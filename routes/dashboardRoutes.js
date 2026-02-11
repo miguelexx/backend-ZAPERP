@@ -1,0 +1,22 @@
+const express = require('express')
+const router = express.Router()
+const auth = require('../middleware/auth')
+const adminOnly = require('../middleware/adminOnly')
+const dashboardController = require('../controllers/dashboardController')
+
+router.get('/overview', auth, dashboardController.overview)
+router.get('/departamentos', auth, dashboardController.listarDepartamentos)
+router.post('/departamentos', auth, adminOnly, dashboardController.criarDepartamento)
+router.put('/departamentos/:id', auth, adminOnly, dashboardController.atualizarDepartamento)
+router.delete('/departamentos/:id', auth, adminOnly, dashboardController.excluirDepartamento)
+router.get('/respostas-salvas', auth, dashboardController.listarRespostasSalvas)
+router.post('/respostas-salvas', auth, dashboardController.criarRespostaSalva)
+router.put('/respostas-salvas/:id', auth, dashboardController.atualizarRespostaSalva)
+router.delete('/respostas-salvas/:id', auth, dashboardController.excluirRespostaSalva)
+router.get('/relatorios/conversas', auth, dashboardController.relatorioConversas)
+router.get('/relatorios/export', auth, dashboardController.exportRelatorio)
+router.get('/sla/config', auth, dashboardController.getSlaConfig)
+router.put('/sla/config', auth, dashboardController.setSlaConfig)
+router.get('/sla/alertas', auth, dashboardController.getSlaAlertas)
+
+module.exports = router
