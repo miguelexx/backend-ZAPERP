@@ -32,6 +32,13 @@ ALTER TABLE public.mensagens
   ADD COLUMN IF NOT EXISTS remetente_nome varchar(255),
   ADD COLUMN IF NOT EXISTS remetente_telefone varchar(50);
 
+-- 3b) Responder mensagens (citação estilo WhatsApp) — metadata persistida no banco
+-- Usado pelo frontend para exibir o "bloco de resposta" dentro da bolha.
+ALTER TABLE public.mensagens
+  ADD COLUMN IF NOT EXISTS reply_meta jsonb;
+
+COMMENT ON COLUMN public.mensagens.reply_meta IS 'Metadados de resposta: { name, snippet, ts, replyToId }.';
+
 -- 4) Conversas: tipo grupo, nome_grupo, foto_grupo
 ALTER TABLE public.conversas
   ADD COLUMN IF NOT EXISTS tipo text DEFAULT 'cliente',

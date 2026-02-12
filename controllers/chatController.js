@@ -1024,8 +1024,8 @@ exports.detalharChat = async (req, res) => {
     }
 
     // mensagens paginadas (remetente_nome/remetente_telefone para grupos; fallback se colunas não existirem)
-    const selectComRemetente = 'id, texto, direcao, criado_em, autor_usuario_id, status, whatsapp_id, tipo, url, nome_arquivo, remetente_nome, remetente_telefone'
-    const selectBasico = 'id, texto, direcao, criado_em, autor_usuario_id, status, whatsapp_id, tipo, url, nome_arquivo'
+    const selectComRemetente = 'id, texto, direcao, criado_em, autor_usuario_id, status, whatsapp_id, tipo, url, nome_arquivo, reply_meta, remetente_nome, remetente_telefone'
+    const selectBasico = 'id, texto, direcao, criado_em, autor_usuario_id, status, whatsapp_id, tipo, url, nome_arquivo, reply_meta'
     let query = supabase
       .from('mensagens')
       .select(selectComRemetente)
@@ -1040,7 +1040,8 @@ exports.detalharChat = async (req, res) => {
     }
 
     let { data: mensagens, error: errMsgs } = await query
-    if (errMsgs && (String(errMsgs.message || '').includes('remetente_nome') || String(errMsgs.message || '').includes('remetente_telefone') || String(errMsgs.message || '').includes('does not exist'))) {
+    // Compatibilidade: se reply_meta/remetente_* não existirem ainda no banco, refaz select sem essas colunas.
+    if (errMsgs && (String(errMsgs.message || '').includes('reply_meta') || String(errMsgs.message || '').includes('remetente_nome') || String(errMsgs.message || '').includes('remetente_telefone') || String(errMsgs.message || '').includes('does not exist'))) {
       query = supabase
         .from('mensagens')
         .select(selectBasico)
@@ -1431,7 +1432,7 @@ exports.enviarMensagemChat = async (req, res) => {
   try {
     const { company_id, id: user_id } = req.user
     const { id: conversa_id } = req.params
-    const { texto } = req.body
+    const { texto, reply_meta } = req.body
 
     if (!texto || !String(texto).trim()) {
       return res.status(400).json({ error: 'texto é obrigatório' })
@@ -1448,19 +1449,43 @@ exports.enviarMensagemChat = async (req, res) => {
       return res.status(404).json({ error: 'Conversa não encontrada' })
     }
 
-    const { data: msg, error: errMsg } = await supabase
+    // Reply (citação) — opcional. Requer coluna mensagens.reply_meta (jsonb).
+    const basePayload = {
+      company_id,
+      conversa_id: Number(conversa_id),
+      texto: String(texto).trim(),
+      direcao: 'out',
+      autor_usuario_id: Number(user_id),
+      status: 'pending',
+      criado_em: new Date().toISOString()
+    }
+    const payloadWithReply =
+      reply_meta && typeof reply_meta === 'object'
+        ? {
+            ...basePayload,
+            reply_meta: {
+              name: String(reply_meta.name || '').slice(0, 80),
+              snippet: String(reply_meta.snippet || '').slice(0, 180),
+              ts: Number(reply_meta.ts || Date.now()),
+              replyToId: reply_meta.replyToId != null ? String(reply_meta.replyToId) : undefined
+            }
+          }
+        : basePayload
+
+    let { data: msg, error: errMsg } = await supabase
       .from('mensagens')
-      .insert({
-        company_id,
-        conversa_id: Number(conversa_id),
-        texto: String(texto).trim(),
-        direcao: 'out',
-        autor_usuario_id: Number(user_id),
-        status: 'pending',
-        criado_em: new Date().toISOString()
-      })
+      .insert(payloadWithReply)
       .select()
       .single()
+
+    // Compatibilidade: se a coluna reply_meta não existir ainda, tenta sem ela
+    if (errMsg && (String(errMsg.message || '').includes('reply_meta') || String(errMsg.message || '').includes('does not exist'))) {
+      ;({ data: msg, error: errMsg } = await supabase
+        .from('mensagens')
+        .insert(basePayload)
+        .select()
+        .single())
+    }
 
     if (errMsg) return res.status(500).json({ error: errMsg.message })
 

@@ -117,6 +117,7 @@ exports.receberWebhook = async (req, res) => {
     let tipo = 'texto'
     let url = null
     let nome_arquivo = null
+    let reply_meta = null
 
     // Mídia: áudio, imagem, vídeo, documento
     if (msg.audio) {
@@ -290,6 +291,34 @@ exports.receberWebhook = async (req, res) => {
       }
     }
 
+    // Reply (WhatsApp Cloud API): msg.context.id referencia a mensagem citada
+    // Ex.: https://developers.facebook.com/docs/whatsapp/cloud-api/webhooks/payload-examples
+    const quotedId = msg?.context?.id ? String(msg.context.id).trim() : null
+    if (quotedId) {
+      try {
+        const { data: quoted } = await supabase
+          .from('mensagens')
+          .select('texto, direcao, remetente_nome')
+          .eq('company_id', company_id)
+          .eq('conversa_id', conversa_id)
+          .eq('whatsapp_id', quotedId)
+          .maybeSingle()
+        const snippet = String(quoted?.texto || '').trim().slice(0, 180) || 'Mensagem'
+        const name =
+          quoted?.direcao === 'out'
+            ? 'Você'
+            : (String(quoted?.remetente_nome || '').trim() || 'Contato')
+        reply_meta = {
+          name,
+          snippet,
+          ts: Date.now(),
+          replyToId: quotedId
+        }
+      } catch (_) {
+        reply_meta = { name: 'Mensagem', snippet: 'Mensagem', ts: Date.now(), replyToId: quotedId }
+      }
+    }
+
     // 4) Salvar mensagem do cliente (texto ou mídia)
     const insertMsg = {
       conversa_id,
@@ -303,11 +332,32 @@ exports.receberWebhook = async (req, res) => {
       if (url) insertMsg.url = url
       if (nome_arquivo) insertMsg.nome_arquivo = nome_arquivo
     }
-    const { data: mensagemSalva, error: errMsg } = await supabase
-      .from('mensagens')
-      .insert(insertMsg)
-      .select('*')
-      .single()
+    if (reply_meta) insertMsg.reply_meta = reply_meta
+
+    let mensagemSalva = null
+    let errMsg = null
+    {
+      const r = await supabase
+        .from('mensagens')
+        .insert(insertMsg)
+        .select('*')
+        .single()
+      mensagemSalva = r.data
+      errMsg = r.error
+    }
+
+    // Compatibilidade: se a coluna reply_meta não existir, tenta inserir sem ela
+    if (errMsg && (String(errMsg.message || '').includes('reply_meta') || String(errMsg.message || '').includes('does not exist'))) {
+      delete insertMsg.reply_meta
+      const retry = await supabase.from('mensagens').insert(insertMsg).select('*').single()
+      if (retry.error) {
+        console.error('Erro ao salvar mensagem:', retry.error)
+        return res.sendStatus(500)
+      }
+      // substitui a referência para o realtime
+      mensagemSalva = retry.data
+      errMsg = null
+    }
 
     if (errMsg) {
       console.error('Erro ao salvar mensagem:', errMsg)

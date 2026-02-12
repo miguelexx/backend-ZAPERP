@@ -176,9 +176,7 @@ body {
   min-width: 210px !important;
   max-width: min(340px, 78vw) !important;
 }
-.wa-audioPlayer {
-  justify-content: center !important;
-}
+/* Não força layout interno do player (deixa o CSS do frontend controlar) */
 .wa-footer {
   padding: 10px 12px 12px;
 }

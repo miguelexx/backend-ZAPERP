@@ -881,6 +881,48 @@ exports.receberZapi = async (req, res) => {
 
     if (!mensagemSalva) {
       const statusPayload = (payload.status && String(payload.status).toLowerCase()) || null
+
+      // Reply/citação (Z-API) — tenta capturar o ID da mensagem citada (quando existir)
+      // Z-API pode variar o formato: quotedMsgId, quotedStanzaId, contextInfo.stanzaId etc.
+      const quotedIdRaw =
+        payload?.quotedMsgId ??
+        payload?.quotedMessageId ??
+        payload?.quotedStanzaId ??
+        payload?.contextInfo?.stanzaId ??
+        payload?.contextInfo?.quotedStanzaId ??
+        payload?.contextInfo?.quotedMessageId ??
+        payload?.quotedMsg?.id ??
+        payload?.quotedMsg?.messageId ??
+        payload?.quoted?.id ??
+        payload?.message?.contextInfo?.stanzaId ??
+        payload?.message?.contextInfo?.quotedStanzaId ??
+        null
+      const quotedId = quotedIdRaw ? String(quotedIdRaw).trim() : null
+
+      let reply_meta = null
+      if (quotedId) {
+        try {
+          const { data: quoted } = await supabase
+            .from('mensagens')
+            .select('texto, direcao, remetente_nome')
+            .eq('company_id', company_id)
+            .eq('conversa_id', conversa_id)
+            .eq('whatsapp_id', quotedId)
+            .maybeSingle()
+          const snippet =
+            String(quoted?.texto || '').trim().slice(0, 180) ||
+            String(payload?.quotedMsg?.message || payload?.quotedMsg?.body || payload?.quotedMsg?.text?.message || '').trim().slice(0, 180) ||
+            'Mensagem'
+          const name =
+            quoted?.direcao === 'out'
+              ? 'Você'
+              : (String(quoted?.remetente_nome || '').trim() || 'Contato')
+          reply_meta = { name, snippet, ts: Date.now(), replyToId: quotedId }
+        } catch (_) {
+          reply_meta = { name: 'Mensagem', snippet: 'Mensagem', ts: Date.now(), replyToId: quotedId }
+        }
+      }
+
       const insertMsg = {
         conversa_id,
         texto,
@@ -890,6 +932,7 @@ exports.receberZapi = async (req, res) => {
         criado_em,
         ...(statusPayload ? { status: statusPayload } : {})
       }
+      if (reply_meta) insertMsg.reply_meta = reply_meta
       if (isGroup && !fromMe) {
         // Grupo: salvar SEMPRE no grupo, e armazenar remetente (membro) na mensagem.
         const pNorm = participantPhone ? (normalizePhoneBR(participantPhone) || String(participantPhone).replace(/\D/g, '')) : ''
@@ -965,6 +1008,14 @@ exports.receberZapi = async (req, res) => {
         .insert(insertMsg)
         .select('*')
         .single()
+
+      // Compatibilidade: se a coluna reply_meta não existir ainda, remove e tenta de novo
+      if (errMsg && (String(errMsg.message || '').includes('reply_meta') || String(errMsg.message || '').includes('does not exist'))) {
+        delete insertMsg.reply_meta
+        const retryReply = await supabase.from('mensagens').insert(insertMsg).select('*').single()
+        inserted = retryReply.data
+        errMsg = retryReply.error
+      }
 
       if (errMsg && (String(errMsg.message || '').includes('remetente_nome') || String(errMsg.message || '').includes('remetente_telefone') || String(errMsg.message || '').includes('does not exist'))) {
         delete insertMsg.remetente_nome
