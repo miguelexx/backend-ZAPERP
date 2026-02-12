@@ -137,6 +137,13 @@ body {
 /* Garante espaço para o horário no rodapé do balão */
 .wa-bubble {
   padding-bottom: 18px !important;
+  /* evita cortar horário/ticks em mensagens curtas quando a bolha usa fit-content */
+  overflow: visible !important;
+}
+
+/* Mensagens bem curtas (ex: "oi"): dá “folga” lateral para caber hora + ticks */
+.wa-bubble.hasInlineMeta{
+  min-width: 156px !important;
 }
 
 /* Rodapé do balão: só canto direito */
