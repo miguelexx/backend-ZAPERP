@@ -172,6 +172,9 @@ body {
 .wa-bubble-audioWrap {
   margin-left: auto !important;
   margin-right: auto !important;
+  /* largura mais confortável (sem estourar no mobile) */
+  min-width: 210px !important;
+  max-width: min(340px, 78vw) !important;
 }
 .wa-audioPlayer {
   justify-content: center !important;
