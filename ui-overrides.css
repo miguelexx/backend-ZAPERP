@@ -124,6 +124,58 @@ body {
 .wa-ticks {
   font-size: 11px;
 }
+
+/* ============================================
+   Ajuste WhatsApp: horário sempre embaixo à direita
+   (evita horário “colado” no texto e agrupamento visual)
+============================================ */
+/* Remove o horário inline no final do texto (ex: "simm 01:41 ✓✓") */
+.wa-inlineMeta {
+  display: none !important;
+}
+
+/* Garante espaço para o horário no rodapé do balão */
+.wa-bubble {
+  padding-bottom: 18px !important;
+}
+
+/* Rodapé do balão: só canto direito */
+.wa-bubble-meta {
+  justify-content: flex-end !important;
+  gap: 6px !important;
+}
+.wa-bubble-metaLeft {
+  display: none !important;
+}
+
+/* Mesmo quando o balão marca "hasInlineMeta", força o meta para baixo */
+.wa-bubble.hasInlineMeta .wa-bubble-meta {
+  top: auto !important;
+  bottom: 4px !important;
+  left: 0 !important;
+  right: 0 !important;
+  width: 100% !important;
+  padding: 0 8px !important;
+  justify-content: flex-end !important;
+}
+.wa-bubble.hasInlineMeta .wa-bubble-metaLeft {
+  display: none !important;
+}
+
+/* ============================================
+   Áudio: centralizar conteúdo e deixar “limpo”
+============================================ */
+.wa-bubble-audio {
+  display: flex !important;
+  justify-content: center !important;
+}
+.wa-bubble-audioWrap {
+  margin-left: auto !important;
+  margin-right: auto !important;
+}
+.wa-audioPlayer {
+  justify-content: center !important;
+}
 .wa-footer {
   padding: 10px 12px 12px;
 }
