@@ -1,0 +1,185 @@
+/* UI Overrides — legibilidade + acabamento profissional
+   - Aplicado via injeção no index.html do frontend/dist
+   - Foco: desktop (mantém mobile mais compacto)
+*/
+
+:root {
+  /* Escala global para o “Chat List” (cl-*) */
+  --cl-font-size-xs: 12px;
+  --cl-font-size-sm: 14px;
+  --cl-font-size-md: 15px;
+  --cl-font-size-lg: 16px;
+}
+
+html {
+  text-rendering: optimizeLegibility;
+}
+
+body {
+  /* Muitos trechos do bundle usam 12–13px; aqui damos um “piso” melhor. */
+  font-size: 14px;
+}
+
+/* ============================================
+   Sidebar / navegação
+============================================ */
+.sidebar {
+  width: 72px;
+}
+.sidebar-nav-item,
+.sidebar-logout {
+  width: 46px;
+  height: 46px;
+}
+
+/* ============================================
+   Lista de conversas (chat-list-*)
+============================================ */
+.chat-list-header {
+  min-height: 68px;
+}
+.chat-list-header-title {
+  font-size: 19px;
+}
+.chat-list-header-sub {
+  font-size: 12px;
+}
+.chat-list-search-input {
+  font-size: var(--cl-font-size-sm);
+  height: 28px;
+}
+.chat-list-search-box {
+  padding: 9px 12px;
+}
+.chat-list-chip {
+  height: 26px;
+  font-size: 12px;
+}
+.chat-list-row {
+  min-height: 72px;
+  padding-top: 12px;
+  padding-bottom: 12px;
+}
+.chat-list-avatar {
+  width: 44px;
+  height: 44px;
+  min-width: 44px;
+}
+.chat-list-avatar-text {
+  font-size: 14px;
+}
+.chat-list-title {
+  font-size: 15px;
+}
+.chat-list-preview,
+.chat-list-subline,
+.chat-list-setor {
+  font-size: 12px;
+}
+.chat-list-time {
+  font-size: 12px;
+}
+.chat-list-unread {
+  min-width: 22px;
+  height: 22px;
+  font-size: 11px;
+}
+
+/* ============================================
+   Área de atendimento (wa-*)
+============================================ */
+.wa-header {
+  height: 56px;
+  padding: 0 12px;
+}
+.wa-avatar {
+  width: 42px;
+  height: 42px;
+  font-size: 15px;
+}
+.wa-header-name {
+  font-size: 15px;
+}
+.wa-header-setor,
+.wa-header-setorBtn {
+  font-size: 13px;
+}
+.wa-actions button {
+  height: 32px;
+  font-size: 13px;
+  border-radius: 9px;
+}
+.wa-messages {
+  padding: 14px 16px 16px;
+  gap: 6px;
+}
+.wa-bubble,
+.wa-bubble-text,
+.wa-bubble-audioCaption {
+  font-size: 15px;
+  line-height: 1.45;
+}
+.wa-inlineMeta,
+.wa-bubble-meta,
+.wa-ticks {
+  font-size: 11px;
+}
+.wa-footer {
+  padding: 10px 12px 12px;
+}
+.wa-input {
+  height: 44px;
+  font-size: 16px;
+}
+.wa-sendBtn {
+  width: 44px;
+  height: 44px;
+}
+.wa-iconBtn {
+  width: 36px;
+  height: 36px;
+}
+
+/* ============================================
+   Login / formulários (page/login-form)
+============================================ */
+.page h2,
+.login-form h2 {
+  font-size: 20px;
+}
+.page input,
+.login-form input {
+  font-size: 16px;
+  padding: 14px 14px;
+}
+.page button,
+.login-form button {
+  font-size: 16px;
+  padding: 14px 14px;
+}
+.login-form label,
+.page label {
+  font-size: 14px;
+}
+
+/* ============================================
+   “Polimento” geral
+============================================ */
+:where(input, textarea, select) {
+  letter-spacing: 0.1px;
+}
+
+/* Mantém mobile mais compacto */
+@media (max-width: 520px) {
+  .sidebar {
+    width: auto;
+  }
+  .wa-bubble,
+  .wa-bubble-text {
+    font-size: 14px;
+  }
+  .wa-input {
+    font-size: 15px;
+  }
+}
+

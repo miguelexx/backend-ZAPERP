@@ -47,6 +47,29 @@ const frontendDist = path.join(__dirname, '..', 'frontend', 'dist')
 const hasFrontendDist = fs.existsSync(frontendDist) && fs.existsSync(path.join(frontendDist, 'index.html'))
 
 if (hasFrontendDist) {
+  // CSS de overrides para melhorar legibilidade/visual sem rebuild do frontend
+  const uiOverridesPath = path.join(__dirname, 'ui-overrides.css')
+  const uiOverridesHref = '/ui-overrides.css'
+  const indexHtmlPath = path.join(frontendDist, 'index.html')
+  const indexHtmlRaw = fs.readFileSync(indexHtmlPath, 'utf8')
+  const indexHtmlInjected = indexHtmlRaw.includes(uiOverridesHref)
+    ? indexHtmlRaw
+    : indexHtmlRaw.replace(
+        '</head>',
+        `  <link rel="stylesheet" href="${uiOverridesHref}" />\n  </head>`
+      )
+
+  app.get(uiOverridesHref, (req, res) => {
+    try {
+      const css = fs.readFileSync(uiOverridesPath, 'utf8')
+      res.setHeader('Content-Type', 'text/css; charset=utf-8')
+      res.setHeader('Cache-Control', 'public, max-age=300')
+      return res.status(200).send(css)
+    } catch (e) {
+      return res.status(404).send('/* ui-overrides.css não encontrado */')
+    }
+  })
+
   app.use(express.static(frontendDist, { index: false }))
 
   // SPA fallback somente para rotas de frontend (não APIs)
@@ -72,7 +95,7 @@ if (hasFrontendDist) {
       if (!accept.includes('text/html')) return next()
       const p = String(req.path || '/')
       if (apiPrefixes.some((pre) => p === pre || p.startsWith(pre + '/'))) return next()
-      return res.sendFile(path.join(frontendDist, 'index.html'))
+      return res.status(200).type('html').send(indexHtmlInjected)
     } catch (e) {
       return next(e)
     }
