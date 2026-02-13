@@ -1533,7 +1533,7 @@ exports.enviarMensagemChat = async (req, res) => {
         const io2 = req.app.get('io')
         if (io2) {
           io2.to(`empresa_${company_id}`).emit('status_mensagem', { mensagem_id: msg.id, conversa_id: Number(conversa_id), status: nextStatus })
-          io2.to(`conversa_${conversa_id}`).emit('status_mensagem', { mensagem_id: msg.id, status: nextStatus })
+          io2.to(`conversa_${conversa_id}`).emit('status_mensagem', { mensagem_id: msg.id, conversa_id: Number(conversa_id), status: nextStatus })
         }
 
         if (!ok) console.warn('WhatsApp: falha ao enviar mensagem para', conversa.telefone)
@@ -1547,7 +1547,7 @@ exports.enviarMensagemChat = async (req, res) => {
         const io2 = req.app.get('io')
         if (io2) {
           io2.to(`empresa_${company_id}`).emit('status_mensagem', { mensagem_id: msg.id, conversa_id: Number(conversa_id), status: 'erro' })
-          io2.to(`conversa_${conversa_id}`).emit('status_mensagem', { mensagem_id: msg.id, status: 'erro' })
+          io2.to(`conversa_${conversa_id}`).emit('status_mensagem', { mensagem_id: msg.id, conversa_id: Number(conversa_id), status: 'erro' })
         }
       }
     }

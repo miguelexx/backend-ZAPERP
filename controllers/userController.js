@@ -8,7 +8,9 @@ exports.listar = async (req, res) => {
     const { company_id, perfil } = req.user
     let query = supabase
       .from('usuarios')
-      .select('id, nome, email, perfil, ativo, departamento_id, criado_em, departamentos(nome)')
+      // Não embutir departamentos aqui: em alguns schemas o PostgREST detecta mais de 1 relacionamento
+      // e retorna "Could not embed because more than one relationship was found..."
+      .select('id, nome, email, perfil, ativo, departamento_id, criado_em')
       .eq('company_id', company_id)
       .order('nome')
     if (perfil !== 'admin') {
@@ -16,7 +18,33 @@ exports.listar = async (req, res) => {
     }
     const { data, error } = await query
     if (error) return res.status(500).json({ error: error.message })
-    return res.json(data || [])
+
+    const list = Array.isArray(data) ? data : []
+
+    const depIds = [...new Set(list.map((u) => u?.departamento_id).filter((id) => id != null))]
+    let depMap = {}
+    if (depIds.length > 0) {
+      const { data: deps, error: errDeps } = await supabase
+        .from('departamentos')
+        .select('id, nome')
+        .eq('company_id', company_id)
+        .in('id', depIds)
+      if (!errDeps && Array.isArray(deps)) {
+        deps.forEach((d) => {
+          if (d?.id != null) depMap[String(d.id)] = d
+        })
+      }
+    }
+
+    const out = list.map((u) => ({
+      ...u,
+      departamentos:
+        u?.departamento_id != null
+          ? (depMap[String(u.departamento_id)] ? { nome: depMap[String(u.departamento_id)].nome } : null)
+          : null
+    }))
+
+    return res.json(out)
   } catch (err) {
     console.error(err)
     return res.status(500).json({ error: 'Erro ao listar usuários' })

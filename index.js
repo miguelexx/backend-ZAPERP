@@ -6,10 +6,20 @@ const jwt = require('jsonwebtoken')
 
 const server = http.createServer(app)
 
+const allowedOrigins = String(process.env.CORS_ORIGINS || '')
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean)
+
 const io = new Server(server, {
   cors: {
-    origin: '*',
-    methods: ['GET', 'POST'],
+    origin(origin, cb) {
+      if (!origin) return cb(null, true)
+      if (allowedOrigins.length === 0) return cb(null, true)
+      if (allowedOrigins.includes(origin)) return cb(null, true)
+      return cb(new Error('Not allowed by CORS'))
+    },
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   },
   transports: ['websocket', 'polling']
 })

@@ -8,7 +8,32 @@ require('dotenv').config()
 
 const app = express()
 
-app.use(cors())
+// Em produção, normalmente o app fica atrás de Nginx/Cloudflare (HTTPS).
+// Isso melhora req.ip/req.protocol e evita problemas com redirects/URLs.
+if (process.env.TRUST_PROXY === '1' || process.env.NODE_ENV === 'production') {
+  app.set('trust proxy', 1)
+}
+
+// CORS: em dev pode ser livre; em produção defina CORS_ORIGINS=dominio1,dominio2
+const allowedOrigins = String(process.env.CORS_ORIGINS || '')
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean)
+
+app.use(
+  cors({
+    origin(origin, cb) {
+      // requests sem Origin (curl/postman) devem passar
+      if (!origin) return cb(null, true)
+      // se não configurou allowlist, permite (modo compatível)
+      if (allowedOrigins.length === 0) return cb(null, true)
+      if (allowedOrigins.includes(origin)) return cb(null, true)
+      return cb(new Error('Not allowed by CORS'))
+    },
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization'],
+  })
+)
 app.use(express.json())
 
 // Arquivos estáticos (uploads: imagens, áudios, etc.)

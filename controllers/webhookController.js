@@ -106,6 +106,51 @@ exports.receberWebhook = async (req, res) => {
     const changes = entry?.changes?.[0]
     const value = changes?.value
     const messages = value?.messages
+    const statuses = value?.statuses
+
+    // ✅ Atualização de status (Meta Cloud API): entrega/leitura
+    // Quando vier somente "statuses" (sem messages), atualiza ticks e retorna.
+    if ((!messages || messages.length === 0) && Array.isArray(statuses) && statuses.length > 0) {
+      const phoneNumberId = value?.metadata?.phone_number_id ? String(value.metadata.phone_number_id) : null
+      let company_id = Number(process.env.WEBHOOK_COMPANY_ID || 1)
+      if (phoneNumberId) {
+        const { data: ew } = await supabase
+          .from('empresas_whatsapp')
+          .select('company_id')
+          .eq('phone_number_id', phoneNumberId)
+          .maybeSingle()
+        if (ew?.company_id) company_id = Number(ew.company_id)
+      }
+
+      const io = req.app.get('io')
+
+      for (const st of statuses) {
+        const wId = st?.id ? String(st.id).trim() : null
+        const raw = st?.status ? String(st.status).trim().toLowerCase() : ''
+        if (!wId) continue
+
+        const norm =
+          raw === 'sent' ? 'sent' :
+          raw === 'delivered' ? 'delivered' :
+          raw === 'read' ? 'read' :
+          (raw || 'sent')
+
+        const { data: msgRow, error } = await supabase
+          .from('mensagens')
+          .update({ status: norm })
+          .eq('company_id', company_id)
+          .eq('whatsapp_id', wId)
+          .select('id, conversa_id, company_id')
+          .maybeSingle()
+
+        if (!error && msgRow && io) {
+          io.to(`empresa_${msgRow.company_id}`).emit('status_mensagem', { mensagem_id: msgRow.id, conversa_id: msgRow.conversa_id, status: norm })
+          io.to(`conversa_${msgRow.conversa_id}`).emit('status_mensagem', { mensagem_id: msgRow.id, conversa_id: msgRow.conversa_id, status: norm })
+        }
+      }
+
+      return res.status(200).json({ ok: true, statuses: statuses.length })
+    }
 
     if (!messages || messages.length === 0) {
       return res.status(200).json({ ok: true, message: 'Sem mensagens' })

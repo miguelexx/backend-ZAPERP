@@ -211,13 +211,56 @@ function extractMessage(payload) {
 
   let texto = String(rawMessage || '').trim()
   // URLs de mídia
-  let imageUrl = payload.image?.imageUrl ?? payload.image?.url ?? payload.imageUrl ?? payload.image ?? null
+  let imageUrl =
+    payload.image?.imageUrl ??
+    payload.image?.url ??
+    payload.imageUrl ??
+    payload.message?.image?.imageUrl ??
+    payload.message?.image?.url ??
+    payload.message?.imageUrl ??
+    payload.image ??
+    null
   if (imageUrl && typeof imageUrl === 'object') imageUrl = imageUrl.url ?? imageUrl.imageUrl ?? null
-  let documentUrl = payload.document?.documentUrl ?? payload.document?.url ?? payload.documentUrl ?? null
+  let documentUrl =
+    payload.document?.documentUrl ??
+    payload.document?.url ??
+    payload.documentUrl ??
+    payload.message?.document?.documentUrl ??
+    payload.message?.document?.url ??
+    payload.message?.documentUrl ??
+    null
+  if (documentUrl && typeof documentUrl === 'object') documentUrl = documentUrl.url ?? documentUrl.documentUrl ?? null
   let fileName = payload.document?.fileName ?? payload.document?.title ?? payload.fileName ?? null
-  const audioUrl = payload.audio?.audioUrl ?? payload.audio?.url ?? payload.audioUrl ?? null
-  const videoUrl = payload.video?.videoUrl ?? payload.video?.url ?? payload.videoUrl ?? payload.ptv?.url ?? null
-  const stickerUrl = payload.sticker?.stickerUrl ?? payload.sticker?.url ?? payload.stickerUrl ?? null
+  // Áudio: diferentes formatos (Z-API pode mandar em payload.audio, payload.message.audio, ou fields diretos)
+  let audioUrl =
+    payload.audio?.audioUrl ??
+    payload.audio?.url ??
+    payload.audioUrl ??
+    payload.message?.audio?.audioUrl ??
+    payload.message?.audio?.url ??
+    payload.message?.audioUrl ??
+    null
+  if (audioUrl && typeof audioUrl === 'object') audioUrl = audioUrl.url ?? audioUrl.audioUrl ?? null
+  let videoUrl =
+    payload.video?.videoUrl ??
+    payload.video?.url ??
+    payload.videoUrl ??
+    payload.message?.video?.videoUrl ??
+    payload.message?.video?.url ??
+    payload.message?.videoUrl ??
+    payload.ptv?.url ??
+    null
+  if (videoUrl && typeof videoUrl === 'object') videoUrl = videoUrl.url ?? videoUrl.videoUrl ?? null
+
+  let stickerUrl =
+    payload.sticker?.stickerUrl ??
+    payload.sticker?.url ??
+    payload.stickerUrl ??
+    payload.message?.sticker?.stickerUrl ??
+    payload.message?.sticker?.url ??
+    payload.message?.stickerUrl ??
+    null
+  if (stickerUrl && typeof stickerUrl === 'object') stickerUrl = stickerUrl.url ?? stickerUrl.stickerUrl ?? null
   const locationUrl = payload.location?.url ?? payload.location?.thumbnailUrl ?? null
 
   const participantPhone = payload.participantPhone ?? payload.participant ?? payload.author ?? payload.key?.participant ?? null
@@ -391,7 +434,7 @@ exports.receberZapi = async (req, res) => {
           const io = req.app.get('io')
           if (io) {
             io.to(`empresa_${msg.company_id}`).emit('status_mensagem', { mensagem_id: msg.id, conversa_id: msg.conversa_id, status: statusNorm })
-            io.to(`conversa_${msg.conversa_id}`).emit('status_mensagem', { mensagem_id: msg.id, status: statusNorm })
+            io.to(`conversa_${msg.conversa_id}`).emit('status_mensagem', { mensagem_id: msg.id, conversa_id: msg.conversa_id, status: statusNorm })
           }
         }
 
@@ -1139,7 +1182,18 @@ exports.statusZapi = async (req, res) => {
   try {
     const { messageId, status } = req.body || {}
     if (!messageId) return res.status(200).json({ ok: true })
-    const statusNorm = String(status || '').toLowerCase()
+    const raw = String(status || '').trim().toLowerCase()
+    // Normaliza para estados canônicos
+    const statusNorm =
+      raw === 'received' ? 'delivered' :
+      raw === 'entregue' ? 'delivered' :
+      raw === 'delivered' ? 'delivered' :
+      raw === 'read' || raw === 'seen' || raw === 'visualizada' ? 'read' :
+      raw === 'played' ? 'played' :
+      raw === 'pending' || raw === 'enviando' ? 'pending' :
+      raw === 'sent' || raw === 'enviada' || raw === 'enviado' ? 'sent' :
+      raw === 'erro' || raw === 'error' || raw === 'failed' ? 'erro' :
+      (raw || 'sent')
     const { data: msg, error } = await supabase
       .from('mensagens')
       .update({ status: statusNorm || 'enviada' })
@@ -1150,7 +1204,7 @@ exports.statusZapi = async (req, res) => {
       const io = req.app.get('io')
       if (io) {
         io.to(`empresa_${msg.company_id}`).emit('status_mensagem', { mensagem_id: msg.id, conversa_id: msg.conversa_id, status: statusNorm })
-        io.to(`conversa_${msg.conversa_id}`).emit('status_mensagem', { mensagem_id: msg.id, status: statusNorm })
+        io.to(`conversa_${msg.conversa_id}`).emit('status_mensagem', { mensagem_id: msg.id, conversa_id: msg.conversa_id, status: statusNorm })
       }
     }
     return res.status(200).json({ ok: true })

@@ -8,17 +8,35 @@ function startOfToday() {
   return d.toISOString()
 }
 
+function clampInt(n, min, max) {
+  const x = Number(n)
+  if (!Number.isFinite(x)) return null
+  return Math.max(min, Math.min(max, Math.trunc(x)))
+}
+
 exports.overview = async (req, res) => {
   const { company_id } = req.user
 
   try {
+    // Filtro de período (opcional): últimos N dias
+    // - Sem range_days → mantém comportamento antigo (tudo)
+    // - Com range_days → evita dashboard "pesado" e deixa mais útil
+    const rangeDays = clampInt(req.query?.range_days, 1, 365)
+    const now = new Date()
+    const fromIso = rangeDays ? new Date(now.getTime() - rangeDays * 24 * 60 * 60 * 1000).toISOString() : null
+    const toIso = now.toISOString()
+
     /* ===============================
        1. STATUS DAS CONVERSAS (KPIs)
     =============================== */
-    const { data: conversas, error: errConversas } = await supabase
+    let qConversas = supabase
       .from('conversas')
-      .select('status_atendimento, criado_em, atendente_id')
+      // Não embute departamentos aqui: em alguns schemas o PostgREST detecta mais de 1 relacionamento
+      // e quebra com "Could not embed because more than one relationship was found..."
+      .select('status_atendimento, criado_em, atendente_id, departamento_id')
       .eq('company_id', company_id)
+    if (fromIso) qConversas = qConversas.gte('criado_em', fromIso).lte('criado_em', toIso)
+    const { data: conversas, error: errConversas } = await qConversas
 
     if (errConversas) throw errConversas
 
@@ -47,6 +65,31 @@ exports.overview = async (req, res) => {
       kpis.taxa_conversao_percent = Math.round((kpis.fechadas / kpis.total) * 100)
     }
 
+    // Conversas por setor (departamento) — resolve nomes manualmente (sem embed)
+    const setorMap = {}
+    const depIds = [...new Set((conversas || []).map((c) => c?.departamento_id).filter((id) => id != null))]
+    let depMap = {}
+    if (depIds.length > 0) {
+      const { data: deps, error: errDeps } = await supabase
+        .from('departamentos')
+        .select('id, nome')
+        .eq('company_id', company_id)
+        .in('id', depIds)
+      if (!errDeps && Array.isArray(deps)) {
+        deps.forEach((d) => {
+          if (d?.id != null) depMap[String(d.id)] = d?.nome || null
+        })
+      }
+    }
+    for (const c of conversas || []) {
+      const depId = c?.departamento_id
+      const nome = depId != null ? (depMap[String(depId)] || 'Sem setor') : 'Sem setor'
+      setorMap[nome] = (setorMap[nome] || 0) + 1
+    }
+    const conversas_por_setor = Object.entries(setorMap)
+      .map(([nome, total]) => ({ nome, total }))
+      .sort((a, b) => b.total - a.total)
+
     /* ===============================
        ATENDIMENTOS HOJE (registros na tabela atendimentos)
     =============================== */
@@ -61,22 +104,32 @@ exports.overview = async (req, res) => {
     /* ===============================
        2. TEMPO MÉDIO DA 1ª RESPOSTA (SLA)
     =============================== */
-    const { data: mensagens, error: errMensagens } = await supabase
+    let qMensagens = supabase
       .from('mensagens')
-      .select('conversa_id, criado_em, direcao')
+      .select('conversa_id, criado_em, direcao, tipo')
       .eq('company_id', company_id)
       .in('direcao', ['in', 'out'])
       .order('criado_em', { ascending: true })
+    if (fromIso) qMensagens = qMensagens.gte('criado_em', fromIso).lte('criado_em', toIso)
+    const { data: mensagens, error: errMensagens } = await qMensagens
 
     if (errMensagens) throw errMensagens
 
     const mensagensPorConversa = {}
+    const msgTipoMap = {}
+    let msgIn = 0
+    let msgOut = 0
 
     mensagens.forEach(msg => {
       if (!mensagensPorConversa[msg.conversa_id]) {
         mensagensPorConversa[msg.conversa_id] = []
       }
       mensagensPorConversa[msg.conversa_id].push(msg)
+
+      const t = String(msg?.tipo || 'texto').toLowerCase()
+      msgTipoMap[t] = (msgTipoMap[t] || 0) + 1
+      if (msg?.direcao === 'in') msgIn++
+      if (msg?.direcao === 'out') msgOut++
     })
 
     let totalMinutos = 0
@@ -124,14 +177,26 @@ exports.overview = async (req, res) => {
       kpis.sla_percent = Math.round((conversasComSla / totalComResposta) * 100)
     }
 
+    const mensagens_por_tipo = Object.entries(msgTipoMap)
+      .map(([tipo, total]) => ({ tipo, total }))
+      .sort((a, b) => b.total - a.total)
+
+    const mensagens_kpis = {
+      total: (mensagens || []).length,
+      in: msgIn,
+      out: msgOut,
+    }
+
     /* ===============================
        3. CONVERSAS POR ATENDENTE + ATENDENTE MAIS PRODUTIVO
     =============================== */
-    const { data: porAtendente, error: errAtendente } = await supabase
+    let qAt = supabase
       .from('conversas')
       .select('atendente_id, usuarios!conversas_atendente_fk ( nome )')
       .eq('company_id', company_id)
       .not('atendente_id', 'is', null)
+    if (fromIso) qAt = qAt.gte('criado_em', fromIso).lte('criado_em', toIso)
+    const { data: porAtendente, error: errAtendente } = await qAt
 
     if (errAtendente) throw errAtendente
 
@@ -175,7 +240,15 @@ exports.overview = async (req, res) => {
        RESPONSE FINAL
     =============================== */
     res.json({
+      periodo: {
+        range_days: rangeDays,
+        from: fromIso,
+        to: toIso,
+      },
       kpis,
+      mensagens_kpis,
+      mensagens_por_tipo,
+      conversas_por_setor,
       conversas_por_atendente: conversasPorAtendente,
       conversas_por_hora: conversasPorHora,
     })
@@ -321,13 +394,40 @@ exports.listarRespostasSalvas = async (req, res) => {
     const { departamento_id } = req.query
     let q = supabase
       .from('respostas_salvas')
-      .select('id, titulo, texto, departamento_id, criado_em, departamentos(nome)')
+      // NÃO embutir departamentos aqui: em alguns schemas o PostgREST detecta mais de 1 relacionamento
+      // entre respostas_salvas e departamentos e retorna:
+      // "Could not embed because more than one relationship was found..."
+      .select('id, titulo, texto, departamento_id, criado_em')
       .eq('company_id', company_id)
       .order('titulo')
     if (departamento_id) q = q.eq('departamento_id', departamento_id)
     const { data, error } = await q
     if (error) return res.status(500).json({ error: error.message })
-    return res.json(data || [])
+
+    const list = Array.isArray(data) ? data : []
+
+    // Resolve nomes de departamento manualmente (evita embed ambíguo)
+    const depIds = [...new Set(list.map((r) => r?.departamento_id).filter((id) => id != null))]
+    let depMap = {}
+    if (depIds.length > 0) {
+      const { data: deps, error: errDeps } = await supabase
+        .from('departamentos')
+        .select('id, nome')
+        .eq('company_id', company_id)
+        .in('id', depIds)
+      if (!errDeps && Array.isArray(deps)) {
+        deps.forEach((d) => {
+          if (d?.id != null) depMap[String(d.id)] = d
+        })
+      }
+    }
+
+    const out = list.map((r) => ({
+      ...r,
+      departamentos: r?.departamento_id != null ? (depMap[String(r.departamento_id)] ? { nome: depMap[String(r.departamento_id)].nome } : null) : null,
+    }))
+
+    return res.json(out)
   } catch (err) {
     console.error(err)
     return res.status(500).json({ error: 'Erro ao listar respostas salvas' })
@@ -403,7 +503,6 @@ async function buildRelatorioConversas(company_id, filters = {}) {
     .select(`
       id, telefone, status_atendimento, criado_em, atendente_id, departamento_id,
       clientes!conversas_cliente_fk ( nome, observacoes ),
-      departamentos ( nome ),
       usuarios!conversas_atendente_fk ( nome ),
       conversa_tags ( tag_id, tags ( id, nome ) )
     `)
@@ -424,6 +523,22 @@ async function buildRelatorioConversas(company_id, filters = {}) {
 
   const conversaIds = list.map(c => c.id)
   if (conversaIds.length === 0) return []
+
+  // Resolve nomes de setor sem embed (evita relacionamento ambíguo)
+  const depIds = [...new Set(list.map((c) => c?.departamento_id).filter((id) => id != null))]
+  let depMap = {}
+  if (depIds.length > 0) {
+    const { data: deps } = await supabase
+      .from('departamentos')
+      .select('id, nome')
+      .eq('company_id', company_id)
+      .in('id', depIds)
+    if (Array.isArray(deps)) {
+      deps.forEach((d) => {
+        if (d?.id != null) depMap[String(d.id)] = d?.nome || null
+      })
+    }
+  }
 
   const { data: mensagens } = await supabase
     .from('mensagens')
@@ -454,7 +569,7 @@ async function buildRelatorioConversas(company_id, filters = {}) {
       cliente_nome: c.clientes?.nome || '—',
       telefone: c.telefone,
       observacoes: c.clientes?.observacoes || '',
-      setor: c.departamentos?.nome || '—',
+      setor: c?.departamento_id != null ? (depMap[String(c.departamento_id)] || '—') : '—',
       status_atendimento: c.status_atendimento,
       atendente_nome: c.usuarios?.nome || '—',
       tags: tags.map(t => t.nome).join(', '),
@@ -481,6 +596,72 @@ exports.relatorioConversas = async (req, res) => {
   } catch (err) {
     console.error(err)
     return res.status(500).json({ error: 'Erro ao gerar relatório' })
+  }
+}
+
+// =====================================================
+// RELATÓRIO (mensagens por dia/tipo/direção) — simples e claro
+// =====================================================
+exports.relatorioMensagens = async (req, res) => {
+  try {
+    const { company_id } = req.user
+    const data_inicio = req.query.data_inicio || null
+    const data_fim = req.query.data_fim || null
+
+    let q = supabase
+      .from('mensagens')
+      .select('criado_em, direcao, tipo')
+      .eq('company_id', company_id)
+      .order('criado_em', { ascending: true })
+
+    if (data_inicio) q = q.gte('criado_em', new Date(data_inicio).toISOString())
+    if (data_fim) {
+      const fim = new Date(data_fim)
+      fim.setHours(23, 59, 59, 999)
+      q = q.lte('criado_em', fim.toISOString())
+    }
+
+    const { data: rows, error } = await q
+    if (error) return res.status(500).json({ error: error.message })
+
+    const byDay = {}
+    for (const r of rows || []) {
+      const d = r?.criado_em ? new Date(r.criado_em) : null
+      if (!d || Number.isNaN(d.getTime())) continue
+      const key = d.toISOString().slice(0, 10) // YYYY-MM-DD
+      if (!byDay[key]) {
+        byDay[key] = {
+          dia: key,
+          total: 0,
+          in: 0,
+          out: 0,
+          texto: 0,
+          audio: 0,
+          imagem: 0,
+          video: 0,
+          sticker: 0,
+          arquivo: 0,
+        }
+      }
+      const agg = byDay[key]
+      agg.total++
+      if (r?.direcao === 'in') agg.in++
+      if (r?.direcao === 'out') agg.out++
+
+      const t = String(r?.tipo || 'texto').toLowerCase()
+      if (t === 'audio') agg.audio++
+      else if (t === 'imagem') agg.imagem++
+      else if (t === 'video') agg.video++
+      else if (t === 'sticker') agg.sticker++
+      else if (t === 'arquivo') agg.arquivo++
+      else agg.texto++
+    }
+
+    const list = Object.values(byDay).sort((a, b) => a.dia.localeCompare(b.dia))
+    return res.json(list)
+  } catch (err) {
+    console.error(err)
+    return res.status(500).json({ error: 'Erro ao gerar relatório de mensagens' })
   }
 }
 
