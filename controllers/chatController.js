@@ -62,6 +62,43 @@ function emitirDepartamento(io, departamento_id, eventName, payload) {
   io.to(`departamento_${departamento_id}`).emit(eventName, payload)
 }
 
+async function assertPermissaoConversa({ company_id, conversa_id, user_id, role, user_dep_id }) {
+  const { data: conv, error } = await supabase
+    .from('conversas')
+    .select('id, atendente_id, departamento_id, tipo, telefone')
+    .eq('company_id', Number(company_id))
+    .eq('id', Number(conversa_id))
+    .maybeSingle()
+  if (error) return { ok: false, status: 500, error: error.message }
+  if (!conv) return { ok: false, status: 404, error: 'Conversa não encontrada' }
+
+  const isGroup = isGroupConversation(conv)
+  const r = String(role || '').toLowerCase()
+  if (r === 'admin') return { ok: true, conv }
+
+  // supervisor: pode gerenciar conversas do seu setor (grupos: permitido)
+  if (r === 'supervisor') {
+    if (!isGroup && user_dep_id != null && conv.departamento_id != null && Number(conv.departamento_id) !== Number(user_dep_id)) {
+      return { ok: false, status: 403, error: 'Conversa de outro setor' }
+    }
+    return { ok: true, conv }
+  }
+
+  // atendente: só gerencia conversa atribuída a ele (grupos: permitido)
+  if (r === 'atendente') {
+    if (!isGroup && (conv.atendente_id == null || Number(conv.atendente_id) !== Number(user_id))) {
+      return { ok: false, status: 403, error: 'Conversa não atribuída a este atendente' }
+    }
+    return { ok: true, conv }
+  }
+
+  // fallback: perfis desconhecidos são tratados como atendente (seguro)
+  if (!isGroup && (conv.atendente_id == null || Number(conv.atendente_id) !== Number(user_id))) {
+    return { ok: false, status: 403, error: 'Conversa não atribuída a este atendente' }
+  }
+  return { ok: true, conv }
+}
+
 // =====================================================
 // 2) UNREAD (TotalChat-like)
 // =====================================================
@@ -129,7 +166,9 @@ async function registrarAtendimento({
 exports.listarConversas = async (req, res) => {
   try {
     const { company_id, id: user_id, perfil, departamento_id: user_dep_id } = req.user
-    const isAdmin = perfil === 'admin'
+    const role = String(perfil || '').toLowerCase()
+    const isAdmin = role === 'admin'
+    const isAtendente = role === 'atendente'
     const {
       tag_id,
       data_inicio,
@@ -270,7 +309,9 @@ exports.listarConversas = async (req, res) => {
         q = q.in('id', conversaIdsFilter)
       }
       if (status_atendimento) q = q.eq('status_atendimento', status_atendimento)
-      if (atendente_id) q = q.eq('atendente_id', Number(atendente_id))
+      // Atendente: só pode ver suas conversas (padrão CRM SaaS). Admin/supervisor podem filtrar por atendente_id.
+      if (isAtendente) q = q.eq('atendente_id', Number(user_id))
+      else if (atendente_id) q = q.eq('atendente_id', Number(atendente_id))
       if (data_inicio) q = q.gte('criado_em', new Date(data_inicio).toISOString())
       if (data_fim) {
         const end = new Date(data_fim)
@@ -356,14 +397,13 @@ exports.listarConversas = async (req, res) => {
     // Incluir todos os clientes: quem não tem conversa aparece como "Sem conversa" (clicável para abrir)
     const incluirTodos = incluirTodosClientes === '1' || incluirTodosClientes === 'true' || incluirTodosClientes === 1
     if (incluirTodos) {
-      const cid = Number(company_id) || 1
+      const cid = Number(company_id)
       let clientesQuery = supabase
         .from('clientes')
         .select('id, nome, pushname, telefone, foto_perfil')
+        .eq('company_id', cid)
         .order('nome', { ascending: true, nullsFirst: false })
         .limit(5000)
-      if (cid === 1) clientesQuery = clientesQuery.or('company_id.eq.1,company_id.is.null')
-      else clientesQuery = clientesQuery.eq('company_id', cid)
       const { data: todosClientes } = await clientesQuery
       const clienteIdsComConversa = new Set(
         conversasFormatadas
@@ -457,11 +497,7 @@ exports.sincronizarContatosZapi = async (req, res) => {
         let existenteQuery = supabase.from('clientes').select('id, nome, pushname, foto_perfil, telefone')
         if (phones.length > 0) existenteQuery = existenteQuery.in('telefone', phones)
         else existenteQuery = existenteQuery.eq('telefone', phone)
-        if (Number(company_id) === 1) {
-          existenteQuery = existenteQuery.or('company_id.eq.1,company_id.is.null')
-        } else {
-          existenteQuery = existenteQuery.eq('company_id', company_id)
-        }
+        existenteQuery = existenteQuery.eq('company_id', Number(company_id))
         const { data: existentes } = await existenteQuery.order('id', { ascending: true }).limit(10)
         const rows = Array.isArray(existentes) ? existentes : (existentes ? [existentes] : [])
         let existente = null
@@ -475,8 +511,8 @@ exports.sincronizarContatosZapi = async (req, res) => {
           const dupIds = rows.map(r => r.id).filter(id => id !== canonId)
           if (dupIds.length > 0) {
             // Apontar conversas para o cliente canônico e remover duplicados (melhora lista e evita "duas pessoas iguais").
-            await supabase.from('conversas').update({ cliente_id: canonId }).in('cliente_id', dupIds)
-            await supabase.from('clientes').delete().in('id', dupIds)
+            await supabase.from('conversas').update({ cliente_id: canonId }).eq('company_id', Number(company_id)).in('cliente_id', dupIds)
+            await supabase.from('clientes').delete().eq('company_id', Number(company_id)).in('id', dupIds)
           }
         }
 
@@ -506,7 +542,7 @@ exports.sincronizarContatosZapi = async (req, res) => {
           }
         } else {
           let ins = await supabase.from('clientes').insert({
-            company_id,
+            company_id: Number(company_id),
             telefone: phone,
             nome: nomeFinal || null,
             pushname: pushname || undefined,
@@ -526,8 +562,7 @@ exports.sincronizarContatosZapi = async (req, res) => {
             let q = supabase.from('clientes').select('id, telefone')
             if (phones.length > 0) q = q.in('telefone', phones)
             else q = q.eq('telefone', phone)
-            if (Number(company_id) === 1) q = q.or('company_id.eq.1,company_id.is.null')
-            else q = q.eq('company_id', company_id)
+            q = q.eq('company_id', Number(company_id))
             const found = await q.order('id', { ascending: true }).limit(1)
             const jaExiste = Array.isArray(found.data) && found.data.length > 0 ? found.data[0] : null
             if (jaExiste?.id) {
@@ -572,17 +607,16 @@ exports.sincronizarFotosPerfilZapi = async (req, res) => {
       return res.status(501).json({ error: 'Sincronização de fotos disponível apenas com Z-API configurado.' })
     }
 
-    const cid = Number(company_id) || 1
+    const cid = Number(company_id)
     const limit = Math.min(3000, Math.max(1, Number(req.query.limit) || 2000))
     const delayMs = Math.min(1200, Math.max(0, Number(req.query.delay_ms) || 220))
 
     let q = supabase
       .from('clientes')
       .select('id, telefone, nome, pushname, foto_perfil')
+      .eq('company_id', cid)
       .not('telefone', 'is', null)
       .limit(limit)
-    if (cid === 1) q = q.or('company_id.eq.1,company_id.is.null')
-    else q = q.eq('company_id', cid)
     // prioriza registros potencialmente incompletos
     q = q.or('foto_perfil.is.null,foto_perfil.eq.,nome.is.null,nome.eq.,pushname.is.null,pushname.eq.')
     const { data: clientes, error: errList } = await q
@@ -795,13 +829,12 @@ exports.abrirConversaCliente = async (req, res) => {
       return res.status(400).json({ error: 'cliente_id é obrigatório' })
     }
 
-    const cid = Number(company_id) || 1
+    const cid = Number(company_id)
     let clienteQuery = supabase
       .from('clientes')
       .select('id, nome, pushname, telefone, foto_perfil')
       .eq('id', Number(cliente_id))
-    if (cid === 1) clienteQuery = clienteQuery.or('company_id.eq.1,company_id.is.null')
-    else clienteQuery = clienteQuery.eq('company_id', cid)
+      .eq('company_id', cid)
     const { data: cliente, error: errCli } = await clienteQuery.maybeSingle()
 
     if (errCli || !cliente) {
@@ -972,7 +1005,9 @@ exports.detalharChat = async (req, res) => {
   try {
     const { id } = req.params
     const { company_id, id: user_id, perfil, departamento_id: user_dep_id } = req.user
-    const isAdmin = perfil === 'admin'
+    const role = String(perfil || '').toLowerCase()
+    const isAdmin = role === 'admin'
+    const isAtendente = role === 'atendente'
 
     const limit = Math.min(Number(req.query.limit || 50), 200)
     const cursor = req.query.cursor || null
@@ -1023,6 +1058,13 @@ exports.detalharChat = async (req, res) => {
       }
     }
 
+    // Atendente: acesso somente às próprias conversas (quando já atribuídas)
+    if (isAtendente && !isGroup) {
+      if (conversa.atendente_id == null || Number(conversa.atendente_id) !== Number(user_id)) {
+        return res.status(403).json({ error: 'Conversa não atribuída a este atendente' })
+      }
+    }
+
     // mensagens paginadas (remetente_nome/remetente_telefone para grupos; fallback se colunas não existirem)
     const selectComRemetente = 'id, texto, direcao, criado_em, autor_usuario_id, status, whatsapp_id, tipo, url, nome_arquivo, reply_meta, remetente_nome, remetente_telefone'
     const selectBasico = 'id, texto, direcao, criado_em, autor_usuario_id, status, whatsapp_id, tipo, url, nome_arquivo, reply_meta'
@@ -1056,6 +1098,28 @@ exports.detalharChat = async (req, res) => {
       errMsgs = result.error
     }
     if (errMsgs) return res.status(500).json({ error: errMsgs.message })
+
+    // ✅ "Apagar pra mim": filtra mensagens ocultas para este usuário (se a tabela existir)
+    try {
+      const { data: ocultas, error: errOcultas } = await supabase
+        .from('mensagens_ocultas')
+        .select('mensagem_id')
+        .eq('company_id', Number(company_id))
+        .eq('conversa_id', Number(id))
+        .eq('usuario_id', Number(user_id))
+      if (errOcultas) {
+        const msg = String(errOcultas.message || '')
+        // compat: tabela pode não existir ainda (banco desatualizado)
+        if (!msg.includes('mensagens_ocultas') && !msg.includes('does not exist')) {
+          console.warn('detalharChat: erro ao ler mensagens_ocultas:', errOcultas.message)
+        }
+      } else if (Array.isArray(ocultas) && ocultas.length > 0) {
+        const hidden = new Set(ocultas.map((o) => String(o.mensagem_id)))
+        mensagens = (Array.isArray(mensagens) ? mensagens : []).filter((m) => !hidden.has(String(m.id)))
+      }
+    } catch (_) {
+      // ignore
+    }
 
     // marca como lida (unread=0 + compatibilidade lida=true)
     await marcarComoLidaPorUsuario({ company_id, conversa_id: id, usuario_id: user_id })
@@ -1176,8 +1240,9 @@ exports.assumirChat = async (req, res) => {
 
     const io = req.app.get('io')
     if (io) {
-      emitirConversaAtualizada(io, company_id, conversa_id, { id: Number(conversa_id) })
-      emitirLock(io, conversa_id, user_id) // ⭐ ADICIONAR
+      // Payload completo para todos atualizarem lista (atendente_id, atendente_atribuido_em) em tempo real
+      emitirConversaAtualizada(io, company_id, conversa_id, data)
+      emitirLock(io, conversa_id, user_id)
     }
 
     return res.json({ ok: true, conversa: data })
@@ -1192,8 +1257,11 @@ exports.assumirChat = async (req, res) => {
 // =====================================================
 exports.encerrarChat = async (req, res) => {
   try {
-    const { company_id, id: user_id } = req.user
+    const { company_id, id: user_id, perfil, departamento_id: user_dep_id } = req.user
     const { id: conversa_id } = req.params
+
+    const perm = await assertPermissaoConversa({ company_id, conversa_id, user_id, role: perfil, user_dep_id })
+    if (!perm.ok) return res.status(perm.status).json({ error: perm.error })
 
     const { data, error } = await supabase
       .from('conversas')
@@ -1235,8 +1303,11 @@ exports.encerrarChat = async (req, res) => {
 
 exports.reabrirChat = async (req, res) => {
   try {
-    const { company_id, id: user_id } = req.user
+    const { company_id, id: user_id, perfil, departamento_id: user_dep_id } = req.user
     const { id: conversa_id } = req.params
+
+    const perm = await assertPermissaoConversa({ company_id, conversa_id, user_id, role: perfil, user_dep_id })
+    if (!perm.ok) return res.status(perm.status).json({ error: perm.error })
 
     const { data, error } = await supabase
       .from('conversas')
@@ -1282,9 +1353,12 @@ exports.reabrirChat = async (req, res) => {
 // =====================================================
 exports.transferirChat = async (req, res) => {
   try {
-    const { company_id, id: user_id } = req.user
+    const { company_id, id: user_id, perfil, departamento_id: user_dep_id } = req.user
     const { id: conversa_id } = req.params
     const { para_usuario_id, observacao } = req.body
+
+    const perm = await assertPermissaoConversa({ company_id, conversa_id, user_id, role: perfil, user_dep_id })
+    if (!perm.ok) return res.status(perm.status).json({ error: perm.error })
 
     if (!para_usuario_id) {
       return res.status(400).json({ error: 'para_usuario_id é obrigatório' })
@@ -1343,9 +1417,12 @@ exports.transferirChat = async (req, res) => {
 // =====================================================
 exports.transferirSetor = async (req, res) => {
   try {
-    const { company_id, id: user_id, perfil } = req.user
+    const { company_id, id: user_id, perfil, departamento_id: user_dep_id } = req.user
     const { id: conversa_id } = req.params
     const { departamento_id: novo_departamento_id } = req.body
+
+    const perm = await assertPermissaoConversa({ company_id, conversa_id, user_id, role: perfil, user_dep_id })
+    if (!perm.ok) return res.status(perm.status).json({ error: perm.error })
 
     if (novo_departamento_id == null || novo_departamento_id === '') {
       return res.status(400).json({ error: 'departamento_id é obrigatório' })
@@ -1440,7 +1517,7 @@ exports.enviarMensagemChat = async (req, res) => {
 
     const { data: conversa, error: errConv } = await supabase
       .from('conversas')
-      .select('id, telefone')
+      .select('id, telefone, cliente_id, tipo')
       .eq('company_id', company_id)
       .eq('id', conversa_id)
       .single()
@@ -1495,6 +1572,18 @@ exports.enviarMensagemChat = async (req, res) => {
       .update({ lida: true, ultima_atividade: new Date().toISOString() })
       .eq('company_id', Number(company_id))
       .eq('id', Number(conversa_id))
+
+    // CRM: atualiza último contato do cliente (apenas conversas individuais)
+    try {
+      const isGroup = String(conversa?.tipo || '').toLowerCase() === 'grupo' || String(conversa?.telefone || '').includes('@g.us')
+      if (!isGroup && conversa?.cliente_id != null) {
+        await supabase
+          .from('clientes')
+          .update({ ultimo_contato: basePayload.criado_em, atualizado_em: new Date().toISOString() })
+          .eq('company_id', Number(company_id))
+          .eq('id', Number(conversa.cliente_id))
+      }
+    } catch (_) {}
 
     const io = req.app.get('io')
     if (io) {
@@ -1570,8 +1659,9 @@ exports.enviarMensagemChat = async (req, res) => {
 // =====================================================
 exports.excluirMensagem = async (req, res) => {
   try {
-    const { company_id } = req.user
+    const { company_id, id: user_id, perfil } = req.user
     const { id: conversa_id, mensagem_id } = req.params
+    const scope = String(req.query?.scope || req.query?.for || '').toLowerCase().trim() || 'all'
 
     const cid = Number(conversa_id)
     const mid = Number(mensagem_id)
@@ -1590,7 +1680,7 @@ exports.excluirMensagem = async (req, res) => {
     // valida que a mensagem é desta conversa/empresa
     const { data: msg, error: errMsgSel } = await supabase
       .from('mensagens')
-      .select('id, conversa_id, criado_em')
+      .select('id, conversa_id, criado_em, direcao, autor_usuario_id')
       .eq('company_id', company_id)
       .eq('conversa_id', cid)
       .eq('id', mid)
@@ -1598,6 +1688,53 @@ exports.excluirMensagem = async (req, res) => {
 
     if (errMsgSel) return res.status(500).json({ error: errMsgSel.message })
     if (!msg) return res.status(404).json({ error: 'Mensagem não encontrada' })
+
+    // =====================================================
+    // Apagar "pra mim" (persistente): oculta para este usuário
+    // =====================================================
+    if (scope === 'me' || scope === 'mim' || scope === 'self') {
+      const { error: errHide } = await supabase
+        .from('mensagens_ocultas')
+        .insert({
+          company_id: Number(company_id),
+          conversa_id: cid,
+          mensagem_id: mid,
+          usuario_id: Number(user_id)
+        })
+
+      if (errHide) {
+        const msg = String(errHide.message || '')
+        if (msg.includes('mensagens_ocultas') || msg.includes('does not exist')) {
+          return res.status(400).json({ error: 'Banco desatualizado: rode o supabase/RUN_IN_SUPABASE.sql (tabela mensagens_ocultas).' })
+        }
+        // se já existe (unique), considera ok
+        if (String(errHide.code || '') !== '23505') {
+          return res.status(500).json({ error: errHide.message })
+        }
+      }
+
+      const io = req.app.get('io')
+      if (io) {
+        // emite só para o usuário (não impacta outros atendentes)
+        emitirParaUsuario(io, user_id, 'mensagem_oculta', { conversa_id: cid, mensagem_id: mid })
+      }
+
+      return res.json({ ok: true, scope: 'me', conversa_id: cid, mensagem_id: mid })
+    }
+
+    // =====================================================
+    // Apagar "para todos" — permitido somente para mensagens enviadas pelo próprio usuário
+    // (admin pode apagar qualquer mensagem do sistema)
+    // =====================================================
+    if (String(perfil || '') !== 'admin') {
+      const isOut = String(msg?.direcao || '').toLowerCase() === 'out'
+      if (!isOut) {
+        return res.status(403).json({ error: 'Você só pode apagar para todos mensagens enviadas por você.' })
+      }
+      if (msg?.autor_usuario_id == null || Number(msg.autor_usuario_id) !== Number(user_id)) {
+        return res.status(403).json({ error: 'Você só pode apagar para todos mensagens enviadas por você.' })
+      }
+    }
 
     const { error: errDel } = await supabase
       .from('mensagens')
@@ -1661,6 +1798,16 @@ exports.listarAtendimentos = async (req, res) => {
     const { id: conversa_id } = req.params
     const cid = Number(conversa_id)
 
+    // 🔒 Tenant estrito: não permitir consultar conversa de outra empresa
+    const { data: conv, error: errConvCheck } = await supabase
+      .from('conversas')
+      .select('id')
+      .eq('company_id', company_id)
+      .eq('id', cid)
+      .maybeSingle()
+    if (errConvCheck) return res.status(500).json({ error: errConvCheck.message })
+    if (!conv) return res.status(404).json({ error: 'Conversa não encontrada' })
+
     const { data: rows, error } = await supabase
       .from('atendimentos')
       .select('id, conversa_id, acao, observacao, criado_em, de_usuario_id, para_usuario_id')
@@ -1690,6 +1837,7 @@ exports.listarAtendimentos = async (req, res) => {
       const { data: usuarios } = await supabase
         .from('usuarios')
         .select('id, nome')
+        .eq('company_id', company_id)
         .in('id', idList)
       usuarios?.forEach((u) => { userMap[u.id] = u.nome || '' })
     }

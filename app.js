@@ -1,5 +1,6 @@
 const express = require('express')
 const cors = require('cors')
+const helmet = require('helmet')
 const path = require('path')
 const fs = require('fs')
 const tagsRoutes = require('./routes/tagRoutes')
@@ -7,6 +8,64 @@ require('dotenv').config()
 
 
 const app = express()
+
+// =====================================================
+// 🔐 Security headers (produção)
+// - CSP mínimo seguro p/ React SPA + Socket.IO + uploads/mídia
+// - X-Frame-Options + frame-ancestors (anti-clickjacking)
+// - Referrer-Policy
+// - Permissions-Policy (Helmet não cobre nativamente)
+// =====================================================
+const isProd = process.env.NODE_ENV === 'production'
+if (isProd) {
+  const defaultDirectives = helmet.contentSecurityPolicy.getDefaultDirectives()
+
+  // Ajustes para este projeto (SPA + mídia blob + WS)
+  defaultDirectives['frame-ancestors'] = ["'none'"]
+  defaultDirectives['img-src'] = [...new Set([...(defaultDirectives['img-src'] || []), 'blob:'])]
+  defaultDirectives['media-src'] = ["'self'", 'blob:', 'https:']
+  defaultDirectives['connect-src'] = ["'self'", 'https:', 'wss:', 'ws:']
+  defaultDirectives['frame-src'] = ["'none'"]
+  defaultDirectives['worker-src'] = ["'self'", 'blob:']
+
+  app.use(
+    helmet({
+      // CSP só faz sentido quando o backend serve o SPA (ou qualquer HTML).
+      // Mesmo assim é seguro aplicar globalmente.
+      contentSecurityPolicy: {
+        directives: defaultDirectives,
+      },
+      // menos agressivo que no-referrer, mas ainda privativo
+      referrerPolicy: { policy: 'strict-origin-when-cross-origin' },
+      // evita quebrar fluxos com popups (ex.: login externo) se existir no futuro
+      crossOriginOpenerPolicy: { policy: 'same-origin-allow-popups' },
+      // IMPORTANTE: se o frontend for hospedado em outro domínio, este header (same-origin)
+      // pode bloquear imagens/áudios do /uploads. Usamos cross-origin para não quebrar.
+      crossOriginResourcePolicy: { policy: 'cross-origin' },
+      // legado/compat: reforça o bloqueio de iframes (além de frame-ancestors)
+      xFrameOptions: { action: 'deny' },
+    })
+  )
+
+  // Helmet não implementa Permissions-Policy; setamos manualmente.
+  // Mantém microfone/câmera para o próprio origin; desabilita APIs não usadas.
+  app.use((req, res, next) => {
+    res.setHeader(
+      'Permissions-Policy',
+      [
+        'camera=(self)',
+        'microphone=(self)',
+        'geolocation=()',
+        'payment=()',
+        'usb=()',
+        'bluetooth=()',
+        'serial=()',
+        'hid=()',
+      ].join(', ')
+    )
+    next()
+  })
+}
 
 // Em produção, normalmente o app fica atrás de Nginx/Cloudflare (HTTPS).
 // Isso melhora req.ip/req.protocol e evita problemas com redirects/URLs.
@@ -34,10 +93,35 @@ app.use(
     allowedHeaders: ['Content-Type', 'Authorization'],
   })
 )
-app.use(express.json())
+// Captura rawBody para validação de assinatura (webhooks)
+app.use(express.json({
+  verify: (req, res, buf) => {
+    try { req.rawBody = buf } catch (_) {}
+  }
+}))
 
 // Arquivos estáticos (uploads: imagens, áudios, etc.)
-app.use('/uploads', express.static(path.join(__dirname, 'uploads')))
+// Segurança:
+// - X-Content-Type-Options: nosniff
+// - Força download para não-imagens (evita execução/XSS)
+app.use(
+  '/uploads',
+  express.static(path.join(__dirname, 'uploads'), {
+    index: false,
+    dotfiles: 'deny',
+    setHeaders(res, filePath) {
+      res.setHeader('X-Content-Type-Options', 'nosniff')
+      const p = String(filePath || '').toLowerCase()
+      const isImage = p.endsWith('.jpg') || p.endsWith('.jpeg') || p.endsWith('.png') || p.endsWith('.webp')
+      if (!isImage) {
+        const name = p.split(/[\\/]/).pop() || 'download'
+        res.setHeader('Content-Disposition', `attachment; filename="${name.replace(/"/g, '')}"`)
+        // força um tipo genérico para não permitir renderização ativa
+        res.setHeader('Content-Type', 'application/octet-stream')
+      }
+    },
+  })
+)
 
 // Health check
 app.get('/health', (req, res) => res.json({ ok: true }))
@@ -51,17 +135,36 @@ const iaRoutes = require('./routes/iaRoutes')
 const configRoutes = require('./routes/configRoutes')
 const clienteRoutes = require('./routes/clienteRoutes')
 const jobsRoutes = require('./routes/jobsRoutes')
+const { webhookLimiter, apiLimiter } = require('./middleware/rateLimit')
 
 app.use('/dashboard', dashboardRoutes)
 app.use('/jobs', jobsRoutes)
 app.use('/ia', iaRoutes)
 app.use('/config', configRoutes)
 app.use('/clientes', clienteRoutes)
-app.use('/webhook', webhookRoutes)
-app.use('/webhooks/zapi', webhookZapiRoutes)
+// Webhooks (rate limit dedicado por IP)
+// Meta (Cloud API)
+app.use('/webhook', webhookLimiter, webhookRoutes)
+app.use('/webhook/meta', webhookLimiter, webhookRoutes) // alias solicitado
+// Z-API
+app.use('/webhooks/zapi', webhookLimiter, webhookZapiRoutes)
+app.use('/webhook/zapi', webhookLimiter, webhookZapiRoutes) // alias solicitado
 app.use('/usuarios', userRoutes)
 app.use('/chats', chatRoutes)
 app.use('/tags', tagsRoutes)
+
+// /api — prefixo opcional para SaaS; mantém compatibilidade com rotas antigas
+// Aplica apiLimiter globalmente para "rotas de API"
+const api = express.Router()
+api.use('/dashboard', dashboardRoutes)
+api.use('/jobs', jobsRoutes)
+api.use('/ia', iaRoutes)
+api.use('/config', configRoutes)
+api.use('/clientes', clienteRoutes)
+api.use('/usuarios', userRoutes)
+api.use('/chats', chatRoutes)
+api.use('/tags', tagsRoutes)
+app.use('/api', apiLimiter, api)
 
 // =====================================================
 // PROD: servir frontend (Vite build) pelo backend
@@ -99,6 +202,7 @@ if (hasFrontendDist) {
 
   // SPA fallback somente para rotas de frontend (não APIs)
   const apiPrefixes = [
+    '/api',
     '/health',
     '/uploads',
     '/dashboard',
@@ -126,5 +230,25 @@ if (hasFrontendDist) {
     }
   })
 }
+
+// =====================================================
+// Global error handler (DEVE ser o último middleware)
+// Converte erros do Multer (fileFilter, fileSize) em JSON 400.
+// Evita que o Express devolva HTML 500 para erros de upload.
+// =====================================================
+// eslint-disable-next-line no-unused-vars
+app.use((err, req, res, next) => {
+  // Multer: tipo não permitido ou tamanho excedido
+  if (err && (err.code === 'LIMIT_FILE_SIZE' || err.code === 'LIMIT_UNEXPECTED_FILE' || (err.message && err.message.includes('não permitido')))) {
+    return res.status(400).json({ error: err.message || 'Arquivo inválido' })
+  }
+  // CORS
+  if (err && err.message === 'Not allowed by CORS') {
+    return res.status(403).json({ error: 'CORS: origem não permitida' })
+  }
+  // Outros erros: log + 500 JSON (nunca HTML)
+  console.error('[APP_ERROR]', err?.message || err)
+  return res.status(err?.status || 500).json({ error: err?.message || 'Erro interno' })
+})
 
 module.exports = app

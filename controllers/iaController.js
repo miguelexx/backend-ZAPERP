@@ -39,12 +39,10 @@ exports.getConfig = async (req, res) => {
   try {
     const company_id = req.user?.company_id
     if (!company_id) {
-      return res.json({
-        bot_global: DEFAULT_CONFIG.bot_global,
-        roteamento: DEFAULT_CONFIG.roteamento,
-        ia: DEFAULT_CONFIG.ia,
-        automacoes: DEFAULT_CONFIG.automacoes,
+      console.error('[TENANT_INCONSISTENT] /ia/config sem company_id no usuário', {
+        user_id: req.user?.id ?? null
       })
+      return res.status(401).json({ error: 'Tenant inválido' })
     }
     const { data, error } = await supabase
       .from('ia_config')

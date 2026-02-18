@@ -22,7 +22,20 @@ exports.getEmpresa = async (req, res) => {
 exports.putEmpresa = async (req, res) => {
   try {
     const { company_id } = req.user
-    const { nome, ativo, logo_url, tema, cor_primaria, horario_inicio, horario_fim, sla_minutos_sem_resposta, plano_id, limite_chats_por_atendente, timeout_inatividade_min } = req.body
+    const {
+      nome,
+      ativo,
+      logo_url,
+      tema,
+      cor_primaria,
+      horario_inicio,
+      horario_fim,
+      sla_minutos_sem_resposta,
+      plano_id,
+      limite_chats_por_atendente,
+      timeout_inatividade_min,
+      zapi_auto_sync_contatos
+    } = req.body
     const update = {}
     if (nome !== undefined) update.nome = nome
     if (ativo !== undefined) update.ativo = !!ativo
@@ -35,9 +48,16 @@ exports.putEmpresa = async (req, res) => {
     if (plano_id !== undefined) update.plano_id = plano_id || null
     if (limite_chats_por_atendente !== undefined) update.limite_chats_por_atendente = Math.max(0, Number(limite_chats_por_atendente) || 0)
     if (timeout_inatividade_min !== undefined) update.timeout_inatividade_min = Math.max(0, Number(timeout_inatividade_min) || 0)
+    if (zapi_auto_sync_contatos !== undefined) update.zapi_auto_sync_contatos = !!zapi_auto_sync_contatos
 
     const { data, error } = await supabase.from('empresas').update(update).eq('id', company_id).select().single()
-    if (error) return res.status(500).json({ error: error.message })
+    if (error) {
+      const msg = String(error.message || '')
+      if (msg.includes('zapi_auto_sync_contatos') || msg.includes('does not exist')) {
+        return res.status(400).json({ error: 'Banco desatualizado: rode o supabase/RUN_IN_SUPABASE.sql (coluna zapi_auto_sync_contatos).' })
+      }
+      return res.status(500).json({ error: error.message })
+    }
     return res.json(data)
   } catch (err) {
     console.error(err)
@@ -146,7 +166,11 @@ exports.getAuditoria = async (req, res) => {
 
     let userMap = {}
     if (userIds.size > 0) {
-      const { data: users } = await supabase.from('usuarios').select('id, nome').in('id', [...userIds])
+      const { data: users } = await supabase
+        .from('usuarios')
+        .select('id, nome')
+        .eq('company_id', company_id)
+        .in('id', [...userIds])
       users?.forEach(u => { userMap[u.id] = u.nome })
     }
 

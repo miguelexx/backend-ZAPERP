@@ -5,11 +5,12 @@
 const express = require('express')
 const router = express.Router()
 const webhookZapiController = require('../controllers/webhookZapiController')
+const { verifyZapiToken, rejectWrongZapiInstance } = require('../middleware/webhookAuth')
 
 router.get('/', webhookZapiController.testarZapi)
-router.post('/', webhookZapiController.receberZapi)
-router.post('/status', webhookZapiController.statusZapi)
-router.post('/connection', webhookZapiController.connectionZapi)
-router.post('/presence', webhookZapiController.presenceZapi)
+router.post('/', verifyZapiToken, rejectWrongZapiInstance, webhookZapiController.receberZapi)
+router.post('/status', verifyZapiToken, rejectWrongZapiInstance, webhookZapiController.statusZapi)
+router.post('/connection', verifyZapiToken, rejectWrongZapiInstance, webhookZapiController.connectionZapi)
+router.post('/presence', verifyZapiToken, rejectWrongZapiInstance, webhookZapiController.presenceZapi)
 
 module.exports = router

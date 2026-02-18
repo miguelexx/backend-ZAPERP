@@ -167,15 +167,18 @@ exports.login = async (req, res) => {
       return res.status(400).json({ error: 'Email e senha obrigatórios' })
     }
 
+    const emailNorm = String(email).trim().toLowerCase()
+
     // Busca usuário pelo email
     const { data: usuario, error } = await supabase
       .from('usuarios')
       .select('*')
-      .eq('email', email)
-      .single()
+      .eq('email', emailNorm)
+      .maybeSingle()
 
+    // Não vazar se o usuário existe (padrão SaaS)
     if (error || !usuario) {
-      return res.status(401).json({ error: 'Usuário não encontrado' })
+      return res.status(401).json({ error: 'Credenciais inválidas' })
     }
 
     // 🔎 Localiza corretamente a coluna de senha (compatível com vários padrões)
@@ -194,12 +197,12 @@ exports.login = async (req, res) => {
     const senhaOk = await bcrypt.compare(senha, senhaBanco)
 
     if (!senhaOk) {
-      return res.status(401).json({ error: 'Senha inválida' })
+      return res.status(401).json({ error: 'Credenciais inválidas' })
     }
 
     // Verifica se o usuário pertence a uma empresa
     if (!usuario.company_id) {
-      return res.status(401).json({ error: 'Usuário sem empresa vinculada' })
+      return res.status(401).json({ error: 'Credenciais inválidas' })
     }
 
     // Gera JWT com dados essenciais (perfil e departamento para roteamento por setor)

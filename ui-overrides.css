@@ -86,6 +86,164 @@ body {
 }
 
 /* ============================================
+   BRAND (logo + nome) — premium, chamativo, alinhado
+   Alvo: header da lista de conversas (ZapERP)
+============================================ */
+.chat-list-header-left {
+  align-items: center;
+}
+
+.chat-list-header-brand {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 2px;
+  min-width: 0;
+}
+
+.chat-list-header-title {
+  position: relative;
+  display: flex;
+  align-items: baseline;
+  gap: 2px;
+  line-height: 1;
+  font-weight: 900;
+  letter-spacing: -0.02em;
+  font-size: clamp(20px, 1.4vw, 24px);
+  padding-bottom: 2px;
+  isolation: isolate;
+}
+
+.chat-list-header-title::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -7px;
+  height: 2px;
+  border-radius: 999px;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgba(13, 148, 136, 0.85),
+    rgba(6, 182, 212, 0.65),
+    rgba(34, 197, 94, 0.55),
+    rgba(13, 148, 136, 0.85),
+    transparent
+  );
+  opacity: 0.55;
+  transform: scaleX(0.78);
+  transform-origin: center;
+  filter: blur(0.2px);
+  animation: clBrandLine 4.8s ease-in-out infinite;
+  pointer-events: none;
+}
+
+.chat-list-zap,
+.chat-list-erp {
+  background-image: linear-gradient(90deg, #0d9488, #22c55e, #06b6d4, #0d9488);
+  background-size: 220% 100%;
+  background-position: 0% 50%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: clBrandShimmer 7.2s ease-in-out infinite;
+}
+
+.chat-list-erp {
+  /* um “acabamento” mais tecnológico no ERP */
+  text-shadow: 0 10px 30px rgba(13, 148, 136, 0.10);
+}
+
+.chat-list-header-sub {
+  font-size: 12px;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+  color: rgba(87, 83, 78, 0.78);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 260px;
+}
+
+.chat-list-header-icon {
+  position: relative;
+  border-radius: 10px;
+  background: rgba(13, 148, 136, 0.06);
+  border: 1px solid rgba(13, 148, 136, 0.20);
+  overflow: hidden;
+}
+
+.chat-list-header-icon::before {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  border-radius: 12px;
+  background: conic-gradient(
+    from 180deg,
+    rgba(13, 148, 136, 0.55),
+    rgba(6, 182, 212, 0.42),
+    rgba(34, 197, 94, 0.45),
+    rgba(13, 148, 136, 0.55)
+  );
+  opacity: 0.55;
+  animation: clIconSpin 9s linear infinite;
+  pointer-events: none;
+}
+
+.chat-list-header-icon::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(120deg, transparent 35%, rgba(255, 255, 255, 0.30), transparent 65%);
+  transform: translateX(-120%);
+  opacity: 0.55;
+  animation: clIconSweep 5.5s ease-in-out infinite;
+  pointer-events: none;
+}
+
+.chat-list-header-icon > * {
+  position: relative;
+  z-index: 1;
+}
+
+.chat-list-header-left:hover .chat-list-header-title {
+  filter: drop-shadow(0 10px 26px rgba(13, 148, 136, 0.14));
+}
+
+@keyframes clBrandShimmer {
+  0% { background-position: 0% 50%; }
+  50% { background-position: 100% 50%; }
+  100% { background-position: 0% 50%; }
+}
+
+@keyframes clBrandLine {
+  0% { opacity: 0.35; transform: scaleX(0.68); }
+  50% { opacity: 0.70; transform: scaleX(0.95); }
+  100% { opacity: 0.35; transform: scaleX(0.68); }
+}
+
+@keyframes clIconSpin {
+  to { transform: rotate(360deg); }
+}
+
+@keyframes clIconSweep {
+  0% { transform: translateX(-120%); }
+  45% { transform: translateX(120%); }
+  100% { transform: translateX(120%); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-list-header-title::after,
+  .chat-list-zap,
+  .chat-list-erp,
+  .chat-list-header-icon::before,
+  .chat-list-header-icon::after {
+    animation: none !important;
+  }
+}
+
+/* ============================================
    Área de atendimento (wa-*)
 ============================================ */
 .wa-header {

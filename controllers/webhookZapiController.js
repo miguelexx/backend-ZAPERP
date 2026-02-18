@@ -13,12 +13,6 @@ const { normalizePhoneBR, possiblePhonesBR, normalizeGroupIdForStorage } = requi
 
 const COMPANY_ID = Number(process.env.WEBHOOK_COMPANY_ID || 1)
 
-function applyCompanyFilter(q, company_id) {
-  const cid = Number(company_id) || 1
-  if (cid === 1) return q.or('company_id.eq.1,company_id.is.null')
-  return q.eq('company_id', cid)
-}
-
 /** Detecta se o payload é de um grupo (remoteJid @g.us, isGroup ou tipo grupo). */
 function isGroupPayload(payload) {
   if (!payload || typeof payload !== 'object') return false
@@ -492,7 +486,7 @@ exports.receberZapi = async (req, res) => {
       let cliQuery = supabase.from('clientes').select('id, telefone, nome')
       if (phones.length > 0) cliQuery = cliQuery.in('telefone', phones)
       else cliQuery = cliQuery.eq('telefone', phone)
-      cliQuery = applyCompanyFilter(cliQuery, company_id)
+      cliQuery = cliQuery.eq('company_id', company_id)
       const { data: cliRows, error: errCli } = await cliQuery.order('id', { ascending: true }).limit(5)
       const clienteExistente = Array.isArray(cliRows) && cliRows.length > 0 ? cliRows[0] : null
 
@@ -516,8 +510,7 @@ exports.receberZapi = async (req, res) => {
         else if (!clienteExistente.nome || !String(clienteExistente.nome).trim()) updates.nome = phone
         if (!fromMe && senderPhoto) updates.foto_perfil = senderPhoto
         if (Object.keys(updates).length > 0) {
-          // update por id (id é globalmente único) — permite também company_id null (empresa 1)
-          await supabase.from('clientes').update(updates).eq('id', cliente_id)
+          await supabase.from('clientes').update(updates).eq('company_id', company_id).eq('id', cliente_id)
         }
         // Sync Z-API em background (será emitido após salvar mensagem, com conversa_id)
         pendingContactSync = { phone, cliente_id }
@@ -548,7 +541,7 @@ exports.receberZapi = async (req, res) => {
             let q2 = supabase.from('clientes').select('id')
             if (phones2.length > 0) q2 = q2.in('telefone', phones2)
             else q2 = q2.eq('telefone', phone)
-            q2 = applyCompanyFilter(q2, company_id)
+            q2 = q2.eq('company_id', company_id)
             const found = await q2.order('id', { ascending: true }).limit(1)
             if (Array.isArray(found.data) && found.data[0]?.id) {
               cliente_id = found.data[0].id
@@ -989,7 +982,7 @@ exports.receberZapi = async (req, res) => {
             let qM = supabase.from('clientes').select('id, nome, pushname, telefone').order('id', { ascending: true }).limit(3)
             if (pPhones.length > 0) qM = qM.in('telefone', pPhones)
             else qM = qM.eq('telefone', pNorm)
-            qM = applyCompanyFilter(qM, company_id)
+            qM = qM.eq('company_id', company_id)
             const { data: rowsM } = await qM
             const ex = Array.isArray(rowsM) && rowsM.length > 0 ? rowsM[0] : null
             if (ex) {
@@ -1112,6 +1105,27 @@ exports.receberZapi = async (req, res) => {
       if (errUpdate && (String(errUpdate.message || '').includes('ultima_atividade') || String(errUpdate.code || '') === 'PGRST204')) {
         console.warn('⚠️ Atualização ultima_atividade ignorada (coluna ausente). Execute RUN_IN_SUPABASE.sql no Supabase.')
       }
+
+      // CRM: atualiza último contato do cliente (apenas conversas individuais)
+      try {
+        if (!isGroup) {
+          const { data: convRow } = await supabase
+            .from('conversas')
+            .select('cliente_id, tipo, telefone')
+            .eq('company_id', company_id)
+            .eq('id', conversa_id)
+            .maybeSingle()
+          const convIsGroup = String(convRow?.tipo || '').toLowerCase() === 'grupo' || String(convRow?.telefone || '').includes('@g.us')
+          if (!convIsGroup && convRow?.cliente_id != null) {
+            await supabase
+              .from('clientes')
+              .update({ ultimo_contato: mensagemSalva.criado_em || new Date().toISOString(), atualizado_em: new Date().toISOString() })
+              .eq('company_id', company_id)
+              .eq('id', Number(convRow.cliente_id))
+          }
+        }
+      } catch (_) {}
+
       console.log('✅ Mensagem salva no sistema:', { conversa_id, mensagem_id: mensagemSalva.id, phone: phone?.slice(-6), direcao: fromMe ? 'out' : 'in' })
     }
 
@@ -1237,16 +1251,43 @@ exports.connectionZapi = async (req, res) => {
     if (connected) {
       setImmediate(async () => {
         const company_id = COMPANY_ID
+        const io = req.app.get('io')
         const provider = getProvider()
         if (!provider || !provider.getContacts || !provider.isConfigured) return
 
         try {
+          // ✅ respeita preferências da empresa (auto sync contatos)
+          let autoSync = true
+          try {
+            const { data: emp, error: errEmp } = await supabase
+              .from('empresas')
+              .select('zapi_auto_sync_contatos')
+              .eq('id', company_id)
+              .maybeSingle()
+            if (errEmp) {
+              // compat: coluna pode não existir ainda
+              const msg = String(errEmp.message || '')
+              if (!msg.includes('zapi_auto_sync_contatos') && !msg.includes('does not exist')) {
+                console.warn('⚠️ Z-API: erro ao ler preferência auto-sync:', errEmp.message)
+              }
+            } else if (emp && emp.zapi_auto_sync_contatos === false) {
+              autoSync = false
+            }
+          } catch (_) {
+            // ignora (mantém padrão true)
+          }
+          if (!autoSync) {
+            console.log('⏭️ Z-API: auto-sync de contatos desativado (empresa).')
+            return
+          }
+
           console.log('🔄 Z-API: iniciando sync de contatos (on connected)...')
           const pageSize = 100
           let page = 1
           let total = 0
           let atualizados = 0
           let criados = 0
+          let fotosAtualizadas = 0
 
           while (true) {
             const contacts = await provider.getContacts(page, pageSize)
@@ -1326,7 +1367,7 @@ exports.connectionZapi = async (req, res) => {
               .limit(150)
 
             const list = Array.isArray(semFoto) ? semFoto : []
-            let fotosAtualizadas = 0
+            fotosAtualizadas = 0
             for (const cl of list) {
               const tel = String(cl.telefone || '').trim()
               if (!tel) continue
@@ -1346,6 +1387,17 @@ exports.connectionZapi = async (req, res) => {
               await new Promise(r => setTimeout(r, 220))
             }
             if (fotosAtualizadas > 0) console.log('🖼️ Z-API: fotos atualizadas (parcial):', fotosAtualizadas)
+          }
+
+          // Notifica o front (Configurações → Clientes) para atualizar lista automaticamente
+          if (io) {
+            io.to(`empresa_${company_id}`).emit('zapi_sync_contatos', {
+              ok: true,
+              total_contatos: total,
+              criados,
+              atualizados,
+              fotos_atualizadas: fotosAtualizadas
+            })
           }
         } catch (e) {
           console.error('❌ Z-API sync on connected falhou:', e?.message || e)

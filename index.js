@@ -35,6 +35,17 @@ io.use((socket, next) => {
     }
 
     const payload = jwt.verify(token, process.env.JWT_SECRET)
+    // Multi-tenant estrito: company_id obrigatório no token
+    const cid = Number(payload?.company_id)
+    if (!Number.isFinite(cid) || cid <= 0) {
+      console.error('[TENANT_INCONSISTENT] Socket token sem company_id válido', {
+        user_id: payload?.id ?? null,
+        company_id: payload?.company_id ?? null,
+        ip: socket.handshake.address
+      })
+      return next(new Error('Tenant inválido'))
+    }
+    payload.company_id = cid
     socket.user = payload
 
     next()
@@ -106,6 +117,26 @@ io.on('connection', (socket) => {
 
     socket.leave(`conversa_${conversaId}`)
     console.log(`💬 Socket saiu da conversa ${conversaId}`)
+  })
+
+  // =====================================================
+  // Indicador de digitação (typing) — re-broadcast na room da conversa
+  // =====================================================
+  socket.on('typing_start', (data) => {
+    const conversa_id = data?.conversa_id
+    if (!conversa_id) return
+    const payload = {
+      conversa_id: Number(conversa_id),
+      usuario_id: socket.user.id,
+      nome: data?.nome ?? null
+    }
+    socket.to(`conversa_${conversa_id}`).emit('typing_start', payload)
+  })
+
+  socket.on('typing_stop', (data) => {
+    const conversa_id = data?.conversa_id
+    if (!conversa_id) return
+    socket.to(`conversa_${conversa_id}`).emit('typing_stop', { conversa_id: Number(conversa_id) })
   })
 
   socket.on('disconnect', () => {

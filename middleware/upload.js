@@ -7,10 +7,23 @@ if (!fs.existsSync(uploadDir)) {
   fs.mkdirSync(uploadDir, { recursive: true })
 }
 
+const ALLOWED_MIME = new Map([
+  ['image/jpeg', '.jpg'],
+  ['image/png', '.png'],
+  ['image/webp', '.webp'],
+  ['application/pdf', '.pdf'],
+  ['audio/mpeg', '.mp3'],
+  ['audio/ogg', '.ogg'],
+  ['video/mp4', '.mp4'],
+])
+
 const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, uploadDir),
   filename: (req, file, cb) => {
-    const ext = path.extname(file.originalname) || '.bin'
+    // Não usar extensão do arquivo original (previne upload de .html/.svg etc).
+    // A extensão é derivada do mimetype permitido.
+    const mime = String(file.mimetype || '').toLowerCase().trim()
+    const ext = ALLOWED_MIME.get(mime) || '.bin'
     const name = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}${ext}`
     cb(null, name)
   },
@@ -20,14 +33,8 @@ const upload = multer({
   storage,
   limits: { fileSize: 16 * 1024 * 1024 }, // 16MB (áudio pode ser grande)
   fileFilter: (req, file, cb) => {
-    const m = (file.mimetype || '').toLowerCase()
-    const allowed = [
-      'image/', 'audio/', 'video/',
-      'application/pdf', 'application/msword',
-      'application/vnd.openxmlformats-officedocument',
-      'text/',
-    ]
-    const ok = allowed.some(p => m.startsWith(p) || m === p)
+    const m = String(file.mimetype || '').toLowerCase().trim()
+    const ok = ALLOWED_MIME.has(m)
     if (ok) cb(null, true)
     else cb(new Error('Tipo de arquivo não permitido'), false)
   },

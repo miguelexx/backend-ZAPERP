@@ -409,6 +409,31 @@ exports.receberWebhook = async (req, res) => {
       return res.sendStatus(500)
     }
 
+    // Atualiza ordenação (ultima_atividade) e CRM (ultimo_contato)
+    try {
+      await supabase
+        .from('conversas')
+        .update({ ultima_atividade: new Date().toISOString() })
+        .eq('company_id', company_id)
+        .eq('id', conversa_id)
+    } catch (_) {}
+    try {
+      const { data: convRow } = await supabase
+        .from('conversas')
+        .select('cliente_id, tipo, telefone')
+        .eq('company_id', company_id)
+        .eq('id', conversa_id)
+        .maybeSingle()
+      const convIsGroup = String(convRow?.tipo || '').toLowerCase() === 'grupo' || String(convRow?.telefone || '').includes('@g.us')
+      if (!convIsGroup && convRow?.cliente_id != null) {
+        await supabase
+          .from('clientes')
+          .update({ ultimo_contato: mensagemSalva.criado_em || new Date().toISOString(), atualizado_em: new Date().toISOString() })
+          .eq('company_id', company_id)
+          .eq('id', Number(convRow.cliente_id))
+      }
+    } catch (_) {}
+
     // 5) Realtime: empresa, conversa e room do departamento
     const io = req.app.get('io')
     if (io) {

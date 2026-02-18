@@ -12,6 +12,9 @@ router.get('/', clienteController.listarClientes);
 // PEGAR 1
 router.get('/:id', clienteController.buscarClientePorId);
 
+// TAGS DO CLIENTE
+router.get('/:id/tags', clienteController.listarTagsCliente);
+
 // CRIAR
 router.post('/', clienteController.criarCliente);
 
@@ -23,5 +26,8 @@ router.delete('/:id', clienteController.excluirCliente);
 
 // VINCULAR TAG
 router.post('/:id/tags', clienteController.vincularTag);
+
+// DESVINCULAR TAG
+router.delete('/:id/tags/:tagId', clienteController.desvincularTag);
 
 module.exports = router;

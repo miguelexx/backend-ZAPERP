@@ -2,9 +2,10 @@ const express = require('express')
 const router = express.Router()
 const auth = require('../middleware/auth')
 const userController = require('../controllers/userController')
+const { loginLimiter } = require('../middleware/rateLimit')
 
 router.get('/', auth, userController.listar)
-router.post('/login', userController.login)
+router.post('/login', loginLimiter, userController.login)
 
 const adminOnly = require('../middleware/adminOnly')
 router.post('/', auth, adminOnly, userController.criar)
