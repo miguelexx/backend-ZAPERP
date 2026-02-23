@@ -1321,25 +1321,33 @@ exports.receberZapi = async (req, res) => {
 
 /**
  * POST /webhooks/zapi/status — status da mensagem (entrega/leitura) para ticks ✓✓.
- * Payload esperado: messageId, status (PENDING|SENT|RECEIVED|READ|PLAYED).
+ * Z-API envia: status (SENT|RECEIVED|READ|READ_BY_ME|PLAYED) e ids (array de IDs).
+ * Também aceita: messageId, zaapId, id (formato antigo).
  */
 exports.statusZapi = async (req, res) => {
   try {
     const body = req.body || {}
-    const messageId = body?.messageId ?? body?.zaapId ?? body?.id ?? null
+    // Z-API oficial usa "ids" (array); fallback para messageId, zaapId, id
+    const idsRaw = body?.ids
+    const messageIds = Array.isArray(idsRaw) && idsRaw.length > 0
+      ? idsRaw.map((id) => (id != null ? String(id).trim() : '')).filter(Boolean)
+      : []
+    const singleId = body?.messageId ?? body?.zaapId ?? body?.id ?? (messageIds.length > 0 ? messageIds[0] : null)
+    const idsToProcess = messageIds.length > 0 ? messageIds : (singleId ? [String(singleId).trim()] : [])
+
     const rawStatus =
       body?.ack != null ? String(body.ack).trim().toLowerCase() : String(body?.status ?? '').trim().toLowerCase()
 
     // Debug: log toda requisição recebida em /webhooks/zapi/status
     console.log('[DEBUG] /webhooks/zapi/status recebido:', {
-      messageId: messageId ? String(messageId).slice(0, 24) + (String(messageId).length > 24 ? '...' : '') : null,
+      ids: idsToProcess.length ? idsToProcess.slice(0, 3).map((id) => id.slice(0, 24) + (id.length > 24 ? '…' : '')) : null,
       statusBruto: body?.status ?? body?.ack ?? '(vazio)',
       ack: body?.ack,
       erro: body?.error != null ? String(body.error).slice(0, 100) : null
     })
 
-    if (!messageId) {
-      console.log('[DEBUG] /webhooks/zapi/status: sem messageId, ignorando.')
+    if (idsToProcess.length === 0) {
+      console.log('[DEBUG] /webhooks/zapi/status: sem messageId nem ids, ignorando.')
       return res.status(200).json({ ok: true })
     }
 
@@ -1355,7 +1363,7 @@ exports.statusZapi = async (req, res) => {
       return (
         rawStatus === 'received' || rawStatus === 'entregue' ? 'delivered' :
         rawStatus === 'delivered' ? 'delivered' :
-        rawStatus === 'read' || rawStatus === 'seen' || rawStatus === 'visualizada' || rawStatus === 'lida' ? 'read' :
+        rawStatus === 'read' || rawStatus === 'read_by_me' || rawStatus === 'seen' || rawStatus === 'visualizada' || rawStatus === 'lida' ? 'read' :
         rawStatus === 'played' ? 'played' :
         rawStatus === 'pending' || rawStatus === 'enviando' ? 'pending' :
         rawStatus === 'sent' || rawStatus === 'enviada' || rawStatus === 'enviado' ? 'sent' :
@@ -1370,39 +1378,44 @@ exports.statusZapi = async (req, res) => {
     }
 
     const company_id = COMPANY_ID
+    const io = req.app.get('io')
+    let updated = 0
 
-    // 1) Atualiza por whatsapp_id
-    let { data: msg } = await supabase
-      .from('mensagens')
-      .update({ status: statusNorm })
-      .eq('company_id', company_id)
-      .eq('whatsapp_id', String(messageId))
-      .select('id, conversa_id, company_id')
-      .maybeSingle()
+    for (const messageId of idsToProcess) {
+      if (!messageId) continue
+      const idStr = String(messageId)
 
-    // 2) Fallback: tenta encontrar mensagem com whatsapp_id correspondente sem filtro company_id
-    //    (para casos onde company_id do banco não bate por migração)
-    if (!msg) {
-      const { data: fallbackMsg } = await supabase
+      // 1) Atualiza por whatsapp_id
+      let { data: msg } = await supabase
         .from('mensagens')
         .update({ status: statusNorm })
-        .eq('whatsapp_id', String(messageId))
+        .eq('company_id', company_id)
+        .eq('whatsapp_id', idStr)
         .select('id, conversa_id, company_id')
         .maybeSingle()
-      msg = fallbackMsg || null
-    }
 
-    if (msg) {
-      const io = req.app.get('io')
-      if (io) {
-        io.to(`empresa_${msg.company_id}`)
-          .to(`conversa_${msg.conversa_id}`)
-          .emit('status_mensagem', { mensagem_id: msg.id, conversa_id: msg.conversa_id, status: statusNorm })
+      // 2) Fallback: sem filtro company_id
+      if (!msg) {
+        const { data: fallbackMsg } = await supabase
+          .from('mensagens')
+          .update({ status: statusNorm })
+          .eq('whatsapp_id', idStr)
+          .select('id, conversa_id, company_id')
+          .maybeSingle()
+        msg = fallbackMsg || null
       }
-      console.log('[DEBUG] /webhooks/zapi/status resultado:', { status: statusNorm, mensagem_id: msg.id, conversa_id: msg.conversa_id, erro: false })
-    } else {
-      // Normal quando o status é de mensagem antiga ou de outro fluxo (ex.: antes do CORS estar ok)
-      console.log('[Z-API] Status', statusNorm, 'para messageId', String(messageId).slice(0, 20) + '… — mensagem não encontrada no banco (ignorado)')
+
+      if (msg) {
+        updated++
+        if (io) {
+          io.to(`empresa_${msg.company_id}`)
+            .to(`conversa_${msg.conversa_id}`)
+            .emit('status_mensagem', { mensagem_id: msg.id, conversa_id: msg.conversa_id, status: statusNorm })
+        }
+        console.log('[DEBUG] /webhooks/zapi/status resultado:', { status: statusNorm, mensagem_id: msg.id, conversa_id: msg.conversa_id, whatsapp_id: idStr.slice(0, 20) + '…' })
+      } else {
+        console.log('[Z-API] Status', statusNorm, 'para id', idStr.slice(0, 20) + '… — mensagem não encontrada no banco (ignorado)')
+      }
     }
 
     return res.status(200).json({ ok: true })
