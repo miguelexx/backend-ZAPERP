@@ -11,13 +11,10 @@ function emitirConversaAtualizada(io, company_id, conversa_id, payload = null) {
 
   const data = payload || { id: Number(conversa_id) }
 
-  if (io.emitEmpresa && io.EVENTS) {
-    io.emitEmpresa(company_id, io.EVENTS.CONVERSA_ATUALIZADA, data)
-    io.emitConversa(conversa_id, io.EVENTS.CONVERSA_ATUALIZADA, data)
-  } else {
-    io.to(`empresa_${company_id}`).emit('conversa_atualizada', data)
-    io.to(`conversa_${conversa_id}`).emit('conversa_atualizada', data)
-  }
+  // Emite para empresa + conversa em UMA única operação (evita duplicidade
+  // quando o mesmo socket está nas duas rooms).
+  const eventName = io.EVENTS?.CONVERSA_ATUALIZADA || 'conversa_atualizada'
+  io.to(`empresa_${company_id}`).to(`conversa_${conversa_id}`).emit(eventName, data)
 
   // compatibilidade com seu front atual
   io.to(`empresa_${company_id}`).emit('atualizar_conversa', { id: Number(conversa_id) })
@@ -26,13 +23,11 @@ function emitirConversaAtualizada(io, company_id, conversa_id, payload = null) {
 function emitirEventoEmpresaConversa(io, company_id, conversa_id, eventName, payload) {
   if (!io) return
 
-  if (io.emitEmpresa) io.emitEmpresa(company_id, eventName, payload)
-  else io.to(`empresa_${company_id}`).emit(eventName, payload)
-
   if (conversa_id) {
-    if (io.emitConversa) io.emitConversa(conversa_id, eventName, payload)
-    else io.to(`conversa_${conversa_id}`).emit(eventName, payload)
+    io.to(`empresa_${company_id}`).to(`conversa_${conversa_id}`).emit(eventName, payload)
+    return
   }
+  io.to(`empresa_${company_id}`).emit(eventName, payload)
 }
 // =====================================================
 // ⭐ LOCK REALTIME (SEMANA 3)
@@ -1609,20 +1604,44 @@ exports.enviarMensagemChat = async (req, res) => {
         if (ew?.phone_number_id) phoneId = String(ew.phone_number_id)
       } catch (_) {}
 
+      // Resolve o whatsapp_id real da mensagem citada para enviar reply nativo ao WhatsApp
+      let replyMessageId = null
+      if (reply_meta?.replyToId != null) {
+        const rid = String(reply_meta.replyToId).trim()
+        // Se parece um ID numérico do banco (inteiro curto), busca o whatsapp_id real
+        if (/^\d{1,15}$/.test(rid)) {
+          try {
+            const { data: refMsg } = await supabase
+              .from('mensagens')
+              .select('whatsapp_id')
+              .eq('company_id', company_id)
+              .eq('conversa_id', Number(conversa_id))
+              .eq('id', Number(rid))
+              .maybeSingle()
+            replyMessageId = refMsg?.whatsapp_id || null
+          } catch (_) {}
+        } else {
+          // Já é um whatsapp_id (ID longo do WhatsApp)
+          replyMessageId = rid
+        }
+      }
+
       const provider = getProvider()
       try {
-        const ok = await provider.sendText(conversa.telefone, String(texto).trim(), { phoneId: phoneId || undefined })
+        const result = await provider.sendText(conversa.telefone, String(texto).trim(), { phoneId: phoneId || undefined, replyMessageId: replyMessageId || undefined })
+        const ok = typeof result === 'boolean' ? result : result?.ok === true
+        const waMessageId = typeof result === 'object' && result?.messageId ? String(result.messageId).trim() : null
         const nextStatus = ok ? 'sent' : 'erro'
         await supabase
           .from('mensagens')
-          .update({ status: nextStatus })
+          .update({ status: nextStatus, ...(waMessageId ? { whatsapp_id: waMessageId } : {}) })
           .eq('company_id', company_id)
           .eq('id', msg.id)
 
         const io2 = req.app.get('io')
         if (io2) {
-          io2.to(`empresa_${company_id}`).emit('status_mensagem', { mensagem_id: msg.id, conversa_id: Number(conversa_id), status: nextStatus })
-          io2.to(`conversa_${conversa_id}`).emit('status_mensagem', { mensagem_id: msg.id, conversa_id: Number(conversa_id), status: nextStatus })
+          const payload = { mensagem_id: msg.id, conversa_id: Number(conversa_id), status: nextStatus, ...(waMessageId ? { whatsapp_id: waMessageId } : {}) }
+          io2.to(`empresa_${company_id}`).to(`conversa_${conversa_id}`).emit('status_mensagem', payload)
         }
 
         if (!ok) console.warn('WhatsApp: falha ao enviar mensagem para', conversa.telefone)
@@ -1635,8 +1654,7 @@ exports.enviarMensagemChat = async (req, res) => {
           .eq('id', msg.id)
         const io2 = req.app.get('io')
         if (io2) {
-          io2.to(`empresa_${company_id}`).emit('status_mensagem', { mensagem_id: msg.id, conversa_id: Number(conversa_id), status: 'erro' })
-          io2.to(`conversa_${conversa_id}`).emit('status_mensagem', { mensagem_id: msg.id, conversa_id: Number(conversa_id), status: 'erro' })
+          io2.to(`empresa_${company_id}`).to(`conversa_${conversa_id}`).emit('status_mensagem', { mensagem_id: msg.id, conversa_id: Number(conversa_id), status: 'erro' })
         }
       }
     }

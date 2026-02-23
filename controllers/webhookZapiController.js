@@ -347,9 +347,95 @@ exports.receberZapi = async (req, res) => {
     let lastResult = { ok: true }
 
     for (const payload of payloads) {
+      // Normaliza status Z-API para canônico interno
+      // Observação: alguns callbacks chegam como ACK numérico (0..4).
+      const normalizeZapiStatus = (raw) => {
+        const s = String(raw ?? '').trim().toLowerCase()
+
+        // ACK numérico (comum em callbacks): 0=pending,1=sent,2=delivered,3=read,4=played
+        if (/^\d+$/.test(s)) {
+          const n = Number(s)
+          if (n <= 0) return 'pending'
+          if (n === 1) return 'sent'
+          if (n === 2) return 'delivered'
+          if (n === 3) return 'read'
+          if (n >= 4) return 'played'
+        }
+
+        if (s === 'received' || s === 'entregue') return 'delivered'
+        if (s === 'delivered') return 'delivered'
+        if (s === 'read' || s === 'seen' || s === 'visualizada' || s === 'lida') return 'read'
+        if (s === 'played') return 'played'
+        if (s === 'pending' || s === 'enviando') return 'pending'
+        if (s === 'sent' || s === 'enviada' || s === 'enviado') return 'sent'
+        if (s === 'failed' || s === 'error' || s === 'erro') return 'erro'
+        return s || null
+      }
+
+      // Helper: emite status_mensagem via socket
+      const emitStatusMsg = (msg, statusNorm) => {
+        const io = req.app.get('io')
+        if (io && msg) {
+          // Uma única emissão para empresa + conversa (evita duplicidade quando o socket está nas duas rooms)
+          io.to(`empresa_${msg.company_id}`)
+            .to(`conversa_${msg.conversa_id}`)
+            .emit('status_mensagem', { mensagem_id: msg.id, conversa_id: msg.conversa_id, status: statusNorm })
+        }
+      }
+
+      // Helper: atualiza status no banco por whatsapp_id
+      const updateStatusByWaId = async (waId, statusNorm) => {
+        if (!waId || !statusNorm) return null
+        const { data: msg } = await supabase
+          .from('mensagens')
+          .update({ status: statusNorm })
+          .eq('company_id', COMPANY_ID)
+          .eq('whatsapp_id', String(waId))
+          .select('id, conversa_id, company_id')
+          .maybeSingle()
+        return msg || null
+      }
+
+      // payloadType: usa type > event como fonte primária de classificação.
+      // payloadTypeOrStatus: fallback inclui o campo "status" para Z-API que envia tipo no campo status.
+      const payloadType = String(payload?.type ?? payload?.event ?? '').toLowerCase()
+      // Em alguns callbacks, o status vem em "ack" (número) em vez de "status" (string).
+      const payloadStatusRaw =
+        payload?.ack != null ? String(payload.ack).trim() : String(payload?.status ?? '').trim()
+      const payloadTypeOrStatus = payloadType || payloadStatusRaw.toLowerCase()
+
+      // ─── MessageStatusCallback: READ / RECEIVED / PLAYED (ticks ✓✓ e azul) ───
+      // Z-API envia este tipo quando o destinatário recebe ou lê a mensagem.
+      // Alguns payloads têm "type: MessageStatusCallback", outros só "status: READ" sem type.
+      const STATUS_VALUE_KEYWORDS = ['read', 'received', 'played']
+      const isStatusCallback =
+        payloadType === 'messagestatuscallback' ||
+        payloadType === 'message_status_callback' ||
+        payloadType === 'readcallback' ||
+        payloadType === 'read_callback' ||
+        payloadType === 'receivedcallback_ack' ||
+        // Sem type: Z-API manda só {status:"READ", messageId:"..."} na rota /status
+        (STATUS_VALUE_KEYWORDS.includes(payloadStatusRaw.toLowerCase()) && (payload?.messageId || payload?.zaapId))
+
+      if (isStatusCallback) {
+        const msgId = payload?.messageId ?? payload?.zaapId ?? null
+        if (!msgId) continue
+        const statusNorm = normalizeZapiStatus(payloadStatusRaw)
+        if (!statusNorm) continue
+
+        const msg = await updateStatusByWaId(String(msgId), statusNorm)
+        if (msg) {
+          emitStatusMsg(msg, statusNorm)
+          console.log(`✅ Z-API status ${statusNorm.toUpperCase()} → msg ${msg.id} (conversa ${msg.conversa_id})`)
+        } else {
+          console.warn(`⚠️ Z-API status ${statusNorm.toUpperCase()} recebido mas messageId não encontrado: ${String(msgId).slice(0, 25)}`)
+        }
+        lastResult = { ok: true, statusUpdate: true, messageId: String(msgId), status: statusNorm }
+        continue
+      }
+
       // DeliveryCallback (on-message-send): retorno do envio, não é uma mensagem para salvar.
-      const payloadType = String(payload?.type ?? payload?.event ?? payload?.status ?? '').toLowerCase()
-      if (payloadType === 'deliverycallback') {
+      if (payloadTypeOrStatus === 'deliverycallback') {
         const company_id = COMPANY_ID
         const phoneDestRaw = payload?.phone ?? payload?.to ?? payload?.destination ?? ''
         const phoneDest = normalizePhoneBR(phoneDestRaw) || String(phoneDestRaw || '').replace(/\D/g, '')
@@ -427,8 +513,9 @@ exports.receberZapi = async (req, res) => {
         if (!error && msg) {
           const io = req.app.get('io')
           if (io) {
-            io.to(`empresa_${msg.company_id}`).emit('status_mensagem', { mensagem_id: msg.id, conversa_id: msg.conversa_id, status: statusNorm })
-            io.to(`conversa_${msg.conversa_id}`).emit('status_mensagem', { mensagem_id: msg.id, conversa_id: msg.conversa_id, status: statusNorm })
+            io.to(`empresa_${msg.company_id}`)
+              .to(`conversa_${msg.conversa_id}`)
+              .emit('status_mensagem', { mensagem_id: msg.id, conversa_id: msg.conversa_id, status: statusNorm })
           }
         }
 
@@ -853,6 +940,68 @@ exports.receberZapi = async (req, res) => {
       }
     }
 
+    // ─── Reply/citação: extraído ANTES da reconciliação para que ambos os caminhos usem ───
+    // Z-API usa "referencedMessage.messageId" como campo principal; outros formatos são fallbacks.
+    let webhookReplyMeta = null
+    {
+      const refMsg = payload?.referencedMessage ?? payload?.quotedMsg ?? payload?.quoted ?? null
+      const quotedIdRaw =
+        payload?.referencedMessage?.messageId ??
+        payload?.referencedMessage?.id ??
+        payload?.quotedMsgId ??
+        payload?.quotedMessageId ??
+        payload?.quotedStanzaId ??
+        payload?.contextInfo?.stanzaId ??
+        payload?.contextInfo?.quotedStanzaId ??
+        payload?.contextInfo?.quotedMessageId ??
+        refMsg?.id ??
+        refMsg?.messageId ??
+        payload?.message?.contextInfo?.stanzaId ??
+        payload?.message?.contextInfo?.quotedStanzaId ??
+        null
+      const quotedId = quotedIdRaw ? String(quotedIdRaw).trim() : null
+
+      const refBodyFallback =
+        String(
+          payload?.referencedMessage?.body ??
+          payload?.referencedMessage?.text?.message ??
+          payload?.referencedMessage?.caption ??
+          refMsg?.message ??
+          refMsg?.body ??
+          refMsg?.text?.message ??
+          ''
+        ).trim().slice(0, 180) || null
+
+      const refFromMe = payload?.referencedMessage?.fromMe ?? refMsg?.fromMe ?? null
+
+      if (quotedId) {
+        try {
+          const { data: quoted } = await supabase
+            .from('mensagens')
+            .select('texto, direcao, remetente_nome')
+            .eq('company_id', company_id)
+            .eq('conversa_id', conversa_id)
+            .eq('whatsapp_id', quotedId)
+            .maybeSingle()
+
+          const snippet =
+            String(quoted?.texto || '').trim().slice(0, 180) ||
+            refBodyFallback ||
+            'Mensagem'
+
+          let name
+          if (quoted) {
+            name = quoted.direcao === 'out' ? 'Você' : (String(quoted.remetente_nome || '').trim() || 'Contato')
+          } else {
+            name = (refFromMe === true) ? 'Você' : 'Contato'
+          }
+          webhookReplyMeta = { name, snippet, ts: Date.now(), replyToId: quotedId }
+        } catch (_) {
+          webhookReplyMeta = { name: (refFromMe === true ? 'Você' : 'Mensagem'), snippet: refBodyFallback || 'Mensagem', ts: Date.now(), replyToId: quotedId }
+        }
+      }
+    }
+
     // ✅ Anti-duplicação profissional (envio pelo sistema + eco do webhook fromMe):
     // Quando enviamos pelo CRM, a mensagem é inserida com whatsapp_id = null.
     // Em seguida o Z-API pode disparar webhook fromMe com whatsapp_id real.
@@ -878,7 +1027,7 @@ exports.receberZapi = async (req, res) => {
 
         let q = supabase
           .from('mensagens')
-          .select('id, criado_em, texto, url, nome_arquivo, tipo, whatsapp_id')
+          .select('id, criado_em, texto, url, nome_arquivo, tipo, whatsapp_id, reply_meta')
           .eq('company_id', company_id)
           .eq('conversa_id', conversa_id)
           .eq('direcao', 'out')
@@ -897,6 +1046,8 @@ exports.receberZapi = async (req, res) => {
         if (cand?.id) {
           const updates = { whatsapp_id: whatsappIdStr }
           if (statusPayload) updates.status = statusPayload
+          // Aplica reply_meta se o webhook trouxe citação e o registro pendente não tem
+          if (webhookReplyMeta && !cand.reply_meta) updates.reply_meta = webhookReplyMeta
 
           const { data: patched, error: patchErr } = await supabase
             .from('mensagens')
@@ -917,47 +1068,7 @@ exports.receberZapi = async (req, res) => {
 
     if (!mensagemSalva) {
       const statusPayload = (payload.status && String(payload.status).toLowerCase()) || null
-
-      // Reply/citação (Z-API) — tenta capturar o ID da mensagem citada (quando existir)
-      // Z-API pode variar o formato: quotedMsgId, quotedStanzaId, contextInfo.stanzaId etc.
-      const quotedIdRaw =
-        payload?.quotedMsgId ??
-        payload?.quotedMessageId ??
-        payload?.quotedStanzaId ??
-        payload?.contextInfo?.stanzaId ??
-        payload?.contextInfo?.quotedStanzaId ??
-        payload?.contextInfo?.quotedMessageId ??
-        payload?.quotedMsg?.id ??
-        payload?.quotedMsg?.messageId ??
-        payload?.quoted?.id ??
-        payload?.message?.contextInfo?.stanzaId ??
-        payload?.message?.contextInfo?.quotedStanzaId ??
-        null
-      const quotedId = quotedIdRaw ? String(quotedIdRaw).trim() : null
-
-      let reply_meta = null
-      if (quotedId) {
-        try {
-          const { data: quoted } = await supabase
-            .from('mensagens')
-            .select('texto, direcao, remetente_nome')
-            .eq('company_id', company_id)
-            .eq('conversa_id', conversa_id)
-            .eq('whatsapp_id', quotedId)
-            .maybeSingle()
-          const snippet =
-            String(quoted?.texto || '').trim().slice(0, 180) ||
-            String(payload?.quotedMsg?.message || payload?.quotedMsg?.body || payload?.quotedMsg?.text?.message || '').trim().slice(0, 180) ||
-            'Mensagem'
-          const name =
-            quoted?.direcao === 'out'
-              ? 'Você'
-              : (String(quoted?.remetente_nome || '').trim() || 'Contato')
-          reply_meta = { name, snippet, ts: Date.now(), replyToId: quotedId }
-        } catch (_) {
-          reply_meta = { name: 'Mensagem', snippet: 'Mensagem', ts: Date.now(), replyToId: quotedId }
-        }
-      }
+      const reply_meta = webhookReplyMeta || null
 
       const insertMsg = {
         conversa_id,
@@ -1132,13 +1243,19 @@ exports.receberZapi = async (req, res) => {
     // 4) Realtime: nova_mensagem + contato_atualizado quando sync Z-API terminar
     const io = req.app.get('io')
     if (io && mensagemSalva) {
-      io.to(`empresa_${company_id}`).emit('nova_mensagem', mensagemSalva)
-      io.to(`conversa_${conversa_id}`).emit('nova_mensagem', mensagemSalva)
-      io.to(`empresa_${company_id}`).emit('atualizar_conversa', { id: conversa_id })
-      if (departamento_id != null) {
-        io.to(`departamento_${departamento_id}`).emit('nova_mensagem', mensagemSalva)
-        io.to(`departamento_${departamento_id}`).emit('atualizar_conversa', { id: conversa_id })
-      }
+      // 🔒 Privacidade por setor:
+      // - Se a conversa tem departamento_id, NÃO enviar "nova_mensagem" para a empresa inteira.
+      // - Enviar para room do departamento + room da conversa.
+      const rooms = [`conversa_${conversa_id}`]
+      if (departamento_id != null) rooms.push(`departamento_${departamento_id}`)
+      else rooms.push(`empresa_${company_id}`)
+
+      io.to(rooms).emit('nova_mensagem', mensagemSalva)
+
+      const roomList = departamento_id != null ? `departamento_${departamento_id}` : `empresa_${company_id}`
+      // Emite os dois nomes de evento para compatibilidade total com o frontend
+      io.to(roomList).emit('atualizar_conversa', { id: conversa_id })
+      io.to(roomList).emit('conversa_atualizada', { id: conversa_id })
     }
 
     if (pendingContactSync && io) {
@@ -1161,7 +1278,8 @@ exports.receberZapi = async (req, res) => {
             if (!res || res.error) return null
             return supabase.from('clientes').select('nome, pushname, telefone, foto_perfil').eq('id', syncClienteId).single()
           })
-          .then(({ data } = {}) => {
+          .then((r) => {
+            const data = r?.data
             if (data && io) {
               const displayName = data.pushname || data.nome || data.telefone || syncPhone
               console.log('✅ Contato sincronizado Z-API:', syncPhone?.slice(-6), displayName || '(sem nome)')
@@ -1194,36 +1312,88 @@ exports.receberZapi = async (req, res) => {
  */
 exports.statusZapi = async (req, res) => {
   try {
-    const { messageId, status } = req.body || {}
-    if (!messageId) return res.status(200).json({ ok: true })
-    const raw = String(status || '').trim().toLowerCase()
-    // Normaliza para estados canônicos
-    const statusNorm =
-      raw === 'received' ? 'delivered' :
-      raw === 'entregue' ? 'delivered' :
-      raw === 'delivered' ? 'delivered' :
-      raw === 'read' || raw === 'seen' || raw === 'visualizada' ? 'read' :
-      raw === 'played' ? 'played' :
-      raw === 'pending' || raw === 'enviando' ? 'pending' :
-      raw === 'sent' || raw === 'enviada' || raw === 'enviado' ? 'sent' :
-      raw === 'erro' || raw === 'error' || raw === 'failed' ? 'erro' :
-      (raw || 'sent')
-    const { data: msg, error } = await supabase
+    const body = req.body || {}
+    const messageId = body?.messageId ?? body?.zaapId ?? body?.id ?? null
+    const rawStatus =
+      body?.ack != null ? String(body.ack).trim().toLowerCase() : String(body?.status ?? '').trim().toLowerCase()
+
+    // Debug: log toda requisição recebida em /webhooks/zapi/status
+    console.log('[DEBUG] /webhooks/zapi/status recebido:', {
+      messageId: messageId ? String(messageId).slice(0, 24) + (String(messageId).length > 24 ? '...' : '') : null,
+      statusBruto: body?.status ?? body?.ack ?? '(vazio)',
+      ack: body?.ack,
+      erro: body?.error != null ? String(body.error).slice(0, 100) : null
+    })
+
+    if (!messageId) {
+      console.log('[DEBUG] /webhooks/zapi/status: sem messageId, ignorando.')
+      return res.status(200).json({ ok: true })
+    }
+
+    const statusNorm = (() => {
+      if (/^\d+$/.test(rawStatus)) {
+        const n = Number(rawStatus)
+        if (n <= 0) return 'pending'
+        if (n === 1) return 'sent'
+        if (n === 2) return 'delivered'
+        if (n === 3) return 'read'
+        if (n >= 4) return 'played'
+      }
+      return (
+        rawStatus === 'received' || rawStatus === 'entregue' ? 'delivered' :
+        rawStatus === 'delivered' ? 'delivered' :
+        rawStatus === 'read' || rawStatus === 'seen' || rawStatus === 'visualizada' || rawStatus === 'lida' ? 'read' :
+        rawStatus === 'played' ? 'played' :
+        rawStatus === 'pending' || rawStatus === 'enviando' ? 'pending' :
+        rawStatus === 'sent' || rawStatus === 'enviada' || rawStatus === 'enviado' ? 'sent' :
+        rawStatus === 'erro' || rawStatus === 'error' || rawStatus === 'failed' ? 'erro' :
+        (rawStatus || null)
+      )
+    })()
+
+    if (!statusNorm) {
+      console.log('[DEBUG] /webhooks/zapi/status: status não mapeado, ignorando. rawStatus=', rawStatus || '(vazio)')
+      return res.status(200).json({ ok: true })
+    }
+
+    const company_id = COMPANY_ID
+
+    // 1) Atualiza por whatsapp_id
+    let { data: msg } = await supabase
       .from('mensagens')
-      .update({ status: statusNorm || 'enviada' })
+      .update({ status: statusNorm })
+      .eq('company_id', company_id)
       .eq('whatsapp_id', String(messageId))
       .select('id, conversa_id, company_id')
       .maybeSingle()
-    if (!error && msg) {
+
+    // 2) Fallback: tenta encontrar mensagem com whatsapp_id correspondente sem filtro company_id
+    //    (para casos onde company_id do banco não bate por migração)
+    if (!msg) {
+      const { data: fallbackMsg } = await supabase
+        .from('mensagens')
+        .update({ status: statusNorm })
+        .eq('whatsapp_id', String(messageId))
+        .select('id, conversa_id, company_id')
+        .maybeSingle()
+      msg = fallbackMsg || null
+    }
+
+    if (msg) {
       const io = req.app.get('io')
       if (io) {
-        io.to(`empresa_${msg.company_id}`).emit('status_mensagem', { mensagem_id: msg.id, conversa_id: msg.conversa_id, status: statusNorm })
-        io.to(`conversa_${msg.conversa_id}`).emit('status_mensagem', { mensagem_id: msg.id, conversa_id: msg.conversa_id, status: statusNorm })
+        io.to(`empresa_${msg.company_id}`)
+          .to(`conversa_${msg.conversa_id}`)
+          .emit('status_mensagem', { mensagem_id: msg.id, conversa_id: msg.conversa_id, status: statusNorm })
       }
+      console.log('[DEBUG] /webhooks/zapi/status resultado:', { status: statusNorm, mensagem_id: msg.id, conversa_id: msg.conversa_id, erro: false })
+    } else {
+      console.warn('[DEBUG] /webhooks/zapi/status resultado:', { status: statusNorm, messageId: String(messageId).slice(0, 24), erro: true, motivo: 'messageId não encontrado no banco' })
     }
+
     return res.status(200).json({ ok: true })
   } catch (e) {
-    console.error('Erro webhook Z-API status:', e)
+    console.error('[DEBUG] /webhooks/zapi/status ERRO:', e?.message || e)
     return res.status(200).json({ ok: true })
   }
 }
@@ -1253,7 +1423,21 @@ exports.connectionZapi = async (req, res) => {
         const company_id = COMPANY_ID
         const io = req.app.get('io')
         const provider = getProvider()
-        if (!provider || !provider.getContacts || !provider.isConfigured) return
+        if (!provider || !provider.isConfigured) return
+
+        // ─── Auto-configuração dos webhooks Z-API ───
+        // Registra automaticamente as URLs de callback (mensagens + status) na instância Z-API.
+        // Garante que READ/RECEIVED cheguem mesmo sem configuração manual no painel.
+        const appUrl = process.env.APP_URL || ''
+        if (appUrl && provider.configureWebhooks) {
+          try {
+            await provider.configureWebhooks(appUrl)
+          } catch (e) {
+            console.warn('⚠️ Z-API: erro ao configurar webhooks automaticamente:', e.message)
+          }
+        }
+
+        if (!provider.getContacts) return
 
         try {
           // ✅ respeita preferências da empresa (auto sync contatos)

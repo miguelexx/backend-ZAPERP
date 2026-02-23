@@ -7,31 +7,39 @@ const fs = require('fs')
  * phoneId: opcional para multi-tenant; se omitido usa env
  * Exportado para uso em chatController (envio a partir do CRM).
  */
-async function enviarMensagemWhatsApp(telefone, texto, phoneId = null) {
+async function enviarMensagemWhatsApp(telefone, texto, phoneId = null, replyMessageId = null) {
   const token = process.env.WHATSAPP_TOKEN || process.env.META_ACCESS_TOKEN
   const defaultPhoneId = process.env.PHONE_NUMBER_ID || process.env.WHATSAPP_PHONE_ID
   const resolvedPhoneId = phoneId || defaultPhoneId
-  if (!token || !resolvedPhoneId) return false
+  if (!token || !resolvedPhoneId) return { ok: false, messageId: null }
   const num = String(telefone).replace(/\D/g, '')
   const url = `https://graph.facebook.com/v18.0/${resolvedPhoneId}/messages`
   try {
+    const body = {
+      messaging_product: 'whatsapp',
+      to: num,
+      type: 'text',
+      text: { body: texto }
+    }
+    // Reply nativo (WhatsApp Cloud API): context.message_id
+    if (replyMessageId) {
+      body.context = { message_id: String(replyMessageId).trim() }
+    }
+
     const res = await fetch(url, {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${token}`,
         'Content-Type': 'application/json'
       },
-      body: JSON.stringify({
-        messaging_product: 'whatsapp',
-        to: num,
-        type: 'text',
-        text: { body: texto }
-      })
+      body: JSON.stringify(body)
     })
-    return res.ok
+    const json = await res.json().catch(() => null)
+    const messageId = json?.messages?.[0]?.id ? String(json.messages[0].id).trim() : null
+    return { ok: !!res.ok, messageId }
   } catch (e) {
     console.error('Erro ao enviar WhatsApp:', e)
-    return false
+    return { ok: false, messageId: null }
   }
 }
 
@@ -144,8 +152,11 @@ exports.receberWebhook = async (req, res) => {
           .maybeSingle()
 
         if (!error && msgRow && io) {
-          io.to(`empresa_${msgRow.company_id}`).emit('status_mensagem', { mensagem_id: msgRow.id, conversa_id: msgRow.conversa_id, status: norm })
-          io.to(`conversa_${msgRow.conversa_id}`).emit('status_mensagem', { mensagem_id: msgRow.id, conversa_id: msgRow.conversa_id, status: norm })
+          // Emite para empresa + conversa em UMA única operação (evita evento duplicado
+          // quando o mesmo socket está nas duas rooms).
+          io.to(`empresa_${msgRow.company_id}`)
+            .to(`conversa_${msgRow.conversa_id}`)
+            .emit('status_mensagem', { mensagem_id: msgRow.id, conversa_id: msgRow.conversa_id, status: norm })
         }
       }
 
@@ -437,13 +448,17 @@ exports.receberWebhook = async (req, res) => {
     // 5) Realtime: empresa, conversa e room do departamento
     const io = req.app.get('io')
     if (io) {
-      io.to(`empresa_${company_id}`).emit('nova_mensagem', mensagemSalva)
-      io.to(`conversa_${conversa_id}`).emit('nova_mensagem', mensagemSalva)
-      io.to(`empresa_${company_id}`).emit('atualizar_conversa', { id: conversa_id })
-      if (departamento_id != null) {
-        io.to(`departamento_${departamento_id}`).emit('nova_mensagem', mensagemSalva)
-        io.to(`departamento_${departamento_id}`).emit('atualizar_conversa', { id: conversa_id })
-      }
+      // 🔒 Privacidade por setor:
+      // - Se a conversa tem departamento_id, NÃO enviar "nova_mensagem" para a empresa inteira.
+      // - Enviar para room do departamento + room da conversa (e somente esses).
+      const rooms = [`conversa_${conversa_id}`]
+      if (departamento_id != null) rooms.push(`departamento_${departamento_id}`)
+      else rooms.push(`empresa_${company_id}`)
+
+      io.to(rooms).emit('nova_mensagem', mensagemSalva)
+
+      const roomList = departamento_id != null ? `departamento_${departamento_id}` : `empresa_${company_id}`
+      io.to(roomList).emit('atualizar_conversa', { id: conversa_id })
     }
 
     return res.sendStatus(200)

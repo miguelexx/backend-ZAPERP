@@ -4,68 +4,59 @@ const helmet = require('helmet')
 const path = require('path')
 const fs = require('fs')
 const tagsRoutes = require('./routes/tagRoutes')
-require('dotenv').config()
-
+// Usar o mesmo .env do backend (evita carregar .env de outra pasta e sobrescrever APP_URL)
+require('dotenv').config({ path: path.join(__dirname, '.env'), override: true })
 
 const app = express()
 
 // =====================================================
-// 🔐 Security headers (produção)
+// 🔐 Security headers (sempre ativos — não dependem de NODE_ENV)
 // - CSP mínimo seguro p/ React SPA + Socket.IO + uploads/mídia
 // - X-Frame-Options + frame-ancestors (anti-clickjacking)
 // - Referrer-Policy
 // - Permissions-Policy (Helmet não cobre nativamente)
 // =====================================================
 const isProd = process.env.NODE_ENV === 'production'
-if (isProd) {
-  const defaultDirectives = helmet.contentSecurityPolicy.getDefaultDirectives()
+const defaultDirectives = helmet.contentSecurityPolicy.getDefaultDirectives()
 
-  // Ajustes para este projeto (SPA + mídia blob + WS)
-  defaultDirectives['frame-ancestors'] = ["'none'"]
-  defaultDirectives['img-src'] = [...new Set([...(defaultDirectives['img-src'] || []), 'blob:'])]
-  defaultDirectives['media-src'] = ["'self'", 'blob:', 'https:']
-  defaultDirectives['connect-src'] = ["'self'", 'https:', 'wss:', 'ws:']
-  defaultDirectives['frame-src'] = ["'none'"]
-  defaultDirectives['worker-src'] = ["'self'", 'blob:']
+// Ajustes para este projeto (SPA + mídia blob + WS)
+defaultDirectives['frame-ancestors'] = ["'none'"]
+defaultDirectives['img-src'] = [...new Set([...(defaultDirectives['img-src'] || []), 'blob:'])]
+defaultDirectives['media-src'] = ["'self'", 'blob:', 'https:']
+defaultDirectives['connect-src'] = ["'self'", 'https:', 'wss:', 'ws:']
+defaultDirectives['frame-src'] = ["'none'"]
+defaultDirectives['worker-src'] = ["'self'", 'blob:']
 
-  app.use(
-    helmet({
-      // CSP só faz sentido quando o backend serve o SPA (ou qualquer HTML).
-      // Mesmo assim é seguro aplicar globalmente.
-      contentSecurityPolicy: {
-        directives: defaultDirectives,
-      },
-      // menos agressivo que no-referrer, mas ainda privativo
-      referrerPolicy: { policy: 'strict-origin-when-cross-origin' },
-      // evita quebrar fluxos com popups (ex.: login externo) se existir no futuro
-      crossOriginOpenerPolicy: { policy: 'same-origin-allow-popups' },
-      // IMPORTANTE: se o frontend for hospedado em outro domínio, este header (same-origin)
-      // pode bloquear imagens/áudios do /uploads. Usamos cross-origin para não quebrar.
-      crossOriginResourcePolicy: { policy: 'cross-origin' },
-      // legado/compat: reforça o bloqueio de iframes (além de frame-ancestors)
-      xFrameOptions: { action: 'deny' },
-    })
-  )
-
-  // Helmet não implementa Permissions-Policy; setamos manualmente.
-  // Mantém microfone/câmera para o próprio origin; desabilita APIs não usadas.
-  app.use((req, res, next) => {
-    res.setHeader(
-      'Permissions-Policy',
-      [
-        'camera=(self)',
-        'microphone=(self)',
-        'geolocation=()',
-        'payment=()',
-        'usb=()',
-        'bluetooth=()',
-        'serial=()',
-        'hid=()',
-      ].join(', ')
-    )
-    next()
+app.use(
+  helmet({
+    contentSecurityPolicy: {
+      directives: defaultDirectives,
+    },
+    referrerPolicy: { policy: 'strict-origin-when-cross-origin' },
+    crossOriginOpenerPolicy: { policy: 'same-origin-allow-popups' },
+    crossOriginResourcePolicy: { policy: 'cross-origin' },
+    xFrameOptions: { action: 'deny' },
   })
-}
+)
+
+// Helmet não implementa Permissions-Policy; setamos manualmente.
+// Mantém microfone/câmera para o próprio origin; desabilita APIs não usadas.
+app.use((req, res, next) => {
+  res.setHeader(
+    'Permissions-Policy',
+    [
+      'camera=(self)',
+      'microphone=(self)',
+      'geolocation=()',
+      'payment=()',
+      'usb=()',
+      'bluetooth=()',
+      'serial=()',
+      'hid=()',
+    ].join(', ')
+  )
+  next()
+})
 
 // Em produção, normalmente o app fica atrás de Nginx/Cloudflare (HTTPS).
 // Isso melhora req.ip/req.protocol e evita problemas com redirects/URLs.
@@ -73,24 +64,35 @@ if (process.env.TRUST_PROXY === '1' || process.env.NODE_ENV === 'production') {
   app.set('trust proxy', 1)
 }
 
-// CORS: em dev pode ser livre; em produção defina CORS_ORIGINS=dominio1,dominio2
+// CORS: lista explícita de origens permitidas via CORS_ORIGINS; inclui APP_URL como fallback seguro.
 const allowedOrigins = String(process.env.CORS_ORIGINS || '')
   .split(',')
   .map((s) => s.trim())
   .filter(Boolean)
+
+let appOrigin = null
+try {
+  const u = new URL(String(process.env.APP_URL || '').trim())
+  appOrigin = u?.origin || null
+} catch (_) {
+  appOrigin = null
+}
+
+if (appOrigin && !allowedOrigins.includes(appOrigin)) {
+  allowedOrigins.push(appOrigin)
+}
 
 app.use(
   cors({
     origin(origin, cb) {
       // requests sem Origin (curl/postman) devem passar
       if (!origin) return cb(null, true)
-      // se não configurou allowlist, permite (modo compatível)
-      if (allowedOrigins.length === 0) return cb(null, true)
       if (allowedOrigins.includes(origin)) return cb(null, true)
       return cb(new Error('Not allowed by CORS'))
     },
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization'],
+    credentials: true,
   })
 )
 // Captura rawBody para validação de assinatura (webhooks)
@@ -125,6 +127,15 @@ app.use(
 
 // Health check
 app.get('/health', (req, res) => res.json({ ok: true }))
+
+// Endpoint temporário de diagnóstico de ambiente (remover após validação em produção)
+app.get('/debug/env', (req, res) => {
+  res.json({
+    APP_URL: process.env.APP_URL || null,
+    NODE_ENV: process.env.NODE_ENV || null,
+    WEBHOOK_TOKEN_SET: !!String(process.env.ZAPI_WEBHOOK_TOKEN || '').trim(),
+  })
+})
 
 const webhookRoutes = require('./routes/webhookRoutes')
 const webhookZapiRoutes = require('./routes/webhookZapiRoutes')

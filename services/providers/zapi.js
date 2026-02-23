@@ -180,19 +180,28 @@ function phoneCandidatesForLookup(phone) {
  * Envia mensagem de texto.
  * @param {string} phone - Número no formato DDI+DDD+NUMERO (apenas dígitos ou será normalizado)
  * @param {string} message - Texto da mensagem
- * @returns {Promise<boolean>} true se enviado com sucesso
+ * @param {{ phoneId?: string, replyMessageId?: string }} [opts] - Opções extras
+ *   replyMessageId: ID Z-API da mensagem que está sendo respondida (para reply nativo no WhatsApp)
+ * @returns {Promise<{ ok: boolean, messageId: string|null }>} ok e messageId (quando disponível)
  */
-async function sendText(phone, message) {
+async function sendText(phone, message, opts = {}) {
   const basePath = getBasePath()
-  if (!basePath) return false
+  if (!basePath) return { ok: false, messageId: null }
   const nums = await phoneCandidatesForSendAsync(phone)
-  if (!nums.length || !message) return false
+  if (!nums.length || !message) return { ok: false, messageId: null }
+
+  const replyMessageId = opts?.replyMessageId ? String(opts.replyMessageId).trim() : null
+
   try {
     for (const num of nums) {
+      const body = { phone: num, message: String(message).trim() }
+      // reply nativo WhatsApp: Z-API aceita "replyMessageId" no corpo
+      if (replyMessageId) body.replyMessageId = replyMessageId
+
       const res = await fetch(`${basePath}/send-text`, {
         method: 'POST',
         headers: getHeaders(),
-        body: JSON.stringify({ phone: num, message: String(message).trim() })
+        body: JSON.stringify(body)
       })
 
       const bodyText = await res.text().catch(() => '')
@@ -212,13 +221,13 @@ async function sendText(phone, message) {
       }
 
       const msgId = data?.messageId || data?.zaapId || null
-      console.log('✅ Z-API mensagem enviada:', String(num || '').slice(-12), msgId ? `id=${String(msgId).slice(0, 14)}...` : '')
-      return true
+      console.log('✅ Z-API mensagem enviada:', String(num || '').slice(-12), msgId ? `id=${String(msgId).slice(0, 14)}...` : '', replyMessageId ? `[reply a ${String(replyMessageId).slice(0, 10)}...]` : '')
+      return { ok: true, messageId: msgId ? String(msgId) : null }
     }
-    return false
+    return { ok: false, messageId: null }
   } catch (e) {
     console.error('❌ Erro Z-API sendText:', e.message)
-    return false
+    return { ok: false, messageId: null }
   }
 }
 
@@ -510,6 +519,82 @@ async function getChatMessages(phone, amount = 10, lastMessageId = null) {
   }
 }
 
+/**
+ * Configura automaticamente as URLs de webhook no painel Z-API via API REST.
+ * Chamado ao conectar a instância ou no startup do backend.
+ *
+ * Z-API endpoints:
+ *   PUT /update-webhook-received    → mensagens recebidas (incoming)
+ *   PUT /update-webhook-delivery    → DeliveryCallback (confirmação de envio)
+ *   PUT /update-webhook-status      → MessageStatusCallback (READ/RECEIVED/PLAYED)
+ *   PUT /update-webhook-disconnected → disconnect event
+ *   PUT /update-webhook-connected   → connect event
+ */
+async function configureWebhooks(appUrl) {
+  const basePath = getBasePath()
+  if (!basePath || !appUrl) return
+
+  const base = String(appUrl).replace(/\/$/, '')
+
+  // Inclui o token como query param nas URLs registradas no Z-API.
+  // O Z-API envia o token de volta ao chamar o webhook (?token=xxx),
+  // que é então validado pelo middleware requireWebhookToken.
+  const webhookToken = String(process.env.ZAPI_WEBHOOK_TOKEN || '').trim()
+  const tokenSuffix  = webhookToken ? `?token=${encodeURIComponent(webhookToken)}` : ''
+
+  const mainUrl    = `${base}/webhooks/zapi${tokenSuffix}`
+  const statusUrl  = `${base}/webhooks/zapi/status${tokenSuffix}`
+  const connUrl    = `${base}/webhooks/zapi/connection${tokenSuffix}`
+
+  // Cada entrada tem candidatos de endpoint (Z-API mudou nomes entre versões).
+  // Tentamos todos em sequência e paramos no primeiro que retornar 2xx.
+  const configs = [
+    { label: 'received',     value: mainUrl,    candidates: ['/update-webhook-received', '/update-on-message-received'] },
+    { label: 'delivery',     value: mainUrl,    candidates: ['/update-webhook-delivery', '/update-on-message-delivery'] },
+    { label: 'status',       value: statusUrl,  candidates: ['/update-on-message-status', '/update-webhook-status', '/update-webhook-on-message-status'] },
+    { label: 'disconnected', value: connUrl,    candidates: ['/update-webhook-disconnected', '/update-on-disconnected'] },
+    { label: 'connected',    value: connUrl,    candidates: ['/update-webhook-connected', '/update-on-connected'] },
+  ]
+
+  const putWebhook = async (endpoint, value) => {
+    const res = await fetch(`${basePath}${endpoint}`, {
+      method: 'PUT',
+      headers: getHeaders(),
+      body: JSON.stringify({ value })
+    })
+    return res.ok || res.status === 204 || res.status === 200
+  }
+
+  const results = []
+  for (const { label, value, candidates } of configs) {
+    let ok = false
+    for (const endpoint of candidates) {
+      try {
+        ok = await putWebhook(endpoint, value)
+        if (ok) break
+      } catch (_) {}
+    }
+    if (!ok) {
+      console.warn(`⚠️ Z-API configureWebhooks [${label}]: todos os endpoints falharam. Configure manualmente: ${value}`)
+    }
+    results.push({ label, ok })
+  }
+
+  const allOk = results.every(r => r.ok)
+  if (allOk) {
+    console.log('✅ Z-API webhooks configurados automaticamente:', mainUrl)
+    console.log(`   Status (leitura/entrega): ${statusUrl}`)
+  } else {
+    const failed = results.filter(r => !r.ok).map(r => r.label)
+    console.warn('⚠️ Z-API configureWebhooks: configure manualmente no painel Z-API:')
+    console.warn(`   "Ao receber" + "Ao enviar": ${mainUrl}`)
+    console.warn(`   "Receber status da mensagem": ${statusUrl}`)
+    console.warn(`   "Ao conectar" + "Ao desconectar": ${connUrl}`)
+    if (failed.length) console.warn('   Itens não configurados via API:', failed.join(', '))
+  }
+  return results
+}
+
 module.exports = {
   sendText,
   sendImage,
@@ -521,6 +606,7 @@ module.exports = {
   getProfilePicture,
   getContactMetadata,
   getChatMessages,
+  configureWebhooks,
   normalizePhone,
   isConfigured: !!ZAPI_INSTANCE_ID && !!ZAPI_TOKEN
 }

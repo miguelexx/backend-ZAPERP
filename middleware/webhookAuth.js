@@ -40,27 +40,6 @@ function verifyMetaSignature(req, res, next) {
   return next()
 }
 
-// Z-API: token simples por header ou query (?token=)
-function verifyZapiToken(req, res, next) {
-  const isProd = String(process.env.NODE_ENV || '').toLowerCase() === 'production'
-  const token = String(process.env.ZAPI_WEBHOOK_TOKEN || process.env.WEBHOOK_ZAPI_TOKEN || '').trim()
-
-  if (isProd && !token) {
-    return res.status(500).json({ error: 'WEBHOOK: ZAPI_WEBHOOK_TOKEN/WEBHOOK_ZAPI_TOKEN não configurado' })
-  }
-  if (!token) return next()
-
-  const incoming =
-    String(req.get('x-webhook-token') || '').trim() ||
-    String(req.query?.token || '').trim() ||
-    String(req.query?.key || '').trim()
-
-  if (!incoming || !timingSafeEqual(incoming, token)) {
-    return res.status(401).json({ error: 'Token do webhook inválido' })
-  }
-  return next()
-}
-
 function rejectWrongZapiInstance(req, res, next) {
   const expected = String(process.env.ZAPI_INSTANCE_ID || '').trim()
   if (!expected) return next()
@@ -72,5 +51,5 @@ function rejectWrongZapiInstance(req, res, next) {
   return next()
 }
 
-module.exports = { verifyMetaSignature, verifyZapiToken, rejectWrongZapiInstance }
+module.exports = { verifyMetaSignature, rejectWrongZapiInstance }
 

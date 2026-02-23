@@ -1,22 +1,58 @@
-require('dotenv').config()
+const path = require('path')
+// Carrega .env do diretório do backend e SOBRESCREVE variáveis já existentes
+require('dotenv').config({ path: path.join(__dirname, '.env'), override: true })
 const http = require('http')
 const app = require('./app')
 const { Server } = require('socket.io')
 const jwt = require('jsonwebtoken')
 
+// Diagnóstico: confirma qual .env foi carregado
+const envPath = path.join(__dirname, '.env')
+console.log('[ENV] Carregado:', envPath)
+console.log('PRODUCTION CONFIG:')
+console.log('APP_URL:', process.env.APP_URL)
+console.log('NODE_ENV:', process.env.NODE_ENV)
+console.log('WEBHOOK TOKEN SET:', !!String(process.env.ZAPI_WEBHOOK_TOKEN || '').trim())
+
+// Fail-fast: configuração crítica obrigatória — impede deploy inseguro.
+if (!process.env.JWT_SECRET) {
+  throw new Error('JWT_SECRET não configurado no .env')
+}
+if (!String(process.env.APP_URL || '').trim()) {
+  throw new Error('APP_URL não definido no .env')
+}
+if (!String(process.env.ZAPI_WEBHOOK_TOKEN || '').trim()) {
+  throw new Error('ZAPI_WEBHOOK_TOKEN não definido no .env')
+}
+if (!String(process.env.NODE_ENV || '').trim()) {
+  throw new Error('NODE_ENV não definido no .env')
+}
+
 const server = http.createServer(app)
 
-const allowedOrigins = String(process.env.CORS_ORIGINS || '')
+// CORS do Socket.IO: segue mesma política do Express (CORS_ORIGINS + APP_URL).
+const allowedSocketOrigins = String(process.env.CORS_ORIGINS || '')
   .split(',')
   .map((s) => s.trim())
   .filter(Boolean)
+
+let socketAppOrigin = null
+try {
+  const u = new URL(String(process.env.APP_URL || '').trim())
+  socketAppOrigin = u?.origin || null
+} catch (_) {
+  socketAppOrigin = null
+}
+
+if (socketAppOrigin && !allowedSocketOrigins.includes(socketAppOrigin)) {
+  allowedSocketOrigins.push(socketAppOrigin)
+}
 
 const io = new Server(server, {
   cors: {
     origin(origin, cb) {
       if (!origin) return cb(null, true)
-      if (allowedOrigins.length === 0) return cb(null, true)
-      if (allowedOrigins.includes(origin)) return cb(null, true)
+      if (allowedSocketOrigins.includes(origin)) return cb(null, true)
       return cb(new Error('Not allowed by CORS'))
     },
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
@@ -152,4 +188,22 @@ app.set('io', io)
 const PORT = process.env.PORT || 3000
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`Servidor HTTP + WebSocket rodando na porta ${PORT}`)
+
+  // ─── Auto-configuração dos webhooks Z-API no startup ───
+  // Garante que as URLs de callback (mensagens, entrega, status, conexão) estejam
+  // registradas na instância Z-API logo após o servidor subir.
+  const appUrl = process.env.APP_URL || ''
+  if (appUrl && process.env.WHATSAPP_PROVIDER === 'zapi') {
+    setImmediate(async () => {
+      try {
+        const { getProvider } = require('./services/providers')
+        const provider = getProvider()
+        if (provider && provider.isConfigured && provider.configureWebhooks) {
+          await provider.configureWebhooks(appUrl)
+        }
+      } catch (e) {
+        console.warn('⚠️ Startup: erro ao configurar webhooks Z-API:', e.message)
+      }
+    })
+  }
 })

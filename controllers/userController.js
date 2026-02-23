@@ -181,6 +181,11 @@ exports.login = async (req, res) => {
       return res.status(401).json({ error: 'Credenciais inválidas' })
     }
 
+    // Conta desativada: não revelar existência (padrão SaaS)
+    if (usuario.ativo === false) {
+      return res.status(401).json({ error: 'Credenciais inválidas' })
+    }
+
     // 🔎 Localiza corretamente a coluna de senha (compatível com vários padrões)
     const senhaBanco =
       usuario.senha ||
@@ -189,7 +194,11 @@ exports.login = async (req, res) => {
       usuario.pass
 
     if (!senhaBanco) {
-      console.error('Coluna de senha não encontrada no usuário:', usuario)
+      console.error('Coluna de senha não encontrada no usuário', {
+        id: usuario?.id ?? null,
+        email: usuario?.email ?? null,
+        company_id: usuario?.company_id ?? null
+      })
       return res.status(500).json({ error: 'Usuário sem senha cadastrada corretamente' })
     }
 
