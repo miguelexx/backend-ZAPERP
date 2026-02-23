@@ -666,7 +666,7 @@ exports.receberZapi = async (req, res) => {
             if (!fallbackInsert.error) cliente_id = fallbackInsert.data.id
           }
           if (!cliente_id) {
-            console.error('Erro ao criar cliente Z-API:', errNovoCli)
+            console.error('❌ Z-API Erro ao criar cliente:', errNovoCli?.code, errNovoCli?.message, errNovoCli?.details)
             return res.status(500).json({ error: 'Erro ao criar cliente' })
           }
         } else {
@@ -813,7 +813,7 @@ exports.receberZapi = async (req, res) => {
           }
         }
         if (errNovaConv) {
-          console.error('Erro ao criar conversa Z-API:', errNovaConv)
+          console.error('❌ Z-API Erro ao criar conversa:', errNovaConv?.code, errNovaConv?.message, errNovaConv?.details)
           return res.status(500).json({ error: 'Erro ao criar conversa' })
         }
       }
@@ -1211,7 +1211,7 @@ exports.receberZapi = async (req, res) => {
             mensagemSalva = fallback.data
             console.log('✅ Mensagem salva (fallback):', mensagemSalva.id)
           } else {
-            console.error('Erro ao salvar mensagem Z-API:', errMsg)
+            console.error('❌ Z-API Erro ao salvar mensagem:', errMsg?.code, errMsg?.message, errMsg?.details)
             return res.status(500).json({ error: 'Erro ao salvar mensagem' })
           }
         }
