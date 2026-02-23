@@ -341,7 +341,13 @@ exports.testarZapi = (req, res) => {
 exports.receberZapi = async (req, res) => {
   try {
     const body = req.body || {}
-    console.log('[Z-API] Webhook chamado:', body.type || '(sem type)', 'phone=' + (body.phone || '(vazio)'), 'fromMe=' + body.fromMe, 'isGroup=' + body.isGroup)
+    const bodyPreview = {
+      type: body.type || body.event || '(vazio)',
+      phone: (body.phone || '(vazio)').toString().slice(-12),
+      instanceId: body.instanceId != null ? String(body.instanceId).slice(0, 12) : '(vazio)',
+      hasText: !!(body.text?.message || body.message || body.body)
+    }
+    console.log('[Z-API] POST recebido (mensagem/status):', JSON.stringify(bodyPreview))
 
     const payloads = getPayloads(body)
     let lastResult = { ok: true }
@@ -406,16 +412,25 @@ exports.receberZapi = async (req, res) => {
 
       // ─── MessageStatusCallback: READ / RECEIVED / PLAYED (ticks ✓✓ e azul) ───
       // Z-API envia este tipo quando o destinatário recebe ou lê a mensagem.
-      // Alguns payloads têm "type: MessageStatusCallback", outros só "status: READ" sem type.
+      // Se o payload tiver conteúdo de mensagem (text.message, message, body), é ReceivedCallback — NÃO status.
+      const hasMessageContent =
+        (payload?.text?.message != null && String(payload.text.message).trim() !== '') ||
+        (payload?.message != null && String(payload.message).trim() !== '') ||
+        (payload?.body != null && String(payload.body).trim() !== '') ||
+        payload?.image != null || payload?.imageUrl != null ||
+        payload?.audio != null || payload?.audioUrl != null ||
+        payload?.video != null || payload?.videoUrl != null ||
+        payload?.document != null || payload?.documentUrl != null
+
       const STATUS_VALUE_KEYWORDS = ['read', 'received', 'played']
       const isStatusCallback =
-        payloadType === 'messagestatuscallback' ||
-        payloadType === 'message_status_callback' ||
-        payloadType === 'readcallback' ||
-        payloadType === 'read_callback' ||
-        payloadType === 'receivedcallback_ack' ||
-        // Sem type: Z-API manda só {status:"READ", messageId:"..."} na rota /status
-        (STATUS_VALUE_KEYWORDS.includes(payloadStatusRaw.toLowerCase()) && (payload?.messageId || payload?.zaapId))
+        !hasMessageContent &&
+        (payloadType === 'messagestatuscallback' ||
+          payloadType === 'message_status_callback' ||
+          payloadType === 'readcallback' ||
+          payloadType === 'read_callback' ||
+          payloadType === 'receivedcallback_ack' ||
+          (STATUS_VALUE_KEYWORDS.includes(payloadStatusRaw.toLowerCase()) && (payload?.messageId || payload?.zaapId)))
 
       if (isStatusCallback) {
         const msgId = payload?.messageId ?? payload?.zaapId ?? null
