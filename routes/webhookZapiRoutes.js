@@ -1,19 +1,17 @@
 /**
  * Rotas do webhook Z-API.
- * Todos os endpoints POST exigem token via requireWebhookToken (fail-closed).
+ * (Sem exigência de token — Z-API chama diretamente essas URLs.)
  */
 
 const express = require('express')
 const router = express.Router()
 const webhookZapiController = require('../controllers/webhookZapiController')
-const requireWebhookToken = require('../middleware/requireWebhookToken')
 const { rejectWrongZapiInstance } = require('../middleware/webhookAuth')
 
-// Loga TODA requisição POST que chega (antes de validar token) — para saber se a Z-API está chamando
+// Loga TODA requisição POST que chega — para diagnosticar chamadas da Z-API
 router.use((req, res, next) => {
   if (req.method === 'POST') {
-    const hasToken = !!(req.query?.token || req.get('X-Webhook-Token'))
-    console.log('[Z-API] Requisição POST', req.path || '/', '| token presente:', hasToken, '| IP:', req.ip || req.socket?.remoteAddress)
+    console.log('[Z-API] Requisição POST', req.path || '/', '| IP:', req.ip || req.socket?.remoteAddress)
   }
   next()
 })
@@ -21,10 +19,10 @@ router.use((req, res, next) => {
 // GET público — usado apenas para diagnóstico/healthcheck da URL configurada no Z-API
 router.get('/', webhookZapiController.testarZapi)
 
-// Todos os callbacks Z-API protegidos com token obrigatório (header X-Webhook-Token ou ?token=)
-router.post('/',           requireWebhookToken, rejectWrongZapiInstance, webhookZapiController.receberZapi)
-router.post('/status',     requireWebhookToken, rejectWrongZapiInstance, webhookZapiController.statusZapi)
-router.post('/connection', requireWebhookToken, rejectWrongZapiInstance, webhookZapiController.connectionZapi)
-router.post('/presence',   requireWebhookToken, rejectWrongZapiInstance, webhookZapiController.presenceZapi)
+// Callbacks Z-API sem validação de token
+router.post('/',           rejectWrongZapiInstance, webhookZapiController.receberZapi)
+router.post('/status',     rejectWrongZapiInstance, webhookZapiController.statusZapi)
+router.post('/connection', rejectWrongZapiInstance, webhookZapiController.connectionZapi)
+router.post('/presence',   rejectWrongZapiInstance, webhookZapiController.presenceZapi)
 
 module.exports = router
