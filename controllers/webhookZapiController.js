@@ -347,8 +347,6 @@ exports.receberZapi = async (req, res) => {
       instanceId: body.instanceId != null ? String(body.instanceId).slice(0, 12) : '(vazio)',
       hasText: !!(body.text?.message || body.message || body.body)
     }
-    console.log('[Z-API] POST recebido (mensagem/status):', JSON.stringify(bodyPreview))
-
     const payloads = getPayloads(body)
     let lastResult = { ok: true }
 
@@ -1403,7 +1401,8 @@ exports.statusZapi = async (req, res) => {
       }
       console.log('[DEBUG] /webhooks/zapi/status resultado:', { status: statusNorm, mensagem_id: msg.id, conversa_id: msg.conversa_id, erro: false })
     } else {
-      console.warn('[DEBUG] /webhooks/zapi/status resultado:', { status: statusNorm, messageId: String(messageId).slice(0, 24), erro: true, motivo: 'messageId não encontrado no banco' })
+      // Normal quando o status é de mensagem antiga ou de outro fluxo (ex.: antes do CORS estar ok)
+      console.log('[Z-API] Status', statusNorm, 'para messageId', String(messageId).slice(0, 20) + '… — mensagem não encontrada no banco (ignorado)')
     }
 
     return res.status(200).json({ ok: true })
