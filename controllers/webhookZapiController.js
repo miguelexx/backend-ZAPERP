@@ -192,7 +192,19 @@ function extractMessage(payload) {
   // Grupo x individual: se for grupo, a chave da conversa é SEMPRE o id do grupo (nunca o participante).
   const isGroup = isGroupPayload(payload)
   const groupChatId = isGroup ? pickGroupChatId(payload) : ''
-  const phone = isGroup ? groupChatId : pickBestPhone(payload, { fromMe })
+  // Z-API docs (ReceivedCallback): phone = número do chat; connectedPhone = número conectado à API.
+  // Para garantir que mensagens enviadas/recebidas caiam SEMPRE na mesma conversa/cliente,
+  // priorizamos payload.phone nos eventos ReceivedCallback e só usamos pickBestPhone como fallback.
+  const rawType = String(payload.type || payload.event || payload.msgType || '').toLowerCase()
+  const isReceivedCallbackType = rawType === 'receivedcallback' || rawType === 'received_callback'
+  let phone = ''
+  if (isGroup) {
+    phone = groupChatId
+  } else if (isReceivedCallbackType && payload.phone != null && String(payload.phone).trim() !== '') {
+    phone = String(payload.phone).trim()
+  } else {
+    phone = pickBestPhone(payload, { fromMe })
+  }
   const messageId = payload.messageId ?? payload.id ?? payload.instanceId ?? payload.key?.id ?? null
   const ts = payload.timestamp ?? payload.momment ?? payload.t ?? payload.reaction?.time ?? Date.now()
 
@@ -708,23 +720,48 @@ exports.receberZapi = async (req, res) => {
         // Sync Z-API em background (será emitido após salvar mensagem, com conversa_id)
         pendingContactSync = { phone, cliente_id }
       } else {
-        // Novo cliente: inserir já com dados do payload; sync em background depois
-        const fromPayloadRaw = fromMe
-          ? (payload.chatName ?? payload.chat?.name ?? null)
-          : (payload.senderName ?? payload.chatName ?? payload.chat?.name ?? null)
-        const fromPayload = fromPayloadRaw ? String(fromPayloadRaw).trim() : null
+        // Novo cliente: antes de inserir, tenta reaproveitar cadastro LEGADO com o mesmo número (ex.: antigo sem DDI/9).
+        // Ex.: cliente salvo como "3499999999" e webhook chega com "5534999999999" → reaproveita o mesmo cliente.
+        if (phone) {
+          try {
+            const digits10 = String(phone).replace(/\D/g, '').slice(-10)
+            if (digits10 && digits10.length === 10) {
+              const { data: legacyRows } = await supabase
+                .from('clientes')
+                .select('id, telefone')
+                .eq('company_id', company_id)
+                .like('telefone', `%${digits10}`)
+                .order('id', { ascending: true })
+                .limit(1)
+              const legacy = Array.isArray(legacyRows) && legacyRows[0] ? legacyRows[0] : null
+              if (legacy?.id) {
+                cliente_id = legacy.id
+                pendingContactSync = { phone, cliente_id }
+              }
+            }
+          } catch (_) {
+            // fallback silencioso — se falhar, segue para inserção normal
+          }
+        }
 
-        const { data: novoCliente, error: errNovoCli } = await supabase
-          .from('clientes')
-          .insert({
-            telefone: phone,
-            nome: fromPayload || phone || null,
-            observacoes: null,
-            company_id,
-            ...(!fromMe && senderPhoto ? { foto_perfil: senderPhoto } : {})
-          })
-          .select('id')
-          .single()
+        // Se ainda não achou cliente legado, insere já com dados do payload; sync em background depois.
+        if (!cliente_id) {
+          const fromPayloadRaw = fromMe
+            ? (payload.chatName ?? payload.chat?.name ?? null)
+            : (payload.senderName ?? payload.chatName ?? payload.chat?.name ?? null)
+          const fromPayload = fromPayloadRaw ? String(fromPayloadRaw).trim() : null
+
+          const { data: novoCliente, error: errNovoCli } = await supabase
+            .from('clientes')
+            .insert({
+              telefone: phone,
+              nome: fromPayload || phone || null,
+              observacoes: null,
+              company_id,
+              ...(!fromMe && senderPhoto ? { foto_perfil: senderPhoto } : {})
+            })
+            .select('id')
+            .single()
 
         if (errNovoCli) {
           // Se bateu UNIQUE (cliente já existe), apenas busca e segue (evita 500 em webhook)
@@ -762,8 +799,9 @@ exports.receberZapi = async (req, res) => {
             console.error('❌ Z-API Erro ao criar cliente:', errNovoCli?.code, errNovoCli?.message, errNovoCli?.details)
             return res.status(500).json({ error: 'Erro ao criar cliente' })
           }
-        } else {
-          cliente_id = novoCliente.id
+          } else {
+            cliente_id = novoCliente.id
+          }
         }
         pendingContactSync = { phone, cliente_id: cliente_id }
       }
