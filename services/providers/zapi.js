@@ -529,6 +529,8 @@ async function getChatMessages(phone, amount = 10, lastMessageId = null) {
  *   PUT /update-webhook-status      → MessageStatusCallback (READ/RECEIVED/PLAYED)
  *   PUT /update-webhook-disconnected → disconnect event
  *   PUT /update-webhook-connected   → connect event
+ *   PUT /update-webhook-chat-presence → PresenceChatCallback (digitando, online)
+ *   PUT /update-notify-sent-by-me   → ativa envio ao webhook de mensagens enviadas pelo CELULAR (espelhamento)
  */
 async function configureWebhooks(appUrl) {
   const basePath = getBasePath()
@@ -542,25 +544,27 @@ async function configureWebhooks(appUrl) {
   const webhookToken = String(process.env.ZAPI_WEBHOOK_TOKEN || '').trim()
   const tokenSuffix  = webhookToken ? `?token=${encodeURIComponent(webhookToken)}` : ''
 
-  const mainUrl    = `${base}/webhooks/zapi${tokenSuffix}`
-  const statusUrl  = `${base}/webhooks/zapi/status${tokenSuffix}`
-  const connUrl    = `${base}/webhooks/zapi/connection${tokenSuffix}`
+  const mainUrl     = `${base}/webhooks/zapi${tokenSuffix}`
+  const statusUrl   = `${base}/webhooks/zapi/status${tokenSuffix}`
+  const connUrl     = `${base}/webhooks/zapi/connection${tokenSuffix}`
+  const presenceUrl = `${base}/webhooks/zapi/presence${tokenSuffix}`
 
   // Cada entrada tem candidatos de endpoint (Z-API mudou nomes entre versões).
   // Tentamos todos em sequência e paramos no primeiro que retornar 2xx.
   const configs = [
-    { label: 'received',     value: mainUrl,    candidates: ['/update-webhook-received', '/update-on-message-received'] },
-    { label: 'delivery',     value: mainUrl,    candidates: ['/update-webhook-delivery', '/update-on-message-delivery'] },
-    { label: 'status',       value: statusUrl,  candidates: ['/update-on-message-status', '/update-webhook-status', '/update-webhook-on-message-status'] },
-    { label: 'disconnected', value: connUrl,    candidates: ['/update-webhook-disconnected', '/update-on-disconnected'] },
-    { label: 'connected',    value: connUrl,    candidates: ['/update-webhook-connected', '/update-on-connected'] },
+    { label: 'received',     value: mainUrl,     candidates: ['/update-webhook-received', '/update-on-message-received'] },
+    { label: 'delivery',     value: mainUrl,     candidates: ['/update-webhook-delivery', '/update-on-message-delivery'] },
+    { label: 'status',       value: statusUrl,   candidates: ['/update-on-message-status', '/update-webhook-status', '/update-webhook-on-message-status'] },
+    { label: 'disconnected', value: connUrl,     candidates: ['/update-webhook-disconnected', '/update-on-disconnected'] },
+    { label: 'connected',    value: connUrl,     candidates: ['/update-webhook-connected', '/update-on-connected'] },
+    { label: 'presence',     value: presenceUrl, candidates: ['/update-webhook-chat-presence', '/update-on-chat-presence'] },
   ]
 
-  const putWebhook = async (endpoint, value) => {
+  const putBody = async (endpoint, body) => {
     const res = await fetch(`${basePath}${endpoint}`, {
       method: 'PUT',
       headers: getHeaders(),
-      body: JSON.stringify({ value })
+      body: JSON.stringify(body)
     })
     return res.ok || res.status === 204 || res.status === 200
   }
@@ -570,7 +574,9 @@ async function configureWebhooks(appUrl) {
     let ok = false
     for (const endpoint of candidates) {
       try {
-        ok = await putWebhook(endpoint, value)
+        // Received: enviar notifySentByMe no mesmo body (doc Z-API: opcional em value + notifySentByMe)
+        const body = label === 'received' ? { value, notifySentByMe: true } : { value }
+        ok = await putBody(endpoint, body)
         if (ok) break
       } catch (_) {}
     }
@@ -580,16 +586,34 @@ async function configureWebhooks(appUrl) {
     results.push({ label, ok })
   }
 
+  // Fallback: endpoint dedicado para notifySentByMe (caso a API não aceite no body do received)
+  try {
+    const notifyOk = await putBody('/update-notify-sent-by-me', { notifySentByMe: true })
+    if (notifyOk) {
+      console.log('✅ Z-API notifySentByMe ativado: mensagens enviadas pelo celular serão enviadas ao webhook')
+    }
+    results.push({ label: 'notifySentByMe', ok: notifyOk })
+  } catch (e) {
+    console.warn('⚠️ Z-API notifySentByMe: erro ao chamar API:', e?.message || e)
+    results.push({ label: 'notifySentByMe', ok: false })
+  }
+
   const allOk = results.every(r => r.ok)
   if (allOk) {
-    console.log('✅ Z-API webhooks configurados automaticamente:', mainUrl)
+    console.log('✅ Z-API webhooks configurados automaticamente')
+    console.log(`   Mensagens (recebido + enviado por mim): ${mainUrl}`)
     console.log(`   Status (leitura/entrega): ${statusUrl}`)
+    console.log(`   Conexão: ${connUrl} | Presença (digitando): ${presenceUrl}`)
   } else {
     const failed = results.filter(r => !r.ok).map(r => r.label)
     console.warn('⚠️ Z-API configureWebhooks: configure manualmente no painel Z-API:')
     console.warn(`   "Ao receber" + "Ao enviar": ${mainUrl}`)
     console.warn(`   "Receber status da mensagem": ${statusUrl}`)
     console.warn(`   "Ao conectar" + "Ao desconectar": ${connUrl}`)
+    console.warn(`   "Status do chat" (presença/digitando): ${presenceUrl}`)
+    if (failed.includes('notifySentByMe')) {
+      console.warn('   Ative "Notificar mensagens enviadas por mim" para espelhar mensagens do celular.')
+    }
     if (failed.length) console.warn('   Itens não configurados via API:', failed.join(', '))
   }
   return results

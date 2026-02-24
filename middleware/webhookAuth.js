@@ -45,7 +45,10 @@ function rejectWrongZapiInstance(req, res, next) {
   if (!expected) return next()
   const incoming = req.body?.instanceId != null ? String(req.body.instanceId).trim() : ''
   // se não veio instanceId, não bloqueia (alguns eventos não mandam)
-  if (incoming && incoming !== expected) {
+  if (!incoming) return next()
+  // Aceita: igual OU payload com ID longo que começa com o esperado (ex.: .env "3EE81ED18926" e payload "3EE81ED189267279CB31EA4E62592653")
+  const match = incoming === expected || incoming.startsWith(expected) || expected.startsWith(incoming)
+  if (!match) {
     console.warn('[Z-API] Webhook ignorado: instanceId diferente do .env', { incoming: incoming.slice(0, 20), expected: expected.slice(0, 20) })
     return res.status(200).json({ ok: true })
   }

@@ -128,14 +128,16 @@ app.use(
 // Health check
 app.get('/health', (req, res) => res.json({ ok: true }))
 
-// Endpoint temporário de diagnóstico de ambiente (remover após validação em produção)
-app.get('/debug/env', (req, res) => {
-  res.json({
-    APP_URL: process.env.APP_URL || null,
-    NODE_ENV: process.env.NODE_ENV || null,
-    WEBHOOK_TOKEN_SET: !!String(process.env.ZAPI_WEBHOOK_TOKEN || '').trim(),
+// Diagnóstico de ambiente — apenas em desenvolvimento (nunca expor em produção)
+if (process.env.NODE_ENV !== 'production') {
+  app.get('/debug/env', (req, res) => {
+    res.json({
+      APP_URL: process.env.APP_URL || null,
+      NODE_ENV: process.env.NODE_ENV || null,
+      WEBHOOK_TOKEN_SET: !!String(process.env.ZAPI_WEBHOOK_TOKEN || '').trim(),
+    })
   })
-})
+}
 
 const webhookRoutes = require('./routes/webhookRoutes')
 const webhookZapiRoutes = require('./routes/webhookZapiRoutes')

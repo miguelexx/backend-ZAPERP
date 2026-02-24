@@ -2,16 +2,19 @@
  * Webhook Z-API: recebe mensagens do Z-API (POST /webhooks/zapi).
  * TUDO que a Z-API enviar para esta URL deve chegar no sistema: texto, imagem, áudio,
  * vídeo, documento, figurinha, reação, localização, contato, PTV, templates, botões, listas.
- * Suporta conversas individuais e de GRUPO. Mensagens enviadas por nós (fromMe) não são
- * gravadas de novo (evita eco); apenas atualiza ultima_atividade.
+ * Suporta conversas individuais e de GRUPO.
+ * Espelhamento WhatsApp Web: mensagens enviadas pelo celular (fromMe) TAMBÉM são
+ * persistidas e emitidas via WebSocket; idempotência por (conversa_id, whatsapp_id).
  */
 
 const supabase = require('../config/supabase')
 const { getProvider } = require('../services/providers')
 const { syncContactFromZapi } = require('../services/zapiSyncContact')
 const { normalizePhoneBR, possiblePhonesBR, normalizeGroupIdForStorage } = require('../helpers/phoneHelper')
+const { incrementarUnreadParaConversa } = require('./chatController')
 
 const COMPANY_ID = Number(process.env.WEBHOOK_COMPANY_ID || 1)
+const WHATSAPP_DEBUG = String(process.env.WHATSAPP_DEBUG || '').toLowerCase() === 'true'
 
 /** Detecta se o payload é de um grupo (remoteJid @g.us, isGroup ou tipo grupo). */
 function isGroupPayload(payload) {
@@ -105,6 +108,7 @@ function looksLikeBRPhoneDigits(digits) {
  * Em alguns eventos (principalmente fromMe em multi-device), a Z-API pode preencher `chatId`/`phone`
  * com um identificador (ex.: "lid") que não é o telefone do contato.
  * Esta função escolhe o melhor candidato que realmente pareça um número/JID.
+ * Para fromMe: prioriza destino (to, recipientPhone) para espelhamento WhatsApp Web.
  */
 function pickBestPhone(payload, { fromMe } = {}) {
   // Importante: NÃO usar senderName/chatName como candidato de telefone.
@@ -123,26 +127,40 @@ function pickBestPhone(payload, { fromMe } = {}) {
     ''
   const myTail = tail11(myDigits)
 
-  // candidates mais prováveis do "chat" (destinatário) vêm primeiro
-  const candidates = [
-    payload.key?.remoteJid,
-    payload.remoteJid,
-    payload.chat?.id,
-    payload.chatId,
-    payload.to,
-    payload.toPhone,
-    payload.recipientPhone,
-    payload.recipient,
-    payload.destination,
-    payload.phone,
-    // campos de "from" só ajudam quando NÃO é fromMe
-    ...(fromMe ? [] : [payload.senderPhone, payload.from, payload.author, payload.participantPhone, payload.participant]),
-  ]
-    .filter((v) => v != null)
-    .map(clean)
-    .filter(Boolean)
+  // Para fromMe: destino da mensagem (contato) vem PRIMEIRO para espelhamento correto
+  const candidates = fromMe
+    ? [
+        payload.to,
+        payload.toPhone,
+        payload.recipientPhone,
+        payload.recipient,
+        payload.destination,
+        payload.key?.remoteJid,
+        payload.remoteJid,
+        payload.chat?.id,
+        payload.chatId,
+        payload.phone,
+      ]
+    : [
+        payload.key?.remoteJid,
+        payload.remoteJid,
+        payload.chat?.id,
+        payload.chatId,
+        payload.to,
+        payload.toPhone,
+        payload.recipientPhone,
+        payload.recipient,
+        payload.destination,
+        payload.phone,
+        payload.senderPhone,
+        payload.from,
+        payload.author,
+        payload.participantPhone,
+        payload.participant,
+      ]
+  const list = [...(candidates || [])].filter((v) => v != null).map(clean).filter(Boolean)
 
-  for (const c of candidates) {
+  for (const c of list) {
     // grupo: preserve o JID completo
     if (c.endsWith('@g.us')) return c
 
@@ -155,7 +173,14 @@ function pickBestPhone(payload, { fromMe } = {}) {
     return digits
   }
 
-  // Se nada parece telefone/JID real, não inventar (evita salvar IDs/timestamps como telefone)
+  // Espelhamento: fromMe sem número BR válido — aceitar primeiro JID (ex.: LID) para não descartar mensagem
+  if (fromMe && list.length > 0) {
+    const first = list[0]
+    if (first.includes('@')) return first // JID; normalização no extractMessage/controller
+    const d = first.replace(/\D/g, '')
+    if (d.length >= 10) return d
+  }
+
   return ''
 }
 
@@ -286,12 +311,15 @@ function extractMessage(payload) {
   }
   if (!texto) texto = '(mídia)'
 
+  // Espelhamento: fromMe com JID (ex.: LID) que não normaliza para BR — manter raw para lookup/criação de conversa
+  const normalized = isGroup ? (groupChatId ? normalizeGroupIdForStorage(groupChatId) : '') : normalizePhoneBR(phone)
+  const phoneFinal = normalized || (fromMe && phone && String(phone).includes('@') ? String(phone).trim() : normalized)
   return {
     // IMPORTANTE:
     // - Em alguns bancos, conversas.telefone é varchar(20). IDs de grupo como "120363...-group" estouram esse limite.
     // - Para garantir que TODAS as mensagens entrem no sistema, normalizamos grupos para apenas dígitos.
     // Se o payload indicou grupo mas não conseguimos achar o ID do grupo, NÃO roteia para privado.
-    phone: isGroup ? (groupChatId ? normalizeGroupIdForStorage(groupChatId) : '') : normalizePhoneBR(phone),
+    phone: phoneFinal,
     texto,
     fromMe,
     messageId,
@@ -323,18 +351,52 @@ function getPayloads(body) {
   if (body.data && Array.isArray(body.data) && body.data.length > 0) return body.data
   if (body.data && typeof body.data === 'object' && !Array.isArray(body.data)) return [body.data]
   if (body.value && typeof body.value === 'object') return [body.value]
+  if (body.messages && Array.isArray(body.messages) && body.messages.length > 0) return body.messages
+  if (body.message && typeof body.message === 'object') return [body.message]
   return [body]
 }
 
-/** GET /webhooks/zapi — teste de conectividade; mostra a URL que deve ser configurada no painel Z-API. */
+/** Fallback para obter telefone/JID do destino em mensagens fromMe quando pickBestPhone retorna vazio. */
+function getFallbackPhoneForFromMe(payload) {
+  if (!payload || typeof payload !== 'object') return ''
+  const raw =
+    payload.to ??
+    payload.recipientPhone ??
+    payload.toPhone ??
+    payload.recipient ??
+    payload.destination ??
+    payload.key?.remoteJid ??
+    payload.remoteJid ??
+    payload.chatId ??
+    payload.chat?.id ??
+    payload.phone ??
+    ''
+  const s = String(raw).trim()
+  if (!s) return ''
+  const norm = normalizePhoneBR(s)
+  return norm || s
+}
+
+/** GET /webhooks/zapi — teste de conectividade; retorna todas as URLs para configurar no painel Z-API. */
 exports.testarZapi = (req, res) => {
-  const base = process.env.APP_URL || `${req.protocol}://${req.get('host')}`
-  const url = `${base.replace(/\/$/, '')}/webhooks/zapi`
+  const base = (process.env.APP_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '')
+  const prefix = `${base}/webhooks/zapi`
+  const urls = {
+    mensagens: prefix,
+    status: `${prefix}/status`,
+    connection: `${prefix}/connection`,
+    presence: `${prefix}/presence`
+  }
   return res.status(200).json({
     ok: true,
-    message: 'Configure no painel Z-API (Opções → Editar instância) o webhook "Recebido" com a URL abaixo.',
-    url,
-    metodo: 'POST'
+    message: 'Configure no painel Z-API (Opções → Editar instância) cada webhook com a URL correspondente. Método: POST.',
+    urls,
+    webhooks: [
+      { nome: 'Ao receber / Ao enviar', url: urls.mensagens, tipo: 'ReceivedCallback + DeliveryCallback' },
+      { nome: 'Receber status da mensagem', url: urls.status, tipo: 'MessageStatusCallback (READ/RECEIVED/PLAYED)' },
+      { nome: 'Ao conectar / Ao desconectar', url: urls.connection, tipo: 'connected / disconnected' },
+      { nome: 'Status do chat (digitando)', url: urls.presence, tipo: 'PresenceChatCallback' }
+    ]
   })
 }
 
@@ -408,9 +470,23 @@ exports.receberZapi = async (req, res) => {
         payload?.ack != null ? String(payload.ack).trim() : String(payload?.status ?? '').trim()
       const payloadTypeOrStatus = payloadType || payloadStatusRaw.toLowerCase()
 
+      if (WHATSAPP_DEBUG) {
+        const msgId = payload?.messageId ?? payload?.zaapId ?? payload?.id ?? payload?.key?.id
+        console.log('[Z-API] webhook payload', {
+          eventType: payloadType || '(vazio)',
+          messageId: msgId ? String(msgId).slice(0, 32) : null,
+          from: (payload?.senderPhone ?? payload?.from ?? payload?.phone ?? '').toString().slice(-14),
+          to: (payload?.to ?? payload?.recipientPhone ?? '').toString().slice(-14),
+          chatId: (payload?.chatId ?? payload?.key?.remoteJid ?? '').toString().slice(0, 36),
+          fromMe: Boolean(payload?.fromMe ?? payload?.key?.fromMe),
+          hasText: !!(payload?.text?.message ?? payload?.message ?? payload?.body)
+        })
+      }
+
       // ─── MessageStatusCallback: READ / RECEIVED / PLAYED (ticks ✓✓ e azul) ───
       // Z-API envia este tipo quando o destinatário recebe ou lê a mensagem.
       // Se o payload tiver conteúdo de mensagem (text.message, message, body), é ReceivedCallback — NÃO status.
+      const payloadFromMe = Boolean(payload?.fromMe ?? payload?.key?.fromMe)
       const hasMessageContent =
         (payload?.text?.message != null && String(payload.text.message).trim() !== '') ||
         (payload?.message != null && String(payload.message).trim() !== '') ||
@@ -418,7 +494,9 @@ exports.receberZapi = async (req, res) => {
         payload?.image != null || payload?.imageUrl != null ||
         payload?.audio != null || payload?.audioUrl != null ||
         payload?.video != null || payload?.videoUrl != null ||
-        payload?.document != null || payload?.documentUrl != null
+        payload?.document != null || payload?.documentUrl != null ||
+        // Mensagem enviada pelo celular (espelhamento): tratar como conteúdo para gravar no sistema
+        (payloadFromMe && (payload?.messageId || payload?.zaapId || (Array.isArray(payload?.ids) && payload.ids.length > 0)))
 
       const STATUS_VALUE_KEYWORDS = ['read', 'received', 'played']
       const isStatusCallback =
@@ -537,7 +615,7 @@ exports.receberZapi = async (req, res) => {
       }
 
       const extracted = extractMessage(payload)
-      const {
+      let {
         phone,
         texto,
         fromMe,
@@ -559,7 +637,22 @@ exports.receberZapi = async (req, res) => {
         chatPhoto
       } = extracted
 
+      // Espelhamento: fromMe sem phone (ex.: Z-API envia só nosso número) — usar destino da mensagem
+      if (!phone && fromMe) {
+        const fallback = getFallbackPhoneForFromMe(payload)
+        if (fallback) phone = fallback
+      }
       if (!phone) {
+        if (WHATSAPP_DEBUG) {
+          console.log('[Z-API] DROPPED: no phone', {
+            eventType: payload?.type ?? payload?.event,
+            messageId: extracted.messageId ?? payload?.messageId ?? payload?.zaapId,
+            fromMe,
+            to: (payload?.to ?? '').toString().slice(-12),
+            chatId: (payload?.chatId ?? payload?.key?.remoteJid ?? '').toString().slice(0, 30),
+            keys: Object.keys(payload || {}).slice(0, 20)
+          })
+        }
         console.warn('⚠️ Z-API webhook: Sem phone no payload. Keys:', Object.keys(payload || {}).join(', '))
         continue
       }
@@ -846,9 +939,9 @@ exports.receberZapi = async (req, res) => {
     // fromMe: também persiste (você pediu "todas as mensagens"). O índice único por (conversa_id, whatsapp_id)
     // evita duplicatas quando o provider reenviar o mesmo evento.
 
-    // Não gravar evento que virou só "(mídia)" sem mídia real (ex.: eco/confirmação ao enviar msg pelo CRM)
+    // Não gravar evento que virou só "(mídia)" sem mídia real — exceto fromMe (espelhamento: mensagem enviada pelo celular deve aparecer)
     const soPlaceholderMidia = texto === '(mídia)' && !imageUrl && !documentUrl && !audioUrl && !videoUrl && !stickerUrl && !locationUrl
-    if (soPlaceholderMidia) {
+    if (soPlaceholderMidia && !fromMe) {
       await supabase
         .from('conversas')
         .update({ ultima_atividade: new Date().toISOString() })
@@ -856,6 +949,7 @@ exports.receberZapi = async (req, res) => {
         .eq('company_id', company_id)
       return res.status(200).json({ ok: true, conversa_id, skip: 'placeholderMidia' })
     }
+    if (soPlaceholderMidia && fromMe) texto = '(mensagem)' // espelhamento: mostrar algo no chat
 
     // Histórico do celular: ao criar uma conversa nova, buscar as últimas mensagens do chat na Z-API
     // e inserir no banco (sem duplicar pelo whatsapp_id).
@@ -941,6 +1035,7 @@ exports.receberZapi = async (req, res) => {
       }
     }
 
+    // Idempotência: chave única (conversa_id, whatsapp_id) — reenvio do webhook não duplica
     if (whatsappIdStr) {
       const { data: existente } = await supabase
         .from('mensagens')
@@ -1251,24 +1346,35 @@ exports.receberZapi = async (req, res) => {
       } catch (_) {}
 
       console.log('✅ Mensagem salva no sistema:', { conversa_id, mensagem_id: mensagemSalva.id, phone: phone?.slice(-6), direcao: fromMe ? 'out' : 'in' })
+      if (fromMe) console.log('📤 Espelhamento: mensagem enviada pelo celular registrada no sistema')
     }
 
-    // 4) Realtime: nova_mensagem + contato_atualizado quando sync Z-API terminar
+    // Mensagem de entrada: incrementa unread no banco para todos os usuários (igual WhatsApp; refetch da lista já vem com contador certo)
+    if (!fromMe) {
+      await incrementarUnreadParaConversa(company_id, conversa_id)
+    }
+
+    // 4) Realtime: nova_mensagem + atualizar_conversa — sempre para empresa (lista + chat em tempo real, espelho WhatsApp)
     const io = req.app.get('io')
     if (io && mensagemSalva) {
-      // 🔒 Privacidade por setor:
-      // - Se a conversa tem departamento_id, NÃO enviar "nova_mensagem" para a empresa inteira.
-      // - Enviar para room do departamento + room da conversa.
-      const rooms = [`conversa_${conversa_id}`]
+      const rooms = [`conversa_${conversa_id}`, `empresa_${company_id}`]
       if (departamento_id != null) rooms.push(`departamento_${departamento_id}`)
-      else rooms.push(`empresa_${company_id}`)
-
-      io.to(rooms).emit('nova_mensagem', mensagemSalva)
-
-      const roomList = departamento_id != null ? `departamento_${departamento_id}` : `empresa_${company_id}`
-      // Emite os dois nomes de evento para compatibilidade total com o frontend
-      io.to(roomList).emit('atualizar_conversa', { id: conversa_id })
-      io.to(roomList).emit('conversa_atualizada', { id: conversa_id })
+      // Status canônico para os ticks no frontend (sent, delivered, read, pending, erro, played)
+      const rawStatus = (mensagemSalva.status_mensagem ?? mensagemSalva.status ?? '').toString().toLowerCase()
+      const canon = rawStatus === 'enviada' || rawStatus === 'enviado' ? 'sent' : (rawStatus === 'entregue' || rawStatus === 'received' ? 'delivered' : (rawStatus || (fromMe ? 'sent' : 'delivered')))
+      const payload = {
+        ...mensagemSalva,
+        conversa_id: mensagemSalva.conversa_id ?? conversa_id,
+        status: canon,
+        status_mensagem: canon
+      }
+      io.to(rooms).emit('nova_mensagem', payload)
+      io.to(`empresa_${company_id}`).emit('atualizar_conversa', { id: conversa_id })
+      io.to(`empresa_${company_id}`).emit('conversa_atualizada', { id: conversa_id })
+      if (departamento_id != null) {
+        io.to(`departamento_${departamento_id}`).emit('atualizar_conversa', { id: conversa_id })
+        io.to(`departamento_${departamento_id}`).emit('conversa_atualizada', { id: conversa_id })
+      }
     }
 
     if (pendingContactSync && io) {
@@ -1408,9 +1514,8 @@ exports.statusZapi = async (req, res) => {
       if (msg) {
         updated++
         if (io) {
-          io.to(`empresa_${msg.company_id}`)
-            .to(`conversa_${msg.conversa_id}`)
-            .emit('status_mensagem', { mensagem_id: msg.id, conversa_id: msg.conversa_id, status: statusNorm })
+          const payload = { mensagem_id: msg.id, conversa_id: msg.conversa_id, status: statusNorm }
+          io.to(`empresa_${msg.company_id}`).to(`conversa_${msg.conversa_id}`).emit('status_mensagem', payload)
         }
         console.log('[DEBUG] /webhooks/zapi/status resultado:', { status: statusNorm, mensagem_id: msg.id, conversa_id: msg.conversa_id, whatsapp_id: idStr.slice(0, 20) + '…' })
       } else {
@@ -1623,10 +1728,35 @@ exports.connectionZapi = async (req, res) => {
 }
 
 /**
- * POST /webhooks/zapi/presence — presença do chat (digitando, online). Responde 200.
+ * POST /webhooks/zapi/presence — PresenceChatCallback (digitando, online, gravando).
+ * Payload Z-API: type, phone, status (UNAVAILABLE|AVAILABLE|COMPOSING|RECORDING|PAUSED), lastSeen, instanceId.
  */
 exports.presenceZapi = async (req, res) => {
   try {
+    const body = req.body || {}
+    const phoneRaw = body.phone ? String(body.phone).trim() : ''
+    const status = body.status ? String(body.status).trim().toUpperCase() : ''
+    const lastSeen = body.lastSeen != null ? body.lastSeen : null
+
+    if (phoneRaw && status) {
+      const company_id = COMPANY_ID
+      const phones = possiblePhonesBR(phoneRaw)
+      let q = supabase
+        .from('conversas')
+        .select('id')
+        .eq('company_id', company_id)
+        .limit(1)
+      if (phones.length > 0) q = q.in('telefone', phones)
+      else q = q.eq('telefone', normalizePhoneBR(phoneRaw) || phoneRaw.replace(/\D/g, ''))
+      const { data: rows } = await q
+      const conversa_id = Array.isArray(rows) && rows[0]?.id ? rows[0].id : null
+      const io = req.app.get('io')
+      if (io && conversa_id) {
+        io.to(`empresa_${company_id}`)
+          .to(`conversa_${conversa_id}`)
+          .emit('presence', { conversa_id, phone: phoneRaw, status, lastSeen })
+      }
+    }
     return res.status(200).json({ ok: true })
   } catch (e) {
     return res.status(200).json({ ok: true })

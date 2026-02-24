@@ -132,6 +132,53 @@ async function obterUnreadMap({ company_id, usuario_id }) {
   return map
 }
 
+/**
+ * Incrementa unread para todos os usuários da empresa quando chega mensagem de entrada (in).
+ * Roda em background para não bloquear o webhook. Sincroniza com a lista ao recarregar.
+ */
+async function incrementarUnreadParaConversa(company_id, conversa_id) {
+  try {
+    const { data: usuarios } = await supabase
+      .from('usuarios')
+      .select('id')
+      .eq('company_id', Number(company_id))
+      .eq('ativo', true)
+    if (!Array.isArray(usuarios) || usuarios.length === 0) return
+
+    const { data: existentes } = await supabase
+      .from('conversa_unreads')
+      .select('id, usuario_id, unread_count')
+      .eq('company_id', Number(company_id))
+      .eq('conversa_id', Number(conversa_id))
+    const byUser = new Map((existentes || []).map((r) => [Number(r.usuario_id), r]))
+
+    for (const u of usuarios) {
+      const uid = Number(u.id)
+      const row = byUser.get(uid)
+      if (row) {
+        await supabase
+          .from('conversa_unreads')
+          .update({
+            unread_count: Number(row.unread_count || 0) + 1,
+            updated_at: new Date().toISOString()
+          })
+          .eq('id', row.id)
+      } else {
+        await supabase.from('conversa_unreads').insert({
+          company_id: Number(company_id),
+          conversa_id: Number(conversa_id),
+          usuario_id: uid,
+          unread_count: 1
+        })
+      }
+    }
+  } catch (e) {
+    console.warn('incrementarUnreadParaConversa:', e?.message || e)
+  }
+}
+
+exports.incrementarUnreadParaConversa = incrementarUnreadParaConversa
+
 // =====================================================
 // AUX: registrar atendimentos
 // =====================================================
