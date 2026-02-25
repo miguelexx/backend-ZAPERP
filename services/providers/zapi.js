@@ -587,9 +587,9 @@ async function configureWebhooks(appUrl) {
   }
 
   // Fallback: endpoint dedicado para notifySentByMe (caso a API não aceite no body do received)
-  // Envia também a URL (algumas versões da Z-API exigem o campo "value" com o endpoint de destino)
+  // Z-API v2: { value: true } é o formato correto para o toggle (boolean, não URL).
   try {
-    const notifyOk = await putBody('/update-notify-sent-by-me', { value: mainUrl, notifySentByMe: true })
+    const notifyOk = await putBody('/update-notify-sent-by-me', { value: true })
     if (notifyOk) {
       console.log('✅ Z-API notifySentByMe ativado: mensagens enviadas pelo celular serão enviadas ao webhook')
     }
