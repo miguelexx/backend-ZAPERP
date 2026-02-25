@@ -560,6 +560,7 @@ exports.receberZapi = async (req, res) => {
         payload?.audio != null || payload?.audioUrl != null ||
         payload?.video != null || payload?.videoUrl != null ||
         payload?.document != null || payload?.documentUrl != null ||
+        payload?.sticker != null || payload?.stickerUrl != null ||
         // Mensagem enviada pelo celular (espelhamento): tratar como conteúdo para gravar no sistema
         (payloadFromMe && (payload?.messageId || payload?.zaapId || (Array.isArray(payload?.ids) && payload.ids.length > 0)))
 
@@ -597,12 +598,45 @@ exports.receberZapi = async (req, res) => {
       //   deixa cair no pipeline normal (extractMessage → findOrCreateConversation → insert).
       if (payloadTypeOrStatus === 'deliverycallback') {
         if (payloadFromMe && (hasMessageContent || payload?.messageId || payload?.zaapId)) {
-          if (WHATSAPP_DEBUG) {
-            const msgId = payload?.messageId ?? payload?.zaapId ?? null
-            console.log('[Z-API] DeliveryCallback fromMe tratado como MENSAGEM', {
-              messageId: msgId ? String(msgId).slice(0, 32) : null,
-              phone: (payload?.phone || '').toString().slice(-12),
-            })
+          const delivMsgId = payload?.messageId ?? payload?.zaapId ?? null
+          const hasRealContent =
+            (payload?.text?.message != null && String(payload.text.message).trim() !== '') ||
+            (payload?.message != null && String(payload.message).trim() !== '') ||
+            (payload?.body != null && String(payload.body).trim() !== '') ||
+            payload?.image != null || payload?.imageUrl != null ||
+            payload?.audio != null || payload?.audioUrl != null ||
+            payload?.video != null || payload?.videoUrl != null ||
+            payload?.document != null || payload?.documentUrl != null ||
+            payload?.sticker != null || payload?.stickerUrl != null
+
+          console.log('[Z-API] DeliveryCallback fromMe:', {
+            messageId: delivMsgId ? String(delivMsgId).slice(0, 32) : null,
+            phone: (payload?.phone || '').toString().slice(-12),
+            hasRealContent
+          })
+
+          // Otimização: se não tem conteúdo real, verificar se a mensagem já foi salva pelo
+          // ReceivedCallback. Se sim, apenas atualizar status e emitir socket — evitar criar
+          // placeholder desnecessário e re-executar todo o pipeline.
+          if (!hasRealContent && delivMsgId) {
+            const { data: existByWaId } = await supabase
+              .from('mensagens')
+              .update({ status: 'sent' })
+              .eq('company_id', COMPANY_ID)
+              .eq('whatsapp_id', String(delivMsgId))
+              .select('id, conversa_id, company_id')
+              .maybeSingle()
+            if (existByWaId?.id) {
+              const io = req.app.get('io')
+              if (io) {
+                io.to(`empresa_${existByWaId.company_id}`)
+                  .to(`conversa_${existByWaId.conversa_id}`)
+                  .emit('status_mensagem', { mensagem_id: existByWaId.id, conversa_id: existByWaId.conversa_id, status: 'sent' })
+              }
+              lastResult = { ok: true, delivery: true, fromMe: true, messageId: String(delivMsgId) }
+              continue
+            }
+            // Mensagem ainda não existe → segue para pipeline para registrar (espelhamento)
           }
           // NÃO faz continue → segue para pipeline de mensagem abaixo.
         } else {
@@ -718,15 +752,15 @@ exports.receberZapi = async (req, res) => {
         chatPhoto
       } = extracted
 
-      // ── Log de diagnóstico (sempre para fromMe, debug mode para os demais) ──
-      if (WHATSAPP_DEBUG || (fromMe && !phone)) {
+      // ── Log de diagnóstico (sempre para fromMe; debug mode para os demais) ──
+      if (WHATSAPP_DEBUG || fromMe) {
         console.log('[Z-API] resolveKey', {
           type: payload?.type ?? payload?.event ?? '(sem type)',
           fromMe,
           isGroup,
-          phone_raw: (payload?.phone ?? '').toString().slice(-12),
+          phone_raw: (payload?.phone ?? '').toString().slice(-14),
           connectedPhone: (payload?.connectedPhone ?? '').toString().slice(-6),
-          resolvedKey: phone ? ('...' + String(phone).slice(-8)) : '(vazio)',
+          resolvedKey: phone ? ('...' + String(phone).slice(-8)) : '(vazio — será DROPPED)',
           messageId: messageId ? String(messageId).slice(0, 20) : null,
           debugReason,
         })
@@ -1039,7 +1073,33 @@ exports.receberZapi = async (req, res) => {
         .eq('whatsapp_id', whatsappIdStr)
         .maybeSingle()
       if (existente) {
-        mensagemSalva = existente
+        // Se a mensagem salva tem texto placeholder (DeliveryCallback chegou antes do ReceivedCallback)
+        // e o webhook atual traz conteúdo real → atualizar com o texto/mídia corretos.
+        const savedTexto = String(existente.texto || '')
+        const isPlaceholder = savedTexto === '(mensagem)' || savedTexto === '(mídia)'
+        const textoReal = texto && texto !== '(mensagem)' && texto !== '(mídia)' ? texto : null
+        if (isPlaceholder && textoReal) {
+          const upFields = { texto: textoReal }
+          if (imageUrl && !existente.url) { upFields.url = imageUrl; upFields.tipo = 'imagem' }
+          else if (documentUrl && !existente.url) { upFields.url = documentUrl; upFields.tipo = 'arquivo' }
+          else if (audioUrl && !existente.url) { upFields.url = audioUrl; upFields.tipo = 'audio' }
+          else if (videoUrl && !existente.url) { upFields.url = videoUrl; upFields.tipo = 'video' }
+          else if (stickerUrl && !existente.url) { upFields.url = stickerUrl; upFields.tipo = 'sticker' }
+          try {
+            const { data: updMsg } = await supabase
+              .from('mensagens')
+              .update(upFields)
+              .eq('id', existente.id)
+              .select('*')
+              .single()
+            mensagemSalva = updMsg || existente
+            if (WHATSAPP_DEBUG) console.log('[Z-API] idempotência: placeholder atualizado com conteúdo real', existente.id)
+          } catch (_) {
+            mensagemSalva = existente
+          }
+        } else {
+          mensagemSalva = existente
+        }
       }
     }
 
@@ -1284,7 +1344,7 @@ exports.receberZapi = async (req, res) => {
           let fallbackPayload = {
             conversa_id,
             texto: texto || '(mensagem)',
-            direcao: 'in',
+            direcao: fromMe ? 'out' : 'in',
             company_id,
             whatsapp_id: whatsappIdStr || null,
             criado_em
