@@ -106,98 +106,117 @@ function looksLikeBRPhoneDigits(digits) {
 }
 
 /**
- * Em alguns eventos (principalmente fromMe em multi-device), a Z-API pode preencher `chatId`/`phone`
- * com um identificador (ex.: "lid") que não é o telefone do contato.
- * Esta função escolhe o melhor candidato que realmente pareça um número/JID.
- * Para fromMe: prioriza destino (to, recipientPhone) para espelhamento WhatsApp Web.
+ * Resolve a chave de conversa a partir de um payload Z-API.
+ *
+ * Contrato Z-API (fonte: documentação oficial):
+ *   - connectedPhone = MEU número (instância). NUNCA usar como destino de conversa.
+ *   - phone          = "Número de telefone, ou do grupo que enviou a mensagem." = chave do chat.
+ *     Para fromMe=true: phone ainda é o contato/grupo (não meu número).
+ *   - isGroup        = true → grupo; participantPhone = remetente dentro do grupo.
+ *   - @lid           = identificador interno do WhatsApp Multi-Device. NUNCA é phone real.
+ *
+ * @param {object} payload
+ * @returns {{ key: string, isGroup: boolean, participantPhone: string, debugReason: string }}
  */
-function pickBestPhone(payload, { fromMe } = {}) {
-  // Importante: NÃO usar senderName/chatName como candidato de telefone.
-  // Em mensagens fromMe, `payload.phone`/`senderPhone` podem ser o NOSSO número (instância).
-  const clean = (v) => (v == null ? '' : String(v).trim())
-  const getDigits = (v) => clean(v).replace(/\D/g, '')
-  const tail11 = (d) => String(d || '').replace(/\D/g, '').slice(-11)
+function resolveConversationKeyFromZapi(payload) {
+  const clean    = (v) => (v == null ? '' : String(v).trim())
+  const digits   = (v) => clean(v).replace(/\D/g, '')
+  const tail11   = (v) => digits(v).slice(-11)
+  const isLidJid = (v) => { const s = clean(v); return s.endsWith('@lid') || s.endsWith('@broadcast') }
+  const isGrpJid = (v) => { const s = clean(v); return s.endsWith('@g.us') || s.includes('-group') }
 
-  // tenta descobrir "meu" telefone para não confundir em fromMe=true
-  const myDigits =
-    getDigits(payload.senderPhone) ||
-    getDigits(payload.ownerPhone) ||
-    getDigits(payload.instancePhone) ||
-    getDigits(payload.phoneNumber) ||
-    getDigits(payload.me?.phone) ||
-    ''
-  const myTail = tail11(myDigits)
-
-  // Para fromMe: destino da mensagem (contato) vem PRIMEIRO para espelhamento correto.
-  // PRIORIDADE: campos que contêm o número do CONTATO (não o nosso número).
-  // key.remoteJid = JID do chat (sempre o contato para conversas individuais, formato @s.whatsapp.net).
-  const candidates = fromMe
-    ? [
-        // JID do chat é a fonte mais confiável para fromMe (contém o phone do contato em @s.whatsapp.net)
-        payload.key?.remoteJid,
-        payload.remoteJid,
-        payload.chat?.id,
-        payload.chatId,
-        // Campos to/recipient podem ser LID em multi-device — tentamos mas vêm depois do JID
-        payload.to,
-        payload.toPhone,
-        payload.recipientPhone,
-        payload.recipient,
-        payload.destination,
-        payload.phone,
-      ]
-    : [
-        payload.key?.remoteJid,
-        payload.remoteJid,
-        payload.chat?.id,
-        payload.chatId,
-        payload.to,
-        payload.toPhone,
-        payload.recipientPhone,
-        payload.recipient,
-        payload.destination,
-        payload.phone,
-        payload.senderPhone,
-        payload.from,
-        payload.author,
-        payload.participantPhone,
-        payload.participant,
-      ]
-  const list = [...(candidates || [])].filter((v) => v != null).map(clean).filter(Boolean)
-
-  for (const c of list) {
-    // grupo: preserve o JID completo
-    if (c.endsWith('@g.us')) return c
-
-    // JID individual (@s.whatsapp.net): extrair apenas os dígitos do telefone
-    const jidPhone = c.includes('@') && !c.endsWith('@g.us') && !c.endsWith('@lid') && !c.endsWith('@broadcast')
-      ? c.replace(/@[^@]+$/, '').replace(/\D/g, '')
-      : c.replace(/\D/g, '')
-
-    // LID (@lid): identificador interno do WhatsApp, NÃO é número de telefone — pular
-    if (c.endsWith('@lid')) continue
-
-    const digits = jidPhone
-    if (!looksLikeBRPhoneDigits(digits)) continue
-
-    // fromMe: se o candidato bate com meu número (tail), ignore e tente o próximo
-    if (fromMe && myTail && tail11(digits) === myTail) continue
-
-    return digits
-  }
-
-  // Fallback: para fromMe, aceitar JID @s.whatsapp.net mesmo que não seja BR (número internacional)
-  // NÃO aceitar @lid (LID é identificador interno, não phone real) nem números sem @
-  if (fromMe) {
-    for (const c of list) {
-      if (c.includes('@s.whatsapp.net')) {
-        const jidPhone = c.replace('@s.whatsapp.net', '').replace(/\D/g, '')
-        if (jidPhone.length >= 10 && (myTail ? tail11(jidPhone) !== myTail : true)) return jidPhone
-      }
+  // ─── Grupo ───
+  const isGroup = isGroupPayload(payload)
+  if (isGroup) {
+    const groupKey = pickGroupChatId(payload)
+    const key = groupKey ? normalizeGroupIdForStorage(groupKey) : ''
+    const participantPhone = digits(payload.participantPhone ?? payload.participant ?? payload.author ?? payload.key?.participant ?? '')
+    return {
+      key,
+      isGroup: true,
+      participantPhone,
+      debugReason: key ? `group via pickGroupChatId (${groupKey})` : 'group but no groupChatId found — drop'
     }
   }
 
-  return ''
+  // ─── Individual ───
+  // Meu número (connectedPhone tem prioridade máxima como referência do "eu")
+  const myDigits =
+    digits(payload.connectedPhone) ||
+    digits(payload.senderPhone)    ||
+    digits(payload.ownerPhone)     ||
+    digits(payload.instancePhone)  ||
+    digits(payload.phoneNumber)    ||
+    digits(payload.me?.phone)      ||
+    ''
+  const myTail = myDigits ? tail11(myDigits) : ''
+  const isMyNumber = (d) => myTail && d && tail11(d) === myTail
+
+  // Normaliza um candidato bruto → telefone BR ou ''
+  const normCandidate = (raw) => {
+    if (!raw) return ''
+    const s = clean(raw)
+    if (!s) return ''
+    if (isLidJid(s)) return ''   // @lid = nunca é phone
+    if (isGrpJid(s)) return ''   // @g.us em contexto individual = ignorar
+    // Extrair dígitos de JID (@s.whatsapp.net) ou valor cru
+    const d = s.includes('@') ? s.replace(/@[^@]+$/, '').replace(/\D/g, '') : digits(s)
+    if (!d) return ''
+    if (!looksLikeBRPhoneDigits(d)) return ''
+    if (isMyNumber(d)) return ''  // NUNCA usar meu próprio número como contato
+    return normalizePhoneBR(d) || d
+  }
+
+  // ─── Fonte primária: payload.phone (contrato Z-API: é SEMPRE o número do chat) ───
+  const phonePrimary = normCandidate(payload.phone)
+  if (phonePrimary) {
+    return { key: phonePrimary, isGroup: false, participantPhone: '', debugReason: 'from payload.phone (Z-API primary)' }
+  }
+
+  // ─── Fontes secundárias (em ordem de confiabilidade) ───
+  const fromMe = Boolean(payload.fromMe ?? payload.key?.fromMe)
+  const fallbackSources = [
+    [payload.key?.remoteJid, 'key.remoteJid'],
+    [payload.remoteJid,      'remoteJid'],
+    [payload.chatId,         'chatId'],
+    [payload.chat?.id,       'chat.id'],
+    ...(fromMe ? [
+      [payload.to,             'to'],
+      [payload.toPhone,        'toPhone'],
+      [payload.recipientPhone, 'recipientPhone'],
+      [payload.recipient,      'recipient'],
+      [payload.destination,    'destination'],
+    ] : []),
+  ]
+
+  for (const [raw, fieldName] of fallbackSources) {
+    const norm = normCandidate(raw)
+    if (norm) {
+      return { key: norm, isGroup: false, participantPhone: '', debugReason: `fallback ${fieldName}` }
+    }
+  }
+
+  // ─── Sem destino válido ───
+  const candidateSummary = {
+    phone: payload.phone,
+    remoteJid: payload.key?.remoteJid ?? payload.remoteJid,
+    chatId: payload.chatId,
+    to: payload.to,
+    connectedPhone: myDigits ? `...${myDigits.slice(-6)}` : null,
+    fromMe,
+  }
+  return {
+    key: '',
+    isGroup: false,
+    participantPhone: '',
+    debugReason: `drop — no valid dest. candidates: ${JSON.stringify(candidateSummary)}`
+  }
+}
+
+// pickBestPhone mantido apenas para retrocompatibilidade (wrapper do resolveConversationKeyFromZapi)
+function pickBestPhone(payload, { fromMe } = {}) {
+  const { key } = resolveConversationKeyFromZapi(payload)
+  return key
 }
 
 function extractMessage(payload) {
@@ -205,23 +224,11 @@ function extractMessage(payload) {
     return { phone: '', texto: '(vazio)', fromMe: false, messageId: null, criado_em: new Date().toISOString(), type: 'text', imageUrl: null, documentUrl: null, audioUrl: null, videoUrl: null, stickerUrl: null, locationUrl: null, fileName: null, isGroup: false, participantPhone: null, senderName: null, nomeGrupo: null, senderPhoto: null, chatPhoto: null }
   }
   const fromMe = Boolean(payload.fromMe ?? payload.key?.fromMe)
-  // Grupo x individual: se for grupo, a chave da conversa é SEMPRE o id do grupo (nunca o participante).
-  const isGroup = isGroupPayload(payload)
-  const groupChatId = isGroup ? pickGroupChatId(payload) : ''
-  const rawType = String(payload.type || payload.event || payload.msgType || '').toLowerCase()
-  const isReceivedCallbackType = rawType === 'receivedcallback' || rawType === 'received_callback'
-  let phone = ''
-  if (isGroup) {
-    phone = groupChatId
-  } else if (isReceivedCallbackType && payload.phone != null && String(payload.phone).trim() !== '') {
-    // Documentação Z-API: em ReceivedCallback, `phone` é "Número de telefone, ou do grupo que enviou a mensagem."
-    // Isso vale tanto para fromMe=false (mensagem recebida) quanto para fromMe=true (notifySentByMe).
-    // Usar sempre esse campo garante que o mesmo chat (contato) use SEMPRE o mesmo número.
-    phone = String(payload.phone).trim()
-  } else {
-    // Outros tipos de eventos (delivery/status/etc.) usam heurística padrão.
-    phone = pickBestPhone(payload, { fromMe })
-  }
+
+  // Resolver chave de conversa usando resolveConversationKeyFromZapi (contrato Z-API).
+  // - isGroup: true → grupo (key = id normalizado do grupo)
+  // - isGroup: false → individual (key = telefone BR canônico do CONTATO, nunca do connectedPhone)
+  const { key: phone, isGroup, participantPhone: partPhoneResolved, debugReason } = resolveConversationKeyFromZapi(payload)
   const messageId = payload.messageId ?? payload.id ?? payload.instanceId ?? payload.key?.id ?? null
   const ts = payload.timestamp ?? payload.momment ?? payload.t ?? payload.reaction?.time ?? Date.now()
 
@@ -311,7 +318,9 @@ function extractMessage(payload) {
   if (stickerUrl && typeof stickerUrl === 'object') stickerUrl = stickerUrl.url ?? stickerUrl.stickerUrl ?? null
   const locationUrl = payload.location?.url ?? payload.location?.thumbnailUrl ?? null
 
-  const participantPhone = payload.participantPhone ?? payload.participant ?? payload.author ?? payload.key?.participant ?? null
+  // participantPhone: remetente dentro do grupo (só relevante para grupos; usamos o valor resolvido por resolveConversationKeyFromZapi + o bruto do payload como fallback)
+  const participantPhoneRaw = partPhoneResolved ||
+    String(payload.participantPhone ?? payload.participant ?? payload.author ?? payload.key?.participant ?? '').replace(/\D/g, '')
   const senderName = payload.senderName ?? payload.chatName ?? payload.sender?.name ?? payload.pushName ?? null
   const senderPhoto = payload.senderPhoto ?? payload.photo ?? payload.sender?.photo ?? null
   const chatPhoto = payload.chatPhoto ?? payload.groupPicture ?? payload.groupPhoto ?? null
@@ -340,31 +349,13 @@ function extractMessage(payload) {
   }
   if (!texto) texto = '(mídia)'
 
-  // Normalização final do telefone.
-  // LID (@lid) nunca é usado como identificador de conversa — descartado.
-  // JID @s.whatsapp.net → extrair só os dígitos do telefone.
-  const normalized = isGroup
-    ? (groupChatId ? normalizeGroupIdForStorage(groupChatId) : '')
-    : normalizePhoneBR(phone)
-
-  let phoneFinal = normalized
-  if (!phoneFinal && phone) {
-    const ph = String(phone).trim()
-    if (ph.includes('@s.whatsapp.net')) {
-      // JID individual legítimo: extrair dígitos
-      phoneFinal = ph.replace('@s.whatsapp.net', '').replace(/\D/g, '')
-    } else if (ph.endsWith('@g.us')) {
-      phoneFinal = ph // grupo
-    }
-    // @lid e qualquer outro identificador interno: descartar (phoneFinal fica vazio)
-  }
+  // phone já foi resolvido por resolveConversationKeyFromZapi: é a chave canônica do chat.
+  // Para grupos com id muito longo (>20 chars), normalizeGroupIdForStorage já truncou para dígitos.
+  // Não há mais processamento adicional de LID/JID aqui.
 
   return {
-    // IMPORTANTE:
-    // - Em alguns bancos, conversas.telefone é varchar(20). IDs de grupo como "120363...-group" estouram esse limite.
-    // - Para garantir que TODAS as mensagens entrem no sistema, normalizamos grupos para apenas dígitos.
-    // Se o payload indicou grupo mas não conseguimos achar o ID do grupo, NÃO roteia para privado.
-    phone: phoneFinal,
+    phone,      // chave canônica do chat (contato ou grupo) — nunca o nosso próprio número
+    debugReason, // motivo de seleção (usado no log de debug abaixo)
     texto,
     fromMe,
     messageId,
@@ -378,7 +369,7 @@ function extractMessage(payload) {
     locationUrl,
     fileName,
     isGroup,
-    participantPhone: participantPhone ? String(participantPhone).replace(/\D/g, '') : null,
+    participantPhone: participantPhoneRaw || null,
     senderName: senderName ? String(senderName).trim() : null,
     nomeGrupo: (isGroup && (payload.chatName ?? payload.groupName ?? payload.subject)) ? String(payload.chatName ?? payload.groupName ?? payload.subject).trim() : null,
     senderPhoto: senderPhoto && String(senderPhoto).trim() ? String(senderPhoto).trim() : null,
@@ -599,8 +590,22 @@ exports.receberZapi = async (req, res) => {
         continue
       }
 
-      // DeliveryCallback (on-message-send): retorno do envio, não é uma mensagem para salvar.
+      // DeliveryCallback (on-message-send)
+      // Regra:
+      // - Se for apenas ACK/status (sem conteúdo e sem fromMe), trata como status e NÃO grava nova mensagem.
+      // - Se vier de notifySentByMe (fromMe=true) COM messageId, tratamos como MENSAGEM:
+      //   deixa cair no pipeline normal (extractMessage → findOrCreateConversation → insert).
       if (payloadTypeOrStatus === 'deliverycallback') {
+        if (payloadFromMe && (hasMessageContent || payload?.messageId || payload?.zaapId)) {
+          if (WHATSAPP_DEBUG) {
+            const msgId = payload?.messageId ?? payload?.zaapId ?? null
+            console.log('[Z-API] DeliveryCallback fromMe tratado como MENSAGEM', {
+              messageId: msgId ? String(msgId).slice(0, 32) : null,
+              phone: (payload?.phone || '').toString().slice(-12),
+            })
+          }
+          // NÃO faz continue → segue para pipeline de mensagem abaixo.
+        } else {
         const company_id = COMPANY_ID
         const phoneDestRaw = payload?.phone ?? payload?.to ?? payload?.destination ?? ''
         const phoneDest = normalizePhoneBR(phoneDestRaw) || String(phoneDestRaw || '').replace(/\D/g, '')
@@ -687,10 +692,12 @@ exports.receberZapi = async (req, res) => {
         lastResult = { ok: true, delivery: true, messageId: String(messageId) }
         continue
       }
+      }
 
       const extracted = extractMessage(payload)
       let {
         phone,
+        debugReason,
         texto,
         fromMe,
         messageId,
@@ -711,29 +718,23 @@ exports.receberZapi = async (req, res) => {
         chatPhoto
       } = extracted
 
-      if (!phone && fromMe) {
-        const fallback = getFallbackPhoneForFromMe(payload)
-        if (fallback) phone = fallback
+      // ── Log de diagnóstico (sempre para fromMe, debug mode para os demais) ──
+      if (WHATSAPP_DEBUG || (fromMe && !phone)) {
+        console.log('[Z-API] resolveKey', {
+          type: payload?.type ?? payload?.event ?? '(sem type)',
+          fromMe,
+          isGroup,
+          phone_raw: (payload?.phone ?? '').toString().slice(-12),
+          connectedPhone: (payload?.connectedPhone ?? '').toString().slice(-6),
+          resolvedKey: phone ? ('...' + String(phone).slice(-8)) : '(vazio)',
+          messageId: messageId ? String(messageId).slice(0, 20) : null,
+          debugReason,
+        })
       }
+
       if (!phone) {
-        if (WHATSAPP_DEBUG) {
-          console.log('[Z-API] DROPPED: no phone', {
-            eventType: payload?.type ?? payload?.event,
-            messageId: extracted.messageId ?? payload?.messageId ?? payload?.zaapId,
-            fromMe,
-            to: (payload?.to ?? '').toString().slice(-12),
-            chatId: (payload?.chatId ?? payload?.key?.remoteJid ?? '').toString().slice(0, 30),
-            keys: Object.keys(payload || {}).slice(0, 20)
-          })
-        }
-        console.warn('⚠️ Z-API webhook: Sem phone no payload. Keys:', Object.keys(payload || {}).join(', '))
+        console.warn('⚠️ [Z-API] DROPPED — phone não resolvido.', debugReason)
         continue
-      }
-      if (!isGroup) {
-        const d = String(phone || '').replace(/\D/g, '')
-        if (!(d.startsWith('55') && (d.length === 12 || d.length === 13))) {
-          console.warn('⚠️ Z-API webhook: phone não é BR padrão. Usado=', phone, '— verificar se é número internacional válido.')
-        }
       }
 
     const company_id = COMPANY_ID
