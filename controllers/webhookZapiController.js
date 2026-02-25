@@ -147,58 +147,68 @@ function resolveConversationKeyFromZapi(payload) {
   }
 
   // ─── Individual ───
-  // Meu número (connectedPhone tem prioridade máxima como referência do "eu").
-  // IMPORTANTE: senderPhone NÃO é usado para derivar "meu número" pois em mensagens
-  // fromMe=true o senderPhone pode ser o número do CONTATO (destinatário), não o meu.
   const fromMeHint = Boolean(payload.fromMe ?? payload.key?.fromMe)
+
+  // Meu número: connectedPhone tem prioridade máxima.
+  // Para fromMe=true, senderPhone NÃO é usado pois pode ser o CONTATO em algumas versões da Z-API.
   const myDigits =
     digits(payload.connectedPhone) ||
     digits(payload.ownerPhone)     ||
     digits(payload.instancePhone)  ||
     digits(payload.phoneNumber)    ||
     digits(payload.me?.phone)      ||
-    // senderPhone como fallback SOMENTE para mensagens recebidas (fromMe=false)
     (!fromMeHint ? digits(payload.senderPhone) : '') ||
     ''
   const myTail = myDigits ? tail11(myDigits) : ''
   const isMyNumber = (d) => myTail && d && tail11(d) === myTail
 
-  // Normaliza um candidato bruto → telefone ou ''
-  const normCandidate = (raw, { allowNonBR = false } = {}) => {
+  // Extrai dígitos de um campo raw (JID, número puro ou formato misto)
+  const extractDigits = (raw) => {
     if (!raw) return ''
     const s = clean(raw)
-    if (!s) return ''
-    if (isLidJid(s)) return ''   // @lid = nunca é phone
-    if (isGrpJid(s)) return ''   // @g.us em contexto individual = ignorar
-    // Extrair dígitos de JID (@s.whatsapp.net) ou valor cru
+    if (!s || isLidJid(s) || isGrpJid(s)) return ''
     const d = s.includes('@') ? s.replace(/@[^@]+$/, '').replace(/\D/g, '') : digits(s)
-    if (!d || d.length < 8) return ''
-    // Filtro BR: se allowNonBR=false, exige formato brasileiro (55 + DDD + 8/9 dígitos ou só DDD+8/9)
+    return (d && d.length >= 8) ? d : ''
+  }
+
+  // Normaliza candidato → telefone armazenável ou ''
+  // skipMyNumber: usado no último recurso onde queremos log mas não usar meu número
+  const normCandidate = (raw, { allowNonBR = false, skipMyNumber = true } = {}) => {
+    const d = extractDigits(raw)
+    if (!d) return ''
     if (!allowNonBR && !looksLikeBRPhoneDigits(d)) return ''
-    if (isMyNumber(d)) return ''  // NUNCA usar meu próprio número como contato
+    if (skipMyNumber && isMyNumber(d)) return ''
     return normalizePhoneBR(d) || d
   }
 
-  // ─── Fonte primária: payload.phone (contrato Z-API: é SEMPRE o número do chat) ───
+  // ─── Fonte primária: payload.phone ───────────────────────────────────────────
+  // Z-API contrato: phone = número do CHAT (contato ou grupo).
+  // Para fromMe=true: phone é o DESTINATÁRIO (contato para quem você enviou).
   const phonePrimary = normCandidate(payload.phone)
   if (phonePrimary) {
     return { key: phonePrimary, isGroup: false, participantPhone: '', debugReason: 'from payload.phone (Z-API primary)' }
   }
 
-  // ─── Fontes secundárias (em ordem de confiabilidade) ───
-  const fromMe = Boolean(payload.fromMe ?? payload.key?.fromMe)
+  // ─── Fontes secundárias ───────────────────────────────────────────────────
+  const fromMe = fromMeHint
   const fallbackSources = [
-    [payload.key?.remoteJid, 'key.remoteJid'],
-    [payload.remoteJid,      'remoteJid'],
-    [payload.chatId,         'chatId'],
-    [payload.chat?.id,       'chat.id'],
+    [payload.key?.remoteJid,  'key.remoteJid'],
+    [payload.remoteJid,       'remoteJid'],
+    [payload.chatId,          'chatId'],
+    [payload.chat?.id,        'chat.id'],
+    // Para fromMe=true: recipiente é o contato
     ...(fromMe ? [
       [payload.to,             'to'],
       [payload.toPhone,        'toPhone'],
       [payload.recipientPhone, 'recipientPhone'],
       [payload.recipient,      'recipient'],
       [payload.destination,    'destination'],
-    ] : []),
+      // senderPhone em fromMe=true pode ser o contato em algumas versões Z-API
+      [payload.senderPhone,    'senderPhone (fromMe fallback)'],
+    ] : [
+      // Para fromMe=false: senderPhone = quem enviou (o contato)
+      [payload.senderPhone,    'senderPhone'],
+    ]),
   ]
 
   for (const [raw, fieldName] of fallbackSources) {
@@ -208,20 +218,16 @@ function resolveConversationKeyFromZapi(payload) {
     }
   }
 
-  // ─── Último recurso para fromMe: aceita número não-BR se for o único candidato disponível ───
-  if (fromMe) {
-    const lastResortSources = [
-      [payload.phone,           'phone (non-BR last resort)'],
-      [payload.key?.remoteJid,  'key.remoteJid (non-BR last resort)'],
-      [payload.chatId,          'chatId (non-BR last resort)'],
-      [payload.to,              'to (non-BR last resort)'],
-      [payload.toPhone,         'toPhone (non-BR last resort)'],
-    ]
-    for (const [raw, fieldName] of lastResortSources) {
-      const norm = normCandidate(raw, { allowNonBR: true })
-      if (norm) {
-        return { key: norm, isGroup: false, participantPhone: '', debugReason: `last resort ${fieldName}` }
-      }
+  // ─── Último recurso: aceita número não-BR ────────────────────────────────
+  const lastResortAll = [
+    payload.phone, payload.key?.remoteJid, payload.chatId,
+    payload.to, payload.toPhone, payload.recipientPhone,
+    payload.senderPhone, payload.chat?.id,
+  ]
+  for (const raw of lastResortAll) {
+    const norm = normCandidate(raw, { allowNonBR: true })
+    if (norm) {
+      return { key: norm, isGroup: false, participantPhone: '', debugReason: `last resort non-BR (${raw})` }
     }
   }
 
@@ -822,7 +828,24 @@ exports.receberZapi = async (req, res) => {
       }
 
       if (!phone) {
-        console.warn('⚠️ [Z-API] DROPPED — phone não resolvido.', debugReason)
+        // Log SEMPRE do payload completo para diagnóstico — crítico para entender o que Z-API envia
+        console.warn('⚠️ [Z-API] DROPPED — phone não resolvido:', debugReason)
+        console.warn('⚠️ [Z-API] DROPPED — payload completo (diagnóstico):', JSON.stringify({
+          type: payload?.type,
+          fromMe: payload?.fromMe,
+          phone: payload?.phone,
+          senderPhone: payload?.senderPhone,
+          connectedPhone: payload?.connectedPhone,
+          chatId: payload?.chatId,
+          remoteJid: payload?.remoteJid,
+          to: payload?.to,
+          toPhone: payload?.toPhone,
+          recipientPhone: payload?.recipientPhone,
+          'key.remoteJid': payload?.key?.remoteJid,
+          isGroup: payload?.isGroup,
+          messageId: payload?.messageId,
+          status: payload?.status,
+        }))
         continue
       }
 
