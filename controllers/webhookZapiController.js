@@ -210,41 +210,14 @@ function extractMessage(payload) {
   const groupChatId = isGroup ? pickGroupChatId(payload) : ''
   const rawType = String(payload.type || payload.event || payload.msgType || '').toLowerCase()
   const isReceivedCallbackType = rawType === 'receivedcallback' || rawType === 'received_callback'
-  const getDigits = (v) => String(v || '').replace(/\D/g, '')
-  const connectedDigits = getDigits(payload.connectedPhone)
-
   let phone = ''
   if (isGroup) {
-    // Grupo: a identidade da conversa é o próprio id do grupo.
     phone = groupChatId
-  } else if (isReceivedCallbackType) {
-    // Eventos ReceivedCallback (documentação Z-API).
-    if (fromMe) {
-      // Mensagem enviada PELO celular/instância.
-      // Objetivo: descobrir o telefone do CONTATO, nunca o nosso.
-
-      // 1) Tenta participantePhone (nos exemplos Z-API ele traz o número do contato em PTV/anúncios).
-      const partDigits = getDigits(payload.participantPhone ?? payload.participant ?? null)
-      if (looksLikeBRPhoneDigits(partDigits)) {
-        phone = partDigits
-      } else {
-        // 2) Usa payload.phone se for diferente do connectedPhone e parecer BR.
-        const phoneDigits = getDigits(payload.phone)
-        if (looksLikeBRPhoneDigits(phoneDigits) && (!connectedDigits || phoneDigits !== connectedDigits)) {
-          phone = phoneDigits
-        } else {
-          // 3) Fallback para heurística geral.
-          phone = pickBestPhone(payload, { fromMe: true })
-        }
-      }
-    } else {
-      // Mensagem RECEBIDA do contato: phone já é "número de telefone ou do grupo que enviou a mensagem".
-      if (payload.phone != null && String(payload.phone).trim() !== '') {
-        phone = String(payload.phone).trim()
-      } else {
-        phone = pickBestPhone(payload, { fromMe: false })
-      }
-    }
+  } else if (isReceivedCallbackType && payload.phone != null && String(payload.phone).trim() !== '') {
+    // Documentação Z-API: em ReceivedCallback, `phone` é "Número de telefone, ou do grupo que enviou a mensagem."
+    // Isso vale tanto para fromMe=false (mensagem recebida) quanto para fromMe=true (notifySentByMe).
+    // Usar sempre esse campo garante que o mesmo chat (contato) use SEMPRE o mesmo número.
+    phone = String(payload.phone).trim()
   } else {
     // Outros tipos de eventos (delivery/status/etc.) usam heurística padrão.
     phone = pickBestPhone(payload, { fromMe })
