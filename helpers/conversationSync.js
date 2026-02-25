@@ -8,14 +8,41 @@ const { normalizePhoneBR, possiblePhonesBR, phoneKeyBR } = require('./phoneHelpe
 
 /**
  * Retorna telefone canônico para armazenamento (sempre o mesmo formato por número).
+ * Rejeita LIDs (identificadores internos do WhatsApp multi-device) que não são telefones.
  * @param {string} phone
  * @returns {string}
  */
 function getCanonicalPhone(phone) {
   if (!phone) return ''
   const s = String(phone).trim()
+
+  // Grupos: preservar JID completo
   if (s.endsWith('@g.us')) return s
-  return normalizePhoneBR(s) || s.replace(/\D/g, '')
+
+  // LID (@lid): identificador interno do WhatsApp — NUNCA usar como telefone
+  if (s.endsWith('@lid') || s.endsWith('@broadcast')) {
+    console.warn('[getCanonicalPhone] LID detectado e rejeitado:', s)
+    return ''
+  }
+
+  // JID individual @s.whatsapp.net → extrair dígitos do telefone
+  const phoneStr = s.includes('@s.whatsapp.net') ? s.replace('@s.whatsapp.net', '') : s
+
+  // Tentar normalização BR primeiro (resultado canônico preferido)
+  const norm = normalizePhoneBR(phoneStr)
+  if (norm) return norm
+
+  // Fallback: apenas dígitos, mas rejeitar números claramente inválidos como telefone:
+  // - Mais de 13 dígitos (max BR: 55 + 2 DDD + 9 + 8 = 13 dígitos)
+  // - Começa com 55 e tem comprimento correto: 12 ou 13 dígitos
+  const digits = phoneStr.replace(/\D/g, '')
+  if (digits.length > 13) {
+    console.warn('[getCanonicalPhone] Número muito longo para ser BR (possível LID):', digits)
+    return ''
+  }
+  if (digits.length < 8) return ''
+
+  return digits
 }
 
 /**

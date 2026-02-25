@@ -128,18 +128,22 @@ function pickBestPhone(payload, { fromMe } = {}) {
     ''
   const myTail = tail11(myDigits)
 
-  // Para fromMe: destino da mensagem (contato) vem PRIMEIRO para espelhamento correto
+  // Para fromMe: destino da mensagem (contato) vem PRIMEIRO para espelhamento correto.
+  // PRIORIDADE: campos que contêm o número do CONTATO (não o nosso número).
+  // key.remoteJid = JID do chat (sempre o contato para conversas individuais, formato @s.whatsapp.net).
   const candidates = fromMe
     ? [
+        // JID do chat é a fonte mais confiável para fromMe (contém o phone do contato em @s.whatsapp.net)
+        payload.key?.remoteJid,
+        payload.remoteJid,
+        payload.chat?.id,
+        payload.chatId,
+        // Campos to/recipient podem ser LID em multi-device — tentamos mas vêm depois do JID
         payload.to,
         payload.toPhone,
         payload.recipientPhone,
         payload.recipient,
         payload.destination,
-        payload.key?.remoteJid,
-        payload.remoteJid,
-        payload.chat?.id,
-        payload.chatId,
         payload.phone,
       ]
     : [
@@ -165,7 +169,15 @@ function pickBestPhone(payload, { fromMe } = {}) {
     // grupo: preserve o JID completo
     if (c.endsWith('@g.us')) return c
 
-    const digits = c.replace(/\D/g, '')
+    // JID individual (@s.whatsapp.net): extrair apenas os dígitos do telefone
+    const jidPhone = c.includes('@') && !c.endsWith('@g.us') && !c.endsWith('@lid') && !c.endsWith('@broadcast')
+      ? c.replace(/@[^@]+$/, '').replace(/\D/g, '')
+      : c.replace(/\D/g, '')
+
+    // LID (@lid): identificador interno do WhatsApp, NÃO é número de telefone — pular
+    if (c.endsWith('@lid')) continue
+
+    const digits = jidPhone
     if (!looksLikeBRPhoneDigits(digits)) continue
 
     // fromMe: se o candidato bate com meu número (tail), ignore e tente o próximo
@@ -174,12 +186,15 @@ function pickBestPhone(payload, { fromMe } = {}) {
     return digits
   }
 
-  // Espelhamento: fromMe sem número BR válido — aceitar primeiro JID (ex.: LID) para não descartar mensagem
-  if (fromMe && list.length > 0) {
-    const first = list[0]
-    if (first.includes('@')) return first // JID; normalização no extractMessage/controller
-    const d = first.replace(/\D/g, '')
-    if (d.length >= 10) return d
+  // Fallback: para fromMe, aceitar JID @s.whatsapp.net mesmo que não seja BR (número internacional)
+  // NÃO aceitar @lid (LID é identificador interno, não phone real) nem números sem @
+  if (fromMe) {
+    for (const c of list) {
+      if (c.includes('@s.whatsapp.net')) {
+        const jidPhone = c.replace('@s.whatsapp.net', '').replace(/\D/g, '')
+        if (jidPhone.length >= 10 && (myTail ? tail11(jidPhone) !== myTail : true)) return jidPhone
+      }
+    }
   }
 
   return ''
@@ -324,9 +339,25 @@ function extractMessage(payload) {
   }
   if (!texto) texto = '(mídia)'
 
-  // Espelhamento: fromMe com JID (ex.: LID) que não normaliza para BR — manter raw para lookup/criação de conversa
-  const normalized = isGroup ? (groupChatId ? normalizeGroupIdForStorage(groupChatId) : '') : normalizePhoneBR(phone)
-  const phoneFinal = normalized || (fromMe && phone && String(phone).includes('@') ? String(phone).trim() : normalized)
+  // Normalização final do telefone.
+  // LID (@lid) nunca é usado como identificador de conversa — descartado.
+  // JID @s.whatsapp.net → extrair só os dígitos do telefone.
+  const normalized = isGroup
+    ? (groupChatId ? normalizeGroupIdForStorage(groupChatId) : '')
+    : normalizePhoneBR(phone)
+
+  let phoneFinal = normalized
+  if (!phoneFinal && phone) {
+    const ph = String(phone).trim()
+    if (ph.includes('@s.whatsapp.net')) {
+      // JID individual legítimo: extrair dígitos
+      phoneFinal = ph.replace('@s.whatsapp.net', '').replace(/\D/g, '')
+    } else if (ph.endsWith('@g.us')) {
+      phoneFinal = ph // grupo
+    }
+    // @lid e qualquer outro identificador interno: descartar (phoneFinal fica vazio)
+  }
+
   return {
     // IMPORTANTE:
     // - Em alguns bancos, conversas.telefone é varchar(20). IDs de grupo como "120363...-group" estouram esse limite.
@@ -650,7 +681,45 @@ exports.receberZapi = async (req, res) => {
         chatPhoto
       } = extracted
 
-      // Espelhamento: fromMe sem phone (ex.: Z-API envia só nosso número) — usar destino da mensagem
+      // Espelhamento: fromMe sem phone válido — tentar extrair o número do CONTATO de outros campos.
+      // NUNCA criar conversa com LID ou identificador interno do WhatsApp como telefone.
+      if (fromMe && !isGroup) {
+        const normPhone = normalizePhoneBR(phone || '')
+        if (!normPhone) {
+          // phone inválido (LID ou vazio): tentar extrair o número real do contato
+          const candidatos = [
+            // key.remoteJid = JID do chat = número do contato em formato @s.whatsapp.net
+            payload.key?.remoteJid,
+            payload.remoteJid,
+            payload.chatId,
+            payload.chat?.id,
+            payload.phone,
+            getFallbackPhoneForFromMe(payload),
+          ]
+          let resolved = ''
+          for (const cand of candidatos) {
+            if (!cand) continue
+            const s = String(cand).trim()
+            // LID (@lid): identificador interno, NÃO é phone — pular sempre
+            if (s.endsWith('@lid') || s.endsWith('@broadcast')) continue
+            // JID individual @s.whatsapp.net → extrair dígitos
+            const digits = s.includes('@') ? s.replace(/@[^@]+$/, '').replace(/\D/g, '') : s.replace(/\D/g, '')
+            const norm = normalizePhoneBR(digits)
+            if (norm) { resolved = norm; break }
+            // número com 10+ dígitos que começa com 55: aceitar
+            if (digits.length >= 10 && digits.startsWith('55')) { resolved = digits; break }
+          }
+          if (resolved) {
+            console.log(`[Z-API] fromMe: phone inválido "${phone}" → resolvido para "${resolved}"`)
+            phone = resolved
+          } else {
+            console.warn(`[Z-API] fromMe: não foi possível resolver phone "${phone}" para número válido. Pulando.`)
+            console.warn('[Z-API] Payload keys:', Object.keys(payload || {}).join(', '))
+            continue
+          }
+        }
+      }
+
       if (!phone && fromMe) {
         const fallback = getFallbackPhoneForFromMe(payload)
         if (fallback) phone = fallback
@@ -672,7 +741,7 @@ exports.receberZapi = async (req, res) => {
       if (!isGroup) {
         const d = String(phone || '').replace(/\D/g, '')
         if (!(d.startsWith('55') && (d.length === 12 || d.length === 13))) {
-          console.warn('⚠️ Z-API webhook: phone não parece BR (possível LID). Usado=', phone, 'keys=', Object.keys(payload || {}).slice(0, 12).join(','))
+          console.warn('⚠️ Z-API webhook: phone não é BR padrão. Usado=', phone, '— verificar se é número internacional válido.')
         }
       }
 
