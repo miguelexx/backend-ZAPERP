@@ -681,45 +681,6 @@ exports.receberZapi = async (req, res) => {
         chatPhoto
       } = extracted
 
-      // Espelhamento: fromMe sem phone válido — tentar extrair o número do CONTATO de outros campos.
-      // NUNCA criar conversa com LID ou identificador interno do WhatsApp como telefone.
-      if (fromMe && !isGroup) {
-        const normPhone = normalizePhoneBR(phone || '')
-        if (!normPhone) {
-          // phone inválido (LID ou vazio): tentar extrair o número real do contato
-          const candidatos = [
-            // key.remoteJid = JID do chat = número do contato em formato @s.whatsapp.net
-            payload.key?.remoteJid,
-            payload.remoteJid,
-            payload.chatId,
-            payload.chat?.id,
-            payload.phone,
-            getFallbackPhoneForFromMe(payload),
-          ]
-          let resolved = ''
-          for (const cand of candidatos) {
-            if (!cand) continue
-            const s = String(cand).trim()
-            // LID (@lid): identificador interno, NÃO é phone — pular sempre
-            if (s.endsWith('@lid') || s.endsWith('@broadcast')) continue
-            // JID individual @s.whatsapp.net → extrair dígitos
-            const digits = s.includes('@') ? s.replace(/@[^@]+$/, '').replace(/\D/g, '') : s.replace(/\D/g, '')
-            const norm = normalizePhoneBR(digits)
-            if (norm) { resolved = norm; break }
-            // número com 10+ dígitos que começa com 55: aceitar
-            if (digits.length >= 10 && digits.startsWith('55')) { resolved = digits; break }
-          }
-          if (resolved) {
-            console.log(`[Z-API] fromMe: phone inválido "${phone}" → resolvido para "${resolved}"`)
-            phone = resolved
-          } else {
-            console.warn(`[Z-API] fromMe: não foi possível resolver phone "${phone}" para número válido. Pulando.`)
-            console.warn('[Z-API] Payload keys:', Object.keys(payload || {}).join(', '))
-            continue
-          }
-        }
-      }
-
       if (!phone && fromMe) {
         const fallback = getFallbackPhoneForFromMe(payload)
         if (fallback) phone = fallback

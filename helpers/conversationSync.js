@@ -8,7 +8,13 @@ const { normalizePhoneBR, possiblePhonesBR, phoneKeyBR } = require('./phoneHelpe
 
 /**
  * Retorna telefone canônico para armazenamento (sempre o mesmo formato por número).
- * Rejeita LIDs (identificadores internos do WhatsApp multi-device) que não são telefones.
+ * Mantém compatibilidade com números já existentes, mas tenta extrair o telefone real
+ * de JIDs (@s.whatsapp.net) e de identificadores especiais como @lid.
+ *
+ * ATENÇÃO: A deduplicação forte (12/13 dígitos BR) é feita por `normalizePhoneBR` /
+ * `possiblePhonesBR`. Aqui o objetivo principal é **nunca perder mensagem**: se não
+ * conseguir normalizar, ainda assim devolve os dígitos disponíveis.
+ *
  * @param {string} phone
  * @returns {string}
  */
@@ -19,28 +25,32 @@ function getCanonicalPhone(phone) {
   // Grupos: preservar JID completo
   if (s.endsWith('@g.us')) return s
 
-  // LID (@lid): identificador interno do WhatsApp — NUNCA usar como telefone
-  if (s.endsWith('@lid') || s.endsWith('@broadcast')) {
-    console.warn('[getCanonicalPhone] LID detectado e rejeitado:', s)
-    return ''
+  // JID individual @s.whatsapp.net → extrair apenas os dígitos do telefone
+  let phoneStr = s
+  if (s.includes('@s.whatsapp.net')) {
+    phoneStr = s.replace('@s.whatsapp.net', '')
   }
 
-  // JID individual @s.whatsapp.net → extrair dígitos do telefone
-  const phoneStr = s.includes('@s.whatsapp.net') ? s.replace('@s.whatsapp.net', '') : s
+  // Identificadores especiais (@lid, @broadcast, etc.): extrair só dígitos
+  if (/@(lid|broadcast)$/i.test(s)) {
+    phoneStr = s.replace(/@[^@]+$/, '')
+  }
 
-  // Tentar normalização BR primeiro (resultado canônico preferido)
+  // 1) Tentar normalização BR (caso de uso principal)
   const norm = normalizePhoneBR(phoneStr)
   if (norm) return norm
 
-  // Fallback: apenas dígitos, mas rejeitar números claramente inválidos como telefone:
-  // - Mais de 13 dígitos (max BR: 55 + 2 DDD + 9 + 8 = 13 dígitos)
-  // - Começa com 55 e tem comprimento correto: 12 ou 13 dígitos
+  // 2) Fallback defensivo: usar apenas dígitos disponíveis.
+  //    Isso garante que nenhuma mensagem seja perdida, mesmo que o provider
+  //    envie identificadores não-BR. A deduplicação por número BR continua
+  //    sendo feita por `possiblePhonesBR`/`phoneKeyBR`.
   const digits = phoneStr.replace(/\D/g, '')
-  if (digits.length > 13) {
-    console.warn('[getCanonicalPhone] Número muito longo para ser BR (possível LID):', digits)
-    return ''
+  if (!digits) return ''
+
+  // Loga quando parecer algo fora do padrão BR (ex.: 14+ dígitos).
+  if (digits.length > 13 || !digits.startsWith('55')) {
+    console.warn('[getCanonicalPhone] Telefone não-BR ou fora do padrão, usando dígitos brutos:', digits)
   }
-  if (digits.length < 8) return ''
 
   return digits
 }
