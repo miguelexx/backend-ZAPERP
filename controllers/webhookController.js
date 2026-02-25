@@ -296,7 +296,30 @@ exports.receberWebhook = async (req, res) => {
       return res.sendStatus(500)
     }
 
-    const conversaRow = Array.isArray(conversasAbertas) && conversasAbertas.length > 0 ? conversasAbertas[0] : null
+    let conversaRow = Array.isArray(conversasAbertas) && conversasAbertas.length > 0 ? conversasAbertas[0] : null
+
+    if (conversasAbertas && conversasAbertas.length > 1) {
+      const canonical = conversasAbertas[0]
+      const others = conversasAbertas.slice(1)
+      const otherIds = others.map((c) => c.id).filter(Boolean)
+      if (canonical?.id && otherIds.length > 0) {
+        try {
+          await supabase.from('mensagens').update({ conversa_id: canonical.id }).in('conversa_id', otherIds)
+          await supabase.from('conversa_tags').update({ conversa_id: canonical.id }).in('conversa_id', otherIds)
+          await supabase.from('atendimentos').update({ conversa_id: canonical.id }).in('conversa_id', otherIds)
+          await supabase.from('historico_atendimentos').update({ conversa_id: canonical.id }).in('conversa_id', otherIds)
+          await supabase.from('conversa_unreads').update({ conversa_id: canonical.id }).in('conversa_id', otherIds)
+          const del = await supabase.from('conversas').delete().in('id', otherIds).eq('company_id', company_id)
+          if (del.error) {
+            await supabase.from('conversas').update({ status_atendimento: 'fechada', lida: true }).in('id', otherIds).eq('company_id', company_id)
+          }
+          console.log('🧹 Meta: conversas duplicadas unificadas:', { canonical: canonical.id, merged: otherIds.length })
+        } catch (e) {
+          console.warn('⚠️ Meta: falha ao unificar conversas duplicadas:', e?.message || e)
+        }
+      }
+      conversaRow = conversasAbertas[0]
+    }
 
     if (conversaRow) {
       conversa_id = conversaRow.id

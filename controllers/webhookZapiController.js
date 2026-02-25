@@ -11,6 +11,7 @@ const supabase = require('../config/supabase')
 const { getProvider } = require('../services/providers')
 const { syncContactFromZapi } = require('../services/zapiSyncContact')
 const { normalizePhoneBR, possiblePhonesBR, normalizeGroupIdForStorage } = require('../helpers/phoneHelper')
+const { getCanonicalPhone } = require('../helpers/conversationSync')
 const { incrementarUnreadParaConversa } = require('./chatController')
 
 const COMPANY_ID = Number(process.env.WEBHOOK_COMPANY_ID || 1)
@@ -750,12 +751,13 @@ exports.receberZapi = async (req, res) => {
             ? (payload.chatName ?? payload.chat?.name ?? null)
             : (payload.senderName ?? payload.chatName ?? payload.chat?.name ?? null)
           const fromPayload = fromPayloadRaw ? String(fromPayloadRaw).trim() : null
+          const telefoneCanonico = getCanonicalPhone(phone) || phone
 
           const { data: novoCliente, error: errNovoCli } = await supabase
             .from('clientes')
             .insert({
-              telefone: phone,
-              nome: fromPayload || phone || null,
+              telefone: telefoneCanonico,
+              nome: fromPayload || telefoneCanonico || null,
               observacoes: null,
               company_id,
               ...(!fromMe && senderPhoto ? { foto_perfil: senderPhoto } : {})
@@ -785,8 +787,8 @@ exports.receberZapi = async (req, res) => {
             const fallbackInsert = await supabase
               .from('clientes')
               .insert({
-                telefone: phone,
-                nome: fromPayload || phone || null,
+                telefone: telefoneCanonico || phone,
+                nome: fromPayload || telefoneCanonico || phone || null,
                 observacoes: null,
                 company_id,
                 ...(!fromMe && senderPhoto ? { foto_perfil: senderPhoto } : {})
@@ -885,8 +887,9 @@ exports.receberZapi = async (req, res) => {
           .eq('company_id', company_id)
       }
     } else {
+      const telefoneConvCanonico = isGroup ? phone : (getCanonicalPhone(phone) || phone)
       const insertConv = {
-        telefone: phone,
+        telefone: telefoneConvCanonico,
         lida: false,
         status_atendimento: 'aberta',
         company_id,

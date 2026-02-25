@@ -2,6 +2,7 @@ const supabase = require('../config/supabase')
 const { getProvider } = require('../services/providers')
 const { isGroupConversation } = require('../helpers/conversaHelper')
 const { normalizePhoneBR, possiblePhonesBR, phoneKeyBR } = require('../helpers/phoneHelper')
+const { deduplicateConversationsByContact, sortConversationsByRecent, getCanonicalPhone } = require('../helpers/conversationSync')
 
 // =====================================================
 // 1) HELPERS (TOPO DO ARQUIVO)
@@ -436,6 +437,10 @@ exports.listarConversas = async (req, res) => {
       }
     })
 
+    // Um contato = uma conversa na lista (evita duplicata 55... vs 11...); conversas mais recentes no topo
+    conversasFormatadas = deduplicateConversationsByContact(conversasFormatadas)
+    conversasFormatadas = sortConversationsByRecent(conversasFormatadas)
+
     // Incluir todos os clientes: quem não tem conversa aparece como "Sem conversa" (clicável para abrir)
     const incluirTodos = incluirTodosClientes === '1' || incluirTodosClientes === 'true' || incluirTodosClientes === 1
     if (incluirTodos) {
@@ -499,6 +504,140 @@ exports.listarConversas = async (req, res) => {
   } catch (err) {
     console.error(err)
     return res.status(500).json({ error: 'Erro ao listar conversas' })
+  }
+}
+
+// HTML mínimo da página "Apagar duplicatas" (botão + chamada à API)
+const MERGE_DUPLICATAS_HTML = `
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Apagar duplicatas</title>
+  <style>
+    body { font-family: system-ui, sans-serif; padding: 1rem; background: #f5f5f5; }
+    .box { background: #fff; border-radius: 8px; padding: 1rem 1.25rem; box-shadow: 0 1px 3px rgba(0,0,0,.08); max-width: 320px; }
+    .box h2 { margin: 0 0 .75rem; font-size: 1rem; font-weight: 600; color: #333; }
+    .box p { margin: 0 0 1rem; font-size: 0.875rem; color: #666; }
+    .btn { background: #25d366; color: #fff; border: none; padding: 0.5rem 1rem; border-radius: 6px; font-size: 0.875rem; cursor: pointer; }
+    .btn:hover { background: #20bd5a; }
+    .btn:disabled { opacity: 0.6; cursor: not-allowed; }
+    .msg { margin-top: 0.75rem; font-size: 0.8125rem; }
+    .msg.ok { color: #0a0; }
+    .msg.err { color: #c00; }
+  </style>
+</head>
+<body>
+  <div class="box">
+    <h2>Conversas duplicadas</h2>
+    <p>Unifica conversas do mesmo contato (mesmo número em formatos diferentes).</p>
+    <button type="button" class="btn" id="btn">Apagar duplicatas</button>
+    <div class="msg" id="msg"></div>
+  </div>
+  <script>
+    (function() {
+      var btn = document.getElementById('btn');
+      var msg = document.getElementById('msg');
+      function getToken() {
+        try {
+          return localStorage.getItem('token') || localStorage.getItem('authToken') || localStorage.getItem('jwt') || '';
+        } catch (e) { return ''; }
+      }
+      function setMsg(text, isErr) {
+        msg.textContent = text || '';
+        msg.className = 'msg' + (text ? (isErr ? ' err' : ' ok') : '');
+      }
+      btn.addEventListener('click', function() {
+        btn.disabled = true;
+        setMsg('');
+        var token = getToken();
+        fetch(window.location.pathname, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + (token || '') }
+        }).then(function(r) {
+          return r.json().then(function(d) { return { ok: r.ok, data: d }; });
+        }).then(function(_) {
+          var res = _.data;
+          if (_.ok) setMsg(res.message || (res.merged ? res.merged + ' unificada(s).' : 'Nenhuma duplicata.'));
+          else setMsg(res.error || 'Erro', true);
+        }).catch(function(e) {
+          setMsg('Erro: ' + (e.message || 'rede'), true);
+        }).finally(function() {
+          btn.disabled = false;
+        });
+      });
+    })();
+  </script>
+</body>
+</html>
+`
+
+// GET /chats/merge-duplicatas — página com botão "Apagar duplicatas" (abrir no navegador)
+exports.paginaMergeDuplicatas = (req, res) => {
+  res.setHeader('Content-Type', 'text/html; charset=utf-8')
+  res.send(MERGE_DUPLICATAS_HTML)
+}
+
+// =====================================================
+// Merge conversas duplicadas (mesmo contato, variantes de telefone)
+// POST /chats/merge-duplicatas — admin only
+// =====================================================
+exports.mergeConversasDuplicadas = async (req, res) => {
+  try {
+    const { company_id } = req.user
+    const cid = Number(company_id)
+
+    const { data: conversas, error: errList } = await supabase
+      .from('conversas')
+      .select('id, telefone, ultima_atividade, criado_em, tipo')
+      .eq('company_id', cid)
+      .neq('status_atendimento', 'fechada')
+      .not('telefone', 'is', null)
+
+    if (errList) return res.status(500).json({ error: errList.message })
+
+    const individuais = (conversas || []).filter((c) => !c.tipo || String(c.tipo).toLowerCase() !== 'grupo')
+    const byKey = new Map()
+    for (const c of individuais) {
+      const key = phoneKeyBR(c.telefone) || String(c.telefone || '').replace(/\D/g, '')
+      if (!key) continue
+      if (!byKey.has(key)) byKey.set(key, [])
+      byKey.get(key).push(c)
+    }
+
+    let merged = 0
+    for (const [, list] of byKey) {
+      if (list.length <= 1) continue
+      list.sort((a, b) => {
+        const ta = new Date(a.ultima_atividade || a.criado_em || 0).getTime()
+        const tb = new Date(b.ultima_atividade || b.criado_em || 0).getTime()
+        if (tb !== ta) return tb - ta
+        return (b.id || 0) - (a.id || 0)
+      })
+      const canonical = list[0]
+      const otherIds = list.slice(1).map((c) => c.id).filter(Boolean)
+      if (otherIds.length === 0) continue
+      try {
+        await supabase.from('mensagens').update({ conversa_id: canonical.id }).in('conversa_id', otherIds)
+        await supabase.from('conversa_tags').update({ conversa_id: canonical.id }).in('conversa_id', otherIds)
+        await supabase.from('atendimentos').update({ conversa_id: canonical.id }).in('conversa_id', otherIds)
+        await supabase.from('historico_atendimentos').update({ conversa_id: canonical.id }).in('conversa_id', otherIds)
+        await supabase.from('conversa_unreads').update({ conversa_id: canonical.id }).in('conversa_id', otherIds)
+        const del = await supabase.from('conversas').delete().in('id', otherIds).eq('company_id', cid)
+        if (del.error) {
+          await supabase.from('conversas').update({ status_atendimento: 'fechada', lida: true }).in('id', otherIds).eq('company_id', cid)
+        }
+        merged += otherIds.length
+      } catch (e) {
+        console.warn('mergeConversasDuplicadas:', e?.message || e)
+      }
+    }
+
+    return res.json({ ok: true, merged, message: merged ? `${merged} conversa(s) duplicada(s) unificada(s).` : 'Nenhuma duplicata encontrada.' })
+  } catch (err) {
+    console.error(err)
+    return res.status(500).json({ error: 'Erro ao mesclar duplicatas' })
   }
 }
 
@@ -930,11 +1069,12 @@ exports.abrirConversaCliente = async (req, res) => {
       return res.json({ conversa: payload, criada: false })
     }
 
+    const telefoneCanonico = getCanonicalPhone(telefone) || telefone
     const { data: novaConversa, error: errConv } = await supabase
       .from('conversas')
       .insert({
         cliente_id: cliente.id,
-        telefone,
+        telefone: telefoneCanonico,
         company_id,
         status_atendimento: 'aberta',
         usuario_id,
@@ -977,27 +1117,27 @@ exports.criarContato = async (req, res) => {
     const { company_id, id: usuario_id } = req.user
     const { nome, telefone } = req.body
 
+    const telefoneCanonico = getCanonicalPhone(telefone) || String(telefone || '').trim()
+    const phonesBusca = possiblePhonesBR(telefoneCanonico)
     let cliente
 
     // =================================================
-    // 1️⃣ TENTA BUSCAR CLIENTE EXISTENTE
+    // 1️⃣ TENTA BUSCAR CLIENTE EXISTENTE (por variantes do número)
     // =================================================
-    const { data: existente } = await supabase
-      .from('clientes')
-      .select('*')
-      .eq('telefone', telefone)
-      .eq('company_id', company_id)
-      .maybeSingle()
+    let qCli = supabase.from('clientes').select('*').eq('company_id', company_id)
+    if (phonesBusca.length > 0) qCli = qCli.in('telefone', phonesBusca)
+    else qCli = qCli.eq('telefone', telefoneCanonico)
+    const { data: existenteList } = await qCli.order('id', { ascending: true }).limit(1)
+    const existenteRow = Array.isArray(existenteList) && existenteList.length > 0 ? existenteList[0] : null
 
-    if (existente) {
-      cliente = existente
+    if (existenteRow) {
+      cliente = existenteRow
     } else {
-      // cria se não existir
       const { data, error } = await supabase
         .from('clientes')
         .insert({
           nome,
-          telefone,
+          telefone: telefoneCanonico,
           company_id
         })
         .select()
@@ -1009,13 +1149,15 @@ exports.criarContato = async (req, res) => {
     }
 
     // =================================================
-    // 2️⃣ CRIA CONVERSA
+    // 2️⃣ CRIA CONVERSA (telefone canônico = uma conversa por contato)
     // =================================================
-    const { data: conversa, error: errConv } = await supabase
+    let conversa = null
+    let errConv = null
+    const insConv = await supabase
       .from('conversas')
       .insert({
         cliente_id: cliente.id,
-        telefone,
+        telefone: telefoneCanonico,
         company_id,
         status_atendimento: 'aberta',
         usuario_id,
@@ -1023,7 +1165,24 @@ exports.criarContato = async (req, res) => {
       })
       .select()
       .single()
+    conversa = insConv.data
+    errConv = insConv.error
 
+    if (errConv && (String(errConv.code || '') === '23505' || String(errConv.message || '').includes('unique'))) {
+      const { data: existenteConv } = await supabase
+        .from('conversas')
+        .select('*')
+        .eq('company_id', company_id)
+        .neq('status_atendimento', 'fechada')
+        .in('telefone', phonesBusca.length > 0 ? phonesBusca : [telefoneCanonico])
+        .order('id', { ascending: false })
+        .limit(1)
+        .maybeSingle()
+      if (existenteConv) {
+        conversa = existenteConv
+        errConv = null
+      }
+    }
     if (errConv) return res.status(500).json({ error: errConv.message })
 
     // realtime
