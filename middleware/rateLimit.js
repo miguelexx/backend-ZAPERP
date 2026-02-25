@@ -6,8 +6,6 @@ function limiter({ windowMs, max, message }) {
     max,
     standardHeaders: true,
     legacyHeaders: false,
-    // IPv6-safe (recomendado pelo express-rate-limit)
-    keyGenerator: rateLimit.ipKeyGenerator,
     handler: (req, res) => {
       if (message) return res.status(429).json({ error: message })
       return res.status(429).json({ error: 'Too many requests, try again later' })

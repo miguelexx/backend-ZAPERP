@@ -38,13 +38,14 @@ function getArg(name) {
 const INSTANCE_ID  = process.env.ZAPI_INSTANCE_ID || ''
 const APP_URL_ENV  = (process.env.APP_URL || 'http://localhost:5000').replace(/\/$/, '')
 
-const argUrl  = getArg('url')
-const argPhone = getArg('phone')
-const argMeu  = getArg('meu')
-const argTexto = getArg('texto')
-const argTipo  = (getArg('tipo') || 'received').toLowerCase()
+const argUrl   = getArg('url')
+const argPhone  = getArg('phone')
+const argMeu   = getArg('meu')
+const argTexto  = getArg('texto')
+const argTipo   = (getArg('tipo') || 'received').toLowerCase()
+const isLocal   = args.includes('--local')
 
-const BASE_URL = argUrl || APP_URL_ENV
+const BASE_URL = argUrl || (isLocal ? `http://localhost:${process.env.PORT || 5000}` : APP_URL_ENV)
 const WEBHOOK_URL = `${BASE_URL}/webhooks/zapi`
 
 // ── Helpers ────────────────────────────────────────────────────────────────

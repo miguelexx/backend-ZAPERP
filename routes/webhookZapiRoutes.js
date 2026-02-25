@@ -19,6 +19,9 @@ router.use((req, res, next) => {
 // GET público — usado apenas para diagnóstico/healthcheck da URL configurada no Z-API
 router.get('/', webhookZapiController.testarZapi)
 
+// GET diagnóstico: mostra os últimos webhooks recebidos (útil para verificar se Z-API está chamando)
+router.get('/debug', webhookZapiController.debugZapi)
+
 // Callbacks Z-API sem validação de token
 router.post('/',           rejectWrongZapiInstance, webhookZapiController.receberZapi)
 router.post('/status',     rejectWrongZapiInstance, webhookZapiController.statusZapi)

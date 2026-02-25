@@ -586,18 +586,29 @@ async function configureWebhooks(appUrl) {
     results.push({ label, ok })
   }
 
-  // Fallback: endpoint dedicado para notifySentByMe (caso a API não aceite no body do received)
-  // Z-API v2: { value: true } é o formato correto para o toggle (boolean, não URL).
-  try {
-    const notifyOk = await putBody('/update-notify-sent-by-me', { value: true })
-    if (notifyOk) {
-      console.log('✅ Z-API notifySentByMe ativado: mensagens enviadas pelo celular serão enviadas ao webhook')
-    }
-    results.push({ label: 'notifySentByMe', ok: notifyOk })
-  } catch (e) {
-    console.warn('⚠️ Z-API notifySentByMe: erro ao chamar API:', e?.message || e)
-    results.push({ label: 'notifySentByMe', ok: false })
+  // Endpoint dedicado para notifySentByMe — tenta múltiplos formatos para compatibilidade com versões diferentes da Z-API.
+  // Z-API v1: { value: "URL", notifySentByMe: true }  (já enviado no body do received acima)
+  // Z-API v2: endpoint dedicado /update-notify-sent-by-me com { value: true }
+  // Z-API v3+: endpoint /update-on-sent-by-me ou toggle simples
+  const notifyCandidates = [
+    { endpoint: '/update-notify-sent-by-me',  body: { value: true } },
+    { endpoint: '/update-notify-sent-by-me',  body: { value: mainUrl, notifySentByMe: true } },
+    { endpoint: '/update-on-sent-by-me',      body: { value: true } },
+    { endpoint: '/update-on-sent-by-me',      body: { value: mainUrl } },
+  ]
+  let notifyOk = false
+  for (const { endpoint, body } of notifyCandidates) {
+    try {
+      const ok = await putBody(endpoint, body)
+      if (ok) { notifyOk = true; break }
+    } catch (_) {}
   }
+  if (notifyOk) {
+    console.log('✅ Z-API notifySentByMe ativado: mensagens enviadas pelo celular serão enviadas ao webhook')
+  } else {
+    console.warn('⚠️ Z-API notifySentByMe: não foi possível ativar via API. Ative manualmente no painel Z-API: "Notificar mensagens enviadas por mim"')
+  }
+  results.push({ label: 'notifySentByMe', ok: notifyOk })
 
   const allOk = results.every(r => r.ok)
   if (allOk) {

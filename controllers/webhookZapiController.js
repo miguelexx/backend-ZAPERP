@@ -17,6 +17,13 @@ const { incrementarUnreadParaConversa } = require('./chatController')
 const COMPANY_ID = Number(process.env.WEBHOOK_COMPANY_ID || 1)
 const WHATSAPP_DEBUG = String(process.env.WHATSAPP_DEBUG || '').toLowerCase() === 'true'
 
+// Buffer em memória das últimas 20 requisições webhook recebidas (diagnóstico)
+const _webhookLog = []
+function _logWebhook(entry) {
+  _webhookLog.unshift({ ts: new Date().toISOString(), ...entry })
+  if (_webhookLog.length > 20) _webhookLog.pop()
+}
+
 /** Detecta se o payload é de um grupo (remoteJid @g.us, isGroup ou tipo grupo). */
 function isGroupPayload(payload) {
   if (!payload || typeof payload !== 'object') return false
@@ -140,20 +147,24 @@ function resolveConversationKeyFromZapi(payload) {
   }
 
   // ─── Individual ───
-  // Meu número (connectedPhone tem prioridade máxima como referência do "eu")
+  // Meu número (connectedPhone tem prioridade máxima como referência do "eu").
+  // IMPORTANTE: senderPhone NÃO é usado para derivar "meu número" pois em mensagens
+  // fromMe=true o senderPhone pode ser o número do CONTATO (destinatário), não o meu.
+  const fromMeHint = Boolean(payload.fromMe ?? payload.key?.fromMe)
   const myDigits =
     digits(payload.connectedPhone) ||
-    digits(payload.senderPhone)    ||
     digits(payload.ownerPhone)     ||
     digits(payload.instancePhone)  ||
     digits(payload.phoneNumber)    ||
     digits(payload.me?.phone)      ||
+    // senderPhone como fallback SOMENTE para mensagens recebidas (fromMe=false)
+    (!fromMeHint ? digits(payload.senderPhone) : '') ||
     ''
   const myTail = myDigits ? tail11(myDigits) : ''
   const isMyNumber = (d) => myTail && d && tail11(d) === myTail
 
-  // Normaliza um candidato bruto → telefone BR ou ''
-  const normCandidate = (raw) => {
+  // Normaliza um candidato bruto → telefone ou ''
+  const normCandidate = (raw, { allowNonBR = false } = {}) => {
     if (!raw) return ''
     const s = clean(raw)
     if (!s) return ''
@@ -161,8 +172,9 @@ function resolveConversationKeyFromZapi(payload) {
     if (isGrpJid(s)) return ''   // @g.us em contexto individual = ignorar
     // Extrair dígitos de JID (@s.whatsapp.net) ou valor cru
     const d = s.includes('@') ? s.replace(/@[^@]+$/, '').replace(/\D/g, '') : digits(s)
-    if (!d) return ''
-    if (!looksLikeBRPhoneDigits(d)) return ''
+    if (!d || d.length < 8) return ''
+    // Filtro BR: se allowNonBR=false, exige formato brasileiro (55 + DDD + 8/9 dígitos ou só DDD+8/9)
+    if (!allowNonBR && !looksLikeBRPhoneDigits(d)) return ''
     if (isMyNumber(d)) return ''  // NUNCA usar meu próprio número como contato
     return normalizePhoneBR(d) || d
   }
@@ -193,6 +205,23 @@ function resolveConversationKeyFromZapi(payload) {
     const norm = normCandidate(raw)
     if (norm) {
       return { key: norm, isGroup: false, participantPhone: '', debugReason: `fallback ${fieldName}` }
+    }
+  }
+
+  // ─── Último recurso para fromMe: aceita número não-BR se for o único candidato disponível ───
+  if (fromMe) {
+    const lastResortSources = [
+      [payload.phone,           'phone (non-BR last resort)'],
+      [payload.key?.remoteJid,  'key.remoteJid (non-BR last resort)'],
+      [payload.chatId,          'chatId (non-BR last resort)'],
+      [payload.to,              'to (non-BR last resort)'],
+      [payload.toPhone,         'toPhone (non-BR last resort)'],
+    ]
+    for (const [raw, fieldName] of lastResortSources) {
+      const norm = normCandidate(raw, { allowNonBR: true })
+      if (norm) {
+        return { key: norm, isGroup: false, participantPhone: '', debugReason: `last resort ${fieldName}` }
+      }
     }
   }
 
@@ -465,15 +494,41 @@ exports.testarZapi = (req, res) => {
   })
 }
 
+/** GET /webhooks/zapi/debug — mostra as últimas requisições recebidas (diagnóstico de mobile/fromMe). */
+exports.debugZapi = (req, res) => {
+  return res.status(200).json({
+    ok: true,
+    total_recebidos: _webhookLog.length,
+    debug_mode: WHATSAPP_DEBUG,
+    ultimos_webhooks: _webhookLog
+  })
+}
+
 exports.receberZapi = async (req, res) => {
   try {
     const body = req.body || {}
+
+    // Log SEMPRE (independente de WHATSAPP_DEBUG) — essencial para diagnóstico em produção
     const bodyPreview = {
       type: body.type || body.event || '(vazio)',
       phone: (body.phone || '(vazio)').toString().slice(-12),
+      fromMe: body.fromMe ?? body.key?.fromMe ?? '?',
       instanceId: body.instanceId != null ? String(body.instanceId).slice(0, 12) : '(vazio)',
-      hasText: !!(body.text?.message || body.message || body.body)
+      hasText: !!(body.text?.message || body.message || body.body),
+      ip: req.ip || req.socket?.remoteAddress || '?'
     }
+    console.log('[Z-API] ▶ webhook recebido:', JSON.stringify(bodyPreview))
+
+    // Salva no buffer de diagnóstico (GET /webhooks/zapi/debug)
+    _logWebhook({
+      type: bodyPreview.type,
+      phone: bodyPreview.phone,
+      fromMe: bodyPreview.fromMe,
+      hasText: bodyPreview.hasText,
+      ip: bodyPreview.ip,
+      rawBody: WHATSAPP_DEBUG ? JSON.stringify(body).slice(0, 800) : undefined
+    })
+
     const payloads = getPayloads(body)
     let lastResult = { ok: true }
 
