@@ -8,12 +8,10 @@ const { normalizePhoneBR, possiblePhonesBR, phoneKeyBR } = require('./phoneHelpe
 
 /**
  * Retorna telefone canônico para armazenamento (sempre o mesmo formato por número).
- * Mantém compatibilidade com números já existentes, mas tenta extrair o telefone real
- * de JIDs (@s.whatsapp.net) e de identificadores especiais como @lid.
  *
- * ATENÇÃO: A deduplicação forte (12/13 dígitos BR) é feita por `normalizePhoneBR` /
- * `possiblePhonesBR`. Aqui o objetivo principal é **nunca perder mensagem**: se não
- * conseguir normalizar, ainda assim devolve os dígitos disponíveis.
+ * REGRA: para contato individual, **só aceita telefone BR válido** (normalizePhoneBR).
+ * Não converte LID/IDs internos em “telefone”. Isso garante que o campo `telefone`
+ * da conversa/cliente nunca seja um número inexistente como o da sua imagem.
  *
  * @param {string} phone
  * @returns {string}
@@ -31,28 +29,19 @@ function getCanonicalPhone(phone) {
     phoneStr = s.replace('@s.whatsapp.net', '')
   }
 
-  // Identificadores especiais (@lid, @broadcast, etc.): extrair só dígitos
+  // IDs internos (@lid, @broadcast, etc.) NUNCA viram telefone
   if (/@(lid|broadcast)$/i.test(s)) {
-    phoneStr = s.replace(/@[^@]+$/, '')
+    console.warn('[getCanonicalPhone] Identificador interno ignorado (lid/broadcast):', s)
+    return ''
   }
 
-  // 1) Tentar normalização BR (caso de uso principal)
+  // Só aceitamos telefone BR válido
   const norm = normalizePhoneBR(phoneStr)
   if (norm) return norm
 
-  // 2) Fallback defensivo: usar apenas dígitos disponíveis.
-  //    Isso garante que nenhuma mensagem seja perdida, mesmo que o provider
-  //    envie identificadores não-BR. A deduplicação por número BR continua
-  //    sendo feita por `possiblePhonesBR`/`phoneKeyBR`.
-  const digits = phoneStr.replace(/\D/g, '')
-  if (!digits) return ''
-
-  // Loga quando parecer algo fora do padrão BR (ex.: 14+ dígitos).
-  if (digits.length > 13 || !digits.startsWith('55')) {
-    console.warn('[getCanonicalPhone] Telefone não-BR ou fora do padrão, usando dígitos brutos:', digits)
-  }
-
-  return digits
+  // Qualquer coisa que não normalize para BR é considerada inválida
+  console.warn('[getCanonicalPhone] Telefone inválido para BR, descartado:', phoneStr)
+  return ''
 }
 
 /**

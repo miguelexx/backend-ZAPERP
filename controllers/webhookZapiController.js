@@ -400,25 +400,54 @@ function getPayloads(body) {
   return [body]
 }
 
-/** Fallback para obter telefone/JID do destino em mensagens fromMe quando pickBestPhone retorna vazio. */
+/** Fallback para obter telefone do CONTATO em mensagens fromMe quando pickBestPhone retorna vazio.
+ *  Não devolve LID nem número \"inventado\" – apenas telefones BR válidos.
+ */
 function getFallbackPhoneForFromMe(payload) {
   if (!payload || typeof payload !== 'object') return ''
-  const raw =
-    payload.to ??
-    payload.recipientPhone ??
-    payload.toPhone ??
-    payload.recipient ??
-    payload.destination ??
-    payload.key?.remoteJid ??
-    payload.remoteJid ??
-    payload.chatId ??
-    payload.chat?.id ??
-    payload.phone ??
-    ''
-  const s = String(raw).trim()
-  if (!s) return ''
-  const norm = normalizePhoneBR(s)
-  return norm || s
+
+  // 1) Tenta reaproveitar a mesma lógica de seleção principal
+  const best = pickBestPhone(payload, { fromMe: true })
+  if (best) return best
+
+  // 2) Fallback extra: varre vários campos à procura de um número BR válido
+  const candidates = [
+    payload.to,
+    payload.recipientPhone,
+    payload.toPhone,
+    payload.recipient,
+    payload.destination,
+    payload.key?.remoteJid,
+    payload.remoteJid,
+    payload.chatId,
+    payload.chat?.id,
+    payload.phone,
+  ]
+
+  for (const cand of candidates) {
+    if (!cand) continue
+    const s = String(cand).trim()
+    if (!s) continue
+
+    // Ignorar IDs internos (lid/broadcast)
+    if (s.endsWith('@lid') || s.endsWith('@broadcast')) continue
+
+    // Extrair dígitos do JID ou do valor cru
+    const digits = s.includes('@')
+      ? s.replace(/@[^@]+$/, '').replace(/\D/g, '')
+      : s.replace(/\D/g, '')
+
+    if (!looksLikeBRPhoneDigits(digits)) continue
+
+    const norm = normalizePhoneBR(digits)
+    if (norm) {
+      console.log('[Z-API] getFallbackPhoneForFromMe → usando telefone BR:', norm)
+      return norm
+    }
+  }
+
+  console.warn('[Z-API] getFallbackPhoneForFromMe: nenhum telefone BR válido encontrado em fromMe.')
+  return ''
 }
 
 /** GET /webhooks/zapi — teste de conectividade; retorna todas as URLs para configurar no painel Z-API. */
