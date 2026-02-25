@@ -1,6 +1,7 @@
 const supabase = require('../config/supabase')
 const path = require('path')
 const fs = require('fs')
+const { normalizePhoneBR, possiblePhonesBR } = require('../helpers/phoneHelper')
 
 /**
  * Envia mensagem para WhatsApp via Meta API (se configurado).
@@ -211,21 +212,48 @@ exports.receberWebhook = async (req, res) => {
       if (ew?.company_id) company_id = Number(ew.company_id)
     }
 
-    console.log('📩 Mensagem recebida:', from, texto)
+    // ---------- Evitar conversa duplicada: mensagem enviada pelo celular (nosso número) ----------
+    // Se "from" for o número do negócio, a mensagem foi ENVIADA por nós; o contato é o DESTINATÁRIO.
+    let displayPhone = value?.metadata?.display_phone_number ? String(value.metadata.display_phone_number).trim() : ''
+    if (!displayPhone && phoneNumberId) {
+      const { data: ewPhone } = await supabase.from('empresas_whatsapp').select('phone_number').eq('phone_number_id', phoneNumberId).maybeSingle()
+      if (ewPhone?.phone_number) displayPhone = String(ewPhone.phone_number).trim()
+    }
+    const ourNumberNorm = displayPhone ? normalizePhoneBR(displayPhone) || displayPhone.replace(/\D/g, '') : ''
+    const ourNumberVariants = ourNumberNorm ? [ourNumberNorm, ...possiblePhonesBR(displayPhone || ourNumberNorm)] : []
+    const fromDigits = String(from || '').replace(/\D/g, '')
+    const isOutgoing = ourNumberVariants.length > 0 && fromDigits && ourNumberVariants.some((v) => String(v).replace(/\D/g, '') === fromDigits)
 
-    // 1) Cliente (cria se não existir)
+    let contactPhone = from
+    if (isOutgoing) {
+      const recipient = msg.to ? String(msg.to).trim() : null
+      if (!recipient) {
+        console.log('📤 Meta webhook: mensagem enviada por nós (from=nosso número) sem destinatário (to); ignorada para evitar conversa duplicada.')
+        return res.status(200).json({ ok: true, message: 'Outgoing without recipient' })
+      }
+      contactPhone = recipient
+      console.log('📤 Mensagem enviada por nós (celular) → destinatário:', contactPhone, texto?.slice(0, 50))
+    } else {
+      console.log('📩 Mensagem recebida:', from, texto?.slice(0, 50))
+    }
+
+    // Normalizar telefone do contato para busca/criação (evita conversa duplicada 55DD9... vs 55DD8...)
+    const contactPhoneNorm = normalizePhoneBR(contactPhone) || String(contactPhone).replace(/\D/g, '')
+    const contactPhonesForSearch = contactPhoneNorm ? possiblePhonesBR(contactPhoneNorm) : [contactPhone]
+
+    // 1) Cliente (cria se não existir) — sempre pelo CONTATO (destinatário se for mensagem nossa)
     let cliente_id = null
-    const { data: clienteExistente, error: errCli } = await supabase
-      .from('clientes')
-      .select('id')
-      .eq('company_id', company_id)
-      .eq('telefone', from)
-      .maybeSingle()
+    let clienteQuery = supabase.from('clientes').select('id').eq('company_id', company_id)
+    if (contactPhonesForSearch.length > 0) clienteQuery = clienteQuery.in('telefone', contactPhonesForSearch)
+    else clienteQuery = clienteQuery.eq('telefone', contactPhoneNorm || contactPhone)
+    const { data: clientesCandidatos, error: errCli } = await clienteQuery.order('id', { ascending: true }).limit(5)
 
     if (errCli) {
       console.error('Erro ao buscar cliente:', errCli)
       return res.sendStatus(500)
     }
+
+    const clienteExistente = Array.isArray(clientesCandidatos) && clientesCandidatos.length > 0 ? clientesCandidatos[0] : null
 
     if (clienteExistente?.id) {
       cliente_id = clienteExistente.id
@@ -233,7 +261,7 @@ exports.receberWebhook = async (req, res) => {
       const { data: novoCliente, error: errNovoCli } = await supabase
         .from('clientes')
         .insert({
-          telefone: from,
+          telefone: contactPhoneNorm || contactPhone,
           nome: null,
           observacoes: null,
           company_id
@@ -248,31 +276,36 @@ exports.receberWebhook = async (req, res) => {
       cliente_id = novoCliente.id
     }
 
-    // 2) Conversa (busca aberta ou cria) — trazer departamento_id
+    // 2) Conversa (busca aberta ou cria) — por cliente_id e por telefone (evita duplicata)
     let conversa_id = null
     let departamento_id = null
-    const { data: conversasAbertas, error: errConv } = await supabase
+    let qConv = supabase
       .from('conversas')
-      .select('id, departamento_id')
+      .select('id, departamento_id, telefone')
       .eq('company_id', company_id)
       .eq('cliente_id', cliente_id)
       .neq('status_atendimento', 'fechada')
       .order('id', { ascending: false })
-      .limit(1)
+      .limit(5)
+    if (contactPhonesForSearch.length > 0) qConv = qConv.in('telefone', contactPhonesForSearch)
+    else qConv = qConv.eq('telefone', contactPhoneNorm || contactPhone)
+    const { data: conversasAbertas, error: errConv } = await qConv
 
     if (errConv) {
       console.error('Erro ao buscar conversa:', errConv)
       return res.sendStatus(500)
     }
 
-    if (conversasAbertas && conversasAbertas.length > 0) {
-      conversa_id = conversasAbertas[0].id
-      departamento_id = conversasAbertas[0].departamento_id ?? null
+    const conversaRow = Array.isArray(conversasAbertas) && conversasAbertas.length > 0 ? conversasAbertas[0] : null
+
+    if (conversaRow) {
+      conversa_id = conversaRow.id
+      departamento_id = conversaRow.departamento_id ?? null
     } else {
       const { data: novaConversa, error: errNovaConv } = await supabase
         .from('conversas')
         .insert({
-          telefone: from,
+          telefone: contactPhoneNorm || contactPhone,
           cliente_id,
           lida: false,
           status_atendimento: 'aberta',
@@ -289,8 +322,8 @@ exports.receberWebhook = async (req, res) => {
       departamento_id = novaConversa.departamento_id ?? null
     }
 
-    // 3) Roteamento por setor (respeita ia_config): se conversa ainda sem departamento
-    if (departamento_id == null) {
+    // 3) Roteamento por setor (apenas mensagens recebidas do contato; não para mensagens enviadas por nós)
+    if (!isOutgoing && departamento_id == null) {
       const { data: iaConfigRow } = await supabase
         .from('ia_config')
         .select('config')
@@ -341,7 +374,7 @@ exports.receberWebhook = async (req, res) => {
             status: 'enviada'
           })
           const phoneId = phoneNumberId || undefined
-          await enviarMensagemWhatsApp(from, menuTexto, phoneId)
+          await enviarMensagemWhatsApp(contactPhone, menuTexto, phoneId)
           await registrarBotLog(company_id, conversa_id, 'menu_setores_enviado', { departamentos: departamentos.map(d => d.nome) })
         }
       }
@@ -375,11 +408,11 @@ exports.receberWebhook = async (req, res) => {
       }
     }
 
-    // 4) Salvar mensagem do cliente (texto ou mídia)
+    // 4) Salvar mensagem (do contato ou enviada por nós pelo celular)
     const insertMsg = {
       conversa_id,
       texto: texto || '(mídia ou vazio)',
-      direcao: 'in',
+      direcao: isOutgoing ? 'out' : 'in',
       company_id,
       whatsapp_id: msg.id || null,
     }
