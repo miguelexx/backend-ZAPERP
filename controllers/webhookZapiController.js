@@ -11,7 +11,7 @@ const supabase = require('../config/supabase')
 const { getProvider } = require('../services/providers')
 const { syncContactFromZapi } = require('../services/zapiSyncContact')
 const { normalizePhoneBR, possiblePhonesBR, normalizeGroupIdForStorage } = require('../helpers/phoneHelper')
-const { getCanonicalPhone } = require('../helpers/conversationSync')
+const { getCanonicalPhone, findOrCreateConversation } = require('../helpers/conversationSync')
 const { incrementarUnreadParaConversa } = require('./chatController')
 
 const COMPANY_ID = Number(process.env.WEBHOOK_COMPANY_ID || 1)
@@ -809,167 +809,60 @@ exports.receberZapi = async (req, res) => {
       }
     }
 
-    // 2) Conversa (busca aberta ou cria). Grupos: por telefone (remoteJid), tipo grupo, cliente_id null
+    // 2) Conversa — findOrCreateConversation garante UMA conversa por contato.
+    //    Telefone é normalizado internamente; busca por variantes 12/13 dígitos.
+    //    fromMe=true e fromMe=false para o MESMO contato sempre encontram a mesma conversa.
     let conversa_id = null
     let departamento_id = null
-    const convPhones = !isGroup ? possiblePhonesBR(phone) : []
-    let conversaQuery = supabase
-      .from('conversas')
-      .select('id, departamento_id, telefone')
-      .eq('company_id', company_id)
-      .neq('status_atendimento', 'fechada')
-      .order('id', { ascending: false })
-      .limit(5)
-
-    // Evita conversas duplicadas por variação 12/13 dígitos (com/sem 9 após DDD)
-    if (isGroup) {
-      conversaQuery = conversaQuery.eq('telefone', phone)
-    } else if (convPhones.length > 0) {
-      conversaQuery = conversaQuery.in('telefone', convPhones)
-    } else {
-      conversaQuery = conversaQuery.eq('telefone', phone)
-    }
-
-    if (!isGroup) conversaQuery.eq('cliente_id', cliente_id)
-    const { data: conversasAbertas, error: errConv } = await conversaQuery
-
-    if (errConv) {
-      console.error('Erro ao buscar conversa Z-API:', errConv)
-      return res.status(500).json({ error: 'Erro ao buscar conversa' })
-    }
-
     let isNewConversation = false
-    if (conversasAbertas && conversasAbertas.length > 0) {
-      // Se houver MAIS DE UMA conversa aberta para o mesmo cliente (variação 12/13 dígitos),
-      // unificar tudo numa conversa só (profissional: 1 chat por contato).
-      if (!isGroup && Array.isArray(conversasAbertas) && conversasAbertas.length > 1) {
-        const canonical = conversasAbertas[0] // mais recente (order id desc)
-        const others = conversasAbertas.slice(1)
-        const otherIds = others.map((c) => c.id).filter(Boolean)
-        if (canonical?.id && otherIds.length > 0) {
-          try {
-            // 1) Mover dependências para a conversa canônica
-            await supabase.from('mensagens').update({ conversa_id: canonical.id }).in('conversa_id', otherIds)
-            await supabase.from('conversa_tags').update({ conversa_id: canonical.id }).in('conversa_id', otherIds)
-            await supabase.from('atendimentos').update({ conversa_id: canonical.id }).in('conversa_id', otherIds)
-            await supabase.from('historico_atendimentos').update({ conversa_id: canonical.id }).in('conversa_id', otherIds)
-            await supabase.from('conversa_unreads').update({ conversa_id: canonical.id }).in('conversa_id', otherIds)
 
-            // 2) Apagar conversas antigas (se falhar por FK/perm, fecha para não aparecer)
-            const del = await supabase.from('conversas').delete().in('id', otherIds).eq('company_id', company_id)
-            if (del.error) {
-              await supabase
-                .from('conversas')
-                .update({ status_atendimento: 'fechada', lida: true })
-                .in('id', otherIds)
-                .eq('company_id', company_id)
-            }
-            console.log('🧹 Conversas unificadas (12/13 dígitos):', { canonical: canonical.id, merged: otherIds.length })
-          } catch (e) {
-            console.warn('⚠️ Falha ao unificar conversas duplicadas:', e?.message || e)
-          }
-        }
+    try {
+      const syncResult = await findOrCreateConversation(supabase, {
+        company_id,
+        phone,
+        cliente_id: isGroup ? null : cliente_id,
+        isGroup,
+        nomeGrupo,
+        chatPhoto,
+        logPrefix: `[Z-API fromMe=${fromMe}]`,
+      })
+
+      if (!syncResult) {
+        console.error('[Z-API] findOrCreateConversation retornou null para phone:', phone)
+        return res.status(500).json({ error: 'Não foi possível identificar conversa para o número' })
       }
 
-      // Preferir conversa cujo telefone bate exatamente com o phone do evento; senão pega a mais recente
-      const picked =
-        (!isGroup && convPhones.length > 0
-          ? (conversasAbertas.find((c) => String(c.telefone || '') === String(phone)) || conversasAbertas[0])
-          : conversasAbertas[0])
-      conversa_id = picked.id
-      departamento_id = picked.departamento_id ?? null
+      conversa_id = syncResult.conversa.id
+      departamento_id = syncResult.conversa.departamento_id ?? null
+      isNewConversation = syncResult.created
+
       // Atualiza foto do grupo quando disponível no payload
-      if (isGroup && chatPhoto) {
-        await supabase
-          .from('conversas')
+      if (isGroup && chatPhoto && !isNewConversation) {
+        await supabase.from('conversas')
           .update({ foto_grupo: chatPhoto })
           .eq('id', conversa_id)
           .eq('company_id', company_id)
       }
-    } else {
-      const telefoneConvCanonico = isGroup ? phone : (getCanonicalPhone(phone) || phone)
-      const insertConv = {
-        telefone: telefoneConvCanonico,
-        lida: false,
-        status_atendimento: 'aberta',
-        company_id,
-        ultima_atividade: new Date().toISOString()
-      }
-      if (isGroup) {
-        insertConv.tipo = 'grupo'
-        insertConv.nome_grupo = nomeGrupo || null
-        insertConv.cliente_id = null
-        if (chatPhoto) insertConv.foto_grupo = chatPhoto
-      } else {
-        insertConv.cliente_id = cliente_id
-      }
-      let { data: novaConversa, error: errNovaConv } = await supabase
-        .from('conversas')
-        .insert(insertConv)
-        .select('id, departamento_id')
-        .single()
 
-      if (errNovaConv) {
-        const missingColumn = String(errNovaConv.message || '').includes('ultima_atividade') || String(errNovaConv.code || '') === 'PGRST204'
-        let isDuplicate = String(errNovaConv.code || '') === '23505' || String(errNovaConv.message || '').includes('unique') || String(errNovaConv.message || '').includes('duplicate')
-
-        if (missingColumn) {
-          delete insertConv.ultima_atividade
-          const retry = await supabase.from('conversas').insert(insertConv).select('id, departamento_id').single()
-          if (retry.error && String(retry.error.code || '') !== '23505') {
-            console.error('Erro ao criar conversa Z-API (retry):', retry.error)
-            return res.status(500).json({ error: 'Erro ao criar conversa' })
-          }
-          if (!retry.error) {
-            novaConversa = retry.data
-            errNovaConv = null
-          } else {
-            isDuplicate = true
-          }
-          if (errNovaConv && !isDuplicate) console.warn('⚠️ Coluna ultima_atividade não existe em conversas. Execute backend/supabase/RUN_IN_SUPABASE.sql no Supabase.')
-        }
-        if (isDuplicate || (errNovaConv && (String(errNovaConv.code || '') === '23505'))) {
-          let q = supabase
-            .from('conversas')
-            .select('id, departamento_id')
-            .eq('company_id', company_id)
-            .neq('status_atendimento', 'fechada')
-            .order('id', { ascending: false })
-            .limit(1)
-          if (isGroup) q = q.eq('telefone', phone)
-          else if (convPhones.length > 0) q = q.in('telefone', convPhones)
-          else q = q.eq('telefone', phone)
-          if (!isGroup) q = q.eq('cliente_id', cliente_id)
-          const { data: existenteConv } = await q.maybeSingle()
-          if (existenteConv) {
-            novaConversa = existenteConv
-            errNovaConv = null
-          }
-        }
-        if (errNovaConv) {
-          console.error('❌ Z-API Erro ao criar conversa:', errNovaConv?.code, errNovaConv?.message, errNovaConv?.details)
-          return res.status(500).json({ error: 'Erro ao criar conversa' })
+      if (isNewConversation) {
+        const io = req.app.get('io')
+        if (io) {
+          io.to(`empresa_${company_id}`).emit('nova_conversa', {
+            id: conversa_id,
+            telefone: getCanonicalPhone(phone) || phone,
+            tipo: isGroup ? 'grupo' : 'cliente',
+            nome_grupo: isGroup ? (nomeGrupo || null) : null,
+            foto_grupo: isGroup ? (chatPhoto || null) : null,
+            contato_nome: isGroup ? (nomeGrupo || phone || 'Grupo') : (senderName || phone || null),
+            foto_perfil: isGroup ? null : (senderPhoto || null),
+            unread_count: 0,
+            tags: [],
+          })
         }
       }
-      conversa_id = novaConversa.id
-      departamento_id = novaConversa.departamento_id ?? null
-      isNewConversation = true
-
-      const io = req.app.get('io')
-      if (io) {
-        const payload = {
-          id: conversa_id,
-          telefone: phone,
-          tipo: isGroup ? 'grupo' : 'cliente',
-          nome_grupo: isGroup ? (nomeGrupo || null) : null,
-          foto_grupo: isGroup ? (chatPhoto || null) : null,
-          contato_nome: isGroup ? (nomeGrupo || phone || 'Grupo') : (senderName || phone || null),
-          foto_perfil: isGroup ? null : (senderPhoto || null),
-          unread_count: 0,
-          tags: []
-        }
-        io.to(`empresa_${company_id}`).emit('nova_conversa', payload)
-      }
+    } catch (errConv) {
+      console.error('[Z-API] ❌ Erro ao obter/criar conversa:', errConv?.message || errConv)
+      return res.status(500).json({ error: 'Erro ao obter conversa' })
     }
 
     // 3) Salvar mensagem. TUDO que a Z-API envia (recebido, !fromMe) é gravado; sem messageId grava com whatsapp_id null.

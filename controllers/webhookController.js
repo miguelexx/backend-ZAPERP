@@ -2,6 +2,7 @@ const supabase = require('../config/supabase')
 const path = require('path')
 const fs = require('fs')
 const { normalizePhoneBR, possiblePhonesBR } = require('../helpers/phoneHelper')
+const { findOrCreateConversation } = require('../helpers/conversationSync')
 
 /**
  * Envia mensagem para WhatsApp via Meta API (se configurado).
@@ -276,73 +277,30 @@ exports.receberWebhook = async (req, res) => {
       cliente_id = novoCliente.id
     }
 
-    // 2) Conversa (busca aberta ou cria) — por cliente_id e por telefone (evita duplicata)
+    // 2) Conversa — findOrCreateConversation garante UMA conversa por contato.
+    //    Mensagens recebidas (in) e enviadas pelo celular (out/fromMe) sempre encontram a mesma conversa.
     let conversa_id = null
     let departamento_id = null
-    let qConv = supabase
-      .from('conversas')
-      .select('id, departamento_id, telefone')
-      .eq('company_id', company_id)
-      .eq('cliente_id', cliente_id)
-      .neq('status_atendimento', 'fechada')
-      .order('id', { ascending: false })
-      .limit(5)
-    if (contactPhonesForSearch.length > 0) qConv = qConv.in('telefone', contactPhonesForSearch)
-    else qConv = qConv.eq('telefone', contactPhoneNorm || contactPhone)
-    const { data: conversasAbertas, error: errConv } = await qConv
 
-    if (errConv) {
-      console.error('Erro ao buscar conversa:', errConv)
-      return res.sendStatus(500)
-    }
+    try {
+      const syncResult = await findOrCreateConversation(supabase, {
+        company_id,
+        phone: contactPhoneNorm || contactPhone,
+        cliente_id,
+        isGroup: false,
+        logPrefix: `[Meta fromMe=${isOutgoing}]`,
+      })
 
-    let conversaRow = Array.isArray(conversasAbertas) && conversasAbertas.length > 0 ? conversasAbertas[0] : null
-
-    if (conversasAbertas && conversasAbertas.length > 1) {
-      const canonical = conversasAbertas[0]
-      const others = conversasAbertas.slice(1)
-      const otherIds = others.map((c) => c.id).filter(Boolean)
-      if (canonical?.id && otherIds.length > 0) {
-        try {
-          await supabase.from('mensagens').update({ conversa_id: canonical.id }).in('conversa_id', otherIds)
-          await supabase.from('conversa_tags').update({ conversa_id: canonical.id }).in('conversa_id', otherIds)
-          await supabase.from('atendimentos').update({ conversa_id: canonical.id }).in('conversa_id', otherIds)
-          await supabase.from('historico_atendimentos').update({ conversa_id: canonical.id }).in('conversa_id', otherIds)
-          await supabase.from('conversa_unreads').update({ conversa_id: canonical.id }).in('conversa_id', otherIds)
-          const del = await supabase.from('conversas').delete().in('id', otherIds).eq('company_id', company_id)
-          if (del.error) {
-            await supabase.from('conversas').update({ status_atendimento: 'fechada', lida: true }).in('id', otherIds).eq('company_id', company_id)
-          }
-          console.log('🧹 Meta: conversas duplicadas unificadas:', { canonical: canonical.id, merged: otherIds.length })
-        } catch (e) {
-          console.warn('⚠️ Meta: falha ao unificar conversas duplicadas:', e?.message || e)
-        }
-      }
-      conversaRow = conversasAbertas[0]
-    }
-
-    if (conversaRow) {
-      conversa_id = conversaRow.id
-      departamento_id = conversaRow.departamento_id ?? null
-    } else {
-      const { data: novaConversa, error: errNovaConv } = await supabase
-        .from('conversas')
-        .insert({
-          telefone: contactPhoneNorm || contactPhone,
-          cliente_id,
-          lida: false,
-          status_atendimento: 'aberta',
-          company_id
-        })
-        .select('id, departamento_id')
-        .single()
-
-      if (errNovaConv) {
-        console.error('Erro ao criar conversa:', errNovaConv)
+      if (!syncResult) {
+        console.error('[Meta] findOrCreateConversation retornou null para:', contactPhone)
         return res.sendStatus(500)
       }
-      conversa_id = novaConversa.id
-      departamento_id = novaConversa.departamento_id ?? null
+
+      conversa_id = syncResult.conversa.id
+      departamento_id = syncResult.conversa.departamento_id ?? null
+    } catch (errConv) {
+      console.error('[Meta] ❌ Erro ao obter/criar conversa:', errConv?.message || errConv)
+      return res.sendStatus(500)
     }
 
     // 3) Roteamento por setor (apenas mensagens recebidas do contato; não para mensagens enviadas por nós)
