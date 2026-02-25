@@ -208,17 +208,45 @@ function extractMessage(payload) {
   // Grupo x individual: se for grupo, a chave da conversa é SEMPRE o id do grupo (nunca o participante).
   const isGroup = isGroupPayload(payload)
   const groupChatId = isGroup ? pickGroupChatId(payload) : ''
-  // Z-API docs (ReceivedCallback): phone = número do chat; connectedPhone = número conectado à API.
-  // Para garantir que mensagens enviadas/recebidas caiam SEMPRE na mesma conversa/cliente,
-  // priorizamos payload.phone nos eventos ReceivedCallback e só usamos pickBestPhone como fallback.
   const rawType = String(payload.type || payload.event || payload.msgType || '').toLowerCase()
   const isReceivedCallbackType = rawType === 'receivedcallback' || rawType === 'received_callback'
+  const getDigits = (v) => String(v || '').replace(/\D/g, '')
+  const connectedDigits = getDigits(payload.connectedPhone)
+
   let phone = ''
   if (isGroup) {
+    // Grupo: a identidade da conversa é o próprio id do grupo.
     phone = groupChatId
-  } else if (isReceivedCallbackType && payload.phone != null && String(payload.phone).trim() !== '') {
-    phone = String(payload.phone).trim()
+  } else if (isReceivedCallbackType) {
+    // Eventos ReceivedCallback (documentação Z-API).
+    if (fromMe) {
+      // Mensagem enviada PELO celular/instância.
+      // Objetivo: descobrir o telefone do CONTATO, nunca o nosso.
+
+      // 1) Tenta participantePhone (nos exemplos Z-API ele traz o número do contato em PTV/anúncios).
+      const partDigits = getDigits(payload.participantPhone ?? payload.participant ?? null)
+      if (looksLikeBRPhoneDigits(partDigits)) {
+        phone = partDigits
+      } else {
+        // 2) Usa payload.phone se for diferente do connectedPhone e parecer BR.
+        const phoneDigits = getDigits(payload.phone)
+        if (looksLikeBRPhoneDigits(phoneDigits) && (!connectedDigits || phoneDigits !== connectedDigits)) {
+          phone = phoneDigits
+        } else {
+          // 3) Fallback para heurística geral.
+          phone = pickBestPhone(payload, { fromMe: true })
+        }
+      }
+    } else {
+      // Mensagem RECEBIDA do contato: phone já é "número de telefone ou do grupo que enviou a mensagem".
+      if (payload.phone != null && String(payload.phone).trim() !== '') {
+        phone = String(payload.phone).trim()
+      } else {
+        phone = pickBestPhone(payload, { fromMe: false })
+      }
+    }
   } else {
+    // Outros tipos de eventos (delivery/status/etc.) usam heurística padrão.
     phone = pickBestPhone(payload, { fromMe })
   }
   const messageId = payload.messageId ?? payload.id ?? payload.instanceId ?? payload.key?.id ?? null
