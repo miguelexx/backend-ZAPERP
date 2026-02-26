@@ -149,16 +149,24 @@ function resolveConversationKeyFromZapi(payload) {
   // ─── Individual ───
   const fromMeHint = Boolean(payload.fromMe ?? payload.key?.fromMe)
 
-  // Meu número: connectedPhone tem prioridade máxima.
-  // Para fromMe=true, senderPhone NÃO é usado pois pode ser o CONTATO em algumas versões da Z-API.
+  // Meu número: APENAS campos que identificam a INSTÂNCIA conectada.
+  // NUNCA usar senderPhone para identificar "meu número":
+  //   - fromMe=false: senderPhone É o cliente (remetente) — usá-lo como myDigits causa o sistema
+  //     a identificar o cliente como "eu", descartando a mensagem inteira (phone → '').
+  //   - fromMe=true: senderPhone pode ser o contato destinatário em algumas versões da Z-API.
   const myDigits =
     digits(payload.connectedPhone) ||
     digits(payload.ownerPhone)     ||
     digits(payload.instancePhone)  ||
     digits(payload.phoneNumber)    ||
     digits(payload.me?.phone)      ||
-    (!fromMeHint ? digits(payload.senderPhone) : '') ||
     ''
+
+  if (!myDigits) {
+    // Aviso diagnóstico: connectedPhone ausente é inofensivo (myTail = '' → isMyNumber sempre false),
+    // mas registrar ajuda a identificar configurações da Z-API que não enviam connectedPhone.
+    console.warn('[Z-API] resolveKey: connectedPhone ausente no payload — verifique a versão/configuração da instância Z-API. phone:', clean(payload.phone).slice(-8) || '(vazio)')
+  }
   const myTail = myDigits ? tail11(myDigits) : ''
   const isMyNumber = (d) => myTail && d && tail11(d) === myTail
 
@@ -622,10 +630,20 @@ exports.receberZapi = async (req, res) => {
         payload?.video != null || payload?.videoUrl != null ||
         payload?.document != null || payload?.documentUrl != null ||
         payload?.sticker != null || payload?.stickerUrl != null ||
+        // Tipos extras que a Z-API envia como ReceivedCallback sem campo de texto/mídia
+        payload?.reaction != null ||
+        payload?.location != null ||
+        payload?.contact != null  ||
+        payload?.ptv != null      ||
         // Mensagem enviada pelo celular (espelhamento): tratar como conteúdo para gravar no sistema
         (payloadFromMe && (payload?.messageId || payload?.zaapId || (Array.isArray(payload?.ids) && payload.ids.length > 0)))
 
-      const STATUS_VALUE_KEYWORDS = ['read', 'received', 'played']
+      // isStatusCallback: SOMENTE quando o payload NÃO tem conteúdo de mensagem E o tipo é
+      // explicitamente de status (MessageStatusCallback, ReadCallback, etc.) OU o status é
+      // read/played (nunca "received" isolado, pois ReceivedCallback envia status="RECEIVED").
+      // ATENÇÃO: "received" como status NÃO qualifica sozinho — ReceivedCallback também tem
+      // status="RECEIVED" mas é uma mensagem real. Apenas "read" e "played" são exclusivos de status.
+      const STATUS_ONLY_KEYWORDS = ['read', 'played']
       const isStatusCallback =
         !hasMessageContent &&
         (payloadType === 'messagestatuscallback' ||
@@ -633,7 +651,7 @@ exports.receberZapi = async (req, res) => {
           payloadType === 'readcallback' ||
           payloadType === 'read_callback' ||
           payloadType === 'receivedcallback_ack' ||
-          (STATUS_VALUE_KEYWORDS.includes(payloadStatusRaw.toLowerCase()) && (payload?.messageId || payload?.zaapId)))
+          (STATUS_ONLY_KEYWORDS.includes(payloadStatusRaw.toLowerCase()) && (payload?.messageId || payload?.zaapId)))
 
       if (isStatusCallback) {
         const msgId = payload?.messageId ?? payload?.zaapId ?? null
@@ -1495,13 +1513,14 @@ exports.receberZapi = async (req, res) => {
       // Status canônico para os ticks no frontend (sent, delivered, read, pending, erro, played)
       const rawStatus = (mensagemSalva.status_mensagem ?? mensagemSalva.status ?? '').toString().toLowerCase()
       const canon = rawStatus === 'enviada' || rawStatus === 'enviado' ? 'sent' : (rawStatus === 'entregue' || rawStatus === 'received' ? 'delivered' : (rawStatus || (fromMe ? 'sent' : 'delivered')))
-      const payload = {
+      // Nota: renomeado de 'payload' para 'emitPayload' para evitar shadowing da variável de loop
+      const emitPayload = {
         ...mensagemSalva,
         conversa_id: mensagemSalva.conversa_id ?? conversa_id,
         status: canon,
         status_mensagem: canon
       }
-      io.to(rooms).emit('nova_mensagem', payload)
+      io.to(rooms).emit('nova_mensagem', emitPayload)
       io.to(`empresa_${company_id}`).emit('atualizar_conversa', { id: conversa_id })
       io.to(`empresa_${company_id}`).emit('conversa_atualizada', { id: conversa_id })
       if (departamento_id != null) {
@@ -1624,7 +1643,7 @@ exports.statusZapi = async (req, res) => {
       if (!messageId) continue
       const idStr = String(messageId)
 
-      // 1) Atualiza por whatsapp_id
+      // 1) Atualiza por (company_id, whatsapp_id) — match exato
       let { data: msg } = await supabase
         .from('mensagens')
         .update({ status: statusNorm })
@@ -1633,15 +1652,28 @@ exports.statusZapi = async (req, res) => {
         .select('id, conversa_id, company_id')
         .maybeSingle()
 
-      // 2) Fallback: sem filtro company_id
-      if (!msg) {
-        const { data: fallbackMsg } = await supabase
+      // 2) Fallback: Z-API às vezes trunca o ID no status callback.
+      //    Tenta prefixo (primeiros 20 chars) ainda dentro do company_id (sem cross-tenant).
+      if (!msg && idStr.length >= 20) {
+        const prefix = idStr.slice(0, 20)
+        const { data: prefixRows } = await supabase
           .from('mensagens')
-          .update({ status: statusNorm })
-          .eq('whatsapp_id', idStr)
-          .select('id, conversa_id, company_id')
-          .maybeSingle()
-        msg = fallbackMsg || null
+          .select('id, conversa_id, company_id, whatsapp_id')
+          .eq('company_id', company_id)
+          .ilike('whatsapp_id', `${prefix}%`)
+          .order('id', { ascending: false })
+          .limit(1)
+        const candidate = Array.isArray(prefixRows) && prefixRows[0] ? prefixRows[0] : null
+        if (candidate?.id) {
+          const { data: patched } = await supabase
+            .from('mensagens')
+            .update({ status: statusNorm })
+            .eq('company_id', company_id)
+            .eq('id', candidate.id)
+            .select('id, conversa_id, company_id')
+            .maybeSingle()
+          msg = patched || null
+        }
       }
 
       if (msg) {

@@ -162,12 +162,17 @@ exports.login = async (req, res) => {
   try {
     const { email, senha } = req.body
 
-    // Validação básica
+    // Validação e sanitização de entrada
     if (!email || !senha) {
       return res.status(400).json({ error: 'Email e senha obrigatórios' })
     }
-
-    const emailNorm = String(email).trim().toLowerCase()
+    const emailNorm = String(email).trim().toLowerCase().slice(0, 320)
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailNorm)) {
+      return res.status(400).json({ error: 'Email inválido' })
+    }
+    if (String(senha).length > 200) {
+      return res.status(400).json({ error: 'Credenciais inválidas' })
+    }
 
     // Busca usuário pelo email
     const { data: usuario, error } = await supabase

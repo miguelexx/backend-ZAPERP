@@ -135,7 +135,15 @@ async function obterUnreadMap({ company_id, usuario_id }) {
 
 /**
  * Incrementa unread para todos os usuários da empresa quando chega mensagem de entrada (in).
- * Roda em background para não bloquear o webhook. Sincroniza com a lista ao recarregar.
+ * Roda em background para não bloquear o webhook.
+ *
+ * Usa RPC `increment_conversa_unreads` para operação atômica com
+ * INSERT ... ON CONFLICT DO UPDATE SET unread_count = unread_count + 1.
+ * Isso evita a race condition de read-modify-write quando duas mensagens chegam
+ * simultaneamente e o contador não seria incrementado corretamente.
+ *
+ * A função RPC deve existir no banco (migration 20250225000000_production_hardening.sql).
+ * Fallback para o método leitura-escrita se o RPC não existir ainda.
  */
 async function incrementarUnreadParaConversa(company_id, conversa_id) {
   try {
@@ -146,30 +154,47 @@ async function incrementarUnreadParaConversa(company_id, conversa_id) {
       .eq('ativo', true)
     if (!Array.isArray(usuarios) || usuarios.length === 0) return
 
+    const cid = Number(company_id)
+    const convId = Number(conversa_id)
+    const usuarioIds = usuarios.map((u) => Number(u.id))
+
+    // Tenta o RPC atômico primeiro
+    const { error: rpcErr } = await supabase.rpc('increment_conversa_unreads', {
+      p_company_id: cid,
+      p_conversa_id: convId,
+      p_usuario_ids: usuarioIds,
+    })
+
+    if (!rpcErr) return
+
+    // Fallback: se o RPC não existir no banco ainda (PGRST202 = function not found),
+    // usa o método leitura-escrita. Não é atômico mas funciona para volumes normais.
+    const isNotFound = String(rpcErr.code || '').includes('PGRST202') ||
+      String(rpcErr.message || '').includes('function') ||
+      String(rpcErr.message || '').includes('not exist')
+
+    if (!isNotFound) {
+      console.warn('incrementarUnreadParaConversa rpc error:', rpcErr?.message || rpcErr)
+    }
+
+    const now = new Date().toISOString()
     const { data: existentes } = await supabase
       .from('conversa_unreads')
       .select('id, usuario_id, unread_count')
-      .eq('company_id', Number(company_id))
-      .eq('conversa_id', Number(conversa_id))
+      .eq('company_id', cid)
+      .eq('conversa_id', convId)
     const byUser = new Map((existentes || []).map((r) => [Number(r.usuario_id), r]))
 
-    for (const u of usuarios) {
-      const uid = Number(u.id)
+    for (const uid of usuarioIds) {
       const row = byUser.get(uid)
       if (row) {
         await supabase
           .from('conversa_unreads')
-          .update({
-            unread_count: Number(row.unread_count || 0) + 1,
-            updated_at: new Date().toISOString()
-          })
+          .update({ unread_count: Number(row.unread_count || 0) + 1, updated_at: now })
           .eq('id', row.id)
       } else {
         await supabase.from('conversa_unreads').insert({
-          company_id: Number(company_id),
-          conversa_id: Number(conversa_id),
-          usuario_id: uid,
-          unread_count: 1
+          company_id: cid, conversa_id: convId, usuario_id: uid, unread_count: 1
         })
       }
     }
