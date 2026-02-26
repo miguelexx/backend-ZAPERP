@@ -14,13 +14,26 @@ const webhookZapiController = require('../controllers/webhookZapiController')
 const { rejectWrongZapiInstance } = require('../middleware/webhookAuth')
 const requireWebhookToken = require('../middleware/requireWebhookToken')
 
-// Loga TODA requisição POST que chega — para diagnosticar chamadas da Z-API
-// Assim você vê no PM2/Docker se a Z-API está batendo no backend (qualquer réplica).
+// Log ANTES de qualquer validação: método, URL, headers e body size.
+// Ajuda a ver se: (1) o body chega vazio por parser/headers, (2) path está diferente (nginx prefix).
 router.use((req, res, next) => {
   if (req.method === 'POST') {
     const ip = req.ip || req.socket?.remoteAddress || '?'
-    const instanceId = req.body?.instanceId != null ? String(req.body.instanceId).slice(0, 20) : '(vazio)'
-    console.log('[Z-API] POST', req.path || '/', '| IP:', ip, '| instanceId:', instanceId)
+    const method = req.method
+    const url = req.originalUrl || req.url || req.path || '/'
+    const contentType = req.get('content-type') || '(vazio)'
+    const userAgent = req.get('user-agent') || '(vazio)'
+    const contentLength = req.get('content-length') != null ? req.get('content-length') : '(vazio)'
+    const bodyKeys = req.body && typeof req.body === 'object' ? Object.keys(req.body).length : 0
+    console.log('[Z-API] INCOMING:', {
+      method,
+      url,
+      ip,
+      'content-type': contentType,
+      'content-length': contentLength,
+      'user-agent': userAgent?.slice(0, 60),
+      bodyKeys
+    })
   }
   next()
 })
