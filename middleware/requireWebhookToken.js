@@ -11,6 +11,7 @@
  *   2. Query   ?token=<token>             ← compatibilidade Z-API (appenda na URL registrada)
  *
  * Logging: registra rejeições sem expor o valor do token recebido.
+ * Diagnóstico: rejeições são gravadas no buffer _rejectedLog do webhookZapiController.
  */
 
 const crypto = require('crypto')
@@ -46,14 +47,30 @@ function requireWebhookToken(req, res, next) {
     req.get('X-Webhook-Token') || req.query?.token || ''
   ).trim()
 
-  if (!incoming) {
-    console.warn('[WEBHOOK_REJECTED] Token ausente —', req.method, req.path, '| IP:', req.ip || '?')
-    return res.status(401).json({ error: 'Token do webhook ausente' })
-  }
+  const motivo = !incoming ? 'token_ausente' : 'token_invalido'
 
-  if (!timingSafeEqual(incoming, expected)) {
-    console.warn('[WEBHOOK_REJECTED] Token inválido —', req.method, req.path, '| IP:', req.ip || '?')
-    return res.status(401).json({ error: 'Token do webhook inválido' })
+  if (!incoming || !timingSafeEqual(incoming, expected)) {
+    const logEntry = {
+      motivo,
+      method: req.method,
+      path: req.path,
+      ip: req.ip || '?',
+      // Mostra apenas se o token veio ou não, sem expor o valor
+      token_recebido: incoming ? `(${incoming.length} chars)` : '(nenhum)',
+      body_preview: req.body ? JSON.stringify(req.body).slice(0, 300) : '(vazio)',
+    }
+    const label = motivo === 'token_ausente' ? 'Token ausente' : 'Token inválido'
+    console.warn(`[WEBHOOK_REJECTED] ${label} — ${req.method} ${req.path} | IP: ${req.ip || '?'}`)
+    console.warn(`[WEBHOOK_REJECTED] 💡 Dica: URL correta = APP_URL/webhooks/zapi${req.path === '/' ? '' : req.path}?token=<ZAPI_WEBHOOK_TOKEN>`)
+
+    // Registra no buffer de diagnóstico do webhookZapiController
+    try {
+      const ctrl = require('../controllers/webhookZapiController')
+      if (ctrl._logRejected) ctrl._logRejected(logEntry)
+    } catch (_) {}
+
+    const statusCode = motivo === 'token_ausente' ? 401 : 401
+    return res.status(statusCode).json({ error: motivo === 'token_ausente' ? 'Token do webhook ausente' : 'Token do webhook inválido' })
   }
 
   return next()

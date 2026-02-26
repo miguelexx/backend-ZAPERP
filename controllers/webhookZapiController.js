@@ -17,12 +17,20 @@ const { incrementarUnreadParaConversa } = require('./chatController')
 const COMPANY_ID = Number(process.env.WEBHOOK_COMPANY_ID || 1)
 const WHATSAPP_DEBUG = String(process.env.WHATSAPP_DEBUG || '').toLowerCase() === 'true'
 
-// Buffer em memória das últimas 20 requisições webhook recebidas (diagnóstico)
+// Buffer em memória das últimas 30 requisições webhook recebidas (diagnóstico)
 const _webhookLog = []
 function _logWebhook(entry) {
   _webhookLog.unshift({ ts: new Date().toISOString(), ...entry })
-  if (_webhookLog.length > 20) _webhookLog.pop()
+  if (_webhookLog.length > 30) _webhookLog.pop()
 }
+
+// Buffer separado para requisições REJEITADAS (token ausente/inválido) — diagnóstico de configuração
+const _rejectedLog = []
+function _logRejected(entry) {
+  _rejectedLog.unshift({ ts: new Date().toISOString(), ...entry })
+  if (_rejectedLog.length > 20) _rejectedLog.pop()
+}
+exports._logRejected = _logRejected
 
 /** Detecta se o payload é de um grupo (remoteJid @g.us, isGroup ou tipo grupo). */
 function isGroupPayload(payload) {
@@ -508,13 +516,33 @@ exports.testarZapi = (req, res) => {
   })
 }
 
-/** GET /webhooks/zapi/debug — mostra as últimas requisições recebidas (diagnóstico de mobile/fromMe). */
+/** GET /webhooks/zapi/debug — diagnóstico completo: webhooks recebidos, rejeitados e configuração. */
 exports.debugZapi = (req, res) => {
+  const appUrl = (process.env.APP_URL || '').replace(/\/$/, '')
+  const token = String(process.env.ZAPI_WEBHOOK_TOKEN || '').trim()
+  const tokenSuffix = token ? `?token=${encodeURIComponent(token)}` : '(SEM TOKEN CONFIGURADO)'
   return res.status(200).json({
     ok: true,
-    total_recebidos: _webhookLog.length,
-    debug_mode: WHATSAPP_DEBUG,
-    ultimos_webhooks: _webhookLog
+    servidor: {
+      app_url: appUrl || '(não definido)',
+      zapi_instance_id: String(process.env.ZAPI_INSTANCE_ID || '').slice(0, 8) + '...',
+      webhook_token_configurado: !!token,
+      whatsapp_debug: WHATSAPP_DEBUG,
+      company_id: COMPANY_ID,
+    },
+    urls_esperadas: {
+      recebidas: `${appUrl}/webhooks/zapi${tokenSuffix}`,
+      status:    `${appUrl}/webhooks/zapi/status${tokenSuffix}`,
+      conexao:   `${appUrl}/webhooks/zapi/connection${tokenSuffix}`,
+      presenca:  `${appUrl}/webhooks/zapi/presence${tokenSuffix}`,
+    },
+    diagnostico: {
+      total_recebidos: _webhookLog.length,
+      total_rejeitados: _rejectedLog.length,
+      instrucao: 'Se total_rejeitados > 0, o Z-API está chamando URLs sem token. Verifique o painel Z-API e garanta que as URLs acima estão configuradas.',
+    },
+    ultimos_webhooks_recebidos: _webhookLog,
+    ultimos_webhooks_rejeitados: _rejectedLog,
   })
 }
 
@@ -522,25 +550,30 @@ exports.receberZapi = async (req, res) => {
   try {
     const body = req.body || {}
 
-    // Log SEMPRE (independente de WHATSAPP_DEBUG) — essencial para diagnóstico em produção
+    // Log SEMPRE — essencial para diagnóstico em produção
     const bodyPreview = {
-      type: body.type || body.event || '(vazio)',
-      phone: (body.phone || '(vazio)').toString().slice(-12),
-      fromMe: body.fromMe ?? body.key?.fromMe ?? '?',
+      type:       body.type || body.event || '(vazio)',
+      phone:      (body.phone || '(vazio)').toString().slice(-12),
+      fromMe:     body.fromMe ?? body.key?.fromMe ?? '?',
       instanceId: body.instanceId != null ? String(body.instanceId).slice(0, 12) : '(vazio)',
-      hasText: !!(body.text?.message || body.message || body.body),
-      ip: req.ip || req.socket?.remoteAddress || '?'
+      hasText:    !!(body.text?.message || body.message || body.body),
+      hasMedia:   !!(body.image || body.audio || body.video || body.document || body.sticker),
+      status:     body.status || body.ack || '(sem status)',
+      ip:         req.ip || req.socket?.remoteAddress || '?'
     }
     console.log('[Z-API] ▶ webhook recebido:', JSON.stringify(bodyPreview))
 
     // Salva no buffer de diagnóstico (GET /webhooks/zapi/debug)
+    // rawBody: sempre salvo (truncado em 600 chars) para permitir diagnóstico mesmo sem WHATSAPP_DEBUG
     _logWebhook({
-      type: bodyPreview.type,
-      phone: bodyPreview.phone,
-      fromMe: bodyPreview.fromMe,
+      type:    bodyPreview.type,
+      phone:   bodyPreview.phone,
+      fromMe:  bodyPreview.fromMe,
       hasText: bodyPreview.hasText,
-      ip: bodyPreview.ip,
-      rawBody: WHATSAPP_DEBUG ? JSON.stringify(body).slice(0, 800) : undefined
+      hasMedia: bodyPreview.hasMedia,
+      status:  bodyPreview.status,
+      ip:      bodyPreview.ip,
+      rawBody: JSON.stringify(body).slice(0, 600)
     })
 
     const payloads = getPayloads(body)
@@ -652,6 +685,9 @@ exports.receberZapi = async (req, res) => {
           payloadType === 'read_callback' ||
           payloadType === 'receivedcallback_ack' ||
           (STATUS_ONLY_KEYWORDS.includes(payloadStatusRaw.toLowerCase()) && (payload?.messageId || payload?.zaapId)))
+
+      // Log de pipeline — sempre visível, para rastrear o que chega e como é classificado
+      console.log(`[Z-API] 🔍 pipeline: type="${payloadType || '(vazio)'}" status="${payloadStatusRaw || '(vazio)'}" fromMe=${payloadFromMe} hasContent=${hasMessageContent} isStatus=${isStatusCallback} phone=${String(payload?.phone || '').slice(-10) || '(vazio)'}`)
 
       if (isStatusCallback) {
         const msgId = payload?.messageId ?? payload?.zaapId ?? null
@@ -831,19 +867,17 @@ exports.receberZapi = async (req, res) => {
         chatPhoto
       } = extracted
 
-      // ── Log de diagnóstico (sempre para fromMe; debug mode para os demais) ──
-      if (WHATSAPP_DEBUG || fromMe) {
-        console.log('[Z-API] resolveKey', {
-          type: payload?.type ?? payload?.event ?? '(sem type)',
-          fromMe,
-          isGroup,
-          phone_raw: (payload?.phone ?? '').toString().slice(-14),
-          connectedPhone: (payload?.connectedPhone ?? '').toString().slice(-6),
-          resolvedKey: phone ? ('...' + String(phone).slice(-8)) : '(vazio — será DROPPED)',
-          messageId: messageId ? String(messageId).slice(0, 20) : null,
-          debugReason,
-        })
-      }
+      // ── Log de resolução de chave — SEMPRE visível (crítico para diagnóstico) ──
+      console.log('[Z-API] 📞 resolveKey:', {
+        type: payload?.type ?? payload?.event ?? '(sem type)',
+        fromMe,
+        isGroup,
+        phone_raw: (payload?.phone ?? '').toString().slice(-14) || '(vazio)',
+        connectedPhone_tail: (payload?.connectedPhone ?? '').toString().slice(-6) || '(ausente)',
+        resolvedKey: phone ? ('...' + String(phone).slice(-8)) : '❌ VAZIO → SERÁ DROPADO',
+        messageId: messageId ? String(messageId).slice(0, 20) : null,
+        reason: debugReason,
+      })
 
       if (!phone) {
         // Log SEMPRE do payload completo para diagnóstico — crítico para entender o que Z-API envia
