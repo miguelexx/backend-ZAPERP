@@ -64,18 +64,26 @@ if (process.env.TRUST_PROXY === '1' || process.env.NODE_ENV === 'production') {
   app.set('trust proxy', 1)
 }
 
-// CORS: lista explícita de origens permitidas via CORS_ORIGINS; inclui APP_URL como fallback seguro.
+// CORS: lista explícita de origens permitidas via CORS_ORIGINS; inclui APP_URL como fallback seguro
+// e, adicionalmente, QUALQUER subdomínio do mesmo domínio raiz da APP_URL (ex.: zaperp / zaperpapi).
 const allowedOrigins = String(process.env.CORS_ORIGINS || '')
   .split(',')
   .map((s) => s.trim())
   .filter(Boolean)
 
 let appOrigin = null
+let appRootDomain = null
 try {
-  const u = new URL(String(process.env.APP_URL || '').trim())
-  appOrigin = u?.origin || null
+  const url = new URL(String(process.env.APP_URL || '').trim())
+  appOrigin = url.origin
+  const hostParts = String(url.hostname || '').split('.').filter(Boolean)
+  if (hostParts.length >= 2) {
+    // exemplo: zaperp.wmsistemas.inf.br → wmsistemas.inf.br
+    appRootDomain = hostParts.slice(-2).join('.')
+  }
 } catch (_) {
   appOrigin = null
+  appRootDomain = null
 }
 
 if (appOrigin && !allowedOrigins.includes(appOrigin)) {
@@ -87,7 +95,27 @@ app.use(
     origin(origin, cb) {
       // requests sem Origin (curl/postman) devem passar
       if (!origin) return cb(null, true)
+
+      // 1) lista explícita de origens permitidas
       if (allowedOrigins.includes(origin)) return cb(null, true)
+
+      // 2) qualquer subdomínio do mesmo domínio raiz da APP_URL
+      //    Ex.: APP_URL = https://zaperp.wmsistemas.inf.br
+      //    → aceita https://zaperp.wmsistemas.inf.br e https://zaperpapi.wmsistemas.inf.br
+      if (appRootDomain) {
+        try {
+          const { hostname } = new URL(origin)
+          if (
+            hostname === appRootDomain ||
+            hostname.endsWith(`.${appRootDomain}`)
+          ) {
+            return cb(null, true)
+          }
+        } catch (_) {
+          // Origin inválida → trata como não permitida
+        }
+      }
+
       return cb(new Error('Not allowed by CORS'))
     },
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
