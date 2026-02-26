@@ -64,8 +64,27 @@ if (process.env.TRUST_PROXY === '1' || process.env.NODE_ENV === 'production') {
   app.set('trust proxy', 1)
 }
 
-// CORS: lista explícita de origens permitidas via CORS_ORIGINS; inclui APP_URL como fallback seguro
-// e, adicionalmente, QUALQUER subdomínio do mesmo domínio raiz da APP_URL (ex.: zaperp / zaperpapi).
+// JSON parser (precisa vir antes dos webhooks para ter req.body)
+app.use(express.json({
+  verify: (req, res, buf) => {
+    try { req.rawBody = buf } catch (_) {}
+  }
+}))
+
+// =====================================================
+// Webhooks ANTES do CORS — Z-API/Meta enviam Origin e seriam bloqueados por CORS.
+// Registrando aqui, POST /webhooks/zapi (e /webhook*) nunca passam pelo middleware CORS.
+// =====================================================
+const webhookRoutes = require('./routes/webhookRoutes')
+const webhookZapiRoutes = require('./routes/webhookZapiRoutes')
+const { webhookLimiter } = require('./middleware/rateLimit')
+
+app.use('/webhook', webhookLimiter, webhookRoutes)
+app.use('/webhook/meta', webhookLimiter, webhookRoutes)
+app.use('/webhooks/zapi', webhookZapiRoutes)
+app.use('/webhook/zapi', webhookZapiRoutes)
+
+// CORS: só para rotas que ainda não foram tratadas (front/API). Webhooks já foram atendidos acima.
 const allowedOrigins = String(process.env.CORS_ORIGINS || '')
   .split(',')
   .map((s) => s.trim())
@@ -78,7 +97,6 @@ try {
   appOrigin = url.origin
   const hostParts = String(url.hostname || '').split('.').filter(Boolean)
   if (hostParts.length >= 2) {
-    // exemplo: zaperp.wmsistemas.inf.br → wmsistemas.inf.br
     appRootDomain = hostParts.slice(-2).join('.')
   }
 } catch (_) {
@@ -93,29 +111,16 @@ if (appOrigin && !allowedOrigins.includes(appOrigin)) {
 app.use(
   cors({
     origin(origin, cb) {
-      // requests sem Origin (curl/postman) devem passar
       if (!origin) return cb(null, true)
-
-      // 1) lista explícita de origens permitidas
       if (allowedOrigins.includes(origin)) return cb(null, true)
-
-      // 2) qualquer subdomínio do mesmo domínio raiz da APP_URL
-      //    Ex.: APP_URL = https://zaperp.wmsistemas.inf.br
-      //    → aceita https://zaperp.wmsistemas.inf.br e https://zaperpapi.wmsistemas.inf.br
       if (appRootDomain) {
         try {
           const { hostname } = new URL(origin)
-          if (
-            hostname === appRootDomain ||
-            hostname.endsWith(`.${appRootDomain}`)
-          ) {
+          if (hostname === appRootDomain || hostname.endsWith(`.${appRootDomain}`)) {
             return cb(null, true)
           }
-        } catch (_) {
-          // Origin inválida → trata como não permitida
-        }
+        } catch (_) {}
       }
-
       return cb(new Error('Not allowed by CORS'))
     },
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
@@ -123,12 +128,6 @@ app.use(
     credentials: true,
   })
 )
-// Captura rawBody para validação de assinatura (webhooks)
-app.use(express.json({
-  verify: (req, res, buf) => {
-    try { req.rawBody = buf } catch (_) {}
-  }
-}))
 
 // Arquivos estáticos (uploads: imagens, áudios, etc.)
 // Segurança:
@@ -167,8 +166,6 @@ if (process.env.NODE_ENV !== 'production') {
   })
 }
 
-const webhookRoutes = require('./routes/webhookRoutes')
-const webhookZapiRoutes = require('./routes/webhookZapiRoutes')
 const userRoutes = require('./routes/userRoutes')
 const chatRoutes = require('./routes/chatRoutes')
 const dashboardRoutes = require('./routes/dashboardRoutes')
@@ -176,20 +173,14 @@ const iaRoutes = require('./routes/iaRoutes')
 const configRoutes = require('./routes/configRoutes')
 const clienteRoutes = require('./routes/clienteRoutes')
 const jobsRoutes = require('./routes/jobsRoutes')
-const { webhookLimiter, apiLimiter } = require('./middleware/rateLimit')
+const { apiLimiter } = require('./middleware/rateLimit')
 
+// Webhooks já registrados antes do CORS (evita 403 Origin)
 app.use('/dashboard', dashboardRoutes)
 app.use('/jobs', jobsRoutes)
 app.use('/ia', iaRoutes)
 app.use('/config', configRoutes)
 app.use('/clientes', clienteRoutes)
-// Webhooks (rate limit dedicado por IP)
-// Meta (Cloud API)
-app.use('/webhook', webhookLimiter, webhookRoutes)
-app.use('/webhook/meta', webhookLimiter, webhookRoutes) // alias solicitado
-// Z-API: SEM rate limit — callbacks são server-to-server; 60/min pode bloquear e devolver 429 antes do log
-app.use('/webhooks/zapi', webhookZapiRoutes)
-app.use('/webhook/zapi', webhookZapiRoutes) // alias solicitado
 app.use('/usuarios', userRoutes)
 app.use('/chats', chatRoutes)
 app.use('/tags', tagsRoutes)
