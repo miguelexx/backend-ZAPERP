@@ -11,7 +11,7 @@ const supabase = require('../config/supabase')
 const { getProvider } = require('../services/providers')
 const { syncContactFromZapi } = require('../services/zapiSyncContact')
 const { normalizePhoneBR, possiblePhonesBR, normalizeGroupIdForStorage } = require('../helpers/phoneHelper')
-const { getCanonicalPhone, findOrCreateConversation } = require('../helpers/conversationSync')
+const { getCanonicalPhone, findOrCreateConversation, mergeConversasIntoCanonico } = require('../helpers/conversationSync')
 const { incrementarUnreadParaConversa } = require('./chatController')
 
 const COMPANY_ID = Number(process.env.WEBHOOK_COMPANY_ID || 1)
@@ -1045,32 +1045,93 @@ exports.receberZapi = async (req, res) => {
       }
     }
 
-    // 2) Conversa — findOrCreateConversation garante UMA conversa por contato.
-    //    Telefone é normalizado internamente; busca por variantes 12/13 dígitos.
-    //    fromMe=true e fromMe=false para o MESMO contato sempre encontram a mesma conversa.
+    // 2) Conversa — uma única conversa por contato; quando Z-API envia chatLid, unificar por chat_lid
+    //    para que "recebido" (phone real) e "enviado pelo celular" (phone @lid) caiam no mesmo chat.
     let conversa_id = null
     let departamento_id = null
     let isNewConversation = false
 
-    try {
-      const syncResult = await findOrCreateConversation(supabase, {
-        company_id,
-        phone,
-        cliente_id: isGroup ? null : cliente_id,
-        isGroup,
-        nomeGrupo,
-        chatPhoto,
-        logPrefix: `[Z-API fromMe=${fromMe}]`,
-      })
+    const lidRaw = String(payload?.chatLid ?? payload?.phone ?? '').trim()
+    const lidPart = lidRaw.endsWith('@lid') ? lidRaw.replace(/@lid$/i, '').trim() : (phone.startsWith('lid:') ? phone.slice(4) : null)
 
-      if (!syncResult) {
-        console.error('[Z-API] findOrCreateConversation retornou null para phone:', phone)
-        return res.status(500).json({ error: 'Não foi possível identificar conversa para o número' })
+    try {
+      if (lidPart) {
+        const { data: convByLid } = await supabase
+          .from('conversas')
+          .select('id, departamento_id, telefone')
+          .eq('company_id', company_id)
+          .eq('chat_lid', lidPart)
+          .maybeSingle()
+
+        const hasRealPhone = phone && !phone.startsWith('lid:')
+        let convByPhone = null
+        if (hasRealPhone) {
+          const canonical = getCanonicalPhone(phone)
+          const variants = canonical ? possiblePhonesBR(canonical) : []
+          const list = variants.length > 0 ? variants : [phone]
+          const { data: rows } = await supabase
+            .from('conversas')
+            .select('id, departamento_id, telefone')
+            .eq('company_id', company_id)
+            .in('telefone', list)
+            .order('ultima_atividade', { ascending: false })
+            .limit(1)
+          convByPhone = Array.isArray(rows) && rows[0] ? rows[0] : null
+        }
+
+        if (convByLid && convByPhone && convByLid.id !== convByPhone.id) {
+          await mergeConversasIntoCanonico(supabase, company_id, convByPhone.id, [convByLid.id])
+          await supabase.from('conversas').update({ chat_lid: lidPart }).eq('id', convByPhone.id).eq('company_id', company_id)
+          conversa_id = convByPhone.id
+          departamento_id = convByPhone.departamento_id ?? null
+          isNewConversation = false
+          console.log('[Z-API] 🔗 Unificado por chat_lid: conv LID mesclada em conv telefone', { conversa_id, lidPart })
+        } else if (convByLid) {
+          if (hasRealPhone) {
+            const canonical = getCanonicalPhone(phone)
+            if (canonical) {
+              await supabase.from('conversas').update({ telefone: canonical, chat_lid: lidPart }).eq('id', convByLid.id).eq('company_id', company_id)
+            } else {
+              await supabase.from('conversas').update({ chat_lid: lidPart }).eq('id', convByLid.id).eq('company_id', company_id)
+            }
+          } else {
+            await supabase.from('conversas').update({ chat_lid: lidPart }).eq('id', convByLid.id).eq('company_id', company_id)
+          }
+          conversa_id = convByLid.id
+          departamento_id = convByLid.departamento_id ?? null
+          isNewConversation = false
+        } else if (convByPhone) {
+          await supabase.from('conversas').update({ chat_lid: lidPart }).eq('id', convByPhone.id).eq('company_id', company_id)
+          conversa_id = convByPhone.id
+          departamento_id = convByPhone.departamento_id ?? null
+          isNewConversation = false
+        }
       }
 
-      conversa_id = syncResult.conversa.id
-      departamento_id = syncResult.conversa.departamento_id ?? null
-      isNewConversation = syncResult.created
+      if (conversa_id == null) {
+        const syncResult = await findOrCreateConversation(supabase, {
+          company_id,
+          phone,
+          cliente_id: isGroup ? null : cliente_id,
+          isGroup,
+          nomeGrupo,
+          chatPhoto,
+          logPrefix: `[Z-API fromMe=${fromMe}]`,
+        })
+
+        if (!syncResult) {
+          console.error('[Z-API] findOrCreateConversation retornou null para phone:', phone)
+          return res.status(500).json({ error: 'Não foi possível identificar conversa para o número' })
+        }
+
+        conversa_id = syncResult.conversa.id
+        departamento_id = syncResult.conversa.departamento_id ?? null
+        isNewConversation = syncResult.created
+
+        if (lidPart) {
+          await supabase.from('conversas').update({ chat_lid: lidPart }).eq('id', conversa_id).eq('company_id', company_id)
+        }
+      }
 
       // Atualiza foto do grupo quando disponível no payload
       if (isGroup && chatPhoto && !isNewConversation) {
