@@ -247,6 +247,17 @@ function resolveConversationKeyFromZapi(payload) {
     }
   }
 
+  // ─── LID (espelhamento: mensagem enviada pelo celular pode vir só com phone/chatLid @lid) ───
+  // Z-API às vezes envia phone/chatLid como "280396956696801@lid" sem número real.
+  // Usamos chave sintética "lid:XXXX" para encontrar/criar a mesma conversa e registrar a mensagem no front.
+  const lidRaw = clean(payload.phone) || clean(payload.chatLid) || ''
+  if (lidRaw.endsWith('@lid')) {
+    const lidPart = lidRaw.replace(/@lid$/i, '').trim()
+    if (lidPart) {
+      return { key: `lid:${lidPart}`, isGroup: false, participantPhone: '', debugReason: 'from payload.phone/chatLid (@lid)' }
+    }
+  }
+
   // ─── Sem destino válido ───
   const candidateSummary = {
     phone: payload.phone,

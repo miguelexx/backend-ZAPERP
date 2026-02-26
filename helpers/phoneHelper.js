@@ -49,6 +49,8 @@ function possiblePhonesBR(phone) {
   const s = String(phone || '').trim()
   if (!s) return []
   if (s.endsWith('@g.us')) return [s]
+  // Chave sintética LID (espelhamento): uma única variante
+  if (s.startsWith('lid:') && s.length > 4) return [s]
 
   const norm = normalizePhoneBR(s)
   const digits = String(norm || '').replace(/\D/g, '')

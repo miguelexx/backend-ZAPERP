@@ -20,6 +20,10 @@ function getCanonicalPhone(phone) {
   if (!phone) return ''
   const s = String(phone).trim()
 
+  // Chave sintética LID: mensagens enviadas pelo celular (espelhamento) podem vir só com phone @lid.
+  // Aceitar "lid:XXXX" para encontrar/criar a mesma conversa e exibir no front.
+  if (s.startsWith('lid:') && s.length > 4) return s
+
   // Grupos: preservar JID completo
   if (s.endsWith('@g.us')) return s
 
@@ -29,11 +33,9 @@ function getCanonicalPhone(phone) {
     phoneStr = s.replace('@s.whatsapp.net', '')
   }
 
-  // IDs internos (@lid, @broadcast, etc.) NUNCA viram telefone
-  if (/@(lid|broadcast)$/i.test(s)) {
-    console.warn('[getCanonicalPhone] Identificador interno ignorado (lid/broadcast):', s)
-    return ''
-  }
+  // IDs internos (@lid, @broadcast, etc.) — não converter para telefone; o controller já usa chave "lid:xxx"
+  if (/@(lid|broadcast)$/i.test(s)) return ''
+  // (removido warn: LID é tratado em resolveConversationKeyFromZapi como lid:xxx)
 
   // Só aceitamos telefone BR válido
   const norm = normalizePhoneBR(phoneStr)
