@@ -203,7 +203,33 @@ async function incrementarUnreadParaConversa(company_id, conversa_id) {
   }
 }
 
+/**
+ * Marca a conversa como lida para TODOS os usuários da empresa (zera notificação).
+ * Usado quando a mensagem é visualizada no celular (Z-API envia read/played): a notificação
+ * de mensagem nova deve sumir no sistema para todos.
+ */
+async function marcarConversaComoLidaParaTodos(company_id, conversa_id) {
+  const cid = Number(company_id)
+  const convId = Number(conversa_id)
+  if (!cid || !convId) return
+  try {
+    await supabase
+      .from('conversa_unreads')
+      .update({ unread_count: 0, updated_at: new Date().toISOString() })
+      .eq('company_id', cid)
+      .eq('conversa_id', convId)
+    await supabase
+      .from('conversas')
+      .update({ lida: true })
+      .eq('company_id', cid)
+      .eq('id', convId)
+  } catch (e) {
+    console.warn('marcarConversaComoLidaParaTodos:', e?.message || e)
+  }
+}
+
 exports.incrementarUnreadParaConversa = incrementarUnreadParaConversa
+exports.marcarConversaComoLidaParaTodos = marcarConversaComoLidaParaTodos
 
 // =====================================================
 // AUX: registrar atendimentos
@@ -315,7 +341,7 @@ exports.listarConversas = async (req, res) => {
       foto_grupo,
       clientes!conversas_cliente_fk ( id, nome, pushname, telefone, foto_perfil ),
       departamentos ( id, nome ),
-      mensagens ( texto, criado_em, direcao, tipo, url, nome_arquivo, whatsapp_id ),
+      mensagens ( texto, criado_em, direcao, tipo, url, nome_arquivo, whatsapp_id, status ),
       conversa_tags (
         tag_id,
         tags (
@@ -339,7 +365,7 @@ exports.listarConversas = async (req, res) => {
       foto_grupo,
       clientes!conversas_cliente_fk ( id, nome, pushname, telefone, foto_perfil ),
       departamentos ( id, nome ),
-      mensagens ( texto, criado_em, direcao, tipo, url, nome_arquivo, whatsapp_id ),
+      mensagens ( texto, criado_em, direcao, tipo, url, nome_arquivo, whatsapp_id, status ),
       conversa_tags (
         tag_id,
         tags (
@@ -349,6 +375,7 @@ exports.listarConversas = async (req, res) => {
         )
       )
     `
+    // Fallback mínimo mas com foto e última mensagem para não quebrar setas/fotos na UI ao atualizar
     const selectBare = `
       id,
       telefone,
@@ -360,7 +387,10 @@ exports.listarConversas = async (req, res) => {
       departamento_id,
       tipo,
       nome_grupo,
-      departamentos ( id, nome )
+      foto_grupo,
+      clientes!conversas_cliente_fk ( id, nome, pushname, telefone, foto_perfil ),
+      departamentos ( id, nome ),
+      mensagens ( texto, criado_em, direcao, tipo, url, nome_arquivo, whatsapp_id, status )
     `
 
     function buildQuery(select) {
@@ -432,10 +462,14 @@ exports.listarConversas = async (req, res) => {
       const clientesObj = Array.isArray(raw)
         ? (raw.find((cl) => cl && Number(cl.id) === Number(c.cliente_id)) || raw[0])
         : raw
-      const nomeCliente = clientesObj?.pushname ?? clientesObj?.nome ?? null
+      const nomeCliente = (clientesObj?.pushname ?? clientesObj?.nome ?? null) && String(clientesObj?.pushname ?? clientesObj?.nome ?? '').trim() ? String(clientesObj?.pushname ?? clientesObj?.nome ?? '').trim() : null
       const fotoCliente = clientesObj?.foto_perfil ?? null
       const isGroup = isGroupConversation(c)
       const ultimaMsg = Array.isArray(c.mensagens) && c.mensagens.length > 0 ? c.mensagens[0] : null
+      // Contatos não salvos (sem nome): sempre exibir o número no lugar do nome
+      const contatoNome = isGroup
+        ? (c.nome_grupo || c.telefone || 'Grupo')
+        : (nomeCliente || c.telefone || null)
       return {
         id: c.id,
         cliente_id: c.cliente_id,
@@ -448,16 +482,16 @@ exports.listarConversas = async (req, res) => {
         departamento_id: c.departamento_id,
         tipo: c.tipo,
         nome_grupo: c.nome_grupo,
-        foto_grupo: isGroup ? (c.foto_grupo || null) : null,
+        foto_grupo: isGroup ? (c.foto_grupo ?? null) : null,
         mensagens: c.mensagens,
         ultima_mensagem: ultimaMsg,
-        conversa_tags: c.conversa_tags,
+        conversa_tags: c.conversa_tags || [],
         departamentos: c.departamentos,
         is_group: isGroup,
-        contato_nome: isGroup ? (c.nome_grupo || c.telefone || 'Grupo') : (nomeCliente || c.telefone || null),
-        foto_perfil: isGroup ? null : fotoCliente,
+        contato_nome: contatoNome,
+        foto_perfil: isGroup ? null : (fotoCliente ?? null),
         setor: c.departamentos?.nome || null,
-        tags: (c.conversa_tags || []).map((ct) => ct.tags).filter(Boolean),
+        tags: (c.conversa_tags || []).map((ct) => ct?.tags).filter(Boolean),
         unread_count: unreadMap[Number(c.id)] || 0
       }
     })

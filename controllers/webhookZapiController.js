@@ -12,7 +12,7 @@ const { getProvider } = require('../services/providers')
 const { syncContactFromZapi } = require('../services/zapiSyncContact')
 const { normalizePhoneBR, possiblePhonesBR, normalizeGroupIdForStorage } = require('../helpers/phoneHelper')
 const { getCanonicalPhone, findOrCreateConversation, mergeConversasIntoCanonico } = require('../helpers/conversationSync')
-const { incrementarUnreadParaConversa } = require('./chatController')
+const { incrementarUnreadParaConversa, marcarConversaComoLidaParaTodos } = require('./chatController')
 
 const COMPANY_ID = Number(process.env.WEBHOOK_COMPANY_ID || 1)
 const WHATSAPP_DEBUG = String(process.env.WHATSAPP_DEBUG || '').toLowerCase() === 'true'
@@ -710,6 +710,15 @@ exports.receberZapi = async (req, res) => {
         if (msg) {
           emitStatusMsg(msg, statusNorm)
           console.log(`✅ Z-API status ${statusNorm.toUpperCase()} → msg ${msg.id} (conversa ${msg.conversa_id})`)
+          // Visualizou no celular (read/played): zera notificação de mensagem nova no sistema para todos
+          if (statusNorm === 'read' || statusNorm === 'played') {
+            await marcarConversaComoLidaParaTodos(COMPANY_ID, msg.conversa_id)
+            const io = req.app.get('io')
+            if (io) {
+              io.to(`empresa_${COMPANY_ID}`).emit('atualizar_conversa', { id: msg.conversa_id })
+              io.to(`empresa_${COMPANY_ID}`).emit('mensagens_lidas', { conversa_id: msg.conversa_id })
+            }
+          }
         } else {
           console.warn(`⚠️ Z-API status ${statusNorm.toUpperCase()} recebido mas messageId não encontrado: ${String(msgId).slice(0, 25)}`)
         }
@@ -1150,8 +1159,8 @@ exports.receberZapi = async (req, res) => {
             tipo: isGroup ? 'grupo' : 'cliente',
             nome_grupo: isGroup ? (nomeGrupo || null) : null,
             foto_grupo: isGroup ? (chatPhoto || null) : null,
-            contato_nome: isGroup ? (nomeGrupo || phone || 'Grupo') : (senderName || phone || null),
-            foto_perfil: isGroup ? null : (senderPhoto || null),
+            contato_nome: isGroup ? (nomeGrupo || phone || 'Grupo') : (senderName || payload?.chatName || phone || null),
+            foto_perfil: isGroup ? null : (senderPhoto || payload?.photo || null),
             unread_count: 0,
             tags: [],
           })

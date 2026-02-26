@@ -292,19 +292,289 @@ body {
 }
 
 /* ============================================
-   Áudio: centralizar conteúdo e deixar “limpo”
+   Figurinhas (stickers) — classe .sticker-message
+   Tamanho 96px–160px, proporção automática, centralizado, sem distorção
 ============================================ */
-.wa-bubble-audio {
+.sticker-message,
+.wa-bubble .sticker-message,
+[class*="message"][class*="sticker"] {
   display: flex !important;
+  align-items: center !important;
   justify-content: center !important;
+  width: fit-content !important;
+  max-width: 160px !important;
+  min-width: 96px !important;
+  height: auto !important;
+  aspect-ratio: 1 / 1 !important;
+  object-fit: contain !important;
+  object-position: center !important;
+  border-radius: 0 !important;
+  overflow: visible !important;
+  flex-shrink: 0 !important;
 }
+
+.sticker-message img,
+.wa-bubble .sticker-message img,
+.wa-bubble img[class*="sticker"],
+.wa-bubble img[alt*="figurinha"] {
+  width: auto !important;
+  height: auto !important;
+  max-width: 160px !important;
+  max-height: 160px !important;
+  min-width: 96px !important;
+  min-height: 96px !important;
+  object-fit: contain !important;
+  object-position: center !important;
+  border-radius: 0 !important;
+  display: block !important;
+  margin: 0 auto !important;
+}
+
+.wa-bubble:has(.sticker-message),
+.wa-bubble:has([class*="sticker"] img) {
+  padding: 4px 8px !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  overflow: visible !important;
+}
+
+/* ============================================
+   Áudio — classe .audio-message
+   Largura correta, alinhamento play/waveform/tempo/avatar, altura consistente
+============================================ */
+.audio-message,
+.wa-bubble-audio,
+.wa-bubble .audio-message {
+  display: flex !important;
+  align-items: center !important;
+  gap: 10px !important;
+  width: 100% !important;
+  max-width: min(300px, 85vw) !important;
+  min-width: 220px !important;
+  min-height: 48px !important;
+  padding: 6px 8px !important;
+  box-sizing: border-box !important;
+  overflow: hidden !important;
+  flex-wrap: nowrap !important;
+}
+
 .wa-bubble-audioWrap {
-  margin-left: auto !important;
-  margin-right: auto !important;
-  /* largura mais confortável (sem estourar no mobile) */
-  min-width: 210px !important;
-  max-width: min(340px, 78vw) !important;
+  margin-left: 0 !important;
+  margin-right: 0 !important;
+  min-width: 220px !important;
+  max-width: min(300px, 85vw) !important;
+  width: 100% !important;
+  display: flex !important;
+  align-items: center !important;
+  flex: 1 !important;
+  min-height: 0 !important;
 }
+
+.audio-message button[class*="play"],
+.wa-bubble-audio button,
+.wa-bubble-audio [class*="play"] {
+  flex-shrink: 0 !important;
+  width: 40px !important;
+  height: 40px !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  margin: 0 !important;
+}
+
+.audio-message [class*="waveform"],
+.wa-bubble-audio [class*="waveform"],
+.wa-bubble-audio canvas {
+  flex: 1 !important;
+  min-width: 0 !important;
+  max-height: 36px !important;
+  align-self: center !important;
+}
+
+.audio-message [class*="time"],
+.audio-message [class*="duration"],
+.wa-bubble-audio [class*="time"],
+.wa-bubble-audio [class*="duration"] {
+  flex-shrink: 0 !important;
+  font-size: 12px !important;
+  white-space: nowrap !important;
+  align-self: center !important;
+}
+
+.wa-bubble.out .audio-message,
+.wa-bubble.out .wa-bubble-audioWrap {
+  margin-left: auto !important;
+  margin-right: 0 !important;
+}
+
+.wa-bubble.in .audio-message,
+.wa-bubble.in .wa-bubble-audioWrap {
+  margin-left: 0 !important;
+  margin-right: auto !important;
+}
+
+/* ============================================
+   Imagens — classe .image-message
+   max 320x320, proporção, border-radius, centralizado, sem esticar
+============================================ */
+.image-message,
+.wa-bubble .image-message,
+.wa-bubble .image-message img,
+.wa-bubble img[class*="image"] {
+  max-width: 320px !important;
+  max-height: 320px !important;
+  width: auto !important;
+  height: auto !important;
+  object-fit: contain !important;
+  object-position: center !important;
+  border-radius: 6px !important;
+  display: block !important;
+  overflow: hidden !important;
+}
+
+.wa-bubble .image-message {
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  margin: 0 auto !important;
+}
+
+.wa-bubble .image-message img {
+  margin: 0 !important;
+  vertical-align: middle !important;
+}
+
+/* ============================================
+   Setas / menu / dropdown — canto superior direito do balão
+   Sem sobreposição com mídia, z-index e hover corretos
+============================================ */
+.wa-bubble-wrapper,
+[class*="bubble-wrapper"],
+[class*="message-row"] {
+  position: relative !important;
+  display: flex !important;
+  align-items: flex-start !important;
+  width: fit-content !important;
+  max-width: 100% !important;
+}
+
+.wa-bubble-menu,
+.wa-bubble [class*="menu"],
+.wa-bubble [class*="dropdown"],
+.wa-bubble [class*="options"],
+.wa-bubble [aria-haspopup="true"],
+.wa-bubble .message-menu,
+.wa-bubble .bubble-menu {
+  position: absolute !important;
+  top: 4px !important;
+  right: 4px !important;
+  left: auto !important;
+  bottom: auto !important;
+  z-index: 10 !important;
+  margin: 0 !important;
+  opacity: 0.7 !important;
+  transition: opacity 0.15s ease !important;
+}
+
+.wa-bubble:hover .wa-bubble-menu,
+.wa-bubble:hover [class*="menu"],
+.wa-bubble:hover [class*="dropdown"],
+.wa-bubble:hover [class*="options"],
+.wa-bubble:hover [aria-haspopup="true"] {
+  opacity: 1 !important;
+}
+
+.wa-bubble.out .wa-bubble-menu,
+.wa-bubble.out [class*="menu"],
+.wa-bubble.out [class*="dropdown"] {
+  right: 4px !important;
+  left: auto !important;
+}
+
+.wa-bubble.in .wa-bubble-menu,
+.wa-bubble.in [class*="menu"],
+.wa-bubble.in [class*="dropdown"] {
+  right: 4px !important;
+  left: auto !important;
+}
+
+/* Container do balão: espaço para o menu no canto (evita sobreposição com conteúdo) */
+.wa-bubble {
+  position: relative !important;
+  min-height: 0 !important;
+  padding-right: 28px !important;
+}
+
+.wa-bubble .sticker-message,
+.wa-bubble .image-message,
+.wa-bubble .audio-message {
+  padding-right: 0 !important;
+}
+
+/* ============================================
+   Layout geral — flexbox, consistência enviadas/recebidas, responsivo
+============================================ */
+.wa-messages,
+[class*="messages-list"],
+[class*="chat-messages"] {
+  display: flex !important;
+  flex-direction: column !important;
+  gap: 6px !important;
+  overflow-x: hidden !important;
+  overflow-y: auto !important;
+  min-height: 0 !important;
+  padding: 14px 16px 16px !important;
+  box-sizing: border-box !important;
+}
+
+.wa-message-row,
+[class*="message-row"] {
+  display: flex !important;
+  width: 100% !important;
+  max-width: 100% !important;
+  box-sizing: border-box !important;
+  min-height: 0 !important;
+}
+
+.wa-message-row.out,
+[class*="message-row"].out,
+[class*="out"] .wa-message-row {
+  justify-content: flex-end !important;
+}
+
+.wa-message-row.in,
+[class*="message-row"].in,
+[class*="in"] .wa-message-row {
+  justify-content: flex-start !important;
+}
+
+.wa-bubble {
+  max-width: min(85vw, 420px) !important;
+  min-width: 0 !important;
+  word-wrap: break-word !important;
+  overflow-wrap: break-word !important;
+  box-sizing: border-box !important;
+}
+
+.wa-bubble.out,
+.wa-bubble[class*="out"] {
+  margin-left: auto !important;
+  margin-right: 0 !important;
+}
+
+.wa-bubble.in,
+.wa-bubble[class*="in"] {
+  margin-left: 0 !important;
+  margin-right: auto !important;
+}
+
+/* Consistência de altura entre enviadas e recebidas */
+.wa-bubble-text,
+.wa-bubble > div:first-child {
+  min-height: 0 !important;
+}
+
 /* Não força layout interno do player (deixa o CSS do frontend controlar) */
 .wa-footer {
   padding: 10px 12px 12px;
@@ -351,7 +621,7 @@ body {
   letter-spacing: 0.1px;
 }
 
-/* Mantém mobile mais compacto */
+/* Mantém mobile mais compacto e evita quebra de layout */
 @media (max-width: 520px) {
   .sidebar {
     width: auto;
@@ -360,8 +630,28 @@ body {
   .wa-bubble-text {
     font-size: 14px;
   }
+  .wa-bubble {
+    max-width: 92vw !important;
+  }
   .wa-input {
     font-size: 15px;
+  }
+  .sticker-message img,
+  .wa-bubble .sticker-message img {
+    max-width: 140px !important;
+    max-height: 140px !important;
+    min-width: 80px !important;
+    min-height: 80px !important;
+  }
+  .image-message img,
+  .wa-bubble .image-message img {
+    max-width: 280px !important;
+    max-height: 280px !important;
+  }
+  .audio-message,
+  .wa-bubble-audioWrap {
+    min-width: 180px !important;
+    max-width: 92vw !important;
   }
 }
 
