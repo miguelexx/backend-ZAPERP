@@ -187,9 +187,9 @@ app.use('/clientes', clienteRoutes)
 // Meta (Cloud API)
 app.use('/webhook', webhookLimiter, webhookRoutes)
 app.use('/webhook/meta', webhookLimiter, webhookRoutes) // alias solicitado
-// Z-API
-app.use('/webhooks/zapi', webhookLimiter, webhookZapiRoutes)
-app.use('/webhook/zapi', webhookLimiter, webhookZapiRoutes) // alias solicitado
+// Z-API: SEM rate limit — callbacks são server-to-server; 60/min pode bloquear e devolver 429 antes do log
+app.use('/webhooks/zapi', webhookZapiRoutes)
+app.use('/webhook/zapi', webhookZapiRoutes) // alias solicitado
 app.use('/usuarios', userRoutes)
 app.use('/chats', chatRoutes)
 app.use('/tags', tagsRoutes)
