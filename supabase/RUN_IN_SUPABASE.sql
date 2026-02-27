@@ -195,6 +195,21 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_mensagens_conversa_whatsapp_id
   WHERE whatsapp_id IS NOT NULL AND whatsapp_id != '';
 
 -- ============================================================
+-- ÍNDICES PARA DASHBOARD / MÉTRICAS (performance)
+-- ============================================================
+CREATE INDEX IF NOT EXISTS idx_mensagens_company_criado_em
+  ON public.mensagens (company_id, criado_em);
+
+CREATE INDEX IF NOT EXISTS idx_mensagens_company_conversa_criado_em
+  ON public.mensagens (company_id, conversa_id, criado_em);
+
+CREATE INDEX IF NOT EXISTS idx_conversas_company_criado_em
+  ON public.conversas (company_id, criado_em);
+
+CREATE INDEX IF NOT EXISTS idx_conversas_company_status
+  ON public.conversas (company_id, status_atendimento);
+
+-- ============================================================
 -- SEM DUPLICATAS: clientes e conversas (um número = um cliente)
 -- Usa coluna temporária para não violar clientes_telefone_unique durante o processo.
 -- ============================================================

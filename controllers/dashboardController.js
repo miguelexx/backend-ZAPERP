@@ -258,6 +258,221 @@ exports.overview = async (req, res) => {
   }
 }
 
+/**
+ * GET /api/dashboard/metrics
+ *
+ * Endpoint profissional de métricas para IA/BI.
+ * Usa SOMENTE dados reais das tabelas:
+ * - empresas, usuarios, clientes, conversas, mensagens, atendimentos
+ *
+ * Retorno:
+ * {
+ *   atendimentosHoje,              // ações registradas hoje na tabela atendimentos
+ *   conversasHoje,                 // conversas criadas hoje
+ *   totalConversas,                // total de conversas da empresa
+ *   tempoMedioPrimeiraResposta,    // minutos (float)
+ *   slaPercentualRespondidas,      // % dentro do SLA (apenas conversas com resposta)
+ *   slaPercentualTotal,            // % dentro do SLA considerando também sem resposta
+ *   atendenteMaisProdutivo,        // { id, nome, totalConversas } ou null
+ *   ticketsAbertos,                // conversas abertas + em_atendimento
+ *   taxaConversao,                 // % conversas fechadas
+ *   mensagensRecebidas,            // mensagens.direcao = 'in'
+ *   mensagensEnviadas              // mensagens.direcao = 'out'
+ * }
+ */
+exports.metrics = async (req, res) => {
+  const { company_id } = req.user
+
+  try {
+    const hoje = new Date()
+    hoje.setHours(0, 0, 0, 0)
+    const hojeIso = hoje.toISOString()
+
+    // 1) Carregar config de SLA da empresa (minutos sem resposta)
+    let slaMinutos = 30
+    {
+      const { data: emp, error: errEmp } = await supabase
+        .from('empresas')
+        .select('sla_minutos_sem_resposta')
+        .eq('id', company_id)
+        .single()
+      if (!errEmp && emp && typeof emp.sla_minutos_sem_resposta === 'number') {
+        slaMinutos = Math.max(1, Math.min(1440, emp.sla_minutos_sem_resposta))
+      }
+    }
+
+    // 2) Conversas da empresa (base para várias métricas)
+    const { data: conversas, error: errConversas } = await supabase
+      .from('conversas')
+      .select('id, criado_em, status_atendimento, atendente_id')
+      .eq('company_id', company_id)
+
+    if (errConversas) throw errConversas
+
+    const totalConversas = conversas?.length || 0
+    let conversasHoje = 0
+    let ticketsAbertos = 0
+    let conversasFechadas = 0
+
+    const contagemPorAtendente = new Map()
+
+    for (const c of conversas || []) {
+      const criadoEm = c?.criado_em ? new Date(c.criado_em) : null
+      if (criadoEm && criadoEm >= hoje) conversasHoje++
+
+      if (c.status_atendimento === 'aberta' || c.status_atendimento === 'em_atendimento') {
+        ticketsAbertos++
+      }
+      if (c.status_atendimento === 'fechada') {
+        conversasFechadas++
+      }
+
+      if (c.atendente_id != null) {
+        const id = Number(c.atendente_id)
+        if (!Number.isNaN(id)) {
+          contagemPorAtendente.set(id, (contagemPorAtendente.get(id) || 0) + 1)
+        }
+      }
+    }
+
+    // Taxa de conversão: % de conversas fechadas
+    const taxaConversao =
+      totalConversas > 0 ? (conversasFechadas * 100) / totalConversas : 0
+
+    // Atendente mais produtivo: mais conversas atribuídas
+    let atendenteMaisProdutivo = null
+    if (contagemPorAtendente.size > 0) {
+      const idsAtendentes = Array.from(contagemPorAtendente.keys())
+      const { data: usuarios, error: errUsers } = await supabase
+        .from('usuarios')
+        .select('id, nome')
+        .eq('company_id', company_id)
+        .in('id', idsAtendentes)
+      if (errUsers) throw errUsers
+
+      let melhorId = null
+      let melhorTotal = -1
+      for (const [id, total] of contagemPorAtendente.entries()) {
+        if (total > melhorTotal) {
+          melhorTotal = total
+          melhorId = id
+        }
+      }
+      if (melhorId != null) {
+        const usuario = (usuarios || []).find((u) => Number(u.id) === Number(melhorId)) || null
+        atendenteMaisProdutivo = usuario
+          ? { id: usuario.id, nome: usuario.nome || 'Sem nome', totalConversas: melhorTotal }
+          : { id: melhorId, nome: 'Sem nome', totalConversas: melhorTotal }
+      }
+    }
+
+    // 3) Mensagens: tempo médio da 1ª resposta + SLA + volume
+    const { data: mensagens, error: errMensagens } = await supabase
+      .from('mensagens')
+      .select('conversa_id, criado_em, direcao')
+      .eq('company_id', company_id)
+      .in('direcao', ['in', 'out'])
+
+    if (errMensagens) throw errMensagens
+
+    // Agrupa mensagens por conversa para calcular 1ª mensagem do cliente (in)
+    // e 1ª resposta do atendente (out) APÓS a primeira in.
+    const mensagensPorConversa = new Map() // conversa_id -> array de msgs
+    let mensagensRecebidas = 0
+    let mensagensEnviadas = 0
+
+    for (const m of mensagens || []) {
+      const convId = m.conversa_id
+      const ts = m?.criado_em ? new Date(m.criado_em).getTime() : NaN
+      if (!convId || Number.isNaN(ts)) continue
+
+      if (m.direcao === 'in') {
+        mensagensRecebidas++
+      } else if (m.direcao === 'out') {
+        mensagensEnviadas++
+      }
+
+      if (!mensagensPorConversa.has(convId)) {
+        mensagensPorConversa.set(convId, [])
+      }
+      mensagensPorConversa.get(convId).push({ ts, direcao: m.direcao })
+    }
+
+    let somaMinutosPrimeiraResposta = 0
+    let conversasComResposta = 0
+    let conversasDentroSla = 0
+    let conversasComCliente = 0
+
+    for (const [convId, arr] of mensagensPorConversa.entries()) {
+      if (!Array.isArray(arr) || arr.length === 0) continue
+      // ordena cronologicamente
+      arr.sort((a, b) => a.ts - b.ts)
+
+      const primeiraInMsg = arr.find((m) => m.direcao === 'in')
+      if (!primeiraInMsg) continue
+      conversasComCliente++
+
+      const primeiraOutMsg = arr.find(
+        (m) => m.direcao === 'out' && m.ts >= primeiraInMsg.ts
+      )
+      if (!primeiraOutMsg) continue
+
+      const diffMin = (primeiraOutMsg.ts - primeiraInMsg.ts) / 60000
+      if (diffMin < 0) continue
+
+      somaMinutosPrimeiraResposta += diffMin
+      conversasComResposta++
+      if (diffMin <= slaMinutos) conversasDentroSla++
+    }
+
+    const tempoMedioPrimeiraResposta =
+      conversasComResposta > 0 ? somaMinutosPrimeiraResposta / conversasComResposta : null
+
+    const slaPercentualRespondidas =
+      conversasComResposta > 0
+        ? (conversasDentroSla * 100) / conversasComResposta
+        : null
+
+    const slaPercentualTotal =
+      conversasComCliente > 0
+        ? (conversasDentroSla * 100) / conversasComCliente
+        : null
+
+    // 4) Atendimentos hoje (ações na tabela atendimentos)
+    let atendimentosHoje = 0
+    {
+      const { data: atRows, error: errAt } = await supabase
+        .from('atendimentos')
+        .select('id')
+        .eq('company_id', company_id)
+        .gte('criado_em', hojeIso)
+      if (errAt) {
+        // mantém o endpoint funcionando mesmo se a tabela ainda não existir
+        console.warn('metrics: erro ao ler atendimentosHoje:', errAt.message || errAt)
+      } else {
+        atendimentosHoje = atRows?.length || 0
+      }
+    }
+
+    return res.json({
+      atendimentosHoje,
+      conversasHoje,
+      totalConversas,
+      tempoMedioPrimeiraResposta,
+      slaPercentualRespondidas,
+      slaPercentualTotal,
+      atendenteMaisProdutivo,
+      ticketsAbertos,
+      taxaConversao,
+      mensagensRecebidas,
+      mensagensEnviadas,
+    })
+  } catch (err) {
+    console.error(err)
+    return res.status(500).json({ error: 'Erro ao calcular métricas do dashboard' })
+  }
+}
+
 // =====================================================
 // DEPARTAMENTOS (setores: Financeiro, Suporte, Comercial)
 // =====================================================

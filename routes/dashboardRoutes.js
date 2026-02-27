@@ -5,6 +5,8 @@ const adminOnly = require('../middleware/adminOnly')
 const dashboardController = require('../controllers/dashboardController')
 
 router.get('/overview', auth, dashboardController.overview)
+// Endpoint profissional de métricas (para /api/dashboard/metrics)
+router.get('/metrics', auth, dashboardController.metrics)
 router.get('/departamentos', auth, dashboardController.listarDepartamentos)
 router.post('/departamentos', auth, adminOnly, dashboardController.criarDepartamento)
 router.put('/departamentos/:id', auth, adminOnly, dashboardController.atualizarDepartamento)
