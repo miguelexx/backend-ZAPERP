@@ -283,9 +283,13 @@ function pickBestPhone(payload, { fromMe } = {}) {
 
 function extractMessage(payload) {
   if (!payload || typeof payload !== 'object') {
-    return { phone: '', texto: '(vazio)', fromMe: false, messageId: null, criado_em: new Date().toISOString(), type: 'text', imageUrl: null, documentUrl: null, audioUrl: null, videoUrl: null, stickerUrl: null, locationUrl: null, fileName: null, isGroup: false, participantPhone: null, senderName: null, nomeGrupo: null, senderPhoto: null, chatPhoto: null }
+    return { phone: '', texto: '(vazio)', fromMe: false, messageId: null, criado_em: new Date().toISOString(), type: 'text', imageUrl: null, documentUrl: null, audioUrl: null, videoUrl: null, stickerUrl: null, locationUrl: null, fileName: null, isGroup: false, isEdit: false, isNewsletter: false, waitingMessage: false, participantPhone: null, senderName: null, senderLid: null, nomeGrupo: null, senderPhoto: null, chatPhoto: null }
   }
   const fromMe = Boolean(payload.fromMe ?? payload.key?.fromMe)
+  const isEdit        = Boolean(payload.isEdit)
+  const isNewsletter  = Boolean(payload.isNewsletter)
+  const waitingMessage = Boolean(payload.waitingMessage)
+  const senderLid     = payload.senderLid ? String(payload.senderLid).trim() : null
 
   // Resolver chave de conversa usando resolveConversationKeyFromZapi (contrato Z-API).
   // - isGroup: true → grupo (key = id normalizado do grupo)
@@ -394,7 +398,13 @@ function extractMessage(payload) {
   } else if (type === 'location') {
     const loc = payload.location || {}
     const parts = [loc.name, loc.address].filter(Boolean).map(String).map(s => s.trim())
-    texto = parts.length ? parts.join(' • ') : (loc.url || '(localização)')
+    // inclui coordenadas quando não há nome/endereço (campo oficial: latitude + longitude)
+    const coords = (loc.latitude != null && loc.longitude != null)
+      ? `${loc.latitude},${loc.longitude}`
+      : ''
+    texto = parts.length
+      ? parts.join(' • ') + (coords ? ` (${coords})` : '')
+      : (coords || loc.url || '(localização)')
   } else if (type === 'contact') {
     const c = payload.contact || {}
     texto = (c.displayName && String(c.displayName).trim()) || (c.formattedName && String(c.formattedName).trim()) || (c.vCard && String(c.vCard).slice(0, 120)) || '(contato)'
@@ -431,8 +441,12 @@ function extractMessage(payload) {
     locationUrl,
     fileName,
     isGroup,
+    isEdit,
+    isNewsletter,
+    waitingMessage,
     participantPhone: participantPhoneRaw || null,
     senderName: senderName ? String(senderName).trim() : null,
+    senderLid,
     nomeGrupo: (isGroup && (payload.chatName ?? payload.groupName ?? payload.subject)) ? String(payload.chatName ?? payload.groupName ?? payload.subject).trim() : null,
     senderPhoto: senderPhoto && String(senderPhoto).trim() ? String(senderPhoto).trim() : null,
     chatPhoto: chatPhoto && String(chatPhoto).trim() ? String(chatPhoto).trim() : null
@@ -880,12 +894,22 @@ exports.receberZapi = async (req, res) => {
         locationUrl,
         fileName,
         isGroup,
+        isEdit,
+        isNewsletter,
+        waitingMessage,
         participantPhone,
         senderName,
+        senderLid: extractedSenderLid,
         nomeGrupo,
         senderPhoto,
         chatPhoto
       } = extracted
+
+      // Newsletters (canais) não são conversas de atendimento — ignorar silenciosamente
+      if (isNewsletter) {
+        console.log('[Z-API] ⏭️ isNewsletter=true — newsletter ignorada:', phone || '(sem phone)')
+        continue
+      }
 
       // ── Log de resolução de chave — SEMPRE visível (crítico para diagnóstico) ──
       console.log('[Z-API] 📞 resolveKey:', {
@@ -1320,6 +1344,7 @@ exports.receberZapi = async (req, res) => {
     {
       const refMsg = payload?.referencedMessage ?? payload?.quotedMsg ?? payload?.quoted ?? null
       const quotedIdRaw =
+        payload?.referenceMessageId ??          // campo oficial Z-API ReceivedCallback
         payload?.referencedMessage?.messageId ??
         payload?.referencedMessage?.id ??
         payload?.quotedMsgId ??
@@ -1440,8 +1465,38 @@ exports.receberZapi = async (req, res) => {
       }
     }
 
+    // isEdit: mensagem editada → atualizar texto da mensagem existente, não inserir nova
+    if (!mensagemSalva && isEdit && whatsappIdStr) {
+      try {
+        const { data: editTarget } = await supabase
+          .from('mensagens')
+          .update({ texto })
+          .eq('company_id', company_id)
+          .eq('whatsapp_id', whatsappIdStr)
+          .select('*')
+          .maybeSingle()
+        if (editTarget) {
+          mensagemSalva = editTarget
+          console.log(`✏️ Z-API isEdit: mensagem ${editTarget.id} atualizada (conversa ${conversa_id})`)
+          const io = req.app.get('io')
+          if (io) {
+            io.to(`conversa_${conversa_id}`).to(`empresa_${company_id}`).emit('mensagem_editada', {
+              id: editTarget.id,
+              conversa_id,
+              texto,
+            })
+          }
+        }
+      } catch (editErr) {
+        console.warn('[Z-API] isEdit: erro ao atualizar mensagem:', editErr?.message)
+      }
+    }
+
     if (!mensagemSalva) {
-      const statusPayload = (payload.status && String(payload.status).toLowerCase()) || null
+      // waitingMessage: status inicial 'pending' enquanto a mensagem está em fila de envio
+      const statusPayload = waitingMessage
+        ? 'pending'
+        : ((payload.status && String(payload.status).toLowerCase()) || null)
       const reply_meta = webhookReplyMeta || null
 
       const insertMsg = {

@@ -631,6 +631,93 @@ async function configureWebhooks(appUrl) {
   return results
 }
 
+/**
+ * Atualiza a foto de perfil do número conectado à instância.
+ * PUT /profile-picture  { value: "URL da imagem" }
+ * @param {string} imageUrl - URL pública da imagem
+ * @returns {Promise<boolean>}
+ */
+async function updateProfilePicture(imageUrl) {
+  const basePath = getBasePath()
+  if (!basePath) return false
+  try {
+    const res = await fetch(`${basePath}/profile-picture`, {
+      method: 'PUT',
+      headers: getHeaders(),
+      body: JSON.stringify({ value: String(imageUrl || '').trim() }),
+    })
+    if (!res.ok) {
+      const errBody = await res.text().catch(() => '')
+      logClientTokenHint(errBody)
+      console.warn('❌ Z-API updateProfilePicture falhou:', res.status, String(errBody || '').slice(0, 200))
+      return false
+    }
+    const data = await res.json().catch(() => null)
+    return data?.value === true
+  } catch (e) {
+    console.error('Z-API updateProfilePicture:', e.message)
+    return false
+  }
+}
+
+/**
+ * Atualiza o nome de perfil do número conectado à instância.
+ * PUT /profile-name  { value: "Nome do perfil" }
+ * @param {string} name - Novo nome de perfil
+ * @returns {Promise<boolean>}
+ */
+async function updateProfileName(name) {
+  const basePath = getBasePath()
+  if (!basePath) return false
+  try {
+    const res = await fetch(`${basePath}/profile-name`, {
+      method: 'PUT',
+      headers: getHeaders(),
+      body: JSON.stringify({ value: String(name || '').trim() }),
+    })
+    if (!res.ok) {
+      const errBody = await res.text().catch(() => '')
+      logClientTokenHint(errBody)
+      console.warn('❌ Z-API updateProfileName falhou:', res.status, String(errBody || '').slice(0, 200))
+      return false
+    }
+    const data = await res.json().catch(() => null)
+    return data?.value === true
+  } catch (e) {
+    console.error('Z-API updateProfileName:', e.message)
+    return false
+  }
+}
+
+/**
+ * Atualiza a descrição (status/bio) do número conectado à instância.
+ * PUT /profile-description  { value: "Descrição do perfil" }
+ * @param {string} description - Nova descrição de perfil
+ * @returns {Promise<boolean>}
+ */
+async function updateProfileDescription(description) {
+  const basePath = getBasePath()
+  if (!basePath) return false
+  try {
+    const res = await fetch(`${basePath}/profile-description`, {
+      method: 'PUT',
+      headers: getHeaders(),
+      body: JSON.stringify({ value: String(description || '').trim() }),
+    })
+    if (!res.ok) {
+      const errBody = await res.text().catch(() => '')
+      logClientTokenHint(errBody)
+      console.warn('❌ Z-API updateProfileDescription falhou:', res.status, String(errBody || '').slice(0, 200))
+      return false
+    }
+    const data = await res.json().catch(() => null)
+    return data?.value === true
+  } catch (e) {
+    console.error('Z-API updateProfileDescription:', e.message)
+    return false
+  }
+}
+
 module.exports = {
   sendText,
   sendImage,
@@ -643,6 +730,9 @@ module.exports = {
   getContactMetadata,
   getChatMessages,
   configureWebhooks,
+  updateProfilePicture,
+  updateProfileName,
+  updateProfileDescription,
   normalizePhone,
   isConfigured: !!ZAPI_INSTANCE_ID && !!ZAPI_TOKEN
 }

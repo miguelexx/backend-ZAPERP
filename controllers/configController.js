@@ -1,4 +1,5 @@
 const supabase = require('../config/supabase')
+const { getProvider } = require('../services/providers')
 
 /** GET /config/empresa — dados da empresa */
 exports.getEmpresa = async (req, res) => {
@@ -183,5 +184,74 @@ exports.getAuditoria = async (req, res) => {
   } catch (err) {
     console.error(err)
     return res.status(500).json({ error: 'Erro ao listar auditoria' })
+  }
+}
+
+// ─── Perfil do WhatsApp (Z-API) ────────────────────────────────────────────────
+
+/** PUT /config/whatsapp/profile-picture — atualiza foto de perfil da instância conectada */
+exports.updateWhatsappProfilePicture = async (req, res) => {
+  try {
+    const { value } = req.body || {}
+    if (!value || typeof value !== 'string' || !value.trim().startsWith('http')) {
+      return res.status(400).json({ error: 'Forneça uma URL válida em "value".' })
+    }
+    const provider = getProvider()
+    if (!provider?.updateProfilePicture) {
+      return res.status(503).json({ error: 'Provedor não suporta atualização de foto de perfil.' })
+    }
+    const ok = await provider.updateProfilePicture(value.trim())
+    if (!ok) return res.status(502).json({ error: 'Z-API retornou falha ao atualizar foto de perfil.' })
+    return res.json({ ok: true, value: true })
+  } catch (err) {
+    console.error('[configController] updateWhatsappProfilePicture:', err?.message || err)
+    return res.status(500).json({ error: 'Erro ao atualizar foto de perfil.' })
+  }
+}
+
+/** PUT /config/whatsapp/profile-name — atualiza nome de perfil da instância conectada */
+exports.updateWhatsappProfileName = async (req, res) => {
+  try {
+    const { value } = req.body || {}
+    if (!value || typeof value !== 'string' || !value.trim()) {
+      return res.status(400).json({ error: 'Forneça um nome válido em "value".' })
+    }
+    if (value.trim().length > 25) {
+      return res.status(400).json({ error: 'Nome de perfil deve ter no máximo 25 caracteres.' })
+    }
+    const provider = getProvider()
+    if (!provider?.updateProfileName) {
+      return res.status(503).json({ error: 'Provedor não suporta atualização de nome de perfil.' })
+    }
+    const ok = await provider.updateProfileName(value.trim())
+    if (!ok) return res.status(502).json({ error: 'Z-API retornou falha ao atualizar nome de perfil.' })
+    return res.json({ ok: true, value: true })
+  } catch (err) {
+    console.error('[configController] updateWhatsappProfileName:', err?.message || err)
+    return res.status(500).json({ error: 'Erro ao atualizar nome de perfil.' })
+  }
+}
+
+/** PUT /config/whatsapp/profile-description — atualiza descrição/bio da instância conectada */
+exports.updateWhatsappProfileDescription = async (req, res) => {
+  try {
+    const { value } = req.body || {}
+    if (value === undefined || value === null) {
+      return res.status(400).json({ error: 'Forneça a descrição em "value".' })
+    }
+    const desc = String(value).trim()
+    if (desc.length > 139) {
+      return res.status(400).json({ error: 'Descrição deve ter no máximo 139 caracteres.' })
+    }
+    const provider = getProvider()
+    if (!provider?.updateProfileDescription) {
+      return res.status(503).json({ error: 'Provedor não suporta atualização de descrição de perfil.' })
+    }
+    const ok = await provider.updateProfileDescription(desc)
+    if (!ok) return res.status(502).json({ error: 'Z-API retornou falha ao atualizar descrição de perfil.' })
+    return res.json({ ok: true, value: true })
+  } catch (err) {
+    console.error('[configController] updateWhatsappProfileDescription:', err?.message || err)
+    return res.status(500).json({ error: 'Erro ao atualizar descrição de perfil.' })
   }
 }
