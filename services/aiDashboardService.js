@@ -407,7 +407,7 @@ async function qSlaAlertas(company_id, limit = 10) {
     .from('empresas')
     .select('sla_minutos_sem_resposta')
     .eq('id', company_id)
-    .single()
+    .maybeSingle()
   const slaMin = Math.max(1, Math.min(1440, emp?.sla_minutos_sem_resposta ?? 30))
 
   // Conversas abertas com última mensagem embutida (mesmo padrão do dashboardController)
