@@ -49,8 +49,10 @@ function possiblePhonesBR(phone) {
   const s = String(phone || '').trim()
   if (!s) return []
   if (s.endsWith('@g.us')) return [s]
-  // Chave sintética LID (espelhamento): uma única variante
-  if (s.startsWith('lid:') && s.length > 4) return [s]
+
+  // Chave sintética LID (espelhamento sem número real): NÃO gerar variantes de telefone.
+  // Retorna array vazio para não criar buscas/inserts com chave inválida na tabela clientes.
+  if (s.startsWith('lid:')) return []
 
   const norm = normalizePhoneBR(s)
   const digits = String(norm || '').replace(/\D/g, '')

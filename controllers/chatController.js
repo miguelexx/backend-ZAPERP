@@ -701,6 +701,27 @@ exports.mergeConversasDuplicadas = async (req, res) => {
 }
 
 // =====================================================
+// 3a) Status da conexão Z-API (instância conectada?)
+// GET /chats/zapi-status
+// =====================================================
+exports.zapiStatus = async (req, res) => {
+  try {
+    const provider = getProvider()
+    if (!provider || !provider.isConfigured) {
+      return res.json({ ok: true, configured: false, connected: false, message: 'Z-API não configurado no servidor.' })
+    }
+    if (typeof provider.getConnectionStatus !== 'function') {
+      return res.json({ ok: true, configured: true, connected: null, message: 'Verificação de status não disponível nesta versão.' })
+    }
+    const status = await provider.getConnectionStatus()
+    return res.json({ ok: true, ...status })
+  } catch (err) {
+    console.error('zapiStatus:', err)
+    return res.status(500).json({ ok: false, error: 'Erro ao verificar status Z-API' })
+  }
+}
+
+// =====================================================
 // 3b) Sincronizar contatos do celular (Z-API Get contacts)
 // =====================================================
 exports.sincronizarContatosZapi = async (req, res) => {
@@ -851,14 +872,19 @@ exports.sincronizarFotosPerfilZapi = async (req, res) => {
     const limit = Math.min(3000, Math.max(1, Number(req.query.limit) || 2000))
     const delayMs = Math.min(1200, Math.max(0, Number(req.query.delay_ms) || 220))
 
+    const forceAll = req.query.force === '1' || req.query.force === 'true'
+
     let q = supabase
       .from('clientes')
       .select('id, telefone, nome, pushname, foto_perfil')
       .eq('company_id', cid)
       .not('telefone', 'is', null)
       .limit(limit)
-    // prioriza registros potencialmente incompletos
-    q = q.or('foto_perfil.is.null,foto_perfil.eq.,nome.is.null,nome.eq.,pushname.is.null,pushname.eq.')
+    // Sem force=1: prioriza registros incompletos; mas SEMPRE inclui quem tem foto
+    // (URLs do WhatsApp CDN expiram → precisamos refrescar a URL mesmo quando existe)
+    if (!forceAll) {
+      q = q.or('foto_perfil.is.null,foto_perfil.eq.,nome.is.null,nome.eq.,pushname.is.null,pushname.eq.,foto_perfil.like.https://%')
+    }
     const { data: clientes, error: errList } = await q
 
     if (errList) return res.status(500).json({ error: errList.message })
@@ -905,14 +931,13 @@ exports.sincronizarFotosPerfilZapi = async (req, res) => {
           updates.pushname = metaPush
         }
 
-        // foto: preencher quando faltando
-        if (missingFoto) {
-          if (fotoFinal) {
-            updates.foto_perfil = fotoFinal
-            fotoAtualizada++
-          } else {
-            semFoto++
-          }
+        // Sempre atualiza foto quando Z-API retorna URL válida
+        // (URLs do WhatsApp CDN expiram; sempre usar a URL mais recente)
+        if (fotoFinal) {
+          updates.foto_perfil = fotoFinal
+          fotoAtualizada++
+        } else if (missingFoto) {
+          semFoto++
         }
 
         if (Object.keys(updates).length > 0) {
@@ -1417,6 +1442,44 @@ exports.detalharChat = async (req, res) => {
       emitirParaUsuario(io, user_id, io.EVENTS?.MENSAGENS_LIDAS || 'mensagens_lidas', payload)
     }
 
+    // Background: re-sincroniza foto e nome do contato com Z-API
+    // As URLs do WhatsApp CDN expiram (tipicamente em poucas horas), por isso
+    // sempre buscamos uma URL fresca ao abrir uma conversa, sem bloquear a resposta.
+    if (!isGroup && clientesConv?.id && clientesConv?.telefone) {
+      const cliId = Number(clientesConv.id)
+      const cliPhone = String(clientesConv.telefone || '').trim()
+      const cid = Number(company_id)
+      if (cliPhone && !cliPhone.startsWith('lid:') && !cliPhone.includes('@g.us')) {
+        setImmediate(async () => {
+          try {
+            const { syncContactFromZapi } = require('../services/zapiSyncContact')
+            const synced = await syncContactFromZapi(cliPhone)
+            if (!synced) return
+            const updates = {}
+            if (synced.foto_perfil && String(synced.foto_perfil).startsWith('http')) {
+              updates.foto_perfil = synced.foto_perfil
+            }
+            if (synced.pushname && String(synced.pushname).trim()) {
+              updates.pushname = String(synced.pushname).trim()
+            }
+            if (Object.keys(updates).length === 0) return
+            const { error: updErr } = await supabase
+              .from('clientes')
+              .update(updates)
+              .eq('company_id', cid)
+              .eq('id', cliId)
+            if (!updErr && io && updates.foto_perfil) {
+              // Reutiliza o evento 'contato_atualizado' (já tratado no socket.js do frontend)
+              io.to(`empresa_${cid}`).emit('contato_atualizado', {
+                conversa_id: Number(id),
+                foto_perfil: updates.foto_perfil
+              })
+            }
+          } catch (_) {}
+        })
+      }
+    }
+
     return res.json(conversaFormatada)
   } catch (err) {
     console.error(err)
@@ -1909,7 +1972,7 @@ exports.enviarMensagemChat = async (req, res) => {
           io2.to(`empresa_${company_id}`).to(`conversa_${conversa_id}`).emit('status_mensagem', payload)
         }
 
-        if (!ok) console.warn('WhatsApp: falha ao enviar mensagem para', conversa.telefone)
+        if (!ok) console.warn('[WhatsApp] Falha ao entregar mensagem para', String(conversa.telefone || '').slice(-8), '— verifique se a instância Z-API está conectada (escaneie o QR no painel)')
       } catch (e) {
         console.error('WhatsApp enviar:', e)
         await supabase

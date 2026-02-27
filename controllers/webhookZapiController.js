@@ -956,125 +956,145 @@ exports.receberZapi = async (req, res) => {
     let pendingContactSync = null
 
     if (!isGroup) {
-      // 1) Cliente só para conversa individual (cria se não existir)
-      const phones = possiblePhonesBR(phone)
-      let cliQuery = supabase.from('clientes').select('id, telefone, nome')
-      if (phones.length > 0) cliQuery = cliQuery.in('telefone', phones)
-      else cliQuery = cliQuery.eq('telefone', phone)
-      cliQuery = cliQuery.eq('company_id', company_id)
-      const { data: cliRows, error: errCli } = await cliQuery.order('id', { ascending: true }).limit(5)
-      const clienteExistente = Array.isArray(cliRows) && cliRows.length > 0 ? cliRows[0] : null
+      // LID sintético (@lid): mensagem espelhada enviada pelo celular sem número real conhecido.
+      // Chave "lid:XXXX" NÃO é um número de telefone → nunca criar/vincular cliente.
+      // A conversa é registrada normalmente com cliente_id = null até o contato enviar uma msg real.
+      const isLidKey = String(phone).startsWith('lid:')
 
-      if (errCli) {
-        console.error('Erro ao buscar cliente Z-API:', errCli)
-        return res.status(500).json({ error: 'Erro ao buscar cliente' })
-      }
-
-      if (clienteExistente?.id) {
-        cliente_id = clienteExistente.id
-        // Atualizar imediatamente com dados do payload (nome/foto) SEM poluir contatos quando fromMe=true.
-        // - fromMe=false: senderName/chatName tendem a ser o nome do contato.
-        // - fromMe=true: senderName costuma ser o NOSSO nome; priorizar chatName (nome do chat) e nunca sobrescrever foto com senderPhoto.
-        const nomePayloadRaw = fromMe
-          ? (payload.chatName ?? payload.chat?.name ?? null)
-          : (payload.senderName ?? payload.chatName ?? payload.chat?.name ?? null)
-        const nomePayload = nomePayloadRaw ? String(nomePayloadRaw).trim() : null
-        const updates = {}
-        // Se não veio nome, salva o número (somente se estiver vazio no banco) para evitar nome NULL.
-        if (nomePayload) updates.nome = nomePayload
-        else if (!clienteExistente.nome || !String(clienteExistente.nome).trim()) updates.nome = phone
-        if (!fromMe && senderPhoto) updates.foto_perfil = senderPhoto
-        if (Object.keys(updates).length > 0) {
-          await supabase.from('clientes').update(updates).eq('company_id', company_id).eq('id', cliente_id)
-        }
-        // Sync Z-API em background (será emitido após salvar mensagem, com conversa_id)
-        pendingContactSync = { phone, cliente_id }
+      if (isLidKey) {
+        console.log('[Z-API] LID key — conversa sem cliente vinculado (número real não disponível):', phone)
+        // cliente_id permanece null — não inserir registro falso na tabela clientes
       } else {
-        // Novo cliente: antes de inserir, tenta reaproveitar cadastro LEGADO com o mesmo número (ex.: antigo sem DDI/9).
-        // Ex.: cliente salvo como "3499999999" e webhook chega com "5534999999999" → reaproveita o mesmo cliente.
-        if (phone) {
-          try {
-            const digits10 = String(phone).replace(/\D/g, '').slice(-10)
-            if (digits10 && digits10.length === 10) {
-              const { data: legacyRows } = await supabase
-                .from('clientes')
-                .select('id, telefone')
-                .eq('company_id', company_id)
-                .like('telefone', `%${digits10}`)
-                .order('id', { ascending: true })
-                .limit(1)
-              const legacy = Array.isArray(legacyRows) && legacyRows[0] ? legacyRows[0] : null
-              if (legacy?.id) {
-                cliente_id = legacy.id
-                pendingContactSync = { phone, cliente_id }
-              }
-            }
-          } catch (_) {
-            // fallback silencioso — se falhar, segue para inserção normal
-          }
+        // ── 1) Buscar cliente por todas as variantes de número BR (12/13 dígitos) ──────────────
+        // Garante que um contato com/sem "9" seja tratado como o mesmo cliente.
+        const phones = possiblePhonesBR(phone)
+        let cliQuery = supabase.from('clientes').select('id, telefone, nome')
+        if (phones.length > 0) cliQuery = cliQuery.in('telefone', phones)
+        else cliQuery = cliQuery.eq('telefone', phone)
+        cliQuery = cliQuery.eq('company_id', company_id)
+        const { data: cliRows, error: errCli } = await cliQuery.order('id', { ascending: true }).limit(5)
+        const clienteExistente = Array.isArray(cliRows) && cliRows.length > 0 ? cliRows[0] : null
+
+        if (errCli) {
+          console.error('Erro ao buscar cliente Z-API:', errCli)
+          return res.status(500).json({ error: 'Erro ao buscar cliente' })
         }
 
-        // Se ainda não achou cliente legado, insere já com dados do payload; sync em background depois.
-        if (!cliente_id) {
-          const fromPayloadRaw = fromMe
+        if (clienteExistente?.id) {
+          cliente_id = clienteExistente.id
+          // Atualizar com dados do payload (nome/foto) sem poluir quando fromMe=true.
+          const nomePayloadRaw = fromMe
             ? (payload.chatName ?? payload.chat?.name ?? null)
             : (payload.senderName ?? payload.chatName ?? payload.chat?.name ?? null)
-          const fromPayload = fromPayloadRaw ? String(fromPayloadRaw).trim() : null
-          const telefoneCanonico = getCanonicalPhone(phone) || phone
+          const nomePayload = nomePayloadRaw ? String(nomePayloadRaw).trim() : null
+          const updates = {}
+          // Salva número se nome estiver vazio (nunca gravar LID como nome)
+          if (nomePayload) updates.nome = nomePayload
+          else if (!clienteExistente.nome || !String(clienteExistente.nome).trim()) {
+            // Usar o número formatado, não o phone bruto
+            const numericDisplay = String(phone).replace(/\D/g, '')
+            if (numericDisplay) updates.nome = numericDisplay
+          }
+          if (!fromMe && senderPhoto) updates.foto_perfil = senderPhoto
+          if (Object.keys(updates).length > 0) {
+            await supabase.from('clientes').update(updates).eq('company_id', company_id).eq('id', cliente_id)
+          }
+          pendingContactSync = { phone, cliente_id }
+        } else {
+          // ── 2) Tentar reaproveitar cadastro legado (número antigo sem DDI/9) ─────────────────
+          // Ex.: "3499999999" no banco vs "5534999999999" no webhook → mesmo contato.
+          if (phone) {
+            try {
+              const digits10 = String(phone).replace(/\D/g, '').slice(-10)
+              if (digits10 && digits10.length === 10) {
+                const { data: legacyRows } = await supabase
+                  .from('clientes')
+                  .select('id, telefone')
+                  .eq('company_id', company_id)
+                  .like('telefone', `%${digits10}`)
+                  .order('id', { ascending: true })
+                  .limit(1)
+                const legacy = Array.isArray(legacyRows) && legacyRows[0] ? legacyRows[0] : null
+                if (legacy?.id) {
+                  cliente_id = legacy.id
+                  pendingContactSync = { phone, cliente_id }
+                }
+              }
+            } catch (_) { /* fallback silencioso */ }
+          }
 
-          const { data: novoCliente, error: errNovoCli } = await supabase
-            .from('clientes')
-            .insert({
-              telefone: telefoneCanonico,
-              nome: fromPayload || telefoneCanonico || null,
-              observacoes: null,
-              company_id,
-              ...(!fromMe && senderPhoto ? { foto_perfil: senderPhoto } : {})
-            })
-            .select('id')
-            .single()
+          // ── 3) Inserir novo cliente — SOMENTE com telefone BR válido ─────────────────────────
+          if (!cliente_id) {
+            // Validar: telefoneCanonico deve ser número BR real (12 ou 13 dígitos com 55)
+            const telefoneCanonico = getCanonicalPhone(phone)
+            // Dupla proteção: rejeitar qualquer coisa que não seja número BR ou grupo real
+            const isTelefoneValido = telefoneCanonico &&
+              !telefoneCanonico.startsWith('lid:') &&
+              (
+                (telefoneCanonico.startsWith('55') && (telefoneCanonico.length === 12 || telefoneCanonico.length === 13)) ||
+                telefoneCanonico.endsWith('@g.us') ||
+                (telefoneCanonico.startsWith('120') && telefoneCanonico.length >= 15)
+              )
 
-        if (errNovoCli) {
-          // Se bateu UNIQUE (cliente já existe), apenas busca e segue (evita 500 em webhook)
-          const isDuplicate = String(errNovoCli.code || '') === '23505' || String(errNovoCli.message || '').includes('unique') || String(errNovoCli.message || '').includes('duplicate')
-          if (isDuplicate) {
-            const phones2 = possiblePhonesBR(phone)
-            let q2 = supabase.from('clientes').select('id')
-            if (phones2.length > 0) q2 = q2.in('telefone', phones2)
-            else q2 = q2.eq('telefone', phone)
-            q2 = q2.eq('company_id', company_id)
-            const found = await q2.order('id', { ascending: true }).limit(1)
-            if (Array.isArray(found.data) && found.data[0]?.id) {
-              cliente_id = found.data[0].id
+            if (!isTelefoneValido) {
+              console.warn('[Z-API] ⚠️ Telefone inválido para criar cliente — descartando cliente:', phone, '→ telefoneCanonico:', telefoneCanonico)
+              // cliente_id permanece null; mensagem ainda será registrada na conversa
+            } else {
+              const fromPayloadRaw = fromMe
+                ? (payload.chatName ?? payload.chat?.name ?? null)
+                : (payload.senderName ?? payload.chatName ?? payload.chat?.name ?? null)
+              const fromPayload = fromPayloadRaw ? String(fromPayloadRaw).trim() : null
+
+              const { data: novoCliente, error: errNovoCli } = await supabase
+                .from('clientes')
+                .insert({
+                  telefone: telefoneCanonico,
+                  nome: fromPayload || telefoneCanonico || null,
+                  observacoes: null,
+                  company_id,
+                  ...(!fromMe && senderPhoto ? { foto_perfil: senderPhoto } : {})
+                })
+                .select('id')
+                .single()
+
+              if (errNovoCli) {
+                const isDuplicate = String(errNovoCli.code || '') === '23505' ||
+                  String(errNovoCli.message || '').includes('unique') ||
+                  String(errNovoCli.message || '').includes('duplicate')
+
+                if (isDuplicate) {
+                  // Race condition ou UNIQUE violation: buscar o que já existe
+                  const phones2 = possiblePhonesBR(telefoneCanonico)
+                  let q2 = supabase.from('clientes').select('id')
+                  if (phones2.length > 0) q2 = q2.in('telefone', phones2)
+                  else q2 = q2.eq('telefone', telefoneCanonico)
+                  q2 = q2.eq('company_id', company_id)
+                  const found = await q2.order('id', { ascending: true }).limit(1)
+                  if (Array.isArray(found.data) && found.data[0]?.id) {
+                    cliente_id = found.data[0].id
+                    pendingContactSync = { phone, cliente_id }
+                  }
+                } else if (String(errNovoCli.message || '').includes('pushname') || String(errNovoCli.message || '').includes('does not exist')) {
+                  // Coluna opcional ausente: retry sem ela
+                  const fallbackInsert = await supabase
+                    .from('clientes')
+                    .insert({ telefone: telefoneCanonico, nome: fromPayload || telefoneCanonico || null, company_id,
+                      ...(!fromMe && senderPhoto ? { foto_perfil: senderPhoto } : {}) })
+                    .select('id').single()
+                  if (!fallbackInsert.error) cliente_id = fallbackInsert.data.id
+                }
+
+                if (!cliente_id) {
+                  console.error('❌ Z-API Erro ao criar cliente:', errNovoCli?.code, errNovoCli?.message)
+                  return res.status(500).json({ error: 'Erro ao criar cliente' })
+                }
+              } else {
+                cliente_id = novoCliente.id
+              }
               pendingContactSync = { phone, cliente_id }
-              // continua o fluxo sem erro
             }
           }
-
-          const isPushnameColumn = String(errNovoCli.message || '').includes('pushname') || String(errNovoCli.message || '').includes('does not exist')
-          if (isPushnameColumn) {
-            const fallbackInsert = await supabase
-              .from('clientes')
-              .insert({
-                telefone: telefoneCanonico || phone,
-                nome: fromPayload || telefoneCanonico || phone || null,
-                observacoes: null,
-                company_id,
-                ...(!fromMe && senderPhoto ? { foto_perfil: senderPhoto } : {})
-              })
-              .select('id')
-              .single()
-            if (!fallbackInsert.error) cliente_id = fallbackInsert.data.id
-          }
-          if (!cliente_id) {
-            console.error('❌ Z-API Erro ao criar cliente:', errNovoCli?.code, errNovoCli?.message, errNovoCli?.details)
-            return res.status(500).json({ error: 'Erro ao criar cliente' })
-          }
-          } else {
-            cliente_id = novoCliente.id
-          }
         }
-        pendingContactSync = { phone, cliente_id: cliente_id }
       }
     }
 

@@ -16,7 +16,9 @@ const aiLimiter = rateLimit({
   max: 20,
   standardHeaders: true,
   legacyHeaders: false,
-  keyGenerator: (req) => `ai:${req.user?.company_id ?? 'anon'}:${req.ip}`,
+  // Chave por company_id (sem req.ip para evitar ERR_ERL_KEY_GEN_IPV6 no express-rate-limit v8)
+  // O isolamento multi-tenant por empresa é suficiente para este endpoint.
+  keyGenerator: (req) => `ai:${req.user?.company_id ?? 'anon'}`,
   handler: (_req, res) =>
     res.status(429).json({
       ok: false,

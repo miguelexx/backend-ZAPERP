@@ -718,6 +718,38 @@ async function updateProfileDescription(description) {
   }
 }
 
+/**
+ * Verifica o status de conexão da instância Z-API (WhatsApp conectado ou não).
+ * GET /status → { connected: boolean, phone?: string, ... }
+ * @returns {Promise<{ connected: boolean, configured: boolean, phone?: string|null }>}
+ */
+async function getConnectionStatus() {
+  const basePath = getBasePath()
+  if (!basePath) return { connected: false, configured: false }
+  try {
+    const res = await fetch(`${basePath}/status`, {
+      method: 'GET',
+      headers: getHeaders(),
+      signal: AbortSignal.timeout(8000)
+    })
+    if (!res.ok) {
+      const body = await res.text().catch(() => '')
+      logClientTokenHint(body)
+      return { connected: false, configured: true }
+    }
+    const data = await res.json().catch(() => null)
+    // Z-API retorna: { connected: true/false, phone: "5511...", ... }
+    const connected = data?.connected === true ||
+      String(data?.status || '').toLowerCase().includes('connected') ||
+      String(data?.value || '').toLowerCase().includes('connected')
+    const phone = data?.phone || data?.number || null
+    return { connected, configured: true, phone, session: data?.session || null }
+  } catch (e) {
+    console.warn('Z-API getConnectionStatus:', e.message)
+    return { connected: false, configured: true, error: e.message }
+  }
+}
+
 module.exports = {
   sendText,
   sendImage,
@@ -733,6 +765,7 @@ module.exports = {
   updateProfilePicture,
   updateProfileName,
   updateProfileDescription,
+  getConnectionStatus,
   normalizePhone,
   isConfigured: !!ZAPI_INSTANCE_ID && !!ZAPI_TOKEN
 }
