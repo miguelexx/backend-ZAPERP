@@ -64,38 +64,22 @@ if (process.env.TRUST_PROXY === '1' || process.env.NODE_ENV === 'production') {
   app.set('trust proxy', 1)
 }
 
-const allowedOrigins = [
-  'https://zaperp.wmsistemas.inf.br',
-  'https://www.zaperp.wmsistemas.inf.br'
-]
-
-const corsOptions = {
-  origin(origin, callback) {
-    // Permitir requisições sem origin (Postman, apps mobile, webhooks)
-    if (!origin) return callback(null, true)
-
-    if (allowedOrigins.includes(origin)) {
-      return callback(null, true)
-    }
-
-    return callback(new Error('CORS não permitido para esta origem: ' + origin))
-  },
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'x-company-id'],
-  credentials: true,
-}
-
-// CORS deve vir antes das rotas.
-app.use(cors(corsOptions))
-app.options('*', cors(corsOptions))
-
-// JSON parser (precisa vir antes dos webhooks para ter req.body)
+// =====================================================
+// JSON parser ANTES de tudo que lê req.body
+// verify: mantém rawBody em Buffer para validação HMAC (Meta)
+// =====================================================
 app.use(express.json({
   verify: (req, res, buf) => {
     try { req.rawBody = buf } catch (_) {}
   }
 }))
 
+// =====================================================
+// WEBHOOKS — devem ser registrados ANTES do CORS.
+// A Z-API (e Meta) enviam header Origin nas chamadas de webhook.
+// Se os webhooks ficassem depois do app.use(cors(...)), qualquer
+// Origin fora da lista seria bloqueado com 403 antes de chegar ao controller.
+// =====================================================
 const webhookRoutes = require('./routes/webhookRoutes')
 const webhookZapiRoutes = require('./routes/webhookZapiRoutes')
 const { webhookLimiter } = require('./middleware/rateLimit')
@@ -104,6 +88,30 @@ app.use('/webhook', webhookLimiter, webhookRoutes)
 app.use('/webhook/meta', webhookLimiter, webhookRoutes)
 app.use('/webhooks/zapi', webhookZapiRoutes)
 app.use('/webhook/zapi', webhookZapiRoutes)
+
+// =====================================================
+// CORS — aplicado APÓS os webhooks.
+// Só as rotas da API/frontend passam por aqui.
+// =====================================================
+const allowedOrigins = [
+  'https://zaperp.wmsistemas.inf.br',
+  'https://www.zaperp.wmsistemas.inf.br'
+]
+
+const corsOptions = {
+  origin(origin, callback) {
+    // Requisições sem origin (Postman, apps mobile) → sempre permitir
+    if (!origin) return callback(null, true)
+    if (allowedOrigins.includes(origin)) return callback(null, true)
+    return callback(new Error('CORS não permitido para esta origem: ' + origin))
+  },
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'x-company-id'],
+  credentials: true,
+}
+
+app.use(cors(corsOptions))
+app.options('*', cors(corsOptions))
 
 // Arquivos estáticos (uploads: imagens, áudios, etc.)
 // Segurança:
