@@ -64,6 +64,31 @@ if (process.env.TRUST_PROXY === '1' || process.env.NODE_ENV === 'production') {
   app.set('trust proxy', 1)
 }
 
+const allowedOrigins = [
+  'https://zaperp.wmsistemas.inf.br',
+  'https://www.zaperp.wmsistemas.inf.br'
+]
+
+const corsOptions = {
+  origin(origin, callback) {
+    // Permitir requisições sem origin (Postman, apps mobile, webhooks)
+    if (!origin) return callback(null, true)
+
+    if (allowedOrigins.includes(origin)) {
+      return callback(null, true)
+    }
+
+    return callback(new Error('CORS não permitido para esta origem: ' + origin))
+  },
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'x-company-id'],
+  credentials: true,
+}
+
+// CORS deve vir antes das rotas.
+app.use(cors(corsOptions))
+app.options('*', cors(corsOptions))
+
 // JSON parser (precisa vir antes dos webhooks para ter req.body)
 app.use(express.json({
   verify: (req, res, buf) => {
@@ -71,10 +96,6 @@ app.use(express.json({
   }
 }))
 
-// =====================================================
-// Webhooks ANTES do CORS — Z-API/Meta enviam Origin e seriam bloqueados por CORS.
-// Registrando aqui, POST /webhooks/zapi (e /webhook*) nunca passam pelo middleware CORS.
-// =====================================================
 const webhookRoutes = require('./routes/webhookRoutes')
 const webhookZapiRoutes = require('./routes/webhookZapiRoutes')
 const { webhookLimiter } = require('./middleware/rateLimit')
@@ -83,51 +104,6 @@ app.use('/webhook', webhookLimiter, webhookRoutes)
 app.use('/webhook/meta', webhookLimiter, webhookRoutes)
 app.use('/webhooks/zapi', webhookZapiRoutes)
 app.use('/webhook/zapi', webhookZapiRoutes)
-
-// CORS: só para rotas que ainda não foram tratadas (front/API). Webhooks já foram atendidos acima.
-const allowedOrigins = String(process.env.CORS_ORIGINS || '')
-  .split(',')
-  .map((s) => s.trim())
-  .filter(Boolean)
-
-let appOrigin = null
-let appRootDomain = null
-try {
-  const url = new URL(String(process.env.APP_URL || '').trim())
-  appOrigin = url.origin
-  const hostParts = String(url.hostname || '').split('.').filter(Boolean)
-  if (hostParts.length >= 2) {
-    appRootDomain = hostParts.slice(-2).join('.')
-  }
-} catch (_) {
-  appOrigin = null
-  appRootDomain = null
-}
-
-if (appOrigin && !allowedOrigins.includes(appOrigin)) {
-  allowedOrigins.push(appOrigin)
-}
-
-app.use(
-  cors({
-    origin(origin, cb) {
-      if (!origin) return cb(null, true)
-      if (allowedOrigins.includes(origin)) return cb(null, true)
-      if (appRootDomain) {
-        try {
-          const { hostname } = new URL(origin)
-          if (hostname === appRootDomain || hostname.endsWith(`.${appRootDomain}`)) {
-            return cb(null, true)
-          }
-        } catch (_) {}
-      }
-      return cb(new Error('Not allowed by CORS'))
-    },
-    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization'],
-    credentials: true,
-  })
-)
 
 // Arquivos estáticos (uploads: imagens, áudios, etc.)
 // Segurança:
@@ -277,7 +253,7 @@ app.use((err, req, res, next) => {
     return res.status(400).json({ error: err.message || 'Arquivo inválido' })
   }
   // CORS
-  if (err && err.message === 'Not allowed by CORS') {
+  if (err && String(err.message || '').startsWith('CORS não permitido para esta origem:')) {
     return res.status(403).json({ error: 'CORS: origem não permitida' })
   }
   // Outros erros: log + 500 JSON (nunca HTML)
