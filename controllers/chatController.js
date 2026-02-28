@@ -466,14 +466,17 @@ exports.listarConversas = async (req, res) => {
       const fotoCliente = clientesObj?.foto_perfil ?? null
       const isGroup = isGroupConversation(c)
       const ultimaMsg = Array.isArray(c.mensagens) && c.mensagens.length > 0 ? c.mensagens[0] : null
-      // Contatos não salvos (sem nome): sempre exibir o número no lugar do nome
+      // Nunca exibir LID (lid:xxx) como nome ou número — é identificador interno do WhatsApp
+      const isLid = !isGroup && c.telefone && String(c.telefone).trim().toLowerCase().startsWith('lid:')
+      const telefoneExibivel = isLid ? null : c.telefone
       const contatoNome = isGroup
-        ? (c.nome_grupo || c.telefone || 'Grupo')
-        : (nomeCliente || c.telefone || null)
+        ? (c.nome_grupo || (c.telefone && !String(c.telefone).startsWith('lid:') ? c.telefone : null) || 'Grupo')
+        : (isLid ? 'Contato' : (nomeCliente || c.telefone || null))
       return {
         id: c.id,
         cliente_id: c.cliente_id,
         telefone: c.telefone,
+        telefone_exibivel: telefoneExibivel,
         status_atendimento: c.status_atendimento,
         atendente_id: c.atendente_id,
         lida: c.lida,
@@ -1413,9 +1416,14 @@ exports.detalharChat = async (req, res) => {
     const clientesConv = Array.isArray(rawClientes)
       ? (rawClientes.find((cl) => cl && Number(cl.id) === Number(conversa.cliente_id)) || rawClientes[0])
       : rawClientes
+    // Nunca exibir LID (lid:xxx) como nome ou número — identificador interno do WhatsApp
+    const isLidConv = !isGroup && conversa.telefone && String(conversa.telefone).trim().toLowerCase().startsWith('lid:')
     const nomeUnico = isGroup
       ? (conversa.nome_grupo ?? conversa.telefone ?? 'Grupo')
-      : (clientesConv?.pushname ?? clientesConv?.nome ?? conversa.telefone ?? null)
+      : (isLidConv ? 'Contato' : (clientesConv?.pushname ?? clientesConv?.nome ?? conversa.telefone ?? null))
+    const clienteTelefoneExibivel = isGroup
+      ? conversa.telefone
+      : (isLidConv ? null : (conversa.telefone ?? clientesConv?.telefone ?? null))
     const fotoUnica = isGroup ? (conversa.foto_grupo ?? null) : (clientesConv?.foto_perfil ?? null)
     const conversaFormatada = {
       ...conversa,
@@ -1424,7 +1432,7 @@ exports.detalharChat = async (req, res) => {
       nome_grupo: conversa.nome_grupo ?? null,
       contato_nome: nomeUnico,
       cliente_nome: nomeUnico,
-      cliente_telefone: isGroup ? conversa.telefone : (conversa.telefone ?? clientesConv?.telefone ?? null),
+      cliente_telefone: clienteTelefoneExibivel,
       observacao: isGroup ? null : (clientesConv?.observacoes ?? null),
       foto_perfil: fotoUnica,
       foto_grupo: isGroup ? (conversa.foto_grupo ?? null) : null,
