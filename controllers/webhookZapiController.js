@@ -197,10 +197,12 @@ function resolveConversationKeyFromZapi(payload) {
     return normalizePhoneBR(d) || d
   }
 
-  // ─── Fonte primária: payload.phone ───────────────────────────────────────────
-  // Z-API contrato: phone = número do CHAT (contato ou grupo).
-  // Para fromMe=true: phone é o DESTINATÁRIO (contato para quem você enviou).
-  const phonePrimary = normCandidate(payload.phone)
+  // ─── Fonte primária: payload.phone (SOMENTE quando for número real, NUNCA quando for @lid) ───
+  // Z-API envia "phone": "5544999999999" (número real) OU "phone": "24601656598766@lid" (LID interno).
+  // Sempre priorizar o número real: usar phone só se NÃO terminar com @lid; caso contrário tentar outros campos.
+  const phoneRaw = clean(payload.phone)
+  const phoneIsLid = phoneRaw && (phoneRaw.endsWith('@lid') || phoneRaw.endsWith('@broadcast'))
+  const phonePrimary = !phoneIsLid ? normCandidate(payload.phone) : ''
   if (phonePrimary) {
     return { key: phonePrimary, isGroup: false, participantPhone: '', debugReason: 'from payload.phone (Z-API primary)' }
   }
@@ -1098,14 +1100,17 @@ exports.receberZapi = async (req, res) => {
       }
     }
 
-    // 2) Conversa — uma única conversa por contato; quando Z-API envia chatLid, unificar por chat_lid
+    // 2) Conversa — uma única conversa por contato; quando Z-API envia chatLid/senderLid, unificar por chat_lid
     //    para que "recebido" (phone real) e "enviado pelo celular" (phone @lid) caiam no mesmo chat.
+    //    Sempre priorizar número real (phone) do payload; LID só para vincular/atualizar.
     let conversa_id = null
     let departamento_id = null
     let isNewConversation = false
 
-    const lidRaw = String(payload?.chatLid ?? payload?.phone ?? '').trim()
-    const lidPart = lidRaw.endsWith('@lid') ? lidRaw.replace(/@lid$/i, '').trim() : (phone.startsWith('lid:') ? phone.slice(4) : null)
+    const lidFromPhone = String(payload?.chatLid ?? payload?.phone ?? '').trim()
+    const lidFromSender = String(payload?.senderLid ?? '').trim()
+    const lidRaw = lidFromPhone.endsWith('@lid') ? lidFromPhone : (lidFromSender.endsWith('@lid') ? lidFromSender : '')
+    const lidPart = lidRaw ? lidRaw.replace(/@lid$/i, '').trim() : (phone.startsWith('lid:') ? phone.slice(4) : null)
 
     try {
       if (lidPart) {
