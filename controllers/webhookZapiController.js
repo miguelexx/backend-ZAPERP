@@ -930,6 +930,7 @@ exports.receberZapi = async (req, res) => {
 
     let cliente_id = null
     let pendingContactSync = null
+    let clientDataForEmit = null
 
     if (!isGroup) {
       // LID sintético (@lid): mensagem espelhada enviada pelo celular sem número real conhecido.
@@ -958,18 +959,19 @@ exports.receberZapi = async (req, res) => {
 
         if (clienteExistente?.id) {
           cliente_id = clienteExistente.id
-          // Doc Z-API: nome = senderName, pushName, contact.displayName. NUNCA sobrescrever com vazio.
+          // Doc Z-API: nome, pushName, photo. Persistir para que ao atualizar/refrescar os dados continuem (listarConversas usa nome/pushname/foto_perfil).
           const nomePayloadRaw = fromMe
             ? (payload.chatName ?? payload.chat?.name ?? payload.groupName ?? payload.senderName ?? payload.pushName ?? payload.contact?.displayName ?? null)
             : (payload.senderName ?? payload.pushName ?? payload.chatName ?? payload.chat?.name ?? payload.contact?.displayName ?? null)
           const nomePayload = nomePayloadRaw ? String(nomePayloadRaw).trim() : null
+          const pushNamePayload = payload.pushName != null ? String(payload.pushName).trim() : null
           const updates = {}
-          if (nomePayload) {
-            updates.nome = nomePayload
-          } else if (!clienteExistente.nome || !String(clienteExistente.nome).trim()) {
+          if (nomePayload) updates.nome = nomePayload
+          else if (!clienteExistente.nome || !String(clienteExistente.nome).trim()) {
             const numericDisplay = String(phone).replace(/\D/g, '')
             if (numericDisplay) updates.nome = numericDisplay
           }
+          if (pushNamePayload) updates.pushname = pushNamePayload
           if (senderPhoto && String(senderPhoto).trim()) updates.foto_perfil = String(senderPhoto).trim()
           if (Object.keys(updates).length > 0) {
             await supabase.from('clientes').update(updates).eq('company_id', company_id).eq('id', cliente_id)
@@ -1019,12 +1021,14 @@ exports.receberZapi = async (req, res) => {
                 ? (payload.chatName ?? payload.chat?.name ?? payload.groupName ?? payload.senderName ?? payload.pushName ?? payload.contact?.displayName ?? null)
                 : (payload.senderName ?? payload.pushName ?? payload.chatName ?? payload.chat?.name ?? payload.contact?.displayName ?? null)
               const fromPayload = fromPayloadRaw ? String(fromPayloadRaw).trim() : null
+              const pushNameInsert = payload.pushName != null && String(payload.pushName).trim() ? String(payload.pushName).trim() : null
 
               const { data: novoCliente, error: errNovoCli } = await supabase
                 .from('clientes')
                 .insert({
                   telefone: telefoneCanonico,
                   nome: fromPayload || telefoneCanonico || null,
+                  ...(pushNameInsert ? { pushname: pushNameInsert } : {}),
                   observacoes: null,
                   company_id,
                   ...(senderPhoto && String(senderPhoto).trim() ? { foto_perfil: String(senderPhoto).trim() } : {})
@@ -1050,11 +1054,11 @@ exports.receberZapi = async (req, res) => {
                     pendingContactSync = { phone, cliente_id }
                   }
                 } else if (String(errNovoCli.message || '').includes('pushname') || String(errNovoCli.message || '').includes('does not exist')) {
-                  // Coluna opcional ausente: retry sem ela
+                  // Coluna opcional ausente: retry sem pushname
                   const fallbackInsert = await supabase
                     .from('clientes')
                     .insert({ telefone: telefoneCanonico, nome: fromPayload || telefoneCanonico || null, company_id,
-                      ...(senderPhoto ? { foto_perfil: senderPhoto } : {}) })
+                      ...(senderPhoto && String(senderPhoto).trim() ? { foto_perfil: String(senderPhoto).trim() } : {}) })
                     .select('id').single()
                   if (!fallbackInsert.error) cliente_id = fallbackInsert.data.id
                 }
@@ -1177,17 +1181,35 @@ exports.receberZapi = async (req, res) => {
         }
       }
 
+      // Buscar dados do cliente no banco para emitir sempre corretos (nome, pushname, telefone, foto).
+      // Assim ao enviar pelo celular (fromMe) ou ao atualizar, a lista mostra dados sincronizados.
+      if (!isGroup && cliente_id) {
+        const { data: cliRow } = await supabase
+          .from('clientes')
+          .select('nome, pushname, telefone, foto_perfil')
+          .eq('id', cliente_id)
+          .eq('company_id', company_id)
+          .maybeSingle()
+        if (cliRow) {
+          clientDataForEmit = {
+            contato_nome: (cliRow.pushname && String(cliRow.pushname).trim()) || (cliRow.nome && String(cliRow.nome).trim()) || cliRow.telefone || phone || null,
+            foto_perfil: cliRow.foto_perfil && String(cliRow.foto_perfil).trim() ? cliRow.foto_perfil : null,
+            telefone: getCanonicalPhone(cliRow.telefone || phone) || cliRow.telefone || phone,
+          }
+        }
+      }
+
       if (isNewConversation) {
         const io = req.app.get('io')
         if (io) {
           io.to(`empresa_${company_id}`).emit('nova_conversa', {
             id: conversa_id,
-            telefone: getCanonicalPhone(phone) || phone,
+            telefone: clientDataForEmit?.telefone ?? getCanonicalPhone(phone) ?? phone,
             tipo: isGroup ? 'grupo' : 'cliente',
             nome_grupo: isGroup ? (nomeGrupo || null) : null,
             foto_grupo: isGroup ? (chatPhoto || null) : null,
-            contato_nome: isGroup ? (nomeGrupo || phone || 'Grupo') : (senderName || payload?.chatName || phone || null),
-            foto_perfil: isGroup ? null : (senderPhoto || payload?.photo || null),
+            contato_nome: isGroup ? (nomeGrupo || phone || 'Grupo') : (clientDataForEmit?.contato_nome ?? senderName ?? payload?.chatName ?? phone ?? null),
+            foto_perfil: isGroup ? null : (clientDataForEmit?.foto_perfil ?? senderPhoto ?? payload?.photo ?? null),
             unread_count: 0,
             tags: [],
           })
@@ -1679,15 +1701,14 @@ exports.receberZapi = async (req, res) => {
       await incrementarUnreadParaConversa(company_id, conversa_id)
     }
 
-    // 4) Realtime: nova_mensagem + atualizar_conversa — sempre para empresa (lista + chat em tempo real, espelho WhatsApp)
+    // 4) Realtime: nova_mensagem + atualizar_conversa com dados do cliente do banco (nome, foto, telefone)
+    // Para que ao atualizar/refrescar a lista continue mostrando os dados corretos e sincronizados.
     const io = req.app.get('io')
     if (io && mensagemSalva) {
       const rooms = [`conversa_${conversa_id}`, `empresa_${company_id}`]
       if (departamento_id != null) rooms.push(`departamento_${departamento_id}`)
-      // Status canônico para os ticks no frontend (sent, delivered, read, pending, erro, played)
       const rawStatus = (mensagemSalva.status_mensagem ?? mensagemSalva.status ?? '').toString().toLowerCase()
       const canon = rawStatus === 'enviada' || rawStatus === 'enviado' ? 'sent' : (rawStatus === 'entregue' || rawStatus === 'received' ? 'delivered' : (rawStatus || (fromMe ? 'sent' : 'delivered')))
-      // Nota: renomeado de 'payload' para 'emitPayload' para evitar shadowing da variável de loop
       const emitPayload = {
         ...mensagemSalva,
         conversa_id: mensagemSalva.conversa_id ?? conversa_id,
@@ -1695,11 +1716,18 @@ exports.receberZapi = async (req, res) => {
         status_mensagem: canon
       }
       io.to(rooms).emit('nova_mensagem', emitPayload)
-      io.to(`empresa_${company_id}`).emit('atualizar_conversa', { id: conversa_id })
-      io.to(`empresa_${company_id}`).emit('conversa_atualizada', { id: conversa_id })
+      // Incluir contato_nome, foto_perfil, telefone do banco para a lista atualizar sem perder dados
+      const conversaPayload = { id: conversa_id }
+      if (clientDataForEmit) {
+        conversaPayload.contato_nome = clientDataForEmit.contato_nome
+        conversaPayload.foto_perfil = clientDataForEmit.foto_perfil
+        conversaPayload.telefone = clientDataForEmit.telefone
+      }
+      io.to(`empresa_${company_id}`).emit('atualizar_conversa', conversaPayload)
+      io.to(`empresa_${company_id}`).emit('conversa_atualizada', conversaPayload)
       if (departamento_id != null) {
-        io.to(`departamento_${departamento_id}`).emit('atualizar_conversa', { id: conversa_id })
-        io.to(`departamento_${departamento_id}`).emit('conversa_atualizada', { id: conversa_id })
+        io.to(`departamento_${departamento_id}`).emit('atualizar_conversa', conversaPayload)
+        io.to(`departamento_${departamento_id}`).emit('conversa_atualizada', conversaPayload)
       }
     }
 
