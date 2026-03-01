@@ -1,10 +1,20 @@
 /**
- * Webhook Z-API: recebe mensagens do Z-API (POST /webhooks/zapi).
- * TUDO que a Z-API enviar para esta URL deve chegar no sistema: texto, imagem, áudio,
- * vídeo, documento, figurinha, reação, localização, contato, PTV, templates, botões, listas.
- * Suporta conversas individuais e de GRUPO.
- * Espelhamento WhatsApp Web: mensagens enviadas pelo celular (fromMe) TAMBÉM são
- * persistidas e emitidas via WebSocket; idempotência por (conversa_id, whatsapp_id).
+ * Webhook Z-API: sincronização 100% fiel com o WhatsApp.
+ * POST /webhooks/zapi — Recebe mensagens e eventos (ReceivedCallback, DeliveryCallback, status).
+ *
+ * REQUISITOS CRÍTICOS DE SINCRONIZAÇÃO:
+ * 1) Chave da conversa: contato = telefone do contato; grupo = id do grupo. NUNCA connectedPhone.
+ * 2) fromMe=true → destino (to, toPhone, recipientPhone...). fromMe=false → payload.phone = remetente.
+ * 3) Contato: sempre sincronizar telefone, nome (senderName, pushName, contact.displayName), foto (photo).
+ *    Salvar em clientes: nome, telefone, foto_perfil. NUNCA sobrescrever com vazio.
+ * 4) Uma conversa por contato; findOrCreateConversation; chave canônica.
+ * 5) Mensagem: texto, tipo, mídia, url, direcao, status, whatsapp_id, reply (referenceMessageId).
+ *    Idempotência: (conversa_id, whatsapp_id) — nunca duplicar.
+ * 6) isEdit=true → atualizar mensagem por whatsapp_id na conversa; NUNCA criar nova.
+ * 7) Status: sent, delivered, read, played — atualizar mensagem existente.
+ * 8) isNewsletter=true → NÃO criar conversa, NÃO salvar mensagem.
+ * 9) waitingMessage=true → status pending.
+ * 10) Grupo: groupId, participantPhone, nomeGrupo, fotoGrupo.
  */
 
 const supabase = require('../config/supabase')
@@ -197,9 +207,35 @@ function resolveConversationKeyFromZapi(payload) {
     return normalizePhoneBR(d) || d
   }
 
+  // ─── Quando fromMe=true: DESTINO da mensagem (contato que recebeu) ─────────────────────────
+  // Doc Z-API ReceivedCallback: "phone" = "Número de telefone, ou do grupo que enviou a mensagem".
+  // Quando fromMe=true, quem enviou somos nós — em algumas versões Z-API "phone" vem como nosso número
+  // ou @lid. Por isso priorizamos os campos de DESTINO (to, toPhone, recipientPhone, etc.) antes de phone.
+  const fromMe = fromMeHint
+  if (fromMe) {
+    const destinationSources = [
+      [payload.to,             'to'],
+      [payload.toPhone,        'toPhone'],
+      [payload.recipientPhone, 'recipientPhone'],
+      [payload.recipient,      'recipient'],
+      [payload.destination,    'destination'],
+      [payload.key?.remoteJid,  'key.remoteJid'],
+      [payload.remoteJid,       'remoteJid'],
+      [payload.chatId,          'chatId'],
+      [payload.chat?.id,        'chat.id'],
+      [payload.senderPhone,    'senderPhone (fromMe)'],
+    ]
+    for (const [raw, fieldName] of destinationSources) {
+      const norm = normCandidate(raw)
+      if (norm) {
+        return { key: norm, isGroup: false, participantPhone: '', debugReason: `fromMe destination ${fieldName}` }
+      }
+    }
+  }
+
   // ─── Fonte primária: payload.phone (SOMENTE quando for número real, NUNCA quando for @lid) ───
   // Z-API envia "phone": "5544999999999" (número real) OU "phone": "24601656598766@lid" (LID interno).
-  // Sempre priorizar o número real: usar phone só se NÃO terminar com @lid; caso contrário tentar outros campos.
+  // Para fromMe=false: phone = remetente (contato). Para fromMe=true: já tentamos destino acima.
   const phoneRaw = clean(payload.phone)
   const phoneIsLid = phoneRaw && (phoneRaw.endsWith('@lid') || phoneRaw.endsWith('@broadcast'))
   const phonePrimary = !phoneIsLid ? normCandidate(payload.phone) : ''
@@ -207,26 +243,13 @@ function resolveConversationKeyFromZapi(payload) {
     return { key: phonePrimary, isGroup: false, participantPhone: '', debugReason: 'from payload.phone (Z-API primary)' }
   }
 
-  // ─── Fontes secundárias ───────────────────────────────────────────────────
-  const fromMe = fromMeHint
+  // ─── Fontes secundárias (quando fromMe já tentamos destino acima) ─────────────────────────
   const fallbackSources = [
     [payload.key?.remoteJid,  'key.remoteJid'],
     [payload.remoteJid,       'remoteJid'],
     [payload.chatId,          'chatId'],
     [payload.chat?.id,        'chat.id'],
-    // Para fromMe=true: recipiente é o contato
-    ...(fromMe ? [
-      [payload.to,             'to'],
-      [payload.toPhone,        'toPhone'],
-      [payload.recipientPhone, 'recipientPhone'],
-      [payload.recipient,      'recipient'],
-      [payload.destination,    'destination'],
-      // senderPhone em fromMe=true pode ser o contato em algumas versões Z-API
-      [payload.senderPhone,    'senderPhone (fromMe fallback)'],
-    ] : [
-      // Para fromMe=false: senderPhone = quem enviou (o contato)
-      [payload.senderPhone,    'senderPhone'],
-    ]),
+    ...(fromMe ? [] : [[payload.senderPhone, 'senderPhone']]),
   ]
 
   for (const [raw, fieldName] of fallbackSources) {
@@ -277,12 +300,6 @@ function resolveConversationKeyFromZapi(payload) {
   }
 }
 
-// pickBestPhone mantido apenas para retrocompatibilidade (wrapper do resolveConversationKeyFromZapi)
-function pickBestPhone(payload, { fromMe } = {}) {
-  const { key } = resolveConversationKeyFromZapi(payload)
-  return key
-}
-
 function extractMessage(payload) {
   if (!payload || typeof payload !== 'object') {
     return { phone: '', texto: '(vazio)', fromMe: false, messageId: null, criado_em: new Date().toISOString(), type: 'text', imageUrl: null, documentUrl: null, audioUrl: null, videoUrl: null, stickerUrl: null, locationUrl: null, fileName: null, isGroup: false, isEdit: false, isNewsletter: false, waitingMessage: false, participantPhone: null, senderName: null, senderLid: null, nomeGrupo: null, senderPhoto: null, chatPhoto: null }
@@ -297,7 +314,8 @@ function extractMessage(payload) {
   // - isGroup: true → grupo (key = id normalizado do grupo)
   // - isGroup: false → individual (key = telefone BR canônico do CONTATO, nunca do connectedPhone)
   const { key: phone, isGroup, participantPhone: partPhoneResolved, debugReason } = resolveConversationKeyFromZapi(payload)
-  const messageId = payload.messageId ?? payload.id ?? payload.instanceId ?? payload.key?.id ?? null
+  // Doc Z-API: messageId e zaapId = identificador da mensagem (ReceivedCallback e DeliveryCallback)
+  const messageId = payload.messageId ?? payload.zaapId ?? payload.id ?? payload.instanceId ?? payload.key?.id ?? null
   const ts = payload.timestamp ?? payload.momment ?? payload.t ?? payload.reaction?.time ?? Date.now()
 
   // Texto: Z-API envia text.message, template, botões, list, reação, localização, contato
@@ -389,8 +407,15 @@ function extractMessage(payload) {
   // participantPhone: remetente dentro do grupo (só relevante para grupos; usamos o valor resolvido por resolveConversationKeyFromZapi + o bruto do payload como fallback)
   const participantPhoneRaw = partPhoneResolved ||
     String(payload.participantPhone ?? payload.participant ?? payload.author ?? payload.key?.participant ?? '').replace(/\D/g, '')
-  const senderName = payload.senderName ?? payload.chatName ?? payload.sender?.name ?? payload.pushName ?? null
-  const senderPhoto = payload.senderPhoto ?? payload.photo ?? payload.sender?.photo ?? null
+  // Doc Z-API: senderName = senderName, pushName, contact.displayName. When fromMe=true = destino (chatName/chat.name).
+  const fromMeForExtract = Boolean(payload.fromMe ?? payload.key?.fromMe)
+  const contactDisplayName = payload.contact?.displayName ?? payload.contact?.formattedName ?? null
+  const senderName = fromMeForExtract
+    ? (payload.chatName ?? payload.chat?.name ?? payload.groupName ?? payload.senderName ?? payload.pushName ?? contactDisplayName ?? null)
+    : (payload.senderName ?? payload.pushName ?? payload.chatName ?? payload.sender?.name ?? contactDisplayName ?? null)
+  const senderPhoto = fromMeForExtract
+    ? (payload.chatPhoto ?? payload.chat?.photo ?? payload.photo ?? payload.sender?.photo ?? null)
+    : (payload.senderPhoto ?? payload.photo ?? payload.sender?.photo ?? null)
   const chatPhoto = payload.chatPhoto ?? payload.groupPicture ?? payload.groupPhoto ?? null
 
   // Texto por tipo (TUDO que a Z-API envia vira registro legível no sistema)
@@ -468,56 +493,6 @@ function getPayloads(body) {
   if (body.messages && Array.isArray(body.messages) && body.messages.length > 0) return body.messages
   if (body.message && typeof body.message === 'object') return [body.message]
   return [body]
-}
-
-/** Fallback para obter telefone do CONTATO em mensagens fromMe quando pickBestPhone retorna vazio.
- *  Não devolve LID nem número \"inventado\" – apenas telefones BR válidos.
- */
-function getFallbackPhoneForFromMe(payload) {
-  if (!payload || typeof payload !== 'object') return ''
-
-  // 1) Tenta reaproveitar a mesma lógica de seleção principal
-  const best = pickBestPhone(payload, { fromMe: true })
-  if (best) return best
-
-  // 2) Fallback extra: varre vários campos à procura de um número BR válido
-  const candidates = [
-    payload.to,
-    payload.recipientPhone,
-    payload.toPhone,
-    payload.recipient,
-    payload.destination,
-    payload.key?.remoteJid,
-    payload.remoteJid,
-    payload.chatId,
-    payload.chat?.id,
-    payload.phone,
-  ]
-
-  for (const cand of candidates) {
-    if (!cand) continue
-    const s = String(cand).trim()
-    if (!s) continue
-
-    // Ignorar IDs internos (lid/broadcast)
-    if (s.endsWith('@lid') || s.endsWith('@broadcast')) continue
-
-    // Extrair dígitos do JID ou do valor cru
-    const digits = s.includes('@')
-      ? s.replace(/@[^@]+$/, '').replace(/\D/g, '')
-      : s.replace(/\D/g, '')
-
-    if (!looksLikeBRPhoneDigits(digits)) continue
-
-    const norm = normalizePhoneBR(digits)
-    if (norm) {
-      console.log('[Z-API] getFallbackPhoneForFromMe → usando telefone BR:', norm)
-      return norm
-    }
-  }
-
-  console.warn('[Z-API] getFallbackPhoneForFromMe: nenhum telefone BR válido encontrado em fromMe.')
-  return ''
 }
 
 /** GET /webhooks/zapi — teste de conectividade; retorna todas as URLs para configurar no painel Z-API. */
@@ -901,7 +876,6 @@ exports.receberZapi = async (req, res) => {
         waitingMessage,
         participantPhone,
         senderName,
-        senderLid: extractedSenderLid,
         nomeGrupo,
         senderPhoto,
         chatPhoto
@@ -984,20 +958,19 @@ exports.receberZapi = async (req, res) => {
 
         if (clienteExistente?.id) {
           cliente_id = clienteExistente.id
-          // Atualizar com dados do payload (nome/foto) sem poluir quando fromMe=true.
+          // Doc Z-API: nome = senderName, pushName, contact.displayName. NUNCA sobrescrever com vazio.
           const nomePayloadRaw = fromMe
-            ? (payload.chatName ?? payload.chat?.name ?? null)
-            : (payload.senderName ?? payload.chatName ?? payload.chat?.name ?? null)
+            ? (payload.chatName ?? payload.chat?.name ?? payload.groupName ?? payload.senderName ?? payload.pushName ?? payload.contact?.displayName ?? null)
+            : (payload.senderName ?? payload.pushName ?? payload.chatName ?? payload.chat?.name ?? payload.contact?.displayName ?? null)
           const nomePayload = nomePayloadRaw ? String(nomePayloadRaw).trim() : null
           const updates = {}
-          // Salva número se nome estiver vazio (nunca gravar LID como nome)
-          if (nomePayload) updates.nome = nomePayload
-          else if (!clienteExistente.nome || !String(clienteExistente.nome).trim()) {
-            // Usar o número formatado, não o phone bruto
+          if (nomePayload) {
+            updates.nome = nomePayload
+          } else if (!clienteExistente.nome || !String(clienteExistente.nome).trim()) {
             const numericDisplay = String(phone).replace(/\D/g, '')
             if (numericDisplay) updates.nome = numericDisplay
           }
-          if (!fromMe && senderPhoto) updates.foto_perfil = senderPhoto
+          if (senderPhoto && String(senderPhoto).trim()) updates.foto_perfil = String(senderPhoto).trim()
           if (Object.keys(updates).length > 0) {
             await supabase.from('clientes').update(updates).eq('company_id', company_id).eq('id', cliente_id)
           }
@@ -1043,8 +1016,8 @@ exports.receberZapi = async (req, res) => {
               // cliente_id permanece null; mensagem ainda será registrada na conversa
             } else {
               const fromPayloadRaw = fromMe
-                ? (payload.chatName ?? payload.chat?.name ?? null)
-                : (payload.senderName ?? payload.chatName ?? payload.chat?.name ?? null)
+                ? (payload.chatName ?? payload.chat?.name ?? payload.groupName ?? payload.senderName ?? payload.pushName ?? payload.contact?.displayName ?? null)
+                : (payload.senderName ?? payload.pushName ?? payload.chatName ?? payload.chat?.name ?? payload.contact?.displayName ?? null)
               const fromPayload = fromPayloadRaw ? String(fromPayloadRaw).trim() : null
 
               const { data: novoCliente, error: errNovoCli } = await supabase
@@ -1054,7 +1027,7 @@ exports.receberZapi = async (req, res) => {
                   nome: fromPayload || telefoneCanonico || null,
                   observacoes: null,
                   company_id,
-                  ...(!fromMe && senderPhoto ? { foto_perfil: senderPhoto } : {})
+                  ...(senderPhoto && String(senderPhoto).trim() ? { foto_perfil: String(senderPhoto).trim() } : {})
                 })
                 .select('id')
                 .single()
@@ -1081,7 +1054,7 @@ exports.receberZapi = async (req, res) => {
                   const fallbackInsert = await supabase
                     .from('clientes')
                     .insert({ telefone: telefoneCanonico, nome: fromPayload || telefoneCanonico || null, company_id,
-                      ...(!fromMe && senderPhoto ? { foto_perfil: senderPhoto } : {}) })
+                      ...(senderPhoto ? { foto_perfil: senderPhoto } : {}) })
                     .select('id').single()
                   if (!fallbackInsert.error) cliente_id = fallbackInsert.data.id
                 }
@@ -1191,12 +1164,17 @@ exports.receberZapi = async (req, res) => {
         }
       }
 
-      // Atualiza foto do grupo quando disponível no payload
-      if (isGroup && chatPhoto && !isNewConversation) {
-        await supabase.from('conversas')
-          .update({ foto_grupo: chatPhoto })
-          .eq('id', conversa_id)
-          .eq('company_id', company_id)
+      // Grupo: atualizar nome_grupo e foto_grupo quando disponíveis no payload (Z-API: chatName, photo)
+      if (isGroup && !isNewConversation) {
+        const groupUpdates = {}
+        if (nomeGrupo && String(nomeGrupo).trim()) groupUpdates.nome_grupo = String(nomeGrupo).trim()
+        if (chatPhoto && String(chatPhoto).trim()) groupUpdates.foto_grupo = String(chatPhoto).trim()
+        if (Object.keys(groupUpdates).length > 0) {
+          await supabase.from('conversas')
+            .update(groupUpdates)
+            .eq('id', conversa_id)
+            .eq('company_id', company_id)
+        }
       }
 
       if (isNewConversation) {
@@ -1490,13 +1468,14 @@ exports.receberZapi = async (req, res) => {
       }
     }
 
-    // isEdit: mensagem editada → atualizar texto da mensagem existente, não inserir nova
+    // isEdit (Z-API): localizar por whatsapp_id na conversa, atualizar texto existente, NUNCA criar nova
     if (!mensagemSalva && isEdit && whatsappIdStr) {
       try {
         const { data: editTarget } = await supabase
           .from('mensagens')
           .update({ texto })
           .eq('company_id', company_id)
+          .eq('conversa_id', conversa_id)
           .eq('whatsapp_id', whatsappIdStr)
           .select('*')
           .maybeSingle()
@@ -1733,10 +1712,10 @@ exports.receberZapi = async (req, res) => {
           .then((synced) => {
             if (!synced) return null
             const up = {}
-            // Se não houver nome na Z-API, salva o número.
-            up.nome = (synced.nome && String(synced.nome).trim()) ? String(synced.nome).trim() : syncPhone
-            if (synced.pushname !== undefined) up.pushname = synced.pushname
-            if (synced.foto_perfil) up.foto_perfil = synced.foto_perfil
+            // NUNCA sobrescrever com vazio: só atualiza quando há valor não vazio da Z-API
+            if (synced.nome != null && String(synced.nome).trim()) up.nome = String(synced.nome).trim()
+            if (synced.pushname != null && String(synced.pushname).trim()) up.pushname = String(synced.pushname).trim()
+            if (synced.foto_perfil != null && String(synced.foto_perfil).trim()) up.foto_perfil = String(synced.foto_perfil).trim()
             if (Object.keys(up).length === 0) return null
             return supabase.from('clientes').update(up).eq('id', syncClienteId).eq('company_id', company_id)
           })
@@ -1999,8 +1978,9 @@ exports.connectionZapi = async (req, res) => {
 
               if (existente?.id) {
                 const updates = {}
-                if (nome != null) updates.nome = nome
-                if (pushname != null) updates.pushname = pushname
+                // NUNCA sobrescrever com vazio: só atualiza quando há valor não vazio
+                if (nome != null && String(nome).trim()) updates.nome = String(nome).trim()
+                if (pushname != null && String(pushname).trim()) updates.pushname = String(pushname).trim()
                 if (Object.keys(updates).length > 0) {
                   let upd = await supabase.from('clientes').update(updates).eq('id', existente.id).eq('company_id', company_id)
                   if (upd.error && String(upd.error.message || '').includes('pushname')) {
