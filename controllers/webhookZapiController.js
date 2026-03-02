@@ -777,6 +777,32 @@ exports.receberZapi = async (req, res) => {
           .select('id, conversa_id, company_id')
           .maybeSingle()
 
+        // 1.1) Se achou a mensagem e temos phoneDest real, tentar corrigir conversa com telefone LID → telefone real.
+        if (!error && msg && phoneDest) {
+          try {
+            const { data: convRow } = await supabase
+              .from('conversas')
+              .select('id, telefone')
+              .eq('company_id', company_id)
+              .eq('id', msg.conversa_id)
+              .maybeSingle()
+            const canonical = getCanonicalPhone(phoneDest)
+            if (convRow && canonical) {
+              const telAtual = convRow.telefone ? String(convRow.telefone).trim() : ''
+              const isLidTel = telAtual.toLowerCase().startsWith('lid:')
+              if (!telAtual || isLidTel) {
+                await supabase
+                  .from('conversas')
+                  .update({ telefone: canonical })
+                  .eq('company_id', company_id)
+                  .eq('id', convRow.id)
+              }
+            }
+          } catch (e) {
+            console.warn('[Z-API] DeliveryCallback: falha ao atualizar telefone da conversa:', e?.message || e)
+          }
+        }
+
         // 2) se não achou, tenta reconciliar a última mensagem out sem whatsapp_id na conversa de destino
         if (!error && !msg && phoneDest) {
           try {
