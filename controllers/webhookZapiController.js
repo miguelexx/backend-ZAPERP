@@ -567,6 +567,66 @@ exports.receberZapi = async (req, res) => {
       rawBody: JSON.stringify(body).slice(0, 600)
     })
 
+    // Callback específico de atualização de foto de grupo:
+    // docs: { "groupId": "...", "groupPhoto": "https://..." }
+    // Quando vier sem campos de mensagem/phone, tratamos direto aqui.
+    const rawGroupId = body.groupId != null ? String(body.groupId).trim() : ''
+    const rawGroupPhoto = body.groupPhoto != null ? String(body.groupPhoto).trim() : ''
+    const hasOnlyGroupPhotoPayload =
+      rawGroupId &&
+      rawGroupPhoto &&
+      !body.phone &&
+      !body.text &&
+      !body.message &&
+      !body.body &&
+      !body.image &&
+      !body.audio &&
+      !body.video &&
+      !body.document &&
+      !body.sticker
+
+    if (hasOnlyGroupPhotoPayload) {
+      const groupIdForStorage = normalizeGroupIdForStorage(rawGroupId) || rawGroupId
+      try {
+        const { data, error } = await supabase
+          .from('conversas')
+          .update({ foto_grupo: rawGroupPhoto })
+          .eq('company_id', COMPANY_ID)
+          .in('telefone', [groupIdForStorage, rawGroupId])
+          .select('id')
+
+        if (error) {
+          console.error('[Z-API] ❌ Erro ao atualizar foto de grupo via callback groupPhoto:', error)
+          return res.status(500).json({ error: 'Erro ao atualizar foto de grupo' })
+        }
+
+        const updatedCount = Array.isArray(data) ? data.length : 0
+        console.log('[Z-API] ✅ Foto de grupo atualizada via callback groupPhoto:', {
+          groupId: rawGroupId,
+          storedId: groupIdForStorage,
+          updated: updatedCount
+        })
+
+        // Emite atualização de conversa para atualizar avatar no front
+        if (updatedCount > 0) {
+          const io = req.app.get('io')
+          if (io) {
+            for (const row of data) {
+              io.to(`empresa_${COMPANY_ID}`).emit('conversa_atualizada', {
+                id: row.id,
+                foto_grupo: rawGroupPhoto
+              })
+            }
+          }
+        }
+
+        return res.status(200).json({ ok: true, updated: updatedCount })
+      } catch (e) {
+        console.error('[Z-API] ❌ Exceção ao processar callback groupPhoto:', e?.message || e)
+        return res.status(500).json({ error: 'Erro ao processar callback de foto de grupo' })
+      }
+    }
+
     const payloads = getPayloads(body)
     let lastResult = { ok: true }
 
