@@ -35,6 +35,10 @@ router.post("/:id/arquivo", auth, upload.single('file'), chatController.enviarAr
 
 router.post('/:id/mensagens', auth, chatController.enviarMensagemChat)
 router.delete('/:id/mensagens/:mensagem_id', auth, chatController.excluirMensagem)
+router.post('/:id/mensagens/:mensagem_id/reacao', auth, chatController.enviarReacaoMensagem)
+router.delete('/:id/mensagens/:mensagem_id/reacao', auth, chatController.removerReacaoMensagem)
+router.post('/:id/contatos', auth, chatController.enviarContatoWhatsapp)
+router.post('/:id/ligacao', auth, chatController.enviarLigacaoWhatsapp)
 router.put('/:id/observacao', auth, chatController.atualizarObservacao)
 
 // auditoria

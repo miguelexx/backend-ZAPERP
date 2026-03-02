@@ -479,6 +479,184 @@ async function sendVideo(phone, videoUrl, caption = '') {
 }
 
 /**
+ * Envia reação a uma mensagem existente no chat.
+ * POST /send-reaction
+ * @param {string} phone - Número/JID do chat
+ * @param {string} messageId - ID da mensagem que receberá a reação (whatsapp_id)
+ * @param {string} reaction - Emoji de reação (❤️, 👍, etc.)
+ * @returns {Promise<boolean>}
+ */
+async function sendReaction(phone, messageId, reaction) {
+  const basePath = getBasePath()
+  if (!basePath) return false
+  try {
+    const nums = await phoneCandidatesForSendAsync(phone)
+    const mid = String(messageId || '').trim()
+    const emoji = String(reaction || '').trim()
+    if (!nums.length || !mid || !emoji) return false
+
+    return await postJsonWithCandidates({
+      basePath,
+      endpoint: '/send-reaction',
+      phoneCandidates: nums,
+      okLogLabel: 'reação',
+      buildBody: (num) => ({
+        phone: num,
+        messageId: mid,
+        reaction: emoji,
+      }),
+    })
+  } catch (e) {
+    console.error('❌ Erro Z-API sendReaction:', e.message)
+    return false
+  }
+}
+
+/**
+ * Remove reação de uma mensagem existente no chat.
+ * POST /send-remove-reaction
+ * @param {string} phone - Número/JID do chat
+ * @param {string} messageId - ID da mensagem que terá a reação removida (whatsapp_id)
+ * @returns {Promise<boolean>}
+ */
+async function removeReaction(phone, messageId) {
+  const basePath = getBasePath()
+  if (!basePath) return false
+  try {
+    const nums = await phoneCandidatesForSendAsync(phone)
+    const mid = String(messageId || '').trim()
+    if (!nums.length || !mid) return false
+
+    return await postJsonWithCandidates({
+      basePath,
+      endpoint: '/send-remove-reaction',
+      phoneCandidates: nums,
+      okLogLabel: 'remover reação',
+      buildBody: (num) => ({
+        phone: num,
+        messageId: mid,
+      }),
+    })
+  } catch (e) {
+    console.error('❌ Erro Z-API removeReaction:', e.message)
+    return false
+  }
+}
+
+/**
+ * Compartilha um contato existente em um chat.
+ * POST /send-contact
+ * @param {string} phone - Número/JID do chat de destino
+ * @param {string} contactName - Nome do contato a compartilhar
+ * @param {string} contactPhone - Telefone do contato (apenas dígitos)
+ * @param {{ messageId?: string }} [opts]
+ * @returns {Promise<{ ok: boolean, messageId: string|null }>}
+ */
+async function sendContact(phone, contactName, contactPhone, opts = {}) {
+  const basePath = getBasePath()
+  if (!basePath) return { ok: false, messageId: null }
+  try {
+    const nums = await phoneCandidatesForSendAsync(phone)
+    const name = String(contactName || '').trim()
+    const contact = String(contactPhone || '').replace(/\D/g, '')
+    const replyMessageId = opts?.messageId ? String(opts.messageId).trim() : null
+    if (!nums.length || !name || !contact) return { ok: false, messageId: null }
+
+    for (const num of nums) {
+      const body = {
+        phone: num,
+        contactName: name,
+        contactPhone: contact,
+      }
+      if (replyMessageId) body.messageId = replyMessageId
+
+      const res = await fetch(`${basePath}/send-contact`, {
+        method: 'POST',
+        headers: getHeaders(),
+        body: JSON.stringify(body),
+      })
+      const text = await res.text().catch(() => '')
+      if (!res.ok) {
+        logClientTokenHint(text)
+        console.warn('❌ Z-API send-contact falhou:', String(num || '').slice(-12), res.status, text.slice(0, 200))
+        continue
+      }
+      let data = null
+      try {
+        data = text ? JSON.parse(text) : null
+      } catch {
+        data = null
+      }
+      const err = data?.error || data?.errorMessage || null
+      if (err) {
+        console.warn('❌ Z-API send-contact retornou erro (200):', String(num || '').slice(-12), String(err).slice(0, 200))
+        continue
+      }
+      const msgId = data?.messageId || data?.zaapId || null
+      console.log('✅ Z-API contato enviado:', String(num || '').slice(-12), msgId ? `id=${String(msgId).slice(0, 14)}...` : '')
+      return { ok: true, messageId: msgId ? String(msgId) : null }
+    }
+    return { ok: false, messageId: null }
+  } catch (e) {
+    console.error('❌ Erro Z-API sendContact:', e.message)
+    return { ok: false, messageId: null }
+  }
+}
+
+/**
+ * Envia uma "ligação" via Z-API (chamada simulada).
+ * POST /send-call
+ * @param {string} phone - Telefone do destinatário (apenas dígitos)
+ * @param {number} [callDuration] - duração em segundos (5–15) opcional
+ * @returns {Promise<{ ok: boolean, messageId: string|null }>}
+ */
+async function sendCall(phone, callDuration) {
+  const basePath = getBasePath()
+  if (!basePath) return { ok: false, messageId: null }
+  try {
+    const nums = await phoneCandidatesForSendAsync(phone)
+    if (!nums.length) return { ok: false, messageId: null }
+    const dur = Number(callDuration)
+    const safeDur = Number.isFinite(dur) ? Math.max(1, Math.min(15, dur)) : undefined
+
+    for (const num of nums) {
+      const body = { phone: num }
+      if (safeDur != null) body.callDuration = safeDur
+
+      const res = await fetch(`${basePath}/send-call`, {
+        method: 'POST',
+        headers: getHeaders(),
+        body: JSON.stringify(body),
+      })
+      const text = await res.text().catch(() => '')
+      if (!res.ok) {
+        logClientTokenHint(text)
+        console.warn('❌ Z-API send-call falhou:', String(num || '').slice(-12), res.status, text.slice(0, 200))
+        continue
+      }
+      let data = null
+      try {
+        data = text ? JSON.parse(text) : null
+      } catch {
+        data = null
+      }
+      const err = data?.error || data?.errorMessage || null
+      if (err) {
+        console.warn('❌ Z-API send-call retornou erro (200):', String(num || '').slice(0, 12), String(err).slice(0, 200))
+        continue
+      }
+      const msgId = data?.messageId || data?.zaapId || null
+      console.log('✅ Z-API ligação iniciada:', String(num || '').slice(-12), msgId ? `id=${String(msgId).slice(0, 14)}...` : '')
+      return { ok: true, messageId: msgId ? String(msgId) : null }
+    }
+    return { ok: false, messageId: null }
+  } catch (e) {
+    console.error('❌ Erro Z-API sendCall:', e.message)
+    return { ok: false, messageId: null }
+  }
+}
+
+/**
  * Busca mensagens de um chat (histórico).
  * GET /chat-messages/{phone}?amount=10&lastMessageId=...
  *
@@ -756,6 +934,10 @@ module.exports = {
   sendFile,
   sendAudio,
   sendVideo,
+   sendReaction,
+   removeReaction,
+  sendContact,
+  sendCall,
   sendSticker,
   getContacts,
   getProfilePicture,

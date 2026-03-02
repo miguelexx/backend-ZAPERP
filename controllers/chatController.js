@@ -2009,6 +2009,305 @@ exports.enviarMensagemChat = async (req, res) => {
 }
 
 // =====================================================
+// Reações em mensagens (Z-API send-reaction / send-remove-reaction)
+// =====================================================
+
+exports.enviarReacaoMensagem = async (req, res) => {
+  try {
+    const { company_id } = req.user
+    const { id: conversa_id, mensagem_id } = req.params
+    const { reaction } = req.body || {}
+
+    if (!reaction || !String(reaction).trim()) {
+      return res.status(400).json({ error: 'reaction é obrigatório' })
+    }
+
+    // busca conversa + mensagem para garantir que pertencem à empresa
+    const { data: conversa, error: errConv } = await supabase
+      .from('conversas')
+      .select('id, telefone, company_id')
+      .eq('company_id', company_id)
+      .eq('id', conversa_id)
+      .maybeSingle()
+
+    if (errConv || !conversa) {
+      return res.status(404).json({ error: 'Conversa não encontrada' })
+    }
+
+    const { data: msg, error: errMsg } = await supabase
+      .from('mensagens')
+      .select('id, whatsapp_id, company_id, conversa_id')
+      .eq('company_id', company_id)
+      .eq('conversa_id', conversa_id)
+      .eq('id', mensagem_id)
+      .maybeSingle()
+
+    if (errMsg || !msg) {
+      return res.status(404).json({ error: 'Mensagem não encontrada' })
+    }
+
+    if (!msg.whatsapp_id) {
+      return res.status(400).json({ error: 'Mensagem ainda não possui whatsapp_id para reagir' })
+    }
+
+    const provider = getProvider()
+    if (!provider || !provider.sendReaction) {
+      return res.status(500).json({ error: 'Provider WhatsApp não suporta reações' })
+    }
+
+    const ok = await provider.sendReaction(conversa.telefone, msg.whatsapp_id, String(reaction).trim())
+    if (!ok) {
+      return res.status(502).json({ error: 'Falha ao enviar reação para o WhatsApp' })
+    }
+
+    // Reação será espelhada depois via webhook Z-API (type=reaction), então não gravamos mensagem aqui.
+    return res.json({ ok: true })
+  } catch (err) {
+    console.error('Erro ao enviar reação:', err)
+    return res.status(500).json({ error: 'Erro ao enviar reação' })
+  }
+}
+
+exports.removerReacaoMensagem = async (req, res) => {
+  try {
+    const { company_id } = req.user
+    const { id: conversa_id, mensagem_id } = req.params
+
+    const { data: conversa, error: errConv } = await supabase
+      .from('conversas')
+      .select('id, telefone, company_id')
+      .eq('company_id', company_id)
+      .eq('id', conversa_id)
+      .maybeSingle()
+
+    if (errConv || !conversa) {
+      return res.status(404).json({ error: 'Conversa não encontrada' })
+    }
+
+    const { data: msg, error: errMsg } = await supabase
+      .from('mensagens')
+      .select('id, whatsapp_id, company_id, conversa_id')
+      .eq('company_id', company_id)
+      .eq('conversa_id', conversa_id)
+      .eq('id', mensagem_id)
+      .maybeSingle()
+
+    if (errMsg || !msg) {
+      return res.status(404).json({ error: 'Mensagem não encontrada' })
+    }
+
+    if (!msg.whatsapp_id) {
+      return res.status(400).json({ error: 'Mensagem ainda não possui whatsapp_id para remover reação' })
+    }
+
+    const provider = getProvider()
+    if (!provider || !provider.removeReaction) {
+      return res.status(500).json({ error: 'Provider WhatsApp não suporta remoção de reação' })
+    }
+
+    const ok = await provider.removeReaction(conversa.telefone, msg.whatsapp_id)
+    if (!ok) {
+      return res.status(502).json({ error: 'Falha ao remover reação no WhatsApp' })
+    }
+
+    // Remoção de reação também será refletida via webhook da Z-API.
+    return res.json({ ok: true })
+  } catch (err) {
+    console.error('Erro ao remover reação:', err)
+    return res.status(500).json({ error: 'Erro ao remover reação' })
+  }
+}
+
+// =====================================================
+// Compartilhar contato existente pelo WhatsApp (Z-API /send-contact)
+// =====================================================
+
+exports.enviarContatoWhatsapp = async (req, res) => {
+  try {
+    const { company_id, id: user_id } = req.user
+    const { id: conversa_id } = req.params
+    const { cliente_id, messageId } = req.body || {}
+
+    if (!cliente_id) {
+      return res.status(400).json({ error: 'cliente_id é obrigatório' })
+    }
+
+    const { data: conversa, error: errConv } = await supabase
+      .from('conversas')
+      .select('id, telefone, company_id')
+      .eq('company_id', company_id)
+      .eq('id', conversa_id)
+      .maybeSingle()
+
+    if (errConv || !conversa) {
+      return res.status(404).json({ error: 'Conversa não encontrada' })
+    }
+
+    const { data: cliente, error: errCli } = await supabase
+      .from('clientes')
+      .select('id, nome, pushname, telefone')
+      .eq('company_id', company_id)
+      .eq('id', cliente_id)
+      .maybeSingle()
+
+    if (errCli || !cliente) {
+      return res.status(404).json({ error: 'Contato não encontrado' })
+    }
+
+    const contactName =
+      (cliente.pushname && String(cliente.pushname).trim()) ||
+      (cliente.nome && String(cliente.nome).trim()) ||
+      (cliente.telefone && String(cliente.telefone).trim()) ||
+      'Contato'
+    const contactPhone = String(cliente.telefone || '').replace(/\D/g, '')
+
+    if (!contactPhone) {
+      return res.status(400).json({ error: 'Contato não possui telefone válido para compartilhar' })
+    }
+
+    const provider = getProvider()
+    if (!provider || !provider.sendContact) {
+      return res.status(500).json({ error: 'Provider WhatsApp não suporta compartilhamento de contato' })
+    }
+
+    // cria registro local de mensagem do tipo "contact" (direção out)
+    const criadoEm = new Date().toISOString()
+    const { data: msg, error: errMsg } = await supabase
+      .from('mensagens')
+      .insert({
+        company_id,
+        conversa_id: Number(conversa_id),
+        texto: contactName,
+        direcao: 'out',
+        tipo: 'contact',
+        status: 'pending',
+        autor_usuario_id: Number(user_id),
+        criado_em: criadoEm,
+      })
+      .select()
+      .single()
+
+    if (errMsg) {
+      return res.status(500).json({ error: errMsg.message })
+    }
+
+    // envia contato via Z-API
+    const result = await provider.sendContact(conversa.telefone, contactName, contactPhone, {
+      messageId: messageId || undefined,
+    })
+    const ok = typeof result === 'boolean' ? result : result?.ok === true
+    const waMessageId =
+      typeof result === 'object' && result?.messageId ? String(result.messageId).trim() : null
+
+    const nextStatus = ok ? 'sent' : 'erro'
+    await supabase
+      .from('mensagens')
+      .update({ status: nextStatus, ...(waMessageId ? { whatsapp_id: waMessageId } : {}) })
+      .eq('company_id', company_id)
+      .eq('id', msg.id)
+
+    const io = req.app.get('io')
+    if (io) {
+      emitirEventoEmpresaConversa(
+        io,
+        company_id,
+        conversa_id,
+        io.EVENTS?.NOVA_MENSAGEM || 'nova_mensagem',
+        { ...msg, status: nextStatus, whatsapp_id: waMessageId || null },
+      )
+      emitirConversaAtualizada(io, company_id, conversa_id, { id: Number(conversa_id) })
+    }
+
+    return res.json({ ok: true })
+  } catch (err) {
+    console.error('Erro ao enviar contato:', err)
+    return res.status(500).json({ error: 'Erro ao enviar contato' })
+  }
+}
+
+// =====================================================
+// Registro de ligações via WhatsApp (Z-API /send-call)
+// =====================================================
+
+exports.enviarLigacaoWhatsapp = async (req, res) => {
+  try {
+    const { company_id, id: user_id } = req.user
+    const { id: conversa_id } = req.params
+    const { callDuration } = req.body || {}
+
+    const { data: conversa, error: errConv } = await supabase
+      .from('conversas')
+      .select('id, telefone, company_id')
+      .eq('company_id', company_id)
+      .eq('id', conversa_id)
+      .maybeSingle()
+
+    if (errConv || !conversa) {
+      return res.status(404).json({ error: 'Conversa não encontrada' })
+    }
+
+    const dur = Number(callDuration)
+    const safeDur = Number.isFinite(dur) ? Math.max(1, Math.min(15, dur)) : 5
+
+    const criadoEm = new Date().toISOString()
+    const texto = `Ligação via WhatsApp (${safeDur}s)`
+
+    const { data: msg, error: errMsg } = await supabase
+      .from('mensagens')
+      .insert({
+        company_id,
+        conversa_id: Number(conversa_id),
+        texto,
+        tipo: 'call',
+        direcao: 'out',
+        status: 'pending',
+        autor_usuario_id: Number(user_id),
+        criado_em: criadoEm,
+      })
+      .select()
+      .single()
+
+    if (errMsg) {
+      return res.status(500).json({ error: errMsg.message })
+    }
+
+    const provider = getProvider()
+    if (!provider || !provider.sendCall) {
+      return res.status(500).json({ error: 'Provider WhatsApp não suporta ligações' })
+    }
+
+    const result = await provider.sendCall(conversa.telefone, safeDur)
+    const ok = typeof result === 'boolean' ? result : result?.ok === true
+    const waMessageId =
+      typeof result === 'object' && result?.messageId ? String(result.messageId).trim() : null
+
+    const nextStatus = ok ? 'sent' : 'erro'
+    await supabase
+      .from('mensagens')
+      .update({ status: nextStatus, ...(waMessageId ? { whatsapp_id: waMessageId } : {}) })
+      .eq('company_id', company_id)
+      .eq('id', msg.id)
+
+    const io = req.app.get('io')
+    if (io) {
+      emitirEventoEmpresaConversa(
+        io,
+        company_id,
+        conversa_id,
+        io.EVENTS?.NOVA_MENSAGEM || 'nova_mensagem',
+        { ...msg, status: nextStatus, whatsapp_id: waMessageId || null },
+      )
+      emitirConversaAtualizada(io, company_id, conversa_id, { id: Number(conversa_id) })
+    }
+
+    return res.json({ ok: true })
+  } catch (err) {
+    console.error('Erro ao registrar ligação:', err)
+    return res.status(500).json({ error: 'Erro ao registrar ligação' })
+  }
+}
+
+// =====================================================
 // excluirMensagem — remove do sistema (DB) + realtime
 // =====================================================
 exports.excluirMensagem = async (req, res) => {
