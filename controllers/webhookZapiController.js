@@ -1,20 +1,10 @@
 /**
- * Webhook Z-API: sincronização 100% fiel com o WhatsApp.
- * POST /webhooks/zapi — Recebe mensagens e eventos (ReceivedCallback, DeliveryCallback, status).
- *
- * REQUISITOS CRÍTICOS DE SINCRONIZAÇÃO:
- * 1) Chave da conversa: contato = telefone do contato; grupo = id do grupo. NUNCA connectedPhone.
- * 2) fromMe=true → destino (to, toPhone, recipientPhone...). fromMe=false → payload.phone = remetente.
- * 3) Contato: sempre sincronizar telefone, nome (senderName, pushName, contact.displayName), foto (photo).
- *    Salvar em clientes: nome, telefone, foto_perfil. NUNCA sobrescrever com vazio.
- * 4) Uma conversa por contato; findOrCreateConversation; chave canônica.
- * 5) Mensagem: texto, tipo, mídia, url, direcao, status, whatsapp_id, reply (referenceMessageId).
- *    Idempotência: (conversa_id, whatsapp_id) — nunca duplicar.
- * 6) isEdit=true → atualizar mensagem por whatsapp_id na conversa; NUNCA criar nova.
- * 7) Status: sent, delivered, read, played — atualizar mensagem existente.
- * 8) isNewsletter=true → NÃO criar conversa, NÃO salvar mensagem.
- * 9) waitingMessage=true → status pending.
- * 10) Grupo: groupId, participantPhone, nomeGrupo, fotoGrupo.
+ * Webhook Z-API: recebe mensagens do Z-API (POST /webhooks/zapi).
+ * TUDO que a Z-API enviar para esta URL deve chegar no sistema: texto, imagem, áudio,
+ * vídeo, documento, figurinha, reação, localização, contato, PTV, templates, botões, listas.
+ * Suporta conversas individuais e de GRUPO.
+ * Espelhamento WhatsApp Web: mensagens enviadas pelo celular (fromMe) TAMBÉM são
+ * persistidas e emitidas via WebSocket; idempotência por (conversa_id, whatsapp_id).
  */
 
 const supabase = require('../config/supabase')
@@ -218,36 +208,17 @@ function resolveConversationKeyFromZapi(payload) {
       [payload.toPhone,        'toPhone'],
       [payload.recipientPhone, 'recipientPhone'],
       [payload.recipient,      'recipient'],
-      [payload.recipientId,    'recipientId'],
       [payload.destination,    'destination'],
       [payload.key?.remoteJid,  'key.remoteJid'],
       [payload.remoteJid,       'remoteJid'],
       [payload.chatId,          'chatId'],
       [payload.chat?.id,        'chat.id'],
-      [payload.chat?.jid,       'chat.jid'],
       [payload.senderPhone,    'senderPhone (fromMe)'],
-      [payload.data?.to,        'data.to'],
-      [payload.value?.to,      'value.to'],
-      [payload.phoneNumber,    'phoneNumber'],
     ]
     for (const [raw, fieldName] of destinationSources) {
       const norm = normCandidate(raw)
       if (norm) {
         return { key: norm, isGroup: false, participantPhone: '', debugReason: `fromMe destination ${fieldName}` }
-      }
-    }
-    // Última tentativa: phone pode vir "DDD+NUMERO@lid" — extrair só dígitos; se 10 ou 11, formar 55+digits
-    const phoneRaw = clean(payload.phone)
-    if (phoneRaw && phoneRaw.endsWith('@lid')) {
-      const digitsOnly = (phoneRaw.replace(/@lid$/i, '').replace(/\D/g, '') || '').trim()
-      if (digitsOnly.length === 10 || digitsOnly.length === 11) {
-        const with55 = '55' + digitsOnly
-        if (looksLikeBRPhoneDigits(with55.replace(/\D/g, '')) && !isMyNumber(with55.replace(/\D/g, ''))) {
-          const norm = normalizePhoneBR(with55) || with55
-          if (norm) {
-            return { key: norm, isGroup: false, participantPhone: '', debugReason: 'fromMe phone@lid digits (55+DDD+num)' }
-          }
-        }
       }
     }
   }
@@ -426,12 +397,11 @@ function extractMessage(payload) {
   // participantPhone: remetente dentro do grupo (só relevante para grupos; usamos o valor resolvido por resolveConversationKeyFromZapi + o bruto do payload como fallback)
   const participantPhoneRaw = partPhoneResolved ||
     String(payload.participantPhone ?? payload.participant ?? payload.author ?? payload.key?.participant ?? '').replace(/\D/g, '')
-  // Doc Z-API: senderName = senderName, pushName, contact.displayName. When fromMe=true = destino (chatName/chat.name).
+  // Doc Z-API: when fromMe=true, "sender" is us; nome/foto do CONTATO (destino) vêm de chatName/chat/photo
   const fromMeForExtract = Boolean(payload.fromMe ?? payload.key?.fromMe)
-  const contactDisplayName = payload.contact?.displayName ?? payload.contact?.formattedName ?? null
   const senderName = fromMeForExtract
-    ? (payload.chatName ?? payload.chat?.name ?? payload.groupName ?? payload.senderName ?? payload.pushName ?? contactDisplayName ?? null)
-    : (payload.senderName ?? payload.pushName ?? payload.chatName ?? payload.sender?.name ?? contactDisplayName ?? null)
+    ? (payload.chatName ?? payload.chat?.name ?? payload.groupName ?? payload.senderName ?? payload.pushName ?? null)
+    : (payload.senderName ?? payload.chatName ?? payload.sender?.name ?? payload.pushName ?? null)
   const senderPhoto = fromMeForExtract
     ? (payload.chatPhoto ?? payload.chat?.photo ?? payload.photo ?? payload.sender?.photo ?? null)
     : (payload.senderPhoto ?? payload.photo ?? payload.sender?.photo ?? null)
@@ -949,7 +919,6 @@ exports.receberZapi = async (req, res) => {
 
     let cliente_id = null
     let pendingContactSync = null
-    let clientDataForEmit = null
 
     if (!isGroup) {
       // LID sintético (@lid): mensagem espelhada enviada pelo celular sem número real conhecido.
@@ -978,20 +947,21 @@ exports.receberZapi = async (req, res) => {
 
         if (clienteExistente?.id) {
           cliente_id = clienteExistente.id
-          // Doc Z-API: nome, pushName, photo. Persistir para que ao atualizar/refrescar os dados continuem (listarConversas usa nome/pushname/foto_perfil).
+          // Doc Z-API: when fromMe=true, nome/foto do CONTATO (destino) = chatName, chat.name, chatPhoto
           const nomePayloadRaw = fromMe
-            ? (payload.chatName ?? payload.chat?.name ?? payload.groupName ?? payload.senderName ?? payload.pushName ?? payload.contact?.displayName ?? null)
-            : (payload.senderName ?? payload.pushName ?? payload.chatName ?? payload.chat?.name ?? payload.contact?.displayName ?? null)
+            ? (payload.chatName ?? payload.chat?.name ?? payload.groupName ?? payload.senderName ?? null)
+            : (payload.senderName ?? payload.chatName ?? payload.chat?.name ?? null)
           const nomePayload = nomePayloadRaw ? String(nomePayloadRaw).trim() : null
-          const pushNamePayload = payload.pushName != null ? String(payload.pushName).trim() : null
           const updates = {}
+          // Salva número se nome estiver vazio (nunca gravar LID como nome)
           if (nomePayload) updates.nome = nomePayload
           else if (!clienteExistente.nome || !String(clienteExistente.nome).trim()) {
+            // Usar o número formatado, não o phone bruto
             const numericDisplay = String(phone).replace(/\D/g, '')
             if (numericDisplay) updates.nome = numericDisplay
           }
-          if (pushNamePayload) updates.pushname = pushNamePayload
-          if (senderPhoto && String(senderPhoto).trim()) updates.foto_perfil = String(senderPhoto).trim()
+          // Foto: quando fromMe, senderPhoto já vem como chatPhoto/chat.photo (destino); quando !fromMe = remetente
+          if (senderPhoto) updates.foto_perfil = senderPhoto
           if (Object.keys(updates).length > 0) {
             await supabase.from('clientes').update(updates).eq('company_id', company_id).eq('id', cliente_id)
           }
@@ -1037,20 +1007,18 @@ exports.receberZapi = async (req, res) => {
               // cliente_id permanece null; mensagem ainda será registrada na conversa
             } else {
               const fromPayloadRaw = fromMe
-                ? (payload.chatName ?? payload.chat?.name ?? payload.groupName ?? payload.senderName ?? payload.pushName ?? payload.contact?.displayName ?? null)
-                : (payload.senderName ?? payload.pushName ?? payload.chatName ?? payload.chat?.name ?? payload.contact?.displayName ?? null)
+                ? (payload.chatName ?? payload.chat?.name ?? payload.groupName ?? payload.senderName ?? null)
+                : (payload.senderName ?? payload.chatName ?? payload.chat?.name ?? null)
               const fromPayload = fromPayloadRaw ? String(fromPayloadRaw).trim() : null
-              const pushNameInsert = payload.pushName != null && String(payload.pushName).trim() ? String(payload.pushName).trim() : null
 
               const { data: novoCliente, error: errNovoCli } = await supabase
                 .from('clientes')
                 .insert({
                   telefone: telefoneCanonico,
                   nome: fromPayload || telefoneCanonico || null,
-                  ...(pushNameInsert ? { pushname: pushNameInsert } : {}),
                   observacoes: null,
                   company_id,
-                  ...(senderPhoto && String(senderPhoto).trim() ? { foto_perfil: String(senderPhoto).trim() } : {})
+                  ...(senderPhoto ? { foto_perfil: senderPhoto } : {})
                 })
                 .select('id')
                 .single()
@@ -1073,11 +1041,11 @@ exports.receberZapi = async (req, res) => {
                     pendingContactSync = { phone, cliente_id }
                   }
                 } else if (String(errNovoCli.message || '').includes('pushname') || String(errNovoCli.message || '').includes('does not exist')) {
-                  // Coluna opcional ausente: retry sem pushname
+                  // Coluna opcional ausente: retry sem ela
                   const fallbackInsert = await supabase
                     .from('clientes')
                     .insert({ telefone: telefoneCanonico, nome: fromPayload || telefoneCanonico || null, company_id,
-                      ...(senderPhoto && String(senderPhoto).trim() ? { foto_perfil: String(senderPhoto).trim() } : {}) })
+                      ...(senderPhoto ? { foto_perfil: senderPhoto } : {}) })
                     .select('id').single()
                   if (!fallbackInsert.error) cliente_id = fallbackInsert.data.id
                 }
@@ -1112,7 +1080,7 @@ exports.receberZapi = async (req, res) => {
       if (lidPart) {
         const { data: convByLid } = await supabase
           .from('conversas')
-          .select('id, departamento_id, telefone, cliente_id')
+          .select('id, departamento_id, telefone')
           .eq('company_id', company_id)
           .eq('chat_lid', lidPart)
           .maybeSingle()
@@ -1125,7 +1093,7 @@ exports.receberZapi = async (req, res) => {
           const list = variants.length > 0 ? variants : [phone]
           const { data: rows } = await supabase
             .from('conversas')
-            .select('id, departamento_id, telefone, cliente_id')
+            .select('id, departamento_id, telefone')
             .eq('company_id', company_id)
             .in('telefone', list)
             .order('ultima_atividade', { ascending: false })
@@ -1139,11 +1107,6 @@ exports.receberZapi = async (req, res) => {
           conversa_id = convByPhone.id
           departamento_id = convByPhone.departamento_id ?? null
           isNewConversation = false
-          // Mensagem enviada pelo celular (LID): usar cliente da conversa por telefone para exibir nome/foto e sincronizar
-          if (isLidKey && convByPhone.cliente_id && convByPhone.telefone && !String(convByPhone.telefone).startsWith('lid:')) {
-            cliente_id = convByPhone.cliente_id
-            pendingContactSync = { phone: convByPhone.telefone, cliente_id: convByPhone.cliente_id }
-          }
           console.log('[Z-API] 🔗 Unificado por chat_lid: conv LID mesclada em conv telefone', { conversa_id, lidPart })
         } else if (convByLid) {
           if (hasRealPhone) {
@@ -1159,20 +1122,11 @@ exports.receberZapi = async (req, res) => {
           conversa_id = convByLid.id
           departamento_id = convByLid.departamento_id ?? null
           isNewConversation = false
-          // Mensagem enviada pelo celular (só LID): se a conversa já tem telefone real e cliente, usar para nome/foto e sync
-          if (isLidKey && convByLid.cliente_id && convByLid.telefone && !String(convByLid.telefone).startsWith('lid:')) {
-            cliente_id = convByLid.cliente_id
-            pendingContactSync = { phone: convByLid.telefone, cliente_id: convByLid.cliente_id }
-          }
         } else if (convByPhone) {
           await supabase.from('conversas').update({ chat_lid: lidPart }).eq('id', convByPhone.id).eq('company_id', company_id)
           conversa_id = convByPhone.id
           departamento_id = convByPhone.departamento_id ?? null
           isNewConversation = false
-          if (isLidKey && convByPhone.cliente_id && convByPhone.telefone && !String(convByPhone.telefone).startsWith('lid:')) {
-            cliente_id = convByPhone.cliente_id
-            pendingContactSync = { phone: convByPhone.telefone, cliente_id: convByPhone.cliente_id }
-          }
         }
       }
 
@@ -1201,35 +1155,12 @@ exports.receberZapi = async (req, res) => {
         }
       }
 
-      // Grupo: atualizar nome_grupo e foto_grupo quando disponíveis no payload (Z-API: chatName, photo)
-      if (isGroup && !isNewConversation) {
-        const groupUpdates = {}
-        if (nomeGrupo && String(nomeGrupo).trim()) groupUpdates.nome_grupo = String(nomeGrupo).trim()
-        if (chatPhoto && String(chatPhoto).trim()) groupUpdates.foto_grupo = String(chatPhoto).trim()
-        if (Object.keys(groupUpdates).length > 0) {
-          await supabase.from('conversas')
-            .update(groupUpdates)
-            .eq('id', conversa_id)
-            .eq('company_id', company_id)
-        }
-      }
-
-      // Buscar dados do cliente no banco para emitir sempre corretos (nome, pushname, telefone, foto).
-      // Assim ao enviar pelo celular (fromMe) ou ao atualizar, a lista mostra dados sincronizados.
-      if (!isGroup && cliente_id) {
-        const { data: cliRow } = await supabase
-          .from('clientes')
-          .select('nome, pushname, telefone, foto_perfil')
-          .eq('id', cliente_id)
+      // Atualiza foto do grupo quando disponível no payload
+      if (isGroup && chatPhoto && !isNewConversation) {
+        await supabase.from('conversas')
+          .update({ foto_grupo: chatPhoto })
+          .eq('id', conversa_id)
           .eq('company_id', company_id)
-          .maybeSingle()
-        if (cliRow) {
-          clientDataForEmit = {
-            contato_nome: (cliRow.pushname && String(cliRow.pushname).trim()) || (cliRow.nome && String(cliRow.nome).trim()) || cliRow.telefone || phone || null,
-            foto_perfil: cliRow.foto_perfil && String(cliRow.foto_perfil).trim() ? cliRow.foto_perfil : null,
-            telefone: getCanonicalPhone(cliRow.telefone || phone) || cliRow.telefone || phone,
-          }
-        }
       }
 
       if (isNewConversation) {
@@ -1237,12 +1168,12 @@ exports.receberZapi = async (req, res) => {
         if (io) {
           io.to(`empresa_${company_id}`).emit('nova_conversa', {
             id: conversa_id,
-            telefone: clientDataForEmit?.telefone ?? getCanonicalPhone(phone) ?? phone,
+            telefone: getCanonicalPhone(phone) || phone,
             tipo: isGroup ? 'grupo' : 'cliente',
             nome_grupo: isGroup ? (nomeGrupo || null) : null,
             foto_grupo: isGroup ? (chatPhoto || null) : null,
-            contato_nome: isGroup ? (nomeGrupo || phone || 'Grupo') : (clientDataForEmit?.contato_nome ?? senderName ?? payload?.chatName ?? phone ?? null),
-            foto_perfil: isGroup ? null : (clientDataForEmit?.foto_perfil ?? senderPhoto ?? payload?.photo ?? null),
+            contato_nome: isGroup ? (nomeGrupo || phone || 'Grupo') : (senderName || payload?.chatName || phone || null),
+            foto_perfil: isGroup ? null : (senderPhoto || payload?.photo || null),
             unread_count: 0,
             tags: [],
           })
@@ -1523,14 +1454,13 @@ exports.receberZapi = async (req, res) => {
       }
     }
 
-    // isEdit (Z-API): localizar por whatsapp_id na conversa, atualizar texto existente, NUNCA criar nova
+    // isEdit: mensagem editada → atualizar texto da mensagem existente, não inserir nova
     if (!mensagemSalva && isEdit && whatsappIdStr) {
       try {
         const { data: editTarget } = await supabase
           .from('mensagens')
           .update({ texto })
           .eq('company_id', company_id)
-          .eq('conversa_id', conversa_id)
           .eq('whatsapp_id', whatsappIdStr)
           .select('*')
           .maybeSingle()
@@ -1734,14 +1664,15 @@ exports.receberZapi = async (req, res) => {
       await incrementarUnreadParaConversa(company_id, conversa_id)
     }
 
-    // 4) Realtime: nova_mensagem + atualizar_conversa com dados do cliente do banco (nome, foto, telefone)
-    // Para que ao atualizar/refrescar a lista continue mostrando os dados corretos e sincronizados.
+    // 4) Realtime: nova_mensagem + atualizar_conversa — sempre para empresa (lista + chat em tempo real, espelho WhatsApp)
     const io = req.app.get('io')
     if (io && mensagemSalva) {
       const rooms = [`conversa_${conversa_id}`, `empresa_${company_id}`]
       if (departamento_id != null) rooms.push(`departamento_${departamento_id}`)
+      // Status canônico para os ticks no frontend (sent, delivered, read, pending, erro, played)
       const rawStatus = (mensagemSalva.status_mensagem ?? mensagemSalva.status ?? '').toString().toLowerCase()
       const canon = rawStatus === 'enviada' || rawStatus === 'enviado' ? 'sent' : (rawStatus === 'entregue' || rawStatus === 'received' ? 'delivered' : (rawStatus || (fromMe ? 'sent' : 'delivered')))
+      // Nota: renomeado de 'payload' para 'emitPayload' para evitar shadowing da variável de loop
       const emitPayload = {
         ...mensagemSalva,
         conversa_id: mensagemSalva.conversa_id ?? conversa_id,
@@ -1749,18 +1680,11 @@ exports.receberZapi = async (req, res) => {
         status_mensagem: canon
       }
       io.to(rooms).emit('nova_mensagem', emitPayload)
-      // Incluir contato_nome, foto_perfil, telefone do banco para a lista atualizar sem perder dados
-      const conversaPayload = { id: conversa_id }
-      if (clientDataForEmit) {
-        conversaPayload.contato_nome = clientDataForEmit.contato_nome
-        conversaPayload.foto_perfil = clientDataForEmit.foto_perfil
-        conversaPayload.telefone = clientDataForEmit.telefone
-      }
-      io.to(`empresa_${company_id}`).emit('atualizar_conversa', conversaPayload)
-      io.to(`empresa_${company_id}`).emit('conversa_atualizada', conversaPayload)
+      io.to(`empresa_${company_id}`).emit('atualizar_conversa', { id: conversa_id })
+      io.to(`empresa_${company_id}`).emit('conversa_atualizada', { id: conversa_id })
       if (departamento_id != null) {
-        io.to(`departamento_${departamento_id}`).emit('atualizar_conversa', conversaPayload)
-        io.to(`departamento_${departamento_id}`).emit('conversa_atualizada', conversaPayload)
+        io.to(`departamento_${departamento_id}`).emit('atualizar_conversa', { id: conversa_id })
+        io.to(`departamento_${departamento_id}`).emit('conversa_atualizada', { id: conversa_id })
       }
     }
 
@@ -1773,10 +1697,10 @@ exports.receberZapi = async (req, res) => {
           .then((synced) => {
             if (!synced) return null
             const up = {}
-            // NUNCA sobrescrever com vazio: só atualiza quando há valor não vazio da Z-API
-            if (synced.nome != null && String(synced.nome).trim()) up.nome = String(synced.nome).trim()
-            if (synced.pushname != null && String(synced.pushname).trim()) up.pushname = String(synced.pushname).trim()
-            if (synced.foto_perfil != null && String(synced.foto_perfil).trim()) up.foto_perfil = String(synced.foto_perfil).trim()
+            // Se não houver nome na Z-API, salva o número.
+            up.nome = (synced.nome && String(synced.nome).trim()) ? String(synced.nome).trim() : syncPhone
+            if (synced.pushname !== undefined) up.pushname = synced.pushname
+            if (synced.foto_perfil) up.foto_perfil = synced.foto_perfil
             if (Object.keys(up).length === 0) return null
             return supabase.from('clientes').update(up).eq('id', syncClienteId).eq('company_id', company_id)
           })
@@ -2039,9 +1963,8 @@ exports.connectionZapi = async (req, res) => {
 
               if (existente?.id) {
                 const updates = {}
-                // NUNCA sobrescrever com vazio: só atualiza quando há valor não vazio
-                if (nome != null && String(nome).trim()) updates.nome = String(nome).trim()
-                if (pushname != null && String(pushname).trim()) updates.pushname = String(pushname).trim()
+                if (nome != null) updates.nome = nome
+                if (pushname != null) updates.pushname = pushname
                 if (Object.keys(updates).length > 0) {
                   let upd = await supabase.from('clientes').update(updates).eq('id', existente.id).eq('company_id', company_id)
                   if (upd.error && String(upd.error.message || '').includes('pushname')) {
