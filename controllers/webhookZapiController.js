@@ -218,17 +218,36 @@ function resolveConversationKeyFromZapi(payload) {
       [payload.toPhone,        'toPhone'],
       [payload.recipientPhone, 'recipientPhone'],
       [payload.recipient,      'recipient'],
+      [payload.recipientId,    'recipientId'],
       [payload.destination,    'destination'],
       [payload.key?.remoteJid,  'key.remoteJid'],
       [payload.remoteJid,       'remoteJid'],
       [payload.chatId,          'chatId'],
       [payload.chat?.id,        'chat.id'],
+      [payload.chat?.jid,       'chat.jid'],
       [payload.senderPhone,    'senderPhone (fromMe)'],
+      [payload.data?.to,        'data.to'],
+      [payload.value?.to,      'value.to'],
+      [payload.phoneNumber,    'phoneNumber'],
     ]
     for (const [raw, fieldName] of destinationSources) {
       const norm = normCandidate(raw)
       if (norm) {
         return { key: norm, isGroup: false, participantPhone: '', debugReason: `fromMe destination ${fieldName}` }
+      }
+    }
+    // Última tentativa: phone pode vir "DDD+NUMERO@lid" — extrair só dígitos; se 10 ou 11, formar 55+digits
+    const phoneRaw = clean(payload.phone)
+    if (phoneRaw && phoneRaw.endsWith('@lid')) {
+      const digitsOnly = (phoneRaw.replace(/@lid$/i, '').replace(/\D/g, '') || '').trim()
+      if (digitsOnly.length === 10 || digitsOnly.length === 11) {
+        const with55 = '55' + digitsOnly
+        if (looksLikeBRPhoneDigits(with55.replace(/\D/g, '')) && !isMyNumber(with55.replace(/\D/g, ''))) {
+          const norm = normalizePhoneBR(with55) || with55
+          if (norm) {
+            return { key: norm, isGroup: false, participantPhone: '', debugReason: 'fromMe phone@lid digits (55+DDD+num)' }
+          }
+        }
       }
     }
   }
@@ -1093,7 +1112,7 @@ exports.receberZapi = async (req, res) => {
       if (lidPart) {
         const { data: convByLid } = await supabase
           .from('conversas')
-          .select('id, departamento_id, telefone')
+          .select('id, departamento_id, telefone, cliente_id')
           .eq('company_id', company_id)
           .eq('chat_lid', lidPart)
           .maybeSingle()
@@ -1106,7 +1125,7 @@ exports.receberZapi = async (req, res) => {
           const list = variants.length > 0 ? variants : [phone]
           const { data: rows } = await supabase
             .from('conversas')
-            .select('id, departamento_id, telefone')
+            .select('id, departamento_id, telefone, cliente_id')
             .eq('company_id', company_id)
             .in('telefone', list)
             .order('ultima_atividade', { ascending: false })
@@ -1120,6 +1139,11 @@ exports.receberZapi = async (req, res) => {
           conversa_id = convByPhone.id
           departamento_id = convByPhone.departamento_id ?? null
           isNewConversation = false
+          // Mensagem enviada pelo celular (LID): usar cliente da conversa por telefone para exibir nome/foto e sincronizar
+          if (isLidKey && convByPhone.cliente_id && convByPhone.telefone && !String(convByPhone.telefone).startsWith('lid:')) {
+            cliente_id = convByPhone.cliente_id
+            pendingContactSync = { phone: convByPhone.telefone, cliente_id: convByPhone.cliente_id }
+          }
           console.log('[Z-API] 🔗 Unificado por chat_lid: conv LID mesclada em conv telefone', { conversa_id, lidPart })
         } else if (convByLid) {
           if (hasRealPhone) {
@@ -1135,11 +1159,20 @@ exports.receberZapi = async (req, res) => {
           conversa_id = convByLid.id
           departamento_id = convByLid.departamento_id ?? null
           isNewConversation = false
+          // Mensagem enviada pelo celular (só LID): se a conversa já tem telefone real e cliente, usar para nome/foto e sync
+          if (isLidKey && convByLid.cliente_id && convByLid.telefone && !String(convByLid.telefone).startsWith('lid:')) {
+            cliente_id = convByLid.cliente_id
+            pendingContactSync = { phone: convByLid.telefone, cliente_id: convByLid.cliente_id }
+          }
         } else if (convByPhone) {
           await supabase.from('conversas').update({ chat_lid: lidPart }).eq('id', convByPhone.id).eq('company_id', company_id)
           conversa_id = convByPhone.id
           departamento_id = convByPhone.departamento_id ?? null
           isNewConversation = false
+          if (isLidKey && convByPhone.cliente_id && convByPhone.telefone && !String(convByPhone.telefone).startsWith('lid:')) {
+            cliente_id = convByPhone.cliente_id
+            pendingContactSync = { phone: convByPhone.telefone, cliente_id: convByPhone.cliente_id }
+          }
         }
       }
 

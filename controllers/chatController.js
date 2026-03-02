@@ -295,7 +295,7 @@ exports.listarConversas = async (req, res) => {
         .from('clientes')
         .select('id')
         .eq('company_id', company_id)
-        .or(`nome.ilike.${term},telefone.ilike.${term}`)
+        .or(`nome.ilike.${term},pushname.ilike.${term},telefone.ilike.${term}`)
       const clienteIds = (clientesMatch || []).map((c) => c.id)
       const { data: convByCliente } = await supabase
         .from('conversas')
