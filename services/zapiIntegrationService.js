@@ -1,5 +1,4 @@
 const supabase = require('../config/supabase')
-const fetch = require('node-fetch')
 
 /**
  * Busca configuração Z-API da empresa.
