@@ -403,9 +403,15 @@ function extractMessage(payload) {
     ? (payload.chatName ?? payload.chat?.name ?? payload.groupName ?? payload.senderName ?? payload.pushName ?? null)
     : (payload.senderName ?? payload.chatName ?? payload.sender?.name ?? payload.pushName ?? null)
   const senderPhoto = fromMeForExtract
-    ? (payload.chatPhoto ?? payload.chat?.photo ?? payload.photo ?? payload.sender?.photo ?? null)
+    ? (payload.chatPhoto ?? payload.chat?.photo ?? payload.senderPhoto ?? payload.photo ?? payload.sender?.photo ?? null)
     : (payload.senderPhoto ?? payload.photo ?? payload.sender?.photo ?? null)
-  const chatPhoto = payload.chatPhoto ?? payload.groupPicture ?? payload.groupPhoto ?? null
+  // Para grupos, a Z-API costuma enviar a foto do grupo apenas em `photo`.
+  // Usamos chatPhoto/groupPicture/groupPhoto e, como fallback quando isGroup, o campo photo.
+  const chatPhoto =
+    payload.chatPhoto ??
+    payload.groupPicture ??
+    payload.groupPhoto ??
+    (payload.isGroup ? payload.photo ?? null : null)
 
   // Texto por tipo (TUDO que a Z-API envia vira registro legível no sistema)
   if (type === 'reaction') {
