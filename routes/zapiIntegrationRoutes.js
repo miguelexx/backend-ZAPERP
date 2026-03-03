@@ -14,11 +14,20 @@ router.get('/me', zapiIntegrationController.getMe)
 // Status da instância para empresa logada
 router.get('/status', zapiIntegrationController.getStatus)
 
-// QR Code base64
-router.get('/qrcode', zapiIntegrationController.getQrCode)
+// QR Code base64 (legado: retorna imageBase64)
+router.get('/qrcode', zapiIntegrationController.getQrCodeLegacy)
 
 // Reiniciar instância
 router.post('/restart', zapiIntegrationController.restart)
+
+// Fluxo Conectar WhatsApp — sub-rotas em /connect/*
+const connectRouter = express.Router()
+connectRouter.get('/status', zapiIntegrationController.getConnectStatus)
+connectRouter.post('/qrcode', zapiIntegrationController.getQrCode)
+connectRouter.get('/qrcode', zapiIntegrationController.getQrCode)
+connectRouter.post('/restart', zapiIntegrationController.connectRestart)
+connectRouter.post('/phone-code', zapiIntegrationController.phoneCode)
+router.use('/connect', connectRouter)
 
 module.exports = router
 
