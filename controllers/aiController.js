@@ -19,7 +19,10 @@ const supabase = require('../config/supabase')
 
 // ── Constantes ────────────────────────────────────────────────────────────────
 const CACHE_TTL_HOURS = 24
-const MONTHLY_DEFAULT_LIMIT = 1000  // perguntas/mês se empresa não tiver limite definido
+// Limite padrão de perguntas por mês.
+// Se quiser ilimitado por padrão, deixe como null. A empresa ainda pode
+// configurar um limite específico na coluna empresas.ai_limit_per_month.
+const MONTHLY_DEFAULT_LIMIT = null  // null = ilimitado se não configurado na empresa
 const MAX_QUESTION_LENGTH = 500
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

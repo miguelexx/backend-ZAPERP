@@ -15,6 +15,9 @@ const { client: openai } = require('./openaiClient')
 const supabase = require('../config/supabase')
 
 // ── Configuração ──────────────────────────────────────────────────────────────
+// Modelo padrão da IA. Pode ser sobrescrito via variável de ambiente AI_MODEL.
+// Recomenda-se usar um modelo mais avançado (ex: "gpt-4.1" ou superior) para
+// obter respostas mais gerais e inteligentes.
 const AI_MODEL = () => process.env.AI_MODEL || 'gpt-4o-mini'
 
 /** Limita period_days ao intervalo válido 1–365 (default 7). */
@@ -33,6 +36,9 @@ const IntentSchema = z.object({
     'TOP_ATENDENTES_POR_CONVERSAS',
     'CLIENTES_MAIS_ATIVOS',
     'SLA_ALERTAS',
+    // GENERAL_CHAT: perguntas livres sobre o trabalho, empresa,
+    // WhatsApp corporativo, produtividade, ou dúvidas gerais de negócio.
+    'GENERAL_CHAT',
     'UNKNOWN',
   ]),
   period_days: z.number().int().min(1).max(365).optional(),
@@ -40,8 +46,7 @@ const IntentSchema = z.object({
 
 // ── Classificação da pergunta (1ª chamada à OpenAI) ───────────────────────────
 async function classifyQuestion(question) {
-  const system = `\
-Você é um classificador de perguntas para o Dashboard do ZapERP.
+  const system = `Você é um classificador de perguntas para o Assistente Inteligente do ZapERP (WhatsApp corporativo e CRM).
 Retorne SOMENTE JSON válido sem texto extra.
 Formato: {"intent": "INTENT", "period_days": N}
 
@@ -52,7 +57,12 @@ Intents permitidos:
 - TOP_ATENDENTES_POR_CONVERSAS: ranking de atendentes por número de conversas
 - CLIENTES_MAIS_ATIVOS: clientes que mais enviaram mensagens (direcao='in')
 - SLA_ALERTAS: alertas de SLA, conversas abertas sem resposta dentro do prazo
-- UNKNOWN: qualquer outra coisa
+- GENERAL_CHAT: perguntas livres que não são claramente uma métrica específica, por exemplo:
+  * dúvidas gerais sobre a empresa, clientes, atendentes ou produtividade;
+  * perguntas sobre "o que os funcionários andam fazendo";
+  * sugestões de melhoria, organização, scripts, mensagens para clientes;
+  * perguntas de uso geral (ex.: “gere uma planilha em CSV com...”, “crie um roteiro”, etc.).
+- UNKNOWN: somente se a pergunta estiver vazia, sem sentido ou impossível de classificar.
 
 Regra: se "period_days" não for mencionado, use 7.`
 
@@ -76,8 +86,24 @@ Regra: se "period_days" não for mencionado, use 7.`
 
 // ── Geração da resposta em texto (2ª chamada à OpenAI) ────────────────────────
 async function formatAnswer({ intent, data, question }) {
-  const system = `\
-Você é um assistente de BI do ZapERP. Responda em português do Brasil.
+  const isGeneral = intent === 'GENERAL_CHAT'
+
+  const system = isGeneral
+    ? `Você é o **Assistente Inteligente do ZapERP**, um sistema de WhatsApp corporativo.
+Responda SEMPRE em português do Brasil.
+
+Identidade:
+- Você é um auxiliar de um WhatsApp corporativo usado para atender clientes, acompanhar atendimentos e monitorar a produtividade dos atendentes.
+- Você conhece métricas, conversas, atendimentos, clientes e atendentes com base nos dados recebidos.
+
+Regras gerais:
+- Seja claro, direto e profissional.
+- Pode responder desde dúvidas básicas até solicitações avançadas (roteiros, mensagens prontas, planos, exemplos de planilha em CSV, textos para cliente etc.).
+- Quando fizer exemplos de planilhas, responda em formato de tabela Markdown ou CSV.
+- Se a pergunta não depender de dados do sistema, responda normalmente usando seu conhecimento geral.
+- Se precisar de números do sistema, use SOMENTE os dados recebidos no campo "Dados".
+- Se faltar dado para responder algo específico, explique de forma transparente o que é possível responder com as informações disponíveis.`
+    : `Você é um assistente de BI do ZapERP. Responda em português do Brasil.
 Regras obrigatórias:
 - Seja objetivo e profissional (máximo 3 parágrafos curtos).
 - Use APENAS os números presentes no campo "Dados".
@@ -87,8 +113,8 @@ Regras obrigatórias:
 
   const resp = await openai.chat.completions.create({
     model: AI_MODEL(),
-    temperature: 0.2,
-    max_tokens: 320,
+    temperature: isGeneral ? 0.5 : 0.2,
+    max_tokens: isGeneral ? 800 : 320,
     messages: [
       { role: 'system', content: system },
       {
@@ -451,6 +477,27 @@ async function qSlaAlertas(company_id, limit = 10) {
   return alertas.slice(0, lim)
 }
 
+/**
+ * GENERAL_CHAT: contexto global resumido para o assistente “saber tudo” sobre
+ * o que está acontecendo na empresa (dentro de limites seguros).
+ * Reaproveita as mesmas funções de métricas já existentes.
+ */
+async function qGlobalContext(company_id) {
+  const [overview, topAtendentes, clientesAtivos, slaAlertas] = await Promise.all([
+    qMetricsOverview(company_id),
+    qTopAtendentesPorConversas(company_id, 30, 5),
+    qClientesMaisAtivos(company_id, 30, 5),
+    qSlaAlertas(company_id, 20),
+  ])
+
+  return {
+    overview,
+    topAtendentes,
+    clientesAtivos,
+    slaAlertas,
+  }
+}
+
 // ── Função principal exportada ────────────────────────────────────────────────
 
 /**
@@ -505,13 +552,18 @@ async function answerDashboardQuestion({ company_id, question, period_days }) {
       data = await qSlaAlertas(company_id, 10)
       break
 
+    case 'GENERAL_CHAT':
+      data = await qGlobalContext(company_id)
+      break
+
     default:
       data = null
   }
 
-  const answer = await formatAnswer({ intent: cls.intent, data, question })
+  const finalIntent = cls.intent === 'UNKNOWN' ? 'GENERAL_CHAT' : cls.intent
+  const answer = await formatAnswer({ intent: finalIntent, data, question })
 
-  return { ok: true, intent: cls.intent, answer, data }
+  return { ok: true, intent: finalIntent, answer, data }
 }
 
 module.exports = { answerDashboardQuestion }

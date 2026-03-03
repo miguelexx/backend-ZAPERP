@@ -506,9 +506,12 @@ exports.listarConversas = async (req, res) => {
       const contatoNome = isGroup
         ? (c.nome_grupo || (c.telefone && !String(c.telefone).startsWith('lid:') ? c.telefone : null) || 'Grupo')
         : (
+            // Para contatos individuais, o campo de nome **nunca** cai para o telefone.
+            // Se não houver nome conhecido, deixamos null e o front decide como exibir
+            // (por exemplo, usando telefone_exibivel).
             nomeCliente ||
             (c.nome_contato_cache && String(c.nome_contato_cache).trim()) ||
-            (isLid ? 'Contato' : (c.telefone || null))
+            null
           )
       const fotoPerfil = isGroup ? null : (fotoCliente ?? (c.foto_perfil_contato_cache && String(c.foto_perfil_contato_cache).trim()) ?? null)
       return {
@@ -1457,12 +1460,15 @@ exports.detalharChat = async (req, res) => {
       : rawClientes
     // Nunca exibir LID (lid:xxx) como nome ou número — identificador interno do WhatsApp
     const isLidConv = !isGroup && conversa.telefone && String(conversa.telefone).trim().toLowerCase().startsWith('lid:')
+    const clienteNomeBase = clientesConv?.pushname ?? clientesConv?.nome ?? null
+    const clienteNome = (clienteNomeBase && String(clienteNomeBase).trim()) ? String(clienteNomeBase).trim() : null
     const nomeUnico = isGroup
       ? (conversa.nome_grupo ?? conversa.telefone ?? 'Grupo')
-      : (isLidConv ? 'Contato' : (clientesConv?.pushname ?? clientesConv?.nome ?? conversa.telefone ?? null))
+      : (isLidConv ? 'Contato' : clienteNome)
     const clienteTelefoneExibivel = isGroup
       ? conversa.telefone
       : (isLidConv ? null : (conversa.telefone ?? clientesConv?.telefone ?? null))
+    const telefoneExibivel = isLidConv ? null : (conversa.telefone ?? clientesConv?.telefone ?? null)
     const fotoUnica = isGroup ? (conversa.foto_grupo ?? null) : (clientesConv?.foto_perfil ?? null)
     const conversaFormatada = {
       ...conversa,
@@ -1472,6 +1478,7 @@ exports.detalharChat = async (req, res) => {
       contato_nome: nomeUnico,
       cliente_nome: nomeUnico,
       cliente_telefone: clienteTelefoneExibivel,
+      telefone_exibivel: telefoneExibivel,
       observacao: isGroup ? null : (clientesConv?.observacoes ?? null),
       foto_perfil: fotoUnica,
       foto_grupo: isGroup ? (conversa.foto_grupo ?? null) : null,
