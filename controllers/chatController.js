@@ -1879,7 +1879,7 @@ exports.enviarMensagemChat = async (req, res) => {
   try {
     const { company_id, id: user_id } = req.user
     const { id: conversa_id } = req.params
-    const { texto, reply_meta } = req.body
+    const { texto, reply_meta, link } = req.body
 
     if (!texto || !String(texto).trim()) {
       return res.status(400).json({ error: 'texto é obrigatório' })
@@ -1896,11 +1896,14 @@ exports.enviarMensagemChat = async (req, res) => {
       return res.status(404).json({ error: 'Conversa não encontrada' })
     }
 
+    const hasLinkPayload = link && typeof link === 'object' && link.linkUrl
+
     // Reply (citação) — opcional. Requer coluna mensagens.reply_meta (jsonb).
     const basePayload = {
       company_id,
       conversa_id: Number(conversa_id),
       texto: String(texto).trim(),
+      tipo: hasLinkPayload ? 'link' : 'texto',
       direcao: 'out',
       autor_usuario_id: Number(user_id),
       status: 'pending',
@@ -2003,7 +2006,25 @@ exports.enviarMensagemChat = async (req, res) => {
 
       const provider = getProvider()
       try {
-        const result = await provider.sendText(conversa.telefone, String(texto).trim(), { phoneId: phoneId || undefined, replyMessageId: replyMessageId || undefined })
+        let result = null
+
+        if (hasLinkPayload && provider.sendLink) {
+          // Garante que o texto enviado contenha o link no final, como exige a Z-API.
+          let messageToSend = String(texto).trim()
+          const linkUrlStr = String(link.linkUrl || '').trim()
+          if (linkUrlStr && !messageToSend.includes(linkUrlStr)) {
+            messageToSend = messageToSend ? `${messageToSend} ${linkUrlStr}` : linkUrlStr
+          }
+          result = await provider.sendLink(conversa.telefone, {
+            message: messageToSend,
+            image: link.image || '',
+            linkUrl: linkUrlStr,
+            title: String(link.title || '').trim() || linkUrlStr,
+            linkDescription: String(link.linkDescription || link.description || '').trim() || messageToSend,
+          })
+        } else {
+          result = await provider.sendText(conversa.telefone, String(texto).trim(), { phoneId: phoneId || undefined, replyMessageId: replyMessageId || undefined })
+        }
         const ok = typeof result === 'boolean' ? result : result?.ok === true
         const waMessageId = typeof result === 'object' && result?.messageId ? String(result.messageId).trim() : null
         const nextStatus = ok ? 'sent' : 'erro'

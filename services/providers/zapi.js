@@ -232,6 +232,71 @@ async function sendText(phone, message, opts = {}) {
 }
 
 /**
+ * Envia link enriquecido (preview) usando /send-link.
+ * @param {string} phone - Número/JID do chat
+ * @param {{ message: string, image?: string, linkUrl: string, title: string, linkDescription: string }} payload
+ * @returns {Promise<{ ok: boolean, messageId: string|null }>}
+ */
+async function sendLink(phone, payload) {
+  const basePath = getBasePath()
+  if (!basePath) return { ok: false, messageId: null }
+  const nums = await phoneCandidatesForSendAsync(phone)
+
+  const message = String(payload?.message || '').trim()
+  const image = payload?.image != null ? String(payload.image).trim() : ''
+  const linkUrl = String(payload?.linkUrl || '').trim()
+  const title = String(payload?.title || '').trim()
+  const linkDescription = String(payload?.linkDescription || '').trim()
+
+  if (!nums.length || !message || !linkUrl || !title || !linkDescription) {
+    return { ok: false, messageId: null }
+  }
+
+  try {
+    for (const num of nums) {
+      const body = {
+        phone: num,
+        message,
+        image,
+        linkUrl,
+        title,
+        linkDescription,
+      }
+      if (!image) delete body.image
+
+      const res = await fetch(`${basePath}/send-link`, {
+        method: 'POST',
+        headers: getHeaders(),
+        body: JSON.stringify(body),
+      })
+
+      const bodyText = await res.text().catch(() => '')
+      if (!res.ok) {
+        logClientTokenHint(bodyText)
+        console.warn('❌ Z-API send-link falhou:', String(num || '').slice(-12), res.status, String(bodyText || '').slice(0, 200))
+        continue
+      }
+
+      let data = null
+      try { data = bodyText ? JSON.parse(bodyText) : null } catch { data = null }
+      const err = data?.error || data?.messageError || data?.errorMessage || null
+      if (err) {
+        console.warn('❌ Z-API send-link retornou erro (200):', String(num || '').slice(-12), String(err).slice(0, 200))
+        continue
+      }
+
+      const msgId = data?.messageId || data?.zaapId || null
+      console.log('✅ Z-API link enviado:', String(num || '').slice(-12), msgId ? `id=${String(msgId).slice(0, 14)}...` : '')
+      return { ok: true, messageId: msgId ? String(msgId) : null }
+    }
+    return { ok: false, messageId: null }
+  } catch (e) {
+    console.error('❌ Erro Z-API sendLink:', e.message)
+    return { ok: false, messageId: null }
+  }
+}
+
+/**
  * Envia imagem por URL.
  * @param {string} phone - Número (apenas dígitos)
  * @param {string} url - URL pública da imagem
@@ -930,6 +995,7 @@ async function getConnectionStatus() {
 
 module.exports = {
   sendText,
+  sendLink,
   sendImage,
   sendFile,
   sendAudio,

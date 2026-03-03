@@ -443,6 +443,12 @@ function extractMessage(payload) {
   }
   if (!texto) texto = '(mídia)'
 
+  // Heurística: se for texto puro com URL http/https, marcamos como tipo "link"
+  // para o frontend poder exibir estilo preview/clicável.
+  if (type === 'text' && texto && /(https?:\/\/\S+)/i.test(texto)) {
+    type = 'link'
+  }
+
   // phone já foi resolvido por resolveConversationKeyFromZapi: é a chave canônica do chat.
   // Para grupos com id muito longo (>20 chars), normalizeGroupIdForStorage já truncou para dígitos.
   // Não há mais processamento adicional de LID/JID aqui.
