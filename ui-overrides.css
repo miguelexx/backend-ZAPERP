@@ -473,8 +473,9 @@ body {
   bottom: auto !important;
   z-index: 10 !important;
   margin: 0 !important;
-  opacity: 0.7 !important;
-  transition: opacity 0.15s ease !important;
+  opacity: 0 !important;
+  transform: translateY(-2px);
+  transition: opacity 0.15s ease, transform 0.15s ease !important;
 }
 
 .wa-bubble:hover .wa-bubble-menu,
@@ -483,6 +484,7 @@ body {
 .wa-bubble:hover [class*="options"],
 .wa-bubble:hover [aria-haspopup="true"] {
   opacity: 1 !important;
+  transform: translateY(0);
 }
 
 .wa-bubble.out .wa-bubble-menu,
@@ -503,7 +505,7 @@ body {
 .wa-bubble {
   position: relative !important;
   min-height: 0 !important;
-  padding-right: 28px !important;
+  padding-right: 24px !important;
 }
 
 .wa-bubble .sticker-message,
@@ -550,7 +552,9 @@ body {
 }
 
 .wa-bubble {
-  max-width: min(85vw, 420px) !important;
+  /* Balanço entre legibilidade e discrição: balão mais estreito,
+     semelhante ao WhatsApp Web padrão. */
+  max-width: min(65vw, 360px) !important;
   min-width: 0 !important;
   word-wrap: break-word !important;
   overflow-wrap: break-word !important;
