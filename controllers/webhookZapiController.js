@@ -1258,6 +1258,19 @@ exports.receberZapi = async (req, res) => {
           .eq('company_id', company_id)
       }
 
+      // Conversa LID (sem número real): gravar nome e foto do contato do payload para exibir na lista
+      if (!isGroup && conversa_id && String(phone).startsWith('lid:')) {
+        const cacheUpdates = {}
+        if (senderName && String(senderName).trim()) cacheUpdates.nome_contato_cache = String(senderName).trim()
+        if (senderPhoto && String(senderPhoto).trim()) cacheUpdates.foto_perfil_contato_cache = String(senderPhoto).trim()
+        if (Object.keys(cacheUpdates).length > 0) {
+          await supabase.from('conversas')
+            .update(cacheUpdates)
+            .eq('id', conversa_id)
+            .eq('company_id', company_id)
+        }
+      }
+
       if (isNewConversation) {
         const io = req.app.get('io')
         if (io) {

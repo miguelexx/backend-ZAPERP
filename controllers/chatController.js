@@ -339,6 +339,8 @@ exports.listarConversas = async (req, res) => {
       tipo,
       nome_grupo,
       foto_grupo,
+      nome_contato_cache,
+      foto_perfil_contato_cache,
       clientes!conversas_cliente_fk ( id, nome, pushname, telefone, foto_perfil ),
       departamentos ( id, nome ),
       mensagens ( texto, criado_em, direcao, tipo, url, nome_arquivo, whatsapp_id, status ),
@@ -363,6 +365,8 @@ exports.listarConversas = async (req, res) => {
       tipo,
       nome_grupo,
       foto_grupo,
+      nome_contato_cache,
+      foto_perfil_contato_cache,
       clientes!conversas_cliente_fk ( id, nome, pushname, telefone, foto_perfil ),
       departamentos ( id, nome ),
       mensagens ( texto, criado_em, direcao, tipo, url, nome_arquivo, whatsapp_id, status ),
@@ -388,6 +392,8 @@ exports.listarConversas = async (req, res) => {
       tipo,
       nome_grupo,
       foto_grupo,
+      nome_contato_cache,
+      foto_perfil_contato_cache,
       clientes!conversas_cliente_fk ( id, nome, pushname, telefone, foto_perfil ),
       departamentos ( id, nome ),
       mensagens ( texto, criado_em, direcao, tipo, url, nome_arquivo, whatsapp_id, status )
@@ -499,7 +505,8 @@ exports.listarConversas = async (req, res) => {
       const telefoneExibivel = isLid ? null : c.telefone
       const contatoNome = isGroup
         ? (c.nome_grupo || (c.telefone && !String(c.telefone).startsWith('lid:') ? c.telefone : null) || 'Grupo')
-        : (isLid ? 'Contato' : (nomeCliente || c.telefone || null))
+        : (isLid ? 'Contato' : (nomeCliente || (c.nome_contato_cache && String(c.nome_contato_cache).trim()) || c.telefone || null))
+      const fotoPerfil = isGroup ? null : (fotoCliente ?? (c.foto_perfil_contato_cache && String(c.foto_perfil_contato_cache).trim()) ?? null)
       return {
         id: c.id,
         cliente_id: c.cliente_id,
@@ -520,7 +527,7 @@ exports.listarConversas = async (req, res) => {
         departamentos: c.departamentos,
         is_group: isGroup,
         contato_nome: contatoNome,
-        foto_perfil: isGroup ? null : (fotoCliente ?? null),
+        foto_perfil: fotoPerfil,
         setor: c.departamentos?.nome || null,
         tags: (c.conversa_tags || []).map((ct) => ct?.tags).filter(Boolean),
         unread_count: unreadMap[Number(c.id)] || 0
