@@ -505,7 +505,11 @@ exports.listarConversas = async (req, res) => {
       const telefoneExibivel = isLid ? null : c.telefone
       const contatoNome = isGroup
         ? (c.nome_grupo || (c.telefone && !String(c.telefone).startsWith('lid:') ? c.telefone : null) || 'Grupo')
-        : (isLid ? 'Contato' : (nomeCliente || (c.nome_contato_cache && String(c.nome_contato_cache).trim()) || c.telefone || null))
+        : (
+            nomeCliente ||
+            (c.nome_contato_cache && String(c.nome_contato_cache).trim()) ||
+            (isLid ? 'Contato' : (c.telefone || null))
+          )
       const fotoPerfil = isGroup ? null : (fotoCliente ?? (c.foto_perfil_contato_cache && String(c.foto_perfil_contato_cache).trim()) ?? null)
       return {
         id: c.id,
