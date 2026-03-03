@@ -457,11 +457,39 @@ exports.listarConversas = async (req, res) => {
 
     if (error) return res.status(500).json({ error: error.message })
 
+    // Fallback: quando conversa.cliente_id é null mas existe cliente com o mesmo telefone,
+    // usamos esse cliente para exibir nome/foto na lista.
+    const phoneToClientFallback = new Map()
+    try {
+      const phonesSemCliente = (data || [])
+        .filter((c) => !isGroupConversation(c) && !c.cliente_id && c.telefone)
+        .map((c) => String(c.telefone).trim())
+      const uniquePhones = Array.from(new Set(phonesSemCliente.filter(Boolean)))
+      if (uniquePhones.length > 0) {
+        const { data: clientesFallback } = await supabase
+          .from('clientes')
+          .select('id, nome, pushname, telefone, foto_perfil')
+          .eq('company_id', company_id)
+          .in('telefone', uniquePhones)
+        for (const cl of clientesFallback || []) {
+          if (!cl || !cl.telefone) continue
+          phoneToClientFallback.set(String(cl.telefone).trim(), cl)
+        }
+      }
+    } catch (_) {
+      // fallback silencioso — se falhar, apenas seguimos sem foto/nome extra
+    }
+
     let conversasFormatadas = (data || []).map((c) => {
       const raw = c.clientes
-      const clientesObj = Array.isArray(raw)
+      let clientesObj = Array.isArray(raw)
         ? (raw.find((cl) => cl && Number(cl.id) === Number(c.cliente_id)) || raw[0])
         : raw
+      if (!clientesObj && !isGroupConversation(c) && !c.cliente_id && c.telefone) {
+        const fallbackCli = phoneToClientFallback.get(String(c.telefone).trim())
+        if (fallbackCli) clientesObj = fallbackCli
+      }
+
       const nomeCliente = (clientesObj?.pushname ?? clientesObj?.nome ?? null) && String(clientesObj?.pushname ?? clientesObj?.nome ?? '').trim() ? String(clientesObj?.pushname ?? clientesObj?.nome ?? '').trim() : null
       const fotoCliente = clientesObj?.foto_perfil ?? null
       const isGroup = isGroupConversation(c)
