@@ -78,19 +78,25 @@ exports.getPlanos = async (req, res) => {
   }
 }
 
-/** GET /config/empresas-whatsapp — lista mapeamentos phone_number_id → company (multi-tenant) */
+/** GET /config/empresas-whatsapp — lista mapeamentos phone_number_id → company (Meta multi-tenant) */
 exports.getEmpresasWhatsapp = async (req, res) => {
   try {
     const { company_id } = req.user
+    if (!company_id) return res.status(401).json({ error: 'Não autenticado' })
     const { data, error } = await supabase
       .from('empresas_whatsapp')
       .select('*')
       .eq('company_id', company_id)
-    if (error) return res.status(500).json({ error: error.message })
+    if (error) {
+      if (String(error.message || '').includes('does not exist') || String(error.code || '').includes('PGRST')) {
+        return res.json([])
+      }
+      return res.status(502).json({ error: 'Erro ao listar mapeamentos' })
+    }
     return res.json(data || [])
   } catch (err) {
-    console.error(err)
-    return res.status(500).json({ error: 'Erro ao listar' })
+    console.error('[getEmpresasWhatsapp]', err?.message || err)
+    return res.status(502).json({ error: 'Erro ao listar' })
   }
 }
 

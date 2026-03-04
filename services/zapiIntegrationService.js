@@ -236,6 +236,7 @@ async function getCompanyIdByInstanceId(instanceId) {
   if (!instanceId || typeof instanceId !== 'string') return null
   const id = String(instanceId).trim()
   if (!id) return null
+  // Match exato; Z-API instance_id pode ser case-sensitive
   const { data, error } = await supabase
     .from('empresa_zapi')
     .select('company_id')
@@ -246,7 +247,15 @@ async function getCompanyIdByInstanceId(instanceId) {
     console.error('[ZAPI-INTEGRATION] Erro ao buscar company_id por instance_id:', error.message)
     return null
   }
-  return data?.company_id != null ? Number(data.company_id) : null
+  if (data?.company_id != null) return Number(data.company_id)
+  // Fallback: match case-insensitive (compatibilidade)
+  const { data: d2 } = await supabase
+    .from('empresa_zapi')
+    .select('company_id, instance_id')
+    .eq('ativo', true)
+    .limit(20)
+  const found = Array.isArray(d2) ? d2.find(r => String(r.instance_id || '').toLowerCase() === id.toLowerCase()) : null
+  return found?.company_id != null ? Number(found.company_id) : null
 }
 
 module.exports = {

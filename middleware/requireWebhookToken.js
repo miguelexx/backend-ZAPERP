@@ -55,9 +55,7 @@ function requireWebhookToken(req, res, next) {
       method: req.method,
       path: req.path,
       ip: req.ip || '?',
-      // Mostra apenas se o token veio ou não, sem expor o valor
       token_recebido: incoming ? `(${incoming.length} chars)` : '(nenhum)',
-      body_preview: req.body ? JSON.stringify(req.body).slice(0, 300) : '(vazio)',
     }
     const label = motivo === 'token_ausente' ? 'Token ausente' : 'Token inválido'
     console.warn(`[WEBHOOK_REJECTED] ${label} — ${req.method} ${req.path} | IP: ${req.ip || '?'}`)

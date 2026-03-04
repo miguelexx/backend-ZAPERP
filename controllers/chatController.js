@@ -747,23 +747,41 @@ exports.mergeConversasDuplicadas = async (req, res) => {
 
 // =====================================================
 // 3a) Status da conexão Z-API (instância conectada?)
-// GET /chats/zapi-status
+// GET /chats/zapi-status — status para banner "WhatsApp conectado/desconectado"
+// Usa empresa_zapi por company_id (JWT). NUNCA ENV.
+// Sem empresa_zapi → 200 { hasInstance:false, connected:false, configured:false }
 // =====================================================
 exports.zapiStatus = async (req, res) => {
   try {
     const company_id = req.user?.company_id
-    const provider = getProvider()
-    if (!provider || !provider.isConfigured) {
-      return res.json({ ok: true, configured: false, connected: false, message: 'Z-API não configurado no servidor.' })
+    if (process.env.WHATSAPP_PROVIDER !== 'zapi') {
+      return res.json({ ok: true, hasInstance: false, connected: false, configured: false })
     }
-    if (typeof provider.getConnectionStatus !== 'function') {
-      return res.json({ ok: true, configured: true, connected: null, message: 'Verificação de status não disponível nesta versão.' })
+    if (!company_id) {
+      return res.json({ ok: true, hasInstance: false, connected: false, configured: false })
     }
-    const status = await provider.getConnectionStatus({ companyId: company_id })
-    return res.json({ ok: true, ...status })
+
+    const { getEmpresaZapiConfig, getStatus } = require('../services/zapiIntegrationService')
+    const configResult = await getEmpresaZapiConfig(company_id)
+    if (configResult.error || !configResult.config) {
+      return res.json({ ok: true, hasInstance: false, connected: false, configured: false })
+    }
+
+    const statusResult = await getStatus(company_id)
+    const connected = !!statusResult?.connected
+    const smartphoneConnected = !!statusResult?.smartphoneConnected
+    return res.json({
+      ok: true,
+      hasInstance: true,
+      connected,
+      smartphoneConnected,
+      configured: true,
+      ...(statusResult?.error && { error: statusResult.error }),
+      ...(statusResult?.needsRestore && { needsRestore: true })
+    })
   } catch (err) {
-    console.error('zapiStatus:', err)
-    return res.status(500).json({ ok: false, error: 'Erro ao verificar status Z-API' })
+    console.error('zapiStatus:', err?.message || err)
+    return res.json({ ok: true, hasInstance: false, connected: false, configured: false })
   }
 }
 

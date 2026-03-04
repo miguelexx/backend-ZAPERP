@@ -497,11 +497,15 @@ function getPayloads(body) {
   return [body]
 }
 
+/** GET /webhooks/zapi/health — health check para configurar no painel Z-API. Sempre 200. */
+exports.healthZapi = (req, res) => res.status(200).json({ ok: true })
+
 /** GET /webhooks/zapi — teste de conectividade; retorna todas as URLs para configurar no painel Z-API. */
 exports.testarZapi = (req, res) => {
   const base = (process.env.APP_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '')
   const prefix = `${base}/webhooks/zapi`
   const urls = {
+    health: `${prefix}/health`,
     mensagens: prefix,
     status: `${prefix}/status`,
     connection: `${prefix}/connection`,
@@ -550,16 +554,67 @@ exports.debugZapi = (req, res) => {
   })
 }
 
+/** Log seguro (sem tokens/conteúdo sensível) — diagnóstico end-to-end webhook */
+function _logWebhookSafe(entry) {
+  const safe = { ts: new Date().toISOString(), received: true, ...entry }
+  console.log('[Z-API-WEBHOOK]', JSON.stringify(safe))
+}
+
+/** Handler principal: roteia por path ou payload.type — só executa quando req.zapiContext.company_id existe. */
+function _routeByEvent(path, body) {
+  const p = String(path || '')
+  const t = String(body?.type ?? body?.event ?? body?.tipo ?? '').toLowerCase()
+  if (p === '/status' || p.endsWith('/status')) return 'status'
+  if (p === '/connection' || p.endsWith('/connection')) return 'connection'
+  if (p === '/disconnected' || p.endsWith('/disconnected')) return 'connection'
+  if (p === '/presence' || p.endsWith('/presence')) return 'presence'
+  if (t === 'connectedcallback' || t === 'connected') return 'connection'
+  if (t === 'disconnectedcallback' || t === 'disconnected') return 'connection'
+  if (t === 'messagestatuscallback' || t === 'readcallback' || t === 'read' || t === 'delivered' || t === 'ack') return 'status'
+  if (t === 'presencechcallback' || t === 'presence') return 'presence'
+  return 'message' // ReceivedCallback, DeliveryCallback, default
+}
+
+/**
+ * Handler unificado: aceita QUALQUER evento da Z-API e roteia pelo payload.type.
+ * req.zapiContext já preenchido pelo middleware resolveWebhookZapi.
+ */
+async function handleWebhookZapi(req, res) {
+  try {
+    const ctx = req.zapiContext
+    if (!ctx || ctx.company_id == null) {
+      return res.status(200).json({ ok: true })
+    }
+    const route = _routeByEvent(req.path, req.body)
+    const fn = {
+      message: () => exports.receberZapi(req, res),
+      status: () => exports.statusZapi(req, res),
+      connection: () => exports.connectionZapi(req, res),
+      presence: () => exports.presenceZapi(req, res)
+    }[route] || (() => exports.receberZapi(req, res))
+    await fn()
+  } catch (e) {
+    console.error('[handleWebhookZapi]', e?.message || e)
+    return res.status(200).json({ ok: true })
+  }
+}
+
+exports.handleWebhookZapi = handleWebhookZapi
+
 exports.receberZapi = async (req, res) => {
   try {
     const body = req.body || {}
-
-    // Multi-tenant: resolve company_id pelo instanceId do payload
-    const instanceId = body.instanceId != null ? String(body.instanceId).trim() : ''
-    let company_id = instanceId ? await getCompanyIdByInstanceId(instanceId) : null
+    let company_id = req.zapiContext?.company_id
     if (company_id == null) {
-      if (instanceId) console.log('[Z-API] instance not mapped:', instanceId.slice(0, 16) + '…')
-      return res.status(200).json({ ok: true })
+      const instanceIdRaw = (
+        body.instanceId != null ? String(body.instanceId) :
+        body.instance_id != null ? String(body.instance_id) :
+        body.instance != null ? String(body.instance) : ''
+      ).trim()
+      company_id = instanceIdRaw ? await getCompanyIdByInstanceId(instanceIdRaw) : null
+      const instanceIdResolved = instanceIdRaw ? instanceIdRaw.slice(0, 24) + (instanceIdRaw.length > 24 ? '…' : '') : '(empty)'
+      _logWebhookSafe({ eventType: body.type || body.event || 'unknown', instanceId: instanceIdResolved, companyIdResolved: company_id != null ? company_id : 'not_mapped' })
+      if (company_id == null) return res.status(200).json({ ok: true })
     }
 
     // Log SEMPRE — essencial para diagnóstico em produção
@@ -567,7 +622,7 @@ exports.receberZapi = async (req, res) => {
       type:       body.type || body.event || '(vazio)',
       phone:      (body.phone || '(vazio)').toString().slice(-12),
       fromMe:     body.fromMe ?? body.key?.fromMe ?? '?',
-      instanceId: body.instanceId != null ? String(body.instanceId).slice(0, 12) : '(vazio)',
+      instanceId: instanceIdResolved,
       hasText:    !!(body.text?.message || body.message || body.body),
       hasMedia:   !!(body.image || body.audio || body.video || body.document || body.sticker),
       status:     body.status || body.ack || '(sem status)',
@@ -1871,6 +1926,15 @@ exports.receberZapi = async (req, res) => {
 exports.statusZapi = async (req, res) => {
   try {
     const body = req.body || {}
+    let company_id = req.zapiContext?.company_id
+    if (company_id == null) {
+      const instanceIdRaw = (body?.instanceId ?? body?.instance_id ?? body?.instance ?? '').toString().trim()
+      company_id = instanceIdRaw ? await getCompanyIdByInstanceId(instanceIdRaw) : null
+      const instanceIdResolved = instanceIdRaw ? instanceIdRaw.slice(0, 24) + (instanceIdRaw.length > 24 ? '…' : '') : '(empty)'
+      _logWebhookSafe({ eventType: 'MessageStatusCallback', instanceId: instanceIdResolved, companyIdResolved: company_id != null ? company_id : 'not_mapped' })
+      if (company_id == null) return res.status(200).json({ ok: true })
+    }
+
     // Z-API oficial usa "ids" (array); fallback para messageId, zaapId, id
     const idsRaw = body?.ids
     const messageIds = Array.isArray(idsRaw) && idsRaw.length > 0
@@ -1921,8 +1985,7 @@ exports.statusZapi = async (req, res) => {
       return res.status(200).json({ ok: true })
     }
 
-    // Multi-tenant: instanceId do payload ou deriva da mensagem (whatsapp_id)
-    let company_id = await getCompanyIdByInstanceId(body?.instanceId)
+    // Fallback: deriva company_id da mensagem (whatsapp_id) quando instanceId ausente
     if (company_id == null && idsToProcess.length > 0) {
       const { data: msgRow } = await supabase.from('mensagens').select('company_id').eq('whatsapp_id', idsToProcess[0]).limit(1).maybeSingle()
       company_id = msgRow?.company_id ?? null
@@ -1997,13 +2060,13 @@ exports.statusZapi = async (req, res) => {
 exports.connectionZapi = async (req, res) => {
   try {
     const payload = req.body || {}
-    console.log('🔌 Z-API connection:', payload?.event ?? payload?.status ?? payload)
-
-    const incomingInstanceId = payload?.instanceId != null ? String(payload.instanceId).trim() : ''
-    const company_id = incomingInstanceId ? await getCompanyIdByInstanceId(incomingInstanceId) : null
+    let company_id = req.zapiContext?.company_id
     if (company_id == null) {
-      if (incomingInstanceId) console.log('[Z-API] connection: instance not mapped:', incomingInstanceId.slice(0, 16) + '…')
-      return res.status(200).json({ ok: true })
+      const incomingInstanceId = (payload?.instanceId ?? payload?.instance_id ?? payload?.instance ?? '').toString().trim()
+      company_id = incomingInstanceId ? await getCompanyIdByInstanceId(incomingInstanceId) : null
+      const instanceIdResolved = incomingInstanceId ? incomingInstanceId.slice(0, 24) + (incomingInstanceId.length > 24 ? '…' : '') : '(empty)'
+      _logWebhookSafe({ eventType: payload?.event ?? payload?.type ?? 'connection', instanceId: instanceIdResolved, companyIdResolved: company_id != null ? company_id : 'not_mapped' })
+      if (company_id == null) return res.status(200).json({ ok: true })
     }
 
     const type = String(payload?.type ?? payload?.event ?? payload?.status ?? '').toLowerCase()
@@ -2193,14 +2256,17 @@ exports.connectionZapi = async (req, res) => {
 exports.presenceZapi = async (req, res) => {
   try {
     const body = req.body || {}
-    const instanceId = body.instanceId != null ? String(body.instanceId).trim() : ''
-    const company_id = instanceId ? await getCompanyIdByInstanceId(instanceId) : null
+    let company_id = req.zapiContext?.company_id
     if (company_id == null) {
-      if (instanceId) console.log('[Z-API] presence: instance not mapped:', instanceId.slice(0, 16) + '…')
-      return res.status(200).json({ ok: true })
+      const instanceId = (body.instanceId ?? body.instance_id ?? body.instance ?? '').toString().trim()
+      company_id = instanceId ? await getCompanyIdByInstanceId(instanceId) : null
+      const instanceIdResolved = instanceId ? instanceId.slice(0, 24) + (instanceId.length > 24 ? '…' : '') : '(empty)'
+      _logWebhookSafe({ eventType: 'PresenceChatCallback', instanceId: instanceIdResolved, companyIdResolved: company_id != null ? company_id : 'not_mapped' })
+      if (company_id == null) return res.status(200).json({ ok: true })
     }
     const phoneRaw = body.phone ? String(body.phone).trim() : ''
     const status = body.status ? String(body.status).trim().toUpperCase() : ''
+    const lastSeen = body.lastSeen ?? body.last_seen ?? null
 
     if (phoneRaw && status) {
       const phones = possiblePhonesBR(phoneRaw)
