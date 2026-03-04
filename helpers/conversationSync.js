@@ -56,11 +56,11 @@ function getCanonicalPhone(phone) {
 async function mergeConversasIntoCanonico(supabaseClient, company_id, canonicalId, dupIds) {
   if (!dupIds || dupIds.length === 0) return
   try {
-    await supabaseClient.from('mensagens').update({ conversa_id: canonicalId }).in('conversa_id', dupIds)
-    await supabaseClient.from('conversa_tags').update({ conversa_id: canonicalId }).in('conversa_id', dupIds)
-    await supabaseClient.from('atendimentos').update({ conversa_id: canonicalId }).in('conversa_id', dupIds)
+    await supabaseClient.from('mensagens').update({ conversa_id: canonicalId }).in('conversa_id', dupIds).eq('company_id', company_id)
+    await supabaseClient.from('conversa_tags').update({ conversa_id: canonicalId }).in('conversa_id', dupIds).eq('company_id', company_id)
+    await supabaseClient.from('atendimentos').update({ conversa_id: canonicalId }).in('conversa_id', dupIds).eq('company_id', company_id)
     await supabaseClient.from('historico_atendimentos').update({ conversa_id: canonicalId }).in('conversa_id', dupIds)
-    await supabaseClient.from('conversa_unreads').update({ conversa_id: canonicalId }).in('conversa_id', dupIds)
+    await supabaseClient.from('conversa_unreads').update({ conversa_id: canonicalId }).in('conversa_id', dupIds).eq('company_id', company_id)
     const del = await supabaseClient.from('conversas').delete().in('id', dupIds).eq('company_id', company_id)
     if (del.error) {
       await supabaseClient.from('conversas')

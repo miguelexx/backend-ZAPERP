@@ -561,10 +561,20 @@ exports.debugZapi = (req, res) => {
   })
 }
 
-/** Log seguro (sem tokens/conteúdo sensível) — diagnóstico end-to-end webhook */
+/** Log seguro (sem tokens/conteúdo sensível) — diagnóstico end-to-end webhook. Nunca logar tokens nem URL com /token/ */
 function _logWebhookSafe(entry) {
   const safe = { ts: new Date().toISOString(), received: true, ...entry }
   console.log('[Z-API-WEBHOOK]', JSON.stringify(safe))
+}
+
+/** Extrai instanceId do payload (body) Z-API — mesma lógica do middleware */
+function _extractInstanceIdFromBody(body) {
+  if (!body || typeof body !== 'object') return ''
+  const v = body.instanceId ?? body.instance_id ?? body.instance?.id ?? body.instance
+  if (v == null) return ''
+  if (typeof v === 'object' && v != null && typeof v.id === 'string') return String(v.id).trim()
+  if (typeof v === 'object' && v != null && v.instance_id != null) return String(v.instance_id).trim()
+  return String(v).trim()
 }
 
 /** Handler principal: roteia por path ou payload.type — só executa quando req.zapiContext.company_id existe. */
@@ -611,40 +621,40 @@ exports.handleWebhookZapi = handleWebhookZapi
 exports.receberZapi = async (req, res) => {
   try {
     const body = req.body || {}
+    // 1) Resolver instanceId e company_id — SEMPRE explícito, NUNCA depender do DEFAULT do banco
+    const instanceIdRaw = _extractInstanceIdFromBody(body) || req.zapiContext?.instanceId || ''
+    const instanceId = instanceIdRaw ? String(instanceIdRaw).trim() : ''
     let company_id = req.zapiContext?.company_id
-    const instanceIdRaw = req.zapiContext?.instanceId ?? body.instanceId ?? body.instance_id ?? body.instance?.id ?? body.instance ?? ''
-    const instanceIdResolved = instanceIdRaw ? String(instanceIdRaw).slice(0, 24) + (String(instanceIdRaw).length > 24 ? '…' : '') : '(empty)'
-
-    if (company_id == null) {
-      const raw = (body.instanceId != null ? String(body.instanceId) : body.instance_id != null ? String(body.instance_id) : body.instance != null ? String(body.instance) : '').trim()
-      company_id = raw ? await getCompanyIdByInstanceId(raw) : null
-      _logWebhookSafe({ eventType: body.type || body.event || 'unknown', instanceId: instanceIdResolved, companyIdResolved: company_id != null ? company_id : 'not_mapped' })
-      if (company_id == null) return res.status(200).json({ ok: true })
+    if (company_id == null && instanceId) {
+      company_id = await getCompanyIdByInstanceId(instanceId)
+    }
+    if (!instanceId || company_id == null) {
+      _logWebhookSafe({ instanceId: instanceId ? instanceId.slice(0, 24) + (instanceId.length > 24 ? '…' : '') : '(empty)', companyId: 'not_mapped', type: body.type || body.event || 'unknown', ignored: 'instance_not_mapped' })
+      return res.status(200).json({ ok: true, ignored: 'instance_not_mapped' })
     }
 
-    // Log SEMPRE — essencial para diagnóstico em produção
-    const bodyPreview = {
-      type:       body.type || body.event || '(vazio)',
-      phone:      (body.phone || '(vazio)').toString().slice(-12),
-      fromMe:     body.fromMe ?? body.key?.fromMe ?? '?',
-      instanceId: instanceIdResolved,
-      hasText:    !!(body.text?.message || body.message || body.body),
-      hasMedia:   !!(body.image || body.audio || body.video || body.document || body.sticker),
-      status:     body.status || body.ack || '(sem status)',
-      ip:         req.ip || req.socket?.remoteAddress || '?'
-    }
-    console.log('[Z-API] ▶ webhook recebido:', JSON.stringify(bodyPreview))
+    // 2) Log DEV uma linha — diagnóstico sem vazar tokens
+    const firstPayload = getPayloads(body)[0] || body
+    const msgId = firstPayload?.messageId ?? firstPayload?.zaapId ?? firstPayload?.id ?? ''
+    const phoneTail = (firstPayload?.phone || '').toString().trim().slice(-10)
+    console.log('[ZAPI_WEBHOOK]', JSON.stringify({
+      instanceId: instanceId.slice(0, 20) + (instanceId.length > 20 ? '…' : ''),
+      companyId: company_id,
+      type: body.type || body.event || firstPayload?.type || 'unknown',
+      messageId: msgId ? String(msgId).slice(0, 20) + (String(msgId).length > 20 ? '…' : '') : null,
+      phone: phoneTail ? '…' + phoneTail : null,
+      fromMe: firstPayload?.fromMe ?? firstPayload?.key?.fromMe ?? null
+    }))
 
     // Salva no buffer de diagnóstico (GET /webhooks/zapi/debug)
-    // rawBody: sempre salvo (truncado em 600 chars) para permitir diagnóstico mesmo sem WHATSAPP_DEBUG
     _logWebhook({
-      type:    bodyPreview.type,
-      phone:   bodyPreview.phone,
-      fromMe:  bodyPreview.fromMe,
-      hasText: bodyPreview.hasText,
-      hasMedia: bodyPreview.hasMedia,
-      status:  bodyPreview.status,
-      ip:      bodyPreview.ip,
+      type: body.type || body.event || 'unknown',
+      phone: (body.phone || '').toString().slice(-12),
+      fromMe: body.fromMe ?? body.key?.fromMe,
+      hasText: !!(body.text?.message || body.message || body.body),
+      hasMedia: !!(body.image || body.audio || body.video || body.document || body.sticker),
+      status: body.status || body.ack,
+      ip: req.ip || req.socket?.remoteAddress || '?',
       rawBody: JSON.stringify(body).slice(0, 600)
     })
 
