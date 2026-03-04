@@ -75,6 +75,80 @@ async function mergeConversasIntoCanonico(supabaseClient, company_id, canonicalI
 }
 
 /**
+ * Mescla conversa LID na conversa PHONE quando ambas existem para o mesmo contato.
+ * Chamar em TODOS os callbacks que possam trazer chatLid + canonicalPhone (ReceivedCallback,
+ * DeliveryCallback, MessageStatusCallback).
+ *
+ * @param {object} supabaseClient
+ * @param {number} company_id
+ * @param {string} chatLid - Parte antes de @lid (ex: "24601656598766")
+ * @param {string} canonicalPhone - Telefone canônico do contato (número real)
+ * @param {object} [opts]
+ * @param {object} [opts.io] - Socket.io para emitir conversa_atualizada/atualizar_conversa
+ * @param {string} [opts.nomeCache] - Nome para atualizar cache na conversa PHONE
+ * @param {string} [opts.fotoCache] - Foto para atualizar cache na conversa PHONE
+ * @returns {Promise<{merged: boolean, conversa_id?: number}>}
+ */
+async function mergeConversationLidToPhone(supabaseClient, company_id, chatLid, canonicalPhone, opts = {}) {
+  if (!chatLid || !canonicalPhone || !company_id) return { merged: false }
+
+  const lidPart = String(chatLid).replace(/@lid$/i, '').trim()
+  if (!lidPart) return { merged: false }
+
+  const canonical = getCanonicalPhone(canonicalPhone)
+  if (!canonical || canonical.startsWith('lid:')) return { merged: false }
+
+  const variants = possiblePhonesBR(canonical).length > 0 ? possiblePhonesBR(canonical) : [canonical]
+
+  const { data: convByLid } = await supabaseClient
+    .from('conversas')
+    .select('id, telefone, nome_contato_cache, foto_perfil_contato_cache')
+    .eq('company_id', company_id)
+    .eq('chat_lid', lidPart)
+    .maybeSingle()
+
+  const { data: convByPhoneRows } = await supabaseClient
+    .from('conversas')
+    .select('id, telefone, nome_contato_cache, foto_perfil_contato_cache')
+    .eq('company_id', company_id)
+    .in('telefone', variants)
+    .neq('status_atendimento', 'fechada')
+    .order('ultima_atividade', { ascending: false })
+    .limit(1)
+
+  const convByPhone = Array.isArray(convByPhoneRows) && convByPhoneRows[0] ? convByPhoneRows[0] : null
+
+  if (!convByLid || !convByPhone || convByLid.id === convByPhone.id) {
+    return { merged: false }
+  }
+
+  try {
+    await mergeConversasIntoCanonico(supabaseClient, company_id, convByPhone.id, [convByLid.id])
+    await supabaseClient.from('conversas').update({ chat_lid: lidPart }).eq('id', convByPhone.id).eq('company_id', company_id)
+
+    const cacheUpdates = {}
+    if (opts.nomeCache && String(opts.nomeCache).trim()) cacheUpdates.nome_contato_cache = String(opts.nomeCache).trim()
+    if (opts.fotoCache && String(opts.fotoCache).trim()) cacheUpdates.foto_perfil_contato_cache = String(opts.fotoCache).trim()
+    if (Object.keys(cacheUpdates).length > 0) {
+      await supabaseClient.from('conversas').update(cacheUpdates).eq('id', convByPhone.id).eq('company_id', company_id)
+    }
+
+    const io = opts.io
+    if (io) {
+      const payload = { id: convByPhone.id, telefone: canonical, ...cacheUpdates }
+      io.to(`empresa_${company_id}`).emit('conversa_atualizada', payload)
+      io.to(`empresa_${company_id}`).emit('atualizar_conversa', { id: convByPhone.id })
+    }
+
+    console.log('[conversationSync] 🔗 LID→PHONE:', { lidPart, canonical: canonical.slice(-8), conversa_id: convByPhone.id })
+    return { merged: true, conversa_id: convByPhone.id }
+  } catch (e) {
+    console.warn('[conversationSync] ⚠️ mergeConversationLidToPhone:', e?.message || e)
+    return { merged: false }
+  }
+}
+
+/**
  * findOrCreateConversation — FUNÇÃO CENTRAL.
  *
  * Garante que exista UMA ÚNICA conversa aberta por telefone canônico.
@@ -270,6 +344,7 @@ module.exports = {
   getCanonicalPhone,
   findOrCreateConversation,
   mergeConversasIntoCanonico,
+  mergeConversationLidToPhone,
   deduplicateConversationsByContact,
   sortConversationsByRecent,
 }

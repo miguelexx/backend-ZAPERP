@@ -685,6 +685,7 @@ exports.paginaMergeDuplicatas = (req, res) => {
 
 // =====================================================
 // Merge conversas duplicadas (mesmo contato, variantes de telefone)
+// Inclui reconciliação LID: mescla conversas com telefone="lid:xxx" na conversa do mesmo chat_lid.
 // POST /chats/merge-duplicatas — admin only
 // =====================================================
 exports.mergeConversasDuplicadas = async (req, res) => {
@@ -694,12 +695,14 @@ exports.mergeConversasDuplicadas = async (req, res) => {
 
     const { data: conversas, error: errList } = await supabase
       .from('conversas')
-      .select('id, telefone, ultima_atividade, criado_em, tipo')
+      .select('id, telefone, chat_lid, ultima_atividade, criado_em, tipo')
       .eq('company_id', cid)
       .neq('status_atendimento', 'fechada')
       .not('telefone', 'is', null)
 
     if (errList) return res.status(500).json({ error: errList.message })
+
+    const { mergeConversasIntoCanonico } = require('../helpers/conversationSync')
 
     const individuais = (conversas || []).filter((c) => !c.tipo || String(c.tipo).toLowerCase() !== 'grupo')
     const byKey = new Map()
@@ -723,18 +726,29 @@ exports.mergeConversasDuplicadas = async (req, res) => {
       const otherIds = list.slice(1).map((c) => c.id).filter(Boolean)
       if (otherIds.length === 0) continue
       try {
-        await supabase.from('mensagens').update({ conversa_id: canonical.id }).in('conversa_id', otherIds)
-        await supabase.from('conversa_tags').update({ conversa_id: canonical.id }).in('conversa_id', otherIds)
-        await supabase.from('atendimentos').update({ conversa_id: canonical.id }).in('conversa_id', otherIds)
-        await supabase.from('historico_atendimentos').update({ conversa_id: canonical.id }).in('conversa_id', otherIds)
-        await supabase.from('conversa_unreads').update({ conversa_id: canonical.id }).in('conversa_id', otherIds)
-        const del = await supabase.from('conversas').delete().in('id', otherIds).eq('company_id', cid)
-        if (del.error) {
-          await supabase.from('conversas').update({ status_atendimento: 'fechada', lida: true }).in('id', otherIds).eq('company_id', cid)
-        }
+        await mergeConversasIntoCanonico(supabase, cid, canonical.id, otherIds)
         merged += otherIds.length
       } catch (e) {
         console.warn('mergeConversasDuplicadas:', e?.message || e)
+      }
+    }
+
+    // Reconcilição LID: conversas com telefone="lid:xxx" mesclar na conversa com telefone real que tenha o mesmo chat_lid
+    const lidConvs = individuais.filter((c) => String(c.telefone || '').startsWith('lid:'))
+    for (const lidConv of lidConvs) {
+      const lidPart = lidConv.telefone ? String(lidConv.telefone).replace(/^lid:/, '').trim() : (lidConv.chat_lid || '')
+      if (!lidPart) continue
+      const canonPhone = individuais
+        .filter((c) => c.id !== lidConv.id && !String(c.telefone || '').startsWith('lid:') && c.chat_lid === lidPart)
+        .sort((a, b) => new Date(b.ultima_atividade || 0).getTime() - new Date(a.ultima_atividade || 0).getTime())[0]
+      if (canonPhone) {
+        try {
+          await mergeConversasIntoCanonico(supabase, cid, canonPhone.id, [lidConv.id])
+          merged += 1
+          await supabase.from('conversas').update({ chat_lid: lidPart }).eq('id', canonPhone.id).eq('company_id', cid)
+        } catch (e) {
+          console.warn('mergeConversasDuplicadas LID:', e?.message || e)
+        }
       }
     }
 

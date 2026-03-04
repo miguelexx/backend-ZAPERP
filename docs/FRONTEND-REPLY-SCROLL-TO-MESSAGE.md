@@ -75,7 +75,7 @@ const scrollToReply = (replyToId) => {
 
 - Mensagens `fromMe` (enviadas pelo celular) chegam via socket `nova_mensagem` com `direcao: 'out'`
 - Devem aparecer imediatamente no chat como mensagem **enviada** (lado direito)
-- Status ticks: escutar evento `status_mensagem` com `{ mensagem_id, conversa_id, status }`
+- Status ticks: escutar evento `status_mensagem` com `{ mensagem_id, conversa_id, status, whatsapp_id? }` (whatsapp_id para de-dup)
 - Atualizar ícone no balão conforme:
   - `pending` → um tick
   - `sent` → dois ticks cinza
@@ -87,5 +87,5 @@ const scrollToReply = (replyToId) => {
 | Evento            | Payload                                             | Uso                                           |
 |-------------------|------------------------------------------------------|-----------------------------------------------|
 | `nova_mensagem`   | `{ id, texto, reply_meta, whatsapp_id, status, ... }`| Inserir/atualizar mensagem na lista            |
-| `status_mensagem` | `{ mensagem_id, conversa_id, status }`              | Atualizar ticks da mensagem correspondente     |
-| `conversa_atualizada` | `{ id, telefone?, ... }`                        | Atualizar lista de conversas (lid→phone)       |
+| `status_mensagem` | `{ mensagem_id, conversa_id, status, whatsapp_id? }` | Atualizar ticks (usar whatsapp_id para de-dup) |
+| `conversa_atualizada` | `{ id, ultima_atividade?, nome_contato_cache?, foto_perfil_contato_cache? }` | Atualizar lista (nome/foto) |
