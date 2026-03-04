@@ -19,6 +19,27 @@ const { incrementarUnreadParaConversa, marcarConversaComoLidaParaTodos } = requi
 // company_id NUNCA mais via ENV — resolvido por instanceId do payload em cada webhook
 const WHATSAPP_DEBUG = String(process.env.WHATSAPP_DEBUG || '').toLowerCase() === 'true'
 
+/** Log [ZAPI_CERT] uma linha por ação — só quando WHATSAPP_DEBUG=true (apenas dev). Sem token, sem conteúdo da msg. */
+function logZapiCert(opts) {
+  if (!WHATSAPP_DEBUG) return
+  const ts = new Date().toISOString()
+  const line = JSON.stringify({
+    ts,
+    companyId: opts.companyId ?? null,
+    instanceId: opts.instanceId ? String(opts.instanceId).slice(0, 24) + (opts.instanceId.length > 24 ? '…' : '') : null,
+    type: opts.type ?? null,
+    fromMe: opts.fromMe ?? null,
+    hasDest: opts.hasDest ?? null,
+    phoneTail: opts.phoneTail ?? null,
+    connectedTail: opts.connectedTail ?? null,
+    messageId: opts.messageId ? String(opts.messageId).slice(0, 24) + (String(opts.messageId).length > 24 ? '…' : '') : null,
+    resolvedKeyType: opts.resolvedKeyType ?? null,
+    conversaId: opts.conversaId ?? null,
+    action: opts.action ?? 'unknown'
+  })
+  console.log('[ZAPI_CERT]', line)
+}
+
 // Buffer em memória das últimas 30 requisições webhook recebidas (diagnóstico)
 const _webhookLog = []
 function _logWebhook(entry) {
@@ -577,6 +598,17 @@ function _extractInstanceIdFromBody(body) {
   return String(v).trim()
 }
 
+/** Verifica se o payload tem campos de destino (to, remoteJid, etc.). Para fromMe, destino = contato que recebeu. */
+function hasDestFields(payload) {
+  if (!payload || typeof payload !== 'object') return false
+  const dest = [
+    payload.to, payload.toPhone, payload.recipientPhone, payload.recipient,
+    payload.destination, payload.key?.remoteJid, payload.remoteJid,
+    payload.chatId, payload.chat?.id, payload.chat?.remoteJid, payload.participant
+  ]
+  return dest.some(v => v != null && String(v).trim() !== '')
+}
+
 /** Handler principal: roteia por path ou payload.type — só executa quando req.zapiContext.company_id existe. */
 function _routeByEvent(path, body) {
   const p = String(path || '')
@@ -854,6 +886,19 @@ exports.receberZapi = async (req, res) => {
           try {
             const io = req.app.get('io')
             await mergeConversationLidToPhone(supabase, company_id, lidPartStatus, canonicalStatus, { io })
+            logZapiCert({
+              companyId: company_id,
+              instanceId,
+              type: payloadType,
+              fromMe: payloadFromMe,
+              hasDest: hasDestFields(payload),
+              phoneTail: canonicalStatus?.slice(-6) || null,
+              connectedTail: (payload?.connectedPhone ?? '').toString().replace(/\D/g, '').slice(-6) || null,
+              messageId: String(msgId),
+              resolvedKeyType: 'lid→phone',
+              conversaId: null,
+              action: 'merged_lid_phone'
+            })
           } catch (_) {}
         }
 
@@ -861,6 +906,18 @@ exports.receberZapi = async (req, res) => {
         if (msg) {
           emitStatusMsg(msg, statusNorm, String(msgId))
           console.log(`✅ Z-API status ${statusNorm.toUpperCase()} → msg ${msg.id} (conversa ${msg.conversa_id})`)
+          logZapiCert({
+            companyId: company_id,
+            instanceId,
+            type: payloadType,
+            fromMe: payloadFromMe,
+            hasDest: hasDestFields(payload),
+            phoneTail: (payload?.phone ?? '').toString().slice(-6) || null,
+            connectedTail: (payload?.connectedPhone ?? '').toString().replace(/\D/g, '').slice(-6) || null,
+            messageId: String(msgId),
+            conversaId: msg.conversa_id,
+            action: 'updated_status'
+          })
           // Visualizou no celular (read/played): zera notificação de mensagem nova no sistema para todos
           if (statusNorm === 'read' || statusNorm === 'played') {
             await marcarConversaComoLidaParaTodos(company_id, msg.conversa_id)
@@ -924,6 +981,18 @@ exports.receberZapi = async (req, res) => {
                   .to(`conversa_${existByWaId.conversa_id}`)
                   .emit('status_mensagem', payload)
               }
+              logZapiCert({
+                companyId: company_id,
+                instanceId,
+                type: 'deliverycallback',
+                fromMe: true,
+                hasDest: false,
+                phoneTail: (payload?.phone ?? '').toString().slice(-6) || null,
+                connectedTail: (payload?.connectedPhone ?? '').toString().replace(/\D/g, '').slice(-6) || null,
+                messageId: String(delivMsgId),
+                conversaId: existByWaId.conversa_id,
+                action: 'updated_status'
+              })
               lastResult = { ok: true, delivery: true, fromMe: true, messageId: String(delivMsgId) }
               continue
             }
@@ -969,6 +1038,21 @@ exports.receberZapi = async (req, res) => {
               fotoCache: senderPhoto || undefined
             })
             if (mergeRes.merged && msg && mergeRes.conversa_id) msg = { ...msg, conversa_id: mergeRes.conversa_id }
+            if (mergeRes.merged) {
+              logZapiCert({
+                companyId: company_id,
+                instanceId,
+                type: 'deliverycallback',
+                fromMe: payloadFromMe,
+                hasDest: hasDestFields(payload),
+                phoneTail: canonicalDeliv?.slice(-6) || null,
+                connectedTail: (payload?.connectedPhone ?? '').toString().replace(/\D/g, '').slice(-6) || null,
+                messageId: String(messageId),
+                resolvedKeyType: 'lid→phone',
+                conversaId: mergeRes.conversa_id ?? null,
+                action: 'merged_lid_phone'
+              })
+            }
           } catch (e) {
             console.warn('[Z-API] DeliveryCallback mergeConversationLidToPhone:', e?.message || e)
           }
@@ -1069,11 +1153,85 @@ exports.receberZapi = async (req, res) => {
               .to(`conversa_${msg.conversa_id}`)
               .emit('status_mensagem', payload)
           }
+          logZapiCert({
+            companyId: company_id,
+            instanceId,
+            type: 'deliverycallback',
+            fromMe: payloadFromMe,
+            hasDest: hasDestFields(payload),
+            phoneTail: (phoneDest || '').toString().slice(-6) || null,
+            connectedTail: (payload?.connectedPhone ?? '').toString().replace(/\D/g, '').slice(-6) || null,
+            messageId: String(messageId),
+            conversaId: msg.conversa_id,
+            action: 'updated_status'
+          })
         }
 
         lastResult = { ok: true, delivery: true, messageId: String(messageId) }
         continue
       }
+      }
+
+      // ─── Caso especial: fromMe=true, phone=connectedPhone, sem destino (self-echo) ───
+      // Evita DROPPED; reconcilia por messageId → atualiza status apenas, nunca criar conversa.
+      const _digits = (v) => String(v ?? '').replace(/\D/g, '')
+      const _tail11 = (d) => (d && d.length >= 11) ? d.slice(-11) : (d || '')
+      const fromMeSelf = Boolean(payload?.fromMe ?? payload?.key?.fromMe)
+      const phoneRaw = (payload?.phone ?? '').toString().trim()
+      const connectedRaw = (payload?.connectedPhone ?? payload?.ownerPhone ?? payload?.instancePhone ?? payload?.phoneNumber ?? payload?.me?.phone ?? '').toString().trim()
+      const phoneDig = _digits(phoneRaw)
+      const connectedDig = _digits(connectedRaw)
+      const phonesMatch = phoneDig && connectedDig && _tail11(phoneDig) === _tail11(connectedDig)
+
+      if (fromMeSelf && phonesMatch && !hasDestFields(payload)) {
+        const msgId = payload?.messageId ?? payload?.zaapId ?? payload?.id ?? payload?.key?.id ?? null
+        const statusRaw = payload?.ack != null ? String(payload.ack).trim() : String(payload?.status ?? '').trim()
+        const statusNorm = statusRaw ? normalizeZapiStatus(statusRaw) : null
+        console.log('[ZAPI_WEBHOOK]', JSON.stringify({ companyIdResolved: company_id, messageId: msgId ? String(msgId).slice(0, 20) : null, status: statusNorm, note: 'self_echo' }))
+        if (msgId) {
+          const { data: existing } = await supabase
+            .from('mensagens')
+            .select('id, conversa_id, company_id, whatsapp_id')
+            .eq('company_id', company_id)
+            .eq('whatsapp_id', String(msgId))
+            .maybeSingle()
+          if (existing) {
+            if (statusNorm) {
+              const updated = await updateStatusByWaId(String(msgId), statusNorm)
+              if (updated) emitStatusMsg(updated, statusNorm, String(msgId))
+            }
+            logZapiCert({
+              companyId: company_id,
+              instanceId,
+              type: payload?.type ?? payload?.event ?? 'receivedcallback',
+              fromMe: true,
+              hasDest: false,
+              phoneTail: phoneDig?.slice(-6) || null,
+              connectedTail: connectedDig?.slice(-6) || null,
+              messageId: String(msgId),
+              resolvedKeyType: 'self_echo',
+              conversaId: existing.conversa_id,
+              action: 'self_echo_status_update'
+            })
+            lastResult = { ok: true, handled: 'fromMe_self_echo_status' }
+            continue
+          }
+        }
+        logZapiCert({
+          companyId: company_id,
+          instanceId,
+          type: payload?.type ?? payload?.event ?? 'receivedcallback',
+          fromMe: true,
+          hasDest: false,
+          phoneTail: phoneDig?.slice(-6) || null,
+          connectedTail: connectedDig?.slice(-6) || null,
+          messageId: String(msgId),
+          resolvedKeyType: 'self_echo',
+          conversaId: null,
+          action: 'self_echo_ignored_no_match'
+        })
+        lastResult = { ok: true, ignored: 'fromMe_self_echo_no_match' }
+        continue
       }
 
       const extracted = extractMessage(payload)
@@ -1131,6 +1289,19 @@ exports.receberZapi = async (req, res) => {
       })
 
       if (!phone) {
+        logZapiCert({
+          companyId: company_id,
+          instanceId,
+          type: payload?.type ?? payload?.event ?? 'receivedcallback',
+          fromMe,
+          hasDest: hasDestFields(payload),
+          phoneTail: (payload?.phone ?? '').toString().replace(/\D/g, '').slice(-6) || null,
+          connectedTail: (payload?.connectedPhone ?? '').toString().replace(/\D/g, '').slice(-6) || null,
+          messageId: messageId ? String(messageId) : null,
+          resolvedKeyType: debugReason ?? 'drop',
+          conversaId: null,
+          action: 'dropped_invalid_payload'
+        })
         // Log SEMPRE do payload completo para diagnóstico — crítico para entender o que Z-API envia
         console.warn('⚠️ [Z-API] DROPPED — phone não resolvido:', debugReason)
         console.warn('⚠️ [Z-API] DROPPED — payload completo (diagnóstico):', JSON.stringify({
@@ -1918,6 +2089,19 @@ exports.receberZapi = async (req, res) => {
 
       console.log('✅ Mensagem salva no sistema:', { conversa_id, mensagem_id: mensagemSalva.id, phone: phone?.slice(-6), direcao: fromMe ? 'out' : 'in' })
       if (fromMe) console.log('📤 Espelhamento: mensagem enviada pelo celular registrada no sistema')
+      logZapiCert({
+        companyId: company_id,
+        instanceId,
+        type: payload?.type ?? payload?.event ?? 'receivedcallback',
+        fromMe,
+        hasDest: hasDestFields(payload),
+        phoneTail: phone?.slice(-6) || null,
+        connectedTail: (payload?.connectedPhone ?? '').toString().replace(/\D/g, '').slice(-6) || null,
+        messageId: mensagemSalva?.whatsapp_id ? String(mensagemSalva.whatsapp_id) : null,
+        resolvedKeyType: debugReason ?? null,
+        conversaId: conversa_id ?? mensagemSalva?.conversa_id,
+        action: 'inserted_message'
+      })
     }
 
     // Mensagem de entrada: incrementa unread no banco para todos os usuários (igual WhatsApp; refetch da lista já vem com contador certo)

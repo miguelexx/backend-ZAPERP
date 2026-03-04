@@ -104,8 +104,30 @@ curl -s -X POST "$BASE_URL/webhooks/zapi" \
   }"
 echo ""
 
+# 6. Self-echo (D1): fromMe=true, phone=connectedPhone, SEM to/destino
+# Esperado: action=self_echo_status_update ou self_echo_ignored_no_match, 200, sem criar conversa
+if [ -n "$CONNECTED_PHONE" ]; then
+  echo ""
+  echo "--- 6. Self-echo (phone=connectedPhone, sem destino) ---"
+  MSG_ID_4="cert-test-selfecho-$(date +%s)"
+  curl -s -X POST "$BASE_URL/webhooks/zapi" \
+    -H "Content-Type: application/json" \
+    -d "{
+      \"instanceId\": \"$INSTANCE_ID\",
+      \"type\": \"ReceivedCallback\",
+      \"phone\": \"$CONNECTED_PHONE\",
+      \"connectedPhone\": \"$CONNECTED_PHONE\",
+      \"fromMe\": true,
+      \"messageId\": \"$MSG_ID_4\",
+      \"text\": {\"message\": \"(self-echo)\"}
+    }"
+  echo " (esperado: 200, log [ZAPI_CERT] action=self_echo_* )"
+  echo " (defina CONNECTED_PHONE=5511888888888 para executar)"
+fi
+
 echo ""
 echo "=== Fim dos testes. Verifique: ==="
 echo "1. Logs [Z-API-WEBHOOK] no backend"
 echo "2. Mensagens em mensagens (sem duplicata de $MSG_ID_1)"
 echo "3. Eventos nova_mensagem e status_mensagem no frontend"
+echo "4. Com WHATSAPP_DEBUG=true: logs [ZAPI_CERT] por ação"

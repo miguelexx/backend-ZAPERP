@@ -121,6 +121,10 @@ Este documento descreve os ajustes realizados e o checklist de certificação pa
 
 - `scripts/certificacao/test-webhooks-curl.sh` — simula ReceivedCallback, DeliveryCallback, MessageStatusCallback (fromMe com `to` = destino)
 
+### Instrumentação [ZAPI_CERT]
+
+- `WHATSAPP_DEBUG=true` (apenas dev) — loga uma linha `[ZAPI_CERT]` por webhook com: ts, companyId, instanceId, type, fromMe, hasDest, phoneTail, connectedTail, messageId, resolvedKeyType, conversaId, action
+
 ---
 
 ## 4. Frontend — Orientações
