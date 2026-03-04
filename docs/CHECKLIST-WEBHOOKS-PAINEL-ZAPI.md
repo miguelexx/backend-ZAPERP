@@ -16,18 +16,20 @@
 **Alternativa**: Todas as URLs acima podem ser substituídas pela principal: `{APP_URL}/webhooks/zapi?token={TOKEN}` — o backend roteia por `payload.type` internamente.
 
 ## Exemplos por APP_URL
+⚠️ **OBRIGATÓRIO**: Todas as URLs abaixo precisam ter `?token=SEU_ZAPI_WEBHOOK_TOKEN` no final.
+O valor do token é o mesmo definido em `ZAPI_WEBHOOK_TOKEN` no seu `.env`.
 
 ### Produção: `https://api.zaperp.com`
-- Ao receber/ao enviar: `https://api.zaperp.com/webhooks/zapi`
-- Status da mensagem: `https://api.zaperp.com/webhooks/zapi/status`
-- Conexão: `https://api.zaperp.com/webhooks/zapi/connection`
-- Presença: `https://api.zaperp.com/webhooks/zapi/presence`
+- Ao receber/ao enviar: `https://api.zaperp.com/webhooks/zapi?token=SEU_ZAPI_WEBHOOK_TOKEN`
+- Status da mensagem: `https://api.zaperp.com/webhooks/zapi/status?token=SEU_ZAPI_WEBHOOK_TOKEN`
+- Conexão: `https://api.zaperp.com/webhooks/zapi/connection?token=SEU_ZAPI_WEBHOOK_TOKEN`
+- Presença: `https://api.zaperp.com/webhooks/zapi/presence?token=SEU_ZAPI_WEBHOOK_TOKEN`
 
 ### Local (ngrok): `https://abc123.ngrok.io`
-- Ao receber/ao enviar: `https://abc123.ngrok.io/webhooks/zapi`
-- Status: `https://abc123.ngrok.io/webhooks/zapi/status`
-- Conexão: `https://abc123.ngrok.io/webhooks/zapi/connection`
-- Presença: `https://abc123.ngrok.io/webhooks/zapi/presence`
+- Ao receber/ao enviar: `https://abc123.ngrok.io/webhooks/zapi?token=SEU_ZAPI_WEBHOOK_TOKEN`
+- Status: `https://abc123.ngrok.io/webhooks/zapi/status?token=SEU_ZAPI_WEBHOOK_TOKEN`
+- Conexão: `https://abc123.ngrok.io/webhooks/zapi/connection?token=SEU_ZAPI_WEBHOOK_TOKEN`
+- Presença: `https://abc123.ngrok.io/webhooks/zapi/presence?token=SEU_ZAPI_WEBHOOK_TOKEN`
 
 ## Token (obrigatório)
 

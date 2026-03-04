@@ -12,9 +12,10 @@ function _logSafe(entry) {
   console.log('[Z-API-WEBHOOK]', JSON.stringify({ ts: new Date().toISOString(), ...entry }))
 }
 
+/** Extrai instanceId do payload Z-API (body.instanceId, instance_id, instance.id, instance). */
 function extractInstanceId(body) {
   if (!body || typeof body !== 'object') return ''
-  const v = body.instanceId ?? body.instance_id ?? body.instance
+  const v = body.instanceId ?? body.instance_id ?? body.instance?.id ?? body.instance
   if (v == null) return ''
   if (typeof v === 'object' && v != null && typeof v.id === 'string') return String(v.id).trim()
   if (typeof v === 'object' && v != null && v.instance_id != null) return String(v.instance_id).trim()
@@ -38,7 +39,13 @@ async function resolveWebhookZapi(req, res, next) {
     const path = req.path || ''
     const instanceIdRaw = extractInstanceId(body)
     const instanceId = instanceIdRaw ? instanceIdRaw.slice(0, 32) : '(empty)'
-    const company_id = instanceIdRaw ? await getCompanyIdByInstanceId(instanceIdRaw) : null
+
+    if (!instanceIdRaw || !String(instanceIdRaw).trim()) {
+      _logSafe({ eventType: inferEventType(body, path), instanceId: '(empty)', companyIdResolved: 'missing_instanceId' })
+      return res.status(200).json({ ok: true, ignored: 'missing_instanceId' })
+    }
+
+    const company_id = await getCompanyIdByInstanceId(instanceIdRaw)
     const companyIdResolved = company_id != null ? company_id : 'not_mapped'
     const eventType = inferEventType(body, path)
 

@@ -27,7 +27,9 @@ curl -s -H "Authorization: Bearer JWT_USUARIO_EMPRESA_1" \
 # Esperado 200 (NUNCA 500): { ok, hasInstance, connected, configured }
 ```
 
-## 3. Webhook mock (instanceId → company_id)
+## 3. Webhook mock (instanceId → company_id, SEM token)
+
+**POST /webhooks/zapi NÃO exige token.** Validação via `instanceId` + `empresa_zapi`.
 
 ```bash
 # Simula callback Z-API. instanceId deve existir em empresa_zapi.instance_id
@@ -44,7 +46,7 @@ curl -s -X POST "https://SEU_APP_URL/webhooks/zapi" \
   }"
 ```
 
-Ou use o script: `INSTANCE_ID=xxx BASE_URL=https://api.zaperp.com ./scripts/test-webhook-zapi.sh`
+Scripts de teste (sem token): `scripts/test-webhook-zapi-sem-token.sh` ou `.ps1`
 
 Verifique no log do backend: `[Z-API-WEBHOOK]` com `instanceIdResolved` e `companyIdResolved`.
 

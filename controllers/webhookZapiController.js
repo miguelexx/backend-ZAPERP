@@ -547,7 +547,7 @@ exports.debugZapi = (req, res) => {
     diagnostico: {
       total_recebidos: _webhookLog.length,
       total_rejeitados: _rejectedLog.length,
-      instrucao: 'Se total_rejeitados > 0, o Z-API está chamando URLs sem token. Verifique o painel Z-API e garanta que as URLs acima estão configuradas.',
+      instrucao: 'POST /webhooks/zapi* não exige token. Validação por instanceId + empresa_zapi. Se webhook retorna ignored:instance_not_mapped, adicione instance_id em empresa_zapi.',
     },
     ultimos_webhooks_recebidos: _webhookLog,
     ultimos_webhooks_rejeitados: _rejectedLog,
@@ -605,14 +605,12 @@ exports.receberZapi = async (req, res) => {
   try {
     const body = req.body || {}
     let company_id = req.zapiContext?.company_id
+    const instanceIdRaw = req.zapiContext?.instanceId ?? body.instanceId ?? body.instance_id ?? body.instance?.id ?? body.instance ?? ''
+    const instanceIdResolved = instanceIdRaw ? String(instanceIdRaw).slice(0, 24) + (String(instanceIdRaw).length > 24 ? '…' : '') : '(empty)'
+
     if (company_id == null) {
-      const instanceIdRaw = (
-        body.instanceId != null ? String(body.instanceId) :
-        body.instance_id != null ? String(body.instance_id) :
-        body.instance != null ? String(body.instance) : ''
-      ).trim()
-      company_id = instanceIdRaw ? await getCompanyIdByInstanceId(instanceIdRaw) : null
-      const instanceIdResolved = instanceIdRaw ? instanceIdRaw.slice(0, 24) + (instanceIdRaw.length > 24 ? '…' : '') : '(empty)'
+      const raw = (body.instanceId != null ? String(body.instanceId) : body.instance_id != null ? String(body.instance_id) : body.instance != null ? String(body.instance) : '').trim()
+      company_id = raw ? await getCompanyIdByInstanceId(raw) : null
       _logWebhookSafe({ eventType: body.type || body.event || 'unknown', instanceId: instanceIdResolved, companyIdResolved: company_id != null ? company_id : 'not_mapped' })
       if (company_id == null) return res.status(200).json({ ok: true })
     }
@@ -866,9 +864,8 @@ exports.receberZapi = async (req, res) => {
             hasRealContent
           })
 
-          // Otimização: se não tem conteúdo real, verificar se a mensagem já foi salva pelo
-          // ReceivedCallback. Se sim, apenas atualizar status e emitir socket — evitar criar
-          // placeholder desnecessário e re-executar todo o pipeline.
+          // Regra: DeliveryCallback SEM conteúdo = APENAS status. Nunca inserir mensagem.
+          // Se a mensagem já existe (CRM enviou antes), atualiza status. Se não existe, ignora (não criar placeholder).
           if (!hasRealContent && delivMsgId) {
             const { data: existByWaId } = await supabase
               .from('mensagens')
@@ -887,7 +884,8 @@ exports.receberZapi = async (req, res) => {
               lastResult = { ok: true, delivery: true, fromMe: true, messageId: String(delivMsgId) }
               continue
             }
-            // Mensagem ainda não existe → segue para pipeline para registrar (espelhamento)
+            lastResult = { ok: true, delivery: true, fromMe: true, messageId: String(delivMsgId), skip: 'no_content_no_insert' }
+            continue
           }
           // NÃO faz continue → segue para pipeline de mensagem abaixo.
         } else {
@@ -931,6 +929,10 @@ exports.receberZapi = async (req, res) => {
                   .update({ telefone: canonical })
                   .eq('company_id', company_id)
                   .eq('id', convRow.id)
+                const io = req.app.get('io')
+                if (io) {
+                  io.to(`empresa_${company_id}`).emit('conversa_atualizada', { id: convRow.id, telefone: canonical })
+                }
               }
             }
           } catch (e) {
@@ -1521,6 +1523,8 @@ exports.receberZapi = async (req, res) => {
         payload?.quotedMsgId ??
         payload?.quotedMessageId ??
         payload?.quotedStanzaId ??
+        payload?.context?.messageId ??          // Z-API context (algumas versões)
+        payload?.context?.id ??
         payload?.contextInfo?.stanzaId ??
         payload?.contextInfo?.quotedStanzaId ??
         payload?.contextInfo?.quotedMessageId ??
@@ -1528,6 +1532,8 @@ exports.receberZapi = async (req, res) => {
         refMsg?.messageId ??
         payload?.message?.contextInfo?.stanzaId ??
         payload?.message?.contextInfo?.quotedStanzaId ??
+        payload?.message?.context?.messageId ??
+        payload?.message?.context?.id ??
         null
       const quotedId = quotedIdRaw ? String(quotedIdRaw).trim() : null
 

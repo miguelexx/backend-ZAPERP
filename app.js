@@ -86,8 +86,8 @@ const { webhookLimiter } = require('./middleware/rateLimit')
 
 app.use('/webhook', webhookLimiter, webhookRoutes)
 app.use('/webhook/meta', webhookLimiter, webhookRoutes)
-app.use('/webhooks/zapi', webhookZapiRoutes)
-app.use('/webhook/zapi', webhookZapiRoutes)
+app.use('/webhooks/zapi', webhookLimiter, webhookZapiRoutes)
+app.use('/webhook/zapi', webhookLimiter, webhookZapiRoutes)
 
 // =====================================================
 // CORS — aplicado APÓS os webhooks.

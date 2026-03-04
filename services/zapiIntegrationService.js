@@ -246,14 +246,15 @@ async function getCompanyIdByInstanceId(instanceId) {
     return null
   }
   if (data?.company_id != null) return Number(data.company_id)
-  // Fallback: match case-insensitive (compatibilidade)
-  const { data: d2 } = await supabase
+  // Fallback: match case-insensitive (SELECT company_id FROM empresa_zapi WHERE ativo=true AND LOWER(instance_id)=LOWER(id))
+  const { data: d2, error: e2 } = await supabase
     .from('empresa_zapi')
-    .select('company_id, instance_id')
+    .select('company_id')
     .eq('ativo', true)
-    .limit(20)
-  const found = Array.isArray(d2) ? d2.find(r => String(r.instance_id || '').toLowerCase() === id.toLowerCase()) : null
-  return found?.company_id != null ? Number(found.company_id) : null
+    .ilike('instance_id', id)
+    .maybeSingle()
+  if (!e2 && d2?.company_id != null) return Number(d2.company_id)
+  return null
 }
 
 module.exports = {
