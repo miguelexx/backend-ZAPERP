@@ -7,8 +7,9 @@
  * O servidor não inicia se ZAPI_WEBHOOK_TOKEN não estiver definido (ver index.js).
  *
  * Aceita o token via:
- *   1. Header  X-Webhook-Token: <token>   ← forma preferencial
- *   2. Query   ?token=<token>             ← compatibilidade Z-API (appenda na URL registrada)
+ *   1. Header  X-Webhook-Token: <token>   ← preferencial
+ *   2. Header  Authorization: Bearer <token>
+ *   3. Query   ?token=<token>             ← compatibilidade Z-API (appenda na URL)
  *
  * Logging: registra rejeições sem expor o valor do token recebido.
  * Diagnóstico: rejeições são gravadas no buffer _rejectedLog do webhookZapiController.
@@ -42,9 +43,11 @@ function requireWebhookToken(req, res, next) {
     return res.status(500).json({ error: 'Configuração de segurança do webhook inválida' })
   }
 
-  // req.get() em Express é case-insensitive; a versão capitalizada é apenas segurança extra.
+  const authHeader = req.get('Authorization') || ''
+  const bearerMatch = authHeader.match(/^Bearer\s+(.+)$/i)
+  const bearer = bearerMatch ? bearerMatch[1].trim() : ''
   const incoming = String(
-    req.get('X-Webhook-Token') || req.query?.token || ''
+    req.get('X-Webhook-Token') || bearer || req.query?.token || ''
   ).trim()
 
   const motivo = !incoming ? 'token_ausente' : 'token_invalido'

@@ -256,6 +256,52 @@ exports.getConnectStatus = async (req, res) => {
 }
 
 /**
+ * GET /debug-config — diagnóstico config (AUTH). Nunca retorna tokens.
+ */
+exports.debugConfig = async (req, res) => {
+  const company_id = req.user?.company_id
+  const configResult = await getEmpresaZapiConfig(company_id)
+  if (configResult.error) {
+    return res.json({
+      company_id: company_id ?? null,
+      hasInstance: false,
+      ativo: false,
+      instance_id: null,
+      tokensMasked: true
+    })
+  }
+  return res.json({
+    company_id,
+    hasInstance: true,
+    ativo: true,
+    instance_id: configResult.config?.instance_id ?? null,
+    tokensMasked: true
+  })
+}
+
+/**
+ * GET /debug-status — diagnóstico status (AUTH). Chama getStatus(company_id).
+ */
+exports.debugStatus = async (req, res) => {
+  const company_id = req.user?.company_id
+  const result = await getStatus(company_id)
+  if (result.error) {
+    return res.json({
+      connected: false,
+      smartphoneConnected: false,
+      needsRestore: false,
+      error: result.error
+    })
+  }
+  return res.json({
+    connected: !!result.connected,
+    smartphoneConnected: !!result.smartphoneConnected,
+    needsRestore: !!result.needsRestore,
+    error: null
+  })
+}
+
+/**
  * POST /phone-code — obtém código de verificação (10-13 dígitos BR).
  */
 exports.phoneCode = async (req, res) => {

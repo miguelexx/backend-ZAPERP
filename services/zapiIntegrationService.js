@@ -27,15 +27,14 @@ async function getEmpresaZapiConfig(company_id) {
     .from('empresa_zapi')
     .select('instance_id, instance_token, client_token, ativo')
     .eq('company_id', company_id)
+    .eq('ativo', true)
     .maybeSingle()
 
   if (error) {
     console.error('[ZAPI-INTEGRATION] Erro ao buscar empresa_zapi:', error.message)
     return { error: 'Erro ao buscar configuração Z-API da empresa' }
   }
-  if (!data || data.ativo === false) {
-    return { error: 'Empresa sem instância configurada' }
-  }
+  if (!data) return { error: 'Empresa sem instância configurada' }
   return { config: data }
 }
 
@@ -74,20 +73,24 @@ async function getStatus(company_id) {
     const needsRestore = bodyStr.includes('you need to restore the session') ||
       bodyStr.includes('restore the session')
     if (needsRestore) {
-      return { needsRestore: true }
+      return { needsRestore: true, connected: false, smartphoneConnected: false }
     }
+    const alreadyConnected = bodyStr.includes('already connected') || bodyStr.includes('you are already connected')
     if (!res.ok) {
       const msg = data?.error || data?.message || `HTTP ${res.status}`
+      if (alreadyConnected) {
+        return { connected: true, smartphoneConnected: true }
+      }
       console.warn('[ZAPI-INTEGRATION] Status erro (mascarado):', res.status)
       return { error: msg || 'Erro ao consultar status Z-API' }
     }
-    const connected = Boolean(data?.connected ?? data?.instance?.connected)
+    const connected = Boolean(data?.connected ?? data?.instance?.connected ?? alreadyConnected)
     const smartphoneConnected = Boolean(
       data?.smartphoneConnected ??
       data?.phone?.connected ??
       data?.instance?.smartphoneConnected
     )
-    return { connected, smartphoneConnected, raw: data }
+    return { connected, smartphoneConnected }
   } catch (e) {
     console.error('[ZAPI-INTEGRATION] Status exception:', e.message)
     return { error: 'Z-API fora do ar ou inacessível' }
@@ -116,13 +119,8 @@ async function getQrCodeImage(company_id) {
       return { error: data?.error || data?.message || 'Erro ao buscar QR Code' }
     }
     const imageBase64 =
-      data?.qrCodeBase64 ||
-      data?.image ||
-      data?.imageBase64 ||
-      null
-    if (!imageBase64) {
-      return { error: 'Resposta da Z-API sem imagem de QR Code' }
-    }
+      data?.qrCodeBase64 || data?.image || data?.imageBase64 || null
+    if (!imageBase64) return { error: 'Resposta da Z-API sem imagem de QR Code' }
     return { imageBase64 }
   } catch (e) {
     console.error('[ZAPI-INTEGRATION] QR exception:', e.message)

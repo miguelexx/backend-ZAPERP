@@ -110,6 +110,40 @@ exports.atualizar = async (req, res) => {
   }
 }
 
+/** POST /usuarios/resetar-senha-email — resetar senha por email (admin da empresa) */
+exports.resetarSenhaPorEmail = async (req, res) => {
+  try {
+    const { company_id, perfil } = req.user
+    const { email, nova_senha } = req.body
+    if (!email?.trim() || !nova_senha?.trim()) {
+      return res.status(400).json({ error: 'email e nova_senha são obrigatórios' })
+    }
+    if (nova_senha.length < 6) {
+      return res.status(400).json({ error: 'Senha deve ter no mínimo 6 caracteres' })
+    }
+    const emailNorm = String(email).trim().toLowerCase()
+    const hash = await bcrypt.hash(nova_senha, 10)
+    const { data: usuario, error: errFind } = await supabase
+      .from('usuarios')
+      .select('id')
+      .eq('email', emailNorm)
+      .eq('company_id', company_id)
+      .maybeSingle()
+    if (errFind) return res.status(500).json({ error: errFind.message })
+    if (!usuario) return res.status(404).json({ error: 'Usuário não encontrado nesta empresa' })
+    const { error } = await supabase
+      .from('usuarios')
+      .update({ senha_hash: hash })
+      .eq('id', usuario.id)
+      .eq('company_id', company_id)
+    if (error) return res.status(500).json({ error: error.message })
+    return res.json({ ok: true })
+  } catch (err) {
+    console.error(err)
+    return res.status(500).json({ error: 'Erro ao redefinir senha' })
+  }
+}
+
 /** POST /usuarios/:id/redefinir-senha — redefinir senha (admin) */
 exports.redefinirSenha = async (req, res) => {
   try {
@@ -181,41 +215,38 @@ exports.login = async (req, res) => {
       .eq('email', emailNorm)
       .maybeSingle()
 
-    // Não vazar se o usuário existe (padrão SaaS)
+    const isDev = String(process.env.NODE_ENV || '').toLowerCase() !== 'production'
+    function logDevLoginFail(reason) {
+      if (isDev) console.log('[LOGIN_DEV]', reason, '| email:', emailNorm?.slice(0, 20) + '***')
+    }
+
     if (error || !usuario) {
+      logDevLoginFail('user_not_found')
       return res.status(401).json({ error: 'Credenciais inválidas' })
     }
-
-    // Conta desativada: não revelar existência (padrão SaaS)
     if (usuario.ativo === false) {
+      logDevLoginFail('inactive')
       return res.status(401).json({ error: 'Credenciais inválidas' })
     }
 
-    // 🔎 Localiza corretamente a coluna de senha (compatível com vários padrões)
     const senhaBanco =
-      usuario.senha_hash ||
-      usuario.senha ||
-      usuario.password ||
-      usuario.pass
-
+      usuario.senha_hash || usuario.senha || usuario.password || usuario.pass
     if (!senhaBanco || typeof senhaBanco !== 'string') {
+      logDevLoginFail('hash_invalid')
       return res.status(401).json({ error: 'Credenciais inválidas' })
     }
-
-    // Valida que o hash é bcrypt válido (evita bugs tipo "$2b$10$$2b$10$..." corrompido)
     if (!senhaBanco.startsWith('$2')) {
+      logDevLoginFail('hash_invalid')
       return res.status(401).json({ error: 'Credenciais inválidas' })
     }
 
-    // Compara senha enviada com hash do banco
     const senhaOk = await bcrypt.compare(senha, senhaBanco)
-
     if (!senhaOk) {
+      logDevLoginFail('bcrypt_mismatch')
       return res.status(401).json({ error: 'Credenciais inválidas' })
     }
-
-    // Verifica se o usuário pertence a uma empresa
     if (!usuario.company_id) {
+      logDevLoginFail('no_company_id')
       return res.status(401).json({ error: 'Credenciais inválidas' })
     }
 

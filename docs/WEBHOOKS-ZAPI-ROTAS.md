@@ -13,6 +13,18 @@ Referência das rotas do backend e dos callbacks Z-API para manter o sistema com
 
 Obter todas as URLs: `GET /webhooks/zapi` retorna `urls` e `webhooks` para copiar no painel.
 
+### Token do webhook (obrigatório)
+
+Todas as URLs POST devem incluir o token. Aceito via:
+- Header `X-Webhook-Token: <token>`
+- Header `Authorization: Bearer <token>`
+- Query `?token=<token>` (ex: `{APP_URL}/webhooks/zapi?token=SEU_ZAPI_WEBHOOK_TOKEN`)
+
+### instanceId no payload
+
+O backend resolve `instanceId` → `company_id` via `empresa_zapi.instance_id` (case-insensitive).  
+Aceita: `body.instanceId`, `body.instance_id`, `body.instance?.id`, `body.instance` (string).
+
 ---
 
 ## 1. POST /webhooks/zapi (mensagens)

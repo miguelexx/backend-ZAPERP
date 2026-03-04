@@ -13,12 +13,12 @@ function _logSafe(entry) {
 }
 
 function extractInstanceId(body) {
-  const raw = (
-    body?.instanceId != null ? String(body.instanceId) :
-    body?.instance_id != null ? String(body.instance_id) :
-    body?.instance != null ? String(body.instance) : ''
-  ).trim()
-  return raw
+  if (!body || typeof body !== 'object') return ''
+  const v = body.instanceId ?? body.instance_id ?? body.instance
+  if (v == null) return ''
+  if (typeof v === 'object' && v != null && typeof v.id === 'string') return String(v.id).trim()
+  if (typeof v === 'object' && v != null && v.instance_id != null) return String(v.instance_id).trim()
+  return String(v).trim()
 }
 
 function inferEventType(body, path) {
@@ -46,7 +46,7 @@ async function resolveWebhookZapi(req, res, next) {
 
     req.zapiContext = { company_id, instanceId: instanceIdRaw, eventType }
     if (company_id == null) {
-      return res.status(200).json({ ok: true })
+      return res.status(200).json({ ok: true, ignored: 'instance_not_mapped' })
     }
     next()
   } catch (e) {

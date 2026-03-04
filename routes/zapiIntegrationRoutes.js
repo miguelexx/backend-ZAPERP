@@ -8,8 +8,9 @@ const zapiIntegrationController = require('../controllers/zapiIntegrationControl
 router.use(auth)
 router.use(apiLimiter)
 
-// Opcional: diagnóstico /me
 router.get('/me', zapiIntegrationController.getMe)
+router.get('/debug-config', zapiIntegrationController.debugConfig)
+router.get('/debug-status', zapiIntegrationController.debugStatus)
 
 // Status da instância para empresa logada
 router.get('/status', zapiIntegrationController.getStatus)
