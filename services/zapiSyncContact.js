@@ -12,16 +12,17 @@ const { normalizePhoneBR } = require('../helpers/phoneHelper')
  * nome = nome exibido no WhatsApp (pushname/notify ou name); foto_perfil = URL da foto.
  *
  * @param {string} phone - Telefone (será normalizado para só dígitos)
+ * @param {number} [companyId] - company_id para multi-tenant (obrigatório em produção)
  * @returns {Promise<{ nome: string|null, pushname: string|null, foto_perfil: string|null }|null>}
  */
-async function syncContactFromZapi(phone) {
+async function syncContactFromZapi(phone, companyId) {
   const provider = getProvider()
   if (!provider || !provider.getContactMetadata || !provider.isConfigured) return null
+  const opts = companyId != null ? { companyId } : {}
 
-  // Paraleliza para ficar mais rápido e reduzir tempo total de sync por contato
   const [metadata, profilePicUrl] = await Promise.all([
-    provider.getContactMetadata(phone).catch(() => null),
-    provider.getProfilePicture(phone).catch(() => null)
+    provider.getContactMetadata(phone, opts).catch(() => null),
+    provider.getProfilePicture(phone, opts).catch(() => null)
   ])
 
    // Se não conseguimos nenhum dado (nem metadata, nem foto), não altere o banco (evita sobrescrever nomes por falha de rede).

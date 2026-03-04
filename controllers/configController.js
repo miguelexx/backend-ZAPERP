@@ -200,7 +200,8 @@ exports.updateWhatsappProfilePicture = async (req, res) => {
     if (!provider?.updateProfilePicture) {
       return res.status(503).json({ error: 'Provedor não suporta atualização de foto de perfil.' })
     }
-    const ok = await provider.updateProfilePicture(value.trim())
+    const company_id = req.user?.company_id
+    const ok = await provider.updateProfilePicture(value.trim(), { companyId: company_id })
     if (!ok) return res.status(502).json({ error: 'Z-API retornou falha ao atualizar foto de perfil.' })
     return res.json({ ok: true, value: true })
   } catch (err) {
@@ -223,7 +224,8 @@ exports.updateWhatsappProfileName = async (req, res) => {
     if (!provider?.updateProfileName) {
       return res.status(503).json({ error: 'Provedor não suporta atualização de nome de perfil.' })
     }
-    const ok = await provider.updateProfileName(value.trim())
+    const company_id = req.user?.company_id
+    const ok = await provider.updateProfileName(value.trim(), { companyId: company_id })
     if (!ok) return res.status(502).json({ error: 'Z-API retornou falha ao atualizar nome de perfil.' })
     return res.json({ ok: true, value: true })
   } catch (err) {
@@ -247,7 +249,8 @@ exports.updateWhatsappProfileDescription = async (req, res) => {
     if (!provider?.updateProfileDescription) {
       return res.status(503).json({ error: 'Provedor não suporta atualização de descrição de perfil.' })
     }
-    const ok = await provider.updateProfileDescription(desc)
+    const company_id = req.user?.company_id
+    const ok = await provider.updateProfileDescription(desc, { companyId: company_id })
     if (!ok) return res.status(502).json({ error: 'Z-API retornou falha ao atualizar descrição de perfil.' })
     return res.json({ ok: true, value: true })
   } catch (err) {

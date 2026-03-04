@@ -191,21 +191,6 @@ const PORT = process.env.PORT || 3000
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`Servidor HTTP + WebSocket rodando na porta ${PORT}`)
 
-  // ─── Auto-configuração dos webhooks Z-API no startup ───
-  // Garante que as URLs de callback (mensagens, entrega, status, conexão) estejam
-  // registradas na instância Z-API logo após o servidor subir.
-  const appUrl = process.env.APP_URL || ''
-  if (appUrl && process.env.WHATSAPP_PROVIDER === 'zapi') {
-    setImmediate(async () => {
-      try {
-        const { getProvider } = require('./services/providers')
-        const provider = getProvider()
-        if (provider && provider.isConfigured && provider.configureWebhooks) {
-          await provider.configureWebhooks(appUrl)
-        }
-      } catch (e) {
-        console.warn('⚠️ Startup: erro ao configurar webhooks Z-API:', e.message)
-      }
-    })
-  }
+  // Multi-tenant: webhooks são configurados por empresa ao conectar (connectionZapi).
+  // Não há mais instância única em ENV para configurar no startup.
 })

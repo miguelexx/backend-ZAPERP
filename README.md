@@ -36,8 +36,8 @@ Resumo: `git pull` → `npm install` no backend e no frontend → `npm run build
 - [ ] `CORS_ORIGINS` = URL do frontend (separadas por vírgula se houver mais de uma)
 - [ ] `JWT_SECRET` forte (ex.: `openssl rand -hex 32`)
 - [ ] Supabase: `SUPABASE_URL` e `SUPABASE_SERVICE_ROLE_KEY`
-- [ ] Z-API: `ZAPI_INSTANCE_ID`, `ZAPI_TOKEN`, `ZAPI_CLIENT_TOKEN`, `ZAPI_WEBHOOK_TOKEN`
-- [ ] No painel Z-API, configurar webhooks (Ao receber, Ao enviar, Status, Conexão) com a URL: `{APP_URL}/webhooks/zapi`
+- [ ] Z-API: `ZAPI_BASE_URL`, `ZAPI_WEBHOOK_TOKEN` (credenciais por empresa em `empresa_zapi`, nunca em ENV)
+- [ ] Webhooks Z-API configurados automaticamente por instância ao conectar (ou manualmente no painel)
 - [ ] Proxy reverso (Nginx/Cloudflare) com `TRUST_PROXY=1` se usar
 - [ ] Remover ou não expor `/debug/env` em produção (já desativado quando `NODE_ENV=production`)
 

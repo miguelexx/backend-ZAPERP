@@ -10,11 +10,12 @@
 const supabase = require('../config/supabase')
 const { getProvider } = require('../services/providers')
 const { syncContactFromZapi } = require('../services/zapiSyncContact')
+const { getCompanyIdByInstanceId } = require('../services/zapiIntegrationService')
 const { normalizePhoneBR, possiblePhonesBR, normalizeGroupIdForStorage } = require('../helpers/phoneHelper')
 const { getCanonicalPhone, findOrCreateConversation, mergeConversasIntoCanonico } = require('../helpers/conversationSync')
 const { incrementarUnreadParaConversa, marcarConversaComoLidaParaTodos } = require('./chatController')
 
-const COMPANY_ID = Number(process.env.WEBHOOK_COMPANY_ID || 1)
+// company_id NUNCA mais via ENV — resolvido por instanceId do payload em cada webhook
 const WHATSAPP_DEBUG = String(process.env.WHATSAPP_DEBUG || '').toLowerCase() === 'true'
 
 // Buffer em memória das últimas 30 requisições webhook recebidas (diagnóstico)
@@ -528,10 +529,10 @@ exports.debugZapi = (req, res) => {
     ok: true,
     servidor: {
       app_url: appUrl || '(não definido)',
-      zapi_instance_id: String(process.env.ZAPI_INSTANCE_ID || '').slice(0, 8) + '...',
+      zapi_instance_id: '(multi-tenant via empresa_zapi)',
       webhook_token_configurado: !!token,
       whatsapp_debug: WHATSAPP_DEBUG,
-      company_id: COMPANY_ID,
+      company_id: '(multi-tenant por instanceId)',
     },
     urls_esperadas: {
       recebidas: `${appUrl}/webhooks/zapi${tokenSuffix}`,
@@ -552,6 +553,14 @@ exports.debugZapi = (req, res) => {
 exports.receberZapi = async (req, res) => {
   try {
     const body = req.body || {}
+
+    // Multi-tenant: resolve company_id pelo instanceId do payload
+    const instanceId = body.instanceId != null ? String(body.instanceId).trim() : ''
+    let company_id = instanceId ? await getCompanyIdByInstanceId(instanceId) : null
+    if (company_id == null) {
+      if (instanceId) console.log('[Z-API] instance not mapped:', instanceId.slice(0, 16) + '…')
+      return res.status(200).json({ ok: true })
+    }
 
     // Log SEMPRE — essencial para diagnóstico em produção
     const bodyPreview = {
@@ -603,7 +612,7 @@ exports.receberZapi = async (req, res) => {
         const { data, error } = await supabase
           .from('conversas')
           .update({ foto_grupo: rawGroupPhoto })
-          .eq('company_id', COMPANY_ID)
+          .eq('company_id', company_id)
           .in('telefone', [groupIdForStorage, rawGroupId])
           .select('id')
 
@@ -624,7 +633,7 @@ exports.receberZapi = async (req, res) => {
           const io = req.app.get('io')
           if (io) {
             for (const row of data) {
-              io.to(`empresa_${COMPANY_ID}`).emit('conversa_atualizada', {
+              io.to(`empresa_${company_id}`).emit('conversa_atualizada', {
                 id: row.id,
                 foto_grupo: rawGroupPhoto
               })
@@ -685,7 +694,7 @@ exports.receberZapi = async (req, res) => {
         const { data: msg } = await supabase
           .from('mensagens')
           .update({ status: statusNorm })
-          .eq('company_id', COMPANY_ID)
+          .eq('company_id', company_id)
           .eq('whatsapp_id', String(waId))
           .select('id, conversa_id, company_id')
           .maybeSingle()
@@ -764,11 +773,11 @@ exports.receberZapi = async (req, res) => {
           console.log(`✅ Z-API status ${statusNorm.toUpperCase()} → msg ${msg.id} (conversa ${msg.conversa_id})`)
           // Visualizou no celular (read/played): zera notificação de mensagem nova no sistema para todos
           if (statusNorm === 'read' || statusNorm === 'played') {
-            await marcarConversaComoLidaParaTodos(COMPANY_ID, msg.conversa_id)
+            await marcarConversaComoLidaParaTodos(company_id, msg.conversa_id)
             const io = req.app.get('io')
             if (io) {
-              io.to(`empresa_${COMPANY_ID}`).emit('atualizar_conversa', { id: msg.conversa_id })
-              io.to(`empresa_${COMPANY_ID}`).emit('mensagens_lidas', { conversa_id: msg.conversa_id })
+              io.to(`empresa_${company_id}`).emit('atualizar_conversa', { id: msg.conversa_id })
+              io.to(`empresa_${company_id}`).emit('mensagens_lidas', { conversa_id: msg.conversa_id })
             }
           }
         } else {
@@ -809,7 +818,7 @@ exports.receberZapi = async (req, res) => {
             const { data: existByWaId } = await supabase
               .from('mensagens')
               .update({ status: 'sent' })
-              .eq('company_id', COMPANY_ID)
+              .eq('company_id', company_id)
               .eq('whatsapp_id', String(delivMsgId))
               .select('id, conversa_id, company_id')
               .maybeSingle()
@@ -827,7 +836,6 @@ exports.receberZapi = async (req, res) => {
           }
           // NÃO faz continue → segue para pipeline de mensagem abaixo.
         } else {
-        const company_id = COMPANY_ID
         const phoneDestRaw = payload?.phone ?? payload?.to ?? payload?.destination ?? ''
         const phoneDest = normalizePhoneBR(phoneDestRaw) || String(phoneDestRaw || '').replace(/\D/g, '')
         const messageId = payload?.messageId ?? payload?.zaapId ?? null
@@ -1017,7 +1025,6 @@ exports.receberZapi = async (req, res) => {
         continue
       }
 
-    const company_id = COMPANY_ID
     if (isGroup) {
       console.log('📩 Z-API [GRUPO]', phone, nomeGrupo || '', fromMe ? '(de mim)' : `(${senderName || participantPhone || 'participante'})`, texto?.slice(0, 50))
     } else {
@@ -1334,7 +1341,7 @@ exports.receberZapi = async (req, res) => {
         const isGroupForHistory = isGroup
         setImmediate(async () => {
           try {
-            const history = await provider.getChatMessages(phoneForHistory, 25, null).catch(() => [])
+            const history = await provider.getChatMessages(phoneForHistory, 25, null, { companyId: company_id }).catch(() => [])
             if (!Array.isArray(history) || history.length === 0) return
 
             // Inserir do mais antigo para o mais novo (ordem natural).
@@ -1645,7 +1652,7 @@ exports.receberZapi = async (req, res) => {
                   // sync em background (nome/foto reais)
                   setImmediate(async () => {
                     try {
-                      const sync = await syncContactFromZapi(pNorm).catch(() => null)
+                      const sync = await syncContactFromZapi(pNorm, company_id).catch(() => null)
                       if (!sync) return
                       const up = {}
                       if (sync.nome) up.nome = sync.nome
@@ -1813,7 +1820,7 @@ exports.receberZapi = async (req, res) => {
       const syncPhone = pendingContactSync.phone
       const convId = conversa_id
       setImmediate(() => {
-        syncContactFromZapi(syncPhone)
+        syncContactFromZapi(syncPhone, company_id)
           .then((synced) => {
             if (!synced) return null
             const up = {}
@@ -1914,7 +1921,16 @@ exports.statusZapi = async (req, res) => {
       return res.status(200).json({ ok: true })
     }
 
-    const company_id = COMPANY_ID
+    // Multi-tenant: instanceId do payload ou deriva da mensagem (whatsapp_id)
+    let company_id = await getCompanyIdByInstanceId(body?.instanceId)
+    if (company_id == null && idsToProcess.length > 0) {
+      const { data: msgRow } = await supabase.from('mensagens').select('company_id').eq('whatsapp_id', idsToProcess[0]).limit(1).maybeSingle()
+      company_id = msgRow?.company_id ?? null
+    }
+    if (company_id == null) {
+      if (body?.instanceId) console.log('[Z-API] status: instance not mapped:', String(body.instanceId).slice(0, 16) + '…')
+      return res.status(200).json({ ok: true })
+    }
     const io = req.app.get('io')
     let updated = 0
 
@@ -1983,10 +1999,10 @@ exports.connectionZapi = async (req, res) => {
     const payload = req.body || {}
     console.log('🔌 Z-API connection:', payload?.event ?? payload?.status ?? payload)
 
-    const expectedInstanceId = String(process.env.ZAPI_INSTANCE_ID || '').trim()
     const incomingInstanceId = payload?.instanceId != null ? String(payload.instanceId).trim() : ''
-    if (expectedInstanceId && incomingInstanceId && incomingInstanceId !== expectedInstanceId) {
-      console.warn('⚠️ Z-API connection: instanceId diferente do .env; ignorando sync.', incomingInstanceId)
+    const company_id = incomingInstanceId ? await getCompanyIdByInstanceId(incomingInstanceId) : null
+    if (company_id == null) {
+      if (incomingInstanceId) console.log('[Z-API] connection: instance not mapped:', incomingInstanceId.slice(0, 16) + '…')
       return res.status(200).json({ ok: true })
     }
 
@@ -1996,7 +2012,6 @@ exports.connectionZapi = async (req, res) => {
     // Ao conectar: dispara sync em background (espelho do WhatsApp: nomes + (se possível) fotos)
     if (connected) {
       setImmediate(async () => {
-        const company_id = COMPANY_ID
         const io = req.app.get('io')
         const provider = getProvider()
         if (!provider || !provider.isConfigured) return
@@ -2007,7 +2022,7 @@ exports.connectionZapi = async (req, res) => {
         const appUrl = process.env.APP_URL || ''
         if (appUrl && provider.configureWebhooks) {
           try {
-            await provider.configureWebhooks(appUrl)
+            await provider.configureWebhooks(appUrl, { companyId: company_id })
           } catch (e) {
             console.warn('⚠️ Z-API: erro ao configurar webhooks automaticamente:', e.message)
           }
@@ -2050,7 +2065,7 @@ exports.connectionZapi = async (req, res) => {
           let fotosAtualizadas = 0
 
           while (true) {
-            const contacts = await provider.getContacts(page, pageSize)
+            const contacts = await provider.getContacts(page, pageSize, { companyId: company_id })
             if (!Array.isArray(contacts) || contacts.length === 0) break
 
             for (const c of contacts) {
@@ -2132,7 +2147,7 @@ exports.connectionZapi = async (req, res) => {
               const tel = String(cl.telefone || '').trim()
               if (!tel) continue
               try {
-                const url = await provider.getProfilePicture(tel)
+                const url = await provider.getProfilePicture(tel, { companyId: company_id })
                 if (url && String(url).trim().startsWith('http')) {
                   const { error: updErr } = await supabase
                     .from('clientes')
@@ -2178,12 +2193,16 @@ exports.connectionZapi = async (req, res) => {
 exports.presenceZapi = async (req, res) => {
   try {
     const body = req.body || {}
+    const instanceId = body.instanceId != null ? String(body.instanceId).trim() : ''
+    const company_id = instanceId ? await getCompanyIdByInstanceId(instanceId) : null
+    if (company_id == null) {
+      if (instanceId) console.log('[Z-API] presence: instance not mapped:', instanceId.slice(0, 16) + '…')
+      return res.status(200).json({ ok: true })
+    }
     const phoneRaw = body.phone ? String(body.phone).trim() : ''
     const status = body.status ? String(body.status).trim().toUpperCase() : ''
-    const lastSeen = body.lastSeen != null ? body.lastSeen : null
 
     if (phoneRaw && status) {
-      const company_id = COMPANY_ID
       const phones = possiblePhonesBR(phoneRaw)
       let q = supabase
         .from('conversas')

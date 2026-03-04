@@ -155,16 +155,14 @@ async function restartInstance(company_id) {
 /**
  * Mapeia resposta Z-API /me para meSummary (sem tokens).
  */
+/**
+ * meSummary sem tokens nem URLs que possam conter tokens.
+ * Apenas dados básicos: id, name, due, paymentStatus, connected, phone.
+ */
 function buildMeSummary(raw) {
   if (!raw || typeof raw !== 'object') return null
+  const safe = ['id', 'name', 'due', 'paymentStatus', 'connected', 'phone']
   const s = {}
-  const safe = [
-    'id', 'name', 'due', 'paymentStatus', 'connected', 'phone',
-    'connectedCallbackUrl', 'deliveryCallbackUrl', 'disconnectedCallbackUrl',
-    'messageStatusCallbackUrl', 'presenceChatCallbackUrl', 'receivedCallbackUrl',
-    'initialDataCallbackUrl',
-    'receiveCallbackSentByMe', 'callRejectAuto', 'callRejectMessage', 'autoReadMessage'
-  ]
   for (const k of safe) {
     if (Object.prototype.hasOwnProperty.call(raw, k)) s[k] = raw[k]
   }
@@ -227,6 +225,30 @@ async function getPhoneCode(company_id, phone) {
   }
 }
 
+/**
+ * Resolve company_id pelo instanceId do payload Z-API (webhooks).
+ * Usado quando recebemos callbacks sem contexto de usuário autenticado.
+ *
+ * @param {string} instanceId - instance_id do payload (body.instanceId)
+ * @returns {Promise<number|null>} company_id ou null se não mapeado
+ */
+async function getCompanyIdByInstanceId(instanceId) {
+  if (!instanceId || typeof instanceId !== 'string') return null
+  const id = String(instanceId).trim()
+  if (!id) return null
+  const { data, error } = await supabase
+    .from('empresa_zapi')
+    .select('company_id')
+    .eq('instance_id', id)
+    .eq('ativo', true)
+    .maybeSingle()
+  if (error) {
+    console.error('[ZAPI-INTEGRATION] Erro ao buscar company_id por instance_id:', error.message)
+    return null
+  }
+  return data?.company_id != null ? Number(data.company_id) : null
+}
+
 module.exports = {
   getStatus,
   getQrCodeImage,
@@ -235,6 +257,7 @@ module.exports = {
   getPhoneCode,
   buildMeSummary,
   getEmpresaZapiConfig,
+  getCompanyIdByInstanceId,
   fetchWithTimeout,
 }
 

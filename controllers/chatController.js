@@ -751,6 +751,7 @@ exports.mergeConversasDuplicadas = async (req, res) => {
 // =====================================================
 exports.zapiStatus = async (req, res) => {
   try {
+    const company_id = req.user?.company_id
     const provider = getProvider()
     if (!provider || !provider.isConfigured) {
       return res.json({ ok: true, configured: false, connected: false, message: 'Z-API não configurado no servidor.' })
@@ -758,7 +759,7 @@ exports.zapiStatus = async (req, res) => {
     if (typeof provider.getConnectionStatus !== 'function') {
       return res.json({ ok: true, configured: true, connected: null, message: 'Verificação de status não disponível nesta versão.' })
     }
-    const status = await provider.getConnectionStatus()
+    const status = await provider.getConnectionStatus({ companyId: company_id })
     return res.json({ ok: true, ...status })
   } catch (err) {
     console.error('zapiStatus:', err)
@@ -784,7 +785,7 @@ exports.sincronizarContatosZapi = async (req, res) => {
     let criados = 0
 
     while (true) {
-      const contacts = await provider.getContacts(page, pageSize)
+      const contacts = await provider.getContacts(page, pageSize, { companyId: company_id })
       if (!Array.isArray(contacts) || contacts.length === 0) break
 
       for (const c of contacts) {
@@ -955,8 +956,8 @@ exports.sincronizarFotosPerfilZapi = async (req, res) => {
         const missingFoto = !fotoDb || fotoDb.toLowerCase() === 'null' || fotoDb.toLowerCase() === 'undefined'
 
         const [meta, fotoUrl] = await Promise.all([
-          provider.getContactMetadata ? provider.getContactMetadata(phone) : Promise.resolve(null),
-          provider.getProfilePicture ? provider.getProfilePicture(phone) : Promise.resolve(null)
+          provider.getContactMetadata ? provider.getContactMetadata(phone, { companyId: cid }) : Promise.resolve(null),
+          provider.getProfilePicture ? provider.getProfilePicture(phone, { companyId: cid }) : Promise.resolve(null)
         ])
 
         const metaNome = String(meta?.name || meta?.short || meta?.notify || meta?.vname || '').trim()
@@ -1507,7 +1508,7 @@ exports.detalharChat = async (req, res) => {
         setImmediate(async () => {
           try {
             const { syncContactFromZapi } = require('../services/zapiSyncContact')
-            const synced = await syncContactFromZapi(cliPhone)
+            const synced = await syncContactFromZapi(cliPhone, cid)
             if (!synced) return
             const updates = {}
             if (synced.foto_perfil && String(synced.foto_perfil).startsWith('http')) {
@@ -2028,9 +2029,9 @@ exports.enviarMensagemChat = async (req, res) => {
             linkUrl: linkUrlStr,
             title: String(link.title || '').trim() || linkUrlStr,
             linkDescription: String(link.linkDescription || link.description || '').trim() || messageToSend,
-          })
+          }, { companyId: company_id })
         } else {
-          result = await provider.sendText(conversa.telefone, String(texto).trim(), { phoneId: phoneId || undefined, replyMessageId: replyMessageId || undefined })
+          result = await provider.sendText(conversa.telefone, String(texto).trim(), { companyId: company_id, phoneId: phoneId || undefined, replyMessageId: replyMessageId || undefined })
         }
         const ok = typeof result === 'boolean' ? result : result?.ok === true
         const waMessageId = typeof result === 'object' && result?.messageId ? String(result.messageId).trim() : null
@@ -2122,7 +2123,7 @@ exports.enviarReacaoMensagem = async (req, res) => {
       return res.status(500).json({ error: 'Provider WhatsApp não suporta reações' })
     }
 
-    const ok = await provider.sendReaction(conversa.telefone, msg.whatsapp_id, String(reaction).trim())
+    const ok = await provider.sendReaction(conversa.telefone, msg.whatsapp_id, String(reaction).trim(), { companyId: company_id })
     if (!ok) {
       return res.status(502).json({ error: 'Falha ao enviar reação para o WhatsApp' })
     }
@@ -2172,7 +2173,7 @@ exports.removerReacaoMensagem = async (req, res) => {
       return res.status(500).json({ error: 'Provider WhatsApp não suporta remoção de reação' })
     }
 
-    const ok = await provider.removeReaction(conversa.telefone, msg.whatsapp_id)
+    const ok = await provider.removeReaction(conversa.telefone, msg.whatsapp_id, { companyId: company_id })
     if (!ok) {
       return res.status(502).json({ error: 'Falha ao remover reação no WhatsApp' })
     }
@@ -2260,6 +2261,7 @@ exports.enviarContatoWhatsapp = async (req, res) => {
 
     // envia contato via Z-API
     const result = await provider.sendContact(conversa.telefone, contactName, contactPhone, {
+      companyId: company_id,
       messageId: messageId || undefined,
     })
     const ok = typeof result === 'boolean' ? result : result?.ok === true
@@ -2343,7 +2345,7 @@ exports.enviarLigacaoWhatsapp = async (req, res) => {
       return res.status(500).json({ error: 'Provider WhatsApp não suporta ligações' })
     }
 
-    const result = await provider.sendCall(conversa.telefone, safeDur)
+    const result = await provider.sendCall(conversa.telefone, safeDur, { companyId: company_id })
     const ok = typeof result === 'boolean' ? result : result?.ok === true
     const waMessageId =
       typeof result === 'object' && result?.messageId ? String(result.messageId).trim() : null
@@ -2835,17 +2837,18 @@ exports.enviarArquivo = async (req, res) => {
     if (conversa?.telefone && fullUrl && !isLocalhost) {
       const provider = getProvider()
       const phone = conversa.telefone
+      const opts = { companyId: company_id }
       const promise =
         tipo === 'audio' && provider.sendAudio
-          ? provider.sendAudio(phone, fullUrl)
+          ? provider.sendAudio(phone, fullUrl, opts)
           : tipo === 'sticker' && provider.sendSticker
-            ? provider.sendSticker(phone, fullUrl, { stickerAuthor: 'ZapERP' })
+            ? provider.sendSticker(phone, fullUrl, { ...opts, stickerAuthor: 'ZapERP' })
           : tipo === 'imagem' && provider.sendImage
-            ? provider.sendImage(phone, fullUrl, '')
+            ? provider.sendImage(phone, fullUrl, '', opts)
             : tipo === 'video' && provider.sendVideo
-              ? provider.sendVideo(phone, fullUrl, '')
+              ? provider.sendVideo(phone, fullUrl, '', opts)
               : provider.sendFile
-                ? provider.sendFile(phone, fullUrl, file.originalname || '')
+                ? provider.sendFile(phone, fullUrl, file.originalname || '', opts)
                 : Promise.resolve(false)
       promise
         .then((ok) => {

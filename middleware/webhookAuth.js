@@ -40,18 +40,12 @@ function verifyMetaSignature(req, res, next) {
   return next()
 }
 
+/**
+ * Multi-tenant: não rejeitamos por instanceId aqui.
+ * O controller resolve company_id por instanceId em empresa_zapi.
+ * Se não mapeado, retorna 200 e loga "instance not mapped".
+ */
 function rejectWrongZapiInstance(req, res, next) {
-  const expected = String(process.env.ZAPI_INSTANCE_ID || '').trim()
-  if (!expected) return next()
-  const incoming = req.body?.instanceId != null ? String(req.body.instanceId).trim() : ''
-  // se não veio instanceId, não bloqueia (alguns eventos não mandam)
-  if (!incoming) return next()
-  // Aceita: igual OU payload com ID longo que começa com o esperado (ex.: .env "3EE81ED18926" e payload "3EE81ED189267279CB31EA4E62592653")
-  const match = incoming === expected || incoming.startsWith(expected) || expected.startsWith(incoming)
-  if (!match) {
-    console.warn('[Z-API] Webhook ignorado: instanceId diferente do .env', { incoming: incoming.slice(0, 20), expected: expected.slice(0, 20) })
-    return res.status(200).json({ ok: true })
-  }
   return next()
 }
 

@@ -2,28 +2,50 @@
  * Provider Z-API (WhatsApp via conexão QR Code).
  * Envio via REST; recebimento via webhook POST /webhooks/zapi.
  *
- * Variáveis .env obrigatórias para envio:
- *   ZAPI_INSTANCE_ID, ZAPI_TOKEN, ZAPI_CLIENT_TOKEN
- * Opcionais: ZAPI_BASE_URL, APP_URL (mídia)
+ * Multi-tenant: credenciais vêm de empresa_zapi por company_id.
+ * ENV ZAPI_INSTANCE_ID/ZAPI_TOKEN/ZAPI_CLIENT_TOKEN = fallback opcional só em DEV.
+ * Em produção, usar ENV para instância fixa causa erro "multi-tenant required".
+ *
+ * Mantido: ZAPI_BASE_URL, ZAPI_WEBHOOK_TOKEN
  */
 
 const { normalizePhoneBR, toZapiSendFormat, possiblePhonesBR } = require('../../helpers/phoneHelper')
+const { getEmpresaZapiConfig } = require('../zapiIntegrationService')
 
+const ZAPI_BASE_URL = (process.env.ZAPI_BASE_URL || 'https://api.z-api.io').replace(/\/$/, '')
 const ZAPI_INSTANCE_ID = process.env.ZAPI_INSTANCE_ID || ''
 const ZAPI_TOKEN = process.env.ZAPI_TOKEN || ''
-const ZAPI_BASE_URL = (process.env.ZAPI_BASE_URL || 'https://api.z-api.io').replace(/\/$/, '')
 const ZAPI_CLIENT_TOKEN = (process.env.ZAPI_CLIENT_TOKEN || '').trim()
+const IS_PRODUCTION = String(process.env.NODE_ENV || '').toLowerCase() === 'production'
 
-function getBasePath() {
+/**
+ * Resolve config (basePath, headers) para chamadas à Z-API.
+ * Prioridade: opts.companyId → empresa_zapi | fallback ENV (só se NODE_ENV !== production).
+ * @param {{ companyId?: number }} [opts]
+ * @returns {Promise<{ basePath: string, headers: object }|null>}
+ */
+async function resolveConfig(opts = {}) {
+  const companyId = opts?.companyId ?? opts?.company_id
+  if (companyId != null && companyId !== '') {
+    const { config, error } = await getEmpresaZapiConfig(Number(companyId))
+    if (error || !config) return null
+    const base = ZAPI_BASE_URL
+    const basePath = `${base}/instances/${encodeURIComponent(config.instance_id)}/token/${encodeURIComponent(config.instance_token)}`
+    const headers = { 'Content-Type': 'application/json' }
+    if (config.client_token) headers['Client-Token'] = config.client_token
+    return { basePath, headers }
+  }
+  if (IS_PRODUCTION && (ZAPI_INSTANCE_ID || ZAPI_TOKEN)) {
+    console.error('[ZAPI] multi-tenant required: use empresa_zapi por company_id. ZAPI_INSTANCE_ID/ZAPI_TOKEN em ENV são ignorados em produção.')
+    return null
+  }
   if (!ZAPI_INSTANCE_ID || !ZAPI_TOKEN) return null
-  return `${ZAPI_BASE_URL}/instances/${ZAPI_INSTANCE_ID}/token/${ZAPI_TOKEN}`
-}
-
-function getHeaders() {
+  const basePath = `${ZAPI_BASE_URL}/instances/${encodeURIComponent(ZAPI_INSTANCE_ID)}/token/${encodeURIComponent(ZAPI_TOKEN)}`
   const headers = { 'Content-Type': 'application/json' }
   if (ZAPI_CLIENT_TOKEN) headers['Client-Token'] = ZAPI_CLIENT_TOKEN
-  return headers
+  return { basePath, headers }
 }
+
 
 function logClientTokenHint(errBody) {
   const body = String(errBody || '').toLowerCase()
@@ -80,21 +102,19 @@ function phoneCandidatesForSend(phone) {
 const GROUP_SEND_CACHE_TTL_MS = 6 * 60 * 60 * 1000 // 6h
 const groupSendCache = new Map() // digits -> { exp: number, candidates: string[] }
 
-async function getGroupMetadata(groupId) {
-  const basePath = getBasePath()
-  if (!basePath) return null
+async function getGroupMetadata(groupId, cfg) {
+  if (!cfg?.basePath) return null
   const gid = String(groupId || '').trim()
   if (!gid) return null
   try {
-    // docs têm inconsistência (GET vs POST). Tentamos ambos.
-    let res = await fetch(`${basePath}/group-metadata/${encodeURIComponent(gid)}`, {
+    let res = await fetch(`${cfg.basePath}/group-metadata/${encodeURIComponent(gid)}`, {
       method: 'GET',
-      headers: getHeaders()
+      headers: cfg.headers
     })
     if (!res.ok && (res.status === 405 || res.status === 404)) {
-      res = await fetch(`${basePath}/group-metadata/${encodeURIComponent(gid)}`, {
+      res = await fetch(`${cfg.basePath}/group-metadata/${encodeURIComponent(gid)}`, {
         method: 'POST',
-        headers: getHeaders()
+        headers: cfg.headers
       })
     }
     if (!res.ok) return null
@@ -105,36 +125,38 @@ async function getGroupMetadata(groupId) {
   }
 }
 
-async function phoneCandidatesForSendAsync(phone) {
+async function phoneCandidatesForSendAsync(phone, cfg) {
   const base = phoneCandidatesForSend(phone)
   const raw = String(phone || '').trim()
   const digits = raw.replace(/\D/g, '')
   if (!isGroupIdDigits(digits)) return base
+  if (!cfg) return base
 
   const now = Date.now()
-  const cached = groupSendCache.get(digits)
+  const cacheKey = `${cfg.basePath?.slice(0, 20) || ''}:${digits}`
+  const cached = groupSendCache.get(cacheKey)
   if (cached && cached.exp > now && Array.isArray(cached.candidates) && cached.candidates.length) {
     return cached.candidates
   }
 
-  // confirma/resolve via group-metadata (formato preferido "-group")
   const meta =
-    (await getGroupMetadata(`${digits}-group`).catch(() => null)) ||
-    (await getGroupMetadata(digits).catch(() => null)) ||
-    (await getGroupMetadata(`${digits}@g.us`).catch(() => null))
+    (await getGroupMetadata(`${digits}-group`, cfg).catch(() => null)) ||
+    (await getGroupMetadata(digits, cfg).catch(() => null)) ||
+    (await getGroupMetadata(`${digits}@g.us`, cfg).catch(() => null))
 
   const canonical = meta?.phone ? String(meta.phone).trim() : ''
   const candidates = canonical ? Array.from(new Set([canonical, ...base])) : base
-  groupSendCache.set(digits, { exp: now + GROUP_SEND_CACHE_TTL_MS, candidates })
+  groupSendCache.set(cacheKey, { exp: now + GROUP_SEND_CACHE_TTL_MS, candidates })
   return candidates
 }
 
-async function postJsonWithCandidates({ basePath, endpoint, phoneCandidates, buildBody, okLogLabel }) {
+async function postJsonWithCandidates({ basePath, headers, endpoint, phoneCandidates, buildBody, okLogLabel }) {
+  const h = headers || {}
   for (const num of phoneCandidates) {
     try {
       const res = await fetch(`${basePath}${endpoint}`, {
         method: 'POST',
-        headers: getHeaders(),
+        headers: h,
         body: JSON.stringify(buildBody(num))
       })
 
@@ -180,14 +202,14 @@ function phoneCandidatesForLookup(phone) {
  * Envia mensagem de texto.
  * @param {string} phone - Número no formato DDI+DDD+NUMERO (apenas dígitos ou será normalizado)
  * @param {string} message - Texto da mensagem
- * @param {{ phoneId?: string, replyMessageId?: string }} [opts] - Opções extras
- *   replyMessageId: ID Z-API da mensagem que está sendo respondida (para reply nativo no WhatsApp)
- * @returns {Promise<{ ok: boolean, messageId: string|null }>} ok e messageId (quando disponível)
+ * @param {{ phoneId?: string, replyMessageId?: string, companyId?: number }} [opts] - Opções
+ *   companyId: obrigatório em produção (multi-tenant)
+ * @returns {Promise<{ ok: boolean, messageId: string|null }>}
  */
 async function sendText(phone, message, opts = {}) {
-  const basePath = getBasePath()
-  if (!basePath) return { ok: false, messageId: null }
-  const nums = await phoneCandidatesForSendAsync(phone)
+  const cfg = await resolveConfig(opts)
+  if (!cfg) return { ok: false, messageId: null }
+  const nums = await phoneCandidatesForSendAsync(phone, cfg)
   if (!nums.length || !message) return { ok: false, messageId: null }
 
   const replyMessageId = opts?.replyMessageId ? String(opts.replyMessageId).trim() : null
@@ -198,9 +220,9 @@ async function sendText(phone, message, opts = {}) {
       // reply nativo WhatsApp: Z-API aceita "replyMessageId" no corpo
       if (replyMessageId) body.replyMessageId = replyMessageId
 
-      const res = await fetch(`${basePath}/send-text`, {
+      const res = await fetch(`${cfg.basePath}/send-text`, {
         method: 'POST',
-        headers: getHeaders(),
+        headers: cfg.headers,
         body: JSON.stringify(body)
       })
 
@@ -234,13 +256,13 @@ async function sendText(phone, message, opts = {}) {
 /**
  * Envia link enriquecido (preview) usando /send-link.
  * @param {string} phone - Número/JID do chat
- * @param {{ message: string, image?: string, linkUrl: string, title: string, linkDescription: string }} payload
- * @returns {Promise<{ ok: boolean, messageId: string|null }>}
+ * @param {object} payload - message, linkUrl, title, linkDescription
+ * @param {{ companyId?: number }} [opts]
  */
-async function sendLink(phone, payload) {
-  const basePath = getBasePath()
-  if (!basePath) return { ok: false, messageId: null }
-  const nums = await phoneCandidatesForSendAsync(phone)
+async function sendLink(phone, payload, opts = {}) {
+  const cfg = await resolveConfig(opts)
+  if (!cfg) return { ok: false, messageId: null }
+  const nums = await phoneCandidatesForSendAsync(phone, cfg)
 
   const message = String(payload?.message || '').trim()
   const image = payload?.image != null ? String(payload.image).trim() : ''
@@ -264,9 +286,9 @@ async function sendLink(phone, payload) {
       }
       if (!image) delete body.image
 
-      const res = await fetch(`${basePath}/send-link`, {
+      const res = await fetch(`${cfg.basePath}/send-link`, {
         method: 'POST',
-        headers: getHeaders(),
+        headers: cfg.headers,
         body: JSON.stringify(body),
       })
 
@@ -301,18 +323,19 @@ async function sendLink(phone, payload) {
  * @param {string} phone - Número (apenas dígitos)
  * @param {string} url - URL pública da imagem
  * @param {string} [caption] - Legenda opcional
- * @returns {Promise<boolean>}
+ * @param {{ companyId?: number }} [opts]
  */
-async function sendImage(phone, url, caption = '') {
-  const basePath = getBasePath()
-  if (!basePath) return false
+async function sendImage(phone, url, caption = '', opts = {}) {
+  const cfg = await resolveConfig(opts)
+  if (!cfg) return false
   try {
-    const nums = await phoneCandidatesForSendAsync(phone)
+    const nums = await phoneCandidatesForSendAsync(phone, cfg)
     if (!nums.length || !url) return false
     const safeUrl = String(url).trim()
     const safeCaption = caption ? String(caption).trim() : ''
     return await postJsonWithCandidates({
-      basePath,
+      basePath: cfg.basePath,
+      headers: cfg.headers,
       endpoint: '/send-image',
       phoneCandidates: nums,
       okLogLabel: 'imagem',
@@ -330,19 +353,20 @@ async function sendImage(phone, url, caption = '') {
 
 /**
  * Envia áudio por URL (ou base64).
- * @param {string} phone - Número (apenas dígitos ou JID grupo)
+ * @param {string} phone - Número
  * @param {string} audioUrl - URL pública do áudio
- * @returns {Promise<boolean>}
+ * @param {{ companyId?: number }} [opts]
  */
-async function sendAudio(phone, audioUrl) {
-  const basePath = getBasePath()
-  if (!basePath) return false
+async function sendAudio(phone, audioUrl, opts = {}) {
+  const cfg = await resolveConfig(opts)
+  if (!cfg) return false
   try {
-    const nums = await phoneCandidatesForSendAsync(phone)
+    const nums = await phoneCandidatesForSendAsync(phone, cfg)
     const a = String(audioUrl || '').trim()
     if (!nums.length || !a) return false
     return await postJsonWithCandidates({
-      basePath,
+      basePath: cfg.basePath,
+      headers: cfg.headers,
       endpoint: '/send-audio',
       phoneCandidates: nums,
       okLogLabel: 'áudio',
@@ -356,24 +380,24 @@ async function sendAudio(phone, audioUrl) {
 
 /**
  * Envia documento/arquivo por URL.
- * @param {string} phone - Número (apenas dígitos)
+ * @param {string} phone - Número
  * @param {string} url - URL pública do arquivo
- * @param {string} [fileName] - Nome do arquivo (opcional)
- * @returns {Promise<boolean>}
+ * @param {string} [fileName] - Nome do arquivo
+ * @param {{ companyId?: number }} [opts]
  */
-async function sendFile(phone, url, fileName = '') {
-  const basePath = getBasePath()
-  if (!basePath) return false
-  const nums = await phoneCandidatesForSendAsync(phone)
+async function sendFile(phone, url, fileName = '', opts = {}) {
+  const cfg = await resolveConfig(opts)
+  if (!cfg) return false
+  const nums = await phoneCandidatesForSendAsync(phone, cfg)
   if (!nums.length || !url) return false
   const ext = fileName ? String(fileName).split('.').pop() : 'pdf'
   const safeExt = /^[a-z0-9]+$/i.test(ext) ? ext : 'pdf'
   try {
     const safeUrl = String(url).trim()
     const safeName = fileName ? String(fileName).trim() : ''
-    // endpoint inclui extensão
     return await postJsonWithCandidates({
-      basePath,
+      basePath: cfg.basePath,
+      headers: cfg.headers,
       endpoint: `/send-document/${safeExt}`,
       phoneCandidates: nums,
       okLogLabel: 'arquivo',
@@ -399,15 +423,16 @@ async function sendFile(phone, url, fileName = '') {
  * @returns {Promise<boolean>}
  */
 async function sendSticker(phone, sticker, opts = {}) {
-  const basePath = getBasePath()
-  if (!basePath) return false
+  const cfg = await resolveConfig(opts)
+  if (!cfg) return false
   try {
-    const nums = await phoneCandidatesForSendAsync(phone)
+    const nums = await phoneCandidatesForSendAsync(phone, cfg)
     const s = String(sticker || '').trim()
     if (!nums.length || !s) return false
     const author = opts?.stickerAuthor ? String(opts.stickerAuthor).trim() : ''
     return await postJsonWithCandidates({
-      basePath,
+      basePath: cfg.basePath,
+      headers: cfg.headers,
       endpoint: '/send-sticker',
       phoneCandidates: nums,
       okLogLabel: 'figurinha',
@@ -426,15 +451,17 @@ async function sendSticker(phone, sticker, opts = {}) {
 /**
  * Lista contatos do WhatsApp (celular conectado).
  * GET /contacts?page=1&pageSize=100
- * @returns {Promise<Array<{phone, name?, short?, vname?, notify?, imgUrl?}>>}
+ * @param {number} [page]
+ * @param {number} [pageSize]
+ * @param {{ companyId?: number }} [opts]
  */
-async function getContacts(page = 1, pageSize = 100) {
-  const basePath = getBasePath()
-  if (!basePath) return []
+async function getContacts(page = 1, pageSize = 100, opts = {}) {
+  const cfg = await resolveConfig(opts)
+  if (!cfg) return []
   try {
     const res = await fetch(
-      `${basePath}/contacts?page=${Number(page)}&pageSize=${Number(pageSize)}`,
-      { method: 'GET', headers: getHeaders() }
+      `${cfg.basePath}/contacts?page=${Number(page)}&pageSize=${Number(pageSize)}`,
+      { method: 'GET', headers: cfg.headers }
     )
     if (!res.ok) return []
     const data = await res.json()
@@ -447,20 +474,19 @@ async function getContacts(page = 1, pageSize = 100) {
 
 /**
  * Busca URL da foto de perfil de um número.
- * GET /profile-picture?phone=5511999999999
- * @returns {Promise<string|null>} URL da foto ou null
+ * @param {string} phone - Telefone
+ * @param {{ companyId?: number }} [opts]
  */
-async function getProfilePicture(phone) {
-  const basePath = getBasePath()
-  if (!basePath) return null
+async function getProfilePicture(phone, opts = {}) {
+  const cfg = await resolveConfig(opts)
+  if (!cfg) return null
   try {
     const nums = phoneCandidatesForLookup(phone)
     if (!nums.length) return null
-
     for (const num of nums) {
       const res = await fetch(
-        `${basePath}/profile-picture?phone=${encodeURIComponent(num)}`,
-        { method: 'GET', headers: getHeaders() }
+        `${cfg.basePath}/profile-picture?phone=${encodeURIComponent(num)}`,
+        { method: 'GET', headers: cfg.headers }
       )
       if (!res.ok) {
         const errBody = await res.text().catch(() => '')
@@ -487,18 +513,19 @@ async function getProfilePicture(phone) {
 
 /**
  * Metadados do contato (nome, foto, etc.) — GET /contacts/{phone}
- * @returns {Promise<{phone?, name?, short?, vname?, notify?, imgUrl?, about?}|null>}
+ * @param {string} phone - Telefone
+ * @param {{ companyId?: number }} [opts]
  */
-async function getContactMetadata(phone) {
-  const basePath = getBasePath()
-  if (!basePath) return null
+async function getContactMetadata(phone, opts = {}) {
+  const cfg = await resolveConfig(opts)
+  if (!cfg) return null
   try {
     const nums = phoneCandidatesForLookup(phone)
     if (!nums.length) return null
     for (const num of nums) {
-      const res = await fetch(`${basePath}/contacts/${encodeURIComponent(num)}`, {
+      const res = await fetch(`${cfg.basePath}/contacts/${encodeURIComponent(num)}`, {
         method: 'GET',
-        headers: getHeaders()
+        headers: cfg.headers
       })
       if (!res.ok) continue
       const data = await res.json().catch(() => null)
@@ -518,16 +545,17 @@ async function getContactMetadata(phone) {
  * @param {string} [caption] - Legenda opcional
  * @returns {Promise<boolean>}
  */
-async function sendVideo(phone, videoUrl, caption = '') {
-  const basePath = getBasePath()
-  if (!basePath) return false
+async function sendVideo(phone, videoUrl, caption = '', opts = {}) {
+  const cfg = await resolveConfig(opts)
+  if (!cfg) return false
   try {
-    const nums = await phoneCandidatesForSendAsync(phone)
+    const nums = await phoneCandidatesForSendAsync(phone, cfg)
     const v = String(videoUrl || '').trim()
     if (!nums.length || !v) return false
     const safeCaption = caption ? String(caption).trim() : ''
     return await postJsonWithCandidates({
-      basePath,
+      basePath: cfg.basePath,
+      headers: cfg.headers,
       endpoint: '/send-video',
       phoneCandidates: nums,
       okLogLabel: 'vídeo',
@@ -551,25 +579,21 @@ async function sendVideo(phone, videoUrl, caption = '') {
  * @param {string} reaction - Emoji de reação (❤️, 👍, etc.)
  * @returns {Promise<boolean>}
  */
-async function sendReaction(phone, messageId, reaction) {
-  const basePath = getBasePath()
-  if (!basePath) return false
+async function sendReaction(phone, messageId, reaction, opts = {}) {
+  const cfg = await resolveConfig(opts)
+  if (!cfg) return false
   try {
-    const nums = await phoneCandidatesForSendAsync(phone)
+    const nums = await phoneCandidatesForSendAsync(phone, cfg)
     const mid = String(messageId || '').trim()
     const emoji = String(reaction || '').trim()
     if (!nums.length || !mid || !emoji) return false
-
     return await postJsonWithCandidates({
-      basePath,
+      basePath: cfg.basePath,
+      headers: cfg.headers,
       endpoint: '/send-reaction',
       phoneCandidates: nums,
       okLogLabel: 'reação',
-      buildBody: (num) => ({
-        phone: num,
-        messageId: mid,
-        reaction: emoji,
-      }),
+      buildBody: (num) => ({ phone: num, messageId: mid, reaction: emoji }),
     })
   } catch (e) {
     console.error('❌ Erro Z-API sendReaction:', e.message)
@@ -584,23 +608,20 @@ async function sendReaction(phone, messageId, reaction) {
  * @param {string} messageId - ID da mensagem que terá a reação removida (whatsapp_id)
  * @returns {Promise<boolean>}
  */
-async function removeReaction(phone, messageId) {
-  const basePath = getBasePath()
-  if (!basePath) return false
+async function removeReaction(phone, messageId, opts = {}) {
+  const cfg = await resolveConfig(opts)
+  if (!cfg) return false
   try {
-    const nums = await phoneCandidatesForSendAsync(phone)
+    const nums = await phoneCandidatesForSendAsync(phone, cfg)
     const mid = String(messageId || '').trim()
     if (!nums.length || !mid) return false
-
     return await postJsonWithCandidates({
-      basePath,
+      basePath: cfg.basePath,
+      headers: cfg.headers,
       endpoint: '/send-remove-reaction',
       phoneCandidates: nums,
       okLogLabel: 'remover reação',
-      buildBody: (num) => ({
-        phone: num,
-        messageId: mid,
-      }),
+      buildBody: (num) => ({ phone: num, messageId: mid }),
     })
   } catch (e) {
     console.error('❌ Erro Z-API removeReaction:', e.message)
@@ -618,10 +639,10 @@ async function removeReaction(phone, messageId) {
  * @returns {Promise<{ ok: boolean, messageId: string|null }>}
  */
 async function sendContact(phone, contactName, contactPhone, opts = {}) {
-  const basePath = getBasePath()
-  if (!basePath) return { ok: false, messageId: null }
+  const cfg = await resolveConfig(opts)
+  if (!cfg) return { ok: false, messageId: null }
   try {
-    const nums = await phoneCandidatesForSendAsync(phone)
+    const nums = await phoneCandidatesForSendAsync(phone, cfg)
     const name = String(contactName || '').trim()
     const contact = String(contactPhone || '').replace(/\D/g, '')
     const replyMessageId = opts?.messageId ? String(opts.messageId).trim() : null
@@ -635,9 +656,9 @@ async function sendContact(phone, contactName, contactPhone, opts = {}) {
       }
       if (replyMessageId) body.messageId = replyMessageId
 
-      const res = await fetch(`${basePath}/send-contact`, {
+      const res = await fetch(`${cfg.basePath}/send-contact`, {
         method: 'POST',
-        headers: getHeaders(),
+        headers: cfg.headers,
         body: JSON.stringify(body),
       })
       const text = await res.text().catch(() => '')
@@ -675,11 +696,11 @@ async function sendContact(phone, contactName, contactPhone, opts = {}) {
  * @param {number} [callDuration] - duração em segundos (5–15) opcional
  * @returns {Promise<{ ok: boolean, messageId: string|null }>}
  */
-async function sendCall(phone, callDuration) {
-  const basePath = getBasePath()
-  if (!basePath) return { ok: false, messageId: null }
+async function sendCall(phone, callDuration, opts = {}) {
+  const cfg = await resolveConfig(opts)
+  if (!cfg) return { ok: false, messageId: null }
   try {
-    const nums = await phoneCandidatesForSendAsync(phone)
+    const nums = await phoneCandidatesForSendAsync(phone, cfg)
     if (!nums.length) return { ok: false, messageId: null }
     const dur = Number(callDuration)
     const safeDur = Number.isFinite(dur) ? Math.max(1, Math.min(15, dur)) : undefined
@@ -688,9 +709,9 @@ async function sendCall(phone, callDuration) {
       const body = { phone: num }
       if (safeDur != null) body.callDuration = safeDur
 
-      const res = await fetch(`${basePath}/send-call`, {
+      const res = await fetch(`${cfg.basePath}/send-call`, {
         method: 'POST',
-        headers: getHeaders(),
+        headers: cfg.headers,
         body: JSON.stringify(body),
       })
       const text = await res.text().catch(() => '')
@@ -730,21 +751,19 @@ async function sendCall(phone, callDuration) {
  * @param {string|null} [lastMessageId=null]
  * @returns {Promise<Array<object>>}
  */
-async function getChatMessages(phone, amount = 10, lastMessageId = null) {
-  const basePath = getBasePath()
-  if (!basePath) return []
+async function getChatMessages(phone, amount = 10, lastMessageId = null, opts = {}) {
+  const cfg = await resolveConfig(opts)
+  if (!cfg) return []
   try {
     const nums = phoneCandidatesForLookup(phone)
     if (!nums.length) return []
-
     for (const num of nums) {
       const qs = new URLSearchParams()
       qs.set('amount', String(Math.max(1, Number(amount) || 10)))
       if (lastMessageId) qs.set('lastMessageId', String(lastMessageId))
-
-      const res = await fetch(`${basePath}/chat-messages/${encodeURIComponent(num)}?${qs.toString()}`, {
+      const res = await fetch(`${cfg.basePath}/chat-messages/${encodeURIComponent(num)}?${qs.toString()}`, {
         method: 'GET',
-        headers: getHeaders()
+        headers: cfg.headers
       })
       if (!res.ok) {
         const errBody = await res.text().catch(() => '')
@@ -775,10 +794,16 @@ async function getChatMessages(phone, amount = 10, lastMessageId = null) {
  *   PUT /update-webhook-chat-presence → PresenceChatCallback (digitando, online)
  *   PUT /update-notify-sent-by-me   → ativa envio ao webhook de mensagens enviadas pelo CELULAR (espelhamento)
  */
-async function configureWebhooks(appUrl) {
-  const basePath = getBasePath()
-  if (!basePath || !appUrl) return
-
+/**
+ * Configura webhooks na instância Z-API. Exige companyId em produção.
+ * @param {string} appUrl - APP_URL
+ * @param {{ companyId?: number }} [opts]
+ */
+async function configureWebhooks(appUrl, opts = {}) {
+  const cfg = await resolveConfig(opts)
+  if (!cfg || !appUrl) return
+  const basePath = cfg.basePath
+  const headers = cfg.headers
   const base = String(appUrl).replace(/\/$/, '')
 
   // Inclui o token como query param nas URLs registradas no Z-API.
@@ -806,7 +831,7 @@ async function configureWebhooks(appUrl) {
   const putBody = async (endpoint, body) => {
     const res = await fetch(`${basePath}${endpoint}`, {
       method: 'PUT',
-      headers: getHeaders(),
+      headers,
       body: JSON.stringify(body)
     })
     return res.ok || res.status === 204 || res.status === 200
@@ -880,13 +905,13 @@ async function configureWebhooks(appUrl) {
  * @param {string} imageUrl - URL pública da imagem
  * @returns {Promise<boolean>}
  */
-async function updateProfilePicture(imageUrl) {
-  const basePath = getBasePath()
-  if (!basePath) return false
+async function updateProfilePicture(imageUrl, opts = {}) {
+  const cfg = await resolveConfig(opts)
+  if (!cfg) return false
   try {
-    const res = await fetch(`${basePath}/profile-picture`, {
+    const res = await fetch(`${cfg.basePath}/profile-picture`, {
       method: 'PUT',
-      headers: getHeaders(),
+      headers: cfg.headers,
       body: JSON.stringify({ value: String(imageUrl || '').trim() }),
     })
     if (!res.ok) {
@@ -909,13 +934,13 @@ async function updateProfilePicture(imageUrl) {
  * @param {string} name - Novo nome de perfil
  * @returns {Promise<boolean>}
  */
-async function updateProfileName(name) {
-  const basePath = getBasePath()
-  if (!basePath) return false
+async function updateProfileName(name, opts = {}) {
+  const cfg = await resolveConfig(opts)
+  if (!cfg) return false
   try {
-    const res = await fetch(`${basePath}/profile-name`, {
+    const res = await fetch(`${cfg.basePath}/profile-name`, {
       method: 'PUT',
-      headers: getHeaders(),
+      headers: cfg.headers,
       body: JSON.stringify({ value: String(name || '').trim() }),
     })
     if (!res.ok) {
@@ -938,13 +963,13 @@ async function updateProfileName(name) {
  * @param {string} description - Nova descrição de perfil
  * @returns {Promise<boolean>}
  */
-async function updateProfileDescription(description) {
-  const basePath = getBasePath()
-  if (!basePath) return false
+async function updateProfileDescription(description, opts = {}) {
+  const cfg = await resolveConfig(opts)
+  if (!cfg) return false
   try {
-    const res = await fetch(`${basePath}/profile-description`, {
+    const res = await fetch(`${cfg.basePath}/profile-description`, {
       method: 'PUT',
-      headers: getHeaders(),
+      headers: cfg.headers,
       body: JSON.stringify({ value: String(description || '').trim() }),
     })
     if (!res.ok) {
@@ -966,13 +991,16 @@ async function updateProfileDescription(description) {
  * GET /status → { connected: boolean, phone?: string, ... }
  * @returns {Promise<{ connected: boolean, configured: boolean, phone?: string|null }>}
  */
-async function getConnectionStatus() {
-  const basePath = getBasePath()
-  if (!basePath) return { connected: false, configured: false }
+/**
+ * @param {{ companyId?: number }} [opts]
+ */
+async function getConnectionStatus(opts = {}) {
+  const cfg = await resolveConfig(opts)
+  if (!cfg) return { connected: false, configured: false }
   try {
-    const res = await fetch(`${basePath}/status`, {
+    const res = await fetch(`${cfg.basePath}/status`, {
       method: 'GET',
-      headers: getHeaders(),
+      headers: cfg.headers,
       signal: AbortSignal.timeout(8000)
     })
     if (!res.ok) {
@@ -1015,5 +1043,6 @@ module.exports = {
   updateProfileDescription,
   getConnectionStatus,
   normalizePhone,
-  isConfigured: !!ZAPI_INSTANCE_ID && !!ZAPI_TOKEN
+  // Em multi-tenant, "configurado" é por empresa (empresa_zapi). Este flag indica provider disponível.
+  isConfigured: true
 }

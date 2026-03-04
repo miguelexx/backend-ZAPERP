@@ -193,18 +193,18 @@ exports.login = async (req, res) => {
 
     // 🔎 Localiza corretamente a coluna de senha (compatível com vários padrões)
     const senhaBanco =
-      usuario.senha ||
       usuario.senha_hash ||
+      usuario.senha ||
       usuario.password ||
       usuario.pass
 
-    if (!senhaBanco) {
-      console.error('Coluna de senha não encontrada no usuário', {
-        id: usuario?.id ?? null,
-        email: usuario?.email ?? null,
-        company_id: usuario?.company_id ?? null
-      })
-      return res.status(500).json({ error: 'Usuário sem senha cadastrada corretamente' })
+    if (!senhaBanco || typeof senhaBanco !== 'string') {
+      return res.status(401).json({ error: 'Credenciais inválidas' })
+    }
+
+    // Valida que o hash é bcrypt válido (evita bugs tipo "$2b$10$$2b$10$..." corrompido)
+    if (!senhaBanco.startsWith('$2')) {
+      return res.status(401).json({ error: 'Credenciais inválidas' })
     }
 
     // Compara senha enviada com hash do banco
@@ -219,11 +219,12 @@ exports.login = async (req, res) => {
       return res.status(401).json({ error: 'Credenciais inválidas' })
     }
 
-    // Gera JWT com dados essenciais (perfil e departamento para roteamento por setor)
+    // Gera JWT com dados essenciais (user_id/company_id obrigatórios p/ multi-tenant)
     const token = jwt.sign(
       {
+        user_id: usuario.id,
         id: usuario.id,
-        company_id: usuario.company_id,
+        company_id: Number(usuario.company_id),
         email: usuario.email,
         perfil: usuario.perfil || 'atendente',
         departamento_id: usuario.departamento_id ?? null

@@ -13,9 +13,13 @@
 ## Segurança multi-tenant
 
 - [x] `company_id` apenas de `req.user.company_id` (JWT)
+- [x] Credenciais Z-API **sempre** de `empresa_zapi` ( nunca ENV para rotas autenticadas)
+- [x] Webhooks: `company_id` por `instanceId` do payload (empresa_zapi)
 - [x] Queries em `empresa_zapi` e `zapi_connect_guard` filtram por `company_id`
 - [x] Nenhum token em responses, logs ou erros
 - [x] URL com `/token/` nunca logada
+
+Ver: [docs/ZAPI-MULTI-TENANT.md](./ZAPI-MULTI-TENANT.md)
 
 ## Guard / throttle / bloqueio
 
