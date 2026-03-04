@@ -149,6 +149,155 @@ async function mergeConversationLidToPhone(supabaseClient, company_id, chatLid, 
 }
 
 /**
+ * getOrCreateCliente — SELECT-then-UPDATE/INSERT. Nunca insert puro.
+ * Evita 23505 (duplicate key) em clientes_telefone_unique ou clientes_company_telefone_unique.
+ * Se cliente já existe (mesma company ou global por telefone), retorna o id e atualiza nome/foto.
+ *
+ * @param {object} supabaseClient
+ * @param {number} company_id
+ * @param {string} phone - Telefone bruto do payload
+ * @param {object} fields - { nome?, foto_perfil? } (não sobrescrever com null)
+ * @returns {Promise<{ cliente_id: number|null }>}
+ */
+async function getOrCreateCliente(supabaseClient, company_id, phone, fields = {}) {
+  const telefoneCanonico = getCanonicalPhone(phone)
+  const phones = possiblePhonesBR(phone)
+  const searchPhones = phones.length > 0 ? phones : (telefoneCanonico ? [telefoneCanonico] : [phone].filter(Boolean))
+
+  if (searchPhones.length === 0) {
+    return { cliente_id: null }
+  }
+
+  // 1) SELECT por (company_id, telefone ou variantes)
+  let q = supabaseClient.from('clientes').select('id, nome, foto_perfil, company_id')
+  if (searchPhones.length > 0) q = q.in('telefone', searchPhones)
+  else q = q.eq('telefone', phone)
+  q = q.eq('company_id', company_id)
+  const { data: rows1, error: err1 } = await q.order('id', { ascending: true }).limit(1)
+  const existente = Array.isArray(rows1) && rows1[0] ? rows1[0] : null
+
+  if (err1) {
+    console.warn('[getOrCreateCliente] Erro ao buscar:', err1?.message || err1)
+    return { cliente_id: null }
+  }
+
+  if (existente?.id) {
+    const updates = {}
+    if (fields.nome && String(fields.nome).trim()) updates.nome = String(fields.nome).trim()
+    else if (!existente.nome || !String(existente.nome).trim()) {
+      const numericDisplay = String(phone).replace(/\D/g, '')
+      if (numericDisplay) updates.nome = numericDisplay
+    }
+    if (fields.foto_perfil) updates.foto_perfil = fields.foto_perfil
+    if (Object.keys(updates).length > 0) {
+      await supabaseClient.from('clientes').update(updates).eq('id', existente.id).eq('company_id', company_id)
+    }
+    return { cliente_id: existente.id }
+  }
+
+  // 2) Fallback legado: LIKE %digits10 (DDD+8)
+  if (phone) {
+    try {
+      const digits10 = String(phone).replace(/\D/g, '').slice(-10)
+      if (digits10 && digits10.length === 10) {
+        const { data: legacyRows } = await supabaseClient
+          .from('clientes')
+          .select('id, telefone')
+          .eq('company_id', company_id)
+          .like('telefone', `%${digits10}`)
+          .order('id', { ascending: true })
+          .limit(1)
+        const legacy = Array.isArray(legacyRows) && legacyRows[0] ? legacyRows[0] : null
+        if (legacy?.id) {
+          const updates = {}
+          if (fields.nome && String(fields.nome).trim()) updates.nome = String(fields.nome).trim()
+          if (fields.foto_perfil) updates.foto_perfil = fields.foto_perfil
+          if (Object.keys(updates).length > 0) {
+            await supabaseClient.from('clientes').update(updates).eq('id', legacy.id).eq('company_id', company_id)
+          }
+          return { cliente_id: legacy.id }
+        }
+      }
+    } catch (_) { /* fallback silencioso */ }
+  }
+
+  // 3) Telefone válido para INSERT?
+  const isTelefoneValido = telefoneCanonico &&
+    !telefoneCanonico.startsWith('lid:') &&
+    (
+      (telefoneCanonico.startsWith('55') && (telefoneCanonico.length === 12 || telefoneCanonico.length === 13)) ||
+      telefoneCanonico.endsWith('@g.us') ||
+      (telefoneCanonico.startsWith('120') && telefoneCanonico.length >= 15)
+    )
+
+  if (!isTelefoneValido) {
+    return { cliente_id: null }
+  }
+
+  // 4) SELECT sem company_id — cliente pode existir em outra company (UNIQUE telefone global)
+  const { data: rowsGlobal } = await supabaseClient
+    .from('clientes')
+    .select('id')
+    .in('telefone', searchPhones)
+    .order('id', { ascending: true })
+    .limit(1)
+  const existenteGlobal = Array.isArray(rowsGlobal) && rowsGlobal[0] ? rowsGlobal[0] : null
+  if (existenteGlobal?.id) {
+    return { cliente_id: existenteGlobal.id }
+  }
+
+  // 5) INSERT
+  const nome = (fields.nome && String(fields.nome).trim()) || telefoneCanonico || null
+  const insertData = {
+    telefone: telefoneCanonico,
+    nome,
+    observacoes: null,
+    company_id,
+    ...(fields.foto_perfil ? { foto_perfil: fields.foto_perfil } : {})
+  }
+  const { data: novoCliente, error: errInsert } = await supabaseClient
+    .from('clientes')
+    .insert(insertData)
+    .select('id')
+    .single()
+
+  if (!errInsert && novoCliente?.id) {
+    return { cliente_id: novoCliente.id }
+  }
+
+  // 6) 23505 ou similar: buscar existente (race ou constraint global)
+  const isDuplicate = String(errInsert?.code || '') === '23505' ||
+    String(errInsert?.message || '').includes('unique') ||
+    String(errInsert?.message || '').includes('duplicate')
+
+  if (isDuplicate) {
+    const { data: foundRows } = await supabaseClient
+      .from('clientes')
+      .select('id')
+      .in('telefone', searchPhones)
+      .order('id', { ascending: true })
+      .limit(1)
+    const found = Array.isArray(foundRows) && foundRows[0] ? foundRows[0] : null
+    if (found?.id) {
+      return { cliente_id: found.id }
+    }
+    // Também tentar com company_id (race condition mesma company)
+    const { data: foundByCo } = await supabaseClient
+      .from('clientes')
+      .select('id')
+      .in('telefone', searchPhones)
+      .eq('company_id', company_id)
+      .order('id', { ascending: true })
+      .limit(1)
+    const foundCo = Array.isArray(foundByCo) && foundByCo[0] ? foundByCo[0] : null
+    if (foundCo?.id) return { cliente_id: foundCo.id }
+  }
+
+  console.warn('[getOrCreateCliente] Insert falhou, continuando sem cliente:', errInsert?.code || errInsert?.message || 'unknown')
+  return { cliente_id: null }
+}
+
+/**
  * findOrCreateConversation — FUNÇÃO CENTRAL.
  *
  * Garante que exista UMA ÚNICA conversa aberta por telefone canônico.
@@ -342,6 +491,7 @@ function sortConversationsByRecent(conversas) {
 
 module.exports = {
   getCanonicalPhone,
+  getOrCreateCliente,
   findOrCreateConversation,
   mergeConversasIntoCanonico,
   mergeConversationLidToPhone,

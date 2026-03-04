@@ -47,6 +47,7 @@ const webhookStack = [resolveWebhookZapi, webhookZapiController.handleWebhookZap
 router.post('/', webhookStack)
 router.post('/connection', webhookStack)
 router.post('/status', webhookStack)
+router.post('/statusht', webhookStack) // alias: painel Z-API pode estar configurado com typo "statusht"
 router.post('/presence', webhookStack)
 router.post('/disconnected', webhookStack)
 

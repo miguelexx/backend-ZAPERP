@@ -25,7 +25,7 @@ function extractInstanceId(body) {
 function inferEventType(body, path) {
   const type = String(body?.type ?? body?.event ?? body?.tipo ?? '').trim()
   const p = String(path || '')
-  if (p === '/status' || p.endsWith('/status')) return type || 'MessageStatusCallback'
+  if (p === '/status' || p === '/statusht' || p.endsWith('/status')) return type || 'MessageStatusCallback'
   if (p === '/connection' || p.endsWith('/connection')) return type || 'ConnectedCallback'
   if (p === '/disconnected' || p.endsWith('/disconnected')) return type || 'DisconnectedCallback'
   if (p === '/presence' || p.endsWith('/presence')) return type || 'PresenceChatCallback'
