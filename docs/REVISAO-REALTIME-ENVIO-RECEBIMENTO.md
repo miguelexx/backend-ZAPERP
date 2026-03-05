@@ -74,8 +74,8 @@
 |--------|---------|-----|
 | `nova_mensagem` | { id, conversa_id, texto, direcao, status, whatsapp_id, ... } | Inserir mensagem na lista |
 | `status_mensagem` | { mensagem_id, conversa_id, status, whatsapp_id } | Atualizar ticks por whatsapp_id |
-| `conversa_atualizada` | { id, ultima_atividade, nome_contato_cache, contato_nome, foto_perfil } | Atualizar item na lista lateral |
-| `contato_atualizado` | { conversa_id, contato_nome, foto_perfil } | Atualizar lista e cabeçalho após sync Z-API |
+| `conversa_atualizada` | { id, ultima_atividade, telefone, nome_contato_cache, contato_nome, foto_perfil } | Atualizar item na lista lateral; telefone garante nome+número fixos no cabeçalho |
+| `contato_atualizado` | { conversa_id, contato_nome, telefone, foto_perfil } | Atualizar lista e cabeçalho após sync Z-API. **Cabeçalho deve exibir sempre nome + número (fixos)** |
 | `atualizar_conversa` | { id } | Sinal para recarregar/atualizar conversa na lista |
 
 ---

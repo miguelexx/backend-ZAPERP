@@ -141,12 +141,15 @@ io.on('connection', (socket) => {
     socket.join(`departamento_${departamento_id}`)
   }
 
-  // entrar na conversa
+  // entrar na conversa (idempotente: evita join duplicado e log repetido)
   socket.on('join_conversa', (conversaId) => {
     if (!conversaId) return
 
-    socket.join(`conversa_${conversaId}`)
-    console.log(`💬 Socket entrou na conversa ${conversaId}`)
+    const room = `conversa_${conversaId}`
+    if (!socket.rooms.has(room)) {
+      socket.join(room)
+      console.log(`💬 Socket entrou na conversa ${conversaId}`)
+    }
   })
 
   // 🔥 NOVO: sair da conversa (escala / limpeza de rooms)

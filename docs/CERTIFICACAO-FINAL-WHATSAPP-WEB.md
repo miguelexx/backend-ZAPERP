@@ -1,7 +1,22 @@
 # CERTIFICAÇÃO FINAL — WhatsApp Web-Like (Z-API) + Veredito "PODE VENDER HOJE?"
 
 **Data:** 2025-03-05  
+**Atualizado:** Auditoria profissional + correções B2/B5  
 **Escopo:** ZapERP Backend — operação igual a WhatsApp Web via Z-API
+
+> **Ver também:** [CERTIFICACAO-ROTAS-BANCO-ZAPI.md](./CERTIFICACAO-ROTAS-BANCO-ZAPI.md) — checklist de rotas, banco 100% conectado e sincronização Z-API.
+
+---
+
+## CORREÇÕES APLICADAS (Auditoria 2025-03-05)
+
+| Item | Problema | Correção |
+|------|----------|----------|
+| **B2** | ReceivedCallback com mídia em grupo vem sem `text.message` — `hasContent=false` descartava mídia | `hasMessageContent` e `hasRealContent` agora verificam `payload.message.image`, `payload.message.document`, etc. (mídia aninhada) |
+| **B2** | Status `READ_BY_ME` não mapeado | `normalizeZapiStatus` inclui `read_by_me` → `read` |
+| **B5** | Socket `join_conversa` sem idempotência — múltiplos joins geravam log repetido | Guard: `if (!socket.rooms.has(room))` antes de join; 1 log por conversa por conexão |
+
+**Arquivos alterados:** `controllers/webhookZapiController.js`, `index.js`
 
 ---
 
@@ -65,6 +80,7 @@
 ### Rotina auditoria
 - **Script:** `scripts/certificacao/auditoria-duplicados.sql`
 - **Prova SQL:** `scripts/certificacao/prova-sql.sql`
+- **Certificação:** `scripts/certificacao/certificacao-sql-obrigatorios.sql`
 
 ---
 
@@ -165,17 +181,27 @@ WHERE company_id IN (1,2) AND (nome IS NULL OR nome='' OR foto_perfil IS NULL OR
 5. fromMe self-echo não cria conversa; atualiza status ou ignora
 6. getOrCreateCliente evita 23505; índices unique em clientes, conversas, mensagens
 7. LID→PHONE merge implementado; dedupe automático
-8. Socket: nova_mensagem, status_mensagem (com whatsapp_id), conversa_atualizada
+8. Socket: nova_mensagem, status_mensagem (com whatsapp_id), conversa_atualizada; join idempotente
 9. Dados do contato: não sobrescreve com null
 10. Sync contatos: POST /api/integrations/zapi/contacts/sync com mode contacts_api ou fallback
+11. Mídia em grupo: hasMessageContent cobre payload.message.* (aninhado)
+
+### 5 Bullets de Evidência (para anexar à certificação)
+
+- **company_id correto:** `SELECT company_id FROM mensagens WHERE whatsapp_id='<id_teste>'` retorna 2 para company 2
+- **Log webhook:** `[Z-API-WEBHOOK] {"ts":"...","eventType":"ReceivedCallback","instanceId":"...","companyIdResolved":2}`
+- **Socket emits:** webhookZapiController linhas ~2012-2041 (nova_mensagem, status_mensagem com whatsapp_id)
+- **Conversa correta:** mensagem company 2 salva em conversa com `company_id=2` e `telefone` canônico
+- **SQL 0 duplicados:** rodar `certificacao-sql-obrigatorios.sql` — 3 primeiros SELECT retornam 0 linhas
 
 ### Evidências técnicas
 
 - `webhookZapiRoutes.js` — rotas + alias statusht
 - `resolveWebhookZapi.js` — roteamento instanceId → company_id
-- `webhookZapiController.js` — pipeline completo, company_id em todos os paths
+- `webhookZapiController.js` — pipeline completo, company_id em todos os paths; hasMessageContent corrigido
 - `conversationSync.js` — getOrCreateCliente, mergeConversationLidToPhone
 - `zapiContactsSyncService.js` — sync contacts
+- `index.js` — socket join_conversa idempotente
 - Migrations: idx_mensagens_company_whatsapp_id, idx_clientes_company_telefone_unique
 
 ### Configuração obrigatória no painel Z-API
@@ -190,6 +216,22 @@ Para cada instância (company), configurar:
 | Status do chat (digitando) | `{APP_URL}/webhooks/zapi/presence` |
 
 **Nota:** O backend auto-configura webhooks ao conectar (connectionZapi) quando `provider.configureWebhooks` está disponível. Para garantir, configure manualmente no painel Z-API.
+
+---
+
+## SE NÃO APROVADO (checklist de bloqueio)
+
+Se algum critério abaixo falhar, **NÃO APROVADO**:
+
+| Critério | Risco |
+|----------|-------|
+| SQL duplicados > 0 | Dados corrompidos; pipeline permite race |
+| hasContent=false para mídia em grupo | Mensagens de imagem/vídeo/documento em grupo não salvam |
+| company_id errado em mensagem | Vazamento entre empresas |
+| Socket join duplicado | Eventos duplicados no front; log poluído |
+| getOrCreateCliente aborta pipeline | Mensagem nunca salva; 23505 não tratado |
+
+**Ação:** Rodar `certificacao-sql-obrigatorios.sql` antes do go-live e confirmar 0 duplicados.
 
 ---
 

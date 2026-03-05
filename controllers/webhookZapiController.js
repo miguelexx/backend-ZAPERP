@@ -772,7 +772,7 @@ exports.receberZapi = async (req, res) => {
 
         if (s === 'received' || s === 'entregue') return 'delivered'
         if (s === 'delivered') return 'delivered'
-        if (s === 'read' || s === 'seen' || s === 'visualizada' || s === 'lida') return 'read'
+        if (s === 'read' || s === 'read_by_me' || s === 'seen' || s === 'visualizada' || s === 'lida') return 'read'
         if (s === 'played') return 'played'
         if (s === 'pending' || s === 'enviando') return 'pending'
         if (s === 'sent' || s === 'enviada' || s === 'enviado') return 'sent'
@@ -837,15 +837,24 @@ exports.receberZapi = async (req, res) => {
       // Z-API envia este tipo quando o destinatário recebe ou lê a mensagem.
       // Se o payload tiver conteúdo de mensagem (text.message, message, body), é ReceivedCallback — NÃO status.
       const payloadFromMe = Boolean(payload?.fromMe ?? payload?.key?.fromMe)
+      // Z-API pode enviar mídia em payload.message.* (objeto aninhado) sem text.message.
+      // Ex.: ReceivedCallback em grupo com imagem vem sem payload.text, mas payload.message.image existe.
       const hasMessageContent =
         (payload?.text?.message != null && String(payload.text.message).trim() !== '') ||
-        (payload?.message != null && String(payload.message).trim() !== '') ||
+        (payload?.message != null && typeof payload.message === 'string' && String(payload.message).trim() !== '') ||
         (payload?.body != null && String(payload.body).trim() !== '') ||
         payload?.image != null || payload?.imageUrl != null ||
         payload?.audio != null || payload?.audioUrl != null ||
         payload?.video != null || payload?.videoUrl != null ||
         payload?.document != null || payload?.documentUrl != null ||
         payload?.sticker != null || payload?.stickerUrl != null ||
+        // Mídia aninhada em payload.message (Z-API grupos, callbacks variados)
+        payload?.message?.image != null || payload?.message?.imageUrl != null ||
+        payload?.message?.audio != null || payload?.message?.audioUrl != null ||
+        payload?.message?.video != null || payload?.message?.videoUrl != null ||
+        payload?.message?.document != null || payload?.message?.documentUrl != null ||
+        payload?.message?.sticker != null || payload?.message?.stickerUrl != null ||
+        payload?.message?.ptv != null || payload?.message?.location != null || payload?.message?.contact != null ||
         // Tipos extras que a Z-API envia como ReceivedCallback sem campo de texto/mídia
         payload?.reaction != null ||
         payload?.location != null ||
@@ -945,13 +954,19 @@ exports.receberZapi = async (req, res) => {
           const delivMsgId = payload?.messageId ?? payload?.zaapId ?? null
           const hasRealContent =
             (payload?.text?.message != null && String(payload.text.message).trim() !== '') ||
-            (payload?.message != null && String(payload.message).trim() !== '') ||
+            (payload?.message != null && typeof payload.message === 'string' && String(payload.message).trim() !== '') ||
             (payload?.body != null && String(payload.body).trim() !== '') ||
             payload?.image != null || payload?.imageUrl != null ||
             payload?.audio != null || payload?.audioUrl != null ||
             payload?.video != null || payload?.videoUrl != null ||
             payload?.document != null || payload?.documentUrl != null ||
-            payload?.sticker != null || payload?.stickerUrl != null
+            payload?.sticker != null || payload?.stickerUrl != null ||
+            payload?.message?.image != null || payload?.message?.imageUrl != null ||
+            payload?.message?.audio != null || payload?.message?.audioUrl != null ||
+            payload?.message?.video != null || payload?.message?.videoUrl != null ||
+            payload?.message?.document != null || payload?.message?.documentUrl != null ||
+            payload?.message?.sticker != null || payload?.message?.stickerUrl != null ||
+            payload?.message?.ptv != null || payload?.message?.location != null || payload?.message?.contact != null
 
           console.log('[Z-API] DeliveryCallback fromMe:', {
             messageId: delivMsgId ? String(delivMsgId).slice(0, 32) : null,
@@ -2049,13 +2064,14 @@ exports.receberZapi = async (req, res) => {
       // conversa_atualizada enriquecida: ultima_atividade, nome/foto cache (frontend atualiza lista lateral)
       const { data: convRow } = await supabase
         .from('conversas')
-        .select('id, ultima_atividade, nome_contato_cache, foto_perfil_contato_cache')
+        .select('id, ultima_atividade, nome_contato_cache, foto_perfil_contato_cache, telefone')
         .eq('id', convIdForEmit)
         .eq('company_id', company_id)
         .maybeSingle()
       const convPayload = {
         id: convIdForEmit,
         ultima_atividade: convRow?.ultima_atividade ?? new Date().toISOString(),
+        telefone: convRow?.telefone ?? null,
         ...(convRow?.nome_contato_cache ? { nome_contato_cache: convRow.nome_contato_cache, contato_nome: convRow.nome_contato_cache } : {}),
         ...(convRow?.foto_perfil_contato_cache ? { foto_perfil_contato_cache: convRow.foto_perfil_contato_cache, foto_perfil: convRow.foto_perfil_contato_cache } : {})
       }
@@ -2070,34 +2086,38 @@ exports.receberZapi = async (req, res) => {
       const { cliente_id: syncClienteId } = pendingContactSync
       const syncPhone = pendingContactSync.phone
       const convId = convIdForEmit
-      setImmediate(async () => {
-        const { data: current } = await supabase.from('clientes').select('nome, pushname, foto_perfil').eq('id', syncClienteId).eq('company_id', company_id).maybeSingle()
-        const synced = await syncContactFromZapi(syncPhone, company_id).catch(() => null)
-        if (!synced) return null
-        const up = {}
-        const nomeVazio = !current?.nome || !String(current.nome).trim()
-        const pushnameVazio = !current?.pushname || !String(current.pushname).trim()
-        const fotoVazia = !current?.foto_perfil || !String(current.foto_perfil).trim()
-        if (nomeVazio) up.nome = (synced.nome && String(synced.nome).trim()) ? String(synced.nome).trim() : syncPhone
-        if (pushnameVazio && synced.pushname !== undefined) up.pushname = synced.pushname
-        if (fotoVazia && synced.foto_perfil) up.foto_perfil = synced.foto_perfil
-        if (Object.keys(up).length === 0) return null
-        const res = await supabase.from('clientes').update(up).eq('id', syncClienteId).eq('company_id', company_id)
-        if (res.error) return
-        const r = await supabase.from('clientes').select('nome, pushname, telefone, foto_perfil').eq('id', syncClienteId).single()
-        const data = r?.data
-        if (data && io) {
-          const displayName = data.pushname || data.nome || data.telefone || syncPhone
-          console.log('✅ Contato sincronizado Z-API:', syncPhone?.slice(-6), displayName || '(sem nome)')
-          io.to(`empresa_${company_id}`).emit('contato_atualizado', {
-            conversa_id: convId,
-            contato_nome: displayName,
-            foto_perfil: data.foto_perfil
-          })
+      // Usar Promise em vez de setImmediate para permitir .catch (setImmediate não retorna Promise)
+      Promise.resolve().then(async () => {
+        try {
+          const { data: current } = await supabase.from('clientes').select('nome, pushname, foto_perfil').eq('id', syncClienteId).eq('company_id', company_id).maybeSingle()
+          const synced = await syncContactFromZapi(syncPhone, company_id).catch(() => null)
+          if (!synced) return null
+          const up = {}
+          const nomeVazio = !current?.nome || !String(current.nome).trim()
+          const pushnameVazio = !current?.pushname || !String(current.pushname).trim()
+          const fotoVazia = !current?.foto_perfil || !String(current.foto_perfil).trim()
+          if (nomeVazio) up.nome = (synced.nome && String(synced.nome).trim()) ? String(synced.nome).trim() : syncPhone
+          if (pushnameVazio && synced.pushname !== undefined) up.pushname = synced.pushname
+          if (fotoVazia && synced.foto_perfil) up.foto_perfil = synced.foto_perfil
+          if (Object.keys(up).length === 0) return null
+          const res = await supabase.from('clientes').update(up).eq('id', syncClienteId).eq('company_id', company_id)
+          if (res.error) return
+          const r = await supabase.from('clientes').select('nome, pushname, telefone, foto_perfil').eq('id', syncClienteId).single()
+          const data = r?.data
+          if (data && io) {
+            const displayName = data.pushname || data.nome || data.telefone || syncPhone
+            console.log('✅ Contato sincronizado Z-API:', syncPhone?.slice(-6), displayName || '(sem nome)')
+            io.to(`empresa_${company_id}`).emit('contato_atualizado', {
+              conversa_id: convId,
+              contato_nome: displayName,
+              telefone: data.telefone || syncPhone,
+              foto_perfil: data.foto_perfil
+            })
+          }
+        } catch (e) {
+          console.error('❌ Erro Z-API ao sincronizar contato:', syncPhone?.slice(-6), e?.message || e)
         }
-      }).catch((e) => {
-        console.error('❌ Erro Z-API ao sincronizar contato:', syncPhone?.slice(-6), e?.message || e)
-      })
+      }).catch(() => {})
     }
 
     lastResult = { ok: true, conversa_id: convIdForEmit, mensagem_id: mensagemSalva?.id }

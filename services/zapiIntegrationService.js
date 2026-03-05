@@ -97,17 +97,33 @@ async function getStatus(company_id) {
   }
 }
 
+/**
+ * Extrai base64 puro de string (aceita data:image/...;base64,XXX ou XXX puro).
+ */
+function extractBase64(value) {
+  if (!value || typeof value !== 'string') return null
+  const s = value.trim()
+  const match = s.match(/^data:image\/[^;]+;base64,(.+)$/i)
+  if (match) return match[1].trim()
+  return s
+}
+
 async function getQrCodeImage(company_id) {
   const { config, error } = await getEmpresaZapiConfig(company_id)
   if (error) return { error }
   const base = buildBaseUrl(config.instance_id, config.instance_token)
+  const headers = buildHeaders(config.client_token)
+
   try {
+    // 1) Tenta /qr-code/image (retorna JSON com base64)
     const res = await fetchWithTimeout(`${base}/qr-code/image`, {
       method: 'GET',
-      headers: buildHeaders(config.client_token)
+      headers: { ...headers, accept: 'application/json' }
     })
-    const data = await safeJson(res)
+    const contentType = (res.headers.get('content-type') || '').toLowerCase()
+
     if (!res.ok) {
+      const data = await safeJson(res)
       const bodyLower = JSON.stringify(data || {}).toLowerCase()
       if (bodyLower.includes('already connected') || bodyLower.includes('you are already connected')) {
         return { alreadyConnected: true }
@@ -115,13 +131,40 @@ async function getQrCodeImage(company_id) {
       if (bodyLower.includes('you need to restore the session') || bodyLower.includes('restore the session')) {
         return { needsRestore: true }
       }
-      console.warn('[ZAPI-INTEGRATION] QR erro (mascarado):', res.status)
+      console.warn('[ZAPI-INTEGRATION] QR image erro (mascarado):', res.status)
       return { error: data?.error || data?.message || 'Erro ao buscar QR Code' }
     }
-    const imageBase64 =
-      data?.qrCodeBase64 || data?.image || data?.imageBase64 || null
-    if (!imageBase64) return { error: 'Resposta da Z-API sem imagem de QR Code' }
-    return { imageBase64 }
+
+    // Resposta JSON: Z-API pode retornar qr, qrCode, qrCodeBase64, image, imageBase64
+    if (contentType.includes('application/json')) {
+      const data = await safeJson(res)
+      const raw =
+        data?.qrCodeBase64 || data?.qrCode || data?.qr || data?.image || data?.imageBase64 || null
+      const imageBase64 = extractBase64(raw)
+      if (imageBase64) return { imageBase64 }
+    }
+
+    // Resposta como texto puro (base64 direto no body)
+    if (contentType.includes('text/plain') || contentType.includes('text/')) {
+      const text = await res.text().catch(() => '')
+      const imageBase64 = extractBase64(text)
+      if (imageBase64) return { imageBase64 }
+    }
+
+    // 2) Fallback: /qr-code (retorna bytes do QR) e converte para base64
+    const resBytes = await fetchWithTimeout(`${base}/qr-code`, {
+      method: 'GET',
+      headers
+    })
+    if (resBytes.ok) {
+      const buf = await resBytes.arrayBuffer().catch(() => null)
+      if (buf && buf.byteLength > 0) {
+        const base64 = Buffer.from(buf).toString('base64')
+        return { imageBase64: base64 }
+      }
+    }
+
+    return { error: 'Resposta da Z-API sem imagem de QR Code' }
   } catch (e) {
     console.error('[ZAPI-INTEGRATION] QR exception:', e.message)
     return { error: 'Z-API fora do ar ou inacessível' }

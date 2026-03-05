@@ -835,16 +835,35 @@ exports.sincronizarContatosZapi = async (req, res) => {
 
       if (page === 1) {
         console.log(`[Sync Contatos] Primeira página: ${contacts.length} contatos recebidos`)
+        if (contacts[0]) {
+          const sample = contacts[0]
+          console.log('[Sync Contatos] Exemplo estrutura:', JSON.stringify({
+            keys: Object.keys(sample),
+            phone: sample.phone,
+            id: sample.id,
+            wa_id: sample.wa_id,
+            jid: typeof sample.jid === 'string' ? sample.jid.slice(0, 30) : sample.jid
+          }))
+        }
       }
 
       for (const c of contacts) {
-        const rawPhone = String(c.phone || '').trim()
+        // Z-API pode enviar phone, id, wa_id ou jid; id/jid vêm como "5511999999999@s.whatsapp.net"
+        let rawPhone = String(c.phone ?? c.wa_id ?? c.id ?? c.jid ?? '').trim()
+        if (rawPhone.includes('@')) rawPhone = rawPhone.replace(/@.*$/, '').trim()
+        if (!rawPhone) continue
+
         let phone = normalizePhoneBR(rawPhone)
         if (!phone) {
           const digits = rawPhone.replace(/\D/g, '')
-          if (digits.length >= 10 && digits.length <= 15) phone = digits
+          if (digits.length >= 10 && digits.length <= 13) {
+            phone = digits.startsWith('55') && (digits.length === 12 || digits.length === 13)
+              ? digits
+              : (digits.length === 10 || digits.length === 11 ? '55' + digits : null)
+          }
         }
-        if (!phone) continue
+        // Só aceita números BR válidos (55 + DDD + número)
+        if (!phone || !phone.startsWith('55') || (phone.length !== 12 && phone.length !== 13)) continue
         total++
 
         const nome = (c.name || c.short || c.notify || c.vname || '').trim() || null
@@ -932,6 +951,8 @@ exports.sincronizarContatosZapi = async (req, res) => {
                 .eq('id', jaExiste.id)
               if (!upd.error) atualizados++
             }
+          } else if (page === 1 && criados + atualizados < 3) {
+            console.warn('[Sync Contatos] Insert falhou:', ins.error?.code, ins.error?.message?.slice(0, 100), 'phone:', phone?.slice(-6))
           }
         }
       }
@@ -1589,11 +1610,13 @@ exports.detalharChat = async (req, res) => {
               .update(updates)
               .eq('company_id', cid)
               .eq('id', cliId)
-            if (!updErr && io && updates.foto_perfil) {
-              // Reutiliza o evento 'contato_atualizado' (já tratado no socket.js do frontend)
+            if (!updErr && io && (updates.foto_perfil || updates.pushname)) {
+              const { data: cli } = await supabase.from('clientes').select('nome, pushname, telefone, foto_perfil').eq('id', cliId).eq('company_id', cid).maybeSingle()
               io.to(`empresa_${cid}`).emit('contato_atualizado', {
                 conversa_id: Number(id),
-                foto_perfil: updates.foto_perfil
+                contato_nome: cli?.pushname || cli?.nome || cliPhone,
+                telefone: cli?.telefone || cliPhone,
+                foto_perfil: cli?.foto_perfil || updates.foto_perfil
               })
             }
           } catch (_) {}
@@ -1995,10 +2018,16 @@ exports.enviarMensagemChat = async (req, res) => {
               if (Object.keys(up).length === 0) return null
               return supabase.from('clientes').update(up).eq('id', novoClienteId).eq('company_id', company_id)
             })
-            .then((r) => {
+            .then(async (r) => {
               if (r && !r.error && req.app?.get('io')) {
                 const io = req.app.get('io')
-                io.to(`empresa_${company_id}`).emit('contato_atualizado', { conversa_id: Number(conversa_id) })
+                const { data: cli } = await supabase.from('clientes').select('nome, pushname, telefone').eq('id', novoClienteId).eq('company_id', company_id).maybeSingle()
+                const contatoNome = cli?.pushname || cli?.nome || conversa.nome_contato_cache || conversa.telefone
+                io.to(`empresa_${company_id}`).emit('contato_atualizado', {
+                  conversa_id: Number(conversa_id),
+                  contato_nome: contatoNome,
+                  telefone: cli?.telefone || conversa.telefone
+                })
               }
             })
             .catch(() => {})
