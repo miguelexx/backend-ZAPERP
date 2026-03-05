@@ -10,7 +10,7 @@ exports.listarClientes = async (req, res) => {
     const cid = Number(company_id)
     let query = supabase
       .from('clientes')
-      .select('id, telefone, wa_id, nome, observacoes, foto_perfil, email, empresa, ultimo_contato, criado_em')
+      .select('id, telefone, wa_id, nome, pushname, observacoes, foto_perfil, email, empresa, ultimo_contato, criado_em')
       .eq('company_id', cid)
     query = query.order('id', { ascending: false })
 
@@ -30,7 +30,8 @@ exports.listarClientes = async (req, res) => {
       id: c.id,
       telefone: c.telefone,
       wa_id: c.wa_id,
-      nome: c.nome,
+      nome: c.nome || c.pushname || null,
+      pushname: c.pushname || null,
       observacoes: c.observacoes,
       foto_perfil: c.foto_perfil || null,
       email: c.email || null,

@@ -1474,12 +1474,33 @@ exports.receberZapi = async (req, res) => {
           .eq('company_id', company_id)
       }
 
-      // Cache nome/foto do contato (igual WhatsApp Web): prioridade senderName -> chatName -> pushname
-      // Aplica para TODOS os contatos individuais (não só LID) — nunca sobrescrever com null
+      // Vincular conversa ao cliente quando obtido via LID ou conversa existente sem cliente_id
+      if (!isGroup && conversa_id && cliente_id) {
+        const { data: convRow } = await supabase
+          .from('conversas')
+          .select('cliente_id')
+          .eq('id', conversa_id)
+          .eq('company_id', company_id)
+          .maybeSingle()
+        if (convRow && convRow.cliente_id == null) {
+          await supabase.from('conversas').update({ cliente_id }).eq('id', conversa_id).eq('company_id', company_id)
+          console.log('[Z-API] Conversa vinculada ao cliente', { conversa_id, cliente_id })
+        }
+      }
+
+      // Cache nome/foto do contato — só preenche quando vazio (evita sobrescrever com dados inconsistentes)
       if (!isGroup && conversa_id && (senderName || senderPhoto)) {
+        const { data: convAtual } = await supabase
+          .from('conversas')
+          .select('nome_contato_cache, foto_perfil_contato_cache')
+          .eq('id', conversa_id)
+          .eq('company_id', company_id)
+          .maybeSingle()
         const cacheUpdates = {}
-        if (senderName && String(senderName).trim()) cacheUpdates.nome_contato_cache = String(senderName).trim()
-        if (senderPhoto && String(senderPhoto).trim()) cacheUpdates.foto_perfil_contato_cache = String(senderPhoto).trim()
+        const nomeCacheVazio = !convAtual?.nome_contato_cache || !String(convAtual.nome_contato_cache).trim()
+        const fotoCacheVazia = !convAtual?.foto_perfil_contato_cache || !String(convAtual.foto_perfil_contato_cache).trim()
+        if (nomeCacheVazio && senderName && String(senderName).trim()) cacheUpdates.nome_contato_cache = String(senderName).trim()
+        if (fotoCacheVazia && senderPhoto && String(senderPhoto).trim()) cacheUpdates.foto_perfil_contato_cache = String(senderPhoto).trim()
         if (Object.keys(cacheUpdates).length > 0) {
           await supabase.from('conversas')
             .update(cacheUpdates)
@@ -1973,7 +1994,7 @@ exports.receberZapi = async (req, res) => {
             .from('conversas')
             .select('cliente_id, tipo, telefone')
             .eq('company_id', company_id)
-            .eq('id', conversa_id)
+            .eq('id', convIdForUpdate)
             .maybeSingle()
           const convIsGroup = String(convRow?.tipo || '').toLowerCase() === 'grupo' || String(convRow?.telefone || '').includes('@g.us')
           if (!convIsGroup && convRow?.cliente_id != null) {
@@ -2049,37 +2070,33 @@ exports.receberZapi = async (req, res) => {
       const { cliente_id: syncClienteId } = pendingContactSync
       const syncPhone = pendingContactSync.phone
       const convId = convIdForEmit
-      setImmediate(() => {
-        syncContactFromZapi(syncPhone, company_id)
-          .then((synced) => {
-            if (!synced) return null
-            const up = {}
-            // Se não houver nome na Z-API, salva o número.
-            up.nome = (synced.nome && String(synced.nome).trim()) ? String(synced.nome).trim() : syncPhone
-            if (synced.pushname !== undefined) up.pushname = synced.pushname
-            if (synced.foto_perfil) up.foto_perfil = synced.foto_perfil
-            if (Object.keys(up).length === 0) return null
-            return supabase.from('clientes').update(up).eq('id', syncClienteId).eq('company_id', company_id)
+      setImmediate(async () => {
+        const { data: current } = await supabase.from('clientes').select('nome, pushname, foto_perfil').eq('id', syncClienteId).eq('company_id', company_id).maybeSingle()
+        const synced = await syncContactFromZapi(syncPhone, company_id).catch(() => null)
+        if (!synced) return null
+        const up = {}
+        const nomeVazio = !current?.nome || !String(current.nome).trim()
+        const pushnameVazio = !current?.pushname || !String(current.pushname).trim()
+        const fotoVazia = !current?.foto_perfil || !String(current.foto_perfil).trim()
+        if (nomeVazio) up.nome = (synced.nome && String(synced.nome).trim()) ? String(synced.nome).trim() : syncPhone
+        if (pushnameVazio && synced.pushname !== undefined) up.pushname = synced.pushname
+        if (fotoVazia && synced.foto_perfil) up.foto_perfil = synced.foto_perfil
+        if (Object.keys(up).length === 0) return null
+        const res = await supabase.from('clientes').update(up).eq('id', syncClienteId).eq('company_id', company_id)
+        if (res.error) return
+        const r = await supabase.from('clientes').select('nome, pushname, telefone, foto_perfil').eq('id', syncClienteId).single()
+        const data = r?.data
+        if (data && io) {
+          const displayName = data.pushname || data.nome || data.telefone || syncPhone
+          console.log('✅ Contato sincronizado Z-API:', syncPhone?.slice(-6), displayName || '(sem nome)')
+          io.to(`empresa_${company_id}`).emit('contato_atualizado', {
+            conversa_id: convId,
+            contato_nome: displayName,
+            foto_perfil: data.foto_perfil
           })
-          .then((res) => {
-            if (!res || res.error) return null
-            return supabase.from('clientes').select('nome, pushname, telefone, foto_perfil').eq('id', syncClienteId).single()
-          })
-          .then((r) => {
-            const data = r?.data
-            if (data && io) {
-              const displayName = data.pushname || data.nome || data.telefone || syncPhone
-              console.log('✅ Contato sincronizado Z-API:', syncPhone?.slice(-6), displayName || '(sem nome)')
-              io.to(`empresa_${company_id}`).emit('contato_atualizado', {
-                conversa_id: convId,
-                contato_nome: displayName,
-                foto_perfil: data.foto_perfil
-              })
-            }
-          })
-          .catch((e) => {
-            console.error('❌ Erro Z-API ao sincronizar contato:', syncPhone?.slice(-6), e?.message || e)
-          })
+        }
+      }).catch((e) => {
+        console.error('❌ Erro Z-API ao sincronizar contato:', syncPhone?.slice(-6), e?.message || e)
       })
     }
 
@@ -2179,10 +2196,31 @@ exports.statusZapi = async (req, res) => {
       if (!messageId) continue
       const idStr = String(messageId)
 
+      // Grupos: WhatsApp não envia read receipts confiáveis — cap em delivered
+      let effectiveStatus = statusNorm
+      if (statusNorm === 'read' || statusNorm === 'played') {
+        const { data: msgForConv } = await supabase
+          .from('mensagens')
+          .select('conversa_id')
+          .eq('company_id', company_id)
+          .eq('whatsapp_id', idStr)
+          .maybeSingle()
+        if (msgForConv?.conversa_id) {
+          const { data: conv } = await supabase
+            .from('conversas')
+            .select('tipo, telefone')
+            .eq('id', msgForConv.conversa_id)
+            .eq('company_id', company_id)
+            .maybeSingle()
+          const isGroup = conv?.tipo === 'grupo' || (conv?.telefone && String(conv.telefone).endsWith('@g.us'))
+          if (isGroup) effectiveStatus = 'delivered'
+        }
+      }
+
       // 1) Atualiza por (company_id, whatsapp_id) — match exato
       let { data: msg } = await supabase
         .from('mensagens')
-        .update({ status: statusNorm })
+        .update({ status: effectiveStatus })
         .eq('company_id', company_id)
         .eq('whatsapp_id', idStr)
         .select('id, conversa_id, company_id')
@@ -2203,7 +2241,7 @@ exports.statusZapi = async (req, res) => {
         if (candidate?.id) {
           const { data: patched } = await supabase
             .from('mensagens')
-            .update({ status: statusNorm })
+            .update({ status: effectiveStatus })
             .eq('company_id', company_id)
             .eq('id', candidate.id)
             .select('id, conversa_id, company_id')
@@ -2218,7 +2256,7 @@ exports.statusZapi = async (req, res) => {
           const payload = {
             mensagem_id: msg.id,
             conversa_id: msg.conversa_id,
-            status: statusNorm,
+            status: effectiveStatus,
             whatsapp_id: idStr
           }
           io.to(`empresa_${msg.company_id}`).to(`conversa_${msg.conversa_id}`).emit('status_mensagem', payload)

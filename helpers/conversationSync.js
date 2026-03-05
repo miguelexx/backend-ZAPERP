@@ -160,9 +160,28 @@ async function mergeConversationLidToPhone(supabaseClient, company_id, chatLid, 
  * @returns {Promise<{ cliente_id: number|null }>}
  */
 async function getOrCreateCliente(supabaseClient, company_id, phone, fields = {}) {
-  const telefoneCanonico = getCanonicalPhone(phone)
+  let telefoneCanonico = getCanonicalPhone(phone)
   const phones = possiblePhonesBR(phone)
-  const searchPhones = phones.length > 0 ? phones : (telefoneCanonico ? [telefoneCanonico] : [phone].filter(Boolean))
+  let searchPhones = phones.length > 0 ? phones : (telefoneCanonico ? [telefoneCanonico] : [])
+
+  // Fallback: extrair dígitos (10 ou 11 = DDD+num BR) e tentar normalizar quando getCanonicalPhone falha
+  if (searchPhones.length === 0 && phone) {
+    const digits = String(phone).replace(/\D/g, '')
+    if (digits.length >= 10 && digits.length <= 13 && !digits.startsWith('120')) {
+      const with55 = digits.startsWith('55') ? digits : '55' + digits
+      if (with55.startsWith('55') && (with55.length === 12 || with55.length === 13)) {
+        searchPhones = [with55]
+        if (with55.length === 12) searchPhones.push(with55.slice(0, 4) + '9' + with55.slice(4))
+        else if (with55.length === 13 && with55[4] === '9') searchPhones.push(with55.slice(0, 4) + with55.slice(5))
+        if (!telefoneCanonico) telefoneCanonico = with55
+      }
+    }
+  }
+
+  // Garantir telefoneCanonico quando temos searchPhones mas getCanonicalPhone retornou vazio
+  if (searchPhones.length > 0 && !telefoneCanonico) {
+    telefoneCanonico = searchPhones[0]
+  }
 
   if (searchPhones.length === 0) {
     return { cliente_id: null }
