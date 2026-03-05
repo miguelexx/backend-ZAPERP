@@ -2,7 +2,7 @@ const supabase = require('../config/supabase')
 const { getProvider } = require('../services/providers')
 const { isGroupConversation } = require('../helpers/conversaHelper')
 const { normalizePhoneBR, possiblePhonesBR, phoneKeyBR } = require('../helpers/phoneHelper')
-const { deduplicateConversationsByContact, sortConversationsByRecent, getCanonicalPhone } = require('../helpers/conversationSync')
+const { deduplicateConversationsByContact, sortConversationsByRecent, getCanonicalPhone, getOrCreateCliente } = require('../helpers/conversationSync')
 
 // =====================================================
 // 1) HELPERS (TOPO DO ARQUIVO)
@@ -801,6 +801,7 @@ exports.zapiStatus = async (req, res) => {
 
 // =====================================================
 // 3b) Sincronizar contatos do celular (Z-API Get contacts)
+// Busca TODOS os contatos do WhatsApp (paginado) e persiste em clientes.
 // =====================================================
 exports.sincronizarContatosZapi = async (req, res) => {
   try {
@@ -810,19 +811,30 @@ exports.sincronizarContatosZapi = async (req, res) => {
       return res.status(501).json({ error: 'Sincronização de contatos disponível apenas com Z-API configurado.' })
     }
 
-    const pageSize = 100
+    const pageSize = 250
+    const maxPages = 120
     let page = 1
     let total = 0
     let atualizados = 0
     let criados = 0
 
-    while (true) {
+    console.log(`[Sync Contatos] Iniciando para company ${company_id} (pageSize=${pageSize})`)
+
+    while (page <= maxPages) {
       const contacts = await provider.getContacts(page, pageSize, { companyId: company_id })
       if (!Array.isArray(contacts) || contacts.length === 0) break
 
+      if (page === 1) {
+        console.log(`[Sync Contatos] Primeira página: ${contacts.length} contatos recebidos`)
+      }
+
       for (const c of contacts) {
         const rawPhone = String(c.phone || '').trim()
-        const phone = normalizePhoneBR(rawPhone) || rawPhone.replace(/\D/g, '').trim()
+        let phone = normalizePhoneBR(rawPhone)
+        if (!phone) {
+          const digits = rawPhone.replace(/\D/g, '')
+          if (digits.length >= 10 && digits.length <= 15) phone = digits
+        }
         if (!phone) continue
         total++
 
@@ -918,6 +930,8 @@ exports.sincronizarContatosZapi = async (req, res) => {
       if (contacts.length < pageSize) break
       page++
     }
+
+    console.log(`[Sync Contatos] Concluído: ${total} processados, ${criados} novos, ${atualizados} atualizados`)
 
     return res.json({
       ok: true,
@@ -1927,13 +1941,28 @@ exports.enviarMensagemChat = async (req, res) => {
 
     const { data: conversa, error: errConv } = await supabase
       .from('conversas')
-      .select('id, telefone, cliente_id, tipo')
+      .select('id, telefone, cliente_id, tipo, nome_contato_cache, foto_perfil_contato_cache')
       .eq('company_id', company_id)
       .eq('id', conversa_id)
       .single()
 
     if (errConv || !conversa) {
       return res.status(404).json({ error: 'Conversa não encontrada' })
+    }
+
+    // Garantir que o contato (número + nome) esteja salvo em clientes antes de enviar
+    const isGroup = String(conversa?.tipo || '').toLowerCase() === 'grupo' || String(conversa?.telefone || '').includes('@g.us')
+    if (!isGroup && conversa?.telefone && !conversa?.cliente_id) {
+      const nomeCache = conversa?.nome_contato_cache ? String(conversa.nome_contato_cache).trim() : null
+      const fotoCache = conversa?.foto_perfil_contato_cache ? String(conversa.foto_perfil_contato_cache).trim() : null
+      const { cliente_id: novoClienteId } = await getOrCreateCliente(supabase, company_id, conversa.telefone, {
+        nome: nomeCache || undefined,
+        foto_perfil: fotoCache || undefined
+      })
+      if (novoClienteId) {
+        await supabase.from('conversas').update({ cliente_id: novoClienteId }).eq('id', conversa_id).eq('company_id', company_id)
+        conversa.cliente_id = novoClienteId
+      }
     }
 
     const hasLinkPayload = link && typeof link === 'object' && link.linkUrl
@@ -2011,6 +2040,9 @@ exports.enviarMensagemChat = async (req, res) => {
     }
 
     // Envio para WhatsApp via provider (meta ou zapi, conforme WHATSAPP_PROVIDER)
+    if (!conversa?.telefone) {
+      console.warn(`[WhatsApp] Conversa ${conversa_id} sem telefone (company ${company_id}) — mensagem salva, mas não enviada ao WhatsApp`)
+    }
     if (conversa?.telefone) {
       let phoneId = null
       try {

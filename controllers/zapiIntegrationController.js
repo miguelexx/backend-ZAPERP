@@ -1,4 +1,5 @@
 const { getStatus, getQrCodeImage, restartInstance, getMe, getPhoneCode, buildMeSummary, getEmpresaZapiConfig } = require('../services/zapiIntegrationService')
+const { syncContacts } = require('../services/zapiContactsSyncService')
 const { checkGuard, recordQrServed, resetOnConnected, getAttempts, THROTTLE_SECONDS } = require('../services/zapiConnectGuardService')
 
 // Rate limit simples por empresa/endpoint em memória (complementar ao express-rate-limit global).
@@ -299,6 +300,28 @@ exports.debugStatus = async (req, res) => {
     needsRestore: !!result.needsRestore,
     error: null
   })
+}
+
+/**
+ * POST /contacts/sync — sincroniza contatos do celular via Z-API.
+ * Usa API oficial GET /contacts quando disponível; fallback via conversas existentes.
+ */
+exports.syncContacts = async (req, res) => {
+  const company_id = req.user?.company_id
+  if (!company_id) {
+    return res.status(401).json({ error: 'Não autenticado' })
+  }
+  if (!checkCompanyRate(company_id, 'contacts-sync', 60_000, 5)) {
+    return res.status(429).json({
+      error: 'Muitas sincronizações. Aguarde 1 minuto.',
+      retryAfterSeconds: 60
+    })
+  }
+  const result = await syncContacts(company_id)
+  if (!result.ok) {
+    return res.status(400).json(result)
+  }
+  return res.json(result)
 }
 
 /**

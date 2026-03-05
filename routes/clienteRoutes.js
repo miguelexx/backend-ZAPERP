@@ -9,6 +9,9 @@ router.use(auth);
 // LISTAR
 router.get('/', clienteController.listarClientes);
 
+// APAGAR TODOS (deve vir antes de /:id)
+router.delete('/todos', clienteController.apagarTodosClientes);
+
 // PEGAR 1
 router.get('/:id', clienteController.buscarClientePorId);
 

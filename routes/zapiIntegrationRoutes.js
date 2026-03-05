@@ -30,5 +30,8 @@ connectRouter.post('/restart', zapiIntegrationController.connectRestart)
 connectRouter.post('/phone-code', zapiIntegrationController.phoneCode)
 router.use('/connect', connectRouter)
 
+// Sincronizar contatos do celular (Z-API GET /contacts ou fallback)
+router.post('/contacts/sync', zapiIntegrationController.syncContacts)
+
 module.exports = router
 

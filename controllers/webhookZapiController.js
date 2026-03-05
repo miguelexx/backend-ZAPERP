@@ -2282,20 +2282,25 @@ exports.connectionZapi = async (req, res) => {
           }
 
           console.log('🔄 Z-API: iniciando sync de contatos (on connected)...')
-          const pageSize = 100
+          const pageSize = 250
+          const maxPages = 120
           let page = 1
           let total = 0
           let atualizados = 0
           let criados = 0
           let fotosAtualizadas = 0
 
-          while (true) {
+          while (page <= maxPages) {
             const contacts = await provider.getContacts(page, pageSize, { companyId: company_id })
             if (!Array.isArray(contacts) || contacts.length === 0) break
 
             for (const c of contacts) {
               const rawPhone = String(c.phone || '').trim()
-              const phone = normalizePhoneBR(rawPhone) || rawPhone.replace(/\D/g, '').trim()
+              let phone = normalizePhoneBR(rawPhone)
+              if (!phone) {
+                const digits = rawPhone.replace(/\D/g, '')
+                if (digits.length >= 10 && digits.length <= 15) phone = digits
+              }
               if (!phone) continue
               total++
 

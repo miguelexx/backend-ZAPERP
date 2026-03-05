@@ -28,7 +28,10 @@ async function resolveConfig(opts = {}) {
   const companyId = opts?.companyId ?? opts?.company_id
   if (companyId != null && companyId !== '') {
     const { config, error } = await getEmpresaZapiConfig(Number(companyId))
-    if (error || !config) return null
+    if (error || !config) {
+      console.warn(`[ZAPI] Empresa ${companyId} sem instância Z-API configurada (empresa_zapi). Envio cancelado.`, error || 'config vazio')
+      return null
+    }
     const base = ZAPI_BASE_URL
     const basePath = `${base}/instances/${encodeURIComponent(config.instance_id)}/token/${encodeURIComponent(config.instance_token)}`
     const headers = { 'Content-Type': 'application/json' }
@@ -208,7 +211,11 @@ function phoneCandidatesForLookup(phone) {
  */
 async function sendText(phone, message, opts = {}) {
   const cfg = await resolveConfig(opts)
-  if (!cfg) return { ok: false, messageId: null }
+  if (!cfg) {
+    const cid = opts?.companyId ?? opts?.company_id
+    if (cid != null) console.warn(`[ZAPI] sendText: sem config para company ${cid} — verifique empresa_zapi (company_id, instance_id, ativo=true)`)
+    return { ok: false, messageId: null }
+  }
   const nums = await phoneCandidatesForSendAsync(phone, cfg)
   if (!nums.length || !message) return { ok: false, messageId: null }
 
@@ -451,6 +458,7 @@ async function sendSticker(phone, sticker, opts = {}) {
 /**
  * Lista contatos do WhatsApp (celular conectado).
  * GET /contacts?page=1&pageSize=100
+ * A Z-API retorna array direto ou pode vir encapsulado (contacts/data/value).
  * @param {number} [page]
  * @param {number} [pageSize]
  * @param {{ companyId?: number }} [opts]
@@ -463,9 +471,19 @@ async function getContacts(page = 1, pageSize = 100, opts = {}) {
       `${cfg.basePath}/contacts?page=${Number(page)}&pageSize=${Number(pageSize)}`,
       { method: 'GET', headers: cfg.headers }
     )
-    if (!res.ok) return []
-    const data = await res.json()
-    return Array.isArray(data) ? data : []
+    if (!res.ok) {
+      const errBody = await res.text().catch(() => '')
+      console.warn('[Z-API] getContacts falhou:', res.status, String(errBody || '').slice(0, 150))
+      return []
+    }
+    const data = await res.json().catch(() => null)
+    // Resposta pode ser array direto ou { contacts: [...] } / { data: [...] } / { value: [...] }
+    if (Array.isArray(data)) return data
+    if (data && typeof data === 'object') {
+      const arr = data.contacts ?? data.data ?? data.value ?? data.list ?? []
+      return Array.isArray(arr) ? arr : []
+    }
+    return []
   } catch (e) {
     console.error('Z-API getContacts:', e.message)
     return []

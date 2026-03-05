@@ -201,6 +201,33 @@ exports.atualizarCliente = async (req, res) => {
 };
 
 /**
+ * DELETE /clientes/todos — apaga todos os clientes da empresa.
+ * Desvincula conversas (cliente_id=null), remove cliente_tags e deleta clientes.
+ */
+exports.apagarTodosClientes = async (req, res) => {
+  const { company_id } = req.user || {};
+  const cid = Number(company_id);
+  if (!cid) {
+    return res.status(401).json({ erro: 'Não autorizado' });
+  }
+
+  try {
+    await supabase.from('conversas').update({ cliente_id: null }).eq('company_id', cid).neq('cliente_id', null);
+    const { error: errTags } = await supabase.from('cliente_tags').delete().eq('company_id', cid);
+    if (errTags && !String(errTags.message || '').includes('does not exist')) {
+      console.warn('[apagarTodosClientes] cliente_tags:', errTags?.message);
+    }
+    const { data: delData, error: errDel } = await supabase.from('clientes').delete().eq('company_id', cid).select('id');
+    if (errDel) throw errDel;
+    const qtd = Array.isArray(delData) ? delData.length : 0;
+    return res.status(200).json({ ok: true, apagados: qtd, mensagem: `${qtd} cliente(s) apagado(s).` });
+  } catch (err) {
+    console.error('[apagarTodosClientes]', err);
+    return res.status(500).json({ erro: err.message || 'Erro ao apagar clientes' });
+  }
+};
+
+/**
  * DELETE /clientes/:id
  */
 exports.excluirCliente = async (req, res) => {
