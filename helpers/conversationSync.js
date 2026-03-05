@@ -159,8 +159,8 @@ async function mergeConversationLidToPhone(supabaseClient, company_id, chatLid, 
 
 /**
  * getOrCreateCliente — SELECT-then-UPDATE/INSERT. Nunca insert puro.
- * Evita 23505 (duplicate key) em clientes_telefone_unique ou clientes_company_telefone_unique.
- * Se cliente já existe (mesma company ou global por telefone), retorna o id e atualiza nome/foto.
+ * Evita 23505 (duplicate key) em clientes_company_telefone_unique.
+ * Cada empresa tem seus próprios clientes; nunca retorna cliente de outra company.
  *
  * @param {object} supabaseClient
  * @param {number} company_id
@@ -280,19 +280,8 @@ async function getOrCreateCliente(supabaseClient, company_id, phone, fields = {}
     return { cliente_id: null }
   }
 
-  // 4) SELECT sem company_id — cliente pode existir em outra company (UNIQUE telefone global)
-  const { data: rowsGlobal } = await supabaseClient
-    .from('clientes')
-    .select('id')
-    .in('telefone', searchPhones)
-    .order('id', { ascending: true })
-    .limit(1)
-  const existenteGlobal = Array.isArray(rowsGlobal) && rowsGlobal[0] ? rowsGlobal[0] : null
-  if (existenteGlobal?.id) {
-    return { cliente_id: existenteGlobal.id }
-  }
-
-  // 5) INSERT — não usar nome "ruim" (evita regressão)
+  // 4) INSERT — cada empresa tem seus próprios clientes (UNIQUE company_id + telefone).
+  // NUNCA retornar cliente de outra company; isolamento multi-tenant.
   const nomeRaw = fields.nome && String(fields.nome).trim()
   const nome = (nomeRaw && !isBadName(nomeRaw)) ? nomeRaw : telefoneCanonico || null
   const pushname = (fields.pushname !== undefined && fields.pushname != null && String(fields.pushname).trim()) ? String(fields.pushname).trim() : null
@@ -314,23 +303,12 @@ async function getOrCreateCliente(supabaseClient, company_id, phone, fields = {}
     return { cliente_id: novoCliente.id }
   }
 
-  // 6) 23505 ou similar: buscar existente (race ou constraint global)
+  // 5) 23505: race condition — buscar existente da MESMA company (unique é company_id + telefone)
   const isDuplicate = String(errInsert?.code || '') === '23505' ||
     String(errInsert?.message || '').includes('unique') ||
     String(errInsert?.message || '').includes('duplicate')
 
   if (isDuplicate) {
-    const { data: foundRows } = await supabaseClient
-      .from('clientes')
-      .select('id')
-      .in('telefone', searchPhones)
-      .order('id', { ascending: true })
-      .limit(1)
-    const found = Array.isArray(foundRows) && foundRows[0] ? foundRows[0] : null
-    if (found?.id) {
-      return { cliente_id: found.id }
-    }
-    // Também tentar com company_id (race condition mesma company)
     const { data: foundByCo } = await supabaseClient
       .from('clientes')
       .select('id')
