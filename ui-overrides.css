@@ -415,6 +415,71 @@ body {
 }
 
 /* ============================================
+   Áudio — modo escuro
+   Contraste e legibilidade no dark mode
+============================================ */
+@media (prefers-color-scheme: dark) {
+  .wa-bubble .audio-message,
+  .wa-bubble .wa-bubble-audioWrap,
+  .wa-bubble-audio,
+  .wa-bubble .wa-bubble-audio {
+    background: rgba(45, 65, 58, 0.85) !important;
+    border-radius: 12px !important;
+    color: rgba(255, 255, 255, 0.95) !important;
+  }
+
+  .wa-bubble.in .audio-message,
+  .wa-bubble.in .wa-bubble-audioWrap,
+  .wa-bubble.in .wa-bubble-audio {
+    background: rgba(35, 55, 48, 0.9) !important;
+  }
+
+  .wa-bubble.out .audio-message,
+  .wa-bubble.out .wa-bubble-audioWrap,
+  .wa-bubble.out .wa-bubble-audio {
+    background: rgba(20, 90, 60, 0.5) !important;
+  }
+
+  .audio-message button[class*="play"],
+  .wa-bubble-audio button,
+  .wa-bubble-audio [class*="play"] {
+    background: rgba(255, 255, 255, 0.15) !important;
+    color: rgba(255, 255, 255, 0.95) !important;
+  }
+
+  .audio-message button[class*="play"]:hover,
+  .wa-bubble-audio button:hover {
+    background: rgba(255, 255, 255, 0.25) !important;
+  }
+
+  .audio-message [class*="time"],
+  .audio-message [class*="duration"],
+  .wa-bubble-audio [class*="time"],
+  .wa-bubble-audio [class*="duration"] {
+    color: rgba(255, 255, 255, 0.9) !important;
+  }
+}
+
+/* Fallback: tema dark via classe .dark no html/body */
+html.dark .wa-bubble .audio-message,
+html.dark .wa-bubble .wa-bubble-audioWrap,
+html.dark .wa-bubble-audio,
+[data-theme="dark"] .wa-bubble .audio-message,
+[data-theme="dark"] .wa-bubble .wa-bubble-audioWrap {
+  background: rgba(45, 65, 58, 0.85) !important;
+  color: rgba(255, 255, 255, 0.95) !important;
+}
+
+html.dark .audio-message [class*="time"],
+html.dark .audio-message [class*="duration"],
+html.dark .wa-bubble-audio [class*="time"],
+html.dark .wa-bubble-audio [class*="duration"],
+[data-theme="dark"] .audio-message [class*="time"],
+[data-theme="dark"] .wa-bubble-audio [class*="time"] {
+  color: rgba(255, 255, 255, 0.9) !important;
+}
+
+/* ============================================
    Imagens — classe .image-message
    max 320x320, proporção, border-radius, centralizado, sem esticar
 ============================================ */
