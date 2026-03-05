@@ -427,13 +427,14 @@ function extractMessage(payload) {
   const participantPhoneRaw = partPhoneResolved ||
     String(payload.participantPhone ?? payload.participant ?? payload.author ?? payload.key?.participant ?? '').replace(/\D/g, '')
   // Doc Z-API: when fromMe=true, "sender" is us; nome/foto do CONTATO (destino) vêm de chatName/chat/photo
+  // Prioridade: notifyName (nome no WA) > senderName > chatName > displayName > pushName > formattedName
   const fromMeForExtract = Boolean(payload.fromMe ?? payload.key?.fromMe)
   const senderName = fromMeForExtract
-    ? (payload.chatName ?? payload.chat?.name ?? payload.groupName ?? payload.senderName ?? payload.pushName ?? null)
-    : (payload.senderName ?? payload.chatName ?? payload.sender?.name ?? payload.pushName ?? null)
+    ? (payload.chatName ?? payload.chat?.name ?? payload.groupName ?? payload.notifyName ?? payload.senderName ?? payload.displayName ?? payload.pushName ?? payload.formattedName ?? payload.sender?.name ?? null)
+    : (payload.notifyName ?? payload.senderName ?? payload.chatName ?? payload.chat?.name ?? payload.displayName ?? payload.pushName ?? payload.formattedName ?? payload.sender?.name ?? null)
   const senderPhoto = fromMeForExtract
-    ? (payload.chatPhoto ?? payload.chat?.photo ?? payload.senderPhoto ?? payload.photo ?? payload.sender?.photo ?? null)
-    : (payload.senderPhoto ?? payload.photo ?? payload.sender?.photo ?? null)
+    ? (payload.chatPhoto ?? payload.chat?.photo ?? payload.senderPhoto ?? payload.photo ?? payload.profilePicture ?? payload.sender?.photo ?? payload.profilePictureUrl ?? null)
+    : (payload.senderPhoto ?? payload.photo ?? payload.profilePicture ?? payload.sender?.photo ?? payload.profilePictureUrl ?? null)
   // Para grupos, a Z-API costuma enviar a foto do grupo apenas em `photo`.
   // Usamos chatPhoto/groupPicture/groupPhoto e, como fallback quando isGroup, o campo photo.
   const chatPhoto =
@@ -1063,7 +1064,7 @@ exports.receberZapi = async (req, res) => {
           try {
             const { data: convRow } = await supabase
               .from('conversas')
-              .select('id, telefone')
+              .select('id, telefone, cliente_id')
               .eq('company_id', company_id)
               .eq('id', msg.conversa_id)
               .maybeSingle()
@@ -1071,7 +1072,24 @@ exports.receberZapi = async (req, res) => {
             if (convRow && canonical) {
               const telAtual = convRow.telefone ? String(convRow.telefone).trim() : ''
               const isLidTel = telAtual.toLowerCase().startsWith('lid:')
-              if (!telAtual || isLidTel) {
+              const isGroupDest = String(phoneDest).startsWith('120')
+              if ((!telAtual || isLidTel) && !isGroupDest) {
+                const nomeDest = payload?.chatName ?? payload?.chat?.name ?? payload?.senderName ?? payload?.notifyName ?? payload?.pushName ?? null
+                const fotoDest = payload?.chatPhoto ?? payload?.chat?.photo ?? payload?.senderPhoto ?? payload?.photo ?? null
+                const { cliente_id: cid } = await getOrCreateCliente(supabase, company_id, canonical, {
+                  nome: nomeDest ? String(nomeDest).trim() : undefined,
+                  foto_perfil: fotoDest ? String(fotoDest).trim() : undefined
+                })
+                await supabase
+                  .from('conversas')
+                  .update({ telefone: canonical, ...(cid ? { cliente_id: cid } : {}) })
+                  .eq('company_id', company_id)
+                  .eq('id', convRow.id)
+                const io = req.app.get('io')
+                if (io) {
+                  io.to(`empresa_${company_id}`).emit('conversa_atualizada', { id: convRow.id, telefone: canonical, ...(cid ? { cliente_id: cid } : {}) })
+                }
+              } else if ((!telAtual || isLidTel) && isGroupDest) {
                 await supabase
                   .from('conversas')
                   .update({ telefone: canonical })
@@ -1341,11 +1359,14 @@ exports.receberZapi = async (req, res) => {
         console.log('[Z-API] LID key — conversa sem cliente vinculado (número real não disponível):', phone)
       } else {
         const nomePayloadRaw = fromMe
-          ? (payload.chatName ?? payload.chat?.name ?? payload.groupName ?? payload.senderName ?? payload.pushName ?? null)
-          : (payload.senderName ?? payload.chatName ?? payload.chat?.name ?? payload.pushName ?? null)
+          ? (payload.chatName ?? payload.chat?.name ?? payload.groupName ?? payload.notifyName ?? payload.senderName ?? payload.displayName ?? payload.pushName ?? null)
+          : (payload.notifyName ?? payload.senderName ?? payload.chatName ?? payload.chat?.name ?? payload.displayName ?? payload.pushName ?? null)
         const nomePayload = nomePayloadRaw ? String(nomePayloadRaw).trim() : null
+        const pushnameRaw = payload.notifyName ?? payload.pushName ?? payload.notify ?? nomePayloadRaw
+        const pushnamePayload = pushnameRaw ? String(pushnameRaw).trim() : null
         const { cliente_id: cid } = await getOrCreateCliente(supabase, company_id, phone, {
           nome: nomePayload,
+          pushname: pushnamePayload || undefined,
           foto_perfil: senderPhoto || undefined
         })
         cliente_id = cid
@@ -2014,8 +2035,8 @@ exports.receberZapi = async (req, res) => {
       const convPayload = {
         id: convIdForEmit,
         ultima_atividade: convRow?.ultima_atividade ?? new Date().toISOString(),
-        ...(convRow?.nome_contato_cache ? { nome_contato_cache: convRow.nome_contato_cache } : {}),
-        ...(convRow?.foto_perfil_contato_cache ? { foto_perfil_contato_cache: convRow.foto_perfil_contato_cache } : {})
+        ...(convRow?.nome_contato_cache ? { nome_contato_cache: convRow.nome_contato_cache, contato_nome: convRow.nome_contato_cache } : {}),
+        ...(convRow?.foto_perfil_contato_cache ? { foto_perfil_contato_cache: convRow.foto_perfil_contato_cache, foto_perfil: convRow.foto_perfil_contato_cache } : {})
       }
       io.to(`empresa_${company_id}`).emit('conversa_atualizada', convPayload)
       if (departamento_id != null) {

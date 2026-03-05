@@ -156,7 +156,7 @@ async function mergeConversationLidToPhone(supabaseClient, company_id, chatLid, 
  * @param {object} supabaseClient
  * @param {number} company_id
  * @param {string} phone - Telefone bruto do payload
- * @param {object} fields - { nome?, foto_perfil? } (não sobrescrever com null)
+ * @param {object} fields - { nome?, pushname?, foto_perfil? } (não sobrescrever com null)
  * @returns {Promise<{ cliente_id: number|null }>}
  */
 async function getOrCreateCliente(supabaseClient, company_id, phone, fields = {}) {
@@ -169,7 +169,7 @@ async function getOrCreateCliente(supabaseClient, company_id, phone, fields = {}
   }
 
   // 1) SELECT por (company_id, telefone ou variantes)
-  let q = supabaseClient.from('clientes').select('id, nome, foto_perfil, company_id')
+  let q = supabaseClient.from('clientes').select('id, nome, pushname, foto_perfil, company_id')
   if (searchPhones.length > 0) q = q.in('telefone', searchPhones)
   else q = q.eq('telefone', phone)
   q = q.eq('company_id', company_id)
@@ -188,6 +188,7 @@ async function getOrCreateCliente(supabaseClient, company_id, phone, fields = {}
       const numericDisplay = String(phone).replace(/\D/g, '')
       if (numericDisplay) updates.nome = numericDisplay
     }
+    if (fields.pushname !== undefined && fields.pushname != null && String(fields.pushname).trim()) updates.pushname = String(fields.pushname).trim()
     if (fields.foto_perfil) updates.foto_perfil = fields.foto_perfil
     if (Object.keys(updates).length > 0) {
       await supabaseClient.from('clientes').update(updates).eq('id', existente.id).eq('company_id', company_id)
@@ -211,6 +212,7 @@ async function getOrCreateCliente(supabaseClient, company_id, phone, fields = {}
         if (legacy?.id) {
           const updates = {}
           if (fields.nome && String(fields.nome).trim()) updates.nome = String(fields.nome).trim()
+          if (fields.pushname !== undefined && fields.pushname != null && String(fields.pushname).trim()) updates.pushname = String(fields.pushname).trim()
           if (fields.foto_perfil) updates.foto_perfil = fields.foto_perfil
           if (Object.keys(updates).length > 0) {
             await supabaseClient.from('clientes').update(updates).eq('id', legacy.id).eq('company_id', company_id)
@@ -248,11 +250,13 @@ async function getOrCreateCliente(supabaseClient, company_id, phone, fields = {}
 
   // 5) INSERT
   const nome = (fields.nome && String(fields.nome).trim()) || telefoneCanonico || null
+  const pushname = (fields.pushname !== undefined && fields.pushname != null && String(fields.pushname).trim()) ? String(fields.pushname).trim() : null
   const insertData = {
     telefone: telefoneCanonico,
     nome,
     observacoes: null,
     company_id,
+    ...(pushname ? { pushname } : {}),
     ...(fields.foto_perfil ? { foto_perfil: fields.foto_perfil } : {})
   }
   const { data: novoCliente, error: errInsert } = await supabaseClient

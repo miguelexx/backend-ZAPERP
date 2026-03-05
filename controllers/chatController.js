@@ -802,13 +802,22 @@ exports.zapiStatus = async (req, res) => {
 // =====================================================
 // 3b) Sincronizar contatos do celular (Z-API Get contacts)
 // Busca TODOS os contatos do WhatsApp (paginado) e persiste em clientes.
+// USA SEMPRE o provider Z-API (empresa_zapi) — independente de WHATSAPP_PROVIDER.
 // =====================================================
 exports.sincronizarContatosZapi = async (req, res) => {
   try {
     const { company_id } = req.user
-    const provider = getProvider()
-    if (!provider || !provider.getContacts || !provider.isConfigured) {
-      return res.status(501).json({ error: 'Sincronização de contatos disponível apenas com Z-API configurado.' })
+    if (!company_id) {
+      return res.status(401).json({ error: 'Não autenticado' })
+    }
+    const { getEmpresaZapiConfig } = require('../services/zapiIntegrationService')
+    const { config, error } = await getEmpresaZapiConfig(company_id)
+    if (error || !config) {
+      return res.status(400).json({ error: 'Empresa sem instância Z-API configurada. Conecte o WhatsApp em Integrações.' })
+    }
+    const zapiProvider = require('../services/providers/zapi')
+    if (!zapiProvider || !zapiProvider.getContacts) {
+      return res.status(501).json({ error: 'Z-API getContacts não disponível.' })
     }
 
     const pageSize = 250
@@ -821,7 +830,7 @@ exports.sincronizarContatosZapi = async (req, res) => {
     console.log(`[Sync Contatos] Iniciando para company ${company_id} (pageSize=${pageSize})`)
 
     while (page <= maxPages) {
-      const contacts = await provider.getContacts(page, pageSize, { companyId: company_id })
+      const contacts = await zapiProvider.getContacts(page, pageSize, { companyId: company_id })
       if (!Array.isArray(contacts) || contacts.length === 0) break
 
       if (page === 1) {
@@ -932,6 +941,12 @@ exports.sincronizarContatosZapi = async (req, res) => {
     }
 
     console.log(`[Sync Contatos] Concluído: ${total} processados, ${criados} novos, ${atualizados} atualizados`)
+
+    // Emite para outras abas/clientes da empresa atualizarem a lista
+    const io = req.app?.get('io')
+    if (io && company_id) {
+      io.to(`empresa_${company_id}`).emit('zapi_sync_contatos', { criados, atualizados, total_contatos: total })
+    }
 
     return res.json({
       ok: true,
@@ -1389,7 +1404,7 @@ exports.detalharChat = async (req, res) => {
     const limit = Math.min(Number(req.query.limit || 50), 200)
     const cursor = req.query.cursor || null
 
-    // conversa (com cliente, atendente, departamento/setor; tipo, nome_grupo, fotos)
+    // conversa (com cliente, atendente, departamento/setor; tipo, nome_grupo, fotos; nome_contato_cache para header quando cliente ainda não tem nome)
     const { data: conversa, error: errConv } = await supabase
       .from('conversas')
       .select(`
@@ -1403,6 +1418,9 @@ exports.detalharChat = async (req, res) => {
         tipo,
         nome_grupo,
         foto_grupo,
+        nome_contato_cache,
+        foto_perfil_contato_cache,
+        cliente_id,
         clientes!conversas_cliente_fk ( id, nome, pushname, telefone, observacoes, foto_perfil ),
         usuarios!conversas_atendente_fk ( id, nome ),
         departamentos ( id, nome ),
@@ -1509,14 +1527,16 @@ exports.detalharChat = async (req, res) => {
     const isLidConv = !isGroup && conversa.telefone && String(conversa.telefone).trim().toLowerCase().startsWith('lid:')
     const clienteNomeBase = clientesConv?.pushname ?? clientesConv?.nome ?? null
     const clienteNome = (clienteNomeBase && String(clienteNomeBase).trim()) ? String(clienteNomeBase).trim() : null
+    const nomeCache = (conversa.nome_contato_cache && String(conversa.nome_contato_cache).trim()) ? String(conversa.nome_contato_cache).trim() : null
     const nomeUnico = isGroup
       ? (conversa.nome_grupo ?? conversa.telefone ?? 'Grupo')
-      : (isLidConv ? 'Contato' : clienteNome)
+      : (isLidConv ? 'Contato' : (clienteNome || nomeCache || null))
     const clienteTelefoneExibivel = isGroup
       ? conversa.telefone
       : (isLidConv ? null : (conversa.telefone ?? clientesConv?.telefone ?? null))
     const telefoneExibivel = isLidConv ? null : (conversa.telefone ?? clientesConv?.telefone ?? null)
-    const fotoUnica = isGroup ? (conversa.foto_grupo ?? null) : (clientesConv?.foto_perfil ?? null)
+    const fotoCache = (conversa.foto_perfil_contato_cache && String(conversa.foto_perfil_contato_cache).trim()) ? String(conversa.foto_perfil_contato_cache).trim() : null
+    const fotoUnica = isGroup ? (conversa.foto_grupo ?? null) : (clientesConv?.foto_perfil ?? fotoCache ?? null)
     const conversaFormatada = {
       ...conversa,
       clientes: clientesConv,
@@ -1962,6 +1982,27 @@ exports.enviarMensagemChat = async (req, res) => {
       if (novoClienteId) {
         await supabase.from('conversas').update({ cliente_id: novoClienteId }).eq('id', conversa_id).eq('company_id', company_id)
         conversa.cliente_id = novoClienteId
+        // Enriquecer em background com dados reais da Z-API (nome, foto do WhatsApp)
+        const { syncContactFromZapi } = require('../services/zapiSyncContact')
+        setImmediate(() => {
+          syncContactFromZapi(conversa.telefone, company_id)
+            .then((synced) => {
+              if (!synced) return null
+              const up = {}
+              if (synced.nome) up.nome = synced.nome
+              if (synced.pushname !== undefined) up.pushname = synced.pushname
+              if (synced.foto_perfil) up.foto_perfil = synced.foto_perfil
+              if (Object.keys(up).length === 0) return null
+              return supabase.from('clientes').update(up).eq('id', novoClienteId).eq('company_id', company_id)
+            })
+            .then((r) => {
+              if (r && !r.error && req.app?.get('io')) {
+                const io = req.app.get('io')
+                io.to(`empresa_${company_id}`).emit('contato_atualizado', { conversa_id: Number(conversa_id) })
+              }
+            })
+            .catch(() => {})
+        })
       }
     }
 

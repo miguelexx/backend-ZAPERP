@@ -1,10 +1,11 @@
 /**
  * Sincronização de contato com Z-API: busca nome e foto reais do WhatsApp.
  * Usado ao receber mensagem e ao criar cliente.
- * Somente Z-API.
+ * Sempre usa provider Z-API quando companyId tem empresa_zapi.
  */
 
-const { getProvider } = require('./providers')
+const zapiProvider = require('./providers/zapi')
+const { getEmpresaZapiConfig } = require('./zapiIntegrationService')
 const { normalizePhoneBR } = require('../helpers/phoneHelper')
 
 /**
@@ -16,13 +17,16 @@ const { normalizePhoneBR } = require('../helpers/phoneHelper')
  * @returns {Promise<{ nome: string|null, pushname: string|null, foto_perfil: string|null }|null>}
  */
 async function syncContactFromZapi(phone, companyId) {
-  const provider = getProvider()
-  if (!provider || !provider.getContactMetadata || !provider.isConfigured) return null
+  if (!zapiProvider.getContactMetadata || !zapiProvider.getProfilePicture) return null
+  if (companyId != null) {
+    const { config } = await getEmpresaZapiConfig(companyId)
+    if (!config) return null
+  }
   const opts = companyId != null ? { companyId } : {}
 
   const [metadata, profilePicUrl] = await Promise.all([
-    provider.getContactMetadata(phone, opts).catch(() => null),
-    provider.getProfilePicture(phone, opts).catch(() => null)
+    zapiProvider.getContactMetadata(phone, opts).catch(() => null),
+    zapiProvider.getProfilePicture(phone, opts).catch(() => null)
   ])
 
    // Se não conseguimos nenhum dado (nem metadata, nem foto), não altere o banco (evita sobrescrever nomes por falha de rede).
