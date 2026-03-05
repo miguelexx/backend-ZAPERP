@@ -5,6 +5,7 @@
 
 const supabase = require('../config/supabase')
 const { normalizePhoneBR, possiblePhonesBR, phoneKeyBR } = require('./phoneHelper')
+const { chooseBestName, isBadName } = require('./contactEnrichment')
 
 /**
  * Retorna telefone canônico para armazenamento (sempre o mesmo formato por número).
@@ -127,7 +128,15 @@ async function mergeConversationLidToPhone(supabaseClient, company_id, chatLid, 
     await supabaseClient.from('conversas').update({ chat_lid: lidPart }).eq('id', convByPhone.id).eq('company_id', company_id)
 
     const cacheUpdates = {}
-    if (opts.nomeCache && String(opts.nomeCache).trim()) cacheUpdates.nome_contato_cache = String(opts.nomeCache).trim()
+    if (opts.nomeCache && String(opts.nomeCache).trim()) {
+      const { name: bestNome } = chooseBestName(
+        convByPhone.nome_contato_cache,
+        String(opts.nomeCache).trim(),
+        opts.nomeSource || 'chatName',
+        { fromMe: opts.fromMe, company_id, telefoneTail: canonical.slice(-6) }
+      )
+      if (bestNome && bestNome !== (convByPhone.nome_contato_cache || '')) cacheUpdates.nome_contato_cache = bestNome
+    }
     if (opts.fotoCache && String(opts.fotoCache).trim()) cacheUpdates.foto_perfil_contato_cache = String(opts.fotoCache).trim()
     if (Object.keys(cacheUpdates).length > 0) {
       await supabaseClient.from('conversas').update(cacheUpdates).eq('id', convByPhone.id).eq('company_id', company_id)
@@ -202,8 +211,17 @@ async function getOrCreateCliente(supabaseClient, company_id, phone, fields = {}
 
   if (existente?.id) {
     const updates = {}
-    if (fields.nome && String(fields.nome).trim()) updates.nome = String(fields.nome).trim()
-    else if (!existente.nome || !String(existente.nome).trim()) {
+    const telefoneTail = String(phone).replace(/\D/g, '').slice(-6) || null
+    if (fields.nome != null && String(fields.nome).trim()) {
+      const { name: bestNome } = chooseBestName(
+        existente.nome,
+        String(fields.nome).trim(),
+        fields.nomeSource || 'unknown',
+        { fromMe: fields.fromMe, company_id, telefoneTail }
+      )
+      if (bestNome && bestNome !== (existente.nome || '')) updates.nome = bestNome
+    }
+    if (!updates.nome && (!existente.nome || !String(existente.nome).trim())) {
       const numericDisplay = String(phone).replace(/\D/g, '')
       if (numericDisplay) updates.nome = numericDisplay
     }
@@ -222,7 +240,7 @@ async function getOrCreateCliente(supabaseClient, company_id, phone, fields = {}
       if (digits10 && digits10.length === 10) {
         const { data: legacyRows } = await supabaseClient
           .from('clientes')
-          .select('id, telefone')
+          .select('id, telefone, nome')
           .eq('company_id', company_id)
           .like('telefone', `%${digits10}`)
           .order('id', { ascending: true })
@@ -230,7 +248,14 @@ async function getOrCreateCliente(supabaseClient, company_id, phone, fields = {}
         const legacy = Array.isArray(legacyRows) && legacyRows[0] ? legacyRows[0] : null
         if (legacy?.id) {
           const updates = {}
-          if (fields.nome && String(fields.nome).trim()) updates.nome = String(fields.nome).trim()
+          const telefoneTail = String(phone).replace(/\D/g, '').slice(-6) || null
+          const { name: bestNome } = chooseBestName(
+            legacy.nome,
+            fields.nome != null ? String(fields.nome).trim() : null,
+            fields.nomeSource || 'unknown',
+            { fromMe: fields.fromMe, company_id, telefoneTail }
+          )
+          if (bestNome && bestNome !== (legacy.nome || '')) updates.nome = bestNome
           if (fields.pushname !== undefined && fields.pushname != null && String(fields.pushname).trim()) updates.pushname = String(fields.pushname).trim()
           if (fields.foto_perfil) updates.foto_perfil = fields.foto_perfil
           if (Object.keys(updates).length > 0) {
@@ -267,8 +292,9 @@ async function getOrCreateCliente(supabaseClient, company_id, phone, fields = {}
     return { cliente_id: existenteGlobal.id }
   }
 
-  // 5) INSERT
-  const nome = (fields.nome && String(fields.nome).trim()) || telefoneCanonico || null
+  // 5) INSERT — não usar nome "ruim" (evita regressão)
+  const nomeRaw = fields.nome && String(fields.nome).trim()
+  const nome = (nomeRaw && !isBadName(nomeRaw)) ? nomeRaw : telefoneCanonico || null
   const pushname = (fields.pushname !== undefined && fields.pushname != null && String(fields.pushname).trim()) ? String(fields.pushname).trim() : null
   const insertData = {
     telefone: telefoneCanonico,

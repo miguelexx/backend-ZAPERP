@@ -91,6 +91,7 @@ async function syncViaContactsApi(company_id) {
         const clienteFields = {}
         if (fields.nome) clienteFields.nome = fields.nome
         if (fields.foto) clienteFields.foto_perfil = fields.foto
+        clienteFields.nomeSource = 'syncZapi'
 
         const result = await getOrCreateCliente(supabase, company_id, fields.phone, clienteFields)
         if (result.cliente_id) {
@@ -148,6 +149,7 @@ async function syncViaFallback(company_id) {
       const clienteFields = {}
       if (nome) clienteFields.nome = nome
       if (foto) clienteFields.foto_perfil = foto
+      clienteFields.nomeSource = 'syncZapi'
 
       const variants = possiblePhonesBR(phone).length > 0 ? possiblePhonesBR(phone) : [phone]
       const { data: prev } = await supabase

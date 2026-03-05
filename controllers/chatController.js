@@ -3,6 +3,7 @@ const { getProvider } = require('../services/providers')
 const { isGroupConversation } = require('../helpers/conversaHelper')
 const { normalizePhoneBR, possiblePhonesBR, phoneKeyBR } = require('../helpers/phoneHelper')
 const { deduplicateConversationsByContact, sortConversationsByRecent, getCanonicalPhone, getOrCreateCliente } = require('../helpers/conversationSync')
+const { chooseBestName } = require('../helpers/contactEnrichment')
 
 // =====================================================
 // 1) HELPERS (TOPO DO ARQUIVO)
@@ -901,9 +902,12 @@ exports.sincronizarContatosZapi = async (req, res) => {
           const pushExistente = (existente?.pushname || '').trim()
           const missingName = !nomeExistente || nomeExistente === (existente?.telefone || '').trim()
 
-          // ✅ NÃO degradar nome: só atualiza se veio nome do WhatsApp, ou se o banco está vazio
-          if (nome && String(nome).trim()) updates.nome = String(nome).trim()
-          else if (missingName) updates.nome = phone // sem nome → usa número, mas só se estava vazio
+          // chooseBestName evita regressão: nunca substituir nome bom por pior
+          if (nome && String(nome).trim()) {
+            const telefoneTail = String(phone).replace(/\D/g, '').slice(-6) || null
+            const { name: bestNome } = chooseBestName(nomeExistente, String(nome).trim(), 'syncZapi', { fromMe: false, company_id, telefoneTail })
+            if (bestNome && bestNome !== nomeExistente) updates.nome = bestNome
+          } else if (missingName) updates.nome = phone // sem nome → usa número, mas só se estava vazio
 
           // pushname só se veio e o banco está vazio (ou null)
           if (pushname != null && String(pushname).trim() && !pushExistente) updates.pushname = String(pushname).trim()
@@ -2000,6 +2004,7 @@ exports.enviarMensagemChat = async (req, res) => {
       const fotoCache = conversa?.foto_perfil_contato_cache ? String(conversa.foto_perfil_contato_cache).trim() : null
       const { cliente_id: novoClienteId } = await getOrCreateCliente(supabase, company_id, conversa.telefone, {
         nome: nomeCache || undefined,
+        nomeSource: 'chatName',
         foto_perfil: fotoCache || undefined
       })
       if (novoClienteId) {
@@ -2008,16 +2013,19 @@ exports.enviarMensagemChat = async (req, res) => {
         // Enriquecer em background com dados reais da Z-API (nome, foto do WhatsApp)
         const { syncContactFromZapi } = require('../services/zapiSyncContact')
         setImmediate(() => {
-          syncContactFromZapi(conversa.telefone, company_id)
-            .then((synced) => {
-              if (!synced) return null
-              const up = {}
-              if (synced.nome) up.nome = synced.nome
-              if (synced.pushname !== undefined) up.pushname = synced.pushname
-              if (synced.foto_perfil) up.foto_perfil = synced.foto_perfil
-              if (Object.keys(up).length === 0) return null
-              return supabase.from('clientes').update(up).eq('id', novoClienteId).eq('company_id', company_id)
-            })
+          supabase.from('clientes').select('nome, pushname, foto_perfil').eq('id', novoClienteId).eq('company_id', company_id).maybeSingle()
+            .then(({ data: current }) => syncContactFromZapi(conversa.telefone, company_id)
+              .then((synced) => {
+                if (!synced) return null
+                const up = {}
+                const telefoneTail = String(conversa.telefone).replace(/\D/g, '').slice(-6) || null
+                const { name: bestNome } = chooseBestName(current?.nome, synced.nome, 'syncZapi', { fromMe: false, company_id, telefoneTail })
+                if (bestNome && bestNome !== (current?.nome || '')) up.nome = bestNome
+                if (synced.pushname !== undefined && !current?.pushname) up.pushname = synced.pushname
+                if (synced.foto_perfil && !current?.foto_perfil) up.foto_perfil = synced.foto_perfil
+                if (Object.keys(up).length === 0) return null
+                return supabase.from('clientes').update(up).eq('id', novoClienteId).eq('company_id', company_id)
+              }))
             .then(async (r) => {
               if (r && !r.error && req.app?.get('io')) {
                 const io = req.app.get('io')

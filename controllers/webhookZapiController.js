@@ -13,6 +13,7 @@ const { syncContactFromZapi } = require('../services/zapiSyncContact')
 const { getCompanyIdByInstanceId } = require('../services/zapiIntegrationService')
 const { normalizePhoneBR, possiblePhonesBR, normalizeGroupIdForStorage } = require('../helpers/phoneHelper')
 const { getCanonicalPhone, getOrCreateCliente, findOrCreateConversation, mergeConversasIntoCanonico, mergeConversationLidToPhone } = require('../helpers/conversationSync')
+const { chooseBestName } = require('../helpers/contactEnrichment')
 const { resolvePeerPhone } = require('../helpers/conversationKeyHelper')
 const { incrementarUnreadParaConversa, marcarConversaComoLidaParaTodos } = require('./chatController')
 
@@ -1046,13 +1047,8 @@ exports.receberZapi = async (req, res) => {
         if (lidPartDeliv && canonicalDeliv) {
           try {
             const io = req.app.get('io')
-            const senderName = payload?.chatName ?? payload?.chat?.name ?? payload?.senderName ?? null
-            const senderPhoto = payload?.chatPhoto ?? payload?.chat?.photo ?? payload?.senderPhoto ?? null
-            const mergeRes = await mergeConversationLidToPhone(supabase, company_id, lidPartDeliv, canonicalDeliv, {
-              io,
-              nomeCache: senderName || undefined,
-              fotoCache: senderPhoto || undefined
-            })
+            // DeliveryCallback: NÃO enriquecer nome/foto — apenas merge LID→PHONE (evita regressão de nome)
+            const mergeRes = await mergeConversationLidToPhone(supabase, company_id, lidPartDeliv, canonicalDeliv, { io })
             if (mergeRes.merged && msg && mergeRes.conversa_id) msg = { ...msg, conversa_id: mergeRes.conversa_id }
             if (mergeRes.merged) {
               logZapiCert({
@@ -1089,12 +1085,8 @@ exports.receberZapi = async (req, res) => {
               const isLidTel = telAtual.toLowerCase().startsWith('lid:')
               const isGroupDest = String(phoneDest).startsWith('120')
               if ((!telAtual || isLidTel) && !isGroupDest) {
-                const nomeDest = payload?.chatName ?? payload?.chat?.name ?? payload?.senderName ?? payload?.notifyName ?? payload?.pushName ?? null
-                const fotoDest = payload?.chatPhoto ?? payload?.chat?.photo ?? payload?.senderPhoto ?? payload?.photo ?? null
-                const { cliente_id: cid } = await getOrCreateCliente(supabase, company_id, canonical, {
-                  nome: nomeDest ? String(nomeDest).trim() : undefined,
-                  foto_perfil: fotoDest ? String(fotoDest).trim() : undefined
-                })
+                // DeliveryCallback: NÃO enriquecer nome — apenas vincular cliente (evita regressão)
+                const { cliente_id: cid } = await getOrCreateCliente(supabase, company_id, canonical, {})
                 await supabase
                   .from('conversas')
                   .update({ telefone: canonical, ...(cid ? { cliente_id: cid } : {}) })
@@ -1379,8 +1371,11 @@ exports.receberZapi = async (req, res) => {
         const nomePayload = nomePayloadRaw ? String(nomePayloadRaw).trim() : null
         const pushnameRaw = payload.notifyName ?? payload.pushName ?? payload.notify ?? nomePayloadRaw
         const pushnamePayload = pushnameRaw ? String(pushnameRaw).trim() : null
+        const nomeSource = fromMe ? 'chatName' : 'senderName'
         const { cliente_id: cid } = await getOrCreateCliente(supabase, company_id, phone, {
           nome: nomePayload,
+          nomeSource,
+          fromMe,
           pushname: pushnamePayload || undefined,
           foto_perfil: senderPhoto || undefined
         })
@@ -1503,7 +1498,7 @@ exports.receberZapi = async (req, res) => {
         }
       }
 
-      // Cache nome/foto do contato — só preenche quando vazio (evita sobrescrever com dados inconsistentes)
+      // Cache nome/foto do contato — chooseBestName evita regressão (nunca substituir nome bom por pior)
       if (!isGroup && conversa_id && (senderName || senderPhoto)) {
         const { data: convAtual } = await supabase
           .from('conversas')
@@ -1512,9 +1507,18 @@ exports.receberZapi = async (req, res) => {
           .eq('company_id', company_id)
           .maybeSingle()
         const cacheUpdates = {}
-        const nomeCacheVazio = !convAtual?.nome_contato_cache || !String(convAtual.nome_contato_cache).trim()
+        const cacheSource = fromMe ? 'chatName' : 'senderName'
+        const telefoneTail = String(phone).replace(/\D/g, '').slice(-6) || null
+        if (senderName && String(senderName).trim()) {
+          const { name: bestNome } = chooseBestName(
+            convAtual?.nome_contato_cache,
+            String(senderName).trim(),
+            cacheSource,
+            { fromMe, company_id, telefoneTail }
+          )
+          if (bestNome && bestNome !== (convAtual?.nome_contato_cache || '')) cacheUpdates.nome_contato_cache = bestNome
+        }
         const fotoCacheVazia = !convAtual?.foto_perfil_contato_cache || !String(convAtual.foto_perfil_contato_cache).trim()
-        if (nomeCacheVazio && senderName && String(senderName).trim()) cacheUpdates.nome_contato_cache = String(senderName).trim()
         if (fotoCacheVazia && senderPhoto && String(senderPhoto).trim()) cacheUpdates.foto_perfil_contato_cache = String(senderPhoto).trim()
         if (Object.keys(cacheUpdates).length > 0) {
           await supabase.from('conversas')
@@ -1887,15 +1891,18 @@ exports.receberZapi = async (req, res) => {
                 const nomeMin = senderName ? String(senderName).trim() : pNorm
                 const ins = await supabase.from('clientes').insert({ company_id, telefone: pNorm, nome: nomeMin }).select('id').maybeSingle()
                 if (ins?.data?.id) {
-                  // sync em background (nome/foto reais)
+                  // sync em background (nome/foto reais) — chooseBestName evita regressão
                   setImmediate(async () => {
                     try {
+                      const { data: current } = await supabase.from('clientes').select('nome, pushname, foto_perfil').eq('id', ins.data.id).maybeSingle()
                       const sync = await syncContactFromZapi(pNorm, company_id).catch(() => null)
                       if (!sync) return
                       const up = {}
-                      if (sync.nome) up.nome = sync.nome
-                      if (sync.pushname) up.pushname = sync.pushname
-                      if (sync.foto_perfil) up.foto_perfil = sync.foto_perfil
+                      const telefoneTail = String(pNorm).replace(/\D/g, '').slice(-6) || null
+                      const { name: bestNome } = chooseBestName(current?.nome, sync.nome, 'syncZapi', { fromMe: false, company_id, telefoneTail })
+                      if (bestNome && bestNome !== (current?.nome || '')) up.nome = bestNome
+                      if (!current?.pushname && sync.pushname) up.pushname = sync.pushname
+                      if (!current?.foto_perfil && sync.foto_perfil) up.foto_perfil = sync.foto_perfil
                       if (Object.keys(up).length > 0) await supabase.from('clientes').update(up).eq('id', ins.data.id)
                     } catch (_) {}
                   })
@@ -2093,10 +2100,12 @@ exports.receberZapi = async (req, res) => {
           const synced = await syncContactFromZapi(syncPhone, company_id).catch(() => null)
           if (!synced) return null
           const up = {}
-          const nomeVazio = !current?.nome || !String(current.nome).trim()
+          const telefoneTail = String(syncPhone).replace(/\D/g, '').slice(-6) || null
+          const { name: bestNome } = chooseBestName(current?.nome, synced?.nome, 'syncZapi', { fromMe: false, company_id, telefoneTail })
+          if (bestNome && bestNome !== (current?.nome || '')) up.nome = bestNome
+          else if (!current?.nome || !String(current.nome).trim()) up.nome = (synced.nome && String(synced.nome).trim()) ? String(synced.nome).trim() : syncPhone
           const pushnameVazio = !current?.pushname || !String(current.pushname).trim()
           const fotoVazia = !current?.foto_perfil || !String(current.foto_perfil).trim()
-          if (nomeVazio) up.nome = (synced.nome && String(synced.nome).trim()) ? String(synced.nome).trim() : syncPhone
           if (pushnameVazio && synced.pushname !== undefined) up.pushname = synced.pushname
           if (fotoVazia && synced.foto_perfil) up.foto_perfil = synced.foto_perfil
           if (Object.keys(up).length === 0) return null

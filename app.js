@@ -201,12 +201,20 @@ if (hasFrontendDist) {
   const uiOverridesHref = '/ui-overrides.css'
   const indexHtmlPath = path.join(frontendDist, 'index.html')
   const indexHtmlRaw = fs.readFileSync(indexHtmlPath, 'utf8')
-  const indexHtmlInjected = indexHtmlRaw.includes(uiOverridesHref)
+  let indexHtmlInjected = indexHtmlRaw.includes(uiOverridesHref)
     ? indexHtmlRaw
     : indexHtmlRaw.replace(
         '</head>',
         `  <link rel="stylesheet" href="${uiOverridesHref}" />\n  </head>`
       )
+  // Refresh automático a cada N minutos (AUTO_REFRESH_MINUTES=5; 0 para desativar)
+  const autoRefreshMinutes = parseInt(process.env.AUTO_REFRESH_MINUTES || '5', 10)
+  if (autoRefreshMinutes > 0 && !indexHtmlInjected.includes('auto-refresh-interval')) {
+    const refreshScript = `<script id="auto-refresh-interval">(function(){var m=${autoRefreshMinutes}*60*1000;setInterval(function(){location.reload()},m)})();</script>`
+    indexHtmlInjected = indexHtmlInjected.includes('</body>')
+      ? indexHtmlInjected.replace('</body>', `${refreshScript}\n</body>`)
+      : indexHtmlInjected.replace('</html>', `${refreshScript}\n</html>`)
+  }
 
   app.get(uiOverridesHref, (req, res) => {
     try {
