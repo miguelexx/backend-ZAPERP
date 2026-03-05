@@ -15,7 +15,7 @@ const { normalizePhoneBR, possiblePhonesBR, normalizeGroupIdForStorage } = requi
 const { getCanonicalPhone, getOrCreateCliente, findOrCreateConversation, mergeConversasIntoCanonico, mergeConversationLidToPhone } = require('../helpers/conversationSync')
 const { chooseBestName } = require('../helpers/contactEnrichment')
 const { resolvePeerPhone } = require('../helpers/conversationKeyHelper')
-const { incrementarUnreadParaConversa, marcarConversaComoLidaParaTodos } = require('./chatController')
+const { incrementarUnreadParaConversa } = require('./chatController')
 
 // company_id NUNCA mais via ENV — resolvido por instanceId do payload em cada webhook
 const WHATSAPP_DEBUG = String(process.env.WHATSAPP_DEBUG || '').toLowerCase() === 'true'
@@ -72,13 +72,14 @@ function isGroupPayload(payload) {
     payload.phone,
     payload.groupId,
     payload.group?.id,
-    payload.data?.remoteJid
+    payload.data?.remoteJid,
+    payload.data?.key?.remoteJid
   ].filter(Boolean).map((v) => String(v).trim())
 
-  // 1) sinais explícitos
+  // 1) Sinais explícitos: @g.us ou sufixo -group
   if (candidates.some((c) => c.endsWith('@g.us') || c.includes('-group'))) return true
 
-  // 2) ID numérico de grupo (120...) + presença de participante/autor é fortíssimo sinal de grupo
+  // 2) ID numérico de grupo (120...) + presença de participante/autor
   const hasParticipant =
     !!payload.participantPhone ||
     !!payload.participant ||
@@ -88,8 +89,15 @@ function isGroupPayload(payload) {
   if (hasParticipant) {
     for (const c of candidates) {
       const d = String(c || '').replace(/\D/g, '')
-      if (d.startsWith('120') && d.length >= 15) return true
+      if (d.startsWith('120') && d.length >= 15 && d.length <= 22) return true
     }
+  }
+
+  // 3) ID de grupo típico (120... 15-22 dígitos) — sem exigir participant.
+  // Crítico para fromMe=true: ao enviar para grupo, Z-API pode mandar só phone="120..." sem participantPhone.
+  for (const c of candidates) {
+    const d = String(c || '').replace(/\D/g, '')
+    if (d.startsWith('120') && d.length >= 15 && d.length <= 22) return true
   }
 
   return false
@@ -98,7 +106,6 @@ function isGroupPayload(payload) {
 /** Retorna identificador do grupo, quando houver. */
 function pickGroupChatId(payload) {
   if (!payload || typeof payload !== 'object') return ''
-  const isGroupHint = payload.isGroup === true || ['grupo', 'group'].includes(String(payload.tipo || payload.type || '').toLowerCase())
 
   const candidates = [
     payload.key?.remoteJid,
@@ -109,27 +116,27 @@ function pickGroupChatId(payload) {
     payload.phone,
     payload.groupId,
     payload.group?.id,
-    payload.data?.remoteJid
+    payload.data?.remoteJid,
+    payload.data?.key?.remoteJid
   ]
     .filter((v) => v != null)
     .map((v) => String(v).trim())
     .filter(Boolean)
 
+  // 1) Formato canônico @g.us
   for (const c of candidates) {
     if (c.endsWith('@g.us')) return c
   }
 
-  // alguns providers mandam "...-group"
+  // 2) Alguns providers mandam "...-group"
   for (const c of candidates) {
     if (c.includes('-group')) return c
   }
 
-  // heurística: id de grupo costuma ser longo e começa com 120...
-  if (isGroupHint || payload.participantPhone || payload.key?.participant) {
-    for (const c of candidates) {
-      const d = c.replace(/\D/g, '')
-      if (d.startsWith('120') && d.length >= 15) return d
-    }
+  // 3) ID numérico 120... (15-22 dígitos) — heurística WhatsApp. Inclui fromMe (envio para grupo).
+  for (const c of candidates) {
+    const d = c.replace(/\D/g, '')
+    if (d.startsWith('120') && d.length >= 15 && d.length <= 22) return d
   }
 
   return ''
@@ -929,15 +936,10 @@ exports.receberZapi = async (req, res) => {
             conversaId: msg.conversa_id,
             action: 'updated_status'
           })
-          // Visualizou no celular (read/played): zera notificação de mensagem nova no sistema para todos
-          if (statusNorm === 'read' || statusNorm === 'played') {
-            await marcarConversaComoLidaParaTodos(company_id, msg.conversa_id)
-            const io = req.app.get('io')
-            if (io) {
-              io.to(`empresa_${company_id}`).emit('atualizar_conversa', { id: msg.conversa_id })
-              io.to(`empresa_${company_id}`).emit('mensagens_lidas', { conversa_id: msg.conversa_id })
-            }
-          }
+          // IMPORTANTE: read/played = o CONTATO visualizou NOSSA mensagem (ticks ✓✓).
+          // Isso NÃO significa que nós (atendentes) visualizamos a conversa no CRM.
+          // Unread só deve ser zerado quando abrimos o chat (detalharChat → marcarComoLidaPorUsuario).
+          // NÃO chamar marcarConversaComoLidaParaTodos aqui — zeraria incorretamente as bolhas.
         } else {
           console.warn(`⚠️ Z-API status ${statusNorm.toUpperCase()} recebido mas messageId não encontrado: ${String(msgId).slice(0, 25)}`)
         }
@@ -1531,6 +1533,8 @@ exports.receberZapi = async (req, res) => {
       if (isNewConversation) {
         const io = req.app.get('io')
         if (io) {
+          // Unread: mensagem recebida (!fromMe) = 1; mensagem enviada por nós (fromMe) = 0
+          const unreadInicial = fromMe ? 0 : 1
           io.to(`empresa_${company_id}`).emit('nova_conversa', {
             id: conversa_id,
             telefone: getCanonicalPhone(phone) || phone,
@@ -1539,7 +1543,7 @@ exports.receberZapi = async (req, res) => {
             foto_grupo: isGroup ? (chatPhoto || null) : null,
             contato_nome: isGroup ? (nomeGrupo || phone || 'Grupo') : (senderName || payload?.chatName || phone || null),
             foto_perfil: isGroup ? null : (senderPhoto || payload?.photo || null),
-            unread_count: 0,
+            unread_count: unreadInicial,
             tags: [],
           })
         }

@@ -34,11 +34,13 @@ Recebe **ReceivedCallback** (mensagem recebida ou enviada por mim) e **DeliveryC
 ### ReceivedCallback (doc Z-API)
 
 - `type`: "ReceivedCallback"
-- `phone`: número do chat (destino se fromMe)
+- `phone`: número do chat (destino se fromMe). Para **grupos**: JID ex. `12036301234567890@g.us` ou dígitos `12036301234567890`
 - `fromMe`: boolean
-- `messageId`, `momment`, `status`, `text.message`, `senderLid`, `connectedPhone`, `chatName`, `senderName`, `participantPhone`, `image.*`, `audio.*`, `video.*`, `document.*`, `location.*`, `contact.*`, `sticker.*`, etc.
+- `messageId`, `momment`, `status`, `text.message`, `senderLid`, `connectedPhone`, `chatName`, `senderName`, `participantPhone` (grupos), `image.*`, `audio.*`, `video.*`, `document.*`, `location.*`, `contact.*`, `sticker.*`, etc.
 
 O backend usa `payload.momment ?? payload.timestamp`, `payload.text?.message ?? payload.body`, e persiste + emite `nova_mensagem` e `atualizar_conversa`.
+
+**Grupos:** O backend aceita `phone` com `@g.us`, `-group`, ou IDs numéricos (120... 15–22 dígitos). Aceita também `key.remoteJid`, `chatId`, `groupId`. Para funcionar, confirme no painel Z-API que a opção "Ao receber" está ativa e que a instância está em um número que participa dos grupos.
 
 ### DeliveryCallback (doc Z-API)
 

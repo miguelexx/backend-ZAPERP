@@ -364,8 +364,14 @@ async function findOrCreateConversation(supabaseClient, {
     return null
   }
 
-  // 2) Variantes para busca (cobre 12 vs 13 dígitos, com/sem 9)
-  const variants = isGroup ? [canonical] : (possiblePhonesBR(canonical).length > 0 ? possiblePhonesBR(canonical) : [canonical])
+  // 2) Variantes para busca (grupos: dígitos e @g.us; individual: 12 vs 13 dígitos)
+  let variants
+  if (isGroup) {
+    const digits = canonical.endsWith('@g.us') ? canonical.replace(/@g.us$/i, '') : canonical
+    variants = [...new Set([digits, digits ? `${digits}@g.us` : ''].filter(Boolean))]
+  } else {
+    variants = possiblePhonesBR(canonical).length > 0 ? possiblePhonesBR(canonical) : [canonical]
+  }
 
   console.log(`[findOrCreateConversation] ${logPrefix} canonical="${canonical}" variants=[${variants.join(',')}] isGroup=${isGroup}`)
 
@@ -408,9 +414,12 @@ async function findOrCreateConversation(supabaseClient, {
     return { conversa: conv, created: false }
   }
 
-  // 6) Não encontrou — criar com telefone CANÔNICO
+  // 6) Não encontrou — criar com telefone CANÔNICO (grupos: sempre dígitos para consistência)
+  const telefoneToInsert = isGroup && canonical.endsWith('@g.us')
+    ? canonical.replace(/@g.us$/i, '')
+    : canonical
   const insertData = {
-    telefone: canonical,
+    telefone: telefoneToInsert,
     lida: false,
     status_atendimento: 'aberta',
     company_id,
