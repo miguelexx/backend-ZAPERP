@@ -3015,12 +3015,19 @@ exports.enviarArquivo = async (req, res) => {
       .eq('company_id', Number(company_id))
       .eq('id', Number(conversa_id))
 
+    // Payload normalizado (igual enviarMensagemChat) — única fonte para exibição é o socket
+    const novaMsgPayload = {
+      ...msg,
+      conversa_id: msg.conversa_id ?? Number(conversa_id),
+      status: msg.status || 'pending',
+      status_mensagem: msg.status_mensagem || msg.status || 'pending'
+    }
     emitirEventoEmpresaConversa(
       io,
       company_id,
       conversa_id,
       io.EVENTS?.NOVA_MENSAGEM || "nova_mensagem",
-      msg
+      novaMsgPayload
     )
     emitirConversaAtualizada(io, company_id, conversa_id, { id: Number(conversa_id) })
 
@@ -3054,7 +3061,8 @@ exports.enviarArquivo = async (req, res) => {
       else console.warn('⚠️ APP_URL não pode ser localhost; Z-API precisa de URL pública para baixar mídia.')
     }
 
-    return res.json(msg)
+    // Não retornar mensagem completa — evita duplicação (API + socket). Mensagem chega via nova_mensagem.
+    return res.json({ ok: true, id: msg.id, conversa_id: Number(conversa_id) })
   } catch (err) {
     console.error('Erro ao enviar arquivo:', err)
     return res.status(500).json({ error: 'Erro ao enviar arquivo' })

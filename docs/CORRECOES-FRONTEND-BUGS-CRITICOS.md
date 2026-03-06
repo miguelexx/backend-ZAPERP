@@ -6,16 +6,18 @@ Este documento especifica as alterações **obrigatórias** no frontend para cor
 
 ## Bug 1 — Mensagem duplicada ("oi" aparece duas vezes)
 
-### Causa
-O frontend recebe a mesma mensagem de **duas fontes**:
-1. **Resposta da API** `POST /chats/:id/mensagens` — retorna `{ ok: true, mensagem: {...} }`
-2. **Socket** `nova_mensagem` — emitido pelo backend logo após o insert
+### Causa (corrigida no backend)
+O backend **não retorna mais** a mensagem completa na API. A resposta é `{ ok: true, id, conversa_id }`.
+A **única fonte** para exibir a mensagem é o socket `nova_mensagem`.
 
-Se o frontend **adiciona** (append) em ambos os casos, a mensagem aparece duplicada.
+Se o frontend ainda adicionar de duas fontes (API antiga + socket), haveria duplicação. Com a mudança no backend, use **apenas** o socket para exibir.
 
-### Correção obrigatória: Dedupe por `id` e `whatsapp_id`
+### Correção obrigatória: Usar APENAS socket + Dedupe
 
-Ao processar `nova_mensagem` ou ao adicionar mensagem da resposta da API:
+**API `POST /chats/:id/mensagens`** retorna `{ ok: true, id, conversa_id }` — **não retorna mensagem**.
+A mensagem chega **somente** via socket `nova_mensagem`. O frontend **não deve** adicionar mensagem da resposta da API.
+
+Ao processar `nova_mensagem`:
 
 ```javascript
 // Pseudo-código — adapte ao seu estado (React, Vue, etc.)
