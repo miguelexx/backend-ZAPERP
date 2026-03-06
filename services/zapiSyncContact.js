@@ -38,8 +38,9 @@ async function syncContactFromZapi(phone, companyId) {
   const vname = metadata?.vname ? String(metadata.vname).trim() : null
   const imgUrl = metadata?.imgUrl ? String(metadata.imgUrl).trim() : null
 
+  // Prioridade: name (nome completo salvo no celular) > short (primeiro nome) > notify (perfil WA) > vname
   const phoneNorm = normalizePhoneBR(phone) || String(phone || '').replace(/\D/g, '').trim()
-  const nome = notify || name || short || vname || (phoneNorm || null)
+  const nome = name || short || notify || vname || (phoneNorm || null)
   const foto_perfil = profilePicUrl || (imgUrl || null)
 
   return {

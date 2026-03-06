@@ -435,11 +435,11 @@ function extractMessage(payload) {
   const participantPhoneRaw = partPhoneResolved ||
     String(payload.participantPhone ?? payload.participant ?? payload.author ?? payload.key?.participant ?? '').replace(/\D/g, '')
   // Doc Z-API: when fromMe=true, "sender" is us; nome/foto do CONTATO (destino) vêm de chatName/chat/photo
-  // Prioridade: notifyName (nome no WA) > senderName > chatName > displayName > pushName > formattedName
+  // Prioridade para nome salvo no celular: name (completo) > short (primeiro nome) > notifyName > senderName > chatName > ...
   const fromMeForExtract = Boolean(payload.fromMe ?? payload.key?.fromMe)
   const senderName = fromMeForExtract
-    ? (payload.chatName ?? payload.chat?.name ?? payload.groupName ?? payload.notifyName ?? payload.senderName ?? payload.displayName ?? payload.pushName ?? payload.formattedName ?? payload.sender?.name ?? null)
-    : (payload.notifyName ?? payload.senderName ?? payload.chatName ?? payload.chat?.name ?? payload.displayName ?? payload.pushName ?? payload.formattedName ?? payload.sender?.name ?? null)
+    ? (payload.chatName ?? payload.chat?.name ?? payload.groupName ?? payload.name ?? payload.short ?? payload.notifyName ?? payload.senderName ?? payload.displayName ?? payload.pushName ?? payload.formattedName ?? payload.sender?.name ?? null)
+    : (payload.name ?? payload.short ?? payload.notifyName ?? payload.senderName ?? payload.chatName ?? payload.chat?.name ?? payload.displayName ?? payload.pushName ?? payload.formattedName ?? payload.sender?.name ?? null)
   const senderPhoto = fromMeForExtract
     ? (payload.chatPhoto ?? payload.chat?.photo ?? payload.senderPhoto ?? payload.photo ?? payload.profilePicture ?? payload.sender?.photo ?? payload.profilePictureUrl ?? null)
     : (payload.senderPhoto ?? payload.photo ?? payload.profilePicture ?? payload.sender?.photo ?? payload.profilePictureUrl ?? null)
@@ -1368,8 +1368,8 @@ exports.receberZapi = async (req, res) => {
         console.log('[Z-API] LID key — conversa sem cliente vinculado (número real não disponível):', phone)
       } else {
         const nomePayloadRaw = fromMe
-          ? (payload.chatName ?? payload.chat?.name ?? payload.groupName ?? payload.notifyName ?? payload.senderName ?? payload.displayName ?? payload.pushName ?? null)
-          : (payload.notifyName ?? payload.senderName ?? payload.chatName ?? payload.chat?.name ?? payload.displayName ?? payload.pushName ?? null)
+          ? (payload.chatName ?? payload.chat?.name ?? payload.groupName ?? payload.name ?? payload.short ?? payload.notifyName ?? payload.senderName ?? payload.displayName ?? payload.pushName ?? null)
+          : (payload.name ?? payload.short ?? payload.notifyName ?? payload.senderName ?? payload.chatName ?? payload.chat?.name ?? payload.displayName ?? payload.pushName ?? null)
         const nomePayload = nomePayloadRaw ? String(nomePayloadRaw).trim() : null
         const pushnameRaw = payload.notifyName ?? payload.pushName ?? payload.notify ?? nomePayloadRaw
         const pushnamePayload = pushnameRaw ? String(pushnameRaw).trim() : null

@@ -29,8 +29,9 @@ function extractContactFields(raw) {
   if (!phone || phone.length < 10) return null
 
   const norm = normalizePhoneBR(phone) || (phone.startsWith('55') ? phone : `55${phone}`)
+  // Prioridade: name (nome completo salvo no celular) > short (primeiro nome) > notify (perfil WA) > vname
   const nome =
-    String(raw.notify ?? raw.name ?? raw.short ?? raw.vname ?? '').trim() ||
+    String(raw.name ?? raw.short ?? raw.notify ?? raw.vname ?? '').trim() ||
     null
 
   const foto = raw.imgUrl ?? raw.photo ?? raw.profilePicture ?? null
