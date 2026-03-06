@@ -11,7 +11,45 @@ const { chooseBestName } = require('../helpers/contactEnrichment')
 function emitirConversaAtualizada(io, company_id, conversa_id, payload = null) {
   if (!io) return
 
-  const data = payload || { id: Number(conversa_id) }
+  const cid = Number(conversa_id)
+  let data = payload || { id: cid }
+
+  // Se payload é mínimo (só id), buscar nome/foto para não sobrescrever com vazio no frontend (Bug 3)
+  const keys = Object.keys(data)
+  if (keys.length <= 1 && (keys.length === 0 || (keys[0] === 'id' && data.id))) {
+    supabase
+      .from('conversas')
+      .select('id, nome_contato_cache, foto_perfil_contato_cache, ultima_atividade')
+      .eq('company_id', company_id)
+      .eq('id', cid)
+      .maybeSingle()
+      .then(({ data: conv }) => {
+        if (conv) {
+          const enriched = { id: cid }
+          if (conv.nome_contato_cache) {
+            enriched.nome_contato_cache = conv.nome_contato_cache
+            enriched.contato_nome = conv.nome_contato_cache
+          }
+          if (conv.foto_perfil_contato_cache) {
+            enriched.foto_perfil_contato_cache = conv.foto_perfil_contato_cache
+            enriched.foto_perfil = conv.foto_perfil_contato_cache
+          }
+          if (conv.ultima_atividade) enriched.ultima_atividade = conv.ultima_atividade
+          const eventName = io.EVENTS?.CONVERSA_ATUALIZADA || 'conversa_atualizada'
+          io.to(`empresa_${company_id}`).to(`conversa_${cid}`).emit(eventName, enriched)
+        } else {
+          const eventName = io.EVENTS?.CONVERSA_ATUALIZADA || 'conversa_atualizada'
+          io.to(`empresa_${company_id}`).to(`conversa_${cid}`).emit(eventName, data)
+        }
+        io.to(`empresa_${company_id}`).emit('atualizar_conversa', { id: cid })
+      })
+      .catch(() => {
+        const eventName = io.EVENTS?.CONVERSA_ATUALIZADA || 'conversa_atualizada'
+        io.to(`empresa_${company_id}`).to(`conversa_${cid}`).emit(eventName, data)
+        io.to(`empresa_${company_id}`).emit('atualizar_conversa', { id: cid })
+      })
+    return
+  }
 
   // Emite para empresa + conversa em UMA única operação (evita duplicidade
   // quando o mesmo socket está nas duas rooms).
@@ -19,7 +57,7 @@ function emitirConversaAtualizada(io, company_id, conversa_id, payload = null) {
   io.to(`empresa_${company_id}`).to(`conversa_${conversa_id}`).emit(eventName, data)
 
   // compatibilidade com seu front atual
-  io.to(`empresa_${company_id}`).emit('atualizar_conversa', { id: Number(conversa_id) })
+  io.to(`empresa_${company_id}`).emit('atualizar_conversa', { id: cid })
 }
 
 function emitirEventoEmpresaConversa(io, company_id, conversa_id, eventName, payload) {
@@ -2114,7 +2152,14 @@ exports.enviarMensagemChat = async (req, res) => {
         io.EVENTS?.NOVA_MENSAGEM || 'nova_mensagem',
         msg
       )
-      emitirConversaAtualizada(io, company_id, conversa_id, { id: Number(conversa_id) })
+      // Incluir nome/foto no payload para evitar frontend sobrescrever com vazio ao enviar msg
+      const convPayload = {
+        id: Number(conversa_id),
+        ultima_atividade: basePayload.criado_em,
+        ...(conversa?.nome_contato_cache ? { nome_contato_cache: conversa.nome_contato_cache, contato_nome: conversa.nome_contato_cache } : {}),
+        ...(conversa?.foto_perfil_contato_cache ? { foto_perfil_contato_cache: conversa.foto_perfil_contato_cache, foto_perfil: conversa.foto_perfil_contato_cache } : {})
+      }
+      emitirConversaAtualizada(io, company_id, conversa_id, convPayload)
     }
 
     // Envio para WhatsApp via provider (meta ou zapi, conforme WHATSAPP_PROVIDER)

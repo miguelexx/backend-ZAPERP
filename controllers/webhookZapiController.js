@@ -1557,6 +1557,8 @@ exports.receberZapi = async (req, res) => {
     // Mensagens enviadas por nós (fromMe): não inserir — evita eco/duplicata.
     const whatsappIdStr = messageId ? String(messageId).trim() : null
     let mensagemSalva = null
+    /** true apenas quando inserimos nova mensagem; false quando idempotência ou reconciliação (CRM já emitiu nova_mensagem) */
+    let mensagemFoiInseridaPeloWebhook = false
 
     // fromMe: também persiste (você pediu "todas as mensagens"). O índice único por (conversa_id, whatsapp_id)
     // evita duplicatas quando o provider reenviar o mesmo evento.
@@ -1800,10 +1802,23 @@ exports.receberZapi = async (req, res) => {
         if (fromIso && toIso) q = q.gte('criado_em', fromIso).lte('criado_em', toIso)
 
         if (urlSig) q = q.eq('url', urlSig)
-        else if (texto) q = q.eq('texto', texto)
 
         const { data: candidates } = await q
-        const cand = Array.isArray(candidates) && candidates.length > 0 ? candidates[0] : null
+        let cand = null
+        if (Array.isArray(candidates) && candidates.length > 0) {
+          if (urlSig) {
+            cand = candidates[0]
+          } else if (texto) {
+            const textoNorm = String(texto || '').trim()
+            // Match exato primeiro; fallback case-insensitive (evita "Oi" vs "oi" duplicar)
+            cand = candidates.find((c) => {
+              const t = String(c.texto || '').trim()
+              return t === textoNorm || t.toLowerCase() === textoNorm.toLowerCase()
+            }) || null
+          } else {
+            cand = candidates[0]
+          }
+        }
         if (cand?.id) {
           const updates = { whatsapp_id: whatsappIdStr }
           if (statusPayload) updates.status = statusPayload
@@ -1990,6 +2005,7 @@ exports.receberZapi = async (req, res) => {
           }
           if (!fallback.error) {
             mensagemSalva = fallback.data
+            mensagemFoiInseridaPeloWebhook = true
             console.log('✅ Mensagem salva (fallback):', mensagemSalva.id)
           } else {
             console.error('❌ Z-API Erro ao salvar mensagem:', errMsg?.code, errMsg?.message, errMsg?.details)
@@ -1998,6 +2014,7 @@ exports.receberZapi = async (req, res) => {
         }
       } else {
         mensagemSalva = inserted
+        mensagemFoiInseridaPeloWebhook = true
       }
     }
 
@@ -2057,6 +2074,8 @@ exports.receberZapi = async (req, res) => {
     }
 
     // 4) Realtime: nova_mensagem + atualizar_conversa + conversa_atualizada (igual WhatsApp Web)
+    // IMPORTANTE: só emite nova_mensagem quando a mensagem foi INSERIDA pelo webhook.
+    // Quando idempotência ou reconciliação (msg enviada pelo CRM), o chatController já emitiu — evita duplicata.
     const io = req.app.get('io')
     if (io && mensagemSalva) {
       const rooms = [`conversa_${convIdForEmit}`, `empresa_${company_id}`]
@@ -2070,21 +2089,44 @@ exports.receberZapi = async (req, res) => {
         status: canon,
         status_mensagem: canon
       }
-      io.to(rooms).emit('nova_mensagem', emitPayload)
+      if (mensagemFoiInseridaPeloWebhook) {
+        io.to(rooms).emit('nova_mensagem', emitPayload)
+      } else {
+        // Reconciliada/idempotência: emite apenas status_mensagem para atualizar ticks (evita duplicar bolha)
+        io.to(`empresa_${company_id}`).to(`conversa_${convIdForEmit}`).emit('status_mensagem', {
+          mensagem_id: mensagemSalva.id,
+          conversa_id: convIdForEmit,
+          status: canon,
+          whatsapp_id: mensagemSalva.whatsapp_id || null
+        })
+      }
       io.to(`empresa_${company_id}`).emit('atualizar_conversa', { id: convIdForEmit })
       // conversa_atualizada enriquecida: ultima_atividade, nome/foto cache (frontend atualiza lista lateral)
+      // Sempre incluir nome quando disponível (cache ou cliente) — evita frontend sobrescrever com vazio
       const { data: convRow } = await supabase
         .from('conversas')
-        .select('id, ultima_atividade, nome_contato_cache, foto_perfil_contato_cache, telefone')
+        .select('id, ultima_atividade, nome_contato_cache, foto_perfil_contato_cache, telefone, cliente_id')
         .eq('id', convIdForEmit)
         .eq('company_id', company_id)
         .maybeSingle()
+      let contatoNome = convRow?.nome_contato_cache ? String(convRow.nome_contato_cache).trim() : null
+      let fotoPerfil = convRow?.foto_perfil_contato_cache ? String(convRow.foto_perfil_contato_cache).trim() : null
+      if ((!contatoNome || !fotoPerfil) && convRow?.cliente_id && !isGroup) {
+        const { data: cli } = await supabase
+          .from('clientes')
+          .select('nome, pushname, foto_perfil')
+          .eq('id', convRow.cliente_id)
+          .eq('company_id', company_id)
+          .maybeSingle()
+        if (cli && !contatoNome) contatoNome = (cli.pushname || cli.nome || '').trim() || null
+        if (cli?.foto_perfil && !fotoPerfil) fotoPerfil = String(cli.foto_perfil).trim()
+      }
       const convPayload = {
         id: convIdForEmit,
         ultima_atividade: convRow?.ultima_atividade ?? new Date().toISOString(),
         telefone: convRow?.telefone ?? null,
-        ...(convRow?.nome_contato_cache ? { nome_contato_cache: convRow.nome_contato_cache, contato_nome: convRow.nome_contato_cache } : {}),
-        ...(convRow?.foto_perfil_contato_cache ? { foto_perfil_contato_cache: convRow.foto_perfil_contato_cache, foto_perfil: convRow.foto_perfil_contato_cache } : {})
+        ...(contatoNome ? { nome_contato_cache: contatoNome, contato_nome: contatoNome } : {}),
+        ...(fotoPerfil ? { foto_perfil_contato_cache: fotoPerfil, foto_perfil: fotoPerfil } : {})
       }
       io.to(`empresa_${company_id}`).emit('conversa_atualizada', convPayload)
       if (departamento_id != null) {
