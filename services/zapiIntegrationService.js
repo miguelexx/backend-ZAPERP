@@ -289,12 +289,14 @@ async function getCompanyIdByInstanceId(instanceId) {
     return null
   }
   if (data?.company_id != null) return Number(data.company_id)
-  // Fallback: match case-insensitive (SELECT company_id FROM empresa_zapi WHERE ativo=true AND LOWER(instance_id)=LOWER(id))
+  // Fallback: match case-insensitive. limit(1) garante resultado determinístico com múltiplas instâncias.
   const { data: d2, error: e2 } = await supabase
     .from('empresa_zapi')
     .select('company_id')
     .eq('ativo', true)
     .ilike('instance_id', id)
+    .order('company_id', { ascending: true })
+    .limit(1)
     .maybeSingle()
   if (!e2 && d2?.company_id != null) return Number(d2.company_id)
   return null

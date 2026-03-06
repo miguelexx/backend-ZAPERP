@@ -504,20 +504,32 @@ exports.listarConversas = async (req, res) => {
 
     // Fallback: quando conversa.cliente_id é null mas existe cliente com o mesmo telefone,
     // usamos esse cliente para exibir nome/foto na lista.
+    // Usa possiblePhonesBR para matching entre formatos (5511... vs 11..., 12 vs 13 dígitos).
     const phoneToClientFallback = new Map()
     try {
       const phonesSemCliente = (data || [])
-        .filter((c) => !isGroupConversation(c) && !c.cliente_id && c.telefone)
+        .filter((c) => !isGroupConversation(c) && !c.cliente_id && c.telefone && !String(c.telefone).startsWith('lid:'))
         .map((c) => String(c.telefone).trim())
       const uniquePhones = Array.from(new Set(phonesSemCliente.filter(Boolean)))
       if (uniquePhones.length > 0) {
+        const expandedPhones = new Set()
+        for (const p of uniquePhones) {
+          const variants = possiblePhonesBR(p)
+          if (variants.length > 0) variants.forEach((v) => expandedPhones.add(v))
+          else expandedPhones.add(p)
+        }
         const { data: clientesFallback } = await supabase
           .from('clientes')
           .select('id, nome, pushname, telefone, foto_perfil')
           .eq('company_id', company_id)
-          .in('telefone', uniquePhones)
+          .in('telefone', Array.from(expandedPhones))
         for (const cl of clientesFallback || []) {
           if (!cl || !cl.telefone) continue
+          const variants = possiblePhonesBR(cl.telefone)
+          const keys = variants.length > 0 ? variants : [String(cl.telefone).trim()]
+          for (const k of keys) {
+            if (k) phoneToClientFallback.set(k, cl)
+          }
           phoneToClientFallback.set(String(cl.telefone).trim(), cl)
         }
       }
@@ -531,7 +543,14 @@ exports.listarConversas = async (req, res) => {
         ? (raw.find((cl) => cl && Number(cl.id) === Number(c.cliente_id)) || raw[0])
         : raw
       if (!clientesObj && !isGroupConversation(c) && !c.cliente_id && c.telefone) {
-        const fallbackCli = phoneToClientFallback.get(String(c.telefone).trim())
+        const convTel = String(c.telefone).trim()
+        let fallbackCli = phoneToClientFallback.get(convTel)
+        if (!fallbackCli && convTel) {
+          const variants = possiblePhonesBR(convTel)
+          for (const v of variants) {
+            if ((fallbackCli = phoneToClientFallback.get(v))) break
+          }
+        }
         if (fallbackCli) clientesObj = fallbackCli
       }
 
@@ -1092,10 +1111,21 @@ exports.sincronizarFotosPerfilZapi = async (req, res) => {
 
         const updates = {}
 
-        // nome/pushname: preencher quando faltando (ou quando só tem número)
-        if (missingName) {
-          updates.nome = metaNome || phone
-          if (metaNome) nomeAtualizado++
+        // nome/pushname: use chooseBestName para evitar regressão (nunca substituir nome bom por pior)
+        if (missingName || metaNome) {
+          const candidate = metaNome || (missingName ? phone : null)
+          const { name: bestNome } = chooseBestName(
+            nomeDb || null,
+            candidate,
+            'syncZapi',
+            { fromMe: false, company_id: cid, telefoneTail: phone.slice(-6) }
+          )
+          if (bestNome && bestNome !== (nomeDb || '')) {
+            updates.nome = bestNome
+            if (bestNome !== phone) nomeAtualizado++
+          } else if (missingName) {
+            updates.nome = phone
+          }
         }
         if (!pushDb && metaPush) {
           updates.pushname = metaPush
@@ -1111,13 +1141,30 @@ exports.sincronizarFotosPerfilZapi = async (req, res) => {
         }
 
         if (Object.keys(updates).length > 0) {
-          let upd = await supabase.from('clientes').update(updates).eq('id', cl.id)
+          let upd = await supabase.from('clientes').update(updates).eq('id', cl.id).eq('company_id', cid)
           if (upd.error && String(upd.error.message || '').includes('pushname')) {
             delete updates.pushname
-            if (Object.keys(updates).length > 0) upd = await supabase.from('clientes').update(updates).eq('id', cl.id)
+            if (Object.keys(updates).length > 0) upd = await supabase.from('clientes').update(updates).eq('id', cl.id).eq('company_id', cid)
           }
-          if (!upd.error) atualizados++
-          else {
+          if (!upd.error) {
+            atualizados++
+            // Atualiza cache nas conversas vinculadas (nome_contato_cache, foto_perfil_contato_cache)
+            const cacheUpdates = {}
+            if (updates.nome) cacheUpdates.nome_contato_cache = updates.nome
+            if (updates.foto_perfil) cacheUpdates.foto_perfil_contato_cache = updates.foto_perfil
+            if (Object.keys(cacheUpdates).length > 0) {
+              supabase.from('conversas').update(cacheUpdates).eq('cliente_id', cl.id).eq('company_id', cid).select('id').then(({ data }) => {
+                // Emite via socket para atualizar UI em tempo real (empresa específica)
+                const io = req.app?.get('io')
+                if (io && Array.isArray(data) && data.length > 0) {
+                  for (const row of data) {
+                    io.to(`empresa_${cid}`).emit('conversa_atualizada', { id: row.id, ...cacheUpdates })
+                    io.to(`empresa_${cid}`).emit('atualizar_conversa', { id: row.id })
+                  }
+                }
+              }).catch(() => {})
+            }
+          } else {
             erros++
             if (exemplosErros.length < 10) exemplosErros.push({ id: cl.id, telefone: phone.slice(-6), erro: upd.error.message })
           }
