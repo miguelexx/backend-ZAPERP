@@ -1557,8 +1557,27 @@ exports.receberZapi = async (req, res) => {
     }
 
     // 2.5) Chatbot de triagem (Z-API): mensagem do cliente, conversa sem departamento → menu ou processar opção
-    if (!fromMe && !isGroup && departamento_id == null && phone) {
+    // APENAS contatos (não grupos). Telefone deve ser enviável (não lid:).
+    let phoneParaChatbot = phone
+    if (phone && String(phone).startsWith('lid:')) {
+      const { data: convRow } = await supabase
+        .from('conversas')
+        .select('telefone')
+        .eq('id', conversa_id)
+        .eq('company_id', company_id)
+        .maybeSingle()
+      const telefoneConv = convRow?.telefone
+      if (telefoneConv && !String(telefoneConv).startsWith('lid:')) {
+        phoneParaChatbot = telefoneConv
+        console.log('[Z-API] 🤖 Chatbot: usando telefone da conversa (payload tinha LID):', telefoneConv?.slice(-8))
+      } else {
+        console.log('[Z-API] 🤖 Chatbot: ignorado — phone é LID e conversa não tem número real para envio')
+        phoneParaChatbot = null
+      }
+    }
+    if (!fromMe && !isGroup && departamento_id == null && phoneParaChatbot) {
       try {
+        console.log('[Z-API] 🤖 Chatbot: processando mensagem', { company_id, conversa_id, phoneTail: String(phoneParaChatbot).slice(-8) })
         const sendMessage = async (ph, msg, o = {}) => {
           const r = await zapiProvider.sendText(ph, msg, { companyId: company_id, ...o })
           return { ok: !!r?.ok, messageId: r?.messageId || null }
@@ -1566,7 +1585,7 @@ exports.receberZapi = async (req, res) => {
         const result = await processChatbotTriage({
           company_id,
           conversa_id,
-          telefone: phone,
+          telefone: phoneParaChatbot,
           texto: texto || '',
           supabase,
           sendMessage,

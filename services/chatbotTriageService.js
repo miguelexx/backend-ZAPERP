@@ -73,9 +73,22 @@ async function getChatbotConfig(company_id) {
       .eq('company_id', company_id)
       .maybeSingle()
 
-    if (error || !data?.config) return null
+    if (error) {
+      console.warn('[chatbotTriage] getChatbotConfig: erro ao buscar ia_config', error.message)
+      return null
+    }
+    if (!data?.config) {
+      console.log('[chatbotTriage] getChatbotConfig: sem registro em ia_config para company_id', company_id)
+      return null
+    }
     const ct = data.config.chatbot_triage || data.config
-    return validateChatbotConfig(ct)
+    const validated = validateChatbotConfig(ct)
+    if (!validated) {
+      const opts = Array.isArray(ct?.options) ? ct.options : []
+      const activeCount = opts.filter((o) => o && o.active !== false && o.departamento_id != null).length
+      console.log('[chatbotTriage] getChatbotConfig: config inválida (enabled=', !!ct?.enabled, 'opcoes_ativas=', activeCount, ')')
+    }
+    return validated
   } catch (e) {
     console.warn('[chatbotTriage] getChatbotConfig:', e?.message || e)
     return null
@@ -277,11 +290,28 @@ async function applyTagIfConfigured(supabaseClient, company_id, conversa_id, tag
  */
 async function processIncomingMessage(ctx) {
   const { company_id, conversa_id, telefone, texto, supabase: supabaseClient, sendMessage, opts = {} } = ctx
-  if (!company_id || !conversa_id || !telefone || !sendMessage) return { handled: false }
+  if (!company_id || !conversa_id || !telefone || !sendMessage) {
+    console.log('[chatbotTriage] skip: falta company_id, conversa_id, telefone ou sendMessage')
+    return { handled: false }
+  }
+  if (String(telefone).startsWith('lid:')) {
+    console.log('[chatbotTriage] skip: telefone é LID (não é possível enviar via Z-API)')
+    return { handled: false }
+  }
 
   const config = await getChatbotConfig(company_id)
-  if (!config || !config.enabled) return { handled: false }
-  if (!config.options?.length) return { handled: false }
+  if (!config) {
+    console.log('[chatbotTriage] skip: config não encontrada ou inválida para company_id', company_id)
+    return { handled: false }
+  }
+  if (!config.enabled) {
+    console.log('[chatbotTriage] skip: chatbot desativado')
+    return { handled: false }
+  }
+  if (!config.options?.length) {
+    console.log('[chatbotTriage] skip: nenhuma opção configurada')
+    return { handled: false }
+  }
 
   const sb = supabaseClient || supabase
   const textoNorm = String(texto || '').trim().toLowerCase()
@@ -342,6 +372,7 @@ async function processIncomingMessage(ctx) {
   if (shouldSendWelcome) {
     const msg = welcomeFull || menuOnly
     if (msg) {
+      console.log('[chatbotTriage] enviando menu de boas-vindas', { conversa_id, company_id })
       await sendMessage(telefone, msg, opts)
       await sb.from('mensagens').insert({
         conversa_id,
@@ -351,6 +382,8 @@ async function processIncomingMessage(ctx) {
         status: 'enviada',
       })
       await logBotAction(company_id, conversa_id, 'menu_enviado', { opcoes: config.options.map((o) => o.key) })
+    } else {
+      console.warn('[chatbotTriage] menu vazio — welcomeMessage e menu (opções) estão vazios. Verifique a configuração.')
     }
     return { handled: true }
   }
