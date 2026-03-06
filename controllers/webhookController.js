@@ -3,6 +3,7 @@ const path = require('path')
 const fs = require('fs')
 const { normalizePhoneBR, possiblePhonesBR } = require('../helpers/phoneHelper')
 const { findOrCreateConversation } = require('../helpers/conversationSync')
+const { processIncomingMessage: processChatbotTriage } = require('../services/chatbotTriageService')
 
 /**
  * Envia mensagem para WhatsApp via Meta API (se configurado).
@@ -308,61 +309,29 @@ exports.receberWebhook = async (req, res) => {
       return res.sendStatus(500)
     }
 
-    // 3) Roteamento por setor (apenas mensagens recebidas do contato; não para mensagens enviadas por nós)
-    if (!isOutgoing && departamento_id == null) {
-      const { data: iaConfigRow } = await supabase
-        .from('ia_config')
-        .select('config')
-        .eq('company_id', company_id)
-        .maybeSingle()
-
-      const roteamento = iaConfigRow?.config?.roteamento || {}
-      const ativarMenu = roteamento.ativar_menu_setores !== false
-      const textoMenu = roteamento.texto_menu || 'Escolha o setor pelo número:'
-      const departamentosIds = roteamento.departamentos_ids || []
-
-      let departamentos = []
-      if (ativarMenu) {
-        let q = supabase
-          .from('departamentos')
-          .select('id, nome')
-          .eq('company_id', company_id)
-        if (Array.isArray(departamentosIds) && departamentosIds.length > 0) {
-          q = q.in('id', departamentosIds)
+    // 3) Chatbot de triagem (apenas mensagens recebidas do contato; não para mensagens enviadas por nós)
+    if (!isOutgoing && departamento_id == null && contactPhone) {
+      try {
+        const sendMessage = async (ph, msg, o = {}) => {
+          const phoneId = o.phoneNumberId ?? phoneNumberId ?? undefined
+          const r = await enviarMensagemWhatsApp(ph, msg, phoneId)
+          return { ok: !!r?.ok, messageId: r?.messageId || null }
         }
-        q = q.order('nome')
-        const { data: depList, error: errDep } = await q
-        if (!errDep && depList) departamentos = depList
-      }
-
-      if (departamentos.length > 0) {
-        const opcao = texto ? parseInt(texto, 10) : NaN
-        if (Number.isInteger(opcao) && opcao >= 1 && opcao <= departamentos.length) {
-          const dept = departamentos[opcao - 1]
-          const { error: errUpd } = await supabase
-            .from('conversas')
-            .update({ departamento_id: dept.id })
-            .eq('id', conversa_id)
-            .eq('company_id', company_id)
-          if (!errUpd) {
-            departamento_id = dept.id
-            console.log('✅ Setor atribuído:', dept.nome, 'conversa', conversa_id)
-            await registrarBotLog(company_id, conversa_id, 'setor_atribuido', { departamento_id: dept.id, departamento_nome: dept.nome })
-          }
-        } else {
-          const linhas = departamentos.map((d, i) => `${i + 1} - ${d.nome}`)
-          const menuTexto = textoMenu + '\n\n' + linhas.join('\n')
-          await supabase.from('mensagens').insert({
-            conversa_id,
-            texto: menuTexto,
-            direcao: 'out',
-            company_id,
-            status: 'enviada'
-          })
-          const phoneId = phoneNumberId || undefined
-          await enviarMensagemWhatsApp(contactPhone, menuTexto, phoneId)
-          await registrarBotLog(company_id, conversa_id, 'menu_setores_enviado', { departamentos: departamentos.map(d => d.nome) })
+        const result = await processChatbotTriage({
+          company_id,
+          conversa_id,
+          telefone: contactPhone,
+          texto: texto || '',
+          supabase,
+          sendMessage,
+          opts: { phoneNumberId: phoneNumberId || undefined },
+        })
+        if (result?.handled && result?.departamento_id != null) {
+          departamento_id = result.departamento_id
+          console.log('[Meta] 🤖 Chatbot: conversa direcionada para departamento', departamento_id)
         }
+      } catch (errChatbot) {
+        console.warn('[Meta] Chatbot triagem:', errChatbot?.message || errChatbot)
       }
     }
 

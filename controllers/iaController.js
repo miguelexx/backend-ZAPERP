@@ -1,6 +1,20 @@
 const supabase = require('../config/supabase')
+const { DEFAULT_CHATBOT_CONFIG, validateChatbotConfig } = require('../services/chatbotTriageService')
 
 const DEFAULT_CONFIG = {
+  chatbot_triage: {
+    enabled: false,
+    welcomeMessage: '',
+    invalidOptionMessage: 'Opção inválida. Por favor, responda apenas com o número do setor desejado.',
+    confirmSelectionMessage: 'Perfeito! Seu atendimento foi direcionado para o setor {{departamento}}. Em instantes nossa equipe dará continuidade.',
+    sendOnlyFirstTime: true,
+    fallbackToAI: false,
+    businessHoursOnly: false,
+    transferMode: 'departamento',
+    tipo_distribuicao: 'round_robin', // round_robin | menor_carga
+    reopenMenuCommand: '0',
+    options: [],
+  },
   bot_global: {
     ativo: false,
     mensagem_boas_vindas: '',
@@ -53,6 +67,7 @@ exports.getConfig = async (req, res) => {
     if (error) {
       console.warn('ia_config select error:', error.message)
       return res.json({
+        chatbot_triage: DEFAULT_CONFIG.chatbot_triage,
         bot_global: DEFAULT_CONFIG.bot_global,
         roteamento: DEFAULT_CONFIG.roteamento,
         ia: DEFAULT_CONFIG.ia,
@@ -60,7 +75,10 @@ exports.getConfig = async (req, res) => {
       })
     }
     const config = data?.config ?? {}
+    const ctRaw = config.chatbot_triage || {}
+    const ctValid = validateChatbotConfig({ ...DEFAULT_CONFIG.chatbot_triage, ...ctRaw }) || DEFAULT_CONFIG.chatbot_triage
     const merged = {
+      chatbot_triage: ctValid,
       bot_global: { ...DEFAULT_CONFIG.bot_global, ...(config.bot_global || {}) },
       roteamento: { ...DEFAULT_CONFIG.roteamento, ...(config.roteamento || {}) },
       ia: { ...DEFAULT_CONFIG.ia, ...(config.ia || {}) },
@@ -70,6 +88,7 @@ exports.getConfig = async (req, res) => {
   } catch (err) {
     console.error('getConfig:', err)
     return res.json({
+      chatbot_triage: DEFAULT_CONFIG.chatbot_triage,
       bot_global: DEFAULT_CONFIG.bot_global,
       roteamento: DEFAULT_CONFIG.roteamento,
       ia: DEFAULT_CONFIG.ia,
@@ -82,7 +101,7 @@ exports.getConfig = async (req, res) => {
 exports.putConfig = async (req, res) => {
   try {
     const { company_id } = req.user
-    const { bot_global, roteamento, ia, automacoes } = req.body
+    const { chatbot_triage: ctBody, bot_global, roteamento, ia, automacoes } = req.body
 
     const { data: existing } = await supabase
       .from('ia_config')
@@ -91,7 +110,10 @@ exports.putConfig = async (req, res) => {
       .maybeSingle()
 
     const current = existing?.config ?? {}
+    const ctMerged = { ...DEFAULT_CONFIG.chatbot_triage, ...(current.chatbot_triage || {}), ...(ctBody || {}) }
+    const ctValid = validateChatbotConfig(ctMerged) || ctMerged
     const merged = {
+      chatbot_triage: ctValid,
       bot_global: { ...DEFAULT_CONFIG.bot_global, ...current.bot_global, ...(bot_global || {}) },
       roteamento: { ...DEFAULT_CONFIG.roteamento, ...current.roteamento, ...(roteamento || {}) },
       ia: { ...DEFAULT_CONFIG.ia, ...current.ia, ...(ia || {}) },

@@ -9,6 +9,7 @@
 
 const supabase = require('../config/supabase')
 const { getProvider } = require('../services/providers')
+const zapiProvider = require('../services/providers/zapi')
 const { syncContactFromZapi } = require('../services/zapiSyncContact')
 const { getCompanyIdByInstanceId } = require('../services/zapiIntegrationService')
 const { normalizePhoneBR, possiblePhonesBR, normalizeGroupIdForStorage } = require('../helpers/phoneHelper')
@@ -16,6 +17,7 @@ const { getCanonicalPhone, getOrCreateCliente, findOrCreateConversation, mergeCo
 const { chooseBestName } = require('../helpers/contactEnrichment')
 const { resolvePeerPhone } = require('../helpers/conversationKeyHelper')
 const { incrementarUnreadParaConversa } = require('./chatController')
+const { processIncomingMessage: processChatbotTriage } = require('../services/chatbotTriageService')
 
 // company_id NUNCA mais via ENV — resolvido por instanceId do payload em cada webhook
 const WHATSAPP_DEBUG = String(process.env.WHATSAPP_DEBUG || '').toLowerCase() === 'true'
@@ -1552,6 +1554,31 @@ exports.receberZapi = async (req, res) => {
     } catch (errConv) {
       console.error('[Z-API] ❌ Erro ao obter/criar conversa:', errConv?.message || errConv)
       return res.status(500).json({ error: 'Erro ao obter conversa' })
+    }
+
+    // 2.5) Chatbot de triagem (Z-API): mensagem do cliente, conversa sem departamento → menu ou processar opção
+    if (!fromMe && !isGroup && departamento_id == null && phone) {
+      try {
+        const sendMessage = async (ph, msg, o = {}) => {
+          const r = await zapiProvider.sendText(ph, msg, { companyId: company_id, ...o })
+          return { ok: !!r?.ok, messageId: r?.messageId || null }
+        }
+        const result = await processChatbotTriage({
+          company_id,
+          conversa_id,
+          telefone: phone,
+          texto: texto || '',
+          supabase,
+          sendMessage,
+          opts: { companyId: company_id },
+        })
+        if (result?.handled && result?.departamento_id != null) {
+          departamento_id = result.departamento_id
+          console.log('[Z-API] 🤖 Chatbot: conversa direcionada para departamento', departamento_id)
+        }
+      } catch (errChatbot) {
+        console.warn('[Z-API] Chatbot triagem:', errChatbot?.message || errChatbot)
+      }
     }
 
     // 3) Salvar mensagem. TUDO que a Z-API envia (recebido, !fromMe) é gravado; sem messageId grava com whatsapp_id null.
