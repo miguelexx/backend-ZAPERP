@@ -2,22 +2,26 @@
  * Contact enrichment: escolha segura de nome para evitar regressões.
  * Garante que nunca substituímos um nome "bom" por um "pior" ou não confiável.
  *
+ * IMPORTANTE: O usuário quer o nome salvo no CELULAR (contatos), não o do perfil WhatsApp.
+ * - syncZapi: vem de GET /contacts (name/short = contato do celular) — MAIOR prioridade
+ * - senderName: vem do webhook (geralmente notify = perfil WhatsApp) — menor prioridade
+ *
  * Fontes de nome (score):
- * - senderName (notify/display do WhatsApp): 100
- * - chatName (contato individual): 80
+ * - syncZapi: 110 (nome do contato no celular via GET /contacts — prioridade máxima)
+ * - chatName: 80
+ * - nome_existente: 70 (já salvo, não sobrescrever com pior)
+ * - senderName: 60 (notify/display do WhatsApp — não sobrescreve nome existente)
  * - pushname: 60
- * - nome_existente: 70 (já está bom)
- * - syncContactFromZapi: 90 (API oficial)
  */
 
 const WHATSAPP_DEBUG = String(process.env.WHATSAPP_DEBUG || '').toLowerCase() === 'true'
 
-/** Score por fonte (maior = mais confiável). */
+/** Score por fonte (maior = mais confiável). Nome do celular (syncZapi) > perfil WhatsApp (senderName). */
 const SOURCE_SCORE = {
-  senderName: 100,
+  syncZapi: 110,
+  senderName: 60,
   chatName: 80,
   pushname: 60,
-  syncZapi: 90,
   nome_existente: 70,
   unknown: 0
 }
@@ -115,9 +119,9 @@ function chooseBestName(currentName, candidateName, source, opts = {}) {
     return { name: cand, decision: 'updated' }
   }
 
-  // fromMe: só atualiza se candidato for senderName (alta confiança) ou se atual for ruim (já tratado acima)
+  // fromMe: aceita syncZapi (nome do celular) e senderName; rejeita chatName/pushname (menos confiáveis)
   if (fromMe) {
-    if (source !== 'senderName') {
+    if (source !== 'senderName' && source !== 'syncZapi') {
       if (WHATSAPP_DEBUG) {
         console.log('[NAME_UPDATE]', {
           company_id: company_id ?? null,

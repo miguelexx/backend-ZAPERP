@@ -554,7 +554,8 @@ exports.listarConversas = async (req, res) => {
         if (fallbackCli) clientesObj = fallbackCli
       }
 
-      const nomeCliente = (clientesObj?.pushname ?? clientesObj?.nome ?? null) && String(clientesObj?.pushname ?? clientesObj?.nome ?? '').trim() ? String(clientesObj?.pushname ?? clientesObj?.nome ?? '').trim() : null
+      // Prioridade: nome (contato do celular) > pushname (perfil WhatsApp)
+      const nomeCliente = (clientesObj?.nome ?? clientesObj?.pushname ?? null) && String(clientesObj?.nome ?? clientesObj?.pushname ?? '').trim() ? String(clientesObj?.nome ?? clientesObj?.pushname ?? '').trim() : null
       const fotoCliente = clientesObj?.foto_perfil ?? null
       const isGroup = isGroupConversation(c)
       const ultimaMsg = Array.isArray(c.mensagens) && c.mensagens.length > 0 ? c.mensagens[0] : null
@@ -637,7 +638,7 @@ exports.listarConversas = async (req, res) => {
         cliente_id: cl.id,
         telefone: cl.telefone || '',
         tipo: 'cliente',
-        contato_nome: cl.pushname || cl.nome || cl.telefone || null,
+        contato_nome: cl.nome || cl.pushname || cl.telefone || null,
         foto_perfil: cl.foto_perfil || null,
         sem_conversa: true,
         mensagens: [],
@@ -1362,7 +1363,7 @@ exports.abrirConversaCliente = async (req, res) => {
         cliente_id: cliente.id,
         telefone: conversaExistente.telefone,
         tipo: 'cliente',
-        contato_nome: cliente.pushname || cliente.nome || conversaExistente.telefone,
+        contato_nome: cliente.nome || cliente.pushname || conversaExistente.telefone,
         foto_perfil: cliente.foto_perfil || null,
         unread_count: 0,
         tags: []
@@ -1392,7 +1393,7 @@ exports.abrirConversaCliente = async (req, res) => {
       cliente_id: cliente.id,
       telefone: novaConversa.telefone,
       tipo: 'cliente',
-      contato_nome: cliente.pushname || cliente.nome || novaConversa.telefone,
+      contato_nome: cliente.nome || cliente.pushname || novaConversa.telefone,
       foto_perfil: cliente.foto_perfil || null,
       unread_count: 0,
       tags: []
@@ -1635,7 +1636,8 @@ exports.detalharChat = async (req, res) => {
       : rawClientes
     // Nunca exibir LID (lid:xxx) como nome ou número — identificador interno do WhatsApp
     const isLidConv = !isGroup && conversa.telefone && String(conversa.telefone).trim().toLowerCase().startsWith('lid:')
-    const clienteNomeBase = clientesConv?.pushname ?? clientesConv?.nome ?? null
+    // Prioridade: nome (contato do celular) > pushname (perfil WhatsApp)
+    const clienteNomeBase = clientesConv?.nome ?? clientesConv?.pushname ?? null
     const clienteNome = (clienteNomeBase && String(clienteNomeBase).trim()) ? String(clienteNomeBase).trim() : null
     const nomeCache = (conversa.nome_contato_cache && String(conversa.nome_contato_cache).trim()) ? String(conversa.nome_contato_cache).trim() : null
     const nomeUnico = isGroup
@@ -1703,7 +1705,7 @@ exports.detalharChat = async (req, res) => {
               const { data: cli } = await supabase.from('clientes').select('nome, pushname, telefone, foto_perfil').eq('id', cliId).eq('company_id', cid).maybeSingle()
               io.to(`empresa_${cid}`).emit('contato_atualizado', {
                 conversa_id: Number(id),
-                contato_nome: cli?.pushname || cli?.nome || cliPhone,
+                contato_nome: cli?.nome || cli?.pushname || cliPhone,
                 telefone: cli?.telefone || cliPhone,
                 foto_perfil: cli?.foto_perfil || updates.foto_perfil
               })
@@ -2115,7 +2117,7 @@ exports.enviarMensagemChat = async (req, res) => {
               if (r && !r.error && req.app?.get('io')) {
                 const io = req.app.get('io')
                 const { data: cli } = await supabase.from('clientes').select('nome, pushname, telefone').eq('id', novoClienteId).eq('company_id', company_id).maybeSingle()
-                const contatoNome = cli?.pushname || cli?.nome || conversa.nome_contato_cache || conversa.telefone
+                const contatoNome = cli?.nome || cli?.pushname || conversa.nome_contato_cache || conversa.telefone
                 io.to(`empresa_${company_id}`).emit('contato_atualizado', {
                   conversa_id: Number(conversa_id),
                   contato_nome: contatoNome,

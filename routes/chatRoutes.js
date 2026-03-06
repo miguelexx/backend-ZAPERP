@@ -12,7 +12,7 @@ router.post('/abrir-conversa', auth, chatController.abrirConversaCliente);
 router.post("/grupos", auth, chatController.criarGrupo);
 router.post("/comunidades", auth, chatController.criarComunidade);
 router.get('/', auth, chatController.listarConversas)
-router.get('/merge-duplicatas', chatController.paginaMergeDuplicatas)
+router.get('/merge-duplicatas', auth, adminOnly, chatController.paginaMergeDuplicatas)
 router.post('/merge-duplicatas', auth, adminOnly, chatController.mergeConversasDuplicadas)
 router.post('/sincronizar-contatos', auth, chatController.sincronizarContatosZapi)
 router.post('/sincronizar-fotos-perfil', auth, chatController.sincronizarFotosPerfilZapi)

@@ -1903,7 +1903,7 @@ exports.receberZapi = async (req, res) => {
             const { data: rowsM } = await qM
             const ex = Array.isArray(rowsM) && rowsM.length > 0 ? rowsM[0] : null
             if (ex) {
-              remetenteNomeFinal = ex.pushname || ex.nome || remetenteNomeFinal
+              remetenteNomeFinal = ex.nome || ex.pushname || remetenteNomeFinal
             } else {
               // se não existe no banco, cria "contato mínimo" (sem conversa) para poder exibir nome depois
               if (pNorm) {
@@ -2121,7 +2121,7 @@ exports.receberZapi = async (req, res) => {
           .eq('id', convRow.cliente_id)
           .eq('company_id', company_id)
           .maybeSingle()
-        if (cli && !contatoNome) contatoNome = (cli.pushname || cli.nome || '').trim() || null
+        if (cli && !contatoNome) contatoNome = (cli.nome || cli.pushname || '').trim() || null
         if (cli?.foto_perfil && !fotoPerfil) fotoPerfil = String(cli.foto_perfil).trim()
       }
       const convPayload = {
@@ -2163,7 +2163,7 @@ exports.receberZapi = async (req, res) => {
           const r = await supabase.from('clientes').select('nome, pushname, telefone, foto_perfil').eq('id', syncClienteId).single()
           const data = r?.data
           if (data && io) {
-            const displayName = data.pushname || data.nome || data.telefone || syncPhone
+            const displayName = data.nome || data.pushname || data.telefone || syncPhone
             console.log('✅ Contato sincronizado Z-API:', syncPhone?.slice(-6), displayName || '(sem nome)')
             io.to(`empresa_${company_id}`).emit('contato_atualizado', {
               conversa_id: convId,

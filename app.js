@@ -95,8 +95,14 @@ app.use('/webhook/zapi', webhookLimiter, webhookZapiRoutes)
 // =====================================================
 const allowedOrigins = [
   'https://zaperp.wmsistemas.inf.br',
-  'https://www.zaperp.wmsistemas.inf.br'
+  'https://www.zaperp.wmsistemas.inf.br',
+  ...(process.env.NODE_ENV !== 'production'
+    ? ['http://localhost:3000', 'http://localhost:5173', 'http://127.0.0.1:5173', 'http://127.0.0.1:3000']
+    : [])
 ]
+// CORS_ORIGINS no .env adiciona origens extras (separadas por vírgula)
+const extraOrigins = String(process.env.CORS_ORIGINS || '').split(',').map((s) => s.trim()).filter(Boolean)
+extraOrigins.forEach((o) => { if (o && !allowedOrigins.includes(o)) allowedOrigins.push(o) })
 
 const corsOptions = {
   origin(origin, callback) {
@@ -171,6 +177,7 @@ app.use('/clientes', clienteRoutes)
 app.use('/usuarios', userRoutes)
 app.use('/chats', chatRoutes)
 app.use('/tags', tagsRoutes)
+app.use('/ai', aiRoutes)
 
 // /api — prefixo opcional para SaaS; mantém compatibilidade com rotas antigas
 // Aplica apiLimiter globalmente para "rotas de API"
@@ -237,7 +244,9 @@ if (hasFrontendDist) {
     '/dashboard',
     '/jobs',
     '/ia',
+    '/ai',
     '/config',
+    '/integrations',
     '/clientes',
     '/webhook',
     '/webhooks',
