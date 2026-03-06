@@ -2145,12 +2145,19 @@ exports.enviarMensagemChat = async (req, res) => {
 
     const io = req.app.get('io')
     if (io) {
+      // Payload normalizado: id, conversa_id, status, status_mensagem, whatsapp_id (para frontend dedupe e ticks)
+      const novaMsgPayload = {
+        ...msg,
+        conversa_id: msg.conversa_id ?? Number(conversa_id),
+        status: msg.status || 'pending',
+        status_mensagem: msg.status_mensagem || msg.status || 'pending'
+      }
       emitirEventoEmpresaConversa(
         io,
         company_id,
         conversa_id,
         io.EVENTS?.NOVA_MENSAGEM || 'nova_mensagem',
-        msg
+        novaMsgPayload
       )
       // Incluir nome/foto no payload para evitar frontend sobrescrever com vazio ao enviar msg
       const convPayload = {
@@ -2250,12 +2257,12 @@ exports.enviarMensagemChat = async (req, res) => {
       }
     }
 
+    // Não retornar mensagem completa — evita duplicação no frontend (API + socket).
+    // A mensagem chega via socket nova_mensagem (única fonte de verdade para exibição).
     return res.json({
       ok: true,
-      mensagem: {
-        ...msg,
-        conversa_id: Number(conversa_id)
-      }
+      id: msg.id,
+      conversa_id: Number(conversa_id)
     })
   } catch (err) {
     console.error(err)

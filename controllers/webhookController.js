@@ -155,10 +155,15 @@ exports.receberWebhook = async (req, res) => {
 
         if (!error && msgRow && io) {
           // Emite para empresa + conversa em UMA única operação (evita evento duplicado
-          // quando o mesmo socket está nas duas rooms).
+          // quando o mesmo socket está nas duas rooms). Inclui whatsapp_id para frontend dedupe/ticks.
           io.to(`empresa_${msgRow.company_id}`)
             .to(`conversa_${msgRow.conversa_id}`)
-            .emit('status_mensagem', { mensagem_id: msgRow.id, conversa_id: msgRow.conversa_id, status: norm })
+            .emit('status_mensagem', {
+              mensagem_id: msgRow.id,
+              conversa_id: msgRow.conversa_id,
+              status: norm,
+              whatsapp_id: wId || null
+            })
         }
       }
 
