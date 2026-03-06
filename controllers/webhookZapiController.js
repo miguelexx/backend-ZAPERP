@@ -562,10 +562,11 @@ exports.testarZapi = (req, res) => {
 }
 
 /** GET /webhooks/zapi/debug — diagnóstico completo: webhooks recebidos, rejeitados e configuração. */
+/** Segurança: NUNCA retorna o valor real do token na resposta (evita vazamento em logs/cache). */
 exports.debugZapi = (req, res) => {
   const appUrl = (process.env.APP_URL || '').replace(/\/$/, '')
   const token = String(process.env.ZAPI_WEBHOOK_TOKEN || '').trim()
-  const tokenSuffix = token ? `?token=${encodeURIComponent(token)}` : '(SEM TOKEN CONFIGURADO)'
+  const tokenSuffix = token ? '?token=***' : '(SEM TOKEN CONFIGURADO)'
   return res.status(200).json({
     ok: true,
     servidor: {

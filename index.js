@@ -6,13 +6,13 @@ const app = require('./app')
 const { Server } = require('socket.io')
 const jwt = require('jsonwebtoken')
 
-// Diagnóstico: confirma qual .env foi carregado
-const envPath = path.join(__dirname, '.env')
-console.log('[ENV] Carregado:', envPath)
-console.log('PRODUCTION CONFIG:')
-console.log('APP_URL:', process.env.APP_URL)
-console.log('NODE_ENV:', process.env.NODE_ENV)
-console.log('WEBHOOK TOKEN SET:', !!String(process.env.ZAPI_WEBHOOK_TOKEN || '').trim())
+// Diagnóstico: em produção, logs mínimos (nunca expor tokens, senhas ou paths sensíveis)
+if (process.env.NODE_ENV !== 'production') {
+  const envPath = path.join(__dirname, '.env')
+  console.log('[ENV] Carregado:', envPath)
+  console.log('APP_URL:', process.env.APP_URL || '(não definido)')
+}
+console.log('NODE_ENV:', process.env.NODE_ENV || 'development')
 
 // Fail-fast: configuração crítica obrigatória — impede deploy inseguro.
 if (!process.env.JWT_SECRET) {
