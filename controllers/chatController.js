@@ -3105,10 +3105,28 @@ exports.enviarArquivo = async (req, res) => {
                 ? provider.sendFile(phone, fullUrl, file.originalname || '', opts)
                 : Promise.resolve(false)
       promise
-        .then((ok) => {
-          if (!ok) console.warn('WhatsApp: falha ao enviar mídia para', phone, tipo)
+        .then(async (ok) => {
+          if (!ok) {
+            console.warn('WhatsApp: falha ao enviar mídia para', phone, tipo)
+            await supabase.from('mensagens').update({ status: 'erro' }).eq('company_id', company_id).eq('id', msg.id)
+            const io2 = req.app?.get('io')
+            if (io2) {
+              const payload = { mensagem_id: msg.id, conversa_id: Number(conversa_id), status: 'erro' }
+              const chain = io2.to(`empresa_${company_id}`).to(`conversa_${conversa_id}`).to(`usuario_${user_id}`)
+              chain.emit(io2.EVENTS?.STATUS_MENSAGEM || 'status_mensagem', payload)
+            }
+          }
         })
-        .catch((e) => console.error('WhatsApp enviar mídia:', e))
+        .catch(async (e) => {
+          console.error('WhatsApp enviar mídia:', e)
+          await supabase.from('mensagens').update({ status: 'erro' }).eq('company_id', company_id).eq('id', msg.id)
+          const io2 = req.app?.get('io')
+          if (io2) {
+            const payload = { mensagem_id: msg.id, conversa_id: Number(conversa_id), status: 'erro' }
+            const chain = io2.to(`empresa_${company_id}`).to(`conversa_${conversa_id}`).to(`usuario_${user_id}`)
+            chain.emit(io2.EVENTS?.STATUS_MENSAGEM || 'status_mensagem', payload)
+          }
+        })
     } else if (conversa?.telefone && (!baseUrl || isLocalhost)) {
       if (!baseUrl) console.warn('⚠️ APP_URL/BASE_URL não configurado; mídia não enviada ao WhatsApp.')
       else console.warn('⚠️ APP_URL não pode ser localhost; Z-API precisa de URL pública para baixar mídia.')
