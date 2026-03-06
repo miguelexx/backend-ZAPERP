@@ -2239,7 +2239,9 @@ exports.enviarMensagemChat = async (req, res) => {
         const io2 = req.app.get('io')
         if (io2) {
           const payload = { mensagem_id: msg.id, conversa_id: Number(conversa_id), status: nextStatus, ...(waMessageId ? { whatsapp_id: waMessageId } : {}) }
-          io2.to(`empresa_${company_id}`).to(`conversa_${conversa_id}`).emit('status_mensagem', payload)
+          // Emite para empresa, conversa E usuario que enviou (garante atualização em tempo real)
+          let chain = io2.to(`empresa_${company_id}`).to(`conversa_${conversa_id}`).to(`usuario_${user_id}`)
+          chain.emit('status_mensagem', payload)
         }
 
         if (!ok) console.warn('[WhatsApp] Falha ao entregar mensagem para', String(conversa.telefone || '').slice(-8), '— verifique se a instância Z-API está conectada (escaneie o QR no painel)')
@@ -2252,7 +2254,9 @@ exports.enviarMensagemChat = async (req, res) => {
           .eq('id', msg.id)
         const io2 = req.app.get('io')
         if (io2) {
-          io2.to(`empresa_${company_id}`).to(`conversa_${conversa_id}`).emit('status_mensagem', { mensagem_id: msg.id, conversa_id: Number(conversa_id), status: 'erro' })
+          const payload = { mensagem_id: msg.id, conversa_id: Number(conversa_id), status: 'erro' }
+          let chain = io2.to(`empresa_${company_id}`).to(`conversa_${conversa_id}`).to(`usuario_${user_id}`)
+          chain.emit('status_mensagem', payload)
         }
       }
     }

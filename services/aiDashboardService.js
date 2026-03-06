@@ -36,19 +36,29 @@ const IntentSchema = z.object({
     'TOP_ATENDENTES_POR_CONVERSAS',
     'CLIENTES_MAIS_ATIVOS',
     'SLA_ALERTAS',
-    // GENERAL_CHAT: perguntas livres sobre o trabalho, empresa,
-    // WhatsApp corporativo, produtividade, ou dúvidas gerais de negócio.
+    // Intents de conversas e mensagens (acesso completo ao histórico)
+    'MENSAGENS_USUARIO_CLIENTE',   // mensagens trocadas entre atendente X e cliente Y
+    'CONVERSAS_USUARIO_CLIENTE',  // conversas entre atendente X e cliente Y
+    'HISTORICO_CLIENTE',           // histórico completo de um cliente
+    'HISTORICO_ATENDENTE',        // conversas de um atendente
+    'DETALHES_CONVERSA',          // detalhes de uma conversa específica
+    // GENERAL_CHAT: perguntas livres
     'GENERAL_CHAT',
     'UNKNOWN',
   ]),
   period_days: z.number().int().min(1).max(365).optional(),
+  usuario_nome: z.string().trim().optional(),
+  cliente_nome: z.string().trim().optional(),
+  cliente_telefone: z.string().trim().optional(),
 })
 
 // ── Classificação da pergunta (1ª chamada à OpenAI) ───────────────────────────
 async function classifyQuestion(question) {
   const system = `Você é um classificador de perguntas para o Assistente Inteligente do ZapERP (WhatsApp corporativo e CRM).
 Retorne SOMENTE JSON válido sem texto extra.
-Formato: {"intent": "INTENT", "period_days": N}
+Formato: {"intent": "INTENT", "period_days": N, "usuario_nome": "nome do atendente", "cliente_nome": "nome do cliente", "cliente_telefone": "telefone"}
+
+Para intents de conversas/mensagens, extraia usuario_nome (atendente) e cliente_nome ou cliente_telefone quando mencionados na pergunta.
 
 Intents permitidos:
 - METRICS_OVERVIEW: visão geral, resumo, métricas gerais, atendimentos de hoje, tickets abertos, SLA geral
@@ -57,6 +67,11 @@ Intents permitidos:
 - TOP_ATENDENTES_POR_CONVERSAS: ranking de atendentes por número de conversas
 - CLIENTES_MAIS_ATIVOS: clientes que mais enviaram mensagens (direcao='in')
 - SLA_ALERTAS: alertas de SLA, conversas abertas sem resposta dentro do prazo
+- MENSAGENS_USUARIO_CLIENTE: quais mensagens foram trocadas, o que conversaram, histórico de mensagens entre atendente X e cliente Y
+- CONVERSAS_USUARIO_CLIENTE: conversas entre atendente X e cliente Y, resumo do que foi tratado
+- HISTORICO_CLIENTE: histórico completo de um cliente, todas as conversas de um cliente
+- HISTORICO_ATENDENTE: conversas de um atendente, com quem o atendente conversou
+- DETALHES_CONVERSA: detalhes de uma conversa específica (por id ou por cliente)
 - GENERAL_CHAT: perguntas livres que não são claramente uma métrica específica, por exemplo:
   * dúvidas gerais sobre a empresa, clientes, atendentes ou produtividade;
   * perguntas sobre "o que os funcionários andam fazendo";
@@ -69,7 +84,7 @@ Regra: se "period_days" não for mencionado, use 7.`
   const resp = await openai.chat.completions.create({
     model: AI_MODEL(),
     temperature: 0,
-    max_tokens: 80,
+    max_tokens: 150,
     messages: [
       { role: 'system', content: system },
       { role: 'user', content: `Pergunta: ${question}` },
@@ -87,8 +102,25 @@ Regra: se "period_days" não for mencionado, use 7.`
 // ── Geração da resposta em texto (2ª chamada à OpenAI) ────────────────────────
 async function formatAnswer({ intent, data, question }) {
   const isGeneral = intent === 'GENERAL_CHAT'
+  const isConversaIntent = [
+    'MENSAGENS_USUARIO_CLIENTE',
+    'CONVERSAS_USUARIO_CLIENTE',
+    'HISTORICO_CLIENTE',
+    'HISTORICO_ATENDENTE',
+    'DETALHES_CONVERSA',
+  ].includes(intent)
 
-  const system = isGeneral
+  const system = isConversaIntent
+    ? `Você é o Assistente Inteligente do ZapERP. Responda SEMPRE em português do Brasil.
+
+Regras para respostas sobre conversas e mensagens:
+- Seja claro, objetivo e profissional.
+- Apresente as informações de forma estruturada e fácil de ler.
+- Se houver erro nos dados (ex: "Nenhuma conversa encontrada"), informe de forma educada e sugira verificar nomes/telefones.
+- Ao listar mensagens, use formato cronológico e indique claramente quem enviou cada mensagem (Atendente/Cliente).
+- Nunca invente dados; use APENAS o que foi fornecido no campo "Dados".
+- Se os dados estiverem vazios, explique que não há registros para os critérios informados.`
+    : isGeneral
     ? `Você é o **Assistente Inteligente do ZapERP**, um sistema de WhatsApp corporativo.
 Responda SEMPRE em português do Brasil.
 
@@ -111,10 +143,12 @@ Regras obrigatórias:
 - Se "Dados" for null, vazio ou array vazio, informe que não há dados suficientes no período.
 - Não mencione "dados JSON", "intent" ou detalhes técnicos na resposta.`
 
+  const maxTokens = isConversaIntent ? 2000 : (isGeneral ? 800 : 320)
+  const temp = isConversaIntent ? 0.3 : (isGeneral ? 0.5 : 0.2)
   const resp = await openai.chat.completions.create({
     model: AI_MODEL(),
-    temperature: isGeneral ? 0.5 : 0.2,
-    max_tokens: isGeneral ? 800 : 320,
+    temperature: temp,
+    max_tokens: maxTokens,
     messages: [
       { role: 'system', content: system },
       {
@@ -498,6 +532,259 @@ async function qGlobalContext(company_id) {
   }
 }
 
+/** Normaliza termo para busca (remove acentos, lowercase, trim). */
+function normalizeSearchTerm(s) {
+  if (!s || typeof s !== 'string') return ''
+  return String(s)
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/\p{Diacritic}/gu, '')
+}
+
+/** MENSAGENS_USUARIO_CLIENTE: mensagens trocadas entre atendente e cliente (até 200). */
+async function qMensagensUsuarioCliente(company_id, usuarioNome, clienteNome, clienteTelefone, days) {
+  const d = clampDays(days)
+  const desde = new Date(Date.now() - d * 24 * 60 * 60 * 1000).toISOString()
+  const limitMsgs = 200
+
+  let usuario_id = null
+  if (usuarioNome) {
+    const term = `%${normalizeSearchTerm(usuarioNome)}%`
+    const { data: us } = await supabase
+      .from('usuarios')
+      .select('id')
+      .eq('company_id', company_id)
+      .ilike('nome', term)
+      .limit(1)
+    usuario_id = us?.[0]?.id ?? null
+  }
+
+  let cliente_id = null
+  let telefoneCliente = null
+  if (clienteTelefone) {
+    const digits = String(clienteTelefone).replace(/\D/g, '')
+    const { data: cl } = await supabase
+      .from('clientes')
+      .select('id, telefone')
+      .eq('company_id', company_id)
+      .or(`telefone.eq.${clienteTelefone},telefone.like.%${digits.slice(-8)}`)
+      .limit(1)
+    if (cl?.[0]) {
+      cliente_id = cl[0].id
+      telefoneCliente = cl[0].telefone
+    }
+  }
+  if (!cliente_id && clienteNome) {
+    const term = `%${normalizeSearchTerm(clienteNome)}%`
+    const { data: cl } = await supabase
+      .from('clientes')
+      .select('id, nome, pushname, telefone')
+      .eq('company_id', company_id)
+      .or(`nome.ilike.${term},pushname.ilike.${term}`)
+      .limit(5)
+    const first = cl?.[0]
+    if (first) {
+      cliente_id = first.id
+      telefoneCliente = first.telefone
+    }
+  }
+
+  let qConv = supabase
+    .from('conversas')
+    .select('id')
+    .eq('company_id', company_id)
+    .neq('tipo', 'grupo')
+
+  if (usuario_id) qConv = qConv.eq('atendente_id', usuario_id)
+  if (cliente_id) qConv = qConv.eq('cliente_id', cliente_id)
+  else if (telefoneCliente) qConv = qConv.eq('telefone', telefoneCliente)
+  else {
+    const { data: convByTel } = await supabase
+      .from('conversas')
+      .select('id')
+      .eq('company_id', company_id)
+      .neq('tipo', 'grupo')
+    const convIds = (convByTel || []).map((c) => c.id)
+    if (convIds.length === 0) return { error: 'Nenhuma conversa encontrada.', mensagens: [], usuario: null, cliente: null }
+    qConv = qConv.in('id', convIds)
+  }
+
+  const { data: convs } = await qConv.limit(10)
+  if (!convs?.length) {
+    return {
+      error: 'Nenhuma conversa encontrada para os critérios informados. Verifique o nome do atendente e do cliente.',
+      mensagens: [],
+      usuario: usuario_id ? (await supabase.from('usuarios').select('id, nome').eq('id', usuario_id).maybeSingle()).data : null,
+      cliente: cliente_id ? (await supabase.from('clientes').select('id, nome, pushname, telefone').eq('id', cliente_id).maybeSingle()).data : null,
+    }
+  }
+
+  const convIds = convs.map((c) => c.id)
+  const { data: msgs } = await supabase
+    .from('mensagens')
+    .select('id, texto, direcao, criado_em, autor_usuario_id, remetente_nome')
+    .eq('company_id', company_id)
+    .in('conversa_id', convIds)
+    .gte('criado_em', desde)
+    .order('criado_em', { ascending: true })
+    .limit(limitMsgs)
+
+  const usuarioMap = new Map()
+  const autorIds = [...new Set((msgs || []).map((m) => m.autor_usuario_id).filter(Boolean))]
+  if (autorIds.length) {
+    const { data: us } = await supabase.from('usuarios').select('id, nome').eq('company_id', company_id).in('id', autorIds)
+    for (const u of us || []) usuarioMap.set(u.id, u.nome)
+  }
+
+  const mensagensFormatadas = (msgs || []).map((m) => ({
+    texto: m.texto,
+    direcao: m.direcao,
+    criado_em: m.criado_em,
+    remetente: m.direcao === 'out' ? (usuarioMap.get(m.autor_usuario_id) || 'Atendente') : (m.remetente_nome || 'Cliente'),
+  }))
+
+  const usuario = usuario_id ? (await supabase.from('usuarios').select('id, nome').eq('id', usuario_id).maybeSingle()).data : null
+  const cliente = cliente_id ? (await supabase.from('clientes').select('id, nome, pushname, telefone').eq('id', cliente_id).maybeSingle()).data : null
+
+  return {
+    mensagens: mensagensFormatadas,
+    total: mensagensFormatadas.length,
+    usuario,
+    cliente,
+    periodo_dias: d,
+  }
+}
+
+/** CONVERSAS_USUARIO_CLIENTE: resumo das conversas entre atendente e cliente. */
+async function qConversasUsuarioCliente(company_id, usuarioNome, clienteNome, clienteTelefone, days) {
+  const result = await qMensagensUsuarioCliente(company_id, usuarioNome, clienteNome, clienteTelefone, days)
+  if (result.error) return result
+  return {
+    ...result,
+    resumo: `Total de ${result.mensagens.length} mensagens no período.`,
+  }
+}
+
+/** HISTORICO_CLIENTE: conversas e mensagens de um cliente. */
+async function qHistoricoCliente(company_id, clienteNome, clienteTelefone, days) {
+  const d = clampDays(days)
+  const desde = new Date(Date.now() - d * 24 * 60 * 60 * 1000).toISOString()
+
+  let cliente_id = null
+  let telefoneCliente = null
+  if (clienteTelefone) {
+    const digits = String(clienteTelefone).replace(/\D/g, '')
+    const { data: cl } = await supabase
+      .from('clientes')
+      .select('id, telefone')
+      .eq('company_id', company_id)
+      .or(`telefone.eq.${clienteTelefone},telefone.like.%${digits.slice(-8)}`)
+      .limit(1)
+    if (cl?.[0]) {
+      cliente_id = cl[0].id
+      telefoneCliente = cl[0].telefone
+    }
+  }
+  if (!cliente_id && clienteNome) {
+    const term = `%${normalizeSearchTerm(clienteNome)}%`
+    const { data: cl } = await supabase
+      .from('clientes')
+      .select('id, nome, pushname, telefone')
+      .eq('company_id', company_id)
+      .or(`nome.ilike.${term},pushname.ilike.${term}`)
+      .limit(1)
+    if (cl?.[0]) {
+      cliente_id = cl[0].id
+      telefoneCliente = cl[0].telefone
+    }
+  }
+
+  if (!cliente_id && !telefoneCliente) {
+    return { error: 'Cliente não encontrado. Informe nome ou telefone.', conversas: [], cliente: null }
+  }
+
+  let qConv = supabase
+    .from('conversas')
+    .select('id, criado_em, status_atendimento, atendente_id')
+    .eq('company_id', company_id)
+    .gte('criado_em', desde)
+  if (cliente_id) qConv = qConv.eq('cliente_id', cliente_id)
+  else qConv = qConv.eq('telefone', telefoneCliente)
+
+  const { data: convs } = await qConv.order('criado_em', { ascending: false }).limit(50)
+  if (!convs?.length) {
+    const cliente = cliente_id ? (await supabase.from('clientes').select('id, nome, pushname, telefone').eq('id', cliente_id).maybeSingle()).data : null
+    return { conversas: [], cliente, periodo_dias: d }
+  }
+
+  const atendenteIds = [...new Set(convs.map((c) => c.atendente_id).filter(Boolean))]
+  const { data: usuarios } = await supabase.from('usuarios').select('id, nome').eq('company_id', company_id).in('id', atendenteIds)
+  const atendenteMap = new Map((usuarios || []).map((u) => [u.id, u.nome]))
+
+  const cliente = cliente_id ? (await supabase.from('clientes').select('id, nome, pushname, telefone').eq('id', cliente_id).maybeSingle()).data : null
+
+  const conversasFormatadas = convs.map((c) => ({
+    id: c.id,
+    criado_em: c.criado_em,
+    status_atendimento: c.status_atendimento,
+    atendente_nome: atendenteMap.get(c.atendente_id) || '—',
+  }))
+
+  return { conversas: conversasFormatadas, cliente, periodo_dias: d }
+}
+
+/** HISTORICO_ATENDENTE: conversas de um atendente. */
+async function qHistoricoAtendente(company_id, usuarioNome, days) {
+  const d = clampDays(days)
+  const desde = new Date(Date.now() - d * 24 * 60 * 60 * 1000).toISOString()
+
+  let usuario_id = null
+  if (usuarioNome) {
+    const term = `%${normalizeSearchTerm(usuarioNome)}%`
+    const { data: us } = await supabase
+      .from('usuarios')
+      .select('id, nome')
+      .eq('company_id', company_id)
+      .ilike('nome', term)
+      .limit(1)
+    usuario_id = us?.[0]?.id ?? null
+  }
+
+  if (!usuario_id) {
+    return { error: 'Atendente não encontrado. Informe o nome.', conversas: [], usuario: null }
+  }
+
+  const { data: convs } = await supabase
+    .from('conversas')
+    .select('id, criado_em, status_atendimento, cliente_id, telefone')
+    .eq('company_id', company_id)
+    .eq('atendente_id', usuario_id)
+    .gte('criado_em', desde)
+    .order('criado_em', { ascending: false })
+    .limit(100)
+
+  const clienteIds = [...new Set((convs || []).map((c) => c.cliente_id).filter(Boolean))]
+  const { data: clientes } = await supabase.from('clientes').select('id, nome, pushname, telefone').eq('company_id', company_id).in('id', clienteIds)
+  const clienteMap = new Map((clientes || []).map((c) => [c.id, c]))
+
+  const usuario = (await supabase.from('usuarios').select('id, nome').eq('id', usuario_id).maybeSingle()).data
+
+  const conversasFormatadas = (convs || []).map((c) => ({
+    id: c.id,
+    criado_em: c.criado_em,
+    status_atendimento: c.status_atendimento,
+    cliente_nome: c.cliente_id ? (clienteMap.get(c.cliente_id)?.pushname || clienteMap.get(c.cliente_id)?.nome || c.telefone) : c.telefone || '—',
+  }))
+
+  return { conversas: conversasFormatadas, usuario, periodo_dias: d }
+}
+
+/** DETALHES_CONVERSA: quando não há id, usa GENERAL_CHAT com contexto. */
+async function qDetalhesConversa(company_id, clienteNome, clienteTelefone, days) {
+  return qHistoricoCliente(company_id, clienteNome, clienteTelefone, days)
+}
+
 // ── Função principal exportada ────────────────────────────────────────────────
 
 /**
@@ -519,7 +806,9 @@ async function answerDashboardQuestion({ company_id, question, period_days }) {
         '• Atendente mais rápido/lento\n' +
         '• Top atendentes por conversas\n' +
         '• Clientes mais ativos\n' +
-        '• Alertas de SLA',
+        '• Alertas de SLA\n' +
+        '• Mensagens entre o atendente X e o cliente Y\n' +
+        '• Histórico de conversas de um cliente ou atendente',
       data: null,
     }
   }
@@ -554,6 +843,48 @@ async function answerDashboardQuestion({ company_id, question, period_days }) {
 
     case 'GENERAL_CHAT':
       data = await qGlobalContext(company_id)
+      break
+
+    case 'MENSAGENS_USUARIO_CLIENTE':
+      data = await qMensagensUsuarioCliente(
+        company_id,
+        cls.usuario_nome || null,
+        cls.cliente_nome || null,
+        cls.cliente_telefone || null,
+        days
+      )
+      break
+
+    case 'CONVERSAS_USUARIO_CLIENTE':
+      data = await qConversasUsuarioCliente(
+        company_id,
+        cls.usuario_nome || null,
+        cls.cliente_nome || null,
+        cls.cliente_telefone || null,
+        days
+      )
+      break
+
+    case 'HISTORICO_CLIENTE':
+      data = await qHistoricoCliente(
+        company_id,
+        cls.cliente_nome || null,
+        cls.cliente_telefone || null,
+        days
+      )
+      break
+
+    case 'HISTORICO_ATENDENTE':
+      data = await qHistoricoAtendente(company_id, cls.usuario_nome || null, days)
+      break
+
+    case 'DETALHES_CONVERSA':
+      data = await qDetalhesConversa(
+        company_id,
+        cls.cliente_nome || null,
+        cls.cliente_telefone || null,
+        days
+      )
       break
 
     default:

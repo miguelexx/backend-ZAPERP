@@ -788,7 +788,7 @@ exports.receberZapi = async (req, res) => {
         return s || null
       }
 
-      // Helper: emite status_mensagem via socket (inclui whatsapp_id para frontend de-dup)
+      // Helper: emite status_mensagem via socket (empresa + conversa + usuario do autor para garantir tempo real)
       const emitStatusMsg = (msg, statusNorm, whatsappId = null) => {
         const io = req.app.get('io')
         if (io && msg) {
@@ -799,13 +799,13 @@ exports.receberZapi = async (req, res) => {
             ...(msg.whatsapp_id ? { whatsapp_id: msg.whatsapp_id } : {}),
             ...(whatsappId ? { whatsapp_id: whatsappId } : {})
           }
-          io.to(`empresa_${msg.company_id}`)
-            .to(`conversa_${msg.conversa_id}`)
-            .emit('status_mensagem', payload)
+          let chain = io.to(`empresa_${msg.company_id}`).to(`conversa_${msg.conversa_id}`)
+          if (msg.autor_usuario_id != null) chain = chain.to(`usuario_${msg.autor_usuario_id}`)
+          chain.emit('status_mensagem', payload)
         }
       }
 
-      // Helper: atualiza status no banco por whatsapp_id (retorna msg com whatsapp_id para emit)
+      // Helper: atualiza status no banco por whatsapp_id (retorna msg com whatsapp_id e autor_usuario_id para emit)
       const updateStatusByWaId = async (waId, statusNorm) => {
         if (!waId || !statusNorm) return null
         const waIdStr = String(waId)
@@ -814,7 +814,7 @@ exports.receberZapi = async (req, res) => {
           .update({ status: statusNorm })
           .eq('company_id', company_id)
           .eq('whatsapp_id', waIdStr)
-          .select('id, conversa_id, company_id, whatsapp_id')
+          .select('id, conversa_id, company_id, whatsapp_id, autor_usuario_id')
           .maybeSingle()
         if (msg) msg.whatsapp_id = msg.whatsapp_id || waIdStr
         return msg || null
@@ -985,7 +985,7 @@ exports.receberZapi = async (req, res) => {
               .update({ status: 'sent' })
               .eq('company_id', company_id)
               .eq('whatsapp_id', String(delivMsgId))
-              .select('id, conversa_id, company_id')
+              .select('id, conversa_id, company_id, autor_usuario_id')
               .maybeSingle()
               if (existByWaId?.id) {
               const io = req.app.get('io')
@@ -996,9 +996,9 @@ exports.receberZapi = async (req, res) => {
                   status: 'sent',
                   whatsapp_id: String(delivMsgId)
                 }
-                io.to(`empresa_${existByWaId.company_id}`)
-                  .to(`conversa_${existByWaId.conversa_id}`)
-                  .emit('status_mensagem', payload)
+                let chain = io.to(`empresa_${existByWaId.company_id}`).to(`conversa_${existByWaId.conversa_id}`)
+                if (existByWaId.autor_usuario_id != null) chain = chain.to(`usuario_${existByWaId.autor_usuario_id}`)
+                chain.emit('status_mensagem', payload)
               }
               logZapiCert({
                 companyId: company_id,
@@ -1032,13 +1032,13 @@ exports.receberZapi = async (req, res) => {
 
         const statusNorm = errorText ? 'erro' : 'sent'
 
-        // 1) tenta atualizar por whatsapp_id
+        // 1) tenta atualizar por whatsapp_id (inclui autor_usuario_id para emit ao remetente)
         let { data: msg, error } = await supabase
           .from('mensagens')
           .update({ status: statusNorm })
           .eq('company_id', company_id)
           .eq('whatsapp_id', String(messageId))
-          .select('id, conversa_id, company_id')
+          .select('id, conversa_id, company_id, autor_usuario_id')
           .maybeSingle()
 
         // 1.1) Mesclagem LID→PHONE: sempre que temos chatLid + canonicalPhone no payload
@@ -1176,9 +1176,9 @@ exports.receberZapi = async (req, res) => {
               status: statusNorm,
               whatsapp_id: String(messageId)
             }
-            io.to(`empresa_${msg.company_id}`)
-              .to(`conversa_${msg.conversa_id}`)
-              .emit('status_mensagem', payload)
+            let chain = io.to(`empresa_${msg.company_id}`).to(`conversa_${msg.conversa_id}`)
+            if (msg.autor_usuario_id != null) chain = chain.to(`usuario_${msg.autor_usuario_id}`)
+            chain.emit('status_mensagem', payload)
           }
           logZapiCert({
             companyId: company_id,
@@ -2093,12 +2093,15 @@ exports.receberZapi = async (req, res) => {
         io.to(rooms).emit('nova_mensagem', emitPayload)
       } else {
         // Reconciliada/idempotência: emite apenas status_mensagem para atualizar ticks (evita duplicar bolha)
-        io.to(`empresa_${company_id}`).to(`conversa_${convIdForEmit}`).emit('status_mensagem', {
+        const statusPayload = {
           mensagem_id: mensagemSalva.id,
           conversa_id: convIdForEmit,
           status: canon,
           whatsapp_id: mensagemSalva.whatsapp_id || null
-        })
+        }
+        let chain = io.to(`empresa_${company_id}`).to(`conversa_${convIdForEmit}`)
+        if (mensagemSalva.autor_usuario_id != null) chain = chain.to(`usuario_${mensagemSalva.autor_usuario_id}`)
+        chain.emit('status_mensagem', statusPayload)
       }
       io.to(`empresa_${company_id}`).emit('atualizar_conversa', { id: convIdForEmit })
       // conversa_atualizada enriquecida: ultima_atividade, nome/foto cache (frontend atualiza lista lateral)
@@ -2292,13 +2295,13 @@ exports.statusZapi = async (req, res) => {
         }
       }
 
-      // 1) Atualiza por (company_id, whatsapp_id) — match exato
+      // 1) Atualiza por (company_id, whatsapp_id) — match exato (inclui autor_usuario_id para emit ao remetente)
       let { data: msg } = await supabase
         .from('mensagens')
         .update({ status: effectiveStatus })
         .eq('company_id', company_id)
         .eq('whatsapp_id', idStr)
-        .select('id, conversa_id, company_id')
+        .select('id, conversa_id, company_id, autor_usuario_id')
         .maybeSingle()
 
       // 2) Fallback: Z-API às vezes trunca o ID no status callback.
@@ -2307,7 +2310,7 @@ exports.statusZapi = async (req, res) => {
         const prefix = idStr.slice(0, 20)
         const { data: prefixRows } = await supabase
           .from('mensagens')
-          .select('id, conversa_id, company_id, whatsapp_id')
+          .select('id, conversa_id, company_id, autor_usuario_id, whatsapp_id')
           .eq('company_id', company_id)
           .ilike('whatsapp_id', `${prefix}%`)
           .order('id', { ascending: false })
@@ -2319,7 +2322,7 @@ exports.statusZapi = async (req, res) => {
             .update({ status: effectiveStatus })
             .eq('company_id', company_id)
             .eq('id', candidate.id)
-            .select('id, conversa_id, company_id')
+            .select('id, conversa_id, company_id, autor_usuario_id')
             .maybeSingle()
           msg = patched || null
         }
@@ -2334,7 +2337,10 @@ exports.statusZapi = async (req, res) => {
             status: effectiveStatus,
             whatsapp_id: idStr
           }
-          io.to(`empresa_${msg.company_id}`).to(`conversa_${msg.conversa_id}`).emit('status_mensagem', payload)
+          // Emite para empresa, conversa E usuario do autor (garante atualização em tempo real para quem enviou)
+          let chain = io.to(`empresa_${msg.company_id}`).to(`conversa_${msg.conversa_id}`)
+          if (msg.autor_usuario_id != null) chain = chain.to(`usuario_${msg.autor_usuario_id}`)
+          chain.emit('status_mensagem', payload)
         }
         console.log('[DEBUG] /webhooks/zapi/status resultado:', { status: statusNorm, mensagem_id: msg.id, conversa_id: msg.conversa_id, whatsapp_id: idStr.slice(0, 20) + '…' })
       } else {
