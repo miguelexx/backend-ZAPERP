@@ -2495,7 +2495,7 @@ exports.connectionZapi = async (req, res) => {
               const pushname = (c.notify || '').trim() || null
 
               const phones = possiblePhonesBR(phone)
-              let q = supabase.from('clientes').select('id, telefone').eq('company_id', company_id)
+              let q = supabase.from('clientes').select('id, telefone, nome').eq('company_id', company_id)
               if (phones.length > 0) q = q.in('telefone', phones)
               else q = q.eq('telefone', phone)
 
@@ -2513,10 +2513,17 @@ exports.connectionZapi = async (req, res) => {
                 }
               }
 
+              // Nome: só Z-API sync e webhook podem atualizar. Sem nome → fallback com número.
+              const nomeFinal = nome && String(nome).trim() ? nome : phone
+
               if (existente?.id) {
                 const updates = {}
-                if (nome != null) updates.nome = nome
-                if (pushname != null) updates.pushname = pushname
+                if (nome && String(nome).trim()) {
+                  const { name: bestNome } = chooseBestName(existente.nome, String(nome).trim(), 'syncZapi', { fromMe: false, company_id, telefoneTail: String(phone || '').replace(/\D/g, '').slice(-6) })
+                  if (bestNome && bestNome !== (existente.nome || '')) updates.nome = bestNome
+                }
+                if (!updates.nome && (!existente.nome || !String(existente.nome).trim())) updates.nome = phone
+                if (pushname != null && String(pushname).trim()) updates.pushname = String(pushname).trim()
                 if (Object.keys(updates).length > 0) {
                   let upd = await supabase.from('clientes').update(updates).eq('id', existente.id).eq('company_id', company_id)
                   if (upd.error && String(upd.error.message || '').includes('pushname')) {
@@ -2529,14 +2536,14 @@ exports.connectionZapi = async (req, res) => {
                 let ins = await supabase.from('clientes').insert({
                   company_id,
                   telefone: phone,
-                  nome: nome || null,
+                  nome: nomeFinal || phone,
                   pushname: pushname || undefined
                 })
                 if (ins.error && String(ins.error.message || '').includes('pushname')) {
                   ins = await supabase.from('clientes').insert({
                     company_id,
                     telefone: phone,
-                    nome: nome || null
+                    nome: nomeFinal || phone
                   })
                 }
                 if (!ins.error) criados++

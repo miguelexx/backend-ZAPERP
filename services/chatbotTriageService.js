@@ -6,6 +6,9 @@
  *
  * Configuração em ia_config.config.chatbot_triage (JSON estruturado).
  * Integrado ao webhook Z-API e Meta.
+ *
+ * RESTRIÇÃO: Atualiza apenas conversas (departamento, atendente), mensagens (respostas
+ * do bot) e bot_logs. Nunca atualiza clientes.nome — nomes vêm só de Z-API sync e webhook.
  */
 
 const supabase = require('../config/supabase')

@@ -54,6 +54,7 @@ $body3 = @{
   instanceId = $InstanceId
   type = "ReceivedCallback"
   phone = "5511999999999"
+  to = "5511999999999"
   fromMe = $true
   text = @{ message = "Resposta do celular" }
   messageId = $msgId2

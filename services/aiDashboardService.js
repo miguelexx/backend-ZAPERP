@@ -8,6 +8,10 @@
  * - NÃO permite SQL livre: modelo apenas classifica a pergunta em um intent
  *   permitido; aexecução dos dados é feita por funções pré-definidas aqui.
  * - Todas as queries filtram por company_id (multi-tenant rigoroso).
+ *
+ * RESTRIÇÃO: Este serviço faz APENAS leitura (SELECT). Nunca atualiza clientes,
+ * conversas ou mensagens. Nomes de contatos são atualizados apenas por:
+ * Z-API sync, webhook ReceivedCallback, e fallback número quando ausente.
  */
 
 const { z } = require('zod')

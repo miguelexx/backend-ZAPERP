@@ -51,6 +51,8 @@ exports.listar = async (req, res) => {
   }
 }
 
+const PERFIS_VALIDOS = ['admin', 'supervisor', 'atendente']
+
 /** POST /usuarios — criar usuário (admin) */
 exports.criar = async (req, res) => {
   try {
@@ -59,6 +61,10 @@ exports.criar = async (req, res) => {
     if (!nome?.trim() || !email?.trim() || !senha?.trim()) {
       return res.status(400).json({ error: 'nome, email e senha são obrigatórios' })
     }
+    const perfilNorm = (perfil || 'atendente').toLowerCase()
+    if (!PERFIS_VALIDOS.includes(perfilNorm)) {
+      return res.status(400).json({ error: `perfil deve ser: ${PERFIS_VALIDOS.join(', ')}` })
+    }
     const hash = await bcrypt.hash(senha, 10)
     const { data, error } = await supabase
       .from('usuarios')
@@ -66,7 +72,7 @@ exports.criar = async (req, res) => {
         nome: nome.trim(),
         email: email.trim().toLowerCase(),
         senha_hash: hash,
-        perfil: perfil || 'atendente',
+        perfil: perfilNorm,
         company_id,
         departamento_id: departamento_id || null,
         ativo: ativo !== false
@@ -90,7 +96,13 @@ exports.atualizar = async (req, res) => {
     const update = {}
     if (nome !== undefined) update.nome = nome.trim()
     if (email !== undefined) update.email = email.trim().toLowerCase()
-    if (perfil !== undefined) update.perfil = perfil || 'atendente'
+    if (perfil !== undefined) {
+      const perfilNorm = (perfil || 'atendente').toLowerCase()
+      if (!PERFIS_VALIDOS.includes(perfilNorm)) {
+        return res.status(400).json({ error: `perfil deve ser: ${PERFIS_VALIDOS.join(', ')}` })
+      }
+      update.perfil = perfilNorm
+    }
     if (departamento_id !== undefined) update.departamento_id = departamento_id || null
     if (ativo !== undefined) update.ativo = !!ativo
 

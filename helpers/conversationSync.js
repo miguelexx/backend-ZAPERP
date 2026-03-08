@@ -256,6 +256,11 @@ async function getOrCreateCliente(supabaseClient, company_id, phone, fields = {}
             { fromMe: fields.fromMe, company_id, telefoneTail }
           )
           if (bestNome && bestNome !== (legacy.nome || '')) updates.nome = bestNome
+          // Fallback: quando sem nome, salva com número (nunca deixar vazio)
+          if (!updates.nome && (!legacy.nome || !String(legacy.nome).trim())) {
+            const fallbackNum = telefoneCanonico || String(phone).replace(/\D/g, '')
+            if (fallbackNum) updates.nome = fallbackNum
+          }
           if (fields.pushname !== undefined && fields.pushname != null && String(fields.pushname).trim()) updates.pushname = String(fields.pushname).trim()
           if (fields.foto_perfil) updates.foto_perfil = fields.foto_perfil
           if (Object.keys(updates).length > 0) {

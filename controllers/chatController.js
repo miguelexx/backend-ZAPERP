@@ -119,19 +119,33 @@ async function assertPermissaoConversa({ company_id, conversa_id, user_id, role,
     return { ok: true, conv }
   }
 
-  // atendente: só gerencia conversa atribuída a ele (grupos: permitido)
-  if (r === 'atendente') {
-    if (!isGroup && (conv.atendente_id == null || Number(conv.atendente_id) !== Number(user_id))) {
-      return { ok: false, status: 403, error: 'Conversa não atribuída a este atendente' }
-    }
-    return { ok: true, conv }
-  }
+  // atendente: pode conversar com TODOS os contatos — assumir, transferir, responder em qualquer conversa
+  if (r === 'atendente') return { ok: true, conv }
 
-  // fallback: perfis desconhecidos são tratados como atendente (seguro)
-  if (!isGroup && (conv.atendente_id == null || Number(conv.atendente_id) !== Number(user_id))) {
-    return { ok: false, status: 403, error: 'Conversa não atribuída a este atendente' }
-  }
+  // fallback: perfis desconhecidos permitem acesso (comportamento padrão para atendimento)
   return { ok: true, conv }
+}
+
+/**
+ * Verifica se o usuário pode ENVIAR mensagens na conversa.
+ * Regra: somente quem ASSUMIU a conversa (atendente_id) ou admin pode enviar.
+ * Mantém o WhatsApp organizado — um atendente por conversa ativa.
+ */
+async function assertPodeEnviarMensagem({ company_id, conversa_id, user_id, perfil }) {
+  const { data: conv, error } = await supabase
+    .from('conversas')
+    .select('id, atendente_id')
+    .eq('company_id', Number(company_id))
+    .eq('id', Number(conversa_id))
+    .maybeSingle()
+  if (error) return { ok: false, status: 500, error: error.message }
+  if (!conv) return { ok: false, status: 404, error: 'Conversa não encontrada' }
+
+  const r = String(perfil || '').toLowerCase()
+  if (r === 'admin') return { ok: true }
+  if (conv.atendente_id != null && Number(conv.atendente_id) === Number(user_id)) return { ok: true }
+
+  return { ok: false, status: 403, error: 'Assuma a conversa antes de enviar mensagens. Clique em "Assumir" para continuar.' }
 }
 
 // =====================================================
@@ -443,7 +457,8 @@ exports.listarConversas = async (req, res) => {
         .from('conversas')
         .select(select)
         .eq('company_id', company_id)
-      if (!isAdmin && user_dep_id != null) {
+      // Supervisor: filtra por setor. Admin e atendente veem todas.
+      if (!isAdmin && !isAtendente && user_dep_id != null) {
         q = q.or(`departamento_id.eq.${user_dep_id},tipo.eq.grupo,departamento_id.is.null`)
       } else if (filter_dep_id) {
         q = q.eq('departamento_id', Number(filter_dep_id))
@@ -452,9 +467,9 @@ exports.listarConversas = async (req, res) => {
         q = q.in('id', conversaIdsFilter)
       }
       if (status_atendimento) q = q.eq('status_atendimento', status_atendimento)
-      // Atendente: só pode ver suas conversas (padrão CRM SaaS). Admin/supervisor podem filtrar por atendente_id.
-      if (isAtendente) q = q.eq('atendente_id', Number(user_id))
-      else if (atendente_id) q = q.eq('atendente_id', Number(atendente_id))
+      // Atendente: vê TODAS as conversas (pode assumir, transferir, responder qualquer uma)
+      // Admin/supervisor: filtro opcional por atendente_id
+      if (!isAtendente && atendente_id) q = q.eq('atendente_id', Number(atendente_id))
       if (data_inicio) q = q.gte('criado_em', new Date(data_inicio).toISOString())
       if (data_fim) {
         const end = new Date(data_fim)
@@ -1261,7 +1276,10 @@ exports.atualizarObservacao = async (req, res) => {
   try {
     const { id } = req.params;
     const { observacao } = req.body;
-    const { company_id } = req.user;
+    const { company_id, id: user_id, perfil } = req.user;
+
+    const permEnvio = await assertPodeEnviarMensagem({ company_id, conversa_id: Number(id), user_id, perfil })
+    if (!permEnvio.ok) return res.status(permEnvio.status).json({ error: permEnvio.error });
 
     // busca cliente ligado à conversa
     const { data: conversa, error: errConv } = await supabase
@@ -2065,13 +2083,16 @@ exports.transferirSetor = async (req, res) => {
 // =====================================================
 exports.enviarMensagemChat = async (req, res) => {
   try {
-    const { company_id, id: user_id } = req.user
+    const { company_id, id: user_id, perfil } = req.user
     const { id: conversa_id } = req.params
     const { texto, reply_meta, link } = req.body
 
     if (!texto || !String(texto).trim()) {
       return res.status(400).json({ error: 'texto é obrigatório' })
     }
+
+    const permEnvio = await assertPodeEnviarMensagem({ company_id, conversa_id, user_id, perfil })
+    if (!permEnvio.ok) return res.status(permEnvio.status).json({ error: permEnvio.error })
 
     const { data: conversa, error: errConv } = await supabase
       .from('conversas')
@@ -2329,13 +2350,16 @@ exports.enviarMensagemChat = async (req, res) => {
 
 exports.enviarReacaoMensagem = async (req, res) => {
   try {
-    const { company_id } = req.user
+    const { company_id, id: user_id, perfil } = req.user
     const { id: conversa_id, mensagem_id } = req.params
     const { reaction } = req.body || {}
 
     if (!reaction || !String(reaction).trim()) {
       return res.status(400).json({ error: 'reaction é obrigatório' })
     }
+
+    const permEnvio = await assertPodeEnviarMensagem({ company_id, conversa_id, user_id, perfil })
+    if (!permEnvio.ok) return res.status(permEnvio.status).json({ error: permEnvio.error })
 
     // busca conversa + mensagem para garantir que pertencem à empresa
     const { data: conversa, error: errConv } = await supabase
@@ -2385,8 +2409,11 @@ exports.enviarReacaoMensagem = async (req, res) => {
 
 exports.removerReacaoMensagem = async (req, res) => {
   try {
-    const { company_id } = req.user
+    const { company_id, id: user_id, perfil } = req.user
     const { id: conversa_id, mensagem_id } = req.params
+
+    const permEnvio = await assertPodeEnviarMensagem({ company_id, conversa_id, user_id, perfil })
+    if (!permEnvio.ok) return res.status(permEnvio.status).json({ error: permEnvio.error })
 
     const { data: conversa, error: errConv } = await supabase
       .from('conversas')
@@ -2439,13 +2466,16 @@ exports.removerReacaoMensagem = async (req, res) => {
 
 exports.enviarContatoWhatsapp = async (req, res) => {
   try {
-    const { company_id, id: user_id } = req.user
+    const { company_id, id: user_id, perfil } = req.user
     const { id: conversa_id } = req.params
     const { cliente_id, messageId } = req.body || {}
 
     if (!cliente_id) {
       return res.status(400).json({ error: 'cliente_id é obrigatório' })
     }
+
+    const permEnvio = await assertPodeEnviarMensagem({ company_id, conversa_id, user_id, perfil })
+    if (!permEnvio.ok) return res.status(permEnvio.status).json({ error: permEnvio.error })
 
     const { data: conversa, error: errConv } = await supabase
       .from('conversas')
@@ -2547,9 +2577,12 @@ exports.enviarContatoWhatsapp = async (req, res) => {
 
 exports.enviarLigacaoWhatsapp = async (req, res) => {
   try {
-    const { company_id, id: user_id } = req.user
+    const { company_id, id: user_id, perfil } = req.user
     const { id: conversa_id } = req.params
     const { callDuration } = req.body || {}
+
+    const permEnvio = await assertPodeEnviarMensagem({ company_id, conversa_id, user_id, perfil })
+    if (!permEnvio.ok) return res.status(permEnvio.status).json({ error: permEnvio.error })
 
     const { data: conversa, error: errConv } = await supabase
       .from('conversas')
@@ -3031,12 +3064,15 @@ function inferirTipoArquivo(file) {
 exports.enviarArquivo = async (req, res) => {
   try {
     const { id: conversa_id } = req.params
-    const { company_id, id: user_id } = req.user
+    const { company_id, id: user_id, perfil } = req.user
     const io = req.app.get('io')
 
     if (!req.file) {
       return res.status(400).json({ error: "Arquivo não enviado" })
     }
+
+    const permEnvio = await assertPodeEnviarMensagem({ company_id, conversa_id, user_id, perfil })
+    if (!permEnvio.ok) return res.status(permEnvio.status).json({ error: permEnvio.error })
 
     const file = req.file
     const tipo = inferirTipoArquivo(file)

@@ -1,11 +1,13 @@
 const express = require('express')
 const router = express.Router()
 const auth = require('../middleware/auth')
+const supervisorOrAdmin = require('../middleware/supervisorOrAdmin')
 const { apiLimiter } = require('../middleware/rateLimit')
 const zapiIntegrationController = require('../controllers/zapiIntegrationController')
 
-// Todas as rotas exigem usuário autenticado.
+// Integrações Z-API: supervisor e admin (atendente não gerencia conexão WhatsApp)
 router.use(auth)
+router.use(supervisorOrAdmin)
 router.use(apiLimiter)
 
 router.get('/me', zapiIntegrationController.getMe)

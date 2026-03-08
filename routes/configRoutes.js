@@ -1,11 +1,12 @@
 const express = require('express')
 const router = express.Router()
 const auth = require('../middleware/auth')
-const adminOnly = require('../middleware/adminOnly')
+const supervisorOrAdmin = require('../middleware/supervisorOrAdmin')
 const configController = require('../controllers/configController')
 
+// Configurações: supervisor e admin (atendente não acessa)
 router.use(auth)
-router.use(adminOnly)
+router.use(supervisorOrAdmin)
 
 router.get('/empresa', configController.getEmpresa)
 router.put('/empresa', configController.putEmpresa)

@@ -2,9 +2,13 @@
  * Contact enrichment: escolha segura de nome para evitar regressões.
  * Garante que nunca substituímos um nome "bom" por um "pior" ou não confiável.
  *
- * IMPORTANTE: O usuário quer o nome salvo no CELULAR (contatos), não o do perfil WhatsApp.
- * - syncZapi: vem de GET /contacts (name/short = contato do celular) — MAIOR prioridade
- * - senderName: vem do webhook (geralmente notify = perfil WhatsApp) — menor prioridade
+ * IMPORTANTE - Fontes permitidas para atualizar clientes.nome:
+ * - syncZapi: GET /contacts Z-API (nome salvo no celular) — MAIOR prioridade
+ * - senderName/chatName: webhook ReceivedCallback (perfil WhatsApp)
+ * - Fallback: telefone quando nome ausente (evita contato vazio)
+ *
+ * RESTRIÇÃO: IA (aiDashboardService, chatbot, OpenAI) NÃO tem permissão para
+ * atualizar nomes de contatos. Apenas sincronização Z-API e webhook podem.
  *
  * Fontes de nome (score):
  * - syncZapi: 110 (nome do contato no celular via GET /contacts — prioridade máxima)
