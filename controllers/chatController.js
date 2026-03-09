@@ -2346,12 +2346,15 @@ exports.enviarMensagemChat = async (req, res) => {
         if (cli?.foto_perfil && !fotoPerfil) fotoPerfil = String(cli.foto_perfil).trim()
       }
       if (!contatoNome && conversa?.telefone && !String(conversa.telefone).startsWith('lid:')) contatoNome = conversa.telefone
+      // Fallback: preservar nome que já está na tela (evita contato "sumir" em LID ou sync tardio)
+      if (!contatoNome && conversa?.nome_contato_cache) contatoNome = String(conversa.nome_contato_cache).trim()
       // ultima_mensagem_preview: só para preview na lista lateral — NUNCA adicionar ao array de mensagens
       // (nova_mensagem já traz a mensagem completa para o chat; incluir id aqui causaria duplicata)
       // IMPORTANTE: incluir telefone e cliente_id para frontend manter deduplicação e não fazer contato "sumir"
       const telefoneParaPayload = conversa?.telefone && !String(conversa.telefone).startsWith('lid:')
         ? String(conversa.telefone).trim()
         : null
+      // Incluir telefone/nome/foto sempre que disponíveis — frontend faz merge defensivo
       const convPayload = {
         id: Number(conversa_id),
         ultima_atividade: basePayload.criado_em,
