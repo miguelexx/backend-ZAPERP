@@ -178,6 +178,13 @@ exports.receberWebhook = async (req, res) => {
     const msg = messages[0]
     const from = msg.from
     let texto = (msg.text?.body || '').trim()
+    // Suporte a mensagens interativas: botões e lista (clique do cliente)
+    if (!texto && msg.interactive) {
+      const btn = msg.interactive?.button_reply
+      const lst = msg.interactive?.list_reply
+      if (btn?.id != null) texto = String(btn.id).trim()
+      else if (lst?.id != null) texto = String(lst.id).trim()
+    }
     let tipo = 'texto'
     let url = null
     let nome_arquivo = null

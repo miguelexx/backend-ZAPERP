@@ -2,6 +2,24 @@
 
 > ZapERP usa **apenas Z-API**. O chatbot de triagem funciona via webhook Z-API.
 
+## Rótulos sugeridos para a interface (linguagem simples)
+
+Use estes textos na tela para facilitar o entendimento de leigos:
+
+| Termo técnico | Rótulo sugerido na tela |
+|---------------|-------------------------|
+| Opções do menu | **Escolhas que o cliente verá no WhatsApp** |
+| Key | **Nº da opção** (ex: 1, 2, 3) |
+| Label | **Texto que o cliente vê** ou **Nome da opção** |
+| Departamento | **Setor que vai receber a conversa** |
+| Ativo | **Opção ativa** ou **Mostrar esta opção no menu** |
+| Adicionar opção | **Adicionar nova escolha** |
+| Remover | **Remover esta opção** |
+
+**Dica:** Pode usar um texto de ajuda (tooltip) em cada campo, por exemplo: *"O número que o cliente digita para escolher (1, 2, 3...)"* ao lado de "Nº da opção".
+
+---
+
 ## 1. Visão geral
 
 A página de Chatbot permite configurar o **roteador automático de atendimento**:
@@ -116,15 +134,20 @@ Tipos: `menu_enviado`, `opcao_valida`, `opcao_invalida`, `menu_reenviado`
 │  ☑ Enviar menu apenas na primeira mensagem                  │
 │                                                             │
 ├─────────────────────────────────────────────────────────────┤
-│  Opções do menu                                             │
-│  ┌──────┬─────────────────┬──────────────────┬──────┐     │
-│  │ Key  │ Label           │ Departamento     │ Ativo│     │
-│  ├──────┼─────────────────┼──────────────────┼──────┤     │
-│  │  1   │ Atendimento     │ [Dropdown ▼]     │  ☑   │     │
-│  │  2   │ Vendas          │ [Dropdown ▼]     │  ☑   │     │
-│  │  3   │ Financeiro      │ [Dropdown ▼]     │  ☑   │     │
-│  └──────┴─────────────────┴──────────────────┴──────┘     │
-│  [+ Adicionar opção]                                        │
+│  Escolhas que o cliente verá no WhatsApp                   │
+│  (O que aparece quando alguém manda a primeira mensagem)    │
+│                                                             │
+│  ┌────────────────┬───────────────────────┬─────────────┐   │
+│  │ Nº da opção    │ O que o cliente vê    │ Setor que   │   │
+│  │ (ex: 1, 2, 3)  │ (texto no menu)       │ recebe a    │   │
+│  │                │                        │ conversa    │   │
+│  ├────────────────┼───────────────────────┼─────────────┤   │
+│  │  1             │ Atendimento           │ [Dropdown]  │   │
+│  │  2             │ Vendas                │ [Dropdown]  │   │
+│  │  3             │ Financeiro            │ [Dropdown]  │   │
+│  └────────────────┴───────────────────────┴─────────────┘   │
+│  ☐ Opção desativada (não aparece no menu)                   │
+│  [+ Adicionar nova escolha]                                 │
 │                                                             │
 │  [Salvar configuração]                                      │
 ├─────────────────────────────────────────────────────────────┤
@@ -136,25 +159,48 @@ Tipos: `menu_enviado`, `opcao_valida`, `opcao_invalida`, `menu_reenviado`
 └─────────────────────────────────────────────────────────────┘
 ```
 
-### 3.2 Componentes obrigatórios
+### 3.2 Explicação simples (para quem não é técnico)
 
-| Componente | Tipo | Descrição |
-|------------|------|-----------|
-| Toggle Ativar/Desativar | Switch | `chatbot_triage.enabled` |
-| Mensagem de boas-vindas | Textarea | `welcomeMessage` — pode incluir o menu completo |
-| Mensagem opção inválida | Textarea | `invalidOptionMessage` |
-| Mensagem de confirmação | Textarea | `confirmSelectionMessage` — `{{departamento}}` substituído pelo nome do setor |
-| Comando reabrir menu | Input | `reopenMenuCommand` (ex: "0") |
-| Enviar só na 1ª vez | Checkbox | `sendOnlyFirstTime` |
-| Tabela de opções | Dinâmica | key, label, departamento_id (dropdown), active |
+**O que são as "escolhas do menu"?**
+
+Quando um cliente manda a primeira mensagem no WhatsApp, o sistema envia um menu com opções. Exemplo:
+
+```
+1 - Atendimento
+2 - Vendas
+3 - Financeiro
+```
+
+Cada linha é uma **escolha** que você configura na tabela:
+
+| Na tela você vê | O que significa |
+|-----------------|----------------|
+| **Nº da opção** | O número que o cliente digita ou clica (1, 2, 3...) |
+| **O que o cliente vê** | O texto que aparece no menu (ex: "Atendimento", "Vendas") |
+| **Setor que recebe** | Para qual equipe a conversa vai quando o cliente escolher essa opção |
+| **Opção desativada** | Se marcar, essa escolha não aparece no menu (útil para desativar temporariamente) |
+
+**Resumindo:** Você define as escolhas (ex: Atendimento, Vendas, Financeiro) e para qual setor cada uma manda o cliente. Quem estiver naquele setor verá a conversa no painel.
+
+### 3.3 Componentes obrigatórios (referência técnica)
+
+| Componente | Tipo | Campo técnico |
+|------------|------|---------------|
+| Ligar/Desligar chatbot | Switch | `chatbot_triage.enabled` |
+| Mensagem de boas-vindas | Textarea | `welcomeMessage` |
+| Mensagem quando digita opção errada | Textarea | `invalidOptionMessage` |
+| Mensagem de confirmação | Textarea | `confirmSelectionMessage` — use `{{departamento}}` para o nome do setor |
+| Comando para ver o menu de novo | Input | `reopenMenuCommand` (ex: "0") |
+| Enviar menu só na primeira vez | Checkbox | `sendOnlyFirstTime` |
+| Tabela de escolhas | Dinâmica | key, label, departamento_id, active |
 | Botão Salvar | Button | PUT /api/ia/config |
 | Área de logs | Lista | GET /api/ia/logs |
 
-### 3.3 Validações no frontend
+### 3.4 Validações no frontend
 
 - `enabled` = true exige pelo menos 1 opção com `departamento_id` válido
-- `key` deve ser único (1, 2, 3...)
-- `label` e `departamento_id` obrigatórios por opção
+- O **número da opção** deve ser único (1, 2, 3...)
+- O **texto** e o **setor** são obrigatórios em cada linha
 - Ao salvar, enviar apenas `chatbot_triage` no body (ou o objeto completo conforme backend)
 
 ---

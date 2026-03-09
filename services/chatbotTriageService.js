@@ -153,13 +153,18 @@ function buildWelcomeMessage(config) {
 }
 
 /**
- * Encontra a opção pelo key (ex: "1", "2").
+ * Encontra a opção pelo key (ex: "1", "2") ou por label (ex: "Atendimento", "Vendas").
+ * Útil quando o cliente clica em botão: id pode ser key, title pode ser label.
  */
 function findOptionByKey(config, texto) {
   const key = String(texto || '').trim()
   if (!key) return null
   const activeOptions = (config?.options || []).filter((o) => o && o.active !== false && o.departamento_id != null)
-  return activeOptions.find((o) => String(o.key) === key)
+  const byKey = activeOptions.find((o) => String(o.key) === key)
+  if (byKey) return byKey
+  // Fallback: match por label (ignora case)
+  const keyLower = key.toLowerCase()
+  return activeOptions.find((o) => String(o.label || '').trim().toLowerCase() === keyLower)
 }
 
 /**
