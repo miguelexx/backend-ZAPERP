@@ -1538,7 +1538,6 @@ exports.detalharChat = async (req, res) => {
     const { company_id, id: user_id, perfil, departamento_id: user_dep_id } = req.user
     const role = String(perfil || '').toLowerCase()
     const isAdmin = role === 'admin'
-    const isAtendente = role === 'atendente'
 
     const limit = Math.min(Number(req.query.limit || 50), 200)
     const cursor = req.query.cursor || null
@@ -1581,6 +1580,7 @@ exports.detalharChat = async (req, res) => {
 
     const isGroup = isGroupConversation(conversa)
     // Visibilidade: conversas sem setor visíveis para TODOS; com setor só para usuários do mesmo setor
+    // Atendente: acesso total às conversas que vê na lista (seu setor + sem setor) — pode abrir para assumir/transferir
     if (!isAdmin && !isGroup) {
       const convDep = conversa.departamento_id ?? null
       const userDep = user_dep_id ?? null
@@ -1590,13 +1590,6 @@ exports.detalharChat = async (req, res) => {
       // convDep == null: qualquer usuário pode ver conversas sem setor
       if (userDep != null && convDep != null && Number(convDep) !== Number(userDep)) {
         return res.status(403).json({ error: 'Conversa de outro setor' })
-      }
-    }
-
-    // Atendente: acesso somente às próprias conversas (quando já atribuídas)
-    if (isAtendente && !isGroup) {
-      if (conversa.atendente_id == null || Number(conversa.atendente_id) !== Number(user_id)) {
-        return res.status(403).json({ error: 'Conversa não atribuída a este atendente' })
       }
     }
 
