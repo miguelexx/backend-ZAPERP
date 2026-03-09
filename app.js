@@ -20,7 +20,8 @@ const isProd = process.env.NODE_ENV === 'production'
 const defaultDirectives = helmet.contentSecurityPolicy.getDefaultDirectives()
 
 // Ajustes para este projeto (SPA + mídia blob + WS)
-defaultDirectives['frame-ancestors'] = ["'none'"]
+// frame-ancestors 'self' permite embed da página /permissoes na aba Configurações
+defaultDirectives['frame-ancestors'] = ["'self'"]
 defaultDirectives['img-src'] = [...new Set([...(defaultDirectives['img-src'] || []), 'blob:'])]
 defaultDirectives['media-src'] = ["'self'", 'blob:', 'https:']
 defaultDirectives['connect-src'] = ["'self'", 'https:', 'wss:', 'ws:']
@@ -146,8 +147,10 @@ app.use(
 app.get('/health', (req, res) => res.json({ ok: true }))
 
 // Página de Permissões (admin) — HTML standalone que consome as APIs
+// Permite iframe same-origin para embed na aba Configurações → Permissões
 app.get('/permissoes', (req, res) => {
   res.setHeader('Content-Type', 'text/html; charset=utf-8')
+  res.setHeader('X-Frame-Options', 'SAMEORIGIN')
   res.sendFile(path.join(__dirname, 'public', 'permissoes.html'))
 })
 
