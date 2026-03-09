@@ -710,7 +710,7 @@ const MERGE_DUPLICATAS_HTML = `
   <title>Apagar duplicatas</title>
   <style>
     body { font-family: system-ui, sans-serif; padding: 1rem; background: #f5f5f5; }
-    .box { background: #fff; border-radius: 8px; padding: 1rem 1.25rem; box-shadow: 0 1px 3px rgba(0,0,0,.08); max-width: 320px; }
+    .box { background: #fff; border-radius: 8px; padding: 1rem 1.25rem; box-shadow: 0 1px 3px rgba(0,0,0,.08); max-width: 380px; }
     .box h2 { margin: 0 0 .75rem; font-size: 1rem; font-weight: 600; color: #333; }
     .box p { margin: 0 0 1rem; font-size: 0.875rem; color: #666; }
     .btn { background: #25d366; color: #fff; border: none; padding: 0.5rem 1rem; border-radius: 6px; font-size: 0.875rem; cursor: pointer; }
@@ -723,9 +723,9 @@ const MERGE_DUPLICATAS_HTML = `
 </head>
 <body>
   <div class="box">
-    <h2>Conversas duplicadas</h2>
-    <p>Unifica conversas do mesmo contato (mesmo número em formatos diferentes).</p>
-    <button type="button" class="btn" id="btn">Apagar duplicatas</button>
+    <h2>Conversas e contatos duplicados</h2>
+    <p>Unifica conversas e contatos do mesmo número (evita duplicados ao enviar pelo celular).</p>
+    <button type="button" class="btn" id="btn">Remover duplicatas</button>
     <div class="msg" id="msg"></div>
   </div>
   <script>
@@ -752,8 +752,12 @@ const MERGE_DUPLICATAS_HTML = `
           return r.json().then(function(d) { return { ok: r.ok, data: d }; });
         }).then(function(_) {
           var res = _.data;
-          if (_.ok) setMsg(res.message || (res.merged ? res.merged + ' unificada(s).' : 'Nenhuma duplicata.'));
-          else setMsg(res.error || 'Erro', true);
+          if (_.ok) {
+            var parts = [];
+            if (res.clientesRemovidos) parts.push(res.clientesRemovidos + ' contato(s)');
+            if (res.merged) parts.push(res.merged + ' conversa(s)');
+            setMsg(res.message || (parts.length ? parts.join(', ') + ' unificados.' : 'Nenhuma duplicata encontrada.'));
+          } else setMsg(res.error || 'Erro', true);
         }).catch(function(e) {
           setMsg('Erro: ' + (e.message || 'rede'), true);
         }).finally(function() {
@@ -782,6 +786,45 @@ exports.mergeConversasDuplicadas = async (req, res) => {
     const { company_id } = req.user
     const cid = Number(company_id)
 
+    let clientesRemovidos = 0
+
+    // 1) Remover contatos duplicados (mesmo número em formatos diferentes)
+    const { data: clientes, error: errCli } = await supabase
+      .from('clientes')
+      .select('id, telefone, nome')
+      .eq('company_id', cid)
+      .not('telefone', 'like', 'lid:%')
+
+    if (!errCli && Array.isArray(clientes)) {
+      const byPhoneKey = new Map()
+      for (const cl of clientes) {
+        const key = phoneKeyBR(cl.telefone) || String(cl.telefone || '').replace(/\D/g, '')
+        if (!key) continue
+        if (!byPhoneKey.has(key)) byPhoneKey.set(key, [])
+        byPhoneKey.get(key).push(cl)
+      }
+      for (const [, list] of byPhoneKey) {
+        if (list.length <= 1) continue
+        list.sort((a, b) => {
+          const na = (a.nome || '').trim().length
+          const nb = (b.nome || '').trim().length
+          if (nb !== na) return nb - na
+          return (a.id || 0) - (b.id || 0)
+        })
+        const canonical = list[0]
+        const dupIds = list.slice(1).map((c) => c.id).filter(Boolean)
+        if (dupIds.length === 0) continue
+        try {
+          await supabase.from('conversas').update({ cliente_id: canonical.id }).eq('company_id', cid).in('cliente_id', dupIds)
+          const { error: delErr } = await supabase.from('clientes').delete().eq('company_id', cid).in('id', dupIds)
+          if (!delErr) clientesRemovidos += dupIds.length
+        } catch (e) {
+          console.warn('mergeConversasDuplicadas clientes:', e?.message || e)
+        }
+      }
+    }
+
+    // 2) Mesclar conversas duplicadas
     const { data: conversas, error: errList } = await supabase
       .from('conversas')
       .select('id, telefone, chat_lid, ultima_atividade, criado_em, tipo')
@@ -841,7 +884,11 @@ exports.mergeConversasDuplicadas = async (req, res) => {
       }
     }
 
-    return res.json({ ok: true, merged, message: merged ? `${merged} conversa(s) duplicada(s) unificada(s).` : 'Nenhuma duplicata encontrada.' })
+    const msgParts = []
+    if (clientesRemovidos) msgParts.push(`${clientesRemovidos} contato(s) removido(s)`)
+    if (merged) msgParts.push(`${merged} conversa(s) unificada(s)`)
+    const message = msgParts.length ? msgParts.join('. ') + '.' : 'Nenhuma duplicata encontrada.'
+    return res.json({ ok: true, merged, clientesRemovidos, message })
   } catch (err) {
     console.error(err)
     return res.status(500).json({ error: 'Erro ao mesclar duplicatas' })

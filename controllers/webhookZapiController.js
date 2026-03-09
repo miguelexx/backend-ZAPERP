@@ -1495,6 +1495,55 @@ exports.receberZapi = async (req, res) => {
           conversa_id = convByPhone.id
           departamento_id = convByPhone.departamento_id ?? null
           isNewConversation = false
+        } else if (!convByLid && !hasRealPhone && senderName && String(senderName).trim()) {
+          // fromMe+LID: Z-API às vezes envia só @lid sem número. Tenta encontrar conversa existente pelo nome do contato (chatName).
+          const nomeBusca = String(senderName).trim().replace(/[\u{1F300}-\u{1F9FF}]/gu, '').trim() || String(senderName).trim()
+          const nomePrimeiraPalavra = (nomeBusca.split(/\s/)[0] || nomeBusca).slice(0, 50).replace(/[%_\\]/g, '\\$&')
+          const { data: convsByNome } = await supabase
+            .from('conversas')
+            .select('id, departamento_id, telefone')
+            .eq('company_id', company_id)
+            .neq('status_atendimento', 'fechada')
+            .ilike('nome_contato_cache', `%${nomePrimeiraPalavra}%`)
+            .not('telefone', 'like', 'lid:%')
+            .order('ultima_atividade', { ascending: false })
+            .limit(3)
+          const convNome = Array.isArray(convsByNome) && convsByNome.length > 0 ? convsByNome[0] : null
+          if (!convNome && nomeBusca.length >= 2) {
+            const { data: clientesByNome } = await supabase
+              .from('clientes')
+              .select('id')
+              .eq('company_id', company_id)
+              .ilike('nome', `%${nomeBusca}%`)
+              .limit(5)
+            const cids = Array.isArray(clientesByNome) ? clientesByNome.map((c) => c.id) : []
+            if (cids.length > 0) {
+              const { data: convsCliente } = await supabase
+                .from('conversas')
+                .select('id, departamento_id, telefone')
+                .eq('company_id', company_id)
+                .in('cliente_id', cids)
+                .neq('status_atendimento', 'fechada')
+                .not('telefone', 'like', 'lid:%')
+                .order('ultima_atividade', { ascending: false })
+                .limit(1)
+              const c = Array.isArray(convsCliente) && convsCliente[0] ? convsCliente[0] : null
+              if (c) {
+                await supabase.from('conversas').update({ chat_lid: lidPart }).eq('id', c.id).eq('company_id', company_id)
+                conversa_id = c.id
+                departamento_id = c.departamento_id ?? null
+                isNewConversation = false
+                console.log('[Z-API] fromMe+LID: conversa encontrada por cliente.nome:', { conversa_id, chatName: nomeBusca?.slice(0, 20) })
+              }
+            }
+          }
+          if (convNome && !conversa_id) {
+            await supabase.from('conversas').update({ chat_lid: lidPart }).eq('id', convNome.id).eq('company_id', company_id)
+            conversa_id = convNome.id
+            departamento_id = convNome.departamento_id ?? null
+            isNewConversation = false
+            console.log('[Z-API] fromMe+LID: conversa encontrada por nome_contato_cache:', { conversa_id, chatName: nomeBusca?.slice(0, 20) })
+          }
         }
       }
 
@@ -2243,7 +2292,11 @@ exports.receberZapi = async (req, res) => {
         if (mensagemSalva.autor_usuario_id != null) chain = chain.to(`usuario_${mensagemSalva.autor_usuario_id}`)
         chain.emit('status_mensagem', statusPayload)
       }
-      io.to(`empresa_${company_id}`).emit('atualizar_conversa', { id: convIdForEmit })
+      // Só emitir atualizar_conversa quando NÃO inserimos mensagem nova — evita refetch que causa "aparecer e sumir"
+      // Quando inserimos, conversa_atualizada (com ultima_mensagem) basta para o front atualizar a lista
+      if (!mensagemFoiInseridaPeloWebhook) {
+        io.to(`empresa_${company_id}`).emit('atualizar_conversa', { id: convIdForEmit })
+      }
       // conversa_atualizada enriquecida: ultima_atividade, nome/foto cache (frontend atualiza lista lateral)
       // Sempre incluir nome quando disponível (cache ou cliente) — evita frontend sobrescrever com vazio
       const { data: convRow } = await supabase
@@ -2274,9 +2327,21 @@ exports.receberZapi = async (req, res) => {
         ...(fotoPerfil ? { foto_perfil_contato_cache: fotoPerfil, foto_perfil: fotoPerfil } : {}),
         ...(mensagemFoiInseridaPeloWebhook && !fromMe ? { tem_novas_mensagens: true, lida: false } : {})
       }
+      // Incluir ultima_mensagem para o frontend atualizar a lista sem refetch (evita mensagem "aparecer e sumir")
+      if (mensagemFoiInseridaPeloWebhook && emitPayload) {
+        convPayload.ultima_mensagem = {
+          id: emitPayload.id,
+          texto: emitPayload.texto ?? '(mensagem)',
+          criado_em: emitPayload.criado_em,
+          direcao: emitPayload.direcao ?? 'in',
+          tipo: emitPayload.tipo ?? 'texto',
+          status: canon,
+          whatsapp_id: emitPayload.whatsapp_id ?? null
+        }
+      }
       io.to(`empresa_${company_id}`).emit('conversa_atualizada', convPayload)
       if (depId != null) {
-        io.to(`departamento_${depId}`).emit('atualizar_conversa', { id: convIdForEmit })
+        if (!mensagemFoiInseridaPeloWebhook) io.to(`departamento_${depId}`).emit('atualizar_conversa', { id: convIdForEmit })
         io.to(`departamento_${depId}`).emit('conversa_atualizada', convPayload)
       }
     }
