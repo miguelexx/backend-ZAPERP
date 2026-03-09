@@ -2175,13 +2175,36 @@ exports.enviarMensagemChat = async (req, res) => {
 
     const { data: conversa, error: errConv } = await supabase
       .from('conversas')
-      .select('id, telefone, cliente_id, tipo, nome_contato_cache, foto_perfil_contato_cache')
+      .select('id, telefone, cliente_id, tipo, nome_contato_cache, foto_perfil_contato_cache, chat_lid')
       .eq('company_id', company_id)
       .eq('id', conversa_id)
       .single()
 
     if (errConv || !conversa) {
       return res.status(404).json({ error: 'Conversa não encontrada' })
+    }
+
+    // Resolver telefone real quando conversa tem apenas LID (lid:xxx) — Z-API não envia para LID
+    let telefoneParaEnvio = conversa.telefone || ''
+    if (telefoneParaEnvio && String(telefoneParaEnvio).trim().toLowerCase().startsWith('lid:')) {
+      if (conversa.cliente_id) {
+        const { data: cli } = await supabase.from('clientes').select('telefone').eq('id', conversa.cliente_id).eq('company_id', company_id).maybeSingle()
+        if (cli?.telefone && !String(cli.telefone).startsWith('lid:')) telefoneParaEnvio = cli.telefone
+      }
+      if (telefoneParaEnvio.startsWith('lid:') && conversa.chat_lid) {
+        const { data: outra } = await supabase
+          .from('conversas')
+          .select('telefone')
+          .eq('company_id', company_id)
+          .eq('chat_lid', conversa.chat_lid)
+          .not('telefone', 'like', 'lid:%')
+          .limit(1)
+          .maybeSingle()
+        if (outra?.telefone) telefoneParaEnvio = outra.telefone
+      }
+      if (telefoneParaEnvio.startsWith('lid:')) {
+        return res.status(400).json({ error: 'Número do contato indisponível (conversa por LID). Aguarde o contato enviar uma mensagem ou sincronize os contatos.' })
+      }
     }
 
     // Garantir que o contato (número + nome) esteja salvo em clientes antes de enviar
@@ -2308,21 +2331,36 @@ exports.enviarMensagemChat = async (req, res) => {
         io.EVENTS?.NOVA_MENSAGEM || 'nova_mensagem',
         novaMsgPayload
       )
-      // Incluir nome/foto no payload para evitar frontend sobrescrever com vazio ao enviar msg
+      // Incluir SEMPRE nome/foto no payload para evitar frontend "bugar" o nome ao enviar msg
+      let contatoNome = conversa?.nome_contato_cache ? String(conversa.nome_contato_cache).trim() : null
+      let fotoPerfil = conversa?.foto_perfil_contato_cache ? String(conversa.foto_perfil_contato_cache).trim() : null
+      if ((!contatoNome || !fotoPerfil) && conversa?.cliente_id) {
+        const { data: cli } = await supabase
+          .from('clientes')
+          .select('nome, pushname, foto_perfil')
+          .eq('id', conversa.cliente_id)
+          .eq('company_id', company_id)
+          .maybeSingle()
+        if (cli && !contatoNome) contatoNome = (cli.nome || cli.pushname || '').trim() || null
+        if (cli?.foto_perfil && !fotoPerfil) fotoPerfil = String(cli.foto_perfil).trim()
+      }
+      if (!contatoNome && conversa?.telefone && !String(conversa.telefone).startsWith('lid:')) contatoNome = conversa.telefone
       const convPayload = {
         id: Number(conversa_id),
         ultima_atividade: basePayload.criado_em,
-        ...(conversa?.nome_contato_cache ? { nome_contato_cache: conversa.nome_contato_cache, contato_nome: conversa.nome_contato_cache } : {}),
-        ...(conversa?.foto_perfil_contato_cache ? { foto_perfil_contato_cache: conversa.foto_perfil_contato_cache, foto_perfil: conversa.foto_perfil_contato_cache } : {})
+        ...(contatoNome ? { nome_contato_cache: contatoNome, contato_nome: contatoNome } : {}),
+        ...(fotoPerfil ? { foto_perfil_contato_cache: fotoPerfil, foto_perfil: fotoPerfil } : {}),
+        ultima_mensagem: { id: msg.id, texto: basePayload.texto, criado_em: basePayload.criado_em, direcao: 'out', status: 'pending', tipo: basePayload.tipo || 'texto' }
       }
       emitirConversaAtualizada(io, company_id, conversa_id, convPayload)
     }
 
     // Envio para WhatsApp via provider (meta ou zapi, conforme WHATSAPP_PROVIDER)
-    if (!conversa?.telefone) {
+    let sendResult = null
+    if (!telefoneParaEnvio) {
       console.warn(`[WhatsApp] Conversa ${conversa_id} sem telefone (company ${company_id}) — mensagem salva, mas não enviada ao WhatsApp`)
     }
-    if (conversa?.telefone) {
+    if (telefoneParaEnvio) {
       let phoneId = null
       try {
         const { data: ew } = await supabase
@@ -2366,7 +2404,7 @@ exports.enviarMensagemChat = async (req, res) => {
           if (linkUrlStr && !messageToSend.includes(linkUrlStr)) {
             messageToSend = messageToSend ? `${messageToSend} ${linkUrlStr}` : linkUrlStr
           }
-          result = await provider.sendLink(conversa.telefone, {
+          result = await provider.sendLink(telefoneParaEnvio, {
             message: messageToSend,
             image: link.image || '',
             linkUrl: linkUrlStr,
@@ -2374,7 +2412,7 @@ exports.enviarMensagemChat = async (req, res) => {
             linkDescription: String(link.linkDescription || link.description || '').trim() || messageToSend,
           }, { companyId: company_id, conversaId: conversa_id })
         } else {
-          result = await provider.sendText(conversa.telefone, String(texto).trim(), { companyId: company_id, conversaId: conversa_id, phoneId: phoneId || undefined, replyMessageId: replyMessageId || undefined })
+          result = await provider.sendText(telefoneParaEnvio, String(texto).trim(), { companyId: company_id, conversaId: conversa_id, phoneId: phoneId || undefined, replyMessageId: replyMessageId || undefined })
         }
         const ok = typeof result === 'boolean' ? result : result?.ok === true
         const waMessageId = typeof result === 'object' && result?.messageId ? String(result.messageId).trim() : null
@@ -2393,7 +2431,8 @@ exports.enviarMensagemChat = async (req, res) => {
           chain.emit('status_mensagem', payload)
         }
 
-        if (!ok) console.warn('[WhatsApp] Falha ao entregar mensagem para', String(conversa.telefone || '').slice(-8), '— verifique se a instância Z-API está conectada (escaneie o QR no painel)')
+        if (!ok) console.warn('[WhatsApp] Falha ao entregar mensagem para', String(telefoneParaEnvio || '').slice(-8), '— verifique se a instância Z-API está conectada (escaneie o QR no painel)')
+        sendResult = result
       } catch (e) {
         console.error('WhatsApp enviar:', e)
         await supabase
@@ -2412,10 +2451,12 @@ exports.enviarMensagemChat = async (req, res) => {
 
     // Não retornar mensagem completa — evita duplicação no frontend (API + socket).
     // A mensagem chega via socket nova_mensagem (única fonte de verdade para exibição).
+    const sendOk = !!telefoneParaEnvio && (typeof sendResult === 'boolean' ? sendResult : sendResult?.ok === true)
     return res.json({
       ok: true,
       id: msg.id,
-      conversa_id: Number(conversa_id)
+      conversa_id: Number(conversa_id),
+      ...(sendOk ? { status: 'sent' } : { status: sendResult?.blockedBy ? 'blocked' : 'erro', ...(sendResult?.blockedBy ? { motivo: sendResult.blockedBy } : {}) })
     })
   } catch (err) {
     console.error(err)
