@@ -36,3 +36,13 @@ describe('Rota pública', () => {
     expect(res.status).toBe(200)
   })
 })
+
+describe('Webhook Z-API exige token', () => {
+  it('POST /webhooks/zapi rejeita requisição sem token válido', async () => {
+    const res = await request(app)
+      .post('/webhooks/zapi')
+      .send({ instanceId: 'test', type: 'ReceivedCallback' })
+    expect([401, 500]).toContain(res.status)
+    expect(res.body).toHaveProperty('error')
+  })
+})

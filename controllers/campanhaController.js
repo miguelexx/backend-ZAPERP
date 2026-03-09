@@ -80,6 +80,14 @@ exports.atualizar = async (req, res) => {
     const company_id = getCompanyId(req)
     if (!company_id) return res.status(401).json({ error: 'Não autorizado' })
     const campanha = await campanhaService.atualizar(company_id, req.params.id, req.body)
+    await registrarAuditoria({
+      company_id,
+      usuario_id: req.user?.id,
+      acao: 'campanha_atualizar',
+      entidade: 'campanha',
+      entidade_id: campanha?.id,
+      detalhes_json: { nome: campanha?.nome, status: campanha?.status },
+    })
     return res.json(campanha)
   } catch (e) {
     console.error('[campanhaController] atualizar:', e)
@@ -118,6 +126,14 @@ exports.pausar = async (req, res) => {
     const company_id = getCompanyId(req)
     if (!company_id) return res.status(401).json({ error: 'Não autorizado' })
     const campanha = await campanhaService.pausar(company_id, req.params.id)
+    await registrarAuditoria({
+      company_id,
+      usuario_id: req.user?.id,
+      acao: 'campanha_pausar',
+      entidade: 'campanha',
+      entidade_id: campanha?.id,
+      detalhes_json: { nome: campanha?.nome },
+    })
     return res.json(campanha)
   } catch (e) {
     console.error('[campanhaController] pausar:', e)
@@ -133,6 +149,14 @@ exports.retomar = async (req, res) => {
     const company_id = getCompanyId(req)
     if (!company_id) return res.status(401).json({ error: 'Não autorizado' })
     const campanha = await campanhaService.retomar(company_id, req.params.id)
+    await registrarAuditoria({
+      company_id,
+      usuario_id: req.user?.id,
+      acao: 'campanha_retomar',
+      entidade: 'campanha',
+      entidade_id: campanha?.id,
+      detalhes_json: { nome: campanha?.nome },
+    })
     return res.json(campanha)
   } catch (e) {
     console.error('[campanhaController] retomar:', e)

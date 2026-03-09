@@ -4,6 +4,7 @@ const express = require('express')
 const router = express.Router()
 const rateLimit = require('express-rate-limit')
 const auth = require('../middleware/auth')
+const supervisorOrAdmin = require('../middleware/supervisorOrAdmin')
 const aiController = require('../controllers/aiController')
 
 /**
@@ -29,6 +30,6 @@ const aiLimiter = rateLimit({
     }),
 })
 
-router.post('/ask', auth, aiLimiter, aiController.ask)
+router.post('/ask', auth, supervisorOrAdmin, aiLimiter, aiController.ask)
 
 module.exports = router

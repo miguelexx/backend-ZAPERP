@@ -3,7 +3,8 @@
  * Chamado antes do chatbot — não altera fluxo existente.
  */
 
-const COMENTARIOS_OPT_OUT = ['PARAR', 'SAIR', 'DESCADASTRAR', 'CANCELAR', 'REMOVER', 'UNSUBSCRIBE', 'STOP', 'OPT OUT']
+/** Comandos que acionam opt-out (case-insensitive, normalizado) */
+const COMANDOS_OPT_OUT = ['PARAR', 'SAIR', 'DESCADASTRAR', 'CANCELAR', 'REMOVER', 'UNSUBSCRIBE', 'STOP', 'OPT OUT']
 
 function normalizeText(t) {
   if (!t || typeof t !== 'string') return ''
@@ -13,7 +14,7 @@ function normalizeText(t) {
 function isOptOutCommand(texto) {
   const n = normalizeText(texto)
   if (!n) return false
-  return COMENTARIOS_OPT_OUT.some((cmd) => n === cmd || n.startsWith(cmd + ' ') || n.endsWith(' ' + cmd))
+  return COMANDOS_OPT_OUT.some((cmd) => n === cmd || n.startsWith(cmd + ' ') || n.endsWith(' ' + cmd))
 }
 
 /**
@@ -86,5 +87,5 @@ module.exports = {
   verificarOptOut,
   processarOptOut,
   isOptOutCommand,
-  COMENTARIOS_OPT_OUT,
+  COMANDOS_OPT_OUT,
 }

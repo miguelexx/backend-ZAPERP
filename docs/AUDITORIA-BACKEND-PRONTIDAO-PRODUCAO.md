@@ -117,7 +117,7 @@
 ### 3.4 Auditoria
 | Item | Classificação | Detalhe |
 |------|---------------|---------|
-| auditoria_log e helper criados, uso opcional | **ATENÇÃO** | Ações críticas (criar campanha, alterar permissões, excluir) não gravam em auditoria_log. Integração pontual recomendada. |
+| auditoria_log | **OK** | Integrado em campanha_criar, campanha_excluir, permissoes_alterar. GET /config/auditoria inclui auditoria_log. |
 
 ### 3.5 Jobs
 | Item | Classificação | Detalhe |

@@ -11,7 +11,8 @@ function formatEntry(level, msg, meta = {}) {
     msg: String(msg || ''),
     ...(typeof meta === 'object' && meta !== null ? meta : { meta }),
   }
-  return LOG_JSON ? JSON.stringify(base) : `[${level.toUpperCase()}] ${base.msg} ${Object.keys(meta).length ? JSON.stringify(meta) : ''}`
+  const metaStr = Object.keys(meta || {}).length ? ` ${JSON.stringify(meta)}` : ''
+  return LOG_JSON ? JSON.stringify(base) : `[${level.toUpperCase()}] ${base.msg}${metaStr}`
 }
 
 const logger = {

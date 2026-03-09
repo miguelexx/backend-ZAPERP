@@ -49,8 +49,12 @@ Todas as melhorias obrigatórias (P0 e P1) da auditoria foram implementadas.
 - **Arquivos:** `controllers/campanhaController.js`, `controllers/permissoesController.js`
 - **Ações registradas:**
   - `campanha_criar` — criação de campanha
+  - `campanha_atualizar` — alteração de campanha
   - `campanha_excluir` — exclusão
+  - `campanha_pausar` — pausa de campanha
+  - `campanha_retomar` — retomada de campanha
   - `permissoes_alterar` — alteração de permissões de usuário
+- **Visualização:** `GET /config/auditoria` retorna atendimentos, historico_atendimentos e auditoria_log (ações críticas)
 
 ---
 
@@ -79,8 +83,50 @@ Todas as melhorias obrigatórias (P0 e P1) da auditoria foram implementadas.
 
 ---
 
+## 9. Chatbot Human Takeover
+
+- **Arquivo:** `controllers/webhookZapiController.js`
+- **Alteração:** Condição do chatbot inclui `atendente_id == null`; quando humano assume conversa, chatbot não processa mais mensagens
+
+## 10. Proteção Operacional Integrada
+
+- **Arquivos:** `services/protecao/protecaoOrchestrator.js`, `services/providers/zapi.js`
+- **Ativação:** `FEATURE_PROTECAO=1` no .env
+- **Checks:** volume (limite_por_minuto, limite_por_hora), frequência (intervalo_minimo_entre_mensagens_seg), opt-in (quando requireOptIn)
+- **Integração:** Todos os métodos de envio (sendText, sendLink, sendImage, sendFile, etc.) chamam `permitirEnvio` antes de enviar
+
+## 11. Otimização Campanhas (N+1)
+
+- **Arquivo:** `services/campanhaService.js`
+- **Alteração:** `filtrarContatosValidos` usa queries em lote em vez de loop com N queries
+
+## 12. Health/detailed em Produção
+
+- **Arquivo:** `controllers/healthController.js`
+- **Alteração:** Em `NODE_ENV=production`, `supabase_error` não é retornado no JSON (evita exposição de stack)
+
+## 13. POST /ai/ask Restrito
+
+- **Arquivo:** `routes/aiRoutes.js`
+- **Alteração:** Middleware `supervisorOrAdmin` adicionado; apenas admin e supervisor podem usar o Assistente IA
+
+## 14. Migration Obrigatória
+
+A migration `supabase/migrations/20260310000000_opt_in_opt_out_campanhas_auditoria.sql` cria:
+- `contato_opt_in`, `contato_opt_out`
+- `campanhas`, `campanha_envios`
+- `auditoria_log`
+- Colunas de proteção em `empresas` (intervalo_minimo_entre_mensagens_seg, limite_por_minuto, limite_por_hora)
+
+**Rodar** via Supabase CLI ou Dashboard antes de usar campanhas, opt-in/opt-out e auditoria.
+
+---
+
 ## Checklist Pós-Implementação
 
+- [ ] Rodar migration `20260310000000_opt_in_opt_out_campanhas_auditoria.sql`
+- [ ] Opcional: `FEATURE_PROTECAO=1` para ativar limites de volume e frequência no envio
+- [ ] Instâncias já configuradas: se o webhook Z-API não tinha token, adicionar `?token=VALOR` à URL (ver `CONFIGURACAO-WEBHOOK-ZAPI-TOKEN.md`)
 - [ ] Rodar `npm install` para instalar jest e supertest
 - [ ] Rodar `npm test` para validar testes
 - [ ] Configurar Z-API com `?token=ZAPI_WEBHOOK_TOKEN` na URL do webhook

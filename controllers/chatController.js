@@ -1012,40 +1012,13 @@ exports.sincronizarContatosZapi = async (req, res) => {
             if (!upd.error) atualizados++
           }
         } else {
-          let ins = await supabase.from('clientes').insert({
-            company_id: Number(company_id),
-            telefone: phone,
-            nome: nomeFinal || null,
+          const { cliente_id: cid } = await getOrCreateCliente(supabase, company_id, phone, {
+            nome: nomeFinal || phone,
+            nomeSource: 'syncZapi',
             pushname: pushname || undefined,
-            ...(imgUrl ? { foto_perfil: imgUrl } : {})
+            foto_perfil: imgUrl || undefined
           })
-          if (ins.error && String(ins.error.message || '').includes('pushname')) {
-            ins = await supabase.from('clientes').insert({
-              company_id,
-              telefone: phone,
-              nome: nomeFinal || null,
-              ...(imgUrl ? { foto_perfil: imgUrl } : {})
-            })
-          }
-          if (!ins.error) {
-            criados++
-          } else if (String(ins.error.code || '') === '23505') {
-            let q = supabase.from('clientes').select('id, telefone')
-            if (phones.length > 0) q = q.in('telefone', phones)
-            else q = q.eq('telefone', phone)
-            q = q.eq('company_id', Number(company_id))
-            const found = await q.order('id', { ascending: true }).limit(1)
-            const jaExiste = Array.isArray(found.data) && found.data.length > 0 ? found.data[0] : null
-            if (jaExiste?.id) {
-              const upd = await supabase
-                .from('clientes')
-                .update({ nome: nomeFinal || phone, ...(imgUrl ? { foto_perfil: imgUrl } : {}) })
-                .eq('id', jaExiste.id)
-              if (!upd.error) atualizados++
-            }
-          } else if (page === 1 && criados + atualizados < 3) {
-            console.warn('[Sync Contatos] Insert falhou:', ins.error?.code, ins.error?.message?.slice(0, 100), 'phone:', phone?.slice(-6))
-          }
+          if (cid) criados++
         }
       }
 
@@ -2352,9 +2325,9 @@ exports.enviarMensagemChat = async (req, res) => {
             linkUrl: linkUrlStr,
             title: String(link.title || '').trim() || linkUrlStr,
             linkDescription: String(link.linkDescription || link.description || '').trim() || messageToSend,
-          }, { companyId: company_id })
+          }, { companyId: company_id, conversaId: conversa_id })
         } else {
-          result = await provider.sendText(conversa.telefone, String(texto).trim(), { companyId: company_id, phoneId: phoneId || undefined, replyMessageId: replyMessageId || undefined })
+          result = await provider.sendText(conversa.telefone, String(texto).trim(), { companyId: company_id, conversaId: conversa_id, phoneId: phoneId || undefined, replyMessageId: replyMessageId || undefined })
         }
         const ok = typeof result === 'boolean' ? result : result?.ok === true
         const waMessageId = typeof result === 'object' && result?.messageId ? String(result.messageId).trim() : null
@@ -2598,6 +2571,7 @@ exports.enviarContatoWhatsapp = async (req, res) => {
     // envia contato via Z-API
     const result = await provider.sendContact(conversa.telefone, contactName, contactPhone, {
       companyId: company_id,
+      conversaId: conversa_id,
       messageId: messageId || undefined,
     })
     const ok = typeof result === 'boolean' ? result : result?.ok === true
@@ -2684,7 +2658,7 @@ exports.enviarLigacaoWhatsapp = async (req, res) => {
       return res.status(500).json({ error: 'Provider WhatsApp não suporta ligações' })
     }
 
-    const result = await provider.sendCall(conversa.telefone, safeDur, { companyId: company_id })
+    const result = await provider.sendCall(conversa.telefone, safeDur, { companyId: company_id, conversaId: conversa_id })
     const ok = typeof result === 'boolean' ? result : result?.ok === true
     const waMessageId =
       typeof result === 'object' && result?.messageId ? String(result.messageId).trim() : null
@@ -3190,7 +3164,7 @@ exports.enviarArquivo = async (req, res) => {
     if (conversa?.telefone && fullUrl && !isLocalhost) {
       const provider = getProvider()
       const phone = conversa.telefone
-      const opts = { companyId: company_id }
+      const opts = { companyId: company_id, conversaId: conversa_id }
       const promise =
         tipo === 'audio' && provider.sendAudio
           ? provider.sendAudio(phone, fullUrl, opts)

@@ -5,7 +5,6 @@
 
 const supabase = require('../config/supabase')
 const { verificarOptOut } = require('./optOutService')
-const zapiProvider = require('./providers/zapi')
 
 /**
  * Lista campanhas da empresa.
@@ -104,20 +103,54 @@ async function retomar(company_id, id) {
 /**
  * Valida opt-in antes de incluir contato na campanha.
  * Retorna lista de cliente_ids válidos (com opt-in e sem opt-out).
+ * Otimizado: queries em lote em vez de N+1.
  */
 async function filtrarContatosValidos(company_id, cliente_ids) {
   if (!cliente_ids?.length) return []
-  const validos = []
-  for (const cid of cliente_ids) {
-    const { data: cliente } = await supabase.from('clientes').select('id, telefone').eq('id', cid).eq('company_id', company_id).maybeSingle()
-    if (!cliente) continue
-    const emOptOut = await verificarOptOut(supabase, company_id, cliente.id, cliente.telefone)
-    if (emOptOut) continue
-    const { data: optIn } = await supabase.from('contato_opt_in').select('id').eq('company_id', company_id).eq('cliente_id', cid).eq('ativo', true).maybeSingle()
-    if (!optIn) continue
-    validos.push(cid)
+  const idsUniq = [...new Set(cliente_ids)]
+
+  const { data: clientes } = await supabase
+    .from('clientes')
+    .select('id, telefone')
+    .eq('company_id', company_id)
+    .in('id', idsUniq)
+  const clientesMap = new Map((clientes || []).map((c) => [Number(c.id), c]))
+
+  const optOutClienteIds = new Set()
+  const { data: optOutByCliente } = await supabase
+    .from('contato_opt_out')
+    .select('cliente_id')
+    .eq('company_id', company_id)
+    .in('cliente_id', idsUniq.filter(Boolean))
+  ;(optOutByCliente || []).forEach((r) => { if (r.cliente_id) optOutClienteIds.add(Number(r.cliente_id)) })
+
+  const telefones = [...clientesMap.values()].map((c) => c?.telefone).filter(Boolean)
+  if (telefones.length > 0) {
+    const { data: optOutByTel } = await supabase
+      .from('contato_opt_out')
+      .select('telefone')
+      .eq('company_id', company_id)
+      .in('telefone', telefones)
+    const optOutTelefones = new Set((optOutByTel || []).map((r) => String(r.telefone || '')))
+    for (const [cid, cl] of clientesMap) {
+      if (cl?.telefone && optOutTelefones.has(String(cl.telefone))) optOutClienteIds.add(cid)
+    }
   }
-  return validos
+
+  const { data: optIns } = await supabase
+    .from('contato_opt_in')
+    .select('cliente_id')
+    .eq('company_id', company_id)
+    .in('cliente_id', idsUniq)
+    .eq('ativo', true)
+  const optInIds = new Set((optIns || []).map((r) => Number(r.cliente_id)))
+
+  return idsUniq.filter((cid) => {
+    if (!clientesMap.has(Number(cid))) return false
+    if (optOutClienteIds.has(Number(cid))) return false
+    if (!optInIds.has(Number(cid))) return false
+    return true
+  })
 }
 
 /**

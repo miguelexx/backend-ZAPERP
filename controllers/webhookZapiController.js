@@ -1621,10 +1621,21 @@ exports.receberZapi = async (req, res) => {
         phoneParaChatbot = null
       }
     }
+    // Human takeover: não processar chatbot se atendente já assumiu a conversa
+    let atendente_id = null
     if (!fromMe && !isGroup && departamento_id == null && phoneParaChatbot) {
+      const { data: convEstado } = await supabase
+        .from('conversas')
+        .select('atendente_id')
+        .eq('id', conversa_id)
+        .eq('company_id', company_id)
+        .maybeSingle()
+      atendente_id = convEstado?.atendente_id ?? null
+    }
+    if (!fromMe && !isGroup && departamento_id == null && atendente_id == null && phoneParaChatbot) {
       try {
         const sendMessage = async (ph, msg, o = {}) => {
-          const r = await zapiProvider.sendText(ph, msg, { companyId: company_id, ...o })
+          const r = await zapiProvider.sendText(ph, msg, { companyId: company_id, conversaId: conversa_id, ...o })
           return { ok: !!r?.ok, messageId: r?.messageId || null }
         }
         let skipChatbot = false
@@ -2030,15 +2041,19 @@ exports.receberZapi = async (req, res) => {
             if (ex) {
               remetenteNomeFinal = ex.nome || ex.pushname || remetenteNomeFinal
             } else {
-              // se não existe no banco, cria "contato mínimo" (sem conversa) para poder exibir nome depois
+              // se não existe no banco, usa getOrCreateCliente para evitar duplicata (mesmo contato 12 vs 13 dígitos)
               if (pNorm) {
                 const nomeMin = senderName ? String(senderName).trim() : pNorm
-                const ins = await supabase.from('clientes').insert({ company_id, telefone: pNorm, nome: nomeMin }).select('id').maybeSingle()
-                if (ins?.data?.id) {
+                const { cliente_id: cidGrupo } = await getOrCreateCliente(supabase, company_id, pNorm, {
+                  nome: nomeMin,
+                  nomeSource: 'grupo_sender',
+                  pushname: senderName ? String(senderName).trim() : undefined,
+                })
+                if (cidGrupo) {
                   // sync em background (nome/foto reais) — chooseBestName evita regressão
                   setImmediate(async () => {
                     try {
-                      const { data: current } = await supabase.from('clientes').select('nome, pushname, foto_perfil').eq('id', ins.data.id).maybeSingle()
+                      const { data: current } = await supabase.from('clientes').select('nome, pushname, foto_perfil').eq('id', cidGrupo).maybeSingle()
                       const sync = await syncContactFromZapi(pNorm, company_id).catch(() => null)
                       if (!sync) return
                       const up = {}
@@ -2047,7 +2062,7 @@ exports.receberZapi = async (req, res) => {
                       if (bestNome && bestNome !== (current?.nome || '')) up.nome = bestNome
                       if (!current?.pushname && sync.pushname) up.pushname = sync.pushname
                       if (!current?.foto_perfil && sync.foto_perfil) up.foto_perfil = sync.foto_perfil
-                      if (Object.keys(up).length > 0) await supabase.from('clientes').update(up).eq('id', ins.data.id)
+                      if (Object.keys(up).length > 0) await supabase.from('clientes').update(up).eq('id', cidGrupo)
                     } catch (_) {}
                   })
                 }
@@ -2621,20 +2636,12 @@ exports.connectionZapi = async (req, res) => {
                   if (!upd.error) atualizados++
                 }
               } else {
-                let ins = await supabase.from('clientes').insert({
-                  company_id,
-                  telefone: phone,
+                const { cliente_id: cid } = await getOrCreateCliente(supabase, company_id, phone, {
                   nome: nomeFinal || phone,
+                  nomeSource: 'syncZapi',
                   pushname: pushname || undefined
                 })
-                if (ins.error && String(ins.error.message || '').includes('pushname')) {
-                  ins = await supabase.from('clientes').insert({
-                    company_id,
-                    telefone: phone,
-                    nome: nomeFinal || phone
-                  })
-                }
-                if (!ins.error) criados++
+                if (cid) criados++
               }
             }
 

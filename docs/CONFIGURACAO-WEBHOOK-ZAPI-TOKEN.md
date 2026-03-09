@@ -28,6 +28,13 @@ ZAPI_WEBHOOK_TOKEN=seu_token_secreto_aqui
 2. **Header:** `X-Webhook-Token: xxx`
 3. **Header:** `Authorization: Bearer xxx`
 
+## Atenção para instâncias já configuradas
+
+Se a Z-API já estava configurada **antes** desta alteração, a URL do webhook **não** incluía o token. O webhook passará a rejeitar com 401 até que você:
+
+1. Adicione `?token=VALOR_DO_ZAPI_WEBHOOK_TOKEN` à URL no painel Z-API
+2. Ou configure o header `X-Webhook-Token` (se a Z-API suportar headers customizados)
+
 ## Validação
 
 - Token ausente → 401 "Token do webhook ausente"

@@ -141,7 +141,7 @@ exports.deleteEmpresasWhatsapp = async (req, res) => {
   }
 }
 
-/** GET /config/auditoria — logs de atendimentos + historico */
+/** GET /config/auditoria — logs de atendimentos + historico + auditoria_log (campanhas, permissões) */
 exports.getAuditoria = async (req, res) => {
   try {
     const { company_id } = req.user
@@ -153,6 +153,17 @@ exports.getAuditoria = async (req, res) => {
       .eq('company_id', company_id)
       .order('criado_em', { ascending: false })
       .limit(limit)
+
+    let auditoriaLog = []
+    try {
+      const { data: al } = await supabase
+        .from('auditoria_log')
+        .select('id, acao, entidade, entidade_id, detalhes_json, criado_em, usuario_id')
+        .eq('company_id', company_id)
+        .order('criado_em', { ascending: false })
+        .limit(limit)
+      auditoriaLog = al || []
+    } catch (_) {}
 
     const { data: convIds } = await supabase.from('conversas').select('id').eq('company_id', company_id)
     const ids = (convIds || []).map(c => c.id)
@@ -170,6 +181,7 @@ exports.getAuditoria = async (req, res) => {
     const userIds = new Set()
     ;(atend || []).forEach(a => { if (a.de_usuario_id) userIds.add(a.de_usuario_id); if (a.para_usuario_id) userIds.add(a.para_usuario_id) })
     ;(hist || []).forEach(h => { if (h.usuario_id) userIds.add(h.usuario_id) })
+    ;(auditoriaLog || []).forEach(a => { if (a.usuario_id) userIds.add(a.usuario_id) })
 
     let userMap = {}
     if (userIds.size > 0) {
@@ -183,7 +195,8 @@ exports.getAuditoria = async (req, res) => {
 
     const items = [
       ...(atend || []).map(a => ({ tipo: 'atendimento', ...a, usuario_nome: userMap[a.de_usuario_id], para_nome: userMap[a.para_usuario_id] })),
-      ...(hist || []).map(h => ({ tipo: 'historico', ...h, usuario_nome: userMap[h.usuario_id] }))
+      ...(hist || []).map(h => ({ tipo: 'historico', ...h, usuario_nome: userMap[h.usuario_id] })),
+      ...(auditoriaLog || []).map(a => ({ tipo: 'auditoria_log', ...a, usuario_nome: userMap[a.usuario_id] })),
     ].sort((a, b) => new Date(b.criado_em) - new Date(a.criado_em)).slice(0, limit)
 
     return res.json(items)

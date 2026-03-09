@@ -12,6 +12,7 @@
 const { normalizePhoneBR, toZapiSendFormat, possiblePhonesBR } = require('../../helpers/phoneHelper')
 const { getEmpresaZapiConfig } = require('../zapiIntegrationService')
 const { fetchWithRetry } = require('../../helpers/retryWithBackoff')
+const { permitirEnvio } = require('../protecao/protecaoOrchestrator')
 
 const ZAPI_BASE_URL = (process.env.ZAPI_BASE_URL || 'https://api.z-api.io').replace(/\/$/, '')
 const ZAPI_INSTANCE_ID = process.env.ZAPI_INSTANCE_ID || ''
@@ -211,6 +212,17 @@ function phoneCandidatesForLookup(phone) {
  * @returns {Promise<{ ok: boolean, messageId: string|null }>}
  */
 async function sendText(phone, message, opts = {}) {
+  const companyId = opts?.companyId ?? opts?.company_id
+  const protecao = await permitirEnvio({
+    company_id: companyId,
+    conversa_id: opts?.conversaId ?? opts?.conversa_id,
+    cliente_id: opts?.clienteId ?? opts?.cliente_id,
+    requireOptIn: opts?.requireOptIn || false,
+  })
+  if (!protecao.allow) {
+    console.warn('[ZAPI] sendText bloqueado por proteção:', protecao.reason || 'proteção')
+    return { ok: false, messageId: null, blockedBy: protecao.reason }
+  }
   const cfg = await resolveConfig(opts)
   if (!cfg) {
     const cid = opts?.companyId ?? opts?.company_id
@@ -268,6 +280,14 @@ async function sendText(phone, message, opts = {}) {
  * @param {{ companyId?: number }} [opts]
  */
 async function sendLink(phone, payload, opts = {}) {
+  const protecao = await permitirEnvio({
+    company_id: opts?.companyId ?? opts?.company_id,
+    conversa_id: opts?.conversaId ?? opts?.conversa_id,
+  })
+  if (!protecao.allow) {
+    console.warn('[ZAPI] sendLink bloqueado por proteção:', protecao.reason || 'proteção')
+    return { ok: false, messageId: null, blockedBy: protecao.reason }
+  }
   const cfg = await resolveConfig(opts)
   if (!cfg) return { ok: false, messageId: null }
   const nums = await phoneCandidatesForSendAsync(phone, cfg)
@@ -334,6 +354,14 @@ async function sendLink(phone, payload, opts = {}) {
  * @param {{ companyId?: number }} [opts]
  */
 async function sendImage(phone, url, caption = '', opts = {}) {
+  const protecao = await permitirEnvio({
+    company_id: opts?.companyId ?? opts?.company_id,
+    conversa_id: opts?.conversaId ?? opts?.conversa_id,
+  })
+  if (!protecao.allow) {
+    console.warn('[ZAPI] sendImage bloqueado por proteção:', protecao.reason || 'proteção')
+    return false
+  }
   const cfg = await resolveConfig(opts)
   if (!cfg) return false
   try {
@@ -366,6 +394,14 @@ async function sendImage(phone, url, caption = '', opts = {}) {
  * @param {{ companyId?: number }} [opts]
  */
 async function sendAudio(phone, audioUrl, opts = {}) {
+  const protecao = await permitirEnvio({
+    company_id: opts?.companyId ?? opts?.company_id,
+    conversa_id: opts?.conversaId ?? opts?.conversa_id,
+  })
+  if (!protecao.allow) {
+    console.warn('[ZAPI] sendAudio bloqueado por proteção:', protecao.reason || 'proteção')
+    return false
+  }
   const cfg = await resolveConfig(opts)
   if (!cfg) return false
   try {
@@ -394,6 +430,14 @@ async function sendAudio(phone, audioUrl, opts = {}) {
  * @param {{ companyId?: number }} [opts]
  */
 async function sendFile(phone, url, fileName = '', opts = {}) {
+  const protecao = await permitirEnvio({
+    company_id: opts?.companyId ?? opts?.company_id,
+    conversa_id: opts?.conversaId ?? opts?.conversa_id,
+  })
+  if (!protecao.allow) {
+    console.warn('[ZAPI] sendFile bloqueado por proteção:', protecao.reason || 'proteção')
+    return false
+  }
   const cfg = await resolveConfig(opts)
   if (!cfg) return false
   const nums = await phoneCandidatesForSendAsync(phone, cfg)
@@ -431,6 +475,14 @@ async function sendFile(phone, url, fileName = '', opts = {}) {
  * @returns {Promise<boolean>}
  */
 async function sendSticker(phone, sticker, opts = {}) {
+  const protecao = await permitirEnvio({
+    company_id: opts?.companyId ?? opts?.company_id,
+    conversa_id: opts?.conversaId ?? opts?.conversa_id,
+  })
+  if (!protecao.allow) {
+    console.warn('[ZAPI] sendSticker bloqueado por proteção:', protecao.reason || 'proteção')
+    return false
+  }
   const cfg = await resolveConfig(opts)
   if (!cfg) return false
   try {
@@ -572,6 +624,14 @@ async function getContactMetadata(phone, opts = {}) {
  * @returns {Promise<boolean>}
  */
 async function sendVideo(phone, videoUrl, caption = '', opts = {}) {
+  const protecao = await permitirEnvio({
+    company_id: opts?.companyId ?? opts?.company_id,
+    conversa_id: opts?.conversaId ?? opts?.conversa_id,
+  })
+  if (!protecao.allow) {
+    console.warn('[ZAPI] sendVideo bloqueado por proteção:', protecao.reason || 'proteção')
+    return false
+  }
   const cfg = await resolveConfig(opts)
   if (!cfg) return false
   try {
@@ -665,6 +725,14 @@ async function removeReaction(phone, messageId, opts = {}) {
  * @returns {Promise<{ ok: boolean, messageId: string|null }>}
  */
 async function sendContact(phone, contactName, contactPhone, opts = {}) {
+  const protecao = await permitirEnvio({
+    company_id: opts?.companyId ?? opts?.company_id,
+    conversa_id: opts?.conversaId ?? opts?.conversa_id,
+  })
+  if (!protecao.allow) {
+    console.warn('[ZAPI] sendContact bloqueado por proteção:', protecao.reason || 'proteção')
+    return { ok: false, messageId: null }
+  }
   const cfg = await resolveConfig(opts)
   if (!cfg) return { ok: false, messageId: null }
   try {
@@ -723,6 +791,14 @@ async function sendContact(phone, contactName, contactPhone, opts = {}) {
  * @returns {Promise<{ ok: boolean, messageId: string|null }>}
  */
 async function sendCall(phone, callDuration, opts = {}) {
+  const protecao = await permitirEnvio({
+    company_id: opts?.companyId ?? opts?.company_id,
+    conversa_id: opts?.conversaId ?? opts?.conversa_id,
+  })
+  if (!protecao.allow) {
+    console.warn('[ZAPI] sendCall bloqueado por proteção:', protecao.reason || 'proteção')
+    return { ok: false, messageId: null }
+  }
   const cfg = await resolveConfig(opts)
   if (!cfg) return { ok: false, messageId: null }
   try {
