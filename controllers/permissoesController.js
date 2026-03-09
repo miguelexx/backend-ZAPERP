@@ -11,6 +11,7 @@ const {
   salvarPermissoesUsuario
 } = require('../helpers/permissoesService')
 const supabase = require('../config/supabase')
+const { registrar: registrarAuditoria } = require('../helpers/auditoriaLog')
 
 /** GET /config/permissoes/catalogo — lista todas as permissões agrupadas por categoria */
 exports.getCatalogo = async (req, res) => {
@@ -89,6 +90,15 @@ exports.putPermissoesUsuario = async (req, res) => {
 
     const result = await salvarPermissoesUsuario(tid, company_id, permissoes)
     if (result.error) return res.status(500).json({ error: result.error })
+
+    await registrarAuditoria({
+      company_id,
+      usuario_id: req.user?.id,
+      acao: 'permissoes_alterar',
+      entidade: 'usuario',
+      entidade_id: tid,
+      detalhes_json: { permissoes_alteradas: Object.keys(permissoes || {}) },
+    })
 
     const efetivas = await getPermissoesEfetivasUsuario(tid, company_id, usuario.perfil || 'atendente')
     return res.json({ ok: true, permissoes: efetivas })

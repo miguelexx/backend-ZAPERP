@@ -143,8 +143,10 @@ app.use(
   })
 )
 
-// Health check
-app.get('/health', (req, res) => res.json({ ok: true }))
+// Health check: básico (LB) e detalhado (Supabase)
+const healthController = require('./controllers/healthController')
+app.get('/health', healthController.basic)
+app.get('/health/detailed', healthController.detailed)
 
 // Página de Permissões (admin) — HTML standalone que consome as APIs
 // Permite iframe same-origin para embed na aba Configurações → Permissões
@@ -270,6 +272,9 @@ if (hasFrontendDist) {
     '/usuarios',
     '/chats',
     '/tags',
+    '/campanhas',
+    '/opt-in',
+    '/opt-out',
   ]
 
   app.get('*', (req, res, next) => {

@@ -5,6 +5,7 @@
 
 const campanhaService = require('../services/campanhaService')
 const { isEnabled, FLAGS } = require('../helpers/featureFlags')
+const { registrar: registrarAuditoria } = require('../helpers/auditoriaLog')
 
 function getCompanyId(req) {
   return req.user?.company_id
@@ -56,6 +57,14 @@ exports.criar = async (req, res) => {
     const company_id = getCompanyId(req)
     if (!company_id) return res.status(401).json({ error: 'Não autorizado' })
     const campanha = await campanhaService.criar(company_id, req.body)
+    await registrarAuditoria({
+      company_id,
+      usuario_id: req.user?.id,
+      acao: 'campanha_criar',
+      entidade: 'campanha',
+      entidade_id: campanha?.id,
+      detalhes_json: { nome: campanha?.nome, status: campanha?.status },
+    })
     return res.status(201).json(campanha)
   } catch (e) {
     console.error('[campanhaController] criar:', e)
@@ -86,6 +95,14 @@ exports.excluir = async (req, res) => {
     const company_id = getCompanyId(req)
     if (!company_id) return res.status(401).json({ error: 'Não autorizado' })
     await campanhaService.excluir(company_id, req.params.id)
+    await registrarAuditoria({
+      company_id,
+      usuario_id: req.user?.id,
+      acao: 'campanha_excluir',
+      entidade: 'campanha',
+      entidade_id: Number(req.params.id),
+      detalhes_json: {},
+    })
     return res.json({ ok: true })
   } catch (e) {
     console.error('[campanhaController] excluir:', e)

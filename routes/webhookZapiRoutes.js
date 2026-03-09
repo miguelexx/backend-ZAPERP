@@ -4,7 +4,7 @@
  * Endpoint principal: POST /webhooks/zapi — aceita QUALQUER evento e roteia por payload.type.
  * Aliases (compatibilidade com painel): /connection, /status, /presence, /disconnected.
  *
- * Segurança: POST /webhooks/zapi* NÃO exige token. Validação via instanceId + empresa_zapi.
+ * Segurança: POST /webhooks/zapi exige ZAPI_WEBHOOK_TOKEN (header X-Webhook-Token ou ?token=).
  * GET /debug exige token. Rate-limit por IP (60 req/min). Mapeamento case-insensitive.
  */
 
@@ -40,9 +40,9 @@ router.get('/health', webhookZapiController.healthZapi)
 router.get('/', webhookZapiController.testarZapi)
 router.get('/debug', requireWebhookToken, webhookZapiController.debugZapi)
 
-// Stack: resolve instanceId→company_id (sem token obrigatório) -> handler unificado
-// Segurança: instanceId obrigatório; mapeamento empresa_zapi; rate-limit por IP (app.js)
-const webhookStack = [resolveWebhookZapi, webhookZapiController.handleWebhookZapi]
+// Stack: token obrigatório -> resolve instanceId→company_id -> handler unificado
+// Segurança: ZAPI_WEBHOOK_TOKEN em header/query; instanceId; rate-limit por IP (app.js)
+const webhookStack = [requireWebhookToken, resolveWebhookZapi, webhookZapiController.handleWebhookZapi]
 
 router.post('/', webhookStack)
 router.post('/connection', webhookStack)

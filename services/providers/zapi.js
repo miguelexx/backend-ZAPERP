@@ -11,6 +11,7 @@
 
 const { normalizePhoneBR, toZapiSendFormat, possiblePhonesBR } = require('../../helpers/phoneHelper')
 const { getEmpresaZapiConfig } = require('../zapiIntegrationService')
+const { fetchWithRetry } = require('../../helpers/retryWithBackoff')
 
 const ZAPI_BASE_URL = (process.env.ZAPI_BASE_URL || 'https://api.z-api.io').replace(/\/$/, '')
 const ZAPI_INSTANCE_ID = process.env.ZAPI_INSTANCE_ID || ''
@@ -157,7 +158,7 @@ async function postJsonWithCandidates({ basePath, headers, endpoint, phoneCandid
   const h = headers || {}
   for (const num of phoneCandidates) {
     try {
-      const res = await fetch(`${basePath}${endpoint}`, {
+      const res = await fetchWithRetry(`${basePath}${endpoint}`, {
         method: 'POST',
         headers: h,
         body: JSON.stringify(buildBody(num))
@@ -227,7 +228,7 @@ async function sendText(phone, message, opts = {}) {
       // reply nativo WhatsApp: Z-API aceita "replyMessageId" no corpo
       if (replyMessageId) body.replyMessageId = replyMessageId
 
-      const res = await fetch(`${cfg.basePath}/send-text`, {
+      const res = await fetchWithRetry(`${cfg.basePath}/send-text`, {
         method: 'POST',
         headers: cfg.headers,
         body: JSON.stringify(body)
@@ -293,7 +294,7 @@ async function sendLink(phone, payload, opts = {}) {
       }
       if (!image) delete body.image
 
-      const res = await fetch(`${cfg.basePath}/send-link`, {
+      const res = await fetchWithRetry(`${cfg.basePath}/send-link`, {
         method: 'POST',
         headers: cfg.headers,
         body: JSON.stringify(body),
@@ -681,7 +682,7 @@ async function sendContact(phone, contactName, contactPhone, opts = {}) {
       }
       if (replyMessageId) body.messageId = replyMessageId
 
-      const res = await fetch(`${cfg.basePath}/send-contact`, {
+      const res = await fetchWithRetry(`${cfg.basePath}/send-contact`, {
         method: 'POST',
         headers: cfg.headers,
         body: JSON.stringify(body),
@@ -734,7 +735,7 @@ async function sendCall(phone, callDuration, opts = {}) {
       const body = { phone: num }
       if (safeDur != null) body.callDuration = safeDur
 
-      const res = await fetch(`${cfg.basePath}/send-call`, {
+      const res = await fetchWithRetry(`${cfg.basePath}/send-call`, {
         method: 'POST',
         headers: cfg.headers,
         body: JSON.stringify(body),
