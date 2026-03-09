@@ -23,7 +23,7 @@ const DEFAULT_CHATBOT_CONFIG = {
   fallbackToAI: false,
   businessHoursOnly: false,
   transferMode: 'departamento',
-  tipo_distribuicao: 'round_robin', // round_robin | menor_carga
+  tipo_distribuicao: 'fila', // fila = primeiro a assumir | round_robin | menor_carga
   reopenMenuCommand: '0',
   options: [],
 }
@@ -38,8 +38,8 @@ function validateChatbotConfig(raw) {
   const opts = Array.isArray(raw.options) ? raw.options : []
   const activeOptions = opts.filter((o) => o && o.active !== false && o.departamento_id != null)
   if (activeOptions.length === 0 && raw.enabled) return null
-  const tipoDist = String(raw.tipo_distribuicao || 'round_robin').trim().toLowerCase()
-  const tipoDistribuicao = tipoDist === 'menor_carga' ? 'menor_carga' : 'round_robin'
+  const tipoDist = String(raw.tipo_distribuicao || 'fila').trim().toLowerCase()
+  const tipoDistribuicao = tipoDist === 'menor_carga' ? 'menor_carga' : (tipoDist === 'round_robin' ? 'round_robin' : 'fila')
 
   return {
     enabled: !!raw.enabled,
@@ -168,8 +168,10 @@ function findOptionByKey(config, texto) {
 }
 
 /**
- * Transfere conversa para o departamento: atualiza conversa e atribui a um usuário do setor.
- * Respeita round_robin ou menor_carga se configurado; senão deixa aberta para o departamento.
+ * Transfere conversa para o departamento: atualiza conversa e opcionalmente atribui a um usuário.
+ * tipo_distribuicao:
+ *   - 'fila': deixa aberta na fila — todos do setor veem, primeiro a clicar "Assumir" ganha
+ *   - 'round_robin' | 'menor_carga': atribui automaticamente a um usuário do setor
  */
 async function transferToDepartment(supabaseClient, company_id, conversa_id, departamento_id, config = {}) {
   const depId = Number(departamento_id)
@@ -185,6 +187,7 @@ async function transferToDepartment(supabaseClient, company_id, conversa_id, dep
   if (!dep) return { ok: false }
 
   const transferMode = config.transferMode || 'departamento'
+  const tipoDistribuicao = config.tipo_distribuicao || 'fila'
 
   const updatePayload = {
     departamento_id: depId,
@@ -193,7 +196,8 @@ async function transferToDepartment(supabaseClient, company_id, conversa_id, dep
     ultima_atividade: new Date().toISOString(),
   }
 
-  if (transferMode === 'departamento') {
+  // 'fila': não atribui — conversa fica aberta para todos do setor; primeiro a assumir ganha
+  if (transferMode === 'departamento' && tipoDistribuicao !== 'fila') {
     const { data: usuarios } = await supabaseClient
       .from('usuarios')
       .select('id')
@@ -204,7 +208,6 @@ async function transferToDepartment(supabaseClient, company_id, conversa_id, dep
 
     const userIds = (usuarios || []).map((u) => u.id).filter(Boolean)
     if (userIds.length > 0) {
-      const tipoDistribuicao = config.tipo_distribuicao || 'round_robin'
       let escolhido = null
       if (tipoDistribuicao === 'menor_carga') {
         const { data: cargas } = await supabaseClient

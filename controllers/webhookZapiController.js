@@ -2197,7 +2197,7 @@ exports.receberZapi = async (req, res) => {
       // Sempre incluir nome quando disponível (cache ou cliente) — evita frontend sobrescrever com vazio
       const { data: convRow } = await supabase
         .from('conversas')
-        .select('id, ultima_atividade, nome_contato_cache, foto_perfil_contato_cache, telefone, cliente_id')
+        .select('id, ultima_atividade, nome_contato_cache, foto_perfil_contato_cache, telefone, cliente_id, departamento_id')
         .eq('id', convIdForEmit)
         .eq('company_id', company_id)
         .maybeSingle()
@@ -2213,18 +2213,20 @@ exports.receberZapi = async (req, res) => {
         if (cli && !contatoNome) contatoNome = (cli.nome || cli.pushname || '').trim() || null
         if (cli?.foto_perfil && !fotoPerfil) fotoPerfil = String(cli.foto_perfil).trim()
       }
+      const depId = departamento_id ?? convRow?.departamento_id ?? null
       const convPayload = {
         id: convIdForEmit,
         ultima_atividade: convRow?.ultima_atividade ?? new Date().toISOString(),
         telefone: convRow?.telefone ?? null,
+        ...(depId != null ? { departamento_id: depId } : {}),
         ...(contatoNome ? { nome_contato_cache: contatoNome, contato_nome: contatoNome } : {}),
         ...(fotoPerfil ? { foto_perfil_contato_cache: fotoPerfil, foto_perfil: fotoPerfil } : {}),
         ...(mensagemFoiInseridaPeloWebhook && !fromMe ? { tem_novas_mensagens: true, lida: false } : {})
       }
       io.to(`empresa_${company_id}`).emit('conversa_atualizada', convPayload)
-      if (departamento_id != null) {
-        io.to(`departamento_${departamento_id}`).emit('atualizar_conversa', { id: convIdForEmit })
-        io.to(`departamento_${departamento_id}`).emit('conversa_atualizada', convPayload)
+      if (depId != null) {
+        io.to(`departamento_${depId}`).emit('atualizar_conversa', { id: convIdForEmit })
+        io.to(`departamento_${depId}`).emit('conversa_atualizada', convPayload)
       }
     }
 

@@ -21,7 +21,7 @@
 | fallbackToAI | ✅ | Boolean (estrutura pronta) |
 | businessHoursOnly | ✅ | Boolean (estrutura pronta) |
 | transferMode | ✅ | String ('departamento') |
-| tipo_distribuicao | ✅ | String ('round_robin' \| 'menor_carga') |
+| tipo_distribuicao | ✅ | String ('fila' \| 'round_robin' \| 'menor_carga') — fila = primeiro a assumir |
 | reopenMenuCommand | ✅ | String (ex: "0") |
 | options | ✅ | Array |
 | options[].key | ✅ | String (ex: "1", "2") |
@@ -63,7 +63,7 @@
 | Respeitar company_id | ✅ | Todas as queries filtram por `company_id` |
 | Apenas usuários ativos | ✅ | `.eq('ativo', true)` |
 | Registrar em log | ✅ | `logBotAction('opcao_valida', {...})` |
-| Distribuição | ✅ | round_robin ou menor_carga |
+| Distribuição | ✅ | fila (primeiro a assumir), round_robin ou menor_carga |
 
 **Arquivo:** `services/chatbotTriageService.js` — `transferToDepartment`
 

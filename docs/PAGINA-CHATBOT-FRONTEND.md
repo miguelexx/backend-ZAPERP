@@ -192,6 +192,7 @@ Cada linha é uma **escolha** que você configura na tabela:
 | Mensagem de confirmação | Textarea | `confirmSelectionMessage` — use `{{departamento}}` para o nome do setor |
 | Comando para ver o menu de novo | Input | `reopenMenuCommand` (ex: "0") |
 | Enviar menu só na primeira vez | Checkbox | `sendOnlyFirstTime` |
+| Distribuição | Select | `tipo_distribuicao`: `fila` (primeiro a assumir), `round_robin`, `menor_carga` |
 | Tabela de escolhas | Dinâmica | key, label, departamento_id, active |
 | Botão Salvar | Button | PUT /api/ia/config |
 | Área de logs | Lista | GET /api/ia/logs |
