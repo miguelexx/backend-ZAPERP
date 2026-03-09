@@ -11,13 +11,17 @@ const supabase = require('../config/supabase')
 const { getProvider } = require('../services/providers')
 const zapiProvider = require('../services/providers/zapi')
 const { syncContactFromZapi } = require('../services/zapiSyncContact')
-const { getCompanyIdByInstanceId } = require('../services/zapiIntegrationService')
+const { getCompanyIdByInstanceId, getStatus } = require('../services/zapiIntegrationService')
+const { resetOnConnected } = require('../services/zapiConnectGuardService')
 const { normalizePhoneBR, possiblePhonesBR, normalizeGroupIdForStorage } = require('../helpers/phoneHelper')
 const { getCanonicalPhone, getOrCreateCliente, findOrCreateConversation, mergeConversasIntoCanonico, mergeConversationLidToPhone } = require('../helpers/conversationSync')
 const { chooseBestName } = require('../helpers/contactEnrichment')
 const { resolvePeerPhone } = require('../helpers/conversationKeyHelper')
 const { incrementarUnreadParaConversa } = require('./chatController')
 const { processIncomingMessage: processChatbotTriage } = require('../services/chatbotTriageService')
+const { processarOptOut } = require('../services/optOutService')
+const { processarRegras } = require('../services/regrasAutomaticasService')
+const { isEnabled, FLAGS } = require('../helpers/featureFlags')
 
 // company_id NUNCA mais via ENV — resolvido por instanceId do payload em cada webhook
 const WHATSAPP_DEBUG = String(process.env.WHATSAPP_DEBUG || '').toLowerCase() === 'true'
@@ -1619,23 +1623,55 @@ exports.receberZapi = async (req, res) => {
     }
     if (!fromMe && !isGroup && departamento_id == null && phoneParaChatbot) {
       try {
-        console.log('[Z-API] 🤖 Chatbot: processando mensagem', { company_id, conversa_id, phoneTail: String(phoneParaChatbot).slice(-8) })
         const sendMessage = async (ph, msg, o = {}) => {
           const r = await zapiProvider.sendText(ph, msg, { companyId: company_id, ...o })
           return { ok: !!r?.ok, messageId: r?.messageId || null }
         }
-        const result = await processChatbotTriage({
-          company_id,
-          conversa_id,
-          telefone: phoneParaChatbot,
-          texto: texto || '',
-          supabase,
-          sendMessage,
-          opts: { companyId: company_id },
-        })
-        if (result?.handled && result?.departamento_id != null) {
-          departamento_id = result.departamento_id
-          console.log('[Z-API] 🤖 Chatbot: conversa direcionada para departamento', departamento_id)
+        let skipChatbot = false
+
+        // Opt-out (complementar): PARAR, SAIR, DESCADASTRAR — antes do chatbot
+        if (isEnabled(FLAGS.FEATURE_OPT_OUT_WEBHOOK)) {
+          const optResult = await processarOptOut({
+            supabase,
+            company_id,
+            cliente_id: cliente_id || null,
+            telefone: phoneParaChatbot,
+            texto: texto || '',
+          })
+          if (optResult.isOptOut && optResult.mensagemConfirmacao) {
+            await sendMessage(phoneParaChatbot, optResult.mensagemConfirmacao, {})
+            skipChatbot = true
+          }
+        }
+
+        // Regras automáticas (complementar): palavra-chave → resposta — antes do chatbot
+        if (!skipChatbot && isEnabled(FLAGS.FEATURE_REGRA_AUTO_WEBHOOK)) {
+          const regrasResult = await processarRegras({
+            supabase,
+            company_id,
+            conversa_id,
+            texto: texto || '',
+            telefone: phoneParaChatbot,
+            sendMessage,
+          })
+          if (regrasResult.matched) skipChatbot = true
+        }
+
+        if (!skipChatbot) {
+          console.log('[Z-API] 🤖 Chatbot: processando mensagem', { company_id, conversa_id, phoneTail: String(phoneParaChatbot).slice(-8) })
+          const result = await processChatbotTriage({
+            company_id,
+            conversa_id,
+            telefone: phoneParaChatbot,
+            texto: texto || '',
+            supabase,
+            sendMessage,
+            opts: { companyId: company_id },
+          })
+          if (result?.handled && result?.departamento_id != null) {
+            departamento_id = result.departamento_id
+            console.log('[Z-API] 🤖 Chatbot: conversa direcionada para departamento', departamento_id)
+          }
         }
       } catch (errChatbot) {
         console.warn('[Z-API] Chatbot triagem:', errChatbot?.message || errChatbot)
@@ -2466,12 +2502,19 @@ exports.connectionZapi = async (req, res) => {
     const type = String(payload?.type ?? payload?.event ?? payload?.status ?? '').toLowerCase()
     const connected = payload?.connected === true || type.includes('connected')
 
+    if (connected && company_id) {
+      await resetOnConnected(company_id)
+    }
+
     // Ao conectar: dispara sync em background (espelho do WhatsApp: nomes + (se possível) fotos)
     if (connected) {
       setImmediate(async () => {
         const io = req.app.get('io')
         const provider = getProvider()
         if (!provider || !provider.isConfigured) return
+
+        // Aguarda instância Z-API estabilizar (evita "You need to be connected" em massa)
+        await new Promise(r => setTimeout(r, 10000))
 
         // ─── Auto-configuração dos webhooks Z-API ───
         // Registra automaticamente as URLs de callback (mensagens + status) na instância Z-API.
@@ -2602,35 +2645,45 @@ exports.connectionZapi = async (req, res) => {
           console.log('✅ Z-API sync de contatos finalizado:', { total, criados, atualizados })
 
           // Fotos: tenta completar para os que estão sem foto (limitado para não travar o webhook)
+          // Só executa se Z-API estiver realmente conectada (evita centenas de 400 "not connected")
           if (provider.getProfilePicture) {
-            const { data: semFoto } = await supabase
-              .from('clientes')
-              .select('id, telefone')
-              .eq('company_id', company_id)
-              .or('foto_perfil.is.null,foto_perfil.eq.')
-              .limit(150)
+            const statusResult = await getStatus(company_id)
+            if (!statusResult?.connected) {
+              console.warn('⏭️ Z-API: pulando sync de fotos (instância ainda não conectada). Use Configurações > Sincronizar fotos depois.')
+            } else {
+              const { data: semFoto } = await supabase
+                .from('clientes')
+                .select('id, telefone')
+                .eq('company_id', company_id)
+                .or('foto_perfil.is.null,foto_perfil.eq.')
+                .limit(150)
 
-            const list = Array.isArray(semFoto) ? semFoto : []
-            fotosAtualizadas = 0
-            for (const cl of list) {
-              const tel = String(cl.telefone || '').trim()
-              if (!tel) continue
-              try {
-                const url = await provider.getProfilePicture(tel, { companyId: company_id })
-                if (url && String(url).trim().startsWith('http')) {
-                  const { error: updErr } = await supabase
-                    .from('clientes')
-                    .update({ foto_perfil: String(url).trim() })
-                    .eq('id', cl.id)
-                    .eq('company_id', company_id)
-                  if (!updErr) fotosAtualizadas++
+              const list = Array.isArray(semFoto) ? semFoto : []
+              fotosAtualizadas = 0
+              for (const cl of list) {
+                const tel = String(cl.telefone || '').trim()
+                if (!tel) continue
+                try {
+                  const url = await provider.getProfilePicture(tel, { companyId: company_id })
+                  if (url && String(url).trim().startsWith('http')) {
+                    const { error: updErr } = await supabase
+                      .from('clientes')
+                      .update({ foto_perfil: String(url).trim() })
+                      .eq('id', cl.id)
+                      .eq('company_id', company_id)
+                    if (!updErr) fotosAtualizadas++
+                  }
+                } catch (e) {
+                  if (e?.code === 'ZAPI_NOT_CONNECTED') {
+                    console.warn('⏭️ Z-API: sync de fotos interrompido (instância desconectada). Use Configurações > Sincronizar fotos quando estiver conectado.')
+                    break
+                  }
+                  // ignora outros (pode estar sem foto/privacidade)
                 }
-              } catch (_) {
-                // ignora (pode estar sem foto/privacidade)
+                await new Promise(r => setTimeout(r, 220))
               }
-              await new Promise(r => setTimeout(r, 220))
+              if (fotosAtualizadas > 0) console.log('🖼️ Z-API: fotos atualizadas (parcial):', fotosAtualizadas)
             }
-            if (fotosAtualizadas > 0) console.log('🖼️ Z-API: fotos atualizadas (parcial):', fotosAtualizadas)
           }
 
           // Notifica o front (Configurações → Clientes) para atualizar lista automaticamente

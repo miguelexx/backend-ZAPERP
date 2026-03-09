@@ -173,6 +173,8 @@ const configRoutes = require('./routes/configRoutes')
 const zapiIntegrationRoutes = require('./routes/zapiIntegrationRoutes')
 const clienteRoutes = require('./routes/clienteRoutes')
 const jobsRoutes = require('./routes/jobsRoutes')
+const campanhaRoutes = require('./routes/campanhaRoutes')
+const { optInRouter, optOutRouter } = require('./routes/optInOptOutRoutes')
 const { apiLimiter } = require('./middleware/rateLimit')
 const aiRoutes = require('./routes/aiRoutes')
 
@@ -187,6 +189,9 @@ app.use('/usuarios', userRoutes)
 app.use('/chats', chatRoutes)
 app.use('/tags', tagsRoutes)
 app.use('/ai', aiRoutes)
+app.use('/campanhas', campanhaRoutes)
+app.use('/opt-in', optInRouter)
+app.use('/opt-out', optOutRouter)
 
 // /api — prefixo opcional para SaaS; mantém compatibilidade com rotas antigas
 // Aplica apiLimiter globalmente para "rotas de API"
@@ -201,6 +206,9 @@ api.use('/clientes', clienteRoutes)
 api.use('/usuarios', userRoutes)
 api.use('/chats', chatRoutes)
 api.use('/tags', tagsRoutes)
+api.use('/campanhas', campanhaRoutes)
+api.use('/opt-in', optInRouter)
+api.use('/opt-out', optOutRouter)
 app.use('/api', apiLimiter, api)
 
 // =====================================================

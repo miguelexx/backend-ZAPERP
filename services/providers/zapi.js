@@ -509,6 +509,13 @@ async function getProfilePicture(phone, opts = {}) {
       if (!res.ok) {
         const errBody = await res.text().catch(() => '')
         logClientTokenHint(errBody)
+        // 400 "You need to be connected" → instância ainda não pronta; permite abortar batch no caller
+        if (res.status === 400 && String(errBody || '').toLowerCase().includes('you need to be connected')) {
+          const err = new Error('ZAPI_NOT_CONNECTED')
+          err.code = 'ZAPI_NOT_CONNECTED'
+          err.originalBody = errBody
+          throw err
+        }
         console.warn('❌ Z-API getProfilePicture falhou:', num?.slice(-6), res.status, String(errBody || '').slice(0, 200))
         continue
       }

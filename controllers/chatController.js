@@ -1,5 +1,6 @@
 const supabase = require('../config/supabase')
 const { getProvider } = require('../services/providers')
+const { getStatus } = require('../services/zapiIntegrationService')
 const { isGroupConversation } = require('../helpers/conversaHelper')
 const { normalizePhoneBR, possiblePhonesBR, phoneKeyBR } = require('../helpers/phoneHelper')
 const { deduplicateConversationsByContact, sortConversationsByRecent, getCanonicalPhone, getOrCreateCliente } = require('../helpers/conversationSync')
@@ -132,8 +133,11 @@ async function assertPermissaoConversa({ company_id, conversa_id, user_id, role,
 
 /**
  * Verifica se o usuário pode ENVIAR mensagens na conversa.
- * Regra: SOMENTE quem ASSUMIU a conversa (atendente_id === user_id) pode enviar.
- * Ninguém (nem admin) envia sem assumir — mantém o WhatsApp organizado.
+ * Regras (otimizado para chatbot + atendimento humano):
+ * - Quem ASSUMIU (atendente_id === user_id) pode enviar.
+ * - Conversa em fila (atendente_id === null): qualquer usuário autenticado da empresa pode enviar
+ *   — permite respostas via painel durante triagem, chatbots e fluxos automatizados antes de assumir.
+ * - Conversa assumida por OUTRO usuário: bloqueia (evita conflito entre atendentes).
  */
 async function assertPodeEnviarMensagem({ company_id, conversa_id, user_id }) {
   const { data: conv, error } = await supabase
@@ -146,6 +150,7 @@ async function assertPodeEnviarMensagem({ company_id, conversa_id, user_id }) {
   if (!conv) return { ok: false, status: 404, error: 'Conversa não encontrada' }
 
   if (conv.atendente_id != null && Number(conv.atendente_id) === Number(user_id)) return { ok: true }
+  if (conv.atendente_id == null) return { ok: true }
 
   return { ok: false, status: 403, error: 'Assuma a conversa antes de enviar mensagens. Clique em "Assumir" para continuar.' }
 }
@@ -1084,6 +1089,13 @@ exports.sincronizarFotosPerfilZapi = async (req, res) => {
     }
 
     const cid = Number(company_id)
+
+    const statusResult = await getStatus(cid)
+    if (!statusResult?.connected) {
+      return res.status(503).json({
+        error: 'Z-API não está conectada ao WhatsApp. Conecte o WhatsApp primeiro e tente novamente.'
+      })
+    }
     const limit = Math.min(3000, Math.max(1, Number(req.query.limit) || 2000))
     const delayMs = Math.min(1200, Math.max(0, Number(req.query.delay_ms) || 220))
 
@@ -1195,7 +1207,21 @@ exports.sincronizarFotosPerfilZapi = async (req, res) => {
             if (exemplosErros.length < 10) exemplosErros.push({ id: cl.id, telefone: phone.slice(-6), erro: upd.error.message })
           }
         }
-      } catch (_) {
+      } catch (e) {
+        if (e?.code === 'ZAPI_NOT_CONNECTED') {
+          console.warn('sincronizarFotosPerfilZapi: Z-API desconectou durante a sincronização')
+          return res.json({
+            ok: true,
+            total: clientes.length,
+            atualizados,
+            nome_atualizado: nomeAtualizado,
+            foto_atualizada: fotoAtualizada,
+            sem_foto: semFoto,
+            erros,
+            exemplos_erros: exemplosErros,
+            interrompido: 'Z-API desconectou durante a sincronização. Tente novamente quando estiver conectado.'
+          })
+        }
         erros++
         if (exemplosErros.length < 10) exemplosErros.push({ id: cl.id, telefone: phone.slice(-6), erro: 'exception' })
       }

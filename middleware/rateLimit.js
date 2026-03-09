@@ -21,12 +21,12 @@ const loginLimiter = limiter({
 
 const webhookLimiter = limiter({
   windowMs: 60 * 1000,
-  max: 60,
+  max: 200,
 })
 
 const apiLimiter = limiter({
   windowMs: 60 * 1000,
-  max: 120,
+  max: 300,
 })
 
 module.exports = { loginLimiter, webhookLimiter, apiLimiter }

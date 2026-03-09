@@ -1,4 +1,5 @@
 const supabase = require('../config/supabase')
+const { isEnabled, FLAGS } = require('../helpers/featureFlags')
 const ExcelJS = require('exceljs')
 const PDFDocument = require('pdfkit')
 
@@ -470,6 +471,125 @@ exports.metrics = async (req, res) => {
   } catch (err) {
     console.error(err)
     return res.status(500).json({ error: 'Erro ao calcular métricas do dashboard' })
+  }
+}
+
+// GET /dashboard/metrics-avancadas — volume_enviado, volume_recebido, taxa_resposta_24h, etc.
+exports.metricsAvancadas = async (req, res) => {
+  if (!isEnabled(FLAGS.FEATURE_METRICAS_AVANCADAS)) {
+    return res.status(403).json({ error: 'Métricas avançadas não estão habilitadas' })
+  }
+  const { company_id } = req.user
+  const rangeDays = Math.min(Math.max(Number(req.query.range_days) || 7, 1), 365)
+  const fromDate = new Date()
+  fromDate.setDate(fromDate.getDate() - rangeDays)
+  const fromIso = fromDate.toISOString()
+  const toIso = new Date().toISOString()
+
+  try {
+    const { data: mensagens } = await supabase
+      .from('mensagens')
+      .select('conversa_id, criado_em, direcao')
+      .eq('company_id', company_id)
+      .in('direcao', ['in', 'out'])
+      .gte('criado_em', fromIso)
+      .lte('criado_em', toIso)
+
+    let volume_enviado = 0
+    let volume_recebido = 0
+    const conversasPorHora = {}
+    const setoresAcionados = {}
+
+    for (const m of mensagens || []) {
+      if (m.direcao === 'out') volume_enviado++
+      else volume_recebido++
+
+      const d = m.criado_em ? new Date(m.criado_em) : null
+      if (d) {
+        const h = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}_${String(d.getHours()).padStart(2, '0')}:00`
+        conversasPorHora[h] = (conversasPorHora[h] || 0) + 1
+      }
+    }
+
+    const { data: conversas } = await supabase
+      .from('conversas')
+      .select('id, departamento_id, criado_em')
+      .eq('company_id', company_id)
+      .gte('criado_em', fromIso)
+
+    const { data: deps } = await supabase
+      .from('departamentos')
+      .select('id, nome')
+      .eq('company_id', company_id)
+    const depMap = {}
+    ;(deps || []).forEach((d) => { depMap[d.id] = d.nome })
+
+    for (const c of conversas || []) {
+      if (c.departamento_id != null) {
+        const nome = depMap[c.departamento_id] || 'Outros'
+        setoresAcionados[nome] = (setoresAcionados[nome] || 0) + 1
+      }
+    }
+
+    const setores_mais_acionados = Object.entries(setoresAcionados)
+      .map(([nome, total]) => ({ nome, total }))
+      .sort((a, b) => b.total - a.total)
+      .slice(0, 10)
+
+    const horario_pico = Object.entries(conversasPorHora)
+      .sort((a, b) => b[1] - a[1])[0]?.[0] || null
+
+    const hojeMenos24h = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
+    const { data: msgs24h } = await supabase
+      .from('mensagens')
+      .select('conversa_id, direcao, criado_em')
+      .eq('company_id', company_id)
+      .gte('criado_em', hojeMenos24h)
+      .in('direcao', ['in', 'out'])
+
+    const convsComIn24h = new Set()
+    const convsComOut24h = new Set()
+    for (const m of msgs24h || []) {
+      if (m.direcao === 'in') convsComIn24h.add(m.conversa_id)
+      if (m.direcao === 'out') convsComOut24h.add(m.conversa_id)
+    }
+    let taxa_resposta_24h = null
+    if (convsComIn24h.size > 0) {
+      let respondidas = 0
+      for (const cid of convsComIn24h) {
+        if (convsComOut24h.has(cid)) respondidas++
+      }
+      taxa_resposta_24h = Math.round((respondidas / convsComIn24h.size) * 100)
+    }
+
+    const { data: novosContatos } = await supabase
+      .from('conversas')
+      .select('id')
+      .eq('company_id', company_id)
+      .gte('criado_em', fromIso)
+      .is('departamento_id', null)
+    const conversas_novos_contatos = novosContatos?.length || 0
+
+    const { data: alertasSla } = await supabase
+      .from('conversas')
+      .select('id')
+      .eq('company_id', company_id)
+      .in('status_atendimento', ['aberta', 'em_atendimento'])
+    const alertas_recentes = alertasSla?.length || 0
+
+    return res.json({
+      volume_enviado,
+      volume_recebido,
+      taxa_resposta_24h,
+      conversas_novos_contatos,
+      setores_mais_acionados,
+      horario_pico,
+      alertas_recentes,
+      range_days: rangeDays,
+    })
+  } catch (err) {
+    console.error(err)
+    return res.status(500).json({ error: 'Erro ao calcular métricas avançadas' })
   }
 }
 
