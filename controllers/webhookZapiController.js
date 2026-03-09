@@ -1111,11 +1111,12 @@ exports.receberZapi = async (req, res) => {
         }
 
         // 1.2) Se achou a mensagem e temos phoneDest real, tentar corrigir conversa com telefone LID → telefone real (atualização simples, não merge).
+        // CRÍTICO: preservar nome_contato_cache e foto — nunca sobrescrever com vazio (evita contato sumir da lista).
         if (!error && msg && phoneDest) {
           try {
             const { data: convRow } = await supabase
               .from('conversas')
-              .select('id, telefone, cliente_id')
+              .select('id, telefone, cliente_id, nome_contato_cache, foto_perfil_contato_cache')
               .eq('company_id', company_id)
               .eq('id', msg.conversa_id)
               .maybeSingle()
@@ -1124,9 +1125,15 @@ exports.receberZapi = async (req, res) => {
               const telAtual = convRow.telefone ? String(convRow.telefone).trim() : ''
               const isLidTel = telAtual.toLowerCase().startsWith('lid:')
               const isGroupDest = String(phoneDest).startsWith('120')
+              const nomeCache = convRow.nome_contato_cache ? String(convRow.nome_contato_cache).trim() : null
+              const fotoCache = convRow.foto_perfil_contato_cache ? String(convRow.foto_perfil_contato_cache).trim() : null
               if ((!telAtual || isLidTel) && !isGroupDest) {
-                // DeliveryCallback: NÃO enriquecer nome — apenas vincular cliente (evita regressão)
-                const { cliente_id: cid } = await getOrCreateCliente(supabase, company_id, canonical, {})
+                // DeliveryCallback: passar nome/foto existentes para getOrCreateCliente (evita criar cliente com nome=número)
+                const { cliente_id: cid } = await getOrCreateCliente(supabase, company_id, canonical, {
+                  nome: nomeCache || undefined,
+                  nomeSource: 'chatName',
+                  foto_perfil: fotoCache || undefined
+                })
                 await supabase
                   .from('conversas')
                   .update({ telefone: canonical, ...(cid ? { cliente_id: cid } : {}) })
@@ -1134,7 +1141,21 @@ exports.receberZapi = async (req, res) => {
                   .eq('id', convRow.id)
                 const io = req.app.get('io')
                 if (io) {
-                  io.to(`empresa_${company_id}`).emit('conversa_atualizada', { id: convRow.id, telefone: canonical, ...(cid ? { cliente_id: cid } : {}) })
+                  // Sempre incluir nome/foto no emit para não sobrescrever com vazio no frontend
+                  const emitPayload = {
+                    id: convRow.id,
+                    telefone: canonical,
+                    ...(cid ? { cliente_id: cid } : {})
+                  }
+                  if (nomeCache) {
+                    emitPayload.nome_contato_cache = nomeCache
+                    emitPayload.contato_nome = nomeCache
+                  }
+                  if (fotoCache) {
+                    emitPayload.foto_perfil_contato_cache = fotoCache
+                    emitPayload.foto_perfil = fotoCache
+                  }
+                  io.to(`empresa_${company_id}`).emit('conversa_atualizada', emitPayload)
                 }
               } else if ((!telAtual || isLidTel) && isGroupDest) {
                 await supabase
@@ -1144,7 +1165,10 @@ exports.receberZapi = async (req, res) => {
                   .eq('id', convRow.id)
                 const io = req.app.get('io')
                 if (io) {
-                  io.to(`empresa_${company_id}`).emit('conversa_atualizada', { id: convRow.id, telefone: canonical })
+                  const emitPayload = { id: convRow.id, telefone: canonical }
+                  if (nomeCache) { emitPayload.nome_contato_cache = nomeCache; emitPayload.contato_nome = nomeCache }
+                  if (fotoCache) { emitPayload.foto_perfil_contato_cache = fotoCache; emitPayload.foto_perfil = fotoCache }
+                  io.to(`empresa_${company_id}`).emit('conversa_atualizada', emitPayload)
                 }
               }
             }
@@ -2327,16 +2351,12 @@ exports.receberZapi = async (req, res) => {
         ...(fotoPerfil ? { foto_perfil_contato_cache: fotoPerfil, foto_perfil: fotoPerfil } : {}),
         ...(mensagemFoiInseridaPeloWebhook && !fromMe ? { tem_novas_mensagens: true, lida: false } : {})
       }
-      // Incluir ultima_mensagem para o frontend atualizar a lista sem refetch (evita mensagem "aparecer e sumir")
+      // ultima_mensagem_preview: só preview na lista lateral — sem id para nunca ser tratado como mensagem (evita duplicata)
       if (mensagemFoiInseridaPeloWebhook && emitPayload) {
-        convPayload.ultima_mensagem = {
-          id: emitPayload.id,
+        convPayload.ultima_mensagem_preview = {
           texto: emitPayload.texto ?? '(mensagem)',
           criado_em: emitPayload.criado_em,
-          direcao: emitPayload.direcao ?? 'in',
-          tipo: emitPayload.tipo ?? 'texto',
-          status: canon,
-          whatsapp_id: emitPayload.whatsapp_id ?? null
+          direcao: emitPayload.direcao ?? 'in'
         }
       }
       io.to(`empresa_${company_id}`).emit('conversa_atualizada', convPayload)

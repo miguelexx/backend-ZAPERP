@@ -19,7 +19,7 @@ O backend de chat usa Socket.IO para envio em tempo real. Corrija o frontend par
    - Se existe por `conversa_id` + `whatsapp_id` → atualizar
    - Caso contrário → adicionar ao array
 
-2. **conversa_atualizada** — Atualizar o item na lista lateral. O payload pode trazer `ultima_mensagem` (objeto com id, texto, criado_em, direcao, tipo, status). Fazer **merge defensivo**: só sobrescrever campos que vêm definidos; nunca sobrescrever com `undefined` ou string vazia (evita nome/foto sumirem).
+2. **conversa_atualizada** — Atualizar o item na lista lateral. O payload pode trazer `telefone`, `cliente_id`, `ultima_mensagem_preview` (objeto com `texto`, `criado_em`, `direcao` — **sem id**). Usar **apenas para preview** na lista lateral; **NUNCA** adicionar ao array de mensagens do chat (evita duplicata/bolha no topo). Fazer **merge defensivo**: só sobrescrever campos que vêm definidos; nunca sobrescrever com `undefined` ou string vazia (evita nome/foto/contato sumirem da lista). O backend envia `telefone` e `cliente_id` ao enviar mensagem para manter a deduplicação estável.
 
 3. **atualizar_conversa** — O backend **não emite mais** quando é mensagem nova. Quando emitir (status, transferência etc.):
    - Pode refetchar a **lista** (GET /chats)
@@ -64,8 +64,13 @@ socket.on('conversa_atualizada', (payload) => {
     const next = { ...c }
     if (payload.ultima_atividade != null) next.ultima_atividade = payload.ultima_atividade
     if (payload.contato_nome != null && payload.contato_nome !== '') next.contato_nome = payload.contato_nome
+    if (payload.nome_contato_cache != null && payload.nome_contato_cache !== '') next.nome_contato_cache = payload.nome_contato_cache
     if (payload.foto_perfil != null && payload.foto_perfil !== '') next.foto_perfil = payload.foto_perfil
-    if (payload.ultima_mensagem != null) next.ultima_mensagem = payload.ultima_mensagem
+    if (payload.foto_perfil_contato_cache != null && payload.foto_perfil_contato_cache !== '') next.foto_perfil_contato_cache = payload.foto_perfil_contato_cache
+    // ultima_mensagem_preview: só preview na lista — NUNCA adicionar às mensagens (não tem id)
+    if (payload.ultima_mensagem_preview != null) next.ultima_mensagem_preview = payload.ultima_mensagem_preview
+    // retrocompatibilidade com ultima_mensagem (se vier sem id, tratar como preview)
+    if (payload.ultima_mensagem != null && !payload.ultima_mensagem.id) next.ultima_mensagem_preview = payload.ultima_mensagem
     if (payload.tem_novas_mensagens === true) { next.tem_novas_mensagens = true; next.lida = false }
     return next
   }))
@@ -88,7 +93,7 @@ socket.on('status_mensagem', ({ mensagem_id, conversa_id, status, whatsapp_id })
 - [ ] `nova_mensagem`: upsert por id e (conversa_id, whatsapp_id)
 - [ ] `nova_mensagem` direcao 'in': incrementar unread_count na lista
 - [ ] `conversa_atualizada`: merge defensivo (nunca sobrescrever com undefined)
-- [ ] `conversa_atualizada`: usar `ultima_mensagem` para preview na lista (sem refetch)
+- [ ] `conversa_atualizada`: usar `ultima_mensagem_preview` para preview na lista (sem id, nunca adicionar às mensagens)
 - [ ] `atualizar_conversa`: NÃO refetchar mensagens do chat aberto
 - [ ] `status_mensagem`: match por mensagem_id ou whatsapp_id
 - [ ] API enviar mensagem: não adicionar da resposta, só do socket

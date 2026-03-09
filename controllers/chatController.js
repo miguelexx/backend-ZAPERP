@@ -9,8 +9,9 @@ const { chooseBestName } = require('../helpers/contactEnrichment')
 // =====================================================
 // 1) HELPERS (TOPO DO ARQUIVO)
 // =====================================================
-function emitirConversaAtualizada(io, company_id, conversa_id, payload = null) {
+function emitirConversaAtualizada(io, company_id, conversa_id, payload = null, opts = {}) {
   if (!io) return
+  const { skipAtualizarConversa = false } = opts
 
   const cid = Number(conversa_id)
   let data = payload || { id: cid }
@@ -42,12 +43,12 @@ function emitirConversaAtualizada(io, company_id, conversa_id, payload = null) {
           const eventName = io.EVENTS?.CONVERSA_ATUALIZADA || 'conversa_atualizada'
           io.to(`empresa_${company_id}`).to(`conversa_${cid}`).emit(eventName, data)
         }
-        io.to(`empresa_${company_id}`).emit('atualizar_conversa', { id: cid })
+        if (!skipAtualizarConversa) io.to(`empresa_${company_id}`).emit('atualizar_conversa', { id: cid })
       })
       .catch(() => {
         const eventName = io.EVENTS?.CONVERSA_ATUALIZADA || 'conversa_atualizada'
         io.to(`empresa_${company_id}`).to(`conversa_${cid}`).emit(eventName, data)
-        io.to(`empresa_${company_id}`).emit('atualizar_conversa', { id: cid })
+        if (!skipAtualizarConversa) io.to(`empresa_${company_id}`).emit('atualizar_conversa', { id: cid })
       })
     return
   }
@@ -57,8 +58,8 @@ function emitirConversaAtualizada(io, company_id, conversa_id, payload = null) {
   const eventName = io.EVENTS?.CONVERSA_ATUALIZADA || 'conversa_atualizada'
   io.to(`empresa_${company_id}`).to(`conversa_${conversa_id}`).emit(eventName, data)
 
-  // compatibilidade com seu front atual
-  io.to(`empresa_${company_id}`).emit('atualizar_conversa', { id: cid })
+  // skipAtualizarConversa: evita refetch que causa duplicata/glitch (payload já tem tudo)
+  if (!skipAtualizarConversa) io.to(`empresa_${company_id}`).emit('atualizar_conversa', { id: cid })
 }
 
 function emitirEventoEmpresaConversa(io, company_id, conversa_id, eventName, payload) {
@@ -2345,14 +2346,22 @@ exports.enviarMensagemChat = async (req, res) => {
         if (cli?.foto_perfil && !fotoPerfil) fotoPerfil = String(cli.foto_perfil).trim()
       }
       if (!contatoNome && conversa?.telefone && !String(conversa.telefone).startsWith('lid:')) contatoNome = conversa.telefone
+      // ultima_mensagem_preview: só para preview na lista lateral — NUNCA adicionar ao array de mensagens
+      // (nova_mensagem já traz a mensagem completa para o chat; incluir id aqui causaria duplicata)
+      // IMPORTANTE: incluir telefone e cliente_id para frontend manter deduplicação e não fazer contato "sumir"
+      const telefoneParaPayload = conversa?.telefone && !String(conversa.telefone).startsWith('lid:')
+        ? String(conversa.telefone).trim()
+        : null
       const convPayload = {
         id: Number(conversa_id),
         ultima_atividade: basePayload.criado_em,
+        ...(telefoneParaPayload ? { telefone: telefoneParaPayload } : {}),
+        ...(conversa?.cliente_id != null ? { cliente_id: conversa.cliente_id } : {}),
         ...(contatoNome ? { nome_contato_cache: contatoNome, contato_nome: contatoNome } : {}),
         ...(fotoPerfil ? { foto_perfil_contato_cache: fotoPerfil, foto_perfil: fotoPerfil } : {}),
-        ultima_mensagem: { id: msg.id, texto: basePayload.texto, criado_em: basePayload.criado_em, direcao: 'out', status: 'pending', tipo: basePayload.tipo || 'texto' }
+        ultima_mensagem_preview: { texto: basePayload.texto, criado_em: basePayload.criado_em, direcao: 'out' }
       }
-      emitirConversaAtualizada(io, company_id, conversa_id, convPayload)
+      emitirConversaAtualizada(io, company_id, conversa_id, convPayload, { skipAtualizarConversa: true })
     }
 
     // Envio para WhatsApp via provider (meta ou zapi, conforme WHATSAPP_PROVIDER)

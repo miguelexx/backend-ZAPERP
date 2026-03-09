@@ -9,7 +9,7 @@ Causa: ao receber `atualizar_conversa`, o frontend fazia refetch da lista ou das
 O backend **não emite mais** `atualizar_conversa` quando insere uma nova mensagem via webhook. Em vez disso:
 
 1. **nova_mensagem** — contém a mensagem completa; adicionar na lista do chat aberto.
-2. **conversa_atualizada** — contém `ultima_mensagem` (quando há insert) + `ultima_atividade`, `nome_contato_cache`, `foto_perfil_contato_cache`. Usar para atualizar o item na lista lateral **sem refetch**.
+2. **conversa_atualizada** — contém `ultima_mensagem_preview` (quando há insert: `texto`, `criado_em`, `direcao` — **sem id**) + `ultima_atividade`, `nome_contato_cache`, `foto_perfil_contato_cache`. Usar **apenas para preview** na lista lateral; **nunca** adicionar ao array de mensagens (evita duplicata/bolha).
 
 ## Tratamento correto no frontend
 
@@ -29,12 +29,17 @@ socket.on('nova_mensagem', (msg) => {
 ### conversa_atualizada
 ```javascript
 socket.on('conversa_atualizada', (conv) => {
-  // Atualizar item na lista lateral (merge defensivo — não sobrescrever com undefined)
-  setConversas(prev => prev.map(c => c.id === conv.id ? { ...c, ...conv } : c))
-  // Se trouxer ultima_mensagem, usar para preview na lista (sem refetch)
-  if (conv.ultima_mensagem) {
-    // Já está em conv; o merge acima atualiza o item
-  }
+  // Merge defensivo: só sobrescrever campos definidos (evita nome/foto sumirem)
+  setConversas(prev => prev.map(c => {
+    if (c.id !== conv.id) return c
+    const next = { ...c }
+    if (conv.ultima_atividade != null) next.ultima_atividade = conv.ultima_atividade
+    if (conv.nome_contato_cache != null && conv.nome_contato_cache !== '') next.nome_contato_cache = conv.nome_contato_cache
+    if (conv.foto_perfil_contato_cache != null) next.foto_perfil_contato_cache = conv.foto_perfil_contato_cache
+    if (conv.ultima_mensagem_preview != null) next.ultima_mensagem_preview = conv.ultima_mensagem_preview
+    if (conv.tem_novas_mensagens === true) { next.tem_novas_mensagens = true; next.lida = false }
+    return next
+  }))
 })
 ```
 
