@@ -446,17 +446,18 @@ exports.receberWebhook = async (req, res) => {
     // 5) Realtime: empresa, conversa e room do departamento
     const io = req.app.get('io')
     if (io) {
-      // 🔒 Privacidade por setor:
-      // - Se a conversa tem departamento_id, NÃO enviar "nova_mensagem" para a empresa inteira.
-      // - Enviar para room do departamento + room da conversa (e somente esses).
-      const rooms = [`conversa_${conversa_id}`]
+      // Enviar nova_mensagem para TODOS os usuários que podem ver a conversa:
+      // - conversa_X: quem tem o chat aberto (join_conversa)
+      // - empresa_X: todos da empresa (admin, supervisores) — garante que "o outro usuário" veja as mensagens
+      // - departamento_X: atendentes do setor quando a conversa tem departamento
+      const rooms = [`conversa_${conversa_id}`, `empresa_${company_id}`]
       if (departamento_id != null) rooms.push(`departamento_${departamento_id}`)
-      else rooms.push(`empresa_${company_id}`)
 
       io.to(rooms).emit('nova_mensagem', mensagemSalva)
-
-      const roomList = departamento_id != null ? `departamento_${departamento_id}` : `empresa_${company_id}`
-      io.to(roomList).emit('atualizar_conversa', { id: conversa_id })
+      io.to(`empresa_${company_id}`).emit('atualizar_conversa', { id: conversa_id })
+      if (departamento_id != null) {
+        io.to(`departamento_${departamento_id}`).emit('atualizar_conversa', { id: conversa_id })
+      }
     }
 
     return res.sendStatus(200)

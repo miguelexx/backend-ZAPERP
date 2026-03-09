@@ -1593,23 +1593,37 @@ exports.detalharChat = async (req, res) => {
       }
     }
 
+    // Bloqueia visão das mensagens quando a conversa está assumida por outro usuário
+    // (apenas admin e supervisor podem ver; atendente que não assumiu não vê o conteúdo)
+    const isSupervisor = role === 'supervisor'
+    const conversaAssumidaPorOutro = conversa.atendente_id != null && Number(conversa.atendente_id) !== Number(user_id)
+    const deveBloquearMensagens = !isGroup && conversaAssumidaPorOutro && !isAdmin && !isSupervisor
+
     // mensagens paginadas (remetente_nome/remetente_telefone para grupos; fallback se colunas não existirem)
     const selectComRemetente = 'id, texto, direcao, criado_em, autor_usuario_id, status, whatsapp_id, tipo, url, nome_arquivo, reply_meta, remetente_nome, remetente_telefone'
     const selectBasico = 'id, texto, direcao, criado_em, autor_usuario_id, status, whatsapp_id, tipo, url, nome_arquivo, reply_meta'
-    let query = supabase
-      .from('mensagens')
-      .select(selectComRemetente)
-      .eq('company_id', Number(company_id))
-      .eq('conversa_id', Number(id))
-      .order('criado_em', { ascending: false })
-      .order('id', { ascending: false })
-      .limit(limit)
+    let mensagens = []
+    let errMsgs = null
+    let query
 
-    if (cursor) {
-      query = query.lt('criado_em', cursor)
+    if (!deveBloquearMensagens) {
+      query = supabase
+        .from('mensagens')
+        .select(selectComRemetente)
+        .eq('company_id', Number(company_id))
+        .eq('conversa_id', Number(id))
+        .order('criado_em', { ascending: false })
+        .order('id', { ascending: false })
+        .limit(limit)
+
+      if (cursor) {
+        query = query.lt('criado_em', cursor)
+      }
+
+      const result = await query
+      mensagens = result.data
+      errMsgs = result.error
     }
-
-    let { data: mensagens, error: errMsgs } = await query
     // Compatibilidade: se reply_meta/remetente_* não existirem ainda no banco, refaz select sem essas colunas.
     if (errMsgs && (String(errMsgs.message || '').includes('reply_meta') || String(errMsgs.message || '').includes('remetente_nome') || String(errMsgs.message || '').includes('remetente_telefone') || String(errMsgs.message || '').includes('does not exist'))) {
       query = supabase
@@ -1687,7 +1701,8 @@ exports.detalharChat = async (req, res) => {
       setor: conversa.departamentos?.nome ?? null,
       tags: (conversa.conversa_tags || []).map((ct) => ct.tags).filter(Boolean),
       mensagens: (mensagens || []).reverse(),
-      next_cursor: mensagens?.length ? mensagens[mensagens.length - 1].criado_em : null
+      next_cursor: mensagens?.length ? mensagens[mensagens.length - 1].criado_em : null,
+      mensagens_bloqueadas: deveBloquearMensagens || undefined
     }
 
     // ✅ emite SOMENTE mensagens_lidas (não dispara atualizar lista ao abrir)
