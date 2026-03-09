@@ -2,6 +2,17 @@
 
 **Níveis:** atendente | supervisor | admin
 
+**Permissões granulares:** O admin pode sobrescrever permissões por usuário via Configurações → Permissões. Ver `docs/PAGINA-PERMISSOES-FRONTEND.md`.
+
+---
+
+## Visibilidade de conversas por setor
+
+- **Conversas sem setor** são visíveis **apenas** para **usuários sem setor** (departamento_id = null).
+- **Usuários com setor** veem apenas conversas do seu setor + grupos.
+- **Admin** vê todas.
+- Grupos são sempre visíveis a todos.
+
 ---
 
 ## Resumo de Acesso
@@ -28,8 +39,7 @@
 
 O usuário **só pode enviar mensagens** (texto, arquivo, reação, contato, ligação, observação) se tiver **assumido** a conversa antes. Isso mantém o WhatsApp organizado — um atendente por conversa ativa.
 
-- **Admin:** pode enviar em qualquer conversa (não precisa assumir)
-- **Supervisor / Atendente:** precisa clicar em **Assumir** antes de enviar. Se tentar enviar sem assumir → 403 "Assuma a conversa antes de enviar mensagens"
+- **Todos os perfis** (incluindo admin): precisam clicar em **Assumir** antes de enviar. Se tentar enviar sem assumir → 403 "Assuma a conversa antes de enviar mensagens"
 
 ### O que exige "assumir" antes
 
@@ -52,7 +62,7 @@ O usuário **só pode enviar mensagens** (texto, arquivo, reação, contato, lig
 
 **Supervisor** vê conversas do **seu setor** + grupos. Pode fazer o mesmo que atendente nas que tem acesso.
 
-**Admin** vê e gerencia tudo, e pode enviar em qualquer conversa sem assumir.
+**Admin** vê e gerencia tudo, mas também precisa **assumir** antes de enviar mensagens.
 
 ---
 

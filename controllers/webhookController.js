@@ -233,9 +233,12 @@ exports.receberWebhook = async (req, res) => {
 
     let contactPhone = from
     if (isOutgoing) {
-      const recipient = msg.to ? String(msg.to).trim() : null
+      // Meta Cloud API: msg.to = destinatário. Fallbacks: msg.recipient_id, value.contacts[0].wa_id
+      const recipient = (msg.to ? String(msg.to).trim() : null) ||
+        (msg.recipient_id ? String(msg.recipient_id).trim() : null) ||
+        (value?.contacts?.[0]?.wa_id ? String(value.contacts[0].wa_id).trim() : null)
       if (!recipient) {
-        console.log('📤 Meta webhook: mensagem enviada por nós (from=nosso número) sem destinatário (to); ignorada para evitar conversa duplicada.')
+        console.warn('📤 Meta webhook: mensagem enviada por nós (from=nosso número) sem destinatário. msg.to ausente. Keys:', Object.keys(msg || {}), 'value.contacts:', value?.contacts?.length ?? 0)
         return res.status(200).json({ ok: true, message: 'Outgoing without recipient' })
       }
       contactPhone = recipient

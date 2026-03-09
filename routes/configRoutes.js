@@ -3,6 +3,7 @@ const router = express.Router()
 const auth = require('../middleware/auth')
 const supervisorOrAdmin = require('../middleware/supervisorOrAdmin')
 const configController = require('../controllers/configController')
+const permissoesController = require('../controllers/permissoesController')
 
 // Configurações: supervisor e admin (atendente não acessa)
 router.use(auth)
@@ -20,5 +21,8 @@ router.delete('/empresas-whatsapp/:id', configController.deleteEmpresasWhatsapp)
 router.put('/whatsapp/profile-picture',    configController.updateWhatsappProfilePicture)
 router.put('/whatsapp/profile-name',       configController.updateWhatsappProfileName)
 router.put('/whatsapp/profile-description', configController.updateWhatsappProfileDescription)
+
+// Permissões granulares — catálogo (para página de configuração de permissões)
+router.get('/permissoes/catalogo', permissoesController.getCatalogo)
 
 module.exports = router

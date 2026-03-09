@@ -248,10 +248,25 @@ function resolveConversationKeyFromZapi(payload) {
       [payload.recipient,      'recipient'],
       [payload.destination,    'destination'],
       [payload.key?.remoteJid,  'key.remoteJid'],
+      [payload.key?.participant, 'key.participant'],
       [payload.remoteJid,       'remoteJid'],
       [payload.chatId,          'chatId'],
       [payload.chat?.id,        'chat.id'],
       [payload.chat?.remoteJid, 'chat.remoteJid'],
+      [payload.data?.key?.remoteJid, 'data.key.remoteJid'],
+      [payload.data?.remoteJid, 'data.remoteJid'],
+      [payload.data?.chatId,    'data.chatId'],
+      [payload.data?.to,        'data.to'],
+      [payload.data?.toPhone,   'data.toPhone'],
+      [payload.data?.recipientPhone, 'data.recipientPhone'],
+      [payload.value?.to,       'value.to'],
+      [payload.value?.toPhone,  'value.toPhone'],
+      [payload.value?.recipientPhone, 'value.recipientPhone'],
+      [payload.value?.key?.remoteJid, 'value.key.remoteJid'],
+      [payload.value?.remoteJid, 'value.remoteJid'],
+      [payload.message?.key?.remoteJid, 'message.key.remoteJid'],
+      [payload.referencedMessage?.phone, 'referencedMessage.phone'],
+      [payload.reaction?.referencedMessage?.phone, 'reaction.referencedMessage.phone'],
       [payload.senderPhone,    'senderPhone (fromMe)'],
     ]
     for (const [raw, fieldName] of destinationSources) {
@@ -290,9 +305,14 @@ function resolveConversationKeyFromZapi(payload) {
 
   // ─── Último recurso: aceita número não-BR ────────────────────────────────
   const lastResortAll = [
-    payload.phone, payload.key?.remoteJid, payload.chatId,
-    payload.to, payload.toPhone, payload.recipientPhone,
-    payload.senderPhone, payload.chat?.id,
+    payload.to, payload.toPhone, payload.recipientPhone, payload.recipient,
+    payload.destination, payload.phone, payload.key?.remoteJid, payload.key?.participant,
+    payload.remoteJid, payload.chatId, payload.chat?.id, payload.senderPhone,
+    payload.data?.key?.remoteJid, payload.data?.remoteJid, payload.data?.to,
+    payload.data?.toPhone, payload.data?.recipientPhone,
+    payload.value?.to, payload.value?.toPhone, payload.value?.recipientPhone,
+    payload.value?.key?.remoteJid, payload.value?.remoteJid,
+    payload.message?.key?.remoteJid, payload.referencedMessage?.phone,
   ]
   for (const raw of lastResortAll) {
     const norm = normCandidate(raw, { allowNonBR: true })
@@ -304,7 +324,8 @@ function resolveConversationKeyFromZapi(payload) {
   // ─── LID (espelhamento: mensagem enviada pelo celular pode vir só com phone/chatLid @lid) ───
   // Z-API às vezes envia phone/chatLid como "280396956696801@lid" sem número real.
   // Usamos chave sintética "lid:XXXX" para encontrar/criar a mesma conversa e registrar a mensagem no front.
-  const lidRaw = clean(payload.phone) || clean(payload.chatLid) || ''
+  // Inclui payload.data e payload.value para payloads encapsulados
+  const lidRaw = clean(payload.phone) || clean(payload.chatLid) || clean(payload.data?.phone) || clean(payload.value?.phone) || ''
   if (lidRaw.endsWith('@lid')) {
     const lidPart = lidRaw.replace(/@lid$/i, '').trim()
     if (lidPart) {
@@ -1023,8 +1044,19 @@ exports.receberZapi = async (req, res) => {
           }
           // NÃO faz continue → segue para pipeline de mensagem abaixo.
         } else {
-        const phoneDestRaw = payload?.phone ?? payload?.to ?? payload?.destination ?? ''
-        const phoneDest = normalizePhoneBR(phoneDestRaw) || String(phoneDestRaw || '').replace(/\D/g, '')
+        // Mesma prioridade de resolvePeerPhone: to, recipientPhone, toPhone, key.remoteJid, data.*, value.*, etc.
+        const { peerPhone: peerDeliv } = resolvePeerPhone(payload)
+        const phoneDestCandidates = [
+          payload?.to, payload?.toPhone, payload?.recipientPhone, payload?.recipient,
+          payload?.destination, payload?.key?.remoteJid, payload?.key?.participant,
+          payload?.remoteJid, payload?.chatId, payload?.data?.to, payload?.data?.toPhone,
+          payload?.data?.recipientPhone, payload?.data?.key?.remoteJid, payload?.data?.remoteJid,
+          payload?.value?.to, payload?.value?.toPhone, payload?.value?.recipientPhone,
+          payload?.value?.key?.remoteJid, payload?.value?.remoteJid,
+          payload?.phone,
+        ]
+        const phoneDestRaw = phoneDestCandidates.find(v => v != null && String(v).trim() !== '') ?? ''
+        const phoneDest = peerDeliv || (normalizePhoneBR(phoneDestRaw) || String(phoneDestRaw || '').replace(/\D/g, ''))
         const messageId = payload?.messageId ?? payload?.zaapId ?? null
         const errorText = payload?.error != null ? String(payload.error) : ''
 
@@ -1045,9 +1077,8 @@ exports.receberZapi = async (req, res) => {
           .maybeSingle()
 
         // 1.1) Mesclagem LID→PHONE: sempre que temos chatLid + canonicalPhone no payload
-        const lidFromPayload = String(payload?.phone ?? payload?.chatLid ?? payload?.chat?.id ?? '').trim()
+        const lidFromPayload = String(payload?.phone ?? payload?.chatLid ?? payload?.chat?.id ?? payload?.data?.phone ?? payload?.value?.phone ?? '').trim()
         const lidPartDeliv = lidFromPayload.endsWith('@lid') ? lidFromPayload.replace(/@lid$/i, '').trim() : ''
-        const { peerPhone: peerDeliv } = resolvePeerPhone(payload)
         const canonicalDeliv = peerDeliv || (phoneDest && !String(phoneDest).startsWith('120') ? getCanonicalPhone(phoneDest) : null)
         if (lidPartDeliv && canonicalDeliv) {
           try {
@@ -1334,7 +1365,7 @@ exports.receberZapi = async (req, res) => {
         })
         // Log SEMPRE do payload completo para diagnóstico — crítico para entender o que Z-API envia
         console.warn('⚠️ [Z-API] DROPPED — phone não resolvido:', debugReason)
-        console.warn('⚠️ [Z-API] DROPPED — payload completo (diagnóstico):', JSON.stringify({
+        const droppedMeta = {
           type: payload?.type,
           fromMe: payload?.fromMe,
           phone: payload?.phone,
@@ -1346,10 +1377,17 @@ exports.receberZapi = async (req, res) => {
           toPhone: payload?.toPhone,
           recipientPhone: payload?.recipientPhone,
           'key.remoteJid': payload?.key?.remoteJid,
+          'key.participant': payload?.key?.participant,
           isGroup: payload?.isGroup,
           messageId: payload?.messageId,
           status: payload?.status,
-        }))
+        }
+        if (WHATSAPP_DEBUG && (payload?.data != null || payload?.key != null || payload?.value != null)) {
+          droppedMeta.data = payload?.data
+          droppedMeta.key = payload?.key
+          droppedMeta.value = payload?.value
+        }
+        console.warn('⚠️ [Z-API] DROPPED — payload completo (diagnóstico):', JSON.stringify(droppedMeta))
         continue
       }
 
@@ -1538,9 +1576,13 @@ exports.receberZapi = async (req, res) => {
         if (io) {
           // Unread: mensagem recebida (!fromMe) = 1; mensagem enviada por nós (fromMe) = 0
           const unreadInicial = fromMe ? 0 : 1
+          // LID: enviar telefone: null e telefone_lid: true para frontend não exibir lid:xxx; permite atualização via conversa_atualizada
+          const isLidPhone = !isGroup && phone && String(phone).trim().toLowerCase().startsWith('lid:')
+          const telefoneForEmit = isLidPhone ? null : (getCanonicalPhone(phone) || phone)
           io.to(`empresa_${company_id}`).emit('nova_conversa', {
             id: conversa_id,
-            telefone: getCanonicalPhone(phone) || phone,
+            telefone: telefoneForEmit,
+            ...(isLidPhone ? { telefone_lid: true } : {}),
             tipo: isGroup ? 'grupo' : 'cliente',
             nome_grupo: isGroup ? (nomeGrupo || null) : null,
             foto_grupo: isGroup ? (chatPhoto || null) : null,
@@ -2176,7 +2218,8 @@ exports.receberZapi = async (req, res) => {
         ultima_atividade: convRow?.ultima_atividade ?? new Date().toISOString(),
         telefone: convRow?.telefone ?? null,
         ...(contatoNome ? { nome_contato_cache: contatoNome, contato_nome: contatoNome } : {}),
-        ...(fotoPerfil ? { foto_perfil_contato_cache: fotoPerfil, foto_perfil: fotoPerfil } : {})
+        ...(fotoPerfil ? { foto_perfil_contato_cache: fotoPerfil, foto_perfil: fotoPerfil } : {}),
+        ...(mensagemFoiInseridaPeloWebhook && !fromMe ? { tem_novas_mensagens: true, lida: false } : {})
       }
       io.to(`empresa_${company_id}`).emit('conversa_atualizada', convPayload)
       if (departamento_id != null) {

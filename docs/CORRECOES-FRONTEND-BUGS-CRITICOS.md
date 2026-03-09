@@ -113,9 +113,70 @@ socket.on('conversa_atualizada', (payload) => {
 
 ---
 
+## Bug 4 — Mensagens novas aparecendo como já vistas
+
+### Causa (corrigida no backend)
+A API usava `conversas.lida` (global) em vez de `unread_count` (por usuário) para o estado "não lido".
+
+### Correção do backend
+- `lida` na resposta de `GET /chats` agora é **por usuário**: `lida = (unread_count === 0)`.
+- Novos campos: `tem_novas_mensagens` e `unread_count` para badge/notificação.
+
+### Correção frontend
+
+1. **Lista de conversas:** Usar `unread_count` e `tem_novas_mensagens` para badge/bolha. Exibir contador quando `unread_count > 0`.
+
+2. **Socket `nova_mensagem`** com `direcao === 'in'`:
+   - Incrementar `unread_count` localmente (+1) para aquela conversa na lista.
+   - Mostrar badge/notificação até o usuário abrir o chat.
+
+3. **Socket `mensagens_lidas`** (quando o usuário abre o chat):
+   - Zerar `unread_count` e `tem_novas_mensagens` para a conversa com `conversa_id` do payload.
+
+4. **Socket `conversa_atualizada`** com `tem_novas_mensagens: true`:
+   - Atualizar a conversa na lista: `tem_novas_mensagens: true`, `lida: false`, e incrementar `unread_count` se a mensagem acabou de chegar.
+
+```javascript
+socket.on('nova_mensagem', (msg) => {
+  if (msg.direcao === 'in') {
+    setConversas(prev => prev.map(c =>
+      c.id === msg.conversa_id
+        ? { ...c, unread_count: (c.unread_count || 0) + 1, tem_novas_mensagens: true, lida: false }
+        : c
+    ))
+  }
+  // ... upsert da mensagem (Bug 1)
+})
+
+socket.on('mensagens_lidas', ({ conversa_id }) => {
+  setConversas(prev => prev.map(c =>
+    c.id === conversa_id ? { ...c, unread_count: 0, tem_novas_mensagens: false, lida: true } : c
+  ))
+})
+
+socket.on('conversa_atualizada', (payload) => {
+  setConversas(prev => prev.map(c => {
+    if (c.id !== payload.id) return c
+    const next = { ...c, ...payload }
+    if (payload.tem_novas_mensagens === true) {
+      next.lida = false
+      next.tem_novas_mensagens = true
+      // Só incrementar se unread ainda for 0 (caso nova_mensagem não tenha chegado antes)
+      if ((next.unread_count || 0) === 0) next.unread_count = 1
+    }
+    return next
+  }))
+})
+```
+
+---
+
 ## Checklist de implementação
 
 - [ ] **nova_mensagem**: upsert por `id` e `(conversa_id, whatsapp_id)` — nunca append cego
+- [ ] **nova_mensagem** com `direcao === 'in'`: incrementar unread_count e mostrar badge
+- [ ] **mensagens_lidas**: zerar unread_count da conversa
+- [ ] **conversa_atualizada**: merge tem_novas_mensagens/unread_count quando payload traz
 - [ ] **Resposta da API** ao enviar: usar upsert, não append
 - [ ] **status_mensagem**: atualizar por `mensagem_id` **e** por `whatsapp_id` na mesma conversa
 - [ ] **conversa_atualizada**: merge apenas campos definidos; não sobrescrever nome/foto com vazio

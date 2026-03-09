@@ -111,10 +111,14 @@ async function assertPermissaoConversa({ company_id, conversa_id, user_id, role,
   const r = String(role || '').toLowerCase()
   if (r === 'admin') return { ok: true, conv }
 
-  // supervisor: pode gerenciar conversas do seu setor (grupos: permitido)
+  // supervisor: conversas sem setor só para usuários sem setor; com setor só mesmo setor
   if (r === 'supervisor') {
-    if (!isGroup && user_dep_id != null && conv.departamento_id != null && Number(conv.departamento_id) !== Number(user_dep_id)) {
-      return { ok: false, status: 403, error: 'Conversa de outro setor' }
+    if (!isGroup) {
+      const convDep = conv.departamento_id ?? null
+      const userDep = user_dep_id ?? null
+      if (userDep == null && convDep != null) return { ok: false, status: 403, error: 'Conversa de outro setor' }
+      if (userDep != null && convDep == null) return { ok: false, status: 403, error: 'Conversa sem setor; acesso negado' }
+      if (userDep != null && Number(convDep) !== Number(userDep)) return { ok: false, status: 403, error: 'Conversa de outro setor' }
     }
     return { ok: true, conv }
   }
@@ -128,10 +132,10 @@ async function assertPermissaoConversa({ company_id, conversa_id, user_id, role,
 
 /**
  * Verifica se o usuário pode ENVIAR mensagens na conversa.
- * Regra: somente quem ASSUMIU a conversa (atendente_id) ou admin pode enviar.
- * Mantém o WhatsApp organizado — um atendente por conversa ativa.
+ * Regra: SOMENTE quem ASSUMIU a conversa (atendente_id === user_id) pode enviar.
+ * Ninguém (nem admin) envia sem assumir — mantém o WhatsApp organizado.
  */
-async function assertPodeEnviarMensagem({ company_id, conversa_id, user_id, perfil }) {
+async function assertPodeEnviarMensagem({ company_id, conversa_id, user_id }) {
   const { data: conv, error } = await supabase
     .from('conversas')
     .select('id, atendente_id')
@@ -141,8 +145,6 @@ async function assertPodeEnviarMensagem({ company_id, conversa_id, user_id, perf
   if (error) return { ok: false, status: 500, error: error.message }
   if (!conv) return { ok: false, status: 404, error: 'Conversa não encontrada' }
 
-  const r = String(perfil || '').toLowerCase()
-  if (r === 'admin') return { ok: true }
   if (conv.atendente_id != null && Number(conv.atendente_id) === Number(user_id)) return { ok: true }
 
   return { ok: false, status: 403, error: 'Assuma a conversa antes de enviar mensagens. Clique em "Assumir" para continuar.' }
@@ -457,9 +459,15 @@ exports.listarConversas = async (req, res) => {
         .from('conversas')
         .select(select)
         .eq('company_id', company_id)
-      // Supervisor: filtra por setor. Admin e atendente veem todas.
-      if (!isAdmin && !isAtendente && user_dep_id != null) {
-        q = q.or(`departamento_id.eq.${user_dep_id},tipo.eq.grupo,departamento_id.is.null`)
+      // Filtro por setor: conversas sem setor só visíveis para usuários sem setor.
+      // Admin vê todas. Supervisor/atendente: com setor → só seu setor + grupos;
+      // sem setor → só conversas sem setor + grupos.
+      if (!isAdmin) {
+        if (user_dep_id != null) {
+          q = q.or(`departamento_id.eq.${user_dep_id},tipo.eq.grupo`)
+        } else {
+          q = q.or(`departamento_id.is.null,tipo.eq.grupo`)
+        }
       } else if (filter_dep_id) {
         q = q.eq('departamento_id', Number(filter_dep_id))
       }
@@ -588,6 +596,7 @@ exports.listarConversas = async (req, res) => {
             null
           )
       const fotoPerfil = isGroup ? null : (fotoCliente ?? (c.foto_perfil_contato_cache && String(c.foto_perfil_contato_cache).trim()) ?? null)
+      const unreadCount = unreadMap[Number(c.id)] || 0
       return {
         id: c.id,
         cliente_id: c.cliente_id,
@@ -595,7 +604,8 @@ exports.listarConversas = async (req, res) => {
         telefone_exibivel: telefoneExibivel,
         status_atendimento: c.status_atendimento,
         atendente_id: c.atendente_id,
-        lida: c.lida,
+        lida: unreadCount === 0,
+        tem_novas_mensagens: unreadCount > 0,
         criado_em: c.criado_em,
         ultima_atividade: c.ultima_atividade,
         departamento_id: c.departamento_id,
@@ -611,7 +621,7 @@ exports.listarConversas = async (req, res) => {
         foto_perfil: fotoPerfil,
         setor: c.departamentos?.nome || null,
         tags: (c.conversa_tags || []).map((ct) => ct?.tags).filter(Boolean),
-        unread_count: unreadMap[Number(c.id)] || 0
+        unread_count: unreadCount
       }
     })
 
@@ -1278,7 +1288,7 @@ exports.atualizarObservacao = async (req, res) => {
     const { observacao } = req.body;
     const { company_id, id: user_id, perfil } = req.user;
 
-    const permEnvio = await assertPodeEnviarMensagem({ company_id, conversa_id: Number(id), user_id, perfil })
+    const permEnvio = await assertPodeEnviarMensagem({ company_id, conversa_id: Number(id), user_id })
     if (!permEnvio.ok) return res.status(permEnvio.status).json({ error: permEnvio.error });
 
     // busca cliente ligado à conversa
@@ -1570,12 +1580,15 @@ exports.detalharChat = async (req, res) => {
     if (!conversa) return res.status(404).json({ error: 'Conversa não encontrada' })
 
     const isGroup = isGroupConversation(conversa)
-    // Visibilidade: não-admin vê seu setor; grupos são visíveis a todos
+    // Visibilidade: conversas sem setor só para usuários sem setor; com setor só para usuários do mesmo setor
     if (!isAdmin && !isGroup) {
       const convDep = conversa.departamento_id ?? null
       const userDep = user_dep_id ?? null
       if (userDep == null && convDep != null) {
-        return res.status(403).json({ error: 'Conversa de outro setor' })
+        return res.status(403).json({ error: 'Conversa pertence a um setor; usuários sem setor não podem acessá-la' })
+      }
+      if (userDep != null && convDep == null) {
+        return res.status(403).json({ error: 'Conversa sem setor; atribua-se a um setor ou use perfil sem setor para acessá-la' })
       }
       if (userDep != null && Number(convDep) !== Number(userDep)) {
         return res.status(403).json({ error: 'Conversa de outro setor' })
@@ -1759,15 +1772,18 @@ exports.assumirChat = async (req, res) => {
     if (errAtual) return res.status(500).json({ error: errAtual.message })
     if (!atual) return res.status(404).json({ error: 'Conversa não encontrada' })
 
-    // Permissão por setor: não-admin só assume conversas do seu departamento
+    // Permissão por setor: conversas sem setor só para usuários sem setor; com setor só mesmo setor
     if (!isAdmin) {
       const convDep = atual.departamento_id ?? null
       const userDep = user_dep_id ?? null
-      if (userDep != null && Number(convDep) !== Number(userDep)) {
-        return res.status(403).json({ error: 'Conversa de outro setor' })
+      if (userDep != null && convDep == null) {
+        return res.status(403).json({ error: 'Conversa sem setor; apenas usuários sem setor podem assumi-la' })
       }
       if (userDep == null && convDep != null) {
         return res.status(403).json({ error: 'Conversa pertence a um setor; atribua-se a um setor para assumir' })
+      }
+      if (userDep != null && Number(convDep) !== Number(userDep)) {
+        return res.status(403).json({ error: 'Conversa de outro setor' })
       }
     }
 
@@ -2091,7 +2107,7 @@ exports.enviarMensagemChat = async (req, res) => {
       return res.status(400).json({ error: 'texto é obrigatório' })
     }
 
-    const permEnvio = await assertPodeEnviarMensagem({ company_id, conversa_id, user_id, perfil })
+    const permEnvio = await assertPodeEnviarMensagem({ company_id, conversa_id, user_id })
     if (!permEnvio.ok) return res.status(permEnvio.status).json({ error: permEnvio.error })
 
     const { data: conversa, error: errConv } = await supabase
@@ -2358,7 +2374,7 @@ exports.enviarReacaoMensagem = async (req, res) => {
       return res.status(400).json({ error: 'reaction é obrigatório' })
     }
 
-    const permEnvio = await assertPodeEnviarMensagem({ company_id, conversa_id, user_id, perfil })
+    const permEnvio = await assertPodeEnviarMensagem({ company_id, conversa_id, user_id })
     if (!permEnvio.ok) return res.status(permEnvio.status).json({ error: permEnvio.error })
 
     // busca conversa + mensagem para garantir que pertencem à empresa
@@ -2412,7 +2428,7 @@ exports.removerReacaoMensagem = async (req, res) => {
     const { company_id, id: user_id, perfil } = req.user
     const { id: conversa_id, mensagem_id } = req.params
 
-    const permEnvio = await assertPodeEnviarMensagem({ company_id, conversa_id, user_id, perfil })
+    const permEnvio = await assertPodeEnviarMensagem({ company_id, conversa_id, user_id })
     if (!permEnvio.ok) return res.status(permEnvio.status).json({ error: permEnvio.error })
 
     const { data: conversa, error: errConv } = await supabase
@@ -2474,7 +2490,7 @@ exports.enviarContatoWhatsapp = async (req, res) => {
       return res.status(400).json({ error: 'cliente_id é obrigatório' })
     }
 
-    const permEnvio = await assertPodeEnviarMensagem({ company_id, conversa_id, user_id, perfil })
+    const permEnvio = await assertPodeEnviarMensagem({ company_id, conversa_id, user_id })
     if (!permEnvio.ok) return res.status(permEnvio.status).json({ error: permEnvio.error })
 
     const { data: conversa, error: errConv } = await supabase
@@ -2581,7 +2597,7 @@ exports.enviarLigacaoWhatsapp = async (req, res) => {
     const { id: conversa_id } = req.params
     const { callDuration } = req.body || {}
 
-    const permEnvio = await assertPodeEnviarMensagem({ company_id, conversa_id, user_id, perfil })
+    const permEnvio = await assertPodeEnviarMensagem({ company_id, conversa_id, user_id })
     if (!permEnvio.ok) return res.status(permEnvio.status).json({ error: permEnvio.error })
 
     const { data: conversa, error: errConv } = await supabase
@@ -2887,9 +2903,13 @@ exports.puxarChatFila = async (req, res) => {
       .order('criado_em', { ascending: true })
       .limit(1)
 
-    // Atendente só puxa conversas do seu setor
-    if (!isAdmin && user_dep_id != null) {
-      query = query.eq('departamento_id', user_dep_id)
+    // Atendente/supervisor: com setor → só seu setor; sem setor → só conversas sem setor
+    if (!isAdmin) {
+      if (user_dep_id != null) {
+        query = query.eq('departamento_id', user_dep_id)
+      } else {
+        query = query.is('departamento_id', null)
+      }
     }
 
     const { data: conversa, error } = await query.maybeSingle()
@@ -3071,7 +3091,7 @@ exports.enviarArquivo = async (req, res) => {
       return res.status(400).json({ error: "Arquivo não enviado" })
     }
 
-    const permEnvio = await assertPodeEnviarMensagem({ company_id, conversa_id, user_id, perfil })
+    const permEnvio = await assertPodeEnviarMensagem({ company_id, conversa_id, user_id })
     if (!permEnvio.ok) return res.status(permEnvio.status).json({ error: permEnvio.error })
 
     const file = req.file

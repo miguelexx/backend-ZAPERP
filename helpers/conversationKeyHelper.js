@@ -46,9 +46,17 @@ function resolvePeerPhone(payload) {
     if (skipMy && isMyNumber(d)) return ''
     return normalizePhoneBR(d) || d
   }
+  // Último recurso: aceita número não-BR (10+ dígitos) quando só temos LID — útil para contatos internacionais
+  const normAllowNonBR = (raw, skipMy = true) => {
+    const d = extractDigits(raw)
+    if (!d || d.length < 10) return ''
+    if (skipMy && isMyNumber(d)) return ''
+    return normalizePhoneBR(d) || d
+  }
 
   if (fromMe) {
     // Prioridade: to / toPhone / recipientPhone / key.remoteJid (destino explícito)
+    // Inclui fontes aninhadas (payload.data, payload.value encapsulados, payload.message) e referencedMessage
     const destPriority = [
       [payload?.to, 'to'],
       [payload?.toPhone, 'toPhone'],
@@ -56,10 +64,25 @@ function resolvePeerPhone(payload) {
       [payload?.recipient, 'recipient'],
       [payload?.destination, 'destination'],
       [payload?.key?.remoteJid, 'key.remoteJid'],
+      [payload?.key?.participant, 'key.participant'],
       [payload?.remoteJid, 'remoteJid'],
       [payload?.chatId, 'chatId'],
       [payload?.chat?.id, 'chat.id'],
       [payload?.chat?.remoteJid, 'chat.remoteJid'],
+      [payload?.data?.key?.remoteJid, 'data.key.remoteJid'],
+      [payload?.data?.remoteJid, 'data.remoteJid'],
+      [payload?.data?.chatId, 'data.chatId'],
+      [payload?.data?.to, 'data.to'],
+      [payload?.data?.toPhone, 'data.toPhone'],
+      [payload?.data?.recipientPhone, 'data.recipientPhone'],
+      [payload?.value?.to, 'value.to'],
+      [payload?.value?.toPhone, 'value.toPhone'],
+      [payload?.value?.recipientPhone, 'value.recipientPhone'],
+      [payload?.value?.key?.remoteJid, 'value.key.remoteJid'],
+      [payload?.value?.remoteJid, 'value.remoteJid'],
+      [payload?.message?.key?.remoteJid, 'message.key.remoteJid'],
+      [payload?.referencedMessage?.phone, 'referencedMessage.phone'],
+      [payload?.reaction?.referencedMessage?.phone, 'reaction.referencedMessage.phone'],
     ]
     for (const [raw, source] of destPriority) {
       const n = norm(raw)
@@ -83,9 +106,28 @@ function resolvePeerPhone(payload) {
       }
     }
 
-    // Fallback 2: só existe chatLid (@lid) → retornar null (sem canonicalPhone), keyType='lid'
-    // REGRA: NUNCA retornar connectedPhone como peerPhone.
+    // Fallback 2: só existe chatLid (@lid) → tentar allowNonBR nas mesmas fontes antes de desistir
     const phoneStr = clean(payload?.phone ?? '')
+    const lastResortSources = [
+      payload?.to, payload?.toPhone, payload?.recipientPhone, payload?.recipient,
+      payload?.destination, payload?.key?.remoteJid, payload?.key?.participant,
+      payload?.remoteJid, payload?.chatId, payload?.chat?.id, payload?.chat?.remoteJid,
+      payload?.data?.key?.remoteJid, payload?.data?.remoteJid, payload?.data?.to,
+      payload?.data?.toPhone, payload?.data?.recipientPhone,
+      payload?.value?.to, payload?.value?.toPhone, payload?.value?.recipientPhone,
+      payload?.value?.key?.remoteJid, payload?.value?.remoteJid,
+      payload?.message?.key?.remoteJid, payload?.referencedMessage?.phone
+    ]
+    for (const raw of lastResortSources) {
+      const n = normAllowNonBR(raw)
+      if (n) {
+        if (WHATSAPP_DEBUG) {
+          console.log('[resolvePeerPhone] DEV:', { fromMe, peerPhone: n?.slice(-6), source: 'fromMe lastResort allowNonBR' })
+        }
+        return { peerPhone: n, source: 'fromMe lastResort allowNonBR', fromMe, connectedPhone }
+      }
+    }
+
     if (phoneStr.endsWith('@lid')) {
       if (WHATSAPP_DEBUG) {
         console.log('[resolvePeerPhone] DEV:', { fromMe, connectedPhone: connectedPhone ? `...${connectedPhone.slice(-6)}` : null, phone: payload?.phone, to: payload?.to, peerPhone: null, source: 'lid only - no peer' })
