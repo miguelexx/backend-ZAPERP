@@ -11,7 +11,7 @@ const DEFAULT_CONFIG = {
     fallbackToAI: false,
     businessHoursOnly: false,
     transferMode: 'departamento',
-    tipo_distribuicao: 'round_robin', // round_robin | menor_carga
+    tipo_distribuicao: 'fila', // fila = todos do setor veem; primeiro a assumir ganha | round_robin | menor_carga
     reopenMenuCommand: '0',
     options: [],
   },

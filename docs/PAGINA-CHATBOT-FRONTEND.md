@@ -15,8 +15,32 @@ Use estes textos na tela para facilitar o entendimento de leigos:
 | Ativo | **Opção ativa** ou **Mostrar esta opção no menu** |
 | Adicionar opção | **Adicionar nova escolha** |
 | Remover | **Remover esta opção** |
+| Distribuição | **Como a conversa chega ao setor** |
 
 **Dica:** Pode usar um texto de ajuda (tooltip) em cada campo, por exemplo: *"O número que o cliente digita para escolher (1, 2, 3...)"* ao lado de "Nº da opção".
+
+### PROMPT: Campo "Distribuição" (tipo_distribuicao)
+
+**Rótulo na tela:** "Como a conversa chega ao setor" ou "Quando o cliente escolhe o setor"
+
+**Tooltip:** *"Define o que acontece quando o cliente responde com o número do setor (ex: 1 para Vendas)."*
+
+| Valor (API) | Rótulo para o usuário |
+|-------------|------------------------|
+| `fila` | **Todos do setor veem** — A conversa aparece para todos. Quem clicar em "Assumir" primeiro atende. |
+| `round_robin` | **Rotação automática** — O sistema escolhe um atendente do setor para receber a conversa. |
+| `menor_carga` | **Menor carga** — O atendente com menos conversas ativas recebe automaticamente. |
+
+**Recomendado:** Use `fila` como padrão. O sistema apenas define o setor e todos os usuários daquele setor veem a conversa. Quem puder assume primeiro.
+
+```js
+// Exemplo para o frontend
+const tipoDistribuicaoOptions = [
+  { value: 'fila', label: 'Todos do setor veem — quem assumir primeiro atende' },
+  { value: 'round_robin', label: 'Rotação automática entre atendentes do setor' },
+  { value: 'menor_carga', label: 'Atribuir ao atendente com menos conversas' },
+]
+```
 
 ---
 
@@ -48,7 +72,7 @@ Authorization: Bearer <token>
     "fallbackToAI": false,
     "businessHoursOnly": false,
     "transferMode": "departamento",
-    "tipo_distribuicao": "round_robin",
+    "tipo_distribuicao": "fila",
     "reopenMenuCommand": "0",
     "options": []
   },
@@ -72,7 +96,7 @@ Content-Type: application/json
     "invalidOptionMessage": "Opção inválida. Por favor, responda apenas com o número do setor desejado.",
     "confirmSelectionMessage": "Perfeito! Seu atendimento foi direcionado para o setor {{departamento}}. Em instantes nossa equipe dará continuidade.",
     "sendOnlyFirstTime": true,
-    "tipo_distribuicao": "round_robin",
+    "tipo_distribuicao": "fila",
     "reopenMenuCommand": "0",
     "options": [
       { "key": "1", "label": "Atendimento", "departamento_id": 1, "active": true },
@@ -180,7 +204,9 @@ Cada linha é uma **escolha** que você configura na tabela:
 | **Setor que recebe** | Para qual equipe a conversa vai quando o cliente escolher essa opção |
 | **Opção desativada** | Se marcar, essa escolha não aparece no menu (útil para desativar temporariamente) |
 
-**Resumindo:** Você define as escolhas (ex: Atendimento, Vendas, Financeiro) e para qual setor cada uma manda o cliente. Quem estiver naquele setor verá a conversa no painel.
+**Resumindo:** Você define as escolhas (ex: Atendimento, Vendas, Financeiro) e para qual setor cada uma manda o cliente. Com **"Todos do setor veem"** (fila), quem estiver naquele setor verá a conversa no painel e poderá assumir — o primeiro a clicar em "Assumir" atende.
+
+**Importante:** Se a conversa está indo automaticamente para um usuário específico em vez de aparecer para todos do setor, verifique o campo **Distribuição** e altere para **"Todos do setor veem"** (`fila`).
 
 ### 3.3 Componentes obrigatórios (referência técnica)
 
@@ -192,7 +218,7 @@ Cada linha é uma **escolha** que você configura na tabela:
 | Mensagem de confirmação | Textarea | `confirmSelectionMessage` — use `{{departamento}}` para o nome do setor |
 | Comando para ver o menu de novo | Input | `reopenMenuCommand` (ex: "0") |
 | Enviar menu só na primeira vez | Checkbox | `sendOnlyFirstTime` |
-| Distribuição | Select | `tipo_distribuicao`: `fila` (primeiro a assumir), `round_robin`, `menor_carga` |
+| Distribuição | Select | `tipo_distribuicao`: `fila` (**recomendado** — todos do setor veem; primeiro a assumir ganha), `round_robin`, `menor_carga` |
 | Tabela de escolhas | Dinâmica | key, label, departamento_id, active |
 | Botão Salvar | Button | PUT /api/ia/config |
 | Área de logs | Lista | GET /api/ia/logs |
