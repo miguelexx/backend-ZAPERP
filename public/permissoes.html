@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Permissões — Central de administração</title>
+  <style>
+    :root {
+      --bg: #f8fafc;
+      --card: #fff;
+      --border: #e2e8f0;
+      --text: #1e293b;
+      --text-muted: #64748b;
+      --primary: #2563eb;
+      --primary-hover: #1d4ed8;
+      --success: #16a34a;
+      --danger: #dc2626;
+      --neutral: #94a3b8;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: system-ui, -apple-system, sans-serif; background: var(--bg); color: var(--text); line-height: 1.5; }
+    .container { max-width: 900px; margin: 0 auto; padding: 24px; }
+    h1 { font-size: 1.5rem; margin: 0 0 8px; }
+    .subtitle { color: var(--text-muted); margin: 0 0 24px; font-size: 0.9rem; }
+    .card { background: var(--card); border-radius: 8px; border: 1px solid var(--border); padding: 20px; margin-bottom: 20px; }
+    .flex { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+    .flex-between { justify-content: space-between; }
+    select {
+      flex: 1; min-width: 200px;
+      padding: 10px 12px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      font-size: 1rem;
+      background: var(--card);
+    }
+    .user-info { margin-top: 12px; padding: 12px; background: var(--bg); border-radius: 6px; font-size: 0.9rem; color: var(--text-muted); }
+    .user-info span { margin-right: 16px; }
+    .btn {
+      padding: 10px 20px;
+      border: none;
+      border-radius: 6px;
+      font-size: 0.95rem;
+      cursor: pointer;
+      font-weight: 500;
+    }
+    .btn:disabled { opacity: 0.6; cursor: not-allowed; }
+    .btn-primary { background: var(--primary); color: #fff; }
+    .btn-primary:hover:not(:disabled) { background: var(--primary-hover); }
+    .btn-secondary { background: var(--border); color: var(--text); }
+    .btn-secondary:hover:not(:disabled) { background: var(--neutral); color: #fff; }
+    .categoria { margin-bottom: 20px; }
+    .categoria-titulo { font-weight: 600; margin-bottom: 12px; font-size: 1rem; color: var(--text); }
+    .permissao {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 10px 12px;
+      margin-bottom: 6px;
+      background: var(--bg);
+      border-radius: 6px;
+      gap: 12px;
+    }
+    .permissao-nome { font-weight: 500; }
+    .permissao-desc { font-size: 0.8rem; color: var(--text-muted); margin-top: 2px; }
+    .perm-toggle {
+      display: flex;
+      gap: 4px;
+      align-items: center;
+    }
+    .perm-btn {
+      padding: 6px 12px;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      font-size: 0.85rem;
+      cursor: pointer;
+      background: var(--card);
+    }
+    .perm-btn.allow { border-color: var(--success); color: var(--success); }
+    .perm-btn.allow.active { background: var(--success); color: #fff; border-color: var(--success); }
+    .perm-btn.deny { border-color: var(--danger); color: var(--danger); }
+    .perm-btn.deny.active { background: var(--danger); color: #fff; border-color: var(--danger); }
+    .perm-btn.default { border-color: var(--neutral); color: var(--text-muted); }
+    .perm-btn.default.active { background: var(--neutral); color: #fff; border-color: var(--neutral); }
+    .perm-btn:hover:not(:disabled) { opacity: 0.9; }
+    .badge-override { font-size: 0.7rem; padding: 2px 6px; border-radius: 4px; background: #fef3c7; color: #92400e; }
+    .loading { text-align: center; padding: 40px; color: var(--text-muted); }
+    .error { background: #fef2f2; color: var(--danger); padding: 12px; border-radius: 6px; margin-bottom: 16px; }
+    .success { background: #f0fdf4; color: var(--success); padding: 12px; border-radius: 6px; margin-bottom: 16px; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Permissões</h1>
+    <p class="subtitle">Selecione um usuário e edite suas permissões (conceder, negar ou restaurar ao padrão do perfil).</p>
+
+    <div id="error" class="error" style="display:none;"></div>
+    <div id="success" class="success" style="display:none;"></div>
+
+    <div class="card">
+      <div class="flex flex-between">
+        <div style="flex:1; min-width: 200px;">
+          <label for="usuario" style="display:block; margin-bottom:6px; font-weight:500;">Usuário</label>
+          <select id="usuario" disabled>
+            <option value="">Carregando...</option>
+          </select>
+        </div>
+        <div style="display:flex; gap:8px; align-items:flex-end;">
+          <button type="button" class="btn btn-secondary" id="restaurar" disabled>Restaurar padrão</button>
+          <button type="button" class="btn btn-primary" id="salvar" disabled>Salvar</button>
+        </div>
+      </div>
+      <div id="user-info" class="user-info" style="display:none;"></div>
+    </div>
+
+    <div id="permissoes-root">
+      <div class="loading" id="loading">Carregando permissões...</div>
+    </div>
+  </div>
+
+  <script>
+    (function() {
+      const API = window.location.pathname.startsWith('/api') ? '' : (document.querySelector('base')?.href || '');
+      const getToken = () => localStorage.getItem('token') || localStorage.getItem('authToken') || localStorage.getItem('jwt') || '';
+      const headers = () => ({ 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + getToken(), credentials: 'include' });
+
+      const $ = id => document.getElementById(id);
+      const show = (el, msg) => {
+        el.style.display = 'block';
+        if (msg !== undefined) el.textContent = msg;
+      };
+      const hide = (el) => el.style.display = 'none';
+
+      let catalogo = [];
+      let usuarios = [];
+      let permissoesAtuais = [];
+      let usuarioSelecionado = null;
+      let overrides = {}; // { codigo: true|false|null }
+
+      async function fetchApi(path, opts = {}) {
+        const base = window.location.pathname.startsWith('/api') ? '' : '/api';
+        const res = await fetch((base + path), { ...opts, credentials: 'include', headers: { ...headers(), ...(opts.headers || {}) } });
+        if (res.status === 401) { window.location.href = '/login'; return null; }
+        if (res.status === 403) throw new Error('Acesso restrito a administradores');
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || 'Erro na requisição');
+        return data;
+      }
+
+      async function loadUsuarios() {
+        const data = await fetchApi('/usuarios');
+        if (!data) return;
+        usuarios = Array.isArray(data) ? data : [];
+        const sel = $('usuario');
+        sel.innerHTML = '<option value="">Selecione um usuário</option>' +
+          usuarios.map(u => `<option value="${u.id}">${escapeHtml(u.nome)} (${u.perfil || 'atendente'})</option>`).join('');
+        sel.disabled = false;
+      }
+
+      async function loadCatalogo() {
+        const data = await fetchApi('/config/permissoes/catalogo');
+        if (!data) return;
+        catalogo = data.catalogo || [];
+      }
+
+      async function loadPermissoesUsuario(id) {
+        const data = await fetchApi('/usuarios/' + id + '/permissoes');
+        if (!data) return;
+        usuarioSelecionado = data.usuario;
+        permissoesAtuais = data.permissoes || [];
+        overrides = {};
+        permissoesAtuais.filter(p => p.isOverride).forEach(p => {
+          overrides[p.codigo] = p.concedido;
+        });
+        $('restaurar').disabled = !permissoesAtuais.some(p => p.isOverride);
+        renderUserInfo();
+        renderPermissoes();
+      }
+
+      function escapeHtml(s) {
+        if (!s) return '';
+        const d = document.createElement('div');
+        d.textContent = s;
+        return d.innerHTML;
+      }
+
+      function renderUserInfo() {
+        const ui = $('user-info');
+        if (!usuarioSelecionado) { hide(ui); return; }
+        const u = usuarioSelecionado;
+        const dep = usuarios.find(x => x.id === u.id)?.departamentos?.nome || '';
+        ui.innerHTML = `<span><strong>${escapeHtml(u.nome)}</strong></span>` +
+          `<span>${escapeHtml(u.email)}</span>` +
+          `<span>Perfil: ${escapeHtml(u.perfil || 'atendente')}</span>` +
+          (dep ? `<span>Setor: ${escapeHtml(dep)}</span>` : '');
+        show(ui);
+      }
+
+      function getValorAtual(perm) {
+        if (overrides[perm.codigo] !== undefined) return overrides[perm.codigo];
+        return perm.concedido ? 'padrao' : 'padrao';
+      }
+
+      function renderPermissoes() {
+        const root = $('permissoes-root');
+        root.innerHTML = '';
+        hide($('loading'));
+
+        catalogo.forEach(cat => {
+          const card = document.createElement('div');
+          card.className = 'card';
+          card.innerHTML = `<div class="categoria-titulo">${escapeHtml(cat.categoria)}</div>`;
+          const catDiv = document.createElement('div');
+          catDiv.className = 'categoria';
+          (cat.permissoes || []).forEach(perm => {
+            const p = permissoesAtuais.find(x => x.codigo === perm.codigo) || perm;
+            const valor = overrides[perm.codigo] !== undefined ? overrides[perm.codigo] : (p.concedido ? 'padrao' : 'padrao');
+            const div = document.createElement('div');
+            div.className = 'permissao';
+            const estado = overrides[perm.codigo] !== undefined ? overrides[perm.codigo] : null;
+            const labelPadrao = estado === null ? ' (padrão)' : '';
+            div.innerHTML = `
+              <div>
+                <div class="permissao-nome">${escapeHtml(perm.nome)}${p.isOverride ? ' <span class="badge-override">Personalizado</span>' : ''}</div>
+                ${perm.descricao ? `<div class="permissao-desc">${escapeHtml(perm.descricao)}</div>` : ''}
+              </div>
+              <div class="perm-toggle">
+                <button type="button" class="perm-btn allow ${estado === true ? 'active' : ''}" data-codigo="${escapeHtml(perm.codigo)}" data-val="true">Permitir</button>
+                <button type="button" class="perm-btn deny ${estado === false ? 'active' : ''}" data-codigo="${escapeHtml(perm.codigo)}" data-val="false">Negar</button>
+                <button type="button" class="perm-btn default ${estado === null ? 'active' : ''}" data-codigo="${escapeHtml(perm.codigo)}" data-val="null">Padrão</button>
+              </div>
+            `;
+            catDiv.appendChild(div);
+          });
+          card.appendChild(catDiv);
+          root.appendChild(card);
+        });
+
+        root.querySelectorAll('.perm-btn').forEach(btn => {
+          btn.onclick = () => {
+            const codigo = btn.dataset.codigo;
+            const val = btn.dataset.val === 'null' ? null : btn.dataset.val === 'true';
+            overrides[codigo] = val;
+            const row = btn.closest('.permissao');
+            row.querySelectorAll('.perm-btn').forEach(b => b.classList.remove('active'));
+            row.querySelectorAll(`[data-codigo="${codigo}"]`).forEach(b => {
+              if ((val === null && b.dataset.val === 'null') || (val === true && b.dataset.val === 'true') || (val === false && b.dataset.val === 'false')) b.classList.add('active');
+            });
+            const badge = row.querySelector('.badge-override');
+            if (val !== null) {
+              if (!badge) { const d = row.querySelector('.permissao-nome'); d.innerHTML += ' <span class="badge-override">Personalizado</span>'; }
+            } else if (badge) badge.remove();
+            $('salvar').disabled = false;
+          };
+        });
+      }
+
+      async function salvar() {
+        const id = $('usuario').value;
+        if (!id) return;
+        $('salvar').disabled = true;
+        hide($('error'));
+        hide($('success'));
+        try {
+          const payload = {};
+          Object.entries(overrides).forEach(([codigo, val]) => {
+            if (val !== undefined) payload[codigo] = val;
+          });
+          await fetchApi('/usuarios/' + id + '/permissoes', {
+            method: 'PUT',
+            body: JSON.stringify({ permissoes: payload })
+          });
+          show($('success'), 'Permissões salvas com sucesso.');
+          setTimeout(() => hide($('success')), 3000);
+          loadPermissoesUsuario(id);
+        } catch (e) {
+          show($('error'), e.message);
+          $('salvar').disabled = false;
+        }
+      }
+
+      async function restaurar() {
+        const id = $('usuario').value;
+        if (!id) return;
+        if (!confirm('Remover todas as permissões personalizadas e usar o padrão do perfil?')) return;
+        $('restaurar').disabled = true;
+        hide($('error'));
+        hide($('success'));
+        try {
+          const payload = {};
+          permissoesAtuais.filter(p => p.isOverride).forEach(p => { payload[p.codigo] = null; });
+          await fetchApi('/usuarios/' + id + '/permissoes', {
+            method: 'PUT',
+            body: JSON.stringify({ permissoes: payload })
+          });
+          show($('success'), 'Padrão restaurado com sucesso.');
+          setTimeout(() => hide($('success')), 3000);
+          loadPermissoesUsuario(id);
+          $('restaurar').disabled = false;
+        } catch (e) {
+          show($('error'), e.message);
+          $('restaurar').disabled = false;
+        }
+      }
+
+      $('usuario').onchange = () => {
+        const id = $('usuario').value;
+        if (!id) { $('restaurar').disabled = true; $('salvar').disabled = true; hide($('user-info')); $('permissoes-root').innerHTML = ''; return; }
+        $('restaurar').disabled = true;
+        $('salvar').disabled = true;
+        $('permissoes-root').innerHTML = '<div class="loading" id="loading">Carregando...</div>';
+        loadPermissoesUsuario(id);
+      };
+
+      $('salvar').onclick = salvar;
+      $('restaurar').onclick = restaurar;
+
+      (async function init() {
+        if (!getToken()) { window.location.href = '/login'; return; }
+        try {
+          await Promise.all([loadUsuarios(), loadCatalogo()]);
+        } catch (e) {
+          show($('error'), e.message);
+        }
+      })();
+    })();
+  </script>
+</body>
+</html>

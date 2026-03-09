@@ -145,6 +145,12 @@ app.use(
 // Health check
 app.get('/health', (req, res) => res.json({ ok: true }))
 
+// Página de Permissões (admin) — HTML standalone que consome as APIs
+app.get('/permissoes', (req, res) => {
+  res.setHeader('Content-Type', 'text/html; charset=utf-8')
+  res.sendFile(path.join(__dirname, 'public', 'permissoes.html'))
+})
+
 // Diagnóstico de ambiente — apenas em desenvolvimento (nunca expor em produção)
 if (process.env.NODE_ENV !== 'production') {
   app.get('/debug/env', (req, res) => {

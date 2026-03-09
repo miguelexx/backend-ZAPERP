@@ -2011,13 +2011,15 @@ exports.transferirSetor = async (req, res) => {
   try {
     const { company_id, id: user_id, perfil, departamento_id: user_dep_id } = req.user
     const { id: conversa_id } = req.params
-    const { departamento_id: novo_departamento_id } = req.body
+    const { departamento_id: novo_departamento_id, remover_setor } = req.body
 
     const perm = await assertPermissaoConversa({ company_id, conversa_id, user_id, role: perfil, user_dep_id })
     if (!perm.ok) return res.status(perm.status).json({ error: perm.error })
 
-    if (novo_departamento_id == null || novo_departamento_id === '') {
-      return res.status(400).json({ error: 'departamento_id é obrigatório' })
+    const remover = remover_setor === true || (req.body.hasOwnProperty('departamento_id') && novo_departamento_id == null)
+
+    if (!remover && (novo_departamento_id == null || novo_departamento_id === '')) {
+      return res.status(400).json({ error: 'departamento_id é obrigatório. Use remover_setor: true para remover o setor.' })
     }
 
     const { data: conversa, error: errConv } = await supabase
@@ -2033,25 +2035,34 @@ exports.transferirSetor = async (req, res) => {
 
     const depAntigoId = conversa.departamento_id ?? null
     const depAntigoNome = conversa.departamentos?.nome ?? 'Sem setor'
-    if (Number(depAntigoId) === Number(novo_departamento_id)) {
-      return res.status(400).json({ error: 'Conversa já está neste setor' })
-    }
 
-    const { data: novoDep } = await supabase
-      .from('departamentos')
-      .select('id, nome')
-      .eq('company_id', company_id)
-      .eq('id', novo_departamento_id)
-      .single()
+    let novoDep = null
+    let departamentoIdFinal = null
 
-    if (!novoDep) {
-      return res.status(400).json({ error: 'Setor de destino inválido' })
+    if (remover) {
+      if (depAntigoId == null) {
+        return res.status(400).json({ error: 'Conversa já está sem setor' })
+      }
+      departamentoIdFinal = null
+    } else {
+      if (Number(depAntigoId) === Number(novo_departamento_id)) {
+        return res.status(400).json({ error: 'Conversa já está neste setor' })
+      }
+      const { data: dep } = await supabase
+        .from('departamentos')
+        .select('id, nome')
+        .eq('company_id', company_id)
+        .eq('id', novo_departamento_id)
+        .single()
+      if (!dep) return res.status(400).json({ error: 'Setor de destino inválido' })
+      novoDep = dep
+      departamentoIdFinal = Number(novo_departamento_id)
     }
 
     const { data: atualizada, error: errUpd } = await supabase
       .from('conversas')
       .update({
-        departamento_id: Number(novo_departamento_id),
+        departamento_id: departamentoIdFinal,
         atendente_id: null,
         status_atendimento: 'aberta'
       })
@@ -2062,7 +2073,7 @@ exports.transferirSetor = async (req, res) => {
 
     if (errUpd) return res.status(500).json({ error: errUpd.message })
 
-    const observacaoTexto = `${depAntigoNome} → ${novoDep.nome}`
+    const observacaoTexto = remover ? `${depAntigoNome} → Sem setor` : `${depAntigoNome} → ${novoDep.nome}`
     await supabase.from('historico_atendimentos').insert({
       conversa_id: Number(conversa_id),
       usuario_id: user_id,
@@ -2072,20 +2083,22 @@ exports.transferirSetor = async (req, res) => {
 
     const io = req.app.get('io')
     if (io) {
-      const payload = { id: Number(conversa_id), departamento_id: Number(novo_departamento_id), setor: novoDep.nome }
+      const payload = { id: Number(conversa_id), departamento_id: departamentoIdFinal, setor: remover ? null : novoDep.nome }
       emitirConversaAtualizada(io, company_id, conversa_id, payload)
       emitirLock(io, conversa_id, null)
       if (depAntigoId != null) {
         emitirDepartamento(io, depAntigoId, io.EVENTS?.CONVERSA_ATUALIZADA || 'conversa_atualizada', payload)
       }
-      emitirDepartamento(io, Number(novo_departamento_id), io.EVENTS?.CONVERSA_ATUALIZADA || 'conversa_atualizada', payload)
+      if (departamentoIdFinal != null) {
+        emitirDepartamento(io, departamentoIdFinal, io.EVENTS?.CONVERSA_ATUALIZADA || 'conversa_atualizada', payload)
+      }
       io.to(`empresa_${company_id}`).emit('atualizar_conversa', { id: Number(conversa_id) })
     }
 
     return res.json({
       ok: true,
       conversa: atualizada,
-      setor: novoDep.nome,
+      setor: remover ? null : novoDep.nome,
       observacao: observacaoTexto
     })
   } catch (err) {
