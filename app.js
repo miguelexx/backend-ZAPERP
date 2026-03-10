@@ -97,6 +97,8 @@ app.use('/webhook/zapi', webhookLimiter, webhookZapiRoutes)
 const allowedOrigins = [
   'https://zaperp.wmsistemas.inf.br',
   'https://www.zaperp.wmsistemas.inf.br',
+  'http://zaperp.wmsistemas.inf.br',
+  'http://www.zaperp.wmsistemas.inf.br',
   ...(process.env.NODE_ENV !== 'production'
     ? ['http://localhost:3000', 'http://localhost:5173', 'http://127.0.0.1:5173', 'http://127.0.0.1:3000']
     : [])
@@ -105,11 +107,18 @@ const allowedOrigins = [
 const extraOrigins = String(process.env.CORS_ORIGINS || '').split(',').map((s) => s.trim()).filter(Boolean)
 extraOrigins.forEach((o) => { if (o && !allowedOrigins.includes(o)) allowedOrigins.push(o) })
 
+// Padrões de domínio permitidos (ex: *.wmsistemas.inf.br, *.wmsistemas.ats)
+const allowedOriginPatterns = [
+  /^https?:\/\/[a-z0-9-]+\.wmsistemas\.inf\.br$/i,
+  /^https?:\/\/[a-z0-9-]+\.wmsistemas\.ats$/i,
+]
+
 const corsOptions = {
   origin(origin, callback) {
     // Requisições sem origin (Postman, apps mobile) → sempre permitir
     if (!origin) return callback(null, true)
     if (allowedOrigins.includes(origin)) return callback(null, true)
+    if (allowedOriginPatterns.some((re) => re.test(origin))) return callback(null, true)
     return callback(new Error('CORS não permitido para esta origem: ' + origin))
   },
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],

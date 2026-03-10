@@ -2437,10 +2437,15 @@ exports.enviarMensagemChat = async (req, res) => {
           chain.emit('status_mensagem', payload)
         }
 
-        if (!ok) console.warn('[WhatsApp] Falha ao entregar mensagem para', String(telefoneParaEnvio || '').slice(-8), '— verifique se a instância Z-API está conectada (escaneie o QR no painel)')
+        if (!ok) {
+          const errMsg = sendResult?.error || sendResult?.blockedBy
+          if (errMsg) console.warn('[WhatsApp] Falha ao entregar:', String(telefoneParaEnvio || '').slice(-8), '—', errMsg)
+          else console.warn('[WhatsApp] Falha ao entregar mensagem para', String(telefoneParaEnvio || '').slice(-8), '— verifique se a instância Z-API está conectada (escaneie o QR no painel)')
+        }
         sendResult = result
       } catch (e) {
         console.error('WhatsApp enviar:', e)
+        sendResult = { ok: false, error: e?.message || 'Erro ao enviar mensagem' }
         await supabase
           .from('mensagens')
           .update({ status: 'erro' })
@@ -2458,11 +2463,15 @@ exports.enviarMensagemChat = async (req, res) => {
     // Não retornar mensagem completa — evita duplicação no frontend (API + socket).
     // A mensagem chega via socket nova_mensagem (única fonte de verdade para exibição).
     const sendOk = !!telefoneParaEnvio && (typeof sendResult === 'boolean' ? sendResult : sendResult?.ok === true)
+    const motivoErro = sendResult?.error || sendResult?.blockedBy
     return res.json({
       ok: true,
       id: msg.id,
       conversa_id: Number(conversa_id),
-      ...(sendOk ? { status: 'sent' } : { status: sendResult?.blockedBy ? 'blocked' : 'erro', ...(sendResult?.blockedBy ? { motivo: sendResult.blockedBy } : {}) })
+      ...(sendOk ? { status: 'sent' } : {
+        status: sendResult?.blockedBy ? 'blocked' : 'erro',
+        ...(motivoErro ? { motivo: motivoErro } : {})
+      })
     })
   } catch (err) {
     console.error(err)

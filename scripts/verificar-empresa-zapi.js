@@ -15,7 +15,7 @@ async function main() {
   const companyId = process.argv[2] ? Number(process.argv[2]) : null
   const { data, error } = await supabase
     .from('empresa_zapi')
-    .select('company_id, instance_id, ativo, criado_em')
+    .select('company_id, instance_id, instance_token, client_token, ativo, criado_em')
     .order('company_id', { ascending: true })
 
   if (error) {
@@ -38,12 +38,18 @@ async function main() {
   }
 
   for (const r of rows) {
-    const ok = r.instance_id && r.ativo === true
+    const hasInstance = !!(r.instance_id && r.instance_token)
+    const hasClientToken = !!(r.client_token && String(r.client_token).trim())
+    const ok = hasInstance && r.ativo === true
     const status = ok ? '✅' : '❌'
-    console.log(`${status} company_id=${r.company_id} instance_id=${(r.instance_id || '').slice(0, 24)}... ativo=${r.ativo}`)
+    console.log(`${status} company_id=${r.company_id} instance_id=${(r.instance_id || '').slice(0, 24)}... ativo=${r.ativo} client_token=${hasClientToken ? 'sim' : 'NÃO'}`)
     if (!ok) {
       if (!r.instance_id) console.warn('   → instance_id vazio')
+      if (!r.instance_token) console.warn('   → instance_token vazio')
       if (r.ativo !== true) console.warn('   → ativo deve ser true para envio funcionar')
+    }
+    if (!hasClientToken) {
+      console.warn('   ⚠️  client_token ausente — Z-API exige para envio. Obtenha em: painel Z-API → Segurança → Token da conta')
     }
   }
   console.log('\nPara envio funcionar: empresa_zapi com instance_id, instance_token, client_token e ativo=true.')

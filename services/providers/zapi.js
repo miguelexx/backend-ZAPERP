@@ -242,14 +242,18 @@ async function sendText(phone, message, opts = {}) {
   if (!cfg) {
     const cid = opts?.companyId ?? opts?.company_id
     if (cid != null) console.warn(`[ZAPI] sendText: sem config para company ${cid} — verifique empresa_zapi (company_id, instance_id, ativo=true)`)
-    return { ok: false, messageId: null }
+    return { ok: false, messageId: null, error: 'Instância Z-API não configurada. Conecte o WhatsApp no painel de integrações.' }
   }
   const nums = await phoneCandidatesForSendAsync(phone, cfg)
-  if (!nums.length || !message) return { ok: false, messageId: null }
+  if (!nums.length) {
+    return { ok: false, messageId: null, error: 'Número de telefone inválido. Use o formato 55 + DDD + número (ex: 5534999999999).' }
+  }
+  if (!message) return { ok: false, messageId: null, error: 'Mensagem vazia.' }
 
   const replyMessageId = opts?.replyMessageId ? String(opts.replyMessageId).trim() : null
 
   try {
+    let lastError = null
     for (const num of nums) {
       const body = { phone: num, message: String(message).trim() }
       // reply nativo WhatsApp: Z-API aceita "replyMessageId" no corpo
@@ -264,6 +268,21 @@ async function sendText(phone, message, opts = {}) {
       const bodyText = await res.text().catch(() => '')
       if (!res.ok) {
         logClientTokenHint(bodyText)
+        const errLower = String(bodyText || '').toLowerCase()
+        if (errLower.includes('client-token') || errLower.includes('client_token')) {
+          lastError = 'Z-API exige Client-Token. Configure em Integrações → Z-API → Token da conta (painel Z-API → Segurança).'
+        } else if (errLower.includes('restore') || errLower.includes('disconnected') || errLower.includes('qr') || errLower.includes('qrcode')) {
+          lastError = 'WhatsApp desconectado. Escaneie o QR Code novamente no painel de integrações.'
+        } else if (bodyText && bodyText.length < 300) {
+          try {
+            const parsed = JSON.parse(bodyText)
+            lastError = parsed?.error || parsed?.message || parsed?.messageError || bodyText
+          } catch {
+            lastError = bodyText || `HTTP ${res.status}`
+          }
+        } else {
+          lastError = `Falha ao enviar (HTTP ${res.status}). Verifique se a instância está conectada.`
+        }
         console.warn('❌ Z-API falha ao enviar texto:', String(num || '').slice(-12), res.status, String(bodyText || '').slice(0, 200))
         continue
       }
@@ -273,7 +292,14 @@ async function sendText(phone, message, opts = {}) {
       try { data = bodyText ? JSON.parse(bodyText) : null } catch { data = null }
       const err = data?.error || data?.messageError || data?.errorMessage || null
       if (err) {
-        console.warn('❌ Z-API envio retornou erro (200):', String(num || '').slice(-12), String(err).slice(0, 200))
+        const errStr = String(err)
+        lastError = errStr
+        if (errStr.toLowerCase().includes('client-token')) {
+          lastError = 'Z-API exige Client-Token. Configure em Integrações → Z-API → Token da conta.'
+        } else if (errStr.toLowerCase().includes('restore') || errStr.toLowerCase().includes('disconnected')) {
+          lastError = 'WhatsApp desconectado. Escaneie o QR Code novamente no painel de integrações.'
+        }
+        console.warn('❌ Z-API envio retornou erro (200):', String(num || '').slice(-12), errStr.slice(0, 200))
         continue
       }
 
@@ -281,10 +307,15 @@ async function sendText(phone, message, opts = {}) {
       console.log('✅ Z-API mensagem enviada:', String(num || '').slice(-12), msgId ? `id=${String(msgId).slice(0, 14)}...` : '', replyMessageId ? `[reply a ${String(replyMessageId).slice(0, 10)}...]` : '')
       return { ok: true, messageId: msgId ? String(msgId) : null }
     }
-    return { ok: false, messageId: null }
+    return { ok: false, messageId: null, error: lastError || 'Falha ao enviar mensagem. Tente novamente.' }
   } catch (e) {
     console.error('❌ Erro Z-API sendText:', e.message)
-    return { ok: false, messageId: null }
+    const msg = e?.message || String(e)
+    let userError = 'Erro de conexão com Z-API. Tente novamente.'
+    if (msg.includes('fetch') || msg.includes('network') || msg.includes('ECONNREFUSED') || msg.includes('ETIMEDOUT')) {
+      userError = 'Não foi possível conectar à Z-API. Verifique sua internet e se a Z-API está online.'
+    }
+    return { ok: false, messageId: null, error: userError }
   }
 }
 
