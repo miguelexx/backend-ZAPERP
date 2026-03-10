@@ -50,7 +50,10 @@ Com base na análise do codebase do backend WhatsApp + Z-API:
 | **Envio** | Quem assumiu OU conversa em fila (atendente_id null) pode enviar — otimizado para chatbot | Bom |
 | **Permissões** | Admin, supervisor e atendente com regras claras | Bom |
 | **Rate limit** | 300 req/min API; 200 req/min webhook; 5 tentativas login/min — suporta volume de chatbot | Bom |
-| **QR Code / conexão** | Throttle 10s entre QR; bloqueio 60s após 3 tentativas sem conectar | Bom |
+| **QR Code / conexão** | Throttle 15s entre QR; bloqueio 90s após 3 tentativas — reduz risco de detecção | Bom |
+| **Proteção de envio** | Sempre ativa com defaults: 5s entre msgs, 40/min, 400/h (empresas.intervalo_minimo_entre_mensagens_seg etc.) | Bom |
+| **Delay entre envios** | ~280ms mínimo entre chamadas Z-API por empresa (ZAPI_SEND_DELAY_MS) | Bom |
+| **Cache sync contatos** | syncContactFromZapi com cache 5 min — evita centenas de chamadas GET /contacts | Bom |
 | **Timeout inatividade** | Job fecha conversas sem resposta após X minutos configurável | Bom |
 | **Limite de chats por atendente** | `limite_chats_por_atendente` configurável por empresa | Bom |
 | **SLA sem resposta** | Alerta quando cliente fica mais de X min sem resposta | Bom |

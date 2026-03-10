@@ -20,6 +20,20 @@ const ZAPI_TOKEN = process.env.ZAPI_TOKEN || ''
 const ZAPI_CLIENT_TOKEN = (process.env.ZAPI_CLIENT_TOKEN || '').trim()
 const IS_PRODUCTION = String(process.env.NODE_ENV || '').toLowerCase() === 'production'
 
+// Delay mínimo entre envios por empresa (anti-bloqueio: evita bursts que acionam detecção do WhatsApp)
+const MIN_DELAY_BETWEEN_SENDS_MS = Math.min(500, Math.max(150, Number(process.env.ZAPI_SEND_DELAY_MS) || 280))
+const lastSendPerCompany = new Map()
+
+async function awaitSendDelay(companyId) {
+  const key = companyId ?? 'default'
+  const last = lastSendPerCompany.get(key) || 0
+  const elapsed = Date.now() - last
+  if (elapsed < MIN_DELAY_BETWEEN_SENDS_MS) {
+    await new Promise(r => setTimeout(r, MIN_DELAY_BETWEEN_SENDS_MS - elapsed))
+  }
+  lastSendPerCompany.set(key, Date.now())
+}
+
 /**
  * Resolve config (basePath, headers) para chamadas à Z-API.
  * Prioridade: opts.companyId → empresa_zapi | fallback ENV (só se NODE_ENV !== production).
@@ -223,6 +237,7 @@ async function sendText(phone, message, opts = {}) {
     console.warn('[ZAPI] sendText bloqueado por proteção:', protecao.reason || 'proteção')
     return { ok: false, messageId: null, blockedBy: protecao.reason }
   }
+  await awaitSendDelay(companyId)
   const cfg = await resolveConfig(opts)
   if (!cfg) {
     const cid = opts?.companyId ?? opts?.company_id
@@ -288,6 +303,7 @@ async function sendLink(phone, payload, opts = {}) {
     console.warn('[ZAPI] sendLink bloqueado por proteção:', protecao.reason || 'proteção')
     return { ok: false, messageId: null, blockedBy: protecao.reason }
   }
+  await awaitSendDelay(opts?.companyId ?? opts?.company_id)
   const cfg = await resolveConfig(opts)
   if (!cfg) return { ok: false, messageId: null }
   const nums = await phoneCandidatesForSendAsync(phone, cfg)
@@ -362,6 +378,7 @@ async function sendImage(phone, url, caption = '', opts = {}) {
     console.warn('[ZAPI] sendImage bloqueado por proteção:', protecao.reason || 'proteção')
     return false
   }
+  await awaitSendDelay(opts?.companyId ?? opts?.company_id)
   const cfg = await resolveConfig(opts)
   if (!cfg) return false
   try {
@@ -402,6 +419,7 @@ async function sendAudio(phone, audioUrl, opts = {}) {
     console.warn('[ZAPI] sendAudio bloqueado por proteção:', protecao.reason || 'proteção')
     return false
   }
+  await awaitSendDelay(opts?.companyId ?? opts?.company_id)
   const cfg = await resolveConfig(opts)
   if (!cfg) return false
   try {
@@ -438,6 +456,7 @@ async function sendFile(phone, url, fileName = '', opts = {}) {
     console.warn('[ZAPI] sendFile bloqueado por proteção:', protecao.reason || 'proteção')
     return false
   }
+  await awaitSendDelay(opts?.companyId ?? opts?.company_id)
   const cfg = await resolveConfig(opts)
   if (!cfg) return false
   const nums = await phoneCandidatesForSendAsync(phone, cfg)
@@ -483,6 +502,7 @@ async function sendSticker(phone, sticker, opts = {}) {
     console.warn('[ZAPI] sendSticker bloqueado por proteção:', protecao.reason || 'proteção')
     return false
   }
+  await awaitSendDelay(opts?.companyId ?? opts?.company_id)
   const cfg = await resolveConfig(opts)
   if (!cfg) return false
   try {
@@ -632,6 +652,7 @@ async function sendVideo(phone, videoUrl, caption = '', opts = {}) {
     console.warn('[ZAPI] sendVideo bloqueado por proteção:', protecao.reason || 'proteção')
     return false
   }
+  await awaitSendDelay(opts?.companyId ?? opts?.company_id)
   const cfg = await resolveConfig(opts)
   if (!cfg) return false
   try {
@@ -733,6 +754,7 @@ async function sendContact(phone, contactName, contactPhone, opts = {}) {
     console.warn('[ZAPI] sendContact bloqueado por proteção:', protecao.reason || 'proteção')
     return { ok: false, messageId: null }
   }
+  await awaitSendDelay(opts?.companyId ?? opts?.company_id)
   const cfg = await resolveConfig(opts)
   if (!cfg) return { ok: false, messageId: null }
   try {
@@ -799,6 +821,7 @@ async function sendCall(phone, callDuration, opts = {}) {
     console.warn('[ZAPI] sendCall bloqueado por proteção:', protecao.reason || 'proteção')
     return { ok: false, messageId: null }
   }
+  await awaitSendDelay(opts?.companyId ?? opts?.company_id)
   const cfg = await resolveConfig(opts)
   if (!cfg) return { ok: false, messageId: null }
   try {

@@ -1447,6 +1447,8 @@ exports.receberZapi = async (req, res) => {
 
     let cliente_id = null
     let pendingContactSync = null
+    let nomeParaCache = null // Nome resolvido (syncZapi ou payload) para atualizar cache da conversa
+    let nomeSourceParaCache = null
 
     if (!isGroup) {
       // LID sintético (@lid): mensagem espelhada enviada pelo celular sem número real conhecido.
@@ -1459,10 +1461,34 @@ exports.receberZapi = async (req, res) => {
         const nomePayloadRaw = fromMe
           ? (payload.name ?? payload.formattedName ?? payload.chatName ?? payload.chat?.name ?? payload.groupName ?? payload.short ?? payload.notifyName ?? payload.senderName ?? payload.displayName ?? payload.pushName ?? null)
           : (payload.name ?? payload.formattedName ?? payload.short ?? payload.notifyName ?? payload.senderName ?? payload.chatName ?? payload.chat?.name ?? payload.displayName ?? payload.pushName ?? null)
-        const nomePayload = nomePayloadRaw ? String(nomePayloadRaw).trim() : null
+        let nomePayload = nomePayloadRaw ? String(nomePayloadRaw).trim() : null
+        let nomeSource = (payload.name && String(payload.name).trim()) ? 'name' : (fromMe ? 'chatName' : 'senderName')
+
+        // !fromMe: webhook envia senderName/chatName = perfil WhatsApp. Nome salvo no celular vem da API GET /contacts.
+        if (!fromMe && phone) {
+          try {
+            const syncResult = await Promise.race([
+              syncContactFromZapi(phone, company_id),
+              new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 2500))
+            ])
+            if (syncResult?.nome && String(syncResult.nome).trim()) {
+              nomePayload = String(syncResult.nome).trim()
+              nomeSource = 'syncZapi'
+              nomeParaCache = nomePayload
+              nomeSourceParaCache = 'syncZapi'
+              if (syncResult.foto_perfil && !senderPhoto) senderPhoto = syncResult.foto_perfil
+            }
+          } catch (_) {
+            // fallback: usa nome do payload (senderName/chatName)
+          }
+        }
+        if (nomePayload && !nomeParaCache) {
+          nomeParaCache = nomePayload
+          nomeSourceParaCache = nomeSource
+        }
+
         const pushnameRaw = payload.notifyName ?? payload.pushName ?? payload.notify ?? nomePayloadRaw
         const pushnamePayload = pushnameRaw ? String(pushnameRaw).trim() : null
-        const nomeSource = (payload.name && String(payload.name).trim()) ? 'name' : (fromMe ? 'chatName' : 'senderName')
         const { cliente_id: cid } = await getOrCreateCliente(supabase, company_id, phone, {
           nome: nomePayload,
           nomeSource,
@@ -1594,9 +1620,8 @@ exports.receberZapi = async (req, res) => {
         }
       }
 
-      // Cache nome/foto do contato. Nome: usa chooseBestName — source 'name' (payload.name) tem score 110
-      // e substitui nomes abreviados; cache vazio ou nome mais completo do celular sempre atualiza.
-      if (!isGroup && conversa_id && (senderName || senderPhoto)) {
+      // Cache nome/foto do contato. Prioriza nome da API (syncZapi = como salvo no celular).
+      if (!isGroup && conversa_id && (nomeParaCache || senderName || senderPhoto)) {
         const { data: convAtual } = await supabase
           .from('conversas')
           .select('nome_contato_cache, foto_perfil_contato_cache')
@@ -1604,12 +1629,13 @@ exports.receberZapi = async (req, res) => {
           .eq('company_id', company_id)
           .maybeSingle()
         const cacheUpdates = {}
-        const nomeSource = (payload.name && String(payload.name).trim()) ? 'name' : (fromMe ? 'chatName' : 'senderName')
-        if (senderName && String(senderName).trim()) {
+        const nomeCandidato = (nomeParaCache && String(nomeParaCache).trim()) || (senderName && String(senderName).trim())
+        const sourceCache = nomeSourceParaCache || ((payload.name && String(payload.name).trim()) ? 'name' : (fromMe ? 'chatName' : 'senderName'))
+        if (nomeCandidato) {
           const { name: bestNome, decision } = chooseBestName(
             convAtual?.nome_contato_cache || null,
-            String(senderName).trim(),
-            nomeSource,
+            String(nomeCandidato).trim(),
+            sourceCache,
             { fromMe, company_id, telefoneTail: String(phone).replace(/\D/g, '').slice(-6) || null }
           )
           if (bestNome && decision === 'updated') cacheUpdates.nome_contato_cache = bestNome
@@ -1639,7 +1665,7 @@ exports.receberZapi = async (req, res) => {
             tipo: isGroup ? 'grupo' : 'cliente',
             nome_grupo: isGroup ? (nomeGrupo || null) : null,
             foto_grupo: isGroup ? (chatPhoto || null) : null,
-            contato_nome: isGroup ? (nomeGrupo || phone || 'Grupo') : (senderName || payload?.chatName || phone || null),
+            contato_nome: isGroup ? (nomeGrupo || phone || 'Grupo') : (nomeParaCache || senderName || payload?.chatName || phone || null),
             foto_perfil: isGroup ? null : (senderPhoto || payload?.photo || null),
             unread_count: unreadInicial,
             tags: [],

@@ -23,8 +23,8 @@ Ver: [docs/ZAPI-MULTI-TENANT.md](./ZAPI-MULTI-TENANT.md)
 
 ## Guard / throttle / bloqueio
 
-- [x] Throttle 10s entre chamadas de QR
-- [x] Bloqueio 60s após 3 tentativas
+- [x] Throttle 15s entre chamadas de QR (anti-bloqueio: reconexões rápidas acionam detecção)
+- [x] Bloqueio 90s após 3 tentativas sem conectar
 - [x] 429 com `retryAfterSeconds` quando throttle/bloqueio
 - [x] `resetOnConnected` quando `connected=true` (em status e qrcode)
 

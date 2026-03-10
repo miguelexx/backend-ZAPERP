@@ -1,13 +1,14 @@
 /**
  * Guard para o fluxo Conectar WhatsApp (Z-API QR Code).
- * Throttle 10s entre QRs; bloqueio 60s após 3 tentativas sem conectar.
+ * Reduz risco de bloqueio: throttle 15s entre QRs; bloqueio 90s após 3 tentativas.
+ * Reconexões muito rápidas podem acionar detecção do WhatsApp.
  */
 
 const supabase = require('../config/supabase')
 
-const THROTTLE_SECONDS = 10
+const THROTTLE_SECONDS = 15
 const MAX_ATTEMPTS = 3
-const BLOCK_SECONDS = 60
+const BLOCK_SECONDS = 90
 
 /**
  * Verifica se pode servir novo QR.
