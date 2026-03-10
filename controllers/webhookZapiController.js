@@ -246,17 +246,17 @@ function resolveConversationKeyFromZapi(payload) {
       return { key: peerPhone, isGroup: false, participantPhone: '', debugReason: `fromMe ${source}` }
     }
     const destinationSources = [
+      [payload.key?.remoteJid,  'key.remoteJid'],
+      [payload.remoteJid,       'remoteJid'],
+      [payload.chat?.remoteJid, 'chat.remoteJid'],
+      [payload.chatId,          'chatId'],
+      [payload.chat?.id,        'chat.id'],
       [payload.to,             'to'],
       [payload.toPhone,        'toPhone'],
       [payload.recipientPhone, 'recipientPhone'],
       [payload.recipient,      'recipient'],
       [payload.destination,    'destination'],
-      [payload.key?.remoteJid,  'key.remoteJid'],
       [payload.key?.participant, 'key.participant'],
-      [payload.remoteJid,       'remoteJid'],
-      [payload.chatId,          'chatId'],
-      [payload.chat?.id,        'chat.id'],
-      [payload.chat?.remoteJid, 'chat.remoteJid'],
       [payload.data?.key?.remoteJid, 'data.key.remoteJid'],
       [payload.data?.remoteJid, 'data.remoteJid'],
       [payload.data?.chatId,    'data.chatId'],
@@ -549,15 +549,36 @@ function extractMessage(payload) {
 /**
  * POST /webhooks/zapi — recebe callback do Z-API (mensagem recebida ou enviada). Suporta grupos e lote.
  */
-/** Retorna array de payloads para processar (1 ou N mensagens). */
+/** Retorna array de payloads para processar (1 ou N mensagens).
+ * Mescla campos de body (key, instanceId, etc.) quando payload vem de body.value/data —
+ * Z-API pode enviar key.remoteJid no nível raiz com a mensagem em value/data. */
 function getPayloads(body) {
   if (!body || typeof body !== 'object') return [{}]
+  const merge = (parent, child) => {
+    if (!child || typeof child !== 'object') return parent || {}
+    const out = { ...parent, ...child }
+    // key.remoteJid pode estar só em parent (Z-API envia mensagem em value, key no raiz)
+    if (parent?.key && (!child?.key || !child.key?.remoteJid) && parent.key?.remoteJid) {
+      out.key = { ...(child?.key || {}), ...parent.key }
+    }
+    return out
+  }
   if (Array.isArray(body) && body.length > 0) return body
-  if (body.data && Array.isArray(body.data) && body.data.length > 0) return body.data
-  if (body.data && typeof body.data === 'object' && !Array.isArray(body.data)) return [body.data]
-  if (body.value && typeof body.value === 'object') return [body.value]
-  if (body.messages && Array.isArray(body.messages) && body.messages.length > 0) return body.messages
-  if (body.message && typeof body.message === 'object') return [body.message]
+  if (body.data && Array.isArray(body.data) && body.data.length > 0) {
+    return body.data.map((item) => merge(body, item))
+  }
+  if (body.data && typeof body.data === 'object' && !Array.isArray(body.data)) {
+    return [merge(body, body.data)]
+  }
+  if (body.value && typeof body.value === 'object') {
+    return [merge(body, body.value)]
+  }
+  if (body.messages && Array.isArray(body.messages) && body.messages.length > 0) {
+    return body.messages.map((item) => merge(body, item))
+  }
+  if (body.message && typeof body.message === 'object') {
+    return [merge(body, body.message)]
+  }
   return [body]
 }
 
@@ -1500,14 +1521,12 @@ exports.receberZapi = async (req, res) => {
           departamento_id = convByPhone.departamento_id ?? null
           isNewConversation = false
           console.log('[Z-API] 🔗 Unificado por chat_lid: conv LID mesclada em conv telefone', { conversa_id, lidPart })
-        } else if (convByLid) {
-          if (hasRealPhone) {
-            const canonical = getCanonicalPhone(phone)
-            if (canonical) {
-              await supabase.from('conversas').update({ telefone: canonical, chat_lid: lidPart }).eq('id', convByLid.id).eq('company_id', company_id)
-            } else {
-              await supabase.from('conversas').update({ chat_lid: lidPart }).eq('id', convByLid.id).eq('company_id', company_id)
-            }
+        } else if (convByLid && hasRealPhone) {
+          // Só usar convByLid quando temos número real — confirma que é o contato certo.
+          // LID-only: NÃO confiar em convByLid (pode ter sido associado errado antes) → findOrCreate(lid:xxx).
+          const canonical = getCanonicalPhone(phone)
+          if (canonical) {
+            await supabase.from('conversas').update({ telefone: canonical, chat_lid: lidPart }).eq('id', convByLid.id).eq('company_id', company_id)
           } else {
             await supabase.from('conversas').update({ chat_lid: lidPart }).eq('id', convByLid.id).eq('company_id', company_id)
           }
@@ -1519,56 +1538,11 @@ exports.receberZapi = async (req, res) => {
           conversa_id = convByPhone.id
           departamento_id = convByPhone.departamento_id ?? null
           isNewConversation = false
-        } else if (!convByLid && !hasRealPhone && senderName && String(senderName).trim()) {
-          // fromMe+LID: Z-API às vezes envia só @lid sem número. Tenta encontrar conversa existente pelo nome do contato (chatName).
-          const nomeBusca = String(senderName).trim().replace(/[\u{1F300}-\u{1F9FF}]/gu, '').trim() || String(senderName).trim()
-          const nomePrimeiraPalavra = (nomeBusca.split(/\s/)[0] || nomeBusca).slice(0, 50).replace(/[%_\\]/g, '\\$&')
-          const { data: convsByNome } = await supabase
-            .from('conversas')
-            .select('id, departamento_id, telefone')
-            .eq('company_id', company_id)
-            .neq('status_atendimento', 'fechada')
-            .ilike('nome_contato_cache', `%${nomePrimeiraPalavra}%`)
-            .not('telefone', 'like', 'lid:%')
-            .order('ultima_atividade', { ascending: false })
-            .limit(3)
-          const convNome = Array.isArray(convsByNome) && convsByNome.length > 0 ? convsByNome[0] : null
-          if (!convNome && nomeBusca.length >= 2) {
-            const { data: clientesByNome } = await supabase
-              .from('clientes')
-              .select('id')
-              .eq('company_id', company_id)
-              .ilike('nome', `%${nomeBusca}%`)
-              .limit(5)
-            const cids = Array.isArray(clientesByNome) ? clientesByNome.map((c) => c.id) : []
-            if (cids.length > 0) {
-              const { data: convsCliente } = await supabase
-                .from('conversas')
-                .select('id, departamento_id, telefone')
-                .eq('company_id', company_id)
-                .in('cliente_id', cids)
-                .neq('status_atendimento', 'fechada')
-                .not('telefone', 'like', 'lid:%')
-                .order('ultima_atividade', { ascending: false })
-                .limit(1)
-              const c = Array.isArray(convsCliente) && convsCliente[0] ? convsCliente[0] : null
-              if (c) {
-                await supabase.from('conversas').update({ chat_lid: lidPart }).eq('id', c.id).eq('company_id', company_id)
-                conversa_id = c.id
-                departamento_id = c.departamento_id ?? null
-                isNewConversation = false
-                console.log('[Z-API] fromMe+LID: conversa encontrada por cliente.nome:', { conversa_id, chatName: nomeBusca?.slice(0, 20) })
-              }
-            }
-          }
-          if (convNome && !conversa_id) {
-            await supabase.from('conversas').update({ chat_lid: lidPart }).eq('id', convNome.id).eq('company_id', company_id)
-            conversa_id = convNome.id
-            departamento_id = convNome.departamento_id ?? null
-            isNewConversation = false
-            console.log('[Z-API] fromMe+LID: conversa encontrada por nome_contato_cache:', { conversa_id, chatName: nomeBusca?.slice(0, 20) })
-          }
         }
+        // REMOVIDO: fallback por nome (nome_contato_cache / cliente.nome) — inseguro: vários contatos
+        // compartilham mesmo primeiro nome (João, Maria etc.) → mensagem ia para contato errado.
+        // Com LID-only, usamos findOrCreateConversation(lid:xxx) para criar/achar conv por chat_lid.
+        // Quando chegar DeliveryCallback ou resposta com número real, mergeConversationLidToPhone corrige.
       }
 
       if (conversa_id == null) {
@@ -1618,7 +1592,7 @@ exports.receberZapi = async (req, res) => {
         }
       }
 
-      // Cache nome/foto do contato — chooseBestName evita regressão (nunca substituir nome bom por pior)
+      // Cache nome/foto do contato — só preencher quando VAZIO (nunca trocar nome existente)
       if (!isGroup && conversa_id && (senderName || senderPhoto)) {
         const { data: convAtual } = await supabase
           .from('conversas')
@@ -1627,16 +1601,16 @@ exports.receberZapi = async (req, res) => {
           .eq('company_id', company_id)
           .maybeSingle()
         const cacheUpdates = {}
-        const cacheSource = fromMe ? 'chatName' : 'senderName'
-        const telefoneTail = String(phone).replace(/\D/g, '').slice(-6) || null
-        if (senderName && String(senderName).trim()) {
+        const nomeCacheVazio = !convAtual?.nome_contato_cache || !String(convAtual.nome_contato_cache).trim()
+        // Só atualizar nome quando cache está vazio — evita alternar entre senderName/pushname/nome
+        if (nomeCacheVazio && senderName && String(senderName).trim()) {
           const { name: bestNome } = chooseBestName(
-            convAtual?.nome_contato_cache,
+            null,
             String(senderName).trim(),
-            cacheSource,
-            { fromMe, company_id, telefoneTail }
+            fromMe ? 'chatName' : 'senderName',
+            { fromMe, company_id, telefoneTail: String(phone).replace(/\D/g, '').slice(-6) || null }
           )
-          if (bestNome && bestNome !== (convAtual?.nome_contato_cache || '')) cacheUpdates.nome_contato_cache = bestNome
+          if (bestNome) cacheUpdates.nome_contato_cache = bestNome
         }
         const fotoCacheVazia = !convAtual?.foto_perfil_contato_cache || !String(convAtual.foto_perfil_contato_cache).trim()
         if (fotoCacheVazia && senderPhoto && String(senderPhoto).trim()) cacheUpdates.foto_perfil_contato_cache = String(senderPhoto).trim()
@@ -2321,8 +2295,7 @@ exports.receberZapi = async (req, res) => {
       if (!mensagemFoiInseridaPeloWebhook) {
         io.to(`empresa_${company_id}`).emit('atualizar_conversa', { id: convIdForEmit })
       }
-      // conversa_atualizada enriquecida: ultima_atividade, nome/foto cache (frontend atualiza lista lateral)
-      // Sempre incluir nome quando disponível (cache ou cliente) — evita frontend sobrescrever com vazio
+      // conversa_atualizada: usar APENAS nome_contato_cache (nunca clientes.nome/pushname — evita nome alternar)
       const { data: convRow } = await supabase
         .from('conversas')
         .select('id, ultima_atividade, nome_contato_cache, foto_perfil_contato_cache, telefone, cliente_id, departamento_id')
@@ -2331,15 +2304,15 @@ exports.receberZapi = async (req, res) => {
         .maybeSingle()
       let contatoNome = convRow?.nome_contato_cache ? String(convRow.nome_contato_cache).trim() : null
       let fotoPerfil = convRow?.foto_perfil_contato_cache ? String(convRow.foto_perfil_contato_cache).trim() : null
-      if ((!contatoNome || !fotoPerfil) && convRow?.cliente_id && !isGroup) {
+      // Foto: fallback cliente só se cache vazio (nome: NUNCA — mantém contato fixo)
+      if (!fotoPerfil && convRow?.cliente_id && !isGroup) {
         const { data: cli } = await supabase
           .from('clientes')
-          .select('nome, pushname, foto_perfil')
+          .select('foto_perfil')
           .eq('id', convRow.cliente_id)
           .eq('company_id', company_id)
           .maybeSingle()
-        if (cli && !contatoNome) contatoNome = (cli.nome || cli.pushname || '').trim() || null
-        if (cli?.foto_perfil && !fotoPerfil) fotoPerfil = String(cli.foto_perfil).trim()
+        if (cli?.foto_perfil) fotoPerfil = String(cli.foto_perfil).trim()
       }
       const depId = departamento_id ?? convRow?.departamento_id ?? null
       const convPayload = {
@@ -2388,14 +2361,16 @@ exports.receberZapi = async (req, res) => {
           if (Object.keys(up).length === 0) return null
           const res = await supabase.from('clientes').update(up).eq('id', syncClienteId).eq('company_id', company_id)
           if (res.error) return
+          // contato_atualizado: usar nome_contato_cache da conversa (nunca clientes.nome/pushname — evita trocar nome)
+          const { data: conv } = await supabase.from('conversas').select('nome_contato_cache').eq('id', convId).eq('company_id', company_id).maybeSingle()
+          const nomeParaEmit = conv?.nome_contato_cache ? String(conv.nome_contato_cache).trim() : null
           const r = await supabase.from('clientes').select('nome, pushname, telefone, foto_perfil').eq('id', syncClienteId).single()
           const data = r?.data
           if (data && io) {
-            const displayName = data.nome || data.pushname || data.telefone || syncPhone
-            console.log('✅ Contato sincronizado Z-API:', syncPhone?.slice(-6), displayName || '(sem nome)')
+            console.log('✅ Contato sincronizado Z-API:', syncPhone?.slice(-6), nomeParaEmit || '(sem nome)')
             io.to(`empresa_${company_id}`).emit('contato_atualizado', {
               conversa_id: convId,
-              contato_nome: displayName,
+              contato_nome: nomeParaEmit,
               telefone: data.telefone || syncPhone,
               foto_perfil: data.foto_perfil
             })

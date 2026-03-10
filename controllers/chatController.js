@@ -583,7 +583,7 @@ exports.listarConversas = async (req, res) => {
         if (fallbackCli) clientesObj = fallbackCli
       }
 
-      // Prioridade: nome (contato do celular) > pushname (perfil WhatsApp)
+      // Prioridade: nome_contato_cache (único, fixo) > nome/pushname do cliente
       const nomeCliente = (clientesObj?.nome ?? clientesObj?.pushname ?? null) && String(clientesObj?.nome ?? clientesObj?.pushname ?? '').trim() ? String(clientesObj?.nome ?? clientesObj?.pushname ?? '').trim() : null
       const fotoCliente = clientesObj?.foto_perfil ?? null
       const isGroup = isGroupConversation(c)
@@ -594,11 +594,9 @@ exports.listarConversas = async (req, res) => {
       const contatoNome = isGroup
         ? (c.nome_grupo || (c.telefone && !String(c.telefone).startsWith('lid:') ? c.telefone : null) || 'Grupo')
         : (
-            // Para contatos individuais, o campo de nome **nunca** cai para o telefone.
-            // Se não houver nome conhecido, deixamos null e o front decide como exibir
-            // (por exemplo, usando telefone_exibivel).
-            nomeCliente ||
+            // Cache primeiro (nome único, nunca alterna) — depois nome/pushname do cliente
             (c.nome_contato_cache && String(c.nome_contato_cache).trim()) ||
+            nomeCliente ||
             null
           )
       const fotoPerfil = isGroup ? null : (fotoCliente ?? (c.foto_perfil_contato_cache && String(c.foto_perfil_contato_cache).trim()) ?? null)
@@ -1207,9 +1205,8 @@ exports.sincronizarFotosPerfilZapi = async (req, res) => {
           }
           if (!upd.error) {
             atualizados++
-            // Atualiza cache nas conversas vinculadas (nome_contato_cache, foto_perfil_contato_cache)
+            // Atualiza só foto no cache (nome: nunca trocar — evita alternar ao sync)
             const cacheUpdates = {}
-            if (updates.nome) cacheUpdates.nome_contato_cache = updates.nome
             if (updates.foto_perfil) cacheUpdates.foto_perfil_contato_cache = updates.foto_perfil
             if (Object.keys(cacheUpdates).length > 0) {
               supabase.from('conversas').update(cacheUpdates).eq('cliente_id', cl.id).eq('company_id', cid).select('id').then(({ data }) => {
@@ -2332,22 +2329,19 @@ exports.enviarMensagemChat = async (req, res) => {
         io.EVENTS?.NOVA_MENSAGEM || 'nova_mensagem',
         novaMsgPayload
       )
-      // Incluir SEMPRE nome/foto no payload para evitar frontend "bugar" o nome ao enviar msg
+      // Usar APENAS nome_contato_cache — nunca clientes.nome/pushname (evita nome alternar ao enviar/receber)
       let contatoNome = conversa?.nome_contato_cache ? String(conversa.nome_contato_cache).trim() : null
       let fotoPerfil = conversa?.foto_perfil_contato_cache ? String(conversa.foto_perfil_contato_cache).trim() : null
-      if ((!contatoNome || !fotoPerfil) && conversa?.cliente_id) {
+      // Foto: fallback cliente só se cache vazio (nome: NUNCA trocar — mantém contato fixo)
+      if (!fotoPerfil && conversa?.cliente_id) {
         const { data: cli } = await supabase
           .from('clientes')
-          .select('nome, pushname, foto_perfil')
+          .select('foto_perfil')
           .eq('id', conversa.cliente_id)
           .eq('company_id', company_id)
           .maybeSingle()
-        if (cli && !contatoNome) contatoNome = (cli.nome || cli.pushname || '').trim() || null
-        if (cli?.foto_perfil && !fotoPerfil) fotoPerfil = String(cli.foto_perfil).trim()
+        if (cli?.foto_perfil) fotoPerfil = String(cli.foto_perfil).trim()
       }
-      if (!contatoNome && conversa?.telefone && !String(conversa.telefone).startsWith('lid:')) contatoNome = conversa.telefone
-      // Fallback: preservar nome que já está na tela (evita contato "sumir" em LID ou sync tardio)
-      if (!contatoNome && conversa?.nome_contato_cache) contatoNome = String(conversa.nome_contato_cache).trim()
       // ultima_mensagem_preview: só para preview na lista lateral — NUNCA adicionar ao array de mensagens
       // (nova_mensagem já traz a mensagem completa para o chat; incluir id aqui causaria duplicata)
       // IMPORTANTE: incluir telefone e cliente_id para frontend manter deduplicação e não fazer contato "sumir"

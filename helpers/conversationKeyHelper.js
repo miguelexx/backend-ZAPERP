@@ -55,20 +55,19 @@ function resolvePeerPhone(payload) {
   }
 
   if (fromMe) {
-    // Prioridade: to / toPhone / recipientPhone / key.remoteJid (destino explícito)
-    // Inclui fontes aninhadas (payload.data, payload.value encapsulados, payload.message) e referencedMessage
+    // Prioridade: key.remoteJid/remoteJid PRIMEIRO (mais confiável - JID do chat no protocolo WhatsApp).
+    // Z-API pode enviar to/toPhone vazios ou inconsistentes em espelhamento fromMe; JID é a fonte canônica.
     const destPriority = [
+      [payload?.key?.remoteJid, 'key.remoteJid'],
+      [payload?.remoteJid, 'remoteJid'],
+      [payload?.chat?.remoteJid, 'chat.remoteJid'],
+      [payload?.chatId, 'chatId'],
+      [payload?.chat?.id, 'chat.id'],
       [payload?.to, 'to'],
       [payload?.toPhone, 'toPhone'],
       [payload?.recipientPhone, 'recipientPhone'],
       [payload?.recipient, 'recipient'],
       [payload?.destination, 'destination'],
-      [payload?.key?.remoteJid, 'key.remoteJid'],
-      [payload?.key?.participant, 'key.participant'],
-      [payload?.remoteJid, 'remoteJid'],
-      [payload?.chatId, 'chatId'],
-      [payload?.chat?.id, 'chat.id'],
-      [payload?.chat?.remoteJid, 'chat.remoteJid'],
       [payload?.data?.key?.remoteJid, 'data.key.remoteJid'],
       [payload?.data?.remoteJid, 'data.remoteJid'],
       [payload?.data?.chatId, 'data.chatId'],
@@ -83,6 +82,7 @@ function resolvePeerPhone(payload) {
       [payload?.message?.key?.remoteJid, 'message.key.remoteJid'],
       [payload?.referencedMessage?.phone, 'referencedMessage.phone'],
       [payload?.reaction?.referencedMessage?.phone, 'reaction.referencedMessage.phone'],
+      [payload?.senderPhone, 'senderPhone'],
     ]
     for (const [raw, source] of destPriority) {
       const n = norm(raw)
