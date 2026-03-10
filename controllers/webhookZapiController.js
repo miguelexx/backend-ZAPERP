@@ -461,12 +461,11 @@ function extractMessage(payload) {
   // participantPhone: remetente dentro do grupo (só relevante para grupos; usamos o valor resolvido por resolveConversationKeyFromZapi + o bruto do payload como fallback)
   const participantPhoneRaw = partPhoneResolved ||
     String(payload.participantPhone ?? payload.participant ?? payload.author ?? payload.key?.participant ?? '').replace(/\D/g, '')
-  // Doc Z-API: when fromMe=true, "sender" is us; nome/foto do CONTATO (destino) vêm de chatName/chat/photo
-  // Prioridade para nome salvo no celular: name (completo) > short (primeiro nome) > notifyName > senderName > chatName > ...
+  // Doc Z-API: name = nome completo salvo no celular; chatName/short = abreviados. Priorizar name sempre.
   const fromMeForExtract = Boolean(payload.fromMe ?? payload.key?.fromMe)
   const senderName = fromMeForExtract
-    ? (payload.chatName ?? payload.chat?.name ?? payload.groupName ?? payload.name ?? payload.short ?? payload.notifyName ?? payload.senderName ?? payload.displayName ?? payload.pushName ?? payload.formattedName ?? payload.sender?.name ?? null)
-    : (payload.name ?? payload.short ?? payload.notifyName ?? payload.senderName ?? payload.chatName ?? payload.chat?.name ?? payload.displayName ?? payload.pushName ?? payload.formattedName ?? payload.sender?.name ?? null)
+    ? (payload.name ?? payload.formattedName ?? payload.chatName ?? payload.chat?.name ?? payload.groupName ?? payload.short ?? payload.notifyName ?? payload.senderName ?? payload.displayName ?? payload.pushName ?? payload.sender?.name ?? null)
+    : (payload.name ?? payload.formattedName ?? payload.short ?? payload.notifyName ?? payload.senderName ?? payload.chatName ?? payload.chat?.name ?? payload.displayName ?? payload.pushName ?? payload.sender?.name ?? null)
   const senderPhoto = fromMeForExtract
     ? (payload.chatPhoto ?? payload.chat?.photo ?? payload.senderPhoto ?? payload.photo ?? payload.profilePicture ?? payload.sender?.photo ?? payload.profilePictureUrl ?? null)
     : (payload.senderPhoto ?? payload.photo ?? payload.profilePicture ?? payload.sender?.photo ?? payload.profilePictureUrl ?? null)
@@ -1458,12 +1457,12 @@ exports.receberZapi = async (req, res) => {
         console.log('[Z-API] LID key — conversa sem cliente vinculado (número real não disponível):', phone)
       } else {
         const nomePayloadRaw = fromMe
-          ? (payload.chatName ?? payload.chat?.name ?? payload.groupName ?? payload.name ?? payload.short ?? payload.notifyName ?? payload.senderName ?? payload.displayName ?? payload.pushName ?? null)
-          : (payload.name ?? payload.short ?? payload.notifyName ?? payload.senderName ?? payload.chatName ?? payload.chat?.name ?? payload.displayName ?? payload.pushName ?? null)
+          ? (payload.name ?? payload.formattedName ?? payload.chatName ?? payload.chat?.name ?? payload.groupName ?? payload.short ?? payload.notifyName ?? payload.senderName ?? payload.displayName ?? payload.pushName ?? null)
+          : (payload.name ?? payload.formattedName ?? payload.short ?? payload.notifyName ?? payload.senderName ?? payload.chatName ?? payload.chat?.name ?? payload.displayName ?? payload.pushName ?? null)
         const nomePayload = nomePayloadRaw ? String(nomePayloadRaw).trim() : null
         const pushnameRaw = payload.notifyName ?? payload.pushName ?? payload.notify ?? nomePayloadRaw
         const pushnamePayload = pushnameRaw ? String(pushnameRaw).trim() : null
-        const nomeSource = fromMe ? 'chatName' : 'senderName'
+        const nomeSource = (payload.name && String(payload.name).trim()) ? 'name' : (fromMe ? 'chatName' : 'senderName')
         const { cliente_id: cid } = await getOrCreateCliente(supabase, company_id, phone, {
           nome: nomePayload,
           nomeSource,
@@ -1522,8 +1521,7 @@ exports.receberZapi = async (req, res) => {
           isNewConversation = false
           console.log('[Z-API] 🔗 Unificado por chat_lid: conv LID mesclada em conv telefone', { conversa_id, lidPart })
         } else if (convByLid && hasRealPhone) {
-          // Só usar convByLid quando temos número real — confirma que é o contato certo.
-          // LID-only: NÃO confiar em convByLid (pode ter sido associado errado antes) → findOrCreate(lid:xxx).
+          // Temos número real + conv com chat_lid: atualizar telefone se estava lid e usar.
           const canonical = getCanonicalPhone(phone)
           if (canonical) {
             await supabase.from('conversas').update({ telefone: canonical, chat_lid: lidPart }).eq('id', convByLid.id).eq('company_id', company_id)
@@ -1533,16 +1531,19 @@ exports.receberZapi = async (req, res) => {
           conversa_id = convByLid.id
           departamento_id = convByLid.departamento_id ?? null
           isNewConversation = false
+        } else if (convByLid && !hasRealPhone) {
+          // LID-only (contato enviou, Z-API mandou só @lid): usar conversa existente com esse chat_lid.
+          // Evita duplicar: quando fromMe criou conv com telefone real + chat_lid, mensagem do contato cai na mesma.
+          conversa_id = convByLid.id
+          departamento_id = convByLid.departamento_id ?? null
+          isNewConversation = false
+          console.log('[Z-API] 🔗 LID-only: reutilizando conv existente por chat_lid', { conversa_id, lidPart })
         } else if (convByPhone) {
           await supabase.from('conversas').update({ chat_lid: lidPart }).eq('id', convByPhone.id).eq('company_id', company_id)
           conversa_id = convByPhone.id
           departamento_id = convByPhone.departamento_id ?? null
           isNewConversation = false
         }
-        // REMOVIDO: fallback por nome (nome_contato_cache / cliente.nome) — inseguro: vários contatos
-        // compartilham mesmo primeiro nome (João, Maria etc.) → mensagem ia para contato errado.
-        // Com LID-only, usamos findOrCreateConversation(lid:xxx) para criar/achar conv por chat_lid.
-        // Quando chegar DeliveryCallback ou resposta com número real, mergeConversationLidToPhone corrige.
       }
 
       if (conversa_id == null) {
@@ -1553,6 +1554,7 @@ exports.receberZapi = async (req, res) => {
           isGroup,
           nomeGrupo,
           chatPhoto,
+          chatLid: lidPart || null,
           logPrefix: `[Z-API fromMe=${fromMe}]`,
         })
 
@@ -1592,7 +1594,8 @@ exports.receberZapi = async (req, res) => {
         }
       }
 
-      // Cache nome/foto do contato — só preencher quando VAZIO (nunca trocar nome existente)
+      // Cache nome/foto do contato. Nome: usa chooseBestName — source 'name' (payload.name) tem score 110
+      // e substitui nomes abreviados; cache vazio ou nome mais completo do celular sempre atualiza.
       if (!isGroup && conversa_id && (senderName || senderPhoto)) {
         const { data: convAtual } = await supabase
           .from('conversas')
@@ -1601,16 +1604,15 @@ exports.receberZapi = async (req, res) => {
           .eq('company_id', company_id)
           .maybeSingle()
         const cacheUpdates = {}
-        const nomeCacheVazio = !convAtual?.nome_contato_cache || !String(convAtual.nome_contato_cache).trim()
-        // Só atualizar nome quando cache está vazio — evita alternar entre senderName/pushname/nome
-        if (nomeCacheVazio && senderName && String(senderName).trim()) {
-          const { name: bestNome } = chooseBestName(
-            null,
+        const nomeSource = (payload.name && String(payload.name).trim()) ? 'name' : (fromMe ? 'chatName' : 'senderName')
+        if (senderName && String(senderName).trim()) {
+          const { name: bestNome, decision } = chooseBestName(
+            convAtual?.nome_contato_cache || null,
             String(senderName).trim(),
-            fromMe ? 'chatName' : 'senderName',
+            nomeSource,
             { fromMe, company_id, telefoneTail: String(phone).replace(/\D/g, '').slice(-6) || null }
           )
-          if (bestNome) cacheUpdates.nome_contato_cache = bestNome
+          if (bestNome && decision === 'updated') cacheUpdates.nome_contato_cache = bestNome
         }
         const fotoCacheVazia = !convAtual?.foto_perfil_contato_cache || !String(convAtual.foto_perfil_contato_cache).trim()
         if (fotoCacheVazia && senderPhoto && String(senderPhoto).trim()) cacheUpdates.foto_perfil_contato_cache = String(senderPhoto).trim()

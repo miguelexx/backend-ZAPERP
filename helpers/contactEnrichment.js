@@ -12,6 +12,7 @@
  *
  * Fontes de nome (score):
  * - syncZapi: 110 (nome do contato no celular via GET /contacts — prioridade máxima)
+ * - name: 110 (payload.name = nome completo salvo no celular — mesmo nível que syncZapi)
  * - chatName: 80
  * - nome_existente: 70 (já salvo, não sobrescrever com pior)
  * - senderName: 60 (notify/display do WhatsApp — não sobrescreve nome existente)
@@ -20,9 +21,10 @@
 
 const WHATSAPP_DEBUG = String(process.env.WHATSAPP_DEBUG || '').toLowerCase() === 'true'
 
-/** Score por fonte (maior = mais confiável). Nome do celular (syncZapi) > perfil WhatsApp (senderName). */
+/** Score por fonte (maior = mais confiável). Nome do celular (syncZapi/name) > perfil WhatsApp (senderName). */
 const SOURCE_SCORE = {
   syncZapi: 110,
+  name: 110,
   senderName: 60,
   chatName: 80,
   pushname: 60,
@@ -81,7 +83,7 @@ function scoreName(name, source) {
  *
  * @param {string|null} currentName - Nome atualmente salvo
  * @param {string|null} candidateName - Nome candidato vindo do payload/sync
- * @param {string} source - Fonte do candidato: senderName, chatName, pushname, syncZapi, unknown
+ * @param {string} source - Fonte do candidato: senderName, chatName, pushname, syncZapi, name, unknown
  * @param {object} [opts]
  * @param {boolean} [opts.fromMe] - Se a mensagem foi enviada por nós (candidato pode ser menos confiável)
  * @param {number} [opts.company_id] - Para log (opcional)
@@ -123,9 +125,9 @@ function chooseBestName(currentName, candidateName, source, opts = {}) {
     return { name: cand, decision: 'updated' }
   }
 
-  // fromMe: aceita syncZapi (nome do celular) e senderName; rejeita chatName/pushname (menos confiáveis)
+  // fromMe: aceita syncZapi, name (nome completo do celular) e senderName; rejeita chatName/pushname (menos confiáveis)
   if (fromMe) {
-    if (source !== 'senderName' && source !== 'syncZapi') {
+    if (source !== 'senderName' && source !== 'syncZapi' && source !== 'name') {
       if (WHATSAPP_DEBUG) {
         console.log('[NAME_UPDATE]', {
           company_id: company_id ?? null,

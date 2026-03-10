@@ -39,13 +39,16 @@ Este documento descreve os ajustes realizados e o checklist de certificação pa
 
 | Prioridade | Campo | Origem |
 |------------|-------|--------|
-| 1 | senderName | Payload Z-API |
-| 2 | chatName | Payload (quando fromMe) |
-| 3 | pushname | Payload |
-| 4 | nome existente | Banco |
+| 1 | name | Nome completo salvo no celular (Z-API) |
+| 2 | formattedName | Payload Z-API |
+| 3 | chatName / senderName | Abreviado ou do chat |
+| 4 | short | Primeiro nome |
+| 5 | pushname | Payload |
+| 6 | nome existente | Banco |
 
+- **Prioridade**: `name` (contato salvo no celular) vem antes de variantes abreviadas (`chatName`, `short`). `chooseBestName` aceita fonte `name` (score 110) para substituir nomes curtos por completos.
 - **Cache na conversa**: `nome_contato_cache` e `foto_perfil_contato_cache` atualizados para **todos** os contatos individuais (não só LID) quando `senderName` ou `senderPhoto` vêm no payload.
-- **Regra**: nunca sobrescrever com `null` — apenas atualizar quando vier valor.
+- **Regra**: nunca sobrescrever com `null` — apenas atualizar quando vier valor. Cache pode ser atualizado quando nome mais completo chegar (via `chooseBestName` com fonte `name`).
 
 ---
 
@@ -114,7 +117,8 @@ Este documento descreve os ajustes realizados e o checklist de certificação pa
 
 ### Deduplicação
 
-- **POST /chats/merge-duplicatas** (auth, admin) — mescla conversas duplicadas por telefone + reconcilia LID
+- **POST /chats/merge-duplicatas** (auth, adminOnly) — mescla conversas duplicadas por `phoneKeyBR` + reconcilia LID→PHONE. Remove clientes duplicados e une conversas no canônico (mais recente). Uso: token JWT de usuário admin no header `Authorization: Bearer <token>`.
+- **GET /chats/merge-duplicatas** — página HTML com botão para executar o merge (usa token do localStorage).
 - `scripts/certificacao/deduplicate-conversations.js [company_id]` — script standalone (Supabase direto)
 
 ### Curl de Teste

@@ -355,11 +355,33 @@ async function findOrCreateConversation(supabaseClient, {
   isGroup = false,
   nomeGrupo = null,
   chatPhoto = null,
+  chatLid = null,
   logPrefix = '',
 }) {
   if (!phone) {
     console.warn(`[findOrCreateConversation] ${logPrefix} phone vazio/nulo`)
     return null
+  }
+
+  // 0) LID-only: buscar por chat_lid antes de criar (evita duplicata quando conv com telefone real já existe)
+  const isLidPhone = String(phone || '').startsWith('lid:')
+  if (isLidPhone && chatLid) {
+    const lidPart = String(chatLid).replace(/@lid$/i, '').trim()
+    if (lidPart) {
+      const { data: rows } = await supabaseClient
+        .from('conversas')
+        .select('id, departamento_id, telefone, cliente_id')
+        .eq('company_id', company_id)
+        .eq('chat_lid', lidPart)
+        .neq('status_atendimento', 'fechada')
+        .order('ultima_atividade', { ascending: false })
+        .limit(1)
+      const convByLid = Array.isArray(rows) && rows[0] ? rows[0] : null
+      if (convByLid?.id) {
+        console.log(`[findOrCreateConversation] ${logPrefix} ✅ encontrada por chat_lid (evita duplicata LID) conv=${convByLid.id}`)
+        return { conversa: convByLid, created: false }
+      }
+    }
   }
 
   // 1) Normalização: SEMPRE usar telefone canônico
