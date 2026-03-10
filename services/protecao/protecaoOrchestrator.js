@@ -1,7 +1,7 @@
 /**
  * Orquestrador de proteção: volume, frequência e opt-in.
  * SEMPRE ativo para evitar bloqueio do WhatsApp — usa defaults seguros quando empresa não configurou.
- * FEATURE_PROTECAO=1: usa config da empresa; =0: usa apenas defaults conservadores (5s, 40/min, 400/h).
+ * FEATURE_PROTECAO=1: usa config da empresa; =0: usa defaults (1s chat, 40/min, 400/h).
  */
 
 const { isEnabled, FLAGS } = require('../../helpers/featureFlags')
@@ -10,9 +10,9 @@ const { verificarIntervalo } = require('./frequenciaService')
 const { verificarLimiteVolume } = require('./volumeService')
 const { temOptIn } = require('./optInService')
 
-// Defaults conservadores para reduzir risco de bloqueio (WhatsApp detecta picos e spam)
+// Defaults: intervalo 1s evita duplo clique mas permite chat normal; volume evita spam
 const DEFAULTS = {
-  intervalo_seg: 5,      // 5s entre mensagens ao mesmo contato
+  intervalo_seg: 1,      // 1s entre mensagens ao mesmo contato (chat fluido; campanhas usam config própria)
   limite_por_minuto: 40,
   limite_por_hora: 400,
 }
@@ -37,20 +37,24 @@ async function permitirEnvio(opts = {}) {
       .eq('id', company_id)
       .maybeSingle()
 
-    // Usa config da empresa; quando 0, aplica defaults seguros (anti-bloqueio)
-    let intervalo = Number(emp?.intervalo_minimo_entre_mensagens_seg)
-    let limiteMin = Number(emp?.limite_por_minuto)
-    let limiteHora = Number(emp?.limite_por_hora)
+    // Usa config da empresa. Null/undefined → defaults. 0 explícito → desativa a proteção.
+    const rawIntervalo = emp?.intervalo_minimo_entre_mensagens_seg
+    const rawLimiteMin = emp?.limite_por_minuto
+    const rawLimiteHora = emp?.limite_por_hora
+    let intervalo = rawIntervalo != null ? Number(rawIntervalo) : null
+    let limiteMin = rawLimiteMin != null ? Number(rawLimiteMin) : null
+    let limiteHora = rawLimiteHora != null ? Number(rawLimiteHora) : null
 
     if (!isEnabled(FLAGS.FEATURE_PROTECAO)) {
-      // Proteção básica sempre ativa: defaults conservadores quando empresa não configurou
-      if (!intervalo || intervalo <= 0) intervalo = DEFAULTS.intervalo_seg
-      if (!limiteMin || limiteMin <= 0) limiteMin = DEFAULTS.limite_por_minuto
-      if (!limiteHora || limiteHora <= 0) limiteHora = DEFAULTS.limite_por_hora
+      // Empresa não configurou: usa defaults leves (chat fluido)
+      if (intervalo == null) intervalo = DEFAULTS.intervalo_seg
+      if (limiteMin == null || limiteMin <= 0) limiteMin = DEFAULTS.limite_por_minuto
+      if (limiteHora == null || limiteHora <= 0) limiteHora = DEFAULTS.limite_por_hora
     } else {
-      intervalo = intervalo || 0
-      limiteMin = limiteMin || 0
-      limiteHora = limiteHora || 0
+      // FEATURE_PROTECAO: respeita exatamente o que empresa configurou (0 = desativado)
+      intervalo = intervalo ?? 0
+      limiteMin = limiteMin ?? 0
+      limiteHora = limiteHora ?? 0
     }
 
     // Volume (por empresa)
