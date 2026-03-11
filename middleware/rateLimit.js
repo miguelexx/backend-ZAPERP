@@ -1,4 +1,4 @@
-const rateLimit = require('express-rate-limit')
+const { rateLimit, ipKeyGenerator } = require('express-rate-limit')
 
 /** IP real do cliente (importante quando atrás de proxy/Nginx) — evita rate limit compartilhado entre todos os usuários */
 function getClientIp(req) {
@@ -16,7 +16,7 @@ function limiter({ windowMs, max, message }) {
     max,
     standardHeaders: true,
     legacyHeaders: false,
-    keyGenerator: getClientIp,
+    keyGenerator: (req, res) => ipKeyGenerator(getClientIp(req)),
     handler: (req, res) => {
       if (message) return res.status(429).json({ error: message })
       return res.status(429).json({ error: 'Too many requests, try again later' })

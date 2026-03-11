@@ -2183,9 +2183,12 @@ exports.enviarMensagemChat = async (req, res) => {
         }
 
         if (!ok) {
-          const errMsg = sendResult?.error || sendResult?.blockedBy
-          if (errMsg) console.warn('[WhatsApp] Falha ao entregar:', String(telefoneParaEnvio || '').slice(-8), '—', errMsg)
-          else console.warn('[WhatsApp] Falha ao entregar mensagem para', String(telefoneParaEnvio || '').slice(-8), '— verifique se a instância Z-API está conectada (escaneie o QR no painel)')
+          const errMsg = result?.error || result?.blockedBy
+          if (errMsg) {
+            console.warn('[WhatsApp] Falha ao entregar:', String(telefoneParaEnvio || '').slice(-8), '—', errMsg, '| mensagem_id:', msg.id)
+          } else {
+            console.warn('[WhatsApp] Falha ao entregar mensagem para', String(telefoneParaEnvio || '').slice(-8), '— verifique se a instância está conectada (escaneie o QR no painel) | mensagem_id:', msg.id)
+          }
         }
         sendResult = result
       } catch (e) {

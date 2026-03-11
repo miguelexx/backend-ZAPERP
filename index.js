@@ -14,6 +14,14 @@ if (process.env.NODE_ENV !== 'production') {
 }
 console.log('NODE_ENV:', process.env.NODE_ENV || 'development')
 
+// Detecta NODE_ENV malformado (ex: falta newline no .env → NODE_ENV=productionULTRAMSG_BASE_URL=...)
+const nodeEnv = String(process.env.NODE_ENV || '').trim()
+if (nodeEnv && (nodeEnv.includes('ULTRAMSG') || nodeEnv.includes('='))) {
+  console.warn(
+    '[ENV] NODE_ENV parece concatenado com outra variável. Verifique o .env: cada variável deve estar em uma linha separada.'
+  )
+}
+
 // Fail-fast: configuração crítica obrigatória — impede deploy inseguro.
 if (!process.env.JWT_SECRET) {
   throw new Error('JWT_SECRET não configurado no .env')
