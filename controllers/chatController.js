@@ -1694,9 +1694,10 @@ exports.reabrirChat = async (req, res) => {
     const perm = await assertPermissaoConversa({ company_id, conversa_id, user_id, role: perfil, user_dep_id })
     if (!perm.ok) return res.status(perm.status).json({ error: perm.error })
 
+    // Conversa aberta = sem responsável, apenas setor (volta para a fila)
     const { data, error } = await supabase
       .from('conversas')
-      .update({ status_atendimento: 'aberta' })
+      .update({ status_atendimento: 'aberta', atendente_id: null })
       .eq('company_id', company_id)
       .eq('id', conversa_id)
       .select()
