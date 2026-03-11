@@ -1,29 +1,16 @@
 'use strict'
 
 /**
- * Middleware FAIL-CLOSED para webhooks Z-API.
- *
- * Exige o token em TODOS os ambientes (sem dependência de NODE_ENV).
- * O servidor não inicia se ZAPI_WEBHOOK_TOKEN não estiver definido (ver index.js).
- *
- * Aceita o token via:
- *   1. Header  X-Webhook-Token: <token>   ← preferencial
- *   2. Header  Authorization: Bearer <token>
- *   3. Query   ?token=<token>             ← compatibilidade Z-API (appenda na URL)
- *
- * FALLBACK quando token ausente: se o payload contém instanceId registrado em empresa_zapi,
- * aceita a requisição (Z-API às vezes envia sem token em /webhooks/zapi ou /status).
- *
- * Logging: registra rejeições sem expor o valor do token recebido.
- * Diagnóstico: rejeições são gravadas no buffer _rejectedLog do webhookZapiController.
+ * Middleware FAIL-CLOSED para webhooks UltraMsg.
+ * Exige WHATSAPP_WEBHOOK_TOKEN (ver index.js).
+ * Aceita: X-Webhook-Token, Authorization: Bearer, ?token=
+ * Fallback: instanceId registrado em empresa_zapi.
  */
 
 const crypto = require('crypto')
-const { getCompanyIdByInstanceId } = require('../services/zapiIntegrationService')
+const { getCompanyIdByInstanceId } = require('../services/whatsappConfigService')
 
-/**
- * Extrai instanceId do payload Z-API (body.instanceId, instance_id, instance.id, instance).
- */
+/** Extrai instanceId do payload (body.instanceId, instance_id, instance). */
 function extractInstanceId(body) {
   if (!body || typeof body !== 'object') return ''
   const v = body.instanceId ?? body.instance_id ?? body.instance?.id ?? body.instance
@@ -50,12 +37,10 @@ function timingSafeEqual(a, b) {
 }
 
 function requireWebhookToken(req, res, next) {
-  const expected = String(process.env.ZAPI_WEBHOOK_TOKEN || '').trim()
+  const expected = String(process.env.WHATSAPP_WEBHOOK_TOKEN || process.env.ZAPI_WEBHOOK_TOKEN || '').trim()
 
-  // Defesa em profundidade: se o boot não bloqueou e chegou aqui sem token configurado,
-  // rejeita com 500 (misconfiguration), não 401.
   if (!expected) {
-    console.error('[WEBHOOK_FATAL] ZAPI_WEBHOOK_TOKEN ausente — rejeitando requisição (misconfiguration)')
+    console.error('[WEBHOOK_FATAL] WHATSAPP_WEBHOOK_TOKEN ausente')
     return res.status(500).json({ error: 'Configuração de segurança do webhook inválida' })
   }
 
@@ -102,12 +87,7 @@ function _reject(req, res, incoming) {
   }
   const label = motivo === 'token_ausente' ? 'Token ausente' : 'Token inválido'
   console.warn(`[WEBHOOK_REJECTED] ${label} — ${req.method} ${req.path} | IP: ${req.ip || '?'}`)
-  console.warn(`[WEBHOOK_REJECTED] 💡 Dica: URL correta = APP_URL/webhooks/zapi${req.path === '/' ? '' : req.path}?token=<ZAPI_WEBHOOK_TOKEN>`)
-
-  try {
-    const ctrl = require('../controllers/webhookZapiController')
-    if (ctrl._logRejected) ctrl._logRejected(logEntry)
-  } catch (_) {}
+  console.warn(`[WEBHOOK_REJECTED] 💡 URL: APP_URL/webhooks/ultramsg?token=<WHATSAPP_WEBHOOK_TOKEN>`)
 
   res.status(401).json({ error: motivo === 'token_ausente' ? 'Token do webhook ausente' : 'Token do webhook inválido' })
 }

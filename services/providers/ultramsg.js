@@ -9,7 +9,7 @@
  */
 
 const { normalizePhoneBR, toZapiSendFormat, possiblePhonesBR } = require('../../helpers/phoneHelper')
-const { getEmpresaZapiConfig } = require('../zapiIntegrationService')
+const { getEmpresaWhatsappConfig } = require('../whatsappConfigService')
 const { fetchWithRetry } = require('../../helpers/retryWithBackoff')
 const { permitirEnvio } = require('../protecao/protecaoOrchestrator')
 
@@ -34,7 +34,7 @@ async function awaitSendDelay(companyId) {
 async function resolveConfig(opts = {}) {
   const companyId = opts?.companyId ?? opts?.company_id
   if (companyId == null || companyId === '') return null
-  const { config, error } = await getEmpresaZapiConfig(Number(companyId))
+  const { config, error } = await getEmpresaWhatsappConfig(Number(companyId))
   if (error || !config) {
     console.warn(`[ULTRAMSG] Empresa ${companyId} sem instância configurada (empresa_zapi).`, error || 'config vazio')
     return null
@@ -384,7 +384,7 @@ async function configureWebhooks(appUrl, opts = {}) {
   const cfg = await resolveConfig(opts)
   if (!cfg || !appUrl) return []
   const base = String(appUrl).replace(/\/$/, '')
-  const webhookToken = String(process.env.ULTRAMSG_WEBHOOK_TOKEN || process.env.ZAPI_WEBHOOK_TOKEN || '').trim()
+  const webhookToken = String(process.env.WHATSAPP_WEBHOOK_TOKEN || process.env.ZAPI_WEBHOOK_TOKEN || '').trim()
   const tokenSuffix = webhookToken ? `?token=${encodeURIComponent(webhookToken)}` : ''
   const webhookUrl = `${base}/webhooks/ultramsg${tokenSuffix}`
 

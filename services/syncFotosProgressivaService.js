@@ -5,7 +5,7 @@
 
 const supabase = require('../config/supabase')
 const { getProvider } = require('./providers')
-const { getStatus } = require('./zapiIntegrationService')
+const { getStatus } = require('./ultramsgIntegrationService')
 const { getConfig, isProcessamentoPausado } = require('./configOperacionalService')
 const { chooseBestName } = require('../helpers/contactEnrichment')
 
@@ -78,7 +78,7 @@ async function syncFotosProgressiva(company_id, opts = {}) {
       const updates = {}
       if (missingName || metaNome) {
         const candidate = metaNome || (missingName ? phone : null)
-        const { name: bestNome } = chooseBestName(nomeDb || null, candidate, 'syncZapi', { fromMe: false, company_id: cid, telefoneTail: phone.slice(-6) })
+        const { name: bestNome } = chooseBestName(nomeDb || null, candidate, 'syncUltramsg', { fromMe: false, company_id: cid, telefoneTail: phone.slice(-6) })
         if (bestNome && bestNome !== nomeDb) updates.nome = bestNome
         else if (missingName) updates.nome = phone
       }

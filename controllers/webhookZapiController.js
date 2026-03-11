@@ -9,9 +9,9 @@
 
 const supabase = require('../config/supabase')
 const { getProvider } = require('../services/providers')
-const zapiProvider = require('../services/providers/zapi')
-const { syncContactFromZapi } = require('../services/zapiSyncContact')
-const { getCompanyIdByInstanceId, getStatus } = require('../services/zapiIntegrationService')
+const { syncContactFromUltramsg } = require('../services/ultramsgSyncContact')
+const { getCompanyIdByInstanceId } = require('../services/whatsappConfigService')
+const { getStatus } = require('../services/ultramsgIntegrationService')
 const { resetOnConnected } = require('../services/zapiConnectGuardService')
 const { normalizePhoneBR, possiblePhonesBR, normalizeGroupIdForStorage } = require('../helpers/phoneHelper')
 const { getCanonicalPhone, getOrCreateCliente, findOrCreateConversation, mergeConversasIntoCanonico, mergeConversationLidToPhone } = require('../helpers/conversationSync')
@@ -1447,7 +1447,7 @@ exports.receberZapi = async (req, res) => {
 
     let cliente_id = null
     let pendingContactSync = null
-    let nomeParaCache = null // Nome resolvido (syncZapi ou payload) para atualizar cache da conversa
+    let nomeParaCache = null // Nome resolvido (syncUltramsg ou payload) para atualizar cache da conversa
     let nomeSourceParaCache = null
 
     if (!isGroup) {
@@ -1468,14 +1468,14 @@ exports.receberZapi = async (req, res) => {
         if (!fromMe && phone) {
           try {
             const syncResult = await Promise.race([
-              syncContactFromZapi(phone, company_id),
+              syncContactFromUltramsg(phone, company_id),
               new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 2500))
             ])
             if (syncResult?.nome && String(syncResult.nome).trim()) {
               nomePayload = String(syncResult.nome).trim()
-              nomeSource = 'syncZapi'
+              nomeSource = 'syncUltramsg'
               nomeParaCache = nomePayload
-              nomeSourceParaCache = 'syncZapi'
+              nomeSourceParaCache = 'syncUltramsg'
               if (syncResult.foto_perfil && !senderPhoto) senderPhoto = syncResult.foto_perfil
             }
           } catch (_) {
@@ -1620,7 +1620,7 @@ exports.receberZapi = async (req, res) => {
         }
       }
 
-      // Cache nome/foto do contato. Prioriza nome da API (syncZapi = como salvo no celular).
+      // Cache nome/foto do contato. Prioriza nome da API (syncUltramsg = como salvo no celular).
       if (!isGroup && conversa_id && (nomeParaCache || senderName || senderPhoto)) {
         const { data: convAtual } = await supabase
           .from('conversas')
@@ -1737,7 +1737,7 @@ exports.receberZapi = async (req, res) => {
     if (!fromMe && !isGroup && departamento_id == null && atendente_id == null && phoneParaChatbot) {
       try {
         const sendMessage = async (ph, msg, o = {}) => {
-          const r = await zapiProvider.sendText(ph, msg, { companyId: company_id, conversaId: conversa_id, ...o })
+          const r = await getProvider().sendText(ph, msg, { companyId: company_id, conversaId: conversa_id, ...o })
           return { ok: !!r?.ok, messageId: r?.messageId || null }
         }
         let skipChatbot = false
@@ -2156,11 +2156,11 @@ exports.receberZapi = async (req, res) => {
                   setImmediate(async () => {
                     try {
                       const { data: current } = await supabase.from('clientes').select('nome, pushname, foto_perfil').eq('id', cidGrupo).maybeSingle()
-                      const sync = await syncContactFromZapi(pNorm, company_id).catch(() => null)
+                      const sync = await syncContactFromUltramsg(pNorm, company_id).catch(() => null)
                       if (!sync) return
                       const up = {}
                       const telefoneTail = String(pNorm).replace(/\D/g, '').slice(-6) || null
-                      const { name: bestNome } = chooseBestName(current?.nome, sync.nome, 'syncZapi', { fromMe: false, company_id, telefoneTail })
+                      const { name: bestNome } = chooseBestName(current?.nome, sync.nome, 'syncUltramsg', { fromMe: false, company_id, telefoneTail })
                       if (bestNome && bestNome !== (current?.nome || '')) up.nome = bestNome
                       if (!current?.pushname && sync.pushname) up.pushname = sync.pushname
                       if (!current?.foto_perfil && sync.foto_perfil) up.foto_perfil = sync.foto_perfil
@@ -2402,11 +2402,11 @@ exports.receberZapi = async (req, res) => {
       Promise.resolve().then(async () => {
         try {
           const { data: current } = await supabase.from('clientes').select('nome, pushname, foto_perfil').eq('id', syncClienteId).eq('company_id', company_id).maybeSingle()
-          const synced = await syncContactFromZapi(syncPhone, company_id).catch(() => null)
+          const synced = await syncContactFromUltramsg(syncPhone, company_id).catch(() => null)
           if (!synced) return null
           const up = {}
           const telefoneTail = String(syncPhone).replace(/\D/g, '').slice(-6) || null
-          const { name: bestNome } = chooseBestName(current?.nome, synced?.nome, 'syncZapi', { fromMe: false, company_id, telefoneTail })
+          const { name: bestNome } = chooseBestName(current?.nome, synced?.nome, 'syncUltramsg', { fromMe: false, company_id, telefoneTail })
           if (bestNome && bestNome !== (current?.nome || '')) up.nome = bestNome
           else if (!current?.nome || !String(current.nome).trim()) up.nome = (synced.nome && String(synced.nome).trim()) ? String(synced.nome).trim() : syncPhone
           const pushnameVazio = !current?.pushname || !String(current.pushname).trim()
@@ -2669,7 +2669,7 @@ exports.connectionZapi = async (req, res) => {
         if (autoSync && provider.getContacts) {
           setImmediate(async () => {
             try {
-              const { syncContacts } = require('../services/zapiContactsSyncService')
+              const { syncContacts } = require('../services/ultramsgContactsSyncService')
               const result = await syncContacts(company_id)
               if (result.ok) {
                 const io = req.app.get('io')

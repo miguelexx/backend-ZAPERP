@@ -1,72 +1,58 @@
-# Migração Z-API → UltraMsg
+# WhatsApp via UltraMsg
 
-## Resumo
-
-O sistema foi migrado para suportar **UltraMsg** como provedor de WhatsApp. A tabela `empresa_zapi` continua sendo utilizada (instance_id, instance_token). O `client_token` pode ser vazio para UltraMsg.
+O sistema utiliza **apenas UltraMsg** para integração com WhatsApp.
 
 ## Configuração
 
 ### 1. Variáveis de ambiente (.env)
 
 ```env
-WHATSAPP_PROVIDER=ultramsg
+WHATSAPP_WEBHOOK_TOKEN=seu_token_seguro
 ULTRAMSG_BASE_URL=https://api.ultramsg.com
-ZAPI_WEBHOOK_TOKEN=seu_token_seguro
+ULTRAMSG_INSTANCE_ID=instance51534
+ULTRAMSG_TOKEN=r6ztawoqwcfhzrd
+APP_URL=https://sua-api.seudominio.com
 ```
 
 ### 2. Banco de dados (empresa_zapi)
 
-Inserir ou atualizar o registro para sua empresa:
+Execute para configurar a instância:
+
+```bash
+node scripts/configurar-ultramsg.js 1
+```
+
+Ou insira manualmente:
 
 ```sql
 INSERT INTO empresa_zapi (company_id, instance_id, instance_token, client_token, ativo)
-VALUES (1, 'instance51534', 'r6ztawoqwcfhzrdc', '', true)
+VALUES (1, 'instance51534', 'r6ztawoqwcfhzrd', '', true)
 ON CONFLICT (company_id) DO UPDATE SET
   instance_id = EXCLUDED.instance_id,
   instance_token = EXCLUDED.instance_token,
-  client_token = EXCLUDED.client_token,
-  ativo = EXCLUDED.ativo;
+  client_token = '',
+  ativo = true;
 ```
-
-Substitua `company_id` pelo ID da sua empresa e use o `instance_id` e `instance_token` do painel UltraMsg.
 
 ### 3. Webhook no painel UltraMsg
 
-1. Acesse o painel UltraMsg → Instance Settings
-2. Configure **Webhook URL**: `https://SEU_APP_URL/webhooks/ultramsg?token=SEU_ZAPI_WEBHOOK_TOKEN`
-3. Ative: message_received, message_create, message_ack
+Configure no painel UltraMsg (Instance Settings → Webhook):
 
-O backend também tenta configurar automaticamente ao conectar (se `configureWebhooks` for chamado).
+- **URL:** `https://SEU_APP_URL/webhooks/ultramsg?token=SEU_WHATSAPP_WEBHOOK_TOKEN`
+- Ative: message_received, message_create, message_ack
 
-### 4. Conexão do WhatsApp
+### 4. Rotas de integração (frontend)
 
-O fluxo permanece o mesmo: Integrações → Conectar WhatsApp → Escanear QR Code.
+As rotas `/api/integrations/zapi/*` permanecem para compatibilidade:
 
-## Endpoints
+- GET `/api/integrations/zapi/status`
+- POST `/api/integrations/zapi/connect/qrcode`
+- GET `/api/integrations/zapi/connect/status`
 
-| Recurso              | Rota                              |
-|----------------------|-----------------------------------|
-| Status               | GET /api/integrations/zapi/status  |
-| QR Code              | POST /api/integrations/zapi/connect/qrcode |
-| Webhook (receber)    | POST /webhooks/ultramsg           |
-| Health webhook       | GET /webhooks/ultramsg/health     |
+## Endpoints de webhook
 
-## Diferenças Z-API vs UltraMsg
-
-| Recurso           | Z-API      | UltraMsg                          |
-|-------------------|------------|-----------------------------------|
-| sendCall          | ✅         | ❌ (não suportado)                |
-| getContacts       | ✅         | ❌ (retorna [])                   |
-| getProfilePicture | ✅         | ❌ (retorna null)                |
-| sendContact       | Nome+Phone | vCard (implementado)              |
-| sendLink          | Preview    | Fallback para texto com URL       |
-
-## Reverter para Z-API
-
-Altere no .env:
-
-```env
-WHATSAPP_PROVIDER=zapi
-```
-
-E restaure os valores de `instance_id` e `instance_token` na tabela `empresa_zapi` para as credenciais Z-API.
+| Rota | Uso |
+|------|-----|
+| POST /webhooks/ultramsg | Webhook principal UltraMsg |
+| POST /webhooks/whatsapp | Alias para /webhooks/ultramsg |
+| GET /webhooks/ultramsg/health | Health check |

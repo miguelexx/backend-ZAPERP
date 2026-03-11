@@ -1,25 +1,25 @@
 /**
- * Sincronização de contatos do celular via Z-API.
- * Endpoint: POST /api/integrations/zapi/contacts/sync
+ * Sincronização de contatos do celular via UltraMsg.
+ * Endpoint: POST /api/integrations/whatsapp/contacts/sync
  *
  * Fluxo:
- * 1) Tenta GET /contacts (API oficial Z-API) — mode: "contacts_api"
- * 2) Se falhar ou retornar vazio: fallback via conversas existentes — mode: "fallback"
+ * 1) Tenta GET /contacts (quando disponível) — mode: "contacts_api"
+ * 2) Fallback via conversas existentes — mode: "fallback"
  *
  * Resposta: { ok, mode, totalFetched, inserted, updated, skipped, errors[] }
  */
 
 const supabase = require('../config/supabase')
-const zapiProvider = require('./providers/zapi')
-const { getEmpresaZapiConfig } = require('./zapiIntegrationService')
+const { getProvider } = require('./providers')
+const { getEmpresaWhatsappConfig } = require('./whatsappConfigService')
 const { getOrCreateCliente } = require('../helpers/conversationSync')
-const { syncContactFromZapi } = require('./zapiSyncContact')
+const { syncContactFromUltramsg } = require('./ultramsgSyncContact')
 const { normalizePhoneBR, possiblePhonesBR } = require('../helpers/phoneHelper')
 
 const PAGE_SIZE = 100
 
 /**
- * Extrai phone e nome de um objeto contato retornado pela Z-API.
+ * Extrai phone e nome de um objeto contato retornado pelo provider.
  * Campos: phone, name, short, vname, notify, imgUrl (quando disponível)
  */
 function extractContactFields(raw) {
@@ -41,13 +41,14 @@ function extractContactFields(raw) {
 }
 
 /**
- * Sync via API oficial GET /contacts (Z-API).
+ * Sync via API oficial GET /contacts.
  * @param {number} company_id
  * @returns {Promise<{ mode: string, totalFetched: number, inserted: number, updated: number, skipped: number, errors: string[] }>}
  */
 async function syncViaContactsApi(company_id) {
-  if (!zapiProvider.getContacts) {
-    return { mode: 'contacts_api', totalFetched: 0, inserted: 0, updated: 0, skipped: 0, errors: ['Z-API getContacts não disponível'] }
+  const provider = getProvider()
+  if (!provider?.getContacts) {
+    return { mode: 'contacts_api', totalFetched: 0, inserted: 0, updated: 0, skipped: 0, errors: ['getContacts não disponível'] }
   }
 
   const stats = { totalFetched: 0, inserted: 0, updated: 0, skipped: 0, errors: [] }
@@ -58,7 +59,7 @@ async function syncViaContactsApi(company_id) {
   const seen = new Set()
 
   while (hasMore) {
-    const contacts = await zapiProvider.getContacts(page, PAGE_SIZE, opts)
+    const contacts = await provider.getContacts(page, PAGE_SIZE, opts)
     if (!Array.isArray(contacts) || contacts.length === 0) {
       hasMore = false
       break
@@ -92,7 +93,7 @@ async function syncViaContactsApi(company_id) {
         const clienteFields = {}
         if (fields.nome) clienteFields.nome = fields.nome
         if (fields.foto) clienteFields.foto_perfil = fields.foto
-        clienteFields.nomeSource = 'syncZapi'
+        clienteFields.nomeSource = 'syncUltramsg'
 
         const result = await getOrCreateCliente(supabase, company_id, fields.phone, clienteFields)
         if (result.cliente_id) {
@@ -115,7 +116,7 @@ async function syncViaContactsApi(company_id) {
 
 /**
  * Fallback: enriquece clientes a partir de conversas existentes.
- * Busca conversas abertas com telefone individual e chama syncContactFromZapi.
+ * Busca conversas abertas com telefone individual e chama syncContactFromUltramsg.
  */
 async function syncViaFallback(company_id) {
   const stats = { totalFetched: 0, inserted: 0, updated: 0, skipped: 0, errors: [] }
@@ -143,14 +144,14 @@ async function syncViaFallback(company_id) {
     }
 
     try {
-      const enriched = await syncContactFromZapi(phone, company_id)
+      const enriched = await syncContactFromUltramsg(phone, company_id)
       const nome = enriched?.nome ?? conv.nome_contato_cache ?? null
       const foto = enriched?.foto_perfil ?? null
 
       const clienteFields = {}
       if (nome) clienteFields.nome = nome
       if (foto) clienteFields.foto_perfil = foto
-      clienteFields.nomeSource = 'syncZapi'
+      clienteFields.nomeSource = 'syncUltramsg'
 
       const variants = possiblePhonesBR(phone).length > 0 ? possiblePhonesBR(phone) : [phone]
       const { data: prev } = await supabase
@@ -186,18 +187,18 @@ async function syncContacts(company_id) {
     return { ok: false, mode: 'none', totalFetched: 0, inserted: 0, updated: 0, skipped: 0, errors: ['company_id ausente'] }
   }
 
-  const { config, error } = await getEmpresaZapiConfig(company_id)
+  const { config, error } = await getEmpresaWhatsappConfig(company_id)
   if (error || !config) {
-    return { ok: false, mode: 'none', totalFetched: 0, inserted: 0, updated: 0, skipped: 0, errors: ['Empresa sem instância Z-API configurada'] }
+    return { ok: false, mode: 'none', totalFetched: 0, inserted: 0, updated: 0, skipped: 0, errors: ['Empresa sem instância configurada'] }
   }
 
   let result = await syncViaContactsApi(company_id)
 
   if (result.mode === 'contacts_api' && result.totalFetched === 0 && result.errors.length === 0) {
-    console.log('[ZAPI-SYNC] contacts_api vazio — usando fallback via conversas')
+    console.log('[ULTRAMSG-SYNC] contacts_api vazio — usando fallback via conversas')
     result = await syncViaFallback(company_id)
   } else if (result.errors.some((e) => e.includes('falhou') || e.includes('não configurado'))) {
-    console.log('[ZAPI-SYNC] contacts_api falhou — usando fallback')
+    console.log('[ULTRAMSG-SYNC] contacts_api falhou — usando fallback')
     result = await syncViaFallback(company_id)
   }
 
@@ -213,7 +214,7 @@ async function syncContacts(company_id) {
 }
 
 /**
- * Processa um único lote (página) de contatos da Z-API.
+ * Processa um único lote (página) de contatos.
  * Usado pela sincronização progressiva.
  * @param {number} company_id
  * @param {object} opts - { page, pageSize }
@@ -222,17 +223,18 @@ async function syncContacts(company_id) {
 async function syncContactsBatch(company_id, opts = {}) {
   const page = Math.max(1, opts.page || 1)
   const pageSize = Math.min(100, Math.max(10, opts.pageSize || 50))
+  const provider = getProvider()
 
-  if (!zapiProvider.getContacts) {
-    return { processados: 0, inserted: 0, updated: 0, skipped: 0, errors: ['Z-API getContacts não disponível'], hasMore: false }
+  if (!provider?.getContacts) {
+    return { processados: 0, inserted: 0, updated: 0, skipped: 0, errors: ['getContacts não disponível'], hasMore: false }
   }
 
-  const { config, error } = await getEmpresaZapiConfig(company_id)
+  const { config, error } = await getEmpresaWhatsappConfig(company_id)
   if (error || !config) {
-    return { processados: 0, inserted: 0, updated: 0, skipped: 0, errors: ['Empresa sem instância Z-API configurada'], hasMore: false }
+    return { processados: 0, inserted: 0, updated: 0, skipped: 0, errors: ['Empresa sem instância configurada'], hasMore: false }
   }
 
-  const contacts = await zapiProvider.getContacts(page, pageSize, { companyId: company_id })
+  const contacts = await provider.getContacts(page, pageSize, { companyId: company_id })
   if (!Array.isArray(contacts) || contacts.length === 0) {
     return { processados: 0, inserted: 0, updated: 0, skipped: 0, errors: [], hasMore: false }
   }
@@ -267,7 +269,7 @@ async function syncContactsBatch(company_id, opts = {}) {
       const clienteFields = {}
       if (fields.nome) clienteFields.nome = fields.nome
       if (fields.foto) clienteFields.foto_perfil = fields.foto
-      clienteFields.nomeSource = 'syncZapi'
+      clienteFields.nomeSource = 'syncUltramsg'
 
       const result = await getOrCreateCliente(supabase, company_id, fields.phone, clienteFields)
       if (result.cliente_id) {

@@ -1,6 +1,6 @@
 const supabase = require('../config/supabase')
 const { getProvider } = require('../services/providers')
-const { getStatus } = require('../services/zapiIntegrationService')
+const { getStatus } = require('../services/ultramsgIntegrationService')
 const { isGroupConversation } = require('../helpers/conversaHelper')
 const { normalizePhoneBR, possiblePhonesBR, phoneKeyBR } = require('../helpers/phoneHelper')
 const { deduplicateConversationsByContact, sortConversationsByRecent, getCanonicalPhone, getOrCreateCliente } = require('../helpers/conversationSync')
@@ -910,8 +910,9 @@ exports.zapiStatus = async (req, res) => {
       return res.json({ ok: true, hasInstance: false, connected: false, configured: false })
     }
 
-    const { getEmpresaZapiConfig, getStatus } = require('../services/zapiIntegrationService')
-    const configResult = await getEmpresaZapiConfig(company_id)
+    const { getStatus } = require('../services/ultramsgIntegrationService')
+    const { getEmpresaWhatsappConfig } = require('../services/whatsappConfigService')
+    const configResult = await getEmpresaWhatsappConfig(company_id)
     if (configResult.error || !configResult.config) {
       return res.json({ ok: true, hasInstance: false, connected: false, configured: false })
     }
@@ -943,7 +944,7 @@ exports.sincronizarContatosZapi = async (req, res) => {
     const { company_id } = req.user
     if (!company_id) return res.status(401).json({ error: 'Não autenticado' })
 
-    const { syncContacts } = require('../services/zapiContactsSyncService')
+    const { syncContacts } = require('../services/ultramsgContactsSyncService')
     const result = await syncContacts(company_id)
 
     if (!result.ok) {
@@ -1511,8 +1512,8 @@ exports.detalharChat = async (req, res) => {
       if (cliPhone && !cliPhone.startsWith('lid:') && !cliPhone.includes('@g.us')) {
         setImmediate(async () => {
           try {
-            const { syncContactFromZapi } = require('../services/zapiSyncContact')
-            const synced = await syncContactFromZapi(cliPhone, cid)
+            const { syncContactFromUltramsg } = require('../services/ultramsgSyncContact')
+            const synced = await syncContactFromUltramsg(cliPhone, cid)
             if (!synced) return
             const updates = {}
             if (synced.foto_perfil && String(synced.foto_perfil).startsWith('http')) {
@@ -1965,15 +1966,15 @@ exports.enviarMensagemChat = async (req, res) => {
         await supabase.from('conversas').update({ cliente_id: novoClienteId }).eq('id', conversa_id).eq('company_id', company_id)
         conversa.cliente_id = novoClienteId
         // Enriquecer em background com dados reais da Z-API (nome, foto do WhatsApp)
-        const { syncContactFromZapi } = require('../services/zapiSyncContact')
+        const { syncContactFromUltramsg } = require('../services/ultramsgSyncContact')
         setImmediate(() => {
           supabase.from('clientes').select('nome, pushname, foto_perfil').eq('id', novoClienteId).eq('company_id', company_id).maybeSingle()
-            .then(({ data: current }) => syncContactFromZapi(conversa.telefone, company_id)
+            .then(({ data: current }) => syncContactFromUltramsg(conversa.telefone, company_id)
               .then((synced) => {
                 if (!synced) return null
                 const up = {}
                 const telefoneTail = String(conversa.telefone).replace(/\D/g, '').slice(-6) || null
-                const { name: bestNome } = chooseBestName(current?.nome, synced.nome, 'syncZapi', { fromMe: false, company_id, telefoneTail })
+                const { name: bestNome } = chooseBestName(current?.nome, synced.nome, 'syncUltramsg', { fromMe: false, company_id, telefoneTail })
                 if (bestNome && bestNome !== (current?.nome || '')) up.nome = bestNome
                 if (synced.pushname !== undefined && !current?.pushname) up.pushname = synced.pushname
                 if (synced.foto_perfil && !current?.foto_perfil) up.foto_perfil = synced.foto_perfil

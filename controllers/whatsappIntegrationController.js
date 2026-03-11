@@ -6,7 +6,6 @@ const { getConfig } = require('../services/configOperacionalService')
 const { getStatus, getQrCodeImage, restartInstance, getMe, getPhoneCode, buildMeSummary } = ultramsgIntegrationService
 const { getEmpresaWhatsappConfig } = whatsappConfigService
 
-// Rate limit simples por empresa/endpoint em memória (complementar ao express-rate-limit global).
 const perCompanyBuckets = new Map()
 
 function checkCompanyRate(companyId, key, windowMs, max) {
@@ -47,9 +46,6 @@ exports.getStatus = async (req, res) => {
   })
 }
 
-/**
- * Handler legado: GET /qrcode — retorna { imageBase64 } (retrocompat).
- */
 exports.getQrCodeLegacy = async (req, res) => {
   const company_id = req.user?.company_id
   if (!checkCompanyRate(company_id, 'qrcode', 60_000, 10)) {
@@ -68,9 +64,6 @@ exports.getQrCodeLegacy = async (req, res) => {
   return res.json({ imageBase64: result.imageBase64 })
 }
 
-/**
- * Handler com guard: POST/GET /connect/qrcode — retorna { connected, qrBase64?, nextRefreshSeconds, attemptsLeft }.
- */
 exports.getQrCode = async (req, res) => {
   const company_id = req.user?.company_id
   if (!checkCompanyRate(company_id, 'qrcode', 60_000, 10)) {
@@ -122,7 +115,6 @@ exports.getQrCode = async (req, res) => {
   await recordQrServed(company_id)
   const { attemptsLeft } = await getAttempts(company_id)
   const qrBase64 = result.imageBase64
-  // qrBase64 é base64 puro; front use: src={"data:image/png;base64," + qrBase64}
   return res.json({
     connected: false,
     qrBase64,
@@ -143,9 +135,6 @@ exports.restart = async (req, res) => {
   return res.json({ value: !!result.value })
 }
 
-/**
- * POST /connect/restart — reinicia e retorna status completo (contrato /connect/status).
- */
 exports.connectRestart = async (req, res) => {
   const company_id = req.user?.company_id
   const configResult = await getEmpresaWhatsappConfig(company_id)
@@ -196,9 +185,6 @@ exports.getMe = async (req, res) => {
   return res.json(result.data || {})
 }
 
-/**
- * Contrato /connect/status: sempre 200 com campos obrigatórios.
- */
 function buildConnectStatusPayload(opts) {
   return {
     hasInstance: !!opts.hasInstance,
@@ -210,10 +196,6 @@ function buildConnectStatusPayload(opts) {
   }
 }
 
-/**
- * Status completo para fluxo Conectar: status + meSummary (sem tokens).
- * Nunca retorna 404 — sempre 200 com contrato completo.
- */
 exports.getConnectStatus = async (req, res) => {
   const company_id = req.user?.company_id
   if (!checkCompanyRate(company_id, 'connect-status', 60_000, 30)) {
@@ -260,9 +242,6 @@ exports.getConnectStatus = async (req, res) => {
   }))
 }
 
-/**
- * GET /debug-config — diagnóstico config (AUTH). Nunca retorna tokens.
- */
 exports.debugConfig = async (req, res) => {
   const company_id = req.user?.company_id
   const configResult = await getEmpresaWhatsappConfig(company_id)
@@ -284,9 +263,6 @@ exports.debugConfig = async (req, res) => {
   })
 }
 
-/**
- * GET /debug-status — diagnóstico status (AUTH). Chama getStatus(company_id).
- */
 exports.debugStatus = async (req, res) => {
   const company_id = req.user?.company_id
   const result = await getStatus(company_id)
@@ -306,9 +282,6 @@ exports.debugStatus = async (req, res) => {
   })
 }
 
-/**
- * POST /contacts/sync — executa sync de contatos inline.
- */
 exports.syncContacts = async (req, res) => {
   const company_id = req.user?.company_id
   if (!company_id) return res.status(401).json({ error: 'Não autenticado' })
@@ -331,9 +304,6 @@ exports.syncContacts = async (req, res) => {
   })
 }
 
-/**
- * GET /operational-status — saúde da sessão: conectado, sync, modo seguro.
- */
 exports.getOperationalStatus = async (req, res) => {
   const company_id = req.user?.company_id
   if (!company_id) return res.status(401).json({ error: 'Não autenticado' })
@@ -365,9 +335,7 @@ exports.getOperationalStatus = async (req, res) => {
       .limit(1)
       .maybeSingle()
     if (!r2.error) pendingJob = r2.data
-  } catch (_) {
-    // Tabela jobs pode não existir — usa defaults
-  }
+  } catch (_) {}
 
   return res.json({
     connected: statusResult?.connected ?? false,
@@ -379,9 +347,6 @@ exports.getOperationalStatus = async (req, res) => {
   })
 }
 
-/**
- * POST /phone-code — obtém código de verificação (10-13 dígitos BR).
- */
 exports.phoneCode = async (req, res) => {
   const company_id = req.user?.company_id
   const phone = req.body?.phone ?? req.body?.numero
@@ -400,4 +365,3 @@ exports.phoneCode = async (req, res) => {
   }
   return res.json({ code: result.code })
 }
-

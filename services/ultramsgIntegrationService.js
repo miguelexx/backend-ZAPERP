@@ -3,7 +3,7 @@
  * Usa empresa_zapi (instance_id, instance_token) — client_token não utilizado.
  */
 
-const { getEmpresaZapiConfig, getCompanyIdByInstanceId, fetchWithTimeout } = require('./zapiIntegrationService')
+const { getEmpresaWhatsappConfig, getCompanyIdByInstanceId, fetchWithTimeout } = require('./whatsappConfigService')
 
 const ULTRAMSG_BASE_URL = (process.env.ULTRAMSG_BASE_URL || 'https://api.ultramsg.com').replace(/\/$/, '')
 const TIMEOUT_MS = 10_000
@@ -13,7 +13,7 @@ function buildUrl(instanceId, path) {
 }
 
 async function request(companyId, method, path, body = null) {
-  const { config, error } = await getEmpresaZapiConfig(companyId)
+  const { config, error } = await getEmpresaWhatsappConfig(companyId)
   if (error || !config) return { error: error || 'Empresa sem instância configurada' }
   const url = buildUrl(config.instance_id, path)
   const token = encodeURIComponent(config.instance_token)
@@ -63,7 +63,7 @@ async function getQrCodeImage(companyId) {
   if (status.connected) return { alreadyConnected: true }
   if (status.error) return { error: status.error }
 
-  const { config, error } = await getEmpresaZapiConfig(companyId)
+  const { config, error } = await getEmpresaWhatsappConfig(companyId)
   if (error || !config) return { error: error || 'Empresa sem instância configurada' }
   const url = buildUrl(config.instance_id, '/instance/qrCode') + '?token=' + encodeURIComponent(config.instance_token)
   try {
@@ -149,5 +149,5 @@ module.exports = {
   getPhoneCode,
   buildMeSummary,
   getCompanyIdByInstanceId,
-  getEmpresaZapiConfig
+  getEmpresaWhatsappConfig
 }

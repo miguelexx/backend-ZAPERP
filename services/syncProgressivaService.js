@@ -6,7 +6,7 @@
 const supabase = require('../config/supabase')
 const { getConfig, isProcessamentoPausado } = require('./configOperacionalService')
 const { registrarEvento, TIPOS } = require('./operationalAuditService')
-const { syncContactsBatch } = require('./zapiContactsSyncService')
+const { syncContactsBatch } = require('./ultramsgContactsSyncService')
 
 const LOCK_TIPO = 'sync_contatos'
 const CHECKPOINT_TIPO = 'sync_contatos'

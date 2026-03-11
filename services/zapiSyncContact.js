@@ -5,7 +5,7 @@
  */
 
 const zapiProvider = require('./providers/zapi')
-const { getEmpresaZapiConfig } = require('./zapiIntegrationService')
+const { getEmpresaWhatsappConfig } = require('./whatsappConfigService')
 const { normalizePhoneBR } = require('../helpers/phoneHelper')
 
 const CACHE_TTL_MS = 5 * 60 * 1000 // 5 min — evita centenas de chamadas quando mesmo contato envia várias msgs
@@ -32,7 +32,7 @@ async function syncContactFromZapi(phone, companyId) {
 
   if (!zapiProvider.getContactMetadata || !zapiProvider.getProfilePicture) return null
   if (companyId != null) {
-    const { config } = await getEmpresaZapiConfig(companyId)
+    const { config } = await getEmpresaWhatsappConfig(companyId)
     if (!config) return null
   }
   const opts = companyId != null ? { companyId } : {}

@@ -76,21 +76,16 @@ app.use(express.json({
 }))
 
 // =====================================================
-// WEBHOOKS — devem ser registrados ANTES do CORS.
-// A Z-API (e Meta) enviam header Origin nas chamadas de webhook.
-// Se os webhooks ficassem depois do app.use(cors(...)), qualquer
-// Origin fora da lista seria bloqueado com 403 antes de chegar ao controller.
+// WEBHOOKS — registrados ANTES do CORS (UltraMsg/Meta enviam Origin).
 // =====================================================
 const webhookRoutes = require('./routes/webhookRoutes')
-const webhookZapiRoutes = require('./routes/webhookZapiRoutes')
 const webhookUltramsgRoutes = require('./routes/webhookUltramsgRoutes')
 const { webhookLimiter } = require('./middleware/rateLimit')
 
 app.use('/webhook', webhookLimiter, webhookRoutes)
 app.use('/webhook/meta', webhookLimiter, webhookRoutes)
-app.use('/webhooks/zapi', webhookLimiter, webhookZapiRoutes)
-app.use('/webhook/zapi', webhookLimiter, webhookZapiRoutes)
 app.use('/webhooks/ultramsg', webhookLimiter, webhookUltramsgRoutes)
+app.use('/webhooks/whatsapp', webhookLimiter, webhookUltramsgRoutes)
 
 // =====================================================
 // CORS — aplicado APÓS os webhooks.
@@ -173,7 +168,7 @@ if (process.env.NODE_ENV !== 'production') {
     res.json({
       APP_URL: process.env.APP_URL || null,
       NODE_ENV: process.env.NODE_ENV || null,
-      WEBHOOK_TOKEN_SET: !!String(process.env.ZAPI_WEBHOOK_TOKEN || '').trim(),
+      WEBHOOK_TOKEN_SET: !!String(process.env.WHATSAPP_WEBHOOK_TOKEN || process.env.ZAPI_WEBHOOK_TOKEN || '').trim(),
     })
   })
 }

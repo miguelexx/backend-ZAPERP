@@ -21,8 +21,9 @@ if (!process.env.JWT_SECRET) {
 if (!String(process.env.APP_URL || '').trim()) {
   throw new Error('APP_URL não definido no .env')
 }
-if (!String(process.env.ZAPI_WEBHOOK_TOKEN || '').trim()) {
-  throw new Error('ZAPI_WEBHOOK_TOKEN não definido no .env')
+const webhookToken = process.env.WHATSAPP_WEBHOOK_TOKEN || process.env.ZAPI_WEBHOOK_TOKEN || ''
+if (!String(webhookToken).trim()) {
+  throw new Error('WHATSAPP_WEBHOOK_TOKEN não definido no .env')
 }
 if (!String(process.env.NODE_ENV || '').trim()) {
   throw new Error('NODE_ENV não definido no .env')

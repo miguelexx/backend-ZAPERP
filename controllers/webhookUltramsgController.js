@@ -119,7 +119,7 @@ exports.healthUltramsg = (req, res) => res.status(200).json({ ok: true, provider
 
 exports.testarUltramsg = (req, res) => {
   const base = (process.env.APP_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '')
-  const token = String(process.env.ULTRAMSG_WEBHOOK_TOKEN || process.env.ZAPI_WEBHOOK_TOKEN || '').trim()
+  const token = String(process.env.WHATSAPP_WEBHOOK_TOKEN || process.env.ZAPI_WEBHOOK_TOKEN || '').trim()
   const suffix = token ? `?token=${encodeURIComponent(token)}` : ''
   const webhookUrl = `${base}/webhooks/ultramsg${suffix}`
   return res.status(200).json({

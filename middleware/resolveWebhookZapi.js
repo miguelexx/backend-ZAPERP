@@ -2,17 +2,15 @@
 
 /**
  * Middleware: resolve instanceId → company_id e injeta em req.zapiContext.
- * Log seguro: { eventType, instanceId, companyIdResolved }
- * Se não mapeado: 200 { ok: true } (nunca expor tokens).
  */
 
-const { getCompanyIdByInstanceId } = require('../services/zapiIntegrationService')
+const { getCompanyIdByInstanceId } = require('../services/whatsappConfigService')
 
 function _logSafe(entry) {
-  console.log('[Z-API-WEBHOOK]', JSON.stringify({ ts: new Date().toISOString(), ...entry }))
+  console.log('[WEBHOOK]', JSON.stringify({ ts: new Date().toISOString(), ...entry }))
 }
 
-/** Extrai instanceId do payload Z-API (body.instanceId, instance_id, instance.id, instance). */
+/** Extrai instanceId do payload (body.instanceId, instance_id, instance). */
 function extractInstanceId(body) {
   if (!body || typeof body !== 'object') return ''
   const v = body.instanceId ?? body.instance_id ?? body.instance?.id ?? body.instance
