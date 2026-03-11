@@ -53,7 +53,7 @@ async function getStatus(companyId) {
     return { error: data?.error || data?.message || `HTTP ${data?.status || 500}` }
   }
   const status = String(data?.status ?? data?.state ?? '').toLowerCase()
-  const connected = status === 'authenticated' || status === 'connected' || data?.connected === true
+  const connected = ['authenticated', 'connected', 'standby'].includes(status) || data?.connected === true
   const smartphoneConnected = connected
   return { connected, smartphoneConnected }
 }

@@ -15,7 +15,16 @@ const { permitirEnvio } = require('../protecao/protecaoOrchestrator')
 
 const ULTRAMSG_BASE_URL = (process.env.ULTRAMSG_BASE_URL || 'https://api.ultramsg.com').replace(/\/$/, '')
 const MIN_DELAY_BETWEEN_SENDS_MS = Math.min(500, Math.max(150, Number(process.env.ULTRAMSG_SEND_DELAY_MS) || 280))
+const BODY_MAX_LEN = 4096
+const CHATS_MESSAGES_LIMIT_MAX = 1000
 const lastSendPerCompany = new Map()
+
+/** Mascara token em logs — nunca expor segredos. */
+function maskToken(t) {
+  if (!t || typeof t !== 'string') return '***'
+  if (t.length <= 4) return '****'
+  return t.slice(0, 2) + '***' + t.slice(-2)
+}
 
 async function awaitSendDelay(companyId) {
   const key = companyId ?? 'default'
@@ -84,8 +93,10 @@ async function postJson({ basePath, token, endpoint, body }) {
   return { ok: res.ok, status: res.status, data, text }
 }
 
-async function getJson({ basePath, token, endpoint }) {
-  const url = `${basePath}${endpoint}?token=${encodeURIComponent(token)}`
+async function getJson({ basePath, token, endpoint, extraParams = {} }) {
+  const sep = String(endpoint || '').includes('?') ? '&' : '?'
+  const params = new URLSearchParams({ token, ...extraParams })
+  const url = `${basePath}${endpoint}${sep}${params.toString()}`
   const res = await fetchWithRetry(url, { method: 'GET', headers: { accept: 'application/json' } })
   const text = await res.text().catch(() => '')
   let data = null
@@ -134,14 +145,18 @@ async function sendText(phone, message, opts = {}) {
   if (!nums.length || !message) {
     return { ok: false, messageId: null, error: 'Número inválido ou mensagem vazia.' }
   }
+  const msg = String(message).trim()
+  if (msg.length > BODY_MAX_LEN) {
+    return { ok: false, messageId: null, error: `body excede ${BODY_MAX_LEN} caracteres` }
+  }
   const replyMessageId = opts?.replyMessageId ? String(opts.replyMessageId).trim() : null
-  const body = { to: nums[0], body: String(message).trim() }
+  const body = { to: nums[0], body: msg }
   if (replyMessageId) body.msgId = replyMessageId
 
   const { ok, status, data, text } = await postJson({ ...cfg, endpoint: '/messages/chat', body })
   if (!ok) {
     const err = data?.error || data?.message || text?.slice(0, 200) || `HTTP ${status}`
-    console.warn('❌ UltraMsg sendText falhou:', nums[0]?.slice(-12), status, String(err).slice(0, 150))
+    console.warn('❌ UltraMsg sendText falhou:', nums[0]?.slice(-12), status, String(err).slice(0, 150), '| token:', maskToken(cfg.token))
     return { ok: false, messageId: null, error: err }
   }
   const msgId = data?.id ?? data?.messageId ?? null
@@ -183,7 +198,7 @@ async function sendImage(phone, url, caption = '', opts = {}) {
   const body = { to: nums[0], image: String(url).trim(), caption: String(caption || '').trim() }
   const { ok, data, text } = await postJson({ ...cfg, endpoint: '/messages/image', body })
   if (!ok) {
-    console.warn('❌ UltraMsg sendImage falhou:', nums[0]?.slice(-12), String(text || data?.error || '').slice(0, 150))
+    console.warn('❌ UltraMsg sendImage falhou:', nums[0]?.slice(-12), String(text || data?.error || '').slice(0, 150), '| token:', maskToken(cfg.token))
     return false
   }
   console.log('✅ UltraMsg imagem enviada:', nums[0]?.slice(-12))
@@ -336,10 +351,62 @@ async function sendCall(phone, callDuration, opts = {}) {
 }
 
 /**
- * Lista contatos. UltraMsg não expõe endpoint GET /contacts — retorna [].
+ * Lista contatos. UltraMsg: GET /{instance_id}/contacts
  */
 async function getContacts(page = 1, pageSize = 100, opts = {}) {
-  return []
+  const cfg = await resolveConfig(opts)
+  if (!cfg) return []
+  try {
+    const limit = Math.min(100, Math.max(1, Number(pageSize) || 100))
+    const offset = (Math.max(1, Number(page)) - 1) * limit
+    const { ok, data } = await getJson({
+      ...cfg,
+      endpoint: '/contacts',
+      extraParams: { limit: String(limit), offset: String(offset) }
+    })
+    if (!ok) return []
+    const arr = Array.isArray(data) ? data : (data?.contacts ? (Array.isArray(data.contacts) ? data.contacts : []) : [])
+    return arr.map((c) => ({
+      phone: c.id || c.phone || c.wa_id || '',
+      name: c.name || null,
+      short: c.short || null,
+      notify: c.notify || null,
+      vname: c.vname || null,
+      imgUrl: c.imgUrl || c.photo || null
+    }))
+  } catch {
+    return []
+  }
+}
+
+/**
+ * Lista chats. UltraMsg: GET /{instance_id}/chats
+ */
+async function getChats(opts = {}) {
+  const cfg = await resolveConfig(opts)
+  if (!cfg) return []
+  try {
+    const { ok, data } = await getJson({ ...cfg, endpoint: '/chats' })
+    if (!ok || !Array.isArray(data)) return []
+    return data
+  } catch {
+    return []
+  }
+}
+
+/**
+ * Lista grupos. UltraMsg: GET /{instance_id}/groups
+ */
+async function getGroups(opts = {}) {
+  const cfg = await resolveConfig(opts)
+  if (!cfg) return []
+  try {
+    const { ok, data } = await getJson({ ...cfg, endpoint: '/groups' })
+    if (!ok || !Array.isArray(data)) return []
+    return data
+  } catch {
+    return []
+  }
 }
 
 /**
@@ -357,7 +424,7 @@ async function getContactMetadata(phone, opts = {}) {
 }
 
 /**
- * Mensagens do chat. UltraMsg: GET /chats/messages.
+ * Mensagens do chat. UltraMsg: GET /chats/messages (limit obrigatório, max 1000).
  */
 async function getChatMessages(phone, amount = 10, lastMessageId = null, opts = {}) {
   const cfg = await resolveConfig(opts)
@@ -367,13 +434,53 @@ async function getChatMessages(phone, amount = 10, lastMessageId = null, opts = 
   const to = toUltramsgPhone(nums[0])
   if (!to) return []
   try {
-    const url = `${cfg.basePath}/chats/messages?token=${encodeURIComponent(cfg.token)}&chatId=${encodeURIComponent(to)}`
-    const res = await fetchWithRetry(url, { method: 'GET' })
-    if (!res.ok) return []
-    const data = await res.json().catch(() => null)
+    const limit = Math.min(CHATS_MESSAGES_LIMIT_MAX, Math.max(1, Number(amount) || 10))
+    const { ok, data } = await getJson({
+      ...cfg,
+      endpoint: '/chats/messages',
+      extraParams: { chatId: to, limit: String(limit) }
+    })
+    if (!ok) return []
     return Array.isArray(data) ? data : []
   } catch {
     return []
+  }
+}
+
+/**
+ * Upload de mídia para UltraMsg. POST /{instance_id}/media/upload
+ * Retorna URL pública para usar em sendImage/sendFile/etc quando APP_URL não é acessível.
+ */
+async function uploadMedia(filePath, filename, opts = {}) {
+  const cfg = await resolveConfig(opts)
+  if (!cfg || !filePath) return { ok: false, url: null, error: 'Config ou arquivo indisponível' }
+  const fs = require('fs')
+  const path = require('path')
+  if (!fs.existsSync(filePath)) return { ok: false, url: null, error: 'Arquivo não encontrado' }
+  const safeFilename = filename || path.basename(filePath) || 'file'
+  try {
+    const FormData = require('form-data')
+    const form = new FormData()
+    form.append('token', cfg.token)
+    form.append('file', fs.createReadStream(filePath), { filename: safeFilename })
+    const res = await fetchWithRetry(`${cfg.basePath}/media/upload`, {
+      method: 'POST',
+      body: form,
+      headers: form.getHeaders()
+    })
+    const text = await res.text().catch(() => '')
+    let data = null
+    try { data = text ? JSON.parse(text) : null } catch { data = null }
+    if (!res.ok) {
+      const err = data?.error || data?.message || `HTTP ${res.status}`
+      console.warn('❌ UltraMsg uploadMedia falhou:', safeFilename?.slice(-20), err, '| token:', maskToken(cfg.token))
+      return { ok: false, url: null, error: err }
+    }
+    const url = data?.url || data?.link || data?.file || null
+    return { ok: !!url, url }
+  } catch (e) {
+    console.warn('[ULTRAMSG] uploadMedia:', e?.message || e, '| token:', maskToken(cfg.token))
+    return { ok: false, url: null, error: e?.message || 'Erro no upload' }
   }
 }
 
@@ -388,22 +495,25 @@ async function configureWebhooks(appUrl, opts = {}) {
   const tokenSuffix = webhookToken ? `?token=${encodeURIComponent(webhookToken)}` : ''
   const webhookUrl = `${base}/webhooks/ultramsg${tokenSuffix}`
 
+  const sendDelay = Math.max(1, Math.min(60, Number(process.env.ULTRAMSG_SEND_DELAY) || 1))
+  const sendDelayMax = Math.max(1, Math.min(120, Number(process.env.ULTRAMSG_SEND_DELAY_MAX) || 15))
+  const webhookDownloadMedia = process.env.ULTRAMSG_WEBHOOK_DOWNLOAD_MEDIA === 'true'
   const body = {
     token: cfg.token,
     webhook_url: webhookUrl,
     webhook_message_received: true,
     webhook_message_create: true,
     webhook_message_ack: true,
-    webhook_message_download_media: false,
-    sendDelay: 1,
-    sendDelayMax: 15
+    webhook_message_download_media: webhookDownloadMedia,
+    sendDelay,
+    sendDelayMax
   }
   const { ok, data, text } = await postJson({ ...cfg, endpoint: '/instance/settings', body })
   if (ok) {
     console.log('✅ UltraMsg webhooks configurados:', webhookUrl)
     return [{ label: 'webhook', ok: true }]
   }
-  console.warn('⚠️ UltraMsg configureWebhooks falhou:', String(text || data?.error || '').slice(0, 200))
+  console.warn('⚠️ UltraMsg configureWebhooks falhou:', String(text || data?.error || '').slice(0, 200), '| token:', maskToken(cfg?.token))
   return [{ label: 'webhook', ok: false }]
 }
 
@@ -429,7 +539,7 @@ async function getConnectionStatus(opts = {}) {
     const { ok, data } = await getJson({ ...cfg, endpoint: '/instance/status' })
     if (!ok) return { connected: false, configured: true }
     const status = String(data?.status || data?.state || '').toLowerCase()
-    const connected = status === 'authenticated' || status === 'connected' || data?.connected === true
+    const connected = ['authenticated', 'connected', 'standby'].includes(status) || data?.connected === true
     const phone = data?.phone ?? data?.wid ?? null
     return { connected, configured: true, phone, session: data?.session ?? null }
   } catch (e) {
@@ -451,6 +561,9 @@ module.exports = {
   sendCall,
   sendSticker,
   getContacts,
+  getChats,
+  getGroups,
+  uploadMedia,
   getProfilePicture,
   getContactMetadata,
   getChatMessages,

@@ -7,17 +7,35 @@
 const supabase = require('../config/supabase')
 
 const MAX_PAYLOAD_SIZE = 50000 // ~50KB para evitar payloads gigantes
+const SENSITIVE_KEYS = ['token', 'instance_token', 'password', 'authorization']
 
 /**
  * Sanitiza o payload removendo ou mascarando dados sensíveis.
  */
 function sanitizePayload(obj) {
   if (!obj || typeof obj !== 'object') return obj
-  const str = JSON.stringify(obj)
+  const clone = JSON.parse(JSON.stringify(obj))
+  for (const key of SENSITIVE_KEYS) {
+    if (Object.prototype.hasOwnProperty.call(clone, key) && clone[key]) {
+      clone[key] = '***'
+    }
+  }
+  // Também mascara em objetos aninhados (ex: data.token)
+  function maskInObject(o) {
+    if (!o || typeof o !== 'object') return
+    for (const k of SENSITIVE_KEYS) {
+      if (Object.prototype.hasOwnProperty.call(o, k) && o[k]) o[k] = '***'
+    }
+    for (const v of Object.values(o)) {
+      if (v && typeof v === 'object') maskInObject(v)
+    }
+  }
+  maskInObject(clone)
+  const str = JSON.stringify(clone)
   if (str.length > MAX_PAYLOAD_SIZE) {
     return { _truncated: true, _size: str.length, _preview: str.slice(0, 2000) }
   }
-  return obj
+  return clone
 }
 
 /**

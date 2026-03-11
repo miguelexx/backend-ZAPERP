@@ -132,15 +132,21 @@ exports.testarUltramsg = (req, res) => {
 
 /**
  * Handler principal: normaliza payload UltraMsg → Z-API e delega ao webhookZapi.
+ * Idempotência: webhookZapiController trata por (conversa_id, whatsapp_id).
  */
 async function handleWebhookUltramsg(req, res) {
   try {
+    const body = req.body
+    if (!body || typeof body !== 'object') {
+      req.webhookLogData = { status: 'ignored', error: 'payload_invalido' }
+      return res.status(200).json({ ok: true })
+    }
+
     const ctx = req.zapiContext
     if (!ctx || ctx.company_id == null) {
       return res.status(200).json({ ok: true })
     }
 
-    const body = req.body || {}
     const eventType = String(body.event_type || body.eventType || '').toLowerCase()
     req.webhookLogData = {
       status: 'processed',
@@ -151,6 +157,7 @@ async function handleWebhookUltramsg(req, res) {
 
     if (eventType === 'message_ack' || eventType === 'webhook_message_ack') {
       const normalized = normalizeUltramsgToZapi(body)
+      if (!normalized) return res.status(200).json({ ok: true })
       req.body = { ...normalized, type: 'MessageStatusCallback', instanceId: body.instanceId, instance_id: body.instanceId }
       return webhookZapiController.statusZapi(req, res)
     }
@@ -158,18 +165,22 @@ async function handleWebhookUltramsg(req, res) {
     const isMessageEvent = [
       'message_received', 'message_create',
       'webhook_message_received', 'webhook_message_create',
+      'webhook_message_download_media',
       ''
     ].includes(eventType)
-    if (isMessageEvent || (body?.data && typeof body.data === 'object' && (body.data.from || body.data.id))) {
+    const hasMessageData = body?.data && typeof body.data === 'object' && (body.data.from != null || body.data.id != null)
+    if (isMessageEvent || hasMessageData) {
       const normalized = normalizeUltramsgToZapi(body)
+      if (!normalized) return res.status(200).json({ ok: true })
       req.body = { ...normalized, type: 'ReceivedCallback', instanceId: body.instanceId, instance_id: body.instanceId }
       return webhookZapiController.receberZapi(req, res)
     }
 
     return res.status(200).json({ ok: true })
   } catch (e) {
-    console.error('[handleWebhookUltramsg]', e?.message || e)
-    req.webhookLogData = { status: 'error', error_message: e?.message || String(e) }
+    const errMsg = e?.message || String(e)
+    console.error('[handleWebhookUltramsg]', errMsg)
+    req.webhookLogData = { status: 'error', error_message: errMsg }
     return res.status(200).json({ ok: true })
   }
 }

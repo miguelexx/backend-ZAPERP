@@ -3009,22 +3009,22 @@ exports.enviarArquivo = async (req, res) => {
     const fullUrl = baseUrl ? `${baseUrl}${pathUrl}` : null
     const isLocalhost = /localhost|127\.0\.0\.1/i.test(baseUrl)
 
-    if (conversa?.telefone && fullUrl && !isLocalhost) {
+    const sendMediaWithUrl = (mediaUrl) => {
       const provider = getProvider()
       const phone = conversa.telefone
       const opts = { companyId: company_id, conversaId: conversa_id }
       const promise =
         tipo === 'audio' && provider.sendAudio
-          ? provider.sendAudio(phone, fullUrl, opts)
+          ? provider.sendAudio(phone, mediaUrl, opts)
           : tipo === 'sticker' && provider.sendSticker
-            ? provider.sendSticker(phone, fullUrl, { ...opts, stickerAuthor: 'ZapERP' })
-          : tipo === 'imagem' && provider.sendImage
-            ? provider.sendImage(phone, fullUrl, '', opts)
-            : tipo === 'video' && provider.sendVideo
-              ? provider.sendVideo(phone, fullUrl, '', opts)
-              : provider.sendFile
-                ? provider.sendFile(phone, fullUrl, file.originalname || '', opts)
-                : Promise.resolve(false)
+            ? provider.sendSticker(phone, mediaUrl, { ...opts, stickerAuthor: 'ZapERP' })
+            : tipo === 'imagem' && provider.sendImage
+              ? provider.sendImage(phone, mediaUrl, '', opts)
+              : tipo === 'video' && provider.sendVideo
+                ? provider.sendVideo(phone, mediaUrl, '', opts)
+                : provider.sendFile
+                  ? provider.sendFile(phone, mediaUrl, file.originalname || '', opts)
+                  : Promise.resolve(false)
       promise
         .then(async (ok) => {
           if (!ok) {
@@ -3033,8 +3033,7 @@ exports.enviarArquivo = async (req, res) => {
             const io2 = req.app?.get('io')
             if (io2) {
               const payload = { mensagem_id: msg.id, conversa_id: Number(conversa_id), status: 'erro' }
-              const chain = io2.to(`empresa_${company_id}`).to(`conversa_${conversa_id}`).to(`usuario_${user_id}`)
-              chain.emit(io2.EVENTS?.STATUS_MENSAGEM || 'status_mensagem', payload)
+              io2.to(`empresa_${company_id}`).to(`conversa_${conversa_id}`).to(`usuario_${user_id}`).emit(io2.EVENTS?.STATUS_MENSAGEM || 'status_mensagem', payload)
             }
           }
         })
@@ -3044,13 +3043,47 @@ exports.enviarArquivo = async (req, res) => {
           const io2 = req.app?.get('io')
           if (io2) {
             const payload = { mensagem_id: msg.id, conversa_id: Number(conversa_id), status: 'erro' }
-            const chain = io2.to(`empresa_${company_id}`).to(`conversa_${conversa_id}`).to(`usuario_${user_id}`)
-            chain.emit(io2.EVENTS?.STATUS_MENSAGEM || 'status_mensagem', payload)
+            io2.to(`empresa_${company_id}`).to(`conversa_${conversa_id}`).to(`usuario_${user_id}`).emit(io2.EVENTS?.STATUS_MENSAGEM || 'status_mensagem', payload)
           }
         })
-    } else if (conversa?.telefone && (!baseUrl || isLocalhost)) {
-      if (!baseUrl) console.warn('⚠️ APP_URL/BASE_URL não configurado; mídia não enviada ao WhatsApp.')
-      else console.warn('⚠️ APP_URL não pode ser localhost; Z-API precisa de URL pública para baixar mídia.')
+    }
+
+    if (conversa?.telefone) {
+      if (fullUrl && !isLocalhost) {
+        setImmediate(() => sendMediaWithUrl(fullUrl))
+      } else if ((!baseUrl || isLocalhost) && file.path) {
+        const provider = getProvider()
+        if (provider?.uploadMedia) {
+          setImmediate(async () => {
+            try {
+              const result = await provider.uploadMedia(file.path, file.originalname || 'file', { companyId: company_id })
+              if (result?.ok && result?.url) {
+                sendMediaWithUrl(result.url)
+              } else {
+                console.warn('⚠️ UltraMsg uploadMedia falhou; mídia não enviada.', result?.error || '')
+                await supabase.from('mensagens').update({ status: 'erro' }).eq('company_id', company_id).eq('id', msg.id)
+                const io2 = req.app?.get('io')
+                if (io2) {
+                  io2.to(`empresa_${company_id}`).to(`conversa_${conversa_id}`).to(`usuario_${user_id}`).emit(io2.EVENTS?.STATUS_MENSAGEM || 'status_mensagem', { mensagem_id: msg.id, conversa_id: Number(conversa_id), status: 'erro' })
+                }
+              }
+            } catch (e) {
+              console.error('WhatsApp uploadMedia:', e)
+              await supabase.from('mensagens').update({ status: 'erro' }).eq('company_id', company_id).eq('id', msg.id)
+              const io2 = req.app?.get('io')
+              if (io2) {
+                io2.to(`empresa_${company_id}`).to(`conversa_${conversa_id}`).to(`usuario_${user_id}`).emit(io2.EVENTS?.STATUS_MENSAGEM || 'status_mensagem', { mensagem_id: msg.id, conversa_id: Number(conversa_id), status: 'erro' })
+              }
+            }
+          })
+        } else if (!baseUrl) {
+          console.warn('⚠️ APP_URL/BASE_URL não configurado; mídia não enviada ao WhatsApp.')
+        } else {
+          console.warn('⚠️ APP_URL é localhost e provider sem uploadMedia; mídia não enviada ao WhatsApp.')
+        }
+      } else if (!baseUrl) {
+        console.warn('⚠️ APP_URL/BASE_URL não configurado; mídia não enviada ao WhatsApp.')
+      }
     }
 
     // Não retornar mensagem completa — evita duplicação (API + socket). Mensagem chega via nova_mensagem.
