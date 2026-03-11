@@ -2626,9 +2626,6 @@ exports.connectionZapi = async (req, res) => {
           }
         }
 
-        const { registrarEvento, TIPOS } = require('../services/operationalAuditService')
-        await registrarEvento(company_id, TIPOS.CONEXAO, 'Sessão Z-API conectada', {})
-
         let autoSync = false
         try {
           const { data: emp, error: errEmp } = await supabase
@@ -2640,13 +2637,26 @@ exports.connectionZapi = async (req, res) => {
         } catch (_) {}
 
         if (autoSync && provider.getContacts) {
-          const { enqueue, JOB_TIPOS } = require('../services/queueManager')
-          const result = await enqueue(company_id, JOB_TIPOS.SYNC_CONTATOS, { reset: true })
-          if (result.ok) {
-            console.log('🔄 Z-API: job de sync de contatos enfileirado (sync progressiva)')
-          } else {
-            console.log('⏭️ Z-API: sync não enfileirado:', result.error)
-          }
+          setImmediate(async () => {
+            try {
+              const { syncContacts } = require('../services/zapiContactsSyncService')
+              const result = await syncContacts(company_id)
+              if (result.ok) {
+                const io = req.app.get('io')
+                if (io) {
+                  io.to(`empresa_${company_id}`).emit('zapi_sync_contatos', {
+                    total_contatos: result.totalFetched,
+                    criados: result.inserted,
+                    atualizados: result.updated,
+                    fotos_atualizadas: 0
+                  })
+                }
+                console.log('🔄 Z-API: sync de contatos concluído (auto-sync ao conectar)')
+              }
+            } catch (e) {
+              console.warn('Z-API auto-sync:', e?.message || e)
+            }
+          })
         } else {
           console.log('⏭️ Z-API: auto-sync desativado ou getContacts indisponível')
         }

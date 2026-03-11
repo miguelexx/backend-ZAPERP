@@ -936,31 +936,35 @@ exports.zapiStatus = async (req, res) => {
 
 // =====================================================
 // 3b) Sincronizar contatos do celular (Z-API Get contacts)
-// Enfileira job de sync progressiva em vez de executar inline.
-// Resultado será enviado via socket zapi_sync_contatos ao concluir.
+// Executa sync inline — compatível sem fila de jobs.
 // =====================================================
 exports.sincronizarContatosZapi = async (req, res) => {
   try {
     const { company_id } = req.user
     if (!company_id) return res.status(401).json({ error: 'Não autenticado' })
 
-    const { getEmpresaZapiConfig } = require('../services/zapiIntegrationService')
-    const { config, error } = await getEmpresaZapiConfig(company_id)
-    if (error || !config) {
-      return res.status(400).json({ error: 'Empresa sem instância Z-API configurada. Conecte o WhatsApp em Integrações.' })
-    }
-
-    const { enqueue, JOB_TIPOS } = require('../services/queueManager')
-    const result = await enqueue(company_id, JOB_TIPOS.SYNC_CONTATOS, { reset: true })
+    const { syncContacts } = require('../services/zapiContactsSyncService')
+    const result = await syncContacts(company_id)
 
     if (!result.ok) {
-      return res.status(400).json({ error: result.error || 'Não foi possível enfileirar sync' })
+      return res.status(400).json({ error: result.errors?.[0] || 'Empresa sem instância Z-API configurada. Conecte o WhatsApp em Integrações.' })
+    }
+
+    const io = req.app.get('io')
+    if (io) {
+      io.to(`empresa_${company_id}`).emit('zapi_sync_contatos', {
+        total_contatos: result.totalFetched,
+        criados: result.inserted,
+        atualizados: result.updated,
+        fotos_atualizadas: 0
+      })
     }
 
     return res.json({
-      ok: true,
-      job_id: result.job_id,
-      mensagem: 'Sincronização enfileirada. O resultado será exibido quando concluir.'
+      total_contatos: result.totalFetched,
+      criados: result.inserted,
+      atualizados: result.updated,
+      fotos_atualizadas: 0
     })
   } catch (err) {
     console.error('sincronizarContatosZapi:', err)
@@ -970,8 +974,7 @@ exports.sincronizarContatosZapi = async (req, res) => {
 
 // =====================================================
 // 3c) Sincronizar fotos de perfil (Z-API Get profile-picture)
-// Enfileira job de sync progressiva em vez de executar inline.
-// Resultado será enviado via socket zapi_sync_contatos ao concluir.
+// Executa sync inline — compatível sem fila de jobs.
 // =====================================================
 exports.sincronizarFotosPerfilZapi = async (req, res) => {
   try {
@@ -990,19 +993,13 @@ exports.sincronizarFotosPerfilZapi = async (req, res) => {
       })
     }
 
-    const { enqueue, JOB_TIPOS } = require('../services/queueManager')
-    const result = await enqueue(company_id, JOB_TIPOS.SYNC_FOTOS, {
-      maxClients: Math.min(500, Number(req.query.limit) || 500)
-    })
-
-    if (!result.ok) {
-      return res.status(400).json({ error: result.error || 'Não foi possível enfileirar sync de fotos' })
-    }
+    const { syncFotosFullProgressiva } = require('../services/syncFotosProgressivaService')
+    const maxClients = Math.min(500, Number(req.query.limit) || 500)
+    const result = await syncFotosFullProgressiva(company_id, { maxClients })
 
     return res.json({
-      ok: true,
-      job_id: result.job_id,
-      mensagem: 'Sincronização de fotos enfileirada. O resultado será exibido quando concluir.'
+      total: result.clientesProcessados ?? 0,
+      atualizados: result.totalAtualizados ?? 0
     })
   } catch (err) {
     console.error('sincronizarFotosPerfilZapi:', err)

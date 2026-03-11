@@ -303,8 +303,7 @@ exports.debugStatus = async (req, res) => {
 }
 
 /**
- * POST /contacts/sync — enfileira sync de contatos (progressiva).
- * Resultado enviado via socket zapi_sync_contatos ao concluir.
+ * POST /contacts/sync — executa sync de contatos inline.
  */
 exports.syncContacts = async (req, res) => {
   const company_id = req.user?.company_id
@@ -315,10 +314,17 @@ exports.syncContacts = async (req, res) => {
       retryAfterSeconds: 60
     })
   }
-  const { enqueue, JOB_TIPOS } = require('../services/queueManager')
-  const result = await enqueue(company_id, JOB_TIPOS.SYNC_CONTATOS, { reset: true })
-  if (!result.ok) return res.status(400).json({ ok: false, error: result.error })
-  return res.json({ ok: true, job_id: result.job_id, mode: 'enqueued' })
+  const { syncContacts } = require('../services/zapiContactsSyncService')
+  const result = await syncContacts(company_id)
+  if (!result.ok) return res.status(400).json({ ok: false, error: result.errors?.[0] || 'Erro ao sincronizar' })
+  return res.json({
+    ok: true,
+    mode: result.mode,
+    totalFetched: result.totalFetched,
+    inserted: result.inserted,
+    updated: result.updated,
+    skipped: result.skipped
+  })
 }
 
 /**
@@ -331,29 +337,37 @@ exports.getOperationalStatus = async (req, res) => {
   const statusResult = await getStatus(company_id)
   const config = await getConfig(company_id)
 
-  const supabase = require('../config/supabase')
-  const { data: lastJob } = await supabase
-    .from('jobs')
-    .select('atualizado_em, resultado_json, status')
-    .eq('company_id', company_id)
-    .eq('tipo', 'sync_contatos')
-    .in('status', ['completed'])
-    .order('atualizado_em', { ascending: false })
-    .limit(1)
-    .maybeSingle()
+  let lastJob = null
+  let pendingJob = null
+  try {
+    const supabase = require('../config/supabase')
+    const r1 = await supabase
+      .from('jobs')
+      .select('atualizado_em, resultado_json, status')
+      .eq('company_id', company_id)
+      .eq('tipo', 'sync_contatos')
+      .in('status', ['completed'])
+      .order('atualizado_em', { ascending: false })
+      .limit(1)
+      .maybeSingle()
+    if (!r1.error) lastJob = r1.data
 
-  const { data: pendingJob } = await supabase
-    .from('jobs')
-    .select('id')
-    .eq('company_id', company_id)
-    .eq('tipo', 'sync_contatos')
-    .in('status', ['pending', 'running'])
-    .limit(1)
-    .maybeSingle()
+    const r2 = await supabase
+      .from('jobs')
+      .select('id')
+      .eq('company_id', company_id)
+      .eq('tipo', 'sync_contatos')
+      .in('status', ['pending', 'running'])
+      .limit(1)
+      .maybeSingle()
+    if (!r2.error) pendingJob = r2.data
+  } catch (_) {
+    // Tabela jobs pode não existir — usa defaults
+  }
 
   return res.json({
     connected: statusResult?.connected ?? false,
-    syncStatus: pendingJob?.id ? 'running' : (lastJob ? 'idle' : 'idle'),
+    syncStatus: pendingJob?.id ? 'running' : 'idle',
     syncPending: !!pendingJob,
     lastSyncAt: lastJob?.atualizado_em ?? null,
     modoSeguro: config?.modo_seguro ?? true,
