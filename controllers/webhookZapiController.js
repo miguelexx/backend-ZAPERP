@@ -1677,6 +1677,33 @@ exports.receberZapi = async (req, res) => {
       return res.status(500).json({ error: 'Erro ao obter conversa' })
     }
 
+    // Reabertura automática: quando o cliente manda mensagem em conversa fechada, reabre automaticamente
+    if (!fromMe && !isGroup && conversa_id) {
+      const { data: convStatus } = await supabase
+        .from('conversas')
+        .select('id, status_atendimento')
+        .eq('id', conversa_id)
+        .eq('company_id', company_id)
+        .maybeSingle()
+      if (convStatus?.status_atendimento === 'fechada') {
+        const { data: reaberta } = await supabase
+          .from('conversas')
+          .update({ status_atendimento: 'aberta' })
+          .eq('id', conversa_id)
+          .eq('company_id', company_id)
+          .select()
+          .single()
+        if (reaberta) {
+          const io = req.app.get('io')
+          if (io) {
+            io.to(`empresa_${company_id}`).emit(io.EVENTS?.CONVERSA_REABERTA || 'conversa_reaberta', reaberta)
+            io.to(`empresa_${company_id}`).emit(io.EVENTS?.ATUALIZAR_CONVERSA || 'atualizar_conversa', { id: conversa_id })
+          }
+          console.log('[Z-API] 🔄 Conversa reaberta automaticamente (cliente enviou msg após encerramento)', { conversa_id })
+        }
+      }
+    }
+
     // 2.5) Chatbot de triagem (Z-API): mensagem do cliente, conversa sem departamento → menu ou processar opção
     // APENAS contatos (não grupos). Telefone deve ser enviável (não lid:).
     let phoneParaChatbot = phone

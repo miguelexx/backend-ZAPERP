@@ -220,11 +220,12 @@ exports.login = async (req, res) => {
       return res.status(400).json({ error: 'Credenciais inválidas' })
     }
 
-    // Busca usuário pelo email
+    // Busca usuário pelo email (case-insensitive: aceita User@Email.com mesmo se no banco estiver user@email.com)
+    const emailParaBusca = emailNorm.replace(/\\/g, '\\\\').replace(/%/g, '\\%').replace(/_/g, '\\_')
     const { data: usuario, error } = await supabase
       .from('usuarios')
       .select('*')
-      .eq('email', emailNorm)
+      .ilike('email', emailParaBusca)
       .maybeSingle()
 
     const isDev = String(process.env.NODE_ENV || '').toLowerCase() !== 'production'
@@ -276,11 +277,12 @@ exports.login = async (req, res) => {
       { expiresIn: '1d' }
     )
 
-    // Retorna token e dados do usuário
+    // Retorna token e dados do usuário (nome para exibição no cabeçalho)
     return res.json({
       token,
       usuario: {
         id: usuario.id,
+        nome: usuario.nome || usuario.email?.split('@')[0] || 'Usuário',
         email: usuario.email,
         company_id: usuario.company_id,
         perfil: usuario.perfil || 'atendente',

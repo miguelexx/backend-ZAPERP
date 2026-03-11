@@ -364,6 +364,7 @@ async function findOrCreateConversation(supabaseClient, {
   }
 
   // 0) LID-only: buscar por chat_lid antes de criar (evita duplicata quando conv com telefone real já existe)
+  // Inclui conversas fechadas: quando cliente manda msg, reutilizamos e o webhook reabre automaticamente
   const isLidPhone = String(phone || '').startsWith('lid:')
   if (isLidPhone && chatLid) {
     const lidPart = String(chatLid).replace(/@lid$/i, '').trim()
@@ -373,7 +374,6 @@ async function findOrCreateConversation(supabaseClient, {
         .select('id, departamento_id, telefone, cliente_id')
         .eq('company_id', company_id)
         .eq('chat_lid', lidPart)
-        .neq('status_atendimento', 'fechada')
         .order('ultima_atividade', { ascending: false })
         .limit(1)
       const convByLid = Array.isArray(rows) && rows[0] ? rows[0] : null
@@ -402,12 +402,11 @@ async function findOrCreateConversation(supabaseClient, {
 
   console.log(`[findOrCreateConversation] ${logPrefix} canonical="${canonical}" variants=[${variants.join(',')}] isGroup=${isGroup}`)
 
-  // 3) Buscar conversa(s) abertas por qualquer variante do telefone
+  // 3) Buscar conversa(s) por qualquer variante do telefone (inclui fechadas para reutilizar — webhook reabre quando cliente manda msg)
   const { data: found, error: errFind } = await supabaseClient
     .from('conversas')
     .select('id, departamento_id, telefone, cliente_id')
     .eq('company_id', company_id)
-    .neq('status_atendimento', 'fechada')
     .in('telefone', variants)
     .order('id', { ascending: false })
     .limit(10)
@@ -485,12 +484,11 @@ async function findOrCreateConversation(supabaseClient, {
     }
 
     if (isUnique || isMissingCol) {
-      // Race condition resolvida: busca novamente
+      // Race condition resolvida: busca novamente (inclui fechadas)
       const { data: raceFound } = await supabaseClient
         .from('conversas')
         .select('id, departamento_id, telefone, cliente_id')
         .eq('company_id', company_id)
-        .neq('status_atendimento', 'fechada')
         .in('telefone', variants)
         .order('id', { ascending: false })
         .limit(1)

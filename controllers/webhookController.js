@@ -319,6 +319,33 @@ exports.receberWebhook = async (req, res) => {
       return res.sendStatus(500)
     }
 
+    // Reabertura automática: quando o cliente manda mensagem em conversa fechada, reabre automaticamente
+    if (!isOutgoing && conversa_id) {
+      const { data: convStatus } = await supabase
+        .from('conversas')
+        .select('id, status_atendimento')
+        .eq('id', conversa_id)
+        .eq('company_id', company_id)
+        .maybeSingle()
+      if (convStatus?.status_atendimento === 'fechada') {
+        const { data: reaberta } = await supabase
+          .from('conversas')
+          .update({ status_atendimento: 'aberta' })
+          .eq('id', conversa_id)
+          .eq('company_id', company_id)
+          .select()
+          .single()
+        if (reaberta) {
+          const io = req.app.get('io')
+          if (io) {
+            io.to(`empresa_${company_id}`).emit(io.EVENTS?.CONVERSA_REABERTA || 'conversa_reaberta', reaberta)
+            io.to(`empresa_${company_id}`).emit(io.EVENTS?.ATUALIZAR_CONVERSA || 'atualizar_conversa', { id: conversa_id })
+          }
+          console.log('[Meta] 🔄 Conversa reaberta automaticamente (cliente enviou msg após encerramento)', { conversa_id })
+        }
+      }
+    }
+
     // 3) Chatbot de triagem (apenas mensagens recebidas do contato; não para mensagens enviadas por nós)
     if (!isOutgoing && departamento_id == null && contactPhone) {
       try {
