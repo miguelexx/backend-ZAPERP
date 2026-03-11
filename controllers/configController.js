@@ -141,6 +141,57 @@ exports.deleteEmpresasWhatsapp = async (req, res) => {
   }
 }
 
+/** GET /config/webhook-logs — logs de webhooks recebidos (UltraMsg, Meta) */
+exports.getWebhookLogs = async (req, res) => {
+  try {
+    const { company_id } = req.user
+    const limit = Math.min(Number(req.query.limit || 100), 200)
+    const offset = Math.max(0, Number(req.query.offset || 0))
+    const provider = req.query.provider?.trim() || null
+    const status = req.query.status?.trim() || null
+
+    let q = supabase
+      .from('webhook_logs')
+      .select('id, provider, path, method, instance_id, company_id, event_type, status, ip, response_status, error_message, processing_ms, criado_em', { count: 'exact' })
+      .or(`company_id.eq.${company_id},company_id.is.null`)
+      .order('criado_em', { ascending: false })
+      .range(offset, offset + limit - 1)
+
+    if (provider) q = q.eq('provider', provider)
+    if (status) q = q.eq('status', status)
+
+    const { data, error, count } = await q
+    if (error) {
+      if (String(error.message || '').includes('does not exist')) return res.json({ items: [], total: 0 })
+      return res.status(500).json({ error: error.message })
+    }
+    return res.json({ items: data || [], total: count ?? 0 })
+  } catch (err) {
+    console.error('[getWebhookLogs]', err?.message || err)
+    return res.status(500).json({ error: 'Erro ao listar logs de webhook' })
+  }
+}
+
+/** GET /config/webhook-logs/:id — detalhe de um log (payload completo) */
+exports.getWebhookLogDetail = async (req, res) => {
+  try {
+    const { company_id } = req.user
+    const { id } = req.params
+    const { data, error } = await supabase
+      .from('webhook_logs')
+      .select('*')
+      .eq('id', id)
+      .or(`company_id.eq.${company_id},company_id.is.null`)
+      .maybeSingle()
+    if (error) return res.status(500).json({ error: error.message })
+    if (!data) return res.status(404).json({ error: 'Log não encontrado' })
+    return res.json(data)
+  } catch (err) {
+    console.error('[getWebhookLogDetail]', err?.message || err)
+    return res.status(500).json({ error: 'Erro ao obter log' })
+  }
+}
+
 /** GET /config/auditoria — logs de atendimentos + historico + auditoria_log (campanhas, permissões) */
 exports.getAuditoria = async (req, res) => {
   try {

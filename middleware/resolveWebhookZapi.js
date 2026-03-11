@@ -21,13 +21,18 @@ function extractInstanceId(body) {
 }
 
 function inferEventType(body, path) {
-  const type = String(body?.type ?? body?.event ?? body?.tipo ?? '').trim()
   const p = String(path || '')
-  if (p === '/status' || p === '/statusht' || p.endsWith('/status')) return type || 'MessageStatusCallback'
-  if (p === '/connection' || p.endsWith('/connection')) return type || 'ConnectedCallback'
-  if (p === '/disconnected' || p.endsWith('/disconnected')) return type || 'DisconnectedCallback'
-  if (p === '/presence' || p.endsWith('/presence')) return type || 'PresenceChatCallback'
-  return type || 'unknown'
+  if (p === '/status' || p === '/statusht' || p.endsWith('/status')) {
+    return String(body?.type ?? body?.event ?? body?.event_type ?? body?.eventType ?? '').trim() || 'MessageStatusCallback'
+  }
+  if (p === '/connection' || p.endsWith('/connection')) return String(body?.type ?? body?.event ?? '').trim() || 'ConnectedCallback'
+  if (p === '/disconnected' || p.endsWith('/disconnected')) return String(body?.type ?? body?.event ?? '').trim() || 'DisconnectedCallback'
+  if (p === '/presence' || p.endsWith('/presence')) return String(body?.type ?? body?.event ?? '').trim() || 'PresenceChatCallback'
+  // UltraMsg: event_type / eventType (message_received, message_ack, message_create)
+  const ev = String(body?.event_type ?? body?.eventType ?? body?.type ?? body?.event ?? body?.tipo ?? '').trim()
+  if (ev) return ev
+  if (body?.data && typeof body.data === 'object') return body.data?.id ? 'message_received' : 'unknown'
+  return 'unknown'
 }
 
 async function resolveWebhookZapi(req, res, next) {
@@ -39,7 +44,9 @@ async function resolveWebhookZapi(req, res, next) {
     const instanceId = instanceIdRaw ? instanceIdRaw.slice(0, 32) : '(empty)'
 
     if (!instanceIdRaw || !String(instanceIdRaw).trim()) {
-      _logSafe({ eventType: inferEventType(body, path), instanceId: '(empty)', companyIdResolved: 'missing_instanceId' })
+      const ev = inferEventType(body, path)
+      req.webhookLogData = { status: 'ignored_missing_instance', event_type: ev }
+      _logSafe({ eventType: ev, instanceId: '(empty)', companyIdResolved: 'missing_instanceId' })
       return res.status(200).json({ ok: true, ignored: 'missing_instanceId' })
     }
 
@@ -51,6 +58,7 @@ async function resolveWebhookZapi(req, res, next) {
 
     req.zapiContext = { company_id, instanceId: instanceIdRaw, eventType }
     if (company_id == null) {
+      req.webhookLogData = { status: 'ignored_not_mapped', instance_id: instanceIdRaw, event_type: eventType }
       return res.status(200).json({ ok: true, ignored: 'instance_not_mapped' })
     }
     next()

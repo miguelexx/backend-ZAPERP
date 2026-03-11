@@ -37,11 +37,11 @@ describe('Rota pública', () => {
   })
 })
 
-describe('Webhook Z-API exige token', () => {
-  it('POST /webhooks/zapi rejeita requisição sem token válido', async () => {
+describe('Webhook UltraMsg exige token', () => {
+  it('POST /webhooks/ultramsg rejeita requisição sem token válido', async () => {
     const res = await request(app)
-      .post('/webhooks/zapi')
-      .send({ instanceId: 'test', type: 'ReceivedCallback' })
+      .post('/webhooks/ultramsg')
+      .send({ instanceId: 'test', event_type: 'message_received', data: {} })
     expect([401, 500]).toContain(res.status)
     expect(res.body).toHaveProperty('error')
   })

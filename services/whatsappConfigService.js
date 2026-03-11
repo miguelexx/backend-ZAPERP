@@ -65,6 +65,28 @@ async function getCompanyIdByInstanceId(instanceId) {
     .limit(1)
     .maybeSingle()
   if (!e2 && d2?.company_id != null) return Number(d2.company_id)
+  // UltraMsg webhook envia instanceId numérico (ex: "51534"); banco pode ter "instance51534"
+  if (/^\d+$/.test(id)) {
+    const altId = `instance${id}`
+    const { data: d3, error: e3 } = await supabase
+      .from('empresa_zapi')
+      .select('company_id')
+      .eq('instance_id', altId)
+      .eq('ativo', true)
+      .maybeSingle()
+    if (!e3 && d3?.company_id != null) return Number(d3.company_id)
+  } else if (id.toLowerCase().startsWith('instance') && id.length > 8) {
+    const numericPart = id.replace(/\D/g, '')
+    if (numericPart) {
+      const { data: d4, error: e4 } = await supabase
+        .from('empresa_zapi')
+        .select('company_id')
+        .eq('instance_id', numericPart)
+        .eq('ativo', true)
+        .maybeSingle()
+      if (!e4 && d4?.company_id != null) return Number(d4.company_id)
+    }
+  }
   return null
 }
 

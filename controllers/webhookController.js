@@ -113,6 +113,7 @@ exports.verificarWebhook = (req, res) => {
 
 exports.receberWebhook = async (req, res) => {
   try {
+    req.webhookLogData = { status: 'processed' }
     const entry = req.body.entry?.[0]
     const changes = entry?.changes?.[0]
     const value = changes?.value

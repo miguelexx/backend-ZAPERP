@@ -142,14 +142,25 @@ async function handleWebhookUltramsg(req, res) {
 
     const body = req.body || {}
     const eventType = String(body.event_type || body.eventType || '').toLowerCase()
+    req.webhookLogData = {
+      status: 'processed',
+      company_id: ctx.company_id,
+      instance_id: ctx.instanceId,
+      event_type: eventType || ctx.eventType,
+    }
 
-    if (eventType === 'message_ack') {
+    if (eventType === 'message_ack' || eventType === 'webhook_message_ack') {
       const normalized = normalizeUltramsgToZapi(body)
       req.body = { ...normalized, type: 'MessageStatusCallback', instanceId: body.instanceId, instance_id: body.instanceId }
       return webhookZapiController.statusZapi(req, res)
     }
 
-    if (eventType === 'message_received' || eventType === 'message_create' || !eventType) {
+    const isMessageEvent = [
+      'message_received', 'message_create',
+      'webhook_message_received', 'webhook_message_create',
+      ''
+    ].includes(eventType)
+    if (isMessageEvent || (body?.data && typeof body.data === 'object' && (body.data.from || body.data.id))) {
       const normalized = normalizeUltramsgToZapi(body)
       req.body = { ...normalized, type: 'ReceivedCallback', instanceId: body.instanceId, instance_id: body.instanceId }
       return webhookZapiController.receberZapi(req, res)
@@ -158,6 +169,7 @@ async function handleWebhookUltramsg(req, res) {
     return res.status(200).json({ ok: true })
   } catch (e) {
     console.error('[handleWebhookUltramsg]', e?.message || e)
+    req.webhookLogData = { status: 'error', error_message: e?.message || String(e) }
     return res.status(200).json({ ok: true })
   }
 }

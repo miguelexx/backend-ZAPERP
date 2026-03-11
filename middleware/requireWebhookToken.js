@@ -78,13 +78,7 @@ function requireWebhookToken(req, res, next) {
 
 function _reject(req, res, incoming) {
   const motivo = !incoming ? 'token_ausente' : 'token_invalido'
-  const logEntry = {
-    motivo,
-    method: req.method,
-    path: req.path,
-    ip: req.ip || '?',
-    token_recebido: incoming ? `(${incoming.length} chars)` : '(nenhum)',
-  }
+  req.webhookLogData = { status: 'rejected_token', error: motivo }
   const label = motivo === 'token_ausente' ? 'Token ausente' : 'Token inválido'
   console.warn(`[WEBHOOK_REJECTED] ${label} — ${req.method} ${req.path} | IP: ${req.ip || '?'}`)
   console.warn(`[WEBHOOK_REJECTED] 💡 URL: APP_URL/webhooks/ultramsg?token=<WHATSAPP_WEBHOOK_TOKEN>`)

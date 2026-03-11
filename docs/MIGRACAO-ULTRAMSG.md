@@ -16,6 +16,8 @@ APP_URL=https://sua-api.seudominio.com
 
 ### 2. Banco de dados (empresa_zapi)
 
+A tabela `empresa_zapi` armazena credenciais UltraMsg (instance_id, instance_token). O webhook UltraMsg pode enviar `instanceId` como número (ex: "51534") ou com prefixo ("instance51534"); o backend aceita ambos e faz o mapeamento automaticamente.
+
 Execute para configurar a instância:
 
 ```bash

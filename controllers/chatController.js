@@ -903,9 +903,7 @@ exports.mergeConversasDuplicadas = async (req, res) => {
 exports.zapiStatus = async (req, res) => {
   try {
     const company_id = req.user?.company_id
-    if (process.env.WHATSAPP_PROVIDER !== 'zapi') {
-      return res.json({ ok: true, hasInstance: false, connected: false, configured: false })
-    }
+    // Usa UltraMsg como único provider WhatsApp; empresa_zapi armazena instance_id/token
     if (!company_id) {
       return res.json({ ok: true, hasInstance: false, connected: false, configured: false })
     }
@@ -948,7 +946,7 @@ exports.sincronizarContatosZapi = async (req, res) => {
     const result = await syncContacts(company_id)
 
     if (!result.ok) {
-      return res.status(400).json({ error: result.errors?.[0] || 'Empresa sem instância Z-API configurada. Conecte o WhatsApp em Integrações.' })
+      return res.status(400).json({ error: result.errors?.[0] || 'Empresa sem instância WhatsApp configurada. Conecte o WhatsApp em Integrações.' })
     }
 
     const io = req.app.get('io')
