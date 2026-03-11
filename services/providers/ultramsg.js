@@ -17,8 +17,43 @@ const ULTRAMSG_BASE_URL = (process.env.ULTRAMSG_BASE_URL || 'https://api.ultrams
 // Delay entre envios: 0 = sem delay (envio imediato). Ex: ULTRAMSG_SEND_DELAY_MS=0 para desativar.
 const MIN_DELAY_BETWEEN_SENDS_MS = Math.max(0, Number(process.env.ULTRAMSG_SEND_DELAY_MS) ?? 0)
 const BODY_MAX_LEN = 4096
+const CAPTION_MAX_LEN = 1024
+const FILENAME_MAX_LEN = 255
 const CHATS_MESSAGES_LIMIT_MAX = 1000
+const ULTRAMSG_TIMEOUT_MS = Number(process.env.ULTRAMSG_TIMEOUT_MS) || 30_000
 const lastSendPerCompany = new Map()
+
+// ========== Camada centralizada UltraMsg (contrato oficial) ==========
+
+/** Constrói base URL: https://api.ultramsg.com/{instance_id} */
+function buildBaseUrl(instanceId) {
+  if (!instanceId || typeof instanceId !== 'string') return ''
+  return `${ULTRAMSG_BASE_URL}/${encodeURIComponent(String(instanceId).trim())}`
+}
+
+/** Adiciona token ao body (POST) ou query (GET). */
+function appendToken(bodyOrParams, token) {
+  if (!bodyOrParams || typeof bodyOrParams !== 'object') return { token }
+  return { ...bodyOrParams, token: token || bodyOrParams.token }
+}
+
+/** Mascara token em logs — nunca expor segredos. */
+function maskTokenInLogs(t) {
+  return maskToken(t)
+}
+
+/** Normaliza phone/chatId para formato UltraMsg: +55... ou xxx@g.us */
+function normalizeChatId(phoneOrChatId) {
+  return toUltramsgPhone(phoneOrChatId) || phoneToChatId(phoneOrChatId) || ''
+}
+
+/** Valida campos obrigatórios; retorna { valid, error }. */
+function validateRequiredFields(obj, required) {
+  if (!obj || typeof obj !== 'object') return { valid: false, error: 'payload inválido' }
+  const missing = required.filter((k) => obj[k] == null || String(obj[k]).trim() === '')
+  if (missing.length) return { valid: false, error: `Campos obrigatórios: ${missing.join(', ')}` }
+  return { valid: true }
+}
 
 /** Mascara token em logs — nunca expor segredos. */
 function maskToken(t) {
@@ -81,29 +116,54 @@ function phoneCandidatesForSend(phone) {
   return Array.from(new Set(list.filter(Boolean)))
 }
 
-async function postJson({ basePath, token, endpoint, body }) {
+function createFetchOptions(method, body, extra = {}) {
+  let signal
+  try {
+    if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function') {
+      signal = AbortSignal.timeout(ULTRAMSG_TIMEOUT_MS)
+    }
+  } catch { /* Node < 17.3 */ }
+  const opts = {
+    method,
+    headers: { accept: 'application/json' },
+    ...(signal && { signal }),
+    ...extra
+  }
+  if (body && method === 'POST') {
+    opts.headers = { ...opts.headers, 'Content-Type': 'application/json' }
+    opts.body = typeof body === 'string' ? body : JSON.stringify(body)
+  }
+  return opts
+}
+
+async function post({ basePath, token, endpoint, body }) {
   const url = `${basePath}${endpoint}`
-  const payload = { ...body, token }
-  const res = await fetchWithRetry(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload)
-  })
+  const payload = appendToken(body || {}, token)
+  const res = await fetchWithRetry(url, createFetchOptions('POST', payload))
   const text = await res.text().catch(() => '')
   let data = null
   try { data = text ? JSON.parse(text) : null } catch { data = null }
   return { ok: res.ok, status: res.status, data, text }
 }
 
-async function getJson({ basePath, token, endpoint, extraParams = {} }) {
+async function get({ basePath, token, endpoint, extraParams = {} }) {
   const sep = String(endpoint || '').includes('?') ? '&' : '?'
-  const params = new URLSearchParams({ token, ...extraParams })
+  const params = new URLSearchParams(appendToken(extraParams, token))
   const url = `${basePath}${endpoint}${sep}${params.toString()}`
-  const res = await fetchWithRetry(url, { method: 'GET', headers: { accept: 'application/json' } })
+  const res = await fetchWithRetry(url, createFetchOptions('GET'))
   const text = await res.text().catch(() => '')
   let data = null
   try { data = text ? JSON.parse(text) : null } catch { data = null }
   return { ok: res.ok, status: res.status, data, text }
+}
+
+/** Alias para compatibilidade interna. */
+async function postJson({ basePath, token, endpoint, body }) {
+  return post({ basePath, token, endpoint, body })
+}
+
+async function getJson({ basePath, token, endpoint, extraParams = {} }) {
+  return get({ basePath, token, endpoint, extraParams })
 }
 
 /** Normaliza telefone (interface compatível com zapi). */
@@ -197,7 +257,8 @@ async function sendImage(phone, url, caption = '', opts = {}) {
   if (!cfg) return false
   const nums = phoneCandidatesForSend(phone)
   if (!nums.length || !url) return false
-  const body = { to: nums[0], image: String(url).trim(), caption: String(caption || '').trim() }
+  const captionTrim = String(caption || '').trim().slice(0, CAPTION_MAX_LEN)
+  const body = { to: nums[0], image: String(url).trim(), caption: captionTrim }
   const { ok, data, text } = await postJson({ ...cfg, endpoint: '/messages/image', body })
   if (!ok) {
     console.warn('❌ UltraMsg sendImage falhou:', nums[0]?.slice(-12), String(text || data?.error || '').slice(0, 150), '| token:', maskToken(cfg.token))
@@ -244,7 +305,8 @@ async function sendFile(phone, url, fileName = '', opts = {}) {
   if (!nums.length || !url) return false
   const ext = fileName ? String(fileName).split('.').pop() : 'pdf'
   const safeExt = /^[a-z0-9]+$/i.test(ext) ? ext : 'pdf'
-  const filename = fileName ? String(fileName).trim() : `file.${safeExt}`
+  const filenameRaw = fileName ? String(fileName).trim() : `file.${safeExt}`
+  const filename = filenameRaw.slice(0, FILENAME_MAX_LEN)
   const body = { to: nums[0], document: String(url).trim(), filename, caption: '' }
   const { ok } = await postJson({ ...cfg, endpoint: '/messages/document', body })
   if (!ok) return false
@@ -266,7 +328,8 @@ async function sendVideo(phone, videoUrl, caption = '', opts = {}) {
   if (!cfg) return false
   const nums = phoneCandidatesForSend(phone)
   if (!nums.length || !videoUrl) return false
-  const body = { to: nums[0], video: String(videoUrl).trim(), caption: String(caption || '').trim() }
+  const captionTrim = String(caption || '').trim().slice(0, CAPTION_MAX_LEN)
+  const body = { to: nums[0], video: String(videoUrl).trim(), caption: captionTrim }
   const { ok } = await postJson({ ...cfg, endpoint: '/messages/video', body })
   if (!ok) return false
   console.log('✅ UltraMsg vídeo enviado:', nums[0]?.slice(-12))
@@ -316,6 +379,123 @@ async function sendReaction(phone, messageId, reaction, opts = {}) {
  */
 async function removeReaction(phone, messageId, opts = {}) {
   return sendReaction(phone, messageId, '', opts)
+}
+
+/**
+ * Envia áudio de voz (voice note). UltraMsg exige codec opus.
+ * POST /{instance_id}/messages/voice — body: token, to, audio
+ */
+async function sendVoice(phone, audioUrl, opts = {}) {
+  const protecao = await permitirEnvio({
+    company_id: opts?.companyId ?? opts?.company_id,
+    conversa_id: opts?.conversaId ?? opts?.conversa_id
+  })
+  if (!protecao.allow) return false
+  await awaitSendDelay(opts?.companyId ?? opts?.company_id)
+  const cfg = await resolveConfig(opts)
+  if (!cfg) return false
+  const nums = phoneCandidatesForSend(phone)
+  if (!nums.length || !audioUrl) return false
+  const body = { to: nums[0], audio: String(audioUrl).trim() }
+  const { ok } = await postJson({ ...cfg, endpoint: '/messages/voice', body })
+  if (!ok) return false
+  console.log('✅ UltraMsg voice enviado:', nums[0]?.slice(-12))
+  return true
+}
+
+/**
+ * Envia localização.
+ * POST /{instance_id}/messages/location — body: token, to, address, lat, lng
+ * address: até 2 linhas com \n; máx 300 chars
+ */
+async function sendLocation(phone, { address = '', lat, lng }, opts = {}) {
+  const protecao = await permitirEnvio({
+    company_id: opts?.companyId ?? opts?.company_id,
+    conversa_id: opts?.conversaId ?? opts?.conversa_id
+  })
+  if (!protecao.allow) return { ok: false, messageId: null }
+  await awaitSendDelay(opts?.companyId ?? opts?.company_id)
+  const cfg = await resolveConfig(opts)
+  if (!cfg) return { ok: false, messageId: null }
+  const nums = phoneCandidatesForSend(phone)
+  const addr = String(address || '').slice(0, 300)
+  const latitude = Number(lat)
+  const longitude = Number(lng)
+  if (!nums.length || (isNaN(latitude) && isNaN(longitude))) return { ok: false, messageId: null }
+  const body = { to: nums[0], address: addr, lat: latitude, lng: longitude }
+  const { ok, data } = await postJson({ ...cfg, endpoint: '/messages/location', body })
+  if (!ok) return { ok: false, messageId: null }
+  const msgId = data?.id ?? data?.messageId ?? null
+  console.log('✅ UltraMsg localização enviada:', nums[0]?.slice(-12))
+  return { ok: true, messageId: msgId ? String(msgId) : null }
+}
+
+/**
+ * Deleta mensagem no WhatsApp. msgId deve vir do webhook.
+ * POST /{instance_id}/messages/delete — body: token, msgId
+ */
+async function deleteMessage(phone, msgId, opts = {}) {
+  const cfg = await resolveConfig(opts)
+  if (!cfg) return false
+  const mid = String(msgId || '').trim()
+  if (!mid) return false
+  const body = { msgId: mid }
+  const { ok } = await postJson({ ...cfg, endpoint: '/messages/delete', body })
+  return ok
+}
+
+/**
+ * Reenvia mensagens por status (unsent ou expired).
+ * POST /{instance_id}/messages/resendByStatus — body: token, status
+ */
+async function resendByStatus(status, opts = {}) {
+  const cfg = await resolveConfig(opts)
+  if (!cfg) return { ok: false }
+  const s = String(status || '').toLowerCase()
+  if (!['unsent', 'expired'].includes(s)) return { ok: false, error: 'status deve ser unsent ou expired' }
+  const body = { status: s }
+  const { ok, data, text } = await postJson({ ...cfg, endpoint: '/messages/resendByStatus', body })
+  return { ok, data, text }
+}
+
+/**
+ * Reenvia mensagem por id.
+ * POST /{instance_id}/messages/resendById — body: token, id
+ */
+async function resendById(msgId, opts = {}) {
+  const cfg = await resolveConfig(opts)
+  if (!cfg) return { ok: false }
+  const mid = String(msgId || '').trim()
+  if (!mid) return { ok: false, error: 'msgId obrigatório' }
+  const body = { id: mid }
+  const { ok, data, text } = await postJson({ ...cfg, endpoint: '/messages/resendById', body })
+  return { ok, data, text }
+}
+
+/**
+ * Limpa mensagens por status (queue, sent, unsent, invalid).
+ * POST /{instance_id}/messages/clear — body: token, status
+ */
+async function clearMessages(status, opts = {}) {
+  const cfg = await resolveConfig(opts)
+  if (!cfg) return { ok: false }
+  const s = String(status || '').toLowerCase()
+  if (!['queue', 'sent', 'unsent', 'invalid'].includes(s)) return { ok: false, error: 'status inválido' }
+  const body = { status: s }
+  const { ok, data, text } = await postJson({ ...cfg, endpoint: '/messages/clear', body })
+  return { ok, data, text }
+}
+
+/**
+ * Estatísticas de mensagens (sent, queue, unsent).
+ * GET /{instance_id}/messages/statistics
+ */
+async function getMessagesStatistics(opts = {}) {
+  const cfg = await resolveConfig(opts)
+  if (!cfg) return null
+  const { ok, data } = await getJson({ ...cfg, endpoint: '/messages/statistics' })
+  if (!ok) return null
+  return data
 }
 
 /**
@@ -381,6 +561,77 @@ async function getContacts(page = 1, pageSize = 100, opts = {}) {
   }
 }
 
+/** Resolve phone/chatId para chatId no formato @c.us ou @g.us (exigido por chats/*). */
+function toChatIdForChats(phone) {
+  const s = String(phone || '').trim()
+  if (!s) return ''
+  if (s.endsWith('@g.us')) return s
+  if (s.includes('-group')) return (s.replace(/-group$/, '') || s) + '@g.us'
+  return phoneToChatId(s) || ''
+}
+
+/**
+ * Arquiva chat. UltraMsg: POST /{instance_id}/chats/archive — body: token, chatId
+ */
+async function archiveChat(phone, opts = {}) {
+  const cfg = await resolveConfig(opts)
+  if (!cfg) return false
+  const chatId = toChatIdForChats(phone)
+  if (!chatId) return false
+  const { ok } = await post({ ...cfg, endpoint: '/chats/archive', body: { chatId } })
+  return ok
+}
+
+/**
+ * Desarquiva chat. UltraMsg: POST /{instance_id}/chats/unarchive — body: token, chatId
+ */
+async function unarchiveChat(phone, opts = {}) {
+  const cfg = await resolveConfig(opts)
+  if (!cfg) return false
+  const chatId = toChatIdForChats(phone)
+  if (!chatId) return false
+  const { ok } = await post({ ...cfg, endpoint: '/chats/unarchive', body: { chatId } })
+  return ok
+}
+
+/**
+ * Marca chat como lido. UltraMsg: POST /{instance_id}/chats/read — body: token, chatId
+ */
+async function readChat(phone, opts = {}) {
+  const cfg = await resolveConfig(opts)
+  if (!cfg) return false
+  const chatId = toChatIdForChats(phone)
+  if (!chatId) return false
+  const { ok } = await post({ ...cfg, endpoint: '/chats/read', body: { chatId } })
+  return ok
+}
+
+/**
+ * Limpa mensagens do chat. UltraMsg: POST /{instance_id}/chats/clearMessages
+ * Arquitetura pronta; parâmetros conforme doc quando disponível.
+ */
+async function clearChatMessages(phone, opts = {}) {
+  const cfg = await resolveConfig(opts)
+  if (!cfg) return false
+  const chatId = toChatIdForChats(phone)
+  if (!chatId) return false
+  const { ok } = await post({ ...cfg, endpoint: '/chats/clearMessages', body: { chatId } })
+  return ok
+}
+
+/**
+ * Exclui chat. UltraMsg: POST /{instance_id}/chats/delete — body: token, chatId
+ * Arquitetura pronta para uso futuro.
+ */
+async function deleteChat(phone, opts = {}) {
+  const cfg = await resolveConfig(opts)
+  if (!cfg) return false
+  const chatId = toChatIdForChats(phone)
+  if (!chatId) return false
+  const { ok } = await post({ ...cfg, endpoint: '/chats/delete', body: { chatId } })
+  return ok
+}
+
 /**
  * Lista chats. UltraMsg: GET /{instance_id}/chats
  */
@@ -412,17 +663,95 @@ async function getGroups(opts = {}) {
 }
 
 /**
- * Busca URL da foto de perfil. UltraMsg pode não ter endpoint — retorna null.
+ * Converte phone para chatId no formato WhatsApp (55xxx@c.us ou 120xxx@g.us).
  */
-async function getProfilePicture(phone, opts = {}) {
-  return null
+function phoneToChatId(phone) {
+  const s = String(phone || '').trim()
+  if (!s) return null
+  if (s.endsWith('@g.us')) return s
+  const digits = s.replace(/\D/g, '')
+  if (!digits) return null
+  if (digits.startsWith('120') && digits.length >= 15) return `${digits}@g.us`
+  const fmt = digits.startsWith('55') ? digits : '55' + digits
+  return `${fmt}@c.us`
 }
 
 /**
- * Metadados do contato. UltraMsg pode não ter — retorna null.
+ * Busca URL da foto de perfil. UltraMsg: GET /contacts/image?chatId=...
+ */
+async function getProfilePicture(phone, opts = {}) {
+  const cfg = await resolveConfig(opts)
+  if (!cfg) return null
+  const chatId = phoneToChatId(phone)
+  if (!chatId || chatId.endsWith('@g.us')) return null
+  try {
+    const { ok, data } = await getJson({
+      ...cfg,
+      endpoint: '/contacts/image',
+      extraParams: { chatId }
+    })
+    if (!ok || !data) return null
+    const url = data.url ?? data.image ?? data.img ?? data.profilePicture ?? data.profilePic ?? null
+    return url && typeof url === 'string' ? url.trim() : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Metadados do contato. UltraMsg: GET /contacts/contact?chatId=... ou busca em GET /contacts.
+ * Retorna: { name, short, notify, vname, imgUrl } para ultramsgSyncContact.
  */
 async function getContactMetadata(phone, opts = {}) {
-  return null
+  const cfg = await resolveConfig(opts)
+  if (!cfg) return null
+  const chatId = phoneToChatId(phone)
+  if (!chatId) return null
+  try {
+    const { ok, data } = await getJson({
+      ...cfg,
+      endpoint: '/contacts/contact',
+      extraParams: { chatId }
+    })
+    if (ok && data && typeof data === 'object') {
+      return {
+        name: data.name ?? data.formattedName ?? null,
+        short: data.short ?? null,
+        notify: data.notify ?? data.pushName ?? null,
+        vname: data.vname ?? null,
+        imgUrl: data.imgUrl ?? data.photo ?? data.profilePicture ?? null
+      }
+    }
+    // Fallback: busca em getContacts (lista paginada)
+    const digits = String(phone || '').replace(/\D/g, '')
+    const searchTail = digits.slice(-8)
+    for (let page = 1; page <= 3; page++) {
+      const { ok: okList, data: listData } = await getJson({
+        ...cfg,
+        endpoint: '/contacts',
+        extraParams: { limit: '100', offset: String((page - 1) * 100) }
+      })
+      if (!okList) break
+      const arr = Array.isArray(listData) ? listData : (listData?.contacts || [])
+      const found = arr.find((c) => {
+        const cPhone = String(c.id ?? c.phone ?? c.wa_id ?? '').replace(/\D/g, '')
+        return cPhone.endsWith(searchTail) || cPhone === digits
+      })
+      if (found) {
+        return {
+          name: found.name ?? null,
+          short: found.short ?? null,
+          notify: found.notify ?? null,
+          vname: found.vname ?? null,
+          imgUrl: found.imgUrl ?? found.photo ?? null
+        }
+      }
+      if (arr.length < 100) break
+    }
+    return null
+  } catch {
+    return null
+  }
 }
 
 /**
@@ -433,14 +762,15 @@ async function getChatMessages(phone, amount = 10, lastMessageId = null, opts = 
   if (!cfg) return []
   const nums = phoneCandidatesForLookup(phone)
   if (!nums.length) return []
-  const to = toUltramsgPhone(nums[0])
-  if (!to) return []
+  const raw = String(nums[0] || '').trim()
+  const chatId = raw.endsWith('@g.us') ? raw : phoneToChatId(raw) || toUltramsgPhone(raw)
+  if (!chatId) return []
   try {
     const limit = Math.min(CHATS_MESSAGES_LIMIT_MAX, Math.max(1, Number(amount) || 10))
     const { ok, data } = await getJson({
       ...cfg,
       endpoint: '/chats/messages',
-      extraParams: { chatId: to, limit: String(limit) }
+      extraParams: { chatId, limit: String(limit) }
     })
     if (!ok) return []
     return Array.isArray(data) ? data : []
@@ -464,11 +794,19 @@ async function uploadMedia(filePath, filename, opts = {}) {
     const FormData = require('form-data')
     const form = new FormData()
     form.append('token', cfg.token)
-    form.append('file', fs.createReadStream(filePath), { filename: safeFilename })
+    form.append('file', fs.createReadStream(filePath), { filename: safeFilename.slice(0, FILENAME_MAX_LEN) })
+    const uploadTimeout = 60_000 // 60s para arquivos até 30MB
+    let signal
+    try {
+      if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function') {
+        signal = AbortSignal.timeout(uploadTimeout)
+      }
+    } catch { /* Node < 17.3 */ }
     const res = await fetchWithRetry(`${cfg.basePath}/media/upload`, {
       method: 'POST',
       body: form,
-      headers: form.getHeaders()
+      headers: form.getHeaders(),
+      ...(signal && { signal })
     })
     const text = await res.text().catch(() => '')
     let data = null
@@ -556,12 +894,24 @@ module.exports = {
   sendImage,
   sendFile,
   sendAudio,
+  sendVoice,
   sendVideo,
   sendReaction,
   removeReaction,
   sendContact,
+  sendLocation,
   sendCall,
   sendSticker,
+  deleteMessage,
+  resendByStatus,
+  resendById,
+  clearMessages,
+  getMessagesStatistics,
+  archiveChat,
+  unarchiveChat,
+  readChat,
+  clearChatMessages,
+  deleteChat,
   getContacts,
   getChats,
   getGroups,
@@ -576,5 +926,13 @@ module.exports = {
   getConnectionStatus,
   normalizePhone,
   toUltramsgPhone,
-  isConfigured: true
+  isConfigured: true,
+  // Camada centralizada (contrato UltraMsg)
+  buildBaseUrl,
+  appendToken,
+  get,
+  post,
+  maskTokenInLogs,
+  normalizeChatId,
+  validateRequiredFields
 }

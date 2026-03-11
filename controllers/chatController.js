@@ -1498,39 +1498,52 @@ exports.detalharChat = async (req, res) => {
       emitirParaUsuario(io, user_id, io.EVENTS?.MENSAGENS_LIDAS || 'mensagens_lidas', payload)
     }
 
-    // Background: re-sincroniza foto e nome do contato com Z-API
-    // As URLs do WhatsApp CDN expiram (tipicamente em poucas horas), por isso
-    // sempre buscamos uma URL fresca ao abrir uma conversa, sem bloquear a resposta.
-    if (!isGroup && clientesConv?.id && clientesConv?.telefone) {
-      const cliId = Number(clientesConv.id)
-      const cliPhone = String(clientesConv.telefone || '').trim()
+    // Background: re-sincroniza foto e nome do contato com provider (UltraMsg/Z-API)
+    // Atualiza clientes E conversas (nome_contato_cache, foto_perfil_contato_cache) para exibir na lista e header.
+    if (!isGroup && (clientesConv?.id && clientesConv?.telefone || conversa?.telefone)) {
+      const cliId = clientesConv?.id ? Number(clientesConv.id) : null
+      const cliPhone = String((clientesConv?.telefone || conversa?.telefone) || '').trim()
       const cid = Number(company_id)
       if (cliPhone && !cliPhone.startsWith('lid:') && !cliPhone.includes('@g.us')) {
         setImmediate(async () => {
           try {
             const { syncContactFromUltramsg } = require('../services/ultramsgSyncContact')
+            const { chooseBestName } = require('../helpers/contactEnrichment')
             const synced = await syncContactFromUltramsg(cliPhone, cid)
             if (!synced) return
-            const updates = {}
+            const clienteUpdates = {}
+            const conversaUpdates = {}
             if (synced.foto_perfil && String(synced.foto_perfil).startsWith('http')) {
-              updates.foto_perfil = synced.foto_perfil
+              clienteUpdates.foto_perfil = synced.foto_perfil
+              conversaUpdates.foto_perfil_contato_cache = synced.foto_perfil
             }
-            if (synced.pushname && String(synced.pushname).trim()) {
-              updates.pushname = String(synced.pushname).trim()
+            if (synced.pushname && String(synced.pushname).trim()) clienteUpdates.pushname = String(synced.pushname).trim()
+            if (synced.nome && String(synced.nome).trim()) {
+              const currentNome = cliId ? (await supabase.from('clientes').select('nome').eq('id', cliId).eq('company_id', cid).maybeSingle()).data?.nome : null
+              const { name: bestNome } = chooseBestName(currentNome, synced.nome, 'syncUltramsg', { fromMe: false, company_id: cid, telefoneTail: cliPhone.replace(/\D/g, '').slice(-6) || null })
+              if (bestNome) {
+                clienteUpdates.nome = bestNome
+                conversaUpdates.nome_contato_cache = bestNome
+              }
             }
-            if (Object.keys(updates).length === 0) return
-            const { error: updErr } = await supabase
-              .from('clientes')
-              .update(updates)
-              .eq('company_id', cid)
-              .eq('id', cliId)
-            if (!updErr && io && (updates.foto_perfil || updates.pushname)) {
-              const { data: cli } = await supabase.from('clientes').select('nome, pushname, telefone, foto_perfil').eq('id', cliId).eq('company_id', cid).maybeSingle()
+            if (Object.keys(clienteUpdates).length > 0 && cliId) {
+              await supabase.from('clientes').update(clienteUpdates).eq('company_id', cid).eq('id', cliId)
+            }
+            if (Object.keys(conversaUpdates).length > 0) {
+              await supabase.from('conversas').update(conversaUpdates).eq('company_id', cid).eq('id', Number(id))
+            }
+            if (io && (clienteUpdates.foto_perfil || clienteUpdates.nome || conversaUpdates.nome_contato_cache || conversaUpdates.foto_perfil_contato_cache)) {
+              const { data: cli } = cliId ? await supabase.from('clientes').select('nome, pushname, telefone, foto_perfil').eq('id', cliId).eq('company_id', cid).maybeSingle() : { data: null }
+              const { data: conv } = await supabase.from('conversas').select('nome_contato_cache, foto_perfil_contato_cache').eq('id', id).eq('company_id', cid).maybeSingle()
+              const contatoNome = conv?.nome_contato_cache || cli?.nome || cli?.pushname || cliPhone
+              const fotoPerfil = conv?.foto_perfil_contato_cache || cli?.foto_perfil
               io.to(`empresa_${cid}`).emit('contato_atualizado', {
                 conversa_id: Number(id),
-                contato_nome: cli?.nome || cli?.pushname || cliPhone,
+                contato_nome: contatoNome,
+                nome_contato_cache: contatoNome,
                 telefone: cli?.telefone || cliPhone,
-                foto_perfil: cli?.foto_perfil || updates.foto_perfil
+                foto_perfil: fotoPerfil,
+                foto_perfil_contato_cache: fotoPerfil
               })
             }
           } catch (_) {}
@@ -2454,6 +2467,93 @@ exports.enviarContatoWhatsapp = async (req, res) => {
 }
 
 // =====================================================
+// enviarLocalizacao — envia localização via UltraMsg (contrato WhatsApp)
+// =====================================================
+
+exports.enviarLocalizacao = async (req, res) => {
+  try {
+    const { company_id, id: user_id } = req.user
+    const { id: conversa_id } = req.params
+    const { address = '', lat, lng } = req.body || {}
+
+    const permEnvio = await assertPodeEnviarMensagem({ company_id, conversa_id, user_id })
+    if (!permEnvio.ok) return res.status(permEnvio.status).json({ error: permEnvio.error })
+
+    const latitude = Number(lat)
+    const longitude = Number(lng)
+    if (isNaN(latitude) || isNaN(longitude)) {
+      return res.status(400).json({ error: 'lat e lng são obrigatórios e devem ser números válidos' })
+    }
+
+    const { data: conversa, error: errConv } = await supabase
+      .from('conversas')
+      .select('id, telefone')
+      .eq('company_id', company_id)
+      .eq('id', conversa_id)
+      .maybeSingle()
+
+    if (errConv || !conversa) return res.status(404).json({ error: 'Conversa não encontrada' })
+
+    const provider = getProvider()
+    if (!provider || !provider.sendLocation) {
+      return res.status(500).json({ error: 'Provider WhatsApp não suporta envio de localização' })
+    }
+
+    const criadoEm = new Date().toISOString()
+    const locationUrl = `https://www.google.com/maps?q=${latitude},${longitude}`
+    const { data: msg, error: errMsg } = await supabase
+      .from('mensagens')
+      .insert({
+        company_id,
+        conversa_id: Number(conversa_id),
+        texto: String(address || '').slice(0, 100) || '(localização)',
+        direcao: 'out',
+        tipo: 'location',
+        status: 'pending',
+        url: locationUrl,
+        autor_usuario_id: Number(user_id),
+        criado_em: criadoEm,
+      })
+      .select()
+      .single()
+
+    if (errMsg) return res.status(500).json({ error: errMsg.message })
+
+    const result = await provider.sendLocation(conversa.telefone, { address, lat: latitude, lng: longitude }, {
+      companyId: company_id,
+      conversaId: conversa_id
+    })
+
+    const ok = result?.ok === true
+    const waMessageId = result?.messageId ? String(result.messageId).trim() : null
+    const nextStatus = ok ? 'sent' : 'erro'
+
+    await supabase
+      .from('mensagens')
+      .update({ status: nextStatus, ...(waMessageId ? { whatsapp_id: waMessageId } : {}) })
+      .eq('company_id', company_id)
+      .eq('id', msg.id)
+
+    const io = req.app.get('io')
+    if (io) {
+      emitirEventoEmpresaConversa(
+        io,
+        company_id,
+        conversa_id,
+        io.EVENTS?.NOVA_MENSAGEM || 'nova_mensagem',
+        { ...msg, status: nextStatus, whatsapp_id: waMessageId || null }
+      )
+      emitirConversaAtualizada(io, company_id, conversa_id, { id: Number(conversa_id) })
+    }
+
+    return res.json({ ok: true })
+  } catch (err) {
+    console.error('Erro ao enviar localização:', err)
+    return res.status(500).json({ error: 'Erro ao enviar localização' })
+  }
+}
+
+// =====================================================
 // Registro de ligações via WhatsApp (Z-API /send-call)
 // =====================================================
 
@@ -2554,7 +2654,7 @@ exports.excluirMensagem = async (req, res) => {
     // garante que a conversa pertence à empresa
     const { data: conversa, error: errConv } = await supabase
       .from('conversas')
-      .select('id, criado_em')
+      .select('id, criado_em, telefone')
       .eq('company_id', company_id)
       .eq('id', cid)
       .maybeSingle()
@@ -2564,7 +2664,7 @@ exports.excluirMensagem = async (req, res) => {
     // valida que a mensagem é desta conversa/empresa
     const { data: msg, error: errMsgSel } = await supabase
       .from('mensagens')
-      .select('id, conversa_id, criado_em, direcao, autor_usuario_id')
+      .select('id, conversa_id, criado_em, direcao, autor_usuario_id, whatsapp_id')
       .eq('company_id', company_id)
       .eq('conversa_id', cid)
       .eq('id', mid)
@@ -2617,6 +2717,16 @@ exports.excluirMensagem = async (req, res) => {
       }
       if (msg?.autor_usuario_id == null || Number(msg.autor_usuario_id) !== Number(user_id)) {
         return res.status(403).json({ error: 'Você só pode apagar para todos mensagens enviadas por você.' })
+      }
+    }
+
+    // Apagar no WhatsApp (UltraMsg) se houver whatsapp_id e provider suportar
+    const provider = getProvider()
+    if (provider?.deleteMessage && msg?.whatsapp_id && conversa?.telefone) {
+      try {
+        await provider.deleteMessage(conversa.telefone, msg.whatsapp_id, { companyId: company_id })
+      } catch (e) {
+        console.warn('[excluirMensagem] deleteMessage no WhatsApp:', e?.message || e)
       }
     }
 
@@ -2942,7 +3052,9 @@ function inferirTipoArquivo(file) {
   // Figurinha (WhatsApp): geralmente WEBP
   if (m === 'image/webp' || /\.webp$/i.test(n)) return 'sticker'
   if (m.startsWith('image/')) return 'imagem'
-  if (m.startsWith('audio/') || /\.(mp3|ogg|wav|m4a|webm|aac|opus)$/i.test(n)) return 'audio'
+  // Voice note: UltraMsg exige codec opus (contracted ultramsg-contract)
+  if (m === 'audio/opus' || /\.opus$/i.test(n)) return 'voice'
+  if (m.startsWith('audio/') || /\.(mp3|ogg|wav|m4a|webm|aac)$/i.test(n)) return 'audio'
   if (m.startsWith('video/')) return 'video'
   return 'arquivo'
 }
@@ -2973,7 +3085,7 @@ exports.enviarArquivo = async (req, res) => {
 
     const { data: msg, error } = await supabase.from("mensagens").insert({
       conversa_id: Number(conversa_id),
-      texto: tipo === 'audio' ? '(áudio)' : tipo === 'sticker' ? '(figurinha)' : file.originalname,
+      texto: tipo === 'audio' ? '(áudio)' : tipo === 'voice' ? '(áudio de voz)' : tipo === 'sticker' ? '(figurinha)' : file.originalname,
       tipo,
       url: pathUrl,
       nome_arquivo: file.originalname,
@@ -3015,7 +3127,9 @@ exports.enviarArquivo = async (req, res) => {
       const phone = conversa.telefone
       const opts = { companyId: company_id, conversaId: conversa_id }
       const promise =
-        tipo === 'audio' && provider.sendAudio
+        tipo === 'voice' && provider.sendVoice
+          ? provider.sendVoice(phone, mediaUrl, opts)
+          : tipo === 'audio' && provider.sendAudio
           ? provider.sendAudio(phone, mediaUrl, opts)
           : tipo === 'sticker' && provider.sendSticker
             ? provider.sendSticker(phone, mediaUrl, { ...opts, stickerAuthor: 'ZapERP' })

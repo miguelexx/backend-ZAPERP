@@ -1,0 +1,267 @@
+---
+description: Contrato oficial da API UltraMsg para integração WhatsApp — paridade total com WhatsApp
+globs: **/*ultramsg*,**/chatController*,**/providers/*ultramsg*
+alwaysApply: false
+---
+
+# Contrato Oficial UltraMsg — Paridade WhatsApp
+
+Referência autoritativa da API UltraMsg. Usar ao implementar ou modificar `services/providers/ultramsg.js`, `controllers/chatController.js` e arquivos relacionados. **Objetivo: integração idêntica às capacidades do WhatsApp.**
+
+---
+
+## 1. Base da integração
+
+- **Base URL:** `https://api.ultramsg.com/{instance_id}/`
+- **Autenticação:** `token` obrigatório em toda requisição
+- **Encoding:** Fazer URL encoding de parâmetros quando houver base64, UTF-8 ou valores especiais (a documentação alerta para isso)
+- **Instância:** Precisa estar pronta/autenticada; fluxo inicial: criar instância → escanear QR → Auth Status: `authenticated`
+- **Fila:** Se a instância não estiver autorizada, mensagens podem entrar em fila e ser enviadas quando pronta
+
+---
+
+## 2. Estados da instância
+
+Estados documentados pela UltraMsg: `initialize`, `qr`, `retrying`, `loading`, `authenticated`, `disconnected`, `standby`
+
+- **Endpoint:** `GET /{instance_id}/instance/status`
+- **Implementação:** `getConnectionStatus()` trata `authenticated`, `connected`, `standby` como conectado
+
+---
+
+## 3. Configuração (instance/settings)
+
+- **GET** `/{instance_id}/instance/settings`
+- **POST** `/{instance_id}/instance/settings`
+
+| Campo | Uso |
+|-------|-----|
+| `sendDelay` | Atraso entre envios; default 1s |
+| `sendDelayMax` | Atraso maior quando fila tiver 10+ mensagens; default 15s |
+| `webhook_url` | URL base do webhook |
+| `webhook_message_received` | Mensagens recebidas |
+| `webhook_message_create` | Mensagens criadas (enviadas) |
+| `webhook_message_ack` | Entregue/lido |
+| `webhook_message_download_media` | Download de documentos/mídia |
+
+---
+
+## 4. Mensagens — Módulo completo (como WhatsApp)
+
+### Texto
+- **POST** `/{instance_id}/messages/chat`
+- Body: `token`, `to`, `body` (obrigatórios); `msgId` opcional para reply
+- `to`: número internacional (`+14155552671`) ou chatId (`@c.us`, `@g.us`)
+- `body`: UTF-8/UTF-16, emoji; **máx 4096 caracteres**
+
+### Imagem
+- **POST** `/{instance_id}/messages/image`
+- Body: `token`, `to`, `image`, `caption?`
+- `image`: link HTTP ou base64 | Extensões: jpg, jpeg, gif, png, webp, bmp | máx **16 MB**
+- `caption`: máx **1024 caracteres**
+
+### Sticker
+- **POST** `/{instance_id}/messages/sticker`
+- `sticker`: link HTTP ou base64 | mesmas extensões que imagem | máx 16 MB
+
+### Documento
+- **POST** `/{instance_id}/messages/document`
+- Body: `token`, `to`, `filename`, `document`, `caption?`
+- `filename` obrigatório (máx 255 chars)
+- `document`: link HTTP ou base64 | zip, xlsx, csv, txt, pptx, docx etc. | máx **30 MB**
+- `caption`: máx 1024 caracteres
+
+### Áudio
+- **POST** `/{instance_id}/messages/audio`
+- `audio`: link ou base64 | mp3, aac, ogg | máx 16 MB
+
+### Voice (áudio de voz / PTT)
+- **POST** `/{instance_id}/messages/voice`
+- Usa `audio`; codec **opus** obrigatório | máx 16 MB
+
+### Vídeo
+- **POST** `/{instance_id}/messages/video`
+- `video`: link ou base64 | mp4, 3gp, mov | máx **32 MB**
+- `caption`: máx 1024 caracteres
+
+### Contact
+- **POST** `/{instance_id}/messages/contact`
+- `contact`: ID ou lista de IDs | limite ~300 chars (~15 contatos)
+
+### Location
+- **POST** `/{instance_id}/messages/location`
+- Body: `token`, `to`, `address`, `lat`, `lng`
+- `address`: até 2 linhas com `\n`; limite 300 chars
+
+### VCard
+- **POST** `/{instance_id}/messages/vcard`
+- `vcard`: texto vCard 3.0 | máx 4096 caracteres
+
+### Reaction
+- **POST** `/{instance_id}/messages/reaction`
+- Body: `token`, `msgId`, `emoji`
+
+### Delete
+- **POST** `/{instance_id}/messages/delete`
+- Body: `token`, `msgId` (do webhook)
+
+### Reenvio
+- **POST** `/{instance_id}/messages/resendByStatus` — `status`: `unsent`, `expired`
+- **POST** `/{instance_id}/messages/resendById` — por `id`
+
+### Consulta e limpeza
+- **GET** `/{instance_id}/messages` — `page`, `limit` (máx 100), `status` (sent, queue, unsent, invalid, all), `sort` (asc, desc)
+- **POST** `/{instance_id}/messages/clear` — `status`: queue, sent, unsent, invalid
+- **GET** `/{instance_id}/messages/statistics` — contagem sent, queue, unsent
+
+---
+
+## 5. Instância (instance)
+
+| Método | Endpoint | Uso |
+|--------|----------|-----|
+| GET | `/{instance_id}/instance/status` | Status da instância |
+| GET | `/{instance_id}/instance/qr` | QR code para autenticação |
+| GET | `/{instance_id}/instance/qrCode` | Alternativa ao QR |
+| GET | `/{instance_id}/instance/me` | Dados da instância conectada |
+| GET | `/{instance_id}/instance/settings` | Configurações atuais |
+| POST | `/{instance_id}/instance/settings` | Atualiza configurações |
+| POST | `/{instance_id}/instance/logout` | Desconecta a instância |
+| POST | `/{instance_id}/instance/restart` | Reinicia a instância |
+| POST | `/{instance_id}/instance/clear` | Limpa dados da instância |
+
+---
+
+## 6. Chats
+
+| Método | Endpoint | Regras |
+|--------|----------|--------|
+| GET | `/{instance_id}/chats` | Lista todos os chats |
+| GET | `/{instance_id}/chats/ids` | IDs dos chats |
+| GET | `/{instance_id}/chats/messages` | `chatId` obrigatório, `limit` opcional (máx 1000) |
+| POST | `/{instance_id}/chats/archive` | Exige `chatId` |
+| POST | `/{instance_id}/chats/unarchive` | Exige `chatId` |
+| POST | `/{instance_id}/chats/clearMessages` | — |
+| POST | `/{instance_id}/chats/delete` | — |
+| POST | `/{instance_id}/chats/read` | Exige `chatId` |
+
+---
+
+## 7. Contacts
+
+| Método | Endpoint | Regras |
+|--------|----------|--------|
+| GET | `/{instance_id}/contacts` | Lista contatos |
+| GET | `/{instance_id}/contacts/ids` | IDs dos contatos |
+| GET | `/{instance_id}/contacts/contact` | Exige `chatId` |
+| GET | `/{instance_id}/contacts/image` | Exige `chatId` (foto de perfil) |
+| GET | `/{instance_id}/contacts/blocked` | Contatos bloqueados |
+| GET | `/{instance_id}/contacts/invalid` | Contatos inválidos |
+| GET | `/{instance_id}/contacts/check` | `chatId`, `nocache`; cache ~3 dias |
+| POST | `/{instance_id}/contacts/block` | Bloquear contato |
+| POST | `/{instance_id}/contacts/unblock` | Desbloquear contato |
+
+---
+
+## 8. Groups
+
+| Método | Endpoint | Regras |
+|--------|----------|--------|
+| GET | `/{instance_id}/groups` | Lista grupos |
+| GET | `/{instance_id}/groups/ids` | IDs dos grupos |
+| GET | `/{instance_id}/groups/group` | `groupId` obrigatório |
+
+---
+
+## 9. Media
+
+| Método | Endpoint | Regras |
+|--------|----------|--------|
+| POST | `/{instance_id}/media/upload` | `file` e `token`; arquivo por URL ou local |
+| POST | `/{instance_id}/media/delete` | Exige `url` do arquivo |
+| POST | `/{instance_id}/media/deleteByDate` | Exige `date` formato `1-2023` ou `01-2023` |
+
+---
+
+## Regras gerais
+
+- Formato `to`: `+5534999999999` (individual) ou `120363...@g.us` (grupo)
+- Base64/UTF-8: sempre URL encoding conforme documentação
+- Fila: mensagens podem ficar em fila se instância não autenticada
+
+---
+
+## Implementação (services/providers/ultramsg.js)
+
+### Mensagens
+| Método | Endpoint UltraMsg | Status |
+|--------|-------------------|--------|
+| `sendText` | POST /messages/chat | ✅ |
+| `sendImage` | POST /messages/image | ✅ |
+| `sendFile` | POST /messages/document | ✅ |
+| `sendAudio` | POST /messages/audio | ✅ |
+| `sendVoice` | POST /messages/voice | ✅ |
+| `sendVideo` | POST /messages/video | ✅ |
+| `sendSticker` | POST /messages/sticker | ✅ |
+| `sendContact` | POST /messages/vcard | ✅ |
+| `sendLocation` | POST /messages/location | ✅ |
+| `sendReaction` | POST /messages/reaction | ✅ |
+| `deleteMessage` | POST /messages/delete | ✅ |
+| `resendByStatus` | POST /messages/resendByStatus | ✅ |
+| `resendById` | POST /messages/resendById | ✅ |
+| `clearMessages` | POST /messages/clear | ✅ |
+| `getMessagesStatistics` | GET /messages/statistics | ✅ |
+
+### Instância
+| Método | Endpoint | Status |
+|--------|----------|--------|
+| `getConnectionStatus` | GET /instance/status | ✅ |
+| `configureWebhooks` | POST /instance/settings | ✅ |
+
+### Chats
+| Método | Endpoint | Status |
+|--------|----------|--------|
+| `getChats` | GET /chats | ✅ |
+| `getChatMessages` | GET /chats/messages | ✅ |
+| `archiveChat` | POST /chats/archive | ✅ |
+| `unarchiveChat` | POST /chats/unarchive | ✅ |
+| `readChat` | POST /chats/read | ✅ |
+| `clearChatMessages` | POST /chats/clearMessages | ✅ |
+| `deleteChat` | POST /chats/delete | ✅ |
+
+### Contacts
+| Método | Endpoint | Status |
+|--------|----------|--------|
+| `getContacts` | GET /contacts | ✅ |
+| `getContactMetadata` | GET /contacts/contact | ✅ |
+| `getProfilePicture` | GET /contacts/image | ✅ |
+
+### Groups
+| Método | Endpoint | Status |
+|--------|----------|--------|
+| `getGroups` | GET /groups | ✅ |
+
+### Media
+| Método | Endpoint | Status |
+|--------|----------|--------|
+| `uploadMedia` | POST /media/upload | ✅ |
+
+**Endpoints disponíveis na doc mas ainda não implementados:** instance/qr, instance/qrCode, instance/me, instance/logout, instance/restart, instance/clear; chats/ids; contacts/ids, contacts/block, contacts/unblock, contacts/blocked, contacts/invalid, contacts/check; groups/ids, groups/group; media/delete, media/deleteByDate.
+
+---
+
+## Checklist de integração (onde está configurado)
+
+| Fluxo | Arquivo | Rota / Uso |
+|-------|---------|------------|
+| Envio texto | chatController.enviarMensagemChat | POST /chats/:id/mensagens |
+| Envio mídia (imagem, áudio, voice, vídeo, sticker, arquivo) | chatController.enviarArquivo | POST /chats/:id/arquivo |
+| Envio contato | chatController.enviarContatoWhatsapp | POST /chats/:id/contatos |
+| Envio localização | chatController.enviarLocalizacao | POST /chats/:id/localizacao |
+| Reação | chatController.enviarReacaoMensagem | POST /chats/:id/mensagens/:id/reacao |
+| Remover reação | chatController.removerReacaoMensagem | DELETE /chats/:id/mensagens/:id/reacao |
+| Excluir mensagem (incl. deleteMessage no WhatsApp) | chatController.excluirMensagem | DELETE /chats/:id/mensagens/:id |
+| Status conexão | ultramsgIntegrationService.getStatus | GET /connect/status, GET /chats/zapi-status |
+| Webhook recebimento | webhookUltramsgController | POST /webhooks/ultramsg |
+| Config webhooks | provider.configureWebhooks | Chamado ao conectar (webhookZapiController) |
+| Config empresa | whatsappConfigService (empresa_zapi) | instance_id, instance_token por company_id |

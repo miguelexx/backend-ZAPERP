@@ -38,6 +38,7 @@ router.delete('/:id/mensagens/:mensagem_id', auth, chatController.excluirMensage
 router.post('/:id/mensagens/:mensagem_id/reacao', auth, chatController.enviarReacaoMensagem)
 router.delete('/:id/mensagens/:mensagem_id/reacao', auth, chatController.removerReacaoMensagem)
 router.post('/:id/contatos', auth, chatController.enviarContatoWhatsapp)
+router.post('/:id/localizacao', auth, chatController.enviarLocalizacao)
 router.post('/:id/ligacao', auth, chatController.enviarLigacaoWhatsapp)
 router.put('/:id/observacao', auth, chatController.atualizarObservacao)
 
