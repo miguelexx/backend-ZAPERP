@@ -936,155 +936,31 @@ exports.zapiStatus = async (req, res) => {
 
 // =====================================================
 // 3b) Sincronizar contatos do celular (Z-API Get contacts)
-// Busca TODOS os contatos do WhatsApp (paginado) e persiste em clientes.
-// USA SEMPRE o provider Z-API (empresa_zapi) — independente de WHATSAPP_PROVIDER.
+// Enfileira job de sync progressiva em vez de executar inline.
+// Resultado será enviado via socket zapi_sync_contatos ao concluir.
 // =====================================================
 exports.sincronizarContatosZapi = async (req, res) => {
   try {
     const { company_id } = req.user
-    if (!company_id) {
-      return res.status(401).json({ error: 'Não autenticado' })
-    }
+    if (!company_id) return res.status(401).json({ error: 'Não autenticado' })
+
     const { getEmpresaZapiConfig } = require('../services/zapiIntegrationService')
     const { config, error } = await getEmpresaZapiConfig(company_id)
     if (error || !config) {
       return res.status(400).json({ error: 'Empresa sem instância Z-API configurada. Conecte o WhatsApp em Integrações.' })
     }
-    const zapiProvider = require('../services/providers/zapi')
-    if (!zapiProvider || !zapiProvider.getContacts) {
-      return res.status(501).json({ error: 'Z-API getContacts não disponível.' })
-    }
 
-    const pageSize = 250
-    const maxPages = 120
-    let page = 1
-    let total = 0
-    let atualizados = 0
-    let criados = 0
+    const { enqueue, JOB_TIPOS } = require('../services/queueManager')
+    const result = await enqueue(company_id, JOB_TIPOS.SYNC_CONTATOS, { reset: true })
 
-    console.log(`[Sync Contatos] Iniciando para company ${company_id} (pageSize=${pageSize})`)
-
-    while (page <= maxPages) {
-      const contacts = await zapiProvider.getContacts(page, pageSize, { companyId: company_id })
-      if (!Array.isArray(contacts) || contacts.length === 0) break
-
-      if (page === 1) {
-        console.log(`[Sync Contatos] Primeira página: ${contacts.length} contatos recebidos`)
-        if (contacts[0]) {
-          const sample = contacts[0]
-          console.log('[Sync Contatos] Exemplo estrutura:', JSON.stringify({
-            keys: Object.keys(sample),
-            phone: sample.phone,
-            id: sample.id,
-            wa_id: sample.wa_id,
-            jid: typeof sample.jid === 'string' ? sample.jid.slice(0, 30) : sample.jid
-          }))
-        }
-      }
-
-      for (const c of contacts) {
-        // Z-API pode enviar phone, id, wa_id ou jid; id/jid vêm como "5511999999999@s.whatsapp.net"
-        let rawPhone = String(c.phone ?? c.wa_id ?? c.id ?? c.jid ?? '').trim()
-        if (rawPhone.includes('@')) rawPhone = rawPhone.replace(/@.*$/, '').trim()
-        if (!rawPhone) continue
-
-        let phone = normalizePhoneBR(rawPhone)
-        if (!phone) {
-          const digits = rawPhone.replace(/\D/g, '')
-          if (digits.length >= 10 && digits.length <= 13) {
-            phone = digits.startsWith('55') && (digits.length === 12 || digits.length === 13)
-              ? digits
-              : (digits.length === 10 || digits.length === 11 ? '55' + digits : null)
-          }
-        }
-        // Só aceita números BR válidos (55 + DDD + número)
-        if (!phone || !phone.startsWith('55') || (phone.length !== 12 && phone.length !== 13)) continue
-        total++
-
-        const nome = (c.name || c.short || c.notify || c.vname || '').trim() || null
-        const nomeFinal = nome || phone
-        const pushname = (c.notify || '').trim() || null
-        const imgUrl = (c.imgUrl || c.photo || c.profilePicture || '').trim() || null
-
-        const phones = possiblePhonesBR(phone)
-
-        let existenteQuery = supabase.from('clientes').select('id, nome, pushname, foto_perfil, telefone')
-        if (phones.length > 0) existenteQuery = existenteQuery.in('telefone', phones)
-        else existenteQuery = existenteQuery.eq('telefone', phone)
-        existenteQuery = existenteQuery.eq('company_id', Number(company_id))
-        const { data: existentes } = await existenteQuery.order('id', { ascending: true }).limit(10)
-        const rows = Array.isArray(existentes) ? existentes : (existentes ? [existentes] : [])
-        let existente = null
-        if (rows.length > 0) {
-          existente = rows.find(r => String(r.telefone || '') === phone) || rows[0]
-        }
-
-        // Se encontrou duplicatas (mesmo número com/sem 9), mescla no registro canônico.
-        if (existente?.id && rows.length > 1) {
-          const canonId = existente.id
-          const dupIds = rows.map(r => r.id).filter(id => id !== canonId)
-          if (dupIds.length > 0) {
-            // Apontar conversas para o cliente canônico e remover duplicados (melhora lista e evita "duas pessoas iguais").
-            await supabase.from('conversas').update({ cliente_id: canonId }).eq('company_id', Number(company_id)).in('cliente_id', dupIds)
-            await supabase.from('clientes').delete().eq('company_id', Number(company_id)).in('id', dupIds)
-          }
-        }
-
-        if (existente?.id) {
-          const updates = {}
-          const nomeExistente = (existente?.nome || '').trim()
-          const pushExistente = (existente?.pushname || '').trim()
-          const missingName = !nomeExistente || nomeExistente === (existente?.telefone || '').trim()
-
-          // chooseBestName evita regressão: nunca substituir nome bom por pior
-          if (nome && String(nome).trim()) {
-            const telefoneTail = String(phone).replace(/\D/g, '').slice(-6) || null
-            const { name: bestNome } = chooseBestName(nomeExistente, String(nome).trim(), 'syncZapi', { fromMe: false, company_id, telefoneTail })
-            if (bestNome && bestNome !== nomeExistente) updates.nome = bestNome
-          } else if (missingName) updates.nome = phone // sem nome → usa número, mas só se estava vazio
-
-          // pushname só se veio e o banco está vazio (ou null)
-          if (pushname != null && String(pushname).trim() && !pushExistente) updates.pushname = String(pushname).trim()
-
-          // foto só se veio uma válida; não remover foto existente
-          if (imgUrl != null && String(imgUrl).trim().startsWith('http')) updates.foto_perfil = String(imgUrl).trim()
-
-          if (Object.keys(updates).length > 0) {
-            let upd = await supabase.from('clientes').update(updates).eq('id', existente.id)
-            if (upd.error && String(upd.error.message || '').includes('pushname')) {
-              delete updates.pushname
-              if (Object.keys(updates).length > 0) upd = await supabase.from('clientes').update(updates).eq('id', existente.id)
-            }
-            if (!upd.error) atualizados++
-          }
-        } else {
-          const { cliente_id: cid } = await getOrCreateCliente(supabase, company_id, phone, {
-            nome: nomeFinal || phone,
-            nomeSource: 'syncZapi',
-            pushname: pushname || undefined,
-            foto_perfil: imgUrl || undefined
-          })
-          if (cid) criados++
-        }
-      }
-
-      if (contacts.length < pageSize) break
-      page++
-    }
-
-    console.log(`[Sync Contatos] Concluído: ${total} processados, ${criados} novos, ${atualizados} atualizados`)
-
-    // Emite para outras abas/clientes da empresa atualizarem a lista
-    const io = req.app?.get('io')
-    if (io && company_id) {
-      io.to(`empresa_${company_id}`).emit('zapi_sync_contatos', { criados, atualizados, total_contatos: total })
+    if (!result.ok) {
+      return res.status(400).json({ error: result.error || 'Não foi possível enfileirar sync' })
     }
 
     return res.json({
       ok: true,
-      total_contatos: total,
-      criados,
-      atualizados
+      job_id: result.job_id,
+      mensagem: 'Sincronização enfileirada. O resultado será exibido quando concluir.'
     })
   } catch (err) {
     console.error('sincronizarContatosZapi:', err)
@@ -1093,168 +969,40 @@ exports.sincronizarContatosZapi = async (req, res) => {
 }
 
 // =====================================================
-// 3c) Sincronizar fotos de perfil de todos os clientes (Z-API Get profile-picture)
+// 3c) Sincronizar fotos de perfil (Z-API Get profile-picture)
+// Enfileira job de sync progressiva em vez de executar inline.
+// Resultado será enviado via socket zapi_sync_contatos ao concluir.
 // =====================================================
-function sleep(ms) {
-  return new Promise((r) => setTimeout(r, ms))
-}
-
 exports.sincronizarFotosPerfilZapi = async (req, res) => {
   try {
     const { company_id } = req.user
+    if (!company_id) return res.status(401).json({ error: 'Não autenticado' })
+
     const provider = getProvider()
-    if (!provider || !provider.isConfigured || (!provider.getProfilePicture && !provider.getContactMetadata)) {
+    if (!provider?.getProfilePicture && !provider?.getContactMetadata) {
       return res.status(501).json({ error: 'Sincronização de fotos disponível apenas com Z-API configurado.' })
     }
 
-    const cid = Number(company_id)
-
-    const statusResult = await getStatus(cid)
+    const statusResult = await getStatus(Number(company_id))
     if (!statusResult?.connected) {
       return res.status(503).json({
         error: 'Z-API não está conectada ao WhatsApp. Conecte o WhatsApp primeiro e tente novamente.'
       })
     }
-    const limit = Math.min(3000, Math.max(1, Number(req.query.limit) || 2000))
-    const delayMs = Math.min(1200, Math.max(0, Number(req.query.delay_ms) || 220))
 
-    const forceAll = req.query.force === '1' || req.query.force === 'true'
+    const { enqueue, JOB_TIPOS } = require('../services/queueManager')
+    const result = await enqueue(company_id, JOB_TIPOS.SYNC_FOTOS, {
+      maxClients: Math.min(500, Number(req.query.limit) || 500)
+    })
 
-    let q = supabase
-      .from('clientes')
-      .select('id, telefone, nome, pushname, foto_perfil')
-      .eq('company_id', cid)
-      .not('telefone', 'is', null)
-      .limit(limit)
-    // Sem force=1: prioriza registros incompletos; mas SEMPRE inclui quem tem foto
-    // (URLs do WhatsApp CDN expiram → precisamos refrescar a URL mesmo quando existe)
-    if (!forceAll) {
-      q = q.or('foto_perfil.is.null,foto_perfil.eq.,nome.is.null,nome.eq.,pushname.is.null,pushname.eq.,foto_perfil.like.https://%')
-    }
-    const { data: clientes, error: errList } = await q
-
-    if (errList) return res.status(500).json({ error: errList.message })
-    if (!clientes || clientes.length === 0) {
-      return res.json({ ok: true, total: 0, atualizados: 0, erros: 0 })
-    }
-
-    let atualizados = 0
-    let erros = 0
-    let semFoto = 0
-    let nomeAtualizado = 0
-    let fotoAtualizada = 0
-    const exemplosErros = []
-
-    for (const cl of clientes) {
-      const phone = (cl.telefone || '').trim().replace(/\D/g, '')
-      if (!phone) continue
-      try {
-        const nomeDb = String(cl.nome || '').trim()
-        const pushDb = String(cl.pushname || '').trim()
-        const fotoDb = String(cl.foto_perfil || '').trim()
-        const missingName = !nomeDb || nomeDb === phone
-        const missingFoto = !fotoDb || fotoDb.toLowerCase() === 'null' || fotoDb.toLowerCase() === 'undefined'
-
-        const [meta, fotoUrl] = await Promise.all([
-          provider.getContactMetadata ? provider.getContactMetadata(phone, { companyId: cid }) : Promise.resolve(null),
-          provider.getProfilePicture ? provider.getProfilePicture(phone, { companyId: cid }) : Promise.resolve(null)
-        ])
-
-        const metaNome = String(meta?.name || meta?.short || meta?.notify || meta?.vname || '').trim()
-        const metaPush = String(meta?.notify || '').trim()
-        const metaImgRaw = String(meta?.imgUrl || meta?.photo || meta?.profilePicture || '').trim()
-        const metaImg = metaImgRaw && metaImgRaw.startsWith('http') ? metaImgRaw : null
-        const fotoFinal = (fotoUrl && String(fotoUrl).trim().startsWith('http') ? String(fotoUrl).trim() : null) || metaImg
-
-        const updates = {}
-
-        // nome/pushname: use chooseBestName para evitar regressão (nunca substituir nome bom por pior)
-        if (missingName || metaNome) {
-          const candidate = metaNome || (missingName ? phone : null)
-          const { name: bestNome } = chooseBestName(
-            nomeDb || null,
-            candidate,
-            'syncZapi',
-            { fromMe: false, company_id: cid, telefoneTail: phone.slice(-6) }
-          )
-          if (bestNome && bestNome !== (nomeDb || '')) {
-            updates.nome = bestNome
-            if (bestNome !== phone) nomeAtualizado++
-          } else if (missingName) {
-            updates.nome = phone
-          }
-        }
-        if (!pushDb && metaPush) {
-          updates.pushname = metaPush
-        }
-
-        // Sempre atualiza foto quando Z-API retorna URL válida
-        // (URLs do WhatsApp CDN expiram; sempre usar a URL mais recente)
-        if (fotoFinal) {
-          updates.foto_perfil = fotoFinal
-          fotoAtualizada++
-        } else if (missingFoto) {
-          semFoto++
-        }
-
-        if (Object.keys(updates).length > 0) {
-          let upd = await supabase.from('clientes').update(updates).eq('id', cl.id).eq('company_id', cid)
-          if (upd.error && String(upd.error.message || '').includes('pushname')) {
-            delete updates.pushname
-            if (Object.keys(updates).length > 0) upd = await supabase.from('clientes').update(updates).eq('id', cl.id).eq('company_id', cid)
-          }
-          if (!upd.error) {
-            atualizados++
-            // Atualiza só foto no cache (nome: nunca trocar — evita alternar ao sync)
-            const cacheUpdates = {}
-            if (updates.foto_perfil) cacheUpdates.foto_perfil_contato_cache = updates.foto_perfil
-            if (Object.keys(cacheUpdates).length > 0) {
-              supabase.from('conversas').update(cacheUpdates).eq('cliente_id', cl.id).eq('company_id', cid).select('id').then(({ data }) => {
-                // Emite via socket para atualizar UI em tempo real (empresa específica)
-                const io = req.app?.get('io')
-                if (io && Array.isArray(data) && data.length > 0) {
-                  for (const row of data) {
-                    io.to(`empresa_${cid}`).emit('conversa_atualizada', { id: row.id, ...cacheUpdates })
-                    io.to(`empresa_${cid}`).emit('atualizar_conversa', { id: row.id })
-                  }
-                }
-              }).catch(() => {})
-            }
-          } else {
-            erros++
-            if (exemplosErros.length < 10) exemplosErros.push({ id: cl.id, telefone: phone.slice(-6), erro: upd.error.message })
-          }
-        }
-      } catch (e) {
-        if (e?.code === 'ZAPI_NOT_CONNECTED') {
-          console.warn('sincronizarFotosPerfilZapi: Z-API desconectou durante a sincronização')
-          return res.json({
-            ok: true,
-            total: clientes.length,
-            atualizados,
-            nome_atualizado: nomeAtualizado,
-            foto_atualizada: fotoAtualizada,
-            sem_foto: semFoto,
-            erros,
-            exemplos_erros: exemplosErros,
-            interrompido: 'Z-API desconectou durante a sincronização. Tente novamente quando estiver conectado.'
-          })
-        }
-        erros++
-        if (exemplosErros.length < 10) exemplosErros.push({ id: cl.id, telefone: phone.slice(-6), erro: 'exception' })
-      }
-      await sleep(delayMs)
+    if (!result.ok) {
+      return res.status(400).json({ error: result.error || 'Não foi possível enfileirar sync de fotos' })
     }
 
     return res.json({
       ok: true,
-      total: clientes.length,
-      atualizados,
-      nome_atualizado: nomeAtualizado,
-      foto_atualizada: fotoAtualizada,
-      sem_foto: semFoto,
-      erros,
-      exemplos_erros: exemplosErros
+      job_id: result.job_id,
+      mensagem: 'Sincronização de fotos enfileirada. O resultado será exibido quando concluir.'
     })
   } catch (err) {
     console.error('sincronizarFotosPerfilZapi:', err)

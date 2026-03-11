@@ -2609,19 +2609,14 @@ exports.connectionZapi = async (req, res) => {
       await resetOnConnected(company_id)
     }
 
-    // Ao conectar: dispara sync em background (espelho do WhatsApp: nomes + (se possível) fotos)
+    // Ao conectar: configura webhooks e enfileira sync progressiva (não executa inline)
     if (connected) {
       setImmediate(async () => {
-        const io = req.app.get('io')
         const provider = getProvider()
         if (!provider || !provider.isConfigured) return
 
-        // Aguarda instância Z-API estabilizar (evita "You need to be connected" em massa)
         await new Promise(r => setTimeout(r, 10000))
 
-        // ─── Auto-configuração dos webhooks Z-API ───
-        // Registra automaticamente as URLs de callback (mensagens + status) na instância Z-API.
-        // Garante que READ/RECEIVED cheguem mesmo sem configuração manual no painel.
         const appUrl = process.env.APP_URL || ''
         if (appUrl && provider.configureWebhooks) {
           try {
@@ -2631,168 +2626,29 @@ exports.connectionZapi = async (req, res) => {
           }
         }
 
-        if (!provider.getContacts) return
+        const { registrarEvento, TIPOS } = require('../services/operationalAuditService')
+        await registrarEvento(company_id, TIPOS.CONEXAO, 'Sessão Z-API conectada', {})
 
+        let autoSync = false
         try {
-          // ✅ respeita preferências da empresa (auto sync contatos)
-          let autoSync = true
-          try {
-            const { data: emp, error: errEmp } = await supabase
-              .from('empresas')
-              .select('zapi_auto_sync_contatos')
-              .eq('id', company_id)
-              .maybeSingle()
-            if (errEmp) {
-              // compat: coluna pode não existir ainda
-              const msg = String(errEmp.message || '')
-              if (!msg.includes('zapi_auto_sync_contatos') && !msg.includes('does not exist')) {
-                console.warn('⚠️ Z-API: erro ao ler preferência auto-sync:', errEmp.message)
-              }
-            } else if (emp && emp.zapi_auto_sync_contatos === false) {
-              autoSync = false
-            }
-          } catch (_) {
-            // ignora (mantém padrão true)
+          const { data: emp, error: errEmp } = await supabase
+            .from('empresas')
+            .select('zapi_auto_sync_contatos')
+            .eq('id', company_id)
+            .maybeSingle()
+          if (!errEmp && emp) autoSync = emp.zapi_auto_sync_contatos === true
+        } catch (_) {}
+
+        if (autoSync && provider.getContacts) {
+          const { enqueue, JOB_TIPOS } = require('../services/queueManager')
+          const result = await enqueue(company_id, JOB_TIPOS.SYNC_CONTATOS, { reset: true })
+          if (result.ok) {
+            console.log('🔄 Z-API: job de sync de contatos enfileirado (sync progressiva)')
+          } else {
+            console.log('⏭️ Z-API: sync não enfileirado:', result.error)
           }
-          if (!autoSync) {
-            console.log('⏭️ Z-API: auto-sync de contatos desativado (empresa).')
-            return
-          }
-
-          console.log('🔄 Z-API: iniciando sync de contatos (on connected)...')
-          const pageSize = 250
-          const maxPages = 120
-          let page = 1
-          let total = 0
-          let atualizados = 0
-          let criados = 0
-          let fotosAtualizadas = 0
-
-          while (page <= maxPages) {
-            const contacts = await provider.getContacts(page, pageSize, { companyId: company_id })
-            if (!Array.isArray(contacts) || contacts.length === 0) break
-
-            for (const c of contacts) {
-              const rawPhone = String(c.phone || '').trim()
-              let phone = normalizePhoneBR(rawPhone)
-              if (!phone) {
-                const digits = rawPhone.replace(/\D/g, '')
-                if (digits.length >= 10 && digits.length <= 15) phone = digits
-              }
-              if (!phone) continue
-              total++
-
-              const nome = (c.name || c.short || c.notify || c.vname || '').trim() || null
-              const pushname = (c.notify || '').trim() || null
-
-              const phones = possiblePhonesBR(phone)
-              let q = supabase.from('clientes').select('id, telefone, nome').eq('company_id', company_id)
-              if (phones.length > 0) q = q.in('telefone', phones)
-              else q = q.eq('telefone', phone)
-
-              const found = await q.order('id', { ascending: true }).limit(10)
-              const rows = Array.isArray(found.data) ? found.data : []
-              const existente = rows.find(r => String(r.telefone || '') === phone) || rows[0] || null
-
-              // Mesclar duplicatas simples (com/sem 9 após DDD)
-              if (existente?.id && rows.length > 1) {
-                const canonId = existente.id
-                const dupIds = rows.map(r => r.id).filter(id => id !== canonId)
-                if (dupIds.length > 0) {
-                  await supabase.from('conversas').update({ cliente_id: canonId }).in('cliente_id', dupIds)
-                  await supabase.from('clientes').delete().in('id', dupIds)
-                }
-              }
-
-              // Nome: só Z-API sync e webhook podem atualizar. Sem nome → fallback com número.
-              const nomeFinal = nome && String(nome).trim() ? nome : phone
-
-              if (existente?.id) {
-                const updates = {}
-                if (nome && String(nome).trim()) {
-                  const { name: bestNome } = chooseBestName(existente.nome, String(nome).trim(), 'syncZapi', { fromMe: false, company_id, telefoneTail: String(phone || '').replace(/\D/g, '').slice(-6) })
-                  if (bestNome && bestNome !== (existente.nome || '')) updates.nome = bestNome
-                }
-                if (!updates.nome && (!existente.nome || !String(existente.nome).trim())) updates.nome = phone
-                if (pushname != null && String(pushname).trim()) updates.pushname = String(pushname).trim()
-                if (Object.keys(updates).length > 0) {
-                  let upd = await supabase.from('clientes').update(updates).eq('id', existente.id).eq('company_id', company_id)
-                  if (upd.error && String(upd.error.message || '').includes('pushname')) {
-                    delete updates.pushname
-                    if (Object.keys(updates).length > 0) upd = await supabase.from('clientes').update(updates).eq('id', existente.id).eq('company_id', company_id)
-                  }
-                  if (!upd.error) atualizados++
-                }
-              } else {
-                const { cliente_id: cid } = await getOrCreateCliente(supabase, company_id, phone, {
-                  nome: nomeFinal || phone,
-                  nomeSource: 'syncZapi',
-                  pushname: pushname || undefined
-                })
-                if (cid) criados++
-              }
-            }
-
-            if (contacts.length < pageSize) break
-            page++
-          }
-
-          console.log('✅ Z-API sync de contatos finalizado:', { total, criados, atualizados })
-
-          // Fotos: tenta completar para os que estão sem foto (limitado para não travar o webhook)
-          // Só executa se Z-API estiver realmente conectada (evita centenas de 400 "not connected")
-          if (provider.getProfilePicture) {
-            const statusResult = await getStatus(company_id)
-            if (!statusResult?.connected) {
-              console.warn('⏭️ Z-API: pulando sync de fotos (instância ainda não conectada). Use Configurações > Sincronizar fotos depois.')
-            } else {
-              const { data: semFoto } = await supabase
-                .from('clientes')
-                .select('id, telefone')
-                .eq('company_id', company_id)
-                .or('foto_perfil.is.null,foto_perfil.eq.')
-                .limit(150)
-
-              const list = Array.isArray(semFoto) ? semFoto : []
-              fotosAtualizadas = 0
-              for (const cl of list) {
-                const tel = String(cl.telefone || '').trim()
-                if (!tel) continue
-                try {
-                  const url = await provider.getProfilePicture(tel, { companyId: company_id })
-                  if (url && String(url).trim().startsWith('http')) {
-                    const { error: updErr } = await supabase
-                      .from('clientes')
-                      .update({ foto_perfil: String(url).trim() })
-                      .eq('id', cl.id)
-                      .eq('company_id', company_id)
-                    if (!updErr) fotosAtualizadas++
-                  }
-                } catch (e) {
-                  if (e?.code === 'ZAPI_NOT_CONNECTED') {
-                    console.warn('⏭️ Z-API: sync de fotos interrompido (instância desconectada). Use Configurações > Sincronizar fotos quando estiver conectado.')
-                    break
-                  }
-                  // ignora outros (pode estar sem foto/privacidade)
-                }
-                await new Promise(r => setTimeout(r, 220))
-              }
-              if (fotosAtualizadas > 0) console.log('🖼️ Z-API: fotos atualizadas (parcial):', fotosAtualizadas)
-            }
-          }
-
-          // Notifica o front (Configurações → Clientes) para atualizar lista automaticamente
-          if (io) {
-            io.to(`empresa_${company_id}`).emit('zapi_sync_contatos', {
-              ok: true,
-              total_contatos: total,
-              criados,
-              atualizados,
-              fotos_atualizadas: fotosAtualizadas
-            })
-          }
-        } catch (e) {
-          console.error('❌ Z-API sync on connected falhou:', e?.message || e)
+        } else {
+          console.log('⏭️ Z-API: auto-sync desativado ou getContacts indisponível')
         }
       })
     }

@@ -1,6 +1,6 @@
 const { getStatus, getQrCodeImage, restartInstance, getMe, getPhoneCode, buildMeSummary, getEmpresaZapiConfig } = require('../services/zapiIntegrationService')
-const { syncContacts } = require('../services/zapiContactsSyncService')
 const { checkGuard, recordQrServed, resetOnConnected, getAttempts, THROTTLE_SECONDS } = require('../services/zapiConnectGuardService')
+const { getConfig } = require('../services/configOperacionalService')
 
 // Rate limit simples por empresa/endpoint em memória (complementar ao express-rate-limit global).
 const perCompanyBuckets = new Map()
@@ -303,25 +303,62 @@ exports.debugStatus = async (req, res) => {
 }
 
 /**
- * POST /contacts/sync — sincroniza contatos do celular via Z-API.
- * Usa API oficial GET /contacts quando disponível; fallback via conversas existentes.
+ * POST /contacts/sync — enfileira sync de contatos (progressiva).
+ * Resultado enviado via socket zapi_sync_contatos ao concluir.
  */
 exports.syncContacts = async (req, res) => {
   const company_id = req.user?.company_id
-  if (!company_id) {
-    return res.status(401).json({ error: 'Não autenticado' })
-  }
+  if (!company_id) return res.status(401).json({ error: 'Não autenticado' })
   if (!checkCompanyRate(company_id, 'contacts-sync', 60_000, 5)) {
     return res.status(429).json({
       error: 'Muitas sincronizações. Aguarde 1 minuto.',
       retryAfterSeconds: 60
     })
   }
-  const result = await syncContacts(company_id)
-  if (!result.ok) {
-    return res.status(400).json(result)
-  }
-  return res.json(result)
+  const { enqueue, JOB_TIPOS } = require('../services/queueManager')
+  const result = await enqueue(company_id, JOB_TIPOS.SYNC_CONTATOS, { reset: true })
+  if (!result.ok) return res.status(400).json({ ok: false, error: result.error })
+  return res.json({ ok: true, job_id: result.job_id, mode: 'enqueued' })
+}
+
+/**
+ * GET /operational-status — saúde da sessão: conectado, sync, modo seguro.
+ */
+exports.getOperationalStatus = async (req, res) => {
+  const company_id = req.user?.company_id
+  if (!company_id) return res.status(401).json({ error: 'Não autenticado' })
+
+  const statusResult = await getStatus(company_id)
+  const config = await getConfig(company_id)
+
+  const supabase = require('../config/supabase')
+  const { data: lastJob } = await supabase
+    .from('jobs')
+    .select('atualizado_em, resultado_json, status')
+    .eq('company_id', company_id)
+    .eq('tipo', 'sync_contatos')
+    .in('status', ['completed'])
+    .order('atualizado_em', { ascending: false })
+    .limit(1)
+    .maybeSingle()
+
+  const { data: pendingJob } = await supabase
+    .from('jobs')
+    .select('id')
+    .eq('company_id', company_id)
+    .eq('tipo', 'sync_contatos')
+    .in('status', ['pending', 'running'])
+    .limit(1)
+    .maybeSingle()
+
+  return res.json({
+    connected: statusResult?.connected ?? false,
+    syncStatus: pendingJob?.id ? 'running' : (lastJob ? 'idle' : 'idle'),
+    syncPending: !!pendingJob,
+    lastSyncAt: lastJob?.atualizado_em ?? null,
+    modoSeguro: config?.modo_seguro ?? true,
+    processamentoPausado: config?.processamento_pausado ?? false
+  })
 }
 
 /**

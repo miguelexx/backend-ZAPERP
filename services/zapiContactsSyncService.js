@@ -212,4 +212,78 @@ async function syncContacts(company_id) {
   }
 }
 
-module.exports = { syncContacts, syncViaContactsApi, syncViaFallback }
+/**
+ * Processa um único lote (página) de contatos da Z-API.
+ * Usado pela sincronização progressiva.
+ * @param {number} company_id
+ * @param {object} opts - { page, pageSize }
+ * @returns {Promise<{ processados: number, inserted: number, updated: number, skipped: number, errors: string[], hasMore: boolean }>}
+ */
+async function syncContactsBatch(company_id, opts = {}) {
+  const page = Math.max(1, opts.page || 1)
+  const pageSize = Math.min(100, Math.max(10, opts.pageSize || 50))
+
+  if (!zapiProvider.getContacts) {
+    return { processados: 0, inserted: 0, updated: 0, skipped: 0, errors: ['Z-API getContacts não disponível'], hasMore: false }
+  }
+
+  const { config, error } = await getEmpresaZapiConfig(company_id)
+  if (error || !config) {
+    return { processados: 0, inserted: 0, updated: 0, skipped: 0, errors: ['Empresa sem instância Z-API configurada'], hasMore: false }
+  }
+
+  const contacts = await zapiProvider.getContacts(page, pageSize, { companyId: company_id })
+  if (!Array.isArray(contacts) || contacts.length === 0) {
+    return { processados: 0, inserted: 0, updated: 0, skipped: 0, errors: [], hasMore: false }
+  }
+
+  const stats = { processados: 0, inserted: 0, updated: 0, skipped: 0, errors: [] }
+  const seen = new Set()
+
+  for (const c of contacts) {
+    const fields = extractContactFields(c)
+    if (!fields || !fields.phone) {
+      stats.skipped++
+      continue
+    }
+
+    const key = fields.phone
+    if (seen.has(key)) {
+      stats.skipped++
+      continue
+    }
+    seen.add(key)
+
+    try {
+      const variants = possiblePhonesBR(fields.phone).length > 0 ? possiblePhonesBR(fields.phone) : [fields.phone]
+      const { data: existente } = await supabase
+        .from('clientes')
+        .select('id')
+        .eq('company_id', company_id)
+        .in('telefone', variants)
+        .limit(1)
+        .maybeSingle()
+
+      const clienteFields = {}
+      if (fields.nome) clienteFields.nome = fields.nome
+      if (fields.foto) clienteFields.foto_perfil = fields.foto
+      clienteFields.nomeSource = 'syncZapi'
+
+      const result = await getOrCreateCliente(supabase, company_id, fields.phone, clienteFields)
+      if (result.cliente_id) {
+        if (existente?.id) stats.updated++
+        else stats.inserted++
+      } else {
+        stats.skipped++
+      }
+      stats.processados++
+    } catch (e) {
+      stats.errors.push(`${fields.phone}: ${String(e?.message || e).slice(0, 80)}`)
+    }
+  }
+
+  const hasMore = contacts.length >= pageSize
+  return { ...stats, hasMore }
+}
+
+module.exports = { syncContacts, syncViaContactsApi, syncViaFallback, syncContactsBatch }

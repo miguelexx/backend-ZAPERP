@@ -13,6 +13,7 @@ const { normalizePhoneBR, toZapiSendFormat, possiblePhonesBR } = require('../../
 const { getEmpresaZapiConfig } = require('../zapiIntegrationService')
 const { fetchWithRetry } = require('../../helpers/retryWithBackoff')
 const { permitirEnvio } = require('../protecao/protecaoOrchestrator')
+const circuitBreaker = require('../circuitBreakerZapi')
 
 const ZAPI_BASE_URL = (process.env.ZAPI_BASE_URL || 'https://api.z-api.io').replace(/\/$/, '')
 const ZAPI_INSTANCE_ID = process.env.ZAPI_INSTANCE_ID || ''
@@ -568,6 +569,8 @@ async function sendSticker(phone, sticker, opts = {}) {
  * @param {{ companyId?: number }} [opts]
  */
 async function getContacts(page = 1, pageSize = 100, opts = {}) {
+  const companyId = opts?.companyId ?? opts?.company_id
+  if (circuitBreaker.isOpen(companyId)) return []
   const cfg = await resolveConfig(opts)
   if (!cfg) return []
   try {
@@ -577,9 +580,11 @@ async function getContacts(page = 1, pageSize = 100, opts = {}) {
     )
     if (!res.ok) {
       const errBody = await res.text().catch(() => '')
+      if (res.status >= 500 || res.status === 429) circuitBreaker.recordFailure(companyId)
       console.warn('[Z-API] getContacts falhou:', res.status, String(errBody || '').slice(0, 150))
       return []
     }
+    circuitBreaker.recordSuccess(companyId)
     const data = await res.json().catch(() => null)
     // Resposta pode ser array direto ou { contacts: [...] } / { data: [...] } / { value: [...] }
     if (Array.isArray(data)) return data
@@ -589,6 +594,7 @@ async function getContacts(page = 1, pageSize = 100, opts = {}) {
     }
     return []
   } catch (e) {
+    circuitBreaker.recordFailure(companyId)
     console.error('Z-API getContacts:', e.message)
     return []
   }
@@ -600,6 +606,8 @@ async function getContacts(page = 1, pageSize = 100, opts = {}) {
  * @param {{ companyId?: number }} [opts]
  */
 async function getProfilePicture(phone, opts = {}) {
+  const companyId = opts?.companyId ?? opts?.company_id
+  if (circuitBreaker.isOpen(companyId)) return null
   const cfg = await resolveConfig(opts)
   if (!cfg) return null
   try {
@@ -615,14 +623,17 @@ async function getProfilePicture(phone, opts = {}) {
         logClientTokenHint(errBody)
         // 400 "You need to be connected" → instância ainda não pronta; permite abortar batch no caller
         if (res.status === 400 && String(errBody || '').toLowerCase().includes('you need to be connected')) {
+          circuitBreaker.recordFailure(companyId)
           const err = new Error('ZAPI_NOT_CONNECTED')
           err.code = 'ZAPI_NOT_CONNECTED'
           err.originalBody = errBody
           throw err
         }
+        if (res.status >= 500 || res.status === 429) circuitBreaker.recordFailure(companyId)
         console.warn('❌ Z-API getProfilePicture falhou:', num?.slice(-6), res.status, String(errBody || '').slice(0, 200))
         continue
       }
+      circuitBreaker.recordSuccess(companyId)
       const data = await res.json().catch(() => null)
       // Z-API pode retornar {link:"..."} OU [{link:"..."}]
       const obj = Array.isArray(data) ? (data[0] || null) : data
@@ -635,6 +646,7 @@ async function getProfilePicture(phone, opts = {}) {
     }
     return null
   } catch (e) {
+    circuitBreaker.recordFailure(companyId)
     console.error('Z-API getProfilePicture:', e.message)
     return null
   }

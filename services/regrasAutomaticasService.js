@@ -39,7 +39,7 @@ async function processarRegras(ctx) {
       .maybeSingle()
 
     const enabled = iaConfig?.config?.regras_automaticas?.enabled
-    if (enabled === false) return { matched: false }
+    if (enabled !== true) return { matched: false }
 
     const { data: regras } = await supabaseClient
       .from('regras_automaticas')

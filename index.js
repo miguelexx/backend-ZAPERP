@@ -194,6 +194,10 @@ const PORT = process.env.PORT || 3000
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`Servidor HTTP + WebSocket rodando na porta ${PORT}`)
 
+  // Worker da fila de jobs (sync progressiva)
+  const { startWorker } = require('./services/queueManager')
+  startWorker(5000, io)
+
   // Multi-tenant: webhooks são configurados por empresa ao conectar (connectionZapi).
   // Não há mais instância única em ENV para configurar no startup.
 })

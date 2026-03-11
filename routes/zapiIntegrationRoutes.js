@@ -17,6 +17,9 @@ router.get('/debug-status', zapiIntegrationController.debugStatus)
 // Status da instância para empresa logada
 router.get('/status', zapiIntegrationController.getStatus)
 
+// Status operacional (conectado, sync, modo seguro)
+router.get('/operational-status', zapiIntegrationController.getOperationalStatus)
+
 // QR Code base64 (legado: retorna imageBase64)
 router.get('/qrcode', zapiIntegrationController.getQrCodeLegacy)
 
