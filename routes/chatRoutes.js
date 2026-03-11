@@ -28,8 +28,8 @@ router.post('/:id/transferir', auth, chatController.transferirChat)
 router.post("/:id/tags", auth, chatController.adicionarTagConversa);
 router.delete("/:id/tags/:tag_id", auth, chatController.removerTagConversa)
 
-// Apenas admin: transferir conversa para outro setor (departamento)
-router.put('/:id/departamento', auth, adminOnly, chatController.transferirSetor)
+// Todos os usuários: transferir conversa para outro setor (departamento)
+router.put('/:id/departamento', auth, chatController.transferirSetor)
 
 router.post("/:id/arquivo", auth, upload.single('file'), chatController.enviarArquivo)
 
