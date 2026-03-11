@@ -11,11 +11,27 @@
  *   2. Header  Authorization: Bearer <token>
  *   3. Query   ?token=<token>             ← compatibilidade Z-API (appenda na URL)
  *
+ * FALLBACK quando token ausente: se o payload contém instanceId registrado em empresa_zapi,
+ * aceita a requisição (Z-API às vezes envia sem token em /webhooks/zapi ou /status).
+ *
  * Logging: registra rejeições sem expor o valor do token recebido.
  * Diagnóstico: rejeições são gravadas no buffer _rejectedLog do webhookZapiController.
  */
 
 const crypto = require('crypto')
+const { getCompanyIdByInstanceId } = require('../services/zapiIntegrationService')
+
+/**
+ * Extrai instanceId do payload Z-API (body.instanceId, instance_id, instance.id, instance).
+ */
+function extractInstanceId(body) {
+  if (!body || typeof body !== 'object') return ''
+  const v = body.instanceId ?? body.instance_id ?? body.instance?.id ?? body.instance
+  if (v == null) return ''
+  if (typeof v === 'object' && v != null && typeof v.id === 'string') return String(v.id).trim()
+  if (typeof v === 'object' && v != null && v.instance_id != null) return String(v.instance_id).trim()
+  return String(v).trim()
+}
 
 /**
  * Comparação em tempo constante — previne timing-attacks.
@@ -50,31 +66,50 @@ function requireWebhookToken(req, res, next) {
     req.get('X-Webhook-Token') || bearer || req.query?.token || ''
   ).trim()
 
-  const motivo = !incoming ? 'token_ausente' : 'token_invalido'
-
-  if (!incoming || !timingSafeEqual(incoming, expected)) {
-    const logEntry = {
-      motivo,
-      method: req.method,
-      path: req.path,
-      ip: req.ip || '?',
-      token_recebido: incoming ? `(${incoming.length} chars)` : '(nenhum)',
-    }
-    const label = motivo === 'token_ausente' ? 'Token ausente' : 'Token inválido'
-    console.warn(`[WEBHOOK_REJECTED] ${label} — ${req.method} ${req.path} | IP: ${req.ip || '?'}`)
-    console.warn(`[WEBHOOK_REJECTED] 💡 Dica: URL correta = APP_URL/webhooks/zapi${req.path === '/' ? '' : req.path}?token=<ZAPI_WEBHOOK_TOKEN>`)
-
-    // Registra no buffer de diagnóstico do webhookZapiController
-    try {
-      const ctrl = require('../controllers/webhookZapiController')
-      if (ctrl._logRejected) ctrl._logRejected(logEntry)
-    } catch (_) {}
-
-    const statusCode = motivo === 'token_ausente' ? 401 : 401
-    return res.status(statusCode).json({ error: motivo === 'token_ausente' ? 'Token do webhook ausente' : 'Token do webhook inválido' })
+  // Token presente e válido → permite
+  if (incoming && timingSafeEqual(incoming, expected)) {
+    return next()
   }
 
-  return next()
+  // Token ausente ou inválido → tenta fallback via instanceId registrado
+  const instanceId = extractInstanceId(req.body)
+  if (instanceId) {
+    return getCompanyIdByInstanceId(instanceId)
+      .then((companyId) => {
+        if (companyId != null) {
+          console.info(`[WEBHOOK_TOKEN_FALLBACK] Aceito via instanceId registrado — ${req.method} ${req.path} | instanceId: ${instanceId.slice(0, 16)}…`)
+          return next()
+        }
+        _reject(req, res, incoming)
+      })
+      .catch((err) => {
+        console.error('[requireWebhookToken] Fallback instanceId:', err?.message || err)
+        _reject(req, res, incoming)
+      })
+  }
+
+  _reject(req, res, incoming)
+}
+
+function _reject(req, res, incoming) {
+  const motivo = !incoming ? 'token_ausente' : 'token_invalido'
+  const logEntry = {
+    motivo,
+    method: req.method,
+    path: req.path,
+    ip: req.ip || '?',
+    token_recebido: incoming ? `(${incoming.length} chars)` : '(nenhum)',
+  }
+  const label = motivo === 'token_ausente' ? 'Token ausente' : 'Token inválido'
+  console.warn(`[WEBHOOK_REJECTED] ${label} — ${req.method} ${req.path} | IP: ${req.ip || '?'}`)
+  console.warn(`[WEBHOOK_REJECTED] 💡 Dica: URL correta = APP_URL/webhooks/zapi${req.path === '/' ? '' : req.path}?token=<ZAPI_WEBHOOK_TOKEN>`)
+
+  try {
+    const ctrl = require('../controllers/webhookZapiController')
+    if (ctrl._logRejected) ctrl._logRejected(logEntry)
+  } catch (_) {}
+
+  res.status(401).json({ error: motivo === 'token_ausente' ? 'Token do webhook ausente' : 'Token do webhook inválido' })
 }
 
 module.exports = requireWebhookToken

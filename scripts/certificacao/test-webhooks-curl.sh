@@ -3,14 +3,21 @@
 # Script de teste: simula webhooks Z-API para certificação
 # Uso: ./test-webhooks-curl.sh [BASE_URL] [INSTANCE_ID]
 # Ex:  ./test-webhooks-curl.sh https://meu-app.com INSTANCE_A
+# Token: use ZAPI_WEBHOOK_TOKEN no .env ou export ZAPI_WEBHOOK_TOKEN=xxx
 # ============================================================
 
 BASE_URL="${1:-http://localhost:3000}"
 INSTANCE_ID="${2:-}"
+TOKEN="${ZAPI_WEBHOOK_TOKEN:-}"
+URL_SUFFIX=""
+if [ -n "$TOKEN" ]; then
+  URL_SUFFIX="?token=$TOKEN"
+fi
 
 if [ -z "$INSTANCE_ID" ]; then
   echo "Uso: $0 BASE_URL INSTANCE_ID"
   echo "INSTANCE_ID deve existir em empresa_zapi.instance_id"
+  echo "Token: export ZAPI_WEBHOOK_TOKEN=xxx ou use .env"
   exit 1
 fi
 
@@ -26,7 +33,7 @@ echo ""
 echo ""
 echo "--- 1. ReceivedCallback (mensagem IN) ---"
 MSG_ID_1="cert-test-in-$(date +%s)"
-curl -s -X POST "$BASE_URL/webhooks/zapi" \
+curl -s -X POST "$BASE_URL/webhooks/zapi$URL_SUFFIX" \
   -H "Content-Type: application/json" \
   -d "{
     \"instanceId\": \"$INSTANCE_ID\",
@@ -44,7 +51,7 @@ echo ""
 # 2. Idempotência: reenviar mesma mensagem (não deve duplicar)
 echo ""
 echo "--- 2. Idempotência (mesmo messageId) ---"
-curl -s -X POST "$BASE_URL/webhooks/zapi" \
+curl -s -X POST "$BASE_URL/webhooks/zapi$URL_SUFFIX" \
   -H "Content-Type: application/json" \
   -d "{
     \"instanceId\": \"$INSTANCE_ID\",
@@ -61,7 +68,7 @@ echo " (deve retornar ok sem criar nova mensagem)"
 echo ""
 echo "--- 3. fromMe (espelhamento) ---"
 MSG_ID_2="cert-test-out-$(date +%s)"
-curl -s -X POST "$BASE_URL/webhooks/zapi" \
+curl -s -X POST "$BASE_URL/webhooks/zapi$URL_SUFFIX" \
   -H "Content-Type: application/json" \
   -d "{
     \"instanceId\": \"$INSTANCE_ID\",
@@ -79,7 +86,7 @@ echo ""
 echo ""
 echo "--- 4. Status READ ---"
 sleep 1
-curl -s -X POST "$BASE_URL/webhooks/zapi/status" \
+curl -s -X POST "$BASE_URL/webhooks/zapi/status$URL_SUFFIX" \
   -H "Content-Type: application/json" \
   -d "{
     \"instanceId\": \"$INSTANCE_ID\",
@@ -92,7 +99,7 @@ echo ""
 echo ""
 echo "--- 5. DeliveryCallback (sent) ---"
 MSG_ID_3="cert-test-delivery-$(date +%s)"
-curl -s -X POST "$BASE_URL/webhooks/zapi" \
+curl -s -X POST "$BASE_URL/webhooks/zapi$URL_SUFFIX" \
   -H "Content-Type: application/json" \
   -d "{
     \"instanceId\": \"$INSTANCE_ID\",
@@ -110,7 +117,7 @@ if [ -n "$CONNECTED_PHONE" ]; then
   echo ""
   echo "--- 6. Self-echo (phone=connectedPhone, sem destino) ---"
   MSG_ID_4="cert-test-selfecho-$(date +%s)"
-  curl -s -X POST "$BASE_URL/webhooks/zapi" \
+  curl -s -X POST "$BASE_URL/webhooks/zapi$URL_SUFFIX" \
     -H "Content-Type: application/json" \
     -d "{
       \"instanceId\": \"$INSTANCE_ID\",

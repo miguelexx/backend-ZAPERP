@@ -96,8 +96,10 @@ io.use((socket, next) => {
 io.EVENTS = {
   NOVA_MENSAGEM: 'nova_mensagem',
   STATUS_MENSAGEM: 'status_mensagem',
+  NOVA_CONVERSA: 'nova_conversa',
   CONVERSA_ATUALIZADA: 'conversa_atualizada',
   ATUALIZAR_CONVERSA: 'atualizar_conversa',
+  CONTATO_ATUALIZADO: 'contato_atualizado',
   MENSAGENS_LIDAS: 'mensagens_lidas',
   TAG_ADICIONADA: 'tag_adicionada',
   TAG_REMOVIDA: 'tag_removida',

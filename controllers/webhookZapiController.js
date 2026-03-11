@@ -1658,7 +1658,7 @@ exports.receberZapi = async (req, res) => {
           // LID: enviar telefone: null e telefone_lid: true para frontend não exibir lid:xxx; permite atualização via conversa_atualizada
           const isLidPhone = !isGroup && phone && String(phone).trim().toLowerCase().startsWith('lid:')
           const telefoneForEmit = isLidPhone ? null : (getCanonicalPhone(phone) || phone)
-          io.to(`empresa_${company_id}`).emit('nova_conversa', {
+          io.to(`empresa_${company_id}`).emit(io.EVENTS?.NOVA_CONVERSA || 'nova_conversa', {
             id: conversa_id,
             telefone: telefoneForEmit,
             ...(isLidPhone ? { telefone_lid: true } : {}),
