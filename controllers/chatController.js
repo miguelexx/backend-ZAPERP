@@ -150,10 +150,8 @@ async function assertPodeEnviarMensagem({ company_id, conversa_id, user_id }) {
   if (error) return { ok: false, status: 500, error: error.message }
   if (!conv) return { ok: false, status: 404, error: 'Conversa não encontrada' }
 
-  if (conv.atendente_id != null && Number(conv.atendente_id) === Number(user_id)) return { ok: true }
-  if (conv.atendente_id == null) return { ok: true }
-
-  return { ok: false, status: 403, error: 'Assuma a conversa antes de enviar mensagens. Clique em "Assumir" para continuar.' }
+  // Bloqueio "assumir conversa" desativado — qualquer usuário autenticado pode enviar
+  return { ok: true }
 }
 
 // =====================================================

@@ -1,7 +1,7 @@
 /**
  * Orquestrador de proteção: volume, frequência e opt-in.
- * SEMPRE ativo para evitar bloqueio do WhatsApp — usa defaults seguros quando empresa não configurou.
- * FEATURE_PROTECAO=1: usa config da empresa; =0: usa defaults (1s chat, 40/min, 400/h).
+ * Proteções DESATIVADAS — envio livre para não bloquear o sistema.
+ * Para reativar: remover o return antecipado em permitirEnvio.
  */
 
 const { isEnabled, FLAGS } = require('../../helpers/featureFlags')
@@ -9,6 +9,9 @@ const supabase = require('../../config/supabase')
 const { verificarIntervalo } = require('./frequenciaService')
 const { verificarLimiteVolume } = require('./volumeService')
 const { temOptIn } = require('./optInService')
+
+// Proteções desativadas — permite envio imediato sem limite de volume, frequência ou opt-in
+const PROTECAO_DESATIVADA = true
 
 // Defaults: intervalo 1s evita duplo clique mas permite chat normal; volume evita spam
 const DEFAULTS = {
@@ -27,6 +30,8 @@ const DEFAULTS = {
  * @returns {Promise<{ allow: boolean, reason?: string }>}
  */
 async function permitirEnvio(opts = {}) {
+  if (PROTECAO_DESATIVADA) return { allow: true }
+
   const company_id = opts?.company_id ?? opts?.companyId
   if (!company_id) return { allow: true }
 

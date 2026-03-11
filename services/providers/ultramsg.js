@@ -14,7 +14,8 @@ const { fetchWithRetry } = require('../../helpers/retryWithBackoff')
 const { permitirEnvio } = require('../protecao/protecaoOrchestrator')
 
 const ULTRAMSG_BASE_URL = (process.env.ULTRAMSG_BASE_URL || 'https://api.ultramsg.com').replace(/\/$/, '')
-const MIN_DELAY_BETWEEN_SENDS_MS = Math.min(500, Math.max(150, Number(process.env.ULTRAMSG_SEND_DELAY_MS) || 280))
+// Delay entre envios: 0 = sem delay (envio imediato). Ex: ULTRAMSG_SEND_DELAY_MS=0 para desativar.
+const MIN_DELAY_BETWEEN_SENDS_MS = Math.max(0, Number(process.env.ULTRAMSG_SEND_DELAY_MS) ?? 0)
 const BODY_MAX_LEN = 4096
 const CHATS_MESSAGES_LIMIT_MAX = 1000
 const lastSendPerCompany = new Map()
@@ -27,6 +28,7 @@ function maskToken(t) {
 }
 
 async function awaitSendDelay(companyId) {
+  if (MIN_DELAY_BETWEEN_SENDS_MS <= 0) return
   const key = companyId ?? 'default'
   const last = lastSendPerCompany.get(key) || 0
   const elapsed = Date.now() - last
