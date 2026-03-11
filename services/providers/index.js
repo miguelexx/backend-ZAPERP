@@ -1,16 +1,17 @@
 /**
- * Padrão provider WhatsApp: permite trocar entre meta (Cloud API) e zapi
- * sem alterar o restante do sistema.
+ * Padrão provider WhatsApp: permite trocar entre meta (Cloud API), zapi e ultramsg.
  *
- * ZapERP usa Z-API apenas. Variável .env: WHATSAPP_PROVIDER = "zapi" (default: "zapi")
+ * Variável .env: WHATSAPP_PROVIDER = "ultramsg" | "zapi" | "meta"
  */
 
 const meta = require('./meta')
 const zapi = require('./zapi')
+const ultramsg = require('./ultramsg')
 
-const PROVIDER = (process.env.WHATSAPP_PROVIDER || 'zapi').toLowerCase()
+const PROVIDER = (process.env.WHATSAPP_PROVIDER || 'ultramsg').toLowerCase()
 
 function getProvider() {
+  if (PROVIDER === 'ultramsg') return ultramsg
   if (PROVIDER === 'zapi') return zapi
   return meta
 }
@@ -18,5 +19,6 @@ function getProvider() {
 module.exports = {
   getProvider,
   meta,
-  zapi
+  zapi,
+  ultramsg
 }

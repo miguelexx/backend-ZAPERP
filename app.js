@@ -83,12 +83,14 @@ app.use(express.json({
 // =====================================================
 const webhookRoutes = require('./routes/webhookRoutes')
 const webhookZapiRoutes = require('./routes/webhookZapiRoutes')
+const webhookUltramsgRoutes = require('./routes/webhookUltramsgRoutes')
 const { webhookLimiter } = require('./middleware/rateLimit')
 
 app.use('/webhook', webhookLimiter, webhookRoutes)
 app.use('/webhook/meta', webhookLimiter, webhookRoutes)
 app.use('/webhooks/zapi', webhookLimiter, webhookZapiRoutes)
 app.use('/webhook/zapi', webhookLimiter, webhookZapiRoutes)
+app.use('/webhooks/ultramsg', webhookLimiter, webhookUltramsgRoutes)
 
 // =====================================================
 // CORS — aplicado APÓS os webhooks.

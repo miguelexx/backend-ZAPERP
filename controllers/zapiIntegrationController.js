@@ -1,6 +1,11 @@
-const { getStatus, getQrCodeImage, restartInstance, getMe, getPhoneCode, buildMeSummary, getEmpresaZapiConfig } = require('../services/zapiIntegrationService')
+const zapiIntegrationService = require('../services/zapiIntegrationService')
+const ultramsgIntegrationService = require('../services/ultramsgIntegrationService')
 const { checkGuard, recordQrServed, resetOnConnected, getAttempts, THROTTLE_SECONDS } = require('../services/zapiConnectGuardService')
 const { getConfig } = require('../services/configOperacionalService')
+
+const PROVIDER = (process.env.WHATSAPP_PROVIDER || 'ultramsg').toLowerCase()
+const integrationService = PROVIDER === 'ultramsg' ? ultramsgIntegrationService : zapiIntegrationService
+const { getStatus, getQrCodeImage, restartInstance, getMe, getPhoneCode, buildMeSummary, getEmpresaZapiConfig } = integrationService
 
 // Rate limit simples por empresa/endpoint em memória (complementar ao express-rate-limit global).
 const perCompanyBuckets = new Map()
