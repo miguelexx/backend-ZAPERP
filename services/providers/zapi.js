@@ -936,7 +936,11 @@ async function getChatMessages(phone, amount = 10, lastMessageId = null, opts = 
       if (!res.ok) {
         const errBody = await res.text().catch(() => '')
         logClientTokenHint(errBody)
-        console.warn('❌ Z-API getChatMessages falhou:', num?.slice(-6), res.status, String(errBody || '').slice(0, 200))
+        // "Does not work in multi device version" é esperado — WhatsApp linked devices não suportam histórico
+        const isMultiDeviceKnown = String(errBody || '').includes('multi device')
+        if (!isMultiDeviceKnown) {
+          console.warn('❌ Z-API getChatMessages falhou:', num?.slice(-6), res.status, String(errBody || '').slice(0, 200))
+        }
         continue
       }
       const data = await res.json().catch(() => null)

@@ -2450,16 +2450,19 @@ exports.statusZapi = async (req, res) => {
     const rawStatus =
       body?.ack != null ? String(body.ack).trim().toLowerCase() : String(body?.status ?? '').trim().toLowerCase()
 
-    // Debug: log toda requisição recebida em /webhooks/zapi/status
-    console.log('[DEBUG] /webhooks/zapi/status recebido:', {
-      ids: idsToProcess.length ? idsToProcess.slice(0, 3).map((id) => id.slice(0, 24) + (id.length > 24 ? '…' : '')) : null,
-      statusBruto: body?.status ?? body?.ack ?? '(vazio)',
-      ack: body?.ack,
-      erro: body?.error != null ? String(body.error).slice(0, 100) : null
-    })
+    // Debug: log toda requisição recebida em /webhooks/zapi/status (apenas com WHATSAPP_DEBUG=1)
+    const logDebug = process.env.WHATSAPP_DEBUG === '1'
+    if (logDebug) {
+      console.log('[DEBUG] /webhooks/zapi/status recebido:', {
+        ids: idsToProcess.length ? idsToProcess.slice(0, 3).map((id) => id.slice(0, 24) + (id.length > 24 ? '…' : '')) : null,
+        statusBruto: body?.status ?? body?.ack ?? '(vazio)',
+        ack: body?.ack,
+        erro: body?.error != null ? String(body.error).slice(0, 100) : null
+      })
+    }
 
     if (idsToProcess.length === 0) {
-      console.log('[DEBUG] /webhooks/zapi/status: sem messageId nem ids, ignorando.')
+      if (logDebug) console.log('[DEBUG] /webhooks/zapi/status: sem messageId nem ids, ignorando.')
       return res.status(200).json({ ok: true })
     }
 
@@ -2485,7 +2488,7 @@ exports.statusZapi = async (req, res) => {
     })()
 
     if (!statusNorm) {
-      console.log('[DEBUG] /webhooks/zapi/status: status não mapeado, ignorando. rawStatus=', rawStatus || '(vazio)')
+      if (logDebug) console.log('[DEBUG] /webhooks/zapi/status: status não mapeado, ignorando. rawStatus=', rawStatus || '(vazio)')
       return res.status(200).json({ ok: true })
     }
 
@@ -2573,7 +2576,7 @@ exports.statusZapi = async (req, res) => {
           if (msg.autor_usuario_id != null) chain = chain.to(`usuario_${msg.autor_usuario_id}`)
           chain.emit('status_mensagem', payload)
         }
-        console.log('[DEBUG] /webhooks/zapi/status resultado:', { status: statusNorm, mensagem_id: msg.id, conversa_id: msg.conversa_id, whatsapp_id: idStr.slice(0, 20) + '…' })
+        if (logDebug) console.log('[DEBUG] /webhooks/zapi/status resultado:', { status: statusNorm, mensagem_id: msg.id, conversa_id: msg.conversa_id, whatsapp_id: idStr.slice(0, 20) + '…' })
       } else {
         console.log('[Z-API] Status', statusNorm, 'para id', idStr.slice(0, 20) + '… — mensagem não encontrada no banco (ignorado)')
       }
@@ -2581,7 +2584,7 @@ exports.statusZapi = async (req, res) => {
 
     return res.status(200).json({ ok: true })
   } catch (e) {
-    console.error('[DEBUG] /webhooks/zapi/status ERRO:', e?.message || e)
+    if (process.env.WHATSAPP_DEBUG === '1') console.error('[DEBUG] /webhooks/zapi/status ERRO:', e?.message || e)
     return res.status(200).json({ ok: true })
   }
 }
