@@ -980,13 +980,21 @@ exports.sincronizarFotosPerfilZapi = async (req, res) => {
 
     const provider = getProvider()
     if (!provider?.getProfilePicture && !provider?.getContactMetadata) {
-      return res.status(501).json({ error: 'Sincronização de fotos disponível apenas com Z-API configurado.' })
+      return res.status(501).json({ error: 'Sincronização de fotos disponível apenas com WhatsApp conectado.' })
     }
 
+    // Verifica conexão: getStatus primeiro; se não conectado, fallback em getConnectionStatus (evita 503 falso)
+    let connected = false
     const statusResult = await getStatus(Number(company_id))
-    if (!statusResult?.connected) {
+    if (statusResult?.connected) {
+      connected = true
+    } else if (provider?.getConnectionStatus) {
+      const conn = await provider.getConnectionStatus({ companyId: company_id })
+      connected = !!conn?.connected
+    }
+    if (!connected) {
       return res.status(503).json({
-        error: 'Z-API não está conectada ao WhatsApp. Conecte o WhatsApp primeiro e tente novamente.'
+        error: 'WhatsApp não está conectado. Conecte o WhatsApp no painel de integrações e tente novamente.'
       })
     }
 

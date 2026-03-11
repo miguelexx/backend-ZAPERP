@@ -18,10 +18,16 @@ async function request(companyId, method, path, body = null) {
   const url = buildUrl(config.instance_id, path)
   const token = encodeURIComponent(config.instance_token)
   const fullUrl = body ? url : `${url}?token=${token}`
+  let signal
+  try {
+    if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function') {
+      signal = AbortSignal.timeout(TIMEOUT_MS)
+    }
+  } catch { /* Node < 17.3 */ }
   const opts = {
     method,
     headers: { accept: 'application/json' },
-    signal: AbortSignal.timeout(TIMEOUT_MS)
+    ...(signal && { signal })
   }
   if (body && method === 'POST') {
     opts.headers = { ...opts.headers, 'Content-Type': 'application/json' }

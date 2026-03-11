@@ -29,9 +29,18 @@ async function syncFotosProgressiva(company_id, opts = {}) {
     return { total: 0, atualizados: 0, processados: 0, error: 'Z-API não disponível' }
   }
 
+  // Fallback: se getStatus diz não conectado, tentar provider.getConnectionStatus
   const statusResult = await getStatus(company_id)
-  if (!statusResult?.connected) {
-    return { total: 0, atualizados: 0, processados: 0, error: 'Z-API não conectada' }
+  let connected = !!statusResult?.connected
+  if (!connected) {
+    const provider = getProvider()
+    if (provider?.getConnectionStatus) {
+      const conn = await provider.getConnectionStatus({ companyId: company_id })
+      connected = !!conn?.connected
+    }
+  }
+  if (!connected) {
+    return { total: 0, atualizados: 0, processados: 0, error: 'WhatsApp não conectado' }
   }
 
   if (await isProcessamentoPausado(company_id)) {

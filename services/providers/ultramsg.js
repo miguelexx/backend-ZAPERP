@@ -533,7 +533,21 @@ async function sendCall(phone, callDuration, opts = {}) {
 }
 
 /**
+ * Extrai array de contatos da resposta UltraMsg (suporta múltiplos formatos).
+ */
+function parseContactsResponse(data) {
+  if (!data) return []
+  if (Array.isArray(data)) return data
+  if (Array.isArray(data.contacts)) return data.contacts
+  if (Array.isArray(data.data)) return data.data
+  if (Array.isArray(data.list)) return data.list
+  if (Array.isArray(data.contact)) return data.contact
+  return []
+}
+
+/**
  * Lista contatos. UltraMsg: GET /{instance_id}/contacts
+ * Doc oficial: apenas token obrigatório; limit/offset podem não existir.
  */
 async function getContacts(page = 1, pageSize = 100, opts = {}) {
   const cfg = await resolveConfig(opts)
@@ -547,8 +561,8 @@ async function getContacts(page = 1, pageSize = 100, opts = {}) {
       extraParams: { limit: String(limit), offset: String(offset) }
     })
     if (!ok) return []
-    const arr = Array.isArray(data) ? data : (data?.contacts ? (Array.isArray(data.contacts) ? data.contacts : []) : [])
-    return arr.map((c) => ({
+    const raw = parseContactsResponse(data)
+    return raw.map((c) => ({
       phone: c.id || c.phone || c.wa_id || '',
       name: c.name || null,
       short: c.short || null,
