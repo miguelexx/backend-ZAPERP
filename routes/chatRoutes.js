@@ -16,7 +16,8 @@ router.get('/merge-duplicatas', auth, adminOnly, chatController.paginaMergeDupli
 router.post('/merge-duplicatas', auth, adminOnly, chatController.mergeConversasDuplicadas)
 router.post('/sincronizar-contatos', auth, chatController.sincronizarContatosZapi)
 router.post('/sincronizar-fotos-perfil', auth, chatController.sincronizarFotosPerfilZapi)
-router.get('/zapi-status', auth, chatController.zapiStatus)
+router.get('/whatsapp-status', auth, chatController.whatsappStatus)
+router.get('/zapi-status', auth, chatController.whatsappStatus)
 router.get('/:id', auth, chatController.detalharChat)
 
 // Atendimento: todos os usuários autenticados (regras por setor no controller)

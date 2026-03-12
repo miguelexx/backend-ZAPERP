@@ -907,12 +907,12 @@ exports.mergeConversasDuplicadas = async (req, res) => {
 }
 
 // =====================================================
-// 3a) Status da conexão Z-API (instância conectada?)
-// GET /chats/zapi-status — status para banner "WhatsApp conectado/desconectado"
-// Usa empresa_zapi por company_id (JWT). NUNCA ENV.
-// Sem empresa_zapi → 200 { hasInstance:false, connected:false, configured:false }
+// 3a) Status da conexão WhatsApp (UltraMsg)
+// GET /chats/whatsapp-status — status para banner "WhatsApp conectado/desconectado"
+// Usa empresa_zapi (instance_id, instance_token) por company_id. NUNCA ENV.
+// Sem config → 200 { hasInstance:false, connected:false, configured:false }
 // =====================================================
-exports.zapiStatus = async (req, res) => {
+exports.whatsappStatus = async (req, res) => {
   try {
     const company_id = req.user?.company_id
     // Usa UltraMsg como único provider WhatsApp; empresa_zapi armazena instance_id/token
@@ -940,13 +940,15 @@ exports.zapiStatus = async (req, res) => {
       ...(statusResult?.needsRestore && { needsRestore: true })
     })
   } catch (err) {
-    console.error('zapiStatus:', err?.message || err)
+    console.error('whatsappStatus:', err?.message || err)
     return res.json({ ok: true, hasInstance: false, connected: false, configured: false })
   }
 }
 
+exports.zapiStatus = exports.whatsappStatus
+
 // =====================================================
-// 3b) Sincronizar contatos do celular (Z-API Get contacts)
+// 3b) Sincronizar contatos do celular (UltraMsg)
 // Executa sync inline — compatível sem fila de jobs.
 // =====================================================
 exports.sincronizarContatosZapi = async (req, res) => {

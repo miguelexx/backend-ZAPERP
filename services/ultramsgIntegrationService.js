@@ -53,12 +53,15 @@ function extractBase64(value) {
 }
 
 async function getStatus(companyId) {
-  const { error, ok, data } = await request(companyId, 'GET', '/instance/status')
+  const { error, ok, data, text } = await request(companyId, 'GET', '/instance/status')
   if (error) return { error }
   if (!ok) {
     return { error: data?.error || data?.message || `HTTP ${data?.status || 500}` }
   }
-  const status = String(data?.status ?? data?.state ?? '').toLowerCase()
+  // UltraMsg pode retornar status em vários formatos: data.status, data.state, data.instance?.status ou texto
+  const status = String(
+    data?.status ?? data?.state ?? data?.instance?.status ?? data?.response?.status ?? ''
+  ).toLowerCase().trim() || String(text || '').toLowerCase().trim()
   const connected = ['authenticated', 'connected', 'standby'].includes(status) || data?.connected === true
   const smartphoneConnected = connected
   return { connected, smartphoneConnected }
