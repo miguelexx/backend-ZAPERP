@@ -239,6 +239,7 @@ async function handleWebhookUltramsg(req, res) {
       'message_received', 'message_create',
       'webhook_message_received', 'webhook_message_create',
       'webhook_message_download_media',
+      'webhook_message_reaction', 'message_reaction',
       ''
     ].includes(eventType)
     const hasMessageData = body?.data && typeof body.data === 'object' && (body.data.from != null || body.data.id != null)

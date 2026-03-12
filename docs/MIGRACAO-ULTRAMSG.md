@@ -2,6 +2,8 @@
 
 O sistema utiliza **apenas UltraMsg** para integração com WhatsApp.
 
+> **Documentação completa:** [ULTRAMSG-CONFIGURACAO-ENVIO.md](./ULTRAMSG-CONFIGURACAO-ENVIO.md) — formato de envio, API de mensagens, webhooks e certificação.
+
 ## Configuração
 
 ### 1. Variáveis de ambiente (.env)

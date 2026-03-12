@@ -36,13 +36,15 @@ Estados documentados pela UltraMsg: `initialize`, `qr`, `retrying`, `loading`, `
 
 | Campo | Uso |
 |-------|-----|
-| `sendDelay` | Atraso entre envios; default 1s |
-| `sendDelayMax` | Atraso maior quando fila tiver 10+ mensagens; default 15s |
-| `webhook_url` | URL base do webhook |
+| `sendDelay` | Atraso entre envios (segundos); default 1s |
+| `sendDelayMax` | Atraso maior quando fila tiver 10+ mensagens (deve ser ≥ sendDelay); default 15s |
+| `webhook_url` | URL base do webhook (ex: https://app/webhooks/ultramsg?token=xxx) |
+| `webhook_retries` | Tentativas de reenvio em falha HTTP; default 3 |
 | `webhook_message_received` | Mensagens recebidas |
 | `webhook_message_create` | Mensagens criadas (enviadas) |
 | `webhook_message_ack` | Entregue/lido |
 | `webhook_message_download_media` | Download de documentos/mídia |
+| `webhook_message_reaction` | Reações a mensagens |
 
 ---
 
@@ -110,7 +112,7 @@ Estados documentados pela UltraMsg: `initialize`, `qr`, `retrying`, `loading`, `
 - **POST** `/{instance_id}/messages/resendById` — por `id`
 
 ### Consulta e limpeza
-- **GET** `/{instance_id}/messages` — `page`, `limit` (máx 100), `status` (sent, queue, unsent, invalid, all), `sort` (asc, desc)
+- **GET** `/{instance_id}/messages` — `page`, `limit` (máx 100), `status` (all, queue, sent, unsent, invalid, expired), `sort` (asc, desc)
 - **POST** `/{instance_id}/messages/clear` — `status`: queue, sent, unsent, invalid
 - **GET** `/{instance_id}/messages/statistics` — contagem sent, queue, unsent
 
@@ -211,6 +213,7 @@ Estados documentados pela UltraMsg: `initialize`, `qr`, `retrying`, `loading`, `
 | `resendById` | POST /messages/resendById | ✅ |
 | `clearMessages` | POST /messages/clear | ✅ |
 | `getMessagesStatistics` | GET /messages/statistics | ✅ |
+| `getMessages` | GET /messages (page, limit, status, sort) | ✅ |
 
 ### Instância
 | Método | Endpoint | Status |

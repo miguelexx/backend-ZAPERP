@@ -499,6 +499,30 @@ async function getMessagesStatistics(opts = {}) {
 }
 
 /**
+ * Lista mensagens enviadas via API UltraMsg.
+ * GET /{instance_id}/messages — page, limit (máx 100), status (all|queue|sent|unsent|invalid|expired), sort (asc|desc)
+ */
+async function getMessages(opts = {}) {
+  const cfg = await resolveConfig(opts)
+  if (!cfg) return { ok: false, data: [], error: 'Instância não configurada' }
+  const page = Math.max(1, Number(opts.page) || 1)
+  const limit = Math.min(100, Math.max(1, Number(opts.limit) || 100))
+  const status = String(opts.status || 'all').toLowerCase()
+  const sort = ['asc', 'desc'].includes(String(opts.sort || '').toLowerCase()) ? opts.sort : 'desc'
+  const validStatus = ['all', 'queue', 'sent', 'unsent', 'invalid', 'expired']
+  const extraParams = { page: String(page), limit: String(limit), sort }
+  if (validStatus.includes(status) && status !== 'all') extraParams.status = status
+
+  const { ok, data, text } = await getJson({ ...cfg, endpoint: '/messages', extraParams })
+  if (!ok) {
+    const err = data?.error || data?.message || text?.slice(0, 200) || `HTTP error`
+    return { ok: false, data: [], error: err }
+  }
+  const list = Array.isArray(data) ? data : (data?.messages ?? data?.data ?? [])
+  return { ok: true, data: list }
+}
+
+/**
  * Compartilha contato via vCard.
  */
 async function sendContact(phone, contactName, contactPhone, opts = {}) {
@@ -861,8 +885,9 @@ async function configureWebhooks(appUrl, opts = {}) {
   const webhookUrl = `${base}/webhooks/ultramsg${tokenSuffix}`
 
   const sendDelay = Math.max(1, Math.min(60, Number(process.env.ULTRAMSG_SEND_DELAY) || 1))
-  const sendDelayMax = Math.max(1, Math.min(120, Number(process.env.ULTRAMSG_SEND_DELAY_MAX) || 15))
+  const sendDelayMax = Math.max(1, Math.min(120, Math.max(sendDelay, Number(process.env.ULTRAMSG_SEND_DELAY_MAX) || 15)))
   const webhookDownloadMedia = process.env.ULTRAMSG_WEBHOOK_DOWNLOAD_MEDIA === 'true'
+  const webhookRetries = Math.max(1, Math.min(5, Number(process.env.ULTRAMSG_WEBHOOK_RETRIES) || 3))
   const body = {
     token: cfg.token,
     webhook_url: webhookUrl,
@@ -870,6 +895,8 @@ async function configureWebhooks(appUrl, opts = {}) {
     webhook_message_create: true,
     webhook_message_ack: true,
     webhook_message_download_media: webhookDownloadMedia,
+    webhook_message_reaction: true,
+    webhook_retries: webhookRetries,
     sendDelay,
     sendDelayMax
   }
@@ -932,6 +959,7 @@ module.exports = {
   resendById,
   clearMessages,
   getMessagesStatistics,
+  getMessages,
   archiveChat,
   unarchiveChat,
   readChat,

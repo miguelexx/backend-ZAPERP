@@ -12,6 +12,8 @@
 | [MELHORIAS-IMPLEMENTADAS-AUDITORIA.md](./MELHORIAS-IMPLEMENTADAS-AUDITORIA.md) | Resumo das melhorias implementadas |
 | [BACKUP-RESTORE-DR.md](./BACKUP-RESTORE-DR.md) | Procedimentos de backup, restore e disaster recovery |
 | [CONFIGURACAO-WEBHOOK-ZAPI-TOKEN.md](./CONFIGURACAO-WEBHOOK-ZAPI-TOKEN.md) | Como configurar o token no webhook Z-API |
+| [ULTRAMSG-CONFIGURACAO-ENVIO.md](./ULTRAMSG-CONFIGURACAO-ENVIO.md) | UltraMsg: webhooks, API de mensagens, formato de envio certificado |
+| [CERTIFICACAO-ULTRAMSG-DOCUMENTACAO.md](./CERTIFICACAO-ULTRAMSG-DOCUMENTACAO.md) | Certificação doc vs sistema — auditado |
 | [FEATURE-FLAGS.md](./FEATURE-FLAGS.md) | Feature flags via ENV |
 
 ---
