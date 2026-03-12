@@ -11,7 +11,6 @@
 const { normalizePhoneBR, toZapiSendFormat, possiblePhonesBR } = require('../../helpers/phoneHelper')
 const { getEmpresaWhatsappConfig } = require('../whatsappConfigService')
 const { fetchWithRetry } = require('../../helpers/retryWithBackoff')
-const { permitirEnvio } = require('../protecao/protecaoOrchestrator')
 
 const ULTRAMSG_BASE_URL = (process.env.ULTRAMSG_BASE_URL || 'https://api.ultramsg.com').replace(/\/$/, '')
 // Delay entre envios: 0 = sem delay (envio imediato). Ex: ULTRAMSG_SEND_DELAY_MS=0 para desativar.
@@ -188,16 +187,6 @@ function phoneCandidatesForLookup(phone) {
  */
 async function sendText(phone, message, opts = {}) {
   const companyId = opts?.companyId ?? opts?.company_id
-  const protecao = await permitirEnvio({
-    company_id: companyId,
-    conversa_id: opts?.conversaId ?? opts?.conversa_id,
-    cliente_id: opts?.clienteId ?? opts?.cliente_id,
-    requireOptIn: opts?.requireOptIn || false
-  })
-  if (!protecao.allow) {
-    console.warn('[ULTRAMSG] sendText bloqueado por proteção:', protecao.reason || 'proteção')
-    return { ok: false, messageId: null, blockedBy: protecao.reason }
-  }
   await awaitSendDelay(companyId)
   const cfg = await resolveConfig(opts)
   if (!cfg) {
@@ -230,11 +219,6 @@ async function sendText(phone, message, opts = {}) {
  * Envia link enriquecido (fallback: sendText com URL para preview automático).
  */
 async function sendLink(phone, payload, opts = {}) {
-  const protecao = await permitirEnvio({
-    company_id: opts?.companyId ?? opts?.company_id,
-    conversa_id: opts?.conversaId ?? opts?.conversa_id
-  })
-  if (!protecao.allow) return { ok: false, messageId: null }
   await awaitSendDelay(opts?.companyId ?? opts?.company_id)
   const linkUrl = String(payload?.linkUrl || '').trim()
   const title = String(payload?.title || '').trim()
@@ -247,11 +231,6 @@ async function sendLink(phone, payload, opts = {}) {
  * Envia imagem por URL.
  */
 async function sendImage(phone, url, caption = '', opts = {}) {
-  const protecao = await permitirEnvio({
-    company_id: opts?.companyId ?? opts?.company_id,
-    conversa_id: opts?.conversaId ?? opts?.conversa_id
-  })
-  if (!protecao.allow) return false
   await awaitSendDelay(opts?.companyId ?? opts?.company_id)
   const cfg = await resolveConfig(opts)
   if (!cfg) return false
@@ -272,11 +251,6 @@ async function sendImage(phone, url, caption = '', opts = {}) {
  * Envia áudio por URL.
  */
 async function sendAudio(phone, audioUrl, opts = {}) {
-  const protecao = await permitirEnvio({
-    company_id: opts?.companyId ?? opts?.company_id,
-    conversa_id: opts?.conversaId ?? opts?.conversa_id
-  })
-  if (!protecao.allow) return false
   await awaitSendDelay(opts?.companyId ?? opts?.company_id)
   const cfg = await resolveConfig(opts)
   if (!cfg) return false
@@ -293,11 +267,6 @@ async function sendAudio(phone, audioUrl, opts = {}) {
  * Envia documento por URL.
  */
 async function sendFile(phone, url, fileName = '', opts = {}) {
-  const protecao = await permitirEnvio({
-    company_id: opts?.companyId ?? opts?.company_id,
-    conversa_id: opts?.conversaId ?? opts?.conversa_id
-  })
-  if (!protecao.allow) return false
   await awaitSendDelay(opts?.companyId ?? opts?.company_id)
   const cfg = await resolveConfig(opts)
   if (!cfg) return false
@@ -318,11 +287,6 @@ async function sendFile(phone, url, fileName = '', opts = {}) {
  * Envia vídeo por URL.
  */
 async function sendVideo(phone, videoUrl, caption = '', opts = {}) {
-  const protecao = await permitirEnvio({
-    company_id: opts?.companyId ?? opts?.company_id,
-    conversa_id: opts?.conversaId ?? opts?.conversa_id
-  })
-  if (!protecao.allow) return false
   await awaitSendDelay(opts?.companyId ?? opts?.company_id)
   const cfg = await resolveConfig(opts)
   if (!cfg) return false
@@ -340,11 +304,6 @@ async function sendVideo(phone, videoUrl, caption = '', opts = {}) {
  * Envia figurinha (sticker) por URL.
  */
 async function sendSticker(phone, sticker, opts = {}) {
-  const protecao = await permitirEnvio({
-    company_id: opts?.companyId ?? opts?.company_id,
-    conversa_id: opts?.conversaId ?? opts?.conversa_id
-  })
-  if (!protecao.allow) return false
   await awaitSendDelay(opts?.companyId ?? opts?.company_id)
   const cfg = await resolveConfig(opts)
   if (!cfg) return false
@@ -386,11 +345,6 @@ async function removeReaction(phone, messageId, opts = {}) {
  * POST /{instance_id}/messages/voice — body: token, to, audio
  */
 async function sendVoice(phone, audioUrl, opts = {}) {
-  const protecao = await permitirEnvio({
-    company_id: opts?.companyId ?? opts?.company_id,
-    conversa_id: opts?.conversaId ?? opts?.conversa_id
-  })
-  if (!protecao.allow) return false
   await awaitSendDelay(opts?.companyId ?? opts?.company_id)
   const cfg = await resolveConfig(opts)
   if (!cfg) return false
@@ -409,11 +363,6 @@ async function sendVoice(phone, audioUrl, opts = {}) {
  * address: até 2 linhas com \n; máx 300 chars
  */
 async function sendLocation(phone, { address = '', lat, lng }, opts = {}) {
-  const protecao = await permitirEnvio({
-    company_id: opts?.companyId ?? opts?.company_id,
-    conversa_id: opts?.conversaId ?? opts?.conversa_id
-  })
-  if (!protecao.allow) return { ok: false, messageId: null }
   await awaitSendDelay(opts?.companyId ?? opts?.company_id)
   const cfg = await resolveConfig(opts)
   if (!cfg) return { ok: false, messageId: null }
@@ -526,11 +475,6 @@ async function getMessages(opts = {}) {
  * Compartilha contato via vCard.
  */
 async function sendContact(phone, contactName, contactPhone, opts = {}) {
-  const protecao = await permitirEnvio({
-    company_id: opts?.companyId ?? opts?.company_id,
-    conversa_id: opts?.conversaId ?? opts?.conversa_id
-  })
-  if (!protecao.allow) return { ok: false, messageId: null }
   await awaitSendDelay(opts?.companyId ?? opts?.company_id)
   const cfg = await resolveConfig(opts)
   if (!cfg) return { ok: false, messageId: null }
