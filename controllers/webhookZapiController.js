@@ -1464,8 +1464,9 @@ exports.receberZapi = async (req, res) => {
         let nomePayload = nomePayloadRaw ? String(nomePayloadRaw).trim() : null
         let nomeSource = (payload.name && String(payload.name).trim()) ? 'name' : (fromMe ? 'chatName' : 'senderName')
 
-        // !fromMe: webhook envia senderName/chatName = perfil WhatsApp. Nome salvo no celular vem da API GET /contacts.
-        if (!fromMe && phone) {
+        // Sincroniza nome: quando recebemos (!fromMe), payload traz pushname do contato;
+        // quando enviamos (fromMe), payload traz nosso pushname — buscar destinatário na API.
+        if (phone) {
           try {
             const syncResult = await Promise.race([
               syncUltraMsgContact(phone, company_id, { skipPersistence: true }),

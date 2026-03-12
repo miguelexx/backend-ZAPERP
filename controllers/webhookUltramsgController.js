@@ -90,8 +90,10 @@ function normalizeUltramsgToZapi(body) {
   const videoUrl = msgType === 'video' ? (mediaUrl ?? toUrl(data.videoUrl) ?? toUrl(data.video)) : (toUrl(data.videoUrl) ?? toUrl(data.video))
   const stickerUrl = msgType === 'sticker' ? (mediaUrl ?? toUrl(data.stickerUrl) ?? toUrl(data.sticker)) : (toUrl(data.stickerUrl) ?? toUrl(data.sticker))
 
-  // Nome e foto: UltraMsg envia pushname, notify, author (grupos)
-  const senderName = data.pushname ?? data.notify ?? data.senderName ?? data.name ?? data.formattedName ?? data.short ?? data.chatName ?? data.displayName ?? null
+  // Nome e foto: UltraMsg envia pushname = nome de quem ENVIOU.
+  // Quando fromMe=true (message_create), pushname é NOSSO nome — NÃO usar para contato.
+  const senderNameRaw = data.pushname ?? data.notify ?? data.senderName ?? data.name ?? data.formattedName ?? data.short ?? data.chatName ?? data.displayName ?? null
+  const senderName = fromMe ? null : (senderNameRaw ? String(senderNameRaw).trim() : null)
   const senderPhoto = data.photo ?? data.senderPhoto ?? data.profilePicture ?? data.profilePictureUrl ?? data.imgUrl ?? data.media?.url ?? null
 
   // quotedMsg: citação/reply — Ultramsg envia { id, body, from, ... }
