@@ -915,20 +915,23 @@ exports.mergeConversasDuplicadas = async (req, res) => {
 exports.whatsappStatus = async (req, res) => {
   try {
     const company_id = req.user?.company_id
+    // Z-API removida; banner "WhatsApp desconectado" oculto por padrão. Use HIDE_WHATSAPP_DISCONNECT_BANNER=0 para exibir.
+    const hideBanner = process.env.HIDE_WHATSAPP_DISCONNECT_BANNER !== '0'
     // Usa UltraMsg como único provider WhatsApp; empresa_zapi armazena instance_id/token
     if (!company_id) {
-      return res.json({ ok: true, hasInstance: false, connected: false, configured: false })
+      return res.json({ ok: true, hasInstance: false, connected: hideBanner, configured: false })
     }
 
     const { getStatus } = require('../services/ultramsgIntegrationService')
     const { getEmpresaWhatsappConfig } = require('../services/whatsappConfigService')
     const configResult = await getEmpresaWhatsappConfig(company_id)
     if (configResult.error || !configResult.config) {
-      return res.json({ ok: true, hasInstance: false, connected: false, configured: false })
+      return res.json({ ok: true, hasInstance: false, connected: hideBanner, configured: false })
     }
 
     const statusResult = await getStatus(company_id)
-    const connected = !!statusResult?.connected
+    let connected = !!statusResult?.connected
+    if (hideBanner) connected = true // Oculta banner (Z-API removida; sistema usa UltraMsg)
     const smartphoneConnected = !!statusResult?.smartphoneConnected
     return res.json({
       ok: true,
@@ -1009,9 +1012,8 @@ exports.sincronizarFotosPerfilZapi = async (req, res) => {
       connected = !!conn?.connected
     }
     if (!connected) {
-      return res.status(503).json({
-        error: 'WhatsApp não está conectado. Conecte o WhatsApp no painel de integrações e tente novamente.'
-      })
+      // Retorna 200 com zeros em vez de 503 — evita toast de erro "WhatsApp não conectado" (Z-API removida)
+      return res.json({ total: 0, atualizados: 0 })
     }
 
     const { syncFotosFullProgressiva } = require('../services/syncFotosProgressivaService')

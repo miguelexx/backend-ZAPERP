@@ -50,8 +50,8 @@ const PERMISSOES_CATALOGO = [
   { codigo: 'usuarios.permissoes', nome: 'Gerenciar permissões', descricao: 'Configurar permissões granulares de usuários', categoria: 'Usuários', perfis: ['admin'] },
 
   // --- INTEGRAÇÕES ---
-  { codigo: 'integracoes.ver', nome: 'Ver integrações', descricao: 'Acessar status Z-API e QR Code', categoria: 'Integrações', perfis: ['admin', 'supervisor'] },
-  { codigo: 'integracoes.editar', nome: 'Editar integrações', descricao: 'Conectar/desconectar instâncias Z-API', categoria: 'Integrações', perfis: ['admin', 'supervisor'] },
+  { codigo: 'integracoes.ver', nome: 'Ver integrações', descricao: 'Acessar status WhatsApp e QR Code', categoria: 'Integrações', perfis: ['admin', 'supervisor'] },
+  { codigo: 'integracoes.editar', nome: 'Editar integrações', descricao: 'Conectar/desconectar instâncias WhatsApp', categoria: 'Integrações', perfis: ['admin', 'supervisor'] },
 
   // --- TAGS ---
   { codigo: 'tags.ver', nome: 'Ver tags', descricao: 'Listar tags da empresa', categoria: 'Tags', perfis: ['admin', 'supervisor', 'atendente'] },
