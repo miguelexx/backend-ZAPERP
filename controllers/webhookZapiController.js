@@ -9,7 +9,7 @@
 
 const supabase = require('../config/supabase')
 const { getProvider } = require('../services/providers')
-const { syncContactFromUltramsg } = require('../services/ultramsgSyncContact')
+const { syncUltraMsgContact } = require('../services/ultramsgSyncContact')
 const { getCompanyIdByInstanceId } = require('../services/whatsappConfigService')
 const { getStatus } = require('../services/ultramsgIntegrationService')
 const { resetOnConnected } = require('../services/zapiConnectGuardService')
@@ -1468,8 +1468,8 @@ exports.receberZapi = async (req, res) => {
         if (!fromMe && phone) {
           try {
             const syncResult = await Promise.race([
-              syncContactFromUltramsg(phone, company_id),
-              new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 2500))
+              syncUltraMsgContact(phone, company_id, { skipPersistence: true }),
+              new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 3000))
             ])
             if (syncResult?.nome && String(syncResult.nome).trim()) {
               nomePayload = String(syncResult.nome).trim()
@@ -2156,7 +2156,7 @@ exports.receberZapi = async (req, res) => {
                   setImmediate(async () => {
                     try {
                       const { data: current } = await supabase.from('clientes').select('nome, pushname, foto_perfil').eq('id', cidGrupo).maybeSingle()
-                      const sync = await syncContactFromUltramsg(pNorm, company_id).catch(() => null)
+                      const sync = await syncUltraMsgContact(pNorm, company_id, { skipPersistence: true }).catch(() => null)
                       if (!sync) return
                       const up = {}
                       const telefoneTail = String(pNorm).replace(/\D/g, '').slice(-6) || null
@@ -2402,7 +2402,7 @@ exports.receberZapi = async (req, res) => {
       Promise.resolve().then(async () => {
         try {
           const { data: current } = await supabase.from('clientes').select('nome, pushname, foto_perfil').eq('id', syncClienteId).eq('company_id', company_id).maybeSingle()
-          const synced = await syncContactFromUltramsg(syncPhone, company_id).catch(() => null)
+          const synced = await syncUltraMsgContact(syncPhone, company_id, { skipPersistence: true }).catch(() => null)
           if (!synced) return null
           const up = {}
           const telefoneTail = String(syncPhone).replace(/\D/g, '').slice(-6) || null

@@ -121,7 +121,10 @@ async function executeJob(job) {
 
   try {
     if (tipo === JOB_TIPOS.SYNC_CONTATOS) {
-      const result = await syncContactsFullProgressiva(company_id, payload)
+      const result = await syncContactsFullProgressiva(company_id, {
+        ...payload,
+        includeConversationCache: payload?.includeConversationCache !== false
+      })
       return { ok: true, resultado: result }
     }
 

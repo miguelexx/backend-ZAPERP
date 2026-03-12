@@ -4,16 +4,20 @@
  *
  * Regras:
  * - Só enriquece contatos individuais (não grupos)
- * - Não chama /contacts/image para grupos
- * - Usa syncContactFromUltramsg (já tem cache 5 min)
+ * - Usa syncUltraMsgContact (cache 5 min)
+ * - Heurística: nunca sobrescrever nome/foto melhor por pior
  * - Limita concorrência e quantidade para performance
- * - Persiste no banco para próxima listagem
  */
 
 const supabase = require('../config/supabase')
-const { syncContactFromUltramsg } = require('../services/ultramsgSyncContact')
+const { syncUltraMsgContact } = require('../services/ultramsgSyncContact')
+const { chooseBestName, isBadName } = require('./contactEnrichment')
 const { isGroupConversation } = require('../helpers/conversaHelper')
 const { phoneKeyBR } = require('../helpers/phoneHelper')
+
+function isValidPhotoUrl(url) {
+  return url && typeof url === 'string' && url.trim().startsWith('http')
+}
 
 const MAX_ENRICH_PER_REQUEST = 15
 const CONCURRENCY = 5
@@ -56,9 +60,11 @@ async function enrichConversationsWithContactData(conversas, company_id, opts = 
 
   async function processOne(conv) {
     try {
-      const enriched = await syncContactFromUltramsg(conv.telefone, company_id)
-      if (!enriched) return null
-      return { conv, enriched }
+      const data = await syncUltraMsgContact(conv.telefone, company_id, { skipPersistence: true })
+      if (!data) return null
+      const nome = data.nome || data.pushname || null
+      const foto = data.foto_perfil && isValidPhotoUrl(data.foto_perfil) ? data.foto_perfil : null
+      return { conv, nome, foto }
     } catch {
       return null
     }
@@ -73,14 +79,8 @@ async function enrichConversationsWithContactData(conversas, company_id, opts = 
     const settled = await Promise.allSettled(chunk.map(processOne))
     for (const p of settled) {
       if (p.status === 'fulfilled' && p.value) {
-        const { conv, enriched } = p.value
-        const key = conv.id
-        results.set(key, {
-          id: conv.id,
-          telefone: conv.telefone,
-          nome: enriched.nome || enriched.pushname || null,
-          foto: enriched.foto_perfil || null
-        })
+        const { conv, nome, foto } = p.value
+        if (nome || foto) results.set(conv.id, { id: conv.id, nome, foto })
       }
     }
   }
@@ -88,20 +88,35 @@ async function enrichConversationsWithContactData(conversas, company_id, opts = 
   if (results.size === 0) return conversas
 
   const updates = []
-  for (const [id, data] of results) {
-    if (data.nome || data.foto) {
-      updates.push({ id: Number(id), nome: data.nome, foto: data.foto })
-    }
-  }
+  if (opts.skipPersistence !== true) {
+    for (const [id, data] of results) {
+      const { data: convRow } = await supabase
+        .from('conversas')
+        .select('nome_contato_cache, foto_perfil_contato_cache')
+        .eq('id', Number(id))
+        .eq('company_id', company_id)
+        .maybeSingle()
 
-  if (updates.length > 0 && opts.skipPersistence !== true) {
-    for (const u of updates) {
+      const nomeAtual = convRow?.nome_contato_cache ? String(convRow.nome_contato_cache).trim() : null
+      const fotoAtual = convRow?.foto_perfil_contato_cache ? String(convRow.foto_perfil_contato_cache).trim() : null
+
       const fields = {}
-      if (u.nome) fields.nome_contato_cache = u.nome
-      if (u.foto) fields.foto_perfil_contato_cache = u.foto
-      if (Object.keys(fields).length > 0) {
-        await supabase.from('conversas').update(fields).eq('id', u.id).eq('company_id', company_id)
+      if (data.nome && !isBadName(data.nome)) {
+        const { name: bestNome, decision } = chooseBestName(nomeAtual, data.nome, 'syncUltramsg', { fromMe: false, company_id })
+        if (bestNome && decision === 'updated') fields.nome_contato_cache = bestNome
       }
+      if (data.foto && isValidPhotoUrl(data.foto) && !fotoAtual) fields.foto_perfil_contato_cache = data.foto.trim()
+
+      if (Object.keys(fields).length > 0) {
+        await supabase.from('conversas').update(fields).eq('id', Number(id)).eq('company_id', company_id)
+        updates.push({ id: Number(id), nome: fields.nome_contato_cache || data.nome, foto: fields.foto_perfil_contato_cache || data.foto })
+      } else {
+        updates.push({ id: Number(id), nome: data.nome, foto: data.foto })
+      }
+    }
+  } else {
+    for (const [id, data] of results) {
+      updates.push({ id: Number(id), nome: data.nome, foto: data.foto })
     }
   }
 

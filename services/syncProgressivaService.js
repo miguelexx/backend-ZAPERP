@@ -6,7 +6,7 @@
 const supabase = require('../config/supabase')
 const { getConfig, isProcessamentoPausado } = require('./configOperacionalService')
 const { registrarEvento, TIPOS } = require('./operationalAuditService')
-const { syncContactsBatch } = require('./ultramsgContactsSyncService')
+const { syncContactsBatch, syncMissingConversationContacts } = require('./ultramsgContactsSyncService')
 
 const LOCK_TIPO = 'sync_contatos'
 const CHECKPOINT_TIPO = 'sync_contatos'
@@ -171,6 +171,19 @@ async function syncContactsFullProgressiva(company_id, opts = {}) {
     if (!result.temMais) break
 
     await new Promise(r => setTimeout(r, intervaloMs))
+  }
+
+  if (opts.includeConversationCache === true) {
+    try {
+      const convResult = await syncMissingConversationContacts(company_id, { batchSize: 30, delayMs: 500 })
+      await registrarEvento(company_id, TIPOS.SYNC_LOTE, 'Sync conversas sem nome/foto', {
+        processadas: convResult.processadas,
+        atualizadas: convResult.atualizadas,
+        errors: convResult.errors?.length || 0
+      })
+    } catch (e) {
+      console.warn('[syncProgressiva] syncMissingConversationContacts:', e?.message || e)
+    }
   }
 
   await registrarEvento(company_id, TIPOS.SYNC_FIM, 'Sync progressiva finalizada', {

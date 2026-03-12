@@ -4,7 +4,6 @@ const { getStatus } = require('../services/ultramsgIntegrationService')
 const { isGroupConversation } = require('../helpers/conversaHelper')
 const { normalizePhoneBR, possiblePhonesBR, phoneKeyBR } = require('../helpers/phoneHelper')
 const { deduplicateConversationsByContact, sortConversationsByRecent, getCanonicalPhone, getOrCreateCliente } = require('../helpers/conversationSync')
-const { chooseBestName } = require('../helpers/contactEnrichment')
 const { enrichConversationsWithContactData } = require('../helpers/conversaEnrichment')
 
 // =====================================================
@@ -1530,36 +1529,13 @@ exports.detalharChat = async (req, res) => {
       if (cliPhone && !cliPhone.startsWith('lid:') && !cliPhone.includes('@g.us')) {
         setImmediate(async () => {
           try {
-            const { syncContactFromUltramsg } = require('../services/ultramsgSyncContact')
-            const { chooseBestName } = require('../helpers/contactEnrichment')
-            const synced = await syncContactFromUltramsg(cliPhone, cid)
-            if (!synced) return
-            const clienteUpdates = {}
-            const conversaUpdates = {}
-            if (synced.foto_perfil && String(synced.foto_perfil).startsWith('http')) {
-              clienteUpdates.foto_perfil = synced.foto_perfil
-              conversaUpdates.foto_perfil_contato_cache = synced.foto_perfil
-            }
-            if (synced.pushname && String(synced.pushname).trim()) clienteUpdates.pushname = String(synced.pushname).trim()
-            if (synced.nome && String(synced.nome).trim()) {
-              const currentNome = cliId ? (await supabase.from('clientes').select('nome').eq('id', cliId).eq('company_id', cid).maybeSingle()).data?.nome : null
-              const { name: bestNome } = chooseBestName(currentNome, synced.nome, 'syncUltramsg', { fromMe: false, company_id: cid, telefoneTail: cliPhone.replace(/\D/g, '').slice(-6) || null })
-              if (bestNome) {
-                clienteUpdates.nome = bestNome
-                conversaUpdates.nome_contato_cache = bestNome
-              }
-            }
-            if (Object.keys(clienteUpdates).length > 0 && cliId) {
-              await supabase.from('clientes').update(clienteUpdates).eq('company_id', cid).eq('id', cliId)
-            }
-            if (Object.keys(conversaUpdates).length > 0) {
-              await supabase.from('conversas').update(conversaUpdates).eq('company_id', cid).eq('id', Number(id))
-            }
-            if (io && (clienteUpdates.foto_perfil || clienteUpdates.nome || conversaUpdates.nome_contato_cache || conversaUpdates.foto_perfil_contato_cache)) {
+            const { syncUltraMsgContact } = require('../services/ultramsgSyncContact')
+            const synced = await syncUltraMsgContact(cliPhone, cid)
+            if (io && synced) {
               const { data: cli } = cliId ? await supabase.from('clientes').select('nome, pushname, telefone, foto_perfil').eq('id', cliId).eq('company_id', cid).maybeSingle() : { data: null }
               const { data: conv } = await supabase.from('conversas').select('nome_contato_cache, foto_perfil_contato_cache').eq('id', id).eq('company_id', cid).maybeSingle()
-              const contatoNome = conv?.nome_contato_cache || cli?.nome || cli?.pushname || cliPhone
-              const fotoPerfil = conv?.foto_perfil_contato_cache || cli?.foto_perfil
+              const contatoNome = conv?.nome_contato_cache || cli?.nome || cli?.pushname || synced.nome || cliPhone
+              const fotoPerfil = conv?.foto_perfil_contato_cache || cli?.foto_perfil || synced.foto_perfil
               io.to(`empresa_${cid}`).emit('contato_atualizado', {
                 conversa_id: Number(id),
                 contato_nome: contatoNome,
@@ -1997,35 +1973,25 @@ exports.enviarMensagemChat = async (req, res) => {
       if (novoClienteId) {
         await supabase.from('conversas').update({ cliente_id: novoClienteId }).eq('id', conversa_id).eq('company_id', company_id)
         conversa.cliente_id = novoClienteId
-        // Enriquecer em background com dados reais da Z-API (nome, foto do WhatsApp)
-        const { syncContactFromUltramsg } = require('../services/ultramsgSyncContact')
-        setImmediate(() => {
-          supabase.from('clientes').select('nome, pushname, foto_perfil').eq('id', novoClienteId).eq('company_id', company_id).maybeSingle()
-            .then(({ data: current }) => syncContactFromUltramsg(conversa.telefone, company_id)
-              .then((synced) => {
-                if (!synced) return null
-                const up = {}
-                const telefoneTail = String(conversa.telefone).replace(/\D/g, '').slice(-6) || null
-                const { name: bestNome } = chooseBestName(current?.nome, synced.nome, 'syncUltramsg', { fromMe: false, company_id, telefoneTail })
-                if (bestNome && bestNome !== (current?.nome || '')) up.nome = bestNome
-                if (synced.pushname !== undefined && !current?.pushname) up.pushname = synced.pushname
-                if (synced.foto_perfil && !current?.foto_perfil) up.foto_perfil = synced.foto_perfil
-                if (Object.keys(up).length === 0) return null
-                return supabase.from('clientes').update(up).eq('id', novoClienteId).eq('company_id', company_id)
-              }))
-            .then(async (r) => {
-              if (r && !r.error && req.app?.get('io')) {
-                const io = req.app.get('io')
-                const { data: cli } = await supabase.from('clientes').select('nome, pushname, telefone').eq('id', novoClienteId).eq('company_id', company_id).maybeSingle()
-                const contatoNome = cli?.nome || cli?.pushname || conversa.nome_contato_cache || conversa.telefone
-                io.to(`empresa_${company_id}`).emit('contato_atualizado', {
-                  conversa_id: Number(conversa_id),
-                  contato_nome: contatoNome,
-                  telefone: cli?.telefone || conversa.telefone
-                })
-              }
-            })
-            .catch(() => {})
+        // Enriquecer em background com dados reais da UltraMsg (nome, foto do WhatsApp)
+        const { syncUltraMsgContact } = require('../services/ultramsgSyncContact')
+        setImmediate(async () => {
+          try {
+            const synced = await syncUltraMsgContact(conversa.telefone, company_id)
+            if (synced && req.app?.get('io')) {
+              const io = req.app.get('io')
+              const { data: cli } = await supabase.from('clientes').select('nome, pushname, telefone, foto_perfil').eq('id', novoClienteId).eq('company_id', company_id).maybeSingle()
+              const { data: conv } = await supabase.from('conversas').select('nome_contato_cache, foto_perfil_contato_cache').eq('id', conversa_id).eq('company_id', company_id).maybeSingle()
+              const contatoNome = conv?.nome_contato_cache || cli?.nome || cli?.pushname || synced.nome || conversa.telefone
+              const fotoPerfil = conv?.foto_perfil_contato_cache || cli?.foto_perfil || synced.foto_perfil
+              io.to(`empresa_${company_id}`).emit('contato_atualizado', {
+                conversa_id: Number(conversa_id),
+                contato_nome: contatoNome,
+                telefone: cli?.telefone || conversa.telefone,
+                foto_perfil: fotoPerfil
+              })
+            }
+          } catch (_) {}
         })
       }
     }

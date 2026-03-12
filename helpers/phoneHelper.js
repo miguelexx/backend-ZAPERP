@@ -139,4 +139,54 @@ function toZapiSendFormat(phone) {
   return ''
 }
 
-module.exports = { normalizePhoneBR, toZapiSendFormat, possiblePhonesBR, phoneKeyBR, normalizeGroupIdForStorage }
+/**
+ * Verifica se o chatId é de um grupo WhatsApp (@g.us ou ID 120...).
+ *
+ * @param {string} chatId - JID ou identificador (ex: 5511999999999@c.us, 120363...@g.us)
+ * @returns {boolean}
+ */
+function isGroupChat(chatId) {
+  const s = String(chatId || '').trim()
+  if (!s) return false
+  if (s.endsWith('@g.us')) return true
+  const digits = s.replace(/\D/g, '')
+  return digits.startsWith('120') && digits.length >= 15
+}
+
+/**
+ * Verifica se o chatId é de contato individual (não grupo).
+ *
+ * @param {string} chatId
+ * @returns {boolean}
+ */
+function isIndividualChat(chatId) {
+  if (!chatId) return false
+  return !isGroupChat(chatId) && (String(chatId).includes('@') || String(chatId).replace(/\D/g, '').length >= 10)
+}
+
+/**
+ * Extrai o telefone (apenas dígitos) do chatId.
+ * Ex: "5511999999999@c.us" → "5511999999999"
+ *
+ * @param {string} chatId
+ * @returns {string}
+ */
+function extractPhoneFromChatId(chatId) {
+  const s = String(chatId || '').trim()
+  if (!s || s.endsWith('@g.us')) return ''
+  const match = s.match(/^(\d+)@c\.us$/i)
+  if (match) return match[1]
+  const phone = s.replace(/@[^@]+$/, '').replace(/\D/g, '').trim()
+  return phone || ''
+}
+
+module.exports = {
+  normalizePhoneBR,
+  toZapiSendFormat,
+  possiblePhonesBR,
+  phoneKeyBR,
+  normalizeGroupIdForStorage,
+  isGroupChat,
+  isIndividualChat,
+  extractPhoneFromChatId
+}

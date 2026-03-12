@@ -13,7 +13,7 @@ const supabase = require('../config/supabase')
 const { getProvider } = require('./providers')
 const { getEmpresaWhatsappConfig } = require('./whatsappConfigService')
 const { getOrCreateCliente } = require('../helpers/conversationSync')
-const { syncContactFromUltramsg } = require('./ultramsgSyncContact')
+const { syncUltraMsgContact } = require('./ultramsgSyncContact')
 const { normalizePhoneBR, possiblePhonesBR } = require('../helpers/phoneHelper')
 
 const PAGE_SIZE = 100
@@ -115,8 +115,8 @@ async function syncViaContactsApi(company_id) {
 }
 
 /**
- * Fallback: enriquece clientes a partir de conversas existentes.
- * Busca conversas abertas com telefone individual e chama syncContactFromUltramsg.
+ * Fallback: enriquece conversas e clientes a partir de conversas existentes.
+ * Chama syncUltraMsgContact que atualiza conversas.nome_contato_cache, foto_perfil_contato_cache e clientes.
  */
 async function syncViaFallback(company_id) {
   const stats = { totalFetched: 0, inserted: 0, updated: 0, skipped: 0, errors: [] }
@@ -144,15 +144,6 @@ async function syncViaFallback(company_id) {
     }
 
     try {
-      const enriched = await syncContactFromUltramsg(phone, company_id)
-      const nome = enriched?.nome ?? conv.nome_contato_cache ?? null
-      const foto = enriched?.foto_perfil ?? null
-
-      const clienteFields = {}
-      if (nome) clienteFields.nome = nome
-      if (foto) clienteFields.foto_perfil = foto
-      clienteFields.nomeSource = 'syncUltramsg'
-
       const variants = possiblePhonesBR(phone).length > 0 ? possiblePhonesBR(phone) : [phone]
       const { data: prev } = await supabase
         .from('clientes')
@@ -162,10 +153,21 @@ async function syncViaFallback(company_id) {
         .limit(1)
         .maybeSingle()
 
-      const result = await getOrCreateCliente(supabase, company_id, phone, clienteFields)
-      if (result.cliente_id) {
-        if (prev?.id) stats.updated++
-        else stats.inserted++
+      const result = await syncUltraMsgContact(phone, company_id)
+      if (result) {
+        const { data: cliente } = await supabase
+          .from('clientes')
+          .select('id')
+          .eq('company_id', company_id)
+          .in('telefone', variants)
+          .limit(1)
+          .maybeSingle()
+        if (cliente?.id) {
+          if (prev?.id) stats.updated++
+          else stats.inserted++
+        } else {
+          stats.skipped++
+        }
       } else {
         stats.skipped++
       }
@@ -175,6 +177,64 @@ async function syncViaFallback(company_id) {
   }
 
   return { mode: 'fallback', ...stats }
+}
+
+/**
+ * Sincroniza em lote conversas individuais sem nome ou foto.
+ * Usa syncUltraMsgContact por conversa com delay para evitar rate limit.
+ *
+ * @param {number} company_id
+ * @param {object} opts - { batchSize, delayMs }
+ * @returns {Promise<{ processadas: number, atualizadas: number, errors: string[] }>}
+ */
+async function syncMissingConversationContacts(company_id, opts = {}) {
+  const batchSize = Math.min(50, Math.max(5, opts.batchSize ?? 20))
+  const delayMs = Math.max(200, opts.delayMs ?? 500)
+
+  const { config, error } = await getEmpresaWhatsappConfig(company_id)
+  if (error || !config) {
+    return { processadas: 0, atualizadas: 0, errors: ['Empresa sem instância configurada'] }
+  }
+
+  const { data: conversas } = await supabase
+    .from('conversas')
+    .select('id, telefone, nome_contato_cache, foto_perfil_contato_cache')
+    .eq('company_id', company_id)
+    .not('telefone', 'like', '%@g.us')
+    .not('telefone', 'like', 'lid:%')
+    .limit(batchSize * 2)
+
+  const allRows = Array.isArray(conversas) ? conversas : []
+  const needsSync = (c) => {
+    const hasNome = c.nome_contato_cache && String(c.nome_contato_cache).trim().length > 0
+    const hasFoto = c.foto_perfil_contato_cache && String(c.foto_perfil_contato_cache).trim().startsWith('http')
+    return !hasNome || !hasFoto
+  }
+  const rows = allRows.filter(needsSync).slice(0, batchSize)
+
+  if (rows.length === 0) {
+    return { processadas: 0, atualizadas: 0, errors: [] }
+  }
+
+  const stats = { processadas: 0, atualizadas: 0, errors: [] }
+
+  for (const conv of rows) {
+    if (!conv.telefone || conv.telefone.length < 10) continue
+
+    try {
+      const result = await syncUltraMsgContact(conv.telefone, company_id)
+      if (result) {
+        stats.processadas++
+        if (result.nome || result.foto_perfil) stats.atualizadas++
+      }
+    } catch (e) {
+      stats.errors.push(`${String(conv.telefone).slice(-8)}: ${String(e?.message || e).slice(0, 80)}`)
+    }
+
+    await new Promise((r) => setTimeout(r, delayMs))
+  }
+
+  return stats
 }
 
 /**
@@ -288,4 +348,10 @@ async function syncContactsBatch(company_id, opts = {}) {
   return { ...stats, hasMore }
 }
 
-module.exports = { syncContacts, syncViaContactsApi, syncViaFallback, syncContactsBatch }
+module.exports = {
+  syncContacts,
+  syncViaContactsApi,
+  syncViaFallback,
+  syncContactsBatch,
+  syncMissingConversationContacts
+}
