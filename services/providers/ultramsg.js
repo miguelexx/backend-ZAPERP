@@ -691,12 +691,16 @@ function phoneToChatId(phone) {
 }
 
 /**
- * Busca URL da foto de perfil. UltraMsg: GET /contacts/image?chatId=...
+ * Busca URL da foto de perfil. UltraMsg: GET /{instance_id}/contacts/image?token=...&chatId=...
+ * Aceita phone (será convertido) ou opts.chatId quando disponível (ex.: data.from do webhook).
+ * Nunca expor token em logs.
  */
-async function getProfilePicture(phone, opts = {}) {
+async function getProfilePicture(phoneOrChatId, opts = {}) {
   const cfg = await resolveConfig(opts)
   if (!cfg) return null
-  const chatId = phoneToChatId(phone)
+  const chatId = opts.chatId && String(opts.chatId).trim().endsWith('@c.us')
+    ? String(opts.chatId).trim()
+    : phoneToChatId(phoneOrChatId)
   if (!chatId || chatId.endsWith('@g.us')) return null
   try {
     const { ok, data } = await getJson({

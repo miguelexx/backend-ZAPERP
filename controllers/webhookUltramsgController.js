@@ -97,7 +97,9 @@ function normalizeUltramsgToZapi(body) {
   // Quando fromMe=true (message_create), pushname é NOSSO nome — NÃO usar para contato.
   const senderNameRaw = data.pushname ?? data.notify ?? data.senderName ?? data.name ?? data.formattedName ?? data.short ?? data.chatName ?? data.displayName ?? null
   const senderName = fromMe ? null : (senderNameRaw ? String(senderNameRaw).trim() : null)
-  const senderPhoto = data.photo ?? data.senderPhoto ?? data.profilePicture ?? data.profilePictureUrl ?? data.imgUrl ?? data.media?.url ?? null
+  // Regra: UltraMsg message_received/message_ack NUNCA traz profile picture no payload.
+  // Buscar foto via GET /contacts/image (disparado por syncUltraMsgContact no receberZapi).
+  const senderPhoto = null
 
   // quotedMsg: citação/reply — Ultramsg envia { id, body, from, ... }
   const quotedMsg = data.quotedMsg && typeof data.quotedMsg === 'object' && Object.keys(data.quotedMsg).length > 0 ? data.quotedMsg : null

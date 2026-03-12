@@ -67,10 +67,11 @@ function resolvePhoneAndChatId(chatIdOrPhone) {
 /**
  * Sincroniza um contato individual com UltraMsg e atualiza banco.
  * Ignora grupos. Nunca sobrescreve dado melhor por pior.
+ * Foto: sempre via GET /contacts/image?chatId=... (webhook NÃO traz profile picture).
  *
- * @param {string} chatIdOrPhone - chatId (5511999999999@c.us) ou telefone
+ * @param {string} chatIdOrPhone - chatId (5511999999999@c.us, ex. data.from) ou telefone
  * @param {number} companyId
- * @param {object} opts - { skipPersistence, skipCache }
+ * @param {object} opts - { skipPersistence, skipCache, chatId } — chatId força uso direto na API
  * @returns {Promise<{ chatId, telefone, nome, pushname, foto_perfil }|null>}
  */
 async function syncUltraMsgContact(chatIdOrPhone, companyId, opts = {}) {
@@ -81,7 +82,8 @@ async function syncUltraMsgContact(chatIdOrPhone, companyId, opts = {}) {
   const key = cacheKey(telefone, companyId)
 
   let result = null
-  if (!opts.skipCache) {
+  const useCache = !opts.skipCache
+  if (useCache) {
     const cached = cache.get(key)
     if (cached && cached.exp > Date.now()) {
       result = cached.data
@@ -98,11 +100,12 @@ async function syncUltraMsgContact(chatIdOrPhone, companyId, opts = {}) {
 
     let metadata = null
     let profilePicUrl = null
+    const picOpts = { companyId, chatId }
 
     try {
       const [meta, pic] = await Promise.all([
         provider.getContactMetadata?.(telefone, { companyId }).catch(() => null) ?? null,
-        provider.getProfilePicture?.(telefone, { companyId }).catch(() => null) ?? null
+        provider.getProfilePicture?.(chatId, picOpts).catch(() => null) ?? null
       ])
       metadata = meta
       profilePicUrl = pic

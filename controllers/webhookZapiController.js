@@ -1464,13 +1464,19 @@ exports.receberZapi = async (req, res) => {
         let nomePayload = nomePayloadRaw ? String(nomePayloadRaw).trim() : null
         let nomeSource = (payload.name && String(payload.name).trim()) ? 'name' : (fromMe ? 'chatName' : 'senderName')
 
-        // Sincroniza nome: quando recebemos (!fromMe), payload traz pushname do contato;
-        // quando enviamos (fromMe), payload traz nosso pushname — buscar destinatário na API.
+        // Sincroniza nome/foto: UltraMsg webhook NUNCA traz profile picture — usar GET /contacts/image.
+        // Passar chatId (ex. payload.chatId = data.from) quando disponível para chamada correta à API.
         if (phone) {
+          const syncChatId = !isGroup && payload.chatId && String(payload.chatId).trim().endsWith('@c.us')
+            ? String(payload.chatId).trim()
+            : phone
+          const syncTimeoutMs = fromMe ? 6000 : 3000
+          const syncOpts = { skipPersistence: true }
+          if (fromMe) syncOpts.skipCache = true
           try {
             const syncResult = await Promise.race([
-              syncUltraMsgContact(phone, company_id, { skipPersistence: true }),
-              new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 3000))
+              syncUltraMsgContact(syncChatId, company_id, syncOpts),
+              new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), syncTimeoutMs))
             ])
             // syncUltraMsgContact pode retornar telefone como fallback quando API não tem nome — ignorar e usar pushname do payload
             const syncNome = syncResult?.nome ? String(syncResult.nome).trim() : null
@@ -1479,13 +1485,17 @@ exports.receberZapi = async (req, res) => {
               nomeSource = 'syncUltramsg'
               nomeParaCache = nomePayload
               nomeSourceParaCache = 'syncUltramsg'
-              if (syncResult.foto_perfil && !senderPhoto) senderPhoto = syncResult.foto_perfil
             }
+            // Foto: sempre usar da API quando disponível (payload só traz quando contato envia; when fromMe precisamos da API)
+            const syncFoto = syncResult?.foto_perfil && String(syncResult.foto_perfil).trim()
+            if (syncFoto && syncFoto.startsWith('http')) senderPhoto = syncFoto
           } catch (_) {
-            // fallback: usa nome do payload (senderName/chatName)
+            // fallback: usa nome do payload (senderName/chatName) — SOMENTE quando !fromMe (payload traz pushname do contato)
+            // Quando fromMe: payload traz NOSSO nome — nunca usar como nome do contato
           }
         }
-        if (nomePayload && !nomeParaCache) {
+        // Quando fromMe: nome do payload é do remetente (nós) — só usar nome vindo do sync (destinatário)
+        if (nomePayload && !nomeParaCache && !fromMe) {
           nomeParaCache = nomePayload
           nomeSourceParaCache = nomeSource
         }
@@ -2334,13 +2344,16 @@ exports.receberZapi = async (req, res) => {
         status: canon,
         status_mensagem: canon
       }
-      // Incluir senderName/chatName para o frontend exibir o nome ao adicionar conversa (pushname do webhook)
-      if (!fromMe && (nomeParaCache || senderName)) {
-        const nomeContato = (nomeParaCache || senderName || '').toString().trim()
-        if (nomeContato && !nomeContato.replace(/\D/g, '').match(/^\d{10,15}$/)) {
-          emitPayload.senderName = nomeContato
-          emitPayload.chatName = nomeContato
-        }
+      // Incluir nome e foto para o frontend exibir ao adicionar/atualizar conversa na lista
+      const nomeContato = (nomeParaCache || senderName || '').toString().trim()
+      const fotoContato = (senderPhoto && String(senderPhoto).trim().startsWith('http')) ? String(senderPhoto).trim() : null
+      if (nomeContato && !nomeContato.replace(/\D/g, '').match(/^\d{10,15}$/)) {
+        emitPayload.senderName = nomeContato
+        emitPayload.chatName = nomeContato
+      }
+      if (fotoContato) {
+        emitPayload.senderPhoto = fotoContato
+        emitPayload.photo = fotoContato
       }
       if (mensagemFoiInseridaPeloWebhook) {
         io.to(rooms).emit('nova_mensagem', emitPayload)
@@ -2409,36 +2422,47 @@ exports.receberZapi = async (req, res) => {
       const { cliente_id: syncClienteId } = pendingContactSync
       const syncPhone = pendingContactSync.phone
       const convId = convIdForEmit
-      // Usar Promise em vez de setImmediate para permitir .catch (setImmediate não retorna Promise)
+      // Sync em background: atualiza cliente E conversa (nome/foto) quando o sync inicial falhou ou retornou vazio
       Promise.resolve().then(async () => {
         try {
           const { data: current } = await supabase.from('clientes').select('nome, pushname, foto_perfil').eq('id', syncClienteId).eq('company_id', company_id).maybeSingle()
-          const synced = await syncUltraMsgContact(syncPhone, company_id, { skipPersistence: true }).catch(() => null)
+          const { data: convRow } = await supabase.from('conversas').select('nome_contato_cache, foto_perfil_contato_cache').eq('id', convId).eq('company_id', company_id).maybeSingle()
+          const synced = await syncUltraMsgContact(syncPhone, company_id, { skipPersistence: true, skipCache: fromMe }).catch(() => null)
           if (!synced) return null
           const up = {}
           const telefoneTail = String(syncPhone).replace(/\D/g, '').slice(-6) || null
           const { name: bestNome } = chooseBestName(current?.nome, synced?.nome, 'syncUltramsg', { fromMe: false, company_id, telefoneTail })
           if (bestNome && bestNome !== (current?.nome || '')) up.nome = bestNome
-          else if (!current?.nome || !String(current.nome).trim()) up.nome = (synced.nome && String(synced.nome).trim()) ? String(synced.nome).trim() : syncPhone
+          else if (!current?.nome || !String(current.nome).trim()) up.nome = (synced.nome && String(synced.nome).trim() && !isBadName(synced.nome)) ? String(synced.nome).trim() : syncPhone
           const pushnameVazio = !current?.pushname || !String(current.pushname).trim()
           const fotoVazia = !current?.foto_perfil || !String(current.foto_perfil).trim()
           if (pushnameVazio && synced.pushname !== undefined) up.pushname = synced.pushname
           if (fotoVazia && synced.foto_perfil) up.foto_perfil = synced.foto_perfil
-          if (Object.keys(up).length === 0) return null
-          const res = await supabase.from('clientes').update(up).eq('id', syncClienteId).eq('company_id', company_id)
-          if (res.error) return
-          // contato_atualizado: usar nome_contato_cache da conversa (nunca clientes.nome/pushname — evita trocar nome)
-          const { data: conv } = await supabase.from('conversas').select('nome_contato_cache').eq('id', convId).eq('company_id', company_id).maybeSingle()
-          const nomeParaEmit = conv?.nome_contato_cache ? String(conv.nome_contato_cache).trim() : null
+          if (Object.keys(up).length > 0) {
+            await supabase.from('clientes').update(up).eq('id', syncClienteId).eq('company_id', company_id)
+          }
+          // Atualizar conversa (nome_contato_cache, foto_perfil_contato_cache) quando vazios e sync trouxe dados
+          const nomeConvVazio = !convRow?.nome_contato_cache || !String(convRow.nome_contato_cache).trim()
+          const fotoConvVazia = !convRow?.foto_perfil_contato_cache || !String(convRow.foto_perfil_contato_cache).trim()
+          const syncNomeValido = synced?.nome && String(synced.nome).trim() && !isBadName(synced.nome)
+          const syncFotoValida = synced?.foto_perfil && String(synced.foto_perfil).trim().startsWith('http')
+          const cacheConv = {}
+          if (nomeConvVazio && syncNomeValido) cacheConv.nome_contato_cache = String(synced.nome).trim()
+          if (fotoConvVazia && syncFotoValida) cacheConv.foto_perfil_contato_cache = String(synced.foto_perfil).trim()
+          if (Object.keys(cacheConv).length > 0) {
+            await supabase.from('conversas').update(cacheConv).eq('id', convId).eq('company_id', company_id)
+          }
           const r = await supabase.from('clientes').select('nome, pushname, telefone, foto_perfil').eq('id', syncClienteId).single()
           const data = r?.data
-          if (data && io) {
+          const nomeParaEmit = cacheConv.nome_contato_cache ?? convRow?.nome_contato_cache ?? data?.nome ?? data?.pushname ?? null
+          const fotoParaEmit = cacheConv.foto_perfil_contato_cache ?? convRow?.foto_perfil_contato_cache ?? data?.foto_perfil ?? null
+          if (data && io && (nomeParaEmit || fotoParaEmit)) {
             console.log('✅ Contato sincronizado Z-API:', syncPhone?.slice(-6), nomeParaEmit || '(sem nome)')
             io.to(`empresa_${company_id}`).emit('contato_atualizado', {
               conversa_id: convId,
-              contato_nome: nomeParaEmit,
+              contato_nome: nomeParaEmit ? String(nomeParaEmit).trim() : null,
               telefone: data.telefone || syncPhone,
-              foto_perfil: data.foto_perfil
+              foto_perfil: fotoParaEmit ? String(fotoParaEmit).trim() : null
             })
           }
         } catch (e) {
