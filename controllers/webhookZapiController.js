@@ -15,7 +15,7 @@ const { getStatus } = require('../services/ultramsgIntegrationService')
 const { resetOnConnected } = require('../services/zapiConnectGuardService')
 const { normalizePhoneBR, possiblePhonesBR, normalizeGroupIdForStorage } = require('../helpers/phoneHelper')
 const { getCanonicalPhone, getOrCreateCliente, findOrCreateConversation, mergeConversasIntoCanonico, mergeConversationLidToPhone } = require('../helpers/conversationSync')
-const { chooseBestName } = require('../helpers/contactEnrichment')
+const { chooseBestName, isBadName } = require('../helpers/contactEnrichment')
 const { resolvePeerPhone } = require('../helpers/conversationKeyHelper')
 const { incrementarUnreadParaConversa } = require('./chatController')
 const { processIncomingMessage: processChatbotTriage } = require('../services/chatbotTriageService')
@@ -1472,8 +1472,10 @@ exports.receberZapi = async (req, res) => {
               syncUltraMsgContact(phone, company_id, { skipPersistence: true }),
               new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 3000))
             ])
-            if (syncResult?.nome && String(syncResult.nome).trim()) {
-              nomePayload = String(syncResult.nome).trim()
+            // syncUltraMsgContact pode retornar telefone como fallback quando API não tem nome — ignorar e usar pushname do payload
+            const syncNome = syncResult?.nome ? String(syncResult.nome).trim() : null
+            if (syncNome && !isBadName(syncNome)) {
+              nomePayload = syncNome
               nomeSource = 'syncUltramsg'
               nomeParaCache = nomePayload
               nomeSourceParaCache = 'syncUltramsg'
@@ -2331,6 +2333,14 @@ exports.receberZapi = async (req, res) => {
         conversa_id: mensagemSalva.conversa_id ?? convIdForEmit,
         status: canon,
         status_mensagem: canon
+      }
+      // Incluir senderName/chatName para o frontend exibir o nome ao adicionar conversa (pushname do webhook)
+      if (!fromMe && (nomeParaCache || senderName)) {
+        const nomeContato = (nomeParaCache || senderName || '').toString().trim()
+        if (nomeContato && !nomeContato.replace(/\D/g, '').match(/^\d{10,15}$/)) {
+          emitPayload.senderName = nomeContato
+          emitPayload.chatName = nomeContato
+        }
       }
       if (mensagemFoiInseridaPeloWebhook) {
         io.to(rooms).emit('nova_mensagem', emitPayload)
