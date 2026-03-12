@@ -691,7 +691,9 @@ function phoneToChatId(phone) {
 }
 
 /**
- * Busca URL da foto de perfil. UltraMsg: GET /{instance_id}/contacts/image?token=...&chatId=...
+ * Busca URL da foto de perfil.
+ * Doc oficial: GET /{instance_id}/contacts/image?token={TOKEN}&chatId={chatId}
+ * Parâmetros obrigatórios: token, chatId (ex.: 5511999999999@c.us)
  * Aceita phone (será convertido) ou opts.chatId quando disponível (ex.: data.from do webhook).
  * Nunca expor token em logs.
  */
@@ -703,13 +705,18 @@ async function getProfilePicture(phoneOrChatId, opts = {}) {
     : phoneToChatId(phoneOrChatId)
   if (!chatId || chatId.endsWith('@g.us')) return null
   try {
-    const { ok, data } = await getJson({
+    const { ok, data, text } = await get({
       ...cfg,
       endpoint: '/contacts/image',
       extraParams: { chatId }
     })
-    if (!ok || !data) return null
-    const url = data.url ?? data.image ?? data.img ?? data.profilePicture ?? data.profilePic ?? null
+    if (!ok) return null
+    // Resposta pode ser objeto JSON ou string (URL direta). Múltiplos campos possíveis.
+    let url = null
+    if (data && typeof data === 'object') {
+      url = data.url ?? data.image ?? data.img ?? data.profilePicture ?? data.profilePic ?? data.link ?? null
+    }
+    if (!url && typeof text === 'string' && text.trim().startsWith('http')) url = text.trim()
     return url && typeof url === 'string' ? url.trim() : null
   } catch {
     return null
