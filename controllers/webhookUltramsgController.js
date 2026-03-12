@@ -2,7 +2,16 @@
  * Webhook UltraMsg: recebe eventos e normaliza para formato Z-API.
  * Reutiliza a lógica de processamento do webhookZapiController.
  *
- * Formato UltraMsg: { event_type, instanceId, data: { id, from, to, body, type, fromMe, ... } }
+ * Formato UltraMsg (como chega do site):
+ * {
+ *   event_type: "message_received",
+ *   instanceId: "51534",
+ *   id, referenceId, hash,
+ *   data: {
+ *     id, sid, from, to, author, pushname, ack, type, body, media,
+ *     fromMe, self, isForwarded, isMentioned, quotedMsg, mentionedIds, time
+ *   }
+ * }
  * Formato Z-API:   { phone, fromMe, messageId, text/message/body, key, ... }
  */
 
@@ -26,12 +35,12 @@ function normalizeUltramsgToZapi(body) {
     return {
       instanceId: body.instanceId ?? body.instance_id,
       instance_id: body.instanceId ?? body.instance_id,
-      messageId: data.id ?? data.msgId ?? null,
-      zaapId: data.id ?? data.msgId ?? null,
-      id: data.id ?? data.msgId ?? null,
+      messageId: data.id ?? data.sid ?? data.msgId ?? null,
+      zaapId: data.id ?? data.sid ?? data.msgId ?? null,
+      id: data.id ?? data.sid ?? data.msgId ?? null,
       ack: data.ack ?? data.status ?? 'pending',
       status: mapUltramsgAckToStatus(data.ack ?? data.status),
-      ids: data.id ? [data.id] : []
+      ids: data.id ? [data.id] : (data.sid ? [data.sid] : [])
     }
   }
 
@@ -50,30 +59,48 @@ function normalizeUltramsgToZapi(body) {
     remoteJid = toJid
     const groupDigits = jidToDigits(toJid)
     phone = groupDigits ? normalizeGroupIdForStorage(groupDigits) || groupDigits : toJid
-    participantPhone = jidToDigits(fromJid) || ''
+    participantPhone = jidToDigits(data.author || fromJid) || jidToDigits(fromJid) || ''
   } else {
     const contactJid = fromMe ? toJid : fromJid
     phone = normalizePhoneBR(jidToDigits(contactJid)) || jidToDigits(contactJid) || contactJid
     remoteJid = contactJid
   }
 
-  const messageId = data.id ?? data.msgId ?? null
+  const messageId = (data.id && String(data.id).trim()) ? data.id : (data.sid && String(data.sid).trim()) ? data.sid : null
   const bodyText = data.body ?? data.text ?? data.message ?? ''
   const msgType = String(data.type || 'chat').toLowerCase()
 
-  // Áudio: UltraMsg pode enviar em data.audio (string/objeto), data.audioUrl, data.mediaUrl (quando type=audio/ptt)
-  let audioUrl = data.audioUrl ?? data.audio ?? null
-  if (audioUrl && typeof audioUrl === 'object') {
-    audioUrl = audioUrl.url ?? audioUrl.audioUrl ?? audioUrl.link ?? null
-  }
-  if ((!audioUrl || !String(audioUrl).startsWith('http')) && (msgType === 'audio' || msgType === 'ptt')) {
-    const mediaUrl = data.mediaUrl ?? data.media?.url ?? data.media?.link ?? null
-    if (mediaUrl && typeof mediaUrl === 'string' && mediaUrl.startsWith('http')) audioUrl = mediaUrl
+  /** Normaliza campo de mídia (string URL ou objeto com url/link) para string URL. */
+  const toUrl = (v) => {
+    if (!v) return null
+    if (typeof v === 'string' && v.trim().startsWith('http')) return v.trim()
+    if (typeof v === 'object' && v != null) return v.url ?? v.link ?? (v.src && String(v.src).startsWith('http') ? v.src : null) ?? null
+    return null
   }
 
-  // Nome e foto: UltraMsg pode enviar notify, pushname, senderName, name, photo (quando disponível)
-  const senderName = data.notify ?? data.pushname ?? data.senderName ?? data.name ?? data.formattedName ?? data.short ?? data.chatName ?? data.displayName ?? null
+  // data.media: pode ser string URL ou objeto { url, link }
+  const mediaUrl = toUrl(data.media)
+
+  // Áudio: data.audio, data.audioUrl, data.mediaUrl
+  let audioUrl = toUrl(data.audio) ?? toUrl(data.audioUrl) ?? (msgType === 'audio' || msgType === 'ptt' ? (mediaUrl ?? toUrl(data.mediaUrl)) : null)
+
+  // Mídia por tipo (UltraMsg pode enviar em data.media, data.mediaUrl ou campos específicos)
+  const imageUrl = msgType === 'image' ? (mediaUrl ?? toUrl(data.mediaUrl) ?? toUrl(data.image)) : toUrl(data.image)
+  const documentUrl = toUrl(data.documentUrl) ?? toUrl(data.document)
+  const videoUrl = msgType === 'video' ? (mediaUrl ?? toUrl(data.videoUrl) ?? toUrl(data.video)) : (toUrl(data.videoUrl) ?? toUrl(data.video))
+  const stickerUrl = msgType === 'sticker' ? (mediaUrl ?? toUrl(data.stickerUrl) ?? toUrl(data.sticker)) : (toUrl(data.stickerUrl) ?? toUrl(data.sticker))
+
+  // Nome e foto: UltraMsg envia pushname, notify, author (grupos)
+  const senderName = data.pushname ?? data.notify ?? data.senderName ?? data.name ?? data.formattedName ?? data.short ?? data.chatName ?? data.displayName ?? null
   const senderPhoto = data.photo ?? data.senderPhoto ?? data.profilePicture ?? data.profilePictureUrl ?? data.imgUrl ?? data.media?.url ?? null
+
+  // quotedMsg: citação/reply — Ultramsg envia { id, body, from, ... }
+  const quotedMsg = data.quotedMsg && typeof data.quotedMsg === 'object' && Object.keys(data.quotedMsg).length > 0 ? data.quotedMsg : null
+  const referenceMessageId = quotedMsg ? (quotedMsg.id ?? quotedMsg.stanzaId ?? quotedMsg.messageId ?? null) : null
+
+  // connectedPhone: nosso número (to quando recebemos, from quando enviamos) — necessário para resolveConversationKeyFromZapi
+  const connectedPhone = fromMe ? jidToDigits(fromJid) : jidToDigits(toJid)
+  const connectedPhoneNorm = connectedPhone ? (normalizePhoneBR(connectedPhone) || connectedPhone) : null
 
   const zapiLike = {
     instanceId: body.instanceId ?? body.instance_id,
@@ -99,21 +126,31 @@ function normalizeUltramsgToZapi(body) {
     },
     chatId: remoteJid,
     chat: { id: remoteJid, remoteJid },
-    timestamp: data.time ? data.time * 1000 : Date.now(),
+    timestamp: data.time ? (Number(data.time) * 1000) : Date.now(),
     t: data.time,
-    ack: data.ack ?? 'pending',
-    status: data.ack ?? 'RECEIVED',
-    imageUrl: msgType === 'image' ? (data.mediaUrl ?? data.image ?? data.media?.url) : (data.image ?? null),
-    documentUrl: data.documentUrl ?? data.document ?? null,
-    audioUrl: audioUrl ?? null,
-    videoUrl: data.videoUrl ?? data.video ?? null,
-    stickerUrl: data.stickerUrl ?? data.sticker ?? null,
+    ack: (data.ack && String(data.ack).trim()) ? data.ack : 'pending',
+    status: (data.ack && String(data.ack).trim()) ? data.ack : 'RECEIVED',
+    imageUrl: imageUrl || null,
+    documentUrl: documentUrl || null,
+    audioUrl: audioUrl || null,
+    videoUrl: videoUrl || null,
+    stickerUrl: stickerUrl || null,
     senderName: senderName ? String(senderName).trim() : null,
     senderPhoto: senderPhoto && String(senderPhoto).trim().startsWith('http') ? String(senderPhoto).trim() : null,
     name: senderName ? String(senderName).trim() : null,
     notifyName: senderName ? String(senderName).trim() : null,
     pushName: senderName ? String(senderName).trim() : null,
-    photo: senderPhoto && String(senderPhoto).trim().startsWith('http') ? String(senderPhoto).trim() : null
+    photo: senderPhoto && String(senderPhoto).trim().startsWith('http') ? String(senderPhoto).trim() : null,
+    connectedPhone: connectedPhoneNorm || connectedPhone || undefined,
+    ownerPhone: connectedPhoneNorm || connectedPhone || undefined,
+    quotedMsg: quotedMsg || undefined,
+    referenceMessageId: referenceMessageId || undefined,
+    referencedMessage: quotedMsg ? { id: referenceMessageId, messageId: referenceMessageId, body: quotedMsg.body } : undefined,
+    isForwarded: Boolean(data.isForwarded),
+    isMentioned: Boolean(data.isMentioned),
+    mentionedIds: Array.isArray(data.mentionedIds) ? data.mentionedIds : (data.mentionedIds ? [data.mentionedIds] : undefined),
+    ultramsgHash: body.hash || undefined,
+    ultramsgReferenceId: body.referenceId || undefined
   }
 
   return zapiLike
