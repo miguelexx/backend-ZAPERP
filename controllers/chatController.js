@@ -582,23 +582,37 @@ exports.listarConversas = async (req, res) => {
         if (fallbackCli) clientesObj = fallbackCli
       }
 
-      // Prioridade: nome_contato_cache (único, fixo) > nome/pushname do cliente
-      const nomeCliente = (clientesObj?.nome ?? clientesObj?.pushname ?? null) && String(clientesObj?.nome ?? clientesObj?.pushname ?? '').trim() ? String(clientesObj?.nome ?? clientesObj?.pushname ?? '').trim() : null
-      const fotoCliente = clientesObj?.foto_perfil ?? null
+      const nomeCliente =
+        (clientesObj?.nome && String(clientesObj.nome).trim()) ||
+        (clientesObj?.pushname && String(clientesObj.pushname).trim()) ||
+        null
+
+      const fotoCliente =
+        (clientesObj?.foto_perfil && String(clientesObj.foto_perfil).trim()) ||
+        null
+
       const isGroup = isGroupConversation(c)
       const ultimaMsg = Array.isArray(c.mensagens) && c.mensagens.length > 0 ? c.mensagens[0] : null
-      // Nunca exibir LID (lid:xxx) como nome ou número — é identificador interno do WhatsApp
+
       const isLid = !isGroup && c.telefone && String(c.telefone).trim().toLowerCase().startsWith('lid:')
       const telefoneExibivel = isLid ? null : c.telefone
+
       const contatoNome = isGroup
-        ? (c.nome_grupo || (c.telefone && !String(c.telefone).startsWith('lid:') ? c.telefone : null) || 'Grupo')
+        ? (c.nome_grupo || telefoneExibivel || 'Grupo')
         : (
-            // Cache primeiro (nome único, nunca alterna) — depois nome/pushname do cliente
             (c.nome_contato_cache && String(c.nome_contato_cache).trim()) ||
             nomeCliente ||
+            telefoneExibivel ||
+            'Sem nome'
+          )
+
+      const fotoPerfil = isGroup
+        ? null
+        : (
+            fotoCliente ||
+            (c.foto_perfil_contato_cache && String(c.foto_perfil_contato_cache).trim()) ||
             null
           )
-      const fotoPerfil = isGroup ? null : (fotoCliente ?? (c.foto_perfil_contato_cache && String(c.foto_perfil_contato_cache).trim()) ?? null)
       const unreadCount = unreadMap[Number(c.id)] || 0
       return {
         id: c.id,
@@ -627,13 +641,6 @@ exports.listarConversas = async (req, res) => {
         unread_count: unreadCount
       }
     })
-
-    // Enriquecimento: busca nome/foto via UltraMsg /contacts/contact e /contacts/image quando ausentes
-    try {
-      conversasFormatadas = await enrichConversationsWithContactData(conversasFormatadas, company_id)
-    } catch (e) {
-      // Silencioso: lista retorna sem enriquecimento em caso de erro (instância desconectada, etc.)
-    }
 
     // Um contato = uma conversa na lista (evita duplicata 55... vs 11...); conversas mais recentes no topo
     conversasFormatadas = deduplicateConversationsByContact(conversasFormatadas)
