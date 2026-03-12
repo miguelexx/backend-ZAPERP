@@ -31,16 +31,18 @@ function normalizeUltramsgToZapi(body) {
   const data = body.data || body
   const eventType = String(body.event_type || body.eventType || '').toLowerCase()
 
-  if (eventType === 'message_ack') {
+  if (eventType === 'message_ack' || eventType === 'webhook_message_ack') {
+    const msgId = data.id ?? data.sid ?? data.msgId ?? null
+    const ids = msgId ? [String(msgId).trim()] : []
     return {
       instanceId: body.instanceId ?? body.instance_id,
       instance_id: body.instanceId ?? body.instance_id,
-      messageId: data.id ?? data.sid ?? data.msgId ?? null,
-      zaapId: data.id ?? data.sid ?? data.msgId ?? null,
-      id: data.id ?? data.sid ?? data.msgId ?? null,
+      messageId: msgId,
+      zaapId: msgId,
+      id: msgId,
       ack: data.ack ?? data.status ?? 'pending',
       status: mapUltramsgAckToStatus(data.ack ?? data.status),
-      ids: data.id ? [data.id] : (data.sid ? [data.sid] : [])
+      ids
     }
   }
 
@@ -66,27 +68,28 @@ function normalizeUltramsgToZapi(body) {
     remoteJid = contactJid
   }
 
+  // messageId: UltraMSG usa id (formato "false_xxx@c.us_SID") como identificador canônico - message_ack envia o mesmo id
   const messageId = (data.id && String(data.id).trim()) ? data.id : (data.sid && String(data.sid).trim()) ? data.sid : null
   const bodyText = data.body ?? data.text ?? data.message ?? ''
   const msgType = String(data.type || 'chat').toLowerCase()
 
-  /** Normaliza campo de mídia (string URL ou objeto com url/link) para string URL. */
+  /** Normaliza campo de mídia (string URL ou objeto com url/link/file) para string URL. */
   const toUrl = (v) => {
     if (!v) return null
     if (typeof v === 'string' && v.trim().startsWith('http')) return v.trim()
-    if (typeof v === 'object' && v != null) return v.url ?? v.link ?? (v.src && String(v.src).startsWith('http') ? v.src : null) ?? null
+    if (typeof v === 'object' && v != null) return v.url ?? v.link ?? v.file ?? (v.src && String(v.src).startsWith('http') ? v.src : null) ?? null
     return null
   }
 
-  // data.media: pode ser string URL ou objeto { url, link }
+  // data.media: UltraMSG envia string URL ou objeto { url, link, file } para imagem/áudio/vídeo/documento
   const mediaUrl = toUrl(data.media)
 
   // Áudio: data.audio, data.audioUrl, data.mediaUrl
   let audioUrl = toUrl(data.audio) ?? toUrl(data.audioUrl) ?? (msgType === 'audio' || msgType === 'ptt' ? (mediaUrl ?? toUrl(data.mediaUrl)) : null)
 
-  // Mídia por tipo (UltraMsg pode enviar em data.media, data.mediaUrl ou campos específicos)
+  // Mídia por tipo: UltraMSG doc — media (URL) é o campo principal; mediaUrl, document/file, etc. como fallback
   const imageUrl = msgType === 'image' ? (mediaUrl ?? toUrl(data.mediaUrl) ?? toUrl(data.image)) : toUrl(data.image)
-  const documentUrl = toUrl(data.documentUrl) ?? toUrl(data.document)
+  const documentUrl = toUrl(data.documentUrl) ?? toUrl(data.document) ?? toUrl(data.file) ?? (msgType === 'document' || msgType === 'file' ? mediaUrl : null)
   const videoUrl = msgType === 'video' ? (mediaUrl ?? toUrl(data.videoUrl) ?? toUrl(data.video)) : (toUrl(data.videoUrl) ?? toUrl(data.video))
   const stickerUrl = msgType === 'sticker' ? (mediaUrl ?? toUrl(data.stickerUrl) ?? toUrl(data.sticker)) : (toUrl(data.stickerUrl) ?? toUrl(data.sticker))
 
@@ -104,6 +107,10 @@ function normalizeUltramsgToZapi(body) {
   const connectedPhone = fromMe ? jidToDigits(fromJid) : jidToDigits(toJid)
   const connectedPhoneNorm = connectedPhone ? (normalizePhoneBR(connectedPhone) || connectedPhone) : null
 
+  // to/toPhone/recipientPhone: toJid = destinatário (nosso número quando recebemos, contato quando enviamos). Necessário para resolveConversationKeyFromZapi quando fromMe.
+  const toPhoneDest = jidToDigits(toJid)
+  const toPhoneNorm = toPhoneDest ? (normalizePhoneBR(toPhoneDest) || toPhoneDest) : null
+
   const zapiLike = {
     instanceId: body.instanceId ?? body.instance_id,
     instance_id: body.instanceId ?? body.instance_id,
@@ -111,6 +118,10 @@ function normalizeUltramsgToZapi(body) {
     phone,
     remoteJid,
     isGroup,
+    to: !isGroup && toJid ? toJid : undefined,
+    toPhone: !isGroup ? (toPhoneNorm || toPhoneDest || undefined) : undefined,
+    recipientPhone: !isGroup ? (toPhoneNorm || toPhoneDest || undefined) : undefined,
+    recipient: !isGroup && toJid ? toJid : undefined,
     messageId,
     zaapId: messageId,
     id: messageId,
@@ -160,8 +171,9 @@ function normalizeUltramsgToZapi(body) {
 
 function mapUltramsgAckToStatus(ack) {
   const s = String(ack ?? '').toLowerCase()
-  if (s === 'sent' || s === '1') return 'sent'
-  if (s === 'delivered' || s === 'received' || s === '2') return 'delivered'
+  // UltraMSG doc: pending, server, device, read, played
+  if (s === 'sent' || s === 'server' || s === '1') return 'sent'
+  if (s === 'delivered' || s === 'received' || s === 'device' || s === '2') return 'delivered'
   if (s === 'read' || s === 'seen' || s === '3') return 'read'
   if (s === 'played' || s === '4') return 'played'
   return s || 'pending'
