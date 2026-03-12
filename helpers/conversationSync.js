@@ -25,8 +25,9 @@ function getCanonicalPhone(phone) {
   // Aceitar "lid:XXXX" para encontrar/criar a mesma conversa e exibir no front.
   if (s.startsWith('lid:') && s.length > 4) return s
 
-  // Grupos: preservar JID completo
+  // Grupos: preservar JID completo (120...@g.us ou Group-Owner@g.us)
   if (s.endsWith('@g.us')) return s
+  if (/^\d{5,15}-\d{10,15}$/.test(s)) return `${s}@g.us` // UltraMsg formato Group-Owner sem sufixo
 
   // JID individual @s.whatsapp.net → extrair apenas os dígitos do telefone
   let phoneStr = s
@@ -396,6 +397,11 @@ async function findOrCreateConversation(supabaseClient, {
   if (isGroup) {
     const digits = canonical.endsWith('@g.us') ? canonical.replace(/@g.us$/i, '') : canonical
     variants = [...new Set([digits, digits ? `${digits}@g.us` : ''].filter(Boolean))]
+    // UltraMsg formato Group-Owner: incluir parte antes do hífen para achar conversas legadas (ex: 3618420)
+    if (digits && digits.includes('-')) {
+      const groupPart = digits.split('-')[0]
+      if (groupPart) variants.push(groupPart, `${groupPart}@g.us`)
+    }
   } else {
     variants = possiblePhonesBR(canonical).length > 0 ? possiblePhonesBR(canonical) : [canonical]
   }
@@ -428,10 +434,14 @@ async function findOrCreateConversation(supabaseClient, {
     console.log(`[findOrCreateConversation] ${logPrefix} ✅ encontrada conv=${conv.id} phone_db="${conv.telefone}"`)
 
     // 5) Garantir telefone canônico na conversa encontrada (normalizar legado)
-    if (!isGroup && conv.telefone !== canonical) {
+    const storedCanonical = conv.telefone
+    const targetTelefone = canonical.endsWith('@g.us') ? canonical.replace(/@g.us$/i, '') : canonical
+    const needsUpdate = !isGroup && storedCanonical !== canonical
+    const needsGroupUpdate = isGroup && canonical.includes('-') && storedCanonical !== targetTelefone && !storedCanonical.includes('-')
+    if (needsUpdate || needsGroupUpdate) {
       try {
         await supabaseClient.from('conversas')
-          .update({ telefone: canonical })
+          .update({ telefone: targetTelefone })
           .eq('id', conv.id)
           .eq('company_id', company_id)
       } catch (_) { /* não crítico */ }

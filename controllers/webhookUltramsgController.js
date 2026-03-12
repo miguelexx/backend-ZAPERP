@@ -15,7 +15,6 @@
  * Formato Z-API:   { phone, fromMe, messageId, text/message/body, key, ... }
  */
 
-const { normalizeGroupIdForStorage } = require('../helpers/phoneHelper')
 const { normalizePhoneBR } = require('../helpers/phoneHelper')
 const webhookZapiController = require('./webhookZapiController')
 
@@ -59,8 +58,9 @@ function normalizeUltramsgToZapi(body) {
 
   if (isGroup) {
     remoteJid = toJid
-    const groupDigits = jidToDigits(toJid)
-    phone = groupDigits ? normalizeGroupIdForStorage(groupDigits) || groupDigits : toJid
+    // UltraMsg usa formato {GroupNumber}-{OwnerNumber}@g.us (ex: 3618420-5534984080098@g.us).
+    // Preservar o JID completo — não usar normalizeGroupIdForStorage (perde o hífen e quebra envio).
+    phone = toJid || (jidToDigits(toJid) ? `${jidToDigits(toJid)}@g.us` : '')
     participantPhone = jidToDigits(data.author || fromJid) || jidToDigits(fromJid) || ''
   } else {
     const contactJid = fromMe ? toJid : fromJid

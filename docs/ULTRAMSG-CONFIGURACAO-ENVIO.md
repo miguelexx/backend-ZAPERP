@@ -4,6 +4,28 @@ Documentação oficial para integração WhatsApp via UltraMsg. Inclui configura
 
 ---
 
+## 0. Troubleshooting: mensagens não chegam / variáveis concatenadas
+
+### Mensagens enviadas pelo sistema mas que não chegam no WhatsApp
+
+A API UltraMsg exige **`application/x-www-form-urlencoded`** no envio (não JSON). O provider está configurado para isso; em caso de falha, confira os logs no servidor.
+
+### NODE_ENV concatenado no .env
+
+Se aparecer no log: `NODE_ENV: productULTRAMSG_BASE_URL=...` ou similar, significa que **falta uma quebra de linha** entre variáveis no `.env`. Corrija assim:
+
+```
+# ❌ Errado (tudo na mesma linha):
+NODE_ENV=productionULTRAMSG_BASE_URL=https://api.ultramsg.com
+
+# ✅ Correto (cada variável em sua linha):
+NODE_ENV=production
+
+ULTRAMSG_BASE_URL=https://api.ultramsg.com
+```
+
+---
+
 ## 1. Configuração da instância (instance/settings)
 
 ### 1.1 Campos disponíveis

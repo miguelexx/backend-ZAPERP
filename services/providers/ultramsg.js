@@ -91,11 +91,17 @@ async function resolveConfig(opts = {}) {
   return { basePath, token }
 }
 
-/** Converte número para formato UltraMsg: +5534999999999 ou 120...@g.us */
+/**
+ * Converte número para formato UltraMsg: +5534999999999, 120...@g.us ou {Group}-{Owner}@g.us.
+ * UltraMsg usa dois formatos para grupos: 120363...@g.us (WhatsApp) ou 3618420-5534984080098@g.us (Group-Owner).
+ */
 function toUltramsgPhone(phone) {
   const s = String(phone || '').trim()
   if (!s) return ''
-  if (s.endsWith('@g.us') || s.includes('-group')) return s.includes('@') ? s : `${s.replace(/-group$/, '')}@g.us`
+  if (s.endsWith('@g.us')) return s
+  if (s.includes('-group')) return s.replace(/-group$/, '') + '@g.us'
+  // Formato UltraMsg Group-Owner sem sufixo (ex: 3618420-5534984080098)
+  if (/^\d{5,15}-\d{10,15}$/.test(s)) return `${s}@g.us`
   const digits = s.replace(/\D/g, '')
   if (!digits) return ''
   if (digits.startsWith('120') && digits.length >= 15) return `${digits}@g.us`
@@ -115,6 +121,10 @@ function phoneCandidatesForSend(phone) {
   return Array.from(new Set(list.filter(Boolean)))
 }
 
+/**
+ * UltraMsg API exige application/x-www-form-urlencoded (não JSON).
+ * Ver: https://docs.ultramsg.com/api/post/messages/chat e exemplos PHP/cURL.
+ */
 function createFetchOptions(method, body, extra = {}) {
   let signal
   try {
@@ -129,8 +139,16 @@ function createFetchOptions(method, body, extra = {}) {
     ...extra
   }
   if (body && method === 'POST') {
-    opts.headers = { ...opts.headers, 'Content-Type': 'application/json' }
-    opts.body = typeof body === 'string' ? body : JSON.stringify(body)
+    opts.headers = { ...opts.headers, 'Content-Type': 'application/x-www-form-urlencoded' }
+    if (typeof body === 'string') {
+      opts.body = body
+    } else if (body && typeof body === 'object') {
+      const params = new URLSearchParams()
+      for (const [k, v] of Object.entries(body)) {
+        if (v != null && v !== '') params.set(k, String(v))
+      }
+      opts.body = params.toString()
+    }
   }
   return opts
 }
