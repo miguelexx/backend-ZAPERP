@@ -61,6 +61,16 @@ function normalizeUltramsgToZapi(body) {
   const bodyText = data.body ?? data.text ?? data.message ?? ''
   const msgType = String(data.type || 'chat').toLowerCase()
 
+  // Áudio: UltraMsg pode enviar em data.audio (string/objeto), data.audioUrl, data.mediaUrl (quando type=audio/ptt)
+  let audioUrl = data.audioUrl ?? data.audio ?? null
+  if (audioUrl && typeof audioUrl === 'object') {
+    audioUrl = audioUrl.url ?? audioUrl.audioUrl ?? audioUrl.link ?? null
+  }
+  if ((!audioUrl || !String(audioUrl).startsWith('http')) && (msgType === 'audio' || msgType === 'ptt')) {
+    const mediaUrl = data.mediaUrl ?? data.media?.url ?? data.media?.link ?? null
+    if (mediaUrl && typeof mediaUrl === 'string' && mediaUrl.startsWith('http')) audioUrl = mediaUrl
+  }
+
   const zapiLike = {
     instanceId: body.instanceId ?? body.instance_id,
     instance_id: body.instanceId ?? body.instance_id,
@@ -74,7 +84,7 @@ function normalizeUltramsgToZapi(body) {
     body: bodyText,
     message: bodyText,
     text: { message: bodyText },
-    type: msgType,
+    type: (msgType === 'ptt' ? 'audio' : msgType),
     participantPhone: participantPhone || undefined,
     participant: participantPhone ? `${participantPhone}@c.us` : undefined,
     key: {
@@ -89,9 +99,9 @@ function normalizeUltramsgToZapi(body) {
     t: data.time,
     ack: data.ack ?? 'pending',
     status: data.ack ?? 'RECEIVED',
-    imageUrl: data.mediaUrl ?? data.image ?? null,
+    imageUrl: msgType === 'image' ? (data.mediaUrl ?? data.image ?? data.media?.url) : (data.image ?? null),
     documentUrl: data.documentUrl ?? data.document ?? null,
-    audioUrl: data.audioUrl ?? data.audio ?? null,
+    audioUrl: audioUrl ?? null,
     videoUrl: data.videoUrl ?? data.video ?? null,
     stickerUrl: data.stickerUrl ?? data.sticker ?? null
   }

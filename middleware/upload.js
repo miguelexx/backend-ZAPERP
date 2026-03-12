@@ -13,7 +13,10 @@ const ALLOWED_MIME = new Map([
   ['image/webp', '.webp'],
   ['application/pdf', '.pdf'],
   ['audio/mpeg', '.mp3'],
+  ['audio/mp3', '.mp3'],
   ['audio/ogg', '.ogg'],
+  ['audio/aac', '.aac'],
+  ['audio/x-m4a', '.m4a'],
   ['video/mp4', '.mp4'],
 ])
 
