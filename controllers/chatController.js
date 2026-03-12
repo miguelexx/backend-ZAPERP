@@ -5,6 +5,7 @@ const { isGroupConversation } = require('../helpers/conversaHelper')
 const { normalizePhoneBR, possiblePhonesBR, phoneKeyBR } = require('../helpers/phoneHelper')
 const { deduplicateConversationsByContact, sortConversationsByRecent, getCanonicalPhone, getOrCreateCliente } = require('../helpers/conversationSync')
 const { chooseBestName } = require('../helpers/contactEnrichment')
+const { enrichConversationsWithContactData } = require('../helpers/conversaEnrichment')
 
 // =====================================================
 // 1) HELPERS (TOPO DO ARQUIVO)
@@ -626,6 +627,13 @@ exports.listarConversas = async (req, res) => {
         unread_count: unreadCount
       }
     })
+
+    // Enriquecimento: busca nome/foto via UltraMsg /contacts/contact e /contacts/image quando ausentes
+    try {
+      conversasFormatadas = await enrichConversationsWithContactData(conversasFormatadas, company_id)
+    } catch (e) {
+      // Silencioso: lista retorna sem enriquecimento em caso de erro (instância desconectada, etc.)
+    }
 
     // Um contato = uma conversa na lista (evita duplicata 55... vs 11...); conversas mais recentes no topo
     conversasFormatadas = deduplicateConversationsByContact(conversasFormatadas)

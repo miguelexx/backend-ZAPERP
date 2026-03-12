@@ -71,6 +71,10 @@ function normalizeUltramsgToZapi(body) {
     if (mediaUrl && typeof mediaUrl === 'string' && mediaUrl.startsWith('http')) audioUrl = mediaUrl
   }
 
+  // Nome e foto: UltraMsg pode enviar notify, pushname, senderName, name, photo (quando disponível)
+  const senderName = data.notify ?? data.pushname ?? data.senderName ?? data.name ?? data.formattedName ?? data.short ?? data.chatName ?? data.displayName ?? null
+  const senderPhoto = data.photo ?? data.senderPhoto ?? data.profilePicture ?? data.profilePictureUrl ?? data.imgUrl ?? data.media?.url ?? null
+
   const zapiLike = {
     instanceId: body.instanceId ?? body.instance_id,
     instance_id: body.instanceId ?? body.instance_id,
@@ -103,7 +107,13 @@ function normalizeUltramsgToZapi(body) {
     documentUrl: data.documentUrl ?? data.document ?? null,
     audioUrl: audioUrl ?? null,
     videoUrl: data.videoUrl ?? data.video ?? null,
-    stickerUrl: data.stickerUrl ?? data.sticker ?? null
+    stickerUrl: data.stickerUrl ?? data.sticker ?? null,
+    senderName: senderName ? String(senderName).trim() : null,
+    senderPhoto: senderPhoto && String(senderPhoto).trim().startsWith('http') ? String(senderPhoto).trim() : null,
+    name: senderName ? String(senderName).trim() : null,
+    notifyName: senderName ? String(senderName).trim() : null,
+    pushName: senderName ? String(senderName).trim() : null,
+    photo: senderPhoto && String(senderPhoto).trim().startsWith('http') ? String(senderPhoto).trim() : null
   }
 
   return zapiLike
