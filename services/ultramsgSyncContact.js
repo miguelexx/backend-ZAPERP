@@ -114,13 +114,14 @@ async function syncUltraMsgContact(chatIdOrPhone, companyId, opts = {}) {
       return null
     }
 
-    const notify = metadata?.notify ? String(metadata.notify).trim() : null
     const name = metadata?.name ? String(metadata.name).trim() : null
+    const pushnameApi = metadata?.pushname ?? metadata?.notify
+    const pushnameFromApi = pushnameApi ? String(pushnameApi).trim() : null
     const short = metadata?.short ? String(metadata.short).trim() : null
     const vname = metadata?.vname ? String(metadata.vname).trim() : null
     const imgUrl = metadata?.imgUrl ? String(metadata.imgUrl).trim() : null
 
-    const nomeFromApi = name || short || notify || vname || null
+    const nomeFromApi = name || short || pushnameFromApi || vname || null
     const fotoFromApi = (profilePicUrl && isValidPhotoUrl(profilePicUrl)) || (imgUrl && isValidPhotoUrl(imgUrl))
       ? (profilePicUrl || imgUrl || null)
       : null
@@ -131,7 +132,7 @@ async function syncUltraMsgContact(chatIdOrPhone, companyId, opts = {}) {
       chatId,
       telefone,
       nome: nomeFromApi || telefoneFormatado,
-      pushname: notify || null,
+      pushname: pushnameFromApi || null,
       foto_perfil: fotoFromApi || null
     }
 

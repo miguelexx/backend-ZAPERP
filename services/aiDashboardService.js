@@ -17,6 +17,7 @@
 const { z } = require('zod')
 const { client: openai } = require('./openaiClient')
 const supabase = require('../config/supabase')
+const { getDisplayName } = require('../helpers/contactEnrichment')
 
 // ── Configuração ──────────────────────────────────────────────────────────────
 // Modelo padrão da IA. Pode ser sobrescrito via variável de ambiente AI_MODEL.
@@ -457,7 +458,7 @@ async function qClientesMaisAtivos(company_id, days, limit = 5) {
     .map((r) => {
       const cl = r.clienteId != null ? clienteMap.get(r.clienteId) : null
       const telefone = cl?.telefone || telefoneByConv.get(r.convId) || null
-      const nome = cl?.nome || cl?.pushname || telefone || '(sem nome)'
+      const nome = getDisplayName(cl) || telefone || '(sem nome)'
       return { id: r.clienteId, nome, telefone, mensagens: r.count }
     })
 }
@@ -502,7 +503,7 @@ async function qSlaAlertas(company_id, limit = 10) {
     const atendente = Array.isArray(c.usuarios) ? c.usuarios[0] : c.usuarios
     alertas.push({
       conversa_id: c.id,
-      cliente_nome: cl?.nome || cl?.pushname || c.telefone || '—',
+      cliente_nome: getDisplayName(cl) || c.telefone || '—',
       telefone: c.telefone,
       atendente_nome: atendente?.nome || '—',
       status_atendimento: c.status_atendimento,
@@ -778,7 +779,7 @@ async function qHistoricoAtendente(company_id, usuarioNome, days) {
     id: c.id,
     criado_em: c.criado_em,
     status_atendimento: c.status_atendimento,
-    cliente_nome: c.cliente_id ? (clienteMap.get(c.cliente_id)?.nome || clienteMap.get(c.cliente_id)?.pushname || c.telefone) : c.telefone || '—',
+    cliente_nome: c.cliente_id ? (getDisplayName(clienteMap.get(c.cliente_id)) || c.telefone) : c.telefone || '—',
   }))
 
   return { conversas: conversasFormatadas, usuario, periodo_dias: d }

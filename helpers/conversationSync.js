@@ -287,8 +287,8 @@ async function getOrCreateCliente(supabaseClient, company_id, phone, fields = {}
   }
 
   // 4) INSERT — cada empresa tem seus próprios clientes (UNIQUE company_id + telefone).
-  // NUNCA retornar cliente de outra company; isolamento multi-tenant.
-  const nomeRaw = fields.nome && String(fields.nome).trim()
+  // Prioridade: name (salvo no celular) > pushname (perfil WhatsApp) > telefone
+  const nomeRaw = (fields.nome && String(fields.nome).trim()) || (fields.pushname && String(fields.pushname).trim())
   const nome = (nomeRaw && !isBadName(nomeRaw)) ? nomeRaw : telefoneCanonico || null
   const pushname = (fields.pushname !== undefined && fields.pushname != null && String(fields.pushname).trim()) ? String(fields.pushname).trim() : null
   const insertData = {

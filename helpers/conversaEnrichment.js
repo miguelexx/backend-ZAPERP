@@ -62,7 +62,7 @@ async function enrichConversationsWithContactData(conversas, company_id, opts = 
     try {
       const data = await syncUltraMsgContact(conv.telefone, company_id, { skipPersistence: true })
       if (!data) return null
-      const nome = data.nome || data.pushname || null
+      const nome = data.nome || null
       const foto = data.foto_perfil && isValidPhotoUrl(data.foto_perfil) ? data.foto_perfil : null
       return { conv, nome, foto }
     } catch {

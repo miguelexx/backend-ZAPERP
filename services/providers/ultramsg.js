@@ -725,10 +725,13 @@ async function getContactMetadata(phone, opts = {}) {
       extraParams: { chatId }
     })
     if (ok && data && typeof data === 'object') {
+      const name = data.name ?? data.formattedName ?? null
+      const pushname = data.pushname ?? data.pushName ?? data.notify ?? null
       return {
-        name: data.name ?? data.formattedName ?? null,
+        name,
+        pushname,
         short: data.short ?? null,
-        notify: data.notify ?? data.pushName ?? null,
+        notify: pushname,
         vname: data.vname ?? null,
         imgUrl: data.imgUrl ?? data.photo ?? data.profilePicture ?? null
       }
@@ -749,10 +752,12 @@ async function getContactMetadata(phone, opts = {}) {
         return cPhone.endsWith(searchTail) || cPhone === digits
       })
       if (found) {
+        const pushname = found.pushname ?? found.pushName ?? found.notify ?? null
         return {
           name: found.name ?? null,
+          pushname,
           short: found.short ?? null,
-          notify: found.notify ?? null,
+          notify: pushname,
           vname: found.vname ?? null,
           imgUrl: found.imgUrl ?? found.photo ?? null
         }

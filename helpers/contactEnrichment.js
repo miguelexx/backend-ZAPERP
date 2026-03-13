@@ -173,9 +173,18 @@ function chooseBestName(currentName, candidateName, source, opts = {}) {
   return { name: cand, decision: 'updated' }
 }
 
+function getDisplayName(cliente) {
+  if (!cliente) return null
+  const nome = cliente.nome && String(cliente.nome).trim()
+  const pushname = cliente.pushname && String(cliente.pushname).trim()
+  const telefone = cliente.telefone && String(cliente.telefone).trim()
+  return nome || pushname || telefone || null
+}
+
 module.exports = {
   normalizeName,
   isBadName,
   scoreName,
-  chooseBestName
+  chooseBestName,
+  getDisplayName
 }

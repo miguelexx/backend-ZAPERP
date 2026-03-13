@@ -1,5 +1,6 @@
 const supabase = require('../config/supabase');
 const { normalizePhoneBR } = require('../helpers/phoneHelper');
+const { getDisplayName } = require('../helpers/contactEnrichment');
 
 /**
  * GET /clientes
@@ -30,7 +31,7 @@ exports.listarClientes = async (req, res) => {
       id: c.id,
       telefone: c.telefone,
       wa_id: c.wa_id,
-      nome: c.nome || c.pushname || null,
+      nome: getDisplayName(c) || null,
       pushname: c.pushname || null,
       observacoes: c.observacoes,
       foto_perfil: c.foto_perfil || null,

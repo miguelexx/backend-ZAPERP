@@ -15,7 +15,7 @@ const { getStatus } = require('../services/ultramsgIntegrationService')
 const { resetOnConnected } = require('../services/zapiConnectGuardService')
 const { normalizePhoneBR, possiblePhonesBR, normalizeGroupIdForStorage } = require('../helpers/phoneHelper')
 const { getCanonicalPhone, getOrCreateCliente, findOrCreateConversation, mergeConversasIntoCanonico, mergeConversationLidToPhone } = require('../helpers/conversationSync')
-const { chooseBestName, isBadName } = require('../helpers/contactEnrichment')
+const { chooseBestName, isBadName, getDisplayName } = require('../helpers/contactEnrichment')
 const { resolvePeerPhone } = require('../helpers/conversationKeyHelper')
 const { incrementarUnreadParaConversa } = require('./chatController')
 const { processIncomingMessage: processChatbotTriage } = require('../services/chatbotTriageService')
@@ -2154,7 +2154,7 @@ exports.receberZapi = async (req, res) => {
             const { data: rowsM } = await qM
             const ex = Array.isArray(rowsM) && rowsM.length > 0 ? rowsM[0] : null
             if (ex) {
-              remetenteNomeFinal = ex.nome || ex.pushname || remetenteNomeFinal
+              remetenteNomeFinal = getDisplayName(ex) || remetenteNomeFinal
             } else {
               // se não existe no banco, usa getOrCreateCliente para evitar duplicata (mesmo contato 12 vs 13 dígitos)
               if (pNorm) {
@@ -2454,7 +2454,7 @@ exports.receberZapi = async (req, res) => {
           }
           const r = await supabase.from('clientes').select('nome, pushname, telefone, foto_perfil').eq('id', syncClienteId).single()
           const data = r?.data
-          const nomeParaEmit = cacheConv.nome_contato_cache ?? convRow?.nome_contato_cache ?? data?.nome ?? data?.pushname ?? null
+          const nomeParaEmit = cacheConv.nome_contato_cache ?? convRow?.nome_contato_cache ?? getDisplayName(data) ?? null
           const fotoParaEmit = cacheConv.foto_perfil_contato_cache ?? convRow?.foto_perfil_contato_cache ?? data?.foto_perfil ?? null
           if (data && io && (nomeParaEmit || fotoParaEmit)) {
             console.log('✅ Contato sincronizado Z-API:', syncPhone?.slice(-6), nomeParaEmit || '(sem nome)')

@@ -5,6 +5,7 @@ const { isGroupConversation } = require('../helpers/conversaHelper')
 const { normalizePhoneBR, possiblePhonesBR, phoneKeyBR } = require('../helpers/phoneHelper')
 const { deduplicateConversationsByContact, sortConversationsByRecent, getCanonicalPhone, getOrCreateCliente } = require('../helpers/conversationSync')
 const { enrichConversationsWithContactData } = require('../helpers/conversaEnrichment')
+const { getDisplayName } = require('../helpers/contactEnrichment')
 
 // =====================================================
 // 1) HELPERS (TOPO DO ARQUIVO)
@@ -679,7 +680,7 @@ exports.listarConversas = async (req, res) => {
         cliente_id: cl.id,
         telefone: cl.telefone || '',
         tipo: 'cliente',
-        contato_nome: cl.nome || cl.pushname || cl.telefone || null,
+        contato_nome: getDisplayName(cl) || null,
         foto_perfil: cl.foto_perfil || null,
         sem_conversa: true,
         mensagens: [],
@@ -1203,7 +1204,7 @@ exports.abrirConversaCliente = async (req, res) => {
         cliente_id: cliente.id,
         telefone: conversaExistente.telefone,
         tipo: 'cliente',
-        contato_nome: cliente.nome || cliente.pushname || conversaExistente.telefone,
+        contato_nome: getDisplayName(cliente) || conversaExistente.telefone,
         foto_perfil: cliente.foto_perfil || null,
         unread_count: 0,
         tags: []
@@ -1233,7 +1234,7 @@ exports.abrirConversaCliente = async (req, res) => {
       cliente_id: cliente.id,
       telefone: novaConversa.telefone,
       tipo: 'cliente',
-      contato_nome: cliente.nome || cliente.pushname || novaConversa.telefone,
+      contato_nome: getDisplayName(cliente) || novaConversa.telefone,
       foto_perfil: cliente.foto_perfil || null,
       unread_count: 0,
       tags: []
@@ -1484,9 +1485,7 @@ exports.detalharChat = async (req, res) => {
       : rawClientes
     // Nunca exibir LID (lid:xxx) como nome ou número — identificador interno do WhatsApp
     const isLidConv = !isGroup && conversa.telefone && String(conversa.telefone).trim().toLowerCase().startsWith('lid:')
-    // Prioridade: nome (contato do celular) > pushname (perfil WhatsApp)
-    const clienteNomeBase = clientesConv?.nome ?? clientesConv?.pushname ?? null
-    const clienteNome = (clienteNomeBase && String(clienteNomeBase).trim()) ? String(clienteNomeBase).trim() : null
+    const clienteNome = getDisplayName(clientesConv)
     const nomeCache = (conversa.nome_contato_cache && String(conversa.nome_contato_cache).trim()) ? String(conversa.nome_contato_cache).trim() : null
     const nomeUnico = isGroup
       ? (conversa.nome_grupo ?? conversa.telefone ?? 'Grupo')
@@ -1538,7 +1537,7 @@ exports.detalharChat = async (req, res) => {
             if (io && synced) {
               const { data: cli } = cliId ? await supabase.from('clientes').select('nome, pushname, telefone, foto_perfil').eq('id', cliId).eq('company_id', cid).maybeSingle() : { data: null }
               const { data: conv } = await supabase.from('conversas').select('nome_contato_cache, foto_perfil_contato_cache').eq('id', id).eq('company_id', cid).maybeSingle()
-              const contatoNome = conv?.nome_contato_cache || cli?.nome || cli?.pushname || synced.nome || cliPhone
+              const contatoNome = conv?.nome_contato_cache || getDisplayName(cli) || synced.nome || cliPhone
               const fotoPerfil = conv?.foto_perfil_contato_cache || cli?.foto_perfil || synced.foto_perfil
               io.to(`empresa_${cid}`).emit('contato_atualizado', {
                 conversa_id: Number(id),
@@ -1986,7 +1985,7 @@ exports.enviarMensagemChat = async (req, res) => {
               const io = req.app.get('io')
               const { data: cli } = await supabase.from('clientes').select('nome, pushname, telefone, foto_perfil').eq('id', novoClienteId).eq('company_id', company_id).maybeSingle()
               const { data: conv } = await supabase.from('conversas').select('nome_contato_cache, foto_perfil_contato_cache').eq('id', conversa_id).eq('company_id', company_id).maybeSingle()
-              const contatoNome = conv?.nome_contato_cache || cli?.nome || cli?.pushname || synced.nome || conversa.telefone
+              const contatoNome = conv?.nome_contato_cache || getDisplayName(cli) || synced.nome || conversa.telefone
               const fotoPerfil = conv?.foto_perfil_contato_cache || cli?.foto_perfil || synced.foto_perfil
               io.to(`empresa_${company_id}`).emit('contato_atualizado', {
                 conversa_id: Number(conversa_id),
@@ -2386,11 +2385,7 @@ exports.enviarContatoWhatsapp = async (req, res) => {
       return res.status(404).json({ error: 'Contato não encontrado' })
     }
 
-    const contactName =
-      (cliente.pushname && String(cliente.pushname).trim()) ||
-      (cliente.nome && String(cliente.nome).trim()) ||
-      (cliente.telefone && String(cliente.telefone).trim()) ||
-      'Contato'
+    const contactName = getDisplayName(cliente) || 'Contato'
     const contactPhone = String(cliente.telefone || '').replace(/\D/g, '')
 
     if (!contactPhone) {
