@@ -303,10 +303,12 @@ async function sendText(phone, message, opts = {}) {
   if (replyMessageId) body.msgId = replyMessageId
 
   const { ok, status, data, text } = await postJson({ ...cfg, endpoint: '/messages/chat', body })
-  if (!ok) {
+  // UltraMsg retorna HTTP 200 mesmo em caso de erro (ex.: token inválido) — checar body também
+  const bodyError = data?.error || (!data?.id && !data?.sent && !data?.messageId && data?.message)
+  if (!ok || bodyError) {
     const err = data?.error || data?.message || text?.slice(0, 200) || `HTTP ${status}`
     console.warn('❌ UltraMsg sendText falhou:', nums[0]?.slice(-12), status, String(err).slice(0, 150), '| token:', maskToken(cfg.token))
-    return { ok: false, messageId: null, error: err }
+    return { ok: false, messageId: null, error: String(err) }
   }
   const msgId = data?.id ?? data?.messageId ?? null
   const numLog = nums[0] ? (String(nums[0]).replace(/\D/g, '').length >= 13 ? String(nums[0]).slice(-13) : String(nums[0]).slice(-12)) : ''
@@ -613,9 +615,10 @@ function parseContactsResponse(data) {
 }
 
 /**
- * Lista contatos. UltraMsg: GET /{instance_id}/contacts
+ * Lista contatos salvos na agenda. UltraMsg: GET /{instance_id}/contacts
  * Doc oficial: apenas token obrigatório; limit/offset podem não existir.
- * Tenta primeiro sem limit/offset; se vazio, tenta com paginação.
+ * Retorna apenas contatos com `name` definido (salvos na agenda do celular).
+ * Exclui grupos (@g.us), broadcasts e contatos sem número BR válido.
  */
 async function getContacts(page = 1, pageSize = 100, opts = {}) {
   const cfg = await resolveConfig(opts)
@@ -644,14 +647,32 @@ async function getContacts(page = 1, pageSize = 100, opts = {}) {
     if (WHATSAPP_DEBUG && page === 1) {
       console.log('[ULTRAMSG] getContacts:', { page, limit, offset, total: raw.length })
     }
-    return raw.map((c) => ({
-      phone: c.id || c.phone || c.wa_id || '',
-      name: c.name || null,
-      short: c.short || null,
-      notify: c.notify || null,
-      vname: c.vname || null,
-      imgUrl: c.imgUrl || c.photo || null
-    }))
+
+    const contacts = []
+    for (const c of raw) {
+      const phoneRaw = String(c.id || c.phone || c.wa_id || '').trim()
+      // Ignorar grupos, broadcasts e IDs inválidos
+      if (!phoneRaw || phoneRaw.endsWith('@g.us') || phoneRaw.endsWith('@broadcast')) continue
+      // Exigir name: apenas contatos salvos na agenda têm este campo preenchido
+      if (!c.name || !String(c.name).trim()) continue
+
+      const digits = phoneRaw.replace(/\D/g, '')
+      if (!digits || digits.length < 10) continue
+
+      contacts.push({
+        phone: phoneRaw,
+        name: String(c.name).trim(),
+        short: c.short ? String(c.short).trim() : null,
+        notify: c.notify ? String(c.notify).trim() : null,
+        vname: c.vname ? String(c.vname).trim() : null,
+        imgUrl: c.imgUrl || c.photo || null
+      })
+    }
+
+    if (WHATSAPP_DEBUG) {
+      console.log('[ULTRAMSG] getContacts filtrado:', { total_api: raw.length, com_name: contacts.length })
+    }
+    return contacts
   } catch (e) {
     if (WHATSAPP_DEBUG) console.warn('[ULTRAMSG] getContacts erro:', e?.message)
     return []

@@ -15,27 +15,46 @@ const { getEmpresaWhatsappConfig } = require('./whatsappConfigService')
 const { getOrCreateCliente } = require('../helpers/conversationSync')
 const { syncUltraMsgContact } = require('./ultramsgSyncContact')
 const { normalizePhoneBR, possiblePhonesBR, phoneKeyBR } = require('../helpers/phoneHelper')
+const { syncFotosProgressiva } = require('./syncFotosProgressivaService')
 
 const PAGE_SIZE = 100
 
 /**
  * Extrai phone e nome de um objeto contato retornado pelo provider.
  * Campos: phone, name, short, vname, notify, imgUrl (quando disponível)
+ *
+ * Regras de filtragem (evita contatos falsos/inventados):
+ * 1) Exige campo `name` não-vazio: contatos sem nome não estão salvos na agenda —
+ *    são apenas JIDs que apareceram em conversas, grupos ou spam.
+ * 2) Ignora grupos (@g.us) e IDs não-numéricos.
+ * 3) Exige número BR válido após normalização (12 ou 13 dígitos, começa com 55).
+ *    NÃO faz prepend '55' em números inválidos — evita inventar números.
  */
 function extractContactFields(raw) {
   if (!raw || typeof raw !== 'object') return null
-  const phoneRaw = raw.phone ?? raw.wa_id ?? raw.id ?? ''
-  const phone = String(phoneRaw || '').trim().replace(/\D/g, '')
-  if (!phone || phone.length < 10) return null
 
-  const norm = normalizePhoneBR(phone) || (phone.startsWith('55') ? phone : `55${phone}`)
-  // Prioridade: name (nome completo salvo no celular) > short (primeiro nome) > notify (perfil WA) > vname
-  const nome =
-    String(raw.name ?? raw.short ?? raw.notify ?? raw.vname ?? '').trim() ||
-    null
+  // Regra 1: exige name (contato salvo na agenda do celular)
+  const name = String(raw.name ?? '').trim()
+  if (!name) return null
+
+  const phoneRaw = raw.phone ?? raw.wa_id ?? raw.id ?? ''
+  const phoneStr = String(phoneRaw || '').trim()
+
+  // Regra 2: ignora grupos e IDs não numéricos
+  if (phoneStr.endsWith('@g.us') || phoneStr.includes('-group')) return null
+
+  const digits = phoneStr.replace(/\D/g, '')
+  if (!digits || digits.length < 10) return null
+
+  // Regra 3: normaliza para BR válido sem inventar prefixo
+  const norm = normalizePhoneBR(digits)
+  if (!norm || !norm.startsWith('55') || (norm.length !== 12 && norm.length !== 13)) return null
+
+  // Nome: prioriza name (salvo no celular) > short > notify > vname
+  const nome = name || String(raw.short ?? raw.notify ?? raw.vname ?? '').trim() || null
 
   const foto = raw.imgUrl ?? raw.photo ?? raw.profilePicture ?? null
-  const fotoUrl = foto && typeof foto === 'string' ? foto.trim() : (foto?.url ? String(foto.url).trim() : null)
+  const fotoUrl = foto && typeof foto === 'string' && foto.trim().startsWith('http') ? foto.trim() : null
 
   return { phone: norm, nome: nome || null, foto: fotoUrl || null }
 }
@@ -117,28 +136,38 @@ async function syncViaContactsApi(company_id) {
 }
 
 /**
- * Fallback: enriquece conversas e clientes a partir de conversas existentes.
- * Chama syncUltraMsgContact que atualiza conversas.nome_contato_cache, foto_perfil_contato_cache e clientes.
+ * Fallback: enriquece clientes EXISTENTES a partir de conversas.
+ * Apenas atualiza nome/foto de quem já tem registro em clientes — não cria novos.
+ * Para criar contatos, use syncViaContactsApi (que filtra pela agenda do celular).
  */
 async function syncViaFallback(company_id) {
   const stats = { totalFetched: 0, inserted: 0, updated: 0, skipped: 0, errors: [] }
 
+  // Busca conversas onde o cliente já existe mas está sem nome ou foto
   const { data: conversas } = await supabase
     .from('conversas')
-    .select('id, telefone, cliente_id, nome_contato_cache')
+    .select('id, telefone, cliente_id, nome_contato_cache, foto_perfil_contato_cache')
     .eq('company_id', company_id)
     .neq('status_atendimento', 'fechada')
     .not('telefone', 'like', '%@g.us')
     .not('telefone', 'like', 'lid:%')
+    .not('cliente_id', 'is', null)
     .limit(200)
 
   if (!Array.isArray(conversas) || conversas.length === 0) {
     return { mode: 'fallback', ...stats }
   }
 
-  stats.totalFetched = conversas.length
+  // Filtra apenas as que realmente precisam de enriquecimento (sem nome ou sem foto)
+  const precisamSync = conversas.filter((c) => {
+    const semNome = !c.nome_contato_cache || !String(c.nome_contato_cache).trim()
+    const semFoto = !c.foto_perfil_contato_cache || !String(c.foto_perfil_contato_cache).trim().startsWith('http')
+    return semNome || semFoto
+  })
 
-  for (const conv of conversas) {
+  stats.totalFetched = precisamSync.length
+
+  for (const conv of precisamSync) {
     const phone = conv.telefone
     if (!phone || phone.startsWith('lid:')) {
       stats.skipped++
@@ -146,31 +175,10 @@ async function syncViaFallback(company_id) {
     }
 
     try {
-      const variants = possiblePhonesBR(phone).length > 0 ? possiblePhonesBR(phone) : [phone]
-      const { data: prev } = await supabase
-        .from('clientes')
-        .select('id')
-        .eq('company_id', company_id)
-        .in('telefone', variants)
-        .limit(1)
-        .maybeSingle()
-
       const chatId = phone.includes('@c.us') ? phone : `${String(phone).replace(/\D/g, '')}@c.us`
       const result = await syncUltraMsgContact(chatId, company_id, { skipCache: true })
       if (result) {
-        const { data: cliente } = await supabase
-          .from('clientes')
-          .select('id')
-          .eq('company_id', company_id)
-          .in('telefone', variants)
-          .limit(1)
-          .maybeSingle()
-        if (cliente?.id) {
-          if (prev?.id) stats.updated++
-          else stats.inserted++
-        } else {
-          stats.skipped++
-        }
+        stats.updated++
       } else {
         stats.skipped++
       }
@@ -264,6 +272,18 @@ async function syncContacts(company_id) {
   } else if (result.errors.some((e) => e.includes('falhou') || e.includes('não configurado'))) {
     console.log('[ULTRAMSG-SYNC] contacts_api falhou — usando fallback')
     result = await syncViaFallback(company_id)
+  }
+
+  // Dispara busca de fotos em background para clientes sem foto (não bloqueia a resposta)
+  if (result.totalFetched > 0) {
+    setImmediate(async () => {
+      try {
+        const fotoResult = await syncFotosProgressiva(company_id, { onlySemFoto: true, limit: 100 })
+        console.log('[ULTRAMSG-SYNC] fotos background:', fotoResult)
+      } catch (e) {
+        console.warn('[ULTRAMSG-SYNC] fotos background erro:', e?.message)
+      }
+    })
   }
 
   return {

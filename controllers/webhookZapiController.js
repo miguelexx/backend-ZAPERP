@@ -1933,41 +1933,62 @@ exports.receberZapi = async (req, res) => {
           null
 
         const tsMs = Date.parse(criado_em)
-        const windowMs = 5 * 60 * 1000 // 5 min
+        // Janela ampliada para 15 min: cobre delay de envio UltraMsg e diferenças de relógio entre servidores
+        const windowMs = 15 * 60 * 1000
         const fromIso = Number.isFinite(tsMs) ? new Date(tsMs - windowMs).toISOString() : null
         const toIso = Number.isFinite(tsMs) ? new Date(tsMs + windowMs).toISOString() : null
 
-        let q = supabase
-          .from('mensagens')
-          .select('id, criado_em, texto, url, nome_arquivo, tipo, whatsapp_id, reply_meta')
-          .eq('company_id', company_id)
-          .eq('conversa_id', conversa_id)
-          .eq('direcao', 'out')
-          .is('whatsapp_id', null)
-          .order('criado_em', { ascending: false })
-          .order('id', { ascending: false })
-          .limit(10)
+        const buildQuery = (filterConversa) => {
+          let q = supabase
+            .from('mensagens')
+            .select('id, criado_em, texto, url, nome_arquivo, tipo, whatsapp_id, reply_meta, conversa_id')
+            .eq('company_id', company_id)
+            .eq('direcao', 'out')
+            .is('whatsapp_id', null)
+            .order('criado_em', { ascending: false })
+            .order('id', { ascending: false })
+            .limit(10)
+          if (filterConversa) q = q.eq('conversa_id', conversa_id)
+          if (fromIso && toIso) q = q.gte('criado_em', fromIso).lte('criado_em', toIso)
+          if (urlSig) q = q.eq('url', urlSig)
+          return q
+        }
 
-        if (fromIso && toIso) q = q.gte('criado_em', fromIso).lte('criado_em', toIso)
-
-        if (urlSig) q = q.eq('url', urlSig)
-
-        const { data: candidates } = await q
-        let cand = null
-        if (Array.isArray(candidates) && candidates.length > 0) {
-          if (urlSig) {
-            cand = candidates[0]
-          } else if (texto) {
+        const findCand = (rows) => {
+          if (!Array.isArray(rows) || rows.length === 0) return null
+          if (urlSig) return rows[0]
+          if (texto) {
             const textoNorm = String(texto || '').trim()
-            // Match exato primeiro; fallback case-insensitive (evita "Oi" vs "oi" duplicar)
-            cand = candidates.find((c) => {
+            return rows.find((c) => {
               const t = String(c.texto || '').trim()
               return t === textoNorm || t.toLowerCase() === textoNorm.toLowerCase()
             }) || null
-          } else {
-            cand = candidates[0]
+          }
+          return rows[0]
+        }
+
+        // Busca 1: na conversa específica resolvida pelo webhook
+        const { data: candidates } = await buildQuery(true)
+        let cand = findCand(candidates)
+
+        // Busca 2 (fallback): na empresa inteira — cobre divergência de conversa_id entre
+        // chatController (URL param) e webhook (findOrCreateConversation pode resolver diferente)
+        if (!cand && !urlSig) {
+          const { data: fallbackCandidates } = await buildQuery(false)
+          cand = findCand(fallbackCandidates)
+          if (cand && WHATSAPP_DEBUG) {
+            console.log('[Z-API] fromMe reconcile fallback: encontrado fora da conversa', {
+              cand_conversa: cand.conversa_id, webhook_conversa: conversa_id
+            })
           }
         }
+
+        if (!cand && WHATSAPP_DEBUG) {
+          console.warn('[Z-API] fromMe reconcile: nenhum candidato encontrado', {
+            conversa_id, texto: String(texto || '').slice(0, 30), fromIso, toIso
+          })
+        }
+
         if (cand?.id) {
           const updates = { whatsapp_id: whatsappIdStr }
           if (statusPayload) updates.status = statusPayload
@@ -1984,6 +2005,8 @@ exports.receberZapi = async (req, res) => {
 
           if (!patchErr && patched) {
             mensagemSalva = patched
+          } else if (patchErr) {
+            console.warn('⚠️ fromMe reconcile: falha ao atualizar candidato:', patchErr?.message)
           }
         }
       } catch (e) {

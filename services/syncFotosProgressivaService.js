@@ -49,13 +49,20 @@ async function syncFotosProgressiva(company_id, opts = {}) {
 
   const limit = Math.min(BATCH_SIZE, opts.limit || BATCH_SIZE)
   const offset = Math.max(0, opts.offset || 0)
+  const onlySemFoto = opts.onlySemFoto !== false // padrão: priorizar clientes sem foto
 
-  const { data: clientes } = await supabase
+  let query = supabase
     .from('clientes')
     .select('id, telefone, nome, pushname, foto_perfil')
     .eq('company_id', company_id)
     .not('telefone', 'is', null)
-    .range(offset, offset + limit - 1)
+
+  if (onlySemFoto) {
+    // Prioriza clientes sem foto ou com valor inválido ('null', vazio)
+    query = query.or('foto_perfil.is.null,foto_perfil.eq.,foto_perfil.eq.null')
+  }
+
+  const { data: clientes } = await query.range(offset, offset + limit - 1)
 
   if (!clientes?.length) return { total: 0, atualizados: 0, processados: 0 }
 
