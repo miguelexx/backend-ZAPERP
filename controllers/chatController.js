@@ -582,10 +582,7 @@ exports.listarConversas = async (req, res) => {
         if (fallbackCli) clientesObj = fallbackCli
       }
 
-      const nomeCliente =
-        (clientesObj?.nome && String(clientesObj.nome).trim()) ||
-        (clientesObj?.pushname && String(clientesObj.pushname).trim()) ||
-        null
+      const nomeCliente = getDisplayName(clientesObj)
 
       const fotoCliente =
         (clientesObj?.foto_perfil && String(clientesObj.foto_perfil).trim()) ||

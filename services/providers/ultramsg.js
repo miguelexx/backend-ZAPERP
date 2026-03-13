@@ -716,7 +716,9 @@ async function getProfilePicture(phoneOrChatId, opts = {}) {
 async function getContactMetadata(phone, opts = {}) {
   const cfg = await resolveConfig(opts)
   if (!cfg) return null
-  const chatId = phoneToChatId(phone)
+  const chatId = (opts.chatId && String(opts.chatId).trim().endsWith('@c.us'))
+    ? String(opts.chatId).trim()
+    : phoneToChatId(phone)
   if (!chatId) return null
   try {
     const { ok, data } = await getJson({

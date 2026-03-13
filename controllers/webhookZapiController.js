@@ -1470,8 +1470,8 @@ exports.receberZapi = async (req, res) => {
           const syncChatId = !isGroup && payload.chatId && String(payload.chatId).trim().endsWith('@c.us')
             ? String(payload.chatId).trim()
             : phone
-          const syncTimeoutMs = fromMe ? 6000 : 3000
-          const syncOpts = { skipPersistence: true }
+          const syncTimeoutMs = fromMe ? 6000 : 5000
+          const syncOpts = { skipCache: true }
           if (fromMe) syncOpts.skipCache = true
           try {
             const syncResult = await Promise.race([
@@ -2374,14 +2374,14 @@ exports.receberZapi = async (req, res) => {
       if (!mensagemFoiInseridaPeloWebhook) {
         io.to(`empresa_${company_id}`).emit('atualizar_conversa', { id: convIdForEmit })
       }
-      // conversa_atualizada: usar APENAS nome_contato_cache (nunca clientes.nome/pushname — evita nome alternar)
+      // conversa_atualizada: priorizar nome do sync (name) sobre cache; fallback nome_contato_cache
       const { data: convRow } = await supabase
         .from('conversas')
         .select('id, ultima_atividade, nome_contato_cache, foto_perfil_contato_cache, telefone, cliente_id, departamento_id')
         .eq('id', convIdForEmit)
         .eq('company_id', company_id)
         .maybeSingle()
-      let contatoNome = convRow?.nome_contato_cache ? String(convRow.nome_contato_cache).trim() : null
+      let contatoNome = (nomeParaCache && String(nomeParaCache).trim()) || (convRow?.nome_contato_cache ? String(convRow.nome_contato_cache).trim() : null)
       let fotoPerfil = convRow?.foto_perfil_contato_cache ? String(convRow.foto_perfil_contato_cache).trim() : null
       // Foto: fallback cliente só se cache vazio (nome: NUNCA — mantém contato fixo)
       if (!fotoPerfil && convRow?.cliente_id && !isGroup) {

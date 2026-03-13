@@ -104,7 +104,7 @@ async function syncUltraMsgContact(chatIdOrPhone, companyId, opts = {}) {
 
     try {
       const [meta, pic] = await Promise.all([
-        provider.getContactMetadata?.(telefone, { companyId }).catch(() => null) ?? null,
+        provider.getContactMetadata?.(telefone, { companyId, chatId }).catch(() => null) ?? null,
         provider.getProfilePicture?.(chatId, picOpts).catch(() => null) ?? null
       ])
       metadata = meta
