@@ -686,17 +686,20 @@ async function getGroups(opts = {}) {
 }
 
 /**
- * Converte phone para chatId no formato WhatsApp (55xxx@c.us ou 120xxx@g.us).
+ * Converte phone para chatId no formato WhatsApp: 5511986459364@c.us (13 dígitos BR) ou 120xxx@g.us.
+ * UltraMsg exige chatId sem + e sem espaços.
  */
 function phoneToChatId(phone) {
   const s = String(phone || '').trim()
   if (!s) return null
   if (s.endsWith('@g.us')) return s
+  if (s.endsWith('@c.us')) return s
   const digits = s.replace(/\D/g, '')
   if (!digits) return null
   if (digits.startsWith('120') && digits.length >= 15) return `${digits}@g.us`
-  const fmt = digits.startsWith('55') ? digits : '55' + digits
-  return `${fmt}@c.us`
+  const norm = normalizePhoneBR(s)
+  const fmt = toZapiSendFormat(norm || digits) || (digits.startsWith('55') ? digits : '55' + digits)
+  return fmt ? `${fmt}@c.us` : null
 }
 
 /**
