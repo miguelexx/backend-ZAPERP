@@ -802,10 +802,11 @@ async function getProfilePicture(phoneOrChatId, opts = {}) {
       console.log('[ULTRAMSG] getProfilePicture', { chatId: chatId.slice(-12), ok, status: data?.error ?? 'ok' })
     }
     if (!ok) return null
-    // Resposta pode ser objeto JSON com URL ou string direta com a URL
+    // Resposta pode ser objeto JSON com URL ou string direta com a URL.
+    // UltraMsg retorna: { "success": "https://..." }
     let url = null
     if (data && typeof data === 'object') {
-      url = data.url ?? data.image ?? data.img ?? data.profilePicture ?? data.profilePic ?? data.link ?? null
+      url = data.success ?? data.url ?? data.image ?? data.img ?? data.profilePicture ?? data.profilePic ?? data.link ?? null
     }
     if (!url && typeof text === 'string' && text.trim().startsWith('http')) url = text.trim()
     return url && typeof url === 'string' ? url.trim() : null
