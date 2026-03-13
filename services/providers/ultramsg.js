@@ -96,8 +96,8 @@ async function resolveConfig(opts = {}) {
 }
 
 /**
- * Converte número para formato UltraMsg: +5534999999999, 120...@g.us ou {Group}-{Owner}@g.us.
- * UltraMsg usa dois formatos para grupos: 120363...@g.us (WhatsApp) ou 3618420-5534984080098@g.us (Group-Owner).
+ * Converte número para formato UltraMsg: +5511986459364 (13 dígitos BR), 120...@g.us ou {Group}-{Owner}@g.us.
+ * UltraMsg exige DDI 55 completo. Prioriza normalizePhoneBR + toZapiSendFormat para garantir 13 dígitos (celular).
  */
 function toUltramsgPhone(phone) {
   const s = String(phone || '').trim()
@@ -109,7 +109,9 @@ function toUltramsgPhone(phone) {
   const digits = s.replace(/\D/g, '')
   if (!digits) return ''
   if (digits.startsWith('120') && digits.length >= 15) return `${digits}@g.us`
-  const fmt = toZapiSendFormat(digits) || (digits.startsWith('55') ? digits : '55' + digits)
+  // Normaliza BR (55 + DDD + número) e garante 13 dígitos para celular (toZapiSendFormat insere 9 se 12)
+  const norm = normalizePhoneBR(s)
+  const fmt = toZapiSendFormat(norm || digits) || (digits.startsWith('55') ? digits : '55' + digits)
   return fmt ? `+${fmt}` : ''
 }
 
@@ -233,7 +235,8 @@ async function sendText(phone, message, opts = {}) {
     return { ok: false, messageId: null, error: err }
   }
   const msgId = data?.id ?? data?.messageId ?? null
-  console.log('✅ UltraMsg mensagem enviada:', nums[0]?.slice(-12), msgId ? `id=${String(msgId).slice(0, 14)}...` : '')
+  const numLog = nums[0] ? (String(nums[0]).replace(/\D/g, '').length >= 13 ? String(nums[0]).slice(-13) : String(nums[0]).slice(-12)) : ''
+  console.log('✅ UltraMsg mensagem enviada:', numLog || nums[0], msgId ? `id=${String(msgId).slice(0, 14)}...` : '')
   return { ok: true, messageId: msgId ? String(msgId) : null }
 }
 
