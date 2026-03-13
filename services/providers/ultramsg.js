@@ -21,6 +21,7 @@ const FILENAME_MAX_LEN = 255
 const CHATS_MESSAGES_LIMIT_MAX = 1000
 const ULTRAMSG_TIMEOUT_MS = Number(process.env.ULTRAMSG_TIMEOUT_MS) || 30_000
 const lastSendPerCompany = new Map()
+const WHATSAPP_DEBUG = String(process.env.WHATSAPP_DEBUG || '').toLowerCase() === 'true'
 
 // ========== Camada centralizada UltraMsg (contrato oficial) ==========
 
@@ -710,8 +711,26 @@ async function getProfilePicture(phoneOrChatId, opts = {}) {
 }
 
 /**
+ * Extrai objeto de contato de resposta da API (suporta múltiplos formatos).
+ */
+function extractContactFromResponse(rawData) {
+  if (!rawData || typeof rawData !== 'object') return null
+  const candidates = [rawData.contact, rawData.data, rawData]
+  for (const c of candidates) {
+    if (c && typeof c === 'object' && (c.name != null || c.pushname != null || c.pushName != null || c.notify != null)) {
+      return c
+    }
+  }
+  if (rawData.name != null || rawData.pushname != null || rawData.pushName != null || rawData.notify != null) {
+    return rawData
+  }
+  return null
+}
+
+/**
  * Metadados do contato. UltraMsg: GET /contacts/contact?chatId=... ou busca em GET /contacts.
  * Retorna: { name, short, notify, vname, imgUrl } para ultramsgSyncContact.
+ * Prioridade: name (nome salvo no celular) > pushname (nome de perfil WhatsApp).
  */
 async function getContactMetadata(phone, opts = {}) {
   const cfg = await resolveConfig(opts)
@@ -720,24 +739,38 @@ async function getContactMetadata(phone, opts = {}) {
     ? String(opts.chatId).trim()
     : phoneToChatId(phone)
   if (!chatId) return null
-  try {
-    const { ok, data } = await getJson({
-      ...cfg,
-      endpoint: '/contacts/contact',
-      extraParams: { chatId }
-    })
-    if (ok && data && typeof data === 'object') {
-      const name = data.name ?? data.formattedName ?? null
-      const pushname = data.pushname ?? data.pushName ?? data.notify ?? null
-      return {
-        name,
-        pushname,
-        short: data.short ?? null,
-        notify: pushname,
-        vname: data.vname ?? null,
-        imgUrl: data.imgUrl ?? data.photo ?? data.profilePicture ?? null
+  const paramNames = ['chatId', 'chatID']
+  for (const paramName of paramNames) {
+    try {
+      const { ok, data: rawData } = await getJson({
+        ...cfg,
+        endpoint: '/contacts/contact',
+        extraParams: { [paramName]: chatId }
+      })
+      if (WHATSAPP_DEBUG) {
+        console.log('[ULTRAMSG] getContactMetadata', { chatId: chatId.slice(-12), paramName, ok, hasData: !!rawData, keys: rawData && typeof rawData === 'object' ? Object.keys(rawData) : [] })
       }
+      const data = extractContactFromResponse(rawData)
+      if (ok && data) {
+        const name = data.name ?? data.formattedName ?? null
+        const pushname = data.pushname ?? data.pushName ?? data.notify ?? null
+        if (WHATSAPP_DEBUG && (name || pushname)) {
+          console.log('[ULTRAMSG] getContactMetadata resultado:', { name: name || '(vazio)', pushname: pushname || '(vazio)' })
+        }
+        return {
+          name: name ? String(name).trim() : null,
+          pushname: pushname ? String(pushname).trim() : null,
+          short: data.short ? String(data.short).trim() : null,
+          notify: pushname ? String(pushname).trim() : null,
+          vname: data.vname ? String(data.vname).trim() : null,
+          imgUrl: data.imgUrl ?? data.photo ?? data.profilePicture ?? null
+        }
+      }
+    } catch (e) {
+      if (WHATSAPP_DEBUG) console.warn('[ULTRAMSG] getContactMetadata erro:', paramName, e?.message)
     }
+  }
+  try {
     // Fallback: busca em getContacts (lista paginada)
     const digits = String(phone || '').replace(/\D/g, '')
     const searchTail = digits.slice(-8)

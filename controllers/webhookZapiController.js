@@ -1510,7 +1510,12 @@ exports.receberZapi = async (req, res) => {
           foto_perfil: senderPhoto || undefined
         })
         cliente_id = cid
-        if (cliente_id) pendingContactSync = { phone, cliente_id }
+        if (cliente_id) {
+          const chatIdForSync = !isGroup && payload.chatId && String(payload.chatId).trim().endsWith('@c.us')
+            ? String(payload.chatId).trim()
+            : (payload.key?.remoteJid && String(payload.key.remoteJid).trim().endsWith('@c.us') ? String(payload.key.remoteJid).trim() : null)
+          pendingContactSync = { phone, cliente_id, chatId: chatIdForSync || phone }
+        }
         // Pipeline NUNCA aborta por cliente: mesmo sem cliente_id, mensagem e socket seguem
       }
     }
@@ -2419,15 +2424,16 @@ exports.receberZapi = async (req, res) => {
     }
 
     if (pendingContactSync && io) {
-      const { cliente_id: syncClienteId } = pendingContactSync
+      const { cliente_id: syncClienteId, chatId: syncChatId } = pendingContactSync
       const syncPhone = pendingContactSync.phone
+      const syncInput = (syncChatId && String(syncChatId).endsWith('@c.us')) ? syncChatId : syncPhone
       const convId = convIdForEmit
       // Sync em background: atualiza cliente E conversa (nome/foto) quando o sync inicial falhou ou retornou vazio
       Promise.resolve().then(async () => {
         try {
           const { data: current } = await supabase.from('clientes').select('nome, pushname, foto_perfil').eq('id', syncClienteId).eq('company_id', company_id).maybeSingle()
           const { data: convRow } = await supabase.from('conversas').select('nome_contato_cache, foto_perfil_contato_cache').eq('id', convId).eq('company_id', company_id).maybeSingle()
-          const synced = await syncUltraMsgContact(syncPhone, company_id, { skipPersistence: true, skipCache: fromMe }).catch(() => null)
+          const synced = await syncUltraMsgContact(syncInput, company_id, { skipPersistence: true, skipCache: fromMe }).catch(() => null)
           if (!synced) return null
           const up = {}
           const telefoneTail = String(syncPhone).replace(/\D/g, '').slice(-6) || null
