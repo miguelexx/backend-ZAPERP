@@ -25,10 +25,12 @@ const WHATSAPP_DEBUG = String(process.env.WHATSAPP_DEBUG || '').toLowerCase() ==
 
 // ========== Camada centralizada UltraMsg (contrato oficial) ==========
 
-/** Constrói base URL: https://api.ultramsg.com/{instance_id} */
+/** Constrói base URL: https://api.ultramsg.com/instance{id} — UltraMsg exige prefixo "instance" */
 function buildBaseUrl(instanceId) {
   if (!instanceId || typeof instanceId !== 'string') return ''
-  return `${ULTRAMSG_BASE_URL}/${encodeURIComponent(String(instanceId).trim())}`
+  const id = String(instanceId).trim()
+  const segment = id.toLowerCase().startsWith('instance') ? id : `instance${id}`
+  return `${ULTRAMSG_BASE_URL}/${encodeURIComponent(segment)}`
 }
 
 /** Adiciona token ao body (POST) ou query (GET). */
@@ -88,7 +90,8 @@ async function resolveConfig(opts = {}) {
   const instanceId = String(config.instance_id || '').trim()
   const token = String(config.instance_token || '').trim()
   if (!instanceId || !token) return null
-  const basePath = `${ULTRAMSG_BASE_URL}/${encodeURIComponent(instanceId)}`
+  const segment = instanceId.toLowerCase().startsWith('instance') ? instanceId : `instance${instanceId}`
+  const basePath = `${ULTRAMSG_BASE_URL}/${encodeURIComponent(segment)}`
   return { basePath, token }
 }
 
