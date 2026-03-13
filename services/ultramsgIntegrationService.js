@@ -8,14 +8,23 @@ const { getEmpresaWhatsappConfig, getCompanyIdByInstanceId, fetchWithTimeout } =
 const ULTRAMSG_BASE_URL = (process.env.ULTRAMSG_BASE_URL || 'https://api.ultramsg.com').replace(/\/$/, '')
 const TIMEOUT_MS = 10_000
 
+/** Normaliza instance_id: UltraMsg aceita numérico (51534) ou com prefixo (instance51534). Unifica com provider. */
+function normalizeInstanceId(instanceId) {
+  if (!instanceId || typeof instanceId !== 'string') return ''
+  const id = String(instanceId).trim()
+  return id.toLowerCase().startsWith('instance') ? id : `instance${id}`
+}
+
 function buildUrl(instanceId, path) {
-  return `${ULTRAMSG_BASE_URL}/${encodeURIComponent(instanceId)}${path}`
+  const segment = normalizeInstanceId(instanceId)
+  return segment ? `${ULTRAMSG_BASE_URL}/${encodeURIComponent(segment)}${path}` : ''
 }
 
 async function request(companyId, method, path, body = null) {
   const { config, error } = await getEmpresaWhatsappConfig(companyId)
   if (error || !config) return { error: error || 'Empresa sem instância configurada' }
   const url = buildUrl(config.instance_id, path)
+  if (!url) return { error: 'Empresa sem instance_id configurado' }
   const token = encodeURIComponent(config.instance_token)
   const fullUrl = body ? url : `${url}?token=${token}`
   let signal
@@ -74,7 +83,9 @@ async function getQrCodeImage(companyId) {
 
   const { config, error } = await getEmpresaWhatsappConfig(companyId)
   if (error || !config) return { error: error || 'Empresa sem instância configurada' }
-  const url = buildUrl(config.instance_id, '/instance/qrCode') + '?token=' + encodeURIComponent(config.instance_token)
+  const baseUrl = buildUrl(config.instance_id, '/instance/qrCode')
+  if (!baseUrl) return { error: 'Empresa sem instance_id configurado' }
+  const url = baseUrl + '?token=' + encodeURIComponent(config.instance_token)
   try {
     const res = await fetchWithTimeout(url, {
       method: 'GET',

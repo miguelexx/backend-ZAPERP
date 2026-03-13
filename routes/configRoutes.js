@@ -4,10 +4,14 @@ const auth = require('../middleware/auth')
 const supervisorOrAdmin = require('../middleware/supervisorOrAdmin')
 const configController = require('../controllers/configController')
 const permissoesController = require('../controllers/permissoesController')
+const configOperacionalRoutes = require('./configOperacionalRoutes')
 
 // Configurações: supervisor e admin (atendente não acessa)
 router.use(auth)
 router.use(supervisorOrAdmin)
+
+// Config operacional e auditoria de eventos (proteção WhatsApp)
+router.use('/', configOperacionalRoutes)
 
 router.get('/empresa', configController.getEmpresa)
 router.put('/empresa', configController.putEmpresa)

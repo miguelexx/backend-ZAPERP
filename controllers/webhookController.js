@@ -16,7 +16,7 @@ async function enviarMensagemWhatsApp(telefone, texto, phoneId = null, replyMess
   const resolvedPhoneId = phoneId || defaultPhoneId
   if (!token || !resolvedPhoneId) return { ok: false, messageId: null }
   const num = String(telefone).replace(/\D/g, '')
-  const url = `https://graph.facebook.com/v18.0/${resolvedPhoneId}/messages`
+  const url = `https://graph.facebook.com/v21.0/${resolvedPhoneId}/messages`
   try {
     const body = {
       messaging_product: 'whatsapp',
@@ -53,7 +53,7 @@ async function buscarEMediasWhatsApp(mediaId) {
   const token = process.env.WHATSAPP_TOKEN || process.env.META_ACCESS_TOKEN
   if (!token) return null
   try {
-    const url = `https://graph.facebook.com/v18.0/${mediaId}`
+    const url = `https://graph.facebook.com/v21.0/${mediaId}`
     const res = await fetch(`${url}?access_token=${token}`)
     const data = await res.json()
     const mediaUrl = data?.url

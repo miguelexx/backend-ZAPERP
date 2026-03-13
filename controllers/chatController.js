@@ -263,33 +263,7 @@ async function incrementarUnreadParaConversa(company_id, conversa_id) {
   }
 }
 
-/**
- * Marca a conversa como lida para TODOS os usuários da empresa (zera notificação).
- * Usado quando a mensagem é visualizada no celular (Z-API envia read/played): a notificação
- * de mensagem nova deve sumir no sistema para todos.
- */
-async function marcarConversaComoLidaParaTodos(company_id, conversa_id) {
-  const cid = Number(company_id)
-  const convId = Number(conversa_id)
-  if (!cid || !convId) return
-  try {
-    await supabase
-      .from('conversa_unreads')
-      .update({ unread_count: 0, updated_at: new Date().toISOString() })
-      .eq('company_id', cid)
-      .eq('conversa_id', convId)
-    await supabase
-      .from('conversas')
-      .update({ lida: true })
-      .eq('company_id', cid)
-      .eq('id', convId)
-  } catch (e) {
-    console.warn('marcarConversaComoLidaParaTodos:', e?.message || e)
-  }
-}
-
 exports.incrementarUnreadParaConversa = incrementarUnreadParaConversa
-exports.marcarConversaComoLidaParaTodos = marcarConversaComoLidaParaTodos
 
 // =====================================================
 // AUX: registrar atendimentos
@@ -1127,15 +1101,6 @@ exports.atualizarObservacao = async (req, res) => {
     return res.status(500).json({ error: 'Erro ao atualizar observação' });
   }
 };
-
-// Rotas não registradas em chatRoutes; responsável = use assumir/transferir
-exports.atualizarOrigem = async (req, res) => {
-  return res.status(501).json({ error: 'Atualizar origem não implementado; use Supabase se precisar.' })
-}
-
-exports.atualizarResponsavel = async (req, res) => {
-  return res.status(501).json({ error: 'Use POST /chats/:id/assumir ou POST /chats/:id/transferir para responsável.' })
-}
 
 // =====================================================
 // 5b) ABRIR CONVERSA POR CLIENTE (lista de clientes → chat list)

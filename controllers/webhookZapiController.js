@@ -54,14 +54,6 @@ function _logWebhook(entry) {
   if (_webhookLog.length > 30) _webhookLog.pop()
 }
 
-// Buffer separado para requisições REJEITADAS (token ausente/inválido) — diagnóstico de configuração
-const _rejectedLog = []
-function _logRejected(entry) {
-  _rejectedLog.unshift({ ts: new Date().toISOString(), ...entry })
-  if (_rejectedLog.length > 20) _rejectedLog.pop()
-}
-exports._logRejected = _logRejected
-
 /** Detecta se o payload é de um grupo (remoteJid @g.us, isGroup ou tipo grupo). */
 function isGroupPayload(payload) {
   if (!payload || typeof payload !== 'object') return false
@@ -579,64 +571,6 @@ function getPayloads(body) {
     return [merge(body, body.message)]
   }
   return [body]
-}
-
-/** GET /webhooks/zapi/health — health check para configurar no painel Z-API. Sempre 200. */
-exports.healthZapi = (req, res) => res.status(200).json({ ok: true })
-
-/** GET /webhooks/zapi — teste de conectividade; retorna todas as URLs para configurar no painel Z-API. */
-exports.testarZapi = (req, res) => {
-  const base = (process.env.APP_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '')
-  const prefix = `${base}/webhooks/zapi`
-  const urls = {
-    health: `${prefix}/health`,
-    mensagens: prefix,
-    status: `${prefix}/status`,
-    connection: `${prefix}/connection`,
-    presence: `${prefix}/presence`
-  }
-  return res.status(200).json({
-    ok: true,
-    message: 'Configure no painel Z-API (Opções → Editar instância) cada webhook com a URL correspondente. Método: POST.',
-    urls,
-    webhooks: [
-      { nome: 'Ao receber / Ao enviar', url: urls.mensagens, tipo: 'ReceivedCallback + DeliveryCallback' },
-      { nome: 'Receber status da mensagem', url: urls.status, tipo: 'MessageStatusCallback (READ/RECEIVED/PLAYED)' },
-      { nome: 'Ao conectar / Ao desconectar', url: urls.connection, tipo: 'connected / disconnected' },
-      { nome: 'Status do chat (digitando)', url: urls.presence, tipo: 'PresenceChatCallback' }
-    ]
-  })
-}
-
-/** GET /webhooks/zapi/debug — diagnóstico completo: webhooks recebidos, rejeitados e configuração. */
-/** Segurança: NUNCA retorna o valor real do token na resposta (evita vazamento em logs/cache). */
-exports.debugZapi = (req, res) => {
-  const appUrl = (process.env.APP_URL || '').replace(/\/$/, '')
-  const token = String(process.env.ZAPI_WEBHOOK_TOKEN || '').trim()
-  const tokenSuffix = token ? '?token=***' : '(SEM TOKEN CONFIGURADO)'
-  return res.status(200).json({
-    ok: true,
-    servidor: {
-      app_url: appUrl || '(não definido)',
-      zapi_instance_id: '(multi-tenant via empresa_zapi)',
-      webhook_token_configurado: !!token,
-      whatsapp_debug: WHATSAPP_DEBUG,
-      company_id: '(multi-tenant por instanceId)',
-    },
-    urls_esperadas: {
-      recebidas: `${appUrl}/webhooks/zapi${tokenSuffix}`,
-      status:    `${appUrl}/webhooks/zapi/status${tokenSuffix}`,
-      conexao:   `${appUrl}/webhooks/zapi/connection${tokenSuffix}`,
-      presenca:  `${appUrl}/webhooks/zapi/presence${tokenSuffix}`,
-    },
-    diagnostico: {
-      total_recebidos: _webhookLog.length,
-      total_rejeitados: _rejectedLog.length,
-      instrucao: 'POST /webhooks/zapi* não exige token. Validação por instanceId + empresa_zapi. Se webhook retorna ignored:instance_not_mapped, adicione instance_id em empresa_zapi.',
-    },
-    ultimos_webhooks_recebidos: _webhookLog,
-    ultimos_webhooks_rejeitados: _rejectedLog,
-  })
 }
 
 /** Log seguro (sem tokens/conteúdo sensível) — diagnóstico end-to-end webhook. Nunca logar tokens nem URL com /token/ */
