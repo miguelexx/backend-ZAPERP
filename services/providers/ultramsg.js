@@ -64,6 +64,58 @@ function maskToken(t) {
   return t.slice(0, 2) + '***' + t.slice(-2)
 }
 
+/** Sanitiza objeto para log (mascara token). */
+function sanitizeForLog(obj, token) {
+  if (!obj || typeof obj !== 'object') return obj
+  const out = {}
+  for (const [k, v] of Object.entries(obj)) {
+    if (k === 'token' && v != null) out[k] = maskToken(token || v)
+    else if (typeof v === 'object' && v !== null && !Array.isArray(v) && !(v instanceof URLSearchParams)) out[k] = sanitizeForLog(v, token)
+    else out[k] = v
+  }
+  return out
+}
+
+/** Trunca string para log (evita poluir console). */
+function truncateForLog(s, maxLen = 500) {
+  if (s == null) return s
+  const str = typeof s === 'string' ? s : JSON.stringify(s)
+  if (str.length <= maxLen) return str
+  return str.slice(0, maxLen) + '...[truncado]'
+}
+
+/** Mascara token em string form-urlencoded (token=xxx&...). */
+function maskTokenInFormBody(str) {
+  if (!str || typeof str !== 'string') return str
+  return str.replace(/token=([^&]*)/gi, (_, t) => `token=${maskToken(t)}`)
+}
+
+/** Log completo da requisição UltraMsg: URL, headers, params, body e retorno. */
+function logUltramsgRequest({ method, url, headers = {}, params = null, body = null, responseStatus, responseData, responseText }) {
+  const headersObj = typeof headers === 'object' && headers !== null && !Array.isArray(headers)
+    ? (headers.get ? Object.fromEntries([...Object.entries(headers)].filter(([k]) => !k.startsWith('_'))) : { ...headers })
+    : {}
+  const sanitizedHeaders = sanitizeForLog(headersObj)
+  let bodyForLog = body
+  if (body != null && typeof body === 'string') bodyForLog = maskTokenInFormBody(truncateForLog(body, 800))
+  else if (body != null && typeof body === 'object') bodyForLog = sanitizeForLog(body, body?.token)
+  const logPayload = {
+    '[ULTRAMSG REQUEST]': {
+      method,
+      url,
+      headers: sanitizedHeaders,
+      ...(params != null && typeof params === 'object' && Object.keys(params).length > 0 && { params: sanitizeForLog(params, params?.token) }),
+      ...(bodyForLog != null && { body: bodyForLog })
+    },
+    '[ULTRAMSG RESPONSE]': {
+      status: responseStatus,
+      data: responseData != null ? truncateForLog(JSON.stringify(responseData), 1000) : null,
+      text: responseText != null ? truncateForLog(responseText, 500) : null
+    }
+  }
+  console.log(JSON.stringify(logPayload, null, 2))
+}
+
 async function awaitSendDelay(companyId) {
   if (MIN_DELAY_BETWEEN_SENDS_MS <= 0) return
   const key = companyId ?? 'default'
@@ -162,21 +214,42 @@ function createFetchOptions(method, body, extra = {}) {
 async function post({ basePath, token, endpoint, body }) {
   const url = `${basePath}${endpoint}`
   const payload = appendToken(body || {}, token)
-  const res = await fetchWithRetry(url, createFetchOptions('POST', payload))
+  const fetchOpts = createFetchOptions('POST', payload)
+  const res = await fetchWithRetry(url, fetchOpts)
   const text = await res.text().catch(() => '')
   let data = null
   try { data = text ? JSON.parse(text) : null } catch { data = null }
+  logUltramsgRequest({
+    method: 'POST',
+    url,
+    headers: fetchOpts.headers || {},
+    body: payload,
+    responseStatus: res.status,
+    responseData: data,
+    responseText: text
+  })
   return { ok: res.ok, status: res.status, data, text }
 }
 
 async function get({ basePath, token, endpoint, extraParams = {} }) {
   const sep = String(endpoint || '').includes('?') ? '&' : '?'
-  const params = new URLSearchParams(appendToken(extraParams, token))
-  const url = `${basePath}${endpoint}${sep}${params.toString()}`
-  const res = await fetchWithRetry(url, createFetchOptions('GET'))
+  const params = appendToken(extraParams, token)
+  const paramsEncoded = new URLSearchParams(params)
+  const url = `${basePath}${endpoint}${sep}${paramsEncoded.toString()}`
+  const fetchOpts = createFetchOptions('GET')
+  const res = await fetchWithRetry(url, fetchOpts)
   const text = await res.text().catch(() => '')
   let data = null
   try { data = text ? JSON.parse(text) : null } catch { data = null }
+  logUltramsgRequest({
+    method: 'GET',
+    url,
+    headers: fetchOpts.headers || {},
+    params,
+    responseStatus: res.status,
+    responseData: data,
+    responseText: text
+  })
   return { ok: res.ok, status: res.status, data, text }
 }
 
@@ -878,15 +951,26 @@ async function uploadMedia(filePath, filename, opts = {}) {
         signal = AbortSignal.timeout(uploadTimeout)
       }
     } catch { /* Node < 17.3 */ }
-    const res = await fetchWithRetry(`${cfg.basePath}/media/upload`, {
+    const uploadUrl = `${cfg.basePath}/media/upload`
+    const uploadHeaders = form.getHeaders()
+    const res = await fetchWithRetry(uploadUrl, {
       method: 'POST',
       body: form,
-      headers: form.getHeaders(),
+      headers: uploadHeaders,
       ...(signal && { signal })
     })
     const text = await res.text().catch(() => '')
     let data = null
     try { data = text ? JSON.parse(text) : null } catch { data = null }
+    logUltramsgRequest({
+      method: 'POST',
+      url: uploadUrl,
+      headers: { ...uploadHeaders, token: maskToken(cfg.token) },
+      body: { file: safeFilename, token: maskToken(cfg.token) },
+      responseStatus: res.status,
+      responseData: data,
+      responseText: text
+    })
     if (!res.ok) {
       const err = data?.error || data?.message || `HTTP ${res.status}`
       console.warn('❌ UltraMsg uploadMedia falhou:', safeFilename?.slice(-20), err, '| token:', maskToken(cfg.token))
