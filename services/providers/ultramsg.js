@@ -535,20 +535,35 @@ function parseContactsResponse(data) {
 /**
  * Lista contatos. UltraMsg: GET /{instance_id}/contacts
  * Doc oficial: apenas token obrigatório; limit/offset podem não existir.
+ * Tenta primeiro sem limit/offset; se vazio, tenta com paginação.
  */
 async function getContacts(page = 1, pageSize = 100, opts = {}) {
   const cfg = await resolveConfig(opts)
   if (!cfg) return []
-  try {
-    const limit = Math.min(100, Math.max(1, Number(pageSize) || 100))
-    const offset = (Math.max(1, Number(page)) - 1) * limit
+  const limit = Math.min(100, Math.max(1, Number(pageSize) || 100))
+  const offset = (Math.max(1, Number(page)) - 1) * limit
+
+  const tryFetch = async (extraParams) => {
     const { ok, data } = await getJson({
       ...cfg,
       endpoint: '/contacts',
-      extraParams: { limit: String(limit), offset: String(offset) }
+      extraParams: { ...extraParams }
     })
     if (!ok) return []
-    const raw = parseContactsResponse(data)
+    return parseContactsResponse(data)
+  }
+
+  try {
+    let raw = await tryFetch({ limit: String(limit), offset: String(offset) })
+    if (raw.length === 0 && page === 1) {
+      raw = await tryFetch({})
+      if (WHATSAPP_DEBUG && raw.length > 0) {
+        console.log('[ULTRAMSG] getContacts: sem limit/offset retornou', raw.length, 'contatos')
+      }
+    }
+    if (WHATSAPP_DEBUG && page === 1) {
+      console.log('[ULTRAMSG] getContacts:', { page, limit, offset, total: raw.length })
+    }
     return raw.map((c) => ({
       phone: c.id || c.phone || c.wa_id || '',
       name: c.name || null,
@@ -557,7 +572,8 @@ async function getContacts(page = 1, pageSize = 100, opts = {}) {
       vname: c.vname || null,
       imgUrl: c.imgUrl || c.photo || null
     }))
-  } catch {
+  } catch (e) {
+    if (WHATSAPP_DEBUG) console.warn('[ULTRAMSG] getContacts erro:', e?.message)
     return []
   }
 }

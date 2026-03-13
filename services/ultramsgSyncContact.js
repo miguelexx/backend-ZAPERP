@@ -14,7 +14,7 @@ const {
   possiblePhonesBR
 } = require('../helpers/phoneHelper')
 const { getOrCreateCliente } = require('../helpers/conversationSync')
-const { chooseBestName, isBadName } = require('../helpers/contactEnrichment')
+const { chooseBestName, isBadName, getDisplayName } = require('../helpers/contactEnrichment')
 
 const CACHE_TTL_MS = 5 * 60 * 1000
 const cache = new Map()
@@ -210,4 +210,89 @@ async function syncContactFromUltramsg(phone, companyId) {
   }
 }
 
-module.exports = { syncUltraMsgContact, syncContactFromUltramsg }
+/**
+ * Sincroniza contato ao abrir conversa (join_conversa ou GET /chats/:id).
+ * Consulta API UltraMsg e atualiza nome/foto se necessário; emite contato_atualizado.
+ * @param {object} supabase - Cliente Supabase
+ * @param {number} conversaId - ID da conversa
+ * @param {number} companyId - ID da empresa
+ * @param {object} io - Socket.io
+ * @param {object} opts - { skipIfRecent } - evita sync se já fez nos últimos 60s (por conversa)
+ */
+const _lastSyncByConv = new Map()
+const SYNC_DEBOUNCE_MS = 60_000
+
+async function syncConversationContactOnJoin(supabase, conversaId, companyId, io, opts = {}) {
+  if (!conversaId || !companyId || !io) return
+  const key = `${companyId}:${conversaId}`
+  if (opts.skipIfRecent && _lastSyncByConv.get(key) && Date.now() - _lastSyncByConv.get(key) < SYNC_DEBOUNCE_MS) {
+    return
+  }
+
+  try {
+    const { data: conv } = await supabase
+      .from('conversas')
+      .select('id, telefone, cliente_id, nome_contato_cache, foto_perfil_contato_cache')
+      .eq('id', conversaId)
+      .eq('company_id', companyId)
+      .maybeSingle()
+
+    if (!conv || !conv.telefone || conv.telefone.startsWith('lid:') || conv.telefone.includes('@g.us')) return
+
+    const chatId = conv.telefone.includes('@c.us') ? conv.telefone : `${String(conv.telefone).replace(/\D/g, '')}@c.us`
+    const synced = await syncUltraMsgContact(chatId, companyId, { skipCache: true })
+    if (!synced) return
+
+    _lastSyncByConv.set(key, Date.now())
+
+    const variants = possiblePhonesBR(conv.telefone).length > 0 ? possiblePhonesBR(conv.telefone) : [conv.telefone]
+    const { data: cliente } = conv.cliente_id
+      ? await supabase.from('clientes').select('id, nome, pushname, telefone, foto_perfil').eq('id', conv.cliente_id).eq('company_id', companyId).maybeSingle()
+      : await supabase.from('clientes').select('id, nome, pushname, telefone, foto_perfil').eq('company_id', companyId).in('telefone', variants).limit(1).maybeSingle()
+
+    const upCliente = {}
+    const syncNomeValido = synced.nome && String(synced.nome).trim() && !isBadName(synced.nome)
+    if (syncNomeValido && (!cliente?.nome || String(cliente.nome).trim() !== String(synced.nome).trim())) {
+      upCliente.nome = String(synced.nome).trim()
+    }
+    if (synced.pushname && (!cliente?.pushname || !String(cliente.pushname).trim())) upCliente.pushname = synced.pushname
+    if (synced.foto_perfil && (!cliente?.foto_perfil || !String(cliente.foto_perfil).trim())) upCliente.foto_perfil = synced.foto_perfil
+    const clienteIdToUpdate = conv.cliente_id || cliente?.id
+    if (Object.keys(upCliente).length > 0 && clienteIdToUpdate) {
+      await supabase.from('clientes').update(upCliente).eq('id', clienteIdToUpdate).eq('company_id', companyId)
+    }
+
+    const upConv = {}
+    if (syncNomeValido && (!conv.nome_contato_cache || !String(conv.nome_contato_cache).trim())) {
+      upConv.nome_contato_cache = String(synced.nome).trim()
+    }
+    if (synced.foto_perfil && (!conv.foto_perfil_contato_cache || !String(conv.foto_perfil_contato_cache).trim())) {
+      upConv.foto_perfil_contato_cache = String(synced.foto_perfil).trim()
+    }
+    if (Object.keys(upConv).length > 0) {
+      await supabase.from('conversas').update(upConv).eq('id', conversaId).eq('company_id', companyId)
+    }
+
+    const { data: cliAtual } = conv.cliente_id
+      ? await supabase.from('clientes').select('nome, pushname, telefone, foto_perfil').eq('id', conv.cliente_id).eq('company_id', companyId).maybeSingle()
+      : await supabase.from('clientes').select('nome, pushname, telefone, foto_perfil').eq('company_id', companyId).in('telefone', variants).limit(1).maybeSingle()
+    const { data: convAtual } = await supabase.from('conversas').select('nome_contato_cache, foto_perfil_contato_cache').eq('id', conversaId).eq('company_id', companyId).maybeSingle()
+    const nomeParaEmit = upConv.nome_contato_cache ?? convAtual?.nome_contato_cache ?? getDisplayName(cliAtual) ?? synced.nome ?? null
+    const fotoParaEmit = upConv.foto_perfil_contato_cache ?? convAtual?.foto_perfil_contato_cache ?? cliAtual?.foto_perfil ?? synced.foto_perfil ?? null
+
+    if (nomeParaEmit || fotoParaEmit) {
+      io.to(`empresa_${companyId}`).emit('contato_atualizado', {
+        conversa_id: Number(conversaId),
+        contato_nome: nomeParaEmit ? String(nomeParaEmit).trim() : null,
+        nome_contato_cache: nomeParaEmit ? String(nomeParaEmit).trim() : null,
+        telefone: cliAtual?.telefone ?? conv.telefone,
+        foto_perfil: fotoParaEmit ? String(fotoParaEmit).trim() : null,
+        foto_perfil_contato_cache: fotoParaEmit ? String(fotoParaEmit).trim() : null
+      })
+    }
+  } catch (e) {
+    console.warn('[syncConversationContactOnJoin]', conversaId, e?.message || e)
+  }
+}
+
+module.exports = { syncUltraMsgContact, syncContactFromUltramsg, syncConversationContactOnJoin }

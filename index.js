@@ -160,6 +160,12 @@ io.on('connection', (socket) => {
     if (!socket.rooms.has(room)) {
       socket.join(room)
       console.log(`💬 Socket entrou na conversa ${conversaId}`)
+      // Sincroniza contato com API UltraMsg ao abrir chat (atualiza nome/foto se necessário)
+      setImmediate(() => {
+        const supabase = require('./config/supabase')
+        const { syncConversationContactOnJoin } = require('./services/ultramsgSyncContact')
+        syncConversationContactOnJoin(supabase, Number(conversaId), company_id, io, { skipIfRecent: true }).catch(() => {})
+      })
     }
   })
 

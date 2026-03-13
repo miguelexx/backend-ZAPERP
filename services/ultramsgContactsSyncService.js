@@ -153,7 +153,8 @@ async function syncViaFallback(company_id) {
         .limit(1)
         .maybeSingle()
 
-      const result = await syncUltraMsgContact(phone, company_id)
+      const chatId = phone.includes('@c.us') ? phone : `${String(phone).replace(/\D/g, '')}@c.us`
+      const result = await syncUltraMsgContact(chatId, company_id, { skipCache: true })
       if (result) {
         const { data: cliente } = await supabase
           .from('clientes')
@@ -222,7 +223,8 @@ async function syncMissingConversationContacts(company_id, opts = {}) {
     if (!conv.telefone || conv.telefone.length < 10) continue
 
     try {
-      const result = await syncUltraMsgContact(conv.telefone, company_id)
+      const chatId = conv.telefone.includes('@c.us') ? conv.telefone : `${String(conv.telefone).replace(/\D/g, '')}@c.us`
+      const result = await syncUltraMsgContact(chatId, company_id, { skipCache: true })
       if (result) {
         stats.processadas++
         if (result.nome || result.foto_perfil) stats.atualizadas++

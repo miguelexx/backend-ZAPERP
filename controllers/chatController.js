@@ -1522,32 +1522,11 @@ exports.detalharChat = async (req, res) => {
 
     // Background: re-sincroniza foto e nome do contato com provider (UltraMsg/Z-API)
     // Atualiza clientes E conversas (nome_contato_cache, foto_perfil_contato_cache) para exibir na lista e header.
-    if (!isGroup && (clientesConv?.id && clientesConv?.telefone || conversa?.telefone)) {
-      const cliId = clientesConv?.id ? Number(clientesConv.id) : null
-      const cliPhone = String((clientesConv?.telefone || conversa?.telefone) || '').trim()
-      const cid = Number(company_id)
-      if (cliPhone && !cliPhone.startsWith('lid:') && !cliPhone.includes('@g.us')) {
-        setImmediate(async () => {
-          try {
-            const { syncUltraMsgContact } = require('../services/ultramsgSyncContact')
-            const synced = await syncUltraMsgContact(cliPhone, cid)
-            if (io && synced) {
-              const { data: cli } = cliId ? await supabase.from('clientes').select('nome, pushname, telefone, foto_perfil').eq('id', cliId).eq('company_id', cid).maybeSingle() : { data: null }
-              const { data: conv } = await supabase.from('conversas').select('nome_contato_cache, foto_perfil_contato_cache').eq('id', id).eq('company_id', cid).maybeSingle()
-              const contatoNome = conv?.nome_contato_cache || getDisplayName(cli) || synced.nome || cliPhone
-              const fotoPerfil = conv?.foto_perfil_contato_cache || cli?.foto_perfil || synced.foto_perfil
-              io.to(`empresa_${cid}`).emit('contato_atualizado', {
-                conversa_id: Number(id),
-                contato_nome: contatoNome,
-                nome_contato_cache: contatoNome,
-                telefone: cli?.telefone || cliPhone,
-                foto_perfil: fotoPerfil,
-                foto_perfil_contato_cache: fotoPerfil
-              })
-            }
-          } catch (_) {}
-        })
-      }
+    if (!isGroup && io) {
+      setImmediate(() => {
+        const { syncConversationContactOnJoin } = require('../services/ultramsgSyncContact')
+        syncConversationContactOnJoin(supabase, Number(id), Number(company_id), io, { skipIfRecent: true }).catch(() => {})
+      })
     }
 
     return res.json(conversaFormatada)
