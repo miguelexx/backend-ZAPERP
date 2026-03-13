@@ -125,7 +125,7 @@ exports.atualizar = async (req, res) => {
 /** POST /usuarios/resetar-senha-email — resetar senha por email (admin da empresa) */
 exports.resetarSenhaPorEmail = async (req, res) => {
   try {
-    const { company_id, perfil } = req.user
+    const { company_id } = req.user
     const { email, nova_senha } = req.body
     if (!email?.trim() || !nova_senha?.trim()) {
       return res.status(400).json({ error: 'email e nova_senha são obrigatórios' })

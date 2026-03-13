@@ -181,13 +181,6 @@ function mapUltramsgAckToStatus(ack) {
   return s || 'pending'
 }
 
-/** Retorna payloads para processar (UltraMsg envia um por evento). */
-function getPayloads(body) {
-  if (!body || typeof body !== 'object') return []
-  const normalized = normalizeUltramsgToZapi(body)
-  return [normalized]
-}
-
 exports.healthUltramsg = (req, res) => res.status(200).json({ ok: true, provider: 'ultramsg' })
 
 exports.testarUltramsg = (req, res) => {

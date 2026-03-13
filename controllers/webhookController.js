@@ -78,19 +78,6 @@ async function buscarEMediasWhatsApp(mediaId) {
   }
 }
 
-async function registrarBotLog(company_id, conversa_id, tipo, detalhes = {}) {
-  try {
-    await supabase.from('bot_logs').insert({
-      company_id,
-      conversa_id: conversa_id || null,
-      tipo,
-      detalhes: typeof detalhes === 'object' ? detalhes : { raw: detalhes }
-    })
-  } catch (e) {
-    console.warn('Erro ao registrar bot_log:', e.message)
-  }
-}
-
 /**
  * GET /webhook — verificação do Meta para configurar o webhook no Developer Console.
  * Meta envia: hub.mode=subscribe, hub.verify_token=XXX, hub.challenge=YYY

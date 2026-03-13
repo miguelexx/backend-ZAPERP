@@ -3,7 +3,7 @@ const { getProvider } = require('../services/providers')
 const { getStatus } = require('../services/ultramsgIntegrationService')
 const { isGroupConversation } = require('../helpers/conversaHelper')
 const { normalizePhoneBR, possiblePhonesBR, phoneKeyBR } = require('../helpers/phoneHelper')
-const { deduplicateConversationsByContact, sortConversationsByRecent, getCanonicalPhone, getOrCreateCliente } = require('../helpers/conversationSync')
+const { deduplicateConversationsByContact, sortConversationsByRecent, getCanonicalPhone, getOrCreateCliente, mergeConversasIntoCanonico } = require('../helpers/conversationSync')
 const { enrichConversationsWithContactData } = require('../helpers/conversaEnrichment')
 const { getDisplayName } = require('../helpers/contactEnrichment')
 
@@ -816,8 +816,6 @@ exports.mergeConversasDuplicadas = async (req, res) => {
       .not('telefone', 'is', null)
 
     if (errList) return res.status(500).json({ error: errList.message })
-
-    const { mergeConversasIntoCanonico } = require('../helpers/conversationSync')
 
     const individuais = (conversas || []).filter((c) => !c.tipo || String(c.tipo).toLowerCase() !== 'grupo')
     const byKey = new Map()

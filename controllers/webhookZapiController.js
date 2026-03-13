@@ -1,6 +1,7 @@
 /**
- * Webhook Z-API: recebe mensagens do Z-API (POST /webhooks/zapi).
- * TUDO que a Z-API enviar para esta URL deve chegar no sistema: texto, imagem, áudio,
+ * Processamento de webhooks WhatsApp (formato Z-API).
+ * Usado pelo webhookUltramsgController: UltraMsg normaliza payload → receberZapi/statusZapi.
+ * Suporta: texto, imagem, áudio,
  * vídeo, documento, figurinha, reação, localização, contato, PTV, templates, botões, listas.
  * Suporta conversas individuais e de GRUPO.
  * Espelhamento WhatsApp Web: mensagens enviadas pelo celular (fromMe) TAMBÉM são
@@ -12,7 +13,6 @@ const { getProvider } = require('../services/providers')
 const { syncUltraMsgContact } = require('../services/ultramsgSyncContact')
 const { getCompanyIdByInstanceId } = require('../services/whatsappConfigService')
 const { getStatus } = require('../services/ultramsgIntegrationService')
-const { resetOnConnected } = require('../services/zapiConnectGuardService')
 const { normalizePhoneBR, possiblePhonesBR, normalizeGroupIdForStorage } = require('../helpers/phoneHelper')
 const { getCanonicalPhone, getOrCreateCliente, findOrCreateConversation, mergeConversasIntoCanonico, mergeConversationLidToPhone } = require('../helpers/conversationSync')
 const { chooseBestName, isBadName, getDisplayName } = require('../helpers/contactEnrichment')
@@ -599,47 +599,6 @@ function hasDestFields(payload) {
   ]
   return dest.some(v => v != null && String(v).trim() !== '')
 }
-
-/** Handler principal: roteia por path ou payload.type — só executa quando req.zapiContext.company_id existe. */
-function _routeByEvent(path, body) {
-  const p = String(path || '')
-  const t = String(body?.type ?? body?.event ?? body?.tipo ?? '').toLowerCase()
-  if (p === '/status' || p === '/statusht' || p.endsWith('/status')) return 'status'
-  if (p === '/connection' || p.endsWith('/connection')) return 'connection'
-  if (p === '/disconnected' || p.endsWith('/disconnected')) return 'connection'
-  if (p === '/presence' || p.endsWith('/presence')) return 'presence'
-  if (t === 'connectedcallback' || t === 'connected') return 'connection'
-  if (t === 'disconnectedcallback' || t === 'disconnected') return 'connection'
-  if (t === 'messagestatuscallback' || t === 'readcallback' || t === 'read' || t === 'delivered' || t === 'ack') return 'status'
-  if (t === 'presencechcallback' || t === 'presence') return 'presence'
-  return 'message' // ReceivedCallback, DeliveryCallback, default
-}
-
-/**
- * Handler unificado: aceita QUALQUER evento da Z-API e roteia pelo payload.type.
- * req.zapiContext já preenchido pelo middleware resolveWebhookZapi.
- */
-async function handleWebhookZapi(req, res) {
-  try {
-    const ctx = req.zapiContext
-    if (!ctx || ctx.company_id == null) {
-      return res.status(200).json({ ok: true })
-    }
-    const route = _routeByEvent(req.path, req.body)
-    const fn = {
-      message: () => exports.receberZapi(req, res),
-      status: () => exports.statusZapi(req, res),
-      connection: () => exports.connectionZapi(req, res),
-      presence: () => exports.presenceZapi(req, res)
-    }[route] || (() => exports.receberZapi(req, res))
-    await fn()
-  } catch (e) {
-    console.error('[handleWebhookZapi]', e?.message || e)
-    return res.status(200).json({ ok: true })
-  }
-}
-
-exports.handleWebhookZapi = handleWebhookZapi
 
 exports.receberZapi = async (req, res) => {
   try {
@@ -2587,132 +2546,6 @@ exports.statusZapi = async (req, res) => {
     return res.status(200).json({ ok: true })
   } catch (e) {
     if (process.env.WHATSAPP_DEBUG === '1') console.error('[DEBUG] /webhooks/zapi/status ERRO:', e?.message || e)
-    return res.status(200).json({ ok: true })
-  }
-}
-
-/**
- * POST /webhooks/zapi/connection — ao conectar/desconectar a instância.
- * Payload: evento (connected/disconnected) ou similar; apenas responde 200 e loga.
- */
-exports.connectionZapi = async (req, res) => {
-  try {
-    const payload = req.body || {}
-    let company_id = req.zapiContext?.company_id
-    if (company_id == null) {
-      const incomingInstanceId = (payload?.instanceId ?? payload?.instance_id ?? payload?.instance ?? '').toString().trim()
-      company_id = incomingInstanceId ? await getCompanyIdByInstanceId(incomingInstanceId) : null
-      const instanceIdResolved = incomingInstanceId ? incomingInstanceId.slice(0, 24) + (incomingInstanceId.length > 24 ? '…' : '') : '(empty)'
-      _logWebhookSafe({ eventType: payload?.event ?? payload?.type ?? 'connection', instanceId: instanceIdResolved, companyIdResolved: company_id != null ? company_id : 'not_mapped' })
-      if (company_id == null) return res.status(200).json({ ok: true })
-    }
-
-    const type = String(payload?.type ?? payload?.event ?? payload?.status ?? '').toLowerCase()
-    const connected = payload?.connected === true || type.includes('connected')
-
-    if (connected && company_id) {
-      await resetOnConnected(company_id)
-    }
-
-    // Ao conectar: configura webhooks e enfileira sync progressiva (não executa inline)
-    if (connected) {
-      setImmediate(async () => {
-        const provider = getProvider()
-        if (!provider || !provider.isConfigured) return
-
-        await new Promise(r => setTimeout(r, 10000))
-
-        const appUrl = process.env.APP_URL || ''
-        if (appUrl && provider.configureWebhooks) {
-          try {
-            await provider.configureWebhooks(appUrl, { companyId: company_id })
-          } catch (e) {
-            console.warn('⚠️ Z-API: erro ao configurar webhooks automaticamente:', e.message)
-          }
-        }
-
-        let autoSync = false
-        try {
-          const { data: emp, error: errEmp } = await supabase
-            .from('empresas')
-            .select('zapi_auto_sync_contatos')
-            .eq('id', company_id)
-            .maybeSingle()
-          if (!errEmp && emp) autoSync = emp.zapi_auto_sync_contatos === true
-        } catch (_) {}
-
-        if (autoSync && provider.getContacts) {
-          setImmediate(async () => {
-            try {
-              const { syncContacts } = require('../services/ultramsgContactsSyncService')
-              const result = await syncContacts(company_id)
-              if (result.ok) {
-                const io = req.app.get('io')
-                if (io) {
-                  io.to(`empresa_${company_id}`).emit('zapi_sync_contatos', {
-                    total_contatos: result.totalFetched,
-                    criados: result.inserted,
-                    atualizados: result.updated,
-                    fotos_atualizadas: 0
-                  })
-                }
-                console.log('🔄 Z-API: sync de contatos concluído (auto-sync ao conectar)')
-              }
-            } catch (e) {
-              console.warn('Z-API auto-sync:', e?.message || e)
-            }
-          })
-        } else {
-          console.log('⏭️ Z-API: auto-sync desativado ou getContacts indisponível')
-        }
-      })
-    }
-
-    return res.status(200).json({ ok: true })
-  } catch (e) {
-    return res.status(200).json({ ok: true })
-  }
-}
-
-/**
- * POST /webhooks/zapi/presence — PresenceChatCallback (digitando, online, gravando).
- * Payload Z-API: type, phone, status (UNAVAILABLE|AVAILABLE|COMPOSING|RECORDING|PAUSED), lastSeen, instanceId.
- */
-exports.presenceZapi = async (req, res) => {
-  try {
-    const body = req.body || {}
-    let company_id = req.zapiContext?.company_id
-    if (company_id == null) {
-      const instanceId = (body.instanceId ?? body.instance_id ?? body.instance ?? '').toString().trim()
-      company_id = instanceId ? await getCompanyIdByInstanceId(instanceId) : null
-      const instanceIdResolved = instanceId ? instanceId.slice(0, 24) + (instanceId.length > 24 ? '…' : '') : '(empty)'
-      _logWebhookSafe({ eventType: 'PresenceChatCallback', instanceId: instanceIdResolved, companyIdResolved: company_id != null ? company_id : 'not_mapped' })
-      if (company_id == null) return res.status(200).json({ ok: true })
-    }
-    const phoneRaw = body.phone ? String(body.phone).trim() : ''
-    const status = body.status ? String(body.status).trim().toUpperCase() : ''
-    const lastSeen = body.lastSeen ?? body.last_seen ?? null
-
-    if (phoneRaw && status) {
-      const phones = possiblePhonesBR(phoneRaw)
-      let q = supabase
-        .from('conversas')
-        .select('id')
-        .eq('company_id', company_id)
-        .limit(1)
-      if (phones.length > 0) q = q.in('telefone', phones)
-      else q = q.eq('telefone', normalizePhoneBR(phoneRaw) || phoneRaw.replace(/\D/g, ''))
-      const { data: rows } = await q
-      const conversa_id = Array.isArray(rows) && rows[0]?.id ? rows[0].id : null
-      const io = req.app.get('io')
-      if (io && conversa_id) {
-        io.to(`empresa_${company_id}`)
-          .to(`conversa_${conversa_id}`)
-          .emit('presence', { conversa_id, phone: phoneRaw, status, lastSeen })
-      }
-    }
-    return res.status(200).json({ ok: true })
-  } catch (e) {
     return res.status(200).json({ ok: true })
   }
 }

@@ -3,6 +3,7 @@
  * Todas as rotas exigem auth e company_id do token.
  */
 
+const supabase = require('../config/supabase')
 const campanhaService = require('../services/campanhaService')
 const { isEnabled, FLAGS } = require('../helpers/featureFlags')
 const { registrar: registrarAuditoria } = require('../helpers/auditoriaLog')
@@ -33,7 +34,6 @@ exports.obter = async (req, res) => {
     }
     const company_id = getCompanyId(req)
     if (!company_id) return res.status(401).json({ error: 'Não autorizado' })
-    const supabase = require('../config/supabase')
     const { data: camp, error } = await supabase
       .from('campanhas')
       .select('*')

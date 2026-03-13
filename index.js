@@ -211,6 +211,6 @@ const PORT = process.env.PORT || 3000
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`Servidor HTTP + WebSocket rodando na porta ${PORT}`)
 
-  // Multi-tenant: webhooks são configurados por empresa ao conectar (connectionZapi).
+  // Multi-tenant: webhooks UltraMsg configurados manualmente no painel (Instance Settings).
   // Não há mais instância única em ENV para configurar no startup.
 })

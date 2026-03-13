@@ -1,5 +1,7 @@
+const supabase = require('../config/supabase')
 const ultramsgIntegrationService = require('../services/ultramsgIntegrationService')
 const whatsappConfigService = require('../services/whatsappConfigService')
+const { syncContacts } = require('../services/ultramsgContactsSyncService')
 const { checkGuard, recordQrServed, resetOnConnected, getAttempts, THROTTLE_SECONDS } = require('../services/zapiConnectGuardService')
 const { getConfig } = require('../services/configOperacionalService')
 
@@ -291,7 +293,6 @@ exports.syncContacts = async (req, res) => {
       retryAfterSeconds: 60
     })
   }
-  const { syncContacts } = require('../services/ultramsgContactsSyncService')
   const result = await syncContacts(company_id)
   if (!result.ok) return res.status(400).json({ ok: false, error: result.errors?.[0] || 'Erro ao sincronizar' })
   return res.json({
@@ -314,7 +315,6 @@ exports.getOperationalStatus = async (req, res) => {
   let lastJob = null
   let pendingJob = null
   try {
-    const supabase = require('../config/supabase')
     const r1 = await supabase
       .from('jobs')
       .select('atualizado_em, resultado_json, status')
