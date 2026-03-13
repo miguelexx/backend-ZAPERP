@@ -1,5 +1,6 @@
 const supabase = require('../config/supabase')
 const { isEnabled, FLAGS } = require('../helpers/featureFlags')
+const { getDisplayName } = require('../helpers/contactEnrichment')
 const ExcelJS = require('exceljs')
 const PDFDocument = require('pdfkit')
 
@@ -901,7 +902,7 @@ async function buildRelatorioConversas(company_id, filters = {}) {
     const tags = (c.conversa_tags || []).map(ct => ct.tags).filter(Boolean)
     return {
       id: c.id,
-      cliente_nome: c.clientes?.nome || '—',
+      cliente_nome: getDisplayName(c.clientes) || '—',
       telefone: c.telefone,
       observacoes: c.clientes?.observacoes || '',
       setor: c?.departamento_id != null ? (depMap[String(c.departamento_id)] || '—') : '—',
@@ -1200,7 +1201,7 @@ exports.getSlaAlertas = async (req, res) => {
       if (minSemResponder >= limiteMin) {
         alertas.push({
           conversa_id: c.id,
-          cliente_nome: c.clientes?.nome || c.telefone,
+          cliente_nome: getDisplayName(c.clientes) || c.telefone,
           telefone: c.telefone,
           atendente_nome: c.usuarios?.nome || '—',
           tempo_sem_responder_min: minSemResponder,
