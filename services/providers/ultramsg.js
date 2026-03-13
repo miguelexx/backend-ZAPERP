@@ -233,7 +233,8 @@ async function post({ basePath, token, endpoint, body }) {
 
 async function get({ basePath, token, endpoint, extraParams = {} }) {
   const sep = String(endpoint || '').includes('?') ? '&' : '?'
-  const params = appendToken(extraParams, token)
+  // UltraMsg exige token como primeiro parâmetro na URL (docs: ?token=xxx&chatId=...)
+  const params = { token: String(token || '').trim(), ...extraParams }
   const paramsEncoded = new URLSearchParams(params)
   const url = `${basePath}${endpoint}${sep}${paramsEncoded.toString()}`
   const fetchOpts = createFetchOptions('GET')
@@ -779,24 +780,29 @@ function phoneToChatId(phone) {
  * Busca URL da foto de perfil.
  * Doc oficial: GET /{instance_id}/contacts/image?token={TOKEN}&chatId={chatId}
  * Parâmetros obrigatórios: token, chatId (ex.: 5511999999999@c.us)
- * Aceita phone (será convertido) ou opts.chatId quando disponível (ex.: data.from do webhook).
- * Nunca expor token em logs.
+ * Aceita opts.chatId (qualquer formato) ou phone (será convertido para chatId).
  */
 async function getProfilePicture(phoneOrChatId, opts = {}) {
   const cfg = await resolveConfig(opts)
   if (!cfg) return null
-  const chatId = opts.chatId && String(opts.chatId).trim().endsWith('@c.us')
-    ? String(opts.chatId).trim()
-    : phoneToChatId(phoneOrChatId)
-  if (!chatId || chatId.endsWith('@g.us')) return null
+
+  // Usa opts.chatId diretamente se fornecido (qualquer formato válido: @c.us, @g.us, numérico)
+  // Caso contrário converte o primeiro argumento para chatId via phoneToChatId
+  const rawOpts = opts.chatId ? String(opts.chatId).trim() : null
+  const chatId = rawOpts || phoneToChatId(phoneOrChatId)
+  if (!chatId) return null
+
   try {
     const { ok, data, text } = await get({
       ...cfg,
       endpoint: '/contacts/image',
       extraParams: { chatId }
     })
+    if (WHATSAPP_DEBUG) {
+      console.log('[ULTRAMSG] getProfilePicture', { chatId: chatId.slice(-12), ok, status: data?.error ?? 'ok' })
+    }
     if (!ok) return null
-    // Resposta pode ser objeto JSON ou string (URL direta). Múltiplos campos possíveis.
+    // Resposta pode ser objeto JSON com URL ou string direta com a URL
     let url = null
     if (data && typeof data === 'object') {
       url = data.url ?? data.image ?? data.img ?? data.profilePicture ?? data.profilePic ?? data.link ?? null
