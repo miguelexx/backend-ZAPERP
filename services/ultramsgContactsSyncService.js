@@ -14,7 +14,7 @@ const { getProvider } = require('./providers')
 const { getEmpresaWhatsappConfig } = require('./whatsappConfigService')
 const { getOrCreateCliente } = require('../helpers/conversationSync')
 const { syncUltraMsgContact } = require('./ultramsgSyncContact')
-const { normalizePhoneBR, possiblePhonesBR } = require('../helpers/phoneHelper')
+const { normalizePhoneBR, possiblePhonesBR, phoneKeyBR } = require('../helpers/phoneHelper')
 
 const PAGE_SIZE = 100
 
@@ -73,7 +73,9 @@ async function syncViaContactsApi(company_id) {
         continue
       }
 
-      const key = fields.phone
+      // Usa phoneKeyBR como chave de dedup: normaliza 12↔13 dígitos para a mesma chave,
+      // evitando que o mesmo contato físico seja processado duas vezes dentro do mesmo batch.
+      const key = phoneKeyBR(fields.phone)
       if (seen.has(key)) {
         stats.skipped++
         continue
@@ -311,7 +313,7 @@ async function syncContactsBatch(company_id, opts = {}) {
       continue
     }
 
-    const key = fields.phone
+    const key = phoneKeyBR(fields.phone)
     if (seen.has(key)) {
       stats.skipped++
       continue
