@@ -2590,6 +2590,35 @@ exports.statusZapi = async (req, res) => {
         }
       }
 
+      // 3) Fallback UltraMsg: message_ack pode chegar ANTES do ReceivedCallback.
+      //    Busca mensagem out recente sem whatsapp_id e atualiza (reconcilia status + whatsapp_id).
+      const isWhatsAppFormatId = idStr.includes('@') || idStr.includes('_')
+      if (!msg && isWhatsAppFormatId && company_id) {
+        const fromIso = new Date(Date.now() - 5 * 60 * 1000).toISOString()
+        const { data: cand } = await supabase
+          .from('mensagens')
+          .select('id, conversa_id, company_id, autor_usuario_id')
+          .eq('company_id', company_id)
+          .eq('direcao', 'out')
+          .is('whatsapp_id', null)
+          .gte('criado_em', fromIso)
+          .order('criado_em', { ascending: false })
+          .order('id', { ascending: false })
+          .limit(1)
+          .maybeSingle()
+        if (cand?.id) {
+          const { data: patched } = await supabase
+            .from('mensagens')
+            .update({ status: effectiveStatus, whatsapp_id: idStr })
+            .eq('company_id', company_id)
+            .eq('id', cand.id)
+            .select('id, conversa_id, company_id, autor_usuario_id')
+            .maybeSingle()
+          msg = patched || null
+          if (msg && logDebug) console.log('[DEBUG] status reconciliação: message_ack antes do ReceivedCallback', { mensagem_id: msg.id })
+        }
+      }
+
       if (msg) {
         updated++
         if (io) {
@@ -2597,9 +2626,10 @@ exports.statusZapi = async (req, res) => {
             mensagem_id: msg.id,
             conversa_id: msg.conversa_id,
             status: effectiveStatus,
+            status_mensagem: effectiveStatus,
             whatsapp_id: idStr
           }
-          // Emite para empresa, conversa E usuario do autor (garante atualização em tempo real para quem enviou)
+          // Emite para empresa, conversa E usuario do autor (garante ticks ✓✓ em tempo real)
           let chain = io.to(`empresa_${msg.company_id}`).to(`conversa_${msg.conversa_id}`)
           if (msg.autor_usuario_id != null) chain = chain.to(`usuario_${msg.autor_usuario_id}`)
           chain.emit('status_mensagem', payload)
