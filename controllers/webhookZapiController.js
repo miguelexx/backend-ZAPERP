@@ -2406,6 +2406,7 @@ exports.receberZapi = async (req, res) => {
           // Atualizar conversa (nome_contato_cache, foto_perfil_contato_cache) quando vazios e sync trouxe dados
           const nomeConvVazio = !convRow?.nome_contato_cache || !String(convRow.nome_contato_cache).trim()
           const fotoConvVazia = !convRow?.foto_perfil_contato_cache || !String(convRow.foto_perfil_contato_cache).trim()
+          // Priorizar name (nome salvo no celular) sobre pushname — nunca sobrescrever com pushname quando name existir
           const syncNomeValido = synced?.nome && String(synced.nome).trim() && !isBadName(synced.nome)
           const syncFotoValida = synced?.foto_perfil && String(synced.foto_perfil).trim().startsWith('http')
           const cacheConv = {}

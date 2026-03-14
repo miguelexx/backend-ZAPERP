@@ -173,6 +173,10 @@ function chooseBestName(currentName, candidateName, source, opts = {}) {
   return { name: cand, decision: 'updated' }
 }
 
+/**
+ * Nome para exibição. Prioridade: name (salvo no celular) > pushname (perfil WhatsApp) > telefone.
+ * NUNCA usar pushname quando name existir — o usuário quer ver o nome como salvo no celular.
+ */
 function getDisplayName(cliente) {
   if (!cliente) return null
   const nome = cliente.nome && String(cliente.nome).trim()

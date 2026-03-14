@@ -112,8 +112,8 @@ async function syncUltraMsgContact(chatIdOrPhone, companyId, opts = {}) {
         pic = await provider.getProfilePicture?.(chatId, picOpts).catch(() => null) ?? null
       }
       
-      metadata = metadata
-      profilePicUrl = profilePicUrl
+      metadata = meta
+      profilePicUrl = pic
     } catch (e) {
       console.warn('[syncUltraMsgContact] UltraMsg falhou:', e?.message || 'erro', '| company:', companyId)
       return null
@@ -126,6 +126,7 @@ async function syncUltraMsgContact(chatIdOrPhone, companyId, opts = {}) {
     const vname = metadata?.vname ? String(metadata.vname).trim() : null
     const imgUrl = metadata?.imgUrl ? String(metadata.imgUrl).trim() : null
 
+    // Prioridade: name (nome salvo no celular) > short > pushname (perfil WhatsApp) > vname
     const nomeFromApi = name || short || pushnameFromApi || vname || null
     const fotoFromApi = (profilePicUrl && isValidPhotoUrl(profilePicUrl)) || (imgUrl && isValidPhotoUrl(imgUrl))
       ? (profilePicUrl || imgUrl || null)

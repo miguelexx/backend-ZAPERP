@@ -7,6 +7,10 @@ const { deduplicateConversationsByContact, sortConversationsByRecent, getCanonic
 const { enrichConversationsWithContactData } = require('../helpers/conversaEnrichment')
 const { getDisplayName } = require('../helpers/contactEnrichment')
 
+/** UltraMsg retorna id interno (ex: 35096), não o messageId do WhatsApp. Só usar como whatsapp_id se for o ID real. */
+function isRealWhatsAppId(waId) {
+  return waId && (String(waId).includes('@') || String(waId).length > 20)
+}
 
 // =====================================================
 // 1) HELPERS (TOPO DO ARQUIVO)
@@ -2177,7 +2181,7 @@ exports.enviarMensagemChat = async (req, res) => {
         const nextStatus = ok ? 'sent' : 'erro'
         await supabase
           .from('mensagens')
-          .update({ status: nextStatus, ...(waMessageId ? { whatsapp_id: waMessageId } : {}) })
+          .update({ status: nextStatus, ...(isRealWhatsAppId(waMessageId) ? { whatsapp_id: waMessageId } : {}) })
           .eq('company_id', company_id)
           .eq('id', msg.id)
 
@@ -2435,7 +2439,7 @@ exports.enviarContatoWhatsapp = async (req, res) => {
     const nextStatus = ok ? 'sent' : 'erro'
     await supabase
       .from('mensagens')
-      .update({ status: nextStatus, ...(waMessageId ? { whatsapp_id: waMessageId } : {}) })
+      .update({ status: nextStatus, ...(isRealWhatsAppId(waMessageId) ? { whatsapp_id: waMessageId } : {}) })
       .eq('company_id', company_id)
       .eq('id', msg.id)
 
@@ -2522,7 +2526,7 @@ exports.enviarLocalizacao = async (req, res) => {
 
     await supabase
       .from('mensagens')
-      .update({ status: nextStatus, ...(waMessageId ? { whatsapp_id: waMessageId } : {}) })
+      .update({ status: nextStatus, ...(isRealWhatsAppId(waMessageId) ? { whatsapp_id: waMessageId } : {}) })
       .eq('company_id', company_id)
       .eq('id', msg.id)
 
@@ -2607,7 +2611,7 @@ exports.enviarLigacaoWhatsapp = async (req, res) => {
     const nextStatus = ok ? 'sent' : 'erro'
     await supabase
       .from('mensagens')
-      .update({ status: nextStatus, ...(waMessageId ? { whatsapp_id: waMessageId } : {}) })
+      .update({ status: nextStatus, ...(isRealWhatsAppId(waMessageId) ? { whatsapp_id: waMessageId } : {}) })
       .eq('company_id', company_id)
       .eq('id', msg.id)
 
