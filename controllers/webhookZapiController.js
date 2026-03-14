@@ -18,6 +18,26 @@ const { getCanonicalPhone, getOrCreateCliente, findOrCreateConversation, mergeCo
 const { chooseBestName, isBadName, getDisplayName } = require('../helpers/contactEnrichment')
 const { resolvePeerPhone } = require('../helpers/conversationKeyHelper')
 const { incrementarUnreadParaConversa } = require('./chatController')
+
+// Cache para evitar duplicação de mensagens
+const messageDuplicationCache = new Map()
+const MESSAGE_CACHE_TTL = 30 * 1000 // 30 segundos
+
+/**
+ * Verifica se uma mensagem já foi emitida recentemente para evitar duplicação
+ */
+function isMessageRecentlyEmitted(messageId, eventType = 'nova_mensagem') {
+  const key = `${messageId}_${eventType}`
+  const cached = messageDuplicationCache.get(key)
+  
+  if (cached && cached.timestamp > Date.now() - MESSAGE_CACHE_TTL) {
+    return true // Já foi emitida recentemente
+  }
+  
+  // Marcar como emitida
+  messageDuplicationCache.set(key, { timestamp: Date.now() })
+  return false
+}
 const { processIncomingMessage: processChatbotTriage } = require('../services/chatbotTriageService')
 const { processarOptOut } = require('../services/optOutService')
 const { processarRegras } = require('../services/regrasAutomaticasService')
@@ -1810,12 +1830,38 @@ exports.receberZapi = async (req, res) => {
 
     // Idempotência: chave única (company_id, whatsapp_id) — reenvio do webhook não duplica
     if (whatsappIdStr) {
-      const { data: existente } = await supabase
+      let { data: existente } = await supabase
         .from('mensagens')
         .select('*')
         .eq('company_id', company_id)
         .eq('whatsapp_id', whatsappIdStr)
         .maybeSingle()
+      
+      // Se não encontrou por whatsapp_id, tentar buscar por temp_id (mensagens enviadas pelo usuário)
+      if (!existente && fromMe) {
+        const { data: tempExistente } = await supabase
+          .from('mensagens')
+          .select('*')
+          .eq('company_id', company_id)
+          .eq('conversa_id', conversa_id)
+          .eq('direcao', 'out')
+          .ilike('whatsapp_id', 'temp_%')
+          .order('criado_em', { ascending: false })
+          .limit(1)
+          .maybeSingle()
+        
+        if (tempExistente) {
+          // Atualizar com o whatsapp_id real
+          const { data: updatedMsg } = await supabase
+            .from('mensagens')
+            .update({ whatsapp_id: whatsappIdStr })
+            .eq('id', tempExistente.id)
+            .select('*')
+            .single()
+          existente = updatedMsg || tempExistente
+        }
+      }
+      
       if (existente) {
         // Se a mensagem salva tem texto placeholder (DeliveryCallback chegou antes do ReceivedCallback)
         // e o webhook atual traz conteúdo real → atualizar com o texto/mídia corretos.
@@ -2277,13 +2323,17 @@ exports.receberZapi = async (req, res) => {
         emitPayload.photo = fotoContato
       }
       if (mensagemFoiInseridaPeloWebhook) {
-        io.to(rooms).emit('nova_mensagem', emitPayload)
+        // Mensagem nova (recebida): verificar duplicação antes de emitir
+        if (!isMessageRecentlyEmitted(mensagemSalva.id, 'nova_mensagem')) {
+          io.to(rooms).emit('nova_mensagem', emitPayload)
+        }
       } else {
-        // Reconciliada/idempotência: emite apenas status_mensagem para atualizar ticks (evita duplicar bolha)
+        // Mensagem já existe (enviada pelo usuário): apenas atualizar status, não duplicar mensagem
         const statusPayload = {
           mensagem_id: mensagemSalva.id,
           conversa_id: convIdForEmit,
           status: canon,
+          status_mensagem: canon,
           whatsapp_id: mensagemSalva.whatsapp_id || null
         }
         let chain = io.to(`empresa_${company_id}`).to(`conversa_${convIdForEmit}`)
