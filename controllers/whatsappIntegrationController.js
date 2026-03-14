@@ -5,6 +5,7 @@ const { syncContacts } = require('../services/ultramsgContactsSyncService')
 const { syncGroups } = require('../services/ultramsgGroupsSyncService')
 const { checkGuard, recordQrServed, resetOnConnected, getAttempts, THROTTLE_SECONDS } = require('../services/zapiConnectGuardService')
 const { getConfig } = require('../services/configOperacionalService')
+const { getProvider } = require('../services/providers')
 
 const { getStatus, getQrCodeImage, restartInstance, getMe, getPhoneCode, buildMeSummary } = ultramsgIntegrationService
 const { getEmpresaWhatsappConfig } = whatsappConfigService
@@ -388,4 +389,113 @@ exports.phoneCode = async (req, res) => {
     return res.status(502).json({ error: result.error })
   }
   return res.json({ code: result.code })
+}
+
+exports.getMessages = async (req, res) => {
+  const company_id = req.user?.company_id
+  if (!company_id) {
+    return res.status(401).json({ error: 'Não autenticado' })
+  }
+
+  // Rate limiting para evitar abuso
+  if (!checkCompanyRate(company_id, 'messages', 60_000, 30)) {
+    return res.status(429).json({ 
+      error: 'Muitas consultas de mensagens, tente novamente em instantes.', 
+      retryAfterSeconds: 60 
+    })
+  }
+
+  // Validar parâmetros de entrada
+  const page = Math.max(1, parseInt(req.query.page) || 1)
+  const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 100))
+  const status = req.query.status || 'all'
+  const sort = ['asc', 'desc'].includes(req.query.sort) ? req.query.sort : 'desc'
+
+  // Validar status permitidos
+  const validStatus = ['all', 'queue', 'sent', 'unsent', 'invalid', 'expired']
+  if (!validStatus.includes(status)) {
+    return res.status(400).json({ 
+      error: `Status inválido. Valores permitidos: ${validStatus.join(', ')}` 
+    })
+  }
+
+  try {
+    // Obter provider UltraMsg
+    const provider = await getProvider(company_id)
+    if (!provider || !provider.getMessages) {
+      return res.status(404).json({ error: 'Empresa sem instância configurada' })
+    }
+
+    // Buscar mensagens via UltraMsg
+    const result = await provider.getMessages({ 
+      companyId: company_id,
+      page, 
+      limit, 
+      status, 
+      sort 
+    })
+
+    if (!result.ok) {
+      return res.status(502).json({ 
+        error: result.error || 'Erro ao buscar mensagens' 
+      })
+    }
+
+    // Retornar dados no formato esperado
+    return res.json({
+      messages: result.data || [],
+      pagination: {
+        page,
+        limit,
+        status,
+        sort
+      }
+    })
+
+  } catch (error) {
+    console.error('[GET_MESSAGES_ERROR]', error)
+    return res.status(500).json({ 
+      error: 'Erro interno ao buscar mensagens' 
+    })
+  }
+}
+
+exports.getMessagesStatistics = async (req, res) => {
+  const company_id = req.user?.company_id
+  if (!company_id) {
+    return res.status(401).json({ error: 'Não autenticado' })
+  }
+
+  // Rate limiting
+  if (!checkCompanyRate(company_id, 'messages-stats', 60_000, 20)) {
+    return res.status(429).json({ 
+      error: 'Muitas consultas de estatísticas, tente novamente em instantes.', 
+      retryAfterSeconds: 60 
+    })
+  }
+
+  try {
+    // Obter provider UltraMsg
+    const provider = await getProvider(company_id)
+    if (!provider || !provider.getMessagesStatistics) {
+      return res.status(404).json({ error: 'Empresa sem instância configurada' })
+    }
+
+    // Buscar estatísticas via UltraMsg
+    const result = await provider.getMessagesStatistics({ companyId: company_id })
+    
+    if (!result) {
+      return res.status(502).json({ 
+        error: 'Erro ao buscar estatísticas de mensagens' 
+      })
+    }
+
+    return res.json(result)
+
+  } catch (error) {
+    console.error('[GET_MESSAGES_STATISTICS_ERROR]', error)
+    return res.status(500).json({ 
+      error: 'Erro interno ao buscar estatísticas' 
+    })
+  }
 }

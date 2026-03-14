@@ -28,4 +28,8 @@ router.use('/connect', connectRouter)
 router.post('/contacts/sync', whatsappIntegrationController.syncContacts)
 router.post('/groups/sync', whatsappIntegrationController.syncGroups)
 
+// Rotas para mensagens enviadas via UltraMsg
+router.get('/messages', whatsappIntegrationController.getMessages)
+router.get('/messages/statistics', whatsappIntegrationController.getMessagesStatistics)
+
 module.exports = router
