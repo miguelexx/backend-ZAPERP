@@ -2324,9 +2324,10 @@ exports.receberZapi = async (req, res) => {
         if (mensagemSalva.autor_usuario_id != null) chain = chain.to(`usuario_${mensagemSalva.autor_usuario_id}`)
         chain.emit('status_mensagem', statusPayload)
       }
-      // Só emitir atualizar_conversa quando NÃO inserimos mensagem nova — evita refetch que causa "aparecer e sumir"
-      // Quando inserimos, conversa_atualizada (com ultima_mensagem) basta para o front atualizar a lista
-      if (!mensagemFoiInseridaPeloWebhook) {
+      // NÃO emitir atualizar_conversa para mensagens enviadas por nós (fromMe)
+      // — evita refetch que causa duplicação visual e flicker. status_mensagem já atualiza os ticks.
+      // Só emitir para mensagens recebidas (inseridas pelo webhook)
+      if (mensagemFoiInseridaPeloWebhook) {
         io.to(`empresa_${company_id}`).emit('atualizar_conversa', { id: convIdForEmit })
       }
       // conversa_atualizada: priorizar nome do sync (name) sobre cache; fallback nome_contato_cache

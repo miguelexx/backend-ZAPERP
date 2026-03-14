@@ -2075,12 +2075,14 @@ exports.enviarMensagemChat = async (req, res) => {
 
     const io = req.app.get('io')
     if (io) {
-      // Emitir nova_mensagem imediatamente para feedback visual instantâneo
+      // ÚNICA emissão de nova_mensagem — evita duplicação. Frontend deve deduplicar por id.
       const novaMsgPayload = {
         ...msg,
+        id: msg.id,
         conversa_id: msg.conversa_id ?? Number(conversa_id),
         status: 'sending',
-        status_mensagem: 'sending'
+        status_mensagem: 'sending',
+        direcao: 'out'
       }
       emitirEventoEmpresaConversa(
         io,
@@ -2089,31 +2091,16 @@ exports.enviarMensagemChat = async (req, res) => {
         io.EVENTS?.NOVA_MENSAGEM || 'nova_mensagem',
         novaMsgPayload
       )
-      // Usar nome e foto do cache por enquanto (versão estável)
+      // Atualizar sidebar (preview) sem disparar refetch que causa duplicação
       let contatoNome = conversa?.nome_contato_cache ? String(conversa.nome_contato_cache).trim() : null
       let fotoPerfil = conversa?.foto_perfil_contato_cache ? String(conversa.foto_perfil_contato_cache).trim() : null
-      
-      // Buscar foto do cliente se cache vazio
       if (!fotoPerfil && conversa?.cliente_id) {
         try {
-          const { data: cli } = await supabase
-            .from('clientes')
-            .select('foto_perfil')
-            .eq('id', conversa.cliente_id)
-            .eq('company_id', company_id)
-            .maybeSingle()
+          const { data: cli } = await supabase.from('clientes').select('foto_perfil').eq('id', conversa.cliente_id).eq('company_id', company_id).maybeSingle()
           if (cli?.foto_perfil) fotoPerfil = String(cli.foto_perfil).trim()
-        } catch (e) {
-          console.warn('Erro ao buscar foto do cliente:', e.message)
-        }
+        } catch (_) {}
       }
-      // ultima_mensagem_preview: só para preview na lista lateral — NUNCA adicionar ao array de mensagens
-      // (nova_mensagem já traz a mensagem completa para o chat; incluir id aqui causaria duplicata)
-      // IMPORTANTE: incluir telefone e cliente_id para frontend manter deduplicação e não fazer contato "sumir"
-      const telefoneParaPayload = conversa?.telefone && !String(conversa.telefone).startsWith('lid:')
-        ? String(conversa.telefone).trim()
-        : null
-      // Incluir telefone/nome/foto sempre que disponíveis — frontend faz merge defensivo
+      const telefoneParaPayload = conversa?.telefone && !String(conversa.telefone).startsWith('lid:') ? String(conversa.telefone).trim() : null
       const convPayload = {
         id: Number(conversa_id),
         ultima_atividade: basePayload.criado_em,
