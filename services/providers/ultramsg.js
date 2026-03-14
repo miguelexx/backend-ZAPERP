@@ -92,6 +92,19 @@ function maskTokenInFormBody(str) {
 
 /** Log completo da requisição UltraMsg: URL, headers, params, body e retorno. */
 function logUltramsgRequest({ method, url, headers = {}, params = null, body = null, responseStatus, responseData, responseText }) {
+  // Verificar se é erro conhecido de foto de perfil para reduzir spam de logs
+  const isProfilePictureRequest = url && url.includes('/contacts/image')
+  const isKnownProfilePictureError = isProfilePictureRequest && responseData?.error && (
+    responseData.error.includes("don't have picture") ||
+    responseData.error.includes("not in your chat list") ||
+    responseData.error.includes("user not found")
+  )
+  
+  // Não logar erros conhecidos de foto de perfil, a menos que seja modo debug
+  if (isKnownProfilePictureError && !WHATSAPP_DEBUG) {
+    return
+  }
+  
   const headersObj = typeof headers === 'object' && headers !== null && !Array.isArray(headers)
     ? (headers.get ? Object.fromEntries([...Object.entries(headers)].filter(([k]) => !k.startsWith('_'))) : { ...headers })
     : {}
@@ -99,6 +112,7 @@ function logUltramsgRequest({ method, url, headers = {}, params = null, body = n
   let bodyForLog = body
   if (body != null && typeof body === 'string') bodyForLog = maskTokenInFormBody(truncateForLog(body, 800))
   else if (body != null && typeof body === 'object') bodyForLog = sanitizeForLog(body, body?.token)
+  
   const logPayload = {
     '[ULTRAMSG REQUEST]': {
       method,
@@ -113,7 +127,13 @@ function logUltramsgRequest({ method, url, headers = {}, params = null, body = n
       text: responseText != null ? truncateForLog(responseText, 500) : null
     }
   }
-  console.log(JSON.stringify(logPayload, null, 2))
+  
+  // Log mais compacto para erros conhecidos em modo debug
+  if (isKnownProfilePictureError && WHATSAPP_DEBUG) {
+    console.log(`[ULTRAMSG] Profile picture not available: ${params?.chatId || 'unknown'}`)
+  } else {
+    console.log(JSON.stringify(logPayload, null, 2))
+  }
 }
 
 async function awaitSendDelay(companyId) {
@@ -797,6 +817,40 @@ function phoneToChatId(phone) {
   return fmt ? `${fmt}@c.us` : null
 }
 
+// Cache para contatos sem foto (evita requisições repetidas)
+const noProfilePictureCache = new Map()
+const NO_PICTURE_CACHE_TTL = 24 * 60 * 60 * 1000 // 24 horas
+
+// Rate limiting para requisições de foto de perfil
+const profilePictureRateLimit = new Map()
+const PROFILE_PICTURE_RATE_LIMIT_MS = 2000 // 2 segundos entre requisições por instância
+
+// Limpeza periódica dos caches (a cada 6 horas)
+setInterval(() => {
+  const now = Date.now()
+  
+  // Limpar cache de contatos sem foto expirados
+  for (const [key, value] of noProfilePictureCache.entries()) {
+    if (value.expiry <= now) {
+      noProfilePictureCache.delete(key)
+    }
+  }
+  
+  // Limpar rate limit antigo (mais de 1 hora)
+  for (const [key, timestamp] of profilePictureRateLimit.entries()) {
+    if (now - timestamp > 60 * 60 * 1000) {
+      profilePictureRateLimit.delete(key)
+    }
+  }
+  
+  if (WHATSAPP_DEBUG) {
+    console.log('[ULTRAMSG] Cache cleanup completed', {
+      noPictureCache: noProfilePictureCache.size,
+      rateLimitCache: profilePictureRateLimit.size
+    })
+  }
+}, 6 * 60 * 60 * 1000) // 6 horas
+
 /**
  * Busca URL da foto de perfil.
  * Doc oficial: GET /{instance_id}/contacts/image?token={TOKEN}&chatId={chatId}
@@ -813,12 +867,52 @@ async function getProfilePicture(phoneOrChatId, opts = {}) {
   const chatId = rawOpts || phoneToChatId(phoneOrChatId)
   if (!chatId) return null
 
+  // Verificar cache de contatos sem foto
+  const cacheKey = `${cfg.instanceId}:${chatId}`
+  const cachedNoPhoto = noProfilePictureCache.get(cacheKey)
+  if (cachedNoPhoto && cachedNoPhoto.expiry > Date.now()) {
+    // Contato já conhecido por não ter foto, retorna null silenciosamente
+    return null
+  }
+
+  // Rate limiting por instância para evitar spam de requisições
+  const rateLimitKey = `rate_limit:${cfg.instanceId}`
+  const lastRequest = profilePictureRateLimit.get(rateLimitKey)
+  const now = Date.now()
+  
+  if (lastRequest && (now - lastRequest) < PROFILE_PICTURE_RATE_LIMIT_MS) {
+    // Muito cedo para nova requisição, aguardar
+    const waitTime = PROFILE_PICTURE_RATE_LIMIT_MS - (now - lastRequest)
+    await new Promise(resolve => setTimeout(resolve, waitTime))
+  }
+  
+  profilePictureRateLimit.set(rateLimitKey, Date.now())
+
   try {
     const { ok, data, text } = await get({
       ...cfg,
       endpoint: '/contacts/image',
       extraParams: { chatId }
     })
+    
+    // Verificar se é erro conhecido de "sem foto"
+    const isNoPhotoError = data?.error && (
+      data.error.includes("don't have picture") ||
+      data.error.includes("not in your chat list") ||
+      data.error.includes("user not found")
+    )
+    
+    if (isNoPhotoError) {
+      // Cachear que este contato não tem foto
+      noProfilePictureCache.set(cacheKey, { expiry: Date.now() + NO_PICTURE_CACHE_TTL })
+      
+      // Log mais silencioso apenas em debug
+      if (WHATSAPP_DEBUG) {
+        console.log('[ULTRAMSG] No profile picture:', chatId.slice(-12))
+      }
+      return null
+    }
+    
     if (WHATSAPP_DEBUG) {
       console.log('[ULTRAMSG] getProfilePicture', { chatId: chatId.slice(-12), ok, status: data?.error ?? 'ok' })
     }

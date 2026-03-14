@@ -103,12 +103,17 @@ async function syncUltraMsgContact(chatIdOrPhone, companyId, opts = {}) {
     const picOpts = { companyId, chatId }
 
     try {
-      const [meta, pic] = await Promise.all([
-        provider.getContactMetadata?.(telefone, { companyId, chatId }).catch(() => null) ?? null,
-        provider.getProfilePicture?.(chatId, picOpts).catch(() => null) ?? null
-      ])
-      metadata = meta
-      profilePicUrl = pic
+      // Buscar metadados primeiro
+      const meta = await provider.getContactMetadata?.(telefone, { companyId, chatId }).catch(() => null) ?? null
+      
+      // Só buscar foto se os metadados indicarem que o contato existe e está na lista
+      let pic = null
+      if (meta && !meta.error) {
+        pic = await provider.getProfilePicture?.(chatId, picOpts).catch(() => null) ?? null
+      }
+      
+      metadata = metadata
+      profilePicUrl = profilePicUrl
     } catch (e) {
       console.warn('[syncUltraMsgContact] UltraMsg falhou:', e?.message || 'erro', '| company:', companyId)
       return null

@@ -114,11 +114,16 @@ async function assertPermissaoConversa({ company_id, conversa_id, user_id, role,
   const r = String(role || '').toLowerCase()
   if (r === 'admin') return { ok: true, conv }
 
-  // supervisor: conversas sem setor visíveis para TODOS; com setor só mesmo setor
+  // supervisor: conversas sem setor visíveis para TODOS; com setor só mesmo setor + conversas assumidas por ele
   if (r === 'supervisor') {
     if (!isGroup) {
       const convDep = conv.departamento_id ?? null
       const userDep = user_dep_id ?? null
+      const isAssignedToUser = conv.atendente_id && Number(conv.atendente_id) === Number(user_id)
+      
+      // Se a conversa está assumida pelo usuário, sempre permitir acesso
+      if (isAssignedToUser) return { ok: true, conv }
+      
       if (userDep == null && convDep != null) return { ok: false, status: 403, error: 'Conversa de outro setor' }
       // convDep == null: qualquer usuário pode ver conversas sem setor
       if (userDep != null && convDep != null && Number(convDep) !== Number(userDep)) return { ok: false, status: 403, error: 'Conversa de outro setor' }
@@ -439,13 +444,14 @@ exports.listarConversas = async (req, res) => {
         .select(select)
         .eq('company_id', company_id)
       // Filtro por setor: conversas sem setor visíveis para TODOS os usuários.
-      // Admin vê todas. Supervisor/atendente: com setor → seu setor + conversas sem setor + grupos;
-      // sem setor → conversas sem setor + grupos.
+      // Admin vê todas. Supervisor/atendente: com setor → seu setor + conversas sem setor + grupos + conversas assumidas por ele;
+      // sem setor → conversas sem setor + grupos + conversas assumidas por ele.
+      // IMPORTANTE: Sempre mostrar conversas assumidas pelo usuário, independente do setor
       if (!isAdmin) {
         if (user_dep_id != null) {
-          q = q.or(`departamento_id.eq.${user_dep_id},departamento_id.is.null,tipo.eq.grupo`)
+          q = q.or(`departamento_id.eq.${user_dep_id},departamento_id.is.null,tipo.eq.grupo,atendente_id.eq.${user_id}`)
         } else {
-          q = q.or(`departamento_id.is.null,tipo.eq.grupo`)
+          q = q.or(`departamento_id.is.null,tipo.eq.grupo,atendente_id.eq.${user_id}`)
         }
       } else if (filter_dep_id) {
         q = q.eq('departamento_id', Number(filter_dep_id))
@@ -1701,6 +1707,23 @@ exports.transferirChat = async (req, res) => {
       return res.status(400).json({ error: 'para_usuario_id é obrigatório' })
     }
 
+    // Validar se o usuário de destino existe e está ativo na mesma empresa
+    const { data: targetUser, error: userError } = await supabase
+      .from('usuarios')
+      .select('id, nome, ativo, departamento_id')
+      .eq('company_id', company_id)
+      .eq('id', para_usuario_id)
+      .eq('ativo', true)
+      .maybeSingle()
+
+    if (userError) {
+      return res.status(500).json({ error: 'Erro ao validar usuário de destino' })
+    }
+
+    if (!targetUser) {
+      return res.status(400).json({ error: 'Usuário de destino não encontrado ou inativo' })
+    }
+
     const { data, error } = await supabase
       .from('conversas')
       .update({
@@ -1727,6 +1750,7 @@ exports.transferirChat = async (req, res) => {
 
     const io = req.app.get('io')
     if (io) {
+      // Emitir para toda a empresa sobre a transferência
       emitirEventoEmpresaConversa(
         io,
         company_id,
@@ -1734,12 +1758,40 @@ exports.transferirChat = async (req, res) => {
         io.EVENTS?.CONVERSA_TRANSFERIDA || 'conversa_transferida',
         data
       )
+      
+      // Lock para o novo atendente
       emitirLock(io, conversa_id, para_usuario_id)
 
+      // Buscar nome do usuário que está transferindo para notificação mais rica
+      const { data: fromUser } = await supabase
+        .from('usuarios')
+        .select('nome')
+        .eq('id', user_id)
+        .maybeSingle()
+
+      // Notificar o novo atendente que recebeu uma conversa
       emitirParaUsuario(io, para_usuario_id, io.EVENTS?.CONVERSA_ATRIBUIDA || 'conversa_atribuida', {
-        conversa_id: Number(conversa_id)
+        conversa_id: Number(conversa_id),
+        transferido_por: user_id,
+        transferido_por_nome: fromUser?.nome || 'Usuário',
+        observacao: observacao || null,
+        timestamp: new Date().toISOString()
       })
-      emitirConversaAtualizada(io, company_id, conversa_id, { id: Number(conversa_id) })
+      
+      // Notificar o usuário que transferiu
+      emitirParaUsuario(io, user_id, 'conversa_transferida_sucesso', {
+        conversa_id: Number(conversa_id),
+        para_usuario_id: para_usuario_id,
+        para_usuario_nome: targetUser.nome,
+        timestamp: new Date().toISOString()
+      })
+      
+      // Atualizar conversa para todos
+      emitirConversaAtualizada(io, company_id, conversa_id, { 
+        id: Number(conversa_id),
+        atendente_id: para_usuario_id,
+        status_atendimento: 'em_atendimento'
+      })
     }
 
     return res.json({ ok: true, conversa: data })
