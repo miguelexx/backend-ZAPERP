@@ -2590,8 +2590,8 @@ exports.statusZapi = async (req, res) => {
         }
       }
 
-      // 3) Fallback UltraMsg: message_ack pode chegar ANTES do ReceivedCallback.
-      //    Busca mensagem out recente sem whatsapp_id e atualiza (reconcilia status + whatsapp_id).
+      // 3) Fallback UltraMsg: message_ack pode chegar ANTES do ReceivedCallback (id formato WhatsApp).
+      //    Busca mensagem out recente sem whatsapp_id e atualiza status + whatsapp_id.
       const isWhatsAppFormatId = idStr.includes('@') || idStr.includes('_')
       if (!msg && isWhatsAppFormatId && company_id) {
         const fromIso = new Date(Date.now() - 5 * 60 * 1000).toISOString()
@@ -2616,6 +2616,33 @@ exports.statusZapi = async (req, res) => {
             .maybeSingle()
           msg = patched || null
           if (msg && logDebug) console.log('[DEBUG] status reconciliação: message_ack antes do ReceivedCallback', { mensagem_id: msg.id })
+        }
+      }
+
+      // 4) Fallback UltraMsg: message_ack envia id numérico (ex: 35096). Só atualiza quando há UMA
+      //    mensagem out recente (evita marcar a mensagem errada quando várias em sequência).
+      const isUltramsgNumericId = /^\d{1,15}$/.test(idStr)
+      if (!msg && isUltramsgNumericId && company_id) {
+        const fromIso = new Date(Date.now() - 3 * 60 * 1000).toISOString()
+        const { data: recent } = await supabase
+          .from('mensagens')
+          .select('id, conversa_id, company_id, autor_usuario_id')
+          .eq('company_id', company_id)
+          .eq('direcao', 'out')
+          .gte('criado_em', fromIso)
+          .order('criado_em', { ascending: false })
+          .order('id', { ascending: false })
+          .limit(2)
+        const cand = Array.isArray(recent) && recent.length === 1 ? recent[0] : null
+        if (cand?.id) {
+          const { data: patched } = await supabase
+            .from('mensagens')
+            .update({ status: effectiveStatus })
+            .eq('company_id', company_id)
+            .eq('id', cand.id)
+            .select('id, conversa_id, company_id, autor_usuario_id')
+            .maybeSingle()
+          msg = patched || null
         }
       }
 

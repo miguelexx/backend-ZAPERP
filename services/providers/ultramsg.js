@@ -801,6 +801,23 @@ async function getGroups(opts = {}) {
 }
 
 /**
+ * Busca detalhes de um grupo. UltraMsg: GET /{instance_id}/groups/group?groupId=XXX
+ */
+async function getGroup(groupId, opts = {}) {
+  const cfg = await resolveConfig(opts)
+  if (!cfg || !groupId) return null
+  try {
+    const gid = String(groupId).trim()
+    if (!gid || !gid.endsWith('@g.us')) return null
+    const { ok, data } = await getJson({ ...cfg, endpoint: '/groups/group', extraParams: { groupId: gid } })
+    if (!ok || !data || typeof data !== 'object') return null
+    return data
+  } catch {
+    return null
+  }
+}
+
+/**
  * Converte phone para chatId no formato WhatsApp: 5511986459364@c.us (13 dígitos BR) ou 120xxx@g.us.
  * UltraMsg exige chatId sem + e sem espaços.
  */
@@ -1201,6 +1218,7 @@ module.exports = {
   getContacts,
   getChats,
   getGroups,
+  getGroup,
   uploadMedia,
   getProfilePicture,
   getContactMetadata,

@@ -48,15 +48,30 @@ function extractGroupFields(raw) {
 
 /**
  * Busca metadados de um grupo (nome e foto) via API UltraMsg.
+ * Usa GET /groups/group?groupId= para obter o nome do grupo.
  */
 async function getGroupMetadata(groupId, company_id) {
   const provider = getProvider()
   if (!provider) return { nome: null, foto: null }
   
   try {
-    // Tenta buscar foto do grupo
+    let nome = null
     let foto = null
-    if (provider.getProfilePicture) {
+
+    if (provider.getGroup) {
+      try {
+        const groupData = await provider.getGroup(groupId, { companyId: company_id })
+        if (groupData && typeof groupData === 'object') {
+          nome = String(groupData.name || groupData.subject || groupData.title || '').trim() || null
+          const pic = groupData.picture || groupData.image || groupData.photo
+          foto = pic && typeof pic === 'string' && pic.trim().startsWith('http') ? pic.trim() : null
+        }
+      } catch (e) {
+        console.warn(`[GROUPS-SYNC] Erro ao buscar grupo ${groupId}:`, e?.message)
+      }
+    }
+
+    if (!foto && provider.getProfilePicture) {
       try {
         foto = await provider.getProfilePicture(groupId, { companyId: company_id })
         if (!foto || !foto.startsWith('http')) foto = null
@@ -65,8 +80,7 @@ async function getGroupMetadata(groupId, company_id) {
       }
     }
     
-    // Para nome, usa o que veio na listagem de grupos (não há endpoint específico na UltraMsg)
-    return { nome: null, foto }
+    return { nome, foto }
   } catch (e) {
     console.warn(`[GROUPS-SYNC] Erro ao buscar metadados do grupo ${groupId}:`, e?.message)
     return { nome: null, foto: null }
@@ -184,8 +198,63 @@ async function syncGroups(company_id) {
   }
 }
 
+/** Debounce por conversa para evitar excesso de chamadas ao abrir grupo */
+const _lastGroupSyncByConv = new Map()
+const GROUP_SYNC_DEBOUNCE_MS = 60_000
+
+/**
+ * Sincroniza nome do grupo ao abrir a conversa (detalharChat).
+ * Atualiza nome_grupo e emite conversa_atualizada se houver nome novo.
+ */
+async function syncConversationGroupOnJoin(supabase, conversaId, companyId, io, opts = {}) {
+  if (!conversaId || !companyId || !io) return
+  const key = `${companyId}:${conversaId}`
+  if (opts.skipIfRecent && _lastGroupSyncByConv.get(key) && Date.now() - _lastGroupSyncByConv.get(key) < GROUP_SYNC_DEBOUNCE_MS) {
+    return
+  }
+
+  try {
+    const { data: conv } = await supabase
+      .from('conversas')
+      .select('id, telefone, tipo, nome_grupo')
+      .eq('id', conversaId)
+      .eq('company_id', companyId)
+      .maybeSingle()
+
+    if (!conv || String(conv.tipo || '').toLowerCase() !== 'grupo') return
+    const tf = String(conv.telefone || '').trim()
+    if (!tf || !tf.includes('@g.us') && !(tf.startsWith('120') || tf.includes('-'))) return
+
+    const groupId = tf.endsWith('@g.us') ? tf : `${tf}@g.us`
+    const metadata = await getGroupMetadata(groupId, companyId)
+    if (!metadata?.nome) return
+
+    const nomeAtual = (conv.nome_grupo || '').trim()
+    if (metadata.nome !== nomeAtual) {
+      const { error } = await supabase
+        .from('conversas')
+        .update({ nome_grupo: metadata.nome })
+        .eq('id', conversaId)
+        .eq('company_id', companyId)
+      if (!error && io) {
+        const eventName = io.EVENTS?.CONVERSA_ATUALIZADA || 'conversa_atualizada'
+        io.to(`empresa_${companyId}`).to(`conversa_${conversaId}`).emit(eventName, {
+          id: conversaId,
+          nome_grupo: metadata.nome,
+          contato_nome: metadata.nome,
+          cliente_nome: metadata.nome
+        })
+      }
+    }
+    _lastGroupSyncByConv.set(key, Date.now())
+  } catch (e) {
+    console.warn('[syncConversationGroupOnJoin]', e?.message || e)
+  }
+}
+
 module.exports = {
   syncGroups,
   extractGroupFields,
-  getGroupMetadata
+  getGroupMetadata,
+  syncConversationGroupOnJoin
 }

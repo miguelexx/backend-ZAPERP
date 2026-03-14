@@ -1513,12 +1513,16 @@ exports.detalharChat = async (req, res) => {
       emitirParaUsuario(io, user_id, io.EVENTS?.MENSAGENS_LIDAS || 'mensagens_lidas', payload)
     }
 
-    // Background: re-sincroniza foto e nome do contato com provider (UltraMsg/Z-API)
-    // Atualiza clientes E conversas (nome_contato_cache, foto_perfil_contato_cache) para exibir na lista e header.
-    if (!isGroup && io) {
+    // Background: re-sincroniza foto e nome do contato/grupo com provider (UltraMsg/Z-API)
+    if (io) {
       setImmediate(() => {
-        const { syncConversationContactOnJoin } = require('../services/ultramsgSyncContact')
-        syncConversationContactOnJoin(supabase, Number(id), Number(company_id), io, { skipIfRecent: true }).catch(() => {})
+        if (isGroup) {
+          const { syncConversationGroupOnJoin } = require('../services/ultramsgGroupsSyncService')
+          syncConversationGroupOnJoin(supabase, Number(id), Number(company_id), io, { skipIfRecent: true }).catch(() => {})
+        } else {
+          const { syncConversationContactOnJoin } = require('../services/ultramsgSyncContact')
+          syncConversationContactOnJoin(supabase, Number(id), Number(company_id), io, { skipIfRecent: true }).catch(() => {})
+        }
       })
     }
 
