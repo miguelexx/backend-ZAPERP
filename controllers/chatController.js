@@ -142,17 +142,21 @@ async function assertPermissaoConversa({ company_id, conversa_id, user_id, role,
 
   const isGroup = isGroupConversation(conv)
   const r = String(role || '').toLowerCase()
+  const isAssignedToUser = conv.atendente_id && Number(conv.atendente_id) === Number(user_id)
+  
+  // REGRA PRINCIPAL: Se a conversa está assumida pelo usuário, SEMPRE permitir acesso total
+  // independente do setor, perfil ou qualquer outra restrição
+  if (isAssignedToUser) {
+    return { ok: true, conv, reason: 'conversa_assumida_pelo_usuario' }
+  }
+  
   if (r === 'admin') return { ok: true, conv }
 
-  // supervisor: conversas sem setor visíveis para TODOS; com setor só mesmo setor + conversas assumidas por ele
+  // supervisor: conversas sem setor visíveis para TODOS; com setor só mesmo setor
   if (r === 'supervisor') {
     if (!isGroup) {
       const convDep = conv.departamento_id ?? null
       const userDep = user_dep_id ?? null
-      const isAssignedToUser = conv.atendente_id && Number(conv.atendente_id) === Number(user_id)
-      
-      // Se a conversa está assumida pelo usuário, sempre permitir acesso
-      if (isAssignedToUser) return { ok: true, conv }
       
       if (userDep == null && convDep != null) return { ok: false, status: 403, error: 'Conversa de outro setor' }
       // convDep == null: qualquer usuário pode ver conversas sem setor
@@ -170,11 +174,10 @@ async function assertPermissaoConversa({ company_id, conversa_id, user_id, role,
 
 /**
  * Verifica se o usuário pode ENVIAR mensagens na conversa.
- * Regras (otimizado para chatbot + atendimento humano):
- * - Quem ASSUMIU (atendente_id === user_id) pode enviar.
- * - Conversa em fila (atendente_id === null): qualquer usuário autenticado da empresa pode enviar
- *   — permite respostas via painel durante triagem, chatbots e fluxos automatizados antes de assumir.
- * - Conversa assumida por OUTRO usuário: bloqueia (evita conflito entre atendentes).
+ * Regras principais:
+ * - SEMPRE: Se a conversa está assumida pelo usuário (atendente_id === user_id), pode enviar
+ * - SEMPRE: Conversa em fila (atendente_id === null), qualquer usuário pode enviar
+ * - FLEXÍVEL: Sistema permite envio para facilitar atendimento colaborativo
  */
 async function assertPodeEnviarMensagem({ company_id, conversa_id, user_id }) {
   const { data: conv, error } = await supabase
@@ -186,8 +189,20 @@ async function assertPodeEnviarMensagem({ company_id, conversa_id, user_id }) {
   if (error) return { ok: false, status: 500, error: error.message }
   if (!conv) return { ok: false, status: 404, error: 'Conversa não encontrada' }
 
-  // Bloqueio "assumir conversa" desativado — qualquer usuário autenticado pode enviar
-  return { ok: true }
+  // REGRA PRINCIPAL: Se a conversa está assumida pelo usuário, SEMPRE pode enviar
+  const isAssignedToUser = conv.atendente_id && Number(conv.atendente_id) === Number(user_id)
+  if (isAssignedToUser) {
+    return { ok: true, reason: 'conversa_assumida_pelo_usuario' }
+  }
+
+  // REGRA SECUNDÁRIA: Conversa em fila (sem atendente), qualquer usuário pode enviar
+  if (!conv.atendente_id) {
+    return { ok: true, reason: 'conversa_em_fila' }
+  }
+
+  // REGRA FLEXÍVEL: Permitir envio mesmo se assumida por outro (para colaboração)
+  // Isso permite que supervisores/admins possam intervir quando necessário
+  return { ok: true, reason: 'sistema_colaborativo' }
 }
 
 // =====================================================
@@ -1388,9 +1403,13 @@ exports.detalharChat = async (req, res) => {
     if (!conversa) return res.status(404).json({ error: 'Conversa não encontrada' })
 
     const isGroup = isGroupConversation(conversa)
-    // Visibilidade: conversas sem setor visíveis para TODOS; com setor só para usuários do mesmo setor
-    // Atendente: acesso total às conversas que vê na lista (seu setor + sem setor) — pode abrir para assumir/transferir
-    if (!isAdmin && !isGroup) {
+    const isAssignedToUser = conversa.atendente_id && Number(conversa.atendente_id) === Number(user_id)
+    
+    // REGRA PRINCIPAL: Se a conversa está assumida pelo usuário, SEMPRE permitir acesso total
+    if (isAssignedToUser) {
+      // Usuário responsável pela conversa tem acesso total independente do setor
+    } else if (!isAdmin && !isGroup) {
+      // Aplicar regras de setor apenas se a conversa NÃO estiver assumida pelo usuário
       const convDep = conversa.departamento_id ?? null
       const userDep = user_dep_id ?? null
       if (userDep == null && convDep != null) {
