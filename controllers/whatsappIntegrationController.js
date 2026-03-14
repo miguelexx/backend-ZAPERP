@@ -2,6 +2,7 @@ const supabase = require('../config/supabase')
 const ultramsgIntegrationService = require('../services/ultramsgIntegrationService')
 const whatsappConfigService = require('../services/whatsappConfigService')
 const { syncContacts } = require('../services/ultramsgContactsSyncService')
+const { syncGroups } = require('../services/ultramsgGroupsSyncService')
 const { checkGuard, recordQrServed, resetOnConnected, getAttempts, THROTTLE_SECONDS } = require('../services/zapiConnectGuardService')
 const { getConfig } = require('../services/configOperacionalService')
 
@@ -298,6 +299,29 @@ exports.syncContacts = async (req, res) => {
   return res.json({
     ok: true,
     mode: result.mode,
+    totalFetched: result.totalFetched,
+    inserted: result.inserted,
+    updated: result.updated,
+    skipped: result.skipped
+  })
+}
+
+exports.syncGroups = async (req, res) => {
+  const company_id = req.user?.company_id
+  if (!company_id) return res.status(401).json({ error: 'Não autenticado' })
+  
+  if (!checkCompanyRate(company_id, 'groups-sync', 60_000, 3)) {
+    return res.status(429).json({
+      error: 'Muitas sincronizações de grupos. Aguarde 1 minuto.',
+      retryAfterSeconds: 60
+    })
+  }
+  
+  const result = await syncGroups(company_id)
+  if (!result.ok) return res.status(400).json({ ok: false, error: result.errors?.[0] || 'Erro ao sincronizar grupos' })
+  
+  return res.json({
+    ok: true,
     totalFetched: result.totalFetched,
     inserted: result.inserted,
     updated: result.updated,

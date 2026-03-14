@@ -26,5 +26,6 @@ connectRouter.post('/phone-code', whatsappIntegrationController.phoneCode)
 router.use('/connect', connectRouter)
 
 router.post('/contacts/sync', whatsappIntegrationController.syncContacts)
+router.post('/groups/sync', whatsappIntegrationController.syncGroups)
 
 module.exports = router

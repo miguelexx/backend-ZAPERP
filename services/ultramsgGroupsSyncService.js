@@ -1,0 +1,191 @@
+/**
+ * Sincronização de grupos do WhatsApp via UltraMsg.
+ * Endpoint: POST /api/integrations/whatsapp/groups/sync
+ *
+ * Fluxo:
+ * 1) GET /groups - lista grupos da instância
+ * 2) Para cada grupo: busca metadados (nome, foto)
+ * 3) Cria/atualiza registro na tabela `conversas` (tipo: 'grupo')
+ *
+ * Resposta: { ok, totalFetched, inserted, updated, skipped, errors[] }
+ */
+
+const supabase = require('../config/supabase')
+const { getProvider } = require('./providers')
+const { getEmpresaWhatsappConfig } = require('./whatsappConfigService')
+
+// Constantes de configuração
+const GROUP_ID_PREFIX = '120'
+const MIN_GROUP_ID_LENGTH = 15
+const GROUP_SUFFIX = '@g.us'
+const ERROR_MESSAGE_MAX_LENGTH = 80
+
+/**
+ * Extrai campos de um grupo retornado pela UltraMsg.
+ * Formato esperado: { id: "120363027...@g.us", name: "Nome do Grupo", ... }
+ */
+function extractGroupFields(raw) {
+  if (!raw || typeof raw !== 'object') return null
+  
+  const groupId = String(raw.id || raw.jid || raw.chatId || '').trim()
+  if (!groupId || !groupId.endsWith(GROUP_SUFFIX)) return null
+  
+  // Remove @g.us e valida formato de grupo (120...)
+  const digits = groupId.replace(GROUP_SUFFIX, '').replace(/\D/g, '')
+  if (!digits.startsWith(GROUP_ID_PREFIX) || digits.length < MIN_GROUP_ID_LENGTH) return null
+  
+  const nome = String(raw.name || raw.subject || raw.title || '').trim() || null
+  const foto = raw.picture || raw.image || raw.photo || null
+  const fotoUrl = foto && typeof foto === 'string' && foto.trim().startsWith('http') ? foto.trim() : null
+  
+  return {
+    groupId: groupId,
+    telefone: digits, // Apenas os dígitos (sem @g.us) para armazenar no banco
+    nome: nome,
+    foto: fotoUrl
+  }
+}
+
+/**
+ * Busca metadados de um grupo (nome e foto) via API UltraMsg.
+ */
+async function getGroupMetadata(groupId, company_id) {
+  const provider = getProvider()
+  if (!provider) return { nome: null, foto: null }
+  
+  try {
+    // Tenta buscar foto do grupo
+    let foto = null
+    if (provider.getProfilePicture) {
+      try {
+        foto = await provider.getProfilePicture(groupId, { companyId: company_id })
+        if (!foto || !foto.startsWith('http')) foto = null
+      } catch (e) {
+        console.warn(`[GROUPS-SYNC] Erro ao buscar foto do grupo ${groupId}:`, e?.message)
+      }
+    }
+    
+    // Para nome, usa o que veio na listagem de grupos (não há endpoint específico na UltraMsg)
+    return { nome: null, foto }
+  } catch (e) {
+    console.warn(`[GROUPS-SYNC] Erro ao buscar metadados do grupo ${groupId}:`, e?.message)
+    return { nome: null, foto: null }
+  }
+}
+
+/**
+ * Sincroniza grupos via API UltraMsg GET /groups.
+ */
+async function syncGroups(company_id) {
+  if (!company_id) {
+    return { ok: false, totalFetched: 0, inserted: 0, updated: 0, skipped: 0, errors: ['company_id ausente'] }
+  }
+
+  const { config, error } = await getEmpresaWhatsappConfig(company_id)
+  if (error || !config) {
+    return { ok: false, totalFetched: 0, inserted: 0, updated: 0, skipped: 0, errors: ['Empresa sem instância configurada'] }
+  }
+
+  const provider = getProvider()
+  if (!provider?.getGroups) {
+    return { ok: false, totalFetched: 0, inserted: 0, updated: 0, skipped: 0, errors: ['getGroups não disponível'] }
+  }
+
+  const stats = { totalFetched: 0, inserted: 0, updated: 0, skipped: 0, errors: [] }
+
+  try {
+    const groups = await provider.getGroups({ companyId: company_id })
+    if (!Array.isArray(groups) || groups.length === 0) {
+      return { ok: true, totalFetched: 0, inserted: 0, updated: 0, skipped: 0, errors: [] }
+    }
+
+    stats.totalFetched = groups.length
+    console.log(`[GROUPS-SYNC] Encontrados ${groups.length} grupos para sincronizar`)
+
+    for (const g of groups) {
+      const fields = extractGroupFields(g)
+      if (!fields || !fields.telefone) {
+        stats.skipped++
+        continue
+      }
+
+      try {
+        // Verifica se o grupo já existe
+        const { data: existente } = await supabase
+          .from('conversas')
+          .select('id, nome_grupo, foto_grupo')
+          .eq('company_id', company_id)
+          .eq('telefone', fields.telefone)
+          .eq('tipo', 'grupo')
+          .limit(1)
+          .maybeSingle()
+
+        // Busca metadados adicionais (principalmente foto)
+        const metadata = await getGroupMetadata(fields.groupId, company_id)
+        const nomeAtualizado = fields.nome || metadata.nome
+        const fotoAtualizada = fields.foto || metadata.foto
+
+        if (existente) {
+          // Atualiza grupo existente apenas se houver novos dados
+          const updates = {}
+          if (nomeAtualizado && nomeAtualizado !== existente.nome_grupo) {
+            updates.nome_grupo = nomeAtualizado
+          }
+          if (fotoAtualizada && fotoAtualizada !== existente.foto_grupo) {
+            updates.foto_grupo = fotoAtualizada
+          }
+
+          if (Object.keys(updates).length > 0) {
+            const { error: updateError } = await supabase
+              .from('conversas')
+              .update(updates)
+              .eq('id', existente.id)
+              .eq('company_id', company_id)
+
+            if (updateError) {
+              stats.errors.push(`${fields.telefone}: erro ao atualizar - ${updateError.message}`)
+            } else {
+              stats.updated++
+            }
+          } else {
+            stats.skipped++
+          }
+        } else {
+          // Cria novo grupo
+          const novoGrupo = {
+            company_id: company_id,
+            telefone: fields.telefone,
+            tipo: 'grupo',
+            nome_grupo: nomeAtualizado,
+            foto_grupo: fotoAtualizada,
+            status_atendimento: 'aberta',
+            criado_em: new Date().toISOString()
+          }
+
+          const { error: insertError } = await supabase
+            .from('conversas')
+            .insert(novoGrupo)
+
+          if (insertError) {
+            stats.errors.push(`${fields.telefone}: erro ao inserir - ${insertError.message}`)
+          } else {
+            stats.inserted++
+          }
+        }
+      } catch (e) {
+        const errorMessage = String(e?.message || e).slice(0, ERROR_MESSAGE_MAX_LENGTH)
+        stats.errors.push(`${fields.telefone}: ${errorMessage}`)
+      }
+    }
+
+    return { ok: true, ...stats }
+  } catch (e) {
+    return { ok: false, totalFetched: 0, inserted: 0, updated: 0, skipped: 0, errors: [String(e?.message || e)] }
+  }
+}
+
+module.exports = {
+  syncGroups,
+  extractGroupFields,
+  getGroupMetadata
+}

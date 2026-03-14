@@ -15,9 +15,14 @@ const { getEmpresaWhatsappConfig } = require('./whatsappConfigService')
 const { getOrCreateCliente } = require('../helpers/conversationSync')
 const { syncUltraMsgContact } = require('./ultramsgSyncContact')
 const { normalizePhoneBR, possiblePhonesBR, phoneKeyBR } = require('../helpers/phoneHelper')
-const { syncFotosProgressiva } = require('./syncFotosProgressivaService')
 
+// Constantes de configuração
 const PAGE_SIZE = 100
+const MIN_PHONE_DIGITS = 10
+const BR_COUNTRY_CODE = '55'
+const MIN_BR_PHONE_LENGTH = 12
+const MAX_BR_PHONE_LENGTH = 13
+const ERROR_MESSAGE_MAX_LENGTH = 80
 
 /**
  * Extrai phone e nome de um objeto contato retornado pelo provider.
@@ -44,11 +49,11 @@ function extractContactFields(raw) {
   if (phoneStr.endsWith('@g.us') || phoneStr.includes('-group')) return null
 
   const digits = phoneStr.replace(/\D/g, '')
-  if (!digits || digits.length < 10) return null
+  if (!digits || digits.length < MIN_PHONE_DIGITS) return null
 
   // Regra 3: normaliza para BR válido sem inventar prefixo
   const norm = normalizePhoneBR(digits)
-  if (!norm || !norm.startsWith('55') || (norm.length !== 12 && norm.length !== 13)) return null
+  if (!norm || !norm.startsWith(BR_COUNTRY_CODE) || (norm.length !== MIN_BR_PHONE_LENGTH && norm.length !== MAX_BR_PHONE_LENGTH)) return null
 
   // Nome: prioriza name (salvo no celular) > short > notify > vname
   const nome = name || String(raw.short ?? raw.notify ?? raw.vname ?? '').trim() || null
@@ -105,7 +110,7 @@ async function syncViaContactsApi(company_id) {
         const variants = possiblePhonesBR(fields.phone).length > 0 ? possiblePhonesBR(fields.phone) : [fields.phone]
         const { data: existente } = await supabase
           .from('clientes')
-          .select('id')
+          .select('id, foto_perfil')
           .eq('company_id', company_id)
           .in('telefone', variants)
           .limit(1)
@@ -113,8 +118,28 @@ async function syncViaContactsApi(company_id) {
 
         const clienteFields = {}
         if (fields.nome) clienteFields.nome = fields.nome
-        if (fields.foto) clienteFields.foto_perfil = fields.foto
         clienteFields.nomeSource = 'syncUltramsg'
+
+        // Se não tem foto na resposta da API ou cliente existente não tem foto, busca ativamente
+        let fotoUrl = fields.foto
+        const needsFoto = !fotoUrl && (!existente?.foto_perfil || existente.foto_perfil === 'null' || existente.foto_perfil === '')
+        
+        if (needsFoto) {
+          const provider = getProvider()
+          if (provider?.getProfilePicture) {
+            try {
+              fotoUrl = await provider.getProfilePicture(fields.phone, { companyId: company_id })
+              if (fotoUrl && typeof fotoUrl === 'string' && fotoUrl.startsWith('http')) {
+                clienteFields.foto_perfil = fotoUrl
+              }
+            } catch (fotoErr) {
+              // Falha na busca de foto não deve interromper o sync do contato
+              console.warn(`[SYNC-CONTACTS] Erro ao buscar foto ${fields.phone.slice(-8)}:`, fotoErr?.message)
+            }
+          }
+        } else if (fotoUrl) {
+          clienteFields.foto_perfil = fotoUrl
+        }
 
         const result = await getOrCreateCliente(supabase, company_id, fields.phone, clienteFields)
         if (result.cliente_id) {
@@ -124,7 +149,8 @@ async function syncViaContactsApi(company_id) {
           stats.skipped++
         }
       } catch (e) {
-        stats.errors.push(`${fields.phone}: ${String(e?.message || e).slice(0, 80)}`)
+        const errorMessage = String(e?.message || e).slice(0, ERROR_MESSAGE_MAX_LENGTH)
+        stats.errors.push(`${fields.phone}: ${errorMessage}`)
       }
     }
 
@@ -274,16 +300,10 @@ async function syncContacts(company_id) {
     result = await syncViaFallback(company_id)
   }
 
-  // Dispara busca de fotos em background para clientes sem foto (não bloqueia a resposta)
-  if (result.totalFetched > 0) {
-    setImmediate(async () => {
-      try {
-        const fotoResult = await syncFotosProgressiva(company_id, { onlySemFoto: true, limit: 100 })
-        console.log('[ULTRAMSG-SYNC] fotos background:', fotoResult)
-      } catch (e) {
-        console.warn('[ULTRAMSG-SYNC] fotos background erro:', e?.message)
-      }
-    })
+  // Log do resultado da sincronização
+  console.log(`[ULTRAMSG-SYNC] Concluído: ${result.mode}, fetched=${result.totalFetched}, inserted=${result.inserted}, updated=${result.updated}, skipped=${result.skipped}`)
+  if (result.errors.length > 0) {
+    console.warn('[ULTRAMSG-SYNC] Erros:', result.errors.slice(0, 3))
   }
 
   return {
