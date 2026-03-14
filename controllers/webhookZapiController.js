@@ -2352,17 +2352,36 @@ exports.receberZapi = async (req, res) => {
         .eq('id', convIdForEmit)
         .eq('company_id', company_id)
         .maybeSingle()
-      let contatoNome = (nomeParaCache && String(nomeParaCache).trim()) || (convRow?.nome_contato_cache ? String(convRow.nome_contato_cache).trim() : null)
+      let contatoNome = null
       let fotoPerfil = convRow?.foto_perfil_contato_cache ? String(convRow.foto_perfil_contato_cache).trim() : null
-      // Foto: fallback cliente só se cache vazio (nome: NUNCA — mantém contato fixo)
-      if (!fotoPerfil && convRow?.cliente_id && !isGroup) {
+      
+      // Priorizar nome salvo pelo usuário sobre cache automático ou webhook
+      if (convRow?.cliente_id && !isGroup) {
         const { data: cli } = await supabase
           .from('clientes')
-          .select('foto_perfil')
+          .select('nome, pushname, foto_perfil')
           .eq('id', convRow.cliente_id)
           .eq('company_id', company_id)
           .maybeSingle()
-        if (cli?.foto_perfil) fotoPerfil = String(cli.foto_perfil).trim()
+        
+        if (cli) {
+          const { getDisplayName } = require('../helpers/contactEnrichment')
+          // Priorizar: nome do cliente > nome do webhook > cache
+          contatoNome = getDisplayName(cli) || 
+                       (nomeParaCache && String(nomeParaCache).trim()) || 
+                       (convRow?.nome_contato_cache ? String(convRow.nome_contato_cache).trim() : null)
+          
+          // Foto: priorizar cliente, depois cache
+          if (!fotoPerfil && cli.foto_perfil) {
+            fotoPerfil = String(cli.foto_perfil).trim()
+          }
+        }
+      }
+      
+      // Fallback se não tem cliente_id
+      if (!contatoNome) {
+        contatoNome = (nomeParaCache && String(nomeParaCache).trim()) || 
+                     (convRow?.nome_contato_cache ? String(convRow.nome_contato_cache).trim() : null)
       }
       const depId = departamento_id ?? convRow?.departamento_id ?? null
       const convPayload = {

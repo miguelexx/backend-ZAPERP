@@ -622,8 +622,8 @@ exports.listarConversas = async (req, res) => {
       const contatoNome = isGroup
         ? (c.nome_grupo || telefoneExibivel || 'Grupo')
         : (
-            (c.nome_contato_cache && String(c.nome_contato_cache).trim()) ||
             nomeCliente ||
+            (c.nome_contato_cache && String(c.nome_contato_cache).trim()) ||
             telefoneExibivel ||
             'Sem nome'
           )
@@ -2025,7 +2025,7 @@ exports.enviarMensagemChat = async (req, res) => {
               const io = req.app.get('io')
               const { data: cli } = await supabase.from('clientes').select('nome, pushname, telefone, foto_perfil').eq('id', novoClienteId).eq('company_id', company_id).maybeSingle()
               const { data: conv } = await supabase.from('conversas').select('nome_contato_cache, foto_perfil_contato_cache').eq('id', conversa_id).eq('company_id', company_id).maybeSingle()
-              const contatoNome = conv?.nome_contato_cache || getDisplayName(cli) || synced.nome || conversa.telefone
+              const contatoNome = getDisplayName(cli) || conv?.nome_contato_cache || synced.nome || conversa.telefone
               const fotoPerfil = conv?.foto_perfil_contato_cache || cli?.foto_perfil || synced.foto_perfil
               io.to(`empresa_${company_id}`).emit('contato_atualizado', {
                 conversa_id: Number(conversa_id),
@@ -2126,18 +2126,34 @@ exports.enviarMensagemChat = async (req, res) => {
           novaMsgPayload
         )
       }
-      // Usar APENAS nome_contato_cache — nunca clientes.nome/pushname (evita nome alternar ao enviar/receber)
-      let contatoNome = conversa?.nome_contato_cache ? String(conversa.nome_contato_cache).trim() : null
+      // Priorizar nome salvo pelo usuário (clientes.nome) sobre cache automático
+      let contatoNome = null
       let fotoPerfil = conversa?.foto_perfil_contato_cache ? String(conversa.foto_perfil_contato_cache).trim() : null
-      // Foto: fallback cliente só se cache vazio (nome: NUNCA trocar — mantém contato fixo)
-      if (!fotoPerfil && conversa?.cliente_id) {
+      
+      // Buscar nome e foto do cliente se disponível
+      if (conversa?.cliente_id) {
         const { data: cli } = await supabase
           .from('clientes')
-          .select('foto_perfil')
+          .select('nome, pushname, foto_perfil')
           .eq('id', conversa.cliente_id)
           .eq('company_id', company_id)
           .maybeSingle()
-        if (cli?.foto_perfil) fotoPerfil = String(cli.foto_perfil).trim()
+        
+        if (cli) {
+          // Priorizar nome salvo pelo usuário, depois pushname, depois cache
+          contatoNome = getDisplayName(cli) || 
+                       (conversa?.nome_contato_cache ? String(conversa.nome_contato_cache).trim() : null)
+          
+          // Foto: priorizar cliente, depois cache
+          if (!fotoPerfil && cli.foto_perfil) {
+            fotoPerfil = String(cli.foto_perfil).trim()
+          }
+        }
+      }
+      
+      // Fallback para cache se não encontrou no cliente
+      if (!contatoNome && conversa?.nome_contato_cache) {
+        contatoNome = String(conversa.nome_contato_cache).trim()
       }
       // ultima_mensagem_preview: só para preview na lista lateral — NUNCA adicionar ao array de mensagens
       // (nova_mensagem já traz a mensagem completa para o chat; incluir id aqui causaria duplicata)
