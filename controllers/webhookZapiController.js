@@ -19,25 +19,6 @@ const { chooseBestName, isBadName, getDisplayName } = require('../helpers/contac
 const { resolvePeerPhone } = require('../helpers/conversationKeyHelper')
 const { incrementarUnreadParaConversa } = require('./chatController')
 
-// Cache para evitar duplicação de mensagens
-const messageDuplicationCache = new Map()
-const MESSAGE_CACHE_TTL = 30 * 1000 // 30 segundos
-
-/**
- * Verifica se uma mensagem já foi emitida recentemente para evitar duplicação
- */
-function isMessageRecentlyEmitted(messageId, eventType = 'nova_mensagem') {
-  const key = `${messageId}_${eventType}`
-  const cached = messageDuplicationCache.get(key)
-  
-  if (cached && cached.timestamp > Date.now() - MESSAGE_CACHE_TTL) {
-    return true // Já foi emitida recentemente
-  }
-  
-  // Marcar como emitida
-  messageDuplicationCache.set(key, { timestamp: Date.now() })
-  return false
-}
 const { processIncomingMessage: processChatbotTriage } = require('../services/chatbotTriageService')
 const { processarOptOut } = require('../services/optOutService')
 const { processarRegras } = require('../services/regrasAutomaticasService')
@@ -1837,7 +1818,7 @@ exports.receberZapi = async (req, res) => {
         .eq('whatsapp_id', whatsappIdStr)
         .maybeSingle()
       
-      // Se não encontrou por whatsapp_id, tentar buscar por temp_id (mensagens enviadas pelo usuário)
+      // Se não encontrou por whatsapp_id e é mensagem enviada por nós, buscar a mais recente
       if (!existente && fromMe) {
         const { data: tempExistente } = await supabase
           .from('mensagens')
@@ -1845,20 +1826,25 @@ exports.receberZapi = async (req, res) => {
           .eq('company_id', company_id)
           .eq('conversa_id', conversa_id)
           .eq('direcao', 'out')
-          .ilike('whatsapp_id', 'temp_%')
+          .is('whatsapp_id', null)
           .order('criado_em', { ascending: false })
           .limit(1)
           .maybeSingle()
         
         if (tempExistente) {
           // Atualizar com o whatsapp_id real
-          const { data: updatedMsg } = await supabase
-            .from('mensagens')
-            .update({ whatsapp_id: whatsappIdStr })
-            .eq('id', tempExistente.id)
-            .select('*')
-            .single()
-          existente = updatedMsg || tempExistente
+          try {
+            const { data: updatedMsg } = await supabase
+              .from('mensagens')
+              .update({ whatsapp_id: whatsappIdStr })
+              .eq('id', tempExistente.id)
+              .select('*')
+              .single()
+            existente = updatedMsg || tempExistente
+          } catch (e) {
+            console.warn('Erro ao atualizar whatsapp_id:', e.message)
+            existente = tempExistente
+          }
         }
       }
       
@@ -2323,10 +2309,8 @@ exports.receberZapi = async (req, res) => {
         emitPayload.photo = fotoContato
       }
       if (mensagemFoiInseridaPeloWebhook) {
-        // Mensagem nova (recebida): verificar duplicação antes de emitir
-        if (!isMessageRecentlyEmitted(mensagemSalva.id, 'nova_mensagem')) {
-          io.to(rooms).emit('nova_mensagem', emitPayload)
-        }
+        // Mensagem nova (recebida): emitir nova_mensagem
+        io.to(rooms).emit('nova_mensagem', emitPayload)
       } else {
         // Mensagem já existe (enviada pelo usuário): apenas atualizar status, não duplicar mensagem
         const statusPayload = {
@@ -2352,36 +2336,22 @@ exports.receberZapi = async (req, res) => {
         .eq('id', convIdForEmit)
         .eq('company_id', company_id)
         .maybeSingle()
-      let contatoNome = null
+      let contatoNome = (nomeParaCache && String(nomeParaCache).trim()) || (convRow?.nome_contato_cache ? String(convRow.nome_contato_cache).trim() : null)
       let fotoPerfil = convRow?.foto_perfil_contato_cache ? String(convRow.foto_perfil_contato_cache).trim() : null
       
-      // Priorizar nome salvo pelo usuário sobre cache automático ou webhook
-      if (convRow?.cliente_id && !isGroup) {
-        const { data: cli } = await supabase
-          .from('clientes')
-          .select('nome, pushname, foto_perfil')
-          .eq('id', convRow.cliente_id)
-          .eq('company_id', company_id)
-          .maybeSingle()
-        
-        if (cli) {
-          const { getDisplayName } = require('../helpers/contactEnrichment')
-          // Priorizar: nome do cliente > nome do webhook > cache
-          contatoNome = getDisplayName(cli) || 
-                       (nomeParaCache && String(nomeParaCache).trim()) || 
-                       (convRow?.nome_contato_cache ? String(convRow.nome_contato_cache).trim() : null)
-          
-          // Foto: priorizar cliente, depois cache
-          if (!fotoPerfil && cli.foto_perfil) {
-            fotoPerfil = String(cli.foto_perfil).trim()
-          }
+      // Foto: fallback cliente só se cache vazio
+      if (!fotoPerfil && convRow?.cliente_id && !isGroup) {
+        try {
+          const { data: cli } = await supabase
+            .from('clientes')
+            .select('foto_perfil')
+            .eq('id', convRow.cliente_id)
+            .eq('company_id', company_id)
+            .maybeSingle()
+          if (cli?.foto_perfil) fotoPerfil = String(cli.foto_perfil).trim()
+        } catch (e) {
+          console.warn('Erro ao buscar foto do cliente no webhook:', e.message)
         }
-      }
-      
-      // Fallback se não tem cliente_id
-      if (!contatoNome) {
-        contatoNome = (nomeParaCache && String(nomeParaCache).trim()) || 
-                     (convRow?.nome_contato_cache ? String(convRow.nome_contato_cache).trim() : null)
       }
       const depId = departamento_id ?? convRow?.departamento_id ?? null
       const convPayload = {

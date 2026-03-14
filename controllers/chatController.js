@@ -7,35 +7,6 @@ const { deduplicateConversationsByContact, sortConversationsByRecent, getCanonic
 const { enrichConversationsWithContactData } = require('../helpers/conversaEnrichment')
 const { getDisplayName } = require('../helpers/contactEnrichment')
 
-// Cache para evitar duplicação de mensagens
-const messageDuplicationCache = new Map()
-const MESSAGE_CACHE_TTL = 30 * 1000 // 30 segundos
-
-/**
- * Verifica se uma mensagem já foi emitida recentemente para evitar duplicação
- */
-function isMessageRecentlyEmitted(messageId, eventType = 'nova_mensagem') {
-  const key = `${messageId}_${eventType}`
-  const cached = messageDuplicationCache.get(key)
-  
-  if (cached && cached.timestamp > Date.now() - MESSAGE_CACHE_TTL) {
-    return true // Já foi emitida recentemente
-  }
-  
-  // Marcar como emitida
-  messageDuplicationCache.set(key, { timestamp: Date.now() })
-  return false
-}
-
-// Limpeza periódica do cache
-setInterval(() => {
-  const now = Date.now()
-  for (const [key, value] of messageDuplicationCache.entries()) {
-    if (now - value.timestamp > MESSAGE_CACHE_TTL) {
-      messageDuplicationCache.delete(key)
-    }
-  }
-}, MESSAGE_CACHE_TTL)
 
 // =====================================================
 // 1) HELPERS (TOPO DO ARQUIVO)
@@ -2051,11 +2022,7 @@ exports.enviarMensagemChat = async (req, res) => {
       direcao: 'out',
       autor_usuario_id: Number(user_id),
       status: 'pending',
-      criado_em: timestamp,
-      // Adicionar ID temporário para deduplicação no frontend e webhook
-      temp_id: `temp_${user_id}_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
-      // Usar temp_id como whatsapp_id temporário até receber o real do webhook
-      whatsapp_id: `temp_${user_id}_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
+      criado_em: timestamp
     }
     const payloadWithReply =
       reply_meta && typeof reply_meta === 'object'
@@ -2108,52 +2075,37 @@ exports.enviarMensagemChat = async (req, res) => {
 
     const io = req.app.get('io')
     if (io) {
-      // Verificar se a mensagem já foi emitida para evitar duplicação
-      if (!isMessageRecentlyEmitted(msg.id, 'nova_mensagem')) {
-        // Emitir nova_mensagem imediatamente para feedback visual instantâneo
-        const novaMsgPayload = {
-          ...msg,
-          conversa_id: msg.conversa_id ?? Number(conversa_id),
-          status: 'sending',
-          status_mensagem: 'sending',
-          temp_id: basePayload.temp_id // Para deduplicação no frontend
-        }
-        emitirEventoEmpresaConversa(
-          io,
-          company_id,
-          conversa_id,
-          io.EVENTS?.NOVA_MENSAGEM || 'nova_mensagem',
-          novaMsgPayload
-        )
+      // Emitir nova_mensagem imediatamente para feedback visual instantâneo
+      const novaMsgPayload = {
+        ...msg,
+        conversa_id: msg.conversa_id ?? Number(conversa_id),
+        status: 'sending',
+        status_mensagem: 'sending'
       }
-      // Priorizar nome salvo pelo usuário (clientes.nome) sobre cache automático
-      let contatoNome = null
+      emitirEventoEmpresaConversa(
+        io,
+        company_id,
+        conversa_id,
+        io.EVENTS?.NOVA_MENSAGEM || 'nova_mensagem',
+        novaMsgPayload
+      )
+      // Usar nome e foto do cache por enquanto (versão estável)
+      let contatoNome = conversa?.nome_contato_cache ? String(conversa.nome_contato_cache).trim() : null
       let fotoPerfil = conversa?.foto_perfil_contato_cache ? String(conversa.foto_perfil_contato_cache).trim() : null
       
-      // Buscar nome e foto do cliente se disponível
-      if (conversa?.cliente_id) {
-        const { data: cli } = await supabase
-          .from('clientes')
-          .select('nome, pushname, foto_perfil')
-          .eq('id', conversa.cliente_id)
-          .eq('company_id', company_id)
-          .maybeSingle()
-        
-        if (cli) {
-          // Priorizar nome salvo pelo usuário, depois pushname, depois cache
-          contatoNome = getDisplayName(cli) || 
-                       (conversa?.nome_contato_cache ? String(conversa.nome_contato_cache).trim() : null)
-          
-          // Foto: priorizar cliente, depois cache
-          if (!fotoPerfil && cli.foto_perfil) {
-            fotoPerfil = String(cli.foto_perfil).trim()
-          }
+      // Buscar foto do cliente se cache vazio
+      if (!fotoPerfil && conversa?.cliente_id) {
+        try {
+          const { data: cli } = await supabase
+            .from('clientes')
+            .select('foto_perfil')
+            .eq('id', conversa.cliente_id)
+            .eq('company_id', company_id)
+            .maybeSingle()
+          if (cli?.foto_perfil) fotoPerfil = String(cli.foto_perfil).trim()
+        } catch (e) {
+          console.warn('Erro ao buscar foto do cliente:', e.message)
         }
-      }
-      
-      // Fallback para cache se não encontrou no cliente
-      if (!contatoNome && conversa?.nome_contato_cache) {
-        contatoNome = String(conversa.nome_contato_cache).trim()
       }
       // ultima_mensagem_preview: só para preview na lista lateral — NUNCA adicionar ao array de mensagens
       // (nova_mensagem já traz a mensagem completa para o chat; incluir id aqui causaria duplicata)
