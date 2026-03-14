@@ -2372,9 +2372,12 @@ exports.receberZapi = async (req, res) => {
           direcao: emitPayload.direcao ?? 'in'
         }
       }
+      // reordenar_suave: true — frontend deve animar o item para o topo em vez de refetch (evita "desce e sobe")
+      convPayload.reordenar_suave = true
       io.to(`empresa_${company_id}`).emit('conversa_atualizada', convPayload)
       if (depId != null) {
-        if (!mensagemFoiInseridaPeloWebhook) io.to(`departamento_${depId}`).emit('atualizar_conversa', { id: convIdForEmit })
+        // Não emitir atualizar_conversa em reconciliação (fromMe) — evita refetch que causa bug visual
+        if (mensagemFoiInseridaPeloWebhook) io.to(`departamento_${depId}`).emit('atualizar_conversa', { id: convIdForEmit })
         io.to(`departamento_${depId}`).emit('conversa_atualizada', convPayload)
       }
     }

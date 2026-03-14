@@ -2112,7 +2112,8 @@ exports.enviarMensagemChat = async (req, res) => {
         ...(conversa?.cliente_id != null ? { cliente_id: conversa.cliente_id } : {}),
         ...(contatoNome ? { nome_contato_cache: contatoNome, contato_nome: contatoNome } : {}),
         ...(fotoPerfil ? { foto_perfil_contato_cache: fotoPerfil, foto_perfil: fotoPerfil } : {}),
-        ultima_mensagem_preview: { texto: basePayload.texto, criado_em: basePayload.criado_em, direcao: 'out' }
+        ultima_mensagem_preview: { texto: basePayload.texto, criado_em: basePayload.criado_em, direcao: 'out' },
+        reordenar_suave: true // Frontend: animar item para o topo em vez de refetch (evita "desce e sobe")
       }
       emitirConversaAtualizada(io, company_id, conversa_id, convPayload, { skipAtualizarConversa: true })
     }
@@ -2187,8 +2188,8 @@ exports.enviarMensagemChat = async (req, res) => {
 
         const io2 = req.app.get('io')
         if (io2) {
-          const payload = { mensagem_id: msg.id, conversa_id: Number(conversa_id), status: nextStatus, ...(waMessageId ? { whatsapp_id: waMessageId } : {}) }
-          // Emite para empresa, conversa E usuario que enviou (garante atualização em tempo real)
+          const payload = { mensagem_id: msg.id, conversa_id: Number(conversa_id), status: nextStatus, status_mensagem: nextStatus, ...(waMessageId ? { whatsapp_id: waMessageId } : {}) }
+          // Emite para empresa, conversa E usuario que enviou (garante ticks ✓✓ em tempo real)
           let chain = io2.to(`empresa_${company_id}`).to(`conversa_${conversa_id}`).to(`usuario_${user_id}`)
           chain.emit('status_mensagem', payload)
         }
@@ -2212,7 +2213,7 @@ exports.enviarMensagemChat = async (req, res) => {
           .eq('id', msg.id)
         const io2 = req.app.get('io')
         if (io2) {
-          const payload = { mensagem_id: msg.id, conversa_id: Number(conversa_id), status: 'erro' }
+          const payload = { mensagem_id: msg.id, conversa_id: Number(conversa_id), status: 'erro', status_mensagem: 'erro' }
           let chain = io2.to(`empresa_${company_id}`).to(`conversa_${conversa_id}`).to(`usuario_${user_id}`)
           chain.emit('status_mensagem', payload)
         }
