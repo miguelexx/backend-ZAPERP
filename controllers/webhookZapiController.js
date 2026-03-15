@@ -16,6 +16,7 @@ const { getStatus } = require('../services/ultramsgIntegrationService')
 const { normalizePhoneBR, possiblePhonesBR, normalizeGroupIdForStorage } = require('../helpers/phoneHelper')
 const { getCanonicalPhone, getOrCreateCliente, findOrCreateConversation, mergeConversasIntoCanonico, mergeConversationLidToPhone } = require('../helpers/conversationSync')
 const { chooseBestName, isBadName, getDisplayName } = require('../helpers/contactEnrichment')
+const { parseVcardForContact } = require('../helpers/vcardHelper')
 const { resolvePeerPhone } = require('../helpers/conversationKeyHelper')
 const { incrementarUnreadParaConversa } = require('./chatController')
 
@@ -487,6 +488,22 @@ function extractMessage(payload) {
   } else if (type === 'contact') {
     const c = payload.contact || {}
     texto = (c.displayName && String(c.displayName).trim()) || (c.formattedName && String(c.formattedName).trim()) || (c.vCard && String(c.vCard).slice(0, 120)) || '(contato)'
+  }
+
+  // contactMeta: { nome, telefone, foto_perfil? } para cartão de contato no frontend
+  let contactMeta = null
+  if (type === 'contact') {
+    const c = payload.contact || {}
+    const displayName = (c.displayName && String(c.displayName).trim()) || (c.formattedName && String(c.formattedName).trim()) || null
+    const vcard = c.vCard || c.vcard || (typeof rawMessage === 'string' && rawMessage.includes('BEGIN:VCARD') ? rawMessage : null)
+    const parsed = vcard ? parseVcardForContact(vcard) : { nome: null, telefone: null }
+    const contactPhone = c.phone || c.telefone || parsed.telefone || (Array.isArray(c.fullContactData?.phoneNumbers) && c.fullContactData.phoneNumbers[0] ? String(c.fullContactData.phoneNumbers[0]).replace(/\D/g, '') : null)
+    contactMeta = {
+      nome: displayName || parsed.nome || texto || null,
+      telefone: contactPhone || null,
+      foto_perfil: (c.profilePicture || c.profilePictureUrl || c.photo) && String(c.profilePicture || c.profilePictureUrl || c.photo).startsWith('http') ? String(c.profilePicture || c.profilePictureUrl || c.photo).trim() : null
+    }
+    if (!contactMeta.nome && !contactMeta.telefone) contactMeta = null
   } else if (type === 'image' && imageUrl) {
     texto = texto || (payload.image?.caption && String(payload.image.caption).trim()) || '(imagem)'
   } else if ((type === 'document' || type === 'file') && documentUrl) {
@@ -534,7 +551,8 @@ function extractMessage(payload) {
     senderLid,
     nomeGrupo: (isGroup && (payload.chatName ?? payload.groupName ?? payload.subject)) ? String(payload.chatName ?? payload.groupName ?? payload.subject).trim() : null,
     senderPhoto: senderPhoto && String(senderPhoto).trim() ? String(senderPhoto).trim() : null,
-    chatPhoto: chatPhoto && String(chatPhoto).trim() ? String(chatPhoto).trim() : null
+    chatPhoto: chatPhoto && String(chatPhoto).trim() ? String(chatPhoto).trim() : null,
+    contactMeta
   }
 }
 
@@ -1270,7 +1288,8 @@ exports.receberZapi = async (req, res) => {
         senderName,
         nomeGrupo,
         senderPhoto,
-        chatPhoto
+        chatPhoto,
+        contactMeta
       } = extracted
 
       // Newsletters (canais) não são conversas de atendimento — ignorar silenciosamente
@@ -2164,8 +2183,13 @@ exports.receberZapi = async (req, res) => {
         insertMsg.tipo = 'texto'
         insertMsg.url = locationUrl
         insertMsg.nome_arquivo = 'localização'
+      } else if (type === 'contact') {
+        insertMsg.tipo = 'contact'
+        if (contactMeta && (contactMeta.nome || contactMeta.telefone)) {
+          insertMsg.contact_meta = contactMeta
+        }
       }
-      // reaction, contact e qualquer outro tipo: já têm texto preenchido; tipo padrão é texto
+      // reaction e qualquer outro tipo: já têm texto preenchido; tipo padrão é texto
 
       let { data: inserted, error: errMsg } = await supabase
         .from('mensagens')

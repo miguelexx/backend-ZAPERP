@@ -1379,7 +1379,25 @@ exports.detalharChat = async (req, res) => {
 
     const isGroup = isGroupConversation(conversa)
     const isAssignedToUser = conversa.atendente_id && Number(conversa.atendente_id) === Number(user_id)
-    
+
+    // A conversa só pode ser aberta quando: (1) chegou mensagem do contato, ou (2) o usuário assumiu
+    if (!isAssignedToUser) {
+      const { data: msgIn } = await supabase
+        .from('mensagens')
+        .select('id')
+        .eq('company_id', Number(company_id))
+        .eq('conversa_id', Number(id))
+        .eq('direcao', 'in')
+        .limit(1)
+      const temMensagemDoContato = Array.isArray(msgIn) && msgIn.length > 0
+      if (!temMensagemDoContato) {
+        return res.status(403).json({
+          error: 'A conversa só pode ser aberta quando receber uma mensagem do contato ou quando você assumir a conversa.',
+          code: 'CONVERSA_NAO_ABERTA'
+        })
+      }
+    }
+
     // REGRA PRINCIPAL: Se a conversa está assumida pelo usuário, SEMPRE permitir acesso total
     if (isAssignedToUser) {
       // Usuário responsável pela conversa tem acesso total independente do setor
@@ -1403,8 +1421,8 @@ exports.detalharChat = async (req, res) => {
     const deveBloquearMensagens = !isGroup && conversaAssumidaPorOutro && !isAdmin && !isSupervisor
 
     // mensagens paginadas (remetente_nome/remetente_telefone para grupos; fallback se colunas não existirem)
-    const selectComRemetente = 'id, texto, direcao, criado_em, autor_usuario_id, status, whatsapp_id, tipo, url, nome_arquivo, reply_meta, remetente_nome, remetente_telefone'
-    const selectBasico = 'id, texto, direcao, criado_em, autor_usuario_id, status, whatsapp_id, tipo, url, nome_arquivo, reply_meta'
+    const selectComRemetente = 'id, texto, direcao, criado_em, autor_usuario_id, status, whatsapp_id, tipo, url, nome_arquivo, reply_meta, remetente_nome, remetente_telefone, contact_meta'
+    const selectBasico = 'id, texto, direcao, criado_em, autor_usuario_id, status, whatsapp_id, tipo, url, nome_arquivo, reply_meta, contact_meta'
     let mensagens = []
     let errMsgs = null
     let query
@@ -1427,11 +1445,12 @@ exports.detalharChat = async (req, res) => {
       mensagens = result.data
       errMsgs = result.error
     }
-    // Compatibilidade: se reply_meta/remetente_* não existirem ainda no banco, refaz select sem essas colunas.
-    if (errMsgs && (String(errMsgs.message || '').includes('reply_meta') || String(errMsgs.message || '').includes('remetente_nome') || String(errMsgs.message || '').includes('remetente_telefone') || String(errMsgs.message || '').includes('does not exist'))) {
+    // Compatibilidade: se reply_meta/remetente_*/contact_meta não existirem ainda no banco, refaz select sem essas colunas.
+    const selectFallback = 'id, texto, direcao, criado_em, autor_usuario_id, status, whatsapp_id, tipo, url, nome_arquivo'
+    if (errMsgs && (String(errMsgs.message || '').includes('reply_meta') || String(errMsgs.message || '').includes('remetente_nome') || String(errMsgs.message || '').includes('remetente_telefone') || String(errMsgs.message || '').includes('contact_meta') || String(errMsgs.message || '').includes('does not exist'))) {
       query = supabase
         .from('mensagens')
-        .select(selectBasico)
+        .select(selectFallback)
         .eq('company_id', Number(company_id))
         .eq('conversa_id', Number(id))
         .order('criado_em', { ascending: false })
@@ -2389,7 +2408,7 @@ exports.enviarContatoWhatsapp = async (req, res) => {
 
     const { data: cliente, error: errCli } = await supabase
       .from('clientes')
-      .select('id, nome, pushname, telefone')
+      .select('id, nome, pushname, telefone, foto_perfil')
       .eq('company_id', company_id)
       .eq('id', cliente_id)
       .maybeSingle()
@@ -2400,6 +2419,8 @@ exports.enviarContatoWhatsapp = async (req, res) => {
 
     const contactName = getDisplayName(cliente) || 'Contato'
     const contactPhone = String(cliente.telefone || '').replace(/\D/g, '')
+    const contactPhoneNorm = contactPhone.startsWith('55') ? contactPhone : `55${contactPhone}`
+    const fotoPerfil = (cliente.foto_perfil && String(cliente.foto_perfil).trim().startsWith('http')) ? String(cliente.foto_perfil).trim() : null
 
     if (!contactPhone) {
       return res.status(400).json({ error: 'Contato não possui telefone válido para compartilhar' })
@@ -2408,6 +2429,13 @@ exports.enviarContatoWhatsapp = async (req, res) => {
     const provider = getProvider()
     if (!provider || !provider.sendContact) {
       return res.status(500).json({ error: 'Provider WhatsApp não suporta compartilhamento de contato' })
+    }
+
+    // contact_meta para o frontend exibir cartão de contato (nome, telefone, foto)
+    const contact_meta = {
+      nome: contactName,
+      telefone: contactPhoneNorm,
+      ...(fotoPerfil ? { foto_perfil: fotoPerfil } : {})
     }
 
     // cria registro local de mensagem do tipo "contact" (direção out)
@@ -2423,6 +2451,7 @@ exports.enviarContatoWhatsapp = async (req, res) => {
         status: 'pending',
         autor_usuario_id: Number(user_id),
         criado_em: criadoEm,
+        contact_meta,
       })
       .select()
       .single()

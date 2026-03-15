@@ -113,6 +113,15 @@ function normalizeUltramsgToZapi(body) {
   const toPhoneDest = jidToDigits(toJid)
   const toPhoneNorm = toPhoneDest ? (normalizePhoneBR(toPhoneDest) || toPhoneDest) : null
 
+  // Contato (vCard): UltraMsg envia type=vcard/contact e body com vCard; webhookZapi espera payload.contact
+  const isContactType = ['vcard', 'contact', 'contactmessage'].includes(msgType)
+  const vcardBody = (isContactType && bodyText && String(bodyText).includes('BEGIN:VCARD')) ? bodyText : (data.vcard ?? data.vCard ?? null)
+  const contactPayload = (isContactType && (vcardBody || data.contact || data.contactMessageData)) ? {
+    vCard: vcardBody || (data.contact?.vCard ?? data.contact?.vcard ?? data.contactMessageData?.vcard),
+    displayName: data.contact?.displayName ?? data.contact?.formattedName ?? data.contactMessageData?.displayName ?? null,
+    formattedName: data.contact?.formattedName ?? data.contact?.displayName ?? null
+  } : undefined
+
   const zapiLike = {
     instanceId: body.instanceId ?? body.instance_id,
     instance_id: body.instanceId ?? body.instance_id,
@@ -130,7 +139,7 @@ function normalizeUltramsgToZapi(body) {
     body: bodyText,
     message: bodyText,
     text: { message: bodyText },
-    type: (msgType === 'ptt' ? 'audio' : msgType),
+    type: (msgType === 'ptt' ? 'audio' : (isContactType ? 'contact' : msgType)),
     participantPhone: participantPhone || undefined,
     participant: participantPhone ? `${participantPhone}@c.us` : undefined,
     key: {
@@ -165,7 +174,8 @@ function normalizeUltramsgToZapi(body) {
     isMentioned: Boolean(data.isMentioned),
     mentionedIds: Array.isArray(data.mentionedIds) ? data.mentionedIds : (data.mentionedIds ? [data.mentionedIds] : undefined),
     ultramsgHash: body.hash || undefined,
-    ultramsgReferenceId: body.referenceId || undefined
+    ultramsgReferenceId: body.referenceId || undefined,
+    ...(contactPayload ? { contact: { ...contactPayload, vCard: contactPayload.vCard || bodyText } } : {})
   }
 
   return zapiLike
