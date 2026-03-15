@@ -49,13 +49,15 @@ async function syncFotosProgressiva(company_id, opts = {}) {
 
   const limit = Math.min(BATCH_SIZE, opts.limit || BATCH_SIZE)
   const offset = Math.max(0, opts.offset || 0)
-  const onlySemFoto = opts.onlySemFoto !== false // padrão: priorizar clientes sem foto
+  // onlySemFoto: false = puxar TODAS as fotos (clientes com e sem foto). true = só quem não tem foto.
+  const onlySemFoto = opts.onlySemFoto === true
 
   let query = supabase
     .from('clientes')
     .select('id, telefone, nome, pushname, foto_perfil')
     .eq('company_id', company_id)
     .not('telefone', 'is', null)
+    .order('id', { ascending: true })
 
   if (onlySemFoto) {
     // Prioriza clientes sem foto ou com valor inválido ('null', vazio)
@@ -121,11 +123,13 @@ async function syncFotosProgressiva(company_id, opts = {}) {
 
 /**
  * Executa sync completo de fotos em lotes (para o worker).
+ * Por padrão processa TODOS os clientes (onlySemFoto: false) para puxar todas as fotos.
  */
 async function syncFotosFullProgressiva(company_id, opts = {}) {
   const config = await getConfig(company_id)
   const batchSize = Math.min(100, config.lote_max || BATCH_SIZE)
-  const maxClients = opts.maxClients || 500
+  const maxClients = opts.maxClients ?? 10000
+  const onlySemFoto = opts.onlySemFoto === true
 
   let offset = 0
   let totalAtualizados = 0
@@ -133,7 +137,7 @@ async function syncFotosFullProgressiva(company_id, opts = {}) {
   while (offset < maxClients) {
     if (await isProcessamentoPausado(company_id)) break
 
-    const result = await syncFotosProgressiva(company_id, { offset, limit: batchSize })
+    const result = await syncFotosProgressiva(company_id, { offset, limit: batchSize, onlySemFoto })
     if (result.error) break
     totalAtualizados += result.atualizados || 0
 

@@ -105,6 +105,39 @@ function emitirDepartamento(io, departamento_id, eventName, payload) {
   io.to(`departamento_${departamento_id}`).emit(eventName, payload)
 }
 
+/** Enriquece mensagens com usuario_id, usuario_nome e enviado_por_usuario (apenas direcao out) */
+async function enrichMensagensComAutorUsuario(supabase, company_id, mensagens) {
+  if (!Array.isArray(mensagens) || mensagens.length === 0) return mensagens
+  const autorIds = [...new Set(mensagens.map((m) => m.autor_usuario_id).filter(Boolean))]
+  const base = (m) => ({
+    ...m,
+    usuario_id: m.autor_usuario_id ?? null,
+    usuario_nome: null,
+    enviado_por_usuario: m.direcao === 'out' && m.autor_usuario_id != null
+  })
+  if (autorIds.length === 0) return mensagens.map(base)
+  const { data: us } = await supabase.from('usuarios').select('id, nome').eq('company_id', company_id).in('id', autorIds)
+  const usuarioMap = new Map((us || []).map((u) => [u.id, u.nome]))
+  return mensagens.map((m) => ({
+    ...base(m),
+    usuario_nome: m.direcao === 'out' && m.autor_usuario_id ? (usuarioMap.get(m.autor_usuario_id) ?? null) : null
+  }))
+}
+
+/** Enriquece uma mensagem única com usuario_nome (para evento nova_mensagem) */
+async function enrichMensagemComAutorUsuario(supabase, company_id, msg) {
+  if (!msg || msg.direcao !== 'out' || !msg.autor_usuario_id) {
+    return { ...msg, usuario_id: msg?.autor_usuario_id ?? null, usuario_nome: null, enviado_por_usuario: !!(msg?.direcao === 'out' && msg?.autor_usuario_id) }
+  }
+  const { data: u } = await supabase.from('usuarios').select('id, nome').eq('company_id', company_id).eq('id', msg.autor_usuario_id).maybeSingle()
+  return {
+    ...msg,
+    usuario_id: msg.autor_usuario_id,
+    usuario_nome: u?.nome ?? null,
+    enviado_por_usuario: true
+  }
+}
+
 async function assertPermissaoConversa({ company_id, conversa_id, user_id, role, user_dep_id }) {
   const { data: conv, error } = await supabase
     .from('conversas')
@@ -150,19 +183,25 @@ async function assertPermissaoConversa({ company_id, conversa_id, user_id, role,
 /**
  * Verifica se o usuário pode ENVIAR mensagens na conversa.
  * Regras principais:
- * - SEMPRE: Se a conversa está assumida pelo usuário (atendente_id === user_id), pode enviar
- * - SEMPRE: Conversa em fila (atendente_id === null), qualquer usuário pode enviar
+ * - GRUPOS: Qualquer usuário pode enviar SEM assumir
+ * - Se a conversa está assumida pelo usuário (atendente_id === user_id), pode enviar
+ * - Conversa em fila (atendente_id === null), qualquer usuário pode enviar
  * - FLEXÍVEL: Sistema permite envio para facilitar atendimento colaborativo
  */
 async function assertPodeEnviarMensagem({ company_id, conversa_id, user_id }) {
   const { data: conv, error } = await supabase
     .from('conversas')
-    .select('id, atendente_id')
+    .select('id, atendente_id, tipo, telefone')
     .eq('company_id', Number(company_id))
     .eq('id', Number(conversa_id))
     .maybeSingle()
   if (error) return { ok: false, status: 500, error: error.message }
   if (!conv) return { ok: false, status: 404, error: 'Conversa não encontrada' }
+
+  // GRUPOS: qualquer usuário pode enviar sem assumir
+  if (isGroupConversation(conv)) {
+    return { ok: true, reason: 'grupo_sem_exigir_assumir' }
+  }
 
   // REGRA PRINCIPAL: Se a conversa está assumida pelo usuário, SEMPRE pode enviar
   const isAssignedToUser = conv.atendente_id && Number(conv.atendente_id) === Number(user_id)
@@ -176,7 +215,6 @@ async function assertPodeEnviarMensagem({ company_id, conversa_id, user_id }) {
   }
 
   // REGRA FLEXÍVEL: Permitir envio mesmo se assumida por outro (para colaboração)
-  // Isso permite que supervisores/admins possam intervir quando necessário
   return { ok: true, reason: 'sistema_colaborativo' }
 }
 
@@ -402,7 +440,7 @@ exports.listarConversas = async (req, res) => {
       foto_perfil_contato_cache,
       clientes!conversas_cliente_fk ( id, nome, pushname, telefone, foto_perfil ),
       departamentos ( id, nome ),
-      mensagens ( texto, criado_em, direcao, tipo, url, nome_arquivo, whatsapp_id, status ),
+      mensagens ( texto, criado_em, direcao, tipo, url, nome_arquivo, whatsapp_id, status, autor_usuario_id ),
       conversa_tags (
         tag_id,
         tags (
@@ -428,7 +466,7 @@ exports.listarConversas = async (req, res) => {
       foto_perfil_contato_cache,
       clientes!conversas_cliente_fk ( id, nome, pushname, telefone, foto_perfil ),
       departamentos ( id, nome ),
-      mensagens ( texto, criado_em, direcao, tipo, url, nome_arquivo, whatsapp_id, status ),
+      mensagens ( texto, criado_em, direcao, tipo, url, nome_arquivo, whatsapp_id, status, autor_usuario_id ),
       conversa_tags (
         tag_id,
         tags (
@@ -455,7 +493,7 @@ exports.listarConversas = async (req, res) => {
       foto_perfil_contato_cache,
       clientes!conversas_cliente_fk ( id, nome, pushname, telefone, foto_perfil ),
       departamentos ( id, nome ),
-      mensagens ( texto, criado_em, direcao, tipo, url, nome_arquivo, whatsapp_id, status )
+      mensagens ( texto, criado_em, direcao, tipo, url, nome_arquivo, whatsapp_id, status, autor_usuario_id )
     `
 
     function buildQuery(select) {
@@ -529,6 +567,18 @@ exports.listarConversas = async (req, res) => {
     }
 
     if (error) return res.status(500).json({ error: error.message })
+
+    // Enriquece última mensagem de cada conversa com usuario_nome
+    const allLastMsgs = (data || []).flatMap((c) => c.mensagens || [])
+    if (allLastMsgs.length > 0) {
+      const enriched = await enrichMensagensComAutorUsuario(supabase, company_id, allLastMsgs)
+      let idx = 0
+      for (const c of data || []) {
+        if (c.mensagens && c.mensagens.length > 0) {
+          c.mensagens = [enriched[idx++]]
+        }
+      }
+    }
 
     // Fallback: quando conversa.cliente_id é null mas existe cliente com o mesmo telefone,
     // usamos esse cliente para exibir nome/foto na lista.
@@ -1018,8 +1068,9 @@ exports.sincronizarFotosPerfilZapi = async (req, res) => {
     }
 
     const { syncFotosFullProgressiva } = require('../services/syncFotosProgressivaService')
-    const maxClients = Math.min(500, Number(req.query.limit) || 500)
-    const result = await syncFotosFullProgressiva(company_id, { maxClients })
+    // Botão "Sincronizar fotos": puxa TODAS as fotos de perfil (todos os clientes)
+    const maxClients = Math.min(10000, Number(req.query.limit) || 10000)
+    const result = await syncFotosFullProgressiva(company_id, { maxClients, onlySemFoto: false })
 
     return res.json({
       total: result.clientesProcessados ?? 0,
@@ -1507,7 +1558,7 @@ exports.detalharChat = async (req, res) => {
       atendente_nome: conversa.usuarios?.nome ?? null,
       setor: conversa.departamentos?.nome ?? null,
       tags: (conversa.conversa_tags || []).map((ct) => ct.tags).filter(Boolean),
-      mensagens: (mensagens || []).reverse(),
+      mensagens: await enrichMensagensComAutorUsuario(supabase, company_id, (mensagens || []).reverse()),
       next_cursor: mensagens?.length ? mensagens[mensagens.length - 1].criado_em : null,
       mensagens_bloqueadas: deveBloquearMensagens || undefined
     }
@@ -2089,15 +2140,8 @@ exports.enviarMensagemChat = async (req, res) => {
 
     const io = req.app.get('io')
     if (io) {
-      // ÚNICA emissão de nova_mensagem — evita duplicação. Frontend deve deduplicar por id.
-      const novaMsgPayload = {
-        ...msg,
-        id: msg.id,
-        conversa_id: msg.conversa_id ?? Number(conversa_id),
-        status: 'sending',
-        status_mensagem: 'sending',
-        direcao: 'out'
-      }
+      const basePayload = { ...msg, id: msg.id, conversa_id: msg.conversa_id ?? Number(conversa_id), status: 'sending', status_mensagem: 'sending', direcao: 'out' }
+      const novaMsgPayload = await enrichMensagemComAutorUsuario(supabase, company_id, basePayload)
       emitirEventoEmpresaConversa(
         io,
         company_id,
@@ -2123,7 +2167,7 @@ exports.enviarMensagemChat = async (req, res) => {
         ...(conversa?.cliente_id != null ? { cliente_id: conversa.cliente_id } : {}),
         ...(contatoNome ? { nome_contato_cache: contatoNome, contato_nome: contatoNome } : {}),
         ...(fotoPerfil ? { foto_perfil_contato_cache: fotoPerfil, foto_perfil: fotoPerfil } : {}),
-        ultima_mensagem_preview: { texto: basePayload.texto, criado_em: basePayload.criado_em, direcao: 'out' },
+        ultima_mensagem_preview: { texto: basePayload.texto, criado_em: basePayload.criado_em, direcao: 'out', usuario_id: novaMsgPayload.usuario_id, usuario_nome: novaMsgPayload.usuario_nome },
         reordenar_suave: true // Frontend: animar item para o topo em vez de refetch (evita "desce e sobe")
       }
       emitirConversaAtualizada(io, company_id, conversa_id, convPayload, { skipAtualizarConversa: true })
@@ -2467,13 +2511,8 @@ exports.enviarContatoWhatsapp = async (req, res) => {
 
     const io = req.app.get('io')
     if (io) {
-      emitirEventoEmpresaConversa(
-        io,
-        company_id,
-        conversa_id,
-        io.EVENTS?.NOVA_MENSAGEM || 'nova_mensagem',
-        { ...msg, status: nextStatus, whatsapp_id: waMessageId || null },
-      )
+      const payload = await enrichMensagemComAutorUsuario(supabase, company_id, { ...msg, status: nextStatus, whatsapp_id: waMessageId || null })
+      emitirEventoEmpresaConversa(io, company_id, conversa_id, io.EVENTS?.NOVA_MENSAGEM || 'nova_mensagem', payload)
       emitirConversaAtualizada(io, company_id, conversa_id, { id: Number(conversa_id) })
     }
 
@@ -2554,13 +2593,8 @@ exports.enviarLocalizacao = async (req, res) => {
 
     const io = req.app.get('io')
     if (io) {
-      emitirEventoEmpresaConversa(
-        io,
-        company_id,
-        conversa_id,
-        io.EVENTS?.NOVA_MENSAGEM || 'nova_mensagem',
-        { ...msg, status: nextStatus, whatsapp_id: waMessageId || null }
-      )
+      const payload = await enrichMensagemComAutorUsuario(supabase, company_id, { ...msg, status: nextStatus, whatsapp_id: waMessageId || null })
+      emitirEventoEmpresaConversa(io, company_id, conversa_id, io.EVENTS?.NOVA_MENSAGEM || 'nova_mensagem', payload)
       emitirConversaAtualizada(io, company_id, conversa_id, { id: Number(conversa_id) })
     }
 
@@ -2639,13 +2673,8 @@ exports.enviarLigacaoWhatsapp = async (req, res) => {
 
     const io = req.app.get('io')
     if (io) {
-      emitirEventoEmpresaConversa(
-        io,
-        company_id,
-        conversa_id,
-        io.EVENTS?.NOVA_MENSAGEM || 'nova_mensagem',
-        { ...msg, status: nextStatus, whatsapp_id: waMessageId || null },
-      )
+      const payload = await enrichMensagemComAutorUsuario(supabase, company_id, { ...msg, status: nextStatus, whatsapp_id: waMessageId || null })
+      emitirEventoEmpresaConversa(io, company_id, conversa_id, io.EVENTS?.NOVA_MENSAGEM || 'nova_mensagem', payload)
       emitirConversaAtualizada(io, company_id, conversa_id, { id: Number(conversa_id) })
     }
 
@@ -3120,20 +3149,9 @@ exports.enviarArquivo = async (req, res) => {
       .eq('company_id', Number(company_id))
       .eq('id', Number(conversa_id))
 
-    // Payload normalizado (igual enviarMensagemChat) — única fonte para exibição é o socket
-    const novaMsgPayload = {
-      ...msg,
-      conversa_id: msg.conversa_id ?? Number(conversa_id),
-      status: msg.status || 'pending',
-      status_mensagem: msg.status_mensagem || msg.status || 'pending'
-    }
-    emitirEventoEmpresaConversa(
-      io,
-      company_id,
-      conversa_id,
-      io.EVENTS?.NOVA_MENSAGEM || "nova_mensagem",
-      novaMsgPayload
-    )
+    const basePayload = { ...msg, conversa_id: msg.conversa_id ?? Number(conversa_id), status: msg.status || 'pending', status_mensagem: msg.status_mensagem || msg.status || 'pending', direcao: 'out' }
+    const novaMsgPayload = await enrichMensagemComAutorUsuario(supabase, company_id, basePayload)
+    emitirEventoEmpresaConversa(io, company_id, conversa_id, io.EVENTS?.NOVA_MENSAGEM || 'nova_mensagem', novaMsgPayload)
     emitirConversaAtualizada(io, company_id, conversa_id, { id: Number(conversa_id) })
 
     const baseUrl = (process.env.APP_URL || process.env.BASE_URL || '').replace(/\/$/, '')
