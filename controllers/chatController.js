@@ -124,6 +124,20 @@ async function enrichMensagensComAutorUsuario(supabase, company_id, mensagens) {
   }))
 }
 
+/** Retorna texto prefixado com nome do atendente para o cliente ver no WhatsApp */
+function prefixarParaCliente(texto, usuarioNome) {
+  if (!usuarioNome || !String(usuarioNome).trim()) return texto
+  const t = String(texto || '').trim()
+  return t ? `${String(usuarioNome).trim()}: ${t}` : String(usuarioNome).trim()
+}
+
+/** Busca nome do usuário para exibir ao cliente no WhatsApp */
+async function getUsuarioNome(supabase, company_id, user_id) {
+  if (!user_id) return null
+  const { data } = await supabase.from('usuarios').select('nome').eq('company_id', company_id).eq('id', user_id).maybeSingle()
+  return data?.nome ? String(data.nome).trim() : null
+}
+
 /** Enriquece uma mensagem única com usuario_nome (para evento nova_mensagem) */
 async function enrichMensagemComAutorUsuario(supabase, company_id, msg) {
   if (!msg || msg.direcao !== 'out' || !msg.autor_usuario_id) {
@@ -2211,17 +2225,18 @@ exports.enviarMensagemChat = async (req, res) => {
         }
       }
 
+      const usuarioNome = await getUsuarioNome(supabase, company_id, user_id)
       const provider = getProvider()
       try {
         let result = null
 
         if (hasLinkPayload && provider.sendLink) {
-          // Garante que o texto enviado contenha o link no final, como exige a Z-API.
           let messageToSend = String(texto).trim()
           const linkUrlStr = String(link.linkUrl || '').trim()
           if (linkUrlStr && !messageToSend.includes(linkUrlStr)) {
             messageToSend = messageToSend ? `${messageToSend} ${linkUrlStr}` : linkUrlStr
           }
+          messageToSend = prefixarParaCliente(messageToSend, usuarioNome)
           result = await provider.sendLink(telefoneParaEnvio, {
             message: messageToSend,
             image: link.image || '',
@@ -2230,7 +2245,8 @@ exports.enviarMensagemChat = async (req, res) => {
             linkDescription: String(link.linkDescription || link.description || '').trim() || messageToSend,
           }, { companyId: company_id, conversaId: conversa_id })
         } else {
-          result = await provider.sendText(telefoneParaEnvio, String(texto).trim(), { companyId: company_id, conversaId: conversa_id, phoneId: phoneId || undefined, replyMessageId: replyMessageId || undefined })
+          const textoParaCliente = prefixarParaCliente(String(texto).trim(), usuarioNome)
+          result = await provider.sendText(telefoneParaEnvio, textoParaCliente, { companyId: company_id, conversaId: conversa_id, phoneId: phoneId || undefined, replyMessageId: replyMessageId || undefined })
         }
         const ok = typeof result === 'boolean' ? result : result?.ok === true
         const waMessageId = typeof result === 'object' && result?.messageId ? String(result.messageId).trim() : null
@@ -2492,7 +2508,10 @@ exports.enviarContatoWhatsapp = async (req, res) => {
       return res.status(500).json({ error: errMsg.message })
     }
 
-    // envia contato via Z-API
+    const usuarioNome = await getUsuarioNome(supabase, company_id, user_id)
+    if (usuarioNome) {
+      await provider.sendText(conversa.telefone, prefixarParaCliente('Segue contato abaixo:', usuarioNome), { companyId: company_id, conversaId: conversa_id })
+    }
     const result = await provider.sendContact(conversa.telefone, contactName, contactPhone, {
       companyId: company_id,
       conversaId: conversa_id,
@@ -2556,6 +2575,9 @@ exports.enviarLocalizacao = async (req, res) => {
       return res.status(500).json({ error: 'Provider WhatsApp não suporta envio de localização' })
     }
 
+    const usuarioNome = await getUsuarioNome(supabase, company_id, user_id)
+    const addressOriginal = String(address || '').slice(0, 100) || '(localização)'
+    const addressParaCliente = usuarioNome ? `${usuarioNome} — ${addressOriginal}` : addressOriginal
     const criadoEm = new Date().toISOString()
     const locationUrl = `https://www.google.com/maps?q=${latitude},${longitude}`
     const { data: msg, error: errMsg } = await supabase
@@ -2576,7 +2598,7 @@ exports.enviarLocalizacao = async (req, res) => {
 
     if (errMsg) return res.status(500).json({ error: errMsg.message })
 
-    const result = await provider.sendLocation(conversa.telefone, { address, lat: latitude, lng: longitude }, {
+    const result = await provider.sendLocation(conversa.telefone, { address: addressParaCliente, lat: latitude, lng: longitude }, {
       companyId: company_id,
       conversaId: conversa_id
     })
@@ -3154,6 +3176,8 @@ exports.enviarArquivo = async (req, res) => {
     emitirEventoEmpresaConversa(io, company_id, conversa_id, io.EVENTS?.NOVA_MENSAGEM || 'nova_mensagem', novaMsgPayload)
     emitirConversaAtualizada(io, company_id, conversa_id, { id: Number(conversa_id) })
 
+    const usuarioNome = novaMsgPayload.usuario_nome || null
+    const captionCliente = usuarioNome ? `— ${usuarioNome}` : ''
     const baseUrl = (process.env.APP_URL || process.env.BASE_URL || '').replace(/\/$/, '')
     const fullUrl = baseUrl ? `${baseUrl}${pathUrl}` : null
     const isLocalhost = /localhost|127\.0\.0\.1/i.test(baseUrl)
@@ -3170,11 +3194,11 @@ exports.enviarArquivo = async (req, res) => {
           : tipo === 'sticker' && provider.sendSticker
             ? provider.sendSticker(phone, mediaUrl, { ...opts, stickerAuthor: 'ZapERP' })
             : tipo === 'imagem' && provider.sendImage
-              ? provider.sendImage(phone, mediaUrl, '', opts)
+              ? provider.sendImage(phone, mediaUrl, captionCliente, opts)
               : tipo === 'video' && provider.sendVideo
-                ? provider.sendVideo(phone, mediaUrl, '', opts)
+                ? provider.sendVideo(phone, mediaUrl, captionCliente, opts)
                 : provider.sendFile
-                  ? provider.sendFile(phone, mediaUrl, file.originalname || '', opts)
+                  ? provider.sendFile(phone, mediaUrl, file.originalname || '', { ...opts, caption: captionCliente })
                   : Promise.resolve(false)
       promise
         .then(async (ok) => {

@@ -397,7 +397,8 @@ async function sendFile(phone, url, fileName = '', opts = {}) {
   const safeExt = /^[a-z0-9]+$/i.test(ext) ? ext : 'pdf'
   const filenameRaw = fileName ? String(fileName).trim() : `file.${safeExt}`
   const filename = filenameRaw.slice(0, FILENAME_MAX_LEN)
-  const body = { to: nums[0], document: String(url).trim(), filename, caption: '' }
+  const captionTrim = String(opts?.caption || '').trim().slice(0, CAPTION_MAX_LEN)
+  const body = { to: nums[0], document: String(url).trim(), filename, caption: captionTrim }
   const { ok } = await postJson({ ...cfg, endpoint: '/messages/document', body })
   if (!ok) return false
   console.log('✅ UltraMsg arquivo enviado:', nums[0]?.slice(-12))
