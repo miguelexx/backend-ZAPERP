@@ -89,6 +89,11 @@ socket.on('status_mensagem', ({ mensagem_id, conversa_id, status, whatsapp_id })
 })
 ```
 
+### Badge "Aberta"
+- **`exibir_badge_aberta`** (boolean): Indica se a conversa deve exibir o ícone/label "Aberta". É `true` apenas quando há movimentação: mensagem recebida, mensagem enviada ou conversa assumida. Sem movimentação, deve ser `false` — não exibir nenhum badge.
+- Usar este campo em vez de `status_atendimento` para decidir se mostra o badge "Aberta" na lista.
+- `conversa_atualizada` pode trazer `exibir_badge_aberta: true` quando chega mensagem ou usuário assume.
+
 ### Checklist
 - [ ] `nova_mensagem`: upsert por id e (conversa_id, whatsapp_id)
 - [ ] `nova_mensagem` direcao 'in': incrementar unread_count na lista

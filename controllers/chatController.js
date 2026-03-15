@@ -611,12 +611,16 @@ exports.listarConversas = async (req, res) => {
             null
           )
       const unreadCount = unreadMap[Number(c.id)] || 0
+      // Badge "Aberta" só quando há movimentação: mensagem recebida/enviada ou conversa assumida
+      const temMensagem = Array.isArray(c.mensagens) && c.mensagens.length > 0
+      const exibir_badge_aberta = temMensagem || (c.atendente_id != null)
       return {
         id: c.id,
         cliente_id: c.cliente_id,
         telefone: c.telefone,
         telefone_exibivel: telefoneExibivel,
         status_atendimento: c.status_atendimento,
+        exibir_badge_aberta,
         atendente_id: c.atendente_id,
         lida: unreadCount === 0,
         tem_novas_mensagens: unreadCount > 0,
@@ -684,6 +688,7 @@ exports.listarConversas = async (req, res) => {
         unread_count: 0,
         tags: [],
         status_atendimento: null,
+        exibir_badge_aberta: false,
         ultima_atividade: null,
         criado_em: null
       }))
@@ -1380,24 +1385,6 @@ exports.detalharChat = async (req, res) => {
     const isGroup = isGroupConversation(conversa)
     const isAssignedToUser = conversa.atendente_id && Number(conversa.atendente_id) === Number(user_id)
 
-    // A conversa só pode ser aberta quando: (1) chegou mensagem do contato, ou (2) o usuário assumiu
-    if (!isAssignedToUser) {
-      const { data: msgIn } = await supabase
-        .from('mensagens')
-        .select('id')
-        .eq('company_id', Number(company_id))
-        .eq('conversa_id', Number(id))
-        .eq('direcao', 'in')
-        .limit(1)
-      const temMensagemDoContato = Array.isArray(msgIn) && msgIn.length > 0
-      if (!temMensagemDoContato) {
-        return res.status(403).json({
-          error: 'A conversa só pode ser aberta quando receber uma mensagem do contato ou quando você assumir a conversa.',
-          code: 'CONVERSA_NAO_ABERTA'
-        })
-      }
-    }
-
     // REGRA PRINCIPAL: Se a conversa está assumida pelo usuário, SEMPRE permitir acesso total
     if (isAssignedToUser) {
       // Usuário responsável pela conversa tem acesso total independente do setor
@@ -1630,7 +1617,7 @@ exports.assumirChat = async (req, res) => {
     const io = req.app.get('io')
     if (io) {
       // Payload completo para todos atualizarem lista (atendente_id, atendente_atribuido_em) em tempo real
-      emitirConversaAtualizada(io, company_id, conversa_id, data)
+      emitirConversaAtualizada(io, company_id, conversa_id, { ...data, exibir_badge_aberta: true })
       emitirLock(io, conversa_id, user_id)
     }
 
@@ -2131,6 +2118,7 @@ exports.enviarMensagemChat = async (req, res) => {
       const convPayload = {
         id: Number(conversa_id),
         ultima_atividade: basePayload.criado_em,
+        exibir_badge_aberta: true,
         ...(telefoneParaPayload ? { telefone: telefoneParaPayload } : {}),
         ...(conversa?.cliente_id != null ? { cliente_id: conversa.cliente_id } : {}),
         ...(contatoNome ? { nome_contato_cache: contatoNome, contato_nome: contatoNome } : {}),
