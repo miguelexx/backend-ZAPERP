@@ -131,11 +131,14 @@ function prefixarParaCliente(texto, usuarioNome) {
   return t ? `${String(usuarioNome).trim()}: ${t}` : String(usuarioNome).trim()
 }
 
-/** Busca nome do usuário para exibir ao cliente no WhatsApp */
-async function getUsuarioNome(supabase, company_id, user_id) {
-  if (!user_id) return null
-  const { data } = await supabase.from('usuarios').select('nome').eq('company_id', company_id).eq('id', user_id).maybeSingle()
-  return data?.nome ? String(data.nome).trim() : null
+/** Busca nome e preferência do usuário para exibir ao cliente no WhatsApp. Retorna { nome, mostrar } */
+async function getUsuarioParaEnvioCliente(supabase, company_id, user_id) {
+  if (!user_id) return { nome: null, mostrar: false }
+  const { data, error } = await supabase.from('usuarios').select('nome, mostrar_nome_ao_cliente').eq('company_id', company_id).eq('id', user_id).maybeSingle()
+  if (error) return { nome: null, mostrar: true }
+  const mostrar = data?.mostrar_nome_ao_cliente !== false
+  const nome = (data?.nome && String(data.nome).trim()) || null
+  return { nome: mostrar ? nome : null, mostrar }
 }
 
 /** Enriquece uma mensagem única com usuario_nome (para evento nova_mensagem) */
@@ -2225,7 +2228,7 @@ exports.enviarMensagemChat = async (req, res) => {
         }
       }
 
-      const usuarioNome = await getUsuarioNome(supabase, company_id, user_id)
+      const { nome: usuarioNome } = await getUsuarioParaEnvioCliente(supabase, company_id, user_id)
       const provider = getProvider()
       try {
         let result = null
@@ -2508,7 +2511,7 @@ exports.enviarContatoWhatsapp = async (req, res) => {
       return res.status(500).json({ error: errMsg.message })
     }
 
-    const usuarioNome = await getUsuarioNome(supabase, company_id, user_id)
+    const { nome: usuarioNome } = await getUsuarioParaEnvioCliente(supabase, company_id, user_id)
     if (usuarioNome) {
       await provider.sendText(conversa.telefone, prefixarParaCliente('Segue contato abaixo:', usuarioNome), { companyId: company_id, conversaId: conversa_id })
     }
@@ -2575,7 +2578,7 @@ exports.enviarLocalizacao = async (req, res) => {
       return res.status(500).json({ error: 'Provider WhatsApp não suporta envio de localização' })
     }
 
-    const usuarioNome = await getUsuarioNome(supabase, company_id, user_id)
+    const { nome: usuarioNome } = await getUsuarioParaEnvioCliente(supabase, company_id, user_id)
     const addressOriginal = String(address || '').slice(0, 100) || '(localização)'
     const addressParaCliente = usuarioNome ? `${usuarioNome} — ${addressOriginal}` : addressOriginal
     const criadoEm = new Date().toISOString()
@@ -3176,7 +3179,7 @@ exports.enviarArquivo = async (req, res) => {
     emitirEventoEmpresaConversa(io, company_id, conversa_id, io.EVENTS?.NOVA_MENSAGEM || 'nova_mensagem', novaMsgPayload)
     emitirConversaAtualizada(io, company_id, conversa_id, { id: Number(conversa_id) })
 
-    const usuarioNome = novaMsgPayload.usuario_nome || null
+    const { nome: usuarioNome } = await getUsuarioParaEnvioCliente(supabase, company_id, user_id)
     const captionCliente = usuarioNome ? `— ${usuarioNome}` : ''
     const baseUrl = (process.env.APP_URL || process.env.BASE_URL || '').replace(/\/$/, '')
     const fullUrl = baseUrl ? `${baseUrl}${pathUrl}` : null

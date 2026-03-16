@@ -7,9 +7,9 @@ const { loginLimiter } = require('../middleware/rateLimit')
 
 router.get('/', auth, userController.listar)
 router.post('/login', loginLimiter, userController.login)
-
-// Minhas permissões — qualquer usuário autenticado (para UI esconder/mostrar menus)
 router.get('/me/permissoes', auth, permissoesController.getMinhasPermissoes)
+router.get('/me', auth, userController.getMe)
+router.patch('/me', auth, userController.patchMe)
 
 const adminOnly = require('../middleware/adminOnly')
 router.post('/', auth, adminOnly, userController.criar)

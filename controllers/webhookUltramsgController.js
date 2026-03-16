@@ -122,6 +122,9 @@ function normalizeUltramsgToZapi(body) {
     formattedName: data.contact?.formattedName ?? data.contact?.displayName ?? null
   } : undefined
 
+  const nomeGrupoRaw = isGroup ? (data.chatName ?? data.chat?.name ?? data.subject ?? data.groupName ?? body.chatName ?? body.chat?.name ?? null) : null
+  const chatName = nomeGrupoRaw ? String(nomeGrupoRaw).trim() : null
+
   const zapiLike = {
     instanceId: body.instanceId ?? body.instance_id,
     instance_id: body.instanceId ?? body.instance_id,
@@ -129,6 +132,9 @@ function normalizeUltramsgToZapi(body) {
     phone,
     remoteJid,
     isGroup,
+    chatName: chatName || undefined,
+    groupName: chatName || undefined,
+    subject: chatName || undefined,
     to: !isGroup && toJid ? toJid : undefined,
     toPhone: !isGroup ? (toPhoneNorm || toPhoneDest || undefined) : undefined,
     recipientPhone: !isGroup ? (toPhoneNorm || toPhoneDest || undefined) : undefined,

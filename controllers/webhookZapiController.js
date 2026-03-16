@@ -1537,6 +1537,17 @@ exports.receberZapi = async (req, res) => {
           .eq('company_id', company_id)
       }
 
+      // Se grupo sem nome, busca em background (UltraMsg nem sempre envia chatName no webhook)
+      if (isGroup && !nomeGrupo && conversa_id) {
+        const io = req.app.get('io')
+        if (io) {
+          setImmediate(() => {
+            const { syncConversationGroupOnJoin } = require('../services/ultramsgGroupsSyncService')
+            syncConversationGroupOnJoin(supabase, conversa_id, company_id, io, { skipIfRecent: false }).catch(() => {})
+          })
+        }
+      }
+
       // Vincular conversa ao cliente quando obtido via LID ou conversa existente sem cliente_id
       if (!isGroup && conversa_id && cliente_id) {
         const { data: convRow } = await supabase

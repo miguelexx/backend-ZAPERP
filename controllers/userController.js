@@ -2,6 +2,52 @@ const supabase = require('../config/supabase')
 const jwt = require('jsonwebtoken')
 const bcrypt = require('bcryptjs')
 
+/** GET /usuarios/me — perfil do usuário logado (inclui preferências) */
+exports.getMe = async (req, res) => {
+  try {
+    const { id: user_id, company_id } = req.user
+    const { data, error } = await supabase
+      .from('usuarios')
+      .select('id, nome, email, perfil, departamento_id, mostrar_nome_ao_cliente')
+      .eq('id', user_id)
+      .eq('company_id', company_id)
+      .maybeSingle()
+    if (error) return res.status(500).json({ error: error.message })
+    if (!data) return res.status(404).json({ error: 'Usuário não encontrado' })
+    return res.json({
+      ...data,
+      mostrar_nome_ao_cliente: data.mostrar_nome_ao_cliente !== false
+    })
+  } catch (err) {
+    console.error(err)
+    return res.status(500).json({ error: 'Erro ao buscar perfil' })
+  }
+}
+
+/** PATCH /usuarios/me — atualiza preferências do usuário logado */
+exports.patchMe = async (req, res) => {
+  try {
+    const { id: user_id, company_id } = req.user
+    const { mostrar_nome_ao_cliente } = req.body || {}
+    const update = {}
+    if (typeof mostrar_nome_ao_cliente === 'boolean') update.mostrar_nome_ao_cliente = mostrar_nome_ao_cliente
+    if (Object.keys(update).length === 0) return res.status(400).json({ error: 'Nenhum campo válido para atualizar' })
+    const { data, error } = await supabase
+      .from('usuarios')
+      .update(update)
+      .eq('id', user_id)
+      .eq('company_id', company_id)
+      .select('id, nome, mostrar_nome_ao_cliente')
+      .single()
+    if (error) return res.status(500).json({ error: error.message })
+    if (!data) return res.status(404).json({ error: 'Usuário não encontrado' })
+    return res.json(data)
+  } catch (err) {
+    console.error(err)
+    return res.status(500).json({ error: 'Erro ao atualizar preferências' })
+  }
+}
+
 /** GET /usuarios — lista atendentes da empresa (admin vê todos inclusive inativos) */
 exports.listar = async (req, res) => {
   try {
@@ -92,7 +138,7 @@ exports.atualizar = async (req, res) => {
   try {
     const { company_id } = req.user
     const { id } = req.params
-    const { nome, email, perfil, departamento_id, ativo } = req.body
+    const { nome, email, perfil, departamento_id, ativo, mostrar_nome_ao_cliente } = req.body
     const update = {}
     if (nome !== undefined) update.nome = nome.trim()
     if (email !== undefined) update.email = email.trim().toLowerCase()
@@ -105,13 +151,14 @@ exports.atualizar = async (req, res) => {
     }
     if (departamento_id !== undefined) update.departamento_id = departamento_id || null
     if (ativo !== undefined) update.ativo = !!ativo
+    if (typeof mostrar_nome_ao_cliente === 'boolean') update.mostrar_nome_ao_cliente = mostrar_nome_ao_cliente
 
     const { data, error } = await supabase
       .from('usuarios')
       .update(update)
       .eq('id', id)
       .eq('company_id', company_id)
-      .select('id, nome, email, perfil, ativo, departamento_id')
+      .select('id, nome, email, perfil, ativo, departamento_id, mostrar_nome_ao_cliente')
       .single()
     if (error) return res.status(500).json({ error: error.message })
     if (!data) return res.status(404).json({ error: 'Usuário não encontrado' })
