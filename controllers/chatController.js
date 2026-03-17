@@ -27,7 +27,7 @@ function emitirConversaAtualizada(io, company_id, conversa_id, payload = null, o
   if (keys.length <= 1 && (keys.length === 0 || (keys[0] === 'id' && data.id))) {
     supabase
       .from('conversas')
-      .select('id, nome_contato_cache, foto_perfil_contato_cache, ultima_atividade')
+      .select('id, nome_contato_cache, foto_perfil_contato_cache, ultima_atividade, status_atendimento')
       .eq('company_id', company_id)
       .eq('id', cid)
       .maybeSingle()
@@ -43,6 +43,7 @@ function emitirConversaAtualizada(io, company_id, conversa_id, payload = null, o
             enriched.foto_perfil = conv.foto_perfil_contato_cache
           }
           if (conv.ultima_atividade) enriched.ultima_atividade = conv.ultima_atividade
+          if (conv.status_atendimento) enriched.status_atendimento = conv.status_atendimento
           const eventName = io.EVENTS?.CONVERSA_ATUALIZADA || 'conversa_atualizada'
           io.to(`empresa_${company_id}`).to(`conversa_${cid}`).emit(eventName, enriched)
         } else {

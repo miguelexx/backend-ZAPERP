@@ -67,6 +67,7 @@ socket.on('conversa_atualizada', (payload) => {
     if (payload.nome_contato_cache != null && payload.nome_contato_cache !== '') next.nome_contato_cache = payload.nome_contato_cache
     if (payload.foto_perfil != null && payload.foto_perfil !== '') next.foto_perfil = payload.foto_perfil
     if (payload.foto_perfil_contato_cache != null && payload.foto_perfil_contato_cache !== '') next.foto_perfil_contato_cache = payload.foto_perfil_contato_cache
+    if (payload.status_atendimento != null) next.status_atendimento = payload.status_atendimento
     // ultima_mensagem_preview: só preview na lista — NUNCA adicionar às mensagens (não tem id)
     if (payload.ultima_mensagem_preview != null) next.ultima_mensagem_preview = payload.ultima_mensagem_preview
     // retrocompatibilidade com ultima_mensagem (se vier sem id, tratar como preview)

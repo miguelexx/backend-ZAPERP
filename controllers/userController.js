@@ -6,12 +6,20 @@ const bcrypt = require('bcryptjs')
 exports.getMe = async (req, res) => {
   try {
     const { id: user_id, company_id } = req.user
-    const { data, error } = await supabase
+    let { data, error } = await supabase
       .from('usuarios')
       .select('id, nome, email, perfil, departamento_id, mostrar_nome_ao_cliente')
       .eq('id', user_id)
       .eq('company_id', company_id)
       .maybeSingle()
+    if (error && (String(error.message || '').includes('mostrar_nome_ao_cliente') || String(error.message || '').includes('does not exist'))) {
+      const res2 = await supabase.from('usuarios').select('id, nome, email, perfil, departamento_id').eq('id', user_id).eq('company_id', company_id).maybeSingle()
+      data = res2.data
+      error = res2.error
+      if (error) return res.status(500).json({ error: error.message })
+      if (!data) return res.status(404).json({ error: 'Usuário não encontrado' })
+      return res.json({ ...data, mostrar_nome_ao_cliente: true })
+    }
     if (error) return res.status(500).json({ error: error.message })
     if (!data) return res.status(404).json({ error: 'Usuário não encontrado' })
     return res.json({
@@ -29,17 +37,20 @@ exports.patchMe = async (req, res) => {
   try {
     const { id: user_id, company_id } = req.user
     const { mostrar_nome_ao_cliente } = req.body || {}
-    const update = {}
-    if (typeof mostrar_nome_ao_cliente === 'boolean') update.mostrar_nome_ao_cliente = mostrar_nome_ao_cliente
-    if (Object.keys(update).length === 0) return res.status(400).json({ error: 'Nenhum campo válido para atualizar' })
+    if (typeof mostrar_nome_ao_cliente !== 'boolean') return res.status(400).json({ error: 'mostrar_nome_ao_cliente deve ser true ou false' })
     const { data, error } = await supabase
       .from('usuarios')
-      .update(update)
+      .update({ mostrar_nome_ao_cliente })
       .eq('id', user_id)
       .eq('company_id', company_id)
       .select('id, nome, mostrar_nome_ao_cliente')
       .single()
-    if (error) return res.status(500).json({ error: error.message })
+    if (error) {
+      if (String(error.message || '').includes('mostrar_nome_ao_cliente') || String(error.message || '').includes('does not exist')) {
+        return res.status(400).json({ error: 'Preferência indisponível. Execute a migration: ALTER TABLE usuarios ADD COLUMN mostrar_nome_ao_cliente boolean DEFAULT true;' })
+      }
+      return res.status(500).json({ error: error.message })
+    }
     if (!data) return res.status(404).json({ error: 'Usuário não encontrado' })
     return res.json(data)
   } catch (err) {

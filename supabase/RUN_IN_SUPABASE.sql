@@ -125,6 +125,9 @@ UPDATE public.conversas SET company_id = 1 WHERE company_id IS NULL;
 UPDATE public.mensagens SET company_id = 1 WHERE company_id IS NULL;
 UPDATE public.conversa_tags SET company_id = 1 WHERE company_id IS NULL;
 UPDATE public.usuarios SET company_id = 1 WHERE company_id IS NULL;
+
+-- Usuários: preferência exibir nome ao cliente nas mensagens (toggle em configurações)
+ALTER TABLE public.usuarios ADD COLUMN IF NOT EXISTS mostrar_nome_ao_cliente boolean DEFAULT true;
 UPDATE public.atendimentos SET company_id = 1 WHERE company_id IS NULL;
 -- se a tabela existir de versões anteriores
 UPDATE public.cliente_tags SET company_id = 1 WHERE company_id IS NULL;

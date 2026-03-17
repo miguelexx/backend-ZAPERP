@@ -101,6 +101,7 @@ socket.on('conversa_atualizada', (payload) => {
       next.foto_perfil = payload.foto_perfil
       next.foto_perfil_contato_cache = payload.foto_perfil_contato_cache ?? payload.foto_perfil
     }
+    if (payload.status_atendimento != null) next.status_atendimento = payload.status_atendimento
     if (payload.ultima_atividade != null) next.ultima_atividade = payload.ultima_atividade
     return next
   }))

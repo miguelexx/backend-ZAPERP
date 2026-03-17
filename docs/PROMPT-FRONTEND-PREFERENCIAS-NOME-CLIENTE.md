@@ -2,6 +2,10 @@
 
 Implemente nas configurações/perfil do usuário um botão para ativar/desativar a exibição do nome nas mensagens enviadas ao cliente no WhatsApp.
 
+**Migration necessária:** No Supabase SQL Editor, execute:
+`ALTER TABLE public.usuarios ADD COLUMN IF NOT EXISTS mostrar_nome_ao_cliente boolean DEFAULT true;`
+(O GET /me funciona sem a migration; o toggle só funciona após aplicá-la.)
+
 ## API
 
 - **GET /api/usuarios/me** — retorna `{ id, nome, email, perfil, departamento_id, mostrar_nome_ao_cliente }`
