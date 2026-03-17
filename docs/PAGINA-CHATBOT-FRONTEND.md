@@ -68,6 +68,7 @@ Authorization: Bearer <token>
     "welcomeMessage": "",
     "invalidOptionMessage": "Opção inválida. Por favor, responda apenas com o número do setor desejado.",
     "confirmSelectionMessage": "Perfeito! Seu atendimento foi direcionado para o setor {{departamento}}. Em instantes nossa equipe dará continuidade.",
+    "intervaloEnvioSegundos": 3,
     "sendOnlyFirstTime": true,
     "fallbackToAI": false,
     "businessHoursOnly": false,
@@ -95,6 +96,7 @@ Content-Type: application/json
     "welcomeMessage": "Olá! Seja bem-vindo(a) à Empresa X.\nPara direcionarmos seu atendimento, escolha o setor:\n\n1 - Atendimento\n2 - Vendas\n3 - Financeiro\n\nResponda com o número da opção desejada.",
     "invalidOptionMessage": "Opção inválida. Por favor, responda apenas com o número do setor desejado.",
     "confirmSelectionMessage": "Perfeito! Seu atendimento foi direcionado para o setor {{departamento}}. Em instantes nossa equipe dará continuidade.",
+    "intervaloEnvioSegundos": 3,
     "sendOnlyFirstTime": true,
     "tipo_distribuicao": "fila",
     "reopenMenuCommand": "0",
@@ -219,6 +221,7 @@ Cada linha é uma **escolha** que você configura na tabela:
 | Comando para ver o menu de novo | Input | `reopenMenuCommand` (ex: "0") |
 | Enviar menu só na primeira vez | Checkbox | `sendOnlyFirstTime` |
 | Distribuição | Select | `tipo_distribuicao`: `fila` (**recomendado** — todos do setor veem; primeiro a assumir ganha), `round_robin`, `menor_carga` |
+| Intervalo entre envios (segundos) | Input number | `intervaloEnvioSegundos` — 0–60, padrão 3. Evita bloqueio WhatsApp/UltraMSG |
 | Tabela de escolhas | Dinâmica | key, label, departamento_id, active |
 | Botão Salvar | Button | PUT /api/ia/config |
 | Área de logs | Lista | GET /api/ia/logs |
@@ -249,6 +252,7 @@ Cada linha é uma **escolha** que você configura na tabela:
     "welcomeMessage": "Olá! Seja bem-vindo(a) à MENDONÇA Artefatos de Cimento.\nPara direcionarmos seu atendimento, por favor escolha com qual setor deseja falar:\n\n1 - Atendimento\n2 - Vendas\n3 - Financeiro\n4 - Compras\n5 - RH\n6 - Diretoria\n\nResponda com o número da opção desejada.",
     "invalidOptionMessage": "Opção inválida. Por favor, responda apenas com o número do setor desejado.",
     "confirmSelectionMessage": "Perfeito! Seu atendimento foi direcionado para o setor {{departamento}}. Em instantes nossa equipe dará continuidade.",
+    "intervaloEnvioSegundos": 3,
     "sendOnlyFirstTime": true,
     "fallbackToAI": false,
     "businessHoursOnly": false,

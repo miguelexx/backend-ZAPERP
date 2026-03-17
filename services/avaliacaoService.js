@@ -66,6 +66,11 @@ async function tentarRegistrarAvaliacao({ company_id, conversa_id, cliente_id, t
         // Já existe avaliação para este atendimento
         return { registered: false }
       }
+      if (String(errIns.code || '') === '42P01') {
+        // Tabela não existe — migração não aplicada
+        console.warn('[avaliacaoService] Tabela avaliacoes_atendimento inexistente. Execute RUN_IN_SUPABASE.sql ou migrações.')
+        return { registered: false }
+      }
       console.warn('[avaliacaoService] insert error:', errIns.message)
       return { registered: false, error: errIns.message }
     }

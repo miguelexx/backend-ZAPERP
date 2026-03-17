@@ -16,6 +16,7 @@ const DEFAULT_CONFIG = {
     options: [],
     enviarMensagemFinalizacao: false,
     mensagemFinalizacao: 'Atendimento finalizado com sucesso. (Segue seu protocolo: {{protocolo}}.\nPor favor, informe uma nota entre 0 e 10 para avaliar o atendimento prestado.)',
+    intervaloEnvioSegundos: 3,
   },
   bot_global: {
     ativo: false,

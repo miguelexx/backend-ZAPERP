@@ -1764,17 +1764,24 @@ exports.encerrarChat = async (req, res) => {
               const provider = getProvider()
               if (provider?.sendText) {
                 const resultSend = await provider.sendText(telefoneParaEnvio, msg, { companyId: company_id, conversaId: conversa_id })
-                await supabase.from('mensagens').insert({
-                  conversa_id: Number(conversa_id),
-                  texto: msg,
-                  direcao: 'out',
-                  company_id,
-                  status: resultSend?.ok ? 'sent' : 'erro',
-                  autor_usuario_id: user_id
-                })
-                if (resultSend?.ok && req.app?.get('io')) {
+                const statusMsg = resultSend?.ok ? 'sent' : 'erro'
+                const { data: msgInsert, error: errInsert } = await supabase
+                  .from('mensagens')
+                  .insert({
+                    conversa_id: Number(conversa_id),
+                    texto: msg,
+                    direcao: 'out',
+                    company_id,
+                    status: statusMsg,
+                    autor_usuario_id: user_id
+                  })
+                  .select()
+                  .single()
+                if (!errInsert && msgInsert && req.app?.get('io')) {
                   const io2 = req.app.get('io')
-                  io2.to(`empresa_${company_id}`).to(`conversa_${conversa_id}`).emit(io2.EVENTS?.CONVERSA_ATUALIZADA || 'conversa_atualizada', { id: Number(conversa_id) })
+                  const payload = await enrichMensagemComAutorUsuario(supabase, company_id, msgInsert)
+                  emitirEventoEmpresaConversa(io2, company_id, conversa_id, io2.EVENTS?.NOVA_MENSAGEM || 'nova_mensagem', payload)
+                  emitirConversaAtualizada(io2, company_id, conversa_id, { id: Number(conversa_id) })
                 }
               }
             }

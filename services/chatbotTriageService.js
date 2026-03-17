@@ -5,13 +5,44 @@
  * vincula conversa ao departamento e transfere para usuários do setor.
  *
  * Configuração em ia_config.config.chatbot_triage (JSON estruturado).
- * Integrado ao webhook Z-API e Meta.
+ * Integrado ao webhook UltraMSG (via webhookZapiController).
  *
  * RESTRIÇÃO: Atualiza apenas conversas (departamento, atendente), mensagens (respostas
- * do bot) e bot_logs. Nunca atualiza clientes.nome — nomes vêm só de Z-API sync e webhook.
+ * do bot) e bot_logs. Nunca atualiza clientes.nome — nomes vêm só de sync e webhook.
  */
 
 const supabase = require('../config/supabase')
+
+/** Último envio por company_id — throttling para respeitar intervalo configurável. */
+const lastChatbotSendPerCompany = new Map()
+
+/**
+ * Aguarda o intervalo configurado desde o último envio do chatbot (por empresa).
+ * @param {number} company_id
+ * @param {number} intervaloSegundos - Configurado pelo usuário (0 = sem delay)
+ */
+async function throttleChatbotSend(company_id, intervaloSegundos) {
+  const delayMs = Math.max(0, Number(intervaloSegundos) || 0) * 1000
+  if (delayMs <= 0) return
+  const key = company_id ?? 'default'
+  const last = lastChatbotSendPerCompany.get(key) || 0
+  const elapsed = Date.now() - last
+  if (elapsed < delayMs) {
+    await new Promise((r) => setTimeout(r, delayMs - elapsed))
+  }
+}
+
+/**
+ * Envia mensagem pelo chatbot com throttle (intervalo configurável por empresa).
+ */
+async function sendWithThrottle(sendMessage, telefone, msg, opts, company_id, intervaloSegundos) {
+  await throttleChatbotSend(company_id, intervaloSegundos)
+  try {
+    return await sendMessage(telefone, msg, opts)
+  } finally {
+    lastChatbotSendPerCompany.set(company_id ?? 'default', Date.now())
+  }
+}
 
 /** Estrutura padrão do chatbot_triage em ia_config.config */
 const DEFAULT_CHATBOT_CONFIG = {
@@ -29,6 +60,8 @@ const DEFAULT_CHATBOT_CONFIG = {
   // Mensagem de finalização (enviada ao clicar "Finalizar conversa")
   enviarMensagemFinalizacao: false,
   mensagemFinalizacao: 'Atendimento finalizado com sucesso. (Segue seu protocolo: {{protocolo}}.\nPor favor, informe uma nota entre 0 e 10 para avaliar o atendimento prestado.)',
+  // Intervalo entre envios do chatbot (segundos) — evita bloqueio WhatsApp/UltraMSG. 0 = sem delay.
+  intervaloEnvioSegundos: 3,
 }
 
 /**
@@ -57,6 +90,11 @@ function validateChatbotConfig(raw) {
     reopenMenuCommand: String(raw.reopenMenuCommand || '0').trim().toLowerCase(),
     enviarMensagemFinalizacao: !!raw.enviarMensagemFinalizacao,
     mensagemFinalizacao: String(raw.mensagemFinalizacao || DEFAULT_CHATBOT_CONFIG.mensagemFinalizacao || '').trim() || DEFAULT_CHATBOT_CONFIG.mensagemFinalizacao,
+    intervaloEnvioSegundos: (() => {
+      const v = raw.intervaloEnvioSegundos ?? DEFAULT_CHATBOT_CONFIG.intervaloEnvioSegundos ?? 3
+      const n = Number(v)
+      return Number.isFinite(n) ? Math.max(0, Math.min(60, Math.round(n))) : 3
+    })(),
     options: opts.map((o) => ({
       key: String(o.key || '').trim(),
       label: String(o.label || '').trim() || 'Setor',
@@ -360,7 +398,7 @@ async function processIncomingMessage(ctx) {
     const nomeSetor = result.departamento_nome || option.label || 'setor'
     const confirmMsg = (config.confirmSelectionMessage || '').replace(/\{\{departamento\}\}/gi, nomeSetor)
     const msgToSend = confirmMsg || `Seu atendimento foi direcionado para ${option.label}. Em instantes nossa equipe dará continuidade.`
-    await sendMessage(telefone, msgToSend, opts)
+    await sendWithThrottle(sendMessage, telefone, msgToSend, opts, company_id, config.intervaloEnvioSegundos)
 
     await sb.from('mensagens').insert({
       conversa_id,
@@ -382,7 +420,7 @@ async function processIncomingMessage(ctx) {
   if (isReopenCommand) {
     const msg = welcomeFull || menuOnly
     if (msg) {
-      await sendMessage(telefone, msg, opts)
+      await sendWithThrottle(sendMessage, telefone, msg, opts, company_id, config.intervaloEnvioSegundos)
       await sb.from('mensagens').insert({
         conversa_id,
         texto: msg,
@@ -402,7 +440,7 @@ async function processIncomingMessage(ctx) {
     const msg = welcomeFull || menuOnly
     if (msg) {
       console.log('[chatbotTriage] enviando menu de boas-vindas', { conversa_id, company_id })
-      await sendMessage(telefone, msg, opts)
+      await sendWithThrottle(sendMessage, telefone, msg, opts, company_id, config.intervaloEnvioSegundos)
       await sb.from('mensagens').insert({
         conversa_id,
         texto: msg,
@@ -419,7 +457,7 @@ async function processIncomingMessage(ctx) {
 
   const invalidMsg = config.invalidOptionMessage || 'Opção inválida. Por favor, responda apenas com o número do setor desejado.'
   const fullInvalid = `${invalidMsg}\n\n${menuOnly}\n\nResponda com o número da opção desejada.`
-  await sendMessage(telefone, fullInvalid, opts)
+  await sendWithThrottle(sendMessage, telefone, fullInvalid, opts, company_id, config.intervaloEnvioSegundos)
   await sb.from('mensagens').insert({
     conversa_id,
     texto: fullInvalid,

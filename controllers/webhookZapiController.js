@@ -1640,20 +1640,23 @@ exports.receberZapi = async (req, res) => {
         if (avalResult.registered) {
           console.log('[Webhook] 📊 Avaliação registrada (UltraMSG):', { conversa_id, nota: textoNorm })
         }
-        const { data: reaberta } = await supabase
-          .from('conversas')
-          .update({ status_atendimento: 'aberta' })
-          .eq('id', conversa_id)
-          .eq('company_id', company_id)
-          .select()
-          .single()
-        if (reaberta) {
-          const io = req.app.get('io')
-          if (io) {
-            io.to(`empresa_${company_id}`).emit(io.EVENTS?.CONVERSA_REABERTA || 'conversa_reaberta', reaberta)
-            io.to(`empresa_${company_id}`).emit(io.EVENTS?.ATUALIZAR_CONVERSA || 'atualizar_conversa', { id: conversa_id })
+        // Reabrir apenas se a mensagem NÃO for uma avaliação (0-10) — cliente quer continuar conversa
+        if (!avalResult.registered) {
+          const { data: reaberta } = await supabase
+            .from('conversas')
+            .update({ status_atendimento: 'aberta' })
+            .eq('id', conversa_id)
+            .eq('company_id', company_id)
+            .select()
+            .single()
+          if (reaberta) {
+            const io = req.app.get('io')
+            if (io) {
+              io.to(`empresa_${company_id}`).emit(io.EVENTS?.CONVERSA_REABERTA || 'conversa_reaberta', reaberta)
+              io.to(`empresa_${company_id}`).emit(io.EVENTS?.ATUALIZAR_CONVERSA || 'atualizar_conversa', { id: conversa_id })
+            }
+            console.log('[Z-API] 🔄 Conversa reaberta automaticamente (cliente enviou msg após encerramento)', { conversa_id })
           }
-          console.log('[Z-API] 🔄 Conversa reaberta automaticamente (cliente enviou msg após encerramento)', { conversa_id })
         }
       }
     }
