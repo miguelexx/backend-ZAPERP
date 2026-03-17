@@ -1620,6 +1620,7 @@ exports.receberZapi = async (req, res) => {
     }
 
     // Captura avaliação (nota 0-10) e reabertura automática em conversa fechada
+    let conversaReabertaAposFinalizacao = false
     if (!fromMe && !isGroup && conversa_id) {
       const { data: convStatus } = await supabase
         .from('conversas')
@@ -1644,12 +1645,18 @@ exports.receberZapi = async (req, res) => {
         if (!avalResult.registered) {
           const { data: reaberta } = await supabase
             .from('conversas')
-            .update({ status_atendimento: 'aberta' })
+            .update({
+              status_atendimento: 'aberta',
+              departamento_id: null,
+              atendente_id: null,
+            })
             .eq('id', conversa_id)
             .eq('company_id', company_id)
             .select()
             .single()
           if (reaberta) {
+            departamento_id = null
+            conversaReabertaAposFinalizacao = true
             const io = req.app.get('io')
             if (io) {
               io.to(`empresa_${company_id}`).emit(io.EVENTS?.CONVERSA_REABERTA || 'conversa_reaberta', reaberta)
@@ -1727,6 +1734,23 @@ exports.receberZapi = async (req, res) => {
           if (regrasResult.matched) skipChatbot = true
         }
 
+        // Chatbot só envia quando o CLIENTE iniciou a conversa. Se o usuário/atendente enviou a 1ª msg, não enviar nada.
+        if (!skipChatbot) {
+          const { data: primeiraMsg } = await supabase
+            .from('mensagens')
+            .select('direcao')
+            .eq('conversa_id', conversa_id)
+            .eq('company_id', company_id)
+            .order('criado_em', { ascending: true })
+            .limit(1)
+            .maybeSingle()
+          // Sem mensagens ainda = cliente está enviando a 1ª (in) → permitir. Direcao 'out' = usuário começou → não enviar.
+          if (primeiraMsg?.direcao === 'out') {
+            skipChatbot = true
+            console.log('[Z-API] 🤖 Chatbot: ignorado — usuário iniciou a conversa (1ª msg foi direcao out)', { conversa_id })
+          }
+        }
+
         if (!skipChatbot) {
           console.log('[Z-API] 🤖 Chatbot: processando mensagem', { company_id, conversa_id, phoneTail: String(phoneParaChatbot).slice(-8) })
           const result = await processChatbotTriage({
@@ -1737,6 +1761,7 @@ exports.receberZapi = async (req, res) => {
             supabase,
             sendMessage,
             opts: { companyId: company_id },
+            conversaReabertaAposFinalizacao,
           })
           if (result?.handled && result?.departamento_id != null) {
             departamento_id = result.departamento_id

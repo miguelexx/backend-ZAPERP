@@ -219,7 +219,7 @@ Cada linha é uma **escolha** que você configura na tabela:
 | Mensagem quando digita opção errada | Textarea | `invalidOptionMessage` |
 | Mensagem de confirmação | Textarea | `confirmSelectionMessage` — use `{{departamento}}` para o nome do setor |
 | Comando para ver o menu de novo | Input | `reopenMenuCommand` (ex: "0") |
-| Enviar menu só na primeira vez | Checkbox | `sendOnlyFirstTime` |
+| Enviar menu só na primeira vez | Checkbox | `sendOnlyFirstTime` — *exceto* quando conversa reabre após finalização (cliente voltou) |
 | Distribuição | Select | `tipo_distribuicao`: `fila` (**recomendado** — todos do setor veem; primeiro a assumir ganha), `round_robin`, `menor_carga` |
 | Intervalo entre envios (segundos) | Input number | `intervaloEnvioSegundos` — 0–60, padrão 3. Evita bloqueio WhatsApp/UltraMSG |
 | Tabela de escolhas | Dinâmica | key, label, departamento_id, active |
@@ -240,6 +240,18 @@ Cada linha é uma **escolha** que você configura na tabela:
 1. **Ao carregar:** GET /ia/config + GET /dashboard/departamentos
 2. **Ao salvar:** PUT /ia/config com `{ chatbot_triage: { ... } }`
 3. **Logs:** GET /ia/logs (opcional, pode ter botão "Atualizar")
+
+### 4.1 Quem iniciou a conversa
+
+O chatbot **só envia** mensagens quando o **cliente** iniciou a conversa (1ª mensagem foi do cliente). Se o usuário/atendente enviou a primeira mensagem (proativo, campanha, etc.), o chatbot **não envia nada** — a conversa segue sem triagem automática.
+
+### 4.2 Reabertura após finalização (cliente volta)
+
+Quando o atendente **finaliza** a conversa e o **cliente envia mensagem depois** (1h ou 1 mês):
+1. Sistema reabre a conversa e zera departamento/atendente (volta para triagem)
+2. Chatbot envia **de novo** a mensagem de boas-vindas configurada
+3. Cliente escolhe o setor novamente (ex: "2 - Suporte")
+4. Atendimento segue normalmente
 
 ---
 

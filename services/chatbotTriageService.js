@@ -353,10 +353,11 @@ async function applyTagIfConfigured(supabaseClient, company_id, conversa_id, tag
  * @param {object} ctx.supabase - Cliente Supabase
  * @param {Function} ctx.sendMessage - async (phone, message, opts) => { ok, messageId }
  * @param {object} [ctx.opts] - { phoneNumberId } para Meta, { companyId } para Z-API
+ * @param {boolean} [ctx.conversaReabertaAposFinalizacao] - true quando cliente mandou msg em conversa fechada e reabrimos — enviar boas-vindas novamente
  * @returns {Promise<{ handled: boolean, departamento_id?: number }>}
  */
 async function processIncomingMessage(ctx) {
-  const { company_id, conversa_id, telefone, texto, supabase: supabaseClient, sendMessage, opts = {} } = ctx
+  const { company_id, conversa_id, telefone, texto, supabase: supabaseClient, sendMessage, opts = {}, conversaReabertaAposFinalizacao = false } = ctx
   if (!company_id || !conversa_id || !telefone || !sendMessage) {
     console.log('[chatbotTriage] skip: falta company_id, conversa_id, telefone ou sendMessage')
     return { handled: false }
@@ -434,7 +435,8 @@ async function processIncomingMessage(ctx) {
   }
 
   const menuAlreadySent = await wasMenuSentForConversa(sb, company_id, conversa_id)
-  const shouldSendWelcome = !menuAlreadySent || !config.sendOnlyFirstTime
+  // Quando conversa foi reaberta após finalização, enviar boas-vindas novamente (cliente voltou depois de 1h, 1 mês, etc.)
+  const shouldSendWelcome = conversaReabertaAposFinalizacao || !menuAlreadySent || !config.sendOnlyFirstTime
 
   if (shouldSendWelcome) {
     const msg = welcomeFull || menuOnly
