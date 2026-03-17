@@ -131,7 +131,8 @@ Responda SEMPRE em português do Brasil.
 
 Identidade:
 - Você é um auxiliar de um WhatsApp corporativo usado para atender clientes, acompanhar atendimentos e monitorar a produtividade dos atendentes.
-- Você conhece métricas, conversas, atendimentos, clientes e atendentes com base nos dados recebidos.
+- Você conhece métricas, conversas, atendimentos, clientes, atendentes e avaliações (notas 0-10) com base nos dados recebidos.
+- Quando o usuário perguntar sobre "média das notas", "avaliação de atendimento", "satisfação" ou "nota por atendente", use notasAtendimento em Dados (media, total, distribucao, porAtendente com atendente_nome e media).
 
 Regras gerais:
 - Seja claro, direto e profissional.
@@ -463,6 +464,56 @@ async function qClientesMaisAtivos(company_id, days, limit = 5) {
     })
 }
 
+/** NOTAS_ATENDIMENTO: estatísticas de avaliações (nota 0-10) dos clientes após finalização. Inclui media por atendente. */
+async function qNotasAtendimentoStats(company_id, days = 30) {
+  const d = clampDays(days)
+  const desde = new Date(Date.now() - d * 24 * 60 * 60 * 1000).toISOString()
+
+  const { data: rows, error } = await supabase
+    .from('avaliacoes_atendimento')
+    .select('nota, atendente_id')
+    .eq('company_id', company_id)
+    .gte('criado_em', desde)
+  if (error) return null
+  if (!rows?.length) return { media: null, total: 0, distribucao: {}, porAtendente: [] }
+
+  let soma = 0
+  const distribucao = {}
+  for (let i = 0; i <= 10; i++) distribucao[i] = 0
+  const byAtendente = new Map()
+  for (const r of rows) {
+    const n = Number(r.nota)
+    if (n >= 0 && n <= 10) {
+      soma += n
+      distribucao[n] = (distribucao[n] || 0) + 1
+      const aid = r.atendente_id
+      if (aid) {
+        if (!byAtendente.has(aid)) byAtendente.set(aid, { soma: 0, count: 0 })
+        const rec = byAtendente.get(aid)
+        rec.soma += n
+        rec.count++
+      }
+    }
+  }
+  const total = rows.length
+  const media = total > 0 ? Math.round((soma / total) * 100) / 100 : null
+
+  const atendenteIds = Array.from(byAtendente.keys())
+  const { data: usuarios } = atendenteIds.length
+    ? await supabase.from('usuarios').select('id, nome').eq('company_id', company_id).in('id', atendenteIds)
+    : { data: [] }
+  const nomeMap = new Map((usuarios || []).map((u) => [u.id, u.nome || 'Sem nome']))
+
+  const porAtendente = Array.from(byAtendente.entries()).map(([id, rec]) => ({
+    atendente_id: id,
+    atendente_nome: nomeMap.get(id) || 'Sem nome',
+    media: Math.round((rec.soma / rec.count) * 100) / 100,
+    total: rec.count,
+  })).sort((a, b) => b.total - a.total)
+
+  return { media, total, distribucao, porAtendente }
+}
+
 /** SLA_ALERTAS: conversas abertas/em_atendimento cuja última mensagem é 'in' e excede o SLA. */
 async function qSlaAlertas(company_id, limit = 10) {
   const lim = Math.max(1, Math.min(50, limit))
@@ -522,11 +573,12 @@ async function qSlaAlertas(company_id, limit = 10) {
  * Reaproveita as mesmas funções de métricas já existentes.
  */
 async function qGlobalContext(company_id) {
-  const [overview, topAtendentes, clientesAtivos, slaAlertas] = await Promise.all([
+  const [overview, topAtendentes, clientesAtivos, slaAlertas, notasAtendimento] = await Promise.all([
     qMetricsOverview(company_id),
     qTopAtendentesPorConversas(company_id, 30, 5),
     qClientesMaisAtivos(company_id, 30, 5),
     qSlaAlertas(company_id, 20),
+    qNotasAtendimentoStats(company_id, 30),
   ])
 
   return {
@@ -534,6 +586,7 @@ async function qGlobalContext(company_id) {
     topAtendentes,
     clientesAtivos,
     slaAlertas,
+    notasAtendimento,
   }
 }
 

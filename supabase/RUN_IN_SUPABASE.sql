@@ -293,4 +293,41 @@ CREATE UNIQUE INDEX idx_conversas_company_telefone_open_unique
   ON public.conversas (company_id, telefone)
   WHERE (tipo IS NULL OR tipo = 'cliente') AND status_atendimento IN ('aberta', 'em_atendimento');
 
+-- ============================================================
+-- Tabela avaliacoes_atendimento (mensagem finalização + nota 0-10)
+-- atendente_id = usuário que atendeu (encerrou) — integrado UltraMSG
+-- ============================================================
+CREATE TABLE IF NOT EXISTS public.avaliacoes_atendimento (
+  id bigserial PRIMARY KEY,
+  company_id bigint NOT NULL,
+  atendimento_id integer NOT NULL,
+  atendente_id integer REFERENCES public.usuarios(id),
+  conversa_id integer NOT NULL,
+  cliente_id integer,
+  nota smallint NOT NULL CHECK (nota >= 0 AND nota <= 10),
+  criado_em timestamp with time zone NOT NULL DEFAULT now(),
+  CONSTRAINT avaliacoes_atendimento_company_fk FOREIGN KEY (company_id) REFERENCES public.empresas(id),
+  CONSTRAINT avaliacoes_atendimento_atendimento_fk FOREIGN KEY (atendimento_id) REFERENCES public.atendimentos(id),
+  CONSTRAINT avaliacoes_atendimento_conversa_fk FOREIGN KEY (conversa_id) REFERENCES public.conversas(id),
+  CONSTRAINT avaliacoes_atendimento_cliente_fk FOREIGN KEY (cliente_id) REFERENCES public.clientes(id),
+  CONSTRAINT avaliacoes_atendimento_unique UNIQUE (atendimento_id)
+);
+
+-- Se a tabela já existia sem atendente_id, adicionar coluna
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='avaliacoes_atendimento' AND column_name='atendente_id') THEN
+    ALTER TABLE public.avaliacoes_atendimento ADD COLUMN atendente_id integer REFERENCES public.usuarios(id);
+    UPDATE public.avaliacoes_atendimento a SET atendente_id = (SELECT at.de_usuario_id FROM public.atendimentos at WHERE at.id = a.atendimento_id);
+  END IF;
+EXCEPTION WHEN OTHERS THEN
+  RAISE NOTICE 'avaliacoes_atendimento.atendente_id: %', SQLERRM;
+END $$;
+
+COMMENT ON TABLE public.avaliacoes_atendimento IS 'Notas de avaliação (0-10) dos clientes após atendimento finalizado. atendente_id = usuário que atendeu.';
+
+CREATE INDEX IF NOT EXISTS idx_avaliacoes_company_criado ON public.avaliacoes_atendimento (company_id, criado_em DESC);
+CREATE INDEX IF NOT EXISTS idx_avaliacoes_atendente ON public.avaliacoes_atendimento (company_id, atendente_id);
+
 -- Confirme no Supabase que não há erros. Depois reinicie o backend se estiver rodando.
+

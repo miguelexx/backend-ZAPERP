@@ -357,15 +357,20 @@ async function registrarAtendimento({
   para_usuario_id = null,
   observacao = null
 }) {
-  const { error } = await supabase.from('atendimentos').insert({
-    conversa_id: Number(conversa_id),
-    company_id: Number(company_id),
-    acao,
-    de_usuario_id: de_usuario_id != null ? Number(de_usuario_id) : null,
-    para_usuario_id: para_usuario_id != null ? Number(para_usuario_id) : null,
-    observacao
-  })
-  return error
+  const { data, error } = await supabase
+    .from('atendimentos')
+    .insert({
+      conversa_id: Number(conversa_id),
+      company_id: Number(company_id),
+      acao,
+      de_usuario_id: de_usuario_id != null ? Number(de_usuario_id) : null,
+      para_usuario_id: para_usuario_id != null ? Number(para_usuario_id) : null,
+      observacao
+    })
+    .select('id')
+    .single()
+  if (error) return { error, atendimento: null }
+  return { error: null, atendimento: data }
 }
 
 // =====================================================
@@ -1674,14 +1679,14 @@ exports.assumirChat = async (req, res) => {
 
     if (error) return res.status(500).json({ error: error.message })
 
-    const errAt = await registrarAtendimento({
+    const resultAt = await registrarAtendimento({
       conversa_id,
       company_id,
       acao: 'assumiu',
       de_usuario_id: user_id,
       para_usuario_id: user_id
     })
-    if (errAt) return res.status(500).json({ error: errAt.message })
+    if (resultAt.error) return res.status(500).json({ error: resultAt.error.message })
 
     const io = req.app.get('io')
     if (io) {
@@ -1718,13 +1723,13 @@ exports.encerrarChat = async (req, res) => {
 
     if (error) return res.status(500).json({ error: error.message })
 
-    const errAt = await registrarAtendimento({
+    const resultAt = await registrarAtendimento({
       conversa_id,
       company_id,
       acao: 'encerrou',
       de_usuario_id: user_id
     })
-    if (errAt) return res.status(500).json({ error: errAt.message })
+    if (resultAt.error) return res.status(500).json({ error: resultAt.error.message })
 
     const io = req.app.get('io')
     if (io) {
@@ -1737,6 +1742,47 @@ exports.encerrarChat = async (req, res) => {
       )
       emitirLock(io, conversa_id, null)
       emitirConversaAtualizada(io, company_id, conversa_id, { id: Number(conversa_id) })
+    }
+
+    // Enviar mensagem de finalização se configurado no chatbot de triagem
+    const atendimentoEncerrou = resultAt.atendimento
+    if (atendimentoEncerrou?.id) {
+      try {
+        const { getChatbotConfig, buildMensagemFinalizacao } = require('../services/chatbotTriageService')
+        const config = await getChatbotConfig(company_id)
+        if (config?.enviarMensagemFinalizacao && config?.mensagemFinalizacao) {
+          const { data: usu } = await supabase.from('usuarios').select('nome').eq('id', user_id).maybeSingle()
+          const msg = buildMensagemFinalizacao(config.mensagemFinalizacao, {
+            protocolo: atendimentoEncerrou.id,
+            nome_atendente: usu?.nome || ''
+          })
+          if (msg) {
+            let telefoneParaEnvio = data.telefone || ''
+            const isGroup = String(data?.tipo || '').toLowerCase() === 'grupo' || String(data?.telefone || '').includes('@g.us')
+            if (!isGroup && telefoneParaEnvio && !String(telefoneParaEnvio).trim().toLowerCase().startsWith('lid:')) {
+              const { getProvider } = require('../services/providers')
+              const provider = getProvider()
+              if (provider?.sendText) {
+                const resultSend = await provider.sendText(telefoneParaEnvio, msg, { companyId: company_id, conversaId: conversa_id })
+                await supabase.from('mensagens').insert({
+                  conversa_id: Number(conversa_id),
+                  texto: msg,
+                  direcao: 'out',
+                  company_id,
+                  status: resultSend?.ok ? 'sent' : 'erro',
+                  autor_usuario_id: user_id
+                })
+                if (resultSend?.ok && req.app?.get('io')) {
+                  const io2 = req.app.get('io')
+                  io2.to(`empresa_${company_id}`).to(`conversa_${conversa_id}`).emit(io2.EVENTS?.CONVERSA_ATUALIZADA || 'conversa_atualizada', { id: Number(conversa_id) })
+                }
+              }
+            }
+          }
+        }
+      } catch (eFinal) {
+        console.warn('[encerrarChat] mensagem finalização:', eFinal?.message || eFinal)
+      }
     }
 
     return res.json({ ok: true, conversa: data })
@@ -1765,13 +1811,13 @@ exports.reabrirChat = async (req, res) => {
 
     if (error) return res.status(500).json({ error: error.message })
 
-    const errAt = await registrarAtendimento({
+    const resultAt = await registrarAtendimento({
       conversa_id,
       company_id,
       acao: 'reabriu',
       de_usuario_id: user_id
     })
-    if (errAt) return res.status(500).json({ error: errAt.message })
+    if (resultAt.error) return res.status(500).json({ error: resultAt.error.message })
 
     const io = req.app.get('io')
     if (io) {
@@ -1841,7 +1887,7 @@ exports.transferirChat = async (req, res) => {
 
     if (error) return res.status(500).json({ error: error.message })
 
-    const errAt = await registrarAtendimento({
+    const resultAt = await registrarAtendimento({
       conversa_id,
       company_id,
       acao: 'transferiu',
@@ -1849,7 +1895,7 @@ exports.transferirChat = async (req, res) => {
       para_usuario_id,
       observacao
     })
-    if (errAt) return res.status(500).json({ error: errAt.message })
+    if (resultAt.error) return res.status(500).json({ error: resultAt.error.message })
 
     const io = req.app.get('io')
     if (io) {
@@ -3004,7 +3050,7 @@ exports.puxarChatFila = async (req, res) => {
       return res.status(409).json({ error: 'Outra pessoa puxou essa conversa antes de você' })
     }
 
-    const errAt = await registrarAtendimento({
+    const resultAt = await registrarAtendimento({
       conversa_id: conversa.id,
       company_id,
       acao: 'assumiu',
@@ -3012,7 +3058,7 @@ exports.puxarChatFila = async (req, res) => {
       para_usuario_id: user_id, // ✅ corrigido
       observacao: 'Puxou da fila'
     })
-    if (errAt) return res.status(500).json({ error: errAt.message })
+    if (resultAt.error) return res.status(500).json({ error: resultAt.error.message })
 
     const io = req.app.get('io')
     if (io) {

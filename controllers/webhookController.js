@@ -308,6 +308,7 @@ exports.receberWebhook = async (req, res) => {
     }
 
     // Reabertura automática: quando o cliente manda mensagem em conversa fechada, reabre automaticamente
+    // (Captura de avaliação 0-10: integrada em webhookZapiController — usado por UltraMSG)
     if (!isOutgoing && conversa_id) {
       const { data: convStatus } = await supabase
         .from('conversas')

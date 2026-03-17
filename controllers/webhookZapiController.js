@@ -1619,15 +1619,27 @@ exports.receberZapi = async (req, res) => {
       return res.status(500).json({ error: 'Erro ao obter conversa' })
     }
 
-    // Reabertura automática: quando o cliente manda mensagem em conversa fechada, reabre automaticamente
+    // Captura avaliação (nota 0-10) e reabertura automática em conversa fechada
     if (!fromMe && !isGroup && conversa_id) {
       const { data: convStatus } = await supabase
         .from('conversas')
-        .select('id, status_atendimento')
+        .select('id, status_atendimento, cliente_id')
         .eq('id', conversa_id)
         .eq('company_id', company_id)
         .maybeSingle()
       if (convStatus?.status_atendimento === 'fechada') {
+        // Tentar registrar nota de avaliação se o texto for 0-10
+        const textoNorm = String(texto || '').trim()
+        const { tentarRegistrarAvaliacao } = require('../services/avaliacaoService')
+        const avalResult = await tentarRegistrarAvaliacao({
+          company_id,
+          conversa_id,
+          cliente_id: convStatus.cliente_id || cliente_id || null,
+          texto: textoNorm,
+        })
+        if (avalResult.registered) {
+          console.log('[Webhook] 📊 Avaliação registrada (UltraMSG):', { conversa_id, nota: textoNorm })
+        }
         const { data: reaberta } = await supabase
           .from('conversas')
           .update({ status_atendimento: 'aberta' })

@@ -26,6 +26,9 @@ const DEFAULT_CHATBOT_CONFIG = {
   tipo_distribuicao: 'fila', // fila = primeiro a assumir | round_robin | menor_carga
   reopenMenuCommand: '0',
   options: [],
+  // Mensagem de finalização (enviada ao clicar "Finalizar conversa")
+  enviarMensagemFinalizacao: false,
+  mensagemFinalizacao: 'Atendimento finalizado com sucesso. (Segue seu protocolo: {{protocolo}}.\nPor favor, informe uma nota entre 0 e 10 para avaliar o atendimento prestado.)',
 }
 
 /**
@@ -52,6 +55,8 @@ function validateChatbotConfig(raw) {
     transferMode: raw.transferMode || 'departamento',
     tipo_distribuicao: tipoDistribuicao,
     reopenMenuCommand: String(raw.reopenMenuCommand || '0').trim().toLowerCase(),
+    enviarMensagemFinalizacao: !!raw.enviarMensagemFinalizacao,
+    mensagemFinalizacao: String(raw.mensagemFinalizacao || DEFAULT_CHATBOT_CONFIG.mensagemFinalizacao || '').trim() || DEFAULT_CHATBOT_CONFIG.mensagemFinalizacao,
     options: opts.map((o) => ({
       key: String(o.key || '').trim(),
       label: String(o.label || '').trim() || 'Setor',
@@ -137,6 +142,19 @@ function buildMenuText(config) {
   if (!active.length) return ''
   const lines = active.map((o) => `${o.key} - ${o.label}`)
   return lines.join('\n')
+}
+
+/**
+ * Monta a mensagem de finalização substituindo placeholders.
+ * @param {string} template - Template com {{protocolo}}, {{nome_atendente}}
+ * @param {object} vars - { protocolo, nome_atendente }
+ */
+function buildMensagemFinalizacao(template, vars = {}) {
+  if (!template || typeof template !== 'string') return null
+  return template
+    .replace(/\{\{protocolo\}\}/gi, String(vars.protocolo ?? ''))
+    .replace(/\{\{nome_atendente\}\}/gi, String(vars.nome_atendente ?? ''))
+    .trim()
 }
 
 /**
@@ -422,6 +440,7 @@ module.exports = {
   logBotAction,
   buildWelcomeMessage,
   buildMenuText,
+  buildMensagemFinalizacao,
   findOptionByKey,
   transferToDepartment,
 }

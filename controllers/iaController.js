@@ -14,6 +14,8 @@ const DEFAULT_CONFIG = {
     tipo_distribuicao: 'fila', // fila = todos do setor veem; primeiro a assumir ganha | round_robin | menor_carga
     reopenMenuCommand: '0',
     options: [],
+    enviarMensagemFinalizacao: false,
+    mensagemFinalizacao: 'Atendimento finalizado com sucesso. (Segue seu protocolo: {{protocolo}}.\nPor favor, informe uma nota entre 0 e 10 para avaliar o atendimento prestado.)',
   },
   bot_global: {
     ativo: false,
