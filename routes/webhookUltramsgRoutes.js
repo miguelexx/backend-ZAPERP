@@ -8,6 +8,7 @@
 const express = require('express')
 const router = express.Router()
 const webhookLogger = require('../middleware/webhookLogger')
+const webhookBodyResolver = require('../middleware/webhookBodyResolver')
 const webhookUltramsgController = require('../controllers/webhookUltramsgController')
 const requireWebhookToken = require('../middleware/requireWebhookToken')
 const resolveWebhookZapi = require('../middleware/resolveWebhookZapi')
@@ -15,7 +16,7 @@ const resolveWebhookZapi = require('../middleware/resolveWebhookZapi')
 router.get('/health', webhookUltramsgController.healthUltramsg)
 router.get('/', webhookUltramsgController.testarUltramsg)
 
-const webhookStack = [webhookLogger('ultramsg'), requireWebhookToken, resolveWebhookZapi, webhookUltramsgController.handleWebhookUltramsg]
+const webhookStack = [webhookLogger('ultramsg'), webhookBodyResolver, requireWebhookToken, resolveWebhookZapi, webhookUltramsgController.handleWebhookUltramsg]
 router.post('/', webhookStack)
 
 module.exports = router

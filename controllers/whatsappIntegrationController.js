@@ -286,6 +286,29 @@ exports.debugStatus = async (req, res) => {
   })
 }
 
+exports.configureWebhooks = async (req, res) => {
+  const company_id = req.user?.company_id
+  if (!company_id) return res.status(401).json({ error: 'Não autenticado' })
+  const appUrl = String(process.env.APP_URL || '').trim()
+  if (!appUrl) return res.status(500).json({ error: 'APP_URL não configurado no servidor' })
+  const provider = getProvider()
+  if (!provider?.configureWebhooks) {
+    return res.status(501).json({ error: 'Provider não suporta configureWebhooks' })
+  }
+  try {
+    const results = await provider.configureWebhooks(appUrl, { companyId: company_id })
+    const ok = Array.isArray(results) && results.some((r) => r.ok)
+    return res.json({
+      ok: !!ok,
+      webhook_url: `${appUrl}/webhooks/ultramsg?token=***`,
+      results
+    })
+  } catch (e) {
+    console.error('[configureWebhooks]', e?.message || e)
+    return res.status(500).json({ error: e?.message || 'Erro ao configurar webhooks' })
+  }
+}
+
 exports.syncContacts = async (req, res) => {
   const company_id = req.user?.company_id
   if (!company_id) return res.status(401).json({ error: 'Não autenticado' })

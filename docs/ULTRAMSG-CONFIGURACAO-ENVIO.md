@@ -6,6 +6,22 @@ Documentação oficial para integração WhatsApp via UltraMsg. Inclui configura
 
 ## 0. Troubleshooting: mensagens não chegam / variáveis concatenadas
 
+### Mensagens de grupos e contatos NÃO chegam (recebidas nem enviadas)
+
+1. **Webhook URL no painel UltraMsg:** Acesse Instance Settings → Webhook URL e configure:
+   ```
+   https://SEU_DOMINIO/webhooks/ultramsg?token=SEU_WHATSAPP_WEBHOOK_TOKEN
+   ```
+   O token deve ser **exatamente** o valor de `WHATSAPP_WEBHOOK_TOKEN` no `.env` da VPS.
+
+2. **Ativar webhooks no painel:** Marque `webhook_message_received` e `webhook_message_create` como **true**.
+
+3. **Mapeamento instance_id:** A tabela `empresa_zapi` deve ter um registro com `instance_id` igual ao que o UltraMsg envia (ex: `51534` ou `instance51534`). O backend aceita ambos.
+
+4. **Forçar configuração de webhooks:** Após conectar o WhatsApp, chame `POST /integrations/whatsapp/configure-webhooks` (com auth) ou abra a página de Integrações — o sistema configura automaticamente ao detectar conexão.
+
+5. **Variáveis obrigatórias na VPS:** `APP_URL`, `WHATSAPP_WEBHOOK_TOKEN`, e `empresa_zapi` com `instance_id` e `instance_token` da instância UltraMsg.
+
 ### Mensagens enviadas pelo sistema mas que não chegam no WhatsApp
 
 A API UltraMsg exige **`application/x-www-form-urlencoded`** no envio (não JSON). O provider está configurado para isso; em caso de falha, confira os logs no servidor.

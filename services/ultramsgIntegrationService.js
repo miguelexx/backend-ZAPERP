@@ -7,6 +7,8 @@ const { getEmpresaWhatsappConfig, getCompanyIdByInstanceId, fetchWithTimeout } =
 
 const ULTRAMSG_BASE_URL = (process.env.ULTRAMSG_BASE_URL || 'https://api.ultramsg.com').replace(/\/$/, '')
 const TIMEOUT_MS = 10_000
+const CONFIGURE_WEBHOOKS_THROTTLE_MS = 10 * 60 * 1000 // 10 minutos entre tentativas de configureWebhooks
+const lastConfigureWebhooksAt = new Map()
 
 /** Normaliza instance_id: UltraMsg aceita numérico (51534) ou com prefixo (instance51534). Unifica com provider. */
 function normalizeInstanceId(instanceId) {
@@ -73,6 +75,27 @@ async function getStatus(companyId) {
   ).toLowerCase().trim() || String(text || '').toLowerCase().trim()
   const connected = ['authenticated', 'connected', 'standby'].includes(status) || data?.connected === true
   const smartphoneConnected = connected
+
+  // Ao detectar conexão: configurar webhooks na instância UltraMsg (message_received, message_create, message_ack)
+  // Throttle: máximo 1 vez a cada 10 min por empresa para evitar spam à API
+  if (connected && companyId) {
+    const now = Date.now()
+    const last = lastConfigureWebhooksAt.get(companyId) || 0
+    if (now - last >= CONFIGURE_WEBHOOKS_THROTTLE_MS) {
+      lastConfigureWebhooksAt.set(companyId, now)
+      setImmediate(() => {
+        const { getProvider } = require('./providers')
+        const appUrl = String(process.env.APP_URL || '').trim()
+        const provider = getProvider()
+        if (appUrl && provider?.configureWebhooks) {
+          provider.configureWebhooks(appUrl, { companyId }).catch((e) => {
+            console.warn('[ULTRAMSG] configureWebhooks ao conectar:', e?.message || e)
+          })
+        }
+      })
+    }
+  }
+
   return { connected, smartphoneConnected }
 }
 

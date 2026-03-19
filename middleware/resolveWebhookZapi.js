@@ -10,10 +10,11 @@ function _logSafe(entry) {
   console.log('[WEBHOOK]', JSON.stringify({ ts: new Date().toISOString(), ...entry }))
 }
 
-/** Extrai instanceId do payload (body.instanceId, instance_id, instance). */
+/** Extrai instanceId do payload (body.instanceId, instance_id, instance, ou dentro de data). */
 function extractInstanceId(body) {
   if (!body || typeof body !== 'object') return ''
-  const v = body.instanceId ?? body.instance_id ?? body.instance?.id ?? body.instance
+  const v = body.instanceId ?? body.instance_id ?? body.instance?.id ?? body.instance ??
+    body.data?.instanceId ?? body.data?.instance_id
   if (v == null) return ''
   if (typeof v === 'object' && v != null && typeof v.id === 'string') return String(v.id).trim()
   if (typeof v === 'object' && v != null && v.instance_id != null) return String(v.instance_id).trim()

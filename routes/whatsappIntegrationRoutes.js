@@ -25,6 +25,7 @@ connectRouter.post('/restart', whatsappIntegrationController.connectRestart)
 connectRouter.post('/phone-code', whatsappIntegrationController.phoneCode)
 router.use('/connect', connectRouter)
 
+router.post('/configure-webhooks', whatsappIntegrationController.configureWebhooks)
 router.post('/contacts/sync', whatsappIntegrationController.syncContacts)
 router.post('/groups/sync', whatsappIntegrationController.syncGroups)
 

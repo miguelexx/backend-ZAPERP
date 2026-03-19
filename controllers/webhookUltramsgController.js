@@ -50,18 +50,21 @@ function normalizeUltramsgToZapi(body) {
   const fromMe = Boolean(data.fromMe)
   const fromJid = String(data.from || '').trim()
   const toJid = String(data.to || '').trim()
-  const isGroup = toJid.endsWith('@g.us')
+  const chatIdRaw = String(data.chatId || data.chat?.id || '').trim()
+  // UltraMsg: to=grupo para mensagem recebida em grupo; às vezes from=grupo. Aceita chatId também.
+  const isGroup = toJid.endsWith('@g.us') || fromJid.endsWith('@g.us') || chatIdRaw.endsWith('@g.us')
 
   let phone = ''
   let participantPhone = ''
   let remoteJid = ''
 
   if (isGroup) {
-    remoteJid = toJid
+    // Grupo: remoteJid = JID do grupo (to, from ou chatId — quem tem @g.us)
+    remoteJid = toJid.endsWith('@g.us') ? toJid : (fromJid.endsWith('@g.us') ? fromJid : (chatIdRaw.endsWith('@g.us') ? chatIdRaw : toJid))
     // UltraMsg usa formato {GroupNumber}-{OwnerNumber}@g.us (ex: 3618420-5534984080098@g.us).
     // Preservar o JID completo — não usar normalizeGroupIdForStorage (perde o hífen e quebra envio).
-    phone = toJid || (jidToDigits(toJid) ? `${jidToDigits(toJid)}@g.us` : '')
-    participantPhone = jidToDigits(data.author || fromJid) || jidToDigits(fromJid) || ''
+    phone = remoteJid || (jidToDigits(remoteJid) ? `${jidToDigits(remoteJid)}@g.us` : '')
+    participantPhone = jidToDigits(data.author || data.sender || fromJid) || jidToDigits(fromJid) || ''
   } else {
     const contactJid = fromMe ? toJid : fromJid
     phone = normalizePhoneBR(jidToDigits(contactJid)) || jidToDigits(contactJid) || contactJid
@@ -212,15 +215,30 @@ exports.testarUltramsg = (req, res) => {
   })
 }
 
+/** Tenta obter body válido — UltraMsg pode enviar JSON em campo string (ex: body.payload). */
+function resolveWebhookBody(raw) {
+  if (!raw || typeof raw !== 'object') return null
+  if (raw.event_type || raw.eventType || raw.data) return raw
+  const str = raw.payload ?? raw.body ?? raw.data
+  if (typeof str === 'string' && str.trim().startsWith('{')) {
+    try {
+      return JSON.parse(str)
+    } catch (_) {}
+  }
+  return raw
+}
+
 /**
  * Handler principal: normaliza payload UltraMsg → Z-API e delega ao webhookZapi.
  * Idempotência: webhookZapiController trata por (conversa_id, whatsapp_id).
  */
 async function handleWebhookUltramsg(req, res) {
   try {
-    const body = req.body
+    let body = req.body
+    body = resolveWebhookBody(body) || body
     if (!body || typeof body !== 'object') {
       req.webhookLogData = { status: 'ignored', error: 'payload_invalido' }
+      console.warn('[WEBHOOK_ULTRAMSG] Payload inválido ou vazio — Content-Type:', req.get('content-type'))
       return res.status(200).json({ ok: true })
     }
 

@@ -66,7 +66,7 @@ if (process.env.TRUST_PROXY === '1' || process.env.NODE_ENV === 'production') {
 }
 
 // =====================================================
-// JSON parser ANTES de tudo que lê req.body
+// JSON + urlencoded parsers — UltraMsg pode enviar application/json ou form-urlencoded
 // verify: mantém rawBody em Buffer para validação HMAC (Meta)
 // =====================================================
 app.use(express.json({
@@ -74,6 +74,7 @@ app.use(express.json({
     try { req.rawBody = buf } catch (_) {}
   }
 }))
+app.use(express.urlencoded({ extended: true, limit: '1mb' }))
 
 // =====================================================
 // WEBHOOKS — registrados ANTES do CORS (UltraMsg/Meta enviam Origin).
