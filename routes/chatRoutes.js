@@ -15,6 +15,7 @@ router.get('/', auth, chatController.listarConversas)
 router.get('/merge-duplicatas', auth, adminOnly, chatController.paginaMergeDuplicatas)
 router.post('/merge-duplicatas', auth, adminOnly, chatController.mergeConversasDuplicadas)
 router.post('/sincronizar-contatos', auth, chatController.sincronizarContatosZapi)
+router.get('/debug-sync-contatos', auth, chatController.debugSyncContatos)
 router.post('/sincronizar-fotos-perfil', auth, chatController.sincronizarFotosPerfilZapi)
 router.get('/whatsapp-status', auth, chatController.whatsappStatus)
 router.get('/zapi-status', auth, chatController.whatsappStatus) // alias para compatibilidade

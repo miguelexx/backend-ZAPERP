@@ -306,14 +306,18 @@ async function syncContacts(company_id) {
 
   const { config, error } = await getEmpresaWhatsappConfig(company_id)
   if (error || !config) {
-    return { ok: false, mode: 'none', totalFetched: 0, inserted: 0, updated: 0, skipped: 0, errors: ['Empresa sem instância configurada'] }
+    console.warn(`[ULTRAMSG-SYNC] empresa=${company_id} sem instância: ${error || 'sem config'}`)
+    return { ok: false, mode: 'none', totalFetched: 0, inserted: 0, updated: 0, skipped: 0, errors: ['Empresa sem instância WhatsApp configurada. Conecte o WhatsApp em Integrações.'] }
   }
 
+  console.log(`[ULTRAMSG-SYNC] empresa=${company_id} instance=${config.instance_id} — verificando conexão...`)
   const connError = await ensureConnected(company_id)
   if (connError) {
+    console.warn(`[ULTRAMSG-SYNC] empresa=${company_id} não conectada: ${connError}`)
     return { ok: false, mode: 'none', totalFetched: 0, inserted: 0, updated: 0, skipped: 0, errors: [connError] }
   }
 
+  console.log(`[ULTRAMSG-SYNC] empresa=${company_id} conectada — iniciando busca de contatos...`)
   let result = await syncViaContactsApi(company_id)
 
   if (result.mode === 'contacts_api' && result.totalFetched === 0 && result.errors.length === 0) {

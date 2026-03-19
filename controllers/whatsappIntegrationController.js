@@ -319,7 +319,13 @@ exports.syncContacts = async (req, res) => {
     })
   }
   const result = await syncContacts(company_id)
-  if (!result.ok) return res.status(400).json({ ok: false, error: result.errors?.[0] || 'Erro ao sincronizar' })
+  if (!result.ok) {
+    const msg = result.errors?.[0] || 'Erro ao sincronizar contatos'
+    console.warn(`[SYNC-CONTATOS] empresa=${company_id} falhou: ${msg}`)
+    // Retorna 200 com ok:false para não gerar erro vermelho no browser
+    return res.json({ ok: false, message: msg, totalFetched: 0, inserted: 0, updated: 0, skipped: 0 })
+  }
+  console.log(`[SYNC-CONTATOS] empresa=${company_id} ok — mode=${result.mode} fetched=${result.totalFetched} inserted=${result.inserted} updated=${result.updated} skipped=${result.skipped}`)
   return res.json({
     ok: true,
     mode: result.mode,

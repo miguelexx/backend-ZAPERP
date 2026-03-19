@@ -1038,15 +1038,19 @@ exports.sincronizarContatosZapi = async (req, res) => {
     const { company_id } = req.user
     if (!company_id) return res.status(401).json({ error: 'Não autenticado' })
 
+    console.log(`[SYNC-CONTATOS] Iniciando para empresa=${company_id}`)
     const { syncContacts } = require('../services/ultramsgContactsSyncService')
     const result = await syncContacts(company_id)
 
     if (!result.ok) {
       const msg = result.errors?.[0] || 'Empresa sem instância WhatsApp configurada. Conecte o WhatsApp em Integrações.'
+      console.warn(`[SYNC-CONTATOS] empresa=${company_id} falhou: ${msg}`)
       // Retorna 200 (não erro HTTP) para que o browser não logue como "Failed to load resource"
       // O frontend detecta a falha via ok:false no body
       return res.json({ ok: false, message: msg, total_contatos: 0, criados: 0, atualizados: 0 })
     }
+
+    console.log(`[SYNC-CONTATOS] empresa=${company_id} concluído — mode=${result.mode} fetched=${result.totalFetched} inserted=${result.inserted} updated=${result.updated} skipped=${result.skipped}`)
 
     const io = req.app.get('io')
     if (io) {
@@ -1059,14 +1063,96 @@ exports.sincronizarContatosZapi = async (req, res) => {
     }
 
     return res.json({
+      ok: true,
       total_contatos: result.totalFetched,
       criados: result.inserted,
       atualizados: result.updated,
-      fotos_atualizadas: 0
+      fotos_atualizadas: 0,
+      mode: result.mode
     })
   } catch (err) {
     console.error('sincronizarContatosZapi:', err)
     return res.status(500).json({ error: 'Erro ao sincronizar contatos' })
+  }
+}
+
+// =====================================================
+// 3b.1) Debug sync de contatos — testa passo a passo sem salvar
+// GET /chats/debug-sync-contatos
+// =====================================================
+exports.debugSyncContatos = async (req, res) => {
+  try {
+    const { company_id } = req.user
+    if (!company_id) return res.status(401).json({ error: 'Não autenticado' })
+
+    const { getEmpresaWhatsappConfig } = require('../services/whatsappConfigService')
+    const ultramsgSvc = require('../services/ultramsgIntegrationService')
+    const { getProvider } = require('../services/providers')
+
+    const diag = { company_id, steps: [] }
+
+    // Passo 1: Verificar credenciais na tabela empresa_zapi
+    const { config, error: cfgError } = await getEmpresaWhatsappConfig(company_id)
+    if (cfgError || !config) {
+      diag.steps.push({ step: 'credenciais', ok: false, detail: cfgError || 'sem registro em empresa_zapi com ativo=true' })
+      return res.json({ ok: false, diagnostico: diag })
+    }
+    diag.steps.push({
+      step: 'credenciais',
+      ok: true,
+      detail: `instance_id=${config.instance_id} token=${config.instance_token ? config.instance_token.slice(0, 6) + '...' : 'VAZIO'} ativo=${config.ativo}`
+    })
+
+    // Passo 2: Verificar status da conexão
+    const status = await ultramsgSvc.getStatus(company_id)
+    diag.steps.push({
+      step: 'conexao',
+      ok: !!status.connected,
+      detail: status.error ? `erro: ${status.error}` : `connected=${status.connected} smartphoneConnected=${status.smartphoneConnected}`
+    })
+    if (!status.connected) {
+      return res.json({ ok: false, diagnostico: diag, mensagem: 'WhatsApp não está conectado. Escaneie o QR code em Integrações.' })
+    }
+
+    // Passo 3: Tentar buscar os primeiros 10 contatos da API UltraMSG
+    const provider = getProvider()
+    const primeiraLeva = await provider.getContacts(1, 10, { companyId: company_id })
+    diag.steps.push({
+      step: 'buscar_contatos_api',
+      ok: Array.isArray(primeiraLeva),
+      contatos_retornados: Array.isArray(primeiraLeva) ? primeiraLeva.length : 0,
+      amostra: Array.isArray(primeiraLeva)
+        ? primeiraLeva.slice(0, 3).map(c => ({ name: c.name, phone: String(c.phone || c.id || '').slice(-12) }))
+        : []
+    })
+
+    if (!Array.isArray(primeiraLeva) || primeiraLeva.length === 0) {
+      return res.json({
+        ok: false,
+        diagnostico: diag,
+        mensagem: 'UltraMSG retornou lista vazia. Verifique se o celular tem contatos salvos na agenda.'
+      })
+    }
+
+    // Passo 4: Verificar quantos passam pelos filtros BR
+    const { normalizePhoneBR } = require('../helpers/phoneHelper')
+    let passam = 0, falham = 0
+    for (const c of primeiraLeva) {
+      const phoneRaw = String(c.phone || c.id || '').replace(/\D/g, '')
+      const norm = normalizePhoneBR(phoneRaw)
+      if (norm && norm.startsWith('55') && (norm.length === 12 || norm.length === 13)) passam++
+      else falham++
+    }
+    diag.steps.push({ step: 'filtro_br', passam, falham, total: primeiraLeva.length })
+
+    return res.json({
+      ok: true,
+      diagnostico: diag,
+      mensagem: `Tudo OK. ${primeiraLeva.length} contatos na primeira página. Use POST /chats/sincronizar-contatos para salvar todos.`
+    })
+  } catch (err) {
+    console.error('debugSyncContatos:', err)
+    return res.status(500).json({ error: err?.message || 'Erro interno' })
   }
 }
 
