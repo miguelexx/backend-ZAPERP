@@ -148,7 +148,7 @@ async function createTestData(companyId, reset = false) {
             cliente_id: cliente.id,
             company_id: companyId,
             telefone,
-            nome_contato: `Cliente Teste ${companyId}`,
+            nome_contato_cache: `Cliente Teste ${companyId}`,
             status_atendimento: 'aberta'
           })
           .select('id')

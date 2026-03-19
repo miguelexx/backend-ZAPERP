@@ -15,6 +15,7 @@ const { getEmpresaWhatsappConfig } = require('./whatsappConfigService')
 const { getOrCreateCliente } = require('../helpers/conversationSync')
 const { syncUltraMsgContact } = require('./ultramsgSyncContact')
 const { normalizePhoneBR, possiblePhonesBR, phoneKeyBR } = require('../helpers/phoneHelper')
+const ultramsgIntegrationService = require('./ultramsgIntegrationService')
 
 // Constantes de configuração
 const PAGE_SIZE = 100
@@ -66,6 +67,8 @@ function extractContactFields(raw) {
 
 /**
  * Sync via API oficial GET /contacts.
+ * A API UltraMsg retorna APENAS contatos da agenda do celular conectado via QR.
+ * Regra: exige campo `name` — contatos sem nome são JIDs de conversas/grupos, não da agenda.
  * @param {number} company_id
  * @returns {Promise<{ mode: string, totalFetched: number, inserted: number, updated: number, skipped: number, errors: string[] }>}
  */
@@ -276,7 +279,22 @@ async function syncMissingConversationContacts(company_id, opts = {}) {
 }
 
 /**
+ * Verifica se o WhatsApp está conectado (celular logado via QR).
+ * O sync de contatos usa GET /contacts da API UltraMsg, que retorna
+ * APENAS os contatos salvos na agenda do celular conectado.
+ */
+async function ensureConnected(company_id) {
+  const status = await ultramsgIntegrationService.getStatus(company_id)
+  if (status.error) return status.error
+  if (!status.connected) {
+    return 'Conecte o WhatsApp via QR code antes de sincronizar. Os contatos são puxados exclusivamente da agenda do celular logado.'
+  }
+  return null
+}
+
+/**
  * Executa sync de contatos para a empresa.
+ * Garante que só puxa contatos da agenda do celular conectado via QR.
  * @param {number} company_id - req.user.company_id
  * @returns {Promise<{ ok: boolean, mode: string, totalFetched: number, inserted: number, updated: number, skipped: number, errors: string[] }>}
  */
@@ -288,6 +306,11 @@ async function syncContacts(company_id) {
   const { config, error } = await getEmpresaWhatsappConfig(company_id)
   if (error || !config) {
     return { ok: false, mode: 'none', totalFetched: 0, inserted: 0, updated: 0, skipped: 0, errors: ['Empresa sem instância configurada'] }
+  }
+
+  const connError = await ensureConnected(company_id)
+  if (connError) {
+    return { ok: false, mode: 'none', totalFetched: 0, inserted: 0, updated: 0, skipped: 0, errors: [connError] }
   }
 
   let result = await syncViaContactsApi(company_id)
@@ -336,6 +359,11 @@ async function syncContactsBatch(company_id, opts = {}) {
   const { config, error } = await getEmpresaWhatsappConfig(company_id)
   if (error || !config) {
     return { processados: 0, inserted: 0, updated: 0, skipped: 0, errors: ['Empresa sem instância configurada'], hasMore: false }
+  }
+
+  const connError = await ensureConnected(company_id)
+  if (connError) {
+    return { processados: 0, inserted: 0, updated: 0, skipped: 0, errors: [connError], hasMore: false }
   }
 
   const contacts = await provider.getContacts(page, pageSize, { companyId: company_id })

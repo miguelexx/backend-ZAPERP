@@ -636,9 +636,10 @@ function parseContactsResponse(data) {
 }
 
 /**
- * Lista contatos salvos na agenda. UltraMsg: GET /{instance_id}/contacts
- * Doc oficial: apenas token obrigatório; limit/offset podem não existir.
- * Retorna apenas contatos com `name` definido (salvos na agenda do celular).
+ * Lista contatos salvos na agenda do celular conectado via QR.
+ * UltraMsg: GET /{instance_id}/contacts — retorna APENAS da instância conectada.
+ * Cada instância = um celular; os contatos vêm exclusivamente da agenda desse celular.
+ * Retorna apenas contatos com `name` definido (salvos na agenda).
  * Exclui grupos (@g.us), broadcasts e contatos sem número BR válido.
  */
 async function getContacts(page = 1, pageSize = 100, opts = {}) {

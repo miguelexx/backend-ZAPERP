@@ -38,7 +38,7 @@ router.get('/logs/:companyId', async (req, res) => {
         conversas (
           id,
           telefone,
-          nome_contato
+          nome_contato_cache
         )
       `)
       .eq('company_id', companyId)
@@ -268,7 +268,7 @@ router.post('/simulate/:companyId', async (req, res) => {
             cliente_id: clienteId,
             company_id: companyId,
             telefone,
-            nome_contato: 'Cliente Teste',
+            nome_contato_cache: 'Cliente Teste',
             status_atendimento: 'aberta'
           })
           .select('id')
