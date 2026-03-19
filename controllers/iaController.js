@@ -17,6 +17,12 @@ const DEFAULT_CONFIG = {
     enviarMensagemFinalizacao: false,
     mensagemFinalizacao: 'Atendimento finalizado com sucesso. (Segue seu protocolo: {{protocolo}}.\nPor favor, informe uma nota entre 0 e 10 para avaliar o atendimento prestado.)',
     intervaloEnvioSegundos: 3,
+    foraHorarioEnabled: false,
+    horarioInicio: '09:00',
+    horarioFim: '18:00',
+    mensagemForaHorario: 'Olá! Nosso horário de atendimento é de segunda a sexta, das 09h às 18h. Sua mensagem foi recebida e retornaremos no próximo dia útil. Obrigado!',
+    diasSemanaDesativados: [0, 6],
+    datasEspecificasFechadas: [],
   },
   bot_global: {
     ativo: false,

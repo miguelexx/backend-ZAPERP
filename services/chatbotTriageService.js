@@ -33,6 +33,41 @@ async function throttleChatbotSend(company_id, intervaloSegundos) {
 }
 
 /**
+ * Verifica se o horário atual está dentro do horário comercial configurado.
+ * Suporta janelas que atravessam meia-noite (ex: 22:00 a 06:00).
+ * @param {string} horarioInicio - "HH:mm" (ex: "09:00")
+ * @param {string} horarioFim - "HH:mm" (ex: "18:00")
+ * @param {Date} [now] - Data/hora a verificar (default: agora, fuso do servidor)
+ * @returns {boolean}
+ */
+function isWithinBusinessHours(horarioInicio, horarioFim, now = new Date()) {
+  if (!horarioInicio || !horarioFim) return true
+  const [hIni, mIni] = String(horarioInicio).split(':').map(Number)
+  const [hFim, mFim] = String(horarioFim).split(':').map(Number)
+  const minutosAgora = now.getHours() * 60 + now.getMinutes()
+  const minutosIni = (hIni || 0) * 60 + (mIni || 0)
+  const minutosFim = (hFim || 0) * 60 + (mFim || 0)
+  if (minutosIni <= minutosFim) return minutosAgora >= minutosIni && minutosAgora <= minutosFim
+  return minutosAgora >= minutosIni || minutosAgora <= minutosFim
+}
+
+/**
+ * Verifica se a data/hora atual está fora do atendimento (dia da semana desativado ou data específica fechada).
+ * @param {number[]} diasSemanaDesativados - Dias que não trabalha: 0=dom, 1=seg, ..., 6=sáb
+ * @param {string[]} datasEspecificasFechadas - Datas YYYY-MM-DD (feriados, recesso)
+ * @param {Date} [now] - Data/hora a verificar
+ * @returns {boolean} true se está fora (dia desativado ou data fechada)
+ */
+function isOutsideBusinessDays(diasSemanaDesativados, datasEspecificasFechadas, now = new Date()) {
+  const diaSemana = now.getDay() // 0=domingo, 6=sábado
+  const diasOff = Array.isArray(diasSemanaDesativados) ? diasSemanaDesativados : [0, 6]
+  if (diasOff.includes(diaSemana)) return true
+  const hoje = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`
+  const datasFechadas = Array.isArray(datasEspecificasFechadas) ? datasEspecificasFechadas : []
+  return datasFechadas.some((d) => String(d).trim() === hoje)
+}
+
+/**
  * Envia mensagem pelo chatbot com throttle (intervalo configurável por empresa).
  */
 async function sendWithThrottle(sendMessage, telefone, msg, opts, company_id, intervaloSegundos) {
@@ -62,6 +97,15 @@ const DEFAULT_CHATBOT_CONFIG = {
   mensagemFinalizacao: 'Atendimento finalizado com sucesso. (Segue seu protocolo: {{protocolo}}.\nPor favor, informe uma nota entre 0 e 10 para avaliar o atendimento prestado.)',
   // Intervalo entre envios do chatbot (segundos) — evita bloqueio WhatsApp/UltraMSG. 0 = sem delay.
   intervaloEnvioSegundos: 3,
+  // Mensagem fora do horário comercial — cliente envia msg fora do horário → recebe esta mensagem em vez do menu
+  foraHorarioEnabled: false,
+  horarioInicio: '09:00',
+  horarioFim: '18:00',
+  mensagemForaHorario: 'Olá! Nosso horário de atendimento é de segunda a sexta, das 09h às 18h. Sua mensagem foi recebida e retornaremos no próximo dia útil. Obrigado!',
+  // Dias da semana em que NÃO trabalha (0=domingo, 1=segunda, ..., 6=sábado). Ex: [0,6] = fim de semana
+  diasSemanaDesativados: [0, 6],
+  // Datas específicas fechadas (YYYY-MM-DD) — feriados, recesso etc.
+  datasEspecificasFechadas: [],
 }
 
 /**
@@ -90,6 +134,26 @@ function validateChatbotConfig(raw) {
     reopenMenuCommand: String(raw.reopenMenuCommand || '0').trim().toLowerCase(),
     enviarMensagemFinalizacao: !!raw.enviarMensagemFinalizacao,
     mensagemFinalizacao: String(raw.mensagemFinalizacao || DEFAULT_CHATBOT_CONFIG.mensagemFinalizacao || '').trim() || DEFAULT_CHATBOT_CONFIG.mensagemFinalizacao,
+    foraHorarioEnabled: !!raw.foraHorarioEnabled,
+    horarioInicio: (() => {
+      const v = String(raw.horarioInicio || DEFAULT_CHATBOT_CONFIG.horarioInicio || '09:00').trim()
+      return /^\d{1,2}:\d{2}$/.test(v) ? v : '09:00'
+    })(),
+    horarioFim: (() => {
+      const v = String(raw.horarioFim || DEFAULT_CHATBOT_CONFIG.horarioFim || '18:00').trim()
+      return /^\d{1,2}:\d{2}$/.test(v) ? v : '18:00'
+    })(),
+    mensagemForaHorario: String(raw.mensagemForaHorario || DEFAULT_CHATBOT_CONFIG.mensagemForaHorario || '').trim() || DEFAULT_CHATBOT_CONFIG.mensagemForaHorario,
+    diasSemanaDesativados: (() => {
+      const arr = raw.diasSemanaDesativados
+      if (!Array.isArray(arr)) return DEFAULT_CHATBOT_CONFIG.diasSemanaDesativados || [0, 6]
+      return arr.filter((d) => Number.isInteger(Number(d)) && d >= 0 && d <= 6).map(Number)
+    })(),
+    datasEspecificasFechadas: (() => {
+      const arr = raw.datasEspecificasFechadas
+      if (!Array.isArray(arr)) return []
+      return arr.filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(String(d).trim())).map((d) => String(d).trim())
+    })(),
     intervaloEnvioSegundos: (() => {
       const v = raw.intervaloEnvioSegundos ?? DEFAULT_CHATBOT_CONFIG.intervaloEnvioSegundos ?? 3
       const n = Number(v)
@@ -379,6 +443,31 @@ async function processIncomingMessage(ctx) {
   if (!config.options?.length) {
     console.log('[chatbotTriage] skip: nenhuma opção configurada')
     return { handled: false }
+  }
+
+  // Mensagem fora do horário: se ativado e fora do horário ou dia desativado, envia mensagem e não processa o menu
+  if (config.foraHorarioEnabled && config.mensagemForaHorario) {
+    const foraDia = isOutsideBusinessDays(config.diasSemanaDesativados, config.datasEspecificasFechadas)
+    const dentroHorario = isWithinBusinessHours(config.horarioInicio, config.horarioFim)
+    if (foraDia || !dentroHorario) {
+      console.log('[chatbotTriage] fora do horário comercial — enviando mensagem', { conversa_id, company_id, horario: `${config.horarioInicio}-${config.horarioFim}`, foraDia })
+      await sendWithThrottle(sendMessage, telefone, config.mensagemForaHorario, opts, company_id, config.intervaloEnvioSegundos)
+      const sb = supabaseClient || supabase
+      await sb.from('mensagens').insert({
+        conversa_id,
+        texto: config.mensagemForaHorario,
+        direcao: 'out',
+        company_id,
+        status: 'enviada',
+      })
+      await logBotAction(company_id, conversa_id, 'fora_horario', {
+        horario_inicio: config.horarioInicio,
+        horario_fim: config.horarioFim,
+        dias_semana_desativados: config.diasSemanaDesativados,
+        data_fechada: foraDia,
+      })
+      return { handled: true }
+    }
   }
 
   const sb = supabaseClient || supabase

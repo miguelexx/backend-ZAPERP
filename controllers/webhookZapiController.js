@@ -1735,7 +1735,8 @@ exports.receberZapi = async (req, res) => {
         }
 
         // Chatbot só envia quando o CLIENTE iniciou a conversa. Se o usuário/atendente enviou a 1ª msg, não enviar nada.
-        if (!skipChatbot) {
+        // Exceção: conversaReabertaAposFinalizacao — cliente enviou msg após finalização, tratar como novo contato e enviar boas-vindas
+        if (!skipChatbot && !conversaReabertaAposFinalizacao) {
           const { data: primeiraMsg } = await supabase
             .from('mensagens')
             .select('direcao')

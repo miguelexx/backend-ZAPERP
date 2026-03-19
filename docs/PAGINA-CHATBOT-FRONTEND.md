@@ -123,7 +123,9 @@ Authorization: Bearer <token>
 ```
 
 **Resposta:** Array de `{ id, conversa_id, tipo, detalhes, criado_em }`  
-Tipos: `menu_enviado`, `opcao_valida`, `opcao_invalida`, `menu_reenviado`
+Tipos: `menu_enviado`, `opcao_valida`, `opcao_invalida`, `menu_reenviado`, `fora_horario`
+
+> **Mensagem fora do horário:** Ver [PROMPT-FRONTEND-CHATBOT-FORA-HORARIO.md](./PROMPT-FRONTEND-CHATBOT-FORA-HORARIO.md) para implementação completa.
 
 ---
 
