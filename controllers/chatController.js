@@ -1042,7 +1042,10 @@ exports.sincronizarContatosZapi = async (req, res) => {
     const result = await syncContacts(company_id)
 
     if (!result.ok) {
-      return res.status(400).json({ error: result.errors?.[0] || 'Empresa sem instância WhatsApp configurada. Conecte o WhatsApp em Integrações.' })
+      const msg = result.errors?.[0] || 'Empresa sem instância WhatsApp configurada. Conecte o WhatsApp em Integrações.'
+      // Retorna 200 (não erro HTTP) para que o browser não logue como "Failed to load resource"
+      // O frontend detecta a falha via ok:false no body
+      return res.json({ ok: false, message: msg, total_contatos: 0, criados: 0, atualizados: 0 })
     }
 
     const io = req.app.get('io')
