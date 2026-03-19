@@ -295,7 +295,8 @@ async function ensureConnected(company_id) {
 /**
  * Executa sync de contatos para a empresa.
  * Garante que só puxa contatos da agenda do celular conectado via QR.
- * @param {number} company_id - req.user.company_id
+ * ISOLAMENTO: cada empresa tem seus próprios clientes (company_id); nunca mistura contatos entre empresas.
+ * @param {number} company_id - req.user.company_id (obrigatório)
  * @returns {Promise<{ ok: boolean, mode: string, totalFetched: number, inserted: number, updated: number, skipped: number, errors: string[] }>}
  */
 async function syncContacts(company_id) {

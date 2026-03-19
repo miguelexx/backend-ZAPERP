@@ -160,7 +160,10 @@ async function syncContactsFullProgressiva(company_id, opts = {}) {
       break
     }
 
-    const result = await syncContactsProgressiva(company_id, { maxPagesPerRun: maxPages })
+    const result = await syncContactsProgressiva(company_id, {
+      maxPagesPerRun: maxPages,
+      reset: pageCount === 0 && !!opts.reset
+    })
     if (!result.ok) break
 
     totalProcessados += result.processados

@@ -79,12 +79,10 @@ app.use(express.urlencoded({ extended: true, limit: '1mb' }))
 // =====================================================
 // WEBHOOKS — registrados ANTES do CORS (UltraMsg/Meta enviam Origin).
 // =====================================================
-const webhookRoutes = require('./routes/webhookRoutes')
 const webhookUltramsgRoutes = require('./routes/webhookUltramsgRoutes')
 const { webhookLimiter } = require('./middleware/rateLimit')
 
-app.use('/webhook', webhookLimiter, webhookRoutes)
-app.use('/webhook/meta', webhookLimiter, webhookRoutes)
+// UltraMSG: webhook principal (Meta Cloud API removido — usamos apenas UltraMSG)
 app.use('/webhooks/ultramsg', webhookLimiter, webhookUltramsgRoutes)
 app.use('/webhooks/whatsapp', webhookLimiter, webhookUltramsgRoutes)
 

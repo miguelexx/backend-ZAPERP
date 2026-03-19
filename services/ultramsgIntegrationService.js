@@ -4,11 +4,13 @@
  */
 
 const { getEmpresaWhatsappConfig, getCompanyIdByInstanceId, fetchWithTimeout } = require('./whatsappConfigService')
+const supabase = require('../config/supabase')
 
 const ULTRAMSG_BASE_URL = (process.env.ULTRAMSG_BASE_URL || 'https://api.ultramsg.com').replace(/\/$/, '')
 const TIMEOUT_MS = 10_000
 const CONFIGURE_WEBHOOKS_THROTTLE_MS = 10 * 60 * 1000 // 10 minutos entre tentativas de configureWebhooks
 const lastConfigureWebhooksAt = new Map()
+const lastConnectedState = new Map() // companyId -> boolean (para detectar transição ao conectar QR)
 
 /** Normaliza instance_id: UltraMsg aceita numérico (51534) ou com prefixo (instance51534). Unifica com provider. */
 function normalizeInstanceId(instanceId) {
@@ -94,6 +96,38 @@ async function getStatus(companyId) {
         }
       })
     }
+
+    // Auto-sync de contatos ao conectar QR: detecta transição disconnected → connected
+    // Respeita zapi_auto_sync_contatos (default true para puxar agenda do celular)
+    const wasConnected = lastConnectedState.get(companyId) ?? false
+    if (!wasConnected && connected) {
+      lastConnectedState.set(companyId, true)
+      setImmediate(async () => {
+        try {
+          const { data: empresa } = await supabase
+            .from('empresas')
+            .select('zapi_auto_sync_contatos')
+            .eq('id', companyId)
+            .maybeSingle()
+          const autoSync = empresa?.zapi_auto_sync_contatos !== false
+          if (autoSync) {
+            const { enqueue, JOB_TIPOS } = require('./queueManager')
+            const { ok, error } = await enqueue(companyId, JOB_TIPOS.SYNC_CONTATOS, { reset: true })
+            if (ok) {
+              console.log(`[ULTRAMSG] Auto-sync de contatos enfileirado para empresa ${companyId} (QR conectado)`)
+            } else if (error && !error.includes('já enfileirado')) {
+              console.warn('[ULTRAMSG] Auto-sync não enfileirado:', error)
+            }
+          }
+        } catch (e) {
+          console.warn('[ULTRAMSG] Erro ao enfileirar auto-sync:', e?.message || e)
+        }
+      })
+    } else if (connected) {
+      lastConnectedState.set(companyId, true)
+    }
+  } else if (companyId) {
+    lastConnectedState.set(companyId, false)
   }
 
   return { connected, smartphoneConnected }

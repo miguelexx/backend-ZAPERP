@@ -267,48 +267,6 @@ exports.debugConfig = async (req, res) => {
   })
 }
 
-exports.debugEmpresa2 = async (req, res) => {
-  const supabase = require('../config/supabase')
-  
-  try {
-    // 1. Verificar empresa_zapi
-    const { data: empresaZapi } = await supabase
-      .from('empresa_zapi')
-      .select('*')
-      .eq('company_id', 2)
-      .maybeSingle()
-    
-    // 2. Verificar clientes duplicados
-    const { data: clientesDuplicados } = await supabase
-      .from('clientes')
-      .select('telefone, count(*)')
-      .eq('company_id', 2)
-      .group('telefone')
-      .having('count(*) > 1')
-    
-    // 3. Verificar conversas sem cliente
-    const { data: conversasSemCliente } = await supabase
-      .from('conversas')
-      .select('id, telefone, nome_contato_cache')
-      .eq('company_id', 2)
-      .is('cliente_id', null)
-      .limit(5)
-    
-    // 4. Status da instância
-    const statusResult = await require('../services/ultramsgIntegrationService').getStatus(2)
-    
-    return res.json({
-      empresa_zapi: empresaZapi,
-      clientes_duplicados: clientesDuplicados || [],
-      conversas_sem_cliente: conversasSemCliente || [],
-      status_instancia: statusResult,
-      webhook_url_esperada: `${process.env.APP_URL}/webhooks/ultramsg?token=${process.env.WHATSAPP_WEBHOOK_TOKEN}`
-    })
-  } catch (e) {
-    return res.status(500).json({ error: e.message })
-  }
-}
-
 exports.debugStatus = async (req, res) => {
   const company_id = req.user?.company_id
   const result = await getStatus(company_id)
@@ -486,7 +444,7 @@ exports.getMessages = async (req, res) => {
 
   try {
     // Obter provider UltraMsg
-    const provider = await getProvider(company_id)
+    const provider = getProvider()
     if (!provider || !provider.getMessages) {
       return res.status(404).json({ error: 'Empresa sem instância configurada' })
     }
@@ -541,7 +499,7 @@ exports.getMessagesStatistics = async (req, res) => {
 
   try {
     // Obter provider UltraMsg
-    const provider = await getProvider(company_id)
+    const provider = getProvider()
     if (!provider || !provider.getMessagesStatistics) {
       return res.status(404).json({ error: 'Empresa sem instância configurada' })
     }
