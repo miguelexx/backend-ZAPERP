@@ -33,6 +33,10 @@ async function getEmpresaWhatsappConfig(company_id) {
     return { error: 'Erro ao buscar configuração WhatsApp da empresa' }
   }
   if (data) return { config: data }
+  // Produção: dados APENAS do banco — não usar fallback ENV (multi-tenant vendendo para clientes).
+  if (process.env.NODE_ENV === 'production') {
+    return { error: 'Empresa sem instância configurada em empresa_zapi. Cadastre credenciais UltraMsg no painel.' }
+  }
   const fallbackId = process.env.ULTRAMSG_INSTANCE_ID || ''
   const fallbackToken = process.env.ULTRAMSG_TOKEN || ''
   if (fallbackId && fallbackToken) {

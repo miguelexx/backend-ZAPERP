@@ -1,13 +1,29 @@
 /**
  * Jobs para cron (timeout inatividade, etc.)
  * Protegido por header X-Cron-Secret === process.env.CRON_SECRET
+ * Usa comparação timing-safe para evitar timing-attacks.
  */
+const crypto = require('crypto')
 const supabase = require('../config/supabase')
+
+function timingSafeEqualStr(a, b) {
+  const sa = String(a ?? '')
+  const sb = String(b ?? '')
+  const maxLen = Math.max(Buffer.byteLength(sa, 'utf8'), Buffer.byteLength(sb, 'utf8'), 1)
+  const ba = Buffer.alloc(maxLen)
+  const bb = Buffer.alloc(maxLen)
+  ba.write(sa, 'utf8')
+  bb.write(sb, 'utf8')
+  return crypto.timingSafeEqual(ba, bb) && sa.length === sb.length
+}
 
 function checkCronSecret(req, res, next) {
   const secret = process.env.CRON_SECRET
   const provided = req.headers['x-cron-secret']
-  if (!secret || secret !== provided) {
+  if (!secret || !String(secret).trim()) {
+    return res.status(503).json({ error: 'CRON_SECRET não configurado. Configure no .env para usar jobs de cron.' })
+  }
+  if (!provided || !timingSafeEqualStr(secret, provided)) {
     return res.status(401).json({ error: 'Unauthorized' })
   }
   next()

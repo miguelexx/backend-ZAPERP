@@ -315,14 +315,34 @@ async function getOrCreateCliente(supabaseClient, company_id, phone, fields = {}
     String(errInsert?.message || '').includes('duplicate')
 
   if (isDuplicate) {
-    const { data: foundByCo } = await supabaseClient
-      .from('clientes')
-      .select('id')
-      .in('telefone', searchPhones)
-      .eq('company_id', company_id)
-      .order('id', { ascending: true })
-      .limit(1)
-    const foundCo = Array.isArray(foundByCo) && foundByCo[0] ? foundByCo[0] : null
+    const tryFind = async () => {
+      const { data: foundByCo } = await supabaseClient
+        .from('clientes')
+        .select('id')
+        .in('telefone', searchPhones)
+        .eq('company_id', company_id)
+        .order('id', { ascending: true })
+        .limit(1)
+      return Array.isArray(foundByCo) && foundByCo[0] ? foundByCo[0] : null
+    }
+    let foundCo = await tryFind()
+    if (!foundCo?.id && telefoneCanonico) {
+      await new Promise(r => setTimeout(r, 80))
+      foundCo = await tryFind()
+    }
+    if (!foundCo?.id && telefoneCanonico) {
+      const digits8 = String(telefoneCanonico).replace(/\D/g, '').slice(-8)
+      if (digits8?.length === 8) {
+        const { data: likeRows } = await supabaseClient
+          .from('clientes')
+          .select('id')
+          .eq('company_id', company_id)
+          .like('telefone', `%${digits8}`)
+          .order('id', { ascending: true })
+          .limit(1)
+        foundCo = Array.isArray(likeRows) && likeRows[0] ? likeRows[0] : null
+      }
+    }
     if (foundCo?.id) return { cliente_id: foundCo.id }
   }
 

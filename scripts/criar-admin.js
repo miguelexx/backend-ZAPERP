@@ -110,7 +110,7 @@ async function criarAdmin() {
   console.log('  Email:', novo.email)
   console.log('  Perfil:', novo.perfil)
   console.log('')
-  console.log('Faça login com:', emailNorm, '| Senha:', ADMIN_SENHA)
+  console.log('Faça login com o email acima e a senha que você definiu.')
   process.exit(0)
 }
 

@@ -164,7 +164,7 @@ async function resolveConfig(opts = {}) {
   if (!instanceId || !token) return null
   const segment = instanceId.toLowerCase().startsWith('instance') ? instanceId : `instance${instanceId}`
   const basePath = `${ULTRAMSG_BASE_URL}/${encodeURIComponent(segment)}`
-  return { basePath, token }
+  return { basePath, token, instanceId: segment, companyId: Number(companyId) }
 }
 
 /**
@@ -885,8 +885,8 @@ async function getProfilePicture(phoneOrChatId, opts = {}) {
   const chatId = rawOpts || phoneToChatId(phoneOrChatId)
   if (!chatId) return null
 
-  // Verificar cache de contatos sem foto
-  const cacheKey = `${cfg.instanceId}:${chatId}`
+  // Verificar cache de contatos sem foto (por instância e chatId — multi-tenant)
+  const cacheKey = `${cfg.instanceId || cfg.companyId || 'default'}:${chatId}`
   const cachedNoPhoto = noProfilePictureCache.get(cacheKey)
   if (cachedNoPhoto && cachedNoPhoto.expiry > Date.now()) {
     // Contato já conhecido por não ter foto, retorna null silenciosamente
@@ -894,7 +894,7 @@ async function getProfilePicture(phoneOrChatId, opts = {}) {
   }
 
   // Rate limiting por instância para evitar spam de requisições
-  const rateLimitKey = `rate_limit:${cfg.instanceId}`
+  const rateLimitKey = `rate_limit:${cfg.instanceId || cfg.companyId || 'default'}`
   const lastRequest = profilePictureRateLimit.get(rateLimitKey)
   const now = Date.now()
   
