@@ -114,10 +114,21 @@ const DEFAULT_CHATBOT_CONFIG = {
  * @returns {object} Config validada
  */
 function validateChatbotConfig(raw) {
-  if (!raw || typeof raw !== 'object') return null
+  if (!raw || typeof raw !== 'object') {
+    console.log('[chatbotTriage] validateChatbotConfig: raw config é null ou não é object')
+    return null
+  }
   const opts = Array.isArray(raw.options) ? raw.options : []
   const activeOptions = opts.filter((o) => o && o.active !== false && o.departamento_id != null)
-  if (activeOptions.length === 0 && raw.enabled) return null
+  console.log('[chatbotTriage] validateChatbotConfig: análise das opções', {
+    totalOpcoes: opts.length,
+    opcoesAtivas: activeOptions.length,
+    enabled: raw.enabled
+  })
+  if (activeOptions.length === 0 && raw.enabled) {
+    console.log('[chatbotTriage] validateChatbotConfig: chatbot habilitado mas sem opções ativas')
+    return null
+  }
   const tipoDist = String(raw.tipo_distribuicao || 'fila').trim().toLowerCase()
   const tipoDistribuicao = tipoDist === 'menor_carga' ? 'menor_carga' : (tipoDist === 'round_robin' ? 'round_robin' : 'fila')
 
@@ -422,28 +433,46 @@ async function applyTagIfConfigured(supabaseClient, company_id, conversa_id, tag
  */
 async function processIncomingMessage(ctx) {
   const { company_id, conversa_id, telefone, texto, supabase: supabaseClient, sendMessage, opts = {}, conversaReabertaAposFinalizacao = false } = ctx
+  
+  console.log('[chatbotTriage] 🤖 INÍCIO DO PROCESSAMENTO', {
+    company_id,
+    conversa_id,
+    telefone: String(telefone || '').slice(-8),
+    texto: String(texto || '').slice(0, 50),
+    conversaReabertaAposFinalizacao,
+    timestamp: new Date().toISOString()
+  })
+  
   if (!company_id || !conversa_id || !telefone || !sendMessage) {
-    console.log('[chatbotTriage] skip: falta company_id, conversa_id, telefone ou sendMessage')
+    console.log('[chatbotTriage] ❌ skip: falta company_id, conversa_id, telefone ou sendMessage')
     return { handled: false }
   }
   if (String(telefone).startsWith('lid:')) {
-    console.log('[chatbotTriage] skip: telefone é LID (não é possível enviar via Z-API)')
+    console.log('[chatbotTriage] ❌ skip: telefone é LID (não é possível enviar via Z-API)')
     return { handled: false }
   }
 
   const config = await getChatbotConfig(company_id)
   if (!config) {
-    console.log('[chatbotTriage] skip: config não encontrada ou inválida para company_id', company_id)
+    console.log('[chatbotTriage] ❌ skip: config não encontrada ou inválida para company_id', company_id)
     return { handled: false }
   }
   if (!config.enabled) {
-    console.log('[chatbotTriage] skip: chatbot desativado')
+    console.log('[chatbotTriage] ❌ skip: chatbot desativado para company_id', company_id)
     return { handled: false }
   }
   if (!config.options?.length) {
-    console.log('[chatbotTriage] skip: nenhuma opção configurada')
+    console.log('[chatbotTriage] ❌ skip: nenhuma opção configurada para company_id', company_id)
     return { handled: false }
   }
+  
+  console.log('[chatbotTriage] ✅ configuração válida encontrada', {
+    company_id,
+    enabled: config.enabled,
+    totalOpcoes: config.options.length,
+    sendOnlyFirstTime: config.sendOnlyFirstTime,
+    foraHorarioEnabled: config.foraHorarioEnabled
+  })
 
   // Mensagem fora do horário: se ativado e fora do horário ou dia desativado, envia mensagem e não processa o menu
   if (config.foraHorarioEnabled && config.mensagemForaHorario) {
@@ -524,13 +553,43 @@ async function processIncomingMessage(ctx) {
   }
 
   const menuAlreadySent = await wasMenuSentForConversa(sb, company_id, conversa_id)
-  // Quando conversa foi reaberta após finalização, enviar boas-vindas novamente (cliente voltou depois de 1h, 1 mês, etc.)
-  const shouldSendWelcome = conversaReabertaAposFinalizacao || !menuAlreadySent || !config.sendOnlyFirstTime
+  
+  // Verificar se esta é a primeira mensagem do cliente na conversa
+  const { data: mensagensAnteriores } = await sb
+    .from('mensagens')
+    .select('id, direcao')
+    .eq('conversa_id', conversa_id)
+    .eq('company_id', company_id)
+    .order('criado_em', { ascending: true })
+    .limit(5)
+
+  const isPrimeiraMensagemCliente = !mensagensAnteriores || mensagensAnteriores.length === 0 || 
+    mensagensAnteriores.every(m => m.direcao === 'in') // Todas as mensagens são do cliente (entrada)
+
+  console.log('[chatbotTriage] análise da conversa', { 
+    conversa_id, 
+    company_id, 
+    menuAlreadySent, 
+    conversaReabertaAposFinalizacao,
+    isPrimeiraMensagemCliente,
+    totalMensagens: mensagensAnteriores?.length || 0
+  })
+
+  // Determinar se deve enviar boas-vindas:
+  // 1. Conversa reaberta após finalização (sempre enviar)
+  // 2. Primeira mensagem do cliente E (menu não foi enviado OU não é sendOnlyFirstTime)
+  // 3. Comando de reabrir menu já foi tratado acima
+  const shouldSendWelcome = conversaReabertaAposFinalizacao || 
+    (isPrimeiraMensagemCliente && (!menuAlreadySent || !config.sendOnlyFirstTime))
 
   if (shouldSendWelcome) {
     const msg = welcomeFull || menuOnly
     if (msg) {
-      console.log('[chatbotTriage] enviando menu de boas-vindas', { conversa_id, company_id })
+      console.log('[chatbotTriage] enviando menu de boas-vindas', { 
+        conversa_id, 
+        company_id, 
+        motivo: conversaReabertaAposFinalizacao ? 'conversa_reaberta' : 'primeira_mensagem'
+      })
       await sendWithThrottle(sendMessage, telefone, msg, opts, company_id, config.intervaloEnvioSegundos)
       await sb.from('mensagens').insert({
         conversa_id,
@@ -539,7 +598,10 @@ async function processIncomingMessage(ctx) {
         company_id,
         status: 'enviada',
       })
-      await logBotAction(company_id, conversa_id, 'menu_enviado', { opcoes: config.options.map((o) => o.key) })
+      await logBotAction(company_id, conversa_id, 'menu_enviado', { 
+        opcoes: config.options.map((o) => o.key),
+        motivo: conversaReabertaAposFinalizacao ? 'conversa_reaberta' : 'primeira_mensagem'
+      })
     } else {
       console.warn('[chatbotTriage] menu vazio — welcomeMessage e menu (opções) estão vazios. Verifique a configuração.')
     }
@@ -547,7 +609,17 @@ async function processIncomingMessage(ctx) {
   }
 
   const invalidMsg = config.invalidOptionMessage || 'Opção inválida. Por favor, responda apenas com o número do setor desejado.'
-  const fullInvalid = `${invalidMsg}\n\n${menuOnly}\n\nResponda com o número da opção desejada.`
+  const menuText = buildMenuText(config)
+  const fullInvalid = menuText ? 
+    `${invalidMsg}\n\n${menuText}\n\nResponda com o número da opção desejada.` : 
+    invalidMsg
+
+  console.log('[chatbotTriage] enviando mensagem de opção inválida', { 
+    conversa_id, 
+    company_id, 
+    textoRecebido: String(texto || '').slice(0, 50) 
+  })
+  
   await sendWithThrottle(sendMessage, telefone, fullInvalid, opts, company_id, config.intervaloEnvioSegundos)
   await sb.from('mensagens').insert({
     conversa_id,
@@ -556,7 +628,10 @@ async function processIncomingMessage(ctx) {
     company_id,
     status: 'enviada',
   })
-  await logBotAction(company_id, conversa_id, 'opcao_invalida', { texto_recebido: texto?.slice(0, 100) })
+  await logBotAction(company_id, conversa_id, 'opcao_invalida', { 
+    texto_recebido: texto?.slice(0, 100),
+    opcoes_validas: config.options.filter(o => o.active !== false).map(o => o.key)
+  })
 
   return { handled: true }
 }

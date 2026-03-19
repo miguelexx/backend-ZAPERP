@@ -630,7 +630,19 @@ exports.receberZapi = async (req, res) => {
       company_id = await getCompanyIdByInstanceId(instanceId)
     }
     if (!instanceId || company_id == null) {
-      _logWebhookSafe({ instanceId: instanceId ? instanceId.slice(0, 24) + (instanceId.length > 24 ? '…' : '') : '(empty)', companyId: 'not_mapped', type: body.type || body.event || 'unknown', ignored: 'instance_not_mapped' })
+      const logData = { instanceId: instanceId ? instanceId.slice(0, 24) + (instanceId.length > 24 ? '…' : '') : '(empty)', companyId: 'not_mapped', type: body.type || body.event || 'unknown', ignored: 'instance_not_mapped' }
+      _logWebhookSafe(logData)
+      
+      // Log específico para debugar empresa 2
+      if (instanceId === '51534' || instanceId === 'instance51534') {
+        console.error('[EMPRESA_2_DEBUG] Instance não mapeada:', {
+          instanceId,
+          company_id,
+          bodyKeys: Object.keys(body || {}),
+          eventType: body.event_type || body.eventType || body.type
+        })
+      }
+      
       return res.status(200).json({ ok: true, ignored: 'instance_not_mapped' })
     }
 
@@ -1737,18 +1749,41 @@ exports.receberZapi = async (req, res) => {
         // Chatbot só envia quando o CLIENTE iniciou a conversa. Se o usuário/atendente enviou a 1ª msg, não enviar nada.
         // Exceção: conversaReabertaAposFinalizacao — cliente enviou msg após finalização, tratar como novo contato e enviar boas-vindas
         if (!skipChatbot && !conversaReabertaAposFinalizacao) {
-          const { data: primeiraMsg } = await supabase
+          const { data: mensagensAnteriores } = await supabase
             .from('mensagens')
-            .select('direcao')
+            .select('direcao, criado_em, texto')
             .eq('conversa_id', conversa_id)
             .eq('company_id', company_id)
             .order('criado_em', { ascending: true })
-            .limit(1)
-            .maybeSingle()
-          // Sem mensagens ainda = cliente está enviando a 1ª (in) → permitir. Direcao 'out' = usuário começou → não enviar.
-          if (primeiraMsg?.direcao === 'out') {
-            skipChatbot = true
-            console.log('[Z-API] 🤖 Chatbot: ignorado — usuário iniciou a conversa (1ª msg foi direcao out)', { conversa_id })
+            .limit(10) // Verificar as primeiras mensagens para ter certeza
+
+          console.log('[Z-API] 🤖 Chatbot: verificando histórico da conversa', { 
+            conversa_id, 
+            totalMensagens: mensagensAnteriores?.length || 0,
+            primeiraMensagem: mensagensAnteriores?.[0] ? {
+              direcao: mensagensAnteriores[0].direcao,
+              texto: String(mensagensAnteriores[0].texto || '').slice(0, 30)
+            } : null
+          })
+
+          // Se não há mensagens anteriores, esta é a primeira mensagem do cliente → permitir chatbot
+          if (!mensagensAnteriores || mensagensAnteriores.length === 0) {
+            console.log('[Z-API] 🤖 Chatbot: primeira mensagem do cliente — permitindo chatbot', { conversa_id })
+          } else {
+            // Verificar se a primeira mensagem foi do usuário/atendente (direcao 'out')
+            const primeiraMsg = mensagensAnteriores[0]
+            if (primeiraMsg?.direcao === 'out') {
+              skipChatbot = true
+              console.log('[Z-API] 🤖 Chatbot: ignorado — usuário iniciou a conversa (1ª msg foi direcao out)', { 
+                conversa_id,
+                primeiraMsg: String(primeiraMsg.texto || '').slice(0, 30)
+              })
+            } else {
+              console.log('[Z-API] 🤖 Chatbot: cliente iniciou a conversa — permitindo chatbot', { 
+                conversa_id,
+                totalMensagensCliente: mensagensAnteriores.filter(m => m.direcao === 'in').length
+              })
+            }
           }
         }
 

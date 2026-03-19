@@ -56,6 +56,18 @@ async function resolveWebhookZapi(req, res, next) {
     const eventType = inferEventType(body, path)
 
     _logSafe({ eventType, instanceId, companyIdResolved })
+    
+    // Log específico para debugar empresa 2
+    if (instanceIdRaw === '51534' || instanceIdRaw === 'instance51534') {
+      console.log('[EMPRESA_2_DEBUG] Webhook recebido:', {
+        instanceId: instanceIdRaw,
+        company_id,
+        eventType,
+        hasData: !!body.data,
+        dataFrom: body.data?.from,
+        dataTo: body.data?.to
+      })
+    }
 
     req.zapiContext = { company_id, instanceId: instanceIdRaw, eventType }
     if (company_id == null) {

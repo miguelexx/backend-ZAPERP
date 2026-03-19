@@ -315,38 +315,58 @@ async function getOrCreateCliente(supabaseClient, company_id, phone, fields = {}
     String(errInsert?.message || '').includes('duplicate')
 
   if (isDuplicate) {
-    const tryFind = async () => {
-      const { data: foundByCo } = await supabaseClient
-        .from('clientes')
-        .select('id')
-        .in('telefone', searchPhones)
-        .eq('company_id', company_id)
-        .order('id', { ascending: true })
-        .limit(1)
-      return Array.isArray(foundByCo) && foundByCo[0] ? foundByCo[0] : null
+    // Múltiplas tentativas de busca com diferentes estratégias
+    const tryFind = async (strategy = 'exact') => {
+      let q = supabaseClient.from('clientes').select('id').eq('company_id', company_id)
+      
+      if (strategy === 'exact') {
+        q = searchPhones.length > 0 ? q.in('telefone', searchPhones) : q.eq('telefone', telefoneCanonico)
+      } else if (strategy === 'like' && telefoneCanonico) {
+        const digits8 = String(telefoneCanonico).replace(/\D/g, '').slice(-8)
+        if (digits8?.length === 8) {
+          q = q.like('telefone', `%${digits8}`)
+        } else {
+          return null
+        }
+      }
+      
+      const { data } = await q.order('id', { ascending: true }).limit(1)
+      return Array.isArray(data) && data[0] ? data[0] : null
     }
-    let foundCo = await tryFind()
-    if (!foundCo?.id && telefoneCanonico) {
-      await new Promise(r => setTimeout(r, 80))
-      foundCo = await tryFind()
+
+    // Tentativa 1: busca exata
+    let foundCo = await tryFind('exact')
+    
+    // Tentativa 2: aguardar um pouco (race condition)
+    if (!foundCo?.id) {
+      await new Promise(r => setTimeout(r, 100))
+      foundCo = await tryFind('exact')
     }
+    
+    // Tentativa 3: busca por LIKE (últimos 8 dígitos)
+    if (!foundCo?.id) {
+      foundCo = await tryFind('like')
+    }
+    
+    // Tentativa 4: busca por possiblePhonesBR (variações 12/13 dígitos)
     if (!foundCo?.id && telefoneCanonico) {
-      const digits8 = String(telefoneCanonico).replace(/\D/g, '').slice(-8)
-      if (digits8?.length === 8) {
-        const { data: likeRows } = await supabaseClient
+      const allVariants = possiblePhonesBR(telefoneCanonico)
+      if (allVariants.length > 1) {
+        const { data: variantRows } = await supabaseClient
           .from('clientes')
           .select('id')
           .eq('company_id', company_id)
-          .like('telefone', `%${digits8}`)
+          .in('telefone', allVariants)
           .order('id', { ascending: true })
           .limit(1)
-        foundCo = Array.isArray(likeRows) && likeRows[0] ? likeRows[0] : null
+        foundCo = Array.isArray(variantRows) && variantRows[0] ? variantRows[0] : null
       }
     }
+    
     if (foundCo?.id) return { cliente_id: foundCo.id }
   }
 
-  console.warn('[getOrCreateCliente] Insert falhou, continuando sem cliente:', errInsert?.code || errInsert?.message || 'unknown')
+  console.warn('[getOrCreateCliente] Insert falhou, continuando sem cliente:', errInsert?.code || errInsert?.message || 'unknown', 'company_id:', company_id, 'telefone:', telefoneCanonico)
   return { cliente_id: null }
 }
 

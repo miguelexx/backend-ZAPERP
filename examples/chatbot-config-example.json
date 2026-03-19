@@ -1,0 +1,53 @@
+{
+  "chatbot_triage": {
+    "enabled": true,
+    "welcomeMessage": "Olá! Seja bem-vindo(a) à nossa empresa.\nPara direcionarmos seu atendimento, por favor escolha com qual setor deseja falar:",
+    "invalidOptionMessage": "Opção inválida. Por favor, responda apenas com o número do setor desejado.",
+    "confirmSelectionMessage": "Perfeito! Seu atendimento foi direcionado para o setor {{departamento}}. Em instantes nossa equipe dará continuidade.",
+    "sendOnlyFirstTime": true,
+    "fallbackToAI": false,
+    "businessHoursOnly": false,
+    "transferMode": "departamento",
+    "tipo_distribuicao": "fila",
+    "reopenMenuCommand": "0",
+    "intervaloEnvioSegundos": 3,
+    "foraHorarioEnabled": true,
+    "horarioInicio": "09:00",
+    "horarioFim": "18:00",
+    "mensagemForaHorario": "Olá! Nosso horário de atendimento é de segunda a sexta, das 09h às 18h. Sua mensagem foi recebida e retornaremos no próximo dia útil. Obrigado!",
+    "diasSemanaDesativados": [0, 6],
+    "datasEspecificasFechadas": ["2024-12-25", "2024-01-01"],
+    "enviarMensagemFinalizacao": false,
+    "mensagemFinalizacao": "Atendimento finalizado com sucesso. Segue seu protocolo: {{protocolo}}.\nPor favor, informe uma nota entre 0 e 10 para avaliar o atendimento prestado.",
+    "options": [
+      {
+        "key": "1",
+        "label": "Comercial",
+        "departamento_id": 1,
+        "active": true,
+        "tag_id": null
+      },
+      {
+        "key": "2",
+        "label": "Suporte Técnico",
+        "departamento_id": 2,
+        "active": true,
+        "tag_id": null
+      },
+      {
+        "key": "3",
+        "label": "Financeiro",
+        "departamento_id": 3,
+        "active": true,
+        "tag_id": null
+      },
+      {
+        "key": "4",
+        "label": "Administrativo",
+        "departamento_id": 4,
+        "active": true,
+        "tag_id": null
+      }
+    ]
+  }
+}

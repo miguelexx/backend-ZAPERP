@@ -186,6 +186,8 @@ const campanhaRoutes = require('./routes/campanhaRoutes')
 const { optInRouter, optOutRouter } = require('./routes/optInOptOutRoutes')
 const { apiLimiter } = require('./middleware/rateLimit')
 const aiRoutes = require('./routes/aiRoutes')
+const chatbotDebugRoutes = require('./routes/chatbotDebugRoutes')
+const chatbotManagementRoutes = require('./routes/chatbotManagementRoutes')
 
 // Webhooks já registrados antes do CORS (evita 403 Origin)
 app.use('/dashboard', dashboardRoutes)
@@ -202,6 +204,8 @@ app.use('/ai', aiRoutes)
 app.use('/campanhas', campanhaRoutes)
 app.use('/opt-in', optInRouter)
 app.use('/opt-out', optOutRouter)
+app.use('/chatbot/debug', chatbotDebugRoutes)
+app.use('/chatbot', chatbotManagementRoutes)
 
 // /api — prefixo opcional para SaaS; mantém compatibilidade com rotas antigas
 // Aplica apiLimiter globalmente para "rotas de API"
@@ -220,6 +224,8 @@ api.use('/tags', tagsRoutes)
 api.use('/campanhas', campanhaRoutes)
 api.use('/opt-in', optInRouter)
 api.use('/opt-out', optOutRouter)
+api.use('/chatbot/debug', chatbotDebugRoutes)
+api.use('/chatbot', chatbotManagementRoutes)
 app.use('/api', apiLimiter, api)
 
 // =====================================================
@@ -318,6 +324,21 @@ app.use((err, req, res, next) => {
   // Outros erros: log + 500 JSON (nunca HTML)
   console.error('[APP_ERROR]', err?.message || err)
   return res.status(err?.status || 500).json({ error: err?.message || 'Erro interno' })
+})
+
+// =====================================================
+// 🤖 Inicialização automática do chatbot para todas as empresas
+// =====================================================
+const { initializeChatbotForAllCompanies } = require('./middleware/autoChatbotSetup')
+
+// Executar inicialização em background após startup
+setImmediate(async () => {
+  try {
+    console.log('[APP] 🤖 Inicializando chatbot para todas as empresas...')
+    await initializeChatbotForAllCompanies()
+  } catch (error) {
+    console.error('[APP] ❌ Erro na inicialização do chatbot:', error.message)
+  }
 })
 
 module.exports = app
