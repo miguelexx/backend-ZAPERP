@@ -264,7 +264,7 @@ exports.excluir = async (req, res) => {
 
 exports.login = async (req, res) => {
   try {
-    const { email, senha } = req.body
+    const { email, senha, company_id: companyIdBody } = req.body
 
     // Validação e sanitização de entrada
     if (!email || !senha) {
@@ -279,19 +279,32 @@ exports.login = async (req, res) => {
     }
 
     // Busca usuário pelo email (case-insensitive: aceita User@Email.com mesmo se no banco estiver user@email.com)
+    // Multi-tenant: company_id opcional — quando o mesmo email existe em várias empresas, obriga escolher qual
     const emailParaBusca = emailNorm.replace(/\\/g, '\\\\').replace(/%/g, '\\%').replace(/_/g, '\\_')
-    const { data: usuario, error } = await supabase
-      .from('usuarios')
-      .select('*')
-      .ilike('email', emailParaBusca)
-      .maybeSingle()
+    let query = supabase.from('usuarios').select('*').ilike('email', emailParaBusca)
+    const cidLogin = companyIdBody != null ? Number(companyIdBody) : null
+    if (Number.isFinite(cidLogin) && cidLogin > 0) {
+      query = query.eq('company_id', cidLogin)
+    }
+    const { data: usuario, error } = await query.maybeSingle()
 
     const isDev = String(process.env.NODE_ENV || '').toLowerCase() !== 'production'
     function logDevLoginFail(reason) {
       if (isDev) console.log('[LOGIN_DEV]', reason, '| email:', emailNorm?.slice(0, 20) + '***')
     }
 
-    if (error || !usuario) {
+    if (error) {
+      // PGRST116: múltiplas linhas — mesmo email em várias empresas; exige company_id
+      if (String(error.code || '') === 'PGRST116' || String(error.message || '').includes('0 or more than 1')) {
+        return res.status(400).json({
+          error: 'Este email está cadastrado em mais de uma empresa. Informe company_id no login.',
+          code: 'MULTIPLE_COMPANIES'
+        })
+      }
+      logDevLoginFail('query_error')
+      return res.status(401).json({ error: 'Credenciais inválidas' })
+    }
+    if (!usuario) {
       logDevLoginFail('user_not_found')
       return res.status(401).json({ error: 'Credenciais inválidas' })
     }

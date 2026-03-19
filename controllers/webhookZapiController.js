@@ -1669,12 +1669,15 @@ exports.receberZapi = async (req, res) => {
           if (reaberta) {
             departamento_id = null
             conversaReabertaAposFinalizacao = true
+            // Resetar estado do chatbot para reiniciar fluxo (menu, opções) — mesmo passo sempre
+            const { resetChatbotStateForConversa } = require('../services/chatbotTriageService')
+            await resetChatbotStateForConversa(supabase, company_id, conversa_id)
             const io = req.app.get('io')
             if (io) {
               io.to(`empresa_${company_id}`).emit(io.EVENTS?.CONVERSA_REABERTA || 'conversa_reaberta', reaberta)
               io.to(`empresa_${company_id}`).emit(io.EVENTS?.ATUALIZAR_CONVERSA || 'atualizar_conversa', { id: conversa_id })
             }
-            console.log('[Z-API] 🔄 Conversa reaberta automaticamente (cliente enviou msg após encerramento)', { conversa_id })
+            console.log('[Z-API] 🔄 Conversa reaberta automaticamente (cliente enviou msg após encerramento) — chatbot reiniciado', { conversa_id })
           }
         }
       }

@@ -114,21 +114,10 @@ const DEFAULT_CHATBOT_CONFIG = {
  * @returns {object} Config validada
  */
 function validateChatbotConfig(raw) {
-  if (!raw || typeof raw !== 'object') {
-    console.log('[chatbotTriage] validateChatbotConfig: raw config é null ou não é object')
-    return null
-  }
+  if (!raw || typeof raw !== 'object') return null
   const opts = Array.isArray(raw.options) ? raw.options : []
   const activeOptions = opts.filter((o) => o && o.active !== false && o.departamento_id != null)
-  console.log('[chatbotTriage] validateChatbotConfig: análise das opções', {
-    totalOpcoes: opts.length,
-    opcoesAtivas: activeOptions.length,
-    enabled: raw.enabled
-  })
-  if (activeOptions.length === 0 && raw.enabled) {
-    console.log('[chatbotTriage] validateChatbotConfig: chatbot habilitado mas sem opções ativas')
-    return null
-  }
+  if (activeOptions.length === 0 && raw.enabled) return null
   const tipoDist = String(raw.tipo_distribuicao || 'fila').trim().toLowerCase()
   const tipoDistribuicao = tipoDist === 'menor_carga' ? 'menor_carga' : (tipoDist === 'round_robin' ? 'round_robin' : 'fila')
 
@@ -203,13 +192,7 @@ async function getChatbotConfig(company_id) {
       return null
     }
     const ct = data.config.chatbot_triage || data.config
-    const validated = validateChatbotConfig(ct)
-    if (!validated) {
-      const opts = Array.isArray(ct?.options) ? ct.options : []
-      const activeCount = opts.filter((o) => o && o.active !== false && o.departamento_id != null).length
-      console.log('[chatbotTriage] getChatbotConfig: config inválida (enabled=', !!ct?.enabled, 'opcoes_ativas=', activeCount, ')')
-    }
-    return validated
+    return validateChatbotConfig(ct)
   } catch (e) {
     console.warn('[chatbotTriage] getChatbotConfig:', e?.message || e)
     return null
@@ -229,6 +212,29 @@ async function logBotAction(company_id, conversa_id, tipo, detalhes = {}) {
     })
   } catch (e) {
     console.warn('[chatbotTriage] logBotAction:', e?.message || e)
+  }
+}
+
+/**
+ * Reseta o estado do chatbot para uma conversa (ex: após reabertura).
+ * Remove logs de menu_enviado, opcao_valida etc. para que o fluxo reinicie do zero.
+ * Chamado pelo webhook quando conversa fechada é reaberta por nova mensagem do cliente.
+ */
+async function resetChatbotStateForConversa(supabaseClient, company_id, conversa_id) {
+  if (!conversa_id || !company_id) return
+  try {
+    const { error } = await (supabaseClient || supabase)
+      .from('bot_logs')
+      .delete()
+      .eq('company_id', company_id)
+      .eq('conversa_id', conversa_id)
+    if (error) {
+      console.warn('[chatbotTriage] resetChatbotStateForConversa:', error.message)
+      return
+    }
+    console.log('[chatbotTriage] 🔄 Estado do chatbot resetado para conversa reaberta', { conversa_id, company_id })
+  } catch (e) {
+    console.warn('[chatbotTriage] resetChatbotStateForConversa:', e?.message || e)
   }
 }
 
@@ -487,7 +493,7 @@ async function processIncomingMessage(ctx) {
         texto: config.mensagemForaHorario,
         direcao: 'out',
         company_id,
-        status: 'enviada',
+        status: 'sent',
       })
       await logBotAction(company_id, conversa_id, 'fora_horario', {
         horario_inicio: config.horarioInicio,
@@ -524,7 +530,7 @@ async function processIncomingMessage(ctx) {
       texto: msgToSend,
       direcao: 'out',
       company_id,
-      status: 'enviada',
+      status: 'sent',
     })
 
     await logBotAction(company_id, conversa_id, 'opcao_valida', {
@@ -545,7 +551,7 @@ async function processIncomingMessage(ctx) {
         texto: msg,
         direcao: 'out',
         company_id,
-        status: 'enviada',
+        status: 'sent',
       })
       await logBotAction(company_id, conversa_id, 'menu_reenviado', { comando: textoNorm })
     }
@@ -575,11 +581,11 @@ async function processIncomingMessage(ctx) {
     totalMensagens: mensagensAnteriores?.length || 0
   })
 
-  // Determinar se deve enviar boas-vindas:
-  // 1. Conversa reaberta após finalização (sempre enviar)
+  // Determinar se deve enviar boas-vindas (menu de triagem):
+  // 1. Conversa reaberta após finalização — SEMPRE enviar (cliente mandou msg após encerrar; chatbot reinicia do zero)
   // 2. Primeira mensagem do cliente E (menu não foi enviado OU não é sendOnlyFirstTime)
   // 3. Comando de reabrir menu já foi tratado acima
-  const shouldSendWelcome = conversaReabertaAposFinalizacao || 
+  const shouldSendWelcome = conversaReabertaAposFinalizacao ||
     (isPrimeiraMensagemCliente && (!menuAlreadySent || !config.sendOnlyFirstTime))
 
   if (shouldSendWelcome) {
@@ -596,7 +602,7 @@ async function processIncomingMessage(ctx) {
         texto: msg,
         direcao: 'out',
         company_id,
-        status: 'enviada',
+        status: 'sent',
       })
       await logBotAction(company_id, conversa_id, 'menu_enviado', { 
         opcoes: config.options.map((o) => o.key),
@@ -626,7 +632,7 @@ async function processIncomingMessage(ctx) {
     texto: fullInvalid,
     direcao: 'out',
     company_id,
-    status: 'enviada',
+    status: 'sent',
   })
   await logBotAction(company_id, conversa_id, 'opcao_invalida', { 
     texto_recebido: texto?.slice(0, 100),
@@ -647,4 +653,5 @@ module.exports = {
   buildMensagemFinalizacao,
   findOptionByKey,
   transferToDepartment,
+  resetChatbotStateForConversa,
 }

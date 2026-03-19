@@ -461,7 +461,7 @@ exports.listarConversas = async (req, res) => {
       foto_grupo,
       nome_contato_cache,
       foto_perfil_contato_cache,
-      clientes!conversas_cliente_fk ( id, nome, pushname, telefone, foto_perfil ),
+      clientes!conversas_cliente_fk ( id, nome, pushname, telefone, foto_perfil, company_id ),
       departamentos ( id, nome ),
       mensagens ( texto, criado_em, direcao, tipo, url, nome_arquivo, whatsapp_id, status, autor_usuario_id ),
       conversa_tags (
@@ -487,7 +487,7 @@ exports.listarConversas = async (req, res) => {
       foto_grupo,
       nome_contato_cache,
       foto_perfil_contato_cache,
-      clientes!conversas_cliente_fk ( id, nome, pushname, telefone, foto_perfil ),
+      clientes!conversas_cliente_fk ( id, nome, pushname, telefone, foto_perfil, company_id ),
       departamentos ( id, nome ),
       mensagens ( texto, criado_em, direcao, tipo, url, nome_arquivo, whatsapp_id, status, autor_usuario_id ),
       conversa_tags (
@@ -514,7 +514,7 @@ exports.listarConversas = async (req, res) => {
       foto_grupo,
       nome_contato_cache,
       foto_perfil_contato_cache,
-      clientes!conversas_cliente_fk ( id, nome, pushname, telefone, foto_perfil ),
+      clientes!conversas_cliente_fk ( id, nome, pushname, telefone, foto_perfil, company_id ),
       departamentos ( id, nome ),
       mensagens ( texto, criado_em, direcao, tipo, url, nome_arquivo, whatsapp_id, status, autor_usuario_id )
     `
@@ -638,11 +638,16 @@ exports.listarConversas = async (req, res) => {
       // fallback silencioso — se falhar, apenas seguimos sem foto/nome extra
     }
 
+    const cid = Number(company_id)
     let conversasFormatadas = (data || []).map((c) => {
       const raw = c.clientes
       let clientesObj = Array.isArray(raw)
         ? (raw.find((cl) => cl && Number(cl.id) === Number(c.cliente_id)) || raw[0])
         : raw
+      // Isolamento multi-tenant: descarta cliente de outra empresa (evita vazamento entre companies)
+      if (clientesObj && clientesObj.company_id != null && Number(clientesObj.company_id) !== cid) {
+        clientesObj = null
+      }
       if (!clientesObj && !isGroupConversation(c) && !c.cliente_id && c.telefone) {
         const convTel = String(c.telefone).trim()
         let fallbackCli = phoneToClientFallback.get(convTel)
@@ -1437,7 +1442,7 @@ exports.detalharChat = async (req, res) => {
         nome_contato_cache,
         foto_perfil_contato_cache,
         cliente_id,
-        clientes!conversas_cliente_fk ( id, nome, pushname, telefone, observacoes, foto_perfil ),
+        clientes!conversas_cliente_fk ( id, nome, pushname, telefone, observacoes, foto_perfil, company_id ),
         usuarios!conversas_atendente_fk ( id, nome ),
         departamentos ( id, nome ),
         conversa_tags (
@@ -1550,9 +1555,13 @@ exports.detalharChat = async (req, res) => {
     await marcarComoLidaPorUsuario({ company_id, conversa_id: id, usuario_id: user_id })
 
     const rawClientes = conversa.clientes
-    const clientesConv = Array.isArray(rawClientes)
+    let clientesConv = Array.isArray(rawClientes)
       ? (rawClientes.find((cl) => cl && Number(cl.id) === Number(conversa.cliente_id)) || rawClientes[0])
       : rawClientes
+    // Isolamento multi-tenant: descarta cliente de outra empresa
+    if (clientesConv && clientesConv.company_id != null && Number(clientesConv.company_id) !== Number(company_id)) {
+      clientesConv = null
+    }
     // Nunca exibir LID (lid:xxx) como nome ou número — identificador interno do WhatsApp
     const isLidConv = !isGroup && conversa.telefone && String(conversa.telefone).trim().toLowerCase().startsWith('lid:')
     const clienteNome = getDisplayName(clientesConv)
@@ -1624,13 +1633,17 @@ exports.assumirChat = async (req, res) => {
 
     const { data: atual, error: errAtual } = await supabase
       .from('conversas')
-      .select('id, atendente_id, departamento_id')
+      .select('id, atendente_id, departamento_id, tipo, telefone')
       .eq('company_id', company_id)
       .eq('id', conversa_id)
       .single()
 
     if (errAtual) return res.status(500).json({ error: errAtual.message })
     if (!atual) return res.status(404).json({ error: 'Conversa não encontrada' })
+
+    if (isGroupConversation(atual)) {
+      return res.status(400).json({ error: 'Grupos são apenas visuais. Não é possível assumir conversa de grupo.' })
+    }
 
     // Permissão por setor: conversas sem setor assumíveis por TODOS; com setor só mesmo setor
     if (!isAdmin) {
@@ -1712,6 +1725,9 @@ exports.encerrarChat = async (req, res) => {
 
     const perm = await assertPermissaoConversa({ company_id, conversa_id, user_id, role: perfil, user_dep_id })
     if (!perm.ok) return res.status(perm.status).json({ error: perm.error })
+    if (perm.conv && isGroupConversation(perm.conv)) {
+      return res.status(400).json({ error: 'Grupos são apenas visuais. Não é possível encerrar conversa de grupo.' })
+    }
 
     const { data, error } = await supabase
       .from('conversas')
@@ -1806,6 +1822,9 @@ exports.reabrirChat = async (req, res) => {
 
     const perm = await assertPermissaoConversa({ company_id, conversa_id, user_id, role: perfil, user_dep_id })
     if (!perm.ok) return res.status(perm.status).json({ error: perm.error })
+    if (perm.conv && isGroupConversation(perm.conv)) {
+      return res.status(400).json({ error: 'Grupos são apenas visuais. Não é possível reabrir conversa de grupo.' })
+    }
 
     // Conversa aberta = sem responsável, apenas setor (volta para a fila)
     const { data, error } = await supabase
@@ -1858,6 +1877,9 @@ exports.transferirChat = async (req, res) => {
 
     const perm = await assertPermissaoConversa({ company_id, conversa_id, user_id, role: perfil, user_dep_id })
     if (!perm.ok) return res.status(perm.status).json({ error: perm.error })
+    if (perm.conv && isGroupConversation(perm.conv)) {
+      return res.status(400).json({ error: 'Grupos são apenas visuais. Não é possível transferir conversa de grupo.' })
+    }
 
     if (!para_usuario_id) {
       return res.status(400).json({ error: 'para_usuario_id é obrigatório' })
@@ -1968,6 +1990,9 @@ exports.transferirSetor = async (req, res) => {
 
     const perm = await assertPermissaoConversa({ company_id, conversa_id, user_id, role: perfil, user_dep_id })
     if (!perm.ok) return res.status(perm.status).json({ error: perm.error })
+    if (perm.conv && isGroupConversation(perm.conv)) {
+      return res.status(400).json({ error: 'Grupos são apenas visuais. Não é possível alterar setor de conversa de grupo.' })
+    }
 
     const remover = remover_setor === true || (req.body.hasOwnProperty('departamento_id') && novo_departamento_id == null)
 
@@ -3002,6 +3027,7 @@ exports.puxarChatFila = async (req, res) => {
       .eq('company_id', company_id)
       .eq('status_atendimento', 'aberta')
       .is('atendente_id', null)
+      .or('tipo.is.null,tipo.neq.grupo') // Grupos são apenas visuais — não entram na fila
       .order('criado_em', { ascending: true })
       .limit(1)
 
@@ -3204,10 +3230,37 @@ exports.enviarArquivo = async (req, res) => {
 
     const { data: conversa } = await supabase
       .from('conversas')
-      .select('id, telefone')
+      .select('id, telefone, cliente_id, tipo, chat_lid')
       .eq('company_id', company_id)
       .eq('id', conversa_id)
       .single()
+
+    if (!conversa) {
+      return res.status(404).json({ error: 'Conversa não encontrada' })
+    }
+
+    // Resolver telefone real quando conversa tem apenas LID (lid:xxx) — UltraMsg não envia para LID
+    let telefoneParaEnvio = conversa.telefone || ''
+    if (telefoneParaEnvio && String(telefoneParaEnvio).trim().toLowerCase().startsWith('lid:')) {
+      if (conversa.cliente_id) {
+        const { data: cli } = await supabase.from('clientes').select('telefone').eq('id', conversa.cliente_id).eq('company_id', company_id).maybeSingle()
+        if (cli?.telefone && !String(cli.telefone).startsWith('lid:')) telefoneParaEnvio = cli.telefone
+      }
+      if (telefoneParaEnvio.startsWith('lid:') && conversa.chat_lid) {
+        const { data: outra } = await supabase
+          .from('conversas')
+          .select('telefone')
+          .eq('company_id', company_id)
+          .eq('chat_lid', conversa.chat_lid)
+          .not('telefone', 'like', 'lid:%')
+          .limit(1)
+          .maybeSingle()
+        if (outra?.telefone) telefoneParaEnvio = outra.telefone
+      }
+      if (telefoneParaEnvio.startsWith('lid:')) {
+        return res.status(400).json({ error: 'Número do contato indisponível (conversa por LID). Aguarde o contato enviar uma mensagem ou sincronize os contatos.' })
+      }
+    }
 
     const { data: msg, error } = await supabase.from("mensagens").insert({
       conversa_id: Number(conversa_id),
@@ -3241,7 +3294,7 @@ exports.enviarArquivo = async (req, res) => {
 
     const sendMediaWithUrl = (mediaUrl) => {
       const provider = getProvider()
-      const phone = conversa.telefone
+      const phone = telefoneParaEnvio
       const opts = { companyId: company_id, conversaId: conversa_id }
       const promise =
         tipo === 'voice' && provider.sendVoice
@@ -3264,7 +3317,7 @@ exports.enviarArquivo = async (req, res) => {
             await supabase.from('mensagens').update({ status: 'erro' }).eq('company_id', company_id).eq('id', msg.id)
             const io2 = req.app?.get('io')
             if (io2) {
-              const payload = { mensagem_id: msg.id, conversa_id: Number(conversa_id), status: 'erro' }
+              const payload = { mensagem_id: msg.id, conversa_id: Number(conversa_id), status: 'erro', status_mensagem: 'erro' }
               io2.to(`empresa_${company_id}`).to(`conversa_${conversa_id}`).to(`usuario_${user_id}`).emit(io2.EVENTS?.STATUS_MENSAGEM || 'status_mensagem', payload)
             }
           }
@@ -3274,13 +3327,13 @@ exports.enviarArquivo = async (req, res) => {
           await supabase.from('mensagens').update({ status: 'erro' }).eq('company_id', company_id).eq('id', msg.id)
           const io2 = req.app?.get('io')
           if (io2) {
-            const payload = { mensagem_id: msg.id, conversa_id: Number(conversa_id), status: 'erro' }
+            const payload = { mensagem_id: msg.id, conversa_id: Number(conversa_id), status: 'erro', status_mensagem: 'erro' }
             io2.to(`empresa_${company_id}`).to(`conversa_${conversa_id}`).to(`usuario_${user_id}`).emit(io2.EVENTS?.STATUS_MENSAGEM || 'status_mensagem', payload)
           }
         })
     }
 
-    if (conversa?.telefone) {
+    if (telefoneParaEnvio) {
       if (fullUrl && !isLocalhost) {
         setImmediate(() => sendMediaWithUrl(fullUrl))
       } else if ((!baseUrl || isLocalhost) && file.path) {
@@ -3296,7 +3349,7 @@ exports.enviarArquivo = async (req, res) => {
                 await supabase.from('mensagens').update({ status: 'erro' }).eq('company_id', company_id).eq('id', msg.id)
                 const io2 = req.app?.get('io')
                 if (io2) {
-                  io2.to(`empresa_${company_id}`).to(`conversa_${conversa_id}`).to(`usuario_${user_id}`).emit(io2.EVENTS?.STATUS_MENSAGEM || 'status_mensagem', { mensagem_id: msg.id, conversa_id: Number(conversa_id), status: 'erro' })
+                  io2.to(`empresa_${company_id}`).to(`conversa_${conversa_id}`).to(`usuario_${user_id}`).emit(io2.EVENTS?.STATUS_MENSAGEM || 'status_mensagem', { mensagem_id: msg.id, conversa_id: Number(conversa_id), status: 'erro', status_mensagem: 'erro' })
                 }
               }
             } catch (e) {
@@ -3304,7 +3357,7 @@ exports.enviarArquivo = async (req, res) => {
               await supabase.from('mensagens').update({ status: 'erro' }).eq('company_id', company_id).eq('id', msg.id)
               const io2 = req.app?.get('io')
               if (io2) {
-                io2.to(`empresa_${company_id}`).to(`conversa_${conversa_id}`).to(`usuario_${user_id}`).emit(io2.EVENTS?.STATUS_MENSAGEM || 'status_mensagem', { mensagem_id: msg.id, conversa_id: Number(conversa_id), status: 'erro' })
+                io2.to(`empresa_${company_id}`).to(`conversa_${conversa_id}`).to(`usuario_${user_id}`).emit(io2.EVENTS?.STATUS_MENSAGEM || 'status_mensagem', { mensagem_id: msg.id, conversa_id: Number(conversa_id), status: 'erro', status_mensagem: 'erro' })
               }
             }
           })

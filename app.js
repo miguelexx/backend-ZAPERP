@@ -290,6 +290,7 @@ if (hasFrontendDist) {
     '/campanhas',
     '/opt-in',
     '/opt-out',
+    '/chatbot',
   ]
 
   app.get('*', (req, res, next) => {
