@@ -212,8 +212,8 @@ const initializeChatbotForAllCompanies = async () => {
   try {
     console.log('[AutoChatbotSetup] 🚀 Inicializando configuração de chatbot para todas as empresas...')
     
-    const { configureAllCompanieshatbot } = require('../services/chatbotAutoConfigService')
-    const result = await configureAllCompanieshatbot()
+    const { configureAllCompaniesChatbot } = require('../services/chatbotAutoConfigService')
+    const result = await configureAllCompaniesChatbot()
     
     if (result.success) {
       console.log(`[AutoChatbotSetup] ✅ Inicialização concluída: ${result.configured} empresas configuradas`)

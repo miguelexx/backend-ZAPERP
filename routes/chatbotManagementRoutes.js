@@ -18,7 +18,7 @@ const router = express.Router()
 const {
   generateChatbotConfig,
   configureChatbotForCompany,
-  configureAllCompanieshatbot,
+  configureAllCompaniesChatbot,
   toggleChatbotForCompany,
   getChatbotStatusForAllCompanies,
   reconfigureChatbotForCompany
@@ -64,7 +64,7 @@ router.post('/configure-all', async (req, res) => {
     const customConfig = req.body.config || {}
     
     console.log('[ChatbotRoutes] Iniciando configuração para todas as empresas...')
-    const result = await configureAllCompanieshatbot(customConfig)
+    const result = await configureAllCompaniesChatbot(customConfig)
     
     if (result.success) {
       res.json({

@@ -167,7 +167,7 @@ async function configureChatbotForCompany(companyId, customConfig = {}) {
  * @param {object} globalCustomConfig - Configurações personalizadas globais (opcional)
  * @returns {Promise<object>} Resultado da operação
  */
-async function configureAllCompanieschatbot(globalCustomConfig = {}) {
+async function configureAllCompaniesChatbot(globalCustomConfig = {}) {
   try {
     console.log('[ChatbotAutoConfig] 🚀 Iniciando configuração para todas as empresas...')
 
@@ -389,7 +389,7 @@ async function autoConfigureNewCompany(companyId) {
 module.exports = {
   generateChatbotConfig,
   configureChatbotForCompany,
-  configureAllCompanieshatbot,
+  configureAllCompaniesChatbot,
   toggleChatbotForCompany,
   getChatbotStatusForAllCompanies,
   reconfigureChatbotForCompany,

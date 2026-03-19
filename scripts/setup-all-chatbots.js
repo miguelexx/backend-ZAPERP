@@ -19,7 +19,7 @@ const path = require('path')
 require('dotenv').config({ path: path.join(__dirname, '..', '.env') })
 
 const {
-  configureAllCompanieshatbot,
+  configureAllCompaniesChatbot,
   getChatbotStatusForAllCompanies,
   reconfigureChatbotForCompany
 } = require('../services/chatbotAutoConfigService')
@@ -176,7 +176,7 @@ async function main() {
       result = results
     } else {
       // Modo normal: configurar apenas as não configuradas
-      result = await configureAllCompanieshatbot()
+      result = await configureAllCompaniesChatbot()
     }
 
     // 3. Mostrar resultado
