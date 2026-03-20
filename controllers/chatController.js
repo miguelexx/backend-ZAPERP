@@ -185,6 +185,18 @@ async function assertPermissaoConversa({ company_id, conversa_id, user_id, role,
   if (isAssignedToUser) return { ok: true, conv, reason: 'conversa_assumida_pelo_usuario' }
   if (r === 'admin') return { ok: true, conv }
 
+  // EXCEÇÃO: usuário transferiu a conversa para outro — vê independente do setor
+  const { data: transferRow } = await supabase
+    .from('atendimentos')
+    .select('id')
+    .eq('company_id', Number(company_id))
+    .eq('conversa_id', Number(conversa_id))
+    .eq('de_usuario_id', Number(user_id))
+    .eq('acao', 'transferiu')
+    .limit(1)
+    .maybeSingle()
+  if (transferRow) return { ok: true, conv, reason: 'usuario_transferiu_conversa' }
+
   // supervisor e atendente: conversas sem setor visíveis para TODOS; com setor só se usuário pertence
   if (r === 'supervisor' || r === 'atendente') {
     if (!isGroup) {
@@ -277,8 +289,8 @@ async function obterUnreadMap({ company_id, usuario_id }) {
 
 /**
  * Retorna IDs dos usuários que podem ver a conversa (para unread/notificações).
- * Regras: admin vê tudo; conversa assumida pelo usuário → sempre; conversa com setor → só usuários do setor; sem setor → todos.
- * Suporta múltiplos departamentos por usuário (usuario_departamentos).
+ * Regras: admin vê tudo; conversa assumida → sempre; setor → só usuários do setor; sem setor → todos.
+ * EXCEÇÃO: usuários que transferiram a conversa veem independente do setor.
  */
 async function obterUsuarioIdsQuePodemVerConversa(company_id, conversa_id) {
   const { data: conv } = await supabase
@@ -293,6 +305,14 @@ async function obterUsuarioIdsQuePodemVerConversa(company_id, conversa_id) {
   const convDep = conv.departamento_id ?? null
   const atendenteId = conv.atendente_id ? Number(conv.atendente_id) : null
 
+  const { data: transferiuRows } = await supabase
+    .from('atendimentos')
+    .select('de_usuario_id')
+    .eq('company_id', Number(company_id))
+    .eq('conversa_id', Number(conversa_id))
+    .eq('acao', 'transferiu')
+  const transferiuIds = new Set((transferiuRows || []).map((r) => Number(r.de_usuario_id)).filter(Boolean))
+
   const { data: usuarios } = await supabase
     .from('usuarios')
     .select('id, perfil, departamento_id')
@@ -301,19 +321,17 @@ async function obterUsuarioIdsQuePodemVerConversa(company_id, conversa_id) {
   if (!Array.isArray(usuarios) || usuarios.length === 0) return []
 
   let userDepMap = new Map()
-  try {
-    const { data: udRows } = await supabase
-      .from('usuario_departamentos')
-      .select('usuario_id, departamento_id')
-      .eq('company_id', Number(company_id))
-    if (Array.isArray(udRows)) {
-      udRows.forEach((r) => {
-        const uid = Number(r.usuario_id)
-        if (!userDepMap.has(uid)) userDepMap.set(uid, [])
-        userDepMap.get(uid).push(Number(r.departamento_id))
-      })
-    }
-  } catch (_) {}
+  const { data: udRows } = await supabase
+    .from('usuario_departamentos')
+    .select('usuario_id, departamento_id')
+    .eq('company_id', Number(company_id))
+  if (Array.isArray(udRows)) {
+    udRows.forEach((r) => {
+      const uid = Number(r.usuario_id)
+      if (!userDepMap.has(uid)) userDepMap.set(uid, [])
+      userDepMap.get(uid).push(Number(r.departamento_id))
+    })
+  }
 
   const ids = []
   for (const u of usuarios) {
@@ -321,6 +339,7 @@ async function obterUsuarioIdsQuePodemVerConversa(company_id, conversa_id) {
     const isAdmin = String(u.perfil || '').toLowerCase() === 'admin'
     if (isAdmin) { ids.push(uid); continue }
     if (atendenteId && uid === atendenteId) { ids.push(uid); continue }
+    if (transferiuIds.has(uid)) { ids.push(uid); continue }
     if (isGroup) { ids.push(uid); continue }
     const userDepIds = userDepMap.get(uid) ?? (u.departamento_id != null ? [Number(u.departamento_id)] : [])
     if (convDep == null) ids.push(uid)
@@ -440,6 +459,18 @@ exports.listarConversas = async (req, res) => {
     } = req.query
 
     const unreadMap = await obterUnreadMap({ company_id, usuario_id: user_id })
+
+    // Exceção: conversas que o usuário transferiu para outro — aparecem na lista independente do setor
+    let conversaIdsTransferidas = []
+    if (!isAdmin) {
+      const { data: transferRows } = await supabase
+        .from('atendimentos')
+        .select('conversa_id')
+        .eq('company_id', company_id)
+        .eq('de_usuario_id', user_id)
+        .eq('acao', 'transferiu')
+      conversaIdsTransferidas = [...new Set((transferRows || []).map((r) => Number(r.conversa_id)).filter(Boolean))]
+    }
 
     let conversaIdsFilter = null
 
@@ -569,18 +600,19 @@ exports.listarConversas = async (req, res) => {
         .from('conversas')
         .select(select)
         .eq('company_id', company_id)
-      // Filtro por setor: conversas sem setor visíveis para TODOS os usuários.
-      // Admin vê todas. Supervisor/atendente: com setor → seu setor + conversas sem setor + grupos + conversas assumidas por ele;
-      // sem setor → conversas sem setor + grupos + conversas assumidas por ele.
-      // IMPORTANTE: Sempre mostrar conversas assumidas pelo usuário, independente do setor
+      // Filtro por setor: usuário vê só conversas do seu setor, sem setor, grupos ou assumidas por ele.
+      // EXCEÇÃO: conversas que o usuário transferiu para outro — aparecem independente do setor.
       if (!isAdmin) {
         const depIds = Array.isArray(departamento_ids) ? departamento_ids.filter((id) => id != null && Number.isFinite(Number(id))) : []
+        const parts = []
         if (depIds.length > 0) {
-          const depOr = depIds.map((d) => `departamento_id.eq.${d}`).join(',')
-          q = q.or(`${depOr},departamento_id.is.null,tipo.eq.grupo,atendente_id.eq.${user_id}`)
-        } else {
-          q = q.or(`departamento_id.is.null,tipo.eq.grupo,atendente_id.eq.${user_id}`)
+          depIds.forEach((d) => parts.push(`departamento_id.eq.${d}`))
         }
+        parts.push('departamento_id.is.null', `tipo.eq.grupo`, `atendente_id.eq.${user_id}`)
+        if (conversaIdsTransferidas.length > 0) {
+          parts.push(`id.in.(${conversaIdsTransferidas.join(',')})`)
+        }
+        q = q.or(parts.join(','))
       } else if (filter_dep_id) {
         q = q.eq('departamento_id', Number(filter_dep_id))
       }
@@ -1603,17 +1635,24 @@ exports.detalharChat = async (req, res) => {
     const isAssignedToUser = conversa.atendente_id && Number(conversa.atendente_id) === Number(user_id)
 
     // REGRA PRINCIPAL: Se a conversa está assumida pelo usuário, SEMPRE permitir acesso total
-    if (isAssignedToUser) {
-      // Usuário responsável pela conversa tem acesso total independente do setor
-    } else if (!isAdmin && !isGroup) {
-      // Aplicar regras de setor: usuário precisa pertencer ao departamento da conversa
+    let podeAcessar = isAssignedToUser
+    if (!podeAcessar && !isAdmin && !isGroup) {
       const convDep = conversa.departamento_id ?? null
       const depIds = Array.isArray(departamento_ids) ? departamento_ids : []
-      if (depIds.length === 0 && convDep != null) {
-        return res.status(403).json({ error: 'Conversa pertence a um setor; usuários sem setor não podem acessá-la' })
-      }
-      if (convDep != null && !depIds.some((d) => Number(d) === Number(convDep))) {
-        return res.status(403).json({ error: 'Conversa de outro setor' })
+      const pertenceAoSetor = convDep == null || depIds.some((d) => Number(d) === Number(convDep))
+      if (!pertenceAoSetor) {
+        const { data: transferRow } = await supabase
+          .from('atendimentos')
+          .select('id')
+          .eq('company_id', Number(company_id))
+          .eq('conversa_id', Number(id))
+          .eq('de_usuario_id', Number(user_id))
+          .eq('acao', 'transferiu')
+          .limit(1)
+          .maybeSingle()
+        if (!transferRow) {
+          return res.status(403).json({ error: 'Conversa de outro setor' })
+        }
       }
     }
 
