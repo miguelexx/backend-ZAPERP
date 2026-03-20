@@ -197,13 +197,12 @@ async function assertPermissaoConversa({ company_id, conversa_id, user_id, role,
     .maybeSingle()
   if (transferRow) return { ok: true, conv, reason: 'usuario_transferiu_conversa' }
 
-  // supervisor e atendente: conversas sem setor só para usuários sem setor; com setor só se usuário pertence
+  // supervisor e atendente: conversas sem setor visíveis para TODOS; com setor só se usuário pertence
   if (r === 'supervisor' || r === 'atendente') {
     if (!isGroup) {
       const convDep = conv.departamento_id ?? null
       const userSemSetor = depIds.length === 0
       if (userSemSetor && convDep != null) return { ok: false, status: 403, error: 'Conversa de outro setor' }
-      if (!userSemSetor && convDep == null) return { ok: false, status: 403, error: 'Conversa sem setor; apenas usuários sem setor podem acessá-la' }
       if (convDep != null && !depIds.some((id) => Number(id) === Number(convDep))) return { ok: false, status: 403, error: 'Conversa de outro setor' }
     }
     return { ok: true, conv }
@@ -343,11 +342,8 @@ async function obterUsuarioIdsQuePodemVerConversa(company_id, conversa_id) {
     if (transferiuIds.has(uid)) { ids.push(uid); continue }
     if (isGroup) { ids.push(uid); continue }
     const userDepIds = userDepMap.get(uid) ?? (u.departamento_id != null ? [Number(u.departamento_id)] : [])
-    if (convDep == null) {
-      if (userDepIds.length === 0) ids.push(uid)
-    } else if (userDepIds.some((d) => Number(d) === Number(convDep))) {
-      ids.push(uid)
-    }
+    if (convDep == null) ids.push(uid)
+    else if (userDepIds.some((d) => Number(d) === Number(convDep))) ids.push(uid)
   }
   return ids
 }
@@ -604,18 +600,15 @@ exports.listarConversas = async (req, res) => {
         .from('conversas')
         .select(select)
         .eq('company_id', company_id)
-      // Filtro por setor: usuário com setor vê SÓ conversas do seu setor (+ grupos, assumidas, transferidas).
-      // Usuário SEM setor vê conversas sem setor (fila geral) + grupos + assumidas + transferidas.
+      // Filtro por setor: conversas sem setor visíveis para TODOS; com setor só mesmo setor.
       // EXCEÇÃO: conversas que o usuário transferiu — aparecem independente do setor.
       if (!isAdmin) {
         const depIds = Array.isArray(departamento_ids) ? departamento_ids.filter((id) => id != null && Number.isFinite(Number(id))) : []
         const parts = []
         if (depIds.length > 0) {
           depIds.forEach((d) => parts.push(`departamento_id.eq.${d}`))
-        } else {
-          parts.push('departamento_id.is.null')
         }
-        parts.push(`tipo.eq.grupo`, `atendente_id.eq.${user_id}`)
+        parts.push('departamento_id.is.null', `tipo.eq.grupo`, `atendente_id.eq.${user_id}`)
         if (conversaIdsTransferidas.length > 0) {
           parts.push(`id.in.(${conversaIdsTransferidas.join(',')})`)
         }
@@ -1646,7 +1639,7 @@ exports.detalharChat = async (req, res) => {
     if (!podeAcessar && !isAdmin && !isGroup) {
       const convDep = conversa.departamento_id ?? null
       const depIds = Array.isArray(departamento_ids) ? departamento_ids : []
-      const pertenceAoSetor = (convDep == null && depIds.length === 0) || (convDep != null && depIds.some((d) => Number(d) === Number(convDep)))
+      const pertenceAoSetor = convDep == null || depIds.some((d) => Number(d) === Number(convDep))
       if (!pertenceAoSetor) {
         const { data: transferRow } = await supabase
           .from('atendimentos')
@@ -1828,15 +1821,12 @@ exports.assumirChat = async (req, res) => {
       return res.status(400).json({ error: 'Grupos são apenas visuais. Não é possível assumir conversa de grupo.' })
     }
 
-    // Permissão por setor: conversas sem setor só para usuários sem setor; com setor só se usuário pertence
+    // Permissão por setor: conversas sem setor assumíveis por TODOS; com setor só se usuário pertence
     if (!isAdmin) {
       const convDep = atual.departamento_id ?? null
       const depIds = Array.isArray(departamento_ids) ? departamento_ids : []
       if (depIds.length === 0 && convDep != null) {
         return res.status(403).json({ error: 'Conversa pertence a um setor; atribua-se a um setor para assumir' })
-      }
-      if (depIds.length > 0 && convDep == null) {
-        return res.status(403).json({ error: 'Conversa sem setor; apenas usuários sem setor podem assumir' })
       }
       if (convDep != null && !depIds.some((d) => Number(d) === Number(convDep))) {
         return res.status(403).json({ error: 'Conversa de outro setor' })
@@ -3216,12 +3206,12 @@ exports.puxarChatFila = async (req, res) => {
       .order('criado_em', { ascending: true })
       .limit(1)
 
-    // Atendente/supervisor: com setor → só conversas do seu setor; sem setor → só conversas sem setor (fila geral)
+    // Atendente/supervisor: com setor → seu setor + conversas sem setor; sem setor → só conversas sem setor
     if (!isAdmin) {
       const depIds = Array.isArray(departamento_ids) ? departamento_ids.filter((id) => id != null && Number.isFinite(Number(id))) : []
       if (depIds.length > 0) {
         const depOr = depIds.map((d) => `departamento_id.eq.${d}`).join(',')
-        query = query.or(depOr)
+        query = query.or(`${depOr},departamento_id.is.null`)
       } else {
         query = query.is('departamento_id', null)
       }
