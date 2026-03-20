@@ -117,7 +117,7 @@ const corsOptions = {
     if (allowedOriginPatterns.some((re) => re.test(origin))) return callback(null, true)
     return callback(new Error('CORS não permitido para esta origem: ' + origin))
   },
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'x-company-id'],
   credentials: true,
 }
