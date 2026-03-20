@@ -13,6 +13,8 @@
 const supabase = require('../config/supabase')
 const { getProvider } = require('./providers')
 const { getEmpresaWhatsappConfig } = require('./whatsappConfigService')
+const { findOrCreateConversation, getOrCreateCliente } = require('../helpers/conversationSync')
+const { normalizePhoneBR } = require('../helpers/phoneHelper')
 
 // Constantes de configuração
 const GROUP_ID_PREFIX = '120'
@@ -252,8 +254,148 @@ async function syncConversationGroupOnJoin(supabase, conversaId, companyId, io, 
   }
 }
 
+/**
+ * Sincroniza via GET /chats — lista completa de conversas (individuais + grupos).
+ * Complementa /contacts e /groups: captura chats que possam não estar em nenhum dos dois.
+ */
+async function syncFromChats(company_id) {
+  if (!company_id) {
+    return { ok: false, totalFetched: 0, inserted: 0, updated: 0, skipped: 0, errors: ['company_id ausente'] }
+  }
+
+  const { config, error } = await getEmpresaWhatsappConfig(company_id)
+  if (error || !config) {
+    return { ok: false, totalFetched: 0, inserted: 0, updated: 0, skipped: 0, errors: ['Empresa sem instância configurada'] }
+  }
+
+  const provider = getProvider()
+  if (!provider?.getChats) {
+    return { ok: true, totalFetched: 0, inserted: 0, updated: 0, skipped: 0, errors: [] }
+  }
+
+  const stats = { totalFetched: 0, inserted: 0, updated: 0, skipped: 0, errors: [] }
+
+  try {
+    const chats = await provider.getChats({ companyId: company_id })
+    if (!Array.isArray(chats) || chats.length === 0) {
+      return { ok: true, ...stats }
+    }
+
+    stats.totalFetched = chats.length
+    console.log(`[CHATS-SYNC] Encontrados ${chats.length} chats para sincronizar`)
+
+    for (const chat of chats) {
+      const chatId = String(chat.id || chat.jid || chat.chatId || '').trim()
+      if (!chatId) {
+        stats.skipped++
+        continue
+      }
+
+      const isGroup = chatId.endsWith('@g.us')
+      const nome = String(chat.name || chat.subject || chat.title || '').trim() || null
+      const foto = chat.picture || chat.image || chat.photo
+      const fotoUrl = foto && typeof foto === 'string' && foto.trim().startsWith('http') ? foto.trim() : null
+
+      try {
+        if (isGroup) {
+          const digits = chatId.replace(/@g.us$/i, '').replace(/\D/g, '')
+          if (!digits || digits.length < MIN_GROUP_ID_LENGTH) {
+            stats.skipped++
+            continue
+          }
+          const result = await findOrCreateConversation(supabase, {
+            company_id,
+            phone: chatId,
+            isGroup: true,
+            nomeGrupo: nome,
+            chatPhoto: fotoUrl,
+            logPrefix: '[CHATS-SYNC]'
+          })
+          if (result?.created) stats.inserted++
+          else if (result) stats.updated++
+          else stats.skipped++
+        } else {
+          const digits = chatId.replace(/@c.us$/i, '').replace(/\D/g, '')
+          if (!digits || digits.length < 10) {
+            stats.skipped++
+            continue
+          }
+          const phoneNorm = normalizePhoneBR(digits)
+          if (!phoneNorm || !phoneNorm.startsWith('55')) {
+            stats.skipped++
+            continue
+          }
+          const { cliente_id } = await getOrCreateCliente(supabase, company_id, phoneNorm, {
+            nome: nome || digits,
+            nomeSource: 'syncChats'
+          })
+          const result = await findOrCreateConversation(supabase, {
+            company_id,
+            phone: phoneNorm,
+            cliente_id,
+            isGroup: false,
+            logPrefix: '[CHATS-SYNC]'
+          })
+          if (result?.created) stats.inserted++
+          else if (result) stats.updated++
+          else stats.skipped++
+        }
+      } catch (e) {
+        const errMsg = String(e?.message || e).slice(0, ERROR_MESSAGE_MAX_LENGTH)
+        stats.errors.push(`${chatId}: ${errMsg}`)
+      }
+    }
+
+    return { ok: true, ...stats }
+  } catch (e) {
+    return { ok: false, totalFetched: 0, inserted: 0, updated: 0, skipped: 0, errors: [String(e?.message || e)] }
+  }
+}
+
+/**
+ * Sincronização completa: contatos + grupos + chats.
+ * Garante que todos os contatos e grupos do celular apareçam no sistema.
+ */
+async function syncAll(company_id) {
+  const { syncContacts } = require('./ultramsgContactsSyncService')
+  const contactsResult = await syncContacts(company_id)
+  const groupsResult = await syncGroups(company_id)
+  const chatsResult = await syncFromChats(company_id)
+
+  return {
+    ok: contactsResult.ok && groupsResult.ok && chatsResult.ok,
+    contacts: {
+      ok: contactsResult.ok,
+      mode: contactsResult.mode,
+      totalFetched: contactsResult.totalFetched,
+      inserted: contactsResult.inserted,
+      updated: contactsResult.updated,
+      skipped: contactsResult.skipped,
+      errors: contactsResult.errors || []
+    },
+    groups: {
+      ok: groupsResult.ok,
+      totalFetched: groupsResult.totalFetched,
+      inserted: groupsResult.inserted,
+      updated: groupsResult.updated,
+      skipped: groupsResult.skipped,
+      errors: groupsResult.errors || []
+    },
+    chats: {
+      ok: chatsResult.ok,
+      totalFetched: chatsResult.totalFetched,
+      inserted: chatsResult.inserted,
+      updated: chatsResult.updated,
+      skipped: chatsResult.skipped,
+      errors: chatsResult.errors || []
+    }
+  }
+}
+
 module.exports = {
   syncGroups,
+  syncFromChats,
+  syncAll,
   extractGroupFields,
   getGroupMetadata,
   syncConversationGroupOnJoin

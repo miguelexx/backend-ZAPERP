@@ -2,7 +2,7 @@ const supabase = require('../config/supabase')
 const ultramsgIntegrationService = require('../services/ultramsgIntegrationService')
 const whatsappConfigService = require('../services/whatsappConfigService')
 const { syncContacts } = require('../services/ultramsgContactsSyncService')
-const { syncGroups } = require('../services/ultramsgGroupsSyncService')
+const { syncGroups, syncAll } = require('../services/ultramsgGroupsSyncService')
 const { checkGuard, recordQrServed, resetOnConnected, getAttempts, THROTTLE_SECONDS } = require('../services/zapiConnectGuardService')
 const { getConfig } = require('../services/configOperacionalService')
 const { getProvider } = require('../services/providers')
@@ -348,7 +348,15 @@ exports.syncGroups = async (req, res) => {
   }
   
   const result = await syncGroups(company_id)
-  if (!result.ok) return res.status(400).json({ ok: false, error: result.errors?.[0] || 'Erro ao sincronizar grupos' })
+  if (!result.ok) {
+    const errMsg = result.errors?.[0] || 'Erro ao sincronizar grupos'
+    const isNoConfig = /sem instância|não configurad|getGroups não disponível/i.test(errMsg)
+    return res.status(isNoConfig ? 404 : 400).json({
+      ok: false,
+      error: errMsg,
+      hint: isNoConfig ? 'Configure UltraMsg para esta empresa: node scripts/configurar-ultramsg.js ' + company_id : undefined
+    })
+  }
   
   return res.json({
     ok: true,
@@ -357,6 +365,21 @@ exports.syncGroups = async (req, res) => {
     updated: result.updated,
     skipped: result.skipped
   })
+}
+
+exports.syncAll = async (req, res) => {
+  const company_id = req.user?.company_id
+  if (!company_id) return res.status(401).json({ error: 'Não autenticado' })
+
+  if (!checkCompanyRate(company_id, 'sync-all', 120_000, 2)) {
+    return res.status(429).json({
+      error: 'Muitas sincronizações completas. Aguarde 2 minutos.',
+      retryAfterSeconds: 120
+    })
+  }
+
+  const result = await syncAll(company_id)
+  return res.json(result)
 }
 
 exports.getOperationalStatus = async (req, res) => {

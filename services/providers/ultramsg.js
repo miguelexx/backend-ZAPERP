@@ -638,14 +638,13 @@ function parseContactsResponse(data) {
 /**
  * Lista contatos salvos na agenda do celular conectado via QR.
  * UltraMsg: GET /{instance_id}/contacts — retorna APENAS da instância conectada.
- * Cada instância = um celular; os contatos vêm exclusivamente da agenda desse celular.
- * Retorna apenas contatos com `name` definido (salvos na agenda).
- * Exclui grupos (@g.us), broadcasts e contatos sem número BR válido.
+ * A API pode retornar todos de uma vez (sem paginação) ou suportar limit/offset.
+ * Estratégia: na página 1, tenta SEM parâmetros primeiro para obter a lista completa.
  */
 async function getContacts(page = 1, pageSize = 100, opts = {}) {
   const cfg = await resolveConfig(opts)
   if (!cfg) return []
-  const limit = Math.min(100, Math.max(1, Number(pageSize) || 100))
+  const limit = Math.min(1000, Math.max(1, Number(pageSize) || 100))
   const offset = (Math.max(1, Number(page)) - 1) * limit
 
   const tryFetch = async (extraParams) => {
@@ -659,12 +658,18 @@ async function getContacts(page = 1, pageSize = 100, opts = {}) {
   }
 
   try {
-    let raw = await tryFetch({ limit: String(limit), offset: String(offset) })
-    if (raw.length === 0 && page === 1) {
+    // Página 1: tenta SEM limit/offset primeiro — UltraMsg pode retornar todos de uma vez
+    let raw
+    if (page === 1) {
       raw = await tryFetch({})
-      if (WHATSAPP_DEBUG && raw.length > 0) {
-        console.log('[ULTRAMSG] getContacts: sem limit/offset retornou', raw.length, 'contatos')
+      if (raw.length === 0) {
+        raw = await tryFetch({ limit: String(limit), offset: '0' })
       }
+      if (WHATSAPP_DEBUG && raw.length > 0) {
+        console.log('[ULTRAMSG] getContacts página 1:', { total: raw.length })
+      }
+    } else {
+      raw = await tryFetch({ limit: String(limit), offset: String(offset) })
     }
     if (WHATSAPP_DEBUG && page === 1) {
       console.log('[ULTRAMSG] getContacts:', { page, limit, offset, total: raw.length })
@@ -773,15 +778,22 @@ async function deleteChat(phone, opts = {}) {
 }
 
 /**
- * Lista chats. UltraMsg: GET /{instance_id}/chats
+ * Lista todos os chats (conversas individuais e grupos).
+ * UltraMsg: GET /{instance_id}/chats — retorna lista completa.
+ * Aceita resposta como array direto ou objeto com data/chats.
  */
 async function getChats(opts = {}) {
   const cfg = await resolveConfig(opts)
   if (!cfg) return []
   try {
     const { ok, data } = await getJson({ ...cfg, endpoint: '/chats' })
-    if (!ok || !Array.isArray(data)) return []
-    return data
+    if (!ok) return []
+    if (Array.isArray(data)) return data
+    if (data && typeof data === 'object') {
+      const arr = data.data ?? data.chats ?? data.list
+      if (Array.isArray(arr)) return arr
+    }
+    return []
   } catch {
     return []
   }
@@ -789,14 +801,20 @@ async function getChats(opts = {}) {
 
 /**
  * Lista grupos. UltraMsg: GET /{instance_id}/groups
+ * Aceita resposta como array direto ou objeto com data/groups.
  */
 async function getGroups(opts = {}) {
   const cfg = await resolveConfig(opts)
   if (!cfg) return []
   try {
     const { ok, data } = await getJson({ ...cfg, endpoint: '/groups' })
-    if (!ok || !Array.isArray(data)) return []
-    return data
+    if (!ok) return []
+    if (Array.isArray(data)) return data
+    if (data && typeof data === 'object') {
+      const arr = data.data ?? data.groups ?? data.chats
+      if (Array.isArray(arr)) return arr
+    }
+    return []
   } catch {
     return []
   }

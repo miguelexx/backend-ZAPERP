@@ -119,6 +119,18 @@ async function getStatus(companyId) {
               console.warn('[ULTRAMSG] Auto-sync não enfileirado:', error)
             }
           }
+          // Auto-sync de grupos e chats ao conectar: traz todos os grupos e conversas do celular
+          const { syncGroups, syncFromChats } = require('./ultramsgGroupsSyncService')
+          const groupsResult = await syncGroups(companyId).catch((e) => ({ ok: false, errors: [e?.message || 'Erro'] }))
+          if (groupsResult.ok && groupsResult.totalFetched > 0) {
+            console.log(`[ULTRAMSG] Auto-sync grupos empresa ${companyId}: ${groupsResult.inserted} inseridos, ${groupsResult.updated} atualizados`)
+          } else if (groupsResult.errors?.length) {
+            console.warn(`[ULTRAMSG] Auto-sync grupos empresa ${companyId}:`, groupsResult.errors[0])
+          }
+          const chatsResult = await syncFromChats(companyId).catch((e) => ({ ok: false, errors: [e?.message || 'Erro'] }))
+          if (chatsResult.ok && chatsResult.totalFetched > 0) {
+            console.log(`[ULTRAMSG] Auto-sync chats empresa ${companyId}: ${chatsResult.inserted} inseridos, ${chatsResult.updated} atualizados`)
+          }
         } catch (e) {
           console.warn('[ULTRAMSG] Erro ao enfileirar auto-sync:', e?.message || e)
         }

@@ -28,6 +28,7 @@ router.use('/connect', connectRouter)
 router.post('/configure-webhooks', whatsappIntegrationController.configureWebhooks)
 router.post('/contacts/sync', whatsappIntegrationController.syncContacts)
 router.post('/groups/sync', whatsappIntegrationController.syncGroups)
+router.post('/sync-all', whatsappIntegrationController.syncAll)
 
 // Rotas para mensagens enviadas via UltraMsg
 router.get('/messages', whatsappIntegrationController.getMessages)
