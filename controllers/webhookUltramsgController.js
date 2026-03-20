@@ -85,10 +85,15 @@ function normalizeUltramsgToZapi(body) {
   }
 
   // data.media: UltraMSG envia string URL ou objeto { url, link, file } para imagem/áudio/vídeo/documento
+  // webhook_message_download_media=true: UltraMsg inclui URL da mídia no payload
   const mediaUrl = toUrl(data.media)
 
-  // Áudio: data.audio, data.audioUrl, data.mediaUrl
-  let audioUrl = toUrl(data.audio) ?? toUrl(data.audioUrl) ?? (msgType === 'audio' || msgType === 'ptt' ? (mediaUrl ?? toUrl(data.mediaUrl)) : null)
+  // Áudio: data.audio, data.audioUrl, data.mediaUrl, data.media, data.attachment (UltraMsg pode variar)
+  let audioUrl =
+    toUrl(data.audio) ??
+    toUrl(data.audioUrl) ??
+    toUrl(data.attachment) ??
+    (msgType === 'audio' || msgType === 'ptt' ? (mediaUrl ?? toUrl(data.mediaUrl) ?? toUrl(data.file)) : null)
 
   // Mídia por tipo: UltraMSG doc — media (URL) é o campo principal; mediaUrl, document/file, etc. como fallback
   const imageUrl = msgType === 'image' ? (mediaUrl ?? toUrl(data.mediaUrl) ?? toUrl(data.image)) : toUrl(data.image)

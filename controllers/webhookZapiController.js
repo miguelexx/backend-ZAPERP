@@ -1977,26 +1977,48 @@ exports.receberZapi = async (req, res) => {
       if (existente) {
         // Se a mensagem salva tem texto placeholder (DeliveryCallback chegou antes do ReceivedCallback)
         // e o webhook atual traz conteúdo real → atualizar com o texto/mídia corretos.
+        // Também: webhook_message_download_media pode chegar DEPOIS com URL da mídia — atualizar mensagem existente sem url.
         const savedTexto = String(existente.texto || '')
         const isPlaceholder = savedTexto === '(mensagem)' || savedTexto === '(mídia)'
         const textoReal = texto && texto !== '(mensagem)' && texto !== '(mídia)' ? texto : null
-        if (isPlaceholder && textoReal) {
-          const upFields = { texto: textoReal }
+        const hasMediaToUpdate = (imageUrl || documentUrl || audioUrl || videoUrl || stickerUrl) && !String(existente.url || '').trim()
+        const shouldUpdate = (isPlaceholder && textoReal) || hasMediaToUpdate
+        if (shouldUpdate) {
+          const upFields = {}
+          if (textoReal && isPlaceholder) upFields.texto = textoReal
           if (imageUrl && !existente.url) { upFields.url = imageUrl; upFields.tipo = 'imagem' }
           else if (documentUrl && !existente.url) { upFields.url = documentUrl; upFields.tipo = 'arquivo' }
-          else if (audioUrl && !existente.url) { upFields.url = audioUrl; upFields.tipo = 'audio' }
+          else if (audioUrl && !existente.url) { upFields.url = audioUrl; upFields.tipo = (existente.tipo === 'voice' ? 'voice' : 'audio') }
           else if (videoUrl && !existente.url) { upFields.url = videoUrl; upFields.tipo = 'video' }
           else if (stickerUrl && !existente.url) { upFields.url = stickerUrl; upFields.tipo = 'sticker' }
-          try {
-            const { data: updMsg } = await supabase
-              .from('mensagens')
-              .update(upFields)
-              .eq('id', existente.id)
-              .select('*')
-              .single()
-            mensagemSalva = updMsg || existente
-            if (WHATSAPP_DEBUG) console.log('[Z-API] idempotência: placeholder atualizado com conteúdo real', existente.id)
-          } catch (_) {
+          if (Object.keys(upFields).length > 0) {
+            try {
+              const { data: updMsg } = await supabase
+                .from('mensagens')
+                .update(upFields)
+                .eq('id', existente.id)
+                .select('*')
+                .single()
+              mensagemSalva = updMsg || existente
+              if (WHATSAPP_DEBUG || hasMediaToUpdate) console.log('[Z-API] idempotência: mensagem atualizada com mídia/placeholder', existente.id, Object.keys(upFields))
+              // Emitir nova_mensagem para frontend atualizar player de áudio quando URL chega via webhook_message_download_media
+              if (hasMediaToUpdate && req.app?.get('io')) {
+                const io2 = req.app.get('io')
+                const rooms = [`conversa_${conversa_id}`, `empresa_${company_id}`]
+                const emitPayload = {
+                  ...mensagemSalva,
+                  conversa_id: mensagemSalva.conversa_id ?? conversa_id,
+                  status: mensagemSalva.status || 'delivered',
+                  status_mensagem: mensagemSalva.status_mensagem || mensagemSalva.status || 'delivered',
+                  fromMe,
+                  direcao: mensagemSalva.direcao ?? (fromMe ? 'out' : 'in'),
+                }
+                io2.to(rooms).emit(io2.EVENTS?.NOVA_MENSAGEM || 'nova_mensagem', emitPayload)
+              }
+            } catch (_) {
+              mensagemSalva = existente
+            }
+          } else {
             mensagemSalva = existente
           }
         } else {
@@ -2274,10 +2296,12 @@ exports.receberZapi = async (req, res) => {
         insertMsg.tipo = 'arquivo'
         insertMsg.url = documentUrl
         insertMsg.nome_arquivo = fileName || 'arquivo'
-      } else if (type === 'audio' && audioUrl) {
-        insertMsg.tipo = 'audio'
-        insertMsg.url = audioUrl
-        insertMsg.nome_arquivo = fileName || 'audio'
+      } else if (type === 'audio' || type === 'ptt') {
+        insertMsg.tipo = type === 'ptt' ? 'voice' : 'audio'
+        if (audioUrl) {
+          insertMsg.url = audioUrl
+          insertMsg.nome_arquivo = fileName || (type === 'ptt' ? 'voice.ogg' : 'audio')
+        }
       } else if (type === 'video' && videoUrl) {
         insertMsg.tipo = 'video'
         insertMsg.url = videoUrl

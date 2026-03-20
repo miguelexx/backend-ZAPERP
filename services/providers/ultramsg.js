@@ -1138,7 +1138,8 @@ async function configureWebhooks(appUrl, opts = {}) {
 
   const sendDelay = Math.max(1, Math.min(60, Number(process.env.ULTRAMSG_SEND_DELAY) || 1))
   const sendDelayMax = Math.max(1, Math.min(120, Math.max(sendDelay, Number(process.env.ULTRAMSG_SEND_DELAY_MAX) || 15)))
-  const webhookDownloadMedia = process.env.ULTRAMSG_WEBHOOK_DOWNLOAD_MEDIA === 'true'
+  // true por padrão: UltraMsg envia URL da mídia no webhook (áudio, imagem, etc.) — essencial para áudios chegarem
+  const webhookDownloadMedia = process.env.ULTRAMSG_WEBHOOK_DOWNLOAD_MEDIA !== 'false'
   const webhookRetries = Math.max(1, Math.min(5, Number(process.env.ULTRAMSG_WEBHOOK_RETRIES) || 3))
   const body = {
     token: cfg.token,
