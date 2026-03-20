@@ -166,7 +166,7 @@ async function enrichMensagemComAutorUsuario(supabase, company_id, msg) {
   }
 }
 
-async function assertPermissaoConversa({ company_id, conversa_id, user_id, role, user_dep_id }) {
+async function assertPermissaoConversa({ company_id, conversa_id, user_id, role, user_dep_ids }) {
   const { data: conv, error } = await supabase
     .from('conversas')
     .select('id, atendente_id, departamento_id, tipo, telefone')
@@ -179,32 +179,23 @@ async function assertPermissaoConversa({ company_id, conversa_id, user_id, role,
   const isGroup = isGroupConversation(conv)
   const r = String(role || '').toLowerCase()
   const isAssignedToUser = conv.atendente_id && Number(conv.atendente_id) === Number(user_id)
-  
+  const depIds = Array.isArray(user_dep_ids) ? user_dep_ids : []
+
   // REGRA PRINCIPAL: Se a conversa está assumida pelo usuário, SEMPRE permitir acesso total
-  // independente do setor, perfil ou qualquer outra restrição
-  if (isAssignedToUser) {
-    return { ok: true, conv, reason: 'conversa_assumida_pelo_usuario' }
-  }
-  
+  if (isAssignedToUser) return { ok: true, conv, reason: 'conversa_assumida_pelo_usuario' }
   if (r === 'admin') return { ok: true, conv }
 
-  // supervisor: conversas sem setor visíveis para TODOS; com setor só mesmo setor
-  if (r === 'supervisor') {
+  // supervisor e atendente: conversas sem setor visíveis para TODOS; com setor só se usuário pertence
+  if (r === 'supervisor' || r === 'atendente') {
     if (!isGroup) {
       const convDep = conv.departamento_id ?? null
-      const userDep = user_dep_id ?? null
-      
-      if (userDep == null && convDep != null) return { ok: false, status: 403, error: 'Conversa de outro setor' }
-      // convDep == null: qualquer usuário pode ver conversas sem setor
-      if (userDep != null && convDep != null && Number(convDep) !== Number(userDep)) return { ok: false, status: 403, error: 'Conversa de outro setor' }
+      const userSemSetor = depIds.length === 0
+      if (userSemSetor && convDep != null) return { ok: false, status: 403, error: 'Conversa de outro setor' }
+      if (convDep != null && !depIds.some((id) => Number(id) === Number(convDep))) return { ok: false, status: 403, error: 'Conversa de outro setor' }
     }
     return { ok: true, conv }
   }
 
-  // atendente: pode conversar com TODOS os contatos — assumir, transferir, responder em qualquer conversa
-  if (r === 'atendente') return { ok: true, conv }
-
-  // fallback: perfis desconhecidos permitem acesso (comportamento padrão para atendimento)
   return { ok: true, conv }
 }
 
@@ -285,31 +276,77 @@ async function obterUnreadMap({ company_id, usuario_id }) {
 }
 
 /**
- * Incrementa unread para todos os usuários da empresa quando chega mensagem de entrada (in).
- * Roda em background para não bloquear o webhook.
+ * Retorna IDs dos usuários que podem ver a conversa (para unread/notificações).
+ * Regras: admin vê tudo; conversa assumida pelo usuário → sempre; conversa com setor → só usuários do setor; sem setor → todos.
+ * Suporta múltiplos departamentos por usuário (usuario_departamentos).
+ */
+async function obterUsuarioIdsQuePodemVerConversa(company_id, conversa_id) {
+  const { data: conv } = await supabase
+    .from('conversas')
+    .select('departamento_id, atendente_id, tipo')
+    .eq('company_id', Number(company_id))
+    .eq('id', Number(conversa_id))
+    .maybeSingle()
+  if (!conv) return []
+
+  const isGroup = isGroupConversation(conv)
+  const convDep = conv.departamento_id ?? null
+  const atendenteId = conv.atendente_id ? Number(conv.atendente_id) : null
+
+  const { data: usuarios } = await supabase
+    .from('usuarios')
+    .select('id, perfil, departamento_id')
+    .eq('company_id', Number(company_id))
+    .eq('ativo', true)
+  if (!Array.isArray(usuarios) || usuarios.length === 0) return []
+
+  let userDepMap = new Map()
+  try {
+    const { data: udRows } = await supabase
+      .from('usuario_departamentos')
+      .select('usuario_id, departamento_id')
+      .eq('company_id', Number(company_id))
+    if (Array.isArray(udRows)) {
+      udRows.forEach((r) => {
+        const uid = Number(r.usuario_id)
+        if (!userDepMap.has(uid)) userDepMap.set(uid, [])
+        userDepMap.get(uid).push(Number(r.departamento_id))
+      })
+    }
+  } catch (_) {}
+
+  const ids = []
+  for (const u of usuarios) {
+    const uid = Number(u.id)
+    const isAdmin = String(u.perfil || '').toLowerCase() === 'admin'
+    if (isAdmin) { ids.push(uid); continue }
+    if (atendenteId && uid === atendenteId) { ids.push(uid); continue }
+    if (isGroup) { ids.push(uid); continue }
+    const userDepIds = userDepMap.get(uid) ?? (u.departamento_id != null ? [Number(u.departamento_id)] : [])
+    if (convDep == null) ids.push(uid)
+    else if (userDepIds.some((d) => Number(d) === Number(convDep))) ids.push(uid)
+  }
+  return ids
+}
+
+/**
+ * Incrementa unread apenas para usuários que podem ver a conversa (por setor).
+ * Quando o cliente escolhe um setor, só usuários daquele setor recebem notificação.
  *
  * Usa RPC `increment_conversa_unreads` para operação atômica com
  * INSERT ... ON CONFLICT DO UPDATE SET unread_count = unread_count + 1.
- * Isso evita a race condition de read-modify-write quando duas mensagens chegam
- * simultaneamente e o contador não seria incrementado corretamente.
  *
  * A função RPC deve existir no banco (migration 20250225000000_production_hardening.sql).
  * Fallback para o método leitura-escrita se o RPC não existir ainda.
  */
 async function incrementarUnreadParaConversa(company_id, conversa_id) {
   try {
-    const { data: usuarios } = await supabase
-      .from('usuarios')
-      .select('id')
-      .eq('company_id', Number(company_id))
-      .eq('ativo', true)
-    if (!Array.isArray(usuarios) || usuarios.length === 0) return
+    const usuarioIds = await obterUsuarioIdsQuePodemVerConversa(company_id, conversa_id)
+    if (usuarioIds.length === 0) return
 
     const cid = Number(company_id)
     const convId = Number(conversa_id)
-    const usuarioIds = usuarios.map((u) => Number(u.id))
 
-    // Tenta o RPC atômico primeiro
     const { error: rpcErr } = await supabase.rpc('increment_conversa_unreads', {
       p_company_id: cid,
       p_conversa_id: convId,
@@ -318,8 +355,6 @@ async function incrementarUnreadParaConversa(company_id, conversa_id) {
 
     if (!rpcErr) return
 
-    // Fallback: se o RPC não existir no banco ainda (PGRST202 = function not found),
-    // usa o método leitura-escrita. Não é atômico mas funciona para volumes normais.
     const isNotFound = String(rpcErr.code || '').includes('PGRST202') ||
       String(rpcErr.message || '').includes('function') ||
       String(rpcErr.message || '').includes('not exist')
@@ -389,7 +424,7 @@ async function registrarAtendimento({
 // =====================================================
 exports.listarConversas = async (req, res) => {
   try {
-    const { company_id, id: user_id, perfil, departamento_id: user_dep_id } = req.user
+    const { company_id, id: user_id, perfil, departamento_ids = [] } = req.user
     const role = String(perfil || '').toLowerCase()
     const isAdmin = role === 'admin'
     const isAtendente = role === 'atendente'
@@ -539,8 +574,10 @@ exports.listarConversas = async (req, res) => {
       // sem setor → conversas sem setor + grupos + conversas assumidas por ele.
       // IMPORTANTE: Sempre mostrar conversas assumidas pelo usuário, independente do setor
       if (!isAdmin) {
-        if (user_dep_id != null) {
-          q = q.or(`departamento_id.eq.${user_dep_id},departamento_id.is.null,tipo.eq.grupo,atendente_id.eq.${user_id}`)
+        const depIds = Array.isArray(departamento_ids) ? departamento_ids.filter((id) => id != null && Number.isFinite(Number(id))) : []
+        if (depIds.length > 0) {
+          const depOr = depIds.map((d) => `departamento_id.eq.${d}`).join(',')
+          q = q.or(`${depOr},departamento_id.is.null,tipo.eq.grupo,atendente_id.eq.${user_id}`)
         } else {
           q = q.or(`departamento_id.is.null,tipo.eq.grupo,atendente_id.eq.${user_id}`)
         }
@@ -1519,7 +1556,7 @@ exports.criarContato = async (req, res) => {
 exports.detalharChat = async (req, res) => {
   try {
     const { id } = req.params
-    const { company_id, id: user_id, perfil, departamento_id: user_dep_id } = req.user
+    const { company_id, id: user_id, perfil, departamento_ids = [] } = req.user
     const role = String(perfil || '').toLowerCase()
     const isAdmin = role === 'admin'
 
@@ -1569,14 +1606,13 @@ exports.detalharChat = async (req, res) => {
     if (isAssignedToUser) {
       // Usuário responsável pela conversa tem acesso total independente do setor
     } else if (!isAdmin && !isGroup) {
-      // Aplicar regras de setor apenas se a conversa NÃO estiver assumida pelo usuário
+      // Aplicar regras de setor: usuário precisa pertencer ao departamento da conversa
       const convDep = conversa.departamento_id ?? null
-      const userDep = user_dep_id ?? null
-      if (userDep == null && convDep != null) {
+      const depIds = Array.isArray(departamento_ids) ? departamento_ids : []
+      if (depIds.length === 0 && convDep != null) {
         return res.status(403).json({ error: 'Conversa pertence a um setor; usuários sem setor não podem acessá-la' })
       }
-      // convDep == null: qualquer usuário pode ver conversas sem setor
-      if (userDep != null && convDep != null && Number(convDep) !== Number(userDep)) {
+      if (convDep != null && !depIds.some((d) => Number(d) === Number(convDep))) {
         return res.status(403).json({ error: 'Conversa de outro setor' })
       }
     }
@@ -1728,7 +1764,7 @@ exports.detalharChat = async (req, res) => {
 // =====================================================
 exports.assumirChat = async (req, res) => {
   try {
-    const { company_id, id: user_id, perfil, departamento_id: user_dep_id } = req.user
+    const { company_id, id: user_id, perfil, departamento_ids = [] } = req.user
     const { id: conversa_id } = req.params
     const isAdmin = perfil === 'admin'
 
@@ -1746,15 +1782,14 @@ exports.assumirChat = async (req, res) => {
       return res.status(400).json({ error: 'Grupos são apenas visuais. Não é possível assumir conversa de grupo.' })
     }
 
-    // Permissão por setor: conversas sem setor assumíveis por TODOS; com setor só mesmo setor
+    // Permissão por setor: conversas sem setor assumíveis por TODOS; com setor só se usuário pertence
     if (!isAdmin) {
       const convDep = atual.departamento_id ?? null
-      const userDep = user_dep_id ?? null
-      if (userDep == null && convDep != null) {
+      const depIds = Array.isArray(departamento_ids) ? departamento_ids : []
+      if (depIds.length === 0 && convDep != null) {
         return res.status(403).json({ error: 'Conversa pertence a um setor; atribua-se a um setor para assumir' })
       }
-      // convDep == null: qualquer usuário pode assumir conversas sem setor
-      if (userDep != null && convDep != null && Number(convDep) !== Number(userDep)) {
+      if (convDep != null && !depIds.some((d) => Number(d) === Number(convDep))) {
         return res.status(403).json({ error: 'Conversa de outro setor' })
       }
     }
@@ -1821,10 +1856,10 @@ exports.assumirChat = async (req, res) => {
 // =====================================================
 exports.encerrarChat = async (req, res) => {
   try {
-    const { company_id, id: user_id, perfil, departamento_id: user_dep_id } = req.user
+    const { company_id, id: user_id, perfil, departamento_ids = [] } = req.user
     const { id: conversa_id } = req.params
 
-    const perm = await assertPermissaoConversa({ company_id, conversa_id, user_id, role: perfil, user_dep_id })
+    const perm = await assertPermissaoConversa({ company_id, conversa_id, user_id, role: perfil, user_dep_ids: departamento_ids })
     if (!perm.ok) return res.status(perm.status).json({ error: perm.error })
     if (perm.conv && isGroupConversation(perm.conv)) {
       return res.status(400).json({ error: 'Grupos são apenas visuais. Não é possível encerrar conversa de grupo.' })
@@ -1918,10 +1953,10 @@ exports.encerrarChat = async (req, res) => {
 
 exports.reabrirChat = async (req, res) => {
   try {
-    const { company_id, id: user_id, perfil, departamento_id: user_dep_id } = req.user
+    const { company_id, id: user_id, perfil, departamento_ids = [] } = req.user
     const { id: conversa_id } = req.params
 
-    const perm = await assertPermissaoConversa({ company_id, conversa_id, user_id, role: perfil, user_dep_id })
+    const perm = await assertPermissaoConversa({ company_id, conversa_id, user_id, role: perfil, user_dep_ids: departamento_ids })
     if (!perm.ok) return res.status(perm.status).json({ error: perm.error })
     if (perm.conv && isGroupConversation(perm.conv)) {
       return res.status(400).json({ error: 'Grupos são apenas visuais. Não é possível reabrir conversa de grupo.' })
@@ -1972,11 +2007,11 @@ exports.reabrirChat = async (req, res) => {
 // =====================================================
 exports.transferirChat = async (req, res) => {
   try {
-    const { company_id, id: user_id, perfil, departamento_id: user_dep_id } = req.user
+    const { company_id, id: user_id, perfil, departamento_ids = [] } = req.user
     const { id: conversa_id } = req.params
     const { para_usuario_id, observacao } = req.body
 
-    const perm = await assertPermissaoConversa({ company_id, conversa_id, user_id, role: perfil, user_dep_id })
+    const perm = await assertPermissaoConversa({ company_id, conversa_id, user_id, role: perfil, user_dep_ids: departamento_ids })
     if (!perm.ok) return res.status(perm.status).json({ error: perm.error })
     if (perm.conv && isGroupConversation(perm.conv)) {
       return res.status(400).json({ error: 'Grupos são apenas visuais. Não é possível transferir conversa de grupo.' })
@@ -2085,11 +2120,11 @@ exports.transferirChat = async (req, res) => {
 // =====================================================
 exports.transferirSetor = async (req, res) => {
   try {
-    const { company_id, id: user_id, perfil, departamento_id: user_dep_id } = req.user
+    const { company_id, id: user_id, perfil, departamento_ids = [] } = req.user
     const { id: conversa_id } = req.params
     const { departamento_id: novo_departamento_id, remover_setor } = req.body
 
-    const perm = await assertPermissaoConversa({ company_id, conversa_id, user_id, role: perfil, user_dep_id })
+    const perm = await assertPermissaoConversa({ company_id, conversa_id, user_id, role: perfil, user_dep_ids: departamento_ids })
     if (!perm.ok) return res.status(perm.status).json({ error: perm.error })
     if (perm.conv && isGroupConversation(perm.conv)) {
       return res.status(400).json({ error: 'Grupos são apenas visuais. Não é possível alterar setor de conversa de grupo.' })
@@ -3119,7 +3154,7 @@ exports.listarAtendimentos = async (req, res) => {
 // =====================================================
 exports.puxarChatFila = async (req, res) => {
   try {
-    const { company_id, id: user_id, perfil, departamento_id: user_dep_id } = req.user
+    const { company_id, id: user_id, perfil, departamento_ids = [] } = req.user
     const isAdmin = perfil === 'admin'
 
     let query = supabase
@@ -3132,10 +3167,12 @@ exports.puxarChatFila = async (req, res) => {
       .order('criado_em', { ascending: true })
       .limit(1)
 
-    // Atendente/supervisor: com setor → seu setor + conversas sem setor; sem setor → só conversas sem setor
+    // Atendente/supervisor: com setores → seus setores + conversas sem setor; sem setor → só conversas sem setor
     if (!isAdmin) {
-      if (user_dep_id != null) {
-        query = query.or(`departamento_id.eq.${user_dep_id},departamento_id.is.null`)
+      const depIds = Array.isArray(departamento_ids) ? departamento_ids.filter((id) => id != null && Number.isFinite(Number(id))) : []
+      if (depIds.length > 0) {
+        const depOr = depIds.map((d) => `departamento_id.eq.${d}`).join(',')
+        query = query.or(`${depOr},departamento_id.is.null`)
       } else {
         query = query.is('departamento_id', null)
       }

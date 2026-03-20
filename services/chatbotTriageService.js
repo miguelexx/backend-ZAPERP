@@ -391,15 +391,31 @@ async function transferToDepartment(supabaseClient, company_id, conversa_id, dep
 
   // 'fila': não atribui — conversa fica aberta para todos do setor; primeiro a assumir ganha
   if (transferMode === 'departamento' && tipoDistribuicao !== 'fila') {
-    const { data: usuarios } = await supabaseClient
-      .from('usuarios')
-      .select('id')
+    let userIds = []
+    const { data: udRows } = await supabaseClient
+      .from('usuario_departamentos')
+      .select('usuario_id')
       .eq('company_id', company_id)
       .eq('departamento_id', depId)
-      .eq('ativo', true)
-      .order('id')
-
-    const userIds = (usuarios || []).map((u) => u.id).filter(Boolean)
+    if (Array.isArray(udRows) && udRows.length > 0) {
+      const ids = [...new Set(udRows.map((r) => r.usuario_id))].filter(Boolean)
+      const { data: usuarios } = await supabaseClient
+        .from('usuarios')
+        .select('id')
+        .eq('company_id', company_id)
+        .in('id', ids)
+        .eq('ativo', true)
+      userIds = (usuarios || []).map((u) => u.id).filter(Boolean)
+    }
+    if (userIds.length === 0) {
+      const { data: usuariosLegado } = await supabaseClient
+        .from('usuarios')
+        .select('id')
+        .eq('company_id', company_id)
+        .eq('departamento_id', depId)
+        .eq('ativo', true)
+      userIds = (usuariosLegado || []).map((u) => u.id).filter(Boolean)
+    }
     if (userIds.length > 0) {
       let escolhido = null
       if (tipoDistribuicao === 'menor_carga') {

@@ -51,10 +51,13 @@ exports.getPermissoesUsuario = async (req, res) => {
     if (errUser) return res.status(500).json({ error: errUser.message })
     if (!usuario) return res.status(404).json({ error: 'Usuário não encontrado' })
 
+    const { obterDepartamentoIdsDoUsuario } = require('../helpers/usuarioDepartamentosHelper')
+    const departamento_ids = await obterDepartamentoIdsDoUsuario(tid, company_id, usuario)
+
     const permissoes = await getPermissoesEfetivasUsuario(tid, company_id, usuario.perfil || 'atendente')
 
     return res.json({
-      usuario: { id: usuario.id, nome: usuario.nome, email: usuario.email, perfil: usuario.perfil, departamento_id: usuario.departamento_id },
+      usuario: { id: usuario.id, nome: usuario.nome, email: usuario.email, perfil: usuario.perfil, departamento_id: usuario.departamento_id, departamento_ids },
       permissoes
     })
   } catch (err) {

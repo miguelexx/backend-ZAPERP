@@ -91,6 +91,9 @@ io.use((socket, next) => {
       return next(new Error('Tenant inválido'))
     }
     payload.company_id = cid
+    if (!Array.isArray(payload.departamento_ids)) {
+      payload.departamento_ids = payload.departamento_id != null ? [Number(payload.departamento_id)] : []
+    }
     socket.user = payload
 
     next()
@@ -140,17 +143,20 @@ io.emitUsuario = (usuario_id, event, payload) => {
 // 🔌 conexão socket (MANTIDO + MELHORADO)
 // =====================================================
 io.on('connection', (socket) => {
-  const { id, company_id, departamento_id } = socket.user
+  const { id, company_id, departamento_ids = [] } = socket.user
 
   console.log(`🟢 Socket conectado | Usuário ${id} | Empresa ${company_id}`)
 
   // rooms padrão: empresa (admin vê tudo) e usuário
   socket.join(`empresa_${company_id}`)
   socket.join(`usuario_${id}`)
-  // room por setor: apenas atendentes do setor recebem eventos do departamento
-  if (departamento_id != null) {
-    socket.join(`departamento_${departamento_id}`)
-  }
+  // rooms por setor: usuário entra em todos os departamentos que pertence (Comercial + Financeiro, etc.)
+  const depIds = Array.isArray(departamento_ids) ? departamento_ids : []
+  depIds.forEach((depId) => {
+    if (depId != null && Number.isFinite(Number(depId))) {
+      socket.join(`departamento_${depId}`)
+    }
+  })
 
   // entrar na conversa (idempotente: evita join duplicado e log repetido)
   socket.on('join_conversa', (conversaId) => {

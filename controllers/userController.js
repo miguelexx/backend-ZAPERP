@@ -22,8 +22,11 @@ exports.getMe = async (req, res) => {
     }
     if (error) return res.status(500).json({ error: error.message })
     if (!data) return res.status(404).json({ error: 'Usuário não encontrado' })
+    const { obterDepartamentoIdsDoUsuario } = require('../helpers/usuarioDepartamentosHelper')
+    const departamento_ids = await obterDepartamentoIdsDoUsuario(user_id, company_id, data)
     return res.json({
       ...data,
+      departamento_ids,
       mostrar_nome_ao_cliente: data.mostrar_nome_ao_cliente !== false
     })
   } catch (err) {
@@ -65,8 +68,6 @@ exports.listar = async (req, res) => {
     const { company_id, perfil } = req.user
     let query = supabase
       .from('usuarios')
-      // Não embutir departamentos aqui: em alguns schemas o PostgREST detecta mais de 1 relacionamento
-      // e retorna "Could not embed because more than one relationship was found..."
       .select('id, nome, email, perfil, ativo, departamento_id, criado_em')
       .eq('company_id', company_id)
       .order('nome')
@@ -78,28 +79,46 @@ exports.listar = async (req, res) => {
 
     const list = Array.isArray(data) ? data : []
 
-    const depIds = [...new Set(list.map((u) => u?.departamento_id).filter((id) => id != null))]
+    let userDepMap = new Map()
+    const { data: udRows, error: errUd } = await supabase
+      .from('usuario_departamentos')
+      .select('usuario_id, departamento_id')
+      .eq('company_id', company_id)
+    if (!errUd && Array.isArray(udRows)) {
+      udRows.forEach((r) => {
+        const uid = Number(r.usuario_id)
+        if (!userDepMap.has(uid)) userDepMap.set(uid, [])
+        userDepMap.get(uid).push(Number(r.departamento_id))
+      })
+    }
+
+    const depIds = new Set()
+    list.forEach((u) => {
+      const ids = userDepMap.get(Number(u.id)) ?? (u?.departamento_id != null ? [Number(u.departamento_id)] : [])
+      ids.forEach((id) => depIds.add(id))
+    })
     let depMap = {}
-    if (depIds.length > 0) {
-      const { data: deps, error: errDeps } = await supabase
+    if (depIds.size > 0) {
+      const { data: deps } = await supabase
         .from('departamentos')
         .select('id, nome')
         .eq('company_id', company_id)
-        .in('id', depIds)
-      if (!errDeps && Array.isArray(deps)) {
-        deps.forEach((d) => {
-          if (d?.id != null) depMap[String(d.id)] = d
-        })
-      }
+        .in('id', [...depIds])
+      if (Array.isArray(deps)) deps.forEach((d) => { if (d?.id != null) depMap[String(d.id)] = d })
     }
 
-    const out = list.map((u) => ({
-      ...u,
-      departamentos:
-        u?.departamento_id != null
-          ? (depMap[String(u.departamento_id)] ? { nome: depMap[String(u.departamento_id)].nome } : null)
-          : null
-    }))
+    const out = list.map((u) => {
+      const depIdsUser = userDepMap.get(Number(u.id)) ?? (u?.departamento_id != null ? [Number(u.departamento_id)] : [])
+      const departamentos = depIdsUser
+        .map((id) => depMap[String(id)])
+        .filter(Boolean)
+        .map((d) => ({ id: d.id, nome: d.nome }))
+      return {
+        ...u,
+        departamento_ids: depIdsUser,
+        departamentos: departamentos.length > 0 ? departamentos : null
+      }
+    })
 
     return res.json(out)
   } catch (err) {
@@ -114,7 +133,7 @@ const PERFIS_VALIDOS = ['admin', 'supervisor', 'atendente']
 exports.criar = async (req, res) => {
   try {
     const { company_id } = req.user
-    const { nome, email, senha, perfil, departamento_id, ativo } = req.body
+    const { nome, email, senha, perfil, departamento_id, departamento_ids, ativo } = req.body
     if (!nome?.trim() || !email?.trim() || !senha?.trim()) {
       return res.status(400).json({ error: 'nome, email e senha são obrigatórios' })
     }
@@ -122,6 +141,8 @@ exports.criar = async (req, res) => {
     if (!PERFIS_VALIDOS.includes(perfilNorm)) {
       return res.status(400).json({ error: `perfil deve ser: ${PERFIS_VALIDOS.join(', ')}` })
     }
+    const depIds = [...new Set((Array.isArray(departamento_ids) ? departamento_ids : (departamento_id != null ? [departamento_id] : [])).map((id) => Number(id)).filter((id) => Number.isFinite(id) && id > 0))]
+    const primeiroDep = depIds.length > 0 ? depIds[0] : null
     const hash = await bcrypt.hash(senha, 10)
     const { data, error } = await supabase
       .from('usuarios')
@@ -131,13 +152,18 @@ exports.criar = async (req, res) => {
         senha_hash: hash,
         perfil: perfilNorm,
         company_id,
-        departamento_id: departamento_id || null,
+        departamento_id: primeiroDep || null,
         ativo: ativo !== false
       })
       .select('id, nome, email, perfil, ativo, departamento_id')
       .single()
     if (error) return res.status(500).json({ error: error.message })
-    return res.status(201).json(data)
+    if (data?.id && depIds.length > 0) {
+      await supabase.from('usuario_departamentos').insert(
+        depIds.map((depId) => ({ usuario_id: data.id, departamento_id: Number(depId), company_id }))
+      )
+    }
+    return res.status(201).json({ ...data, departamento_ids: depIds })
   } catch (err) {
     console.error(err)
     return res.status(500).json({ error: 'Erro ao criar usuário' })
@@ -149,7 +175,7 @@ exports.atualizar = async (req, res) => {
   try {
     const { company_id } = req.user
     const { id } = req.params
-    const { nome, email, perfil, departamento_id, ativo, mostrar_nome_ao_cliente } = req.body
+    const { nome, email, perfil, departamento_id, departamento_ids, ativo, mostrar_nome_ao_cliente } = req.body
     const update = {}
     if (nome !== undefined) update.nome = nome.trim()
     if (email !== undefined) update.email = email.trim().toLowerCase()
@@ -160,7 +186,13 @@ exports.atualizar = async (req, res) => {
       }
       update.perfil = perfilNorm
     }
-    if (departamento_id !== undefined) update.departamento_id = departamento_id || null
+    let depIds = departamento_ids !== undefined
+      ? (Array.isArray(departamento_ids) ? departamento_ids : (departamento_ids != null ? [departamento_ids] : []))
+      : (departamento_id !== undefined ? (departamento_id != null ? [departamento_id] : []) : undefined)
+    if (depIds !== undefined) depIds = [...new Set(depIds.map((id) => Number(id)).filter((id) => Number.isFinite(id) && id > 0))]
+    if (depIds !== undefined) {
+      update.departamento_id = depIds.length > 0 ? depIds[0] : null
+    }
     if (ativo !== undefined) update.ativo = !!ativo
     if (typeof mostrar_nome_ao_cliente === 'boolean') update.mostrar_nome_ao_cliente = mostrar_nome_ao_cliente
 
@@ -173,7 +205,20 @@ exports.atualizar = async (req, res) => {
       .single()
     if (error) return res.status(500).json({ error: error.message })
     if (!data) return res.status(404).json({ error: 'Usuário não encontrado' })
-    return res.json(data)
+    if (depIds !== undefined) {
+      await supabase.from('usuario_departamentos').delete().eq('usuario_id', id).eq('company_id', company_id)
+      if (depIds.length > 0) {
+        await supabase.from('usuario_departamentos').insert(
+          depIds.map((depId) => ({ usuario_id: Number(id), departamento_id: Number(depId), company_id }))
+        )
+      }
+    }
+    let finalDepIds = depIds
+    if (finalDepIds === undefined) {
+      const { data: ud } = await supabase.from('usuario_departamentos').select('departamento_id').eq('usuario_id', id).eq('company_id', company_id)
+      finalDepIds = Array.isArray(ud) && ud.length > 0 ? ud.map((r) => r.departamento_id) : (data.departamento_id != null ? [data.departamento_id] : [])
+    }
+    return res.json({ ...data, departamento_ids: finalDepIds })
   } catch (err) {
     console.error(err)
     return res.status(500).json({ error: 'Erro ao atualizar usuário' })
@@ -334,6 +379,11 @@ exports.login = async (req, res) => {
       return res.status(401).json({ error: 'Credenciais inválidas' })
     }
 
+    // Múltiplos departamentos: busca em usuario_departamentos (fallback: departamento_id legado)
+    const { obterDepartamentoIdsDoUsuario } = require('../helpers/usuarioDepartamentosHelper')
+    const departamento_ids = await obterDepartamentoIdsDoUsuario(usuario.id, usuario.company_id, usuario)
+    const departamento_id = departamento_ids.length > 0 ? departamento_ids[0] : null
+
     // Gera JWT com dados essenciais (user_id/company_id obrigatórios p/ multi-tenant)
     const token = jwt.sign(
       {
@@ -342,7 +392,8 @@ exports.login = async (req, res) => {
         company_id: Number(usuario.company_id),
         email: usuario.email,
         perfil: usuario.perfil || 'atendente',
-        departamento_id: usuario.departamento_id ?? null
+        departamento_id,
+        departamento_ids
       },
       process.env.JWT_SECRET,
       { expiresIn: '1d' }
@@ -357,7 +408,8 @@ exports.login = async (req, res) => {
         email: usuario.email,
         company_id: usuario.company_id,
         perfil: usuario.perfil || 'atendente',
-        departamento_id: usuario.departamento_id ?? null
+        departamento_id,
+        departamento_ids
       }
     })
   } catch (err) {

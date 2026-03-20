@@ -31,6 +31,10 @@ module.exports = (req, res, next) => {
     }
 
     decoded.company_id = cid
+    // Múltiplos departamentos: garantir departamento_ids (compat com tokens antigos)
+    if (!Array.isArray(decoded.departamento_ids)) {
+      decoded.departamento_ids = decoded.departamento_id != null ? [Number(decoded.departamento_id)] : []
+    }
     req.user = decoded
     return next()
   } catch (err) {
