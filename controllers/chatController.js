@@ -144,15 +144,25 @@ async function getUsuarioParaEnvioCliente(supabase, company_id, user_id) {
 
 /** Enriquece uma mensagem única com usuario_nome (para evento nova_mensagem) */
 async function enrichMensagemComAutorUsuario(supabase, company_id, msg) {
-  if (!msg || msg.direcao !== 'out' || !msg.autor_usuario_id) {
-    return { ...msg, usuario_id: msg?.autor_usuario_id ?? null, usuario_nome: null, enviado_por_usuario: !!(msg?.direcao === 'out' && msg?.autor_usuario_id) }
+  const isOut = msg?.direcao === 'out'
+  if (!msg || !isOut || !msg.autor_usuario_id) {
+    return {
+      ...msg,
+      usuario_id: msg?.autor_usuario_id ?? null,
+      usuario_nome: null,
+      enviado_por_usuario: !!(isOut && msg?.autor_usuario_id),
+      // fromMe: mensagens enviadas pelo CRM (direcao 'out') são sempre fromMe=true para fins de notificação.
+      // O frontend NÃO deve exibir notificação/som para estas mensagens.
+      fromMe: isOut,
+    }
   }
   const { data: u } = await supabase.from('usuarios').select('id, nome').eq('company_id', company_id).eq('id', msg.autor_usuario_id).maybeSingle()
   return {
     ...msg,
     usuario_id: msg.autor_usuario_id,
     usuario_nome: u?.nome ?? null,
-    enviado_por_usuario: true
+    enviado_por_usuario: true,
+    fromMe: true,
   }
 }
 
@@ -2354,7 +2364,7 @@ exports.enviarMensagemChat = async (req, res) => {
         ...(conversa?.cliente_id != null ? { cliente_id: conversa.cliente_id } : {}),
         ...(contatoNome ? { nome_contato_cache: contatoNome, contato_nome: contatoNome } : {}),
         ...(fotoPerfil ? { foto_perfil_contato_cache: fotoPerfil, foto_perfil: fotoPerfil } : {}),
-        ultima_mensagem_preview: { texto: basePayload.texto, criado_em: basePayload.criado_em, direcao: 'out', usuario_id: novaMsgPayload.usuario_id, usuario_nome: novaMsgPayload.usuario_nome },
+        ultima_mensagem_preview: { texto: basePayload.texto, criado_em: basePayload.criado_em, direcao: 'out', fromMe: true, usuario_id: novaMsgPayload.usuario_id, usuario_nome: novaMsgPayload.usuario_nome },
         reordenar_suave: true // Frontend: animar item para o topo em vez de refetch (evita "desce e sobe")
       }
       emitirConversaAtualizada(io, company_id, conversa_id, convPayload, { skipAtualizarConversa: true })

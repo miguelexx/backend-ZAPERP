@@ -2426,7 +2426,11 @@ exports.receberZapi = async (req, res) => {
         ...mensagemSalva,
         conversa_id: mensagemSalva.conversa_id ?? convIdForEmit,
         status: canon,
-        status_mensagem: canon
+        status_mensagem: canon,
+        // fromMe e direcao EXPLÍCITOS: garantem que o frontend saiba se deve ou não
+        // exibir notificação/som — NUNCA notificar para mensagens enviadas por nós (fromMe=true).
+        fromMe,
+        direcao: mensagemSalva.direcao ?? (fromMe ? 'out' : 'in'),
       }
       // Incluir nome e foto para o frontend exibir ao adicionar/atualizar conversa na lista
       const nomeContato = (nomeParaCache || senderName || '').toString().trim()
@@ -2440,7 +2444,10 @@ exports.receberZapi = async (req, res) => {
         emitPayload.photo = fotoContato
       }
       if (mensagemFoiInseridaPeloWebhook) {
-        // Mensagem nova (recebida): emitir nova_mensagem
+        // Emitir nova_mensagem para todas as mensagens inseridas pelo webhook:
+        // - fromMe=false (recebida do cliente) → frontend DEVE notificar
+        // - fromMe=true  (espelhamento: enviada pelo celular) → frontend NÃO deve notificar
+        // O campo fromMe e direcao no payload permitem o frontend filtrar corretamente.
         io.to(rooms).emit('nova_mensagem', emitPayload)
       } else {
         // Mensagem já existe (enviada pelo usuário): apenas atualizar status, não duplicar mensagem
@@ -2498,12 +2505,14 @@ exports.receberZapi = async (req, res) => {
         ...(fotoPerfil ? { foto_perfil_contato_cache: fotoPerfil, foto_perfil: fotoPerfil } : {}),
         ...(mensagemFoiInseridaPeloWebhook && !fromMe ? { tem_novas_mensagens: true, lida: false } : {})
       }
-      // ultima_mensagem_preview: só preview na lista lateral — sem id para nunca ser tratado como mensagem (evita duplicata)
+      // ultima_mensagem_preview: preview na lista lateral — direcao correta ('in'/'out') para exibir seta/ícone certo.
       if (mensagemFoiInseridaPeloWebhook && emitPayload) {
         convPayload.ultima_mensagem_preview = {
           texto: emitPayload.texto ?? '(mensagem)',
           criado_em: emitPayload.criado_em,
-          direcao: emitPayload.direcao ?? 'in'
+          // Usar direcao do payload; fallback baseado em fromMe (nunca assumir 'in' para msg enviada)
+          direcao: emitPayload.direcao ?? (fromMe ? 'out' : 'in'),
+          fromMe,
         }
       }
       // reordenar_suave: true — frontend deve animar o item para o topo em vez de refetch (evita "desce e sobe")
