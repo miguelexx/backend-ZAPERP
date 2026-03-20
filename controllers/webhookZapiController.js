@@ -1750,42 +1750,59 @@ exports.receberZapi = async (req, res) => {
         }
 
         // Chatbot só envia quando o CLIENTE iniciou a conversa. Se o usuário/atendente enviou a 1ª msg, não enviar nada.
-        // Exceção: conversaReabertaAposFinalizacao — cliente enviou msg após finalização, tratar como novo contato e enviar boas-vindas
+        // Exceção 1: conversaReabertaAposFinalizacao — cliente enviou msg após finalização, tratar como novo contato.
+        // Exceção 2: bot já estava ativo (menu_enviado em bot_logs) — mesmo que a msg do cliente não tenha sido
+        //            salva corretamente, o bot deve continuar processando as respostas do menu.
         if (!skipChatbot && !conversaReabertaAposFinalizacao) {
-          const { data: mensagensAnteriores } = await supabase
-            .from('mensagens')
-            .select('direcao, criado_em, texto')
+          // Prioridade: verificar se o chatbot já estava ativo para esta conversa via bot_logs.
+          // Isso evita o bug onde a mensagem inicial do cliente falha ao salvar mas a resposta
+          // do bot é salva, fazendo a primeira msg parecer 'out' e silenciando o chatbot.
+          const { data: botLogAtivo } = await supabase
+            .from('bot_logs')
+            .select('id, tipo')
             .eq('conversa_id', conversa_id)
             .eq('company_id', company_id)
-            .order('criado_em', { ascending: true })
-            .limit(10) // Verificar as primeiras mensagens para ter certeza
+            .in('tipo', ['menu_enviado', 'menu_reenviado', 'opcao_invalida', 'opcao_valida'])
+            .limit(1)
+            .maybeSingle()
 
-          console.log('[Z-API] 🤖 Chatbot: verificando histórico da conversa', { 
-            conversa_id, 
-            totalMensagens: mensagensAnteriores?.length || 0,
-            primeiraMensagem: mensagensAnteriores?.[0] ? {
-              direcao: mensagensAnteriores[0].direcao,
-              texto: String(mensagensAnteriores[0].texto || '').slice(0, 30)
-            } : null
-          })
-
-          // Se não há mensagens anteriores, esta é a primeira mensagem do cliente → permitir chatbot
-          if (!mensagensAnteriores || mensagensAnteriores.length === 0) {
-            console.log('[Z-API] 🤖 Chatbot: primeira mensagem do cliente — permitindo chatbot', { conversa_id })
+          if (botLogAtivo) {
+            // Bot já estava ativo — sempre processar (cliente está respondendo ao menu do bot)
+            console.log('[Z-API] 🤖 Chatbot: conversa com bot ativo (bot_logs) — processando resposta', {
+              conversa_id, tipo: botLogAtivo.tipo
+            })
           } else {
-            // Verificar se a primeira mensagem foi do usuário/atendente (direcao 'out')
-            const primeiraMsg = mensagensAnteriores[0]
-            if (primeiraMsg?.direcao === 'out') {
-              skipChatbot = true
-              console.log('[Z-API] 🤖 Chatbot: ignorado — usuário iniciou a conversa (1ª msg foi direcao out)', { 
-                conversa_id,
-                primeiraMsg: String(primeiraMsg.texto || '').slice(0, 30)
-              })
+            // Bot não esteve ativo ainda — verificar se foi o operador quem iniciou a conversa
+            const { data: mensagensAnteriores } = await supabase
+              .from('mensagens')
+              .select('direcao, texto')
+              .eq('conversa_id', conversa_id)
+              .eq('company_id', company_id)
+              .order('criado_em', { ascending: true })
+              .limit(3)
+
+            console.log('[Z-API] 🤖 Chatbot: verificando histórico (sem bot_logs)', {
+              conversa_id,
+              totalMensagens: mensagensAnteriores?.length || 0,
+              primeiraMensagem: mensagensAnteriores?.[0]
+                ? { direcao: mensagensAnteriores[0].direcao, texto: String(mensagensAnteriores[0].texto || '').slice(0, 30) }
+                : null
+            })
+
+            if (!mensagensAnteriores || mensagensAnteriores.length === 0) {
+              console.log('[Z-API] 🤖 Chatbot: primeira mensagem do cliente — permitindo chatbot', { conversa_id })
             } else {
-              console.log('[Z-API] 🤖 Chatbot: cliente iniciou a conversa — permitindo chatbot', { 
-                conversa_id,
-                totalMensagensCliente: mensagensAnteriores.filter(m => m.direcao === 'in').length
-              })
+              const primeiraMsg = mensagensAnteriores[0]
+              if (primeiraMsg?.direcao === 'out') {
+                skipChatbot = true
+                console.log('[Z-API] 🤖 Chatbot: ignorado — operador iniciou a conversa (1ª msg foi direcao out)', {
+                  conversa_id, primeiraMsg: String(primeiraMsg.texto || '').slice(0, 30)
+                })
+              } else {
+                console.log('[Z-API] 🤖 Chatbot: cliente iniciou a conversa — permitindo chatbot', {
+                  conversa_id, totalMensagensCliente: mensagensAnteriores.filter(m => m.direcao === 'in').length
+                })
+              }
             }
           }
         }
@@ -2473,7 +2490,9 @@ exports.receberZapi = async (req, res) => {
         id: convIdForEmit,
         ultima_atividade: convRow?.ultima_atividade ?? new Date().toISOString(),
         telefone: convRow?.telefone ?? null,
-        exibir_badge_aberta: true,
+        // Grupos nunca mostram badge "aberta" — não precisam ser assumidos
+        exibir_badge_aberta: !isGroup,
+        ...(isGroup ? { status_atendimento: null } : {}),
         ...(depId != null ? { departamento_id: depId } : {}),
         ...(contatoNome ? { nome_contato_cache: contatoNome, contato_nome: contatoNome } : {}),
         ...(fotoPerfil ? { foto_perfil_contato_cache: fotoPerfil, foto_perfil: fotoPerfil } : {}),

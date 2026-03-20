@@ -540,7 +540,9 @@ exports.listarConversas = async (req, res) => {
       if (conversaIdsFilter && conversaIdsFilter.length > 0) {
         q = q.in('id', conversaIdsFilter)
       }
-      if (status_atendimento) q = q.eq('status_atendimento', status_atendimento)
+      // Grupos são sempre visíveis independentemente do filtro de status —
+      // não têm estado de atendimento (não precisam ser assumidos nem encerrados).
+      if (status_atendimento) q = q.or(`tipo.eq.grupo,status_atendimento.eq.${status_atendimento}`)
       // Atendente: vê TODAS as conversas (pode assumir, transferir, responder qualquer uma)
       // Admin/supervisor: filtro opcional por atendente_id
       if (!isAtendente && atendente_id) q = q.eq('atendente_id', Number(atendente_id))
@@ -689,15 +691,15 @@ exports.listarConversas = async (req, res) => {
             null
           )
       const unreadCount = unreadMap[Number(c.id)] || 0
-      // Badge "Aberta" só quando há movimentação: mensagem recebida/enviada ou conversa assumida
+      // Grupos não têm estado de atendimento: sem badge "aberta", sem status, sem atendente obrigatório
       const temMensagem = Array.isArray(c.mensagens) && c.mensagens.length > 0
-      const exibir_badge_aberta = temMensagem || (c.atendente_id != null)
+      const exibir_badge_aberta = !isGroup && (temMensagem || (c.atendente_id != null))
       return {
         id: c.id,
         cliente_id: c.cliente_id,
         telefone: c.telefone,
         telefone_exibivel: telefoneExibivel,
-        status_atendimento: c.status_atendimento,
+        status_atendimento: isGroup ? null : c.status_atendimento,
         exibir_badge_aberta,
         atendente_id: c.atendente_id,
         lida: unreadCount === 0,
