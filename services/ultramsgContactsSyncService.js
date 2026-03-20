@@ -15,7 +15,6 @@ const { getEmpresaWhatsappConfig } = require('./whatsappConfigService')
 const { getOrCreateCliente } = require('../helpers/conversationSync')
 const { syncUltraMsgContact } = require('./ultramsgSyncContact')
 const { normalizePhoneBR, possiblePhonesBR, phoneKeyBR } = require('../helpers/phoneHelper')
-const ultramsgIntegrationService = require('./ultramsgIntegrationService')
 
 // Constantes de configuração
 const PAGE_SIZE = 100
@@ -279,20 +278,6 @@ async function syncMissingConversationContacts(company_id, opts = {}) {
 }
 
 /**
- * Verifica se o WhatsApp está conectado (celular logado via QR).
- * O sync de contatos usa GET /contacts da API UltraMsg, que retorna
- * APENAS os contatos salvos na agenda do celular conectado.
- */
-async function ensureConnected(company_id) {
-  const status = await ultramsgIntegrationService.getStatus(company_id)
-  if (status.error) return status.error
-  if (!status.connected) {
-    return 'Conecte o WhatsApp via QR code antes de sincronizar. Os contatos são puxados exclusivamente da agenda do celular logado.'
-  }
-  return null
-}
-
-/**
  * Executa sync de contatos para a empresa.
  * Garante que só puxa contatos da agenda do celular conectado via QR.
  * ISOLAMENTO: cada empresa tem seus próprios clientes (company_id); nunca mistura contatos entre empresas.
@@ -310,14 +295,7 @@ async function syncContacts(company_id) {
     return { ok: false, mode: 'none', totalFetched: 0, inserted: 0, updated: 0, skipped: 0, errors: ['Empresa sem instância WhatsApp configurada. Conecte o WhatsApp em Integrações.'] }
   }
 
-  console.log(`[ULTRAMSG-SYNC] empresa=${company_id} instance=${config.instance_id} — verificando conexão...`)
-  const connError = await ensureConnected(company_id)
-  if (connError) {
-    console.warn(`[ULTRAMSG-SYNC] empresa=${company_id} não conectada: ${connError}`)
-    return { ok: false, mode: 'none', totalFetched: 0, inserted: 0, updated: 0, skipped: 0, errors: [connError] }
-  }
-
-  console.log(`[ULTRAMSG-SYNC] empresa=${company_id} conectada — iniciando busca de contatos...`)
+  console.log(`[ULTRAMSG-SYNC] empresa=${company_id} instance=${config.instance_id} — iniciando busca de contatos (UltraMSG)...`)
   let result = await syncViaContactsApi(company_id)
 
   if (result.mode === 'contacts_api' && result.totalFetched === 0 && result.errors.length === 0) {
@@ -364,11 +342,6 @@ async function syncContactsBatch(company_id, opts = {}) {
   const { config, error } = await getEmpresaWhatsappConfig(company_id)
   if (error || !config) {
     return { processados: 0, inserted: 0, updated: 0, skipped: 0, errors: ['Empresa sem instância configurada'], hasMore: false }
-  }
-
-  const connError = await ensureConnected(company_id)
-  if (connError) {
-    return { processados: 0, inserted: 0, updated: 0, skipped: 0, errors: [connError], hasMore: false }
   }
 
   const contacts = await provider.getContacts(page, pageSize, { companyId: company_id })
