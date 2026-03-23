@@ -33,38 +33,84 @@ async function throttleChatbotSend(company_id, intervaloSegundos) {
 }
 
 /**
+ * Retorna hora e dia no fuso da empresa (evita erro quando VPS em UTC e empresa em BRT).
+ * @param {Date} date - Momento a converter
+ * @param {string} timezone - IANA timezone (ex: "America/Sao_Paulo")
+ * @returns {{ getHours: () => number, getMinutes: () => number, getDay: () => number }}
+ */
+function getLocalTimeInTimezone(date, timezone = 'America/Sao_Paulo') {
+  const tz = timezone && String(timezone).trim() ? String(timezone).trim() : 'America/Sao_Paulo'
+  const fmt = new Intl.DateTimeFormat('en-CA', {
+    timeZone: tz,
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false
+  })
+  const dayFmt = new Intl.DateTimeFormat('en-US', { timeZone: tz, weekday: 'short' })
+  const parts = fmt.formatToParts(date)
+  const get = (type) => parseInt(parts.find((p) => p.type === type)?.value || '0', 10)
+  const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
+  const dayStr = dayFmt.format(date)
+  return {
+    getHours: () => get('hour'),
+    getMinutes: () => get('minute'),
+    getDay: () => dayNames.indexOf(dayStr)
+  }
+}
+
+/**
  * Verifica se o horário atual está dentro do horário comercial configurado.
+ * Usa timezone da empresa — essencial quando VPS está em UTC (ex: 15:05 BRT = 18:05 UTC).
  * Suporta janelas que atravessam meia-noite (ex: 22:00 a 06:00).
+ * Suporta múltiplas janelas (ex: manhã 07:40-11:00 e tarde 12:30-18:00).
  * @param {string} horarioInicio - "HH:mm" (ex: "09:00")
  * @param {string} horarioFim - "HH:mm" (ex: "18:00")
- * @param {Date} [now] - Data/hora a verificar (default: agora, fuso do servidor)
+ * @param {Date} [now] - Data/hora a verificar (default: agora)
+ * @param {string} [timezone] - IANA timezone (default: America/Sao_Paulo)
+ * @param {Array<{inicio:string,fim:string}>} [janelas] - Múltiplas janelas (usa em vez de inicio/fim único)
  * @returns {boolean}
  */
-function isWithinBusinessHours(horarioInicio, horarioFim, now = new Date()) {
-  if (!horarioInicio || !horarioFim) return true
-  const [hIni, mIni] = String(horarioInicio).split(':').map(Number)
-  const [hFim, mFim] = String(horarioFim).split(':').map(Number)
-  const minutosAgora = now.getHours() * 60 + now.getMinutes()
-  const minutosIni = (hIni || 0) * 60 + (mIni || 0)
-  const minutosFim = (hFim || 0) * 60 + (mFim || 0)
-  if (minutosIni <= minutosFim) return minutosAgora >= minutosIni && minutosAgora <= minutosFim
-  return minutosAgora >= minutosIni || minutosAgora <= minutosFim
+function isWithinBusinessHours(horarioInicio, horarioFim, now = new Date(), timezone = 'America/Sao_Paulo', janelas = null) {
+  const local = getLocalTimeInTimezone(now, timezone)
+  const minutosAgora = local.getHours() * 60 + local.getMinutes()
+
+  const checkWindow = (ini, fim) => {
+    if (!ini || !fim) return true
+    const [hIni, mIni] = String(ini).split(':').map(Number)
+    const [hFim, mFim] = String(fim).split(':').map(Number)
+    const minutosIni = (hIni || 0) * 60 + (mIni || 0)
+    const minutosFim = (hFim || 0) * 60 + (mFim || 0)
+    if (minutosIni <= minutosFim) return minutosAgora >= minutosIni && minutosAgora <= minutosFim
+    return minutosAgora >= minutosIni || minutosAgora <= minutosFim
+  }
+
+  if (Array.isArray(janelas) && janelas.length > 0) {
+    return janelas.some((j) => j && j.inicio && j.fim && checkWindow(j.inicio, j.fim))
+  }
+  return checkWindow(horarioInicio, horarioFim)
 }
 
 /**
  * Verifica se a data/hora atual está fora do atendimento (dia da semana desativado ou data específica fechada).
+ * Usa timezone da empresa para dia da semana e data local.
  * @param {number[]} diasSemanaDesativados - Dias que não trabalha: 0=dom, 1=seg, ..., 6=sáb
  * @param {string[]} datasEspecificasFechadas - Datas YYYY-MM-DD (feriados, recesso)
  * @param {Date} [now] - Data/hora a verificar
+ * @param {string} [timezone] - IANA timezone (default: America/Sao_Paulo)
  * @returns {boolean} true se está fora (dia desativado ou data fechada)
  */
-function isOutsideBusinessDays(diasSemanaDesativados, datasEspecificasFechadas, now = new Date()) {
-  const diaSemana = now.getDay() // 0=domingo, 6=sábado
+function isOutsideBusinessDays(diasSemanaDesativados, datasEspecificasFechadas, now = new Date(), timezone = 'America/Sao_Paulo') {
+  const tz = timezone && String(timezone).trim() ? String(timezone).trim() : 'America/Sao_Paulo'
+  const local = getLocalTimeInTimezone(now, tz)
+  const diaSemana = local.getDay()
   const diasOff = Array.isArray(diasSemanaDesativados) ? diasSemanaDesativados : [0, 6]
   if (diasOff.includes(diaSemana)) return true
-  const hoje = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`
+  const dp = new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(now)
+  const getPart = (t) => dp.find((p) => p.type === t)?.value || '0'
+  const hoje = `${getPart('year')}-${getPart('month')}-${getPart('day')}`
   const datasFechadas = Array.isArray(datasEspecificasFechadas) ? datasEspecificasFechadas : []
-  return datasFechadas.some((d) => String(d).trim() === hoje)
+  return datasFechadas.some((dStr) => String(dStr).trim() === hoje)
 }
 
 /**
@@ -106,6 +152,10 @@ const DEFAULT_CHATBOT_CONFIG = {
   diasSemanaDesativados: [0, 6],
   // Datas específicas fechadas (YYYY-MM-DD) — feriados, recesso etc.
   datasEspecificasFechadas: [],
+  // Timezone IANA para horário comercial (VPS em UTC, empresa em BRT → usar America/Sao_Paulo)
+  timezone: 'America/Sao_Paulo',
+  // Janelas múltiplas (ex: manhã 07:40-11:00 e tarde 12:30-18:00). Se vazio, usa horarioInicio/horarioFim.
+  horariosJanelas: [],
 }
 
 /**
@@ -153,6 +203,14 @@ function validateChatbotConfig(raw) {
       const arr = raw.datasEspecificasFechadas
       if (!Array.isArray(arr)) return []
       return arr.filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(String(d).trim())).map((d) => String(d).trim())
+    })(),
+    timezone: String(raw.timezone || DEFAULT_CHATBOT_CONFIG.timezone || 'America/Sao_Paulo').trim() || 'America/Sao_Paulo',
+    horariosJanelas: (() => {
+      const arr = raw.horariosJanelas || raw.janelasHorario
+      if (!Array.isArray(arr)) return []
+      return arr
+        .filter((j) => j && typeof j === 'object' && j.inicio && j.fim && /^\d{1,2}:\d{2}$/.test(String(j.inicio).trim()) && /^\d{1,2}:\d{2}$/.test(String(j.fim).trim()))
+        .map((j) => ({ inicio: String(j.inicio).trim(), fim: String(j.fim).trim() }))
     })(),
     intervaloEnvioSegundos: (() => {
       const v = raw.intervaloEnvioSegundos ?? DEFAULT_CHATBOT_CONFIG.intervaloEnvioSegundos ?? 3
@@ -650,13 +708,27 @@ async function processIncomingMessage(ctx) {
   })
 
   // Mensagem fora do horário: se ativado e fora do horário ou dia desativado, envia mensagem e não processa o menu
+  // Usa timezone da empresa (evita VPS UTC considerar 15:05 BRT como 18:05 = fora)
   if (config.foraHorarioEnabled && config.mensagemForaHorario) {
-    const foraDia = isOutsideBusinessDays(config.diasSemanaDesativados, config.datasEspecificasFechadas)
-    const dentroHorario = isWithinBusinessHours(config.horarioInicio, config.horarioFim)
-    if (foraDia || !dentroHorario) {
-      console.log('[chatbotTriage] fora do horário comercial — enviando mensagem', {
-        conversa_id, company_id, horario: `${config.horarioInicio}-${config.horarioFim}`, foraDia
-      })
+    let deveEnviarForaHorario = false
+    let foraDia = false
+    try {
+      const now = new Date()
+      const timezone = config.timezone || 'America/Sao_Paulo'
+      foraDia = isOutsideBusinessDays(config.diasSemanaDesativados, config.datasEspecificasFechadas, now, timezone)
+      const janelas = config.horariosJanelas?.length > 0 ? config.horariosJanelas : null
+      const dentroHorario = isWithinBusinessHours(config.horarioInicio, config.horarioFim, now, timezone, janelas)
+      deveEnviarForaHorario = foraDia || !dentroHorario
+      if (deveEnviarForaHorario) {
+        console.log('[chatbotTriage] fora do horário comercial — enviando mensagem', {
+          conversa_id, company_id, timezone, horario: janelas ? `janelas:${janelas.length}` : `${config.horarioInicio}-${config.horarioFim}`, foraDia
+        })
+      }
+    } catch (errTz) {
+      console.warn('[chatbotTriage] Erro ao avaliar horário comercial (timezone/janelas) — fallback: NÃO enviar fora-horário', errTz?.message || errTz)
+      deveEnviarForaHorario = false
+    }
+    if (deveEnviarForaHorario) {
       const sb = supabaseClient || supabase
       try {
         await sendWithThrottle(sendMessage, telefone, config.mensagemForaHorario, opts, company_id, config.intervaloEnvioSegundos)

@@ -310,17 +310,20 @@ async function getOrCreateCliente(supabaseClient, company_id, phone, fields = {}
   }
 
   // 5) 23505: race condition — buscar existente da MESMA company (unique é company_id + telefone)
+  // Quando 23505, a linha (company_id, telefoneCanonico) JÁ EXISTE — garantir que a busca inclua esse valor
   const isDuplicate = String(errInsert?.code || '') === '23505' ||
     String(errInsert?.message || '').includes('unique') ||
     String(errInsert?.message || '').includes('duplicate')
 
   if (isDuplicate) {
-    // Múltiplas tentativas de busca com diferentes estratégias
+    // Sempre incluir telefoneCanonico na busca (valor exato que causou o 23505)
+    const phonesToSearch = Array.from(new Set([telefoneCanonico, ...searchPhones].filter(Boolean)))
+
     const tryFind = async (strategy = 'exact') => {
       let q = supabaseClient.from('clientes').select('id').eq('company_id', company_id)
       
       if (strategy === 'exact') {
-        q = searchPhones.length > 0 ? q.in('telefone', searchPhones) : q.eq('telefone', telefoneCanonico)
+        q = phonesToSearch.length > 0 ? q.in('telefone', phonesToSearch) : q.eq('telefone', telefoneCanonico)
       } else if (strategy === 'like' && telefoneCanonico) {
         const digits8 = String(telefoneCanonico).replace(/\D/g, '').slice(-8)
         if (digits8?.length === 8) {
@@ -330,28 +333,41 @@ async function getOrCreateCliente(supabaseClient, company_id, phone, fields = {}
         }
       }
       
-      const { data } = await q.order('id', { ascending: true }).limit(1)
+      const { data, error } = await q.order('id', { ascending: true }).limit(1)
+      if (error) return null
       return Array.isArray(data) && data[0] ? data[0] : null
     }
 
-    // Tentativa 1: busca exata
+    // Tentativa 1: busca exata (inclui telefoneCanonico que causou 23505)
     let foundCo = await tryFind('exact')
     
-    // Tentativa 2: aguardar um pouco (race condition)
+    // Tentativa 2: busca DIRETA pelo valor exato do INSERT (100% garantido quando 23505)
+    if (!foundCo?.id && telefoneCanonico) {
+      const { data: directRow } = await supabaseClient
+        .from('clientes')
+        .select('id')
+        .eq('company_id', company_id)
+        .eq('telefone', telefoneCanonico)
+        .limit(1)
+        .maybeSingle()
+      foundCo = directRow && directRow.id ? directRow : null
+    }
+    
+    // Tentativa 3: aguardar (race condition) e retry
     if (!foundCo?.id) {
-      await new Promise(r => setTimeout(r, 100))
+      await new Promise(r => setTimeout(r, 150))
       foundCo = await tryFind('exact')
     }
     
-    // Tentativa 3: busca por LIKE (últimos 8 dígitos)
+    // Tentativa 4: busca por LIKE (últimos 8 dígitos)
     if (!foundCo?.id) {
       foundCo = await tryFind('like')
     }
     
-    // Tentativa 4: busca por possiblePhonesBR (variações 12/13 dígitos)
+    // Tentativa 5: variações 12/13 dígitos
     if (!foundCo?.id && telefoneCanonico) {
       const allVariants = possiblePhonesBR(telefoneCanonico)
-      if (allVariants.length > 1) {
+      if (allVariants.length >= 1) {
         const { data: variantRows } = await supabaseClient
           .from('clientes')
           .select('id')
