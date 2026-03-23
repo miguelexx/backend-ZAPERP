@@ -280,6 +280,75 @@ async function wasOptionSelectedForConversa(supabaseClient, company_id, conversa
 }
 
 /**
+ * Verifica se o texto parece mensagem do bot (menu, opção inválida, confirmação, fora do horário).
+ * Usado para detectar se a última mensagem 'out' foi do bot ou do operador humano.
+ */
+function looksLikeBotMessage(texto, config) {
+  const t = String(texto || '').trim()
+  if (!t) return false
+  const lower = t.toLowerCase()
+  // Padrões típicos do bot
+  if (lower.includes('opção inválida') || lower.includes('opcao invalida')) return true
+  if (config?.invalidOptionMessage && t.includes(config.invalidOptionMessage.slice(0, 40))) return true
+  if (lower.includes('responda com o número') || lower.includes('responda apenas com o número')) return true
+  if (lower.includes('perfeito!') || lower.includes('seu atendimento foi direcionado')) return true
+  if (/\d+\s*-\s*[\w\s]+/.test(t) && (lower.includes('vendas') || lower.includes('atendimento') || lower.includes('financeiro') || lower.includes('compras') || lower.includes('diretoria') || lower.includes('rh'))) return true
+  if (config?.mensagemForaHorario && t.includes(String(config.mensagemForaHorario || '').slice(0, 30))) return true
+  return false
+}
+
+/**
+ * Verifica se o operador humano enviou mensagem recentemente (pelo celular ou painel).
+ * Se a última mensagem 'out' não parece ser do bot, considera que humano está conversando.
+ */
+async function hasHumanIntervenedRecently(supabaseClient, company_id, conversa_id, config) {
+  try {
+    const { data: ultimas } = await supabaseClient
+      .from('mensagens')
+      .select('id, direcao, texto, criado_em')
+      .eq('conversa_id', conversa_id)
+      .eq('company_id', company_id)
+      .order('criado_em', { ascending: false })
+      .limit(10)
+
+    if (!ultimas || ultimas.length === 0) return false
+    const ultimaOut = ultimas.find((m) => m.direcao === 'out')
+    if (!ultimaOut) return false
+    if (looksLikeBotMessage(ultimaOut.texto, config)) return false
+    return true
+  } catch (e) {
+    console.warn('[chatbotTriage] hasHumanIntervenedRecently:', e?.message || e)
+    return false
+  }
+}
+
+/** Quantidade máxima de vezes que a mensagem "opção inválida" pode ser enviada por conversa. */
+const MAX_OPCAO_INVALIDA_ENVIOS = 2
+
+/**
+ * Conta quantas vezes já enviamos a mensagem de opção inválida para esta conversa.
+ */
+async function countOpcaoInvalidaSent(supabaseClient, company_id, conversa_id) {
+  try {
+    const { count, error } = await supabaseClient
+      .from('bot_logs')
+      .select('*', { count: 'exact', head: true })
+      .eq('company_id', company_id)
+      .eq('conversa_id', conversa_id)
+      .eq('tipo', 'opcao_invalida')
+
+    if (error) {
+      console.warn('[chatbotTriage] countOpcaoInvalidaSent:', error.message)
+      return 0
+    }
+    return Number(count) || 0
+  } catch (e) {
+    console.warn('[chatbotTriage] countOpcaoInvalidaSent:', e?.message || e)
+    return 0
+  }
+}
+
+/**
  * Monta o texto do menu a partir das opções ativas.
  */
 function buildMenuText(config) {
@@ -530,6 +599,23 @@ async function processIncomingMessage(ctx) {
     return { handled: false }
   }
 
+  // Human takeover: não processar se atendente já está conversando com o cliente
+  try {
+    const { data: conv } = await (supabaseClient || supabase)
+      .from('conversas')
+      .select('atendente_id, departamento_id')
+      .eq('id', conversa_id)
+      .eq('company_id', company_id)
+      .maybeSingle()
+    if (conv?.atendente_id != null) {
+      console.log('[chatbotTriage] ❌ skip: atendente assumiu a conversa — chatbot desativado', { conversa_id, atendente_id: conv.atendente_id })
+      return { handled: false }
+    }
+  } catch (e) {
+    console.warn('[chatbotTriage] Erro ao verificar atendente_id:', e?.message || e)
+    return { handled: false }
+  }
+
   const config = await getChatbotConfig(company_id)
   if (!config) {
     console.log('[chatbotTriage] ❌ skip: config não encontrada ou inválida para company_id', company_id)
@@ -749,6 +835,27 @@ async function processIncomingMessage(ctx) {
   }
 
   // Opção inválida: menu já foi enviado mas o cliente não digitou uma opção válida
+  // Regra 1: Se o operador humano enviou mensagem recentemente (celular ou painel), não se intrometer
+  const humanIntervened = await hasHumanIntervenedRecently(sb, company_id, conversa_id, config)
+  if (humanIntervened) {
+    console.log('[chatbotTriage] ❌ skip opção inválida: operador humano está conversando — chatbot não se intromete', {
+      conversa_id,
+      company_id,
+    })
+    return { handled: true }
+  }
+
+  // Regra 2: Enviar no máximo 2 vezes por conversa — evita spam
+  const opcaoInvalidaCount = await countOpcaoInvalidaSent(sb, company_id, conversa_id)
+  if (opcaoInvalidaCount >= MAX_OPCAO_INVALIDA_ENVIOS) {
+    console.log('[chatbotTriage] ❌ skip opção inválida: limite atingido (máx 2)', {
+      conversa_id,
+      company_id,
+      count: opcaoInvalidaCount,
+    })
+    return { handled: true }
+  }
+
   const invalidMsg =
     config.invalidOptionMessage || 'Opção inválida. Por favor, responda apenas com o número do setor desejado.'
   const menuText = buildMenuText(config)
@@ -760,6 +867,8 @@ async function processIncomingMessage(ctx) {
     conversa_id,
     company_id,
     textoRecebido: String(texto || '').slice(0, 50),
+    enviadoNumero: opcaoInvalidaCount + 1,
+    maxEnvio: MAX_OPCAO_INVALIDA_ENVIOS,
   })
 
   try {

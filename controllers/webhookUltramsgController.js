@@ -101,6 +101,17 @@ function normalizeUltramsgToZapi(body) {
   const videoUrl = msgType === 'video' ? (mediaUrl ?? toUrl(data.videoUrl) ?? toUrl(data.video)) : (toUrl(data.videoUrl) ?? toUrl(data.video))
   const stickerUrl = msgType === 'sticker' ? (mediaUrl ?? toUrl(data.stickerUrl) ?? toUrl(data.sticker)) : (toUrl(data.stickerUrl) ?? toUrl(data.sticker))
 
+  // Localização: UltraMsg envia type=location com lat/lng (ou latitude/longitude), address
+  const isLocationType = ['location', 'loc', 'geo'].includes(msgType)
+  const locLat = data.lat ?? data.latitude
+  const locLng = data.lng ?? data.longitude
+  const locationPayload = (isLocationType && (locLat != null || locLng != null)) ? {
+    latitude: Number(locLat) || 0,
+    longitude: Number(locLng) || 0,
+    address: data.address ?? data.body ?? '',
+    name: data.name ?? data.nameLocation ?? ''
+  } : undefined
+
   // Nome e foto: UltraMsg envia pushname = nome de quem ENVIOU.
   // Quando fromMe=true (message_create), pushname é NOSSO nome — NÃO usar para contato.
   const senderNameRaw = data.pushname ?? data.notify ?? data.senderName ?? data.name ?? data.formattedName ?? data.short ?? data.chatName ?? data.displayName ?? null
@@ -191,7 +202,8 @@ function normalizeUltramsgToZapi(body) {
     mentionedIds: Array.isArray(data.mentionedIds) ? data.mentionedIds : (data.mentionedIds ? [data.mentionedIds] : undefined),
     ultramsgHash: body.hash || undefined,
     ultramsgReferenceId: body.referenceId || undefined,
-    ...(contactPayload ? { contact: { ...contactPayload, vCard: contactPayload.vCard || bodyText } } : {})
+    ...(contactPayload ? { contact: { ...contactPayload, vCard: contactPayload.vCard || bodyText } } : {}),
+    ...(locationPayload ? { location: locationPayload } : {})
   }
 
   return zapiLike

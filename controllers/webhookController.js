@@ -353,7 +353,18 @@ exports.receberWebhook = async (req, res) => {
     }
 
     // 3) Chatbot de triagem (apenas mensagens recebidas do contato; não para mensagens enviadas por nós)
+    // Human takeover: não processar chatbot se atendente já assumiu a conversa
+    let atendente_id = null
     if (!isOutgoing && departamento_id == null && contactPhone) {
+      const { data: convEstado } = await supabase
+        .from('conversas')
+        .select('atendente_id')
+        .eq('id', conversa_id)
+        .eq('company_id', company_id)
+        .maybeSingle()
+      atendente_id = convEstado?.atendente_id ?? null
+    }
+    if (!isOutgoing && departamento_id == null && atendente_id == null && contactPhone) {
       try {
         const sendMessage = async (ph, msg, o = {}) => {
           const phoneId = o.phoneNumberId ?? phoneNumberId ?? undefined

@@ -462,7 +462,14 @@ function extractMessage(payload) {
     payload.message?.stickerUrl ??
     null
   if (stickerUrl && typeof stickerUrl === 'object') stickerUrl = stickerUrl.url ?? stickerUrl.stickerUrl ?? null
-  const locationUrl = payload.location?.url ?? payload.location?.thumbnailUrl ?? null
+  let locationUrl = payload.location?.url ?? payload.location?.thumbnailUrl ?? null
+  // Se não tiver URL mas tiver lat/lng (ex: UltraMsg), monta link do Google Maps
+  const loc = payload.location || {}
+  if (!locationUrl && (loc.latitude != null || loc.lat != null) && (loc.longitude != null || loc.lng != null)) {
+    const lat = Number(loc.latitude ?? loc.lat)
+    const lng = Number(loc.longitude ?? loc.lng)
+    if (!isNaN(lat) && !isNaN(lng)) locationUrl = `https://www.google.com/maps?q=${lat},${lng}`
+  }
 
   // participantPhone: remetente dentro do grupo (só relevante para grupos; usamos o valor resolvido por resolveConversationKeyFromZapi + o bruto do payload como fallback)
   const participantPhoneRaw = partPhoneResolved ||
@@ -1953,9 +1960,9 @@ exports.receberZapi = async (req, res) => {
                 insertMsg.tipo = 'sticker'
                 insertMsg.url = ex.stickerUrl
                 insertMsg.nome_arquivo = ex.fileName || 'sticker.webp'
-              } else if (ex.type === 'location' && ex.locationUrl) {
-                insertMsg.tipo = 'texto'
-                insertMsg.url = ex.locationUrl
+              } else if (ex.type === 'location') {
+                insertMsg.tipo = 'location'
+                if (ex.locationUrl) insertMsg.url = ex.locationUrl
                 insertMsg.nome_arquivo = 'localização'
               }
 
@@ -2347,9 +2354,9 @@ exports.receberZapi = async (req, res) => {
         insertMsg.tipo = 'sticker'
         insertMsg.url = stickerUrl
         insertMsg.nome_arquivo = fileName || 'sticker.webp'
-      } else if (type === 'location' && locationUrl) {
-        insertMsg.tipo = 'texto'
-        insertMsg.url = locationUrl
+      } else if (type === 'location') {
+        insertMsg.tipo = 'location'
+        if (locationUrl) insertMsg.url = locationUrl
         insertMsg.nome_arquivo = 'localização'
       } else if (type === 'contact') {
         insertMsg.tipo = 'contact'
