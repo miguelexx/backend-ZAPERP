@@ -101,15 +101,31 @@ function normalizeUltramsgToZapi(body) {
   const videoUrl = msgType === 'video' ? (mediaUrl ?? toUrl(data.videoUrl) ?? toUrl(data.video)) : (toUrl(data.videoUrl) ?? toUrl(data.video))
   const stickerUrl = msgType === 'sticker' ? (mediaUrl ?? toUrl(data.stickerUrl) ?? toUrl(data.sticker)) : (toUrl(data.stickerUrl) ?? toUrl(data.sticker))
 
-  // Localização: UltraMsg envia type=location com lat/lng (ou latitude/longitude), address
+  // Localização: UltraMsg envia type=location com lat/lng (ou latitude/longitude).
+  // UltraMSG pode enviar: data.lat/data.lng no root, ou data.location = { lat, lng, address }.
+  // IMPORTANTE: data.body para location pode conter Base64 do thumbnail (imagem estática do mapa) —
+  // NUNCA usar body como address quando for Base64 (ex: /9j/4AAQ = JPEG base64).
   const isLocationType = ['location', 'loc', 'geo'].includes(msgType)
-  const locLat = data.lat ?? data.latitude
-  const locLng = data.lng ?? data.longitude
+  const locData = data.location && typeof data.location === 'object' ? data.location : data
+  const locLat = locData.lat ?? locData.latitude ?? data.lat ?? data.latitude
+  const locLng = locData.lng ?? locData.longitude ?? data.lng ?? data.longitude
+  const isBodyBase64Image = (v) => {
+    if (!v || typeof v !== 'string') return false
+    const s = String(v).trim()
+    return s.startsWith('/9j/') || s.startsWith('iVB') || s.startsWith('data:image') ||
+      (s.length > 200 && /^[A-Za-z0-9+/=]+$/.test(s))
+  }
+  const locAddress = locData.address ?? data.address ?? ''
+  const locName = locData.name ?? locData.nameLocation ?? data.name ?? data.nameLocation ?? ''
+  const safeAddress = (locAddress && String(locAddress).trim()) || (!isBodyBase64Image(bodyText) && bodyText && String(bodyText).length < 300 ? String(bodyText).trim() : '')
   const locationPayload = (isLocationType && (locLat != null || locLng != null)) ? {
     latitude: Number(locLat) || 0,
     longitude: Number(locLng) || 0,
-    address: data.address ?? data.body ?? '',
-    name: data.name ?? data.nameLocation ?? ''
+    address: safeAddress,
+    name: (locName && String(locName).trim()) || '',
+    url: (locLat != null && locLng != null && !isNaN(Number(locLat)) && !isNaN(Number(locLng)))
+      ? `https://www.google.com/maps?q=${Number(locLat)},${Number(locLng)}`
+      : undefined
   } : undefined
 
   // Nome e foto: UltraMsg envia pushname = nome de quem ENVIOU.
@@ -146,6 +162,12 @@ function normalizeUltramsgToZapi(body) {
   const nomeGrupoRaw = isGroup ? (data.chatName ?? data.chat?.name ?? data.subject ?? data.groupName ?? body.chatName ?? body.chat?.name ?? null) : null
   const chatName = nomeGrupoRaw ? String(nomeGrupoRaw).trim() : null
 
+  // Para localização: se body for Base64 (thumbnail do mapa), usar texto descritivo em vez do Base64
+  const validCoords = locLat != null && locLng != null && !isNaN(Number(locLat)) && !isNaN(Number(locLng))
+  const bodyForPayload = (locationPayload && isBodyBase64Image(bodyText))
+    ? (safeAddress || (validCoords ? `${locLat},${locLng}` : null) || '(localização)')
+    : bodyText
+
   const zapiLike = {
     instanceId: body.instanceId ?? body.instance_id,
     instance_id: body.instanceId ?? body.instance_id,
@@ -163,9 +185,9 @@ function normalizeUltramsgToZapi(body) {
     messageId,
     zaapId: messageId,
     id: messageId,
-    body: bodyText,
-    message: bodyText,
-    text: { message: bodyText },
+    body: bodyForPayload,
+    message: bodyForPayload,
+    text: { message: bodyForPayload },
     type: (msgType === 'ptt' ? 'audio' : (isContactType ? 'contact' : msgType)),
     participantPhone: participantPhone || undefined,
     participant: participantPhone ? `${participantPhone}@c.us` : undefined,

@@ -497,9 +497,11 @@ function extractMessage(payload) {
   } else if (type === 'location') {
     const loc = payload.location || {}
     const parts = [loc.name, loc.address].filter(Boolean).map(String).map(s => s.trim())
-    // inclui coordenadas quando não há nome/endereço (campo oficial: latitude + longitude)
-    const coords = (loc.latitude != null && loc.longitude != null)
-      ? `${loc.latitude},${loc.longitude}`
+    // inclui coordenadas quando não há nome/endereço (latitude/longitude ou lat/lng — UltraMSG)
+    const lat = loc.latitude ?? loc.lat
+    const lng = loc.longitude ?? loc.lng
+    const coords = (lat != null && lng != null && !isNaN(Number(lat)) && !isNaN(Number(lng)))
+      ? `${Number(lat)},${Number(lng)}`
       : ''
     texto = parts.length
       ? parts.join(' • ') + (coords ? ` (${coords})` : '')
