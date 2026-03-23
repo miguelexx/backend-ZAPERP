@@ -143,11 +143,14 @@ async function configureChatbotForCompany(companyId, customConfig = {}) {
 
     const { error } = await supabase
       .from('ia_config')
-      .upsert({
-        company_id: companyId,
-        config: config,
-        updated_at: new Date().toISOString()
-      })
+      .upsert(
+        {
+          company_id: companyId,
+          config: config,
+          updated_at: new Date().toISOString()
+        },
+        { onConflict: 'company_id' }
+      )
 
     if (error) {
       throw new Error(`Erro ao salvar configuração: ${error.message}`)
@@ -281,11 +284,14 @@ async function toggleChatbotForCompany(companyId, enabled) {
 
     const { error: updateError } = await supabase
       .from('ia_config')
-      .upsert({
-        company_id: companyId,
-        config: config,
-        updated_at: new Date().toISOString()
-      })
+      .upsert(
+        {
+          company_id: companyId,
+          config: config,
+          updated_at: new Date().toISOString()
+        },
+        { onConflict: 'company_id' }
+      )
 
     if (updateError) {
       throw new Error(`Erro ao atualizar configuração: ${updateError.message}`)
