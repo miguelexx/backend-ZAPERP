@@ -3422,6 +3422,18 @@ exports.enviarArquivo = async (req, res) => {
     const tipo = inferirTipoArquivo(file)
     const pathUrl = `/uploads/${file.filename}`
 
+    // Áudio vazio ou corrompido → evita "0:00" e falha no WhatsApp
+    const fs = require('fs')
+    const MIN_BYTES_AUDIO = 50
+    const isAudio = tipo === 'audio' || tipo === 'voice'
+    const fileSize = Number(file.size) || (file.path && fs.existsSync(file.path) ? fs.statSync(file.path).size : 0)
+    if (isAudio && fileSize < MIN_BYTES_AUDIO) {
+      if (file.path && fs.existsSync(file.path)) fs.unlinkSync(file.path)
+      return res.status(400).json({
+        error: `Áudio muito curto ou vazio (${fileSize} bytes). Grave por pelo menos 1 segundo antes de enviar.`
+      })
+    }
+
     const { data: conversa } = await supabase
       .from('conversas')
       .select('id, telefone, cliente_id, tipo, chat_lid')
@@ -3475,7 +3487,16 @@ exports.enviarArquivo = async (req, res) => {
       .eq('company_id', Number(company_id))
       .eq('id', Number(conversa_id))
 
-    const basePayload = { ...msg, conversa_id: msg.conversa_id ?? Number(conversa_id), status: msg.status || 'pending', status_mensagem: msg.status_mensagem || msg.status || 'pending', direcao: 'out' }
+    const baseUrl = (process.env.APP_URL || process.env.BASE_URL || '').replace(/\/$/, '')
+    const urlAbsoluta = baseUrl && pathUrl ? `${baseUrl}${pathUrl}` : null
+    const basePayload = {
+      ...msg,
+      conversa_id: msg.conversa_id ?? Number(conversa_id),
+      status: msg.status || 'pending',
+      status_mensagem: msg.status_mensagem || msg.status || 'pending',
+      direcao: 'out',
+      ...(urlAbsoluta && { url_absoluta: urlAbsoluta })
+    }
     const novaMsgPayload = await enrichMensagemComAutorUsuario(supabase, company_id, basePayload)
     emitirEventoEmpresaConversa(io, company_id, conversa_id, io.EVENTS?.NOVA_MENSAGEM || 'nova_mensagem', novaMsgPayload)
     const convPayload = { id: Number(conversa_id) }
@@ -3486,8 +3507,7 @@ exports.enviarArquivo = async (req, res) => {
 
     const { nome: usuarioNome } = await getUsuarioParaEnvioCliente(supabase, company_id, user_id)
     const captionCliente = usuarioNome ? `— ${usuarioNome}` : ''
-    const baseUrl = (process.env.APP_URL || process.env.BASE_URL || '').replace(/\/$/, '')
-    const fullUrl = baseUrl ? `${baseUrl}${pathUrl}` : null
+    const fullUrl = urlAbsoluta
     const isLocalhost = /localhost|127\.0\.0\.1/i.test(baseUrl)
 
     const emitirStatusErro = () => {
@@ -3537,6 +3557,9 @@ exports.enviarArquivo = async (req, res) => {
     if (telefoneParaEnvio) {
       const provider = getProvider()
       const usarUploadMedia = file.path && provider?.uploadMedia
+      if (process.env.NODE_ENV !== 'production') {
+        console.log('[enviarArquivo]', { conversa_id, tipo, fileSize, telefone: telefoneParaEnvio?.slice(-8), usarUploadMedia })
+      }
       if (usarUploadMedia) {
         setImmediate(async () => {
           try {

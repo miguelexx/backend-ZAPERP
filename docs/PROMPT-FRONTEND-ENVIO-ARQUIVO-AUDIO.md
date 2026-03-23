@@ -146,7 +146,19 @@ Tamanho máximo: **32 MB**.
 
 ---
 
-## 8. Checklist de validação
+## 8. url_absoluta (reprodução de áudio)
+
+O evento `nova_mensagem` pode incluir `url_absoluta` quando APP_URL está configurado. Use-a para reproduzir áudio/vídeo:
+
+```javascript
+const src = msg.url_absoluta || `${API_BASE}${msg.url}` || msg.url
+```
+
+## 9. Gravação mínima
+
+O backend rejeita áudios com menos de 50 bytes (gravação vazia ou muito curta). **Peça ao usuário gravar por pelo menos 1 segundo** antes de enviar.
+
+## 10. Checklist de validação
 
 - [ ] Usa `FormData` para montar o corpo da requisição
 - [ ] Não define `Content-Type` manualmente (exceto para excluir headers customizados)
@@ -157,7 +169,7 @@ Tamanho máximo: **32 MB**.
 
 ---
 
-## 9. Erros comuns e soluções
+## 11. Erros comuns e soluções
 
 | Erro | Causa | Solução |
 |------|-------|---------|
@@ -166,10 +178,11 @@ Tamanho máximo: **32 MB**.
 | 401 Unauthorized | Token ausente ou inválido | Incluir `Authorization: Bearer <token>` |
 | CORS | API em outro domínio sem CORS configurado | Verificar CORS no backend para o domínio do frontend |
 | "Tipo de arquivo não permitido" | MIME não aceito | Verificar se o tipo está na lista (seção 7) |
+| "Áudio muito curto ou vazio" | Menos de 1s de gravação | Grave por pelo menos 1 segundo antes de enviar |
 
 ---
 
-## 10. Teste com cURL
+## 12. Teste com cURL
 
 ```bash
 # Substitua TOKEN e CONVERSA_ID
@@ -182,7 +195,7 @@ Ou use o script: `TOKEN=xxx CONVERSA_ID=468 BASE_URL=https://zaperpapi.wmsistema
 
 ---
 
-## 11. Resposta de sucesso
+## 13. Resposta de sucesso
 
 ```json
 {
