@@ -26,9 +26,6 @@ const ALLOWED_MIME = new Map([
   ['audio/wav', '.wav'],
   ['audio/x-wav', '.wav'],
   ['audio/mp4', '.m4a'], // Safari/iOS às vezes envia m4a como audio/mp4
-  ['audio/amr', '.amr'],
-  ['audio/3gpp', '.3gp'],
-  ['audio/3gpp2', '.3g2'],
   // Vídeo
   ['video/mp4', '.mp4'],
   ['video/webm', '.webm'],
@@ -76,12 +73,9 @@ const upload = multer({
   fileFilter: (req, file, cb) => {
     const baseMime = getBaseMime(file.mimetype)
     let ok = ALLOWED_MIME.has(baseMime)
-    // Fallback 1: Blob de áudio sem mimetype (navegadores/MediaRecorder)
+    // Fallback: Blob de áudio sem mimetype explícito (alguns navegadores/MediaRecorder)
     if (!ok && (!baseMime || baseMime === 'application/octet-stream')) {
       if (AUDIO_FIELD_NAMES.includes(file.fieldname)) ok = true
-      // Fallback 2: extensão do nome sugere áudio
-      const name = (file.originalname || '').toLowerCase()
-      if (!ok && /\.(webm|ogg|opus|mp3|m4a|wav|aac|amr|3gp|3g2)$/.test(name)) ok = true
     }
     if (ok) cb(null, true)
     else cb(new Error(`Tipo de arquivo não permitido: ${baseMime || file.mimetype}`), false)

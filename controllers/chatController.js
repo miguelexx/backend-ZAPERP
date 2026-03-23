@@ -3381,18 +3381,14 @@ exports.removerTagConversa = async (req, res) => {
     return res.status(500).json({ error: 'Erro ao remover tag' })
   }
 }
-const VOICE_FIELD_NAMES = ['audio', 'recording', 'voice', 'blob', 'file']
 function inferirTipoArquivo(file) {
-  const m = String(file.mimetype || '').toLowerCase().split(';')[0].trim()
+  const m = String(file.mimetype || '').toLowerCase()
   const n = String(file.originalname || '').toLowerCase()
-  const fn = String(file.fieldname || '').toLowerCase()
   // Figurinha (WhatsApp): geralmente WEBP
   if (m === 'image/webp' || /\.webp$/i.test(n)) return 'sticker'
   if (m.startsWith('image/')) return 'imagem'
-  // Voice note: UltraMsg aceita opus. MediaRecorder do navegador produz webm/ogg com opus.
+  // Voice note: UltraMsg exige codec opus (contracted ultramsg-contract)
   if (m === 'audio/opus' || /\.opus$/i.test(n)) return 'voice'
-  if ((m === 'audio/webm' || m === 'audio/ogg') && VOICE_FIELD_NAMES.includes(fn)) return 'voice'
-  if (/\.(webm|ogg)$/i.test(n) && VOICE_FIELD_NAMES.includes(fn)) return 'voice'
   if (m.startsWith('audio/') || /\.(mp3|ogg|wav|m4a|webm|aac)$/i.test(n)) return 'audio'
   if (m.startsWith('video/')) return 'video'
   return 'arquivo'
@@ -3405,13 +3401,7 @@ exports.enviarArquivo = async (req, res) => {
     const io = req.app.get('io')
 
     if (!req.file) {
-      const ct = req.get('content-type') || ''
-      const hint = !ct.includes('boundary=')
-        ? 'Use FormData e NÃO defina Content-Type manualmente (o navegador/axios deve enviar com boundary). Envie o arquivo no campo "file" ou "audio".'
-        : 'Envie o arquivo no campo "file" ou "audio" (multipart/form-data).'
-      if (process.env.NODE_ENV !== 'production') {
-        console.warn('[enviarArquivo] Arquivo ausente. content-type:', ct, '| files:', req.files?.length ?? 0)
-      }
+      const hint = 'Envie multipart/form-data com campo "file" ou "audio"'
       return res.status(400).json({ error: "Arquivo não enviado. " + hint })
     }
 
@@ -3421,18 +3411,6 @@ exports.enviarArquivo = async (req, res) => {
     const file = req.file
     const tipo = inferirTipoArquivo(file)
     const pathUrl = `/uploads/${file.filename}`
-
-    // Áudio vazio ou corrompido → evita "0:00" e falha no WhatsApp
-    const fs = require('fs')
-    const MIN_BYTES_AUDIO = 50
-    const isAudio = tipo === 'audio' || tipo === 'voice'
-    const fileSize = Number(file.size) || (file.path && fs.existsSync(file.path) ? fs.statSync(file.path).size : 0)
-    if (isAudio && fileSize < MIN_BYTES_AUDIO) {
-      if (file.path && fs.existsSync(file.path)) fs.unlinkSync(file.path)
-      return res.status(400).json({
-        error: `Áudio muito curto ou vazio (${fileSize} bytes). Grave por pelo menos 1 segundo antes de enviar.`
-      })
-    }
 
     const { data: conversa } = await supabase
       .from('conversas')
@@ -3487,16 +3465,7 @@ exports.enviarArquivo = async (req, res) => {
       .eq('company_id', Number(company_id))
       .eq('id', Number(conversa_id))
 
-    const baseUrl = (process.env.APP_URL || process.env.BASE_URL || '').replace(/\/$/, '')
-    const urlAbsoluta = baseUrl && pathUrl ? `${baseUrl}${pathUrl}` : null
-    const basePayload = {
-      ...msg,
-      conversa_id: msg.conversa_id ?? Number(conversa_id),
-      status: msg.status || 'pending',
-      status_mensagem: msg.status_mensagem || msg.status || 'pending',
-      direcao: 'out',
-      ...(urlAbsoluta && { url_absoluta: urlAbsoluta })
-    }
+    const basePayload = { ...msg, conversa_id: msg.conversa_id ?? Number(conversa_id), status: msg.status || 'pending', status_mensagem: msg.status_mensagem || msg.status || 'pending', direcao: 'out' }
     const novaMsgPayload = await enrichMensagemComAutorUsuario(supabase, company_id, basePayload)
     emitirEventoEmpresaConversa(io, company_id, conversa_id, io.EVENTS?.NOVA_MENSAGEM || 'nova_mensagem', novaMsgPayload)
     const convPayload = { id: Number(conversa_id) }
@@ -3507,22 +3476,15 @@ exports.enviarArquivo = async (req, res) => {
 
     const { nome: usuarioNome } = await getUsuarioParaEnvioCliente(supabase, company_id, user_id)
     const captionCliente = usuarioNome ? `— ${usuarioNome}` : ''
-    const fullUrl = urlAbsoluta
+    const baseUrl = (process.env.APP_URL || process.env.BASE_URL || '').replace(/\/$/, '')
+    const fullUrl = baseUrl ? `${baseUrl}${pathUrl}` : null
     const isLocalhost = /localhost|127\.0\.0\.1/i.test(baseUrl)
 
-    const emitirStatusErro = () => {
-      const io2 = req.app?.get('io')
-      if (io2) {
-        const payload = { mensagem_id: msg.id, conversa_id: Number(conversa_id), status: 'erro', status_mensagem: 'erro' }
-        io2.to(`empresa_${company_id}`).to(`conversa_${conversa_id}`).to(`usuario_${user_id}`).emit(io2.EVENTS?.STATUS_MENSAGEM || 'status_mensagem', payload)
-      }
-    }
-
-    const sendMediaWithUrl = async (mediaUrl) => {
+    const sendMediaWithUrl = (mediaUrl) => {
       const provider = getProvider()
       const phone = telefoneParaEnvio
       const opts = { companyId: company_id, conversaId: conversa_id }
-      let promise =
+      const promise =
         tipo === 'voice' && provider.sendVoice
           ? provider.sendVoice(phone, mediaUrl, opts)
           : tipo === 'audio' && provider.sendAudio
@@ -3536,61 +3498,62 @@ exports.enviarArquivo = async (req, res) => {
                 : provider.sendFile
                   ? provider.sendFile(phone, mediaUrl, file.originalname || '', { ...opts, caption: captionCliente })
                   : Promise.resolve(false)
-      try {
-        let ok = await promise
-        if (!ok && (tipo === 'audio' || tipo === 'voice') && provider.sendFile) {
-          console.warn('WhatsApp: sendAudio/sendVoice falhou, tentando enviar como documento:', phone)
-          ok = await provider.sendFile(phone, mediaUrl, file.originalname || 'audio.webm', { ...opts, caption: captionCliente })
-        }
-        if (!ok) {
-          console.warn('WhatsApp: falha ao enviar mídia para', phone, tipo, '| url:', mediaUrl?.slice(0, 60) + '...')
-          await supabase.from('mensagens').update({ status: 'erro' }).eq('company_id', company_id).eq('id', msg.id)
-          emitirStatusErro()
-        }
-      } catch (e) {
-        console.error('WhatsApp enviar mídia:', e)
-        await supabase.from('mensagens').update({ status: 'erro' }).eq('company_id', company_id).eq('id', msg.id)
-        emitirStatusErro()
-      }
-    }
-
-    if (telefoneParaEnvio) {
-      const provider = getProvider()
-      const usarUploadMedia = file.path && provider?.uploadMedia
-      if (process.env.NODE_ENV !== 'production') {
-        console.log('[enviarArquivo]', { conversa_id, tipo, fileSize, telefone: telefoneParaEnvio?.slice(-8), usarUploadMedia })
-      }
-      if (usarUploadMedia) {
-        setImmediate(async () => {
-          try {
-            const result = await provider.uploadMedia(file.path, file.originalname || 'file', { companyId: company_id })
-            if (result?.ok && result?.url) {
-              await sendMediaWithUrl(result.url)
-            } else {
-              if (fullUrl && !isLocalhost) {
-                console.warn('⚠️ uploadMedia falhou, tentando URL própria:', result?.error || '')
-                await sendMediaWithUrl(fullUrl)
-              } else {
-                console.warn('⚠️ UltraMsg uploadMedia falhou; mídia não enviada.', result?.error || '')
-                await supabase.from('mensagens').update({ status: 'erro' }).eq('company_id', company_id).eq('id', msg.id)
-                emitirStatusErro()
-              }
-            }
-          } catch (e) {
-            console.error('WhatsApp uploadMedia:', e)
-            if (fullUrl && !isLocalhost) {
-              console.warn('⚠️ uploadMedia falhou, tentando URL própria')
-              await sendMediaWithUrl(fullUrl)
-            } else {
-              await supabase.from('mensagens').update({ status: 'erro' }).eq('company_id', company_id).eq('id', msg.id)
-              emitirStatusErro()
+      promise
+        .then(async (ok) => {
+          if (!ok) {
+            console.warn('WhatsApp: falha ao enviar mídia para', phone, tipo)
+            await supabase.from('mensagens').update({ status: 'erro' }).eq('company_id', company_id).eq('id', msg.id)
+            const io2 = req.app?.get('io')
+            if (io2) {
+              const payload = { mensagem_id: msg.id, conversa_id: Number(conversa_id), status: 'erro', status_mensagem: 'erro' }
+              io2.to(`empresa_${company_id}`).to(`conversa_${conversa_id}`).to(`usuario_${user_id}`).emit(io2.EVENTS?.STATUS_MENSAGEM || 'status_mensagem', payload)
             }
           }
         })
-      } else if (fullUrl && !isLocalhost) {
+        .catch(async (e) => {
+          console.error('WhatsApp enviar mídia:', e)
+          await supabase.from('mensagens').update({ status: 'erro' }).eq('company_id', company_id).eq('id', msg.id)
+          const io2 = req.app?.get('io')
+          if (io2) {
+            const payload = { mensagem_id: msg.id, conversa_id: Number(conversa_id), status: 'erro', status_mensagem: 'erro' }
+            io2.to(`empresa_${company_id}`).to(`conversa_${conversa_id}`).to(`usuario_${user_id}`).emit(io2.EVENTS?.STATUS_MENSAGEM || 'status_mensagem', payload)
+          }
+        })
+    }
+
+    if (telefoneParaEnvio) {
+      if (fullUrl && !isLocalhost) {
         setImmediate(() => sendMediaWithUrl(fullUrl))
-      } else if (!provider?.uploadMedia) {
-        console.warn('⚠️ Provider sem uploadMedia; mídia não enviada ao WhatsApp.')
+      } else if ((!baseUrl || isLocalhost) && file.path) {
+        const provider = getProvider()
+        if (provider?.uploadMedia) {
+          setImmediate(async () => {
+            try {
+              const result = await provider.uploadMedia(file.path, file.originalname || 'file', { companyId: company_id })
+              if (result?.ok && result?.url) {
+                sendMediaWithUrl(result.url)
+              } else {
+                console.warn('⚠️ UltraMsg uploadMedia falhou; mídia não enviada.', result?.error || '')
+                await supabase.from('mensagens').update({ status: 'erro' }).eq('company_id', company_id).eq('id', msg.id)
+                const io2 = req.app?.get('io')
+                if (io2) {
+                  io2.to(`empresa_${company_id}`).to(`conversa_${conversa_id}`).to(`usuario_${user_id}`).emit(io2.EVENTS?.STATUS_MENSAGEM || 'status_mensagem', { mensagem_id: msg.id, conversa_id: Number(conversa_id), status: 'erro', status_mensagem: 'erro' })
+                }
+              }
+            } catch (e) {
+              console.error('WhatsApp uploadMedia:', e)
+              await supabase.from('mensagens').update({ status: 'erro' }).eq('company_id', company_id).eq('id', msg.id)
+              const io2 = req.app?.get('io')
+              if (io2) {
+                io2.to(`empresa_${company_id}`).to(`conversa_${conversa_id}`).to(`usuario_${user_id}`).emit(io2.EVENTS?.STATUS_MENSAGEM || 'status_mensagem', { mensagem_id: msg.id, conversa_id: Number(conversa_id), status: 'erro', status_mensagem: 'erro' })
+              }
+            }
+          })
+        } else if (!baseUrl) {
+          console.warn('⚠️ APP_URL/BASE_URL não configurado; mídia não enviada ao WhatsApp.')
+        } else {
+          console.warn('⚠️ APP_URL é localhost e provider sem uploadMedia; mídia não enviada ao WhatsApp.')
+        }
       } else if (!baseUrl) {
         console.warn('⚠️ APP_URL/BASE_URL não configurado; mídia não enviada ao WhatsApp.')
       }

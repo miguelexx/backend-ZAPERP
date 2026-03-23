@@ -312,11 +312,9 @@ if (hasFrontendDist) {
 // =====================================================
 // eslint-disable-next-line no-unused-vars
 app.use((err, req, res, next) => {
-  // Multer / busboy: tipo não permitido, tamanho excedido, boundary ausente
-  if (err && (err.code === 'LIMIT_FILE_SIZE' || err.code === 'LIMIT_UNEXPECTED_FILE' || (err.message && (err.message.includes('não permitido') || err.message.includes('boundary') || err.message.includes('Boundary'))))) {
-    let msg = err.message || 'Arquivo inválido'
-    if (err.code === 'LIMIT_UNEXPECTED_FILE') msg = 'Use multipart/form-data com campo "file" ou "audio"'
-    else if (/boundary|Boundary/i.test(String(err.message || ''))) msg = 'Content-Type inválido. Use FormData e NÃO defina Content-Type manualmente — deixe o axios/navegador definir com boundary.'
+  // Multer: tipo não permitido, tamanho excedido ou campo inesperado
+  if (err && (err.code === 'LIMIT_FILE_SIZE' || err.code === 'LIMIT_UNEXPECTED_FILE' || (err.message && err.message.includes('não permitido')))) {
+    const msg = err.code === 'LIMIT_UNEXPECTED_FILE' ? 'Use multipart/form-data com campo "file" ou "audio"' : (err.message || 'Arquivo inválido')
     return res.status(400).json({ error: msg })
   }
   // CORS
