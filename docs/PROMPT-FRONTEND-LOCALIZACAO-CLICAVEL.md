@@ -1,129 +1,140 @@
-# Prompt para Frontend — Mensagem de Localização Clicável
+# Prompt Frontend — Mensagem de Localização (Visual Melhorado)
 
-Use este prompt ao implementar a exibição de mensagens de **localização** no chat, permitindo que o usuário visualize no mapa a localização enviada pelo cliente.
-
----
-
-## Objetivo
-
-Quando o **cliente** envia sua localização pelo WhatsApp, a mensagem deve aparecer no sistema de forma **clicável**, abrindo o Google Maps (ou outro serviço de mapas) para visualizar a localização enviada.
+Implemente o componente de localização no chat com **visual profissional**, identificando o tipo (atual vs tempo real) e layout limpo.
 
 ---
 
-## Estrutura de dados (Backend)
-
-### Mensagem de localização (`tipo === 'location'`)
-
-Cada mensagem de localização possui:
+## Dados do backend
 
 ```json
 {
   "id": 456,
-  "texto": "Rua ABC, 123 • São Paulo (23.5505,-46.6333)",
+  "texto": "-20.02893, -48.93106",
   "tipo": "location",
-  "url": "https://www.google.com/maps?q=-23.5505,-46.6333",
+  "url": "https://www.google.com/maps?q=-20.02893,-48.93106",
   "direcao": "in | out",
   "criado_em": "2025-03-23T14:30:00.000Z",
   "status": "sent | delivered | read",
-  "whatsapp_id": "3EB0...",
   "nome_arquivo": "localização"
 }
 ```
 
-- **`texto`**: Descrição da localização (endereço, nome do lugar e/ou coordenadas) — fallback legível
-- **`url`**: Link para Google Maps no formato `https://www.google.com/maps?q=LAT,LNG` — **clicável**
-- **`tipo`**: Sempre `'location'` para mensagens de localização
-- **`nome_arquivo`**: Sempre `"localização"` (pode ser ignorado no frontend)
-
-### APIs e eventos
-
-- **GET /chats/:id** (detalharChat): mensagens incluem `tipo: 'location'` e `url` quando for localização
-- **Socket `nova_mensagem`**: payload inclui `tipo: 'location'` e `url` para localizações recebidas
-- **POST /chats/:id/localizacao**: envia localização; a mensagem chega via `nova_mensagem` com `tipo: 'location'`
+- **`tipo`**: `'location'` — sempre verificar antes de renderizar
+- **`url`**: Link para Google Maps (`https://www.google.com/maps?q=LAT,LNG`)
+- **`texto`**: Endereço + coordenadas ou só coordenadas — **não exibir raw**; tratar e formatar
 
 ---
 
-## Implementação no frontend
+## Regras de implementação
 
-### Regra de detecção
+### 1. Identificação do tipo
 
-```javascript
-// Sempre verificar o tipo da mensagem
-if (msg.tipo === 'location') {
-  // Renderizar componente de localização clicável
-}
+| Tipo | Condição | Label |
+|------|----------|-------|
+| **Localização atual** | `texto` contém só números/coordenadas OU `location_live` ausente/false | "Localização atual" |
+| **Localização em tempo real** | `msg.location_live === true` (futuro backend) | "Localização em tempo real" |
+
+Enquanto o backend não enviar `location_live`, usar como "Localização atual".
+
+### 2. Formatação das coordenadas
+
+- Se `texto` for só coordenadas (ex: `-20.02893, -48.93106`), extrair lat/lng e formatar com máx. 5 decimais
+- Nunca exibir números com 10+ casas decimais
+- Separe lat e lng visualmente (ex.: em linhas ou com vírgula + espaço)
+
+### 3. Layout do card (estilo WhatsApp)
+
+```
+┌─────────────────────────────────────┐
+│ [Ícone]  Localização atual          │  ← Badge/tag pequeno
+├─────────────────────────────────────┤
+│ 📍                                  │
+│ Rua ABC, 123 • Bairro               │  ← Endereço se houver
+│ -20.02893, -48.93106                │  ← Coordenadas formatadas
+│                                     │
+│ [🔗 Abrir no mapa →]                │  ← Botão/link destacado
+├─────────────────────────────────────┤
+│ 12:01                    ✓✓         │  ← Hora + status
+└─────────────────────────────────────┘
 ```
 
-### Componente (exemplo React)
+### 4. Componente React (exemplo)
 
 ```tsx
 function MessageLocation({ msg }: { msg: Mensagem }) {
   const { texto, url, criado_em, status, direcao } = msg
+  const isLive = msg.location_live === true
+  const mapUrl = url || `https://www.google.com/maps/search/${encodeURIComponent(texto || 'localização')}`
+
+  // Extrair endereço vs coords (texto pode ser "Endereço • (lat, lng)" ou só "lat, lng")
+  const hasAddress = texto && texto.includes('•') && !/^-?\d+\.?\d*,\s*-?\d+\.?\d*$/.test(texto.trim())
+  const displayText = hasAddress ? texto : (texto || 'Ver localização')
+  const coordsOnly = texto?.match(/\(?(-?\d+\.?\d*),\s*(-?\d+\.?\d*)\)?/) 
+    ? `📍 ${texto.replace(/^\(|\)$/g, '').trim()}` 
+    : null
 
   return (
-    <div className={`bubble ${direcao === 'out' ? 'bubble-out' : 'bubble-in'}`}>
-      <a
-        href={url || `https://www.google.com/maps/search/${encodeURIComponent(texto || 'localização')}`}
-        target="_blank"
-        rel="noopener noreferrer"
-        className="location-link"
-      >
-        <span className="location-icon">📍</span>
-        <span className="location-text">{texto || 'Ver localização'}</span>
-        <span className="location-hint">Clique para abrir no mapa →</span>
-      </a>
-      <span className="message-time">
-        {formatTime(criado_em)}
-        <StatusIcon status={status} />
-      </span>
+    <div className={`message-bubble message-bubble--${direcao}`}>
+      <div className="location-card">
+        <span className="location-badge">
+          {isLive ? '🟢 Em tempo real' : '📍 Localização atual'}
+        </span>
+        <div className="location-content">
+          {hasAddress && <p className="location-address">{displayText}</p>}
+          {coordsOnly && <p className="location-coords">{coordsOnly}</p>}
+          <a
+            href={mapUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="location-cta"
+          >
+            Abrir no mapa →
+          </a>
+        </div>
+        <div className="message-footer">
+          <span className="message-time">{formatTime(criado_em)}</span>
+          <StatusIcon status={status} />
+        </div>
+      </div>
     </div>
   )
 }
 ```
 
-### Fallback quando `url` está ausente
+### 5. CSS (referência)
 
-Se `url` for `null` ou vazio, use o `texto` como busca no Google Maps:
+```css
+.location-card {
+  padding: 12px;
+  border-radius: 8px;
+  background: var(--bubble-bg);
+  max-width: 280px;
+}
+.location-badge {
+  font-size: 11px;
+  color: var(--muted);
+  display: block;
+  margin-bottom: 8px;
+}
+.location-address { font-size: 14px; margin: 0 0 4px; }
+.location-coords { font-size: 12px; opacity: 0.9; margin: 0 0 8px; }
+.location-cta {
+  display: inline-block;
+  color: var(--primary);
+  font-size: 13px;
+  text-decoration: none;
+  font-weight: 500;
+}
+.location-cta:hover { text-decoration: underline; }
 ```
-https://www.google.com/maps/search/${encodeURIComponent(texto || 'localização')}
-```
-
----
-
-## Layout visual (referência WhatsApp)
-
-1. **Balão da mensagem**
-   - Cor: verde claro (`#dcf8c6`) para `direcao === 'out'`; cinza claro para `direcao === 'in'`
-   - Raio de borda arredondado
-   - Link clicável com efeito hover
-
-2. **Conteúdo**
-   - Ícone de localização (📍 ou similar)
-   - Texto descritivo (endereço ou coordenadas)
-   - Indicação visual de que é clicável ("Clique para abrir no mapa" ou ícone de link externo)
-
-3. **Horário e status**
-   - Formato HH:mm
-   - Ticks de status (✓ enviado, ✓✓ entregue, ✓✓ lido)
 
 ---
 
 ## Checklist
 
-- [ ] Mensagens com `tipo === 'location'` renderizam como link clicável (não como texto simples)
-- [ ] Clique abre Google Maps em nova aba (`target="_blank"`)
-- [ ] Usa `rel="noopener noreferrer"` por segurança
-- [ ] Fallback quando `url` ausente: usar `texto` em `/maps/search/`
-- [ ] Layout responsivo e alinhado ao estilo WhatsApp
-- [ ] Integração com `nova_mensagem` (localização aparece em tempo real)
-- [ ] Endpoint de envio: `POST /chats/:id/localizacao` com body `{ address?, lat, lng }`
-
----
-
-## Envio de localização (atendente → cliente)
-
-| Método | URL | Body |
-|--------|-----|------|
-| POST | `/api/chats/:id/localizacao` | `{ address?: string, lat: number, lng: number }` |
-
-O `:id` é o **ID da conversa**. Os campos `lat` e `lng` são obrigatórios e devem ser números válidos (latitude e longitude).
+- [ ] `msg.tipo === 'location'` renderiza card de localização
+- [ ] Badge: "Localização atual" (ou "Em tempo real" se `location_live`)
+- [ ] Coordenadas com no máx. 5–6 decimais
+- [ ] Link "Abrir no mapa" abre Google Maps em nova aba
+- [ ] Layout em card, não texto solto
+- [ ] Hora + ticks de status no rodapé

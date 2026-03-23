@@ -497,15 +497,15 @@ function extractMessage(payload) {
   } else if (type === 'location') {
     const loc = payload.location || {}
     const parts = [loc.name, loc.address].filter(Boolean).map(String).map(s => s.trim())
-    // inclui coordenadas quando não há nome/endereço (latitude/longitude ou lat/lng — UltraMSG)
     const lat = loc.latitude ?? loc.lat
     const lng = loc.longitude ?? loc.lng
-    const coords = (lat != null && lng != null && !isNaN(Number(lat)) && !isNaN(Number(lng)))
-      ? `${Number(lat)},${Number(lng)}`
-      : ''
+    const latNum = Number(lat)
+    const lngNum = Number(lng)
+    const hasValidCoords = lat != null && lng != null && !isNaN(latNum) && !isNaN(lngNum)
+    const coordsFormatted = hasValidCoords ? `${Number(latNum).toFixed(5)}, ${Number(lngNum).toFixed(5)}` : ''
     texto = parts.length
-      ? parts.join(' • ') + (coords ? ` (${coords})` : '')
-      : (coords || loc.url || '(localização)')
+      ? parts.join(' • ') + (coordsFormatted ? ` (${coordsFormatted})` : '')
+      : (coordsFormatted || loc.url || '(localização)')
   } else if (type === 'contact') {
     const c = payload.contact || {}
     texto = (c.displayName && String(c.displayName).trim()) || (c.formattedName && String(c.formattedName).trim()) || (c.vCard && String(c.vCard).slice(0, 120)) || '(contato)'

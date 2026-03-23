@@ -373,14 +373,25 @@ function buildMensagemFinalizacao(template, vars = {}) {
 
 /**
  * Monta a mensagem completa de boas-vindas (welcome + menu).
- * Se welcomeMessage já contiver o menu (ex: "1 - Atendimento"), usa como está.
+ * Se welcomeMessage já contiver o menu completo, usa APENAS o que foi configurado.
+ * Detecta: "1 - Label", "1️⃣ Label", ou múltiplas linhas numeradas.
  */
 function buildWelcomeMessage(config) {
   const welcome = String(config?.welcomeMessage || '').trim()
   const menu = buildMenuText(config)
   if (!welcome && !menu) return null
-  if (welcome && /\d+\s*-\s*\w+/.test(welcome)) return welcome
   if (!menu) return welcome
+  // Se welcomeMessage foi configurado e já contém menu (ex: "1 - X", "1️⃣ X", múltiplas opções), usar APENAS a mensagem configurada
+  if (welcome) {
+    const jaTemMenuComHifen = /\d+\s*[-–—]\s*[\w\sáàâãéèêíìîóòôõúùûç]+/i.test(welcome) // "1 - Vendas e Atendimento"
+    const jaTemMenuEmoji = /[1-9]\uFE0F?\u20E3?\s*[\w\sáàâãéèêíìîóòôõúùûç]+/i.test(welcome) // "1️⃣ Vendas e Atendimento"
+    const linhasNumeradas = welcome.split('\n').filter((l) => /^\s*\d/.test(l.trim()))
+    const jaTemMultiplasOpcoes = linhasNumeradas.length >= 2
+    if (jaTemMenuComHifen || jaTemMenuEmoji || jaTemMultiplasOpcoes) {
+      return welcome
+    }
+  }
+  // Welcome sem menu → concatenar menu gerado das opções
   return welcome ? `${welcome}\n\n${menu}\n\nResponda com o número da opção desejada.` : `${menu}\n\nResponda com o número da opção desejada.`
 }
 
