@@ -3401,7 +3401,13 @@ exports.enviarArquivo = async (req, res) => {
     const io = req.app.get('io')
 
     if (!req.file) {
-      const hint = 'Envie multipart/form-data com campo "file" ou "audio"'
+      const ct = req.get('content-type') || ''
+      const hint = !ct.includes('boundary=')
+        ? 'Use FormData e NÃO defina Content-Type manualmente (o navegador/axios deve enviar com boundary). Envie o arquivo no campo "file" ou "audio".'
+        : 'Envie o arquivo no campo "file" ou "audio" (multipart/form-data).'
+      if (process.env.NODE_ENV !== 'production') {
+        console.warn('[enviarArquivo] Arquivo ausente. content-type:', ct, '| files:', req.files?.length ?? 0)
+      }
       return res.status(400).json({ error: "Arquivo não enviado. " + hint })
     }
 

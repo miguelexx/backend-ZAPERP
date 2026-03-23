@@ -26,6 +26,9 @@ const ALLOWED_MIME = new Map([
   ['audio/wav', '.wav'],
   ['audio/x-wav', '.wav'],
   ['audio/mp4', '.m4a'], // Safari/iOS às vezes envia m4a como audio/mp4
+  ['audio/amr', '.amr'],
+  ['audio/3gpp', '.3gp'],
+  ['audio/3gpp2', '.3g2'],
   // Vídeo
   ['video/mp4', '.mp4'],
   ['video/webm', '.webm'],
@@ -52,8 +55,8 @@ function getBaseMime(mimetype) {
   return m.split(';')[0].trim()
 }
 
-// Definido antes do storage (usado no filename)
-const AUDIO_FIELD_NAMES = ['audio', 'recording', 'voice', 'blob', 'media']
+// Campos tipicamente usados para áudio (fallback quando mimetype vazio)
+const AUDIO_FIELD_NAMES = ['audio', 'recording', 'voice', 'blob', 'media', 'file', 'arquivo', 'attachment']
 
 const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, uploadDir),
@@ -73,9 +76,12 @@ const upload = multer({
   fileFilter: (req, file, cb) => {
     const baseMime = getBaseMime(file.mimetype)
     let ok = ALLOWED_MIME.has(baseMime)
-    // Fallback: Blob de áudio sem mimetype explícito (alguns navegadores/MediaRecorder)
+    // Fallback 1: Blob de áudio sem mimetype (navegadores/MediaRecorder)
     if (!ok && (!baseMime || baseMime === 'application/octet-stream')) {
       if (AUDIO_FIELD_NAMES.includes(file.fieldname)) ok = true
+      // Fallback 2: extensão do nome sugere áudio
+      const name = (file.originalname || '').toLowerCase()
+      if (!ok && /\.(webm|ogg|opus|mp3|m4a|wav|aac|amr|3gp|3g2)$/.test(name)) ok = true
     }
     if (ok) cb(null, true)
     else cb(new Error(`Tipo de arquivo não permitido: ${baseMime || file.mimetype}`), false)
@@ -83,26 +89,17 @@ const upload = multer({
 })
 
 /**
- * Campos aceitos para upload (file, audio e variantes usadas por gravadores de voz no frontend).
+ * Upload para rota /arquivo: aceita QUALQUER nome de campo (file, audio, recording, etc).
+ * Usa upload.any() para não rejeitar campos inesperados enviados pelo frontend.
  * Retorna req.file populado para compatibilidade com enviarArquivo.
  */
-const ARQUIVO_FIELDS = [
-  { name: 'file', maxCount: 1 },
-  { name: 'audio', maxCount: 1 },
-  { name: 'recording', maxCount: 1 },   // MediaRecorder / gravador de voz
-  { name: 'voice', maxCount: 1 },      // voice note
-  { name: 'blob', maxCount: 1 },       // Blob genérico do frontend
-  { name: 'media', maxCount: 1 },      // Alguns componentes usam "media"
-]
-
 const uploadArquivo = (req, res, next) => {
-  const mw = upload.fields(ARQUIVO_FIELDS)
+  const mw = upload.any()
   mw(req, res, (err) => {
     if (err) return next(err)
-    // Normaliza: enviarArquivo espera req.file
-    if (!req.file && req.files) {
-      const first = ARQUIVO_FIELDS.find(({ name }) => req.files[name]?.[0])
-      req.file = first ? req.files[first.name][0] : null
+    // Normaliza: enviarArquivo espera req.file (singular)
+    if (!req.file && req.files && Array.isArray(req.files) && req.files.length > 0) {
+      req.file = req.files[0]
     }
     next()
   })
