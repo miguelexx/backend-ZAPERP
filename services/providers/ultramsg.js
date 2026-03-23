@@ -370,6 +370,7 @@ async function sendImage(phone, url, caption = '', opts = {}) {
 
 /**
  * Envia áudio por URL.
+ * UltraMsg aceita: mp3, aac, ogg | máx 16 MB | link HTTP ou base64
  */
 async function sendAudio(phone, audioUrl, opts = {}) {
   await awaitSendDelay(opts?.companyId ?? opts?.company_id)
@@ -378,8 +379,11 @@ async function sendAudio(phone, audioUrl, opts = {}) {
   const nums = phoneCandidatesForSend(phone)
   if (!nums.length || !audioUrl) return false
   const body = { to: nums[0], audio: String(audioUrl).trim() }
-  const { ok } = await postJson({ ...cfg, endpoint: '/messages/audio', body })
-  if (!ok) return false
+  const { ok, data, text } = await postJson({ ...cfg, endpoint: '/messages/audio', body })
+  if (!ok) {
+    console.warn('❌ UltraMsg sendAudio falhou:', nums[0]?.slice(-12), String(text || data?.error || '').slice(0, 150), '| token:', maskToken(cfg.token))
+    return false
+  }
   console.log('✅ UltraMsg áudio enviado:', nums[0]?.slice(-12))
   return true
 }

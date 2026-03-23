@@ -25,6 +25,7 @@ const ALLOWED_MIME = new Map([
   ['audio/opus', '.opus'],
   ['audio/wav', '.wav'],
   ['audio/x-wav', '.wav'],
+  ['audio/mp4', '.m4a'], // Safari/iOS às vezes envia m4a como audio/mp4
   // Vídeo
   ['video/mp4', '.mp4'],
   ['video/webm', '.webm'],
@@ -72,4 +73,23 @@ const upload = multer({
   },
 })
 
-module.exports = { upload, uploadDir }
+/**
+ * Upload para rota /arquivo: aceita campo "file" ou "audio" (frontend de gravação pode usar "audio").
+ * Retorna req.file populado para compatibilidade com enviarArquivo.
+ */
+const uploadArquivo = (req, res, next) => {
+  const mw = upload.fields([
+    { name: 'file', maxCount: 1 },
+    { name: 'audio', maxCount: 1 },
+  ])
+  mw(req, res, (err) => {
+    if (err) return next(err)
+    // Normaliza: enviarArquivo espera req.file
+    if (!req.file && req.files) {
+      req.file = (req.files.file && req.files.file[0]) || (req.files.audio && req.files.audio[0]) || null
+    }
+    next()
+  })
+}
+
+module.exports = { upload, uploadDir, uploadArquivo }

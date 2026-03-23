@@ -806,8 +806,14 @@ exports.listarConversas = async (req, res) => {
     conversasFormatadas = deduplicateConversationsByContact(conversasFormatadas)
     conversasFormatadas = sortConversationsByRecent(conversasFormatadas)
 
+    // Filtro "Abertas": só incluir conversas com movimentação (mensagem recebida ou usuário assumiu)
+    if (status_atendimento === 'aberta') {
+      conversasFormatadas = conversasFormatadas.filter((c) => c.is_group || c.exibir_badge_aberta)
+    }
+
     // Incluir todos os clientes: quem não tem conversa aparece como "Sem conversa" (clicável para abrir)
-    const incluirTodos = incluirTodosClientes === '1' || incluirTodosClientes === 'true' || incluirTodosClientes === 1
+    // Ao filtrar "Abertas", não incluir sem_conversa (não há conversa aberta)
+    const incluirTodos = (incluirTodosClientes === '1' || incluirTodosClientes === 'true' || incluirTodosClientes === 1) && status_atendimento !== 'aberta'
     if (incluirTodos) {
       const cid = Number(company_id)
       let clientesQuery = supabase
@@ -3395,7 +3401,8 @@ exports.enviarArquivo = async (req, res) => {
     const io = req.app.get('io')
 
     if (!req.file) {
-      return res.status(400).json({ error: "Arquivo não enviado" })
+      const hint = 'Envie multipart/form-data com campo "file" ou "audio"'
+      return res.status(400).json({ error: "Arquivo não enviado. " + hint })
     }
 
     const permEnvio = await assertPodeEnviarMensagem({ company_id, conversa_id, user_id })

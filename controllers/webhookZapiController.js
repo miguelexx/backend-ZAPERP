@@ -390,6 +390,13 @@ function extractMessage(payload) {
   if (payload.contact && typeof payload.contact === 'object') {
     type = 'contact'
   }
+  // Fallback: texto bruto com vCard (ex: UltraMsg envia type=chat com body=vCard)
+  if ((!type || type === 'text') && typeof rawMessage === 'string' && String(rawMessage).trim().includes('BEGIN:VCARD') && String(rawMessage).trim().includes('END:VCARD')) {
+    type = 'contact'
+    if (!payload.contact || typeof payload.contact !== 'object') {
+      payload = { ...payload, contact: { vCard: String(rawMessage).trim(), displayName: null, formattedName: null } }
+    }
+  }
   if (!type || type === 'text') {
     if (payload.image || payload.imageUrl) type = 'image'
     else if (payload.audio || payload.audioUrl) type = 'audio'
@@ -490,7 +497,7 @@ function extractMessage(payload) {
     texto = (c.displayName && String(c.displayName).trim()) || (c.formattedName && String(c.formattedName).trim()) || (c.vCard && String(c.vCard).slice(0, 120)) || '(contato)'
   }
 
-  // contactMeta: { nome, telefone, foto_perfil? } para cartão de contato no frontend
+  // contactMeta: { nome, telefone, foto_perfil?, descricao_negocio? } para cartão de contato no frontend
   let contactMeta = null
   if (type === 'contact') {
     const c = payload.contact || {}
@@ -503,6 +510,7 @@ function extractMessage(payload) {
       telefone: contactPhone || null,
       foto_perfil: (c.profilePicture || c.profilePictureUrl || c.photo) && String(c.profilePicture || c.profilePictureUrl || c.photo).startsWith('http') ? String(c.profilePicture || c.profilePictureUrl || c.photo).trim() : null
     }
+    if (parsed.descricao_negocio) contactMeta.descricao_negocio = parsed.descricao_negocio
     if (!contactMeta.nome && !contactMeta.telefone) contactMeta = null
   } else if (type === 'image' && imageUrl) {
     texto = texto || (payload.image?.caption && String(payload.image.caption).trim()) || '(imagem)'

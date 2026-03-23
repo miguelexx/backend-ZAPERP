@@ -122,7 +122,9 @@ function normalizeUltramsgToZapi(body) {
   const toPhoneNorm = toPhoneDest ? (normalizePhoneBR(toPhoneDest) || toPhoneDest) : null
 
   // Contato (vCard): UltraMsg envia type=vcard/contact e body com vCard; webhookZapi espera payload.contact
-  const isContactType = ['vcard', 'contact', 'contactmessage'].includes(msgType)
+  // Fallback: body contém BEGIN:VCARD mesmo com type=chat (alguns provedores enviam assim)
+  const hasVcardInBody = bodyText && String(bodyText).includes('BEGIN:VCARD') && String(bodyText).includes('END:VCARD')
+  const isContactType = ['vcard', 'contact', 'contactmessage'].includes(msgType) || hasVcardInBody
   const vcardBody = (isContactType && bodyText && String(bodyText).includes('BEGIN:VCARD')) ? bodyText : (data.vcard ?? data.vCard ?? null)
   const contactPayload = (isContactType && (vcardBody || data.contact || data.contactMessageData)) ? {
     vCard: vcardBody || (data.contact?.vCard ?? data.contact?.vcard ?? data.contactMessageData?.vcard),

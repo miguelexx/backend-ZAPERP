@@ -33,9 +33,10 @@ Cada mensagem de contato possui:
   "status": "sent | delivered | read",
   "whatsapp_id": "3EB0...",
   "contact_meta": {
-    "nome": "Gazola",
-    "telefone": "5511999999999",
-    "foto_perfil": "https://..." 
+    "nome": "Carlos ACM Trabalho",
+    "telefone": "553498838263",
+    "foto_perfil": "https://...",
+    "descricao_negocio": "Artefatos de Cimento Mendonça"
   }
 }
 ```
@@ -45,6 +46,7 @@ Cada mensagem de contato possui:
   - `nome` (string): Nome para exibição
   - `telefone` (string): Número em formato internacional (ex: 5511999999999)
   - `foto_perfil` (string | null): URL da foto de perfil (pode não existir)
+  - `descricao_negocio` (string | null): Descrição do negócio (WhatsApp Business, ex: "Artefatos de Cimento Mendonça")
 
 ### APIs e eventos
 
@@ -64,6 +66,7 @@ Cada mensagem de contato possui:
 2. **Seção superior do cartão**
    - **Foto**: avatar circular (~48px), fallback para iniciais ou ícone de contato
    - **Nome**: negrito, tamanho maior
+   - **Descrição do negócio** (opcional): se `contact_meta.descricao_negocio` existir, exibir em texto menor/cinza abaixo do nome
    - **Horário** (criado_em formatado) e **status** (✓ pendente, ✓✓ enviado, ✓✓ lido em verde)
 
 3. **Divisor** sutil entre seção de informações e ações
@@ -123,6 +126,9 @@ function MessageContactCard({ msg }: { msg: Mensagem }) {
           />
           <div className="contact-info">
             <span className="contact-name">{meta.nome || 'Contato'}</span>
+            {meta.descricao_negocio && (
+              <span className="contact-business-desc">{meta.descricao_negocio}</span>
+            )}
             <span className="contact-time">
               {formatTime(criado_em)}
               <StatusIcon status={status} />
@@ -144,7 +150,8 @@ function MessageContactCard({ msg }: { msg: Mensagem }) {
 
 ## Regras de exibição
 
-1. **Fallback**: Se `contact_meta` for `null` ou ausente, exibir apenas `texto` como mensagem comum.
+1. **Detecção**: Sempre verificar `msg.tipo === 'contact'` para renderizar o cartão. O backend agora detecta vCards em texto bruto e salva com `tipo: 'contact'` e `contact_meta` preenchido.
+2. **Fallback**: Se `contact_meta` for `null` ou ausente, exibir apenas `texto` como mensagem comum (evita mostrar vCard bruto).
 2. **Foto**: Se `foto_perfil` não existir, usar avatar genérico ou iniciais do nome.
 3. **Telefone**: Formatar para exibição (ex: +55 11 99999-9999) quando disponível.
 4. **Direção**: Mesmo layout para `in` e `out`; apenas cores do balão mudam.

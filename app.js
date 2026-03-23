@@ -312,9 +312,10 @@ if (hasFrontendDist) {
 // =====================================================
 // eslint-disable-next-line no-unused-vars
 app.use((err, req, res, next) => {
-  // Multer: tipo não permitido ou tamanho excedido
+  // Multer: tipo não permitido, tamanho excedido ou campo inesperado
   if (err && (err.code === 'LIMIT_FILE_SIZE' || err.code === 'LIMIT_UNEXPECTED_FILE' || (err.message && err.message.includes('não permitido')))) {
-    return res.status(400).json({ error: err.message || 'Arquivo inválido' })
+    const msg = err.code === 'LIMIT_UNEXPECTED_FILE' ? 'Use multipart/form-data com campo "file" ou "audio"' : (err.message || 'Arquivo inválido')
+    return res.status(400).json({ error: msg })
   }
   // CORS
   if (err && String(err.message || '').startsWith('CORS não permitido para esta origem:')) {

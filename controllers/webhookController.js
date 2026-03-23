@@ -3,6 +3,7 @@ const path = require('path')
 const fs = require('fs')
 const { normalizePhoneBR, possiblePhonesBR } = require('../helpers/phoneHelper')
 const { findOrCreateConversation } = require('../helpers/conversationSync')
+const { parseVcardForContact } = require('../helpers/vcardHelper')
 const { processIncomingMessage: processChatbotTriage } = require('../services/chatbotTriageService')
 
 /**
@@ -177,6 +178,7 @@ exports.receberWebhook = async (req, res) => {
     let url = null
     let nome_arquivo = null
     let reply_meta = null
+    let contactMeta = null
 
     // Mídia: áudio, imagem, vídeo, documento
     if (msg.audio) {
@@ -200,6 +202,21 @@ exports.receberWebhook = async (req, res) => {
       nome_arquivo = msg.document.filename || msg.document.caption || 'arquivo'
       url = await buscarEMediasWhatsApp(msg.document.id)
       if (!texto) texto = '(arquivo)'
+    } else if (msg.contacts && Array.isArray(msg.contacts) && msg.contacts.length > 0) {
+      // Meta Cloud API: contato compartilhado (msg.contacts)
+      tipo = 'contact'
+      const c = msg.contacts[0]
+      const name = c?.name?.formatted_name || c?.name?.first_name || null
+      const phone = (c?.phones?.[0]?.wa_id || c?.phones?.[0]?.phone_number || '').replace(/\D/g, '')
+      texto = name || (phone ? `+${phone}` : '') || '(contato)'
+      contactMeta = { nome: name || null, telefone: phone || null, foto_perfil: null }
+    } else if (texto && String(texto).includes('BEGIN:VCARD') && String(texto).includes('END:VCARD')) {
+      // Fallback: texto bruto com vCard (espelhamento celular pode enviar assim)
+      tipo = 'contact'
+      const parsed = parseVcardForContact(texto)
+      contactMeta = { nome: parsed.nome || null, telefone: parsed.telefone || null, foto_perfil: null }
+      if (parsed.descricao_negocio) contactMeta.descricao_negocio = parsed.descricao_negocio
+      texto = parsed.nome || parsed.telefone || '(contato)'
     }
 
     // Multi-tenant: metadata.phone_number_id → empresas_whatsapp → company_id
@@ -401,6 +418,7 @@ exports.receberWebhook = async (req, res) => {
       insertMsg.tipo = tipo
       if (url) insertMsg.url = url
       if (nome_arquivo) insertMsg.nome_arquivo = nome_arquivo
+      if (tipo === 'contact' && contactMeta) insertMsg.contact_meta = contactMeta
     }
     if (reply_meta) insertMsg.reply_meta = reply_meta
 

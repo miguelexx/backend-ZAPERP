@@ -3,7 +3,7 @@ const router = express.Router()
 const chatController = require('../controllers/chatController')
 const auth = require('../middleware/auth')
 const adminOnly = require('../middleware/adminOnly')
-const { upload } = require('../middleware/upload')
+const { uploadArquivo } = require('../middleware/upload')
 
 // base: /chats
 
@@ -33,7 +33,7 @@ router.delete("/:id/tags/:tag_id", auth, chatController.removerTagConversa)
 // Todos os usuários: transferir conversa para outro setor (departamento)
 router.put('/:id/departamento', auth, chatController.transferirSetor)
 
-router.post("/:id/arquivo", auth, upload.single('file'), chatController.enviarArquivo)
+router.post("/:id/arquivo", auth, uploadArquivo, chatController.enviarArquivo)
 
 router.post('/:id/mensagens', auth, chatController.enviarMensagemChat)
 router.delete('/:id/mensagens/:mensagem_id', auth, chatController.excluirMensagem)
