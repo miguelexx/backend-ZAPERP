@@ -52,11 +52,16 @@ function getBaseMime(mimetype) {
   return m.split(';')[0].trim()
 }
 
+// Definido antes do storage (usado no filename)
+const AUDIO_FIELD_NAMES = ['audio', 'recording', 'voice', 'blob', 'media']
+
 const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, uploadDir),
   filename: (req, file, cb) => {
     const mime = getBaseMime(file.mimetype)
-    const ext = ALLOWED_MIME.get(mime) || '.bin'
+    let ext = ALLOWED_MIME.get(mime)
+    if (!ext && AUDIO_FIELD_NAMES.includes(file.fieldname)) ext = '.webm' // Blob áudio sem mimetype
+    ext = ext || '.bin'
     const name = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}${ext}`
     cb(null, name)
   },
@@ -67,26 +72,37 @@ const upload = multer({
   limits: { fileSize: 32 * 1024 * 1024 }, // 32MB (vídeo UltraMsg; docs até 30MB)
   fileFilter: (req, file, cb) => {
     const baseMime = getBaseMime(file.mimetype)
-    const ok = ALLOWED_MIME.has(baseMime)
+    let ok = ALLOWED_MIME.has(baseMime)
+    // Fallback: Blob de áudio sem mimetype explícito (alguns navegadores/MediaRecorder)
+    if (!ok && (!baseMime || baseMime === 'application/octet-stream')) {
+      if (AUDIO_FIELD_NAMES.includes(file.fieldname)) ok = true
+    }
     if (ok) cb(null, true)
     else cb(new Error(`Tipo de arquivo não permitido: ${baseMime || file.mimetype}`), false)
   },
 })
 
 /**
- * Upload para rota /arquivo: aceita campo "file" ou "audio" (frontend de gravação pode usar "audio").
+ * Campos aceitos para upload (file, audio e variantes usadas por gravadores de voz no frontend).
  * Retorna req.file populado para compatibilidade com enviarArquivo.
  */
+const ARQUIVO_FIELDS = [
+  { name: 'file', maxCount: 1 },
+  { name: 'audio', maxCount: 1 },
+  { name: 'recording', maxCount: 1 },   // MediaRecorder / gravador de voz
+  { name: 'voice', maxCount: 1 },      // voice note
+  { name: 'blob', maxCount: 1 },       // Blob genérico do frontend
+  { name: 'media', maxCount: 1 },      // Alguns componentes usam "media"
+]
+
 const uploadArquivo = (req, res, next) => {
-  const mw = upload.fields([
-    { name: 'file', maxCount: 1 },
-    { name: 'audio', maxCount: 1 },
-  ])
+  const mw = upload.fields(ARQUIVO_FIELDS)
   mw(req, res, (err) => {
     if (err) return next(err)
     // Normaliza: enviarArquivo espera req.file
     if (!req.file && req.files) {
-      req.file = (req.files.file && req.files.file[0]) || (req.files.audio && req.files.audio[0]) || null
+      const first = ARQUIVO_FIELDS.find(({ name }) => req.files[name]?.[0])
+      req.file = first ? req.files[first.name][0] : null
     }
     next()
   })
