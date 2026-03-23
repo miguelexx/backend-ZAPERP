@@ -364,7 +364,12 @@ function extractMessage(payload) {
   const { key: phone, isGroup, participantPhone: partPhoneResolved, debugReason } = resolveConversationKeyFromZapi(payload)
   // Doc Z-API: messageId e zaapId = identificador da mensagem (ReceivedCallback e DeliveryCallback)
   const messageId = payload.messageId ?? payload.zaapId ?? payload.id ?? payload.instanceId ?? payload.key?.id ?? null
-  const ts = payload.timestamp ?? payload.momment ?? payload.t ?? payload.reaction?.time ?? Date.now()
+  let ts = payload.timestamp ?? payload.momment ?? payload.t ?? payload.reaction?.time ?? Date.now()
+  // Timestamp pode vir em segundos (ex: API histórico) ou ms. Valores antigos/inválidos geram data 1970.
+  const tsNum = Number(ts)
+  if (tsNum && tsNum < 1e12) ts = tsNum * 1000
+  const dateFromTs = ts ? new Date(Number(ts)) : null
+  if (!dateFromTs || dateFromTs.getFullYear() < 2020) ts = Date.now()
 
   // Texto: Z-API envia text.message, template, botões, list, reação, localização, contato
   const rawMessage =
@@ -541,7 +546,7 @@ function extractMessage(payload) {
     texto,
     fromMe,
     messageId,
-    criado_em: ts ? new Date(Number(ts)).toISOString() : new Date().toISOString(),
+    criado_em: (ts ? new Date(Number(ts)) : new Date()).toISOString(),
     type,
     imageUrl,
     documentUrl,
@@ -1888,13 +1893,37 @@ exports.receberZapi = async (req, res) => {
               // Evitar duplicar: se não tem whatsapp_id, pula (histórico sem id pode gerar duplicatas).
               if (!wId) continue
 
+              const direcaoHistory = ex.fromMe ? 'out' : 'in'
               const insertMsg = {
                 conversa_id: convIdForHistory,
                 texto: ex.texto,
-                direcao: ex.fromMe ? 'out' : 'in',
+                direcao: direcaoHistory,
                 company_id,
                 whatsapp_id: wId,
                 criado_em: ex.criado_em
+              }
+
+              // Mensagens out (chatbot/CRM): podem ter sido inseridas antes do sync sem whatsapp_id.
+              // Em vez de duplicar, atualizar a existente com whatsapp_id e corrigir criado_em se inválido (1970).
+              if (ex.fromMe) {
+                const { data: existOut } = await supabase
+                  .from('mensagens')
+                  .select('id, criado_em, whatsapp_id')
+                  .eq('company_id', company_id)
+                  .eq('conversa_id', convIdForHistory)
+                  .eq('direcao', 'out')
+                  .eq('texto', ex.texto)
+                  .order('id', { ascending: false })
+                  .limit(1)
+                  .maybeSingle()
+                if (existOut && !existOut.whatsapp_id) {
+                  const updatePayload = { whatsapp_id: wId }
+                  const yearExist = existOut.criado_em ? new Date(existOut.criado_em).getFullYear() : 0
+                  const yearNew = ex.criado_em ? new Date(ex.criado_em).getFullYear() : 0
+                  if (yearExist < 2020 && yearNew >= 2020) updatePayload.criado_em = ex.criado_em
+                  await supabase.from('mensagens').update(updatePayload).eq('id', existOut.id)
+                  continue
+                }
               }
 
               // Remetente em grupo (quando disponível)
@@ -2538,14 +2567,19 @@ exports.receberZapi = async (req, res) => {
         ...(mensagemFoiInseridaPeloWebhook && !fromMe ? { tem_novas_mensagens: true, lida: false } : {})
       }
       // ultima_mensagem_preview: preview na lista lateral — direcao correta ('in'/'out') para exibir seta/ícone certo.
+      // Para mensagem de contato, incluir tipo e contact_meta para o frontend exibir card em vez do vCard bruto.
       if (mensagemFoiInseridaPeloWebhook && emitPayload) {
-        convPayload.ultima_mensagem_preview = {
+        const preview = {
           texto: emitPayload.texto ?? '(mensagem)',
           criado_em: emitPayload.criado_em,
-          // Usar direcao do payload; fallback baseado em fromMe (nunca assumir 'in' para msg enviada)
           direcao: emitPayload.direcao ?? (fromMe ? 'out' : 'in'),
           fromMe,
         }
+        if (emitPayload.tipo === 'contact' && emitPayload.contact_meta) {
+          preview.tipo = 'contact'
+          preview.contact_meta = emitPayload.contact_meta
+        }
+        convPayload.ultima_mensagem_preview = preview
       }
       // reordenar_suave: true — frontend deve animar o item para o topo em vez de refetch (evita "desce e sobe")
       convPayload.reordenar_suave = true

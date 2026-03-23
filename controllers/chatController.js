@@ -539,7 +539,7 @@ exports.listarConversas = async (req, res) => {
       foto_perfil_contato_cache,
       clientes!conversas_cliente_fk ( id, nome, pushname, telefone, foto_perfil, company_id ),
       departamentos ( id, nome ),
-      mensagens ( texto, criado_em, direcao, tipo, url, nome_arquivo, whatsapp_id, status, autor_usuario_id ),
+      mensagens ( texto, criado_em, direcao, tipo, url, nome_arquivo, whatsapp_id, status, autor_usuario_id, contact_meta ),
       conversa_tags (
         tag_id,
         tags (
@@ -565,7 +565,7 @@ exports.listarConversas = async (req, res) => {
       foto_perfil_contato_cache,
       clientes!conversas_cliente_fk ( id, nome, pushname, telefone, foto_perfil, company_id ),
       departamentos ( id, nome ),
-      mensagens ( texto, criado_em, direcao, tipo, url, nome_arquivo, whatsapp_id, status, autor_usuario_id ),
+      mensagens ( texto, criado_em, direcao, tipo, url, nome_arquivo, whatsapp_id, status, autor_usuario_id, contact_meta ),
       conversa_tags (
         tag_id,
         tags (
@@ -592,7 +592,7 @@ exports.listarConversas = async (req, res) => {
       foto_perfil_contato_cache,
       clientes!conversas_cliente_fk ( id, nome, pushname, telefone, foto_perfil, company_id ),
       departamentos ( id, nome ),
-      mensagens ( texto, criado_em, direcao, tipo, url, nome_arquivo, whatsapp_id, status, autor_usuario_id )
+      mensagens ( texto, criado_em, direcao, tipo, url, nome_arquivo, whatsapp_id, status, autor_usuario_id, contact_meta )
     `
 
     function buildQuery(select) {
@@ -3468,7 +3468,11 @@ exports.enviarArquivo = async (req, res) => {
     const basePayload = { ...msg, conversa_id: msg.conversa_id ?? Number(conversa_id), status: msg.status || 'pending', status_mensagem: msg.status_mensagem || msg.status || 'pending', direcao: 'out' }
     const novaMsgPayload = await enrichMensagemComAutorUsuario(supabase, company_id, basePayload)
     emitirEventoEmpresaConversa(io, company_id, conversa_id, io.EVENTS?.NOVA_MENSAGEM || 'nova_mensagem', novaMsgPayload)
-    emitirConversaAtualizada(io, company_id, conversa_id, { id: Number(conversa_id) })
+    const convPayload = { id: Number(conversa_id) }
+    if (msg.tipo === 'contact' && msg.contact_meta) {
+      convPayload.ultima_mensagem_preview = { texto: msg.texto, criado_em: msg.criado_em, direcao: 'out', tipo: 'contact', contact_meta: msg.contact_meta }
+    }
+    emitirConversaAtualizada(io, company_id, conversa_id, convPayload)
 
     const { nome: usuarioNome } = await getUsuarioParaEnvioCliente(supabase, company_id, user_id)
     const captionCliente = usuarioNome ? `— ${usuarioNome}` : ''

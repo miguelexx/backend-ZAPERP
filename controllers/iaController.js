@@ -50,6 +50,7 @@ const DEFAULT_CONFIG = {
   },
   automacoes: {
     encerrar_automatico_min: 0,
+    mensagem_encerramento_inatividade: '-conversa encerrada por conta de inatividade-',
     transferir_para_humano_apos_bot: true,
     limite_mensagens_bot: 5,
     auto_assumir: false,

@@ -6,6 +6,7 @@ const jobsController = require('../controllers/jobsController')
 const { enqueue, listJobs, retryJob, pauseAll, resumeAll, JOB_TIPOS } = require('../services/queueManager')
 
 router.post('/timeout-inatividade', jobsController.checkCronSecret, jobsController.timeoutInatividade)
+router.post('/timeout-inatividade-chatbot', jobsController.checkCronSecret, jobsController.timeoutInatividadeChatbot)
 
 // Operacional: requer auth + supervisor/admin
 const operacionalRouter = express.Router()

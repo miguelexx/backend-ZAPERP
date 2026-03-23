@@ -29,6 +29,135 @@ function checkCronSecret(req, res, next) {
   next()
 }
 
+/**
+ * POST /jobs/timeout-inatividade-chatbot
+ * Encerra conversas por inatividade do cliente ao chatbot.
+ * - Última mensagem do BOT (cliente não respondeu)
+ * - Mais antiga que encerrar_automatico_min
+ * - Exceção: NÃO encerra se a última mensagem do bot foi a de "fora do horário"
+ * - Envia mensagem configurada antes de fechar
+ */
+exports.timeoutInatividadeChatbot = async (req, res) => {
+  try {
+    const { data: configs } = await supabase
+      .from('ia_config')
+      .select('company_id, config')
+
+    if (!configs?.length) {
+      return res.json({ ok: true, processadas: 0, mensagem: 'Nenhuma empresa com ia_config' })
+    }
+
+    const { getProvider } = require('../services/providers')
+    const provider = getProvider()
+    if (!provider?.sendText) {
+      return res.status(503).json({ error: 'Provider de envio não disponível' })
+    }
+
+    let totalProcessadas = 0
+
+    for (const row of configs) {
+      const company_id = row.company_id
+      const config = row.config || {}
+      const automacoes = config.automacoes || {}
+      const chatbotTriage = config.chatbot_triage || {}
+
+      const encerrarMin = Number(automacoes.encerrar_automatico_min) || 0
+      if (encerrarMin <= 0) continue
+
+      const mensagemEncerramento = String(automacoes.mensagem_encerramento_inatividade || '-conversa encerrada por conta de inatividade-').trim()
+      const mensagemForaHorario = String(chatbotTriage.mensagemForaHorario || '').trim()
+
+      // Conversas não fechadas, excluindo grupos
+      const { data: conversas } = await supabase
+        .from('conversas')
+        .select('id, telefone, tipo')
+        .eq('company_id', company_id)
+        .neq('status_atendimento', 'fechada')
+
+      if (!conversas?.length) continue
+
+      const conversaIds = conversas
+        .filter((c) => {
+          const tipo = String(c.tipo || '').toLowerCase()
+          const tel = String(c.telefone || '')
+          return tipo !== 'grupo' && !tel.includes('@g.us')
+        })
+        .map((c) => c.id)
+
+      if (conversaIds.length === 0) continue
+
+      const { data: mensagens } = await supabase
+        .from('mensagens')
+        .select('conversa_id, criado_em, direcao, texto')
+        .in('conversa_id', conversaIds)
+        .order('criado_em', { ascending: false })
+
+      const ultimaPorConversa = {}
+      ;(mensagens || []).forEach((m) => {
+        if (!ultimaPorConversa[m.conversa_id]) ultimaPorConversa[m.conversa_id] = m
+      })
+
+      const limite = new Date(Date.now() - encerrarMin * 60 * 1000)
+
+      for (const conv of conversas) {
+        if (!conversaIds.includes(conv.id)) continue
+
+        const ultima = ultimaPorConversa[conv.id]
+        if (!ultima) continue
+
+        // Só encerra se a ÚLTIMA mensagem foi do BOT (out) = cliente não respondeu
+        if (ultima.direcao !== 'out') continue
+        if (new Date(ultima.criado_em) > limite) continue
+
+        // Exceção: se a última msg do bot foi "fora do horário", não encerra
+        if (mensagemForaHorario && String(ultima.texto || '').trim() === mensagemForaHorario) continue
+
+        const telefone = conv.telefone || ''
+        if (!telefone || String(telefone).includes('@g.us') || String(telefone).toLowerCase().startsWith('lid:')) continue
+
+        try {
+          const resultSend = await provider.sendText(telefone, mensagemEncerramento, {
+            companyId: company_id,
+            conversaId: conv.id
+          })
+
+          const statusMsg = resultSend?.ok ? 'sent' : 'erro'
+          await supabase.from('mensagens').insert({
+            conversa_id: conv.id,
+            texto: mensagemEncerramento,
+            direcao: 'out',
+            company_id,
+            status: statusMsg
+          })
+
+          const { error: updErr } = await supabase
+            .from('conversas')
+            .update({ status_atendimento: 'fechada' })
+            .eq('id', conv.id)
+            .eq('company_id', company_id)
+
+          if (!updErr) {
+            totalProcessadas++
+            await supabase.from('historico_atendimentos').insert({
+              conversa_id: conv.id,
+              usuario_id: null,
+              acao: 'encerramento_inatividade_chatbot',
+              observacao: `Conversa encerrada automaticamente após ${encerrarMin} min sem resposta do cliente ao chatbot`
+            })
+          }
+        } catch (e) {
+          console.warn('[timeoutInatividadeChatbot] Erro ao processar conversa', conv.id, e?.message || e)
+        }
+      }
+    }
+
+    return res.json({ ok: true, processadas: totalProcessadas })
+  } catch (err) {
+    console.error('timeoutInatividadeChatbot:', err)
+    return res.status(500).json({ error: err.message })
+  }
+}
+
 /** POST /jobs/timeout-inatividade — fecha/reabre conversas inativas */
 exports.timeoutInatividade = async (req, res) => {
   try {
