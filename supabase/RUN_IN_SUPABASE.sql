@@ -329,5 +329,10 @@ COMMENT ON TABLE public.avaliacoes_atendimento IS 'Notas de avaliação (0-10) d
 CREATE INDEX IF NOT EXISTS idx_avaliacoes_company_criado ON public.avaliacoes_atendimento (company_id, criado_em DESC);
 CREATE INDEX IF NOT EXISTS idx_avaliacoes_atendente ON public.avaliacoes_atendimento (company_id, atendente_id);
 
+-- Localização no chat (mensagens tipo location)
+ALTER TABLE public.mensagens
+  ADD COLUMN IF NOT EXISTS location_meta jsonb DEFAULT NULL;
+COMMENT ON COLUMN public.mensagens.location_meta IS 'Localização: { latitude, longitude, nome?, endereco? }. Usado com tipo=location.';
+
 -- Confirme no Supabase que não há erros. Depois reinicie o backend se estiver rodando.
 

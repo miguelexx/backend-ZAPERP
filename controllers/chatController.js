@@ -539,7 +539,7 @@ exports.listarConversas = async (req, res) => {
       foto_perfil_contato_cache,
       clientes!conversas_cliente_fk ( id, nome, pushname, telefone, foto_perfil, company_id ),
       departamentos ( id, nome ),
-      mensagens ( texto, criado_em, direcao, tipo, url, nome_arquivo, whatsapp_id, status, autor_usuario_id, contact_meta ),
+      mensagens ( texto, criado_em, direcao, tipo, url, nome_arquivo, whatsapp_id, status, autor_usuario_id, contact_meta, location_meta ),
       conversa_tags (
         tag_id,
         tags (
@@ -565,7 +565,7 @@ exports.listarConversas = async (req, res) => {
       foto_perfil_contato_cache,
       clientes!conversas_cliente_fk ( id, nome, pushname, telefone, foto_perfil, company_id ),
       departamentos ( id, nome ),
-      mensagens ( texto, criado_em, direcao, tipo, url, nome_arquivo, whatsapp_id, status, autor_usuario_id, contact_meta ),
+      mensagens ( texto, criado_em, direcao, tipo, url, nome_arquivo, whatsapp_id, status, autor_usuario_id, contact_meta, location_meta ),
       conversa_tags (
         tag_id,
         tags (
@@ -592,7 +592,7 @@ exports.listarConversas = async (req, res) => {
       foto_perfil_contato_cache,
       clientes!conversas_cliente_fk ( id, nome, pushname, telefone, foto_perfil, company_id ),
       departamentos ( id, nome ),
-      mensagens ( texto, criado_em, direcao, tipo, url, nome_arquivo, whatsapp_id, status, autor_usuario_id, contact_meta )
+      mensagens ( texto, criado_em, direcao, tipo, url, nome_arquivo, whatsapp_id, status, autor_usuario_id, contact_meta, location_meta )
     `
 
     function buildQuery(select) {
@@ -1502,6 +1502,23 @@ exports.abrirConversaCliente = async (req, res) => {
   }
 }
 
+// Resposta 400 padronizada — frontend pode exibir formato ao usuário (novo contato manual)
+function erroTelefoneNovoContato (codigo, extra = {}) {
+  const base = {
+    error: codigo === 'TELEFONE_OBRIGATORIO' ? 'Telefone obrigatório' : 'Telefone inválido',
+    codigo,
+    detalhe:
+      codigo === 'TELEFONE_OBRIGATORIO'
+        ? 'Informe o número do contato para continuar.'
+        : 'Informe um número brasileiro válido: DDD + número (10 ou 11 dígitos), com ou sem o código do país 55 (12 ou 13 dígitos no total). Espaços, parênteses e hífens podem ser usados e serão ignorados.',
+    formato_esperado:
+      'Somente números do Brasil. Celular com 9 após o DDD: ex. (11) 98765-4321 → armazenado como 5511987654321. Fixo sem o 9: ex. (11) 3456-7890.',
+    exemplos: ['34999999999', '(34) 99999-9999', '+55 34 99999-9999', '5534999999999'],
+    ...extra
+  }
+  return base
+}
+
 // =====================================================
 // 6) CRIAR CONTATO (cliente + conversa)
 // =====================================================
@@ -1511,7 +1528,26 @@ exports.criarContato = async (req, res) => {
     const { company_id, id: usuario_id } = req.user
     const { nome, telefone } = req.body
 
-    const telefoneCanonico = getCanonicalPhone(telefone) || String(telefone || '').trim()
+    const telefoneRaw = telefone != null ? String(telefone).trim() : ''
+    if (!telefoneRaw) {
+      return res.status(400).json(erroTelefoneNovoContato('TELEFONE_OBRIGATORIO'))
+    }
+
+    const telefoneCanonico = getCanonicalPhone(telefone)
+    const bloqueadoManual =
+      !telefoneCanonico ||
+      telefoneCanonico.startsWith('lid:') ||
+      telefoneCanonico.endsWith('@g.us')
+    if (bloqueadoManual) {
+      return res.status(400).json(
+        erroTelefoneNovoContato('TELEFONE_INVALIDO', {
+          detalhe:
+            'Não foi possível interpretar um telefone brasileiro. Verifique DDD e quantidade de dígitos. Grupos e identificadores internos (LID) não podem ser cadastrados por este formulário.'
+        })
+      )
+    }
+
+    const nomeTrim = nome != null ? String(nome).trim() : ''
     const phonesBusca = possiblePhonesBR(telefoneCanonico)
     let cliente
 
@@ -1530,7 +1566,7 @@ exports.criarContato = async (req, res) => {
       const { data, error } = await supabase
         .from('clientes')
         .insert({
-          nome,
+          nome: nomeTrim || null,
           telefone: telefoneCanonico,
           company_id
         })
@@ -1674,8 +1710,8 @@ exports.detalharChat = async (req, res) => {
     const deveBloquearMensagens = !isGroup && conversaAssumidaPorOutro && !isAdmin && !isSupervisor
 
     // mensagens paginadas (remetente_nome/remetente_telefone para grupos; fallback se colunas não existirem)
-    const selectComRemetente = 'id, texto, direcao, criado_em, autor_usuario_id, status, whatsapp_id, tipo, url, nome_arquivo, reply_meta, remetente_nome, remetente_telefone, contact_meta'
-    const selectBasico = 'id, texto, direcao, criado_em, autor_usuario_id, status, whatsapp_id, tipo, url, nome_arquivo, reply_meta, contact_meta'
+    const selectComRemetente = 'id, texto, direcao, criado_em, autor_usuario_id, status, whatsapp_id, tipo, url, nome_arquivo, reply_meta, remetente_nome, remetente_telefone, contact_meta, location_meta'
+    const selectBasico = 'id, texto, direcao, criado_em, autor_usuario_id, status, whatsapp_id, tipo, url, nome_arquivo, reply_meta, contact_meta, location_meta'
     let mensagens = []
     let errMsgs = null
     let query
@@ -1698,9 +1734,9 @@ exports.detalharChat = async (req, res) => {
       mensagens = result.data
       errMsgs = result.error
     }
-    // Compatibilidade: se reply_meta/remetente_*/contact_meta não existirem ainda no banco, refaz select sem essas colunas.
+    // Compatibilidade: se reply_meta/remetente_*/contact_meta/location_meta não existirem ainda no banco, refaz select sem essas colunas.
     const selectFallback = 'id, texto, direcao, criado_em, autor_usuario_id, status, whatsapp_id, tipo, url, nome_arquivo'
-    if (errMsgs && (String(errMsgs.message || '').includes('reply_meta') || String(errMsgs.message || '').includes('remetente_nome') || String(errMsgs.message || '').includes('remetente_telefone') || String(errMsgs.message || '').includes('contact_meta') || String(errMsgs.message || '').includes('does not exist'))) {
+    if (errMsgs && (String(errMsgs.message || '').includes('reply_meta') || String(errMsgs.message || '').includes('remetente_nome') || String(errMsgs.message || '').includes('remetente_telefone') || String(errMsgs.message || '').includes('contact_meta') || String(errMsgs.message || '').includes('location_meta') || String(errMsgs.message || '').includes('does not exist'))) {
       query = supabase
         .from('mensagens')
         .select(selectFallback)
@@ -2822,58 +2858,128 @@ exports.enviarLocalizacao = async (req, res) => {
   try {
     const { company_id, id: user_id } = req.user
     const { id: conversa_id } = req.params
-    const { address = '', lat, lng } = req.body || {}
-
-    const permEnvio = await assertPodeEnviarMensagem({ company_id, conversa_id, user_id })
-    if (!permEnvio.ok) return res.status(permEnvio.status).json({ error: permEnvio.error })
+    const body = req.body || {}
+    const addressRaw = body.address ?? body.endereco ?? ''
+    const nomeRaw = body.nome ?? body.name ?? body.placeName ?? ''
+    const lat = body.lat ?? body.latitude
+    const lng = body.lng ?? body.longitude
 
     const latitude = Number(lat)
     const longitude = Number(lng)
     if (isNaN(latitude) || isNaN(longitude)) {
-      return res.status(400).json({ error: 'lat e lng são obrigatórios e devem ser números válidos' })
+      return res.status(400).json({ error: 'lat e lng (ou latitude e longitude) são obrigatórios e devem ser números válidos' })
     }
+
+    const nomePlace = String(nomeRaw || '').trim().slice(0, 200) || null
+    const endereco = String(addressRaw || '').trim().slice(0, 500) || null
+
+    const permEnvio = await assertPodeEnviarMensagem({ company_id, conversa_id, user_id })
+    if (!permEnvio.ok) return res.status(permEnvio.status).json({ error: permEnvio.error })
 
     const { data: conversa, error: errConv } = await supabase
       .from('conversas')
-      .select('id, telefone')
+      .select('id, telefone, cliente_id, tipo, nome_contato_cache, foto_perfil_contato_cache, chat_lid')
       .eq('company_id', company_id)
       .eq('id', conversa_id)
       .maybeSingle()
 
     if (errConv || !conversa) return res.status(404).json({ error: 'Conversa não encontrada' })
 
+    let telefoneParaEnvio = conversa.telefone || ''
+    if (telefoneParaEnvio && String(telefoneParaEnvio).trim().toLowerCase().startsWith('lid:')) {
+      if (conversa.cliente_id) {
+        const { data: cli } = await supabase.from('clientes').select('telefone').eq('id', conversa.cliente_id).eq('company_id', company_id).maybeSingle()
+        if (cli?.telefone && !String(cli.telefone).startsWith('lid:')) telefoneParaEnvio = cli.telefone
+      }
+      if (telefoneParaEnvio.startsWith('lid:') && conversa.chat_lid) {
+        const { data: outra } = await supabase
+          .from('conversas')
+          .select('telefone')
+          .eq('company_id', company_id)
+          .eq('chat_lid', conversa.chat_lid)
+          .not('telefone', 'like', 'lid:%')
+          .limit(1)
+          .maybeSingle()
+        if (outra?.telefone) telefoneParaEnvio = outra.telefone
+      }
+      if (telefoneParaEnvio.startsWith('lid:')) {
+        return res.status(400).json({ error: 'Número do contato indisponível (conversa por LID). Aguarde o contato enviar uma mensagem ou sincronize os contatos.' })
+      }
+    }
+
+    const location_meta = {
+      latitude,
+      longitude,
+      ...(nomePlace ? { nome: nomePlace } : {}),
+      ...(endereco ? { endereco } : {})
+    }
+
     const provider = getProvider()
     if (!provider || !provider.sendLocation) {
       return res.status(500).json({ error: 'Provider WhatsApp não suporta envio de localização' })
     }
 
-    const { nome: usuarioNome } = await getUsuarioParaEnvioCliente(supabase, company_id, user_id)
-    const addressOriginal = String(address || '').slice(0, 100) || '(localização)'
-    const addressParaCliente = usuarioNome ? `${usuarioNome} — ${addressOriginal}` : addressOriginal
-    const criadoEm = new Date().toISOString()
+    const textoDisplay = [nomePlace, endereco].filter(Boolean).join(' • ') || '(localização)'
     const locationUrl = `https://www.google.com/maps?q=${latitude},${longitude}`
-    const { data: msg, error: errMsg } = await supabase
+    const criadoEm = new Date().toISOString()
+
+    const insertRow = {
+      company_id,
+      conversa_id: Number(conversa_id),
+      texto: textoDisplay.slice(0, 2000),
+      direcao: 'out',
+      tipo: 'location',
+      status: 'pending',
+      url: locationUrl,
+      nome_arquivo: 'localização',
+      autor_usuario_id: Number(user_id),
+      criado_em: criadoEm,
+      location_meta
+    }
+
+    let { data: msg, error: errMsg } = await supabase
       .from('mensagens')
-      .insert({
-        company_id,
-        conversa_id: Number(conversa_id),
-        texto: String(address || '').slice(0, 100) || '(localização)',
-        direcao: 'out',
-        tipo: 'location',
-        status: 'pending',
-        url: locationUrl,
-        autor_usuario_id: Number(user_id),
-        criado_em: criadoEm,
-      })
+      .insert(insertRow)
       .select()
       .single()
 
+    if (errMsg && (String(errMsg.message || '').includes('location_meta') || String(errMsg.message || '').includes('does not exist'))) {
+      delete insertRow.location_meta
+      ;({ data: msg, error: errMsg } = await supabase.from('mensagens').insert(insertRow).select().single())
+    }
+
     if (errMsg) return res.status(500).json({ error: errMsg.message })
 
-    const result = await provider.sendLocation(conversa.telefone, { address: addressParaCliente, lat: latitude, lng: longitude }, {
-      companyId: company_id,
-      conversaId: conversa_id
-    })
+    await supabase
+      .from('conversas')
+      .update({ lida: true, ultima_atividade: new Date().toISOString() })
+      .eq('company_id', Number(company_id))
+      .eq('id', Number(conversa_id))
+
+    try {
+      const isGroup = String(conversa?.tipo || '').toLowerCase() === 'grupo' || String(conversa?.telefone || '').includes('@g.us')
+      if (!isGroup && conversa?.cliente_id != null) {
+        await supabase
+          .from('clientes')
+          .update({ ultimo_contato: criadoEm, atualizado_em: new Date().toISOString() })
+          .eq('company_id', Number(company_id))
+          .eq('id', Number(conversa.cliente_id))
+      }
+    } catch (_) {}
+
+    const { nome: usuarioNome } = await getUsuarioParaEnvioCliente(supabase, company_id, user_id)
+    const baseAddress = [nomePlace, endereco].filter(Boolean).join('\n') || `${latitude},${longitude}`
+    const addressParaCliente = usuarioNome ? `${usuarioNome} — ${String(baseAddress).slice(0, 280)}` : String(baseAddress).slice(0, 300)
+
+    let result = { ok: false, messageId: null }
+    if (telefoneParaEnvio) {
+      result = await provider.sendLocation(telefoneParaEnvio, { address: addressParaCliente, lat: latitude, lng: longitude }, {
+        companyId: company_id,
+        conversaId: conversa_id
+      })
+    } else {
+      console.warn(`[WhatsApp] Conversa ${conversa_id} sem telefone — localização salva, não enviada ao WhatsApp`)
+    }
 
     const ok = result?.ok === true
     const waMessageId = result?.messageId ? String(result.messageId).trim() : null
@@ -2887,12 +2993,32 @@ exports.enviarLocalizacao = async (req, res) => {
 
     const io = req.app.get('io')
     if (io) {
-      const payload = await enrichMensagemComAutorUsuario(supabase, company_id, { ...msg, status: nextStatus, whatsapp_id: waMessageId || null })
+      const payload = await enrichMensagemComAutorUsuario(supabase, company_id, { ...msg, status: nextStatus, whatsapp_id: waMessageId || null, location_meta: msg.location_meta || location_meta })
       emitirEventoEmpresaConversa(io, company_id, conversa_id, io.EVENTS?.NOVA_MENSAGEM || 'nova_mensagem', payload)
-      emitirConversaAtualizada(io, company_id, conversa_id, { id: Number(conversa_id) })
+      const convPayload = {
+        id: Number(conversa_id),
+        ultima_mensagem_preview: {
+          texto: msg.texto,
+          criado_em: msg.criado_em,
+          direcao: 'out',
+          tipo: 'location',
+          location_meta: msg.location_meta || location_meta,
+          url: locationUrl
+        },
+        reordenar_suave: true
+      }
+      emitirConversaAtualizada(io, company_id, conversa_id, convPayload, { skipAtualizarConversa: true })
     }
 
-    return res.json({ ok: true })
+    const sendOk = !!telefoneParaEnvio && ok
+
+    return res.json({
+      ok: true,
+      id: msg.id,
+      conversa_id: Number(conversa_id),
+      location_meta: msg.location_meta || location_meta,
+      ...(sendOk ? { status: 'sent' } : { status: telefoneParaEnvio ? 'erro' : 'pending' })
+    })
   } catch (err) {
     console.error('Erro ao enviar localização:', err)
     return res.status(500).json({ error: 'Erro ao enviar localização' })
@@ -3480,6 +3606,16 @@ exports.enviarArquivo = async (req, res) => {
     const convPayload = { id: Number(conversa_id) }
     if (msg.tipo === 'contact' && msg.contact_meta) {
       convPayload.ultima_mensagem_preview = { texto: msg.texto, criado_em: msg.criado_em, direcao: 'out', tipo: 'contact', contact_meta: msg.contact_meta }
+    }
+    if (msg.tipo === 'location' && (msg.location_meta || msg.url)) {
+      convPayload.ultima_mensagem_preview = {
+        texto: msg.texto,
+        criado_em: msg.criado_em,
+        direcao: 'out',
+        tipo: 'location',
+        ...(msg.location_meta ? { location_meta: msg.location_meta } : {}),
+        ...(msg.url ? { url: msg.url } : {})
+      }
     }
     emitirConversaAtualizada(io, company_id, conversa_id, convPayload)
 

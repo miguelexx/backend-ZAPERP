@@ -526,7 +526,25 @@ function extractMessage(payload) {
     }
     if (parsed.descricao_negocio) contactMeta.descricao_negocio = parsed.descricao_negocio
     if (!contactMeta.nome && !contactMeta.telefone) contactMeta = null
-  } else if (type === 'image' && imageUrl) {
+  }
+
+  // locationMeta: { latitude, longitude, nome, endereco } — paridade com contact_meta
+  let locationMeta = null
+  if (type === 'location') {
+    const loc = payload.location || {}
+    const lat = Number(loc.latitude ?? loc.lat)
+    const lng = Number(loc.longitude ?? loc.lng)
+    if (!isNaN(lat) && !isNaN(lng)) {
+      locationMeta = {
+        latitude: lat,
+        longitude: lng,
+        nome: (loc.name && String(loc.name).trim()) || null,
+        endereco: (loc.address && String(loc.address).trim()) || null
+      }
+    }
+  }
+
+  if (type === 'image' && imageUrl) {
     texto = texto || (payload.image?.caption && String(payload.image.caption).trim()) || '(imagem)'
   } else if ((type === 'document' || type === 'file') && documentUrl) {
     texto = texto || fileName || '(arquivo)'
@@ -574,7 +592,8 @@ function extractMessage(payload) {
     nomeGrupo: (isGroup && (payload.chatName ?? payload.groupName ?? payload.subject)) ? String(payload.chatName ?? payload.groupName ?? payload.subject).trim() : null,
     senderPhoto: senderPhoto && String(senderPhoto).trim() ? String(senderPhoto).trim() : null,
     chatPhoto: chatPhoto && String(chatPhoto).trim() ? String(chatPhoto).trim() : null,
-    contactMeta
+    contactMeta,
+    locationMeta
   }
 }
 
@@ -1323,7 +1342,8 @@ exports.receberZapi = async (req, res) => {
         nomeGrupo,
         senderPhoto,
         chatPhoto,
-        contactMeta
+        contactMeta,
+        locationMeta
       } = extracted
 
       // Newsletters (canais) não são conversas de atendimento — ignorar silenciosamente
@@ -1966,6 +1986,9 @@ exports.receberZapi = async (req, res) => {
                 insertMsg.tipo = 'location'
                 if (ex.locationUrl) insertMsg.url = ex.locationUrl
                 insertMsg.nome_arquivo = 'localização'
+                if (ex.locationMeta && (ex.locationMeta.latitude != null || ex.locationMeta.longitude != null)) {
+                  insertMsg.location_meta = ex.locationMeta
+                }
               }
 
               const { error: histErr } = await supabase.from('mensagens').insert(insertMsg)
@@ -2360,6 +2383,9 @@ exports.receberZapi = async (req, res) => {
         insertMsg.tipo = 'location'
         if (locationUrl) insertMsg.url = locationUrl
         insertMsg.nome_arquivo = 'localização'
+        if (locationMeta && (locationMeta.latitude != null || locationMeta.longitude != null)) {
+          insertMsg.location_meta = locationMeta
+        }
       } else if (type === 'contact') {
         insertMsg.tipo = 'contact'
         if (contactMeta && (contactMeta.nome || contactMeta.telefone)) {
@@ -2388,6 +2414,13 @@ exports.receberZapi = async (req, res) => {
         const retry = await supabase.from('mensagens').insert(insertMsg).select('*').single()
         inserted = retry.data
         errMsg = retry.error
+      }
+      if (errMsg && (String(errMsg.message || '').includes('contact_meta') || String(errMsg.message || '').includes('location_meta') || String(errMsg.message || '').includes('does not exist'))) {
+        delete insertMsg.contact_meta
+        delete insertMsg.location_meta
+        const retryMeta = await supabase.from('mensagens').insert(insertMsg).select('*').single()
+        inserted = retryMeta.data
+        errMsg = retryMeta.error
       }
       if (errMsg) {
         if (String(errMsg.code || '') === '23505' || String(errMsg.message || '').includes('duplicate') || String(errMsg.message || '').includes('unique')) {
@@ -2587,6 +2620,10 @@ exports.receberZapi = async (req, res) => {
         if (emitPayload.tipo === 'contact' && emitPayload.contact_meta) {
           preview.tipo = 'contact'
           preview.contact_meta = emitPayload.contact_meta
+        }
+        if (emitPayload.tipo === 'location' && emitPayload.location_meta) {
+          preview.tipo = 'location'
+          preview.location_meta = emitPayload.location_meta
         }
         convPayload.ultima_mensagem_preview = preview
       }

@@ -179,6 +179,7 @@ exports.receberWebhook = async (req, res) => {
     let nome_arquivo = null
     let reply_meta = null
     let contactMeta = null
+    let locationMeta = null
 
     // Mídia: áudio, imagem, vídeo, documento
     if (msg.audio) {
@@ -202,6 +203,22 @@ exports.receberWebhook = async (req, res) => {
       nome_arquivo = msg.document.filename || msg.document.caption || 'arquivo'
       url = await buscarEMediasWhatsApp(msg.document.id)
       if (!texto) texto = '(arquivo)'
+    } else if (msg.location && typeof msg.location === 'object') {
+      tipo = 'location'
+      const loc = msg.location
+      const lat = Number(loc.latitude)
+      const lng = Number(loc.longitude)
+      if (Number.isFinite(lat) && Number.isFinite(lng)) {
+        locationMeta = {
+          latitude: lat,
+          longitude: lng,
+          nome: loc.name ? String(loc.name).trim() : null,
+          endereco: loc.address ? String(loc.address).trim() : null
+        }
+        url = `https://www.google.com/maps?q=${lat},${lng}`
+      }
+      const parts = [loc.name, loc.address].filter(Boolean).map((s) => String(s).trim())
+      texto = parts.length ? parts.join(' • ') : (Number.isFinite(lat) && Number.isFinite(lng) ? `${lat}, ${lng}` : '(localização)')
     } else if (msg.contacts && Array.isArray(msg.contacts) && msg.contacts.length > 0) {
       // Meta Cloud API: contato compartilhado (msg.contacts)
       tipo = 'contact'
@@ -430,6 +447,10 @@ exports.receberWebhook = async (req, res) => {
       if (url) insertMsg.url = url
       if (nome_arquivo) insertMsg.nome_arquivo = nome_arquivo
       if (tipo === 'contact' && contactMeta) insertMsg.contact_meta = contactMeta
+      if (tipo === 'location') {
+        insertMsg.nome_arquivo = 'localização'
+        if (locationMeta) insertMsg.location_meta = locationMeta
+      }
     }
     if (reply_meta) insertMsg.reply_meta = reply_meta
 
@@ -456,6 +477,16 @@ exports.receberWebhook = async (req, res) => {
       // substitui a referência para o realtime
       mensagemSalva = retry.data
       errMsg = null
+    }
+
+    if (errMsg && (String(errMsg.message || '').includes('location_meta') || String(errMsg.message || '').includes('contact_meta') || String(errMsg.message || '').includes('does not exist'))) {
+      delete insertMsg.location_meta
+      delete insertMsg.contact_meta
+      const retry2 = await supabase.from('mensagens').insert(insertMsg).select('*').single()
+      if (!retry2.error) {
+        mensagemSalva = retry2.data
+        errMsg = null
+      }
     }
 
     if (errMsg) {
