@@ -928,13 +928,41 @@ async function processIncomingMessage(ctx) {
     return { handled: true }
   }
 
-  // Regra 2: Enviar no máximo 2 vezes por conversa — evita spam
-  const opcaoInvalidaCount = await countOpcaoInvalidaSent(sb, company_id, conversa_id)
-  if (opcaoInvalidaCount >= MAX_OPCAO_INVALIDA_ENVIOS) {
+  // Regra 2: Enviar no máximo 2 vezes por conversa — evita spam quando cliente manda várias fotos/áudios de uma vez
+  // Usa reserva atômica (RPC) para evitar race condition: múltiplas requisições paralelas não podem ultrapassar o limite
+  const detalhes = {
+    texto_recebido: String(texto || '').slice(0, 100),
+    opcoes_validas: (config.options || []).filter((o) => o && o.active !== false).map((o) => o.key),
+  }
+  let slotReservado = false
+  let usouRpc = false
+  try {
+    const { data: reservado, error } = await sb.rpc('reserve_opcao_invalida_slot', {
+      p_company_id: company_id,
+      p_conversa_id: conversa_id,
+      p_detalhes: detalhes,
+    })
+    if (error) {
+      console.warn('[chatbotTriage] reserve_opcao_invalida_slot:', error.message)
+      // Fallback: conta manualmente (pode ter race em burst - execute a migration)
+      const count = await countOpcaoInvalidaSent(sb, company_id, conversa_id)
+      if (count >= MAX_OPCAO_INVALIDA_ENVIOS) return { handled: true }
+      slotReservado = true
+    } else {
+      usouRpc = true
+      slotReservado = Boolean(reservado)
+    }
+  } catch (e) {
+    console.warn('[chatbotTriage] reserve_opcao_invalida_slot exceção:', e?.message || e)
+    const count = await countOpcaoInvalidaSent(sb, company_id, conversa_id)
+    if (count >= MAX_OPCAO_INVALIDA_ENVIOS) return { handled: true }
+    slotReservado = true
+  }
+
+  if (!slotReservado) {
     console.log('[chatbotTriage] ❌ skip opção inválida: limite atingido (máx 2)', {
       conversa_id,
       company_id,
-      count: opcaoInvalidaCount,
     })
     return { handled: true }
   }
@@ -950,7 +978,6 @@ async function processIncomingMessage(ctx) {
     conversa_id,
     company_id,
     textoRecebido: String(texto || '').slice(0, 50),
-    enviadoNumero: opcaoInvalidaCount + 1,
     maxEnvio: MAX_OPCAO_INVALIDA_ENVIOS,
   })
 
@@ -963,10 +990,14 @@ async function processIncomingMessage(ctx) {
       company_id,
       status: 'sent',
     })
-    await logBotAction(company_id, conversa_id, 'opcao_invalida', {
-      texto_recebido: texto?.slice(0, 100),
-      opcoes_validas: config.options.filter((o) => o.active !== false).map((o) => o.key),
-    })
+    if (!usouRpc) {
+      await (sb || supabase).from('bot_logs').insert({
+        company_id,
+        conversa_id: conversa_id || null,
+        tipo: 'opcao_invalida',
+        detalhes: typeof detalhes === 'object' ? detalhes : { raw: detalhes },
+      })
+    }
   } catch (e) {
     console.error('[chatbotTriage] ❌ Erro ao enviar mensagem de opção inválida:', e?.message || e)
   }

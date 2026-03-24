@@ -806,9 +806,14 @@ exports.listarConversas = async (req, res) => {
     conversasFormatadas = deduplicateConversationsByContact(conversasFormatadas)
     conversasFormatadas = sortConversationsByRecent(conversasFormatadas)
 
-    // Filtro "Abertas": só incluir conversas com movimentação (mensagem recebida ou usuário assumiu)
+    // Filtro "Abertas": só incluir conversas com movimentação (mensagem ou atendente assumiu)
+    // Exclui: conversas sem mensagens e sem atividade — não contam como abertas
     if (status_atendimento === 'aberta') {
-      conversasFormatadas = conversasFormatadas.filter((c) => c.is_group || c.exibir_badge_aberta)
+      conversasFormatadas = conversasFormatadas.filter((c) => {
+        if (c.sem_conversa) return false
+        if (c.is_group) return c.ultima_mensagem != null // grupo precisa ter ao menos 1 mensagem
+        return c.exibir_badge_aberta // individual: tem mensagem ou atendente assumiu
+      })
     }
 
     // Incluir todos os clientes: quem não tem conversa aparece como "Sem conversa" (clicável para abrir)
@@ -1757,8 +1762,12 @@ exports.detalharChat = async (req, res) => {
     const telefoneExibivel = isLidConv ? null : (conversa.telefone ?? clientesConv?.telefone ?? null)
     const fotoCache = (conversa.foto_perfil_contato_cache && String(conversa.foto_perfil_contato_cache).trim()) ? String(conversa.foto_perfil_contato_cache).trim() : null
     const fotoUnica = isGroup ? (conversa.foto_grupo ?? null) : (clientesConv?.foto_perfil ?? fotoCache ?? null)
+    // Badge "Aberta": só exibir quando há movimentação (mensagem ou atendente assumiu) — mesma regra da lista
+    const temMensagem = Array.isArray(mensagens) && mensagens.length > 0
+    const exibirBadgeAberta = !isGroup && (temMensagem || conversa.atendente_id != null)
     const conversaFormatada = {
       ...conversa,
+      exibir_badge_aberta: exibirBadgeAberta,
       clientes: clientesConv,
       is_group: isGroup,
       nome_grupo: conversa.nome_grupo ?? null,

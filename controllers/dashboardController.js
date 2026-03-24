@@ -62,6 +62,17 @@ exports.overview = async (req, res) => {
       if (c.status_atendimento === 'fechada') kpis.fechadas++
     })
 
+    // Abertas: só contar as que têm movimentação (mensagem ou atendente assumiu)
+    const { data: countAbertasComMov, error: errCountAbertas } = await supabase
+      .rpc('count_conversas_abertas_com_movimentacao', {
+        p_company_id: company_id,
+        p_from_iso: fromIso || null,
+        p_to_iso: toIso || null
+      })
+    if (!errCountAbertas && countAbertasComMov != null) {
+      kpis.abertas = Number(countAbertasComMov) || 0
+    }
+
     kpis.tickets_abertos = kpis.abertas + kpis.em_atendimento
     if (kpis.total > 0) {
       kpis.taxa_conversao_percent = Math.round((kpis.fechadas / kpis.total) * 100)

@@ -92,7 +92,8 @@ socket.on('status_mensagem', ({ mensagem_id, conversa_id, status, whatsapp_id })
 
 ### Badge "Aberta"
 - **`exibir_badge_aberta`** (boolean): Indica se a conversa deve exibir o ícone/label "Aberta". É `true` apenas quando há movimentação: mensagem recebida, mensagem enviada ou conversa assumida. Sem movimentação, deve ser `false` — não exibir nenhum badge.
-- Usar este campo em vez de `status_atendimento` para decidir se mostra o badge "Aberta" na lista.
+- Usar este campo em vez de `status_atendimento` para decidir se mostra o badge "Aberta" **na lista E no cabeçalho** da conversa aberta.
+- GET /chats/:id (detalharChat) retorna `exibir_badge_aberta` — o cabeçalho deve usá-lo, não `status_atendimento`.
 - `conversa_atualizada` pode trazer `exibir_badge_aberta: true` quando chega mensagem ou usuário assume.
 
 ### Checklist
