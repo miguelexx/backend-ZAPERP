@@ -10,7 +10,7 @@
  * 4. Garantia de que conversas reabertas reiniciem o processo
  */
 
-const { autoConfigureNewCompany, getChatbotStatusForAllCompanies } = require('../services/chatbotAutoConfigService')
+const { autoConfigureNewCompany, getChatbotStatusForAllCompanies, setupMissingChatbots } = require('../services/chatbotAutoConfigService')
 
 /**
  * Middleware para auto-configurar chatbot após criação de empresa
@@ -205,28 +205,21 @@ const autoReconfigureOnDepartmentChange = async (req, res, next) => {
 }
 
 /**
- * Função para inicializar configuração de chatbot no startup da aplicação
- * Deve ser chamada no app.js ou index.js
+ * Inicializa chatbot no startup configurando APENAS empresas que ainda não têm configuração.
+ * Nunca sobrescreve configurações já existentes — seguro para reinicializações do servidor.
  */
 const initializeChatbotForAllCompanies = async () => {
   try {
-    console.log('[AutoChatbotSetup] 🚀 Inicializando configuração de chatbot para todas as empresas...')
-    
-    const { configureAllCompaniesChatbot } = require('../services/chatbotAutoConfigService')
-    const result = await configureAllCompaniesChatbot()
-    
+    console.log('[AutoChatbotSetup] 🚀 Verificando empresas sem configuração de chatbot...')
+    const result = await setupMissingChatbots()
     if (result.success) {
-      console.log(`[AutoChatbotSetup] ✅ Inicialização concluída: ${result.configured} empresas configuradas`)
-      if (result.failed > 0) {
-        console.warn(`[AutoChatbotSetup] ⚠️ ${result.failed} empresas falharam na configuração`)
-      }
+      console.log(`[AutoChatbotSetup] ✅ Startup concluído: ${result.configured} nova(s) empresa(s) configurada(s), ${result.skipped} já existiam`)
     } else {
-      console.error('[AutoChatbotSetup] ❌ Falha na inicialização:', result.error)
+      console.error('[AutoChatbotSetup] ❌ Falha no startup do chatbot:', result.error)
     }
-    
     return result
   } catch (error) {
-    console.error('[AutoChatbotSetup] ❌ Erro na inicialização do chatbot:', error.message)
+    console.error('[AutoChatbotSetup] ❌ Erro no startup do chatbot:', error.message)
     return { success: false, error: error.message }
   }
 }
@@ -269,5 +262,6 @@ module.exports = {
   checkAndMarkChatbotRestart,
   autoReconfigureOnDepartmentChange,
   initializeChatbotForAllCompanies,
-  chatbotHealthCheck
+  chatbotHealthCheck,
+  setupMissingChatbots
 }

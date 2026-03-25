@@ -28,6 +28,50 @@ const { isEnabled, FLAGS } = require('../helpers/featureFlags')
 // company_id NUNCA mais via ENV — resolvido por instanceId do payload em cada webhook
 const WHATSAPP_DEBUG = String(process.env.WHATSAPP_DEBUG || '').toLowerCase() === 'true'
 
+/**
+ * Determina se uma mensagem enviada pelo cliente após finalização indica
+ * intenção real de continuar o atendimento.
+ *
+ * Retorna false para confirmações/agradecimentos simples, números e emojis isolados.
+ * Retorna true apenas quando há palavras de intenção explícita ou mensagem longa.
+ */
+function mensagemIndicaIntencaoContinuar(texto) {
+  if (!texto || typeof texto !== 'string') return false
+  const t = texto.trim()
+  if (!t) return false
+  const tLower = t.toLowerCase()
+
+  // Apenas números (protocolo, nota fora de range, etc.) — não reabre
+  if (/^\d[\d\s]*$/.test(t)) return false
+
+  // Apenas emojis — não reabre
+  if (/^[\u{1F300}-\u{1F9FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}\u{1F000}-\u{1F02F}\u{1F0A0}-\u{1F0FF}\u{1F100}-\u{1F1FF}\u{1F200}-\u{1F2FF}\u{1F900}-\u{1F9FF}\u{1FA00}-\u{1FA6F}\u{1FA70}-\u{1FAFF}\s]+$/u.test(t)) return false
+
+  // Confirmações/agradecimentos simples — não reabrem
+  const padraoSimples = /^(ok+|okay|certo|entendido|entendi|perfeito|ótimo|otimo|excelente|obrigad[ao]|obg|vlw|valeu|tudo\s*bem|sim|não|nao|blz|beleza|show|tá|ta|tks|thanks|oi|olá|ola|👍|✅|🙏|xau|tchau|até|ate)([!.,?\s]*)$/i
+  if (padraoSimples.test(tLower)) return false
+
+  // Palavras-chave que indicam intenção de continuar — reabrem
+  const palavrasIntencao = [
+    'preciso', 'quero', 'gostaria', 'necessito', 'necessit',
+    'ajuda', 'ajudar', 'dúvida', 'duvida', 'problema', 'questão', 'questao',
+    'mais alguma', 'outra coisa', 'outro assunto', 'nova solicitação', 'nova solicitacao',
+    'falar com', 'falar sobre', 'suporte', 'atendimento',
+    'informação', 'informacao', 'resolver', 'solucionar',
+    'comprar', 'adquirir', 'solicitar', 'agendar', 'marcar', 'cancelar',
+    'tirar dúvida', 'tirar duvida', 'esclarecer', 'verificar', 'consultar',
+    'reclamação', 'reclamacao', 'orçamento', 'orcamento',
+  ]
+  if (palavrasIntencao.some(p => tLower.includes(p))) return true
+
+  // Mensagens com 5+ palavras provavelmente indicam necessidade real
+  const palavras = tLower.split(/\s+/).filter(Boolean)
+  if (palavras.length >= 5) return true
+
+  // Por padrão mensagens curtas sem palavra-chave não reabrem
+  return false
+}
+
 /** Log [ZAPI_CERT] uma linha por ação — só quando WHATSAPP_DEBUG=true (apenas dev). Sem token, sem conteúdo da msg. */
 function logZapiCert(opts) {
   if (!WHATSAPP_DEBUG) return
@@ -1695,31 +1739,36 @@ exports.receberZapi = async (req, res) => {
         if (avalResult.registered) {
           console.log('[Webhook] 📊 Avaliação registrada (UltraMSG):', { conversa_id, nota: textoNorm })
         }
-        // Reabrir apenas se a mensagem NÃO for uma avaliação (0-10) — cliente quer continuar conversa
+        // Reabrir APENAS se: (1) não é avaliação E (2) cliente expressa intenção real de continuar
+        // Mensagens simples como "ok", números, emojis ou agradecimentos mantêm conversa fechada.
         if (!avalResult.registered) {
-          const { data: reaberta } = await supabase
-            .from('conversas')
-            .update({
-              status_atendimento: 'aberta',
-              departamento_id: null,
-              atendente_id: null,
-            })
-            .eq('id', conversa_id)
-            .eq('company_id', company_id)
-            .select()
-            .single()
-          if (reaberta) {
-            departamento_id = null
-            conversaReabertaAposFinalizacao = true
-            // Resetar estado do chatbot para reiniciar fluxo (menu, opções) — mesmo passo sempre
-            const { resetChatbotStateForConversa } = require('../services/chatbotTriageService')
-            await resetChatbotStateForConversa(supabase, company_id, conversa_id)
-            const io = req.app.get('io')
-            if (io) {
-              io.to(`empresa_${company_id}`).emit(io.EVENTS?.CONVERSA_REABERTA || 'conversa_reaberta', reaberta)
-              io.to(`empresa_${company_id}`).emit(io.EVENTS?.ATUALIZAR_CONVERSA || 'atualizar_conversa', { id: conversa_id })
+          const devReabrir = mensagemIndicaIntencaoContinuar(textoNorm)
+          if (devReabrir) {
+            const { data: reaberta } = await supabase
+              .from('conversas')
+              .update({
+                status_atendimento: 'aberta',
+                departamento_id: null,
+                atendente_id: null,
+              })
+              .eq('id', conversa_id)
+              .eq('company_id', company_id)
+              .select()
+              .single()
+            if (reaberta) {
+              departamento_id = null
+              conversaReabertaAposFinalizacao = true
+              const { resetChatbotStateForConversa } = require('../services/chatbotTriageService')
+              await resetChatbotStateForConversa(supabase, company_id, conversa_id)
+              const io = req.app.get('io')
+              if (io) {
+                io.to(`empresa_${company_id}`).emit(io.EVENTS?.CONVERSA_REABERTA || 'conversa_reaberta', reaberta)
+                io.to(`empresa_${company_id}`).emit(io.EVENTS?.ATUALIZAR_CONVERSA || 'atualizar_conversa', { id: conversa_id })
+              }
+              console.log('[Z-API] 🔄 Conversa reaberta (cliente sinalizou intenção de continuar) — chatbot reiniciado', { conversa_id, texto: textoNorm })
             }
-            console.log('[Z-API] 🔄 Conversa reaberta automaticamente (cliente enviou msg após encerramento) — chatbot reiniciado', { conversa_id })
+          } else {
+            console.log('[Z-API] 🔒 Conversa mantida fechada (mensagem simples após finalização, sem intenção de continuar)', { conversa_id, texto: textoNorm })
           }
         }
       }

@@ -392,6 +392,59 @@ async function autoConfigureNewCompany(companyId) {
   }
 }
 
+/**
+ * Configura chatbot APENAS para empresas que ainda não possuem configuração salva.
+ * Seguro para chamar no startup: nunca sobrescreve configurações existentes.
+ * @returns {Promise<object>} Resultado da operação
+ */
+async function setupMissingChatbots() {
+  try {
+    console.log('[ChatbotAutoConfig] 🔍 Verificando empresas sem configuração de chatbot...')
+
+    const { data: empresas, error: empresasError } = await supabase
+      .from('empresas')
+      .select('id, nome')
+      .eq('ativo', true)
+      .order('id')
+
+    if (empresasError) throw new Error(`Erro ao buscar empresas: ${empresasError.message}`)
+    if (!empresas || empresas.length === 0) {
+      console.log('[ChatbotAutoConfig] ⚠️ Nenhuma empresa ativa encontrada')
+      return { success: true, configured: 0, skipped: 0 }
+    }
+
+    // Buscar quais empresas já têm configuração salva
+    const { data: existentes } = await supabase
+      .from('ia_config')
+      .select('company_id')
+      .in('company_id', empresas.map(e => e.id))
+
+    const idsComConfig = new Set((existentes || []).map(r => r.company_id))
+
+    const semConfig = empresas.filter(e => !idsComConfig.has(e.id))
+    const comConfig = empresas.length - semConfig.length
+
+    if (semConfig.length === 0) {
+      console.log(`[ChatbotAutoConfig] ✅ Todas as ${comConfig} empresas já têm configuração — nenhuma alteração feita`)
+      return { success: true, configured: 0, skipped: comConfig }
+    }
+
+    console.log(`[ChatbotAutoConfig] 🆕 ${semConfig.length} empresa(s) sem chatbot, configurando...`)
+    let configuradas = 0
+    for (const empresa of semConfig) {
+      const ok = await configureChatbotForCompany(empresa.id)
+      if (ok) configuradas++
+    }
+
+    console.log(`[ChatbotAutoConfig] ✅ Setup concluído: ${configuradas} configurada(s), ${comConfig} já existiam (não alteradas)`)
+    return { success: true, configured: configuradas, skipped: comConfig }
+
+  } catch (error) {
+    console.error('[ChatbotAutoConfig] ❌ Erro em setupMissingChatbots:', error.message)
+    return { success: false, error: error.message, configured: 0, skipped: 0 }
+  }
+}
+
 module.exports = {
   generateChatbotConfig,
   configureChatbotForCompany,
@@ -400,5 +453,6 @@ module.exports = {
   getChatbotStatusForAllCompanies,
   reconfigureChatbotForCompany,
   autoConfigureNewCompany,
+  setupMissingChatbots,
   DEFAULT_CHATBOT_TEMPLATE
 }

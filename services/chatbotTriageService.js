@@ -17,6 +17,14 @@ const supabase = require('../config/supabase')
 const lastChatbotSendPerCompany = new Map()
 
 /**
+ * Cache do último envio de "opção inválida" por conversa_id — debounce em memória.
+ * Evita múltiplos envios em rajada quando o cliente manda várias mensagens em sequência.
+ */
+const lastOpcaoInvalidaSentAt = new Map()
+/** Janela de debounce: 60 segundos entre envios de "opção inválida" por conversa. */
+const OPCAO_INVALIDA_DEBOUNCE_MS = 60_000
+
+/**
  * Aguarda o intervalo configurado desde o último envio do chatbot (por empresa).
  * @param {number} company_id
  * @param {number} intervaloSegundos - Configurado pelo usuário (0 = sem delay)
@@ -917,6 +925,16 @@ async function processIncomingMessage(ctx) {
     return { handled: true }
   }
 
+  // Segurança: se o menu NUNCA foi enviado para esta conversa, não enviar "opção inválida".
+  // Garante que a mensagem só aparece em contextos onde o fluxo de boas-vindas já foi iniciado.
+  if (!menuAlreadySent) {
+    console.log('[chatbotTriage] ❌ skip: menu nunca foi enviado para esta conversa — não enviar opção inválida', {
+      conversa_id,
+      company_id,
+    })
+    return { handled: false }
+  }
+
   // Opção inválida: menu já foi enviado mas o cliente não digitou uma opção válida
   // Regra 1: Se o operador humano enviou mensagem recentemente (celular ou painel), não se intrometer
   const humanIntervened = await hasHumanIntervenedRecently(sb, company_id, conversa_id, config)
@@ -928,8 +946,23 @@ async function processIncomingMessage(ctx) {
     return { handled: true }
   }
 
-  // Regra 2: Enviar no máximo 2 vezes por conversa — evita spam quando cliente manda várias fotos/áudios de uma vez
-  // Usa reserva atômica (RPC) para evitar race condition: múltiplas requisições paralelas não podem ultrapassar o limite
+  // Regra 2: Debounce em memória por conversa (60 s) — evita envio múltiplo em rajada de mensagens.
+  // O Map é por processo; em caso de restart os contadores são zerados (comportamento aceitável).
+  const agoraMs = Date.now()
+  const ultimoEnvioMs = lastOpcaoInvalidaSentAt.get(conversa_id) || 0
+  if (agoraMs - ultimoEnvioMs < OPCAO_INVALIDA_DEBOUNCE_MS) {
+    console.log('[chatbotTriage] ❌ skip opção inválida: debounce ativo (janela 60 s)', {
+      conversa_id,
+      company_id,
+      segundosAtras: Math.round((agoraMs - ultimoEnvioMs) / 1000),
+    })
+    return { handled: true }
+  }
+  // Marcar antes de prosseguir para que requisições paralelas que ainda não finalizaram também sejam bloqueadas
+  lastOpcaoInvalidaSentAt.set(conversa_id, agoraMs)
+
+  // Regra 3: Enviar no máximo 2 vezes por conversa (total) — camada adicional via RPC atômico no banco.
+  // Garante o limite mesmo após restart do servidor (estado persistente).
   const detalhes = {
     texto_recebido: String(texto || '').slice(0, 100),
     opcoes_validas: (config.options || []).filter((o) => o && o.active !== false).map((o) => o.key),
