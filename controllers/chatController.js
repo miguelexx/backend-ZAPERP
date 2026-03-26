@@ -3909,17 +3909,19 @@ exports.encaminharMensagem = async (req, res) => {
     const temUrl = !!(mensagemOriginal.url)
 
     if (tipo_encaminhamento === 'texto' || (!temUrl && tipoOriginal === 'texto')) {
-      // Encaminhar como texto
-      const textoEncaminhado = mensagemOriginal.texto 
-        ? `${prefixoEncaminhado}\n${mensagemOriginal.texto}`
-        : `${prefixoEncaminhado}\n(mídia)`
+      // Encaminhar como texto — preserva o texto original sem o prefixo no banco (o frontend adiciona badge)
+      const textoOriginal = mensagemOriginal.texto && !mensagemOriginal.texto.startsWith('[Encaminhado]')
+        ? mensagemOriginal.texto
+        : (mensagemOriginal.texto || '(mídia)')
 
-      const textoComUsuario = usuarioNome ? `${textoEncaminhado}\n— ${usuarioNome}` : textoEncaminhado
+      const textoParaWhatsApp = usuarioNome 
+        ? `${prefixoEncaminhado}\n${textoOriginal}\n— ${usuarioNome}` 
+        : `${prefixoEncaminhado}\n${textoOriginal}`
 
       // Salvar mensagem no banco
       const { data: msg, error } = await supabase.from('mensagens').insert({
         conversa_id: Number(conversa_id),
-        texto: textoEncaminhado,
+        texto: textoOriginal,
         tipo: 'texto',
         direcao: 'out',
         autor_usuario_id: user_id,
@@ -3933,7 +3935,7 @@ exports.encaminharMensagem = async (req, res) => {
 
       // Enviar via WhatsApp
       if (telefoneParaEnvio && provider.sendText) {
-        resultadoEnvio = await provider.sendText(telefoneParaEnvio, textoComUsuario, {
+        resultadoEnvio = await provider.sendText(telefoneParaEnvio, textoParaWhatsApp, {
           companyId: company_id,
           conversaId: conversa_id
         })
@@ -3952,10 +3954,21 @@ exports.encaminharMensagem = async (req, res) => {
 
       const captionEncaminhado = usuarioNome ? `${prefixoEncaminhado} — ${usuarioNome}` : prefixoEncaminhado
       
-      // Salvar mensagem no banco
+      // Texto placeholder correto para o tipo (frontend usa isso como fallback)
+      const textoPlaceholderPorTipo = {
+        imagem: '(imagem)',
+        video: '(vídeo)',
+        audio: '(áudio)',
+        voice: '(áudio de voz)',
+        sticker: '(figurinha)',
+        arquivo: mensagemOriginal.nome_arquivo || '(arquivo)'
+      }
+      const textoParaBanco = textoPlaceholderPorTipo[tipoOriginal] || mensagemOriginal.nome_arquivo || `(${tipoOriginal})`
+
+      // Salvar mensagem no banco preservando tipo e url originais
       const { data: msg, error } = await supabase.from('mensagens').insert({
         conversa_id: Number(conversa_id),
-        texto: mensagemOriginal.nome_arquivo || `${prefixoEncaminhado} (${tipoOriginal})`,
+        texto: textoParaBanco,
         tipo: tipoOriginal,
         url: mensagemOriginal.url,
         nome_arquivo: mensagemOriginal.nome_arquivo,
@@ -4134,7 +4147,8 @@ exports.encaminharMensagem = async (req, res) => {
       mensagem: { 
         ...novaMensagem, 
         status: nextStatus,
-        whatsapp_id: waMessageId || null
+        whatsapp_id: waMessageId || null,
+        encaminhado: true
       },
       enviado_whatsapp: ok
     })
