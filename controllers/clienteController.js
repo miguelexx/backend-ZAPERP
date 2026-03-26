@@ -166,12 +166,16 @@ exports.atualizarCliente = async (req, res) => {
   const { id } = req.params;
   const { company_id } = req.user || {}
   const cid = Number(company_id)
-  const { nome, observacoes, email, empresa, foto_perfil } = req.body;
+  const { nome, observacoes, email, empresa, foto_perfil, telefone } = req.body;
 
-  if (nome === undefined && observacoes === undefined && email === undefined && empresa === undefined && foto_perfil === undefined) {
+  if (nome === undefined && observacoes === undefined && email === undefined && empresa === undefined && foto_perfil === undefined && telefone === undefined) {
     return res.status(400).json({
       erro: 'Informe ao menos um campo'
     });
+  }
+
+  if (telefone !== undefined && !String(telefone || '').trim()) {
+    return res.status(400).json({ erro: 'Telefone não pode ser vazio' });
   }
 
   try {
@@ -183,6 +187,7 @@ exports.atualizarCliente = async (req, res) => {
         ...(email !== undefined && { email: email ? String(email).trim() : null }),
         ...(empresa !== undefined && { empresa: empresa ? String(empresa).trim() : null }),
         ...(foto_perfil !== undefined && { foto_perfil: foto_perfil ? String(foto_perfil).trim() : null }),
+        ...(telefone !== undefined && { telefone: String(telefone).trim() }),
         atualizado_em: new Date().toISOString(),
       })
       .eq('id', Number(id))
@@ -190,7 +195,12 @@ exports.atualizarCliente = async (req, res) => {
       .select()
     const { data, error } = await q.maybeSingle();
 
-    if (error) throw error;
+    if (error) {
+      if (error.code === '23505') {
+        return res.status(409).json({ erro: 'Já existe um cliente com este número de telefone.' });
+      }
+      throw error;
+    }
     if (!data) {
       return res.status(404).json({ erro: 'Cliente não encontrado' });
     }
