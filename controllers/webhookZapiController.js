@@ -47,8 +47,45 @@ function mensagemIndicaIntencaoContinuar(texto) {
   // Apenas emojis — não reabre
   if (/^[\u{1F300}-\u{1F9FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}\u{1F000}-\u{1F02F}\u{1F0A0}-\u{1F0FF}\u{1F100}-\u{1F1FF}\u{1F200}-\u{1F2FF}\u{1F900}-\u{1F9FF}\u{1FA00}-\u{1FA6F}\u{1FA70}-\u{1FAFF}\s]+$/u.test(t)) return false
 
+  // Saudações/cumprimentos — indicam intenção de reabrir
+  const saudacoes = [
+    // variações de "oi"
+    'oi', 'oii', 'oiii', 'oioi', 'oi oi',
+    // variações de "olá"
+    'olá', 'ola', 'olaa', 'oláa',
+    // períodos do dia
+    'bom dia', 'boa tarde', 'boa noite',
+    // "ei" e variações
+    'ei', 'eii', 'eiiii',
+    // "alô"
+    'alô', 'alo', 'alô?', 'alo?',
+    // "e aí" e variações
+    'e aí', 'e ai', 'eai', 'eaí', 'e aí?', 'e ai?',
+    // expressões casuais brasileiras
+    'salve', 'opa', 'fala', 'falá',
+    // inglês
+    'hello', 'hey', 'hi',
+    // "tudo" como saudação
+    'tudo bem', 'tudo bom', 'tudo certo', 'tudo ótimo', 'tudo otimo', 'tudo',
+    // "como vai/está"
+    'como vai', 'como está', 'como esta', 'como você está', 'como voce esta',
+    // "boas"
+    'boas', 'boa',
+    // formal
+    'prezado', 'prezada', 'prezados', 'prezadas',
+    'caro', 'cara', 'caros', 'caras',
+    'saudações', 'saudacoes',
+    'bom dia a todos', 'boa tarde a todos', 'boa noite a todos',
+  ]
+  if (saudacoes.some(s => {
+    if (tLower === s) return true
+    if (!tLower.startsWith(s)) return false
+    const next = tLower[s.length]
+    return !next || /[\s!?,.]/.test(next)
+  })) return true
+
   // Confirmações/agradecimentos simples — não reabrem
-  const padraoSimples = /^(ok+|okay|certo|entendido|entendi|perfeito|ótimo|otimo|excelente|obrigad[ao]|obg|vlw|valeu|tudo\s*bem|sim|não|nao|blz|beleza|show|tá|ta|tks|thanks|oi|olá|ola|👍|✅|🙏|xau|tchau|até|ate)([!.,?\s]*)$/i
+  const padraoSimples = /^(ok+|okay|certo|entendido|entendi|perfeito|ótimo|otimo|excelente|obrigad[ao]|obg|vlw|valeu|sim|não|nao|blz|beleza|show|tá|ta|tks|thanks|👍|✅|🙏|xau|tchau|até|ate)([!.,?\s]*)$/i
   if (padraoSimples.test(tLower)) return false
 
   // Palavras-chave que indicam intenção de continuar — reabrem
