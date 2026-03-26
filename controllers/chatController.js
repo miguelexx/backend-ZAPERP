@@ -3625,6 +3625,9 @@ exports.enviarArquivo = async (req, res) => {
     const baseUrl = (process.env.APP_URL || process.env.BASE_URL || '').replace(/\/$/, '')
     const fullUrl = baseUrl ? `${baseUrl}${pathUrl}` : null
     const isLocalhost = /localhost|127\.0\.0\.1/i.test(baseUrl)
+    // UltraMsg rejeita URLs com extensão .webm em endpoints de áudio ("file extension not supported").
+    // Para esses arquivos, usar uploadMedia (CDN deles sem extensão) independente do APP_URL.
+    const forceUploadMedia = (tipo === 'voice' || tipo === 'audio') && /\.webm$/i.test(file.filename || file.originalname || '')
 
     const sendMediaWithUrl = (mediaUrl) => {
       const provider = getProvider()
@@ -3668,9 +3671,9 @@ exports.enviarArquivo = async (req, res) => {
     }
 
     if (telefoneParaEnvio) {
-      if (fullUrl && !isLocalhost) {
+      if (fullUrl && !isLocalhost && !forceUploadMedia) {
         setImmediate(() => sendMediaWithUrl(fullUrl))
-      } else if ((!baseUrl || isLocalhost) && file.path) {
+      } else if ((!baseUrl || isLocalhost || forceUploadMedia) && file.path) {
         const provider = getProvider()
         if (provider?.uploadMedia) {
           setImmediate(async () => {
@@ -3695,7 +3698,7 @@ exports.enviarArquivo = async (req, res) => {
               }
             }
           })
-        } else if (!baseUrl) {
+        } else if (!baseUrl && !forceUploadMedia) {
           console.warn('⚠️ APP_URL/BASE_URL não configurado; mídia não enviada ao WhatsApp.')
         } else {
           console.warn('⚠️ APP_URL é localhost e provider sem uploadMedia; mídia não enviada ao WhatsApp.')
