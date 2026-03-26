@@ -3522,8 +3522,9 @@ function inferirTipoArquivo(file) {
   // Figurinha (WhatsApp): geralmente WEBP
   if (m === 'image/webp' || /\.webp$/i.test(n)) return 'sticker'
   if (m.startsWith('image/')) return 'imagem'
-  // Voice note: UltraMsg exige codec opus (contracted ultramsg-contract)
-  if (m === 'audio/opus' || /\.opus$/i.test(n)) return 'voice'
+  // Voice note: codec opus (gravação do browser: audio/webm;codecs=opus, audio/webm, audio/opus)
+  // UltraMsg /messages/voice aceita Opus; audio/webm gravado pelo browser contém Opus
+  if (m === 'audio/opus' || m === 'audio/webm' || /\.opus$/i.test(n)) return 'voice'
   if (m.startsWith('audio/') || /\.(mp3|ogg|wav|m4a|webm|aac)$/i.test(n)) return 'audio'
   if (m.startsWith('video/')) return 'video'
   return 'arquivo'

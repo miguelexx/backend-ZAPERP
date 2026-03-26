@@ -379,9 +379,11 @@ async function sendAudio(phone, audioUrl, opts = {}) {
   const nums = phoneCandidatesForSend(phone)
   if (!nums.length || !audioUrl) return false
   const body = { to: nums[0], audio: String(audioUrl).trim() }
-  const { ok, data, text } = await postJson({ ...cfg, endpoint: '/messages/audio', body })
-  if (!ok) {
-    console.warn('❌ UltraMsg sendAudio falhou:', nums[0]?.slice(-12), String(text || data?.error || '').slice(0, 150), '| token:', maskToken(cfg.token))
+  const { ok, status, data, text } = await postJson({ ...cfg, endpoint: '/messages/audio', body })
+  const bodyError = data?.error || (!data?.id && !data?.sent && !data?.messageId && data?.message)
+  if (!ok || bodyError) {
+    const err = data?.error || data?.message || String(text || '').slice(0, 200) || `HTTP ${status}`
+    console.warn('❌ UltraMsg sendAudio falhou:', nums[0]?.slice(-12), String(err).slice(0, 150), '| token:', maskToken(cfg.token))
     return false
   }
   console.log('✅ UltraMsg áudio enviado:', nums[0]?.slice(-12))
@@ -477,8 +479,13 @@ async function sendVoice(phone, audioUrl, opts = {}) {
   const nums = phoneCandidatesForSend(phone)
   if (!nums.length || !audioUrl) return false
   const body = { to: nums[0], audio: String(audioUrl).trim() }
-  const { ok } = await postJson({ ...cfg, endpoint: '/messages/voice', body })
-  if (!ok) return false
+  const { ok, status, data, text } = await postJson({ ...cfg, endpoint: '/messages/voice', body })
+  const bodyError = data?.error || (!data?.id && !data?.sent && !data?.messageId && data?.message)
+  if (!ok || bodyError) {
+    const err = data?.error || data?.message || String(text || '').slice(0, 200) || `HTTP ${status}`
+    console.warn('❌ UltraMsg sendVoice falhou:', nums[0]?.slice(-12), String(err).slice(0, 150), '| token:', maskToken(cfg.token))
+    return false
+  }
   console.log('✅ UltraMsg voice enviado:', nums[0]?.slice(-12))
   return true
 }
