@@ -3682,11 +3682,30 @@ exports.enviarArquivo = async (req, res) => {
               if (result?.ok && result?.url) {
                 sendMediaWithUrl(result.url)
               } else {
-                console.warn('⚠️ UltraMsg uploadMedia falhou; mídia não enviada.', result?.error || '')
-                await supabase.from('mensagens').update({ status: 'erro' }).eq('company_id', company_id).eq('id', msg.id)
-                const io2 = req.app?.get('io')
-                if (io2) {
-                  io2.to(`empresa_${company_id}`).to(`conversa_${conversa_id}`).to(`usuario_${user_id}`).emit(io2.EVENTS?.STATUS_MENSAGEM || 'status_mensagem', { mensagem_id: msg.id, conversa_id: Number(conversa_id), status: 'erro', status_mensagem: 'erro' })
+                // Fallback: para áudio/voz, tentar enviar como base64 diretamente (evita dependência do CDN)
+                let base64FallbackOk = false
+                if ((tipo === 'voice' || tipo === 'audio') && file.path) {
+                  try {
+                    const fsSync = require('fs')
+                    if (fsSync.existsSync(file.path)) {
+                      const fileBuffer = fsSync.readFileSync(file.path)
+                      // Usa data URI audio/ogg (UltraMsg aceita base64 no campo audio)
+                      const base64DataUri = `data:audio/ogg;base64,${fileBuffer.toString('base64')}`
+                      sendMediaWithUrl(base64DataUri)
+                      base64FallbackOk = true
+                      console.log('[ULTRAMSG] Áudio enviado via base64 (fallback CDN falhou)')
+                    }
+                  } catch (e2) {
+                    console.warn('[ULTRAMSG] Fallback base64 áudio falhou:', e2?.message)
+                  }
+                }
+                if (!base64FallbackOk) {
+                  console.warn('⚠️ UltraMsg uploadMedia falhou; mídia não enviada.', result?.error || '')
+                  await supabase.from('mensagens').update({ status: 'erro' }).eq('company_id', company_id).eq('id', msg.id)
+                  const io2 = req.app?.get('io')
+                  if (io2) {
+                    io2.to(`empresa_${company_id}`).to(`conversa_${conversa_id}`).to(`usuario_${user_id}`).emit(io2.EVENTS?.STATUS_MENSAGEM || 'status_mensagem', { mensagem_id: msg.id, conversa_id: Number(conversa_id), status: 'erro', status_mensagem: 'erro' })
+                  }
                 }
               }
             } catch (e) {

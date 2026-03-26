@@ -1133,7 +1133,13 @@ async function uploadMedia(filePath, filename, opts = {}) {
     const FormData = require('form-data')
     const form = new FormData()
     form.append('token', cfg.token)
-    form.append('file', fs.createReadStream(filePath), { filename: safeFilename.slice(0, FILENAME_MAX_LEN) })
+
+    // UltraMsg CDN rejeita .webm: renomear para .ogg (mesmo codec opus, container compatível)
+    let uploadFilename = safeFilename.slice(0, FILENAME_MAX_LEN)
+    if (/\.webm$/i.test(uploadFilename)) {
+      uploadFilename = uploadFilename.replace(/\.webm$/i, '.ogg')
+    }
+    form.append('file', fs.createReadStream(filePath), { filename: uploadFilename })
     const uploadTimeout = 60_000 // 60s para arquivos até 30MB
     let signal
     try {
