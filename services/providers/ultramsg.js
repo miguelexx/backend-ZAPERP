@@ -119,6 +119,61 @@ function isFileExtensionError(error) {
   return false
 }
 
+/**
+ * Tenta enviar áudio com múltiplos formatos até um funcionar.
+ * Usado quando o formato original é rejeitado pelo UltraMsg.
+ */
+async function tryMultipleAudioFormats(phone, originalAudioUrl, cfg, endpoint = '/messages/audio') {
+  if (!originalAudioUrl.startsWith('data:')) return false
+  
+  const nums = phoneCandidatesForSend(phone)
+  if (!nums.length) return false
+  
+  const base64Data = originalAudioUrl.split(',')[1]
+  if (!base64Data) return false
+  
+  // Lista de MIME types para tentar, em ordem de compatibilidade
+  const mimeTypesToTry = [
+    'audio/mpeg',  // MP3 - mais universalmente aceito
+    'audio/ogg',   // OGG - boa compatibilidade
+    'audio/wav',   // WAV - formato básico
+    'audio/mp4',   // M4A/AAC em container MP4
+    'audio/aac'    // AAC puro
+  ]
+  
+  for (const mimeType of mimeTypesToTry) {
+    try {
+      const audioUrl = `data:${mimeType};base64,${base64Data}`
+      const body = { to: nums[0], audio: audioUrl }
+      
+      const result = await postJson({ ...cfg, endpoint, body })
+      const hasError = result.data?.error && result.data.error !== false && result.data.error !== 'false'
+      const sentFailed = result.data?.sent === 'false' || result.data?.sent === false
+      
+      if (result.ok && !hasError && !sentFailed) {
+        console.log(`✅ UltraMsg áudio enviado como ${mimeType}:`, nums[0]?.slice(-12))
+        return true
+      }
+      
+      // Se ainda é erro de extensão, continua tentando
+      if (isFileExtensionError(result.data?.error)) {
+        console.log(`[ULTRAMSG] ${mimeType} também rejeitado, tentando próximo formato`)
+        continue
+      }
+      
+      // Se é outro tipo de erro, para de tentar
+      console.warn(`[ULTRAMSG] Erro não relacionado à extensão com ${mimeType}:`, result.data?.error)
+      break
+      
+    } catch (error) {
+      console.warn(`[ULTRAMSG] Erro ao tentar ${mimeType}:`, error?.message)
+      continue
+    }
+  }
+  
+  return false
+}
+
 /** Sanitiza objeto para log (mascara token). */
 function sanitizeForLog(obj, token) {
   if (!obj || typeof obj !== 'object') return obj
@@ -437,6 +492,7 @@ async function sendAudio(phone, audioUrl, opts = {}) {
   // Processa URL de áudio para melhor compatibilidade
   const processedAudioUrl = normalizeAudioUrl(String(audioUrl).trim())
   
+  console.log(`[ULTRAMSG] Tentando enviar audio para ${nums[0]?.slice(-12)} com URL: ${processedAudioUrl.slice(0, 50)}...`)
   const body = { to: nums[0], audio: processedAudioUrl }
   const { ok, status, data, text } = await postJson({ ...cfg, endpoint: '/messages/audio', body })
   
@@ -447,32 +503,21 @@ async function sendAudio(phone, audioUrl, opts = {}) {
   // Verifica se é erro de extensão não suportada
   const isExtensionError = isFileExtensionError(data?.error)
   
+  if (WHATSAPP_DEBUG) {
+    console.log('[ULTRAMSG] sendAudio resultado:', { ok, status, hasError: !!explicitError, sentFailed, isExtensionError })
+  }
+  
   if (!ok || explicitError || sentFailed) {
     const errRaw = data?.error || (sentFailed ? 'sent:false' : null) || String(text || '').slice(0, 200) || `HTTP ${status}`
     const errMsg = typeof errRaw === 'object' ? JSON.stringify(errRaw) : String(errRaw)
     console.warn('❌ UltraMsg sendAudio falhou:', nums[0]?.slice(-12), errMsg.slice(0, 200), '| token:', maskToken(cfg.token))
     
-    // Se falhou por extensão, tentar como documento
+    // Se falhou por extensão, tentar múltiplos formatos
     if (isExtensionError && processedAudioUrl.startsWith('data:')) {
-      console.log('[ULTRAMSG] Tentando enviar áudio como documento devido a erro de extensão')
-      try {
-        // Extrai o base64 e envia como documento
-        const base64Data = processedAudioUrl.split(',')[1]
-        if (base64Data) {
-          const docBody = { 
-            to: nums[0], 
-            document: processedAudioUrl,
-            filename: 'audio.ogg',
-            caption: '🎵 Áudio'
-          }
-          const docResult = await postJson({ ...cfg, endpoint: '/messages/document', body: docBody })
-          if (docResult.ok && !docResult.data?.error) {
-            console.log('✅ UltraMsg áudio enviado como documento:', nums[0]?.slice(-12))
-            return true
-          }
-        }
-      } catch (docError) {
-        console.warn('❌ UltraMsg envio como documento também falhou:', docError?.message)
+      console.log('[ULTRAMSG] Tentando múltiplos formatos de áudio')
+      const multiFormatSuccess = await tryMultipleAudioFormats(phone, processedAudioUrl, cfg, '/messages/audio')
+      if (multiFormatSuccess) {
+        return true
       }
     }
     
@@ -578,12 +623,17 @@ async function sendVoice(phone, audioUrl, opts = {}) {
   const body = { to: nums[0], audio: processedAudioUrl }
 
   // Tenta endpoint voice primeiro
+  console.log(`[ULTRAMSG] Tentando enviar voice para ${nums[0]?.slice(-12)} com URL: ${processedAudioUrl.slice(0, 50)}...`)
   const { ok, status, data, text } = await postJson({ ...cfg, endpoint: '/messages/voice', body })
   const explicitError = data?.error && data.error !== false && data.error !== 'false'
   const sentFailed = data?.sent === 'false' || data?.sent === false
   
   // Verifica se é erro de extensão não suportada
   const isExtensionError = isFileExtensionError(data?.error)
+  
+  if (WHATSAPP_DEBUG) {
+    console.log('[ULTRAMSG] sendVoice resultado:', { ok, status, hasError: !!explicitError, sentFailed, isExtensionError })
+  }
   
   if (!ok || explicitError || sentFailed) {
     const errRaw = data?.error || (sentFailed ? 'sent:false' : null) || String(text || '').slice(0, 200) || `HTTP ${status}`
@@ -603,27 +653,12 @@ async function sendVoice(phone, audioUrl, opts = {}) {
       const fbErrMsg = typeof fbErrRaw === 'object' ? JSON.stringify(fbErrRaw) : String(fbErrRaw)
       console.warn('❌ UltraMsg sendAudio (fallback) falhou:', nums[0]?.slice(-12), fbErrMsg.slice(0, 200), '| token:', maskToken(cfg.token))
       
-      // Se ambos falharam por extensão, tentar como documento
+      // Se ambos falharam por extensão, tentar múltiplos formatos
       if ((isExtensionError || fbIsExtensionError) && processedAudioUrl.startsWith('data:')) {
-        console.log('[ULTRAMSG] Tentando enviar áudio como documento devido a erro de extensão')
-        try {
-          // Extrai o base64 e envia como documento
-          const base64Data = processedAudioUrl.split(',')[1]
-          if (base64Data) {
-            const docBody = { 
-              to: nums[0], 
-              document: processedAudioUrl,
-              filename: 'audio.ogg',
-              caption: '🎵 Áudio'
-            }
-            const docResult = await postJson({ ...cfg, endpoint: '/messages/document', body: docBody })
-            if (docResult.ok && !docResult.data?.error) {
-              console.log('✅ UltraMsg áudio enviado como documento:', nums[0]?.slice(-12))
-              return true
-            }
-          }
-        } catch (docError) {
-          console.warn('❌ UltraMsg envio como documento também falhou:', docError?.message)
+        console.log('[ULTRAMSG] Tentando múltiplos formatos de áudio')
+        const multiFormatSuccess = await tryMultipleAudioFormats(phone, processedAudioUrl, cfg, '/messages/audio')
+        if (multiFormatSuccess) {
+          return true
         }
       }
       

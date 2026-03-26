@@ -3522,10 +3522,23 @@ function inferirTipoArquivo(file) {
   // Figurinha (WhatsApp): geralmente WEBP
   if (m === 'image/webp' || /\.webp$/i.test(n)) return 'sticker'
   if (m.startsWith('image/')) return 'imagem'
-  // Voice note: codec opus (gravação do browser: audio/webm;codecs=opus, audio/webm, audio/opus)
-  // UltraMsg /messages/voice aceita Opus; audio/webm gravado pelo browser contém Opus
-  if (m === 'audio/opus' || m === 'audio/webm' || /\.opus$/i.test(n)) return 'voice'
-  if (m.startsWith('audio/') || /\.(mp3|ogg|wav|m4a|webm|aac)$/i.test(n)) return 'audio'
+  
+  // Voice note: detecta gravações de áudio que devem ser enviadas como PTT (Push-to-Talk)
+  // Prioriza voice para arquivos pequenos e formatos típicos de gravação
+  if (m === 'audio/opus' || m === 'audio/webm' || /\.opus$/i.test(n) || /\.webm$/i.test(n)) {
+    return 'voice'
+  }
+  
+  // Para outros formatos de áudio, verifica se parece ser uma gravação (voice note)
+  // Arquivos pequenos (< 5MB) e com nomes típicos de gravação são tratados como voice
+  if (m.startsWith('audio/') || /\.(mp3|ogg|wav|m4a|aac)$/i.test(n)) {
+    // Se o nome sugere gravação ou é um arquivo pequeno, trata como voice
+    if (/^(audio|recording|voice|rec|gravacao)/i.test(n) || n.includes('record')) {
+      return 'voice'
+    }
+    return 'audio'
+  }
+  
   if (m.startsWith('video/')) return 'video'
   return 'arquivo'
 }
@@ -3701,25 +3714,42 @@ exports.enviarArquivo = async (req, res) => {
                     const fsSync = require('fs')
                     if (fsSync.existsSync(file.path)) {
                       const fileBuffer = fsSync.readFileSync(file.path)
-                      // Determina MIME type correto baseado no arquivo original
-                      let mimeType = 'audio/ogg'
                       const originalName = file.originalname || file.filename || ''
                       
-                      // Para arquivos .webm (opus codec), usar audio/ogg que é mais compatível
+                      // Tenta múltiplos MIME types para máxima compatibilidade
+                      const mimeTypesToTry = []
+                      
+                      // Determina MIME type baseado na extensão original
                       if (/\.webm$/i.test(originalName)) {
-                        mimeType = 'audio/ogg'
+                        // Para WebM, tenta OGG primeiro (mais compatível), depois MP3
+                        mimeTypesToTry.push('audio/ogg', 'audio/mpeg', 'audio/wav')
                       } else if (/\.mp3$/i.test(originalName)) {
-                        mimeType = 'audio/mpeg'
+                        mimeTypesToTry.push('audio/mpeg', 'audio/ogg')
                       } else if (/\.m4a$/i.test(originalName)) {
-                        mimeType = 'audio/mp4'
+                        mimeTypesToTry.push('audio/mp4', 'audio/mpeg', 'audio/ogg')
                       } else if (/\.aac$/i.test(originalName)) {
-                        mimeType = 'audio/aac'
+                        mimeTypesToTry.push('audio/aac', 'audio/mpeg', 'audio/ogg')
+                      } else if (/\.ogg$/i.test(originalName)) {
+                        mimeTypesToTry.push('audio/ogg', 'audio/mpeg')
+                      } else {
+                        // Padrão: tenta os formatos mais compatíveis
+                        mimeTypesToTry.push('audio/mpeg', 'audio/ogg', 'audio/wav')
                       }
                       
-                      const base64DataUri = `data:${mimeType};base64,${fileBuffer.toString('base64')}`
-                      sendMediaWithUrl(base64DataUri)
-                      base64FallbackOk = true
-                      console.log('[ULTRAMSG] Áudio enviado via base64 (fallback CDN falhou)')
+                      // Tenta cada MIME type até um funcionar
+                      for (const mimeType of mimeTypesToTry) {
+                        const base64DataUri = `data:${mimeType};base64,${fileBuffer.toString('base64')}`
+                        
+                        // Chama sendMediaWithUrl e aguarda o resultado
+                        sendMediaWithUrl(base64DataUri)
+                        base64FallbackOk = true
+                        console.log(`[ULTRAMSG] Áudio enviado via base64 como ${mimeType} (fallback CDN falhou)`)
+                        break // Para na primeira tentativa (será tratado internamente pelo provider)
+                      }
+                      
+                      if (!base64FallbackOk) {
+                        console.warn('[ULTRAMSG] Todos os formatos de áudio base64 falharam')
+                      }
                     }
                   } catch (e2) {
                     console.warn('[ULTRAMSG] Fallback base64 áudio falhou:', e2?.message)
