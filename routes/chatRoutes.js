@@ -36,6 +36,7 @@ router.put('/:id/departamento', auth, chatController.transferirSetor)
 router.post("/:id/arquivo", auth, uploadArquivo, chatController.enviarArquivo)
 
 router.post('/:id/mensagens', auth, chatController.enviarMensagemChat)
+router.post('/:id/encaminhar', auth, chatController.encaminharMensagem)
 router.delete('/:id/mensagens/:mensagem_id', auth, chatController.excluirMensagem)
 router.post('/:id/mensagens/:mensagem_id/reacao', auth, chatController.enviarReacaoMensagem)
 router.delete('/:id/mensagens/:mensagem_id/reacao', auth, chatController.removerReacaoMensagem)

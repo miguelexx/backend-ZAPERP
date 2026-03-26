@@ -3608,30 +3608,48 @@ exports.enviarArquivo = async (req, res) => {
 
     if (error) return res.status(500).json({ error: error.message })
 
+    // Atualizar conversa com timestamp correto
+    const timestampAtividade = new Date().toISOString()
     await supabase
       .from('conversas')
-      .update({ lida: true, ultima_atividade: new Date().toISOString() })
+      .update({ lida: true, ultima_atividade: timestampAtividade })
       .eq('company_id', Number(company_id))
       .eq('id', Number(conversa_id))
 
-    const basePayload = { ...msg, conversa_id: msg.conversa_id ?? Number(conversa_id), status: msg.status || 'pending', status_mensagem: msg.status_mensagem || msg.status || 'pending', direcao: 'out' }
-    const novaMsgPayload = await enrichMensagemComAutorUsuario(supabase, company_id, basePayload)
-    emitirEventoEmpresaConversa(io, company_id, conversa_id, io.EVENTS?.NOVA_MENSAGEM || 'nova_mensagem', novaMsgPayload)
-    const convPayload = { id: Number(conversa_id) }
-    if (msg.tipo === 'contact' && msg.contact_meta) {
-      convPayload.ultima_mensagem_preview = { texto: msg.texto, criado_em: msg.criado_em, direcao: 'out', tipo: 'contact', contact_meta: msg.contact_meta }
-    }
-    if (msg.tipo === 'location' && (msg.location_meta || msg.url)) {
-      convPayload.ultima_mensagem_preview = {
-        texto: msg.texto,
-        criado_em: msg.criado_em,
-        direcao: 'out',
-        tipo: 'location',
-        ...(msg.location_meta ? { location_meta: msg.location_meta } : {}),
-        ...(msg.url ? { url: msg.url } : {})
+    // Emitir eventos para o frontend
+    if (io) {
+      const basePayload = { ...msg, conversa_id: msg.conversa_id ?? Number(conversa_id), status: msg.status || 'pending', status_mensagem: msg.status_mensagem || msg.status || 'pending', direcao: 'out' }
+      const novaMsgPayload = await enrichMensagemComAutorUsuario(supabase, company_id, basePayload)
+      emitirEventoEmpresaConversa(io, company_id, conversa_id, io.EVENTS?.NOVA_MENSAGEM || 'nova_mensagem', novaMsgPayload)
+      
+      const convPayload = { id: Number(conversa_id), ultima_atividade: timestampAtividade }
+      
+      // Adicionar preview da última mensagem baseado no tipo
+      if (msg.tipo === 'contact' && msg.contact_meta) {
+        convPayload.ultima_mensagem_preview = { texto: msg.texto, criado_em: msg.criado_em, direcao: 'out', tipo: 'contact', contact_meta: msg.contact_meta }
+      } else if (msg.tipo === 'location' && (msg.location_meta || msg.url)) {
+        convPayload.ultima_mensagem_preview = {
+          texto: msg.texto,
+          criado_em: msg.criado_em,
+          direcao: 'out',
+          tipo: 'location',
+          ...(msg.location_meta ? { location_meta: msg.location_meta } : {}),
+          ...(msg.url ? { url: msg.url } : {})
+        }
+      } else {
+        // Para outros tipos de mídia
+        convPayload.ultima_mensagem_preview = {
+          texto: msg.texto,
+          criado_em: msg.criado_em,
+          direcao: 'out',
+          tipo: msg.tipo,
+          ...(msg.url ? { url: msg.url } : {}),
+          ...(msg.nome_arquivo ? { nome_arquivo: msg.nome_arquivo } : {})
+        }
       }
+      
+      emitirConversaAtualizada(io, company_id, conversa_id, convPayload)
     }
-    emitirConversaAtualizada(io, company_id, conversa_id, convPayload)
 
     const { nome: usuarioNome } = await getUsuarioParaEnvioCliente(supabase, company_id, user_id)
     const captionCliente = usuarioNome ? `— ${usuarioNome}` : ''
@@ -3665,19 +3683,40 @@ exports.enviarArquivo = async (req, res) => {
                   ? provider.sendFile(phone, mediaUrl, file.originalname || '', { ...opts, caption: captionCliente })
                   : Promise.resolve(false)
       promise
-        .then(async (ok) => {
+        .then(async (result) => {
+          const ok = result?.ok === true
+          const waMessageId = result?.messageId ? String(result.messageId).trim() : null
+          const nextStatus = ok ? 'sent' : 'erro'
+          
           if (!ok) {
-            console.warn('WhatsApp: falha ao enviar mídia para', phone, tipo)
-            await supabase.from('mensagens').update({ status: 'erro' }).eq('company_id', company_id).eq('id', msg.id)
-            const io2 = req.app?.get('io')
-            if (io2) {
-              const payload = { mensagem_id: msg.id, conversa_id: Number(conversa_id), status: 'erro', status_mensagem: 'erro' }
-              io2.to(`empresa_${company_id}`).to(`conversa_${conversa_id}`).to(`usuario_${user_id}`).emit(io2.EVENTS?.STATUS_MENSAGEM || 'status_mensagem', payload)
+            console.warn('WhatsApp: falha ao enviar mídia para', phone, tipo, result?.error || 'sem detalhes')
+          } else {
+            console.log('✅ WhatsApp mídia enviada:', phone?.slice(-12), tipo, waMessageId ? `(${waMessageId})` : '')
+          }
+          
+          await supabase
+            .from('mensagens')
+            .update({ 
+              status: nextStatus,
+              ...(isRealWhatsAppId(waMessageId) ? { whatsapp_id: waMessageId } : {})
+            })
+            .eq('company_id', company_id)
+            .eq('id', msg.id)
+            
+          const io2 = req.app?.get('io')
+          if (io2) {
+            const payload = { 
+              mensagem_id: msg.id, 
+              conversa_id: Number(conversa_id), 
+              status: nextStatus, 
+              status_mensagem: nextStatus,
+              ...(waMessageId ? { whatsapp_id: waMessageId } : {})
             }
+            io2.to(`empresa_${company_id}`).to(`conversa_${conversa_id}`).to(`usuario_${user_id}`).emit(io2.EVENTS?.STATUS_MENSAGEM || 'status_mensagem', payload)
           }
         })
         .catch(async (e) => {
-          console.error('WhatsApp enviar mídia:', e)
+          console.error('WhatsApp enviar mídia (erro de rede/provider):', e?.message || e)
           await supabase.from('mensagens').update({ status: 'erro' }).eq('company_id', company_id).eq('id', msg.id)
           const io2 = req.app?.get('io')
           if (io2) {
@@ -3736,15 +3775,14 @@ exports.enviarArquivo = async (req, res) => {
                         mimeTypesToTry.push('audio/mpeg', 'audio/ogg', 'audio/wav')
                       }
                       
-                      // Tenta cada MIME type até um funcionar
-                      for (const mimeType of mimeTypesToTry) {
+                      // Tenta o primeiro MIME type mais compatível
+                      if (mimeTypesToTry.length > 0) {
+                        const mimeType = mimeTypesToTry[0] // Usa o mais compatível
                         const base64DataUri = `data:${mimeType};base64,${fileBuffer.toString('base64')}`
                         
-                        // Chama sendMediaWithUrl e aguarda o resultado
+                        console.log(`[ULTRAMSG] Tentando áudio via base64 como ${mimeType} (fallback CDN falhou)`)
                         sendMediaWithUrl(base64DataUri)
                         base64FallbackOk = true
-                        console.log(`[ULTRAMSG] Áudio enviado via base64 como ${mimeType} (fallback CDN falhou)`)
-                        break // Para na primeira tentativa (será tratado internamente pelo provider)
                       }
                       
                       if (!base64FallbackOk) {
@@ -3788,5 +3826,321 @@ exports.enviarArquivo = async (req, res) => {
   } catch (err) {
     console.error('Erro ao enviar arquivo:', err)
     return res.status(500).json({ error: 'Erro ao enviar arquivo' })
+  }
+}
+
+/**
+ * Encaminha uma mensagem (texto ou mídia) para outra conversa
+ */
+exports.encaminharMensagem = async (req, res) => {
+  try {
+    const { id: conversa_id } = req.params
+    const { company_id, id: user_id } = req.user
+    const { mensagem_id, tipo_encaminhamento = 'auto' } = req.body
+
+    if (!mensagem_id) {
+      return res.status(400).json({ error: 'mensagem_id é obrigatório' })
+    }
+
+    const permEnvio = await assertPodeEnviarMensagem({ company_id, conversa_id, user_id })
+    if (!permEnvio.ok) return res.status(permEnvio.status).json({ error: permEnvio.error })
+
+    // Buscar a mensagem original
+    const { data: mensagemOriginal, error: errMsg } = await supabase
+      .from('mensagens')
+      .select('id, texto, tipo, url, nome_arquivo, contact_meta, location_meta, conversa_id')
+      .eq('company_id', company_id)
+      .eq('id', mensagem_id)
+      .single()
+
+    if (errMsg || !mensagemOriginal) {
+      return res.status(404).json({ error: 'Mensagem original não encontrada' })
+    }
+
+    // Buscar conversa de destino
+    const { data: conversa } = await supabase
+      .from('conversas')
+      .select('id, telefone, cliente_id, tipo, chat_lid')
+      .eq('company_id', company_id)
+      .eq('id', conversa_id)
+      .single()
+
+    if (!conversa) {
+      return res.status(404).json({ error: 'Conversa de destino não encontrada' })
+    }
+
+    // Resolver telefone real quando conversa tem apenas LID
+    let telefoneParaEnvio = conversa.telefone || ''
+    if (telefoneParaEnvio && String(telefoneParaEnvio).trim().toLowerCase().startsWith('lid:')) {
+      if (conversa.cliente_id) {
+        const { data: cli } = await supabase.from('clientes').select('telefone').eq('id', conversa.cliente_id).eq('company_id', company_id).maybeSingle()
+        if (cli?.telefone && !String(cli.telefone).startsWith('lid:')) telefoneParaEnvio = cli.telefone
+      }
+      if (telefoneParaEnvio.startsWith('lid:') && conversa.chat_lid) {
+        const { data: outra } = await supabase
+          .from('conversas')
+          .select('telefone')
+          .eq('company_id', company_id)
+          .eq('chat_lid', conversa.chat_lid)
+          .not('telefone', 'like', 'lid:%')
+          .limit(1)
+          .maybeSingle()
+        if (outra?.telefone) telefoneParaEnvio = outra.telefone
+      }
+      if (telefoneParaEnvio.startsWith('lid:')) {
+        return res.status(400).json({ error: 'Número do contato indisponível (conversa por LID). Aguarde o contato enviar uma mensagem ou sincronize os contatos.' })
+      }
+    }
+
+    const provider = getProvider()
+    if (!provider) {
+      return res.status(500).json({ error: 'Provider WhatsApp não configurado' })
+    }
+
+    const { nome: usuarioNome } = await getUsuarioParaEnvioCliente(supabase, company_id, user_id)
+    const prefixoEncaminhado = '[Encaminhado]'
+    const timestamp = new Date().toISOString()
+
+    let novaMensagem = null
+    let resultadoEnvio = { ok: false, messageId: null }
+
+    // Determinar como encaminhar baseado no tipo da mensagem
+    const tipoOriginal = String(mensagemOriginal.tipo || '').toLowerCase()
+    const temUrl = !!(mensagemOriginal.url)
+
+    if (tipo_encaminhamento === 'texto' || (!temUrl && tipoOriginal === 'texto')) {
+      // Encaminhar como texto
+      const textoEncaminhado = mensagemOriginal.texto 
+        ? `${prefixoEncaminhado}\n${mensagemOriginal.texto}`
+        : `${prefixoEncaminhado}\n(mídia)`
+
+      const textoComUsuario = usuarioNome ? `${textoEncaminhado}\n— ${usuarioNome}` : textoEncaminhado
+
+      // Salvar mensagem no banco
+      const { data: msg, error } = await supabase.from('mensagens').insert({
+        conversa_id: Number(conversa_id),
+        texto: textoEncaminhado,
+        tipo: 'texto',
+        direcao: 'out',
+        autor_usuario_id: user_id,
+        company_id,
+        status: 'pending',
+        criado_em: timestamp
+      }).select().single()
+
+      if (error) return res.status(500).json({ error: error.message })
+      novaMensagem = msg
+
+      // Enviar via WhatsApp
+      if (telefoneParaEnvio && provider.sendText) {
+        resultadoEnvio = await provider.sendText(telefoneParaEnvio, textoComUsuario, {
+          companyId: company_id,
+          conversaId: conversa_id
+        })
+      }
+
+    } else if (temUrl && (tipoOriginal === 'imagem' || tipoOriginal === 'video' || tipoOriginal === 'audio' || tipoOriginal === 'voice' || tipoOriginal === 'arquivo' || tipoOriginal === 'sticker')) {
+      // Encaminhar como mídia
+      const baseUrl = (process.env.APP_URL || process.env.BASE_URL || '').replace(/\/$/, '')
+      const mediaUrl = mensagemOriginal.url.startsWith('http') 
+        ? mensagemOriginal.url 
+        : baseUrl ? `${baseUrl}${mensagemOriginal.url}` : null
+
+      if (!mediaUrl) {
+        return res.status(400).json({ error: 'URL da mídia não pode ser resolvida para encaminhamento' })
+      }
+
+      const captionEncaminhado = usuarioNome ? `${prefixoEncaminhado} — ${usuarioNome}` : prefixoEncaminhado
+      
+      // Salvar mensagem no banco
+      const { data: msg, error } = await supabase.from('mensagens').insert({
+        conversa_id: Number(conversa_id),
+        texto: mensagemOriginal.nome_arquivo || `${prefixoEncaminhado} (${tipoOriginal})`,
+        tipo: tipoOriginal,
+        url: mensagemOriginal.url,
+        nome_arquivo: mensagemOriginal.nome_arquivo,
+        direcao: 'out',
+        autor_usuario_id: user_id,
+        company_id,
+        status: 'pending',
+        criado_em: timestamp
+      }).select().single()
+
+      if (error) return res.status(500).json({ error: error.message })
+      novaMensagem = msg
+
+      // Enviar via WhatsApp baseado no tipo
+      if (telefoneParaEnvio) {
+        const opts = { companyId: company_id, conversaId: conversa_id }
+        
+        switch (tipoOriginal) {
+          case 'imagem':
+            if (provider.sendImage) {
+              resultadoEnvio = await provider.sendImage(telefoneParaEnvio, mediaUrl, captionEncaminhado, opts)
+            }
+            break
+          case 'video':
+            if (provider.sendVideo) {
+              resultadoEnvio = await provider.sendVideo(telefoneParaEnvio, mediaUrl, captionEncaminhado, opts)
+            }
+            break
+          case 'audio':
+            if (provider.sendAudio) {
+              resultadoEnvio = await provider.sendAudio(telefoneParaEnvio, mediaUrl, opts)
+            }
+            break
+          case 'voice':
+            if (provider.sendVoice) {
+              resultadoEnvio = await provider.sendVoice(telefoneParaEnvio, mediaUrl, opts)
+            } else if (provider.sendAudio) {
+              resultadoEnvio = await provider.sendAudio(telefoneParaEnvio, mediaUrl, opts)
+            }
+            break
+          case 'sticker':
+            if (provider.sendSticker) {
+              resultadoEnvio = await provider.sendSticker(telefoneParaEnvio, mediaUrl, opts)
+            }
+            break
+          default: // arquivo
+            if (provider.sendFile) {
+              resultadoEnvio = await provider.sendFile(telefoneParaEnvio, mediaUrl, mensagemOriginal.nome_arquivo || 'arquivo', { ...opts, caption: captionEncaminhado })
+            }
+        }
+      }
+
+    } else if (tipoOriginal === 'contact' && mensagemOriginal.contact_meta) {
+      // Encaminhar contato
+      const { data: msg, error } = await supabase.from('mensagens').insert({
+        conversa_id: Number(conversa_id),
+        texto: `${prefixoEncaminhado}\n${mensagemOriginal.texto}`,
+        tipo: 'contact',
+        contact_meta: mensagemOriginal.contact_meta,
+        direcao: 'out',
+        autor_usuario_id: user_id,
+        company_id,
+        status: 'pending',
+        criado_em: timestamp
+      }).select().single()
+
+      if (error) return res.status(500).json({ error: error.message })
+      novaMensagem = msg
+
+      if (telefoneParaEnvio && provider.sendContact && mensagemOriginal.contact_meta) {
+        resultadoEnvio = await provider.sendContact(telefoneParaEnvio, mensagemOriginal.contact_meta, {
+          companyId: company_id,
+          conversaId: conversa_id
+        })
+      }
+
+    } else if (tipoOriginal === 'location' && mensagemOriginal.location_meta) {
+      // Encaminhar localização
+      const { data: msg, error } = await supabase.from('mensagens').insert({
+        conversa_id: Number(conversa_id),
+        texto: `${prefixoEncaminhado}\n${mensagemOriginal.texto}`,
+        tipo: 'location',
+        url: mensagemOriginal.url,
+        location_meta: mensagemOriginal.location_meta,
+        direcao: 'out',
+        autor_usuario_id: user_id,
+        company_id,
+        status: 'pending',
+        criado_em: timestamp
+      }).select().single()
+
+      if (error) return res.status(500).json({ error: error.message })
+      novaMensagem = msg
+
+      if (telefoneParaEnvio && provider.sendLocation && mensagemOriginal.location_meta) {
+        const { latitude, longitude, nome, endereco } = mensagemOriginal.location_meta
+        const addressParaCliente = usuarioNome 
+          ? `${usuarioNome} — ${[nome, endereco].filter(Boolean).join('\n') || `${latitude},${longitude}`}`
+          : [nome, endereco].filter(Boolean).join('\n') || `${latitude},${longitude}`
+
+        resultadoEnvio = await provider.sendLocation(telefoneParaEnvio, {
+          address: addressParaCliente,
+          lat: latitude,
+          lng: longitude
+        }, {
+          companyId: company_id,
+          conversaId: conversa_id
+        })
+      }
+
+    } else {
+      // Fallback: encaminhar como texto
+      const textoFallback = mensagemOriginal.texto || '(mídia não suportada para encaminhamento)'
+      const textoEncaminhado = `${prefixoEncaminhado}\n${textoFallback}`
+      const textoComUsuario = usuarioNome ? `${textoEncaminhado}\n— ${usuarioNome}` : textoEncaminhado
+
+      const { data: msg, error } = await supabase.from('mensagens').insert({
+        conversa_id: Number(conversa_id),
+        texto: textoEncaminhado,
+        tipo: 'texto',
+        direcao: 'out',
+        autor_usuario_id: user_id,
+        company_id,
+        status: 'pending',
+        criado_em: timestamp
+      }).select().single()
+
+      if (error) return res.status(500).json({ error: error.message })
+      novaMensagem = msg
+
+      if (telefoneParaEnvio && provider.sendText) {
+        resultadoEnvio = await provider.sendText(telefoneParaEnvio, textoComUsuario, {
+          companyId: company_id,
+          conversaId: conversa_id
+        })
+      }
+    }
+
+    // Atualizar status da mensagem baseado no resultado do envio
+    const ok = resultadoEnvio?.ok === true
+    const waMessageId = resultadoEnvio?.messageId ? String(resultadoEnvio.messageId).trim() : null
+    const nextStatus = ok ? 'sent' : 'erro'
+
+    await supabase
+      .from('mensagens')
+      .update({ 
+        status: nextStatus, 
+        ...(isRealWhatsAppId(waMessageId) ? { whatsapp_id: waMessageId } : {}) 
+      })
+      .eq('company_id', company_id)
+      .eq('id', novaMensagem.id)
+
+    // Atualizar conversa
+    await supabase
+      .from('conversas')
+      .update({ lida: true, ultima_atividade: timestamp })
+      .eq('company_id', Number(company_id))
+      .eq('id', Number(conversa_id))
+
+    // Emitir eventos para o frontend
+    const io = req.app.get('io')
+    if (io) {
+      const payload = await enrichMensagemComAutorUsuario(supabase, company_id, { 
+        ...novaMensagem, 
+        status: nextStatus, 
+        whatsapp_id: waMessageId || null 
+      })
+      emitirEventoEmpresaConversa(io, company_id, conversa_id, io.EVENTS?.NOVA_MENSAGEM || 'nova_mensagem', payload)
+      
+      const convPayload = { id: Number(conversa_id) }
+      emitirConversaAtualizada(io, company_id, conversa_id, convPayload)
+    }
+
+    res.json({ 
+      success: true, 
+      mensagem: { 
+        ...novaMensagem, 
+        status: nextStatus,
+        whatsapp_id: waMessageId || null
+      },
+      enviado_whatsapp: ok
+    })
+
+  } catch (error) {
+    console.error('Erro ao encaminhar mensagem:', error)
+    return res.status(500).json({ error: 'Erro ao encaminhar mensagem' })
   }
 }
