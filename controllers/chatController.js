@@ -3627,7 +3627,11 @@ exports.enviarArquivo = async (req, res) => {
     const isLocalhost = /localhost|127\.0\.0\.1/i.test(baseUrl)
     // UltraMsg rejeita URLs com extensão .webm em endpoints de áudio ("file extension not supported").
     // Para esses arquivos, usar uploadMedia (CDN deles sem extensão) independente do APP_URL.
-    const forceUploadMedia = (tipo === 'voice' || tipo === 'audio') && /\.webm$/i.test(file.filename || file.originalname || '')
+    const forceUploadMedia = (tipo === 'voice' || tipo === 'audio') && (
+      /\.webm$/i.test(file.filename || file.originalname || '') ||
+      /\.opus$/i.test(file.filename || file.originalname || '') ||
+      /\.m4a$/i.test(file.filename || file.originalname || '')
+    )
 
     const sendMediaWithUrl = (mediaUrl) => {
       const provider = getProvider()
@@ -3680,8 +3684,16 @@ exports.enviarArquivo = async (req, res) => {
             try {
               const result = await provider.uploadMedia(file.path, file.originalname || 'file', { companyId: company_id })
               if (result?.ok && result?.url) {
+                console.log('[ULTRAMSG] Upload bem-sucedido, enviando mídia via CDN:', result.url.slice(0, 50) + '...')
                 sendMediaWithUrl(result.url)
               } else {
+                console.warn('[ULTRAMSG] Upload de mídia falhou:', {
+                  ok: result?.ok,
+                  error: result?.error,
+                  filename: file.originalname,
+                  tipo,
+                  forceUploadMedia
+                })
                 // Fallback: para áudio/voz, tentar enviar como base64 diretamente (evita dependência do CDN)
                 let base64FallbackOk = false
                 if ((tipo === 'voice' || tipo === 'audio') && file.path) {
@@ -3689,8 +3701,22 @@ exports.enviarArquivo = async (req, res) => {
                     const fsSync = require('fs')
                     if (fsSync.existsSync(file.path)) {
                       const fileBuffer = fsSync.readFileSync(file.path)
-                      // Usa data URI audio/ogg (UltraMsg aceita base64 no campo audio)
-                      const base64DataUri = `data:audio/ogg;base64,${fileBuffer.toString('base64')}`
+                      // Determina MIME type correto baseado no arquivo original
+                      let mimeType = 'audio/ogg'
+                      const originalName = file.originalname || file.filename || ''
+                      
+                      // Para arquivos .webm (opus codec), usar audio/ogg que é mais compatível
+                      if (/\.webm$/i.test(originalName)) {
+                        mimeType = 'audio/ogg'
+                      } else if (/\.mp3$/i.test(originalName)) {
+                        mimeType = 'audio/mpeg'
+                      } else if (/\.m4a$/i.test(originalName)) {
+                        mimeType = 'audio/mp4'
+                      } else if (/\.aac$/i.test(originalName)) {
+                        mimeType = 'audio/aac'
+                      }
+                      
+                      const base64DataUri = `data:${mimeType};base64,${fileBuffer.toString('base64')}`
                       sendMediaWithUrl(base64DataUri)
                       base64FallbackOk = true
                       console.log('[ULTRAMSG] Áudio enviado via base64 (fallback CDN falhou)')

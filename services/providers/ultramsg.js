@@ -64,6 +64,61 @@ function maskToken(t) {
   return t.slice(0, 2) + '***' + t.slice(-2)
 }
 
+/** 
+ * Converte URL de áudio para formato compatível com UltraMsg.
+ * Corrige MIME types problemáticos (webm -> ogg) mantendo o codec opus.
+ */
+function normalizeAudioUrl(audioUrl) {
+  if (!audioUrl || typeof audioUrl !== 'string') return audioUrl
+  
+  // Se é data URI com webm, converter para ogg (mesmo codec, container compatível)
+  if (audioUrl.startsWith('data:audio/webm')) {
+    return audioUrl.replace('data:audio/webm', 'data:audio/ogg')
+  }
+  
+  // Se é data URI com opus, converter para ogg
+  if (audioUrl.startsWith('data:audio/opus')) {
+    return audioUrl.replace('data:audio/opus', 'data:audio/ogg')
+  }
+  
+  return audioUrl
+}
+
+/**
+ * Verifica se o erro do UltraMsg é relacionado a extensão de arquivo não suportada.
+ * UltraMsg pode retornar erro como string, objeto ou array de objetos.
+ */
+function isFileExtensionError(error) {
+  if (!error) return false
+  
+  // Erro como string
+  if (typeof error === 'string') {
+    return error.includes('file extension not supported')
+  }
+  
+  // Erro como array de objetos
+  if (Array.isArray(error)) {
+    return error.some(e => {
+      if (typeof e === 'string') return e.includes('file extension not supported')
+      if (e && typeof e === 'object') {
+        return Object.values(e).some(val => 
+          typeof val === 'string' && val.includes('file extension not supported')
+        )
+      }
+      return false
+    })
+  }
+  
+  // Erro como objeto
+  if (typeof error === 'object') {
+    return Object.values(error).some(val => 
+      typeof val === 'string' && val.includes('file extension not supported')
+    )
+  }
+  
+  return false
+}
+
 /** Sanitiza objeto para log (mascara token). */
 function sanitizeForLog(obj, token) {
   if (!obj || typeof obj !== 'object') return obj
@@ -378,15 +433,49 @@ async function sendAudio(phone, audioUrl, opts = {}) {
   if (!cfg) return false
   const nums = phoneCandidatesForSend(phone)
   if (!nums.length || !audioUrl) return false
-  const body = { to: nums[0], audio: String(audioUrl).trim() }
+  
+  // Processa URL de áudio para melhor compatibilidade
+  const processedAudioUrl = normalizeAudioUrl(String(audioUrl).trim())
+  
+  const body = { to: nums[0], audio: processedAudioUrl }
   const { ok, status, data, text } = await postJson({ ...cfg, endpoint: '/messages/audio', body })
+  
   // UltraMsg retorna sent:"false" ou error em body mesmo com HTTP 200
   const explicitError = data?.error && data.error !== false && data.error !== 'false'
   const sentFailed = data?.sent === 'false' || data?.sent === false
+  
+  // Verifica se é erro de extensão não suportada
+  const isExtensionError = isFileExtensionError(data?.error)
+  
   if (!ok || explicitError || sentFailed) {
     const errRaw = data?.error || (sentFailed ? 'sent:false' : null) || String(text || '').slice(0, 200) || `HTTP ${status}`
     const errMsg = typeof errRaw === 'object' ? JSON.stringify(errRaw) : String(errRaw)
     console.warn('❌ UltraMsg sendAudio falhou:', nums[0]?.slice(-12), errMsg.slice(0, 200), '| token:', maskToken(cfg.token))
+    
+    // Se falhou por extensão, tentar como documento
+    if (isExtensionError && processedAudioUrl.startsWith('data:')) {
+      console.log('[ULTRAMSG] Tentando enviar áudio como documento devido a erro de extensão')
+      try {
+        // Extrai o base64 e envia como documento
+        const base64Data = processedAudioUrl.split(',')[1]
+        if (base64Data) {
+          const docBody = { 
+            to: nums[0], 
+            document: processedAudioUrl,
+            filename: 'audio.ogg',
+            caption: '🎵 Áudio'
+          }
+          const docResult = await postJson({ ...cfg, endpoint: '/messages/document', body: docBody })
+          if (docResult.ok && !docResult.data?.error) {
+            console.log('✅ UltraMsg áudio enviado como documento:', nums[0]?.slice(-12))
+            return true
+          }
+        }
+      } catch (docError) {
+        console.warn('❌ UltraMsg envio como documento também falhou:', docError?.message)
+      }
+    }
+    
     return false
   }
   console.log('✅ UltraMsg áudio enviado:', nums[0]?.slice(-12))
@@ -482,12 +571,20 @@ async function sendVoice(phone, audioUrl, opts = {}) {
   if (!cfg) return false
   const nums = phoneCandidatesForSend(phone)
   if (!nums.length || !audioUrl) return false
-  const body = { to: nums[0], audio: String(audioUrl).trim() }
+  
+  // Processa URL de áudio para melhor compatibilidade
+  const processedAudioUrl = normalizeAudioUrl(String(audioUrl).trim())
+  
+  const body = { to: nums[0], audio: processedAudioUrl }
 
   // Tenta endpoint voice primeiro
   const { ok, status, data, text } = await postJson({ ...cfg, endpoint: '/messages/voice', body })
   const explicitError = data?.error && data.error !== false && data.error !== 'false'
   const sentFailed = data?.sent === 'false' || data?.sent === false
+  
+  // Verifica se é erro de extensão não suportada
+  const isExtensionError = isFileExtensionError(data?.error)
+  
   if (!ok || explicitError || sentFailed) {
     const errRaw = data?.error || (sentFailed ? 'sent:false' : null) || String(text || '').slice(0, 200) || `HTTP ${status}`
     const errMsg = typeof errRaw === 'object' ? JSON.stringify(errRaw) : String(errRaw)
@@ -497,10 +594,39 @@ async function sendVoice(phone, audioUrl, opts = {}) {
     const fb = await postJson({ ...cfg, endpoint: '/messages/audio', body })
     const fbExplicitError = fb.data?.error && fb.data.error !== false && fb.data.error !== 'false'
     const fbSentFailed = fb.data?.sent === 'false' || fb.data?.sent === false
+    
+    // Verifica se o fallback também tem erro de extensão
+    const fbIsExtensionError = isFileExtensionError(fb.data?.error)
+    
     if (!fb.ok || fbExplicitError || fbSentFailed) {
       const fbErrRaw = fb.data?.error || (fbSentFailed ? 'sent:false' : null) || String(fb.text || '').slice(0, 200) || `HTTP ${fb.status}`
       const fbErrMsg = typeof fbErrRaw === 'object' ? JSON.stringify(fbErrRaw) : String(fbErrRaw)
       console.warn('❌ UltraMsg sendAudio (fallback) falhou:', nums[0]?.slice(-12), fbErrMsg.slice(0, 200), '| token:', maskToken(cfg.token))
+      
+      // Se ambos falharam por extensão, tentar como documento
+      if ((isExtensionError || fbIsExtensionError) && processedAudioUrl.startsWith('data:')) {
+        console.log('[ULTRAMSG] Tentando enviar áudio como documento devido a erro de extensão')
+        try {
+          // Extrai o base64 e envia como documento
+          const base64Data = processedAudioUrl.split(',')[1]
+          if (base64Data) {
+            const docBody = { 
+              to: nums[0], 
+              document: processedAudioUrl,
+              filename: 'audio.ogg',
+              caption: '🎵 Áudio'
+            }
+            const docResult = await postJson({ ...cfg, endpoint: '/messages/document', body: docBody })
+            if (docResult.ok && !docResult.data?.error) {
+              console.log('✅ UltraMsg áudio enviado como documento:', nums[0]?.slice(-12))
+              return true
+            }
+          }
+        } catch (docError) {
+          console.warn('❌ UltraMsg envio como documento também falhou:', docError?.message)
+        }
+      }
+      
       return false
     }
     console.log('✅ UltraMsg áudio enviado (fallback /messages/audio):', nums[0]?.slice(-12))
@@ -1139,6 +1265,14 @@ async function uploadMedia(filePath, filename, opts = {}) {
     if (/\.webm$/i.test(uploadFilename)) {
       uploadFilename = uploadFilename.replace(/\.webm$/i, '.ogg')
     }
+    
+    // Para arquivos de áudio, garantir extensões compatíveis
+    const isAudio = /\.(webm|opus|m4a|aac|wav)$/i.test(uploadFilename)
+    if (isAudio && !/\.(mp3|ogg|aac)$/i.test(uploadFilename)) {
+      // Converter extensões não suportadas para .ogg
+      uploadFilename = uploadFilename.replace(/\.(webm|opus|m4a|wav)$/i, '.ogg')
+    }
+    
     form.append('file', fs.createReadStream(filePath), { filename: uploadFilename })
     const uploadTimeout = 60_000 // 60s para arquivos até 30MB
     let signal
