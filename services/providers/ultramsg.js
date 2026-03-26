@@ -380,10 +380,13 @@ async function sendAudio(phone, audioUrl, opts = {}) {
   if (!nums.length || !audioUrl) return false
   const body = { to: nums[0], audio: String(audioUrl).trim() }
   const { ok, status, data, text } = await postJson({ ...cfg, endpoint: '/messages/audio', body })
-  const bodyError = data?.error || (!data?.id && !data?.sent && !data?.messageId && data?.message)
-  if (!ok || bodyError) {
-    const err = data?.error || data?.message || String(text || '').slice(0, 200) || `HTTP ${status}`
-    console.warn('❌ UltraMsg sendAudio falhou:', nums[0]?.slice(-12), String(err).slice(0, 150), '| token:', maskToken(cfg.token))
+  // UltraMsg retorna sent:"false" ou error em body mesmo com HTTP 200
+  const explicitError = data?.error && data.error !== false && data.error !== 'false'
+  const sentFailed = data?.sent === 'false' || data?.sent === false
+  if (!ok || explicitError || sentFailed) {
+    const errRaw = data?.error || (sentFailed ? 'sent:false' : null) || String(text || '').slice(0, 200) || `HTTP ${status}`
+    const errMsg = typeof errRaw === 'object' ? JSON.stringify(errRaw) : String(errRaw)
+    console.warn('❌ UltraMsg sendAudio falhou:', nums[0]?.slice(-12), errMsg.slice(0, 200), '| token:', maskToken(cfg.token))
     return false
   }
   console.log('✅ UltraMsg áudio enviado:', nums[0]?.slice(-12))
@@ -471,6 +474,7 @@ async function removeReaction(phone, messageId, opts = {}) {
 /**
  * Envia áudio de voz (voice note). UltraMsg exige codec opus.
  * POST /{instance_id}/messages/voice — body: token, to, audio
+ * Fallback: se o endpoint voice rejeitar (ex.: formato), tenta /messages/audio.
  */
 async function sendVoice(phone, audioUrl, opts = {}) {
   await awaitSendDelay(opts?.companyId ?? opts?.company_id)
@@ -479,12 +483,28 @@ async function sendVoice(phone, audioUrl, opts = {}) {
   const nums = phoneCandidatesForSend(phone)
   if (!nums.length || !audioUrl) return false
   const body = { to: nums[0], audio: String(audioUrl).trim() }
+
+  // Tenta endpoint voice primeiro
   const { ok, status, data, text } = await postJson({ ...cfg, endpoint: '/messages/voice', body })
-  const bodyError = data?.error || (!data?.id && !data?.sent && !data?.messageId && data?.message)
-  if (!ok || bodyError) {
-    const err = data?.error || data?.message || String(text || '').slice(0, 200) || `HTTP ${status}`
-    console.warn('❌ UltraMsg sendVoice falhou:', nums[0]?.slice(-12), String(err).slice(0, 150), '| token:', maskToken(cfg.token))
-    return false
+  const explicitError = data?.error && data.error !== false && data.error !== 'false'
+  const sentFailed = data?.sent === 'false' || data?.sent === false
+  if (!ok || explicitError || sentFailed) {
+    const errRaw = data?.error || (sentFailed ? 'sent:false' : null) || String(text || '').slice(0, 200) || `HTTP ${status}`
+    const errMsg = typeof errRaw === 'object' ? JSON.stringify(errRaw) : String(errRaw)
+    console.warn('❌ UltraMsg sendVoice falhou, tentando /messages/audio:', nums[0]?.slice(-12), errMsg.slice(0, 200), '| token:', maskToken(cfg.token))
+
+    // Fallback: tenta como áudio comum
+    const fb = await postJson({ ...cfg, endpoint: '/messages/audio', body })
+    const fbExplicitError = fb.data?.error && fb.data.error !== false && fb.data.error !== 'false'
+    const fbSentFailed = fb.data?.sent === 'false' || fb.data?.sent === false
+    if (!fb.ok || fbExplicitError || fbSentFailed) {
+      const fbErrRaw = fb.data?.error || (fbSentFailed ? 'sent:false' : null) || String(fb.text || '').slice(0, 200) || `HTTP ${fb.status}`
+      const fbErrMsg = typeof fbErrRaw === 'object' ? JSON.stringify(fbErrRaw) : String(fbErrRaw)
+      console.warn('❌ UltraMsg sendAudio (fallback) falhou:', nums[0]?.slice(-12), fbErrMsg.slice(0, 200), '| token:', maskToken(cfg.token))
+      return false
+    }
+    console.log('✅ UltraMsg áudio enviado (fallback /messages/audio):', nums[0]?.slice(-12))
+    return true
   }
   console.log('✅ UltraMsg voice enviado:', nums[0]?.slice(-12))
   return true
