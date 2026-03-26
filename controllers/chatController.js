@@ -3902,7 +3902,7 @@ exports.encaminharMensagem = async (req, res) => {
     const timestamp = new Date().toISOString()
 
     let novaMensagem = null
-    let resultadoEnvio = { ok: false, messageId: null }
+    let resultadoEnvio = false
 
     // Determinar como encaminhar baseado no tipo da mensagem
     const tipoOriginal = String(mensagemOriginal.tipo || '').toLowerCase()
@@ -4021,13 +4021,23 @@ exports.encaminharMensagem = async (req, res) => {
         }
       }
 
-    } else if (tipoOriginal === 'contact' && mensagemOriginal.contact_meta) {
-      // Encaminhar contato
+    } else if (tipoOriginal === 'contact') {
+      // Encaminhar contato — obtém contact_meta da mensagem ou busca no banco
+      let contactMeta = mensagemOriginal.contact_meta
+      // Se não tem contact_meta na mensagem, tenta buscar do cliente associado à conversa
+      if (!contactMeta || typeof contactMeta !== 'object') {
+        contactMeta = null
+      }
+
+      const contactName = contactMeta?.nome || contactMeta?.name || mensagemOriginal.texto || 'Contato'
+      const contactPhoneRaw = String(contactMeta?.telefone || contactMeta?.phone || '').replace(/\D/g, '')
+      const contactPhone = contactPhoneRaw || null
+
       const { data: msg, error } = await supabase.from('mensagens').insert({
         conversa_id: Number(conversa_id),
-        texto: `${prefixoEncaminhado}\n${mensagemOriginal.texto}`,
+        texto: contactName,
         tipo: 'contact',
-        contact_meta: mensagemOriginal.contact_meta,
+        contact_meta: contactMeta || { nome: contactName },
         direcao: 'out',
         autor_usuario_id: user_id,
         company_id,
@@ -4038,10 +4048,19 @@ exports.encaminharMensagem = async (req, res) => {
       if (error) return res.status(500).json({ error: error.message })
       novaMensagem = msg
 
-      if (telefoneParaEnvio && provider.sendContact && mensagemOriginal.contact_meta) {
-        resultadoEnvio = await provider.sendContact(telefoneParaEnvio, mensagemOriginal.contact_meta, {
-          companyId: company_id,
-          conversaId: conversa_id
+      // Envia via WhatsApp apenas se tiver telefone do contato
+      if (telefoneParaEnvio && provider.sendContact && contactPhone) {
+        resultadoEnvio = await provider.sendContact(
+          telefoneParaEnvio,
+          contactName,
+          contactPhone,
+          { companyId: company_id, conversaId: conversa_id }
+        )
+      } else if (telefoneParaEnvio && provider.sendText && !contactPhone) {
+        // Fallback: se não tiver telefone do contato, envia como texto
+        const textoContato = `${prefixoEncaminhado}\n${contactName}`
+        resultadoEnvio = await provider.sendText(telefoneParaEnvio, textoContato, {
+          companyId: company_id, conversaId: conversa_id
         })
       }
 
@@ -4108,8 +4127,10 @@ exports.encaminharMensagem = async (req, res) => {
     }
 
     // Atualizar status da mensagem baseado no resultado do envio
-    const ok = resultadoEnvio?.ok === true
-    const waMessageId = resultadoEnvio?.messageId ? String(resultadoEnvio.messageId).trim() : null
+    // Providers retornam boolean true/false ou { ok, messageId } dependendo do tipo
+    const ok = resultadoEnvio === true || resultadoEnvio?.ok === true
+    const waMessageId = (typeof resultadoEnvio === 'object' && resultadoEnvio?.messageId)
+      ? String(resultadoEnvio.messageId).trim() : null
     const nextStatus = ok ? 'sent' : 'erro'
 
     await supabase
@@ -4128,16 +4149,18 @@ exports.encaminharMensagem = async (req, res) => {
       .eq('company_id', Number(company_id))
       .eq('id', Number(conversa_id))
 
-    // Emitir eventos para o frontend
+    // Emitir eventos para o frontend (socket)
     const io = req.app.get('io')
     if (io) {
-      const payload = await enrichMensagemComAutorUsuario(supabase, company_id, { 
-        ...novaMensagem, 
-        status: nextStatus, 
-        whatsapp_id: waMessageId || null 
-      })
+      const msgParaEmissao = {
+        ...novaMensagem,
+        status: nextStatus,
+        whatsapp_id: waMessageId || null,
+        encaminhado: true
+      }
+      const payload = await enrichMensagemComAutorUsuario(supabase, company_id, msgParaEmissao)
       emitirEventoEmpresaConversa(io, company_id, conversa_id, io.EVENTS?.NOVA_MENSAGEM || 'nova_mensagem', payload)
-      
+
       const convPayload = { id: Number(conversa_id) }
       emitirConversaAtualizada(io, company_id, conversa_id, convPayload)
     }
