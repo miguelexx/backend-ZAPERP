@@ -3684,13 +3684,12 @@ exports.enviarArquivo = async (req, res) => {
                   : Promise.resolve(false)
       promise
         .then(async (result) => {
-          // Providers retornam boolean true/false ou { ok, messageId } — tratar ambos
-          const ok = result === true || result?.ok === true
-          const waMessageId = (typeof result === 'object' && result?.messageId) ? String(result.messageId).trim() : null
+          const ok = result?.ok === true
+          const waMessageId = result?.messageId ? String(result.messageId).trim() : null
           const nextStatus = ok ? 'sent' : 'erro'
           
           if (!ok) {
-            console.warn('WhatsApp: falha ao enviar mídia para', phone, tipo, (typeof result === 'object' ? result?.error : null) || 'sem detalhes')
+            console.warn('WhatsApp: falha ao enviar mídia para', phone, tipo, result?.error || 'sem detalhes')
           } else {
             console.log('✅ WhatsApp mídia enviada:', phone?.slice(-12), tipo, waMessageId ? `(${waMessageId})` : '')
           }
