@@ -625,15 +625,14 @@ async function transferToDepartment(supabaseClient, company_id, conversa_id, dep
     return { ok: false }
   }
 
-  // Fire-and-forget: insert de log de transferência não precisa bloquear o envio da confirmação
-  supabaseClient.from('atendimentos').insert({
+  await supabaseClient.from('atendimentos').insert({
     conversa_id,
     de_usuario_id: null,
     para_usuario_id: updatePayload.atendente_id || null,
     acao: 'transferiu',
     observacao: `Chatbot: direcionado para ${dep.nome}`,
     company_id,
-  }).catch(e => console.warn('[chatbotTriage] atendimentos insert:', e?.message || e))
+  })
 
   return { ok: true, departamento_nome: dep.nome }
 }
@@ -818,8 +817,7 @@ async function processIncomingMessage(ctx) {
       depNome = result.departamento_nome || option.label || 'setor'
     }
 
-    // Fire-and-forget: tag é secundária, não precisa bloquear o envio da confirmação
-    applyTagIfConfigured(sb, company_id, conversa_id, option.tag_id)
+    await applyTagIfConfigured(sb, company_id, conversa_id, option.tag_id)
 
     const confirmMsg = (config.confirmSelectionMessage || '').replace(/\{\{departamento\}\}/gi, depNome)
     const msgToSend = confirmMsg || `Seu atendimento foi direcionado para ${depNome}. Em instantes nossa equipe dará continuidade.`
@@ -830,25 +828,23 @@ async function processIncomingMessage(ctx) {
 
     try {
       await sendWithThrottle(sendMessage, telefone, msgToSend, opts, company_id, config.intervaloEnvioSegundos)
-      // Fire-and-forget: insert de histórico não precisa bloquear após mensagem já enviada
-      sb.from('mensagens').insert({
+      await sb.from('mensagens').insert({
         conversa_id,
         texto: msgToSend,
         direcao: 'out',
         company_id,
         status: 'sent',
-      }).catch(e => console.warn('[chatbotTriage] mensagem insert (confirmacao):', e?.message || e))
+      })
     } catch (sendErr) {
       console.error('[chatbotTriage] ❌ Erro ao enviar mensagem de confirmação:', sendErr?.message || sendErr)
     }
 
-    // Fire-and-forget: após transfer, chatbot não volta a processar esta conversa (departamento_id definido)
-    logBotAction(company_id, conversa_id, 'opcao_valida', {
+    await logBotAction(company_id, conversa_id, 'opcao_valida', {
       opcao_key: option.key,
       departamento_id: depId,
       departamento_nome: depNome,
       transfer_ok: result.ok,
-    }).catch(e => console.warn('[chatbotTriage] logBotAction (opcao_valida):', e?.message || e))
+    })
 
     return { handled: true, departamento_id: depId }
   }
@@ -873,17 +869,7 @@ async function processIncomingMessage(ctx) {
     return { handled: true }
   }
 
-  // Executa em paralelo: ambas as queries são independentes e sempre necessárias no path de boas-vindas
-  const [menuAlreadySent, mensagensCheckResult] = await Promise.all([
-    wasMenuSentForConversa(sb, company_id, conversa_id),
-    sb
-      .from('mensagens')
-      .select('id, direcao')
-      .eq('conversa_id', conversa_id)
-      .eq('company_id', company_id)
-      .order('criado_em', { ascending: true })
-      .limit(10),
-  ])
+  const menuAlreadySent = await wasMenuSentForConversa(sb, company_id, conversa_id)
 
   // Verificar se esta é a primeira mensagem do cliente na conversa.
   // Usa bot_logs como fonte primária: se o menu foi enviado, não é mais a "primeira" mensagem.
@@ -891,7 +877,14 @@ async function processIncomingMessage(ctx) {
   let isPrimeiraMensagemCliente = false
   if (!menuAlreadySent) {
     try {
-      const mensagensAnteriores = mensagensCheckResult.data
+      const { data: mensagensAnteriores } = await sb
+        .from('mensagens')
+        .select('id, direcao')
+        .eq('conversa_id', conversa_id)
+        .eq('company_id', company_id)
+        .order('criado_em', { ascending: true })
+        .limit(10)
+
       // É primeira mensagem se: sem histórico OU todas as mensagens são do cliente (nenhuma resposta do bot ainda)
       isPrimeiraMensagemCliente =
         !mensagensAnteriores ||
@@ -925,15 +918,13 @@ async function processIncomingMessage(ctx) {
       console.log('[chatbotTriage] enviando menu de boas-vindas', { conversa_id, company_id, motivo })
       try {
         await sendWithThrottle(sendMessage, telefone, msg, opts, company_id, config.intervaloEnvioSegundos)
-        // Fire-and-forget: insert de histórico não precisa bloquear após mensagem já enviada
-        sb.from('mensagens').insert({
+        await sb.from('mensagens').insert({
           conversa_id,
           texto: msg,
           direcao: 'out',
           company_id,
           status: 'sent',
-        }).catch(e => console.warn('[chatbotTriage] mensagem insert (menu):', e?.message || e))
-        // DEVE ser aguardado: 'menu_enviado' é consultado por wasMenuSentForConversa para evitar menu duplicado
+        })
         await logBotAction(company_id, conversa_id, 'menu_enviado', {
           opcoes: config.options.map((o) => o.key),
           motivo,
