@@ -8,6 +8,10 @@ const supabase = require('../config/supabase')
 
 const TIMEOUT_MS = 10_000
 
+// Cache em memória para credenciais WhatsApp (dados raramente mudam)
+const _empresaConfigCache = new Map()
+const _EMPRESA_CONFIG_CACHE_TTL = 5 * 60 * 1000 // 5 minutos
+
 async function fetchWithTimeout(url, options = {}, timeoutMs = TIMEOUT_MS) {
   const ctrl = new AbortController()
   const to = setTimeout(() => ctrl.abort(), timeoutMs)
@@ -21,6 +25,13 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = TIMEOUT_MS) {
 
 async function getEmpresaWhatsappConfig(company_id) {
   if (!company_id) return { error: 'Empresa sem instância configurada' }
+
+  const cacheKey = Number(company_id)
+  const cached = _empresaConfigCache.get(cacheKey)
+  if (cached && Date.now() - cached.ts < _EMPRESA_CONFIG_CACHE_TTL) {
+    return cached.result
+  }
+
   const { data, error } = await supabase
     .from('empresa_zapi')
     .select('instance_id, instance_token, client_token, ativo')
@@ -32,7 +43,11 @@ async function getEmpresaWhatsappConfig(company_id) {
     console.error('[WHATSAPP-CONFIG] Erro ao buscar empresa_zapi:', error.message)
     return { error: 'Erro ao buscar configuração WhatsApp da empresa' }
   }
-  if (data) return { config: data }
+  if (data) {
+    const result = { config: data }
+    _empresaConfigCache.set(cacheKey, { ts: Date.now(), result })
+    return result
+  }
   // Produção: dados APENAS do banco — não usar fallback ENV (multi-tenant vendendo para clientes).
   if (process.env.NODE_ENV === 'production') {
     return { error: 'Empresa sem instância configurada em empresa_zapi. Cadastre credenciais UltraMsg no painel.' }

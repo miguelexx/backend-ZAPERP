@@ -16,6 +16,10 @@ const supabase = require('../config/supabase')
 /** Último envio por company_id — throttling para respeitar intervalo configurável. */
 const lastChatbotSendPerCompany = new Map()
 
+// Cache em memória para config do chatbot (dados raramente mudam)
+const _chatbotConfigCache = new Map()
+const _CHATBOT_CONFIG_CACHE_TTL = 5 * 60 * 1000 // 5 minutos
+
 /**
  * Cache do último envio de "opção inválida" por conversa_id — debounce em memória.
  * Evita múltiplos envios em rajada quando o cliente manda várias mensagens em sequência.
@@ -242,6 +246,13 @@ function validateChatbotConfig(raw) {
  */
 async function getChatbotConfig(company_id) {
   if (!company_id) return null
+
+  const cacheKey = Number(company_id)
+  const cached = _chatbotConfigCache.get(cacheKey)
+  if (cached && Date.now() - cached.ts < _CHATBOT_CONFIG_CACHE_TTL) {
+    return cached.config
+  }
+
   try {
     const { data, error } = await supabase
       .from('ia_config')
@@ -258,7 +269,9 @@ async function getChatbotConfig(company_id) {
       return null
     }
     const ct = data.config.chatbot_triage || data.config
-    return validateChatbotConfig(ct)
+    const validatedConfig = validateChatbotConfig(ct)
+    _chatbotConfigCache.set(cacheKey, { ts: Date.now(), config: validatedConfig })
+    return validatedConfig
   } catch (e) {
     console.warn('[chatbotTriage] getChatbotConfig:', e?.message || e)
     return null
