@@ -672,7 +672,17 @@ async function applyTagIfConfigured(supabaseClient, company_id, conversa_id, tag
  * @returns {Promise<{ handled: boolean, departamento_id?: number }>}
  */
 async function processIncomingMessage(ctx) {
-  const { company_id, conversa_id, telefone, texto, supabase: supabaseClient, sendMessage, opts = {}, conversaReabertaAposFinalizacao = false } = ctx
+  const {
+    company_id,
+    conversa_id,
+    telefone,
+    texto,
+    supabase: supabaseClient,
+    sendMessage,
+    opts = {},
+    conversaReabertaAposFinalizacao = false,
+    hints = null,
+  } = ctx
   
   console.log('[chatbotTriage] 🤖 INÍCIO DO PROCESSAMENTO', {
     company_id,
@@ -888,30 +898,38 @@ async function processIncomingMessage(ctx) {
     return { handled: true }
   }
 
-  const menuAlreadySent = await wasMenuSentForConversa(sb, company_id, conversa_id)
+  const menuAlreadySentHint = hints && typeof hints.menuAlreadySent === 'boolean' ? hints.menuAlreadySent : null
+  const primeiraMensagemHint = hints && typeof hints.isPrimeiraMensagemCliente === 'boolean' ? hints.isPrimeiraMensagemCliente : null
+  const menuAlreadySent = menuAlreadySentHint != null
+    ? menuAlreadySentHint
+    : await wasMenuSentForConversa(sb, company_id, conversa_id)
 
   // Verificar se esta é a primeira mensagem do cliente na conversa.
   // Usa bot_logs como fonte primária: se o menu foi enviado, não é mais a "primeira" mensagem.
   // Fallback: verificar mensagens (limit 10 para maior precisão).
   let isPrimeiraMensagemCliente = false
   if (!menuAlreadySent) {
-    try {
-      const { data: mensagensAnteriores } = await sb
-        .from('mensagens')
-        .select('id, direcao')
-        .eq('conversa_id', conversa_id)
-        .eq('company_id', company_id)
-        .order('criado_em', { ascending: true })
-        .limit(10)
+    if (primeiraMensagemHint != null) {
+      isPrimeiraMensagemCliente = primeiraMensagemHint
+    } else {
+      try {
+        const { data: mensagensAnteriores } = await sb
+          .from('mensagens')
+          .select('id, direcao')
+          .eq('conversa_id', conversa_id)
+          .eq('company_id', company_id)
+          .order('criado_em', { ascending: true })
+          .limit(10)
 
-      // É primeira mensagem se: sem histórico OU todas as mensagens são do cliente (nenhuma resposta do bot ainda)
-      isPrimeiraMensagemCliente =
-        !mensagensAnteriores ||
-        mensagensAnteriores.length === 0 ||
-        mensagensAnteriores.every((m) => m.direcao === 'in')
-    } catch (e) {
-      console.warn('[chatbotTriage] Erro ao verificar mensagens anteriores:', e?.message)
-      isPrimeiraMensagemCliente = true // Assume primeira mensagem em caso de erro — melhor enviar menu do que ignorar
+        // É primeira mensagem se: sem histórico OU todas as mensagens são do cliente (nenhuma resposta do bot ainda)
+        isPrimeiraMensagemCliente =
+          !mensagensAnteriores ||
+          mensagensAnteriores.length === 0 ||
+          mensagensAnteriores.every((m) => m.direcao === 'in')
+      } catch (e) {
+        console.warn('[chatbotTriage] Erro ao verificar mensagens anteriores:', e?.message)
+        isPrimeiraMensagemCliente = true // Assume primeira mensagem em caso de erro — melhor enviar menu do que ignorar
+      }
     }
   }
 

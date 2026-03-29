@@ -1848,6 +1848,7 @@ exports.receberZapi = async (req, res) => {
           return { ok: !!r?.ok, messageId: r?.messageId || null }
         }
         let skipChatbot = false
+        const chatbotHints = {}
 
         // Opt-out (complementar): PARAR, SAIR, DESCADASTRAR — antes do chatbot
         if (isEnabled(FLAGS.FEATURE_OPT_OUT_WEBHOOK)) {
@@ -1896,6 +1897,7 @@ exports.receberZapi = async (req, res) => {
 
           if (botLogAtivo) {
             // Bot já estava ativo — sempre processar (cliente está respondendo ao menu do bot)
+            chatbotHints.menuAlreadySent = true
             console.log('[Z-API] 🤖 Chatbot: conversa com bot ativo (bot_logs) — processando resposta', {
               conversa_id, tipo: botLogAtivo.tipo
             })
@@ -1918,15 +1920,21 @@ exports.receberZapi = async (req, res) => {
             })
 
             if (!mensagensAnteriores || mensagensAnteriores.length === 0) {
+              chatbotHints.menuAlreadySent = false
+              chatbotHints.isPrimeiraMensagemCliente = true
               console.log('[Z-API] 🤖 Chatbot: primeira mensagem do cliente — permitindo chatbot', { conversa_id })
             } else {
               const primeiraMsg = mensagensAnteriores[0]
               if (primeiraMsg?.direcao === 'out') {
                 skipChatbot = true
+                chatbotHints.menuAlreadySent = false
+                chatbotHints.isPrimeiraMensagemCliente = false
                 console.log('[Z-API] 🤖 Chatbot: ignorado — operador iniciou a conversa (1ª msg foi direcao out)', {
                   conversa_id, primeiraMsg: String(primeiraMsg.texto || '').slice(0, 30)
                 })
               } else {
+                chatbotHints.menuAlreadySent = false
+                chatbotHints.isPrimeiraMensagemCliente = true
                 console.log('[Z-API] 🤖 Chatbot: cliente iniciou a conversa — permitindo chatbot', {
                   conversa_id, totalMensagensCliente: mensagensAnteriores.filter(m => m.direcao === 'in').length
                 })
@@ -1946,6 +1954,7 @@ exports.receberZapi = async (req, res) => {
             sendMessage,
             opts: { companyId: company_id },
             conversaReabertaAposFinalizacao,
+            hints: chatbotHints,
           })
           if (result?.handled && result?.departamento_id != null) {
             departamento_id = result.departamento_id
