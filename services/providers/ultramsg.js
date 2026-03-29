@@ -246,9 +246,13 @@ function logUltramsgRequest({ method, url, headers = {}, params = null, body = n
   }
 }
 
-async function awaitSendDelay(companyId) {
+async function awaitSendDelay(companyId, opts = {}) {
   if (MIN_DELAY_BETWEEN_SENDS_MS <= 0) return
   const key = companyId ?? 'default'
+  if (opts?.skipProviderDelay) {
+    lastSendPerCompany.set(key, Date.now())
+    return
+  }
   const last = lastSendPerCompany.get(key) || 0
   const elapsed = Date.now() - last
   if (elapsed < MIN_DELAY_BETWEEN_SENDS_MS) {
@@ -415,7 +419,7 @@ function phoneCandidatesForLookup(phone) {
  */
 async function sendText(phone, message, opts = {}) {
   const companyId = opts?.companyId ?? opts?.company_id
-  await awaitSendDelay(companyId)
+  await awaitSendDelay(companyId, opts)
   const cfg = await resolveConfig(opts)
   if (!cfg) {
     return { ok: false, messageId: null, error: 'Instância UltraMsg não configurada. Conecte o WhatsApp no painel de integrações.' }

@@ -1930,7 +1930,8 @@ exports.assumirChat = async (req, res) => {
     const io = req.app.get('io')
     if (io) {
       // Payload completo para todos atualizarem lista (atendente_id, atendente_atribuido_em) em tempo real
-      emitirConversaAtualizada(io, company_id, conversa_id, { ...data, exibir_badge_aberta: true })
+      // Evita refetch agressivo no frontend (mantém usuário nas últimas mensagens).
+      emitirConversaAtualizada(io, company_id, conversa_id, { ...data, exibir_badge_aberta: true }, { skipAtualizarConversa: true })
       emitirLock(io, conversa_id, user_id)
     }
 
@@ -1983,7 +1984,8 @@ exports.encerrarChat = async (req, res) => {
         data
       )
       emitirLock(io, conversa_id, null)
-      emitirConversaAtualizada(io, company_id, conversa_id, { id: Number(conversa_id) })
+      // Evita reposicionamento para mensagens antigas após encerrar.
+      emitirConversaAtualizada(io, company_id, conversa_id, { ...data }, { skipAtualizarConversa: true })
     }
 
     // Enviar mensagem de finalização se configurado no chatbot de triagem
@@ -2023,7 +2025,7 @@ exports.encerrarChat = async (req, res) => {
                   const io2 = req.app.get('io')
                   const payload = await enrichMensagemComAutorUsuario(supabase, company_id, msgInsert)
                   emitirEventoEmpresaConversa(io2, company_id, conversa_id, io2.EVENTS?.NOVA_MENSAGEM || 'nova_mensagem', payload)
-                  emitirConversaAtualizada(io2, company_id, conversa_id, { id: Number(conversa_id) })
+                  emitirConversaAtualizada(io2, company_id, conversa_id, { ...data }, { skipAtualizarConversa: true })
                 }
               }
             }
@@ -2081,8 +2083,8 @@ exports.reabrirChat = async (req, res) => {
         data
       )
       emitirLock(io, conversa_id, null)
-
-      emitirConversaAtualizada(io, company_id, conversa_id, { id: Number(conversa_id) })
+      // Evita reposicionamento indevido ao reabrir.
+      emitirConversaAtualizada(io, company_id, conversa_id, { ...data }, { skipAtualizarConversa: true })
     }
 
     return res.json({ ok: true, conversa: data })

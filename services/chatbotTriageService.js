@@ -128,10 +128,13 @@ function isOutsideBusinessDays(diasSemanaDesativados, datasEspecificasFechadas, 
 /**
  * Envia mensagem pelo chatbot com throttle (intervalo configurável por empresa).
  */
-async function sendWithThrottle(sendMessage, telefone, msg, opts, company_id, intervaloSegundos) {
-  await throttleChatbotSend(company_id, intervaloSegundos)
+async function sendWithThrottle(sendMessage, telefone, msg, opts, company_id, intervaloSegundos, behavior = {}) {
+  const { bypassChatbotInterval = false, sendOptions = {} } = behavior || {}
+  if (!bypassChatbotInterval) {
+    await throttleChatbotSend(company_id, intervaloSegundos)
+  }
   try {
-    return await sendMessage(telefone, msg, opts)
+    return await sendMessage(telefone, msg, { ...(opts || {}), ...(sendOptions || {}) })
   } finally {
     lastChatbotSendPerCompany.set(company_id ?? 'default', Date.now())
   }
@@ -827,7 +830,15 @@ async function processIncomingMessage(ctx) {
     })
 
     try {
-      await sendWithThrottle(sendMessage, telefone, msgToSend, opts, company_id, config.intervaloEnvioSegundos)
+      await sendWithThrottle(
+        sendMessage,
+        telefone,
+        msgToSend,
+        opts,
+        company_id,
+        config.intervaloEnvioSegundos,
+        { bypassChatbotInterval: true, sendOptions: { skipProviderDelay: true } }
+      )
       await sb.from('mensagens').insert({
         conversa_id,
         texto: msgToSend,
@@ -853,7 +864,15 @@ async function processIncomingMessage(ctx) {
     const msg = welcomeFull || menuOnly
     if (msg) {
       try {
-        await sendWithThrottle(sendMessage, telefone, msg, opts, company_id, config.intervaloEnvioSegundos)
+        await sendWithThrottle(
+          sendMessage,
+          telefone,
+          msg,
+          opts,
+          company_id,
+          config.intervaloEnvioSegundos,
+          { bypassChatbotInterval: true, sendOptions: { skipProviderDelay: true } }
+        )
         await sb.from('mensagens').insert({
           conversa_id,
           texto: msg,
