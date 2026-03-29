@@ -5,7 +5,7 @@
  * vincula conversa ao departamento e transfere para usuários do setor.
  *
  * Configuração em ia_config.config.chatbot_triage (JSON estruturado).
- * Integrado ao webhook UltraMSG (via webhookZapiController).
+ * Integrado ao webhook UltraMSG (pipeline principal de mensagens).
  *
  * RESTRIÇÃO: Atualiza apenas conversas (departamento, atendente), mensagens (respostas
  * do bot) e bot_logs. Nunca atualiza clientes.nome — nomes vêm só de sync e webhook.

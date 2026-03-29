@@ -1,5 +1,7 @@
 # Validação: Status de Visualização (Ticks ✓✓)
 
+> Atualização 2026-03-28: este documento contém referências legadas de Meta/Z-API (`/webhook`, `/webhooks/zapi`, `webhookController`). O fluxo ativo do backend está em `routes/webhookUltramsgRoutes.js` com UltraMsg.
+
 **Data:** 2025-03-08  
 **Objetivo:** Certificar que o status de visualização (read/delivered) está funcionando corretamente no backend.
 

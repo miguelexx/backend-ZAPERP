@@ -87,14 +87,14 @@ async function main() {
     addCheck('GET /health/detailed', false, msg)
   }
 
-  // 3. Webhook Z-API health
+  // 3. Webhook UltraMsg health
   try {
-    const r = await fetchJSON(`${BASE_URL}/webhooks/zapi/health`)
+    const r = await fetchJSON(`${BASE_URL}/webhooks/ultramsg/health`)
     const webhookOk = r.ok && r.json?.ok === true
-    addCheck('GET /webhooks/zapi/health', webhookOk, r.json ? 'ok' : `status ${r.status}`)
+    addCheck('GET /webhooks/ultramsg/health', webhookOk, r.json ? 'ok' : `status ${r.status}`)
   } catch (e) {
     const msg = e.code === 'ECONNREFUSED' ? 'conexão recusada' : (e.message || 'erro')
-    addCheck('GET /webhooks/zapi/health', false, msg)
+    addCheck('GET /webhooks/ultramsg/health', false, msg)
   }
 
   // 4. Variáveis de ambiente (via debug/env se não produção)
@@ -103,9 +103,9 @@ async function main() {
     try {
       const r = await fetchJSON(`${BASE_URL}/debug/env`)
       const tokenSet = r.json?.WEBHOOK_TOKEN_SET === true
-      addCheck('ZAPI_WEBHOOK_TOKEN configurado', tokenSet, tokenSet ? 'sim' : 'não (debug env)')
+      addCheck('WHATSAPP_WEBHOOK_TOKEN configurado', tokenSet, tokenSet ? 'sim' : 'não (debug env)')
     } catch (_) {
-      addCheck('ZAPI_WEBHOOK_TOKEN', null, 'não verificado (endpoint /debug/env só em dev)')
+      addCheck('WHATSAPP_WEBHOOK_TOKEN', null, 'não verificado (endpoint /debug/env só em dev)')
     }
   }
 
@@ -114,7 +114,7 @@ async function main() {
     ['/chats', [200, 401]],
     ['/clientes', [200, 401]],
     ['/dashboard/departamentos', [200, 401]],
-    ['/webhooks/zapi', [200]],
+    ['/webhooks/ultramsg', [200]],
   ]) {
     try {
       const r = await fetchJSON(`${BASE_URL}${pathName}`)

@@ -10,7 +10,7 @@
  *   node scripts/verificar-clientes-por-empresa.js sync <company_id> <JWT_TOKEN>
  *
  * O sync também é disparado automaticamente quando o celular conecta (webhook
- * /webhooks/zapi/connection com type=ConnectedCallback).
+ * /webhooks/ultramsg/connection com type=ConnectedCallback).
  */
 
 require('dotenv').config()
@@ -73,7 +73,7 @@ async function runSync(companyId, token) {
     process.exit(1)
   }
   const baseUrl = process.env.APP_URL || 'http://localhost:3000'
-  const url = `${baseUrl.replace(/\/$/, '')}/api/integrations/zapi/contacts/sync`
+  const url = `${baseUrl.replace(/\/$/, '')}/api/integrations/whatsapp/contacts/sync`
   console.log('📤 POST', url, 'company_id=', companyId)
   try {
     const res = await fetch(url, {

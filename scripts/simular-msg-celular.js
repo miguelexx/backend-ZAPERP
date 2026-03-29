@@ -46,7 +46,7 @@ const argTipo   = (getArg('tipo') || 'received').toLowerCase()
 const isLocal   = args.includes('--local')
 
 const BASE_URL = argUrl || (isLocal ? `http://localhost:${process.env.PORT || 5000}` : APP_URL_ENV)
-const WEBHOOK_URL = `${BASE_URL}/webhooks/zapi`
+const WEBHOOK_URL = `${BASE_URL}/webhooks/ultramsg`
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 function gerarMsgId() {

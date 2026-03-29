@@ -1356,7 +1356,7 @@ async function configureWebhooks(appUrl, opts = {}) {
   const cfg = await resolveConfig(opts)
   if (!cfg || !appUrl) return []
   const base = String(appUrl).replace(/\/$/, '')
-  const webhookToken = String(process.env.WHATSAPP_WEBHOOK_TOKEN || process.env.ZAPI_WEBHOOK_TOKEN || '').trim()
+  const webhookToken = String(process.env.WHATSAPP_WEBHOOK_TOKEN || '').trim()
   const tokenSuffix = webhookToken ? `?token=${encodeURIComponent(webhookToken)}` : ''
   const webhookUrl = `${base}/webhooks/ultramsg${tokenSuffix}`
 

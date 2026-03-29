@@ -1,7 +1,7 @@
 'use strict'
 
 /**
- * Middleware: resolve instanceId → company_id e injeta em req.zapiContext.
+ * Middleware: resolve instanceId -> company_id e injeta em req.webhookContext.
  */
 
 const { getCompanyIdByInstanceId } = require('../services/whatsappConfigService')
@@ -10,7 +10,6 @@ function _logSafe(entry) {
   console.log('[WEBHOOK]', JSON.stringify({ ts: new Date().toISOString(), ...entry }))
 }
 
-/** Extrai instanceId do payload (body.instanceId, instance_id, instance, ou dentro de data). */
 function extractInstanceId(body) {
   if (!body || typeof body !== 'object') return ''
   const v = body.instanceId ?? body.instance_id ?? body.instance?.id ?? body.instance ??
@@ -29,14 +28,13 @@ function inferEventType(body, path) {
   if (p === '/connection' || p.endsWith('/connection')) return String(body?.type ?? body?.event ?? '').trim() || 'ConnectedCallback'
   if (p === '/disconnected' || p.endsWith('/disconnected')) return String(body?.type ?? body?.event ?? '').trim() || 'DisconnectedCallback'
   if (p === '/presence' || p.endsWith('/presence')) return String(body?.type ?? body?.event ?? '').trim() || 'PresenceChatCallback'
-  // UltraMsg: event_type / eventType (message_received, message_ack, message_create)
   const ev = String(body?.event_type ?? body?.eventType ?? body?.type ?? body?.event ?? body?.tipo ?? '').trim()
   if (ev) return ev
   if (body?.data && typeof body.data === 'object') return body.data?.id ? 'message_received' : 'unknown'
   return 'unknown'
 }
 
-async function resolveWebhookZapi(req, res, next) {
+async function resolveWebhookCompany(req, res, next) {
   if (req.method !== 'POST') return next()
   try {
     const body = req.body || {}
@@ -57,16 +55,19 @@ async function resolveWebhookZapi(req, res, next) {
 
     _logSafe({ eventType, instanceId, companyIdResolved })
 
-    req.zapiContext = { company_id, instanceId: instanceIdRaw, eventType }
+    req.webhookContext = { company_id, instanceId: instanceIdRaw, eventType }
+    // Compat legado: manter alias até concluir renomeação total.
+    req.zapiContext = req.webhookContext
+
     if (company_id == null) {
       req.webhookLogData = { status: 'ignored_not_mapped', instance_id: instanceIdRaw, event_type: eventType }
       return res.status(200).json({ ok: true, ignored: 'instance_not_mapped' })
     }
     next()
   } catch (e) {
-    console.error('[resolveWebhookZapi]', e?.message || e)
+    console.error('[resolveWebhookCompany]', e?.message || e)
     return res.status(200).json({ ok: true })
   }
 }
 
-module.exports = resolveWebhookZapi
+module.exports = resolveWebhookCompany

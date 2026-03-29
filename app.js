@@ -1,11 +1,13 @@
+require('express-async-errors')
 const express = require('express')
 const cors = require('cors')
 const helmet = require('helmet')
 const path = require('path')
 const fs = require('fs')
+const { randomUUID } = require('crypto')
+const { loadEnv, isProduction } = require('./config/env')
 const tagsRoutes = require('./routes/tagRoutes')
-// Usar o mesmo .env do backend (evita carregar .env de outra pasta e sobrescrever APP_URL)
-require('dotenv').config({ path: path.join(__dirname, '.env'), override: true })
+loadEnv()
 
 const app = express()
 
@@ -16,8 +18,15 @@ const app = express()
 // - Referrer-Policy
 // - Permissions-Policy (Helmet não cobre nativamente)
 // =====================================================
-const isProd = process.env.NODE_ENV === 'production'
+const isProd = isProduction()
 const defaultDirectives = helmet.contentSecurityPolicy.getDefaultDirectives()
+
+// Correlaciona logs e respostas sem expor dados sensíveis.
+app.use((req, res, next) => {
+  req.requestId = req.get('X-Request-Id') || randomUUID()
+  res.setHeader('X-Request-Id', req.requestId)
+  next()
+})
 
 // Ajustes para este projeto (SPA + mídia blob + WS)
 // frame-ancestors 'self' permite embed da página /permissoes na aba Configurações
@@ -167,7 +176,7 @@ if (process.env.NODE_ENV !== 'production') {
     res.json({
       APP_URL: process.env.APP_URL || null,
       NODE_ENV: process.env.NODE_ENV || null,
-      WEBHOOK_TOKEN_SET: !!String(process.env.WHATSAPP_WEBHOOK_TOKEN || process.env.ZAPI_WEBHOOK_TOKEN || '').trim(),
+      WEBHOOK_TOKEN_SET: !!String(process.env.WHATSAPP_WEBHOOK_TOKEN || '').trim(),
     })
   })
 }
@@ -193,7 +202,6 @@ app.use('/jobs', jobsRoutes)
 app.use('/ia', iaRoutes)
 app.use('/config', configRoutes)
 app.use('/integrations/whatsapp', whatsappIntegrationRoutes)
-app.use('/integrations/zapi', whatsappIntegrationRoutes) // alias p/ compatibilidade (usa UltraMsg)
 app.use('/clientes', clienteRoutes)
 app.use('/usuarios', userRoutes)
 app.use('/chats', chatRoutes)
@@ -214,7 +222,6 @@ api.use('/ia', iaRoutes)
 api.use('/ai', aiRoutes)
 api.use('/config', configRoutes)
 api.use('/integrations/whatsapp', whatsappIntegrationRoutes)
-api.use('/integrations/zapi', whatsappIntegrationRoutes) // alias p/ compatibilidade (usa UltraMsg)
 api.use('/clientes', clienteRoutes)
 api.use('/usuarios', userRoutes)
 api.use('/chats', chatRoutes)
@@ -322,8 +329,18 @@ app.use((err, req, res, next) => {
     return res.status(403).json({ error: 'CORS: origem não permitida' })
   }
   // Outros erros: log + 500 JSON (nunca HTML)
-  console.error('[APP_ERROR]', err?.message || err)
-  return res.status(err?.status || 500).json({ error: err?.message || 'Erro interno' })
+  const status = Number(err?.status) || 500
+  const safeMessage = status < 500
+    ? (err?.message || 'Erro na requisição')
+    : (isProd ? 'Erro interno' : (err?.message || 'Erro interno'))
+  console.error('[APP_ERROR]', {
+    requestId: req?.requestId || null,
+    method: req?.method || null,
+    path: req?.originalUrl || req?.url || null,
+    status,
+    message: err?.message || String(err || ''),
+  })
+  return res.status(status).json({ error: safeMessage, requestId: req?.requestId || null })
 })
 
 // =====================================================
@@ -331,14 +348,18 @@ app.use((err, req, res, next) => {
 // =====================================================
 const { initializeChatbotForAllCompanies } = require('./middleware/autoChatbotSetup')
 
-// Executar inicialização em background após startup
-setImmediate(async () => {
-  try {
-    console.log('[APP] 🤖 Inicializando chatbot para todas as empresas...')
-    await initializeChatbotForAllCompanies()
-  } catch (error) {
-    console.error('[APP] ❌ Erro na inicialização do chatbot:', error.message)
-  }
-})
+// Executar inicialização em background após startup.
+// Em teste, desativamos para evitar handles pendentes no Jest.
+const isAutomatedTest = process.env.NODE_ENV === 'test' || !!process.env.JEST_WORKER_ID
+if (!isAutomatedTest) {
+  setImmediate(async () => {
+    try {
+      console.log('[APP] 🤖 Inicializando chatbot para todas as empresas...')
+      await initializeChatbotForAllCompanies()
+    } catch (error) {
+      console.error('[APP] ❌ Erro na inicialização do chatbot:', error.message)
+    }
+  })
+}
 
 module.exports = app

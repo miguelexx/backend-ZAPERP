@@ -1,5 +1,7 @@
 # Patch: remoção de dependências ENV para Z-API multi-tenant
 
+> Atualização 2026-03-28: documento mantido por histórico. O backend ativo opera com UltraMsg e algumas referências a Meta/Z-API podem não refletir o runtime atual.
+
 ## Locais corrigidos
 
 ### 1. Rotas de status (evitar 500)

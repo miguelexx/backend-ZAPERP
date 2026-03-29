@@ -1,5 +1,7 @@
 # Verificação Backend — Envio de Mensagens e Realtime
 
+> Atualização 2026-03-28: este documento tem trechos legados de Meta/Z-API para referência histórica. O runtime atual usa UltraMsg (`/webhooks/ultramsg`) e não usa `webhookController`.
+
 **Data:** 2025-03-06  
 **Objetivo:** Garantir que o backend está correto para envio de mensagens, sem duplicação, com ticks em tempo real e nome/foto estáveis.
 

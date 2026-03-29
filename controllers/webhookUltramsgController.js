@@ -1,6 +1,6 @@
 /**
  * Webhook UltraMsg: recebe eventos e normaliza para formato Z-API.
- * Reutiliza a lógica de processamento do webhookZapiController.
+ * Reutiliza a lógica central de processamento de mensagens.
  *
  * Formato UltraMsg (como chega do site):
  * {
@@ -16,7 +16,7 @@
  */
 
 const { normalizePhoneBR } = require('../helpers/phoneHelper')
-const webhookZapiController = require('./webhookZapiController')
+const webhookCoreController = require('./webhookZapiController')
 
 /** Extrai dígitos de JID (55349999@c.us → 55349999, 120363@g.us → 120363) */
 function jidToDigits(jid) {
@@ -245,7 +245,7 @@ exports.healthUltramsg = (req, res) => res.status(200).json({ ok: true, provider
 
 exports.testarUltramsg = (req, res) => {
   const base = (process.env.APP_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '')
-  const token = String(process.env.WHATSAPP_WEBHOOK_TOKEN || process.env.ZAPI_WEBHOOK_TOKEN || '').trim()
+  const token = String(process.env.WHATSAPP_WEBHOOK_TOKEN || '').trim()
   const suffix = token ? `?token=${encodeURIComponent(token)}` : ''
   const webhookUrl = `${base}/webhooks/ultramsg${suffix}`
   return res.status(200).json({
@@ -271,7 +271,7 @@ function resolveWebhookBody(raw) {
 
 /**
  * Handler principal: normaliza payload UltraMsg → Z-API e delega ao webhookZapi.
- * Idempotência: webhookZapiController trata por (conversa_id, whatsapp_id).
+ * Idempotência: controlador central trata por (conversa_id, whatsapp_id).
  */
 async function handleWebhookUltramsg(req, res) {
   try {
@@ -300,7 +300,7 @@ async function handleWebhookUltramsg(req, res) {
       const normalized = normalizeUltramsgToZapi(body)
       if (!normalized) return res.status(200).json({ ok: true })
       req.body = { ...normalized, type: 'MessageStatusCallback', instanceId: body.instanceId, instance_id: body.instanceId }
-      return webhookZapiController.statusZapi(req, res)
+      return webhookCoreController.statusZapi(req, res)
     }
 
     const isMessageEvent = [
@@ -315,7 +315,7 @@ async function handleWebhookUltramsg(req, res) {
       const normalized = normalizeUltramsgToZapi(body)
       if (!normalized) return res.status(200).json({ ok: true })
       req.body = { ...normalized, type: 'ReceivedCallback', instanceId: body.instanceId, instance_id: body.instanceId }
-      return webhookZapiController.receberZapi(req, res)
+      return webhookCoreController.receberZapi(req, res)
     }
 
     return res.status(200).json({ ok: true })

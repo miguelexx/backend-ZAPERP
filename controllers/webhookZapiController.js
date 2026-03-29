@@ -1,6 +1,6 @@
 /**
- * Processamento de webhooks WhatsApp (formato Z-API).
- * Usado pelo webhookUltramsgController: UltraMsg normaliza payload → receberZapi/statusZapi.
+ * Processamento central de webhooks WhatsApp.
+ * Usado pelo webhookUltramsgController: UltraMsg normaliza payload e delega para este controlador.
  * Suporta: texto, imagem, áudio,
  * vídeo, documento, figurinha, reação, localização, contato, PTV, templates, botões, listas.
  * Suporta conversas individuais e de GRUPO.
@@ -679,7 +679,7 @@ function extractMessage(payload) {
 }
 
 /**
- * POST /webhooks/zapi — recebe callback do Z-API (mensagem recebida ou enviada). Suporta grupos e lote.
+ * POST /webhooks/ultramsg — recebe callback principal de mensagem (entrada/saída). Suporta grupos e lote.
  */
 /** Retorna array de payloads para processar (1 ou N mensagens).
  * Mescla campos de body (key, instanceId, etc.) quando payload vem de body.value/data —
@@ -781,7 +781,7 @@ exports.receberZapi = async (req, res) => {
       fromMe: firstPayload?.fromMe ?? firstPayload?.key?.fromMe ?? null
     }))
 
-    // Salva no buffer de diagnóstico (GET /webhooks/zapi/debug)
+    // Salva no buffer de diagnóstico (GET /webhooks/ultramsg/debug)
     _logWebhook({
       type: body.type || body.event || 'unknown',
       phone: (body.phone || '').toString().slice(-12),
@@ -2789,7 +2789,7 @@ exports.receberZapi = async (req, res) => {
 }
 
 /**
- * POST /webhooks/zapi/status — status da mensagem (entrega/leitura) para ticks ✓✓.
+ * POST /webhooks/ultramsg/status — status da mensagem (entrega/leitura) para ticks ✓✓.
  * Z-API envia: status (SENT|RECEIVED|READ|READ_BY_ME|PLAYED) e ids (array de IDs).
  * Também aceita: messageId, zaapId, id (formato antigo).
  */
@@ -2819,10 +2819,10 @@ exports.statusZapi = async (req, res) => {
     const rawStatus =
       body?.ack != null ? String(body.ack).trim().toLowerCase() : String(body?.status ?? '').trim().toLowerCase()
 
-    // Debug: log toda requisição recebida em /webhooks/zapi/status (apenas com WHATSAPP_DEBUG=1)
+    // Debug: log toda requisição recebida em /webhooks/ultramsg/status (apenas com WHATSAPP_DEBUG=1)
     const logDebug = process.env.WHATSAPP_DEBUG === '1'
     if (logDebug) {
-      console.log('[DEBUG] /webhooks/zapi/status recebido:', {
+      console.log('[DEBUG] /webhooks/ultramsg/status recebido:', {
         ids: idsToProcess.length ? idsToProcess.slice(0, 3).map((id) => id.slice(0, 24) + (id.length > 24 ? '…' : '')) : null,
         statusBruto: body?.status ?? body?.ack ?? '(vazio)',
         ack: body?.ack,
@@ -2831,7 +2831,7 @@ exports.statusZapi = async (req, res) => {
     }
 
     if (idsToProcess.length === 0) {
-      if (logDebug) console.log('[DEBUG] /webhooks/zapi/status: sem messageId nem ids, ignorando.')
+      if (logDebug) console.log('[DEBUG] /webhooks/ultramsg/status: sem messageId nem ids, ignorando.')
       return res.status(200).json({ ok: true })
     }
 
@@ -2857,7 +2857,7 @@ exports.statusZapi = async (req, res) => {
     })()
 
     if (!statusNorm) {
-      if (logDebug) console.log('[DEBUG] /webhooks/zapi/status: status não mapeado, ignorando. rawStatus=', rawStatus || '(vazio)')
+      if (logDebug) console.log('[DEBUG] /webhooks/ultramsg/status: status não mapeado, ignorando. rawStatus=', rawStatus || '(vazio)')
       return res.status(200).json({ ok: true })
     }
 
@@ -3002,15 +3002,15 @@ exports.statusZapi = async (req, res) => {
           if (msg.autor_usuario_id != null) chain = chain.to(`usuario_${msg.autor_usuario_id}`)
           chain.emit('status_mensagem', payload)
         }
-        if (logDebug) console.log('[DEBUG] /webhooks/zapi/status resultado:', { status: statusNorm, mensagem_id: msg.id, conversa_id: msg.conversa_id, whatsapp_id: idStr.slice(0, 20) + '…' })
+        if (logDebug) console.log('[DEBUG] /webhooks/ultramsg/status resultado:', { status: statusNorm, mensagem_id: msg.id, conversa_id: msg.conversa_id, whatsapp_id: idStr.slice(0, 20) + '…' })
       } else {
-        console.log('[Z-API] Status', statusNorm, 'para id', idStr.slice(0, 20) + '… — mensagem não encontrada no banco (ignorado)')
+        console.log('[ULTRAMSG] Status', statusNorm, 'para id', idStr.slice(0, 20) + '… — mensagem não encontrada no banco (ignorado)')
       }
     }
 
     return res.status(200).json({ ok: true })
   } catch (e) {
-    if (process.env.WHATSAPP_DEBUG === '1') console.error('[DEBUG] /webhooks/zapi/status ERRO:', e?.message || e)
+    if (process.env.WHATSAPP_DEBUG === '1') console.error('[DEBUG] /webhooks/ultramsg/status ERRO:', e?.message || e)
     return res.status(200).json({ ok: true })
   }
 }

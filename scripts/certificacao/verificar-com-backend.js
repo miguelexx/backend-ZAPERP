@@ -60,7 +60,7 @@ async function main() {
     await waitForBackend()
   } catch (e) {
     backend.kill('SIGTERM')
-    console.error('❌ Backend não iniciou a tempo. Verifique erros no .env (JWT_SECRET, APP_URL, ZAPI_WEBHOOK_TOKEN).')
+    console.error('❌ Backend não iniciou a tempo. Verifique erros no .env (JWT_SECRET, APP_URL, WHATSAPP_WEBHOOK_TOKEN).')
     process.exit(1)
   }
   console.log('✅ Backend pronto. Executando verificação...\n')

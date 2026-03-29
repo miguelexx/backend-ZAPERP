@@ -174,7 +174,8 @@ async function getQrCodeImage(companyId) {
 
     if (contentType.includes('application/json')) {
       const text = await res.text().catch(() => '')
-      const data = text ? JSON.parse(text).catch(() => null) : null
+      let data = null
+      try { data = text ? JSON.parse(text) : null } catch { data = null }
       const raw = data?.qrCode ?? data?.qr ?? data?.qrCodeBase64 ?? data?.image ?? data?.imageBase64 ?? data?.data ?? null
       const imageBase64 = extractBase64(raw) || (typeof raw === 'string' ? raw : null)
       if (imageBase64) return { imageBase64 }

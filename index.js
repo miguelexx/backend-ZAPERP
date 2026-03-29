@@ -1,10 +1,10 @@
 const path = require('path')
-// Carrega .env do diretório do backend e SOBRESCREVE variáveis já existentes
-require('dotenv').config({ path: path.join(__dirname, '.env'), override: true })
+const { loadEnv } = require('./config/env')
 const http = require('http')
 const app = require('./app')
 const { Server } = require('socket.io')
 const jwt = require('jsonwebtoken')
+loadEnv()
 
 // Diagnóstico: em produção, logs mínimos (nunca expor tokens, senhas ou paths sensíveis)
 if (process.env.NODE_ENV !== 'production') {
@@ -29,7 +29,7 @@ if (!process.env.JWT_SECRET) {
 if (!String(process.env.APP_URL || '').trim()) {
   throw new Error('APP_URL não definido no .env')
 }
-const webhookToken = process.env.WHATSAPP_WEBHOOK_TOKEN || process.env.ZAPI_WEBHOOK_TOKEN || ''
+const webhookToken = process.env.WHATSAPP_WEBHOOK_TOKEN || ''
 if (!String(webhookToken).trim()) {
   throw new Error('WHATSAPP_WEBHOOK_TOKEN não definido no .env')
 }

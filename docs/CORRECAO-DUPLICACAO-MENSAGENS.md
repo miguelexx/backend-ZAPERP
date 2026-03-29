@@ -1,5 +1,7 @@
 # Correção Completa da Duplicação de Mensagens
 
+> Atualização 2026-03-28: este documento descreve correções históricas e cita middlewares legados já removidos (`performanceOptimization`, `conversaOptimization`).
+
 ## 🎯 Problema Identificado
 
 O sistema estava duplicando mensagens enviadas pelos usuários, causando:

@@ -9,6 +9,7 @@
 
 const crypto = require('crypto')
 const { getCompanyIdByInstanceId } = require('../services/whatsappConfigService')
+const { getBooleanEnv, isProduction } = require('../config/env')
 
 /** Extrai instanceId do payload (body.instanceId, instance_id, instance, ou dentro de data). */
 function extractInstanceId(body) {
@@ -38,7 +39,7 @@ function timingSafeEqual(a, b) {
 }
 
 function requireWebhookToken(req, res, next) {
-  const expected = String(process.env.WHATSAPP_WEBHOOK_TOKEN || process.env.ZAPI_WEBHOOK_TOKEN || '').trim()
+  const expected = String(process.env.WHATSAPP_WEBHOOK_TOKEN || '').trim()
 
   if (!expected) {
     console.error('[WEBHOOK_FATAL] WHATSAPP_WEBHOOK_TOKEN ausente')
@@ -57,7 +58,16 @@ function requireWebhookToken(req, res, next) {
     return next()
   }
 
-  // Token ausente ou inválido → tenta fallback via instanceId registrado
+  const allowInstanceFallback = getBooleanEnv(
+    'ALLOW_INSTANCEID_WEBHOOK_FALLBACK',
+    !isProduction()
+  )
+
+  // Token ausente ou inválido → fallback opcional via instanceId registrado
+  if (!allowInstanceFallback) {
+    return _reject(req, res, incoming)
+  }
+
   const instanceId = extractInstanceId(req.body)
   if (instanceId) {
     return getCompanyIdByInstanceId(instanceId)

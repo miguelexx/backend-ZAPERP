@@ -1,5 +1,7 @@
 # Revisão Geral do Backend + Prompt para Validação no Frontend
 
+> Atualização 2026-03-28: documento de revisão histórica. Referências a `webhookAuth`, Meta e Z-API devem ser interpretadas como legado; integração ativa atual é UltraMsg.
+
 ## 1. Resumo da Revisão Realizada
 
 ### 1.1 Estrutura Verificada

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Script de teste: POST /api/integrations/zapi/contacts/sync
+ * Script de teste: POST /api/integrations/whatsapp/contacts/sync
  * Uso: node scripts/certificacao/test-sync-contatos.js BASE_URL JWT_TOKEN
  * Ex:  node scripts/certificacao/test-sync-contatos.js http://localhost:3000 eyJhbGc...
  */
@@ -15,7 +15,7 @@ if (!TOKEN) {
 }
 
 async function main() {
-  const url = `${BASE_URL.replace(/\/$/, '')}/api/integrations/zapi/contacts/sync`
+  const url = `${BASE_URL.replace(/\/$/, '')}/api/integrations/whatsapp/contacts/sync`
   console.log('POST', url)
   const res = await fetch(url, {
     method: 'POST',

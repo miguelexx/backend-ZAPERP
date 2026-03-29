@@ -3,7 +3,7 @@ const ultramsgIntegrationService = require('../services/ultramsgIntegrationServi
 const whatsappConfigService = require('../services/whatsappConfigService')
 const { syncContacts } = require('../services/ultramsgContactsSyncService')
 const { syncGroups, syncAll } = require('../services/ultramsgGroupsSyncService')
-const { checkGuard, recordQrServed, resetOnConnected, getAttempts, THROTTLE_SECONDS } = require('../services/zapiConnectGuardService')
+const { checkGuard, recordQrServed, resetOnConnected, getAttempts, THROTTLE_SECONDS } = require('../services/whatsappConnectGuardService')
 const { getConfig } = require('../services/configOperacionalService')
 const { getProvider } = require('../services/providers')
 

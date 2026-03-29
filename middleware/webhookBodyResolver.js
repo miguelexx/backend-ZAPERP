@@ -3,7 +3,7 @@
 /**
  * Resolve body do webhook UltraMsg.
  * Alguns provedores enviam JSON em campo string (ex: body.payload ou form-urlencoded).
- * Deve rodar ANTES de requireWebhookToken e resolveWebhookZapi para que instanceId seja extraído corretamente.
+ * Deve rodar ANTES de requireWebhookToken e resolveWebhookCompany para que instanceId seja extraído corretamente.
  */
 function webhookBodyResolver(req, res, next) {
   if (req.method !== 'POST') return next()
