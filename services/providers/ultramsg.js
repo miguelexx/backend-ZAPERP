@@ -84,6 +84,27 @@ function normalizeAudioUrl(audioUrl) {
   return audioUrl
 }
 
+function isDataUri(value) {
+  return typeof value === 'string' && value.trim().toLowerCase().startsWith('data:')
+}
+
+function extractAudioExtension(value = '') {
+  try {
+    const raw = String(value || '').trim()
+    if (!raw) return ''
+    const withoutQuery = raw.split('?')[0].split('#')[0]
+    const match = withoutQuery.match(/\.([a-z0-9]{2,5})$/i)
+    return match ? String(match[1]).toLowerCase() : ''
+  } catch {
+    return ''
+  }
+}
+
+function isAllowedAudioExtension(ext) {
+  if (!ext) return true // URLs de CDN sem extensão explícita
+  return ['mp3', 'ogg', 'aac', 'wav', 'm4a', 'opus', 'webm'].includes(String(ext).toLowerCase())
+}
+
 /**
  * Verifica se o erro do UltraMsg é relacionado a extensão de arquivo não suportada.
  * UltraMsg pode retornar erro como string, objeto ou array de objetos.
@@ -487,14 +508,40 @@ async function sendImage(phone, url, caption = '', opts = {}) {
  * UltraMsg aceita: mp3, aac, ogg | máx 16 MB | link HTTP ou base64
  */
 async function sendAudio(phone, audioUrl, opts = {}) {
+  const returnDetails = opts?.returnDetails === true
   await awaitSendDelay(opts?.companyId ?? opts?.company_id)
   const cfg = await resolveConfig(opts)
-  if (!cfg) return false
+  if (!cfg) return returnDetails ? { ok: false, error: 'Configuração UltraMsg indisponível' } : false
   const nums = phoneCandidatesForSend(phone)
-  if (!nums.length || !audioUrl) return false
+  if (!nums.length || !audioUrl) return returnDetails ? { ok: false, error: 'Destino ou áudio inválido' } : false
   
   // Processa URL de áudio para melhor compatibilidade
   const processedAudioUrl = normalizeAudioUrl(String(audioUrl).trim())
+  const audioExt = extractAudioExtension(opts?.audioMeta?.originalName || processedAudioUrl)
+  const audioMime = String(opts?.audioMeta?.mimeType || '').toLowerCase()
+
+  if (isDataUri(processedAudioUrl)) {
+    const reason = 'Data URI não suportado para /messages/audio; envie URL HTTP(S).'
+    console.warn('[ULTRAMSG][AUDIO] Rejeitado antes do POST:', {
+      reason,
+      to: nums[0]?.slice(-12),
+      ext: audioExt || null,
+      mime: audioMime || null,
+      payload: { to: nums[0], audio: 'data:*base64*' },
+    })
+    return returnDetails ? { ok: false, error: reason } : false
+  }
+  if (!isAllowedAudioExtension(audioExt)) {
+    const reason = `Extensão de áudio não suportada para UltraMsg: .${audioExt}`
+    console.warn('[ULTRAMSG][AUDIO] Rejeitado antes do POST:', {
+      reason,
+      to: nums[0]?.slice(-12),
+      ext: audioExt,
+      mime: audioMime || null,
+      url: processedAudioUrl.slice(0, 120),
+    })
+    return returnDetails ? { ok: false, error: reason } : false
+  }
   
   console.log(`[ULTRAMSG] Tentando enviar audio para ${nums[0]?.slice(-12)} com URL: ${processedAudioUrl.slice(0, 50)}...`)
   const body = { to: nums[0], audio: processedAudioUrl }
@@ -508,27 +555,34 @@ async function sendAudio(phone, audioUrl, opts = {}) {
   const isExtensionError = isFileExtensionError(data?.error)
   
   if (WHATSAPP_DEBUG) {
-    console.log('[ULTRAMSG] sendAudio resultado:', { ok, status, hasError: !!explicitError, sentFailed, isExtensionError })
+    console.log('[ULTRAMSG] sendAudio tentativa:', {
+      endpoint: '/messages/audio',
+      to: nums[0],
+      audio: processedAudioUrl.slice(0, 120),
+      ext: audioExt || null,
+      mime: audioMime || null,
+      result: { ok, status, hasError: !!explicitError, sentFailed, isExtensionError },
+    })
   }
   
   if (!ok || explicitError || sentFailed) {
     const errRaw = data?.error || (sentFailed ? 'sent:false' : null) || String(text || '').slice(0, 200) || `HTTP ${status}`
     const errMsg = typeof errRaw === 'object' ? JSON.stringify(errRaw) : String(errRaw)
-    console.warn('❌ UltraMsg sendAudio falhou:', nums[0]?.slice(-12), errMsg.slice(0, 200), '| token:', maskToken(cfg.token))
-    
-    // Se falhou por extensão, tentar múltiplos formatos
-    if (isExtensionError && processedAudioUrl.startsWith('data:')) {
-      console.log('[ULTRAMSG] Tentando múltiplos formatos de áudio')
-      const multiFormatSuccess = await tryMultipleAudioFormats(phone, processedAudioUrl, cfg, '/messages/audio')
-      if (multiFormatSuccess) {
-        return true
-      }
-    }
-    
-    return false
+    console.warn('❌ UltraMsg sendAudio falhou:', {
+      to: nums[0]?.slice(-12),
+      endpoint: '/messages/audio',
+      status,
+      error: errMsg.slice(0, 300),
+      ext: audioExt || null,
+      mime: audioMime || null,
+      payload: { to: nums[0], audio: processedAudioUrl.slice(0, 120) },
+      response: { data: data || null, text: String(text || '').slice(0, 300) },
+      token: maskToken(cfg.token),
+    })
+    return returnDetails ? { ok: false, error: errMsg } : false
   }
   console.log('✅ UltraMsg áudio enviado:', nums[0]?.slice(-12))
-  return true
+  return returnDetails ? { ok: true, messageId: data?.id ?? data?.messageId ?? null } : true
 }
 
 /**
@@ -615,14 +669,40 @@ async function removeReaction(phone, messageId, opts = {}) {
  * Fallback: se o endpoint voice rejeitar (ex.: formato), tenta /messages/audio.
  */
 async function sendVoice(phone, audioUrl, opts = {}) {
+  const returnDetails = opts?.returnDetails === true
   await awaitSendDelay(opts?.companyId ?? opts?.company_id)
   const cfg = await resolveConfig(opts)
-  if (!cfg) return false
+  if (!cfg) return returnDetails ? { ok: false, error: 'Configuração UltraMsg indisponível' } : false
   const nums = phoneCandidatesForSend(phone)
-  if (!nums.length || !audioUrl) return false
+  if (!nums.length || !audioUrl) return returnDetails ? { ok: false, error: 'Destino ou áudio inválido' } : false
   
   // Processa URL de áudio para melhor compatibilidade
   const processedAudioUrl = normalizeAudioUrl(String(audioUrl).trim())
+  const audioExt = extractAudioExtension(opts?.audioMeta?.originalName || processedAudioUrl)
+  const audioMime = String(opts?.audioMeta?.mimeType || '').toLowerCase()
+
+  if (isDataUri(processedAudioUrl)) {
+    const reason = 'Data URI não suportado para /messages/voice; envie URL HTTP(S).'
+    console.warn('[ULTRAMSG][VOICE] Rejeitado antes do POST:', {
+      reason,
+      to: nums[0]?.slice(-12),
+      ext: audioExt || null,
+      mime: audioMime || null,
+      payload: { to: nums[0], audio: 'data:*base64*' },
+    })
+    return returnDetails ? { ok: false, error: reason } : false
+  }
+  if (!isAllowedAudioExtension(audioExt)) {
+    const reason = `Extensão de áudio não suportada para UltraMsg: .${audioExt}`
+    console.warn('[ULTRAMSG][VOICE] Rejeitado antes do POST:', {
+      reason,
+      to: nums[0]?.slice(-12),
+      ext: audioExt,
+      mime: audioMime || null,
+      url: processedAudioUrl.slice(0, 120),
+    })
+    return returnDetails ? { ok: false, error: reason } : false
+  }
   
   const body = { to: nums[0], audio: processedAudioUrl }
 
@@ -636,13 +716,30 @@ async function sendVoice(phone, audioUrl, opts = {}) {
   const isExtensionError = isFileExtensionError(data?.error)
   
   if (WHATSAPP_DEBUG) {
-    console.log('[ULTRAMSG] sendVoice resultado:', { ok, status, hasError: !!explicitError, sentFailed, isExtensionError })
+    console.log('[ULTRAMSG] sendVoice tentativa:', {
+      endpoint: '/messages/voice',
+      to: nums[0],
+      audio: processedAudioUrl.slice(0, 120),
+      ext: audioExt || null,
+      mime: audioMime || null,
+      result: { ok, status, hasError: !!explicitError, sentFailed, isExtensionError },
+    })
   }
   
   if (!ok || explicitError || sentFailed) {
     const errRaw = data?.error || (sentFailed ? 'sent:false' : null) || String(text || '').slice(0, 200) || `HTTP ${status}`
     const errMsg = typeof errRaw === 'object' ? JSON.stringify(errRaw) : String(errRaw)
-    console.warn('❌ UltraMsg sendVoice falhou, tentando /messages/audio:', nums[0]?.slice(-12), errMsg.slice(0, 200), '| token:', maskToken(cfg.token))
+    console.warn('❌ UltraMsg sendVoice falhou, tentando /messages/audio:', {
+      to: nums[0]?.slice(-12),
+      endpoint: '/messages/voice',
+      status,
+      error: errMsg.slice(0, 300),
+      ext: audioExt || null,
+      mime: audioMime || null,
+      payload: { to: nums[0], audio: processedAudioUrl.slice(0, 120) },
+      response: { data: data || null, text: String(text || '').slice(0, 300) },
+      token: maskToken(cfg.token),
+    })
 
     // Fallback: tenta como áudio comum
     const fb = await postJson({ ...cfg, endpoint: '/messages/audio', body })
@@ -655,24 +752,25 @@ async function sendVoice(phone, audioUrl, opts = {}) {
     if (!fb.ok || fbExplicitError || fbSentFailed) {
       const fbErrRaw = fb.data?.error || (fbSentFailed ? 'sent:false' : null) || String(fb.text || '').slice(0, 200) || `HTTP ${fb.status}`
       const fbErrMsg = typeof fbErrRaw === 'object' ? JSON.stringify(fbErrRaw) : String(fbErrRaw)
-      console.warn('❌ UltraMsg sendAudio (fallback) falhou:', nums[0]?.slice(-12), fbErrMsg.slice(0, 200), '| token:', maskToken(cfg.token))
-      
-      // Se ambos falharam por extensão, tentar múltiplos formatos
-      if ((isExtensionError || fbIsExtensionError) && processedAudioUrl.startsWith('data:')) {
-        console.log('[ULTRAMSG] Tentando múltiplos formatos de áudio')
-        const multiFormatSuccess = await tryMultipleAudioFormats(phone, processedAudioUrl, cfg, '/messages/audio')
-        if (multiFormatSuccess) {
-          return true
-        }
-      }
-      
-      return false
+      console.warn('❌ UltraMsg sendAudio (fallback) falhou:', {
+        to: nums[0]?.slice(-12),
+        endpoint: '/messages/audio',
+        status: fb.status,
+        error: fbErrMsg.slice(0, 300),
+        ext: audioExt || null,
+        mime: audioMime || null,
+        payload: { to: nums[0], audio: processedAudioUrl.slice(0, 120) },
+        response: { data: fb.data || null, text: String(fb.text || '').slice(0, 300) },
+        isExtensionError: fbIsExtensionError || isExtensionError,
+        token: maskToken(cfg.token),
+      })
+      return returnDetails ? { ok: false, error: fbErrMsg } : false
     }
     console.log('✅ UltraMsg áudio enviado (fallback /messages/audio):', nums[0]?.slice(-12))
-    return true
+    return returnDetails ? { ok: true, messageId: fb.data?.id ?? fb.data?.messageId ?? null } : true
   }
   console.log('✅ UltraMsg voice enviado:', nums[0]?.slice(-12))
-  return true
+  return returnDetails ? { ok: true, messageId: data?.id ?? data?.messageId ?? null } : true
 }
 
 /**

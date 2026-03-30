@@ -3672,7 +3672,12 @@ exports.enviarArquivo = async (req, res) => {
     const sendMediaWithUrl = (mediaUrl) => {
       const provider = getProvider()
       const phone = telefoneParaEnvio
-      const opts = { companyId: company_id, conversaId: conversa_id }
+      const isAudioTipo = tipo === 'voice' || tipo === 'audio'
+      const opts = {
+        companyId: company_id,
+        conversaId: conversa_id,
+        ...(isAudioTipo ? { returnDetails: true, audioMeta: { originalName: file.originalname, mimeType: file.mimetype } } : {}),
+      }
       const promise =
         tipo === 'voice' && provider.sendVoice
           ? provider.sendVoice(phone, mediaUrl, opts)
@@ -3689,12 +3694,20 @@ exports.enviarArquivo = async (req, res) => {
                   : Promise.resolve(false)
       promise
         .then(async (result) => {
-          const ok = typeof result === 'boolean' ? result : result?.ok === true
-          const waMessageId = (typeof result === 'object' && result?.messageId) ? String(result.messageId).trim() : null
+          const normalizedResult = typeof result === 'boolean'
+            ? { ok: result, error: null, messageId: null }
+            : (result || { ok: false, error: 'resultado_provider_vazio', messageId: null })
+          const ok = normalizedResult.ok === true
+          const waMessageId = normalizedResult?.messageId ? String(normalizedResult.messageId).trim() : null
           const nextStatus = ok ? 'sent' : 'erro'
           
           if (!ok) {
-            console.warn('WhatsApp: falha ao enviar mídia para', phone, tipo, result?.error || 'sem detalhes')
+            console.warn('WhatsApp: falha ao enviar mídia', {
+              phone: String(phone || '').slice(-12),
+              tipo,
+              mediaUrl: String(mediaUrl || '').slice(0, 180),
+              erro: normalizedResult?.error || 'sem detalhes',
+            })
           } else {
             console.log('✅ WhatsApp mídia enviada:', phone?.slice(-12), tipo, waMessageId ? `(${waMessageId})` : '')
           }
@@ -3751,60 +3764,11 @@ exports.enviarArquivo = async (req, res) => {
                   tipo,
                   forceUploadMedia
                 })
-                // Fallback: para áudio/voz, tentar enviar como base64 diretamente (evita dependência do CDN)
-                let base64FallbackOk = false
-                if ((tipo === 'voice' || tipo === 'audio') && file.path) {
-                  try {
-                    const fsSync = require('fs')
-                    if (fsSync.existsSync(file.path)) {
-                      const fileBuffer = fsSync.readFileSync(file.path)
-                      const originalName = file.originalname || file.filename || ''
-                      
-                      // Tenta múltiplos MIME types para máxima compatibilidade
-                      const mimeTypesToTry = []
-                      
-                      // Determina MIME type baseado na extensão original
-                      if (/\.webm$/i.test(originalName)) {
-                        // Para WebM, tenta OGG primeiro (mais compatível), depois MP3
-                        mimeTypesToTry.push('audio/ogg', 'audio/mpeg', 'audio/wav')
-                      } else if (/\.mp3$/i.test(originalName)) {
-                        mimeTypesToTry.push('audio/mpeg', 'audio/ogg')
-                      } else if (/\.m4a$/i.test(originalName)) {
-                        mimeTypesToTry.push('audio/mp4', 'audio/mpeg', 'audio/ogg')
-                      } else if (/\.aac$/i.test(originalName)) {
-                        mimeTypesToTry.push('audio/aac', 'audio/mpeg', 'audio/ogg')
-                      } else if (/\.ogg$/i.test(originalName)) {
-                        mimeTypesToTry.push('audio/ogg', 'audio/mpeg')
-                      } else {
-                        // Padrão: tenta os formatos mais compatíveis
-                        mimeTypesToTry.push('audio/mpeg', 'audio/ogg', 'audio/wav')
-                      }
-                      
-                      // Tenta o primeiro MIME type mais compatível
-                      if (mimeTypesToTry.length > 0) {
-                        const mimeType = mimeTypesToTry[0] // Usa o mais compatível
-                        const base64DataUri = `data:${mimeType};base64,${fileBuffer.toString('base64')}`
-                        
-                        console.log(`[ULTRAMSG] Tentando áudio via base64 como ${mimeType} (fallback CDN falhou)`)
-                        sendMediaWithUrl(base64DataUri)
-                        base64FallbackOk = true
-                      }
-                      
-                      if (!base64FallbackOk) {
-                        console.warn('[ULTRAMSG] Todos os formatos de áudio base64 falharam')
-                      }
-                    }
-                  } catch (e2) {
-                    console.warn('[ULTRAMSG] Fallback base64 áudio falhou:', e2?.message)
-                  }
-                }
-                if (!base64FallbackOk) {
-                  console.warn('⚠️ UltraMsg uploadMedia falhou; mídia não enviada.', result?.error || '')
-                  await supabase.from('mensagens').update({ status: 'erro' }).eq('company_id', company_id).eq('id', msg.id)
-                  const io2 = req.app?.get('io')
-                  if (io2) {
-                    io2.to(`empresa_${company_id}`).to(`conversa_${conversa_id}`).to(`usuario_${user_id}`).emit(io2.EVENTS?.STATUS_MENSAGEM || 'status_mensagem', { mensagem_id: msg.id, conversa_id: Number(conversa_id), status: 'erro', status_mensagem: 'erro' })
-                  }
+                console.warn('⚠️ UltraMsg uploadMedia falhou; mídia não enviada.', result?.error || '')
+                await supabase.from('mensagens').update({ status: 'erro' }).eq('company_id', company_id).eq('id', msg.id)
+                const io2 = req.app?.get('io')
+                if (io2) {
+                  io2.to(`empresa_${company_id}`).to(`conversa_${conversa_id}`).to(`usuario_${user_id}`).emit(io2.EVENTS?.STATUS_MENSAGEM || 'status_mensagem', { mensagem_id: msg.id, conversa_id: Number(conversa_id), status: 'erro', status_mensagem: 'erro' })
                 }
               }
             } catch (e) {
