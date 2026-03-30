@@ -529,6 +529,21 @@ function findOptionByKey(config, texto) {
   )
   if (!activeOptions.length) return null
 
+  // Normaliza "3️⃣" -> "3", removendo variações visuais do keycap emoji.
+  const normalizeOptionKey = (v) =>
+    String(v || '')
+      .normalize('NFKD')
+      .replace(/[\uFE0F\u20E3]/g, '')
+      .replace(/\s+/g, ' ')
+      .trim()
+
+  const extractNumericCandidate = (v) => {
+    const normalized = normalizeOptionKey(v)
+    // Aceita "3", "3 - Vendas", "3. Vendas", "3) Vendas".
+    const m = normalized.match(/^(\d{1,2})(?:\s*[-.)].*)?$/)
+    return m ? m[1] : null
+  }
+
   // 1. Match exato (case-sensitive)
   const exactMatch = activeOptions.find((o) => String(o.key).trim() === key)
   if (exactMatch) return exactMatch
@@ -540,7 +555,21 @@ function findOptionByKey(config, texto) {
   )
   if (caseInsensitiveMatch) return caseInsensitiveMatch
 
-  // 3. Match por label case-insensitive (ex: cliente digitou "Comercial")
+  // 3. Match por chave normalizada (resolve keycap emoji: "3️⃣" vs "3").
+  const normalizedInput = normalizeOptionKey(key).toLowerCase()
+  const normalizedMatch = activeOptions.find(
+    (o) => normalizeOptionKey(o.key).toLowerCase() === normalizedInput
+  )
+  if (normalizedMatch) return normalizedMatch
+
+  // 4. Match numérico tolerante (ex.: input "3", key "3️⃣" / "3 - Vendas").
+  const inputNumeric = extractNumericCandidate(key)
+  if (inputNumeric) {
+    const numericMatch = activeOptions.find((o) => extractNumericCandidate(o.key) === inputNumeric)
+    if (numericMatch) return numericMatch
+  }
+
+  // 5. Match por label case-insensitive (ex: cliente digitou "Comercial")
   return activeOptions.find((o) => String(o.label || '').trim().toLowerCase() === keyLower) || null
 }
 
