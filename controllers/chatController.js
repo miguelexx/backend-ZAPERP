@@ -3610,7 +3610,7 @@ async function normalizeAudioForUltraMsg(file, tipo) {
   const mime = String(file.mimetype || '').toLowerCase()
   const isVoice = tipo === 'voice'
   const isAudio = tipo === 'audio'
-  const allowedVoiceExt = ['ogg']
+  const allowedVoiceExt = ['mp3', 'ogg', 'aac']
   const allowedAudioExt = ['mp3', 'ogg', 'aac']
   if ((isVoice && allowedVoiceExt.includes(ext)) || (isAudio && allowedAudioExt.includes(ext))) {
     return { file, converted: false, error: null }
@@ -3622,11 +3622,12 @@ async function normalizeAudioForUltraMsg(file, tipo) {
   const currentStoredName = String(file.filename || path.basename(file.path))
   const baseStoredName = currentStoredName.replace(/\.[a-z0-9]{2,5}$/i, '')
   const originalName = String(file.originalname || currentStoredName)
-  const targetExt = isVoice ? 'ogg' : 'mp3'
+  // Para maior compatibilidade no WhatsApp mobile do destinatário, padronizamos em MP3.
+  const targetExt = 'mp3'
   const targetStoredName = `${baseStoredName}.${targetExt}`
   const targetPath = path.join(dir, targetStoredName)
   const targetOriginalName = originalName.replace(/\.[a-z0-9]{2,5}$/i, `.${targetExt}`)
-  const ffmpegProfile = isVoice ? 'voice_ogg_opus' : 'audio_mp3'
+  const ffmpegProfile = 'audio_mp3'
 
   await convertAudioWithFfmpeg(file.path, targetPath, ffmpegProfile)
   fs.unlink(file.path, () => {})
@@ -3791,9 +3792,7 @@ exports.enviarArquivo = async (req, res) => {
         ...(isAudioTipo ? { returnDetails: true, audioMeta: { originalName: file.originalname, mimeType: file.mimetype } } : {}),
       }
       const promise =
-        tipo === 'voice' && provider.sendVoice
-          ? provider.sendVoice(phone, mediaUrl, opts)
-          : tipo === 'audio' && provider.sendAudio
+        ((tipo === 'voice' || tipo === 'audio') && provider.sendAudio)
           ? provider.sendAudio(phone, mediaUrl, opts)
           : tipo === 'sticker' && provider.sendSticker
             ? provider.sendSticker(phone, mediaUrl, { ...opts, stickerAuthor: 'ZapERP' })
@@ -3876,8 +3875,9 @@ exports.enviarArquivo = async (req, res) => {
                   tipo,
                   forceUploadMedia
                 })
-                // Fallback seguro: se temos URL pública do backend, tenta enviar direto sem upload.
-                if (fullUrl && !isLocalhost) {
+                // Para áudio/voice, não usar fallback de URL externa:
+                // mobile pode marcar como "mídia não disponível" se a URL ficar instável/inacessível.
+                if ((tipo !== 'audio' && tipo !== 'voice') && fullUrl && !isLocalhost) {
                   console.warn('[ULTRAMSG] Tentando fallback com URL pública do backend após falha no upload.')
                   sendMediaWithUrl(fullUrl)
                 } else {
