@@ -3777,13 +3777,9 @@ exports.enviarArquivo = async (req, res) => {
     const baseUrl = (process.env.APP_URL || process.env.BASE_URL || '').replace(/\/$/, '')
     const fullUrl = baseUrl ? `${baseUrl}${pathUrl}` : null
     const isLocalhost = /localhost|127\.0\.0\.1/i.test(baseUrl)
-    // Para "audio" normal, alguns formatos precisam passar por uploadMedia antes do envio.
-    // Para "voice" preferimos tentar URL pública primeiro (endpoint /messages/voice costuma lidar melhor).
-    const forceUploadMedia = (tipo === 'audio') && (
-      // /messages/audio costuma aceitar melhor mp3/ogg/aac.
-      // Para outros formatos, preferir upload CDN da UltraMsg (URL sem extensão).
-      !/\.(mp3|ogg|aac)$/i.test(file.filename || file.originalname || '')
-    )
+    // Para áudio/voice, priorizar sempre upload na CDN da UltraMsg.
+    // Isso evita indisponibilidade de mídia no app móvel quando a API tenta buscar URL externa.
+    const forceUploadMedia = (tipo === 'audio' || tipo === 'voice')
 
     const sendMediaWithUrl = (mediaUrl) => {
       const provider = getProvider()
