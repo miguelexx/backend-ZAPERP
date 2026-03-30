@@ -3578,6 +3578,10 @@ async function convertAudioWithFfmpeg(inputPath, outputPath, profile = 'audio_mp
         '-ac', '1',
         '-ar', '16000',
         '-c:a', 'libopus',
+        '-application', 'voip',
+        '-vbr', 'on',
+        '-compression_level', '10',
+        '-frame_duration', '20',
         '-b:a', '32k',
         outputPath,
       ]
@@ -3607,12 +3611,12 @@ async function convertAudioWithFfmpeg(inputPath, outputPath, profile = 'audio_mp
 async function normalizeAudioForUltraMsg(file, tipo) {
   if (!file || !file.path || (tipo !== 'audio' && tipo !== 'voice')) return { file, converted: false, error: null }
   const ext = getAudioFileExtension(file)
-  const mime = String(file.mimetype || '').toLowerCase()
   const isVoice = tipo === 'voice'
   const isAudio = tipo === 'audio'
-  const allowedVoiceExt = ['ogg']
   const allowedAudioExt = ['mp3', 'ogg', 'aac']
-  if ((isVoice && allowedVoiceExt.includes(ext)) || (isAudio && allowedAudioExt.includes(ext))) {
+  // Para voice, sempre transcodificar para OGG/Opus.
+  // Isso elimina variações de codec/container que tocam no desktop mas falham no mobile.
+  if (isAudio && allowedAudioExt.includes(ext)) {
     return { file, converted: false, error: null }
   }
 
