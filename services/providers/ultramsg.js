@@ -102,7 +102,12 @@ function extractAudioExtension(value = '') {
 
 function isAllowedAudioExtension(ext) {
   if (!ext) return true // URLs de CDN sem extensão explícita
-  return ['mp3', 'ogg', 'aac', 'wav', 'm4a', 'opus', 'webm'].includes(String(ext).toLowerCase())
+  return ['mp3', 'ogg', 'aac', 'm4a', 'opus', 'webm'].includes(String(ext).toLowerCase())
+}
+
+function isAllowedAudioEndpointExtension(ext) {
+  if (!ext) return true // URLs de CDN da UltraMsg normalmente não têm extensão
+  return ['mp3', 'ogg', 'aac'].includes(String(ext).toLowerCase())
 }
 
 /**
@@ -533,6 +538,17 @@ async function sendAudio(phone, audioUrl, opts = {}) {
   }
   if (!isAllowedAudioExtension(audioExt)) {
     const reason = `Extensão de áudio não suportada para UltraMsg: .${audioExt}`
+    console.warn('[ULTRAMSG][AUDIO] Rejeitado antes do POST:', {
+      reason,
+      to: nums[0]?.slice(-12),
+      ext: audioExt,
+      mime: audioMime || null,
+      url: processedAudioUrl.slice(0, 120),
+    })
+    return returnDetails ? { ok: false, error: reason } : false
+  }
+  if (!isAllowedAudioEndpointExtension(audioExt)) {
+    const reason = `Extensão .${audioExt} não suportada no endpoint /messages/audio (use mp3/ogg/aac ou URL CDN sem extensão).`
     console.warn('[ULTRAMSG][AUDIO] Rejeitado antes do POST:', {
       reason,
       to: nums[0]?.slice(-12),
@@ -1443,8 +1459,17 @@ async function uploadMedia(filePath, filename, opts = {}) {
       console.warn('❌ UltraMsg uploadMedia falhou:', safeFilename?.slice(-20), err, '| token:', maskToken(cfg.token))
       return { ok: false, url: null, error: err }
     }
+    if (data?.error) {
+      const err = typeof data.error === 'string' ? data.error : JSON.stringify(data.error)
+      console.warn('❌ UltraMsg uploadMedia respondeu erro no body:', safeFilename?.slice(-20), err, '| token:', maskToken(cfg.token))
+      return { ok: false, url: null, error: err }
+    }
     const url = data?.url || data?.link || data?.file || null
-    return { ok: !!url, url }
+    if (!url) {
+      const err = data?.message || text?.slice(0, 200) || 'Upload sem URL retornada pela UltraMsg'
+      return { ok: false, url: null, error: err }
+    }
+    return { ok: true, url, error: null }
   } catch (e) {
     console.warn('[ULTRAMSG] uploadMedia:', e?.message || e, '| token:', maskToken(cfg.token))
     return { ok: false, url: null, error: e?.message || 'Erro no upload' }

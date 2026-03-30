@@ -3661,12 +3661,12 @@ exports.enviarArquivo = async (req, res) => {
     const baseUrl = (process.env.APP_URL || process.env.BASE_URL || '').replace(/\/$/, '')
     const fullUrl = baseUrl ? `${baseUrl}${pathUrl}` : null
     const isLocalhost = /localhost|127\.0\.0\.1/i.test(baseUrl)
-    // UltraMsg rejeita URLs com extensão .webm em endpoints de áudio ("file extension not supported").
-    // Para esses arquivos, usar uploadMedia (CDN deles sem extensão) independente do APP_URL.
-    const forceUploadMedia = (tipo === 'voice' || tipo === 'audio') && (
-      /\.webm$/i.test(file.filename || file.originalname || '') ||
-      /\.opus$/i.test(file.filename || file.originalname || '') ||
-      /\.m4a$/i.test(file.filename || file.originalname || '')
+    // Para "audio" normal, alguns formatos precisam passar por uploadMedia antes do envio.
+    // Para "voice" preferimos tentar URL pública primeiro (endpoint /messages/voice costuma lidar melhor).
+    const forceUploadMedia = (tipo === 'audio') && (
+      // /messages/audio costuma aceitar melhor mp3/ogg/aac.
+      // Para outros formatos, preferir upload CDN da UltraMsg (URL sem extensão).
+      !/\.(mp3|ogg|aac)$/i.test(file.filename || file.originalname || '')
     )
 
     const sendMediaWithUrl = (mediaUrl) => {
@@ -3764,11 +3764,17 @@ exports.enviarArquivo = async (req, res) => {
                   tipo,
                   forceUploadMedia
                 })
-                console.warn('⚠️ UltraMsg uploadMedia falhou; mídia não enviada.', result?.error || '')
-                await supabase.from('mensagens').update({ status: 'erro' }).eq('company_id', company_id).eq('id', msg.id)
-                const io2 = req.app?.get('io')
-                if (io2) {
-                  io2.to(`empresa_${company_id}`).to(`conversa_${conversa_id}`).to(`usuario_${user_id}`).emit(io2.EVENTS?.STATUS_MENSAGEM || 'status_mensagem', { mensagem_id: msg.id, conversa_id: Number(conversa_id), status: 'erro', status_mensagem: 'erro' })
+                // Fallback seguro: se temos URL pública do backend, tenta enviar direto sem upload.
+                if (fullUrl && !isLocalhost) {
+                  console.warn('[ULTRAMSG] Tentando fallback com URL pública do backend após falha no upload.')
+                  sendMediaWithUrl(fullUrl)
+                } else {
+                  console.warn('⚠️ UltraMsg uploadMedia falhou; mídia não enviada.', result?.error || '')
+                  await supabase.from('mensagens').update({ status: 'erro' }).eq('company_id', company_id).eq('id', msg.id)
+                  const io2 = req.app?.get('io')
+                  if (io2) {
+                    io2.to(`empresa_${company_id}`).to(`conversa_${conversa_id}`).to(`usuario_${user_id}`).emit(io2.EVENTS?.STATUS_MENSAGEM || 'status_mensagem', { mensagem_id: msg.id, conversa_id: Number(conversa_id), status: 'erro', status_mensagem: 'erro' })
+                  }
                 }
               }
             } catch (e) {
