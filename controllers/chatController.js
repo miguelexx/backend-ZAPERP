@@ -3525,19 +3525,22 @@ function inferirTipoArquivo(file) {
   if (m === 'image/webp' || /\.webp$/i.test(n)) return 'sticker'
   if (m.startsWith('image/')) return 'imagem'
   
-  // Voice note: detecta gravações de áudio que devem ser enviadas como PTT (Push-to-Talk)
-  // Prioriza voice para arquivos pequenos e formatos típicos de gravação
-  if (m === 'audio/opus' || m === 'audio/webm' || /\.opus$/i.test(n) || /\.webm$/i.test(n)) {
+  // Voice note (PTT): formatos tipicamente opus/ogg/webm.
+  // Áudios comuns (mp3/m4a/wav/aac) devem ir como "audio".
+  if (
+    m === 'audio/opus' ||
+    m === 'audio/ogg' ||
+    m === 'audio/webm' ||
+    /\.opus$/i.test(n) ||
+    /\.ogg$/i.test(n) ||
+    /\.webm$/i.test(n)
+  ) {
     return 'voice'
   }
   
   // Para outros formatos de áudio, verifica se parece ser uma gravação (voice note)
   // Arquivos pequenos (< 5MB) e com nomes típicos de gravação são tratados como voice
   if (m.startsWith('audio/') || /\.(mp3|ogg|wav|m4a|aac)$/i.test(n)) {
-    // Se o nome sugere gravação ou é um arquivo pequeno, trata como voice
-    if (/^(audio|recording|voice|rec|gravacao)/i.test(n) || n.includes('record')) {
-      return 'voice'
-    }
     return 'audio'
   }
   
@@ -3686,8 +3689,8 @@ exports.enviarArquivo = async (req, res) => {
                   : Promise.resolve(false)
       promise
         .then(async (result) => {
-          const ok = result?.ok === true
-          const waMessageId = result?.messageId ? String(result.messageId).trim() : null
+          const ok = typeof result === 'boolean' ? result : result?.ok === true
+          const waMessageId = (typeof result === 'object' && result?.messageId) ? String(result.messageId).trim() : null
           const nextStatus = ok ? 'sent' : 'erro'
           
           if (!ok) {
