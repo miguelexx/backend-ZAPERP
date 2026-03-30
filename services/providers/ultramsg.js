@@ -102,7 +102,7 @@ function extractAudioExtension(value = '') {
 
 function isAllowedAudioExtension(ext) {
   if (!ext) return true // URLs de CDN sem extensão explícita
-  return ['mp3', 'ogg', 'aac', 'm4a', 'opus', 'webm'].includes(String(ext).toLowerCase())
+  return ['mp3', 'ogg', 'aac', 'wav', 'm4a', 'opus', 'webm'].includes(String(ext).toLowerCase())
 }
 
 function isAllowedAudioEndpointExtension(ext) {
@@ -548,15 +548,36 @@ async function sendAudio(phone, audioUrl, opts = {}) {
     return returnDetails ? { ok: false, error: reason } : false
   }
   if (!isAllowedAudioEndpointExtension(audioExt)) {
-    const reason = `Extensão .${audioExt} não suportada no endpoint /messages/audio (use mp3/ogg/aac ou URL CDN sem extensão).`
-    console.warn('[ULTRAMSG][AUDIO] Rejeitado antes do POST:', {
+    const reason = `Extensão .${audioExt} não suportada no endpoint /messages/audio`
+    console.warn('[ULTRAMSG][AUDIO] Formato não aceito em /messages/audio, tentando /messages/voice:', {
       reason,
       to: nums[0]?.slice(-12),
       ext: audioExt,
       mime: audioMime || null,
       url: processedAudioUrl.slice(0, 120),
     })
-    return returnDetails ? { ok: false, error: reason } : false
+    const allowVoiceFallback = opts?.allowVoiceFallback !== false
+    if (!allowVoiceFallback) {
+      return returnDetails
+        ? { ok: false, error: `${reason}. Permitidos em /messages/audio: mp3/ogg/aac.` }
+        : false
+    }
+    const voiceResult = await sendVoice(phone, processedAudioUrl, {
+      ...opts,
+      returnDetails: true,
+      // Evita esperar delay duas vezes no fallback audio -> voice
+      skipProviderDelay: true,
+      // Evita "ping-pong" de fallback voice -> audio
+      disableAudioFallback: true,
+      allowVoiceFallback: false
+    })
+    if (voiceResult?.ok) {
+      return returnDetails
+        ? { ok: true, messageId: voiceResult?.messageId ?? null, error: null }
+        : true
+    }
+    const voiceError = String(voiceResult?.error || 'Falha ao enviar via /messages/voice')
+    return returnDetails ? { ok: false, error: `${reason}; fallback voice falhou: ${voiceError}` } : false
   }
   
   console.log(`[ULTRAMSG] Tentando enviar audio para ${nums[0]?.slice(-12)} com URL: ${processedAudioUrl.slice(0, 50)}...`)
@@ -756,6 +777,10 @@ async function sendVoice(phone, audioUrl, opts = {}) {
       response: { data: data || null, text: String(text || '').slice(0, 300) },
       token: maskToken(cfg.token),
     })
+
+    if (opts?.disableAudioFallback) {
+      return returnDetails ? { ok: false, error: errMsg } : false
+    }
 
     // Fallback: tenta como áudio comum
     const fb = await postJson({ ...cfg, endpoint: '/messages/audio', body })
@@ -1413,19 +1438,10 @@ async function uploadMedia(filePath, filename, opts = {}) {
     const form = new FormData()
     form.append('token', cfg.token)
 
-    // UltraMsg CDN rejeita .webm: renomear para .ogg (mesmo codec opus, container compatível)
+    // Não renomear extensão sem transcodificar bytes reais.
+    // UltraMsg pode validar conteúdo e extensão; renomear "na marra" tende a falhar.
     let uploadFilename = safeFilename.slice(0, FILENAME_MAX_LEN)
-    if (/\.webm$/i.test(uploadFilename)) {
-      uploadFilename = uploadFilename.replace(/\.webm$/i, '.ogg')
-    }
-    
-    // Para arquivos de áudio, garantir extensões compatíveis
-    const isAudio = /\.(webm|opus|m4a|aac|wav)$/i.test(uploadFilename)
-    if (isAudio && !/\.(mp3|ogg|aac)$/i.test(uploadFilename)) {
-      // Converter extensões não suportadas para .ogg
-      uploadFilename = uploadFilename.replace(/\.(webm|opus|m4a|wav)$/i, '.ogg')
-    }
-    
+
     form.append('file', fs.createReadStream(filePath), { filename: uploadFilename })
     const uploadTimeout = 60_000 // 60s para arquivos até 30MB
     let signal
@@ -1449,7 +1465,7 @@ async function uploadMedia(filePath, filename, opts = {}) {
       method: 'POST',
       url: uploadUrl,
       headers: { ...uploadHeaders, token: maskToken(cfg.token) },
-      body: { file: safeFilename, token: maskToken(cfg.token) },
+      body: { file_original: safeFilename, file_upload: uploadFilename, token: maskToken(cfg.token) },
       responseStatus: res.status,
       responseData: data,
       responseText: text
