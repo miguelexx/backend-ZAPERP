@@ -3556,7 +3556,7 @@ function getAudioFileExtension(file) {
   return ''
 }
 
-async function convertWavToMp3(inputPath, outputPath) {
+async function convertAudioWithFfmpeg(inputPath, outputPath, profile = 'audio_mp3') {
   const { spawn } = require('child_process')
   return new Promise((resolve, reject) => {
     let ffmpegPath
@@ -3569,16 +3569,30 @@ async function convertWavToMp3(inputPath, outputPath) {
       reject(new Error('ffmpeg-static não disponível'))
       return
     }
-    const args = [
-      '-y',
-      '-i', inputPath,
-      '-vn',
-      '-ac', '1',
-      '-ar', '44100',
-      '-c:a', 'libmp3lame',
-      '-b:a', '128k',
-      outputPath,
-    ]
+    let args
+    if (profile === 'voice_ogg_opus') {
+      args = [
+        '-y',
+        '-i', inputPath,
+        '-vn',
+        '-ac', '1',
+        '-ar', '16000',
+        '-c:a', 'libopus',
+        '-b:a', '32k',
+        outputPath,
+      ]
+    } else {
+      args = [
+        '-y',
+        '-i', inputPath,
+        '-vn',
+        '-ac', '1',
+        '-ar', '44100',
+        '-c:a', 'libmp3lame',
+        '-b:a', '128k',
+        outputPath,
+      ]
+    }
     const proc = spawn(ffmpegPath, args, { windowsHide: true })
     let stderr = ''
     proc.stderr.on('data', (d) => { stderr += String(d || '') })
@@ -3591,18 +3605,15 @@ async function convertWavToMp3(inputPath, outputPath) {
 }
 
 async function normalizeAudioForUltraMsg(file, tipo) {
-  if (!file || tipo !== 'audio' || !file.path) return { file, converted: false, error: null }
+  if (!file || !file.path || (tipo !== 'audio' && tipo !== 'voice')) return { file, converted: false, error: null }
   const ext = getAudioFileExtension(file)
   const mime = String(file.mimetype || '').toLowerCase()
-  if (['mp3', 'ogg', 'aac'].includes(ext)) return { file, converted: false, error: null }
-
-  const isWav = ext === 'wav' || mime === 'audio/wav' || mime === 'audio/x-wav'
-  if (!isWav) {
-    return {
-      file,
-      converted: false,
-      error: `Formato de áudio não suportado pela UltraMsg neste fluxo: .${ext || 'desconhecido'}. Use mp3/ogg/aac.`,
-    }
+  const isVoice = tipo === 'voice'
+  const isAudio = tipo === 'audio'
+  const allowedVoiceExt = ['ogg']
+  const allowedAudioExt = ['mp3', 'ogg', 'aac']
+  if ((isVoice && allowedVoiceExt.includes(ext)) || (isAudio && allowedAudioExt.includes(ext))) {
+    return { file, converted: false, error: null }
   }
 
   const path = require('path')
@@ -3610,12 +3621,14 @@ async function normalizeAudioForUltraMsg(file, tipo) {
   const dir = path.dirname(file.path)
   const currentStoredName = String(file.filename || path.basename(file.path))
   const baseStoredName = currentStoredName.replace(/\.[a-z0-9]{2,5}$/i, '')
-  const mp3StoredName = `${baseStoredName}.mp3`
-  const mp3Path = path.join(dir, mp3StoredName)
   const originalName = String(file.originalname || currentStoredName)
-  const mp3OriginalName = originalName.replace(/\.[a-z0-9]{2,5}$/i, '.mp3')
+  const targetExt = isVoice ? 'ogg' : 'mp3'
+  const targetStoredName = `${baseStoredName}.${targetExt}`
+  const targetPath = path.join(dir, targetStoredName)
+  const targetOriginalName = originalName.replace(/\.[a-z0-9]{2,5}$/i, `.${targetExt}`)
+  const ffmpegProfile = isVoice ? 'voice_ogg_opus' : 'audio_mp3'
 
-  await convertWavToMp3(file.path, mp3Path)
+  await convertAudioWithFfmpeg(file.path, targetPath, ffmpegProfile)
   fs.unlink(file.path, () => {})
 
   return {
@@ -3623,10 +3636,10 @@ async function normalizeAudioForUltraMsg(file, tipo) {
     error: null,
     file: {
       ...file,
-      path: mp3Path,
-      filename: mp3StoredName,
-      originalname: mp3OriginalName,
-      mimetype: 'audio/mpeg',
+      path: targetPath,
+      filename: targetStoredName,
+      originalname: targetOriginalName,
+      mimetype: isVoice ? 'audio/ogg' : 'audio/mpeg',
     }
   }
 }
@@ -3647,15 +3660,18 @@ exports.enviarArquivo = async (req, res) => {
 
     let file = req.file
     const tipo = inferirTipoArquivo(file)
-    if (tipo === 'audio') {
+    if (tipo === 'audio' || tipo === 'voice') {
       try {
         const normalized = await normalizeAudioForUltraMsg(file, tipo)
         if (normalized?.converted && normalized?.file) {
+          const beforeName = req.file?.originalname || file.originalname
           file = normalized.file
           req.file = file
-          console.log('[ULTRAMSG][AUDIO] WAV convertido para MP3 antes do envio:', {
-            from: String(normalized?.file?.originalname || '').replace(/\.mp3$/i, '.wav'),
+          console.log('[ULTRAMSG][AUDIO] Áudio convertido para formato compatível antes do envio:', {
+            tipo,
+            from: beforeName,
             to: file.originalname,
+            mime: file.mimetype,
           })
         } else if (normalized?.error) {
           console.warn('[ULTRAMSG][AUDIO] Conversão/normalização indisponível:', normalized.error)
