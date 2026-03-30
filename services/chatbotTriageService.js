@@ -29,6 +29,16 @@ const lastOpcaoInvalidaSentAt = new Map()
 const OPCAO_INVALIDA_DEBOUNCE_MS = 60_000
 
 /**
+ * Cache do último envio de boas-vindas/menu por conversa (proteção contra rajada).
+ * Evita menu duplicado quando chegam múltiplas mensagens quase ao mesmo tempo.
+ */
+const lastWelcomeSentAt = new Map()
+/** Janela de debounce para boas-vindas/menu por conversa. */
+const WELCOME_DEBOUNCE_MS = 15_000
+/** Janela de tolerância após envio do menu para não responder "opção inválida" em rajada. */
+const MENU_INVALID_GRACE_MS = 8_000
+
+/**
  * Aguarda o intervalo configurado desde o último envio do chatbot (por empresa).
  * @param {number} company_id
  * @param {number} intervaloSegundos - Configurado pelo usuário (0 = sem delay)
@@ -336,6 +346,32 @@ async function wasMenuSentForConversa(supabaseClient, company_id, conversa_id) {
     return !!data?.id
   } catch (e) {
     console.warn('[chatbotTriage] wasMenuSentForConversa: erro ao verificar bot_logs', e?.message)
+    return false
+  }
+}
+
+/**
+ * Verifica se o menu foi enviado recentemente para esta conversa.
+ * Usado para evitar "opção inválida" imediata em mensagens em rajada.
+ */
+async function wasMenuSentRecently(supabaseClient, company_id, conversa_id, janelaMs = MENU_INVALID_GRACE_MS) {
+  try {
+    const { data } = await supabaseClient
+      .from('bot_logs')
+      .select('criado_em')
+      .eq('company_id', company_id)
+      .eq('conversa_id', conversa_id)
+      .in('tipo', ['menu_enviado', 'menu_reenviado'])
+      .order('criado_em', { ascending: false })
+      .limit(1)
+      .maybeSingle()
+
+    if (!data?.criado_em) return false
+    const ts = new Date(data.criado_em).getTime()
+    if (!Number.isFinite(ts)) return false
+    return (Date.now() - ts) < Math.max(0, Number(janelaMs) || 0)
+  } catch (e) {
+    console.warn('[chatbotTriage] wasMenuSentRecently: erro ao verificar bot_logs', e?.message)
     return false
   }
 }
@@ -949,6 +985,20 @@ async function processIncomingMessage(ctx) {
     (isPrimeiraMensagemCliente && (!menuAlreadySent || !config.sendOnlyFirstTime))
 
   if (shouldSendWelcome) {
+    // Debounce em memória para evitar menu duplicado em requisições paralelas da mesma conversa.
+    const nowMs = Date.now()
+    const lastWelcomeMs = lastWelcomeSentAt.get(conversa_id) || 0
+    if (nowMs - lastWelcomeMs < WELCOME_DEBOUNCE_MS) {
+      console.log('[chatbotTriage] ❌ skip menu: debounce ativo (proteção anti-duplicação)', {
+        conversa_id,
+        company_id,
+        segundosAtras: Math.round((nowMs - lastWelcomeMs) / 1000),
+      })
+      return { handled: true }
+    }
+    // Marca antes do envio para bloquear concorrência em rajada.
+    lastWelcomeSentAt.set(conversa_id, nowMs)
+
     const msg = welcomeFull || menuOnly
     if (msg) {
       const motivo = conversaReabertaAposFinalizacao ? 'conversa_reaberta' : 'primeira_mensagem'
@@ -983,6 +1033,18 @@ async function processIncomingMessage(ctx) {
       company_id,
     })
     return { handled: false }
+  }
+
+  // Janela de tolerância após menu: evita "opção inválida" quando cliente mandou várias mensagens
+  // antes de receber/ler o menu de boas-vindas.
+  const menuSentRecently = await wasMenuSentRecently(sb, company_id, conversa_id, MENU_INVALID_GRACE_MS)
+  if (menuSentRecently) {
+    console.log('[chatbotTriage] ❌ skip opção inválida: menu enviado recentemente (janela de tolerância)', {
+      conversa_id,
+      company_id,
+      janelaMs: MENU_INVALID_GRACE_MS,
+    })
+    return { handled: true }
   }
 
   // Opção inválida: menu já foi enviado mas o cliente não digitou uma opção válida
