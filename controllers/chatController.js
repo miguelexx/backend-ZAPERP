@@ -3548,6 +3548,89 @@ function inferirTipoArquivo(file) {
   return 'arquivo'
 }
 
+function getAudioFileExtension(file) {
+  const byOriginal = String(file?.originalname || '').toLowerCase().match(/\.([a-z0-9]{2,5})$/i)
+  if (byOriginal?.[1]) return byOriginal[1].toLowerCase()
+  const byStored = String(file?.filename || '').toLowerCase().match(/\.([a-z0-9]{2,5})$/i)
+  if (byStored?.[1]) return byStored[1].toLowerCase()
+  return ''
+}
+
+async function convertWavToMp3(inputPath, outputPath) {
+  const { spawn } = require('child_process')
+  return new Promise((resolve, reject) => {
+    let ffmpegPath
+    try {
+      ffmpegPath = require('ffmpeg-static')
+    } catch {
+      ffmpegPath = null
+    }
+    if (!ffmpegPath) {
+      reject(new Error('ffmpeg-static não disponível'))
+      return
+    }
+    const args = [
+      '-y',
+      '-i', inputPath,
+      '-vn',
+      '-ac', '1',
+      '-ar', '44100',
+      '-c:a', 'libmp3lame',
+      '-b:a', '128k',
+      outputPath,
+    ]
+    const proc = spawn(ffmpegPath, args, { windowsHide: true })
+    let stderr = ''
+    proc.stderr.on('data', (d) => { stderr += String(d || '') })
+    proc.on('error', (err) => reject(err))
+    proc.on('close', (code) => {
+      if (code === 0) resolve()
+      else reject(new Error(`ffmpeg exit=${code} ${stderr.slice(-240)}`.trim()))
+    })
+  })
+}
+
+async function normalizeAudioForUltraMsg(file, tipo) {
+  if (!file || tipo !== 'audio' || !file.path) return { file, converted: false, error: null }
+  const ext = getAudioFileExtension(file)
+  const mime = String(file.mimetype || '').toLowerCase()
+  if (['mp3', 'ogg', 'aac'].includes(ext)) return { file, converted: false, error: null }
+
+  const isWav = ext === 'wav' || mime === 'audio/wav' || mime === 'audio/x-wav'
+  if (!isWav) {
+    return {
+      file,
+      converted: false,
+      error: `Formato de áudio não suportado pela UltraMsg neste fluxo: .${ext || 'desconhecido'}. Use mp3/ogg/aac.`,
+    }
+  }
+
+  const path = require('path')
+  const fs = require('fs')
+  const dir = path.dirname(file.path)
+  const currentStoredName = String(file.filename || path.basename(file.path))
+  const baseStoredName = currentStoredName.replace(/\.[a-z0-9]{2,5}$/i, '')
+  const mp3StoredName = `${baseStoredName}.mp3`
+  const mp3Path = path.join(dir, mp3StoredName)
+  const originalName = String(file.originalname || currentStoredName)
+  const mp3OriginalName = originalName.replace(/\.[a-z0-9]{2,5}$/i, '.mp3')
+
+  await convertWavToMp3(file.path, mp3Path)
+  fs.unlink(file.path, () => {})
+
+  return {
+    converted: true,
+    error: null,
+    file: {
+      ...file,
+      path: mp3Path,
+      filename: mp3StoredName,
+      originalname: mp3OriginalName,
+      mimetype: 'audio/mpeg',
+    }
+  }
+}
+
 exports.enviarArquivo = async (req, res) => {
   try {
     const { id: conversa_id } = req.params
@@ -3562,8 +3645,25 @@ exports.enviarArquivo = async (req, res) => {
     const permEnvio = await assertPodeEnviarMensagem({ company_id, conversa_id, user_id })
     if (!permEnvio.ok) return res.status(permEnvio.status).json({ error: permEnvio.error })
 
-    const file = req.file
+    let file = req.file
     const tipo = inferirTipoArquivo(file)
+    if (tipo === 'audio') {
+      try {
+        const normalized = await normalizeAudioForUltraMsg(file, tipo)
+        if (normalized?.converted && normalized?.file) {
+          file = normalized.file
+          req.file = file
+          console.log('[ULTRAMSG][AUDIO] WAV convertido para MP3 antes do envio:', {
+            from: String(normalized?.file?.originalname || '').replace(/\.mp3$/i, '.wav'),
+            to: file.originalname,
+          })
+        } else if (normalized?.error) {
+          console.warn('[ULTRAMSG][AUDIO] Conversão/normalização indisponível:', normalized.error)
+        }
+      } catch (e) {
+        console.warn('[ULTRAMSG][AUDIO] Falha ao converter WAV para MP3:', e?.message || e)
+      }
+    }
     const pathUrl = `/uploads/${file.filename}`
 
     const { data: conversa } = await supabase
