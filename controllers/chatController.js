@@ -12,6 +12,17 @@ function isRealWhatsAppId(waId) {
   return waId && (String(waId).includes('@') || String(waId).length > 20)
 }
 
+/**
+ * Na listagem, conversas com status "aberta" no BD mas sem mensagem e sem atendente não são tratadas
+ * como abertas nas abas (contagem / filtro). Expõe `ociosa` no JSON; o BD permanece `aberta` para constraints e fluxos internos.
+ */
+function statusAtendimentoParaLista(isGroup, dbStatus, exibirBadgeAberta) {
+  if (isGroup) return null
+  const s = dbStatus != null ? String(dbStatus) : null
+  if (s === 'aberta' && !exibirBadgeAberta) return 'ociosa'
+  return s
+}
+
 // =====================================================
 // 1) HELPERS (TOPO DO ARQUIVO)
 // =====================================================
@@ -27,11 +38,11 @@ function emitirConversaAtualizada(io, company_id, conversa_id, payload = null, o
   if (keys.length <= 1 && (keys.length === 0 || (keys[0] === 'id' && data.id))) {
     supabase
       .from('conversas')
-      .select('id, nome_contato_cache, foto_perfil_contato_cache, ultima_atividade, status_atendimento')
+      .select('id, nome_contato_cache, foto_perfil_contato_cache, ultima_atividade, status_atendimento, atendente_id, tipo')
       .eq('company_id', company_id)
       .eq('id', cid)
       .maybeSingle()
-      .then(({ data: conv }) => {
+      .then(async ({ data: conv }) => {
         if (conv) {
           const enriched = { id: cid }
           if (conv.nome_contato_cache) {
@@ -43,7 +54,29 @@ function emitirConversaAtualizada(io, company_id, conversa_id, payload = null, o
             enriched.foto_perfil = conv.foto_perfil_contato_cache
           }
           if (conv.ultima_atividade) enriched.ultima_atividade = conv.ultima_atividade
-          if (conv.status_atendimento) enriched.status_atendimento = conv.status_atendimento
+          const isGroup = isGroupConversation(conv)
+          let statusParaUi = conv.status_atendimento
+          if (!isGroup && conv.status_atendimento === 'aberta') {
+            const temAtendente = conv.atendente_id != null
+            let temMsg = false
+            try {
+              const { data: um } = await supabase
+                .from('mensagens')
+                .select('id')
+                .eq('company_id', company_id)
+                .eq('conversa_id', cid)
+                .limit(1)
+                .maybeSingle()
+              temMsg = !!um
+            } catch (_) {
+              temMsg = false
+            }
+            const exibirBadge = temMsg || temAtendente
+            statusParaUi = statusAtendimentoParaLista(false, conv.status_atendimento, exibirBadge)
+          } else if (isGroup) {
+            statusParaUi = null
+          }
+          if (statusParaUi) enriched.status_atendimento = statusParaUi
           const eventName = io.EVENTS?.CONVERSA_ATUALIZADA || 'conversa_atualizada'
           io.to(`empresa_${company_id}`).to(`conversa_${cid}`).emit(eventName, enriched)
         } else {
@@ -439,7 +472,8 @@ async function registrarAtendimento({
 
 // =====================================================
 // 3) listarConversas (com unread_count + pesquisa avançada)
-// Query: tag_id, data_inicio, data_fim, status_atendimento, atendente_id, palavra
+// Query: tag_id, data_inicio, data_fim, status_atendimento, atendente_id, palavra, minha_fila
+// minha_fila=1: só conversas (não grupo) em aberta (fila visível) + em_atendimento onde o responsável é o usuário logado
 // =====================================================
 exports.listarConversas = async (req, res) => {
   try {
@@ -455,8 +489,22 @@ exports.listarConversas = async (req, res) => {
       atendente_id,
       palavra,
       departamento_id: filter_dep_id,
-      incluir_todos_clientes: incluirTodosClientes
+      incluir_todos_clientes: incluirTodosClientes,
+      minha_fila: minhaFilaRaw
     } = req.query
+
+    const minhaFilaAtiva =
+      minhaFilaRaw === '1' ||
+      minhaFilaRaw === 'true' ||
+      minhaFilaRaw === 1 ||
+      minhaFilaRaw === true
+
+    const statusNorm =
+      !minhaFilaAtiva &&
+      status_atendimento != null &&
+      String(status_atendimento).trim() !== ''
+        ? String(status_atendimento).toLowerCase().trim()
+        : null
 
     const unreadMap = await obterUnreadMap({ company_id, usuario_id: user_id })
 
@@ -619,12 +667,20 @@ exports.listarConversas = async (req, res) => {
       if (conversaIdsFilter && conversaIdsFilter.length > 0) {
         q = q.in('id', conversaIdsFilter)
       }
-      // Grupos são sempre visíveis independentemente do filtro de status —
-      // não têm estado de atendimento (não precisam ser assumidos nem encerrados).
-      if (status_atendimento) q = q.or(`tipo.eq.grupo,status_atendimento.eq.${status_atendimento}`)
+      // Filtro personalizado "Minha fila": abertas (fila) + em atendimento só comigo; sem grupos; sem finalizadas
+      if (minhaFilaAtiva) {
+        q = q.or('tipo.is.null,tipo.neq.grupo')
+        q = q.or(
+          `status_atendimento.eq.aberta,and(status_atendimento.eq.em_atendimento,atendente_id.eq.${user_id})`
+        )
+      } else if (statusNorm) {
+        // Grupos são sempre visíveis independentemente do filtro de status —
+        // não têm estado de atendimento (não precisam ser assumidos nem encerrados).
+        q = q.or(`tipo.eq.grupo,status_atendimento.eq.${statusNorm}`)
+      }
       // Atendente: vê TODAS as conversas (pode assumir, transferir, responder qualquer uma)
       // Admin/supervisor: filtro opcional por atendente_id
-      if (!isAtendente && atendente_id) q = q.eq('atendente_id', Number(atendente_id))
+      if (!minhaFilaAtiva && !isAtendente && atendente_id) q = q.eq('atendente_id', Number(atendente_id))
       if (data_inicio) q = q.gte('criado_em', new Date(data_inicio).toISOString())
       if (data_fim) {
         const end = new Date(data_fim)
@@ -778,7 +834,7 @@ exports.listarConversas = async (req, res) => {
         cliente_id: c.cliente_id,
         telefone: c.telefone,
         telefone_exibivel: telefoneExibivel,
-        status_atendimento: isGroup ? null : c.status_atendimento,
+        status_atendimento: statusAtendimentoParaLista(isGroup, c.status_atendimento, exibir_badge_aberta),
         exibir_badge_aberta,
         atendente_id: c.atendente_id,
         lida: unreadCount === 0,
@@ -808,7 +864,7 @@ exports.listarConversas = async (req, res) => {
 
     // Filtro "Abertas": só incluir conversas com movimentação (mensagem ou atendente assumiu)
     // Exclui: conversas sem mensagens e sem atividade — não contam como abertas
-    if (status_atendimento === 'aberta') {
+    if (statusNorm === 'aberta') {
       conversasFormatadas = conversasFormatadas.filter((c) => {
         if (c.sem_conversa) return false
         if (c.is_group) return c.ultima_mensagem != null // grupo precisa ter ao menos 1 mensagem
@@ -816,9 +872,28 @@ exports.listarConversas = async (req, res) => {
       })
     }
 
+    // "Minha fila": alinha com abas Abertas + Em atendimento só do usuário (exclui finalizadas e assumidas por outros)
+    if (minhaFilaAtiva) {
+      conversasFormatadas = conversasFormatadas.filter((c) => {
+        if (c.sem_conversa || c.is_group) return false
+        if (c.status_atendimento === 'ociosa') return false
+        if (c.status_atendimento === 'em_atendimento') {
+          return Number(c.atendente_id) === Number(user_id)
+        }
+        if (c.status_atendimento === 'aberta') {
+          const livreOuMeu = c.atendente_id == null || Number(c.atendente_id) === Number(user_id)
+          return c.exibir_badge_aberta && livreOuMeu
+        }
+        return false
+      })
+    }
+
     // Incluir todos os clientes: quem não tem conversa aparece como "Sem conversa" (clicável para abrir)
     // Ao filtrar "Abertas", não incluir sem_conversa (não há conversa aberta)
-    const incluirTodos = (incluirTodosClientes === '1' || incluirTodosClientes === 'true' || incluirTodosClientes === 1) && status_atendimento !== 'aberta'
+    const incluirTodos =
+      (incluirTodosClientes === '1' || incluirTodosClientes === 'true' || incluirTodosClientes === 1) &&
+      statusNorm !== 'aberta' &&
+      !minhaFilaAtiva
     if (incluirTodos) {
       const cid = Number(company_id)
       let clientesQuery = supabase
@@ -1803,6 +1878,7 @@ exports.detalharChat = async (req, res) => {
     const exibirBadgeAberta = !isGroup && (temMensagem || conversa.atendente_id != null)
     const conversaFormatada = {
       ...conversa,
+      status_atendimento: statusAtendimentoParaLista(isGroup, conversa.status_atendimento, exibirBadgeAberta),
       exibir_badge_aberta: exibirBadgeAberta,
       clientes: clientesConv,
       is_group: isGroup,
@@ -3339,9 +3415,10 @@ exports.puxarChatFila = async (req, res) => {
     const { company_id, id: user_id, perfil, departamento_ids = [] } = req.user
     const isAdmin = perfil === 'admin'
 
+    // Só entra na fila quem tem ao menos uma mensagem (movimentação real), alinhado à aba "Abertas"
     let query = supabase
       .from('conversas')
-      .select('*')
+      .select('*, mensagens!inner(id)')
       .eq('company_id', company_id)
       .eq('status_atendimento', 'aberta')
       .is('atendente_id', null)
