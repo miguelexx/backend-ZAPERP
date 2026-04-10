@@ -486,7 +486,21 @@ function looksLikeBotMessage(texto, config) {
   if (config?.invalidOptionMessage && t.includes(config.invalidOptionMessage.slice(0, 40))) return true
   if (lower.includes('responda com o número') || lower.includes('responda apenas com o número')) return true
   if (lower.includes('perfeito!') || lower.includes('seu atendimento foi direcionado')) return true
-  if (/\d+\s*-\s*[\w\s]+/.test(t) && (lower.includes('vendas') || lower.includes('atendimento') || lower.includes('financeiro') || lower.includes('compras') || lower.includes('diretoria') || lower.includes('rh'))) return true
+  // Menu no painel costuma ser "1 - X" ou "1. X" / "1) X"; sem isso a última out parecia "humana" e bloqueava opção inválida
+  const linhaMenuNumerada = /\d+\s*[-–—.\)]\s*[\w\sáàâãéèêíìîóòôõúùûç]+/i.test(t)
+  const pareceSetorNoTexto =
+    lower.includes('vendas') ||
+    lower.includes('atendimento') ||
+    lower.includes('financeiro') ||
+    lower.includes('compras') ||
+    lower.includes('diretoria') ||
+    lower.includes('rh') ||
+    lower.includes('suporte') ||
+    lower.includes('comercial') ||
+    lower.includes('administrativo') ||
+    lower.includes('setor') ||
+    lower.includes('escolha')
+  if (linhaMenuNumerada && pareceSetorNoTexto) return true
   if (config?.mensagemForaHorario && t.includes(String(config.mensagemForaHorario || '').slice(0, 30))) return true
   return false
 }

@@ -4,11 +4,12 @@
 CREATE OR REPLACE FUNCTION public.reserve_opcao_invalida_slot(
   p_company_id bigint,
   p_conversa_id bigint,
-  p_detalhes jsonb DEFAULT '{}'
+  p_detalhes jsonb DEFAULT '{}'::jsonb
 )
 RETURNS boolean
 LANGUAGE plpgsql
 SECURITY DEFINER
+SET search_path = public
 AS $$
 DECLARE
   v_count int;
@@ -39,4 +40,4 @@ BEGIN
 END;
 $$;
 
-COMMENT ON FUNCTION public.reserve_opcao_invalida_slot IS 'Reserva atomicamente um slot para mensagem "opção inválida" (máx 2 por conversa). Retorna true se reservou, false se limite atingido.';
+COMMENT ON FUNCTION public.reserve_opcao_invalida_slot(bigint, bigint, jsonb) IS 'Reserva atomicamente um slot para mensagem "opção inválida" (máx 2 por conversa). Retorna true se reservou, false se limite atingido.';
