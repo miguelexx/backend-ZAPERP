@@ -507,17 +507,51 @@ function looksLikeBotMessage(texto, config) {
 
 /**
  * Verifica se o operador humano enviou mensagem recentemente (pelo celular ou painel).
- * Se a última mensagem 'out' não parece ser do bot, considera que humano está conversando.
+ * Usa o último menu_enviado/menu_reenviado em bot_logs como âncora: só importam mensagens `out`
+ * **depois** do menu. Evita falso positivo em conversas longas, onde as últimas 10 linhas podem ser
+ * só `in` e a "última out" vista no slice errado não é o menu atual.
  */
 async function hasHumanIntervenedRecently(supabaseClient, company_id, conversa_id, config) {
   try {
+    const { data: menuRow } = await supabaseClient
+      .from('bot_logs')
+      .select('criado_em')
+      .eq('company_id', company_id)
+      .eq('conversa_id', conversa_id)
+      .in('tipo', ['menu_enviado', 'menu_reenviado'])
+      .order('criado_em', { ascending: false })
+      .limit(1)
+      .maybeSingle()
+
+    if (menuRow?.criado_em) {
+      const { data: outsDepoisMenu } = await supabaseClient
+        .from('mensagens')
+        .select('id, texto, criado_em')
+        .eq('conversa_id', conversa_id)
+        .eq('company_id', company_id)
+        .eq('direcao', 'out')
+        .gt('criado_em', menuRow.criado_em)
+        .order('criado_em', { ascending: true })
+
+      for (const m of outsDepoisMenu || []) {
+        if (!looksLikeBotMessage(m.texto, config)) {
+          console.log('[chatbotTriage] intervenção humana após menu (mensagem out não reconhecida como bot)', {
+            conversa_id,
+            textoPreview: String(m.texto || '').slice(0, 60),
+          })
+          return true
+        }
+      }
+      return false
+    }
+
     const { data: ultimas } = await supabaseClient
       .from('mensagens')
       .select('id, direcao, texto, criado_em')
       .eq('conversa_id', conversa_id)
       .eq('company_id', company_id)
       .order('criado_em', { ascending: false })
-      .limit(10)
+      .limit(40)
 
     if (!ultimas || ultimas.length === 0) return false
     const ultimaOut = ultimas.find((m) => m.direcao === 'out')
