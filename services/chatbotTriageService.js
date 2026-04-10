@@ -64,8 +64,6 @@ const OPCAO_INVALIDA_DEBOUNCE_MS = 60_000
 const lastWelcomeSentAt = new Map()
 /** Janela de debounce para boas-vindas/menu por conversa. */
 const WELCOME_DEBOUNCE_MS = 15_000
-/** Janela de tolerância após envio do menu para não responder "opção inválida" em rajada. */
-const MENU_INVALID_GRACE_MS = 8_000
 
 /**
  * Aguarda o intervalo configurado desde o último envio do chatbot (por empresa).
@@ -398,32 +396,6 @@ async function wasMenuSentForConversa(supabaseClient, company_id, conversa_id) {
     return !!data?.id
   } catch (e) {
     console.warn('[chatbotTriage] wasMenuSentForConversa: erro ao verificar bot_logs', e?.message)
-    return false
-  }
-}
-
-/**
- * Verifica se o menu foi enviado recentemente para esta conversa.
- * Usado para evitar "opção inválida" imediata em mensagens em rajada.
- */
-async function wasMenuSentRecently(supabaseClient, company_id, conversa_id, janelaMs = MENU_INVALID_GRACE_MS) {
-  try {
-    const { data } = await supabaseClient
-      .from('bot_logs')
-      .select('criado_em')
-      .eq('company_id', company_id)
-      .eq('conversa_id', conversa_id)
-      .in('tipo', ['menu_enviado', 'menu_reenviado'])
-      .order('criado_em', { ascending: false })
-      .limit(1)
-      .maybeSingle()
-
-    if (!data?.criado_em) return false
-    const ts = new Date(data.criado_em).getTime()
-    if (!Number.isFinite(ts)) return false
-    return (Date.now() - ts) < Math.max(0, Number(janelaMs) || 0)
-  } catch (e) {
-    console.warn('[chatbotTriage] wasMenuSentRecently: erro ao verificar bot_logs', e?.message)
     return false
   }
 }
@@ -1114,18 +1086,6 @@ async function processIncomingMessage(ctx) {
       company_id,
     })
     return { handled: false }
-  }
-
-  // Janela de tolerância após menu: evita "opção inválida" quando cliente mandou várias mensagens
-  // antes de receber/ler o menu de boas-vindas.
-  const menuSentRecently = await wasMenuSentRecently(sb, company_id, conversa_id, MENU_INVALID_GRACE_MS)
-  if (menuSentRecently) {
-    console.log('[chatbotTriage] ❌ skip opção inválida: menu enviado recentemente (janela de tolerância)', {
-      conversa_id,
-      company_id,
-      janelaMs: MENU_INVALID_GRACE_MS,
-    })
-    return { handled: true }
   }
 
   // Opção inválida: menu já foi enviado mas o cliente não digitou uma opção válida
