@@ -1754,7 +1754,7 @@ exports.receberZapi = async (req, res) => {
       return res.status(500).json({ error: 'Erro ao obter conversa' })
     }
 
-    // Captura avaliação (nota 0-10) e reabertura automática em conversa fechada
+    // Captura avaliação (nota 0-10) e reabertura automática em conversa encerrada (fechada ou finalizada)
     let conversaReabertaAposFinalizacao = false
     if (!fromMe && !isGroup && conversa_id) {
       const { data: convStatus } = await supabase
@@ -1763,7 +1763,9 @@ exports.receberZapi = async (req, res) => {
         .eq('id', conversa_id)
         .eq('company_id', company_id)
         .maybeSingle()
-      if (convStatus?.status_atendimento === 'fechada') {
+      const st = convStatus?.status_atendimento
+      const conversaEncerrada = st === 'fechada' || st === 'finalizada'
+      if (conversaEncerrada) {
         // Tentar registrar nota de avaliação se o texto for 0-10
         const textoNorm = String(texto || '').trim()
         const { tentarRegistrarAvaliacao } = require('../services/avaliacaoService')
@@ -1787,6 +1789,7 @@ exports.receberZapi = async (req, res) => {
                 status_atendimento: 'aberta',
                 departamento_id: null,
                 atendente_id: null,
+                atendente_atribuido_em: null,
               })
               .eq('id', conversa_id)
               .eq('company_id', company_id)
