@@ -64,7 +64,8 @@ async function emitBotMensagemRealtime({ io, supabase, company_id, conversa_id, 
     telefone: convRow?.telefone ?? null,
     exibir_badge_aberta: !isGroup,
     ...(isGroup ? { status_atendimento: null } : {}),
-    ...(depId != null ? { departamento_id: depId } : {}),
+    // Sempre enviar (null = sem setor) para o painel atualizar badge/lista sem recarregar
+    departamento_id: depId,
     ...(contatoNome ? { nome_contato_cache: contatoNome, contato_nome: contatoNome } : {}),
     ...(fotoPerfil ? { foto_perfil_contato_cache: fotoPerfil, foto_perfil: fotoPerfil } : {}),
     ultima_mensagem_preview: {
@@ -77,10 +78,40 @@ async function emitBotMensagemRealtime({ io, supabase, company_id, conversa_id, 
   }
 
   io.to(`empresa_${company_id}`).emit('conversa_atualizada', convPayload)
+  io.to(`conversa_${cid}`).emit('conversa_atualizada', convPayload)
   if (depId != null) {
     io.to(`departamento_${depId}`).emit('atualizar_conversa', { id: cid })
     io.to(`departamento_${depId}`).emit('conversa_atualizada', convPayload)
   }
 }
 
-module.exports = { emitBotMensagemRealtime }
+/**
+ * Após reabrir conversa encerrada: setor zerado no BD — notifica todos os canais (incl. room do setor antigo).
+ */
+function emitReaberturaSemSetorRealtime({ io, company_id, conversa_id, reabertaRow, departamentoIdAntigo }) {
+  if (!io || !company_id || !conversa_id) return
+  const cid = Number(conversa_id)
+  const convPayload = {
+    id: cid,
+    departamento_id: null,
+    atendente_id: null,
+    status_atendimento: 'aberta',
+    ultima_atividade: reabertaRow?.ultima_atividade ?? new Date().toISOString(),
+    telefone: reabertaRow?.telefone ?? null,
+    exibir_badge_aberta: true,
+    reordenar_suave: true,
+  }
+  io.to(`empresa_${company_id}`).emit('atualizar_conversa', { id: cid })
+  io.to(`empresa_${company_id}`).emit('conversa_atualizada', convPayload)
+  io.to(`conversa_${cid}`).emit('conversa_atualizada', convPayload)
+  const antigo =
+    departamentoIdAntigo != null && Number.isFinite(Number(departamentoIdAntigo))
+      ? Number(departamentoIdAntigo)
+      : null
+  if (antigo != null) {
+    io.to(`departamento_${antigo}`).emit('atualizar_conversa', { id: cid })
+    io.to(`departamento_${antigo}`).emit('conversa_atualizada', convPayload)
+  }
+}
+
+module.exports = { emitBotMensagemRealtime, emitReaberturaSemSetorRealtime }

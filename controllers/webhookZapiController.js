@@ -21,7 +21,7 @@ const { resolvePeerPhone } = require('../helpers/conversationKeyHelper')
 const { incrementarUnreadParaConversa } = require('./chatController')
 
 const { processIncomingMessage: processChatbotTriage } = require('../services/chatbotTriageService')
-const { emitBotMensagemRealtime } = require('../helpers/chatbotRealtimeEmitter')
+const { emitBotMensagemRealtime, emitReaberturaSemSetorRealtime } = require('../helpers/chatbotRealtimeEmitter')
 const { processarOptOut } = require('../services/optOutService')
 const { processarRegras } = require('../services/regrasAutomaticasService')
 const { isEnabled, FLAGS } = require('../helpers/featureFlags')
@@ -1760,7 +1760,7 @@ exports.receberZapi = async (req, res) => {
     if (!fromMe && !isGroup && conversa_id) {
       const { data: convStatus } = await supabase
         .from('conversas')
-        .select('id, status_atendimento, cliente_id')
+        .select('id, status_atendimento, cliente_id, departamento_id')
         .eq('id', conversa_id)
         .eq('company_id', company_id)
         .maybeSingle()
@@ -1784,6 +1784,8 @@ exports.receberZapi = async (req, res) => {
         if (!avalResult.registered) {
           const devReabrir = mensagemIndicaIntencaoContinuar(textoNorm)
           if (devReabrir) {
+            const depAntesReabrir =
+              convStatus?.departamento_id != null ? Number(convStatus.departamento_id) : null
             const { data: reaberta } = await supabase
               .from('conversas')
               .update({
@@ -1803,8 +1805,14 @@ exports.receberZapi = async (req, res) => {
               await resetChatbotStateForConversa(supabase, company_id, conversa_id)
               const io = req.app.get('io')
               if (io) {
+                emitReaberturaSemSetorRealtime({
+                  io,
+                  company_id,
+                  conversa_id,
+                  reabertaRow: reaberta,
+                  departamentoIdAntigo: depAntesReabrir,
+                })
                 io.to(`empresa_${company_id}`).emit(io.EVENTS?.CONVERSA_REABERTA || 'conversa_reaberta', reaberta)
-                io.to(`empresa_${company_id}`).emit(io.EVENTS?.ATUALIZAR_CONVERSA || 'atualizar_conversa', { id: conversa_id })
               }
               console.log('[Z-API] 🔄 Conversa reaberta (cliente sinalizou intenção de continuar) — chatbot reiniciado', { conversa_id, texto: textoNorm })
             }
