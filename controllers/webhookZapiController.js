@@ -1909,7 +1909,7 @@ exports.receberZapi = async (req, res) => {
               .eq('conversa_id', conversa_id)
               .eq('company_id', company_id)
               .order('criado_em', { ascending: true })
-              .limit(3)
+              .limit(25)
 
             console.log('[Z-API] 🤖 Chatbot: verificando histórico (sem bot_logs)', {
               conversa_id,
@@ -1933,11 +1933,21 @@ exports.receberZapi = async (req, res) => {
                   conversa_id, primeiraMsg: String(primeiraMsg.texto || '').slice(0, 30)
                 })
               } else {
-                chatbotHints.menuAlreadySent = false
-                chatbotHints.isPrimeiraMensagemCliente = true
-                console.log('[Z-API] 🤖 Chatbot: cliente iniciou a conversa — permitindo chatbot', {
-                  conversa_id, totalMensagensCliente: mensagensAnteriores.filter(m => m.direcao === 'in').length
-                })
+                // Cliente falou primeiro, mas já pode existir resposta do bot (menu) — ex.: [in, out, in atual]
+                const temRespostaBot = mensagensAnteriores.some((m) => m.direcao === 'out')
+                if (temRespostaBot) {
+                  chatbotHints.menuAlreadySent = true
+                  chatbotHints.isPrimeiraMensagemCliente = false
+                  console.log('[Z-API] 🤖 Chatbot: histórico já tem msg do bot — cliente respondendo ao menu', {
+                    conversa_id,
+                  })
+                } else {
+                  chatbotHints.menuAlreadySent = false
+                  chatbotHints.isPrimeiraMensagemCliente = true
+                  console.log('[Z-API] 🤖 Chatbot: cliente iniciou a conversa — permitindo chatbot', {
+                    conversa_id, totalMensagensCliente: mensagensAnteriores.filter(m => m.direcao === 'in').length
+                  })
+                }
               }
             }
           }

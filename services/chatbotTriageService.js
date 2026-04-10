@@ -390,7 +390,7 @@ async function wasMenuSentForConversa(supabaseClient, company_id, conversa_id) {
       .select('id')
       .eq('company_id', company_id)
       .eq('conversa_id', conversa_id)
-      .eq('tipo', 'menu_enviado')
+      .in('tipo', ['menu_enviado', 'menu_reenviado'])
       .limit(1)
       .maybeSingle()
     return !!data?.id
@@ -989,9 +989,14 @@ async function processIncomingMessage(ctx) {
 
   const menuAlreadySentHint = hints && typeof hints.menuAlreadySent === 'boolean' ? hints.menuAlreadySent : null
   const primeiraMensagemHint = hints && typeof hints.isPrimeiraMensagemCliente === 'boolean' ? hints.isPrimeiraMensagemCliente : null
-  const menuAlreadySent = menuAlreadySentHint != null
-    ? menuAlreadySentHint
-    : await wasMenuSentForConversa(sb, company_id, conversa_id)
+  // hints.menuAlreadySent=false do webhook não é confiável (ex.: menu gravado em mensagens mas bot_logs atrasado).
+  // Só confiamos em false após checar o banco; assim "opção inválida" não fica bloqueada.
+  let menuAlreadySent = false
+  if (menuAlreadySentHint === true) {
+    menuAlreadySent = true
+  } else {
+    menuAlreadySent = await wasMenuSentForConversa(sb, company_id, conversa_id)
+  }
 
   // Verificar se esta é a primeira mensagem do cliente na conversa.
   // Usa bot_logs como fonte primária: se o menu foi enviado, não é mais a "primeira" mensagem.
