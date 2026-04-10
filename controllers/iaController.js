@@ -1,5 +1,10 @@
 const supabase = require('../config/supabase')
-const { DEFAULT_CHATBOT_CONFIG, validateChatbotConfig } = require('../services/chatbotTriageService')
+const {
+  DEFAULT_CHATBOT_CONFIG,
+  validateChatbotConfig,
+  normalizeChatbotTriageStrings,
+  invalidateChatbotConfigCache,
+} = require('../services/chatbotTriageService')
 
 const DEFAULT_CONFIG = {
   chatbot_triage: {
@@ -86,7 +91,8 @@ exports.getConfig = async (req, res) => {
     }
     const config = data?.config ?? {}
     const ctRaw = config.chatbot_triage || {}
-    const ctValid = validateChatbotConfig({ ...DEFAULT_CONFIG.chatbot_triage, ...ctRaw }) || DEFAULT_CONFIG.chatbot_triage
+    const ctMerged = { ...DEFAULT_CONFIG.chatbot_triage, ...ctRaw }
+    const ctValid = validateChatbotConfig(ctMerged) || normalizeChatbotTriageStrings(ctMerged)
     const merged = {
       chatbot_triage: ctValid,
       bot_global: { ...DEFAULT_CONFIG.bot_global, ...(config.bot_global || {}) },
@@ -121,7 +127,7 @@ exports.putConfig = async (req, res) => {
 
     const current = existing?.config ?? {}
     const ctMerged = { ...DEFAULT_CONFIG.chatbot_triage, ...(current.chatbot_triage || {}), ...(ctBody || {}) }
-    const ctValid = validateChatbotConfig(ctMerged) || ctMerged
+    const ctValid = validateChatbotConfig(ctMerged) || normalizeChatbotTriageStrings(ctMerged)
     const merged = {
       chatbot_triage: ctValid,
       bot_global: { ...DEFAULT_CONFIG.bot_global, ...current.bot_global, ...(bot_global || {}) },
@@ -144,6 +150,7 @@ exports.putConfig = async (req, res) => {
       .single()
 
     if (error) return res.status(500).json({ error: error.message })
+    invalidateChatbotConfigCache(company_id)
     return res.json(data?.config ?? merged)
   } catch (err) {
     console.error(err)

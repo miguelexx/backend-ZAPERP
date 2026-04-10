@@ -12,6 +12,7 @@
  */
 
 const supabase = require('../config/supabase')
+const { invalidateChatbotConfigCache } = require('./chatbotTriageService')
 
 /**
  * Configuração padrão do chatbot que será aplicada a todas as empresas
@@ -157,6 +158,7 @@ async function configureChatbotForCompany(companyId, customConfig = {}) {
     }
 
     console.log(`[ChatbotAutoConfig] ✅ Chatbot configurado para empresa ${companyId}`)
+    invalidateChatbotConfigCache(companyId)
     return true
 
   } catch (error) {
@@ -298,6 +300,7 @@ async function toggleChatbotForCompany(companyId, enabled) {
     }
 
     console.log(`[ChatbotAutoConfig] ✅ Chatbot ${enabled ? 'ativado' : 'desativado'} para empresa ${companyId}`)
+    invalidateChatbotConfigCache(companyId)
     return true
 
   } catch (error) {

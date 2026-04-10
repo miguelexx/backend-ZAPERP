@@ -13,12 +13,41 @@
 
 const supabase = require('../config/supabase')
 
+/**
+ * Corrige mojibake típico: texto UTF-8 foi gravado/lido como Latin-1 (ex.: "OpÃ§Ã£o" → "Opção").
+ * Só altera quando há padrão clássico (Ã/Â + byte de continuação); texto já correto em português não muda.
+ * Até 3 passos para casos de dupla/tripla codificação acidental.
+ */
+function repairChatbotTriageUtf8(s) {
+  if (typeof s !== 'string' || !s) return s
+  let cur = s
+  const mojibakeHint = /\u00C3[\u00A0-\u00BF]|\u00C2[\u0080-\u00BF]/
+  for (let i = 0; i < 3; i++) {
+    if (!mojibakeHint.test(cur)) break
+    try {
+      const out = Buffer.from(cur, 'latin1').toString('utf8')
+      if (out.includes('\uFFFD') || out === cur) break
+      cur = out
+    } catch {
+      break
+    }
+  }
+  return cur
+}
+
 /** Último envio por company_id — throttling para respeitar intervalo configurável. */
 const lastChatbotSendPerCompany = new Map()
 
 // Cache em memória para config do chatbot (dados raramente mudam)
 const _chatbotConfigCache = new Map()
 const _CHATBOT_CONFIG_CACHE_TTL = 5 * 60 * 1000 // 5 minutos
+
+function invalidateChatbotConfigCache(company_id) {
+  if (company_id == null || company_id === '') return
+  const key = Number(company_id)
+  if (!Number.isFinite(key)) return
+  _chatbotConfigCache.delete(key)
+}
 
 /**
  * Cache do último envio de "opção inválida" por conversa_id — debounce em memória.
@@ -184,61 +213,84 @@ const DEFAULT_CHATBOT_CONFIG = {
 }
 
 /**
+ * Repara mojibake em todos os textos editáveis do chatbot_triage (antes de validar/persistir).
+ */
+function normalizeChatbotTriageStrings(raw) {
+  if (!raw || typeof raw !== 'object') return raw
+  const opts = Array.isArray(raw.options) ? raw.options : []
+  return {
+    ...raw,
+    welcomeMessage: repairChatbotTriageUtf8(String(raw.welcomeMessage ?? '').trim()),
+    invalidOptionMessage: repairChatbotTriageUtf8(String(raw.invalidOptionMessage ?? '').trim()),
+    confirmSelectionMessage: repairChatbotTriageUtf8(String(raw.confirmSelectionMessage ?? '').trim()),
+    reopenMenuCommand: repairChatbotTriageUtf8(String(raw.reopenMenuCommand ?? '').trim()),
+    mensagemFinalizacao: repairChatbotTriageUtf8(String(raw.mensagemFinalizacao ?? '').trim()),
+    mensagemForaHorario: repairChatbotTriageUtf8(String(raw.mensagemForaHorario ?? '').trim()),
+    options: opts.map((o) => ({
+      ...o,
+      key: repairChatbotTriageUtf8(String(o?.key ?? '').trim()),
+      label: repairChatbotTriageUtf8(String(o?.label ?? '').trim()),
+    })),
+  }
+}
+
+/**
  * Valida e normaliza a configuração do chatbot.
  * @param {object} raw - Config bruto de ia_config.config.chatbot_triage
  * @returns {object} Config validada
  */
 function validateChatbotConfig(raw) {
   if (!raw || typeof raw !== 'object') return null
-  const opts = Array.isArray(raw.options) ? raw.options : []
+  const src = normalizeChatbotTriageStrings(raw)
+  const opts = Array.isArray(src.options) ? src.options : []
   const activeOptions = opts.filter((o) => o && o.active !== false && o.departamento_id != null)
-  if (activeOptions.length === 0 && raw.enabled) return null
-  const tipoDist = String(raw.tipo_distribuicao || 'fila').trim().toLowerCase()
+  if (activeOptions.length === 0 && src.enabled) return null
+  const tipoDist = String(src.tipo_distribuicao || 'fila').trim().toLowerCase()
   const tipoDistribuicao = tipoDist === 'menor_carga' ? 'menor_carga' : (tipoDist === 'round_robin' ? 'round_robin' : 'fila')
 
   return {
-    enabled: !!raw.enabled,
-    welcomeMessage: String(raw.welcomeMessage || '').trim() || null,
-    invalidOptionMessage: String(raw.invalidOptionMessage || DEFAULT_CHATBOT_CONFIG.invalidOptionMessage).trim(),
-    confirmSelectionMessage: String(raw.confirmSelectionMessage || DEFAULT_CHATBOT_CONFIG.confirmSelectionMessage).trim(),
-    sendOnlyFirstTime: raw.sendOnlyFirstTime !== false,
-    fallbackToAI: !!raw.fallbackToAI,
-    businessHoursOnly: !!raw.businessHoursOnly,
-    transferMode: raw.transferMode || 'departamento',
+    enabled: !!src.enabled,
+    welcomeMessage: String(src.welcomeMessage || '').trim() || null,
+    invalidOptionMessage: String(src.invalidOptionMessage || DEFAULT_CHATBOT_CONFIG.invalidOptionMessage).trim(),
+    confirmSelectionMessage: String(src.confirmSelectionMessage || DEFAULT_CHATBOT_CONFIG.confirmSelectionMessage).trim(),
+    sendOnlyFirstTime: src.sendOnlyFirstTime !== false,
+    fallbackToAI: !!src.fallbackToAI,
+    businessHoursOnly: !!src.businessHoursOnly,
+    transferMode: src.transferMode || 'departamento',
     tipo_distribuicao: tipoDistribuicao,
-    reopenMenuCommand: String(raw.reopenMenuCommand || '0').trim().toLowerCase(),
-    enviarMensagemFinalizacao: !!raw.enviarMensagemFinalizacao,
-    mensagemFinalizacao: String(raw.mensagemFinalizacao || DEFAULT_CHATBOT_CONFIG.mensagemFinalizacao || '').trim() || DEFAULT_CHATBOT_CONFIG.mensagemFinalizacao,
-    foraHorarioEnabled: !!raw.foraHorarioEnabled,
+    reopenMenuCommand: String(src.reopenMenuCommand || '0').trim().toLowerCase(),
+    enviarMensagemFinalizacao: !!src.enviarMensagemFinalizacao,
+    mensagemFinalizacao: String(src.mensagemFinalizacao || DEFAULT_CHATBOT_CONFIG.mensagemFinalizacao || '').trim() || DEFAULT_CHATBOT_CONFIG.mensagemFinalizacao,
+    foraHorarioEnabled: !!src.foraHorarioEnabled,
     horarioInicio: (() => {
-      const v = String(raw.horarioInicio || DEFAULT_CHATBOT_CONFIG.horarioInicio || '09:00').trim()
+      const v = String(src.horarioInicio || DEFAULT_CHATBOT_CONFIG.horarioInicio || '09:00').trim()
       return /^\d{1,2}:\d{2}$/.test(v) ? v : '09:00'
     })(),
     horarioFim: (() => {
-      const v = String(raw.horarioFim || DEFAULT_CHATBOT_CONFIG.horarioFim || '18:00').trim()
+      const v = String(src.horarioFim || DEFAULT_CHATBOT_CONFIG.horarioFim || '18:00').trim()
       return /^\d{1,2}:\d{2}$/.test(v) ? v : '18:00'
     })(),
-    mensagemForaHorario: String(raw.mensagemForaHorario || DEFAULT_CHATBOT_CONFIG.mensagemForaHorario || '').trim() || DEFAULT_CHATBOT_CONFIG.mensagemForaHorario,
+    mensagemForaHorario: String(src.mensagemForaHorario || DEFAULT_CHATBOT_CONFIG.mensagemForaHorario || '').trim() || DEFAULT_CHATBOT_CONFIG.mensagemForaHorario,
     diasSemanaDesativados: (() => {
-      const arr = raw.diasSemanaDesativados
+      const arr = src.diasSemanaDesativados
       if (!Array.isArray(arr)) return DEFAULT_CHATBOT_CONFIG.diasSemanaDesativados || [0, 6]
       return arr.filter((d) => Number.isInteger(Number(d)) && d >= 0 && d <= 6).map(Number)
     })(),
     datasEspecificasFechadas: (() => {
-      const arr = raw.datasEspecificasFechadas
+      const arr = src.datasEspecificasFechadas
       if (!Array.isArray(arr)) return []
       return arr.filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(String(d).trim())).map((d) => String(d).trim())
     })(),
-    timezone: String(raw.timezone || DEFAULT_CHATBOT_CONFIG.timezone || 'America/Sao_Paulo').trim() || 'America/Sao_Paulo',
+    timezone: String(src.timezone || DEFAULT_CHATBOT_CONFIG.timezone || 'America/Sao_Paulo').trim() || 'America/Sao_Paulo',
     horariosJanelas: (() => {
-      const arr = raw.horariosJanelas || raw.janelasHorario
+      const arr = src.horariosJanelas || src.janelasHorario
       if (!Array.isArray(arr)) return []
       return arr
         .filter((j) => j && typeof j === 'object' && j.inicio && j.fim && /^\d{1,2}:\d{2}$/.test(String(j.inicio).trim()) && /^\d{1,2}:\d{2}$/.test(String(j.fim).trim()))
         .map((j) => ({ inicio: String(j.inicio).trim(), fim: String(j.fim).trim() }))
     })(),
     intervaloEnvioSegundos: (() => {
-      const v = raw.intervaloEnvioSegundos ?? DEFAULT_CHATBOT_CONFIG.intervaloEnvioSegundos ?? 3
+      const v = src.intervaloEnvioSegundos ?? DEFAULT_CHATBOT_CONFIG.intervaloEnvioSegundos ?? 3
       const n = Number(v)
       return Number.isFinite(n) ? Math.max(0, Math.min(60, Math.round(n))) : 3
     })(),
@@ -1182,6 +1234,8 @@ async function processIncomingMessage(ctx) {
 module.exports = {
   DEFAULT_CHATBOT_CONFIG,
   validateChatbotConfig,
+  normalizeChatbotTriageStrings,
+  invalidateChatbotConfigCache,
   getChatbotConfig,
   processIncomingMessage,
   logBotAction,

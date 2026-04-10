@@ -14,6 +14,11 @@
 const express = require('express')
 const router = express.Router()
 const supabase = require('../config/supabase')
+const {
+  DEFAULT_CHATBOT_CONFIG,
+  validateChatbotConfig,
+  normalizeChatbotTriageStrings,
+} = require('../services/chatbotTriageService')
 
 /**
  * GET /api/chatbot/debug/logs/:companyId
@@ -159,8 +164,11 @@ router.get('/conversation/:conversaId', async (req, res) => {
       .eq('company_id', conversa.company_id)
       .single()
     
-    const chatbotConfig = config?.config?.chatbot_triage
-    
+    const rawTriage = config?.config?.chatbot_triage || {}
+    const triageMerged = { ...DEFAULT_CHATBOT_CONFIG, ...rawTriage }
+    const chatbotConfig =
+      validateChatbotConfig(triageMerged) || normalizeChatbotTriageStrings(triageMerged)
+
     // Análise da conversa
     const analysis = {
       total_mensagens: mensagens.length,

@@ -5,6 +5,11 @@
  */
 const crypto = require('crypto')
 const supabase = require('../config/supabase')
+const {
+  DEFAULT_CHATBOT_CONFIG,
+  validateChatbotConfig,
+  normalizeChatbotTriageStrings,
+} = require('../services/chatbotTriageService')
 
 function timingSafeEqualStr(a, b) {
   const sa = String(a ?? '')
@@ -60,12 +65,15 @@ exports.timeoutInatividadeChatbot = async (req, res) => {
       const config = row.config || {}
       const automacoes = config.automacoes || {}
       const chatbotTriage = config.chatbot_triage || {}
+      const triageMerged = { ...DEFAULT_CHATBOT_CONFIG, ...chatbotTriage }
+      const triageNorm =
+        validateChatbotConfig(triageMerged) || normalizeChatbotTriageStrings(triageMerged)
 
       const encerrarMin = Number(automacoes.encerrar_automatico_min) || 0
       if (encerrarMin <= 0) continue
 
       const mensagemEncerramento = String(automacoes.mensagem_encerramento_inatividade || '-conversa encerrada por conta de inatividade-').trim()
-      const mensagemForaHorario = String(chatbotTriage.mensagemForaHorario || '').trim()
+      const mensagemForaHorario = String(triageNorm.mensagemForaHorario || '').trim()
 
       // Conversas não fechadas, excluindo grupos
       const { data: conversas } = await supabase

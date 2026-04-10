@@ -25,6 +25,12 @@ const {
 } = require('../services/chatbotAutoConfigService')
 
 const { chatbotHealthCheck } = require('../middleware/autoChatbotSetup')
+const {
+  DEFAULT_CHATBOT_CONFIG,
+  validateChatbotConfig,
+  normalizeChatbotTriageStrings,
+  invalidateChatbotConfigCache,
+} = require('../services/chatbotTriageService')
 
 /**
  * GET /api/chatbot/status
@@ -337,11 +343,15 @@ router.get('/config/:companyId', async (req, res) => {
       })
     }
     
+    const ctRaw = config.config?.chatbot_triage || {}
+    const ctMerged = { ...DEFAULT_CHATBOT_CONFIG, ...ctRaw }
+    const ctOut = validateChatbotConfig(ctMerged) || normalizeChatbotTriageStrings(ctMerged)
+
     res.json({
       success: true,
       data: {
         company_id: companyId,
-        config: config.config?.chatbot_triage || null
+        config: ctOut
       }
     })
   } catch (error) {
@@ -390,10 +400,11 @@ router.put('/config/:companyId', async (req, res) => {
       throw new Error(fetchError.message)
     }
     
-    // Mesclar configuração atual com nova
+    // Mesclar configuração atual com nova (textos com mojibake são normalizados)
     const fullConfig = currentConfig?.config || {}
-    fullConfig.chatbot_triage = { ...fullConfig.chatbot_triage, ...config }
-    
+    const ctMerged = { ...DEFAULT_CHATBOT_CONFIG, ...(fullConfig.chatbot_triage || {}), ...config }
+    fullConfig.chatbot_triage = validateChatbotConfig(ctMerged) || normalizeChatbotTriageStrings(ctMerged)
+
     // Atualizar configuração
     const { error: updateError } = await supabase
       .from('ia_config')
@@ -406,7 +417,9 @@ router.put('/config/:companyId', async (req, res) => {
     if (updateError) {
       throw new Error(updateError.message)
     }
-    
+
+    invalidateChatbotConfigCache(companyId)
+
     res.json({
       success: true,
       message: `Configuração atualizada com sucesso para empresa ${companyId}`
