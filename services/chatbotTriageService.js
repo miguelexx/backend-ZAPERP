@@ -758,6 +758,7 @@ async function applyTagIfConfigured(supabaseClient, company_id, conversa_id, tag
  * @param {Function} ctx.sendMessage - async (phone, message, opts) => { ok, messageId }
  * @param {object} [ctx.opts] - { phoneNumberId } para Meta, { companyId } para Z-API
  * @param {boolean} [ctx.conversaReabertaAposFinalizacao] - true quando cliente mandou msg em conversa fechada e reabrimos — enviar boas-vindas novamente
+ * @param {function(object): Promise<void>} [ctx.emitChatbotRealtime] - após insert de mensagem outbound, emite Socket.IO (nova_mensagem + conversa_atualizada)
  * @returns {Promise<{ handled: boolean, departamento_id?: number }>}
  */
 async function processIncomingMessage(ctx) {
@@ -771,7 +772,19 @@ async function processIncomingMessage(ctx) {
     opts = {},
     conversaReabertaAposFinalizacao = false,
     hints = null,
+    emitChatbotRealtime,
   } = ctx
+
+  const emitRt = typeof emitChatbotRealtime === 'function' ? emitChatbotRealtime : null
+  const emitAfterBotMsg = async (row) => {
+    if (emitRt && row) {
+      try {
+        await emitRt(row)
+      } catch (e) {
+        console.warn('[chatbotTriage] emitChatbotRealtime:', e?.message || e)
+      }
+    }
+  }
   
   console.log('[chatbotTriage] 🤖 INÍCIO DO PROCESSAMENTO', {
     company_id,
@@ -855,13 +868,18 @@ async function processIncomingMessage(ctx) {
       const sb = supabaseClient || supabase
       try {
         await sendWithThrottle(sendMessage, telefone, config.mensagemForaHorario, opts, company_id, config.intervaloEnvioSegundos)
-        await sb.from('mensagens').insert({
-          conversa_id,
-          texto: config.mensagemForaHorario,
-          direcao: 'out',
-          company_id,
-          status: 'sent',
-        })
+        const { data: rowFora } = await sb
+          .from('mensagens')
+          .insert({
+            conversa_id,
+            texto: config.mensagemForaHorario,
+            direcao: 'out',
+            company_id,
+            status: 'sent',
+          })
+          .select('*')
+          .single()
+        await emitAfterBotMsg(rowFora)
         await logBotAction(company_id, conversa_id, 'fora_horario', {
           horario_inicio: config.horarioInicio,
           horario_fim: config.horarioFim,
@@ -938,13 +956,18 @@ async function processIncomingMessage(ctx) {
         config.intervaloEnvioSegundos,
         { bypassChatbotInterval: true, sendOptions: { skipProviderDelay: true } }
       )
-      await sb.from('mensagens').insert({
-        conversa_id,
-        texto: msgToSend,
-        direcao: 'out',
-        company_id,
-        status: 'sent',
-      })
+      const { data: rowConf } = await sb
+        .from('mensagens')
+        .insert({
+          conversa_id,
+          texto: msgToSend,
+          direcao: 'out',
+          company_id,
+          status: 'sent',
+        })
+        .select('*')
+        .single()
+      await emitAfterBotMsg(rowConf)
     } catch (sendErr) {
       console.error('[chatbotTriage] ❌ Erro ao enviar mensagem de confirmação:', sendErr?.message || sendErr)
     }
@@ -972,13 +995,18 @@ async function processIncomingMessage(ctx) {
           config.intervaloEnvioSegundos,
           { bypassChatbotInterval: true, sendOptions: { skipProviderDelay: true } }
         )
-        await sb.from('mensagens').insert({
-          conversa_id,
-          texto: msg,
-          direcao: 'out',
-          company_id,
-          status: 'sent',
-        })
+        const { data: rowReab } = await sb
+          .from('mensagens')
+          .insert({
+            conversa_id,
+            texto: msg,
+            direcao: 'out',
+            company_id,
+            status: 'sent',
+          })
+          .select('*')
+          .single()
+        await emitAfterBotMsg(rowReab)
         await logBotAction(company_id, conversa_id, 'menu_reenviado', { comando: textoNorm })
       } catch (e) {
         console.error('[chatbotTriage] ❌ Erro ao reenviar menu:', e?.message || e)
@@ -1063,13 +1091,18 @@ async function processIncomingMessage(ctx) {
       console.log('[chatbotTriage] enviando menu de boas-vindas', { conversa_id, company_id, motivo })
       try {
         await sendWithThrottle(sendMessage, telefone, msg, opts, company_id, config.intervaloEnvioSegundos)
-        await sb.from('mensagens').insert({
-          conversa_id,
-          texto: msg,
-          direcao: 'out',
-          company_id,
-          status: 'sent',
-        })
+        const { data: rowMenu } = await sb
+          .from('mensagens')
+          .insert({
+            conversa_id,
+            texto: msg,
+            direcao: 'out',
+            company_id,
+            status: 'sent',
+          })
+          .select('*')
+          .single()
+        await emitAfterBotMsg(rowMenu)
         await logBotAction(company_id, conversa_id, 'menu_enviado', {
           opcoes: config.options.map((o) => o.key),
           motivo,
@@ -1174,13 +1207,18 @@ async function processIncomingMessage(ctx) {
 
   try {
     await sendWithThrottle(sendMessage, telefone, fullInvalid, opts, company_id, config.intervaloEnvioSegundos)
-    await sb.from('mensagens').insert({
-      conversa_id,
-      texto: fullInvalid,
-      direcao: 'out',
-      company_id,
-      status: 'sent',
-    })
+    const { data: rowInv } = await sb
+      .from('mensagens')
+      .insert({
+        conversa_id,
+        texto: fullInvalid,
+        direcao: 'out',
+        company_id,
+        status: 'sent',
+      })
+      .select('*')
+      .single()
+    await emitAfterBotMsg(rowInv)
     if (!usouRpc) {
       await (sb || supabase).from('bot_logs').insert({
         company_id,

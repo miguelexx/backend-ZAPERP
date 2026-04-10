@@ -21,6 +21,7 @@ const { resolvePeerPhone } = require('../helpers/conversationKeyHelper')
 const { incrementarUnreadParaConversa } = require('./chatController')
 
 const { processIncomingMessage: processChatbotTriage } = require('../services/chatbotTriageService')
+const { emitBotMensagemRealtime } = require('../helpers/chatbotRealtimeEmitter')
 const { processarOptOut } = require('../services/optOutService')
 const { processarRegras } = require('../services/regrasAutomaticasService')
 const { isEnabled, FLAGS } = require('../helpers/featureFlags')
@@ -1958,6 +1959,17 @@ exports.receberZapi = async (req, res) => {
 
         if (!skipChatbot) {
           console.log('[Z-API] 🤖 Chatbot: processando mensagem', { company_id, conversa_id, phoneTail: String(phoneParaChatbot).slice(-8) })
+          const ioChatbot = req.app.get('io')
+          const emitChatbotRealtime =
+            ioChatbot &&
+            (async (mensagemRow) =>
+              emitBotMensagemRealtime({
+                io: ioChatbot,
+                supabase,
+                company_id,
+                conversa_id,
+                mensagem: mensagemRow,
+              }))
           const result = await processChatbotTriage({
             company_id,
             conversa_id,
@@ -1968,6 +1980,7 @@ exports.receberZapi = async (req, res) => {
             opts: { companyId: company_id },
             conversaReabertaAposFinalizacao,
             hints: chatbotHints,
+            emitChatbotRealtime,
           })
           if (result?.handled && result?.departamento_id != null) {
             departamento_id = result.departamento_id
