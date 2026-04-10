@@ -66,6 +66,20 @@ const lastWelcomeSentAt = new Map()
 const WELCOME_DEBOUNCE_MS = 15_000
 
 /**
+ * Instant em que o menu (boas-vindas ou reenvio) foi efetivamente persistido/enviado no servidor.
+ * Usado para não disparar "opção inválida" em rajadas de "oi" logo após o menu, quando o timestamp
+ * do WhatsApp não bate com bot_logs ou cai em Date.now() por payload incompleto.
+ */
+const lastMenuEnviadoServerAt = new Map()
+/** Após este ms desde o envio do menu, volta a valer "opção inválida" para texto não numérico. */
+const POS_MENU_OPCAO_INVALIDA_GRACE_MS = 8_000
+
+/** Texto só com dígitos = tentativa de escolher opção do menu (válida ou não). Saudações em rajada não casam. */
+function pareceTentativaOpcaoSoNumeros(texto) {
+  return /^\s*\d{1,4}\s*$/.test(String(texto || ''))
+}
+
+/**
  * Aguarda o intervalo configurado desde o último envio do chatbot (por empresa).
  * @param {number} company_id
  * @param {number} intervaloSegundos - Configurado pelo usuário (0 = sem delay)
@@ -375,6 +389,7 @@ async function resetChatbotStateForConversa(supabaseClient, company_id, conversa
       return
     }
     console.log('[chatbotTriage] 🔄 Estado do chatbot resetado para conversa reaberta', { conversa_id, company_id })
+    lastMenuEnviadoServerAt.delete(Number(conversa_id))
   } catch (e) {
     console.warn('[chatbotTriage] resetChatbotStateForConversa:', e?.message || e)
   }
@@ -1138,6 +1153,7 @@ async function processIncomingMessage(ctx) {
           .select('*')
           .single()
         await emitAfterBotMsg(rowReab)
+        lastMenuEnviadoServerAt.set(Number(conversa_id), Date.now())
         await logBotAction(company_id, conversa_id, 'menu_reenviado', { comando: textoNorm })
       } catch (e) {
         console.error('[chatbotTriage] ❌ Erro ao reenviar menu:', e?.message || e)
@@ -1237,6 +1253,7 @@ async function processIncomingMessage(ctx) {
           .select('*')
           .single()
         await emitAfterBotMsg(rowMenu)
+        lastMenuEnviadoServerAt.set(Number(conversa_id), Date.now())
         await logBotAction(company_id, conversa_id, 'menu_enviado', {
           opcoes: config.options.map((o) => o.key),
           motivo,
@@ -1273,6 +1290,21 @@ async function processIncomingMessage(ctx) {
       company_id,
     })
     return { handled: true }
+  }
+
+  // Rajada inicial: várias "oi" / saudações com o mesmo horário no WhatsApp ou webhook sem timestamp fiel —
+  // não enviar opção inválida até passar a janela, exceto se o cliente mandar só número (tentativa de opção).
+  const cidKey = Number(conversa_id)
+  const menuServerMs = lastMenuEnviadoServerAt.get(cidKey) || 0
+  if (menuServerMs && Date.now() - menuServerMs < POS_MENU_OPCAO_INVALIDA_GRACE_MS) {
+    if (!pareceTentativaOpcaoSoNumeros(texto)) {
+      console.log('[chatbotTriage] ❌ skip opção inválida: janela pós-menu (rajada / texto não é tentativa numérica)', {
+        conversa_id,
+        company_id,
+        msDesdeMenu: Date.now() - menuServerMs,
+      })
+      return { handled: true }
+    }
   }
 
   // Opção inválida: menu já foi enviado mas o cliente não digitou uma opção válida
