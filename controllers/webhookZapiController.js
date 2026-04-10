@@ -1989,6 +1989,7 @@ exports.receberZapi = async (req, res) => {
             conversaReabertaAposFinalizacao,
             hints: chatbotHints,
             emitChatbotRealtime,
+            mensagemClienteCriadoEm: criado_em || null,
           })
           if (result?.handled && result?.departamento_id != null) {
             departamento_id = result.departamento_id

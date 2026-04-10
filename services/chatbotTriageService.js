@@ -424,6 +424,35 @@ async function wasMenuSentForConversa(supabaseClient, company_id, conversa_id) {
 }
 
 /**
+ * Quando o cliente manda várias mensagens seguidas, o webhook pode processar a segunda depois do menu já gravado.
+ * Nesse caso não devemos enviar "opção inválida" para texto que no WhatsApp foi enviado antes (ou no mesmo instante)
+ * do registro do menu — só depois que o menu existir no fluxo.
+ */
+async function shouldSkipOpcaoInvalidaMensagemAntigaAoMenu(supabaseClient, company_id, conversa_id, mensagemClienteCriadoEm) {
+  if (!mensagemClienteCriadoEm) return false
+  const inboundMs = Date.parse(String(mensagemClienteCriadoEm).trim())
+  if (!Number.isFinite(inboundMs)) return false
+  try {
+    const { data: menuRow } = await supabaseClient
+      .from('bot_logs')
+      .select('criado_em')
+      .eq('company_id', company_id)
+      .eq('conversa_id', conversa_id)
+      .in('tipo', ['menu_enviado', 'menu_reenviado'])
+      .order('criado_em', { ascending: false })
+      .limit(1)
+      .maybeSingle()
+    if (!menuRow?.criado_em) return false
+    const menuMs = Date.parse(String(menuRow.criado_em))
+    if (!Number.isFinite(menuMs)) return false
+    return inboundMs <= menuMs
+  } catch (e) {
+    console.warn('[chatbotTriage] shouldSkipOpcaoInvalidaMensagemAntigaAoMenu:', e?.message || e)
+    return false
+  }
+}
+
+/**
  * Fallback quando bot_logs não tem menu_enviado mas o menu já foi enviado (ex.: log falhou após insert em mensagens).
  * Evita não enviar "opção inválida" após boas-vindas reais.
  */
@@ -858,6 +887,7 @@ async function applyTagIfConfigured(supabaseClient, company_id, conversa_id, tag
  * @param {Function} ctx.sendMessage - async (phone, message, opts) => { ok, messageId }
  * @param {object} [ctx.opts] - { phoneNumberId } para Meta, { companyId } para Z-API
  * @param {boolean} [ctx.conversaReabertaAposFinalizacao] - true quando cliente mandou msg em conversa fechada e reabrimos — enviar boas-vindas novamente
+ * @param {string} [ctx.mensagemClienteCriadoEm] - ISO do timestamp da mensagem inbound (WhatsApp), p.ex. do webhook — para não enviar opção inválida em rajada antes do menu
  * @param {function(object): Promise<void>} [ctx.emitChatbotRealtime] - após insert de mensagem outbound, emite Socket.IO (nova_mensagem + conversa_atualizada)
  * @returns {Promise<{ handled: boolean, departamento_id?: number }>}
  */
@@ -873,6 +903,7 @@ async function processIncomingMessage(ctx) {
     conversaReabertaAposFinalizacao = false,
     hints = null,
     emitChatbotRealtime,
+    mensagemClienteCriadoEm = null,
   } = ctx
 
   const emitRt = typeof emitChatbotRealtime === 'function' ? emitChatbotRealtime : null
@@ -1227,6 +1258,21 @@ async function processIncomingMessage(ctx) {
       company_id,
     })
     return { handled: false }
+  }
+
+  // Rajada de mensagens: esta inbound pode ter timestamp do WhatsApp anterior ao menu — não tratar como resposta ao menu.
+  const skipOpcaoInvalidaAntesMenu = await shouldSkipOpcaoInvalidaMensagemAntigaAoMenu(
+    sb,
+    company_id,
+    conversa_id,
+    mensagemClienteCriadoEm
+  )
+  if (skipOpcaoInvalidaAntesMenu) {
+    console.log('[chatbotTriage] ❌ skip opção inválida: mensagem com instante anterior ou igual ao envio do menu (rajada)', {
+      conversa_id,
+      company_id,
+    })
+    return { handled: true }
   }
 
   // Opção inválida: menu já foi enviado mas o cliente não digitou uma opção válida

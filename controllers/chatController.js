@@ -1876,9 +1876,13 @@ exports.detalharChat = async (req, res) => {
     // Badge "Aberta": só exibir quando há movimentação (mensagem ou atendente assumiu) — mesma regra da lista
     const temMensagem = Array.isArray(mensagens) && mensagens.length > 0
     const exibirBadgeAberta = !isGroup && (temMensagem || conversa.atendente_id != null)
+    // No detalhe da conversa, preserva status real do BD para liberar ações do cabeçalho
+    // (assumir/transferir/encerrar) mesmo sem movimentação.
+    const statusDetalhe = isGroup ? null : conversa.status_atendimento
     const conversaFormatada = {
       ...conversa,
-      status_atendimento: statusAtendimentoParaLista(isGroup, conversa.status_atendimento, exibirBadgeAberta),
+      status_atendimento: statusDetalhe,
+      status_atendimento_lista: statusAtendimentoParaLista(isGroup, conversa.status_atendimento, exibirBadgeAberta),
       exibir_badge_aberta: exibirBadgeAberta,
       clientes: clientesConv,
       is_group: isGroup,
