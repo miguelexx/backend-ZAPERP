@@ -146,6 +146,8 @@ exports.timeoutInatividadeChatbot = async (req, res) => {
 
           if (!updErr) {
             totalProcessadas++
+            const { resetOpcaoInvalidaLimitForConversa } = require('../services/chatbotTriageService')
+            await resetOpcaoInvalidaLimitForConversa(supabase, company_id, conv.id)
             await supabase.from('historico_atendimentos').insert({
               conversa_id: conv.id,
               usuario_id: null,

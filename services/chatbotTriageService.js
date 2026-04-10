@@ -381,6 +381,29 @@ async function resetChatbotStateForConversa(supabaseClient, company_id, conversa
 }
 
 /**
+ * Zera o limite da RPC de opção inválida para um novo ciclo após o atendimento ser encerrado.
+ * Remove só `bot_logs` tipo opcao_invalida e o debounce em memória — não apaga menu_enviado / opcao_valida.
+ */
+async function resetOpcaoInvalidaLimitForConversa(supabaseClient, company_id, conversa_id) {
+  const cid = Number(conversa_id)
+  const cidEmp = Number(company_id)
+  if (!Number.isFinite(cid) || cid <= 0 || !Number.isFinite(cidEmp) || cidEmp <= 0) return
+  lastOpcaoInvalidaSentAt.delete(cid)
+  try {
+    const sb = supabaseClient || supabase
+    const { error } = await sb
+      .from('bot_logs')
+      .delete()
+      .eq('company_id', cidEmp)
+      .eq('conversa_id', cid)
+      .eq('tipo', 'opcao_invalida')
+    if (error) console.warn('[chatbotTriage] resetOpcaoInvalidaLimitForConversa:', error.message)
+  } catch (e) {
+    console.warn('[chatbotTriage] resetOpcaoInvalidaLimitForConversa:', e?.message || e)
+  }
+}
+
+/**
  * Verifica se já enviamos o menu para esta conversa (para sendOnlyFirstTime).
  */
 async function wasMenuSentForConversa(supabaseClient, company_id, conversa_id) {
@@ -396,6 +419,35 @@ async function wasMenuSentForConversa(supabaseClient, company_id, conversa_id) {
     return !!data?.id
   } catch (e) {
     console.warn('[chatbotTriage] wasMenuSentForConversa: erro ao verificar bot_logs', e?.message)
+    return false
+  }
+}
+
+/**
+ * Fallback quando bot_logs não tem menu_enviado mas o menu já foi enviado (ex.: log falhou após insert em mensagens).
+ * Evita não enviar "opção inválida" após boas-vindas reais.
+ */
+async function wasMenuLikelySentViaOutboundMensagens(supabaseClient, company_id, conversa_id, config) {
+  const menu = buildMenuText(config)
+  if (!menu) return false
+  const firstLine = menu
+    .split('\n')
+    .map((l) => l.trim())
+    .find((l) => l.length >= 2)
+  if (!firstLine) return false
+  const needle = firstLine.slice(0, Math.min(80, firstLine.length))
+  try {
+    const { data: rows } = await supabaseClient
+      .from('mensagens')
+      .select('texto')
+      .eq('conversa_id', conversa_id)
+      .eq('company_id', company_id)
+      .eq('direcao', 'out')
+      .order('criado_em', { ascending: false })
+      .limit(40)
+    return (rows || []).some((r) => String(r.texto || '').includes(needle))
+  } catch (e) {
+    console.warn('[chatbotTriage] wasMenuLikelySentViaOutboundMensagens:', e?.message || e)
     return false
   }
 }
@@ -1024,6 +1076,9 @@ async function processIncomingMessage(ctx) {
     menuAlreadySent = true
   } else {
     menuAlreadySent = await wasMenuSentForConversa(sb, company_id, conversa_id)
+    if (!menuAlreadySent) {
+      menuAlreadySent = await wasMenuLikelySentViaOutboundMensagens(sb, company_id, conversa_id, config)
+    }
   }
 
   // Verificar se esta é a primeira mensagem do cliente na conversa.
@@ -1248,6 +1303,7 @@ module.exports = {
   findOptionByKey,
   transferToDepartment,
   resetChatbotStateForConversa,
+  resetOpcaoInvalidaLimitForConversa,
   wasMenuSentForConversa,
   wasOptionSelectedForConversa,
 }

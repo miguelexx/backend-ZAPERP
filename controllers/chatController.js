@@ -2042,6 +2042,9 @@ exports.encerrarChat = async (req, res) => {
 
     if (error) return res.status(500).json({ error: error.message })
 
+    const { resetOpcaoInvalidaLimitForConversa } = require('../services/chatbotTriageService')
+    await resetOpcaoInvalidaLimitForConversa(supabase, company_id, conversa_id)
+
     const resultAt = await registrarAtendimento({
       conversa_id,
       company_id,
