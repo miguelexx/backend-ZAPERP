@@ -38,6 +38,7 @@ const IntentSchema = z.object({
     'METRICS_OVERVIEW',
     'ATENDENTE_MAIS_RAPIDO',
     'ATENDENTE_MAIS_LENTO',
+    'TEMPO_MEDIO_ATENDENTE', // tempo médio de 1ª resposta de um atendente específico (nome)
     'TOP_ATENDENTES_POR_CONVERSAS',
     'CLIENTES_MAIS_ATIVOS',
     'SLA_ALERTAS',
@@ -47,6 +48,7 @@ const IntentSchema = z.object({
     'HISTORICO_CLIENTE',           // histórico completo de um cliente
     'HISTORICO_ATENDENTE',        // conversas de um atendente
     'DETALHES_CONVERSA',          // detalhes de uma conversa específica
+    'ANALISE_TOM_ATENDENTE',      // tom/educação do atendente (usa amostra de mensagens enviadas)
     // GENERAL_CHAT: perguntas livres
     'GENERAL_CHAT',
     'UNKNOWN',
@@ -67,22 +69,20 @@ Para intents de conversas/mensagens, extraia usuario_nome (atendente) e cliente_
 
 Intents permitidos:
 - METRICS_OVERVIEW: visão geral, resumo, métricas gerais, atendimentos de hoje, tickets abertos, SLA geral
-- ATENDENTE_MAIS_RAPIDO: atendente com menor tempo médio de 1ª resposta
-- ATENDENTE_MAIS_LENTO: atendente com maior tempo médio de 1ª resposta
+- ATENDENTE_MAIS_RAPIDO: qual atendente tem o MENOR tempo médio de 1ª resposta (ranking geral, sem nome na pergunta)
+- ATENDENTE_MAIS_LENTO: qual atendente tem o MAIOR tempo médio de 1ª resposta (ranking geral, sem nome na pergunta)
+- TEMPO_MEDIO_ATENDENTE: tempo médio de resposta (ou de 1ª resposta) de UM atendente específico citado pelo nome (ex.: "do João", "da Maria", "funcionário X"); também "quanto tempo X demora para responder"
 - TOP_ATENDENTES_POR_CONVERSAS: ranking de atendentes por número de conversas
 - CLIENTES_MAIS_ATIVOS: clientes que mais enviaram mensagens (direcao='in')
 - SLA_ALERTAS: alertas de SLA, conversas abertas sem resposta dentro do prazo
 - MENSAGENS_USUARIO_CLIENTE: quais mensagens foram trocadas, o que conversaram, histórico de mensagens entre atendente X e cliente Y
 - CONVERSAS_USUARIO_CLIENTE: conversas entre atendente X e cliente Y, resumo do que foi tratado
-- HISTORICO_CLIENTE: histórico completo de um cliente, todas as conversas de um cliente
-- HISTORICO_ATENDENTE: conversas de um atendente, com quem o atendente conversou
+- HISTORICO_CLIENTE: histórico/relatório de conversas de um cliente, "como foram as conversas do cliente X"
+- HISTORICO_ATENDENTE: conversas de um atendente, com quem o atendente conversou, lista de atendimentos do funcionário X
 - DETALHES_CONVERSA: detalhes de uma conversa específica (por id ou por cliente)
-- GENERAL_CHAT: perguntas livres que não são claramente uma métrica específica, por exemplo:
-  * dúvidas gerais sobre a empresa, clientes, atendentes ou produtividade;
-  * perguntas sobre "o que os funcionários andam fazendo";
-  * sugestões de melhoria, organização, scripts, mensagens para clientes;
-  * perguntas de uso geral (ex.: “gere uma planilha em CSV com...”, “crie um roteiro”, etc.).
-- UNKNOWN: somente se a pergunta estiver vazia, sem sentido ou impossível de classificar.
+- ANALISE_TOM_ATENDENTE: se o atendente é educado, cordial, profissional, tom da comunicação, "trata bem o cliente" (precisa de usuario_nome)
+- GENERAL_CHAT: qualquer outra pergunta que possa ser respondida com contexto geral ou conhecimento: melhorar atendimento, dicas, redação, planilhas, ideias, processos, produtividade, e perguntas amplas que não caem em um intent acima. Prefira GENERAL_CHAT a UNKNOWN quando houver dúvida.
+- UNKNOWN: apenas se a pergunta estiver vazia, ilegível ou sem nenhuma relação com atendimento/CRM/WhatsApp.
 
 Regra: se "period_days" não for mencionado, use 7.`
 
@@ -107,6 +107,7 @@ Regra: se "period_days" não for mencionado, use 7.`
 // ── Geração da resposta em texto (2ª chamada à OpenAI) ────────────────────────
 async function formatAnswer({ intent, data, question }) {
   const isGeneral = intent === 'GENERAL_CHAT'
+  const isTom = intent === 'ANALISE_TOM_ATENDENTE'
   const isConversaIntent = [
     'MENSAGENS_USUARIO_CLIENTE',
     'CONVERSAS_USUARIO_CLIENTE',
@@ -115,42 +116,47 @@ async function formatAnswer({ intent, data, question }) {
     'DETALHES_CONVERSA',
   ].includes(intent)
 
-  const system = isConversaIntent
+  const system = isTom
+    ? `Você é o Assistente Inteligente do ZapERP. Responda SEMPRE em português do Brasil.
+
+Tarefa: avaliar cordialidade/profissionalismo do atendente com base APENAS na amostra de mensagens enviadas em "Dados" (campo amostra).
+Regras:
+- Resposta curta: primeiro um veredito direto (sim/não ou "em geral sim, com ressalvas"), depois no máximo 3 bullets com observações objetivas.
+- Se amostra vazia ou sem texto, diga que não há mensagens suficientes no período; não invente tom.
+- Não julgue o caráter da pessoa; avalie só o texto das mensagens para o contexto de atendimento.
+- Não repita frases longas da amostra; cite no máximo trechos muito curtos se necessário.`
+    : isConversaIntent
     ? `Você é o Assistente Inteligente do ZapERP. Responda SEMPRE em português do Brasil.
 
 Regras para respostas sobre conversas e mensagens:
-- Seja claro, objetivo e profissional.
-- Apresente as informações de forma estruturada e fácil de ler.
-- Se houver erro nos dados (ex: "Nenhuma conversa encontrada"), informe de forma educada e sugira verificar nomes/telefones.
-- Ao listar mensagens, use formato cronológico e indique claramente quem enviou cada mensagem (Atendente/Cliente).
-- Nunca invente dados; use APENAS o que foi fornecido no campo "Dados".
-- Se os dados estiverem vazios, explique que não há registros para os critérios informados.`
+- Seja direto: comece pela resposta principal (número, situação ou conclusão) em 1–2 frases.
+- Evite introduções longas e repetições. Liste só o que o usuário precisa saber.
+- Se houver erro nos dados (ex: "Nenhuma conversa encontrada"), diga isso em uma frase e sugira verificar nome/telefone.
+- Ao listar mensagens, ordem cronológica; quem enviou (Atendente/Cliente) de forma compacta.
+- Nunca invente dados; use APENAS o campo "Dados".
+- Para relatório de conversas de um cliente: resuma status, quantidade de conversas no período e destaques factuais; sem prolixidade.`
     : isGeneral
-    ? `Você é o **Assistente Inteligente do ZapERP**, um sistema de WhatsApp corporativo.
+    ? `Você é o Assistente Inteligente do ZapERP (WhatsApp corporativo e CRM).
 Responda SEMPRE em português do Brasil.
 
-Identidade:
-- Você é um auxiliar de um WhatsApp corporativo usado para atender clientes, acompanhar atendimentos e monitorar a produtividade dos atendentes.
-- Você conhece métricas, conversas, atendimentos, clientes, atendentes e avaliações (notas 0-10) com base nos dados recebidos.
-- Quando o usuário perguntar sobre "média das notas", "avaliação de atendimento", "satisfação" ou "nota por atendente", use notasAtendimento em Dados (media, total, distribucao, porAtendente com atendente_nome e media).
+Estilo:
+- Direto e claro. Sem saudações longas nem encerramentos genéricos ("estou à disposição").
+- Responda qualquer pergunta útil ao contexto de atendimento, clientes, equipe, métricas, processos ou redação (mensagens, scripts, planilhas, melhorias).
+- Use bullets só quando listar passos ou itens; caso contrário parágrafos curtos.
+- Dados do sistema: use somente o que vier em "Dados" (overview, topAtendentes, clientesAtivos, slaAlertas, notasAtendimento). Não invente números.
+- Perguntas gerais (como melhorar atendimento, boas práticas): responda com lista enxuta e acionável; sem teoria demais.
+- Planilhas: tabela Markdown ou bloco CSV quando pedido.
+- Se faltar dado no sistema para um pedido específico, diga em uma frase o que falta e o que ainda dá para concluir com o que há.`
+    : `Você é o Assistente Inteligente do ZapERP (métricas). Responda em português do Brasil.
+Regras:
+- Máximo 2 parágrafos curtos OU até 5 bullets; priorize o número principal na primeira linha.
+- Use APENAS números e nomes presentes em "Dados".
+- NUNCA invente valores.
+- Se "Dados" for null, vazio ou sem informação útil, uma frase dizendo que não há dados no período ou critério.
+- Não cite JSON, intent ou termos técnicos.`
 
-Regras gerais:
-- Seja claro, direto e profissional.
-- Pode responder desde dúvidas básicas até solicitações avançadas (roteiros, mensagens prontas, planos, exemplos de planilha em CSV, textos para cliente etc.).
-- Quando fizer exemplos de planilhas, responda em formato de tabela Markdown ou CSV.
-- Se a pergunta não depender de dados do sistema, responda normalmente usando seu conhecimento geral.
-- Se precisar de números do sistema, use SOMENTE os dados recebidos no campo "Dados".
-- Se faltar dado para responder algo específico, explique de forma transparente o que é possível responder com as informações disponíveis.`
-    : `Você é um assistente de BI do ZapERP. Responda em português do Brasil.
-Regras obrigatórias:
-- Seja objetivo e profissional (máximo 3 parágrafos curtos).
-- Use APENAS os números presentes no campo "Dados".
-- NUNCA invente valores, percentuais ou nomes.
-- Se "Dados" for null, vazio ou array vazio, informe que não há dados suficientes no período.
-- Não mencione "dados JSON", "intent" ou detalhes técnicos na resposta.`
-
-  const maxTokens = isConversaIntent ? 2000 : (isGeneral ? 800 : 320)
-  const temp = isConversaIntent ? 0.3 : (isGeneral ? 0.5 : 0.2)
+  const maxTokens = isConversaIntent ? 1800 : (isGeneral ? 900 : (isTom ? 600 : 400))
+  const temp = isConversaIntent ? 0.25 : (isGeneral ? 0.45 : (isTom ? 0.35 : 0.15))
   const resp = await openai.chat.completions.create({
     model: AI_MODEL(),
     temperature: temp,
@@ -361,6 +367,139 @@ async function qAtendenteSpeed(company_id, direction, days) {
     : b.tempo_medio_min - a.tempo_medio_min)
 
   return ranking[0] || null
+}
+
+/**
+ * TEMPO_MEDIO_ATENDENTE: tempo médio de 1ª resposta (min) para um atendente pelo nome.
+ */
+async function qTempoMedioRespostaAtendente(company_id, usuarioNome, days) {
+  const d = clampDays(days)
+  const desde = new Date(Date.now() - d * 24 * 60 * 60 * 1000).toISOString()
+
+  let usuario_id = null
+  if (usuarioNome) {
+    const term = `%${normalizeSearchTerm(usuarioNome)}%`
+    const { data: us } = await supabase
+      .from('usuarios')
+      .select('id, nome')
+      .eq('company_id', company_id)
+      .ilike('nome', term)
+      .limit(1)
+    usuario_id = us?.[0]?.id ?? null
+  }
+
+  if (!usuario_id) {
+    return { error: 'Atendente não encontrado. Informe o nome como cadastrado no sistema.', usuario: null, tempo_medio_min: null, conversas_analisadas: 0, periodo_dias: d }
+  }
+
+  const usuarioRow = (await supabase.from('usuarios').select('id, nome').eq('id', usuario_id).maybeSingle()).data
+
+  const { data: convRows, error: errConv } = await supabase
+    .from('conversas')
+    .select('id')
+    .eq('company_id', company_id)
+    .eq('atendente_id', usuario_id)
+    .gte('criado_em', desde)
+  if (errConv) throw errConv
+  if (!convRows?.length) {
+    return {
+      error: null,
+      usuario: usuarioRow,
+      tempo_medio_min: null,
+      conversas_analisadas: 0,
+      periodo_dias: d,
+      observacao: 'Nenhuma conversa deste atendente no período.',
+    }
+  }
+
+  const convIds = convRows.map((c) => c.id)
+  const { data: msgRows, error: errMsg } = await supabase
+    .from('mensagens')
+    .select('conversa_id, criado_em, direcao')
+    .eq('company_id', company_id)
+    .in('conversa_id', convIds)
+    .in('direcao', ['in', 'out'])
+    .order('criado_em', { ascending: true })
+    .limit(10000)
+  if (errMsg) throw errMsg
+
+  const msgsByConv = buildMsgsByConv(msgRows)
+  let soma = 0
+  let n = 0
+  for (const msgs of msgsByConv.values()) {
+    const diff = calcFirstResponseDiff(msgs)
+    if (diff == null) continue
+    soma += diff
+    n++
+  }
+
+  return {
+    error: null,
+    usuario: usuarioRow,
+    tempo_medio_min: n > 0 ? Math.round((soma / n) * 10) / 10 : null,
+    conversas_analisadas: n,
+    periodo_dias: d,
+  }
+}
+
+/**
+ * ANALISE_TOM_ATENDENTE: amostra de mensagens enviadas (out) pelo atendente para avaliar tom/cordialidade.
+ */
+async function qAmostraTextosAtendente(company_id, usuarioNome, days) {
+  const d = clampDays(days)
+  const desde = new Date(Date.now() - d * 24 * 60 * 60 * 1000).toISOString()
+  const limitMsgs = 80
+
+  let usuario_id = null
+  if (usuarioNome) {
+    const term = `%${normalizeSearchTerm(usuarioNome)}%`
+    const { data: us } = await supabase
+      .from('usuarios')
+      .select('id, nome')
+      .eq('company_id', company_id)
+      .ilike('nome', term)
+      .limit(1)
+    usuario_id = us?.[0]?.id ?? null
+  }
+
+  if (!usuario_id) {
+    return { error: 'Atendente não encontrado. Informe o nome.', usuario: null, amostra: [], periodo_dias: d }
+  }
+
+  const usuario = (await supabase.from('usuarios').select('id, nome').eq('id', usuario_id).maybeSingle()).data
+
+  const { data: convs } = await supabase
+    .from('conversas')
+    .select('id')
+    .eq('company_id', company_id)
+    .eq('atendente_id', usuario_id)
+    .gte('criado_em', desde)
+    .limit(200)
+
+  const convIds = (convs || []).map((c) => c.id)
+  if (!convIds.length) {
+    return { error: null, usuario, amostra: [], periodo_dias: d, observacao: 'Nenhuma conversa no período.' }
+  }
+
+  const { data: msgs } = await supabase
+    .from('mensagens')
+    .select('texto, criado_em, conversa_id')
+    .eq('company_id', company_id)
+    .eq('direcao', 'out')
+    .in('conversa_id', convIds)
+    .gte('criado_em', desde)
+    .order('criado_em', { ascending: false })
+    .limit(limitMsgs)
+
+  const amostra = (msgs || [])
+    .filter((m) => m.texto && String(m.texto).trim().length > 0)
+    .map((m) => ({
+      texto: String(m.texto).trim().slice(0, 500),
+      criado_em: m.criado_em,
+      conversa_id: m.conversa_id,
+    }))
+
+  return { error: null, usuario, amostra, periodo_dias: d, total_mensagens: amostra.length }
 }
 
 /** TOP_ATENDENTES_POR_CONVERSAS: ranking por período, top 5. */
@@ -859,23 +998,10 @@ async function qDetalhesConversa(company_id, clienteNome, clienteTelefone, days)
  * @returns {{ ok: boolean, intent: string, answer: string, data: any }}
  */
 async function answerDashboardQuestion({ company_id, question, period_days }) {
-  const cls = await classifyQuestion(question)
+  let cls = await classifyQuestion(question)
 
   if (cls.intent === 'UNKNOWN') {
-    return {
-      ok: false,
-      intent: 'UNKNOWN',
-      answer:
-        'Não entendi com segurança. Tente perguntar sobre:\n' +
-        '• Resumo das métricas\n' +
-        '• Atendente mais rápido/lento\n' +
-        '• Top atendentes por conversas\n' +
-        '• Clientes mais ativos\n' +
-        '• Alertas de SLA\n' +
-        '• Mensagens entre o atendente X e o cliente Y\n' +
-        '• Histórico de conversas de um cliente ou atendente',
-      data: null,
-    }
+    cls = { ...cls, intent: 'GENERAL_CHAT' }
   }
 
   const days = clampDays(period_days ?? cls.period_days ?? 7)
@@ -892,6 +1018,14 @@ async function answerDashboardQuestion({ company_id, question, period_days }) {
 
     case 'ATENDENTE_MAIS_LENTO':
       data = await qAtendenteSpeed(company_id, 'DESC', days)
+      break
+
+    case 'TEMPO_MEDIO_ATENDENTE':
+      data = await qTempoMedioRespostaAtendente(company_id, cls.usuario_nome || null, days)
+      break
+
+    case 'ANALISE_TOM_ATENDENTE':
+      data = await qAmostraTextosAtendente(company_id, cls.usuario_nome || null, days)
       break
 
     case 'TOP_ATENDENTES_POR_CONVERSAS':
@@ -956,10 +1090,9 @@ async function answerDashboardQuestion({ company_id, question, period_days }) {
       data = null
   }
 
-  const finalIntent = cls.intent === 'UNKNOWN' ? 'GENERAL_CHAT' : cls.intent
-  const answer = await formatAnswer({ intent: finalIntent, data, question })
+  const answer = await formatAnswer({ intent: cls.intent, data, question })
 
-  return { ok: true, intent: finalIntent, answer, data }
+  return { ok: true, intent: cls.intent, answer, data }
 }
 
 module.exports = { answerDashboardQuestion }
