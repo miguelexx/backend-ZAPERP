@@ -57,6 +57,8 @@ if (socketAppOrigin && !allowedSocketOrigins.includes(socketAppOrigin)) {
   allowedSocketOrigins.push(socketAppOrigin)
 }
 
+const internalChatSocket = require('./socket/internalChatSocket')
+
 const io = new Server(server, {
   cors: {
     origin(origin, cb) {
@@ -68,6 +70,8 @@ const io = new Server(server, {
   },
   transports: ['websocket', 'polling']
 })
+
+internalChatSocket.attach(io)
 
 // =====================================================
 // 🔐 middleware de autenticação do socket (MANTIDO)
@@ -144,6 +148,8 @@ io.emitUsuario = (usuario_id, event, payload) => {
 // =====================================================
 io.on('connection', (socket) => {
   const { id, company_id, departamento_ids = [] } = socket.user
+
+  internalChatSocket.handleConnection(socket)
 
   console.log(`🟢 Socket conectado | Usuário ${id} | Empresa ${company_id}`)
 

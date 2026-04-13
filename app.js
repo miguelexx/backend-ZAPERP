@@ -195,6 +195,7 @@ const { apiLimiter } = require('./middleware/rateLimit')
 const aiRoutes = require('./routes/aiRoutes')
 const chatbotDebugRoutes = require('./routes/chatbotDebugRoutes')
 const chatbotManagementRoutes = require('./routes/chatbotManagementRoutes')
+const internalChatRoutes = require('./routes/internalChatRoutes')
 
 // Webhooks já registrados antes do CORS (evita 403 Origin)
 app.use('/dashboard', dashboardRoutes)
@@ -212,6 +213,7 @@ app.use('/opt-in', optInRouter)
 app.use('/opt-out', optOutRouter)
 app.use('/chatbot/debug', chatbotDebugRoutes)
 app.use('/chatbot', chatbotManagementRoutes)
+app.use('/internal-chat', internalChatRoutes)
 
 // /api — prefixo opcional para SaaS; mantém compatibilidade com rotas antigas
 // Aplica apiLimiter globalmente para "rotas de API"
@@ -231,6 +233,7 @@ api.use('/opt-in', optInRouter)
 api.use('/opt-out', optOutRouter)
 api.use('/chatbot/debug', chatbotDebugRoutes)
 api.use('/chatbot', chatbotManagementRoutes)
+api.use('/internal-chat', internalChatRoutes)
 app.use('/api', apiLimiter, api)
 
 // =====================================================
@@ -296,6 +299,7 @@ if (hasFrontendDist) {
     '/opt-in',
     '/opt-out',
     '/chatbot',
+    '/internal-chat',
   ]
 
   app.get('*', (req, res, next) => {
