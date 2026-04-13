@@ -1,4 +1,12 @@
-const { MAX_CONTENT_LENGTH, MESSAGE_TYPE } = require('../repositories/internalChatConstants')
+const {
+  MAX_CONTENT_LENGTH,
+  MAX_ADDRESS_LENGTH,
+  MAX_CONTACT_NAME_LENGTH,
+  MAX_PHONE_LENGTH,
+  MAX_ORG_LENGTH,
+  MESSAGE_TYPE,
+  ALL_MESSAGE_TYPES,
+} = require('../repositories/internalChatConstants')
 const { orderedPair } = require('../helpers/internalChatParticipantPair')
 
 /**
@@ -61,15 +69,128 @@ function validateMessageContent(content) {
 }
 
 /**
- * @param {string} type
+ * Legenda opcional (mídia).
+ * @param {unknown} content
+ * @returns {{ ok: true, content: string } | { ok: false, error: string }}
+ */
+function validateOptionalCaption(content) {
+  if (content === undefined || content === null || content === '') {
+    return { ok: true, content: '' }
+  }
+  const text = typeof content === 'string' ? content : String(content)
+  const noNulls = text.replace(/\u0000/g, '')
+  if (noNulls.length > MAX_CONTENT_LENGTH) {
+    return { ok: false, error: `Legenda excede ${MAX_CONTENT_LENGTH} caracteres` }
+  }
+  return { ok: true, content: noNulls }
+}
+
+/**
+ * @param {unknown} type
  * @returns {{ ok: true, message_type: string } | { ok: false, error: string }}
  */
 function validateMessageType(type) {
-  const t = type === undefined || type === null ? MESSAGE_TYPE.TEXT : String(type)
-  if (t !== MESSAGE_TYPE.TEXT) {
-    return { ok: false, error: 'message_type não suportado nesta fase' }
+  const raw =
+    type === undefined || type === null || type === ''
+      ? MESSAGE_TYPE.TEXT
+      : String(type).trim().toLowerCase()
+  if (!ALL_MESSAGE_TYPES.includes(raw)) {
+    return { ok: false, error: `message_type inválido (use: ${ALL_MESSAGE_TYPES.join(', ')})` }
   }
-  return { ok: true, message_type: t }
+  return { ok: true, message_type: raw }
+}
+
+/**
+ * @param {object} body
+ * @returns {{ ok: true, payload: object, content: string } | { ok: false, error: string }}
+ */
+function validateLocationMessage(body) {
+  const latRaw = body?.latitude ?? body?.lat ?? body?.payload?.latitude
+  const lngRaw = body?.longitude ?? body?.lng ?? body?.payload?.longitude
+  const lat = typeof latRaw === 'string' ? parseFloat(latRaw) : Number(latRaw)
+  const lng = typeof lngRaw === 'string' ? parseFloat(lngRaw) : Number(lngRaw)
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+    return { ok: false, error: 'latitude e longitude obrigatórios e numéricos' }
+  }
+  if (lat < -90 || lat > 90 || lng < -180 || lng > 180) {
+    return { ok: false, error: 'Coordenadas fora do intervalo válido' }
+  }
+  let address = body?.address ?? body?.payload?.address
+  if (address != null) {
+    address = String(address).replace(/\u0000/g, '').trim()
+    if (address.length > MAX_ADDRESS_LENGTH) {
+      return { ok: false, error: `Endereço excede ${MAX_ADDRESS_LENGTH} caracteres` }
+    }
+  } else {
+    address = undefined
+  }
+  const cap = validateOptionalCaption(body?.content ?? body?.caption)
+  if (!cap.ok) return cap
+
+  const payload = { latitude: lat, longitude: lng }
+  if (address) payload.address = address
+
+  return { ok: true, payload, content: cap.content || '' }
+}
+
+/**
+ * @param {object} body
+ * @returns {{ ok: true, payload: object, content: string } | { ok: false, error: string }}
+ */
+function validateContactMessage(body) {
+  const src = body?.contact && typeof body.contact === 'object' ? body.contact : body
+  let name = src?.name != null ? String(src.name).replace(/\u0000/g, '').trim() : ''
+  let phone = src?.phone != null ? String(src.phone).replace(/\u0000/g, '').trim() : ''
+  if (!name) {
+    return { ok: false, error: 'Nome do contato obrigatório' }
+  }
+  if (!phone) {
+    return { ok: false, error: 'Telefone do contato obrigatório' }
+  }
+  if (name.length > MAX_CONTACT_NAME_LENGTH) {
+    return { ok: false, error: `Nome excede ${MAX_CONTACT_NAME_LENGTH} caracteres` }
+  }
+  if (phone.length > MAX_PHONE_LENGTH) {
+    return { ok: false, error: `Telefone excede ${MAX_PHONE_LENGTH} caracteres` }
+  }
+  if (!/^[\d\s+().-]+$/.test(phone)) {
+    return { ok: false, error: 'Telefone com formato inválido' }
+  }
+  let organization = src?.organization
+  if (organization != null) {
+    organization = String(organization).replace(/\u0000/g, '').trim()
+    if (organization.length > MAX_ORG_LENGTH) {
+      return { ok: false, error: `Organização excede ${MAX_ORG_LENGTH} caracteres` }
+    }
+  } else {
+    organization = undefined
+  }
+  const cap = validateOptionalCaption(body?.content ?? body?.caption)
+  if (!cap.ok) return cap
+
+  const payload = { name, phone }
+  if (organization) payload.organization = organization
+
+  return { ok: true, payload, content: cap.content || '' }
+}
+
+/**
+ * URL de mídia servida pelo próprio backend (upload interno).
+ * @param {string} url
+ * @returns {{ ok: true, media_url: string } | { ok: false, error: string }}
+ */
+function validateInternalMediaUrl(url) {
+  if (url == null || typeof url !== 'string') {
+    return { ok: false, error: 'media_url inválida' }
+  }
+  const u = url.trim()
+  if (!u.startsWith('/uploads/')) {
+    return { ok: false, error: 'media_url deve começar com /uploads/' }
+  }
+  if (u.includes('..') || u.includes('\\')) {
+    return { ok: false, error: 'media_url inválida' }
+  }
+  return { ok: true, media_url: u }
 }
 
 /**
@@ -128,7 +249,11 @@ module.exports = {
   assertPositiveCompanyId,
   validatePairRequest,
   validateMessageContent,
+  validateOptionalCaption,
   validateMessageType,
+  validateLocationMessage,
+  validateContactMessage,
+  validateInternalMediaUrl,
   parseRequiredUserId,
   parseConversationIdParam,
   parseMessagesPagination,

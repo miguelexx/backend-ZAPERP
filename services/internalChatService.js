@@ -7,10 +7,15 @@ const {
   assertPositiveCompanyId,
   validatePairRequest,
   validateMessageContent,
+  validateOptionalCaption,
   validateMessageType,
+  validateLocationMessage,
+  validateContactMessage,
+  validateInternalMediaUrl,
   parseMessagesPagination,
   parseOptionalLastReadMessageId,
 } = require('../validators/internalChatValidators')
+const { MEDIA_MESSAGE_TYPES, MESSAGE_TYPE } = require('../repositories/internalChatConstants')
 const presence = require('../socket/internalChatPresence')
 const internalChatSocket = require('../socket/internalChatSocket')
 
@@ -174,7 +179,9 @@ async function listConversations(companyId, currentUserId) {
     const lastMessage = r.last_message_id != null
       ? {
           id: Number(r.last_message_id),
+          message_type: r.last_message_type || MESSAGE_TYPE.TEXT,
           content: r.last_message_content,
+          media_url: r.last_message_media_url ?? null,
           sender_user_id: r.last_message_sender_id != null ? Number(r.last_message_sender_id) : null,
           created_at: r.last_message_created_at,
           is_deleted: !!r.last_message_is_deleted,
@@ -252,35 +259,15 @@ async function listMessages(companyId, conversationId, currentUserId, query) {
  * @param {number} currentUserId
  * @param {object} body
  */
-async function sendMessage(io, companyId, conversationId, currentUserId, body) {
-  const c = assertPositiveCompanyId(companyId)
-  if (!c.ok) return c
-
-  const uid = Number(currentUserId)
-  const cid = Number(conversationId)
-  if (!Number.isFinite(uid) || !Number.isFinite(cid)) {
-    return { ok: false, error: 'Parâmetros inválidos', status: 400 }
-  }
-
-  const part = await repo.isUserParticipant(cid, companyId, uid)
-  if (!part.ok) return { ok: false, error: part.error, status: 500 }
-  if (!part.isParticipant) {
-    return { ok: false, error: 'Acesso negado à conversa', status: 403 }
-  }
-
-  const tv = validateMessageType(body?.message_type)
-  if (!tv.ok) return { ok: false, error: tv.error, status: 400 }
-
-  const mv = validateMessageContent(body?.content)
-  if (!mv.ok) return { ok: false, error: mv.error, status: 400 }
-
-  const ins = await repo.insertMessage({
-    conversation_id: cid,
-    company_id: companyId,
-    sender_user_id: uid,
-    message_type: tv.message_type,
-    content: mv.content,
-  })
+/**
+ * @param {import('socket.io').Server|null|undefined} io
+ * @param {number} companyId
+ * @param {number} cid
+ * @param {number} uid
+ * @param {object} insertPayload
+ */
+async function insertInternalMessageAndEmit(io, companyId, cid, uid, insertPayload) {
+  const ins = await repo.insertMessage(insertPayload)
   if (!ins.ok) {
     return { ok: false, error: ins.error, status: 500 }
   }
@@ -309,6 +296,152 @@ async function sendMessage(io, companyId, conversationId, currentUserId, body) {
   }
 
   return { ok: true, data: { message: outMsg } }
+}
+
+function inferMessageTypeFromMime(mimetype, bodyMessageType) {
+  const wanted = String(bodyMessageType || '').trim().toLowerCase()
+  if (wanted === MESSAGE_TYPE.STICKER) return MESSAGE_TYPE.STICKER
+  if (wanted === MESSAGE_TYPE.IMAGE) return MESSAGE_TYPE.IMAGE
+  if (wanted === MESSAGE_TYPE.AUDIO) return MESSAGE_TYPE.AUDIO
+  if (wanted === MESSAGE_TYPE.VIDEO) return MESSAGE_TYPE.VIDEO
+  if (wanted === MESSAGE_TYPE.DOCUMENT) return MESSAGE_TYPE.DOCUMENT
+
+  const base = String(mimetype || '').split(';')[0].trim().toLowerCase()
+  if (base.startsWith('image/')) return MESSAGE_TYPE.IMAGE
+  if (base.startsWith('audio/')) return MESSAGE_TYPE.AUDIO
+  if (base.startsWith('video/')) return MESSAGE_TYPE.VIDEO
+  return MESSAGE_TYPE.DOCUMENT
+}
+
+async function sendMessage(io, companyId, conversationId, currentUserId, body) {
+  const c = assertPositiveCompanyId(companyId)
+  if (!c.ok) return c
+
+  const uid = Number(currentUserId)
+  const cid = Number(conversationId)
+  if (!Number.isFinite(uid) || !Number.isFinite(cid)) {
+    return { ok: false, error: 'Parâmetros inválidos', status: 400 }
+  }
+
+  const part = await repo.isUserParticipant(cid, companyId, uid)
+  if (!part.ok) return { ok: false, error: part.error, status: 500 }
+  if (!part.isParticipant) {
+    return { ok: false, error: 'Acesso negado à conversa', status: 403 }
+  }
+
+  const tv = validateMessageType(body?.message_type)
+  if (!tv.ok) return { ok: false, error: tv.error, status: 400 }
+
+  const t = tv.message_type
+
+  /** @type {object} */
+  const insertPayload = {
+    conversation_id: cid,
+    company_id: companyId,
+    sender_user_id: uid,
+    message_type: t,
+    content: '',
+    media_url: null,
+    file_name: null,
+    mime_type: null,
+    file_size: null,
+    payload: null,
+  }
+
+  if (t === MESSAGE_TYPE.TEXT) {
+    const mv = validateMessageContent(body?.content)
+    if (!mv.ok) return { ok: false, error: mv.error, status: 400 }
+    insertPayload.content = mv.content
+  } else if (t === MESSAGE_TYPE.LOCATION) {
+    const loc = validateLocationMessage(body || {})
+    if (!loc.ok) return { ok: false, error: loc.error, status: 400 }
+    insertPayload.payload = loc.payload
+    insertPayload.content = loc.content
+  } else if (t === MESSAGE_TYPE.CONTACT) {
+    const ct = validateContactMessage(body || {})
+    if (!ct.ok) return { ok: false, error: ct.error, status: 400 }
+    insertPayload.payload = ct.payload
+    insertPayload.content = ct.content
+  } else if (MEDIA_MESSAGE_TYPES.has(t)) {
+    const mu = validateInternalMediaUrl(body?.media_url)
+    if (!mu.ok) {
+      return {
+        ok: false,
+        error: `${mu.error} Envie o arquivo em POST /conversations/:id/messages/media ou use uma media_url prévia do próprio sistema (/uploads/...).`,
+        status: 400,
+      }
+    }
+    const cap = validateOptionalCaption(body?.content ?? body?.caption)
+    if (!cap.ok) return { ok: false, error: cap.error, status: 400 }
+    insertPayload.media_url = mu.media_url
+    insertPayload.content = cap.content
+    if (body?.file_name != null) {
+      insertPayload.file_name = String(body.file_name).replace(/\u0000/g, '').slice(0, 255)
+    }
+    if (body?.mime_type != null) {
+      insertPayload.mime_type = String(body.mime_type).replace(/\u0000/g, '').slice(0, 200)
+    }
+    const fsz = Number(body?.file_size)
+    if (Number.isFinite(fsz) && fsz >= 0) insertPayload.file_size = fsz
+  } else {
+    return { ok: false, error: 'Tipo de mensagem não suportado', status: 400 }
+  }
+
+  return insertInternalMessageAndEmit(io, companyId, cid, uid, insertPayload)
+}
+
+/**
+ * Upload multipart (multer). Não chama WhatsApp nem webhooks.
+ * @param {import('socket.io').Server|null|undefined} io
+ * @param {object|null} file
+ * @param {object} body
+ */
+async function sendMediaMessage(io, companyId, conversationId, currentUserId, file, body) {
+  const c = assertPositiveCompanyId(companyId)
+  if (!c.ok) return c
+
+  const uid = Number(currentUserId)
+  const cid = Number(conversationId)
+  if (!Number.isFinite(uid) || !Number.isFinite(cid)) {
+    return { ok: false, error: 'Parâmetros inválidos', status: 400 }
+  }
+
+  if (!file || !file.filename) {
+    return { ok: false, error: 'Arquivo obrigatório (multipart)', status: 400 }
+  }
+
+  const part = await repo.isUserParticipant(cid, companyId, uid)
+  if (!part.ok) return { ok: false, error: part.error, status: 500 }
+  if (!part.isParticipant) {
+    return { ok: false, error: 'Acesso negado à conversa', status: 403 }
+  }
+
+  const message_type = inferMessageTypeFromMime(file.mimetype, body?.message_type)
+  if (!MEDIA_MESSAGE_TYPES.has(message_type)) {
+    return { ok: false, error: 'Tipo de mídia não suportado', status: 400 }
+  }
+
+  const cap = validateOptionalCaption(body?.caption ?? body?.content)
+  if (!cap.ok) return { ok: false, error: cap.error, status: 400 }
+
+  const relativeUrl = `/uploads/${file.filename}`
+  const vurl = validateInternalMediaUrl(relativeUrl)
+  if (!vurl.ok) return { ok: false, error: vurl.error, status: 500 }
+
+  const insertPayload = {
+    conversation_id: cid,
+    company_id: companyId,
+    sender_user_id: uid,
+    message_type,
+    content: cap.content || '',
+    media_url: vurl.media_url,
+    file_name: String(file.originalname || file.filename || 'arquivo').replace(/\u0000/g, '').slice(0, 255),
+    mime_type: String(file.mimetype || '').split(';')[0].trim().slice(0, 200),
+    file_size: Number(file.size) >= 0 ? Number(file.size) : null,
+    payload: null,
+  }
+
+  return insertInternalMessageAndEmit(io, companyId, cid, uid, insertPayload)
 }
 
 /**
@@ -381,5 +514,6 @@ module.exports = {
   listConversations,
   listMessages,
   sendMessage,
+  sendMediaMessage,
   markConversationRead,
 }

@@ -59,7 +59,29 @@ exports.listMessages = async (req, res) => {
   return res.json(result.data)
 }
 
-/** POST /internal-chat/conversations/:id/messages */
+/** POST /internal-chat/conversations/:id/messages/media — multipart (arquivo); opcional caption / message_type=sticker */
+exports.sendMediaMessage = async (req, res) => {
+  const { id: userId, company_id } = req.user
+  const cid = parseConversationIdParam(req.params.id)
+  if (!cid.ok) {
+    return res.status(400).json({ error: cid.error })
+  }
+  const io = getIo(req)
+  const result = await internalChatService.sendMediaMessage(
+    io,
+    company_id,
+    cid.id,
+    userId,
+    req.file,
+    req.body || {}
+  )
+  if (!result.ok) {
+    return res.status(result.status || 500).json({ error: result.error })
+  }
+  return res.status(201).json(result.data)
+}
+
+/** POST /internal-chat/conversations/:id/messages — JSON: texto, localização, contato ou mídia já em /uploads/ */
 exports.sendMessage = async (req, res) => {
   const { id: userId, company_id } = req.user
   const cid = parseConversationIdParam(req.params.id)

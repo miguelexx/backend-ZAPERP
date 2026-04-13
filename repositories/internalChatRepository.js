@@ -5,6 +5,9 @@
 const supabase = require('../config/supabase')
 const { TABLES, RPC, MESSAGE_TYPE } = require('./internalChatConstants')
 
+const MESSAGE_SELECT =
+  'id, conversation_id, company_id, sender_user_id, message_type, content, media_url, file_name, mime_type, file_size, payload, is_deleted, created_at, updated_at'
+
 /**
  * @param {number} companyId
  * @param {number} userIdA
@@ -173,7 +176,7 @@ async function insertMessage(payload) {
       ...payload,
       message_type: payload.message_type || MESSAGE_TYPE.TEXT,
     })
-    .select('id, conversation_id, company_id, sender_user_id, message_type, content, is_deleted, created_at, updated_at')
+    .select(MESSAGE_SELECT)
     .single()
 
   if (error) {
@@ -191,7 +194,9 @@ async function listMessagesPage(conversationId, companyId, opts) {
   const { beforeId, limit } = opts
   let q = supabase
     .from(TABLES.MESSAGES)
-    .select('id, sender_user_id, message_type, content, is_deleted, created_at')
+    .select(
+      'id, sender_user_id, message_type, content, media_url, file_name, mime_type, file_size, payload, is_deleted, created_at'
+    )
     .eq('conversation_id', conversationId)
     .eq('company_id', companyId)
     .order('id', { ascending: false })
