@@ -490,8 +490,15 @@ exports.listarConversas = async (req, res) => {
       palavra,
       departamento_id: filter_dep_id,
       incluir_todos_clientes: incluirTodosClientes,
-      minha_fila: minhaFilaRaw
+      minha_fila: minhaFilaRaw,
+      incluir_colaboradores_encaminhar: incluirColabEncRaw,
     } = req.query
+
+    const incluirColaboradoresEncaminhar =
+      incluirColabEncRaw === '1' ||
+      incluirColabEncRaw === 'true' ||
+      incluirColabEncRaw === 1 ||
+      incluirColabEncRaw === true
 
     const minhaFilaAtiva =
       minhaFilaRaw === '1' ||
@@ -507,6 +514,23 @@ exports.listarConversas = async (req, res) => {
         : null
 
     const unreadMap = await obterUnreadMap({ company_id, usuario_id: user_id })
+
+    async function loadColaboradoresEncaminhar() {
+      const { data, error } = await supabase
+        .from('usuarios')
+        .select('id, nome, email, perfil')
+        .eq('company_id', company_id)
+        .eq('ativo', true)
+        .neq('id', user_id)
+        .order('nome', { ascending: true })
+      if (error) return []
+      return (data || []).map((u) => ({
+        usuario_id: Number(u.id),
+        nome: u.nome ?? null,
+        email: u.email ?? null,
+        perfil: u.perfil ?? null,
+      }))
+    }
 
     // Exceção: conversas que o usuário transferiu para outro — aparecem na lista independente do setor
     let conversaIdsTransferidas = []
@@ -529,7 +553,11 @@ exports.listarConversas = async (req, res) => {
         .eq('company_id', company_id)
         .eq('tag_id', tag_id)
       const ids = (tagRows || []).map((r) => r.conversa_id)
-      if (ids.length === 0) return res.json([])
+      if (ids.length === 0) {
+        if (!incluirColaboradoresEncaminhar) return res.json([])
+        const colaboradores_encaminhar = await loadColaboradoresEncaminhar()
+        return res.json({ conversas: [], colaboradores_encaminhar })
+      }
       conversaIdsFilter = ids
     }
 
@@ -566,7 +594,11 @@ exports.listarConversas = async (req, res) => {
       const idsFromTel = (convByTelefone || []).map((c) => c.id)
       const idsFromGrupo = (convByNomeGrupo || []).map((c) => c.id)
       const merged = [...new Set([...idsFromCliente, ...idsFromTel, ...idsFromGrupo, ...idsFromMsg])]
-      if (merged.length === 0) return res.json([])
+      if (merged.length === 0) {
+        if (!incluirColaboradoresEncaminhar) return res.json([])
+        const colaboradores_encaminhar = await loadColaboradoresEncaminhar()
+        return res.json({ conversas: [], colaboradores_encaminhar })
+      }
       conversaIdsFilter = conversaIdsFilter ? conversaIdsFilter.filter((id) => merged.includes(id)) : merged
     }
 
@@ -966,7 +998,11 @@ exports.listarConversas = async (req, res) => {
       })
     }
 
-    return res.json(conversasFormatadas)
+    if (!incluirColaboradoresEncaminhar) {
+      return res.json(conversasFormatadas)
+    }
+    const colaboradores_encaminhar = await loadColaboradoresEncaminhar()
+    return res.json({ conversas: conversasFormatadas, colaboradores_encaminhar })
   } catch (err) {
     console.error(err)
     return res.status(500).json({ error: 'Erro ao listar conversas' })

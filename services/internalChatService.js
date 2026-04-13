@@ -2,6 +2,7 @@
  * Regras de negócio — chat interno (isolado do WhatsApp).
  */
 
+const supabase = require('../config/supabase')
 const repo = require('../repositories/internalChatRepository')
 const {
   assertPositiveCompanyId,
@@ -14,11 +15,164 @@ const {
   validateInternalMediaUrl,
   parseMessagesPagination,
   parseOptionalLastReadMessageId,
+  parseRequiredUserId,
 } = require('../validators/internalChatValidators')
-const { MEDIA_MESSAGE_TYPES, MESSAGE_TYPE } = require('../repositories/internalChatConstants')
+const { MEDIA_MESSAGE_TYPES, MESSAGE_TYPE, MAX_CONTENT_LENGTH } = require('../repositories/internalChatConstants')
 const presence = require('../socket/internalChatPresence')
 const internalChatSocket = require('../socket/internalChatSocket')
-const { enrichInternalChatMessageRow, resolvePublicMediaUrl } = require('../helpers/internalChatMediaUrl')
+const { enrichInternalChatMessageRow, resolvePublicMediaUrl, getPublicApiBase } = require('../helpers/internalChatMediaUrl')
+
+const FORWARD_ATEND_PREFIX = '[Encaminhado do atendimento]'
+
+/**
+ * @param {string|null|undefined} url
+ * @returns {string|null}
+ */
+function toInternalUploadsPath(url) {
+  if (url == null) return null
+  const s = String(url).trim()
+  if (s.startsWith('/uploads/')) return s
+  const base = getPublicApiBase()
+  if (!base) return null
+  if (s.startsWith(`${base}/uploads/`)) return s.slice(base.length)
+  if (s.startsWith(base)) {
+    const tail = s.slice(base.length)
+    if (tail.startsWith('/uploads/')) return tail
+  }
+  return null
+}
+
+/**
+ * @param {string} tipoOriginal
+ * @param {boolean} hasUploadPath
+ * @returns {string|null}
+ */
+function mapWhatsappTipoToInternalMedia(tipoOriginal, hasUploadPath) {
+  if (!hasUploadPath) return null
+  const t = String(tipoOriginal || '').toLowerCase()
+  if (t === 'imagem') return MESSAGE_TYPE.IMAGE
+  if (t === 'video') return MESSAGE_TYPE.VIDEO
+  if (t === 'audio' || t === 'voice') return MESSAGE_TYPE.AUDIO
+  if (t === 'arquivo') return MESSAGE_TYPE.DOCUMENT
+  if (t === 'sticker') return MESSAGE_TYPE.STICKER
+  return null
+}
+
+/**
+ * Corpo insertMessage (sem conversation_id / company_id / sender_user_id).
+ * @param {object} m — linha mensagens
+ * @returns {{ ok: true, insertPayload: object } | { ok: false, error: string, status: number }}
+ */
+function buildForwardInsertFromMensagem(m) {
+  const tipoOriginal = String(m.tipo || 'texto').toLowerCase()
+  const mediaPath = toInternalUploadsPath(m.url)
+  const internalMediaType = mapWhatsappTipoToInternalMedia(tipoOriginal, !!mediaPath)
+
+  const baseFields = () => ({
+    message_type: MESSAGE_TYPE.TEXT,
+    content: '',
+    media_url: null,
+    file_name: null,
+    mime_type: null,
+    file_size: null,
+    payload: null,
+  })
+
+  if (tipoOriginal === 'contact') {
+    const meta = m.contact_meta && typeof m.contact_meta === 'object' ? m.contact_meta : {}
+    const name = String(meta.nome ?? meta.name ?? m.texto ?? 'Contato').trim() || 'Contato'
+    const phoneRaw = String(meta.telefone ?? meta.phone ?? '').trim()
+    const phoneDigits = phoneRaw.replace(/\D/g, '')
+    const phoneForCard = (phoneDigits || phoneRaw || '').trim()
+    if (phoneForCard) {
+      const ct = validateContactMessage({ contact: { name, phone: phoneForCard } })
+      if (ct.ok) {
+        return {
+          ok: true,
+          insertPayload: {
+            ...baseFields(),
+            message_type: MESSAGE_TYPE.CONTACT,
+            content: ct.content,
+            payload: ct.payload,
+          },
+        }
+      }
+    }
+    const line = `${FORWARD_ATEND_PREFIX}\n${name}${phoneRaw ? ` — ${phoneRaw}` : ''}`.slice(0, MAX_CONTENT_LENGTH)
+    const mv = validateMessageContent(line)
+    if (!mv.ok) {
+      return { ok: false, error: mv.error, status: 400 }
+    }
+    return {
+      ok: true,
+      insertPayload: { ...baseFields(), message_type: MESSAGE_TYPE.TEXT, content: mv.content },
+    }
+  }
+
+  if (tipoOriginal === 'location' && m.location_meta && typeof m.location_meta === 'object') {
+    const lm = m.location_meta
+    const addressParts = [lm.nome, lm.endereco].filter((x) => x != null && String(x).trim())
+    const loc = validateLocationMessage({
+      latitude: lm.latitude,
+      longitude: lm.longitude,
+      address: addressParts.length ? addressParts.join(' — ') : undefined,
+      content: '',
+    })
+    if (!loc.ok) {
+      const line = `${FORWARD_ATEND_PREFIX}\n${String(m.texto || 'Localização').trim()}`.slice(0, MAX_CONTENT_LENGTH)
+      const mv = validateMessageContent(line)
+      if (!mv.ok) return { ok: false, error: mv.error, status: 400 }
+      return {
+        ok: true,
+        insertPayload: { ...baseFields(), message_type: MESSAGE_TYPE.TEXT, content: mv.content },
+      }
+    }
+    return {
+      ok: true,
+      insertPayload: {
+        ...baseFields(),
+        message_type: MESSAGE_TYPE.LOCATION,
+        content: loc.content,
+        payload: loc.payload,
+      },
+    }
+  }
+
+  if (internalMediaType && MEDIA_MESSAGE_TYPES.has(internalMediaType)) {
+    const mu = validateInternalMediaUrl(mediaPath)
+    if (mu.ok) {
+      const rawCaption = String(m.texto || '').trim()
+      const capText =
+        rawCaption && !rawCaption.startsWith('(')
+          ? `${FORWARD_ATEND_PREFIX}\n${rawCaption}`.slice(0, MAX_CONTENT_LENGTH)
+          : FORWARD_ATEND_PREFIX
+      const cap = validateOptionalCaption(capText)
+      if (!cap.ok) return { ok: false, error: cap.error, status: 400 }
+      let fileName = m.nome_arquivo != null ? String(m.nome_arquivo).replace(/\u0000/g, '').slice(0, 255) : null
+      if (!fileName && internalMediaType === MESSAGE_TYPE.DOCUMENT) fileName = 'arquivo'
+      return {
+        ok: true,
+        insertPayload: {
+          ...baseFields(),
+          message_type: internalMediaType,
+          media_url: mu.media_url,
+          content: cap.content,
+          file_name: fileName,
+          mime_type: null,
+        },
+      }
+    }
+  }
+
+  const textoOriginal = (m.texto && String(m.texto).trim()) || '(sem texto)'
+  const prefixed = `${FORWARD_ATEND_PREFIX}\n${textoOriginal}`.slice(0, MAX_CONTENT_LENGTH)
+  const mv = validateMessageContent(prefixed)
+  if (!mv.ok) return { ok: false, error: mv.error, status: 400 }
+  return {
+    ok: true,
+    insertPayload: { ...baseFields(), message_type: MESSAGE_TYPE.TEXT, content: mv.content },
+  }
+}
 
 /**
  * @param {object|null} row
@@ -516,6 +670,63 @@ async function markConversationRead(io, companyId, conversationId, currentUserId
  * @param {number} companyId
  * @param {Record<string, unknown>} query
  */
+/**
+ * Replica uma mensagem do atendimento (WhatsApp) no chat interno com outro colaborador.
+ * @param {import('socket.io').Server|null|undefined} io
+ * @param {number} companyId
+ * @param {number} userId
+ * @param {{ mensagem_id?: unknown, conversa_origem_id?: unknown, target_user_id?: unknown }} body
+ */
+async function forwardAtendimentoMessage(io, companyId, userId, body) {
+  const c = assertPositiveCompanyId(companyId)
+  if (!c.ok) return c
+
+  const uid = Number(userId)
+  if (!Number.isFinite(uid) || uid <= 0) {
+    return { ok: false, error: 'Usuário autenticado inválido', status: 401 }
+  }
+
+  const midParsed = parseRequiredUserId(body?.mensagem_id, 'mensagem_id')
+  if (!midParsed.ok) return { ok: false, error: midParsed.error, status: 400 }
+  const convParsed = parseRequiredUserId(body?.conversa_origem_id, 'conversa_origem_id')
+  if (!convParsed.ok) return { ok: false, error: convParsed.error, status: 400 }
+  const tgtParsed = parseRequiredUserId(body?.target_user_id, 'target_user_id')
+  if (!tgtParsed.ok) return { ok: false, error: tgtParsed.error, status: 400 }
+
+  const mid = midParsed.id
+  const convOrig = convParsed.id
+  const tgt = tgtParsed.id
+
+  const { data: m, error: errM } = await supabase
+    .from('mensagens')
+    .select('id, texto, tipo, url, nome_arquivo, contact_meta, location_meta, conversa_id, company_id')
+    .eq('company_id', Number(companyId))
+    .eq('id', mid)
+    .maybeSingle()
+
+  if (errM) return { ok: false, error: errM.message, status: 500 }
+  if (!m) return { ok: false, error: 'Mensagem não encontrada', status: 404 }
+  if (Number(m.conversa_id) !== convOrig) {
+    return { ok: false, error: 'Mensagem não pertence à conversa de origem', status: 400 }
+  }
+
+  const convRes = await createOrGetConversation(io, companyId, uid, tgt)
+  if (!convRes.ok) return convRes
+
+  const internalCid = Number(convRes.data.conversation.id)
+  const built = buildForwardInsertFromMensagem(m)
+  if (!built.ok) return built
+
+  const insertPayload = {
+    ...built.insertPayload,
+    conversation_id: internalCid,
+    company_id: Number(companyId),
+    sender_user_id: uid,
+  }
+
+  return insertInternalMessageAndEmit(io, companyId, internalCid, uid, insertPayload)
+}
+
 async function listClientContacts(companyId, query) {
   const c = assertPositiveCompanyId(companyId)
   if (!c.ok) return c
@@ -557,4 +768,5 @@ module.exports = {
   sendMessage,
   sendMediaMessage,
   markConversationRead,
+  forwardAtendimentoMessage,
 }

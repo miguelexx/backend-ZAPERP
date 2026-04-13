@@ -122,6 +122,17 @@ exports.markRead = async (req, res) => {
   return res.json(result.data)
 }
 
+/** POST /internal-chat/forward-atendimento-message — encaminhar trecho da mensagem do atendimento para o chat interno */
+exports.forwardAtendimentoMessage = async (req, res) => {
+  const { id: userId, company_id } = req.user
+  const io = getIo(req)
+  const result = await internalChatService.forwardAtendimentoMessage(io, company_id, userId, req.body || {})
+  if (!result.ok) {
+    return res.status(result.status || 500).json({ error: result.error })
+  }
+  return res.status(201).json(result.data)
+}
+
 /** GET /internal-chat/status */
 exports.status = (req, res) => {
   const base = getPublicApiBase()

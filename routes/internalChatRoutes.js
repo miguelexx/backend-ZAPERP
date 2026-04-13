@@ -13,6 +13,8 @@ router.get('/employees', internalChatController.listEmployees)
 
 router.get('/client-contacts', internalChatController.listClientContacts)
 
+router.post('/forward-atendimento-message', internalChatController.forwardAtendimentoMessage)
+
 router.post('/conversations', internalChatController.createOrGetConversation)
 router.get('/conversations', internalChatController.listConversations)
 router.get('/conversations/:id/messages', internalChatController.listMessages)
