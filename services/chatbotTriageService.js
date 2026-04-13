@@ -64,6 +64,12 @@ const OPCAO_INVALIDA_DEBOUNCE_MS = 60_000
 const lastWelcomeSentAt = new Map()
 /** Janela de debounce para boas-vindas/menu por conversa. */
 const WELCOME_DEBOUNCE_MS = 15_000
+/** Debounce em memória para fora do horário por conversa. */
+const lastForaHorarioSentAt = new Map()
+/** Lock local por conversa para evitar envio concorrente quase simultâneo. */
+const foraHorarioInFlight = new Set()
+/** Janela curta de idempotência (eventos duplicados em rajada). */
+const FORA_HORARIO_IDEMPOTENCIA_MS = 10_000
 
 /**
  * Instant em que o menu (boas-vindas ou reenvio) foi efetivamente persistido/enviado no servidor.
@@ -222,6 +228,12 @@ const DEFAULT_CHATBOT_CONFIG = {
   timezone: 'America/Sao_Paulo',
   // Janelas múltiplas (ex: manhã 07:40-11:00 e tarde 12:30-18:00). Se vazio, usa horarioInicio/horarioFim.
   horariosJanelas: [],
+  // Debounce imediato por conversa (segundos) para rajadas quase simultâneas.
+  foraHorarioDebounceSegundos: 15,
+  // Cooldown por conversa para nova mensagem fora do horário (minutos).
+  foraHorarioCooldownMinutos: 60,
+  // Máximo de envios fora do horário por conversa em 24h.
+  foraHorarioMaxEnvios24h: 2,
 }
 
 /**
@@ -300,6 +312,21 @@ function validateChatbotConfig(raw) {
       return arr
         .filter((j) => j && typeof j === 'object' && j.inicio && j.fim && /^\d{1,2}:\d{2}$/.test(String(j.inicio).trim()) && /^\d{1,2}:\d{2}$/.test(String(j.fim).trim()))
         .map((j) => ({ inicio: String(j.inicio).trim(), fim: String(j.fim).trim() }))
+    })(),
+    foraHorarioDebounceSegundos: (() => {
+      const v = src.foraHorarioDebounceSegundos ?? DEFAULT_CHATBOT_CONFIG.foraHorarioDebounceSegundos ?? 15
+      const n = Number(v)
+      return Number.isFinite(n) ? Math.max(0, Math.min(300, Math.round(n))) : 15
+    })(),
+    foraHorarioCooldownMinutos: (() => {
+      const v = src.foraHorarioCooldownMinutos ?? DEFAULT_CHATBOT_CONFIG.foraHorarioCooldownMinutos ?? 60
+      const n = Number(v)
+      return Number.isFinite(n) ? Math.max(0, Math.min(1440, Math.round(n))) : 60
+    })(),
+    foraHorarioMaxEnvios24h: (() => {
+      const v = src.foraHorarioMaxEnvios24h ?? DEFAULT_CHATBOT_CONFIG.foraHorarioMaxEnvios24h ?? 2
+      const n = Number(v)
+      return Number.isFinite(n) ? Math.max(1, Math.min(20, Math.round(n))) : 2
     })(),
     intervaloEnvioSegundos: (() => {
       const v = src.intervaloEnvioSegundos ?? DEFAULT_CHATBOT_CONFIG.intervaloEnvioSegundos ?? 3
@@ -889,6 +916,90 @@ async function applyTagIfConfigured(supabaseClient, company_id, conversa_id, tag
   }
 }
 
+async function shouldSendForaHorarioMessage(supabaseClient, company_id, conversa_id, textoMensagem, config) {
+  const convKey = Number(conversa_id)
+  const nowMs = Date.now()
+  const debounceMs = Math.max(0, Number(config?.foraHorarioDebounceSegundos) || 0) * 1000
+  const cooldownMs = Math.max(0, Number(config?.foraHorarioCooldownMinutos) || 0) * 60_000
+  const max24h = Math.max(1, Number(config?.foraHorarioMaxEnvios24h) || 2)
+  const texto = String(textoMensagem || '').trim()
+
+  // 1) debounce local por conversa (rajada no mesmo processo)
+  const lastLocal = lastForaHorarioSentAt.get(convKey) || 0
+  if (debounceMs > 0 && nowMs - lastLocal < debounceMs) {
+    return { ok: false, reason: 'debounce_local' }
+  }
+
+  // 2) idempotência curta cross-process via bot_logs (tipo fora_horario recente)
+  try {
+    const sinceIso = new Date(nowMs - FORA_HORARIO_IDEMPOTENCIA_MS).toISOString()
+    const { data: recentRows } = await supabaseClient
+      .from('bot_logs')
+      .select('id')
+      .eq('company_id', company_id)
+      .eq('conversa_id', conversa_id)
+      .eq('tipo', 'fora_horario')
+      .gte('criado_em', sinceIso)
+      .limit(1)
+    if ((recentRows || []).length > 0) return { ok: false, reason: 'idempotencia_curta' }
+  } catch (e) {
+    console.warn('[chatbotTriage] shouldSendForaHorarioMessage:idempotencia_curta', e?.message || e)
+  }
+
+  // 3) cooldown por conversa + mesma mensagem enviada recentemente
+  try {
+    const sinceIso = new Date(nowMs - Math.max(cooldownMs, 5 * 60_000)).toISOString()
+    const { data: rows } = await supabaseClient
+      .from('mensagens')
+      .select('texto, criado_em')
+      .eq('company_id', company_id)
+      .eq('conversa_id', conversa_id)
+      .eq('direcao', 'out')
+      .order('criado_em', { ascending: false })
+      .gte('criado_em', sinceIso)
+      .limit(20)
+
+    const ultimaIgual = (rows || []).find((r) => String(r?.texto || '').trim() === texto)
+    if (ultimaIgual?.criado_em) {
+      const ms = Date.parse(String(ultimaIgual.criado_em))
+      if (Number.isFinite(ms) && nowMs - ms < Math.max(cooldownMs, 5 * 60_000)) {
+        return { ok: false, reason: 'mensagem_igual_recente' }
+      }
+    }
+
+    if (cooldownMs > 0) {
+      const ultimoBotForaHorario = (rows || []).find((r) => String(r?.texto || '').trim() === texto)
+      if (ultimoBotForaHorario?.criado_em) {
+        const ms = Date.parse(String(ultimoBotForaHorario.criado_em))
+        if (Number.isFinite(ms) && nowMs - ms < cooldownMs) {
+          return { ok: false, reason: 'cooldown' }
+        }
+      }
+    }
+  } catch (e) {
+    console.warn('[chatbotTriage] shouldSendForaHorarioMessage:cooldown', e?.message || e)
+  }
+
+  // 4) limite de envios por conversa em 24h
+  try {
+    const since24hIso = new Date(nowMs - 24 * 60 * 60 * 1000).toISOString()
+    const { count, error } = await supabaseClient
+      .from('bot_logs')
+      .select('*', { count: 'exact', head: true })
+      .eq('company_id', company_id)
+      .eq('conversa_id', conversa_id)
+      .eq('tipo', 'fora_horario')
+      .gte('criado_em', since24hIso)
+    if (!error && (Number(count) || 0) >= max24h) {
+      return { ok: false, reason: 'max_24h' }
+    }
+  } catch (e) {
+    console.warn('[chatbotTriage] shouldSendForaHorarioMessage:max24h', e?.message || e)
+  }
+
+  return { ok: true }
+}
+
 /**
  * Processa mensagem recebida do cliente no contexto do chatbot de triagem.
  * Chamado pelo webhook quando: !fromMe, !isGroup, departamento_id == null.
@@ -1012,7 +1123,28 @@ async function processIncomingMessage(ctx) {
     }
     if (deveEnviarForaHorario) {
       const sb = supabaseClient || supabase
+      const lockKey = `${company_id}:${conversa_id}`
+      if (foraHorarioInFlight.has(lockKey)) {
+        console.log('[chatbotTriage] ❌ skip fora_horario: envio concorrente em andamento', { conversa_id, company_id })
+        return { handled: true }
+      }
+      foraHorarioInFlight.add(lockKey)
       try {
+        // Se houve intervenção humana, não enviar fora-horário para não se intrometer no atendimento.
+        const humanIntervened = await hasHumanIntervenedRecently(sb, company_id, conversa_id, config)
+        if (humanIntervened) {
+          console.log('[chatbotTriage] ❌ skip fora_horario: operador humano já interveio', { conversa_id, company_id })
+          return { handled: true }
+        }
+        const canSend = await shouldSendForaHorarioMessage(sb, company_id, conversa_id, config.mensagemForaHorario, config)
+        if (!canSend.ok) {
+          console.log('[chatbotTriage] ❌ skip fora_horario: regra anti-duplicação', {
+            conversa_id,
+            company_id,
+            reason: canSend.reason,
+          })
+          return { handled: true }
+        }
         await sendWithThrottle(sendMessage, telefone, config.mensagemForaHorario, opts, company_id, config.intervaloEnvioSegundos)
         const { data: rowFora } = await sb
           .from('mensagens')
@@ -1031,9 +1163,15 @@ async function processIncomingMessage(ctx) {
           horario_fim: config.horarioFim,
           dias_semana_desativados: config.diasSemanaDesativados,
           data_fechada: foraDia,
+          debounce_segundos: config.foraHorarioDebounceSegundos,
+          cooldown_minutos: config.foraHorarioCooldownMinutos,
+          max_envios_24h: config.foraHorarioMaxEnvios24h,
         })
+        lastForaHorarioSentAt.set(Number(conversa_id), Date.now())
       } catch (e) {
         console.error('[chatbotTriage] ❌ Erro ao enviar mensagem fora do horário:', e?.message || e)
+      } finally {
+        foraHorarioInFlight.delete(lockKey)
       }
       return { handled: true }
     }

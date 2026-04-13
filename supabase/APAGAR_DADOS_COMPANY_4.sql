@@ -89,11 +89,7 @@ BEGIN
   DELETE FROM public.departamentos
   WHERE company_id = v_company_id;
 
-  DELETE FROM public.grupos
-  WHERE company_id = v_company_id;
-
-  DELETE FROM public.comunidades
-  WHERE company_id = v_company_id;
+  -- grupos/comunidades: tabelas legadas removidas (20260413190000); metadados em conversas.
 
   -- Limpeza complementar: tenta remover em qualquer outra tabela com company_id.
   -- Ignora tabelas já tratadas acima.
@@ -112,8 +108,6 @@ BEGIN
         'tags',
         'usuarios',
         'departamentos',
-        'grupos',
-        'comunidades',
         'empresas'
       )
     ORDER BY c.table_name
