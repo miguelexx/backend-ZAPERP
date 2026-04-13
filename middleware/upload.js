@@ -1,11 +1,8 @@
 const multer = require('multer')
 const path = require('path')
-const fs = require('fs')
+const { ensureUploadsRootExists } = require('../config/uploadsRoot')
 
-const uploadDir = path.join(__dirname, '../uploads')
-if (!fs.existsSync(uploadDir)) {
-  fs.mkdirSync(uploadDir, { recursive: true })
-}
+const uploadDir = ensureUploadsRootExists()
 
 /** MIME permitidos → extensão. Usa base MIME (sem parâmetros) para lookup. */
 const ALLOWED_MIME = new Map([

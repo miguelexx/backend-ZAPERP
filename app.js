@@ -6,8 +6,10 @@ const path = require('path')
 const fs = require('fs')
 const { randomUUID } = require('crypto')
 const { loadEnv, isProduction } = require('./config/env')
+const { getUploadsRoot, ensureUploadsRootExists } = require('./config/uploadsRoot')
 const tagsRoutes = require('./routes/tagRoutes')
 loadEnv()
+ensureUploadsRootExists()
 
 const app = express()
 
@@ -140,7 +142,7 @@ app.options('*', cors(corsOptions))
 // - Força download para não-imagens (evita execução/XSS)
 app.use(
   '/uploads',
-  express.static(path.join(__dirname, 'uploads'), {
+  express.static(getUploadsRoot(), {
     index: false,
     dotfiles: 'deny',
     setHeaders(res, filePath) {
