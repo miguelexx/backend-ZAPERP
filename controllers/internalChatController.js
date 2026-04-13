@@ -9,6 +9,16 @@ function getIo(req) {
   }
 }
 
+/** GET /internal-chat/client-contacts?q=&limit=&offset= — clientes da empresa (CRM) para picker de contato */
+exports.listClientContacts = async (req, res) => {
+  const { company_id } = req.user
+  const result = await internalChatService.listClientContacts(company_id, req.query || {})
+  if (!result.ok) {
+    return res.status(result.status || 500).json({ error: result.error })
+  }
+  return res.json(result.data)
+}
+
 /** GET /internal-chat/employees */
 exports.listEmployees = async (req, res) => {
   const { id: userId, company_id } = req.user

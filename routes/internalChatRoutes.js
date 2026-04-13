@@ -11,6 +11,8 @@ router.get('/status', internalChatController.status)
 
 router.get('/employees', internalChatController.listEmployees)
 
+router.get('/client-contacts', internalChatController.listClientContacts)
+
 router.post('/conversations', internalChatController.createOrGetConversation)
 router.get('/conversations', internalChatController.listConversations)
 router.get('/conversations/:id/messages', internalChatController.listMessages)

@@ -586,6 +586,7 @@ exports.listarConversas = async (req, res) => {
       nome_contato_cache,
       foto_perfil_contato_cache,
       clientes!conversas_cliente_fk ( id, nome, pushname, telefone, foto_perfil, company_id ),
+      atendente:usuarios!conversas_atendente_id_fkey ( id, nome, email ),
       departamentos ( id, nome ),
       mensagens ( texto, criado_em, direcao, tipo, url, nome_arquivo, whatsapp_id, status, autor_usuario_id, contact_meta, location_meta ),
       conversa_tags (
@@ -612,6 +613,7 @@ exports.listarConversas = async (req, res) => {
       nome_contato_cache,
       foto_perfil_contato_cache,
       clientes!conversas_cliente_fk ( id, nome, pushname, telefone, foto_perfil, company_id ),
+      atendente:usuarios!conversas_atendente_id_fkey ( id, nome, email ),
       departamentos ( id, nome ),
       mensagens ( texto, criado_em, direcao, tipo, url, nome_arquivo, whatsapp_id, status, autor_usuario_id, contact_meta, location_meta ),
       conversa_tags (
@@ -639,6 +641,7 @@ exports.listarConversas = async (req, res) => {
       nome_contato_cache,
       foto_perfil_contato_cache,
       clientes!conversas_cliente_fk ( id, nome, pushname, telefone, foto_perfil, company_id ),
+      atendente:usuarios!conversas_atendente_id_fkey ( id, nome, email ),
       departamentos ( id, nome ),
       mensagens ( texto, criado_em, direcao, tipo, url, nome_arquivo, whatsapp_id, status, autor_usuario_id, contact_meta, location_meta )
     `
@@ -829,6 +832,15 @@ exports.listarConversas = async (req, res) => {
       // Grupos não têm estado de atendimento: sem badge "aberta", sem status, sem atendente obrigatório
       const temMensagem = Array.isArray(c.mensagens) && c.mensagens.length > 0
       const exibir_badge_aberta = !isGroup && (temMensagem || (c.atendente_id != null))
+      const atendRow = c.atendente && typeof c.atendente === 'object' ? c.atendente : null
+      const atendenteNome =
+        atendRow && atendRow.nome != null && String(atendRow.nome).trim()
+          ? String(atendRow.nome).trim()
+          : null
+      const atendenteEmail =
+        atendRow && atendRow.email != null && String(atendRow.email).trim()
+          ? String(atendRow.email).trim()
+          : null
       return {
         id: c.id,
         cliente_id: c.cliente_id,
@@ -837,6 +849,8 @@ exports.listarConversas = async (req, res) => {
         status_atendimento: statusAtendimentoParaLista(isGroup, c.status_atendimento, exibir_badge_aberta),
         exibir_badge_aberta,
         atendente_id: c.atendente_id,
+        atendente_nome: atendenteNome,
+        atendente_email: atendenteEmail,
         lida: unreadCount === 0,
         tem_novas_mensagens: unreadCount > 0,
         criado_em: c.criado_em,

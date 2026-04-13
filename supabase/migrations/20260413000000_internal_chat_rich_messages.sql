@@ -75,8 +75,11 @@ COMMENT ON COLUMN public.internal_messages.payload IS 'Metadados: localização 
 
 -- ============================================================
 -- Listagem: incluir tipo e mídia da última mensagem
+-- (DROP obrigatório: PG não permite CREATE OR REPLACE alterando RETURNS TABLE)
 -- ============================================================
-CREATE OR REPLACE FUNCTION public.internal_chat_list_conversations(
+DROP FUNCTION IF EXISTS public.internal_chat_list_conversations(integer, integer);
+
+CREATE FUNCTION public.internal_chat_list_conversations(
   p_company_id integer,
   p_user_id integer
 )

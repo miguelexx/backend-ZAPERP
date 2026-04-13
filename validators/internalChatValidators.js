@@ -4,6 +4,8 @@ const {
   MAX_CONTACT_NAME_LENGTH,
   MAX_PHONE_LENGTH,
   MAX_ORG_LENGTH,
+  MAX_CONTACTS_PER_MESSAGE,
+  MAX_PHONES_PER_CARD,
   MESSAGE_TYPE,
   ALL_MESSAGE_TYPES,
 } = require('../repositories/internalChatConstants')
@@ -134,29 +136,40 @@ function validateLocationMessage(body) {
 }
 
 /**
- * @param {object} body
- * @returns {{ ok: true, payload: object, content: string } | { ok: false, error: string }}
+ * @param {string} phone
+ * @returns {{ ok: true } | { ok: false, error: string }}
  */
-function validateContactMessage(body) {
-  const src = body?.contact && typeof body.contact === 'object' ? body.contact : body
-  let name = src?.name != null ? String(src.name).replace(/\u0000/g, '').trim() : ''
-  let phone = src?.phone != null ? String(src.phone).replace(/\u0000/g, '').trim() : ''
-  if (!name) {
-    return { ok: false, error: 'Nome do contato obrigatório' }
+function validatePhoneString(phone) {
+  const p = String(phone).replace(/\u0000/g, '').trim()
+  if (!p) return { ok: false, error: 'Telefone vazio' }
+  if (p.length > MAX_PHONE_LENGTH) {
+    return { ok: false, error: `Telefone excede ${MAX_PHONE_LENGTH} caracteres` }
   }
-  if (!phone) {
-    return { ok: false, error: 'Telefone do contato obrigatório' }
+  if (!/^[\d\s+().-]+$/.test(p)) {
+    return { ok: false, error: 'Telefone com formato inválido' }
   }
+  return { ok: true }
+}
+
+/**
+ * Um cartão de contato: nome + telefone + org opcional.
+ * @param {object} raw
+ * @returns {{ ok: true, contact: { name: string, phone: string, organization?: string } } | { ok: false, error: string }}
+ */
+function normalizeOneContactCard(raw) {
+  if (!raw || typeof raw !== 'object') {
+    return { ok: false, error: 'Contato inválido' }
+  }
+  const name = raw.name != null ? String(raw.name).replace(/\u0000/g, '').trim() : ''
+  const phone = raw.phone != null ? String(raw.phone).replace(/\u0000/g, '').trim() : ''
+  if (!name) return { ok: false, error: 'Nome do contato obrigatório' }
+  if (!phone) return { ok: false, error: 'Telefone do contato obrigatório' }
   if (name.length > MAX_CONTACT_NAME_LENGTH) {
     return { ok: false, error: `Nome excede ${MAX_CONTACT_NAME_LENGTH} caracteres` }
   }
-  if (phone.length > MAX_PHONE_LENGTH) {
-    return { ok: false, error: `Telefone excede ${MAX_PHONE_LENGTH} caracteres` }
-  }
-  if (!/^[\d\s+().-]+$/.test(phone)) {
-    return { ok: false, error: 'Telefone com formato inválido' }
-  }
-  let organization = src?.organization
+  const pv = validatePhoneString(phone)
+  if (!pv.ok) return pv
+  let organization = raw.organization
   if (organization != null) {
     organization = String(organization).replace(/\u0000/g, '').trim()
     if (organization.length > MAX_ORG_LENGTH) {
@@ -165,13 +178,82 @@ function validateContactMessage(body) {
   } else {
     organization = undefined
   }
+  const contact = { name, phone }
+  if (organization) contact.organization = organization
+  return { ok: true, contact }
+}
+
+/**
+ * Vários contatos numa mensagem OU um nome com vários telefones (cartão estilo agenda).
+ * Payload canônico salvo: { contacts: [{ name, phone, organization? }, ...] }.
+ * Compatível com legado { name, phone } (vira um item em contacts).
+ *
+ * @param {object} body
+ * @returns {{ ok: true, payload: object, content: string } | { ok: false, error: string }}
+ */
+function validateContactMessage(body) {
   const cap = validateOptionalCaption(body?.content ?? body?.caption)
   if (!cap.ok) return cap
 
-  const payload = { name, phone }
-  if (organization) payload.organization = organization
+  /** @type {{ name: string, phone: string, organization?: string }[]} */
+  const contacts = []
 
-  return { ok: true, payload, content: cap.content || '' }
+  if (Array.isArray(body?.contacts) && body.contacts.length > 0) {
+    if (body.contacts.length > MAX_CONTACTS_PER_MESSAGE) {
+      return { ok: false, error: `Máximo de ${MAX_CONTACTS_PER_MESSAGE} contatos por mensagem` }
+    }
+    for (let i = 0; i < body.contacts.length; i += 1) {
+      const one = normalizeOneContactCard(body.contacts[i])
+      if (!one.ok) {
+        return { ok: false, error: `Contato ${i + 1}: ${one.error}` }
+      }
+      contacts.push(one.contact)
+    }
+  } else if (Array.isArray(body?.phones) && body.phones.length > 0 && body?.name != null) {
+    const name = String(body.name).replace(/\u0000/g, '').trim()
+    if (!name) {
+      return { ok: false, error: 'Nome obrigatório quando enviar vários telefones' }
+    }
+    if (name.length > MAX_CONTACT_NAME_LENGTH) {
+      return { ok: false, error: `Nome excede ${MAX_CONTACT_NAME_LENGTH} caracteres` }
+    }
+    if (body.phones.length > MAX_PHONES_PER_CARD) {
+      return { ok: false, error: `Máximo de ${MAX_PHONES_PER_CARD} telefones por contato` }
+    }
+    let organization = body.organization
+    if (organization != null) {
+      organization = String(organization).replace(/\u0000/g, '').trim()
+      if (organization.length > MAX_ORG_LENGTH) {
+        return { ok: false, error: `Organização excede ${MAX_ORG_LENGTH} caracteres` }
+      }
+    } else {
+      organization = undefined
+    }
+    for (let i = 0; i < body.phones.length; i += 1) {
+      const pv = validatePhoneString(body.phones[i])
+      if (!pv.ok) {
+        return { ok: false, error: `Telefone ${i + 1}: ${pv.error}` }
+      }
+      const phone = String(body.phones[i]).replace(/\u0000/g, '').trim()
+      const card = { name, phone }
+      if (organization) card.organization = organization
+      contacts.push(card)
+    }
+  } else {
+    const src = body?.contact && typeof body.contact === 'object' ? body.contact : body
+    const one = normalizeOneContactCard(src)
+    if (!one.ok) return one
+    contacts.push(one.contact)
+  }
+
+  if (contacts.length === 0) {
+    return { ok: false, error: 'Informe ao menos um contato ou uma lista phones[]' }
+  }
+  if (contacts.length > MAX_CONTACTS_PER_MESSAGE) {
+    return { ok: false, error: `Máximo de ${MAX_CONTACTS_PER_MESSAGE} linhas por mensagem` }
+  }
+
+  return { ok: true, payload: { contacts }, content: cap.content || '' }
 }
 
 /**

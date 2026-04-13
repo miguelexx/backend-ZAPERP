@@ -8,6 +8,7 @@ const TABLES = {
   MESSAGES: 'internal_messages',
   READS: 'internal_conversation_reads',
   USUARIOS: 'usuarios',
+  CLIENTES: 'clientes',
 }
 
 const RPC = {
@@ -42,6 +43,10 @@ const MAX_ADDRESS_LENGTH = 500
 const MAX_CONTACT_NAME_LENGTH = 200
 const MAX_PHONE_LENGTH = 40
 const MAX_ORG_LENGTH = 200
+/** Máximo de linhas (pessoas ou número+pessoa) numa mensagem de contato */
+const MAX_CONTACTS_PER_MESSAGE = 50
+/** Máximo de telefones num mesmo cartão (name + phones[]) */
+const MAX_PHONES_PER_CARD = 25
 
 module.exports = {
   TABLES,
@@ -54,4 +59,6 @@ module.exports = {
   MAX_CONTACT_NAME_LENGTH,
   MAX_PHONE_LENGTH,
   MAX_ORG_LENGTH,
+  MAX_CONTACTS_PER_MESSAGE,
+  MAX_PHONES_PER_CARD,
 }

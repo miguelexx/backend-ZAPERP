@@ -281,6 +281,36 @@ async function upsertReadState(payload) {
   return { ok: true, row: data }
 }
 
+/**
+ * Clientes da empresa para preencher o modal "Compartilhar contato" no chat interno.
+ * @param {number} companyId
+ * @param {{ q?: string, limit?: number, offset?: number }} opts
+ */
+async function listClientContactsForPicker(companyId, opts = {}) {
+  const lim = Math.min(100, Math.max(1, parseInt(String(opts.limit ?? '50'), 10) || 50))
+  const off = Math.max(0, parseInt(String(opts.offset ?? '0'), 10) || 0)
+  const end = off + lim - 1
+
+  let q = supabase
+    .from(TABLES.CLIENTES)
+    .select('id, nome, pushname, telefone, foto_perfil', { count: 'exact' })
+    .eq('company_id', companyId)
+    .order('nome', { ascending: true, nullsFirst: false })
+    .range(off, end)
+
+  const rawQ = opts.q != null ? String(opts.q).trim() : ''
+  if (rawQ.length > 0) {
+    const term = `%${rawQ.slice(0, 80)}%`
+    q = q.or(`nome.ilike.${term},pushname.ilike.${term},telefone.ilike.${term}`)
+  }
+
+  const { data, error, count } = await q
+  if (error) {
+    return { ok: false, error: error.message }
+  }
+  return { ok: true, rows: data || [], total: typeof count === 'number' ? count : null }
+}
+
 module.exports = {
   ensurePairConversation,
   rpcListConversations,
@@ -294,4 +324,5 @@ module.exports = {
   getLatestMessageId,
   messageBelongsToConversation,
   upsertReadState,
+  listClientContactsForPicker,
 }

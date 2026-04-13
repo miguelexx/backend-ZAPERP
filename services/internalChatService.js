@@ -508,9 +508,47 @@ async function markConversationRead(io, companyId, conversationId, currentUserId
   return { ok: true, data: { read: up.row } }
 }
 
+/**
+ * Clientes (CRM) da empresa — para o modal de compartilhar contato no chat interno.
+ * @param {number} companyId
+ * @param {Record<string, unknown>} query
+ */
+async function listClientContacts(companyId, query) {
+  const c = assertPositiveCompanyId(companyId)
+  if (!c.ok) return c
+
+  const res = await repo.listClientContactsForPicker(companyId, {
+    q: query?.q,
+    limit: query?.limit,
+    offset: query?.offset,
+  })
+  if (!res.ok) return { ok: false, error: res.error, status: 500 }
+
+  const contacts = (res.rows || []).map((r) => {
+    const nome = r.nome != null ? String(r.nome).trim() : ''
+    const push = r.pushname != null ? String(r.pushname).trim() : ''
+    return {
+      id: Number(r.id),
+      name: nome || push || null,
+      pushname: push || null,
+      phone: r.telefone != null ? String(r.telefone).trim() : null,
+      avatar: r.foto_perfil != null ? String(r.foto_perfil).trim() : null,
+    }
+  })
+
+  return {
+    ok: true,
+    data: {
+      contacts,
+      total: res.total,
+    },
+  }
+}
+
 module.exports = {
   createOrGetConversation,
   listEmployees,
+  listClientContacts,
   listConversations,
   listMessages,
   sendMessage,
