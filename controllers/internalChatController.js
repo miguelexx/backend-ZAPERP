@@ -1,5 +1,6 @@
 const internalChatService = require('../services/internalChatService')
 const { parseRequiredUserId, parseConversationIdParam } = require('../validators/internalChatValidators')
+const { getPublicApiBase } = require('../helpers/internalChatMediaUrl')
 
 function getIo(req) {
   try {
@@ -123,9 +124,12 @@ exports.markRead = async (req, res) => {
 
 /** GET /internal-chat/status */
 exports.status = (req, res) => {
+  const base = getPublicApiBase()
   return res.json({
     module: 'internal-chat',
     ok: true,
     company_id: req.user?.company_id ?? null,
+    /** Base usada para absolutizar /uploads/ em mídias (APP_URL/BASE_URL). */
+    public_media_base_url: base || null,
   })
 }

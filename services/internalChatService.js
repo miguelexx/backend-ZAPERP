@@ -18,6 +18,7 @@ const {
 const { MEDIA_MESSAGE_TYPES, MESSAGE_TYPE } = require('../repositories/internalChatConstants')
 const presence = require('../socket/internalChatPresence')
 const internalChatSocket = require('../socket/internalChatSocket')
+const { enrichInternalChatMessageRow, resolvePublicMediaUrl } = require('../helpers/internalChatMediaUrl')
 
 /**
  * @param {object|null} row
@@ -181,7 +182,7 @@ async function listConversations(companyId, currentUserId) {
           id: Number(r.last_message_id),
           message_type: r.last_message_type || MESSAGE_TYPE.TEXT,
           content: r.last_message_content,
-          media_url: r.last_message_media_url ?? null,
+          media_url: resolvePublicMediaUrl(r.last_message_media_url ?? null),
           sender_user_id: r.last_message_sender_id != null ? Number(r.last_message_sender_id) : null,
           created_at: r.last_message_created_at,
           is_deleted: !!r.last_message_is_deleted,
@@ -238,7 +239,7 @@ async function listMessages(companyId, conversationId, currentUserId, query) {
   if (!page.ok) return { ok: false, error: page.error, status: 500 }
 
   const messages = (page.messages || []).map((m) => ({
-    ...m,
+    ...enrichInternalChatMessageRow(m),
     is_mine: Number(m.sender_user_id) === uid,
   }))
 
@@ -272,6 +273,8 @@ async function insertInternalMessageAndEmit(io, companyId, cid, uid, insertPaylo
     return { ok: false, error: ins.error, status: 500 }
   }
 
+  const rowPublic = enrichInternalChatMessageRow(ins.row)
+
   const participants = await repo.listParticipants(cid, companyId)
   const userIds = participants.ok ? participants.rows.map((p) => p.user_id) : []
   const senderId = Number(ins.row.sender_user_id)
@@ -283,7 +286,7 @@ async function insertInternalMessageAndEmit(io, companyId, cid, uid, insertPaylo
       if (!Number.isFinite(recipientId)) continue
       io.internalChatEmitUser(recipientId, ev, {
         message: {
-          ...ins.row,
+          ...rowPublic,
           is_mine: senderId === recipientId,
         },
       })
@@ -291,7 +294,7 @@ async function insertInternalMessageAndEmit(io, companyId, cid, uid, insertPaylo
   }
 
   const outMsg = {
-    ...ins.row,
+    ...rowPublic,
     is_mine: senderId === uid,
   }
 
