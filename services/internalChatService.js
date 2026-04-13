@@ -230,10 +230,15 @@ async function listMessages(companyId, conversationId, currentUserId, query) {
   const page = await repo.listMessagesPage(cid, companyId, { beforeId: before_id, limit })
   if (!page.ok) return { ok: false, error: page.error, status: 500 }
 
+  const messages = (page.messages || []).map((m) => ({
+    ...m,
+    is_mine: Number(m.sender_user_id) === uid,
+  }))
+
   return {
     ok: true,
     data: {
-      messages: page.messages,
+      messages,
       next_before_id: page.next_before_id,
       limit,
     },
@@ -282,13 +287,28 @@ async function sendMessage(io, companyId, conversationId, currentUserId, body) {
 
   const participants = await repo.listParticipants(cid, companyId)
   const userIds = participants.ok ? participants.rows.map((p) => p.user_id) : []
+  const senderId = Number(ins.row.sender_user_id)
 
   if (io && userIds.length) {
     const ev = internalChatSocket.INTERNAL_CHAT_EVENTS.MESSAGE_CREATED
-    io.internalChatEmitUsers(userIds, ev, { message: ins.row })
+    for (const rid of userIds) {
+      const recipientId = Number(rid)
+      if (!Number.isFinite(recipientId)) continue
+      io.internalChatEmitUser(recipientId, ev, {
+        message: {
+          ...ins.row,
+          is_mine: senderId === recipientId,
+        },
+      })
+    }
   }
 
-  return { ok: true, data: { message: ins.row } }
+  const outMsg = {
+    ...ins.row,
+    is_mine: senderId === uid,
+  }
+
+  return { ok: true, data: { message: outMsg } }
 }
 
 /**
