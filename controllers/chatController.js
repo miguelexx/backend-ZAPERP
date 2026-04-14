@@ -111,6 +111,14 @@ function emitirEventoEmpresaConversa(io, company_id, conversa_id, eventName, pay
   }
   io.to(`empresa_${company_id}`).emit(eventName, payload)
 }
+
+/** Quando `emitirConversaAtualizada` usa skipAtualizarConversa (evita flicker), ainda força sync da lista lateral / “Minha fila”. */
+function emitirSincronizacaoListaConversas(io, company_id, conversa_id) {
+  if (!io || company_id == null || conversa_id == null) return
+  const ev = io.EVENTS?.ATUALIZAR_CONVERSA || 'atualizar_conversa'
+  io.to(`empresa_${Number(company_id)}`).emit(ev, { id: Number(conversa_id) })
+}
+
 // =====================================================
 // ⭐ LOCK REALTIME (SEMANA 3)
 // =====================================================
@@ -2062,6 +2070,7 @@ exports.assumirChat = async (req, res) => {
       // Payload completo para todos atualizarem lista (atendente_id, atendente_atribuido_em) em tempo real
       // Evita refetch agressivo no frontend (mantém usuário nas últimas mensagens).
       emitirConversaAtualizada(io, company_id, conversa_id, { ...data, exibir_badge_aberta: true }, { skipAtualizarConversa: true })
+      emitirSincronizacaoListaConversas(io, company_id, conversa_id)
       emitirLock(io, conversa_id, user_id)
     }
 
@@ -2114,11 +2123,15 @@ exports.encerrarChat = async (req, res) => {
         company_id,
         conversa_id,
         io.EVENTS?.CONVERSA_ENCERRADA || 'conversa_encerrada',
-        data
+        {
+          ...data,
+          lista_realtime: { minha_fila: true, motivo: 'encerrada' }
+        }
       )
       emitirLock(io, conversa_id, null)
       // Evita reposicionamento para mensagens antigas após encerrar.
       emitirConversaAtualizada(io, company_id, conversa_id, { ...data }, { skipAtualizarConversa: true })
+      emitirSincronizacaoListaConversas(io, company_id, conversa_id)
     }
 
     // Enviar mensagem de finalização se configurado no chatbot de triagem
@@ -2159,6 +2172,7 @@ exports.encerrarChat = async (req, res) => {
                   const payload = await enrichMensagemComAutorUsuario(supabase, company_id, msgInsert)
                   emitirEventoEmpresaConversa(io2, company_id, conversa_id, io2.EVENTS?.NOVA_MENSAGEM || 'nova_mensagem', payload)
                   emitirConversaAtualizada(io2, company_id, conversa_id, { ...data }, { skipAtualizarConversa: true })
+                  emitirSincronizacaoListaConversas(io2, company_id, conversa_id)
                 }
               }
             }
@@ -2213,11 +2227,15 @@ exports.reabrirChat = async (req, res) => {
         company_id,
         conversa_id,
         io.EVENTS?.CONVERSA_REABERTA || 'conversa_reaberta',
-        data
+        {
+          ...data,
+          lista_realtime: { minha_fila: true, motivo: 'reaberta' }
+        }
       )
       emitirLock(io, conversa_id, null)
       // Evita reposicionamento indevido ao reabrir.
       emitirConversaAtualizada(io, company_id, conversa_id, { ...data }, { skipAtualizarConversa: true })
+      emitirSincronizacaoListaConversas(io, company_id, conversa_id)
     }
 
     return res.json({ ok: true, conversa: data })
@@ -2313,6 +2331,7 @@ exports.transferirChat = async (req, res) => {
         {
           ...data,
           company_id: Number(company_id),
+          lista_realtime: { minha_fila: true, motivo: 'transferencia', novo_atendente_id: Number(para_usuario_id) },
           /** Quem deve tratar alerta sonoro/toast específico é este usuário (via evento privado). */
           notificacao_rica_usuario_id: Number(para_usuario_id),
           /** Front: em `conversa_transferida` não repetir som de nova msg para o destinatário. */
@@ -2339,6 +2358,8 @@ exports.transferirChat = async (req, res) => {
         cliente_preview: nomeCliente
           ? { nome: nomeCliente, telefone: data?.telefone ?? null }
           : { nome: null, telefone: data?.telefone ?? null },
+        /** Front: incluir na “Minha fila” (em atendimento com você) sem esperar polling */
+        lista_realtime: { minha_fila: true, motivo: 'recebeu_transferencia' },
         /** Contrato estável para o front mapear áudio / vibra / Notification API */
         ui: {
           variant: 'handoff',
@@ -2356,14 +2377,19 @@ exports.transferirChat = async (req, res) => {
         conversa_id: Number(conversa_id),
         para_usuario_id: para_usuario_id,
         para_usuario_nome: targetUser.nome,
-        timestamp: new Date().toISOString()
+        timestamp: new Date().toISOString(),
+        /** Front: refetch ou patch “Minha fila” — conversa deixa de ser “minha” após transferir */
+        lista_realtime: {
+          minha_fila: true,
+          motivo: 'transferiu_para_outro',
+          novo_atendente_id: Number(para_usuario_id)
+        }
       })
       
-      // Atualizar conversa para todos
-      emitirConversaAtualizada(io, company_id, conversa_id, { 
-        id: Number(conversa_id),
-        atendente_id: para_usuario_id,
-        status_atendimento: 'em_atendimento'
+      // Linha completa da conversa (setor, nome, status, atendente) para botões e filtros em tempo real
+      emitirConversaAtualizada(io, company_id, conversa_id, {
+        ...data,
+        company_id: Number(company_id)
       })
     }
 
@@ -2456,7 +2482,12 @@ exports.transferirSetor = async (req, res) => {
 
     const io = req.app.get('io')
     if (io) {
-      const payload = { id: Number(conversa_id), departamento_id: departamentoIdFinal, setor: remover ? null : novoDep.nome }
+      const payload = {
+        ...atualizada,
+        departamento_id: departamentoIdFinal,
+        setor: remover ? null : novoDep?.nome ?? null,
+        lista_realtime: { minha_fila: true, motivo: 'transferiu_setor' }
+      }
       emitirConversaAtualizada(io, company_id, conversa_id, payload)
       emitirLock(io, conversa_id, null)
       if (depAntigoId != null) {
@@ -2465,7 +2496,7 @@ exports.transferirSetor = async (req, res) => {
       if (departamentoIdFinal != null) {
         emitirDepartamento(io, departamentoIdFinal, io.EVENTS?.CONVERSA_ATUALIZADA || 'conversa_atualizada', payload)
       }
-      io.to(`empresa_${company_id}`).emit('atualizar_conversa', { id: Number(conversa_id) })
+      // `emitirConversaAtualizada` já emite `atualizar_conversa` na empresa (skip padrão false).
     }
 
     return res.json({
