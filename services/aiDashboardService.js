@@ -312,14 +312,16 @@ Regras para respostas sobre conversas, mensagens, buscas e rankings:
 - Seja direto: comece pela resposta principal (número, situação ou conclusão) em 1–2 frases.
 - Evite introduções longas e repetições. Liste só o que o usuário precisa saber.
 - Se Dados.mensagens for um array com itens, houve interação retornada pelo sistema: resuma o conteúdo; NUNCA diga que não houve conversa ou mensagens entre as partes para esse recorte.
+- CRÍTICO — tempo e datas: se existir Dados.recorte_temporal, siga à risca Dados.recorte_temporal.instrucao_temporal_obrigatoria. Só use "hoje", "ontem" ou "nesta conversa de hoje" se Dados.recorte_temporal.pode_usar_hoje_no_texto for true; caso contrário use "nas mensagens retornadas", "no período analisado" ou cite Dados.recorte_temporal.primeiro_data_exibicao / ultimo_data_exibicao. Nunca confunda a janela de consulta (Dados.periodo_dias) com o dia civil das mensagens. O mesmo vale para buscas com Dados.evidencias quando houver recorte_temporal.
+- Resumo inteligente: se existir Dados.orientacao_resumo_ia e flags em mensagens, priorize flags.peso_resumo alto; trate flags.provavel_automatica como mensagem de roteiro/sistema (mencione de leve, não como foco principal); destaque conteúdo útil do cliente e do atendente; para mídias use tipo, nome_arquivo e url quando existirem; não repita várias linhas quase idênticas (use Dados.mensagens_compactas como apoio narrativo se ajudar).
 - Se houver erro nos dados (ex: "Nenhuma conversa encontrada"), diga isso em uma frase e sugira verificar nome/telefone ou ampliar o período.
 - Ao listar mensagens ou evidências, ordem cronológica quando fizer sentido; quem enviou (Atendente/Cliente) de forma compacta.
 - Nunca invente dados; use APENAS o campo "Dados". Se "Dados" não contiver a informação pedida, diga explicitamente que o sistema não retornou essa informação no escopo atual.
 - Ao citar trechos ou achados, mencione explicitamente os IDs presentes em "Dados": conversa_id, mensagem_id, cliente_id, usuario_id / atendente_id, atendimento_id, avaliacao_id, internal_conversation_id, internal_message_id quando existirem.
-- Separe claramente: (1) FATO — só o que está sustentado por números ou textos em "Dados"; (2) INFERÊNCIA LIMITADA — só quando o enunciado disser que é interpretação sobre o subconjunto retornado (nunca como certeza absoluta); (3) LACUNA — o que não consta em "Dados" ou o que o recorte de período/limite de linhas pode ter deixado de fora.
+- Separe com clareza (texto fluido, não robótico): **Fatos:** (datas, IDs, quem disse o quê com base nas mensagens); **Inferência limitada:** (interpretação cautelosa); **Lacunas:** (o que faltou no recorte); **Alertas e ambiguidade:** — omita seções vazias.
 - Não extrapole intenção de venda, humor ou qualidade além do que os textos ou métricas em "Dados" sustentam.
 - Se houver campo "avisos" com ambiguidade_usuario ou ambiguidade_cliente, explique que o filtro por pessoa não foi aplicado e liste os candidatos com id.
-- Se existir "analitica_ui" em Dados, incorpore no texto: período efetivo em dias, se o período veio do pedido (periodo_definido_na_requisicao) e os alertas (codigo, mensagem, candidatos). Use os rótulos exatos em markdown quando houver conteúdo: **Fatos:** , **Inferência limitada:** , **Lacunas:** , **Alertas e ambiguidade:** — omita seções vazias.
+- Se existir "analitica_ui" em Dados, incorpore no texto: período efetivo em dias, se o período veio do pedido (periodo_definido_na_requisicao), recorte_mensagens (datas reais) e os alertas (codigo, mensagem, candidatos). Não contradiga analitica_ui.recorte_mensagens.
 - Para relatório de conversas de um cliente: resuma status, quantidade de conversas no período e destaques factuais; sem prolixidade.`
     : isGeneral
     ? `Você é o Assistente Inteligente do ZapERP (WhatsApp corporativo e CRM).
@@ -353,7 +355,7 @@ Regras:
       { role: 'system', content: system },
       {
         role: 'user',
-        content: `Pergunta: ${question}\nIntenção: ${intent}\nDados: ${JSON.stringify(data)}\n\nNota: se Dados.analitica_ui existir, use-o para período, alertas e ambiguidades; não contradiga esses metadados.`,
+        content: `Pergunta: ${question}\nIntenção: ${intent}\nDados: ${JSON.stringify(data)}\n\nNotas: (1) Se Dados.analitica_ui existir, use-o para período, alertas e ambiguidades; não contradiga. (2) Se Dados.recorte_temporal existir, a linguagem sobre "hoje"/datas deve obedecer a recorte_temporal.instrucao_temporal_obrigatoria.`,
       },
     ],
   })
@@ -978,6 +980,118 @@ function filtrarConversasIndividuais(rows) {
   })
 }
 
+const RECORTE_TZ = 'America/Sao_Paulo'
+
+function calendarKeyInTz(iso, tz = RECORTE_TZ) {
+  if (!iso) return null
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return null
+  return new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' }).format(d)
+}
+
+function formatDateTimeBR(iso, tz = RECORTE_TZ) {
+  if (!iso) return ''
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return String(iso)
+  return d.toLocaleString('pt-BR', { timeZone: tz, dateStyle: 'short', timeStyle: 'short' })
+}
+
+function calendarKeyToBRLabel(yyyyMmDd) {
+  if (!yyyyMmDd || !/^\d{4}-\d{2}-\d{2}$/.test(yyyyMmDd)) return yyyyMmDd
+  const [y, m, d] = yyyyMmDd.split('-')
+  return `${d}/${m}/${y}`
+}
+
+/** Metadados das datas reais das mensagens — evita "hoje" indevido no texto gerado. */
+function buildRecorteTemporalMeta(mensagens, ctx) {
+  const list = (mensagens || []).filter((m) => m && m.criado_em)
+  if (!list.length) return null
+  let minIso = list[0].criado_em
+  let maxIso = list[0].criado_em
+  for (const m of list) {
+    if (m.criado_em < minIso) minIso = m.criado_em
+    if (m.criado_em > maxIso) maxIso = m.criado_em
+  }
+  const keys = [...new Set(list.map((m) => calendarKeyInTz(m.criado_em)).filter(Boolean))].sort()
+  const todayKey = calendarKeyInTz(new Date().toISOString())
+  const minK = keys[0]
+  const maxK = keys[keys.length - 1]
+  const apenas_um_dia = minK === maxK
+  const esse_dia_eh_hoje = minK === todayKey && maxK === todayKey
+  const pode_usar_hoje = apenas_um_dia && esse_dia_eh_hoje
+  const instrucao = pode_usar_hoje
+    ? `Todas as mensagens em Dados.mensagens são do dia civil atual (${calendarKeyToBRLabel(todayKey)}, fuso ${RECORTE_TZ}). Pode usar "hoje" só se ficar explícito que se refere a essas mensagens; prefira citar a data (${calendarKeyToBRLabel(todayKey)}).`
+    : `Datas reais das mensagens retornadas: de ${calendarKeyToBRLabel(minK)} a ${calendarKeyToBRLabel(maxK)} (fuso ${RECORTE_TZ}). É PROIBIDO usar "hoje", "ontem" ou "nesta conversa de hoje" para esse conjunto — use "nas mensagens retornadas", "no período analisado" ou cite ${calendarKeyToBRLabel(minK)}${minK !== maxK ? ` a ${calendarKeyToBRLabel(maxK)}` : ''}.`
+
+  return {
+    fuso: RECORTE_TZ,
+    primeiro_criado_em: minIso,
+    ultimo_criado_em: maxIso,
+    primeiro_data_exibicao: formatDateTimeBR(minIso),
+    ultimo_data_exibicao: formatDateTimeBR(maxIso),
+    primeiro_dia_calendario: minK,
+    ultimo_dia_calendario: maxK,
+    dias_distintos_calendario: keys.length,
+    pode_usar_hoje_no_texto: pode_usar_hoje,
+    janela_consulta_dias: ctx?.periodo_dias ?? null,
+    periodo_definido_na_requisicao: ctx?.periodo_explicito === true,
+    instrucao_temporal_obrigatoria: instrucao,
+    texto_cabecalho_ui: `Análise de ${list.length} mensagem(ns) — ${formatDateTimeBR(minIso)} → ${formatDateTimeBR(maxIso)} (${RECORTE_TZ})`,
+  }
+}
+
+const RE_AUTO = /(escolha (um |o )?setor|digite (o |a )?n[uú]mero|menu principal|bem[-\s]?vindo|assistente virtual|chatbot|protocolo|avali(ar|e) (o |nosso )?atendimento|encerr(amos|ada)|transfer(ido|ência)|op[cç][aã]o inv[aá]lida)/i
+
+function classificarMensagemParaResumo(m) {
+  const tipo = String(m.tipo || 'texto').toLowerCase()
+  const t = String(m.texto || '').trim()
+  const tl = t.toLowerCase()
+  const ehMidia = !!(m.url || m.nome_arquivo || ['imagem', 'image', 'audio', 'video', 'documento', 'sticker', 'location', 'ptt', 'document'].includes(tipo))
+  let provavel_automatica = false
+  if (!ehMidia && t.length > 0) {
+    if (RE_AUTO.test(t)) provavel_automatica = true
+    if (/^\d{1,2}\s*[-–.)]\s*\S/.test(tl) && t.length < 160) provavel_automatica = true
+  }
+  const sinal_baixo_valor = !ehMidia && t.length > 0 && t.length <= 4 && /^(oi|ok|opa|sim|n[aã]o|👍|👋)$/i.test(t)
+  let peso_resumo = 2
+  if (ehMidia) peso_resumo = 3
+  else if (provavel_automatica) peso_resumo = 0
+  else if (sinal_baixo_valor) peso_resumo = 1
+  return {
+    eh_midia: ehMidia,
+    provavel_automatica,
+    sinal_baixo_valor_informativo: sinal_baixo_valor,
+    peso_resumo,
+  }
+}
+
+function dedupeMensagensConsecutivasSemelhantes(mensagens) {
+  const out = []
+  let prev = null
+  for (const m of mensagens || []) {
+    const key = `${m.direcao}|${String(m.texto || '').trim().replace(/\s+/g, ' ').toLowerCase()}`
+    if (prev === key) continue
+    prev = key
+    out.push(m)
+  }
+  return out
+}
+
+/** Acrescenta nota se o texto usar "hoje"/"ontem" sem recorte permitir. */
+function sanearLinguagemTemporalIndevida(answer, intent, data) {
+  if (!answer || typeof answer !== 'string') return answer
+  const rt = data?.recorte_temporal
+  if (!rt || typeof rt !== 'object') return answer
+  const comMensagens = ['MENSAGENS_USUARIO_CLIENTE', 'CONVERSAS_USUARIO_CLIENTE', 'BUSCA_CONTEUDO_MENSAGENS'].includes(intent)
+  if (!comMensagens) return answer
+  if (rt.pode_usar_hoje_no_texto === true) return answer
+  const pat = /\b(hoje|ontem|nesta (manhã|tarde|noite) de hoje|conversa de hoje|mensagens de hoje)\b/i
+  if (!pat.test(answer)) return answer
+  const de = rt.primeiro_data_exibicao || rt.primeiro_dia_calendario
+  const ate = rt.ultimo_data_exibicao || rt.ultimo_dia_calendario
+  return `${answer.trim()}\n\n**Correção temporal:** As mensagens analisadas vão de **${de}** a **${ate}** (${rt.fuso}). Não use "hoje"/"ontem" para esse recorte.`
+}
+
 /** Limites de dia UTC para data_referencia_iso (YYYY-MM-DD). */
 function dayBoundsUtc(isoDate) {
   if (!isoDate || typeof isoDate !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(isoDate)) return null
@@ -1302,6 +1416,11 @@ async function qBuscaConteudoMensagens(company_id, termos, days, dataIso, opts =
     }
   })
 
+  const recorte_temporal = buildRecorteTemporalMeta(
+    evidencias.map((e) => ({ criado_em: e.criado_em })),
+    { periodo_dias: d, periodo_explicito: false },
+  )
+
   return {
     evidencias,
     termos_usados: terms,
@@ -1309,6 +1428,7 @@ async function qBuscaConteudoMensagens(company_id, termos, days, dataIso, opts =
     data_filtro: dataIso || null,
     total_retornado: evidencias.length,
     fonte: 'mensagens',
+    recorte_temporal,
   }
 }
 
@@ -1795,9 +1915,11 @@ async function qMensagensUsuarioCliente(company_id, usuarioNome, clienteNome, cl
     convIdsFinal = convs.map((c) => c.id)
   }
 
+  const selMsg = 'id, texto, direcao, criado_em, autor_usuario_id, remetente_nome, conversa_id, tipo, url, nome_arquivo'
+
   let { data: msgs } = await supabase
     .from('mensagens')
-    .select('id, texto, direcao, criado_em, autor_usuario_id, remetente_nome, conversa_id')
+    .select(selMsg)
     .eq('company_id', company_id)
     .in('conversa_id', convIdsFinal)
     .gte('criado_em', desde)
@@ -1808,7 +1930,7 @@ async function qMensagensUsuarioCliente(company_id, usuarioNome, clienteNome, cl
   if ((!msgs || msgs.length === 0) && convIdsFinal.length && usuario_id && (cliente_id || telefoneCliente) && !periodoExplicito) {
     const { data: msgs2 } = await supabase
       .from('mensagens')
-      .select('id, texto, direcao, criado_em, autor_usuario_id, remetente_nome, conversa_id')
+      .select(selMsg)
       .eq('company_id', company_id)
       .in('conversa_id', convIdsFinal)
       .order('criado_em', { ascending: false })
@@ -1826,27 +1948,53 @@ async function qMensagensUsuarioCliente(company_id, usuarioNome, clienteNome, cl
     for (const u of us || []) usuarioMap.set(u.id, u.nome)
   }
 
-  const mensagensFormatadas = (msgs || []).map((m) => ({
-    mensagem_id: m.id,
-    conversa_id: m.conversa_id,
-    texto: m.texto,
-    direcao: m.direcao,
-    criado_em: m.criado_em,
-    remetente: m.direcao === 'out' ? (usuarioMap.get(m.autor_usuario_id) || 'Atendente') : (m.remetente_nome || 'Cliente'),
-  }))
+  const mensagensFormatadas = (msgs || []).map((m) => {
+    const baseM = {
+      mensagem_id: m.id,
+      conversa_id: m.conversa_id,
+      texto: m.texto,
+      direcao: m.direcao,
+      criado_em: m.criado_em,
+      tipo: m.tipo || 'texto',
+      url: m.url || null,
+      nome_arquivo: m.nome_arquivo || null,
+      remetente: m.direcao === 'out' ? (usuarioMap.get(m.autor_usuario_id) || 'Atendente') : (m.remetente_nome || 'Cliente'),
+      papel: m.direcao === 'out' ? 'atendente_sistema' : 'cliente',
+    }
+    return { ...baseM, flags: classificarMensagemParaResumo({ ...m, tipo: baseM.tipo }) }
+  })
+
+  const mensagens_compactas = dedupeMensagensConsecutivasSemelhantes(mensagensFormatadas).slice(0, 80)
+  const recorte_temporal = buildRecorteTemporalMeta(mensagensFormatadas, {
+    periodo_dias: d,
+    periodo_explicito: periodoExplicito,
+  })
 
   const usuario = usuario_id ? (await supabase.from('usuarios').select('id, nome').eq('id', usuario_id).maybeSingle()).data : null
   const cliente = cliente_id ? (await supabase.from('clientes').select('id, nome, pushname, telefone').eq('id', cliente_id).maybeSingle()).data : null
 
   const base = {
     mensagens: mensagensFormatadas,
+    mensagens_compactas,
     total: mensagensFormatadas.length,
     usuario,
     cliente,
     periodo_dias: d,
+    orientacao_resumo_ia: 'Priorize mensagens com flags.peso_resumo >= 2. Trate flags.provavel_automatica como roteiro/sistema (não como foco principal). Mídias (flags.eh_midia): cite tipo/arquivo. Evite repetir cumprimentos idênticos.',
+    recorte_temporal,
   }
   if (criterio_resolucao) base.criterio_resolucao = criterio_resolucao
   if (recado_recuperacao) base.recado_recuperacao = recado_recuperacao
+
+  if (convIdsFinal.length && convIdsFinal.length <= 8) {
+    const { data: cmeta } = await supabase
+      .from('conversas')
+      .select('id, status_atendimento, tipo, atendente_id, usuario_id')
+      .eq('company_id', company_id)
+      .in('id', convIdsFinal)
+    if (cmeta?.length) base.conversas_envolvidas = cmeta
+  }
+
   return base
 }
 
@@ -1854,9 +2002,11 @@ async function qMensagensUsuarioCliente(company_id, usuarioNome, clienteNome, cl
 async function qConversasUsuarioCliente(company_id, usuarioNome, clienteNome, clienteTelefone, days, opts = {}) {
   const result = await qMensagensUsuarioCliente(company_id, usuarioNome, clienteNome, clienteTelefone, days, opts)
   if (result.error) return result
+  const rt = result.recorte_temporal
+  const trecho = rt ? ` Entre ${rt.primeiro_data_exibicao} e ${rt.ultimo_data_exibicao} (${rt.fuso}).` : ''
   return {
     ...result,
-    resumo: `Total de ${result.mensagens.length} mensagens no período.`,
+    resumo: `Total de ${result.mensagens.length} mensagem(ns) retornadas.${trecho}`,
   }
 }
 
@@ -2134,6 +2284,9 @@ function attachAnaliticaUiMeta(data, ctx) {
     periodo_padrao_usado: periodoDefinidoNoBody !== true,
     fonte_dados: data.fonte || inferFonteDados(intent),
     alertas,
+    recorte_mensagens: data.recorte_temporal || null,
+    texto_cabecalho_periodo: data.recorte_temporal?.texto_cabecalho_ui || null,
+    evidencias_colapso_inicial: 6,
   }
   return { ...data, analitica_ui }
 }
@@ -2325,6 +2478,7 @@ async function answerDashboardQuestion({ company_id, question, period_days }) {
   let answer = await formatAnswer({ intent: cls.intent, data, question })
   answer = sanearRespostaContradicaoMetricas(answer, cls.intent, data)
   answer = sanearNegacaoComEvidenciaMensagens(answer, cls.intent, data)
+  answer = sanearLinguagemTemporalIndevida(answer, cls.intent, data)
 
   return { ok: true, intent: cls.intent, answer, data }
 }
