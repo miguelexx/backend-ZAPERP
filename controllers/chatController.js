@@ -2289,32 +2289,66 @@ exports.transferirChat = async (req, res) => {
 
     const io = req.app.get('io')
     if (io) {
-      // Emitir para toda a empresa sobre a transferência
-      emitirEventoEmpresaConversa(
-        io,
-        company_id,
-        conversa_id,
-        io.EVENTS?.CONVERSA_TRANSFERIDA || 'conversa_transferida',
-        data
-      )
-      
-      // Lock para o novo atendente
-      emitirLock(io, conversa_id, para_usuario_id)
-
-      // Buscar nome do usuário que está transferindo para notificação mais rica
+      // Buscar nome de quem transferiu (notificação rica + texto sugerido)
       const { data: fromUser } = await supabase
         .from('usuarios')
         .select('nome')
         .eq('id', user_id)
         .maybeSingle()
 
-      // Notificar o novo atendente que recebeu uma conversa
+      const fromNome = (fromUser?.nome && String(fromUser.nome).trim()) || 'Um colega'
+      const nomeCliente =
+        (data?.nome_contato_cache && String(data.nome_contato_cache).trim()) ||
+        (data?.contato_nome && String(data.contato_nome).trim()) ||
+        null
+      const ts = new Date().toISOString()
+
+      // Broadcast empresa + room da conversa: sincroniza lista/UI. O som/toast “de transferência”
+      // deve usar só `conversa_atribuida` na room `usuario_${destino}` (emitirParaUsuario).
+      emitirEventoEmpresaConversa(
+        io,
+        company_id,
+        conversa_id,
+        io.EVENTS?.CONVERSA_TRANSFERIDA || 'conversa_transferida',
+        {
+          ...data,
+          company_id: Number(company_id),
+          /** Quem deve tratar alerta sonoro/toast específico é este usuário (via evento privado). */
+          notificacao_rica_usuario_id: Number(para_usuario_id),
+          /** Front: em `conversa_transferida` não repetir som de nova msg para o destinatário. */
+          suprimir_som_nova_mensagem_para_usuario_id: Number(para_usuario_id)
+        }
+      )
+
+      // Lock para o novo atendente
+      emitirLock(io, conversa_id, para_usuario_id)
+
+      // Destinatário exclusivo (room usuario_*): aqui vai o contrato completo para som/título distintos
+      const corpoLinha = nomeCliente
+        ? `${fromNome} encaminhou «${nomeCliente}» pra você — é sua vez de brilhar ✨`
+        : `${fromNome} te passou um atendimento. Bora responder com estilo 🚀`
+
       emitirParaUsuario(io, para_usuario_id, io.EVENTS?.CONVERSA_ATRIBUIDA || 'conversa_atribuida', {
         conversa_id: Number(conversa_id),
+        company_id: Number(company_id),
+        motivo: 'transferencia_recebida',
         transferido_por: user_id,
-        transferido_por_nome: fromUser?.nome || 'Usuário',
+        transferido_por_nome: fromNome,
         observacao: observacao || null,
-        timestamp: new Date().toISOString()
+        timestamp: ts,
+        cliente_preview: nomeCliente
+          ? { nome: nomeCliente, telefone: data?.telefone ?? null }
+          : { nome: null, telefone: data?.telefone ?? null },
+        /** Contrato estável para o front mapear áudio / vibra / Notification API */
+        ui: {
+          variant: 'handoff',
+          soundId: 'atendimento-transferido',
+          titulo: '🎯 Passaram o bastão pra você!',
+          corpo: corpoLinha,
+          vibratePatternMs: [100, 60, 140, 60, 180],
+          priority: 'high',
+          tag: `handoff-${company_id}-${conversa_id}-${Date.now()}`
+        }
       })
       
       // Notificar o usuário que transferiu
