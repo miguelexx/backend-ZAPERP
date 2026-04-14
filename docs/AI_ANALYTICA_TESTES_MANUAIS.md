@@ -1,6 +1,6 @@
 # IA analítica — bateria de testes manuais (`POST /api/ai/ask`)
 
-Use `Authorization: Bearer <token>` e body JSON. O período padrão é **7 dias** se `period_days` for omitido.
+Use `Authorization: Bearer <token>` e body JSON. O período base do classificador costuma ser **7 dias**; quando `period_days` **não** é enviado no body, vários intents usam janela **mínima de 90 dias** (par atendente+cliente, histórico de cliente, histórico de atendente, relatório completo) para não ocultar conversas antigas.
 
 ```http
 POST /api/ai/ask
@@ -119,9 +119,11 @@ Após cada resposta, verificar em `data`:
 
 | # | Pergunta | Validar |
 |---|----------|---------|
-| 11.1 | "O que o João falou com o cliente Ana?" | `mensagem_id` + `conversa_id` nas linhas |
+| 11.1 | "O que o João falou com o cliente Ana?" | `mensagem_id` + `conversa_id` nas linhas; `criterio_resolucao` pode citar atendente_id, usuario_id, mensagens, atendimentos ou historico_atendimentos |
 | 11.2 | Dois clientes "Ana Costa" | `ambiguidade_cliente` + `alertas` |
 | 11.3 | Dois atendentes "Paulo" | `ambiguidade_usuario` |
+| 11.4 | Atendente só aparece em `autor_usuario_id` (titular da conversa outro) | Mesmo assim há mensagens em `data.mensagens`; texto não nega interação |
+| 11.5 | `"period_days": 7` no body | Janela respeitada (não força 90d); pode haver `recado_recuperacao` se vazio na janela |
 
 ---
 
@@ -129,8 +131,9 @@ Após cada resposta, verificar em `data`:
 
 | # | Pergunta | Validar |
 |---|----------|---------|
-| 12.1 | "Resumo geral do dashboard" | Só KPIs; sem inventar conversas |
+| 12.1 | "Resumo geral do dashboard" | Só KPIs; sem inventar conversas; texto não contradiz `overview.totalConversas` / mensagens |
 | 12.2 | "Como melhorar vendas no mundo?" | Lacuna ou recusa de conselho genérico sem dados |
+| 12.3 | `METRICS_OVERVIEW` ou pergunta que retorne só métricas | `atendimentosHoje` = 0 com `totalConversas` > 0 → resposta não diz “sem conversas” |
 
 ---
 
@@ -140,6 +143,23 @@ Após cada resposta, verificar em `data`:
 |---|----------|---------|
 | 13.1 | "Me fala de tudo" | GENERAL ou busca vaga; resposta honesta sobre limite |
 | 13.2 | Mistura métrica + detalhe | Prioridade do classificador; `analitica_ui.intent` coerente |
+
+---
+
+## 14. Cenários de regressão (precisão)
+
+| # | Cenário | `question` / body | Validar |
+|---|---------|-------------------|---------|
+| 14.1 | Wagner × Miguel WM (troca real) | "O que o Wagner falou com o cliente Miguel WM?" | `mensagens` ou erro honesto; nunca “não existe conversa” se `mensagens.length` > 0 |
+| 14.2 | Resumo do dia | "Resumo das métricas de hoje" / dashboard | `conversasHoje`, `atendimentosHoje` e totais globais descritos sem contradizer `legenda_metricas` |
+| 14.3 | Tickets abertos | "Quantos tickets abertos?" (se classificar métricas) | Coerente com `ticketsAbertos` e `status_atendimento` na amostra |
+| 14.4 | Cliente nome parcial | "Histórico do cliente Miguel" | `resolveClienteCandidates` ou ambiguidade |
+| 14.5 | Atendente nome parcial | "Conversas do atendente Wagner" | `HISTORICO_ATENDENTE` com conversas por atendente_id, usuario_id ou autor de mensagem |
+| 14.6 | Sem `period_days` | omitido no body | Par atendente+cliente / histórico: janela efetiva ≥ 90 em `data.periodo_dias` ou `analitica_ui` |
+| 14.7 | Conversa antiga | Mesma pergunta 14.1 com `"period_days": 7` | Pode retornar menos linhas; com omitido deve buscar amplo |
+| 14.8 | Várias conversas do cliente | "Histórico do cliente X" | Lista `conversas` múltiplas; exclui `tipo` grupo / `@g.us` |
+| 14.9 | Transferência | Cliente com conversa transferida entre atendentes | Par X+cliente ainda encontra via `atendimentos` ou `historico_atendimentos` ou mensagens |
+| 14.10 | `usuario_id` na conversa | Atendente no campo `usuario_id` mas não em `atendente_id` | Ainda aparece em `MENSAGENS_USUARIO_CLIENTE` / histórico |
 
 ---
 
