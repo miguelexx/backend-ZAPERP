@@ -8,13 +8,15 @@ POST /chats/:id/encaminhar
 
 ## Descrição
 
-Encaminha uma mensagem (texto ou mídia) de uma conversa para outra conversa.
+Encaminha uma ou várias mensagens (texto, mídia, áudio, arquivo, etc.) de uma conversa para outra conversa, na ordem enviada.
 
 ## Parâmetros da URL
 
 - `id`: ID da conversa de destino
 
 ## Corpo da Requisição
+
+**Uma mensagem (compatível):**
 
 ```json
 {
@@ -23,9 +25,20 @@ Encaminha uma mensagem (texto ou mídia) de uma conversa para outra conversa.
 }
 ```
 
+**Várias mensagens (lote, mesma ordem do array):**
+
+```json
+{
+  "mensagem_ids": [101, 102, 103],
+  "tipo_encaminhamento": "auto"
+}
+```
+
+Limite: até **30** IDs por requisição. Duplicados no array são ignorados.
+
 ### Campos
 
-- `mensagem_id` (obrigatório): ID da mensagem original a ser encaminhada
+- `mensagem_id` ou `mensagem_ids` (**obrigatório um dos dois**): ID único ou lista de IDs das mensagens originais
 - `tipo_encaminhamento` (opcional): Tipo de encaminhamento
   - `"auto"` (padrão): Detecta automaticamente o melhor método
   - `"texto"`: Força encaminhamento como texto
@@ -72,6 +85,8 @@ Encaminha uma mensagem (texto ou mídia) de uma conversa para outra conversa.
 
 ## Resposta de Sucesso
 
+**Encaminhamento único** — mesmo formato de antes:
+
 ```json
 {
   "success": true,
@@ -87,6 +102,22 @@ Encaminha uma mensagem (texto ou mídia) de uma conversa para outra conversa.
   "enviado_whatsapp": true
 }
 ```
+
+**Encaminhamento em lote** (`mensagem_ids` com 2+ itens):
+
+```json
+{
+  "success": true,
+  "total": 3,
+  "encaminhamentos": [
+    { "mensagem_id": 101, "ok": true, "mensagem": { "id": 501, "tipo": "texto" }, "enviado_whatsapp": true },
+    { "mensagem_id": 102, "ok": true, "mensagem": { "id": 502, "tipo": "audio" }, "enviado_whatsapp": true },
+    { "mensagem_id": 103, "ok": false, "error": "URL da mídia não pode ser resolvida para encaminhamento", "status": 400 }
+  ]
+}
+```
+
+`success` é `true` apenas se **todos** os itens tiverem `ok: true`. Itens com falha não impedem o processamento dos demais.
 
 ## Resposta de Erro
 

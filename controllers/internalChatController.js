@@ -122,7 +122,7 @@ exports.markRead = async (req, res) => {
   return res.json(result.data)
 }
 
-/** POST /internal-chat/forward-atendimento-message — encaminhar trecho da mensagem do atendimento para o chat interno */
+/** POST /internal-chat/forward-atendimento-message — encaminhar mensagem(ns) do atendimento para o chat interno (`mensagem_id` ou `mensagem_ids`) */
 exports.forwardAtendimentoMessage = async (req, res) => {
   const { id: userId, company_id } = req.user
   const io = getIo(req)

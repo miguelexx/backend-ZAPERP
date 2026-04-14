@@ -23,6 +23,30 @@ const internalChatSocket = require('../socket/internalChatSocket')
 const { enrichInternalChatMessageRow, resolvePublicMediaUrl, getPublicApiBase } = require('../helpers/internalChatMediaUrl')
 
 const FORWARD_ATEND_PREFIX = '[Encaminhado do atendimento]'
+const MAX_FORWARD_ATEND_LOTE = 30
+
+/**
+ * @param {Record<string, unknown>} body
+ * @returns {number[]}
+ */
+function collectOrderedMensagemIdsFromBody(body) {
+  const raw =
+    Array.isArray(body?.mensagem_ids) && body.mensagem_ids.length > 0
+      ? body.mensagem_ids
+      : body?.mensagem_id != null && body?.mensagem_id !== ''
+        ? [body.mensagem_id]
+        : []
+  const seen = new Set()
+  const ordered = []
+  for (const x of raw) {
+    const n = Number(x)
+    if (!Number.isFinite(n) || n <= 0) continue
+    if (seen.has(n)) continue
+    seen.add(n)
+    ordered.push(n)
+  }
+  return ordered
+}
 
 /**
  * @param {string|null|undefined} url
@@ -337,6 +361,9 @@ async function listConversations(companyId, currentUserId) {
           message_type: r.last_message_type || MESSAGE_TYPE.TEXT,
           content: r.last_message_content,
           media_url: resolvePublicMediaUrl(r.last_message_media_url ?? null),
+          url: resolvePublicMediaUrl(r.last_message_media_url ?? null),
+          tipo: r.last_message_type || MESSAGE_TYPE.TEXT,
+          texto: r.last_message_content,
           sender_user_id: r.last_message_sender_id != null ? Number(r.last_message_sender_id) : null,
           created_at: r.last_message_created_at,
           is_deleted: !!r.last_message_is_deleted,
@@ -671,11 +698,12 @@ async function markConversationRead(io, companyId, conversationId, currentUserId
  * @param {Record<string, unknown>} query
  */
 /**
- * Replica uma mensagem do atendimento (WhatsApp) no chat interno com outro colaborador.
+ * Replica mensagem(ns) do atendimento (WhatsApp) no chat interno com outro colaborador.
+ * Body: `mensagem_id` (único) ou `mensagem_ids` (array), ordem preservada.
  * @param {import('socket.io').Server|null|undefined} io
  * @param {number} companyId
  * @param {number} userId
- * @param {{ mensagem_id?: unknown, conversa_origem_id?: unknown, target_user_id?: unknown }} body
+ * @param {{ mensagem_id?: unknown, mensagem_ids?: unknown, conversa_origem_id?: unknown, target_user_id?: unknown }} body
  */
 async function forwardAtendimentoMessage(io, companyId, userId, body) {
   const c = assertPositiveCompanyId(companyId)
@@ -686,45 +714,70 @@ async function forwardAtendimentoMessage(io, companyId, userId, body) {
     return { ok: false, error: 'Usuário autenticado inválido', status: 401 }
   }
 
-  const midParsed = parseRequiredUserId(body?.mensagem_id, 'mensagem_id')
-  if (!midParsed.ok) return { ok: false, error: midParsed.error, status: 400 }
+  const orderedIds = collectOrderedMensagemIdsFromBody(body || {})
+  if (!orderedIds.length) {
+    return { ok: false, error: 'mensagem_id ou mensagem_ids é obrigatório', status: 400 }
+  }
+  if (orderedIds.length > MAX_FORWARD_ATEND_LOTE) {
+    return { ok: false, error: `No máximo ${MAX_FORWARD_ATEND_LOTE} mensagens por encaminhamento`, status: 400 }
+  }
+
   const convParsed = parseRequiredUserId(body?.conversa_origem_id, 'conversa_origem_id')
   if (!convParsed.ok) return { ok: false, error: convParsed.error, status: 400 }
   const tgtParsed = parseRequiredUserId(body?.target_user_id, 'target_user_id')
   if (!tgtParsed.ok) return { ok: false, error: tgtParsed.error, status: 400 }
 
-  const mid = midParsed.id
   const convOrig = convParsed.id
   const tgt = tgtParsed.id
 
-  const { data: m, error: errM } = await supabase
+  const { data: rows, error: errM } = await supabase
     .from('mensagens')
     .select('id, texto, tipo, url, nome_arquivo, contact_meta, location_meta, conversa_id, company_id')
     .eq('company_id', Number(companyId))
-    .eq('id', mid)
-    .maybeSingle()
+    .in('id', orderedIds)
 
   if (errM) return { ok: false, error: errM.message, status: 500 }
-  if (!m) return { ok: false, error: 'Mensagem não encontrada', status: 404 }
-  if (Number(m.conversa_id) !== convOrig) {
-    return { ok: false, error: 'Mensagem não pertence à conversa de origem', status: 400 }
+
+  const byId = new Map((rows || []).map((row) => [Number(row.id), row]))
+  const missing = orderedIds.filter((id) => !byId.has(id))
+  if (missing.length) {
+    return { ok: false, error: `Mensagem(ns) não encontrada(s): ${missing.join(', ')}`, status: 404 }
+  }
+
+  for (const id of orderedIds) {
+    const row = byId.get(id)
+    if (row && Number(row.conversa_id) !== convOrig) {
+      return { ok: false, error: 'Uma ou mais mensagens não pertencem à conversa de origem', status: 400 }
+    }
   }
 
   const convRes = await createOrGetConversation(io, companyId, uid, tgt)
   if (!convRes.ok) return convRes
 
   const internalCid = Number(convRes.data.conversation.id)
-  const built = buildForwardInsertFromMensagem(m)
-  if (!built.ok) return built
+  const messagesOut = []
 
-  const insertPayload = {
-    ...built.insertPayload,
-    conversation_id: internalCid,
-    company_id: Number(companyId),
-    sender_user_id: uid,
+  for (const mid of orderedIds) {
+    const m = byId.get(mid)
+    const built = buildForwardInsertFromMensagem(m)
+    if (!built.ok) return built
+
+    const insertPayload = {
+      ...built.insertPayload,
+      conversation_id: internalCid,
+      company_id: Number(companyId),
+      sender_user_id: uid,
+    }
+
+    const ins = await insertInternalMessageAndEmit(io, companyId, internalCid, uid, insertPayload)
+    if (!ins.ok) return ins
+    messagesOut.push(ins.data.message)
   }
 
-  return insertInternalMessageAndEmit(io, companyId, internalCid, uid, insertPayload)
+  if (messagesOut.length === 1) {
+    return { ok: true, data: { message: messagesOut[0] } }
+  }
+  return { ok: true, data: { messages: messagesOut } }
 }
 
 async function listClientContacts(companyId, query) {
