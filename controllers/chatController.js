@@ -3769,19 +3769,27 @@ async function convertAudioWithFfmpeg(inputPath, outputPath, profile = 'audio_mp
       return
     }
     let args
+    // Voice (PTT): alinhado ao padrão usado por integrações WhatsApp estáveis (Evolution/Baileys):
+    // 48 kHz, mono, Opus ~48k, sem metadados — evita áudio que toca no Web mas falha no iPhone.
     if (profile === 'voice_ogg_opus') {
       args = [
         '-y',
         '-i', inputPath,
         '-vn',
         '-ac', '1',
-        '-ar', '16000',
+        '-ar', '48000',
         '-c:a', 'libopus',
-        '-application', 'voip',
-        '-vbr', 'on',
+        '-b:a', '48k',
+        '-avoid_negative_ts', 'make_zero',
+        '-write_xing', '0',
         '-compression_level', '10',
-        '-frame_duration', '20',
-        '-b:a', '32k',
+        '-application', 'voip',
+        '-fflags', '+bitexact',
+        '-flags', '+bitexact',
+        '-id3v2_version', '0',
+        '-map_metadata', '-1',
+        '-map_chapters', '-1',
+        '-write_bext', '0',
         outputPath,
       ]
     } else {
@@ -3793,6 +3801,10 @@ async function convertAudioWithFfmpeg(inputPath, outputPath, profile = 'audio_mp
         '-ar', '44100',
         '-c:a', 'libmp3lame',
         '-b:a', '128k',
+        '-write_xing', '0',
+        '-id3v2_version', '0',
+        '-map_metadata', '-1',
+        '-map_chapters', '-1',
         outputPath,
       ]
     }
