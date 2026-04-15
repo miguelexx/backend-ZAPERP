@@ -3981,11 +3981,10 @@ exports.enviarArquivo = async (req, res) => {
     const baseUrl = (process.env.APP_URL || process.env.BASE_URL || '').replace(/\/$/, '')
     const fullUrl = baseUrl ? `${baseUrl}${pathUrl}` : null
     const isLocalhost = /localhost|127\.0\.0\.1/i.test(baseUrl)
-    // Para "audio" normal, alguns formatos precisam passar por uploadMedia antes do envio.
-    // Para "voice" preferimos tentar URL pública primeiro (endpoint /messages/voice costuma lidar melhor).
-    const forceUploadMedia = (tipo === 'audio') && (
-      !/\.(mp3|ogg|aac)$/i.test(file.filename || file.originalname || '')
-    )
+    // Para áudio/voice, prioriza sempre CDN da UltraMsg:
+    // evita problemas de disponibilidade/headers em URLs próprias do backend
+    // e melhora a reprodução no WhatsApp mobile e desktop.
+    const forceUploadMedia = (tipo === 'audio' || tipo === 'voice')
 
     const sendMediaWithUrl = (mediaUrl) => {
       const provider = getProvider()
