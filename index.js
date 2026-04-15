@@ -4,6 +4,7 @@ const http = require('http')
 const app = require('./app')
 const { Server } = require('socket.io')
 const jwt = require('jsonwebtoken')
+const supabase = require('./config/supabase')
 loadEnv()
 
 // Diagnóstico: em produção, logs mínimos (nunca expor tokens, senhas ou paths sensíveis)
@@ -58,6 +59,43 @@ if (socketAppOrigin && !allowedSocketOrigins.includes(socketAppOrigin)) {
 }
 
 const internalChatSocket = require('./socket/internalChatSocket')
+
+async function canUserJoinConversationRoom({ company_id, user_id, role, departamento_ids, conversa_id }) {
+  const cid = Number(conversa_id)
+  const companyId = Number(company_id)
+  const userId = Number(user_id)
+  if (!Number.isFinite(cid) || cid <= 0) return false
+  if (!Number.isFinite(companyId) || companyId <= 0) return false
+  if (!Number.isFinite(userId) || userId <= 0) return false
+
+  const { data: conv, error: convErr } = await supabase
+    .from('conversas')
+    .select('id, atendente_id, departamento_id')
+    .eq('company_id', companyId)
+    .eq('id', cid)
+    .maybeSingle()
+  if (convErr || !conv) return false
+
+  const profile = String(role || '').toLowerCase()
+  if (profile === 'admin') return true
+  if (conv.atendente_id != null && Number(conv.atendente_id) === userId) return true
+
+  const { data: transferRow } = await supabase
+    .from('atendimentos')
+    .select('id')
+    .eq('company_id', companyId)
+    .eq('conversa_id', cid)
+    .eq('de_usuario_id', userId)
+    .eq('acao', 'transferiu')
+    .limit(1)
+    .maybeSingle()
+  if (transferRow) return true
+
+  const depIds = Array.isArray(departamento_ids) ? departamento_ids.map(Number).filter(Number.isFinite) : []
+  const convDep = conv.departamento_id != null ? Number(conv.departamento_id) : null
+  if (convDep == null) return true
+  return depIds.some((d) => d === convDep)
+}
 
 const io = new Server(server, {
   cors: {
@@ -147,7 +185,7 @@ io.emitUsuario = (usuario_id, event, payload) => {
 // 🔌 conexão socket (MANTIDO + MELHORADO)
 // =====================================================
 io.on('connection', (socket) => {
-  const { id, company_id, departamento_ids = [] } = socket.user
+  const { id, company_id, departamento_ids = [], perfil } = socket.user
 
   internalChatSocket.handleConnection(socket)
 
@@ -165,18 +203,32 @@ io.on('connection', (socket) => {
   })
 
   // entrar na conversa (idempotente: evita join duplicado e log repetido)
-  socket.on('join_conversa', (conversaId) => {
+  socket.on('join_conversa', async (conversaId) => {
     if (!conversaId) return
 
-    const room = `conversa_${conversaId}`
+    const convId = Number(conversaId)
+    if (!Number.isFinite(convId) || convId <= 0) return
+
+    const allowed = await canUserJoinConversationRoom({
+      company_id,
+      user_id: id,
+      role: perfil,
+      departamento_ids,
+      conversa_id: convId
+    })
+    if (!allowed) {
+      console.warn(`🚫 Join negado | Usuário ${id} | Empresa ${company_id} | Conversa ${convId}`)
+      return
+    }
+
+    const room = `conversa_${convId}`
     if (!socket.rooms.has(room)) {
       socket.join(room)
-      console.log(`💬 Socket entrou na conversa ${conversaId}`)
+      console.log(`💬 Socket entrou na conversa ${convId}`)
       // Sincroniza contato com API UltraMsg ao abrir chat (atualiza nome/foto se necessário)
       setImmediate(() => {
-        const supabase = require('./config/supabase')
         const { syncConversationContactOnJoin } = require('./services/ultramsgSyncContact')
-        syncConversationContactOnJoin(supabase, Number(conversaId), company_id, io, { skipIfRecent: true }).catch(() => {})
+        syncConversationContactOnJoin(supabase, convId, company_id, io, { skipIfRecent: true }).catch(() => {})
       })
     }
   })
@@ -195,18 +247,22 @@ io.on('connection', (socket) => {
   socket.on('typing_start', (data) => {
     const conversa_id = data?.conversa_id
     if (!conversa_id) return
+    const room = `conversa_${conversa_id}`
+    if (!socket.rooms.has(room)) return
     const payload = {
       conversa_id: Number(conversa_id),
       usuario_id: socket.user.id,
       nome: data?.nome ?? null
     }
-    socket.to(`conversa_${conversa_id}`).emit('typing_start', payload)
+    socket.to(room).emit('typing_start', payload)
   })
 
   socket.on('typing_stop', (data) => {
     const conversa_id = data?.conversa_id
     if (!conversa_id) return
-    socket.to(`conversa_${conversa_id}`).emit('typing_stop', { conversa_id: Number(conversa_id) })
+    const room = `conversa_${conversa_id}`
+    if (!socket.rooms.has(room)) return
+    socket.to(room).emit('typing_stop', { conversa_id: Number(conversa_id) })
   })
 
   socket.on('disconnect', () => {

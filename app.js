@@ -149,7 +149,13 @@ app.use(
       res.setHeader('X-Content-Type-Options', 'nosniff')
       const p = String(filePath || '').toLowerCase()
       const isImage = p.endsWith('.jpg') || p.endsWith('.jpeg') || p.endsWith('.png') || p.endsWith('.webp')
-      if (!isImage) {
+      const isAudio = p.endsWith('.mp3') || p.endsWith('.ogg') || p.endsWith('.aac') || p.endsWith('.m4a') || p.endsWith('.wav') || p.endsWith('.opus') || p.endsWith('.webm')
+      const isVideo = p.endsWith('.mp4') || p.endsWith('.mov') || p.endsWith('.avi') || p.endsWith('.3gp')
+      const isMedia = isImage || isAudio || isVideo
+      // Para mídia (imagem/áudio/vídeo), manter Content-Type original para provedores
+      // como UltraMsg/WhatsApp conseguirem processar e reproduzir corretamente.
+      // Para demais arquivos, força download e tipo genérico por segurança.
+      if (!isMedia) {
         const name = p.split(/[\\/]/).pop() || 'download'
         res.setHeader('Content-Disposition', `attachment; filename="${name.replace(/"/g, '')}"`)
         // força um tipo genérico para não permitir renderização ativa
