@@ -204,6 +204,7 @@ const aiRoutes = require('./routes/aiRoutes')
 const chatbotDebugRoutes = require('./routes/chatbotDebugRoutes')
 const chatbotManagementRoutes = require('./routes/chatbotManagementRoutes')
 const internalChatRoutes = require('./routes/internalChatRoutes')
+const crmRoutes = require('./routes/crmRoutes')
 
 // Webhooks já registrados antes do CORS (evita 403 Origin)
 app.use('/dashboard', dashboardRoutes)
@@ -222,6 +223,7 @@ app.use('/opt-out', optOutRouter)
 app.use('/chatbot/debug', chatbotDebugRoutes)
 app.use('/chatbot', chatbotManagementRoutes)
 app.use('/internal-chat', internalChatRoutes)
+app.use('/crm', apiLimiter, crmRoutes)
 
 // /api — prefixo opcional para SaaS; mantém compatibilidade com rotas antigas
 // Aplica apiLimiter globalmente para "rotas de API"
@@ -242,6 +244,7 @@ api.use('/opt-out', optOutRouter)
 api.use('/chatbot/debug', chatbotDebugRoutes)
 api.use('/chatbot', chatbotManagementRoutes)
 api.use('/internal-chat', internalChatRoutes)
+api.use('/crm', crmRoutes)
 app.use('/api', apiLimiter, api)
 
 // =====================================================
@@ -308,6 +311,7 @@ if (hasFrontendDist) {
     '/opt-out',
     '/chatbot',
     '/internal-chat',
+    '/crm',
   ]
 
   app.get('*', (req, res, next) => {

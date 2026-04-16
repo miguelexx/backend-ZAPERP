@@ -160,7 +160,9 @@ io.EVENTS = {
   CONVERSA_TRANSFERIDA: 'conversa_transferida',
   CONVERSA_ENCERRADA: 'conversa_encerrada',
   CONVERSA_REABERTA: 'conversa_reaberta',
-  CONVERSA_ATRIBUIDA: 'conversa_atribuida'
+  CONVERSA_ATRIBUIDA: 'conversa_atribuida',
+  CRM_LEAD_UPDATED: 'crm:lead_updated',
+  CRM_KANBAN_REFRESH: 'crm:kanban_refresh'
 }
 
 // =====================================================
