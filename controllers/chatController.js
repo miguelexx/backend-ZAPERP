@@ -3895,7 +3895,7 @@ exports.enviarArquivo = async (req, res) => {
     const permEnvio = await assertPodeEnviarMensagem({ company_id, conversa_id, user_id })
     if (!permEnvio.ok) return res.status(permEnvio.status).json({ error: permEnvio.error })
 
-    const file = req.file
+    let file = req.file
     const tipoBody = String(req.body?.tipo || req.query?.tipo || '').toLowerCase().trim()
     if (tipoBody === 'sticker') file.__tipoForcado = 'sticker'
     const tipo = aplicarTipoForcadoSticker(file, inferirTipoArquivo(file))
