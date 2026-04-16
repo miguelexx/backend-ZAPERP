@@ -2930,7 +2930,53 @@ async function qHistoricoAtendente(company_id, usuarioNome, days, opts = {}) {
   const byId = new Map()
   for (const c of titularIndiv) byId.set(c.id, c)
   for (const c of convsMsg) byId.set(c.id, c)
-  const convs = [...byId.values()].sort((a, b) => new Date(b.criado_em) - new Date(a.criado_em))
+  let convs = [...byId.values()].sort((a, b) => new Date(b.criado_em) - new Date(a.criado_em))
+
+  let recuperacaoSemPeriodo = false
+  let recado_recuperacao = null
+  if (!convs.length && !fixadoPergunta) {
+    // Sem data explícita na pergunta: tenta recuperar as conversas mais recentes do atendente.
+    const [{ data: convTitularRecentes }, { data: msgRowsRecentes }] = await Promise.all([
+      supabase
+        .from('conversas')
+        .select(sel)
+        .eq('company_id', company_id)
+        .or(`atendente_id.eq.${usuario_id},usuario_id.eq.${usuario_id}`)
+        .order('ultima_atividade', { ascending: false })
+        .limit(600),
+      supabase
+        .from('mensagens')
+        .select('conversa_id')
+        .eq('company_id', company_id)
+        .eq('autor_usuario_id', usuario_id)
+        .eq('direcao', 'out')
+        .order('criado_em', { ascending: false })
+        .limit(2000),
+    ])
+
+    const titularRecentes = filtrarConversasIndividuais(convTitularRecentes || [])
+    const msgConvIdsRecentes = [...new Set((msgRowsRecentes || []).map((m) => m.conversa_id).filter(Boolean))]
+    let convsMsgRecentes = []
+    for (const ch of chunkArray(msgConvIdsRecentes, 120)) {
+      const { data: cm } = await supabase.from('conversas').select(sel).eq('company_id', company_id).in('id', ch)
+      convsMsgRecentes.push(...filtrarConversasIndividuais(cm || []))
+    }
+    const byIdRecentes = new Map()
+    for (const c of titularRecentes) byIdRecentes.set(c.id, c)
+    for (const c of convsMsgRecentes) byIdRecentes.set(c.id, c)
+    convs = [...byIdRecentes.values()]
+      .sort((a, b) => {
+        const ta = Date.parse(a.ultima_atividade || a.criado_em || 0)
+        const tb = Date.parse(b.ultima_atividade || b.criado_em || 0)
+        return tb - ta
+      })
+      .slice(0, 500)
+
+    if (convs.length) {
+      recuperacaoSemPeriodo = true
+      recado_recuperacao = 'Não houve registros na janela solicitada; exibindo as conversas mais recentes encontradas para o atendente (como você não informou data específica).'
+    }
+  }
 
   const allConvIds = convs.map((c) => c.id)
   const countByConv = new Map()
@@ -2948,7 +2994,7 @@ async function qHistoricoAtendente(company_id, usuarioNome, days, opts = {}) {
       .select('conversa_id')
       .eq('company_id', company_id)
       .in('conversa_id', ch)
-      .gte('criado_em', desde)
+    if (!recuperacaoSemPeriodo) qMc = qMc.gte('criado_em', desde)
     if (ateExclusive) qMc = qMc.lt('criado_em', ateExclusive)
     const { data: mrows } = await qMc.limit(limChunk)
     const rows = mrows || []
@@ -3057,6 +3103,7 @@ async function qHistoricoAtendente(company_id, usuarioNome, days, opts = {}) {
         : null,
     },
   }
+  if (recado_recuperacao) outHist.recado_recuperacao = recado_recuperacao
   if (fxIn && fxEx) {
     outHist.periodo_efetivo_consulta = {
       fuso: RECORTE_TZ,
@@ -4189,9 +4236,24 @@ async function answerDashboardQuestion({ company_id, question, period_days }) {
     cls = { ...cls, intent: 'GENERAL_CHAT' }
   }
 
-  const periodoDefinidoNoBody = period_days != null && Number.isFinite(Number(period_days))
+  const bodyPeriodInformado = period_days != null && Number.isFinite(Number(period_days))
   const tscope = resolveTemporalAnalyticsScope(question, cls)
-  let days = clampDays(period_days ?? cls.period_days ?? 7)
+  const periodDaysNum = bodyPeriodInformado ? Number(period_days) : null
+  const intentsComHistoricoAtendente = new Set([
+    'HISTORICO_ATENDENTE',
+    'RELATORIO_ATENDENTE_COMPLETO',
+    'ANALISE_TOM_ATENDENTE',
+    'TEMPO_MEDIO_ATENDENTE',
+  ])
+  const ignorarPeriodBodyPadrao =
+    intentsComHistoricoAtendente.has(cls.intent)
+    && bodyPeriodInformado
+    && tscope?.fixado_na_pergunta !== true
+    && periodDaysNum != null
+    && periodDaysNum <= 1
+  const periodoDefinidoNoBody = bodyPeriodInformado && !ignorarPeriodBodyPadrao
+
+  let days = clampDays((periodoDefinidoNoBody ? periodDaysNum : undefined) ?? cls.period_days ?? 7)
   if (tscope?.opts?.periodo_mensagens_inicio_iso && tscope.opts.periodo_mensagens_fim_exclusive_iso) {
     const ms = Date.parse(tscope.opts.periodo_mensagens_fim_exclusive_iso) - Date.parse(tscope.opts.periodo_mensagens_inicio_iso)
     days = Math.min(365, Math.max(1, Math.ceil(ms / 86400000)))
