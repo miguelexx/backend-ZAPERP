@@ -5,6 +5,7 @@ const { registrar } = require('../helpers/auditoriaLog')
 const {
   safeParse,
   createLeadSchema,
+  fromConversaBodySchema,
   moveLeadSchema,
   reorderSchema,
   notaSchema,
@@ -361,10 +362,19 @@ exports.createLeadFromConversa = async (req, res) => {
   try {
     const { company_id, id: userId } = req.user
     const cid = Number(req.params.conversaId)
-    const lead = await crmService.createLeadFromConversa(company_id, userId, cid, req.body || {})
-    emitCrm(req, company_id, 'crm:lead_updated', { lead_id: lead.id, action: 'from_conversa' })
-    emitCrm(req, company_id, 'crm:kanban_refresh', { pipeline_id: lead.pipeline_id })
-    return res.status(201).json(lead)
+    const parsed = safeParse(fromConversaBodySchema, req.body || {})
+    const out = await crmService.createLeadFromConversa(company_id, userId, cid, parsed)
+    const payload = out.body
+    const leadId = payload.lead?.id
+    if (leadId && out.httpStatus < 400) {
+      const dup = payload.from_conversa?.duplicate
+      emitCrm(req, company_id, 'crm:lead_updated', {
+        lead_id: leadId,
+        action: dup ? 'from_conversa_sync' : 'from_conversa',
+      })
+      emitCrm(req, company_id, 'crm:kanban_refresh', { pipeline_id: payload.lead?.pipeline_id })
+    }
+    return res.status(out.httpStatus).json(payload)
   } catch (e) {
     return err(res, e, 'Erro ao criar lead a partir da conversa')
   }

@@ -346,6 +346,40 @@ async function getLeadById(companyId, id) {
   return data
 }
 
+/** Primeiro lead vinculado à conversa (maior id), se houver. */
+async function findLeadByConversaId(companyId, conversaId) {
+  const { data, error } = await supabase
+    .from('crm_leads')
+    .select('*')
+    .eq('company_id', companyId)
+    .eq('conversa_id', conversaId)
+    .order('id', { ascending: false })
+    .limit(1)
+  if (error) throw error
+  const row = data && data[0]
+  return row || null
+}
+
+async function listConversaTagIds(companyId, conversaId) {
+  const { data, error } = await supabase
+    .from('conversa_tags')
+    .select('tag_id')
+    .eq('company_id', companyId)
+    .eq('conversa_id', conversaId)
+  if (error) throw error
+  return [...new Set((data || []).map((r) => r.tag_id).filter((x) => Number.isFinite(Number(x))))]
+}
+
+async function listLeadTagIds(companyId, leadId) {
+  const { data, error } = await supabase
+    .from('crm_lead_tags')
+    .select('tag_id')
+    .eq('company_id', companyId)
+    .eq('lead_id', leadId)
+  if (error) throw error
+  return [...new Set((data || []).map((r) => r.tag_id).filter((x) => Number.isFinite(Number(x))))]
+}
+
 async function insertLead(row) {
   const { data, error } = await supabase.from('crm_leads').insert(row).select().single()
   if (error) throw error
@@ -862,6 +896,9 @@ module.exports = {
   listLeads,
   countLeads,
   getLeadById,
+  findLeadByConversaId,
+  listConversaTagIds,
+  listLeadTagIds,
   insertLead,
   updateLead,
   listLeadsByPipeline,

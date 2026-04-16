@@ -45,7 +45,7 @@ Base URL: **`/api/crm`** (ou **`/crm`** — mesmo conjunto de rotas).
 |--------|------|-----------|
 | GET | `/leads` | Lista enriquecida: pipeline, stage, origem, cliente, conversa, totais, próxima atividade, responsável |
 | GET | `/leads/export` | CSV (`;`), mesmos filtros que `/leads`, `?max=` (máx. 10000) |
-| POST | `/leads/from-conversa/:conversaId` | Cria lead vinculado (preenche com cliente/telefone; opcionalmente `ultima_interacao_em` da última mensagem) |
+| POST | `/leads/from-conversa/:conversaId` | **Importação inteligente** do atendimento → CRM (ver abaixo) |
 | POST | `/leads/from-cliente/:clienteId` | Cria lead a partir do cliente |
 | POST | `/leads` | Cria lead |
 | GET | `/leads/:id` | Detalhe completo (notas, atividades, `historico` de movimentações) |
@@ -53,6 +53,26 @@ Base URL: **`/api/crm`** (ou **`/crm`** — mesmo conjunto de rotas).
 | POST | `/leads/:id/move` | Move no Kanban. Body: `stage_id`, `pipeline_id?`, `ordem?`, `motivo_perda?`, `bloquear_cruzamento_pipeline?`, `retornar_snapshot?`. Com `retornar_snapshot: true` ou `?snapshot=1` → `{ lead, column_totals }` |
 | POST | `/leads/reorder` | Reordena (`stage_id`, `lead_ids[]`) |
 | GET | `/leads/:id/history` | Movimentações |
+
+### `POST /leads/from-conversa/:conversaId` — enviar conversa ao CRM
+
+Preenche o lead com dados da **conversa**, **cliente** (se houver), **setor** (`departamentos`), **tags da conversa** (`conversa_tags` → `crm_lead_tags`), **e-mail** do cliente, nome (cliente → `nome_contato_cache` → grupo → telefone), e grava **observações** com bloco estruturado (ticket, setor, status, quem enviou ao CRM).
+
+Opcionalmente cria uma **nota interna** com resumo das últimas mensagens (`criar_nota_com_resumo`, default `true`).
+
+**Resposta (sempre JSON):**
+
+| HTTP | Situação |
+|------|----------|
+| **201** | Lead **criado**. Corpo: `{ lead, from_conversa: { created: true, duplicate: false, conversa_id, tags_sincronizadas, nota_resumo_criada, nota_resumo_id } }` |
+| **200** | Já existia lead para esta conversa e **`sincronizar_duplicata`** não foi `false`: atualiza última interação, **mescla tags** (se `vincular_tags_da_conversa`), retorna `{ lead, from_conversa: { duplicate: true, created: false, ... } }` |
+| **409** | Já existe lead e body tem **`sincronizar_duplicata: false`**: `{ error, lead, from_conversa: { duplicate: true, sincronizado: false } }` |
+
+**Body (todos opcionais, validados por Zod `fromConversaBodySchema`):**  
+`nome`, `empresa`, `telefone`, `email`, `pipeline_id`, `stage_id`, `origem_id`, `responsavel_id`, `tag_ids` (extras além das da conversa), `prioridade`, `valor_estimado`, `probabilidade`, `observacoes` (texto livre **abaixo** do bloco automático),  
+`vincular_tags_da_conversa` (default `true`), `criar_nota_com_resumo` (default `true`),  
+`sincronizar_duplicata` (default `true` — se `false` e já existir lead → **409**),  
+`atualizar_responsavel_em_duplicata` (default `false`; com `true` + `responsavel_id` atualiza no lead existente).
 
 ### Query `GET /leads`
 

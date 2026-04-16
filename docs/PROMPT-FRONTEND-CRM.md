@@ -81,7 +81,7 @@ Prefixo: **`/api/crm`** (ex.: `GET /api/crm/kanban`).
 |--------|---------|--------|
 | GET | `/leads` | Lista **enriquecida** + paginação. Ver query string abaixo. |
 | GET | `/leads/export` | CSV (`;`), BOM UTF-8. Mesmos filtros que `/leads`; query `max` com **default 5000**, limitado entre **1 e 10000**. |
-| POST | `/leads/from-conversa/:conversaId` | Body opcional para sobrescrever campos; cria vínculo com conversa/cliente. |
+| POST | `/leads/from-conversa/:conversaId` | Importação completa (tags da conversa, observações, nota com resumo). Ver **`docs/CRM-API.md`** e prompt **`docs/PROMPT-FRONTEND-CHAT-CRM.md`** para o botão no chat. |
 | POST | `/leads/from-cliente/:clienteId` | Idem para cliente. |
 | POST | `/leads` | Ver **Payload criar lead** (Zod `createLeadSchema`). |
 | GET | `/leads/:id` | Detalhe: inclui `tags`, `notas`, `atividades`, `historico` (movimentações). |

@@ -43,6 +43,31 @@ const notaSchema = z.object({
   texto: z.string().min(1).max(20000),
 })
 
+/** Body opcional em POST /leads/from-conversa/:id — sobrescreve ou complementa dados inferidos. */
+const fromConversaBodySchema = z.object({
+  nome: z.string().min(1).max(500).optional(),
+  empresa: z.string().max(500).optional().nullable(),
+  telefone: z.string().max(50).optional().nullable(),
+  email: z.string().max(320).optional().nullable(),
+  pipeline_id: z.number().int().positive().optional().nullable(),
+  stage_id: z.number().int().positive().optional().nullable(),
+  origem_id: z.number().int().positive().optional().nullable(),
+  responsavel_id: z.union([z.number().int().positive(), z.null()]).optional(),
+  tag_ids: z.array(z.number().int().positive()).optional(),
+  prioridade: prioridadeEnum.optional(),
+  valor_estimado: z.number().optional().nullable(),
+  probabilidade: z.number().int().min(0).max(100).optional().nullable(),
+  observacoes: z.string().max(20000).optional().nullable(),
+  /** default true — copia tags de conversa_tags para o lead */
+  vincular_tags_da_conversa: z.boolean().optional(),
+  /** default true — cria nota interna com trecho do histórico recente */
+  criar_nota_com_resumo: z.boolean().optional(),
+  /** Se já existir lead para esta conversa: mescla tags e atualiza última interação (default true) */
+  sincronizar_duplicata: z.boolean().optional(),
+  /** Só quando sincronizar_duplicata: também define responsável (default false) */
+  atualizar_responsavel_em_duplicata: z.boolean().optional(),
+})
+
 const atividadeSchema = z.object({
   tipo: z.enum([
     'ligacao', 'reuniao', 'whatsapp', 'email', 'tarefa', 'nota',
@@ -72,6 +97,7 @@ function safeParse(schema, data) {
 
 module.exports = {
   createLeadSchema,
+  fromConversaBodySchema,
   moveLeadSchema,
   reorderSchema,
   notaSchema,

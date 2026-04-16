@@ -1068,35 +1068,7 @@ async function getPipelineComStages(companyId, pipelineId) {
   return { ...p, stages }
 }
 
-async function createLeadFromConversa(companyId, userId, conversaId, body = {}) {
-  const { data: conv, error } = await supabase
-    .from('conversas')
-    .select('id, cliente_id, telefone, company_id')
-    .eq('company_id', companyId)
-    .eq('id', conversaId)
-    .maybeSingle()
-  if (error) throw error
-  if (!conv) throw Object.assign(new Error('Conversa não encontrada'), { status: 404 })
-
-  let nome = body.nome
-  let empresa = body.empresa
-  let telefone = body.telefone || conv.telefone
-  if (conv.cliente_id) {
-    const { data: cli } = await supabase
-      .from('clientes')
-      .select('nome, empresa, telefone, email')
-      .eq('company_id', companyId)
-      .eq('id', conv.cliente_id)
-      .maybeSingle()
-    if (cli) {
-      nome = nome || cli.nome || telefone || 'Lead'
-      empresa = empresa !== undefined ? empresa : cli.empresa
-      telefone = telefone || cli.telefone
-    }
-  }
-  nome = nome || telefone || `Conversa #${conversaId}`
-
-  let ultima = null
+async function fetchUltimaMensagemIso(companyId, conversaId) {
   const { data: um } = await supabase
     .from('mensagens')
     .select('criado_em')
@@ -1105,25 +1077,272 @@ async function createLeadFromConversa(companyId, userId, conversaId, body = {}) 
     .order('criado_em', { ascending: false })
     .limit(1)
     .maybeSingle()
-  if (um?.criado_em) ultima = um.criado_em
+  return um?.criado_em || null
+}
+
+async function fetchMensagensParaResumo(companyId, conversaId, limit = 28) {
+  const { data, error } = await supabase
+    .from('mensagens')
+    .select('texto, criado_em, direcao, tipo')
+    .eq('company_id', companyId)
+    .eq('conversa_id', conversaId)
+    .order('criado_em', { ascending: false })
+    .limit(limit)
+  if (error) throw error
+  return (data || []).slice().reverse()
+}
+
+function buildHistoricoResumoNota(mensagens, maxLen = 7800) {
+  const lines = [
+    '— Resumo automático do histórico (últimas mensagens) —',
+    '',
+  ]
+  for (const m of mensagens) {
+    const quem = String(m.direcao) === 'in' ? 'Cliente' : 'Equipe'
+    const tRaw = String(m.tipo || 'texto').toLowerCase()
+    let content = String(m.texto || '').trim()
+    if (tRaw && tRaw !== 'texto') {
+      const label = tRaw.replace(/_/g, ' ')
+      content = content ? `[${label}] ${content}` : `[${label}]`
+    }
+    if (!content) continue
+    let ts = ''
+    try {
+      if (m.criado_em) {
+        ts = new Date(m.criado_em).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })
+      }
+    } catch (_) {}
+    lines.push(ts ? `[${ts}] ${quem}: ${content}` : `${quem}: ${content}`)
+  }
+  let out = lines.join('\n')
+  if (out.length > maxLen) out = `${out.slice(0, maxLen - 40)}\n… (texto truncado)`
+  return out
+}
+
+function buildObservacaoImportBloqueio({
+  conv,
+  deptNome,
+  importadoPorNome,
+  conversaId,
+}) {
+  const lines = [
+    '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━',
+    'Importado do ZapERP · Atendimento',
+    `Conversa #${conversaId}`,
+  ]
+  if (conv.telefone) lines.push(`Telefone: ${conv.telefone}`)
+  if (deptNome) lines.push(`Setor: ${deptNome}`)
+  lines.push(`Status do ticket: ${conv.status_atendimento || '—'}`)
+  lines.push(`Tipo: ${conv.tipo || 'cliente'}`)
+  if (importadoPorNome) lines.push(`Enviado ao CRM por: ${importadoPorNome}`)
+  lines.push(`Registrado em: ${new Date().toISOString()}`)
+  lines.push('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━')
+  if (conv.observacao && String(conv.observacao).trim()) {
+    lines.push('')
+    lines.push('Observações do atendimento (campo da conversa):')
+    lines.push(String(conv.observacao).trim())
+  }
+  return lines.join('\n')
+}
+
+function mergeObservacoes(importBlock, extra) {
+  const e = extra != null && String(extra).trim() ? String(extra).trim() : ''
+  if (!e) return importBlock
+  return `${importBlock}\n\n— Nota do atendente ao enviar ao CRM —\n${e}`
+}
+
+function resolveNomeLead({ conv, cli, body }) {
+  if (body.nome && String(body.nome).trim()) return String(body.nome).trim()
+  if (cli?.nome && String(cli.nome).trim()) return String(cli.nome).trim()
+  if (conv.tipo === 'grupo' && conv.nome_grupo && String(conv.nome_grupo).trim()) {
+    return String(conv.nome_grupo).trim()
+  }
+  if (conv.nome_contato_cache && String(conv.nome_contato_cache).trim()) {
+    return String(conv.nome_contato_cache).trim()
+  }
+  if (conv.telefone) return String(conv.telefone)
+  return `Conversa #${conv.id}`
+}
+
+/**
+ * Envia conversa ao CRM: preenche dados do cliente/conversa, tags da conversa, observações
+ * estruturadas e nota com resumo do histórico (opcional).
+ * @returns {{ httpStatus: number, body: object }}
+ */
+async function createLeadFromConversa(companyId, userId, conversaId, body = {}) {
+  const { data: conv, error: eConv } = await supabase
+    .from('conversas')
+    .select(
+      'id, cliente_id, telefone, company_id, departamento_id, status_atendimento, atendente_id, tipo, nome_grupo, nome_contato_cache, observacao'
+    )
+    .eq('company_id', companyId)
+    .eq('id', conversaId)
+    .maybeSingle()
+  if (eConv) throw eConv
+  if (!conv) throw Object.assign(new Error('Conversa não encontrada'), { status: 404 })
+
+  let deptNome = null
+  if (conv.departamento_id) {
+    const { data: dep } = await supabase
+      .from('departamentos')
+      .select('nome')
+      .eq('company_id', companyId)
+      .eq('id', conv.departamento_id)
+      .maybeSingle()
+    deptNome = dep?.nome ?? null
+  }
+
+  const { data: importador } = await supabase
+    .from('usuarios')
+    .select('nome')
+    .eq('company_id', companyId)
+    .eq('id', userId)
+    .maybeSingle()
+  const importadoPorNome = importador?.nome || null
+
+  let cli = null
+  if (conv.cliente_id) {
+    const { data: c } = await supabase
+      .from('clientes')
+      .select('id, nome, empresa, telefone, email')
+      .eq('company_id', companyId)
+      .eq('id', conv.cliente_id)
+      .maybeSingle()
+    cli = c || null
+  }
+
+  const conversaTagIds = await repo.listConversaTagIds(companyId, conversaId)
+  const bodyTagIds = Array.isArray(body.tag_ids) ? body.tag_ids : []
+  const mergedTagIds = [...new Set([...conversaTagIds, ...bodyTagIds].map(Number).filter((x) => Number.isFinite(x) && x > 0))]
+
+  const vincularTags = body.vincular_tags_da_conversa !== false
+  const tagIdsParaLead = vincularTags ? mergedTagIds : [...new Set(bodyTagIds.map(Number).filter((x) => Number.isFinite(x) && x > 0))]
+
+  const existing = await repo.findLeadByConversaId(companyId, conversaId)
+  if (existing) {
+    if (body.sincronizar_duplicata === false) {
+      const detail = await getLeadDetailEnriched(companyId, existing.id)
+      return {
+        httpStatus: 409,
+        body: {
+          error: 'Já existe um lead vinculado a esta conversa.',
+          lead: detail,
+          from_conversa: {
+            duplicate: true,
+            conversa_id: conversaId,
+            sincronizado: false,
+          },
+        },
+      }
+    }
+
+    const ultima = await fetchUltimaMensagemIso(companyId, conversaId)
+    const patch = {}
+    if (ultima) patch.ultima_interacao_em = ultima
+    if (body.atualizar_responsavel_em_duplicata === true && body.responsavel_id !== undefined) {
+      patch.responsavel_id = body.responsavel_id != null ? Number(body.responsavel_id) : null
+    }
+    if (Object.keys(patch).length) await repo.updateLead(companyId, existing.id, patch)
+
+    if (vincularTags) {
+      const leadIds = await repo.listLeadTagIds(companyId, existing.id)
+      const merged = [...new Set([...leadIds, ...conversaTagIds, ...bodyTagIds].map(Number).filter((x) => Number.isFinite(x) && x > 0))]
+      await repo.replaceLeadTags(companyId, existing.id, merged)
+    } else if (bodyTagIds.length) {
+      const only = [...new Set(bodyTagIds.map(Number).filter((x) => Number.isFinite(x) && x > 0))]
+      await repo.replaceLeadTags(companyId, existing.id, only)
+    }
+
+    const detail = await getLeadDetailEnriched(companyId, existing.id)
+    return {
+      httpStatus: 200,
+      body: {
+        lead: detail,
+        from_conversa: {
+          created: false,
+          duplicate: true,
+          conversa_id: conversaId,
+          sincronizado: true,
+          tags_mescladas: vincularTags ? (conversaTagIds?.length ?? 0) : 0,
+        },
+      },
+    }
+  }
+
+  let nome = resolveNomeLead({ conv, cli, body })
+  let empresa = body.empresa !== undefined ? body.empresa : cli?.empresa ?? null
+  let telefone = body.telefone != null ? String(body.telefone) : conv.telefone
+  if (cli?.telefone && !telefone) telefone = cli.telefone
+  const email = body.email !== undefined ? body.email : cli?.email ?? null
+
+  const importBlock = buildObservacaoImportBloqueio({
+    conv,
+    deptNome,
+    importadoPorNome,
+    conversaId,
+  })
+  let observacoes = mergeObservacoes(importBlock, body.observacoes)
+  if (observacoes.length > 20000) {
+    observacoes = `${observacoes.slice(0, 19950)}\n… (observações truncadas)`
+  }
+
+  const ultima = await fetchUltimaMensagemIso(companyId, conversaId)
 
   const payload = {
     nome,
     empresa: empresa != null ? empresa : null,
     telefone: telefone != null ? String(telefone) : null,
+    email: email != null ? String(email).trim() : null,
     conversa_id: conversaId,
-    cliente_id: conv.cliente_id || body.cliente_id || null,
+    cliente_id: conv.cliente_id || null,
     pipeline_id: body.pipeline_id,
     stage_id: body.stage_id,
     origem_id: body.origem_id,
     responsavel_id: body.responsavel_id !== undefined ? body.responsavel_id : userId,
+    prioridade: body.prioridade,
+    valor_estimado: body.valor_estimado,
+    probabilidade: body.probabilidade,
+    observacoes,
+    tag_ids: tagIdsParaLead,
     vincular_cliente_por_telefone: false,
   }
+
   const created = await createLead(companyId, userId, payload, true)
   if (ultima) {
     await repo.updateLead(companyId, created.id, { ultima_interacao_em: ultima })
   }
-  return repo.getLeadById(companyId, created.id)
+
+  let notaResumoId = null
+  const querNota = body.criar_nota_com_resumo !== false
+  if (querNota) {
+    const msgs = await fetchMensagensParaResumo(companyId, conversaId, 30)
+    if (msgs.length) {
+      const textoNota = buildHistoricoResumoNota(msgs)
+      const notaRow = await repo.insertNota({
+        company_id: companyId,
+        lead_id: created.id,
+        texto: textoNota,
+        criado_por: userId,
+      })
+      notaResumoId = notaRow?.id ?? null
+    }
+  }
+
+  const detail = await getLeadDetailEnriched(companyId, created.id)
+  return {
+    httpStatus: 201,
+    body: {
+      lead: detail,
+      from_conversa: {
+        created: true,
+        duplicate: false,
+        conversa_id: conversaId,
+        tags_sincronizadas: vincularTags ? conversaTagIds.length : 0,
+        nota_resumo_criada: !!notaResumoId,
+        nota_resumo_id: notaResumoId,
+      },
+    },
+  }
 }
 
 async function createLeadFromCliente(companyId, userId, clienteId, body = {}) {
