@@ -63,6 +63,7 @@ const IntentSchema = z.object({
     'BUSCA_CONTEUDO_MENSAGENS',           // localizar texto/tema/data em mensagens
     'RANKING_TEMPO_RESPOSTA_ATENDENTES',  // ranking de tempos médios de 1ª resposta
     'ATENDENTE_MAIS_MENSAGENS_COM_TEMA',  // quem mais enviou mensagens (out) contendo termo/tema
+    'RANKING_EDUCACAO_ATENDENTES',        // ranking objetivo de cordialidade por sinais textuais
     'QUALIDADE_ATENDIMENTOS_RANKING',     // melhor/pior desempenho por notas de avaliação (quando houver)
     'SINAIS_INTERESSE_COMPRA',            // conversas com termos de intenção de compra/orçamento
     'ATENDIMENTOS_LINGUAGEM_PROBLEMA',    // notas baixas + mensagens com sinais de confusão/insatisfação textual
@@ -96,6 +97,7 @@ const IntentSchema = z.object({
 const LEXICO_PROMOCAO = [
   'promocao', 'promoção', 'desconto', 'oferta', 'cupom', 'black friday', 'liquidacao', 'liquidação',
   'lancamento', 'lançamento', 'preco especial', 'preço especial', 'cashback',
+  'produto', 'produtos', 'catalogo', 'catálogo', 'venda', 'vendas',
 ]
 const LEXICO_FINANCEIRO = [
   'nota fiscal', 'nota fiscal eletronica', 'nf-e', 'nfe', 'danfe', 'nfs-e', 'nfse',
@@ -116,6 +118,15 @@ const STOPWORDS_EXTRAIR = new Set([
   'funcionario', 'funcionários', 'cliente', 'atendimento', 'conversa', 'mensagem', 'chat', 'interno', 'interna',
   'me', 'de', 'da', 'do', 'das', 'dos', 'um', 'uma', 'no', 'na', 'nos', 'nas', 'foi', 'ser', 'tem', 'ter',
 ])
+
+const LEXICO_CORDIAL_POSITIVO = [
+  'bom dia', 'boa tarde', 'boa noite', 'por favor', 'obrigado', 'obrigada', 'agradeco', 'agradeço',
+  'fico a disposicao', 'fico à disposição', 'gentileza', 'poderia', 'por gentileza', 'combinado',
+]
+const LEXICO_CORDIAL_NEGATIVO = [
+  'nao posso ajudar', 'não posso ajudar', 'problema seu', 'se vira', 'tanto faz', 'ja expliquei', 'já expliquei',
+  'nao vou', 'não vou', 'nao quero', 'não quero', 'inaceitavel', 'inaceitável',
+]
 
 /** Expande termos com variantes sem acento + dedupe + limite para OR no PostgREST. */
 function expandTermosForSearch(rawList, max = 22) {
@@ -195,6 +206,7 @@ Intents permitidos:
 - ANALISE_TOM_ATENDENTE: se o atendente é educado, cordial, profissional, tom da comunicação, "trata bem o cliente" (precisa de usuario_nome)
 - BUSCA_CONTEUDO_MENSAGENS: localizar conversa ou trecho que fala sobre algo (nota fiscal, boleto, produto, tema livre), "qual conversa menciona"
 - ATENDENTE_MAIS_MENSAGENS_COM_TEMA: qual funcionário mais enviou mensagens sobre um tema (promoção, desconto, campanha) — preencha termos_busca
+- RANKING_EDUCACAO_ATENDENTES: quando a pergunta pedir "qual atendente é o mais educado", "quem é mais cordial", "ranking de educação/cordialidade entre atendentes"
 - QUALIDADE_ATENDIMENTOS_RANKING: melhor/pior qualidade de atendimento por avaliações/notas dos clientes, "quem tem melhor nota"
 - SINAIS_INTERESSE_COMPRA: chance de venda, interesse em comprar, orçamento, fechar negócio
 - ATENDIMENTOS_LINGUAGEM_PROBLEMA: linguagem ruim, confusa, incompleta, cliente não entendeu, reclamação de comunicação
@@ -325,6 +337,7 @@ async function formatAnswer({ intent, data, question }) {
     'SINAIS_INTERESSE_COMPRA',
     'ATENDIMENTOS_LINGUAGEM_PROBLEMA',
     'ATENDENTE_MAIS_MENSAGENS_COM_TEMA',
+    'RANKING_EDUCACAO_ATENDENTES',
     'RANKING_TEMPO_RESPOSTA_ATENDENTES',
     'QUALIDADE_ATENDIMENTOS_RANKING',
     'RELATORIO_ATENDENTE_COMPLETO',
@@ -433,6 +446,37 @@ function calcFirstResponseDiff(msgs) {
   if (!firstOut) return null
   const diffMin = (firstOut.ts - firstIn.ts) / 60000
   return diffMin >= 0 ? diffMin : null
+}
+
+async function fetchMensagensPaged(buildQuery, { pageSize = 2000, maxRows = 30000 } = {}) {
+  const rows = []
+  let from = 0
+  while (from < maxRows) {
+    const to = Math.min(from + pageSize - 1, maxRows - 1)
+    const { data, error } = await buildQuery(from, to)
+    if (error) throw error
+    const batch = data || []
+    rows.push(...batch)
+    if (batch.length < pageSize) break
+    from += pageSize
+  }
+  return rows
+}
+
+function contarOcorrenciasNoTexto(texto, lexico) {
+  const t = normalizeSearchTerm(String(texto || ''))
+  if (!t) return 0
+  let n = 0
+  for (const termo of lexico) {
+    if (textoCasaTermoRobusto(t, termo)) n++
+  }
+  return n
+}
+
+function notaCordialidadePorMensagem(texto) {
+  const positivos = contarOcorrenciasNoTexto(texto, LEXICO_CORDIAL_POSITIVO)
+  const negativos = contarOcorrenciasNoTexto(texto, LEXICO_CORDIAL_NEGATIVO)
+  return { positivos, negativos }
 }
 
 // ── Queries de dados (Supabase client — sem SQL livre) ───────────────────────
@@ -893,21 +937,22 @@ async function qTopAtendentesPorConversas(company_id, days, limit = 5) {
     .slice(0, lim)
 }
 
-/** CLIENTES_MAIS_ATIVOS: top 5 clientes com mais mensagens recebidas (direcao='in'). */
+/** CLIENTES_MAIS_ATIVOS: ranking de clientes com mais mensagens recebidas (direcao='in'). */
 async function qClientesMaisAtivos(company_id, days, limit = 5) {
   const d = clampDays(days)
   const lim = Math.max(1, Math.min(20, limit))
   const desde = new Date(Date.now() - d * 24 * 60 * 60 * 1000).toISOString()
 
-  // Mensagens recebidas do período (limite seguro de 10k)
-  const { data: msgRows, error: errMsg } = await supabase
-    .from('mensagens')
-    .select('conversa_id')
-    .eq('company_id', company_id)
-    .eq('direcao', 'in')
-    .gte('criado_em', desde)
-    .limit(10000)
-  if (errMsg) throw errMsg
+  // Mensagens recebidas do período (paginação para evitar corte em alto volume).
+  const msgRows = await fetchMensagensPaged((from, to) => (
+    supabase
+      .from('mensagens')
+      .select('conversa_id')
+      .eq('company_id', company_id)
+      .eq('direcao', 'in')
+      .gte('criado_em', desde)
+      .range(from, to)
+  ), { pageSize: 2500, maxRows: 50000 })
   if (!msgRows?.length) return []
 
   // Conta mensagens por conversa_id
@@ -1535,6 +1580,7 @@ function enrichDataReferenciaFromQuestion(cls, question) {
     'CONVERSAS_POR_ASSUNTO_OPERACIONAL',
     'CHAT_INTERNO_POR_TEMA',
     'ATENDENTE_MAIS_MENSAGENS_COM_TEMA',
+    'RANKING_EDUCACAO_ATENDENTES',
     'MENSAGENS_USUARIO_CLIENTE',
     'CONVERSAS_USUARIO_CLIENTE',
     'HISTORICO_CLIENTE',
@@ -2093,18 +2139,18 @@ async function qAtendentesMaisMensagensComTema(company_id, termos, days, opts = 
   const primary = terms[0]
   const orClause = terms.map((t) => `texto.ilike.%${t}%`).join(',')
 
-  let qM = supabase
-    .from('mensagens')
-    .select('id, autor_usuario_id, texto, criado_em')
-    .eq('company_id', company_id)
-    .eq('direcao', 'out')
-    .gte('criado_em', desde)
-    .or(orClause)
-    .limit(2500)
-  if (fxEx) qM = qM.lt('criado_em', fxEx)
-  const { data: msgs, error } = await qM
-
-  if (error) throw error
+  const msgs = await fetchMensagensPaged((from, to) => {
+    let qM = supabase
+      .from('mensagens')
+      .select('id, autor_usuario_id, texto, criado_em')
+      .eq('company_id', company_id)
+      .eq('direcao', 'out')
+      .gte('criado_em', desde)
+      .or(orClause)
+      .range(from, to)
+    if (fxEx) qM = qM.lt('criado_em', fxEx)
+    return qM
+  }, { pageSize: 2000, maxRows: 50000 })
 
   let withAutor = (msgs || []).filter((m) => {
     if (!m.autor_usuario_id || !m.texto) return false
@@ -2157,6 +2203,96 @@ async function qAtendentesMaisMensagensComTema(company_id, termos, days, opts = 
     ) || buildRecorteTemporalMeta([], rtCtx)
   }
   return outTema
+}
+
+async function qRankingEducacaoAtendentes(company_id, days, opts = {}) {
+  const fxIn = opts.periodo_mensagens_inicio_iso || null
+  const fxEx = opts.periodo_mensagens_fim_exclusive_iso || null
+  let d = clampDays(days)
+  let desde
+  if (fxIn && fxEx) {
+    desde = fxIn
+    d = Math.min(365, Math.max(1, Math.ceil((Date.parse(fxEx) - Date.parse(fxIn)) / 86400000)))
+  } else {
+    desde = new Date(Date.now() - d * 24 * 60 * 60 * 1000).toISOString()
+  }
+
+  const msgs = await fetchMensagensPaged((from, to) => {
+    let q = supabase
+      .from('mensagens')
+      .select('id, autor_usuario_id, texto, criado_em, conversa_id')
+      .eq('company_id', company_id)
+      .eq('direcao', 'out')
+      .gte('criado_em', desde)
+      .not('autor_usuario_id', 'is', null)
+      .range(from, to)
+    if (fxEx) q = q.lt('criado_em', fxEx)
+    return q
+  }, { pageSize: 1500, maxRows: 30000 })
+
+  const validas = (msgs || []).filter((m) => m.autor_usuario_id && String(m.texto || '').trim())
+  if (!validas.length) {
+    return { ranking: [], periodo_dias: d, observacao: 'Sem mensagens enviadas por atendentes no período.' }
+  }
+
+  const agg = new Map()
+  for (const m of validas) {
+    const uid = m.autor_usuario_id
+    if (!agg.has(uid)) agg.set(uid, { total: 0, pos: 0, neg: 0, exemplos: [] })
+    const rec = agg.get(uid)
+    const texto = String(m.texto || '').trim().slice(0, 220)
+    const s = notaCordialidadePorMensagem(texto)
+    rec.total += 1
+    rec.pos += s.positivos
+    rec.neg += s.negativos
+    if ((s.positivos > 0 || s.negativos > 0) && rec.exemplos.length < 3) {
+      rec.exemplos.push({
+        mensagem_id: m.id,
+        conversa_id: m.conversa_id,
+        texto_preview: texto,
+        positivos: s.positivos,
+        negativos: s.negativos,
+      })
+    }
+  }
+
+  const ids = Array.from(agg.keys())
+  const { data: usuarios } = await supabase
+    .from('usuarios')
+    .select('id, nome')
+    .eq('company_id', company_id)
+    .in('id', ids)
+  const nomeMap = new Map((usuarios || []).map((u) => [u.id, u.nome || 'Sem nome']))
+
+  const rankingBruto = Array.from(agg.entries())
+    .map(([uid, rec]) => {
+      const taxaPos = rec.total > 0 ? rec.pos / rec.total : 0
+      const taxaNeg = rec.total > 0 ? rec.neg / rec.total : 0
+      const nota = Math.max(0, Math.min(10, Number((5 + taxaPos * 4.5 - taxaNeg * 6.5).toFixed(2))))
+      return {
+        usuario_id: uid,
+        nome: nomeMap.get(uid) || 'Sem nome',
+        total_mensagens_analisadas: rec.total,
+        sinais_cordiais: rec.pos,
+        sinais_risco_linguagem: rec.neg,
+        nota_cordialidade: nota,
+        exemplos: rec.exemplos,
+      }
+    })
+    .filter((r) => r.total_mensagens_analisadas >= 5)
+    .sort((a, b) => (
+      b.nota_cordialidade - a.nota_cordialidade
+      || b.sinais_cordiais - a.sinais_cordiais
+      || b.total_mensagens_analisadas - a.total_mensagens_analisadas
+    ))
+
+  return {
+    ranking: rankingBruto.slice(0, 15),
+    periodo_dias: d,
+    total_atendentes_analisados: rankingBruto.length,
+    total_mensagens_analisadas: validas.length,
+    criterio: 'Ranking heurístico por sinais textuais: cordialidade (saudações/agradecimentos/polidez) menos sinais de fricção. Não substitui auditoria humana.',
+  }
 }
 
 /** QUALIDADE_ATENDIMENTOS_RANKING — ordena por média de notas (avaliações) quando existir histórico. */
@@ -3849,6 +3985,28 @@ async function attachResumoOperacionalParaIa(company_id, data, intent, ctx) {
         }
         break
       }
+      case 'RANKING_EDUCACAO_ATENDENTES': {
+        const rank = data.ranking || []
+        bloco = {
+          clientes_unicos: [],
+          clientes_detalhes: [],
+          conversas_encontradas: [],
+          conversas_detalhes: [],
+          mensagens_encontradas: [],
+          mensagens_detalhes: 'Ranking de cordialidade por atendente com sinais textuais identificados.',
+          total_clientes_unicos: 0,
+          total_conversas: 0,
+          total_mensagens: data.total_mensagens_analisadas || 0,
+          ranking_por_atendente: rank.map((r) => ({
+            usuario_id: r.usuario_id,
+            nome: r.nome,
+            nota_cordialidade: r.nota_cordialidade,
+            total_mensagens_analisadas: r.total_mensagens_analisadas,
+          })),
+          distincao_entidades: 'Ranking de atendentes por nota heurística de cordialidade textual no período.',
+        }
+        break
+      }
       case 'ANALISE_TOM_ATENDENTE': {
         const am = data.amostra || []
         bloco = {
@@ -4070,7 +4228,7 @@ async function answerDashboardQuestion({ company_id, question, period_days }) {
       break
 
     case 'CLIENTES_MAIS_ATIVOS':
-      data = await qClientesMaisAtivos(company_id, days, 5)
+      data = await qClientesMaisAtivos(company_id, days, 20)
       break
 
     case 'SLA_ALERTAS':
@@ -4177,6 +4335,10 @@ async function answerDashboardQuestion({ company_id, question, period_days }) {
 
     case 'ATENDENTE_MAIS_MENSAGENS_COM_TEMA':
       data = await qAtendentesMaisMensagensComTema(company_id, cls.termos_busca || [], days, optsPeriodoApi)
+      break
+
+    case 'RANKING_EDUCACAO_ATENDENTES':
+      data = await qRankingEducacaoAtendentes(company_id, days, optsPeriodoApi)
       break
 
     case 'QUALIDADE_ATENDIMENTOS_RANKING':

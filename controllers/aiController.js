@@ -53,6 +53,12 @@ function startOfMonth() {
   return d.toISOString()
 }
 
+/** Evita cache para perguntas sensíveis a atualização contínua/ranking. */
+function shouldBypassCache(question) {
+  const q = String(question || '').toLowerCase()
+  return /(quem\s+mais|qual\s+atendente\s+mais|mais\s+educad|mais\s+ofert|mais\s+manda\s+mensagem|ranking|top\s+\d+)/i.test(q)
+}
+
 // ── Verificação de limite mensal ──────────────────────────────────────────────
 
 /**
@@ -169,6 +175,7 @@ async function ask(req, res) {
 
     const trimmedQuestion = question.trim()
     const days = period_days != null ? Number(period_days) : undefined
+    const bypassCache = shouldBypassCache(trimmedQuestion)
 
     // ── 1) Verificar limite mensal ────────────────────────────────────────────
     const { allowed, used, limit } = await checkMonthlyLimit(company_id)
@@ -184,7 +191,7 @@ async function ask(req, res) {
 
     // ── 2) Verificar cache ────────────────────────────────────────────────────
     const questionHash = buildQuestionHash(company_id, trimmedQuestion, days)
-    const cached = await getCached(company_id, questionHash)
+    const cached = bypassCache ? null : await getCached(company_id, questionHash)
 
     if (cached) {
       // Resposta em cache: retorna sem chamar OpenAI
@@ -203,7 +210,7 @@ async function ask(req, res) {
     })
 
     // ── 4) Salvar no cache (apenas respostas bem-sucedidas) ───────────────────
-    if (result.ok) {
+    if (result.ok && !bypassCache) {
       await saveCache({
         company_id,
         question_hash: questionHash,

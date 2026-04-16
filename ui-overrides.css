@@ -692,6 +692,39 @@ html.dark .wa-bubble-audio [class*="duration"],
 
 /* Mantém mobile mais compacto e evita quebra de layout */
 @media (max-width: 520px) {
+  .wa-footer {
+    display: flex !important;
+    align-items: center !important;
+    gap: 6px !important;
+    padding: 8px 8px 10px !important;
+  }
+  .wa-footer > * {
+    flex-shrink: 0 !important;
+  }
+  .wa-footer .wa-input,
+  .wa-footer input.wa-input,
+  .wa-footer input[type="text"],
+  .wa-footer textarea {
+    flex: 1 1 auto !important;
+    min-width: 0 !important;
+    width: auto !important;
+    max-width: none !important;
+    font-size: 15px !important;
+    height: 40px !important;
+  }
+  .wa-footer .wa-iconBtn,
+  .wa-footer .wa-sendBtn {
+    width: 34px !important;
+    height: 34px !important;
+    min-width: 34px !important;
+    min-height: 34px !important;
+  }
+  .wa-footer .wa-sendBtn {
+    width: 40px !important;
+    height: 40px !important;
+    min-width: 40px !important;
+    min-height: 40px !important;
+  }
   .sidebar {
     width: auto;
   }
