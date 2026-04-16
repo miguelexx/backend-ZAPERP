@@ -1784,7 +1784,7 @@ exports.apagarConversa = async (req, res) => {
 
     const { data: conv, error: errC } = await supabase
       .from('conversas')
-      .select('id, tipo')
+      .select('id, tipo, cliente_id')
       .eq('company_id', company_id)
       .eq('id', conversa_id)
       .maybeSingle()
@@ -1796,6 +1796,20 @@ exports.apagarConversa = async (req, res) => {
 
     const cid = company_id
     const convId = conversa_id
+    const clienteId = conv?.cliente_id ? Number(conv.cliente_id) : null
+
+    // Garantia operacional: apagar conversa nunca deve apagar o contato.
+    // Guardamos o estado do contato antes da exclusão para validar depois.
+    let contatoExistiaAntes = false
+    if (clienteId) {
+      const { data: contatoAntes } = await supabase
+        .from('clientes')
+        .select('id')
+        .eq('company_id', cid)
+        .eq('id', clienteId)
+        .maybeSingle()
+      contatoExistiaAntes = !!contatoAntes?.id
+    }
 
     const { data: atendRows } = await supabase
       .from('atendimentos')
@@ -1827,7 +1841,30 @@ exports.apagarConversa = async (req, res) => {
       io.to(`empresa_${cid}`).emit('atualizar_conversa', { id: convId, removida: true })
     }
 
-    return res.json({ ok: true, id: convId })
+    let contatoPreservado = true
+    if (clienteId && contatoExistiaAntes) {
+      const { data: contatoDepois } = await supabase
+        .from('clientes')
+        .select('id')
+        .eq('company_id', cid)
+        .eq('id', clienteId)
+        .maybeSingle()
+      contatoPreservado = !!contatoDepois?.id
+      if (!contatoPreservado) {
+        console.error('[apagarConversa] CONTATO REMOVIDO INDEVIDAMENTE', {
+          company_id: cid,
+          conversa_id: convId,
+          cliente_id: clienteId,
+        })
+      }
+    }
+
+    return res.json({
+      ok: true,
+      id: convId,
+      contato_preservado: contatoPreservado,
+      cliente_id_preservado: clienteId,
+    })
   } catch (err) {
     console.error('[apagarConversa]', err)
     return res.status(500).json({ error: 'Erro ao apagar conversa' })
