@@ -1170,11 +1170,11 @@ function resolveNomeLead({ conv, cli, body }) {
  * @returns {{ httpStatus: number, body: object }}
  */
 async function createLeadFromConversa(companyId, userId, conversaId, body = {}) {
+  // Usar '*' em vez de listar `observacao`: em bases antigas a coluna pode não existir;
+  // pedir coluna inexistente no .select() gera erro PostgREST. Com '*', só vêm colunas físicas.
   const { data: conv, error: eConv } = await supabase
     .from('conversas')
-    .select(
-      'id, cliente_id, telefone, company_id, departamento_id, status_atendimento, atendente_id, tipo, nome_grupo, nome_contato_cache, observacao'
-    )
+    .select('*')
     .eq('company_id', companyId)
     .eq('id', conversaId)
     .maybeSingle()
