@@ -45,6 +45,11 @@ router.post('/:id/localizacao', auth, chatController.enviarLocalizacao)
 router.post('/:id/ligacao', auth, chatController.enviarLigacaoWhatsapp)
 router.put('/:id/observacao', auth, chatController.atualizarObservacao)
 
+// Menu da lista (silenciar / fixar / favoritar / limpar / apagar) — ver migration conversa_usuario_prefs
+router.patch('/:id/prefs', auth, chatController.patchConversaPrefs)
+router.post('/:id/limpar-mensagens', auth, chatController.limparMensagensConversa)
+router.delete('/:id', auth, chatController.apagarConversa)
+
 // auditoria
 router.get('/:id/atendimentos', auth, chatController.listarAtendimentos)
 

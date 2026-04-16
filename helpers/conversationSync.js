@@ -616,6 +616,28 @@ function sortConversationsByRecent(conversas) {
   })
 }
 
+/**
+ * Fixadas primeiro (mais recente em fixada_em / atividade), depois o restante por ultima_atividade.
+ * Campos opcionais: fixada (boolean), fixada_em (ISO string).
+ */
+function sortConversationsPinThenRecent(conversas) {
+  if (!Array.isArray(conversas)) return conversas
+  return [...conversas].sort((a, b) => {
+    const ap = !!(a && a.fixada)
+    const bp = !!(b && b.fixada)
+    if (ap !== bp) return ap ? -1 : 1
+    if (ap && bp) {
+      const tfa = new Date(a.fixada_em || a.ultima_atividade || a.criado_em || 0).getTime()
+      const tfb = new Date(b.fixada_em || b.ultima_atividade || b.criado_em || 0).getTime()
+      if (tfb !== tfa) return tfb - tfa
+    }
+    const ta = new Date(a.ultima_atividade || a.criado_em || 0).getTime()
+    const tb = new Date(b.ultima_atividade || b.criado_em || 0).getTime()
+    if (tb !== ta) return tb - ta
+    return (Number(b.id) || 0) - (Number(a.id) || 0)
+  })
+}
+
 module.exports = {
   getCanonicalPhone,
   getOrCreateCliente,
@@ -624,4 +646,5 @@ module.exports = {
   mergeConversationLidToPhone,
   deduplicateConversationsByContact,
   sortConversationsByRecent,
+  sortConversationsPinThenRecent,
 }

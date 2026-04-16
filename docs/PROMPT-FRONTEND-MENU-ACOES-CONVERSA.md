@@ -163,19 +163,23 @@ O menu não pode:
 - Compatível com teclado e mobile.
 - Sem bugs de overlay, clipping, foco ou menu fantasma.
 
-### Importante: endpoints
+### Backend real (ZAPERP — aplicar migration no Supabase)
 
-Antes de codar:
+Rode no banco a migration `supabase/migrations/20260417180000_conversa_usuario_prefs.sql` (tabela `conversa_usuario_prefs`). Sem ela, `PATCH .../prefs` devolve **503** com mensagem explicando.
 
-1. Levantar no próprio frontend quais métodos de API para:
-   - mute/unmute
-   - pin/unpin
-   - favorite/unfavorite
-   - clear conversation
-   - delete conversation
-2. Confirmar que batem com rotas reais do backend.
-3. Se algum endpoint não existir, **não inventar**:
-   - manter ação visível com `disabled` + tooltip `"Disponível em breve"` até backend estar pronto.
+Base HTTP (como o resto do app): **`/api/chats`** + `Authorization: Bearer <JWT>`.
+
+| Ação | Método | Rota | Body / notas |
+|------|--------|------|----------------|
+| Silenciar / fixar / favoritar | `PATCH` | `/api/chats/:id/prefs` | JSON parcial: `silenciada`, `fixada`, `favorita` (boolean). Só envie os campos que mudam. |
+| Limpar conversa | `POST` | `/api/chats/:id/limpar-mensagens` | Sem body. Apaga mensagens no CRM; mantém a conversa. Socket: `mensagens_conversa_limpas` + `conversa_atualizada`. |
+| Apagar conversa | `DELETE` | `/api/chats/:id` | Sem body. Remove conversa e dependências. Socket: `conversa_apagada` + `atualizar_conversa` com `{ id, removida: true }`. Grupos: **400** neste endpoint. |
+
+**Listagem:** `GET /api/chats` passa a incluir por item (quando a migration existe): `silenciada`, `fixada`, `favorita`, `fixada_em`. Conversas **fixadas** sobem no topo (dentro do resultado já filtrado).
+
+**Realtime prefs (só o utilizador que alterou):** evento `conversa_prefs_atualizada` na room `usuario_{id}` com `{ conversa_id, silenciada, fixada, favorita, fixada_em }`.
+
+Remover do frontend o estado **travado** (`disabled` + «Disponível em breve») para estas ações após integrar as rotas acima.
 
 ## FIM DO PROMPT
 

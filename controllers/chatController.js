@@ -3,7 +3,7 @@ const { getProvider } = require('../services/providers')
 const { getStatus } = require('../services/ultramsgIntegrationService')
 const { isGroupConversation } = require('../helpers/conversaHelper')
 const { normalizePhoneBR, possiblePhonesBR, phoneKeyBR } = require('../helpers/phoneHelper')
-const { deduplicateConversationsByContact, sortConversationsByRecent, getCanonicalPhone, getOrCreateCliente, mergeConversasIntoCanonico } = require('../helpers/conversationSync')
+const { deduplicateConversationsByContact, sortConversationsByRecent, sortConversationsPinThenRecent, getCanonicalPhone, getOrCreateCliente, mergeConversasIntoCanonico } = require('../helpers/conversationSync')
 const { enrichConversationsWithContactData } = require('../helpers/conversaEnrichment')
 const { getDisplayName } = require('../helpers/contactEnrichment')
 
@@ -1038,6 +1038,56 @@ exports.listarConversas = async (req, res) => {
       })
     }
 
+    // Preferências por usuário (silenciar / fixar / favoritar) — migration: conversa_usuario_prefs
+    try {
+      const idsComConversa = conversasFormatadas
+        .filter((c) => c.id != null && !c.sem_conversa)
+        .map((c) => Number(c.id))
+        .filter((id) => Number.isFinite(id) && id > 0)
+      if (idsComConversa.length > 0) {
+        const { data: prefRows, error: prefErr } = await supabase
+          .from('conversa_usuario_prefs')
+          .select('conversa_id, silenciada, fixada, favorita, fixada_em')
+          .eq('company_id', Number(company_id))
+          .eq('usuario_id', Number(user_id))
+          .in('conversa_id', idsComConversa)
+        const missingTable =
+          prefErr &&
+          (String(prefErr.message || '').toLowerCase().includes('conversa_usuario_prefs') ||
+            String(prefErr.message || '').includes('schema cache') ||
+            String(prefErr.code || '') === '42P01')
+        if (prefErr && !missingTable) {
+          console.warn('[listarConversas] conversa_usuario_prefs:', prefErr.message)
+        } else {
+          const prefMap = new Map((prefRows || []).map((r) => [Number(r.conversa_id), r]))
+          conversasFormatadas = conversasFormatadas.map((c) => {
+            if (c.sem_conversa || c.id == null) {
+              return {
+                ...c,
+                silenciada: false,
+                fixada: false,
+                favorita: false,
+                fixada_em: null,
+              }
+            }
+            const p = prefMap.get(Number(c.id))
+            return {
+              ...c,
+              silenciada: !!(p && p.silenciada),
+              fixada: !!(p && p.fixada),
+              favorita: !!(p && p.favorita),
+              fixada_em: p && p.fixada_em != null ? p.fixada_em : null,
+            }
+          })
+          if (!prefErr) {
+            conversasFormatadas = sortConversationsPinThenRecent(conversasFormatadas)
+          }
+        }
+      }
+    } catch (e) {
+      console.warn('[listarConversas] prefs:', e?.message || e)
+    }
+
     if (!incluirColaboradoresEncaminhar) {
       return res.json(conversasFormatadas)
     }
@@ -1555,6 +1605,234 @@ exports.atualizarObservacao = async (req, res) => {
     return res.status(500).json({ error: 'Erro ao atualizar observação' });
   }
 };
+
+// =====================================================
+// Preferências da lista (silenciar / fixar / favoritar) — PATCH /chats/:id/prefs
+// =====================================================
+exports.patchConversaPrefs = async (req, res) => {
+  try {
+    const { company_id, id: user_id, perfil, departamento_ids } = req.user
+    const conversa_id = Number(req.params.id)
+    if (!Number.isFinite(conversa_id) || conversa_id <= 0) {
+      return res.status(400).json({ error: 'ID da conversa inválido' })
+    }
+    const perm = await assertPermissaoConversa({
+      company_id,
+      conversa_id,
+      user_id,
+      role: perfil,
+      user_dep_ids: departamento_ids,
+    })
+    if (!perm.ok) return res.status(perm.status).json({ error: perm.error })
+
+    const body = req.body && typeof req.body === 'object' ? req.body : {}
+    if (
+      body.silenciada === undefined &&
+      body.fixada === undefined &&
+      body.favorita === undefined
+    ) {
+      return res.status(400).json({ error: 'Envie silenciada, fixada e/ou favorita (boolean).' })
+    }
+
+    const { data: existing } = await supabase
+      .from('conversa_usuario_prefs')
+      .select('silenciada, fixada, favorita, fixada_em')
+      .eq('company_id', Number(company_id))
+      .eq('usuario_id', Number(user_id))
+      .eq('conversa_id', conversa_id)
+      .maybeSingle()
+
+    let silenciada = !!(existing && existing.silenciada)
+    let favorita = !!(existing && existing.favorita)
+    let fixada = !!(existing && existing.fixada)
+    let fixada_em = existing && existing.fixada_em != null ? existing.fixada_em : null
+    if (body.silenciada !== undefined) silenciada = !!body.silenciada
+    if (body.favorita !== undefined) favorita = !!body.favorita
+    if (body.fixada !== undefined) {
+      fixada = !!body.fixada
+      fixada_em = fixada ? new Date().toISOString() : null
+    }
+
+    const row = {
+      company_id: Number(company_id),
+      usuario_id: Number(user_id),
+      conversa_id,
+      silenciada,
+      fixada,
+      favorita,
+      fixada_em,
+      updated_at: new Date().toISOString(),
+    }
+
+    const { data, error } = await supabase
+      .from('conversa_usuario_prefs')
+      .upsert(row, { onConflict: 'company_id,usuario_id,conversa_id' })
+      .select('conversa_id, silenciada, fixada, favorita, fixada_em')
+      .single()
+
+    if (error) {
+      if (String(error.message || '').includes('conversa_usuario_prefs') || String(error.code || '') === '42P01') {
+        return res.status(503).json({ error: 'Aplique a migration conversa_usuario_prefs no Supabase e tente novamente.' })
+      }
+      return res.status(500).json({ error: error.message })
+    }
+
+    const io = req.app.get('io')
+    if (io) {
+      emitirParaUsuario(io, user_id, 'conversa_prefs_atualizada', {
+        conversa_id,
+        silenciada: !!data?.silenciada,
+        fixada: !!data?.fixada,
+        favorita: !!data?.favorita,
+        fixada_em: data?.fixada_em ?? null,
+      })
+    }
+
+    return res.json({
+      ok: true,
+      conversa_id,
+      silenciada: !!data?.silenciada,
+      fixada: !!data?.fixada,
+      favorita: !!data?.favorita,
+      fixada_em: data?.fixada_em ?? null,
+    })
+  } catch (err) {
+    console.error('[patchConversaPrefs]', err)
+    return res.status(500).json({ error: 'Erro ao salvar preferências da conversa' })
+  }
+}
+
+// =====================================================
+// Limpar mensagens da conversa (mantém a conversa) — POST /chats/:id/limpar-mensagens
+// =====================================================
+exports.limparMensagensConversa = async (req, res) => {
+  try {
+    const { company_id, id: user_id, perfil, departamento_ids } = req.user
+    const conversa_id = Number(req.params.id)
+    if (!Number.isFinite(conversa_id) || conversa_id <= 0) {
+      return res.status(400).json({ error: 'ID da conversa inválido' })
+    }
+    const perm = await assertPermissaoConversa({
+      company_id,
+      conversa_id,
+      user_id,
+      role: perfil,
+      user_dep_ids: departamento_ids,
+    })
+    if (!perm.ok) return res.status(perm.status).json({ error: perm.error })
+
+    const { error: errMsg } = await supabase
+      .from('mensagens')
+      .delete()
+      .eq('company_id', company_id)
+      .eq('conversa_id', conversa_id)
+    if (errMsg) return res.status(500).json({ error: errMsg.message })
+
+    try {
+      await supabase.from('mensagens_ocultas').delete().eq('company_id', company_id).eq('conversa_id', conversa_id)
+    } catch (_) { /* tabela opcional */ }
+
+    const now = new Date().toISOString()
+    await supabase
+      .from('conversas')
+      .update({ ultima_atividade: now, lida: true })
+      .eq('company_id', company_id)
+      .eq('id', conversa_id)
+
+    await marcarComoLidaPorUsuario({ company_id, conversa_id, usuario_id: user_id })
+
+    const io = req.app.get('io')
+    if (io) {
+      emitirEventoEmpresaConversa(io, company_id, conversa_id, 'mensagens_conversa_limpas', {
+        conversa_id,
+        ultima_mensagem: null,
+      })
+      emitirConversaAtualizada(io, company_id, conversa_id, {
+        id: conversa_id,
+        ultima_atividade: now,
+        ultima_mensagem_preview: null,
+        tem_novas_mensagens: false,
+        lida: true,
+      })
+    }
+
+    return res.json({ ok: true, conversa_id, ultima_atividade: now })
+  } catch (err) {
+    console.error('[limparMensagensConversa]', err)
+    return res.status(500).json({ error: 'Erro ao limpar mensagens da conversa' })
+  }
+}
+
+// =====================================================
+// Apagar conversa e dependências — DELETE /chats/:id
+// =====================================================
+exports.apagarConversa = async (req, res) => {
+  try {
+    const { company_id, id: user_id, perfil, departamento_ids } = req.user
+    const conversa_id = Number(req.params.id)
+    if (!Number.isFinite(conversa_id) || conversa_id <= 0) {
+      return res.status(400).json({ error: 'ID da conversa inválido' })
+    }
+    const perm = await assertPermissaoConversa({
+      company_id,
+      conversa_id,
+      user_id,
+      role: perfil,
+      user_dep_ids: departamento_ids,
+    })
+    if (!perm.ok) return res.status(perm.status).json({ error: perm.error })
+
+    const { data: conv, error: errC } = await supabase
+      .from('conversas')
+      .select('id, tipo')
+      .eq('company_id', company_id)
+      .eq('id', conversa_id)
+      .maybeSingle()
+    if (errC) return res.status(500).json({ error: errC.message })
+    if (!conv) return res.status(404).json({ error: 'Conversa não encontrada' })
+    if (isGroupConversation(conv)) {
+      return res.status(400).json({ error: 'Exclusão de conversa de grupo não suportada neste endpoint.' })
+    }
+
+    const cid = company_id
+    const convId = conversa_id
+
+    const { data: atendRows } = await supabase
+      .from('atendimentos')
+      .select('id')
+      .eq('company_id', cid)
+      .eq('conversa_id', convId)
+    const atendIds = (atendRows || []).map((r) => r.id).filter(Boolean)
+    if (atendIds.length > 0) {
+      await supabase.from('avaliacoes_atendimento').delete().in('atendimento_id', atendIds)
+    }
+    await supabase.from('avaliacoes_atendimento').delete().eq('conversa_id', convId).eq('company_id', cid)
+
+    await supabase.from('mensagens_ocultas').delete().eq('company_id', cid).eq('conversa_id', convId)
+    await supabase.from('conversa_unreads').delete().eq('company_id', cid).eq('conversa_id', convId)
+    await supabase.from('atendimentos').delete().eq('company_id', cid).eq('conversa_id', convId)
+    await supabase.from('historico_atendimentos').delete().eq('conversa_id', convId)
+    await supabase.from('conversa_tags').delete().eq('company_id', cid).eq('conversa_id', convId)
+    await supabase.from('bot_logs').delete().eq('company_id', cid).eq('conversa_id', convId)
+    await supabase.from('mensagens').delete().eq('company_id', cid).eq('conversa_id', convId)
+
+    await supabase.from('conversas').update({ cliente_id: null }).eq('company_id', cid).eq('id', convId)
+
+    const { error: errDel } = await supabase.from('conversas').delete().eq('company_id', cid).eq('id', convId)
+    if (errDel) return res.status(500).json({ error: errDel.message })
+
+    const io = req.app.get('io')
+    if (io) {
+      emitirEventoEmpresaConversa(io, cid, convId, 'conversa_apagada', { id: convId })
+      io.to(`empresa_${cid}`).emit('atualizar_conversa', { id: convId, removida: true })
+    }
+
+    return res.json({ ok: true, id: convId })
+  } catch (err) {
+    console.error('[apagarConversa]', err)
+    return res.status(500).json({ error: 'Erro ao apagar conversa' })
+  }
+}
 
 // =====================================================
 // 5b) ABRIR CONVERSA POR CLIENTE (lista de clientes → chat list)
