@@ -3717,6 +3717,27 @@ exports.removerTagConversa = async (req, res) => {
     return res.status(500).json({ error: 'Erro ao remover tag' })
   }
 }
+/** MIME base sem parâmetros (ex.: codecs) */
+function mimeBase(file) {
+  const m = String(file?.mimetype || '').toLowerCase().trim()
+  return m.split(';')[0].trim()
+}
+
+/**
+ * Permite forçar envio como figurinha (endpoint /messages/sticker) quando o front envia
+ * PNG/JPEG recortado na área "Criar" — sem depender só de .webp no nome/MIME.
+ */
+function aplicarTipoForcadoSticker(file, tipoInferido) {
+  const forced = String(file?.__tipoForcado || '').toLowerCase().trim()
+  if (forced !== 'sticker') return tipoInferido
+  const base = mimeBase(file)
+  const n = String(file?.originalname || '').toLowerCase()
+  const stickerish =
+    ['image/webp', 'image/png', 'image/jpeg', 'image/jpg', 'image/gif'].includes(base) ||
+    /\.(webp|png|jpe?g|gif)$/i.test(n)
+  return stickerish ? 'sticker' : tipoInferido
+}
+
 function inferirTipoArquivo(file) {
   const m = String(file.mimetype || '').toLowerCase()
   const n = String(file.originalname || '').toLowerCase()
@@ -3874,8 +3895,10 @@ exports.enviarArquivo = async (req, res) => {
     const permEnvio = await assertPodeEnviarMensagem({ company_id, conversa_id, user_id })
     if (!permEnvio.ok) return res.status(permEnvio.status).json({ error: permEnvio.error })
 
-    let file = req.file
-    const tipo = inferirTipoArquivo(file)
+    const file = req.file
+    const tipoBody = String(req.body?.tipo || req.query?.tipo || '').toLowerCase().trim()
+    if (tipoBody === 'sticker') file.__tipoForcado = 'sticker'
+    const tipo = aplicarTipoForcadoSticker(file, inferirTipoArquivo(file))
     if (tipo === 'audio' || tipo === 'voice') {
       try {
         const normalized = await normalizeAudioForUltraMsg(file, tipo)
