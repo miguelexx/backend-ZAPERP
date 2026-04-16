@@ -18,7 +18,7 @@ const { getCanonicalPhone, getOrCreateCliente, findOrCreateConversation, mergeCo
 const { chooseBestName, isBadName, getDisplayName } = require('../helpers/contactEnrichment')
 const { parseVcardForContact } = require('../helpers/vcardHelper')
 const { resolvePeerPhone } = require('../helpers/conversationKeyHelper')
-const { incrementarUnreadParaConversa } = require('./chatController')
+const { incrementarUnreadParaConversa, emitirParaUsuariosQuePodemVerConversa } = require('./chatController')
 
 const { processIncomingMessage: processChatbotTriage } = require('../services/chatbotTriageService')
 const { emitBotMensagemRealtime, emitReaberturaSemSetorRealtime } = require('../helpers/chatbotRealtimeEmitter')
@@ -2650,8 +2650,6 @@ exports.receberZapi = async (req, res) => {
     // Quando idempotência ou reconciliação (msg enviada pelo CRM), o chatController já emitiu — evita duplicata.
     const io = req.app.get('io')
     if (io && mensagemSalva) {
-      const rooms = [`conversa_${convIdForEmit}`, `empresa_${company_id}`]
-      if (departamento_id != null) rooms.push(`departamento_${departamento_id}`)
       // Status canônico para os ticks no frontend (sent, delivered, read, pending, erro, played)
       const rawStatus = (mensagemSalva.status_mensagem ?? mensagemSalva.status ?? '').toString().toLowerCase()
       const canon = rawStatus === 'enviada' || rawStatus === 'enviado' ? 'sent' : (rawStatus === 'entregue' || rawStatus === 'received' ? 'delivered' : (rawStatus || (fromMe ? 'sent' : 'delivered')))
@@ -2681,7 +2679,18 @@ exports.receberZapi = async (req, res) => {
         // - fromMe=false (recebida do cliente) → frontend DEVE notificar
         // - fromMe=true  (espelhamento: enviada pelo celular) → frontend NÃO deve notificar
         // O campo fromMe e direcao no payload permitem o frontend filtrar corretamente.
-        io.to(rooms).emit('nova_mensagem', emitPayload)
+        const emittedScoped = await emitirParaUsuariosQuePodemVerConversa(
+          io,
+          company_id,
+          convIdForEmit,
+          'nova_mensagem',
+          emitPayload
+        )
+        if (!emittedScoped) {
+          const rooms = [`conversa_${convIdForEmit}`, `empresa_${company_id}`]
+          if (departamento_id != null) rooms.push(`departamento_${departamento_id}`)
+          io.to(rooms).emit('nova_mensagem', emitPayload)
+        }
       } else {
         // Mensagem já existe (enviada pelo usuário): apenas atualizar status, não duplicar mensagem
         const statusPayload = {
@@ -2699,7 +2708,14 @@ exports.receberZapi = async (req, res) => {
       // — evita refetch que causa duplicação visual e flicker. status_mensagem já atualiza os ticks.
       // Só emitir para mensagens recebidas (inseridas pelo webhook)
       if (mensagemFoiInseridaPeloWebhook) {
-        io.to(`empresa_${company_id}`).emit('atualizar_conversa', { id: convIdForEmit })
+        const emittedScoped = await emitirParaUsuariosQuePodemVerConversa(
+          io,
+          company_id,
+          convIdForEmit,
+          'atualizar_conversa',
+          { id: convIdForEmit }
+        )
+        if (!emittedScoped) io.to(`empresa_${company_id}`).emit('atualizar_conversa', { id: convIdForEmit })
       }
       // conversa_atualizada: priorizar nome do sync (name) sobre cache; fallback nome_contato_cache
       const { data: convRow } = await supabase
@@ -2759,11 +2775,20 @@ exports.receberZapi = async (req, res) => {
       }
       // reordenar_suave: true — frontend deve animar o item para o topo em vez de refetch (evita "desce e sobe")
       convPayload.reordenar_suave = true
-      io.to(`empresa_${company_id}`).emit('conversa_atualizada', convPayload)
-      if (depId != null) {
-        // Não emitir atualizar_conversa em reconciliação (fromMe) — evita refetch que causa bug visual
-        if (mensagemFoiInseridaPeloWebhook) io.to(`departamento_${depId}`).emit('atualizar_conversa', { id: convIdForEmit })
-        io.to(`departamento_${depId}`).emit('conversa_atualizada', convPayload)
+      const emittedConversaAtualizadaScoped = await emitirParaUsuariosQuePodemVerConversa(
+        io,
+        company_id,
+        convIdForEmit,
+        'conversa_atualizada',
+        convPayload
+      )
+      if (!emittedConversaAtualizadaScoped) {
+        io.to(`empresa_${company_id}`).emit('conversa_atualizada', convPayload)
+        if (depId != null) {
+          // Não emitir atualizar_conversa em reconciliação (fromMe) — evita refetch que causa bug visual
+          if (mensagemFoiInseridaPeloWebhook) io.to(`departamento_${depId}`).emit('atualizar_conversa', { id: convIdForEmit })
+          io.to(`departamento_${depId}`).emit('conversa_atualizada', convPayload)
+        }
       }
     }
 

@@ -102,11 +102,31 @@ function emitirConversaAtualizada(io, company_id, conversa_id, payload = null, o
   if (!skipAtualizarConversa) io.to(`empresa_${company_id}`).emit('atualizar_conversa', { id: cid })
 }
 
+async function emitirParaUsuariosQuePodemVerConversa(io, company_id, conversa_id, eventName, payload) {
+  if (!io || !conversa_id) return false
+  const usuarioIds = await obterUsuarioIdsQuePodemVerConversa(company_id, conversa_id)
+  if (!Array.isArray(usuarioIds) || usuarioIds.length === 0) return false
+  const idsUnicos = [...new Set(usuarioIds.map(Number).filter((id) => Number.isFinite(id) && id > 0))]
+  if (idsUnicos.length === 0) return false
+  idsUnicos.forEach((uid) => io.to(`usuario_${uid}`).emit(eventName, payload))
+  return true
+}
+
 function emitirEventoEmpresaConversa(io, company_id, conversa_id, eventName, payload) {
   if (!io) return
 
   if (conversa_id) {
-    io.to(`empresa_${company_id}`).to(`conversa_${conversa_id}`).emit(eventName, payload)
+    // Evita "vazamento" cross-setor (ex.: financeiro recebendo vendas).
+    // Fallback para room ampla apenas se não conseguirmos resolver os destinatários.
+    emitirParaUsuariosQuePodemVerConversa(io, company_id, conversa_id, eventName, payload)
+      .then((emitidoFiltrado) => {
+        if (!emitidoFiltrado) {
+          io.to(`empresa_${company_id}`).to(`conversa_${conversa_id}`).emit(eventName, payload)
+        }
+      })
+      .catch(() => {
+        io.to(`empresa_${company_id}`).to(`conversa_${conversa_id}`).emit(eventName, payload)
+      })
     return
   }
   io.to(`empresa_${company_id}`).emit(eventName, payload)
@@ -450,6 +470,7 @@ async function incrementarUnreadParaConversa(company_id, conversa_id) {
 }
 
 exports.incrementarUnreadParaConversa = incrementarUnreadParaConversa
+exports.emitirParaUsuariosQuePodemVerConversa = emitirParaUsuariosQuePodemVerConversa
 
 // =====================================================
 // AUX: registrar atendimentos
