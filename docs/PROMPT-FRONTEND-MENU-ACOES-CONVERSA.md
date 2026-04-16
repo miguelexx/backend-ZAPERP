@@ -1,0 +1,181 @@
+# Prompt — Menu de ações por conversa (estilo WhatsApp Web)
+
+**Instrução:** cole o bloco entre `INICIO DO PROMPT` e `FIM DO PROMPT` numa conversa do Cursor focada no frontend.
+
+---
+
+## INICIO DO PROMPT
+
+### Objetivo
+
+Implementar um menu de ações por item da lista de conversas, inspirado no WhatsApp Web, com visual discreto, moderno e funcional.
+
+Ao passar o mouse em uma conversa:
+
+- exibir uma seta/ícone discreto no canto direito
+- ao clicar, abrir menu suspenso com ações
+
+No mobile:
+
+- adaptar para toque (sem depender de hover)
+
+### Restrições obrigatórias
+
+1. **Não quebrar nada que já funciona** (seleção, abertura de conversa, socket realtime, filtros, paginação, ordenação atual).
+2. **Não inventar endpoints**. Usar apenas rotas/métodos já existentes no projeto frontend/backend.
+3. Se uma ação não tiver backend pronto, manter item visível com estado controlado (disabled + tooltip) até integração real.
+4. Apenas **um menu aberto por vez**.
+5. Fechar menu em:
+   - clique fora
+   - tecla `Esc`
+   - troca de conversa
+   - mudança de lista (filtro/paginação/realtime removendo item ativo)
+
+### Ações que DEVEM existir no menu
+
+- Silenciar notificações
+- Fixar conversa
+- Adicionar aos Favoritos
+- Limpar conversa
+- Apagar conversa
+
+### Ações que NÃO devem existir
+
+- Arquivar conversa
+- Marcar como não lida
+- Adicionar à lista
+- Bloquear
+
+### Requisitos visuais
+
+- Seta aparece somente no hover (desktop), com transição suave (opacity/transform leve).
+- Visual limpo, discreto e profissional (estilo WhatsApp Web, adaptado ao tema do sistema).
+- Menu com sombra leve, borda sutil, boa legibilidade no tema dark/light.
+- Abertura com animação curta e suave.
+- Posicionamento inteligente para evitar corte na viewport (flip para cima quando necessário).
+- Hover da linha não pode ficar poluído.
+
+### Requisitos de acessibilidade
+
+- Botão da seta focável por teclado.
+- `aria-haspopup="menu"` e `aria-expanded`.
+- Navegação por teclado entre itens.
+- `Esc` fecha menu e devolve foco ao botão origem.
+
+### Arquitetura sugerida (obrigatória)
+
+Criar componentes reutilizáveis e separados:
+
+1. `ConversationActionMenuTrigger` (ícone/seta)
+2. `ConversationActionMenu` (dropdown + itens + acessibilidade)
+3. `useConversationActionMenu` (estado de menu aberto, ancoragem e fechamento externo)
+4. `conversationActionsService` (integração com API já existente)
+
+Evitar duplicação:
+
+- centralizar configuração das ações em array tipado (id, label, icon, visible, disabled, onClick)
+
+### Performance e estado
+
+- A lista pode ter muitos itens: evitar rerender global.
+- Usar `React.memo` nos itens da lista, com comparador adequado.
+- Estado do menu por `openConversationId` no nível da lista (não em cada item).
+- Garantir chave estável por `conversa.id` no `map`.
+
+### Integração funcional das ações
+
+#### 1) Silenciar notificações
+
+- Alternar `silenciado` / `não silenciado`.
+- Refletir visualmente no item (ícone discreto de mudo).
+- Persistir via endpoint real existente (ou método já implementado no service).
+
+#### 2) Fixar conversa
+
+- Alternar `fixada`.
+- Conversas fixadas no topo **sem quebrar a ordenação atual** (manter regra atual dentro de cada grupo: fixadas vs não fixadas).
+- Funcionar com atualização realtime.
+
+#### 3) Favoritar conversa
+
+- Alternar `favorita`.
+- Mostrar indicador visual discreto (ex.: estrela sutil).
+- Persistir via API real.
+
+#### 4) Limpar conversa
+
+- Exigir confirmação antes de executar.
+- Limpar mensagens da conversa, sem apagar a conversa.
+- Atualizar UI imediatamente após sucesso.
+
+#### 5) Apagar conversa
+
+- Exigir confirmação forte.
+- Excluir conversa conforme regra atual do sistema.
+- Se conversa aberta for apagada, resetar painel de detalhe com segurança.
+
+### Confirmações (UX)
+
+Usar modal/confirm padronizado já existente no projeto:
+
+- Limpar conversa: confirmação simples.
+- Apagar conversa: confirmação forte (texto de risco).
+
+### Permissões
+
+Se o sistema já possuir controle de permissões:
+
+- esconder/desabilitar ações sem permissão
+- validar também antes de executar
+
+### Realtime / scroll / paginação / filtros
+
+Garantir compatibilidade com:
+
+- eventos socket (`conversa_atualizada`, `atualizar_conversa`, `nova_conversa`, etc.)
+- mudança de filtros/abas
+- paginação/infinite scroll
+
+O menu não pode:
+
+- abrir na conversa errada
+- ficar preso em item removido
+- quebrar clique da linha
+
+### Plano de implementação
+
+1. Mapear componente atual de item da conversa e ponto exato de render da linha.
+2. Inserir trigger discreto da seta no canto direito (hover desktop + toque mobile).
+3. Criar dropdown reutilizável e acessível.
+4. Integrar ações com service central (somente endpoints existentes).
+5. Implementar fechamento por clique externo/ESC/troca de contexto.
+6. Ajustar ordenação para fixadas sem regressão.
+7. Adicionar testes:
+   - unitários para hook/menu
+   - integração para fluxo de abrir/fechar/ação por conversa correta
+8. Validar manualmente com scroll, realtime, troca de filtro e mobile.
+
+### Critérios de aceite
+
+- Menu abre na conversa correta e apenas um por vez.
+- Ações funcionam ponta a ponta (quando endpoint existir) e não causam regressão.
+- UX suave, discreta e profissional.
+- Compatível com teclado e mobile.
+- Sem bugs de overlay, clipping, foco ou menu fantasma.
+
+### Importante: endpoints
+
+Antes de codar:
+
+1. Levantar no próprio frontend quais métodos de API para:
+   - mute/unmute
+   - pin/unpin
+   - favorite/unfavorite
+   - clear conversation
+   - delete conversation
+2. Confirmar que batem com rotas reais do backend.
+3. Se algum endpoint não existir, **não inventar**:
+   - manter ação visível com `disabled` + tooltip `"Disponível em breve"` até backend estar pronto.
+
+## FIM DO PROMPT
+

@@ -29,85 +29,72 @@ const { isEnabled, FLAGS } = require('../helpers/featureFlags')
 // company_id NUNCA mais via ENV — resolvido por instanceId do payload em cada webhook
 const WHATSAPP_DEBUG = String(process.env.WHATSAPP_DEBUG || '').toLowerCase() === 'true'
 
+function normalizeReopenText(texto) {
+  return String(texto || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^\p{L}\p{N}\s!?.,]/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
 /**
- * Determina se uma mensagem enviada pelo cliente após finalização indica
- * intenção real de continuar o atendimento.
- *
- * Retorna false para confirmações/agradecimentos simples, números e emojis isolados.
- * Retorna true apenas quando há palavras de intenção explícita ou mensagem longa.
+ * Decide se conversa finalizada deve reabrir com base em intenção real do cliente.
+ * Retorna decisão + motivo para facilitar manutenção/auditoria.
  */
-function mensagemIndicaIntencaoContinuar(texto) {
-  if (!texto || typeof texto !== 'string') return false
-  const t = texto.trim()
-  if (!t) return false
-  const tLower = t.toLowerCase()
+function shouldReopenFinishedConversation(message, context = {}) {
+  const normalized = normalizeReopenText(message)
+  const compact = normalized.replace(/[!?.,]/g, '').trim()
+  const tokenCount = compact ? compact.split(/\s+/).length : 0
 
-  // Apenas números (protocolo, nota fora de range, etc.) — não reabre
-  if (/^\d[\d\s]*$/.test(t)) return false
+  if (!compact) {
+    return { shouldReopen: false, reason: 'empty_or_symbols_only', normalized }
+  }
 
-  // Apenas emojis — não reabre
-  if (/^[\u{1F300}-\u{1F9FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}\u{1F000}-\u{1F02F}\u{1F0A0}-\u{1F0FF}\u{1F100}-\u{1F1FF}\u{1F200}-\u{1F2FF}\u{1F900}-\u{1F9FF}\u{1FA00}-\u{1FA6F}\u{1FA70}-\u{1FAFF}\s]+$/u.test(t)) return false
+  // Mensagens que normalmente representam avaliação/protocolo sem nova demanda.
+  if (/^\d{1,4}$/.test(compact)) {
+    return { shouldReopen: false, reason: 'numeric_only', normalized }
+  }
 
-  // Saudações/cumprimentos — indicam intenção de reabrir
-  const saudacoes = [
-    // variações de "oi"
-    'oi', 'oii', 'oiii', 'oioi', 'oi oi',
-    // variações de "olá"
-    'olá', 'ola', 'olaa', 'oláa',
-    // períodos do dia
-    'bom dia', 'boa tarde', 'boa noite',
-    // "ei" e variações
-    'ei', 'eii', 'eiiii',
-    // "alô"
-    'alô', 'alo', 'alô?', 'alo?',
-    // "e aí" e variações
-    'e aí', 'e ai', 'eai', 'eaí', 'e aí?', 'e ai?',
-    // expressões casuais brasileiras
-    'salve', 'opa', 'fala', 'falá',
-    // inglês
-    'hello', 'hey', 'hi',
-    // "tudo" como saudação
-    'tudo bem', 'tudo bom', 'tudo certo', 'tudo ótimo', 'tudo otimo', 'tudo',
-    // "como vai/está"
-    'como vai', 'como está', 'como esta', 'como você está', 'como voce esta',
-    // "boas"
-    'boas', 'boa',
-    // formal
-    'prezado', 'prezada', 'prezados', 'prezadas',
-    'caro', 'cara', 'caros', 'caras',
-    'saudações', 'saudacoes',
-    'bom dia a todos', 'boa tarde a todos', 'boa noite a todos',
+  // Frases sociais / cortesias / despedidas não devem reabrir.
+  const socialPatterns = [
+    /^(ok|okay|blz|beleza|certo|entendi|entendido|perfeito|show|sim|nao|ta|t[áa])$/,
+    /^(obrigado|obrigada|obg|valeu|vlw|muito obrigado|obrigado pela ajuda|agradeco|agradeco demais)$/,
+    /^(bom dia|boa tarde|boa noite|oi|ola|opa|e ai|tudo bem|tudo bom|tudo certo)$/,
+    /^(tchau|xau|ate mais|ate logo)$/
   ]
-  if (saudacoes.some(s => {
-    if (tLower === s) return true
-    if (!tLower.startsWith(s)) return false
-    const next = tLower[s.length]
-    return !next || /[\s!?,.]/.test(next)
-  })) return true
+  if (socialPatterns.some((rx) => rx.test(compact))) {
+    return { shouldReopen: false, reason: 'social_or_thanks', normalized }
+  }
 
-  // Confirmações/agradecimentos simples — não reabrem
-  const padraoSimples = /^(ok+|okay|certo|entendido|entendi|perfeito|ótimo|otimo|excelente|obrigad[ao]|obg|vlw|valeu|sim|não|nao|blz|beleza|show|tá|ta|tks|thanks|👍|✅|🙏|xau|tchau|até|ate)([!.,?\s]*)$/i
-  if (padraoSimples.test(tLower)) return false
-
-  // Palavras-chave que indicam intenção de continuar — reabrem
-  const palavrasIntencao = [
-    'preciso', 'quero', 'gostaria', 'necessito', 'necessit',
-    'ajuda', 'ajudar', 'dúvida', 'duvida', 'problema', 'questão', 'questao',
-    'mais alguma', 'outra coisa', 'outro assunto', 'nova solicitação', 'nova solicitacao',
-    'falar com', 'falar sobre', 'suporte', 'atendimento',
-    'informação', 'informacao', 'resolver', 'solucionar',
-    'comprar', 'adquirir', 'solicitar', 'agendar', 'marcar', 'cancelar',
-    'tirar dúvida', 'tirar duvida', 'esclarecer', 'verificar', 'consultar',
-    'reclamação', 'reclamacao', 'orçamento', 'orcamento',
+  // Lista de termos com forte indicio de retomada do atendimento.
+  const demandKeywords = [
+    'preciso de ajuda', 'pode me ajudar', 'tenho uma duvida', 'estou com problema',
+    'nao resolveu', 'ainda nao resolveu', 'nao consegui', 'como faco', 'suporte',
+    'quero falar com alguem', 'quero falar com atendente', 'duvida', 'problema',
+    'erro', 'falha', 'nao funciona', 'nao esta funcionando', 'retorno', 'urgente',
+    'reclamar', 'reclamacao', 'ajuda', 'resolver', 'solucionar', 'cancelar',
+    'segunda via', 'boleto', 'pagamento', 'pedido', 'atendimento'
   ]
-  if (palavrasIntencao.some(p => tLower.includes(p))) return true
+  if (demandKeywords.some((k) => compact.includes(k))) {
+    return { shouldReopen: true, reason: 'explicit_new_demand', normalized }
+  }
 
-  // Mensagens com 5+ palavras provavelmente indicam necessidade real
-  const palavras = tLower.split(/\s+/).filter(Boolean)
-  if (palavras.length >= 5) return true
+  // Perguntas curtas sem semântica social normalmente indicam nova necessidade.
+  const socialQuestionStarts = ['tudo bem', 'como vai', 'como esta']
+  const endsWithQuestion = /[?]$/.test(normalized)
+  if (endsWithQuestion && !socialQuestionStarts.some((s) => compact.startsWith(s))) {
+    return { shouldReopen: true, reason: 'question_with_possible_demand', normalized }
+  }
 
-  // Por padrão mensagens curtas sem palavra-chave não reabrem
-  return false
+  // Mensagem mais detalhada (>= 6 tokens) tende a carregar contexto/necessidade.
+  if (tokenCount >= 6) {
+    return { shouldReopen: true, reason: 'long_context_message', normalized }
+  }
+
+  // Ambígua e curta: padrão seguro é não reabrir.
+  return { shouldReopen: false, reason: 'ambiguous_short_message', normalized }
 }
 
 /** Log [ZAPI_CERT] uma linha por ação — só quando WHATSAPP_DEBUG=true (apenas dev). Sem token, sem conteúdo da msg. */
@@ -1782,8 +1769,12 @@ exports.receberZapi = async (req, res) => {
         // Reabrir APENAS se: (1) não é avaliação E (2) cliente expressa intenção real de continuar
         // Mensagens simples como "ok", números, emojis ou agradecimentos mantêm conversa fechada.
         if (!avalResult.registered) {
-          const devReabrir = mensagemIndicaIntencaoContinuar(textoNorm)
-          if (devReabrir) {
+          const reopenDecision = shouldReopenFinishedConversation(textoNorm, {
+            company_id,
+            conversa_id,
+            status_atendimento: st
+          })
+          if (reopenDecision.shouldReopen) {
             const depAntesReabrir =
               convStatus?.departamento_id != null ? Number(convStatus.departamento_id) : null
             const { data: reaberta } = await supabase
@@ -1814,10 +1805,18 @@ exports.receberZapi = async (req, res) => {
                 })
                 io.to(`empresa_${company_id}`).emit(io.EVENTS?.CONVERSA_REABERTA || 'conversa_reaberta', reaberta)
               }
-              console.log('[Z-API] 🔄 Conversa reaberta (cliente sinalizou intenção de continuar) — chatbot reiniciado', { conversa_id, texto: textoNorm })
+              console.log('[Z-API] 🔄 Conversa reaberta (cliente sinalizou intenção de continuar) — chatbot reiniciado', {
+                conversa_id,
+                texto: textoNorm,
+                reason: reopenDecision.reason
+              })
             }
           } else {
-            console.log('[Z-API] 🔒 Conversa mantida fechada (mensagem simples após finalização, sem intenção de continuar)', { conversa_id, texto: textoNorm })
+            console.log('[Z-API] 🔒 Conversa mantida fechada (mensagem sem intenção clara de retomar atendimento)', {
+              conversa_id,
+              texto: textoNorm,
+              reason: reopenDecision.reason
+            })
           }
         }
       }
@@ -2720,7 +2719,7 @@ exports.receberZapi = async (req, res) => {
       // conversa_atualizada: priorizar nome do sync (name) sobre cache; fallback nome_contato_cache
       const { data: convRow } = await supabase
         .from('conversas')
-        .select('id, ultima_atividade, nome_contato_cache, foto_perfil_contato_cache, telefone, cliente_id, departamento_id')
+        .select('id, ultima_atividade, nome_contato_cache, foto_perfil_contato_cache, telefone, cliente_id, departamento_id, status_atendimento, atendente_id')
         .eq('id', convIdForEmit)
         .eq('company_id', company_id)
         .maybeSingle()
@@ -2742,17 +2741,30 @@ exports.receberZapi = async (req, res) => {
         }
       }
       const depId = departamento_id ?? convRow?.departamento_id ?? null
+      const temNotificacaoDiscretaEmAtendimento =
+        mensagemFoiInseridaPeloWebhook &&
+        !fromMe &&
+        !isGroup &&
+        convRow?.status_atendimento === 'em_atendimento' &&
+        convRow?.atendente_id != null
       const convPayload = {
         id: convIdForEmit,
         ultima_atividade: convRow?.ultima_atividade ?? new Date().toISOString(),
         telefone: convRow?.telefone ?? null,
+        atendente_id: convRow?.atendente_id ?? null,
         // Grupos nunca mostram badge "aberta" — não precisam ser assumidos
         exibir_badge_aberta: !isGroup,
         ...(isGroup ? { status_atendimento: null } : {}),
         ...(depId != null ? { departamento_id: depId } : {}),
         ...(contatoNome ? { nome_contato_cache: contatoNome, contato_nome: contatoNome } : {}),
         ...(fotoPerfil ? { foto_perfil_contato_cache: fotoPerfil, foto_perfil: fotoPerfil } : {}),
-        ...(mensagemFoiInseridaPeloWebhook && !fromMe ? { tem_novas_mensagens: true, lida: false } : {})
+        ...(mensagemFoiInseridaPeloWebhook && !fromMe
+          ? {
+              tem_novas_mensagens: true,
+              tem_novas_mensagens_em_atendimento: temNotificacaoDiscretaEmAtendimento,
+              lida: false
+            }
+          : {})
       }
       // ultima_mensagem_preview: preview na lista lateral — direcao correta ('in'/'out') para exibir seta/ícone certo.
       // Para mensagem de contato, incluir tipo e contact_meta para o frontend exibir card em vez do vCard bruto.

@@ -902,6 +902,16 @@ exports.listarConversas = async (req, res) => {
         atendRow && atendRow.email != null && String(atendRow.email).trim()
           ? String(atendRow.email).trim()
           : null
+      const temNovasMensagens = unreadCount > 0
+      const conversaEmAtendimentoDoUsuario =
+        !isGroup &&
+        c.status_atendimento === 'em_atendimento' &&
+        Number(c.atendente_id) === Number(user_id)
+      const temNotificacaoDiscretaEmAtendimento =
+        !isGroup &&
+        conversaEmAtendimentoDoUsuario &&
+        temNovasMensagens
+
       return {
         id: c.id,
         cliente_id: c.cliente_id,
@@ -913,7 +923,8 @@ exports.listarConversas = async (req, res) => {
         atendente_nome: atendenteNome,
         atendente_email: atendenteEmail,
         lida: unreadCount === 0,
-        tem_novas_mensagens: unreadCount > 0,
+        tem_novas_mensagens: temNovasMensagens,
+        tem_novas_mensagens_em_atendimento: temNotificacaoDiscretaEmAtendimento,
         criado_em: c.criado_em,
         ultima_atividade: c.ultima_atividade,
         departamento_id: c.departamento_id,
