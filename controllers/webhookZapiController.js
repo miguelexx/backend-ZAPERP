@@ -25,6 +25,7 @@ const { emitBotMensagemRealtime, emitReaberturaSemSetorRealtime } = require('../
 const { processarOptOut } = require('../services/optOutService')
 const { processarRegras } = require('../services/regrasAutomaticasService')
 const { isEnabled, FLAGS } = require('../helpers/featureFlags')
+const { parseNota, tentarRegistrarAvaliacao } = require('../services/avaliacaoService')
 
 // company_id NUNCA mais via ENV — resolvido por instanceId do payload em cada webhook
 const WHATSAPP_DEBUG = String(process.env.WHATSAPP_DEBUG || '').toLowerCase() === 'true'
@@ -40,61 +41,45 @@ function normalizeReopenText(texto) {
 }
 
 /**
- * Decide se conversa finalizada deve reabrir com base em intenção real do cliente.
- * Retorna decisão + motivo para facilitar manutenção/auditoria.
+ * Decide se conversa encerrada deve reabrir ao receber nova mensagem do cliente.
+ * Regra: reabrir por defeito; manter fechada só para nota de avaliação (0-10),
+ * agradecimentos / ACKs de encerramento ou frases que indicam ausência de nova demanda.
  */
 function shouldReopenFinishedConversation(message, context = {}) {
+  const raw = String(message || '').trim()
   const normalized = normalizeReopenText(message)
   const compact = normalized.replace(/[!?.,]/g, '').trim()
-  const tokenCount = compact ? compact.split(/\s+/).length : 0
 
   if (!compact) {
     return { shouldReopen: false, reason: 'empty_or_symbols_only', normalized }
   }
 
-  // Mensagens que normalmente representam avaliação/protocolo sem nova demanda.
-  if (/^\d{1,4}$/.test(compact)) {
-    return { shouldReopen: false, reason: 'numeric_only', normalized }
+  // Mesma regra do avaliacaoService: só dígitos 0-10 — não reabre (avaliação ou tentativa)
+  if (/^\d{1,2}$/.test(compact) && parseNota(raw) !== null) {
+    return { shouldReopen: false, reason: 'evaluation_score_0_10', normalized }
   }
 
-  // Frases sociais / cortesias / despedidas não devem reabrir.
-  const socialPatterns = [
-    /^(ok|okay|blz|beleza|certo|entendi|entendido|perfeito|show|sim|nao|ta|t[áa])$/,
-    /^(obrigado|obrigada|obg|valeu|vlw|muito obrigado|obrigado pela ajuda|agradeco|agradeco demais)$/,
-    /^(bom dia|boa tarde|boa noite|oi|ola|opa|e ai|tudo bem|tudo bom|tudo certo)$/,
-    /^(tchau|xau|ate mais|ate logo)$/
+  const stayClosedPatterns = [
+    /^(ok|okay|blz|beleza|certo|entendi|entendido|perfeito|show|sim|nao|não|ta|t[áa])$/,
+    /^(obrigad[oa]|muito obrigad[oa]|valeu|vlw|obg|brigad[oa]|obgd|agrade[cç]o|grat[oa]|thanks|thank you|ty|thx)$/,
+    /^(obrigad[oa] pela ajuda|muito obrigad[oa] pela ajuda)$/,
+    /^(tchau|xau|ate mais|ate logo|ate breve|flw|falou)$/,
+    /^(so|só) isso[!., ]*$/,
+    /^(nada mais|era (so|só) isso)[!. ]*$/,
+    /^(so|só) (um )?(obrigad[oa]|agradecimento|agradecer)$/,
+    /^(so|só|apenas) (pra|para) agradecer$/,
+    /^pra agradecer$/,
+    /^ok[,!. ]+(valeu|obrigad[oa]|vlw|obg)\b/,
+    /^(bom|boa)(,)? (obrigad[oa]|valeu|vlw)\b/,
+    /^(ate mais|ate logo).{0,20}(obrigad[oa]|valeu|vlw)\b/,
+    /^(tudo resolvido|problema resolvido|deu certo|tudo certo)$/
   ]
-  if (socialPatterns.some((rx) => rx.test(compact))) {
-    return { shouldReopen: false, reason: 'social_or_thanks', normalized }
+
+  if (stayClosedPatterns.some((rx) => rx.test(compact))) {
+    return { shouldReopen: false, reason: 'thanks_or_closing_ack', normalized }
   }
 
-  // Lista de termos com forte indicio de retomada do atendimento.
-  const demandKeywords = [
-    'preciso de ajuda', 'pode me ajudar', 'tenho uma duvida', 'estou com problema',
-    'nao resolveu', 'ainda nao resolveu', 'nao consegui', 'como faco', 'suporte',
-    'quero falar com alguem', 'quero falar com atendente', 'duvida', 'problema',
-    'erro', 'falha', 'nao funciona', 'nao esta funcionando', 'retorno', 'urgente',
-    'reclamar', 'reclamacao', 'ajuda', 'resolver', 'solucionar', 'cancelar',
-    'segunda via', 'boleto', 'pagamento', 'pedido', 'atendimento'
-  ]
-  if (demandKeywords.some((k) => compact.includes(k))) {
-    return { shouldReopen: true, reason: 'explicit_new_demand', normalized }
-  }
-
-  // Perguntas curtas sem semântica social normalmente indicam nova necessidade.
-  const socialQuestionStarts = ['tudo bem', 'como vai', 'como esta']
-  const endsWithQuestion = /[?]$/.test(normalized)
-  if (endsWithQuestion && !socialQuestionStarts.some((s) => compact.startsWith(s))) {
-    return { shouldReopen: true, reason: 'question_with_possible_demand', normalized }
-  }
-
-  // Mensagem mais detalhada (>= 6 tokens) tende a carregar contexto/necessidade.
-  if (tokenCount >= 6) {
-    return { shouldReopen: true, reason: 'long_context_message', normalized }
-  }
-
-  // Ambígua e curta: padrão seguro é não reabrir.
-  return { shouldReopen: false, reason: 'ambiguous_short_message', normalized }
+  return { shouldReopen: true, reason: 'default_reopen_after_close', normalized }
 }
 
 /** Log [ZAPI_CERT] uma linha por ação — só quando WHATSAPP_DEBUG=true (apenas dev). Sem token, sem conteúdo da msg. */
@@ -1756,7 +1741,6 @@ exports.receberZapi = async (req, res) => {
       if (conversaEncerrada) {
         // Tentar registrar nota de avaliação se o texto for 0-10
         const textoNorm = String(texto || '').trim()
-        const { tentarRegistrarAvaliacao } = require('../services/avaliacaoService')
         const avalResult = await tentarRegistrarAvaliacao({
           company_id,
           conversa_id,
@@ -1766,8 +1750,8 @@ exports.receberZapi = async (req, res) => {
         if (avalResult.registered) {
           console.log('[Webhook] 📊 Avaliação registrada (UltraMSG):', { conversa_id, nota: textoNorm })
         }
-        // Reabrir APENAS se: (1) não é avaliação E (2) cliente expressa intenção real de continuar
-        // Mensagens simples como "ok", números, emojis ou agradecimentos mantêm conversa fechada.
+        // Reabrir por defeito após encerramento; não reabrir se for avaliação registrada,
+        // nota 0-10 isolada, agradecimento/ACK de encerramento ou mensagem claramente sem nova demanda.
         if (!avalResult.registered) {
           const reopenDecision = shouldReopenFinishedConversation(textoNorm, {
             company_id,
@@ -1805,14 +1789,14 @@ exports.receberZapi = async (req, res) => {
                 })
                 io.to(`empresa_${company_id}`).emit(io.EVENTS?.CONVERSA_REABERTA || 'conversa_reaberta', reaberta)
               }
-              console.log('[Z-API] 🔄 Conversa reaberta (cliente sinalizou intenção de continuar) — chatbot reiniciado', {
+              console.log('[Z-API] 🔄 Conversa reaberta automaticamente após encerramento — chatbot reiniciado', {
                 conversa_id,
                 texto: textoNorm,
                 reason: reopenDecision.reason
               })
             }
           } else {
-            console.log('[Z-API] 🔒 Conversa mantida fechada (mensagem sem intenção clara de retomar atendimento)', {
+            console.log('[Z-API] 🔒 Conversa mantida fechada (avaliação, agradecimento ou ACK de encerramento)', {
               conversa_id,
               texto: textoNorm,
               reason: reopenDecision.reason
