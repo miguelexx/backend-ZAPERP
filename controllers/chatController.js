@@ -1,4 +1,7 @@
 const supabase = require('../config/supabase')
+const { registrarAtendimento } = require('../services/atendimentosRegistroService')
+const { ensureConversaForCliente } = require('../services/conversaAbrirClienteService')
+const { executarAssumirConversa } = require('../services/conversaAssumirInternoService')
 const { getProvider } = require('../services/providers')
 const { getStatus } = require('../services/ultramsgIntegrationService')
 const { isGroupConversation } = require('../helpers/conversaHelper')
@@ -132,6 +135,8 @@ function emitirEventoEmpresaConversa(io, company_id, conversa_id, eventName, pay
   io.to(`empresa_${company_id}`).emit(eventName, payload)
 }
 
+exports.emitirEventoEmpresaConversa = emitirEventoEmpresaConversa
+
 /** Quando `emitirConversaAtualizada` usa skipAtualizarConversa (evita flicker), ainda força sync da lista lateral / “Minha fila”. */
 function emitirSincronizacaoListaConversas(io, company_id, conversa_id) {
   if (!io || company_id == null || conversa_id == null) return
@@ -154,6 +159,15 @@ function emitirLock(io, conversa_id, usuario_id = null) {
     }
   );
 }
+
+function emitirRealtimeAposAssumir(io, company_id, conversa_id, user_id, conversaRow) {
+  if (!io) return
+  emitirConversaAtualizada(io, company_id, conversa_id, { ...conversaRow, exibir_badge_aberta: true }, { skipAtualizarConversa: true })
+  emitirSincronizacaoListaConversas(io, company_id, conversa_id)
+  emitirLock(io, conversa_id, user_id)
+}
+
+exports.emitirRealtimeAposAssumir = emitirRealtimeAposAssumir
 
 function emitirParaUsuario(io, usuario_id, eventName, payload) {
   if (!io) return
@@ -471,33 +485,6 @@ async function incrementarUnreadParaConversa(company_id, conversa_id) {
 
 exports.incrementarUnreadParaConversa = incrementarUnreadParaConversa
 exports.emitirParaUsuariosQuePodemVerConversa = emitirParaUsuariosQuePodemVerConversa
-
-// =====================================================
-// AUX: registrar atendimentos
-// =====================================================
-async function registrarAtendimento({
-  conversa_id,
-  company_id,
-  acao,
-  de_usuario_id,
-  para_usuario_id = null,
-  observacao = null
-}) {
-  const { data, error } = await supabase
-    .from('atendimentos')
-    .insert({
-      conversa_id: Number(conversa_id),
-      company_id: Number(company_id),
-      acao,
-      de_usuario_id: de_usuario_id != null ? Number(de_usuario_id) : null,
-      para_usuario_id: para_usuario_id != null ? Number(para_usuario_id) : null,
-      observacao
-    })
-    .select('id')
-    .single()
-  if (error) return { error, atendimento: null }
-  return { error: null, atendimento: data }
-}
 
 // =====================================================
 // 3) listarConversas (com unread_count + pesquisa avançada)
@@ -1896,86 +1883,17 @@ exports.abrirConversaCliente = async (req, res) => {
       return res.status(404).json({ error: 'Cliente não encontrado' })
     }
 
-    const telefone = cliente.telefone || ''
-    if (!telefone) {
-      return res.status(400).json({ error: 'Cliente sem telefone cadastrado' })
+    const r = await ensureConversaForCliente({ company_id, usuario_id, cliente })
+    if (!r.ok) {
+      const st = r.error === 'Cliente sem telefone cadastrado' ? 400 : 500
+      return res.status(st).json({ error: r.error })
     }
 
-    // ✅ Profissional: encontra conversa existente pelo TELEFONE também
-    // (evita bug quando há clientes duplicados por variação/empresa=1 null vs 1)
-    const convPhones = possiblePhonesBR(telefone)
-    let qConv = supabase
-      .from('conversas')
-      .select('id, telefone, cliente_id, status_atendimento, nome_grupo, tipo')
-      .eq('company_id', company_id)
-      .neq('status_atendimento', 'fechada')
-      .order('id', { ascending: false })
-      .limit(5)
-    if (convPhones.length > 0) qConv = qConv.in('telefone', convPhones)
-    else qConv = qConv.eq('telefone', telefone)
-    const { data: convRows } = await qConv
-    const convList = Array.isArray(convRows) ? convRows : (convRows ? [convRows] : [])
-    const conversaExistente =
-      convList.find((c) => c && Number(c.cliente_id) === Number(cliente.id)) ||
-      convList[0] ||
-      null
-
-    // Se achou conversa mas está apontando para outro cliente_id (duplicata), unifica para este cliente
-    if (conversaExistente?.id && conversaExistente.cliente_id && Number(conversaExistente.cliente_id) !== Number(cliente.id)) {
-      await supabase
-        .from('conversas')
-        .update({ cliente_id: cliente.id })
-        .eq('company_id', company_id)
-        .eq('id', conversaExistente.id)
+    if (r.criada && io) {
+      emitirEventoEmpresaConversa(io, company_id, r.conversa.id, 'nova_conversa', r.conversa)
     }
 
-    if (conversaExistente) {
-      const payload = {
-        id: conversaExistente.id,
-        cliente_id: cliente.id,
-        telefone: conversaExistente.telefone,
-        tipo: 'cliente',
-        contato_nome: getDisplayName(cliente) || conversaExistente.telefone,
-        foto_perfil: cliente.foto_perfil || null,
-        unread_count: 0,
-        tags: []
-      }
-      return res.json({ conversa: payload, criada: false })
-    }
-
-    const telefoneCanonico = getCanonicalPhone(telefone) || telefone
-    const { data: novaConversa, error: errConv } = await supabase
-      .from('conversas')
-      .insert({
-        cliente_id: cliente.id,
-        telefone: telefoneCanonico,
-        company_id,
-        status_atendimento: 'aberta',
-        usuario_id,
-        tipo: 'cliente',
-        ultima_atividade: new Date().toISOString()
-      })
-      .select('id, telefone, cliente_id, status_atendimento, tipo')
-      .single()
-
-    if (errConv) return res.status(500).json({ error: errConv.message })
-
-    const payload = {
-      id: novaConversa.id,
-      cliente_id: cliente.id,
-      telefone: novaConversa.telefone,
-      tipo: 'cliente',
-      contato_nome: getDisplayName(cliente) || novaConversa.telefone,
-      foto_perfil: cliente.foto_perfil || null,
-      unread_count: 0,
-      tags: []
-    }
-
-    if (io) {
-      emitirEventoEmpresaConversa(io, company_id, novaConversa.id, 'nova_conversa', payload)
-    }
-
-    return res.json({ conversa: payload, criada: true })
+    return res.json({ conversa: r.conversa, criada: r.criada })
   } catch (err) {
     console.error(err)
     return res.status(500).json({ error: 'Erro ao abrir conversa' })
@@ -2343,87 +2261,24 @@ exports.assumirChat = async (req, res) => {
   try {
     const { company_id, id: user_id, perfil, departamento_ids = [] } = req.user
     const { id: conversa_id } = req.params
-    const isAdmin = perfil === 'admin'
 
-    const { data: atual, error: errAtual } = await supabase
-      .from('conversas')
-      .select('id, atendente_id, departamento_id, tipo, telefone')
-      .eq('company_id', company_id)
-      .eq('id', conversa_id)
-      .single()
-
-    if (errAtual) return res.status(500).json({ error: errAtual.message })
-    if (!atual) return res.status(404).json({ error: 'Conversa não encontrada' })
-
-    if (isGroupConversation(atual)) {
-      return res.status(400).json({ error: 'Grupos são apenas visuais. Não é possível assumir conversa de grupo.' })
-    }
-
-    // Permissão por setor: conversas sem setor assumíveis por TODOS; com setor só se usuário pertence
-    if (!isAdmin) {
-      const convDep = atual.departamento_id ?? null
-      const depIds = Array.isArray(departamento_ids) ? departamento_ids : []
-      if (depIds.length === 0 && convDep != null) {
-        return res.status(403).json({ error: 'Conversa pertence a um setor; atribua-se a um setor para assumir' })
-      }
-      if (convDep != null && !depIds.some((d) => Number(d) === Number(convDep))) {
-        return res.status(403).json({ error: 'Conversa de outro setor' })
-      }
-    }
-
-    if (atual.atendente_id && Number(atual.atendente_id) !== Number(user_id)) {
-      return res.status(409).json({ error: 'Conversa já está em atendimento por outro usuário' })
-    }
-
-    // Limite de chats simultâneos por atendente
-    const { data: emp } = await supabase.from('empresas').select('limite_chats_por_atendente').eq('id', company_id).single()
-    const limite = Number(emp?.limite_chats_por_atendente ?? 0)
-    if (limite > 0) {
-      const { count } = await supabase
-        .from('conversas')
-        .select('*', { count: 'exact', head: true })
-        .eq('company_id', company_id)
-        .eq('atendente_id', user_id)
-        .eq('status_atendimento', 'em_atendimento')
-      if (count >= limite) {
-        return res.status(409).json({ error: `Limite de ${limite} conversas simultâneas atingido. Encerre uma antes de assumir outra.` })
-      }
-    }
-
-    const { data, error } = await supabase
-      .from('conversas')
-      .update({
-        atendente_id: user_id,
-        status_atendimento: 'em_atendimento',
-        lida: true,
-        atendente_atribuido_em: new Date().toISOString()
-      })
-      .eq('company_id', company_id)
-      .eq('id', conversa_id)
-      .select()
-      .single()
-
-    if (error) return res.status(500).json({ error: error.message })
-
-    const resultAt = await registrarAtendimento({
-      conversa_id,
+    const result = await executarAssumirConversa({
       company_id,
-      acao: 'assumiu',
-      de_usuario_id: user_id,
-      para_usuario_id: user_id
+      conversa_id,
+      user_id,
+      perfil,
+      departamento_ids
     })
-    if (resultAt.error) return res.status(500).json({ error: resultAt.error.message })
+    if (!result.ok) {
+      return res.status(result.status).json({ error: result.error })
+    }
 
     const io = req.app.get('io')
     if (io) {
-      // Payload completo para todos atualizarem lista (atendente_id, atendente_atribuido_em) em tempo real
-      // Evita refetch agressivo no frontend (mantém usuário nas últimas mensagens).
-      emitirConversaAtualizada(io, company_id, conversa_id, { ...data, exibir_badge_aberta: true }, { skipAtualizarConversa: true })
-      emitirSincronizacaoListaConversas(io, company_id, conversa_id)
-      emitirLock(io, conversa_id, user_id)
+      emitirRealtimeAposAssumir(io, company_id, conversa_id, user_id, result.conversa)
     }
 
-    return res.json({ ok: true, conversa: data })
+    return res.json({ ok: true, conversa: result.conversa })
   } catch (err) {
     console.error(err)
     return res.status(500).json({ error: 'Erro ao assumir conversa' })

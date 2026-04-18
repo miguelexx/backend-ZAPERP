@@ -67,17 +67,34 @@ function toInternalUploadsPath(url) {
 }
 
 /**
- * @param {string} tipoOriginal
- * @param {boolean} hasUploadPath
+ * Normaliza URL de mídia de encaminhamento:
+ * - prioriza /uploads/ (interno);
+ * - aceita http(s) quando a mensagem original já aponta para mídia pública.
+ * @param {string|null|undefined} url
  * @returns {string|null}
  */
-function mapWhatsappTipoToInternalMedia(tipoOriginal, hasUploadPath) {
-  if (!hasUploadPath) return null
+function normalizeForwardMediaUrl(url) {
+  const internal = toInternalUploadsPath(url)
+  if (internal) return internal
+
+  if (url == null) return null
+  const s = String(url).trim()
+  if (/^https?:\/\//i.test(s)) return s
+  return null
+}
+
+/**
+ * @param {string} tipoOriginal
+ * @param {boolean} hasMediaUrl
+ * @returns {string|null}
+ */
+function mapWhatsappTipoToInternalMedia(tipoOriginal, hasMediaUrl) {
+  if (!hasMediaUrl) return null
   const t = String(tipoOriginal || '').toLowerCase()
-  if (t === 'imagem') return MESSAGE_TYPE.IMAGE
+  if (t === 'imagem' || t === 'image') return MESSAGE_TYPE.IMAGE
   if (t === 'video') return MESSAGE_TYPE.VIDEO
-  if (t === 'audio' || t === 'voice') return MESSAGE_TYPE.AUDIO
-  if (t === 'arquivo') return MESSAGE_TYPE.DOCUMENT
+  if (t === 'audio' || t === 'voice' || t === 'ptt') return MESSAGE_TYPE.AUDIO
+  if (t === 'arquivo' || t === 'document' || t === 'file') return MESSAGE_TYPE.DOCUMENT
   if (t === 'sticker') return MESSAGE_TYPE.STICKER
   return null
 }
@@ -89,8 +106,8 @@ function mapWhatsappTipoToInternalMedia(tipoOriginal, hasUploadPath) {
  */
 function buildForwardInsertFromMensagem(m) {
   const tipoOriginal = String(m.tipo || 'texto').toLowerCase()
-  const mediaPath = toInternalUploadsPath(m.url)
-  const internalMediaType = mapWhatsappTipoToInternalMedia(tipoOriginal, !!mediaPath)
+  const mediaUrl = normalizeForwardMediaUrl(m.url)
+  const internalMediaType = mapWhatsappTipoToInternalMedia(tipoOriginal, !!mediaUrl)
 
   const baseFields = () => ({
     message_type: MESSAGE_TYPE.TEXT,
@@ -163,8 +180,12 @@ function buildForwardInsertFromMensagem(m) {
   }
 
   if (internalMediaType && MEDIA_MESSAGE_TYPES.has(internalMediaType)) {
-    const mu = validateInternalMediaUrl(mediaPath)
-    if (mu.ok) {
+    const mediaToStore = String(mediaUrl || '').trim()
+    if (mediaToStore) {
+      if (mediaToStore.startsWith('/uploads/')) {
+        const mu = validateInternalMediaUrl(mediaToStore)
+        if (!mu.ok) return { ok: false, error: mu.error, status: 400 }
+      }
       const rawCaption = String(m.texto || '').trim()
       const capText =
         rawCaption && !rawCaption.startsWith('(')
@@ -179,7 +200,7 @@ function buildForwardInsertFromMensagem(m) {
         insertPayload: {
           ...baseFields(),
           message_type: internalMediaType,
-          media_url: mu.media_url,
+          media_url: mediaToStore,
           content: cap.content,
           file_name: fileName,
           mime_type: null,

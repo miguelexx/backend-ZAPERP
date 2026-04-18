@@ -1,6 +1,12 @@
 const supabase = require('../config/supabase');
 const { normalizePhoneBR } = require('../helpers/phoneHelper');
 const { getDisplayName } = require('../helpers/contactEnrichment');
+const { ensureConversaForCliente } = require('../services/conversaAbrirClienteService');
+const { executarAssumirConversa } = require('../services/conversaAssumirInternoService');
+
+function bodyFlagTrue(v) {
+  return v === true || v === 1 || String(v || '').toLowerCase() === 'true';
+}
 
 /**
  * GET /clientes
@@ -93,8 +99,8 @@ exports.buscarClientePorId = async (req, res) => {
  * POST /clientes
  */
 exports.criarCliente = async (req, res) => {
-  const { company_id } = req.user || {}
-  const { telefone, wa_id, nome, observacoes, email, empresa } = req.body;
+  const { company_id, id: usuario_id, perfil, departamento_ids = [] } = req.user || {}
+  const { telefone, wa_id, nome, observacoes, email, empresa, abrir_conversa, assumir } = req.body;
   const cid = Number(company_id)
 
   if (!telefone && !wa_id) {
@@ -151,6 +157,61 @@ exports.criarCliente = async (req, res) => {
       .single();
 
     if (error) throw error;
+
+    const abrirFlag = bodyFlagTrue(abrir_conversa)
+    const assumirFlag = bodyFlagTrue(assumir)
+    if (abrirFlag || assumirFlag) {
+      const cliente = {
+        id: data.id,
+        nome: data.nome,
+        pushname: data.pushname || null,
+        telefone: data.telefone,
+        foto_perfil: data.foto_perfil || null
+      }
+      const r = await ensureConversaForCliente({
+        company_id: cid,
+        usuario_id,
+        cliente
+      })
+      if (!r.ok) {
+        return res.status(201).json({
+          ...data,
+          conversa: null,
+          conversa_criada: false,
+          conversa_aviso: r.error
+        })
+      }
+      const io = req.app && req.app.get('io')
+      if (r.criada && io) {
+        const { emitirEventoEmpresaConversa } = require('./chatController')
+        emitirEventoEmpresaConversa(io, cid, r.conversa.id, 'nova_conversa', r.conversa)
+      }
+      let payload = {
+        ...data,
+        conversa: r.conversa,
+        conversa_criada: r.criada
+      }
+      if (assumirFlag && r.conversa?.id) {
+        const ar = await executarAssumirConversa({
+          company_id: cid,
+          conversa_id: r.conversa.id,
+          user_id: usuario_id,
+          perfil,
+          departamento_ids
+        })
+        if (ar.ok && ar.conversa) {
+          payload.conversa = { ...r.conversa, ...ar.conversa }
+          if (io) {
+            const { emitirRealtimeAposAssumir } = require('./chatController')
+            emitirRealtimeAposAssumir(io, cid, r.conversa.id, usuario_id, ar.conversa)
+          }
+        } else {
+          payload.assumir_erro = ar.error
+          payload.assumir_status = ar.status
+        }
+      }
+      return res.status(201).json(payload)
+    }
 
     return res.status(201).json(data);
   } catch (err) {
