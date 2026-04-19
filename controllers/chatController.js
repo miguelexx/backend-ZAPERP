@@ -894,6 +894,17 @@ exports.listarConversas = async (req, res) => {
           ? String(atendRow.email).trim()
           : null
       const temNovasMensagens = unreadCount > 0
+      const dbStatusLista = String(c.status_atendimento || '')
+      const assumidaPorOutroLista =
+        c.atendente_id != null && Number(c.atendente_id) !== Number(user_id)
+      const assumidaPorMimLista =
+        c.atendente_id != null && Number(c.atendente_id) === Number(user_id)
+      const exibir_cta_assumir_sem_mensagens =
+        !isGroup &&
+        !temMensagem &&
+        dbStatusLista !== 'fechada' &&
+        !assumidaPorMimLista &&
+        !assumidaPorOutroLista
       const conversaEmAtendimentoDoUsuario =
         !isGroup &&
         c.status_atendimento === 'em_atendimento' &&
@@ -931,7 +942,9 @@ exports.listarConversas = async (req, res) => {
         foto_perfil: fotoPerfil,
         setor: c.departamentos?.nome || null,
         tags: (c.conversa_tags || []).map((ct) => ct?.tags).filter(Boolean),
-        unread_count: unreadCount
+        unread_count: unreadCount,
+        sem_mensagens: !temMensagem,
+        exibir_cta_assumir_sem_mensagens
       }
     })
 
@@ -2203,6 +2216,15 @@ exports.detalharChat = async (req, res) => {
     // Badge "Aberta": só exibir quando há movimentação (mensagem ou atendente assumiu) — mesma regra da lista
     const temMensagem = Array.isArray(mensagens) && mensagens.length > 0
     const exibirBadgeAberta = !isGroup && (temMensagem || conversa.atendente_id != null)
+    const semMensagens = !temMensagem
+    const dbStatusAtend = String(conversa.status_atendimento || '')
+    // Empty state: UI deve oferecer Assumir (POST /chats/:id/assumir) mesmo sem badge "aberta" / sem mensagens
+    const exibirCtaAssumirSemMensagens =
+      !isGroup &&
+      semMensagens &&
+      dbStatusAtend !== 'fechada' &&
+      !isAssignedToUser &&
+      !(conversa.atendente_id != null && Number(conversa.atendente_id) !== Number(user_id))
     // No detalhe da conversa, expõe status "de lista" para não promover conversa ociosa para "aberta"
     // ao apenas abrir o chat sem mensagens. O status real do BD segue em `status_atendimento_real`.
     const statusDetalheReal = isGroup ? null : conversa.status_atendimento
@@ -2213,6 +2235,8 @@ exports.detalharChat = async (req, res) => {
       status_atendimento_real: statusDetalheReal,
       status_atendimento_lista: statusDetalheLista,
       exibir_badge_aberta: exibirBadgeAberta,
+      sem_mensagens: semMensagens,
+      exibir_cta_assumir_sem_mensagens: exibirCtaAssumirSemMensagens,
       clientes: clientesConv,
       is_group: isGroup,
       nome_grupo: conversa.nome_grupo ?? null,
