@@ -882,10 +882,8 @@ exports.listarConversas = async (req, res) => {
       const unreadCount = unreadMap[Number(c.id)] || 0
       // Grupos não têm estado de atendimento: sem badge "aberta", sem status, sem atendente obrigatório
       const temMensagem = Array.isArray(c.mensagens) && c.mensagens.length > 0
-      // Conversas criadas pelo painel (abrir contato / novo cliente) têm usuario_id; sem isso ficam "ociosas"
-      // e somem de Abertas/Minha fila até haver mensagem — o atendente não vê opção de Assumir.
-      const iniciadaNoPainel = !isGroup && c.usuario_id != null && Number(c.usuario_id) > 0
-      const exibir_badge_aberta = !isGroup && (temMensagem || (c.atendente_id != null) || iniciadaNoPainel)
+      // Igual a detalharChat: badge "Aberta" só com mensagem ou atendente (sem movimentação → ociosa, fora de Abertas)
+      const exibir_badge_aberta = !isGroup && (temMensagem || c.atendente_id != null)
       const atendRow = c.atendente && typeof c.atendente === 'object' ? c.atendente : null
       const atendenteNome =
         atendRow && atendRow.nome != null && String(atendRow.nome).trim()
