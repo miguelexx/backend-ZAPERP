@@ -919,6 +919,7 @@ exports.listarConversas = async (req, res) => {
         cliente_id: c.cliente_id,
         telefone: c.telefone,
         telefone_exibivel: telefoneExibivel,
+        status_atendimento_real: isGroup ? null : c.status_atendimento,
         status_atendimento: statusAtendimentoParaLista(isGroup, c.status_atendimento, exibir_badge_aberta),
         exibir_badge_aberta,
         atendente_id: c.atendente_id,

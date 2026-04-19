@@ -181,5 +181,22 @@ Base HTTP (como o resto do app): **`/api/chats`** + `Authorization: Bearer <JWT>
 
 Remover do frontend o estado **travado** (`disabled` + «Disponível em breve») para estas ações após integrar as rotas acima.
 
+### Estado vazio + botão Assumir (conversas sem mensagens)
+
+**Objetivo:** Na área principal do chat, quando não houver mensagens, mostrar botão **Assumir** para quem quiser iniciar o atendimento — **sem** tratar essa conversa como “Aberta” na lista (badge/aba).
+
+**Backend já expõe:**
+
+| Campo | Onde | Uso |
+|-------|------|-----|
+| `sem_mensagens` | `GET /api/chats`, `GET /api/chats/:id` | Preview / empty state |
+| `exibir_cta_assumir_sem_mensagens` | idem | Se `true`, renderizar CTA **Assumir** no empty state |
+| `status_atendimento` | idem | Valor **de lista**: pode ser `ociosa` (BD ainda `aberta`, mas sem movimentação) |
+| `status_atendimento_real` | lista + detalhe | Status gravado no BD (`aberta`, `em_atendimento`, `fechada`) |
+
+**Assumir:** `POST /api/chats/:id/assumir` com JWT (mesmo fluxo das outras conversas).
+
+**Contagem da aba “Abertas”:** Contar só conversas que entram no filtro server-side — usar `status_atendimento === 'aberta'` **na resposta já mapeada** ou `exibir_badge_aberta === true`. **Não** contar como “Abertas” quando `status_atendimento === 'ociosa'` ou quando `exibir_badge_aberta === false`, mesmo que `status_atendimento_real === 'aberta'`.
+
 ## FIM DO PROMPT
 
