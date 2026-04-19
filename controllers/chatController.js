@@ -490,6 +490,7 @@ exports.emitirParaUsuariosQuePodemVerConversa = emitirParaUsuariosQuePodemVerCon
 // 3) listarConversas (com unread_count + pesquisa avançada)
 // Query: tag_id, data_inicio, data_fim, status_atendimento, atendente_id, palavra, minha_fila
 // minha_fila=1: só conversas (não grupo) em aberta (fila visível) + em_atendimento onde o responsável é o usuário logado
+// atendente_id=<usuarios.id>: admin/supervisor — todas as conversas individuais com esse responsável (qualquer status_atendimento); sem minha_fila; ver docs/API-CHATS-QUERY.md
 // =====================================================
 exports.listarConversas = async (req, res) => {
   try {
@@ -528,6 +529,20 @@ exports.listarConversas = async (req, res) => {
       String(status_atendimento).trim() !== ''
         ? String(status_atendimento).toLowerCase().trim()
         : null
+
+    /** Inteiro positivo (usuarios.id). UUID não é coluna de atendente_id na conversa — rejeitar valores não inteiros. */
+    let filtroAtendenteInformado = null
+    if (atendente_id != null && String(atendente_id).trim() !== '') {
+      const trimmed = String(atendente_id).trim()
+      const num = Number(trimmed)
+      if (!Number.isInteger(num) || num <= 0) {
+        return res.status(400).json({
+          error:
+            'atendente_id deve ser o id inteiro positivo referente a usuarios.id. Este parâmetro não aceita UUID nem texto arbitrário.',
+        })
+      }
+      filtroAtendenteInformado = num
+    }
 
     const unreadMap = await obterUnreadMap({ company_id, usuario_id: user_id })
 
@@ -733,8 +748,11 @@ exports.listarConversas = async (req, res) => {
         q = q.or(`tipo.eq.grupo,status_atendimento.eq.${statusNorm}`)
       }
       // Atendente: vê TODAS as conversas (pode assumir, transferir, responder qualquer uma)
-      // Admin/supervisor: filtro opcional por atendente_id
-      if (!minhaFilaAtiva && !isAtendente && atendente_id) q = q.eq('atendente_id', Number(atendente_id))
+      // Admin/supervisor: filtro opcional por atendente_id — sem filtro implícito de status; exclui grupos (conversas "assumidas" são individuais)
+      if (!minhaFilaAtiva && !isAtendente && filtroAtendenteInformado != null) {
+        q = q.eq('atendente_id', filtroAtendenteInformado)
+        q = q.or('tipo.is.null,tipo.neq.grupo')
+      }
       if (data_inicio) q = q.gte('criado_em', new Date(data_inicio).toISOString())
       if (data_fim) {
         const end = new Date(data_fim)
@@ -953,6 +971,10 @@ exports.listarConversas = async (req, res) => {
     conversasFormatadas = deduplicateConversationsByContact(conversasFormatadas)
     conversasFormatadas = sortConversationsByRecent(conversasFormatadas)
 
+    if (filtroAtendenteInformado != null && !isAtendente) {
+      conversasFormatadas = conversasFormatadas.filter((c) => !c.is_group && !c.sem_conversa)
+    }
+
     // Filtro "Abertas": só incluir conversas com movimentação (mensagem ou atendente assumiu)
     // Exclui: conversas sem mensagens e sem atividade — não contam como abertas
     if (statusNorm === 'aberta') {
@@ -984,7 +1006,8 @@ exports.listarConversas = async (req, res) => {
     const incluirTodos =
       (incluirTodosClientes === '1' || incluirTodosClientes === 'true' || incluirTodosClientes === 1) &&
       statusNorm !== 'aberta' &&
-      !minhaFilaAtiva
+      !minhaFilaAtiva &&
+      !(filtroAtendenteInformado != null && !isAtendente)
     if (incluirTodos) {
       const cid = Number(company_id)
       let clientesQuery = supabase
