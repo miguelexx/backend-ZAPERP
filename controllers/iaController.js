@@ -87,6 +87,7 @@ exports.getConfig = async (req, res) => {
 
     if (error) {
       console.warn('ia_config select error:', error.message)
+      res.set('Cache-Control', 'private, no-store, must-revalidate')
       return res.json({
         chatbot_triage: DEFAULT_CONFIG.chatbot_triage,
         bot_global: DEFAULT_CONFIG.bot_global,
@@ -106,9 +107,12 @@ exports.getConfig = async (req, res) => {
       ia: { ...DEFAULT_CONFIG.ia, ...(config.ia || {}) },
       automacoes: { ...DEFAULT_CONFIG.automacoes, ...(config.automacoes || {}) },
     }
+    // Config por tenant — evita browser/proxy servir JSON antigo após novo login ou troca de empresa.
+    res.set('Cache-Control', 'private, no-store, must-revalidate')
     return res.json(merged)
   } catch (err) {
     console.error('getConfig:', err)
+    res.set('Cache-Control', 'private, no-store, must-revalidate')
     return res.json({
       chatbot_triage: DEFAULT_CONFIG.chatbot_triage,
       bot_global: DEFAULT_CONFIG.bot_global,
