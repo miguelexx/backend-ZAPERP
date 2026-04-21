@@ -29,8 +29,7 @@ const { processarOptOut } = require('../services/optOutService')
 const { processarRegras } = require('../services/regrasAutomaticasService')
 const {
   loadChatbotTriageMergeAndAbsence,
-  isHumanAttendantOutboundContent,
-  markWaitingForClient,
+  tryMarkWaitingAfterHumanOutbound,
   clearWaitingForClient,
 } = require('../services/absenceFinalizationService')
 const { isEnabled, FLAGS } = require('../helpers/featureFlags')
@@ -1872,27 +1871,12 @@ exports.receberZapi = async (req, res) => {
       if (!fromMe) {
         await clearWaitingForClient(company_id, conversa_id)
       } else {
-        const { data: convHuman } = await supabase
-          .from('conversas')
-          .select('status_atendimento, atendente_id, aguardando_cliente_desde')
-          .eq('id', conversa_id)
-          .eq('company_id', company_id)
-          .maybeSingle()
-        if (convHuman?.status_atendimento === 'em_atendimento' && convHuman?.atendente_id != null) {
-          const { triageMerged, absence: absenceCfg } = await loadChatbotTriageMergeAndAbsence(company_id)
-          if (isHumanAttendantOutboundContent(texto, triageMerged, absenceCfg)) {
-            const jaAguardando = !!convHuman.aguardando_cliente_desde
-            await markWaitingForClient(company_id, conversa_id, criado_em || new Date().toISOString())
-            if (!jaAguardando) {
-              await supabase.from('historico_atendimentos').insert({
-                conversa_id,
-                usuario_id: Number(convHuman.atendente_id) || null,
-                acao: 'aguardando_cliente',
-                observacao: 'Conversa marcada como aguardando cliente após mensagem do atendente',
-              })
-            }
-          }
-        }
+        await tryMarkWaitingAfterHumanOutbound({
+          company_id,
+          conversa_id,
+          texto,
+          criado_em: criado_em || new Date().toISOString(),
+        })
       }
     }
 

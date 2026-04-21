@@ -9,6 +9,7 @@ const { normalizePhoneBR, possiblePhonesBR, phoneKeyBR } = require('../helpers/p
 const { deduplicateConversationsByContact, sortConversationsByRecent, sortConversationsPinThenRecent, getCanonicalPhone, getOrCreateCliente, mergeConversasIntoCanonico } = require('../helpers/conversationSync')
 const { enrichConversationsWithContactData } = require('../helpers/conversaEnrichment')
 const { getDisplayName } = require('../helpers/contactEnrichment')
+const { tryMarkWaitingAfterHumanOutbound } = require('../services/absenceFinalizationService')
 
 /** UltraMsg retorna id interno (ex: 35096), não o messageId do WhatsApp. Só usar como whatsapp_id se for o ID real. */
 function isRealWhatsAppId(waId) {
@@ -488,7 +489,7 @@ exports.emitirParaUsuariosQuePodemVerConversa = emitirParaUsuariosQuePodemVerCon
 
 // =====================================================
 // 3) listarConversas (com unread_count + pesquisa avançada)
-// Query: tag_id, data_inicio, data_fim, status_atendimento, atendente_id, palavra, minha_fila
+// Query: tag_id, data_inicio, data_fim, status_atendimento, atendente_id, palavra, minha_fila, aguardando_cliente
 // minha_fila=1: só conversas (não grupo) em aberta (fila visível) + em_atendimento onde o responsável é o usuário logado
 // atendente_id=<usuarios.id>: admin/supervisor — todas as conversas individuais com esse responsável (qualquer status_atendimento); sem minha_fila; ver docs/API-CHATS-QUERY.md
 // =====================================================
@@ -509,7 +510,14 @@ exports.listarConversas = async (req, res) => {
       incluir_todos_clientes: incluirTodosClientes,
       minha_fila: minhaFilaRaw,
       incluir_colaboradores_encaminhar: incluirColabEncRaw,
+      aguardando_cliente: aguardandoClienteRaw,
     } = req.query
+
+    const aguardandoClienteAtivo =
+      aguardandoClienteRaw === '1' ||
+      aguardandoClienteRaw === 'true' ||
+      aguardandoClienteRaw === 1 ||
+      aguardandoClienteRaw === true
 
     const incluirColaboradoresEncaminhar =
       incluirColabEncRaw === '1' ||
@@ -640,6 +648,7 @@ exports.listarConversas = async (req, res) => {
       usuario_id,
       status_atendimento,
       atendente_id,
+      aguardando_cliente_desde,
       lida,
       criado_em,
       ultima_atividade,
@@ -669,6 +678,7 @@ exports.listarConversas = async (req, res) => {
       usuario_id,
       status_atendimento,
       atendente_id,
+      aguardando_cliente_desde,
       lida,
       criado_em,
       departamento_id,
@@ -698,6 +708,7 @@ exports.listarConversas = async (req, res) => {
       usuario_id,
       status_atendimento,
       atendente_id,
+      aguardando_cliente_desde,
       lida,
       criado_em,
       departamento_id,
@@ -758,6 +769,14 @@ exports.listarConversas = async (req, res) => {
         const end = new Date(data_fim)
         end.setHours(23, 59, 59, 999)
         q = q.lte('criado_em', end.toISOString())
+      }
+
+      // Filtro "Aguardando cliente": última saída humana já registrou aguardando_cliente_desde (painel ou webhook)
+      if (aguardandoClienteAtivo) {
+        q = q.not('aguardando_cliente_desde', 'is', null)
+        q = q.eq('status_atendimento', 'em_atendimento')
+        q = q.not('atendente_id', 'is', null)
+        q = q.or('tipo.is.null,tipo.neq.grupo')
       }
 
       // PERFORMANCE: a lista de conversas só precisa da ÚLTIMA mensagem (preview).
@@ -941,6 +960,7 @@ exports.listarConversas = async (req, res) => {
         status_atendimento: statusAtendimentoParaLista(isGroup, c.status_atendimento, exibir_badge_aberta),
         exibir_badge_aberta,
         atendente_id: c.atendente_id,
+        aguardando_cliente_desde: c.aguardando_cliente_desde ?? null,
         atendente_nome: atendenteNome,
         atendente_email: atendenteEmail,
         lida: unreadCount === 0,
@@ -2912,6 +2932,15 @@ exports.enviarMensagemChat = async (req, res) => {
 
     if (errMsg) return res.status(500).json({ error: errMsg.message })
 
+    try {
+      await tryMarkWaitingAfterHumanOutbound({
+        company_id,
+        conversa_id: Number(conversa_id),
+        texto: String(texto || '').trim(),
+        criado_em: msg.criado_em,
+      })
+    } catch (_) {}
+
     // compatibilidade: marca como lida e atualiza ordem na lista
     await supabase
       .from('conversas')
@@ -3287,6 +3316,15 @@ exports.enviarContatoWhatsapp = async (req, res) => {
       return res.status(500).json({ error: errMsg.message })
     }
 
+    try {
+      await tryMarkWaitingAfterHumanOutbound({
+        company_id,
+        conversa_id: Number(conversa_id),
+        texto: contactName,
+        criado_em: criadoEm,
+      })
+    } catch (_) {}
+
     const { nome: usuarioNome } = await getUsuarioParaEnvioCliente(supabase, company_id, user_id)
     if (usuarioNome) {
       await provider.sendText(conversa.telefone, prefixarParaCliente('Segue contato abaixo:', usuarioNome), { companyId: company_id, conversaId: conversa_id })
@@ -3420,6 +3458,15 @@ exports.enviarLocalizacao = async (req, res) => {
     }
 
     if (errMsg) return res.status(500).json({ error: errMsg.message })
+
+    try {
+      await tryMarkWaitingAfterHumanOutbound({
+        company_id,
+        conversa_id: Number(conversa_id),
+        texto: textoDisplay,
+        criado_em: msg.criado_em || criadoEm,
+      })
+    } catch (_) {}
 
     await supabase
       .from('conversas')
@@ -4238,6 +4285,15 @@ exports.enviarArquivo = async (req, res) => {
     }).select().single()
 
     if (error) return res.status(500).json({ error: error.message })
+
+    try {
+      await tryMarkWaitingAfterHumanOutbound({
+        company_id,
+        conversa_id: Number(conversa_id),
+        texto: String(msg?.texto || '').trim(),
+        criado_em: msg.criado_em,
+      })
+    } catch (_) {}
 
     // Atualizar conversa com timestamp correto
     const timestampAtividade = new Date().toISOString()

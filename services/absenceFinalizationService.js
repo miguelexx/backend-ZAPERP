@@ -118,6 +118,37 @@ async function clearWaitingForClient(company_id, conversa_id) {
     .eq('id', conversa_id)
 }
 
+/**
+ * Marca `aguardando_cliente_desde` quando a última saída é humana (não bot / não mensagem de ausência).
+ * Usado pelo webhook Z-API (eco fromMe) e pelo envio pelo painel (`enviarMensagemChat` etc.), pois esse fluxo não gera webhook confiável.
+ */
+async function tryMarkWaitingAfterHumanOutbound({ company_id, conversa_id, texto, criado_em }) {
+  if (!company_id || !conversa_id) return
+  const ts = criado_em || new Date().toISOString()
+  const { data: conv } = await supabase
+    .from('conversas')
+    .select('tipo, telefone, status_atendimento, atendente_id, aguardando_cliente_desde')
+    .eq('id', conversa_id)
+    .eq('company_id', company_id)
+    .maybeSingle()
+  const isGroup =
+    String(conv?.tipo || '').toLowerCase() === 'grupo' || String(conv?.telefone || '').includes('@g.us')
+  if (!conv || isGroup) return
+  if (conv.status_atendimento !== 'em_atendimento' || conv.atendente_id == null) return
+  const { triageMerged, absence: absenceCfg } = await loadChatbotTriageMergeAndAbsence(company_id)
+  if (!isHumanAttendantOutboundContent(texto, triageMerged, absenceCfg)) return
+  const jaAguardando = !!conv.aguardando_cliente_desde
+  await markWaitingForClient(company_id, conversa_id, ts)
+  if (!jaAguardando) {
+    await supabase.from('historico_atendimentos').insert({
+      conversa_id,
+      usuario_id: Number(conv.atendente_id) || null,
+      acao: 'aguardando_cliente',
+      observacao: 'Conversa marcada como aguardando cliente após mensagem do atendente',
+    })
+  }
+}
+
 async function sendAbsenceClosingMessage({ provider, company_id, conversa_id, telefone, mensagem }) {
   const result = await provider.sendText(telefone, mensagem, { companyId: company_id, conversaId: conversa_id })
   const ok = !!result?.ok
@@ -295,5 +326,6 @@ module.exports = {
   isHumanAttendantLastOutbound,
   markWaitingForClient,
   clearWaitingForClient,
+  tryMarkWaitingAfterHumanOutbound,
   finalizeConversationsByAbsence,
 }
