@@ -60,11 +60,11 @@ async function getAbsencePolicyForCompany(company_id) {
 
 /**
  * Texto outbound é do atendente humano (painel ou WhatsApp), não do chatbot de triagem nem da mensagem de ausência.
+ * `textoEhSoMensagemAusencia`: só ausência configurada ou fallback fixo — não marca aguardando.
  */
-/** Texto só com ausência configurada ou fallback fixo — não marca aguardando. */
 function textoEhSoMensagemAusencia(texto, absenceCfg) {
   const t = String(texto || '').trim()
-  if (!t) return true
+  if (!t) return false
   if (t === ABSENCE_FALLBACK_MESSAGE) return true
   const am = String(absenceCfg?.mensagem || '').trim()
   if (am && t === am) return true
@@ -194,6 +194,7 @@ async function getLastMessage(conversa_id, company_id) {
     .eq('conversa_id', conversa_id)
     .eq('company_id', company_id)
     .order('criado_em', { ascending: false })
+    .order('id', { ascending: false })
     .limit(1)
     .maybeSingle()
   return data || null
@@ -233,6 +234,11 @@ async function finalizeConversationsByAbsence() {
 
       const lastMsg = await getLastMessage(conv.id, company_id)
       if (!lastMsg) continue
+      // Última mensagem cronológica da conversa precisa ser outbound — senão o cliente já falou por último.
+      if (lastMsg.direcao !== 'out') {
+        await clearWaitingForClient(company_id, conv.id)
+        continue
+      }
       if (!isHumanAttendantLastOutbound(lastMsg, triageMerged, absence)) {
         await clearWaitingForClient(company_id, conv.id)
         continue
@@ -252,6 +258,19 @@ async function finalizeConversationsByAbsence() {
       }
 
       if (new Date(aguardandoDesde).toISOString() > cutoff) continue
+
+      // Revalidação imediata antes do UPDATE: evita encerrar se chegou inbound do cliente entre a leitura e o lock.
+      const lastBeforeLock = await getLastMessage(conv.id, company_id)
+      if (!lastBeforeLock || lastBeforeLock.direcao !== 'out') {
+        await clearWaitingForClient(company_id, conv.id)
+        continue
+      }
+      if (!isHumanAttendantLastOutbound(lastBeforeLock, triageMerged, absence)) {
+        await clearWaitingForClient(company_id, conv.id)
+        continue
+      }
+      const aguardandoParaLock = lastBeforeLock.criado_em
+      if (new Date(aguardandoParaLock).toISOString() > cutoff) continue
 
       const prevAtendenteId = conv.atendente_id != null ? Number(conv.atendente_id) : null
       const prevAtendenteAtribuidoEm = conv.atendente_atribuido_em || null
@@ -302,7 +321,7 @@ async function finalizeConversationsByAbsence() {
             finalizada_automaticamente: false,
             finalizada_automaticamente_em: null,
             ausencia_mensagem_enviada_em: null,
-            aguardando_cliente_desde: aguardandoDesde,
+            aguardando_cliente_desde: aguardandoParaLock,
           })
           .eq('company_id', company_id)
           .eq('id', conv.id)
