@@ -61,6 +61,16 @@ async function getAbsencePolicyForCompany(company_id) {
 /**
  * Texto outbound é do atendente humano (painel ou WhatsApp), não do chatbot de triagem nem da mensagem de ausência.
  */
+/** Texto só com ausência configurada ou fallback fixo — não marca aguardando. */
+function textoEhSoMensagemAusencia(texto, absenceCfg) {
+  const t = String(texto || '').trim()
+  if (!t) return true
+  if (t === ABSENCE_FALLBACK_MESSAGE) return true
+  const am = String(absenceCfg?.mensagem || '').trim()
+  if (am && t === am) return true
+  return false
+}
+
 function isHumanAttendantOutboundContent(texto, triageMerged, absenceCfg) {
   const t = String(texto || '').trim()
   if (!t) return false
@@ -69,6 +79,20 @@ function isHumanAttendantOutboundContent(texto, triageMerged, absenceCfg) {
   const am = String(absenceCfg?.mensagem || '').trim()
   if (am && t === am) return false
   return true
+}
+
+/**
+ * Mensagem outbound deve marcar "aguardando cliente"?
+ * Painel/arquivo sempre têm autor_usuario_id → não usar looksLikeBotMessage no texto (evita falso positivo vs menu/invalidOption).
+ */
+function outboundQualificaParaAguardandoCliente(texto, autorUsuarioIdOpt, triageMerged, absenceCfg) {
+  const uid = autorUsuarioIdOpt != null ? Number(autorUsuarioIdOpt) : NaN
+  if (Number.isFinite(uid) && uid > 0) {
+    const t = String(texto || '').trim()
+    if (!t) return false
+    return !textoEhSoMensagemAusencia(t, absenceCfg)
+  }
+  return isHumanAttendantOutboundContent(texto, triageMerged, absenceCfg)
 }
 
 function isHumanAttendantLastOutbound(lastMsg, triageMerged, absenceCfg) {
@@ -122,7 +146,7 @@ async function clearWaitingForClient(company_id, conversa_id) {
  * Marca `aguardando_cliente_desde` quando a última saída é humana (não bot / não mensagem de ausência).
  * Usado pelo webhook Z-API (eco fromMe) e pelo envio pelo painel (`enviarMensagemChat` etc.), pois esse fluxo não gera webhook confiável.
  */
-async function tryMarkWaitingAfterHumanOutbound({ company_id, conversa_id, texto, criado_em }) {
+async function tryMarkWaitingAfterHumanOutbound({ company_id, conversa_id, texto, criado_em, autor_usuario_id }) {
   if (!company_id || !conversa_id) return
   const ts = criado_em || new Date().toISOString()
   const { data: conv } = await supabase
@@ -136,7 +160,7 @@ async function tryMarkWaitingAfterHumanOutbound({ company_id, conversa_id, texto
   if (!conv || isGroup) return
   if (conv.status_atendimento !== 'em_atendimento' || conv.atendente_id == null) return
   const { triageMerged, absence: absenceCfg } = await loadChatbotTriageMergeAndAbsence(company_id)
-  if (!isHumanAttendantOutboundContent(texto, triageMerged, absenceCfg)) return
+  if (!outboundQualificaParaAguardandoCliente(texto, autor_usuario_id, triageMerged, absenceCfg)) return
   const jaAguardando = !!conv.aguardando_cliente_desde
   await markWaitingForClient(company_id, conversa_id, ts)
   if (!jaAguardando) {
@@ -323,6 +347,7 @@ module.exports = {
   getAbsencePolicyForCompany,
   loadChatbotTriageMergeAndAbsence,
   isHumanAttendantOutboundContent,
+  outboundQualificaParaAguardandoCliente,
   isHumanAttendantLastOutbound,
   markWaitingForClient,
   clearWaitingForClient,

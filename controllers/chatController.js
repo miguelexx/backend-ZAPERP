@@ -2938,6 +2938,7 @@ exports.enviarMensagemChat = async (req, res) => {
         conversa_id: Number(conversa_id),
         texto: String(texto || '').trim(),
         criado_em: msg.criado_em,
+        autor_usuario_id: Number(user_id),
       })
     } catch (_) {}
 
@@ -3322,6 +3323,7 @@ exports.enviarContatoWhatsapp = async (req, res) => {
         conversa_id: Number(conversa_id),
         texto: contactName,
         criado_em: criadoEm,
+        autor_usuario_id: Number(user_id),
       })
     } catch (_) {}
 
@@ -3465,6 +3467,7 @@ exports.enviarLocalizacao = async (req, res) => {
         conversa_id: Number(conversa_id),
         texto: textoDisplay,
         criado_em: msg.criado_em || criadoEm,
+        autor_usuario_id: Number(user_id),
       })
     } catch (_) {}
 
@@ -4292,6 +4295,7 @@ exports.enviarArquivo = async (req, res) => {
         conversa_id: Number(conversa_id),
         texto: String(msg?.texto || '').trim(),
         criado_em: msg.criado_em,
+        autor_usuario_id: Number(user_id),
       })
     } catch (_) {}
 
