@@ -28,7 +28,8 @@ const { emitBotMensagemRealtime, emitReaberturaSemSetorRealtime } = require('../
 const { processarOptOut } = require('../services/optOutService')
 const { processarRegras } = require('../services/regrasAutomaticasService')
 const {
-  getAbsencePolicyForCompany,
+  loadChatbotTriageMergeAndAbsence,
+  isHumanAttendantOutboundContent,
   markWaitingForClient,
   clearWaitingForClient,
 } = require('../services/absenceFinalizationService')
@@ -1750,7 +1751,7 @@ exports.receberZapi = async (req, res) => {
       const conversaEncerrada = st === 'fechada' || st === 'finalizada'
       if (conversaEncerrada) {
         if (motivoFinalizacao === 'ausencia_cliente') {
-          const cfg = await getAbsencePolicyForCompany(company_id)
+          const { absence: cfg } = await loadChatbotTriageMergeAndAbsence(company_id)
           if (cfg.reabrirAutomaticamente) {
             const depAntesReabrir =
               convStatus?.departamento_id != null ? Number(convStatus.departamento_id) : null
@@ -1878,15 +1879,18 @@ exports.receberZapi = async (req, res) => {
           .eq('company_id', company_id)
           .maybeSingle()
         if (convHuman?.status_atendimento === 'em_atendimento' && convHuman?.atendente_id != null) {
-          const jaAguardando = !!convHuman.aguardando_cliente_desde
-          await markWaitingForClient(company_id, conversa_id, criado_em || new Date().toISOString())
-          if (!jaAguardando) {
-            await supabase.from('historico_atendimentos').insert({
-              conversa_id,
-              usuario_id: Number(convHuman.atendente_id) || null,
-              acao: 'aguardando_cliente',
-              observacao: 'Conversa marcada como aguardando cliente após mensagem do atendente',
-            })
+          const { triageMerged, absence: absenceCfg } = await loadChatbotTriageMergeAndAbsence(company_id)
+          if (isHumanAttendantOutboundContent(texto, triageMerged, absenceCfg)) {
+            const jaAguardando = !!convHuman.aguardando_cliente_desde
+            await markWaitingForClient(company_id, conversa_id, criado_em || new Date().toISOString())
+            if (!jaAguardando) {
+              await supabase.from('historico_atendimentos').insert({
+                conversa_id,
+                usuario_id: Number(convHuman.atendente_id) || null,
+                acao: 'aguardando_cliente',
+                observacao: 'Conversa marcada como aguardando cliente após mensagem do atendente',
+              })
+            }
           }
         }
       }
@@ -1963,7 +1967,7 @@ exports.receberZapi = async (req, res) => {
         // Exceção 1: conversaReabertaAposFinalizacao — cliente enviou msg após finalização, tratar como novo contato.
         // Exceção 2: bot já estava ativo (menu_enviado em bot_logs) — mesmo que a msg do cliente não tenha sido
         //            salva corretamente, o bot deve continuar processando as respostas do menu.
-        const cfgAbs = await getAbsencePolicyForCompany(company_id)
+        const { absence: cfgAbs } = await loadChatbotTriageMergeAndAbsence(company_id)
         if (reopenedFromAbsence && cfgAbs.reabrirSemChatbot) {
           skipChatbot = true
           await logBotAction(company_id, conversa_id, 'chatbot_bypass_retorno_ausencia', {

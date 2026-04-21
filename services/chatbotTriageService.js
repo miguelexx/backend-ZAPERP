@@ -1581,6 +1581,7 @@ module.exports = {
   normalizeChatbotTriageStrings,
   invalidateChatbotConfigCache,
   getChatbotConfig,
+  looksLikeBotMessage,
   processIncomingMessage,
   logBotAction,
   buildWelcomeMessage,

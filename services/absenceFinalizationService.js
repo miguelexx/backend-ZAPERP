@@ -1,6 +1,10 @@
 const supabase = require('../config/supabase')
 const { getProvider } = require('./providers')
-const { DEFAULT_CHATBOT_CONFIG, logBotAction } = require('./chatbotTriageService')
+const {
+  DEFAULT_CHATBOT_CONFIG,
+  looksLikeBotMessage,
+  logBotAction,
+} = require('./chatbotTriageService')
 
 const ABSENCE_FALLBACK_MESSAGE =
   'Seu atendimento foi encerrado por falta de interação no momento. Caso precise continuar, basta nos enviar uma nova mensagem.'
@@ -18,27 +22,67 @@ function getAbsenceConfig(chatbotConfig) {
 }
 
 /**
- * Lê `ia_config.config.chatbot_triage` cru e mescla com defaults.
- * Necessário porque `validateChatbotConfig` pode retornar null (ex.: chatbot enabled sem opções),
- * mas a empresa ainda pode ter `finalizar_por_ausencia_*` válido no JSON.
+ * Uma leitura de ia_config por empresa: triagem completa (defaults) + política de ausência.
  */
-async function getAbsencePolicyForCompany(company_id) {
-  if (!company_id) return getAbsenceConfig(null)
+async function loadChatbotTriageMergeAndAbsence(company_id) {
+  if (!company_id) {
+    return { triageMerged: { ...DEFAULT_CHATBOT_CONFIG }, absence: getAbsenceConfig(null) }
+  }
   try {
     const { data, error } = await supabase
       .from('ia_config')
       .select('config')
       .eq('company_id', company_id)
       .maybeSingle()
-    if (error || !data?.config || typeof data.config !== 'object') return getAbsenceConfig(null)
+    if (error || !data?.config || typeof data.config !== 'object') {
+      return { triageMerged: { ...DEFAULT_CHATBOT_CONFIG }, absence: getAbsenceConfig(null) }
+    }
     const raw = data.config.chatbot_triage && typeof data.config.chatbot_triage === 'object'
       ? data.config.chatbot_triage
       : {}
-    return getAbsenceConfig({ ...DEFAULT_CHATBOT_CONFIG, ...raw })
+    const triageMerged = { ...DEFAULT_CHATBOT_CONFIG, ...raw }
+    return { triageMerged, absence: getAbsenceConfig(triageMerged) }
   } catch (e) {
-    console.warn('[absenceFinalization] getAbsencePolicyForCompany:', e?.message || e)
-    return getAbsenceConfig(null)
+    console.warn('[absenceFinalization] loadChatbotTriageMergeAndAbsence:', e?.message || e)
+    return { triageMerged: { ...DEFAULT_CHATBOT_CONFIG }, absence: getAbsenceConfig(null) }
   }
+}
+
+/**
+ * Lê `ia_config.config.chatbot_triage` cru e mescla com defaults.
+ * Necessário porque `validateChatbotConfig` pode retornar null (ex.: chatbot enabled sem opções),
+ * mas a empresa ainda pode ter `finalizar_por_ausencia_*` válido no JSON.
+ */
+async function getAbsencePolicyForCompany(company_id) {
+  const { absence } = await loadChatbotTriageMergeAndAbsence(company_id)
+  return absence
+}
+
+/**
+ * Texto outbound é do atendente humano (painel ou WhatsApp), não do chatbot de triagem nem da mensagem de ausência.
+ */
+function isHumanAttendantOutboundContent(texto, triageMerged, absenceCfg) {
+  const t = String(texto || '').trim()
+  if (!t) return false
+  if (looksLikeBotMessage(t, triageMerged)) return false
+  if (t === ABSENCE_FALLBACK_MESSAGE) return false
+  const am = String(absenceCfg?.mensagem || '').trim()
+  if (am && t === am) return false
+  return true
+}
+
+function isHumanAttendantLastOutbound(lastMsg, triageMerged, absenceCfg) {
+  if (!lastMsg || lastMsg.direcao !== 'out') return false
+  const uid = lastMsg.autor_usuario_id
+  if (uid != null && Number(uid) > 0) {
+    const t = String(lastMsg.texto || '').trim()
+    if (!t) return false
+    if (t === ABSENCE_FALLBACK_MESSAGE) return false
+    const am = String(absenceCfg?.mensagem || '').trim()
+    if (am && t === am) return false
+    return true
+  }
+  return isHumanAttendantOutboundContent(lastMsg.texto, triageMerged, absenceCfg)
 }
 
 function getCutoffDate(cfg) {
@@ -112,7 +156,7 @@ async function finalizeConversationsByAbsence() {
 
   for (const item of configs) {
     const company_id = item.company_id
-    const absence = await getAbsencePolicyForCompany(company_id)
+    const { triageMerged, absence } = await loadChatbotTriageMergeAndAbsence(company_id)
     if (!absence.ativo) continue
 
     const cutoff = getCutoffDate(absence).toISOString()
@@ -134,7 +178,7 @@ async function finalizeConversationsByAbsence() {
 
       const lastMsg = await getLastMessage(conv.id, company_id)
       if (!lastMsg) continue
-      if (lastMsg.direcao !== 'out') {
+      if (!isHumanAttendantLastOutbound(lastMsg, triageMerged, absence)) {
         await clearWaitingForClient(company_id, conv.id)
         continue
       }
@@ -246,6 +290,9 @@ module.exports = {
   ABSENCE_FALLBACK_MESSAGE,
   getAbsenceConfig,
   getAbsencePolicyForCompany,
+  loadChatbotTriageMergeAndAbsence,
+  isHumanAttendantOutboundContent,
+  isHumanAttendantLastOutbound,
   markWaitingForClient,
   clearWaitingForClient,
   finalizeConversationsByAbsence,
