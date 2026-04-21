@@ -10,6 +10,7 @@ const {
   validateChatbotConfig,
   normalizeChatbotTriageStrings,
 } = require('../services/chatbotTriageService')
+const { finalizeConversationsByAbsence } = require('../services/absenceFinalizationService')
 
 function timingSafeEqualStr(a, b) {
   const sa = String(a ?? '')
@@ -243,6 +244,18 @@ exports.timeoutInatividade = async (req, res) => {
     return res.json({ ok: true, processadas: totalProcessadas })
   } catch (err) {
     console.error('timeoutInatividade:', err)
+    return res.status(500).json({ error: err.message })
+  }
+}
+
+/** POST /jobs/finalizacao-ausencia-cliente */
+exports.finalizacaoAusenciaCliente = async (req, res) => {
+  try {
+    const result = await finalizeConversationsByAbsence()
+    if (!result.ok) return res.status(503).json({ error: result.error || 'Falha ao processar finalização por ausência' })
+    return res.json(result)
+  } catch (err) {
+    console.error('finalizacaoAusenciaCliente:', err)
     return res.status(500).json({ error: err.message })
   }
 }

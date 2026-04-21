@@ -234,6 +234,13 @@ const DEFAULT_CHATBOT_CONFIG = {
   foraHorarioCooldownMinutos: 60,
   // Máximo de envios fora do horário por conversa em 24h.
   foraHorarioMaxEnvios24h: 2,
+  // Finalização automática por ausência do cliente (backend)
+  finalizar_por_ausencia_ativo: false,
+  finalizar_por_ausencia_prazo: 24,
+  finalizar_por_ausencia_unidade: 'horas_corridas',
+  finalizar_por_ausencia_mensagem: '',
+  finalizar_por_ausencia_reabrir_automaticamente: true,
+  finalizar_por_ausencia_reabrir_sem_chatbot: true,
 }
 
 /**
@@ -250,6 +257,7 @@ function normalizeChatbotTriageStrings(raw) {
     reopenMenuCommand: repairChatbotTriageUtf8(String(raw.reopenMenuCommand ?? '').trim()),
     mensagemFinalizacao: repairChatbotTriageUtf8(String(raw.mensagemFinalizacao ?? '').trim()),
     mensagemForaHorario: repairChatbotTriageUtf8(String(raw.mensagemForaHorario ?? '').trim()),
+    finalizar_por_ausencia_mensagem: repairChatbotTriageUtf8(String(raw.finalizar_por_ausencia_mensagem ?? '').trim()),
     options: opts.map((o) => ({
       ...o,
       key: repairChatbotTriageUtf8(String(o?.key ?? '').trim()),
@@ -328,6 +336,20 @@ function validateChatbotConfig(raw) {
       const n = Number(v)
       return Number.isFinite(n) ? Math.max(1, Math.min(20, Math.round(n))) : 2
     })(),
+    finalizar_por_ausencia_ativo: !!src.finalizar_por_ausencia_ativo,
+    finalizar_por_ausencia_prazo: (() => {
+      const n = Number(src.finalizar_por_ausencia_prazo ?? DEFAULT_CHATBOT_CONFIG.finalizar_por_ausencia_prazo ?? 24)
+      return Number.isFinite(n) ? Math.max(1, Math.min(720, Math.round(n))) : 24
+    })(),
+    finalizar_por_ausencia_unidade: (() => {
+      const v = String(src.finalizar_por_ausencia_unidade || DEFAULT_CHATBOT_CONFIG.finalizar_por_ausencia_unidade || 'horas_corridas')
+        .trim()
+        .toLowerCase()
+      return v === 'horas_uteis' ? 'horas_uteis' : 'horas_corridas'
+    })(),
+    finalizar_por_ausencia_mensagem: String(src.finalizar_por_ausencia_mensagem || '').trim(),
+    finalizar_por_ausencia_reabrir_automaticamente: src.finalizar_por_ausencia_reabrir_automaticamente !== false,
+    finalizar_por_ausencia_reabrir_sem_chatbot: src.finalizar_por_ausencia_reabrir_sem_chatbot !== false,
     intervaloEnvioSegundos: (() => {
       const v = src.intervaloEnvioSegundos ?? DEFAULT_CHATBOT_CONFIG.intervaloEnvioSegundos ?? 3
       const n = Number(v)

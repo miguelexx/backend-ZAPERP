@@ -20,10 +20,18 @@ const { parseVcardForContact } = require('../helpers/vcardHelper')
 const { resolvePeerPhone } = require('../helpers/conversationKeyHelper')
 const { incrementarUnreadParaConversa, emitirParaUsuariosQuePodemVerConversa } = require('./chatController')
 
-const { processIncomingMessage: processChatbotTriage } = require('../services/chatbotTriageService')
+const {
+  processIncomingMessage: processChatbotTriage,
+  logBotAction,
+} = require('../services/chatbotTriageService')
 const { emitBotMensagemRealtime, emitReaberturaSemSetorRealtime } = require('../helpers/chatbotRealtimeEmitter')
 const { processarOptOut } = require('../services/optOutService')
 const { processarRegras } = require('../services/regrasAutomaticasService')
+const {
+  getAbsencePolicyForCompany,
+  markWaitingForClient,
+  clearWaitingForClient,
+} = require('../services/absenceFinalizationService')
 const { isEnabled, FLAGS } = require('../helpers/featureFlags')
 const { parseNota, tentarRegistrarAvaliacao } = require('../services/avaliacaoService')
 
@@ -1729,16 +1737,69 @@ exports.receberZapi = async (req, res) => {
 
     // Captura avaliação (nota 0-10) e reabertura automática em conversa encerrada (fechada ou finalizada)
     let conversaReabertaAposFinalizacao = false
+    let reopenedFromAbsence = false
     if (!fromMe && !isGroup && conversa_id) {
       const { data: convStatus } = await supabase
         .from('conversas')
-        .select('id, status_atendimento, cliente_id, departamento_id')
+        .select('id, status_atendimento, cliente_id, departamento_id, finalizacao_motivo')
         .eq('id', conversa_id)
         .eq('company_id', company_id)
         .maybeSingle()
       const st = convStatus?.status_atendimento
+      const motivoFinalizacao = String(convStatus?.finalizacao_motivo || '').trim().toLowerCase()
       const conversaEncerrada = st === 'fechada' || st === 'finalizada'
       if (conversaEncerrada) {
+        if (motivoFinalizacao === 'ausencia_cliente') {
+          const cfg = await getAbsencePolicyForCompany(company_id)
+          if (cfg.reabrirAutomaticamente) {
+            const depAntesReabrir =
+              convStatus?.departamento_id != null ? Number(convStatus.departamento_id) : null
+            const { data: reabertaAusencia } = await supabase
+              .from('conversas')
+              .update({
+                status_atendimento: 'aberta',
+                departamento_id: null,
+                atendente_id: null,
+                atendente_atribuido_em: null,
+                finalizacao_motivo: null,
+                finalizada_automaticamente: false,
+                finalizada_automaticamente_em: null,
+                aguardando_cliente_desde: null,
+              })
+              .eq('id', conversa_id)
+              .eq('company_id', company_id)
+              .select()
+              .single()
+            if (reabertaAusencia) {
+              departamento_id = null
+              conversaReabertaAposFinalizacao = true
+              reopenedFromAbsence = true
+              await supabase.from('historico_atendimentos').insert({
+                conversa_id,
+                usuario_id: null,
+                acao: 'reabertura_automatica_ausencia',
+                observacao: 'Conversa reaberta automaticamente por retorno do cliente após encerramento por ausência',
+              })
+              await logBotAction(company_id, conversa_id, 'reabertura_automatica_ausencia', {
+                bypass_chatbot: cfg.reabrirSemChatbot,
+              })
+              const io = req.app.get('io')
+              if (io) {
+                emitReaberturaSemSetorRealtime({
+                  io,
+                  company_id,
+                  conversa_id,
+                  reabertaRow: reabertaAusencia,
+                  departamentoIdAntigo: depAntesReabrir,
+                })
+                io.to(`empresa_${company_id}`).emit(io.EVENTS?.CONVERSA_REABERTA || 'conversa_reaberta', reabertaAusencia)
+              }
+            }
+          }
+        }
+        if (reopenedFromAbsence) {
+          await clearWaitingForClient(company_id, conversa_id)
+        }
         // Tentar registrar nota de avaliação se o texto for 0-10
         const textoNorm = String(texto || '').trim()
         const avalResult = await tentarRegistrarAvaliacao({
@@ -1752,7 +1813,7 @@ exports.receberZapi = async (req, res) => {
         }
         // Reabrir por defeito após encerramento; não reabrir se for avaliação registrada,
         // nota 0-10 isolada, agradecimento/ACK de encerramento ou mensagem claramente sem nova demanda.
-        if (!avalResult.registered) {
+        if (!avalResult.registered && !reopenedFromAbsence) {
           const reopenDecision = shouldReopenFinishedConversation(textoNorm, {
             company_id,
             conversa_id,
@@ -1800,6 +1861,31 @@ exports.receberZapi = async (req, res) => {
               conversa_id,
               texto: textoNorm,
               reason: reopenDecision.reason
+            })
+          }
+        }
+      }
+    }
+
+    if (!isGroup && conversa_id) {
+      if (!fromMe) {
+        await clearWaitingForClient(company_id, conversa_id)
+      } else {
+        const { data: convHuman } = await supabase
+          .from('conversas')
+          .select('status_atendimento, atendente_id, aguardando_cliente_desde')
+          .eq('id', conversa_id)
+          .eq('company_id', company_id)
+          .maybeSingle()
+        if (convHuman?.status_atendimento === 'em_atendimento' && convHuman?.atendente_id != null) {
+          const jaAguardando = !!convHuman.aguardando_cliente_desde
+          await markWaitingForClient(company_id, conversa_id, criado_em || new Date().toISOString())
+          if (!jaAguardando) {
+            await supabase.from('historico_atendimentos').insert({
+              conversa_id,
+              usuario_id: Number(convHuman.atendente_id) || null,
+              acao: 'aguardando_cliente',
+              observacao: 'Conversa marcada como aguardando cliente após mensagem do atendente',
             })
           }
         }
@@ -1877,6 +1963,13 @@ exports.receberZapi = async (req, res) => {
         // Exceção 1: conversaReabertaAposFinalizacao — cliente enviou msg após finalização, tratar como novo contato.
         // Exceção 2: bot já estava ativo (menu_enviado em bot_logs) — mesmo que a msg do cliente não tenha sido
         //            salva corretamente, o bot deve continuar processando as respostas do menu.
+        const cfgAbs = await getAbsencePolicyForCompany(company_id)
+        if (reopenedFromAbsence && cfgAbs.reabrirSemChatbot) {
+          skipChatbot = true
+          await logBotAction(company_id, conversa_id, 'chatbot_bypass_retorno_ausencia', {
+            reason: 'reopened_from_absence',
+          })
+        }
         if (!skipChatbot && !conversaReabertaAposFinalizacao) {
           // Prioridade: verificar se o chatbot já estava ativo para esta conversa via bot_logs.
           // Isso evita o bug onde a mensagem inicial do cliente falha ao salvar mas a resposta
@@ -2690,7 +2783,7 @@ exports.receberZapi = async (req, res) => {
       // NÃO emitir atualizar_conversa para mensagens enviadas por nós (fromMe)
       // — evita refetch que causa duplicação visual e flicker. status_mensagem já atualiza os ticks.
       // Só emitir para mensagens recebidas (inseridas pelo webhook)
-      if (mensagemFoiInseridaPeloWebhook) {
+      if (!fromMe) {
         const emittedScoped = await emitirParaUsuariosQuePodemVerConversa(
           io,
           company_id,
@@ -2726,7 +2819,6 @@ exports.receberZapi = async (req, res) => {
       }
       const depId = departamento_id ?? convRow?.departamento_id ?? null
       const temNotificacaoDiscretaEmAtendimento =
-        mensagemFoiInseridaPeloWebhook &&
         !fromMe &&
         !isGroup &&
         convRow?.status_atendimento === 'em_atendimento' &&

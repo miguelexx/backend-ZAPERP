@@ -35,7 +35,13 @@ const DEFAULT_CHATBOT_TEMPLATE = {
   invalidOptionMessage: 'Opção inválida. Por favor, responda apenas com o número do setor desejado.',
   confirmSelectionMessage: 'Perfeito! Seu atendimento foi direcionado para o setor {{departamento}}. Em instantes nossa equipe dará continuidade.',
   mensagemForaHorario: 'Olá! Nosso horário de atendimento é de segunda a sexta, das 09h às 18h. Sua mensagem foi recebida e retornaremos no próximo dia útil. Obrigado!',
-  mensagemFinalizacao: 'Atendimento finalizado com sucesso. Segue seu protocolo: {{protocolo}}.\nPor favor, informe uma nota entre 0 e 10 para avaliar o atendimento prestado.'
+  mensagemFinalizacao: 'Atendimento finalizado com sucesso. Segue seu protocolo: {{protocolo}}.\nPor favor, informe uma nota entre 0 e 10 para avaliar o atendimento prestado.',
+  finalizar_por_ausencia_ativo: false,
+  finalizar_por_ausencia_prazo: 24,
+  finalizar_por_ausencia_unidade: 'horas_corridas',
+  finalizar_por_ausencia_mensagem: '',
+  finalizar_por_ausencia_reabrir_automaticamente: true,
+  finalizar_por_ausencia_reabrir_sem_chatbot: true,
 }
 
 /**

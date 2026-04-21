@@ -2353,7 +2353,14 @@ exports.encerrarChat = async (req, res) => {
 
     const { data, error } = await supabase
       .from('conversas')
-      .update({ status_atendimento: 'fechada' })
+      .update({
+        status_atendimento: 'fechada',
+        finalizacao_motivo: null,
+        finalizada_automaticamente: false,
+        finalizada_automaticamente_em: null,
+        aguardando_cliente_desde: null,
+        ausencia_mensagem_enviada_em: null,
+      })
       .eq('company_id', company_id)
       .eq('id', conversa_id)
       .select()
@@ -2460,7 +2467,15 @@ exports.reabrirChat = async (req, res) => {
     // Conversa aberta = sem responsável, apenas setor (volta para a fila)
     const { data, error } = await supabase
       .from('conversas')
-      .update({ status_atendimento: 'aberta', atendente_id: null })
+      .update({
+        status_atendimento: 'aberta',
+        atendente_id: null,
+        finalizacao_motivo: null,
+        finalizada_automaticamente: false,
+        finalizada_automaticamente_em: null,
+        aguardando_cliente_desde: null,
+        ausencia_mensagem_enviada_em: null,
+      })
       .eq('company_id', company_id)
       .eq('id', conversa_id)
       .select()
