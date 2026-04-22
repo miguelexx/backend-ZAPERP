@@ -495,6 +495,8 @@ exports.emitirParaUsuariosQuePodemVerConversa = emitirParaUsuariosQuePodemVerCon
 // 3) listarConversas (com unread_count + pesquisa avançada)
 // Query: tag_id, data_inicio, data_fim, status_atendimento, atendente_id, palavra, minha_fila, aguardando_cliente
 // minha_fila=1: só conversas (não grupo) em aberta (fila visível) + em_atendimento onde o responsável é o usuário logado
+// aguardando_cliente=1: só conversas “aguardando” em que o atendente responsável é o usuário logado (organização por atendente).
+//   Admin/supervisor pode combinar com atendente_id=<id> para ver a fila de outro colaborador (mesmo critério do restante da API).
 // atendente_id=<usuarios.id>: admin/supervisor — todas as conversas individuais com esse responsável (qualquer status_atendimento); sem minha_fila; ver docs/API-CHATS-QUERY.md
 // =====================================================
 exports.listarConversas = async (req, res) => {
@@ -775,13 +777,19 @@ exports.listarConversas = async (req, res) => {
         q = q.lte('criado_em', end.toISOString())
       }
 
-      // Filtro "Aguardando cliente": (1) coluna aguardando_cliente_desde em em_atendimento ou (2) status manual aguardando_cliente
+      // Filtro "Aguardando cliente": (1) aguardando_cliente_desde em em_atendimento ou (2) status manual aguardando_cliente.
+      // Escopo sempre por atendente responsável (evita listar a empresa inteira). Padrão: usuário logado; com atendente_id na query (admin/supervisor): outro id.
       if (aguardandoClienteAtivo) {
         q = q.or(
           `and(status_atendimento.eq.em_atendimento,aguardando_cliente_desde.not.is.null),status_atendimento.eq.aguardando_cliente`
         )
         q = q.not('atendente_id', 'is', null)
         q = q.or('tipo.is.null,tipo.neq.grupo')
+        const atendenteEscopoAguardando =
+          !isAtendente && filtroAtendenteInformado != null
+            ? filtroAtendenteInformado
+            : Number(user_id)
+        q = q.eq('atendente_id', atendenteEscopoAguardando)
       }
 
       // PERFORMANCE: a lista de conversas só precisa da ÚLTIMA mensagem (preview).
@@ -1023,6 +1031,23 @@ exports.listarConversas = async (req, res) => {
           return c.exibir_badge_aberta && livreOuMeu
         }
         return false
+      })
+    }
+
+    // Filtro "Aguardando cliente": garantia final no backend para organização por responsável.
+    // Evita qualquer vazamento de outros atendentes por combinação de ORs na query.
+    if (aguardandoClienteAtivo) {
+      const atendenteEscopoAguardando =
+        !isAtendente && filtroAtendenteInformado != null
+          ? Number(filtroAtendenteInformado)
+          : Number(user_id)
+      conversasFormatadas = conversasFormatadas.filter((c) => {
+        if (c.sem_conversa || c.is_group) return false
+        if (Number(c.atendente_id) !== atendenteEscopoAguardando) return false
+        const statusReal = String(c.status_atendimento_real || '')
+        const aguardandoAuto = statusReal === 'em_atendimento' && c.aguardando_cliente_desde != null
+        const aguardandoManual = statusReal === 'aguardando_cliente'
+        return aguardandoAuto || aguardandoManual
       })
     }
 
