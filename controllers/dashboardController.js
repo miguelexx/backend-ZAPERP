@@ -58,7 +58,7 @@ exports.overview = async (req, res) => {
 
     conversas.forEach(c => {
       if (c.status_atendimento === 'aberta') kpis.abertas++
-      if (c.status_atendimento === 'em_atendimento') kpis.em_atendimento++
+      if (c.status_atendimento === 'em_atendimento' || c.status_atendimento === 'aguardando_cliente') kpis.em_atendimento++
       if (c.status_atendimento === 'fechada') kpis.fechadas++
     })
 
@@ -333,7 +333,11 @@ exports.metrics = async (req, res) => {
       const criadoEm = c?.criado_em ? new Date(c.criado_em) : null
       if (criadoEm && criadoEm >= hoje) conversasHoje++
 
-      if (c.status_atendimento === 'aberta' || c.status_atendimento === 'em_atendimento') {
+      if (
+        c.status_atendimento === 'aberta' ||
+        c.status_atendimento === 'em_atendimento' ||
+        c.status_atendimento === 'aguardando_cliente'
+      ) {
         ticketsAbertos++
       }
       if (c.status_atendimento === 'fechada') {

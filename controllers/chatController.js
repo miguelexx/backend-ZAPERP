@@ -10,6 +10,10 @@ const { deduplicateConversationsByContact, sortConversationsByRecent, sortConver
 const { enrichConversationsWithContactData } = require('../helpers/conversaEnrichment')
 const { getDisplayName } = require('../helpers/contactEnrichment')
 const { tryMarkWaitingAfterHumanOutbound } = require('../services/absenceFinalizationService')
+const {
+  marcarAguardandoClienteManual,
+  retomarEmAtendimentoManual,
+} = require('../services/conversaStatusManualService')
 
 /** UltraMsg retorna id interno (ex: 35096), não o messageId do WhatsApp. Só usar como whatsapp_id se for o ID real. */
 function isRealWhatsAppId(waId) {
@@ -751,7 +755,7 @@ exports.listarConversas = async (req, res) => {
       if (minhaFilaAtiva) {
         q = q.or('tipo.is.null,tipo.neq.grupo')
         q = q.or(
-          `status_atendimento.eq.aberta,and(status_atendimento.eq.em_atendimento,atendente_id.eq.${user_id})`
+          `status_atendimento.eq.aberta,and(status_atendimento.eq.em_atendimento,atendente_id.eq.${user_id}),and(status_atendimento.eq.aguardando_cliente,atendente_id.eq.${user_id})`
         )
       } else if (statusNorm) {
         // Grupos são sempre visíveis independentemente do filtro de status —
@@ -771,10 +775,11 @@ exports.listarConversas = async (req, res) => {
         q = q.lte('criado_em', end.toISOString())
       }
 
-      // Filtro "Aguardando cliente": última saída humana já registrou aguardando_cliente_desde (painel ou webhook)
+      // Filtro "Aguardando cliente": (1) coluna aguardando_cliente_desde em em_atendimento ou (2) status manual aguardando_cliente
       if (aguardandoClienteAtivo) {
-        q = q.not('aguardando_cliente_desde', 'is', null)
-        q = q.eq('status_atendimento', 'em_atendimento')
+        q = q.or(
+          `and(status_atendimento.eq.em_atendimento,aguardando_cliente_desde.not.is.null),status_atendimento.eq.aguardando_cliente`
+        )
         q = q.not('atendente_id', 'is', null)
         q = q.or('tipo.is.null,tipo.neq.grupo')
       }
@@ -944,7 +949,7 @@ exports.listarConversas = async (req, res) => {
         !assumidaPorOutroLista
       const conversaEmAtendimentoDoUsuario =
         !isGroup &&
-        c.status_atendimento === 'em_atendimento' &&
+        (c.status_atendimento === 'em_atendimento' || c.status_atendimento === 'aguardando_cliente') &&
         Number(c.atendente_id) === Number(user_id)
       const temNotificacaoDiscretaEmAtendimento =
         !isGroup &&
@@ -1010,7 +1015,7 @@ exports.listarConversas = async (req, res) => {
       conversasFormatadas = conversasFormatadas.filter((c) => {
         if (c.sem_conversa || c.is_group) return false
         if (c.status_atendimento === 'ociosa') return false
-        if (c.status_atendimento === 'em_atendimento') {
+        if (c.status_atendimento === 'em_atendimento' || c.status_atendimento === 'aguardando_cliente') {
           return Number(c.atendente_id) === Number(user_id)
         }
         if (c.status_atendimento === 'aberta') {
@@ -2537,6 +2542,63 @@ exports.reabrirChat = async (req, res) => {
 }
 
 // =====================================================
+// Status manual: aguardando cliente / retomar em atendimento
+// =====================================================
+exports.marcarAguardandoClienteManualChat = async (req, res) => {
+  try {
+    const { company_id, id: user_id, perfil, departamento_ids = [] } = req.user
+    const { id: conversa_id } = req.params
+    const perm = await assertPermissaoConversa({ company_id, conversa_id, user_id, role: perfil, user_dep_ids: departamento_ids })
+    if (!perm.ok) return res.status(perm.status).json({ error: perm.error })
+    if (perm.conv && isGroupConversation(perm.conv)) {
+      return res.status(400).json({ error: 'Indisponível para conversas de grupo' })
+    }
+    const result = await marcarAguardandoClienteManual({ company_id, conversa_id, usuario_id: user_id })
+    if (!result.ok) return res.status(result.status).json({ error: result.error })
+    const io = req.app.get('io')
+    if (io && result.conversa) {
+      emitirEventoEmpresaConversa(io, company_id, conversa_id, io.EVENTS?.CONVERSA_ATUALIZADA || 'conversa_atualizada', {
+        ...result.conversa,
+        lista_realtime: { minha_fila: true, motivo: 'manual_aguardando_cliente' },
+      })
+      emitirConversaAtualizada(io, company_id, conversa_id, { ...result.conversa }, { skipAtualizarConversa: true })
+      emitirSincronizacaoListaConversas(io, company_id, conversa_id)
+    }
+    return res.json({ ok: true, conversa: result.conversa, idempotent: !!result.idempotent })
+  } catch (err) {
+    console.error(err)
+    return res.status(500).json({ error: 'Erro ao marcar aguardando cliente' })
+  }
+}
+
+exports.retomarEmAtendimentoManualChat = async (req, res) => {
+  try {
+    const { company_id, id: user_id, perfil, departamento_ids = [] } = req.user
+    const { id: conversa_id } = req.params
+    const perm = await assertPermissaoConversa({ company_id, conversa_id, user_id, role: perfil, user_dep_ids: departamento_ids })
+    if (!perm.ok) return res.status(perm.status).json({ error: perm.error })
+    if (perm.conv && isGroupConversation(perm.conv)) {
+      return res.status(400).json({ error: 'Indisponível para conversas de grupo' })
+    }
+    const result = await retomarEmAtendimentoManual({ company_id, conversa_id, usuario_id: user_id })
+    if (!result.ok) return res.status(result.status).json({ error: result.error })
+    const io = req.app.get('io')
+    if (io && result.conversa) {
+      emitirEventoEmpresaConversa(io, company_id, conversa_id, io.EVENTS?.CONVERSA_ATUALIZADA || 'conversa_atualizada', {
+        ...result.conversa,
+        lista_realtime: { minha_fila: true, motivo: 'manual_retomar_em_atendimento' },
+      })
+      emitirConversaAtualizada(io, company_id, conversa_id, { ...result.conversa }, { skipAtualizarConversa: true })
+      emitirSincronizacaoListaConversas(io, company_id, conversa_id)
+    }
+    return res.json({ ok: true, conversa: result.conversa, idempotent: !!result.idempotent })
+  } catch (err) {
+    console.error(err)
+    return res.status(500).json({ error: 'Erro ao retomar em atendimento' })
+  }
+}
+
+// =====================================================
 // transferir (padronizado)
 // =====================================================
 exports.transferirChat = async (req, res) => {
@@ -3897,7 +3959,7 @@ exports.puxarChatFila = async (req, res) => {
         .select('*', { count: 'exact', head: true })
         .eq('company_id', company_id)
         .eq('atendente_id', user_id)
-        .eq('status_atendimento', 'em_atendimento')
+        .in('status_atendimento', ['em_atendimento', 'aguardando_cliente'])
       if (count >= limite) {
         return res.status(409).json({ error: `Limite de ${limite} conversas simultâneas atingido. Encerre uma antes de puxar outra.` })
       }

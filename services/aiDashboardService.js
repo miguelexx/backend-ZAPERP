@@ -518,7 +518,11 @@ async function qMetricsOverview(company_id) {
   for (const c of convRows || []) {
     totalConversas++
     if (new Date(c.criado_em) >= hoje) conversasHoje++
-    if (c.status_atendimento === 'aberta' || c.status_atendimento === 'em_atendimento') ticketsAbertos++
+    if (
+      c.status_atendimento === 'aberta' ||
+      c.status_atendimento === 'em_atendimento' ||
+      c.status_atendimento === 'aguardando_cliente'
+    ) ticketsAbertos++
     if (c.status_atendimento === 'fechada') conversasFechadas++
   }
   const taxaConversao = totalConversas > 0

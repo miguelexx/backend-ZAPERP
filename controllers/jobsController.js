@@ -79,9 +79,10 @@ exports.timeoutInatividadeChatbot = async (req, res) => {
       // Conversas não fechadas, excluindo grupos
       const { data: conversas } = await supabase
         .from('conversas')
-        .select('id, telefone, tipo')
+        .select('id, telefone, tipo, status_atendimento')
         .eq('company_id', company_id)
         .neq('status_atendimento', 'fechada')
+        .neq('status_atendimento', 'aguardando_cliente')
 
       if (!conversas?.length) continue
 

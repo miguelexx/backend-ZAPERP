@@ -52,7 +52,7 @@ async function executarAssumirConversa({
       .select('*', { count: 'exact', head: true })
       .eq('company_id', company_id)
       .eq('atendente_id', user_id)
-      .eq('status_atendimento', 'em_atendimento')
+      .in('status_atendimento', ['em_atendimento', 'aguardando_cliente'])
     if (count >= limite) {
       return {
         ok: false,

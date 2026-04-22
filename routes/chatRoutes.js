@@ -26,6 +26,8 @@ router.post('/puxar', auth, chatController.puxarChatFila)
 router.post('/:id/assumir', auth, chatController.assumirChat)
 router.post('/:id/encerrar', auth, chatController.encerrarChat)
 router.post('/:id/reabrir', auth, chatController.reabrirChat)
+router.post('/:id/aguardando-cliente', auth, chatController.marcarAguardandoClienteManualChat)
+router.post('/:id/retomar-atendimento', auth, chatController.retomarEmAtendimentoManualChat)
 router.post('/:id/transferir', auth, chatController.transferirChat)
 router.post("/:id/tags", auth, chatController.adicionarTagConversa);
 router.delete("/:id/tags/:tag_id", auth, chatController.removerTagConversa)

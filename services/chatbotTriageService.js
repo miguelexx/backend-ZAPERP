@@ -867,7 +867,7 @@ async function transferToDepartment(supabaseClient, company_id, conversa_id, dep
           .from('conversas')
           .select('atendente_id')
           .eq('company_id', company_id)
-          .eq('status_atendimento', 'em_atendimento')
+          .in('status_atendimento', ['em_atendimento', 'aguardando_cliente'])
           .in('atendente_id', userIds)
 
         const contagem = {}

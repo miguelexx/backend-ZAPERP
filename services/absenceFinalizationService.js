@@ -229,6 +229,9 @@ async function finalizeConversationsByAbsence() {
     for (const conv of conversas || []) {
       analisadas++
       if (!conv?.id) continue
+      /* Regra explícita: só conversas em em_atendimento entram na query acima.
+         status_atendimento = aguardando_cliente (manual) NUNCA é elegível ao encerramento por ausência. */
+      if (conv.status_atendimento !== 'em_atendimento') continue
       const telefone = String(conv.telefone || '')
       if (!telefone || telefone.includes('@g.us') || telefone.toLowerCase().startsWith('lid:')) continue
 

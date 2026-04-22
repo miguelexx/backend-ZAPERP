@@ -1747,6 +1747,30 @@ exports.receberZapi = async (req, res) => {
         .maybeSingle()
       const st = convStatus?.status_atendimento
       const motivoFinalizacao = String(convStatus?.finalizacao_motivo || '').trim().toLowerCase()
+
+      if (st === 'aguardando_cliente') {
+        const { data: retomadaManual } = await supabase
+          .from('conversas')
+          .update({
+            status_atendimento: 'em_atendimento',
+            aguardando_cliente_desde: null,
+          })
+          .eq('id', conversa_id)
+          .eq('company_id', company_id)
+          .eq('status_atendimento', 'aguardando_cliente')
+          .select()
+          .maybeSingle()
+        if (retomadaManual?.id) {
+          await supabase.from('historico_atendimentos').insert({
+            conversa_id,
+            usuario_id: null,
+            acao: 'retomada_em_atendimento_resposta_cliente',
+            observacao:
+              'Cliente enviou mensagem — conversa saiu de aguardando cliente (manual) e voltou para em atendimento',
+          })
+        }
+      }
+
       const conversaEncerrada = st === 'fechada' || st === 'finalizada'
       if (conversaEncerrada) {
         if (motivoFinalizacao === 'ausencia_cliente') {
@@ -2809,7 +2833,8 @@ exports.receberZapi = async (req, res) => {
       const temNotificacaoDiscretaEmAtendimento =
         !fromMe &&
         !isGroup &&
-        convRow?.status_atendimento === 'em_atendimento' &&
+        (convRow?.status_atendimento === 'em_atendimento' ||
+          convRow?.status_atendimento === 'aguardando_cliente') &&
         convRow?.atendente_id != null
       const convPayload = {
         id: convIdForEmit,
