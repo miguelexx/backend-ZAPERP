@@ -129,7 +129,15 @@ const corsOptions = {
     return callback(new Error('CORS não permitido para esta origem: ' + origin))
   },
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'x-company-id'],
+  // Inclui headers usados pelo frontend para controle de cache (preflight CORS).
+  allowedHeaders: [
+    'Content-Type',
+    'Authorization',
+    'x-company-id',
+    'Cache-Control',
+    'Pragma',
+    'Expires',
+  ],
   credentials: true,
 }
 
