@@ -762,7 +762,11 @@ exports.listarConversas = async (req, res) => {
       } else if (statusNorm) {
         // Grupos são sempre visíveis independentemente do filtro de status —
         // não têm estado de atendimento (não precisam ser assumidos nem encerrados).
-        q = q.or(`tipo.eq.grupo,status_atendimento.eq.${statusNorm}`)
+        if (statusNorm === 'em_atendimento' && !isAtendente) {
+          q = q.or('tipo.eq.grupo,status_atendimento.eq.em_atendimento,status_atendimento.eq.aguardando_cliente')
+        } else {
+          q = q.or(`tipo.eq.grupo,status_atendimento.eq.${statusNorm}`)
+        }
       }
       // Atendente: vê TODAS as conversas (pode assumir, transferir, responder qualquer uma)
       // Admin/supervisor: filtro opcional por atendente_id — sem filtro implícito de status; exclui grupos (conversas "assumidas" são individuais)
@@ -778,18 +782,18 @@ exports.listarConversas = async (req, res) => {
       }
 
       // Filtro "Aguardando cliente": (1) aguardando_cliente_desde em em_atendimento ou (2) status manual aguardando_cliente.
-      // Escopo sempre por atendente responsável (evita listar a empresa inteira). Padrão: usuário logado; com atendente_id na query (admin/supervisor): outro id.
+      // Atendente comum: só o próprio responsável. Admin/supervisor: visão agregada; com atendente_id na query, restringe ao informado.
       if (aguardandoClienteAtivo) {
         q = q.or(
           `and(status_atendimento.eq.em_atendimento,aguardando_cliente_desde.not.is.null),status_atendimento.eq.aguardando_cliente`
         )
         q = q.not('atendente_id', 'is', null)
         q = q.or('tipo.is.null,tipo.neq.grupo')
-        const atendenteEscopoAguardando =
-          !isAtendente && filtroAtendenteInformado != null
-            ? filtroAtendenteInformado
-            : Number(user_id)
-        q = q.eq('atendente_id', atendenteEscopoAguardando)
+        if (isAtendente) {
+          q = q.eq('atendente_id', Number(user_id))
+        } else if (filtroAtendenteInformado != null) {
+          q = q.eq('atendente_id', Number(filtroAtendenteInformado))
+        }
       }
 
       // PERFORMANCE: a lista de conversas só precisa da ÚLTIMA mensagem (preview).
@@ -1034,16 +1038,16 @@ exports.listarConversas = async (req, res) => {
       })
     }
 
-    // Filtro "Aguardando cliente": garantia final no backend para organização por responsável.
-    // Evita qualquer vazamento de outros atendentes por combinação de ORs na query.
+    // Filtro "Aguardando cliente": garantia final no backend para retornar apenas conversas realmente aguardando.
+    // Atendente comum: escopo próprio. Admin/supervisor: agregado; com atendente_id, escopo do atendente informado.
     if (aguardandoClienteAtivo) {
-      const atendenteEscopoAguardando =
-        !isAtendente && filtroAtendenteInformado != null
-          ? Number(filtroAtendenteInformado)
-          : Number(user_id)
+      const restringirPorAtendente = isAtendente || (!isAtendente && filtroAtendenteInformado != null)
+      const atendenteEscopoAguardando = isAtendente
+        ? Number(user_id)
+        : Number(filtroAtendenteInformado)
       conversasFormatadas = conversasFormatadas.filter((c) => {
         if (c.sem_conversa || c.is_group) return false
-        if (Number(c.atendente_id) !== atendenteEscopoAguardando) return false
+        if (restringirPorAtendente && Number(c.atendente_id) !== atendenteEscopoAguardando) return false
         const statusReal = String(c.status_atendimento_real || '')
         const aguardandoAuto = statusReal === 'em_atendimento' && c.aguardando_cliente_desde != null
         const aguardandoManual = statusReal === 'aguardando_cliente'
@@ -2582,11 +2586,16 @@ exports.marcarAguardandoClienteManualChat = async (req, res) => {
     if (!result.ok) return res.status(result.status).json({ error: result.error })
     const io = req.app.get('io')
     if (io && result.conversa) {
-      emitirEventoEmpresaConversa(io, company_id, conversa_id, io.EVENTS?.CONVERSA_ATUALIZADA || 'conversa_atualizada', {
+      const payloadAtualizacao = {
         ...result.conversa,
+        status_atendimento_real: result.conversa.status_atendimento ?? null,
+        aguardando_cliente_desde: result.conversa.aguardando_cliente_desde ?? null,
         lista_realtime: { minha_fila: true, motivo: 'manual_aguardando_cliente' },
+      }
+      emitirEventoEmpresaConversa(io, company_id, conversa_id, io.EVENTS?.CONVERSA_ATUALIZADA || 'conversa_atualizada', {
+        ...payloadAtualizacao,
       })
-      emitirConversaAtualizada(io, company_id, conversa_id, { ...result.conversa }, { skipAtualizarConversa: true })
+      emitirConversaAtualizada(io, company_id, conversa_id, payloadAtualizacao, { skipAtualizarConversa: true })
       emitirSincronizacaoListaConversas(io, company_id, conversa_id)
     }
     return res.json({ ok: true, conversa: result.conversa, idempotent: !!result.idempotent })
@@ -2609,11 +2618,16 @@ exports.retomarEmAtendimentoManualChat = async (req, res) => {
     if (!result.ok) return res.status(result.status).json({ error: result.error })
     const io = req.app.get('io')
     if (io && result.conversa) {
-      emitirEventoEmpresaConversa(io, company_id, conversa_id, io.EVENTS?.CONVERSA_ATUALIZADA || 'conversa_atualizada', {
+      const payloadAtualizacao = {
         ...result.conversa,
+        status_atendimento_real: result.conversa.status_atendimento ?? null,
+        aguardando_cliente_desde: result.conversa.aguardando_cliente_desde ?? null,
         lista_realtime: { minha_fila: true, motivo: 'manual_retomar_em_atendimento' },
+      }
+      emitirEventoEmpresaConversa(io, company_id, conversa_id, io.EVENTS?.CONVERSA_ATUALIZADA || 'conversa_atualizada', {
+        ...payloadAtualizacao,
       })
-      emitirConversaAtualizada(io, company_id, conversa_id, { ...result.conversa }, { skipAtualizarConversa: true })
+      emitirConversaAtualizada(io, company_id, conversa_id, payloadAtualizacao, { skipAtualizarConversa: true })
       emitirSincronizacaoListaConversas(io, company_id, conversa_id)
     }
     return res.json({ ok: true, conversa: result.conversa, idempotent: !!result.idempotent })

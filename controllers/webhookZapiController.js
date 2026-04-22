@@ -2808,7 +2808,7 @@ exports.receberZapi = async (req, res) => {
       // conversa_atualizada: priorizar nome do sync (name) sobre cache; fallback nome_contato_cache
       const { data: convRow } = await supabase
         .from('conversas')
-        .select('id, ultima_atividade, nome_contato_cache, foto_perfil_contato_cache, telefone, cliente_id, departamento_id, status_atendimento, atendente_id')
+        .select('id, ultima_atividade, nome_contato_cache, foto_perfil_contato_cache, telefone, cliente_id, departamento_id, status_atendimento, atendente_id, aguardando_cliente_desde')
         .eq('id', convIdForEmit)
         .eq('company_id', company_id)
         .maybeSingle()
@@ -2843,7 +2843,13 @@ exports.receberZapi = async (req, res) => {
         atendente_id: convRow?.atendente_id ?? null,
         // Grupos nunca mostram badge "aberta" — não precisam ser assumidos
         exibir_badge_aberta: !isGroup,
-        ...(isGroup ? { status_atendimento: null } : {}),
+        ...(isGroup
+          ? { status_atendimento: null, status_atendimento_real: null }
+          : {
+              status_atendimento: convRow?.status_atendimento ?? null,
+              status_atendimento_real: convRow?.status_atendimento ?? null,
+              aguardando_cliente_desde: convRow?.aguardando_cliente_desde ?? null,
+            }),
         ...(depId != null ? { departamento_id: depId } : {}),
         ...(contatoNome ? { nome_contato_cache: contatoNome, contato_nome: contatoNome } : {}),
         ...(fotoPerfil ? { foto_perfil_contato_cache: fotoPerfil, foto_perfil: fotoPerfil } : {}),
