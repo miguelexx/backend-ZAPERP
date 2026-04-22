@@ -788,7 +788,6 @@ exports.listarConversas = async (req, res) => {
           `and(status_atendimento.eq.em_atendimento,aguardando_cliente_desde.not.is.null),status_atendimento.eq.aguardando_cliente`
         )
         q = q.not('atendente_id', 'is', null)
-        q = q.or('tipo.is.null,tipo.neq.grupo')
         if (isAtendente) {
           q = q.eq('atendente_id', Number(user_id))
         } else if (filtroAtendenteInformado != null) {
@@ -1019,6 +1018,19 @@ exports.listarConversas = async (req, res) => {
         if (c.sem_conversa) return false
         if (c.is_group) return c.ultima_mensagem != null // grupo precisa ter ao menos 1 mensagem
         return c.exibir_badge_aberta // individual: tem mensagem ou atendente assumiu
+      })
+    }
+
+    // Filtro "Em atendimento":
+    // - Atendente comum: apenas status real "em_atendimento" (escopo padrão da sessão)
+    // - Admin/supervisor: inclui "em_atendimento" + "aguardando_cliente" (manual), com opcional atendente_id.
+    if (!aguardandoClienteAtivo && statusNorm === 'em_atendimento') {
+      conversasFormatadas = conversasFormatadas.filter((c) => {
+        if (c.sem_conversa || c.is_group) return false
+        const st = String(c.status_atendimento_real || '')
+        if (isAtendente) return st === 'em_atendimento'
+        if (filtroAtendenteInformado != null && Number(c.atendente_id) !== Number(filtroAtendenteInformado)) return false
+        return st === 'em_atendimento' || st === 'aguardando_cliente'
       })
     }
 
