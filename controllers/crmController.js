@@ -1,6 +1,7 @@
 const repo = require('../repositories/crmRepository')
 const crmService = require('../services/crmService')
 const crmGoogle = require('../services/crmGoogleService')
+const { empresaCrmHabilitada } = require('../helpers/crmEmpresaFlag')
 const { registrar } = require('../helpers/auditoriaLog')
 const {
   safeParse,
@@ -783,6 +784,15 @@ exports.googleCallback = async (req, res) => {
     if (!payload) return res.redirect(302, failRedirect)
     const company_id = Number(payload.cid)
     const usuario_id = Number(payload.uid)
+    let crmOk = true
+    try {
+      crmOk = await empresaCrmHabilitada(company_id)
+    } catch (_) {
+      crmOk = true
+    }
+    if (!crmOk) {
+      return res.redirect(302, `${failRedirect}&reason=${encodeURIComponent('crm_disabled')}`)
+    }
     const tokens = await crmGoogle.exchangeCode(code)
     const access = tokens.access_token
     let email = null

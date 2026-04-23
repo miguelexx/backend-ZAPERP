@@ -20,6 +20,11 @@ ALTER TABLE public.empresas
 
 COMMENT ON COLUMN public.empresas.zapi_auto_sync_contatos IS 'Se true, ao conectar no Z-API dispara sync de contatos do celular.';
 
+ALTER TABLE public.empresas
+  ADD COLUMN IF NOT EXISTS crm_habilitado boolean NOT NULL DEFAULT true;
+
+COMMENT ON COLUMN public.empresas.crm_habilitado IS 'Se false, CRM desativado para o tenant (UI + API /crm).';
+
 -- Preencher conversas existentes
 UPDATE public.conversas c
 SET ultima_atividade = COALESCE(

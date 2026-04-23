@@ -8,6 +8,13 @@ Base URL: **`/api/crm`** (ou **`/crm`** — mesmo conjunto de rotas).
 
 1. `supabase/migrations/20260416000000_crm_module.sql` — núcleo CRM  
 2. `supabase/migrations/20260416200000_crm_operational_enhancements.sql` — `padrao` em pipeline, `inicial` em stage, campos de atividade (fim, participantes, timezone, link Google)
+3. `supabase/migrations/20260422120000_empresas_crm_habilitado.sql` — flag `empresas.crm_habilitado` (admin desliga o módulo na empresa)
+
+## Ativação por empresa
+
+- Coluna **`empresas.crm_habilitado`** (`boolean`, default `true`). Se `false`, todas as rotas autenticadas em `/crm` respondem **403** com `{ "error": "...", "code": "CRM_DISABLED" }`.
+- Configurações: **PUT `/api/config/empresa`** com `{ "crm_habilitado": false }` (supervisor/admin).
+- O frontend pode ler **`crm_habilitado`** em **GET `/api/usuarios/me`** ou no objeto **`usuario`** do login, além de **GET `/api/config/empresa`** (mesmo campo na linha da empresa).
 
 ## Pipelines
 

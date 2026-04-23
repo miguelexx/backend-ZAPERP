@@ -1,11 +1,16 @@
 const supabase = require('../config/supabase')
 const jwt = require('jsonwebtoken')
 const bcrypt = require('bcryptjs')
+const { empresaCrmHabilitada } = require('../helpers/crmEmpresaFlag')
 
 /** GET /usuarios/me — perfil do usuário logado (inclui preferências) */
 exports.getMe = async (req, res) => {
   try {
     const { id: user_id, company_id } = req.user
+    let crm_habilitado = true
+    try {
+      crm_habilitado = await empresaCrmHabilitada(company_id)
+    } catch (_) {}
     let { data, error } = await supabase
       .from('usuarios')
       .select('id, nome, email, perfil, departamento_id, mostrar_nome_ao_cliente')
@@ -18,7 +23,7 @@ exports.getMe = async (req, res) => {
       error = res2.error
       if (error) return res.status(500).json({ error: error.message })
       if (!data) return res.status(404).json({ error: 'Usuário não encontrado' })
-      return res.json({ ...data, mostrar_nome_ao_cliente: true })
+      return res.json({ ...data, mostrar_nome_ao_cliente: true, crm_habilitado })
     }
     if (error) return res.status(500).json({ error: error.message })
     if (!data) return res.status(404).json({ error: 'Usuário não encontrado' })
@@ -27,7 +32,8 @@ exports.getMe = async (req, res) => {
     return res.json({
       ...data,
       departamento_ids,
-      mostrar_nome_ao_cliente: data.mostrar_nome_ao_cliente !== false
+      mostrar_nome_ao_cliente: data.mostrar_nome_ao_cliente !== false,
+      crm_habilitado,
     })
   } catch (err) {
     console.error(err)
@@ -399,6 +405,11 @@ exports.login = async (req, res) => {
       { expiresIn: '1d' }
     )
 
+    let crm_habilitado = true
+    try {
+      crm_habilitado = await empresaCrmHabilitada(Number(usuario.company_id))
+    } catch (_) {}
+
     // Retorna token e dados do usuário (nome para exibição no cabeçalho)
     return res.json({
       token,
@@ -409,7 +420,8 @@ exports.login = async (req, res) => {
         company_id: usuario.company_id,
         perfil: usuario.perfil || 'atendente',
         departamento_id,
-        departamento_ids
+        departamento_ids,
+        crm_habilitado,
       }
     })
   } catch (err) {

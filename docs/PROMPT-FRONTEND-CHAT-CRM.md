@@ -10,6 +10,8 @@
 
 Adicionar no **cabeçalho da conversa** (ao lado de Tags, Histórico, Assumir, Transferir) um botão **« Enviar ao CRM »** com visual **premium**: ícone discreto + label clara, estados de loading, feedback de sucesso/erro, acessível (aria-label), coerente com o tema **dark + teal** do ZapERP.
 
+**CRM opcional:** só mostrar o botão se **`crm_habilitado !== false`** (vem em **GET `/api/usuarios/me`**, no **login** em `usuario.crm_habilitado`, ou em **GET `/api/config/empresa`**). Em **Configurações → empresa**, o administrador envia **PUT `/api/config/empresa`** com `{ "crm_habilitado": true | false }`. Se desligado, **não renderizar** o botão (e chamadas a `/api/crm/...` retornam **403** `CRM_DISABLED`).
+
 ### API (backend real — não inventar rotas)
 
 - **POST** ` /api/crm/leads/from-conversa/:conversaId `

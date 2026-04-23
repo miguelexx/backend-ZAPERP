@@ -35,7 +35,8 @@ exports.putEmpresa = async (req, res) => {
       plano_id,
       limite_chats_por_atendente,
       timeout_inatividade_min,
-      zapi_auto_sync_contatos
+      zapi_auto_sync_contatos,
+      crm_habilitado
     } = req.body
     const update = {}
     if (nome !== undefined) update.nome = nome
@@ -50,12 +51,16 @@ exports.putEmpresa = async (req, res) => {
     if (limite_chats_por_atendente !== undefined) update.limite_chats_por_atendente = Math.max(0, Number(limite_chats_por_atendente) || 0)
     if (timeout_inatividade_min !== undefined) update.timeout_inatividade_min = Math.max(0, Number(timeout_inatividade_min) || 0)
     if (zapi_auto_sync_contatos !== undefined) update.zapi_auto_sync_contatos = !!zapi_auto_sync_contatos
+    if (crm_habilitado !== undefined) update.crm_habilitado = !!crm_habilitado
 
     const { data, error } = await supabase.from('empresas').update(update).eq('id', company_id).select().single()
     if (error) {
       const msg = String(error.message || '')
       if (msg.includes('zapi_auto_sync_contatos') || msg.includes('does not exist')) {
         return res.status(400).json({ error: 'Banco desatualizado: rode o supabase/RUN_IN_SUPABASE.sql (coluna zapi_auto_sync_contatos).' })
+      }
+      if (msg.includes('crm_habilitado')) {
+        return res.status(400).json({ error: 'Banco desatualizado: aplique a migration empresas_crm_habilitado (coluna crm_habilitado).' })
       }
       return res.status(500).json({ error: error.message })
     }
