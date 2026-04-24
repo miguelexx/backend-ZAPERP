@@ -3,7 +3,8 @@ const supabase = require('../config/supabase')
 function getPublicKey(req, res) {
   const pub = String(process.env.VAPID_PUBLIC_KEY || '').trim()
   if (!pub) {
-    return res.status(503).json({ error: 'Push não configurado no servidor', enabled: false })
+    // Push não configurado — retorna 200 com enabled:false para não poluir o console do browser
+    return res.status(200).json({ publicKey: null, enabled: false })
   }
   return res.json({ publicKey: pub, enabled: true })
 }

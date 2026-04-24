@@ -10,28 +10,50 @@ function bodyFlagTrue(v) {
 
 /**
  * GET /clientes
+ * Query params: palavra (busca), limit (máx 5000, default 500), page (default 1)
+ * Headers de resposta: X-Total-Count (total real no banco, sem limite de paginação)
  */
 exports.listarClientes = async (req, res) => {
   try {
     const { company_id } = req.user
     const cid = Number(company_id)
-    let query = supabase
+
+    const { palavra, limit, page } = req.query || {}
+    const limitNum = Math.min(Math.max(Number(limit) || 500, 1), 5000)
+    const pageNum = Math.max(Number(page) || 1, 1)
+    const offset = (pageNum - 1) * limitNum
+
+    const termoBusca = palavra && String(palavra).trim() ? String(palavra).trim() : null
+
+    // Query de contagem real (sem limite de linhas) — roda em paralelo com a listagem
+    let countQuery = supabase
+      .from('clientes')
+      .select('*', { count: 'exact', head: true })
+      .eq('company_id', cid)
+
+    if (termoBusca) {
+      const term = `%${termoBusca}%`
+      countQuery = countQuery.or(`nome.ilike.${term},telefone.ilike.${term},observacoes.ilike.${term}`)
+    }
+
+    let listQuery = supabase
       .from('clientes')
       .select('id, telefone, wa_id, nome, pushname, observacoes, foto_perfil, email, empresa, ultimo_contato, criado_em')
       .eq('company_id', cid)
-    query = query.order('id', { ascending: false })
+      .order('id', { ascending: false })
+      .range(offset, offset + limitNum - 1)
 
-    const { palavra, limit } = req.query || {}
-    if (palavra && String(palavra).trim()) {
-      const term = `%${String(palavra).trim()}%`
-      query = query.or(`nome.ilike.${term},telefone.ilike.${term},observacoes.ilike.${term}`)
+    if (termoBusca) {
+      const term = `%${termoBusca}%`
+      listQuery = listQuery.or(`nome.ilike.${term},telefone.ilike.${term},observacoes.ilike.${term}`)
     }
-    const limitNum = Math.min(Math.max(Number(limit) || 500, 1), 2000)
-    query = query.limit(limitNum)
 
-    const { data, error } = await query
+    const [{ count, error: countErr }, { data, error }] = await Promise.all([countQuery, listQuery])
 
-    if (error) throw error;
+    if (countErr) console.warn('[listarClientes] count:', countErr?.message)
+    if (error) throw error
+
+    const totalReal = typeof count === 'number' ? count : (data?.length ?? 0)
 
     const clientes = (data || []).map(c => ({
       id: c.id,
@@ -45,12 +67,15 @@ exports.listarClientes = async (req, res) => {
       empresa: c.empresa || null,
       ultimo_contato: c.ultimo_contato || null,
       criado_em: c.criado_em
-    }));
+    }))
 
-    return res.status(200).json(clientes);
+    // X-Total-Count permite o frontend exibir o total real sem depender do tamanho da página
+    res.setHeader('X-Total-Count', String(totalReal))
+    res.setHeader('Access-Control-Expose-Headers', 'X-Total-Count')
+    return res.status(200).json(clientes)
   } catch (err) {
-    console.error(err);
-    return res.status(500).json({ erro: 'Erro ao listar clientes' });
+    console.error(err)
+    return res.status(500).json({ erro: 'Erro ao listar clientes' })
   }
 };
 
