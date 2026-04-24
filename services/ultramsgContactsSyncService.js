@@ -19,6 +19,8 @@ const { processContactsPage, parseAgendaContact } = require('./contactSyncServic
 
 // Chunks alinhados ao max da API (~1000); paginação correta via hasMore (ver ultramsg getContacts)
 const PAGE_SIZE = 1000
+/** Evita laço infinito se a API ignorar offset e repetir a mesma página. */
+const MAX_SYNC_PAGES = 200
 const ERROR_MESSAGE_MAX_LENGTH = 80
 
 /**
@@ -49,6 +51,13 @@ async function syncViaContactsApi(company_id) {
   const seen = new Set()
 
   while (hasMore) {
+    if (page > MAX_SYNC_PAGES) {
+      stats.errors.push(
+        `Limite de ${MAX_SYNC_PAGES} páginas de agenda atingido (proteção). Sincronização progressiva pode continuar o restante.`
+      )
+      break
+    }
+
     const res = await provider.getContacts(page, PAGE_SIZE, opts)
     const contacts = res?.data != null ? res.data : (Array.isArray(res) ? res : [])
     const pageHasMore = res?.hasMore === true
@@ -62,6 +71,7 @@ async function syncViaContactsApi(company_id) {
     }
 
     stats.totalFetched += contacts.length
+    let novosNestaPagina = 0
     for (const c of contacts) {
       const fields = extractContactFields(c)
       if (!fields || !fields.phone) {
@@ -77,6 +87,7 @@ async function syncViaContactsApi(company_id) {
         continue
       }
       seen.add(key)
+      novosNestaPagina++
 
       try {
         const variants = possiblePhonesBR(fields.phone).length > 0 ? possiblePhonesBR(fields.phone) : [fields.phone]
@@ -125,6 +136,15 @@ async function syncViaContactsApi(company_id) {
         const errorMessage = String(e?.message || e).slice(0, ERROR_MESSAGE_MAX_LENGTH)
         stats.errors.push(`${fields.phone}: ${errorMessage}`)
       }
+    }
+
+    // Se a API não avança o offset, a 2.ª+ página repete 100% dos contactos; sem isto o while nunca acaba.
+    if (page > 1 && novosNestaPagina === 0) {
+      console.warn(
+        '[SYNC-CONTATOS] Página da agenda repetida (possivelmente offset não suportado). Encerrando loop.'
+      )
+      hasMore = false
+      break
     }
 
     if (!pageHasMore) hasMore = false
