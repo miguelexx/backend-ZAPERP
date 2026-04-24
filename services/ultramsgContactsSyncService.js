@@ -90,40 +90,22 @@ async function syncViaContactsApi(company_id) {
       novosNestaPagina++
 
       try {
+        const clienteFields = {}
+        if (fields.nome) clienteFields.nome = fields.nome
+        if (fields.waId) clienteFields.wa_id = fields.waId
+        // Foto da resposta da API (campo imgUrl/photo), se existir — sem chamada individual extra
+        // Fotos individuais são atualizadas pelo botão "Sincronizar fotos de perfil"
+        if (fields.foto) clienteFields.foto_perfil = fields.foto
+        clienteFields.nomeSource = 'syncUltramsg'
+
         const variants = possiblePhonesBR(fields.phone).length > 0 ? possiblePhonesBR(fields.phone) : [fields.phone]
         const { data: existente } = await supabase
           .from('clientes')
-          .select('id, foto_perfil')
+          .select('id')
           .eq('company_id', company_id)
           .in('telefone', variants)
           .limit(1)
           .maybeSingle()
-
-        const clienteFields = {}
-        if (fields.nome) clienteFields.nome = fields.nome
-        if (fields.waId) clienteFields.wa_id = fields.waId
-        clienteFields.nomeSource = 'syncUltramsg'
-
-        // Se não tem foto na resposta da API ou cliente existente não tem foto, busca ativamente
-        let fotoUrl = fields.foto
-        const needsFoto = !fotoUrl && (!existente?.foto_perfil || existente.foto_perfil === 'null' || existente.foto_perfil === '')
-        
-        if (needsFoto) {
-          const provider = getProvider()
-          if (provider?.getProfilePicture) {
-            try {
-              fotoUrl = await provider.getProfilePicture(fields.phone, { companyId: company_id })
-              if (fotoUrl && typeof fotoUrl === 'string' && fotoUrl.startsWith('http')) {
-                clienteFields.foto_perfil = fotoUrl
-              }
-            } catch (fotoErr) {
-              // Falha na busca de foto não deve interromper o sync do contato
-              console.warn(`[SYNC-CONTACTS] Erro ao buscar foto ${fields.phone.slice(-8)}:`, fotoErr?.message)
-            }
-          }
-        } else if (fotoUrl) {
-          clienteFields.foto_perfil = fotoUrl
-        }
 
         const result = await getOrCreateCliente(supabase, company_id, fields.phone, clienteFields)
         if (result.cliente_id) {

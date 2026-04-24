@@ -1,7 +1,7 @@
 const supabase = require('../config/supabase')
 const ultramsgIntegrationService = require('../services/ultramsgIntegrationService')
 const whatsappConfigService = require('../services/whatsappConfigService')
-const { syncContacts } = require('../services/ultramsgContactsSyncService')
+const { enqueue, JOB_TIPOS } = require('../services/queueManager')
 const { syncGroups, syncAll } = require('../services/ultramsgGroupsSyncService')
 const { checkGuard, recordQrServed, resetOnConnected, getAttempts, THROTTLE_SECONDS } = require('../services/whatsappConnectGuardService')
 const { getConfig } = require('../services/configOperacionalService')
@@ -312,27 +312,38 @@ exports.configureWebhooks = async (req, res) => {
 exports.syncContacts = async (req, res) => {
   const company_id = req.user?.company_id
   if (!company_id) return res.status(401).json({ error: 'Não autenticado' })
-  if (!checkCompanyRate(company_id, 'contacts-sync', 60_000, 5)) {
+
+  if (!checkCompanyRate(company_id, 'contacts-sync', 30_000, 3)) {
     return res.status(429).json({
-      error: 'Muitas sincronizações. Aguarde 1 minuto.',
-      retryAfterSeconds: 60
+      error: 'Sincronização já iniciada. Aguarde.',
+      retryAfterSeconds: 30
     })
   }
-  const result = await syncContacts(company_id)
+
+  // Enfileira um job progressivo (lotes + checkpoint + lock).
+  // O worker processa em background e emite 'zapi_sync_contatos' via socket ao terminar.
+  const result = await enqueue(company_id, JOB_TIPOS.SYNC_CONTATOS, { reset: true, includeConversationCache: false })
+
   if (!result.ok) {
-    const msg = result.errors?.[0] || 'Erro ao sincronizar contatos'
-    console.warn(`[SYNC-CONTATOS] empresa=${company_id} falhou: ${msg}`)
-    // Retorna 200 com ok:false para não gerar erro vermelho no browser
-    return res.json({ ok: false, message: msg, totalFetched: 0, inserted: 0, updated: 0, skipped: 0 })
+    // Job duplicado = sync já em andamento; não é erro grave.
+    const jaRodando = /enfileirado|execu/i.test(result.error || '')
+    console.log(`[SYNC-CONTATOS] empresa=${company_id} enqueue: ${result.error}`)
+    return res.json({
+      ok: true,
+      queued: false,
+      running: jaRodando,
+      message: jaRodando ? 'Sincronização já em andamento.' : result.error,
+      totalFetched: 0, inserted: 0, updated: 0, skipped: 0
+    })
   }
-  console.log(`[SYNC-CONTATOS] empresa=${company_id} ok — mode=${result.mode} fetched=${result.totalFetched} inserted=${result.inserted} updated=${result.updated} skipped=${result.skipped}`)
+
+  console.log(`[SYNC-CONTATOS] empresa=${company_id} job_id=${result.job_id} enfileirado`)
   return res.json({
     ok: true,
-    mode: result.mode,
-    totalFetched: result.totalFetched,
-    inserted: result.inserted,
-    updated: result.updated,
-    skipped: result.skipped
+    queued: true,
+    job_id: result.job_id,
+    message: 'Sincronização iniciada em segundo plano. Os contatos serão importados em lotes.',
+    totalFetched: 0, inserted: 0, updated: 0, skipped: 0
   })
 }
 

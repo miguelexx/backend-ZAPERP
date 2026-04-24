@@ -971,25 +971,27 @@ function parseContactsResponse(data) {
 }
 
 /**
- * Limite prático da API /contacts (respostas sem paginação costumam parar em ~1000 itens).
- * Sempre paginar com limit/offset; senão a página 1 fica em 1000 e o laço de sync quebrava
- * (hasMore usava tamanho 100 e offset incorreto).
+ * Chunk alto para pedir toda a agenda em uma única chamada.
+ * A UltraMsg retorna a lista inteira da instância de uma só vez (sem paginação real).
+ * Usar um valor grande garante que o limit da API nunca corte a lista.
  */
-const CONTACTS_API_CHUNK_MAX = 1000
+const CONTACTS_API_CHUNK_MAX = 10000
 
 /**
  * Lista contatos salvos na agenda do celular conectado via QR.
  * UltraMsg: GET /{instance_id}/contacts — retorna APENAS da instância conectada.
- * Sempre limit + offset. hasMore = página cheia (raw) na API, permite extrair 2000+ contatos.
+ *
+ * Estratégia: página 1 sem parâmetros (API retorna tudo de uma vez).
+ * Páginas seguintes com limit+offset caso a API suporte e o chunk anterior tenha chegado ao limite.
  *
  * @returns {{ data: object[], hasMore: boolean, rawCount: number }}
  */
-async function getContacts(page = 1, pageSize = 100, opts = {}) {
+async function getContacts(page = 1, pageSize = CONTACTS_API_CHUNK_MAX, opts = {}) {
   const cfg = await resolveConfig(opts)
   if (!cfg) {
     return { data: [], hasMore: false, rawCount: 0 }
   }
-  const limit = Math.min(CONTACTS_API_CHUNK_MAX, Math.max(1, Number(pageSize) || CONTACTS_API_CHUNK_MAX))
+  const limit = Math.min(CONTACTS_API_CHUNK_MAX, Math.max(100, Number(pageSize) || CONTACTS_API_CHUNK_MAX))
   const offset = (Math.max(1, Number(page)) - 1) * limit
 
   const tryFetch = async (extraParams) => {
@@ -1003,7 +1005,18 @@ async function getContacts(page = 1, pageSize = 100, opts = {}) {
   }
 
   try {
-    const raw = await tryFetch({ limit: String(limit), offset: String(offset) })
+    // Página 1: sem params — API UltraMsg retorna a agenda inteira de uma vez.
+    // Páginas seguintes: limit+offset para o caso improvável da API paginar acima de CHUNK_MAX.
+    let raw
+    if (page === 1) {
+      raw = await tryFetch({})
+      if (raw.length === 0) {
+        raw = await tryFetch({ limit: String(limit), offset: '0' })
+      }
+    } else {
+      raw = await tryFetch({ limit: String(limit), offset: String(offset) })
+    }
+
     if (WHATSAPP_DEBUG) {
       console.log('[ULTRAMSG] getContacts', { page, limit, offset, rawTotal: raw.length })
     }
@@ -1032,7 +1045,8 @@ async function getContacts(page = 1, pageSize = 100, opts = {}) {
     if (WHATSAPP_DEBUG) {
       console.log('[ULTRAMSG] getContacts filtrado:', { total_api: raw.length, com_name: contacts.length })
     }
-    const hasMore = raw.length > 0 && raw.length === limit
+    // hasMore só quando a API devolve exatamente o limit solicitado E estamos na página > 1 (com params)
+    const hasMore = page > 1 && raw.length > 0 && raw.length === limit
     return { data: contacts, hasMore, rawCount: raw.length }
   } catch (e) {
     if (WHATSAPP_DEBUG) console.warn('[ULTRAMSG] getContacts erro:', e?.message)

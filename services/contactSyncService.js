@@ -296,23 +296,6 @@ async function processContactsPage(companyId, opts = {}) {
     seen.add(key)
 
     try {
-      const variants = possiblePhonesBR(parsed.phone).length > 0 ? possiblePhonesBR(parsed.phone) : [parsed.phone]
-      const { data: exRow } = await supabase
-        .from('clientes')
-        .select('id, foto_perfil, wa_id')
-        .eq('company_id', Number(companyId))
-        .in('telefone', variants)
-        .order('id', { ascending: true })
-        .limit(1)
-        .maybeSingle()
-
-      const extraFoto = await maybeEnrichFoto(companyId, parsed.phone, exRow)
-      if (extraFoto) {
-        parsed.foto = extraFoto
-      } else if (!parsed.foto && exRow?.foto_perfil) {
-        // mantém o que já tem no banco
-      }
-
       const r = await syncOneAgendaContact(companyId, parsed)
       stats.processados++
       stats.inserted += r.inserted ? 1 : 0
@@ -521,72 +504,140 @@ async function runContactSyncBatch(company_id, opts = {}) {
 }
 
 /**
- * Sincronização completa (várias páginas) para jobs/worker.
+ * Sincronização completa para jobs/worker.
+ *
+ * Estratégia gradual:
+ *  1. Busca TODA a lista da API UltraMsg uma única vez (ela não pagina de verdade).
+ *  2. Divide os contatos em lotes de CHUNK_SIZE e processa cada lote com uma pausa
+ *     entre eles — evita sobrecarregar o banco e dá feedback progressivo via logs/eventos.
+ *  3. O lock é mantido durante toda a sessão; o checkpoint registra qual lote foi
+ *     concluído, permitindo retomada segura.
  */
 async function runContactSyncFull(company_id, opts = {}) {
+  if (!company_id) return { ok: false, error: 'company_id ausente', totalProcessados: 0, totalCriados: 0, totalAtualizados: 0 }
+
   const config = await getConfig(company_id)
-  const intervaloMs = (config.intervalo_lotes_seg || 5) * 1000
-  const maxPages = opts.maxPages ?? MAX_PAGES_DEFAULT
+  // Tamanho de cada lote de inserção no banco. Padrão 200; configurável via lote_max.
+  const CHUNK_SIZE = Math.min(500, Math.max(50, config.lote_max || 200))
+  // Pausa entre lotes em ms (padrão 2 s). Suficiente para não saturar o banco.
+  const PAUSA_MS = Math.max(500, (config.intervalo_lotes_seg || 2) * 1000)
 
-  await registrarEvento(company_id, TIPOS.SYNC_INICIO, 'Contact sync (contact_sync) iniciada', { maxPages })
+  await registrarEvento(company_id, TIPOS.SYNC_INICIO, 'Contact sync iniciada (gradual)', { chunkSize: CHUNK_SIZE })
 
-  let totalProcessados = 0
-  let totalCriados = 0
-  let totalAtualizados = 0
-  let totalConflitados = 0
-  let pageCount = 0
-
-  while (pageCount < maxPages) {
-    const pausado = await isProcessamentoPausado(company_id)
-    if (pausado) {
-      await registrarEvento(company_id, TIPOS.PAUSA, 'Contact sync pausada (processamento_pausado)')
-      break
-    }
-
-    const result = await runContactSyncBatch(company_id, {
-      maxPagesPerRun: maxPages,
-      reset: pageCount === 0 && !!opts.reset
-    })
-    if (!result.ok) break
-
-    totalProcessados += result.processados
-    totalCriados += result.criados
-    totalAtualizados += result.atualizados
-    totalConflitados += result.conflitados
-    pageCount++
-
-    if (!result.temMais) break
-    await new Promise((r) => setTimeout(r, intervaloMs))
+  // Adquirir lock para toda a sessão.
+  const acquired = await tryAcquireLock(company_id)
+  if (!acquired) {
+    return { ok: false, error: 'Sincronização já em andamento', totalProcessados: 0, totalCriados: 0, totalAtualizados: 0 }
   }
 
-  if (opts.includeConversationCache === true) {
-    try {
-      const { syncMissingConversationContacts } = require('./ultramsgContactsSyncService')
-      const convResult = await syncMissingConversationContacts(company_id, { batchSize: 30, delayMs: 500 })
-      await registrarEvento(company_id, TIPOS.SYNC_LOTE, 'Pós-sync: conversas sem nome/foto', {
-        processadas: convResult.processadas,
-        atualizadas: convResult.atualizadas,
-        errCount: convResult.errors?.length || 0
+  try {
+    // 1. Verificar provider e config da empresa.
+    const provider = getProvider()
+    if (!provider?.getContacts) {
+      await registrarEvento(company_id, TIPOS.FALHA, 'provider.getContacts não disponível')
+      return { ok: false, error: 'getContacts não disponível', totalProcessados: 0, totalCriados: 0, totalAtualizados: 0 }
+    }
+
+    const { config: waCfg, error: cfgErr } = await getEmpresaWhatsappConfig(company_id)
+    if (cfgErr || !waCfg) {
+      await registrarEvento(company_id, TIPOS.FALHA, 'Empresa sem instância configurada')
+      return { ok: false, error: 'Empresa sem instância configurada', totalProcessados: 0, totalCriados: 0, totalAtualizados: 0 }
+    }
+
+    // 2. Buscar todos os contatos de uma vez (UltraMsg retorna tudo na primeira página).
+    const gcr = await provider.getContacts(1, 10000, { companyId: company_id })
+    const allContacts = Array.isArray(gcr?.data) ? gcr.data : (Array.isArray(gcr) ? gcr : [])
+
+    if (allContacts.length === 0) {
+      await registrarEvento(company_id, TIPOS.SYNC_FIM, 'Nenhum contato retornado pela API')
+      return { ok: true, totalProcessados: 0, totalCriados: 0, totalAtualizados: 0, paginas: 0 }
+    }
+
+    // 3. Checkpoint: suporte a retomada (offset dentro da lista).
+    let startOffset = 0
+    if (!opts.reset) {
+      const savedPage = await getCheckpoint(company_id)
+      // Checkpoint armazena índice de lote (base 1); offset = (lote - 1) * CHUNK_SIZE
+      startOffset = Math.max(0, (Number(savedPage) - 1)) * CHUNK_SIZE
+      if (startOffset >= allContacts.length) {
+        // Checkpoint ultrapassou o total: reiniciar.
+        startOffset = 0
+      }
+    } else {
+      await resetCheckpoint(company_id)
+    }
+
+    const seen = new Set()
+    let totalProcessados = 0
+    let totalCriados = 0
+    let totalAtualizados = 0
+    let totalConflitados = 0
+    let loteNum = Math.floor(startOffset / CHUNK_SIZE) + 1
+
+    // 4. Processar em lotes com pausa entre eles.
+    for (let offset = startOffset; offset < allContacts.length; offset += CHUNK_SIZE) {
+      const pausado = await isProcessamentoPausado(company_id)
+      if (pausado) {
+        await registrarEvento(company_id, TIPOS.PAUSA, 'Contact sync pausada (processamento_pausado)')
+        break
+      }
+
+      const chunk = allContacts.slice(offset, offset + CHUNK_SIZE)
+      let lCriados = 0, lAtualizados = 0, lProcessados = 0, lConflitados = 0
+
+      for (const c of chunk) {
+        const parsed = parseAgendaContact(c)
+        if (!parsed || !parsed.phone) continue
+        const key = phoneKeyBR(parsed.phone)
+        if (seen.has(key)) continue
+        seen.add(key)
+
+        try {
+          const r = await syncOneAgendaContact(company_id, parsed)
+          lProcessados++
+          lCriados += r.inserted ? 1 : 0
+          lAtualizados += r.updated ? 1 : 0
+          if (r.conflict) lConflitados++
+        } catch (e) {
+          console.warn(`[CONTACT-SYNC] lote ${loteNum} contato erro:`, e?.message || e)
+        }
+      }
+
+      totalProcessados += lProcessados
+      totalCriados += lCriados
+      totalAtualizados += lAtualizados
+      totalConflitados += lConflitados
+
+      // Salvar checkpoint após cada lote concluído.
+      await updateCheckpoint(company_id, loteNum + 1, {
+        loteNum, offset, totalContatos: allContacts.length,
+        totalProcessados, totalCriados, totalAtualizados
       })
-    } catch (e) {
-      console.warn('[CONTACT-SYNC] syncMissingConversationContacts:', e?.message || e)
+      await registrarEvento(company_id, TIPOS.SYNC_LOTE, `Lote ${loteNum} de contatos concluído`, {
+        loteNum, offset, tamanho: chunk.length,
+        criados: lCriados, atualizados: lAtualizados, processados: lProcessados,
+        restantes: Math.max(0, allContacts.length - offset - CHUNK_SIZE)
+      })
+
+      loteNum++
+
+      // Pausa entre lotes (exceto no último).
+      if (offset + CHUNK_SIZE < allContacts.length) {
+        await new Promise((r) => setTimeout(r, PAUSA_MS))
+      }
     }
-  }
 
-  await registrarEvento(company_id, TIPOS.SYNC_FIM, 'Contact sync (contact_sync) finalizada', {
-    totalProcessados,
-    totalCriados,
-    totalAtualizados,
-    totalConflitados,
-    paginas: pageCount
-  })
+    await registrarEvento(company_id, TIPOS.SYNC_FIM, 'Contact sync gradual finalizada', {
+      totalProcessados, totalCriados, totalAtualizados, totalConflitados, lotes: loteNum - 1
+    })
 
-  return {
-    totalProcessados,
-    totalCriados,
-    totalAtualizados,
-    totalConflitados,
-    paginas: pageCount
+    return { ok: true, totalProcessados, totalCriados, totalAtualizados, totalConflitados, paginas: loteNum - 1 }
+  } catch (e) {
+    const msg = e?.message || String(e)
+    await registrarEvento(company_id, TIPOS.FALHA, 'Contact sync falhou', { error: msg.slice(0, 200) })
+    return { ok: false, error: msg, totalProcessados: 0, totalCriados: 0, totalAtualizados: 0 }
+  } finally {
+    await releaseLock(company_id)
   }
 }
 
