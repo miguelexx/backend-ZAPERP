@@ -1469,58 +1469,42 @@ exports.sincronizarContatosZapi = async (req, res) => {
     const { company_id } = req.user
     if (!company_id) return res.status(401).json({ error: 'Não autenticado' })
 
-    console.log(`[SYNC-CONTATOS] Iniciando para empresa=${company_id}`)
-    const { runContactSyncFull } = require('../services/contactSyncService')
-    const result = await runContactSyncFull(company_id, {
+    // Background: continua executando mesmo se o usuário fechar/trocar de tela.
+    const { enqueue, JOB_TIPOS } = require('../services/queueManager')
+    const result = await enqueue(company_id, JOB_TIPOS.SYNC_CONTATOS, {
       reset: true,
       includeConversationCache: false
     })
 
     if (!result.ok) {
-      const msg = result.error || 'Empresa sem instância WhatsApp configurada. Conecte o WhatsApp em Integrações.'
-      console.warn(`[SYNC-CONTATOS] empresa=${company_id} falhou: ${msg}`)
+      // Job duplicado = sync já em andamento; não tratar como erro fatal.
+      const jaRodando = /enfileirado|execu/i.test(result.error || '')
       return res.json({
-        ok: false,
-        message: msg,
+        ok: true,
+        queued: false,
+        running: jaRodando,
+        message: jaRodando ? 'Sincronização já em andamento.' : (result.error || 'Não foi possível iniciar sincronização'),
         total_contatos: 0,
         criados: 0,
         atualizados: 0
       })
     }
 
-    const totalAgenda = Number(result.totalAgendaValidos || result.totalProcessados || 0)
-    const totalCriados = Number(result.totalCriados || 0)
-    const totalAtualizados = Number(result.totalAtualizados || 0)
-    const totalClientesBanco = Number(result.totalClientesBanco || 0)
-
-    console.log(
-      `[SYNC-CONTATOS] empresa=${company_id} concluído — agenda=${totalAgenda} criados=${totalCriados} atualizados=${totalAtualizados} banco=${totalClientesBanco}`
-    )
-
-    const io = req.app.get('io')
-    if (io) {
-      io.to(`empresa_${company_id}`).emit('zapi_sync_contatos', {
-        total_contatos: totalAgenda,
-        criados: totalCriados,
-        atualizados: totalAtualizados,
-        fotos_atualizadas: 0
-      })
-    }
-
     return res.json({
       ok: true,
-      total_contatos: totalAgenda,
-      criados: totalCriados,
-      atualizados: totalAtualizados,
-      total_clientes_banco: totalClientesBanco,
-      ignorados: Number(result.totalIgnorados || 0),
-      invalidos: Number(result.totalInvalidos || 0),
-      fotos_atualizadas: 0,
-      mode: 'contact_sync_full'
+      queued: true,
+      running: true,
+      job_id: result.job_id,
+      message: 'Sincronização iniciada em segundo plano. Continuará mesmo se você sair da tela.',
+      total_contatos: 0,
+      criados: 0,
+      atualizados: 0,
+      fotos_atualizadas: 0
     })
   } catch (err) {
     console.error('sincronizarContatosZapi:', err)
-    return res.status(500).json({ error: 'Erro ao sincronizar contatos' })
+    // Evita "Network Error" no frontend legado: sinaliza falha no body.
+    return res.json({ ok: false, message: 'Erro ao iniciar sincronização de contatos', total_contatos: 0, criados: 0, atualizados: 0 })
   }
 }
 
