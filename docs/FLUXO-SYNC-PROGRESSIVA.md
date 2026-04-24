@@ -14,24 +14,24 @@ Em vez de processar todos os contatos de uma vez, processa em lotes com pausa en
 
 ## Fluxo
 
-1. Job `sync_contatos` é enfileirado
+1. Job na fila com **`tipo` = `sync_contatos`** (identificador do job; ver tabela `jobs`)
 2. Worker pega o job, marca `running`
-3. `syncContactsFullProgressiva`:
+3. `syncContactsFullProgressiva` (implementação em `contactSyncService`):
    - Obtém config (lote, intervalo)
    - Loop: `syncContactsProgressiva` por lote
    - Entre lotes: `await sleep(intervalo_lotes_seg * 1000)`
-   - Atualiza checkpoint após cada lote
+   - Atualiza checkpoint após cada lote **bem-sucedido** (falha de config/provider não avança página)
    - Para se `processamento_pausado` ou fim dos dados
 4. Ao concluir: marca job `completed`, emite socket `zapi_sync_contatos`
 
 ## Checkpoint
 
 - Tabela: `checkpoints_sync`
-- Chave: `(company_id, tipo='sync_contatos')`
+- Chave: **`(company_id, tipo='contact_sync')`** — alinhado ao serviço de sync progressiva (não confundir com o `tipo` do job = `sync_contatos`)
 - Campo: `ultimo_offset` = próxima página a processar
 
 ## Lock
 
 - Tabela: `sync_locks`
-- Evita duas sync do mesmo tipo simultâneas
-- Adquirido no início, liberado no fim (ou em erro)
+- Chave: **`(company_id, tipo='contact_sync')`**
+- `INSERT` (unique) adquire; falha 23505 = outra sync ativa. Liberado no `finally` (sucesso ou erro)

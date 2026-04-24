@@ -15,53 +15,17 @@ const { getEmpresaWhatsappConfig } = require('./whatsappConfigService')
 const { getOrCreateCliente } = require('../helpers/conversationSync')
 const { syncUltraMsgContact } = require('./ultramsgSyncContact')
 const { normalizePhoneBR, possiblePhonesBR, phoneKeyBR } = require('../helpers/phoneHelper')
+const { processContactsPage, parseAgendaContact } = require('./contactSyncService')
 
 // Constantes de configuração
 const PAGE_SIZE = 100
-const MIN_PHONE_DIGITS = 10
-const BR_COUNTRY_CODE = '55'
-const MIN_BR_PHONE_LENGTH = 12
-const MAX_BR_PHONE_LENGTH = 13
 const ERROR_MESSAGE_MAX_LENGTH = 80
 
 /**
- * Extrai phone e nome de um objeto contato retornado pelo provider.
- * Campos: phone, name, short, vname, notify, imgUrl (quando disponível)
- *
- * Regras de filtragem (evita contatos falsos/inventados):
- * 1) Exige campo `name` não-vazio: contatos sem nome não estão salvos na agenda —
- *    são apenas JIDs que apareceram em conversas, grupos ou spam.
- * 2) Ignora grupos (@g.us) e IDs não-numéricos.
- * 3) Exige número BR válido após normalização (12 ou 13 dígitos, começa com 55).
- *    NÃO faz prepend '55' em números inválidos — evita inventar números.
+ * Alias para parseAgendaContact (uma única regra de normalização para sync manual e progressivo).
  */
 function extractContactFields(raw) {
-  if (!raw || typeof raw !== 'object') return null
-
-  // Regra 1: exige name (contato salvo na agenda do celular)
-  const name = String(raw.name ?? '').trim()
-  if (!name) return null
-
-  const phoneRaw = raw.phone ?? raw.wa_id ?? raw.id ?? ''
-  const phoneStr = String(phoneRaw || '').trim()
-
-  // Regra 2: ignora grupos e IDs não numéricos
-  if (phoneStr.endsWith('@g.us') || phoneStr.includes('-group')) return null
-
-  const digits = phoneStr.replace(/\D/g, '')
-  if (!digits || digits.length < MIN_PHONE_DIGITS) return null
-
-  // Regra 3: normaliza para BR válido sem inventar prefixo
-  const norm = normalizePhoneBR(digits)
-  if (!norm || !norm.startsWith(BR_COUNTRY_CODE) || (norm.length !== MIN_BR_PHONE_LENGTH && norm.length !== MAX_BR_PHONE_LENGTH)) return null
-
-  // Nome: prioriza name (salvo no celular) > short > notify > vname
-  const nome = name || String(raw.short ?? raw.notify ?? raw.vname ?? '').trim() || null
-
-  const foto = raw.imgUrl ?? raw.photo ?? raw.profilePicture ?? null
-  const fotoUrl = foto && typeof foto === 'string' && foto.trim().startsWith('http') ? foto.trim() : null
-
-  return { phone: norm, nome: nome || null, foto: fotoUrl || null }
+  return parseAgendaContact(raw)
 }
 
 /**
@@ -120,6 +84,7 @@ async function syncViaContactsApi(company_id) {
 
         const clienteFields = {}
         if (fields.nome) clienteFields.nome = fields.nome
+        if (fields.waId) clienteFields.wa_id = fields.waId
         clienteFields.nomeSource = 'syncUltramsg'
 
         // Se não tem foto na resposta da API ou cliente existente não tem foto, busca ativamente
@@ -325,77 +290,15 @@ async function syncContacts(company_id) {
 
 /**
  * Processa um único lote (página) de contatos.
- * Usado pela sincronização progressiva.
+ * Usado pela rota e testes; delega a contactSyncService (dedupe, wa_id, logs).
  * @param {number} company_id
  * @param {object} opts - { page, pageSize }
- * @returns {Promise<{ processados: number, inserted: number, updated: number, skipped: number, errors: string[], hasMore: boolean }>}
+ * @returns {Promise<{ processados: number, inserted: number, updated: number, skipped: number, conflicted?: number, errors: string[], hasMore: boolean }>}
  */
 async function syncContactsBatch(company_id, opts = {}) {
   const page = Math.max(1, opts.page || 1)
   const pageSize = Math.min(100, Math.max(10, opts.pageSize || 50))
-  const provider = getProvider()
-
-  if (!provider?.getContacts) {
-    return { processados: 0, inserted: 0, updated: 0, skipped: 0, errors: ['getContacts não disponível'], hasMore: false }
-  }
-
-  const { config, error } = await getEmpresaWhatsappConfig(company_id)
-  if (error || !config) {
-    return { processados: 0, inserted: 0, updated: 0, skipped: 0, errors: ['Empresa sem instância configurada'], hasMore: false }
-  }
-
-  const contacts = await provider.getContacts(page, pageSize, { companyId: company_id })
-  if (!Array.isArray(contacts) || contacts.length === 0) {
-    return { processados: 0, inserted: 0, updated: 0, skipped: 0, errors: [], hasMore: false }
-  }
-
-  const stats = { processados: 0, inserted: 0, updated: 0, skipped: 0, errors: [] }
-  const seen = new Set()
-
-  for (const c of contacts) {
-    const fields = extractContactFields(c)
-    if (!fields || !fields.phone) {
-      stats.skipped++
-      continue
-    }
-
-    const key = phoneKeyBR(fields.phone)
-    if (seen.has(key)) {
-      stats.skipped++
-      continue
-    }
-    seen.add(key)
-
-    try {
-      const variants = possiblePhonesBR(fields.phone).length > 0 ? possiblePhonesBR(fields.phone) : [fields.phone]
-      const { data: existente } = await supabase
-        .from('clientes')
-        .select('id')
-        .eq('company_id', company_id)
-        .in('telefone', variants)
-        .limit(1)
-        .maybeSingle()
-
-      const clienteFields = {}
-      if (fields.nome) clienteFields.nome = fields.nome
-      if (fields.foto) clienteFields.foto_perfil = fields.foto
-      clienteFields.nomeSource = 'syncUltramsg'
-
-      const result = await getOrCreateCliente(supabase, company_id, fields.phone, clienteFields)
-      if (result.cliente_id) {
-        if (existente?.id) stats.updated++
-        else stats.inserted++
-      } else {
-        stats.skipped++
-      }
-      stats.processados++
-    } catch (e) {
-      stats.errors.push(`${fields.phone}: ${String(e?.message || e).slice(0, 80)}`)
-    }
-  }
-
-  const hasMore = contacts.length >= pageSize
-  return { ...stats, hasMore }
+  return processContactsPage(company_id, { page, pageSize })
 }
 
 module.exports = {

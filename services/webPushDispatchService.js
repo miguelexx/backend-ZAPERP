@@ -130,8 +130,9 @@ async function tryInsertDeliveryLog(mensagem_id, usuario_id, company_id) {
 
   if (!error) return true
   if (String(error.code || '') === '23505') return false
-  console.warn('[web-push] delivery_log insert:', error.message || error)
-  return false
+  // Falha transitória (rede, timeout): não bloquear o envio do push — dedupe é otimização, não deve silenciar alertas no mobile.
+  console.warn('[web-push] delivery_log insert (push continua):', error.message || error)
+  return true
 }
 
 async function fetchSubscriptionsForUser(company_id, usuario_id) {

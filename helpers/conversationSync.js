@@ -159,6 +159,44 @@ async function mergeConversationLidToPhone(supabaseClient, company_id, chatLid, 
 }
 
 /**
+ * Aplica campos no cliente existente (sem anular com vazio) e retorna o id.
+ */
+async function mergeAndReturnCliente(supabaseClient, company_id, existente, phone, fields) {
+  const updates = {}
+  const telefoneTail = String(phone).replace(/\D/g, '').slice(-6) || null
+  if (fields.nome != null && String(fields.nome).trim()) {
+    const { name: bestNome } = chooseBestName(
+      existente.nome,
+      String(fields.nome).trim(),
+      fields.nomeSource || 'unknown',
+      { fromMe: fields.fromMe, company_id, telefoneTail }
+    )
+    if (bestNome && bestNome !== (existente.nome || '')) updates.nome = bestNome
+  }
+  if (!updates.nome && (!existente.nome || !String(existente.nome).trim())) {
+    const numericDisplay = String(phone).replace(/\D/g, '')
+    if (numericDisplay) updates.nome = numericDisplay
+  }
+  if (fields.pushname !== undefined && fields.pushname != null && String(fields.pushname).trim()) {
+    updates.pushname = String(fields.pushname).trim()
+  }
+  if (fields.foto_perfil) updates.foto_perfil = fields.foto_perfil
+  if (fields.wa_id != null && String(fields.wa_id).trim() && (!existente.wa_id || !String(existente.wa_id).trim())) {
+    updates.wa_id = String(fields.wa_id).trim()
+  }
+  if (fields.email !== undefined && fields.email != null && String(fields.email).trim()) {
+    if (!existente.email || !String(existente.email).trim()) updates.email = String(fields.email).trim()
+  }
+  if (fields.empresa !== undefined && fields.empresa != null && String(fields.empresa).trim()) {
+    if (!existente.empresa || !String(existente.empresa).trim()) updates.empresa = String(fields.empresa).trim()
+  }
+  if (Object.keys(updates).length > 0) {
+    await supabaseClient.from('clientes').update(updates).eq('id', existente.id).eq('company_id', company_id)
+  }
+  return { cliente_id: existente.id }
+}
+
+/**
  * getOrCreateCliente — SELECT-then-UPDATE/INSERT. Nunca insert puro.
  * Evita 23505 (duplicate key) em clientes_company_telefone_unique.
  * Cada empresa tem seus próprios clientes; nunca retorna cliente de outra company.
@@ -166,10 +204,30 @@ async function mergeConversationLidToPhone(supabaseClient, company_id, chatLid, 
  * @param {object} supabaseClient
  * @param {number} company_id
  * @param {string} phone - Telefone bruto do payload
- * @param {object} fields - { nome?, pushname?, foto_perfil? } (não sobrescrever com null)
+ * @param {object} fields - { nome?, pushname?, foto_perfil?, wa_id?, email?, empresa? } (não sobrescrever com null)
  * @returns {Promise<{ cliente_id: number|null }>}
  */
 async function getOrCreateCliente(supabaseClient, company_id, phone, fields = {}) {
+  const waFromFields = fields.wa_id != null && String(fields.wa_id).trim() ? String(fields.wa_id).trim() : ''
+  if (waFromFields) {
+    const wVars = Array.from(
+      new Set([waFromFields, waFromFields.toLowerCase()])
+    ).filter(Boolean)
+    const { data: waRows, error: errWa } = await supabaseClient
+      .from('clientes')
+      .select('id, nome, pushname, foto_perfil, company_id, telefone, wa_id, email, empresa')
+      .eq('company_id', company_id)
+      .in('wa_id', wVars)
+      .order('id', { ascending: true })
+      .limit(1)
+    const byWa = Array.isArray(waRows) && waRows[0] ? waRows[0] : null
+    if (errWa) {
+      console.warn('[getOrCreateCliente] busca wa_id:', errWa?.message || errWa)
+    } else if (byWa?.id) {
+      return mergeAndReturnCliente(supabaseClient, company_id, byWa, phone, fields)
+    }
+  }
+
   let telefoneCanonico = getCanonicalPhone(phone)
   const phones = possiblePhonesBR(phone)
   let searchPhones = phones.length > 0 ? phones : (telefoneCanonico ? [telefoneCanonico] : [])
@@ -198,7 +256,9 @@ async function getOrCreateCliente(supabaseClient, company_id, phone, fields = {}
   }
 
   // 1) SELECT por (company_id, telefone ou variantes)
-  let q = supabaseClient.from('clientes').select('id, nome, pushname, foto_perfil, company_id')
+  let q = supabaseClient
+    .from('clientes')
+    .select('id, nome, pushname, foto_perfil, company_id, telefone, wa_id, email, empresa')
   if (searchPhones.length > 0) q = q.in('telefone', searchPhones)
   else q = q.eq('telefone', phone)
   q = q.eq('company_id', company_id)
@@ -211,27 +271,7 @@ async function getOrCreateCliente(supabaseClient, company_id, phone, fields = {}
   }
 
   if (existente?.id) {
-    const updates = {}
-    const telefoneTail = String(phone).replace(/\D/g, '').slice(-6) || null
-    if (fields.nome != null && String(fields.nome).trim()) {
-      const { name: bestNome } = chooseBestName(
-        existente.nome,
-        String(fields.nome).trim(),
-        fields.nomeSource || 'unknown',
-        { fromMe: fields.fromMe, company_id, telefoneTail }
-      )
-      if (bestNome && bestNome !== (existente.nome || '')) updates.nome = bestNome
-    }
-    if (!updates.nome && (!existente.nome || !String(existente.nome).trim())) {
-      const numericDisplay = String(phone).replace(/\D/g, '')
-      if (numericDisplay) updates.nome = numericDisplay
-    }
-    if (fields.pushname !== undefined && fields.pushname != null && String(fields.pushname).trim()) updates.pushname = String(fields.pushname).trim()
-    if (fields.foto_perfil) updates.foto_perfil = fields.foto_perfil
-    if (Object.keys(updates).length > 0) {
-      await supabaseClient.from('clientes').update(updates).eq('id', existente.id).eq('company_id', company_id)
-    }
-    return { cliente_id: existente.id }
+    return mergeAndReturnCliente(supabaseClient, company_id, existente, phone, fields)
   }
 
   // 2) Fallback legado: LIKE %digits10 (DDD+8)
@@ -241,33 +281,14 @@ async function getOrCreateCliente(supabaseClient, company_id, phone, fields = {}
       if (digits10 && digits10.length === 10) {
         const { data: legacyRows } = await supabaseClient
           .from('clientes')
-          .select('id, telefone, nome')
+          .select('id, telefone, nome, pushname, foto_perfil, wa_id, email, empresa')
           .eq('company_id', company_id)
           .like('telefone', `%${digits10}`)
           .order('id', { ascending: true })
           .limit(1)
         const legacy = Array.isArray(legacyRows) && legacyRows[0] ? legacyRows[0] : null
         if (legacy?.id) {
-          const updates = {}
-          const telefoneTail = String(phone).replace(/\D/g, '').slice(-6) || null
-          const { name: bestNome } = chooseBestName(
-            legacy.nome,
-            fields.nome != null ? String(fields.nome).trim() : null,
-            fields.nomeSource || 'unknown',
-            { fromMe: fields.fromMe, company_id, telefoneTail }
-          )
-          if (bestNome && bestNome !== (legacy.nome || '')) updates.nome = bestNome
-          // Fallback: quando sem nome, salva com número (nunca deixar vazio)
-          if (!updates.nome && (!legacy.nome || !String(legacy.nome).trim())) {
-            const fallbackNum = telefoneCanonico || String(phone).replace(/\D/g, '')
-            if (fallbackNum) updates.nome = fallbackNum
-          }
-          if (fields.pushname !== undefined && fields.pushname != null && String(fields.pushname).trim()) updates.pushname = String(fields.pushname).trim()
-          if (fields.foto_perfil) updates.foto_perfil = fields.foto_perfil
-          if (Object.keys(updates).length > 0) {
-            await supabaseClient.from('clientes').update(updates).eq('id', legacy.id).eq('company_id', company_id)
-          }
-          return { cliente_id: legacy.id }
+          return mergeAndReturnCliente(supabaseClient, company_id, legacy, phone, fields)
         }
       }
     } catch (_) { /* fallback silencioso */ }
@@ -297,7 +318,10 @@ async function getOrCreateCliente(supabaseClient, company_id, phone, fields = {}
     observacoes: null,
     company_id,
     ...(pushname ? { pushname } : {}),
-    ...(fields.foto_perfil ? { foto_perfil: fields.foto_perfil } : {})
+    ...(fields.foto_perfil ? { foto_perfil: fields.foto_perfil } : {}),
+    ...(fields.wa_id && String(fields.wa_id).trim() ? { wa_id: String(fields.wa_id).trim() } : {}),
+    ...(fields.email && String(fields.email).trim() ? { email: String(fields.email).trim() } : {}),
+    ...(fields.empresa && String(fields.empresa).trim() ? { empresa: String(fields.empresa).trim() } : {})
   }
   const { data: novoCliente, error: errInsert } = await supabaseClient
     .from('clientes')
