@@ -544,14 +544,34 @@ async function runContactSyncFull(company_id, opts = {}) {
       return { ok: false, error: 'Empresa sem instância configurada', totalProcessados: 0, totalCriados: 0, totalAtualizados: 0 }
     }
 
-    // 2. Buscar todos os contatos de uma vez (UltraMsg retorna tudo na primeira página).
-    const gcr = await provider.getContacts(1, 10000, { companyId: company_id })
-    const allContacts = Array.isArray(gcr?.data) ? gcr.data : (Array.isArray(gcr) ? gcr : [])
+    // 2. Buscar TODOS os contatos da API, percorrendo páginas até hasMore=false.
+    //    UltraMsg tipicamente devolve tudo na página 1, mas o loop garante que
+    //    nenhum contato seja perdido caso a API tenha limite interno e retorne hasMore.
+    const MAX_FETCH_PAGES = 50  // teto de segurança (50 × 10000 = 500 000 contatos)
+    let allContacts = []
+    let fetchPage = 1
+    let keepFetching = true
+
+    while (keepFetching && fetchPage <= MAX_FETCH_PAGES) {
+      const gcr = await provider.getContacts(fetchPage, 10000, { companyId: company_id })
+      const pageData = Array.isArray(gcr?.data) ? gcr.data : []
+      allContacts = allContacts.concat(pageData)
+
+      console.log(`[CONTACT-SYNC] empresa=${company_id} fetch p${fetchPage}: ${pageData.length} contatos (hasMore=${gcr?.hasMore})`)
+
+      if (!gcr?.hasMore || pageData.length === 0) {
+        keepFetching = false
+      } else {
+        fetchPage++
+      }
+    }
 
     if (allContacts.length === 0) {
       await registrarEvento(company_id, TIPOS.SYNC_FIM, 'Nenhum contato retornado pela API')
       return { ok: true, totalProcessados: 0, totalCriados: 0, totalAtualizados: 0, paginas: 0 }
     }
+
+    console.log(`[CONTACT-SYNC] empresa=${company_id} total da API: ${allContacts.length} contatos (${fetchPage} página(s))`)
 
     // 3. Checkpoint: suporte a retomada (offset dentro da lista).
     let startOffset = 0

@@ -1005,13 +1005,15 @@ async function getContacts(page = 1, pageSize = CONTACTS_API_CHUNK_MAX, opts = {
   }
 
   try {
-    // Página 1: sem params — API UltraMsg retorna a agenda inteira de uma vez.
-    // Páginas seguintes: limit+offset para o caso improvável da API paginar acima de CHUNK_MAX.
+    // Sempre envia limit para garantir que o UltraMsg não aplique um teto padrão interno.
+    // Offset 0 na página 1; offset calculado nas páginas seguintes (caso a API pagine).
     let raw
     if (page === 1) {
-      raw = await tryFetch({})
+      raw = await tryFetch({ limit: String(limit), offset: '0' })
+      // Alguns servidores UltraMsg ignoram params e devolvem tudo; outros respeitam o limit.
+      // Se recebemos 0, tenta sem params como último recurso.
       if (raw.length === 0) {
-        raw = await tryFetch({ limit: String(limit), offset: '0' })
+        raw = await tryFetch({})
       }
     } else {
       raw = await tryFetch({ limit: String(limit), offset: String(offset) })
@@ -1045,8 +1047,8 @@ async function getContacts(page = 1, pageSize = CONTACTS_API_CHUNK_MAX, opts = {
     if (WHATSAPP_DEBUG) {
       console.log('[ULTRAMSG] getContacts filtrado:', { total_api: raw.length, com_name: contacts.length })
     }
-    // hasMore só quando a API devolve exatamente o limit solicitado E estamos na página > 1 (com params)
-    const hasMore = page > 1 && raw.length > 0 && raw.length === limit
+    // hasMore se a API devolveu exatamente `limit` itens (pode haver mais na próxima página)
+    const hasMore = raw.length > 0 && raw.length >= limit
     return { data: contacts, hasMore, rawCount: raw.length }
   } catch (e) {
     if (WHATSAPP_DEBUG) console.warn('[ULTRAMSG] getContacts erro:', e?.message)
