@@ -84,8 +84,15 @@ function phoneKeyBR(phone) {
   const s = String(phone || '').trim()
   if (!s) return ''
   if (s.endsWith('@g.us')) return s
-  const digits = normalizePhoneBR(s).replace(/\D/g, '')
-  if (!digits) return ''
+  const norm = normalizePhoneBR(s)
+  const digits = String(norm || '').replace(/\D/g, '')
+  // Fallback internacional: quando não normaliza em BR, usa os dígitos puros.
+  // Assim evitamos chave vazia (que colapsa múltiplos contatos em um só).
+  if (!digits) {
+    const anyDigits = s.replace(/\D/g, '')
+    if (anyDigits.length >= 10 && anyDigits.length <= 15) return anyDigits
+    return ''
+  }
   if (digits.startsWith('55') && digits.length === 13 && digits.slice(4, 5) === '9') {
     return digits.slice(0, 4) + digits.slice(5)
   }

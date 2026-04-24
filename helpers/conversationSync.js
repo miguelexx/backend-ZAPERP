@@ -293,8 +293,10 @@ async function getOrCreateCliente(supabaseClient, company_id, phone, fields = {}
     return mergeAndReturnCliente(supabaseClient, company_id, existente, phone, fields)
   }
 
-  // 2) Fallback legado: LIKE %digits10 (DDD+8)
-  if (phone) {
+  // 2) Fallback legado: LIKE %digits10 (DDD+8) — somente para números BR.
+  // Evita falso match em números internacionais que compartilham sufixo.
+  const canonicalIsBR = !!(telefoneCanonico && String(telefoneCanonico).startsWith('55') && (String(telefoneCanonico).length === 12 || String(telefoneCanonico).length === 13))
+  if (phone && canonicalIsBR) {
     try {
       const digits10 = String(phone).replace(/\D/g, '').slice(-10)
       if (digits10 && digits10.length === 10) {
