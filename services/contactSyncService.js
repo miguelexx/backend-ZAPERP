@@ -19,7 +19,7 @@ const LOCK_TIPO = 'contact_sync'
 const CHECKPOINT_TIPO = 'contact_sync'
 const NOME_FONTE = 'syncUltramsg'
 
-const PAGE_SIZE_DEFAULT = 100
+const PAGE_SIZE_DEFAULT = 1000
 const MIN_PHONE_DIGITS = 10
 const BR_COUNTRY_CODE = '55'
 const MIN_BR_PHONE_LENGTH = 12
@@ -232,7 +232,8 @@ async function maybeEnrichFoto(companyId, phoneNorm, existente) {
  */
 async function processContactsPage(companyId, opts = {}) {
   const page = Math.max(1, Number(opts.page) || 1)
-  const pageSize = Math.min(100, Math.max(10, Number(opts.pageSize) || PAGE_SIZE_DEFAULT))
+  // Até 1000 por requisição (teto da API); alinhado ao getContacts/UltraMsg
+  const pageSize = Math.min(1000, Math.max(10, Number(opts.pageSize) || PAGE_SIZE_DEFAULT))
   const provider = getProvider()
 
   if (!provider?.getContacts) {
@@ -262,7 +263,9 @@ async function processContactsPage(companyId, opts = {}) {
     }
   }
 
-  const contacts = await provider.getContacts(page, pageSize, { companyId })
+  const gcr = await provider.getContacts(page, pageSize, { companyId })
+  const contacts = gcr?.data != null ? gcr.data : (Array.isArray(gcr) ? gcr : [])
+  const apiHasMore = gcr?.hasMore === true
   if (!Array.isArray(contacts) || contacts.length === 0) {
     return {
       processados: 0,
@@ -271,7 +274,7 @@ async function processContactsPage(companyId, opts = {}) {
       skipped: 0,
       conflicted: 0,
       errors: [],
-      hasMore: false,
+      hasMore: apiHasMore,
       advanceCheckpoint: true
     }
   }
@@ -322,7 +325,7 @@ async function processContactsPage(companyId, opts = {}) {
     }
   }
 
-  const hasMore = contacts.length >= pageSize
+  const hasMore = apiHasMore
   return { ...stats, hasMore, advanceCheckpoint: true }
 }
 
@@ -414,7 +417,7 @@ async function runContactSyncBatch(company_id, opts = {}) {
   }
 
   const config = await getConfig(company_id)
-  const pageSize = Math.min(100, Math.max(10, config.lote_max || 50))
+  const pageSize = Math.min(1000, Math.max(10, config.lote_max || 50))
   const maxPages = opts.maxPagesPerRun
   const acquired = await tryAcquireLock(company_id)
   if (!acquired) {

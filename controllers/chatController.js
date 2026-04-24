@@ -1521,7 +1521,8 @@ exports.debugSyncContatos = async (req, res) => {
 
     // Passo 3: Tentar buscar os primeiros 10 contatos da API UltraMSG
     const provider = getProvider()
-    const primeiraLeva = await provider.getContacts(1, 10, { companyId: company_id })
+    const gcr = await provider.getContacts(1, 10, { companyId: company_id })
+    const primeiraLeva = gcr?.data != null ? gcr.data : (Array.isArray(gcr) ? gcr : [])
     diag.steps.push({
       step: 'buscar_contatos_api',
       ok: Array.isArray(primeiraLeva),

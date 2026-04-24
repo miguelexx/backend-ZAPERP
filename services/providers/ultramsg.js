@@ -971,15 +971,25 @@ function parseContactsResponse(data) {
 }
 
 /**
+ * Limite prático da API /contacts (respostas sem paginação costumam parar em ~1000 itens).
+ * Sempre paginar com limit/offset; senão a página 1 fica em 1000 e o laço de sync quebrava
+ * (hasMore usava tamanho 100 e offset incorreto).
+ */
+const CONTACTS_API_CHUNK_MAX = 1000
+
+/**
  * Lista contatos salvos na agenda do celular conectado via QR.
  * UltraMsg: GET /{instance_id}/contacts — retorna APENAS da instância conectada.
- * A API pode retornar todos de uma vez (sem paginação) ou suportar limit/offset.
- * Estratégia: na página 1, tenta SEM parâmetros primeiro para obter a lista completa.
+ * Sempre limit + offset. hasMore = página cheia (raw) na API, permite extrair 2000+ contatos.
+ *
+ * @returns {{ data: object[], hasMore: boolean, rawCount: number }}
  */
 async function getContacts(page = 1, pageSize = 100, opts = {}) {
   const cfg = await resolveConfig(opts)
-  if (!cfg) return []
-  const limit = Math.min(1000, Math.max(1, Number(pageSize) || 100))
+  if (!cfg) {
+    return { data: [], hasMore: false, rawCount: 0 }
+  }
+  const limit = Math.min(CONTACTS_API_CHUNK_MAX, Math.max(1, Number(pageSize) || CONTACTS_API_CHUNK_MAX))
   const offset = (Math.max(1, Number(page)) - 1) * limit
 
   const tryFetch = async (extraParams) => {
@@ -993,21 +1003,9 @@ async function getContacts(page = 1, pageSize = 100, opts = {}) {
   }
 
   try {
-    // Página 1: tenta SEM limit/offset primeiro — UltraMsg pode retornar todos de uma vez
-    let raw
-    if (page === 1) {
-      raw = await tryFetch({})
-      if (raw.length === 0) {
-        raw = await tryFetch({ limit: String(limit), offset: '0' })
-      }
-      if (WHATSAPP_DEBUG && raw.length > 0) {
-        console.log('[ULTRAMSG] getContacts página 1:', { total: raw.length })
-      }
-    } else {
-      raw = await tryFetch({ limit: String(limit), offset: String(offset) })
-    }
-    if (WHATSAPP_DEBUG && page === 1) {
-      console.log('[ULTRAMSG] getContacts:', { page, limit, offset, total: raw.length })
+    const raw = await tryFetch({ limit: String(limit), offset: String(offset) })
+    if (WHATSAPP_DEBUG) {
+      console.log('[ULTRAMSG] getContacts', { page, limit, offset, rawTotal: raw.length })
     }
 
     const contacts = []
@@ -1034,10 +1032,11 @@ async function getContacts(page = 1, pageSize = 100, opts = {}) {
     if (WHATSAPP_DEBUG) {
       console.log('[ULTRAMSG] getContacts filtrado:', { total_api: raw.length, com_name: contacts.length })
     }
-    return contacts
+    const hasMore = raw.length > 0 && raw.length === limit
+    return { data: contacts, hasMore, rawCount: raw.length }
   } catch (e) {
     if (WHATSAPP_DEBUG) console.warn('[ULTRAMSG] getContacts erro:', e?.message)
-    return []
+    return { data: [], hasMore: false, rawCount: 0 }
   }
 }
 

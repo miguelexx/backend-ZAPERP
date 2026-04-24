@@ -17,8 +17,8 @@ const { syncUltraMsgContact } = require('./ultramsgSyncContact')
 const { normalizePhoneBR, possiblePhonesBR, phoneKeyBR } = require('../helpers/phoneHelper')
 const { processContactsPage, parseAgendaContact } = require('./contactSyncService')
 
-// Constantes de configuração
-const PAGE_SIZE = 100
+// Chunks alinhados ao max da API (~1000); paginação correta via hasMore (ver ultramsg getContacts)
+const PAGE_SIZE = 1000
 const ERROR_MESSAGE_MAX_LENGTH = 80
 
 /**
@@ -49,9 +49,15 @@ async function syncViaContactsApi(company_id) {
   const seen = new Set()
 
   while (hasMore) {
-    const contacts = await provider.getContacts(page, PAGE_SIZE, opts)
+    const res = await provider.getContacts(page, PAGE_SIZE, opts)
+    const contacts = res?.data != null ? res.data : (Array.isArray(res) ? res : [])
+    const pageHasMore = res?.hasMore === true
     if (!Array.isArray(contacts) || contacts.length === 0) {
-      hasMore = false
+      if (!pageHasMore) hasMore = false
+      else {
+        page++
+        continue
+      }
       break
     }
 
@@ -121,7 +127,7 @@ async function syncViaContactsApi(company_id) {
       }
     }
 
-    if (contacts.length < PAGE_SIZE) hasMore = false
+    if (!pageHasMore) hasMore = false
     else page++
   }
 
@@ -297,7 +303,7 @@ async function syncContacts(company_id) {
  */
 async function syncContactsBatch(company_id, opts = {}) {
   const page = Math.max(1, opts.page || 1)
-  const pageSize = Math.min(100, Math.max(10, opts.pageSize || 50))
+  const pageSize = Math.min(1000, Math.max(10, opts.pageSize || 50))
   return processContactsPage(company_id, { page, pageSize })
 }
 
