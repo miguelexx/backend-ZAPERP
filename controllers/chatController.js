@@ -1469,37 +1469,16 @@ exports.sincronizarContatosZapi = async (req, res) => {
     const { company_id } = req.user
     if (!company_id) return res.status(401).json({ error: 'Não autenticado' })
 
-    const getSnapshot = async () => {
-      const { count } = await supabase
-        .from('clientes')
-        .select('*', { count: 'exact', head: true })
-        .eq('company_id', Number(company_id))
+    // Quantidade atual no banco ANTES da sync (resposta imediata ao frontend).
+    const { count: totalBanco } = await supabase
+      .from('clientes')
+      .select('*', { count: 'exact', head: true })
+      .eq('company_id', Number(company_id))
 
-      const { data: lastJob } = await supabase
-        .from('jobs')
-        .select('resultado_json')
-        .eq('company_id', Number(company_id))
-        .eq('tipo', 'sync_contatos')
-        .eq('status', 'completed')
-        .order('atualizado_em', { ascending: false })
-        .limit(1)
-        .maybeSingle()
+    const totalClientesBanco = Number(totalBanco || 0)
 
-      const r = lastJob?.resultado_json || {}
-      const totalContatos = Number(
-        r.totalAgendaValidos ??
-        r.totalProcessados ??
-        r.total_contatos ??
-        0
-      )
-      const criados = Number(r.totalCriados ?? r.criados ?? 0)
-      const atualizados = Number(r.totalAtualizados ?? r.atualizados ?? 0)
-      const totalClientesBanco = Number(count || 0)
-
-      return { totalContatos, criados, atualizados, totalClientesBanco }
-    }
-
-    // Background: continua executando mesmo se o usuário fechar/trocar de tela.
+    // Enfileira job que o worker (iniciado no index.js) vai processar em background.
+    // Continua mesmo se o usuário sair da tela.
     const { enqueue, JOB_TIPOS } = require('../services/queueManager')
     const result = await enqueue(company_id, JOB_TIPOS.SYNC_CONTATOS, {
       reset: true,
@@ -1507,37 +1486,35 @@ exports.sincronizarContatosZapi = async (req, res) => {
     })
 
     if (!result.ok) {
-      // Job duplicado = sync já em andamento; não tratar como erro fatal.
       const jaRodando = /enfileirado|execu/i.test(result.error || '')
-      const snap = await getSnapshot()
       return res.json({
         ok: true,
         queued: false,
         running: jaRodando,
-        message: jaRodando ? 'Sincronização já em andamento.' : (result.error || 'Não foi possível iniciar sincronização'),
-        total_contatos: snap.totalContatos,
-        criados: snap.criados,
-        atualizados: snap.atualizados,
-        total_clientes_banco: snap.totalClientesBanco
+        message: jaRodando
+          ? 'Sincronização já em andamento. Os contatos serão atualizados em breve.'
+          : (result.error || 'Não foi possível iniciar sincronização'),
+        total_contatos: totalClientesBanco,
+        criados: 0,
+        atualizados: 0,
+        fotos_atualizadas: 0
       })
     }
 
-    const snap = await getSnapshot()
+    console.log(`[SYNC-CONTATOS] empresa=${company_id} job_id=${result.job_id} enfileirado — banco atual: ${totalClientesBanco}`)
     return res.json({
       ok: true,
       queued: true,
       running: true,
       job_id: result.job_id,
-      message: 'Sincronização iniciada em segundo plano. Continuará mesmo se você sair da tela.',
-      total_contatos: snap.totalContatos,
-      criados: snap.criados,
-      atualizados: snap.atualizados,
-      total_clientes_banco: snap.totalClientesBanco,
+      message: 'Sincronização iniciada. Os contatos serão importados em lotes e a tela atualizará ao terminar.',
+      total_contatos: totalClientesBanco,
+      criados: 0,
+      atualizados: 0,
       fotos_atualizadas: 0
     })
   } catch (err) {
     console.error('sincronizarContatosZapi:', err)
-    // Evita "Network Error" no frontend legado: sinaliza falha no body.
     return res.json({ ok: false, message: 'Erro ao iniciar sincronização de contatos', total_contatos: 0, criados: 0, atualizados: 0 })
   }
 }

@@ -283,4 +283,13 @@ server.listen(PORT, '0.0.0.0', () => {
 
   // Multi-tenant: webhooks UltraMsg configurados manualmente no painel (Instance Settings).
   // Não há mais instância única em ENV para configurar no startup.
+
+  // Inicia worker de jobs (sync_contatos, sync_fotos, etc.) em background.
+  // Passa io para que o worker emita 'zapi_sync_contatos' ao concluir cada job.
+  const isTest = process.env.NODE_ENV === 'test' || !!process.env.JEST_WORKER_ID
+  if (!isTest) {
+    const { startWorker } = require('./services/queueManager')
+    startWorker(5000, io)
+    console.log('[WORKER] Job worker iniciado (polling a cada 5s)')
+  }
 })
