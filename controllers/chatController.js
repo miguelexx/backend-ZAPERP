@@ -541,6 +541,19 @@ exports.listarConversas = async (req, res) => {
       minhaFilaRaw === 1 ||
       minhaFilaRaw === true
 
+    const incluirTodosClientesAtivo =
+      incluirTodosClientes === '1' ||
+      incluirTodosClientes === 'true' ||
+      incluirTodosClientes === 1 ||
+      incluirTodosClientes === true
+
+    // Para a aba "Todas" (sem filtros de status/fila), incluir clientes sem conversa por padrão.
+    // Isso mantém a lista alinhada com a base real de clientes, mesmo sem parâmetro explícito no front.
+    const incluirTodosClientesDefault =
+      (incluirTodosClientes == null || String(incluirTodosClientes).trim() === '') &&
+      !minhaFilaAtiva &&
+      !aguardandoClienteAtivo
+
     const statusNorm =
       !minhaFilaAtiva &&
       status_atendimento != null &&
@@ -1074,19 +1087,32 @@ exports.listarConversas = async (req, res) => {
     // Incluir todos os clientes: quem não tem conversa aparece como "Sem conversa" (clicável para abrir)
     // Ao filtrar "Abertas", não incluir sem_conversa (não há conversa aberta)
     const incluirTodos =
-      (incluirTodosClientes === '1' || incluirTodosClientes === 'true' || incluirTodosClientes === 1) &&
+      (incluirTodosClientesAtivo || incluirTodosClientesDefault) &&
       statusNorm !== 'aberta' &&
       !minhaFilaAtiva &&
+      !aguardandoClienteAtivo &&
       !(filtroAtendenteInformado != null && !isAtendente)
     if (incluirTodos) {
       const cid = Number(company_id)
-      let clientesQuery = supabase
-        .from('clientes')
-        .select('id, nome, pushname, telefone, foto_perfil')
-        .eq('company_id', cid)
-        .order('nome', { ascending: true, nullsFirst: false })
-        .limit(5000)
-      const { data: todosClientes } = await clientesQuery
+      // Sem limite fixo: busca em lotes para evitar teto do PostgREST/Supabase.
+      const CHUNK = 1000
+      const MAX_CLIENTES_SEM_CONVERSA = Number(process.env.CHAT_LIST_MAX_CLIENTES_SEM_CONVERSA || 200000)
+      const todosClientes = []
+      for (let start = 0; start < MAX_CLIENTES_SEM_CONVERSA; start += CHUNK) {
+        const { data: chunkRows, error: chunkErr } = await supabase
+          .from('clientes')
+          .select('id, nome, pushname, telefone, foto_perfil')
+          .eq('company_id', cid)
+          .order('nome', { ascending: true, nullsFirst: false })
+          .range(start, start + CHUNK - 1)
+        if (chunkErr) {
+          console.warn('[listarConversas] carregar clientes sem conversa:', chunkErr.message || chunkErr)
+          break
+        }
+        const rows = chunkRows || []
+        todosClientes.push(...rows)
+        if (rows.length < CHUNK) break
+      }
       const clienteIdsComConversa = new Set(
         conversasFormatadas
           .filter((c) => c.cliente_id != null)
