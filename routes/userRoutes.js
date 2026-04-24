@@ -2,6 +2,7 @@ const express = require('express')
 const router = express.Router()
 const auth = require('../middleware/auth')
 const userController = require('../controllers/userController')
+const pushController = require('../controllers/pushController')
 const permissoesController = require('../controllers/permissoesController')
 const { loginLimiter } = require('../middleware/rateLimit')
 
@@ -10,6 +11,10 @@ router.post('/login', loginLimiter, userController.login)
 router.get('/me/permissoes', auth, permissoesController.getMinhasPermissoes)
 router.get('/me', auth, userController.getMe)
 router.patch('/me', auth, userController.patchMe)
+
+router.get('/push/vapid-public-key', pushController.getPublicKey)
+router.post('/me/push/subscribe', auth, pushController.subscribe)
+router.delete('/me/push/subscribe', auth, pushController.unsubscribe)
 
 const adminOnly = require('../middleware/adminOnly')
 router.post('/', auth, adminOnly, userController.criar)

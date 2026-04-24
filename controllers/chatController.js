@@ -124,6 +124,7 @@ function emitirEventoEmpresaConversa(io, company_id, conversa_id, eventName, pay
   if (!io) return
 
   if (conversa_id) {
+    const { scheduleInboundWebPush } = require('../services/webPushDispatchService')
     // Evita "vazamento" cross-setor (ex.: financeiro recebendo vendas).
     // Fallback para room ampla apenas se não conseguirmos resolver os destinatários.
     emitirParaUsuariosQuePodemVerConversa(io, company_id, conversa_id, eventName, payload)
@@ -131,9 +132,11 @@ function emitirEventoEmpresaConversa(io, company_id, conversa_id, eventName, pay
         if (!emitidoFiltrado) {
           io.to(`empresa_${company_id}`).to(`conversa_${conversa_id}`).emit(eventName, payload)
         }
+        scheduleInboundWebPush(company_id, conversa_id, eventName, payload)
       })
       .catch(() => {
         io.to(`empresa_${company_id}`).to(`conversa_${conversa_id}`).emit(eventName, payload)
+        scheduleInboundWebPush(company_id, conversa_id, eventName, payload)
       })
     return
   }
@@ -490,6 +493,7 @@ async function incrementarUnreadParaConversa(company_id, conversa_id) {
 
 exports.incrementarUnreadParaConversa = incrementarUnreadParaConversa
 exports.emitirParaUsuariosQuePodemVerConversa = emitirParaUsuariosQuePodemVerConversa
+exports.obterUsuarioIdsQuePodemVerConversa = obterUsuarioIdsQuePodemVerConversa
 
 // =====================================================
 // 3) listarConversas (com unread_count + pesquisa avançada)

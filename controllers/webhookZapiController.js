@@ -19,6 +19,7 @@ const { chooseBestName, isBadName, getDisplayName } = require('../helpers/contac
 const { parseVcardForContact } = require('../helpers/vcardHelper')
 const { resolvePeerPhone } = require('../helpers/conversationKeyHelper')
 const { incrementarUnreadParaConversa, emitirParaUsuariosQuePodemVerConversa } = require('./chatController')
+const { scheduleInboundWebPush } = require('../services/webPushDispatchService')
 
 const {
   processIncomingMessage: processChatbotTriage,
@@ -2301,6 +2302,7 @@ exports.receberZapi = async (req, res) => {
                   direcao: mensagemSalva.direcao ?? (fromMe ? 'out' : 'in'),
                 }
                 io2.to(rooms).emit(io2.EVENTS?.NOVA_MENSAGEM || 'nova_mensagem', emitPayload)
+                scheduleInboundWebPush(company_id, conversa_id, 'nova_mensagem', emitPayload)
               }
             } catch (_) {
               mensagemSalva = existente
@@ -2779,6 +2781,7 @@ exports.receberZapi = async (req, res) => {
           if (departamento_id != null) rooms.push(`departamento_${departamento_id}`)
           io.to(rooms).emit('nova_mensagem', emitPayload)
         }
+        scheduleInboundWebPush(company_id, convIdForEmit, 'nova_mensagem', emitPayload)
       } else {
         // Mensagem já existe (enviada pelo usuário): apenas atualizar status, não duplicar mensagem
         const statusPayload = {
