@@ -239,8 +239,12 @@ async function getOrCreateCliente(supabaseClient, company_id, phone, fields = {}
 
   let telefoneCanonico = getCanonicalPhone(phone)
   const allowNonBR = fields?.allowNonBR === true
+  const strictAgendaImport = fields?.strictAgendaImport === true
   const phones = possiblePhonesBR(phone)
   let searchPhones = phones.length > 0 ? phones : (telefoneCanonico ? [telefoneCanonico] : [])
+  if (strictAgendaImport) {
+    searchPhones = telefoneCanonico ? [telefoneCanonico] : []
+  }
 
   // Fallback: extrair dígitos (10 ou 11 = DDD+num BR) e tentar normalizar quando getCanonicalPhone falha
   if (searchPhones.length === 0 && phone) {
@@ -296,7 +300,7 @@ async function getOrCreateCliente(supabaseClient, company_id, phone, fields = {}
   // 2) Fallback legado: LIKE %digits10 (DDD+8) — somente para números BR.
   // Evita falso match em números internacionais que compartilham sufixo.
   const canonicalIsBR = !!(telefoneCanonico && String(telefoneCanonico).startsWith('55') && (String(telefoneCanonico).length === 12 || String(telefoneCanonico).length === 13))
-  if (phone && canonicalIsBR) {
+  if (!strictAgendaImport && phone && canonicalIsBR) {
     try {
       const digits10 = String(phone).replace(/\D/g, '').slice(-10)
       if (digits10 && digits10.length === 10) {

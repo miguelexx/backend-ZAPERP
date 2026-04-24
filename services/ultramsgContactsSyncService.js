@@ -98,6 +98,7 @@ async function syncViaContactsApi(company_id) {
         if (fields.foto) clienteFields.foto_perfil = fields.foto
         clienteFields.nomeSource = 'syncUltramsg'
         clienteFields.allowNonBR = true
+        clienteFields.strictAgendaImport = true
 
         const result = await getOrCreateCliente(supabase, company_id, fields.phone, clienteFields)
         if (result.cliente_id) {

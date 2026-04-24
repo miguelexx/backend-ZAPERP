@@ -107,9 +107,12 @@ function parseAgendaContact(raw) {
  * Busca candidatos no mesmo company_id (telefone e/ou wa_id).
  * @returns {Promise<{ rows: object[], hadConflict: boolean }>}
  */
-async function findClienteCandidates(companyId, phoneNorm, rawJid) {
+async function findClienteCandidates(companyId, phoneNorm, rawJid, opts = {}) {
   const company_id = Number(companyId)
-  const phones = possiblePhonesBR(phoneNorm)
+  const strictAgendaImport = opts?.strictAgendaImport === true
+  const phones = strictAgendaImport
+    ? [String(phoneNorm || '').trim()].filter(Boolean)
+    : possiblePhonesBR(phoneNorm)
   const waList = waIdSearchVariants(phoneNorm, rawJid)
 
   const byId = new Map()
@@ -148,7 +151,7 @@ function shouldApplyFoto(existente, novoUrl) {
  * Sincroniza um contato da agenda: insert ou update conservador.
  */
 async function syncOneAgendaContact(companyId, parsed) {
-  const { rows, hadConflict } = await findClienteCandidates(companyId, parsed.phone, parsed.rawJid)
+  const { rows, hadConflict } = await findClienteCandidates(companyId, parsed.phone, parsed.rawJid, { strictAgendaImport: true })
 
   if (hadConflict) {
     const ids = rows.map((r) => r.id).join(',')
@@ -158,7 +161,7 @@ async function syncOneAgendaContact(companyId, parsed) {
     )
   }
 
-  const fieldsBase = { nomeSource: NOME_FONTE, allowNonBR: true }
+  const fieldsBase = { nomeSource: NOME_FONTE, allowNonBR: true, strictAgendaImport: true }
   if (parsed.nome) fieldsBase.nome = parsed.nome
   if (parsed.foto) fieldsBase.foto_perfil = parsed.foto
   if (parsed.waId) fieldsBase.wa_id = parsed.waId
