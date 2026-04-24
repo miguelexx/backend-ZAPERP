@@ -22,6 +22,7 @@ exports.listarClientes = async (req, res) => {
     const limitNum = Math.min(Math.max(Number(limit) || 500, 1), 5000)
     const pageNum = Math.max(Number(page) || 1, 1)
     const offset = (pageNum - 1) * limitNum
+    const hasPageParam = Object.prototype.hasOwnProperty.call(req.query || {}, 'page')
 
     const termoBusca = palavra && String(palavra).trim() ? String(palavra).trim() : null
 
@@ -36,24 +37,55 @@ exports.listarClientes = async (req, res) => {
       countQuery = countQuery.or(`nome.ilike.${term},telefone.ilike.${term},observacoes.ilike.${term}`)
     }
 
-    let listQuery = supabase
-      .from('clientes')
-      .select('id, telefone, wa_id, nome, pushname, observacoes, foto_perfil, email, empresa, ultimo_contato, criado_em')
-      .eq('company_id', cid)
-      .order('id', { ascending: false })
-      .range(offset, offset + limitNum - 1)
-
-    if (termoBusca) {
-      const term = `%${termoBusca}%`
-      listQuery = listQuery.or(`nome.ilike.${term},telefone.ilike.${term},observacoes.ilike.${term}`)
-    }
-
-    const [{ count, error: countErr }, { data, error }] = await Promise.all([countQuery, listQuery])
+    const { count, error: countErr } = await countQuery
 
     if (countErr) console.warn('[listarClientes] count:', countErr?.message)
-    if (error) throw error
+    const totalReal = typeof count === 'number' ? count : 0
 
-    const totalReal = typeof count === 'number' ? count : (data?.length ?? 0)
+    let data = []
+    if (hasPageParam) {
+      // Modo paginado explícito (compatível com front que já pagina)
+      let listQuery = supabase
+        .from('clientes')
+        .select('id, telefone, wa_id, nome, pushname, observacoes, foto_perfil, email, empresa, ultimo_contato, criado_em')
+        .eq('company_id', cid)
+        .order('id', { ascending: false })
+        .range(offset, offset + limitNum - 1)
+      if (termoBusca) {
+        const term = `%${termoBusca}%`
+        listQuery = listQuery.or(`nome.ilike.${term},telefone.ilike.${term},observacoes.ilike.${term}`)
+      }
+      const { data: pageRows, error } = await listQuery
+      if (error) throw error
+      data = pageRows || []
+    } else {
+      // Modo "todos": evita teto de 1000 do PostgREST fazendo fetch em lotes internos.
+      const CHUNK = 1000
+      const MAX_RETURN = 50000
+      const target = Math.min(totalReal || MAX_RETURN, MAX_RETURN)
+      const allRows = []
+
+      for (let start = 0; start < target; start += CHUNK) {
+        let chunkQuery = supabase
+          .from('clientes')
+          .select('id, telefone, wa_id, nome, pushname, observacoes, foto_perfil, email, empresa, ultimo_contato, criado_em')
+          .eq('company_id', cid)
+          .order('id', { ascending: false })
+          .range(start, start + CHUNK - 1)
+        if (termoBusca) {
+          const term = `%${termoBusca}%`
+          chunkQuery = chunkQuery.or(`nome.ilike.${term},telefone.ilike.${term},observacoes.ilike.${term}`)
+        }
+
+        const { data: chunkRows, error } = await chunkQuery
+        if (error) throw error
+        const rows = chunkRows || []
+        allRows.push(...rows)
+        if (rows.length < CHUNK) break
+      }
+
+      data = allRows
+    }
 
     const clientes = (data || []).map(c => ({
       id: c.id,
