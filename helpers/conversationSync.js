@@ -48,6 +48,15 @@ function getCanonicalPhone(phone) {
   return ''
 }
 
+function getCanonicalPhoneAnyIntl(phone) {
+  if (!phone) return ''
+  const s = String(phone).trim()
+  if (!s) return ''
+  const digits = s.replace(/\D/g, '')
+  if (digits.length >= 10 && digits.length <= 15) return digits
+  return ''
+}
+
 /**
  * Mescla conversas duplicadas para uma única (canonical), movendo todas as dependências.
  * @param {object} supabaseClient
@@ -229,6 +238,7 @@ async function getOrCreateCliente(supabaseClient, company_id, phone, fields = {}
   }
 
   let telefoneCanonico = getCanonicalPhone(phone)
+  const allowNonBR = fields?.allowNonBR === true
   const phones = possiblePhonesBR(phone)
   let searchPhones = phones.length > 0 ? phones : (telefoneCanonico ? [telefoneCanonico] : [])
 
@@ -243,6 +253,15 @@ async function getOrCreateCliente(supabaseClient, company_id, phone, fields = {}
         else if (with55.length === 13 && with55[4] === '9') searchPhones.push(with55.slice(0, 4) + with55.slice(5))
         if (!telefoneCanonico) telefoneCanonico = with55
       }
+    }
+  }
+
+  // Contatos internacionais (não BR): usa telefone em formato dígitos puro.
+  if (allowNonBR && searchPhones.length === 0 && phone) {
+    const anyIntl = getCanonicalPhoneAnyIntl(phone)
+    if (anyIntl) {
+      searchPhones = [anyIntl]
+      if (!telefoneCanonico) telefoneCanonico = anyIntl
     }
   }
 
@@ -299,6 +318,7 @@ async function getOrCreateCliente(supabaseClient, company_id, phone, fields = {}
     !telefoneCanonico.startsWith('lid:') &&
     (
       (telefoneCanonico.startsWith('55') && (telefoneCanonico.length === 12 || telefoneCanonico.length === 13)) ||
+      (allowNonBR && /^\d{10,15}$/.test(telefoneCanonico)) ||
       telefoneCanonico.endsWith('@g.us') ||
       (telefoneCanonico.startsWith('120') && telefoneCanonico.length >= 15)
     )

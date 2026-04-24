@@ -24,6 +24,8 @@ const MIN_PHONE_DIGITS = 10
 const BR_COUNTRY_CODE = '55'
 const MIN_BR_PHONE_LENGTH = 12
 const MAX_BR_PHONE_LENGTH = 13
+const MIN_INTL_PHONE_LENGTH = 10
+const MAX_INTL_PHONE_LENGTH = 15
 const ERROR_MESSAGE_MAX_LENGTH = 80
 const MAX_PAGES_DEFAULT = parseInt(process.env.SYNC_MAX_PAGES_PER_RUN, 10) || 20
 
@@ -77,18 +79,28 @@ function parseAgendaContact(raw) {
   const digits = phoneStr.replace(/\D/g, '')
   if (!digits || digits.length < MIN_PHONE_DIGITS) return null
 
-  const norm = normalizePhoneBR(digits)
-  if (!norm || !norm.startsWith(BR_COUNTRY_CODE) || (norm.length !== MIN_BR_PHONE_LENGTH && norm.length !== MAX_BR_PHONE_LENGTH)) {
-    return null
+  const normBR = normalizePhoneBR(digits)
+  let phoneNorm = normBR
+  let isBR = true
+  if (!phoneNorm) {
+    // Fallback internacional: permite contatos válidos fora do padrão BR.
+    if (digits.length < MIN_INTL_PHONE_LENGTH || digits.length > MAX_INTL_PHONE_LENGTH) return null
+    phoneNorm = digits
+    isBR = false
+  } else if (!phoneNorm.startsWith(BR_COUNTRY_CODE) || (phoneNorm.length !== MIN_BR_PHONE_LENGTH && phoneNorm.length !== MAX_BR_PHONE_LENGTH)) {
+    // Normalizou mas não caiu em BR canônico: ainda aceita como internacional válido.
+    if (digits.length < MIN_INTL_PHONE_LENGTH || digits.length > MAX_INTL_PHONE_LENGTH) return null
+    phoneNorm = digits
+    isBR = false
   }
 
   const nome =
     name || String(raw.short ?? raw.notify ?? raw.vname ?? '').trim() || null
   const foto = raw.imgUrl ?? raw.photo ?? raw.profilePicture ?? null
   const fotoUrl = foto && typeof foto === 'string' && foto.trim().startsWith('http') ? foto.trim() : null
-  const waId = canonicalWaId(norm, phoneStr)
+  const waId = canonicalWaId(phoneNorm, phoneStr)
 
-  return { phone: norm, nome: nome || null, foto: fotoUrl || null, rawJid: phoneStr, waId }
+  return { phone: phoneNorm, nome: nome || null, foto: fotoUrl || null, rawJid: phoneStr, waId, isBR }
 }
 
 /**
@@ -146,7 +158,7 @@ async function syncOneAgendaContact(companyId, parsed) {
     )
   }
 
-  const fieldsBase = { nomeSource: NOME_FONTE }
+  const fieldsBase = { nomeSource: NOME_FONTE, allowNonBR: true }
   if (parsed.nome) fieldsBase.nome = parsed.nome
   if (parsed.foto) fieldsBase.foto_perfil = parsed.foto
   if (parsed.waId) fieldsBase.wa_id = parsed.waId

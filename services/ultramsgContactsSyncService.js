@@ -97,6 +97,7 @@ async function syncViaContactsApi(company_id) {
         // Fotos individuais são atualizadas pelo botão "Sincronizar fotos de perfil"
         if (fields.foto) clienteFields.foto_perfil = fields.foto
         clienteFields.nomeSource = 'syncUltramsg'
+        clienteFields.allowNonBR = true
 
         const result = await getOrCreateCliente(supabase, company_id, fields.phone, clienteFields)
         if (result.cliente_id) {
