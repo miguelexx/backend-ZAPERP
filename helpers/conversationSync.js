@@ -193,7 +193,7 @@ async function mergeAndReturnCliente(supabaseClient, company_id, existente, phon
   if (Object.keys(updates).length > 0) {
     await supabaseClient.from('clientes').update(updates).eq('id', existente.id).eq('company_id', company_id)
   }
-  return { cliente_id: existente.id }
+  return { cliente_id: existente.id, created: false, changed: Object.keys(updates).length > 0 }
 }
 
 /**
@@ -330,7 +330,7 @@ async function getOrCreateCliente(supabaseClient, company_id, phone, fields = {}
     .single()
 
   if (!errInsert && novoCliente?.id) {
-    return { cliente_id: novoCliente.id }
+    return { cliente_id: novoCliente.id, created: true, changed: true }
   }
 
   // 5) 23505: race condition — buscar existente da MESMA company (unique é company_id + telefone)
@@ -403,11 +403,11 @@ async function getOrCreateCliente(supabaseClient, company_id, phone, fields = {}
       }
     }
     
-    if (foundCo?.id) return { cliente_id: foundCo.id }
+    if (foundCo?.id) return { cliente_id: foundCo.id, created: false, changed: false }
   }
 
   console.warn('[getOrCreateCliente] Insert falhou, continuando sem cliente:', errInsert?.code || errInsert?.message || 'unknown', 'company_id:', company_id, 'telefone:', telefoneCanonico)
-  return { cliente_id: null }
+  return { cliente_id: null, created: false, changed: false }
 }
 
 /**

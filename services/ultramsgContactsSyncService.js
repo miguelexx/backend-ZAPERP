@@ -14,7 +14,7 @@ const { getProvider } = require('./providers')
 const { getEmpresaWhatsappConfig } = require('./whatsappConfigService')
 const { getOrCreateCliente } = require('../helpers/conversationSync')
 const { syncUltraMsgContact } = require('./ultramsgSyncContact')
-const { normalizePhoneBR, possiblePhonesBR, phoneKeyBR } = require('../helpers/phoneHelper')
+const { phoneKeyBR } = require('../helpers/phoneHelper')
 const { processContactsPage, parseAgendaContact } = require('./contactSyncService')
 
 // Chunks alinhados ao max da API (~1000); paginação correta via hasMore (ver ultramsg getContacts)
@@ -98,19 +98,11 @@ async function syncViaContactsApi(company_id) {
         if (fields.foto) clienteFields.foto_perfil = fields.foto
         clienteFields.nomeSource = 'syncUltramsg'
 
-        const variants = possiblePhonesBR(fields.phone).length > 0 ? possiblePhonesBR(fields.phone) : [fields.phone]
-        const { data: existente } = await supabase
-          .from('clientes')
-          .select('id')
-          .eq('company_id', company_id)
-          .in('telefone', variants)
-          .limit(1)
-          .maybeSingle()
-
         const result = await getOrCreateCliente(supabase, company_id, fields.phone, clienteFields)
         if (result.cliente_id) {
-          if (existente?.id) stats.updated++
-          else stats.inserted++
+          if (result.created === true) stats.inserted++
+          else if (result.changed === true) stats.updated++
+          else stats.skipped++
         } else {
           stats.skipped++
         }

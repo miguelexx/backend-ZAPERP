@@ -187,23 +187,15 @@ async function syncOneAgendaContact(companyId, parsed) {
     }
   }
 
-  const variants = possiblePhonesBR(parsed.phone).length > 0 ? possiblePhonesBR(parsed.phone) : [parsed.phone]
-  const { data: exAntes } = await supabase
-    .from('clientes')
-    .select('id')
-    .eq('company_id', Number(companyId))
-    .in('telefone', variants)
-    .order('id', { ascending: true })
-    .limit(1)
-    .maybeSingle()
-  const existia = rows.length === 1 || !!exAntes?.id
-
   const r = await getOrCreateCliente(supabase, companyId, parsed.phone, fieldsBase)
   if (r.cliente_id) {
-    if (existia) {
+    if (r.created === true) {
+      return { inserted: 1, updated: 0, skipped: 0, conflict: false }
+    }
+    if (r.changed === true) {
       return { inserted: 0, updated: 1, skipped: 0, conflict: false }
     }
-    return { inserted: 1, updated: 0, skipped: 0, conflict: false }
+    return { inserted: 0, updated: 0, skipped: 1, conflict: false }
   }
   return { inserted: 0, updated: 0, skipped: 1, conflict: false }
 }
@@ -547,15 +539,17 @@ async function runContactSyncFull(company_id, opts = {}) {
     // 2. Buscar TODOS os contatos da API, percorrendo páginas até hasMore=false.
     //    UltraMsg tipicamente devolve tudo na página 1, mas o loop garante que
     //    nenhum contato seja perdido caso a API tenha limite interno e retorne hasMore.
-    const MAX_FETCH_PAGES = 50  // teto de segurança (50 × 10000 = 500 000 contatos)
+    const MAX_FETCH_PAGES = 50  // teto de segurança (50 x 10000 = 500000 contatos)
     let allContacts = []
     let fetchPage = 1
     let keepFetching = true
+    let totalAgendaRaw = 0
 
     while (keepFetching && fetchPage <= MAX_FETCH_PAGES) {
       const gcr = await provider.getContacts(fetchPage, 10000, { companyId: company_id })
       const pageData = Array.isArray(gcr?.data) ? gcr.data : []
       allContacts = allContacts.concat(pageData)
+      totalAgendaRaw += Number(gcr?.rawCount || pageData.length || 0)
 
       console.log(`[CONTACT-SYNC] empresa=${company_id} fetch p${fetchPage}: ${pageData.length} contatos (hasMore=${gcr?.hasMore})`)
 
@@ -592,6 +586,9 @@ async function runContactSyncFull(company_id, opts = {}) {
     let totalCriados = 0
     let totalAtualizados = 0
     let totalConflitados = 0
+    let totalIgnorados = 0
+    let totalInvalidos = 0
+    let totalDuplicadosNoLote = 0
     let loteNum = Math.floor(startOffset / CHUNK_SIZE) + 1
 
     // 4. Processar em lotes com pausa entre eles.
@@ -603,13 +600,19 @@ async function runContactSyncFull(company_id, opts = {}) {
       }
 
       const chunk = allContacts.slice(offset, offset + CHUNK_SIZE)
-      let lCriados = 0, lAtualizados = 0, lProcessados = 0, lConflitados = 0
+      let lCriados = 0, lAtualizados = 0, lProcessados = 0, lConflitados = 0, lIgnorados = 0, lInvalidos = 0, lDuplicados = 0
 
       for (const c of chunk) {
         const parsed = parseAgendaContact(c)
-        if (!parsed || !parsed.phone) continue
+        if (!parsed || !parsed.phone) {
+          lInvalidos++
+          continue
+        }
         const key = phoneKeyBR(parsed.phone)
-        if (seen.has(key)) continue
+        if (seen.has(key)) {
+          lDuplicados++
+          continue
+        }
         seen.add(key)
 
         try {
@@ -617,6 +620,7 @@ async function runContactSyncFull(company_id, opts = {}) {
           lProcessados++
           lCriados += r.inserted ? 1 : 0
           lAtualizados += r.updated ? 1 : 0
+          lIgnorados += r.skipped ? 1 : 0
           if (r.conflict) lConflitados++
         } catch (e) {
           console.warn(`[CONTACT-SYNC] lote ${loteNum} contato erro:`, e?.message || e)
@@ -627,15 +631,19 @@ async function runContactSyncFull(company_id, opts = {}) {
       totalCriados += lCriados
       totalAtualizados += lAtualizados
       totalConflitados += lConflitados
+      totalIgnorados += lIgnorados
+      totalInvalidos += lInvalidos
+      totalDuplicadosNoLote += lDuplicados
 
       // Salvar checkpoint após cada lote concluído.
       await updateCheckpoint(company_id, loteNum + 1, {
         loteNum, offset, totalContatos: allContacts.length,
-        totalProcessados, totalCriados, totalAtualizados
+        totalProcessados, totalCriados, totalAtualizados, totalIgnorados, totalInvalidos, totalDuplicadosNoLote
       })
       await registrarEvento(company_id, TIPOS.SYNC_LOTE, `Lote ${loteNum} de contatos concluído`, {
         loteNum, offset, tamanho: chunk.length,
-        criados: lCriados, atualizados: lAtualizados, processados: lProcessados,
+        criados: lCriados, atualizados: lAtualizados, processados: lProcessados, ignorados: lIgnorados,
+        invalidos: lInvalidos, duplicados: lDuplicados,
         restantes: Math.max(0, allContacts.length - offset - CHUNK_SIZE)
       })
 
@@ -647,11 +655,39 @@ async function runContactSyncFull(company_id, opts = {}) {
       }
     }
 
+    const { count: totalClientesBanco } = await supabase
+      .from('clientes')
+      .select('*', { count: 'exact', head: true })
+      .eq('company_id', Number(company_id))
+
     await registrarEvento(company_id, TIPOS.SYNC_FIM, 'Contact sync gradual finalizada', {
-      totalProcessados, totalCriados, totalAtualizados, totalConflitados, lotes: loteNum - 1
+      totalAgendaRaw,
+      totalAgendaValidos: allContacts.length,
+      totalProcessados,
+      totalCriados,
+      totalAtualizados,
+      totalIgnorados,
+      totalInvalidos,
+      totalDuplicadosNoLote,
+      totalConflitados,
+      totalClientesBanco: Number(totalClientesBanco || 0),
+      lotes: loteNum - 1
     })
 
-    return { ok: true, totalProcessados, totalCriados, totalAtualizados, totalConflitados, paginas: loteNum - 1 }
+    return {
+      ok: true,
+      totalAgendaRaw,
+      totalAgendaValidos: allContacts.length,
+      totalProcessados,
+      totalCriados,
+      totalAtualizados,
+      totalIgnorados,
+      totalInvalidos,
+      totalDuplicadosNoLote,
+      totalConflitados,
+      totalClientesBanco: Number(totalClientesBanco || 0),
+      paginas: loteNum - 1
+    }
   } catch (e) {
     const msg = e?.message || String(e)
     await registrarEvento(company_id, TIPOS.FALHA, 'Contact sync falhou', { error: msg.slice(0, 200) })
