@@ -9,10 +9,16 @@ const {
 const ABSENCE_FALLBACK_MESSAGE =
   'Seu atendimento foi encerrado por falta de interação no momento. Caso precise continuar, basta nos enviar uma nova mensagem.'
 
+function isAbsenceFinalizationEnabledGlobally() {
+  const raw = String(process.env.ABSENCE_FINALIZATION_GLOBAL_ENABLED || '').trim().toLowerCase()
+  return raw === '1' || raw === 'true'
+}
+
 function getAbsenceConfig(chatbotConfig) {
   const cfg = chatbotConfig || {}
+  const globalEnabled = isAbsenceFinalizationEnabledGlobally()
   return {
-    ativo: !!cfg.finalizar_por_ausencia_ativo,
+    ativo: globalEnabled && !!cfg.finalizar_por_ausencia_ativo,
     prazo: Math.max(1, Number(cfg.finalizar_por_ausencia_prazo) || 24),
     unidade: String(cfg.finalizar_por_ausencia_unidade || 'horas_corridas').trim().toLowerCase(),
     mensagem: String(cfg.finalizar_por_ausencia_mensagem || '').trim() || ABSENCE_FALLBACK_MESSAGE,
@@ -201,6 +207,9 @@ async function getLastMessage(conversa_id, company_id) {
 }
 
 async function finalizeConversationsByAbsence() {
+  if (!isAbsenceFinalizationEnabledGlobally()) {
+    return { ok: true, processadas: 0, analisadas: 0, disabledByGlobalFlag: true }
+  }
   const { data: configs } = await supabase.from('ia_config').select('company_id')
   if (!configs?.length) return { ok: true, processadas: 0, analisadas: 0 }
 
