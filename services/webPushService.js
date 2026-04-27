@@ -6,6 +6,15 @@ const supabase = require('../config/supabase')
 
 let configured = false
 
+const DEFAULT_PUSH_TTL_SECONDS = 60 * 60 * 24 * 7 // 7 dias
+const MAX_PUSH_TTL_SECONDS = 60 * 60 * 24 * 28 // limite prático comum: 28 dias
+
+function resolvePushTtlSeconds() {
+  const raw = Number(process.env.WEB_PUSH_TTL_SECONDS)
+  if (!Number.isFinite(raw) || raw <= 0) return DEFAULT_PUSH_TTL_SECONDS
+  return Math.min(Math.floor(raw), MAX_PUSH_TTL_SECONDS)
+}
+
 function ensureVapidConfigured() {
   if (configured) return true
   const pub = String(process.env.VAPID_PUBLIC_KEY || '').trim()
@@ -46,8 +55,9 @@ async function deleteSubscriptionByEndpoint(endpoint) {
 async function sendToSubscription(subscription, payloadUtf8) {
   if (!ensureVapidConfigured()) return { ok: false, reason: 'vapid_not_configured' }
   try {
+    const ttl = resolvePushTtlSeconds()
     await webpush.sendNotification(subscription, payloadUtf8, {
-      TTL: 120,
+      TTL: ttl,
       urgency: 'high',
     })
     return { ok: true }
