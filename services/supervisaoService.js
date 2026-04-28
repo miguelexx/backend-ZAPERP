@@ -135,7 +135,8 @@ async function listLastMessagesByConversation(companyId, conversationIds) {
     .eq('company_id', companyId)
     .in('conversa_id', conversationIds)
     .in('direcao', ['in', 'out'])
-    .order('criado_em', { ascending: false })
+    .not('criado_em', 'is', null)
+    .order('criado_em', { ascending: false, nullsFirst: false })
 
   if (error) throw error
 
@@ -267,6 +268,70 @@ async function calculateAvgResponseMinutes(companyId, conversationIds, fromDate)
   return Number((totalMinutes / totalPairs).toFixed(2))
 }
 
+async function calculateResponseStatsByConversation(companyId, conversations, fromDate) {
+  const conversationIds = (conversations || []).map((c) => c.id).filter((id) => id != null)
+  if (!conversationIds.length) {
+    return {
+      globalAverage: null,
+      byConversation: new Map(),
+    }
+  }
+
+  let query = supabase
+    .from('mensagens')
+    .select('conversa_id, criado_em, direcao')
+    .eq('company_id', companyId)
+    .in('conversa_id', conversationIds)
+    .in('direcao', ['in', 'out'])
+    .not('criado_em', 'is', null)
+    .order('criado_em', { ascending: true, nullsFirst: false })
+
+  if (fromDate) query = query.gte('criado_em', fromDate.toISOString())
+
+  const { data, error } = await query
+  if (error) throw error
+
+  const byConversationRows = new Map()
+  for (const row of data || []) {
+    if (!byConversationRows.has(row.conversa_id)) byConversationRows.set(row.conversa_id, [])
+    byConversationRows.get(row.conversa_id).push(row)
+  }
+
+  const avgByConversation = new Map()
+  let globalMinutes = 0
+  let globalPairs = 0
+
+  for (const [convId, rows] of byConversationRows.entries()) {
+    let pendingIn = null
+    let convPairs = 0
+    let convMinutes = 0
+    for (const row of rows) {
+      if (row.direcao === 'in' && pendingIn == null) {
+        pendingIn = row
+        continue
+      }
+      if (row.direcao === 'out' && pendingIn) {
+        const diff = (new Date(row.criado_em).getTime() - new Date(pendingIn.criado_em).getTime()) / 60000
+        if (diff >= 0) {
+          convMinutes += diff
+          convPairs += 1
+          globalMinutes += diff
+          globalPairs += 1
+        }
+        pendingIn = null
+      }
+    }
+    if (convPairs > 0) {
+      avgByConversation.set(convId, Number((convMinutes / convPairs).toFixed(2)))
+    }
+  }
+
+  return {
+    globalAverage: globalPairs > 0 ? Number((globalMinutes / globalPairs).toFixed(2)) : null,
+    byConversation: avgByConversation,
+  }
+}
+
 async function listAtendimentosToday(companyId) {
   const todayIso = startOfToday().toISOString()
   const { data, error } = await supabase
@@ -334,10 +399,10 @@ function filterPendingItems(items, filters = {}) {
 
 async function getResumo(companyId) {
   const insights = await buildConversationInsights(companyId)
-  const [usuarios, atendimentosHoje, tempoMedioGlobal] = await Promise.all([
+  const [usuarios, atendimentosHoje, responseStats] = await Promise.all([
     listUsuariosCompany(companyId),
     listAtendimentosToday(companyId),
-    calculateAvgResponseMinutes(companyId, insights.conversations.map((c) => c.id), startOfToday()),
+    calculateResponseStatsByConversation(companyId, insights.conversations, startOfToday()),
   ])
 
   const funcionarios = usuarios.map((u) => {
@@ -345,6 +410,12 @@ async function getResumo(companyId) {
     const assignedPending = insights.pending.filter((p) => Number(p.atendente_id) === Number(u.id))
     const atrasados = assignedPending.filter((p) => p.atrasado)
     const assumidos = atendimentosHoje.filter((a) => a.acao === 'assumiu' && (Number(a.para_usuario_id) === Number(u.id) || Number(a.de_usuario_id) === Number(u.id))).length
+    const mediasAtendente = assignedOpen
+      .map((c) => responseStats.byConversation.get(c.id))
+      .filter((x) => Number.isFinite(Number(x)))
+    const mediaAtendente = mediasAtendente.length > 0
+      ? Number((mediasAtendente.reduce((acc, x) => acc + Number(x), 0) / mediasAtendente.length).toFixed(2))
+      : null
     const maiorTempo = assignedPending.length > 0 ? Math.max(...assignedPending.map((p) => p.minutos_aguardando)) : 0
     const nivel = assignedPending.some((p) => p.nivel === 'critico')
       ? 'critico'
@@ -360,7 +431,7 @@ async function getResumo(companyId) {
       atendimentos_em_aberto: assignedOpen.length,
       clientes_sem_resposta: assignedPending.length,
       clientes_atrasados: atrasados.length,
-      tempo_medio_resposta_minutos: null,
+      tempo_medio_resposta_minutos: mediaAtendente,
       maior_tempo_sem_resposta_minutos: maiorTempo,
       nivel,
     }
@@ -386,14 +457,21 @@ async function getResumo(companyId) {
 
   return {
     sla_minutos_sem_resposta: insights.slaMinutes,
+    slaMinutosSemResposta: insights.slaMinutes,
     cards: {
       atendimentos_abertos: insights.conversations.length,
+      atendimentosAbertos: insights.conversations.length,
       aguardando_funcionario: insights.pending.length,
+      aguardandoFuncionario: insights.pending.length,
       atrasados: insights.pending.filter((p) => p.atrasado).length,
-      tempo_medio_resposta_minutos: tempoMedioGlobal,
+      tempo_medio_resposta_minutos: responseStats.globalAverage,
+      tempoMedioRespostaMinutos: responseStats.globalAverage,
     },
     funcionarios,
+    equipe_hoje: funcionarios,
+    equipeHoje: funcionarios,
     clientes_urgentes: clientesUrgentes,
+    clientesUrgentes,
   }
 }
 
@@ -403,8 +481,27 @@ async function getClientesPendentes(companyId, filters) {
 
   return {
     sla_minutos_sem_resposta: insights.slaMinutes,
+    slaMinutosSemResposta: insights.slaMinutes,
     total: filtered.length,
+    total_clientes: filtered.length,
+    totalClientes: filtered.length,
     clientes: filtered.map((item) => ({
+      conversa_id: item.conversa_id,
+      cliente_nome: item.cliente_nome,
+      telefone: item.telefone,
+      foto_perfil: item.foto_perfil,
+      departamento_id: item.departamento_id,
+      departamento_nome: item.departamento_nome,
+      atendente_id: item.atendente_id,
+      atendente_nome: item.atendente_nome,
+      ultima_mensagem_texto: item.ultima_mensagem_texto,
+      ultima_mensagem_em: item.ultima_mensagem_em,
+      minutos_aguardando: item.minutos_aguardando,
+      nivel: item.nivel,
+      status_atendimento: item.status_atendimento,
+      pode_abrir_conversa: true,
+    })),
+    clientes_pendentes: filtered.map((item) => ({
       conversa_id: item.conversa_id,
       cliente_nome: item.cliente_nome,
       telefone: item.telefone,
