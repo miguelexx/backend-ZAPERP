@@ -28,25 +28,39 @@ async function resolveUltraMsgReplyMessageId(supabaseClient, company_id, convers
   const rid = String(replyToIdRaw ?? '').trim()
   if (!rid) return null
 
-  // Se for apenas dígitos, tratar sempre como `mensagens.id` (inclusive bigint/ids longos).
-  // Nunca enviar ID interno numérico para UltraMsg `msgId`, pois não cria citação no WhatsApp.
-  if (/^\d+$/.test(rid)) {
-    try {
-      const { data: refMsg } = await supabaseClient
-        .from('mensagens')
-        .select('whatsapp_id')
-        .eq('company_id', company_id)
-        .eq('conversa_id', Number(conversa_id))
-        .eq('id', rid)
-        .maybeSingle()
-      const wa = refMsg?.whatsapp_id != null ? String(refMsg.whatsapp_id).trim() : ''
-      if (wa) return wa
-    } catch (_) {}
-    return null
-  }
+  // 1) Se já existir mensagem com whatsapp_id igual ao rid, ele já é o id canônico do WhatsApp.
+  try {
+    const { data: byWhatsappId } = await supabaseClient
+      .from('mensagens')
+      .select('id')
+      .eq('company_id', company_id)
+      .eq('conversa_id', Number(conversa_id))
+      .eq('whatsapp_id', rid)
+      .maybeSingle()
+    if (byWhatsappId) return rid
+  } catch (_) {}
 
-  // Para ids com formato de mensagem WhatsApp/UltraMsg (ex.: false_...@c.us_...).
-  return rid
+  // 2) Se o frontend enviou mensagens.id (UUID/bigint), resolver para whatsapp_id real.
+  // Nunca enviar id interno para UltraMsg `msgId`, pois não cria citação no WhatsApp.
+  try {
+    const { data: refMsg } = await supabaseClient
+      .from('mensagens')
+      .select('whatsapp_id')
+      .eq('company_id', company_id)
+      .eq('conversa_id', Number(conversa_id))
+      .eq('id', rid)
+      .maybeSingle()
+    const wa = refMsg?.whatsapp_id != null ? String(refMsg.whatsapp_id).trim() : ''
+    if (wa) return wa
+  } catch (_) {}
+
+  // 3) Fallback seguro: aceitar apenas formatos que parecem id real de mensagem WA/UltraMsg.
+  // Evita enviar UUID/ID interno como msgId (causa mensagem avulsa no WhatsApp do cliente).
+  const isUuid =
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(rid)
+  const looksLikeWhatsAppId = rid.includes('@') || rid.includes('_')
+  if (!isUuid && looksLikeWhatsAppId) return rid
+  return null
 }
 
 /**
@@ -3086,7 +3100,15 @@ exports.putPixConfig = async (req, res) => {
       .select('tipo_chave, chave_pix, nome_recebedor, mensagem_padrao, atualizado_em')
       .single()
 
-    if (error) return res.status(500).json({ error: error.message })
+    if (error) {
+      const msg = String(error.message || '')
+      if (msg.includes('empresa_pix_config') || msg.includes('does not exist') || msg.includes('schema cache')) {
+        return res.status(400).json({
+          error: 'Funcionalidade Pix ainda não habilitada no banco. Aplique a migration 20260427233000_empresa_pix_config.sql e tente novamente.'
+        })
+      }
+      return res.status(500).json({ error: error.message })
+    }
     return res.json({ ok: true, config: data })
   } catch (err) {
     console.error('[putPixConfig]', err)
@@ -3104,7 +3126,15 @@ exports.enviarMensagemPix = async (req, res) => {
       .eq('company_id', Number(company_id))
       .maybeSingle()
 
-    if (error) return res.status(500).json({ error: error.message })
+    if (error) {
+      const msg = String(error.message || '')
+      if (msg.includes('empresa_pix_config') || msg.includes('does not exist') || msg.includes('schema cache')) {
+        return res.status(400).json({
+          error: 'Funcionalidade Pix ainda não habilitada no banco. Aplique a migration 20260427233000_empresa_pix_config.sql.'
+        })
+      }
+      return res.status(500).json({ error: error.message })
+    }
     if (!data) return res.status(400).json({ error: 'Pix não configurado para esta empresa.' })
 
     const mensagem = buildPixMessageFromConfig(data)
