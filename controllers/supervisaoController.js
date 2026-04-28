@@ -42,8 +42,8 @@ exports.clientesPendentes = async (req, res) => {
     if (req.query.departamento_id !== undefined && departamentoId == null) {
       return res.status(400).json({ error: 'departamento_id inválido' })
     }
-    if (nivel && !['normal', 'atencao', 'critico'].includes(nivel)) {
-      return res.status(400).json({ error: 'nivel inválido. Use: normal, atencao ou critico' })
+    if (nivel && !['normal', 'atencao', 'prioritario', 'critico'].includes(nivel)) {
+      return res.status(400).json({ error: 'nivel inválido. Use: normal, atencao, prioritario ou critico' })
     }
     if (req.query.somente_atrasados !== undefined && somenteAtrasados == null) {
       return res.status(400).json({ error: 'somente_atrasados inválido. Use true/false' })
@@ -64,6 +64,20 @@ exports.clientesPendentes = async (req, res) => {
   } catch (error) {
     console.error('[SUPERVISAO][clientes-pendentes] erro:', error)
     return res.status(500).json({ error: 'Erro ao listar clientes pendentes' })
+  }
+}
+
+exports.relatorioDiarioGestor = async (req, res) => {
+  try {
+    const { company_id } = req.user
+    const data = await supervisaoService.getRelatorioDiarioGestor(company_id, req.query.data)
+    return res.json(data)
+  } catch (error) {
+    if (error?.statusCode === 400) {
+      return res.status(400).json({ error: error.message })
+    }
+    console.error('[SUPERVISAO][relatorio-diario] erro:', error)
+    return res.status(500).json({ error: 'Erro ao gerar relatório diário do gestor' })
   }
 }
 
