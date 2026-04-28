@@ -28,37 +28,24 @@ async function resolveUltraMsgReplyMessageId(supabaseClient, company_id, convers
   const rid = String(replyToIdRaw ?? '').trim()
   if (!rid) return null
 
-  const looksLikeWaMessageKey =
-    rid.includes('@') ||
-    rid.includes('_') ||
-    rid.length >= 22
-
-  if (!looksLikeWaMessageKey) {
-    const num = Number(rid)
-    const allDigits = /^\d+$/.test(rid)
-    const safeInt =
-      allDigits &&
-      Number.isFinite(num) &&
-      Number.isInteger(num) &&
-      num > 0 &&
-      num <= Number.MAX_SAFE_INTEGER &&
-      String(num) === rid
-    if (safeInt) {
-      try {
-        const { data: refMsg } = await supabaseClient
-          .from('mensagens')
-          .select('whatsapp_id')
-          .eq('company_id', company_id)
-          .eq('conversa_id', Number(conversa_id))
-          .eq('id', num)
-          .maybeSingle()
-        const wa = refMsg?.whatsapp_id != null ? String(refMsg.whatsapp_id).trim() : ''
-        if (wa) return wa
-      } catch (_) {}
-      return null
-    }
+  // Se for apenas dígitos, tratar sempre como `mensagens.id` (inclusive bigint/ids longos).
+  // Nunca enviar ID interno numérico para UltraMsg `msgId`, pois não cria citação no WhatsApp.
+  if (/^\d+$/.test(rid)) {
+    try {
+      const { data: refMsg } = await supabaseClient
+        .from('mensagens')
+        .select('whatsapp_id')
+        .eq('company_id', company_id)
+        .eq('conversa_id', Number(conversa_id))
+        .eq('id', rid)
+        .maybeSingle()
+      const wa = refMsg?.whatsapp_id != null ? String(refMsg.whatsapp_id).trim() : ''
+      if (wa) return wa
+    } catch (_) {}
+    return null
   }
 
+  // Para ids com formato de mensagem WhatsApp/UltraMsg (ex.: false_...@c.us_...).
   return rid
 }
 
