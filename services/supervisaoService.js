@@ -66,6 +66,48 @@ function normalizePhone(value) {
   return String(value || '').replace(/\D/g, '')
 }
 
+/** Conversas abertas do atendente com status `em_atendimento`. */
+function countConversasEmAtendimento(conversations, usuarioId) {
+  const uid = Number(usuarioId)
+  return (conversations || []).filter(
+    (c) =>
+      Number(c.atendente_id) === uid &&
+      String(c.status_atendimento || '').toLowerCase() === 'em_atendimento'
+  ).length
+}
+
+const MSG_STATS_PAGE = 1000
+
+/**
+ * Carrega todas as mensagens in/out para cálculo de SLA/tempo médio.
+ * PostgREST limita ~1000 linhas por request — sem paginação o tempo médio global zera com volume alto.
+ */
+async function fetchMensagensInOutPaginated(companyId, conversationIds, { fromDate = null, toDateExclusive = null } = {}) {
+  if (!conversationIds?.length) return []
+  const all = []
+  let offset = 0
+  for (;;) {
+    let q = supabase
+      .from('mensagens')
+      .select('conversa_id, criado_em, direcao')
+      .eq('company_id', companyId)
+      .in('conversa_id', conversationIds)
+      .in('direcao', ['in', 'out'])
+      .not('criado_em', 'is', null)
+      .order('criado_em', { ascending: true, nullsFirst: false })
+    if (fromDate) q = q.gte('criado_em', fromDate.toISOString())
+    if (toDateExclusive) q = q.lt('criado_em', toDateExclusive.toISOString())
+    q = q.range(offset, offset + MSG_STATS_PAGE - 1)
+    const { data, error } = await q
+    if (error) throw error
+    const rows = data || []
+    all.push(...rows)
+    if (rows.length < MSG_STATS_PAGE) break
+    offset += MSG_STATS_PAGE
+  }
+  return all
+}
+
 /**
  * Garante valor seguro para renderização no React (nunca retorna objeto/array cru).
  * JSON/objetos viram string; evita erro "Objects are not valid as a React child".
@@ -334,23 +376,13 @@ async function buildConversationInsights(companyId) {
   }
 }
 
-async function calculateAvgResponseMinutes(companyId, conversationIds, fromDate) {
+async function calculateAvgResponseMinutes(companyId, conversationIds, fromDate, toDateExclusive = null) {
   if (!conversationIds?.length) return null
 
-  let query = supabase
-    .from('mensagens')
-    .select('conversa_id, criado_em, direcao')
-    .eq('company_id', companyId)
-    .in('conversa_id', conversationIds)
-    .in('direcao', ['in', 'out'])
-    .order('criado_em', { ascending: true })
-
-  if (fromDate) {
-    query = query.gte('criado_em', fromDate.toISOString())
-  }
-
-  const { data, error } = await query
-  if (error) throw error
+  const data = await fetchMensagensInOutPaginated(companyId, conversationIds, {
+    fromDate,
+    toDateExclusive,
+  })
 
   const byConversation = new Map()
   for (const m of data || []) {
@@ -383,7 +415,7 @@ async function calculateAvgResponseMinutes(companyId, conversationIds, fromDate)
   return Number((totalMinutes / totalPairs).toFixed(2))
 }
 
-async function calculateResponseStatsByConversation(companyId, conversations, fromDate) {
+async function calculateResponseStatsByConversation(companyId, conversations, fromDate, toDateExclusive = null) {
   const conversationIds = (conversations || []).map((c) => c.id).filter((id) => id != null)
   if (!conversationIds.length) {
     return {
@@ -392,19 +424,10 @@ async function calculateResponseStatsByConversation(companyId, conversations, fr
     }
   }
 
-  let query = supabase
-    .from('mensagens')
-    .select('conversa_id, criado_em, direcao')
-    .eq('company_id', companyId)
-    .in('conversa_id', conversationIds)
-    .in('direcao', ['in', 'out'])
-    .not('criado_em', 'is', null)
-    .order('criado_em', { ascending: true, nullsFirst: false })
-
-  if (fromDate) query = query.gte('criado_em', fromDate.toISOString())
-
-  const { data, error } = await query
-  if (error) throw error
+  const data = await fetchMensagensInOutPaginated(companyId, conversationIds, {
+    fromDate,
+    toDateExclusive,
+  })
 
   const byConversationRows = new Map()
   for (const row of data || []) {
@@ -537,6 +560,7 @@ async function getResumo(companyId) {
       ? Number((mediasAtendente.reduce((acc, x) => acc + Number(x), 0) / mediasAtendente.length).toFixed(2))
       : null
     const maiorTempo = assignedPending.length > 0 ? Math.max(...assignedPending.map((p) => p.minutos_aguardando)) : 0
+    const emAtendimento = countConversasEmAtendimento(assignedOpen, u.id)
     const nivel = assignedPending.some((p) => p.nivel === 'critico')
       ? 'critico'
       : assignedPending.some((p) => p.nivel === 'prioritario')
@@ -550,7 +574,10 @@ async function getResumo(companyId) {
       nome: safeDisplayString(u.nome || 'Sem nome', 120),
       perfil: u.perfil != null ? safeDisplayString(u.perfil, 40) : null,
       atendimentos_assumidos_hoje: assumidos,
+      /** Alias semântico: mesma contagem de eventos `assumiu` no dia (timezone servidor). */
+      atendimentos_assumidos_no_dia: assumidos,
       atendimentos_em_aberto: assignedOpen.length,
+      conversas_em_atendimento: emAtendimento,
       clientes_sem_resposta: assignedPending.length,
       clientes_atrasados: atrasados.length,
       tempo_medio_resposta_minutos: mediaAtendente,
@@ -777,7 +804,7 @@ async function getRelatorioDiarioGestor(companyId, dateStr) {
       .eq('company_id', companyId)
       .gte('criado_em', start.toISOString())
       .lt('criado_em', end.toISOString()),
-    calculateResponseStatsByConversation(companyId, insights.conversations, start),
+    calculateResponseStatsByConversation(companyId, insights.conversations, start, end),
   ])
   if (atendimentosDia.error) throw atendimentosDia.error
   const atendimentosRows = atendimentosDia.data || []
@@ -788,10 +815,18 @@ async function getRelatorioDiarioGestor(companyId, dateStr) {
     const pendUser = insights.pending.filter((p) => Number(p.atendente_id) === Number(u.id))
     const medias = convsUser.map((c) => responseStats.byConversation.get(c.id)).filter((x) => Number.isFinite(Number(x)))
     const tempoMedio = medias.length ? Number((medias.reduce((a, b) => a + Number(b), 0) / medias.length).toFixed(2)) : null
+    const assumidosNoDia = atendimentosRows.filter(
+      (a) =>
+        a.acao === 'assumiu' &&
+        (Number(a.para_usuario_id) === Number(u.id) || Number(a.de_usuario_id) === Number(u.id))
+    ).length
+    const emAtendimento = countConversasEmAtendimento(convsUser, u.id)
     return {
       usuario_id: u.id,
       nome: safeDisplayString(u.nome || 'Sem nome', 120),
-      atendimentos_assumidos_hoje: atendimentosRows.filter((a) => a.acao === 'assumiu' && (Number(a.para_usuario_id) === Number(u.id) || Number(a.de_usuario_id) === Number(u.id))).length,
+      atendimentos_assumidos_hoje: assumidosNoDia,
+      atendimentos_assumidos_no_dia: assumidosNoDia,
+      conversas_em_atendimento: emAtendimento,
       clientes_sem_resposta: pendUser.length,
       maior_tempo_sem_resposta_minutos: pendUser.length ? Math.max(...pendUser.map((p) => p.minutos_aguardando)) : 0,
       tempo_medio_resposta_minutos: tempoMedio,
@@ -836,11 +871,16 @@ async function getRelatorioDiarioGestor(companyId, dateStr) {
       fim: end.toISOString(),
     },
     totais: {
+      /** Quantidade de linhas na tabela `atendimentos` no dia (movimentações — não é conversas abertas). */
+      registros_movimentacao_dia: atendimentosRows.length,
       atendimentos_dia: atendimentosRows.length,
+      /** Conversas com status aberta/em_atendimento/aguardando_cliente (painel “Atendimentos abertos”). */
+      atendimentos_abertos: insights.conversations.length,
       conversas_abertas: insights.conversations.length,
       aguardando_funcionario: insights.pending.length,
       atrasados_30min: insights.pending.filter((p) => p.minutos_aguardando > DEFAULT_DELAY_MINUTES).length,
       tempo_medio_resposta_minutos: responseStats.globalAverage,
+      tempoMedioRespostaMinutos: responseStats.globalAverage,
     },
     ranking_funcionarios: ranking,
     departamentos_maior_demanda: setores,
