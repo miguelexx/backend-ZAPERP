@@ -5,7 +5,8 @@ const supabase = require('../config/supabase')
 const { isGroupConversation } = require('../helpers/conversaHelper')
 const webPushService = require('./webPushService')
 
-const MAX_MESSAGE_AGE_MS = 3 * 60 * 1000
+// Webhooks/sync podem atrasar alguns minutos; tolerância maior evita silenciar push válido por “mensagem velha”.
+const MAX_MESSAGE_AGE_MS = 15 * 60 * 1000
 
 function isInboundEligibleForPush(payload) {
   if (!payload || typeof payload !== 'object') return false
@@ -105,6 +106,7 @@ function buildPushPayloadJson({
     badge: absolutizeUrl('/brand/zaperp-favicon.svg'),
     tag: `zap-${String(mensagem_id)}`,
     renotify: false,
+    priority: 'high',
     data: {
       company_id: Number(company_id),
       conversaId: String(conversa_id),
