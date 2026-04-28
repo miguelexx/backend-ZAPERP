@@ -700,12 +700,18 @@ async function getResumo(companyId) {
       motivo: `Cliente aguardando resposta há ${p.minutos_aguardando} minutos`,
     }))
 
+  const totalConversasAbertas = insights.conversations.length
+
   return {
+    /** Alias na raiz — alguns clients não leem `cards.*`. */
+    atendimentos_abertos: totalConversasAbertas,
+    atendimentosAbertos: totalConversasAbertas,
+    total_conversas_abertas: totalConversasAbertas,
     sla_minutos_sem_resposta: insights.slaMinutes,
     slaMinutosSemResposta: insights.slaMinutes,
     cards: {
-      atendimentos_abertos: insights.conversations.length,
-      atendimentosAbertos: insights.conversations.length,
+      atendimentos_abertos: totalConversasAbertas,
+      atendimentosAbertos: totalConversasAbertas,
       aguardando_funcionario: insights.pending.length,
       aguardandoFuncionario: insights.pending.length,
       /** Última mensagem do cliente, mas conversa sem atendente — não entram no ranking por funcionário. */
@@ -957,24 +963,36 @@ async function getRelatorioDiarioGestor(companyId, dateStr) {
       resumo_conversa: safeDisplayString(p.resumo_conversa, 180),
     }))
 
+  const totalConversasAbertas = insights.conversations.length
+
   return {
     data_referencia: start.toISOString().slice(0, 10),
     periodo: {
       inicio: start.toISOString(),
       fim: end.toISOString(),
     },
+    /** Mesmo valor que `totais.atendimentos_abertos` — evita binding só em `totais`. */
+    atendimentos_abertos: totalConversasAbertas,
+    atendimentosAbertos: totalConversasAbertas,
+    total_conversas_abertas: totalConversasAbertas,
     totais: {
-      /** Quantidade de linhas na tabela `atendimentos` no dia (movimentações — não é conversas abertas). */
-      registros_movimentacao_dia: atendimentosRows.length,
-      atendimentos_dia: atendimentosRows.length,
-      /** Conversas com status aberta/em_atendimento/aguardando_cliente (painel “Atendimentos abertos”). */
-      atendimentos_abertos: insights.conversations.length,
-      conversas_abertas: insights.conversations.length,
+      /**
+       * PRIMEIRO: total de conversas abertas (aberta | em_atendimento | aguardando_cliente).
+       * NÃO confundir com `atendimentos_dia` (linhas na tabela `atendimentos` = movimentações).
+       */
+      atendimentos_abertos: totalConversasAbertas,
+      conversas_abertas: totalConversasAbertas,
+      atendimentosAbertos: totalConversasAbertas,
       aguardando_funcionario: insights.pending.length,
+      aguardandoFuncionario: insights.pending.length,
       aguardando_sem_atribuicao: insights.pending.filter((p) => p.atendente_id == null).length,
+      aguardandoSemAtribuicao: insights.pending.filter((p) => p.atendente_id == null).length,
       atrasados_30min: insights.pending.filter((p) => p.minutos_aguardando > DEFAULT_DELAY_MINUTES).length,
       tempo_medio_resposta_minutos: responseStats.globalAverage,
       tempoMedioRespostaMinutos: responseStats.globalAverage,
+      /** Linhas na tabela `atendimentos` no dia (assumiu/transferiu/encerrou… — não é “conversas abertas”). */
+      registros_movimentacao_dia: atendimentosRows.length,
+      atendimentos_dia: atendimentosRows.length,
     },
     ranking_funcionarios: ranking,
     departamentos_maior_demanda: setores,
