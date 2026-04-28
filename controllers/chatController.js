@@ -2987,6 +2987,135 @@ exports.transferirSetor = async (req, res) => {
   }
 }
 
+function sanitizePixConfigPayload(body = {}) {
+  const allowedTipos = new Set(['cpf', 'cnpj', 'email', 'telefone', 'aleatoria'])
+  const tipo_chave = String(body?.tipo_chave || '').trim().toLowerCase()
+  const chave_pix = String(body?.chave_pix || '').trim()
+  const nome_recebedor = String(body?.nome_recebedor || '').trim()
+  const mensagem_padrao = String(body?.mensagem_padrao || '').trim()
+
+  if (!allowedTipos.has(tipo_chave)) {
+    return { ok: false, status: 400, error: 'tipo_chave inválido. Use: cpf, cnpj, email, telefone ou aleatoria.' }
+  }
+  if (!chave_pix) {
+    return { ok: false, status: 400, error: 'chave_pix é obrigatória.' }
+  }
+  if (!nome_recebedor) {
+    return { ok: false, status: 400, error: 'nome_recebedor é obrigatório.' }
+  }
+
+  return {
+    ok: true,
+    data: {
+      tipo_chave,
+      chave_pix: chave_pix.slice(0, 200),
+      nome_recebedor: nome_recebedor.slice(0, 120),
+      mensagem_padrao: mensagem_padrao ? mensagem_padrao.slice(0, 500) : null,
+    }
+  }
+}
+
+function formatPixTipoLabel(tipo) {
+  const t = String(tipo || '').trim().toLowerCase()
+  if (t === 'cpf') return 'CPF'
+  if (t === 'cnpj') return 'CNPJ'
+  if (t === 'email') return 'E-mail'
+  if (t === 'telefone') return 'Telefone'
+  if (t === 'aleatoria') return 'Chave aleatória'
+  return t || 'Chave Pix'
+}
+
+function buildPixMessageFromConfig(cfg) {
+  const tipoLabel = formatPixTipoLabel(cfg?.tipo_chave)
+  const extra = cfg?.mensagem_padrao ? `\n\n${String(cfg.mensagem_padrao).trim()}` : ''
+  return [
+    'Segue a chave Pix para pagamento:',
+    '',
+    `Nome: ${String(cfg?.nome_recebedor || '').trim()}`,
+    `Tipo da chave: ${tipoLabel}`,
+    `Chave Pix: ${String(cfg?.chave_pix || '').trim()}`,
+    extra,
+    '',
+    'Após o pagamento, por favor envie o comprovante por aqui.'
+  ].join('\n').trim()
+}
+
+/** GET /chats/pix-config */
+exports.getPixConfig = async (req, res) => {
+  try {
+    const { company_id } = req.user
+    const { data, error } = await supabase
+      .from('empresa_pix_config')
+      .select('tipo_chave, chave_pix, nome_recebedor, mensagem_padrao, atualizado_em')
+      .eq('company_id', Number(company_id))
+      .maybeSingle()
+
+    if (error) {
+      const msg = String(error.message || '')
+      if (msg.includes('empresa_pix_config') || msg.includes('does not exist')) {
+        return res.json({ configured: false, config: null })
+      }
+      return res.status(500).json({ error: error.message })
+    }
+
+    if (!data) return res.json({ configured: false, config: null })
+    return res.json({ configured: true, config: data })
+  } catch (err) {
+    console.error('[getPixConfig]', err)
+    return res.status(500).json({ error: 'Erro ao obter configuração Pix.' })
+  }
+}
+
+/** PUT /chats/pix-config */
+exports.putPixConfig = async (req, res) => {
+  try {
+    const { company_id, id: user_id } = req.user
+    const parsed = sanitizePixConfigPayload(req.body)
+    if (!parsed.ok) return res.status(parsed.status).json({ error: parsed.error })
+
+    const payload = {
+      company_id: Number(company_id),
+      ...parsed.data,
+      atualizado_por: Number(user_id),
+      atualizado_em: new Date().toISOString(),
+    }
+
+    const { data, error } = await supabase
+      .from('empresa_pix_config')
+      .upsert(payload, { onConflict: 'company_id' })
+      .select('tipo_chave, chave_pix, nome_recebedor, mensagem_padrao, atualizado_em')
+      .single()
+
+    if (error) return res.status(500).json({ error: error.message })
+    return res.json({ ok: true, config: data })
+  } catch (err) {
+    console.error('[putPixConfig]', err)
+    return res.status(500).json({ error: 'Erro ao salvar configuração Pix.' })
+  }
+}
+
+/** POST /chats/:id/pix — envia mensagem Pix usando o mesmo fluxo de envio/realtime existente */
+exports.enviarMensagemPix = async (req, res) => {
+  try {
+    const { company_id } = req.user
+    const { data, error } = await supabase
+      .from('empresa_pix_config')
+      .select('tipo_chave, chave_pix, nome_recebedor, mensagem_padrao')
+      .eq('company_id', Number(company_id))
+      .maybeSingle()
+
+    if (error) return res.status(500).json({ error: error.message })
+    if (!data) return res.status(400).json({ error: 'Pix não configurado para esta empresa.' })
+
+    const mensagem = buildPixMessageFromConfig(data)
+    req.body = { ...req.body, texto: mensagem }
+    return exports.enviarMensagemChat(req, res)
+  } catch (err) {
+    console.error('[enviarMensagemPix]', err)
+    return res.status(500).json({ error: 'Erro ao enviar mensagem Pix.' })
+  }
+}
+
 // =====================================================
 // enviarMensagemChat (corrigido + padronizado)
 // =====================================================

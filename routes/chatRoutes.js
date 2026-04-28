@@ -19,6 +19,8 @@ router.get('/debug-sync-contatos', auth, chatController.debugSyncContatos)
 router.post('/sincronizar-fotos-perfil', auth, chatController.sincronizarFotosPerfilZapi)
 router.get('/whatsapp-status', auth, chatController.whatsappStatus)
 router.get('/zapi-status', auth, chatController.whatsappStatus) // alias para compatibilidade
+router.get('/pix-config', auth, chatController.getPixConfig)
+router.put('/pix-config', auth, chatController.putPixConfig)
 router.get('/:id', auth, chatController.detalharChat)
 
 // Atendimento: todos os usuários autenticados (regras por setor no controller)
@@ -38,6 +40,7 @@ router.put('/:id/departamento', auth, chatController.transferirSetor)
 router.post("/:id/arquivo", auth, uploadArquivo, chatController.enviarArquivo)
 
 router.post('/:id/mensagens', auth, chatController.enviarMensagemChat)
+router.post('/:id/pix', auth, chatController.enviarMensagemPix)
 router.post('/:id/encaminhar', auth, chatController.encaminharMensagem)
 router.delete('/:id/mensagens/:mensagem_id', auth, chatController.excluirMensagem)
 router.post('/:id/mensagens/:mensagem_id/reacao', auth, chatController.enviarReacaoMensagem)
