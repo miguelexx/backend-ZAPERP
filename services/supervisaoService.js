@@ -66,6 +66,36 @@ function normalizePhone(value) {
   return String(value || '').replace(/\D/g, '')
 }
 
+/**
+ * Garante valor seguro para renderização no React (nunca retorna objeto/array cru).
+ * JSON/objetos viram string; evita erro "Objects are not valid as a React child".
+ */
+function safeDisplayString(value, maxLen = 500) {
+  if (value == null || value === '') return ''
+  if (typeof value === 'string') {
+    const s = value.trim()
+    return maxLen ? s.slice(0, maxLen) : s
+  }
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value)
+  if (typeof value === 'object') {
+    try {
+      const s = JSON.stringify(value)
+      return maxLen ? s.slice(0, maxLen) : s
+    } catch {
+      return ''
+    }
+  }
+  const s = String(value)
+  return maxLen ? s.slice(0, maxLen) : s
+}
+
+/** URL ou texto curto para foto; rejeita objetos */
+function safePhotoUrl(value) {
+  if (value == null) return null
+  if (typeof value === 'string' && value.trim()) return value.trim()
+  return null
+}
+
 async function getSlaConfig(companyId) {
   const { data, error } = await supabase
     .from('empresas')
@@ -159,7 +189,11 @@ async function listLastMessagesByConversation(companyId, conversationIds) {
 }
 
 function hasValidResumoIA(conversa) {
-  return !!String(conversa?.resumo_ia || '').trim()
+  const ia = conversa?.resumo_ia
+  if (ia == null || ia === '') return false
+  if (typeof ia === 'string') return !!ia.trim()
+  if (typeof ia === 'object') return Object.keys(ia).length > 0
+  return true
 }
 
 function buildMessageTypeResumo(lastMessage) {
@@ -176,9 +210,13 @@ function buildMessageTypeResumo(lastMessage) {
 }
 
 function buildResumoConversa(conversa, lastMessage) {
-  if (hasValidResumoIA(conversa)) return String(conversa.resumo_ia).trim().slice(0, 180)
-  const text = String(lastMessage?.texto || '').trim()
-  if (text) return text.slice(0, 180)
+  if (hasValidResumoIA(conversa)) {
+    const ia = conversa.resumo_ia
+    if (typeof ia === 'string') return ia.trim().slice(0, 180)
+    return safeDisplayString(ia, 180)
+  }
+  const text = safeDisplayString(lastMessage?.texto, 180)
+  if (text) return text
   const byType = buildMessageTypeResumo(lastMessage)
   if (byType) return byType
   return 'Sem resumo disponível'
@@ -194,19 +232,22 @@ function buildPendingItem(conversa, lastMessage, depMap) {
     ? depMap[String(conversa.departamento_id)] || 'Sem departamento'
     : 'Sem departamento'
   const clienteObj = conversa.clientes || null
-  const clienteNome = getDisplayName(clienteObj) || conversa.nome_contato_cache || conversa.telefone || 'Cliente'
+  const clienteNome = safeDisplayString(
+    getDisplayName(clienteObj) || conversa.nome_contato_cache || conversa.telefone || 'Cliente',
+    200
+  )
   const resumoConversa = buildResumoConversa(conversa, lastMessage)
 
   return {
     conversa_id: conversa.id,
     cliente_nome: clienteNome,
-    telefone: conversa.telefone || clienteObj?.telefone || null,
-    foto_perfil: clienteObj?.foto_perfil || conversa.foto_perfil_contato_cache || null,
+    telefone: safeDisplayString(conversa.telefone || clienteObj?.telefone || '', 40) || null,
+    foto_perfil: safePhotoUrl(clienteObj?.foto_perfil) || safePhotoUrl(conversa.foto_perfil_contato_cache),
     departamento_id: conversa.departamento_id || null,
     departamento_nome: departamentoNome,
     atendente_id: conversa.atendente_id || null,
-    atendente_nome: conversa.usuarios?.nome || null,
-    ultima_mensagem_texto: lastMessage.texto || '',
+    atendente_nome: conversa.usuarios?.nome != null ? safeDisplayString(conversa.usuarios.nome, 120) : null,
+    ultima_mensagem_texto: safeDisplayString(lastMessage.texto, 2000),
     ultima_mensagem_em: lastMessage.criado_em || null,
     ultima_mensagem_direcao: lastMessage.direcao,
     resumo_conversa: resumoConversa,
@@ -470,8 +511,8 @@ async function getResumo(companyId) {
 
     return {
       usuario_id: u.id,
-      nome: u.nome || 'Sem nome',
-      perfil: u.perfil || null,
+      nome: safeDisplayString(u.nome || 'Sem nome', 120),
+      perfil: u.perfil != null ? safeDisplayString(u.perfil, 40) : null,
       atendimentos_assumidos_hoje: assumidos,
       atendimentos_em_aberto: assignedOpen.length,
       clientes_sem_resposta: assignedPending.length,
@@ -487,15 +528,15 @@ async function getResumo(companyId) {
     .sort((a, b) => b.minutos_aguardando - a.minutos_aguardando)
     .map((p) => ({
       conversa_id: p.conversa_id,
-      cliente_nome: p.cliente_nome,
-      telefone: p.telefone,
-      foto: p.foto_perfil,
-      departamento: p.departamento_nome,
+      cliente_nome: safeDisplayString(p.cliente_nome, 200),
+      telefone: p.telefone != null ? safeDisplayString(p.telefone, 40) : null,
+      foto: safePhotoUrl(p.foto_perfil),
+      departamento: safeDisplayString(p.departamento_nome, 120),
       atendente_id: p.atendente_id,
-      atendente_nome: p.atendente_nome,
-      ultima_mensagem_texto: p.ultima_mensagem_texto,
+      atendente_nome: p.atendente_nome != null ? safeDisplayString(p.atendente_nome, 120) : null,
+      ultima_mensagem_texto: safeDisplayString(p.ultima_mensagem_texto, 2000),
       ultima_mensagem_em: p.ultima_mensagem_em,
-      resumo_conversa: p.resumo_conversa,
+      resumo_conversa: safeDisplayString(p.resumo_conversa, 180),
       minutos_aguardando: p.minutos_aguardando,
       nivel: p.nivel,
       motivo: `Cliente aguardando resposta há ${p.minutos_aguardando} minutos`,
@@ -534,16 +575,16 @@ async function getClientesPendentes(companyId, filters) {
     totalClientes: filtered.length,
     clientes: filtered.map((item) => ({
       conversa_id: item.conversa_id,
-      cliente_nome: item.cliente_nome,
-      telefone: item.telefone,
-      foto_perfil: item.foto_perfil,
+      cliente_nome: safeDisplayString(item.cliente_nome, 200),
+      telefone: item.telefone != null ? safeDisplayString(item.telefone, 40) : null,
+      foto_perfil: safePhotoUrl(item.foto_perfil),
       departamento_id: item.departamento_id,
-      departamento_nome: item.departamento_nome,
+      departamento_nome: safeDisplayString(item.departamento_nome, 120),
       atendente_id: item.atendente_id,
-      atendente_nome: item.atendente_nome,
-      ultima_mensagem_texto: item.ultima_mensagem_texto,
+      atendente_nome: item.atendente_nome != null ? safeDisplayString(item.atendente_nome, 120) : null,
+      ultima_mensagem_texto: safeDisplayString(item.ultima_mensagem_texto, 2000),
       ultima_mensagem_em: item.ultima_mensagem_em,
-      resumo_conversa: item.resumo_conversa,
+      resumo_conversa: safeDisplayString(item.resumo_conversa, 180),
       minutos_aguardando: item.minutos_aguardando,
       nivel: item.nivel,
       status_atendimento: item.status_atendimento,
@@ -551,16 +592,16 @@ async function getClientesPendentes(companyId, filters) {
     })),
     clientes_pendentes: filtered.map((item) => ({
       conversa_id: item.conversa_id,
-      cliente_nome: item.cliente_nome,
-      telefone: item.telefone,
-      foto_perfil: item.foto_perfil,
+      cliente_nome: safeDisplayString(item.cliente_nome, 200),
+      telefone: item.telefone != null ? safeDisplayString(item.telefone, 40) : null,
+      foto_perfil: safePhotoUrl(item.foto_perfil),
       departamento_id: item.departamento_id,
-      departamento_nome: item.departamento_nome,
+      departamento_nome: safeDisplayString(item.departamento_nome, 120),
       atendente_id: item.atendente_id,
-      atendente_nome: item.atendente_nome,
-      ultima_mensagem_texto: item.ultima_mensagem_texto,
+      atendente_nome: item.atendente_nome != null ? safeDisplayString(item.atendente_nome, 120) : null,
+      ultima_mensagem_texto: safeDisplayString(item.ultima_mensagem_texto, 2000),
       ultima_mensagem_em: item.ultima_mensagem_em,
-      resumo_conversa: item.resumo_conversa,
+      resumo_conversa: safeDisplayString(item.resumo_conversa, 180),
       minutos_aguardando: item.minutos_aguardando,
       nivel: item.nivel,
       status_atendimento: item.status_atendimento,
@@ -621,7 +662,10 @@ async function getMovimentacaoFuncionario(companyId, usuarioId) {
     return {
       tipo,
       conversa_id: mov.conversa_id,
-      cliente_nome: getDisplayName(conv?.clientes) || conv?.nome_contato_cache || conv?.telefone || null,
+      cliente_nome: safeDisplayString(
+        getDisplayName(conv?.clientes) || conv?.nome_contato_cache || conv?.telefone || '',
+        200
+      ) || null,
       criado_em: mov.criado_em,
     }
   })
@@ -630,13 +674,13 @@ async function getMovimentacaoFuncionario(companyId, usuarioId) {
     .sort((a, b) => b.minutos_aguardando - a.minutos_aguardando)
     .map((p) => ({
       conversa_id: p.conversa_id,
-      cliente_nome: p.cliente_nome,
-      telefone: p.telefone,
-      departamento: p.departamento_nome,
+      cliente_nome: safeDisplayString(p.cliente_nome, 200),
+      telefone: p.telefone != null ? safeDisplayString(p.telefone, 40) : null,
+      departamento: safeDisplayString(p.departamento_nome, 120),
       status_atendimento: p.status_atendimento,
-      ultima_mensagem_texto: p.ultima_mensagem_texto,
+      ultima_mensagem_texto: safeDisplayString(p.ultima_mensagem_texto, 2000),
       ultima_mensagem_direcao: 'in',
-      resumo_conversa: p.resumo_conversa,
+      resumo_conversa: safeDisplayString(p.resumo_conversa, 180),
       minutos_aguardando: p.minutos_aguardando,
       nivel: p.nivel,
     }))
@@ -644,8 +688,8 @@ async function getMovimentacaoFuncionario(companyId, usuarioId) {
   return {
     funcionario: {
       usuario_id: usuario.data.id,
-      nome: usuario.data.nome || 'Sem nome',
-      perfil: usuario.data.perfil || null,
+      nome: safeDisplayString(usuario.data.nome || 'Sem nome', 120),
+      perfil: usuario.data.perfil != null ? safeDisplayString(usuario.data.perfil, 40) : null,
     },
     resumo_hoje: {
       atendimentos_assumidos: movimentosUsuario.filter((a) => a.acao === 'assumiu').length,
@@ -710,7 +754,7 @@ async function getRelatorioDiarioGestor(companyId, dateStr) {
     const tempoMedio = medias.length ? Number((medias.reduce((a, b) => a + Number(b), 0) / medias.length).toFixed(2)) : null
     return {
       usuario_id: u.id,
-      nome: u.nome || 'Sem nome',
+      nome: safeDisplayString(u.nome || 'Sem nome', 120),
       atendimentos_assumidos_hoje: atendimentosRows.filter((a) => a.acao === 'assumiu' && (Number(a.para_usuario_id) === Number(u.id) || Number(a.de_usuario_id) === Number(u.id))).length,
       clientes_sem_resposta: pendUser.length,
       maior_tempo_sem_resposta_minutos: pendUser.length ? Math.max(...pendUser.map((p) => p.minutos_aguardando)) : 0,
@@ -740,13 +784,13 @@ async function getRelatorioDiarioGestor(companyId, dateStr) {
     .slice(0, 20)
     .map((p) => ({
       conversa_id: p.conversa_id,
-      cliente_nome: p.cliente_nome,
-      telefone: p.telefone,
-      atendente_nome: p.atendente_nome,
-      departamento_nome: p.departamento_nome,
+      cliente_nome: safeDisplayString(p.cliente_nome, 200),
+      telefone: p.telefone != null ? safeDisplayString(p.telefone, 40) : null,
+      atendente_nome: p.atendente_nome != null ? safeDisplayString(p.atendente_nome, 120) : null,
+      departamento_nome: safeDisplayString(p.departamento_nome, 120),
       minutos_aguardando: p.minutos_aguardando,
       nivel: p.nivel,
-      resumo_conversa: p.resumo_conversa,
+      resumo_conversa: safeDisplayString(p.resumo_conversa, 180),
     }))
 
   return {
