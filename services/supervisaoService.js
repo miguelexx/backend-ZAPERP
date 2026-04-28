@@ -77,35 +77,51 @@ function countConversasEmAtendimento(conversations, usuarioId) {
 }
 
 const MSG_STATS_PAGE = 1000
+/** Evita URL/query enorme em `.in()` quando há muitas conversas abertas. */
+const CONV_ID_IN_CHUNK = 120
 
 /**
  * Carrega todas as mensagens in/out para cálculo de SLA/tempo médio.
  * PostgREST limita ~1000 linhas por request — sem paginação o tempo médio global zera com volume alto.
  */
 async function fetchMensagensInOutPaginated(companyId, conversationIds, { fromDate = null, toDateExclusive = null } = {}) {
-  if (!conversationIds?.length) return []
-  const all = []
-  let offset = 0
-  for (;;) {
-    let q = supabase
-      .from('mensagens')
-      .select('conversa_id, criado_em, direcao')
-      .eq('company_id', companyId)
-      .in('conversa_id', conversationIds)
-      .in('direcao', ['in', 'out'])
-      .not('criado_em', 'is', null)
-      .order('criado_em', { ascending: true, nullsFirst: false })
-    if (fromDate) q = q.gte('criado_em', fromDate.toISOString())
-    if (toDateExclusive) q = q.lt('criado_em', toDateExclusive.toISOString())
-    q = q.range(offset, offset + MSG_STATS_PAGE - 1)
-    const { data, error } = await q
-    if (error) throw error
-    const rows = data || []
-    all.push(...rows)
-    if (rows.length < MSG_STATS_PAGE) break
-    offset += MSG_STATS_PAGE
+  const ids = [...new Set((conversationIds || []).map((id) => Number(id)).filter((n) => Number.isFinite(n) && n > 0))]
+  if (!ids.length) return []
+
+  async function fetchChunk(convIds) {
+    const all = []
+    let offset = 0
+    for (;;) {
+      let q = supabase
+        .from('mensagens')
+        .select('conversa_id, criado_em, direcao')
+        .eq('company_id', companyId)
+        .in('conversa_id', convIds)
+        .in('direcao', ['in', 'out'])
+        .not('criado_em', 'is', null)
+        .order('criado_em', { ascending: true, nullsFirst: false })
+      if (fromDate) q = q.gte('criado_em', fromDate.toISOString())
+      if (toDateExclusive) q = q.lt('criado_em', toDateExclusive.toISOString())
+      q = q.range(offset, offset + MSG_STATS_PAGE - 1)
+      const { data, error } = await q
+      if (error) throw error
+      const rows = data || []
+      all.push(...rows)
+      if (rows.length < MSG_STATS_PAGE) break
+      offset += MSG_STATS_PAGE
+    }
+    return all
   }
-  return all
+
+  if (ids.length <= CONV_ID_IN_CHUNK) return fetchChunk(ids)
+
+  const parts = []
+  for (let i = 0; i < ids.length; i += CONV_ID_IN_CHUNK) {
+    parts.push(await fetchChunk(ids.slice(i, i + CONV_ID_IN_CHUNK)))
+  }
+  const merged = parts.flat()
+  merged.sort((a, b) => new Date(a.criado_em).getTime() - new Date(b.criado_em).getTime())
+  return merged
 }
 
 /**
@@ -224,46 +240,90 @@ async function listOpenConversations(companyId) {
     usuarios!conversas_atendente_fk ( id, nome, perfil )
   `
   const selectWithResumo = `${baseSelect}, resumo_ia`
-  let query = supabase
-    .from('conversas')
-    .select(selectWithResumo)
-    .eq('company_id', companyId)
-    .in('status_atendimento', OPEN_STATUSES)
-    .order('criado_em', { ascending: false })
-  let { data, error } = await query
-  if (error) {
-    query = supabase
+
+  let useResumo = true
+  const all = []
+  let offset = 0
+
+  for (;;) {
+    const sel = useResumo ? selectWithResumo : baseSelect
+    let { data: rows, error } = await supabase
       .from('conversas')
-      .select(baseSelect)
+      .select(sel)
       .eq('company_id', companyId)
       .in('status_atendimento', OPEN_STATUSES)
       .order('criado_em', { ascending: false })
-    ;({ data, error } = await query)
+      .range(offset, offset + MSG_STATS_PAGE - 1)
+
+    if (error && useResumo) {
+      useResumo = false
+      all.length = 0
+      offset = 0
+      ;({ data: rows, error } = await supabase
+        .from('conversas')
+        .select(baseSelect)
+        .eq('company_id', companyId)
+        .in('status_atendimento', OPEN_STATUSES)
+        .order('criado_em', { ascending: false })
+        .range(offset, offset + MSG_STATS_PAGE - 1))
+    }
+    if (error) throw error
+    rows = rows || []
+    all.push(...rows)
+    if (rows.length < MSG_STATS_PAGE) break
+    offset += MSG_STATS_PAGE
   }
-  if (error) throw error
-  return data || []
+
+  return all
 }
 
+/**
+ * Última mensagem in/out por conversa. Pagina para não truncar em ~1000 linhas globais.
+ * Chaves do Map são sempre Number(conversa_id) para bater com conversa.id do Postgres/JS.
+ */
 async function listLastMessagesByConversation(companyId, conversationIds) {
-  if (!conversationIds.length) return new Map()
-  const { data, error } = await supabase
-    .from('mensagens')
-    .select('conversa_id, direcao, texto, tipo, criado_em')
-    .eq('company_id', companyId)
-    .in('conversa_id', conversationIds)
-    .in('direcao', ['in', 'out'])
-    .not('criado_em', 'is', null)
-    .order('criado_em', { ascending: false, nullsFirst: false })
+  const normalizeIds = [...new Set((conversationIds || []).map((id) => Number(id)).filter((n) => Number.isFinite(n) && n > 0))]
+  if (!normalizeIds.length) return new Map()
 
-  if (error) throw error
+  async function fetchSlice(idsSlice) {
+    const needed = new Set(idsSlice)
+    const map = new Map()
+    let offset = 0
+    for (;;) {
+      const { data, error } = await supabase
+        .from('mensagens')
+        .select('conversa_id, direcao, texto, tipo, criado_em')
+        .eq('company_id', companyId)
+        .in('conversa_id', idsSlice)
+        .in('direcao', ['in', 'out'])
+        .not('criado_em', 'is', null)
+        .order('criado_em', { ascending: false, nullsFirst: false })
+        .range(offset, offset + MSG_STATS_PAGE - 1)
+      if (error) throw error
+      const rows = data || []
+      for (const msg of rows) {
+        const cid = Number(msg.conversa_id)
+        if (!needed.has(cid)) continue
+        if (!map.has(cid)) map.set(cid, msg)
+      }
+      if (rows.length < MSG_STATS_PAGE) break
+      offset += MSG_STATS_PAGE
+      if (map.size >= needed.size) break
+    }
+    return map
+  }
 
-  const map = new Map()
-  for (const msg of data || []) {
-    if (!map.has(msg.conversa_id)) {
-      map.set(msg.conversa_id, msg)
+  if (normalizeIds.length <= CONV_ID_IN_CHUNK) return fetchSlice(normalizeIds)
+
+  const merged = new Map()
+  for (let i = 0; i < normalizeIds.length; i += CONV_ID_IN_CHUNK) {
+    const slice = normalizeIds.slice(i, i + CONV_ID_IN_CHUNK)
+    const part = await fetchSlice(slice)
+    for (const [k, v] of part) {
+      if (!merged.has(k)) merged.set(k, v)
     }
   }
-  return map
+  return merged
 }
 
 function hasValidResumoIA(conversa) {
@@ -354,7 +414,7 @@ async function buildConversationInsights(companyId) {
   const aguardandoCliente = []
 
   for (const conversa of conversations) {
-    const lastMessage = lastMessagesMap.get(conversa.id)
+    const lastMessage = lastMessagesMap.get(Number(conversa.id))
     if (!lastMessage) continue
     if (lastMessage.direcao === 'out') {
       aguardandoCliente.push({
@@ -386,8 +446,10 @@ async function calculateAvgResponseMinutes(companyId, conversationIds, fromDate,
 
   const byConversation = new Map()
   for (const m of data || []) {
-    if (!byConversation.has(m.conversa_id)) byConversation.set(m.conversa_id, [])
-    byConversation.get(m.conversa_id).push(m)
+    const cid = Number(m.conversa_id)
+    if (!Number.isFinite(cid)) continue
+    if (!byConversation.has(cid)) byConversation.set(cid, [])
+    byConversation.get(cid).push(m)
   }
 
   let totalPairs = 0
@@ -431,8 +493,10 @@ async function calculateResponseStatsByConversation(companyId, conversations, fr
 
   const byConversationRows = new Map()
   for (const row of data || []) {
-    if (!byConversationRows.has(row.conversa_id)) byConversationRows.set(row.conversa_id, [])
-    byConversationRows.get(row.conversa_id).push(row)
+    const cid = Number(row.conversa_id)
+    if (!Number.isFinite(cid)) continue
+    if (!byConversationRows.has(cid)) byConversationRows.set(cid, [])
+    byConversationRows.get(cid).push(row)
   }
 
   const avgByConversation = new Map()
@@ -472,14 +536,45 @@ async function calculateResponseStatsByConversation(companyId, conversations, fr
 
 async function listAtendimentosToday(companyId) {
   const todayIso = startOfToday().toISOString()
-  const { data, error } = await supabase
-    .from('atendimentos')
-    .select('id, conversa_id, acao, criado_em, de_usuario_id, para_usuario_id')
-    .eq('company_id', companyId)
-    .gte('criado_em', todayIso)
-    .order('criado_em', { ascending: false })
-  if (error) throw error
-  return data || []
+  const all = []
+  let offset = 0
+  for (;;) {
+    const { data, error } = await supabase
+      .from('atendimentos')
+      .select('id, conversa_id, acao, criado_em, de_usuario_id, para_usuario_id')
+      .eq('company_id', companyId)
+      .gte('criado_em', todayIso)
+      .order('criado_em', { ascending: false })
+      .range(offset, offset + MSG_STATS_PAGE - 1)
+    if (error) throw error
+    const rows = data || []
+    all.push(...rows)
+    if (rows.length < MSG_STATS_PAGE) break
+    offset += MSG_STATS_PAGE
+  }
+  return all
+}
+
+/** Movimentações na tabela `atendimentos` em [start, end). */
+async function listAtendimentosDayRange(companyId, start, end) {
+  const all = []
+  let offset = 0
+  for (;;) {
+    const { data, error } = await supabase
+      .from('atendimentos')
+      .select('id, conversa_id, acao, criado_em, de_usuario_id, para_usuario_id')
+      .eq('company_id', companyId)
+      .gte('criado_em', start.toISOString())
+      .lt('criado_em', end.toISOString())
+      .order('criado_em', { ascending: false })
+      .range(offset, offset + MSG_STATS_PAGE - 1)
+    if (error) throw error
+    const rows = data || []
+    all.push(...rows)
+    if (rows.length < MSG_STATS_PAGE) break
+    offset += MSG_STATS_PAGE
+  }
+  return all
 }
 
 async function listUsuariosCompany(companyId) {
@@ -554,7 +649,7 @@ async function getResumo(companyId) {
     const atrasados = assignedPending.filter((p) => p.atrasado)
     const assumidos = atendimentosHoje.filter((a) => a.acao === 'assumiu' && (Number(a.para_usuario_id) === Number(u.id) || Number(a.de_usuario_id) === Number(u.id))).length
     const mediasAtendente = assignedOpen
-      .map((c) => responseStats.byConversation.get(c.id))
+      .map((c) => responseStats.byConversation.get(Number(c.id)))
       .filter((x) => Number.isFinite(Number(x)))
     const mediaAtendente = mediasAtendente.length > 0
       ? Number((mediasAtendente.reduce((acc, x) => acc + Number(x), 0) / mediasAtendente.length).toFixed(2))
@@ -613,6 +708,9 @@ async function getResumo(companyId) {
       atendimentosAbertos: insights.conversations.length,
       aguardando_funcionario: insights.pending.length,
       aguardandoFuncionario: insights.pending.length,
+      /** Última mensagem do cliente, mas conversa sem atendente — não entram no ranking por funcionário. */
+      aguardando_sem_atribuicao: insights.pending.filter((p) => p.atendente_id == null).length,
+      aguardandoSemAtribuicao: insights.pending.filter((p) => p.atendente_id == null).length,
       atrasados: insights.pending.filter((p) => p.atrasado).length,
       atrasados_30min: insights.pending.filter((p) => p.minutos_aguardando > DEFAULT_DELAY_MINUTES).length,
       tempo_medio_resposta_minutos: responseStats.globalAverage,
@@ -797,23 +895,18 @@ async function getRelatorioDiarioGestor(companyId, dateStr) {
   }
   const { start, end } = getDayRange(parsedDate)
   const insights = await buildConversationInsights(companyId)
-  const [atendimentosDia, responseStats] = await Promise.all([
-    supabase
-      .from('atendimentos')
-      .select('id, conversa_id, acao, de_usuario_id, para_usuario_id, criado_em')
-      .eq('company_id', companyId)
-      .gte('criado_em', start.toISOString())
-      .lt('criado_em', end.toISOString()),
+  const [atendimentosRows, responseStats] = await Promise.all([
+    listAtendimentosDayRange(companyId, start, end),
     calculateResponseStatsByConversation(companyId, insights.conversations, start, end),
   ])
-  if (atendimentosDia.error) throw atendimentosDia.error
-  const atendimentosRows = atendimentosDia.data || []
 
   const funcionariosBase = await listUsuariosCompany(companyId)
   const ranking = funcionariosBase.map((u) => {
     const convsUser = insights.conversations.filter((c) => Number(c.atendente_id) === Number(u.id))
     const pendUser = insights.pending.filter((p) => Number(p.atendente_id) === Number(u.id))
-    const medias = convsUser.map((c) => responseStats.byConversation.get(c.id)).filter((x) => Number.isFinite(Number(x)))
+    const medias = convsUser
+      .map((c) => responseStats.byConversation.get(Number(c.id)))
+      .filter((x) => Number.isFinite(Number(x)))
     const tempoMedio = medias.length ? Number((medias.reduce((a, b) => a + Number(b), 0) / medias.length).toFixed(2)) : null
     const assumidosNoDia = atendimentosRows.filter(
       (a) =>
@@ -878,6 +971,7 @@ async function getRelatorioDiarioGestor(companyId, dateStr) {
       atendimentos_abertos: insights.conversations.length,
       conversas_abertas: insights.conversations.length,
       aguardando_funcionario: insights.pending.length,
+      aguardando_sem_atribuicao: insights.pending.filter((p) => p.atendente_id == null).length,
       atrasados_30min: insights.pending.filter((p) => p.minutos_aguardando > DEFAULT_DELAY_MINUTES).length,
       tempo_medio_resposta_minutos: responseStats.globalAverage,
       tempoMedioRespostaMinutos: responseStats.globalAverage,
