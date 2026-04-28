@@ -96,6 +96,42 @@ function safePhotoUrl(value) {
   return null
 }
 
+/** FK numérica positiva (evita objeto/embed acidental no JSON). */
+function safeFkId(value) {
+  if (value == null || value === '') return null
+  const n = Number(value)
+  return Number.isFinite(n) && n > 0 ? Math.trunc(n) : null
+}
+
+/**
+ * Objeto final da API: só primitivos aceitos pelo React (sem POJOs aninhados).
+ */
+function toPendingApiShape(raw) {
+  const nivelOk = ['normal', 'atencao', 'prioritario', 'critico'].includes(String(raw.nivel))
+    ? raw.nivel
+    : 'normal'
+  return {
+    conversa_id: safeFkId(raw.conversa_id),
+    cliente_nome: safeDisplayString(raw.cliente_nome, 200),
+    telefone: raw.telefone != null ? safeDisplayString(raw.telefone, 40) : null,
+    foto_perfil: safePhotoUrl(raw.foto_perfil),
+    departamento_id: safeFkId(raw.departamento_id),
+    departamento_nome: safeDisplayString(raw.departamento_nome, 120),
+    atendente_id: safeFkId(raw.atendente_id),
+    atendente_nome: raw.atendente_nome != null ? safeDisplayString(raw.atendente_nome, 120) : null,
+    ultima_mensagem_texto: safeDisplayString(raw.ultima_mensagem_texto, 2000),
+    ultima_mensagem_em: typeof raw.ultima_mensagem_em === 'string' ? raw.ultima_mensagem_em : null,
+    ultima_mensagem_direcao: raw.ultima_mensagem_direcao === 'out' ? 'out' : 'in',
+    resumo_conversa: safeDisplayString(raw.resumo_conversa, 180),
+    minutos_aguardando: Math.max(0, Math.floor(Number(raw.minutos_aguardando) || 0)),
+    nivel: nivelOk,
+    status_atendimento: safeDisplayString(raw.status_atendimento, 80),
+    aguardando_funcionario: !!raw.aguardando_funcionario,
+    atrasado: !!raw.atrasado,
+    pode_abrir_conversa: !!raw.pode_abrir_conversa,
+  }
+}
+
 async function getSlaConfig(companyId) {
   const { data, error } = await supabase
     .from('empresas')
@@ -238,14 +274,14 @@ function buildPendingItem(conversa, lastMessage, depMap) {
   )
   const resumoConversa = buildResumoConversa(conversa, lastMessage)
 
-  return {
+  return toPendingApiShape({
     conversa_id: conversa.id,
     cliente_nome: clienteNome,
     telefone: safeDisplayString(conversa.telefone || clienteObj?.telefone || '', 40) || null,
     foto_perfil: safePhotoUrl(clienteObj?.foto_perfil) || safePhotoUrl(conversa.foto_perfil_contato_cache),
-    departamento_id: conversa.departamento_id || null,
+    departamento_id: conversa.departamento_id,
     departamento_nome: departamentoNome,
-    atendente_id: conversa.atendente_id || null,
+    atendente_id: conversa.atendente_id,
     atendente_nome: conversa.usuarios?.nome != null ? safeDisplayString(conversa.usuarios.nome, 120) : null,
     ultima_mensagem_texto: safeDisplayString(lastMessage.texto, 2000),
     ultima_mensagem_em: lastMessage.criado_em || null,
@@ -257,7 +293,7 @@ function buildPendingItem(conversa, lastMessage, depMap) {
     aguardando_funcionario: true,
     atrasado: minutosAguardando > DEFAULT_DELAY_MINUTES,
     pode_abrir_conversa: true,
-  }
+  })
 }
 
 async function buildConversationInsights(companyId) {
@@ -280,8 +316,8 @@ async function buildConversationInsights(companyId) {
     if (!lastMessage) continue
     if (lastMessage.direcao === 'out') {
       aguardandoCliente.push({
-        conversa_id: conversa.id,
-        status_atendimento: conversa.status_atendimento,
+        conversa_id: safeFkId(conversa.id),
+        status_atendimento: safeDisplayString(conversa.status_atendimento, 80),
       })
       continue
     }
