@@ -21,6 +21,48 @@ function isRealWhatsAppId(waId) {
 }
 
 /**
+ * Para POST /messages/chat com reply: `msgId` deve ser o id da mensagem no WhatsApp (webhook),
+ * não o id interno da tabela `mensagens`. Aceita já no formato UltraMsg/WA ou resolve por `mensagens.id`.
+ */
+async function resolveUltraMsgReplyMessageId(supabaseClient, company_id, conversa_id, replyToIdRaw) {
+  const rid = String(replyToIdRaw ?? '').trim()
+  if (!rid) return null
+
+  const looksLikeWaMessageKey =
+    rid.includes('@') ||
+    rid.includes('_') ||
+    rid.length >= 22
+
+  if (!looksLikeWaMessageKey) {
+    const num = Number(rid)
+    const allDigits = /^\d+$/.test(rid)
+    const safeInt =
+      allDigits &&
+      Number.isFinite(num) &&
+      Number.isInteger(num) &&
+      num > 0 &&
+      num <= Number.MAX_SAFE_INTEGER &&
+      String(num) === rid
+    if (safeInt) {
+      try {
+        const { data: refMsg } = await supabaseClient
+          .from('mensagens')
+          .select('whatsapp_id')
+          .eq('company_id', company_id)
+          .eq('conversa_id', Number(conversa_id))
+          .eq('id', num)
+          .maybeSingle()
+        const wa = refMsg?.whatsapp_id != null ? String(refMsg.whatsapp_id).trim() : ''
+        if (wa) return wa
+      } catch (_) {}
+      return null
+    }
+  }
+
+  return rid
+}
+
+/**
  * Na listagem, conversas com status "aberta" no BD mas sem mensagem e sem atendente não são tratadas
  * como abertas nas abas (contagem / filtro). Expõe `ociosa` no JSON; o BD permanece `aberta` para constraints e fluxos internos.
  */
@@ -3168,25 +3210,15 @@ exports.enviarMensagemChat = async (req, res) => {
         if (ew?.phone_number_id) phoneId = String(ew.phone_number_id)
       } catch (_) {}
 
-      // Resolve o whatsapp_id real da mensagem citada para enviar reply nativo ao WhatsApp
+      // Resolve o whatsapp_id real da mensagem citada para enviar reply nativo ao WhatsApp (UltraMsg: body.msgId)
       let replyMessageId = null
       if (reply_meta?.replyToId != null) {
-        const rid = String(reply_meta.replyToId).trim()
-        // Se parece um ID numérico do banco (inteiro curto), busca o whatsapp_id real
-        if (/^\d{1,15}$/.test(rid)) {
-          try {
-            const { data: refMsg } = await supabase
-              .from('mensagens')
-              .select('whatsapp_id')
-              .eq('company_id', company_id)
-              .eq('conversa_id', Number(conversa_id))
-              .eq('id', Number(rid))
-              .maybeSingle()
-            replyMessageId = refMsg?.whatsapp_id || null
-          } catch (_) {}
-        } else {
-          // Já é um whatsapp_id (ID longo do WhatsApp)
-          replyMessageId = rid
+        replyMessageId = await resolveUltraMsgReplyMessageId(supabase, company_id, conversa_id, reply_meta.replyToId)
+        if (!replyMessageId) {
+          console.warn('[WhatsApp reply] msgId da citação não resolvido — envio sem reply no WhatsApp.', {
+            conversa_id,
+            replyToId: String(reply_meta.replyToId).slice(0, 96),
+          })
         }
       }
 
@@ -3208,7 +3240,7 @@ exports.enviarMensagemChat = async (req, res) => {
             linkUrl: linkUrlStr,
             title: String(link.title || '').trim() || linkUrlStr,
             linkDescription: String(link.linkDescription || link.description || '').trim() || messageToSend,
-          }, { companyId: company_id, conversaId: conversa_id })
+          }, { companyId: company_id, conversaId: conversa_id, replyMessageId: replyMessageId || undefined })
         } else {
           const textoParaCliente = prefixarParaCliente(String(texto).trim(), usuarioNome)
           result = await provider.sendText(telefoneParaEnvio, textoParaCliente, { companyId: company_id, conversaId: conversa_id, phoneId: phoneId || undefined, replyMessageId: replyMessageId || undefined })
