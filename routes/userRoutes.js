@@ -15,6 +15,7 @@ router.patch('/me', auth, userController.patchMe)
 router.get('/push/vapid-public-key', pushController.getPublicKey)
 router.post('/me/push/subscribe', auth, pushController.subscribe)
 router.delete('/me/push/subscribe', auth, pushController.unsubscribe)
+router.post('/me/push/test', auth, pushController.sendTestPush)
 
 const adminOnly = require('../middleware/adminOnly')
 router.post('/', auth, adminOnly, userController.criar)

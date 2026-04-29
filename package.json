@@ -25,9 +25,11 @@
     "form-data": "^4.0.0",
     "helmet": "^8.1.0",
     "jsonwebtoken": "^9.0.2",
+    "mssql": "^12.5.0",
     "multer": "^2.0.2",
     "openai": "^6.25.0",
     "pdfkit": "^0.17.2",
+    "pg": "^8.20.0",
     "socket.io": "^4.7.5",
     "web-push": "^3.6.7",
     "zod": "^4.3.6"

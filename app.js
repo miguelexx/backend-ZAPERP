@@ -186,6 +186,13 @@ app.get('/permissoes', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'permissoes.html'))
 })
 
+// Supervisão — painel HTML autônomo (tema claro; pode ser embed same-origin)
+app.get('/painel-supervisao', (req, res) => {
+  res.setHeader('Content-Type', 'text/html; charset=utf-8')
+  res.setHeader('X-Frame-Options', 'SAMEORIGIN')
+  res.sendFile(path.join(__dirname, 'public', 'supervisao.html'))
+})
+
 // Diagnóstico de ambiente — apenas em desenvolvimento (nunca expor em produção)
 if (process.env.NODE_ENV !== 'production') {
   app.get('/debug/env', (req, res) => {
@@ -214,6 +221,7 @@ const chatbotManagementRoutes = require('./routes/chatbotManagementRoutes')
 const internalChatRoutes = require('./routes/internalChatRoutes')
 const crmRoutes = require('./routes/crmRoutes')
 const supervisaoRoutes = require('./routes/supervisaoRoutes')
+const produtosRoutes = require('./routes/produtosRoutes')
 
 // Webhooks já registrados antes do CORS (evita 403 Origin)
 app.use('/dashboard', dashboardRoutes)
@@ -234,6 +242,7 @@ app.use('/chatbot', chatbotManagementRoutes)
 app.use('/internal-chat', internalChatRoutes)
 app.use('/crm', apiLimiter, crmRoutes)
 app.use('/supervisao', supervisaoRoutes)
+app.use('/produtos', produtosRoutes)
 
 // /api — prefixo opcional para SaaS; mantém compatibilidade com rotas antigas
 // Aplica apiLimiter globalmente para "rotas de API"
@@ -256,6 +265,7 @@ api.use('/chatbot', chatbotManagementRoutes)
 api.use('/internal-chat', internalChatRoutes)
 api.use('/crm', crmRoutes)
 api.use('/supervisao', supervisaoRoutes)
+api.use('/produtos', produtosRoutes)
 app.use('/api', apiLimiter, api)
 
 // =====================================================

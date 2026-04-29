@@ -38,8 +38,10 @@
       "usuario_id": 7,
       "nome": "Ana",
       "atendimentos_assumidos_hoje": 5,
+      "conversas_em_atendimento": 3,
       "clientes_sem_resposta": 2,
-      "maior_tempo_sem_resposta_minutos": 46,
+      "finalizadas_hoje": 4,
+      "atendimentos_finalizados_hoje": 4,
       "tempo_medio_resposta_minutos": 8.9
     }
   ],

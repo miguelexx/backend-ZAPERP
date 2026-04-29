@@ -60,6 +60,7 @@ if (socketAppOrigin && !allowedSocketOrigins.includes(socketAppOrigin)) {
 
 const internalChatSocket = require('./socket/internalChatSocket')
 const { startAbsenceFinalizationScheduler } = require('./services/absenceFinalizationScheduler')
+const { startProdutosSyncScheduler } = require('./services/produtosSyncScheduler')
 
 async function canUserJoinConversationRoom({ company_id, user_id, role, departamento_ids, conversa_id }) {
   const cid = Number(conversa_id)
@@ -293,5 +294,6 @@ server.listen(PORT, '0.0.0.0', () => {
     startWorker(5000, io)
     console.log('[WORKER] Job worker iniciado (polling a cada 5s)')
     startAbsenceFinalizationScheduler()
+    startProdutosSyncScheduler()
   }
 })

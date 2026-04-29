@@ -648,13 +648,15 @@ async function getResumo(companyId) {
     const assignedPending = insights.pending.filter((p) => Number(p.atendente_id) === Number(u.id))
     const atrasados = assignedPending.filter((p) => p.atrasado)
     const assumidos = atendimentosHoje.filter((a) => a.acao === 'assumiu' && (Number(a.para_usuario_id) === Number(u.id) || Number(a.de_usuario_id) === Number(u.id))).length
+    const finalizadasHoje = atendimentosHoje.filter(
+      (a) => a.acao === 'encerrou' && Number(a.de_usuario_id) === Number(u.id)
+    ).length
     const mediasAtendente = assignedOpen
       .map((c) => responseStats.byConversation.get(Number(c.id)))
       .filter((x) => Number.isFinite(Number(x)))
     const mediaAtendente = mediasAtendente.length > 0
       ? Number((mediasAtendente.reduce((acc, x) => acc + Number(x), 0) / mediasAtendente.length).toFixed(2))
       : null
-    const maiorTempo = assignedPending.length > 0 ? Math.max(...assignedPending.map((p) => p.minutos_aguardando)) : 0
     const emAtendimento = countConversasEmAtendimento(assignedOpen, u.id)
     const nivel = assignedPending.some((p) => p.nivel === 'critico')
       ? 'critico'
@@ -676,7 +678,8 @@ async function getResumo(companyId) {
       clientes_sem_resposta: assignedPending.length,
       clientes_atrasados: atrasados.length,
       tempo_medio_resposta_minutos: mediaAtendente,
-      maior_tempo_sem_resposta_minutos: maiorTempo,
+      finalizadas_hoje: finalizadasHoje,
+      atendimentos_finalizados_hoje: finalizadasHoje,
       nivel,
     }
   })
@@ -920,6 +923,9 @@ async function getRelatorioDiarioGestor(companyId, dateStr) {
         (Number(a.para_usuario_id) === Number(u.id) || Number(a.de_usuario_id) === Number(u.id))
     ).length
     const emAtendimento = countConversasEmAtendimento(convsUser, u.id)
+    const finalizadasNoDia = atendimentosRows.filter(
+      (a) => a.acao === 'encerrou' && Number(a.de_usuario_id) === Number(u.id)
+    ).length
     return {
       usuario_id: u.id,
       nome: safeDisplayString(u.nome || 'Sem nome', 120),
@@ -927,7 +933,8 @@ async function getRelatorioDiarioGestor(companyId, dateStr) {
       atendimentos_assumidos_no_dia: assumidosNoDia,
       conversas_em_atendimento: emAtendimento,
       clientes_sem_resposta: pendUser.length,
-      maior_tempo_sem_resposta_minutos: pendUser.length ? Math.max(...pendUser.map((p) => p.minutos_aguardando)) : 0,
+      finalizadas_hoje: finalizadasNoDia,
+      atendimentos_finalizados_hoje: finalizadasNoDia,
       tempo_medio_resposta_minutos: tempoMedio,
     }
   }).sort((a, b) => {

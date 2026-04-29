@@ -59,10 +59,16 @@ async function subscribe(req, res) {
  */
 async function unsubscribe(req, res) {
   try {
+    const company_id = Number(req.user?.company_id)
     const usuario_id = Number(req.user?.id)
     const endpoint = String(req.body?.endpoint || '').trim()
 
-    if (!Number.isFinite(usuario_id) || usuario_id <= 0) {
+    if (
+      !Number.isFinite(company_id) ||
+      company_id <= 0 ||
+      !Number.isFinite(usuario_id) ||
+      usuario_id <= 0
+    ) {
       return res.status(400).json({ error: 'Sessão inválida' })
     }
     if (!endpoint) {
@@ -72,6 +78,7 @@ async function unsubscribe(req, res) {
     await supabase
       .from('push_subscriptions')
       .delete()
+      .eq('company_id', company_id)
       .eq('usuario_id', usuario_id)
       .eq('endpoint', endpoint)
 
@@ -82,8 +89,75 @@ async function unsubscribe(req, res) {
   }
 }
 
+async function sendTestPush(req, res) {
+  try {
+    const company_id = Number(req.user?.company_id)
+    const usuario_id = Number(req.user?.id)
+    if (!Number.isFinite(company_id) || company_id <= 0 || !Number.isFinite(usuario_id) || usuario_id <= 0) {
+      return res.status(400).json({ error: 'Sessão inválida' })
+    }
+
+    const webPushService = require('../services/webPushService')
+    if (!webPushService.ensureVapidConfigured()) {
+      return res.status(503).json({ error: 'Web push não configurado no servidor' })
+    }
+
+    const { data: rows, error } = await supabase
+      .from('push_subscriptions')
+      .select('endpoint, p256dh, auth')
+      .eq('company_id', company_id)
+      .eq('usuario_id', usuario_id)
+
+    if (error) {
+      console.warn('[push] test subscriptions:', error.message || error)
+      return res.status(500).json({ error: 'Falha ao carregar subscriptions' })
+    }
+
+    const subs = (rows || []).map(webPushService.subscriptionFromRow).filter(Boolean)
+    if (subs.length === 0) {
+      return res.status(404).json({ error: 'Nenhuma subscription ativa para este usuário' })
+    }
+
+    const nowIso = new Date().toISOString()
+    const payload = JSON.stringify({
+      title: 'Teste de notificação',
+      body: 'Se você recebeu, o push em background está ativo.',
+      tag: `push-test-${usuario_id}`,
+      renotify: true,
+      requireInteraction: true,
+      priority: 'high',
+      data: {
+        type: 'push_test',
+        sentAt: nowIso,
+        openUrl: '/atendimento',
+        url: '/atendimento',
+      },
+    })
+
+    let sent = 0
+    let failed = 0
+    for (const sub of subs) {
+      const result = await webPushService.sendToSubscription(sub, payload)
+      if (result?.ok) sent += 1
+      else failed += 1
+    }
+
+    return res.json({
+      ok: sent > 0,
+      sent,
+      failed,
+      subscriptions: subs.length,
+      sentAt: nowIso,
+    })
+  } catch (e) {
+    console.warn('[push] sendTestPush:', e?.message || e)
+    return res.status(500).json({ error: 'Erro interno' })
+  }
+}
+
 module.exports = {
   getPublicKey,
   subscribe,
   unsubscribe,
+  sendTestPush,
 }

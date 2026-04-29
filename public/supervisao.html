@@ -1,0 +1,658 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Supervisão — ZapERP</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:ital,wght@0,400;0,500;0,600;0,700;1,500&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --bg: #eef2f7;
+      --bg-accent: linear-gradient(165deg, #f0f9ff 0%, #eef2f7 38%, #f5f3ff 100%);
+      --surface: #ffffff;
+      --surface-muted: #f8fafc;
+      --border: rgba(15, 23, 42, 0.08);
+      --border-strong: rgba(15, 23, 42, 0.12);
+      --text: #0f172a;
+      --text-secondary: #475569;
+      --text-muted: #64748b;
+      --accent: #0d9488;
+      --accent-soft: rgba(13, 148, 136, 0.12);
+      --accent2: #6366f1;
+      --warn: #ea580c;
+      --danger: #dc2626;
+      --radius: 16px;
+      --radius-sm: 12px;
+      --shadow: 0 1px 3px rgba(15, 23, 42, 0.06), 0 12px 32px -8px rgba(15, 23, 42, 0.1);
+      --shadow-hover: 0 4px 24px rgba(15, 23, 42, 0.08);
+      --font: 'Plus Jakarta Sans', system-ui, sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: var(--font);
+      color: var(--text);
+      background: var(--bg-accent);
+      line-height: 1.5;
+    }
+
+    .shell {
+      max-width: 1320px;
+      margin: 0 auto;
+      padding: 28px 20px 48px;
+    }
+
+    .hero {
+      margin-bottom: 28px;
+    }
+    .hero-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 0.72rem;
+      font-weight: 700;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--accent);
+      margin-bottom: 10px;
+    }
+    .hero-badge::before {
+      content: '';
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--accent);
+      box-shadow: 0 0 0 4px var(--accent-soft);
+    }
+    .hero h1 {
+      font-size: clamp(1.55rem, 3vw, 2rem);
+      font-weight: 700;
+      letter-spacing: -0.03em;
+      margin: 0 0 8px;
+      color: var(--text);
+    }
+    .hero p {
+      margin: 0;
+      color: var(--text-secondary);
+      font-size: 1rem;
+      max-width: 52ch;
+    }
+
+    .kpi-row {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      gap: 16px;
+      margin-bottom: 22px;
+    }
+
+    .kpi {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 22px 22px 20px;
+      box-shadow: var(--shadow);
+      position: relative;
+      overflow: hidden;
+      transition: box-shadow 0.2s ease, transform 0.15s ease;
+    }
+    .kpi:hover {
+      box-shadow: var(--shadow-hover);
+    }
+    .kpi::after {
+      content: '';
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 3px;
+      border-radius: var(--radius) var(--radius) 0 0;
+      background: linear-gradient(90deg, var(--accent), var(--accent2));
+      opacity: 0.85;
+    }
+    .kpi-label {
+      font-size: 0.8125rem;
+      font-weight: 600;
+      color: var(--text-muted);
+      margin-bottom: 6px;
+    }
+    .kpi-value {
+      font-size: 2.25rem;
+      font-weight: 700;
+      letter-spacing: -0.04em;
+      color: var(--text);
+      line-height: 1.1;
+    }
+    .kpi-hint {
+      margin-top: 8px;
+      font-size: 0.78rem;
+      color: var(--text-muted);
+    }
+
+    .toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      align-items: flex-end;
+      margin-bottom: 20px;
+      padding: 18px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+    }
+    .toolbar .field {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      min-width: 140px;
+      flex: 1 1 140px;
+    }
+    .toolbar label {
+      font-size: 0.7rem;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--text-muted);
+    }
+    .toolbar input,
+    .toolbar select {
+      padding: 10px 12px;
+      border-radius: var(--radius-sm);
+      border: 1px solid var(--border-strong);
+      font-family: var(--font);
+      font-size: 0.9rem;
+      background: var(--surface-muted);
+      color: var(--text);
+      outline: none;
+      transition: border-color 0.15s, box-shadow 0.15s;
+    }
+    .toolbar input:focus,
+    .toolbar select:focus {
+      border-color: rgba(13, 148, 136, 0.45);
+      box-shadow: 0 0 0 3px var(--accent-soft);
+      background: #fff;
+    }
+
+    .layout-main {
+      display: grid;
+      grid-template-columns: 1fr minmax(300px, 380px);
+      gap: 20px;
+      align-items: start;
+    }
+    @media (max-width: 1024px) {
+      .layout-main { grid-template-columns: 1fr; }
+    }
+
+    .panel {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      overflow: hidden;
+    }
+    .panel-head {
+      padding: 18px 20px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+      background: linear-gradient(180deg, #fff 0%, #fafbfc 100%);
+    }
+    .panel-head h2 {
+      margin: 0;
+      font-size: 1.05rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+    }
+    .panel-body { padding: 12px 16px 18px; max-height: min(70vh, 720px); overflow-y: auto; }
+
+    .client-card {
+      padding: 14px 16px;
+      margin-bottom: 10px;
+      border-radius: var(--radius-sm);
+      border: 1px solid var(--border);
+      background: var(--surface-muted);
+      transition: border-color 0.15s, background 0.15s;
+    }
+    .client-card:hover {
+      border-color: rgba(13, 148, 136, 0.25);
+      background: #fff;
+    }
+    .client-top {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+      align-items: flex-start;
+    }
+    .client-name { font-weight: 700; font-size: 0.95rem; color: var(--text); }
+    .client-meta { font-size: 0.8rem; color: var(--text-muted); margin-top: 4px; }
+    .client-snippet { font-size: 0.85rem; color: var(--text-secondary); margin-top: 10px; line-height: 1.45; }
+    .badge {
+      font-size: 0.68rem;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      padding: 4px 8px;
+      border-radius: 8px;
+      white-space: nowrap;
+    }
+    .badge-critico { background: #fef2f2; color: var(--danger); border: 1px solid #fecaca; }
+    .badge-atencao { background: #fffbeb; color: #b45309; border: 1px solid #fde68a; }
+    .badge-normal { background: #f1f5f9; color: var(--text-muted); border: 1px solid var(--border); }
+
+    .rank-card {
+      padding: 14px 14px 16px;
+      margin-bottom: 10px;
+      border-radius: var(--radius-sm);
+      border: 1px solid var(--border);
+      background: linear-gradient(180deg, #fff 0%, #fafbfc 100%);
+    }
+    .rank-name {
+      font-weight: 700;
+      font-size: 0.95rem;
+      margin-bottom: 10px;
+      color: var(--text);
+      padding-bottom: 8px;
+      border-bottom: 1px solid var(--border);
+    }
+    .rank-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px 12px;
+      font-size: 0.78rem;
+      color: var(--text-secondary);
+    }
+    .rank-grid span strong {
+      display: block;
+      font-size: 0.95rem;
+      color: var(--text);
+      font-weight: 700;
+      margin-top: 2px;
+    }
+
+    .muted { color: var(--text-muted); font-size: 0.85rem; text-align: center; padding: 32px; }
+
+    .alert {
+      padding: 12px 16px;
+      border-radius: var(--radius-sm);
+      margin-bottom: 16px;
+      font-size: 0.9rem;
+      border: 1px solid #fecaca;
+      background: #fef2f2;
+      color: #991b1b;
+    }
+
+    .loading {
+      text-align: center;
+      padding: 40px;
+      color: var(--text-muted);
+    }
+    .loading-spinner {
+      width: 36px;
+      height: 36px;
+      margin: 0 auto 12px;
+      border: 3px solid var(--accent-soft);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin 0.75s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .btn-link {
+      font-size: 0.78rem;
+      font-weight: 600;
+      color: var(--accent);
+      background: none;
+      border: none;
+      cursor: pointer;
+      padding: 0;
+      text-decoration: underline;
+      text-underline-offset: 3px;
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <header class="hero">
+      <div class="hero-badge">Operações em tempo real</div>
+      <h1>Supervisão</h1>
+      <p>Acompanhe clientes aguardando resposta e o desempenho da equipe. Painel focado em fila e SLA.</p>
+    </header>
+
+    <div id="err-box" class="alert" style="display:none;"></div>
+
+    <section class="kpi-row" aria-label="Indicadores principais">
+      <article class="kpi">
+        <div class="kpi-label">Aguardando funcionário</div>
+        <div class="kpi-value" id="kpi-aguardando">—</div>
+        <div class="kpi-hint">Última mensagem do cliente sem resposta</div>
+      </article>
+      <article class="kpi">
+        <div class="kpi-label">Atrasados &gt; 30 min</div>
+        <div class="kpi-value" id="kpi-atrasados">—</div>
+        <div class="kpi-hint">Acima do tempo de alerta configurado</div>
+      </article>
+    </section>
+
+    <div class="toolbar">
+      <div class="field" style="flex: 2 1 220px;">
+        <label for="busca">Buscar</label>
+        <input id="busca" type="search" placeholder="Cliente, telefone ou resumo" autocomplete="off" />
+      </div>
+      <div class="field">
+        <label for="atendente">Atendente</label>
+        <select id="atendente">
+          <option value="">Todos</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="dep">Departamento</label>
+        <select id="dep">
+          <option value="">Todos</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="nivel">Nível</label>
+        <select id="nivel">
+          <option value="">Todos</option>
+          <option value="normal">Normal</option>
+          <option value="atencao">Atenção</option>
+          <option value="prioritario">Prioritário</option>
+          <option value="critico">Crítico</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="periodo">Período</label>
+        <select id="periodo">
+          <option value="">Todos</option>
+          <option value="hoje">Hoje</option>
+          <option value="7dias">7 dias</option>
+          <option value="mes">Mês</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="data-ref">Data referência</label>
+        <input id="data-ref" type="date" />
+      </div>
+      <div class="field" style="flex: 0 0 auto; min-width: auto;">
+        <label>&nbsp;</label>
+        <label style="text-transform: none; letter-spacing: 0; font-size: 0.85rem; cursor: pointer;">
+          <input type="checkbox" id="somente-atrasados" /> Somente atrasados
+        </label>
+      </div>
+    </div>
+
+    <div class="layout-main">
+      <section class="panel">
+        <div class="panel-head">
+          <h2>Clientes aguardando resposta</h2>
+          <span id="total-clientes" class="badge badge-normal" style="font-size: 0.75rem;"></span>
+        </div>
+        <div class="panel-body" id="lista-clientes">
+          <div class="loading"><div class="loading-spinner"></div>Carregando…</div>
+        </div>
+      </section>
+
+      <aside class="panel">
+        <div class="panel-head">
+          <h2>Ranking da equipe</h2>
+        </div>
+        <div class="panel-body" id="ranking">
+          <div class="loading"><div class="loading-spinner"></div></div>
+        </div>
+      </aside>
+    </div>
+  </div>
+
+  <script>
+(function () {
+  const apiBase = window.location.pathname.startsWith('/api') ? '' : '/api';
+  const getToken = () =>
+    localStorage.getItem('token') ||
+    localStorage.getItem('authToken') ||
+    localStorage.getItem('jwt') ||
+    '';
+
+  const $ = (id) => document.getElementById(id);
+  const esc = (s) => {
+    const d = document.createElement('div');
+    d.textContent = s == null ? '' : String(s);
+    return d.innerHTML;
+  };
+
+  function formatDurMin(totalMin) {
+    const m = Math.max(0, Math.floor(Number(totalMin) || 0));
+    if (m >= 1440) {
+      const d = Math.floor(m / 1440);
+      const h = Math.floor((m % 1440) / 60);
+      return d + 'd ' + h + 'h';
+    }
+    if (m >= 60) {
+      const h = Math.floor(m / 60);
+      const mm = m % 60;
+      return h + 'h ' + mm + 'min';
+    }
+    return m + ' min';
+  }
+
+  function todayISO() {
+    const d = new Date();
+    const y = d.getFullYear();
+    const mo = String(d.getMonth() + 1).padStart(2, '0');
+    const da = String(d.getDate()).padStart(2, '0');
+    return y + '-' + mo + '-' + da;
+  }
+
+  async function fetchJSON(path, opts) {
+    const res = await fetch(apiBase + path, {
+      credentials: 'include',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: 'Bearer ' + getToken(),
+        ...(opts && opts.headers),
+      },
+      ...opts,
+    });
+    if (res.status === 401) {
+      window.location.href = '/login';
+      return null;
+    }
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || 'Erro na requisição');
+    return data;
+  }
+
+  function showErr(msg) {
+    const el = $('err-box');
+    el.style.display = 'block';
+    el.textContent = msg;
+  }
+  function hideErr() {
+    $('err-box').style.display = 'none';
+  }
+
+  let usuarios = [];
+
+  async function loadUsuarios() {
+    try {
+      const data = await fetchJSON('/usuarios');
+      usuarios = Array.isArray(data) ? data : [];
+      const sel = $('atendente');
+      sel.innerHTML = '<option value="">Todos atendentes</option>';
+      usuarios.forEach((u) => {
+        sel.innerHTML += '<option value="' + esc(u.id) + '">' + esc(u.nome) + '</option>';
+      });
+    } catch (_) {}
+  }
+
+  async function loadDepartamentos() {
+    try {
+      const data = await fetchJSON('/dashboard/departamentos');
+      const list = Array.isArray(data) ? data : [];
+      const sel = $('dep');
+      sel.innerHTML = '<option value="">Todos departamentos</option>';
+      list.forEach((d) => {
+        const id = d.id != null ? d.id : d.departamento_id;
+        const nome = d.nome || d.departamento_nome || '';
+        if (id != null) sel.innerHTML += '<option value="' + esc(id) + '">' + esc(nome) + '</option>';
+      });
+    } catch (_) {
+      $('dep').innerHTML = '<option value="">Todos departamentos</option>';
+    }
+  }
+
+  function qsFilters() {
+    const params = new URLSearchParams();
+    const att = $('atendente').value;
+    const dep = $('dep').value;
+    const nivel = $('nivel').value;
+    const periodo = $('periodo').value;
+    const busca = $('busca').value.trim();
+    const somente = $('somente-atrasados').checked;
+    if (att) params.set('atendente_id', att);
+    if (dep) params.set('departamento_id', dep);
+    if (nivel) params.set('nivel', nivel);
+    if (periodo) params.set('periodo', periodo);
+    if (busca) params.set('busca', busca);
+    if (somente) params.set('somente_atrasados', 'true');
+    const q = params.toString();
+    return q ? '?' + q : '';
+  }
+
+  async function loadRelatorio() {
+    const dataStr = $('data-ref').value || todayISO();
+    const rel = await fetchJSON('/supervisao/relatorio-diario?data=' + encodeURIComponent(dataStr));
+    const t = rel.totais || {};
+    $('kpi-aguardando').textContent = t.aguardando_funcionario ?? '0';
+    $('kpi-atrasados').textContent = t.atrasados_30min ?? '0';
+
+    const ranking = rel.ranking_funcionarios || [];
+    const box = $('ranking');
+    if (!ranking.length) {
+      box.innerHTML = '<p class="muted">Nenhum funcionário cadastrado.</p>';
+      return;
+    }
+    box.innerHTML = ranking
+      .map((r) => {
+        const assum = r.atendimentos_assumidos_no_dia ?? r.atendimentos_assumidos_hoje ?? 0;
+        const emAt = r.conversas_em_atendimento ?? 0;
+        const sem = r.clientes_sem_resposta ?? 0;
+        const fin = r.finalizadas_hoje ?? r.atendimentos_finalizados_hoje ?? 0;
+        return (
+          '<div class="rank-card">' +
+          '<div class="rank-name">' +
+          esc(r.nome) +
+          '</div>' +
+          '<div class="rank-grid">' +
+          '<div>Assumidos no dia<strong>' +
+          esc(assum) +
+          '</strong></div>' +
+          '<div>Em atendimento<strong>' +
+          esc(emAt) +
+          '</strong></div>' +
+          '<div>Sem resposta<strong>' +
+          esc(sem) +
+          '</strong></div>' +
+          '<div>Finalizadas hoje<strong>' +
+          esc(fin) +
+          '</strong></div>' +
+          '</div></div>'
+        );
+      })
+      .join('');
+  }
+
+  async function loadClientes() {
+    const box = $('lista-clientes');
+    box.innerHTML = '<div class="loading"><div class="loading-spinner"></div>Carregando…</div>';
+    try {
+      const data = await fetchJSON('/supervisao/clientes-pendentes' + qsFilters());
+      const list = data.clientes || data.clientes_pendentes || [];
+      $('total-clientes').textContent = (data.total || list.length) + ' cliente(s)';
+      if (!list.length) {
+        box.innerHTML = '<p class="muted">Nenhum cliente neste filtro.</p>';
+        return;
+      }
+      box.innerHTML = list
+        .map((c) => {
+          const nivel = String(c.nivel || 'normal').toLowerCase();
+          const badgeClass =
+            nivel === 'critico' ? 'badge-critico' : nivel === 'atencao' || nivel === 'prioritario' ? 'badge-atencao' : 'badge-normal';
+          const badgeText = nivel.charAt(0).toUpperCase() + nivel.slice(1);
+          const nome = c.cliente_nome || 'Cliente';
+          const tel = c.telefone ? ' · ' + c.telefone : '';
+          const esp = formatDurMin(c.minutos_aguardando);
+          const resp = c.atendente_nome ? esc(c.atendente_nome) : '<span style="color:var(--text-muted)">Sem responsável</span>';
+          return (
+            '<article class="client-card">' +
+            '<div class="client-top">' +
+            '<div><div class="client-name">' +
+            esc(nome) +
+            '</div>' +
+            '<div class="client-meta">' +
+            esc(c.departamento_nome || '') +
+            tel +
+            '</div></div>' +
+            '<div style="text-align:right;">' +
+            '<span class="badge ' +
+            badgeClass +
+            '">' +
+            esc(badgeText) +
+            '</span>' +
+            '<div style="font-size:0.8rem;color:var(--text-muted);margin-top:6px;">' +
+            esp +
+            '</div>' +
+            '<div style="font-size:0.78rem;margin-top:4px;">' +
+            resp +
+            '</div></div></div>' +
+            (c.resumo_conversa
+              ? '<div class="client-snippet">' + esc(c.resumo_conversa).slice(0, 220) + '</div>'
+              : '') +
+            '</article>'
+          );
+        })
+        .join('');
+    } catch (e) {
+      box.innerHTML = '<p class="muted">' + esc(e.message) + '</p>';
+    }
+  }
+
+  async function refreshAll() {
+    hideErr();
+    try {
+      await Promise.all([loadRelatorio(), loadClientes()]);
+    } catch (e) {
+      showErr(e.message || 'Falha ao carregar supervisão');
+    }
+  }
+
+  $('data-ref').value = todayISO();
+  $('data-ref').addEventListener('change', () => refreshAll());
+
+  let debounce;
+  ['busca', 'atendente', 'dep', 'nivel', 'periodo', 'somente-atrasados'].forEach((id) => {
+    $(id).addEventListener(id === 'busca' ? 'input' : 'change', () => {
+      clearTimeout(debounce);
+      debounce = setTimeout(() => loadClientes(), id === 'busca' ? 320 : 0);
+    });
+  });
+
+  (async function init() {
+    if (!getToken()) {
+      window.location.href = '/login';
+      return;
+    }
+    await Promise.all([loadUsuarios(), loadDepartamentos()]);
+    await refreshAll();
+  })();
+})();
+  </script>
+</body>
+</html>
