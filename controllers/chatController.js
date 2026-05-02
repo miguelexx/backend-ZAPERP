@@ -6,7 +6,7 @@ const { getProvider } = require('../services/providers')
 const { getStatus } = require('../services/ultramsgIntegrationService')
 const { isGroupConversation } = require('../helpers/conversaHelper')
 const { normalizePhoneBR, possiblePhonesBR, phoneKeyBR } = require('../helpers/phoneHelper')
-const { deduplicateConversationsByContact, sortConversationsByRecent, sortConversationsPinThenRecent, getCanonicalPhone, getOrCreateCliente, mergeConversasIntoCanonico } = require('../helpers/conversationSync')
+const { deduplicateConversationsByContact, sortConversationsByRecent, sortConversationsPinThenRecent, getCanonicalPhone, getOrCreateCliente, findOrCreateConversation, mergeConversasIntoCanonico } = require('../helpers/conversationSync')
 const { enrichConversationsWithContactData } = require('../helpers/conversaEnrichment')
 const { getDisplayName } = require('../helpers/contactEnrichment')
 const { tryMarkWaitingAfterHumanOutbound } = require('../services/absenceFinalizationService')
@@ -2139,77 +2139,71 @@ exports.criarContato = async (req, res) => {
     }
 
     const nomeTrim = nome != null ? String(nome).trim() : ''
-    const phonesBusca = possiblePhonesBR(telefoneCanonico)
-    let cliente
 
-    // =================================================
-    // 1️⃣ TENTA BUSCAR CLIENTE EXISTENTE (por variantes do número)
-    // =================================================
-    let qCli = supabase.from('clientes').select('*').eq('company_id', company_id)
-    if (phonesBusca.length > 0) qCli = qCli.in('telefone', phonesBusca)
-    else qCli = qCli.eq('telefone', telefoneCanonico)
-    const { data: existenteList } = await qCli.order('id', { ascending: true }).limit(1)
-    const existenteRow = Array.isArray(existenteList) && existenteList.length > 0 ? existenteList[0] : null
-
-    if (existenteRow) {
-      cliente = existenteRow
-    } else {
-      const { data, error } = await supabase
-        .from('clientes')
-        .insert({
-          nome: nomeTrim || null,
-          telefone: telefoneCanonico,
-          company_id
+    // Cliente: getOrCreateCliente evita 23505 e unifica variantes (55… vs DDD…).
+    const { cliente_id: clienteId } = await getOrCreateCliente(supabase, company_id, telefoneRaw, {
+      ...(nomeTrim ? { nome: nomeTrim } : {})
+    })
+    if (!clienteId) {
+      return res.status(400).json(
+        erroTelefoneNovoContato('TELEFONE_INVALIDO', {
+          detalhe: 'Não foi possível cadastrar ou localizar o cliente para este número.'
         })
-        .select()
-        .single()
-
-      if (error) return res.status(500).json({ error: error.message })
-
-      cliente = data
+      )
     }
 
-    // =================================================
-    // 2️⃣ CRIA CONVERSA (telefone canônico = uma conversa por contato)
-    // =================================================
-    let conversa = null
-    let errConv = null
-    const insConv = await supabase
-      .from('conversas')
-      .insert({
-        cliente_id: cliente.id,
-        telefone: telefoneCanonico,
+    // Conversa: findOrCreateConversation inclui conversas fechadas e trata race (23505).
+    let resultado
+    try {
+      resultado = await findOrCreateConversation(supabase, {
         company_id,
-        status_atendimento: 'aberta',
-        usuario_id,
-        tipo: 'cliente'
+        phone: telefoneCanonico,
+        cliente_id: clienteId,
+        isGroup: false,
+        logPrefix: '[criarContato]'
       })
-      .select()
-      .single()
-    conversa = insConv.data
-    errConv = insConv.error
-
-    if (errConv && (String(errConv.code || '') === '23505' || String(errConv.message || '').includes('unique'))) {
-      const { data: existenteConv } = await supabase
-        .from('conversas')
-        .select('*')
-        .eq('company_id', company_id)
-        .neq('status_atendimento', 'fechada')
-        .in('telefone', phonesBusca.length > 0 ? phonesBusca : [telefoneCanonico])
-        .order('id', { ascending: false })
-        .limit(1)
-        .maybeSingle()
-      if (existenteConv) {
-        conversa = existenteConv
-        errConv = null
-      }
+    } catch (e) {
+      console.error(e)
+      return res.status(500).json({ error: 'Erro ao criar contato' })
     }
-    if (errConv) return res.status(500).json({ error: errConv.message })
 
-    // realtime
-    emitirEventoEmpresaConversa(io, company_id, conversa.id, 'nova_conversa', conversa)
+    if (!resultado?.conversa?.id) {
+      return res.status(500).json({ error: 'Erro ao criar contato' })
+    }
 
-    return res.json(conversa)
+    const convId = Number(resultado.conversa.id)
+    const convNova = resultado.created === true
+
+    if (Number(resultado.conversa.cliente_id) !== Number(clienteId)) {
+      await supabase
+        .from('conversas')
+        .update({ cliente_id: clienteId })
+        .eq('company_id', company_id)
+        .eq('id', convId)
+    }
+
+    if (convNova) {
+      const patch = { tipo: 'cliente', usuario_id }
+      await supabase.from('conversas').update(patch).eq('company_id', company_id).eq('id', convId)
+    }
+
+    const { data: conversa, error: errFull } = await supabase
+      .from('conversas')
+      .select('*')
+      .eq('company_id', company_id)
+      .eq('id', convId)
+      .single()
+
+    if (errFull || !conversa) {
+      return res.status(500).json({ error: errFull?.message || 'Erro ao carregar conversa' })
+    }
+
+    if (convNova && io) {
+      emitirEventoEmpresaConversa(io, company_id, conversa.id, 'nova_conversa', conversa)
+    }
+
+    // reutilizada: número já tinha conversa (ex.: fechada ou duplicata) — frontend pode só navegar, sem toast de erro.
+    return res.json({ ...conversa, reutilizada: !convNova })
 
   } catch (err) {
     console.error(err)
