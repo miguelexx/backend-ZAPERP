@@ -2616,12 +2616,13 @@ exports.reabrirChat = async (req, res) => {
       return res.status(400).json({ error: 'Grupos são apenas visuais. Não é possível reabrir conversa de grupo.' })
     }
 
-    // Conversa aberta = sem responsável, apenas setor (volta para a fila)
+    // Reabrir já assume automaticamente para quem clicou
     const { data, error } = await supabase
       .from('conversas')
       .update({
-        status_atendimento: 'aberta',
-        atendente_id: null,
+        status_atendimento: 'em_atendimento',
+        atendente_id: user_id,
+        atendente_atribuido_em: new Date().toISOString(),
         finalizacao_motivo: null,
         finalizada_automaticamente: false,
         finalizada_automaticamente_em: null,
@@ -2652,10 +2653,10 @@ exports.reabrirChat = async (req, res) => {
         io.EVENTS?.CONVERSA_REABERTA || 'conversa_reaberta',
         {
           ...data,
-          lista_realtime: { minha_fila: true, motivo: 'reaberta' }
+          lista_realtime: { minha_fila: true, motivo: 'reaberta_assumida_automaticamente' }
         }
       )
-      emitirLock(io, conversa_id, null)
+      emitirLock(io, conversa_id, user_id)
       // Evita reposicionamento indevido ao reabrir.
       emitirConversaAtualizada(io, company_id, conversa_id, { ...data }, { skipAtualizarConversa: true })
       emitirSincronizacaoListaConversas(io, company_id, conversa_id)
