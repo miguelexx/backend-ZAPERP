@@ -223,6 +223,7 @@ const crmRoutes = require('./routes/crmRoutes')
 const supervisaoRoutes = require('./routes/supervisaoRoutes')
 const produtosRoutes = require('./routes/produtosRoutes')
 const printRoutes = require('./routes/printRoutes')
+const mediaProxyRoutes = require('./routes/mediaProxyRoutes')
 
 // Webhooks já registrados antes do CORS (evita 403 Origin)
 app.use('/dashboard', dashboardRoutes)
@@ -245,6 +246,7 @@ app.use('/crm', apiLimiter, crmRoutes)
 app.use('/supervisao', supervisaoRoutes)
 app.use('/produtos', produtosRoutes)
 app.use('/print', apiLimiter, printRoutes)
+app.use('/media', apiLimiter, mediaProxyRoutes)
 
 // /api — prefixo opcional para SaaS; mantém compatibilidade com rotas antigas
 // Aplica apiLimiter globalmente para "rotas de API"
@@ -269,6 +271,7 @@ api.use('/crm', crmRoutes)
 api.use('/supervisao', supervisaoRoutes)
 api.use('/produtos', produtosRoutes)
 api.use('/print', printRoutes)
+api.use('/media', mediaProxyRoutes)
 app.use('/api', apiLimiter, api)
 
 // =====================================================
@@ -338,6 +341,8 @@ if (hasFrontendDist) {
     '/crm',
     '/supervisao',
     '/print',
+    '/media',
+    '/produtos',
   ]
 
   app.get('*', (req, res, next) => {
