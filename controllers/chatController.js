@@ -4531,92 +4531,50 @@ async function normalizeAudioForUltraMsg(file, tipo) {
   }
 }
 
-exports.enviarArquivo = async (req, res) => {
-  try {
-    const { id: conversa_id } = req.params
-    const { company_id, id: user_id, perfil } = req.user
-    const io = req.app.get('io')
+/** Lote de fotos/arquivos (galeria): mesmo contrato do WhatsApp Web. */
+const MAX_ARQUIVOS_LOTE_ENVIO = 30
 
-    if (!req.file) {
-      const hint = 'Envie multipart/form-data com campo "file" ou "audio"'
-      return res.status(400).json({ error: "Arquivo não enviado. " + hint })
-    }
-
-    const permEnvio = await assertPodeEnviarMensagem({ company_id, conversa_id, user_id })
-    if (!permEnvio.ok) return res.status(permEnvio.status).json({ error: permEnvio.error })
-
-    let file = req.file
-    const tipoBody = String(req.body?.tipo || req.query?.tipo || '').toLowerCase().trim()
-    if (tipoBody === 'sticker') file.__tipoForcado = 'sticker'
-    const tipo = aplicarTipoForcadoSticker(file, inferirTipoArquivo(file))
-    if (tipo === 'audio' || tipo === 'voice') {
-      try {
-        const normalized = await normalizeAudioForUltraMsg(file, tipo)
-        if (normalized?.converted && normalized?.file) {
-          const beforeName = req.file?.originalname || file.originalname
-          file = normalized.file
-          req.file = file
-          console.log('[ULTRAMSG][AUDIO] Áudio convertido para formato compatível antes do envio:', {
-            tipo,
-            from: beforeName,
-            to: file.originalname,
-            mime: file.mimetype,
-          })
-        } else if (normalized?.error) {
-          console.warn('[ULTRAMSG][AUDIO] Conversão/normalização indisponível:', normalized.error)
-        }
-      } catch (e) {
-        console.warn('[ULTRAMSG][AUDIO] Falha ao converter WAV para MP3:', e?.message || e)
+/**
+ * Uma unidade de upload após multer; conversa e telefone já validados.
+ * @returns {Promise<{ ok: true, msg: object } | { ok: false, status: number, error: string }>}
+ */
+async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conversa_id, telefoneParaEnvio, io }) {
+  let fileWork = file
+  const tipo = aplicarTipoForcadoSticker(fileWork, inferirTipoArquivo(fileWork))
+  if (tipo === 'audio' || tipo === 'voice') {
+    try {
+      const normalized = await normalizeAudioForUltraMsg(fileWork, tipo)
+      if (normalized?.converted && normalized?.file) {
+        const beforeName = fileWork.originalname
+        fileWork = normalized.file
+        req.file = fileWork
+        console.log('[ULTRAMSG][AUDIO] Áudio convertido para formato compatível antes do envio:', {
+          tipo,
+          from: beforeName,
+          to: fileWork.originalname,
+          mime: fileWork.mimetype,
+        })
+      } else if (normalized?.error) {
+        console.warn('[ULTRAMSG][AUDIO] Conversão/normalização indisponível:', normalized.error)
       }
+    } catch (e) {
+      console.warn('[ULTRAMSG][AUDIO] Falha ao converter WAV para MP3:', e?.message || e)
     }
-    const pathUrl = `/uploads/${file.filename}`
+  }
+  const pathUrl = `/uploads/${fileWork.filename}`
 
-    const { data: conversa } = await supabase
-      .from('conversas')
-      .select('id, telefone, cliente_id, tipo, chat_lid')
-      .eq('company_id', company_id)
-      .eq('id', conversa_id)
-      .single()
+  const { data: msg, error } = await supabase.from("mensagens").insert({
+    conversa_id: Number(conversa_id),
+    texto: tipo === 'audio' ? '(áudio)' : tipo === 'voice' ? '(áudio de voz)' : tipo === 'sticker' ? '(figurinha)' : fileWork.originalname,
+    tipo,
+    url: pathUrl,
+    nome_arquivo: fileWork.originalname,
+    direcao: "out",
+    autor_usuario_id: user_id,
+    company_id,
+  }).select().single()
 
-    if (!conversa) {
-      return res.status(404).json({ error: 'Conversa não encontrada' })
-    }
-
-    // Resolver telefone real quando conversa tem apenas LID (lid:xxx) — UltraMsg não envia para LID
-    let telefoneParaEnvio = conversa.telefone || ''
-    if (telefoneParaEnvio && String(telefoneParaEnvio).trim().toLowerCase().startsWith('lid:')) {
-      if (conversa.cliente_id) {
-        const { data: cli } = await supabase.from('clientes').select('telefone').eq('id', conversa.cliente_id).eq('company_id', company_id).maybeSingle()
-        if (cli?.telefone && !String(cli.telefone).startsWith('lid:')) telefoneParaEnvio = cli.telefone
-      }
-      if (telefoneParaEnvio.startsWith('lid:') && conversa.chat_lid) {
-        const { data: outra } = await supabase
-          .from('conversas')
-          .select('telefone')
-          .eq('company_id', company_id)
-          .eq('chat_lid', conversa.chat_lid)
-          .not('telefone', 'like', 'lid:%')
-          .limit(1)
-          .maybeSingle()
-        if (outra?.telefone) telefoneParaEnvio = outra.telefone
-      }
-      if (telefoneParaEnvio.startsWith('lid:')) {
-        return res.status(400).json({ error: 'Número do contato indisponível (conversa por LID). Aguarde o contato enviar uma mensagem ou sincronize os contatos.' })
-      }
-    }
-
-    const { data: msg, error } = await supabase.from("mensagens").insert({
-      conversa_id: Number(conversa_id),
-      texto: tipo === 'audio' ? '(áudio)' : tipo === 'voice' ? '(áudio de voz)' : tipo === 'sticker' ? '(figurinha)' : file.originalname,
-      tipo,
-      url: pathUrl,
-      nome_arquivo: file.originalname,
-      direcao: "out",
-      autor_usuario_id: user_id,
-      company_id,
-    }).select().single()
-
-    if (error) return res.status(500).json({ error: error.message })
+  if (error) return { ok: false, status: 500, error: error.message }
 
     try {
       await tryMarkWaitingAfterHumanOutbound({
@@ -4688,7 +4646,7 @@ exports.enviarArquivo = async (req, res) => {
       const opts = {
         companyId: company_id,
         conversaId: conversa_id,
-        ...(isAudioTipo ? { returnDetails: true, audioMeta: { originalName: file.originalname, mimeType: file.mimetype } } : {}),
+        ...(isAudioTipo ? { returnDetails: true, audioMeta: { originalName: fileWork.originalname, mimeType: fileWork.mimetype } } : {}),
       }
       const promise =
         tipo === 'voice' && provider.sendVoice
@@ -4702,7 +4660,7 @@ exports.enviarArquivo = async (req, res) => {
               : tipo === 'video' && provider.sendVideo
                 ? provider.sendVideo(phone, mediaUrl, captionCliente, opts)
                 : provider.sendFile
-                  ? provider.sendFile(phone, mediaUrl, file.originalname || '', { ...opts, caption: captionCliente })
+                  ? provider.sendFile(phone, mediaUrl, fileWork.originalname || '', { ...opts, caption: captionCliente })
                   : Promise.resolve(false)
       promise
         .then(async (result) => {
@@ -4759,12 +4717,12 @@ exports.enviarArquivo = async (req, res) => {
     if (telefoneParaEnvio) {
       if (fullUrl && !isLocalhost && !forceUploadMedia) {
         setImmediate(() => sendMediaWithUrl(fullUrl))
-      } else if ((!baseUrl || isLocalhost || forceUploadMedia) && file.path) {
+      } else if ((!baseUrl || isLocalhost || forceUploadMedia) && fileWork.path) {
         const provider = getProvider()
         if (provider?.uploadMedia) {
           setImmediate(async () => {
             try {
-              const result = await provider.uploadMedia(file.path, file.originalname || 'file', { companyId: company_id })
+              const result = await provider.uploadMedia(fileWork.path, fileWork.originalname || 'file', { companyId: company_id })
               if (result?.ok && result?.url) {
                 console.log('[ULTRAMSG] Upload bem-sucedido, enviando mídia via CDN:', result.url.slice(0, 50) + '...')
                 sendMediaWithUrl(result.url)
@@ -4772,7 +4730,7 @@ exports.enviarArquivo = async (req, res) => {
                 console.warn('[ULTRAMSG] Upload de mídia falhou:', {
                   ok: result?.ok,
                   error: result?.error,
-                  filename: file.originalname,
+                  filename: fileWork.originalname,
                   tipo,
                   forceUploadMedia
                 })
@@ -4808,8 +4766,98 @@ exports.enviarArquivo = async (req, res) => {
       }
     }
 
-    // Não retornar mensagem completa — evita duplicação (API + socket). Mensagem chega via nova_mensagem.
-    return res.json({ ok: true, id: msg.id, conversa_id: Number(conversa_id) })
+  // Não retornar mensagem completa no HTTP — evita duplicação (API + socket). Mensagem chega via nova_mensagem.
+  return { ok: true, msg }
+}
+
+exports.enviarArquivo = async (req, res) => {
+  try {
+    const { id: conversa_id } = req.params
+    const { company_id, id: user_id } = req.user
+    const io = req.app.get('io')
+
+    const files =
+      req.files && Array.isArray(req.files) && req.files.length > 0
+        ? req.files
+        : req.file
+          ? [req.file]
+          : []
+
+    if (!files.length) {
+      const hint = 'Envie multipart/form-data com campo "file", "files" ou "audio" (múltiplos arquivos no mesmo pedido).'
+      return res.status(400).json({ error: 'Arquivo não enviado. ' + hint })
+    }
+
+    if (files.length > MAX_ARQUIVOS_LOTE_ENVIO) {
+      return res.status(400).json({ error: `Máximo ${MAX_ARQUIVOS_LOTE_ENVIO} arquivos por envio.` })
+    }
+
+    const permEnvio = await assertPodeEnviarMensagem({ company_id, conversa_id, user_id })
+    if (!permEnvio.ok) return res.status(permEnvio.status).json({ error: permEnvio.error })
+
+    const { data: conversa } = await supabase
+      .from('conversas')
+      .select('id, telefone, cliente_id, tipo, chat_lid')
+      .eq('company_id', company_id)
+      .eq('id', conversa_id)
+      .single()
+
+    if (!conversa) {
+      return res.status(404).json({ error: 'Conversa não encontrada' })
+    }
+
+    let telefoneParaEnvio = conversa.telefone || ''
+    if (telefoneParaEnvio && String(telefoneParaEnvio).trim().toLowerCase().startsWith('lid:')) {
+      if (conversa.cliente_id) {
+        const { data: cli } = await supabase.from('clientes').select('telefone').eq('id', conversa.cliente_id).eq('company_id', company_id).maybeSingle()
+        if (cli?.telefone && !String(cli.telefone).startsWith('lid:')) telefoneParaEnvio = cli.telefone
+      }
+      if (telefoneParaEnvio.startsWith('lid:') && conversa.chat_lid) {
+        const { data: outra } = await supabase
+          .from('conversas')
+          .select('telefone')
+          .eq('company_id', company_id)
+          .eq('chat_lid', conversa.chat_lid)
+          .not('telefone', 'like', 'lid:%')
+          .limit(1)
+          .maybeSingle()
+        if (outra?.telefone) telefoneParaEnvio = outra.telefone
+      }
+      if (telefoneParaEnvio.startsWith('lid:')) {
+        return res.status(400).json({ error: 'Número do contato indisponível (conversa por LID). Aguarde o contato enviar uma mensagem ou sincronize os contatos.' })
+      }
+    }
+
+    const tipoBody = String(req.body?.tipo || req.query?.tipo || '').toLowerCase().trim()
+    const ids = []
+
+    for (let i = 0; i < files.length; i++) {
+      const raw = files[i]
+      if (i === 0 && tipoBody === 'sticker') raw.__tipoForcado = 'sticker'
+      else if (raw.__tipoForcado) delete raw.__tipoForcado
+
+      const r = await enviarArquivoProcessarUm(req, raw, {
+        company_id,
+        user_id,
+        conversa_id,
+        telefoneParaEnvio,
+        io,
+      })
+      if (!r.ok) return res.status(r.status).json({ error: r.error })
+      ids.push(r.msg.id)
+      if (i < files.length - 1) await new Promise((resolve) => setTimeout(resolve, 250))
+    }
+
+    if (ids.length === 1) {
+      return res.json({ ok: true, id: ids[0], conversa_id: Number(conversa_id) })
+    }
+    return res.json({
+      ok: true,
+      ids,
+      id: ids[ids.length - 1],
+      conversa_id: Number(conversa_id),
+      count: ids.length,
+    })
   } catch (err) {
     console.error('Erro ao enviar arquivo:', err)
     return res.status(500).json({ error: 'Erro ao enviar arquivo' })
