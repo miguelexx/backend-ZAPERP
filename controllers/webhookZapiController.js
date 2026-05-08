@@ -38,6 +38,8 @@ const { parseNota, tentarRegistrarAvaliacao } = require('../services/avaliacaoSe
 
 // company_id NUNCA mais via ENV — resolvido por instanceId do payload em cada webhook
 const WHATSAPP_DEBUG = String(process.env.WHATSAPP_DEBUG || '').toLowerCase() === 'true'
+// Seleção enxuta para evitar payload desnecessário em caminhos quentes de webhook.
+const WEBHOOK_MSG_SELECT = 'id, conversa_id, company_id, whatsapp_id, texto, url, tipo, direcao, criado_em, status, status_mensagem, autor_usuario_id, reply_meta, nome_arquivo, contact_meta, location_meta, remetente_nome, remetente_telefone'
 
 function normalizeReopenText(texto) {
   return String(texto || '')
@@ -772,7 +774,7 @@ exports.receberZapi = async (req, res) => {
       hasMedia: !!(body.image || body.audio || body.video || body.document || body.sticker),
       status: body.status || body.ack,
       ip: req.ip || req.socket?.remoteAddress || '?',
-      rawBody: JSON.stringify(body).slice(0, 600)
+      rawBody: WHATSAPP_DEBUG ? JSON.stringify(body).slice(0, 600) : undefined
     })
 
     // Callback específico de atualização de foto de grupo:
@@ -2101,11 +2103,12 @@ exports.receberZapi = async (req, res) => {
     // evita duplicatas quando o provider reenviar o mesmo evento.
 
     // Não gravar evento que virou só "(mídia)" sem mídia real — exceto fromMe (espelhamento: mensagem enviada pelo celular deve aparecer)
+    const nowIso = new Date().toISOString()
     const soPlaceholderMidia = texto === '(mídia)' && !imageUrl && !documentUrl && !audioUrl && !videoUrl && !stickerUrl && !locationUrl
     if (soPlaceholderMidia && !fromMe) {
       await supabase
         .from('conversas')
-        .update({ ultima_atividade: new Date().toISOString() })
+        .update({ ultima_atividade: nowIso })
         .eq('id', conversa_id)
         .eq('company_id', company_id)
       return res.status(200).json({ ok: true, conversa_id, skip: 'placeholderMidia' })
@@ -2227,7 +2230,7 @@ exports.receberZapi = async (req, res) => {
     if (whatsappIdStr) {
       let { data: existente } = await supabase
         .from('mensagens')
-        .select('*')
+        .select(WEBHOOK_MSG_SELECT)
         .eq('company_id', company_id)
         .eq('whatsapp_id', whatsappIdStr)
         .maybeSingle()
@@ -2236,7 +2239,7 @@ exports.receberZapi = async (req, res) => {
       if (!existente && fromMe) {
         const { data: tempExistente } = await supabase
           .from('mensagens')
-          .select('*')
+          .select(WEBHOOK_MSG_SELECT)
           .eq('company_id', company_id)
           .eq('conversa_id', conversa_id)
           .eq('direcao', 'out')
@@ -2252,7 +2255,7 @@ exports.receberZapi = async (req, res) => {
               .from('mensagens')
               .update({ whatsapp_id: whatsappIdStr })
               .eq('id', tempExistente.id)
-              .select('*')
+              .select(WEBHOOK_MSG_SELECT)
               .single()
             existente = updatedMsg || tempExistente
           } catch (e) {
@@ -2285,7 +2288,7 @@ exports.receberZapi = async (req, res) => {
                 .from('mensagens')
                 .update(upFields)
                 .eq('id', existente.id)
-                .select('*')
+                .select(WEBHOOK_MSG_SELECT)
                 .single()
               mensagemSalva = updMsg || existente
               if (WHATSAPP_DEBUG || hasMediaToUpdate) console.log('[Z-API] idempotência: mensagem atualizada com mídia/placeholder', existente.id, Object.keys(upFields))
@@ -2356,6 +2359,7 @@ exports.receberZapi = async (req, res) => {
       const refFromMe = payload?.referencedMessage?.fromMe ?? refMsg?.fromMe ?? null
 
       if (quotedId) {
+        const replyTs = Date.now()
         try {
           const { data: quoted } = await supabase
             .from('mensagens')
@@ -2376,9 +2380,9 @@ exports.receberZapi = async (req, res) => {
           } else {
             name = (refFromMe === true) ? 'Você' : 'Contato'
           }
-          webhookReplyMeta = { name, snippet, ts: Date.now(), replyToId: quotedId }
+          webhookReplyMeta = { name, snippet, ts: replyTs, replyToId: quotedId }
         } catch (_) {
-          webhookReplyMeta = { name: (refFromMe === true ? 'Você' : 'Mensagem'), snippet: refBodyFallback || 'Mensagem', ts: Date.now(), replyToId: quotedId }
+          webhookReplyMeta = { name: (refFromMe === true ? 'Você' : 'Mensagem'), snippet: refBodyFallback || 'Mensagem', ts: replyTs, replyToId: quotedId }
         }
       }
     }
@@ -2469,7 +2473,7 @@ exports.receberZapi = async (req, res) => {
             .update(updates)
             .eq('company_id', company_id)
             .eq('id', cand.id)
-            .select('*')
+            .select(WEBHOOK_MSG_SELECT)
             .single()
 
           if (!patchErr && patched) {
@@ -2491,7 +2495,7 @@ exports.receberZapi = async (req, res) => {
           .update({ texto })
           .eq('company_id', company_id)
           .eq('whatsapp_id', whatsappIdStr)
-          .select('*')
+          .select(WEBHOOK_MSG_SELECT)
           .maybeSingle()
         if (editTarget) {
           mensagemSalva = editTarget
@@ -2617,13 +2621,13 @@ exports.receberZapi = async (req, res) => {
       let { data: inserted, error: errMsg } = await supabase
         .from('mensagens')
         .insert(insertMsg)
-        .select('*')
+        .select(WEBHOOK_MSG_SELECT)
         .single()
 
       // Compatibilidade: se a coluna reply_meta não existir ainda, remove e tenta de novo
       if (errMsg && (String(errMsg.message || '').includes('reply_meta') || String(errMsg.message || '').includes('does not exist'))) {
         delete insertMsg.reply_meta
-        const retryReply = await supabase.from('mensagens').insert(insertMsg).select('*').single()
+        const retryReply = await supabase.from('mensagens').insert(insertMsg).select(WEBHOOK_MSG_SELECT).single()
         inserted = retryReply.data
         errMsg = retryReply.error
       }
@@ -2631,20 +2635,20 @@ exports.receberZapi = async (req, res) => {
       if (errMsg && (String(errMsg.message || '').includes('remetente_nome') || String(errMsg.message || '').includes('remetente_telefone') || String(errMsg.message || '').includes('does not exist'))) {
         delete insertMsg.remetente_nome
         delete insertMsg.remetente_telefone
-        const retry = await supabase.from('mensagens').insert(insertMsg).select('*').single()
+        const retry = await supabase.from('mensagens').insert(insertMsg).select(WEBHOOK_MSG_SELECT).single()
         inserted = retry.data
         errMsg = retry.error
       }
       if (errMsg && (String(errMsg.message || '').includes('contact_meta') || String(errMsg.message || '').includes('location_meta') || String(errMsg.message || '').includes('does not exist'))) {
         delete insertMsg.contact_meta
         delete insertMsg.location_meta
-        const retryMeta = await supabase.from('mensagens').insert(insertMsg).select('*').single()
+        const retryMeta = await supabase.from('mensagens').insert(insertMsg).select(WEBHOOK_MSG_SELECT).single()
         inserted = retryMeta.data
         errMsg = retryMeta.error
       }
       if (errMsg) {
         if (String(errMsg.code || '') === '23505' || String(errMsg.message || '').includes('duplicate') || String(errMsg.message || '').includes('unique')) {
-          const { data: existente } = await supabase.from('mensagens').select('*').eq('company_id', company_id).eq('whatsapp_id', whatsappIdStr).maybeSingle()
+          const { data: existente } = await supabase.from('mensagens').select(WEBHOOK_MSG_SELECT).eq('company_id', company_id).eq('whatsapp_id', whatsappIdStr).maybeSingle()
           mensagemSalva = existente
         } else {
           // Fallback: qualquer mensagem que chega TEM que ficar no sistema — tenta inserir com payload mínimo
@@ -2659,11 +2663,11 @@ exports.receberZapi = async (req, res) => {
           }
           if (isGroup && senderName) fallbackPayload.remetente_nome = senderName
           if (isGroup && participantPhone) fallbackPayload.remetente_telefone = participantPhone
-          let fallback = await supabase.from('mensagens').insert(fallbackPayload).select('*').single()
+          let fallback = await supabase.from('mensagens').insert(fallbackPayload).select(WEBHOOK_MSG_SELECT).single()
           if (fallback.error && (String(fallback.error.message || '').includes('remetente_nome') || String(fallback.error.message || '').includes('remetente_telefone'))) {
             delete fallbackPayload.remetente_nome
             delete fallbackPayload.remetente_telefone
-            fallback = await supabase.from('mensagens').insert(fallbackPayload).select('*').single()
+            fallback = await supabase.from('mensagens').insert(fallbackPayload).select(WEBHOOK_MSG_SELECT).single()
           }
           if (!fallback.error) {
             mensagemSalva = fallback.data
@@ -2683,9 +2687,10 @@ exports.receberZapi = async (req, res) => {
     if (mensagemSalva) {
       // Usar conversa_id da mensagem quando idempotência retornou existente de outra conversa
       const convIdForUpdate = mensagemSalva.conversa_id ?? conversa_id
+      const nowIsoUpdate = new Date().toISOString()
       const { error: errUpdate } = await supabase
         .from('conversas')
-        .update({ ultima_atividade: new Date().toISOString() })
+        .update({ ultima_atividade: nowIsoUpdate })
         .eq('id', convIdForUpdate)
         .eq('company_id', company_id)
       if (errUpdate && (String(errUpdate.message || '').includes('ultima_atividade') || String(errUpdate.code || '') === 'PGRST204')) {
@@ -2705,7 +2710,7 @@ exports.receberZapi = async (req, res) => {
           if (!convIsGroup && convRow?.cliente_id != null) {
             await supabase
               .from('clientes')
-              .update({ ultimo_contato: mensagemSalva.criado_em || new Date().toISOString(), atualizado_em: new Date().toISOString() })
+              .update({ ultimo_contato: mensagemSalva.criado_em || nowIsoUpdate, atualizado_em: nowIsoUpdate })
               .eq('company_id', company_id)
               .eq('id', Number(convRow.cliente_id))
           }

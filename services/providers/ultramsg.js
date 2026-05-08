@@ -263,11 +263,15 @@ function logUltramsgRequest({ method, url, headers = {}, params = null, body = n
       text: responseText != null ? truncateForLog(responseText, 500) : null
     }
   }
+  const hasResponseError =
+    Number(responseStatus) >= 400 ||
+    (responseData && typeof responseData === 'object' && responseData.error && responseData.error !== false && responseData.error !== 'false')
+  const shouldLogVerbose = WHATSAPP_DEBUG || hasResponseError
   
   // Log mais compacto para erros conhecidos em modo debug
   if (isKnownProfilePictureError && WHATSAPP_DEBUG) {
     console.log(`[ULTRAMSG] Profile picture not available: ${params?.chatId || 'unknown'}`)
-  } else {
+  } else if (shouldLogVerbose) {
     console.log(JSON.stringify(logPayload, null, 2))
   }
 }

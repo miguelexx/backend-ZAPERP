@@ -16,6 +16,35 @@ function clampInt(n, min, max) {
   return Math.max(min, Math.min(max, Math.trunc(x)))
 }
 
+const PAGE_SIZE = 1000
+
+async function fetchAllRows(buildQuery) {
+  const all = []
+  let from = 0
+  for (;;) {
+    const to = from + PAGE_SIZE - 1
+    const { data, error } = await buildQuery().range(from, to)
+    if (error) throw error
+    const rows = data || []
+    all.push(...rows)
+    if (rows.length < PAGE_SIZE) break
+    from += PAGE_SIZE
+  }
+  return all
+}
+
+async function getSlaMinutes(company_id) {
+  const { data: emp, error } = await supabase
+    .from('empresas')
+    .select('sla_minutos_sem_resposta')
+    .eq('id', company_id)
+    .maybeSingle()
+  if (error) return 5
+  const raw = Number(emp?.sla_minutos_sem_resposta)
+  if (!Number.isFinite(raw)) return 5
+  return Math.max(1, Math.min(1440, Math.trunc(raw)))
+}
+
 exports.overview = async (req, res) => {
   const { company_id } = req.user
 
@@ -31,16 +60,16 @@ exports.overview = async (req, res) => {
     /* ===============================
        1. STATUS DAS CONVERSAS (KPIs)
     =============================== */
-    let qConversas = supabase
-      .from('conversas')
-      // Não embute departamentos aqui: em alguns schemas o PostgREST detecta mais de 1 relacionamento
-      // e quebra com "Could not embed because more than one relationship was found..."
-      .select('status_atendimento, criado_em, atendente_id, departamento_id')
-      .eq('company_id', company_id)
-    if (fromIso) qConversas = qConversas.gte('criado_em', fromIso).lte('criado_em', toIso)
-    const { data: conversas, error: errConversas } = await qConversas
-
-    if (errConversas) throw errConversas
+    const conversas = await fetchAllRows(() => {
+      let q = supabase
+        .from('conversas')
+        // Não embute departamentos aqui: em alguns schemas o PostgREST detecta mais de 1 relacionamento
+        // e quebra com "Could not embed because more than one relationship was found..."
+        .select('status_atendimento, criado_em, atendente_id, departamento_id')
+        .eq('company_id', company_id)
+      if (fromIso) q = q.gte('criado_em', fromIso).lte('criado_em', toIso)
+      return q
+    })
 
     const kpis = {
       total: conversas.length,
@@ -53,7 +82,6 @@ exports.overview = async (req, res) => {
       sla_percent: null,
       atendente_mais_produtivo: null,
       tickets_abertos: 0,
-      taxa_conversao_percent: null,
     }
 
     conversas.forEach(c => {
@@ -74,9 +102,6 @@ exports.overview = async (req, res) => {
     }
 
     kpis.tickets_abertos = kpis.abertas + kpis.em_atendimento
-    if (kpis.total > 0) {
-      kpis.taxa_conversao_percent = Math.round((kpis.fechadas / kpis.total) * 100)
-    }
 
     // Conversas por setor (departamento) — resolve nomes manualmente (sem embed)
     const setorMap = {}
@@ -107,26 +132,30 @@ exports.overview = async (req, res) => {
        ATENDIMENTOS HOJE (registros na tabela atendimentos)
     =============================== */
     const hoje = startOfToday()
-    const { data: atendimentosHoje, error: errAtHoje } = await supabase
-      .from('atendimentos')
-      .select('id')
-      .eq('company_id', company_id)
-      .gte('criado_em', hoje)
-    if (!errAtHoje) kpis.atendimentos_hoje = atendimentosHoje?.length ?? 0
+    try {
+      const atendimentosHoje = await fetchAllRows(() =>
+        supabase
+          .from('atendimentos')
+          .select('id')
+          .eq('company_id', company_id)
+          .gte('criado_em', hoje)
+      )
+      kpis.atendimentos_hoje = atendimentosHoje.length
+    } catch (_) {}
 
     /* ===============================
        2. TEMPO MÉDIO DA 1ª RESPOSTA (SLA)
     =============================== */
-    let qMensagens = supabase
-      .from('mensagens')
-      .select('conversa_id, criado_em, direcao, tipo')
-      .eq('company_id', company_id)
-      .in('direcao', ['in', 'out'])
-      .order('criado_em', { ascending: true })
-    if (fromIso) qMensagens = qMensagens.gte('criado_em', fromIso).lte('criado_em', toIso)
-    const { data: mensagens, error: errMensagens } = await qMensagens
-
-    if (errMensagens) throw errMensagens
+    const mensagens = await fetchAllRows(() => {
+      let q = supabase
+        .from('mensagens')
+        .select('conversa_id, criado_em, direcao, tipo')
+        .eq('company_id', company_id)
+        .in('direcao', ['in', 'out'])
+        .order('criado_em', { ascending: true })
+      if (fromIso) q = q.gte('criado_em', fromIso).lte('criado_em', toIso)
+      return q
+    })
 
     const mensagensPorConversa = {}
     const msgTipoMap = {}
@@ -150,7 +179,7 @@ exports.overview = async (req, res) => {
 
     Object.values(mensagensPorConversa).forEach(msgs => {
       const primeiraIn = msgs.find(m => m.direcao === 'in')
-      const primeiraOut = msgs.find(m => m.direcao === 'out')
+      const primeiraOut = msgs.find(m => m.direcao === 'out' && new Date(m.criado_em) >= new Date(primeiraIn.criado_em))
 
       if (primeiraIn && primeiraOut) {
         const diff =
@@ -171,14 +200,15 @@ exports.overview = async (req, res) => {
       kpis.tempo_medio_resposta_min = Math.round(media * 10) / 10
     }
 
-    /* SLA: % de conversas com 1ª resposta em até 5 minutos */
+    const slaMinutes = await getSlaMinutes(company_id)
+    /* SLA: % de conversas com 1ª resposta dentro da configuração da empresa */
     let conversasComSla = 0
     Object.values(mensagensPorConversa).forEach(msgs => {
       const primeiraIn = msgs.find(m => m.direcao === 'in')
-      const primeiraOut = msgs.find(m => m.direcao === 'out')
+      const primeiraOut = msgs.find(m => m.direcao === 'out' && new Date(m.criado_em) >= new Date(primeiraIn.criado_em))
       if (primeiraIn && primeiraOut) {
         const diff = (new Date(primeiraOut.criado_em) - new Date(primeiraIn.criado_em)) / 60000
-        if (diff >= 0 && diff <= 5) conversasComSla++
+        if (diff >= 0 && diff <= slaMinutes) conversasComSla++
       }
     })
     const totalComResposta = Object.values(mensagensPorConversa).filter(msgs => {
@@ -203,15 +233,15 @@ exports.overview = async (req, res) => {
     /* ===============================
        3. CONVERSAS POR ATENDENTE + ATENDENTE MAIS PRODUTIVO
     =============================== */
-    let qAt = supabase
-      .from('conversas')
-      .select('atendente_id, usuarios!conversas_atendente_fk ( nome )')
-      .eq('company_id', company_id)
-      .not('atendente_id', 'is', null)
-    if (fromIso) qAt = qAt.gte('criado_em', fromIso).lte('criado_em', toIso)
-    const { data: porAtendente, error: errAtendente } = await qAt
-
-    if (errAtendente) throw errAtendente
+    const porAtendente = await fetchAllRows(() => {
+      let q = supabase
+        .from('conversas')
+        .select('atendente_id, usuarios!conversas_atendente_fk ( nome )')
+        .eq('company_id', company_id)
+        .not('atendente_id', 'is', null)
+      if (fromIso) q = q.gte('criado_em', fromIso).lte('criado_em', toIso)
+      return q
+    })
 
     const atendentesMap = {}
 
@@ -283,12 +313,15 @@ exports.overview = async (req, res) => {
  *   atendimentosHoje,              // ações registradas hoje na tabela atendimentos
  *   conversasHoje,                 // conversas criadas hoje
  *   totalConversas,                // total de conversas da empresa
+ *   conversasAbertas,              // status_atendimento = aberta
+ *   conversasEmAtendimento,        // status_atendimento = em_atendimento
+ *   conversasAguardandoCliente,    // status_atendimento = aguardando_cliente
+ *   conversasFechadas,             // status_atendimento = fechada
  *   tempoMedioPrimeiraResposta,    // minutos (float)
  *   slaPercentualRespondidas,      // % dentro do SLA (apenas conversas com resposta)
  *   slaPercentualTotal,            // % dentro do SLA considerando também sem resposta
  *   atendenteMaisProdutivo,        // { id, nome, totalConversas } ou null
  *   ticketsAbertos,                // conversas abertas + em_atendimento
- *   taxaConversao,                 // % conversas fechadas
  *   mensagensRecebidas,            // mensagens.direcao = 'in'
  *   mensagensEnviadas              // mensagens.direcao = 'out'
  * }
@@ -325,6 +358,9 @@ exports.metrics = async (req, res) => {
     const totalConversas = conversas?.length || 0
     let conversasHoje = 0
     let ticketsAbertos = 0
+    let conversasAbertas = 0
+    let conversasEmAtendimento = 0
+    let conversasAguardandoCliente = 0
     let conversasFechadas = 0
 
     const contagemPorAtendente = new Map()
@@ -333,17 +369,18 @@ exports.metrics = async (req, res) => {
       const criadoEm = c?.criado_em ? new Date(c.criado_em) : null
       if (criadoEm && criadoEm >= hoje) conversasHoje++
 
-      if (
-        c.status_atendimento === 'aberta' ||
-        c.status_atendimento === 'em_atendimento' ||
-        c.status_atendimento === 'aguardando_cliente'
-      ) {
+      if (c.status_atendimento === 'aberta') {
+        conversasAbertas++
         ticketsAbertos++
-      }
-      if (c.status_atendimento === 'fechada') {
+      } else if (c.status_atendimento === 'em_atendimento') {
+        conversasEmAtendimento++
+        ticketsAbertos++
+      } else if (c.status_atendimento === 'aguardando_cliente') {
+        conversasAguardandoCliente++
+        ticketsAbertos++
+      } else if (c.status_atendimento === 'fechada') {
         conversasFechadas++
       }
-
       if (c.atendente_id != null) {
         const id = Number(c.atendente_id)
         if (!Number.isNaN(id)) {
@@ -351,10 +388,6 @@ exports.metrics = async (req, res) => {
         }
       }
     }
-
-    // Taxa de conversão: % de conversas fechadas
-    const taxaConversao =
-      totalConversas > 0 ? (conversasFechadas * 100) / totalConversas : 0
 
     // Atendente mais produtivo: mais conversas atribuídas
     let atendenteMaisProdutivo = null
@@ -475,12 +508,15 @@ exports.metrics = async (req, res) => {
       atendimentosHoje,
       conversasHoje,
       totalConversas,
+      conversasAbertas,
+      conversasEmAtendimento,
+      conversasAguardandoCliente,
+      conversasFechadas,
       tempoMedioPrimeiraResposta,
       slaPercentualRespondidas,
       slaPercentualTotal,
       atendenteMaisProdutivo,
       ticketsAbertos,
-      taxaConversao,
       mensagensRecebidas,
       mensagensEnviadas,
     })

@@ -674,37 +674,49 @@ exports.listarConversas = async (req, res) => {
         .eq('company_id', company_id)
         .or(`nome.ilike.${term},pushname.ilike.${term},telefone.ilike.${term}`)
       const clienteIds = (clientesMatch || []).map((c) => c.id)
-      const { data: convByCliente } = await supabase
+      const convByClientePromise = supabase
         .from('conversas')
         .select('id')
         .eq('company_id', company_id)
         .in('cliente_id', clienteIds.length ? clienteIds : [0])
-      const { data: convByTelefone } = await supabase
+      const convByTelefonePromise = supabase
         .from('conversas')
         .select('id')
         .eq('company_id', company_id)
         .ilike('telefone', term)
-      const { data: convByNomeGrupo } = await supabase
+      const convByNomeGrupoPromise = supabase
         .from('conversas')
         .select('id')
         .eq('company_id', company_id)
         .ilike('nome_grupo', term)
-      const { data: msgMatch } = await supabase
+      const msgMatchPromise = supabase
         .from('mensagens')
         .select('conversa_id')
         .eq('company_id', company_id)
         .ilike('texto', term)
+      const [
+        { data: convByCliente },
+        { data: convByTelefone },
+        { data: convByNomeGrupo },
+        { data: msgMatch },
+      ] = await Promise.all([
+        convByClientePromise,
+        convByTelefonePromise,
+        convByNomeGrupoPromise,
+        msgMatchPromise,
+      ])
       const idsFromMsg = [...new Set((msgMatch || []).map((m) => m.conversa_id))]
       const idsFromCliente = (convByCliente || []).map((c) => c.id)
       const idsFromTel = (convByTelefone || []).map((c) => c.id)
       const idsFromGrupo = (convByNomeGrupo || []).map((c) => c.id)
-      const merged = [...new Set([...idsFromCliente, ...idsFromTel, ...idsFromGrupo, ...idsFromMsg])]
+      const mergedSet = new Set([...idsFromCliente, ...idsFromTel, ...idsFromGrupo, ...idsFromMsg])
+      const merged = [...mergedSet]
       if (merged.length === 0) {
         if (!incluirColaboradoresEncaminhar) return res.json([])
         const colaboradores_encaminhar = await loadColaboradoresEncaminhar()
         return res.json({ conversas: [], colaboradores_encaminhar })
       }
-      conversaIdsFilter = conversaIdsFilter ? conversaIdsFilter.filter((id) => merged.includes(id)) : merged
+      conversaIdsFilter = conversaIdsFilter ? conversaIdsFilter.filter((id) => mergedSet.has(id)) : merged
     }
 
     const selectCompleto = `
@@ -897,7 +909,8 @@ exports.listarConversas = async (req, res) => {
 
     // Enriquece última mensagem de cada conversa com usuario_nome
     const allLastMsgs = (data || []).flatMap((c) => c.mensagens || [])
-    if (allLastMsgs.length > 0) {
+    const hasAuthorToEnrich = allLastMsgs.some((m) => m && m.autor_usuario_id != null)
+    if (allLastMsgs.length > 0 && hasAuthorToEnrich) {
       const enriched = await enrichMensagensComAutorUsuario(supabase, company_id, allLastMsgs)
       let idx = 0
       for (const c of data || []) {
