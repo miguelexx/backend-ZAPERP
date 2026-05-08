@@ -4547,11 +4547,14 @@ async function normalizeAudioForUltraMsg(file, tipo) {
 /** Lote de fotos/arquivos (galeria): mesmo contrato do WhatsApp Web. */
 const MAX_ARQUIVOS_LOTE_ENVIO = 30
 
+/** Legenda enviada com foto/vídeo/documento — mesmo limite prático da UltraMsg */
+const MAX_MEDIA_CAPTION_CHARS = 1024
+
 /**
  * Uma unidade de upload após multer; conversa e telefone já validados.
  * @returns {Promise<{ ok: true, msg: object } | { ok: false, status: number, error: string }>}
  */
-async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conversa_id, telefoneParaEnvio, io }) {
+async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conversa_id, telefoneParaEnvio, io, captionUsuario = '' }) {
   let fileWork = file
   const tipo = aplicarTipoForcadoSticker(fileWork, inferirTipoArquivo(fileWork))
   if (tipo === 'audio' || tipo === 'voice') {
@@ -4574,11 +4577,28 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
       console.warn('[ULTRAMSG][AUDIO] Falha ao converter WAV para MP3:', e?.message || e)
     }
   }
+
+  let captionUsuarioTrim =
+    tipo === 'audio' || tipo === 'voice' || tipo === 'sticker'
+      ? ''
+      : String(captionUsuario || '').trim().slice(0, MAX_MEDIA_CAPTION_CHARS)
+
+  const textoMensagem =
+    tipo === 'audio'
+      ? '(áudio)'
+      : tipo === 'voice'
+        ? '(áudio de voz)'
+        : tipo === 'sticker'
+          ? '(figurinha)'
+          : captionUsuarioTrim && (tipo === 'imagem' || tipo === 'video' || tipo === 'arquivo')
+            ? captionUsuarioTrim
+            : fileWork.originalname
+
   const pathUrl = `/uploads/${fileWork.filename}`
 
   const { data: msg, error } = await supabase.from("mensagens").insert({
     conversa_id: Number(conversa_id),
-    texto: tipo === 'audio' ? '(áudio)' : tipo === 'voice' ? '(áudio de voz)' : tipo === 'sticker' ? '(figurinha)' : fileWork.originalname,
+    texto: textoMensagem,
     tipo,
     url: pathUrl,
     nome_arquivo: fileWork.originalname,
@@ -4643,7 +4663,12 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
     }
 
     const { nome: usuarioNome } = await getUsuarioParaEnvioCliente(supabase, company_id, user_id)
-    const captionCliente = usuarioNome ? `— ${usuarioNome}` : ''
+    const footerWa = usuarioNome ? `— ${usuarioNome}` : ''
+    const waCaption = captionUsuarioTrim
+      ? (footerWa
+          ? `${captionUsuarioTrim}\n${footerWa}`.slice(0, MAX_MEDIA_CAPTION_CHARS)
+          : captionUsuarioTrim)
+      : footerWa
     const baseUrl = (process.env.APP_URL || process.env.BASE_URL || '').replace(/\/$/, '')
     const fullUrl = baseUrl ? `${baseUrl}${pathUrl}` : null
     const isLocalhost = /localhost|127\.0\.0\.1/i.test(baseUrl)
@@ -4669,11 +4694,11 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
           : tipo === 'sticker' && provider.sendSticker
             ? provider.sendSticker(phone, mediaUrl, { ...opts, stickerAuthor: 'ZapERP' })
             : tipo === 'imagem' && provider.sendImage
-              ? provider.sendImage(phone, mediaUrl, captionCliente, opts)
+              ? provider.sendImage(phone, mediaUrl, waCaption, opts)
               : tipo === 'video' && provider.sendVideo
-                ? provider.sendVideo(phone, mediaUrl, captionCliente, opts)
+                ? provider.sendVideo(phone, mediaUrl, waCaption, opts)
                 : provider.sendFile
-                  ? provider.sendFile(phone, mediaUrl, fileWork.originalname || '', { ...opts, caption: captionCliente })
+                  ? provider.sendFile(phone, mediaUrl, fileWork.originalname || '', { ...opts, caption: waCaption })
                   : Promise.resolve(false)
       promise
         .then(async (result) => {
@@ -4842,6 +4867,9 @@ exports.enviarArquivo = async (req, res) => {
     }
 
     const tipoBody = String(req.body?.tipo || req.query?.tipo || '').toLowerCase().trim()
+    const captionFromBody = String(req.body?.caption ?? req.body?.legenda ?? '')
+      .trim()
+      .slice(0, MAX_MEDIA_CAPTION_CHARS)
     const ids = []
 
     for (let i = 0; i < files.length; i++) {
@@ -4849,12 +4877,15 @@ exports.enviarArquivo = async (req, res) => {
       if (i === 0 && tipoBody === 'sticker') raw.__tipoForcado = 'sticker'
       else if (raw.__tipoForcado) delete raw.__tipoForcado
 
+      const perFileCaption = i === 0 ? captionFromBody : ''
+
       const r = await enviarArquivoProcessarUm(req, raw, {
         company_id,
         user_id,
         conversa_id,
         telefoneParaEnvio,
         io,
+        captionUsuario: perFileCaption,
       })
       if (!r.ok) return res.status(r.status).json({ error: r.error })
       ids.push(r.msg.id)

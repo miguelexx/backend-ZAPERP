@@ -39,7 +39,8 @@ const { parseNota, tentarRegistrarAvaliacao } = require('../services/avaliacaoSe
 // company_id NUNCA mais via ENV — resolvido por instanceId do payload em cada webhook
 const WHATSAPP_DEBUG = String(process.env.WHATSAPP_DEBUG || '').toLowerCase() === 'true'
 // Seleção enxuta para evitar payload desnecessário em caminhos quentes de webhook.
-const WEBHOOK_MSG_SELECT = 'id, conversa_id, company_id, whatsapp_id, texto, url, tipo, direcao, criado_em, status, status_mensagem, autor_usuario_id, reply_meta, nome_arquivo, contact_meta, location_meta, remetente_nome, remetente_telefone'
+// IMPORTANTE: não depender de colunas opcionais para manter compatibilidade com bancos legados.
+const WEBHOOK_MSG_SELECT = 'id, conversa_id, company_id, whatsapp_id, texto, url, tipo, direcao, criado_em, status, autor_usuario_id, reply_meta, nome_arquivo, contact_meta, location_meta, remetente_nome, remetente_telefone'
 
 function normalizeReopenText(texto) {
   return String(texto || '')
@@ -756,7 +757,7 @@ exports.receberZapi = async (req, res) => {
     const firstPayload = getPayloads(body)[0] || body
     const msgId = firstPayload?.messageId ?? firstPayload?.zaapId ?? firstPayload?.id ?? ''
     const phoneTail = (firstPayload?.phone || '').toString().trim().slice(-10)
-    console.log('[ZAPI_WEBHOOK]', JSON.stringify({
+    console.log('[ULTRAMSG_WEBHOOK]', JSON.stringify({
       instanceId: instanceId.slice(0, 20) + (instanceId.length > 20 ? '…' : ''),
       companyId: company_id,
       type: body.type || body.event || firstPayload?.type || 'unknown',
@@ -965,7 +966,7 @@ exports.receberZapi = async (req, res) => {
           (STATUS_ONLY_KEYWORDS.includes(payloadStatusRaw.toLowerCase()) && (payload?.messageId || payload?.zaapId)))
 
       // Log de pipeline — sempre visível, para rastrear o que chega e como é classificado
-      console.log(`[Z-API] 🔍 pipeline: type="${payloadType || '(vazio)'}" status="${payloadStatusRaw || '(vazio)'}" fromMe=${payloadFromMe} hasContent=${hasMessageContent} isStatus=${isStatusCallback} phone=${String(payload?.phone || '').slice(-10) || '(vazio)'}`)
+      console.log(`[ULTRAMSG] 🔍 pipeline: type="${payloadType || '(vazio)'}" status="${payloadStatusRaw || '(vazio)'}" fromMe=${payloadFromMe} hasContent=${hasMessageContent} isStatus=${isStatusCallback} phone=${String(payload?.phone || '').slice(-10) || '(vazio)'}`)
 
       if (isStatusCallback) {
         const msgId = payload?.messageId ?? payload?.zaapId ?? null
@@ -1326,7 +1327,7 @@ exports.receberZapi = async (req, res) => {
         const msgId = payload?.messageId ?? payload?.zaapId ?? payload?.id ?? payload?.key?.id ?? null
         const statusRaw = payload?.ack != null ? String(payload.ack).trim() : String(payload?.status ?? '').trim()
         const statusNorm = statusRaw ? normalizeZapiStatus(statusRaw) : null
-        console.log('[ZAPI_WEBHOOK]', JSON.stringify({ companyIdResolved: company_id, messageId: msgId ? String(msgId).slice(0, 20) : null, status: statusNorm, note: 'self_echo' }))
+        console.log('[ULTRAMSG_WEBHOOK]', JSON.stringify({ companyIdResolved: company_id, messageId: msgId ? String(msgId).slice(0, 20) : null, status: statusNorm, note: 'self_echo' }))
         if (msgId) {
           const { data: existing } = await supabase
             .from('mensagens')
@@ -1418,7 +1419,7 @@ exports.receberZapi = async (req, res) => {
       }
 
       // ── Log de resolução de chave — SEMPRE visível (crítico para diagnóstico) ──
-      console.log('[Z-API] 📞 resolveKey:', {
+      console.log('[ULTRAMSG] 📞 resolveKey:', {
         type: payload?.type ?? payload?.event ?? '(sem type)',
         fromMe,
         isGroup,
@@ -1474,7 +1475,7 @@ exports.receberZapi = async (req, res) => {
     if (isGroup) {
       console.log('📩 Z-API [GRUPO]', phone, nomeGrupo || '', fromMe ? '(de mim)' : `(${senderName || participantPhone || 'participante'})`, texto?.slice(0, 50))
     } else {
-      console.log('📩 Z-API mensagem recebida:', phone, fromMe ? '(enviada por nós)' : '(recebida)', texto?.slice(0, 50))
+      console.log('📩 ULTRAMSG mensagem recebida:', phone, fromMe ? '(enviada por nós)' : '(recebida)', texto?.slice(0, 50))
     }
 
     let cliente_id = null
@@ -2652,7 +2653,7 @@ exports.receberZapi = async (req, res) => {
           mensagemSalva = existente
         } else {
           // Fallback: qualquer mensagem que chega TEM que ficar no sistema — tenta inserir com payload mínimo
-          console.warn('⚠️ Z-API fallback insert após erro:', errMsg.message)
+          console.warn('⚠️ ULTRAMSG fallback insert após erro:', errMsg.message)
           let fallbackPayload = {
             conversa_id,
             texto: texto || '(mensagem)',
@@ -2674,7 +2675,7 @@ exports.receberZapi = async (req, res) => {
             mensagemFoiInseridaPeloWebhook = true
             console.log('✅ Mensagem salva (fallback):', mensagemSalva.id)
           } else {
-            console.error('❌ Z-API Erro ao salvar mensagem:', errMsg?.code, errMsg?.message, errMsg?.details)
+            console.error('❌ ULTRAMSG Erro ao salvar mensagem:', errMsg?.code, errMsg?.message, errMsg?.details)
             return res.status(500).json({ error: 'Erro ao salvar mensagem' })
           }
         }
