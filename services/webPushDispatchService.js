@@ -4,6 +4,7 @@
 const supabase = require('../config/supabase')
 const { isGroupConversation } = require('../helpers/conversaHelper')
 const webPushService = require('./webPushService')
+const pushNotificationService = require('./pushNotificationService')
 
 // Webhooks/sync podem atrasar alguns minutos; tolerância maior evita silenciar push válido por “mensagem velha”.
 const MAX_MESSAGE_AGE_MS = 15 * 60 * 1000
@@ -213,7 +214,9 @@ async function maybeDispatchInboundWebPush(opts) {
   if (eventName !== 'nova_mensagem') return
   if (!isInboundEligibleForPush(payload)) return
 
-  if (!webPushService.ensureVapidConfigured()) return
+  const vapidOk = webPushService.ensureVapidConfigured()
+  const fcmOk = pushNotificationService.ensureFirebase()
+  if (!vapidOk && !fcmOk) return
 
   const mensagem_id = payload?.id ?? payload?.mensagem_id
   if (mensagem_id == null || mensagem_id === '') return
@@ -234,15 +237,42 @@ async function maybeDispatchInboundWebPush(opts) {
     avatarUrl,
   })
 
+  const autorUid = payload?.autor_usuario_id != null ? Number(payload.autor_usuario_id) : null
+
   for (const usuario_id of targetUsers) {
+    if (Number.isFinite(autorUid) && autorUid > 0 && usuario_id === autorUid) continue
+
     const inserted = await tryInsertDeliveryLog(mensagem_id, usuario_id, company_id)
     if (!inserted) continue
 
-    const rows = await fetchSubscriptionsForUser(company_id, usuario_id)
-    for (const row of rows) {
-      const sub = webPushService.subscriptionFromRow(row)
-      if (!sub) continue
-      await webPushService.sendToSubscription(sub, jsonPayload)
+    const vapidRows = vapidOk ? await fetchSubscriptionsForUser(company_id, usuario_id) : []
+    const temSubscriptionVapid = vapidRows.length > 0
+
+    if (temSubscriptionVapid) {
+      for (const row of vapidRows) {
+        const sub = webPushService.subscriptionFromRow(row)
+        if (!sub) continue
+        setImmediate(() => {
+          webPushService.sendToSubscription(sub, jsonPayload).catch((e) =>
+            console.warn('[web-push] send:', e?.message || e)
+          )
+        })
+      }
+    }
+
+    const usarFcm = fcmOk && !temSubscriptionVapid
+    if (usarFcm) {
+      setImmediate(() => {
+        pushNotificationService
+          .sendNovaMensagemToUser({
+            empresa_id: company_id,
+            usuario_id,
+            conversa_id,
+            mensagem_id,
+            nomeCliente: contactName,
+          })
+          .catch((e) => console.warn('[fcm] nova_mensagem:', e?.message || e))
+      })
     }
   }
 }

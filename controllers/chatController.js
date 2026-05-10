@@ -2869,6 +2869,17 @@ exports.transferirChat = async (req, res) => {
           tag: `handoff-${company_id}-${conversa_id}-${Date.now()}`
         }
       })
+
+      try {
+        const { scheduleHandoffFcmPush } = require('../services/pushNotificationService')
+        scheduleHandoffFcmPush({
+          empresa_id: Number(company_id),
+          usuario_id: Number(para_usuario_id),
+          conversa_id: Number(conversa_id),
+          nomeCliente,
+          transferido_por_nome: fromNome,
+        })
+      } catch (_) {}
       
       // Notificar o usuário que transferiu
       emitirParaUsuario(io, user_id, 'conversa_transferida_sucesso', {
