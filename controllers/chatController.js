@@ -74,6 +74,25 @@ function statusAtendimentoParaLista(isGroup, dbStatus, exibirBadgeAberta) {
   return s
 }
 
+/**
+ * Paginação de mensagens em GET /chats/:id (detalharChat).
+ * Com `cursor_id`: desempate quando várias mensagens compartilham o mesmo `criado_em` (ordem id DESC).
+ * Sem `cursor_id`: compatível com clientes antigos — apenas `criado_em.lt`.
+ */
+function applyDetalharChatMensagensCursor(query, cursorEm, cursorIdRaw) {
+  const em = cursorEm != null && String(cursorEm).trim() !== '' ? String(cursorEm).trim() : null
+  if (!em) return query
+  const idNum =
+    cursorIdRaw !== undefined && cursorIdRaw !== null && String(cursorIdRaw).trim() !== ''
+      ? Number(cursorIdRaw)
+      : NaN
+  if (Number.isFinite(idNum)) {
+    const quoted = `"${em.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`
+    return query.or(`criado_em.lt.${quoted},and(criado_em.eq.${quoted},id.lt.${idNum})`)
+  }
+  return query.lt('criado_em', em)
+}
+
 // =====================================================
 // 1) HELPERS (TOPO DO ARQUIVO)
 // =====================================================
@@ -2239,6 +2258,10 @@ exports.detalharChat = async (req, res) => {
 
     const limit = Math.min(Number(req.query.limit || 50), 200)
     const cursor = req.query.cursor || null
+    const cursor_id =
+      req.query.cursor_id !== undefined && req.query.cursor_id !== null && String(req.query.cursor_id).trim() !== ''
+        ? req.query.cursor_id
+        : null
 
     // conversa (com cliente, atendente, departamento/setor; tipo, nome_grupo, fotos; nome_contato_cache para header quando cliente ainda não tem nome)
     const { data: conversa, error: errConv } = await supabase
@@ -2324,9 +2347,7 @@ exports.detalharChat = async (req, res) => {
         .order('id', { ascending: false })
         .limit(limit)
 
-      if (cursor) {
-        query = query.lt('criado_em', cursor)
-      }
+      query = applyDetalharChatMensagensCursor(query, cursor, cursor_id)
 
       const result = await query
       mensagens = result.data
@@ -2343,12 +2364,17 @@ exports.detalharChat = async (req, res) => {
         .order('criado_em', { ascending: false })
         .order('id', { ascending: false })
         .limit(limit)
-      if (cursor) query = query.lt('criado_em', cursor)
+      query = applyDetalharChatMensagensCursor(query, cursor, cursor_id)
       const result = await query
       mensagens = result.data
       errMsgs = result.error
     }
     if (errMsgs) return res.status(500).json({ error: errMsgs.message })
+
+    const mensagensDbBatch = Array.isArray(mensagens) ? mensagens : []
+    const dbBatchLen = mensagensDbBatch.length
+    const oldestDbRow = dbBatchLen > 0 ? mensagensDbBatch[dbBatchLen - 1] : null
+    const hasMoreFromDb = dbBatchLen >= limit
 
     // ✅ "Apagar pra mim": filtra mensagens ocultas para este usuário (se a tabela existir)
     try {
@@ -2434,7 +2460,9 @@ exports.detalharChat = async (req, res) => {
       setor: conversa.departamentos?.nome ?? null,
       tags: (conversa.conversa_tags || []).map((ct) => ct.tags).filter(Boolean),
       mensagens: await enrichMensagensComAutorUsuario(supabase, company_id, (mensagens || []).reverse()),
-      next_cursor: mensagens?.length ? mensagens[mensagens.length - 1].criado_em : null,
+      next_cursor: hasMoreFromDb && oldestDbRow ? oldestDbRow.criado_em : null,
+      next_cursor_id:
+        hasMoreFromDb && oldestDbRow != null && oldestDbRow.id != null ? oldestDbRow.id : null,
       mensagens_bloqueadas: deveBloquearMensagens || undefined
     }
 

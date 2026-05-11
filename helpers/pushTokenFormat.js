@@ -26,8 +26,21 @@ function looksLikeWebPushSubscriptionObject(o) {
  *   | { kind: 'fcm', token: string }}
  */
 function classifyIncomingPushToken(raw) {
+  // JSON parseado pelo Express vira objeto — não usar String(token) (viraria "[object Object]" e quebra Web Push).
+  if (raw != null && typeof raw === 'object' && !Array.isArray(raw)) {
+    if (looksLikeWebPushSubscriptionObject(raw)) {
+      return {
+        kind: 'web_push',
+        endpoint: String(raw.endpoint).trim(),
+        p256dh: String(raw.keys.p256dh).trim(),
+        auth: String(raw.keys.auth).trim(),
+      }
+    }
+    return { kind: 'invalid_json_shape' }
+  }
+
   const s = String(raw ?? '').trim()
-  if (!s) return { kind: 'empty' }
+  if (!s || s === '[object Object]') return { kind: 'empty' }
   if (s.startsWith('{')) {
     try {
       const o = JSON.parse(s)

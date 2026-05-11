@@ -16,25 +16,30 @@ exports.upsertToken = async (req, res) => {
   try {
     const empresa_id = Number(req.user?.company_id)
     const usuario_id = Number(req.user?.id)
-    const rawToken = normalizeStr(req.body?.token, MAX_TOKEN_LEN)
 
     if (!Number.isFinite(empresa_id) || empresa_id <= 0 || !Number.isFinite(usuario_id) || usuario_id <= 0) {
       return res.status(400).json({ error: 'Sessão inválida' })
-    }
-    if (!rawToken || rawToken.length < 10) {
-      return res.status(400).json({ error: 'token inválido' })
     }
 
     const plataforma = normalizeStr(req.body?.plataforma, MAX_FIELD) || null
     const navegador = normalizeStr(req.body?.navegador, MAX_FIELD) || null
     const dispositivo = normalizeStr(req.body?.dispositivo, MAX_FIELD) || null
 
-    const classified = classifyIncomingPushToken(rawToken)
+    const classified = classifyIncomingPushToken(req.body?.token)
+
+    if (classified.kind === 'empty') {
+      return res.status(400).json({ error: 'token obrigatório' })
+    }
 
     if (classified.kind === 'invalid_json_shape') {
       return res.status(400).json({
-        error: 'token JSON inválido: esperado objeto PushSubscription com endpoint e keys.p256dh / keys.auth',
+        error:
+          'token inválido: envie PushSubscription (objeto ou JSON string com endpoint e keys.p256dh/auth) ou token FCM',
       })
+    }
+
+    if (classified.kind === 'fcm' && (!classified.token || classified.token.length < 10)) {
+      return res.status(400).json({ error: 'token FCM inválido' })
     }
 
     if (classified.kind === 'web_push') {
@@ -96,19 +101,19 @@ exports.logoutToken = async (req, res) => {
   try {
     const empresa_id = Number(req.user?.company_id)
     const usuario_id = Number(req.user?.id)
-    const rawToken = normalizeStr(req.body?.token, MAX_TOKEN_LEN)
 
     if (!Number.isFinite(empresa_id) || empresa_id <= 0 || !Number.isFinite(usuario_id) || usuario_id <= 0) {
       return res.status(400).json({ error: 'Sessão inválida' })
     }
-    if (!rawToken) {
+
+    const classified = classifyIncomingPushToken(req.body?.token)
+    if (classified.kind === 'empty') {
       return res.status(400).json({ error: 'token obrigatório' })
     }
 
     const now = new Date().toISOString()
     let removedSubscription = false
 
-    const classified = classifyIncomingPushToken(rawToken)
     if (classified.kind === 'web_push') {
       const { error: delErr } = await supabase
         .from('push_subscriptions')
@@ -123,13 +128,32 @@ exports.logoutToken = async (req, res) => {
       }
     }
 
-    const { data: rowsPt, error: ptErr } = await supabase
-      .from('push_tokens')
-      .update({ ativo: false, atualizado_em: now })
-      .eq('empresa_id', empresa_id)
-      .eq('usuario_id', usuario_id)
-      .eq('token', rawToken)
-      .select('id')
+    let rowsPt = []
+    let ptErr = null
+    if (classified.kind === 'fcm' && classified.token && classified.token.length >= 10) {
+      const r = await supabase
+        .from('push_tokens')
+        .update({ ativo: false, atualizado_em: now })
+        .eq('empresa_id', empresa_id)
+        .eq('usuario_id', usuario_id)
+        .eq('token', classified.token)
+        .select('id')
+      rowsPt = r.data
+      ptErr = r.error
+    } else if (typeof req.body?.token === 'string' && classified.kind !== 'web_push') {
+      const s = normalizeStr(req.body.token, MAX_TOKEN_LEN)
+      if (s.length >= 10 && !s.trim().startsWith('{')) {
+        const r = await supabase
+          .from('push_tokens')
+          .update({ ativo: false, atualizado_em: now })
+          .eq('empresa_id', empresa_id)
+          .eq('usuario_id', usuario_id)
+          .eq('token', s)
+          .select('id')
+        rowsPt = r.data
+        ptErr = r.error
+      }
+    }
 
     if (ptErr) {
       console.warn('[push] logout push_tokens:', ptErr.message || ptErr)

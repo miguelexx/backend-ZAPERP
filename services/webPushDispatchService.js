@@ -7,7 +7,27 @@ const webPushService = require('./webPushService')
 const pushNotificationService = require('./pushNotificationService')
 
 // Webhooks/sync podem atrasar alguns minutos; tolerância maior evita silenciar push válido por “mensagem velha”.
-const MAX_MESSAGE_AGE_MS = 15 * 60 * 1000
+const MAX_MESSAGE_AGE_MS = (() => {
+  const raw = Number(process.env.WEB_PUSH_MAX_MESSAGE_AGE_MS)
+  if (Number.isFinite(raw) && raw > 60_000) return Math.min(raw, 24 * 60 * 60 * 1000)
+  return 15 * 60 * 1000
+})()
+
+const WEB_PUSH_DEBUG = String(process.env.WEB_PUSH_DEBUG || '').trim() === '1'
+
+let warnedMissingPushProvider = false
+
+function maskEndpoint(endpoint) {
+  const ep = String(endpoint || '').trim()
+  if (!ep) return '(sem endpoint)'
+  try {
+    const u = new URL(ep)
+    const path = u.pathname.length > 28 ? `${u.pathname.slice(0, 28)}…` : u.pathname
+    return `${u.origin}${path}`
+  } catch {
+    return `${ep.slice(0, 48)}…`
+  }
+}
 
 function isInboundEligibleForPush(payload) {
   if (!payload || typeof payload !== 'object') return false
@@ -212,17 +232,62 @@ async function maybeDispatchInboundWebPush(opts) {
   if (!Number.isFinite(company_id) || company_id <= 0) return
   if (!Number.isFinite(conversa_id) || conversa_id <= 0) return
   if (eventName !== 'nova_mensagem') return
-  if (!isInboundEligibleForPush(payload)) return
+
+  const mensagem_id = payload?.id ?? payload?.mensagem_id
+
+  if (!isInboundEligibleForPush(payload)) {
+    if (WEB_PUSH_DEBUG) {
+      console.log('[web-push][debug] ignorado (mensagem inelegível)', {
+        company_id,
+        conversa_id,
+        mensagem_id,
+        direcao: payload?.direcao,
+        fromMe: payload?.fromMe,
+        autor_usuario_id: payload?.autor_usuario_id,
+      })
+    }
+    return
+  }
 
   const vapidOk = webPushService.ensureVapidConfigured()
   const fcmOk = pushNotificationService.ensureFirebase()
-  if (!vapidOk && !fcmOk) return
+  if (!vapidOk && !fcmOk) {
+    if (!warnedMissingPushProvider) {
+      warnedMissingPushProvider = true
+      console.warn(
+        '[web-push] Nenhum provedor configurado: defina VAPID_PUBLIC_KEY + VAPID_PRIVATE_KEY (Web Push) ou Firebase para FCM. Push inbound será ignorado até lá.'
+      )
+    }
+    return
+  }
 
-  const mensagem_id = payload?.id ?? payload?.mensagem_id
-  if (mensagem_id == null || mensagem_id === '') return
+  if (mensagem_id == null || mensagem_id === '') {
+    if (WEB_PUSH_DEBUG) console.log('[web-push][debug] ignorado (sem mensagem_id)', { company_id, conversa_id })
+    return
+  }
 
   const targetUsers = await obterUsuarioIdsParaPushInbound(company_id, conversa_id)
-  if (targetUsers.length === 0) return
+  if (targetUsers.length === 0) {
+    if (WEB_PUSH_DEBUG) {
+      console.log('[web-push][debug] nenhum destinatário após regras de conversa/fila', {
+        company_id,
+        conversa_id,
+        mensagem_id,
+      })
+    }
+    return
+  }
+
+  if (WEB_PUSH_DEBUG) {
+    console.log('[web-push][debug] dispatch', {
+      company_id,
+      conversa_id,
+      mensagem_id,
+      targetUsers,
+      vapidOk,
+      fcmOk,
+    })
+  }
 
   const contactName = await resolveContactLabel(company_id, conversa_id, payload)
   const avatarUrl = await resolveAvatarUrl(company_id, conversa_id, payload)
@@ -243,19 +308,43 @@ async function maybeDispatchInboundWebPush(opts) {
     if (Number.isFinite(autorUid) && autorUid > 0 && usuario_id === autorUid) continue
 
     const inserted = await tryInsertDeliveryLog(mensagem_id, usuario_id, company_id)
-    if (!inserted) continue
+    if (!inserted) {
+      if (WEB_PUSH_DEBUG) console.log('[web-push][debug] dedupe delivery_log — já enviado para usuário', usuario_id)
+      continue
+    }
 
     const vapidRows = vapidOk ? await fetchSubscriptionsForUser(company_id, usuario_id) : []
     const temSubscriptionVapid = vapidRows.length > 0
+
+    if (vapidOk && !temSubscriptionVapid && WEB_PUSH_DEBUG) {
+      console.log('[web-push][debug] sem linhas em push_subscriptions', { company_id, usuario_id })
+    }
 
     if (temSubscriptionVapid) {
       for (const row of vapidRows) {
         const sub = webPushService.subscriptionFromRow(row)
         if (!sub) continue
+        if (WEB_PUSH_DEBUG) {
+          console.log('[web-push][debug] enviando Web Push', {
+            usuario_id,
+            endpoint: maskEndpoint(row.endpoint),
+          })
+        }
         setImmediate(() => {
-          webPushService.sendToSubscription(sub, jsonPayload).catch((e) =>
-            console.warn('[web-push] send:', e?.message || e)
-          )
+          webPushService
+            .sendToSubscription(sub, jsonPayload)
+            .then((result) => {
+              if (WEB_PUSH_DEBUG) {
+                console.log('[web-push][debug] resultado envio', {
+                  usuario_id,
+                  endpoint: maskEndpoint(sub.endpoint),
+                  ok: result?.ok,
+                  reason: result?.reason,
+                  status: result?.status,
+                })
+              }
+            })
+            .catch((e) => console.warn('[web-push] send exceção:', e?.message || e))
         })
       }
     }
