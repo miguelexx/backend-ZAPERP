@@ -11,16 +11,46 @@ const tagsRoutes = require('./routes/tagRoutes')
 loadEnv()
 ensureUploadsRootExists()
 
+const isProd = isProduction()
+
+// Origens CORS (definidas antes do Helmet: também alimentam CSP frame-ancestors
+// para o SPA em outro host poder exibir PDFs/arquivos de GET /uploads em <iframe>.)
+const allowedOrigins = [
+  'https://zaperp.wmsistemas.inf.br',
+  'https://www.zaperp.wmsistemas.inf.br',
+  'http://zaperp.wmsistemas.inf.br',
+  'http://www.zaperp.wmsistemas.inf.br',
+  ...(process.env.NODE_ENV !== 'production'
+    ? ['http://localhost:3000', 'http://localhost:5173', 'http://127.0.0.1:5173', 'http://127.0.0.1:3000']
+    : [])
+]
+const extraOrigins = String(process.env.CORS_ORIGINS || '').split(',').map((s) => s.trim()).filter(Boolean)
+extraOrigins.forEach((o) => { if (o && !allowedOrigins.includes(o)) allowedOrigins.push(o) })
+
+const allowedOriginPatterns = [
+  /^https?:\/\/[a-z0-9-]+\.wmsistemas\.inf\.br$/i,
+  /^https?:\/\/[a-z0-9-]+\.wmsistemas\.ats$/i,
+]
+
+function buildFrameAncestorsDirective() {
+  const s = new Set(["'self'"])
+  allowedOrigins.forEach((o) => {
+    if (typeof o === 'string' && /^https?:\/\//i.test(o)) s.add(o)
+  })
+  ;['https://*.wmsistemas.inf.br', 'http://*.wmsistemas.inf.br', 'https://*.wmsistemas.ats', 'http://*.wmsistemas.ats'].forEach((h) => s.add(h))
+  return Array.from(s)
+}
+
 const app = express()
 
 // =====================================================
 // 🔐 Security headers (sempre ativos — não dependem de NODE_ENV)
 // - CSP mínimo seguro p/ React SPA + Socket.IO + uploads/mídia
-// - X-Frame-Options + frame-ancestors (anti-clickjacking)
+// - frame-ancestors inclui frontends (SPA em outro subdomínio pode iframe /uploads)
+// - X-Frame-Options desativado aqui: combinado com frame-ancestors evita bloquear PDF no painel
 // - Referrer-Policy
 // - Permissions-Policy (Helmet não cobre nativamente)
 // =====================================================
-const isProd = isProduction()
 const defaultDirectives = helmet.contentSecurityPolicy.getDefaultDirectives()
 
 // Correlaciona logs e respostas sem expor dados sensíveis.
@@ -31,8 +61,7 @@ app.use((req, res, next) => {
 })
 
 // Ajustes para este projeto (SPA + mídia blob + WS)
-// frame-ancestors 'self' permite embed da página /permissoes na aba Configurações
-defaultDirectives['frame-ancestors'] = ["'self'"]
+defaultDirectives['frame-ancestors'] = buildFrameAncestorsDirective()
 defaultDirectives['img-src'] = [...new Set([...(defaultDirectives['img-src'] || []), 'blob:'])]
 defaultDirectives['media-src'] = ["'self'", 'blob:', 'https:']
 defaultDirectives['connect-src'] = ["'self'", 'https:', 'wss:', 'ws:']
@@ -47,7 +76,7 @@ app.use(
     referrerPolicy: { policy: 'strict-origin-when-cross-origin' },
     crossOriginOpenerPolicy: { policy: 'same-origin-allow-popups' },
     crossOriginResourcePolicy: { policy: 'cross-origin' },
-    xFrameOptions: { action: 'deny' },
+    xFrameOptions: false,
   })
 )
 
@@ -100,25 +129,8 @@ app.use('/webhooks/whatsapp', webhookLimiter, webhookUltramsgRoutes)
 // =====================================================
 // CORS — aplicado APÓS os webhooks.
 // Só as rotas da API/frontend passam por aqui.
+// (allowedOrigins / allowedOriginPatterns definidos no topo do arquivo.)
 // =====================================================
-const allowedOrigins = [
-  'https://zaperp.wmsistemas.inf.br',
-  'https://www.zaperp.wmsistemas.inf.br',
-  'http://zaperp.wmsistemas.inf.br',
-  'http://www.zaperp.wmsistemas.inf.br',
-  ...(process.env.NODE_ENV !== 'production'
-    ? ['http://localhost:3000', 'http://localhost:5173', 'http://127.0.0.1:5173', 'http://127.0.0.1:3000']
-    : [])
-]
-// CORS_ORIGINS no .env adiciona origens extras (separadas por vírgula)
-const extraOrigins = String(process.env.CORS_ORIGINS || '').split(',').map((s) => s.trim()).filter(Boolean)
-extraOrigins.forEach((o) => { if (o && !allowedOrigins.includes(o)) allowedOrigins.push(o) })
-
-// Padrões de domínio permitidos (ex: *.wmsistemas.inf.br, *.wmsistemas.ats)
-const allowedOriginPatterns = [
-  /^https?:\/\/[a-z0-9-]+\.wmsistemas\.inf\.br$/i,
-  /^https?:\/\/[a-z0-9-]+\.wmsistemas\.ats$/i,
-]
 
 const corsOptions = {
   origin(origin, callback) {
@@ -159,10 +171,10 @@ app.use(
       const isImage = p.endsWith('.jpg') || p.endsWith('.jpeg') || p.endsWith('.png') || p.endsWith('.webp')
       const isAudio = p.endsWith('.mp3') || p.endsWith('.ogg') || p.endsWith('.aac') || p.endsWith('.m4a') || p.endsWith('.wav') || p.endsWith('.opus') || p.endsWith('.webm')
       const isVideo = p.endsWith('.mp4') || p.endsWith('.mov') || p.endsWith('.avi') || p.endsWith('.3gp')
-      const isMedia = isImage || isAudio || isVideo
-      // Para mídia (imagem/áudio/vídeo), manter Content-Type original para provedores
-      // como UltraMsg/WhatsApp conseguirem processar e reproduzir corretamente.
-      // Para demais arquivos, força download e tipo genérico por segurança.
+      const isPdf = p.endsWith('.pdf')
+      const isMedia = isImage || isAudio || isVideo || isPdf
+      // Para mídia (imagem/áudio/vídeo/PDF), manter Content-Type adequado para provedores
+      // e para o painel exibir PDF em iframe. Demais arquivos: download + octet-stream.
       if (!isMedia) {
         const name = p.split(/[\\/]/).pop() || 'download'
         res.setHeader('Content-Disposition', `attachment; filename="${name.replace(/"/g, '')}"`)

@@ -14,6 +14,7 @@ const {
   marcarAguardandoClienteManual,
   retomarEmAtendimentoManual,
 } = require('../services/conversaStatusManualService')
+const { normalizarTimestampSemFusoAmbiguoParaApi } = require('../helpers/timestampApiCompat')
 
 /** UltraMsg retorna id interno (ex: 35096), não o messageId do WhatsApp. Só usar como whatsapp_id se for o ID real. */
 function isRealWhatsAppId(waId) {
@@ -257,6 +258,7 @@ async function enrichMensagensComAutorUsuario(supabase, company_id, mensagens) {
   const autorIds = [...new Set(mensagens.map((m) => m.autor_usuario_id).filter(Boolean))]
   const base = (m) => ({
     ...m,
+    criado_em: normalizarTimestampSemFusoAmbiguoParaApi(m.criado_em),
     usuario_id: m.autor_usuario_id ?? null,
     usuario_nome: null,
     enviado_por_usuario: m.direcao === 'out' && m.autor_usuario_id != null
@@ -293,6 +295,7 @@ async function enrichMensagemComAutorUsuario(supabase, company_id, msg) {
   if (!msg || !isOut || !msg.autor_usuario_id) {
     return {
       ...msg,
+      criado_em: normalizarTimestampSemFusoAmbiguoParaApi(msg?.criado_em),
       usuario_id: msg?.autor_usuario_id ?? null,
       usuario_nome: null,
       enviado_por_usuario: !!(isOut && msg?.autor_usuario_id),
@@ -304,6 +307,7 @@ async function enrichMensagemComAutorUsuario(supabase, company_id, msg) {
   const { data: u } = await supabase.from('usuarios').select('id, nome').eq('company_id', company_id).eq('id', msg.autor_usuario_id).maybeSingle()
   return {
     ...msg,
+    criado_em: normalizarTimestampSemFusoAmbiguoParaApi(msg?.criado_em),
     usuario_id: msg.autor_usuario_id,
     usuario_nome: u?.nome ?? null,
     enviado_por_usuario: true,
@@ -2460,7 +2464,10 @@ exports.detalharChat = async (req, res) => {
       setor: conversa.departamentos?.nome ?? null,
       tags: (conversa.conversa_tags || []).map((ct) => ct.tags).filter(Boolean),
       mensagens: await enrichMensagensComAutorUsuario(supabase, company_id, (mensagens || []).reverse()),
-      next_cursor: hasMoreFromDb && oldestDbRow ? oldestDbRow.criado_em : null,
+      next_cursor:
+        hasMoreFromDb && oldestDbRow
+          ? normalizarTimestampSemFusoAmbiguoParaApi(oldestDbRow.criado_em)
+          : null,
       next_cursor_id:
         hasMoreFromDb && oldestDbRow != null && oldestDbRow.id != null ? oldestDbRow.id : null,
       mensagens_bloqueadas: deveBloquearMensagens || undefined
@@ -3375,13 +3382,20 @@ exports.enviarMensagemChat = async (req, res) => {
       const telefoneParaPayload = conversa?.telefone && !String(conversa.telefone).startsWith('lid:') ? String(conversa.telefone).trim() : null
       const convPayload = {
         id: Number(conversa_id),
-        ultima_atividade: basePayload.criado_em,
+        ultima_atividade: novaMsgPayload.criado_em,
         exibir_badge_aberta: true,
         ...(telefoneParaPayload ? { telefone: telefoneParaPayload } : {}),
         ...(conversa?.cliente_id != null ? { cliente_id: conversa.cliente_id } : {}),
         ...(contatoNome ? { nome_contato_cache: contatoNome, contato_nome: contatoNome } : {}),
         ...(fotoPerfil ? { foto_perfil_contato_cache: fotoPerfil, foto_perfil: fotoPerfil } : {}),
-        ultima_mensagem_preview: { texto: basePayload.texto, criado_em: basePayload.criado_em, direcao: 'out', fromMe: true, usuario_id: novaMsgPayload.usuario_id, usuario_nome: novaMsgPayload.usuario_nome },
+        ultima_mensagem_preview: {
+          texto: basePayload.texto,
+          criado_em: novaMsgPayload.criado_em,
+          direcao: 'out',
+          fromMe: true,
+          usuario_id: novaMsgPayload.usuario_id,
+          usuario_nome: novaMsgPayload.usuario_nome,
+        },
         reordenar_suave: true // Frontend: animar item para o topo em vez de refetch (evita "desce e sobe")
       }
       emitirConversaAtualizada(io, company_id, conversa_id, convPayload, { skipAtualizarConversa: true })
@@ -4119,7 +4133,10 @@ exports.excluirMensagem = async (req, res) => {
       .limit(1)
 
     if (errLast) console.warn('Excluir mensagem: erro ao buscar última mensagem:', errLast.message)
-    const ultima = Array.isArray(lastMsg) && lastMsg.length > 0 ? lastMsg[0] : null
+    let ultima = Array.isArray(lastMsg) && lastMsg.length > 0 ? lastMsg[0] : null
+    if (ultima && ultima.criado_em != null) {
+      ultima = { ...ultima, criado_em: normalizarTimestampSemFusoAmbiguoParaApi(ultima.criado_em) }
+    }
 
     // atualiza ultima_atividade para manter ordenação coerente
     const ultimaAtividade = ultima?.criado_em || conversa?.criado_em || new Date().toISOString()
@@ -4676,25 +4693,31 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
       
       // Adicionar preview da última mensagem baseado no tipo
       if (msg.tipo === 'contact' && msg.contact_meta) {
-        convPayload.ultima_mensagem_preview = { texto: msg.texto, criado_em: msg.criado_em, direcao: 'out', tipo: 'contact', contact_meta: msg.contact_meta }
+        convPayload.ultima_mensagem_preview = {
+          texto: msg.texto,
+          criado_em: novaMsgPayload.criado_em,
+          direcao: 'out',
+          tipo: 'contact',
+          contact_meta: msg.contact_meta,
+        }
       } else if (msg.tipo === 'location' && (msg.location_meta || msg.url)) {
         convPayload.ultima_mensagem_preview = {
           texto: msg.texto,
-          criado_em: msg.criado_em,
+          criado_em: novaMsgPayload.criado_em,
           direcao: 'out',
           tipo: 'location',
           ...(msg.location_meta ? { location_meta: msg.location_meta } : {}),
-          ...(msg.url ? { url: msg.url } : {})
+          ...(msg.url ? { url: msg.url } : {}),
         }
       } else {
         // Para outros tipos de mídia
         convPayload.ultima_mensagem_preview = {
           texto: msg.texto,
-          criado_em: msg.criado_em,
+          criado_em: novaMsgPayload.criado_em,
           direcao: 'out',
           tipo: msg.tipo,
           ...(msg.url ? { url: msg.url } : {}),
-          ...(msg.nome_arquivo ? { nome_arquivo: msg.nome_arquivo } : {})
+          ...(msg.nome_arquivo ? { nome_arquivo: msg.nome_arquivo } : {}),
         }
       }
       

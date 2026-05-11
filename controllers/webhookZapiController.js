@@ -19,6 +19,7 @@ const { chooseBestName, isBadName, getDisplayName } = require('../helpers/contac
 const { parseVcardForContact } = require('../helpers/vcardHelper')
 const { resolvePeerPhone } = require('../helpers/conversationKeyHelper')
 const { incrementarUnreadParaConversa, emitirParaUsuariosQuePodemVerConversa } = require('./chatController')
+const { normalizarTimestampSemFusoAmbiguoParaApi } = require('../helpers/timestampApiCompat')
 const { scheduleInboundWebPush } = require('../services/webPushDispatchService')
 
 const {
@@ -2299,6 +2300,7 @@ exports.receberZapi = async (req, res) => {
                 const rooms = [`conversa_${conversa_id}`, `empresa_${company_id}`]
                 const emitPayload = {
                   ...mensagemSalva,
+                  criado_em: normalizarTimestampSemFusoAmbiguoParaApi(mensagemSalva.criado_em),
                   conversa_id: mensagemSalva.conversa_id ?? conversa_id,
                   status: mensagemSalva.status || 'delivered',
                   status_mensagem: mensagemSalva.status_mensagem || mensagemSalva.status || 'delivered',
@@ -2751,6 +2753,7 @@ exports.receberZapi = async (req, res) => {
       const canon = rawStatus === 'enviada' || rawStatus === 'enviado' ? 'sent' : (rawStatus === 'entregue' || rawStatus === 'received' ? 'delivered' : (rawStatus || (fromMe ? 'sent' : 'delivered')))
       const emitPayload = {
         ...mensagemSalva,
+        criado_em: normalizarTimestampSemFusoAmbiguoParaApi(mensagemSalva.criado_em),
         conversa_id: mensagemSalva.conversa_id ?? convIdForEmit,
         status: canon,
         status_mensagem: canon,

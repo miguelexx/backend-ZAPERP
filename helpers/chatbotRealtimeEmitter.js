@@ -3,6 +3,8 @@
  * O fluxo normal do webhook só emite a mensagem recebida do cliente; sem isso o painel não vê as respostas do bot em tempo real.
  */
 
+const { normalizarTimestampSemFusoAmbiguoParaApi } = require('./timestampApiCompat')
+
 function canonicalMsgStatus(row) {
   const raw = (row?.status_mensagem ?? row?.status ?? '').toString().toLowerCase()
   if (raw === 'enviada' || raw === 'enviado') return 'sent'
@@ -25,6 +27,7 @@ async function emitBotMensagemRealtime({ io, supabase, company_id, conversa_id, 
   const canon = canonicalMsgStatus(mensagem)
   const emitPayload = {
     ...mensagem,
+    criado_em: normalizarTimestampSemFusoAmbiguoParaApi(mensagem.criado_em),
     conversa_id: cid,
     status: canon,
     status_mensagem: canon,
@@ -70,7 +73,7 @@ async function emitBotMensagemRealtime({ io, supabase, company_id, conversa_id, 
     ...(fotoPerfil ? { foto_perfil_contato_cache: fotoPerfil, foto_perfil: fotoPerfil } : {}),
     ultima_mensagem_preview: {
       texto: String(mensagem.texto ?? '(mensagem)').slice(0, 500),
-      criado_em: mensagem.criado_em,
+      criado_em: normalizarTimestampSemFusoAmbiguoParaApi(mensagem.criado_em),
       direcao: 'out',
       fromMe: true,
     },
