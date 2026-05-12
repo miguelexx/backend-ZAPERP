@@ -1,7 +1,9 @@
 'use strict'
 
 /**
- * Middleware: resolve instanceId -> company_id e injeta em req.webhookContext.
+ * Resolve instanceId (UltraMSG) → company_id para webhooks.
+ * Injeta `req.webhookContext` e mantém alias legado `req.zapiContext` (compatibilidade).
+ * @see ../docs/_OFICIAL/ADR-LEGACY-NAMING.md
  */
 
 const { getCompanyIdByInstanceId } = require('../services/whatsappConfigService')

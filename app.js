@@ -106,8 +106,8 @@ if (process.env.TRUST_PROXY === '1' || process.env.NODE_ENV === 'production') {
 }
 
 // =====================================================
-// JSON + urlencoded parsers — UltraMsg pode enviar application/json ou form-urlencoded
-// verify: mantém rawBody em Buffer para validação HMAC (Meta)
+// JSON + urlencoded parsers — UltraMSG pode enviar application/json ou form-urlencoded
+// verify: mantém rawBody em Buffer (útil para verificação HMAC de webhooks, se aplicável)
 // =====================================================
 app.use(express.json({
   verify: (req, res, buf) => {
@@ -117,7 +117,7 @@ app.use(express.json({
 app.use(express.urlencoded({ extended: true, limit: '1mb' }))
 
 // =====================================================
-// WEBHOOKS — registrados ANTES do CORS (UltraMsg/Meta enviam Origin).
+// WEBHOOKS — registrados ANTES do CORS (provedores como UltraMSG enviam Origin).
 // =====================================================
 const webhookUltramsgRoutes = require('./routes/webhookUltramsgRoutes')
 const { webhookLimiter } = require('./middleware/rateLimit')

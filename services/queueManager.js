@@ -186,6 +186,7 @@ async function processJob(job, io = null) {
       await registrarEvento(job.company_id, TIPOS.JOB_CONCLUIDO, `Job ${job.tipo} concluído`, { job_id: job.id })
       if (io && job.tipo === JOB_TIPOS.SYNC_CONTATOS && result.resultado) {
         const r = result.resultado
+        // Nome do evento é legado ("zapi_*"); payload é sync WhatsApp/UltraMSG. Não renomear sem dual-emit + rollout frontend (../docs/_OFICIAL/ADR-LEGACY-NAMING.md).
         io.to(`empresa_${job.company_id}`).emit('zapi_sync_contatos', {
           ok: true,
           total_contatos: r.totalProcessados || 0,
@@ -195,6 +196,7 @@ async function processJob(job, io = null) {
         })
       }
       if (io && job.tipo === JOB_TIPOS.SYNC_FOTOS && result.resultado) {
+        // Mesmo evento legado que SYNC_CONTATOS (ver comentário acima).
         io.to(`empresa_${job.company_id}`).emit('zapi_sync_contatos', {
           ok: true,
           total_contatos: 0,
@@ -223,7 +225,7 @@ async function processJob(job, io = null) {
 /**
  * Inicia polling do worker.
  * @param {number} intervalMs - intervalo entre verificações
- * @param {object} io - Socket.IO para emitir zapi_sync_contatos ao concluir
+ * @param {object} io - Socket.IO para emitir evento legado `zapi_sync_contatos` ao concluir (ver ../docs/_OFICIAL/ADR-LEGACY-NAMING.md)
  */
 function startWorker(intervalMs = 5000, io = null) {
   const poll = async () => {

@@ -7,18 +7,18 @@
 ALTER TABLE public.clientes
   DROP CONSTRAINT IF EXISTS clientes_telefone_unique;
 
--- 1) Coluna ultima_atividade em conversas (obrigatória para webhook Z-API)
+-- 1) Coluna ultima_atividade em conversas (obrigatória para ordenação / webhooks WhatsApp)
 ALTER TABLE public.conversas
   ADD COLUMN IF NOT EXISTS ultima_atividade timestamp with time zone DEFAULT now();
 
 COMMENT ON COLUMN public.conversas.ultima_atividade IS 'Última atividade na conversa (nova mensagem ou envio). Usado para ordenar a lista.';
 
--- 0b) Preferências da empresa (Z-API)
+-- 0b) Preferências da empresa (nome de coluna legado zapi_* — comportamento atual: WhatsApp/UltraMSG)
 -- Auto-sincronizar contatos quando a instância conectar (Configurações → Clientes)
 ALTER TABLE public.empresas
   ADD COLUMN IF NOT EXISTS zapi_auto_sync_contatos boolean DEFAULT true;
 
-COMMENT ON COLUMN public.empresas.zapi_auto_sync_contatos IS 'Se true, ao conectar no Z-API dispara sync de contatos do celular.';
+COMMENT ON COLUMN public.empresas.zapi_auto_sync_contatos IS 'Se true, ao conectar a instância WhatsApp (UltraMSG) dispara sync de contatos do celular. Nome da coluna é legado histórico.';
 
 ALTER TABLE public.empresas
   ADD COLUMN IF NOT EXISTS crm_habilitado boolean NOT NULL DEFAULT true;

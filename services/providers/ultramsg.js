@@ -1,8 +1,8 @@
 /**
- * Provider UltraMsg (WhatsApp via conexão QR Code).
+ * Provider UltraMSG (WhatsApp via conexão QR Code).
  * Envio via REST; recebimento via webhook POST /webhooks/ultramsg.
  *
- * Multi-tenant: credenciais vêm de empresa_zapi por company_id (mesma tabela).
+ * Multi-tenant: credenciais vêm da tabela `empresa_zapi` por company_id (nome histórico da migração; ver ../docs/_OFICIAL/ADR-LEGACY-NAMING.md).
  * API: https://api.ultramsg.com/{instance_id}/
  *
  * Formato telefone: +5534999999999 (individual) ou 120363...@g.us (grupo).

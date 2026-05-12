@@ -1,6 +1,6 @@
 /**
- * Webhook UltraMsg: recebe eventos e normaliza para formato Z-API.
- * Reutiliza a lógica central de processamento de mensagens.
+ * Webhook UltraMSG: recebe eventos e normaliza para um formato interno unificado
+ * consumido pelo pipeline de mensagens (`webhookZapiController` — nome de ficheiro legado; ver ../docs/_OFICIAL/ADR-LEGACY-NAMING.md).
  *
  * Formato UltraMsg (como chega do site):
  * {
@@ -12,7 +12,7 @@
  *     fromMe, self, isForwarded, isMentioned, quotedMsg, mentionedIds, time
  *   }
  * }
- * Formato Z-API:   { phone, fromMe, messageId, text/message/body, key, ... }
+ * Formato interno unificado (histórico): { phone, fromMe, messageId, text/message/body, key, ... }
  */
 
 const { normalizePhoneBR } = require('../helpers/phoneHelper')
@@ -24,7 +24,7 @@ function jidToDigits(jid) {
   return String(jid).replace(/@[^@]+$/, '').replace(/\D/g, '')
 }
 
-/** Converte payload UltraMsg para formato Z-API compatível. */
+/** Converte payload UltraMsg para o formato interno esperado pelo pipeline legado de mensagens. */
 function normalizeUltramsgToZapi(body) {
   if (!body || typeof body !== 'object') return body
   const data = body.data || body
@@ -148,7 +148,7 @@ function normalizeUltramsgToZapi(body) {
   const toPhoneDest = jidToDigits(toJid)
   const toPhoneNorm = toPhoneDest ? (normalizePhoneBR(toPhoneDest) || toPhoneDest) : null
 
-  // Contato (vCard): UltraMsg envia type=vcard/contact e body com vCard; webhookZapi espera payload.contact
+  // Contato (vCard): UltraMSG envia type=vcard/contact e body com vCard; o pipeline interno espera payload.contact
   // Fallback: body contém BEGIN:VCARD mesmo com type=chat (alguns provedores enviam assim)
   const hasVcardInBody = bodyText && String(bodyText).includes('BEGIN:VCARD') && String(bodyText).includes('END:VCARD')
   const isContactType = ['vcard', 'contact', 'contactmessage'].includes(msgType) || hasVcardInBody
@@ -270,7 +270,7 @@ function resolveWebhookBody(raw) {
 }
 
 /**
- * Handler principal: normaliza payload UltraMsg → Z-API e delega ao webhookZapi.
+ * Handler principal: normaliza payload UltraMSG e delega ao pipeline interno (webhookZapiController).
  * Idempotência: controlador central trata por (conversa_id, whatsapp_id).
  */
 async function handleWebhookUltramsg(req, res) {

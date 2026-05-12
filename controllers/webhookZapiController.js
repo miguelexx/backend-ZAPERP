@@ -1,6 +1,10 @@
 /**
- * Processamento central de webhooks WhatsApp.
- * Usado pelo webhookUltramsgController: UltraMsg normaliza payload e delega para este controlador.
+ * Processamento central de webhooks WhatsApp (UltraMSG na entrada atual).
+ * O ficheiro mantém o nome histórico `webhookZapiController`; funções como `receberZapi`/`statusZapi` são o núcleo interno
+ * após normalização em `webhookUltramsgController`. Não implica provider Z-API público.
+ * @see ../docs/_OFICIAL/ADR-LEGACY-NAMING.md
+ *
+ * Usado pelo webhookUltramsgController: UltraMSG normaliza payload e delega para este controlador.
  * Suporta: texto, imagem, áudio,
  * vídeo, documento, figurinha, reação, localização, contato, PTV, templates, botões, listas.
  * Suporta conversas individuais e de GRUPO.

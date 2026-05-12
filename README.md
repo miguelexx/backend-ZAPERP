@@ -1,20 +1,22 @@
 # ZapERP — Backend
 
-API e WebSocket para o sistema de atendimento WhatsApp (Z-API / Meta).
+API HTTP, webhooks **UltraMSG** e **Socket.IO** para o sistema de atendimento WhatsApp multi-tenant.
+
+**Documentação canónica:** [`docs/_OFICIAL/README.md`](./docs/_OFICIAL/README.md) · [ADR — nomes legados](./docs/_OFICIAL/ADR-LEGACY-NAMING.md)
 
 ## Requisitos
 
 - Node.js 18+ (recomendado 20+)
-- Conta Supabase
-- Instância Z-API (ou Meta WhatsApp Cloud API)
+- Supabase (PostgreSQL)
+- Instância **UltraMSG** por empresa (credenciais em `empresa_zapi` — nome histórico da tabela; ver ADR)
 
 ## Configuração
 
-1. Copie o arquivo de exemplo e preencha as variáveis:
+1. Copie o ficheiro de exemplo e preencha as variáveis:
    ```bash
    cp .env.example .env
    ```
-2. Edite `.env` com suas chaves (JWT_SECRET, SUPABASE_*, ZAPI_*, APP_URL, CORS_ORIGINS).
+2. Edite `.env` com as chaves necessárias (`JWT_SECRET`, `APP_URL`, `WHATSAPP_WEBHOOK_TOKEN`, `SUPABASE_*`, `ULTRAMSG_*`, `CORS_ORIGINS`, …).
 3. Instale dependências e inicie:
    ```bash
    npm install
@@ -23,33 +25,35 @@ API e WebSocket para o sistema de atendimento WhatsApp (Z-API / Meta).
 
 ## Atualizar na VPS
 
-Passo a passo completo: **[docs/ATUALIZAR-NA-VPS.md](../docs/ATUALIZAR-NA-VPS.md)** (na raiz do repositório).
+Passo a passo: **[../docs/ATUALIZAR-NA-VPS.md](../docs/ATUALIZAR-NA-VPS.md)** (raiz do repositório).
 
-Resumo: `git pull` → `npm install` no backend e no frontend → `npm run build` no frontend → reiniciar o processo (PM2 ou systemd).
+Resumo: `git pull` → `npm install` (backend e frontend) → `npm run build` (frontend) → reiniciar processo (PM2 ou systemd).
 
 ---
 
 ## Deploy (checklist)
 
 - [ ] `NODE_ENV=production`
-- [ ] `APP_URL` = URL pública do backend (ex.: https://api.seudominio.com)
-- [ ] `CORS_ORIGINS` = URL do frontend (separadas por vírgula se houver mais de uma)
-- [ ] `JWT_SECRET` forte (ex.: `openssl rand -hex 32`)
-- [ ] Supabase: `SUPABASE_URL` e `SUPABASE_SERVICE_ROLE_KEY`
-- [ ] Z-API: `ZAPI_BASE_URL`, `ZAPI_WEBHOOK_TOKEN` (credenciais por empresa em `empresa_zapi`, nunca em ENV)
-- [ ] Webhooks Z-API configurados automaticamente por instância ao conectar (ou manualmente no painel)
-- [ ] Proxy reverso (Nginx/Cloudflare) com `TRUST_PROXY=1` se usar
-- [ ] Remover ou não expor `/debug/env` em produção (já desativado quando `NODE_ENV=production`)
+- [ ] `APP_URL` = URL pública do backend
+- [ ] `CORS_ORIGINS` = URL(s) do frontend
+- [ ] `JWT_SECRET` forte
+- [ ] `SUPABASE_URL` e `SUPABASE_SERVICE_ROLE_KEY`
+- [ ] `WHATSAPP_WEBHOOK_TOKEN` alinhado ao painel UltraMSG
+- [ ] Credenciais por empresa em **`empresa_zapi`** (`instance_id`, `instance_token`, …) — ver doc oficial
+- [ ] Webhook UltraMSG apontando para `https://<APP_URL>/webhooks/ultramsg?token=...`
+- [ ] Proxy reverso com `TRUST_PROXY=1` se aplicável
+- [ ] Não expor `/debug/env` em produção (desativado quando `NODE_ENV=production`)
 
-## Endpoints principais
+## Endpoints principais (visão)
 
 | Rota | Descrição |
 |------|-----------|
 | `GET /health` | Health check |
-| `POST /usuarios/login` | Login (retorna token JWT) |
+| `POST /usuarios/login` | Login (JWT) |
 | `GET /chats` | Lista de conversas (autenticado) |
-| `GET /chats/:id` | Detalhe da conversa e mensagens |
-| `POST /webhooks/zapi` | Webhook Z-API (mensagens, status) |
-| `POST /webhooks/zapi/status` | Status de mensagem (ticks) |
+| `POST /webhooks/ultramsg` | Webhook **UltraMSG** (mensagens, acks) |
+| `POST /webhooks/whatsapp` | Alias do mesmo webhook |
 
-Socket.IO: autenticação via `auth: { token }`. Rooms: `empresa_{id}`, `conversa_{id}`, `usuario_{id}`.
+Integração autenticada: **`/integrations/whatsapp`** (e `/api/integrations/whatsapp`).
+
+**Socket.IO:** `auth: { token }` (JWT com `company_id`). Salas: `empresa_{id}`, `conversa_{id}`, `usuario_{id}`, `departamento_{id}`.

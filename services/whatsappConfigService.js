@@ -1,7 +1,8 @@
 /**
- * Configuração WhatsApp ( UltraMsg ).
- * Usa tabela empresa_zapi (instance_id, instance_token).
+ * Configuração WhatsApp (UltraMSG).
+ * Credenciais por empresa: tabela `empresa_zapi` (nome histórico da migração; armazena instance_id/instance_token UltraMSG).
  * Fallback ENV: ULTRAMSG_INSTANCE_ID, ULTRAMSG_TOKEN.
+ * @see ../docs/_OFICIAL/ADR-LEGACY-NAMING.md
  */
 
 const supabase = require('../config/supabase')
@@ -61,49 +62,44 @@ async function getEmpresaWhatsappConfig(company_id) {
 }
 
 async function getCompanyIdByInstanceId(instanceId) {
-  if (!instanceId || typeof instanceId !== 'string') return null
-  const id = String(instanceId).trim()
+  const id = instanceId == null ? '' : String(instanceId).trim()
   if (!id) return null
-  const { data, error } = await supabase
-    .from('empresa_zapi')
-    .select('company_id')
-    .eq('instance_id', id)
-    .eq('ativo', true)
-    .maybeSingle()
-  if (error) {
-    console.error('[WHATSAPP-CONFIG] Erro ao buscar company_id por instance_id:', error.message)
-    return null
+
+  /** Uma linha ou nenhuma — evita erro do PostgREST quando há duplicatas ativas com o mesmo instance_id */
+  async function firstCompanyByQuery(qb) {
+    const { data: rows, error } = await qb.order('company_id', { ascending: true }).limit(1)
+    if (error) {
+      console.error('[WHATSAPP-CONFIG] Erro ao buscar company_id por instance_id:', error.message)
+      return null
+    }
+    const cid = rows?.[0]?.company_id
+    return cid != null ? Number(cid) : null
   }
-  if (data?.company_id != null) return Number(data.company_id)
-  const { data: d2, error: e2 } = await supabase
-    .from('empresa_zapi')
-    .select('company_id')
-    .eq('ativo', true)
-    .ilike('instance_id', id)
-    .order('company_id', { ascending: true })
-    .limit(1)
-    .maybeSingle()
-  if (!e2 && d2?.company_id != null) return Number(d2.company_id)
+
+  let cid = await firstCompanyByQuery(
+    supabase.from('empresa_zapi').select('company_id').eq('instance_id', id).eq('ativo', true)
+  )
+  if (cid != null) return cid
+
+  cid = await firstCompanyByQuery(
+    supabase.from('empresa_zapi').select('company_id').eq('ativo', true).ilike('instance_id', id)
+  )
+  if (cid != null) return cid
+
   // UltraMsg webhook envia instanceId numérico (ex: "51534"); banco pode ter "instance51534"
   if (/^\d+$/.test(id)) {
     const altId = `instance${id}`
-    const { data: d3, error: e3 } = await supabase
-      .from('empresa_zapi')
-      .select('company_id')
-      .eq('instance_id', altId)
-      .eq('ativo', true)
-      .maybeSingle()
-    if (!e3 && d3?.company_id != null) return Number(d3.company_id)
+    cid = await firstCompanyByQuery(
+      supabase.from('empresa_zapi').select('company_id').eq('instance_id', altId).eq('ativo', true)
+    )
+    if (cid != null) return cid
   } else if (id.toLowerCase().startsWith('instance') && id.length > 8) {
     const numericPart = id.replace(/\D/g, '')
     if (numericPart) {
-      const { data: d4, error: e4 } = await supabase
-        .from('empresa_zapi')
-        .select('company_id')
-        .eq('instance_id', numericPart)
-        .eq('ativo', true)
-        .maybeSingle()
-      if (!e4 && d4?.company_id != null) return Number(d4.company_id)
+      cid = await firstCompanyByQuery(
+        supabase.from('empresa_zapi').select('company_id').eq('instance_id', numericPart).eq('ativo', true)
+      )
+      if (cid != null) return cid
     }
   }
   return null

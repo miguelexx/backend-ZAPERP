@@ -321,7 +321,7 @@ exports.syncContacts = async (req, res) => {
   }
 
   // Enfileira um job progressivo (lotes + checkpoint + lock).
-  // O worker processa em background e emite 'zapi_sync_contatos' via socket ao terminar.
+  // O worker emite o evento Socket legado 'zapi_sync_contatos' ao terminar (nome histórico; não é tabela — ver ../docs/_OFICIAL/ADR-LEGACY-NAMING.md).
   const result = await enqueue(company_id, JOB_TIPOS.SYNC_CONTATOS, { reset: true, includeConversationCache: false })
 
   if (!result.ok) {

@@ -287,7 +287,7 @@ server.listen(PORT, '0.0.0.0', () => {
   // Não há mais instância única em ENV para configurar no startup.
 
   // Inicia worker de jobs (sync_contatos, sync_fotos, etc.) em background.
-  // Passa io para que o worker emita 'zapi_sync_contatos' ao concluir cada job.
+  // Passa io para o worker emitir o evento legado 'zapi_sync_contatos' (nome histórico; ver ../docs/_OFICIAL/ADR-LEGACY-NAMING.md) ao concluir cada job.
   const isTest = process.env.NODE_ENV === 'test' || !!process.env.JEST_WORKER_ID
   if (!isTest) {
     const { startWorker } = require('./services/queueManager')
