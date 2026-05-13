@@ -80,11 +80,12 @@ function ensureFirebase() {
 }
 
 function isInvalidTokenError(err) {
-  const code = String(err?.code || err?.errorInfo?.code || '')
-  return (
-    code.includes('registration-token-not-registered') ||
-    code.includes('invalid-registration-token')
-  )
+  const code = `${String(err?.code || '')} ${String(err?.errorInfo?.code || '')}`.toLowerCase()
+  if (code.includes('registration-token-not-registered')) return true
+  if (code.includes('invalid-registration-token')) return true
+  if (code.includes('unregistered')) return true
+  if (code.includes('not-a-fcm-token')) return true
+  return false
 }
 
 async function deactivateTokens(tokens) {
@@ -203,7 +204,8 @@ async function sendNovaMensagemToUser({
           return
         }
         const err = r.error
-        console.warn('[fcm] falha token:', err?.code || err?.message || err)
+        const tail = tok && tok.length > 8 ? `…${String(tok).slice(-8)}` : '(token)'
+        console.warn('[fcm] falha token', { code: err?.code, message: err?.message, token: tail })
         if (err && isInvalidTokenError(err)) invalid.push(tok)
       })
     } catch (e) {
@@ -274,7 +276,8 @@ async function sendTransferenciaToUser({
           return
         }
         const err = r.error
-        console.warn('[fcm] falha token (transfer):', err?.code || err?.message || err)
+        const tail = tok && tok.length > 8 ? `…${String(tok).slice(-8)}` : '(token)'
+        console.warn('[fcm] falha token (transfer)', { code: err?.code, message: err?.message, token: tail })
         if (err && isInvalidTokenError(err)) invalid.push(tok)
       })
     } catch (e) {

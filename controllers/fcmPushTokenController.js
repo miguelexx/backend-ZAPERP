@@ -11,6 +11,13 @@ function normalizeStr(v, max) {
   return s
 }
 
+function maskTokenHint(raw) {
+  const s = String(raw ?? '').trim()
+  if (!s) return '(vazio)'
+  if (s.length <= 12) return `len=${s.length}`
+  return `…${s.slice(-8)} (len=${s.length})`
+}
+
 /** POST /api/push/tokens — Web Push (JSON PushSubscription) ou token FCM */
 exports.upsertToken = async (req, res) => {
   try {
@@ -26,6 +33,14 @@ exports.upsertToken = async (req, res) => {
     const dispositivo = normalizeStr(req.body?.dispositivo, MAX_FIELD) || null
 
     const classified = classifyIncomingPushToken(req.body?.token)
+
+    console.log('[push] POST /tokens', {
+      kind: classified.kind,
+      hint: classified.kind === 'fcm' ? maskTokenHint(classified.token) : classified.kind,
+      empresa_id,
+      usuario_id,
+      plataforma: plataforma || undefined,
+    })
 
     if (classified.kind === 'empty') {
       return res.status(400).json({ error: 'token obrigatório' })
@@ -88,7 +103,13 @@ exports.upsertToken = async (req, res) => {
       return res.status(500).json({ error: 'Não foi possível salvar o token' })
     }
 
-    console.log('[fcm] token FCM salvo', { empresa_id, usuario_id, plataforma, navegador })
+    console.log('[fcm] token FCM salvo', {
+      empresa_id,
+      usuario_id,
+      plataforma,
+      navegador,
+      token_hint: maskTokenHint(token),
+    })
     return res.json({ ok: true })
   } catch (e) {
     console.warn('[push] upsertToken:', e?.message || e)

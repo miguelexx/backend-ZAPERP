@@ -349,8 +349,14 @@ async function maybeDispatchInboundWebPush(opts) {
       }
     }
 
-    const usarFcm = fcmOk && !temSubscriptionVapid
-    if (usarFcm) {
+    // FCM e Web Push são canais independentes: um usuário pode ter subscription VAPID no PC
+    // e token FCM no app Android. Antes, FCM era ignorado sempre que existia qualquer linha em
+    // push_subscriptions — o que silenciava o mobile. sendNovaMensagemToUser já retorna cedo
+    // se não houver tokens FCM ativos.
+    if (fcmOk) {
+      if (WEB_PUSH_DEBUG && temSubscriptionVapid) {
+        console.log('[web-push][debug] também disparando FCM (paralelo a Web Push)', { usuario_id })
+      }
       setImmediate(() => {
         pushNotificationService
           .sendNovaMensagemToUser({
