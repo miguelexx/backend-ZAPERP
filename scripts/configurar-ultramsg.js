@@ -10,6 +10,7 @@
 
 require('dotenv').config({ path: require('path').join(__dirname, '..', '.env') })
 const supabase = require('../config/supabase')
+const { invalidateEmpresaWhatsappConfigCache } = require('../services/whatsappConfigService')
 
 const instanceId = process.env.ULTRAMSG_INSTANCE_ID || 'instance51534'
 const token = process.env.ULTRAMSG_TOKEN || 'r6ztawoqwcfhzrd'
@@ -31,6 +32,7 @@ async function main() {
     console.error('Erro:', error.message)
     process.exit(1)
   }
+  invalidateEmpresaWhatsappConfigCache(companyId)
   console.log('✅ UltraMsg configurado:', data?.[0] || { company_id: companyId, instance_id: instanceId })
 }
 

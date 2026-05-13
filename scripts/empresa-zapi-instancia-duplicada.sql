@@ -1,6 +1,9 @@
 -- Diagnóstico: mesma instância UltraMsg em mais do que uma empresa ativa
 -- (causa típica: mensagens iam para o company_id mais baixo antes da correção no backend)
 --
+-- No backend, por defeito o mapeamento instance_id → company_id mantém o comportamento
+-- histórico (menor company_id). Opcional no .env: WEBHOOK_INSTANCE_DUPLICATE_STRATEGY=recent
+--
 -- 1) Ver todas as linhas ativas para instance89002
 SELECT company_id, instance_id, ativo, atualizado_em, criado_em
 FROM public.empresa_zapi

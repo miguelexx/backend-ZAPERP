@@ -9,7 +9,7 @@
  */
 
 const { normalizePhoneBR, toZapiSendFormat, possiblePhonesBR } = require('../../helpers/phoneHelper')
-const { getEmpresaWhatsappConfig } = require('../whatsappConfigService')
+const { getEmpresaWhatsappConfig, invalidateEmpresaWhatsappConfigCache } = require('../whatsappConfigService')
 const { fetchWithRetry } = require('../../helpers/retryWithBackoff')
 
 const ULTRAMSG_BASE_URL = (process.env.ULTRAMSG_BASE_URL || 'https://api.ultramsg.com').replace(/\/$/, '')
@@ -22,6 +22,34 @@ const CHATS_MESSAGES_LIMIT_MAX = 1000
 const ULTRAMSG_TIMEOUT_MS = Number(process.env.ULTRAMSG_TIMEOUT_MS) || 30_000
 const lastSendPerCompany = new Map()
 const WHATSAPP_DEBUG = String(process.env.WHATSAPP_DEBUG || '').toLowerCase() === 'true'
+
+/** Resposta HTTP 200 com JSON de erro (ex.: token inválido após rotação no painel UltraMSG). */
+function ultramsgResponseIndicatesBadInstanceToken(data, text) {
+  const parts = []
+  if (data && typeof data === 'object') {
+    if (data.error != null && data.error !== false) parts.push(String(data.error))
+    if (data.message != null) parts.push(String(data.message))
+  }
+  parts.push(String(text || ''))
+  const lower = parts.join(' ').toLowerCase()
+  return (
+    lower.includes('wrong token') ||
+    lower.includes('invalid token') ||
+    lower.includes('invalid api token') ||
+    lower.includes('unauthorized')
+  )
+}
+
+function maybeInvalidateCacheOnBadToken(companyId, data, text) {
+  if (companyId == null || !Number.isFinite(Number(companyId))) return
+  if (!ultramsgResponseIndicatesBadInstanceToken(data, text)) return
+  invalidateEmpresaWhatsappConfigCache(Number(companyId))
+  console.warn(
+    '[ULTRAMSG] instance_token rejeitado pela API — atualize `empresa_zapi.instance_token` com o token atual do painel UltraMSG (empresa ' +
+      Number(companyId) +
+      '). Cache de credenciais desta empresa foi limpo.'
+  )
+}
 
 // ========== Camada centralizada UltraMsg (contrato oficial) ==========
 
@@ -375,7 +403,7 @@ function createFetchOptions(method, body, extra = {}) {
   return opts
 }
 
-async function post({ basePath, token, endpoint, body }) {
+async function post({ basePath, token, endpoint, body, companyId = null }) {
   const url = `${basePath}${endpoint}`
   const payload = appendToken(body || {}, token)
   const fetchOpts = createFetchOptions('POST', payload)
@@ -383,6 +411,7 @@ async function post({ basePath, token, endpoint, body }) {
   const text = await res.text().catch(() => '')
   let data = null
   try { data = text ? JSON.parse(text) : null } catch { data = null }
+  maybeInvalidateCacheOnBadToken(companyId, data, text)
   logUltramsgRequest({
     method: 'POST',
     url,
@@ -395,7 +424,7 @@ async function post({ basePath, token, endpoint, body }) {
   return { ok: res.ok, status: res.status, data, text }
 }
 
-async function get({ basePath, token, endpoint, extraParams = {} }) {
+async function get({ basePath, token, endpoint, extraParams = {}, companyId = null }) {
   const sep = String(endpoint || '').includes('?') ? '&' : '?'
   // UltraMsg exige token como primeiro parâmetro na URL (docs: ?token=xxx&chatId=...)
   const params = { token: String(token || '').trim(), ...extraParams }
@@ -406,6 +435,7 @@ async function get({ basePath, token, endpoint, extraParams = {} }) {
   const text = await res.text().catch(() => '')
   let data = null
   try { data = text ? JSON.parse(text) : null } catch { data = null }
+  maybeInvalidateCacheOnBadToken(companyId, data, text)
   logUltramsgRequest({
     method: 'GET',
     url,
@@ -419,12 +449,12 @@ async function get({ basePath, token, endpoint, extraParams = {} }) {
 }
 
 /** Alias para compatibilidade interna. */
-async function postJson({ basePath, token, endpoint, body }) {
-  return post({ basePath, token, endpoint, body })
+async function postJson({ basePath, token, endpoint, body, companyId = null }) {
+  return post({ basePath, token, endpoint, body, companyId })
 }
 
-async function getJson({ basePath, token, endpoint, extraParams = {} }) {
-  return get({ basePath, token, endpoint, extraParams })
+async function getJson({ basePath, token, endpoint, extraParams = {}, companyId = null }) {
+  return get({ basePath, token, endpoint, extraParams, companyId })
 }
 
 /** Normaliza telefone (interface compatível com zapi). */
@@ -470,9 +500,12 @@ async function sendText(phone, message, opts = {}) {
   // UltraMsg retorna HTTP 200 mesmo em caso de erro (ex.: token inválido) — checar body também
   const bodyError = data?.error || (!data?.id && !data?.sent && !data?.messageId && data?.message)
   if (!ok || bodyError) {
-    const err = data?.error || data?.message || text?.slice(0, 200) || `HTTP ${status}`
-    console.warn('❌ UltraMsg sendText falhou:', nums[0]?.slice(-12), status, String(err).slice(0, 150), '| token:', maskToken(cfg.token))
-    return { ok: false, messageId: null, error: String(err) }
+    let errMsg = String(data?.error || data?.message || text?.slice(0, 200) || `HTTP ${status}`)
+    if (ultramsgResponseIndicatesBadInstanceToken(data, text)) {
+      errMsg += ` — Atualize instance_token em empresa_zapi (token atual do painel UltraMSG, company_id=${cfg.companyId}).`
+    }
+    console.warn('❌ UltraMsg sendText falhou:', nums[0]?.slice(-12), status, errMsg.slice(0, 200), '| token:', maskToken(cfg.token))
+    return { ok: false, messageId: null, error: errMsg }
   }
   const msgId = data?.id ?? data?.messageId ?? null
   const numLog = nums[0] ? (String(nums[0]).replace(/\D/g, '').length >= 13 ? String(nums[0]).slice(-13) : String(nums[0]).slice(-12)) : ''

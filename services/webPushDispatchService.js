@@ -2,9 +2,13 @@
  * Dispara Web Push em mensagens inbound relevantes (alinhado ao filtro do frontend / ownership).
  */
 const supabase = require('../config/supabase')
+const { getBooleanEnv } = require('../config/env')
 const { isGroupConversation } = require('../helpers/conversaHelper')
 const webPushService = require('./webPushService')
 const pushNotificationService = require('./pushNotificationService')
+
+/** Por defeito false = igual ao comportamento histórico (FCM só se não houver subscription Web Push). true = FCM em paralelo (útil com app nativo + PWA no mesmo utilizador). */
+const WEB_PUSH_FCM_ALONGSIDE_VAPID = getBooleanEnv('WEB_PUSH_FCM_ALONGSIDE_VAPID', false)
 
 // Webhooks/sync podem atrasar alguns minutos; tolerância maior evita silenciar push válido por “mensagem velha”.
 const MAX_MESSAGE_AGE_MS = (() => {
@@ -349,12 +353,11 @@ async function maybeDispatchInboundWebPush(opts) {
       }
     }
 
-    // FCM e Web Push são canais independentes: um usuário pode ter subscription VAPID no PC
-    // e token FCM no app Android. Antes, FCM era ignorado sempre que existia qualquer linha em
-    // push_subscriptions — o que silenciava o mobile. sendNovaMensagemToUser já retorna cedo
-    // se não houver tokens FCM ativos.
-    if (fcmOk) {
-      if (WEB_PUSH_DEBUG && temSubscriptionVapid) {
+    // FCM: por defeito só quando não há Web Push (comportamento histórico). Com WEB_PUSH_FCM_ALONGSIDE_VAPID=1,
+    // também envia FCM em paralelo (ex.: token FCM no telemóvel + subscription no PC).
+    const usarFcm = fcmOk && (WEB_PUSH_FCM_ALONGSIDE_VAPID || !temSubscriptionVapid)
+    if (usarFcm) {
+      if (WEB_PUSH_DEBUG && temSubscriptionVapid && WEB_PUSH_FCM_ALONGSIDE_VAPID) {
         console.log('[web-push][debug] também disparando FCM (paralelo a Web Push)', { usuario_id })
       }
       setImmediate(() => {
