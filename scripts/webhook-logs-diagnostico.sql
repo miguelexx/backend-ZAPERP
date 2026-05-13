@@ -1,7 +1,27 @@
 -- Diagnóstico webhook_logs — UltraMsg (ajuste company_id / instance_id se necessário)
 -- Rode no SQL Editor do Supabase ou psql.
-
+--
 -- Empresa 6 + instância instance89002 (painel UltraMsg)
+--
+-- IMPORTANTE sobre a secção 4 abaixo:
+-- Essa query PROPOSITALMENTE exclui company_id = 6 — só serve para encontrar
+-- o mesmo instance_id a ir parar a OUTRA empresa (conflito). NÃO significa
+-- que a empresa 6 está bloqueada. Se a secção 2 mostra muitos "processed"
+-- para company_id = 6, o webhook já está a mapear bem para a 6.
+
+-- ---------------------------------------------------------------------------
+-- 0) Duplicados em empresa_zapi (causa clássica de mensagens “no sítio errado”)
+--    Ver também: scripts/empresa-zapi-instancia-duplicada.sql
+-- ---------------------------------------------------------------------------
+SELECT instance_id, COUNT(*) AS linhas_ativas, array_agg(company_id ORDER BY company_id) AS companies
+FROM public.empresa_zapi
+WHERE ativo = true
+  AND (
+    instance_id IN ('instance89002', '89002')
+    OR instance_id ILIKE '%89002%'
+  )
+GROUP BY instance_id
+HAVING COUNT(*) > 1;
 
 -- ---------------------------------------------------------------------------
 -- 1) Últimos webhooks mapeados para company_id = 6
@@ -65,8 +85,9 @@ ORDER BY criado_em DESC
 LIMIT 100;
 
 -- ---------------------------------------------------------------------------
--- 4) Eventos com instance89002 mas company_id diferente de 6 ou NULL
---    (token 401, instance não mapeada, ou duplicidade de instance_id)
+-- 4) OPCIONAL — só para achar CONFLITO: mesmo instance_id com company_id ≠ 6 ou NULL
+--    (ex.: token inválido antes do mapa, ou instância mapeada a outra empresa)
+--    Não use esta query para medir se a empresa 6 “recebe” — use a secção 1 ou 2.
 -- ---------------------------------------------------------------------------
 SELECT
   id,

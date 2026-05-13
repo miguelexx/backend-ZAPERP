@@ -65,24 +65,40 @@ async function getCompanyIdByInstanceId(instanceId) {
   const id = instanceId == null ? '' : String(instanceId).trim()
   if (!id) return null
 
-  /** Uma linha ou nenhuma — evita erro do PostgREST quando há duplicatas ativas com o mesmo instance_id */
+  /**
+   * Escolhe uma empresa quando há várias linhas ativas com o mesmo instance_id.
+   * Antes: order('company_id').limit(1) → sempre o menor company_id (ex.: 2 "roubava" a 6).
+   * Agora: quem atualizou a config por último em empresa_zapi (atualizado_em) — alinha com a instância real no painel.
+   */
   async function firstCompanyByQuery(qb) {
-    const { data: rows, error } = await qb.order('company_id', { ascending: true }).limit(1)
+    const { data: rows, error } = await qb
+      .order('atualizado_em', { ascending: false, nullsFirst: false })
+      .order('company_id', { ascending: false })
+      .limit(2)
     if (error) {
       console.error('[WHATSAPP-CONFIG] Erro ao buscar company_id por instance_id:', error.message)
       return null
+    }
+    if (rows && rows.length > 1) {
+      const ids = rows.map((r) => r.company_id).filter((x) => x != null)
+      console.warn('[WHATSAPP-CONFIG] instance_id duplicado em empresa_zapi (ativo):', {
+        instanceId: id.slice(0, 48),
+        company_ids: ids,
+        usando_company_id: ids[0],
+        hint: 'Desative (ativo=false) linhas antigas ou instâncias erradas até ficar uma só por instance_id.',
+      })
     }
     const cid = rows?.[0]?.company_id
     return cid != null ? Number(cid) : null
   }
 
   let cid = await firstCompanyByQuery(
-    supabase.from('empresa_zapi').select('company_id').eq('instance_id', id).eq('ativo', true)
+    supabase.from('empresa_zapi').select('company_id, atualizado_em').eq('instance_id', id).eq('ativo', true)
   )
   if (cid != null) return cid
 
   cid = await firstCompanyByQuery(
-    supabase.from('empresa_zapi').select('company_id').eq('ativo', true).ilike('instance_id', id)
+    supabase.from('empresa_zapi').select('company_id, atualizado_em').eq('ativo', true).ilike('instance_id', id)
   )
   if (cid != null) return cid
 
@@ -90,14 +106,14 @@ async function getCompanyIdByInstanceId(instanceId) {
   if (/^\d+$/.test(id)) {
     const altId = `instance${id}`
     cid = await firstCompanyByQuery(
-      supabase.from('empresa_zapi').select('company_id').eq('instance_id', altId).eq('ativo', true)
+      supabase.from('empresa_zapi').select('company_id, atualizado_em').eq('instance_id', altId).eq('ativo', true)
     )
     if (cid != null) return cid
   } else if (id.toLowerCase().startsWith('instance') && id.length > 8) {
     const numericPart = id.replace(/\D/g, '')
     if (numericPart) {
       cid = await firstCompanyByQuery(
-        supabase.from('empresa_zapi').select('company_id').eq('instance_id', numericPart).eq('ativo', true)
+        supabase.from('empresa_zapi').select('company_id, atualizado_em').eq('instance_id', numericPart).eq('ativo', true)
       )
       if (cid != null) return cid
     }
