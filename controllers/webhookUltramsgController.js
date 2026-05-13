@@ -318,6 +318,12 @@ async function handleWebhookUltramsg(req, res) {
       return webhookCoreController.receberZapi(req, res)
     }
 
+    console.warn('[WEBHOOK_ULTRAMSG] evento não encaminhado ao pipeline de mensagens', {
+      company_id: ctx.company_id,
+      event_type: eventType || '(vazio)',
+      hasMessageData,
+      bodyKeys: Object.keys(body || {}).slice(0, 20),
+    })
     return res.status(200).json({ ok: true })
   } catch (e) {
     const errMsg = e?.message || String(e)
