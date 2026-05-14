@@ -763,6 +763,24 @@ async function mensagemInseridaEhPrimeiraDisparoWhatsappExterno(supabaseClient, 
   }
 }
 
+/** True se já existir mensagem inbound na conversa (histórico importado ou respostas do cliente). */
+async function conversaTemAlgumaMensagemInbound(supabaseClient, company_id, conversa_id) {
+  if (!supabaseClient || company_id == null || conversa_id == null) return false
+  try {
+    const { count, error } = await supabaseClient
+      .from('mensagens')
+      .select('id', { count: 'exact', head: true })
+      .eq('company_id', company_id)
+      .eq('conversa_id', conversa_id)
+      .eq('direcao', 'in')
+    if (error) return false
+    return Number(count || 0) > 0
+  } catch (e) {
+    console.warn('[webhook] conversaTemAlgumaMensagemInbound:', e?.message || e)
+    return false
+  }
+}
+
 exports.receberZapi = async (req, res) => {
   try {
     const body = req.body || {}
@@ -2706,6 +2724,14 @@ exports.receberZapi = async (req, res) => {
             mensagemSalva.id
           )
           if (ehPrimeiraDisparoExterno) {
+            const temInboundHistorico = await conversaTemAlgumaMensagemInbound(
+              supabase,
+              company_id,
+              convIdForUpdate
+            )
+            if (temInboundHistorico) {
+              // Já há fala do cliente no histórico: não tratar como disparo isolado (import/sync ou estado inconsistente).
+            } else {
             const { data: convSt } = await supabase
               .from('conversas')
               .select('status_atendimento, atendente_id')
@@ -2732,6 +2758,7 @@ exports.receberZapi = async (req, res) => {
                 .eq('company_id', company_id)
                 .in('status_atendimento', ['aberta', 'mensagem_disparada', 'fechada', 'finalizada'])
                 .is('atendente_id', null)
+            }
             }
           }
         } catch (e) {

@@ -644,6 +644,22 @@ exports.listarConversas = async (req, res) => {
         ? String(status_atendimento).toLowerCase().trim()
         : null
 
+    let separarMensagensDisparadasEmpresa = false
+    try {
+      const { data: empSep } = await supabase
+        .from('empresas')
+        .select('separar_mensagens_disparadas')
+        .eq('id', company_id)
+        .maybeSingle()
+      separarMensagensDisparadasEmpresa = !!empSep?.separar_mensagens_disparadas
+    } catch (_) {}
+
+    if (statusNorm === 'mensagem_disparada' && !separarMensagensDisparadasEmpresa) {
+      if (!incluirColaboradoresEncaminhar) return res.json([])
+      const colaboradores_encaminhar = await loadColaboradoresEncaminhar()
+      return res.json({ conversas: [], colaboradores_encaminhar })
+    }
+
     /** Inteiro positivo (usuarios.id). UUID não é coluna de atendente_id na conversa — rejeitar valores não inteiros. */
     let filtroAtendenteInformado = null
     if (atendente_id != null && String(atendente_id).trim() !== '') {
@@ -865,8 +881,8 @@ exports.listarConversas = async (req, res) => {
       if (conversaIdsFilter && conversaIdsFilter.length > 0) {
         q = q.in('id', conversaIdsFilter)
       }
-      // Mensagens disparadas: só aparecem com filtro explícito status_atendimento=mensagem_disparada.
-      if (!minhaFilaAtiva && !aguardandoClienteAtivo && !statusNorm) {
+      // Mensagens disparadas: fora da listagem geral quando sem filtro de status; se a empresa desligou a opção, nunca misturar esse status nas demais queries.
+      if (!minhaFilaAtiva && !aguardandoClienteAtivo && (!statusNorm || !separarMensagensDisparadasEmpresa)) {
         q = q.or('tipo.eq.grupo,status_atendimento.neq.mensagem_disparada,status_atendimento.is.null')
       }
       // Filtro personalizado "Minha fila": abertas (fila) + em atendimento só comigo; sem grupos; sem finalizadas
@@ -1135,6 +1151,38 @@ exports.listarConversas = async (req, res) => {
     // Um contato = uma conversa na lista (evita duplicata 55... vs 11...); conversas mais recentes no topo
     conversasFormatadas = deduplicateConversationsByContact(conversasFormatadas)
     conversasFormatadas = sortConversationsByRecent(conversasFormatadas)
+
+    // Aba "Mensagens disparadas": omitir conversas com resposta inbound já no histórico (dados inconsistentes).
+    if (statusNorm === 'mensagem_disparada' && Array.isArray(conversasFormatadas) && conversasFormatadas.length > 0) {
+      const convIds = [
+        ...new Set(
+          conversasFormatadas.map((c) => Number(c.id)).filter((n) => Number.isFinite(n) && n > 0)
+        ),
+      ]
+      if (convIds.length > 0) {
+        const comInbound = new Set()
+        const chunkSize = 300
+        for (let i = 0; i < convIds.length; i += chunkSize) {
+          const slice = convIds.slice(i, i + chunkSize)
+          const { data: inboundRows, error: inboundErr } = await supabase
+            .from('mensagens')
+            .select('conversa_id')
+            .eq('company_id', company_id)
+            .in('conversa_id', slice)
+            .eq('direcao', 'in')
+          if (inboundErr) {
+            console.warn('[listarConversas] filtro disparada+inbound:', inboundErr.message || inboundErr)
+            break
+          }
+          for (const row of inboundRows || []) {
+            if (row?.conversa_id != null) comInbound.add(Number(row.conversa_id))
+          }
+        }
+        if (comInbound.size > 0) {
+          conversasFormatadas = conversasFormatadas.filter((c) => !comInbound.has(Number(c.id)))
+        }
+      }
+    }
 
     if (filtroAtendenteInformado != null && !isAtendente) {
       conversasFormatadas = conversasFormatadas.filter((c) => !c.is_group && !c.sem_conversa)

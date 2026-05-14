@@ -8,8 +8,17 @@ exports.getMe = async (req, res) => {
   try {
     const { id: user_id, company_id } = req.user
     let crm_habilitado = true
+    let separar_mensagens_disparadas = false
     try {
       crm_habilitado = await empresaCrmHabilitada(company_id)
+    } catch (_) {}
+    try {
+      const { data: empFlags } = await supabase
+        .from('empresas')
+        .select('separar_mensagens_disparadas')
+        .eq('id', company_id)
+        .maybeSingle()
+      separar_mensagens_disparadas = !!empFlags?.separar_mensagens_disparadas
     } catch (_) {}
     let { data, error } = await supabase
       .from('usuarios')
@@ -23,7 +32,7 @@ exports.getMe = async (req, res) => {
       error = res2.error
       if (error) return res.status(500).json({ error: error.message })
       if (!data) return res.status(404).json({ error: 'Usuário não encontrado' })
-      return res.json({ ...data, mostrar_nome_ao_cliente: true, crm_habilitado })
+      return res.json({ ...data, mostrar_nome_ao_cliente: true, crm_habilitado, separar_mensagens_disparadas })
     }
     if (error) return res.status(500).json({ error: error.message })
     if (!data) return res.status(404).json({ error: 'Usuário não encontrado' })
@@ -34,6 +43,7 @@ exports.getMe = async (req, res) => {
       departamento_ids,
       mostrar_nome_ao_cliente: data.mostrar_nome_ao_cliente !== false,
       crm_habilitado,
+      separar_mensagens_disparadas,
     })
   } catch (err) {
     console.error(err)
@@ -406,8 +416,17 @@ exports.login = async (req, res) => {
     )
 
     let crm_habilitado = true
+    let separar_mensagens_disparadas = false
     try {
       crm_habilitado = await empresaCrmHabilitada(Number(usuario.company_id))
+    } catch (_) {}
+    try {
+      const { data: empFlags } = await supabase
+        .from('empresas')
+        .select('separar_mensagens_disparadas')
+        .eq('id', usuario.company_id)
+        .maybeSingle()
+      separar_mensagens_disparadas = !!empFlags?.separar_mensagens_disparadas
     } catch (_) {}
 
     // Retorna token e dados do usuário (nome para exibição no cabeçalho)
@@ -422,7 +441,8 @@ exports.login = async (req, res) => {
         departamento_id,
         departamento_ids,
         crm_habilitado,
-      }
+        separar_mensagens_disparadas,
+      },
     })
   } catch (err) {
     console.error('ERRO LOGIN:', err)
