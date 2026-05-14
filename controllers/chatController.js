@@ -1245,10 +1245,11 @@ exports.listarConversas = async (req, res) => {
     }
 
     // Incluir todos os clientes: quem não tem conversa aparece como "Sem conversa" (clicável para abrir)
-    // Ao filtrar "Abertas", não incluir sem_conversa (não há conversa aberta)
+    // Não misturar "sem conversa" em filtros por estado de atendimento (aberta / disparada / etc.).
     const incluirTodos =
       (incluirTodosClientesAtivo || incluirTodosClientesDefault) &&
       statusNorm !== 'aberta' &&
+      statusNorm !== 'mensagem_disparada' &&
       !minhaFilaAtiva &&
       !aguardandoClienteAtivo &&
       !(filtroAtendenteInformado != null && !isAtendente)
@@ -1319,6 +1320,17 @@ exports.listarConversas = async (req, res) => {
         const ta = a.ultima_atividade || a.criado_em || ''
         const tb = b.ultima_atividade || b.criado_em || ''
         return new Date(tb) - new Date(ta)
+      })
+    }
+
+    // Mensagens disparadas: só linhas de conversa reais com pelo menos uma mensagem (nunca "sem conversa" / vazias).
+    if (statusNorm === 'mensagem_disparada') {
+      conversasFormatadas = conversasFormatadas.filter((c) => {
+        if (c.sem_conversa || c.id == null) return false
+        const temMsg =
+          (Array.isArray(c.mensagens) && c.mensagens.length > 0) ||
+          (c.ultima_mensagem != null && typeof c.ultima_mensagem === 'object')
+        return temMsg
       })
     }
 
