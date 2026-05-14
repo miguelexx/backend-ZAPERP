@@ -15,6 +15,7 @@ const {
   finalizeAbsenceForConversaIds,
   CONFIRM_FINALIZE_ABSENCE,
 } = require('../services/absenceFinalizationService')
+const { processCompanyAdminAlert } = require('../services/adminAtendimentoAlertaService')
 
 function timingSafeEqualStr(a, b) {
   const sa = String(a ?? '')
@@ -323,6 +324,57 @@ exports.finalizacaoAusenciaLote = async (req, res) => {
     return res.json(result)
   } catch (err) {
     console.error('finalizacaoAusenciaLote:', err)
+    return res.status(500).json({ error: err.message })
+  }
+}
+
+/**
+ * POST /jobs/admin-atendimento-alerta
+ * Envia resumo diário ao número configurado (UltraMSG), por empresa, no horário + fuso do chatbot.
+ * Idempotente via tabela admin_atendimento_alerta_envios. Recomenda-se cron a cada 1–3 minutos.
+ */
+exports.adminAtendimentoAlerta = async (req, res) => {
+  try {
+    const { data: rows, error } = await supabase.from('ia_config').select('company_id, config')
+    if (error) {
+      console.warn('[adminAtendimentoAlerta job] select ia_config:', error.message)
+      return res.status(500).json({ error: error.message })
+    }
+    if (!rows?.length) {
+      return res.json({ ok: true, processadas: 0, mensagem: 'Nenhuma empresa com ia_config' })
+    }
+
+    const { getProvider } = require('../services/providers')
+    const provider = getProvider()
+
+    let processadas = 0
+    let enviadas = 0
+    const detalhes = []
+
+    for (const row of rows) {
+      const company_id = row.company_id
+      const cfg = row.config || {}
+      const alert = cfg.admin_atendimento_alerta
+      if (!alert?.ativo) continue
+
+      processadas++
+      const r = await processCompanyAdminAlert({
+        company_id,
+        fullConfig: cfg,
+        provider,
+      })
+      detalhes.push({ company_id, ...r })
+      if (r?.sent) enviadas++
+    }
+
+    return res.json({
+      ok: true,
+      empresas_com_alerta_ativo: processadas,
+      enviadas,
+      detalhes,
+    })
+  } catch (err) {
+    console.error('adminAtendimentoAlerta:', err)
     return res.status(500).json({ error: err.message })
   }
 }

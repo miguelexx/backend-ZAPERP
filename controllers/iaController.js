@@ -5,6 +5,10 @@ const {
   normalizeChatbotTriageStrings,
   invalidateChatbotConfigCache,
 } = require('../services/chatbotTriageService')
+const {
+  DEFAULT_ADMIN_ATENDIMENTO_ALERTA,
+  normalizeAdminAtendimentoAlerta,
+} = require('../services/adminAtendimentoAlertaService')
 
 const DEFAULT_CONFIG = {
   chatbot_triage: {
@@ -67,6 +71,7 @@ const DEFAULT_CONFIG = {
     auto_assumir: false,
     reabrir_automaticamente: false,
   },
+  admin_atendimento_alerta: { ...DEFAULT_ADMIN_ATENDIMENTO_ALERTA },
 }
 
 // GET /ia/config — retorna config mesclada; se tabela não existir, retorna defaults
@@ -94,6 +99,7 @@ exports.getConfig = async (req, res) => {
         roteamento: DEFAULT_CONFIG.roteamento,
         ia: DEFAULT_CONFIG.ia,
         automacoes: DEFAULT_CONFIG.automacoes,
+        admin_atendimento_alerta: DEFAULT_CONFIG.admin_atendimento_alerta,
       })
     }
     const config = data?.config ?? {}
@@ -106,6 +112,10 @@ exports.getConfig = async (req, res) => {
       roteamento: { ...DEFAULT_CONFIG.roteamento, ...(config.roteamento || {}) },
       ia: { ...DEFAULT_CONFIG.ia, ...(config.ia || {}) },
       automacoes: { ...DEFAULT_CONFIG.automacoes, ...(config.automacoes || {}) },
+      admin_atendimento_alerta: normalizeAdminAtendimentoAlerta({
+        ...DEFAULT_ADMIN_ATENDIMENTO_ALERTA,
+        ...(config.admin_atendimento_alerta || {}),
+      }),
     }
     // Config por tenant — evita browser/proxy servir JSON antigo após novo login ou troca de empresa.
     res.set('Cache-Control', 'private, no-store, must-revalidate')
@@ -119,6 +129,7 @@ exports.getConfig = async (req, res) => {
       roteamento: DEFAULT_CONFIG.roteamento,
       ia: DEFAULT_CONFIG.ia,
       automacoes: DEFAULT_CONFIG.automacoes,
+      admin_atendimento_alerta: DEFAULT_CONFIG.admin_atendimento_alerta,
     })
   }
 }
@@ -127,7 +138,8 @@ exports.getConfig = async (req, res) => {
 exports.putConfig = async (req, res) => {
   try {
     const { company_id } = req.user
-    const { chatbot_triage: ctBody, bot_global, roteamento, ia, automacoes } = req.body
+    const { chatbot_triage: ctBody, bot_global, roteamento, ia, automacoes, admin_atendimento_alerta: adminBody } =
+      req.body
 
     const { data: existing } = await supabase
       .from('ia_config')
@@ -139,12 +151,20 @@ exports.putConfig = async (req, res) => {
     const ctMerged = { ...DEFAULT_CONFIG.chatbot_triage, ...(current.chatbot_triage || {}), ...(ctBody || {}) }
     const ctValid = validateChatbotConfig(ctMerged) || normalizeChatbotTriageStrings(ctMerged)
     const merged = {
+      ...current,
       chatbot_triage: ctValid,
       bot_global: { ...DEFAULT_CONFIG.bot_global, ...current.bot_global, ...(bot_global || {}) },
       roteamento: { ...DEFAULT_CONFIG.roteamento, ...current.roteamento, ...(roteamento || {}) },
       ia: { ...DEFAULT_CONFIG.ia, ...current.ia, ...(ia || {}) },
       automacoes: { ...DEFAULT_CONFIG.automacoes, ...current.automacoes, ...(automacoes || {}) },
     }
+    const adminPatch =
+      adminBody !== undefined && adminBody !== null && typeof adminBody === 'object' ? adminBody : {}
+    merged.admin_atendimento_alerta = normalizeAdminAtendimentoAlerta({
+      ...DEFAULT_ADMIN_ATENDIMENTO_ALERTA,
+      ...(current.admin_atendimento_alerta || {}),
+      ...adminPatch,
+    })
 
     const { data, error } = await supabase
       .from('ia_config')

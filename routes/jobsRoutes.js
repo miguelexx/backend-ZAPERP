@@ -9,6 +9,7 @@ router.post('/timeout-inatividade', jobsController.checkCronSecret, jobsControll
 router.post('/timeout-inatividade-chatbot', jobsController.checkCronSecret, jobsController.timeoutInatividadeChatbot)
 router.post('/finalizacao-ausencia-cliente', jobsController.checkCronSecret, jobsController.finalizacaoAusenciaCliente)
 router.post('/finalizacao-ausencia-lote', jobsController.checkCronSecret, jobsController.finalizacaoAusenciaLote)
+router.post('/admin-atendimento-alerta', jobsController.checkCronSecret, jobsController.adminAtendimentoAlerta)
 
 // Operacional: requer auth + supervisor/admin
 const operacionalRouter = express.Router()
