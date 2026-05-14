@@ -25,6 +25,10 @@ const { resolvePeerPhone } = require('../helpers/conversationKeyHelper')
 const { incrementarUnreadParaConversa, emitirParaUsuariosQuePodemVerConversa } = require('./chatController')
 const { normalizarTimestampSemFusoAmbiguoParaApi } = require('../helpers/timestampApiCompat')
 const { scheduleInboundWebPush } = require('../services/webPushDispatchService')
+const {
+  schedulePersistInboundMediaIfNeeded,
+  tipoQualificaPersistencia,
+} = require('../services/inboundMediaPersistenceService')
 
 const {
   processIncomingMessage: processChatbotTriage,
@@ -2657,6 +2661,24 @@ exports.receberZapi = async (req, res) => {
     }
 
     if (mensagemSalva) {
+      // Mídia remota (UltraMSG/S3): copiar para /uploads em background para não depender de URL com TTL curto.
+      const mPersist = mensagemSalva
+      if (
+        mPersist?.id &&
+        mPersist?.url &&
+        String(mPersist.url).startsWith('https://') &&
+        tipoQualificaPersistencia(mPersist.tipo)
+      ) {
+        schedulePersistInboundMediaIfNeeded({
+          supabase,
+          io: req.app.get('io'),
+          company_id,
+          mensagem_id: mPersist.id,
+          fromMe,
+          departamento_id,
+        })
+      }
+
       // Usar conversa_id da mensagem quando idempotência retornou existente de outra conversa
       const convIdForUpdate = mensagemSalva.conversa_id ?? conversa_id
       const nowIsoUpdate = new Date().toISOString()
@@ -2872,9 +2894,22 @@ exports.receberZapi = async (req, res) => {
                   }
                 }
 
-                const { error: histErr } = await supabase.from('mensagens').insert(insertMsg)
+                const { data: histRow, error: histErr } = await supabase
+                  .from('mensagens')
+                  .insert(insertMsg)
+                  .select(WEBHOOK_MSG_SELECT)
+                  .single()
                 if (histErr && String(histErr.code || '') !== '23505') {
                   console.warn('⚠️ Histórico Z-API: falha ao inserir msg:', String(histErr.message || '').slice(0, 120))
+                } else if (!histErr && histRow?.id && histRow.url && String(histRow.url).startsWith('https://') && tipoQualificaPersistencia(histRow.tipo)) {
+                  schedulePersistInboundMediaIfNeeded({
+                    supabase,
+                    io: req.app.get('io'),
+                    company_id,
+                    mensagem_id: histRow.id,
+                    fromMe: !!ex.fromMe,
+                    departamento_id: null,
+                  })
                 }
               }
             } catch (e) {

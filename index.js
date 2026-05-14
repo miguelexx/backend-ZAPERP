@@ -295,5 +295,7 @@ server.listen(PORT, '0.0.0.0', () => {
     console.log('[WORKER] Job worker iniciado (polling a cada 5s)')
     startAbsenceFinalizationScheduler()
     startProdutosSyncScheduler()
+    const { startInboundMediaRetryScheduler } = require('./services/inboundMediaPersistenceService')
+    startInboundMediaRetryScheduler(supabase, io)
   }
 })

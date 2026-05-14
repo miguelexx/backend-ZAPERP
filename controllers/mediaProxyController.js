@@ -3,42 +3,9 @@
  * baixar bytes com autenticação sem depender de CORS no bucket externo.
  */
 
+const { isAllowedInboundMediaUrl: isAllowedMediaUrl } = require('../helpers/allowedInboundMediaUrl')
+
 const MAX_BYTES = 80 * 1024 * 1024 // 80 MB (impressão / preview)
-
-/**
- * @param {URL} u
- * @returns {boolean}
- */
-function isAllowedMediaUrl(u) {
-  if (u.protocol !== 'https:') return false
-  const host = u.hostname.toLowerCase()
-
-  if (
-    host === 'localhost' ||
-    host === '127.0.0.1' ||
-    /^169\.254\./.test(host) ||
-    /^10\./.test(host) ||
-    /^192\.168\./.test(host) ||
-    /^172\.(1[6-9]|2[0-9]|3[0-1])\./.test(host)
-  ) {
-    return false
-  }
-
-  if (host.endsWith('.amazonaws.com')) {
-    const path = u.pathname
-    if (path.includes('/ultramsgmedia/')) return true
-    if (host.startsWith('ultramsgmedia.')) return true
-    return false
-  }
-
-  const extra = String(process.env.MEDIA_PROXY_EXTRA_HOSTS || '')
-    .split(',')
-    .map((s) => s.trim().toLowerCase())
-    .filter(Boolean)
-  if (extra.length && extra.includes(host)) return true
-
-  return false
-}
 
 /**
  * GET /media/proxy?url=<https...>
