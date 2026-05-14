@@ -563,7 +563,7 @@ exports.obterUsuarioIdsQuePodemVerConversa = obterUsuarioIdsQuePodemVerConversa
 
 // =====================================================
 // 3) listarConversas (com unread_count + pesquisa avançada)
-// Query: tag_id, data_inicio, data_fim, status_atendimento, atendente_id, palavra, minha_fila, aguardando_cliente, tempo_parado
+// Query: tag_id, data_inicio, data_fim, status_atendimento, atendente_id, palavra, minha_fila, aguardando_cliente, tempo_parado, finalizacao_motivo (ex.: ausencia_cliente — filtra com status fechada)
 // minha_fila=1: só conversas (não grupo) em aberta (fila visível) + em_atendimento onde o responsável é o usuário logado
 // aguardando_cliente=1: só conversas “aguardando” em que o atendente responsável é o usuário logado (organização por atendente).
 //   Admin/supervisor pode combinar com atendente_id=<id> para ver a fila de outro colaborador (mesmo critério do restante da API).
@@ -588,7 +588,13 @@ exports.listarConversas = async (req, res) => {
       incluir_colaboradores_encaminhar: incluirColabEncRaw,
       aguardando_cliente: aguardandoClienteRaw,
       tempo_parado: tempoParadoRaw,
+      finalizacao_motivo: finalizacaoMotivoRaw,
     } = req.query
+
+    const filtroAusenciaLista =
+      String(finalizacaoMotivoRaw ?? '')
+        .trim()
+        .toLowerCase() === 'ausencia_cliente'
 
     const TEMPO_PARADO_HORAS = {
       '2h': 2,
@@ -792,6 +798,9 @@ exports.listarConversas = async (req, res) => {
       foto_grupo,
       nome_contato_cache,
       foto_perfil_contato_cache,
+      finalizacao_motivo,
+      finalizada_automaticamente,
+      finalizada_automaticamente_em,
       clientes!conversas_cliente_fk ( id, nome, pushname, telefone, foto_perfil, company_id ),
       atendente:usuarios!conversas_atendente_id_fkey ( id, nome, email ),
       departamentos ( id, nome ),
@@ -813,6 +822,9 @@ exports.listarConversas = async (req, res) => {
       status_atendimento,
       atendente_id,
       aguardando_cliente_desde,
+      finalizacao_motivo,
+      finalizada_automaticamente,
+      finalizada_automaticamente_em,
       lida,
       criado_em,
       departamento_id,
@@ -851,6 +863,9 @@ exports.listarConversas = async (req, res) => {
       foto_grupo,
       nome_contato_cache,
       foto_perfil_contato_cache,
+      finalizacao_motivo,
+      finalizada_automaticamente,
+      finalizada_automaticamente_em,
       clientes!conversas_cliente_fk ( id, nome, pushname, telefone, foto_perfil, company_id ),
       atendente:usuarios!conversas_atendente_id_fkey ( id, nome, email ),
       departamentos ( id, nome ),
@@ -934,6 +949,11 @@ exports.listarConversas = async (req, res) => {
       if (tempoParadoHoras != null) {
         const limiteParado = new Date(Date.now() - tempoParadoHoras * 3600000).toISOString()
         q = q.not('aguardando_cliente_desde', 'is', null).lte('aguardando_cliente_desde', limiteParado)
+      }
+
+      // Aba "Por ausência" (GET com finalizacao_motivo=ausencia_cliente + status fechada): só conversas encerradas por ausência / auto.
+      if (filtroAusenciaLista) {
+        q = q.or('finalizacao_motivo.eq.ausencia_cliente,finalizada_automaticamente.eq.true')
       }
 
       // PERFORMANCE: a lista de conversas só precisa da ÚLTIMA mensagem (preview).
@@ -1144,7 +1164,10 @@ exports.listarConversas = async (req, res) => {
         tags: (c.conversa_tags || []).map((ct) => ct?.tags).filter(Boolean),
         unread_count: unreadCount,
         sem_mensagens: !temMensagem,
-        exibir_cta_assumir_sem_mensagens
+        exibir_cta_assumir_sem_mensagens,
+        finalizacao_motivo: c.finalizacao_motivo ?? null,
+        finalizada_automaticamente: Boolean(c.finalizada_automaticamente),
+        finalizada_automaticamente_em: c.finalizada_automaticamente_em ?? null,
       }
     })
 
