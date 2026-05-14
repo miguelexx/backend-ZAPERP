@@ -733,6 +733,33 @@ function hasDestFields(payload) {
   return dest.some(v => v != null && String(v).trim() !== '')
 }
 
+/**
+ * True se já existir mensagem inbound (cliente) na conversa.
+ * Usado para não classificar como mensagem_disparada atendimentos normais ou conversas iniciadas pelo cliente.
+ * Em erro de consulta, retorna true (conservador: não promove a disparada).
+ */
+async function conversaJaTemMensagemInboundCliente(supabaseClient, company_id, conversa_id) {
+  if (!supabaseClient || company_id == null || conversa_id == null) return true
+  try {
+    const { data, error } = await supabaseClient
+      .from('mensagens')
+      .select('id')
+      .eq('company_id', company_id)
+      .eq('conversa_id', conversa_id)
+      .eq('direcao', 'in')
+      .limit(1)
+      .maybeSingle()
+    if (error) {
+      console.warn('[webhook] conversaJaTemMensagemInboundCliente:', error?.message || error)
+      return true
+    }
+    return Boolean(data?.id)
+  } catch (e) {
+    console.warn('[webhook] conversaJaTemMensagemInboundCliente exceção:', e?.message || e)
+    return true
+  }
+}
+
 exports.receberZapi = async (req, res) => {
   try {
     const body = req.body || {}
@@ -2749,8 +2776,27 @@ exports.receberZapi = async (req, res) => {
         }
       } catch (_) {}
 
+      // Cliente respondeu: sair de mensagem_disparada → aberta (após persistir a inbound; não altera se insert falhou antes).
+      if (!fromMe && separarMensagensDisparadasEmpresa && !isGroup) {
+        try {
+          await supabase
+            .from('conversas')
+            .update({
+              status_atendimento: 'aberta',
+              departamento_id: null,
+              atendente_id: null,
+              atendente_atribuido_em: null,
+            })
+            .eq('id', convIdForUpdate)
+            .eq('company_id', company_id)
+            .eq('status_atendimento', 'mensagem_disparada')
+        } catch (e) {
+          console.warn('[webhook] mensagem_disparada→aberta (resposta cliente):', e?.message || e)
+        }
+      }
+
       // Opcional por empresa: espelhamento fromMe inserido pelo webhook (sem autor_usuario_id = fora do CRM)
-      // → status mensagem_disparada (não fica na fila "Abertas"). Não altera conversa já assumida ou em atendimento.
+      // → mensagem_disparada APENAS se o cliente nunca iniciou a conversa (sem inbound) e o estado não é fila "Abertas" nem atendimento.
       if (
         separarMensagensDisparadasEmpresa &&
         fromMe &&
@@ -2759,27 +2805,37 @@ exports.receberZapi = async (req, res) => {
         mensagemSalva.autor_usuario_id == null
       ) {
         try {
-          const { data: convSt } = await supabase
-            .from('conversas')
-            .select('status_atendimento, atendente_id')
-            .eq('id', convIdForUpdate)
-            .eq('company_id', company_id)
-            .maybeSingle()
-          const st = String(convSt?.status_atendimento || '')
-          const aid = convSt?.atendente_id
-          if ((st === 'aberta' || st === 'mensagem_disparada') && (aid == null || aid === '')) {
-            await supabase
+          const jaClienteFalou = await conversaJaTemMensagemInboundCliente(supabase, company_id, convIdForUpdate)
+          if (!jaClienteFalou) {
+            const { data: convSt } = await supabase
               .from('conversas')
-              .update({
-                status_atendimento: 'mensagem_disparada',
-                departamento_id: null,
-                atendente_id: null,
-                atendente_atribuido_em: null,
-              })
+              .select('status_atendimento, atendente_id')
               .eq('id', convIdForUpdate)
               .eq('company_id', company_id)
-              .in('status_atendimento', ['aberta', 'mensagem_disparada'])
-              .is('atendente_id', null)
+              .maybeSingle()
+            const st = String(convSt?.status_atendimento || '')
+            const aid = convSt?.atendente_id
+            const semAtendente = aid == null || aid === ''
+            if (!semAtendente) {
+              // assumida — não reclassificar
+            } else if (st === 'em_atendimento' || st === 'aguardando_cliente') {
+              // já em fluxo de atendimento humano/aguardando
+            } else if (st === 'aberta') {
+              // já na fila Abertas — não promover (evita pegar conversas normais com outbound pelo celular)
+            } else if (st === 'mensagem_disparada' || st === 'fechada' || st === 'finalizada') {
+              await supabase
+                .from('conversas')
+                .update({
+                  status_atendimento: 'mensagem_disparada',
+                  departamento_id: null,
+                  atendente_id: null,
+                  atendente_atribuido_em: null,
+                })
+                .eq('id', convIdForUpdate)
+                .eq('company_id', company_id)
+                .in('status_atendimento', ['mensagem_disparada', 'fechada', 'finalizada'])
+                .is('atendente_id', null)
+            }
           }
         } catch (e) {
           console.warn('[webhook] separar_mensagens_disparadas:', e?.message || e)
