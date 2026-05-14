@@ -86,6 +86,14 @@ function shouldReopenFinishedConversation(message, context = {}) {
     /^(ok|okay|blz|beleza|certo|entendi|entendido|perfeito|show|sim|nao|não|ta|t[áa])$/,
     /^(obrigad[oa]|muito obrigad[oa]|valeu|vlw|obg|brigad[oa]|obgd|agrade[cç]o|grat[oa]|thanks|thank you|ty|thx)$/,
     /^(obrigad[oa] pela ajuda|muito obrigad[oa] pela ajuda)$/,
+    // Agradecimento + vocativo / reforço curto (ex.: "obrigada vc", "valeu voce", "brigada tbm") — não reabrir menu
+    /^obrigad[oa]\s+(vc|voce|tbm|tb|tambem|demais|tbem)(\s+(vc|voce|tbm|tb|tambem))?$/,
+    /^muito\s+obrigad[oa]\s+(vc|voce|tbm|tb|tambem|demais)?$/,
+    /^obrigad[oa]\s+(a|pra|para)\s+(vc|voce)$/,
+    /^brigad[oa]\s+(vc|voce|tbm|tb|tambem)?$/,
+    /^valeu\s+(vc|voce|tbm|tb|tambem|demais)$/,
+    /^vlw\s+(vc|voce|tbm|tb)?$/,
+    /^obg\s+(vc|voce|tbm|tb|demais)?$/,
     /^(tchau|xau|ate mais|ate logo|ate breve|flw|falou)$/,
     /^(so|só) isso[!., ]*$/,
     /^(nada mais|era (so|só) isso)[!. ]*$/,
@@ -100,6 +108,24 @@ function shouldReopenFinishedConversation(message, context = {}) {
 
   if (stayClosedPatterns.some((rx) => rx.test(compact))) {
     return { shouldReopen: false, reason: 'thanks_or_closing_ack', normalized }
+  }
+
+  // Frase curta só de cortesia: poucas palavras conhecidas, sem sinais de nova demanda
+  const palavrasCortesia = new Set([
+    'ok', 'okay', 'blz', 'beleza', 'certo', 'entendi', 'entendido', 'perfeito', 'show', 'sim', 'nao', 'ta', 'obrigada', 'obrigado',
+    'muito', 'valeu', 'vlw', 'obg', 'brigada', 'brigado', 'obgd', 'agradeco', 'grato', 'grata', 'thanks', 'thank', 'you', 'ty', 'thx',
+    'tchau', 'xau', 'ate', 'mais', 'logo', 'breve', 'flw', 'falou', 'vc', 'voce', 'tbm', 'tb', 'tambem', 'demais',
+    'tbem', 'pra', 'para', 'a', 'igualmente', 'disponha', 'imagina', 'de', 'nada', 'por', 'tudo', 'pela', 'pelo',
+    'atencao', 'atendimento', 'preferencia', 'carinho', 'ajuda', 'info',
+  ])
+  const sinaisDemanda =
+    /\b(preciso|precisar|precisa|quero|gostaria|poderia|pode\s+me|d[uú]vida|problema|reclama|cancelar|devolver|trocar|defeito|or[çc]amento|orcamento|pedido|entrega|atraso|valor|pre[çc]o|preco|como\s+(fa[çc]o|posso|fazer)|onde|quando|urgente)\b/i
+  const tokens = compact.split(/\s+/).filter(Boolean)
+  if (tokens.length > 0 && tokens.length <= 6 && compact.length <= 72 && !sinaisDemanda.test(compact)) {
+    const soCortesia = tokens.every((w) => palavrasCortesia.has(w))
+    if (soCortesia) {
+      return { shouldReopen: false, reason: 'thanks_or_closing_ack_short', normalized }
+    }
   }
 
   return { shouldReopen: true, reason: 'default_reopen_after_close', normalized }

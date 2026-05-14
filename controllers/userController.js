@@ -401,6 +401,7 @@ exports.login = async (req, res) => {
     const departamento_id = departamento_ids.length > 0 ? departamento_ids[0] : null
 
     // Gera JWT com dados essenciais (user_id/company_id obrigatórios p/ multi-tenant)
+    const jwtExpiresIn = String(process.env.JWT_EXPIRES_IN || '30d').trim() || '30d'
     const token = jwt.sign(
       {
         user_id: usuario.id,
@@ -412,7 +413,7 @@ exports.login = async (req, res) => {
         departamento_ids
       },
       process.env.JWT_SECRET,
-      { expiresIn: '1d' }
+      { expiresIn: jwtExpiresIn }
     )
 
     let crm_habilitado = true
