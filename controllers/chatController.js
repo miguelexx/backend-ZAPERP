@@ -563,7 +563,7 @@ exports.obterUsuarioIdsQuePodemVerConversa = obterUsuarioIdsQuePodemVerConversa
 
 // =====================================================
 // 3) listarConversas (com unread_count + pesquisa avançada)
-// Query: tag_id, data_inicio, data_fim, status_atendimento, atendente_id, palavra, minha_fila, aguardando_cliente
+// Query: tag_id, data_inicio, data_fim, status_atendimento, atendente_id, palavra, minha_fila, aguardando_cliente, tempo_parado
 // minha_fila=1: só conversas (não grupo) em aberta (fila visível) + em_atendimento onde o responsável é o usuário logado
 // aguardando_cliente=1: só conversas “aguardando” em que o atendente responsável é o usuário logado (organização por atendente).
 //   Admin/supervisor pode combinar com atendente_id=<id> para ver a fila de outro colaborador (mesmo critério do restante da API).
@@ -587,7 +587,24 @@ exports.listarConversas = async (req, res) => {
       minha_fila: minhaFilaRaw,
       incluir_colaboradores_encaminhar: incluirColabEncRaw,
       aguardando_cliente: aguardandoClienteRaw,
+      tempo_parado: tempoParadoRaw,
     } = req.query
+
+    const TEMPO_PARADO_HORAS = {
+      '2h': 2,
+      '12h': 12,
+      '24h': 24,
+      '7d': 24 * 7,
+      '30d': 24 * 30,
+    }
+    const tempoParadoKey =
+      tempoParadoRaw != null && String(tempoParadoRaw).trim() !== ''
+        ? String(tempoParadoRaw).trim().toLowerCase()
+        : null
+    const tempoParadoHoras =
+      tempoParadoKey && Object.prototype.hasOwnProperty.call(TEMPO_PARADO_HORAS, tempoParadoKey)
+        ? TEMPO_PARADO_HORAS[tempoParadoKey]
+        : null
 
     const aguardandoClienteAtivo =
       aguardandoClienteRaw === '1' ||
@@ -888,6 +905,12 @@ exports.listarConversas = async (req, res) => {
         } else if (filtroAtendenteInformado != null) {
           q = q.eq('atendente_id', Number(filtroAtendenteInformado))
         }
+      }
+
+      // Filtro opcional: tempo parado (usa aguardando_cliente_desde — leve, indexável; sem alterar paginação da API)
+      if (tempoParadoHoras != null) {
+        const limiteParado = new Date(Date.now() - tempoParadoHoras * 3600000).toISOString()
+        q = q.not('aguardando_cliente_desde', 'is', null).lte('aguardando_cliente_desde', limiteParado)
       }
 
       // PERFORMANCE: a lista de conversas só precisa da ÚLTIMA mensagem (preview).
@@ -3308,8 +3331,14 @@ exports.enviarMensagemChat = async (req, res) => {
               name: String(reply_meta.name || '').slice(0, 80),
               snippet: String(reply_meta.snippet || '').slice(0, 180),
               ts: Number(reply_meta.ts || Date.now()),
-              replyToId: reply_meta.replyToId != null ? String(reply_meta.replyToId) : undefined
-            }
+              replyToId: reply_meta.replyToId != null ? String(reply_meta.replyToId) : undefined,
+              ...(reply_meta.thumb
+                ? { thumb: String(reply_meta.thumb).slice(0, 500) }
+                : {}),
+              ...(reply_meta.reply_kind
+                ? { reply_kind: String(reply_meta.reply_kind).slice(0, 24) }
+                : {}),
+            },
           }
         : basePayload
 
@@ -5403,5 +5432,32 @@ exports.encaminharMensagem = async (req, res) => {
   } catch (error) {
     console.error('Erro ao encaminhar mensagem:', error)
     return res.status(500).json({ error: 'Erro ao encaminhar mensagem' })
+  }
+}
+
+/**
+ * POST /chats/finalizacao-ausencia-lote — supervisor/admin, JWT.
+ * Body: { conversa_ids, dry_run?, execute?, confirm? } — delega a finalizeAbsenceForConversaIds.
+ */
+exports.finalizacaoAusenciaLoteAuth = async (req, res) => {
+  try {
+    const company_id = Number(req.user?.company_id)
+    if (!Number.isFinite(company_id) || company_id <= 0) {
+      return res.status(400).json({ error: 'company_id inválido na sessão' })
+    }
+    const { finalizeAbsenceForConversaIds } = require('../services/absenceFinalizationService')
+    const body = req.body || {}
+    const result = await finalizeAbsenceForConversaIds({
+      company_id,
+      conversa_ids: body.conversa_ids,
+      dryRun: !!body.dry_run,
+      execute: body.execute === true,
+      confirm: body.confirm,
+    })
+    if (!result.ok) return res.status(400).json({ error: result.error || 'Falha na operação' })
+    return res.json(result)
+  } catch (err) {
+    console.error('finalizacaoAusenciaLoteAuth:', err)
+    return res.status(500).json({ error: err.message || 'Erro interno' })
   }
 }

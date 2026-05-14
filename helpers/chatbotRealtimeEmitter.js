@@ -89,16 +89,25 @@ async function emitBotMensagemRealtime({ io, supabase, company_id, conversa_id, 
 }
 
 /**
- * Após reabrir conversa encerrada: setor zerado no BD — notifica todos os canais (incl. room do setor antigo).
+ * Após reabrir conversa encerrada: notifica lista/canais com o estado real retornado pelo BD (aberta ou em_atendimento).
  */
 function emitReaberturaSemSetorRealtime({ io, company_id, conversa_id, reabertaRow, departamentoIdAntigo }) {
   if (!io || !company_id || !conversa_id) return
   const cid = Number(conversa_id)
+  const depNovo =
+    reabertaRow?.departamento_id != null && Number.isFinite(Number(reabertaRow.departamento_id))
+      ? Number(reabertaRow.departamento_id)
+      : null
+  const atendNovo =
+    reabertaRow?.atendente_id != null && Number.isFinite(Number(reabertaRow.atendente_id))
+      ? Number(reabertaRow.atendente_id)
+      : null
+  const statusLista = String(reabertaRow?.status_atendimento || 'aberta')
   const convPayload = {
     id: cid,
-    departamento_id: null,
-    atendente_id: null,
-    status_atendimento: 'aberta',
+    departamento_id: depNovo,
+    atendente_id: atendNovo,
+    status_atendimento: statusLista,
     ultima_atividade: reabertaRow?.ultima_atividade ?? new Date().toISOString(),
     telefone: reabertaRow?.telefone ?? null,
     exibir_badge_aberta: true,
@@ -111,9 +120,13 @@ function emitReaberturaSemSetorRealtime({ io, company_id, conversa_id, reabertaR
     departamentoIdAntigo != null && Number.isFinite(Number(departamentoIdAntigo))
       ? Number(departamentoIdAntigo)
       : null
-  if (antigo != null) {
+  if (antigo != null && antigo !== depNovo) {
     io.to(`departamento_${antigo}`).emit('atualizar_conversa', { id: cid })
     io.to(`departamento_${antigo}`).emit('conversa_atualizada', convPayload)
+  }
+  if (depNovo != null) {
+    io.to(`departamento_${depNovo}`).emit('atualizar_conversa', { id: cid })
+    io.to(`departamento_${depNovo}`).emit('conversa_atualizada', convPayload)
   }
 }
 

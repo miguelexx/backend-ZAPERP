@@ -10,7 +10,11 @@ const {
   validateChatbotConfig,
   normalizeChatbotTriageStrings,
 } = require('../services/chatbotTriageService')
-const { finalizeConversationsByAbsence } = require('../services/absenceFinalizationService')
+const {
+  finalizeConversationsByAbsence,
+  finalizeAbsenceForConversaIds,
+  CONFIRM_FINALIZE_ABSENCE,
+} = require('../services/absenceFinalizationService')
 
 function timingSafeEqualStr(a, b) {
   const sa = String(a ?? '')
@@ -252,11 +256,72 @@ exports.timeoutInatividade = async (req, res) => {
 /** POST /jobs/finalizacao-ausencia-cliente */
 exports.finalizacaoAusenciaCliente = async (req, res) => {
   try {
-    const result = await finalizeConversationsByAbsence()
+    const dryRun =
+      req.query.dry_run === '1' ||
+      req.query.dry_run === 'true' ||
+      req.body?.dry_run === true
+    if (dryRun) {
+      const result = await finalizeConversationsByAbsence({ dryRun: true, execute: false, source: 'http' })
+      if (!result.ok) {
+        return res.status(503).json({ error: result.error || 'Falha na simulação (dry-run) de finalização por ausência' })
+      }
+      return res.json({
+        ok: true,
+        dryRun: true,
+        quantidade_candidatos: result.candidatos?.length ?? 0,
+        candidatos: result.candidatos,
+        analisadas: result.analisadas,
+        maxPerCycle: result.maxPerCycle,
+        truncatedByMaxPerCycle: result.truncatedByMaxPerCycle,
+        aviso: result.aviso,
+      })
+    }
+
+    const confirm = String(req.body?.confirm || '').trim()
+    const executeConfirmado = req.body?.execute === true && confirm === CONFIRM_FINALIZE_ABSENCE
+    if (req.body?.execute === true && !executeConfirmado) {
+      return res.status(400).json({
+        error: `Para executar com confirmação explícita, envie confirm exatamente: "${CONFIRM_FINALIZE_ABSENCE}".`,
+      })
+    }
+
+    const result = await finalizeConversationsByAbsence({
+      dryRun: false,
+      source: executeConfirmado ? 'http_confirm' : 'cron',
+    })
     if (!result.ok) return res.status(503).json({ error: result.error || 'Falha ao processar finalização por ausência' })
-    return res.json(result)
+    return res.json({
+      ...result,
+      ...(executeConfirmado ? { executado_com_confirmacao_http: true } : {}),
+    })
   } catch (err) {
     console.error('finalizacaoAusenciaCliente:', err)
+    return res.status(500).json({ error: err.message })
+  }
+}
+
+/**
+ * POST /jobs/finalizacao-ausencia-lote — finalização por IDs (cron). Nunca executa sem confirm no body.
+ * dry_run: true → só valida e devolve preview por conversa.
+ */
+exports.finalizacaoAusenciaLote = async (req, res) => {
+  try {
+    const body = req.body || {}
+    const company_id = Number(body.company_id)
+    if (!Number.isInteger(company_id) || company_id <= 0) {
+      return res.status(400).json({ error: 'company_id inválido' })
+    }
+    const result = await finalizeAbsenceForConversaIds({
+      company_id,
+      conversa_ids: body.conversa_ids,
+      dryRun: !!body.dry_run,
+      execute: body.execute === true,
+      confirm: body.confirm,
+    })
+    if (!result.ok) return res.status(400).json({ error: result.error || 'Falha no lote' })
+    return res.json(result)
+  } catch (err) {
+    console.error('finalizacaoAusenciaLote:', err)
     return res.status(500).json({ error: err.message })
   }
 }

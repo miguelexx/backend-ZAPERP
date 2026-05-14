@@ -3,6 +3,7 @@ const router = express.Router()
 const chatController = require('../controllers/chatController')
 const auth = require('../middleware/auth')
 const adminOnly = require('../middleware/adminOnly')
+const supervisorOrAdmin = require('../middleware/supervisorOrAdmin')
 const { uploadArquivo } = require('../middleware/upload')
 
 // base: /chats
@@ -11,6 +12,7 @@ router.post('/contato', auth, chatController.criarContato);
 router.post('/abrir-conversa', auth, chatController.abrirConversaCliente);
 router.post("/grupos", auth, chatController.criarGrupo);
 router.post("/comunidades", auth, chatController.criarComunidade);
+router.post('/finalizacao-ausencia-lote', auth, supervisorOrAdmin, chatController.finalizacaoAusenciaLoteAuth)
 router.get('/', auth, chatController.listarConversas)
 router.get('/merge-duplicatas', auth, adminOnly, chatController.paginaMergeDuplicatas)
 router.post('/merge-duplicatas', auth, adminOnly, chatController.mergeConversasDuplicadas)

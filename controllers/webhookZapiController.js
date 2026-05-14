@@ -37,6 +37,8 @@ const {
   loadChatbotTriageMergeAndAbsence,
   tryMarkWaitingAfterHumanOutbound,
   clearWaitingForClient,
+  fetchLastAbsenceEncerramentoSnap,
+  resolveReopenAssignmentAfterAbsence,
 } = require('../services/absenceFinalizationService')
 const { isEnabled, FLAGS } = require('../helpers/featureFlags')
 const { parseNota, tentarRegistrarAvaliacao } = require('../services/avaliacaoService')
@@ -1750,7 +1752,7 @@ exports.receberZapi = async (req, res) => {
     if (!fromMe && !isGroup && conversa_id) {
       const { data: convStatus } = await supabase
         .from('conversas')
-        .select('id, status_atendimento, cliente_id, departamento_id, finalizacao_motivo')
+        .select('id, status_atendimento, cliente_id, departamento_id, finalizacao_motivo, atendente_id')
         .eq('id', conversa_id)
         .eq('company_id', company_id)
         .maybeSingle()
@@ -1787,13 +1789,19 @@ exports.receberZapi = async (req, res) => {
           if (cfg.reabrirAutomaticamente) {
             const depAntesReabrir =
               convStatus?.departamento_id != null ? Number(convStatus.departamento_id) : null
+            const snap = await fetchLastAbsenceEncerramentoSnap(conversa_id)
+            const assign = await resolveReopenAssignmentAfterAbsence(company_id, snap)
+            const deptoRestaurar =
+              snap?.departamento_id != null && Number(snap.departamento_id) > 0
+                ? Number(snap.departamento_id)
+                : depAntesReabrir
             const { data: reabertaAusencia } = await supabase
               .from('conversas')
               .update({
-                status_atendimento: 'aberta',
-                departamento_id: null,
-                atendente_id: null,
-                atendente_atribuido_em: null,
+                status_atendimento: assign.status_atendimento,
+                departamento_id: deptoRestaurar,
+                atendente_id: assign.atendente_id,
+                atendente_atribuido_em: assign.atendente_atribuido_em,
                 finalizacao_motivo: null,
                 finalizada_automaticamente: false,
                 finalizada_automaticamente_em: null,
@@ -1804,17 +1812,20 @@ exports.receberZapi = async (req, res) => {
               .select()
               .single()
             if (reabertaAusencia) {
-              departamento_id = null
+              departamento_id = reabertaAusencia.departamento_id != null ? Number(reabertaAusencia.departamento_id) : null
               conversaReabertaAposFinalizacao = true
               reopenedFromAbsence = true
               await supabase.from('historico_atendimentos').insert({
                 conversa_id,
                 usuario_id: null,
                 acao: 'reabertura_automatica_ausencia',
-                observacao: 'Conversa reaberta automaticamente por retorno do cliente após encerramento por ausência',
+                observacao:
+                  'Reaberto pelo cliente após encerramento automático por ausência — retomada sem novo menu de triagem',
               })
               await logBotAction(company_id, conversa_id, 'reabertura_automatica_ausencia', {
                 bypass_chatbot: cfg.reabrirSemChatbot,
+                status_atendimento: assign.status_atendimento,
+                atendente_restaurado: assign.atendente_id,
               })
               const io = req.app.get('io')
               if (io) {
