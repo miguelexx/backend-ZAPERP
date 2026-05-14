@@ -895,6 +895,23 @@ function getDayRange(dateInput) {
   return { start, end }
 }
 
+/**
+ * Contagem alinhada ao selo "Aguardando funcionário" (última mensagem do cliente + status em fila/atendimento).
+ * Exclui grupos (@g.us) e, com chatbot ativo, exclui triagem pura (aberta sem departamento).
+ */
+async function countAguardandoFuncionarioParaAlertaAdmin(companyId, { chatbotEnabled = false } = {}) {
+  const insights = await buildConversationInsights(companyId)
+  let count = 0
+  for (const p of insights.pending) {
+    const tel = String(p.telefone || '')
+    if (tel.includes('@g.us')) continue
+    const st = String(p.status_atendimento || '').toLowerCase()
+    if (chatbotEnabled && st === 'aberta' && (p.departamento_id == null || p.departamento_id === '')) continue
+    count++
+  }
+  return count
+}
+
 async function getRelatorioDiarioGestor(companyId, dateStr) {
   const parsedDate = parseDateInput(dateStr)
   if (dateStr && !parsedDate) {
@@ -1012,4 +1029,5 @@ module.exports = {
   getClientesPendentes,
   getMovimentacaoFuncionario,
   getRelatorioDiarioGestor,
+  countAguardandoFuncionarioParaAlertaAdmin,
 }
