@@ -87,6 +87,7 @@ exports.timeoutInatividadeChatbot = async (req, res) => {
         .eq('company_id', company_id)
         .neq('status_atendimento', 'fechada')
         .neq('status_atendimento', 'aguardando_cliente')
+        .neq('status_atendimento', 'mensagem_disparada')
 
       if (!conversas?.length) continue
 

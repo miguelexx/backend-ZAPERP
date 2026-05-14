@@ -865,12 +865,19 @@ exports.listarConversas = async (req, res) => {
       if (conversaIdsFilter && conversaIdsFilter.length > 0) {
         q = q.in('id', conversaIdsFilter)
       }
+      // Mensagens disparadas: só aparecem com filtro explícito status_atendimento=mensagem_disparada.
+      if (!minhaFilaAtiva && !aguardandoClienteAtivo && !statusNorm) {
+        q = q.or('tipo.eq.grupo,status_atendimento.neq.mensagem_disparada,status_atendimento.is.null')
+      }
       // Filtro personalizado "Minha fila": abertas (fila) + em atendimento só comigo; sem grupos; sem finalizadas
       if (minhaFilaAtiva) {
         q = q.or('tipo.is.null,tipo.neq.grupo')
         q = q.or(
           `status_atendimento.eq.aberta,and(status_atendimento.eq.em_atendimento,atendente_id.eq.${user_id}),and(status_atendimento.eq.aguardando_cliente,atendente_id.eq.${user_id})`
         )
+      } else if (statusNorm === 'mensagem_disparada') {
+        q = q.eq('status_atendimento', 'mensagem_disparada')
+        q = q.neq('tipo', 'grupo')
       } else if (statusNorm) {
         // Grupos são sempre visíveis independentemente do filtro de status —
         // não têm estado de atendimento (não precisam ser assumidos nem encerrados).
@@ -1055,7 +1062,10 @@ exports.listarConversas = async (req, res) => {
       // Grupos não têm estado de atendimento: sem badge "aberta", sem status, sem atendente obrigatório
       const temMensagem = Array.isArray(c.mensagens) && c.mensagens.length > 0
       // Igual a detalharChat: badge "Aberta" só com mensagem ou atendente (sem movimentação → ociosa, fora de Abertas)
-      const exibir_badge_aberta = !isGroup && (temMensagem || c.atendente_id != null)
+      const exibir_badge_aberta =
+        !isGroup &&
+        (temMensagem || c.atendente_id != null) &&
+        c.status_atendimento !== 'mensagem_disparada'
       const atendRow = c.atendente && typeof c.atendente === 'object' ? c.atendente : null
       const atendenteNome =
         atendRow && atendRow.nome != null && String(atendRow.nome).trim()
@@ -2451,9 +2461,12 @@ exports.detalharChat = async (req, res) => {
     const fotoUnica = isGroup ? (conversa.foto_grupo ?? null) : (clientesConv?.foto_perfil ?? fotoCache ?? null)
     // Badge "Aberta": só exibir quando há movimentação (mensagem ou atendente assumiu) — mesma regra da lista
     const temMensagem = Array.isArray(mensagens) && mensagens.length > 0
-    const exibirBadgeAberta = !isGroup && (temMensagem || conversa.atendente_id != null)
-    const semMensagens = !temMensagem
     const dbStatusAtend = String(conversa.status_atendimento || '')
+    const exibirBadgeAberta =
+      !isGroup &&
+      (temMensagem || conversa.atendente_id != null) &&
+      dbStatusAtend !== 'mensagem_disparada'
+    const semMensagens = !temMensagem
     // Empty state: UI deve oferecer Assumir (POST /chats/:id/assumir) mesmo sem badge "aberta" / sem mensagens
     const exibirCtaAssumirSemMensagens =
       !isGroup &&

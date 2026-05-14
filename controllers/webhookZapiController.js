@@ -848,6 +848,18 @@ exports.receberZapi = async (req, res) => {
     const payloads = getPayloads(body)
     let lastResult = { ok: true }
 
+    let separarMensagensDisparadasEmpresa = false
+    try {
+      const { data: empCfgRow, error: empCfgErr } = await supabase
+        .from('empresas')
+        .select('separar_mensagens_disparadas')
+        .eq('id', company_id)
+        .maybeSingle()
+      if (!empCfgErr && empCfgRow) separarMensagensDisparadasEmpresa = !!empCfgRow.separar_mensagens_disparadas
+    } catch (_) {
+      separarMensagensDisparadasEmpresa = false
+    }
+
     for (const payload of payloads) {
       // Normaliza status Z-API para canônico interno
       // Observação: alguns callbacks chegam como ACK numérico (0..4).
@@ -1640,6 +1652,8 @@ exports.receberZapi = async (req, res) => {
           chatPhoto,
           chatLid: lidPart || null,
           logPrefix: `[Z-API fromMe=${fromMe}]`,
+          initial_status_atendimento:
+            separarMensagensDisparadasEmpresa && fromMe && !isGroup ? 'mensagem_disparada' : 'aberta',
         })
 
         if (!syncResult) {
@@ -2735,6 +2749,43 @@ exports.receberZapi = async (req, res) => {
         }
       } catch (_) {}
 
+      // Opcional por empresa: espelhamento fromMe inserido pelo webhook (sem autor_usuario_id = fora do CRM)
+      // → status mensagem_disparada (não fica na fila "Abertas"). Não altera conversa já assumida ou em atendimento.
+      if (
+        separarMensagensDisparadasEmpresa &&
+        fromMe &&
+        !isGroup &&
+        mensagemFoiInseridaPeloWebhook &&
+        mensagemSalva.autor_usuario_id == null
+      ) {
+        try {
+          const { data: convSt } = await supabase
+            .from('conversas')
+            .select('status_atendimento, atendente_id')
+            .eq('id', convIdForUpdate)
+            .eq('company_id', company_id)
+            .maybeSingle()
+          const st = String(convSt?.status_atendimento || '')
+          const aid = convSt?.atendente_id
+          if ((st === 'aberta' || st === 'mensagem_disparada') && (aid == null || aid === '')) {
+            await supabase
+              .from('conversas')
+              .update({
+                status_atendimento: 'mensagem_disparada',
+                departamento_id: null,
+                atendente_id: null,
+                atendente_atribuido_em: null,
+              })
+              .eq('id', convIdForUpdate)
+              .eq('company_id', company_id)
+              .in('status_atendimento', ['aberta', 'mensagem_disparada'])
+              .is('atendente_id', null)
+          }
+        } catch (e) {
+          console.warn('[webhook] separar_mensagens_disparadas:', e?.message || e)
+        }
+      }
+
       console.log('✅ Mensagem salva no sistema:', { conversa_id, mensagem_id: mensagemSalva.id, phone: phone?.slice(-6), direcao: fromMe ? 'out' : 'in' })
       if (fromMe) console.log('📤 Espelhamento: mensagem enviada pelo celular registrada no sistema')
       logZapiCert({
@@ -2869,7 +2920,7 @@ exports.receberZapi = async (req, res) => {
         telefone: convRow?.telefone ?? null,
         atendente_id: convRow?.atendente_id ?? null,
         // Grupos nunca mostram badge "aberta" — não precisam ser assumidos
-        exibir_badge_aberta: !isGroup,
+        exibir_badge_aberta: !isGroup && convRow?.status_atendimento !== 'mensagem_disparada',
         ...(isGroup
           ? { status_atendimento: null, status_atendimento_real: null }
           : {

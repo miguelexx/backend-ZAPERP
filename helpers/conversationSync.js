@@ -453,6 +453,7 @@ async function getOrCreateCliente(supabaseClient, company_id, phone, fields = {}
  * @param {string|null} opts.nomeGrupo
  * @param {string|null} opts.chatPhoto
  * @param {string} opts.logPrefix      - Prefixo para logs (ex: '[Z-API fromMe=true]')
+ * @param {string} [opts.initial_status_atendimento] - ao criar conversa nova (ex.: mensagem_disparada). Default aberta.
  * @returns {Promise<{conversa: object, created: boolean}|null>}
  */
 async function findOrCreateConversation(supabaseClient, {
@@ -464,6 +465,7 @@ async function findOrCreateConversation(supabaseClient, {
   chatPhoto = null,
   chatLid = null,
   logPrefix = '',
+  initial_status_atendimento = 'aberta',
 }) {
   if (!phone) {
     console.warn(`[findOrCreateConversation] ${logPrefix} phone vazio/nulo`)
@@ -560,10 +562,14 @@ async function findOrCreateConversation(supabaseClient, {
   const telefoneToInsert = isGroup && canonical.endsWith('@g.us')
     ? canonical.replace(/@g.us$/i, '')
     : canonical
+  const statusInicial =
+    initial_status_atendimento != null && String(initial_status_atendimento).trim() !== ''
+      ? String(initial_status_atendimento).trim()
+      : 'aberta'
   const insertData = {
     telefone: telefoneToInsert,
     lida: false,
-    status_atendimento: 'aberta',
+    status_atendimento: statusInicial,
     company_id,
     ultima_atividade: new Date().toISOString(),
   }

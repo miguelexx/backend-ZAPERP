@@ -17,7 +17,8 @@ const STATUS_ATENDIMENTO_LABEL = {
   aguardando_cliente: 'Aguardando cliente',
   em_atendimento: 'Em atendimento',
   finalizada: 'Finalizada',
-  ociosa: 'Ociosa'
+  ociosa: 'Ociosa',
+  mensagem_disparada: 'Mensagem disparada',
 }
 
 function labelStatusAtendimento(raw) {
