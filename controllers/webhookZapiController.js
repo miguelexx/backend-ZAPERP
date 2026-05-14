@@ -2176,116 +2176,8 @@ exports.receberZapi = async (req, res) => {
     }
     if (soPlaceholderMidia && fromMe) texto = '(mensagem)' // espelhamento: mostrar algo no chat
 
-    // Histórico do celular: ao criar uma conversa nova, buscar as últimas mensagens do chat na Z-API
-    // e inserir no banco (sem duplicar pelo whatsapp_id).
-    if (isNewConversation) {
-      const provider = getProvider()
-      if (provider && provider.getChatMessages && provider.isConfigured) {
-        const convIdForHistory = conversa_id
-        const phoneForHistory = phone
-        const isGroupForHistory = isGroup
-        setImmediate(async () => {
-          try {
-            const history = await provider.getChatMessages(phoneForHistory, 25, null, { companyId: company_id }).catch(() => [])
-            if (!Array.isArray(history) || history.length === 0) return
-
-            // Inserir do mais antigo para o mais novo (ordem natural).
-            const ordered = history
-              .map((m) => m)
-              .sort((a, b) => Number(a?.momment || a?.timestamp || 0) - Number(b?.momment || b?.timestamp || 0))
-
-            for (const m of ordered) {
-              const p = { ...(m || {}), isGroup: isGroupForHistory, phone: phoneForHistory }
-              const ex = extractMessage(p)
-              const wId = ex.messageId ? String(ex.messageId).trim() : null
-              if (!ex.texto) continue
-              const placeholder = ex.texto === '(mídia)' && !ex.imageUrl && !ex.documentUrl && !ex.audioUrl && !ex.videoUrl && !ex.stickerUrl && !ex.locationUrl
-              if (placeholder) continue
-
-              // Evitar duplicar: se não tem whatsapp_id, pula (histórico sem id pode gerar duplicatas).
-              if (!wId) continue
-
-              const direcaoHistory = ex.fromMe ? 'out' : 'in'
-              const insertMsg = {
-                conversa_id: convIdForHistory,
-                texto: ex.texto,
-                direcao: direcaoHistory,
-                company_id,
-                whatsapp_id: wId,
-                criado_em: ex.criado_em
-              }
-
-              // Mensagens out (chatbot/CRM): podem ter sido inseridas antes do sync sem whatsapp_id.
-              // Em vez de duplicar, atualizar a existente com whatsapp_id e corrigir criado_em se inválido (1970).
-              if (ex.fromMe) {
-                const { data: existOut } = await supabase
-                  .from('mensagens')
-                  .select('id, criado_em, whatsapp_id')
-                  .eq('company_id', company_id)
-                  .eq('conversa_id', convIdForHistory)
-                  .eq('direcao', 'out')
-                  .eq('texto', ex.texto)
-                  .order('id', { ascending: false })
-                  .limit(1)
-                  .maybeSingle()
-                if (existOut && !existOut.whatsapp_id) {
-                  const updatePayload = { whatsapp_id: wId }
-                  const yearExist = existOut.criado_em ? new Date(existOut.criado_em).getFullYear() : 0
-                  const yearNew = ex.criado_em ? new Date(ex.criado_em).getFullYear() : 0
-                  if (yearExist < 2020 && yearNew >= 2020) updatePayload.criado_em = ex.criado_em
-                  await supabase.from('mensagens').update(updatePayload).eq('id', existOut.id)
-                  continue
-                }
-              }
-
-              // Remetente em grupo (quando disponível)
-              if (isGroupForHistory && !ex.fromMe) {
-                if (ex.senderName) insertMsg.remetente_nome = ex.senderName
-                if (ex.participantPhone) insertMsg.remetente_telefone = ex.participantPhone
-              }
-
-              // Mapear mídia
-              if (ex.type === 'image' && ex.imageUrl) {
-                insertMsg.tipo = 'imagem'
-                insertMsg.url = ex.imageUrl
-                insertMsg.nome_arquivo = ex.fileName || 'imagem.jpg'
-              } else if ((ex.type === 'document' || ex.type === 'file') && ex.documentUrl) {
-                insertMsg.tipo = 'arquivo'
-                insertMsg.url = ex.documentUrl
-                insertMsg.nome_arquivo = ex.fileName || 'arquivo'
-              } else if (ex.type === 'audio' && ex.audioUrl) {
-                insertMsg.tipo = 'audio'
-                insertMsg.url = ex.audioUrl
-                insertMsg.nome_arquivo = ex.fileName || 'audio'
-              } else if (ex.type === 'video' && ex.videoUrl) {
-                insertMsg.tipo = 'video'
-                insertMsg.url = ex.videoUrl
-                insertMsg.nome_arquivo = ex.fileName || 'video'
-              } else if (ex.type === 'sticker' && ex.stickerUrl) {
-                insertMsg.tipo = 'sticker'
-                insertMsg.url = ex.stickerUrl
-                insertMsg.nome_arquivo = ex.fileName || 'sticker.webp'
-              } else if (ex.type === 'location') {
-                insertMsg.tipo = 'location'
-                if (ex.locationUrl) insertMsg.url = ex.locationUrl
-                insertMsg.nome_arquivo = 'localização'
-                if (ex.locationMeta && (ex.locationMeta.latitude != null || ex.locationMeta.longitude != null)) {
-                  insertMsg.location_meta = ex.locationMeta
-                }
-              }
-
-              const { error: histErr } = await supabase.from('mensagens').insert(insertMsg)
-              if (histErr && String(histErr.code || '') !== '23505') {
-                // 23505 = duplicata pelo índice único; ignore.
-                console.warn('⚠️ Histórico Z-API: falha ao inserir msg:', String(histErr.message || '').slice(0, 120))
-              }
-            }
-          } catch (e) {
-            console.warn('⚠️ Histórico Z-API: erro ao importar:', e?.message || e)
-          }
-        })
-      }
-    }
+    // Histórico de nova conversa: agendado DEPOIS de persistir a mensagem atual + regra mensagem_disparada
+    // (evita race: import antigo tornava outra linha a "primeira" e a conversa ficava aberta indevidamente).
 
     // Idempotência: chave única (company_id, whatsapp_id) — reenvio do webhook não duplica
     if (whatsappIdStr) {
@@ -2798,13 +2690,12 @@ exports.receberZapi = async (req, res) => {
         }
       }
 
-      // Opcional por empresa: espelhamento fromMe inserido pelo webhook (sem autor_usuario_id = fora do CRM).
-      // mensagem_disparada SOMENTE se esta mensagem for a PRIMEIRA da conversa e outbound sem autor (WhatsApp/celular).
+      // Opcional por empresa: outbound sem autor (WhatsApp/celular). mensagem_disparada se for a 1ª msg da conversa.
+      // Não exige mensagemFoiInseridaPeloWebhook: reconciliação (eco CRM → mesmo id) ainda pode ser a única linha válida.
       if (
         separarMensagensDisparadasEmpresa &&
         fromMe &&
         !isGroup &&
-        mensagemFoiInseridaPeloWebhook &&
         mensagemSalva.autor_usuario_id == null
       ) {
         try {
@@ -2863,6 +2754,108 @@ exports.receberZapi = async (req, res) => {
         conversaId: conversa_id ?? mensagemSalva?.conversa_id,
         action: 'inserted_message'
       })
+
+      // Histórico do celular: nova conversa — importar após a mensagem atual (evita quebrar "primeira mensagem" / mensagem_disparada).
+      if (isNewConversation) {
+        const provider = getProvider()
+        if (provider && provider.getChatMessages && provider.isConfigured) {
+          const convIdForHistory = conversa_id
+          const phoneForHistory = phone
+          const isGroupForHistory = isGroup
+          setImmediate(async () => {
+            try {
+              const history = await provider.getChatMessages(phoneForHistory, 25, null, { companyId: company_id }).catch(() => [])
+              if (!Array.isArray(history) || history.length === 0) return
+
+              const ordered = history
+                .map((m) => m)
+                .sort((a, b) => Number(a?.momment || a?.timestamp || 0) - Number(b?.momment || b?.timestamp || 0))
+
+              for (const m of ordered) {
+                const p = { ...(m || {}), isGroup: isGroupForHistory, phone: phoneForHistory }
+                const ex = extractMessage(p)
+                const wId = ex.messageId ? String(ex.messageId).trim() : null
+                if (!ex.texto) continue
+                const placeholder = ex.texto === '(mídia)' && !ex.imageUrl && !ex.documentUrl && !ex.audioUrl && !ex.videoUrl && !ex.stickerUrl && !ex.locationUrl
+                if (placeholder) continue
+                if (!wId) continue
+
+                const direcaoHistory = ex.fromMe ? 'out' : 'in'
+                const insertMsg = {
+                  conversa_id: convIdForHistory,
+                  texto: ex.texto,
+                  direcao: direcaoHistory,
+                  company_id,
+                  whatsapp_id: wId,
+                  criado_em: ex.criado_em
+                }
+
+                if (ex.fromMe) {
+                  const { data: existOut } = await supabase
+                    .from('mensagens')
+                    .select('id, criado_em, whatsapp_id')
+                    .eq('company_id', company_id)
+                    .eq('conversa_id', convIdForHistory)
+                    .eq('direcao', 'out')
+                    .eq('texto', ex.texto)
+                    .order('id', { ascending: false })
+                    .limit(1)
+                    .maybeSingle()
+                  if (existOut && !existOut.whatsapp_id) {
+                    const updatePayload = { whatsapp_id: wId }
+                    const yearExist = existOut.criado_em ? new Date(existOut.criado_em).getFullYear() : 0
+                    const yearNew = ex.criado_em ? new Date(ex.criado_em).getFullYear() : 0
+                    if (yearExist < 2020 && yearNew >= 2020) updatePayload.criado_em = ex.criado_em
+                    await supabase.from('mensagens').update(updatePayload).eq('id', existOut.id)
+                    continue
+                  }
+                }
+
+                if (isGroupForHistory && !ex.fromMe) {
+                  if (ex.senderName) insertMsg.remetente_nome = ex.senderName
+                  if (ex.participantPhone) insertMsg.remetente_telefone = ex.participantPhone
+                }
+
+                if (ex.type === 'image' && ex.imageUrl) {
+                  insertMsg.tipo = 'imagem'
+                  insertMsg.url = ex.imageUrl
+                  insertMsg.nome_arquivo = ex.fileName || 'imagem.jpg'
+                } else if ((ex.type === 'document' || ex.type === 'file') && ex.documentUrl) {
+                  insertMsg.tipo = 'arquivo'
+                  insertMsg.url = ex.documentUrl
+                  insertMsg.nome_arquivo = ex.fileName || 'arquivo'
+                } else if (ex.type === 'audio' && ex.audioUrl) {
+                  insertMsg.tipo = 'audio'
+                  insertMsg.url = ex.audioUrl
+                  insertMsg.nome_arquivo = ex.fileName || 'audio'
+                } else if (ex.type === 'video' && ex.videoUrl) {
+                  insertMsg.tipo = 'video'
+                  insertMsg.url = ex.videoUrl
+                  insertMsg.nome_arquivo = ex.fileName || 'video'
+                } else if (ex.type === 'sticker' && ex.stickerUrl) {
+                  insertMsg.tipo = 'sticker'
+                  insertMsg.url = ex.stickerUrl
+                  insertMsg.nome_arquivo = ex.fileName || 'sticker.webp'
+                } else if (ex.type === 'location') {
+                  insertMsg.tipo = 'location'
+                  if (ex.locationUrl) insertMsg.url = ex.locationUrl
+                  insertMsg.nome_arquivo = 'localização'
+                  if (ex.locationMeta && (ex.locationMeta.latitude != null || ex.locationMeta.longitude != null)) {
+                    insertMsg.location_meta = ex.locationMeta
+                  }
+                }
+
+                const { error: histErr } = await supabase.from('mensagens').insert(insertMsg)
+                if (histErr && String(histErr.code || '') !== '23505') {
+                  console.warn('⚠️ Histórico Z-API: falha ao inserir msg:', String(histErr.message || '').slice(0, 120))
+                }
+              }
+            } catch (e) {
+              console.warn('⚠️ Histórico Z-API: erro ao importar:', e?.message || e)
+            }
+          })
+        }
+      }
     }
 
     // Mensagem de entrada: incrementa unread no banco para todos os usuários (igual WhatsApp; refetch da lista já vem com contador certo)
