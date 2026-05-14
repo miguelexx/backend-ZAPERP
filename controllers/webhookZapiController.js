@@ -734,29 +734,32 @@ function hasDestFields(payload) {
 }
 
 /**
- * True se já existir mensagem inbound (cliente) na conversa.
- * Usado para não classificar como mensagem_disparada atendimentos normais ou conversas iniciadas pelo cliente.
- * Em erro de consulta, retorna true (conservador: não promove a disparada).
+ * True só se a mensagem inserida for a PRIMEIRA da conversa (por criado_em, id) e for outbound
+ * sem autor_usuario_id — critério de envio pelo WhatsApp/celular fora do ZapERP (CRM grava autor).
  */
-async function conversaJaTemMensagemInboundCliente(supabaseClient, company_id, conversa_id) {
-  if (!supabaseClient || company_id == null || conversa_id == null) return true
+async function mensagemInseridaEhPrimeiraDisparoWhatsappExterno(supabaseClient, company_id, conversa_id, mensagemIdInserida) {
+  if (!supabaseClient || company_id == null || conversa_id == null || mensagemIdInserida == null) return false
   try {
-    const { data, error } = await supabaseClient
+    const { data: first, error } = await supabaseClient
       .from('mensagens')
-      .select('id')
+      .select('id, direcao, autor_usuario_id')
       .eq('company_id', company_id)
       .eq('conversa_id', conversa_id)
-      .eq('direcao', 'in')
+      .order('criado_em', { ascending: true })
+      .order('id', { ascending: true })
       .limit(1)
       .maybeSingle()
     if (error) {
-      console.warn('[webhook] conversaJaTemMensagemInboundCliente:', error?.message || error)
-      return true
+      console.warn('[webhook] mensagemInseridaEhPrimeiraDisparoWhatsappExterno:', error?.message || error)
+      return false
     }
-    return Boolean(data?.id)
-  } catch (e) {
-    console.warn('[webhook] conversaJaTemMensagemInboundCliente exceção:', e?.message || e)
+    if (!first?.id || Number(first.id) !== Number(mensagemIdInserida)) return false
+    if (String(first.direcao || '') !== 'out') return false
+    if (first.autor_usuario_id != null) return false
     return true
+  } catch (e) {
+    console.warn('[webhook] mensagemInseridaEhPrimeiraDisparoWhatsappExterno exceção:', e?.message || e)
+    return false
   }
 }
 
@@ -1679,8 +1682,8 @@ exports.receberZapi = async (req, res) => {
           chatPhoto,
           chatLid: lidPart || null,
           logPrefix: `[Z-API fromMe=${fromMe}]`,
-          initial_status_atendimento:
-            separarMensagensDisparadasEmpresa && fromMe && !isGroup ? 'mensagem_disparada' : 'aberta',
+          // Sempre aberta ao criar; mensagem_disparada só após insert se for 1ª msg e WhatsApp externo (sem autor).
+          initial_status_atendimento: 'aberta',
         })
 
         if (!syncResult) {
@@ -2795,8 +2798,8 @@ exports.receberZapi = async (req, res) => {
         }
       }
 
-      // Opcional por empresa: espelhamento fromMe inserido pelo webhook (sem autor_usuario_id = fora do CRM)
-      // → mensagem_disparada APENAS se o cliente nunca iniciou a conversa (sem inbound) e o estado não é fila "Abertas" nem atendimento.
+      // Opcional por empresa: espelhamento fromMe inserido pelo webhook (sem autor_usuario_id = fora do CRM).
+      // mensagem_disparada SOMENTE se esta mensagem for a PRIMEIRA da conversa e outbound sem autor (WhatsApp/celular).
       if (
         separarMensagensDisparadasEmpresa &&
         fromMe &&
@@ -2805,8 +2808,13 @@ exports.receberZapi = async (req, res) => {
         mensagemSalva.autor_usuario_id == null
       ) {
         try {
-          const jaClienteFalou = await conversaJaTemMensagemInboundCliente(supabase, company_id, convIdForUpdate)
-          if (!jaClienteFalou) {
+          const ehPrimeiraDisparoExterno = await mensagemInseridaEhPrimeiraDisparoWhatsappExterno(
+            supabase,
+            company_id,
+            convIdForUpdate,
+            mensagemSalva.id
+          )
+          if (ehPrimeiraDisparoExterno) {
             const { data: convSt } = await supabase
               .from('conversas')
               .select('status_atendimento, atendente_id')
@@ -2819,10 +2827,8 @@ exports.receberZapi = async (req, res) => {
             if (!semAtendente) {
               // assumida — não reclassificar
             } else if (st === 'em_atendimento' || st === 'aguardando_cliente') {
-              // já em fluxo de atendimento humano/aguardando
-            } else if (st === 'aberta') {
-              // já na fila Abertas — não promover (evita pegar conversas normais com outbound pelo celular)
-            } else if (st === 'mensagem_disparada' || st === 'fechada' || st === 'finalizada') {
+              // já em atendimento humano / aguardando cliente
+            } else if (st === 'aberta' || st === 'mensagem_disparada' || st === 'fechada' || st === 'finalizada') {
               await supabase
                 .from('conversas')
                 .update({
@@ -2833,7 +2839,7 @@ exports.receberZapi = async (req, res) => {
                 })
                 .eq('id', convIdForUpdate)
                 .eq('company_id', company_id)
-                .in('status_atendimento', ['mensagem_disparada', 'fechada', 'finalizada'])
+                .in('status_atendimento', ['aberta', 'mensagem_disparada', 'fechada', 'finalizada'])
                 .is('atendente_id', null)
             }
           }
