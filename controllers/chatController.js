@@ -402,22 +402,22 @@ async function assertPodeEnviarMensagem({ company_id, conversa_id, user_id }) {
 // 2) UNREAD (TotalChat-like)
 // =====================================================
 async function marcarComoLidaPorUsuario({ company_id, conversa_id, usuario_id }) {
-  await supabase
-    .from('conversa_unreads')
-    .update({
-      unread_count: 0,
-      updated_at: new Date().toISOString()
-    })
-    .eq('company_id', Number(company_id))
-    .eq('conversa_id', Number(conversa_id))
-    .eq('usuario_id', Number(usuario_id))
-
-  // mantém compatibilidade com seu campo global
-  await supabase
-    .from('conversas')
-    .update({ lida: true })
-    .eq('company_id', Number(company_id))
-    .eq('id', Number(conversa_id))
+  await Promise.all([
+    supabase
+      .from('conversa_unreads')
+      .update({
+        unread_count: 0,
+        updated_at: new Date().toISOString()
+      })
+      .eq('company_id', Number(company_id))
+      .eq('conversa_id', Number(conversa_id))
+      .eq('usuario_id', Number(usuario_id)),
+    supabase
+      .from('conversas')
+      .update({ lida: true })
+      .eq('company_id', Number(company_id))
+      .eq('id', Number(conversa_id))
+  ])
 }
 
 async function obterUnreadMap({ company_id, usuario_id }) {
@@ -2496,14 +2496,22 @@ exports.detalharChat = async (req, res) => {
     const oldestDbRow = dbBatchLen > 0 ? mensagensDbBatch[dbBatchLen - 1] : null
     const hasMoreFromDb = dbBatchLen >= limit
 
-    // ✅ "Apagar pra mim": filtra mensagens ocultas para este usuário (se a tabela existir)
+    // ✅ "Apagar pra mim" + marcar como lida em paralelo (reduz latência percebida ao abrir o chat)
     try {
-      const { data: ocultas, error: errOcultas } = await supabase
+      const ocultasQuery = supabase
         .from('mensagens_ocultas')
         .select('mensagem_id')
         .eq('company_id', Number(company_id))
         .eq('conversa_id', Number(id))
         .eq('usuario_id', Number(user_id))
+
+      const [, { data: ocultas, error: errOcultas }] = await Promise.all([
+        marcarComoLidaPorUsuario({ company_id, conversa_id: id, usuario_id: user_id }).catch((e) => {
+          console.warn('detalharChat: marcarComoLidaPorUsuario', e?.message || e)
+        }),
+        ocultasQuery,
+      ])
+
       if (errOcultas) {
         const msg = String(errOcultas.message || '')
         // compat: tabela pode não existir ainda (banco desatualizado)
@@ -2517,9 +2525,6 @@ exports.detalharChat = async (req, res) => {
     } catch (_) {
       // ignore
     }
-
-    // marca como lida (unread=0 + compatibilidade lida=true)
-    await marcarComoLidaPorUsuario({ company_id, conversa_id: id, usuario_id: user_id })
 
     const rawClientes = conversa.clientes
     let clientesConv = Array.isArray(rawClientes)
