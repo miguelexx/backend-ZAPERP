@@ -1,5 +1,5 @@
 /**
- * Copia mídia inbound (imagem, vídeo, figurinha, áudio/voz) da URL remota da UltraMSG para /uploads,
+ * Copia mídia inbound (imagem, vídeo, figurinha, áudio/voz, documento/arquivo) da URL remota da UltraMSG para /uploads,
  * para não depender de links com TTL curto. Fluxo do webhook inalterado: corre em background.
  * Não remove arquivos: permanecem no disco enquanto UPLOADS_DIR for persistente (meta: ≥ 3 dias no histórico;
  * depende de volume em disco + backup; URLs remotas da UltraMsg podem expirar em ~24h se a cópia falhar).
@@ -17,10 +17,17 @@ const MAX_BYTES = 80 * 1024 * 1024
 const MSG_SELECT_PERSIST =
   'id, conversa_id, company_id, whatsapp_id, texto, url, tipo, direcao, criado_em, status, autor_usuario_id, reply_meta, nome_arquivo, contact_meta, location_meta, remetente_nome, remetente_telefone'
 
-/** Imagem, vídeo, figurinha e áudio/voz — mesma lógica de URL remota com TTL curto. */
+/** Imagem, vídeo, figurinha, áudio/voz e documento — mesma lógica de URL remota com TTL curto (UltraMSG/S3). */
 function tipoQualificaPersistencia(tipo) {
   const t = String(tipo || '').toLowerCase()
-  return t === 'imagem' || t === 'sticker' || t === 'video' || t === 'audio' || t === 'voice'
+  return (
+    t === 'imagem' ||
+    t === 'sticker' ||
+    t === 'video' ||
+    t === 'audio' ||
+    t === 'voice' ||
+    t === 'arquivo'
+  )
 }
 
 function extFromContentType(ct) {
@@ -42,6 +49,17 @@ function extFromContentType(ct) {
     'audio/aac': '.aac',
     'audio/wav': '.wav',
     'audio/webm': '.webm',
+    'application/pdf': '.pdf',
+    'application/zip': '.zip',
+    'application/x-zip-compressed': '.zip',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document': '.docx',
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': '.xlsx',
+    'application/vnd.openxmlformats-officedocument.presentationml.presentation': '.pptx',
+    'application/msword': '.doc',
+    'application/vnd.ms-excel': '.xls',
+    'application/vnd.ms-powerpoint': '.ppt',
+    'text/plain': '.txt',
+    'text/csv': '.csv',
   }
   return map[c] || null
 }
@@ -61,6 +79,21 @@ const ALLOW_EXT_FROM_NAME = new Set([
   '.aac',
   '.wav',
   '.webm',
+  '.pdf',
+  '.doc',
+  '.docx',
+  '.xls',
+  '.xlsx',
+  '.ppt',
+  '.pptx',
+  '.txt',
+  '.csv',
+  '.zip',
+  '.rar',
+  '.7z',
+  '.apk',
+  '.json',
+  '.xml',
 ])
 
 function safeExtFromNomeArquivo(nome) {
@@ -76,7 +109,10 @@ function pickStoredFilename({ company_id, mensagem_id, contentType, nome_arquivo
   const fromNome = safeExtFromNomeArquivo(nome_arquivo)
   const fromCt = extFromContentType(contentType)
   const t = String(tipo || '').toLowerCase()
-  let ext = fromNome || fromCt || (t === 'imagem' ? '.jpg' : t === 'video' ? '.mp4' : t === 'sticker' ? '.webp' : '.ogg')
+  let ext =
+    fromNome ||
+    fromCt ||
+    (t === 'imagem' ? '.jpg' : t === 'video' ? '.mp4' : t === 'sticker' ? '.webp' : t === 'arquivo' ? '.bin' : '.ogg')
   if (!ext.startsWith('.')) ext = `.${ext}`
   const rand = crypto.randomBytes(6).toString('hex')
   return `inbound-c${Number(company_id)}-m${Number(mensagem_id)}-${rand}${ext}`
@@ -214,7 +250,7 @@ async function persistInboundMediaToUploads({ supabase, io, company_id, mensagem
   }
 }
 
-const TIPOS_HTTPS_RETRY = ['imagem', 'sticker', 'video', 'audio', 'voice']
+const TIPOS_HTTPS_RETRY = ['imagem', 'sticker', 'video', 'audio', 'voice', 'arquivo']
 
 /**
  * Reprocessa mensagens ainda com URL https (falha transitória na 1ª cópia, ou allowlist ampliada depois).
