@@ -60,10 +60,11 @@ function zonedYmdHm(date, timeZone) {
     minute: '2-digit',
     hour12: false,
   }).formatToParts(date)
-  const g = (t) => dp.find((p) => p.type === t)?.value || '00'
+  const g = (t) => dp.find((p) => p.type === t)?.value || '0'
+  const pad2 = (x) => String(x).replace(/\D/g, '').slice(0, 2).padStart(2, '0') || '00'
   return {
-    ymd: `${g('year')}-${g('month')}-${g('day')}`,
-    hm: `${g('hour')}:${g('minute')}`,
+    ymd: `${g('year')}-${pad2(g('month'))}-${pad2(g('day'))}`,
+    hm: `${pad2(g('hour'))}:${pad2(g('minute'))}`,
   }
 }
 
@@ -289,8 +290,48 @@ async function processCompanyAdminAlert({ company_id, fullConfig, provider }) {
   return { sent: false, reason: 'send_failed', error: result?.error }
 }
 
+/**
+ * Varre todas as empresas com ia_config (uso pelo POST /jobs e pelo scheduler interno).
+ */
+async function runAdminAtendimentoAlertaForAllCompanies() {
+  const { data: rows, error } = await supabase.from('ia_config').select('company_id, config')
+  if (error) {
+    console.warn('[adminAtendimentoAlertaJob] select ia_config:', error.message)
+    return { ok: false, processadas: 0, enviadas: 0, detalhes: [], error: error.message }
+  }
+  if (!rows?.length) {
+    return { ok: true, processadas: 0, enviadas: 0, detalhes: [], mensagem: 'Nenhuma empresa com ia_config' }
+  }
+
+  const { getProvider } = require('./providers')
+  const provider = getProvider()
+
+  let processadas = 0
+  let enviadas = 0
+  const detalhes = []
+
+  for (const row of rows) {
+    const company_id = row.company_id
+    const cfg = row.config || {}
+    const alert = cfg.admin_atendimento_alerta
+    if (!alert?.ativo) continue
+
+    processadas++
+    const r = await processCompanyAdminAlert({
+      company_id,
+      fullConfig: cfg,
+      provider,
+    })
+    detalhes.push({ company_id, ...r })
+    if (r?.sent) enviadas++
+  }
+
+  return { ok: true, processadas, enviadas, detalhes }
+}
+
 module.exports = {
   DEFAULT_ADMIN_ATENDIMENTO_ALERTA,
   normalizeAdminAtendimentoAlerta,
   processCompanyAdminAlert,
+  runAdminAtendimentoAlertaForAllCompanies,
 }
