@@ -2651,7 +2651,60 @@ exports.receberZapi = async (req, res) => {
       if (errMsg) {
         if (String(errMsg.code || '') === '23505' || String(errMsg.message || '').includes('duplicate') || String(errMsg.message || '').includes('unique')) {
           const { data: existente } = await supabase.from('mensagens').select(WEBHOOK_MSG_SELECT).eq('company_id', company_id).eq('whatsapp_id', whatsappIdStr).maybeSingle()
-          mensagemSalva = existente
+          // Corrida: outro processo inseriu primeiro (sem URL) e este webhook traz mídia https —
+          // sem merge, a linha fica sem url até expirar o link remoto. Mescla só mídia persistível.
+          let mergedDup = existente
+          const insUrl = String(insertMsg.url || '').trim()
+          const exUrl = String(existente?.url || '').trim()
+          if (
+            existente?.id &&
+            insUrl.startsWith('https://') &&
+            !exUrl &&
+            insertMsg.tipo &&
+            tipoQualificaPersistencia(insertMsg.tipo)
+          ) {
+            try {
+              const upDup = {
+                url: insUrl,
+                tipo: insertMsg.tipo || existente.tipo,
+              }
+              if (insertMsg.nome_arquivo) upDup.nome_arquivo = insertMsg.nome_arquivo
+              if (insertMsg.location_meta && typeof insertMsg.location_meta === 'object') {
+                upDup.location_meta = insertMsg.location_meta
+              }
+              if (insertMsg.contact_meta && typeof insertMsg.contact_meta === 'object') {
+                upDup.contact_meta = insertMsg.contact_meta
+              }
+              const { data: patchedDup, error: patchDupErr } = await supabase
+                .from('mensagens')
+                .update(upDup)
+                .eq('id', existente.id)
+                .eq('company_id', company_id)
+                .select(WEBHOOK_MSG_SELECT)
+                .single()
+              if (!patchDupErr && patchedDup) {
+                mergedDup = patchedDup
+                if (req.app?.get('io')) {
+                  const io2 = req.app.get('io')
+                  const rooms = [`conversa_${conversa_id}`, `empresa_${company_id}`]
+                  const emitPayload = {
+                    ...patchedDup,
+                    criado_em: normalizarTimestampSemFusoAmbiguoParaApi(patchedDup.criado_em),
+                    conversa_id: patchedDup.conversa_id ?? conversa_id,
+                    status: patchedDup.status || 'delivered',
+                    status_mensagem: patchedDup.status_mensagem || patchedDup.status || 'delivered',
+                    fromMe,
+                    direcao: patchedDup.direcao ?? (fromMe ? 'out' : 'in'),
+                  }
+                  io2.to(rooms).emit(io2.EVENTS?.NOVA_MENSAGEM || 'nova_mensagem', emitPayload)
+                  scheduleInboundWebPush(company_id, conversa_id, 'nova_mensagem', emitPayload)
+                }
+              }
+            } catch (e) {
+              console.warn('[webhook] duplicate+media merge:', e?.message || e)
+            }
+          }
+          mensagemSalva = mergedDup
         } else {
           // Fallback: qualquer mensagem que chega TEM que ficar no sistema — tenta inserir com payload mínimo
           console.warn('⚠️ ULTRAMSG fallback insert após erro:', errMsg.message)
