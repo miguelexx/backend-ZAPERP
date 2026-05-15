@@ -208,6 +208,24 @@ async function mergeAndReturnCliente(supabaseClient, company_id, existente, phon
 const CLIENTE_SELECT_COLS =
   'id, nome, pushname, foto_perfil, company_id, telefone, wa_id, email, empresa'
 
+function digitsOnlyPhone(v) {
+  return String(v || '').replace(/\D/g, '')
+}
+
+/** Compara números BR mesmo com/sem 55, com/sem 9º dígito ou só DDD+número no banco. */
+function phonesMatchDigitally(a, b) {
+  const da = digitsOnlyPhone(a)
+  const db = digitsOnlyPhone(b)
+  if (!da || !db) return false
+  if (da === db) return true
+  const ka = phoneKeyBR(da)
+  const kb = phoneKeyBR(db)
+  if (ka && kb && ka === kb) return true
+  if (da.length >= 10 && db.length >= 10 && da.slice(-10) === db.slice(-10)) return true
+  if (da.length >= 8 && db.length >= 8 && da.slice(-8) === db.slice(-8)) return true
+  return false
+}
+
 /**
  * Busca cliente existente por variantes 12/13 dígitos e phoneKeyBR (55… vs 9º dígito).
  * Cobre telefone salvo sem DDI ou formato diferente do canônico do INSERT.
@@ -231,10 +249,8 @@ async function findClienteRowForPhone(supabaseClient, company_id, phone, telefon
     }
   }
 
-  const targetKey = phoneKeyBR(telefoneCanonico || phone)
-  if (!targetKey) return null
-
-  const digits8 = String(targetKey).replace(/\D/g, '').slice(-8)
+  const refPhone = telefoneCanonico || phone
+  const digits8 = digitsOnlyPhone(refPhone).slice(-8)
   if (digits8.length === 8) {
     const { data: candidates, error: errLike } = await supabaseClient
       .from('clientes')
@@ -242,14 +258,14 @@ async function findClienteRowForPhone(supabaseClient, company_id, phone, telefon
       .eq('company_id', company_id)
       .like('telefone', `%${digits8}`)
       .order('id', { ascending: true })
-      .limit(25)
+      .limit(40)
     if (!errLike && Array.isArray(candidates)) {
-      const byKey = candidates.find((row) => row?.id && phoneKeyBR(row.telefone) === targetKey)
-      if (byKey?.id) return byKey
+      const match = candidates.find((row) => row?.id && phonesMatchDigitally(refPhone, row.telefone))
+      if (match?.id) return match
     }
   }
 
-  const digits10 = String(phone || telefoneCanonico || '').replace(/\D/g, '').slice(-10)
+  const digits10 = digitsOnlyPhone(refPhone).slice(-10)
   if (digits10.length === 10) {
     const { data: legacyRows } = await supabaseClient
       .from('clientes')
@@ -257,13 +273,44 @@ async function findClienteRowForPhone(supabaseClient, company_id, phone, telefon
       .eq('company_id', company_id)
       .like('telefone', `%${digits10}`)
       .order('id', { ascending: true })
-      .limit(10)
+      .limit(20)
     if (Array.isArray(legacyRows)) {
-      const legacy = legacyRows.find((row) => row?.id && phoneKeyBR(row.telefone) === targetKey)
+      const legacy = legacyRows.find((row) => row?.id && phonesMatchDigitally(refPhone, row.telefone))
       if (legacy?.id) return legacy
     }
   }
 
+  return null
+}
+
+/** Último recurso: conversa já vinculada a um cliente com o mesmo telefone. */
+async function findClienteRowViaConversa(supabaseClient, company_id, phone, telefoneCanonico, searchPhones) {
+  const variants = Array.from(
+    new Set([telefoneCanonico, ...(Array.isArray(searchPhones) ? searchPhones : []), ...possiblePhonesBR(phone), ...possiblePhonesBR(telefoneCanonico)].filter(Boolean))
+  )
+  if (variants.length === 0) return null
+
+  const { data: convRows } = await supabaseClient
+    .from('conversas')
+    .select('cliente_id, telefone')
+    .eq('company_id', company_id)
+    .in('telefone', variants)
+    .not('cliente_id', 'is', null)
+    .order('id', { ascending: false })
+    .limit(8)
+
+  const refPhone = telefoneCanonico || phone
+  for (const conv of Array.isArray(convRows) ? convRows : []) {
+    if (!conv?.cliente_id) continue
+    if (conv.telefone && !phonesMatchDigitally(refPhone, conv.telefone)) continue
+    const { data: cli } = await supabaseClient
+      .from('clientes')
+      .select(CLIENTE_SELECT_COLS)
+      .eq('id', conv.cliente_id)
+      .eq('company_id', company_id)
+      .maybeSingle()
+    if (cli?.id) return cli
+  }
   return null
 }
 
@@ -383,6 +430,24 @@ async function getOrCreateCliente(supabaseClient, company_id, phone, fields = {}
     ...(fields.email && String(fields.email).trim() ? { email: String(fields.email).trim() } : {}),
     ...(fields.empresa && String(fields.empresa).trim() ? { empresa: String(fields.empresa).trim() } : {})
   }
+  const { data: upserted, error: errUpsert } = await supabaseClient
+    .from('clientes')
+    .upsert(insertData, { onConflict: 'company_id,telefone', ignoreDuplicates: true })
+    .select('id')
+    .maybeSingle()
+
+  if (!errUpsert && upserted?.id) {
+    return { cliente_id: upserted.id, created: true, changed: true }
+  }
+
+  let foundRow = await findClienteRowForPhone(supabaseClient, company_id, phone, telefoneCanonico, searchPhones)
+  if (!foundRow?.id) {
+    foundRow = await findClienteRowViaConversa(supabaseClient, company_id, phone, telefoneCanonico, searchPhones)
+  }
+  if (foundRow?.id) {
+    return mergeAndReturnCliente(supabaseClient, company_id, foundRow, phone, fields)
+  }
+
   const { data: novoCliente, error: errInsert } = await supabaseClient
     .from('clientes')
     .insert(insertData)
@@ -393,14 +458,16 @@ async function getOrCreateCliente(supabaseClient, company_id, phone, fields = {}
     return { cliente_id: novoCliente.id, created: true, changed: true }
   }
 
-  // 5) 23505: race condition — buscar existente da MESMA company (unique é company_id + telefone)
-  // Quando 23505, a linha (company_id, telefoneCanonico) JÁ EXISTE — garantir que a busca inclua esse valor
   const isDuplicate = String(errInsert?.code || '') === '23505' ||
+    String(errUpsert?.code || '') === '23505' ||
     String(errInsert?.message || '').includes('unique') ||
     String(errInsert?.message || '').includes('duplicate')
 
   if (isDuplicate) {
-    let foundRow = await findClienteRowForPhone(supabaseClient, company_id, phone, telefoneCanonico, searchPhones)
+    foundRow = await findClienteRowForPhone(supabaseClient, company_id, phone, telefoneCanonico, searchPhones)
+    if (!foundRow?.id) {
+      foundRow = await findClienteRowViaConversa(supabaseClient, company_id, phone, telefoneCanonico, searchPhones)
+    }
     if (!foundRow?.id && telefoneCanonico) {
       const { data: directRow } = await supabaseClient
         .from('clientes')
@@ -411,15 +478,19 @@ async function getOrCreateCliente(supabaseClient, company_id, phone, fields = {}
       if (directRow?.id) foundRow = directRow
     }
     if (!foundRow?.id) {
-      await new Promise((r) => setTimeout(r, 50))
+      await new Promise((r) => setTimeout(r, 80))
       foundRow = await findClienteRowForPhone(supabaseClient, company_id, phone, telefoneCanonico, searchPhones)
+    }
+    if (!foundRow?.id) {
+      foundRow = await findClienteRowViaConversa(supabaseClient, company_id, phone, telefoneCanonico, searchPhones)
     }
     if (foundRow?.id) {
       return mergeAndReturnCliente(supabaseClient, company_id, foundRow, phone, fields)
     }
   }
 
-  console.warn('[getOrCreateCliente] Insert falhou, continuando sem cliente:', errInsert?.code || errInsert?.message || 'unknown', 'company_id:', company_id, 'telefone:', telefoneCanonico)
+  const errFinal = errInsert || errUpsert
+  console.warn('[getOrCreateCliente] Insert falhou, continuando sem cliente:', errFinal?.code || errFinal?.message || 'unknown', 'company_id:', company_id, 'telefone:', telefoneCanonico)
   return { cliente_id: null, created: false, changed: false }
 }
 
