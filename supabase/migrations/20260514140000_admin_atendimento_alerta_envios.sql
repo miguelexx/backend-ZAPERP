@@ -12,6 +12,10 @@ CREATE TABLE IF NOT EXISTS public.admin_atendimento_alerta_envios (
   CONSTRAINT admin_alerta_envios_company_dia_unique UNIQUE (company_id, dia_local)
 );
 
+-- Se a tabela já existia de um run antigo sem todas as colunas, o CREATE acima não altera o schema.
+ALTER TABLE public.admin_atendimento_alerta_envios
+  ADD COLUMN IF NOT EXISTS criado_em timestamptz NOT NULL DEFAULT now();
+
 COMMENT ON TABLE public.admin_atendimento_alerta_envios IS
   'Registro diário do alerta de resumo ao administrador (evita reenvio se o cron rodar várias vezes).';
 

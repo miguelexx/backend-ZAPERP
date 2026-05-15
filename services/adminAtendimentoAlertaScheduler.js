@@ -24,6 +24,11 @@ async function runCycle() {
     }
     if (result.enviadas > 0) {
       console.log('[adminAlertaScheduler] enviadas', { enviadas: result.enviadas, processadas: result.processadas, elapsedMs })
+    } else if (result.processadas > 0) {
+      console.log('[adminAlertaScheduler] ciclo (alerta ativo; sem envio neste tick — fora da janela de horário ou já enviado hoje)', {
+        empresas_com_alerta_ativo: result.processadas,
+        elapsedMs,
+      })
     }
   } catch (e) {
     console.warn('[adminAlertaScheduler] erro no ciclo:', e?.message || e)
