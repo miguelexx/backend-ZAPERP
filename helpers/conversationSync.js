@@ -205,6 +205,68 @@ async function mergeAndReturnCliente(supabaseClient, company_id, existente, phon
   return { cliente_id: existente.id, created: false, changed: Object.keys(updates).length > 0 }
 }
 
+const CLIENTE_SELECT_COLS =
+  'id, nome, pushname, foto_perfil, company_id, telefone, wa_id, email, empresa'
+
+/**
+ * Busca cliente existente por variantes 12/13 dígitos e phoneKeyBR (55… vs 9º dígito).
+ * Cobre telefone salvo sem DDI ou formato diferente do canônico do INSERT.
+ */
+async function findClienteRowForPhone(supabaseClient, company_id, phone, telefoneCanonico, searchPhones) {
+  const phonesToSearch = Array.from(
+    new Set([telefoneCanonico, ...(Array.isArray(searchPhones) ? searchPhones : []), ...possiblePhonesBR(phone), ...possiblePhonesBR(telefoneCanonico)].filter(Boolean))
+  )
+
+  if (phonesToSearch.length > 0) {
+    const { data: exactRows, error: errExact } = await supabaseClient
+      .from('clientes')
+      .select(CLIENTE_SELECT_COLS)
+      .eq('company_id', company_id)
+      .in('telefone', phonesToSearch)
+      .order('id', { ascending: true })
+      .limit(5)
+    if (!errExact) {
+      const exact = Array.isArray(exactRows) && exactRows[0] ? exactRows[0] : null
+      if (exact?.id) return exact
+    }
+  }
+
+  const targetKey = phoneKeyBR(telefoneCanonico || phone)
+  if (!targetKey) return null
+
+  const digits8 = String(targetKey).replace(/\D/g, '').slice(-8)
+  if (digits8.length === 8) {
+    const { data: candidates, error: errLike } = await supabaseClient
+      .from('clientes')
+      .select(CLIENTE_SELECT_COLS)
+      .eq('company_id', company_id)
+      .like('telefone', `%${digits8}`)
+      .order('id', { ascending: true })
+      .limit(25)
+    if (!errLike && Array.isArray(candidates)) {
+      const byKey = candidates.find((row) => row?.id && phoneKeyBR(row.telefone) === targetKey)
+      if (byKey?.id) return byKey
+    }
+  }
+
+  const digits10 = String(phone || telefoneCanonico || '').replace(/\D/g, '').slice(-10)
+  if (digits10.length === 10) {
+    const { data: legacyRows } = await supabaseClient
+      .from('clientes')
+      .select(CLIENTE_SELECT_COLS)
+      .eq('company_id', company_id)
+      .like('telefone', `%${digits10}`)
+      .order('id', { ascending: true })
+      .limit(10)
+    if (Array.isArray(legacyRows)) {
+      const legacy = legacyRows.find((row) => row?.id && phoneKeyBR(row.telefone) === targetKey)
+      if (legacy?.id) return legacy
+    }
+  }
+
+  return null
+}
+
 /**
  * getOrCreateCliente — SELECT-then-UPDATE/INSERT. Nunca insert puro.
  * Evita 23505 (duplicate key) em clientes_company_telefone_unique.
@@ -278,45 +340,17 @@ async function getOrCreateCliente(supabaseClient, company_id, phone, fields = {}
     return { cliente_id: null }
   }
 
-  // 1) SELECT por (company_id, telefone ou variantes)
-  let q = supabaseClient
-    .from('clientes')
-    .select('id, nome, pushname, foto_perfil, company_id, telefone, wa_id, email, empresa')
-  if (searchPhones.length > 0) q = q.in('telefone', searchPhones)
-  else q = q.eq('telefone', phone)
-  q = q.eq('company_id', company_id)
-  const { data: rows1, error: err1 } = await q.order('id', { ascending: true }).limit(1)
-  const existente = Array.isArray(rows1) && rows1[0] ? rows1[0] : null
-
-  if (err1) {
-    console.warn('[getOrCreateCliente] Erro ao buscar:', err1?.message || err1)
+  // 1) SELECT por variantes + phoneKeyBR (12/13 dígitos, com/sem DDI no banco)
+  let existente = null
+  try {
+    existente = await findClienteRowForPhone(supabaseClient, company_id, phone, telefoneCanonico, searchPhones)
+  } catch (e) {
+    console.warn('[getOrCreateCliente] Erro ao buscar:', e?.message || e)
     return { cliente_id: null }
   }
 
   if (existente?.id) {
     return mergeAndReturnCliente(supabaseClient, company_id, existente, phone, fields)
-  }
-
-  // 2) Fallback legado: LIKE %digits10 (DDD+8) — somente para números BR.
-  // Evita falso match em números internacionais que compartilham sufixo.
-  const canonicalIsBR = !!(telefoneCanonico && String(telefoneCanonico).startsWith('55') && (String(telefoneCanonico).length === 12 || String(telefoneCanonico).length === 13))
-  if (!strictAgendaImport && phone && canonicalIsBR) {
-    try {
-      const digits10 = String(phone).replace(/\D/g, '').slice(-10)
-      if (digits10 && digits10.length === 10) {
-        const { data: legacyRows } = await supabaseClient
-          .from('clientes')
-          .select('id, telefone, nome, pushname, foto_perfil, wa_id, email, empresa')
-          .eq('company_id', company_id)
-          .like('telefone', `%${digits10}`)
-          .order('id', { ascending: true })
-          .limit(1)
-        const legacy = Array.isArray(legacyRows) && legacyRows[0] ? legacyRows[0] : null
-        if (legacy?.id) {
-          return mergeAndReturnCliente(supabaseClient, company_id, legacy, phone, fields)
-        }
-      }
-    } catch (_) { /* fallback silencioso */ }
   }
 
   // 3) Telefone válido para INSERT?
@@ -366,70 +400,23 @@ async function getOrCreateCliente(supabaseClient, company_id, phone, fields = {}
     String(errInsert?.message || '').includes('duplicate')
 
   if (isDuplicate) {
-    // Sempre incluir telefoneCanonico na busca (valor exato que causou o 23505)
-    const phonesToSearch = Array.from(new Set([telefoneCanonico, ...searchPhones].filter(Boolean)))
-
-    const tryFind = async (strategy = 'exact') => {
-      let q = supabaseClient.from('clientes').select('id').eq('company_id', company_id)
-      
-      if (strategy === 'exact') {
-        q = phonesToSearch.length > 0 ? q.in('telefone', phonesToSearch) : q.eq('telefone', telefoneCanonico)
-      } else if (strategy === 'like' && telefoneCanonico) {
-        const digits8 = String(telefoneCanonico).replace(/\D/g, '').slice(-8)
-        if (digits8?.length === 8) {
-          q = q.like('telefone', `%${digits8}`)
-        } else {
-          return null
-        }
-      }
-      
-      const { data, error } = await q.order('id', { ascending: true }).limit(1)
-      if (error) return null
-      return Array.isArray(data) && data[0] ? data[0] : null
-    }
-
-    // Tentativa 1: busca exata (inclui telefoneCanonico que causou 23505)
-    let foundCo = await tryFind('exact')
-    
-    // Tentativa 2: busca DIRETA pelo valor exato do INSERT (100% garantido quando 23505)
-    if (!foundCo?.id && telefoneCanonico) {
+    let foundRow = await findClienteRowForPhone(supabaseClient, company_id, phone, telefoneCanonico, searchPhones)
+    if (!foundRow?.id && telefoneCanonico) {
       const { data: directRow } = await supabaseClient
         .from('clientes')
-        .select('id')
+        .select(CLIENTE_SELECT_COLS)
         .eq('company_id', company_id)
         .eq('telefone', telefoneCanonico)
-        .limit(1)
         .maybeSingle()
-      foundCo = directRow && directRow.id ? directRow : null
+      if (directRow?.id) foundRow = directRow
     }
-    
-    // Tentativa 3: aguardar (race condition) e retry
-    if (!foundCo?.id) {
-      await new Promise(r => setTimeout(r, 150))
-      foundCo = await tryFind('exact')
+    if (!foundRow?.id) {
+      await new Promise((r) => setTimeout(r, 50))
+      foundRow = await findClienteRowForPhone(supabaseClient, company_id, phone, telefoneCanonico, searchPhones)
     }
-    
-    // Tentativa 4: busca por LIKE (últimos 8 dígitos)
-    if (!foundCo?.id) {
-      foundCo = await tryFind('like')
+    if (foundRow?.id) {
+      return mergeAndReturnCliente(supabaseClient, company_id, foundRow, phone, fields)
     }
-    
-    // Tentativa 5: variações 12/13 dígitos
-    if (!foundCo?.id && telefoneCanonico) {
-      const allVariants = possiblePhonesBR(telefoneCanonico)
-      if (allVariants.length >= 1) {
-        const { data: variantRows } = await supabaseClient
-          .from('clientes')
-          .select('id')
-          .eq('company_id', company_id)
-          .in('telefone', allVariants)
-          .order('id', { ascending: true })
-          .limit(1)
-        foundCo = Array.isArray(variantRows) && variantRows[0] ? variantRows[0] : null
-      }
-    }
-    
-    if (foundCo?.id) return { cliente_id: foundCo.id, created: false, changed: false }
   }
 
   console.warn('[getOrCreateCliente] Insert falhou, continuando sem cliente:', errInsert?.code || errInsert?.message || 'unknown', 'company_id:', company_id, 'telefone:', telefoneCanonico)

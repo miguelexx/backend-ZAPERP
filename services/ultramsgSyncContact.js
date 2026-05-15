@@ -189,12 +189,22 @@ async function syncUltraMsgContact(chatIdOrPhone, companyId, opts = {}) {
       }
     }
 
-    await getOrCreateCliente(supabase, companyId, telefone, {
+    const { cliente_id: clienteId } = await getOrCreateCliente(supabase, companyId, telefone, {
       nome: nomeFromResult || undefined,
       nomeSource: 'syncUltramsg',
       pushname: pushnameFromResult || undefined,
       foto_perfil: fotoFromResult || undefined
     })
+    if (clienteId) {
+      for (const conv of convRows) {
+        if (conv.cliente_id != null && Number(conv.cliente_id) > 0) continue
+        await supabase
+          .from('conversas')
+          .update({ cliente_id: clienteId })
+          .eq('id', conv.id)
+          .eq('company_id', companyId)
+      }
+    }
   } catch (e) {
     console.warn('[syncUltraMsgContact] Erro ao atualizar banco:', e?.message || e)
   }
@@ -245,8 +255,14 @@ async function syncConversationContactOnJoin(supabase, conversaId, companyId, io
 
     if (!conv || !conv.telefone || conv.telefone.startsWith('lid:') || conv.telefone.includes('@g.us')) return
 
+    const hasNomeCache = Boolean(conv.nome_contato_cache && String(conv.nome_contato_cache).trim())
+    const hasFotoCache = Boolean(conv.foto_perfil_contato_cache && String(conv.foto_perfil_contato_cache).trim())
+    if (opts.skipIfRecent && conv.cliente_id && hasNomeCache && hasFotoCache) {
+      return
+    }
+
     const chatId = conv.telefone.includes('@c.us') ? conv.telefone : `${String(conv.telefone).replace(/\D/g, '')}@c.us`
-    const synced = await syncUltraMsgContact(chatId, companyId, { skipCache: true })
+    const synced = await syncUltraMsgContact(chatId, companyId, { skipCache: !conv.cliente_id })
     if (!synced) return
 
     _lastSyncByConv.set(key, Date.now())
