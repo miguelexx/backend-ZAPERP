@@ -6,7 +6,8 @@
 const supabase = require('../config/supabase')
 const { countAguardandoFuncionarioParaAlertaAdmin } = require('./supervisaoService')
 
-const CRON_GRACE_MINUTES = 6
+/** Minutos após o horário configurados em que ainda dispara (scheduler a cada 1–2 min + relógios). */
+const CRON_GRACE_MINUTES = 20
 const AVALIACOES_LOOKBACK_MS = 30 * 24 * 60 * 60 * 1000
 
 const DEFAULT_ADMIN_ATENDIMENTO_ALERTA = {
@@ -28,11 +29,22 @@ function normalizeHorarioEnvio(value) {
   return `${String(h).padStart(2, '0')}:${String(min).padStart(2, '0')}`
 }
 
+function coerceAtivo(value) {
+  if (value === true || value === 1) return true
+  if (typeof value === 'string' && ['true', '1', 'yes', 'on'].includes(value.trim().toLowerCase())) return true
+  return false
+}
+
+function isChatbotTriageEnabled(ct) {
+  if (!ct || typeof ct !== 'object') return false
+  return coerceAtivo(ct.enabled)
+}
+
 function normalizeAdminAtendimentoAlerta(raw) {
   const r = raw && typeof raw === 'object' ? raw : {}
   const tz = String(r.timezone || '').trim()
   return {
-    ativo: r.ativo === true,
+    ativo: coerceAtivo(r.ativo),
     telefone_admin: String(r.telefone_admin || '').trim().slice(0, 40),
     horario_envio: normalizeHorarioEnvio(r.horario_envio),
     timezone: tz.length > 0 ? tz.slice(0, 80) : '',
@@ -194,6 +206,16 @@ async function processCompanyAdminAlert({ company_id, fullConfig, provider }) {
   const scheduled = normalizeHorarioEnvio(alert.horario_envio)
 
   if (!isWithinDispatchWindow(scheduled, nowHm, CRON_GRACE_MINUTES)) {
+    if (String(process.env.ADMIN_ATENDIMENTO_ALERTA_DEBUG || '').trim() === '1') {
+      console.log('[adminAtendimentoAlerta] fora da janela', {
+        company_id,
+        scheduled,
+        nowHm,
+        tz,
+        diaLocal,
+        graceMin: CRON_GRACE_MINUTES,
+      })
+    }
     return { sent: false, reason: 'outside_window' }
   }
 
@@ -231,33 +253,50 @@ async function processCompanyAdminAlert({ company_id, fullConfig, provider }) {
 
   const reserved = await tryReserveAlertaSlot(company_id, diaLocal, scheduled)
   if (!reserved.ok) {
-    return { sent: false, reason: 'already_sent_or_attempted' }
+    const reason =
+      reserved.reason === 'duplicate' ? 'already_sent_or_attempted' : 'reserve_failed'
+    if (reason === 'reserve_failed') {
+      console.warn('[adminAtendimentoAlerta] falha ao reservar slot (ver tabela/migração)', {
+        company_id,
+        dia_local: diaLocal,
+        reserve_reason: reserved.reason,
+      })
+    }
+    return { sent: false, reason, reserve_reason: reserved.reason }
   }
 
   let notaMedia = null
-  if (alert.incluir_nota_media) {
-    notaMedia = await fetchNotaMedia30d(company_id)
-  }
-
   let qtdSemResp = 0
-  if (alert.incluir_conversas_sem_resposta) {
-    const chatbotEnabled = !!(fullConfig?.chatbot_triage && fullConfig.chatbot_triage.enabled === true)
-    qtdSemResp = await countAguardandoFuncionarioParaAlertaAdmin(company_id, { chatbotEnabled })
-  }
-
-  const texto = buildMessage({
-    incluirNota: alert.incluir_nota_media,
-    notaMedia,
-    incluirSemResp: alert.incluir_conversas_sem_resposta,
-    qtdSemResp,
-  })
-
   let result = { ok: false, error: null }
+
   try {
+    if (alert.incluir_nota_media) {
+      notaMedia = await fetchNotaMedia30d(company_id)
+    }
+
+    if (alert.incluir_conversas_sem_resposta) {
+      try {
+        const chatbotEnabled = isChatbotTriageEnabled(fullConfig?.chatbot_triage)
+        qtdSemResp = await countAguardandoFuncionarioParaAlertaAdmin(company_id, { chatbotEnabled })
+      } catch (eCount) {
+        console.warn('[adminAtendimentoAlerta] count conversas sem resposta (usa 0):', company_id, eCount?.message || eCount)
+        qtdSemResp = 0
+      }
+    }
+
+    const texto = buildMessage({
+      incluirNota: alert.incluir_nota_media,
+      notaMedia,
+      incluirSemResp: alert.incluir_conversas_sem_resposta,
+      qtdSemResp,
+    })
+
     result = (await send(alert.telefone_admin, texto, { companyId: company_id })) || { ok: false }
   } catch (e) {
     result = { ok: false, error: String(e?.message || e || 'exceção no envio') }
+    console.warn('[adminAtendimentoAlerta] exceção após reserva', { company_id, erro: result.error })
   }
+
   const ok = !!result?.ok
 
   await finalizeAlertaSlot(company_id, diaLocal, {
@@ -276,6 +315,7 @@ async function processCompanyAdminAlert({ company_id, fullConfig, provider }) {
     dia_local: diaLocal,
     horario: scheduled,
     timezone: tz,
+    now_hm: nowHm,
     destino_mascarado: maskPhoneTail(digits),
     nota_media: notaMedia,
     conversas_sem_resposta: alert.incluir_conversas_sem_resposta ? qtdSemResp : undefined,
@@ -288,6 +328,19 @@ async function processCompanyAdminAlert({ company_id, fullConfig, provider }) {
   }
   console.warn('[adminAtendimentoAlerta] falha UltraMsg', { company_id, erro: result?.error })
   return { sent: false, reason: 'send_failed', error: result?.error }
+}
+
+function parseIaConfigJson(config) {
+  if (config == null) return {}
+  if (typeof config === 'string') {
+    try {
+      const o = JSON.parse(config)
+      return o && typeof o === 'object' ? o : {}
+    } catch {
+      return {}
+    }
+  }
+  return typeof config === 'object' ? config : {}
 }
 
 /**
@@ -312,9 +365,9 @@ async function runAdminAtendimentoAlertaForAllCompanies() {
 
   for (const row of rows) {
     const company_id = row.company_id
-    const cfg = row.config || {}
-    const alert = cfg.admin_atendimento_alerta
-    if (!alert?.ativo) continue
+    const cfg = parseIaConfigJson(row.config)
+    const alertNorm = normalizeAdminAtendimentoAlerta(cfg.admin_atendimento_alerta || {})
+    if (!alertNorm.ativo) continue
 
     processadas++
     const r = await processCompanyAdminAlert({
@@ -334,4 +387,5 @@ module.exports = {
   normalizeAdminAtendimentoAlerta,
   processCompanyAdminAlert,
   runAdminAtendimentoAlertaForAllCompanies,
+  parseIaConfigJson,
 }

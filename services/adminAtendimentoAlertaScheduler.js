@@ -25,9 +25,13 @@ async function runCycle() {
     if (result.enviadas > 0) {
       console.log('[adminAlertaScheduler] enviadas', { enviadas: result.enviadas, processadas: result.processadas, elapsedMs })
     } else if (result.processadas > 0) {
-      console.log('[adminAlertaScheduler] ciclo (alerta ativo; sem envio neste tick — fora da janela de horário ou já enviado hoje)', {
+      const resumo = (result.detalhes || [])
+        .map((d) => `${d.company_id}:${d.reason || (d.sent ? 'sent' : '?')}${d.error ? `(${String(d.error).slice(0, 80)})` : ''}`)
+        .join(' | ')
+      console.log('[adminAlertaScheduler] ciclo (alerta ativo; sem envio neste tick)', {
         empresas_com_alerta_ativo: result.processadas,
         elapsedMs,
+        detalhes: resumo || undefined,
       })
     }
   } catch (e) {
