@@ -45,6 +45,37 @@ async function getSlaMinutes(company_id) {
   return Math.max(1, Math.min(1440, Math.trunc(raw)))
 }
 
+/** Nomes de atendentes sem embed PostgREST (FK `conversas_atendente_fk` foi removida na dedupe). */
+async function fetchUsuariosNomeMap(company_id, userIds) {
+  const ids = [...new Set((userIds || []).map((id) => Number(id)).filter((id) => Number.isFinite(id) && id > 0))]
+  const map = {}
+  if (ids.length === 0) return map
+  const { data, error } = await supabase
+    .from('usuarios')
+    .select('id, nome')
+    .eq('company_id', company_id)
+    .in('id', ids)
+  if (error) throw error
+  for (const u of data || []) {
+    if (u?.id != null) map[String(u.id)] = u?.nome || 'Sem nome'
+  }
+  return map
+}
+
+/** Primeira resposta outbound após a primeira inbound (evita TypeError se não houver msg `in`). */
+function findPrimeiraRespostaPair(msgs) {
+  const primeiraIn = (msgs || []).find((m) => m?.direcao === 'in')
+  if (!primeiraIn?.criado_em) return { primeiraIn: null, primeiraOut: null }
+  const inTs = new Date(primeiraIn.criado_em).getTime()
+  if (!Number.isFinite(inTs)) return { primeiraIn: null, primeiraOut: null }
+  const primeiraOut = (msgs || []).find((m) => {
+    if (m?.direcao !== 'out' || !m?.criado_em) return false
+    const outTs = new Date(m.criado_em).getTime()
+    return Number.isFinite(outTs) && outTs >= inTs
+  })
+  return { primeiraIn, primeiraOut: primeiraOut || null }
+}
+
 exports.overview = async (req, res) => {
   const { company_id } = req.user
 
@@ -177,16 +208,11 @@ exports.overview = async (req, res) => {
     let totalMinutos = 0
     let totalConversasComResposta = 0
 
-    Object.values(mensagensPorConversa).forEach(msgs => {
-      const primeiraIn = msgs.find(m => m.direcao === 'in')
-      const primeiraOut = msgs.find(m => m.direcao === 'out' && new Date(m.criado_em) >= new Date(primeiraIn.criado_em))
-
+    Object.values(mensagensPorConversa).forEach((msgs) => {
+      const { primeiraIn, primeiraOut } = findPrimeiraRespostaPair(msgs)
       if (primeiraIn && primeiraOut) {
         const diff =
-          (new Date(primeiraOut.criado_em) -
-            new Date(primeiraIn.criado_em)) /
-          60000
-
+          (new Date(primeiraOut.criado_em) - new Date(primeiraIn.criado_em)) / 60000
         if (diff >= 0) {
           totalMinutos += diff
           totalConversasComResposta++
@@ -203,9 +229,8 @@ exports.overview = async (req, res) => {
     const slaMinutes = await getSlaMinutes(company_id)
     /* SLA: % de conversas com 1ª resposta dentro da configuração da empresa */
     let conversasComSla = 0
-    Object.values(mensagensPorConversa).forEach(msgs => {
-      const primeiraIn = msgs.find(m => m.direcao === 'in')
-      const primeiraOut = msgs.find(m => m.direcao === 'out' && new Date(m.criado_em) >= new Date(primeiraIn.criado_em))
+    Object.values(mensagensPorConversa).forEach((msgs) => {
+      const { primeiraIn, primeiraOut } = findPrimeiraRespostaPair(msgs)
       if (primeiraIn && primeiraOut) {
         const diff = (new Date(primeiraOut.criado_em) - new Date(primeiraIn.criado_em)) / 60000
         if (diff >= 0 && diff <= slaMinutes) conversasComSla++
@@ -236,17 +261,22 @@ exports.overview = async (req, res) => {
     const porAtendente = await fetchAllRows(() => {
       let q = supabase
         .from('conversas')
-        .select('atendente_id, usuarios!conversas_atendente_fk ( nome )')
+        .select('atendente_id')
         .eq('company_id', company_id)
         .not('atendente_id', 'is', null)
       if (fromIso) q = q.gte('criado_em', fromIso).lte('criado_em', toIso)
       return q
     })
 
+    const usuarioNomeMap = await fetchUsuariosNomeMap(
+      company_id,
+      (porAtendente || []).map((c) => c?.atendente_id)
+    )
+
     const atendentesMap = {}
 
-    porAtendente.forEach(c => {
-      const nome = c.usuarios?.nome || 'Sem nome'
+    porAtendente.forEach((c) => {
+      const nome = usuarioNomeMap[String(c?.atendente_id)] || 'Sem nome'
       atendentesMap[nome] = (atendentesMap[nome] || 0) + 1
     })
 
@@ -890,13 +920,17 @@ async function buildRelatorioConversas(company_id, filters = {}) {
     .select(`
       id, telefone, status_atendimento, criado_em, atendente_id, departamento_id,
       clientes!conversas_cliente_fk ( nome, observacoes ),
-      usuarios!conversas_atendente_fk ( nome ),
       conversa_tags ( tag_id, tags ( id, nome ) )
     `)
     .eq('company_id', company_id)
 
   if (error) throw error
   let list = conversas || []
+
+  const atendenteNomeMap = await fetchUsuariosNomeMap(
+    company_id,
+    list.map((c) => c?.atendente_id)
+  )
 
   if (filters.data_inicio) list = list.filter(c => new Date(c.criado_em) >= new Date(filters.data_inicio))
   if (filters.data_fim) {
@@ -958,7 +992,7 @@ async function buildRelatorioConversas(company_id, filters = {}) {
       observacoes: c.clientes?.observacoes || '',
       setor: c?.departamento_id != null ? (depMap[String(c.departamento_id)] || '—') : '—',
       status_atendimento: c.status_atendimento,
-      atendente_nome: c.usuarios?.nome || '—',
+      atendente_nome: atendenteNomeMap[String(c?.atendente_id)] || '—',
       tags: tags.map(t => t.nome).join(', '),
       criado_em: c.criado_em,
       ultima_mensagem: ultima?.texto?.slice(0, 200) || '—',
@@ -1227,9 +1261,14 @@ exports.getSlaAlertas = async (req, res) => {
 
     const { data: conversas } = await supabase
       .from('conversas')
-      .select('id, telefone, status_atendimento, criado_em, atendente_id, clientes!conversas_cliente_fk ( nome ), usuarios!conversas_atendente_fk ( nome )')
+      .select('id, telefone, status_atendimento, criado_em, atendente_id, clientes!conversas_cliente_fk ( nome )')
       .eq('company_id', company_id)
       .in('status_atendimento', ['aberta', 'em_atendimento'])
+
+    const atendenteNomeMap = await fetchUsuariosNomeMap(
+      company_id,
+      (conversas || []).map((c) => c?.atendente_id)
+    )
 
     const { data: mensagens } = await supabase
       .from('mensagens')
@@ -1254,7 +1293,7 @@ exports.getSlaAlertas = async (req, res) => {
           conversa_id: c.id,
           cliente_nome: getDisplayName(c.clientes) || c.telefone,
           telefone: c.telefone,
-          atendente_nome: c.usuarios?.nome || '—',
+          atendente_nome: atendenteNomeMap[String(c?.atendente_id)] || '—',
           tempo_sem_responder_min: minSemResponder,
           limite_min: limiteMin,
         })
