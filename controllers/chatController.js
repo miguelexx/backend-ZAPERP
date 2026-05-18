@@ -277,7 +277,7 @@ function prefixarParaCliente(texto, usuarioNome) {
   if (!usuarioNome || !String(usuarioNome).trim()) return texto
   const t = String(texto || '').trim()
   const nome = String(usuarioNome).trim()
-  return t ? `*${nome}*\n\n${t}` : `*${nome}*`
+  return t ? `*${nome}*\n${t}` : `*${nome}*`
 }
 
 /** Busca nome e preferência do usuário para exibir ao cliente no WhatsApp. Retorna { nome, mostrar } */
