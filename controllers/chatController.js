@@ -276,7 +276,8 @@ async function enrichMensagensComAutorUsuario(supabase, company_id, mensagens) {
 function prefixarParaCliente(texto, usuarioNome) {
   if (!usuarioNome || !String(usuarioNome).trim()) return texto
   const t = String(texto || '').trim()
-  return t ? `${String(usuarioNome).trim()}: ${t}` : String(usuarioNome).trim()
+  const nome = String(usuarioNome).trim()
+  return t ? `*${nome}*\n\n${t}` : `*${nome}*`
 }
 
 /** Busca nome e preferência do usuário para exibir ao cliente no WhatsApp. Retorna { nome, mostrar } */
