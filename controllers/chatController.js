@@ -4928,7 +4928,13 @@ const MAX_MEDIA_CAPTION_CHARS = 1024
  * @returns {Promise<{ ok: true, msg: object } | { ok: false, status: number, error: string }>}
  */
 async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conversa_id, telefoneParaEnvio, io, captionUsuario = '' }) {
+  const { extFromOriginalName, EXTENSOES_AVISO_WHATSAPP } = require('../middleware/upload')
   let fileWork = file
+  const extUpload = extFromOriginalName(fileWork?.originalname)
+  const avisoWhatsapp =
+    extUpload && EXTENSOES_AVISO_WHATSAPP.has(extUpload)
+      ? `O WhatsApp pode recusar arquivos .${extUpload}. Se não entregar, envie o arquivo dentro de um .zip.`
+      : null
   const tipo = aplicarTipoForcadoSticker(fileWork, inferirTipoArquivo(fileWork))
   if (tipo === 'audio' || tipo === 'voice') {
     try {
@@ -4956,16 +4962,12 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
       ? ''
       : String(captionUsuario || '').trim().slice(0, MAX_MEDIA_CAPTION_CHARS)
 
-  const textoMensagem =
-    tipo === 'audio'
-      ? '(áudio)'
-      : tipo === 'voice'
-        ? '(áudio de voz)'
-        : tipo === 'sticker'
-          ? '(figurinha)'
-          : captionUsuarioTrim && (tipo === 'imagem' || tipo === 'video' || tipo === 'arquivo')
-            ? captionUsuarioTrim
-            : fileWork.originalname
+  const { textoMensagemMidiaParaBanco, captionWhatsappParaMidia } = require('../helpers/midiaMensagemHelper')
+  const textoMensagem = textoMensagemMidiaParaBanco({
+    tipo,
+    captionUsuarioTrim,
+    originalname: fileWork.originalname,
+  })
 
   const pathUrl = `/uploads/${fileWork.filename}`
 
@@ -5042,12 +5044,11 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
     }
 
     const { nome: usuarioNome } = await getUsuarioParaEnvioCliente(supabase, company_id, user_id)
-    const footerWa = usuarioNome ? `— ${usuarioNome}` : ''
-    const waCaption = captionUsuarioTrim
-      ? (footerWa
-          ? `${captionUsuarioTrim}\n${footerWa}`.slice(0, MAX_MEDIA_CAPTION_CHARS)
-          : captionUsuarioTrim)
-      : footerWa
+    const waCaption = captionWhatsappParaMidia({
+      tipo,
+      captionUsuarioTrim,
+      usuarioNome,
+    })
     const baseUrl = (process.env.APP_URL || process.env.BASE_URL || '').replace(/\/$/, '')
     const fullUrl = baseUrl ? `${baseUrl}${pathUrl}` : null
     const isLocalhost = /localhost|127\.0\.0\.1/i.test(baseUrl)
@@ -5077,8 +5078,12 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
               : tipo === 'video' && provider.sendVideo
                 ? provider.sendVideo(phone, mediaUrl, waCaption, opts)
                 : provider.sendFile
-                  ? provider.sendFile(phone, mediaUrl, fileWork.originalname || '', { ...opts, caption: waCaption })
-                  : Promise.resolve(false)
+                  ? provider.sendFile(phone, mediaUrl, fileWork.originalname || '', {
+                      ...opts,
+                      caption: waCaption,
+                      returnDetails: true,
+                    })
+                  : Promise.resolve({ ok: false, error: 'Envio de documento indisponível' })
       promise
         .then(async (result) => {
           const normalizedResult = typeof result === 'boolean'
@@ -5184,7 +5189,7 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
     }
 
   // Não retornar mensagem completa no HTTP — evita duplicação (API + socket). Mensagem chega via nova_mensagem.
-  return { ok: true, msg }
+  return { ok: true, msg, aviso_whatsapp: avisoWhatsapp }
 }
 
 exports.enviarArquivo = async (req, res) => {
@@ -5251,6 +5256,7 @@ exports.enviarArquivo = async (req, res) => {
       .trim()
       .slice(0, MAX_MEDIA_CAPTION_CHARS)
     const ids = []
+    let avisoWhatsapp = null
 
     for (let i = 0; i < files.length; i++) {
       const raw = files[i]
@@ -5269,11 +5275,14 @@ exports.enviarArquivo = async (req, res) => {
       })
       if (!r.ok) return res.status(r.status).json({ error: r.error })
       ids.push(r.msg.id)
+      if (r.aviso_whatsapp) avisoWhatsapp = r.aviso_whatsapp
       if (i < files.length - 1) await new Promise((resolve) => setTimeout(resolve, 250))
     }
 
+    const avisoPayload = avisoWhatsapp ? { aviso_whatsapp: avisoWhatsapp } : {}
+
     if (ids.length === 1) {
-      return res.json({ ok: true, id: ids[0], conversa_id: Number(conversa_id) })
+      return res.json({ ok: true, id: ids[0], conversa_id: Number(conversa_id), ...avisoPayload })
     }
     return res.json({
       ok: true,
@@ -5281,6 +5290,7 @@ exports.enviarArquivo = async (req, res) => {
       id: ids[ids.length - 1],
       conversa_id: Number(conversa_id),
       count: ids.length,
+      ...avisoPayload,
     })
   } catch (err) {
     console.error('Erro ao enviar arquivo:', err)

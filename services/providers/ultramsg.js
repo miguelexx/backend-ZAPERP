@@ -537,7 +537,8 @@ async function sendImage(phone, url, caption = '', opts = {}) {
   const nums = phoneCandidatesForSend(phone)
   if (!nums.length || !url) return false
   const captionTrim = String(caption || '').trim().slice(0, CAPTION_MAX_LEN)
-  const body = { to: nums[0], image: String(url).trim(), caption: captionTrim }
+  const body = { to: nums[0], image: String(url).trim() }
+  if (captionTrim) body.caption = captionTrim
   const { ok, data, text } = await postJson({ ...cfg, endpoint: '/messages/image', body })
   if (!ok) {
     console.warn('❌ UltraMsg sendImage falhou:', nums[0]?.slice(-12), String(text || data?.error || '').slice(0, 150), '| token:', maskToken(cfg.token))
@@ -665,21 +666,36 @@ async function sendAudio(phone, audioUrl, opts = {}) {
  * Envia documento por URL.
  */
 async function sendFile(phone, url, fileName = '', opts = {}) {
+  const returnDetails = opts?.returnDetails === true
   await awaitSendDelay(opts?.companyId ?? opts?.company_id)
   const cfg = await resolveConfig(opts)
-  if (!cfg) return false
+  if (!cfg) return returnDetails ? { ok: false, messageId: null, error: 'Configuração UltraMsg indisponível' } : false
   const nums = phoneCandidatesForSend(phone)
-  if (!nums.length || !url) return false
+  if (!nums.length || !url) {
+    return returnDetails ? { ok: false, messageId: null, error: 'Destino ou URL do documento inválido' } : false
+  }
   const ext = fileName ? String(fileName).split('.').pop() : 'pdf'
   const safeExt = /^[a-z0-9]+$/i.test(ext) ? ext : 'pdf'
   const filenameRaw = fileName ? String(fileName).trim() : `file.${safeExt}`
   const filename = filenameRaw.slice(0, FILENAME_MAX_LEN)
   const captionTrim = String(opts?.caption || '').trim().slice(0, CAPTION_MAX_LEN)
-  const body = { to: nums[0], document: String(url).trim(), filename, caption: captionTrim }
-  const { ok } = await postJson({ ...cfg, endpoint: '/messages/document', body })
-  if (!ok) return false
-  console.log('✅ UltraMsg arquivo enviado:', nums[0]?.slice(-12))
-  return true
+  // UltraMsg exige caption no POST /messages/document (vazio falha o envio).
+  // Não usar o nome do arquivo como legenda visível no WhatsApp.
+  const captionForApi = captionTrim || ' '
+  const body = { to: nums[0], document: String(url).trim(), filename, caption: captionForApi }
+  const { ok, data, text } = await postJson({ ...cfg, endpoint: '/messages/document', body })
+  const bodyError = data?.error || (!data?.id && !data?.sent && !data?.messageId && data?.message)
+  if (!ok || bodyError) {
+    let errMsg = String(data?.error || data?.message || text?.slice(0, 200) || `HTTP ${ok ? 200 : 'erro'}`)
+    if (isFileExtensionError(errMsg) || isFileExtensionError(data?.error)) {
+      errMsg = `Extensão não suportada pelo WhatsApp (.${safeExt}). Tente ZIP, PDF ou outro formato.`
+    }
+    console.warn('❌ UltraMsg sendFile falhou:', nums[0]?.slice(-12), filename?.slice(-40), errMsg.slice(0, 200))
+    return returnDetails ? { ok: false, messageId: null, error: errMsg } : false
+  }
+  const msgId = data?.id ?? data?.messageId ?? null
+  console.log('✅ UltraMsg arquivo enviado:', nums[0]?.slice(-12), filename?.slice(-30))
+  return returnDetails ? { ok: true, messageId: msgId ? String(msgId) : null, error: null } : true
 }
 
 /**
@@ -692,7 +708,8 @@ async function sendVideo(phone, videoUrl, caption = '', opts = {}) {
   const nums = phoneCandidatesForSend(phone)
   if (!nums.length || !videoUrl) return false
   const captionTrim = String(caption || '').trim().slice(0, CAPTION_MAX_LEN)
-  const body = { to: nums[0], video: String(videoUrl).trim(), caption: captionTrim }
+  const body = { to: nums[0], video: String(videoUrl).trim() }
+  if (captionTrim) body.caption = captionTrim
   const { ok } = await postJson({ ...cfg, endpoint: '/messages/video', body })
   if (!ok) return false
   console.log('✅ UltraMsg vídeo enviado:', nums[0]?.slice(-12))
