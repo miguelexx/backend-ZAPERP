@@ -324,7 +324,7 @@ async function enrichMensagemComAutorUsuario(supabase, company_id, msg) {
 async function assertPermissaoConversa({ company_id, conversa_id, user_id, role, user_dep_ids }) {
   const { data: conv, error } = await supabase
     .from('conversas')
-    .select('id, atendente_id, departamento_id, tipo, telefone')
+    .select('id, atendente_id, departamento_id, tipo, telefone, status_atendimento')
     .eq('company_id', Number(company_id))
     .eq('id', Number(conversa_id))
     .maybeSingle()
@@ -3008,9 +3008,13 @@ exports.retomarEmAtendimentoManualChat = async (req, res) => {
       return res.status(400).json({ error: 'Indisponível para conversas de grupo' })
     }
 
-    const stConv = String(perm.conv?.status_atendimento || '').toLowerCase()
-    const result =
+    const stConv = String(perm.conv?.status_atendimento || '')
+      .trim()
+      .toLowerCase()
+      .replace(/\s+/g, '_')
+    const isCobrancaFinanceira =
       stConv === 'pagamento_pendente' || stConv === 'em_atraso'
+    const result = isCobrancaFinanceira
         ? await retomarDeCobrancaFinanceira({
             company_id,
             conversa_id,
