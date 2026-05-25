@@ -196,6 +196,30 @@ async function acquireAlertaSendLock(company_id, diaLocalStr, horarioConfig) {
   return { ok: false, reason: 'db_error' }
 }
 
+async function inspectAlertaSendLock(company_id, diaLocalStr) {
+  const { data, error } = await supabase
+    .from('admin_atendimento_alerta_envios')
+    .select('sucesso, horario_config, destino_suffix, detalhes, criado_em')
+    .eq('company_id', company_id)
+    .eq('dia_local', diaLocalStr)
+    .maybeSingle()
+
+  if (error) {
+    if (String(error.code || '') === '42P01') return { ok: false, reason: 'table_missing' }
+    return { ok: false, reason: 'db_error', error: error.message }
+  }
+  if (!data) return { ok: true, exists: false }
+  return {
+    ok: true,
+    exists: true,
+    sucesso: data.sucesso === true,
+    horario_config: data.horario_config || '',
+    destino_suffix: data.destino_suffix || null,
+    detalhes: data.detalhes || {},
+    criado_em: data.criado_em || null,
+  }
+}
+
 async function finalizeAlertaSlot(company_id, diaLocalStr, payload) {
   const { error } = await supabase
     .from('admin_atendimento_alerta_envios')
@@ -265,7 +289,7 @@ function buildMessage({ incluirNota, notaMedia, incluirSemResp, qtdSemResp, fila
  * Processa envio para uma empresa (chamado pelo job de cron).
  * @returns {Promise<{ sent: boolean, reason?: string, error?: string }>}
  */
-async function processCompanyAdminAlert({ company_id, fullConfig, provider }) {
+async function processCompanyAdminAlert({ company_id, fullConfig, provider, dryRun = false }) {
   const alert = normalizeAdminAtendimentoAlerta((fullConfig || {}).admin_atendimento_alerta || {})
   if (!alert.ativo) return { sent: false, reason: 'inactive' }
 
@@ -273,8 +297,23 @@ async function processCompanyAdminAlert({ company_id, fullConfig, provider }) {
   const now = new Date()
   const { ymd: diaLocal, hm: nowHm } = zonedYmdHm(now, tz)
   const scheduled = normalizeHorarioEnvio(alert.horario_envio)
+  const withinWindow = isWithinDispatchWindow(scheduled, nowHm, CRON_GRACE_MINUTES)
+  const baseDiag = {
+    dryRun,
+    scheduled,
+    nowHm,
+    timezone: tz,
+    diaLocal,
+    graceMinutes: CRON_GRACE_MINUTES,
+    withinWindow,
+    metricas: {
+      incluir_nota_media: alert.incluir_nota_media,
+      incluir_conversas_sem_resposta: alert.incluir_conversas_sem_resposta,
+    },
+    telefone_tail: maskPhoneTail(alert.telefone_admin),
+  }
 
-  if (!isWithinDispatchWindow(scheduled, nowHm, CRON_GRACE_MINUTES)) {
+  if (!withinWindow) {
     if (String(process.env.ADMIN_ATENDIMENTO_ALERTA_DEBUG || '').trim() === '1') {
       console.log('[adminAtendimentoAlerta] fora da janela', {
         company_id,
@@ -285,11 +324,11 @@ async function processCompanyAdminAlert({ company_id, fullConfig, provider }) {
         graceMin: CRON_GRACE_MINUTES,
       })
     }
-    return { sent: false, reason: 'outside_window' }
+    return { sent: false, reason: 'outside_window', ...baseDiag }
   }
 
   if (!alert.incluir_nota_media && !alert.incluir_conversas_sem_resposta) {
-    return { sent: false, reason: 'no_metrics_enabled' }
+    return { sent: false, reason: 'no_metrics_enabled', ...baseDiag }
   }
 
   const digits = String(alert.telefone_admin || '').replace(/\D/g, '')
@@ -301,13 +340,48 @@ async function processCompanyAdminAlert({ company_id, fullConfig, provider }) {
       erro: 'telefone_admin inválido',
     })
     console.warn('[adminAtendimentoAlerta] telefone inválido', { company_id })
-    return { sent: false, reason: 'invalid_phone' }
+    return { sent: false, reason: 'invalid_phone', ...baseDiag }
   }
 
   const send = provider?.sendText
-  if (typeof send !== 'function') {
+  if (!dryRun && typeof send !== 'function') {
     await logBotAdminAlert(company_id, { ok: false, dia_local: diaLocal, erro: 'sendText indisponível' })
-    return { sent: false, reason: 'no_provider' }
+    return { sent: false, reason: 'no_provider', ...baseDiag }
+  }
+
+  if (dryRun) {
+    const lock = await inspectAlertaSendLock(company_id, diaLocal)
+    let notaMedia = null
+    let qtdSemResp = 0
+    let filaItens = []
+    if (alert.incluir_nota_media) {
+      notaMedia = await fetchNotaMedia30d(company_id)
+    }
+    if (alert.incluir_conversas_sem_resposta) {
+      try {
+        const chatbotEnabled = isChatbotTriageEnabled(fullConfig?.chatbot_triage)
+        const fila = await getAguardandoFuncionarioParaAlertaAdmin(company_id, {
+          chatbotEnabled,
+          limit: 15,
+        })
+        qtdSemResp = fila.count
+        filaItens = fila.items
+      } catch (_) {
+        qtdSemResp = 0
+        filaItens = []
+      }
+    }
+    return {
+      sent: false,
+      reason: lock?.sucesso ? 'already_sent_today' : 'dry_run_ready',
+      ...baseDiag,
+      lock,
+      preview: {
+        nota_media: notaMedia,
+        conversas_sem_resposta: alert.incluir_conversas_sem_resposta ? qtdSemResp : undefined,
+        itens: filaItens,
+      },
+    }
   }
 
   const locked = await acquireAlertaSendLock(company_id, diaLocal, scheduled)
@@ -320,7 +394,7 @@ async function processCompanyAdminAlert({ company_id, fullConfig, provider }) {
         lock_reason: locked.reason,
       })
     }
-    return { sent: false, reason, lock_reason: locked.reason }
+    return { sent: false, reason, lock_reason: locked.reason, ...baseDiag }
   }
 
   let notaMedia = null
@@ -390,10 +464,10 @@ async function processCompanyAdminAlert({ company_id, fullConfig, provider }) {
 
   if (ok) {
     console.log('[adminAtendimentoAlerta] enviado', { company_id, dia_local: diaLocal, destino: maskPhoneTail(digits) })
-    return { sent: true }
+    return { sent: true, ...baseDiag }
   }
   console.warn('[adminAtendimentoAlerta] falha UltraMsg', { company_id, erro: result?.error })
-  return { sent: false, reason: 'send_failed', error: result?.error }
+  return { sent: false, reason: 'send_failed', error: result?.error, ...baseDiag }
 }
 
 function parseIaConfigJson(config) {
@@ -412,7 +486,8 @@ function parseIaConfigJson(config) {
 /**
  * Varre todas as empresas com ia_config (uso pelo POST /jobs e pelo scheduler interno).
  */
-async function runAdminAtendimentoAlertaForAllCompanies() {
+async function runAdminAtendimentoAlertaForAllCompanies(opts = {}) {
+  const dryRun = opts.dryRun === true
   const { data: rows, error } = await supabase.from('ia_config').select('company_id, config')
   if (error) {
     console.warn('[adminAtendimentoAlertaJob] select ia_config:', error.message)
@@ -440,6 +515,7 @@ async function runAdminAtendimentoAlertaForAllCompanies() {
       company_id,
       fullConfig: cfg,
       provider,
+      dryRun,
     })
     detalhes.push({ company_id, ...r })
     if (r?.sent) enviadas++

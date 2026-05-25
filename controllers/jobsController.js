@@ -356,12 +356,17 @@ exports.vencimentoPagamentoFinanceiro = async (req, res) => {
 
 exports.adminAtendimentoAlerta = async (req, res) => {
   try {
-    const out = await runAdminAtendimentoAlertaForAllCompanies()
+    const dryRun =
+      req.query.dry_run === '1' ||
+      req.query.dry_run === 'true' ||
+      req.body?.dry_run === true
+    const out = await runAdminAtendimentoAlertaForAllCompanies({ dryRun })
     if (!out.ok) {
       return res.status(500).json({ error: out.error || 'Falha ao processar alertas' })
     }
     return res.json({
       ok: true,
+      dryRun,
       empresas_com_alerta_ativo: out.processadas,
       enviadas: out.enviadas,
       detalhes: out.detalhes,
