@@ -174,7 +174,14 @@ async function ask(req, res) {
     }
 
     const trimmedQuestion = question.trim()
-    const days = period_days != null ? Number(period_days) : undefined
+    let days
+    if (period_days !== undefined && period_days !== null && String(period_days).trim() !== '') {
+      days = Number(period_days)
+      if (!Number.isFinite(days) || days <= 0 || days > 365) {
+        return res.status(400).json({ ok: false, intent: null, answer: null, data: null, error: 'period_days invÃ¡lido.' })
+      }
+      days = Math.floor(days)
+    }
     const bypassCache = shouldBypassCache(trimmedQuestion)
 
     // ── 1) Verificar limite mensal ────────────────────────────────────────────

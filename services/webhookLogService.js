@@ -1,54 +1,103 @@
 /**
- * Serviço de log para webhooks.
+ * Servico de log para webhooks.
  * Registra todos os webhooks recebidos no banco (webhook_logs).
- * Não bloqueia o fluxo — falhas são apenas logadas no console.
+ * Nao bloqueia o fluxo: falhas sao apenas logadas no console.
  */
 
 const supabase = require('../config/supabase')
 
 const MAX_PAYLOAD_SIZE = 50000 // ~50KB para evitar payloads gigantes
-const SENSITIVE_KEYS = ['token', 'instance_token', 'password', 'authorization']
+const SENSITIVE_KEYS = [
+  'token',
+  'webhook_token',
+  'instance_token',
+  'instanceToken',
+  'client_token',
+  'clientToken',
+  'access_token',
+  'accessToken',
+  'refresh_token',
+  'refreshToken',
+  'api_key',
+  'apiKey',
+  'password',
+  'authorization',
+]
+const SENSITIVE_KEY_NAMES = new Set(SENSITIVE_KEYS.map(normalizeKeyName))
+
+function normalizeKeyName(key) {
+  return String(key || '').replace(/[-_]/g, '').toLowerCase()
+}
+
+function isSensitiveKey(key) {
+  return SENSITIVE_KEY_NAMES.has(normalizeKeyName(key))
+}
+
+function maskSensitiveJsonString(value) {
+  let masked = String(value)
+  for (const key of SENSITIVE_KEYS) {
+    const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    const rx = new RegExp(`("${escaped}"\\s*:\\s*")([^"]*)(")`, 'gi')
+    masked = masked.replace(rx, '$1***$3')
+  }
+  return masked
+}
+
+function sanitizeValue(value, key = '') {
+  if (isSensitiveKey(key) && value) return '***'
+  if (value == null) return value
+
+  if (typeof value === 'string') {
+    const trimmed = value.trim()
+    if (trimmed && (trimmed.startsWith('{') || trimmed.startsWith('['))) {
+      try {
+        return sanitizeValue(JSON.parse(trimmed), key)
+      } catch (_) {
+        return maskSensitiveJsonString(value)
+      }
+    }
+    return maskSensitiveJsonString(value)
+  }
+
+  if (Array.isArray(value)) {
+    return value.map((item) => sanitizeValue(item))
+  }
+
+  if (typeof value === 'object') {
+    const out = {}
+    for (const [k, v] of Object.entries(value)) {
+      out[k] = sanitizeValue(v, k)
+    }
+    return out
+  }
+
+  return value
+}
 
 /**
- * Sanitiza o payload removendo ou mascarando dados sensíveis.
+ * Sanitiza o payload removendo ou mascarando dados sensiveis.
  */
 function sanitizePayload(obj) {
   if (!obj || typeof obj !== 'object') return obj
-  const clone = JSON.parse(JSON.stringify(obj))
-  for (const key of SENSITIVE_KEYS) {
-    if (Object.prototype.hasOwnProperty.call(clone, key) && clone[key]) {
-      clone[key] = '***'
-    }
-  }
-  // Também mascara em objetos aninhados (ex: data.token)
-  function maskInObject(o) {
-    if (!o || typeof o !== 'object') return
-    for (const k of SENSITIVE_KEYS) {
-      if (Object.prototype.hasOwnProperty.call(o, k) && o[k]) o[k] = '***'
-    }
-    for (const v of Object.values(o)) {
-      if (v && typeof v === 'object') maskInObject(v)
-    }
-  }
-  maskInObject(clone)
-  const str = JSON.stringify(clone)
+  const sanitized = sanitizeValue(obj)
+  const str = JSON.stringify(sanitized)
   if (str.length > MAX_PAYLOAD_SIZE) {
     return { _truncated: true, _size: str.length, _preview: str.slice(0, 2000) }
   }
-  return clone
+  return sanitized
 }
 
 /**
  * Registra um webhook no banco.
  * @param {object} opts
  * @param {string} opts.provider - 'ultramsg' | 'meta'
- * @param {string} opts.path - Path da requisição
+ * @param {string} opts.path - Path da requisicao
  * @param {string} [opts.method='POST']
  * @param {string} [opts.instance_id]
  * @param {number|null} [opts.company_id]
  * @param {string} [opts.event_type]
  * @param {string} opts.status - received | processed | ignored_missing_instance | ignored_not_mapped | rejected_token | error
- * @param {object} [opts.payload] - Body da requisição (sanitizado)
+ * @param {object} [opts.payload] - Body da requisicao (sanitizado)
  * @param {string} [opts.ip]
  * @param {string} [opts.user_agent]
  * @param {number} [opts.response_status]
@@ -84,7 +133,7 @@ async function log(opts) {
 }
 
 /**
- * Log assíncrono sem await — fire-and-forget.
+ * Log assincrono sem await: fire-and-forget.
  */
 function logAsync(opts) {
   setImmediate(() => log(opts))

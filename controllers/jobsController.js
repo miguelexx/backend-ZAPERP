@@ -106,6 +106,7 @@ exports.timeoutInatividadeChatbot = async (req, res) => {
       const { data: mensagens } = await supabase
         .from('mensagens')
         .select('conversa_id, criado_em, direcao, texto')
+        .eq('company_id', company_id)
         .in('conversa_id', conversaIds)
         .order('criado_em', { ascending: false })
 
@@ -210,6 +211,7 @@ exports.timeoutInatividade = async (req, res) => {
       const { data: ultimasMsg } = await supabase
         .from('mensagens')
         .select('conversa_id, criado_em, direcao')
+        .eq('company_id', emp.id)
         .in('conversa_id', conversaIds)
         .order('criado_em', { ascending: false })
 

@@ -57,6 +57,10 @@ exports.upsertToken = async (req, res) => {
       return res.status(400).json({ error: 'token FCM inválido' })
     }
 
+    if (classified.kind === 'fcm' && classified.token.length > MAX_TOKEN_LEN) {
+      return res.status(400).json({ error: 'token FCM muito grande' })
+    }
+
     if (classified.kind === 'web_push') {
       const ua = String(req.headers['user-agent'] || '').slice(0, 512)
       const now = new Date().toISOString()

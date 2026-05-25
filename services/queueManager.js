@@ -89,11 +89,12 @@ async function listJobs(company_id, opts = {}) {
 async function getNextPendingJob() {
   if (runningCount >= MAX_CONCURRENT) return null
 
+  const nowIso = new Date().toISOString()
   const { data } = await supabase
     .from('jobs')
     .select('*')
     .eq('status', 'pending')
-    .or('next_run_at.is.null,next_run_at.lte.' + new Date().toISOString())
+    .or('next_run_at.is.null,next_run_at.lte.' + nowIso)
     .order('criado_em', { ascending: true })
     .limit(1)
     .maybeSingle()
@@ -103,14 +104,24 @@ async function getNextPendingJob() {
   const pausado = await isProcessamentoPausado(data.company_id)
   if (pausado) return null
 
-  const { error } = await supabase
-    .from('jobs')
-    .update({ status: 'running', tentativas: data.tentativas + 1, atualizado_em: new Date().toISOString() })
-    .eq('id', data.id)
-    .eq('status', 'pending')
+  const nextTentativas = Number(data.tentativas || 0) + 1
+  const update = {
+    status: 'running',
+    tentativas: nextTentativas,
+    atualizado_em: new Date().toISOString()
+  }
 
-  if (error) return null
-  return { ...data, tentativas: data.tentativas + 1 }
+  const { data: locked, error } = await supabase
+    .from('jobs')
+    .update(update)
+    .eq('id', data.id)
+    .eq('company_id', data.company_id)
+    .eq('status', 'pending')
+    .select('id')
+    .maybeSingle()
+
+  if (error || !locked?.id) return null
+  return { ...data, ...update }
 }
 
 /**
@@ -170,7 +181,9 @@ async function finalizeJob(jobId, success, job, resultado, erro) {
     atualizado_em: new Date().toISOString()
   }
 
-  await supabase.from('jobs').update(update).eq('id', jobId)
+  let q = supabase.from('jobs').update(update).eq('id', jobId)
+  if (job?.company_id != null) q = q.eq('company_id', job.company_id)
+  await q
 }
 
 /**
@@ -239,7 +252,7 @@ function startWorker(intervalMs = 5000, io = null) {
           await supabase.from('jobs').update({
             status: 'pending',
             tentativas: Math.max(0, (job.tentativas || 1) - 1)
-          }).eq('id', job.id)
+          }).eq('id', job.id).eq('company_id', job.company_id).eq('status', 'running')
         }
       }
     } catch (e) {
@@ -268,6 +281,7 @@ async function retryJob(jobId, company_id) {
       atualizado_em: new Date().toISOString()
     })
     .eq('id', jobId)
+    .eq('company_id', company_id)
 
   if (error) return { ok: false, error: error.message }
   return { ok: true }

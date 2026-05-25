@@ -29,7 +29,7 @@ exports.listarClientes = async (req, res) => {
     // Query de contagem real (sem limite de linhas) — roda em paralelo com a listagem
     let countQuery = supabase
       .from('clientes')
-      .select('*', { count: 'exact', head: true })
+      .select('id', { count: 'exact', head: true })
       .eq('company_id', cid)
 
     if (termoBusca) {
@@ -461,7 +461,7 @@ exports.vincularTag = async (req, res) => {
     // 🔒 evita duplicidade
     const { data: existente, error: errExiste } = await supabase
       .from('cliente_tags')
-      .select('*')
+      .select('cliente_id')
       .eq('company_id', cid)
       .eq('cliente_id', clienteId)
       .eq('tag_id', Number(tagId))

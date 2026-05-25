@@ -342,7 +342,10 @@ exports.login = async (req, res) => {
     // Busca usuário pelo email (case-insensitive: aceita User@Email.com mesmo se no banco estiver user@email.com)
     // Multi-tenant: company_id opcional — quando o mesmo email existe em várias empresas, obriga escolher qual
     const emailParaBusca = emailNorm.replace(/\\/g, '\\\\').replace(/%/g, '\\%').replace(/_/g, '\\_')
-    let query = supabase.from('usuarios').select('*').ilike('email', emailParaBusca)
+    let query = supabase
+      .from('usuarios')
+      .select('id, nome, email, perfil, departamento_id, company_id, ativo, senha_hash, senha, password, pass')
+      .ilike('email', emailParaBusca)
     const cidLogin = companyIdBody != null ? Number(companyIdBody) : null
     if (Number.isFinite(cidLogin) && cidLogin > 0) {
       query = query.eq('company_id', cidLogin)

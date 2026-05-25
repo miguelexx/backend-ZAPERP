@@ -138,8 +138,9 @@ exports.getConfig = async (req, res) => {
 exports.putConfig = async (req, res) => {
   try {
     const { company_id } = req.user
+    const body = req.body && typeof req.body === 'object' ? req.body : {}
     const { chatbot_triage: ctBody, bot_global, roteamento, ia, automacoes, admin_atendimento_alerta: adminBody } =
-      req.body
+      body
 
     const { data: existing } = await supabase
       .from('ia_config')
@@ -213,7 +214,8 @@ exports.getRegras = async (req, res) => {
 exports.postRegra = async (req, res) => {
   try {
     const { company_id } = req.user
-    const { palavra_chave, resposta, departamento_id, tag_id, aplicar_tag, horario_comercial_only, ativo } = req.body
+    const body = req.body && typeof req.body === 'object' ? req.body : {}
+    const { palavra_chave, resposta, departamento_id, tag_id, aplicar_tag, horario_comercial_only, ativo } = body
 
     if (!palavra_chave?.trim() || !resposta?.trim()) {
       return res.status(400).json({ error: 'palavra_chave e resposta são obrigatórios' })
@@ -247,7 +249,8 @@ exports.putRegra = async (req, res) => {
   try {
     const { company_id } = req.user
     const { id } = req.params
-    const { palavra_chave, resposta, departamento_id, tag_id, aplicar_tag, horario_comercial_only, ativo } = req.body
+    const body = req.body && typeof req.body === 'object' ? req.body : {}
+    const { palavra_chave, resposta, departamento_id, tag_id, aplicar_tag, horario_comercial_only, ativo } = body
 
     const update = {}
     if (palavra_chave !== undefined) update.palavra_chave = String(palavra_chave).trim()
