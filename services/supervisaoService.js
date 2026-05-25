@@ -899,17 +899,42 @@ function getDayRange(dateInput) {
  * Contagem alinhada ao selo "Aguardando funcionário" (última mensagem do cliente + status em fila/atendimento).
  * Exclui grupos (@g.us) e, com chatbot ativo, exclui triagem pura (aberta sem departamento).
  */
+function isPendingForAdminAlerta(p, { chatbotEnabled = false } = {}) {
+  const tel = String(p?.telefone || '')
+  if (tel.includes('@g.us')) return false
+  const st = String(p?.status_atendimento || '').toLowerCase()
+  if (chatbotEnabled && st === 'aberta' && (p.departamento_id == null || p.departamento_id === '')) return false
+  return true
+}
+
 async function countAguardandoFuncionarioParaAlertaAdmin(companyId, { chatbotEnabled = false } = {}) {
+  const { count } = await getAguardandoFuncionarioParaAlertaAdmin(companyId, { chatbotEnabled, limit: 1 })
+  return count
+}
+
+/** Lista resumida para o texto do alerta diário ao administrador (sem mídia). */
+async function listAguardandoFuncionarioParaAlertaAdmin(companyId, { chatbotEnabled = false, limit = 15 } = {}) {
+  const { items } = await getAguardandoFuncionarioParaAlertaAdmin(companyId, { chatbotEnabled, limit })
+  return items
+}
+
+/** Contagem + amostra para o alerta (uma passagem em insights.pending). */
+async function getAguardandoFuncionarioParaAlertaAdmin(companyId, { chatbotEnabled = false, limit = 15 } = {}) {
+  const max = Math.max(1, Math.min(30, Number(limit) || 15))
   const insights = await buildConversationInsights(companyId)
+  const items = []
   let count = 0
   for (const p of insights.pending) {
-    const tel = String(p.telefone || '')
-    if (tel.includes('@g.us')) continue
-    const st = String(p.status_atendimento || '').toLowerCase()
-    if (chatbotEnabled && st === 'aberta' && (p.departamento_id == null || p.departamento_id === '')) continue
+    if (!isPendingForAdminAlerta(p, { chatbotEnabled })) continue
     count++
+    if (items.length < max) {
+      items.push({
+        cliente_nome: p.cliente_nome || p.nome || 'Cliente',
+        telefone: p.telefone || null,
+      })
+    }
   }
-  return count
+  return { count, items }
 }
 
 async function getRelatorioDiarioGestor(companyId, dateStr) {
@@ -1030,4 +1055,5 @@ module.exports = {
   getMovimentacaoFuncionario,
   getRelatorioDiarioGestor,
   countAguardandoFuncionarioParaAlertaAdmin,
+  listAguardandoFuncionarioParaAlertaAdmin,
 }

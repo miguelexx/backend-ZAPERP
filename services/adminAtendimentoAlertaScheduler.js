@@ -28,7 +28,11 @@ async function runCycle() {
       const resumo = (result.detalhes || [])
         .map((d) => `${d.company_id}:${d.reason || (d.sent ? 'sent' : '?')}${d.error ? `(${String(d.error).slice(0, 80)})` : ''}`)
         .join(' | ')
-      console.log('[adminAlertaScheduler] ciclo (alerta ativo; sem envio neste tick)', {
+      const hasActionable = (result.detalhes || []).some((d) =>
+        ['send_failed', 'invalid_phone', 'reserve_failed', 'no_provider'].includes(d.reason)
+      )
+      const logFn = hasActionable ? console.warn : console.log
+      logFn('[adminAlertaScheduler] ciclo (alerta ativo; sem envio neste tick)', {
         empresas_com_alerta_ativo: result.processadas,
         elapsedMs,
         detalhes: resumo || undefined,

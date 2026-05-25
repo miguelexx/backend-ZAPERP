@@ -16,6 +16,7 @@ const {
   CONFIRM_FINALIZE_ABSENCE,
 } = require('../services/absenceFinalizationService')
 const { runAdminAtendimentoAlertaForAllCompanies } = require('../services/adminAtendimentoAlertaService')
+const { processarVencimentosPagamentoFinanceiro } = require('../services/conversaPagamentoFinanceiroService')
 
 function timingSafeEqualStr(a, b) {
   const sa = String(a ?? '')
@@ -333,6 +334,24 @@ exports.finalizacaoAusenciaLote = async (req, res) => {
  * Envia resumo diário ao número configurado (UltraMSG), por empresa, no horário + fuso do chatbot.
  * Idempotente via tabela admin_atendimento_alerta_envios. Recomenda-se cron a cada 1–3 minutos.
  */
+/** POST /jobs/vencimento-pagamento-financeiro — pagamento_pendente vencido → em_atraso */
+exports.vencimentoPagamentoFinanceiro = async (req, res) => {
+  try {
+    const dryRun =
+      req.query.dry_run === '1' ||
+      req.query.dry_run === 'true' ||
+      req.body?.dry_run === true
+    const result = await processarVencimentosPagamentoFinanceiro({ dryRun })
+    if (!result.ok) {
+      return res.status(500).json({ error: result.error || 'Falha ao processar vencimentos de pagamento' })
+    }
+    return res.json(result)
+  } catch (err) {
+    console.error('vencimentoPagamentoFinanceiro:', err)
+    return res.status(500).json({ error: err.message })
+  }
+}
+
 exports.adminAtendimentoAlerta = async (req, res) => {
   try {
     const out = await runAdminAtendimentoAlertaForAllCompanies()

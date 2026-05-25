@@ -4,10 +4,10 @@
  */
 
 const supabase = require('../config/supabase')
-const { countAguardandoFuncionarioParaAlertaAdmin } = require('./supervisaoService')
+const { getAguardandoFuncionarioParaAlertaAdmin } = require('./supervisaoService')
 
-/** Minutos após o horário configurados em que ainda dispara (scheduler a cada 1–2 min + relógios). */
-const CRON_GRACE_MINUTES = 20
+/** Minutos após o horário em que ainda dispara (scheduler a cada 1–2 min + relógios; fim inclusivo). */
+const CRON_GRACE_MINUTES = 30
 const AVALIACOES_LOOKBACK_MS = 30 * 24 * 60 * 60 * 1000
 
 const DEFAULT_ADMIN_ATENDIMENTO_ALERTA = {
@@ -74,9 +74,13 @@ function zonedYmdHm(date, timeZone) {
   }).formatToParts(date)
   const g = (t) => dp.find((p) => p.type === t)?.value || '0'
   const pad2 = (x) => String(x).replace(/\D/g, '').slice(0, 2).padStart(2, '0') || '00'
+  let hour = parseInt(pad2(g('hour')), 10)
+  if (!Number.isFinite(hour)) hour = 0
+  if (hour === 24) hour = 0
+  hour = Math.max(0, Math.min(23, hour))
   return {
     ymd: `${g('year')}-${pad2(g('month'))}-${pad2(g('day'))}`,
-    hm: `${pad2(g('hour'))}:${pad2(g('minute'))}`,
+    hm: `${String(hour).padStart(2, '0')}:${pad2(g('minute'))}`,
   }
 }
 
@@ -92,7 +96,8 @@ function isWithinDispatchWindow(scheduledHm, nowHm, graceMinutes) {
   const t0 = hmToMinutes(scheduledHm)
   const t1 = hmToMinutes(nowHm)
   if (t0 == null || t1 == null) return false
-  return t1 >= t0 && t1 < t0 + graceMinutes
+  const grace = Math.max(1, Number(graceMinutes) || CRON_GRACE_MINUTES)
+  return t1 >= t0 && t1 <= t0 + grace
 }
 
 function maskPhoneTail(digits) {
@@ -126,19 +131,68 @@ async function fetchNotaMedia30d(company_id) {
   return Number(avg.toFixed(2))
 }
 
-async function tryReserveAlertaSlot(company_id, diaLocalStr, horarioConfig) {
-  const { error } = await supabase.from('admin_atendimento_alerta_envios').insert({
+/**
+ * Bloqueia reenvio só quando já houve sucesso no dia. Falhas anteriores permitem nova tentativa na janela.
+ */
+async function acquireAlertaSendLock(company_id, diaLocalStr, horarioConfig) {
+  const { data: existing, error: selErr } = await supabase
+    .from('admin_atendimento_alerta_envios')
+    .select('sucesso')
+    .eq('company_id', company_id)
+    .eq('dia_local', diaLocalStr)
+    .maybeSingle()
+
+  if (selErr) {
+    if (String(selErr.code || '') === '42P01') {
+      console.warn('[adminAtendimentoAlerta] tabela admin_atendimento_alerta_envios ausente — rode a migration')
+    } else {
+      console.warn('[adminAtendimentoAlerta] acquireAlertaSendLock select:', selErr.message)
+    }
+    return { ok: false, reason: 'db_error' }
+  }
+
+  if (existing?.sucesso === true) {
+    return { ok: false, reason: 'already_sent' }
+  }
+
+  if (existing) {
+    const { error: updErr } = await supabase
+      .from('admin_atendimento_alerta_envios')
+      .update({
+        horario_config: horarioConfig,
+        sucesso: false,
+        detalhes: { reservado: true, retry: true },
+      })
+      .eq('company_id', company_id)
+      .eq('dia_local', diaLocalStr)
+    if (updErr) {
+      console.warn('[adminAtendimentoAlerta] acquireAlertaSendLock retry update:', updErr.message)
+      return { ok: false, reason: 'db_error' }
+    }
+    return { ok: true, retry: true }
+  }
+
+  const { error: insErr } = await supabase.from('admin_atendimento_alerta_envios').insert({
     company_id,
     dia_local: diaLocalStr,
     horario_config: horarioConfig,
     sucesso: false,
     detalhes: { reservado: true },
   })
-  if (!error) return { ok: true }
-  const code = String(error.code || '')
-  const msg = String(error.message || '')
-  if (code === '23505' || msg.includes('duplicate key')) return { ok: false, reason: 'duplicate' }
-  console.warn('[adminAtendimentoAlerta] tryReserveAlertaSlot:', error.message)
+  if (!insErr) return { ok: true }
+  const code = String(insErr.code || '')
+  const msg = String(insErr.message || '')
+  if (code === '23505' || msg.includes('duplicate key')) {
+    const { data: raced } = await supabase
+      .from('admin_atendimento_alerta_envios')
+      .select('sucesso')
+      .eq('company_id', company_id)
+      .eq('dia_local', diaLocalStr)
+      .maybeSingle()
+    if (raced?.sucesso === true) return { ok: false, reason: 'already_sent' }
+    return { ok: true, retry: true }
+  }
+  console.warn('[adminAtendimentoAlerta] acquireAlertaSendLock insert:', insErr.message)
   return { ok: false, reason: 'db_error' }
 }
 
@@ -180,14 +234,29 @@ async function logBotAdminAlert(company_id, detalhes) {
   }
 }
 
-function buildMessage({ incluirNota, notaMedia, incluirSemResp, qtdSemResp }) {
+function buildMessage({ incluirNota, notaMedia, incluirSemResp, qtdSemResp, filaItens }) {
   const lines = ['📊 Resumo do atendimento:']
   if (incluirNota) {
     const txt = notaMedia != null ? formatNotaPt(notaMedia) : null
     lines.push(txt != null ? `Nota média dos atendimentos: ${txt}` : 'Nota média dos atendimentos: —')
   }
   if (incluirSemResp) {
-    lines.push(`Conversas aguardando resposta: ${Number.isFinite(Number(qtdSemResp)) ? Number(qtdSemResp) : 0}`)
+    const qtd = Number.isFinite(Number(qtdSemResp)) ? Number(qtdSemResp) : 0
+    lines.push(`Conversas aguardando resposta: ${qtd}`)
+    const itens = Array.isArray(filaItens) ? filaItens : []
+    if (itens.length > 0) {
+      lines.push('')
+      lines.push('Aguardando funcionário:')
+      for (const item of itens) {
+        const nome = String(item?.cliente_nome || item?.nome || 'Cliente').trim().slice(0, 80) || 'Cliente'
+        const tel = String(item?.telefone || '').replace(/\D/g, '')
+        const tail = tel.length >= 4 ? tel.slice(-4) : ''
+        lines.push(tail ? `• ${nome} (…${tail})` : `• ${nome}`)
+      }
+      if (qtd > itens.length) {
+        lines.push(`… e mais ${qtd - itens.length}`)
+      }
+    }
   }
   return lines.join('\n')
 }
@@ -225,11 +294,6 @@ async function processCompanyAdminAlert({ company_id, fullConfig, provider }) {
 
   const digits = String(alert.telefone_admin || '').replace(/\D/g, '')
   if (!digits || digits.length < 10) {
-    await recordEnvio(company_id, diaLocal, scheduled, {
-      sucesso: false,
-      destino_suffix: maskPhoneTail(digits),
-      detalhes: { erro: 'telefone_admin inválido' },
-    })
     await logBotAdminAlert(company_id, {
       ok: false,
       dia_local: diaLocal,
@@ -242,31 +306,26 @@ async function processCompanyAdminAlert({ company_id, fullConfig, provider }) {
 
   const send = provider?.sendText
   if (typeof send !== 'function') {
-    await recordEnvio(company_id, diaLocal, scheduled, {
-      sucesso: false,
-      destino_suffix: maskPhoneTail(digits),
-      detalhes: { erro: 'provider.sendText indisponível' },
-    })
     await logBotAdminAlert(company_id, { ok: false, dia_local: diaLocal, erro: 'sendText indisponível' })
     return { sent: false, reason: 'no_provider' }
   }
 
-  const reserved = await tryReserveAlertaSlot(company_id, diaLocal, scheduled)
-  if (!reserved.ok) {
-    const reason =
-      reserved.reason === 'duplicate' ? 'already_sent_or_attempted' : 'reserve_failed'
+  const locked = await acquireAlertaSendLock(company_id, diaLocal, scheduled)
+  if (!locked.ok) {
+    const reason = locked.reason === 'already_sent' ? 'already_sent_today' : 'reserve_failed'
     if (reason === 'reserve_failed') {
-      console.warn('[adminAtendimentoAlerta] falha ao reservar slot (ver tabela/migração)', {
+      console.warn('[adminAtendimentoAlerta] falha ao reservar envio (ver tabela/migração)', {
         company_id,
         dia_local: diaLocal,
-        reserve_reason: reserved.reason,
+        lock_reason: locked.reason,
       })
     }
-    return { sent: false, reason, reserve_reason: reserved.reason }
+    return { sent: false, reason, lock_reason: locked.reason }
   }
 
   let notaMedia = null
   let qtdSemResp = 0
+  let filaItens = []
   let result = { ok: false, error: null }
 
   try {
@@ -277,10 +336,16 @@ async function processCompanyAdminAlert({ company_id, fullConfig, provider }) {
     if (alert.incluir_conversas_sem_resposta) {
       try {
         const chatbotEnabled = isChatbotTriageEnabled(fullConfig?.chatbot_triage)
-        qtdSemResp = await countAguardandoFuncionarioParaAlertaAdmin(company_id, { chatbotEnabled })
+        const fila = await getAguardandoFuncionarioParaAlertaAdmin(company_id, {
+          chatbotEnabled,
+          limit: 15,
+        })
+        qtdSemResp = fila.count
+        filaItens = fila.items
       } catch (eCount) {
         console.warn('[adminAtendimentoAlerta] count conversas sem resposta (usa 0):', company_id, eCount?.message || eCount)
         qtdSemResp = 0
+        filaItens = []
       }
     }
 
@@ -289,6 +354,7 @@ async function processCompanyAdminAlert({ company_id, fullConfig, provider }) {
       notaMedia,
       incluirSemResp: alert.incluir_conversas_sem_resposta,
       qtdSemResp,
+      filaItens,
     })
 
     result = (await send(alert.telefone_admin, texto, { companyId: company_id })) || { ok: false }

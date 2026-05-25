@@ -14,6 +14,11 @@ const {
   marcarAguardandoClienteManual,
   retomarEmAtendimentoManual,
 } = require('../services/conversaStatusManualService')
+const {
+  marcarAguardandoPagamento,
+  retomarDeCobrancaFinanceira,
+} = require('../services/conversaPagamentoFinanceiroService')
+const { usuarioPertenceSetorFinanceiro } = require('../helpers/financeiroSetorHelper')
 const { normalizarTimestampSemFusoAmbiguoParaApi } = require('../helpers/timestampApiCompat')
 
 /** UltraMsg retorna id interno (ex: 35096), não o messageId do WhatsApp. Só usar como whatsapp_id se for o ID real. */
@@ -588,6 +593,8 @@ exports.listarConversas = async (req, res) => {
       minha_fila: minhaFilaRaw,
       incluir_colaboradores_encaminhar: incluirColabEncRaw,
       aguardando_cliente: aguardandoClienteRaw,
+      pagamento_pendente: pagamentoPendenteRaw,
+      em_atraso: emAtrasoRaw,
       tempo_parado: tempoParadoRaw,
       finalizacao_motivo: finalizacaoMotivoRaw,
     } = req.query
@@ -619,11 +626,29 @@ exports.listarConversas = async (req, res) => {
       aguardandoClienteRaw === 1 ||
       aguardandoClienteRaw === true
 
+    const pagamentoPendenteAtivo =
+      pagamentoPendenteRaw === '1' ||
+      pagamentoPendenteRaw === 'true' ||
+      pagamentoPendenteRaw === 1 ||
+      pagamentoPendenteRaw === true
+
+    const emAtrasoAtivo =
+      emAtrasoRaw === '1' ||
+      emAtrasoRaw === 'true' ||
+      emAtrasoRaw === 1 ||
+      emAtrasoRaw === true
+
     const incluirColaboradoresEncaminhar =
       incluirColabEncRaw === '1' ||
       incluirColabEncRaw === 'true' ||
       incluirColabEncRaw === 1 ||
       incluirColabEncRaw === true
+
+    if ((pagamentoPendenteAtivo || emAtrasoAtivo) && !(await usuarioPertenceSetorFinanceiro(departamento_ids, company_id))) {
+      if (!incluirColaboradoresEncaminhar) return res.json([])
+      const colaboradores_encaminhar = await loadColaboradoresEncaminhar()
+      return res.json({ conversas: [], colaboradores_encaminhar })
+    }
 
     const minhaFilaAtiva =
       minhaFilaRaw === '1' ||
@@ -642,10 +667,14 @@ exports.listarConversas = async (req, res) => {
     const incluirTodosClientesDefault =
       (incluirTodosClientes == null || String(incluirTodosClientes).trim() === '') &&
       !minhaFilaAtiva &&
-      !aguardandoClienteAtivo
+      !aguardandoClienteAtivo &&
+      !pagamentoPendenteAtivo &&
+      !emAtrasoAtivo
 
     const statusNorm =
       !minhaFilaAtiva &&
+      !pagamentoPendenteAtivo &&
+      !emAtrasoAtivo &&
       status_atendimento != null &&
       String(status_atendimento).trim() !== ''
         ? String(status_atendimento).toLowerCase().trim()
@@ -790,6 +819,8 @@ exports.listarConversas = async (req, res) => {
       status_atendimento,
       atendente_id,
       aguardando_cliente_desde,
+      pagamento_prazo_ate,
+      pagamento_prazo_origem,
       lida,
       criado_em,
       ultima_atividade,
@@ -823,6 +854,8 @@ exports.listarConversas = async (req, res) => {
       status_atendimento,
       atendente_id,
       aguardando_cliente_desde,
+      pagamento_prazo_ate,
+      pagamento_prazo_origem,
       finalizacao_motivo,
       finalizada_automaticamente,
       finalizada_automaticamente_em,
@@ -856,6 +889,8 @@ exports.listarConversas = async (req, res) => {
       status_atendimento,
       atendente_id,
       aguardando_cliente_desde,
+      pagamento_prazo_ate,
+      pagamento_prazo_origem,
       lida,
       criado_em,
       departamento_id,
@@ -898,15 +933,37 @@ exports.listarConversas = async (req, res) => {
         q = q.in('id', conversaIdsFilter)
       }
       // Mensagens disparadas: fora da listagem geral quando sem filtro de status; se a empresa desligou a opção, nunca misturar esse status nas demais queries.
-      if (!minhaFilaAtiva && !aguardandoClienteAtivo && (!statusNorm || !separarMensagensDisparadasEmpresa)) {
+      if (
+        !minhaFilaAtiva &&
+        !aguardandoClienteAtivo &&
+        !pagamentoPendenteAtivo &&
+        !emAtrasoAtivo &&
+        (!statusNorm || !separarMensagensDisparadasEmpresa)
+      ) {
         q = q.or('tipo.eq.grupo,status_atendimento.neq.mensagem_disparada,status_atendimento.is.null')
       }
       // Filtro personalizado "Minha fila": abertas (fila) + em atendimento só comigo; sem grupos; sem finalizadas
       if (minhaFilaAtiva) {
         q = q.or('tipo.is.null,tipo.neq.grupo')
         q = q.or(
-          `status_atendimento.eq.aberta,and(status_atendimento.eq.em_atendimento,atendente_id.eq.${user_id}),and(status_atendimento.eq.aguardando_cliente,atendente_id.eq.${user_id})`
+          `status_atendimento.eq.aberta,and(status_atendimento.eq.em_atendimento,atendente_id.eq.${user_id}),and(status_atendimento.eq.aguardando_cliente,atendente_id.eq.${user_id}),and(status_atendimento.eq.pagamento_pendente,atendente_id.eq.${user_id}),and(status_atendimento.eq.em_atraso,atendente_id.eq.${user_id})`
         )
+      } else if (pagamentoPendenteAtivo) {
+        q = q.eq('status_atendimento', 'pagamento_pendente')
+        q = q.not('atendente_id', 'is', null)
+        if (isAtendente) {
+          q = q.eq('atendente_id', Number(user_id))
+        } else if (filtroAtendenteInformado != null) {
+          q = q.eq('atendente_id', Number(filtroAtendenteInformado))
+        }
+      } else if (emAtrasoAtivo) {
+        q = q.eq('status_atendimento', 'em_atraso')
+        q = q.not('atendente_id', 'is', null)
+        if (isAtendente) {
+          q = q.eq('atendente_id', Number(user_id))
+        } else if (filtroAtendenteInformado != null) {
+          q = q.eq('atendente_id', Number(filtroAtendenteInformado))
+        }
       } else if (statusNorm === 'mensagem_disparada') {
         q = q.eq('status_atendimento', 'mensagem_disparada')
         q = q.neq('tipo', 'grupo')
@@ -1143,6 +1200,8 @@ exports.listarConversas = async (req, res) => {
         exibir_badge_aberta,
         atendente_id: c.atendente_id,
         aguardando_cliente_desde: c.aguardando_cliente_desde ?? null,
+        pagamento_prazo_ate: c.pagamento_prazo_ate ?? null,
+        pagamento_prazo_origem: c.pagamento_prazo_origem ?? null,
         atendente_nome: atendenteNome,
         atendente_email: atendenteEmail,
         lida: unreadCount === 0,
@@ -1240,7 +1299,12 @@ exports.listarConversas = async (req, res) => {
       conversasFormatadas = conversasFormatadas.filter((c) => {
         if (c.sem_conversa || c.is_group) return false
         if (c.status_atendimento === 'ociosa') return false
-        if (c.status_atendimento === 'em_atendimento' || c.status_atendimento === 'aguardando_cliente') {
+        if (
+          c.status_atendimento === 'em_atendimento' ||
+          c.status_atendimento === 'aguardando_cliente' ||
+          c.status_atendimento === 'pagamento_pendente' ||
+          c.status_atendimento === 'em_atraso'
+        ) {
           return Number(c.atendente_id) === Number(user_id)
         }
         if (c.status_atendimento === 'aberta') {
@@ -1268,6 +1332,26 @@ exports.listarConversas = async (req, res) => {
       })
     }
 
+    if (pagamentoPendenteAtivo) {
+      const restringirPorAtendente = isAtendente || (!isAtendente && filtroAtendenteInformado != null)
+      const atendenteEscopo = isAtendente ? Number(user_id) : Number(filtroAtendenteInformado)
+      conversasFormatadas = conversasFormatadas.filter((c) => {
+        if (c.sem_conversa || c.is_group) return false
+        if (restringirPorAtendente && Number(c.atendente_id) !== atendenteEscopo) return false
+        return String(c.status_atendimento_real || '') === 'pagamento_pendente'
+      })
+    }
+
+    if (emAtrasoAtivo) {
+      const restringirPorAtendente = isAtendente || (!isAtendente && filtroAtendenteInformado != null)
+      const atendenteEscopo = isAtendente ? Number(user_id) : Number(filtroAtendenteInformado)
+      conversasFormatadas = conversasFormatadas.filter((c) => {
+        if (c.sem_conversa || c.is_group) return false
+        if (restringirPorAtendente && Number(c.atendente_id) !== atendenteEscopo) return false
+        return String(c.status_atendimento_real || '') === 'em_atraso'
+      })
+    }
+
     // Incluir todos os clientes: quem não tem conversa aparece como "Sem conversa" (clicável para abrir)
     // Não misturar "sem conversa" em filtros por estado de atendimento (aberta / disparada / etc.).
     const incluirTodos =
@@ -1276,6 +1360,8 @@ exports.listarConversas = async (req, res) => {
       statusNorm !== 'mensagem_disparada' &&
       !minhaFilaAtiva &&
       !aguardandoClienteAtivo &&
+      !pagamentoPendenteAtivo &&
+      !emAtrasoAtivo &&
       !(filtroAtendenteInformado != null && !isAtendente)
     if (incluirTodos) {
       const cid = Number(company_id)
@@ -2871,6 +2957,47 @@ exports.marcarAguardandoClienteManualChat = async (req, res) => {
   }
 }
 
+exports.marcarAguardandoPagamentoFinanceiroChat = async (req, res) => {
+  try {
+    const { company_id, id: user_id, perfil, departamento_ids = [] } = req.user
+    const { id: conversa_id } = req.params
+    const { prazo, data } = req.body || {}
+    const perm = await assertPermissaoConversa({ company_id, conversa_id, user_id, role: perfil, user_dep_ids: departamento_ids })
+    if (!perm.ok) return res.status(perm.status).json({ error: perm.error })
+    if (perm.conv && isGroupConversation(perm.conv)) {
+      return res.status(400).json({ error: 'Indisponível para conversas de grupo' })
+    }
+    const result = await marcarAguardandoPagamento({
+      company_id,
+      conversa_id,
+      usuario_id: user_id,
+      departamento_ids,
+      prazo,
+      data,
+    })
+    if (!result.ok) return res.status(result.status).json({ error: result.error })
+    const io = req.app.get('io')
+    if (io && result.conversa) {
+      const payloadAtualizacao = {
+        ...result.conversa,
+        status_atendimento_real: result.conversa.status_atendimento ?? null,
+        pagamento_prazo_ate: result.conversa.pagamento_prazo_ate ?? null,
+        pagamento_prazo_origem: result.conversa.pagamento_prazo_origem ?? null,
+        lista_realtime: { minha_fila: true, motivo: 'financeiro_aguardando_pagamento' },
+      }
+      emitirEventoEmpresaConversa(io, company_id, conversa_id, io.EVENTS?.CONVERSA_ATUALIZADA || 'conversa_atualizada', {
+        ...payloadAtualizacao,
+      })
+      emitirConversaAtualizada(io, company_id, conversa_id, payloadAtualizacao, { skipAtualizarConversa: true })
+      emitirSincronizacaoListaConversas(io, company_id, conversa_id)
+    }
+    return res.json({ ok: true, conversa: result.conversa, idempotent: !!result.idempotent })
+  } catch (err) {
+    console.error(err)
+    return res.status(500).json({ error: 'Erro ao marcar aguardando pagamento' })
+  }
+}
+
 exports.retomarEmAtendimentoManualChat = async (req, res) => {
   try {
     const { company_id, id: user_id, perfil, departamento_ids = [] } = req.user
@@ -2880,7 +3007,17 @@ exports.retomarEmAtendimentoManualChat = async (req, res) => {
     if (perm.conv && isGroupConversation(perm.conv)) {
       return res.status(400).json({ error: 'Indisponível para conversas de grupo' })
     }
-    const result = await retomarEmAtendimentoManual({ company_id, conversa_id, usuario_id: user_id })
+
+    const stConv = String(perm.conv?.status_atendimento || '').toLowerCase()
+    const result =
+      stConv === 'pagamento_pendente' || stConv === 'em_atraso'
+        ? await retomarDeCobrancaFinanceira({
+            company_id,
+            conversa_id,
+            usuario_id: user_id,
+            departamento_ids,
+          })
+        : await retomarEmAtendimentoManual({ company_id, conversa_id, usuario_id: user_id })
     if (!result.ok) return res.status(result.status).json({ error: result.error })
     const io = req.app.get('io')
     if (io && result.conversa) {
@@ -2888,6 +3025,8 @@ exports.retomarEmAtendimentoManualChat = async (req, res) => {
         ...result.conversa,
         status_atendimento_real: result.conversa.status_atendimento ?? null,
         aguardando_cliente_desde: result.conversa.aguardando_cliente_desde ?? null,
+        pagamento_prazo_ate: result.conversa.pagamento_prazo_ate ?? null,
+        pagamento_prazo_origem: result.conversa.pagamento_prazo_origem ?? null,
         lista_realtime: { minha_fila: true, motivo: 'manual_retomar_em_atendimento' },
       }
       emitirEventoEmpresaConversa(io, company_id, conversa_id, io.EVENTS?.CONVERSA_ATUALIZADA || 'conversa_atualizada', {
