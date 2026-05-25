@@ -200,3 +200,33 @@ exports.logoutToken = async (req, res) => {
     return res.status(500).json({ error: 'Erro interno' })
   }
 }
+
+/** POST /api/push/test-fcm — envia teste FCM aos tokens ativos do usuário logado */
+exports.sendTestFcm = async (req, res) => {
+  try {
+    const empresa_id = Number(req.user?.company_id)
+    const usuario_id = Number(req.user?.id)
+
+    if (!Number.isFinite(empresa_id) || empresa_id <= 0 || !Number.isFinite(usuario_id) || usuario_id <= 0) {
+      return res.status(400).json({ error: 'Sessão inválida' })
+    }
+
+    const pushNotificationService = require('../services/pushNotificationService')
+    const result = await pushNotificationService.sendTestToUser({ empresa_id, usuario_id })
+
+    if (!result?.ok) {
+      if (result?.reason === 'firebase_not_configured') {
+        return res.status(503).json({ error: 'FCM não configurado no servidor', ...result })
+      }
+      if (result?.reason === 'no_fcm_tokens') {
+        return res.status(404).json({ error: 'Nenhum token FCM ativo para este usuário', ...result })
+      }
+      return res.status(result?.status || 500).json({ error: 'Não foi possível enviar teste FCM', ...result })
+    }
+
+    return res.json(result)
+  } catch (e) {
+    console.warn('[fcm] sendTestFcm:', e?.message || e)
+    return res.status(500).json({ error: 'Erro interno' })
+  }
+}

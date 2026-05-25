@@ -53,6 +53,71 @@ const WHATSAPP_DEBUG = String(process.env.WHATSAPP_DEBUG || '').toLowerCase() ==
 // IMPORTANTE: não depender de colunas opcionais para manter compatibilidade com bancos legados.
 const WEBHOOK_MSG_SELECT = 'id, conversa_id, company_id, whatsapp_id, texto, url, tipo, direcao, criado_em, status, autor_usuario_id, reply_meta, nome_arquivo, contact_meta, location_meta, remetente_nome, remetente_telefone'
 
+/** URL pública remota (CDN UltraMsg) — diferente de /uploads/ gravado pelo CRM no envio. */
+function isRemoteMediaUrl(url) {
+  const u = String(url || '').trim().toLowerCase()
+  return u.startsWith('http://') || u.startsWith('https://')
+}
+
+function isLocalUploadMediaUrl(url) {
+  return String(url || '').trim().startsWith('/uploads/')
+}
+
+function normalizeMediaFileNameForMatch(name) {
+  return String(name || '').trim().toLowerCase()
+}
+
+function mapWebhookTypeToStorageTipo(type) {
+  const t = String(type || '').toLowerCase().trim()
+  if (t === 'ptt') return 'voice'
+  if (t === 'document' || t === 'file') return 'arquivo'
+  if (t === 'image') return 'imagem'
+  if (t === 'video') return 'video'
+  if (t === 'audio') return 'audio'
+  if (t === 'sticker') return 'sticker'
+  return t || null
+}
+
+/**
+ * Casa eco fromMe (webhook) com mensagem outbound recente do CRM.
+ * Não usa URL remota vs /uploads/ — evita segunda linha no chat ao enviar PDF/arquivo.
+ */
+function findFromMeOutboundMediaCandidate(rows, { fileName, texto, tipo }) {
+  if (!Array.isArray(rows) || rows.length === 0) return null
+  const nomeW = normalizeMediaFileNameForMatch(fileName)
+  const tipoW = tipo ? String(tipo).toLowerCase() : null
+
+  if (nomeW) {
+    const byNome = rows.find((c) => {
+      const candNome = normalizeMediaFileNameForMatch(c.nome_arquivo || c.texto)
+      if (!candNome || candNome !== nomeW) return false
+      if (tipoW && String(c.tipo || '').toLowerCase() !== tipoW) return false
+      return true
+    })
+    if (byNome) return byNome
+  }
+
+  if (texto) {
+    const textoNorm = String(texto || '').trim()
+    const byTexto = rows.find((c) => {
+      const t = String(c.texto || '').trim()
+      return t && (t === textoNorm || t.toLowerCase() === textoNorm.toLowerCase())
+    })
+    if (byTexto) return byTexto
+  }
+
+  if (tipoW) {
+    const byTipoCrm = rows.find(
+      (c) =>
+        String(c.tipo || '').toLowerCase() === tipoW &&
+        (c.autor_usuario_id != null || isLocalUploadMediaUrl(c.url))
+    )
+    if (byTipoCrm) return byTipoCrm
+  }
+
+  return null
+}
+
 function normalizeReopenText(texto) {
   return String(texto || '')
     .toLowerCase()
@@ -2236,19 +2301,50 @@ exports.receberZapi = async (req, res) => {
         .eq('whatsapp_id', whatsappIdStr)
         .maybeSingle()
       
-      // Se não encontrou por whatsapp_id e é mensagem enviada por nós, buscar a mais recente
+      // Se não encontrou por whatsapp_id e é mensagem enviada por nós, reconciliar com outbound do CRM
       if (!existente && fromMe) {
-        const { data: tempExistente } = await supabase
+        const recentFromIso = new Date(Date.now() - 15 * 60 * 1000).toISOString()
+        let tempExistente = null
+
+        const { data: tempExistenteNullWa } = await supabase
           .from('mensagens')
           .select(WEBHOOK_MSG_SELECT)
           .eq('company_id', company_id)
           .eq('conversa_id', conversa_id)
           .eq('direcao', 'out')
           .is('whatsapp_id', null)
+          .gte('criado_em', recentFromIso)
           .order('criado_em', { ascending: false })
-          .limit(1)
-          .maybeSingle()
-        
+          .order('id', { ascending: false })
+          .limit(10)
+
+        tempExistente =
+          findFromMeOutboundMediaCandidate(tempExistenteNullWa || [], {
+            fileName,
+            texto,
+            tipo: mapWebhookTypeToStorageTipo(type),
+          }) || null
+
+        // ACK pode ter preenchido whatsapp_id (sid) antes do message_create (id) — buscar por nome/tipo
+        if (!tempExistente && fileName) {
+          const { data: recentOut } = await supabase
+            .from('mensagens')
+            .select(WEBHOOK_MSG_SELECT)
+            .eq('company_id', company_id)
+            .eq('conversa_id', conversa_id)
+            .eq('direcao', 'out')
+            .gte('criado_em', recentFromIso)
+            .order('criado_em', { ascending: false })
+            .order('id', { ascending: false })
+            .limit(10)
+          tempExistente =
+            findFromMeOutboundMediaCandidate(recentOut || [], {
+              fileName,
+              texto,
+              tipo: mapWebhookTypeToStorageTipo(type),
+            }) || null
+        }
+
         if (tempExistente) {
           // Atualizar com o whatsapp_id real
           try {
@@ -2425,22 +2521,17 @@ exports.receberZapi = async (req, res) => {
             .limit(10)
           if (filterConversa) q = q.eq('conversa_id', conversa_id)
           if (fromIso && toIso) q = q.gte('criado_em', fromIso).lte('criado_em', toIso)
-          if (urlSig) q = q.eq('url', urlSig)
+          // URL do webhook (CDN) ≠ /uploads/ do CRM — não filtrar por url remota
+          if (urlSig && !isRemoteMediaUrl(urlSig)) q = q.eq('url', urlSig)
           return q
         }
 
-        const findCand = (rows) => {
-          if (!Array.isArray(rows) || rows.length === 0) return null
-          if (urlSig) return rows[0]
-          if (texto) {
-            const textoNorm = String(texto || '').trim()
-            return rows.find((c) => {
-              const t = String(c.texto || '').trim()
-              return t === textoNorm || t.toLowerCase() === textoNorm.toLowerCase()
-            }) || null
-          }
-          return rows[0]
-        }
+        const findCand = (rows) =>
+          findFromMeOutboundMediaCandidate(rows, {
+            fileName,
+            texto,
+            tipo: mapWebhookTypeToStorageTipo(type),
+          })
 
         // Busca 1: na conversa específica resolvida pelo webhook
         const { data: candidates } = await buildQuery(true)
@@ -2448,7 +2539,7 @@ exports.receberZapi = async (req, res) => {
 
         // Busca 2 (fallback): na empresa inteira — cobre divergência de conversa_id entre
         // chatController (URL param) e webhook (findOrCreateConversation pode resolver diferente)
-        if (!cand && !urlSig) {
+        if (!cand) {
           const { data: fallbackCandidates } = await buildQuery(false)
           cand = findCand(fallbackCandidates)
           if (cand && WHATSAPP_DEBUG) {

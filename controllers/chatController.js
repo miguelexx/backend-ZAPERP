@@ -4889,6 +4889,21 @@ async function normalizeAudioForUltraMsg(file, tipo) {
 /** Lote de fotos/arquivos (galeria): mesmo contrato do WhatsApp Web. */
 const MAX_ARQUIVOS_LOTE_ENVIO = 30
 
+/** Evita processar o mesmo upload duas vezes quando multer recebe campos duplicados. */
+function dedupeMulterFiles(files) {
+  if (!Array.isArray(files) || files.length < 2) return files
+  const seen = new Set()
+  const out = []
+  for (const f of files) {
+    if (!f) continue
+    const key = `${String(f.originalname || '')}|${Number(f.size) || 0}|${String(f.path || f.filename || '')}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push(f)
+  }
+  return out
+}
+
 /** Legenda enviada com foto/vídeo/documento — mesmo limite prático da UltraMsg */
 const MAX_MEDIA_CAPTION_CHARS = 1024
 
@@ -5162,12 +5177,13 @@ exports.enviarArquivo = async (req, res) => {
     const { company_id, id: user_id } = req.user
     const io = req.app.get('io')
 
-    const files =
+    const filesRaw =
       req.files && Array.isArray(req.files) && req.files.length > 0
         ? req.files
         : req.file
           ? [req.file]
           : []
+    const files = dedupeMulterFiles(filesRaw)
 
     if (!files.length) {
       const hint = 'Envie multipart/form-data com campo "file", "files" ou "audio" (múltiplos arquivos no mesmo pedido).'
