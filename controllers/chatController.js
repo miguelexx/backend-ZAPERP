@@ -277,12 +277,22 @@ async function enrichMensagensComAutorUsuario(supabase, company_id, mensagens) {
   }))
 }
 
-/** Retorna texto prefixado com nome do atendente para o cliente ver no WhatsApp */
+/**
+ * Texto enviado ao WhatsApp (UltraMsg). Não prefixa com *nome* no body:
+ * contas Business multi-atendente já exibem o nome do agente acima da bolha;
+ * prefixar gerava duas mensagens visíveis (rótulo nativo + linha *Nome*).
+ * O nome continua visível no CRM (usuario_nome) e em legendas/rodapés de mídia (— Nome).
+ */
+function textoParaEnvioWhatsapp(texto) {
+  return String(texto || '').trim()
+}
+
+/** Legado: intro de cartão de contato (mensagem separada intencional). */
 function prefixarParaCliente(texto, usuarioNome) {
   if (!usuarioNome || !String(usuarioNome).trim()) return texto
   const t = String(texto || '').trim()
   const nome = String(usuarioNome).trim()
-  return t ? `*${nome}*\n${t}` : `*${nome}*`
+  return t ? `${t}` : nome
 }
 
 /** Busca nome e preferência do usuário para exibir ao cliente no WhatsApp. Retorna { nome, mostrar } */
@@ -3726,7 +3736,7 @@ exports.enviarMensagemChat = async (req, res) => {
           if (linkUrlStr && !messageToSend.includes(linkUrlStr)) {
             messageToSend = messageToSend ? `${messageToSend} ${linkUrlStr}` : linkUrlStr
           }
-          messageToSend = prefixarParaCliente(messageToSend, usuarioNome)
+          messageToSend = textoParaEnvioWhatsapp(messageToSend)
           result = await provider.sendLink(telefoneParaEnvio, {
             message: messageToSend,
             image: link.image || '',
@@ -3735,8 +3745,14 @@ exports.enviarMensagemChat = async (req, res) => {
             linkDescription: String(link.linkDescription || link.description || '').trim() || messageToSend,
           }, { companyId: company_id, conversaId: conversa_id, replyMessageId: replyMessageId || undefined })
         } else {
-          const textoParaCliente = prefixarParaCliente(String(texto).trim(), usuarioNome)
-          result = await provider.sendText(telefoneParaEnvio, textoParaCliente, { companyId: company_id, conversaId: conversa_id, phoneId: phoneId || undefined, replyMessageId: replyMessageId || undefined })
+          const textoParaCliente = textoParaEnvioWhatsapp(String(texto).trim())
+          result = await provider.sendText(telefoneParaEnvio, textoParaCliente, {
+            companyId: company_id,
+            conversaId: conversa_id,
+            phoneId: phoneId || undefined,
+            replyMessageId: replyMessageId || undefined,
+            referenceId: `crm-${msg.id}`,
+          })
         }
         const ok = typeof result === 'boolean' ? result : result?.ok === true
         const waMessageId = typeof result === 'object' && result?.messageId ? String(result.messageId).trim() : null

@@ -495,6 +495,8 @@ async function sendText(phone, message, opts = {}) {
   const replyMessageId = opts?.replyMessageId ? String(opts.replyMessageId).trim() : null
   const body = { to: nums[0], body: msg }
   if (replyMessageId) body.msgId = replyMessageId
+  const referenceId = opts?.referenceId ? String(opts.referenceId).trim().slice(0, 200) : null
+  if (referenceId) body.referenceId = referenceId
 
   const { ok, status, data, text } = await postJson({ ...cfg, endpoint: '/messages/chat', body })
   // UltraMsg retorna HTTP 200 mesmo em caso de erro (ex.: token inválido) — checar body também

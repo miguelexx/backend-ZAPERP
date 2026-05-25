@@ -82,7 +82,12 @@ function mapWebhookTypeToStorageTipo(type) {
  * Casa eco fromMe (webhook) com mensagem outbound recente do CRM.
  * Não usa URL remota vs /uploads/ — evita segunda linha no chat ao enviar PDF/arquivo.
  */
-function findFromMeOutboundMediaCandidate(rows, { fileName, texto, tipo }) {
+const {
+  textosOutboundFromMeEquivalentes,
+  extrairNomePrefixoTexto,
+} = require('../helpers/mensagemAtendenteNomeHelper')
+
+function findFromMeOutboundMediaCandidate(rows, { fileName, texto, tipo, nomeAtendente }) {
   if (!Array.isArray(rows) || rows.length === 0) return null
   const nomeW = normalizeMediaFileNameForMatch(fileName)
   const tipoW = tipo ? String(tipo).toLowerCase() : null
@@ -101,7 +106,9 @@ function findFromMeOutboundMediaCandidate(rows, { fileName, texto, tipo }) {
     const textoNorm = String(texto || '').trim()
     const byTexto = rows.find((c) => {
       const t = String(c.texto || '').trim()
-      return t && (t === textoNorm || t.toLowerCase() === textoNorm.toLowerCase())
+      if (!t) return false
+      if (textosOutboundFromMeEquivalentes(textoNorm, t, nomeAtendente)) return true
+      return false
     })
     if (byTexto) return byTexto
   }
@@ -2318,11 +2325,13 @@ exports.receberZapi = async (req, res) => {
           .order('id', { ascending: false })
           .limit(10)
 
+        const nomeAtendenteFromMe = extrairNomePrefixoTexto(texto)
         tempExistente =
           findFromMeOutboundMediaCandidate(tempExistenteNullWa || [], {
             fileName,
             texto,
             tipo: mapWebhookTypeToStorageTipo(type),
+            nomeAtendente: nomeAtendenteFromMe,
           }) || null
 
         // ACK pode ter preenchido whatsapp_id (sid) antes do message_create (id) — buscar por nome/tipo
@@ -2342,6 +2351,7 @@ exports.receberZapi = async (req, res) => {
               fileName,
               texto,
               tipo: mapWebhookTypeToStorageTipo(type),
+              nomeAtendente: nomeAtendenteFromMe,
             }) || null
         }
 
@@ -2526,11 +2536,13 @@ exports.receberZapi = async (req, res) => {
           return q
         }
 
+        const nomeAtendenteReconcile = extrairNomePrefixoTexto(texto)
         const findCand = (rows) =>
           findFromMeOutboundMediaCandidate(rows, {
             fileName,
             texto,
             tipo: mapWebhookTypeToStorageTipo(type),
+            nomeAtendente: nomeAtendenteReconcile,
           })
 
         // Busca 1: na conversa específica resolvida pelo webhook
