@@ -144,6 +144,41 @@ exports.listar = async (req, res) => {
 }
 
 const PERFIS_VALIDOS = ['admin', 'supervisor', 'atendente']
+const LOGIN_BASE_SELECT = 'id, nome, email, perfil, departamento_id, company_id, ativo'
+const LOGIN_PASSWORD_COLUMNS = ['senha_hash', 'senha', 'password', 'pass']
+
+function isMissingColumnError(error) {
+  const msg = String(error?.message || '').toLowerCase()
+  const code = String(error?.code || '')
+  return code === '42703' || msg.includes('does not exist') || msg.includes('could not find') || msg.includes('column')
+}
+
+async function findLoginUserByEmail(emailParaBusca, companyId) {
+  let lastMissingColumnError = null
+
+  for (const passwordColumn of LOGIN_PASSWORD_COLUMNS) {
+    let query = supabase
+      .from('usuarios')
+      .select(`${LOGIN_BASE_SELECT}, ${passwordColumn}`)
+      .ilike('email', emailParaBusca)
+
+    if (Number.isFinite(companyId) && companyId > 0) {
+      query = query.eq('company_id', companyId)
+    }
+
+    const result = await query.maybeSingle()
+    if (!result.error) return { data: result.data, error: null }
+
+    if (isMissingColumnError(result.error)) {
+      lastMissingColumnError = result.error
+      continue
+    }
+
+    return result
+  }
+
+  return { data: null, error: lastMissingColumnError }
+}
 
 /** POST /usuarios — criar usuário (admin) */
 exports.criar = async (req, res) => {
@@ -342,15 +377,8 @@ exports.login = async (req, res) => {
     // Busca usuário pelo email (case-insensitive: aceita User@Email.com mesmo se no banco estiver user@email.com)
     // Multi-tenant: company_id opcional — quando o mesmo email existe em várias empresas, obriga escolher qual
     const emailParaBusca = emailNorm.replace(/\\/g, '\\\\').replace(/%/g, '\\%').replace(/_/g, '\\_')
-    let query = supabase
-      .from('usuarios')
-      .select('id, nome, email, perfil, departamento_id, company_id, ativo, senha_hash, senha, password, pass')
-      .ilike('email', emailParaBusca)
     const cidLogin = companyIdBody != null ? Number(companyIdBody) : null
-    if (Number.isFinite(cidLogin) && cidLogin > 0) {
-      query = query.eq('company_id', cidLogin)
-    }
-    const { data: usuario, error } = await query.maybeSingle()
+    const { data: usuario, error } = await findLoginUserByEmail(emailParaBusca, cidLogin)
 
     const isDev = String(process.env.NODE_ENV || '').toLowerCase() !== 'production'
     function logDevLoginFail(reason) {
