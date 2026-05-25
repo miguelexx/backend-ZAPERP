@@ -1,6 +1,11 @@
-const test = require('node:test')
 const assert = require('node:assert/strict')
-const { isAllowedUploadFile, extFromOriginalName } = require('../middleware/upload')
+const {
+  isAllowedUploadFile,
+  extFromOriginalName,
+  isBlockedRiskExtension,
+  blockedUploadErrorMessage,
+  uploadValidationError,
+} = require('../middleware/upload')
 
 test('aceita application/json', () => {
   assert.equal(
@@ -9,15 +14,37 @@ test('aceita application/json', () => {
   )
 })
 
-test('aceita .exe com octet-stream', () => {
+test('rejeita .exe (alto risco WhatsApp)', () => {
+  assert.equal(isBlockedRiskExtension('exe'), true)
   assert.equal(
     isAllowedUploadFile({
       mimetype: 'application/octet-stream',
       originalname: 'setup.exe',
       fieldname: 'file',
     }),
-    true
+    false
   )
+})
+
+test('rejeita .apk', () => {
+  assert.equal(
+    isAllowedUploadFile({
+      mimetype: 'application/vnd.android.package-archive',
+      originalname: 'app.apk',
+      fieldname: 'file',
+    }),
+    false
+  )
+})
+
+test('mensagem de bloqueio menciona zip', () => {
+  assert.match(blockedUploadErrorMessage('exe'), /zip/i)
+})
+
+test('erro de upload inválido carrega status 400', () => {
+  const err = uploadValidationError('Arquivo inválido', 'UPLOAD_TEST')
+  assert.equal(err.status, 400)
+  assert.equal(err.code, 'UPLOAD_TEST')
 })
 
 test('extFromOriginalName', () => {

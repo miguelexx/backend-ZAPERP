@@ -52,6 +52,7 @@ router.post('/:id/contatos', auth, chatController.enviarContatoWhatsapp)
 router.post('/:id/localizacao', auth, chatController.enviarLocalizacao)
 router.post('/:id/ligacao', auth, chatController.enviarLigacaoWhatsapp)
 router.put('/:id/observacao', auth, chatController.atualizarObservacao)
+router.put('/:id/nome-contato', auth, chatController.atualizarNomeContato)
 
 // Menu da lista (silenciar / fixar / favoritar / limpar / apagar) — ver migration conversa_usuario_prefs
 router.patch('/:id/prefs', auth, chatController.patchConversaPrefs)

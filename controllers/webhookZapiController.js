@@ -1913,6 +1913,7 @@ exports.receberZapi = async (req, res) => {
     // Captura avaliação (nota 0-10) e reabertura automática em conversa encerrada (fechada ou finalizada)
     let conversaReabertaAposFinalizacao = false
     let reopenedFromAbsence = false
+    let absenceReopenExplicitlyDisabled = false
     if (!fromMe && !isGroup && conversa_id) {
       const { data: convStatus } = await supabase
         .from('conversas')
@@ -2003,6 +2004,8 @@ exports.receberZapi = async (req, res) => {
                 io.to(`empresa_${company_id}`).emit(io.EVENTS?.CONVERSA_REABERTA || 'conversa_reaberta', reabertaAusencia)
               }
             }
+          } else {
+            absenceReopenExplicitlyDisabled = true
           }
         }
         if (reopenedFromAbsence) {
@@ -2021,7 +2024,7 @@ exports.receberZapi = async (req, res) => {
         }
         // Reabrir por defeito após encerramento; não reabrir se for avaliação registrada,
         // nota 0-10 isolada, agradecimento/ACK de encerramento ou mensagem claramente sem nova demanda.
-        if (!avalResult.registered && !reopenedFromAbsence) {
+        if (!avalResult.registered && !reopenedFromAbsence && !absenceReopenExplicitlyDisabled) {
           const reopenDecision = shouldReopenFinishedConversation(textoNorm, {
             company_id,
             conversa_id,
@@ -2071,6 +2074,12 @@ exports.receberZapi = async (req, res) => {
               reason: reopenDecision.reason
             })
           }
+        } else if (absenceReopenExplicitlyDisabled) {
+          console.log('[Z-API] 🔒 Conversa mantida fechada — reabertura automática por ausência desativada', {
+            conversa_id,
+            texto: textoNorm,
+            motivo_finalizacao: motivoFinalizacao,
+          })
         }
       }
     }

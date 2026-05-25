@@ -50,9 +50,6 @@ const ALLOWED_MIME = new Map([
   ['application/vnd.rar', '.rar'],
   ['application/x-rar-compressed', '.rar'],
   ['application/x-7z-compressed', '.7z'],
-  ['application/x-msdownload', '.exe'],
-  ['application/vnd.microsoft.portable-executable', '.exe'],
-  ['application/vnd.android.package-archive', '.apk'],
   ['application/sql', '.sql'],
   ['application/octet-stream', '.bin'],
 ])
@@ -66,11 +63,49 @@ const ALLOWED_EXTENSIONS = new Set([
   'txt', 'csv', 'md', 'html', 'htm', 'rtf',
   'json', 'xml', 'sql',
   'zip', 'rar', '7z',
-  'exe', 'msi', 'apk',
 ])
 
-/** Extensões que o WhatsApp/UltraMsg costuma rejeitar — upload permitido, aviso no envio. */
-const EXTENSOES_AVISO_WHATSAPP = new Set(['exe', 'msi', 'apk', 'bat', 'cmd', 'com', 'scr'])
+/**
+ * Extensões de alto risco: WhatsApp/UltraMsg costumam recusar e podem aumentar chance de restrição na conta.
+ * Upload e envio são bloqueados no CRM (use ZIP apenas com documentos permitidos, se necessário).
+ */
+const EXTENSOES_BLOQUEADAS_WHATSAPP = new Set([
+  'exe', // executável Windows
+  'msi', // instalador Windows
+  'apk', // app Android
+  'bat', // script batch
+  'cmd', // script de comando
+  'com', // executável legado DOS/Windows
+  'scr', // protetor de tela / vetor comum de malware
+  'ps1', // PowerShell
+  'vbs', // VBScript
+  'reg', // registro Windows
+  'dll', // biblioteca executável
+  'jar', // arquivo Java executável
+])
+
+/** @deprecated Use EXTENSOES_BLOQUEADAS_WHATSAPP — mantido vazio para compat de import. */
+const EXTENSOES_AVISO_WHATSAPP = new Set()
+
+function isBlockedRiskExtension(ext) {
+  const e = String(ext || '').toLowerCase().replace(/^\./, '')
+  return e.length > 0 && EXTENSOES_BLOQUEADAS_WHATSAPP.has(e)
+}
+
+function blockedUploadErrorMessage(ext) {
+  const label = ext ? `.${String(ext).toLowerCase()}` : 'deste tipo'
+  return (
+    `Arquivos ${label} não podem ser enviados pelo WhatsApp (alto risco de bloqueio). ` +
+    'Se precisar compartilhar, coloque o conteúdo dentro de um .zip com PDF, planilha ou documento permitido.'
+  )
+}
+
+function uploadValidationError(message, code = 'UPLOAD_VALIDATION_ERROR') {
+  const err = new Error(message)
+  err.status = 400
+  err.code = code
+  return err
+}
 
 const AUDIO_FIELD_NAMES = ['audio', 'recording', 'voice', 'blob', 'media', 'file', 'arquivo', 'attachment']
 
@@ -86,10 +121,12 @@ function extFromOriginalName(originalname) {
 }
 
 function isAllowedUploadFile(file) {
+  const ext = extFromOriginalName(file?.originalname)
+  if (isBlockedRiskExtension(ext)) return false
+
   const baseMime = getBaseMime(file?.mimetype)
   if (ALLOWED_MIME.has(baseMime) && baseMime !== 'application/octet-stream') return true
 
-  const ext = extFromOriginalName(file?.originalname)
   if (ext && ALLOWED_EXTENSIONS.has(ext)) return true
 
   if ((!baseMime || baseMime === 'application/octet-stream') && AUDIO_FIELD_NAMES.includes(file?.fieldname)) {
@@ -123,12 +160,16 @@ const upload = multer({
   storage,
   limits: { fileSize: 32 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
+    const ext = extFromOriginalName(file.originalname)
+    if (isBlockedRiskExtension(ext)) {
+      return cb(uploadValidationError(blockedUploadErrorMessage(ext), 'UPLOAD_BLOCKED_EXTENSION'), false)
+    }
     if (isAllowedUploadFile(file)) return cb(null, true)
     const baseMime = getBaseMime(file.mimetype)
-    const ext = extFromOriginalName(file.originalname)
     cb(
-      new Error(
-        `Tipo de arquivo não permitido${ext ? ` (.${ext})` : ''}${baseMime ? `: ${baseMime}` : ''}. Use documentos, planilhas, PDF, JSON, ZIP, imagens ou vídeos.`
+      uploadValidationError(
+        `Tipo de arquivo não permitido${ext ? ` (.${ext})` : ''}${baseMime ? `: ${baseMime}` : ''}. Use documentos, planilhas, PDF, JSON, ZIP, imagens ou vídeos.`,
+        'UPLOAD_UNSUPPORTED_TYPE'
       ),
       false
     )
@@ -152,5 +193,9 @@ module.exports = {
   uploadArquivo,
   isAllowedUploadFile,
   extFromOriginalName,
+  EXTENSOES_BLOQUEADAS_WHATSAPP,
   EXTENSOES_AVISO_WHATSAPP,
+  isBlockedRiskExtension,
+  blockedUploadErrorMessage,
+  uploadValidationError,
 }

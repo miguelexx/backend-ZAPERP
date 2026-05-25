@@ -393,9 +393,10 @@ app.use((err, req, res, next) => {
   }
   // Outros erros: log + 500 JSON (nunca HTML)
   const status = Number(err?.status) || 500
-  const safeMessage = status < 500
-    ? (err?.message || 'Erro na requisição')
-    : (isProd ? 'Erro interno' : (err?.message || 'Erro interno'))
+  if (status < 500) {
+    return res.status(status).json({ error: err?.message || 'Erro na requisição', requestId: req?.requestId || null })
+  }
+  const safeMessage = isProd ? 'Erro interno' : (err?.message || 'Erro interno')
   console.error('[APP_ERROR]', {
     requestId: req?.requestId || null,
     method: req?.method || null,

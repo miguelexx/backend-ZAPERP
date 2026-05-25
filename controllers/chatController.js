@@ -8,7 +8,7 @@ const { isGroupConversation } = require('../helpers/conversaHelper')
 const { normalizePhoneBR, possiblePhonesBR, phoneKeyBR } = require('../helpers/phoneHelper')
 const { deduplicateConversationsByContact, sortConversationsByRecent, sortConversationsPinThenRecent, getCanonicalPhone, getOrCreateCliente, findOrCreateConversation, mergeConversasIntoCanonico } = require('../helpers/conversationSync')
 const { enrichConversationsWithContactData } = require('../helpers/conversaEnrichment')
-const { getDisplayName } = require('../helpers/contactEnrichment')
+const { getDisplayName, normalizeName, isBadName } = require('../helpers/contactEnrichment')
 const { tryMarkWaitingAfterHumanOutbound } = require('../services/absenceFinalizationService')
 const {
   marcarAguardandoClienteManual,
@@ -2003,6 +2003,94 @@ exports.criarComunidade = async (req, res) => {
     return res.status(500).json({ error: 'Erro ao criar comunidade' })
   }
 }
+// =====================================================
+// Nome exibido do contato (conversa + cliente vinculado) — PUT /chats/:id/nome-contato
+// =====================================================
+exports.atualizarNomeContato = async (req, res) => {
+  try {
+    const conversa_id = Number(req.params.id)
+    const { company_id, id: user_id } = req.user
+    if (!Number.isFinite(conversa_id) || conversa_id <= 0) {
+      return res.status(400).json({ error: 'ID da conversa inválido' })
+    }
+
+    const permEnvio = await assertPodeEnviarMensagem({ company_id, conversa_id, user_id })
+    if (!permEnvio.ok) return res.status(permEnvio.status).json({ error: permEnvio.error })
+
+    const nomeRaw = req.body?.nome != null ? String(req.body.nome) : ''
+    const nome = normalizeName(nomeRaw)
+    if (!nome) {
+      return res.status(400).json({ error: 'Informe um nome válido para o contato.' })
+    }
+    if (isBadName(nome)) {
+      return res.status(400).json({ error: 'Nome inválido. Use o nome do contato, não apenas números.' })
+    }
+
+    const { data: conversa, error: errConv } = await supabase
+      .from('conversas')
+      .select('id, company_id, cliente_id, tipo, telefone, nome_contato_cache')
+      .eq('id', conversa_id)
+      .eq('company_id', Number(company_id))
+      .maybeSingle()
+
+    if (errConv) return res.status(500).json({ error: errConv.message })
+    if (!conversa) return res.status(404).json({ error: 'Conversa não encontrada' })
+    if (isGroupConversation(conversa)) {
+      return res.status(400).json({ error: 'Não é possível renomear contato em conversa de grupo.' })
+    }
+
+    const { error: errCache } = await supabase
+      .from('conversas')
+      .update({ nome_contato_cache: nome })
+      .eq('id', conversa_id)
+      .eq('company_id', Number(company_id))
+
+    if (errCache) return res.status(500).json({ error: errCache.message })
+
+    let clienteAtualizado = null
+    const clienteId = conversa.cliente_id != null ? Number(conversa.cliente_id) : null
+    if (clienteId) {
+      const { data: cli, error: errCli } = await supabase
+        .from('clientes')
+        .update({ nome, atualizado_em: new Date().toISOString() })
+        .eq('id', clienteId)
+        .eq('company_id', Number(company_id))
+        .select('id, nome, telefone, email, empresa, observacoes, foto_perfil')
+        .maybeSingle()
+
+      if (errCli) {
+        if (errCli.code === '23505') {
+          return res.status(409).json({ error: 'Já existe um cliente com este número de telefone.' })
+        }
+        return res.status(500).json({ error: errCli.message })
+      }
+      clienteAtualizado = cli
+    }
+
+    const payload = {
+      id: conversa_id,
+      contato_nome: nome,
+      nome_contato_cache: nome,
+      cliente_nome: nome,
+      ...(clienteId ? { cliente_id: clienteId } : {}),
+    }
+
+    const io = req.app.get('io')
+    if (io) {
+      emitirConversaAtualizada(io, company_id, conversa_id, payload, { skipAtualizarConversa: true })
+    }
+
+    return res.json({
+      ok: true,
+      conversa: payload,
+      cliente: clienteAtualizado,
+    })
+  } catch (err) {
+    console.error('[atualizarNomeContato]', err)
+    return res.status(500).json({ error: 'Erro ao atualizar nome do contato' })
+  }
+}
+
 exports.atualizarObservacao = async (req, res) => {
   try {
     const { id } = req.params;
@@ -4928,13 +5016,13 @@ const MAX_MEDIA_CAPTION_CHARS = 1024
  * @returns {Promise<{ ok: true, msg: object } | { ok: false, status: number, error: string }>}
  */
 async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conversa_id, telefoneParaEnvio, io, captionUsuario = '' }) {
-  const { extFromOriginalName, EXTENSOES_AVISO_WHATSAPP } = require('../middleware/upload')
+  const { extFromOriginalName, isBlockedRiskExtension, blockedUploadErrorMessage } = require('../middleware/upload')
   let fileWork = file
   const extUpload = extFromOriginalName(fileWork?.originalname)
-  const avisoWhatsapp =
-    extUpload && EXTENSOES_AVISO_WHATSAPP.has(extUpload)
-      ? `O WhatsApp pode recusar arquivos .${extUpload}. Se não entregar, envie o arquivo dentro de um .zip.`
-      : null
+  if (isBlockedRiskExtension(extUpload)) {
+    return { ok: false, status: 400, error: blockedUploadErrorMessage(extUpload) }
+  }
+  const avisoWhatsapp = null
   const tipo = aplicarTipoForcadoSticker(fileWork, inferirTipoArquivo(fileWork))
   if (tipo === 'audio' || tipo === 'voice') {
     try {

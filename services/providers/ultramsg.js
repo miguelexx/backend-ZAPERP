@@ -1269,7 +1269,7 @@ const profilePictureRateLimit = new Map()
 const PROFILE_PICTURE_RATE_LIMIT_MS = 2000 // 2 segundos entre requisições por instância
 
 // Limpeza periódica dos caches (a cada 6 horas)
-setInterval(() => {
+const cacheCleanupInterval = setInterval(() => {
   const now = Date.now()
   
   // Limpar cache de contatos sem foto expirados
@@ -1293,6 +1293,9 @@ setInterval(() => {
     })
   }
 }, 6 * 60 * 60 * 1000) // 6 horas
+if (cacheCleanupInterval && typeof cacheCleanupInterval.unref === 'function') {
+  cacheCleanupInterval.unref()
+}
 
 /**
  * Busca URL da foto de perfil.
