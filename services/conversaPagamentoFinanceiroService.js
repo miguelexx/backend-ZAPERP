@@ -1,9 +1,5 @@
 const supabase = require('../config/supabase')
-const {
-  obterDepartamentoIdsFinanceiro,
-  usuarioPertenceSetorFinanceiro,
-  conversaNoSetorFinanceiro,
-} = require('../helpers/financeiroSetorHelper')
+const { usuarioPertenceSetorFinanceiro } = require('../helpers/financeiroSetorHelper')
 
 const ACAO_AGUARDAR_PAGAMENTO = 'financeiro_aguardando_pagamento'
 const ACAO_RETOMAR_COBRANCA = 'financeiro_retomar_em_atendimento'
@@ -56,8 +52,6 @@ async function assertFluxoFinanceiroPermitido({ company_id, conversa_id, usuario
     return { ok: false, status: 403, error: 'Fluxo de cobrança disponível apenas para o setor Financeiro' }
   }
 
-  const financeiroIds = await obterDepartamentoIdsFinanceiro(cid)
-
   const { data: row, error: fetchErr } = await supabase
     .from('conversas')
     .select('id, tipo, telefone, status_atendimento, atendente_id, departamento_id')
@@ -74,16 +68,7 @@ async function assertFluxoFinanceiroPermitido({ company_id, conversa_id, usuario
     return { ok: false, status: 400, error: 'Indisponível para conversas de grupo', conversa: null }
   }
 
-  if (!conversaNoSetorFinanceiro(row, financeiroIds)) {
-    return {
-      ok: false,
-      status: 409,
-      error: 'Esta conversa não está no setor Financeiro',
-      conversa: null,
-    }
-  }
-
-  return { ok: true, row, financeiroIds, uid }
+  return { ok: true, row, uid }
 }
 
 async function marcarAguardandoPagamento({
