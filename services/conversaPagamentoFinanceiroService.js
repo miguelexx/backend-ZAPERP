@@ -3,6 +3,7 @@ const { usuarioPertenceSetorFinanceiro } = require('../helpers/financeiroSetorHe
 
 const ACAO_AGUARDAR_PAGAMENTO = 'financeiro_aguardando_pagamento'
 const ACAO_RETOMAR_COBRANCA = 'financeiro_retomar_em_atendimento'
+const ACAO_PAGAMENTO_CONCLUIDO = 'financeiro_pagamento_concluido'
 const ACAO_VENCIMENTO_ATRASO = 'financeiro_pagamento_em_atraso'
 
 const PRAZOS_VALIDOS = new Set(['hoje', 'amanha', '4h', 'data'])
@@ -130,6 +131,7 @@ async function marcarAguardandoPagamento({
       status_atendimento: 'pagamento_pendente',
       pagamento_prazo_ate: prazoAte.toISOString(),
       pagamento_prazo_origem: prazoNorm,
+      pagamento_concluido_em: null,
       aguardando_cliente_desde: null,
       ausencia_mensagem_enviada_em: null,
     })
@@ -193,6 +195,7 @@ async function retomarDeCobrancaFinanceira({ company_id, conversa_id, usuario_id
   }
 
   const stAntes = row.status_atendimento
+  const concluidoEm = new Date().toISOString()
 
   const { data: updated, error: updErr } = await supabase
     .from('conversas')
@@ -200,6 +203,7 @@ async function retomarDeCobrancaFinanceira({ company_id, conversa_id, usuario_id
       status_atendimento: 'em_atendimento',
       pagamento_prazo_ate: null,
       pagamento_prazo_origem: null,
+      pagamento_concluido_em: concluidoEm,
       aguardando_cliente_desde: null,
     })
     .eq('company_id', cid)
@@ -221,8 +225,8 @@ async function retomarDeCobrancaFinanceira({ company_id, conversa_id, usuario_id
   await supabase.from('historico_atendimentos').insert({
     conversa_id: convId,
     usuario_id: Number.isFinite(uid) && uid > 0 ? uid : null,
-    acao: ACAO_RETOMAR_COBRANCA,
-    observacao: `Cobrança encerrada manualmente (estava em ${stAntes}) — retorno para em atendimento`,
+    acao: ACAO_PAGAMENTO_CONCLUIDO,
+    observacao: `Pagamento confirmado (estava em ${stAntes}) — retorno para em atendimento`,
   })
 
   return { ok: true, status: 200, error: null, conversa: updated, idempotent: false }

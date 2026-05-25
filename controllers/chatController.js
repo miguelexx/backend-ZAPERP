@@ -821,6 +821,7 @@ exports.listarConversas = async (req, res) => {
       aguardando_cliente_desde,
       pagamento_prazo_ate,
       pagamento_prazo_origem,
+      pagamento_concluido_em,
       lida,
       criado_em,
       ultima_atividade,
@@ -856,6 +857,7 @@ exports.listarConversas = async (req, res) => {
       aguardando_cliente_desde,
       pagamento_prazo_ate,
       pagamento_prazo_origem,
+      pagamento_concluido_em,
       finalizacao_motivo,
       finalizada_automaticamente,
       finalizada_automaticamente_em,
@@ -891,6 +893,7 @@ exports.listarConversas = async (req, res) => {
       aguardando_cliente_desde,
       pagamento_prazo_ate,
       pagamento_prazo_origem,
+      pagamento_concluido_em,
       lida,
       criado_em,
       departamento_id,
@@ -1202,6 +1205,7 @@ exports.listarConversas = async (req, res) => {
         aguardando_cliente_desde: c.aguardando_cliente_desde ?? null,
         pagamento_prazo_ate: c.pagamento_prazo_ate ?? null,
         pagamento_prazo_origem: c.pagamento_prazo_origem ?? null,
+        pagamento_concluido_em: c.pagamento_concluido_em ?? null,
         atendente_nome: atendenteNome,
         atendente_email: atendenteEmail,
         lida: unreadCount === 0,
@@ -2765,6 +2769,9 @@ exports.encerrarChat = async (req, res) => {
         finalizada_automaticamente_em: null,
         aguardando_cliente_desde: null,
         ausencia_mensagem_enviada_em: null,
+        pagamento_prazo_ate: null,
+        pagamento_prazo_origem: null,
+        pagamento_concluido_em: null,
       })
       .eq('company_id', company_id)
       .eq('id', conversa_id)
@@ -2881,6 +2888,9 @@ exports.reabrirChat = async (req, res) => {
         finalizada_automaticamente_em: null,
         aguardando_cliente_desde: null,
         ausencia_mensagem_enviada_em: null,
+        pagamento_prazo_ate: null,
+        pagamento_prazo_origem: null,
+        pagamento_concluido_em: null,
       })
       .eq('company_id', company_id)
       .eq('id', conversa_id)
@@ -2983,6 +2993,7 @@ exports.marcarAguardandoPagamentoFinanceiroChat = async (req, res) => {
         status_atendimento_real: result.conversa.status_atendimento ?? null,
         pagamento_prazo_ate: result.conversa.pagamento_prazo_ate ?? null,
         pagamento_prazo_origem: result.conversa.pagamento_prazo_origem ?? null,
+        pagamento_concluido_em: null,
         lista_realtime: { minha_fila: true, motivo: 'financeiro_aguardando_pagamento' },
       }
       emitirEventoEmpresaConversa(io, company_id, conversa_id, io.EVENTS?.CONVERSA_ATUALIZADA || 'conversa_atualizada', {
@@ -3031,6 +3042,7 @@ exports.retomarEmAtendimentoManualChat = async (req, res) => {
         aguardando_cliente_desde: result.conversa.aguardando_cliente_desde ?? null,
         pagamento_prazo_ate: result.conversa.pagamento_prazo_ate ?? null,
         pagamento_prazo_origem: result.conversa.pagamento_prazo_origem ?? null,
+        pagamento_concluido_em: result.conversa.pagamento_concluido_em ?? null,
         lista_realtime: { minha_fila: true, motivo: 'manual_retomar_em_atendimento' },
       }
       emitirEventoEmpresaConversa(io, company_id, conversa_id, io.EVENTS?.CONVERSA_ATUALIZADA || 'conversa_atualizada', {
