@@ -29,7 +29,7 @@ async function runCycle() {
         .map((d) => `${d.company_id}:${d.reason || (d.sent ? 'sent' : '?')}${d.error ? `(${String(d.error).slice(0, 80)})` : ''}`)
         .join(' | ')
       const hasActionable = (result.detalhes || []).some((d) =>
-        ['send_failed', 'invalid_phone', 'invalid_contact_phone', 'contact_not_found', 'contact_lookup_failed', 'reserve_failed', 'no_provider'].includes(d.reason)
+        ['send_failed', 'invalid_phone', 'invalid_contact_phone', 'contact_not_found', 'contact_lookup_failed', 'reserve_failed', 'no_provider', 'no_metrics_enabled'].includes(d.reason)
       )
       const logFn = hasActionable ? console.warn : console.log
       logFn('[adminAlertaScheduler] ciclo (alerta ativo; sem envio neste tick)', {

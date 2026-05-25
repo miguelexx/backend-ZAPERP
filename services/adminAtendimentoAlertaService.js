@@ -19,7 +19,14 @@ const DEFAULT_ADMIN_ATENDIMENTO_ALERTA = {
   /** Vazio = herdar chatbot_triage.timezone */
   timezone: '',
   incluir_nota_media: false,
-  incluir_conversas_sem_resposta: false,
+  incluir_conversas_sem_resposta: true,
+}
+
+/** Com alerta ativo, pelo menos uma métrica precisa estar ligada para haver conteúdo no WhatsApp. */
+function ensureAdminAlertMetrics(alert) {
+  if (!alert?.ativo) return alert
+  if (alert.incluir_nota_media || alert.incluir_conversas_sem_resposta) return alert
+  return { ...alert, incluir_conversas_sem_resposta: true }
 }
 
 function normalizeHorarioEnvio(value) {
@@ -46,7 +53,7 @@ function normalizeAdminAtendimentoAlerta(raw) {
   const r = raw && typeof raw === 'object' ? raw : {}
   const tz = String(r.timezone || '').trim()
   const clienteId = Number(r.cliente_id)
-  return {
+  return ensureAdminAlertMetrics({
     ativo: coerceAtivo(r.ativo),
     cliente_id: Number.isInteger(clienteId) && clienteId > 0 ? clienteId : null,
     cliente_nome: String(r.cliente_nome || '').trim().slice(0, 120),
@@ -55,7 +62,7 @@ function normalizeAdminAtendimentoAlerta(raw) {
     timezone: tz.length > 0 ? tz.slice(0, 80) : '',
     incluir_nota_media: r.incluir_nota_media === true,
     incluir_conversas_sem_resposta: r.incluir_conversas_sem_resposta === true,
-  }
+  })
 }
 
 function resolveTimezone(alert, fullConfig) {
@@ -347,7 +354,7 @@ function buildMessage({ incluirNota, notaMedia, incluirSemResp, qtdSemResp, fila
  * Processa envio para uma empresa (chamado pelo job de cron).
  * @returns {Promise<{ sent: boolean, reason?: string, error?: string }>}
  */
-async function processCompanyAdminAlert({ company_id, fullConfig, provider, dryRun = false }) {
+async function processCompanyAdminAlert({ company_id, fullConfig, provider, dryRun = false, forceSend = false }) {
   const alert = normalizeAdminAtendimentoAlerta((fullConfig || {}).admin_atendimento_alerta || {})
   if (!alert.ativo) return { sent: false, reason: 'inactive' }
 
@@ -355,7 +362,7 @@ async function processCompanyAdminAlert({ company_id, fullConfig, provider, dryR
   const now = new Date()
   const { ymd: diaLocal, hm: nowHm } = zonedYmdHm(now, tz)
   const scheduled = normalizeHorarioEnvio(alert.horario_envio)
-  const withinWindow = isWithinDispatchWindow(scheduled, nowHm, CRON_GRACE_MINUTES)
+  const withinWindow = forceSend || isWithinDispatchWindow(scheduled, nowHm, CRON_GRACE_MINUTES)
   const baseDiag = {
     dryRun,
     scheduled,
@@ -385,10 +392,6 @@ async function processCompanyAdminAlert({ company_id, fullConfig, provider, dryR
       })
     }
     return { sent: false, reason: 'outside_window', ...baseDiag }
-  }
-
-  if (!alert.incluir_nota_media && !alert.incluir_conversas_sem_resposta) {
-    return { sent: false, reason: 'no_metrics_enabled', ...baseDiag }
   }
 
   const destination = await resolveAdminAlertDestination(company_id, alert)
@@ -458,7 +461,7 @@ async function processCompanyAdminAlert({ company_id, fullConfig, provider, dryR
     }
   }
 
-  const locked = await acquireAlertaSendLock(company_id, diaLocal, scheduled)
+  const locked = forceSend ? { ok: true, test: true } : await acquireAlertaSendLock(company_id, diaLocal, scheduled)
   if (!locked.ok) {
     const reason = locked.reason === 'already_sent' ? 'already_sent_today' : 'reserve_failed'
     if (reason === 'reserve_failed') {
@@ -513,19 +516,21 @@ async function processCompanyAdminAlert({ company_id, fullConfig, provider, dryR
 
   const ok = !!result?.ok
 
-  await finalizeAlertaSlot(company_id, diaLocal, {
-    sucesso: ok,
-    destino_suffix: maskPhoneTail(digits),
-    detalhes: {
-      reservado: false,
-      destino_origem: destination.source,
-      cliente_id: destination.cliente_id,
-      cliente_nome: destination.cliente_nome,
-      nota_media: notaMedia,
-      conversas_sem_resposta: alert.incluir_conversas_sem_resposta ? qtdSemResp : undefined,
-      ultramsg_error: ok ? null : (result?.error || null),
-    },
-  })
+  if (!forceSend) {
+    await finalizeAlertaSlot(company_id, diaLocal, {
+      sucesso: ok,
+      destino_suffix: maskPhoneTail(digits),
+      detalhes: {
+        reservado: false,
+        destino_origem: destination.source,
+        cliente_id: destination.cliente_id,
+        cliente_nome: destination.cliente_nome,
+        nota_media: notaMedia,
+        conversas_sem_resposta: alert.incluir_conversas_sem_resposta ? qtdSemResp : undefined,
+        ultramsg_error: ok ? null : (result?.error || null),
+      },
+    })
+  }
 
   await logBotAdminAlert(company_id, {
     ok,
@@ -607,6 +612,7 @@ async function runAdminAtendimentoAlertaForAllCompanies(opts = {}) {
 module.exports = {
   DEFAULT_ADMIN_ATENDIMENTO_ALERTA,
   normalizeAdminAtendimentoAlerta,
+  ensureAdminAlertMetrics,
   processCompanyAdminAlert,
   runAdminAtendimentoAlertaForAllCompanies,
   parseIaConfigJson,
