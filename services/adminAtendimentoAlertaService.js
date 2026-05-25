@@ -12,6 +12,8 @@ const AVALIACOES_LOOKBACK_MS = 30 * 24 * 60 * 60 * 1000
 
 const DEFAULT_ADMIN_ATENDIMENTO_ALERTA = {
   ativo: false,
+  cliente_id: null,
+  cliente_nome: '',
   telefone_admin: '',
   horario_envio: '09:00',
   /** Vazio = herdar chatbot_triage.timezone */
@@ -43,8 +45,11 @@ function isChatbotTriageEnabled(ct) {
 function normalizeAdminAtendimentoAlerta(raw) {
   const r = raw && typeof raw === 'object' ? raw : {}
   const tz = String(r.timezone || '').trim()
+  const clienteId = Number(r.cliente_id)
   return {
     ativo: coerceAtivo(r.ativo),
+    cliente_id: Number.isInteger(clienteId) && clienteId > 0 ? clienteId : null,
+    cliente_nome: String(r.cliente_nome || '').trim().slice(0, 120),
     telefone_admin: String(r.telefone_admin || '').trim().slice(0, 40),
     horario_envio: normalizeHorarioEnvio(r.horario_envio),
     timezone: tz.length > 0 ? tz.slice(0, 80) : '',
@@ -104,6 +109,59 @@ function maskPhoneTail(digits) {
   const d = String(digits || '').replace(/\D/g, '')
   if (d.length <= 4) return '****'
   return `…${d.slice(-4)}`
+}
+
+function contactDisplayName(cliente) {
+  const nome = String(cliente?.nome || cliente?.pushname || '').trim()
+  return nome || (cliente?.id ? `Cliente ${cliente.id}` : '')
+}
+
+async function resolveAdminAlertDestination(company_id, alert) {
+  const clienteId = Number(alert?.cliente_id)
+  if (Number.isInteger(clienteId) && clienteId > 0) {
+    const { data, error } = await supabase
+      .from('clientes')
+      .select('id, telefone, wa_id, nome, pushname')
+      .eq('company_id', company_id)
+      .eq('id', clienteId)
+      .maybeSingle()
+
+    if (error) {
+      console.warn('[adminAtendimentoAlerta] destino cliente lookup:', error.message)
+      return { ok: false, reason: 'contact_lookup_failed', error: error.message, cliente_id: clienteId }
+    }
+    if (!data) {
+      return { ok: false, reason: 'contact_not_found', cliente_id: clienteId }
+    }
+
+    const telefone = String(data.telefone || data.wa_id || '').trim()
+    const digits = telefone.replace(/\D/g, '')
+    if (!digits || digits.length < 10) {
+      return {
+        ok: false,
+        reason: 'invalid_contact_phone',
+        cliente_id: clienteId,
+        cliente_nome: contactDisplayName(data),
+        digits,
+      }
+    }
+
+    return {
+      ok: true,
+      source: 'cliente',
+      telefone,
+      digits,
+      cliente_id: clienteId,
+      cliente_nome: contactDisplayName(data),
+    }
+  }
+
+  const telefone = String(alert?.telefone_admin || '').trim()
+  const digits = telefone.replace(/\D/g, '')
+  if (!digits || digits.length < 10) {
+    return { ok: false, reason: 'invalid_phone', source: 'manual', digits }
+  }
+  return { ok: true, source: 'manual', telefone, digits, cliente_id: null, cliente_nome: '' }
 }
 
 function formatNotaPt(n) {
@@ -310,6 +368,8 @@ async function processCompanyAdminAlert({ company_id, fullConfig, provider, dryR
       incluir_nota_media: alert.incluir_nota_media,
       incluir_conversas_sem_resposta: alert.incluir_conversas_sem_resposta,
     },
+    cliente_id: alert.cliente_id,
+    cliente_nome: alert.cliente_nome,
     telefone_tail: maskPhoneTail(alert.telefone_admin),
   }
 
@@ -331,22 +391,36 @@ async function processCompanyAdminAlert({ company_id, fullConfig, provider, dryR
     return { sent: false, reason: 'no_metrics_enabled', ...baseDiag }
   }
 
-  const digits = String(alert.telefone_admin || '').replace(/\D/g, '')
-  if (!digits || digits.length < 10) {
+  const destination = await resolveAdminAlertDestination(company_id, alert)
+  const destinationDiag = {
+    ...baseDiag,
+    destino_origem: destination.source || (alert.cliente_id ? 'cliente' : 'manual'),
+    cliente_id: destination.cliente_id ?? alert.cliente_id,
+    cliente_nome: destination.cliente_nome || alert.cliente_nome,
+    telefone_tail: maskPhoneTail(destination.digits || alert.telefone_admin),
+  }
+  const digits = destination.digits || ''
+  if (!destination.ok) {
     await logBotAdminAlert(company_id, {
       ok: false,
       dia_local: diaLocal,
       horario: scheduled,
-      erro: 'telefone_admin inválido',
+      cliente_id: destination.cliente_id ?? alert.cliente_id,
+      cliente_nome: destination.cliente_nome || alert.cliente_nome,
+      erro: destination.reason || 'destino inválido',
     })
-    console.warn('[adminAtendimentoAlerta] telefone inválido', { company_id })
-    return { sent: false, reason: 'invalid_phone', ...baseDiag }
+    console.warn('[adminAtendimentoAlerta] destino inválido', {
+      company_id,
+      reason: destination.reason,
+      cliente_id: destination.cliente_id ?? alert.cliente_id,
+    })
+    return { sent: false, reason: destination.reason || 'invalid_destination', error: destination.error, ...destinationDiag }
   }
 
   const send = provider?.sendText
   if (!dryRun && typeof send !== 'function') {
     await logBotAdminAlert(company_id, { ok: false, dia_local: diaLocal, erro: 'sendText indisponível' })
-    return { sent: false, reason: 'no_provider', ...baseDiag }
+    return { sent: false, reason: 'no_provider', ...destinationDiag }
   }
 
   if (dryRun) {
@@ -374,7 +448,7 @@ async function processCompanyAdminAlert({ company_id, fullConfig, provider, dryR
     return {
       sent: false,
       reason: lock?.sucesso ? 'already_sent_today' : 'dry_run_ready',
-      ...baseDiag,
+      ...destinationDiag,
       lock,
       preview: {
         nota_media: notaMedia,
@@ -394,7 +468,7 @@ async function processCompanyAdminAlert({ company_id, fullConfig, provider, dryR
         lock_reason: locked.reason,
       })
     }
-    return { sent: false, reason, lock_reason: locked.reason, ...baseDiag }
+    return { sent: false, reason, lock_reason: locked.reason, ...destinationDiag }
   }
 
   let notaMedia = null
@@ -431,7 +505,7 @@ async function processCompanyAdminAlert({ company_id, fullConfig, provider, dryR
       filaItens,
     })
 
-    result = (await send(alert.telefone_admin, texto, { companyId: company_id })) || { ok: false }
+    result = (await send(destination.telefone, texto, { companyId: company_id })) || { ok: false }
   } catch (e) {
     result = { ok: false, error: String(e?.message || e || 'exceção no envio') }
     console.warn('[adminAtendimentoAlerta] exceção após reserva', { company_id, erro: result.error })
@@ -444,6 +518,9 @@ async function processCompanyAdminAlert({ company_id, fullConfig, provider, dryR
     destino_suffix: maskPhoneTail(digits),
     detalhes: {
       reservado: false,
+      destino_origem: destination.source,
+      cliente_id: destination.cliente_id,
+      cliente_nome: destination.cliente_nome,
       nota_media: notaMedia,
       conversas_sem_resposta: alert.incluir_conversas_sem_resposta ? qtdSemResp : undefined,
       ultramsg_error: ok ? null : (result?.error || null),
@@ -456,6 +533,9 @@ async function processCompanyAdminAlert({ company_id, fullConfig, provider, dryR
     horario: scheduled,
     timezone: tz,
     now_hm: nowHm,
+    destino_origem: destination.source,
+    cliente_id: destination.cliente_id,
+    cliente_nome: destination.cliente_nome,
     destino_mascarado: maskPhoneTail(digits),
     nota_media: notaMedia,
     conversas_sem_resposta: alert.incluir_conversas_sem_resposta ? qtdSemResp : undefined,
@@ -464,10 +544,10 @@ async function processCompanyAdminAlert({ company_id, fullConfig, provider, dryR
 
   if (ok) {
     console.log('[adminAtendimentoAlerta] enviado', { company_id, dia_local: diaLocal, destino: maskPhoneTail(digits) })
-    return { sent: true, ...baseDiag }
+    return { sent: true, ...destinationDiag }
   }
   console.warn('[adminAtendimentoAlerta] falha UltraMsg', { company_id, erro: result?.error })
-  return { sent: false, reason: 'send_failed', error: result?.error, ...baseDiag }
+  return { sent: false, reason: 'send_failed', error: result?.error, ...destinationDiag }
 }
 
 function parseIaConfigJson(config) {
