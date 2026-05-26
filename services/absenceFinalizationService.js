@@ -250,7 +250,7 @@ async function clearWaitingForClient(company_id, conversa_id) {
 }
 
 async function tryMarkWaitingAfterHumanOutbound({ company_id, conversa_id, texto, criado_em, autor_usuario_id }) {
-  if (!company_id || !conversa_id) return
+  if (!company_id || !conversa_id) return { marked: false, reason: 'missing_context' }
   const ts = criado_em || new Date().toISOString()
   const { data: conv } = await supabase
     .from('conversas')
@@ -260,10 +260,14 @@ async function tryMarkWaitingAfterHumanOutbound({ company_id, conversa_id, texto
     .maybeSingle()
   const isGroup =
     String(conv?.tipo || '').toLowerCase() === 'grupo' || String(conv?.telefone || '').includes('@g.us')
-  if (!conv || isGroup) return
-  if (conv.status_atendimento !== 'em_atendimento' || conv.atendente_id == null) return
+  if (!conv || isGroup) return { marked: false, reason: 'not_eligible_conversation' }
+  if (conv.status_atendimento !== 'em_atendimento' || conv.atendente_id == null) {
+    return { marked: false, reason: 'not_in_human_attendance' }
+  }
   const { triageMerged, absence: absenceCfg } = await loadChatbotTriageMergeAndAbsence(company_id)
-  if (!outboundQualificaParaAguardandoCliente(texto, autor_usuario_id, triageMerged, absenceCfg)) return
+  if (!outboundQualificaParaAguardandoCliente(texto, autor_usuario_id, triageMerged, absenceCfg)) {
+    return { marked: false, reason: 'message_not_qualified' }
+  }
   const jaAguardando = !!conv.aguardando_cliente_desde
   await markWaitingForClient(company_id, conversa_id, ts)
   if (!jaAguardando) {
@@ -274,6 +278,7 @@ async function tryMarkWaitingAfterHumanOutbound({ company_id, conversa_id, texto
       observacao: 'Conversa marcada como aguardando cliente após mensagem do atendente',
     })
   }
+  return { marked: true, aguardando_cliente_desde: ts, jaAguardando }
 }
 
 async function sendAbsenceClosingMessage({ provider, company_id, conversa_id, telefone, mensagem }) {
@@ -286,7 +291,11 @@ async function sendAbsenceClosingMessage({ provider, company_id, conversa_id, te
   if (row?.ausencia_mensagem_enviada_em) {
     return { ok: true, skippedDuplicate: true }
   }
-  const result = await provider.sendText(telefone, mensagem, { companyId: company_id, conversaId: conversa_id })
+  const result = await provider.sendText(telefone, mensagem, {
+    companyId: company_id,
+    conversaId: conversa_id,
+    sendOrigin: 'finalizacao_ausencia_cliente',
+  })
   const ok = !!result?.ok
   if (!ok) return { ok: false }
   await supabase.from('mensagens').insert({

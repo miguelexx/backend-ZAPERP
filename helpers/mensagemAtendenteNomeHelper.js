@@ -43,6 +43,22 @@ function textosOutboundFromMeEquivalentes(textoWebhook, textoCrm, nomeAtendente)
   return false
 }
 
+/**
+ * Texto enviado ao WhatsApp (UltraMsg). CRM grava sem prefixo; o cliente vê *Nome* na primeira linha.
+ * @param {string} texto
+ * @param {string|null|undefined} usuarioNome
+ */
+function formatTextoWhatsappComNomeAtendente(texto, usuarioNome) {
+  const t = String(texto || '').trim()
+  const nome = usuarioNome ? String(usuarioNome).trim() : ''
+  if (!nome) return t
+  if (!t) return `*${nome}*`
+  const firstLine = String(t.split('\n')[0] || '').trim()
+  const plainFirst = firstLine.replace(/^\*+|\*+$/g, '').trim()
+  if (plainFirst.toLowerCase() === nome.toLowerCase()) return t
+  return `*${nome}*\n${t}`
+}
+
 /** Extrai nome da primeira linha quando vier como *Nome* ou Nome (webhook fromMe). */
 function extrairNomePrefixoTexto(texto) {
   const raw = String(texto || '').trim()
@@ -57,6 +73,7 @@ function extrairNomePrefixoTexto(texto) {
 module.exports = {
   stripPrefixoAtendenteNoTexto,
   textosOutboundFromMeEquivalentes,
+  formatTextoWhatsappComNomeAtendente,
   extrairNomePrefixoTexto,
   escapeRegex,
 }

@@ -37,12 +37,20 @@ test('textoMensagemMidiaParaBanco: arquivo mantém nome', () => {
   )
 })
 
-test('captionWhatsappParaMidia: imagem sem legenda retorna vazio', () => {
+test('captionWhatsappParaMidia: imagem sem legenda envia nome do atendente', () => {
   assert.equal(
     captionWhatsappParaMidia({
       tipo: 'imagem',
       captionUsuarioTrim: '',
       usuarioNome: 'Pollyana',
+    }),
+    '*Pollyana*'
+  )
+  assert.equal(
+    captionWhatsappParaMidia({
+      tipo: 'imagem',
+      captionUsuarioTrim: '',
+      usuarioNome: '',
     }),
     ''
   )

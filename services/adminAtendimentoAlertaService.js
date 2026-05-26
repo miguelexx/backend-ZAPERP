@@ -508,7 +508,10 @@ async function processCompanyAdminAlert({ company_id, fullConfig, provider, dryR
       filaItens,
     })
 
-    result = (await send(destination.telefone, texto, { companyId: company_id })) || { ok: false }
+    result = (await send(destination.telefone, texto, {
+      companyId: company_id,
+      sendOrigin: 'admin_atendimento_alerta',
+    })) || { ok: false }
   } catch (e) {
     result = { ok: false, error: String(e?.message || e || 'exceção no envio') }
     console.warn('[adminAtendimentoAlerta] exceção após reserva', { company_id, erro: result.error })

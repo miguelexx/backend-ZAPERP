@@ -80,9 +80,14 @@ exports.proxyMedia = async (req, res) => {
       return res.status(413).json({ error: 'Arquivo muito grande' })
     }
 
-    const ct = upstream.headers.get('content-type') || 'application/octet-stream'
+    let ct = upstream.headers.get('content-type') || 'application/octet-stream'
+    const pathLower = String(target.pathname || '').toLowerCase()
+    if ((!ct || ct === 'application/octet-stream') && /\.(mp4|mov|webm|3gp|m4v|mkv)(\?|$)/i.test(pathLower)) {
+      ct = 'video/mp4'
+    }
     res.setHeader('Content-Type', ct)
     res.setHeader('Cache-Control', 'private, max-age=120')
+    res.setHeader('Accept-Ranges', 'bytes')
     return res.status(200).send(Buffer.from(arrayBuffer))
   } catch (e) {
     const timedOut = e?.name === 'AbortError'

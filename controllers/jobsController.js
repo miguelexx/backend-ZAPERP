@@ -136,7 +136,8 @@ exports.timeoutInatividadeChatbot = async (req, res) => {
         try {
           const resultSend = await provider.sendText(telefone, mensagemEncerramento, {
             companyId: company_id,
-            conversaId: conv.id
+            conversaId: conv.id,
+            sendOrigin: 'timeout_inatividade_chatbot',
           })
 
           const statusMsg = resultSend?.ok ? 'sent' : 'erro'

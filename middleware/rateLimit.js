@@ -1,9 +1,14 @@
 const { rateLimit, ipKeyGenerator } = require('express-rate-limit')
 
 /** IP real do cliente (importante quando atrás de proxy/Nginx) — evita rate limit compartilhado entre todos os usuários */
+function shouldTrustForwardedFor(req) {
+  const trustProxy = req?.app?.get?.('trust proxy')
+  return trustProxy === true || trustProxy === 1 || trustProxy === '1'
+}
+
 function getClientIp(req) {
   const forwarded = req.headers['x-forwarded-for']
-  if (forwarded) {
+  if (forwarded && shouldTrustForwardedFor(req)) {
     const first = String(forwarded).split(',')[0].trim()
     if (first) return first
   }

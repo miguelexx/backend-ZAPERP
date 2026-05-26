@@ -2130,7 +2130,12 @@ exports.receberZapi = async (req, res) => {
     if (!fromMe && !isGroup && departamento_id == null && atendente_id == null && phoneParaChatbot) {
       try {
         const sendMessage = async (ph, msg, o = {}) => {
-          const r = await getProvider().sendText(ph, msg, { companyId: company_id, conversaId: conversa_id, ...o })
+          const r = await getProvider().sendText(ph, msg, {
+            companyId: company_id,
+            conversaId: conversa_id,
+            ...o,
+            sendOrigin: o?.sendOrigin || o?.origin || 'chatbot_triage',
+          })
           return { ok: !!r?.ok, messageId: r?.messageId || null }
         }
         let skipChatbot = false
@@ -2146,7 +2151,7 @@ exports.receberZapi = async (req, res) => {
             texto: texto || '',
           })
           if (optResult.isOptOut && optResult.mensagemConfirmacao) {
-            await sendMessage(phoneParaChatbot, optResult.mensagemConfirmacao, {})
+            await sendMessage(phoneParaChatbot, optResult.mensagemConfirmacao, { sendOrigin: 'opt_out_confirmacao' })
             skipChatbot = true
           }
         }

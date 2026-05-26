@@ -2,6 +2,7 @@ const assert = require('node:assert/strict')
 const {
   stripPrefixoAtendenteNoTexto,
   textosOutboundFromMeEquivalentes,
+  formatTextoWhatsappComNomeAtendente,
   extrairNomePrefixoTexto,
 } = require('../helpers/mensagemAtendenteNomeHelper')
 
@@ -25,4 +26,14 @@ test('textosOutboundFromMeEquivalentes casa webhook prefixado com CRM sem prefix
 
 test('extrairNomePrefixoTexto', () => {
   assert.equal(extrairNomePrefixoTexto('*João*\nOi'), 'João')
+})
+
+test('formatTextoWhatsappComNomeAtendente prefixa e evita duplicar', () => {
+  assert.equal(formatTextoWhatsappComNomeAtendente('Olá', 'Maria'), '*Maria*\nOlá')
+  assert.equal(formatTextoWhatsappComNomeAtendente('', 'Maria'), '*Maria*')
+  assert.equal(formatTextoWhatsappComNomeAtendente('Olá', ''), 'Olá')
+  assert.equal(
+    formatTextoWhatsappComNomeAtendente('*Maria*\nOlá', 'Maria'),
+    '*Maria*\nOlá'
+  )
 })

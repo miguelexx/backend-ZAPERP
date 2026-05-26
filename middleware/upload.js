@@ -29,6 +29,10 @@ const ALLOWED_MIME = new Map([
   ['video/quicktime', '.mov'],
   ['video/x-msvideo', '.avi'],
   ['video/3gpp', '.3gp'],
+  ['video/x-m4v', '.m4v'],
+  ['video/x-matroska', '.mkv'],
+  ['video/mpeg', '.mpeg'],
+  ['video/ogg', '.ogv'],
   // Documentos (UltraMsg: até 30MB)
   ['application/pdf', '.pdf'],
   ['application/vnd.openxmlformats-officedocument.wordprocessingml.document', '.docx'],
@@ -58,7 +62,7 @@ const ALLOWED_MIME = new Map([
 const ALLOWED_EXTENSIONS = new Set([
   'jpg', 'jpeg', 'png', 'webp', 'gif', 'bmp',
   'mp3', 'ogg', 'aac', 'm4a', 'webm', 'opus', 'wav',
-  'mp4', 'mov', 'avi', '3gp', 'webm',
+  'mp4', 'mov', 'avi', '3gp', 'webm', 'm4v', 'mkv', 'mpeg', 'mpg', 'ogv',
   'pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx',
   'txt', 'csv', 'md', 'html', 'htm', 'rtf',
   'json', 'xml', 'sql',

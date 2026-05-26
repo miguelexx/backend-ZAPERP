@@ -178,6 +178,16 @@ function emitirConversaAtualizada(io, company_id, conversa_id, payload = null, o
   if (!skipAtualizarConversa) io.to(`empresa_${company_id}`).emit('atualizar_conversa', { id: cid })
 }
 
+function aplicarAguardandoClienteNoPayload(payload, waitingResult) {
+  if (!payload || !waitingResult?.marked) return payload
+  payload.status_atendimento = 'em_atendimento'
+  payload.status_atendimento_real = 'em_atendimento'
+  payload.aguardando_cliente_desde = waitingResult.aguardando_cliente_desde || new Date().toISOString()
+  payload.exibir_badge_aberta = false
+  payload.tem_novas_mensagens_em_atendimento = false
+  return payload
+}
+
 async function emitirParaUsuariosQuePodemVerConversa(io, company_id, conversa_id, eventName, payload) {
   if (!io || !conversa_id) return false
   const usuarioIds = await obterUsuarioIdsQuePodemVerConversa(company_id, conversa_id)
@@ -258,41 +268,59 @@ function emitirDepartamento(io, departamento_id, eventName, payload) {
 }
 
 /** Enriquece mensagens com usuario_id, usuario_nome e enviado_por_usuario (apenas direcao out) */
-async function enrichMensagensComAutorUsuario(supabase, company_id, mensagens) {
+function textoRevogadoApagadaParaTodos(m, viewerUserId) {
+  const souAutor =
+    m?.autor_usuario_id != null &&
+    viewerUserId != null &&
+    Number(m.autor_usuario_id) === Number(viewerUserId)
+  return souAutor ? 'Você apagou esta mensagem para todos.' : 'Esta mensagem foi apagada para todos.'
+}
+
+function aplicarApagadaParaTodosNaMensagem(m, viewerUserId) {
+  if (!m?.apagada_para_todos) return m
+  return {
+    ...m,
+    apagada_para_todos: true,
+    texto: textoRevogadoApagadaParaTodos(m, viewerUserId),
+    reply_meta: null,
+    mensagem_respondida_id: null,
+  }
+}
+
+async function enrichMensagensComAutorUsuario(supabase, company_id, mensagens, viewerUserId = null) {
   if (!Array.isArray(mensagens) || mensagens.length === 0) return mensagens
   const autorIds = [...new Set(mensagens.map((m) => m.autor_usuario_id).filter(Boolean))]
-  const base = (m) => ({
-    ...m,
-    criado_em: normalizarTimestampSemFusoAmbiguoParaApi(m.criado_em),
-    usuario_id: m.autor_usuario_id ?? null,
-    usuario_nome: null,
-    enviado_por_usuario: m.direcao === 'out' && m.autor_usuario_id != null
-  })
-  if (autorIds.length === 0) return mensagens.map(base)
+  const decorate = (m, usuarioNome) => {
+    let row = {
+      ...m,
+      criado_em: normalizarTimestampSemFusoAmbiguoParaApi(m.criado_em),
+      usuario_id: m.autor_usuario_id ?? null,
+      usuario_nome: usuarioNome,
+      enviado_por_usuario: m.direcao === 'out' && m.autor_usuario_id != null,
+    }
+    if (viewerUserId != null) row = aplicarApagadaParaTodosNaMensagem(row, viewerUserId)
+    return row
+  }
+  if (autorIds.length === 0) return mensagens.map((m) => decorate(m, null))
   const { data: us } = await supabase.from('usuarios').select('id, nome').eq('company_id', company_id).in('id', autorIds)
   const usuarioMap = new Map((us || []).map((u) => [u.id, u.nome]))
-  return mensagens.map((m) => ({
-    ...base(m),
-    usuario_nome: m.direcao === 'out' && m.autor_usuario_id ? (usuarioMap.get(m.autor_usuario_id) ?? null) : null
-  }))
+  return mensagens.map((m) =>
+    decorate(
+      m,
+      m.direcao === 'out' && m.autor_usuario_id ? (usuarioMap.get(m.autor_usuario_id) ?? null) : null
+    )
+  )
 }
 
-/**
- * Texto enviado ao WhatsApp (UltraMsg). Não prefixa com *nome* no body:
- * contas Business multi-atendente já exibem o nome do agente acima da bolha;
- * prefixar gerava duas mensagens visíveis (rótulo nativo + linha *Nome*).
- * O nome continua visível no CRM (usuario_nome) e em legendas/rodapés de mídia (— Nome).
- */
-function textoParaEnvioWhatsapp(texto) {
-  return String(texto || '').trim()
+const { formatTextoWhatsappComNomeAtendente } = require('../helpers/mensagemAtendenteNomeHelper')
+
+/** Texto ao WhatsApp com *nome* na primeira linha (respeita getUsuarioParaEnvioCliente). CRM grava sem prefixo. */
+function textoParaEnvioWhatsapp(texto, usuarioNome) {
+  return formatTextoWhatsappComNomeAtendente(texto, usuarioNome)
 }
 
-/** Legado: intro de cartão de contato (mensagem separada intencional). */
 function prefixarParaCliente(texto, usuarioNome) {
-  if (!usuarioNome || !String(usuarioNome).trim()) return texto
-  const t = String(texto || '').trim()
-  const nome = String(usuarioNome).trim()
-  return t ? `${t}` : nome
+  return formatTextoWhatsappComNomeAtendente(texto, usuarioNome)
 }
 
 /** Busca nome e preferência do usuário para exibir ao cliente no WhatsApp. Retorna { nome, mostrar } */
@@ -328,6 +356,7 @@ async function enrichMensagemComAutorUsuario(supabase, company_id, msg) {
     usuario_nome: u?.nome ?? null,
     enviado_por_usuario: true,
     fromMe: true,
+    apagada_para_todos: msg?.apagada_para_todos === true,
   }
 }
 
@@ -378,11 +407,8 @@ async function assertPermissaoConversa({ company_id, conversa_id, user_id, role,
 
 /**
  * Verifica se o usuário pode ENVIAR mensagens na conversa.
- * Regras principais:
- * - GRUPOS: Qualquer usuário pode enviar SEM assumir
- * - Se a conversa está assumida pelo usuário (atendente_id === user_id), pode enviar
- * - Conversa em fila (atendente_id === null), qualquer usuário pode enviar
- * - FLEXÍVEL: Sistema permite envio para facilitar atendimento colaborativo
+ * - Grupos: qualquer usuário pode enviar sem assumir.
+ * - Demais conversas: só quem assumiu (atendente_id === user_id), inclusive admin.
  */
 async function assertPodeEnviarMensagem({ company_id, conversa_id, user_id }) {
   const { data: conv, error } = await supabase
@@ -394,24 +420,24 @@ async function assertPodeEnviarMensagem({ company_id, conversa_id, user_id }) {
   if (error) return { ok: false, status: 500, error: error.message }
   if (!conv) return { ok: false, status: 404, error: 'Conversa não encontrada' }
 
-  // GRUPOS: qualquer usuário pode enviar sem assumir
   if (isGroupConversation(conv)) {
     return { ok: true, reason: 'grupo_sem_exigir_assumir' }
   }
 
-  // REGRA PRINCIPAL: Se a conversa está assumida pelo usuário, SEMPRE pode enviar
   const isAssignedToUser = conv.atendente_id && Number(conv.atendente_id) === Number(user_id)
   if (isAssignedToUser) {
     return { ok: true, reason: 'conversa_assumida_pelo_usuario' }
   }
 
-  // REGRA SECUNDÁRIA: Conversa em fila (sem atendente), qualquer usuário pode enviar
   if (!conv.atendente_id) {
-    return { ok: true, reason: 'conversa_em_fila' }
+    return { ok: false, status: 403, error: 'Assuma a conversa antes de enviar mensagens' }
   }
 
-  // REGRA FLEXÍVEL: Permitir envio mesmo se assumida por outro (para colaboração)
-  return { ok: true, reason: 'sistema_colaborativo' }
+  return {
+    ok: false,
+    status: 403,
+    error: 'Esta conversa está com outro atendente. Assuma a conversa para enviar mensagens.',
+  }
 }
 
 // =====================================================
@@ -648,6 +674,11 @@ exports.listarConversas = async (req, res) => {
       emAtrasoRaw === 1 ||
       emAtrasoRaw === true
 
+    const tagFilterAtivo =
+      tag_id != null &&
+      String(tag_id).trim() !== '' &&
+      String(tag_id).trim().toLowerCase() !== 'todas'
+
     const incluirColaboradoresEncaminhar =
       incluirColabEncRaw === '1' ||
       incluirColabEncRaw === 'true' ||
@@ -753,7 +784,7 @@ exports.listarConversas = async (req, res) => {
 
     let conversaIdsFilter = null
 
-    if (tag_id) {
+    if (tagFilterAtivo) {
       const { data: tagRows } = await supabase
         .from('conversa_tags')
         .select('conversa_id')
@@ -1376,6 +1407,7 @@ exports.listarConversas = async (req, res) => {
       !aguardandoClienteAtivo &&
       !pagamentoPendenteAtivo &&
       !emAtrasoAtivo &&
+      !tagFilterAtivo &&
       !(filtroAtendenteInformado != null && !isAtendente)
     if (incluirTodos) {
       const cid = Number(company_id)
@@ -2640,8 +2672,8 @@ exports.detalharChat = async (req, res) => {
     const deveBloquearMensagens = !isGroup && conversaAssumidaPorOutro && !isAdmin && !isSupervisor
 
     // mensagens paginadas (remetente_nome/remetente_telefone para grupos; fallback se colunas não existirem)
-    const selectComRemetente = 'id, texto, direcao, criado_em, autor_usuario_id, status, whatsapp_id, tipo, url, nome_arquivo, reply_meta, remetente_nome, remetente_telefone, contact_meta, location_meta'
-    const selectBasico = 'id, texto, direcao, criado_em, autor_usuario_id, status, whatsapp_id, tipo, url, nome_arquivo, reply_meta, contact_meta, location_meta'
+    const selectComRemetente = 'id, texto, direcao, criado_em, autor_usuario_id, status, whatsapp_id, tipo, url, nome_arquivo, reply_meta, remetente_nome, remetente_telefone, contact_meta, location_meta, apagada_para_todos, apagada_em'
+    const selectBasico = 'id, texto, direcao, criado_em, autor_usuario_id, status, whatsapp_id, tipo, url, nome_arquivo, reply_meta, contact_meta, location_meta, apagada_para_todos, apagada_em'
     let mensagens = []
     let errMsgs = null
     let query
@@ -2664,7 +2696,7 @@ exports.detalharChat = async (req, res) => {
     }
     // Compatibilidade: se reply_meta/remetente_*/contact_meta/location_meta não existirem ainda no banco, refaz select sem essas colunas.
     const selectFallback = 'id, texto, direcao, criado_em, autor_usuario_id, status, whatsapp_id, tipo, url, nome_arquivo'
-    if (errMsgs && (String(errMsgs.message || '').includes('reply_meta') || String(errMsgs.message || '').includes('remetente_nome') || String(errMsgs.message || '').includes('remetente_telefone') || String(errMsgs.message || '').includes('contact_meta') || String(errMsgs.message || '').includes('location_meta') || String(errMsgs.message || '').includes('does not exist'))) {
+    if (errMsgs && (String(errMsgs.message || '').includes('reply_meta') || String(errMsgs.message || '').includes('remetente_nome') || String(errMsgs.message || '').includes('remetente_telefone') || String(errMsgs.message || '').includes('contact_meta') || String(errMsgs.message || '').includes('location_meta') || String(errMsgs.message || '').includes('apagada_para_todos') || String(errMsgs.message || '').includes('does not exist'))) {
       query = supabase
         .from('mensagens')
         .select(selectFallback)
@@ -2776,7 +2808,7 @@ exports.detalharChat = async (req, res) => {
       atendente_nome: conversa.usuarios?.nome ?? null,
       setor: conversa.departamentos?.nome ?? null,
       tags: (conversa.conversa_tags || []).map((ct) => ct.tags).filter(Boolean),
-      mensagens: await enrichMensagensComAutorUsuario(supabase, company_id, (mensagens || []).reverse()),
+      mensagens: await enrichMensagensComAutorUsuario(supabase, company_id, (mensagens || []).reverse(), user_id),
       next_cursor:
         hasMoreFromDb && oldestDbRow
           ? normalizarTimestampSemFusoAmbiguoParaApi(oldestDbRow.criado_em)
@@ -2926,7 +2958,11 @@ exports.encerrarChat = async (req, res) => {
               const { getProvider } = require('../services/providers')
               const provider = getProvider()
               if (provider?.sendText) {
-                const resultSend = await provider.sendText(telefoneParaEnvio, msg, { companyId: company_id, conversaId: conversa_id })
+                const resultSend = await provider.sendText(telefoneParaEnvio, msg, {
+                  companyId: company_id,
+                  conversaId: conversa_id,
+                  sendOrigin: 'mensagem_finalizacao_atendimento',
+                })
                 const statusMsg = resultSend?.ok ? 'sent' : 'erro'
                 const { data: msgInsert, error: errInsert } = await supabase
                   .from('mensagens')
@@ -3714,8 +3750,9 @@ exports.enviarMensagemChat = async (req, res) => {
 
     if (errMsg) return res.status(500).json({ error: errMsg.message })
 
+    let waitingAfterOutbound = null
     try {
-      await tryMarkWaitingAfterHumanOutbound({
+      waitingAfterOutbound = await tryMarkWaitingAfterHumanOutbound({
         company_id,
         conversa_id: Number(conversa_id),
         texto: String(texto || '').trim(),
@@ -3764,7 +3801,7 @@ exports.enviarMensagemChat = async (req, res) => {
         } catch (_) {}
       }
       const telefoneParaPayload = conversa?.telefone && !String(conversa.telefone).startsWith('lid:') ? String(conversa.telefone).trim() : null
-      const convPayload = {
+      const convPayload = aplicarAguardandoClienteNoPayload({
         id: Number(conversa_id),
         ultima_atividade: novaMsgPayload.criado_em,
         exibir_badge_aberta: true,
@@ -3781,7 +3818,7 @@ exports.enviarMensagemChat = async (req, res) => {
           usuario_nome: novaMsgPayload.usuario_nome,
         },
         reordenar_suave: true // Frontend: animar item para o topo em vez de refetch (evita "desce e sobe")
-      }
+      }, waitingAfterOutbound)
       emitirConversaAtualizada(io, company_id, conversa_id, convPayload, { skipAtualizarConversa: true })
     }
 
@@ -3824,22 +3861,28 @@ exports.enviarMensagemChat = async (req, res) => {
           if (linkUrlStr && !messageToSend.includes(linkUrlStr)) {
             messageToSend = messageToSend ? `${messageToSend} ${linkUrlStr}` : linkUrlStr
           }
-          messageToSend = textoParaEnvioWhatsapp(messageToSend)
+          messageToSend = textoParaEnvioWhatsapp(messageToSend, usuarioNome)
           result = await provider.sendLink(telefoneParaEnvio, {
             message: messageToSend,
             image: link.image || '',
             linkUrl: linkUrlStr,
             title: String(link.title || '').trim() || linkUrlStr,
             linkDescription: String(link.linkDescription || link.description || '').trim() || messageToSend,
-          }, { companyId: company_id, conversaId: conversa_id, replyMessageId: replyMessageId || undefined })
+          }, {
+            companyId: company_id,
+            conversaId: conversa_id,
+            replyMessageId: replyMessageId || undefined,
+            sendOrigin: 'atendimento_humano',
+          })
         } else {
-          const textoParaCliente = textoParaEnvioWhatsapp(String(texto).trim())
+          const textoParaCliente = textoParaEnvioWhatsapp(String(texto).trim(), usuarioNome)
           result = await provider.sendText(telefoneParaEnvio, textoParaCliente, {
             companyId: company_id,
             conversaId: conversa_id,
             phoneId: phoneId || undefined,
             replyMessageId: replyMessageId || undefined,
             referenceId: `crm-${msg.id}`,
+            sendOrigin: 'atendimento_humano',
           })
         }
         const ok = typeof result === 'boolean' ? result : result?.ok === true
@@ -4102,8 +4145,9 @@ exports.enviarContatoWhatsapp = async (req, res) => {
       return res.status(500).json({ error: errMsg.message })
     }
 
+    let waitingAfterOutbound = null
     try {
-      await tryMarkWaitingAfterHumanOutbound({
+      waitingAfterOutbound = await tryMarkWaitingAfterHumanOutbound({
         company_id,
         conversa_id: Number(conversa_id),
         texto: contactName,
@@ -4114,11 +4158,16 @@ exports.enviarContatoWhatsapp = async (req, res) => {
 
     const { nome: usuarioNome } = await getUsuarioParaEnvioCliente(supabase, company_id, user_id)
     if (usuarioNome) {
-      await provider.sendText(conversa.telefone, prefixarParaCliente('Segue contato abaixo:', usuarioNome), { companyId: company_id, conversaId: conversa_id })
+      await provider.sendText(conversa.telefone, prefixarParaCliente('Segue contato abaixo:', usuarioNome), {
+        companyId: company_id,
+        conversaId: conversa_id,
+        sendOrigin: 'atendimento_humano_contato',
+      })
     }
     const result = await provider.sendContact(conversa.telefone, contactName, contactPhone, {
       companyId: company_id,
       conversaId: conversa_id,
+      sendOrigin: 'atendimento_humano_contato',
       messageId: messageId || undefined,
     })
     const ok = typeof result === 'boolean' ? result : result?.ok === true
@@ -4136,7 +4185,19 @@ exports.enviarContatoWhatsapp = async (req, res) => {
     if (io) {
       const payload = await enrichMensagemComAutorUsuario(supabase, company_id, { ...msg, status: nextStatus, whatsapp_id: waMessageId || null })
       emitirEventoEmpresaConversa(io, company_id, conversa_id, io.EVENTS?.NOVA_MENSAGEM || 'nova_mensagem', payload)
-      emitirConversaAtualizada(io, company_id, conversa_id, { id: Number(conversa_id) })
+      const convPayload = aplicarAguardandoClienteNoPayload({
+        id: Number(conversa_id),
+        ultima_atividade: payload.criado_em || criadoEm,
+        ultima_mensagem_preview: {
+          texto: contactName,
+          criado_em: payload.criado_em || criadoEm,
+          direcao: 'out',
+          tipo: 'contact',
+          contact_meta,
+        },
+        reordenar_suave: true,
+      }, waitingAfterOutbound)
+      emitirConversaAtualizada(io, company_id, conversa_id, convPayload, { skipAtualizarConversa: true })
     }
 
     return res.json({ ok: true })
@@ -4246,8 +4307,9 @@ exports.enviarLocalizacao = async (req, res) => {
 
     if (errMsg) return res.status(500).json({ error: errMsg.message })
 
+    let waitingAfterOutbound = null
     try {
-      await tryMarkWaitingAfterHumanOutbound({
+      waitingAfterOutbound = await tryMarkWaitingAfterHumanOutbound({
         company_id,
         conversa_id: Number(conversa_id),
         texto: textoDisplay,
@@ -4281,7 +4343,8 @@ exports.enviarLocalizacao = async (req, res) => {
     if (telefoneParaEnvio) {
       result = await provider.sendLocation(telefoneParaEnvio, { address: addressParaCliente, lat: latitude, lng: longitude }, {
         companyId: company_id,
-        conversaId: conversa_id
+        conversaId: conversa_id,
+        sendOrigin: 'atendimento_humano_localizacao',
       })
     } else {
       console.warn(`[WhatsApp] Conversa ${conversa_id} sem telefone — localização salva, não enviada ao WhatsApp`)
@@ -4301,7 +4364,7 @@ exports.enviarLocalizacao = async (req, res) => {
     if (io) {
       const payload = await enrichMensagemComAutorUsuario(supabase, company_id, { ...msg, status: nextStatus, whatsapp_id: waMessageId || null, location_meta: msg.location_meta || location_meta })
       emitirEventoEmpresaConversa(io, company_id, conversa_id, io.EVENTS?.NOVA_MENSAGEM || 'nova_mensagem', payload)
-      const convPayload = {
+      const convPayload = aplicarAguardandoClienteNoPayload({
         id: Number(conversa_id),
         ultima_mensagem_preview: {
           texto: msg.texto,
@@ -4312,7 +4375,7 @@ exports.enviarLocalizacao = async (req, res) => {
           url: locationUrl
         },
         reordenar_suave: true
-      }
+      }, waitingAfterOutbound)
       emitirConversaAtualizada(io, company_id, conversa_id, convPayload, { skipAtualizarConversa: true })
     }
 
@@ -4503,14 +4566,32 @@ exports.excluirMensagem = async (req, res) => {
       }
     }
 
-    const { error: errDel } = await supabase
+    const textoRevogado = textoRevogadoApagadaParaTodos(msg, user_id)
+    const { data: msgRevogada, error: errUpd } = await supabase
       .from('mensagens')
-      .delete()
+      .update({
+        apagada_para_todos: true,
+        apagada_em: new Date().toISOString(),
+        texto: textoRevogado,
+        reply_meta: null,
+      })
       .eq('company_id', company_id)
       .eq('conversa_id', cid)
       .eq('id', mid)
+      .select('id, texto, direcao, criado_em, autor_usuario_id, status, whatsapp_id, tipo, url, nome_arquivo, apagada_para_todos, apagada_em')
+      .maybeSingle()
 
-    if (errDel) return res.status(500).json({ error: errDel.message })
+    if (errUpd) {
+      const errMsg = String(errUpd.message || '')
+      if (errMsg.includes('apagada_para_todos') || errMsg.includes('does not exist')) {
+        return res.status(400).json({
+          error:
+            'Banco desatualizado: execute a migration 20260525120000_mensagens_apagada_para_todos.sql no Supabase.',
+        })
+      }
+      return res.status(500).json({ error: errUpd.message })
+    }
+    if (!msgRevogada) return res.status(404).json({ error: 'Mensagem não encontrada' })
 
     // recalcula última mensagem (para o preview da lista)
     const { data: lastMsg, error: errLast } = await supabase
@@ -4552,7 +4633,18 @@ exports.excluirMensagem = async (req, res) => {
       emitirConversaAtualizada(io, company_id, cid, { id: cid })
     }
 
-    return res.json({ ok: true, conversa_id: cid, mensagem_id: mid, ultima_mensagem: ultima })
+    const msgApi = aplicarApagadaParaTodosNaMensagem(
+      await enrichMensagemComAutorUsuario(supabase, company_id, msgRevogada),
+      user_id
+    )
+    return res.json({
+      ok: true,
+      conversa_id: cid,
+      mensagem_id: mid,
+      ultima_mensagem: ultima,
+      mensagem: msgApi,
+      apagada_para_todos: true,
+    })
   } catch (err) {
     console.error(err)
     return res.status(500).json({ error: 'Erro ao excluir mensagem' })
@@ -4782,7 +4874,7 @@ exports.adicionarTagConversa = async (req, res) => {
         io.EVENTS?.TAG_ADICIONADA || 'tag_adicionada',
         payload
       )
-      emitirConversaAtualizada(io, company_id, id, { id: Number(id) })
+      emitirConversaAtualizada(io, company_id, id, { id: Number(id) }, { skipAtualizarConversa: true })
     }
 
     return res.json({ success: true, tag: data.tags })
@@ -4817,7 +4909,7 @@ exports.removerTagConversa = async (req, res) => {
         io.EVENTS?.TAG_REMOVIDA || 'tag_removida',
         payload
       )
-      emitirConversaAtualizada(io, company_id, id, { id: Number(id) })
+      emitirConversaAtualizada(io, company_id, id, { id: Number(id) }, { skipAtualizarConversa: true })
     }
 
     return res.json({ success: true })
@@ -5072,8 +5164,9 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
 
   if (error) return { ok: false, status: 500, error: error.message }
 
+    let waitingAfterOutbound = null
     try {
-      await tryMarkWaitingAfterHumanOutbound({
+      waitingAfterOutbound = await tryMarkWaitingAfterHumanOutbound({
         company_id,
         conversa_id: Number(conversa_id),
         texto: String(msg?.texto || '').trim(),
@@ -5096,7 +5189,11 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
       const novaMsgPayload = await enrichMensagemComAutorUsuario(supabase, company_id, basePayload)
       emitirEventoEmpresaConversa(io, company_id, conversa_id, io.EVENTS?.NOVA_MENSAGEM || 'nova_mensagem', novaMsgPayload)
       
-      const convPayload = { id: Number(conversa_id), ultima_atividade: timestampAtividade }
+      const convPayload = aplicarAguardandoClienteNoPayload({
+        id: Number(conversa_id),
+        ultima_atividade: timestampAtividade,
+        reordenar_suave: true,
+      }, waitingAfterOutbound)
       
       // Adicionar preview da última mensagem baseado no tipo
       if (msg.tipo === 'contact' && msg.contact_meta) {
@@ -5128,7 +5225,7 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
         }
       }
       
-      emitirConversaAtualizada(io, company_id, conversa_id, convPayload)
+      emitirConversaAtualizada(io, company_id, conversa_id, convPayload, { skipAtualizarConversa: true })
     }
 
     const { nome: usuarioNome } = await getUsuarioParaEnvioCliente(supabase, company_id, user_id)
@@ -5143,7 +5240,7 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
     // Para áudio/voice, prioriza sempre CDN da UltraMsg:
     // evita problemas de disponibilidade/headers em URLs próprias do backend
     // e melhora a reprodução no WhatsApp mobile e desktop.
-    const forceUploadMedia = (tipo === 'audio' || tipo === 'voice')
+    const forceUploadMedia = tipo === 'audio' || tipo === 'voice' || tipo === 'video'
 
     const sendMediaWithUrl = (mediaUrl) => {
       const provider = getProvider()
@@ -5152,6 +5249,7 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
       const opts = {
         companyId: company_id,
         conversaId: conversa_id,
+        sendOrigin: 'atendimento_humano_midia',
         ...(isAudioTipo ? { returnDetails: true, audioMeta: { originalName: fileWork.originalname, mimeType: fileWork.mimetype } } : {}),
       }
       const promise =
@@ -5164,7 +5262,7 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
             : tipo === 'imagem' && provider.sendImage
               ? provider.sendImage(phone, mediaUrl, waCaption, opts)
               : tipo === 'video' && provider.sendVideo
-                ? provider.sendVideo(phone, mediaUrl, waCaption, opts)
+                ? provider.sendVideo(phone, mediaUrl, waCaption, { ...opts, returnDetails: true })
                 : provider.sendFile
                   ? provider.sendFile(phone, mediaUrl, fileWork.originalname || '', {
                       ...opts,
@@ -5467,6 +5565,7 @@ async function encaminharUmaMensagemParaConversa(ctx) {
       resultadoEnvio = await provider.sendText(telefoneParaEnvio, textoParaWhatsApp, {
         companyId: company_id,
         conversaId: conversa_id,
+        sendOrigin: 'encaminhamento_atendimento',
       })
     }
   } else if (temUrl && (tipoOriginal === 'imagem' || tipoOriginal === 'video' || tipoOriginal === 'audio' || tipoOriginal === 'voice' || tipoOriginal === 'arquivo' || tipoOriginal === 'sticker')) {
@@ -5508,7 +5607,11 @@ async function encaminharUmaMensagemParaConversa(ctx) {
     novaMensagem = msg
 
     if (telefoneParaEnvio) {
-      const opts = { companyId: company_id, conversaId: conversa_id }
+      const opts = {
+        companyId: company_id,
+        conversaId: conversa_id,
+        sendOrigin: 'encaminhamento_atendimento',
+      }
 
       switch (tipoOriginal) {
         case 'imagem':
@@ -5574,13 +5677,18 @@ async function encaminharUmaMensagemParaConversa(ctx) {
         telefoneParaEnvio,
         contactName,
         contactPhone,
-        { companyId: company_id, conversaId: conversa_id },
+        {
+          companyId: company_id,
+          conversaId: conversa_id,
+          sendOrigin: 'encaminhamento_atendimento',
+        },
       )
     } else if (telefoneParaEnvio && provider.sendText && !contactPhone) {
       const textoContato = `${prefixoEncaminhado}\n${contactName}`
       resultadoEnvio = await provider.sendText(telefoneParaEnvio, textoContato, {
         companyId: company_id,
         conversaId: conversa_id,
+        sendOrigin: 'encaminhamento_atendimento',
       })
     }
   } else if (tipoOriginal === 'location' && mensagemOriginal.location_meta) {
@@ -5613,6 +5721,7 @@ async function encaminharUmaMensagemParaConversa(ctx) {
       }, {
         companyId: company_id,
         conversaId: conversa_id,
+        sendOrigin: 'encaminhamento_atendimento',
       })
     }
   } else {
@@ -5638,6 +5747,7 @@ async function encaminharUmaMensagemParaConversa(ctx) {
       resultadoEnvio = await provider.sendText(telefoneParaEnvio, textoComUsuario, {
         companyId: company_id,
         conversaId: conversa_id,
+        sendOrigin: 'encaminhamento_atendimento',
       })
     }
   }

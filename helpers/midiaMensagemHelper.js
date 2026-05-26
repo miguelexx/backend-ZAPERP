@@ -29,7 +29,10 @@ function captionWhatsappParaMidia({ tipo, captionUsuarioTrim, usuarioNome }) {
     return full.slice(0, MAX_MEDIA_CAPTION_CHARS)
   }
   const t = String(tipo || '').toLowerCase()
-  if (t === 'imagem' || t === 'video' || t === 'vídeo' || t === 'sticker') return ''
+  if (t === 'imagem' || t === 'video' || t === 'vídeo' || t === 'sticker') {
+    if (usuarioNome) return `*${String(usuarioNome).trim()}*`.slice(0, MAX_MEDIA_CAPTION_CHARS)
+    return ''
+  }
   return footer || ' '
 }
 
