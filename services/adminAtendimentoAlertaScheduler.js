@@ -47,19 +47,11 @@ async function runCycle() {
 
 /**
  * Dispara a verificação de horários periodicamente (sem depender de cron externo).
- * Desative com ADMIN_ATENDIMENTO_ALERTA_SCHEDULER_ENABLED=0
+ * A liberação do alerta é controlada pela tela, por empresa.
  */
 function startAdminAtendimentoAlertaScheduler() {
   if (schedulerStarted) return
   schedulerStarted = true
-
-  const disabled = String(process.env.ADMIN_ATENDIMENTO_ALERTA_SCHEDULER_ENABLED || '')
-    .trim()
-    .toLowerCase()
-  if (disabled === '0' || disabled === 'false') {
-    console.log('[adminAlertaScheduler] desativado por ADMIN_ATENDIMENTO_ALERTA_SCHEDULER_ENABLED')
-    return
-  }
 
   const intervalMs = parseIntervalMs()
   timer = setInterval(() => {

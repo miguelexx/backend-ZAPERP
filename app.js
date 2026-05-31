@@ -237,6 +237,7 @@ const produtosRoutes = require('./routes/produtosRoutes')
 const printRoutes = require('./routes/printRoutes')
 const mediaProxyRoutes = require('./routes/mediaProxyRoutes')
 const pushRoutes = require('./routes/pushRoutes')
+const minhasPendenciasRoutes = require('./routes/minhasPendenciasRoutes')
 
 // Webhooks já registrados antes do CORS (evita 403 Origin)
 app.use('/dashboard', dashboardRoutes)
@@ -261,6 +262,7 @@ app.use('/produtos', produtosRoutes)
 app.use('/print', apiLimiter, printRoutes)
 app.use('/media', apiLimiter, mediaProxyRoutes)
 app.use('/push', apiLimiter, pushRoutes)
+app.use('/conversas', minhasPendenciasRoutes)
 
 // /api — prefixo opcional para SaaS; mantém compatibilidade com rotas antigas
 // Aplica apiLimiter globalmente para "rotas de API"
@@ -287,6 +289,7 @@ api.use('/produtos', produtosRoutes)
 api.use('/print', printRoutes)
 api.use('/media', mediaProxyRoutes)
 api.use('/push', pushRoutes)
+api.use('/conversas', minhasPendenciasRoutes)
 app.use('/api', apiLimiter, api)
 
 // =====================================================

@@ -108,6 +108,9 @@ function emitirConversaAtualizada(io, company_id, conversa_id, payload = null, o
 
   const cid = Number(conversa_id)
   let data = payload || { id: cid }
+  if (payloadAlteraVisibilidadeConversa(data)) {
+    invalidateConversaVisibilityCache(company_id, cid)
+  }
 
   // Se payload é mínimo (só id), buscar nome/foto para não sobrescrever com vazio no frontend (Bug 3)
   const keys = Object.keys(data)
@@ -202,6 +205,9 @@ function emitirEventoEmpresaConversa(io, company_id, conversa_id, eventName, pay
   if (!io) return
 
   if (conversa_id) {
+    if (payloadAlteraVisibilidadeConversa(payload)) {
+      invalidateConversaVisibilityCache(company_id, conversa_id)
+    }
     const { scheduleInboundWebPush } = require('../services/webPushDispatchService')
     // Evita "vazamento" cross-setor (ex.: financeiro recebendo vendas).
     // Fallback para room ampla apenas se não conseguirmos resolver os destinatários.
@@ -478,12 +484,76 @@ async function obterUnreadMap({ company_id, usuario_id }) {
   return map
 }
 
+function getSearchMessagesPageSize() {
+  const raw = Number(process.env.CHAT_SEARCH_MESSAGES_PAGE_SIZE)
+  if (!Number.isFinite(raw) || raw <= 0) return 1000
+  return Math.min(Math.max(Math.floor(raw), 100), 5000)
+}
+
+function getConversaMessagesSearchLimit(rawLimit) {
+  const raw = Number(rawLimit)
+  if (!Number.isFinite(raw) || raw <= 0) return 30
+  return Math.min(Math.max(Math.floor(raw), 1), 100)
+}
+
+function escapeIlikePattern(value) {
+  return String(value || '').replace(/[\\%_]/g, (ch) => `\\${ch}`)
+}
+
+async function buscarConversaIdsPorTextoMensagens({ company_id, term }) {
+  const pageSize = getSearchMessagesPageSize()
+  const ids = new Set()
+
+  for (let start = 0; ; start += pageSize) {
+    const { data, error } = await supabase
+      .from('mensagens')
+      .select('conversa_id')
+      .eq('company_id', Number(company_id))
+      .ilike('texto', term)
+      .order('criado_em', { ascending: false })
+      .order('id', { ascending: false })
+      .range(start, start + pageSize - 1)
+
+    if (error) throw error
+
+    const rows = Array.isArray(data) ? data : []
+    for (const row of rows) {
+      if (row?.conversa_id != null) ids.add(row.conversa_id)
+    }
+
+    if (rows.length < pageSize) break
+  }
+
+  return [...ids]
+}
+
 /**
  * Retorna IDs dos usuários que podem ver a conversa (para unread/notificações).
  * Regras: admin vê tudo; conversa assumida → sempre; setor → só usuários do setor; sem setor → todos.
  * EXCEÇÃO: usuários que transferiram a conversa veem independente do setor.
  */
-async function obterUsuarioIdsQuePodemVerConversa(company_id, conversa_id) {
+const conversaVisibilityCache = new Map()
+const CONVERSA_VISIBILITY_CACHE_TTL_MS = 15_000
+
+function conversaVisibilityCacheKey(company_id, conversa_id) {
+  return `${Number(company_id)}:${Number(conversa_id)}`
+}
+
+function invalidateConversaVisibilityCache(company_id, conversa_id) {
+  if (company_id == null || conversa_id == null) return
+  conversaVisibilityCache.delete(conversaVisibilityCacheKey(company_id, conversa_id))
+}
+
+function payloadAlteraVisibilidadeConversa(payload) {
+  if (!payload || typeof payload !== 'object') return false
+  return (
+    Object.prototype.hasOwnProperty.call(payload, 'departamento_id') ||
+    Object.prototype.hasOwnProperty.call(payload, 'atendente_id') ||
+    Object.prototype.hasOwnProperty.call(payload, 'tipo')
+  )
+}
+
+async function carregarUsuarioIdsQuePodemVerConversaSemCache(company_id, conversa_id) {
   const { data: conv } = await supabase
     .from('conversas')
     .select('departamento_id, atendente_id, tipo')
@@ -537,6 +607,34 @@ async function obterUsuarioIdsQuePodemVerConversa(company_id, conversa_id) {
     else if (userDepIds.some((d) => Number(d) === Number(convDep))) ids.push(uid)
   }
   return ids
+}
+
+async function obterUsuarioIdsQuePodemVerConversa(company_id, conversa_id) {
+  const key = conversaVisibilityCacheKey(company_id, conversa_id)
+  const now = Date.now()
+  const cached = conversaVisibilityCache.get(key)
+
+  if (cached?.ids && cached.expiresAt > now) return [...cached.ids]
+  if (cached?.promise) return [...(await cached.promise)]
+
+  const promise = carregarUsuarioIdsQuePodemVerConversaSemCache(company_id, conversa_id)
+  conversaVisibilityCache.set(key, {
+    promise,
+    expiresAt: now + CONVERSA_VISIBILITY_CACHE_TTL_MS,
+  })
+
+  try {
+    const ids = await promise
+    const safeIds = Array.isArray(ids) ? ids : []
+    conversaVisibilityCache.set(key, {
+      ids: safeIds,
+      expiresAt: Date.now() + CONVERSA_VISIBILITY_CACHE_TTL_MS,
+    })
+    return [...safeIds]
+  } catch (err) {
+    conversaVisibilityCache.delete(key)
+    throw err
+  }
 }
 
 /**
@@ -800,7 +898,8 @@ exports.listarConversas = async (req, res) => {
     }
 
     if (palavra && String(palavra).trim()) {
-      const term = `%${String(palavra).trim()}%`
+      const palavraTrim = String(palavra).trim()
+      const term = `%${palavraTrim}%`
       const { data: clientesMatch } = await supabase
         .from('clientes')
         .select('id')
@@ -822,23 +921,18 @@ exports.listarConversas = async (req, res) => {
         .select('id')
         .eq('company_id', company_id)
         .ilike('nome_grupo', term)
-      const msgMatchPromise = supabase
-        .from('mensagens')
-        .select('conversa_id')
-        .eq('company_id', company_id)
-        .ilike('texto', term)
+      const msgMatchPromise = buscarConversaIdsPorTextoMensagens({ company_id, term })
       const [
         { data: convByCliente },
         { data: convByTelefone },
         { data: convByNomeGrupo },
-        { data: msgMatch },
+        idsFromMsg,
       ] = await Promise.all([
         convByClientePromise,
         convByTelefonePromise,
         convByNomeGrupoPromise,
         msgMatchPromise,
       ])
-      const idsFromMsg = [...new Set((msgMatch || []).map((m) => m.conversa_id))]
       const idsFromCliente = (convByCliente || []).map((c) => c.id)
       const idsFromTel = (convByTelefone || []).map((c) => c.id)
       const idsFromGrupo = (convByNomeGrupo || []).map((c) => c.id)
@@ -2842,6 +2936,118 @@ exports.detalharChat = async (req, res) => {
   } catch (err) {
     console.error(err)
     return res.status(500).json({ error: 'Erro ao detalhar conversa' })
+  }
+}
+
+exports.buscarMensagensConversa = async (req, res) => {
+  try {
+    const { id } = req.params
+    const { company_id, id: user_id, perfil, departamento_ids = [] } = req.user
+    const role = String(perfil || '').toLowerCase()
+    const q = String(req.query.q || '').trim()
+    const limit = getConversaMessagesSearchLimit(req.query.limit)
+    const cursor = req.query.cursor || null
+    const cursor_id =
+      req.query.cursor_id !== undefined && req.query.cursor_id !== null && String(req.query.cursor_id).trim() !== ''
+        ? req.query.cursor_id
+        : null
+
+    const perm = await assertPermissaoConversa({
+      company_id,
+      conversa_id: id,
+      user_id,
+      role: perfil,
+      user_dep_ids: departamento_ids,
+    })
+    if (!perm.ok) return res.status(perm.status).json({ error: perm.error })
+
+    if (!q) {
+      return res.json({
+        resultados: [],
+        has_more: false,
+        next_cursor: null,
+        next_cursor_id: null,
+        q: '',
+      })
+    }
+
+    const conv = perm.conv || {}
+    const isGroup = isGroupConversation(conv)
+    const isAdmin = role === 'admin'
+    const isSupervisor = role === 'supervisor'
+    const conversaAssumidaPorOutro = conv.atendente_id != null && Number(conv.atendente_id) !== Number(user_id)
+    if (!isGroup && conversaAssumidaPorOutro && !isAdmin && !isSupervisor) {
+      return res.status(403).json({ error: 'Mensagens indisponíveis para conversa assumida por outro usuário' })
+    }
+
+    const selectComRemetente = 'id, conversa_id, texto, direcao, criado_em, autor_usuario_id, status, whatsapp_id, tipo, url, nome_arquivo, reply_meta, remetente_nome, remetente_telefone, contact_meta, location_meta, apagada_para_todos, apagada_em'
+    const selectFallback = 'id, conversa_id, texto, direcao, criado_em, autor_usuario_id, status, whatsapp_id, tipo, url, nome_arquivo'
+    const term = `%${escapeIlikePattern(q)}%`
+
+    let query = supabase
+      .from('mensagens')
+      .select(selectComRemetente)
+      .eq('company_id', Number(company_id))
+      .eq('conversa_id', Number(id))
+      .ilike('texto', term)
+      .order('criado_em', { ascending: false })
+      .order('id', { ascending: false })
+
+    query = applyDetalharChatMensagensCursor(query, cursor, cursor_id).limit(limit + 1)
+    let { data: rows, error } = await query
+
+    if (error && (String(error.message || '').includes('reply_meta') || String(error.message || '').includes('remetente_nome') || String(error.message || '').includes('remetente_telefone') || String(error.message || '').includes('contact_meta') || String(error.message || '').includes('location_meta') || String(error.message || '').includes('apagada_para_todos') || String(error.message || '').includes('does not exist'))) {
+      let fallbackQuery = supabase
+        .from('mensagens')
+        .select(selectFallback)
+        .eq('company_id', Number(company_id))
+        .eq('conversa_id', Number(id))
+        .ilike('texto', term)
+        .order('criado_em', { ascending: false })
+        .order('id', { ascending: false })
+      fallbackQuery = applyDetalharChatMensagensCursor(fallbackQuery, cursor, cursor_id).limit(limit + 1)
+      ;({ data: rows, error } = await fallbackQuery)
+    }
+
+    if (error) return res.status(500).json({ error: error.message })
+
+    let dbRows = Array.isArray(rows) ? rows : []
+    const hasMoreRaw = dbRows.length > limit
+    dbRows = dbRows.slice(0, limit)
+    const cursorRow = dbRows.length > 0 ? dbRows[dbRows.length - 1] : null
+
+    try {
+      const { data: ocultas, error: errOcultas } = await supabase
+        .from('mensagens_ocultas')
+        .select('mensagem_id')
+        .eq('company_id', Number(company_id))
+        .eq('conversa_id', Number(id))
+        .eq('usuario_id', Number(user_id))
+      if (!errOcultas && Array.isArray(ocultas) && ocultas.length > 0) {
+        const hidden = new Set(ocultas.map((o) => String(o.mensagem_id)))
+        dbRows = dbRows.filter((m) => !hidden.has(String(m.id)))
+      }
+    } catch (_) {
+      // Tabela opcional em bancos antigos; busca continua sem expor dados fora da conversa.
+    }
+
+    const resultados = await enrichMensagensComAutorUsuario(supabase, company_id, dbRows, user_id)
+
+    return res.json({
+      resultados,
+      has_more: hasMoreRaw,
+      next_cursor:
+        hasMoreRaw && cursorRow
+          ? normalizarTimestampSemFusoAmbiguoParaApi(cursorRow.criado_em)
+          : null,
+      next_cursor_id:
+        hasMoreRaw && cursorRow != null && cursorRow.id != null ? cursorRow.id : null,
+      q,
+      limit,
+    })
+  } catch (err) {
+    console.error(err)
+    return res.status(500).json({ error: 'Erro ao buscar mensagens da conversa' })
   }
 }
 

@@ -13,6 +13,8 @@ const { isAllowedInboundMediaUrl } = require('../helpers/allowedInboundMediaUrl'
 const { normalizarTimestampSemFusoAmbiguoParaApi } = require('../helpers/timestampApiCompat')
 
 const MAX_BYTES = 80 * 1024 * 1024
+const FETCH_TIMEOUT_MS = Math.max(1000, Number(process.env.INBOUND_MEDIA_FETCH_TIMEOUT_MS) || 30000)
+const MAX_REDIRECTS = 3
 
 const MSG_SELECT_PERSIST =
   'id, conversa_id, company_id, whatsapp_id, texto, url, tipo, direcao, criado_em, status, autor_usuario_id, reply_meta, nome_arquivo, contact_meta, location_meta, remetente_nome, remetente_telefone'
@@ -118,6 +120,36 @@ function pickStoredFilename({ company_id, mensagem_id, contentType, nome_arquivo
   return `inbound-c${Number(company_id)}-m${Number(mensagem_id)}-${rand}${ext}`
 }
 
+async function fetchAllowedInboundMedia(target, signal) {
+  let current = target
+  for (let i = 0; i <= MAX_REDIRECTS; i += 1) {
+    const upstream = await fetch(current.href, {
+      redirect: 'manual',
+      headers: { 'User-Agent': 'ZapERP-InboundMediaPersist/1.0' },
+      signal,
+    })
+
+    if (upstream.status >= 300 && upstream.status < 400) {
+      const location = upstream.headers.get('location')
+      if (!location) return upstream
+      const next = new URL(location, current)
+      if (!isAllowedInboundMediaUrl(next)) {
+        const err = new Error('redirect_not_allowed')
+        err.code = 'REDIRECT_NOT_ALLOWED'
+        throw err
+      }
+      current = next
+      continue
+    }
+
+    return upstream
+  }
+
+  const err = new Error('too_many_redirects')
+  err.code = 'TOO_MANY_REDIRECTS'
+  throw err
+}
+
 /**
  * Agenda persistência assíncrona (não bloqueia resposta do webhook).
  * @param {{ supabase: any, io: any|null, company_id: number, mensagem_id: number, fromMe?: boolean, departamento_id?: any }} ctx
@@ -158,14 +190,16 @@ async function persistInboundMediaToUploads({ supabase, io, company_id, mensagem
   }
 
   let upstream
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS)
   try {
-    upstream = await fetch(parsed.href, {
-      redirect: 'follow',
-      headers: { 'User-Agent': 'ZapERP-InboundMediaPersist/1.0' },
-    })
+    upstream = await fetchAllowedInboundMedia(parsed, controller.signal)
   } catch (e) {
-    console.warn('[inboundMediaPersist] fetch:', mensagem_id, e?.message || e)
+    const timedOut = e?.name === 'AbortError'
+    console.warn('[inboundMediaPersist] fetch:', mensagem_id, timedOut ? 'timeout' : (e?.message || e))
     return
+  } finally {
+    clearTimeout(timeout)
   }
 
   if (!upstream.ok) {

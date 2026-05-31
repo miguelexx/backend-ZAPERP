@@ -9,6 +9,7 @@ const { getAguardandoFuncionarioParaAlertaAdmin } = require('./supervisaoService
 /** Minutos após o horário em que ainda dispara (scheduler a cada 1–2 min + relógios; fim inclusivo). */
 const CRON_GRACE_MINUTES = 30
 const AVALIACOES_LOOKBACK_MS = 30 * 24 * 60 * 60 * 1000
+const SEND_LOCK_STALE_MS = 10 * 60 * 1000
 
 const DEFAULT_ADMIN_ATENDIMENTO_ALERTA = {
   ativo: false,
@@ -176,6 +177,17 @@ function formatNotaPt(n) {
   return Number(n).toLocaleString('pt-BR', { minimumFractionDigits: 1, maximumFractionDigits: 1 })
 }
 
+function isSendReservationFresh(row) {
+  const detalhes = row?.detalhes && typeof row.detalhes === 'object' ? row.detalhes : {}
+  const reservadoEmRaw = detalhes.reservado_em || row?.criado_em || 0
+  const reservadoEmMs = new Date(reservadoEmRaw).getTime()
+  return (
+    detalhes.reservado === true &&
+    Number.isFinite(reservadoEmMs) &&
+    Date.now() - reservadoEmMs < SEND_LOCK_STALE_MS
+  )
+}
+
 async function fetchNotaMedia30d(company_id) {
   const since = new Date(Date.now() - AVALIACOES_LOOKBACK_MS).toISOString()
   const { data, error } = await supabase
@@ -202,7 +214,7 @@ async function fetchNotaMedia30d(company_id) {
 async function acquireAlertaSendLock(company_id, diaLocalStr, horarioConfig) {
   const { data: existing, error: selErr } = await supabase
     .from('admin_atendimento_alerta_envios')
-    .select('sucesso')
+    .select('sucesso, detalhes, criado_em')
     .eq('company_id', company_id)
     .eq('dia_local', diaLocalStr)
     .maybeSingle()
@@ -221,12 +233,17 @@ async function acquireAlertaSendLock(company_id, diaLocalStr, horarioConfig) {
   }
 
   if (existing) {
+    if (isSendReservationFresh(existing)) {
+      return { ok: false, reason: 'in_progress' }
+    }
+
+    const reservedAt = new Date().toISOString()
     const { error: updErr } = await supabase
       .from('admin_atendimento_alerta_envios')
       .update({
         horario_config: horarioConfig,
         sucesso: false,
-        detalhes: { reservado: true, retry: true },
+        detalhes: { reservado: true, retry: true, reservado_em: reservedAt },
       })
       .eq('company_id', company_id)
       .eq('dia_local', diaLocalStr)
@@ -237,12 +254,13 @@ async function acquireAlertaSendLock(company_id, diaLocalStr, horarioConfig) {
     return { ok: true, retry: true }
   }
 
+  const reservedAt = new Date().toISOString()
   const { error: insErr } = await supabase.from('admin_atendimento_alerta_envios').insert({
     company_id,
     dia_local: diaLocalStr,
     horario_config: horarioConfig,
     sucesso: false,
-    detalhes: { reservado: true },
+    detalhes: { reservado: true, reservado_em: reservedAt },
   })
   if (!insErr) return { ok: true }
   const code = String(insErr.code || '')
@@ -250,11 +268,12 @@ async function acquireAlertaSendLock(company_id, diaLocalStr, horarioConfig) {
   if (code === '23505' || msg.includes('duplicate key')) {
     const { data: raced } = await supabase
       .from('admin_atendimento_alerta_envios')
-      .select('sucesso')
+      .select('sucesso, detalhes, criado_em')
       .eq('company_id', company_id)
       .eq('dia_local', diaLocalStr)
       .maybeSingle()
     if (raced?.sucesso === true) return { ok: false, reason: 'already_sent' }
+    if (isSendReservationFresh(raced)) return { ok: false, reason: 'in_progress' }
     return { ok: true, retry: true }
   }
   console.warn('[adminAtendimentoAlerta] acquireAlertaSendLock insert:', insErr.message)
@@ -463,7 +482,12 @@ async function processCompanyAdminAlert({ company_id, fullConfig, provider, dryR
 
   const locked = forceSend ? { ok: true, test: true } : await acquireAlertaSendLock(company_id, diaLocal, scheduled)
   if (!locked.ok) {
-    const reason = locked.reason === 'already_sent' ? 'already_sent_today' : 'reserve_failed'
+    const reason =
+      locked.reason === 'already_sent'
+        ? 'already_sent_today'
+        : locked.reason === 'in_progress'
+          ? 'send_in_progress'
+          : 'reserve_failed'
     if (reason === 'reserve_failed') {
       console.warn('[adminAtendimentoAlerta] falha ao reservar envio (ver tabela/migração)', {
         company_id,

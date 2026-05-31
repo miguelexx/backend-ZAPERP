@@ -1,5 +1,6 @@
 const supabase = require('../config/supabase')
 const { getDisplayName } = require('../helpers/contactEnrichment')
+const { isGroupConversation } = require('../helpers/conversaHelper')
 
 const OPEN_STATUSES = ['aberta', 'em_atendimento', 'aguardando_cliente']
 const PENDING_STATUSES = ['aberta', 'em_atendimento']
@@ -184,6 +185,7 @@ function toPendingApiShape(raw) {
     minutos_aguardando: Math.max(0, Math.floor(Number(raw.minutos_aguardando) || 0)),
     nivel: nivelOk,
     status_atendimento: safeDisplayString(raw.status_atendimento, 80),
+    tipo: raw.tipo != null ? safeDisplayString(raw.tipo, 40) : null,
     aguardando_funcionario: !!raw.aguardando_funcionario,
     atrasado: !!raw.atrasado,
     pode_abrir_conversa: !!raw.pode_abrir_conversa,
@@ -230,6 +232,7 @@ async function listOpenConversations(companyId) {
     id,
     company_id,
     telefone,
+    tipo,
     status_atendimento,
     departamento_id,
     atendente_id,
@@ -392,6 +395,7 @@ function buildPendingItem(conversa, lastMessage, depMap) {
     minutos_aguardando: minutosAguardando,
     nivel,
     status_atendimento: conversa.status_atendimento,
+    tipo: conversa.tipo,
     aguardando_funcionario: true,
     atrasado: minutosAguardando > DEFAULT_DELAY_MINUTES,
     pode_abrir_conversa: true,
@@ -414,6 +418,7 @@ async function buildConversationInsights(companyId) {
   const aguardandoCliente = []
 
   for (const conversa of conversations) {
+    if (isGroupConversation(conversa)) continue
     const lastMessage = lastMessagesMap.get(Number(conversa.id))
     if (!lastMessage) continue
     if (lastMessage.direcao === 'out') {
@@ -758,6 +763,7 @@ async function getClientesPendentes(companyId, filters) {
       minutos_aguardando: item.minutos_aguardando,
       nivel: item.nivel,
       status_atendimento: item.status_atendimento,
+      tipo: item.tipo,
       pode_abrir_conversa: true,
     })),
     clientes_pendentes: filtered.map((item) => ({
@@ -775,6 +781,7 @@ async function getClientesPendentes(companyId, filters) {
       minutos_aguardando: item.minutos_aguardando,
       nivel: item.nivel,
       status_atendimento: item.status_atendimento,
+      tipo: item.tipo,
       pode_abrir_conversa: true,
     })),
   }
@@ -900,6 +907,7 @@ function getDayRange(dateInput) {
  * Exclui grupos (@g.us) e, com chatbot ativo, exclui triagem pura (aberta sem departamento).
  */
 function isPendingForAdminAlerta(p, { chatbotEnabled = false } = {}) {
+  if (isGroupConversation(p)) return false
   const tel = String(p?.telefone || '')
   if (tel.includes('@g.us')) return false
   const st = String(p?.status_atendimento || '').toLowerCase()
