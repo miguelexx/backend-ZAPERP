@@ -5774,7 +5774,7 @@ async function encaminharUmaMensagemParaConversa(ctx) {
         sendOrigin: 'encaminhamento_atendimento',
       })
     }
-  } else if (temUrl && (tipoOriginal === 'imagem' || tipoOriginal === 'video' || tipoOriginal === 'audio' || tipoOriginal === 'voice' || tipoOriginal === 'arquivo' || tipoOriginal === 'sticker')) {
+  } else if (temUrl && (tipoOriginal === 'imagem' || tipoOriginal === 'video' || tipoOriginal === 'audio' || tipoOriginal === 'voice' || tipoOriginal === 'arquivo' || tipoOriginal === 'documento' || tipoOriginal === 'sticker')) {
     const baseUrl = (process.env.APP_URL || process.env.BASE_URL || '').replace(/\/$/, '')
     const mediaUrl = mensagemOriginal.url.startsWith('http')
       ? mensagemOriginal.url

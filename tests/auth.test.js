@@ -2,6 +2,7 @@
  * Testes de autenticação e autorização.
  */
 const request = require('supertest')
+const jwt = require('jsonwebtoken')
 
 let app
 beforeAll(() => {
@@ -32,6 +33,46 @@ describe('Rotas protegidas sem token', () => {
   it('GET /api/campanhas retorna 401 sem Authorization', async () => {
     const res = await request(app).get('/api/campanhas')
     expect(res.status).toBe(401)
+  })
+
+  it('GET /api/chatbot/status retorna 401 sem Authorization', async () => {
+    const res = await request(app).get('/api/chatbot/status')
+    expect(res.status).toBe(401)
+  })
+
+  it('GET /api/chatbot/debug/logs/1 retorna 401 sem Authorization', async () => {
+    const res = await request(app).get('/api/chatbot/debug/logs/1')
+    expect(res.status).toBe(401)
+  })
+})
+
+describe('Rotas legadas de chatbot respeitam tenant do token', () => {
+  const OLD_ENV = process.env
+
+  beforeAll(() => {
+    process.env = { ...OLD_ENV, JWT_SECRET: 'test-secret' }
+  })
+
+  afterAll(() => {
+    process.env = OLD_ENV
+  })
+
+  const adminToken = () => jwt.sign({ id: 10, company_id: 1, perfil: 'admin' }, process.env.JWT_SECRET)
+
+  it('GET /api/chatbot/config/:companyId bloqueia empresa diferente', async () => {
+    const res = await request(app)
+      .get('/api/chatbot/config/2')
+      .set('Authorization', `Bearer ${adminToken()}`)
+
+    expect(res.status).toBe(403)
+  })
+
+  it('GET /api/chatbot/debug/logs/:companyId bloqueia empresa diferente', async () => {
+    const res = await request(app)
+      .get('/api/chatbot/debug/logs/2')
+      .set('Authorization', `Bearer ${adminToken()}`)
+
+    expect(res.status).toBe(403)
   })
 })
 
