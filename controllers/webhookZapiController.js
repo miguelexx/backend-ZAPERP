@@ -64,7 +64,32 @@ function isLocalUploadMediaUrl(url) {
 }
 
 function normalizeMediaFileNameForMatch(name) {
-  return String(name || '').trim().toLowerCase()
+  return String(name || '')
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+}
+
+function normalizeMediaBaseNameForMatch(name) {
+  const clean = normalizeMediaFileNameForMatch(name).split(/[?#]/)[0].split(/[\\/]/).pop() || ''
+  return clean.replace(/\.[a-z0-9]{2,5}$/i, '')
+}
+
+function mediaFamilyForStorageTipo(tipo) {
+  const t = String(tipo || '').toLowerCase().trim()
+  if (t === 'audio' || t === 'voice' || t === 'ptt') return 'audio'
+  if (t === 'image' || t === 'imagem') return 'imagem'
+  if (t === 'video' || t === 'vídeo') return 'video'
+  if (t === 'document' || t === 'file' || t === 'arquivo' || t === 'documento') return 'arquivo'
+  if (t === 'sticker') return 'sticker'
+  return t || ''
+}
+
+function whatsappIdCompativelParaReconcile(row, whatsappId) {
+  const atual = row?.whatsapp_id != null ? String(row.whatsapp_id).trim() : ''
+  const alvo = whatsappId != null ? String(whatsappId).trim() : ''
+  return !atual || !alvo || atual === alvo
 }
 
 function mapWebhookTypeToStorageTipo(type) {
@@ -87,16 +112,21 @@ const {
   extrairNomePrefixoTexto,
 } = require('../helpers/mensagemAtendenteNomeHelper')
 
-function findFromMeOutboundMediaCandidate(rows, { fileName, texto, tipo, nomeAtendente }) {
+function findFromMeOutboundMediaCandidate(rows, { fileName, texto, tipo, nomeAtendente, whatsappId }) {
   if (!Array.isArray(rows) || rows.length === 0) return null
   const nomeW = normalizeMediaFileNameForMatch(fileName)
+  const nomeBaseW = normalizeMediaBaseNameForMatch(fileName)
   const tipoW = tipo ? String(tipo).toLowerCase() : null
+  const familiaW = mediaFamilyForStorageTipo(tipoW)
+  const candidates = rows.filter((c) => whatsappIdCompativelParaReconcile(c, whatsappId))
+  if (candidates.length === 0) return null
 
   if (nomeW) {
-    const byNome = rows.find((c) => {
+    const byNome = candidates.find((c) => {
       const candNome = normalizeMediaFileNameForMatch(c.nome_arquivo || c.texto)
-      if (!candNome || candNome !== nomeW) return false
-      if (tipoW && String(c.tipo || '').toLowerCase() !== tipoW) return false
+      const candBase = normalizeMediaBaseNameForMatch(c.nome_arquivo || c.texto)
+      if (!candNome || (candNome !== nomeW && candBase !== nomeBaseW)) return false
+      if (familiaW && mediaFamilyForStorageTipo(c.tipo) !== familiaW) return false
       return true
     })
     if (byNome) return byNome
@@ -104,19 +134,20 @@ function findFromMeOutboundMediaCandidate(rows, { fileName, texto, tipo, nomeAte
 
   if (texto) {
     const textoNorm = String(texto || '').trim()
-    const byTexto = rows.find((c) => {
+    const byTexto = candidates.find((c) => {
       const t = String(c.texto || '').trim()
       if (!t) return false
+      if (familiaW && mediaFamilyForStorageTipo(c.tipo) !== familiaW) return false
       if (textosOutboundFromMeEquivalentes(textoNorm, t, nomeAtendente)) return true
       return false
     })
     if (byTexto) return byTexto
   }
 
-  if (tipoW) {
-    const byTipoCrm = rows.find(
+  if (familiaW) {
+    const byTipoCrm = candidates.find(
       (c) =>
-        String(c.tipo || '').toLowerCase() === tipoW &&
+        mediaFamilyForStorageTipo(c.tipo) === familiaW &&
         (c.autor_usuario_id != null || isLocalUploadMediaUrl(c.url))
     )
     if (byTipoCrm) return byTipoCrm
@@ -2346,10 +2377,11 @@ exports.receberZapi = async (req, res) => {
             texto,
             tipo: mapWebhookTypeToStorageTipo(type),
             nomeAtendente: nomeAtendenteFromMe,
+            whatsappId: whatsappIdStr,
           }) || null
 
         // ACK pode ter preenchido whatsapp_id (sid) antes do message_create (id) — buscar por nome/tipo
-        if (!tempExistente && fileName) {
+        if (!tempExistente && mapWebhookTypeToStorageTipo(type)) {
           const { data: recentOut } = await supabase
             .from('mensagens')
             .select(WEBHOOK_MSG_SELECT)
@@ -2366,15 +2398,25 @@ exports.receberZapi = async (req, res) => {
               texto,
               tipo: mapWebhookTypeToStorageTipo(type),
               nomeAtendente: nomeAtendenteFromMe,
+              whatsappId: whatsappIdStr,
             }) || null
         }
 
         if (tempExistente) {
           // Atualizar com o whatsapp_id real
           try {
+            const updateFromMe = { whatsapp_id: whatsappIdStr }
+            if ((audioUrl || imageUrl || documentUrl || videoUrl || stickerUrl) && !tempExistente.url) {
+              if (imageUrl) { updateFromMe.url = imageUrl; updateFromMe.tipo = 'imagem' }
+              else if (documentUrl) { updateFromMe.url = documentUrl; updateFromMe.tipo = 'arquivo' }
+              else if (audioUrl) { updateFromMe.url = audioUrl; updateFromMe.tipo = tempExistente.tipo === 'voice' ? 'voice' : mapWebhookTypeToStorageTipo(type) }
+              else if (videoUrl) { updateFromMe.url = videoUrl; updateFromMe.tipo = 'video' }
+              else if (stickerUrl) { updateFromMe.url = stickerUrl; updateFromMe.tipo = 'sticker' }
+            }
             const { data: updatedMsg } = await supabase
               .from('mensagens')
-              .update({ whatsapp_id: whatsappIdStr })
+              .update(updateFromMe)
+              .eq('company_id', company_id)
               .eq('id', tempExistente.id)
               .select(WEBHOOK_MSG_SELECT)
               .single()
@@ -2557,6 +2599,7 @@ exports.receberZapi = async (req, res) => {
             texto,
             tipo: mapWebhookTypeToStorageTipo(type),
             nomeAtendente: nomeAtendenteReconcile,
+            whatsappId: whatsappIdStr,
           })
 
         // Busca 1: na conversa específica resolvida pelo webhook
