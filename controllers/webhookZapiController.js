@@ -78,6 +78,7 @@ function normalizeMediaBaseNameForMatch(name) {
 
 function mediaFamilyForStorageTipo(tipo) {
   const t = String(tipo || '').toLowerCase().trim()
+  if (t === 'text' || t === 'texto' || t === 'chat') return 'texto'
   if (t === 'audio' || t === 'voice' || t === 'ptt') return 'audio'
   if (t === 'image' || t === 'imagem') return 'imagem'
   if (t === 'video' || t === 'vídeo') return 'video'
@@ -94,6 +95,7 @@ function whatsappIdCompativelParaReconcile(row, whatsappId) {
 
 function mapWebhookTypeToStorageTipo(type) {
   const t = String(type || '').toLowerCase().trim()
+  if (t === 'text' || t === 'chat') return 'texto'
   if (t === 'ptt') return 'voice'
   if (t === 'document' || t === 'file') return 'arquivo'
   if (t === 'image') return 'imagem'
