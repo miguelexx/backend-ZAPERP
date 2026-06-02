@@ -4,7 +4,7 @@ const { ensureConversaForCliente } = require('../services/conversaAbrirClienteSe
 const { executarAssumirConversa } = require('../services/conversaAssumirInternoService')
 const { getProvider } = require('../services/providers')
 const { getStatus } = require('../services/ultramsgIntegrationService')
-const { isGroupConversation } = require('../helpers/conversaHelper')
+const { isGroupConversation, isClosedAttendanceStatus } = require('../helpers/conversaHelper')
 const { normalizePhoneBR, possiblePhonesBR, phoneKeyBR } = require('../helpers/phoneHelper')
 const { deduplicateConversationsByContact, sortConversationsByRecent, sortConversationsPinThenRecent, getCanonicalPhone, getOrCreateCliente, findOrCreateConversation, mergeConversasIntoCanonico } = require('../helpers/conversationSync')
 const { enrichConversationsWithContactData } = require('../helpers/conversaEnrichment')
@@ -396,6 +396,11 @@ async function assertPermissaoConversa({ company_id, conversa_id, user_id, role,
     .limit(1)
     .maybeSingle()
   if (transferRow) return { ok: true, conv, reason: 'usuario_transferiu_conversa' }
+
+  // Encerrada: qualquer atendente/supervisor pode reabrir (ex.: quem finalizou em outro setor).
+  if ((r === 'supervisor' || r === 'atendente') && isClosedAttendanceStatus(conv.status_atendimento)) {
+    return { ok: true, conv, reason: 'conversa_encerrada_reabertura' }
+  }
 
   // supervisor e atendente: conversas sem setor visíveis para TODOS; com setor só se usuário pertence
   if (r === 'supervisor' || r === 'atendente') {
@@ -2739,7 +2744,8 @@ exports.detalharChat = async (req, res) => {
 
     // REGRA PRINCIPAL: Se a conversa está assumida pelo usuário, SEMPRE permitir acesso total
     let podeAcessar = isAssignedToUser
-    if (!podeAcessar && !isAdmin && !isGroup) {
+    const conversaEncerrada = isClosedAttendanceStatus(conversa.status_atendimento)
+    if (!podeAcessar && !isAdmin && !isGroup && !conversaEncerrada) {
       const convDep = conversa.departamento_id ?? null
       const depIds = Array.isArray(departamento_ids) ? departamento_ids : []
       const pertenceAoSetor = convDep == null || depIds.some((d) => Number(d) === Number(convDep))
@@ -2763,7 +2769,8 @@ exports.detalharChat = async (req, res) => {
     // (apenas admin e supervisor podem ver; atendente que não assumiu não vê o conteúdo)
     const isSupervisor = role === 'supervisor'
     const conversaAssumidaPorOutro = conversa.atendente_id != null && Number(conversa.atendente_id) !== Number(user_id)
-    const deveBloquearMensagens = !isGroup && conversaAssumidaPorOutro && !isAdmin && !isSupervisor
+    const deveBloquearMensagens =
+      !isGroup && !conversaEncerrada && conversaAssumidaPorOutro && !isAdmin && !isSupervisor
 
     // mensagens paginadas (remetente_nome/remetente_telefone para grupos; fallback se colunas não existirem)
     const selectComRemetente = 'id, texto, direcao, criado_em, autor_usuario_id, status, whatsapp_id, tipo, url, nome_arquivo, reply_meta, remetente_nome, remetente_telefone, contact_meta, location_meta, apagada_para_todos, apagada_em'
