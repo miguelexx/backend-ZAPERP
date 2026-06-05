@@ -56,7 +56,7 @@ function startOfMonth() {
 /** Evita cache para perguntas sensíveis a atualização contínua/ranking. */
 function shouldBypassCache(question) {
   const q = String(question || '').toLowerCase()
-  return /(quem\s+mais|qual\s+atendente\s+mais|mais\s+educad|mais\s+ofert|mais\s+manda\s+mensagem|ranking|top\s+\d+)/i.test(q)
+  return /(quem\s+mais|qual\s+atendente\s+mais|mais\s+educad|mais\s+ofert|mais\s+manda\s+mensagem|ranking|top\s+\d+|planilha|csv|excel|xlsx|relat[oó]rio|exportar|download|qual\s+conversa|quais\s+conversas|falando\s+de|fala\s+de|menciona)/i.test(q)
 }
 
 // ── Verificação de limite mensal ──────────────────────────────────────────────
