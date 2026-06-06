@@ -5,6 +5,7 @@ const auth = require('../middleware/auth')
 const adminOnly = require('../middleware/adminOnly')
 const supervisorOrAdmin = require('../middleware/supervisorOrAdmin')
 const { uploadArquivo } = require('../middleware/upload')
+const { destructiveLimiter } = require('../middleware/rateLimit')
 
 // base: /chats
 
@@ -15,7 +16,7 @@ router.post("/comunidades", auth, chatController.criarComunidade);
 router.post('/finalizacao-ausencia-lote', auth, supervisorOrAdmin, chatController.finalizacaoAusenciaLoteAuth)
 router.get('/', auth, chatController.listarConversas)
 router.get('/merge-duplicatas', auth, adminOnly, chatController.paginaMergeDuplicatas)
-router.post('/merge-duplicatas', auth, adminOnly, chatController.mergeConversasDuplicadas)
+router.post('/merge-duplicatas', auth, adminOnly, destructiveLimiter, chatController.mergeConversasDuplicadas)
 router.post('/sincronizar-contatos', auth, chatController.sincronizarContatosZapi)
 router.get('/debug-sync-contatos', auth, chatController.debugSyncContatos)
 router.post('/sincronizar-fotos-perfil', auth, chatController.sincronizarFotosPerfilZapi)
@@ -57,8 +58,8 @@ router.put('/:id/nome-contato', auth, chatController.atualizarNomeContato)
 
 // Menu da lista (silenciar / fixar / favoritar / limpar / apagar) — ver migration conversa_usuario_prefs
 router.patch('/:id/prefs', auth, chatController.patchConversaPrefs)
-router.post('/:id/limpar-mensagens', auth, chatController.limparMensagensConversa)
-router.delete('/:id', auth, chatController.apagarConversa)
+router.post('/:id/limpar-mensagens', auth, adminOnly, destructiveLimiter, chatController.limparMensagensConversa)
+router.delete('/:id', auth, adminOnly, destructiveLimiter, chatController.apagarConversa)
 
 // auditoria
 router.get('/:id/atendimentos', auth, chatController.listarAtendimentos)

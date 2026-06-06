@@ -209,31 +209,40 @@ io.on('connection', (socket) => {
 
   // entrar na conversa (idempotente: evita join duplicado e log repetido)
   socket.on('join_conversa', async (conversaId) => {
-    if (!conversaId) return
+    try {
+      if (!conversaId) return
 
-    const convId = Number(conversaId)
-    if (!Number.isFinite(convId) || convId <= 0) return
+      const convId = Number(conversaId)
+      if (!Number.isFinite(convId) || convId <= 0) return
 
-    const allowed = await canUserJoinConversationRoom({
-      company_id,
-      user_id: id,
-      role: perfil,
-      departamento_ids,
-      conversa_id: convId
-    })
-    if (!allowed) {
-      console.warn(`🚫 Join negado | Usuário ${id} | Empresa ${company_id} | Conversa ${convId}`)
-      return
-    }
+      const allowed = await canUserJoinConversationRoom({
+        company_id,
+        user_id: id,
+        role: perfil,
+        departamento_ids,
+        conversa_id: convId
+      })
+      if (!allowed) {
+        console.warn(`[SOCKET_JOIN_DENIED] Usuario ${id} | Empresa ${company_id} | Conversa ${convId}`)
+        return
+      }
 
-    const room = `conversa_${convId}`
-    if (!socket.rooms.has(room)) {
-      socket.join(room)
-      console.log(`💬 Socket entrou na conversa ${convId}`)
+      const room = `conversa_${convId}`
+      if (!socket.rooms.has(room)) {
+        socket.join(room)
+        console.log(`[SOCKET_JOIN_CONVERSA] Usuario ${id} entrou na conversa ${convId}`)
+      }
+    } catch (err) {
+      console.error('[SOCKET_JOIN_CONVERSA]', {
+        user_id: id,
+        company_id,
+        conversa_id: conversaId,
+        message: err?.message || String(err || ''),
+      })
     }
   })
 
-  // 🔥 NOVO: sair da conversa (escala / limpeza de rooms)
+  // sair da conversa (escala / limpeza de rooms)
   socket.on('leave_conversa', (conversaId) => {
     if (!conversaId) return
 
@@ -295,4 +304,29 @@ server.listen(PORT, '0.0.0.0', () => {
     const { startInboundMediaRetryScheduler } = require('./services/inboundMediaPersistenceService')
     startInboundMediaRetryScheduler(supabase, io)
   }
+})
+
+let shuttingDown = false
+function shutdown(signal) {
+  if (shuttingDown) return
+  shuttingDown = true
+  console.log(`[SHUTDOWN] Recebido ${signal}. Encerrando servidor HTTP/WebSocket...`)
+  server.close((err) => {
+    if (err) {
+      console.error('[SHUTDOWN] Erro ao fechar servidor:', err?.message || err)
+      process.exit(1)
+    }
+    console.log('[SHUTDOWN] Servidor encerrado com sucesso.')
+    process.exit(0)
+  })
+  setTimeout(() => {
+    console.error('[SHUTDOWN] Timeout ao encerrar servidor. Forcando saida.')
+    process.exit(1)
+  }, Number(process.env.SHUTDOWN_TIMEOUT_MS || 10000)).unref()
+}
+
+process.on('SIGTERM', () => shutdown('SIGTERM'))
+process.on('SIGINT', () => shutdown('SIGINT'))
+process.on('unhandledRejection', (err) => {
+  console.error('[UNHANDLED_REJECTION]', err?.message || err)
 })

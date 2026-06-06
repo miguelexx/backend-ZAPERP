@@ -3,6 +3,8 @@ const router = express.Router();
 
 const clienteController = require('../controllers/clienteController');
 const auth = require('../middleware/auth');
+const adminOnly = require('../middleware/adminOnly');
+const { destructiveLimiter } = require('../middleware/rateLimit');
 
 router.use(auth);
 
@@ -10,7 +12,7 @@ router.use(auth);
 router.get('/', clienteController.listarClientes);
 
 // APAGAR TODOS (deve vir antes de /:id)
-router.delete('/todos', clienteController.apagarTodosClientes);
+router.delete('/todos', adminOnly, destructiveLimiter, clienteController.apagarTodosClientes);
 
 // PEGAR 1
 router.get('/:id', clienteController.buscarClientePorId);
@@ -25,7 +27,7 @@ router.post('/', clienteController.criarCliente);
 router.put('/:id', clienteController.atualizarCliente);
 
 // EXCLUIR
-router.delete('/:id', clienteController.excluirCliente);
+router.delete('/:id', adminOnly, destructiveLimiter, clienteController.excluirCliente);
 
 // VINCULAR TAG
 router.post('/:id/tags', clienteController.vincularTag);

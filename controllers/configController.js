@@ -226,17 +226,18 @@ exports.getAuditoria = async (req, res) => {
       auditoriaLog = al || []
     } catch (_) {}
 
-    const { data: convIds } = await supabase.from('conversas').select('id').eq('company_id', company_id)
-    const ids = (convIds || []).map(c => c.id)
     let hist = []
-    if (ids.length > 0) {
-      const { data: h } = await supabase
+    try {
+      const { data: h, error: histErr } = await supabase
         .from('historico_atendimentos')
-        .select('id, conversa_id, acao, observacao, criado_em, usuario_id')
-        .in('conversa_id', ids)
+        .select('id, conversa_id, acao, observacao, criado_em, usuario_id, conversas!inner(company_id)')
+        .eq('conversas.company_id', company_id)
         .order('criado_em', { ascending: false })
         .limit(limit)
+      if (histErr) throw histErr
       hist = h || []
+    } catch (e) {
+      console.warn('[getAuditoria] historico_atendimentos:', e?.message || e)
     }
 
     const userIds = new Set()

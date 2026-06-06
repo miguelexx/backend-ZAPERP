@@ -99,6 +99,118 @@ function applyDetalharChatMensagensCursor(query, cursorEm, cursorIdRaw) {
   return query.lt('criado_em', em)
 }
 
+function parsePositiveInt(value, fallback) {
+  const n = Number(value)
+  if (!Number.isFinite(n) || n <= 0) return fallback
+  return Math.floor(n)
+}
+
+function parseBooleanQuery(value) {
+  return value === true || value === 1 || value === '1' || String(value || '').toLowerCase() === 'true'
+}
+
+function parseChatListPagination(query = {}, env = process.env) {
+  const maxLimit = Math.max(1, parsePositiveInt(env.CHAT_LIST_MAX_LIMIT, 250))
+  const defaultLimit = Math.min(maxLimit, Math.max(1, parsePositiveInt(env.CHAT_LIST_DEFAULT_LIMIT, 100)))
+  const requestedLimit = query.limit ?? query.per_page ?? query.page_size
+  const limit = Math.min(maxLimit, Math.max(1, parsePositiveInt(requestedLimit, defaultLimit)))
+  const cursor =
+    query.cursor != null && String(query.cursor).trim() !== ''
+      ? String(query.cursor).trim()
+      : query.cursor_ultima_atividade != null && String(query.cursor_ultima_atividade).trim() !== ''
+        ? String(query.cursor_ultima_atividade).trim()
+        : null
+  const cursorIdRaw = query.cursor_id ?? query.next_cursor_id
+  const cursorId =
+    cursorIdRaw != null && String(cursorIdRaw).trim() !== '' && Number.isFinite(Number(cursorIdRaw))
+      ? Math.floor(Number(cursorIdRaw))
+      : null
+  const responseMode = String(query.response_mode || '').trim().toLowerCase()
+  const paginatedResponse =
+    parseBooleanQuery(query.paginated) ||
+    responseMode === 'paginated' ||
+    responseMode === 'pagination' ||
+    responseMode === 'object'
+  return { limit, cursor, cursor_id: cursorId, paginatedResponse, maxLimit, defaultLimit }
+}
+
+function applyChatListCursor(query, cursorUltimaAtividade, cursorIdRaw) {
+  const cursor = cursorUltimaAtividade != null && String(cursorUltimaAtividade).trim() !== ''
+    ? String(cursorUltimaAtividade).trim()
+    : null
+  if (!cursor) return query
+  const idNum =
+    cursorIdRaw !== undefined && cursorIdRaw !== null && String(cursorIdRaw).trim() !== ''
+      ? Number(cursorIdRaw)
+      : NaN
+  if (Number.isFinite(idNum)) {
+    const quoted = `"${cursor.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`
+    return query.or(`ultima_atividade.lt.${quoted},and(ultima_atividade.eq.${quoted},id.lt.${Math.floor(idNum)})`)
+  }
+  return query.lt('ultima_atividade', cursor)
+}
+
+function splitChatListPage(rows = [], limit = 100) {
+  const safeRows = Array.isArray(rows) ? rows : []
+  const safeLimit = Math.max(1, Math.floor(Number(limit) || 100))
+  const hasMore = safeRows.length > safeLimit
+  const pageRows = safeRows.slice(0, safeLimit)
+  const last = pageRows.length > 0 ? pageRows[pageRows.length - 1] : null
+  const nextCursor = hasMore && last ? (last.ultima_atividade || last.criado_em || null) : null
+  const nextCursorId = hasMore && last && last.id != null ? Number(last.id) : null
+  return {
+    rows: pageRows,
+    pagination: {
+      limit: safeLimit,
+      has_more: hasMore,
+      next_cursor: nextCursor,
+      next_cursor_id: Number.isFinite(nextCursorId) ? nextCursorId : null,
+    },
+  }
+}
+
+function parseMessageHistoryPagination(query = {}, env = process.env) {
+  const maxLimit = Math.max(1, parsePositiveInt(env.MESSAGE_HISTORY_MAX_LIMIT, 250))
+  const defaultLimit = Math.min(maxLimit, Math.max(1, parsePositiveInt(env.MESSAGE_HISTORY_DEFAULT_LIMIT, 100)))
+  const requestedLimit = query.limit ?? query.per_page ?? query.page_size
+  const limit = Math.min(maxLimit, Math.max(1, parsePositiveInt(requestedLimit, defaultLimit)))
+  const cursor = query.cursor != null && String(query.cursor).trim() !== '' ? String(query.cursor).trim() : null
+  const cursorIdRaw = query.cursor_id ?? query.next_cursor_id
+  const cursorId =
+    cursorIdRaw != null && String(cursorIdRaw).trim() !== '' && Number.isFinite(Number(cursorIdRaw))
+      ? Math.floor(Number(cursorIdRaw))
+      : null
+  return { limit, cursor, cursor_id: cursorId, maxLimit, defaultLimit }
+}
+
+function splitMessageHistoryPage(rows = [], limit = 100) {
+  const safeRows = Array.isArray(rows) ? rows : []
+  const safeLimit = Math.max(1, Math.floor(Number(limit) || 100))
+  const hasMore = safeRows.length > safeLimit
+  const pageRows = safeRows.slice(0, safeLimit)
+  const oldestRow = pageRows.length > 0 ? pageRows[pageRows.length - 1] : null
+  return {
+    rows: pageRows,
+    has_more: hasMore,
+    cursor_row: oldestRow,
+  }
+}
+
+function shouldIncludeClientesSemConversa({ incluirTodosClientesAtivo, palavraTrim }) {
+  return Boolean(incluirTodosClientesAtivo && palavraTrim && String(palavraTrim).trim())
+}
+
+function setChatListPaginationHeaders(res, pagination, extra = {}) {
+  if (!res || typeof res.set !== 'function') return
+  res.set('X-Chat-List-Limit', String(pagination.limit))
+  res.set('X-Chat-List-Has-More', pagination.has_more ? '1' : '0')
+  if (pagination.next_cursor) res.set('X-Chat-List-Next-Cursor', String(pagination.next_cursor))
+  if (pagination.next_cursor_id != null) res.set('X-Chat-List-Next-Cursor-Id', String(pagination.next_cursor_id))
+  if (extra.semConversaIncluded != null) {
+    res.set('X-Chat-List-Sem-Conversa-Included', extra.semConversaIncluded ? '1' : '0')
+  }
+}
+
 // =====================================================
 // 1) HELPERS (TOPO DO ARQUIVO)
 // =====================================================
@@ -424,7 +536,7 @@ async function assertPermissaoConversa({ company_id, conversa_id, user_id, role,
 async function assertPodeEnviarMensagem({ company_id, conversa_id, user_id }) {
   const { data: conv, error } = await supabase
     .from('conversas')
-    .select('id, atendente_id, tipo, telefone')
+    .select('id, atendente_id, tipo, telefone, status_atendimento')
     .eq('company_id', Number(company_id))
     .eq('id', Number(conversa_id))
     .maybeSingle()
@@ -433,6 +545,14 @@ async function assertPodeEnviarMensagem({ company_id, conversa_id, user_id }) {
 
   if (isGroupConversation(conv)) {
     return { ok: true, reason: 'grupo_sem_exigir_assumir' }
+  }
+
+  if (isClosedAttendanceStatus(conv.status_atendimento)) {
+    return {
+      ok: false,
+      status: 409,
+      error: 'Reabra a conversa antes de enviar mensagens.',
+    }
   }
 
   const isAssignedToUser = conv.atendente_id && Number(conv.atendente_id) === Number(user_id)
@@ -806,14 +926,11 @@ exports.listarConversas = async (req, res) => {
       incluirTodosClientes === 1 ||
       incluirTodosClientes === true
 
-    // Para a aba "Todas" (sem filtros de status/fila), incluir clientes sem conversa por padrão.
-    // Isso mantém a lista alinhada com a base real de clientes, mesmo sem parâmetro explícito no front.
-    const incluirTodosClientesDefault =
-      (incluirTodosClientes == null || String(incluirTodosClientes).trim() === '') &&
-      !minhaFilaAtiva &&
-      !aguardandoClienteAtivo &&
-      !pagamentoPendenteAtivo &&
-      !emAtrasoAtivo
+    // Em producao, GET /chats nunca anexa a base inteira de clientes por padrao.
+    // Clientes sem conversa entram apenas em busca explicita e paginada.
+    const chatListPagination = parseChatListPagination(req.query)
+    const incluirTodosClientesDefault = false
+    const palavraTrim = palavra && String(palavra).trim() ? String(palavra).trim() : ''
 
     const statusNorm =
       !minhaFilaAtiva &&
@@ -886,6 +1003,7 @@ exports.listarConversas = async (req, res) => {
     }
 
     let conversaIdsFilter = null
+    let forceEmptyConversas = false
 
     if (tagFilterAtivo) {
       const { data: tagRows } = await supabase
@@ -902,8 +1020,7 @@ exports.listarConversas = async (req, res) => {
       conversaIdsFilter = ids
     }
 
-    if (palavra && String(palavra).trim()) {
-      const palavraTrim = String(palavra).trim()
+    if (palavraTrim) {
       const term = `%${palavraTrim}%`
       const { data: clientesMatch } = await supabase
         .from('clientes')
@@ -944,11 +1061,17 @@ exports.listarConversas = async (req, res) => {
       const mergedSet = new Set([...idsFromCliente, ...idsFromTel, ...idsFromGrupo, ...idsFromMsg])
       const merged = [...mergedSet]
       if (merged.length === 0) {
-        if (!incluirColaboradoresEncaminhar) return res.json([])
-        const colaboradores_encaminhar = await loadColaboradoresEncaminhar()
-        return res.json({ conversas: [], colaboradores_encaminhar })
+        if (shouldIncludeClientesSemConversa({ incluirTodosClientesAtivo, palavraTrim })) {
+          conversaIdsFilter = []
+          forceEmptyConversas = true
+        } else {
+          if (!incluirColaboradoresEncaminhar) return res.json([])
+          const colaboradores_encaminhar = await loadColaboradoresEncaminhar()
+          return res.json({ conversas: [], colaboradores_encaminhar })
+        }
+      } else {
+        conversaIdsFilter = conversaIdsFilter ? conversaIdsFilter.filter((id) => mergedSet.has(id)) : merged
       }
-      conversaIdsFilter = conversaIdsFilter ? conversaIdsFilter.filter((id) => mergedSet.has(id)) : merged
     }
 
     const selectCompleto = `
@@ -1003,6 +1126,7 @@ exports.listarConversas = async (req, res) => {
       finalizada_automaticamente_em,
       lida,
       criado_em,
+      ultima_atividade,
       departamento_id,
       tipo,
       nome_grupo,
@@ -1036,6 +1160,7 @@ exports.listarConversas = async (req, res) => {
       pagamento_concluido_em,
       lida,
       criado_em,
+      ultima_atividade,
       departamento_id,
       tipo,
       nome_grupo,
@@ -1072,7 +1197,9 @@ exports.listarConversas = async (req, res) => {
       } else if (filter_dep_id) {
         q = q.eq('departamento_id', Number(filter_dep_id))
       }
-      if (conversaIdsFilter && conversaIdsFilter.length > 0) {
+      if (forceEmptyConversas) {
+        q = q.in('id', [0])
+      } else if (conversaIdsFilter && conversaIdsFilter.length > 0) {
         q = q.in('id', conversaIdsFilter)
       }
       // Mensagens disparadas: fora da listagem geral quando sem filtro de status; se a empresa desligou a opção, nunca misturar esse status nas demais queries.
@@ -1170,32 +1297,47 @@ exports.listarConversas = async (req, res) => {
     let data = null
     let error = null
 
-    const queryCompleto = buildQuery(selectCompleto)
-      .order('ultima_atividade', { ascending: false, nullsFirst: false })
-      .order('id', { ascending: false })
+    const queryCompleto = applyChatListCursor(
+      buildQuery(selectCompleto)
+        .order('ultima_atividade', { ascending: false, nullsFirst: false })
+        .order('id', { ascending: false }),
+      chatListPagination.cursor,
+      chatListPagination.cursor_id
+    ).limit(chatListPagination.limit + 1)
     let result = await queryCompleto
     data = result.data
     error = result.error
 
     if (error) {
-      const queryMinimo = buildQuery(selectMinimo)
-        .order('criado_em', { ascending: false })
-        .order('id', { ascending: false })
+      const queryMinimo = applyChatListCursor(
+        buildQuery(selectMinimo)
+          .order('ultima_atividade', { ascending: false, nullsFirst: false })
+          .order('id', { ascending: false }),
+        chatListPagination.cursor,
+        chatListPagination.cursor_id
+      ).limit(chatListPagination.limit + 1)
       result = await queryMinimo
       data = result.data
       error = result.error
     }
 
     if (error) {
-      const queryBare = buildQuery(selectBare)
-        .order('criado_em', { ascending: false })
-        .order('id', { ascending: false })
+      const queryBare = applyChatListCursor(
+        buildQuery(selectBare)
+          .order('ultima_atividade', { ascending: false, nullsFirst: false })
+          .order('id', { ascending: false }),
+        chatListPagination.cursor,
+        chatListPagination.cursor_id
+      ).limit(chatListPagination.limit + 1)
       result = await queryBare
       data = result.data
       error = result.error
     }
 
     if (error) return res.status(500).json({ error: error.message })
+
+    const chatListPage = splitChatListPage(data || [], chatListPagination.limit)
+    data = chatListPage.rows
 
     // Enriquece última mensagem de cada conversa com usuario_nome
     const allLastMsgs = (data || []).flatMap((c) => c.mensagens || [])
@@ -1499,35 +1641,43 @@ exports.listarConversas = async (req, res) => {
     // Incluir todos os clientes: quem não tem conversa aparece como "Sem conversa" (clicável para abrir)
     // Não misturar "sem conversa" em filtros por estado de atendimento (aberta / disparada / etc.).
     const incluirTodos =
-      (incluirTodosClientesAtivo || incluirTodosClientesDefault) &&
-      statusNorm !== 'aberta' &&
-      statusNorm !== 'mensagem_disparada' &&
+      (shouldIncludeClientesSemConversa({ incluirTodosClientesAtivo, palavraTrim }) || incluirTodosClientesDefault) &&
+      !statusNorm &&
       !minhaFilaAtiva &&
       !aguardandoClienteAtivo &&
       !pagamentoPendenteAtivo &&
       !emAtrasoAtivo &&
       !tagFilterAtivo &&
+      !data_inicio &&
+      !data_fim &&
+      !filter_dep_id &&
+      !tempoParadoHoras &&
+      !filtroAusenciaLista &&
       !(filtroAtendenteInformado != null && !isAtendente)
     if (incluirTodos) {
       const cid = Number(company_id)
-      // Sem limite fixo: busca em lotes para evitar teto do PostgREST/Supabase.
-      const CHUNK = 1000
-      const MAX_CLIENTES_SEM_CONVERSA = Number(process.env.CHAT_LIST_MAX_CLIENTES_SEM_CONVERSA || 200000)
       const todosClientes = []
-      for (let start = 0; start < MAX_CLIENTES_SEM_CONVERSA; start += CHUNK) {
-        const { data: chunkRows, error: chunkErr } = await supabase
+      const remainingSlots = Math.max(0, chatListPagination.limit - conversasFormatadas.length)
+      const semConversaLimit = Math.min(
+        remainingSlots,
+        Math.max(1, parsePositiveInt(process.env.CHAT_LIST_SEM_CONVERSA_LIMIT, 50))
+      )
+      if (semConversaLimit > 0) {
+        const term = `%${palavraTrim}%`
+        const searchFetchLimit = Math.min(Math.max(semConversaLimit * 3, semConversaLimit), 150)
+        let clientesQuery = supabase
           .from('clientes')
           .select('id, nome, pushname, telefone, foto_perfil')
           .eq('company_id', cid)
+          .or(`nome.ilike.${term},pushname.ilike.${term},telefone.ilike.${term}`)
+        const { data: chunkRows, error: chunkErr } = await clientesQuery
           .order('nome', { ascending: true, nullsFirst: false })
-          .range(start, start + CHUNK - 1)
+          .range(0, searchFetchLimit - 1)
         if (chunkErr) {
           console.warn('[listarConversas] carregar clientes sem conversa:', chunkErr.message || chunkErr)
-          break
+        } else {
+          todosClientes.push(...(chunkRows || []))
         }
-        const rows = chunkRows || []
-        todosClientes.push(...rows)
-        if (rows.length < CHUNK) break
       }
       const clienteIdsComConversa = new Set(
         conversasFormatadas
@@ -1541,12 +1691,48 @@ exports.listarConversas = async (req, res) => {
           .map((c) => phoneKeyBR(c.telefone))
           .filter(Boolean)
       )
+      const candidatosClienteIds = [
+        ...new Set((todosClientes || []).map((cl) => Number(cl.id)).filter((n) => Number.isFinite(n) && n > 0)),
+      ]
+      const candidatosTelefones = [
+        ...new Set(
+          (todosClientes || [])
+            .flatMap((cl) => possiblePhonesBR(cl.telefone || ''))
+            .map((tel) => String(tel || '').trim())
+            .filter(Boolean)
+        ),
+      ]
+      if (candidatosClienteIds.length > 0 || candidatosTelefones.length > 0) {
+        const porClientePromise = candidatosClienteIds.length > 0
+          ? supabase
+              .from('conversas')
+              .select('cliente_id, telefone')
+              .eq('company_id', cid)
+              .in('cliente_id', candidatosClienteIds)
+          : Promise.resolve({ data: [], error: null })
+        const porTelefonePromise = candidatosTelefones.length > 0
+          ? supabase
+              .from('conversas')
+              .select('cliente_id, telefone')
+              .eq('company_id', cid)
+              .in('telefone', candidatosTelefones)
+          : Promise.resolve({ data: [], error: null })
+        const [{ data: convByClienteRows }, { data: convByTelefoneRows }] = await Promise.all([
+          porClientePromise,
+          porTelefonePromise,
+        ])
+        for (const row of [...(convByClienteRows || []), ...(convByTelefoneRows || [])]) {
+          if (row?.cliente_id != null) clienteIdsComConversa.add(Number(row.cliente_id))
+          const key = phoneKeyBR(row?.telefone || '')
+          if (key) convPhoneKeys.add(key)
+        }
+      }
       const semConversa = (todosClientes || []).filter((cl) => {
         if (clienteIdsComConversa.has(Number(cl.id))) return false
         const key = phoneKeyBR(cl.telefone || '')
         if (key && convPhoneKeys.has(key)) return false
         return true
-      })
+      }).slice(0, semConversaLimit)
       const itensSemConversa = semConversa.map((cl) => ({
         id: null,
         cliente_id: cl.id,
@@ -1639,11 +1825,21 @@ exports.listarConversas = async (req, res) => {
       console.warn('[listarConversas] prefs:', e?.message || e)
     }
 
+    const responsePagination = {
+      ...chatListPage.pagination,
+      returned: Array.isArray(conversasFormatadas) ? conversasFormatadas.length : 0,
+      sem_conversa_included: Boolean(incluirTodos),
+    }
+    setChatListPaginationHeaders(res, responsePagination, { semConversaIncluded: incluirTodos })
+
     if (!incluirColaboradoresEncaminhar) {
+      if (chatListPagination.paginatedResponse) {
+        return res.json({ conversas: conversasFormatadas, pagination: responsePagination })
+      }
       return res.json(conversasFormatadas)
     }
     const colaboradores_encaminhar = await loadColaboradoresEncaminhar()
-    return res.json({ conversas: conversasFormatadas, colaboradores_encaminhar })
+    return res.json({ conversas: conversasFormatadas, colaboradores_encaminhar, pagination: responsePagination })
   } catch (err) {
     console.error(err)
     return res.status(500).json({ error: 'Erro ao listar conversas' })
@@ -2696,12 +2892,8 @@ exports.detalharChat = async (req, res) => {
     const role = String(perfil || '').toLowerCase()
     const isAdmin = role === 'admin'
 
-    const limit = Math.min(Number(req.query.limit || 50), 200)
-    const cursor = req.query.cursor || null
-    const cursor_id =
-      req.query.cursor_id !== undefined && req.query.cursor_id !== null && String(req.query.cursor_id).trim() !== ''
-        ? req.query.cursor_id
-        : null
+    const messageHistoryPagination = parseMessageHistoryPagination(req.query)
+    const { limit, cursor, cursor_id } = messageHistoryPagination
 
     // conversa (com cliente, atendente, departamento/setor; tipo, nome_grupo, fotos; nome_contato_cache para header quando cliente ainda não tem nome)
     const { data: conversa, error: errConv } = await supabase
@@ -2787,7 +2979,7 @@ exports.detalharChat = async (req, res) => {
         .eq('conversa_id', Number(id))
         .order('criado_em', { ascending: false })
         .order('id', { ascending: false })
-        .limit(limit)
+        .limit(limit + 1)
 
       query = applyDetalharChatMensagensCursor(query, cursor, cursor_id)
 
@@ -2805,7 +2997,7 @@ exports.detalharChat = async (req, res) => {
         .eq('conversa_id', Number(id))
         .order('criado_em', { ascending: false })
         .order('id', { ascending: false })
-        .limit(limit)
+        .limit(limit + 1)
       query = applyDetalharChatMensagensCursor(query, cursor, cursor_id)
       const result = await query
       mensagens = result.data
@@ -2813,10 +3005,10 @@ exports.detalharChat = async (req, res) => {
     }
     if (errMsgs) return res.status(500).json({ error: errMsgs.message })
 
-    const mensagensDbBatch = Array.isArray(mensagens) ? mensagens : []
-    const dbBatchLen = mensagensDbBatch.length
-    const oldestDbRow = dbBatchLen > 0 ? mensagensDbBatch[dbBatchLen - 1] : null
-    const hasMoreFromDb = dbBatchLen >= limit
+    const messageHistoryPage = splitMessageHistoryPage(mensagens, limit)
+    mensagens = messageHistoryPage.rows
+    const oldestDbRow = messageHistoryPage.cursor_row
+    const hasMoreFromDb = messageHistoryPage.has_more
 
     // ✅ "Apagar pra mim" + marcar como lida em paralelo (reduz latência percebida ao abrir o chat)
     try {
@@ -6170,4 +6362,13 @@ exports.finalizacaoAusenciaLoteAuth = async (req, res) => {
     console.error('finalizacaoAusenciaLoteAuth:', err)
     return res.status(500).json({ error: err.message || 'Erro interno' })
   }
+}
+
+exports._test = {
+  assertPodeEnviarMensagem,
+  parseChatListPagination,
+  splitChatListPage,
+  parseMessageHistoryPagination,
+  splitMessageHistoryPage,
+  shouldIncludeClientesSemConversa,
 }

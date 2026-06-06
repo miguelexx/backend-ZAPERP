@@ -15,6 +15,11 @@ function getClientIp(req) {
   return req.ip || req.socket?.remoteAddress || 'unknown'
 }
 
+function numberFromEnv(name, fallback) {
+  const n = Number(process.env[name])
+  return Number.isFinite(n) && n > 0 ? n : fallback
+}
+
 function limiter({ windowMs, max, message }) {
   return rateLimit({
     windowMs,
@@ -31,19 +36,25 @@ function limiter({ windowMs, max, message }) {
 
 const loginLimiter = limiter({
   windowMs: 60 * 1000,
-  max: 20,
+  max: numberFromEnv('LOGIN_RATE_LIMIT_MAX', 20),
   message: 'Muitas tentativas de login. Aguarde 1 minuto e tente novamente.',
 })
 
 const webhookLimiter = limiter({
   windowMs: 60 * 1000,
-  max: 200,
+  max: numberFromEnv('WEBHOOK_RATE_LIMIT_MAX', 60000),
 })
 
 const apiLimiter = limiter({
   windowMs: 60 * 1000,
-  max: 300,
+  max: numberFromEnv('API_RATE_LIMIT_MAX', 30000),
 })
 
-module.exports = { loginLimiter, webhookLimiter, apiLimiter }
+const destructiveLimiter = limiter({
+  windowMs: 60 * 1000,
+  max: numberFromEnv('DESTRUCTIVE_RATE_LIMIT_MAX', 300),
+  message: 'Muitas acoes sensiveis em pouco tempo. Aguarde 1 minuto e tente novamente.',
+})
+
+module.exports = { loginLimiter, webhookLimiter, apiLimiter, destructiveLimiter }
 
