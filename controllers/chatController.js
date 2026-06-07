@@ -950,10 +950,29 @@ exports.listarConversas = async (req, res) => {
       incluirColabEncRaw === 1 ||
       incluirColabEncRaw === true
 
+    const chatListPagination = parseChatListPagination(req.query)
+
     if ((pagamentoPendenteAtivo || emAtrasoAtivo) && !(await usuarioPertenceSetorFinanceiro(departamento_ids, company_id))) {
-      if (!incluirColaboradoresEncaminhar) return res.json([])
+      const emptyPagination = {
+        limit: chatListPagination.limit,
+        has_more: false,
+        next_cursor: null,
+        next_cursor_id: null,
+        returned: 0,
+        sem_conversa_included: false,
+      }
+      setChatListPaginationHeaders(res, emptyPagination, {
+        semConversaIncluded: false,
+        totalCount: 0,
+      })
+      if (!incluirColaboradoresEncaminhar) {
+        if (chatListPagination.paginatedResponse) {
+          return res.json({ conversas: [], pagination: emptyPagination })
+        }
+        return res.json([])
+      }
       const colaboradores_encaminhar = await loadColaboradoresEncaminhar()
-      return res.json({ conversas: [], colaboradores_encaminhar })
+      return res.json({ conversas: [], colaboradores_encaminhar, pagination: emptyPagination })
     }
 
     const isFinanceiroUser = await usuarioPertenceSetorFinanceiro(departamento_ids, company_id)
@@ -972,7 +991,6 @@ exports.listarConversas = async (req, res) => {
 
     // Em producao, GET /chats nunca anexa a base inteira de clientes por padrao.
     // Clientes sem conversa entram apenas em busca explicita e paginada.
-    const chatListPagination = parseChatListPagination(req.query)
     const incluirTodosClientesDefault = false
     const palavraTrim = palavra && String(palavra).trim() ? String(palavra).trim() : ''
 
@@ -1393,12 +1411,14 @@ exports.listarConversas = async (req, res) => {
     }
     const listFilterOverrides = overridesFromListQuery(req.query)
     const totalCountPromise =
-      !chatListPagination.cursor && !forceEmptyConversas
-        ? countConversasWithFilter(countsCtx, listFilterOverrides).catch((err) => {
+      chatListPagination.cursor
+        ? Promise.resolve(null)
+        : forceEmptyConversas
+          ? Promise.resolve(0)
+          : countConversasWithFilter(countsCtx, listFilterOverrides).catch((err) => {
             console.warn('[listarConversas] total_count:', err?.message || err)
             return null
           })
-        : Promise.resolve(null)
 
     let data = null
     let error = null

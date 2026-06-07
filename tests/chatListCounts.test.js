@@ -1,6 +1,7 @@
 const {
   overridesFromListQuery,
   parseConversaIdsQuery,
+  rowVisibleInPostFilteredList,
   getStartOfTodayIso,
   getEndOfTodayIso,
 } = require('../services/chatListCountsService')
@@ -41,5 +42,57 @@ describe('chatListCountsService', () => {
     expect(end.getHours()).toBe(23)
     expect(end.getMinutes()).toBe(59)
     expect(end.getTime()).toBeGreaterThan(start.getTime())
+  })
+
+  test('post-list count rules match visible open and queue rows', () => {
+    const ctx = { user_id: 84, isAtendente: false, filtroAtendenteInformado: null }
+
+    expect(
+      rowVisibleInPostFilteredList(
+        { tipo: null, status_atendimento: 'aberta', atendente_id: null, mensagens: [] },
+        ctx,
+        { status_atendimento: 'aberta' }
+      )
+    ).toBe(false)
+
+    expect(
+      rowVisibleInPostFilteredList(
+        { tipo: null, status_atendimento: 'aberta', atendente_id: null, mensagens: [{ id: 1 }] },
+        ctx,
+        { status_atendimento: 'aberta' }
+      )
+    ).toBe(true)
+
+    expect(
+      rowVisibleInPostFilteredList(
+        { tipo: null, status_atendimento: 'aberta', atendente_id: 84, mensagens: [] },
+        ctx,
+        { minha_fila: true }
+      )
+    ).toBe(true)
+
+    expect(
+      rowVisibleInPostFilteredList(
+        { tipo: 'grupo', status_atendimento: 'aberta', atendente_id: null, mensagens: [{ id: 1 }] },
+        ctx,
+        { status_atendimento: 'aberta' }
+      )
+    ).toBe(true)
+
+    expect(
+      rowVisibleInPostFilteredList(
+        { tipo: 'grupo', status_atendimento: 'aberta', atendente_id: 84, mensagens: [{ id: 1 }] },
+        ctx,
+        { minha_fila: true }
+      )
+    ).toBe(false)
+
+    expect(
+      rowVisibleInPostFilteredList(
+        { tipo: 'grupo', status_atendimento: 'em_atendimento', atendente_id: 84, mensagens: [{ id: 1 }] },
+        ctx,
+        { status_atendimento: 'em_atendimento' }
+      )
+    ).toBe(false)
   })
 })

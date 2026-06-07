@@ -344,6 +344,87 @@ function applyChatListSqlFilters(query, ctx, overrides = {}) {
   return q
 }
 
+function isGroupConversationRow(row) {
+  return String(row?.tipo || '').trim().toLowerCase() === 'grupo'
+}
+
+function rowHasMessage(row) {
+  return Array.isArray(row?.mensagens) && row.mensagens.length > 0
+}
+
+function rowVisibleInPostFilteredList(row, ctx, overrides = {}) {
+  if (!row) return false
+  const isGroup = isGroupConversationRow(row)
+
+  const status = String(row.status_atendimento || '').trim().toLowerCase()
+  const atendenteId = row.atendente_id != null ? Number(row.atendente_id) : null
+  const userId = ctx?.user_id != null ? Number(ctx.user_id) : null
+  const filtroAtendente =
+    ctx?.filtroAtendenteInformado != null ? Number(ctx.filtroAtendenteInformado) : null
+
+  if (overrides.minha_fila === true) {
+    if (isGroup) return false
+    if (['em_atendimento', 'aguardando_cliente', 'pagamento_pendente', 'em_atraso'].includes(status)) {
+      return Number.isFinite(atendenteId) && Number.isFinite(userId) && atendenteId === userId
+    }
+    if (status === 'aberta') {
+      const livreOuMeu = atendenteId == null || (Number.isFinite(userId) && atendenteId === userId)
+      return livreOuMeu && (rowHasMessage(row) || atendenteId != null)
+    }
+    return false
+  }
+
+  if (overrides.status_atendimento === 'aberta') {
+    if (isGroup) return rowHasMessage(row)
+    return status === 'aberta' && (rowHasMessage(row) || atendenteId != null)
+  }
+
+  if (overrides.status_atendimento === 'em_atendimento' && !overrides.aguardando_cliente) {
+    if (isGroup) return false
+    if (ctx?.isAtendente) return status === 'em_atendimento'
+    if (filtroAtendente != null && atendenteId !== filtroAtendente) return false
+    return status === 'em_atendimento' || status === 'aguardando_cliente'
+  }
+
+  return true
+}
+
+function countNeedsPostListRules(overrides = {}) {
+  return (
+    overrides.minha_fila === true ||
+    overrides.status_atendimento === 'aberta' ||
+    overrides.status_atendimento === 'em_atendimento'
+  )
+}
+
+async function countConversasWithPostListRules(ctx, overrides = {}) {
+  const pageSize = Math.min(getChatFilterIdLimit(), 1000)
+  const maxRows = getChatFilterIdLimit()
+  let total = 0
+
+  for (let from = 0; from < maxRows; from += pageSize) {
+    const to = Math.min(from + pageSize - 1, maxRows - 1)
+    let q = supabase
+      .from('conversas')
+      .select('id, tipo, status_atendimento, atendente_id, mensagens ( id )')
+
+    q = applyChatListSqlFilters(q, ctx, overrides)
+      .order('ultima_atividade', { ascending: false, nullsFirst: false })
+      .order('id', { ascending: false })
+      .order('criado_em', { ascending: false, referencedTable: 'mensagens' })
+      .limit(1, { referencedTable: 'mensagens' })
+      .range(from, to)
+    const { data, error } = await q
+    if (error) throw error
+
+    const rows = Array.isArray(data) ? data : []
+    total += rows.filter((row) => rowVisibleInPostFilteredList(row, ctx, overrides)).length
+    if (rows.length < pageSize) break
+  }
+
+  return total
+}
+
 async function countConversasWithFilter(ctx, overrides = {}) {
   if (ctx.forceEmptyConversas) return 0
   if (overrides.status_atendimento === 'mensagem_disparada' && !ctx.separarMensagensDisparadasEmpresa) {
@@ -351,6 +432,9 @@ async function countConversasWithFilter(ctx, overrides = {}) {
   }
   if ((overrides.pagamento_pendente || overrides.em_atraso) && !ctx.isFinanceiro) {
     return 0
+  }
+  if (countNeedsPostListRules(overrides)) {
+    return countConversasWithPostListRules(ctx, overrides)
   }
 
   let q = supabase.from('conversas').select('id', { count: 'exact', head: true })
@@ -467,6 +551,7 @@ module.exports = {
   applyChatListSqlFilters,
   countConversasWithFilter,
   overridesFromListQuery,
+  rowVisibleInPostFilteredList,
   parseConversaIdsQuery,
   getChatFilterCounts,
   getStartOfTodayIso,
