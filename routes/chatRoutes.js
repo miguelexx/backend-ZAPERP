@@ -14,6 +14,7 @@ router.post('/abrir-conversa', auth, chatController.abrirConversaCliente);
 router.post("/grupos", auth, chatController.criarGrupo);
 router.post("/comunidades", auth, chatController.criarComunidade);
 router.post('/finalizacao-ausencia-lote', auth, supervisorOrAdmin, chatController.finalizacaoAusenciaLoteAuth)
+router.get('/counts', auth, chatController.contarConversasPorFiltros)
 router.get('/', auth, chatController.listarConversas)
 router.get('/merge-duplicatas', auth, adminOnly, chatController.paginaMergeDuplicatas)
 router.post('/merge-duplicatas', auth, adminOnly, destructiveLimiter, chatController.mergeConversasDuplicadas)
@@ -53,6 +54,8 @@ router.delete('/:id/mensagens/:mensagem_id/reacao', auth, chatController.remover
 router.post('/:id/contatos', auth, chatController.enviarContatoWhatsapp)
 router.post('/:id/localizacao', auth, chatController.enviarLocalizacao)
 router.post('/:id/ligacao', auth, chatController.enviarLigacaoWhatsapp)
+router.put('/:id/cliente', auth, chatController.vincularClienteConversa)
+router.put('/:id/vincular-cliente', auth, chatController.vincularClienteConversa)
 router.put('/:id/observacao', auth, chatController.atualizarObservacao)
 router.put('/:id/nome-contato', auth, chatController.atualizarNomeContato)
 

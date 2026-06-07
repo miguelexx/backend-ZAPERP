@@ -42,6 +42,63 @@ function chunkArray(arr, size) {
   return out
 }
 
+function normalizeOpenAiUsage(usage) {
+  if (!usage || typeof usage !== 'object') return { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }
+  const prompt = Number(usage.prompt_tokens ?? usage.input_tokens ?? 0) || 0
+  const completion = Number(usage.completion_tokens ?? usage.output_tokens ?? 0) || 0
+  const total = Number(usage.total_tokens ?? (prompt + completion)) || 0
+  return {
+    prompt_tokens: Math.max(0, Math.floor(prompt)),
+    completion_tokens: Math.max(0, Math.floor(completion)),
+    total_tokens: Math.max(0, Math.floor(total)),
+  }
+}
+
+function addUsage(a, b) {
+  const x = normalizeOpenAiUsage(a)
+  const y = normalizeOpenAiUsage(b)
+  return {
+    prompt_tokens: x.prompt_tokens + y.prompt_tokens,
+    completion_tokens: x.completion_tokens + y.completion_tokens,
+    total_tokens: x.total_tokens + y.total_tokens,
+  }
+}
+
+function compactDataForPrompt(value, depth = 0) {
+  if (value == null) return value
+  if (typeof value === 'string') return value.length > 1200 ? `${value.slice(0, 1200)}... [truncado]` : value
+  if (typeof value !== 'object') return value
+  if (depth >= 7) return '[profundidade_truncada]'
+  if (Array.isArray(value)) {
+    const max = depth <= 2 ? 60 : 25
+    const items = value.slice(0, max).map((item) => compactDataForPrompt(item, depth + 1))
+    if (value.length > max) {
+      items.push({ __truncated: true, total_original: value.length, exibidos: max })
+    }
+    return items
+  }
+  const out = {}
+  const entries = Object.entries(value)
+  const maxKeys = 90
+  for (const [key, val] of entries.slice(0, maxKeys)) {
+    out[key] = compactDataForPrompt(val, depth + 1)
+  }
+  if (entries.length > maxKeys) out.__keys_truncated = entries.length - maxKeys
+  return out
+}
+
+function stringifyDataForPrompt(data) {
+  const maxChars = Math.max(8000, Math.min(60000, Number(process.env.AI_PROMPT_MAX_CHARS) || 28000))
+  const compact = compactDataForPrompt(data)
+  const json = JSON.stringify(compact)
+  if (!json || json.length <= maxChars) return json
+  return JSON.stringify({
+    __prompt_truncated: true,
+    total_chars: json.length,
+    preview_json_inicio: json.slice(0, maxChars),
+  })
+}
+
 // ── Schema de intent (zod) ────────────────────────────────────────────────────
 const IntentSchema = z.object({
   intent: z.enum([
@@ -255,7 +312,8 @@ Regras de período:
   try { parsed = JSON.parse(raw) } catch { parsed = { intent: 'UNKNOWN' } }
 
   const safe = IntentSchema.safeParse(parsed)
-  return safe.success ? safe.data : { intent: 'UNKNOWN' }
+  const data = safe.success ? safe.data : { intent: 'UNKNOWN' }
+  return { ...data, _usage: normalizeOpenAiUsage(resp.usage) }
 }
 
 /** overview aninhado (GENERAL_CHAT) ou métricas na raiz (METRICS_OVERVIEW). */
@@ -421,8 +479,9 @@ Regras:
 - Se Dados trouxer atendimentosHoje e também totalConversas, conversasFechadas, ticketsAbertos ou mensagensRecebidas/mensagensEnviadas: não confunda — atendimentosHoje conta só linhas na tabela atendimentos desde hoje; não negue conversas/mensagens se esses totais forem > 0. Leia legenda_metricas se existir.
 - Não cite JSON, intent ou termos técnicos.`
 
-  const maxTokens = isConversaIntent ? 2200 : (isGeneral ? 500 : (isTom ? 600 : 400))
+  const maxTokens = isConversaIntent ? 1200 : (isGeneral ? 420 : (isTom ? 500 : 350))
   const temp = isConversaIntent ? 0.2 : (isGeneral ? 0.1 : (isTom ? 0.35 : 0.15))
+  const dadosJson = stringifyDataForPrompt(data)
   const resp = await openai.chat.completions.create({
     model: AI_MODEL(),
     temperature: temp,
@@ -431,12 +490,15 @@ Regras:
       { role: 'system', content: system },
       {
         role: 'user',
-        content: `Pergunta: ${question}\nIntenção: ${intent}\nDados: ${JSON.stringify(data)}\n\nNotas: (1) Se Dados.analitica_ui existir, use-o para período, alertas e ambiguidades; não contradiga. (2) Se Dados.recorte_temporal existir, a linguagem sobre "hoje"/datas deve obedecer a recorte_temporal.instrucao_temporal_obrigatoria. (3) Se Dados.resumo_operacional_ia existir, não contradiga seus totais nem omita clientes/conversas listados ali quando o usuário pedir lista completa.`,
+        content: `Pergunta: ${question}\nIntenção: ${intent}\nDados: ${dadosJson}\n\nNotas: (1) Se Dados.analitica_ui existir, use-o para período, alertas e ambiguidades; não contradiga. (2) Se Dados.recorte_temporal existir, a linguagem sobre "hoje"/datas deve obedecer a recorte_temporal.instrucao_temporal_obrigatoria. (3) Se Dados.resumo_operacional_ia existir, não contradiga seus totais nem omita clientes/conversas listados ali quando o usuário pedir lista completa.`,
       },
     ],
   })
 
-  return resp.choices?.[0]?.message?.content?.trim() || 'Não foi possível gerar a resposta.'
+  return {
+    answer: resp.choices?.[0]?.message?.content?.trim() || 'Não foi possível gerar a resposta.',
+    usage: normalizeOpenAiUsage(resp.usage),
+  }
 }
 
 // ── Helpers internos ──────────────────────────────────────────────────────────
@@ -4563,6 +4625,7 @@ function attachAnaliticaUiMeta(data, ctx) {
  */
 async function answerDashboardQuestion({ company_id, question, period_days }) {
   let cls = await classifyQuestion(question)
+  const classifyUsage = cls._usage
   cls = aplicarHeuristicasDeterministicas(cls, question)
   cls = enrichDataReferenciaFromQuestion(cls, question)
   cls = enrichTermosBuscaFromIntent(cls, question)
@@ -4805,13 +4868,15 @@ async function answerDashboardQuestion({ company_id, question, period_days }) {
     })
   }
 
-  let answer = await formatAnswer({ intent: cls.intent, data, question })
+  const formatted = await formatAnswer({ intent: cls.intent, data, question })
+  let answer = formatted.answer
   answer = sanearRespostaContradicaoMetricas(answer, cls.intent, data)
   answer = sanearNegacaoComEvidenciaMensagens(answer, cls.intent, data)
   answer = sanearLinguagemTemporalIndevida(answer, cls.intent, data)
   answer = sanearRespostaContagensInconsistentes(answer, cls.intent, data)
+  const totalUsage = addUsage(classifyUsage, formatted.usage)
 
-  return { ok: true, intent: cls.intent, answer, data }
+  return { ok: true, intent: cls.intent, answer, data, _ai_usage: totalUsage }
 }
 
 module.exports = { answerDashboardQuestion }

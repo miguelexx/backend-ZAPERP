@@ -17,6 +17,7 @@ console.log('NODE_ENV:', process.env.NODE_ENV || 'development')
 
 // Detecta NODE_ENV malformado (ex: falta newline no .env → NODE_ENV=productionULTRAMSG_BASE_URL=...)
 const nodeEnv = String(process.env.NODE_ENV || '').trim()
+const SOCKET_DEBUG = process.env.SOCKET_DEBUG === '1' || process.env.NODE_ENV !== 'production'
 if (nodeEnv && (nodeEnv.includes('ULTRAMSG') || nodeEnv.includes('='))) {
   console.warn(
     '[ENV] NODE_ENV parece concatenado com outra variável. Verifique o .env: cada variável deve estar em uma linha separada.'
@@ -194,7 +195,7 @@ io.on('connection', (socket) => {
 
   internalChatSocket.handleConnection(socket)
 
-  console.log(`🟢 Socket conectado | Usuário ${id} | Empresa ${company_id}`)
+  if (SOCKET_DEBUG) console.log(`🟢 Socket conectado | Usuário ${id} | Empresa ${company_id}`)
 
   // rooms padrão: empresa (admin vê tudo) e usuário
   socket.join(`empresa_${company_id}`)
@@ -230,7 +231,7 @@ io.on('connection', (socket) => {
       const room = `conversa_${convId}`
       if (!socket.rooms.has(room)) {
         socket.join(room)
-        console.log(`[SOCKET_JOIN_CONVERSA] Usuario ${id} entrou na conversa ${convId}`)
+        if (SOCKET_DEBUG) console.log(`[SOCKET_JOIN_CONVERSA] Usuario ${id} entrou na conversa ${convId}`)
       }
     } catch (err) {
       console.error('[SOCKET_JOIN_CONVERSA]', {
@@ -247,7 +248,7 @@ io.on('connection', (socket) => {
     if (!conversaId) return
 
     socket.leave(`conversa_${conversaId}`)
-    console.log(`💬 Socket saiu da conversa ${conversaId}`)
+    if (SOCKET_DEBUG) console.log(`💬 Socket saiu da conversa ${conversaId}`)
   })
 
   // =====================================================
@@ -275,7 +276,7 @@ io.on('connection', (socket) => {
   })
 
   socket.on('disconnect', () => {
-    console.log(`🔴 Socket desconectado | Usuário ${id}`)
+    if (SOCKET_DEBUG) console.log(`🔴 Socket desconectado | Usuário ${id}`)
   })
 })
 
