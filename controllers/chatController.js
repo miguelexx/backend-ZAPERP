@@ -615,6 +615,24 @@ function getSearchMessagesPageSize() {
   return Math.min(Math.max(Math.floor(raw), 100), 5000)
 }
 
+function getChatSearchScanLimit() {
+  const raw = Number(process.env.CHAT_SEARCH_SCAN_LIMIT)
+  if (!Number.isFinite(raw) || raw <= 0) return 3000
+  return Math.min(Math.max(Math.floor(raw), 100), 10000)
+}
+
+function getChatSearchIdLimit() {
+  const raw = Number(process.env.CHAT_SEARCH_ID_LIMIT)
+  if (!Number.isFinite(raw) || raw <= 0) return 1000
+  return Math.min(Math.max(Math.floor(raw), 100), 3000)
+}
+
+function getChatFilterIdLimit() {
+  const raw = Number(process.env.CHAT_FILTER_ID_LIMIT)
+  if (!Number.isFinite(raw) || raw <= 0) return 2000
+  return Math.min(Math.max(Math.floor(raw), 100), 5000)
+}
+
 function getConversaMessagesSearchLimit(rawLimit) {
   const raw = Number(rawLimit)
   if (!Number.isFinite(raw) || raw <= 0) return 30
@@ -627,9 +645,12 @@ function escapeIlikePattern(value) {
 
 async function buscarConversaIdsPorTextoMensagens({ company_id, term }) {
   const pageSize = getSearchMessagesPageSize()
+  const scanLimit = getChatSearchScanLimit()
+  const idLimit = getChatSearchIdLimit()
   const ids = new Set()
 
-  for (let start = 0; ; start += pageSize) {
+  for (let start = 0; start < scanLimit && ids.size < idLimit; start += pageSize) {
+    const end = Math.min(start + pageSize - 1, scanLimit - 1)
     const { data, error } = await supabase
       .from('mensagens')
       .select('conversa_id')
@@ -637,16 +658,17 @@ async function buscarConversaIdsPorTextoMensagens({ company_id, term }) {
       .ilike('texto', term)
       .order('criado_em', { ascending: false })
       .order('id', { ascending: false })
-      .range(start, start + pageSize - 1)
+      .range(start, end)
 
     if (error) throw error
 
     const rows = Array.isArray(data) ? data : []
     for (const row of rows) {
       if (row?.conversa_id != null) ids.add(row.conversa_id)
+      if (ids.size >= idLimit) break
     }
 
-    if (rows.length < pageSize) break
+    if (rows.length < (end - start + 1)) break
   }
 
   return [...ids]
@@ -993,12 +1015,15 @@ exports.listarConversas = async (req, res) => {
     // Exceção: conversas que o usuário transferiu para outro — aparecem na lista independente do setor
     let conversaIdsTransferidas = []
     if (!isAdmin) {
+      const transferLimit = getChatFilterIdLimit()
       const { data: transferRows } = await supabase
         .from('atendimentos')
         .select('conversa_id')
         .eq('company_id', company_id)
         .eq('de_usuario_id', user_id)
         .eq('acao', 'transferiu')
+        .order('criado_em', { ascending: false })
+        .limit(transferLimit)
       conversaIdsTransferidas = [...new Set((transferRows || []).map((r) => Number(r.conversa_id)).filter(Boolean))]
     }
 
@@ -1006,11 +1031,14 @@ exports.listarConversas = async (req, res) => {
     let forceEmptyConversas = false
 
     if (tagFilterAtivo) {
+      const filterIdLimit = getChatFilterIdLimit()
       const { data: tagRows } = await supabase
         .from('conversa_tags')
         .select('conversa_id')
         .eq('company_id', company_id)
         .eq('tag_id', tag_id)
+        .order('criado_em', { ascending: false })
+        .limit(filterIdLimit)
       const ids = (tagRows || []).map((r) => r.conversa_id)
       if (ids.length === 0) {
         if (!incluirColaboradoresEncaminhar) return res.json([])
@@ -1022,27 +1050,36 @@ exports.listarConversas = async (req, res) => {
 
     if (palavraTrim) {
       const term = `%${palavraTrim}%`
+      const searchIdLimit = getChatSearchIdLimit()
       const { data: clientesMatch } = await supabase
         .from('clientes')
         .select('id')
         .eq('company_id', company_id)
         .or(`nome.ilike.${term},pushname.ilike.${term},telefone.ilike.${term}`)
+        .order('criado_em', { ascending: false })
+        .limit(searchIdLimit)
       const clienteIds = (clientesMatch || []).map((c) => c.id)
       const convByClientePromise = supabase
         .from('conversas')
         .select('id')
         .eq('company_id', company_id)
         .in('cliente_id', clienteIds.length ? clienteIds : [0])
+        .order('ultima_atividade', { ascending: false, nullsFirst: false })
+        .limit(searchIdLimit)
       const convByTelefonePromise = supabase
         .from('conversas')
         .select('id')
         .eq('company_id', company_id)
         .ilike('telefone', term)
+        .order('ultima_atividade', { ascending: false, nullsFirst: false })
+        .limit(searchIdLimit)
       const convByNomeGrupoPromise = supabase
         .from('conversas')
         .select('id')
         .eq('company_id', company_id)
         .ilike('nome_grupo', term)
+        .order('ultima_atividade', { ascending: false, nullsFirst: false })
+        .limit(searchIdLimit)
       const msgMatchPromise = buscarConversaIdsPorTextoMensagens({ company_id, term })
       const [
         { data: convByCliente },
@@ -6371,4 +6408,8 @@ exports._test = {
   parseMessageHistoryPagination,
   splitMessageHistoryPage,
   shouldIncludeClientesSemConversa,
+  getSearchMessagesPageSize,
+  getChatSearchScanLimit,
+  getChatSearchIdLimit,
+  getChatFilterIdLimit,
 }

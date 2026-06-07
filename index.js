@@ -311,6 +311,11 @@ function shutdown(signal) {
   if (shuttingDown) return
   shuttingDown = true
   console.log(`[SHUTDOWN] Recebido ${signal}. Encerrando servidor HTTP/WebSocket...`)
+  try {
+    io.close()
+  } catch (e) {
+    console.error('[SHUTDOWN] Erro ao fechar Socket.IO:', e?.message || e)
+  }
   server.close((err) => {
     if (err) {
       console.error('[SHUTDOWN] Erro ao fechar servidor:', err?.message || err)
@@ -329,4 +334,8 @@ process.on('SIGTERM', () => shutdown('SIGTERM'))
 process.on('SIGINT', () => shutdown('SIGINT'))
 process.on('unhandledRejection', (err) => {
   console.error('[UNHANDLED_REJECTION]', err?.message || err)
+})
+process.on('uncaughtException', (err) => {
+  console.error('[UNCAUGHT_EXCEPTION]', err?.message || err)
+  shutdown('uncaughtException')
 })

@@ -60,6 +60,33 @@ describe('GET /api/chats pagination contract', () => {
     expect(_test.parseChatListPagination({}).paginatedResponse).toBe(false)
   })
 
+  test('caps intermediate search/filter scans used before chat pagination', () => {
+    const oldEnv = { ...process.env }
+    try {
+      process.env.CHAT_SEARCH_MESSAGES_PAGE_SIZE = '999999'
+      process.env.CHAT_SEARCH_SCAN_LIMIT = '999999'
+      process.env.CHAT_SEARCH_ID_LIMIT = '999999'
+      process.env.CHAT_FILTER_ID_LIMIT = '999999'
+
+      expect(_test.getSearchMessagesPageSize()).toBe(5000)
+      expect(_test.getChatSearchScanLimit()).toBe(10000)
+      expect(_test.getChatSearchIdLimit()).toBe(3000)
+      expect(_test.getChatFilterIdLimit()).toBe(5000)
+
+      process.env.CHAT_SEARCH_MESSAGES_PAGE_SIZE = '10'
+      process.env.CHAT_SEARCH_SCAN_LIMIT = '10'
+      process.env.CHAT_SEARCH_ID_LIMIT = '10'
+      process.env.CHAT_FILTER_ID_LIMIT = '10'
+
+      expect(_test.getSearchMessagesPageSize()).toBe(100)
+      expect(_test.getChatSearchScanLimit()).toBe(100)
+      expect(_test.getChatSearchIdLimit()).toBe(100)
+      expect(_test.getChatFilterIdLimit()).toBe(100)
+    } finally {
+      process.env = oldEnv
+    }
+  })
+
   test('uses safe message history page size and caps oversized requests', () => {
     expect(_test.parseMessageHistoryPagination({}, {
       MESSAGE_HISTORY_DEFAULT_LIMIT: '100',

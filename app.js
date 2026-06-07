@@ -150,6 +150,14 @@ const corsOptions = {
     'Pragma',
     'Expires',
   ],
+  exposedHeaders: [
+    'X-Request-Id',
+    'X-Chat-List-Limit',
+    'X-Chat-List-Has-More',
+    'X-Chat-List-Next-Cursor',
+    'X-Chat-List-Next-Cursor-Id',
+    'X-Chat-List-Sem-Conversa-Included',
+  ],
   credentials: true,
 }
 
@@ -245,6 +253,9 @@ app.use('/jobs', apiLimiter, jobsRoutes)
 app.use('/ia', apiLimiter, iaRoutes)
 app.use('/config', apiLimiter, configRoutes)
 app.use('/integrations/whatsapp', apiLimiter, whatsappIntegrationRoutes)
+// Alias legado: o frontend historicamente chama /integrations/zapi.
+// O provider atual e o contrato real são UltraMsg/WhatsApp, mas as rotas são equivalentes.
+app.use('/integrations/zapi', apiLimiter, whatsappIntegrationRoutes)
 app.use('/clientes', apiLimiter, clienteRoutes)
 app.use('/usuarios', apiLimiter, userRoutes)
 app.use('/chats', apiLimiter, chatRoutes)
@@ -273,6 +284,7 @@ api.use('/ia', iaRoutes)
 api.use('/ai', aiRoutes)
 api.use('/config', configRoutes)
 api.use('/integrations/whatsapp', whatsappIntegrationRoutes)
+api.use('/integrations/zapi', whatsappIntegrationRoutes)
 api.use('/clientes', clienteRoutes)
 api.use('/usuarios', userRoutes)
 api.use('/chats', chatRoutes)
