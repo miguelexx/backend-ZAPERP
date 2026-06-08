@@ -5754,7 +5754,7 @@ const MAX_MEDIA_CAPTION_CHARS = 1024
  * Uma unidade de upload após multer; conversa e telefone já validados.
  * @returns {Promise<{ ok: true, msg: object } | { ok: false, status: number, error: string }>}
  */
-async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conversa_id, telefoneParaEnvio, io, captionUsuario = '' }) {
+async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conversa_id, telefoneParaEnvio, io, captionUsuario = '', clientTempId = null }) {
   const { extFromOriginalName, isBlockedRiskExtension, blockedUploadErrorMessage } = require('../middleware/upload')
   let fileWork = file
   const extUpload = extFromOriginalName(fileWork?.originalname)
@@ -5832,7 +5832,14 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
 
     // Emitir eventos para o frontend
     if (io) {
-      const basePayload = { ...msg, conversa_id: msg.conversa_id ?? Number(conversa_id), status: msg.status || 'pending', status_mensagem: msg.status_mensagem || msg.status || 'pending', direcao: 'out' }
+      const basePayload = {
+        ...msg,
+        conversa_id: msg.conversa_id ?? Number(conversa_id),
+        status: msg.status || 'pending',
+        status_mensagem: msg.status_mensagem || msg.status || 'pending',
+        direcao: 'out',
+        ...(clientTempId ? { client_temp_id: clientTempId } : {}),
+      }
       const novaMsgPayload = await enrichMensagemComAutorUsuario(supabase, company_id, basePayload)
       emitirEventoEmpresaConversa(io, company_id, conversa_id, io.EVENTS?.NOVA_MENSAGEM || 'nova_mensagem', novaMsgPayload)
       
@@ -6109,6 +6116,7 @@ exports.enviarArquivo = async (req, res) => {
         telefoneParaEnvio,
         io,
         captionUsuario: perFileCaption,
+        clientTempId,
       })
       if (!r.ok) {
         hadFailure = true
