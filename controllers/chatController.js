@@ -5727,6 +5727,11 @@ async function normalizeAudioForUltraMsg(file, tipo) {
 /** Lote de fotos/arquivos (galeria): mesmo contrato do WhatsApp Web. */
 const MAX_ARQUIVOS_LOTE_ENVIO = 30
 
+const {
+  parseClientTempIdsFromBody,
+  buildArquivoApiResultRow,
+} = require('../helpers/arquivoUploadResponseHelper')
+
 /** Evita processar o mesmo upload duas vezes quando multer recebe campos duplicados. */
 function dedupeMulterFiles(files) {
   if (!Array.isArray(files) || files.length < 2) return files
@@ -6083,8 +6088,11 @@ exports.enviarArquivo = async (req, res) => {
     const captionFromBody = String(req.body?.caption ?? req.body?.legenda ?? '')
       .trim()
       .slice(0, MAX_MEDIA_CAPTION_CHARS)
+    const clientTempIds = parseClientTempIdsFromBody(req.body, files.length)
     const ids = []
+    const results = []
     let avisoWhatsapp = null
+    let hadFailure = false
 
     for (let i = 0; i < files.length; i++) {
       const raw = files[i]
@@ -6092,6 +6100,7 @@ exports.enviarArquivo = async (req, res) => {
       else if (raw.__tipoForcado) delete raw.__tipoForcado
 
       const perFileCaption = i === 0 ? captionFromBody : ''
+      const clientTempId = clientTempIds[i] || null
 
       const r = await enviarArquivoProcessarUm(req, raw, {
         company_id,
@@ -6101,25 +6110,59 @@ exports.enviarArquivo = async (req, res) => {
         io,
         captionUsuario: perFileCaption,
       })
-      if (!r.ok) return res.status(r.status).json({ error: r.error })
+      if (!r.ok) {
+        hadFailure = true
+        results.push({
+          ok: false,
+          client_temp_id: clientTempId,
+          error: r.error || 'Falha ao enviar arquivo.',
+          index: i,
+        })
+        continue
+      }
       ids.push(r.msg.id)
+      const row = buildArquivoApiResultRow(
+        { ...r.msg, conversa_id: r.msg.conversa_id ?? Number(conversa_id) },
+        clientTempId
+      )
+      if (row) results.push(row)
       if (r.aviso_whatsapp) avisoWhatsapp = r.aviso_whatsapp
       if (i < files.length - 1) await new Promise((resolve) => setTimeout(resolve, 250))
     }
 
-    const avisoPayload = avisoWhatsapp ? { aviso_whatsapp: avisoWhatsapp } : {}
-
-    if (ids.length === 1) {
-      return res.json({ ok: true, id: ids[0], conversa_id: Number(conversa_id), ...avisoPayload })
+    if (!ids.length) {
+      const firstErr = results.find((x) => x && x.ok === false)
+      return res.status(firstErr?.status || 400).json({
+        error: firstErr?.error || 'Nenhum arquivo foi enviado.',
+        results,
+        conversa_id: Number(conversa_id),
+      })
     }
-    return res.json({
+
+    const avisoPayload = avisoWhatsapp ? { aviso_whatsapp: avisoWhatsapp } : {}
+    const basePayload = {
       ok: true,
       ids,
       id: ids[ids.length - 1],
       conversa_id: Number(conversa_id),
       count: ids.length,
+      results,
+      partial: hadFailure,
       ...avisoPayload,
-    })
+    }
+
+    if (ids.length === 1) {
+      const only = results.find((x) => x?.ok) || null
+      return res.json({
+        ...basePayload,
+        ...(only?.client_temp_id ? { client_temp_id: only.client_temp_id } : {}),
+        ...(only?.tipo ? { tipo: only.tipo } : {}),
+        ...(only?.url ? { url: only.url } : {}),
+        ...(only?.nome_arquivo ? { nome_arquivo: only.nome_arquivo } : {}),
+        ...(only?.texto != null ? { texto: only.texto } : {}),
+      })
+    }
+    return res.json(basePayload)
   } catch (err) {
     console.error('Erro ao enviar arquivo:', err)
     return res.status(500).json({ error: 'Erro ao enviar arquivo' })
