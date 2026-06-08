@@ -2321,7 +2321,7 @@ exports.debugSyncContatos = async (req, res) => {
     diag.steps.push({
       step: 'credenciais',
       ok: true,
-      detail: `instance_id=${config.instance_id} token=${config.instance_token ? config.instance_token.slice(0, 6) + '...' : 'VAZIO'} ativo=${config.ativo}`
+      detail: `instance_id=${config.instance_id} token_configurado=${Boolean(config.instance_token)} ativo=${config.ativo}`
     })
 
     // Passo 2: Verificar status da conexão
@@ -2374,7 +2374,7 @@ exports.debugSyncContatos = async (req, res) => {
     })
   } catch (err) {
     console.error('debugSyncContatos:', err)
-    return res.status(500).json({ error: err?.message || 'Erro interno' })
+    return res.status(500).json({ error: 'Erro ao diagnosticar sincronização de contatos.' })
   }
 }
 

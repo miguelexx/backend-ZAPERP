@@ -4,6 +4,7 @@ const chatController = require('../controllers/chatController')
 const auth = require('../middleware/auth')
 const adminOnly = require('../middleware/adminOnly')
 const supervisorOrAdmin = require('../middleware/supervisorOrAdmin')
+const requirePermissao = require('../middleware/requirePermissao')
 const { uploadArquivo } = require('../middleware/upload')
 const { destructiveLimiter } = require('../middleware/rateLimit')
 
@@ -18,13 +19,13 @@ router.get('/counts', auth, chatController.contarConversasPorFiltros)
 router.get('/', auth, chatController.listarConversas)
 router.get('/merge-duplicatas', auth, adminOnly, chatController.paginaMergeDuplicatas)
 router.post('/merge-duplicatas', auth, adminOnly, destructiveLimiter, chatController.mergeConversasDuplicadas)
-router.post('/sincronizar-contatos', auth, chatController.sincronizarContatosZapi)
-router.get('/debug-sync-contatos', auth, chatController.debugSyncContatos)
-router.post('/sincronizar-fotos-perfil', auth, chatController.sincronizarFotosPerfilZapi)
+router.post('/sincronizar-contatos', auth, requirePermissao('integracoes.editar'), chatController.sincronizarContatosZapi)
+router.get('/debug-sync-contatos', auth, supervisorOrAdmin, chatController.debugSyncContatos)
+router.post('/sincronizar-fotos-perfil', auth, requirePermissao('integracoes.editar'), chatController.sincronizarFotosPerfilZapi)
 router.get('/whatsapp-status', auth, chatController.whatsappStatus)
 router.get('/zapi-status', auth, chatController.whatsappStatus) // alias para compatibilidade
 router.get('/pix-config', auth, chatController.getPixConfig)
-router.put('/pix-config', auth, chatController.putPixConfig)
+router.put('/pix-config', auth, requirePermissao('config.whatsapp'), chatController.putPixConfig)
 router.get('/:id/messages/search', auth, chatController.buscarMensagensConversa)
 router.get('/:id', auth, chatController.detalharChat)
 
@@ -41,7 +42,7 @@ router.post("/:id/tags", auth, chatController.adicionarTagConversa);
 router.delete("/:id/tags/:tag_id", auth, chatController.removerTagConversa)
 
 // Todos os usuários: transferir conversa para outro setor (departamento)
-router.put('/:id/departamento', auth, chatController.transferirSetor)
+router.put('/:id/departamento', auth, requirePermissao('atendimentos.transferir_setor'), chatController.transferirSetor)
 
 router.post("/:id/arquivo", auth, uploadArquivo, chatController.enviarArquivo)
 

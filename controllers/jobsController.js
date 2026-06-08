@@ -16,6 +16,7 @@ const {
   CONFIRM_FINALIZE_ABSENCE,
 } = require('../services/absenceFinalizationService')
 const { runAdminAtendimentoAlertaForAllCompanies } = require('../services/adminAtendimentoAlertaService')
+const { processAllCompaniesAlertaSemResposta } = require('../services/atendimentoSemRespostaService')
 const { processarVencimentosPagamentoFinanceiro } = require('../services/conversaPagamentoFinanceiroService')
 
 function timingSafeEqualStr(a, b) {
@@ -375,6 +376,33 @@ exports.adminAtendimentoAlerta = async (req, res) => {
     })
   } catch (err) {
     console.error('adminAtendimentoAlerta:', err)
+    return res.status(500).json({ error: err.message })
+  }
+}
+
+/** POST /jobs/alerta-sem-resposta */
+exports.alertaSemResposta = async (req, res) => {
+  try {
+    const dryRun =
+      req.query.dry_run === '1' ||
+      req.query.dry_run === 'true' ||
+      req.body?.dry_run === true
+    const out = await processAllCompaniesAlertaSemResposta({
+      io: req.app.get('io'),
+      dryRun,
+    })
+    if (!out.ok) {
+      return res.status(500).json({ error: out.error || 'Falha ao processar alerta sem resposta' })
+    }
+    return res.json({
+      ok: true,
+      dryRun,
+      empresas_com_alerta_ativo: out.empresas,
+      processadas: out.processadas,
+      detalhes: out.detalhes,
+    })
+  } catch (err) {
+    console.error('alertaSemResposta:', err)
     return res.status(500).json({ error: err.message })
   }
 }

@@ -39,6 +39,18 @@ if (!String(process.env.NODE_ENV || '').trim()) {
   throw new Error('NODE_ENV não definido no .env')
 }
 
+const { getUploadsRoot } = require('./config/uploadsRoot')
+if (nodeEnv === 'production' && !String(process.env.UPLOADS_DIR || '').trim()) {
+  console.warn(
+    '[ENV] UPLOADS_DIR não configurado em produção — mídias ficam na pasta local do app e podem sumir após redeploy. Configure volume persistente.'
+  )
+  if (process.env.UPLOADS_DIR_REQUIRED === '1') {
+    throw new Error('UPLOADS_DIR obrigatório em produção (UPLOADS_DIR_REQUIRED=1)')
+  }
+} else if (nodeEnv !== 'production' && !String(process.env.UPLOADS_DIR || '').trim()) {
+  console.warn('[ENV] UPLOADS_DIR não definido — usando pasta local:', getUploadsRoot())
+}
+
 const server = http.createServer(app)
 
 // CORS do Socket.IO: segue mesma política do Express (CORS_ORIGINS + APP_URL).
@@ -62,6 +74,7 @@ if (socketAppOrigin && !allowedSocketOrigins.includes(socketAppOrigin)) {
 const internalChatSocket = require('./socket/internalChatSocket')
 const { startAbsenceFinalizationScheduler } = require('./services/absenceFinalizationScheduler')
 const { startAdminAtendimentoAlertaScheduler } = require('./services/adminAtendimentoAlertaScheduler')
+const { startAtendimentoSemRespostaScheduler } = require('./services/atendimentoSemRespostaScheduler')
 const { startProdutosSyncScheduler } = require('./services/produtosSyncScheduler')
 
 async function canUserJoinConversationRoom({ company_id, user_id, role, departamento_ids, conversa_id }) {
@@ -302,6 +315,7 @@ server.listen(PORT, '0.0.0.0', () => {
     console.log('[WORKER] Job worker iniciado (polling a cada 5s)')
     startAbsenceFinalizationScheduler()
     startAdminAtendimentoAlertaScheduler()
+    startAtendimentoSemRespostaScheduler(io)
     startProdutosSyncScheduler()
     const { startInboundMediaRetryScheduler } = require('./services/inboundMediaPersistenceService')
     startInboundMediaRetryScheduler(supabase, io)

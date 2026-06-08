@@ -4,6 +4,7 @@
  */
 
 const { isAllowedInboundMediaUrl: isAllowedMediaUrl } = require('../helpers/allowedInboundMediaUrl')
+const { parseUploadsPathname, companyOwnsUpload, getLocalUploadFile } = require('../helpers/uploadAccess')
 
 const MAX_BYTES = 80 * 1024 * 1024 // 80 MB (impressão / preview)
 const FETCH_TIMEOUT_MS = Math.max(1000, Number(process.env.MEDIA_PROXY_TIMEOUT_MS) || 30000)
@@ -51,9 +52,23 @@ exports.proxyMedia = async (req, res) => {
 
   let target
   try {
-    target = new URL(raw)
+    target = new URL(raw, String(process.env.APP_URL || 'http://localhost').replace(/\/$/, '') + '/')
   } catch {
     return res.status(400).json({ error: 'URL inválida' })
+  }
+
+  const localFilename = parseUploadsPathname(target.pathname)
+  if (localFilename) {
+    const companyId = Number(req.user?.company_id)
+    if (!Number.isFinite(companyId) || companyId <= 0) {
+      return res.status(401).json({ error: 'Tenant inválido' })
+    }
+    const allowed = await companyOwnsUpload(companyId, localFilename)
+    if (!allowed) return res.status(403).json({ error: 'Acesso negado' })
+    const resolved = getLocalUploadFile(localFilename)
+    if (!resolved) return res.status(404).json({ error: 'Arquivo não encontrado' })
+    res.setHeader('Cache-Control', 'private, max-age=120')
+    return res.sendFile(resolved)
   }
 
   if (!isAllowedMediaUrl(target)) {

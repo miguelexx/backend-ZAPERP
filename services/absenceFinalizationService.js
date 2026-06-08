@@ -233,6 +233,10 @@ async function clearWaitingForClient(company_id, conversa_id) {
 async function tryMarkWaitingAfterHumanOutbound({ company_id, conversa_id, texto, criado_em, autor_usuario_id }) {
   if (!company_id || !conversa_id) return { marked: false, reason: 'missing_context' }
   const ts = criado_em || new Date().toISOString()
+  try {
+    const { registrarRespostaAtendenteSemResposta } = require('./atendimentoSemRespostaService')
+    await registrarRespostaAtendenteSemResposta({ company_id, conversa_id, criado_em: ts })
+  } catch (_) {}
   const { data: conv } = await supabase
     .from('conversas')
     .select('tipo, telefone, status_atendimento, atendente_id, aguardando_cliente_desde')
