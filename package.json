@@ -11,8 +11,6 @@
     "criar-admin": "node scripts/criar-admin.js",
     "cert:verificar": "node scripts/certificacao/verificar-sistema.js",
     "cert:verificar:local": "node scripts/certificacao/verificar-com-backend.js",
-    "cert:schema": "node scripts/certificacao/validate-production-schema.js",
-    "migrate:apply": "node scripts/apply-pending-migrations.js",
     "webhook:logs": "node scripts/webhook-logs-query.js",
     "load:smoke": "node scripts/load-smoke.js"
   },

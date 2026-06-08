@@ -26,10 +26,6 @@ const { incrementarUnreadParaConversa, emitirParaUsuariosQuePodemVerConversa } =
 const { normalizarTimestampSemFusoAmbiguoParaApi } = require('../helpers/timestampApiCompat')
 const { scheduleInboundWebPush } = require('../services/webPushDispatchService')
 const {
-  registrarMensagemClienteSemResposta,
-  registrarRespostaAtendenteSemResposta,
-} = require('../services/atendimentoSemRespostaService')
-const {
   schedulePersistInboundMediaIfNeeded,
   tipoQualificaPersistencia,
 } = require('../services/inboundMediaPersistenceService')
@@ -2937,25 +2933,6 @@ exports.receberZapi = async (req, res) => {
       }
 
       // CRM: atualiza último contato do cliente (apenas conversas individuais)
-      try {
-        if (!fromMe) {
-          await registrarMensagemClienteSemResposta({
-            company_id,
-            conversa_id: convIdForUpdate,
-            criado_em: mensagemSalva.criado_em || nowIsoUpdate,
-          })
-        } else if (mensagemSalva.autor_usuario_id != null) {
-          await registrarRespostaAtendenteSemResposta({
-            company_id,
-            conversa_id: convIdForUpdate,
-            criado_em: mensagemSalva.criado_em || nowIsoUpdate,
-          })
-        }
-      } catch (e) {
-        console.warn('[webhook] alerta sem resposta sync:', e?.message || e)
-      }
-
-      // CRM: atualiza ultimo contato do cliente (apenas conversas individuais)
       try {
         if (!isGroup) {
           const { data: convRow } = await supabase

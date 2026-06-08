@@ -167,10 +167,34 @@ const corsOptions = {
 app.use(cors(corsOptions))
 app.options('*', cors(corsOptions))
 
-// Uploads locais — autenticado por padrao em producao (middleware/secureUploads.js).
-// Compatibilidade temporaria: UPLOADS_LEGACY_PUBLIC=1 ou UPLOADS_REQUIRE_AUTH=0
-const secureUploads = require('./middleware/secureUploads')
-app.use('/uploads', secureUploads)
+// Arquivos estáticos (uploads: imagens, áudios, etc.)
+// Segurança:
+// - X-Content-Type-Options: nosniff
+// - Força download para não-imagens (evita execução/XSS)
+app.use(
+  '/uploads',
+  express.static(getUploadsRoot(), {
+    index: false,
+    dotfiles: 'deny',
+    setHeaders(res, filePath) {
+      res.setHeader('X-Content-Type-Options', 'nosniff')
+      const p = String(filePath || '').toLowerCase()
+      const isImage = p.endsWith('.jpg') || p.endsWith('.jpeg') || p.endsWith('.png') || p.endsWith('.webp')
+      const isAudio = p.endsWith('.mp3') || p.endsWith('.ogg') || p.endsWith('.aac') || p.endsWith('.m4a') || p.endsWith('.wav') || p.endsWith('.opus') || p.endsWith('.webm')
+      const isVideo = p.endsWith('.mp4') || p.endsWith('.mov') || p.endsWith('.avi') || p.endsWith('.3gp')
+      const isPdf = p.endsWith('.pdf')
+      const isMedia = isImage || isAudio || isVideo || isPdf
+      // Para mídia (imagem/áudio/vídeo/PDF), manter Content-Type adequado para provedores
+      // e para o painel exibir PDF em iframe. Demais arquivos: download + octet-stream.
+      if (!isMedia) {
+        const name = p.split(/[\\/]/).pop() || 'download'
+        res.setHeader('Content-Disposition', `attachment; filename="${name.replace(/"/g, '')}"`)
+        // força um tipo genérico para não permitir renderização ativa
+        res.setHeader('Content-Type', 'application/octet-stream')
+      }
+    },
+  })
+)
 
 // Health check: básico (LB) e detalhado (Supabase)
 const healthController = require('./controllers/healthController')

@@ -327,10 +327,7 @@ async function handleWebhookUltramsg(req, res) {
     const errMsg = e?.message || String(e)
     console.error('[handleWebhookUltramsg]', errMsg)
     req.webhookLogData = { status: 'error', error_message: errMsg }
-    if (process.env.WEBHOOK_RETRY_ON_ERROR === '1') {
-      return res.status(500).json({ ok: false, error: 'processing_failed' })
-    }
-    return res.status(200).json({ ok: true, logged: true })
+    return res.status(200).json({ ok: true })
   }
 }
 
