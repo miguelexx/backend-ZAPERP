@@ -3651,13 +3651,14 @@ exports.reabrirChat = async (req, res) => {
       return res.status(400).json({ error: 'Grupos são apenas visuais. Não é possível reabrir conversa de grupo.' })
     }
 
-    // Reabrir já assume automaticamente para quem clicou
+    // Reabrir já assume automaticamente para quem clicou — sem setor (fila geral / visível a todos).
     const { data, error } = await supabase
       .from('conversas')
       .update({
         status_atendimento: 'em_atendimento',
         atendente_id: user_id,
         atendente_atribuido_em: new Date().toISOString(),
+        departamento_id: null,
         finalizacao_motivo: null,
         finalizada_automaticamente: false,
         finalizada_automaticamente_em: null,
