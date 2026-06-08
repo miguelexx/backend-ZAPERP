@@ -1,5 +1,5 @@
 const path = require('path')
-const { loadEnv } = require('./config/env')
+const { loadEnv, getBooleanEnv } = require('./config/env')
 loadEnv()
 const http = require('http')
 const app = require('./app')
@@ -295,7 +295,8 @@ server.listen(PORT, '0.0.0.0', () => {
   // Inicia worker de jobs (sync_contatos, sync_fotos, etc.) em background.
   // Passa io para o worker emitir o evento legado 'zapi_sync_contatos' (nome histórico; ver ../docs/_OFICIAL/ADR-LEGACY-NAMING.md) ao concluir cada job.
   const isTest = process.env.NODE_ENV === 'test' || !!process.env.JEST_WORKER_ID
-  if (!isTest) {
+  const backgroundJobsDisabled = getBooleanEnv('ZAPERP_DISABLE_BACKGROUND_JOBS', false)
+  if (!isTest && !backgroundJobsDisabled) {
     const { startWorker } = require('./services/queueManager')
     startWorker(5000, io)
     console.log('[WORKER] Job worker iniciado (polling a cada 5s)')
@@ -304,6 +305,8 @@ server.listen(PORT, '0.0.0.0', () => {
     startProdutosSyncScheduler()
     const { startInboundMediaRetryScheduler } = require('./services/inboundMediaPersistenceService')
     startInboundMediaRetryScheduler(supabase, io)
+  } else if (backgroundJobsDisabled) {
+    console.log('[WORKER] Rotinas em background desativadas por ZAPERP_DISABLE_BACKGROUND_JOBS')
   }
 })
 

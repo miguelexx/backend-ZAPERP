@@ -24,7 +24,10 @@ const allowedOrigins = [
     ? ['http://localhost:3000', 'http://localhost:5173', 'http://127.0.0.1:5173', 'http://127.0.0.1:3000']
     : [])
 ]
-const extraOrigins = String(process.env.CORS_ORIGINS || '').split(',').map((s) => s.trim()).filter(Boolean)
+const extraOrigins = [
+  ...String(process.env.CORS_ORIGINS || '').split(','),
+  ...String(process.env.ZAPERP_CORS_EXTRA_ORIGINS || '').split(','),
+].map((s) => s.trim()).filter(Boolean)
 extraOrigins.forEach((o) => { if (o && !allowedOrigins.includes(o)) allowedOrigins.push(o) })
 
 const allowedOriginPatterns = [

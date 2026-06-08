@@ -952,17 +952,17 @@ exports.listarConversas = async (req, res) => {
 
     const chatListPagination = parseChatListPagination(req.query)
 
-    if ((pagamentoPendenteAtivo || emAtrasoAtivo) && !(await usuarioPertenceSetorFinanceiro(departamento_ids, company_id))) {
+    async function sendEmptyChatListResponse(semConversaIncluded = false) {
       const emptyPagination = {
         limit: chatListPagination.limit,
         has_more: false,
         next_cursor: null,
         next_cursor_id: null,
         returned: 0,
-        sem_conversa_included: false,
+        sem_conversa_included: Boolean(semConversaIncluded),
       }
       setChatListPaginationHeaders(res, emptyPagination, {
-        semConversaIncluded: false,
+        semConversaIncluded: Boolean(semConversaIncluded),
         totalCount: 0,
       })
       if (!incluirColaboradoresEncaminhar) {
@@ -973,6 +973,10 @@ exports.listarConversas = async (req, res) => {
       }
       const colaboradores_encaminhar = await loadColaboradoresEncaminhar()
       return res.json({ conversas: [], colaboradores_encaminhar, pagination: emptyPagination })
+    }
+
+    if ((pagamentoPendenteAtivo || emAtrasoAtivo) && !(await usuarioPertenceSetorFinanceiro(departamento_ids, company_id))) {
+      return sendEmptyChatListResponse(false)
     }
 
     const isFinanceiroUser = await usuarioPertenceSetorFinanceiro(departamento_ids, company_id)
@@ -1015,9 +1019,7 @@ exports.listarConversas = async (req, res) => {
     } catch (_) {}
 
     if (statusNorm === 'mensagem_disparada' && !separarMensagensDisparadasEmpresa) {
-      if (!incluirColaboradoresEncaminhar) return res.json([])
-      const colaboradores_encaminhar = await loadColaboradoresEncaminhar()
-      return res.json({ conversas: [], colaboradores_encaminhar })
+      return sendEmptyChatListResponse(false)
     }
 
     /** Inteiro positivo (usuarios.id). UUID não é coluna de atendente_id na conversa — rejeitar valores não inteiros. */
@@ -1082,9 +1084,7 @@ exports.listarConversas = async (req, res) => {
         .limit(filterIdLimit)
       const ids = (tagRows || []).map((r) => r.conversa_id)
       if (ids.length === 0) {
-        if (!incluirColaboradoresEncaminhar) return res.json([])
-        const colaboradores_encaminhar = await loadColaboradoresEncaminhar()
-        return res.json({ conversas: [], colaboradores_encaminhar })
+        return sendEmptyChatListResponse(false)
       }
       conversaIdsFilter = ids
     }
@@ -1143,9 +1143,7 @@ exports.listarConversas = async (req, res) => {
           conversaIdsFilter = []
           forceEmptyConversas = true
         } else {
-          if (!incluirColaboradoresEncaminhar) return res.json([])
-          const colaboradores_encaminhar = await loadColaboradoresEncaminhar()
-          return res.json({ conversas: [], colaboradores_encaminhar })
+          return sendEmptyChatListResponse(false)
         }
       } else {
         conversaIdsFilter = conversaIdsFilter ? conversaIdsFilter.filter((id) => mergedSet.has(id)) : merged
@@ -1176,9 +1174,6 @@ exports.listarConversas = async (req, res) => {
       status_atendimento,
       atendente_id,
       aguardando_cliente_desde,
-      pagamento_prazo_ate,
-      pagamento_prazo_origem,
-      pagamento_concluido_em,
       lida,
       criado_em,
       ultima_atividade,
@@ -1978,7 +1973,15 @@ exports.listarConversas = async (req, res) => {
       returned: Array.isArray(conversasFormatadas) ? conversasFormatadas.length : 0,
       sem_conversa_included: Boolean(incluirTodos),
     }
-    const totalCount = await totalCountPromise
+    const totalCountRaw = await totalCountPromise
+    const totalCount =
+      totalCountRaw == null &&
+      !chatListPagination.cursor &&
+      Array.isArray(conversasFormatadas) &&
+      conversasFormatadas.length === 0 &&
+      !responsePagination.has_more
+        ? 0
+        : totalCountRaw
     setChatListPaginationHeaders(res, responsePagination, {
       semConversaIncluded: incluirTodos,
       totalCount,
