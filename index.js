@@ -294,7 +294,6 @@ server.listen(PORT, '0.0.0.0', () => {
   // Não há mais instância única em ENV para configurar no startup.
 
   // Inicia worker de jobs (sync_contatos, sync_fotos, etc.) em background.
-  // Passa io para o worker emitir o evento legado 'zapi_sync_contatos' (nome histórico; ver ../docs/_OFICIAL/ADR-LEGACY-NAMING.md) ao concluir cada job.
   const isTest = process.env.NODE_ENV === 'test' || !!process.env.JEST_WORKER_ID
   const backgroundJobsDisabled = getBooleanEnv('ZAPERP_DISABLE_BACKGROUND_JOBS', false)
   if (!isTest && !backgroundJobsDisabled) {

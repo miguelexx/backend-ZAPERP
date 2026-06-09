@@ -3202,7 +3202,6 @@ exports.detalharChat = async (req, res) => {
 
     // mensagens paginadas (remetente_nome/remetente_telefone para grupos; fallback se colunas não existirem)
     const selectComRemetente = 'id, texto, direcao, criado_em, autor_usuario_id, status, whatsapp_id, tipo, url, nome_arquivo, reply_meta, remetente_nome, remetente_telefone, contact_meta, location_meta, apagada_para_todos, apagada_em'
-    const selectBasico = 'id, texto, direcao, criado_em, autor_usuario_id, status, whatsapp_id, tipo, url, nome_arquivo, reply_meta, contact_meta, location_meta, apagada_para_todos, apagada_em'
     let mensagens = []
     let errMsgs = null
     let query
@@ -4808,7 +4807,7 @@ exports.enviarContatoWhatsapp = async (req, res) => {
     }
     const result = await provider.sendContact(conversa.telefone, contactName, contactPhone, {
       companyId: company_id,
-      conversaId: conversa_id,
+      conversaId: Number(conversa_id),
       sendOrigin: 'atendimento_humano_contato',
       messageId: messageId || undefined,
     })

@@ -117,7 +117,7 @@ app.use(express.json({
     try { req.rawBody = buf } catch (_) {}
   }
 }))
-app.use(express.urlencoded({ extended: true, limit: '1mb' }))
+app.use(express.urlencoded({ extended: false, limit: '1mb' }))
 
 // =====================================================
 // WEBHOOKS — registrados ANTES do CORS (provedores como UltraMSG enviam Origin).

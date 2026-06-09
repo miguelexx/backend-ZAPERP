@@ -26,7 +26,7 @@ function err(res, e, fallback = 'Erro') {
   const status = Number(e?.status) || 500
   const msg = status < 500 ? (e?.message || fallback) : fallback
   if (status >= 500) console.error('[CRM]', e)
-  return res.status(status).json({ error: e?.message || fallback })
+  return res.status(status).json({ error: msg })
 }
 
 // ---------- Pipelines ----------
