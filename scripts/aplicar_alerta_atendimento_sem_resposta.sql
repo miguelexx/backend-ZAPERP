@@ -1,4 +1,5 @@
--- Alertas de atendimento sem resposta (config em ia_config.config.alerta_sem_resposta)
+-- Execute no SQL Editor do Supabase (role postgres).
+-- Corrige: permission denied for table alerta_atendimento_sem_resposta_eventos
 
 CREATE TABLE IF NOT EXISTS public.alerta_atendimento_sem_resposta_eventos (
   id BIGSERIAL PRIMARY KEY,
@@ -32,12 +33,6 @@ CREATE TABLE IF NOT EXISTS public.alerta_atendimento_sem_resposta_estado (
 CREATE INDEX IF NOT EXISTS idx_alerta_sem_resposta_estado_company
   ON public.alerta_atendimento_sem_resposta_estado (company_id);
 
-COMMENT ON TABLE public.alerta_atendimento_sem_resposta_eventos IS
-  'Log de alertas de atendimento sem resposta (escalonamento por conversa).';
-COMMENT ON TABLE public.alerta_atendimento_sem_resposta_estado IS
-  'Estado/idempotência do escalonamento por conversa (evita reenvio do mesmo nível).';
-
--- Permissões Supabase (backend usa service_role; tabelas novas precisam de GRANT explícito)
 GRANT ALL ON TABLE public.alerta_atendimento_sem_resposta_eventos TO postgres, service_role;
 GRANT ALL ON TABLE public.alerta_atendimento_sem_resposta_estado TO postgres, service_role;
 GRANT USAGE, SELECT ON SEQUENCE public.alerta_atendimento_sem_resposta_eventos_id_seq TO postgres, service_role;

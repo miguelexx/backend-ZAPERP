@@ -121,7 +121,12 @@ async function saveAlertaSemRespostaConfig(company_id, patch) {
 
 function isMissingTableError(err) {
   const msg = String(err?.message || err || '').toLowerCase()
-  return msg.includes('does not exist') || msg.includes('relation') || msg.includes('schema cache')
+  return (
+    msg.includes('does not exist') ||
+    msg.includes('relation') ||
+    msg.includes('schema cache') ||
+    msg.includes('permission denied')
+  )
 }
 
 async function listAlertaSemRespostaEventos(company_id, { limit = 20, offset = 0 } = {}) {
@@ -135,7 +140,12 @@ async function listAlertaSemRespostaEventos(company_id, { limit = 20, offset = 0
       .order('criado_em', { ascending: false })
       .range(off, off + lim - 1)
     if (error) {
-      if (isMissingTableError(error)) return { ok: true, eventos: [] }
+      if (isMissingTableError(error)) {
+        if (String(error.message || '').toLowerCase().includes('permission denied')) {
+          console.warn('[atendimentoSemResposta] permissão negada em eventos — aplique GRANT/migration 20260608130000')
+        }
+        return { ok: true, eventos: [] }
+      }
       return { ok: false, error: error.message, eventos: [] }
     }
     const eventos = (data || []).map((e) => ({
