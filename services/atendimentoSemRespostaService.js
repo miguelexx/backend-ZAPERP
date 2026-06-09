@@ -19,6 +19,8 @@ const DEFAULT_ALERTA_SEM_RESPOSTA = {
   aplicar_tag_automatica: true,
   nome_tag_automatica: 'Reaberta por falta de resposta',
   gestor_notificado_id: null,
+  gestor_cliente_id: null,
+  gestor_cliente_nome: '',
   responsaveis_notificacao_ids: [],
   telefone_gestor: '',
   horario_comercial_ativo: false,
@@ -40,6 +42,7 @@ function normalizeMinutes(value, fallback) {
 function normalizeAlertaSemResposta(raw) {
   const r = raw && typeof raw === 'object' ? raw : {}
   const gestorId = Number(r.gestor_notificado_id)
+  const gestorClienteId = Number(r.gestor_cliente_id)
   const responsaveis = Array.isArray(r.responsaveis_notificacao_ids)
     ? r.responsaveis_notificacao_ids.map(Number).filter((id) => Number.isFinite(id) && id > 0)
     : []
@@ -56,6 +59,8 @@ function normalizeAlertaSemResposta(raw) {
     aplicar_tag_automatica: r.aplicar_tag_automatica !== false,
     nome_tag_automatica: String(r.nome_tag_automatica || DEFAULT_ALERTA_SEM_RESPOSTA.nome_tag_automatica).trim().slice(0, 120),
     gestor_notificado_id: Number.isInteger(gestorId) && gestorId > 0 ? gestorId : null,
+    gestor_cliente_id: Number.isInteger(gestorClienteId) && gestorClienteId > 0 ? gestorClienteId : null,
+    gestor_cliente_nome: String(r.gestor_cliente_nome || '').trim().slice(0, 120),
     responsaveis_notificacao_ids: responsaveis,
     telefone_gestor: String(r.telefone_gestor || '').trim().slice(0, 40),
     horario_comercial_ativo: r.horario_comercial_ativo === true,
@@ -74,8 +79,13 @@ function validateAlertaSemResposta(cfg) {
   if (c.aplicar_tag_automatica && !c.nome_tag_automatica) {
     return 'Informe o nome da tag automática.'
   }
-  if (c.notificar_por_whatsapp && !c.telefone_gestor.replace(/\D/g, '')) {
-    return 'Para WhatsApp, informe o telefone do gestor.'
+  if (c.notificar_por_whatsapp) {
+    const clienteId = Number(c.gestor_cliente_id)
+    const manual = String(c.telefone_gestor || '').replace(/\D/g, '')
+    const hasCliente = Number.isInteger(clienteId) && clienteId > 0
+    if (!hasCliente && (!manual || manual.length < 10)) {
+      return 'Para WhatsApp, selecione um contato cadastrado no sistema.'
+    }
   }
   if (!c.notificar_por_whatsapp && !c.notificar_interno) {
     return 'Selecione ao menos um canal de notificação.'
@@ -281,17 +291,96 @@ async function ensureTagForConversa(company_id, conversa_id, nomeTag) {
   return tagId
 }
 
+async function resolveGestorWhatsappDestination(company_id, cfg) {
+  const clienteId = Number(cfg?.gestor_cliente_id)
+  if (Number.isInteger(clienteId) && clienteId > 0) {
+    const { data, error } = await supabase
+      .from('clientes')
+      .select('id, telefone, wa_id, nome, pushname')
+      .eq('company_id', company_id)
+      .eq('id', clienteId)
+      .maybeSingle()
+
+    if (error) {
+      return { ok: false, reason: 'contact_lookup_failed', error: error.message, cliente_id: clienteId }
+    }
+    if (!data) {
+      return { ok: false, reason: 'contact_not_found', cliente_id: clienteId }
+    }
+
+    const telefone = String(data.telefone || data.wa_id || '').trim()
+    const digits = telefone.replace(/\D/g, '')
+    if (!digits || digits.length < 10) {
+      return {
+        ok: false,
+        reason: 'invalid_contact_phone',
+        cliente_id: clienteId,
+        cliente_nome: String(data.nome || data.pushname || '').trim(),
+      }
+    }
+
+    return {
+      ok: true,
+      source: 'cliente',
+      telefone,
+      digits,
+      cliente_id: clienteId,
+      cliente_nome: String(data.nome || data.pushname || cfg?.gestor_cliente_nome || '').trim(),
+    }
+  }
+
+  const telefone = String(cfg?.telefone_gestor || '').trim()
+  const digits = telefone.replace(/\D/g, '')
+  if (!digits || digits.length < 10) {
+    return { ok: false, reason: 'invalid_phone', source: 'manual' }
+  }
+  return { ok: true, source: 'manual', telefone, digits, cliente_id: null, cliente_nome: '' }
+}
+
+async function fetchAtendenteNome(company_id, atendente_id) {
+  const id = Number(atendente_id)
+  if (!Number.isFinite(id) || id <= 0) return null
+  const { data } = await supabase
+    .from('usuarios')
+    .select('nome, email')
+    .eq('company_id', company_id)
+    .eq('id', id)
+    .maybeSingle()
+  return String(data?.nome || data?.email || '').trim() || null
+}
+
+function buildGestorWhatsappText({ clienteNome, atendenteNome, minutos, conversaId, cfg }) {
+  const lines = [
+    '🚨 Atendimento sem resposta no ZapERP',
+    `Cliente: ${clienteNome}`,
+  ]
+  if (atendenteNome) lines.push(`Atendente: ${atendenteNome}`)
+  lines.push(`Tempo sem resposta: ${minutos} minutos`)
+  lines.push(`Conversa #${conversaId}`)
+  if (cfg?.reabrir_conversa_automaticamente) {
+    lines.push('Status: conversa reaberta por falta de resposta')
+    lines.push('A conversa foi liberada para outro atendente ou gestor assumir.')
+  } else {
+    lines.push('Status: gestor notificado; conversa permanece com o atendente atual.')
+  }
+  return lines.join('\n')
+}
+
 async function sendGestorWhatsapp(company_id, telefone, texto) {
-  const digits = String(telefone || '').replace(/\D/g, '')
+  const tel = String(telefone || '').trim()
+  const digits = tel.replace(/\D/g, '')
   if (!digits || digits.length < 10) return { ok: false, error: 'telefone_invalido' }
   try {
     const { getProvider } = require('./providers')
     const provider = getProvider()
     const send = provider?.sendText
     if (typeof send !== 'function') return { ok: false, error: 'sendText_indisponivel' }
-    const result = await send(company_id, digits, texto)
+    const result = await send(tel, texto, {
+      companyId: company_id,
+      sendOrigin: 'alerta_sem_resposta_gestor',
+    })
     if (result?.ok === false || result?.error) return { ok: false, error: result.error || 'falha_envio' }
-    return { ok: true }
+    return { ok: true, messageId: result?.messageId ?? null }
   } catch (e) {
     return { ok: false, error: e?.message || String(e) }
   }
@@ -458,16 +547,54 @@ async function processCompanyAtendimentoSemResposta(company_id, opts = {}) {
       }
 
       if (action.notifyGestor) {
-        if (cfg.notificar_por_whatsapp && cfg.telefone_gestor) {
-          const waText = `[ZapERP] Atendimento sem resposta\nCliente: ${nome}\nTempo: ${minutos} min\nConversa #${conv.id}`
-          const wa = await sendGestorWhatsapp(company_id, cfg.telefone_gestor, waText)
-          if (!wa.ok) {
+        if (cfg.notificar_por_whatsapp) {
+          const destination = await resolveGestorWhatsappDestination(company_id, cfg)
+          if (!destination.ok) {
             await recordEvento(company_id, {
               ...basePayload,
               tipo: 'whatsapp_falha',
               nivel: 'gestor',
-              mensagem: wa.error || 'Falha ao enviar WhatsApp ao gestor',
+              mensagem: destination.error || destination.reason || 'Contato do gestor inválido',
+              detalhes: {
+                reason: destination.reason,
+                cliente_id: destination.cliente_id ?? cfg.gestor_cliente_id ?? null,
+              },
             })
+          } else {
+            const atendenteNome = await fetchAtendenteNome(company_id, conv.atendente_id)
+            const waText = buildGestorWhatsappText({
+              clienteNome: nome,
+              atendenteNome,
+              minutos,
+              conversaId: conv.id,
+              cfg,
+            })
+            const wa = await sendGestorWhatsapp(company_id, destination.telefone, waText)
+            if (!wa.ok) {
+              await recordEvento(company_id, {
+                ...basePayload,
+                tipo: 'whatsapp_falha',
+                nivel: 'gestor',
+                mensagem: wa.error || 'Falha ao enviar WhatsApp ao gestor',
+                detalhes: {
+                  destino: destination.source,
+                  cliente_id: destination.cliente_id,
+                  cliente_nome: destination.cliente_nome || cfg.gestor_cliente_nome || null,
+                },
+              })
+            } else {
+              await recordEvento(company_id, {
+                ...basePayload,
+                tipo: 'whatsapp_enviado',
+                nivel: 'gestor',
+                mensagem: `WhatsApp enviado para ${destination.cliente_nome || destination.telefone}.`,
+                detalhes: {
+                  destino: destination.source,
+                  cliente_id: destination.cliente_id,
+                  cliente_nome: destination.cliente_nome || cfg.gestor_cliente_nome || null,
+                },
+              })
+            }
           }
         }
 
@@ -548,4 +675,6 @@ module.exports = {
   runAtendimentoSemRespostaForAllCompanies,
   emitAlertaRealtime,
   clearEstado,
+  resolveGestorWhatsappDestination,
+  sendGestorWhatsapp,
 }
