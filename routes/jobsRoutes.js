@@ -11,6 +11,7 @@ router.post('/finalizacao-ausencia-cliente', jobsController.checkCronSecret, job
 router.post('/vencimento-pagamento-financeiro', jobsController.checkCronSecret, jobsController.vencimentoPagamentoFinanceiro)
 router.post('/finalizacao-ausencia-lote', jobsController.checkCronSecret, jobsController.finalizacaoAusenciaLote)
 router.post('/admin-atendimento-alerta', jobsController.checkCronSecret, jobsController.adminAtendimentoAlerta)
+router.post('/atendimento-sem-resposta', jobsController.checkCronSecret, jobsController.atendimentoSemResposta)
 
 // Operacional: requer auth + supervisor/admin
 const operacionalRouter = express.Router()

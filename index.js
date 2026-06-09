@@ -62,6 +62,7 @@ if (socketAppOrigin && !allowedSocketOrigins.includes(socketAppOrigin)) {
 const internalChatSocket = require('./socket/internalChatSocket')
 const { startAbsenceFinalizationScheduler } = require('./services/absenceFinalizationScheduler')
 const { startAdminAtendimentoAlertaScheduler } = require('./services/adminAtendimentoAlertaScheduler')
+const { startAtendimentoSemRespostaScheduler } = require('./services/atendimentoSemRespostaScheduler')
 const { startProdutosSyncScheduler } = require('./services/produtosSyncScheduler')
 
 async function canUserJoinConversationRoom({ company_id, user_id, role, departamento_ids, conversa_id }) {
@@ -302,6 +303,7 @@ server.listen(PORT, '0.0.0.0', () => {
     console.log('[WORKER] Job worker iniciado (polling a cada 5s)')
     startAbsenceFinalizationScheduler()
     startAdminAtendimentoAlertaScheduler()
+    startAtendimentoSemRespostaScheduler(io)
     startProdutosSyncScheduler()
     const { startInboundMediaRetryScheduler } = require('./services/inboundMediaPersistenceService')
     startInboundMediaRetryScheduler(supabase, io)
