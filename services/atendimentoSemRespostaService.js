@@ -371,17 +371,37 @@ async function fetchAtendenteNome(company_id, atendente_id) {
   return String(data?.nome || data?.email || '').trim() || null
 }
 
-function buildGestorWhatsappText({ clienteNome, atendenteNome, minutos, conversaId, cfg }) {
+function formatTempoSemResposta(minutos) {
+  const total = Math.max(0, Math.floor(Number(minutos) || 0))
+  if (total < 60) return `${total}min`
+
+  const days = Math.floor(total / 1440)
+  const rem = total % 1440
+  const hours = Math.floor(rem / 60)
+  const mins = rem % 60
+
+  if (days > 0) {
+    let out = `${days}d`
+    if (hours > 0) out += ` ${hours}h`
+    return `${out}${mins}min`
+  }
+
+  if (mins > 0) return `${hours}h${mins}min`
+  return `${hours}h`
+}
+
+function buildGestorWhatsappText({ clienteNome, atendenteNome, minutos, cfg }) {
+  const tempo = formatTempoSemResposta(minutos)
   const lines = [
-    '🚨 Atendimento sem resposta no ZapERP',
+    '🚨 ZapERP — Atendimento sem resposta',
+    '',
     `Cliente: ${clienteNome}`,
+    `Atendente: ${atendenteNome || 'Não informado'}`,
+    `Tempo sem resposta: ${tempo}`,
+    '',
   ]
-  if (atendenteNome) lines.push(`Atendente: ${atendenteNome}`)
-  lines.push(`Tempo sem resposta: ${minutos} minutos`)
-  lines.push(`Conversa #${conversaId}`)
   if (cfg?.reabrir_conversa_automaticamente) {
-    lines.push('Status: conversa reaberta por falta de resposta')
-    lines.push('A conversa foi liberada para outro atendente ou gestor assumir.')
+    lines.push('Status: conversa reaberta e liberada para novo atendimento.')
   } else {
     lines.push('Status: gestor notificado; conversa permanece com o atendente atual.')
   }
@@ -633,7 +653,6 @@ async function processCompanyAtendimentoSemResposta(company_id, opts = {}) {
               clienteNome: nome,
               atendenteNome,
               minutos,
-              conversaId: conv.id,
               cfg,
             })
             const wa = await sendGestorWhatsapp(company_id, destination.telefone, waText)
@@ -760,4 +779,6 @@ module.exports = {
   clearReabertaFaltaInteracao,
   resolveGestorWhatsappDestination,
   sendGestorWhatsapp,
+  formatTempoSemResposta,
+  buildGestorWhatsappText,
 }

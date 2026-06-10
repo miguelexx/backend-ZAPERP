@@ -2,6 +2,8 @@ const {
   normalizeAlertaSemResposta,
   validateAlertaSemResposta,
   DEFAULT_ALERTA_SEM_RESPOSTA,
+  formatTempoSemResposta,
+  buildGestorWhatsappText,
 } = require('../services/atendimentoSemRespostaService')
 
 describe('atendimentoSemRespostaService', () => {
@@ -30,5 +32,27 @@ describe('atendimentoSemRespostaService', () => {
       notificar_por_whatsapp: false,
     })
     expect(err).toMatch(/canal/i)
+  })
+
+  it('formata tempo sem resposta', () => {
+    expect(formatTempoSemResposta(15)).toBe('15min')
+    expect(formatTempoSemResposta(135)).toBe('2h15min')
+    expect(formatTempoSemResposta(1640)).toBe('1d 3h20min')
+    expect(formatTempoSemResposta(120)).toBe('2h')
+  })
+
+  it('monta WhatsApp do gestor sem ID da conversa', () => {
+    const text = buildGestorWhatsappText({
+      clienteNome: 'Carlos Ferreira',
+      atendenteNome: 'João',
+      minutos: 15,
+      cfg: { reabrir_conversa_automaticamente: true },
+    })
+    expect(text).toContain('🚨 ZapERP — Atendimento sem resposta')
+    expect(text).toContain('Cliente: Carlos Ferreira')
+    expect(text).toContain('Atendente: João')
+    expect(text).toContain('Tempo sem resposta: 15min')
+    expect(text).toContain('Status: conversa reaberta e liberada para novo atendimento.')
+    expect(text).not.toMatch(/Conversa #/i)
   })
 })
