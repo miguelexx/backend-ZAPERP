@@ -1,6 +1,7 @@
 const supabase = require('../config/supabase')
 const { isGroupConversation } = require('../helpers/conversaHelper')
 const { registrarAtendimento } = require('./atendimentosRegistroService')
+const { clearReabertaFaltaInteracao } = require('../helpers/reabertaFaltaInteracaoHelper')
 
 /**
  * Mesma regra de POST /chats/:id/assumir — atualiza conversa e registra atendimento.
@@ -78,6 +79,8 @@ async function executarAssumirConversa({
     .single()
 
   if (error) return { ok: false, status: 500, error: error.message, conversa: null }
+
+  await clearReabertaFaltaInteracao(company_id, conversa_id)
 
   const resultAt = await registrarAtendimento({
     conversa_id,

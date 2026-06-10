@@ -6,6 +6,10 @@
 
 const supabase = require('../config/supabase')
 const { isWithinBusinessHours } = require('./chatbotTriageService')
+const {
+  markReabertaFaltaInteracao,
+  clearReabertaFaltaInteracao,
+} = require('../helpers/reabertaFaltaInteracaoHelper')
 
 const DEFAULT_ALERTA_SEM_RESPOSTA = {
   alerta_sem_resposta_ativo: false,
@@ -406,18 +410,61 @@ async function sendGestorWhatsapp(company_id, telefone, texto) {
 
 async function reabrirConversa(company_id, conversa_id) {
   const reabertaEm = new Date().toISOString()
-  const { error } = await supabase
+  const baseUpdate = {
+    status_atendimento: 'aberta',
+    atendente_id: null,
+    atendente_atribuido_em: null,
+  }
+
+  let { data, error } = await supabase
     .from('conversas')
-    .update({
-      status_atendimento: 'aberta',
-      atendente_id: null,
-      atendente_atribuido_em: null,
-      reaberta_falta_interacao_em: reabertaEm,
-    })
+    .update({ ...baseUpdate, reaberta_falta_interacao_em: reabertaEm })
     .eq('company_id', company_id)
     .eq('id', conversa_id)
-    .eq('status_atendimento', 'em_atendimento')
+    .in('status_atendimento', ['em_atendimento', 'aguardando_cliente'])
+    .select('id')
+    .maybeSingle()
+
+  if (error && String(error.message || '').includes('reaberta_falta_interacao_em')) {
+    ;({ data, error } = await supabase
+      .from('conversas')
+      .update(baseUpdate)
+      .eq('company_id', company_id)
+      .eq('id', conversa_id)
+      .in('status_atendimento', ['em_atendimento', 'aguardando_cliente'])
+      .select('id')
+      .maybeSingle())
+  }
+
   if (error) return { ok: false, error: error.message }
+
+  if (!data?.id) {
+    ;({ data, error } = await supabase
+      .from('conversas')
+      .update({ ...baseUpdate, reaberta_falta_interacao_em: reabertaEm })
+      .eq('company_id', company_id)
+      .eq('id', conversa_id)
+      .eq('status_atendimento', 'aberta')
+      .is('atendente_id', null)
+      .select('id')
+      .maybeSingle())
+
+    if (error && String(error.message || '').includes('reaberta_falta_interacao_em')) {
+      ;({ data, error } = await supabase
+        .from('conversas')
+        .update(baseUpdate)
+        .eq('company_id', company_id)
+        .eq('id', conversa_id)
+        .eq('status_atendimento', 'aberta')
+        .is('atendente_id', null)
+        .select('id')
+        .maybeSingle())
+    }
+    if (error) return { ok: false, error: error.message }
+    if (!data?.id) return { ok: false, error: 'conversa_nao_atualizada' }
+  }
+
+  await markReabertaFaltaInteracao(company_id, conversa_id, reabertaEm)
   await supabase.from('historico_atendimentos').insert({
     conversa_id,
     usuario_id: null,
@@ -705,6 +752,7 @@ module.exports = {
   runAtendimentoSemRespostaForAllCompanies,
   emitAlertaRealtime,
   clearEstado,
+  clearReabertaFaltaInteracao,
   resolveGestorWhatsappDestination,
   sendGestorWhatsapp,
 }

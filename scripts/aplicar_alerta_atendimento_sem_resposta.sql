@@ -36,3 +36,10 @@ CREATE INDEX IF NOT EXISTS idx_alerta_sem_resposta_estado_company
 GRANT ALL ON TABLE public.alerta_atendimento_sem_resposta_eventos TO postgres, service_role;
 GRANT ALL ON TABLE public.alerta_atendimento_sem_resposta_estado TO postgres, service_role;
 GRANT USAGE, SELECT ON SEQUENCE public.alerta_atendimento_sem_resposta_eventos_id_seq TO postgres, service_role;
+
+-- Badge azul na lista: reaberta por falta de interação
+ALTER TABLE public.conversas
+  ADD COLUMN IF NOT EXISTS reaberta_falta_interacao_em TIMESTAMPTZ;
+
+ALTER TABLE public.alerta_atendimento_sem_resposta_estado
+  ADD COLUMN IF NOT EXISTS reaberta_em TIMESTAMPTZ;
