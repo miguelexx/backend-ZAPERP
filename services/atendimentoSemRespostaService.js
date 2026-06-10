@@ -464,7 +464,7 @@ async function reabrirConversa(company_id, conversa_id) {
     if (!data?.id) return { ok: false, error: 'conversa_nao_atualizada' }
   }
 
-  await markReabertaFaltaInteracao(company_id, conversa_id, reabertaEm)
+  await markReabertaFaltaInteracao(company_id, conversa_id, reabertaEm, reabertaEm)
   await supabase.from('historico_atendimentos').insert({
     conversa_id,
     usuario_id: null,
@@ -672,7 +672,7 @@ async function processCompanyAtendimentoSemResposta(company_id, opts = {}) {
               ...basePayload,
               tipo: 'conversa_reaberta',
               nivel: 'gestor',
-              mensagem: `Conversa ${conv.id} reaberta automaticamente.`,
+              mensagem: `Conversa ${conv.id} reaberta automaticamente após notificação ao gestor.`,
             })
             if (io) {
               const reabertaEm = reopened.reaberta_em || new Date().toISOString()
@@ -686,6 +686,11 @@ async function processCompanyAtendimentoSemResposta(company_id, opts = {}) {
               })
             }
           }
+        } else if (io) {
+          io.to(`empresa_${company_id}`).emit('conversa_atualizada', {
+            id: conv.id,
+            reaberta_por_falta_interacao: false,
+          })
         }
 
         if (cfg.aplicar_tag_automatica) {

@@ -1,43 +1,29 @@
 const supabase = require('../config/supabase')
 
-const REABERTA_TAG_RE = /reabert/i
-const REABERTA_TAG_CTX = /falta|resposta|interac|inativid/i
-
-function normalizeTagName(nome) {
-  return String(nome || '')
-    .normalize('NFD')
-    .replace(/\p{M}/gu, '')
-    .toLowerCase()
-}
-
-function tagIndicaReabertaFaltaInteracao(tagOrNome) {
-  const nome = typeof tagOrNome === 'string' ? tagOrNome : tagOrNome?.nome
-  const norm = normalizeTagName(nome)
-  if (!norm) return false
-  return REABERTA_TAG_RE.test(norm) && REABERTA_TAG_CTX.test(norm)
-}
-
-function tagsIndicamReabertaFaltaInteracao(tags) {
-  const list = Array.isArray(tags) ? tags : []
-  return list.some((t) => tagIndicaReabertaFaltaInteracao(t))
-}
-
-function resolveReabertaPorFaltaInteracao(row = {}) {
-  if (row.reaberta_por_falta_interacao === true) return true
-  if (row.reaberta_falta_interacao_em) return true
-  if (row.reaberta_em) return true
-  const tagsFromJoin = (row.conversa_tags || []).map((ct) => ct?.tags).filter(Boolean)
-  const tags = Array.isArray(row.tags) && row.tags.length ? row.tags : tagsFromJoin
-  return tagsIndicamReabertaFaltaInteracao(tags)
-}
+/**
+ * Badge azul na lista: somente quando gestor foi notificado E conversa reaberta automaticamente.
+ */
 
 function isMissingColumnError(err, column) {
   const msg = String(err?.message || err || '').toLowerCase()
   return msg.includes(String(column).toLowerCase()) && (msg.includes('column') || msg.includes('schema cache'))
 }
 
-async function markReabertaFaltaInteracao(company_id, conversa_id, reabertaEm = new Date().toISOString()) {
+function resolveReabertaPorFaltaInteracao(row = {}) {
+  if (row.reaberta_por_falta_interacao === true) return true
+  if (row.reaberta_falta_interacao_em) return true
+  if (row.reaberta_em && row.gestor_notificado_em) return true
+  return false
+}
+
+async function markReabertaFaltaInteracao(
+  company_id,
+  conversa_id,
+  reabertaEm = new Date().toISOString(),
+  gestorNotificadoEm = null
+) {
   let marked = false
+  const gestorEm = gestorNotificadoEm || reabertaEm
 
   const { data, error } = await supabase
     .from('conversas')
@@ -59,6 +45,7 @@ async function markReabertaFaltaInteracao(company_id, conversa_id, reabertaEm = 
         company_id,
         conversa_id,
         reaberta_em: reabertaEm,
+        gestor_notificado_em: gestorEm,
         atualizado_em: new Date().toISOString(),
       },
       { onConflict: 'company_id,conversa_id' }
@@ -70,7 +57,7 @@ async function markReabertaFaltaInteracao(company_id, conversa_id, reabertaEm = 
     }
   }
 
-  return { ok: marked, reaberta_em: reabertaEm }
+  return { ok: marked, reaberta_em: reabertaEm, gestor_notificado_em: gestorEm }
 }
 
 async function clearReabertaFaltaInteracao(company_id, conversa_id) {
@@ -93,6 +80,69 @@ async function clearReabertaFaltaInteracao(company_id, conversa_id) {
   } catch (_) {}
 }
 
+async function fetchReabertaGestorConversaIds(company_id, conversaIds) {
+  const flagged = new Set()
+  if (!Array.isArray(conversaIds) || !conversaIds.length) return flagged
+
+  const ids = [...new Set(conversaIds.map((id) => Number(id)).filter((n) => Number.isFinite(n) && n > 0))]
+  if (!ids.length) return flagged
+
+  try {
+    const { data: rows, error } = await supabase
+      .from('conversas')
+      .select('id, reaberta_falta_interacao_em')
+      .eq('company_id', company_id)
+      .in('id', ids)
+      .not('reaberta_falta_interacao_em', 'is', null)
+    if (!error) {
+      for (const row of rows || []) flagged.add(Number(row.id))
+    }
+  } catch (_) {}
+
+  const pending = ids.filter((id) => !flagged.has(id))
+  if (pending.length) {
+    try {
+      const { data: estados, error } = await supabase
+        .from('alerta_atendimento_sem_resposta_estado')
+        .select('conversa_id, reaberta_em, gestor_notificado_em')
+        .eq('company_id', company_id)
+        .in('conversa_id', pending)
+        .not('reaberta_em', 'is', null)
+        .not('gestor_notificado_em', 'is', null)
+      if (!error) {
+        for (const row of estados || []) flagged.add(Number(row.conversa_id))
+      }
+    } catch (_) {}
+  }
+
+  const stillPending = ids.filter((id) => !flagged.has(id))
+  if (stillPending.length) {
+    try {
+      const { data: eventos, error } = await supabase
+        .from('alerta_atendimento_sem_resposta_eventos')
+        .select('conversa_id, tipo')
+        .eq('company_id', company_id)
+        .in('conversa_id', stillPending)
+        .in('tipo', ['conversa_reaberta', 'gestor_notificado'])
+      if (!error) {
+        const reabertas = new Set()
+        const gestores = new Set()
+        for (const row of eventos || []) {
+          const cid = Number(row.conversa_id)
+          if (!Number.isFinite(cid)) continue
+          if (row.tipo === 'conversa_reaberta') reabertas.add(cid)
+          if (row.tipo === 'gestor_notificado') gestores.add(cid)
+        }
+        for (const cid of reabertas) {
+          if (gestores.has(cid)) flagged.add(cid)
+        }
+      }
+    } catch (_) {}
+  }
+
+  return flagged
+}
+
 async function enrichConversasReabertaFaltaInteracao(company_id, conversas) {
   if (!Array.isArray(conversas) || !conversas.length) return conversas
 
@@ -113,50 +163,10 @@ async function enrichConversasReabertaFaltaInteracao(company_id, conversas) {
   )
   if (!candidates.length) return conversas
 
-  const ids = [...new Set(candidates.map((c) => Number(c.id)).filter((n) => Number.isFinite(n) && n > 0))]
-  if (!ids.length) return conversas
-
-  const flagged = new Set()
-
-  try {
-    const { data: rows, error } = await supabase
-      .from('conversas')
-      .select('id, reaberta_falta_interacao_em')
-      .eq('company_id', company_id)
-      .in('id', ids)
-      .not('reaberta_falta_interacao_em', 'is', null)
-    if (!error) {
-      for (const row of rows || []) flagged.add(Number(row.id))
-    }
-  } catch (_) {}
-
-  if (flagged.size < ids.length) {
-    try {
-      const { data: estados, error } = await supabase
-        .from('alerta_atendimento_sem_resposta_estado')
-        .select('conversa_id, reaberta_em')
-        .eq('company_id', company_id)
-        .in('conversa_id', ids)
-        .not('reaberta_em', 'is', null)
-      if (!error) {
-        for (const row of estados || []) flagged.add(Number(row.conversa_id))
-      }
-    } catch (_) {}
-  }
-
-  if (flagged.size < ids.length) {
-    try {
-      const { data: eventos, error } = await supabase
-        .from('alerta_atendimento_sem_resposta_eventos')
-        .select('conversa_id')
-        .eq('company_id', company_id)
-        .eq('tipo', 'conversa_reaberta')
-        .in('conversa_id', ids)
-      if (!error) {
-        for (const row of eventos || []) flagged.add(Number(row.conversa_id))
-      }
-    } catch (_) {}
-  }
+  const flagged = await fetchReabertaGestorConversaIds(
+    company_id,
+    candidates.map((c) => c.id)
+  )
 
   for (const c of conversas) {
     if (flagged.has(Number(c.id))) c.reaberta_por_falta_interacao = true
@@ -166,10 +176,9 @@ async function enrichConversasReabertaFaltaInteracao(company_id, conversas) {
 }
 
 module.exports = {
-  tagIndicaReabertaFaltaInteracao,
-  tagsIndicamReabertaFaltaInteracao,
   resolveReabertaPorFaltaInteracao,
   markReabertaFaltaInteracao,
   clearReabertaFaltaInteracao,
+  fetchReabertaGestorConversaIds,
   enrichConversasReabertaFaltaInteracao,
 }
