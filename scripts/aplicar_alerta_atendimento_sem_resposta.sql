@@ -43,3 +43,6 @@ ALTER TABLE public.conversas
 
 ALTER TABLE public.alerta_atendimento_sem_resposta_estado
   ADD COLUMN IF NOT EXISTS reaberta_em TIMESTAMPTZ;
+
+-- Conversas já reabertas antes do deploy: rode também
+-- backend/scripts/backfill_reaberta_falta_interacao.sql

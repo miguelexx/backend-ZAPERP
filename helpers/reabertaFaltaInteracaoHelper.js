@@ -136,11 +136,39 @@ async function fetchReabertaGestorConversaIds(company_id, conversaIds) {
         for (const cid of reabertas) {
           if (gestores.has(cid)) flagged.add(cid)
         }
+        // Retroativo: gestor notificado + conversa aberta sem atendente (reabertura antiga sem evento conversa_reaberta)
+        for (const cid of stillPending) {
+          if (gestores.has(cid) && !flagged.has(cid)) flagged.add(cid)
+        }
+      }
+    } catch (_) {}
+  }
+
+  const afterEventos = ids.filter((id) => !flagged.has(id))
+  if (afterEventos.length) {
+    try {
+      const { data: hist, error } = await supabase
+        .from('historico_atendimentos')
+        .select('conversa_id')
+        .in('conversa_id', afterEventos)
+        .eq('acao', 'alerta_sem_resposta_reabertura')
+      if (!error) {
+        for (const row of hist || []) {
+          const cid = Number(row.conversa_id)
+          if (Number.isFinite(cid)) flagged.add(cid)
+        }
       }
     } catch (_) {}
   }
 
   return flagged
+}
+
+function isCandidataReabertaFaltaInteracao(c) {
+  if (c.is_group || c.sem_conversa) return false
+  if (c.atendente_id != null) return false
+  const real = String(c.status_atendimento_real || c.status_atendimento || '').toLowerCase()
+  return real === 'aberta'
 }
 
 async function enrichConversasReabertaFaltaInteracao(company_id, conversas) {
@@ -154,12 +182,7 @@ async function enrichConversasReabertaFaltaInteracao(company_id, conversas) {
   }
 
   const candidates = conversas.filter(
-    (c) =>
-      !c.is_group &&
-      !c.sem_conversa &&
-      !c.reaberta_por_falta_interacao &&
-      String(c.status_atendimento_real || c.status_atendimento || '') === 'aberta' &&
-      !c.atendente_id
+    (c) => !c.reaberta_por_falta_interacao && isCandidataReabertaFaltaInteracao(c)
   )
   if (!candidates.length) return conversas
 
@@ -181,4 +204,5 @@ module.exports = {
   clearReabertaFaltaInteracao,
   fetchReabertaGestorConversaIds,
   enrichConversasReabertaFaltaInteracao,
+  isCandidataReabertaFaltaInteracao,
 }
