@@ -69,7 +69,8 @@ async function executarAssumirConversa({
       atendente_id: user_id,
       status_atendimento: 'em_atendimento',
       lida: true,
-      atendente_atribuido_em: new Date().toISOString()
+      atendente_atribuido_em: new Date().toISOString(),
+      reaberta_falta_interacao_em: null,
     })
     .eq('company_id', company_id)
     .eq('id', conversa_id)

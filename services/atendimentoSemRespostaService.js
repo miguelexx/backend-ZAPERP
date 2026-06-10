@@ -259,12 +259,23 @@ function emitAlertaRealtime(io, company_id, payload, opts = {}) {
   io.to(`empresa_${company_id}`).emit('alerta_sem_resposta_evento', base)
 }
 
+const TAG_REABERTA_FALTA_RESPOSTA_COR = '#2563eb'
+
+async function fetchConversaTagsForRealtime(company_id, conversa_id) {
+  const { data } = await supabase
+    .from('conversa_tags')
+    .select('tags ( id, nome, cor )')
+    .eq('company_id', company_id)
+    .eq('conversa_id', conversa_id)
+  return (data || []).map((row) => row?.tags).filter(Boolean)
+}
+
 async function ensureTagForConversa(company_id, conversa_id, nomeTag) {
   const nome = String(nomeTag || '').trim()
   if (!nome) return null
   const { data: tag } = await supabase
     .from('tags')
-    .select('id, nome')
+    .select('id, nome, cor')
     .eq('company_id', company_id)
     .ilike('nome', nome)
     .maybeSingle()
@@ -272,10 +283,17 @@ async function ensureTagForConversa(company_id, conversa_id, nomeTag) {
   if (!tagId) {
     const { data: created } = await supabase
       .from('tags')
-      .insert({ company_id, nome, cor: '#f59e0b' })
+      .insert({ company_id, nome, cor: TAG_REABERTA_FALTA_RESPOSTA_COR })
       .select('id')
       .single()
     tagId = created?.id
+  } else if (String(tag?.cor || '').toLowerCase() !== TAG_REABERTA_FALTA_RESPOSTA_COR) {
+    await supabase
+      .from('tags')
+      .update({ cor: TAG_REABERTA_FALTA_RESPOSTA_COR })
+      .eq('company_id', company_id)
+      .eq('id', tagId)
+      .catch(() => {})
   }
   if (!tagId) return null
   const { data: existente } = await supabase
@@ -387,12 +405,14 @@ async function sendGestorWhatsapp(company_id, telefone, texto) {
 }
 
 async function reabrirConversa(company_id, conversa_id) {
+  const reabertaEm = new Date().toISOString()
   const { error } = await supabase
     .from('conversas')
     .update({
       status_atendimento: 'aberta',
       atendente_id: null,
       atendente_atribuido_em: null,
+      reaberta_falta_interacao_em: reabertaEm,
     })
     .eq('company_id', company_id)
     .eq('id', conversa_id)
@@ -404,7 +424,7 @@ async function reabrirConversa(company_id, conversa_id) {
     acao: 'alerta_sem_resposta_reabertura',
     observacao: 'Conversa reaberta automaticamente por falta de resposta do atendente',
   }).catch(() => {})
-  return { ok: true }
+  return { ok: true, reaberta_em: reabertaEm }
 }
 
 function minutesSince(iso) {
@@ -608,11 +628,14 @@ async function processCompanyAtendimentoSemResposta(company_id, opts = {}) {
               mensagem: `Conversa ${conv.id} reaberta automaticamente.`,
             })
             if (io) {
+              const reabertaEm = reopened.reaberta_em || new Date().toISOString()
               io.to(`empresa_${company_id}`).emit('conversa_atualizada', {
                 id: conv.id,
                 status_atendimento: 'aberta',
                 atendente_id: null,
                 exibir_badge_aberta: true,
+                reaberta_por_falta_interacao: true,
+                reaberta_falta_interacao_em: reabertaEm,
               })
             }
           }
@@ -628,6 +651,13 @@ async function processCompanyAtendimentoSemResposta(company_id, opts = {}) {
               mensagem: `Tag "${cfg.nome_tag_automatica}" aplicada.`,
               metadata: { tag_id: tagId },
             })
+            if (io) {
+              const tags = await fetchConversaTagsForRealtime(company_id, conv.id)
+              io.to(`empresa_${company_id}`).emit('conversa_atualizada', {
+                id: conv.id,
+                tags,
+              })
+            }
           }
         }
       }

@@ -1186,6 +1186,7 @@ exports.listarConversas = async (req, res) => {
       finalizacao_motivo,
       finalizada_automaticamente,
       finalizada_automaticamente_em,
+      reaberta_falta_interacao_em,
       clientes!conversas_cliente_fk ( id, nome, pushname, telefone, foto_perfil, company_id ),
       atendente:usuarios!conversas_atendente_id_fkey ( id, nome, email ),
       departamentos ( id, nome ),
@@ -1213,6 +1214,7 @@ exports.listarConversas = async (req, res) => {
       finalizacao_motivo,
       finalizada_automaticamente,
       finalizada_automaticamente_em,
+      reaberta_falta_interacao_em,
       lida,
       criado_em,
       ultima_atividade,
@@ -1259,6 +1261,7 @@ exports.listarConversas = async (req, res) => {
       finalizacao_motivo,
       finalizada_automaticamente,
       finalizada_automaticamente_em,
+      reaberta_falta_interacao_em,
       clientes!conversas_cliente_fk ( id, nome, pushname, telefone, foto_perfil, company_id ),
       atendente:usuarios!conversas_atendente_id_fkey ( id, nome, email ),
       departamentos ( id, nome ),
@@ -1635,6 +1638,8 @@ exports.listarConversas = async (req, res) => {
         finalizacao_motivo: c.finalizacao_motivo ?? null,
         finalizada_automaticamente: Boolean(c.finalizada_automaticamente),
         finalizada_automaticamente_em: c.finalizada_automaticamente_em ?? null,
+        reaberta_falta_interacao_em: c.reaberta_falta_interacao_em ?? null,
+        reaberta_por_falta_interacao: Boolean(c.reaberta_falta_interacao_em),
       }
     })
 
@@ -3147,6 +3152,7 @@ exports.detalharChat = async (req, res) => {
         foto_grupo,
         nome_contato_cache,
         foto_perfil_contato_cache,
+        reaberta_falta_interacao_em,
         cliente_id,
         clientes!conversas_cliente_fk ( id, nome, pushname, telefone, observacoes, foto_perfil, company_id ),
         usuarios!conversas_atendente_fk ( id, nome ),
@@ -3323,6 +3329,8 @@ exports.detalharChat = async (req, res) => {
       exibir_badge_aberta: exibirBadgeAberta,
       sem_mensagens: semMensagens,
       exibir_cta_assumir_sem_mensagens: exibirCtaAssumirSemMensagens,
+      reaberta_falta_interacao_em: conversa.reaberta_falta_interacao_em ?? null,
+      reaberta_por_falta_interacao: Boolean(conversa.reaberta_falta_interacao_em),
       clientes: clientesConv,
       is_group: isGroup,
       nome_grupo: conversa.nome_grupo ?? null,
@@ -3542,6 +3550,7 @@ exports.encerrarChat = async (req, res) => {
         pagamento_prazo_ate: null,
         pagamento_prazo_origem: null,
         pagamento_concluido_em: null,
+        reaberta_falta_interacao_em: null,
       })
       .eq('company_id', company_id)
       .eq('id', conversa_id)
@@ -3666,6 +3675,7 @@ exports.reabrirChat = async (req, res) => {
         pagamento_prazo_ate: null,
         pagamento_prazo_origem: null,
         pagamento_concluido_em: null,
+        reaberta_falta_interacao_em: null,
       })
       .eq('company_id', company_id)
       .eq('id', conversa_id)
