@@ -1,21 +1,33 @@
-# Auditoria produção WhatsApp (UltraMsg/ZapERP) — TODO
+# Auditoria ZapERP Backend — TODO
 
-## 1) Mapeamento e diagnóstico
-- [x] Ler arquivos críticos solicitados
-- [x] Consolidar fluxo ponta-a-ponta (webhook → conversa → mensagem → mídia → socket → frontend)
-- [x] Listar riscos reais por criticidade (quebra produção / duplicação / perda / performance)
+## Etapa 1 — Análise concluída
+- [x] Ler arquivos críticos de bootstrap/runtime:
+  - [x] package.json
+  - [x] index.js
+  - [x] app.js
+  - [x] config/env.js
+  - [x] config/supabase.js
+- [x] Ler middlewares críticos de segurança:
+  - [x] middleware/auth.js
+  - [x] middleware/authBearerOrQuery.js
+  - [x] middleware/adminOnly.js
+  - [x] middleware/supervisorOrAdmin.js
+  - [x] middleware/rateLimit.js
 
-## 2) Correções conservadoras e seguras
-- [ ] Corrigir apenas bugs reais sem quebrar contratos (rotas/API/frontend)
-- [ ] Garantir idempotência e evitar duplicação de mensagens/socket
-- [ ] Ajustar pontos de mídia persistida com segurança
-- [ ] Ajustar contadores/listagem para consistência em escala
+## Etapa 2 — Correções seguras de baixo risco (em execução)
+- [x] Ajustar robustez do parser URL-encoded para evitar payloads excessivos
+- [x] Corrigir comentário inconsistente no shutdown (clareza operacional)
+- [x] Melhorar segurança de JWT no middleware auth (verificação defensiva de token ausente após split)
 
-## 3) Validação técnica
-- [ ] Revisar rotas e middleware de segurança
-- [ ] Revisar compatibilidade de payload/socket com frontend atual
-- [ ] Rodar checagem básica (lint/teste/comando viável no projeto)
+## Etapa 3 — Validação
+- [ ] Executar testes/lint/build/start disponíveis com segurança
+- [ ] Registrar falhas pré-existentes vs introduzidas
 
-## 4) Entrega
-- [ ] Entregar relatório final (fluxo + problemas + correções)
-- [ ] Veredito final: APROVADO / NÃO APROVADO para produção
+## Etapa 4 — Relatório final profissional
+- [ ] O que foi analisado
+- [ ] Problemas encontrados
+- [ ] Correções aplicadas
+- [ ] Arquivos alterados
+- [ ] Itens não alterados por risco
+- [ ] Resultado da validação
+- [ ] Veredito produção

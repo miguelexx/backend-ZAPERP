@@ -393,7 +393,6 @@ function startInboundMediaRetryScheduler(supabase, io) {
 
   setImmediate(tick)
   const id = setInterval(tick, intervalMs)
-  if (id && typeof id.unref === 'function') id.unref()
   return () => clearInterval(id)
 }
 
