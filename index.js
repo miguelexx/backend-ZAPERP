@@ -248,8 +248,11 @@ io.on('connection', (socket) => {
   socket.on('leave_conversa', (conversaId) => {
     if (!conversaId) return
 
-    socket.leave(`conversa_${conversaId}`)
-    if (SOCKET_DEBUG) console.log(`💬 Socket saiu da conversa ${conversaId}`)
+    const convId = Number(conversaId)
+    if (!Number.isFinite(convId) || convId <= 0) return
+
+    socket.leave(`conversa_${convId}`)
+    if (SOCKET_DEBUG) console.log(`💬 Socket saiu da conversa ${convId}`)
   })
 
   // =====================================================
