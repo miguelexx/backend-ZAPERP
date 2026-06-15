@@ -42,22 +42,33 @@ function normalizeCompanyId(companyId) {
   return Number.isFinite(n) && n > 0 ? n : null
 }
 
+function stripInstancePrefix(instanceId) {
+  const id = instanceId == null ? '' : String(instanceId).trim()
+  if (!id) return ''
+  return id.toLowerCase().startsWith('instance') ? id.slice(8).trim() : id
+}
+
 function normalizeInstanceLookupValues(instanceId) {
   const id = instanceId == null ? '' : String(instanceId).trim()
   if (!id) return []
-  const values = [id]
-  if (/^\d+$/.test(id)) values.push(`instance${id}`)
-  if (id.toLowerCase().startsWith('instance') && id.length > 8) {
-    const numeric = id.replace(/\D/g, '')
-    if (numeric) values.push(numeric)
+  const core = stripInstancePrefix(id)
+  const values = []
+  const add = (value) => {
+    const v = value == null ? '' : String(value).trim()
+    if (!v) return
+    values.push(v)
+    const lower = v.toLowerCase()
+    if (lower !== v) values.push(lower)
   }
+
+  add(id)
+  add(core)
+  add(`instance${core}`)
   return Array.from(new Set(values))
 }
 
 function normalizeProviderInstanceId(instanceId) {
-  const id = instanceId == null ? '' : String(instanceId).trim()
-  if (!id) return ''
-  return id.toLowerCase().startsWith('instance') ? id.slice(8).toLowerCase() : id.toLowerCase()
+  return stripInstancePrefix(instanceId).toLowerCase()
 }
 
 function isMissingTableError(error) {

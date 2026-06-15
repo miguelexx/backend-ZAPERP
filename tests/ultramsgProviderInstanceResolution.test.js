@@ -77,6 +77,23 @@ describe('UltraMsg provider instance resolution', () => {
     expect(deps.fetchWithRetry.mock.calls[0][1].body).toContain('token=default-token')
   })
 
+  test('mantem instance_id prefixado salvo no banco sem duplicar prefixo no envio', async () => {
+    const deps = mockProviderDeps({
+      defaultByCompany: {
+        1: { id: 8, company_id: 1, provider: 'ultramsg', instance_id: 'instance173587', instance_token: 'default-token', ativo: true },
+      },
+      byId: {},
+    })
+
+    const provider = require('../services/providers/ultramsg')
+    const result = await provider.sendText('34999999999', 'Ola', { companyId: 1 })
+
+    expect(result.ok).toBe(true)
+    expect(deps.fetchWithRetry.mock.calls[0][0]).toContain('/instance173587/messages/chat')
+    expect(deps.fetchWithRetry.mock.calls[0][0]).not.toContain('/instanceinstance173587/')
+    expect(deps.fetchWithRetry.mock.calls[0][1].body).toContain('token=default-token')
+  })
+
   test('bloqueia instancia de outra empresa', async () => {
     const deps = mockProviderDeps({
       defaultByCompany: {},

@@ -232,6 +232,43 @@ describe('whatsappInstanceService', () => {
     expect(result.error).toMatch(/Duplicidade ativa/i)
   })
 
+  test('resolver por provider/instance encontra instance salva com prefixo quando webhook envia numerico', async () => {
+    const supabase = createSupabaseMock({
+      whatsapp_instances: [
+        { id: 8, company_id: 1, provider: 'ultramsg', nome: 'Principal', instance_id: 'instance173587', instance_token: 'secret', ativo: true, is_default: true },
+      ],
+    })
+    jest.doMock('../config/supabase', () => supabase)
+
+    const service = require('../services/whatsappInstanceService')
+    const result = await service.getWhatsappInstanceByProviderInstanceId('ultramsg', '173587')
+
+    expect(result.error).toBeNull()
+    expect(result.instance).toMatchObject({
+      id: 8,
+      company_id: 1,
+      provider: 'ultramsg',
+      instance_id: 'instance173587',
+    })
+    expect(result.instance.instance_token).toBeUndefined()
+  })
+
+  test('resolver por provider/instance encontra instance salva com prefixo quando webhook envia prefixado', async () => {
+    const supabase = createSupabaseMock({
+      whatsapp_instances: [
+        { id: 8, company_id: 1, provider: 'ultramsg', nome: 'Principal', instance_id: 'instance173587', instance_token: 'secret', ativo: true, is_default: true },
+      ],
+    })
+    jest.doMock('../config/supabase', () => supabase)
+
+    const service = require('../services/whatsappInstanceService')
+    const result = await service.getWhatsappInstanceByProviderInstanceId('UltraMSG', '  INSTANCE173587  ')
+
+    expect(result.error).toBeNull()
+    expect(result.instance.id).toBe(8)
+    expect(result.instance.company_id).toBe(1)
+  })
+
   test('resolver por provider/instance usa fallback legado quando existe uma unica empresa_zapi', async () => {
     const supabase = createSupabaseMock({
       empresa_zapi: [
@@ -315,6 +352,83 @@ describe('whatsappInstanceService', () => {
     const companyId = await getCompanyIdByInstanceId('9401')
 
     expect(companyId).toBeNull()
+  })
+
+  test('resolveWebhookCompany preenche contexto quando UltraMsg envia instanceId numerico e banco tem prefixo', async () => {
+    const supabase = createSupabaseMock({
+      whatsapp_instances: [
+        { id: 8, company_id: 1, provider: 'ultramsg', nome: 'Principal', instance_id: 'instance173587', instance_token: 'secret', ativo: true, is_default: true },
+      ],
+    })
+    jest.doMock('../config/supabase', () => supabase)
+
+    const middleware = require('../middleware/resolveWebhookCompany')
+    const req = { method: 'POST', path: '/webhooks/ultramsg', body: { instanceId: '173587', type: 'message_received' } }
+    const res = { status: jest.fn(() => res), json: jest.fn() }
+    const next = jest.fn()
+
+    await middleware(req, res, next)
+
+    expect(next).toHaveBeenCalled()
+    expect(res.status).not.toHaveBeenCalled()
+    expect(req.webhookContext).toMatchObject({
+      company_id: 1,
+      whatsapp_instance_id: 8,
+      provider: 'ultramsg',
+      provider_instance_id: 'instance173587',
+      instanceId: '173587',
+    })
+    expect(req.webhookContext.instance_token).toBeUndefined()
+  })
+
+  test('resolveWebhookCompany preenche contexto quando UltraMsg envia instanceId ja prefixado', async () => {
+    const supabase = createSupabaseMock({
+      whatsapp_instances: [
+        { id: 8, company_id: 1, provider: 'ultramsg', nome: 'Principal', instance_id: 'instance173587', instance_token: 'secret', ativo: true, is_default: true },
+      ],
+    })
+    jest.doMock('../config/supabase', () => supabase)
+
+    const middleware = require('../middleware/resolveWebhookCompany')
+    const req = { method: 'POST', path: '/webhooks/ultramsg', body: { instanceId: 'instance173587', type: 'message_received' } }
+    const res = { status: jest.fn(() => res), json: jest.fn() }
+    const next = jest.fn()
+
+    await middleware(req, res, next)
+
+    expect(next).toHaveBeenCalled()
+    expect(req.webhookContext).toMatchObject({
+      company_id: 1,
+      whatsapp_instance_id: 8,
+      provider: 'ultramsg',
+      provider_instance_id: 'instance173587',
+    })
+  })
+
+  test('resolveWebhookCompany bloqueia duplicidade ativa normalizada sem escolher primeira empresa', async () => {
+    const supabase = createSupabaseMock({
+      whatsapp_instances: [
+        { id: 1, company_id: 1, provider: 'ultramsg', nome: 'A', instance_id: '173587', instance_token: 'secret-a', ativo: true, is_default: true },
+        { id: 8, company_id: 2, provider: 'ultramsg', nome: 'B', instance_id: 'instance173587', instance_token: 'secret-b', ativo: true, is_default: true },
+      ],
+    })
+    jest.doMock('../config/supabase', () => supabase)
+
+    const middleware = require('../middleware/resolveWebhookCompany')
+    const req = { method: 'POST', path: '/webhooks/ultramsg', body: { instanceId: '173587', type: 'message_received' } }
+    const res = { status: jest.fn(() => res), json: jest.fn(() => res) }
+    const next = jest.fn()
+
+    await middleware(req, res, next)
+
+    expect(next).not.toHaveBeenCalled()
+    expect(res.status).toHaveBeenCalledWith(200)
+    expect(res.json).toHaveBeenCalledWith({ ok: true, ignored: 'duplicate_provider_instance' })
+    expect(req.webhookLogData).toMatchObject({
+      status: 'blocked_duplicate_instance',
+      instance_id: '173587',
+      provider: 'ultramsg',
+    })
   })
 
   test('falha da RPC de default nao deixa empresa sem default', async () => {
