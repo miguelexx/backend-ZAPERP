@@ -2362,7 +2362,11 @@ exports.listWhatsappInstancesAtendimento = async (req, res) => {
       .filter((i) => i && i.ativo !== false)
       .map(sanitizeWhatsappInstance)
       .filter(Boolean)
-    return res.json({ instances: active })
+    return res.json({
+      instances: active,
+      has_multiple_whatsapp_instances: active.length > 1,
+      active_count: active.length,
+    })
   } catch (err) {
     console.error(err)
     return res.status(500).json({ error: 'Erro ao listar instâncias WhatsApp' })
