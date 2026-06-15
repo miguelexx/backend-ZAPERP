@@ -60,6 +60,36 @@ async function resolveConversationWhatsappInstance(company_id, conversa) {
   return defaultId
 }
 
+function safeWhatsappInstanceMeta(instance) {
+  if (!instance) return {}
+  return {
+    whatsapp_instance_id: instance.id ?? null,
+    whatsapp_instance_nome: instance.nome ?? null,
+    whatsapp_instance_provider: instance.provider ?? null,
+    whatsapp_instance_display_phone: instance.display_phone ?? null,
+  }
+}
+
+async function loadWhatsappInstanceMetaMap(company_id, instanceIds) {
+  const ids = [...new Set((instanceIds || []).map((id) => Number(id)).filter((id) => Number.isFinite(id) && id > 0))]
+  if (ids.length === 0) return new Map()
+  try {
+    const { data, error } = await supabase
+      .from('whatsapp_instances')
+      .select('id, company_id, nome, provider, display_phone')
+      .eq('company_id', Number(company_id))
+      .in('id', ids)
+    if (error) {
+      console.warn('[whatsapp_instances] metadados indisponiveis para conversas:', error.message || error)
+      return new Map()
+    }
+    return new Map((data || []).map((row) => [Number(row.id), row]))
+  } catch (err) {
+    console.warn('[whatsapp_instances] falha ao enriquecer conversas:', err?.message || err)
+    return new Map()
+  }
+}
+
 /**
  * Para POST /messages/chat com reply: `msgId` deve ser o id da mensagem no WhatsApp (webhook),
  * não o id interno da tabela `mensagens`. Aceita já no formato UltraMsg/WA ou resolve por `mensagens.id`.
@@ -1194,6 +1224,7 @@ exports.listarConversas = async (req, res) => {
 
     const selectCompleto = `
       id,
+      whatsapp_instance_id,
       telefone,
       cliente_id,
       usuario_id,
@@ -1227,6 +1258,7 @@ exports.listarConversas = async (req, res) => {
     `
     const selectMinimo = `
       id,
+      whatsapp_instance_id,
       telefone,
       cliente_id,
       usuario_id,
@@ -1264,6 +1296,7 @@ exports.listarConversas = async (req, res) => {
     // Fallback mínimo mas com foto e última mensagem para não quebrar setas/fotos na UI ao atualizar
     const selectBare = `
       id,
+      whatsapp_instance_id,
       telefone,
       cliente_id,
       usuario_id,
@@ -1485,6 +1518,10 @@ exports.listarConversas = async (req, res) => {
 
     const rawSqlRows = Array.isArray(data) ? data : []
     const rawSqlHadMore = rawSqlRows.length > chatListPagination.limit
+    const whatsappInstanceMetaMap = await loadWhatsappInstanceMetaMap(
+      company_id,
+      rawSqlRows.map((c) => c?.whatsapp_instance_id)
+    )
 
     // Enriquece última mensagem de cada conversa com usuario_nome
     const allLastMsgs = (rawSqlRows || []).flatMap((c) => c.mensagens || [])
@@ -1624,6 +1661,8 @@ exports.listarConversas = async (req, res) => {
 
       return {
         id: c.id,
+        whatsapp_instance_id: c.whatsapp_instance_id ?? null,
+        ...safeWhatsappInstanceMeta(whatsappInstanceMetaMap.get(Number(c.whatsapp_instance_id))),
         cliente_id: c.cliente_id,
         telefone: c.telefone,
         telefone_exibivel: telefoneExibivel,
@@ -2158,7 +2197,7 @@ exports.mergeConversasDuplicadas = async (req, res) => {
     // 2) Mesclar conversas duplicadas
     const { data: conversas, error: errList } = await supabase
       .from('conversas')
-      .select('id, telefone, chat_lid, ultima_atividade, criado_em, tipo')
+      .select('id, telefone, chat_lid, ultima_atividade, criado_em, tipo, whatsapp_instance_id')
       .eq('company_id', cid)
       .neq('status_atendimento', 'fechada')
       .not('telefone', 'is', null)
@@ -2168,10 +2207,12 @@ exports.mergeConversasDuplicadas = async (req, res) => {
     const individuais = (conversas || []).filter((c) => !c.tipo || String(c.tipo).toLowerCase() !== 'grupo')
     const byKey = new Map()
     for (const c of individuais) {
-      const key = phoneKeyBR(c.telefone) || String(c.telefone || '').replace(/\D/g, '')
-      if (!key) continue
-      if (!byKey.has(key)) byKey.set(key, [])
-      byKey.get(key).push(c)
+      const phoneKey = phoneKeyBR(c.telefone) || String(c.telefone || '').replace(/\D/g, '')
+      if (!phoneKey) continue
+      const instanceScope = c.whatsapp_instance_id ? `wi:${c.whatsapp_instance_id}` : 'wi:legacy'
+      const scopedKey = `${instanceScope}:${phoneKey}`
+      if (!byKey.has(scopedKey)) byKey.set(scopedKey, [])
+      byKey.get(scopedKey).push(c)
     }
 
     let merged = 0
@@ -2200,7 +2241,15 @@ exports.mergeConversasDuplicadas = async (req, res) => {
       const lidPart = lidConv.telefone ? String(lidConv.telefone).replace(/^lid:/, '').trim() : (lidConv.chat_lid || '')
       if (!lidPart) continue
       const canonPhone = individuais
-        .filter((c) => c.id !== lidConv.id && !String(c.telefone || '').startsWith('lid:') && c.chat_lid === lidPart)
+        .filter((c) =>
+          c.id !== lidConv.id &&
+          !String(c.telefone || '').startsWith('lid:') &&
+          c.chat_lid === lidPart &&
+          (
+            (lidConv.whatsapp_instance_id == null && c.whatsapp_instance_id == null) ||
+            Number(c.whatsapp_instance_id) === Number(lidConv.whatsapp_instance_id)
+          )
+        )
         .sort((a, b) => new Date(b.ultima_atividade || 0).getTime() - new Date(a.ultima_atividade || 0).getTime())[0]
       if (canonPhone) {
         try {
@@ -3166,6 +3215,7 @@ exports.detalharChat = async (req, res) => {
       .from('conversas')
       .select(`
         id,
+        whatsapp_instance_id,
         telefone,
         status_atendimento,
         atendente_id,
@@ -3231,7 +3281,7 @@ exports.detalharChat = async (req, res) => {
       !isGroup && !conversaEncerrada && conversaAssumidaPorOutro && !isAdmin && !isSupervisor
 
     // mensagens paginadas (remetente_nome/remetente_telefone para grupos; fallback se colunas não existirem)
-    const selectComRemetente = 'id, texto, direcao, criado_em, autor_usuario_id, status, whatsapp_id, tipo, url, nome_arquivo, reply_meta, remetente_nome, remetente_telefone, contact_meta, location_meta, apagada_para_todos, apagada_em'
+    const selectComRemetente = 'id, texto, direcao, criado_em, autor_usuario_id, status, whatsapp_id, whatsapp_instance_id, tipo, url, nome_arquivo, reply_meta, remetente_nome, remetente_telefone, contact_meta, location_meta, apagada_para_todos, apagada_em'
     let mensagens = []
     let errMsgs = null
     let query
@@ -3253,7 +3303,7 @@ exports.detalharChat = async (req, res) => {
       errMsgs = result.error
     }
     // Compatibilidade: se reply_meta/remetente_*/contact_meta/location_meta não existirem ainda no banco, refaz select sem essas colunas.
-    const selectFallback = 'id, texto, direcao, criado_em, autor_usuario_id, status, whatsapp_id, tipo, url, nome_arquivo'
+    const selectFallback = 'id, texto, direcao, criado_em, autor_usuario_id, status, whatsapp_id, whatsapp_instance_id, tipo, url, nome_arquivo'
     if (errMsgs && (String(errMsgs.message || '').includes('reply_meta') || String(errMsgs.message || '').includes('remetente_nome') || String(errMsgs.message || '').includes('remetente_telefone') || String(errMsgs.message || '').includes('contact_meta') || String(errMsgs.message || '').includes('location_meta') || String(errMsgs.message || '').includes('apagada_para_todos') || String(errMsgs.message || '').includes('does not exist'))) {
       query = supabase
         .from('mensagens')
@@ -3326,6 +3376,8 @@ exports.detalharChat = async (req, res) => {
     const telefoneExibivel = isLidConv ? null : (conversa.telefone ?? clientesConv?.telefone ?? null)
     const fotoCache = (conversa.foto_perfil_contato_cache && String(conversa.foto_perfil_contato_cache).trim()) ? String(conversa.foto_perfil_contato_cache).trim() : null
     const fotoUnica = isGroup ? (conversa.foto_grupo ?? null) : (clientesConv?.foto_perfil ?? fotoCache ?? null)
+    const whatsappInstanceMetaMap = await loadWhatsappInstanceMetaMap(company_id, [conversa.whatsapp_instance_id])
+    const whatsappInstanceMeta = safeWhatsappInstanceMeta(whatsappInstanceMetaMap.get(Number(conversa.whatsapp_instance_id)))
     // Badge "Aberta": só exibir quando há movimentação (mensagem ou atendente assumiu) — mesma regra da lista
     const temMensagem = Array.isArray(mensagens) && mensagens.length > 0
     const dbStatusAtend = String(conversa.status_atendimento || '')
@@ -3347,6 +3399,8 @@ exports.detalharChat = async (req, res) => {
     const statusDetalheLista = statusAtendimentoParaLista(isGroup, conversa.status_atendimento, exibirBadgeAberta)
     const conversaFormatada = {
       ...conversa,
+      whatsapp_instance_id: conversa.whatsapp_instance_id ?? null,
+      ...whatsappInstanceMeta,
       status_atendimento: statusDetalheLista,
       status_atendimento_real: statusDetalheReal,
       status_atendimento_lista: statusDetalheLista,
@@ -3448,8 +3502,8 @@ exports.buscarMensagensConversa = async (req, res) => {
       return res.status(403).json({ error: 'Mensagens indisponíveis para conversa assumida por outro usuário' })
     }
 
-    const selectComRemetente = 'id, conversa_id, texto, direcao, criado_em, autor_usuario_id, status, whatsapp_id, tipo, url, nome_arquivo, reply_meta, remetente_nome, remetente_telefone, contact_meta, location_meta, apagada_para_todos, apagada_em'
-    const selectFallback = 'id, conversa_id, texto, direcao, criado_em, autor_usuario_id, status, whatsapp_id, tipo, url, nome_arquivo'
+    const selectComRemetente = 'id, conversa_id, texto, direcao, criado_em, autor_usuario_id, status, whatsapp_id, whatsapp_instance_id, tipo, url, nome_arquivo, reply_meta, remetente_nome, remetente_telefone, contact_meta, location_meta, apagada_para_todos, apagada_em'
+    const selectFallback = 'id, conversa_id, texto, direcao, criado_em, autor_usuario_id, status, whatsapp_id, whatsapp_instance_id, tipo, url, nome_arquivo'
     const term = `%${escapeIlikePattern(q)}%`
 
     let query = supabase

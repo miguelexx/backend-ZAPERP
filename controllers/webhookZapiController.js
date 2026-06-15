@@ -3364,7 +3364,8 @@ exports.receberZapi = async (req, res) => {
           conversa_id: convIdForEmit,
           status: canon,
           status_mensagem: canon,
-          whatsapp_id: mensagemSalva.whatsapp_id || null
+          whatsapp_id: mensagemSalva.whatsapp_id || null,
+          whatsapp_instance_id: mensagemSalva.whatsapp_instance_id ?? whatsapp_instance_id ?? null
         }
         let chain = io.to(`empresa_${company_id}`).to(`conversa_${convIdForEmit}`)
         if (mensagemSalva.autor_usuario_id != null) chain = chain.to(`usuario_${mensagemSalva.autor_usuario_id}`)
@@ -3386,7 +3387,7 @@ exports.receberZapi = async (req, res) => {
       // conversa_atualizada: priorizar nome do sync (name) sobre cache; fallback nome_contato_cache
       const { data: convRow } = await supabase
         .from('conversas')
-        .select('id, ultima_atividade, nome_contato_cache, foto_perfil_contato_cache, telefone, cliente_id, departamento_id, status_atendimento, atendente_id, aguardando_cliente_desde')
+        .select('id, ultima_atividade, nome_contato_cache, foto_perfil_contato_cache, telefone, cliente_id, departamento_id, status_atendimento, atendente_id, aguardando_cliente_desde, whatsapp_instance_id')
         .eq('id', convIdForEmit)
         .eq('company_id', company_id)
         .maybeSingle()
@@ -3416,6 +3417,7 @@ exports.receberZapi = async (req, res) => {
         convRow?.atendente_id != null
       const convPayload = {
         id: convIdForEmit,
+        whatsapp_instance_id: convRow?.whatsapp_instance_id ?? whatsapp_instance_id ?? null,
         ultima_atividade: convRow?.ultima_atividade ?? new Date().toISOString(),
         telefone: convRow?.telefone ?? null,
         atendente_id: convRow?.atendente_id ?? null,

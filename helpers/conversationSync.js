@@ -797,6 +797,16 @@ async function findOrCreateConversation(supabaseClient, {
  * @param {Array} conversas - Lista de conversas formatadas (com telefone, ultima_atividade, criado_em, is_group)
  * @returns {Array}
  */
+function conversationDedupeKey(c) {
+  if (!c || c.is_group) return `grupo:${c?.id ?? ''}`
+  const instanceId = normalizeWhatsappInstanceId(c.whatsapp_instance_id)
+  const instanceScope = instanceId ? `wi:${instanceId}` : 'wi:legacy'
+  const phoneKey = (c.telefone && (phoneKeyBR(c.telefone) || String(c.telefone).replace(/\D/g, ''))) || ''
+  const lid = String(c.chat_lid || c.chatLid || '').trim()
+  const contactKey = phoneKey || (lid ? `lid:${lid}` : `id:${c.id}`)
+  return `${instanceScope}:${contactKey}`
+}
+
 function deduplicateConversationsByContact(conversas) {
   if (!Array.isArray(conversas) || conversas.length === 0) return conversas
   const byKey = new Map()
@@ -805,7 +815,7 @@ function deduplicateConversationsByContact(conversas) {
       byKey.set(`grupo:${c.id}`, c)
       continue
     }
-    const key = (c.telefone && (phoneKeyBR(c.telefone) || String(c.telefone).replace(/\D/g, ''))) || `id:${c.id}`
+    const key = conversationDedupeKey(c)
     if (!key) {
       byKey.set(`id:${c.id}`, c)
       continue

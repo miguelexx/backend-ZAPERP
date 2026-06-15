@@ -168,6 +168,19 @@ describe('WhatsApp multi-instance operational phase 2', () => {
     ]))
   })
 
+  test('dedupe de lista preserva mesmo telefone em instancias diferentes', async () => {
+    const { deduplicateConversationsByContact } = require('../helpers/conversationSync')
+    const rows = [
+      { id: 1, telefone: '5534999999999', whatsapp_instance_id: 1, ultima_atividade: '2026-06-15T10:00:00Z' },
+      { id: 8, telefone: '5534999999999', whatsapp_instance_id: 8, ultima_atividade: '2026-06-15T10:01:00Z' },
+      { id: 9, telefone: '5534999999999', whatsapp_instance_id: 8, ultima_atividade: '2026-06-15T10:02:00Z' },
+    ]
+
+    const result = deduplicateConversationsByContact(rows)
+
+    expect(result.map((c) => c.id).sort((a, b) => a - b)).toEqual([1, 9])
+  })
+
   test('nao reaproveita conversa legada null para instancia nao-default', async () => {
     jest.doMock('../config/supabase', () => createSupabaseConversationMock())
     const { findOrCreateConversation } = require('../helpers/conversationSync')
