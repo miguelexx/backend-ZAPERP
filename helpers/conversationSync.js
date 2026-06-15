@@ -259,6 +259,55 @@ async function attachWhatsappInstanceToLegacyConversation(supabaseClient, compan
  * Busca cliente existente por variantes 12/13 dígitos e phoneKeyBR (55… vs 9º dígito).
  * Cobre telefone salvo sem DDI ou formato diferente do canônico do INSERT.
  */
+const CONVERSA_INSTANCE_SELECT = 'id, departamento_id, telefone, cliente_id, whatsapp_instance_id'
+
+async function queryScopedConversationRows(buildBaseQuery, whatsappInstanceId, allowLegacyNullInstance) {
+  async function run(scope) {
+    let query = buildBaseQuery()
+    if (scope === 'exact') query = query.eq('whatsapp_instance_id', whatsappInstanceId)
+    if (scope === 'legacy') query = query.is('whatsapp_instance_id', null)
+    const { data, error } = await query
+    if (error) throw error
+    return Array.isArray(data) ? data : []
+  }
+
+  if (whatsappInstanceId) {
+    const exactRows = await run('exact')
+    if (exactRows.length > 0 || allowLegacyNullInstance !== true) return exactRows
+    return run('legacy')
+  }
+
+  return run('all')
+}
+
+function selectConversationsByChatLid(supabaseClient, company_id, lidPart, whatsappInstanceId, allowLegacyNullInstance) {
+  return queryScopedConversationRows(
+    () => supabaseClient
+      .from('conversas')
+      .select(CONVERSA_INSTANCE_SELECT)
+      .eq('company_id', company_id)
+      .eq('chat_lid', lidPart)
+      .order('ultima_atividade', { ascending: false })
+      .limit(20),
+    whatsappInstanceId,
+    allowLegacyNullInstance
+  )
+}
+
+function selectConversationsByPhoneVariants(supabaseClient, company_id, variants, whatsappInstanceId, allowLegacyNullInstance, limit = 50) {
+  return queryScopedConversationRows(
+    () => supabaseClient
+      .from('conversas')
+      .select(CONVERSA_INSTANCE_SELECT)
+      .eq('company_id', company_id)
+      .in('telefone', variants)
+      .order('id', { ascending: false })
+      .limit(limit),
+    whatsappInstanceId,
+    allowLegacyNullInstance
+  )
+}
+
 async function findClienteRowForPhone(supabaseClient, company_id, phone, telefoneCanonico, searchPhones) {
   const phonesToSearch = Array.from(
     new Set([telefoneCanonico, ...(Array.isArray(searchPhones) ? searchPhones : []), ...possiblePhonesBR(phone), ...possiblePhonesBR(telefoneCanonico)].filter(Boolean))
@@ -570,13 +619,13 @@ async function findOrCreateConversation(supabaseClient, {
   if (isLidPhone && chatLid) {
     const lidPart = String(chatLid).replace(/@lid$/i, '').trim()
     if (lidPart) {
-      const { data: rows } = await supabaseClient
-        .from('conversas')
-        .select('id, departamento_id, telefone, cliente_id, whatsapp_instance_id')
-        .eq('company_id', company_id)
-        .eq('chat_lid', lidPart)
-        .order('ultima_atividade', { ascending: false })
-        .limit(20)
+      const rows = await selectConversationsByChatLid(
+        supabaseClient,
+        company_id,
+        lidPart,
+        whatsappInstanceId,
+        allowLegacyNullInstance
+      )
       const scopedRows = pickConversationForWhatsappInstance(rows, whatsappInstanceId, allowLegacyNullInstance)
       const convByLid = Array.isArray(scopedRows) && scopedRows[0] ? scopedRows[0] : null
       if (convByLid?.id) {
@@ -611,13 +660,20 @@ async function findOrCreateConversation(supabaseClient, {
   console.log(`[findOrCreateConversation] ${logPrefix} canonical="${canonical}" variants=[${variants.join(',')}] isGroup=${isGroup}`)
 
   // 3) Buscar conversa(s) por qualquer variante do telefone (inclui fechadas para reutilizar — webhook reabre quando cliente manda msg)
-  const { data: found, error: errFind } = await supabaseClient
-    .from('conversas')
-    .select('id, departamento_id, telefone, cliente_id, whatsapp_instance_id')
-    .eq('company_id', company_id)
-    .in('telefone', variants)
-    .order('id', { ascending: false })
-    .limit(50)
+  let found
+  let errFind
+  try {
+    found = await selectConversationsByPhoneVariants(
+      supabaseClient,
+      company_id,
+      variants,
+      whatsappInstanceId,
+      allowLegacyNullInstance,
+      50
+    )
+  } catch (err) {
+    errFind = err
+  }
 
   if (errFind) {
     console.error(`[findOrCreateConversation] ${logPrefix} erro ao buscar conversa:`, errFind.message)
@@ -688,7 +744,7 @@ async function findOrCreateConversation(supabaseClient, {
   const { data: created, error: errCreate } = await supabaseClient
     .from('conversas')
     .insert(insertData)
-    .select('id, departamento_id')
+    .select(CONVERSA_INSTANCE_SELECT)
     .single()
 
   if (errCreate) {
@@ -699,7 +755,7 @@ async function findOrCreateConversation(supabaseClient, {
     if (isMissingCol) {
       delete insertData.ultima_atividade
       const { data: retry, error: errRetry } = await supabaseClient
-        .from('conversas').insert(insertData).select('id, departamento_id').single()
+        .from('conversas').insert(insertData).select(CONVERSA_INSTANCE_SELECT).single()
       if (!errRetry) {
         console.log(`[findOrCreateConversation] ${logPrefix} 🆕 criada (sem ultima_atividade) conv=${retry.id}`)
         return { conversa: retry, created: true }
@@ -709,13 +765,14 @@ async function findOrCreateConversation(supabaseClient, {
 
     if (isUnique || isMissingCol) {
       // Race condition resolvida: busca novamente (inclui fechadas)
-      const { data: raceFound } = await supabaseClient
-        .from('conversas')
-        .select('id, departamento_id, telefone, cliente_id, whatsapp_instance_id')
-        .eq('company_id', company_id)
-        .in('telefone', variants)
-        .order('id', { ascending: false })
-        .limit(20)
+      const raceFound = await selectConversationsByPhoneVariants(
+        supabaseClient,
+        company_id,
+        variants,
+        whatsappInstanceId,
+        allowLegacyNullInstance,
+        20
+      )
 
       const raceScoped = pickConversationForWhatsappInstance(raceFound, whatsappInstanceId, allowLegacyNullInstance)
       const raceConv = Array.isArray(raceScoped) && raceScoped[0] ? raceScoped[0] : null

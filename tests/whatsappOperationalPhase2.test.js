@@ -1,6 +1,8 @@
 function createSupabaseConversationMock(seed = {}) {
   const state = {
     conversas: [...(seed.conversas || [])],
+    insertErrors: [...(seed.insertErrors || [])],
+    insertErrorRows: [...(seed.insertErrorRows || [])],
   }
   const calls = []
 
@@ -49,6 +51,7 @@ function createSupabaseConversationMock(seed = {}) {
       },
       single() {
         const rows = execute(this)
+        if (rows && rows.__error) return Promise.resolve({ data: null, error: rows.__error })
         return Promise.resolve({ data: rows[0] || null, error: rows[0] ? null : { message: 'not found' } })
       },
       maybeSingle() {
@@ -74,6 +77,12 @@ function createSupabaseConversationMock(seed = {}) {
     calls.push({ table: q.table, mode: q.mode, filters: q.filters, payload: q.payload })
     const rows = state[q.table] || []
     if (q.mode === 'insert') {
+      if (q.table === 'conversas' && state.insertErrors.length > 0) {
+        const error = state.insertErrors.shift()
+        const raceRow = state.insertErrorRows.shift()
+        if (raceRow) rows.push({ ...raceRow })
+        return { __error: error }
+      }
       const payload = { ...q.payload, id: q.payload.id || rows.length + 1, departamento_id: q.payload.departamento_id ?? null }
       rows.push(payload)
       return [payload]
@@ -135,6 +144,30 @@ describe('WhatsApp multi-instance operational phase 2', () => {
     expect(result.conversa.id).toBe(1)
   })
 
+  test('mesmo telefone em instancias diferentes cria conversas separadas', async () => {
+    jest.doMock('../config/supabase', () => createSupabaseConversationMock())
+    const { findOrCreateConversation } = require('../helpers/conversationSync')
+    const supabase = createSupabaseConversationMock({
+      conversas: [
+        { id: 1, company_id: 1, telefone: '5534999999999', whatsapp_instance_id: 1, departamento_id: null },
+      ],
+    })
+
+    const result = await findOrCreateConversation(supabase, {
+      company_id: 1,
+      phone: '5534999999999',
+      whatsapp_instance_id: 8,
+      whatsapp_instance_is_default: false,
+    })
+
+    expect(result.created).toBe(true)
+    expect(result.conversa.whatsapp_instance_id).toBe(8)
+    expect(supabase.state.conversas).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 1, whatsapp_instance_id: 1 }),
+      expect.objectContaining({ id: 2, whatsapp_instance_id: 8 }),
+    ]))
+  })
+
   test('nao reaproveita conversa legada null para instancia nao-default', async () => {
     jest.doMock('../config/supabase', () => createSupabaseConversationMock())
     const { findOrCreateConversation } = require('../helpers/conversationSync')
@@ -175,6 +208,33 @@ describe('WhatsApp multi-instance operational phase 2', () => {
     expect(result.created).toBe(false)
     expect(result.conversa.id).toBe(1)
     expect(supabase.state.conversas[0].whatsapp_instance_id).toBe(2)
+  })
+
+  test('unique violation rebusca a conversa correta da mesma instancia', async () => {
+    jest.doMock('../config/supabase', () => createSupabaseConversationMock())
+    const { findOrCreateConversation } = require('../helpers/conversationSync')
+    const supabase = createSupabaseConversationMock({
+      conversas: [
+        { id: 1, company_id: 1, telefone: '5534999999999', whatsapp_instance_id: 1, departamento_id: null },
+      ],
+      insertErrors: [
+        { code: '23505', message: 'duplicate key value violates unique constraint "idx_conversas_company_instance_telefone_unique"' },
+      ],
+      insertErrorRows: [
+        { id: 2, company_id: 1, telefone: '5534999999999', whatsapp_instance_id: 8, departamento_id: null },
+      ],
+    })
+
+    const result = await findOrCreateConversation(supabase, {
+      company_id: 1,
+      phone: '5534999999999',
+      whatsapp_instance_id: 8,
+      whatsapp_instance_is_default: false,
+    })
+
+    expect(result.created).toBe(false)
+    expect(result.conversa.id).toBe(2)
+    expect(result.conversa.whatsapp_instance_id).toBe(8)
   })
 
   test('resolveWebhookCompany injeta contexto da instancia sem tokens', async () => {

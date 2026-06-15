@@ -292,4 +292,30 @@ describe('WhatsApp multi-instance operational phase 2.1', () => {
     expect(migration).toContain('drop index if exists public.idx_mensagens_company_whatsapp_id')
     expect(precheck).toContain('having count(*) > 1')
   })
+
+  test('migration de conversas permite mesmo telefone em instancias diferentes e preserva legado', () => {
+    const migration = fs.readFileSync(
+      path.join(__dirname, '../supabase/migrations/20260615005000_whatsapp_instances_conversas_unique.sql'),
+      'utf8'
+    )
+    const precheck = fs.readFileSync(
+      path.join(__dirname, '../supabase/prechecks/20260615005000_whatsapp_instances_conversas_unique_precheck.sql'),
+      'utf8'
+    )
+    const production = fs.readFileSync(
+      path.join(__dirname, '../supabase/production/20260615005000_whatsapp_instances_conversas_unique_concurrently.sql'),
+      'utf8'
+    )
+
+    expect(migration).toContain('idx_conversas_company_instance_telefone_unique')
+    expect(migration).toContain('on public.conversas (company_id, whatsapp_instance_id, telefone)')
+    expect(migration).toContain('where whatsapp_instance_id is not null')
+    expect(migration).toContain('idx_conversas_company_telefone_legacy_null_unique')
+    expect(migration).toContain('where whatsapp_instance_id is null')
+    expect(migration).toContain('drop index if exists public.idx_conversas_company_telefone')
+    expect(migration).toContain('idx_conversas_company_instance_chat_lid_unique')
+    expect(precheck).toContain('DUPLICIDADE_INSTANCE_TELEFONE')
+    expect(precheck).toContain('DUPLICIDADE_LEGADO_TELEFONE_NULL_INSTANCE')
+    expect(production).toContain('create unique index concurrently')
+  })
 })
