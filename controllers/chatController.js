@@ -4,6 +4,7 @@ const { ensureConversaForCliente } = require('../services/conversaAbrirClienteSe
 const { executarAssumirConversa } = require('../services/conversaAssumirInternoService')
 const { getProvider } = require('../services/providers')
 const { getStatus } = require('../services/ultramsgIntegrationService')
+const { getDefaultWhatsappInstance } = require('../services/whatsappInstanceService')
 const { isGroupConversation, isClosedAttendanceStatus } = require('../helpers/conversaHelper')
 const { normalizePhoneBR, possiblePhonesBR, phoneKeyBR } = require('../helpers/phoneHelper')
 const { deduplicateConversationsByContact, sortConversationsByRecent, sortConversationsPinThenRecent, getCanonicalPhone, getOrCreateCliente, findOrCreateConversation, mergeConversasIntoCanonico } = require('../helpers/conversationSync')
@@ -37,6 +38,26 @@ const { normalizarTimestampSemFusoAmbiguoParaApi } = require('../helpers/timesta
 /** UltraMsg retorna id interno (ex: 35096), não o messageId do WhatsApp. Só usar como whatsapp_id se for o ID real. */
 function isRealWhatsAppId(waId) {
   return waId && (String(waId).includes('@') || String(waId).length > 20)
+}
+
+async function resolveConversationWhatsappInstance(company_id, conversa) {
+  const current = Number(conversa?.whatsapp_instance_id)
+  if (Number.isFinite(current) && current > 0) return current
+  const { instance } = await getDefaultWhatsappInstance(company_id)
+  const defaultId = Number(instance?.id)
+  if (!Number.isFinite(defaultId) || defaultId <= 0) return null
+  if (conversa?.id) {
+    try {
+      await supabase
+        .from('conversas')
+        .update({ whatsapp_instance_id: defaultId })
+        .eq('company_id', Number(company_id))
+        .eq('id', Number(conversa.id))
+        .is('whatsapp_instance_id', null)
+      conversa.whatsapp_instance_id = defaultId
+    } catch (_) {}
+  }
+  return defaultId
 }
 
 /**
@@ -554,7 +575,7 @@ async function assertPermissaoConversa({ company_id, conversa_id, user_id, role,
 async function assertPodeEnviarMensagem({ company_id, conversa_id, user_id }) {
   const { data: conv, error } = await supabase
     .from('conversas')
-    .select('id, atendente_id, tipo, telefone, status_atendimento')
+    .select('id, atendente_id, tipo, telefone, status_atendimento, whatsapp_instance_id')
     .eq('company_id', Number(company_id))
     .eq('id', Number(conversa_id))
     .maybeSingle()
@@ -3609,12 +3630,14 @@ exports.encerrarChat = async (req, res) => {
             let telefoneParaEnvio = data.telefone || ''
             const isGroup = String(data?.tipo || '').toLowerCase() === 'grupo' || String(data?.telefone || '').includes('@g.us')
             if (!isGroup && telefoneParaEnvio && !String(telefoneParaEnvio).trim().toLowerCase().startsWith('lid:')) {
+              const whatsappInstanceId = await resolveConversationWhatsappInstance(company_id, data)
               const { getProvider } = require('../services/providers')
               const provider = getProvider()
               if (provider?.sendText) {
                 const resultSend = await provider.sendText(telefoneParaEnvio, msg, {
                   companyId: company_id,
                   conversaId: conversa_id,
+                  whatsappInstanceId: whatsappInstanceId || undefined,
                   sendOrigin: 'mensagem_finalizacao_atendimento',
                 })
                 const statusMsg = resultSend?.ok ? 'sent' : 'erro'
@@ -3626,6 +3649,7 @@ exports.encerrarChat = async (req, res) => {
                     direcao: 'out',
                     company_id,
                     status: statusMsg,
+                    ...(whatsappInstanceId ? { whatsapp_instance_id: whatsappInstanceId } : {}),
                     autor_usuario_id: user_id
                   })
                   .select()
@@ -4041,7 +4065,6 @@ exports.transferirSetor = async (req, res) => {
       .eq('company_id', company_id)
       .eq('id', conversa_id)
       .single()
-
     if (errConv || !conversa) {
       return res.status(404).json({ error: 'Conversa não encontrada' })
     }
@@ -4288,7 +4311,7 @@ exports.enviarMensagemChat = async (req, res) => {
 
     const { data: conversa, error: errConv } = await supabase
       .from('conversas')
-      .select('id, telefone, cliente_id, tipo, nome_contato_cache, foto_perfil_contato_cache, chat_lid')
+      .select('id, telefone, cliente_id, tipo, nome_contato_cache, foto_perfil_contato_cache, chat_lid, whatsapp_instance_id')
       .eq('company_id', company_id)
       .eq('id', conversa_id)
       .single()
@@ -4298,6 +4321,7 @@ exports.enviarMensagemChat = async (req, res) => {
     }
 
     // Resolver telefone real quando conversa tem apenas LID (lid:xxx) — Z-API não envia para LID
+    const whatsappInstanceId = await resolveConversationWhatsappInstance(company_id, conversa)
     let telefoneParaEnvio = conversa.telefone || ''
     if (telefoneParaEnvio && String(telefoneParaEnvio).trim().toLowerCase().startsWith('lid:')) {
       if (conversa.cliente_id) {
@@ -4370,6 +4394,7 @@ exports.enviarMensagemChat = async (req, res) => {
       status: 'pending',
       criado_em: timestamp
     }
+    if (whatsappInstanceId) basePayload.whatsapp_instance_id = whatsappInstanceId
     const payloadWithReply =
       reply_meta && typeof reply_meta === 'object'
         ? {
@@ -4527,6 +4552,7 @@ exports.enviarMensagemChat = async (req, res) => {
           }, {
             companyId: company_id,
             conversaId: conversa_id,
+            whatsappInstanceId: whatsappInstanceId || undefined,
             replyMessageId: replyMessageId || undefined,
             sendOrigin: 'atendimento_humano',
           })
@@ -4535,6 +4561,7 @@ exports.enviarMensagemChat = async (req, res) => {
           result = await provider.sendText(telefoneParaEnvio, textoParaCliente, {
             companyId: company_id,
             conversaId: conversa_id,
+            whatsappInstanceId: whatsappInstanceId || undefined,
             phoneId: phoneId || undefined,
             replyMessageId: replyMessageId || undefined,
             referenceId: `crm-${msg.id}`,
@@ -4623,7 +4650,7 @@ exports.enviarReacaoMensagem = async (req, res) => {
     // busca conversa + mensagem para garantir que pertencem à empresa
     const { data: conversa, error: errConv } = await supabase
       .from('conversas')
-      .select('id, telefone, company_id')
+      .select('id, telefone, company_id, whatsapp_instance_id')
       .eq('company_id', company_id)
       .eq('id', conversa_id)
       .maybeSingle()
@@ -4648,12 +4675,17 @@ exports.enviarReacaoMensagem = async (req, res) => {
       return res.status(400).json({ error: 'Mensagem ainda não possui whatsapp_id para reagir' })
     }
 
+    const whatsappInstanceId = await resolveConversationWhatsappInstance(company_id, conversa)
+
     const provider = getProvider()
     if (!provider || !provider.sendReaction) {
       return res.status(500).json({ error: 'Provider WhatsApp não suporta reações' })
     }
 
-    const ok = await provider.sendReaction(conversa.telefone, msg.whatsapp_id, String(reaction).trim(), { companyId: company_id })
+    const ok = await provider.sendReaction(conversa.telefone, msg.whatsapp_id, String(reaction).trim(), {
+      companyId: company_id,
+      whatsappInstanceId: whatsappInstanceId || undefined,
+    })
     if (!ok) {
       return res.status(502).json({ error: 'Falha ao enviar reação para o WhatsApp' })
     }
@@ -4676,7 +4708,7 @@ exports.removerReacaoMensagem = async (req, res) => {
 
     const { data: conversa, error: errConv } = await supabase
       .from('conversas')
-      .select('id, telefone, company_id')
+      .select('id, telefone, company_id, whatsapp_instance_id')
       .eq('company_id', company_id)
       .eq('id', conversa_id)
       .maybeSingle()
@@ -4701,12 +4733,17 @@ exports.removerReacaoMensagem = async (req, res) => {
       return res.status(400).json({ error: 'Mensagem ainda não possui whatsapp_id para remover reação' })
     }
 
+    const whatsappInstanceId = await resolveConversationWhatsappInstance(company_id, conversa)
+
     const provider = getProvider()
     if (!provider || !provider.removeReaction) {
       return res.status(500).json({ error: 'Provider WhatsApp não suporta remoção de reação' })
     }
 
-    const ok = await provider.removeReaction(conversa.telefone, msg.whatsapp_id, { companyId: company_id })
+    const ok = await provider.removeReaction(conversa.telefone, msg.whatsapp_id, {
+      companyId: company_id,
+      whatsappInstanceId: whatsappInstanceId || undefined,
+    })
     if (!ok) {
       return res.status(502).json({ error: 'Falha ao remover reação no WhatsApp' })
     }
@@ -4738,7 +4775,7 @@ exports.enviarContatoWhatsapp = async (req, res) => {
 
     const { data: conversa, error: errConv } = await supabase
       .from('conversas')
-      .select('id, telefone, company_id')
+      .select('id, telefone, company_id, whatsapp_instance_id')
       .eq('company_id', company_id)
       .eq('id', conversa_id)
       .maybeSingle()
@@ -4747,6 +4784,7 @@ exports.enviarContatoWhatsapp = async (req, res) => {
       return res.status(404).json({ error: 'Conversa não encontrada' })
     }
 
+    const whatsappInstanceId = await resolveConversationWhatsappInstance(company_id, conversa)
     const { data: cliente, error: errCli } = await supabase
       .from('clientes')
       .select('id, nome, pushname, telefone, foto_perfil')
@@ -4792,6 +4830,7 @@ exports.enviarContatoWhatsapp = async (req, res) => {
         status: 'pending',
         autor_usuario_id: Number(user_id),
         criado_em: criadoEm,
+        ...(whatsappInstanceId ? { whatsapp_instance_id: whatsappInstanceId } : {}),
         contact_meta,
       })
       .select()
@@ -4817,12 +4856,14 @@ exports.enviarContatoWhatsapp = async (req, res) => {
       await provider.sendText(conversa.telefone, prefixarParaCliente('Segue contato abaixo:', usuarioNome), {
         companyId: company_id,
         conversaId: conversa_id,
+        whatsappInstanceId: whatsappInstanceId || undefined,
         sendOrigin: 'atendimento_humano_contato',
       })
     }
     const result = await provider.sendContact(conversa.telefone, contactName, contactPhone, {
       companyId: company_id,
       conversaId: Number(conversa_id),
+      whatsappInstanceId: whatsappInstanceId || undefined,
       sendOrigin: 'atendimento_humano_contato',
       messageId: messageId || undefined,
     })
@@ -4891,13 +4932,14 @@ exports.enviarLocalizacao = async (req, res) => {
 
     const { data: conversa, error: errConv } = await supabase
       .from('conversas')
-      .select('id, telefone, cliente_id, tipo, nome_contato_cache, foto_perfil_contato_cache, chat_lid')
+      .select('id, telefone, cliente_id, tipo, nome_contato_cache, foto_perfil_contato_cache, chat_lid, whatsapp_instance_id')
       .eq('company_id', company_id)
       .eq('id', conversa_id)
       .maybeSingle()
 
     if (errConv || !conversa) return res.status(404).json({ error: 'Conversa não encontrada' })
 
+    const whatsappInstanceId = await resolveConversationWhatsappInstance(company_id, conversa)
     let telefoneParaEnvio = conversa.telefone || ''
     if (telefoneParaEnvio && String(telefoneParaEnvio).trim().toLowerCase().startsWith('lid:')) {
       if (conversa.cliente_id) {
@@ -4947,6 +4989,7 @@ exports.enviarLocalizacao = async (req, res) => {
       nome_arquivo: 'localização',
       autor_usuario_id: Number(user_id),
       criado_em: criadoEm,
+      ...(whatsappInstanceId ? { whatsapp_instance_id: whatsappInstanceId } : {}),
       location_meta
     }
 
@@ -5000,6 +5043,7 @@ exports.enviarLocalizacao = async (req, res) => {
       result = await provider.sendLocation(telefoneParaEnvio, { address: addressParaCliente, lat: latitude, lng: longitude }, {
         companyId: company_id,
         conversaId: conversa_id,
+        whatsappInstanceId: whatsappInstanceId || undefined,
         sendOrigin: 'atendimento_humano_localizacao',
       })
     } else {
@@ -5065,7 +5109,7 @@ exports.enviarLigacaoWhatsapp = async (req, res) => {
 
     const { data: conversa, error: errConv } = await supabase
       .from('conversas')
-      .select('id, telefone, company_id')
+      .select('id, telefone, company_id, whatsapp_instance_id')
       .eq('company_id', company_id)
       .eq('id', conversa_id)
       .maybeSingle()
@@ -5076,6 +5120,7 @@ exports.enviarLigacaoWhatsapp = async (req, res) => {
 
     const dur = Number(callDuration)
     const safeDur = Number.isFinite(dur) ? Math.max(1, Math.min(15, dur)) : 5
+    const whatsappInstanceId = await resolveConversationWhatsappInstance(company_id, conversa)
 
     const criadoEm = new Date().toISOString()
     const texto = `Ligação via WhatsApp (${safeDur}s)`
@@ -5085,6 +5130,7 @@ exports.enviarLigacaoWhatsapp = async (req, res) => {
       .insert({
         company_id,
         conversa_id: Number(conversa_id),
+        ...(whatsappInstanceId ? { whatsapp_instance_id: whatsappInstanceId } : {}),
         texto,
         tipo: 'call',
         direcao: 'out',
@@ -5104,7 +5150,11 @@ exports.enviarLigacaoWhatsapp = async (req, res) => {
       return res.status(500).json({ error: 'Provider WhatsApp não suporta ligações' })
     }
 
-    const result = await provider.sendCall(conversa.telefone, safeDur, { companyId: company_id, conversaId: conversa_id })
+    const result = await provider.sendCall(conversa.telefone, safeDur, {
+      companyId: company_id,
+      conversaId: conversa_id,
+      whatsappInstanceId: whatsappInstanceId || undefined,
+    })
     const ok = typeof result === 'boolean' ? result : result?.ok === true
     const waMessageId =
       typeof result === 'object' && result?.messageId ? String(result.messageId).trim() : null
@@ -5768,7 +5818,7 @@ const MAX_MEDIA_CAPTION_CHARS = 1024
  * Uma unidade de upload após multer; conversa e telefone já validados.
  * @returns {Promise<{ ok: true, msg: object } | { ok: false, status: number, error: string }>}
  */
-async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conversa_id, telefoneParaEnvio, io, captionUsuario = '', clientTempId = null }) {
+async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conversa_id, telefoneParaEnvio, whatsappInstanceId = null, io, captionUsuario = '', clientTempId = null }) {
   const { extFromOriginalName, isBlockedRiskExtension, blockedUploadErrorMessage } = require('../middleware/upload')
   let fileWork = file
   const extUpload = extFromOriginalName(fileWork?.originalname)
@@ -5821,6 +5871,7 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
     direcao: "out",
     autor_usuario_id: user_id,
     company_id,
+    ...(whatsappInstanceId ? { whatsapp_instance_id: whatsappInstanceId } : {}),
   }).select().single()
 
   if (error) return { ok: false, status: 500, error: error.message }
@@ -5917,6 +5968,7 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
       const opts = {
         companyId: company_id,
         conversaId: conversa_id,
+        whatsappInstanceId: whatsappInstanceId || undefined,
         sendOrigin: 'atendimento_humano_midia',
         ...(isAudioTipo ? { returnDetails: true, audioMeta: { originalName: fileWork.originalname, mimeType: fileWork.mimetype } } : {}),
       }
@@ -5998,7 +6050,7 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
         if (provider?.uploadMedia) {
           setImmediate(async () => {
             try {
-              const result = await provider.uploadMedia(fileWork.path, fileWork.originalname || 'file', { companyId: company_id })
+              const result = await provider.uploadMedia(fileWork.path, fileWork.originalname || 'file', { companyId: company_id, whatsappInstanceId: whatsappInstanceId || undefined })
               if (result?.ok && result?.url) {
                 console.log('[ULTRAMSG] Upload bem-sucedido, enviando mídia via CDN:', result.url.slice(0, 50) + '...')
                 sendMediaWithUrl(result.url)
@@ -6074,7 +6126,7 @@ exports.enviarArquivo = async (req, res) => {
 
     const { data: conversa } = await supabase
       .from('conversas')
-      .select('id, telefone, cliente_id, tipo, chat_lid')
+      .select('id, telefone, cliente_id, tipo, chat_lid, whatsapp_instance_id')
       .eq('company_id', company_id)
       .eq('id', conversa_id)
       .single()
@@ -6083,6 +6135,7 @@ exports.enviarArquivo = async (req, res) => {
       return res.status(404).json({ error: 'Conversa não encontrada' })
     }
 
+    const whatsappInstanceId = await resolveConversationWhatsappInstance(company_id, conversa)
     let telefoneParaEnvio = conversa.telefone || ''
     if (telefoneParaEnvio && String(telefoneParaEnvio).trim().toLowerCase().startsWith('lid:')) {
       if (conversa.cliente_id) {
@@ -6128,6 +6181,7 @@ exports.enviarArquivo = async (req, res) => {
         user_id,
         conversa_id,
         telefoneParaEnvio,
+        whatsappInstanceId,
         io,
         captionUsuario: perFileCaption,
         clientTempId,
@@ -6229,6 +6283,7 @@ async function encaminharUmaMensagemParaConversa(ctx) {
     user_id,
     conversa_id,
     telefoneParaEnvio,
+    whatsappInstanceId = null,
     provider,
     usuarioNome,
     mensagemOriginal,
@@ -6261,6 +6316,7 @@ async function encaminharUmaMensagemParaConversa(ctx) {
       direcao: 'out',
       autor_usuario_id: user_id,
       company_id,
+      ...(whatsappInstanceId ? { whatsapp_instance_id: whatsappInstanceId } : {}),
       status: 'pending',
       criado_em: timestamp,
     }).select().single()
@@ -6272,6 +6328,7 @@ async function encaminharUmaMensagemParaConversa(ctx) {
       resultadoEnvio = await provider.sendText(telefoneParaEnvio, textoParaWhatsApp, {
         companyId: company_id,
         conversaId: conversa_id,
+        whatsappInstanceId: whatsappInstanceId || undefined,
         sendOrigin: 'encaminhamento_atendimento',
       })
     }
@@ -6306,6 +6363,7 @@ async function encaminharUmaMensagemParaConversa(ctx) {
       direcao: 'out',
       autor_usuario_id: user_id,
       company_id,
+      ...(whatsappInstanceId ? { whatsapp_instance_id: whatsappInstanceId } : {}),
       status: 'pending',
       criado_em: timestamp,
     }).select().single()
@@ -6317,6 +6375,7 @@ async function encaminharUmaMensagemParaConversa(ctx) {
       const opts = {
         companyId: company_id,
         conversaId: conversa_id,
+        whatsappInstanceId: whatsappInstanceId || undefined,
         sendOrigin: 'encaminhamento_atendimento',
       }
 
@@ -6372,6 +6431,7 @@ async function encaminharUmaMensagemParaConversa(ctx) {
       direcao: 'out',
       autor_usuario_id: user_id,
       company_id,
+      ...(whatsappInstanceId ? { whatsapp_instance_id: whatsappInstanceId } : {}),
       status: 'pending',
       criado_em: timestamp,
     }).select().single()
@@ -6387,6 +6447,7 @@ async function encaminharUmaMensagemParaConversa(ctx) {
         {
           companyId: company_id,
           conversaId: conversa_id,
+          whatsappInstanceId: whatsappInstanceId || undefined,
           sendOrigin: 'encaminhamento_atendimento',
         },
       )
@@ -6395,6 +6456,7 @@ async function encaminharUmaMensagemParaConversa(ctx) {
       resultadoEnvio = await provider.sendText(telefoneParaEnvio, textoContato, {
         companyId: company_id,
         conversaId: conversa_id,
+        whatsappInstanceId: whatsappInstanceId || undefined,
         sendOrigin: 'encaminhamento_atendimento',
       })
     }
@@ -6408,6 +6470,7 @@ async function encaminharUmaMensagemParaConversa(ctx) {
       direcao: 'out',
       autor_usuario_id: user_id,
       company_id,
+      ...(whatsappInstanceId ? { whatsapp_instance_id: whatsappInstanceId } : {}),
       status: 'pending',
       criado_em: timestamp,
     }).select().single()
@@ -6428,6 +6491,7 @@ async function encaminharUmaMensagemParaConversa(ctx) {
       }, {
         companyId: company_id,
         conversaId: conversa_id,
+        whatsappInstanceId: whatsappInstanceId || undefined,
         sendOrigin: 'encaminhamento_atendimento',
       })
     }
@@ -6443,6 +6507,7 @@ async function encaminharUmaMensagemParaConversa(ctx) {
       direcao: 'out',
       autor_usuario_id: user_id,
       company_id,
+      ...(whatsappInstanceId ? { whatsapp_instance_id: whatsappInstanceId } : {}),
       status: 'pending',
       criado_em: timestamp,
     }).select().single()
@@ -6454,6 +6519,7 @@ async function encaminharUmaMensagemParaConversa(ctx) {
       resultadoEnvio = await provider.sendText(telefoneParaEnvio, textoComUsuario, {
         companyId: company_id,
         conversaId: conversa_id,
+        whatsappInstanceId: whatsappInstanceId || undefined,
         sendOrigin: 'encaminhamento_atendimento',
       })
     }
@@ -6545,7 +6611,7 @@ exports.encaminharMensagem = async (req, res) => {
     // Buscar conversa de destino
     const { data: conversa } = await supabase
       .from('conversas')
-      .select('id, telefone, cliente_id, tipo, chat_lid')
+      .select('id, telefone, cliente_id, tipo, chat_lid, whatsapp_instance_id')
       .eq('company_id', company_id)
       .eq('id', conversa_id)
       .single()
@@ -6555,6 +6621,7 @@ exports.encaminharMensagem = async (req, res) => {
     }
 
     // Resolver telefone real quando conversa tem apenas LID
+    const whatsappInstanceId = await resolveConversationWhatsappInstance(company_id, conversa)
     let telefoneParaEnvio = conversa.telefone || ''
     if (telefoneParaEnvio && String(telefoneParaEnvio).trim().toLowerCase().startsWith('lid:')) {
       if (conversa.cliente_id) {
@@ -6597,6 +6664,7 @@ exports.encaminharMensagem = async (req, res) => {
         user_id,
         conversa_id,
         telefoneParaEnvio,
+        whatsappInstanceId,
         provider,
         usuarioNome,
         mensagemOriginal: byId.get(orderedIds[i]),
@@ -6687,4 +6755,5 @@ exports._test = {
   getChatSearchScanLimit,
   getChatSearchIdLimit,
   getChatFilterIdLimit,
+  resolveConversationWhatsappInstance,
 }

@@ -1,6 +1,7 @@
 const supabase = require('../config/supabase')
 const ultramsgIntegrationService = require('../services/ultramsgIntegrationService')
 const whatsappConfigService = require('../services/whatsappConfigService')
+const whatsappInstanceService = require('../services/whatsappInstanceService')
 const { enqueue, JOB_TIPOS } = require('../services/queueManager')
 const { syncGroups, syncAll } = require('../services/ultramsgGroupsSyncService')
 const { checkGuard, recordQrServed, resetOnConnected, getAttempts, THROTTLE_SECONDS } = require('../services/whatsappConnectGuardService')
@@ -8,7 +9,7 @@ const { getConfig } = require('../services/configOperacionalService')
 const { getProvider } = require('../services/providers')
 
 const { getStatus, getQrCodeImage, restartInstance, getMe, getPhoneCode, buildMeSummary } = ultramsgIntegrationService
-const { getEmpresaWhatsappConfig } = whatsappConfigService
+const { getEmpresaWhatsappConfig, invalidateEmpresaWhatsappConfigCache } = whatsappConfigService
 
 const perCompanyBuckets = new Map()
 
@@ -24,6 +25,129 @@ function checkCompanyRate(companyId, key, windowMs, max) {
   if (bucket.count >= max) return false
   bucket.count += 1
   return true
+}
+
+function getInstanceParam(req) {
+  const id = Number(req.params?.id || req.params?.instanceId)
+  return Number.isFinite(id) && id > 0 ? id : null
+}
+
+function instanceErrorStatus(error) {
+  if (/duplicidade|duplicate/i.test(String(error || ''))) return 409
+  return /nao encontrada|não encontrada|invalido|inválido/i.test(String(error || '')) ? 404 : 400
+}
+
+exports.listInstances = async (req, res) => {
+  const company_id = req.user?.company_id
+  if (!company_id) return res.status(401).json({ error: 'Não autenticado' })
+  const result = await whatsappInstanceService.listWhatsappInstances(company_id)
+  if (result.error) return res.status(500).json({ error: result.error })
+  return res.json({ instances: result.instances || [] })
+}
+
+exports.createInstance = async (req, res) => {
+  const company_id = req.user?.company_id
+  if (!company_id) return res.status(401).json({ error: 'Não autenticado' })
+  const result = await whatsappInstanceService.createWhatsappInstance(company_id, req.body || {})
+  if (result.error) return res.status(400).json({ error: result.error })
+  invalidateEmpresaWhatsappConfigCache(company_id)
+  return res.status(201).json({ instance: result.instance })
+}
+
+exports.updateInstance = async (req, res) => {
+  const company_id = req.user?.company_id
+  if (!company_id) return res.status(401).json({ error: 'Não autenticado' })
+  const id = getInstanceParam(req)
+  if (!id) return res.status(400).json({ error: 'whatsapp_instance_id inválido' })
+  const result = await whatsappInstanceService.updateWhatsappInstance(company_id, id, req.body || {})
+  if (result.error) return res.status(instanceErrorStatus(result.error)).json({ error: result.error })
+  invalidateEmpresaWhatsappConfigCache(company_id)
+  return res.json({ instance: result.instance })
+}
+
+exports.activateInstance = async (req, res) => {
+  req.body = { ...(req.body || {}), ativo: true }
+  return exports.updateInstance(req, res)
+}
+
+exports.deactivateInstance = async (req, res) => {
+  req.body = { ...(req.body || {}), ativo: false }
+  return exports.updateInstance(req, res)
+}
+
+exports.setDefaultInstance = async (req, res) => {
+  const company_id = req.user?.company_id
+  if (!company_id) return res.status(401).json({ error: 'Não autenticado' })
+  const id = getInstanceParam(req)
+  if (!id) return res.status(400).json({ error: 'whatsapp_instance_id inválido' })
+  const result = await whatsappInstanceService.setDefaultWhatsappInstance(company_id, id)
+  if (result.error) return res.status(instanceErrorStatus(result.error)).json({ error: result.error })
+  invalidateEmpresaWhatsappConfigCache(company_id)
+  return res.json({ instance: result.instance })
+}
+
+exports.getInstanceStatus = async (req, res) => {
+  const company_id = req.user?.company_id
+  if (!company_id) return res.status(401).json({ error: 'Não autenticado' })
+  const id = getInstanceParam(req)
+  if (!id) return res.status(400).json({ error: 'whatsapp_instance_id inválido' })
+  if (!checkCompanyRate(company_id, `instance-status:${id}`, 60_000, 30)) {
+    return res.status(429).json({ error: 'Muitas consultas de status, tente novamente em instantes.', retryAfterSeconds: 60 })
+  }
+  const result = await getStatus(company_id, { whatsappInstanceId: id })
+  if (result.error) return res.status(instanceErrorStatus(result.error)).json({ error: result.error })
+  return res.json({
+    connected: !!result.connected,
+    smartphoneConnected: !!result.smartphoneConnected,
+    needsRestore: !!result.needsRestore,
+  })
+}
+
+exports.getInstanceQrCode = async (req, res) => {
+  const company_id = req.user?.company_id
+  if (!company_id) return res.status(401).json({ error: 'Não autenticado' })
+  const id = getInstanceParam(req)
+  if (!id) return res.status(400).json({ error: 'whatsapp_instance_id inválido' })
+  if (!checkCompanyRate(company_id, `instance-qrcode:${id}`, 60_000, 10)) {
+    return res.status(429).json({ error: 'Muitas solicitações de QR Code, tente novamente em instantes.', retryAfterSeconds: 60 })
+  }
+  const result = await getQrCodeImage(company_id, { whatsappInstanceId: id })
+  if (result.error) return res.status(instanceErrorStatus(result.error)).json({ error: result.error })
+  if (result.alreadyConnected) return res.json({ alreadyConnected: true, connected: true })
+  return res.json({ imageBase64: result.imageBase64, qrBase64: result.imageBase64 })
+}
+
+exports.restartInstance = async (req, res) => {
+  const company_id = req.user?.company_id
+  if (!company_id) return res.status(401).json({ error: 'Não autenticado' })
+  const id = getInstanceParam(req)
+  if (!id) return res.status(400).json({ error: 'whatsapp_instance_id inválido' })
+  const result = await restartInstance(company_id, { whatsappInstanceId: id })
+  if (result.error) return res.status(instanceErrorStatus(result.error)).json({ error: result.error })
+  return res.json({ value: !!result.value })
+}
+
+exports.configureInstanceWebhooks = async (req, res) => {
+  const company_id = req.user?.company_id
+  if (!company_id) return res.status(401).json({ error: 'Não autenticado' })
+  const id = getInstanceParam(req)
+  if (!id) return res.status(400).json({ error: 'whatsapp_instance_id inválido' })
+  const appUrl = String(process.env.APP_URL || '').trim()
+  if (!appUrl) return res.status(500).json({ error: 'APP_URL não configurado no servidor' })
+  const provider = getProvider()
+  if (!provider?.configureWebhooks) return res.status(501).json({ error: 'Provider não suporta configureWebhooks' })
+  try {
+    const results = await provider.configureWebhooks(appUrl, { companyId: company_id, whatsappInstanceId: id })
+    const ok = Array.isArray(results) && results.some((r) => r.ok)
+    return res.json({
+      ok: !!ok,
+      webhook_url: `${appUrl}/webhooks/ultramsg?token=***`,
+      results,
+    })
+  } catch (e) {
+    console.error('[configureInstanceWebhooks]', e?.message || e)
+    return res.status(500).json({ error: e?.message || 'Erro ao configurar webhooks' })
+  }
 }
 
 exports.getStatus = async (req, res) => {

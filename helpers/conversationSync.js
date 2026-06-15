@@ -226,6 +226,35 @@ function phonesMatchDigitally(a, b) {
   return false
 }
 
+function normalizeWhatsappInstanceId(value) {
+  const n = Number(value)
+  return Number.isFinite(n) && n > 0 ? n : null
+}
+
+function pickConversationForWhatsappInstance(rows, whatsappInstanceId, allowNullInstance) {
+  const list = Array.isArray(rows) ? rows : []
+  if (!whatsappInstanceId) return list
+  const exact = list.filter((row) => Number(row?.whatsapp_instance_id) === Number(whatsappInstanceId))
+  if (exact.length > 0) return exact
+  if (allowNullInstance === true) return list.filter((row) => row?.whatsapp_instance_id == null)
+  return []
+}
+
+async function attachWhatsappInstanceToLegacyConversation(supabaseClient, company_id, conversa, whatsappInstanceId) {
+  if (!conversa?.id || !whatsappInstanceId || conversa.whatsapp_instance_id != null) return conversa
+  try {
+    await supabaseClient
+      .from('conversas')
+      .update({ whatsapp_instance_id: whatsappInstanceId })
+      .eq('id', conversa.id)
+      .eq('company_id', company_id)
+      .is('whatsapp_instance_id', null)
+    return { ...conversa, whatsapp_instance_id: whatsappInstanceId }
+  } catch (_) {
+    return conversa
+  }
+}
+
 /**
  * Busca cliente existente por variantes 12/13 dígitos e phoneKeyBR (55… vs 9º dígito).
  * Cobre telefone salvo sem DDI ou formato diferente do canônico do INSERT.
@@ -522,9 +551,14 @@ async function findOrCreateConversation(supabaseClient, {
   nomeGrupo = null,
   chatPhoto = null,
   chatLid = null,
+  whatsapp_instance_id = null,
+  whatsapp_instance_is_default = false,
   logPrefix = '',
   initial_status_atendimento = 'aberta',
 }) {
+  const whatsappInstanceId = normalizeWhatsappInstanceId(whatsapp_instance_id)
+  const allowLegacyNullInstance = !!(whatsappInstanceId && whatsapp_instance_is_default === true)
+
   if (!phone) {
     console.warn(`[findOrCreateConversation] ${logPrefix} phone vazio/nulo`)
     return null
@@ -538,15 +572,17 @@ async function findOrCreateConversation(supabaseClient, {
     if (lidPart) {
       const { data: rows } = await supabaseClient
         .from('conversas')
-        .select('id, departamento_id, telefone, cliente_id')
+        .select('id, departamento_id, telefone, cliente_id, whatsapp_instance_id')
         .eq('company_id', company_id)
         .eq('chat_lid', lidPart)
         .order('ultima_atividade', { ascending: false })
-        .limit(1)
-      const convByLid = Array.isArray(rows) && rows[0] ? rows[0] : null
+        .limit(20)
+      const scopedRows = pickConversationForWhatsappInstance(rows, whatsappInstanceId, allowLegacyNullInstance)
+      const convByLid = Array.isArray(scopedRows) && scopedRows[0] ? scopedRows[0] : null
       if (convByLid?.id) {
         console.log(`[findOrCreateConversation] ${logPrefix} ✅ encontrada por chat_lid (evita duplicata LID) conv=${convByLid.id}`)
-        return { conversa: convByLid, created: false }
+        const convWithInstance = await attachWhatsappInstanceToLegacyConversation(supabaseClient, company_id, convByLid, whatsappInstanceId)
+        return { conversa: convWithInstance, created: false }
       }
     }
   }
@@ -577,26 +613,32 @@ async function findOrCreateConversation(supabaseClient, {
   // 3) Buscar conversa(s) por qualquer variante do telefone (inclui fechadas para reutilizar — webhook reabre quando cliente manda msg)
   const { data: found, error: errFind } = await supabaseClient
     .from('conversas')
-    .select('id, departamento_id, telefone, cliente_id')
+    .select('id, departamento_id, telefone, cliente_id, whatsapp_instance_id')
     .eq('company_id', company_id)
     .in('telefone', variants)
     .order('id', { ascending: false })
-    .limit(10)
+    .limit(50)
 
   if (errFind) {
     console.error(`[findOrCreateConversation] ${logPrefix} erro ao buscar conversa:`, errFind.message)
     throw errFind
   }
 
-  if (Array.isArray(found) && found.length > 0) {
+  const foundScoped = pickConversationForWhatsappInstance(found, whatsappInstanceId, allowLegacyNullInstance)
+
+  if (Array.isArray(foundScoped) && foundScoped.length > 0) {
     // 4) Mesclar duplicatas automaticamente se houver mais de uma
-    if (found.length > 1 && !isGroup) {
-      const canonicalConv = found[0]
-      const dupIds = found.slice(1).map(c => c.id).filter(Boolean)
+    if (foundScoped.length > 1 && !isGroup) {
+      const exactRows = whatsappInstanceId
+        ? foundScoped.filter((row) => Number(row?.whatsapp_instance_id) === Number(whatsappInstanceId))
+        : foundScoped
+      const rowsToMerge = exactRows.length > 0 ? exactRows : foundScoped
+      const canonicalConv = rowsToMerge[0]
+      const dupIds = rowsToMerge.slice(1).map(c => c.id).filter(Boolean)
       await mergeConversasIntoCanonico(supabaseClient, company_id, canonicalConv.id, dupIds)
     }
 
-    const conv = found[0]
+    let conv = foundScoped[0]
     console.log(`[findOrCreateConversation] ${logPrefix} ✅ encontrada conv=${conv.id} phone_db="${conv.telefone}"`)
 
     // 5) Garantir telefone canônico na conversa encontrada (normalizar legado)
@@ -613,6 +655,7 @@ async function findOrCreateConversation(supabaseClient, {
       } catch (_) { /* não crítico */ }
     }
 
+    conv = await attachWhatsappInstanceToLegacyConversation(supabaseClient, company_id, conv, whatsappInstanceId)
     return { conversa: conv, created: false }
   }
 
@@ -631,6 +674,7 @@ async function findOrCreateConversation(supabaseClient, {
     company_id,
     ultima_atividade: new Date().toISOString(),
   }
+  if (whatsappInstanceId) insertData.whatsapp_instance_id = whatsappInstanceId
 
   if (isGroup) {
     insertData.tipo = 'grupo'
@@ -667,16 +711,18 @@ async function findOrCreateConversation(supabaseClient, {
       // Race condition resolvida: busca novamente (inclui fechadas)
       const { data: raceFound } = await supabaseClient
         .from('conversas')
-        .select('id, departamento_id, telefone, cliente_id')
+        .select('id, departamento_id, telefone, cliente_id, whatsapp_instance_id')
         .eq('company_id', company_id)
         .in('telefone', variants)
         .order('id', { ascending: false })
-        .limit(1)
-        .maybeSingle()
+        .limit(20)
 
-      if (raceFound) {
-        console.log(`[findOrCreateConversation] ${logPrefix} ⚡ race condition → conv=${raceFound.id}`)
-        return { conversa: raceFound, created: false }
+      const raceScoped = pickConversationForWhatsappInstance(raceFound, whatsappInstanceId, allowLegacyNullInstance)
+      const raceConv = Array.isArray(raceScoped) && raceScoped[0] ? raceScoped[0] : null
+      if (raceConv) {
+        console.log(`[findOrCreateConversation] ${logPrefix} ⚡ race condition → conv=${raceConv.id}`)
+        const raceConvWithInstance = await attachWhatsappInstanceToLegacyConversation(supabaseClient, company_id, raceConv, whatsappInstanceId)
+        return { conversa: raceConvWithInstance, created: false }
       }
     }
 

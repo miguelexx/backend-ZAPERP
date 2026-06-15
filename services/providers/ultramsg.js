@@ -9,7 +9,11 @@
  */
 
 const { normalizePhoneBR, toZapiSendFormat, possiblePhonesBR } = require('../../helpers/phoneHelper')
-const { getEmpresaWhatsappConfig, invalidateEmpresaWhatsappConfigCache } = require('../whatsappConfigService')
+const { invalidateEmpresaWhatsappConfigCache } = require('../whatsappConfigService')
+const {
+  getDefaultWhatsappInstance,
+  getWhatsappInstanceById,
+} = require('../whatsappInstanceService')
 const { fetchWithRetry } = require('../../helpers/retryWithBackoff')
 const {
   beforeWhatsAppSend,
@@ -345,9 +349,16 @@ async function awaitSendDelay(companyId, opts = {}) {
 async function resolveConfig(opts = {}) {
   const companyId = opts?.companyId ?? opts?.company_id
   if (companyId == null || companyId === '') return null
-  const { config, error } = await getEmpresaWhatsappConfig(Number(companyId))
-  if (error || !config) {
-    console.warn(`[ULTRAMSG] Empresa ${companyId} sem instância configurada (empresa_zapi).`, error || 'config vazio')
+  const cid = Number(companyId)
+  const whatsappInstanceId = opts?.whatsappInstanceId ?? opts?.whatsapp_instance_id
+  const resolved = whatsappInstanceId
+    ? await getWhatsappInstanceById(cid, whatsappInstanceId, { includeCredentials: true, requireActive: true })
+    : await getDefaultWhatsappInstance(cid, { includeCredentials: true })
+  const instance = resolved.instance
+  const config = instance
+  const error = resolved.error
+  if (resolved.error || !instance) {
+    console.warn(`[ULTRAMSG] Empresa ${companyId} sem instancia WhatsApp configurada.`, error || 'config vazio')
     return null
   }
   const instanceId = String(config.instance_id || '').trim()
@@ -355,7 +366,14 @@ async function resolveConfig(opts = {}) {
   if (!instanceId || !token) return null
   const segment = instanceId.toLowerCase().startsWith('instance') ? instanceId : `instance${instanceId}`
   const basePath = `${ULTRAMSG_BASE_URL}/${encodeURIComponent(segment)}`
-  return { basePath, token, instanceId: segment, companyId: Number(companyId) }
+  return {
+    basePath,
+    token,
+    instanceId: segment,
+    companyId: cid,
+    whatsappInstanceId: instance.id ?? null,
+    provider: instance.provider || 'ultramsg',
+  }
 }
 
 /**

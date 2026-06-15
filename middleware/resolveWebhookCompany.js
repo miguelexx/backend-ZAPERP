@@ -6,7 +6,7 @@
  * @see ../docs/_OFICIAL/ADR-LEGACY-NAMING.md
  */
 
-const { getCompanyIdByInstanceId } = require('../services/whatsappConfigService')
+const { getWhatsappInstanceByProviderInstanceId } = require('../services/whatsappInstanceService')
 
 function _logSafe(entry) {
   console.log('[WEBHOOK]', JSON.stringify({ ts: new Date().toISOString(), ...entry }))
@@ -51,13 +51,38 @@ async function resolveWebhookCompany(req, res, next) {
       return res.status(200).json({ ok: true, ignored: 'missing_instanceId' })
     }
 
-    const company_id = await getCompanyIdByInstanceId(instanceIdRaw)
-    const companyIdResolved = company_id != null ? company_id : 'not_mapped'
     const eventType = inferEventType(body, path)
+    const resolved = await getWhatsappInstanceByProviderInstanceId('ultramsg', instanceIdRaw)
+
+    if (resolved?.code === 'DUPLICATE_PROVIDER_INSTANCE') {
+      req.webhookLogData = {
+        status: 'blocked_duplicate_instance',
+        instance_id: instanceIdRaw,
+        event_type: eventType,
+        provider: 'ultramsg',
+      }
+      _logSafe({ eventType, instanceId, companyIdResolved: 'duplicate_blocked' })
+      return res.status(200).json({ ok: true, ignored: 'duplicate_provider_instance' })
+    }
+
+    const instance = resolved?.instance || null
+    const company_id = instance?.company_id ?? null
+    const whatsapp_instance_id = instance?.id ?? null
+    const provider_instance_id = instance?.instance_id || instanceIdRaw
+    const companyIdResolved = company_id != null ? company_id : 'not_mapped'
 
     _logSafe({ eventType, instanceId, companyIdResolved })
 
-    req.webhookContext = { company_id, instanceId: instanceIdRaw, eventType }
+    req.webhookContext = {
+      company_id,
+      whatsapp_instance_id,
+      provider: 'ultramsg',
+      provider_instance_id,
+      instanceId: instanceIdRaw,
+      eventType,
+      whatsapp_instance_is_default: instance?.is_default === true,
+      whatsapp_instance_source: instance?.source || 'whatsapp_instances',
+    }
     // Compat legado: manter alias até concluir renomeação total.
     req.zapiContext = req.webhookContext
 

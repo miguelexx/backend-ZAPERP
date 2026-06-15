@@ -16,6 +16,7 @@ const supabase = require('../config/supabase')
 const { getProvider } = require('../services/providers')
 const { syncUltraMsgContact } = require('../services/ultramsgSyncContact')
 const { getCompanyIdByInstanceId } = require('../services/whatsappConfigService')
+const { getWhatsappInstanceByProviderInstanceId } = require('../services/whatsappInstanceService')
 const { getStatus } = require('../services/ultramsgIntegrationService')
 const { normalizePhoneBR, possiblePhonesBR, normalizeGroupIdForStorage } = require('../helpers/phoneHelper')
 const { getCanonicalPhone, getOrCreateCliente, findOrCreateConversation, mergeConversasIntoCanonico, mergeConversationLidToPhone } = require('../helpers/conversationSync')
@@ -51,7 +52,7 @@ const { parseNota, tentarRegistrarAvaliacao } = require('../services/avaliacaoSe
 const WHATSAPP_DEBUG = String(process.env.WHATSAPP_DEBUG || '').toLowerCase() === 'true'
 // Seleção enxuta para evitar payload desnecessário em caminhos quentes de webhook.
 // IMPORTANTE: não depender de colunas opcionais para manter compatibilidade com bancos legados.
-const WEBHOOK_MSG_SELECT = 'id, conversa_id, company_id, whatsapp_id, texto, url, tipo, direcao, criado_em, status, autor_usuario_id, reply_meta, nome_arquivo, contact_meta, location_meta, remetente_nome, remetente_telefone'
+const WEBHOOK_MSG_SELECT = 'id, conversa_id, company_id, whatsapp_instance_id, whatsapp_id, texto, url, tipo, direcao, criado_em, status, autor_usuario_id, reply_meta, nome_arquivo, contact_meta, location_meta, remetente_nome, remetente_telefone'
 
 /** URL pública remota (CDN UltraMsg) — diferente de /uploads/ gravado pelo CRM no envio. */
 function isRemoteMediaUrl(url) {
@@ -61,6 +62,85 @@ function isRemoteMediaUrl(url) {
 
 function isLocalUploadMediaUrl(url) {
   return String(url || '').trim().startsWith('/uploads/')
+}
+
+function applyWhatsappInstanceFilter(query, whatsappInstanceId) {
+  if (!query || !whatsappInstanceId) return query
+  return query.eq('whatsapp_instance_id', whatsappInstanceId)
+}
+
+function applyWhatsappInstanceFilterOrLegacy(query, whatsappInstanceId) {
+  if (!query) return query
+  if (whatsappInstanceId) return query.eq('whatsapp_instance_id', whatsappInstanceId)
+  return query.is('whatsapp_instance_id', null)
+}
+
+function logAmbiguousWhatsappId(context, { company_id, whatsapp_instance_id, whatsapp_id, count }) {
+  console.error('[webhook] whatsapp_id ambiguo; bloqueando atualizacao para evitar mistura multi-instancia', {
+    context,
+    company_id,
+    whatsapp_instance_id: whatsapp_instance_id || null,
+    whatsapp_id: whatsapp_id ? String(whatsapp_id).slice(0, 32) : null,
+    count,
+  })
+}
+
+async function selectSingleMensagemByWhatsappId(
+  supabaseClient,
+  { company_id, whatsapp_id, whatsapp_instance_id = null, select = WEBHOOK_MSG_SELECT, context = 'webhook' }
+) {
+  const waId = whatsapp_id != null ? String(whatsapp_id).trim() : ''
+  if (!supabaseClient || !company_id || !waId) return { data: null, error: null, ambiguous: false }
+
+  let query = supabaseClient
+    .from('mensagens')
+    .select(select)
+    .eq('company_id', company_id)
+    .eq('whatsapp_id', waId)
+    .order('id', { ascending: false })
+    .limit(2)
+  query = applyWhatsappInstanceFilterOrLegacy(query, whatsapp_instance_id)
+
+  const { data, error } = await query
+  if (error) return { data: null, error, ambiguous: false }
+  const rows = Array.isArray(data) ? data : []
+  if (rows.length > 1) {
+    logAmbiguousWhatsappId(context, {
+      company_id,
+      whatsapp_instance_id,
+      whatsapp_id: waId,
+      count: rows.length,
+    })
+    return {
+      data: null,
+      error: { code: 'AMBIGUOUS_WHATSAPP_ID', message: 'whatsapp_id ambiguo para a empresa/instancia' },
+      ambiguous: true,
+    }
+  }
+  return { data: rows[0] || null, error: null, ambiguous: false }
+}
+
+async function updateSingleMensagemByWhatsappId(
+  supabaseClient,
+  { company_id, whatsapp_id, whatsapp_instance_id = null, updates, select = WEBHOOK_MSG_SELECT, context = 'webhook' }
+) {
+  const found = await selectSingleMensagemByWhatsappId(supabaseClient, {
+    company_id,
+    whatsapp_id,
+    whatsapp_instance_id,
+    select: 'id, whatsapp_id',
+    context,
+  })
+  if (found.error || !found.data?.id) return { data: null, error: found.error || null, ambiguous: Boolean(found.ambiguous) }
+
+  const { data, error } = await supabaseClient
+    .from('mensagens')
+    .update(updates)
+    .eq('company_id', company_id)
+    .eq('id', found.data.id)
+    .select(select)
+    .maybeSingle()
+  return { data, error, ambiguous: false }
 }
 
 function normalizeMediaFileNameForMatch(name) {
@@ -923,8 +1003,26 @@ exports.receberZapi = async (req, res) => {
     const instanceIdRaw = _extractInstanceIdFromBody(body) || req.zapiContext?.instanceId || ''
     const instanceId = instanceIdRaw ? String(instanceIdRaw).trim() : ''
     let company_id = req.zapiContext?.company_id
+    let whatsapp_instance_id = req.zapiContext?.whatsapp_instance_id ?? null
+    let whatsapp_instance_is_default = req.zapiContext?.whatsapp_instance_is_default === true
     if (company_id == null && instanceId) {
-      company_id = await getCompanyIdByInstanceId(instanceId)
+      const resolved = await getWhatsappInstanceByProviderInstanceId('ultramsg', instanceId)
+      if (resolved?.code === 'DUPLICATE_PROVIDER_INSTANCE') {
+        _logWebhookSafe({
+          instanceId: instanceId.slice(0, 24) + (instanceId.length > 24 ? '…' : ''),
+          companyId: 'duplicate_blocked',
+          type: body.type || body.event || 'unknown',
+          ignored: 'duplicate_provider_instance',
+        })
+        return res.status(200).json({ ok: true, ignored: 'duplicate_provider_instance' })
+      }
+      if (resolved?.instance) {
+        company_id = resolved.instance.company_id
+        whatsapp_instance_id = resolved.instance.id ?? null
+        whatsapp_instance_is_default = resolved.instance.is_default === true
+      } else {
+        company_id = await getCompanyIdByInstanceId(instanceId)
+      }
     }
     if (!instanceId || company_id == null) {
       const logData = { instanceId: instanceId ? instanceId.slice(0, 24) + (instanceId.length > 24 ? '…' : '') : '(empty)', companyId: 'not_mapped', type: body.type || body.event || 'unknown', ignored: 'instance_not_mapped' }
@@ -1090,13 +1188,14 @@ exports.receberZapi = async (req, res) => {
       const updateStatusByWaId = async (waId, statusNorm) => {
         if (!waId || !statusNorm) return null
         const waIdStr = String(waId)
-        const { data: msg } = await supabase
-          .from('mensagens')
-          .update({ status: statusNorm })
-          .eq('company_id', company_id)
-          .eq('whatsapp_id', waIdStr)
-          .select('id, conversa_id, company_id, whatsapp_id, autor_usuario_id')
-          .maybeSingle()
+        const { data: msg } = await updateSingleMensagemByWhatsappId(supabase, {
+          company_id,
+          whatsapp_id: waIdStr,
+          whatsapp_instance_id,
+          updates: { status: statusNorm },
+          select: 'id, conversa_id, company_id, whatsapp_instance_id, whatsapp_id, autor_usuario_id',
+          context: 'receberZapi.status',
+        })
         if (msg) msg.whatsapp_id = msg.whatsapp_id || waIdStr
         return msg || null
       }
@@ -1261,13 +1360,14 @@ exports.receberZapi = async (req, res) => {
           // Regra: DeliveryCallback SEM conteúdo = APENAS status. Nunca inserir mensagem.
           // Se a mensagem já existe (CRM enviou antes), atualiza status. Se não existe, ignora (não criar placeholder).
           if (!hasRealContent && delivMsgId) {
-            const { data: existByWaId } = await supabase
-              .from('mensagens')
-              .update({ status: 'sent' })
-              .eq('company_id', company_id)
-              .eq('whatsapp_id', String(delivMsgId))
-              .select('id, conversa_id, company_id, autor_usuario_id')
-              .maybeSingle()
+            const { data: existByWaId } = await updateSingleMensagemByWhatsappId(supabase, {
+              company_id,
+              whatsapp_id: String(delivMsgId),
+              whatsapp_instance_id,
+              updates: { status: 'sent' },
+              select: 'id, conversa_id, company_id, autor_usuario_id',
+              context: 'deliverycallback.fromMe.no_content',
+            })
               if (existByWaId?.id) {
               const io = req.app.get('io')
               if (io) {
@@ -1325,13 +1425,14 @@ exports.receberZapi = async (req, res) => {
         const statusNorm = errorText ? 'erro' : 'sent'
 
         // 1) tenta atualizar por whatsapp_id (inclui autor_usuario_id para emit ao remetente)
-        let { data: msg, error } = await supabase
-          .from('mensagens')
-          .update({ status: statusNorm })
-          .eq('company_id', company_id)
-          .eq('whatsapp_id', String(messageId))
-          .select('id, conversa_id, company_id, autor_usuario_id')
-          .maybeSingle()
+        let { data: msg, error } = await updateSingleMensagemByWhatsappId(supabase, {
+          company_id,
+          whatsapp_id: String(messageId),
+          whatsapp_instance_id,
+          updates: { status: statusNorm },
+          select: 'id, conversa_id, company_id, autor_usuario_id',
+          context: 'deliverycallback.status',
+        })
 
         // 1.1) Mesclagem LID→PHONE: sempre que temos chatLid + canonicalPhone no payload
         const lidFromPayload = String(payload?.phone ?? payload?.chatLid ?? payload?.chat?.id ?? payload?.data?.phone ?? payload?.value?.phone ?? '').trim()
@@ -1437,11 +1538,12 @@ exports.receberZapi = async (req, res) => {
             const phones = isGroup ? [phoneDest] : possiblePhonesBR(phoneDest)
             let qConv = supabase
               .from('conversas')
-              .select('id')
+              .select('id, whatsapp_instance_id')
               .eq('company_id', company_id)
               .neq('status_atendimento', 'fechada')
               .order('id', { ascending: false })
               .limit(3)
+            qConv = applyWhatsappInstanceFilterOrLegacy(qConv, whatsapp_instance_id)
             if (phones.length > 0) qConv = qConv.in('telefone', phones)
             const { data: convs } = await qConv
             const convId = Array.isArray(convs) && convs[0]?.id ? convs[0].id : null
@@ -1450,7 +1552,7 @@ exports.receberZapi = async (req, res) => {
               const ts = Date.now()
               const fromIso = new Date(ts - 10 * 60 * 1000).toISOString()
               const toIso = new Date(ts + 10 * 60 * 1000).toISOString()
-              const { data: cand } = await supabase
+              let candQuery = supabase
                 .from('mensagens')
                 .select('id, conversa_id, company_id')
                 .eq('company_id', company_id)
@@ -1462,6 +1564,8 @@ exports.receberZapi = async (req, res) => {
                 .order('criado_em', { ascending: false })
                 .order('id', { ascending: false })
                 .limit(1)
+              candQuery = applyWhatsappInstanceFilterOrLegacy(candQuery, whatsapp_instance_id)
+              const { data: cand } = await candQuery
 
               const picked = Array.isArray(cand) && cand[0] ? cand[0] : null
               if (picked?.id) {
@@ -1531,12 +1635,13 @@ exports.receberZapi = async (req, res) => {
         const statusNorm = statusRaw ? normalizeZapiStatus(statusRaw) : null
         console.log('[ULTRAMSG_WEBHOOK]', JSON.stringify({ companyIdResolved: company_id, messageId: msgId ? String(msgId).slice(0, 20) : null, status: statusNorm, note: 'self_echo' }))
         if (msgId) {
-          const { data: existing } = await supabase
-            .from('mensagens')
-            .select('id, conversa_id, company_id, whatsapp_id')
-            .eq('company_id', company_id)
-            .eq('whatsapp_id', String(msgId))
-            .maybeSingle()
+          const { data: existing } = await selectSingleMensagemByWhatsappId(supabase, {
+            company_id,
+            whatsapp_id: String(msgId),
+            whatsapp_instance_id,
+            select: 'id, conversa_id, company_id, whatsapp_id',
+            context: 'self_echo',
+          })
           if (existing) {
             if (statusNorm) {
               const updated = await updateStatusByWaId(String(msgId), statusNorm)
@@ -1769,12 +1874,18 @@ exports.receberZapi = async (req, res) => {
 
     try {
       if (lidPart) {
-        const { data: convByLid } = await supabase
+        const { data: convByLidRows } = await supabase
           .from('conversas')
-          .select('id, departamento_id, telefone')
+          .select('id, departamento_id, telefone, whatsapp_instance_id')
           .eq('company_id', company_id)
           .eq('chat_lid', lidPart)
-          .maybeSingle()
+          .order('ultima_atividade', { ascending: false })
+          .limit(20)
+        const convByLid = (Array.isArray(convByLidRows) ? convByLidRows : []).find((row) =>
+          !whatsapp_instance_id ||
+          Number(row?.whatsapp_instance_id) === Number(whatsapp_instance_id) ||
+          (whatsapp_instance_is_default && row?.whatsapp_instance_id == null)
+        ) || null
 
         const hasRealPhone = phone && !phone.startsWith('lid:')
         let convByPhone = null
@@ -1784,12 +1895,16 @@ exports.receberZapi = async (req, res) => {
           const list = variants.length > 0 ? variants : [phone]
           const { data: rows } = await supabase
             .from('conversas')
-            .select('id, departamento_id, telefone')
+            .select('id, departamento_id, telefone, whatsapp_instance_id')
             .eq('company_id', company_id)
             .in('telefone', list)
             .order('ultima_atividade', { ascending: false })
-            .limit(1)
-          convByPhone = Array.isArray(rows) && rows[0] ? rows[0] : null
+            .limit(20)
+          convByPhone = (Array.isArray(rows) ? rows : []).find((row) =>
+            !whatsapp_instance_id ||
+            Number(row?.whatsapp_instance_id) === Number(whatsapp_instance_id) ||
+            (whatsapp_instance_is_default && row?.whatsapp_instance_id == null)
+          ) || null
         }
 
         if (convByLid && convByPhone && convByLid.id !== convByPhone.id) {
@@ -1834,6 +1949,8 @@ exports.receberZapi = async (req, res) => {
           nomeGrupo,
           chatPhoto,
           chatLid: lidPart || null,
+          whatsapp_instance_id,
+          whatsapp_instance_is_default,
           logPrefix: `[Z-API fromMe=${fromMe}]`,
           // Sempre aberta ao criar; mensagem_disparada só após insert se for 1ª msg e WhatsApp externo (sem autor).
           initial_status_atendimento: 'aberta',
@@ -2166,6 +2283,7 @@ exports.receberZapi = async (req, res) => {
           const r = await getProvider().sendText(ph, msg, {
             companyId: company_id,
             conversaId: conversa_id,
+            whatsappInstanceId: whatsapp_instance_id || undefined,
             ...o,
             sendOrigin: o?.sendOrigin || o?.origin || 'chatbot_triage',
           })
@@ -2346,21 +2464,22 @@ exports.receberZapi = async (req, res) => {
     // Histórico de nova conversa: agendado DEPOIS de persistir a mensagem atual + regra mensagem_disparada
     // (evita race: import antigo tornava outra linha a "primeira" e a conversa ficava aberta indevidamente).
 
-    // Idempotência: chave única (company_id, whatsapp_id) — reenvio do webhook não duplica
+    // Idempotencia: chave por instancia quando disponivel; legado fica restrito a whatsapp_instance_id null.
     if (whatsappIdStr) {
-      let { data: existente } = await supabase
-        .from('mensagens')
-        .select(WEBHOOK_MSG_SELECT)
-        .eq('company_id', company_id)
-        .eq('whatsapp_id', whatsappIdStr)
-        .maybeSingle()
+      let { data: existente } = await selectSingleMensagemByWhatsappId(supabase, {
+        company_id,
+        whatsapp_id: whatsappIdStr,
+        whatsapp_instance_id,
+        select: WEBHOOK_MSG_SELECT,
+        context: 'received.idempotency',
+      })
       
       // Se não encontrou por whatsapp_id e é mensagem enviada por nós, reconciliar com outbound do CRM
       if (!existente && fromMe) {
         const recentFromIso = new Date(Date.now() - 15 * 60 * 1000).toISOString()
         let tempExistente = null
 
-        const { data: tempExistenteNullWa } = await supabase
+        let tempNullWaQuery = supabase
           .from('mensagens')
           .select(WEBHOOK_MSG_SELECT)
           .eq('company_id', company_id)
@@ -2371,6 +2490,8 @@ exports.receberZapi = async (req, res) => {
           .order('criado_em', { ascending: false })
           .order('id', { ascending: false })
           .limit(10)
+        tempNullWaQuery = applyWhatsappInstanceFilterOrLegacy(tempNullWaQuery, whatsapp_instance_id)
+        const { data: tempExistenteNullWa } = await tempNullWaQuery
 
         const nomeAtendenteFromMe = extrairNomePrefixoTexto(texto)
         tempExistente =
@@ -2384,7 +2505,7 @@ exports.receberZapi = async (req, res) => {
 
         // ACK pode ter preenchido whatsapp_id (sid) antes do message_create (id) — buscar por nome/tipo
         if (!tempExistente && mapWebhookTypeToStorageTipo(type)) {
-          const { data: recentOut } = await supabase
+          let recentOutQuery = supabase
             .from('mensagens')
             .select(WEBHOOK_MSG_SELECT)
             .eq('company_id', company_id)
@@ -2394,6 +2515,8 @@ exports.receberZapi = async (req, res) => {
             .order('criado_em', { ascending: false })
             .order('id', { ascending: false })
             .limit(10)
+          recentOutQuery = applyWhatsappInstanceFilterOrLegacy(recentOutQuery, whatsapp_instance_id)
+          const { data: recentOut } = await recentOutQuery
           tempExistente =
             findFromMeOutboundMediaCandidate(recentOut || [], {
               fileName,
@@ -2527,13 +2650,14 @@ exports.receberZapi = async (req, res) => {
       if (quotedId) {
         const replyTs = Date.now()
         try {
-          const { data: quoted } = await supabase
+          let quotedQuery = supabase
             .from('mensagens')
             .select('texto, direcao, remetente_nome')
             .eq('company_id', company_id)
             .eq('conversa_id', conversa_id)
             .eq('whatsapp_id', quotedId)
-            .maybeSingle()
+          quotedQuery = applyWhatsappInstanceFilterOrLegacy(quotedQuery, whatsapp_instance_id)
+          const { data: quoted } = await quotedQuery.maybeSingle()
 
           const snippet =
             String(quoted?.texto || '').trim().slice(0, 180) ||
@@ -2588,6 +2712,7 @@ exports.receberZapi = async (req, res) => {
             .order('id', { ascending: false })
             .limit(10)
           if (filterConversa) q = q.eq('conversa_id', conversa_id)
+          q = applyWhatsappInstanceFilterOrLegacy(q, whatsapp_instance_id)
           if (fromIso && toIso) q = q.gte('criado_em', fromIso).lte('criado_em', toIso)
           // URL do webhook (CDN) ≠ /uploads/ do CRM — não filtrar por url remota
           if (urlSig && !isRemoteMediaUrl(urlSig)) q = q.eq('url', urlSig)
@@ -2654,13 +2779,14 @@ exports.receberZapi = async (req, res) => {
     // isEdit: mensagem editada → atualizar texto da mensagem existente, não inserir nova
     if (!mensagemSalva && isEdit && whatsappIdStr) {
       try {
-        const { data: editTarget } = await supabase
-          .from('mensagens')
-          .update({ texto })
-          .eq('company_id', company_id)
-          .eq('whatsapp_id', whatsappIdStr)
-          .select(WEBHOOK_MSG_SELECT)
-          .maybeSingle()
+        const { data: editTarget } = await updateSingleMensagemByWhatsappId(supabase, {
+          company_id,
+          whatsapp_id: whatsappIdStr,
+          whatsapp_instance_id,
+          updates: { texto },
+          select: WEBHOOK_MSG_SELECT,
+          context: 'received.isEdit',
+        })
         if (editTarget) {
           mensagemSalva = editTarget
           console.log(`✏️ Z-API isEdit: mensagem ${editTarget.id} atualizada (conversa ${conversa_id})`)
@@ -2690,6 +2816,7 @@ exports.receberZapi = async (req, res) => {
         texto,
         direcao: fromMe ? 'out' : 'in',
         company_id,
+        ...(whatsapp_instance_id ? { whatsapp_instance_id } : {}),
         whatsapp_id: whatsappIdStr || null,
         criado_em,
         ...(statusPayload ? { status: statusPayload } : {})
@@ -2812,7 +2939,13 @@ exports.receberZapi = async (req, res) => {
       }
       if (errMsg) {
         if (String(errMsg.code || '') === '23505' || String(errMsg.message || '').includes('duplicate') || String(errMsg.message || '').includes('unique')) {
-          const { data: existente } = await supabase.from('mensagens').select(WEBHOOK_MSG_SELECT).eq('company_id', company_id).eq('whatsapp_id', whatsappIdStr).maybeSingle()
+          const { data: existente } = await selectSingleMensagemByWhatsappId(supabase, {
+            company_id,
+            whatsapp_id: whatsappIdStr,
+            whatsapp_instance_id,
+            select: WEBHOOK_MSG_SELECT,
+            context: 'received.insert.duplicate',
+          })
           // Corrida: outro processo inseriu primeiro (sem URL) e este webhook traz mídia https —
           // sem merge, a linha fica sem url até expirar o link remoto. Mescla só mídia persistível.
           let mergedDup = existente
@@ -3054,7 +3187,7 @@ exports.receberZapi = async (req, res) => {
           const isGroupForHistory = isGroup
           setImmediate(async () => {
             try {
-              const history = await provider.getChatMessages(phoneForHistory, 25, null, { companyId: company_id }).catch(() => [])
+              const history = await provider.getChatMessages(phoneForHistory, 25, null, { companyId: company_id, whatsappInstanceId: whatsapp_instance_id || undefined }).catch(() => [])
               if (!Array.isArray(history) || history.length === 0) return
 
               const ordered = history
@@ -3076,12 +3209,13 @@ exports.receberZapi = async (req, res) => {
                   texto: ex.texto,
                   direcao: direcaoHistory,
                   company_id,
+                  ...(whatsapp_instance_id ? { whatsapp_instance_id } : {}),
                   whatsapp_id: wId,
                   criado_em: ex.criado_em
                 }
 
                 if (ex.fromMe) {
-                  const { data: existOut } = await supabase
+                  let existOutQuery = supabase
                     .from('mensagens')
                     .select('id, criado_em, whatsapp_id')
                     .eq('company_id', company_id)
@@ -3090,13 +3224,14 @@ exports.receberZapi = async (req, res) => {
                     .eq('texto', ex.texto)
                     .order('id', { ascending: false })
                     .limit(1)
-                    .maybeSingle()
+                  existOutQuery = applyWhatsappInstanceFilterOrLegacy(existOutQuery, whatsapp_instance_id)
+                  const { data: existOut } = await existOutQuery.maybeSingle()
                   if (existOut && !existOut.whatsapp_id) {
                     const updatePayload = { whatsapp_id: wId }
                     const yearExist = existOut.criado_em ? new Date(existOut.criado_em).getFullYear() : 0
                     const yearNew = ex.criado_em ? new Date(ex.criado_em).getFullYear() : 0
                     if (yearExist < 2020 && yearNew >= 2020) updatePayload.criado_em = ex.criado_em
-                    await supabase.from('mensagens').update(updatePayload).eq('id', existOut.id)
+                    await supabase.from('mensagens').update(updatePayload).eq('company_id', company_id).eq('id', existOut.id)
                     continue
                   }
                 }
@@ -3412,9 +3547,24 @@ exports.statusZapi = async (req, res) => {
     }
     const body = req.body || {}
     let company_id = req.zapiContext?.company_id
+    let whatsapp_instance_id = req.zapiContext?.whatsapp_instance_id ?? null
     if (company_id == null) {
       const instanceIdRaw = (body?.instanceId ?? body?.instance_id ?? body?.instance ?? '').toString().trim()
-      company_id = instanceIdRaw ? await getCompanyIdByInstanceId(instanceIdRaw) : null
+      if (instanceIdRaw) {
+        const resolved = await getWhatsappInstanceByProviderInstanceId('ultramsg', instanceIdRaw)
+        if (resolved?.code === 'DUPLICATE_PROVIDER_INSTANCE') {
+          _logWebhookSafe({ eventType: 'MessageStatusCallback', instanceId: instanceIdRaw.slice(0, 24), companyIdResolved: 'duplicate_blocked' })
+          return res.status(200).json({ ok: true, ignored: 'duplicate_provider_instance' })
+        }
+        if (resolved?.instance) {
+          company_id = resolved.instance.company_id
+          whatsapp_instance_id = resolved.instance.id ?? null
+        } else {
+          company_id = await getCompanyIdByInstanceId(instanceIdRaw)
+        }
+      } else {
+        company_id = null
+      }
       const instanceIdResolved = instanceIdRaw ? instanceIdRaw.slice(0, 24) + (instanceIdRaw.length > 24 ? '…' : '') : '(empty)'
       _logWebhookSafe({ eventType: 'MessageStatusCallback', instanceId: instanceIdResolved, companyIdResolved: company_id != null ? company_id : 'not_mapped' })
       if (company_id == null) return res.status(200).json({ ok: true })
@@ -3475,8 +3625,22 @@ exports.statusZapi = async (req, res) => {
 
     // Fallback: deriva company_id da mensagem (whatsapp_id) quando instanceId ausente
     if (company_id == null && idsToProcess.length > 0) {
-      const { data: msgRow } = await supabase.from('mensagens').select('company_id').eq('whatsapp_id', idsToProcess[0]).limit(1).maybeSingle()
-      company_id = msgRow?.company_id ?? null
+      const { data: msgRows } = await supabase
+        .from('mensagens')
+        .select('company_id')
+        .eq('whatsapp_id', idsToProcess[0])
+        .is('whatsapp_instance_id', null)
+        .limit(2)
+      if (Array.isArray(msgRows) && msgRows.length > 1) {
+        logAmbiguousWhatsappId('status.company_fallback', {
+          company_id: null,
+          whatsapp_instance_id: null,
+          whatsapp_id: idsToProcess[0],
+          count: msgRows.length,
+        })
+        return res.status(200).json({ ok: true, ignored: 'ambiguous_status_without_instance' })
+      }
+      company_id = Array.isArray(msgRows) && msgRows[0]?.company_id != null ? msgRows[0].company_id : null
     }
     if (company_id == null) {
       if (body?.instanceId) console.log('[Z-API] status: instance not mapped:', String(body.instanceId).slice(0, 16) + '…')
@@ -3492,12 +3656,13 @@ exports.statusZapi = async (req, res) => {
       // Grupos: WhatsApp não envia read receipts confiáveis — cap em delivered
       let effectiveStatus = statusNorm
       if (statusNorm === 'read' || statusNorm === 'played') {
-        const { data: msgForConv } = await supabase
-          .from('mensagens')
-          .select('conversa_id')
-          .eq('company_id', company_id)
-          .eq('whatsapp_id', idStr)
-          .maybeSingle()
+        const { data: msgForConv } = await selectSingleMensagemByWhatsappId(supabase, {
+          company_id,
+          whatsapp_id: idStr,
+          whatsapp_instance_id,
+          select: 'conversa_id',
+          context: 'status.group_cap',
+        })
         if (msgForConv?.conversa_id) {
           const { data: conv } = await supabase
             .from('conversas')
@@ -3511,26 +3676,37 @@ exports.statusZapi = async (req, res) => {
       }
 
       // 1) Atualiza por (company_id, whatsapp_id) — match exato (inclui autor_usuario_id para emit ao remetente)
-      let { data: msg } = await supabase
-        .from('mensagens')
-        .update({ status: effectiveStatus })
-        .eq('company_id', company_id)
-        .eq('whatsapp_id', idStr)
-        .select('id, conversa_id, company_id, autor_usuario_id')
-        .maybeSingle()
+      let { data: msg } = await updateSingleMensagemByWhatsappId(supabase, {
+        company_id,
+        whatsapp_id: idStr,
+        whatsapp_instance_id,
+        updates: { status: effectiveStatus },
+        select: 'id, conversa_id, company_id, autor_usuario_id, whatsapp_instance_id',
+        context: 'status.exact',
+      })
 
       // 2) Fallback: Z-API às vezes trunca o ID no status callback.
       //    Tenta prefixo (primeiros 20 chars) ainda dentro do company_id (sem cross-tenant).
       if (!msg && idStr.length >= 20) {
         const prefix = idStr.slice(0, 20)
-        const { data: prefixRows } = await supabase
+        let prefixQuery = supabase
           .from('mensagens')
           .select('id, conversa_id, company_id, autor_usuario_id, whatsapp_id')
           .eq('company_id', company_id)
           .ilike('whatsapp_id', `${prefix}%`)
           .order('id', { ascending: false })
-          .limit(1)
-        const candidate = Array.isArray(prefixRows) && prefixRows[0] ? prefixRows[0] : null
+          .limit(2)
+        prefixQuery = applyWhatsappInstanceFilterOrLegacy(prefixQuery, whatsapp_instance_id)
+        const { data: prefixRows } = await prefixQuery
+        if (Array.isArray(prefixRows) && prefixRows.length > 1) {
+          logAmbiguousWhatsappId('status.prefix', {
+            company_id,
+            whatsapp_instance_id,
+            whatsapp_id: `${prefix}%`,
+            count: prefixRows.length,
+          })
+        }
+        const candidate = Array.isArray(prefixRows) && prefixRows.length === 1 ? prefixRows[0] : null
         if (candidate?.id) {
           const { data: patched } = await supabase
             .from('mensagens')
@@ -3548,9 +3724,9 @@ exports.statusZapi = async (req, res) => {
       const isWhatsAppFormatId = idStr.includes('@') || idStr.includes('_')
       if (!msg && isWhatsAppFormatId && company_id) {
         const fromIso = new Date(Date.now() - 5 * 60 * 1000).toISOString()
-        const { data: cand } = await supabase
+        let recentOutQuery = supabase
           .from('mensagens')
-          .select('id, conversa_id, company_id, autor_usuario_id')
+          .select('id, conversa_id, company_id, autor_usuario_id, whatsapp_instance_id')
           .eq('company_id', company_id)
           .eq('direcao', 'out')
           .is('whatsapp_id', null)
@@ -3558,6 +3734,8 @@ exports.statusZapi = async (req, res) => {
           .order('criado_em', { ascending: false })
           .order('id', { ascending: false })
           .limit(1)
+        recentOutQuery = applyWhatsappInstanceFilterOrLegacy(recentOutQuery, whatsapp_instance_id)
+        const { data: cand } = await recentOutQuery
           .maybeSingle()
         if (cand?.id) {
           const { data: patched } = await supabase
@@ -3577,15 +3755,17 @@ exports.statusZapi = async (req, res) => {
       const isUltramsgNumericId = /^\d{1,15}$/.test(idStr)
       if (!msg && isUltramsgNumericId && company_id) {
         const fromIso = new Date(Date.now() - 3 * 60 * 1000).toISOString()
-        const { data: recent } = await supabase
+        let numericRecentQuery = supabase
           .from('mensagens')
-          .select('id, conversa_id, company_id, autor_usuario_id')
+          .select('id, conversa_id, company_id, autor_usuario_id, whatsapp_instance_id')
           .eq('company_id', company_id)
           .eq('direcao', 'out')
           .gte('criado_em', fromIso)
           .order('criado_em', { ascending: false })
           .order('id', { ascending: false })
           .limit(2)
+        numericRecentQuery = applyWhatsappInstanceFilterOrLegacy(numericRecentQuery, whatsapp_instance_id)
+        const { data: recent } = await numericRecentQuery
         const cand = Array.isArray(recent) && recent.length === 1 ? recent[0] : null
         if (cand?.id) {
           const { data: patched } = await supabase
@@ -3625,4 +3805,10 @@ exports.statusZapi = async (req, res) => {
     if (process.env.WHATSAPP_DEBUG === '1') console.error('[DEBUG] /webhooks/ultramsg/status ERRO:', e?.message || e)
     return res.status(200).json({ ok: true })
   }
+}
+
+exports._test = {
+  applyWhatsappInstanceFilterOrLegacy,
+  selectSingleMensagemByWhatsappId,
+  updateSingleMensagemByWhatsappId,
 }
