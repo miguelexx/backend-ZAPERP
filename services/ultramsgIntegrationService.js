@@ -9,8 +9,21 @@ const supabase = require('../config/supabase')
 const ULTRAMSG_BASE_URL = (process.env.ULTRAMSG_BASE_URL || 'https://api.ultramsg.com').replace(/\/$/, '')
 const TIMEOUT_MS = 10_000
 const CONFIGURE_WEBHOOKS_THROTTLE_MS = 10 * 60 * 1000 // 10 minutos entre tentativas de configureWebhooks
+const MAP_MAX_ENTRIES = 500 // limite para evitar crescimento ilimitado em multi-tenant
 const lastConfigureWebhooksAt = new Map()
 const lastConnectedState = new Map() // companyId -> boolean (para detectar transição ao conectar QR)
+
+/** Evita crescimento ilimitado de Maps em deployments com muitas empresas. */
+function pruneMap(map, maxEntries) {
+  if (map.size <= maxEntries) return
+  const excess = map.size - maxEntries
+  let removed = 0
+  for (const key of map.keys()) {
+    if (removed >= excess) break
+    map.delete(key)
+    removed++
+  }
+}
 
 /** Normaliza instance_id: UltraMsg aceita numérico (51534) ou com prefixo (instance51534). Unifica com provider. */
 function normalizeInstanceId(instanceId) {
@@ -85,6 +98,7 @@ async function getStatus(companyId) {
     const last = lastConfigureWebhooksAt.get(companyId) || 0
     if (now - last >= CONFIGURE_WEBHOOKS_THROTTLE_MS) {
       lastConfigureWebhooksAt.set(companyId, now)
+      pruneMap(lastConfigureWebhooksAt, MAP_MAX_ENTRIES)
       setImmediate(() => {
         const { getProvider } = require('./providers')
         const appUrl = String(process.env.APP_URL || '').trim()
@@ -102,6 +116,7 @@ async function getStatus(companyId) {
     const wasConnected = lastConnectedState.get(companyId) ?? false
     if (!wasConnected && connected) {
       lastConnectedState.set(companyId, true)
+      pruneMap(lastConnectedState, MAP_MAX_ENTRIES)
       setImmediate(async () => {
         try {
           const { data: empresa } = await supabase

@@ -1,5 +1,5 @@
 const path = require('path')
-const { loadEnv, getBooleanEnv } = require('./config/env')
+const { loadEnv, getBooleanEnv, isProduction } = require('./config/env')
 loadEnv()
 const http = require('http')
 const app = require('./app')
@@ -41,23 +41,38 @@ if (!String(process.env.NODE_ENV || '').trim()) {
 
 const server = http.createServer(app)
 
-// CORS do Socket.IO: segue mesma política do Express (CORS_ORIGINS + APP_URL).
-const allowedSocketOrigins = String(process.env.CORS_ORIGINS || '')
-  .split(',')
-  .map((s) => s.trim())
-  .filter(Boolean)
-
-let socketAppOrigin = null
-try {
-  const u = new URL(String(process.env.APP_URL || '').trim())
-  socketAppOrigin = u?.origin || null
-} catch (_) {
-  socketAppOrigin = null
+// CORS do Socket.IO: alinhado ao Express (CORS_ORIGINS + ZAPERP_CORS_EXTRA_ORIGINS + APP_URL + dev local).
+function collectAllowedSocketOrigins() {
+  const origins = new Set()
+  const pushCsv = (raw) => {
+    String(raw || '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .forEach((o) => origins.add(o))
+  }
+  pushCsv(process.env.CORS_ORIGINS)
+  pushCsv(process.env.ZAPERP_CORS_EXTRA_ORIGINS)
+  try {
+    const u = new URL(String(process.env.APP_URL || '').trim())
+    if (u.origin) origins.add(u.origin)
+  } catch (_) {
+    /* ignore */
+  }
+  if (!isProduction()) {
+    ;[
+      'http://localhost:3000',
+      'http://localhost:5173',
+      'http://127.0.0.1:5173',
+      'http://127.0.0.1:3000',
+      'http://localhost:4173',
+      'http://127.0.0.1:4173',
+    ].forEach((o) => origins.add(o))
+  }
+  return Array.from(origins)
 }
 
-if (socketAppOrigin && !allowedSocketOrigins.includes(socketAppOrigin)) {
-  allowedSocketOrigins.push(socketAppOrigin)
-}
+const allowedSocketOrigins = collectAllowedSocketOrigins()
 
 const internalChatSocket = require('./socket/internalChatSocket')
 const { startAbsenceFinalizationScheduler } = require('./services/absenceFinalizationScheduler')

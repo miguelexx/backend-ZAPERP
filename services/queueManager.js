@@ -236,11 +236,43 @@ async function processJob(job, io = null) {
 }
 
 /**
+ * Recupera jobs travados em 'running' (processo anterior encerrou abruptamente).
+ * Reseta para 'pending' jobs com mais de STALE_JOB_TIMEOUT_MS sem atualização.
+ */
+async function recoverStaleRunningJobs() {
+  const STALE_JOB_TIMEOUT_MS = parseInt(process.env.QUEUE_STALE_JOB_TIMEOUT_MS, 10) || 10 * 60 * 1000
+  const staleBefore = new Date(Date.now() - STALE_JOB_TIMEOUT_MS).toISOString()
+  try {
+    const { data: staleJobs } = await supabase
+      .from('jobs')
+      .select('id, company_id, tipo, tentativas')
+      .eq('status', 'running')
+      .lt('atualizado_em', staleBefore)
+    if (!staleJobs || staleJobs.length === 0) return
+    console.warn(`[queueManager] Recuperando ${staleJobs.length} job(s) travados em 'running'`)
+    for (const job of staleJobs) {
+      await supabase
+        .from('jobs')
+        .update({ status: 'pending', atualizado_em: new Date().toISOString() })
+        .eq('id', job.id)
+        .eq('company_id', job.company_id)
+        .eq('status', 'running')
+      console.warn(`[queueManager] Job ${job.id} (${job.tipo}) empresa ${job.company_id} resetado para pending`)
+    }
+  } catch (e) {
+    console.warn('[queueManager] Erro ao recuperar jobs travados:', e?.message || e)
+  }
+}
+
+/**
  * Inicia polling do worker.
  * @param {number} intervalMs - intervalo entre verificações
  * @param {object} io - Socket.IO para emitir evento legado `zapi_sync_contatos` ao concluir (ver ../docs/_OFICIAL/ADR-LEGACY-NAMING.md)
  */
 function startWorker(intervalMs = 5000, io = null) {
+  // Recupera jobs travados de crashes anteriores antes de iniciar o polling
+  recoverStaleRunningJobs().catch(() => {})
+
   const poll = async () => {
     try {
       const job = await getNextPendingJob()
@@ -310,5 +342,6 @@ module.exports = {
   retryJob,
   pauseAll,
   resumeAll,
+  recoverStaleRunningJobs,
   JOB_TIPOS
 }

@@ -7,25 +7,21 @@ const { empresaCrmHabilitada } = require('../helpers/crmEmpresaFlag')
 exports.getMe = async (req, res) => {
   try {
     const { id: user_id, company_id } = req.user
-    let crm_habilitado = true
-    let separar_mensagens_disparadas = false
-    try {
-      crm_habilitado = await empresaCrmHabilitada(company_id)
-    } catch (_) {}
-    try {
-      const { data: empFlags } = await supabase
-        .from('empresas')
-        .select('separar_mensagens_disparadas')
-        .eq('id', company_id)
-        .maybeSingle()
-      separar_mensagens_disparadas = !!empFlags?.separar_mensagens_disparadas
-    } catch (_) {}
-    let { data, error } = await supabase
-      .from('usuarios')
-      .select('id, nome, email, perfil, departamento_id, mostrar_nome_ao_cliente')
-      .eq('id', user_id)
-      .eq('company_id', company_id)
-      .maybeSingle()
+
+    const [crmResult, empFlagsResult, userResult] = await Promise.allSettled([
+      empresaCrmHabilitada(company_id).catch(() => true),
+      supabase.from('empresas').select('separar_mensagens_disparadas').eq('id', company_id).maybeSingle(),
+      supabase.from('usuarios').select('id, nome, email, perfil, departamento_id, mostrar_nome_ao_cliente').eq('id', user_id).eq('company_id', company_id).maybeSingle(),
+    ])
+
+    const crm_habilitado = crmResult.status === 'fulfilled' ? crmResult.value : true
+    const separar_mensagens_disparadas = empFlagsResult.status === 'fulfilled'
+      ? !!empFlagsResult.value?.data?.separar_mensagens_disparadas
+      : false
+
+    let { data, error } = userResult.status === 'fulfilled'
+      ? userResult.value
+      : { data: null, error: new Error('Falha ao buscar usuário') }
     if (error && (String(error.message || '').includes('mostrar_nome_ao_cliente') || String(error.message || '').includes('does not exist'))) {
       const res2 = await supabase.from('usuarios').select('id, nome, email, perfil, departamento_id').eq('id', user_id).eq('company_id', company_id).maybeSingle()
       data = res2.data
@@ -426,10 +422,19 @@ exports.login = async (req, res) => {
       return res.status(401).json({ error: 'Credenciais inválidas' })
     }
 
-    // Múltiplos departamentos: busca em usuario_departamentos (fallback: departamento_id legado)
+    // Múltiplos departamentos + flags da empresa: busca em paralelo
     const { obterDepartamentoIdsDoUsuario } = require('../helpers/usuarioDepartamentosHelper')
-    const departamento_ids = await obterDepartamentoIdsDoUsuario(usuario.id, usuario.company_id, usuario)
-    const departamento_id = departamento_ids.length > 0 ? departamento_ids[0] : null
+    const [departamento_ids, crmHabResult, empFlagsResult] = await Promise.allSettled([
+      obterDepartamentoIdsDoUsuario(usuario.id, usuario.company_id, usuario),
+      empresaCrmHabilitada(Number(usuario.company_id)).catch(() => true),
+      supabase.from('empresas').select('separar_mensagens_disparadas').eq('id', usuario.company_id).maybeSingle(),
+    ])
+    const depIds = departamento_ids.status === 'fulfilled' ? departamento_ids.value : []
+    const departamento_id = depIds.length > 0 ? depIds[0] : null
+    const crm_habilitado = crmHabResult.status === 'fulfilled' ? crmHabResult.value : true
+    const separar_mensagens_disparadas = empFlagsResult.status === 'fulfilled'
+      ? !!empFlagsResult.value?.data?.separar_mensagens_disparadas
+      : false
 
     // Gera JWT com dados essenciais (user_id/company_id obrigatórios p/ multi-tenant)
     const jwtExpiresIn = String(process.env.JWT_EXPIRES_IN || '30d').trim() || '30d'
@@ -441,25 +446,11 @@ exports.login = async (req, res) => {
         email: usuario.email,
         perfil: usuario.perfil || 'atendente',
         departamento_id,
-        departamento_ids
+        departamento_ids: depIds
       },
       process.env.JWT_SECRET,
       { expiresIn: jwtExpiresIn }
     )
-
-    let crm_habilitado = true
-    let separar_mensagens_disparadas = false
-    try {
-      crm_habilitado = await empresaCrmHabilitada(Number(usuario.company_id))
-    } catch (_) {}
-    try {
-      const { data: empFlags } = await supabase
-        .from('empresas')
-        .select('separar_mensagens_disparadas')
-        .eq('id', usuario.company_id)
-        .maybeSingle()
-      separar_mensagens_disparadas = !!empFlags?.separar_mensagens_disparadas
-    } catch (_) {}
 
     // Retorna token e dados do usuário (nome para exibição no cabeçalho)
     return res.json({
@@ -471,7 +462,7 @@ exports.login = async (req, res) => {
         company_id: usuario.company_id,
         perfil: usuario.perfil || 'atendente',
         departamento_id,
-        departamento_ids,
+        departamento_ids: depIds,
         crm_habilitado,
         separar_mensagens_disparadas,
       },

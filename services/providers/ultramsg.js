@@ -26,6 +26,7 @@ const FILENAME_MAX_LEN = 255
 const CHATS_MESSAGES_LIMIT_MAX = 1000
 const ULTRAMSG_TIMEOUT_MS = Number(process.env.ULTRAMSG_TIMEOUT_MS) || 30_000
 const lastSendPerCompany = new Map()
+const LAST_SEND_MAP_MAX = 500
 const WHATSAPP_DEBUG = String(process.env.WHATSAPP_DEBUG || '').toLowerCase() === 'true'
 
 /** Resposta HTTP 200 com JSON de erro (ex.: token inválido após rotação no painel UltraMSG). */
@@ -319,6 +320,10 @@ async function awaitSendDelay(companyId, opts = {}) {
   const key = companyId ?? 'default'
   if (opts?.skipProviderDelay) {
     lastSendPerCompany.set(key, Date.now())
+    if (lastSendPerCompany.size > LAST_SEND_MAP_MAX) {
+      const oldest = lastSendPerCompany.keys().next().value
+      lastSendPerCompany.delete(oldest)
+    }
     return
   }
   const last = lastSendPerCompany.get(key) || 0
@@ -327,6 +332,10 @@ async function awaitSendDelay(companyId, opts = {}) {
     await new Promise(r => setTimeout(r, MIN_DELAY_BETWEEN_SENDS_MS - elapsed))
   }
   lastSendPerCompany.set(key, Date.now())
+  if (lastSendPerCompany.size > LAST_SEND_MAP_MAX) {
+    const oldest = lastSendPerCompany.keys().next().value
+    lastSendPerCompany.delete(oldest)
+  }
 }
 
 /**

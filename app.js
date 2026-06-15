@@ -80,6 +80,10 @@ app.use(
     crossOriginOpenerPolicy: { policy: 'same-origin-allow-popups' },
     crossOriginResourcePolicy: { policy: 'cross-origin' },
     xFrameOptions: false,
+    // HSTS: apenas em produção (HTTPS obrigatório). 1 ano + subdomínios.
+    hsts: isProd
+      ? { maxAge: 31536000, includeSubDomains: true, preload: true }
+      : false,
   })
 )
 
@@ -166,6 +170,10 @@ const corsOptions = {
 
 app.use(cors(corsOptions))
 app.options('*', cors(corsOptions))
+
+// Logging de requisições (após CORS para ter req.user disponível nos handlers)
+const requestLogger = require('./middleware/logger')
+app.use(requestLogger)
 
 // Arquivos estáticos (uploads: imagens, áudios, etc.)
 // Segurança:
