@@ -230,4 +230,55 @@ describe('WhatsApp multi-instance operational phase 2', () => {
     expect(res.json).toHaveBeenCalledWith({ ok: true, ignored: 'duplicate_provider_instance' })
     expect(req.webhookLogData.status).toBe('blocked_duplicate_instance')
   })
+
+  test('webhookUltramsgController preserva contexto resolvido e nao rebaixa para resolver legado', async () => {
+    const receberZapi = jest.fn(async (req, res) => res.json({
+      ok: true,
+      company_id: req.zapiContext?.company_id,
+      whatsapp_instance_id: req.zapiContext?.whatsapp_instance_id,
+    }))
+    jest.doMock('../controllers/webhookZapiController', () => ({
+      receberZapi,
+      statusZapi: jest.fn(),
+    }))
+
+    const controller = require('../controllers/webhookUltramsgController')
+    const req = {
+      body: {
+        event_type: 'message_received',
+        instanceId: '173587',
+        data: {
+          id: 'msg-1',
+          from: '5534999999999@c.us',
+          to: '5534888888888@c.us',
+          type: 'chat',
+          body: 'Ola',
+          fromMe: false,
+        },
+      },
+      zapiContext: {
+        company_id: 1,
+        whatsapp_instance_id: 8,
+        provider: 'ultramsg',
+        provider_instance_id: 'instance173587',
+        instanceId: '173587',
+        eventType: 'message_received',
+      },
+      webhookLogData: null,
+    }
+    const res = { status: jest.fn(() => res), json: jest.fn(() => res) }
+
+    await controller.handleWebhookUltramsg(req, res)
+
+    expect(receberZapi).toHaveBeenCalledTimes(1)
+    expect(req.zapiContext.company_id).toBe(1)
+    expect(req.zapiContext.whatsapp_instance_id).toBe(8)
+    expect(req.webhookLogData).toMatchObject({
+      status: 'processed',
+      company_id: 1,
+      instance_id: '173587',
+      event_type: 'message_received',
+    })
+    expect(req.body.instanceId).toBe('173587')
+  })
 })

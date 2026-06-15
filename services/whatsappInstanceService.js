@@ -157,6 +157,20 @@ function duplicateProviderInstanceResult(provider, instanceId, rows, source) {
   }
 }
 
+function logProviderInstanceLookup(level, message, details = {}) {
+  const safe = {
+    provider: details.provider,
+    instance_id_raw: details.instance_id_raw ? String(details.instance_id_raw).slice(0, 64) : null,
+    variants: Array.isArray(details.variants) ? details.variants.map((v) => String(v).slice(0, 64)) : [],
+    whatsapp_instances_rows: details.whatsapp_instances_rows,
+    empresa_zapi_rows: details.empresa_zapi_rows,
+    result: details.result || null,
+    error: details.error ? String(details.error).slice(0, 160) : null,
+  }
+  const fn = level === 'error' ? console.error : level === 'warn' ? console.warn : console.log
+  fn(message, safe)
+}
+
 async function findActiveProviderInstanceRows(provider, instanceId, opts = {}) {
   const p = normalizeProvider(provider)
   const values = normalizeInstanceLookupValues(instanceId)
@@ -278,28 +292,76 @@ async function getWhatsappInstanceByProviderInstanceId(provider, instanceId, opt
 
   const activeRows = await findActiveProviderInstanceRows(p, instanceId, opts)
   if (activeRows.error && !isMissingTableError(activeRows.error)) {
+    logProviderInstanceLookup('error', '[WHATSAPP-INSTANCES] Erro ao buscar provider instance_id em whatsapp_instances', {
+      provider: p,
+      instance_id_raw: instanceId,
+      variants: values,
+      error: activeRows.error?.message || activeRows.error,
+    })
     return { instance: null, error: 'Erro ao buscar instancia por provider instance_id' }
   }
   if (activeRows.rows.length > 1) {
     return duplicateProviderInstanceResult(p, instanceId, activeRows.rows, 'whatsapp_instances')
   }
   if (activeRows.rows.length === 1) {
+    if (process.env.WHATSAPP_DEBUG === '1') {
+      logProviderInstanceLookup('log', '[WHATSAPP-INSTANCES] Provider instance_id mapeado em whatsapp_instances', {
+        provider: p,
+        instance_id_raw: instanceId,
+        variants: values,
+        whatsapp_instances_rows: 1,
+        result: `company_id=${activeRows.rows[0].company_id} whatsapp_instance_id=${activeRows.rows[0].id}`,
+      })
+    }
     return { instance: responseInstance(activeRows.rows[0], opts), error: null }
   }
 
   if (opts.allowLegacyFallback === false) {
+    logProviderInstanceLookup('warn', '[WHATSAPP-INSTANCES] Provider instance_id nao encontrado em whatsapp_instances', {
+      provider: p,
+      instance_id_raw: instanceId,
+      variants: values,
+      whatsapp_instances_rows: 0,
+      empresa_zapi_rows: null,
+    })
     return { instance: null, error: 'Instancia WhatsApp nao encontrada' }
   }
 
   const legacyRows = await findActiveProviderInstanceRows(p, instanceId, { ...opts, table: 'empresa_zapi' })
-  if (legacyRows.error) return { instance: null, error: 'Erro ao buscar empresa_zapi por instance_id' }
+  if (legacyRows.error) {
+    logProviderInstanceLookup('error', '[WHATSAPP-INSTANCES] Erro ao buscar provider instance_id em empresa_zapi', {
+      provider: p,
+      instance_id_raw: instanceId,
+      variants: values,
+      whatsapp_instances_rows: 0,
+      error: legacyRows.error?.message || legacyRows.error,
+    })
+    return { instance: null, error: 'Erro ao buscar empresa_zapi por instance_id' }
+  }
   if (legacyRows.rows.length > 1) {
     return duplicateProviderInstanceResult(p, instanceId, legacyRows.rows, 'empresa_zapi')
   }
   if (legacyRows.rows.length === 1) {
+    if (process.env.WHATSAPP_DEBUG === '1') {
+      logProviderInstanceLookup('log', '[WHATSAPP-INSTANCES] Provider instance_id mapeado via empresa_zapi legado', {
+        provider: p,
+        instance_id_raw: instanceId,
+        variants: values,
+        whatsapp_instances_rows: 0,
+        empresa_zapi_rows: 1,
+        result: `company_id=${legacyRows.rows[0].company_id}`,
+      })
+    }
     return { instance: buildLegacyInstance(legacyRows.rows[0], opts), error: null }
   }
 
+  logProviderInstanceLookup('warn', '[WHATSAPP-INSTANCES] Provider instance_id nao mapeado em whatsapp_instances nem empresa_zapi', {
+    provider: p,
+    instance_id_raw: instanceId,
+    variants: values,
+    whatsapp_instances_rows: 0,
+    empresa_zapi_rows: 0,
+  })
   return { instance: null, error: 'Instancia WhatsApp nao encontrada' }
 }
 

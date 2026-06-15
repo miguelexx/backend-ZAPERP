@@ -418,6 +418,7 @@ describe('whatsappInstanceService', () => {
     const req = { method: 'POST', path: '/webhooks/ultramsg', body: { instanceId: '173587', type: 'message_received' } }
     const res = { status: jest.fn(() => res), json: jest.fn(() => res) }
     const next = jest.fn()
+    const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {})
 
     await middleware(req, res, next)
 
@@ -429,6 +430,37 @@ describe('whatsappInstanceService', () => {
       instance_id: '173587',
       provider: 'ultramsg',
     })
+    const logged = JSON.stringify(errorSpy.mock.calls)
+    expect(logged).not.toContain('secret-a')
+    expect(logged).not.toContain('secret-b')
+    errorSpy.mockRestore()
+  })
+
+  test('resolveWebhookCompany marca ignored_not_mapped somente quando instancia nao existe', async () => {
+    const supabase = createSupabaseMock()
+    jest.doMock('../config/supabase', () => supabase)
+
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {})
+    const middleware = require('../middleware/resolveWebhookCompany')
+    const req = { method: 'POST', path: '/webhooks/ultramsg', body: { instanceId: '173587', type: 'message_received' } }
+    const res = { status: jest.fn(() => res), json: jest.fn(() => res) }
+    const next = jest.fn()
+
+    await middleware(req, res, next)
+
+    expect(next).not.toHaveBeenCalled()
+    expect(res.status).toHaveBeenCalledWith(200)
+    expect(res.json).toHaveBeenCalledWith({ ok: true, ignored: 'instance_not_mapped' })
+    expect(req.webhookLogData).toMatchObject({
+      status: 'ignored_not_mapped',
+      instance_id: '173587',
+      event_type: 'message_received',
+    })
+    const logged = JSON.stringify(warnSpy.mock.calls)
+    expect(logged).toContain('173587')
+    expect(logged).toContain('instance173587')
+    expect(logged).not.toContain('token')
+    warnSpy.mockRestore()
   })
 
   test('falha da RPC de default nao deixa empresa sem default', async () => {
