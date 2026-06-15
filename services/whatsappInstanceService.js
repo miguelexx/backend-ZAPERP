@@ -157,11 +157,25 @@ function duplicateProviderInstanceResult(provider, instanceId, rows, source) {
   }
 }
 
+function getSupabaseProjectHint() {
+  const raw = String(process.env.SUPABASE_URL || '').trim()
+  if (!raw) return 'not_configured'
+  try {
+    const url = new URL(raw)
+    const host = url.hostname || ''
+    const ref = host.endsWith('.supabase.co') ? host.split('.')[0] : host
+    return ref ? `${url.protocol}//${ref}` : url.protocol
+  } catch (_) {
+    return 'invalid_url'
+  }
+}
+
 function logProviderInstanceLookup(level, message, details = {}) {
   const safe = {
     provider: details.provider,
     instance_id_raw: details.instance_id_raw ? String(details.instance_id_raw).slice(0, 64) : null,
     variants: Array.isArray(details.variants) ? details.variants.map((v) => String(v).slice(0, 64)) : [],
+    supabase_project: getSupabaseProjectHint(),
     whatsapp_instances_rows: details.whatsapp_instances_rows,
     empresa_zapi_rows: details.empresa_zapi_rows,
     result: details.result || null,
@@ -299,6 +313,14 @@ async function getWhatsappInstanceByProviderInstanceId(provider, instanceId, opt
       error: activeRows.error?.message || activeRows.error,
     })
     return { instance: null, error: 'Erro ao buscar instancia por provider instance_id' }
+  }
+  if (activeRows.error && isMissingTableError(activeRows.error)) {
+    logProviderInstanceLookup('warn', '[WHATSAPP-INSTANCES] Tabela whatsapp_instances indisponivel no schema REST; tentando fallback legado', {
+      provider: p,
+      instance_id_raw: instanceId,
+      variants: values,
+      error: activeRows.error?.message || activeRows.error,
+    })
   }
   if (activeRows.rows.length > 1) {
     return duplicateProviderInstanceResult(p, instanceId, activeRows.rows, 'whatsapp_instances')

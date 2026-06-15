@@ -12,6 +12,28 @@ function _logSafe(entry) {
   console.log('[WEBHOOK]', JSON.stringify({ ts: new Date().toISOString(), ...entry }))
 }
 
+function supabaseProjectHint() {
+  const raw = String(process.env.SUPABASE_URL || '').trim()
+  if (!raw) return 'not_configured'
+  try {
+    const url = new URL(raw)
+    const host = url.hostname || ''
+    const ref = host.endsWith('.supabase.co') ? host.split('.')[0] : host
+    return ref ? `${url.protocol}//${ref}` : url.protocol
+  } catch (_) {
+    return 'invalid_url'
+  }
+}
+
+function _logResolveDecision(entry) {
+  const payload = {
+    provider: 'ultramsg',
+    supabase_project: supabaseProjectHint(),
+    ...entry,
+  }
+  console.log('[WEBHOOK_RESOLVE]', JSON.stringify(payload))
+}
+
 function extractInstanceId(body) {
   if (!body || typeof body !== 'object') return ''
   const v = body.instanceId ?? body.instance_id ?? body.instance?.id ?? body.instance ??
@@ -53,6 +75,18 @@ async function resolveWebhookCompany(req, res, next) {
 
     const eventType = inferEventType(body, path)
     const resolved = await getWhatsappInstanceByProviderInstanceId('ultramsg', instanceIdRaw)
+    _logResolveDecision({
+      eventType,
+      instance_id_raw: instanceIdRaw,
+      service_return_shape: {
+        has_instance: Boolean(resolved?.instance),
+        has_error: Boolean(resolved?.error),
+        code: resolved?.code || null,
+      },
+      resolved_company_id: resolved?.instance?.company_id ?? null,
+      resolved_whatsapp_instance_id: resolved?.instance?.id ?? null,
+      resolved_provider_instance_id: resolved?.instance?.instance_id || null,
+    })
 
     if (resolved?.code === 'DUPLICATE_PROVIDER_INSTANCE') {
       req.webhookLogData = {
@@ -87,7 +121,19 @@ async function resolveWebhookCompany(req, res, next) {
     req.zapiContext = req.webhookContext
 
     if (company_id == null) {
-      req.webhookLogData = { status: 'ignored_not_mapped', instance_id: instanceIdRaw, event_type: eventType }
+      req.webhookLogData = {
+        status: 'ignored_not_mapped',
+        instance_id: instanceIdRaw,
+        event_type: eventType,
+        provider: 'ultramsg',
+        error_message: resolved?.error || 'Instancia WhatsApp nao encontrada para o instance_id recebido',
+      }
+      _logResolveDecision({
+        eventType,
+        instance_id_raw: instanceIdRaw,
+        final_status: 'ignored_not_mapped',
+        reason: resolved?.error || 'not_found',
+      })
       return res.status(200).json({ ok: true, ignored: 'instance_not_mapped' })
     }
     next()

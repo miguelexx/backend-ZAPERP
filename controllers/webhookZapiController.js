@@ -1027,6 +1027,13 @@ exports.receberZapi = async (req, res) => {
     if (!instanceId || company_id == null) {
       const logData = { instanceId: instanceId ? instanceId.slice(0, 24) + (instanceId.length > 24 ? '…' : '') : '(empty)', companyId: 'not_mapped', type: body.type || body.event || 'unknown', ignored: 'instance_not_mapped' }
       _logWebhookSafe(logData)
+      console.warn('[WEBHOOK_CORE_RESOLVE] ignored_not_mapped no pipeline legado', {
+        has_zapi_context: Boolean(req.zapiContext),
+        context_company_id: req.zapiContext?.company_id ?? null,
+        context_whatsapp_instance_id: req.zapiContext?.whatsapp_instance_id ?? null,
+        instance_id_raw: instanceId || null,
+        provider: 'ultramsg',
+      })
       
       // Log específico para debugar empresa 2
       if (instanceId === '51534' || instanceId === 'instance51534') {
