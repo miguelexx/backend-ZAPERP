@@ -291,12 +291,25 @@ SET telefone = (
 )
 WHERE conv.telefone IS NOT NULL AND conv.telefone != '' AND conv.telefone NOT LIKE '%@g.us';
 
--- Uma única conversa aberta/em atendimento por (empresa, telefone) para contato individual
--- (Se deu erro 23505 clientes_telefone_unique acima, execute FIX_CLIENTES_DUPLICATA.sql e depois este script todo de novo desde a linha 1.)
-DROP INDEX IF EXISTS idx_conversas_company_telefone_open_unique;
-CREATE UNIQUE INDEX idx_conversas_company_telefone_open_unique
+-- Conversas abertas/em atendimento: multi-instancia (company + whatsapp_instance_id + telefone)
+-- Legado: company + telefone quando whatsapp_instance_id IS NULL
+CREATE UNIQUE INDEX IF NOT EXISTS idx_conversas_company_instance_telefone_open_unique
+  ON public.conversas (company_id, whatsapp_instance_id, telefone)
+  WHERE whatsapp_instance_id IS NOT NULL
+    AND telefone IS NOT NULL
+    AND btrim(telefone) <> ''
+    AND (tipo IS NULL OR tipo = 'cliente')
+    AND status_atendimento IN ('aberta', 'em_atendimento');
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_conversas_company_telefone_open_legacy_null_unique
   ON public.conversas (company_id, telefone)
-  WHERE (tipo IS NULL OR tipo = 'cliente') AND status_atendimento IN ('aberta', 'em_atendimento');
+  WHERE whatsapp_instance_id IS NULL
+    AND telefone IS NOT NULL
+    AND btrim(telefone) <> ''
+    AND (tipo IS NULL OR tipo = 'cliente')
+    AND status_atendimento IN ('aberta', 'em_atendimento');
+
+DROP INDEX IF EXISTS idx_conversas_company_telefone_open_unique;
 
 -- ============================================================
 -- Tabela avaliacoes_atendimento (mensagem finalização + nota 0-10)

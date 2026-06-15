@@ -231,6 +231,36 @@ function normalizeWhatsappInstanceId(value) {
   return Number.isFinite(n) && n > 0 ? n : null
 }
 
+function isUniqueViolationError(error) {
+  if (!error) return false
+  const code = String(error.code || '')
+  const msg = String(error.message || error.details || '').toLowerCase()
+  return code === '23505' || msg.includes('unique') || msg.includes('duplicate key')
+}
+
+async function refetchConversationInInstanceScope(
+  supabaseClient,
+  company_id,
+  variants,
+  whatsappInstanceId,
+  allowLegacyNullInstance,
+  limit = 20
+) {
+  const found = await selectConversationsByPhoneVariants(
+    supabaseClient,
+    company_id,
+    variants,
+    whatsappInstanceId,
+    allowLegacyNullInstance,
+    limit
+  )
+  const scoped = pickConversationForWhatsappInstance(found, whatsappInstanceId, allowLegacyNullInstance)
+  if (!Array.isArray(scoped) || scoped.length === 0) return null
+  let conv = scoped[0]
+  conv = await attachWhatsappInstanceToLegacyConversation(supabaseClient, company_id, conv, whatsappInstanceId)
+  return conv
+}
+
 function pickConversationForWhatsappInstance(rows, whatsappInstanceId, allowNullInstance) {
   const list = Array.isArray(rows) ? rows : []
   if (!whatsappInstanceId) return list
@@ -748,9 +778,10 @@ async function findOrCreateConversation(supabaseClient, {
     .single()
 
   if (errCreate) {
-    // 7) Race condition: outra requisição criou antes de nós — rebuscar
-    const isUnique = String(errCreate.code || '') === '23505' || String(errCreate.message || '').toLowerCase().includes('unique')
+    // 7) Race condition / violacao de unique — rebuscar no escopo correto da instancia
+    const isUnique = isUniqueViolationError(errCreate)
     const isMissingCol = String(errCreate.message || '').includes('ultima_atividade') || String(errCreate.code || '') === 'PGRST204'
+    const legacyAllowed = whatsappInstanceId ? allowLegacyNullInstance === true : true
 
     if (isMissingCol) {
       delete insertData.ultima_atividade
@@ -760,26 +791,21 @@ async function findOrCreateConversation(supabaseClient, {
         console.log(`[findOrCreateConversation] ${logPrefix} 🆕 criada (sem ultima_atividade) conv=${retry.id}`)
         return { conversa: retry, created: true }
       }
-      if (String(errRetry.code || '') !== '23505') throw errRetry
+      if (!isUniqueViolationError(errRetry)) throw errRetry
     }
 
     if (isUnique || isMissingCol) {
-      // Race condition resolvida: busca novamente (inclui fechadas)
-      const raceFound = await selectConversationsByPhoneVariants(
+      const raceConv = await refetchConversationInInstanceScope(
         supabaseClient,
         company_id,
         variants,
         whatsappInstanceId,
-        allowLegacyNullInstance,
+        legacyAllowed,
         20
       )
-
-      const raceScoped = pickConversationForWhatsappInstance(raceFound, whatsappInstanceId, allowLegacyNullInstance)
-      const raceConv = Array.isArray(raceScoped) && raceScoped[0] ? raceScoped[0] : null
-      if (raceConv) {
-        console.log(`[findOrCreateConversation] ${logPrefix} ⚡ race condition → conv=${raceConv.id}`)
-        const raceConvWithInstance = await attachWhatsappInstanceToLegacyConversation(supabaseClient, company_id, raceConv, whatsappInstanceId)
-        return { conversa: raceConvWithInstance, created: false }
+      if (raceConv?.id) {
+        console.log(`[findOrCreateConversation] ${logPrefix} ⚡ unique violation → conv=${raceConv.id} instance=${raceConv.whatsapp_instance_id ?? 'legacy'}`)
+        return { conversa: raceConv, created: false }
       }
     }
 

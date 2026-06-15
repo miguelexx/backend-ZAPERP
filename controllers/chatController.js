@@ -1048,11 +1048,11 @@ exports.listarConversas = async (req, res) => {
       return res.json({ conversas: [], colaboradores_encaminhar, pagination: emptyPagination })
     }
 
-    if ((pagamentoPendenteAtivo || emAtrasoAtivo) && !(await usuarioPertenceSetorFinanceiro(departamento_ids, company_id))) {
+    const isFinanceiroUser = await usuarioPertenceSetorFinanceiro(departamento_ids, company_id)
+
+    if ((pagamentoPendenteAtivo || emAtrasoAtivo) && !isFinanceiroUser) {
       return sendEmptyChatListResponse(false)
     }
-
-    const isFinanceiroUser = await usuarioPertenceSetorFinanceiro(departamento_ids, company_id)
 
     const minhaFilaAtiva =
       minhaFilaRaw === '1' ||
@@ -4870,6 +4870,10 @@ exports.enviarReacaoMensagem = async (req, res) => {
 
     const whatsappInstanceId = await resolveConversationWhatsappInstance(company_id, conversa)
 
+    if (String(conversa.telefone || '').trim().toLowerCase().startsWith('lid:')) {
+      return res.status(400).json({ error: 'Número do contato indisponível (conversa por LID). Aguarde o contato enviar uma mensagem.' })
+    }
+
     const provider = getProvider()
     if (!provider || !provider.sendReaction) {
       return res.status(500).json({ error: 'Provider WhatsApp não suporta reações' })
@@ -4928,6 +4932,10 @@ exports.removerReacaoMensagem = async (req, res) => {
 
     const whatsappInstanceId = await resolveConversationWhatsappInstance(company_id, conversa)
 
+    if (String(conversa.telefone || '').trim().toLowerCase().startsWith('lid:')) {
+      return res.status(400).json({ error: 'Número do contato indisponível (conversa por LID). Aguarde o contato enviar uma mensagem.' })
+    }
+
     const provider = getProvider()
     if (!provider || !provider.removeReaction) {
       return res.status(500).json({ error: 'Provider WhatsApp não suporta remoção de reação' })
@@ -4968,7 +4976,7 @@ exports.enviarContatoWhatsapp = async (req, res) => {
 
     const { data: conversa, error: errConv } = await supabase
       .from('conversas')
-      .select('id, telefone, company_id, whatsapp_instance_id')
+      .select('id, telefone, cliente_id, company_id, chat_lid, whatsapp_instance_id')
       .eq('company_id', company_id)
       .eq('id', conversa_id)
       .maybeSingle()
@@ -4978,6 +4986,21 @@ exports.enviarContatoWhatsapp = async (req, res) => {
     }
 
     const whatsappInstanceId = await resolveConversationWhatsappInstance(company_id, conversa)
+    let telefoneParaEnvio = conversa.telefone || ''
+    if (telefoneParaEnvio && String(telefoneParaEnvio).trim().toLowerCase().startsWith('lid:')) {
+      if (conversa.cliente_id) {
+        const { data: cliLid } = await supabase.from('clientes').select('telefone').eq('id', conversa.cliente_id).eq('company_id', company_id).maybeSingle()
+        if (cliLid?.telefone && !String(cliLid.telefone).startsWith('lid:')) telefoneParaEnvio = cliLid.telefone
+      }
+      if (telefoneParaEnvio.startsWith('lid:') && conversa.chat_lid) {
+        const telSibling = await resolveTelefoneFromLidSiblingConversation(company_id, conversa, whatsappInstanceId)
+        if (telSibling) telefoneParaEnvio = telSibling
+      }
+      if (telefoneParaEnvio.startsWith('lid:')) {
+        return res.status(400).json({ error: 'Número do contato indisponível (conversa por LID). Aguarde o contato enviar uma mensagem ou sincronize os contatos.' })
+      }
+    }
+
     const { data: cliente, error: errCli } = await supabase
       .from('clientes')
       .select('id, nome, pushname, telefone, foto_perfil')
@@ -5046,14 +5069,14 @@ exports.enviarContatoWhatsapp = async (req, res) => {
 
     const { nome: usuarioNome } = await getUsuarioParaEnvioCliente(supabase, company_id, user_id)
     if (usuarioNome) {
-      await provider.sendText(conversa.telefone, prefixarParaCliente('Segue contato abaixo:', usuarioNome), {
+      await provider.sendText(telefoneParaEnvio, prefixarParaCliente('Segue contato abaixo:', usuarioNome), {
         companyId: company_id,
         conversaId: conversa_id,
         whatsappInstanceId: whatsappInstanceId || undefined,
         sendOrigin: 'atendimento_humano_contato',
       })
     }
-    const result = await provider.sendContact(conversa.telefone, contactName, contactPhone, {
+    const result = await provider.sendContact(telefoneParaEnvio, contactName, contactPhone, {
       companyId: company_id,
       conversaId: Number(conversa_id),
       whatsappInstanceId: whatsappInstanceId || undefined,
@@ -5382,7 +5405,7 @@ exports.excluirMensagem = async (req, res) => {
     // garante que a conversa pertence à empresa
     const { data: conversa, error: errConv } = await supabase
       .from('conversas')
-      .select('id, criado_em, telefone')
+      .select('id, criado_em, telefone, whatsapp_instance_id')
       .eq('company_id', company_id)
       .eq('id', cid)
       .maybeSingle()
@@ -5450,9 +5473,16 @@ exports.excluirMensagem = async (req, res) => {
 
     // Apagar no WhatsApp (UltraMsg) se houver whatsapp_id e provider suportar
     const provider = getProvider()
-    if (provider?.deleteMessage && msg?.whatsapp_id && conversa?.telefone) {
+    const isLidTelefone = String(conversa?.telefone || '').trim().toLowerCase().startsWith('lid:')
+    if (provider?.deleteMessage && msg?.whatsapp_id && conversa?.telefone && !isLidTelefone) {
       try {
-        await provider.deleteMessage(conversa.telefone, msg.whatsapp_id, { companyId: company_id })
+        const delInstanceId = conversa.whatsapp_instance_id
+          ? await resolveConversationWhatsappInstance(company_id, conversa)
+          : null
+        await provider.deleteMessage(conversa.telefone, msg.whatsapp_id, {
+          companyId: company_id,
+          ...(delInstanceId ? { whatsappInstanceId: delInstanceId } : {}),
+        })
       } catch (e) {
         console.warn('[excluirMensagem] deleteMessage no WhatsApp:', e?.message || e)
       }

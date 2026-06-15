@@ -1035,16 +1035,6 @@ exports.receberZapi = async (req, res) => {
         provider: 'ultramsg',
       })
       
-      // Log específico para debugar empresa 2
-      if (instanceId === '51534' || instanceId === 'instance51534') {
-        console.error('[EMPRESA_2_DEBUG] Instance não mapeada:', {
-          instanceId,
-          company_id,
-          bodyKeys: Object.keys(body || {}),
-          eventType: body.event_type || body.eventType || body.type
-        })
-      }
-      
       return res.status(200).json({ ok: true, ignored: 'instance_not_mapped' })
     }
 
@@ -1378,7 +1368,7 @@ exports.receberZapi = async (req, res) => {
               if (existByWaId?.id) {
               const io = req.app.get('io')
               if (io) {
-                const payload = {
+                const statusEventPayload = {
                   mensagem_id: existByWaId.id,
                   conversa_id: existByWaId.conversa_id,
                   status: 'sent',
@@ -1386,7 +1376,7 @@ exports.receberZapi = async (req, res) => {
                 }
                 let chain = io.to(`empresa_${existByWaId.company_id}`).to(`conversa_${existByWaId.conversa_id}`)
                 if (existByWaId.autor_usuario_id != null) chain = chain.to(`usuario_${existByWaId.autor_usuario_id}`)
-                chain.emit('status_mensagem', payload)
+                chain.emit('status_mensagem', statusEventPayload)
               }
               logZapiCert({
                 companyId: company_id,
