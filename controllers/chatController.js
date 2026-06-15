@@ -4,7 +4,7 @@ const { ensureConversaForCliente } = require('../services/conversaAbrirClienteSe
 const { executarAssumirConversa } = require('../services/conversaAssumirInternoService')
 const { getProvider } = require('../services/providers')
 const { getStatus } = require('../services/ultramsgIntegrationService')
-const { getDefaultWhatsappInstance } = require('../services/whatsappInstanceService')
+const { getDefaultWhatsappInstance, listWhatsappInstances, resolveWhatsappInstanceForManualAction, sanitizeWhatsappInstance } = require('../services/whatsappInstanceService')
 const { isGroupConversation, isClosedAttendanceStatus } = require('../helpers/conversaHelper')
 const { normalizePhoneBR, possiblePhonesBR, phoneKeyBR } = require('../helpers/phoneHelper')
 const { deduplicateConversationsByContact, sortConversationsByRecent, sortConversationsPinThenRecent, getCanonicalPhone, getOrCreateCliente, findOrCreateConversation, mergeConversasIntoCanonico } = require('../helpers/conversationSync')
@@ -38,6 +38,23 @@ const { normalizarTimestampSemFusoAmbiguoParaApi } = require('../helpers/timesta
 /** UltraMsg retorna id interno (ex: 35096), não o messageId do WhatsApp. Só usar como whatsapp_id se for o ID real. */
 function isRealWhatsAppId(waId) {
   return waId && (String(waId).includes('@') || String(waId).length > 20)
+}
+
+async function resolveTelefoneFromLidSiblingConversation(company_id, conversa, whatsappInstanceId) {
+  if (!conversa?.chat_lid) return null
+  let query = supabase
+    .from('conversas')
+    .select('telefone')
+    .eq('company_id', company_id)
+    .eq('chat_lid', conversa.chat_lid)
+    .not('telefone', 'like', 'lid:%')
+  if (whatsappInstanceId) {
+    query = query.eq('whatsapp_instance_id', whatsappInstanceId)
+  } else {
+    query = query.is('whatsapp_instance_id', null)
+  }
+  const { data: outra } = await query.limit(1).maybeSingle()
+  return outra?.telefone || null
 }
 
 async function resolveConversationWhatsappInstance(company_id, conversa) {
@@ -1870,18 +1887,24 @@ exports.listarConversas = async (req, res) => {
           todosClientes.push(...(chunkRows || []))
         }
       }
-      const clienteIdsComConversa = new Set(
-        conversasFormatadas
-          .filter((c) => c.cliente_id != null)
-          .map((c) => Number(c.cliente_id))
-      )
-      // ✅ Evita "Sem conversa" falso quando a conversa existe mas está ligada a outro cliente duplicado.
-      const convPhoneKeys = new Set(
-        (conversasFormatadas || [])
-          .filter((c) => !c.is_group && c.telefone)
-          .map((c) => phoneKeyBR(c.telefone))
-          .filter(Boolean)
-      )
+      const { instances: companyInstances } = await listWhatsappInstances(cid)
+      const activeInstances = (companyInstances || []).filter((i) => i && i.ativo !== false)
+      const multiInstanceMode = activeInstances.length > 1
+
+      /** Pares (cliente_id|phone, instância) que já possuem conversa */
+      const conversaScopeKeys = new Set()
+      const addConversaScope = (row) => {
+        if (!row) return
+        const instKey = row.whatsapp_instance_id != null ? String(row.whatsapp_instance_id) : 'legacy'
+        if (row.cliente_id != null) conversaScopeKeys.add(`c:${Number(row.cliente_id)}:wi:${instKey}`)
+        const pk = phoneKeyBR(row.telefone || '')
+        if (pk) conversaScopeKeys.add(`p:${pk}:wi:${instKey}`)
+      }
+      for (const c of conversasFormatadas || []) {
+        if (c.is_group || c.sem_conversa) continue
+        addConversaScope(c)
+      }
+
       const candidatosClienteIds = [
         ...new Set((todosClientes || []).map((cl) => Number(cl.id)).filter((n) => Number.isFinite(n) && n > 0)),
       ]
@@ -1897,14 +1920,14 @@ exports.listarConversas = async (req, res) => {
         const porClientePromise = candidatosClienteIds.length > 0
           ? supabase
               .from('conversas')
-              .select('cliente_id, telefone')
+              .select('cliente_id, telefone, whatsapp_instance_id')
               .eq('company_id', cid)
               .in('cliente_id', candidatosClienteIds)
           : Promise.resolve({ data: [], error: null })
         const porTelefonePromise = candidatosTelefones.length > 0
           ? supabase
               .from('conversas')
-              .select('cliente_id, telefone')
+              .select('cliente_id, telefone, whatsapp_instance_id')
               .eq('company_id', cid)
               .in('telefone', candidatosTelefones)
           : Promise.resolve({ data: [], error: null })
@@ -1913,33 +1936,85 @@ exports.listarConversas = async (req, res) => {
           porTelefonePromise,
         ])
         for (const row of [...(convByClienteRows || []), ...(convByTelefoneRows || [])]) {
-          if (row?.cliente_id != null) clienteIdsComConversa.add(Number(row.cliente_id))
-          const key = phoneKeyBR(row?.telefone || '')
-          if (key) convPhoneKeys.add(key)
+          addConversaScope(row)
         }
       }
-      const semConversa = (todosClientes || []).filter((cl) => {
-        if (clienteIdsComConversa.has(Number(cl.id))) return false
-        const key = phoneKeyBR(cl.telefone || '')
-        if (key && convPhoneKeys.has(key)) return false
+
+      const clienteHasAnyConversa = (cl) => {
+        if (conversaScopeKeys.has(`c:${Number(cl.id)}:wi:legacy`)) return true
+        for (const inst of activeInstances) {
+          if (conversaScopeKeys.has(`c:${Number(cl.id)}:wi:${inst.id}`)) return true
+        }
+        const pk = phoneKeyBR(cl.telefone || '')
+        if (pk) {
+          if (conversaScopeKeys.has(`p:${pk}:wi:legacy`)) return true
+          for (const inst of activeInstances) {
+            if (conversaScopeKeys.has(`p:${pk}:wi:${inst.id}`)) return true
+          }
+        }
+        return false
+      }
+
+      const clienteMissingInstance = (cl, inst) => {
+        const instKey = inst?.id != null ? String(inst.id) : 'legacy'
+        if (conversaScopeKeys.has(`c:${Number(cl.id)}:wi:${instKey}`)) return false
+        const pk = phoneKeyBR(cl.telefone || '')
+        if (pk && conversaScopeKeys.has(`p:${pk}:wi:${instKey}`)) return false
         return true
-      }).slice(0, semConversaLimit)
-      const itensSemConversa = semConversa.map((cl) => ({
-        id: null,
-        cliente_id: cl.id,
-        telefone: cl.telefone || '',
-        tipo: 'cliente',
-        contato_nome: getDisplayName(cl) || null,
-        foto_perfil: cl.foto_perfil || null,
-        sem_conversa: true,
-        mensagens: [],
-        unread_count: 0,
-        tags: [],
-        status_atendimento: null,
-        exibir_badge_aberta: false,
-        ultima_atividade: null,
-        criado_em: null
-      }))
+      }
+
+      const instanceScopes = multiInstanceMode
+        ? activeInstances.map((inst) => sanitizeWhatsappInstance(inst)).filter(Boolean)
+        : [null]
+
+      const itensSemConversa = []
+      for (const cl of todosClientes || []) {
+        if (!multiInstanceMode) {
+          if (clienteHasAnyConversa(cl)) continue
+          itensSemConversa.push({
+            id: null,
+            cliente_id: cl.id,
+            telefone: cl.telefone || '',
+            tipo: 'cliente',
+            contato_nome: getDisplayName(cl) || null,
+            foto_perfil: cl.foto_perfil || null,
+            sem_conversa: true,
+            mensagens: [],
+            unread_count: 0,
+            tags: [],
+            status_atendimento: null,
+            exibir_badge_aberta: false,
+            ultima_atividade: null,
+            criado_em: null,
+          })
+          if (itensSemConversa.length >= semConversaLimit) break
+          continue
+        }
+        for (const inst of instanceScopes) {
+          if (!clienteMissingInstance(cl, inst)) continue
+          itensSemConversa.push({
+            id: null,
+            cliente_id: cl.id,
+            telefone: cl.telefone || '',
+            tipo: 'cliente',
+            contato_nome: getDisplayName(cl) || null,
+            foto_perfil: cl.foto_perfil || null,
+            sem_conversa: true,
+            whatsapp_instance_id: inst?.id ?? null,
+            whatsapp_instance_nome: inst?.nome ?? null,
+            whatsapp_instance_display_phone: inst?.display_phone ?? null,
+            mensagens: [],
+            unread_count: 0,
+            tags: [],
+            status_atendimento: null,
+            exibir_badge_aberta: false,
+            ultima_atividade: null,
+            criado_em: null,
+          })
+          if (itensSemConversa.length >= semConversaLimit) break
+        }
+        if (itensSemConversa.length >= semConversaLimit) break
+      }
       conversasFormatadas = [...conversasFormatadas, ...itensSemConversa]
       conversasFormatadas.sort((a, b) => {
         if (a.sem_conversa && b.sem_conversa) {
@@ -2270,6 +2345,27 @@ exports.mergeConversasDuplicadas = async (req, res) => {
   } catch (err) {
     console.error(err)
     return res.status(500).json({ error: 'Erro ao mesclar duplicatas' })
+  }
+}
+
+// =====================================================
+// 3a) Instâncias WhatsApp ativas (atendimento — sem tokens)
+// GET /chats/whatsapp-instances
+// =====================================================
+exports.listWhatsappInstancesAtendimento = async (req, res) => {
+  try {
+    const company_id = req.user?.company_id
+    if (!company_id) return res.status(401).json({ error: 'Não autenticado' })
+    const result = await listWhatsappInstances(company_id)
+    if (result.error) return res.status(500).json({ error: result.error })
+    const active = (result.instances || [])
+      .filter((i) => i && i.ativo !== false)
+      .map(sanitizeWhatsappInstance)
+      .filter(Boolean)
+    return res.json({ instances: active })
+  } catch (err) {
+    console.error(err)
+    return res.status(500).json({ error: 'Erro ao listar instâncias WhatsApp' })
   }
 }
 
@@ -3041,7 +3137,7 @@ exports.abrirConversaCliente = async (req, res) => {
   try {
     const io = req.app.get('io')
     const { company_id, id: usuario_id } = req.user
-    const { cliente_id } = req.body
+    const { cliente_id, whatsapp_instance_id } = req.body
 
     if (!cliente_id) {
       return res.status(400).json({ error: 'cliente_id é obrigatório' })
@@ -3059,8 +3155,15 @@ exports.abrirConversaCliente = async (req, res) => {
       return res.status(404).json({ error: 'Cliente não encontrado' })
     }
 
-    const r = await ensureConversaForCliente({ company_id, usuario_id, cliente })
+    const r = await ensureConversaForCliente({ company_id, usuario_id, cliente, whatsapp_instance_id })
     if (!r.ok) {
+      if (r.codigo === 'SELECIONE_WHATSAPP_INSTANCE') {
+        return res.status(400).json({
+          error: r.error,
+          codigo: r.codigo,
+          whatsapp_instances: r.whatsapp_instances || [],
+        })
+      }
       const st = r.error === 'Cliente sem telefone cadastrado' ? 400 : 500
       return res.status(st).json({ error: r.error })
     }
@@ -3100,11 +3203,23 @@ exports.criarContato = async (req, res) => {
   try {
     const io = req.app.get('io')
     const { company_id, id: usuario_id } = req.user
-    const { nome, telefone } = req.body
+    const { nome, telefone, whatsapp_instance_id } = req.body
 
     const telefoneRaw = telefone != null ? String(telefone).trim() : ''
     if (!telefoneRaw) {
       return res.status(400).json(erroTelefoneNovoContato('TELEFONE_OBRIGATORIO'))
+    }
+
+    const instanceRes = await resolveWhatsappInstanceForManualAction(company_id, whatsapp_instance_id)
+    if (instanceRes.code === 'SELECIONE_WHATSAPP_INSTANCE') {
+      return res.status(400).json({
+        error: instanceRes.error,
+        codigo: instanceRes.code,
+        whatsapp_instances: instanceRes.instances || [],
+      })
+    }
+    if (instanceRes.error || !instanceRes.instanceId) {
+      return res.status(400).json({ error: instanceRes.error || 'Instância WhatsApp indisponível' })
     }
 
     const telefoneCanonico = getCanonicalPhone(telefone)
@@ -3143,6 +3258,8 @@ exports.criarContato = async (req, res) => {
         phone: telefoneCanonico,
         cliente_id: clienteId,
         isGroup: false,
+        whatsapp_instance_id: instanceRes.instanceId,
+        whatsapp_instance_is_default: instanceRes.isDefault === true,
         logPrefix: '[criarContato]'
       })
     } catch (e) {
@@ -3185,8 +3302,15 @@ exports.criarContato = async (req, res) => {
       emitirEventoEmpresaConversa(io, company_id, conversa.id, 'nova_conversa', conversa)
     }
 
+    const whatsappInstanceMetaMap = await loadWhatsappInstanceMetaMap(company_id, [conversa.whatsapp_instance_id, instanceRes.instanceId])
+    const whatsappInstanceMeta = safeWhatsappInstanceMeta(
+      whatsappInstanceMetaMap.get(Number(conversa.whatsapp_instance_id)) ||
+      whatsappInstanceMetaMap.get(Number(instanceRes.instanceId)) ||
+      instanceRes.instance
+    )
+
     // reutilizada: número já tinha conversa (ex.: fechada ou duplicata) — frontend pode só navegar, sem toast de erro.
-    return res.json({ ...conversa, reutilizada: !convNova })
+    return res.json({ ...conversa, ...whatsappInstanceMeta, reutilizada: !convNova })
 
   } catch (err) {
     console.error(err)
@@ -3743,27 +3867,41 @@ exports.reabrirChat = async (req, res) => {
     }
 
     // Reabrir já assume automaticamente para quem clicou — sem setor (fila geral / visível a todos).
-    const { data, error } = await supabase
+    const baseReabrirPatch = {
+      status_atendimento: 'em_atendimento',
+      atendente_id: user_id,
+      atendente_atribuido_em: new Date().toISOString(),
+      departamento_id: null,
+      finalizacao_motivo: null,
+      finalizada_automaticamente: false,
+      finalizada_automaticamente_em: null,
+      aguardando_cliente_desde: null,
+      ausencia_mensagem_enviada_em: null,
+    }
+    const optionalReabrirPatch = {
+      pagamento_prazo_ate: null,
+      pagamento_prazo_origem: null,
+      pagamento_concluido_em: null,
+      reaberta_falta_interacao_em: null,
+    }
+
+    let { data, error } = await supabase
       .from('conversas')
-      .update({
-        status_atendimento: 'em_atendimento',
-        atendente_id: user_id,
-        atendente_atribuido_em: new Date().toISOString(),
-        departamento_id: null,
-        finalizacao_motivo: null,
-        finalizada_automaticamente: false,
-        finalizada_automaticamente_em: null,
-        aguardando_cliente_desde: null,
-        ausencia_mensagem_enviada_em: null,
-        pagamento_prazo_ate: null,
-        pagamento_prazo_origem: null,
-        pagamento_concluido_em: null,
-        reaberta_falta_interacao_em: null,
-      })
+      .update({ ...baseReabrirPatch, ...optionalReabrirPatch })
       .eq('company_id', company_id)
       .eq('id', conversa_id)
       .select()
       .single()
+
+    if (error && /column|schema cache/i.test(String(error.message || ''))) {
+      ;({ data, error } = await supabase
+        .from('conversas')
+        .update(baseReabrirPatch)
+        .eq('company_id', company_id)
+        .eq('id', conversa_id)
+        .select()
+        .single())
+    }
 
     if (error) return res.status(500).json({ error: error.message })
 
@@ -4383,15 +4521,8 @@ exports.enviarMensagemChat = async (req, res) => {
         if (cli?.telefone && !String(cli.telefone).startsWith('lid:')) telefoneParaEnvio = cli.telefone
       }
       if (telefoneParaEnvio.startsWith('lid:') && conversa.chat_lid) {
-        const { data: outra } = await supabase
-          .from('conversas')
-          .select('telefone')
-          .eq('company_id', company_id)
-          .eq('chat_lid', conversa.chat_lid)
-          .not('telefone', 'like', 'lid:%')
-          .limit(1)
-          .maybeSingle()
-        if (outra?.telefone) telefoneParaEnvio = outra.telefone
+        const telSibling = await resolveTelefoneFromLidSiblingConversation(company_id, conversa, whatsappInstanceId)
+        if (telSibling) telefoneParaEnvio = telSibling
       }
       if (telefoneParaEnvio.startsWith('lid:')) {
         return res.status(400).json({ error: 'Número do contato indisponível (conversa por LID). Aguarde o contato enviar uma mensagem ou sincronize os contatos.' })
@@ -4536,10 +4667,14 @@ exports.enviarMensagemChat = async (req, res) => {
         } catch (_) {}
       }
       const telefoneParaPayload = conversa?.telefone && !String(conversa.telefone).startsWith('lid:') ? String(conversa.telefone).trim() : null
+      const whatsappInstanceMetaMap = await loadWhatsappInstanceMetaMap(company_id, [whatsappInstanceId])
+      const whatsappInstanceMeta = safeWhatsappInstanceMeta(whatsappInstanceMetaMap.get(Number(whatsappInstanceId)))
       const convPayload = aplicarAguardandoClienteNoPayload({
         id: Number(conversa_id),
         ultima_atividade: novaMsgPayload.criado_em,
         exibir_badge_aberta: true,
+        whatsapp_instance_id: whatsappInstanceId ?? conversa?.whatsapp_instance_id ?? null,
+        ...whatsappInstanceMeta,
         ...(telefoneParaPayload ? { telefone: telefoneParaPayload } : {}),
         ...(conversa?.cliente_id != null ? { cliente_id: conversa.cliente_id } : {}),
         ...(contatoNome ? { nome_contato_cache: contatoNome, contato_nome: contatoNome } : {}),
@@ -5001,15 +5136,8 @@ exports.enviarLocalizacao = async (req, res) => {
         if (cli?.telefone && !String(cli.telefone).startsWith('lid:')) telefoneParaEnvio = cli.telefone
       }
       if (telefoneParaEnvio.startsWith('lid:') && conversa.chat_lid) {
-        const { data: outra } = await supabase
-          .from('conversas')
-          .select('telefone')
-          .eq('company_id', company_id)
-          .eq('chat_lid', conversa.chat_lid)
-          .not('telefone', 'like', 'lid:%')
-          .limit(1)
-          .maybeSingle()
-        if (outra?.telefone) telefoneParaEnvio = outra.telefone
+        const telSibling = await resolveTelefoneFromLidSiblingConversation(company_id, conversa, whatsappInstanceId)
+        if (telSibling) telefoneParaEnvio = telSibling
       }
       if (telefoneParaEnvio.startsWith('lid:')) {
         return res.status(400).json({ error: 'Número do contato indisponível (conversa por LID). Aguarde o contato enviar uma mensagem ou sincronize os contatos.' })
@@ -6197,15 +6325,8 @@ exports.enviarArquivo = async (req, res) => {
         if (cli?.telefone && !String(cli.telefone).startsWith('lid:')) telefoneParaEnvio = cli.telefone
       }
       if (telefoneParaEnvio.startsWith('lid:') && conversa.chat_lid) {
-        const { data: outra } = await supabase
-          .from('conversas')
-          .select('telefone')
-          .eq('company_id', company_id)
-          .eq('chat_lid', conversa.chat_lid)
-          .not('telefone', 'like', 'lid:%')
-          .limit(1)
-          .maybeSingle()
-        if (outra?.telefone) telefoneParaEnvio = outra.telefone
+        const telSibling = await resolveTelefoneFromLidSiblingConversation(company_id, conversa, whatsappInstanceId)
+        if (telSibling) telefoneParaEnvio = telSibling
       }
       if (telefoneParaEnvio.startsWith('lid:')) {
         return res.status(400).json({ error: 'Número do contato indisponível (conversa por LID). Aguarde o contato enviar uma mensagem ou sincronize os contatos.' })
@@ -6683,15 +6804,8 @@ exports.encaminharMensagem = async (req, res) => {
         if (cli?.telefone && !String(cli.telefone).startsWith('lid:')) telefoneParaEnvio = cli.telefone
       }
       if (telefoneParaEnvio.startsWith('lid:') && conversa.chat_lid) {
-        const { data: outra } = await supabase
-          .from('conversas')
-          .select('telefone')
-          .eq('company_id', company_id)
-          .eq('chat_lid', conversa.chat_lid)
-          .not('telefone', 'like', 'lid:%')
-          .limit(1)
-          .maybeSingle()
-        if (outra?.telefone) telefoneParaEnvio = outra.telefone
+        const telSibling = await resolveTelefoneFromLidSiblingConversation(company_id, conversa, whatsappInstanceId)
+        if (telSibling) telefoneParaEnvio = telSibling
       }
       if (telefoneParaEnvio.startsWith('lid:')) {
         return res.status(400).json({ error: 'Número do contato indisponível (conversa por LID). Aguarde o contato enviar uma mensagem ou sincronize os contatos.' })

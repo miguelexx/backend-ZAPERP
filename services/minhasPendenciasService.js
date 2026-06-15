@@ -1,5 +1,31 @@
 const supabase = require('../config/supabase')
 
+async function loadWhatsappInstanceMetaMap(companyId, instanceIds) {
+  const ids = [...new Set((instanceIds || []).map((id) => Number(id)).filter((id) => Number.isFinite(id) && id > 0))]
+  if (!ids.length) return new Map()
+  const { data, error } = await supabase
+    .from('whatsapp_instances')
+    .select('id, nome, display_phone')
+    .eq('company_id', Number(companyId))
+    .in('id', ids)
+  if (error) return new Map()
+  return new Map(
+    (data || []).map((row) => [
+      Number(row.id),
+      {
+        whatsapp_instance_id: row.id,
+        whatsapp_instance_nome: row.nome ?? null,
+        whatsapp_instance_display_phone: row.display_phone ?? null,
+      },
+    ])
+  )
+}
+
+function metaFromMap(metaMap, conversa) {
+  const id = Number(conversa?.whatsapp_instance_id)
+  return metaMap.get(id) || { whatsapp_instance_id: conversa?.whatsapp_instance_id ?? null }
+}
+
 const DELAY_MINUTES = 30
 const MSG_PAGE = 1000
 const CONV_ID_IN_CHUNK = 120
@@ -110,13 +136,16 @@ function isEmAtraso(conversa, lastMessage, usuarioId) {
   return minutesSince(lastMessage.criado_em) > DELAY_MINUTES
 }
 
-function toListItem(conversa) {
+function toListItem(conversa, instanceMeta = {}) {
   return {
     conversa_id: Number(conversa.id),
     telefone: conversa.telefone ?? null,
     status_atendimento: conversa.status_atendimento ?? null,
     atendente_id: conversa.atendente_id != null ? Number(conversa.atendente_id) : null,
     ultima_atividade: conversa.ultima_atividade ?? null,
+    whatsapp_instance_id: conversa.whatsapp_instance_id ?? instanceMeta.whatsapp_instance_id ?? null,
+    whatsapp_instance_nome: instanceMeta.whatsapp_instance_nome ?? null,
+    whatsapp_instance_display_phone: instanceMeta.whatsapp_instance_display_phone ?? null,
   }
 }
 
@@ -183,7 +212,8 @@ async function listConversasDoAtendente(companyId, usuarioId) {
         aguardando_cliente_desde,
         finalizacao_motivo,
         finalizada_automaticamente,
-        ultima_atividade
+        ultima_atividade,
+        whatsapp_instance_id
       `)
       .eq('company_id', companyId)
       .eq('atendente_id', usuarioId)
@@ -329,11 +359,13 @@ async function getMinhasPendenciasPorCategoria(companyId, usuarioId, categoria) 
   else if (key === CATEGORIAS.aguardandoSuaResposta) lista = aguardandoResposta
   else lista = emAtraso
 
+  const metaMap = await loadWhatsappInstanceMetaMap(companyId, lista.map((c) => c.whatsapp_instance_id))
+
   return {
     categoria: key,
     total: lista.length,
     conversa_ids: lista.map((c) => Number(c.id)),
-    itens: lista.map(toListItem),
+    itens: lista.map((c) => toListItem(c, metaFromMap(metaMap, c))),
   }
 }
 

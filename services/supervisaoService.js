@@ -237,6 +237,7 @@ async function listOpenConversations(companyId) {
     departamento_id,
     atendente_id,
     criado_em,
+    whatsapp_instance_id,
     nome_contato_cache,
     foto_perfil_contato_cache,
     clientes!conversas_cliente_fk ( id, nome, pushname, telefone, foto_perfil ),

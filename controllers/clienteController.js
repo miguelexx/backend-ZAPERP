@@ -157,7 +157,7 @@ exports.buscarClientePorId = async (req, res) => {
  */
 exports.criarCliente = async (req, res) => {
   const { company_id, id: usuario_id, perfil, departamento_ids = [] } = req.user || {}
-  const { telefone, wa_id, nome, observacoes, email, empresa, abrir_conversa, assumir } = req.body;
+  const { telefone, wa_id, nome, observacoes, email, empresa, abrir_conversa, assumir, whatsapp_instance_id } = req.body;
   const cid = Number(company_id)
 
   if (!telefone && !wa_id) {
@@ -228,14 +228,18 @@ exports.criarCliente = async (req, res) => {
       const r = await ensureConversaForCliente({
         company_id: cid,
         usuario_id,
-        cliente
+        cliente,
+        whatsapp_instance_id,
       })
       if (!r.ok) {
         return res.status(201).json({
           ...data,
           conversa: null,
           conversa_criada: false,
-          conversa_aviso: r.error
+          conversa_aviso: r.error,
+          ...(r.codigo === 'SELECIONE_WHATSAPP_INSTANCE'
+            ? { codigo: r.codigo, whatsapp_instances: r.whatsapp_instances || [] }
+            : {}),
         })
       }
       const io = req.app && req.app.get('io')

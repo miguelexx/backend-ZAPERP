@@ -1,21 +1,55 @@
 const supabase = require('../config/supabase')
 const { getDisplayName } = require('../helpers/contactEnrichment')
 const { findOrCreateConversation } = require('../helpers/conversationSync')
+const {
+  resolveWhatsappInstanceForManualAction,
+  sanitizeWhatsappInstance,
+} = require('./whatsappInstanceService')
+
+function safeWhatsappInstanceMeta(instance) {
+  const safe = sanitizeWhatsappInstance(instance)
+  if (!safe) return {}
+  return {
+    whatsapp_instance_id: safe.id ?? null,
+    whatsapp_instance_nome: safe.nome ?? null,
+    whatsapp_instance_provider: safe.provider ?? null,
+    whatsapp_instance_display_phone: safe.display_phone ?? null,
+  }
+}
 
 /**
- * Garante uma conversa 1:1 para o cliente (localiza por telefone ou cria).
+ * Garante uma conversa 1:1 para o cliente (localiza por telefone + instância ou cria).
  * Usado por POST /chats/abrir-conversa e POST /clientes (flags abrir_conversa / assumir).
- *
- * Reutiliza conversa fechada com o mesmo telefone — evita 23505 em idx_conversas_company_telefone*.
  */
 async function ensureConversaForCliente({
   company_id,
   usuario_id,
-  cliente
+  cliente,
+  whatsapp_instance_id = null,
 }) {
   const telefone = cliente.telefone || ''
   if (!telefone) {
     return { ok: false, error: 'Cliente sem telefone cadastrado', conversa: null, criada: false }
+  }
+
+  const instanceRes = await resolveWhatsappInstanceForManualAction(company_id, whatsapp_instance_id)
+  if (instanceRes.code === 'SELECIONE_WHATSAPP_INSTANCE') {
+    return {
+      ok: false,
+      error: instanceRes.error,
+      codigo: instanceRes.code,
+      whatsapp_instances: instanceRes.instances || [],
+      conversa: null,
+      criada: false,
+    }
+  }
+  if (instanceRes.error || !instanceRes.instanceId) {
+    return {
+      ok: false,
+      error: instanceRes.error || 'Não foi possível resolver instância WhatsApp',
+      conversa: null,
+      criada: false,
+    }
   }
 
   let result
@@ -25,6 +59,8 @@ async function ensureConversaForCliente({
       phone: telefone,
       cliente_id: cliente.id,
       isGroup: false,
+      whatsapp_instance_id: instanceRes.instanceId,
+      whatsapp_instance_is_default: instanceRes.isDefault === true,
       logPrefix: '[ensureConversaForCliente]',
     })
   } catch (e) {
@@ -51,12 +87,13 @@ async function ensureConversaForCliente({
 
   const { data: row } = await supabase
     .from('conversas')
-    .select('id, telefone, cliente_id, status_atendimento, tipo')
+    .select('id, telefone, cliente_id, status_atendimento, tipo, whatsapp_instance_id')
     .eq('company_id', company_id)
     .eq('id', convId)
     .maybeSingle()
 
   const convRow = row || result.conversa
+  const instanceMeta = safeWhatsappInstanceMeta(instanceRes.instance)
   const payload = {
     id: convId,
     cliente_id: cliente.id,
@@ -67,6 +104,8 @@ async function ensureConversaForCliente({
     foto_perfil: cliente.foto_perfil || null,
     unread_count: 0,
     tags: [],
+    whatsapp_instance_id: convRow.whatsapp_instance_id ?? instanceRes.instanceId,
+    ...instanceMeta,
   }
 
   return {
@@ -78,4 +117,4 @@ async function ensureConversaForCliente({
   }
 }
 
-module.exports = { ensureConversaForCliente }
+module.exports = { ensureConversaForCliente, safeWhatsappInstanceMeta }

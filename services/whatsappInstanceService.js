@@ -387,6 +387,121 @@ async function getWhatsappInstanceByProviderInstanceId(provider, instanceId, opt
   return { instance: null, error: 'Instancia WhatsApp nao encontrada' }
 }
 
+/**
+ * Resolve qual instância usar em ações manuais (criar contato, abrir conversa).
+ * - Com whatsapp_instance_id explícito: valida e usa.
+ * - Com uma instância ativa: usa automaticamente.
+ * - Com várias ativas sem escolha: retorna code SELECIONE_WHATSAPP_INSTANCE.
+ */
+async function resolveWhatsappInstanceForManualAction(companyId, requestedInstanceId) {
+  const cid = normalizeCompanyId(companyId)
+  if (!cid) {
+    return {
+      error: 'company_id invalido',
+      code: 'INVALID_COMPANY',
+      instanceId: null,
+      isDefault: false,
+      instance: null,
+      instances: [],
+    }
+  }
+
+  const { instances, error: listError } = await listWhatsappInstances(cid)
+  if (listError) {
+    return {
+      error: listError,
+      code: 'LIST_ERROR',
+      instanceId: null,
+      isDefault: false,
+      instance: null,
+      instances: [],
+    }
+  }
+
+  const active = (instances || []).filter((i) => i && i.ativo !== false)
+  const safeActive = active.map(sanitizeWhatsappInstance).filter(Boolean)
+
+  const requestedRaw = requestedInstanceId
+  if (requestedRaw != null && String(requestedRaw).trim() !== '') {
+    const id = Number(requestedRaw)
+    if (!Number.isFinite(id) || id <= 0) {
+      return {
+        error: 'whatsapp_instance_id invalido',
+        code: 'INVALID_INSTANCE',
+        instanceId: null,
+        isDefault: false,
+        instance: null,
+        instances: safeActive,
+      }
+    }
+    const found = active.find((i) => Number(i.id) === id)
+    if (!found) {
+      return {
+        error: 'Instancia WhatsApp invalida ou inativa',
+        code: 'INSTANCE_NOT_FOUND',
+        instanceId: null,
+        isDefault: false,
+        instance: null,
+        instances: safeActive,
+      }
+    }
+    const safe = sanitizeWhatsappInstance(found)
+    return {
+      error: null,
+      code: null,
+      instanceId: id,
+      isDefault: found.is_default === true,
+      instance: safe,
+      instances: safeActive,
+    }
+  }
+
+  if (active.length === 1) {
+    const only = active[0]
+    const safe = sanitizeWhatsappInstance(only)
+    return {
+      error: null,
+      code: null,
+      instanceId: Number(only.id),
+      isDefault: only.is_default === true,
+      instance: safe,
+      instances: safeActive,
+    }
+  }
+
+  if (active.length === 0) {
+    const { instance } = await getDefaultWhatsappInstance(cid)
+    if (instance?.id) {
+      const safe = sanitizeWhatsappInstance(instance)
+      return {
+        error: null,
+        code: null,
+        instanceId: Number(instance.id),
+        isDefault: true,
+        instance: safe,
+        instances: safeActive,
+      }
+    }
+    return {
+      error: 'Nenhuma instancia WhatsApp ativa',
+      code: 'NO_ACTIVE_INSTANCE',
+      instanceId: null,
+      isDefault: false,
+      instance: null,
+      instances: [],
+    }
+  }
+
+  return {
+    error: 'Selecione por qual numero WhatsApp deseja iniciar a conversa.',
+    code: 'SELECIONE_WHATSAPP_INSTANCE',
+    instanceId: null,
+    isDefault: false,
+    instance: null,
+    instances: safeActive,
+  }
+}
+
 async function listWhatsappInstances(companyId) {
   const cid = normalizeCompanyId(companyId)
   if (!cid) return { instances: [], error: 'company_id invalido' }
@@ -543,6 +658,7 @@ module.exports = {
   getWhatsappInstanceById,
   getWhatsappInstanceByProviderInstanceId,
   listWhatsappInstances,
+  resolveWhatsappInstanceForManualAction,
   createWhatsappInstance,
   updateWhatsappInstance,
   setDefaultWhatsappInstance,

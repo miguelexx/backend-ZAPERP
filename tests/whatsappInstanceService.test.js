@@ -481,4 +481,48 @@ describe('whatsappInstanceService', () => {
     expect(supabase.state.whatsapp_instances.find((r) => r.id === 1).is_default).toBe(true)
     expect(supabase.state.whatsapp_instances.find((r) => r.id === 2).is_default).toBe(false)
   })
+
+  test('resolveWhatsappInstanceForManualAction usa unica instancia ativa automaticamente', async () => {
+    const supabase = createSupabaseMock({
+      whatsapp_instances: [
+        { id: 1, company_id: 1, provider: 'ultramsg', nome: 'WM Sistemas', instance_id: '1001', instance_token: 'secret-1', ativo: true, is_default: true },
+      ],
+    })
+    jest.doMock('../config/supabase', () => supabase)
+    const service = require('../services/whatsappInstanceService')
+    const result = await service.resolveWhatsappInstanceForManualAction(1, null)
+    expect(result.error).toBeNull()
+    expect(result.instanceId).toBe(1)
+    expect(result.instance?.instance_token).toBeUndefined()
+  })
+
+  test('resolveWhatsappInstanceForManualAction exige escolha com multiplas instancias', async () => {
+    const supabase = createSupabaseMock({
+      whatsapp_instances: [
+        { id: 1, company_id: 1, provider: 'ultramsg', nome: 'WM Sistemas', instance_id: '1001', instance_token: 'secret-1', ativo: true, is_default: true },
+        { id: 8, company_id: 1, provider: 'ultramsg', nome: 'WhatsApp Teste', instance_id: '173587', instance_token: 'secret-8', ativo: true, is_default: false },
+      ],
+    })
+    jest.doMock('../config/supabase', () => supabase)
+    const service = require('../services/whatsappInstanceService')
+    const result = await service.resolveWhatsappInstanceForManualAction(1, null)
+    expect(result.code).toBe('SELECIONE_WHATSAPP_INSTANCE')
+    expect(result.instances).toHaveLength(2)
+    expect(JSON.stringify(result.instances)).not.toContain('secret')
+  })
+
+  test('resolveWhatsappInstanceForManualAction valida instancia informada', async () => {
+    const supabase = createSupabaseMock({
+      whatsapp_instances: [
+        { id: 1, company_id: 1, provider: 'ultramsg', nome: 'WM Sistemas', instance_id: '1001', instance_token: 'secret-1', ativo: true, is_default: true },
+        { id: 8, company_id: 1, provider: 'ultramsg', nome: 'WhatsApp Teste', instance_id: '173587', instance_token: 'secret-8', ativo: true, is_default: false },
+      ],
+    })
+    jest.doMock('../config/supabase', () => supabase)
+    const service = require('../services/whatsappInstanceService')
+    const result = await service.resolveWhatsappInstanceForManualAction(1, 8)
+    expect(result.error).toBeNull()
+    expect(result.instanceId).toBe(8)
+    expect(result.instance?.nome).toBe('WhatsApp Teste')
+  })
 })

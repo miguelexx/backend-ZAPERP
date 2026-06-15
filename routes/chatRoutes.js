@@ -14,6 +14,7 @@ router.post('/abrir-conversa', auth, chatController.abrirConversaCliente);
 router.post("/grupos", auth, chatController.criarGrupo);
 router.post("/comunidades", auth, chatController.criarComunidade);
 router.post('/finalizacao-ausencia-lote', auth, supervisorOrAdmin, chatController.finalizacaoAusenciaLoteAuth)
+router.get('/whatsapp-instances', auth, chatController.listWhatsappInstancesAtendimento);
 router.get('/counts', auth, chatController.contarConversasPorFiltros)
 router.get('/', auth, chatController.listarConversas)
 router.get('/merge-duplicatas', auth, adminOnly, chatController.paginaMergeDuplicatas)
