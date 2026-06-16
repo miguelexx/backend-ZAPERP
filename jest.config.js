@@ -3,6 +3,17 @@ module.exports = {
   testEnvironment: 'node',
   testMatch: ['**/tests/**/*.test.js'],
   setupFilesAfterEnv: ['<rootDir>/tests/setup.js'],
-  modulePathIgnorePatterns: ['<rootDir>/node_modules/'],
+  testPathIgnorePatterns: [
+    '<rootDir>/node_modules/',
+    '<rootDir>/.claude/',
+    '<rootDir>/coverage/',
+    '<rootDir>/dist/',
+  ],
+  modulePathIgnorePatterns: [
+    '<rootDir>/node_modules/',
+    '<rootDir>/.claude/',
+    '<rootDir>/coverage/',
+    '<rootDir>/dist/',
+  ],
   verbose: true,
 }

@@ -67,19 +67,45 @@ function getCanonicalPhoneAnyIntl(phone) {
 async function mergeConversasIntoCanonico(supabaseClient, company_id, canonicalId, dupIds) {
   if (!dupIds || dupIds.length === 0) return
   try {
-    await supabaseClient.from('mensagens').update({ conversa_id: canonicalId }).in('conversa_id', dupIds).eq('company_id', company_id)
-    await supabaseClient.from('conversa_tags').update({ conversa_id: canonicalId }).in('conversa_id', dupIds).eq('company_id', company_id)
-    await supabaseClient.from('atendimentos').update({ conversa_id: canonicalId }).in('conversa_id', dupIds).eq('company_id', company_id)
-    await supabaseClient.from('historico_atendimentos').update({ conversa_id: canonicalId }).in('conversa_id', dupIds)
-    await supabaseClient.from('conversa_unreads').update({ conversa_id: canonicalId }).in('conversa_id', dupIds).eq('company_id', company_id)
-    const del = await supabaseClient.from('conversas').delete().in('id', dupIds).eq('company_id', company_id)
+    const canonicalNumber = Number(canonicalId)
+    const requestedDupIds = [...new Set(
+      dupIds
+        .map((id) => Number(id))
+        .filter((id) => Number.isFinite(id) && id !== canonicalNumber)
+    )]
+
+    if (!company_id || !Number.isFinite(canonicalNumber) || requestedDupIds.length === 0) return
+
+    const { data: scopedConversations, error: scopedError } = await supabaseClient
+      .from('conversas')
+      .select('id')
+      .eq('company_id', company_id)
+      .in('id', [canonicalNumber, ...requestedDupIds])
+
+    if (scopedError) throw scopedError
+
+    const scopedIds = new Set((scopedConversations || []).map((row) => Number(row.id)))
+    if (!scopedIds.has(canonicalNumber)) {
+      console.warn('[conversationSync] merge bloqueado: conversa canonica fora da empresa', { company_id, canonicalId })
+      return
+    }
+
+    const safeDupIds = requestedDupIds.filter((id) => scopedIds.has(id))
+    if (safeDupIds.length === 0) return
+
+    await supabaseClient.from('mensagens').update({ conversa_id: canonicalNumber }).in('conversa_id', safeDupIds).eq('company_id', company_id)
+    await supabaseClient.from('conversa_tags').update({ conversa_id: canonicalNumber }).in('conversa_id', safeDupIds).eq('company_id', company_id)
+    await supabaseClient.from('atendimentos').update({ conversa_id: canonicalNumber }).in('conversa_id', safeDupIds).eq('company_id', company_id)
+    await supabaseClient.from('historico_atendimentos').update({ conversa_id: canonicalNumber }).in('conversa_id', safeDupIds)
+    await supabaseClient.from('conversa_unreads').update({ conversa_id: canonicalNumber }).in('conversa_id', safeDupIds).eq('company_id', company_id)
+    const del = await supabaseClient.from('conversas').delete().in('id', safeDupIds).eq('company_id', company_id)
     if (del.error) {
       await supabaseClient.from('conversas')
         .update({ status_atendimento: 'fechada', lida: true })
-        .in('id', dupIds)
+        .in('id', safeDupIds)
         .eq('company_id', company_id)
     }
-    console.log(`[conversationSync] 🧹 ${dupIds.length} duplicata(s) mesclada(s) → conv ${canonicalId}`)
+    console.log(`[conversationSync] 🧹 ${safeDupIds.length} duplicata(s) mesclada(s) → conv ${canonicalNumber}`)
   } catch (e) {
     console.warn('[conversationSync] ⚠️ falha ao mesclar duplicatas:', e?.message || e)
   }

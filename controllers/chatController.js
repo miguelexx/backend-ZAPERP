@@ -1264,7 +1264,7 @@ exports.listarConversas = async (req, res) => {
       clientes!conversas_cliente_fk ( id, nome, pushname, telefone, foto_perfil, company_id ),
       atendente:usuarios!conversas_atendente_id_fkey ( id, nome, email ),
       departamentos ( id, nome ),
-      mensagens ( texto, criado_em, direcao, tipo, url, nome_arquivo, whatsapp_id, status, autor_usuario_id, contact_meta, location_meta ),
+      mensagens ( conversa_id, texto, criado_em, direcao, tipo, url, nome_arquivo, whatsapp_id, status, autor_usuario_id, contact_meta, location_meta ),
       conversa_tags (
         tag_id,
         tags (
@@ -1301,7 +1301,7 @@ exports.listarConversas = async (req, res) => {
       clientes!conversas_cliente_fk ( id, nome, pushname, telefone, foto_perfil, company_id ),
       atendente:usuarios!conversas_atendente_id_fkey ( id, nome, email ),
       departamentos ( id, nome ),
-      mensagens ( texto, criado_em, direcao, tipo, url, nome_arquivo, whatsapp_id, status, autor_usuario_id, contact_meta, location_meta ),
+      mensagens ( conversa_id, texto, criado_em, direcao, tipo, url, nome_arquivo, whatsapp_id, status, autor_usuario_id, contact_meta, location_meta ),
       conversa_tags (
         tag_id,
         tags (
@@ -1339,7 +1339,7 @@ exports.listarConversas = async (req, res) => {
       clientes!conversas_cliente_fk ( id, nome, pushname, telefone, foto_perfil, company_id ),
       atendente:usuarios!conversas_atendente_id_fkey ( id, nome, email ),
       departamentos ( id, nome ),
-      mensagens ( texto, criado_em, direcao, tipo, url, nome_arquivo, whatsapp_id, status, autor_usuario_id, contact_meta, location_meta )
+      mensagens ( conversa_id, texto, criado_em, direcao, tipo, url, nome_arquivo, whatsapp_id, status, autor_usuario_id, contact_meta, location_meta )
     `
 
     function buildQuery(select) {
@@ -3410,7 +3410,7 @@ exports.detalharChat = async (req, res) => {
       !isGroup && !conversaEncerrada && conversaAssumidaPorOutro && !isAdmin && !isSupervisor
 
     // mensagens paginadas (remetente_nome/remetente_telefone para grupos; fallback se colunas não existirem)
-    const selectComRemetente = 'id, texto, direcao, criado_em, autor_usuario_id, status, whatsapp_id, whatsapp_instance_id, tipo, url, nome_arquivo, reply_meta, remetente_nome, remetente_telefone, contact_meta, location_meta, apagada_para_todos, apagada_em'
+    const selectComRemetente = 'id, conversa_id, texto, direcao, criado_em, autor_usuario_id, status, whatsapp_id, whatsapp_instance_id, tipo, url, nome_arquivo, reply_meta, remetente_nome, remetente_telefone, contact_meta, location_meta, apagada_para_todos, apagada_em'
     let mensagens = []
     let errMsgs = null
     let query
@@ -3432,7 +3432,7 @@ exports.detalharChat = async (req, res) => {
       errMsgs = result.error
     }
     // Compatibilidade: se reply_meta/remetente_*/contact_meta/location_meta não existirem ainda no banco, refaz select sem essas colunas.
-    const selectFallback = 'id, texto, direcao, criado_em, autor_usuario_id, status, whatsapp_id, whatsapp_instance_id, tipo, url, nome_arquivo'
+    const selectFallback = 'id, conversa_id, texto, direcao, criado_em, autor_usuario_id, status, whatsapp_id, whatsapp_instance_id, tipo, url, nome_arquivo'
     if (errMsgs && (String(errMsgs.message || '').includes('reply_meta') || String(errMsgs.message || '').includes('remetente_nome') || String(errMsgs.message || '').includes('remetente_telefone') || String(errMsgs.message || '').includes('contact_meta') || String(errMsgs.message || '').includes('location_meta') || String(errMsgs.message || '').includes('apagada_para_todos') || String(errMsgs.message || '').includes('does not exist'))) {
       query = supabase
         .from('mensagens')

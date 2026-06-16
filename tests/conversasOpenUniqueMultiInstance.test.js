@@ -6,6 +6,7 @@ function createSupabaseConversationMock(seed = {}) {
     conversas: [...(seed.conversas || [])],
     insertErrors: [...(seed.insertErrors || [])],
     insertErrorRows: [...(seed.insertErrorRows || [])],
+    operations: [],
   }
 
   function makeBuilder(table) {
@@ -24,6 +25,7 @@ function createSupabaseConversationMock(seed = {}) {
       limit(value) { this.limitValue = Number(value); return this },
       insert(payload) { this.mode = 'insert'; this.payload = payload; return this },
       update(payload) { this.mode = 'update'; this.payload = payload; return this },
+      delete() { this.mode = 'delete'; return this },
       single() {
         const rows = execute(this)
         if (rows && rows.__error) return Promise.resolve({ data: null, error: rows.__error })
@@ -62,10 +64,17 @@ function createSupabaseConversationMock(seed = {}) {
       return [payload]
     }
     if (q.mode === 'update') {
+      state.operations.push({ table: q.table, mode: q.mode, payload: q.payload, filters: [...q.filters] })
       for (const row of rows) {
         if (matches(row, q.filters)) Object.assign(row, q.payload)
       }
       return rows.filter((row) => matches(row, q.filters))
+    }
+    if (q.mode === 'delete') {
+      state.operations.push({ table: q.table, mode: q.mode, filters: [...q.filters] })
+      const deleted = rows.filter((row) => matches(row, q.filters))
+      state[q.table] = rows.filter((row) => !matches(row, q.filters))
+      return deleted
     }
     let result = rows.filter((row) => matches(row, q.filters))
     for (const order of q.orders) {
@@ -171,5 +180,35 @@ describe('Conversas open unique multi-instancia', () => {
     expect(result.created).toBe(false)
     expect(result.conversa.id).toBe(20)
     expect(result.conversa.whatsapp_instance_id).toBe(8)
+  })
+
+  test('merge de conversas valida empresa antes de mover mensagens e historico', async () => {
+    const { mergeConversasIntoCanonico } = require('../helpers/conversationSync')
+    const supabase = createSupabaseConversationMock({
+      conversas: [
+        { id: 10, company_id: 1, telefone: '5534999999999', status_atendimento: 'aberta', departamento_id: null },
+        { id: 20, company_id: 1, telefone: '5534999999999', status_atendimento: 'aberta', departamento_id: null },
+        { id: 30, company_id: 2, telefone: '5534999999999', status_atendimento: 'aberta', departamento_id: null },
+      ],
+    })
+
+    await mergeConversasIntoCanonico(supabase, 1, 10, [20, 30])
+
+    const historicoUpdate = supabase.state.operations.find(
+      (op) => op.table === 'historico_atendimentos' && op.mode === 'update'
+    )
+    const mensagensUpdate = supabase.state.operations.find(
+      (op) => op.table === 'mensagens' && op.mode === 'update'
+    )
+    const conversaDelete = supabase.state.operations.find(
+      (op) => op.table === 'conversas' && op.mode === 'delete'
+    )
+
+    expect(historicoUpdate.payload).toEqual({ conversa_id: 10 })
+    expect(historicoUpdate.filters).toContainEqual({ type: 'in', field: 'conversa_id', values: [20] })
+    expect(mensagensUpdate.filters).toContainEqual({ type: 'in', field: 'conversa_id', values: [20] })
+    expect(mensagensUpdate.filters).toContainEqual({ type: 'eq', field: 'company_id', value: 1 })
+    expect(conversaDelete.filters).toContainEqual({ type: 'in', field: 'id', values: [20] })
+    expect(supabase.state.conversas.some((row) => row.id === 30 && row.company_id === 2)).toBe(true)
   })
 })
