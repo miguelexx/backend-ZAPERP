@@ -2,6 +2,7 @@ const supabase = require('../config/supabase')
 const { registrarAtendimento } = require('../services/atendimentosRegistroService')
 const { ensureConversaForCliente } = require('../services/conversaAbrirClienteService')
 const { executarAssumirConversa } = require('../services/conversaAssumirInternoService')
+const { resetAlertaSemRespostaAoAssumirReaberta } = require('../services/atendimentoSemRespostaService')
 const { getProvider } = require('../services/providers')
 const { getStatus } = require('../services/ultramsgIntegrationService')
 const { getDefaultWhatsappInstance, listWhatsappInstances, resolveWhatsappInstanceForManualAction, sanitizeWhatsappInstance } = require('../services/whatsappInstanceService')
@@ -5705,13 +5706,14 @@ exports.puxarChatFila = async (req, res) => {
       }
     }
 
+    const assumidaEm = new Date().toISOString()
     const { data: atualizada, error: errUpdate } = await supabase
       .from('conversas')
       .update({
         atendente_id: user_id,
         status_atendimento: 'em_atendimento',
         lida: true,
-        atendente_atribuido_em: new Date().toISOString()
+        atendente_atribuido_em: assumidaEm
       })
       .eq('company_id', company_id)
       .eq('id', conversa.id)
@@ -5724,6 +5726,9 @@ exports.puxarChatFila = async (req, res) => {
     if (!atualizada) {
       return res.status(409).json({ error: 'Outra pessoa puxou essa conversa antes de você' })
     }
+
+    await resetAlertaSemRespostaAoAssumirReaberta(company_id, conversa.id, assumidaEm)
+    await clearReabertaFaltaInteracao(company_id, conversa.id)
 
     const resultAt = await registrarAtendimento({
       conversa_id: conversa.id,

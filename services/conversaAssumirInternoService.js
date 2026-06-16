@@ -2,6 +2,7 @@ const supabase = require('../config/supabase')
 const { isGroupConversation } = require('../helpers/conversaHelper')
 const { registrarAtendimento } = require('./atendimentosRegistroService')
 const { clearReabertaFaltaInteracao } = require('../helpers/reabertaFaltaInteracaoHelper')
+const { resetAlertaSemRespostaAoAssumirReaberta } = require('./atendimentoSemRespostaService')
 
 /**
  * Mesma regra de POST /chats/:id/assumir — atualiza conversa e registra atendimento.
@@ -64,13 +65,14 @@ async function executarAssumirConversa({
     }
   }
 
+  const assumidaEm = new Date().toISOString()
   const { data, error } = await supabase
     .from('conversas')
     .update({
       atendente_id: user_id,
       status_atendimento: 'em_atendimento',
       lida: true,
-      atendente_atribuido_em: new Date().toISOString(),
+      atendente_atribuido_em: assumidaEm,
       reaberta_falta_interacao_em: null,
     })
     .eq('company_id', company_id)
@@ -80,6 +82,7 @@ async function executarAssumirConversa({
 
   if (error) return { ok: false, status: 500, error: error.message, conversa: null }
 
+  await resetAlertaSemRespostaAoAssumirReaberta(company_id, conversa_id, assumidaEm)
   await clearReabertaFaltaInteracao(company_id, conversa_id)
 
   const resultAt = await registrarAtendimento({

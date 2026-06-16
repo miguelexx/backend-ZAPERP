@@ -5,7 +5,6 @@
  */
 
 const supabase = require('../config/supabase')
-const { isWithinBusinessHours } = require('./chatbotTriageService')
 const {
   markReabertaFaltaInteracao,
   clearReabertaFaltaInteracao,
@@ -27,7 +26,7 @@ const DEFAULT_ALERTA_SEM_RESPOSTA = {
   gestor_cliente_nome: '',
   responsaveis_notificacao_ids: [],
   telefone_gestor: '',
-  horario_comercial_ativo: false,
+  horario_comercial_ativo: true,
   timezone: 'America/Sao_Paulo',
 }
 
@@ -78,7 +77,7 @@ function normalizeAlertaSemResposta(raw) {
     gestor_cliente_nome: String(r.gestor_cliente_nome || '').trim().slice(0, 120),
     responsaveis_notificacao_ids: responsaveis,
     telefone_gestor: String(r.telefone_gestor || '').trim().slice(0, 40),
-    horario_comercial_ativo: r.horario_comercial_ativo === true,
+    horario_comercial_ativo: r.horario_comercial_ativo !== false,
     timezone: String(r.timezone || DEFAULT_ALERTA_SEM_RESPOSTA.timezone).trim().slice(0, 80) || 'America/Sao_Paulo',
   }
 }
@@ -301,6 +300,32 @@ async function clearEstado(company_id, conversa_id) {
   } catch (_) {}
 }
 
+function buildAlertaSemRespostaResetPatch(assumidaEm) {
+  return {
+    ultimo_cliente_msg_em: assumidaEm,
+    primeiro_alerta_em: null,
+    alerta_critico_em: null,
+    gestor_notificado_em: null,
+    reaberta_em: null,
+  }
+}
+
+async function resetAlertaSemRespostaAoAssumirReaberta(company_id, conversa_id, assumidaEm = new Date().toISOString()) {
+  try {
+    const estado = await getEstado(company_id, conversa_id)
+    const foiReabertaPeloAlerta = Boolean(estado?.reaberta_em)
+    if (!foiReabertaPeloAlerta) {
+      return { ok: true, resetado: false, reason: 'nao_reaberta_pelo_alerta' }
+    }
+
+    await upsertEstado(company_id, conversa_id, buildAlertaSemRespostaResetPatch(assumidaEm))
+    return { ok: true, resetado: true, ciclo_iniciado_em: assumidaEm }
+  } catch (e) {
+    console.warn('[atendimentoSemResposta] reset ao assumir reaberta:', e?.message || e)
+    return { ok: false, resetado: false, error: e?.message || String(e) }
+  }
+}
+
 async function fetchUltimaMensagem(company_id, conversa_id) {
   const { data, error } = await supabase
     .from('mensagens')
@@ -318,7 +343,7 @@ async function fetchUltimaMensagem(company_id, conversa_id) {
 async function revalidateConversaElegivel(company_id, conv, anchor) {
   const { data, error } = await supabase
     .from('conversas')
-    .select('id, atendente_id, status_atendimento')
+    .select('id, atendente_id, status_atendimento, atendente_atribuido_em')
     .eq('company_id', company_id)
     .eq('id', conv.id)
     .eq('status_atendimento', 'em_atendimento')
@@ -332,7 +357,18 @@ async function revalidateConversaElegivel(company_id, conv, anchor) {
     await clearEstado(company_id, conv.id)
     return false
   }
-  return String(ultima.criado_em) === String(anchor)
+  if (String(ultima.criado_em) === String(anchor)) return true
+
+  const anchorMs = new Date(anchor).getTime()
+  const ultimaMs = new Date(ultima.criado_em).getTime()
+  const assumidaMs = new Date(data.atendente_atribuido_em || conv.atendente_atribuido_em || 0).getTime()
+  return (
+    Number.isFinite(anchorMs) &&
+    Number.isFinite(ultimaMs) &&
+    Number.isFinite(assumidaMs) &&
+    anchorMs > ultimaMs &&
+    Math.abs(anchorMs - assumidaMs) <= 60 * 1000
+  )
 }
 
 function duplicateKeyError(error) {
@@ -658,35 +694,216 @@ async function reabrirConversa(company_id, conversa_id) {
   return { ok: true, reaberta_em: reabertaEm }
 }
 
-function minutesSince(iso) {
+function minutesSince(iso, now = new Date()) {
   if (!iso) return 0
   const ms = new Date(iso).getTime()
   if (!Number.isFinite(ms)) return 0
-  return Math.max(0, Math.floor((Date.now() - ms) / 60000))
+  return Math.max(0, Math.floor((new Date(now).getTime() - ms) / 60000))
 }
 
-async function shouldRunForBusinessHours(company_id, cfg) {
-  if (!cfg.horario_comercial_ativo) return true
+function parseTimeToMinutes(value, fallback) {
+  const raw = String(value || '').trim()
+  const m = raw.match(/^(\d{1,2}):(\d{2})$/)
+  if (!m) return fallback
+  const h = Number(m[1])
+  const min = Number(m[2])
+  if (!Number.isInteger(h) || !Number.isInteger(min) || h < 0 || h > 23 || min < 0 || min > 59) {
+    return fallback
+  }
+  return h * 60 + min
+}
+
+function normalizeBusinessWindows(ct = {}) {
+  const rawJanelas = Array.isArray(ct.horariosJanelas) ? ct.horariosJanelas : []
+  const source = rawJanelas.length > 0
+    ? rawJanelas.map((j) => ({ inicio: j?.inicio, fim: j?.fim }))
+    : [{ inicio: ct.horarioInicio || '09:00', fim: ct.horarioFim || '18:00' }]
+
+  const windows = []
+  for (const item of source) {
+    const start = parseTimeToMinutes(item?.inicio, null)
+    const end = parseTimeToMinutes(item?.fim, null)
+    if (start == null || end == null || start === end) continue
+    if (start < end) {
+      windows.push({ start, end })
+    } else {
+      windows.push({ start, end: 1440 })
+      windows.push({ start: 0, end })
+    }
+  }
+
+  if (!windows.length) return [{ start: 9 * 60, end: 18 * 60 }]
+  return windows
+    .sort((a, b) => a.start - b.start || a.end - b.end)
+    .reduce((acc, win) => {
+      const prev = acc[acc.length - 1]
+      if (prev && win.start <= prev.end) {
+        prev.end = Math.max(prev.end, win.end)
+      } else {
+        acc.push({ ...win })
+      }
+      return acc
+    }, [])
+}
+
+function getZonedDateParts(date, timezone = 'America/Sao_Paulo') {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: timezone || 'America/Sao_Paulo',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
+    weekday: 'short',
+  }).formatToParts(new Date(date))
+  const get = (type) => parts.find((p) => p.type === type)?.value || ''
+  const year = Number(get('year'))
+  const month = Number(get('month'))
+  const day = Number(get('day'))
+  const hour = Number(get('hour'))
+  const minute = Number(get('minute'))
+  const weekdayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
+  const weekday = weekdayNames.indexOf(get('weekday'))
+  return {
+    year,
+    month,
+    day,
+    hour,
+    minute,
+    weekday,
+    dayKey: `${String(year).padStart(4, '0')}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`,
+    minuteOfDay: hour * 60 + minute,
+    dayNumber: Math.floor(Date.UTC(year, month - 1, day) / 86400000),
+  }
+}
+
+function partsFromDayNumber(dayNumber) {
+  const d = new Date(dayNumber * 86400000)
+  const year = d.getUTCFullYear()
+  const month = d.getUTCMonth() + 1
+  const day = d.getUTCDate()
+  return {
+    year,
+    month,
+    day,
+    weekday: d.getUTCDay(),
+    dayKey: `${String(year).padStart(4, '0')}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`,
+  }
+}
+
+function normalizeBusinessSchedule(cfg = {}, fullConfig = {}) {
+  const ct = fullConfig.chatbot_triage && typeof fullConfig.chatbot_triage === 'object'
+    ? fullConfig.chatbot_triage
+    : {}
+  const timezone = String(cfg.timezone || ct.timezone || 'America/Sao_Paulo').trim() || 'America/Sao_Paulo'
+  const diasSemanaDesativados = Array.isArray(ct.diasSemanaDesativados)
+    ? ct.diasSemanaDesativados.map(Number).filter((d) => Number.isInteger(d) && d >= 0 && d <= 6)
+    : [0, 6]
+  const datasEspecificasFechadas = Array.isArray(ct.datasEspecificasFechadas)
+    ? ct.datasEspecificasFechadas.map((d) => String(d || '').trim()).filter(Boolean)
+    : []
+  return {
+    enabled: cfg.horario_comercial_ativo === true,
+    timezone,
+    diasSemanaDesativados,
+    datasEspecificasFechadas,
+    windows: normalizeBusinessWindows(ct),
+  }
+}
+
+function isBusinessDayParts(parts, schedule) {
+  if (!schedule?.enabled) return true
+  if (schedule.diasSemanaDesativados?.includes(parts.weekday)) return false
+  if (schedule.datasEspecificasFechadas?.includes(parts.dayKey)) return false
+  return true
+}
+
+function isBusinessTime(date = new Date(), schedule) {
+  if (!schedule?.enabled) return true
+  const parts = getZonedDateParts(date, schedule.timezone)
+  if (!isBusinessDayParts(parts, schedule)) return false
+  return (schedule.windows || []).some((w) => parts.minuteOfDay >= w.start && parts.minuteOfDay < w.end)
+}
+
+function businessMinutesBetween(startIso, endDate = new Date(), schedule, capMinutes = null) {
+  if (!schedule?.enabled) return minutesSince(startIso, endDate)
+
+  const start = new Date(startIso)
+  const end = new Date(endDate)
+  const startMs = start.getTime()
+  const endMs = end.getTime()
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) return 0
+
+  const startParts = getZonedDateParts(start, schedule.timezone)
+  const endParts = getZonedDateParts(end, schedule.timezone)
+  const cap = Number.isFinite(Number(capMinutes)) && Number(capMinutes) > 0 ? Number(capMinutes) : null
+  let total = 0
+
+  for (let dayNumber = startParts.dayNumber; dayNumber <= endParts.dayNumber; dayNumber += 1) {
+    const dayParts = partsFromDayNumber(dayNumber)
+    if (!isBusinessDayParts(dayParts, schedule)) continue
+
+    const rangeStart = dayNumber === startParts.dayNumber ? startParts.minuteOfDay : 0
+    const rangeEnd = dayNumber === endParts.dayNumber ? endParts.minuteOfDay : 1440
+    if (rangeEnd <= rangeStart) continue
+
+    for (const win of schedule.windows || []) {
+      const overlapStart = Math.max(rangeStart, win.start)
+      const overlapEnd = Math.min(rangeEnd, win.end)
+      if (overlapEnd > overlapStart) total += overlapEnd - overlapStart
+      if (cap != null && total >= cap) return Math.floor(total)
+    }
+  }
+
+  return Math.floor(total)
+}
+
+function resolveAlertaSemRespostaCycleAnchor({ ultima, estado = {}, conv = {} } = {}) {
+  const ultimaEm = ultima?.criado_em ? String(ultima.criado_em) : null
+  if (!ultimaEm) return null
+
+  const ultimoClienteMs = new Date(ultimaEm).getTime()
+  const estadoAnchor = estado?.ultimo_cliente_msg_em ? String(estado.ultimo_cliente_msg_em) : null
+  const estadoAnchorMs = estadoAnchor ? new Date(estadoAnchor).getTime() : NaN
+  const assumidaMs = conv?.atendente_atribuido_em ? new Date(conv.atendente_atribuido_em).getTime() : NaN
+
+  if (
+    estadoAnchor &&
+    Number.isFinite(estadoAnchorMs) &&
+    Number.isFinite(ultimoClienteMs) &&
+    Number.isFinite(assumidaMs) &&
+    estadoAnchorMs > ultimoClienteMs &&
+    Math.abs(estadoAnchorMs - assumidaMs) <= 60 * 1000
+  ) {
+    return estadoAnchor
+  }
+
+  return ultimaEm
+}
+
+async function loadBusinessSchedule(company_id, cfg) {
+  if (!cfg.horario_comercial_ativo) return normalizeBusinessSchedule(cfg, {})
   const full = await loadIaConfig(company_id)
-  const ct = full.chatbot_triage || {}
-  const tz = cfg.timezone || ct.timezone || 'America/Sao_Paulo'
-  return isWithinBusinessHours(ct.horarioInicio || '09:00', ct.horarioFim || '18:00', new Date(), tz)
+  return normalizeBusinessSchedule(cfg, full)
 }
 
 async function processCompanyAtendimentoSemResposta(company_id, opts = {}) {
   const dryRun = opts.dryRun === true
   const io = opts.io || null
+  const now = opts.now ? new Date(opts.now) : new Date()
   const cfg = await getAlertaSemRespostaConfig(company_id)
   if (!cfg.alerta_sem_resposta_ativo) {
     return { ok: true, processadas: 0, skipped: 'inativo' }
   }
-  if (!(await shouldRunForBusinessHours(company_id, cfg))) {
+  const businessSchedule = await loadBusinessSchedule(company_id, cfg)
+  if (!isBusinessTime(now, businessSchedule)) {
     return { ok: true, processadas: 0, skipped: 'fora_horario' }
   }
 
   const { data: conversas, error: convErr } = await supabase
     .from('conversas')
-    .select('id, atendente_id, nome_contato_cache, telefone, cliente_id')
+    .select('id, atendente_id, atendente_atribuido_em, nome_contato_cache, telefone, cliente_id')
     .eq('company_id', company_id)
     .eq('status_atendimento', 'em_atendimento')
     .not('atendente_id', 'is', null)
@@ -712,11 +929,20 @@ async function processCompanyAtendimentoSemResposta(company_id, opts = {}) {
       continue
     }
 
-    const minutos = minutesSince(ultima.criado_em)
     let estado = (await getEstado(company_id, conv.id)) || {}
-    const anchor = ultima.criado_em
+    let anchor = resolveAlertaSemRespostaCycleAnchor({ ultima, estado, conv })
+    if (!anchor) continue
 
-    if (estado.ultimo_cliente_msg_em && String(estado.ultimo_cliente_msg_em) !== String(anchor)) {
+    const ultimoClienteMs = new Date(ultima.criado_em).getTime()
+    const estadoAnchorMs = estado.ultimo_cliente_msg_em ? new Date(estado.ultimo_cliente_msg_em).getTime() : NaN
+    const novaMensagemClienteNoCiclo =
+      estado.ultimo_cliente_msg_em &&
+      Number.isFinite(ultimoClienteMs) &&
+      Number.isFinite(estadoAnchorMs) &&
+      ultimoClienteMs > estadoAnchorMs
+
+    if (novaMensagemClienteNoCiclo) {
+      anchor = ultima.criado_em
       estado = {
         ...estado,
         ultimo_cliente_msg_em: anchor,
@@ -736,6 +962,13 @@ async function processCompanyAtendimentoSemResposta(company_id, opts = {}) {
       await upsertEstado(company_id, conv.id, { ultimo_cliente_msg_em: anchor })
     }
 
+    const maxStageMinutes = Math.max(
+      cfg.tempo_primeiro_alerta_minutos,
+      cfg.tempo_alerta_critico_minutos,
+      cfg.tempo_notificar_gestor_minutos
+    )
+    const minutos = businessMinutesBetween(anchor, now, businessSchedule, maxStageMinutes)
+
     const nome = conv.nome_contato_cache || conv.telefone || `Conversa ${conv.id}`
     const eventoDetalhes = { cliente_nome: nome }
     const basePayload = {
@@ -751,7 +984,7 @@ async function processCompanyAtendimentoSemResposta(company_id, opts = {}) {
         tipo: 'primeiro_alerta',
         nivel: 'atencao',
         mensagem: `Cliente aguardando resposta há ${minutos} min (${nome}).`,
-        estadoPatch: { primeiro_alerta_em: new Date().toISOString() },
+        estadoPatch: { primeiro_alerta_em: now.toISOString() },
       })
     }
 
@@ -760,7 +993,7 @@ async function processCompanyAtendimentoSemResposta(company_id, opts = {}) {
         tipo: 'alerta_critico',
         nivel: 'critico',
         mensagem: `Alerta crítico: ${nome} sem resposta há ${minutos} min.`,
-        estadoPatch: { alerta_critico_em: new Date().toISOString() },
+        estadoPatch: { alerta_critico_em: now.toISOString() },
       })
     }
 
@@ -769,7 +1002,7 @@ async function processCompanyAtendimentoSemResposta(company_id, opts = {}) {
         tipo: 'gestor_notificado',
         nivel: 'gestor',
         mensagem: `Gestor notificado: ${nome} sem resposta há ${minutos} min.`,
-        estadoPatch: { gestor_notificado_em: new Date().toISOString() },
+        estadoPatch: { gestor_notificado_em: now.toISOString() },
         notifyGestor: true,
       })
     }
@@ -972,6 +1205,12 @@ module.exports = {
   emitAlertaRealtime,
   clearEstado,
   clearReabertaFaltaInteracao,
+  resetAlertaSemRespostaAoAssumirReaberta,
+  buildAlertaSemRespostaResetPatch,
+  normalizeBusinessSchedule,
+  isBusinessTime,
+  businessMinutesBetween,
+  resolveAlertaSemRespostaCycleAnchor,
   resolveGestorWhatsappDestination,
   sendGestorWhatsapp,
   formatTempoSemResposta,

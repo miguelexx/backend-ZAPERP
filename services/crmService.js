@@ -74,6 +74,40 @@ function terminalPatchFromStage(stage, { motivoPerda } = {}) {
   }
 }
 
+function normalizeProdutosInteresse(value) {
+  if (value == null) return undefined
+  if (Array.isArray(value)) return value
+  if (typeof value === 'string') {
+    const trimmed = value.trim()
+    if (!trimmed) return []
+    try {
+      const parsed = JSON.parse(trimmed)
+      if (Array.isArray(parsed)) return parsed
+    } catch (_) {}
+    return trimmed.split(',').map((x) => x.trim()).filter(Boolean)
+  }
+  return [value]
+}
+
+function normalizeStatusLead(value) {
+  const st = String(value || '').toLowerCase()
+  if (st === 'aberto') return 'ativo'
+  if (['ativo', 'arquivado', 'ganho', 'perdido'].includes(st)) return st
+  return null
+}
+
+async function recordTimeline(companyId, leadId, userId, tipo, titulo, opts = {}) {
+  return repo.insertTimeline({
+    company_id: companyId,
+    lead_id: leadId,
+    usuario_id: userId || null,
+    tipo,
+    titulo,
+    descricao: opts.descricao != null ? String(opts.descricao) : null,
+    metadata: opts.metadata || {},
+  })
+}
+
 async function assertClienteConversaCompany(companyId, clienteId, conversaId) {
   if (clienteId != null) {
     const { data, error } = await supabase
@@ -94,6 +128,17 @@ async function assertClienteConversaCompany(companyId, clienteId, conversaId) {
       .maybeSingle()
     if (error) throw error
     if (!data) throw Object.assign(new Error('Conversa não encontrada na empresa'), { status: 400 })
+  }
+}
+
+async function assertLeadRefsCompany(companyId, refs = {}) {
+  if (refs.campanha_id != null) {
+    const campanha = await repo.getCampaignById(companyId, Number(refs.campanha_id))
+    if (!campanha) throw Object.assign(new Error('Campanha nÃ£o encontrada na empresa'), { status: 400 })
+  }
+  if (refs.motivo_perda_id != null) {
+    const reason = await repo.getLostReasonById(companyId, Number(refs.motivo_perda_id))
+    if (!reason) throw Object.assign(new Error('Motivo de perda nÃ£o encontrado na empresa'), { status: 400 })
   }
 }
 
@@ -138,6 +183,10 @@ async function createLead(companyId, userId, body, audit = true) {
   }
 
   await assertClienteConversaCompany(companyId, clienteId, conversaId)
+  await assertLeadRefsCompany(companyId, {
+    campanha_id: body.campanha_id,
+    motivo_perda_id: body.motivo_perda_id,
+  })
 
   const maxO = await repo.maxOrdemInStage(companyId, stage.id)
   const nome = String(body.nome || '').trim()
@@ -153,19 +202,35 @@ async function createLead(companyId, userId, body, audit = true) {
       ? (body.responsavel_id != null ? Number(body.responsavel_id) : null)
       : userId,
     origem_id: body.origem_id != null ? Number(body.origem_id) : null,
+    campanha_id: body.campanha_id != null ? Number(body.campanha_id) : null,
     nome,
     empresa: body.empresa != null ? String(body.empresa).trim() : null,
+    cpf_cnpj: body.cpf_cnpj != null ? String(body.cpf_cnpj).trim() : null,
     telefone: body.telefone != null ? String(body.telefone).trim() : null,
+    whatsapp: body.whatsapp != null ? String(body.whatsapp).trim() : null,
     email: body.email != null ? String(body.email).trim() : null,
+    cidade: body.cidade != null ? String(body.cidade).trim() : null,
+    uf: body.uf != null ? String(body.uf).trim().slice(0, 2).toUpperCase() : null,
     valor_estimado: body.valor_estimado != null ? Number(body.valor_estimado) : null,
+    valor_ganho: body.valor_ganho != null ? Number(body.valor_ganho) : null,
     probabilidade: body.probabilidade != null ? Number(body.probabilidade) : null,
     prioridade: body.prioridade || 'normal',
+    temperatura: body.temperatura || 'morno',
     status: 'ativo',
+    data_prevista_fechamento: body.data_prevista_fechamento || null,
     data_proximo_contato: body.data_proximo_contato || null,
+    data_proxima_acao: body.data_proxima_acao || body.data_proximo_contato || null,
+    data_primeiro_contato: body.data_primeiro_contato || null,
+    data_ultimo_contato: body.data_ultimo_contato || null,
     ultima_interacao_em: new Date().toISOString(),
+    motivo_perda_id: body.motivo_perda_id != null ? Number(body.motivo_perda_id) : null,
+    motivo_perda_observacao: body.motivo_perda_observacao != null ? String(body.motivo_perda_observacao) : null,
+    produtos_interesse: normalizeProdutosInteresse(body.produtos_interesse) ?? [],
     observacoes: body.observacoes != null ? String(body.observacoes) : null,
     ordem: maxO + 1,
     criado_por: userId,
+    atualizado_por: userId,
+    data_entrada_stage: new Date().toISOString(),
     ...terminalPatchFromStage(stage, {}),
   }
 
@@ -186,6 +251,10 @@ async function createLead(companyId, userId, body, audit = true) {
     })
   }
 
+  await recordTimeline(companyId, lead.id, userId, 'lead_criado', 'Lead criado', {
+    metadata: { pipeline_id: pipelineId, stage_id: stage.id },
+  })
+
   return repo.getLeadById(companyId, lead.id).then(async (l) => {
     const { byLead } = await repo.fetchTagsForLeads(companyId, [l.id])
     return { ...l, tags: byLead[l.id] || [] }
@@ -200,9 +269,19 @@ async function updateLead(companyId, userId, leadId, body) {
   const fields = [
     'nome', 'empresa', 'telefone', 'email', 'valor_estimado', 'probabilidade', 'prioridade',
     'observacoes', 'data_proximo_contato', 'cliente_id', 'conversa_id', 'origem_id',
+    'cpf_cnpj', 'whatsapp', 'cidade', 'uf', 'campanha_id', 'valor_ganho', 'temperatura',
+    'data_prevista_fechamento', 'data_proxima_acao', 'data_primeiro_contato',
+    'data_ultimo_contato', 'motivo_perda_id', 'motivo_perda_observacao',
   ]
   for (const f of fields) {
     if (body[f] !== undefined) patch[f] = body[f]
+  }
+  if (body.produtos_interesse !== undefined) {
+    patch.produtos_interesse = normalizeProdutosInteresse(body.produtos_interesse)
+  }
+  if (patch.uf != null) patch.uf = String(patch.uf).trim().slice(0, 2).toUpperCase()
+  if (patch.temperatura != null && !['frio', 'morno', 'quente'].includes(String(patch.temperatura))) {
+    throw Object.assign(new Error('temperatura invÃ¡lida'), { status: 400 })
   }
   if (body.responsavel_id !== undefined) {
     const prev = existing.responsavel_id
@@ -217,6 +296,9 @@ async function updateLead(companyId, userId, leadId, body) {
         entidade_id: leadId,
         detalhes_json: { de: prev, para: next },
       })
+      await recordTimeline(companyId, leadId, userId, 'responsavel_alterado', 'ResponsÃ¡vel alterado', {
+        metadata: { de: prev, para: next },
+      })
     }
   }
 
@@ -227,15 +309,18 @@ async function updateLead(companyId, userId, leadId, body) {
       patch.conversa_id !== undefined ? patch.conversa_id : existing.conversa_id
     )
   }
+  await assertLeadRefsCompany(companyId, {
+    campanha_id: patch.campanha_id !== undefined ? patch.campanha_id : existing.campanha_id,
+    motivo_perda_id: patch.motivo_perda_id !== undefined ? patch.motivo_perda_id : existing.motivo_perda_id,
+  })
 
   if (body.status !== undefined) {
-    const st = String(body.status).toLowerCase()
-    if (['ativo', 'arquivado', 'ganho', 'perdido'].includes(st)) {
-      patch.status = st
-    }
+    const st = normalizeStatusLead(body.status)
+    if (st) patch.status = st
   }
 
   patch.ultima_interacao_em = new Date().toISOString()
+  patch.atualizado_por = userId
   const updated = await repo.updateLead(companyId, leadId, patch)
   if (Array.isArray(body.tag_ids)) {
     const tagIds = [...new Set(body.tag_ids.map(Number).filter((x) => Number.isFinite(x)))]
@@ -250,6 +335,12 @@ async function updateLead(companyId, userId, leadId, body) {
     entidade_id: leadId,
     detalhes_json: { campos: Object.keys(body) },
   })
+  const changed = Object.keys(patch).filter((f) => !['ultima_interacao_em', 'atualizado_por'].includes(f))
+  if (changed.length) {
+    await recordTimeline(companyId, leadId, userId, 'lead_atualizado', 'Lead atualizado', {
+      metadata: { campos: changed },
+    })
+  }
 
   const { byLead } = await repo.fetchTagsForLeads(companyId, [leadId])
   return { ...updated, tags: byLead[leadId] || [] }
@@ -284,6 +375,7 @@ async function moveLead(companyId, userId, leadId, body) {
 
   const motivoPerda = body.motivo_perda ?? body.perdido_motivo ?? null
   const terminal = terminalPatchFromStage(stage, { motivoPerda })
+  const nowIso = new Date().toISOString()
 
   let newOrdem
   if (body.ordem !== undefined && body.ordem !== null) {
@@ -308,7 +400,13 @@ async function moveLead(companyId, userId, leadId, body) {
     pipeline_id: pipelineId,
     stage_id: stageId,
     ordem: newOrdem,
-    ultima_interacao_em: new Date().toISOString(),
+    ultima_interacao_em: nowIso,
+    data_entrada_stage: nowIso,
+    atualizado_por: userId,
+    ...(body.valor_ganho != null ? { valor_ganho: Number(body.valor_ganho) } : {}),
+    ...(body.motivo_perda_id != null ? { motivo_perda_id: Number(body.motivo_perda_id) } : {}),
+    ...(body.motivo_perda_observacao != null ? { motivo_perda_observacao: String(body.motivo_perda_observacao) } : {}),
+    ...(stage.probabilidade_padrao != null && lead.probabilidade == null ? { probabilidade: stage.probabilidade_padrao } : {}),
     ...terminal,
     ...(stage.tipo_fechamento === 'perdido' && motivoPerda
       ? { perdido_motivo: String(motivoPerda).trim() }
@@ -326,7 +424,158 @@ async function moveLead(companyId, userId, leadId, body) {
       para: { pipeline_id: pipelineId, stage_id: stageId },
     },
   })
+  await recordTimeline(companyId, leadId, userId, 'stage_alterado', 'EstÃ¡gio alterado', {
+    metadata: {
+      de: { pipeline_id: lead.pipeline_id, stage_id: lead.stage_id },
+      para: { pipeline_id: pipelineId, stage_id: stageId },
+      motivo: body.motivo || null,
+    },
+  })
+  if (lead.pipeline_id !== pipelineId) {
+    await recordTimeline(companyId, leadId, userId, 'pipeline_alterado', 'Pipeline alterado', {
+      metadata: { de: lead.pipeline_id, para: pipelineId },
+    })
+  }
+  if (updated.status === 'ganho') {
+    await recordTimeline(companyId, leadId, userId, 'lead_ganho', 'Lead ganho', {
+      metadata: { valor_ganho: updated.valor_ganho, stage_id: stageId },
+    })
+  } else if (updated.status === 'perdido') {
+    await recordTimeline(companyId, leadId, userId, 'lead_perdido', 'Lead perdido', {
+      metadata: { motivo_perda: updated.perdido_motivo, stage_id: stageId },
+    })
+  }
 
+  return updated
+}
+
+async function findTerminalStage(companyId, pipelineId, tipo) {
+  const stages = await repo.listStages(companyId, { pipeline_id: pipelineId, ativo: true })
+  return stages.find((s) => s.tipo_fechamento === tipo) || null
+}
+
+async function ganharLead(companyId, userId, leadId, body = {}) {
+  const lead = await repo.getLeadById(companyId, leadId)
+  if (!lead) throw Object.assign(new Error('Lead nÃ£o encontrado'), { status: 404 })
+  const stageId = body.stage_id != null ? Number(body.stage_id) : (await findTerminalStage(companyId, lead.pipeline_id, 'ganho'))?.id
+  if (!stageId) throw Object.assign(new Error('Configure um estÃ¡gio de ganho no pipeline'), { status: 400 })
+  const moved = await moveLead(companyId, userId, leadId, {
+    pipeline_id: body.pipeline_id != null ? Number(body.pipeline_id) : lead.pipeline_id,
+    stage_id: stageId,
+    valor_ganho: body.valor_ganho != null ? Number(body.valor_ganho) : (lead.valor_ganho ?? lead.valor_estimado ?? null),
+    motivo: body.motivo || 'ganho',
+  })
+  return repo.updateLead(companyId, leadId, {
+    status: 'ganho',
+    valor_ganho: body.valor_ganho != null ? Number(body.valor_ganho) : (moved.valor_ganho ?? moved.valor_estimado ?? null),
+    ganho_em: new Date().toISOString(),
+    perdido_em: null,
+    perdido_motivo: null,
+    motivo_perda_id: null,
+    motivo_perda_observacao: null,
+    atualizado_por: userId,
+  })
+}
+
+async function perderLead(companyId, userId, leadId, body = {}) {
+  const lead = await repo.getLeadById(companyId, leadId)
+  if (!lead) throw Object.assign(new Error('Lead nÃ£o encontrado'), { status: 404 })
+  const motivoTexto = body.motivo_perda || body.perdido_motivo || body.motivo || null
+  const motivoId = body.motivo_perda_id != null ? Number(body.motivo_perda_id) : null
+  if (!motivoId && (!motivoTexto || !String(motivoTexto).trim())) {
+    throw Object.assign(new Error('Motivo de perda Ã© obrigatÃ³rio'), { status: 400 })
+  }
+  await assertLeadRefsCompany(companyId, { motivo_perda_id: motivoId })
+  const stageId = body.stage_id != null ? Number(body.stage_id) : (await findTerminalStage(companyId, lead.pipeline_id, 'perdido'))?.id
+  if (!stageId) throw Object.assign(new Error('Configure um estÃ¡gio de perda no pipeline'), { status: 400 })
+  const moved = await moveLead(companyId, userId, leadId, {
+    pipeline_id: body.pipeline_id != null ? Number(body.pipeline_id) : lead.pipeline_id,
+    stage_id: stageId,
+    motivo_perda: motivoTexto || `motivo_id:${motivoId}`,
+    perdido_motivo: motivoTexto || `motivo_id:${motivoId}`,
+    motivo_perda_id: motivoId,
+    motivo_perda_observacao: body.observacao || body.motivo_perda_observacao || null,
+    motivo: body.motivo || 'perdido',
+  })
+  return repo.updateLead(companyId, leadId, {
+    status: 'perdido',
+    perdido_em: new Date().toISOString(),
+    ganho_em: null,
+    valor_ganho: null,
+    perdido_motivo: motivoTexto ? String(motivoTexto).trim() : moved.perdido_motivo,
+    motivo_perda_id: motivoId,
+    motivo_perda_observacao: body.observacao || body.motivo_perda_observacao || null,
+    atualizado_por: userId,
+  })
+}
+
+async function reabrirLead(companyId, userId, leadId, body = {}) {
+  const lead = await repo.getLeadById(companyId, leadId)
+  if (!lead) throw Object.assign(new Error('Lead nÃ£o encontrado'), { status: 404 })
+  let pipelineId = body.pipeline_id != null ? Number(body.pipeline_id) : lead.pipeline_id
+  let stageId = body.stage_id != null ? Number(body.stage_id) : null
+  if (!stageId) {
+    const movements = await repo.listMovements(companyId, leadId, { limit: 20 })
+    const previous = movements.find((m) => m.de_stage_id && m.de_pipeline_id)
+    if (previous) {
+      pipelineId = previous.de_pipeline_id
+      stageId = previous.de_stage_id
+    }
+  }
+  if (!stageId) {
+    const first = await repo.getFirstOpenStage(companyId, pipelineId)
+    stageId = first?.id ?? null
+  }
+  if (!stageId) throw Object.assign(new Error('Nenhum estÃ¡gio aberto para reabrir o lead'), { status: 400 })
+  const updated = await moveLead(companyId, userId, leadId, {
+    pipeline_id: pipelineId,
+    stage_id: stageId,
+    motivo: body.motivo || 'reaberto',
+  })
+  const reopened = await repo.updateLead(companyId, leadId, {
+    status: 'ativo',
+    ganho_em: null,
+    perdido_em: null,
+    perdido_motivo: null,
+    motivo_perda_id: null,
+    motivo_perda_observacao: null,
+    atualizado_por: userId,
+  })
+  await recordTimeline(companyId, leadId, userId, 'lead_reaberto', 'Lead reaberto', {
+    metadata: { pipeline_id: updated.pipeline_id, stage_id: updated.stage_id },
+  })
+  return reopened
+}
+
+async function transferirResponsavel(companyId, userId, leadId, responsavelId) {
+  return updateLead(companyId, userId, leadId, {
+    responsavel_id: responsavelId != null ? Number(responsavelId) : null,
+  })
+}
+
+async function registrarContato(companyId, userId, leadId, body = {}) {
+  const lead = await repo.getLeadById(companyId, leadId)
+  if (!lead) throw Object.assign(new Error('Lead nÃ£o encontrado'), { status: 404 })
+  const now = body.data_contato || new Date().toISOString()
+  const patch = {
+    data_ultimo_contato: now,
+    ultima_interacao_em: now,
+    atualizado_por: userId,
+  }
+  if (!lead.data_primeiro_contato) patch.data_primeiro_contato = now
+  if (body.data_proxima_acao) {
+    patch.data_proxima_acao = body.data_proxima_acao
+    patch.data_proximo_contato = body.data_proxima_acao
+  }
+  const updated = await repo.updateLead(companyId, leadId, patch)
+  await recordTimeline(companyId, leadId, userId, 'contato_realizado', 'Contato realizado', {
+    descricao: body.descricao || body.resultado || null,
+    metadata: {
+      canal: body.canal || null,
+      resultado: body.resultado || null,
+      proxima_acao: body.data_proxima_acao || null,
+    },
+  })
   return updated
 }
 
@@ -379,7 +628,7 @@ async function reorderLeads(companyId, userId, body) {
   return { ok: true }
 }
 
-async function getKanban(companyId, pipelineId) {
+async function getKanban(companyId, pipelineId, query = {}) {
   await ensureDefaultCrmSetup(companyId)
   let pid = pipelineId != null && pipelineId !== '' ? Number(pipelineId) : null
   if (pid != null && !Number.isFinite(pid)) pid = null
@@ -394,7 +643,16 @@ async function getKanban(companyId, pipelineId) {
   if (!pipeline) throw Object.assign(new Error('Pipeline não encontrado'), { status: 404 })
 
   const stages = await repo.listStages(companyId, { pipeline_id: pipeline.id, ativo: true })
-  const leads = await repo.listLeadsByPipeline(companyId, pipeline.id)
+  const result = await repo.listLeads(companyId, {
+    ...query,
+    pipeline_id: pipeline.id,
+    status: query.status || 'ativo',
+    page: 1,
+    page_size: query.page_size || 200,
+    sort: 'atualizado_em',
+    dir: 'desc',
+  })
+  const leads = result.items
   const leadIds = leads.map((l) => l.id)
   const { byLead } = await repo.fetchTagsForLeads(companyId, leadIds)
   const userMap = await repo.fetchUsuarioMap(companyId, leads.map((l) => l.responsavel_id).filter(Boolean))
@@ -413,15 +671,22 @@ async function getKanban(companyId, pipelineId) {
       nome: l.nome,
       empresa: l.empresa,
       telefone: l.telefone,
+      whatsapp: l.whatsapp,
       email: l.email,
       valor_estimado: l.valor_estimado,
+      valor_ganho: l.valor_ganho,
       probabilidade: l.probabilidade,
       prioridade: l.prioridade,
+      temperatura: l.temperatura,
       status: l.status,
       data_proximo_contato: l.data_proximo_contato,
+      data_proxima_acao: l.data_proxima_acao,
+      data_ultimo_contato: l.data_ultimo_contato,
+      data_entrada_stage: l.data_entrada_stage,
       ultima_interacao_em: l.ultima_interacao_em,
       stage_id: l.stage_id,
       pipeline_id: l.pipeline_id,
+      origem: l.origem || null,
       ordem: l.ordem,
       responsavel: l.responsavel_id ? userMap[l.responsavel_id] || { id: l.responsavel_id, nome: null } : null,
       tags: byLead[l.id] || [],
@@ -433,7 +698,7 @@ async function getKanban(companyId, pipelineId) {
     }
   })
 
-  return { pipeline, columns }
+  return { pipeline, columns, total: result.total }
 }
 
 async function getDashboard(companyId, query) {
@@ -669,6 +934,7 @@ async function getLeadDetailEnriched(companyId, leadId) {
   const notas = await repo.listNotas(companyId, leadId)
   const ats = await repo.listAtividades(companyId, leadId)
   const mov = await repo.listMovements(companyId, leadId, { limit: 100 })
+  const timeline = await repo.listTimeline(companyId, leadId, { limit: 200 })
   const { byLead } = await repo.fetchTagsForLeads(companyId, [leadId])
   return {
     ...enriched,
@@ -676,6 +942,7 @@ async function getLeadDetailEnriched(companyId, leadId) {
     notas,
     atividades: ats,
     historico: mov,
+    timeline,
   }
 }
 
@@ -954,6 +1221,9 @@ async function deleteAtividadeFull(companyId, userId, activityId) {
     entidade_id: activityId,
     detalhes_json: { lead_id: a.lead_id },
   })
+  await recordTimeline(companyId, a.lead_id, userId, 'atividade_cancelada', 'Atividade excluÃ­da', {
+    metadata: { atividade_id: activityId },
+  })
   return { ok: true, lead_id: a.lead_id }
 }
 
@@ -981,6 +1251,14 @@ async function patchActivityStatus(companyId, userId, activityId, status, opts =
       entidade: 'crm_atividade',
       entidade_id: activityId,
       detalhes_json: {},
+    })
+    await recordTimeline(companyId, existing.lead_id, userId, 'atividade_concluida', 'Atividade concluÃ­da', {
+      metadata: { atividade_id: activityId },
+    })
+  }
+  if (st === 'cancelada') {
+    await recordTimeline(companyId, existing.lead_id, userId, 'atividade_cancelada', 'Atividade cancelada', {
+      metadata: { atividade_id: activityId },
     })
   }
   const lead = await repo.getLeadById(companyId, existing.lead_id)
@@ -1374,6 +1652,11 @@ module.exports = {
   createLead,
   updateLead,
   moveLead,
+  ganharLead,
+  perderLead,
+  reabrirLead,
+  transferirResponsavel,
+  registrarContato,
   reorderLeads,
   getKanban,
   getDashboard,
@@ -1400,6 +1683,7 @@ module.exports = {
   createLeadFromCliente,
   terminalPatchFromStage,
   tryResolveClienteFromTelefone,
+  recordTimeline,
   enrichLeadRows,
   buildActivityGoogleDescription,
 }

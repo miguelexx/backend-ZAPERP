@@ -66,6 +66,7 @@ exports.processar = async (req, res) => {
       dry_run: dryRun,
       processadas: result.processadas || 0,
       detalhes: result.detalhes || [],
+      skipped: result.skipped || null,
     })
   } catch (err) {
     console.error('[atendimentoSemResposta] processar:', err)
