@@ -803,21 +803,49 @@ exports.excluirDepartamento = async (req, res) => {
 }
 
 // =====================================================
-// RESPOSTAS SALVAS POR SETOR
+// RESPOSTAS SALVAS (pessoais por usuário; setor opcional)
 // =====================================================
+async function validarDepartamentoEmpresa(company_id, departamento_id) {
+  if (departamento_id == null || departamento_id === '') return null
+  const depId = Number(departamento_id)
+  if (!Number.isFinite(depId) || depId <= 0) return { error: 'Setor inválido' }
+  const { data: dep, error } = await supabase
+    .from('departamentos')
+    .select('id')
+    .eq('id', depId)
+    .eq('company_id', company_id)
+    .maybeSingle()
+  if (error) return { error: error.message }
+  if (!dep) return { error: 'Setor não encontrado nesta empresa' }
+  return { departamento_id: depId }
+}
+
 exports.listarRespostasSalvas = async (req, res) => {
   try {
-    const { company_id } = req.user
+    const { company_id, id: usuario_id } = req.user
+    const userId = Number(usuario_id)
+    if (!Number.isFinite(userId) || userId <= 0) {
+      return res.status(401).json({ error: 'Usuário inválido' })
+    }
     const { departamento_id } = req.query
     let q = supabase
       .from('respostas_salvas')
       // NÃO embutir departamentos aqui: em alguns schemas o PostgREST detecta mais de 1 relacionamento
       // entre respostas_salvas e departamentos e retorna:
       // "Could not embed because more than one relationship was found..."
-      .select('id, titulo, texto, departamento_id, criado_em')
+      .select('id, titulo, texto, departamento_id, usuario_id, criado_em')
       .eq('company_id', company_id)
+      .eq('usuario_id', userId)
       .order('titulo')
-    if (departamento_id) q = q.eq('departamento_id', departamento_id)
+    if (departamento_id != null && departamento_id !== '') {
+      const depId = Number(departamento_id)
+      if (Number.isFinite(depId) && depId > 0) {
+        q = q.or(`departamento_id.eq.${depId},departamento_id.is.null`)
+      }
+    } else {
+      // Conversa sem setor: apenas respostas globais (não expor vinculadas a setor)
+      q = q.is('departamento_id', null)
+    }
     const { data, error } = await q
     if (error) return res.status(500).json({ error: error.message })
 
@@ -853,12 +881,27 @@ exports.listarRespostasSalvas = async (req, res) => {
 
 exports.criarRespostaSalva = async (req, res) => {
   try {
-    const { company_id } = req.user
+    const { company_id, id: usuario_id } = req.user
+    const userId = Number(usuario_id)
+    if (!Number.isFinite(userId) || userId <= 0) {
+      return res.status(401).json({ error: 'Usuário inválido' })
+    }
     const { titulo, texto, departamento_id } = req.body
-    if (!titulo || !texto) return res.status(400).json({ error: 'titulo e texto obrigatórios' })
+    const tituloTrim = String(titulo || '').trim()
+    const textoTrim = String(texto || '').trim()
+    if (!tituloTrim || !textoTrim) return res.status(400).json({ error: 'titulo e texto obrigatórios' })
+    if (tituloTrim.length > 255) return res.status(400).json({ error: 'titulo deve ter no máximo 255 caracteres' })
+    const depCheck = await validarDepartamentoEmpresa(company_id, departamento_id)
+    if (depCheck?.error) return res.status(400).json({ error: depCheck.error })
     const { data, error } = await supabase
       .from('respostas_salvas')
-      .insert({ company_id, titulo, texto: String(texto).trim(), departamento_id: departamento_id || null })
+      .insert({
+        company_id,
+        usuario_id: userId,
+        titulo: tituloTrim,
+        texto: textoTrim,
+        departamento_id: depCheck?.departamento_id ?? null,
+      })
       .select()
       .single()
     if (error) return res.status(500).json({ error: error.message })
@@ -871,18 +914,39 @@ exports.criarRespostaSalva = async (req, res) => {
 
 exports.atualizarRespostaSalva = async (req, res) => {
   try {
-    const { company_id } = req.user
+    const { company_id, id: usuario_id } = req.user
+    const userId = Number(usuario_id)
+    if (!Number.isFinite(userId) || userId <= 0) {
+      return res.status(401).json({ error: 'Usuário inválido' })
+    }
     const { id } = req.params
     const { titulo, texto, departamento_id } = req.body
     const update = {}
-    if (titulo !== undefined) update.titulo = titulo.trim()
-    if (texto !== undefined) update.texto = String(texto).trim()
-    if (departamento_id !== undefined) update.departamento_id = departamento_id || null
+    if (titulo !== undefined) {
+      const tituloTrim = String(titulo || '').trim()
+      if (!tituloTrim) return res.status(400).json({ error: 'titulo obrigatório' })
+      if (tituloTrim.length > 255) return res.status(400).json({ error: 'titulo deve ter no máximo 255 caracteres' })
+      update.titulo = tituloTrim
+    }
+    if (texto !== undefined) {
+      const textoTrim = String(texto || '').trim()
+      if (!textoTrim) return res.status(400).json({ error: 'texto obrigatório' })
+      update.texto = textoTrim
+    }
+    if (departamento_id !== undefined) {
+      const depCheck = await validarDepartamentoEmpresa(company_id, departamento_id)
+      if (depCheck?.error) return res.status(400).json({ error: depCheck.error })
+      update.departamento_id = depCheck?.departamento_id ?? null
+    }
+    if (Object.keys(update).length === 0) {
+      return res.status(400).json({ error: 'Nenhum campo para atualizar' })
+    }
     const { data, error } = await supabase
       .from('respostas_salvas')
       .update(update)
       .eq('id', id)
       .eq('company_id', company_id)
+      .eq('usuario_id', userId)
       .select()
       .single()
     if (error) return res.status(500).json({ error: error.message })
@@ -896,13 +960,27 @@ exports.atualizarRespostaSalva = async (req, res) => {
 
 exports.excluirRespostaSalva = async (req, res) => {
   try {
-    const { company_id } = req.user
+    const { company_id, id: usuario_id } = req.user
+    const userId = Number(usuario_id)
+    if (!Number.isFinite(userId) || userId <= 0) {
+      return res.status(401).json({ error: 'Usuário inválido' })
+    }
     const { id } = req.params
+    const { data: existing, error: findErr } = await supabase
+      .from('respostas_salvas')
+      .select('id')
+      .eq('id', id)
+      .eq('company_id', company_id)
+      .eq('usuario_id', userId)
+      .maybeSingle()
+    if (findErr) return res.status(500).json({ error: findErr.message })
+    if (!existing) return res.status(404).json({ error: 'Resposta não encontrada' })
     const { error } = await supabase
       .from('respostas_salvas')
       .delete()
       .eq('id', id)
       .eq('company_id', company_id)
+      .eq('usuario_id', userId)
     if (error) return res.status(500).json({ error: error.message })
     return res.json({ ok: true })
   } catch (err) {

@@ -30,8 +30,19 @@ describe('atendimentoSemRespostaService', () => {
       ...DEFAULT_ALERTA_SEM_RESPOSTA,
       notificar_interno: false,
       notificar_por_whatsapp: false,
+      notificar_por_email: false,
     })
     expect(err).toMatch(/canal/i)
+  })
+
+  it('preserva e aceita e-mail como canal configurado', () => {
+    const cfg = normalizeAlertaSemResposta({
+      notificar_por_email: true,
+      notificar_interno: false,
+      notificar_por_whatsapp: false,
+    })
+    expect(cfg.notificar_por_email).toBe(true)
+    expect(validateAlertaSemResposta(cfg)).toBeNull()
   })
 
   it('formata tempo sem resposta', () => {
@@ -54,5 +65,32 @@ describe('atendimentoSemRespostaService', () => {
     expect(text).toContain('Tempo sem resposta: 15min')
     expect(text).toContain('Status: conversa reaberta e liberada para novo atendimento.')
     expect(text).not.toMatch(/Conversa #/i)
+  })
+
+  it('permite tempos iguais', () => {
+    const err = validateAlertaSemResposta({
+      ...DEFAULT_ALERTA_SEM_RESPOSTA,
+      tempo_primeiro_alerta_minutos: 10,
+      tempo_alerta_critico_minutos: 10,
+      tempo_notificar_gestor_minutos: 10,
+    })
+    expect(err).toBeNull()
+  })
+
+  it('rejeita minutos vazios, negativos ou invalidos', () => {
+    expect(validateAlertaSemResposta({
+      ...DEFAULT_ALERTA_SEM_RESPOSTA,
+      tempo_primeiro_alerta_minutos: '',
+    })).toMatch(/positivo/i)
+
+    expect(validateAlertaSemResposta({
+      ...DEFAULT_ALERTA_SEM_RESPOSTA,
+      tempo_alerta_critico_minutos: -1,
+    })).toMatch(/positivo/i)
+
+    expect(validateAlertaSemResposta({
+      ...DEFAULT_ALERTA_SEM_RESPOSTA,
+      tempo_notificar_gestor_minutos: 'abc',
+    })).toMatch(/positivo/i)
   })
 })

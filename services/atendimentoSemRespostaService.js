@@ -43,6 +43,17 @@ function normalizeMinutes(value, fallback) {
   return Math.max(1, Math.min(1440, Math.floor(n)))
 }
 
+function validateMinuteValue(value, label) {
+  const n = Number(value)
+  if (!Number.isFinite(n) || n <= 0) {
+    return `${label} precisa ser um número positivo.`
+  }
+  if (n > 1440) {
+    return `${label} não pode passar de 1440 minutos.`
+  }
+  return null
+}
+
 function normalizeAlertaSemResposta(raw) {
   const r = raw && typeof raw === 'object' ? raw : {}
   const gestorId = Number(r.gestor_notificado_id)
@@ -57,7 +68,7 @@ function normalizeAlertaSemResposta(raw) {
     tempo_alerta_critico_minutos: normalizeMinutes(r.tempo_alerta_critico_minutos, 10),
     tempo_notificar_gestor_minutos: normalizeMinutes(r.tempo_notificar_gestor_minutos, 15),
     notificar_por_whatsapp: r.notificar_por_whatsapp === true,
-    notificar_por_email: false,
+    notificar_por_email: r.notificar_por_email === true,
     notificar_interno: r.notificar_interno !== false,
     reabrir_conversa_automaticamente: r.reabrir_conversa_automaticamente !== false,
     aplicar_tag_automatica: r.aplicar_tag_automatica !== false,
@@ -73,11 +84,21 @@ function normalizeAlertaSemResposta(raw) {
 }
 
 function validateAlertaSemResposta(cfg) {
+  const minuteFields = [
+    ['tempo_primeiro_alerta_minutos', 'O primeiro alerta'],
+    ['tempo_alerta_critico_minutos', 'O alerta crítico'],
+    ['tempo_notificar_gestor_minutos', 'A notificação ao gestor'],
+  ]
+  for (const [field, label] of minuteFields) {
+    const err = validateMinuteValue(cfg?.[field], label)
+    if (err) return err
+  }
+
   const c = normalizeAlertaSemResposta(cfg)
-  if (c.tempo_alerta_critico_minutos <= c.tempo_primeiro_alerta_minutos) {
+  if (c.tempo_alerta_critico_minutos < c.tempo_primeiro_alerta_minutos) {
     return 'O alerta crítico precisa ser maior que o primeiro alerta.'
   }
-  if (c.tempo_notificar_gestor_minutos <= c.tempo_alerta_critico_minutos) {
+  if (c.tempo_notificar_gestor_minutos < c.tempo_alerta_critico_minutos) {
     return 'A notificação ao gestor precisa ser maior que o alerta crítico.'
   }
   if (c.aplicar_tag_automatica && !c.nome_tag_automatica) {
@@ -91,10 +112,47 @@ function validateAlertaSemResposta(cfg) {
       return 'Para WhatsApp, selecione um contato cadastrado no sistema.'
     }
   }
-  if (!c.notificar_por_whatsapp && !c.notificar_interno) {
+  if (!c.notificar_por_whatsapp && !c.notificar_por_email && !c.notificar_interno) {
     return 'Selecione ao menos um canal de notificação.'
   }
   return null
+}
+
+function hasSmtpConfig() {
+  return Boolean(
+    String(process.env.SMTP_HOST || '').trim() ||
+      String(process.env.SMTP_URL || '').trim() ||
+      String(process.env.MAIL_HOST || '').trim()
+  )
+}
+
+async function resolveGestorEmailDestination(company_id, cfg) {
+  const gestorId = Number(cfg?.gestor_notificado_id)
+  if (!Number.isInteger(gestorId) || gestorId <= 0) {
+    return { ok: false, reason: 'gestor_notificado_nao_selecionado' }
+  }
+
+  const { data, error } = await supabase
+    .from('usuarios')
+    .select('id, nome, email')
+    .eq('company_id', company_id)
+    .eq('id', gestorId)
+    .maybeSingle()
+
+  if (error) return { ok: false, reason: 'gestor_lookup_failed', error: error.message }
+  if (!data) return { ok: false, reason: 'gestor_not_found' }
+
+  const email = String(data.email || '').trim()
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    return { ok: false, reason: 'gestor_email_invalido', gestor_id: gestorId }
+  }
+
+  return {
+    ok: true,
+    gestor_id: gestorId,
+    gestor_nome: String(data.nome || '').trim(),
+    email,
+  }
 }
 
 async function loadIaConfig(company_id) {
@@ -243,6 +301,96 @@ async function clearEstado(company_id, conversa_id) {
   } catch (_) {}
 }
 
+async function fetchUltimaMensagem(company_id, conversa_id) {
+  const { data, error } = await supabase
+    .from('mensagens')
+    .select('id, conversa_id, criado_em, direcao, texto')
+    .eq('company_id', company_id)
+    .eq('conversa_id', conversa_id)
+    .order('criado_em', { ascending: false })
+    .order('id', { ascending: false })
+    .limit(1)
+    .maybeSingle()
+  if (error) throw new Error(error.message)
+  return data || null
+}
+
+async function revalidateConversaElegivel(company_id, conv, anchor) {
+  const { data, error } = await supabase
+    .from('conversas')
+    .select('id, atendente_id, status_atendimento')
+    .eq('company_id', company_id)
+    .eq('id', conv.id)
+    .eq('status_atendimento', 'em_atendimento')
+    .not('atendente_id', 'is', null)
+    .maybeSingle()
+  if (error || !data?.id) return false
+  if (Number(data.atendente_id) !== Number(conv.atendente_id)) return false
+
+  const ultima = await fetchUltimaMensagem(company_id, conv.id)
+  if (!ultima || ultima.direcao !== 'in') {
+    await clearEstado(company_id, conv.id)
+    return false
+  }
+  return String(ultima.criado_em) === String(anchor)
+}
+
+function duplicateKeyError(error) {
+  const msg = String(error?.message || '').toLowerCase()
+  return error?.code === '23505' || msg.includes('duplicate key') || msg.includes('violates unique constraint')
+}
+
+async function claimEstadoStage(company_id, conversa_id, anchor, estadoPatch) {
+  const stage = Object.keys(estadoPatch || {}).find((k) =>
+    ['primeiro_alerta_em', 'alerta_critico_em', 'gestor_notificado_em'].includes(k)
+  )
+  if (!stage) return false
+
+  const now = new Date().toISOString()
+  const claimedAt = estadoPatch[stage] || now
+  const patch = {
+    ultimo_cliente_msg_em: anchor,
+    [stage]: claimedAt,
+    atualizado_em: now,
+  }
+
+  try {
+    const { data, error } = await supabase
+      .from('alerta_atendimento_sem_resposta_estado')
+      .update(patch)
+      .eq('company_id', company_id)
+      .eq('conversa_id', conversa_id)
+      .eq('ultimo_cliente_msg_em', anchor)
+      .is(stage, null)
+      .select('conversa_id')
+      .maybeSingle()
+
+    if (error) {
+      if (isMissingTableError(error)) return true
+      console.warn('[atendimentoSemResposta] claimEstadoStage:', error.message)
+      return false
+    }
+    if (data?.conversa_id) return true
+
+    const { error: insertError } = await supabase
+      .from('alerta_atendimento_sem_resposta_estado')
+      .insert({
+        company_id,
+        conversa_id,
+        ...patch,
+      })
+    if (!insertError) return true
+    if (isMissingTableError(insertError)) return true
+    if (duplicateKeyError(insertError)) return false
+    console.warn('[atendimentoSemResposta] claimEstadoStage insert:', insertError.message)
+    return false
+  } catch (e) {
+    if (isMissingTableError(e)) return true
+    console.warn('[atendimentoSemResposta] claimEstadoStage:', e?.message || e)
+    return false
+  }
+}
+
 function emitAlertaRealtime(io, company_id, payload, opts = {}) {
   if (!io || !company_id || !payload?.conversa_id) return
   const base = {
@@ -285,12 +433,23 @@ async function ensureTagForConversa(company_id, conversa_id, nomeTag) {
     .maybeSingle()
   let tagId = tag?.id
   if (!tagId) {
-    const { data: created } = await supabase
+    const { data: created, error: createError } = await supabase
       .from('tags')
       .insert({ company_id, nome, cor: TAG_REABERTA_FALTA_RESPOSTA_COR })
       .select('id')
       .single()
     tagId = created?.id
+    if (!tagId && createError && duplicateKeyError(createError)) {
+      const { data: afterRace } = await supabase
+        .from('tags')
+        .select('id, nome, cor')
+        .eq('company_id', company_id)
+        .ilike('nome', nome)
+        .maybeSingle()
+      tagId = afterRace?.id
+    } else if (createError) {
+      console.warn('[atendimentoSemResposta] ensureTagForConversa tag:', createError.message)
+    }
   } else if (String(tag?.cor || '').toLowerCase() !== TAG_REABERTA_FALTA_RESPOSTA_COR) {
     await supabase
       .from('tags')
@@ -308,7 +467,12 @@ async function ensureTagForConversa(company_id, conversa_id, nomeTag) {
     .eq('tag_id', tagId)
     .maybeSingle()
   if (!existente) {
-    await supabase.from('conversa_tags').insert({ company_id, conversa_id, tag_id: tagId }).catch(() => {})
+    const { error: relError } = await supabase
+      .from('conversa_tags')
+      .insert({ company_id, conversa_id, tag_id: tagId })
+    if (relError && !duplicateKeyError(relError)) {
+      console.warn('[atendimentoSemResposta] ensureTagForConversa rel:', relError.message)
+    }
   }
   return tagId
 }
@@ -530,24 +694,17 @@ async function processCompanyAtendimentoSemResposta(company_id, opts = {}) {
   if (convErr) return { ok: false, error: convErr.message, processadas: 0 }
   if (!conversas?.length) return { ok: true, processadas: 0 }
 
-  const ids = conversas.map((c) => c.id)
-  const { data: mensagens } = await supabase
-    .from('mensagens')
-    .select('conversa_id, criado_em, direcao, texto')
-    .eq('company_id', company_id)
-    .in('conversa_id', ids)
-    .order('criado_em', { ascending: false })
-
-  const ultimaPorConversa = {}
-  ;(mensagens || []).forEach((m) => {
-    if (!ultimaPorConversa[m.conversa_id]) ultimaPorConversa[m.conversa_id] = m
-  })
-
   let processadas = 0
   const detalhes = []
 
   for (const conv of conversas) {
-    const ultima = ultimaPorConversa[conv.id]
+    let ultima = null
+    try {
+      ultima = await fetchUltimaMensagem(company_id, conv.id)
+    } catch (e) {
+      detalhes.push({ conversa_id: conv.id, error: e?.message || String(e) })
+      continue
+    }
     if (!ultima) continue
 
     if (ultima.direcao !== 'in') {
@@ -618,18 +775,30 @@ async function processCompanyAtendimentoSemResposta(company_id, opts = {}) {
     }
 
     if (!actions.length) continue
-    processadas += 1
 
     if (dryRun) {
+      processadas += 1
       detalhes.push({ conversa_id: conv.id, minutos, acoes: actions.map((a) => a.tipo) })
       continue
     }
 
+    const executedActions = []
     for (const action of actions) {
-      emitAlertaRealtime(io, company_id, { ...basePayload, ...action }, {
-        gestorId: action.notifyGestor ? cfg.gestor_notificado_id : null,
-      })
+      let stillEligible = false
+      try {
+        stillEligible = await revalidateConversaElegivel(company_id, conv, anchor)
+      } catch (e) {
+        console.warn('[atendimentoSemResposta] revalidate:', e?.message || e)
+      }
+      if (!stillEligible) continue
+
+      const claimed = await claimEstadoStage(company_id, conv.id, anchor, action.estadoPatch)
+      if (!claimed) continue
+
       if (cfg.notificar_interno !== false) {
+        emitAlertaRealtime(io, company_id, { ...basePayload, ...action }, {
+          gestorId: action.notifyGestor ? cfg.gestor_notificado_id : null,
+        })
         await recordEvento(company_id, { ...basePayload, ...action })
       }
 
@@ -682,6 +851,28 @@ async function processCompanyAtendimentoSemResposta(company_id, opts = {}) {
               })
             }
           }
+        }
+
+        if (cfg.notificar_por_email) {
+          const emailDestination = await resolveGestorEmailDestination(company_id, cfg)
+          const smtpConfigured = hasSmtpConfig()
+          await recordEvento(company_id, {
+            ...basePayload,
+            tipo: 'email_indisponivel',
+            nivel: 'gestor',
+            mensagem: !emailDestination.ok
+              ? 'E-mail do gestor não enviado: responsável interno sem e-mail válido.'
+              : smtpConfigured
+                ? 'E-mail do gestor não enviado: serviço de envio não configurado no backend.'
+                : 'E-mail do gestor não enviado: SMTP não configurado.',
+            detalhes: {
+              reason: emailDestination.ok
+                ? (smtpConfigured ? 'email_sender_not_configured' : 'smtp_not_configured')
+                : emailDestination.reason,
+              gestor_id: emailDestination.gestor_id ?? cfg.gestor_notificado_id ?? null,
+              smtp_configurado: smtpConfigured,
+            },
+          })
         }
 
         if (cfg.reabrir_conversa_automaticamente) {
@@ -737,9 +928,13 @@ async function processCompanyAtendimentoSemResposta(company_id, opts = {}) {
         ultimo_cliente_msg_em: anchor,
         ...action.estadoPatch,
       })
+      executedActions.push(action.tipo)
     }
 
-    detalhes.push({ conversa_id: conv.id, minutos, acoes: actions.map((a) => a.tipo) })
+    if (executedActions.length) {
+      processadas += 1
+      detalhes.push({ conversa_id: conv.id, minutos, acoes: executedActions })
+    }
   }
 
   return { ok: true, processadas, detalhes }
