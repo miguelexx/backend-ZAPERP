@@ -1,5 +1,8 @@
 const supabase = require('../config/supabase')
 const { getProvider } = require('../services/providers')
+const fs = require('fs')
+const path = require('path')
+const { getUploadsRoot } = require('../config/uploadsRoot')
 
 /** GET /config/empresa — dados da empresa */
 exports.getEmpresa = async (req, res) => {
@@ -73,6 +76,74 @@ exports.putEmpresa = async (req, res) => {
   } catch (err) {
     console.error(err)
     return res.status(500).json({ error: 'Erro ao atualizar empresa' })
+  }
+}
+
+/** POST /config/empresa/logo — upload de imagem de logo da empresa */
+exports.uploadLogoEmpresa = async (req, res) => {
+  try {
+    const { company_id } = req.user
+    if (!req.file) return res.status(400).json({ error: 'Nenhum arquivo de imagem enviado.' })
+
+    const file = req.file
+    const appUrl = (process.env.APP_URL || '').replace(/\/+$/, '') ||
+      `${req.protocol}://${req.get('host')}`
+    const logo_url = `${appUrl}/uploads/logos/${file.filename}`
+
+    const { data, error } = await supabase
+      .from('empresas')
+      .update({ logo_url })
+      .eq('id', company_id)
+      .select()
+      .single()
+
+    if (error) {
+      try { fs.unlinkSync(file.path) } catch (_) {}
+      return res.status(500).json({ error: error.message })
+    }
+
+    return res.json({ logo_url, empresa: data })
+  } catch (err) {
+    console.error(err)
+    return res.status(500).json({ error: 'Erro ao fazer upload do logo.' })
+  }
+}
+
+/** DELETE /config/empresa/logo — remove logo da empresa */
+exports.deleteLogoEmpresa = async (req, res) => {
+  try {
+    const { company_id } = req.user
+
+    const { data: atual } = await supabase
+      .from('empresas')
+      .select('logo_url')
+      .eq('id', company_id)
+      .single()
+
+    if (atual?.logo_url) {
+      try {
+        const uploadsRoot = getUploadsRoot()
+        const parsed = new URL(atual.logo_url)
+        const relPath = parsed.pathname.replace(/^\/uploads\//, '')
+        const filePath = path.join(uploadsRoot, relPath)
+        if (filePath.startsWith(uploadsRoot) && fs.existsSync(filePath)) {
+          fs.unlinkSync(filePath)
+        }
+      } catch (_) {}
+    }
+
+    const { data, error } = await supabase
+      .from('empresas')
+      .update({ logo_url: null })
+      .eq('id', company_id)
+      .select()
+      .single()
+
+    if (error) return res.status(500).json({ error: error.message })
+    return res.json({ logo_url: null, empresa: data })
+  } catch (err) {
+    console.error(err)
+    return res.status(500).json({ error: 'Erro ao remover logo.' })
   }
 }
 

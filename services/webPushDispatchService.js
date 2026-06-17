@@ -132,7 +132,7 @@ function buildPushPayloadJson({
     title: contactName || 'Nova mensagem',
     body: messagePreview || 'Nova mensagem',
     icon: absIcon,
-    badge: absolutizeUrl('/brand/zaperp-favicon.svg'),
+    badge: absolutizeUrl('/brand/pwa-192.png'),
     tag: `zap-${String(mensagem_id)}`,
     renotify: false,
     priority: 'high',

@@ -11,7 +11,8 @@ const { syncContactsFullProgressiva } = require('./syncProgressivaService')
 
 const JOB_TIPOS = {
   SYNC_CONTATOS: 'sync_contatos',
-  SYNC_FOTOS: 'sync_fotos'
+  SYNC_FOTOS: 'sync_fotos',
+  SYNC_MENSAGENS_ANTIGAS: 'sync_mensagens_antigas'
 }
 
 const MAX_CONCURRENT = parseInt(process.env.QUEUE_MAX_CONCURRENT_JOBS, 10) || 2
@@ -145,6 +146,12 @@ async function executeJob(job) {
       return { ok: true, resultado: result }
     }
 
+    if (tipo === JOB_TIPOS.SYNC_MENSAGENS_ANTIGAS) {
+      const { syncOldMessagesForCompany } = require('./oldMessagesSyncService')
+      const result = await syncOldMessagesForCompany(company_id, payload)
+      return { ok: true, resultado: result }
+    }
+
     return { ok: false, erro: `Tipo desconhecido: ${tipo}` }
   } catch (e) {
     return { ok: false, erro: e?.message || String(e) }
@@ -216,6 +223,21 @@ async function processJob(job, io = null) {
           criados: 0,
           atualizados: result.resultado.totalAtualizados || 0,
           fotos_atualizadas: result.resultado.totalAtualizados || 0
+        })
+      }
+      if (io && job.tipo === JOB_TIPOS.SYNC_MENSAGENS_ANTIGAS && result.resultado) {
+        const r = result.resultado
+        io.to(`empresa_${job.company_id}`).emit('whatsapp_sync_mensagens_antigas', {
+          ok: r.ok !== false,
+          job_id: job.id,
+          error: r.ok === false ? (r.error || 'Erro ao sincronizar mensagens antigas.') : null,
+          messages_per_chat: r.messagesPerChat || 0,
+          chats_processados: r.chatsProcessed || 0,
+          conversas_criadas: r.conversationsCreated || 0,
+          mensagens_lidas: r.messagesFetched || 0,
+          mensagens_importadas: r.messagesInserted || 0,
+          mensagens_ignoradas: r.messagesSkipped || 0,
+          erros: Array.isArray(r.errors) ? r.errors.slice(0, 5) : []
         })
       }
       return

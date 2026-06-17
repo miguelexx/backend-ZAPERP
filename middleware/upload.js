@@ -1,8 +1,14 @@
 const multer = require('multer')
 const path = require('path')
-const { ensureUploadsRootExists } = require('../config/uploadsRoot')
+const fs = require('fs')
+const { ensureUploadsRootExists, getUploadsRoot } = require('../config/uploadsRoot')
 
 const uploadDir = ensureUploadsRootExists()
+
+const logosDir = path.join(getUploadsRoot(), 'logos')
+if (!fs.existsSync(logosDir)) {
+  fs.mkdirSync(logosDir, { recursive: true })
+}
 
 /** MIME permitidos → extensão no disco. */
 const ALLOWED_MIME = new Map([
@@ -191,10 +197,41 @@ const uploadArquivo = (req, res, next) => {
   })
 }
 
+const LOGO_MIME = new Set([
+  'image/jpeg',
+  'image/png',
+  'image/webp',
+  'image/gif',
+])
+
+const logoStorage = multer.diskStorage({
+  destination: (req, file, cb) => cb(null, logosDir),
+  filename: (req, file, cb) => {
+    const baseMime = getBaseMime(file?.mimetype)
+    const ext = ALLOWED_MIME.get(baseMime) || `.${extFromOriginalName(file?.originalname) || 'png'}`
+    const name = `company_${Date.now()}-${Math.random().toString(36).slice(2, 8)}${ext}`
+    cb(null, name)
+  },
+})
+
+const uploadLogo = multer({
+  storage: logoStorage,
+  limits: { fileSize: 2 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    const baseMime = getBaseMime(file?.mimetype)
+    const ext = extFromOriginalName(file?.originalname)
+    if (LOGO_MIME.has(baseMime)) return cb(null, true)
+    if (['jpg', 'jpeg', 'png', 'webp', 'gif'].includes(ext)) return cb(null, true)
+    cb(uploadValidationError('Apenas imagens são permitidas para o logo (JPEG, PNG, WebP, GIF — máx. 2 MB).', 'UPLOAD_NOT_IMAGE'), false)
+  },
+})
+
 module.exports = {
   upload,
   uploadDir,
   uploadArquivo,
+  uploadLogo,
+  logosDir,
   isAllowedUploadFile,
   extFromOriginalName,
   EXTENSOES_BLOQUEADAS_WHATSAPP,

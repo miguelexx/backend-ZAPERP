@@ -1,5 +1,6 @@
 const supabase = require('../config/supabase')
 const { usuarioPertenceSetorFinanceiro } = require('../helpers/financeiroSetorHelper')
+const { buildClienteSearchOr, buildTelefoneSearchOr, escapeIlikePattern } = require('../helpers/chatSearchHelper')
 
 function parseBooleanQuery(value) {
   return value === true || value === 1 || value === '1' || String(value || '').toLowerCase() === 'true'
@@ -46,7 +47,7 @@ async function buscarConversaIdsPorTextoMensagens({ company_id, term }) {
   const scanLimit = 3000
   const idLimit = getChatSearchIdLimit()
   const ids = new Set()
-  const safeTerm = String(term || '').replace(/[\\%_]/g, (ch) => `\\${ch}`)
+  const safeTerm = escapeIlikePattern(term)
 
   for (let start = 0; start < scanLimit && ids.size < idLimit; start += pageSize) {
     const end = Math.min(start + pageSize - 1, scanLimit - 1)
@@ -140,13 +141,13 @@ async function resolveChatListCountsContext(req) {
 
   const palavraTrim = palavra && String(palavra).trim() ? String(palavra).trim() : ''
   if (palavraTrim) {
-    const term = `%${palavraTrim}%`
+    const term = `%${escapeIlikePattern(palavraTrim)}%`
     const searchIdLimit = getChatSearchIdLimit()
     const { data: clientesMatch } = await supabase
       .from('clientes')
       .select('id')
       .eq('company_id', company_id)
-      .or(`nome.ilike.${term},pushname.ilike.${term},telefone.ilike.${term}`)
+      .or(buildClienteSearchOr(palavraTrim))
       .order('criado_em', { ascending: false })
       .limit(searchIdLimit)
     const clienteIds = (clientesMatch || []).map((c) => c.id)
@@ -162,7 +163,7 @@ async function resolveChatListCountsContext(req) {
         .from('conversas')
         .select('id')
         .eq('company_id', company_id)
-        .ilike('telefone', term)
+        .or(buildTelefoneSearchOr(palavraTrim))
         .order('ultima_atividade', { ascending: false, nullsFirst: false })
         .limit(searchIdLimit),
       supabase

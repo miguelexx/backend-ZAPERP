@@ -26,6 +26,7 @@ const {
   retomarDeCobrancaFinanceira,
 } = require('../services/conversaPagamentoFinanceiroService')
 const { usuarioPertenceSetorFinanceiro } = require('../helpers/financeiroSetorHelper')
+const { buildClienteSearchOr, buildTelefoneSearchOr, escapeIlikePattern } = require('../helpers/chatSearchHelper')
 const {
   countConversasWithFilter,
   overridesFromListQuery,
@@ -726,10 +727,6 @@ function getConversaMessagesSearchLimit(rawLimit) {
   return Math.min(Math.max(Math.floor(raw), 1), 100)
 }
 
-function escapeIlikePattern(value) {
-  return String(value || '').replace(/[\\%_]/g, (ch) => `\\${ch}`)
-}
-
 async function buscarConversaIdsPorTextoMensagens({ company_id, term }) {
   const pageSize = getSearchMessagesPageSize()
   const scanLimit = getChatSearchScanLimit()
@@ -1164,13 +1161,13 @@ exports.listarConversas = async (req, res) => {
     }
 
     if (palavraTrim) {
-      const term = `%${palavraTrim}%`
+      const term = `%${escapeIlikePattern(palavraTrim)}%`
       const searchIdLimit = getChatSearchIdLimit()
       const { data: clientesMatch } = await supabase
         .from('clientes')
         .select('id')
         .eq('company_id', company_id)
-        .or(`nome.ilike.${term},pushname.ilike.${term},telefone.ilike.${term}`)
+        .or(buildClienteSearchOr(palavraTrim))
         .order('criado_em', { ascending: false })
         .limit(searchIdLimit)
       const clienteIds = (clientesMatch || []).map((c) => c.id)
@@ -1185,7 +1182,7 @@ exports.listarConversas = async (req, res) => {
         .from('conversas')
         .select('id')
         .eq('company_id', company_id)
-        .ilike('telefone', term)
+        .or(buildTelefoneSearchOr(palavraTrim))
         .order('ultima_atividade', { ascending: false, nullsFirst: false })
         .limit(searchIdLimit)
       const convByNomeGrupoPromise = supabase
@@ -1872,13 +1869,13 @@ exports.listarConversas = async (req, res) => {
         Math.max(1, parsePositiveInt(process.env.CHAT_LIST_SEM_CONVERSA_LIMIT, 50))
       )
       if (semConversaLimit > 0) {
-        const term = `%${palavraTrim}%`
+        const term = `%${escapeIlikePattern(palavraTrim)}%`
         const searchFetchLimit = Math.min(Math.max(semConversaLimit * 3, semConversaLimit), 150)
         let clientesQuery = supabase
           .from('clientes')
           .select('id, nome, pushname, telefone, foto_perfil')
           .eq('company_id', cid)
-          .or(`nome.ilike.${term},pushname.ilike.${term},telefone.ilike.${term}`)
+          .or(buildClienteSearchOr(palavraTrim))
         const { data: chunkRows, error: chunkErr } = await clientesQuery
           .order('nome', { ascending: true, nullsFirst: false })
           .range(0, searchFetchLimit - 1)

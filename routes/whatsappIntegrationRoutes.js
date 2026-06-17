@@ -39,6 +39,7 @@ router.use('/connect', connectRouter)
 
 router.post('/configure-webhooks', whatsappIntegrationController.configureWebhooks)
 router.post('/contacts/sync', whatsappIntegrationController.syncContacts)
+router.post('/messages/sync-old', whatsappIntegrationController.syncOldMessages)
 router.post('/groups/sync', whatsappIntegrationController.syncGroups)
 router.post('/sync-all', whatsappIntegrationController.syncAll)
 

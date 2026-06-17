@@ -471,6 +471,41 @@ exports.syncContacts = async (req, res) => {
   })
 }
 
+exports.syncOldMessages = async (req, res) => {
+  const company_id = req.user?.company_id
+  if (!company_id) return res.status(401).json({ error: 'Nao autenticado' })
+
+  if (!checkCompanyRate(company_id, 'old-messages-sync', 300_000, 1)) {
+    return res.status(429).json({
+      error: 'Sincronizacao de mensagens antigas ja iniciada. Aguarde alguns minutos.',
+      retryAfterSeconds: 300
+    })
+  }
+
+  const result = await enqueue(company_id, JOB_TIPOS.SYNC_MENSAGENS_ANTIGAS, {
+    requestedBy: req.user?.id || null
+  })
+
+  if (!result.ok) {
+    const jaRodando = /enfileirado|execu/i.test(result.error || '')
+    console.log(`[SYNC-MENSAGENS-ANTIGAS] empresa=${company_id} enqueue: ${result.error}`)
+    return res.json({
+      ok: true,
+      queued: false,
+      running: jaRodando,
+      message: jaRodando ? 'Sincronizacao de mensagens antigas ja esta em andamento.' : result.error
+    })
+  }
+
+  console.log(`[SYNC-MENSAGENS-ANTIGAS] empresa=${company_id} job_id=${result.job_id} enfileirado`)
+  return res.json({
+    ok: true,
+    queued: true,
+    job_id: result.job_id,
+    message: 'Sincronizacao de mensagens antigas iniciada em segundo plano. O historico sera importado em lotes.'
+  })
+}
+
 exports.syncGroups = async (req, res) => {
   const company_id = req.user?.company_id
   if (!company_id) return res.status(401).json({ error: 'Não autenticado' })
