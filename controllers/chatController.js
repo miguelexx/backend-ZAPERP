@@ -3872,10 +3872,15 @@ exports.reabrirChat = async (req, res) => {
     }
 
     // Reabrir já assume automaticamente para quem clicou — sem setor (fila geral / visível a todos).
+    const assumidaEm = new Date().toISOString()
+    await resetAlertaSemRespostaAoAssumirReaberta(company_id, conversa_id, assumidaEm, {
+      reaberta_falta_interacao_em: perm.conv?.reaberta_falta_interacao_em,
+    })
+
     const baseReabrirPatch = {
       status_atendimento: 'em_atendimento',
       atendente_id: user_id,
-      atendente_atribuido_em: new Date().toISOString(),
+      atendente_atribuido_em: assumidaEm,
       departamento_id: null,
       finalizacao_motivo: null,
       finalizada_automaticamente: false,
@@ -3909,6 +3914,8 @@ exports.reabrirChat = async (req, res) => {
     }
 
     if (error) return res.status(500).json({ error: error.message })
+
+    await clearReabertaFaltaInteracao(company_id, conversa_id)
 
     const resultAt = await registrarAtendimento({
       conversa_id,
@@ -5707,13 +5714,19 @@ exports.puxarChatFila = async (req, res) => {
     }
 
     const assumidaEm = new Date().toISOString()
+
+    await resetAlertaSemRespostaAoAssumirReaberta(company_id, conversa.id, assumidaEm, {
+      reaberta_falta_interacao_em: conversa.reaberta_falta_interacao_em,
+    })
+
     const { data: atualizada, error: errUpdate } = await supabase
       .from('conversas')
       .update({
         atendente_id: user_id,
         status_atendimento: 'em_atendimento',
         lida: true,
-        atendente_atribuido_em: assumidaEm
+        atendente_atribuido_em: assumidaEm,
+        reaberta_falta_interacao_em: null,
       })
       .eq('company_id', company_id)
       .eq('id', conversa.id)
@@ -5727,7 +5740,6 @@ exports.puxarChatFila = async (req, res) => {
       return res.status(409).json({ error: 'Outra pessoa puxou essa conversa antes de você' })
     }
 
-    await resetAlertaSemRespostaAoAssumirReaberta(company_id, conversa.id, assumidaEm)
     await clearReabertaFaltaInteracao(company_id, conversa.id)
 
     const resultAt = await registrarAtendimento({

@@ -53,6 +53,52 @@ function validateMinuteValue(value, label) {
   return null
 }
 
+function normalizeHorarioTime(value, fallback = '09:00') {
+  const raw = String(value || '').trim()
+  const m = raw.match(/^(\d{1,2}):(\d{2})$/)
+  if (!m) return fallback
+  const h = Math.max(0, Math.min(23, parseInt(m[1], 10)))
+  const min = Math.max(0, Math.min(59, parseInt(m[2], 10)))
+  return `${String(h).padStart(2, '0')}:${String(min).padStart(2, '0')}`
+}
+
+function normalizeDiasSemanaDesativados(value, fallback = [0, 6]) {
+  if (!Array.isArray(value)) return fallback
+  const days = [...new Set(value.map(Number).filter((d) => Number.isInteger(d) && d >= 0 && d <= 6))].sort((a, b) => a - b)
+  return days.length ? days : fallback
+}
+
+function normalizeDatasEspecificasFechadas(value) {
+  if (!Array.isArray(value)) return []
+  return [...new Set(
+    value
+      .map((d) => String(d || '').trim())
+      .filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d))
+  )].sort()
+}
+
+function alertConfigHasOwnSchedule(cfg = {}) {
+  return ['horarioInicio', 'horarioFim', 'horariosJanelas', 'diasSemanaDesativados', 'datasEspecificasFechadas']
+    .some((key) => Object.prototype.hasOwnProperty.call(cfg, key))
+}
+
+function mergeScheduleSource(cfg = {}, ct = {}) {
+  const src = alertConfigHasOwnSchedule(cfg) ? cfg : ct
+  return {
+    horarioInicio: src.horarioInicio || '09:00',
+    horarioFim: src.horarioFim || '18:00',
+    horariosJanelas: Array.isArray(src.horariosJanelas) ? src.horariosJanelas : [],
+    diasSemanaDesativados: normalizeDiasSemanaDesativados(src.diasSemanaDesativados),
+    datasEspecificasFechadas: normalizeDatasEspecificasFechadas(src.datasEspecificasFechadas),
+  }
+}
+
+/** Com alerta ativo, horario comercial e sempre obrigatorio (nunca conta 24h). */
+function resolveAlertaRuntimeConfig(cfg = {}) {
+  if (!cfg.alerta_sem_resposta_ativo) return cfg
+  return { ...cfg, horario_comercial_ativo: true }
+}
+
 function normalizeAlertaSemResposta(raw) {
   const r = raw && typeof raw === 'object' ? raw : {}
   const gestorId = Number(r.gestor_notificado_id)
@@ -60,9 +106,12 @@ function normalizeAlertaSemResposta(raw) {
   const responsaveis = Array.isArray(r.responsaveis_notificacao_ids)
     ? r.responsaveis_notificacao_ids.map(Number).filter((id) => Number.isFinite(id) && id > 0)
     : []
-  return {
+  const alertaAtivo = coerceAtivo(r.alerta_sem_resposta_ativo) || coerceAtivo(r.ativo)
+  const scheduleKeys = ['horarioInicio', 'horarioFim', 'horariosJanelas', 'diasSemanaDesativados', 'datasEspecificasFechadas']
+  const hasScheduleInput = scheduleKeys.some((key) => Object.prototype.hasOwnProperty.call(r, key))
+  const base = {
     ...DEFAULT_ALERTA_SEM_RESPOSTA,
-    alerta_sem_resposta_ativo: coerceAtivo(r.alerta_sem_resposta_ativo) || coerceAtivo(r.ativo),
+    alerta_sem_resposta_ativo: alertaAtivo,
     tempo_primeiro_alerta_minutos: normalizeMinutes(r.tempo_primeiro_alerta_minutos, 2),
     tempo_alerta_critico_minutos: normalizeMinutes(r.tempo_alerta_critico_minutos, 10),
     tempo_notificar_gestor_minutos: normalizeMinutes(r.tempo_notificar_gestor_minutos, 15),
@@ -77,8 +126,16 @@ function normalizeAlertaSemResposta(raw) {
     gestor_cliente_nome: String(r.gestor_cliente_nome || '').trim().slice(0, 120),
     responsaveis_notificacao_ids: responsaveis,
     telefone_gestor: String(r.telefone_gestor || '').trim().slice(0, 40),
-    horario_comercial_ativo: r.horario_comercial_ativo !== false,
+    horario_comercial_ativo: alertaAtivo ? true : r.horario_comercial_ativo !== false,
     timezone: String(r.timezone || DEFAULT_ALERTA_SEM_RESPOSTA.timezone).trim().slice(0, 80) || 'America/Sao_Paulo',
+  }
+  if (!hasScheduleInput) return base
+  return {
+    ...base,
+    horarioInicio: normalizeHorarioTime(r.horarioInicio, '09:00'),
+    horarioFim: normalizeHorarioTime(r.horarioFim, '18:00'),
+    diasSemanaDesativados: normalizeDiasSemanaDesativados(r.diasSemanaDesativados),
+    datasEspecificasFechadas: normalizeDatasEspecificasFechadas(r.datasEspecificasFechadas),
   }
 }
 
@@ -211,6 +268,25 @@ async function loadIaConfig(company_id) {
 async function getAlertaSemRespostaConfig(company_id) {
   const config = await loadIaConfig(company_id)
   return normalizeAlertaSemResposta(config.alerta_sem_resposta || {})
+}
+
+async function getAlertaSemRespostaConfigForApi(company_id) {
+  const saved = await loadIaConfig(company_id)
+  const raw = saved.alerta_sem_resposta && typeof saved.alerta_sem_resposta === 'object'
+    ? saved.alerta_sem_resposta
+    : {}
+  const config = normalizeAlertaSemResposta(raw)
+  const ct = saved.chatbot_triage && typeof saved.chatbot_triage === 'object' ? saved.chatbot_triage : {}
+  const merged = mergeScheduleSource(config, ct)
+  const horarioComercial = await getBusinessScheduleInfo(company_id, config)
+  return {
+    ...config,
+    horarioInicio: merged.horarioInicio,
+    horarioFim: merged.horarioFim,
+    diasSemanaDesativados: merged.diasSemanaDesativados,
+    datasEspecificasFechadas: merged.datasEspecificasFechadas,
+    horario_comercial: horarioComercial,
+  }
 }
 
 async function saveAlertaSemRespostaConfig(company_id, patch) {
@@ -356,10 +432,30 @@ function buildAlertaSemRespostaResetPatch(assumidaEm) {
   }
 }
 
-async function resetAlertaSemRespostaAoAssumirReaberta(company_id, conversa_id, assumidaEm = new Date().toISOString()) {
+async function resetAlertaSemRespostaAoAssumirReaberta(
+  company_id,
+  conversa_id,
+  assumidaEm = new Date().toISOString(),
+  opts = {}
+) {
   try {
-    const estado = await getEstado(company_id, conversa_id)
-    const foiReabertaPeloAlerta = Boolean(estado?.reaberta_em)
+    const estado = opts.estado != null ? opts.estado : await getEstado(company_id, conversa_id)
+    let foiReabertaPeloAlerta = Boolean(estado?.reaberta_em)
+
+    if (!foiReabertaPeloAlerta && opts.reaberta_falta_interacao_em) {
+      foiReabertaPeloAlerta = true
+    }
+
+    if (!foiReabertaPeloAlerta) {
+      const { data: conv } = await supabase
+        .from('conversas')
+        .select('reaberta_falta_interacao_em')
+        .eq('company_id', company_id)
+        .eq('id', conversa_id)
+        .maybeSingle()
+      foiReabertaPeloAlerta = Boolean(conv?.reaberta_falta_interacao_em)
+    }
+
     if (!foiReabertaPeloAlerta) {
       return { ok: true, resetado: false, reason: 'nao_reaberta_pelo_alerta' }
     }
@@ -842,19 +938,14 @@ function normalizeBusinessSchedule(cfg = {}, fullConfig = {}) {
   const ct = fullConfig.chatbot_triage && typeof fullConfig.chatbot_triage === 'object'
     ? fullConfig.chatbot_triage
     : {}
+  const merged = mergeScheduleSource(cfg, ct)
   const timezone = String(cfg.timezone || ct.timezone || 'America/Sao_Paulo').trim() || 'America/Sao_Paulo'
-  const diasSemanaDesativados = Array.isArray(ct.diasSemanaDesativados)
-    ? ct.diasSemanaDesativados.map(Number).filter((d) => Number.isInteger(d) && d >= 0 && d <= 6)
-    : [0, 6]
-  const datasEspecificasFechadas = Array.isArray(ct.datasEspecificasFechadas)
-    ? ct.datasEspecificasFechadas.map((d) => String(d || '').trim()).filter(Boolean)
-    : []
   return {
-    enabled: cfg.horario_comercial_ativo === true,
+    enabled: cfg.horario_comercial_ativo !== false,
     timezone,
-    diasSemanaDesativados,
-    datasEspecificasFechadas,
-    windows: normalizeBusinessWindows(ct),
+    diasSemanaDesativados: merged.diasSemanaDesativados,
+    datasEspecificasFechadas: merged.datasEspecificasFechadas,
+    windows: normalizeBusinessWindows(merged),
   }
 }
 
@@ -893,7 +984,7 @@ function describeBusinessSchedule(schedule = {}) {
 }
 
 async function getBusinessScheduleInfo(company_id, cfg = null) {
-  const alertaCfg = cfg || await getAlertaSemRespostaConfig(company_id)
+  const alertaCfg = resolveAlertaRuntimeConfig(cfg || await getAlertaSemRespostaConfig(company_id))
   const schedule = await loadBusinessSchedule(company_id, alertaCfg)
   return {
     enabled: schedule.enabled,
@@ -979,16 +1070,17 @@ function resolveAlertaSemRespostaCycleAnchor({ ultima, estado = {}, conv = {} } 
 }
 
 async function loadBusinessSchedule(company_id, cfg) {
-  if (!cfg.horario_comercial_ativo) return normalizeBusinessSchedule(cfg, {})
+  const effectiveCfg = resolveAlertaRuntimeConfig(cfg)
+  if (!effectiveCfg.horario_comercial_ativo) return normalizeBusinessSchedule(effectiveCfg, {})
   const full = await loadIaConfig(company_id)
-  return normalizeBusinessSchedule(cfg, full)
+  return normalizeBusinessSchedule(effectiveCfg, full)
 }
 
 async function processCompanyAtendimentoSemResposta(company_id, opts = {}) {
   const dryRun = opts.dryRun === true
   const io = opts.io || null
   const now = opts.now ? new Date(opts.now) : new Date()
-  const cfg = await getAlertaSemRespostaConfig(company_id)
+  const cfg = resolveAlertaRuntimeConfig(await getAlertaSemRespostaConfig(company_id))
   const businessInfo = await getBusinessScheduleInfo(company_id, cfg)
   if (!cfg.alerta_sem_resposta_ativo) {
     return { ok: true, processadas: 0, skipped: 'inativo', horario_comercial: businessInfo }
@@ -1132,8 +1224,14 @@ async function processCompanyAtendimentoSemResposta(company_id, opts = {}) {
       }
       if (!stillEligible) continue
 
-      const claimed = await claimEstadoStage(company_id, conv.id, anchor, action.estadoPatch)
-      if (!claimed) continue
+      const isGestorNotify = action.notifyGestor === true
+      let claimed = false
+      if (!isGestorNotify) {
+        claimed = await claimEstadoStage(company_id, conv.id, anchor, action.estadoPatch)
+        if (!claimed) continue
+      }
+
+      let gestorWhatsappOk = !(isGestorNotify && cfg.notificar_por_whatsapp)
 
       if (cfg.notificar_interno !== false) {
         emitAlertaRealtime(io, company_id, { ...basePayload, ...action }, {
@@ -1146,6 +1244,7 @@ async function processCompanyAtendimentoSemResposta(company_id, opts = {}) {
         if (cfg.notificar_por_whatsapp) {
           const destination = await resolveGestorWhatsappDestination(company_id, cfg)
           if (!destination.ok) {
+            gestorWhatsappOk = false
             await recordEvento(company_id, {
               ...basePayload,
               tipo: 'whatsapp_falha',
@@ -1166,6 +1265,7 @@ async function processCompanyAtendimentoSemResposta(company_id, opts = {}) {
             })
             const wa = await sendGestorWhatsapp(company_id, destination.telefone, waText)
             if (!wa.ok) {
+              gestorWhatsappOk = false
               await recordEvento(company_id, {
                 ...basePayload,
                 tipo: 'whatsapp_falha',
@@ -1178,6 +1278,7 @@ async function processCompanyAtendimentoSemResposta(company_id, opts = {}) {
                 },
               })
             } else {
+              gestorWhatsappOk = true
               await recordEvento(company_id, {
                 ...basePayload,
                 tipo: 'whatsapp_enviado',
@@ -1193,6 +1294,15 @@ async function processCompanyAtendimentoSemResposta(company_id, opts = {}) {
           }
         }
 
+        if (isGestorNotify && cfg.notificar_por_whatsapp && !gestorWhatsappOk) {
+          continue
+        }
+
+        if (isGestorNotify) {
+          claimed = await claimEstadoStage(company_id, conv.id, anchor, action.estadoPatch)
+          if (!claimed) continue
+        }
+
         if (cfg.notificar_por_email) {
           const emailDestination = await resolveGestorEmailDestination(company_id, cfg)
           const smtpConfigured = hasSmtpConfig()
@@ -1202,9 +1312,9 @@ async function processCompanyAtendimentoSemResposta(company_id, opts = {}) {
             nivel: 'gestor',
             mensagem: !emailDestination.ok
               ? 'E-mail do gestor não enviado: responsável interno sem e-mail válido.'
-              : smtpConfigured
-                ? 'E-mail do gestor não enviado: serviço de envio não configurado no backend.'
-                : 'E-mail do gestor não enviado: SMTP não configurado.',
+              : !smtpConfigured
+                ? 'E-mail do gestor não enviado: SMTP não configurado.'
+                : 'E-mail do gestor não enviado: serviço de envio não implementado no backend.',
             detalhes: {
               reason: emailDestination.ok
                 ? (smtpConfigured ? 'email_sender_not_configured' : 'smtp_not_configured')
@@ -1305,6 +1415,10 @@ module.exports = {
   normalizeAlertaSemResposta,
   validateAlertaSemResposta,
   getAlertaSemRespostaConfig,
+  getAlertaSemRespostaConfigForApi,
+  resolveAlertaRuntimeConfig,
+  mergeScheduleSource,
+  alertConfigHasOwnSchedule,
   saveAlertaSemRespostaConfig,
   listAlertaSemRespostaEventos,
   processCompanyAtendimentoSemResposta,

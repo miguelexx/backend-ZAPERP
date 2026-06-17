@@ -19,7 +19,7 @@ async function executarAssumirConversa({
 
   const { data: atual, error: errAtual } = await supabase
     .from('conversas')
-    .select('id, atendente_id, departamento_id, tipo, telefone')
+    .select('id, atendente_id, departamento_id, tipo, telefone, reaberta_falta_interacao_em')
     .eq('company_id', company_id)
     .eq('id', conversa_id)
     .single()
@@ -66,6 +66,11 @@ async function executarAssumirConversa({
   }
 
   const assumidaEm = new Date().toISOString()
+
+  await resetAlertaSemRespostaAoAssumirReaberta(company_id, conversa_id, assumidaEm, {
+    reaberta_falta_interacao_em: atual.reaberta_falta_interacao_em,
+  })
+
   const { data, error } = await supabase
     .from('conversas')
     .update({
@@ -82,7 +87,6 @@ async function executarAssumirConversa({
 
   if (error) return { ok: false, status: 500, error: error.message, conversa: null }
 
-  await resetAlertaSemRespostaAoAssumirReaberta(company_id, conversa_id, assumidaEm)
   await clearReabertaFaltaInteracao(company_id, conversa_id)
 
   const resultAt = await registrarAtendimento({

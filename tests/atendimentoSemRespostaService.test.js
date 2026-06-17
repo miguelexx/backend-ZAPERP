@@ -4,6 +4,7 @@ const {
   DEFAULT_ALERTA_SEM_RESPOSTA,
   formatTempoSemResposta,
   buildGestorWhatsappText,
+  resolveAlertaRuntimeConfig,
   normalizeBusinessSchedule,
   isBusinessTime,
   businessMinutesBetween,
@@ -213,6 +214,63 @@ describe('atendimentoSemRespostaService', () => {
       expect(describeBusinessSchedule(schedule)).toContain('segunda a sexta')
       expect(describeBusinessSchedule(schedule)).toContain('08:00 as 18:00')
       expect(describeBusinessSchedule(schedule)).toContain('minutos ficam pausados')
+    })
+
+    it('prioriza horario salvo no alerta em vez do chatbot', () => {
+      const schedule = normalizeBusinessSchedule(
+        {
+          ...cfg,
+          horarioInicio: '10:00',
+          horarioFim: '16:00',
+          diasSemanaDesativados: [0, 6],
+        },
+        {
+          chatbot_triage: {
+            timezone: 'America/Sao_Paulo',
+            horarioInicio: '08:00',
+            horarioFim: '18:00',
+            diasSemanaDesativados: [0, 6],
+          },
+        }
+      )
+
+      expect(describeBusinessSchedule(schedule)).toContain('10:00 as 16:00')
+      expect(businessMinutesBetween(
+        '2026-06-15T12:00:00.000Z',
+        new Date('2026-06-15T12:30:00.000Z'),
+        schedule
+      )).toBe(0)
+      expect(businessMinutesBetween(
+        '2026-06-15T13:00:00.000Z',
+        new Date('2026-06-15T13:30:00.000Z'),
+        schedule
+      )).toBe(30)
+    })
+
+    it('forca horario comercial quando alerta esta ativo', () => {
+      const cfgAtivo = normalizeAlertaSemResposta({
+        alerta_sem_resposta_ativo: true,
+        horario_comercial_ativo: false,
+      })
+      expect(cfgAtivo.horario_comercial_ativo).toBe(true)
+    })
+
+    it('resolveAlertaRuntimeConfig impede contagem 24h com alerta ativo', () => {
+      const cfg = resolveAlertaRuntimeConfig({
+        ...DEFAULT_ALERTA_SEM_RESPOSTA,
+        alerta_sem_resposta_ativo: true,
+        horario_comercial_ativo: false,
+      })
+      const schedule = normalizeBusinessSchedule(cfg, {
+        chatbot_triage: {
+          horarioInicio: '09:00',
+          horarioFim: '18:00',
+          timezone: 'America/Sao_Paulo',
+          diasSemanaDesativados: [0, 6],
+        },
+      })
+      expect(schedule.enabled).toBe(true)
+      expect(isBusinessTime(new Date('2026-06-15T21:01:00.000Z'), schedule)).toBe(false)
     })
   })
 
