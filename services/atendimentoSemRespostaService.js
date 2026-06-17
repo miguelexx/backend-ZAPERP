@@ -103,6 +103,9 @@ function validateAlertaSemResposta(cfg) {
   if (c.aplicar_tag_automatica && !c.nome_tag_automatica) {
     return 'Informe o nome da tag automática.'
   }
+  if (!c.alerta_sem_resposta_ativo) {
+    return null
+  }
   if (c.notificar_por_whatsapp) {
     const clienteId = Number(c.gestor_cliente_id)
     const manual = String(c.telefone_gestor || '').replace(/\D/g, '')
@@ -123,6 +126,47 @@ function hasSmtpConfig() {
       String(process.env.SMTP_URL || '').trim() ||
       String(process.env.MAIL_HOST || '').trim()
   )
+}
+
+async function validateAlertaSemRespostaReferences(company_id, cfg) {
+  if (!cfg.alerta_sem_resposta_ativo) return null
+
+  if (cfg.notificar_por_email) {
+    if (!hasSmtpConfig()) {
+      return 'E-mail indisponivel: configure SMTP antes de ativar este canal.'
+    }
+  }
+
+  if (cfg.notificar_interno || cfg.notificar_por_email) {
+    const gestorId = Number(cfg.gestor_notificado_id)
+    if (!Number.isInteger(gestorId) || gestorId <= 0) {
+      return 'Selecione um responsavel interno da empresa.'
+    }
+    const { data, error } = await supabase
+      .from('usuarios')
+      .select('id')
+      .eq('company_id', company_id)
+      .eq('id', gestorId)
+      .maybeSingle()
+    if (error) return error.message
+    if (!data?.id) return 'Responsavel interno invalido para esta empresa.'
+  }
+
+  if (cfg.notificar_por_whatsapp) {
+    const clienteId = Number(cfg.gestor_cliente_id)
+    if (Number.isInteger(clienteId) && clienteId > 0) {
+      const { data, error } = await supabase
+        .from('clientes')
+        .select('id')
+        .eq('company_id', company_id)
+        .eq('id', clienteId)
+        .maybeSingle()
+      if (error) return error.message
+      if (!data?.id) return 'Contato WhatsApp do gestor invalido para esta empresa.'
+    }
+  }
+
+  return null
 }
 
 async function resolveGestorEmailDestination(company_id, cfg) {
@@ -178,6 +222,8 @@ async function saveAlertaSemRespostaConfig(company_id, patch) {
     ...(current.alerta_sem_resposta || {}),
     ...(patch || {}),
   })
+  const refErr = await validateAlertaSemRespostaReferences(company_id, merged)
+  if (refErr) return { ok: false, error: refErr }
 
   const nextConfig = { ...current, alerta_sem_resposta: merged }
   const { error } = await supabase
@@ -812,6 +858,56 @@ function normalizeBusinessSchedule(cfg = {}, fullConfig = {}) {
   }
 }
 
+function formatScheduleTime(minutes) {
+  const n = Math.max(0, Math.min(1439, Math.floor(Number(minutes) || 0)))
+  return `${String(Math.floor(n / 60)).padStart(2, '0')}:${String(n % 60).padStart(2, '0')}`
+}
+
+function summarizeBusinessDays(schedule = {}) {
+  if (!schedule?.enabled) return 'todos os dias'
+  const closed = new Set(Array.isArray(schedule.diasSemanaDesativados) ? schedule.diasSemanaDesativados : [])
+  const activeDays = [0, 1, 2, 3, 4, 5, 6].filter((d) => !closed.has(d))
+  const names = ['domingo', 'segunda', 'terca', 'quarta', 'quinta', 'sexta', 'sabado']
+  if (activeDays.join(',') === '1,2,3,4,5') return 'segunda a sexta'
+  if (activeDays.join(',') === '1,2,3,4,5,6') return 'segunda a sabado'
+  if (activeDays.join(',') === '0,1,2,3,4,5,6') return 'todos os dias'
+  if (!activeDays.length) return 'nenhum dia ativo'
+  return activeDays.map((d) => names[d]).join(', ')
+}
+
+function describeBusinessSchedule(schedule = {}) {
+  if (!schedule?.enabled) {
+    return 'Contagem ativa: horario comercial desativado. Os minutos contam de forma corrida.'
+  }
+  const windows = Array.isArray(schedule.windows) && schedule.windows.length
+    ? schedule.windows
+    : [{ start: 9 * 60, end: 18 * 60 }]
+  const windowsText = windows
+    .map((w) => `${formatScheduleTime(w.start)} as ${formatScheduleTime(w.end)}`)
+    .join(' e ')
+  const daysText = summarizeBusinessDays(schedule)
+  const holidayText = Array.isArray(schedule.datasEspecificasFechadas) && schedule.datasEspecificasFechadas.length
+    ? ` Datas fechadas: ${schedule.datasEspecificasFechadas.join(', ')}.`
+    : ''
+  return `Contagem ativa: ${daysText}, das ${windowsText}. Fora desse horario, os minutos ficam pausados e continuam no proximo expediente.${holidayText}`
+}
+
+async function getBusinessScheduleInfo(company_id, cfg = null) {
+  const alertaCfg = cfg || await getAlertaSemRespostaConfig(company_id)
+  const schedule = await loadBusinessSchedule(company_id, alertaCfg)
+  return {
+    enabled: schedule.enabled,
+    timezone: schedule.timezone,
+    dias_semana_desativados: schedule.diasSemanaDesativados || [],
+    datas_especificas_fechadas: schedule.datasEspecificasFechadas || [],
+    janelas: (schedule.windows || []).map((w) => ({
+      inicio: formatScheduleTime(w.start),
+      fim: formatScheduleTime(w.end),
+    })),
+    resumo: describeBusinessSchedule(schedule),
+  }
+}
+
 function isBusinessDayParts(parts, schedule) {
   if (!schedule?.enabled) return true
   if (schedule.diasSemanaDesativados?.includes(parts.weekday)) return false
@@ -893,12 +989,23 @@ async function processCompanyAtendimentoSemResposta(company_id, opts = {}) {
   const io = opts.io || null
   const now = opts.now ? new Date(opts.now) : new Date()
   const cfg = await getAlertaSemRespostaConfig(company_id)
+  const businessInfo = await getBusinessScheduleInfo(company_id, cfg)
   if (!cfg.alerta_sem_resposta_ativo) {
-    return { ok: true, processadas: 0, skipped: 'inativo' }
+    return { ok: true, processadas: 0, skipped: 'inativo', horario_comercial: businessInfo }
   }
   const businessSchedule = await loadBusinessSchedule(company_id, cfg)
   if (!isBusinessTime(now, businessSchedule)) {
-    return { ok: true, processadas: 0, skipped: 'fora_horario' }
+    return {
+      ok: true,
+      processadas: 0,
+      skipped: 'fora_horario',
+      horario_comercial: businessInfo,
+      detalhes: [{
+        paused: true,
+        motivo: 'fora_horario',
+        mensagem: 'Contador pausado fora do horario comercial.',
+      }],
+    }
   }
 
   const { data: conversas, error: convErr } = await supabase
@@ -909,7 +1016,7 @@ async function processCompanyAtendimentoSemResposta(company_id, opts = {}) {
     .not('atendente_id', 'is', null)
 
   if (convErr) return { ok: false, error: convErr.message, processadas: 0 }
-  if (!conversas?.length) return { ok: true, processadas: 0 }
+  if (!conversas?.length) return { ok: true, processadas: 0, horario_comercial: businessInfo }
 
   let processadas = 0
   const detalhes = []
@@ -1170,7 +1277,7 @@ async function processCompanyAtendimentoSemResposta(company_id, opts = {}) {
     }
   }
 
-  return { ok: true, processadas, detalhes }
+  return { ok: true, processadas, detalhes, horario_comercial: businessInfo }
 }
 
 async function runAtendimentoSemRespostaForAllCompanies(opts = {}) {
@@ -1182,7 +1289,7 @@ async function runAtendimentoSemRespostaForAllCompanies(opts = {}) {
   let total = 0
   const detalhes = []
   for (const emp of empresas || []) {
-    const r = await processCompanyAtendimentoSemResposta(emp.id, { dryRun, io })
+    const r = await processCompanyAtendimentoSemResposta(emp.id, { dryRun, io, now: opts.now })
     if (!r.ok) {
       detalhes.push({ company_id: emp.id, error: r.error })
       continue
@@ -1210,6 +1317,8 @@ module.exports = {
   normalizeBusinessSchedule,
   isBusinessTime,
   businessMinutesBetween,
+  describeBusinessSchedule,
+  getBusinessScheduleInfo,
   resolveAlertaSemRespostaCycleAnchor,
   resolveGestorWhatsappDestination,
   sendGestorWhatsapp,

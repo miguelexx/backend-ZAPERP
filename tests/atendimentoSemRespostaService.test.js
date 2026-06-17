@@ -7,6 +7,7 @@ const {
   normalizeBusinessSchedule,
   isBusinessTime,
   businessMinutesBetween,
+  describeBusinessSchedule,
   resolveAlertaSemRespostaCycleAnchor,
   buildAlertaSemRespostaResetPatch,
 } = require('../services/atendimentoSemRespostaService')
@@ -34,6 +35,7 @@ describe('atendimentoSemRespostaService', () => {
   it('exige canal de notificação', () => {
     const err = validateAlertaSemResposta({
       ...DEFAULT_ALERTA_SEM_RESPOSTA,
+      alerta_sem_resposta_ativo: true,
       notificar_interno: false,
       notificar_por_whatsapp: false,
       notificar_por_email: false,
@@ -131,6 +133,21 @@ describe('atendimentoSemRespostaService', () => {
       expect(minutes).toBe(10)
     })
 
+    it('conta apenas 2 minutos antes do fechamento e completa 5 no proximo expediente', () => {
+      const schedule = normalizeBusinessSchedule(cfg, {
+        chatbot_triage: {
+          horarioInicio: '08:00',
+          horarioFim: '18:00',
+          timezone: 'America/Sao_Paulo',
+          diasSemanaDesativados: [0, 6],
+        },
+      })
+      const start = '2026-06-15T20:58:00.000Z'
+
+      expect(businessMinutesBetween(start, new Date('2026-06-15T21:30:00.000Z'), schedule)).toBe(2)
+      expect(businessMinutesBetween(start, new Date('2026-06-16T11:03:00.000Z'), schedule)).toBe(5)
+    })
+
     it('mensagem fora do horario comeca a contar no proximo expediente', () => {
       const schedule = normalizeBusinessSchedule(cfg, fullConfig)
       const minutes = businessMinutesBetween(
@@ -181,6 +198,21 @@ describe('atendimentoSemRespostaService', () => {
     it('mantem comportamento atual quando horario comercial foi explicitamente desativado', () => {
       const schedule = normalizeBusinessSchedule({ ...cfg, horario_comercial_ativo: false }, fullConfig)
       expect(businessMinutesBetween('2026-06-15T20:55:00.000Z', new Date('2026-06-15T21:05:00.000Z'), schedule)).toBe(10)
+    })
+
+    it('descreve o horario real usado pelo contador', () => {
+      const schedule = normalizeBusinessSchedule(cfg, {
+        chatbot_triage: {
+          timezone: 'America/Sao_Paulo',
+          horarioInicio: '08:00',
+          horarioFim: '18:00',
+          diasSemanaDesativados: [0, 6],
+        },
+      })
+
+      expect(describeBusinessSchedule(schedule)).toContain('segunda a sexta')
+      expect(describeBusinessSchedule(schedule)).toContain('08:00 as 18:00')
+      expect(describeBusinessSchedule(schedule)).toContain('minutos ficam pausados')
     })
   })
 

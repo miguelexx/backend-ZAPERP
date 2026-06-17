@@ -3,6 +3,7 @@ const {
   saveAlertaSemRespostaConfig,
   listAlertaSemRespostaEventos,
   processCompanyAtendimentoSemResposta,
+  getBusinessScheduleInfo,
 } = require('../services/atendimentoSemRespostaService')
 
 /** GET /config/alerta-sem-resposta */
@@ -11,8 +12,9 @@ exports.getConfig = async (req, res) => {
     const { company_id } = req.user
     if (!company_id) return res.status(401).json({ error: 'Não autenticado' })
     const config = await getAlertaSemRespostaConfig(company_id)
+    const horarioComercial = await getBusinessScheduleInfo(company_id, config)
     res.set('Cache-Control', 'private, no-store, must-revalidate')
-    return res.json(config)
+    return res.json({ ...config, horario_comercial: horarioComercial })
   } catch (err) {
     console.error('[atendimentoSemResposta] getConfig:', err)
     return res.status(500).json({ error: 'Erro ao carregar alertas de atendimento' })
@@ -67,6 +69,7 @@ exports.processar = async (req, res) => {
       processadas: result.processadas || 0,
       detalhes: result.detalhes || [],
       skipped: result.skipped || null,
+      horario_comercial: result.horario_comercial || null,
     })
   } catch (err) {
     console.error('[atendimentoSemResposta] processar:', err)
