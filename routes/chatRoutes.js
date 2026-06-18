@@ -46,6 +46,7 @@ router.put('/:id/departamento', auth, chatController.transferirSetor)
 
 router.post("/:id/arquivo", auth, uploadArquivo, chatController.enviarArquivo)
 
+router.post('/:id/mensagens/sync-old', auth, chatController.carregarMensagensAntigasContato)
 router.post('/:id/mensagens', auth, chatController.enviarMensagemChat)
 router.post('/:id/pix', auth, chatController.enviarMensagemPix)
 router.post('/:id/encaminhar', auth, chatController.encaminharMensagem)

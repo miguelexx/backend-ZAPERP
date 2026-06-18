@@ -337,63 +337,65 @@ async function updateConversationActivity(company_id, conversa_id, current, last
     .eq('id', conversa_id)
 }
 
-async function importMessagesForChat(ctx) {
-  const { company_id, whatsapp_instance_id, whatsapp_instance_is_default, provider, chat, io } = ctx
-  const shouldCancel = typeof ctx.shouldCancel === 'function' ? ctx.shouldCancel : null
-  const cancelResult = {
-    skippedChat: false,
-    cancelled: true,
-    messagesFetched: 0,
-    messagesInserted: 0,
-    messagesSkipped: 0,
-  }
-  const isCancelled = async () => shouldCancel ? await shouldCancel() : false
-  const chatId = chatIdFromChat(chat)
-  if (isSkippableChatId(chatId)) return { skippedChat: true, messagesFetched: 0, messagesInserted: 0, messagesSkipped: 0 }
-  if (await isCancelled()) return cancelResult
-
-  const isGroup = isGroupChatId(chatId)
-  const found = await createConversationForChat({
-    company_id,
-    whatsapp_instance_id,
-    whatsapp_instance_is_default,
-    chat,
-    chatId,
-    isGroup,
-  })
-  if (!found?.conversa?.id) return { skippedChat: true, messagesFetched: 0, messagesInserted: 0, messagesSkipped: 0 }
-  if (await isCancelled()) return cancelResult
-
-  const rawMessages = await provider.getChatMessages(chatId, MESSAGES_PER_CHAT, null, {
-    companyId: company_id,
-    whatsappInstanceId: whatsapp_instance_id || undefined,
-  }).catch(() => [])
-
+function prepareRawMessages(rawMessages, { isGroup }) {
   const ordered = Array.isArray(rawMessages)
     ? [...rawMessages].sort((a, b) => new Date(messageTimestampToIso(a)).getTime() - new Date(messageTimestampToIso(b)).getTime())
     : []
 
+  const prepared = []
+  let invalidSkipped = 0
+  for (const raw of ordered) {
+    const normalized = normalizeOldMessage(raw, { isGroup })
+    if (!normalized?.insert?.whatsapp_id || !normalized.insert.texto) {
+      invalidSkipped += 1
+      continue
+    }
+    prepared.push(normalized)
+  }
+
+  return { ordered, prepared, invalidSkipped }
+}
+
+async function hasAnyNewMessage(company_id, whatsapp_instance_id, prepared, allowLegacyNull) {
+  for (const normalized of prepared || []) {
+    const exists = await selectExistingMessage(
+      company_id,
+      whatsapp_instance_id,
+      normalized.insert.whatsapp_id,
+      allowLegacyNull === true
+    )
+    if (!exists?.id) return true
+  }
+  return false
+}
+
+async function insertPreparedMessagesForConversation(ctx) {
+  const {
+    company_id,
+    whatsapp_instance_id,
+    whatsapp_instance_is_default,
+    conversa,
+    prepared,
+    messagesFetched,
+    initialMessagesSkipped = 0,
+    io,
+    shouldCancel,
+  } = ctx
+
+  const isCancelled = async () => shouldCancel ? await shouldCancel() : false
   let messagesInserted = 0
-  let messagesSkipped = 0
+  let messagesSkipped = initialMessagesSkipped
   let lastImportedAt = null
 
-  for (const raw of ordered) {
+  for (const normalized of prepared || []) {
     if (await isCancelled()) {
-      await updateConversationActivity(company_id, found.conversa.id, found.conversa.ultima_atividade, lastImportedAt)
+      await updateConversationActivity(company_id, conversa.id, conversa.ultima_atividade, lastImportedAt)
       return {
-        skippedChat: false,
         cancelled: true,
-        conversationCreated: !!found.created,
-        messagesFetched: ordered.length,
+        messagesFetched,
         messagesInserted,
         messagesSkipped,
       }
-    }
-
-    const normalized = normalizeOldMessage(raw, { isGroup })
-    if (!normalized?.insert?.whatsapp_id || !normalized.insert.texto) {
-      messagesSkipped += 1
-      continue
     }
 
     const exists = await selectExistingMessage(
@@ -409,7 +411,7 @@ async function importMessagesForChat(ctx) {
 
     const insertMsg = {
       ...normalized.insert,
-      conversa_id: found.conversa.id,
+      conversa_id: conversa.id,
       company_id,
       ...(whatsapp_instance_id ? { whatsapp_instance_id } : {}),
     }
@@ -443,14 +445,76 @@ async function importMessagesForChat(ctx) {
     }
   }
 
-  await updateConversationActivity(company_id, found.conversa.id, found.conversa.ultima_atividade, lastImportedAt)
+  await updateConversationActivity(company_id, conversa.id, conversa.ultima_atividade, lastImportedAt)
+
+  return {
+    messagesFetched,
+    messagesInserted,
+    messagesSkipped,
+  }
+}
+
+async function importMessagesForChat(ctx) {
+  const { company_id, whatsapp_instance_id, whatsapp_instance_is_default, provider, chat, io } = ctx
+  const shouldCancel = typeof ctx.shouldCancel === 'function' ? ctx.shouldCancel : null
+  const cancelResult = {
+    skippedChat: false,
+    cancelled: true,
+    messagesFetched: 0,
+    messagesInserted: 0,
+    messagesSkipped: 0,
+  }
+  const isCancelled = async () => shouldCancel ? await shouldCancel() : false
+  const chatId = chatIdFromChat(chat)
+  if (isSkippableChatId(chatId)) return { skippedChat: true, messagesFetched: 0, messagesInserted: 0, messagesSkipped: 0 }
+  if (await isCancelled()) return cancelResult
+
+  const isGroup = isGroupChatId(chatId)
+  const rawMessages = await provider.getChatMessages(chatId, MESSAGES_PER_CHAT, null, {
+    companyId: company_id,
+    whatsappInstanceId: whatsapp_instance_id || undefined,
+  }).catch(() => [])
+  const { ordered, prepared, invalidSkipped } = prepareRawMessages(rawMessages, { isGroup })
+  if (ordered.length === 0 || prepared.length === 0) {
+    return { skippedChat: true, messagesFetched: ordered.length, messagesInserted: 0, messagesSkipped: invalidSkipped }
+  }
+  if (await isCancelled()) return cancelResult
+
+  const hasNew = await hasAnyNewMessage(company_id, whatsapp_instance_id, prepared, whatsapp_instance_is_default === true)
+  if (!hasNew) {
+    return { skippedChat: true, messagesFetched: ordered.length, messagesInserted: 0, messagesSkipped: invalidSkipped + prepared.length }
+  }
+
+  const found = await createConversationForChat({
+    company_id,
+    whatsapp_instance_id,
+    whatsapp_instance_is_default,
+    chat,
+    chatId,
+    isGroup,
+  })
+  if (!found?.conversa?.id) return { skippedChat: true, messagesFetched: ordered.length, messagesInserted: 0, messagesSkipped: invalidSkipped }
+  if (await isCancelled()) return cancelResult
+
+  const insertedStats = await insertPreparedMessagesForConversation({
+    company_id,
+    whatsapp_instance_id,
+    whatsapp_instance_is_default,
+    conversa: found.conversa,
+    prepared,
+    messagesFetched: ordered.length,
+    initialMessagesSkipped: invalidSkipped,
+    io,
+    shouldCancel,
+  })
 
   return {
     skippedChat: false,
+    cancelled: insertedStats.cancelled === true,
     conversationCreated: !!found.created,
-    messagesFetched: ordered.length,
-    messagesInserted,
-    messagesSkipped,
+    messagesFetched: insertedStats.messagesFetched || 0,
+    messagesInserted: insertedStats.messagesInserted || 0,
+    messagesSkipped: insertedStats.messagesSkipped || 0,
   }
 }
 
@@ -539,7 +603,107 @@ async function syncOldMessagesForCompany(company_id, opts = {}) {
   return stats
 }
 
+async function resolveOldMessagesWhatsappInstanceId(company_id, conversa) {
+  const current = Number(conversa?.whatsapp_instance_id)
+  if (Number.isFinite(current) && current > 0) return current
+  const instancesResult = await listWhatsappInstances(company_id)
+  if (instancesResult.error) return null
+  const instances = (instancesResult.instances || []).filter((instance) => instance && instance.ativo !== false)
+  const preferred = instances.find((instance) => instance.is_default === true) || instances[0] || null
+  const id = Number(preferred?.id)
+  return Number.isFinite(id) && id > 0 ? id : null
+}
+
+function resolveChatIdForConversation(conversa) {
+  const telefone = String(conversa?.telefone || '').trim()
+  const cliente = Array.isArray(conversa?.clientes) ? conversa.clientes[0] : conversa?.clientes
+  const clienteTelefone = String(cliente?.telefone || '').trim()
+  if (telefone && !telefone.toLowerCase().startsWith('lid:')) return telefone
+  if (clienteTelefone && !clienteTelefone.toLowerCase().startsWith('lid:')) return clienteTelefone
+  return ''
+}
+
+async function syncOldMessagesForConversation(company_id, conversa_id, opts = {}) {
+  const provider = getProvider()
+  if (!provider?.getChatMessages) {
+    return { ok: false, error: 'Provider nao suporta leitura de mensagens do chat.' }
+  }
+
+  const { data: conversa, error } = await supabase
+    .from('conversas')
+    .select(`
+      id,
+      company_id,
+      telefone,
+      whatsapp_instance_id,
+      ultima_atividade,
+      tipo,
+      nome_grupo,
+      clientes!conversas_cliente_fk ( id, telefone, company_id )
+    `)
+    .eq('company_id', Number(company_id))
+    .eq('id', Number(conversa_id))
+    .maybeSingle()
+
+  if (error) return { ok: false, error: error.message }
+  if (!conversa?.id) return { ok: false, error: 'Conversa nao encontrada.' }
+  if (conversa.tipo === 'grupo' || isGroupChatId(conversa.telefone)) {
+    return { ok: false, error: 'Use esta acao apenas em conversas individuais.' }
+  }
+
+  const chatId = resolveChatIdForConversation(conversa)
+  if (!chatId) {
+    return { ok: false, error: 'Conversa sem telefone valido para buscar historico.' }
+  }
+
+  const whatsappInstanceId = await resolveOldMessagesWhatsappInstanceId(company_id, conversa)
+  const rawMessages = await provider.getChatMessages(chatId, MESSAGES_PER_CHAT, null, {
+    companyId: company_id,
+    whatsappInstanceId: whatsappInstanceId || undefined,
+  }).catch(() => [])
+
+  const { ordered, prepared, invalidSkipped } = prepareRawMessages(rawMessages, { isGroup: false })
+  if (ordered.length === 0 || prepared.length === 0) {
+    return {
+      ok: true,
+      conversa_id: Number(conversa.id),
+      messagesPerChat: MESSAGES_PER_CHAT,
+      messagesFetched: ordered.length,
+      messagesInserted: 0,
+      messagesSkipped: invalidSkipped,
+      empty: true,
+      message: 'Nenhuma mensagem antiga encontrada para este contato.',
+    }
+  }
+
+  const insertedStats = await insertPreparedMessagesForConversation({
+    company_id,
+    whatsapp_instance_id: whatsappInstanceId,
+    whatsapp_instance_is_default: !conversa.whatsapp_instance_id && !!whatsappInstanceId,
+    conversa,
+    prepared,
+    messagesFetched: ordered.length,
+    initialMessagesSkipped: invalidSkipped,
+    io: opts.io || null,
+    shouldCancel: null,
+  })
+
+  return {
+    ok: true,
+    conversa_id: Number(conversa.id),
+    messagesPerChat: MESSAGES_PER_CHAT,
+    messagesFetched: insertedStats.messagesFetched || 0,
+    messagesInserted: insertedStats.messagesInserted || 0,
+    messagesSkipped: insertedStats.messagesSkipped || 0,
+    empty: (insertedStats.messagesInserted || 0) === 0,
+    message: (insertedStats.messagesInserted || 0) > 0
+      ? 'Mensagens antigas carregadas para este contato.'
+      : 'Nenhuma mensagem antiga encontrada para este contato.',
+  }
+}
+
 module.exports = {
   syncOldMessagesForCompany,
+  syncOldMessagesForConversation,
   normalizeOldMessage,
 }

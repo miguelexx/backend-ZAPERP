@@ -17,6 +17,7 @@ const {
 } = require('../helpers/reabertaFaltaInteracaoHelper')
 const { getDisplayName, normalizeName, isBadName } = require('../helpers/contactEnrichment')
 const { tryMarkWaitingAfterHumanOutbound } = require('../services/absenceFinalizationService')
+const { syncOldMessagesForConversation } = require('../services/oldMessagesSyncService')
 const {
   marcarAguardandoClienteManual,
   retomarEmAtendimentoManual,
@@ -1787,6 +1788,45 @@ exports.listarConversas = async (req, res) => {
     })
 
     conversasFormatadas = await enrichConversasReabertaFaltaInteracao(company_id, conversasFormatadas)
+
+    const encerradasVaziasIds = conversasFormatadas
+      .filter((c) =>
+        !c.is_group &&
+        c.sem_mensagens === true &&
+        c.atendente_id == null &&
+        isClosedAttendanceStatus(c.status_atendimento_real)
+      )
+      .map((c) => Number(c.id))
+      .filter((id) => Number.isFinite(id) && id > 0)
+    if (encerradasVaziasIds.length > 0) {
+      const comAtendimento = new Set()
+      const chunkSize = 300
+      let podeFiltrarEncerradasVazias = true
+      for (let i = 0; i < encerradasVaziasIds.length; i += chunkSize) {
+        const slice = encerradasVaziasIds.slice(i, i + chunkSize)
+        const { data: atendimentoRows, error: atendErr } = await supabase
+          .from('atendimentos')
+          .select('conversa_id')
+          .eq('company_id', company_id)
+          .in('conversa_id', slice)
+        if (atendErr) {
+          console.warn('[listarConversas] filtro encerradas vazias:', atendErr.message || atendErr)
+          podeFiltrarEncerradasVazias = false
+          break
+        }
+        for (const row of atendimentoRows || []) {
+          if (row?.conversa_id != null) comAtendimento.add(Number(row.conversa_id))
+        }
+      }
+      if (podeFiltrarEncerradasVazias) {
+        const encerradasVaziasSet = new Set(encerradasVaziasIds)
+        conversasFormatadas = conversasFormatadas.filter((c) => {
+          const id = Number(c.id)
+          if (!encerradasVaziasSet.has(id)) return true
+          return comAtendimento.has(id)
+        })
+      }
+    }
 
     // Um contato = uma conversa na lista (evita duplicata 55... vs 11...); conversas mais recentes no topo
     conversasFormatadas = deduplicateConversationsByContact(conversasFormatadas)
@@ -3661,6 +3701,53 @@ exports.detalharChat = async (req, res) => {
   } catch (err) {
     console.error(err)
     return res.status(500).json({ error: 'Erro ao detalhar conversa' })
+  }
+}
+
+exports.carregarMensagensAntigasContato = async (req, res) => {
+  try {
+    const { id } = req.params
+    const { company_id, id: user_id, perfil, departamento_ids = [] } = req.user
+
+    const perm = await assertPermissaoConversa({
+      company_id,
+      conversa_id: id,
+      user_id,
+      role: perfil,
+      user_dep_ids: departamento_ids,
+    })
+    if (!perm.ok) return res.status(perm.status).json({ error: perm.error })
+
+    if (isGroupConversation(perm.conv)) {
+      return res.status(400).json({ error: 'Use esta acao apenas em conversas individuais.' })
+    }
+
+    const result = await syncOldMessagesForConversation(company_id, Number(id), {
+      io: req.app?.get?.('io') || null,
+    })
+    if (!result.ok) return res.status(400).json({ ok: false, error: result.error || 'Erro ao carregar mensagens antigas.' })
+
+    const io = req.app?.get?.('io') || null
+    if (io && (result.messagesInserted || 0) > 0) {
+      emitirConversaAtualizada(io, company_id, Number(id), { id: Number(id) })
+    }
+
+    return res.json({
+      ok: true,
+      conversa_id: Number(id),
+      mensagens_lidas: result.messagesFetched || 0,
+      mensagens_importadas: result.messagesInserted || 0,
+      mensagens_ignoradas: result.messagesSkipped || 0,
+      empty: result.empty === true,
+      message: result.message || (
+        (result.messagesInserted || 0) > 0
+          ? 'Mensagens antigas carregadas para este contato.'
+          : 'Nenhuma mensagem antiga encontrada para este contato.'
+      ),
+    })
+  } catch (err) {
+    console.error('[carregarMensagensAntigasContato]', err)
+    return res.status(500).json({ error: 'Erro ao carregar mensagens antigas deste contato' })
   }
 }
 
