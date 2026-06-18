@@ -15,6 +15,8 @@ const JOB_TIPOS = {
   SYNC_MENSAGENS_ANTIGAS: 'sync_mensagens_antigas'
 }
 
+const ACTIVE_JOB_STATUSES = ['pending', 'running', 'cancel_requested']
+
 const MAX_CONCURRENT = parseInt(process.env.QUEUE_MAX_CONCURRENT_JOBS, 10) || 2
 const BACKOFF_BASE_MS = parseInt(process.env.QUEUE_BACKOFF_BASE_MS, 10) || 5000
 
@@ -29,7 +31,7 @@ async function jobDuplicado(company_id, tipo) {
     .select('id')
     .eq('company_id', company_id)
     .eq('tipo', tipo)
-    .in('status', ['pending', 'running'])
+    .in('status', ACTIVE_JOB_STATUSES)
     .limit(1)
   return data && data.length > 0
 }
@@ -82,6 +84,31 @@ async function listJobs(company_id, opts = {}) {
   const { data, error } = await q
   if (error) return { ok: false, jobs: [] }
   return { ok: true, jobs: data || [] }
+}
+
+async function getActiveJob(company_id, tipo) {
+  if (!company_id || !tipo) return null
+  const { data } = await supabase
+    .from('jobs')
+    .select('*')
+    .eq('company_id', Number(company_id))
+    .eq('tipo', tipo)
+    .in('status', ACTIVE_JOB_STATUSES)
+    .order('criado_em', { ascending: false })
+    .limit(1)
+    .maybeSingle()
+  return data || null
+}
+
+async function isJobCancelRequested(company_id, jobId) {
+  if (!jobId) return false
+  const { data } = await supabase
+    .from('jobs')
+    .select('status')
+    .eq('company_id', Number(company_id))
+    .eq('id', Number(jobId))
+    .maybeSingle()
+  return data?.status === 'cancel_requested' || data?.status === 'cancelled'
 }
 
 /**
@@ -148,7 +175,11 @@ async function executeJob(job) {
 
     if (tipo === JOB_TIPOS.SYNC_MENSAGENS_ANTIGAS) {
       const { syncOldMessagesForCompany } = require('./oldMessagesSyncService')
-      const result = await syncOldMessagesForCompany(company_id, payload)
+      const result = await syncOldMessagesForCompany(company_id, {
+        ...payload,
+        jobId: id,
+        shouldCancel: () => isJobCancelRequested(company_id, id),
+      })
       return { ok: true, resultado: result }
     }
 
@@ -168,7 +199,12 @@ async function finalizeJob(jobId, success, job, resultado, erro) {
 
   let status, nextRunAt
 
-  if (success) {
+  const cancelled = success && (resultado?.cancelled === true || resultado?.resultado?.cancelled === true)
+
+  if (cancelled) {
+    status = 'cancelled'
+    nextRunAt = null
+  } else if (success) {
     status = 'completed'
     nextRunAt = null
   } else if (esgotouTentativas) {
@@ -183,7 +219,7 @@ async function finalizeJob(jobId, success, job, resultado, erro) {
   const update = {
     status,
     resultado_json: success ? (resultado?.resultado || resultado) : null,
-    erro: success ? null : (erro || 'Erro desconhecido'),
+    erro: cancelled ? 'Cancelado pelo usuario' : (success ? null : (erro || 'Erro desconhecido')),
     next_run_at: nextRunAt,
     atualizado_em: new Date().toISOString()
   }
@@ -230,7 +266,9 @@ async function processJob(job, io = null) {
         io.to(`empresa_${job.company_id}`).emit('whatsapp_sync_mensagens_antigas', {
           ok: r.ok !== false,
           job_id: job.id,
-          error: r.ok === false ? (r.error || 'Erro ao sincronizar mensagens antigas.') : null,
+          cancelled: r.cancelled === true,
+          error: r.cancelled === true ? null : (r.ok === false ? (r.error || 'Erro ao sincronizar mensagens antigas.') : null),
+          message: r.cancelled === true ? 'Sincronizacao de mensagens antigas cancelada.' : null,
           messages_per_chat: r.messagesPerChat || 0,
           chats_processados: r.chatsProcessed || 0,
           conversas_criadas: r.conversationsCreated || 0,
@@ -267,19 +305,25 @@ async function recoverStaleRunningJobs() {
   try {
     const { data: staleJobs } = await supabase
       .from('jobs')
-      .select('id, company_id, tipo, tentativas')
-      .eq('status', 'running')
+      .select('id, company_id, tipo, status, tentativas')
+      .in('status', ['running', 'cancel_requested'])
       .lt('atualizado_em', staleBefore)
     if (!staleJobs || staleJobs.length === 0) return
-    console.warn(`[queueManager] Recuperando ${staleJobs.length} job(s) travados em 'running'`)
+    console.warn(`[queueManager] Recuperando ${staleJobs.length} job(s) travados`)
     for (const job of staleJobs) {
+      const nextStatus = job.status === 'cancel_requested' ? 'cancelled' : 'pending'
       await supabase
         .from('jobs')
-        .update({ status: 'pending', atualizado_em: new Date().toISOString() })
+        .update({
+          status: nextStatus,
+          erro: nextStatus === 'cancelled' ? 'Cancelado pelo usuario' : null,
+          next_run_at: nextStatus === 'pending' ? new Date().toISOString() : null,
+          atualizado_em: new Date().toISOString()
+        })
         .eq('id', job.id)
         .eq('company_id', job.company_id)
-        .eq('status', 'running')
-      console.warn(`[queueManager] Job ${job.id} (${job.tipo}) empresa ${job.company_id} resetado para pending`)
+        .eq('status', job.status)
+      console.warn(`[queueManager] Job ${job.id} (${job.tipo}) empresa ${job.company_id} ajustado para ${nextStatus}`)
     }
   } catch (e) {
     console.warn('[queueManager] Erro ao recuperar jobs travados:', e?.message || e)
@@ -341,6 +385,48 @@ async function retryJob(jobId, company_id) {
   return { ok: true }
 }
 
+async function requestCancelJob(company_id, tipo) {
+  if (!company_id || !tipo) return { ok: false, error: 'company_id e tipo obrigatorios' }
+
+  const job = await getActiveJob(company_id, tipo)
+  if (!job?.id) return { ok: false, notFound: true, error: 'Nenhuma sincronizacao ativa encontrada' }
+
+  if (job.status === 'pending') {
+    const { data: updated, error: updErr } = await supabase
+      .from('jobs')
+      .update({
+        status: 'cancelled',
+        erro: 'Cancelado pelo usuario antes de iniciar',
+        atualizado_em: new Date().toISOString(),
+      })
+      .eq('company_id', Number(company_id))
+      .eq('id', job.id)
+      .eq('status', 'pending')
+      .select('id')
+      .maybeSingle()
+    if (updErr) return { ok: false, error: updErr.message }
+    if (!updated?.id) return requestCancelJob(company_id, tipo)
+    return { ok: true, cancelled: true, job_id: job.id, status: 'cancelled' }
+  }
+
+  const { data: updated, error: updErr } = await supabase
+    .from('jobs')
+    .update({
+      status: 'cancel_requested',
+      erro: 'Cancelamento solicitado pelo usuario',
+      atualizado_em: new Date().toISOString(),
+    })
+    .eq('company_id', Number(company_id))
+    .eq('id', job.id)
+    .in('status', ['running', 'cancel_requested'])
+    .select('id')
+    .maybeSingle()
+
+  if (updErr) return { ok: false, error: updErr.message }
+  if (!updated?.id) return { ok: false, notFound: true, error: 'Nenhuma sincronizacao ativa encontrada' }
+  return { ok: true, cancel_requested: true, job_id: job.id, status: 'cancel_requested' }
+}
+
 /**
  * Pausa todos os processamentos da empresa (via config).
  */
@@ -358,10 +444,12 @@ async function resumeAll(company_id) {
 module.exports = {
   enqueue,
   listJobs,
+  getActiveJob,
   getNextPendingJob,
   processJob,
   startWorker,
   retryJob,
+  requestCancelJob,
   pauseAll,
   resumeAll,
   recoverStaleRunningJobs,

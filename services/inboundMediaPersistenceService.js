@@ -262,7 +262,6 @@ async function persistInboundMediaToUploads({ supabase, io, company_id, mensagem
 
   if (io) {
     const conversa_id = updated.conversa_id
-    const rooms = [`conversa_${conversa_id}`, `empresa_${company_id}`]
     const rawStatus = String(updated.status_mensagem ?? updated.status ?? '').toLowerCase()
     const canon =
       rawStatus === 'enviada' || rawStatus === 'enviado'
@@ -280,7 +279,19 @@ async function persistInboundMediaToUploads({ supabase, io, company_id, mensagem
       fromMe,
       direcao: updated.direcao ?? (fromMe ? 'out' : 'in'),
     }
-    io.to(rooms).emit(io.EVENTS?.NOVA_MENSAGEM || 'nova_mensagem', emitPayload)
+    try {
+      const { emitirParaUsuariosQuePodemVerConversa } = require('../controllers/chatController')
+      const emitted = await emitirParaUsuariosQuePodemVerConversa(
+        io,
+        company_id,
+        conversa_id,
+        io.EVENTS?.NOVA_MENSAGEM || 'nova_mensagem',
+        emitPayload
+      )
+      if (!emitted) io.to(`conversa_${conversa_id}`).emit(io.EVENTS?.NOVA_MENSAGEM || 'nova_mensagem', emitPayload)
+    } catch (_) {
+      io.to(`conversa_${conversa_id}`).emit(io.EVENTS?.NOVA_MENSAGEM || 'nova_mensagem', emitPayload)
+    }
   }
 }
 

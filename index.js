@@ -79,6 +79,7 @@ const { startAbsenceFinalizationScheduler } = require('./services/absenceFinaliz
 const { startAdminAtendimentoAlertaScheduler } = require('./services/adminAtendimentoAlertaScheduler')
 const { startAtendimentoSemRespostaScheduler } = require('./services/atendimentoSemRespostaScheduler')
 const { startProdutosSyncScheduler } = require('./services/produtosSyncScheduler')
+const { usuarioPodeVerGrupo } = require('./helpers/departamentoGruposHelper')
 
 async function canUserJoinConversationRoom({ company_id, user_id, role, departamento_ids, conversa_id }) {
   const cid = Number(conversa_id)
@@ -90,7 +91,7 @@ async function canUserJoinConversationRoom({ company_id, user_id, role, departam
 
   const { data: conv, error: convErr } = await supabase
     .from('conversas')
-    .select('id, atendente_id, departamento_id')
+    .select('id, atendente_id, departamento_id, tipo, telefone')
     .eq('company_id', companyId)
     .eq('id', cid)
     .maybeSingle()
@@ -98,6 +99,19 @@ async function canUserJoinConversationRoom({ company_id, user_id, role, departam
 
   const profile = String(role || '').toLowerCase()
   if (profile === 'admin') return true
+
+  const isGroup =
+    ['grupo', 'group'].includes(String(conv.tipo || '').toLowerCase()) ||
+    String(conv.telefone || '').toLowerCase().endsWith('@g.us')
+  if (isGroup) {
+    return usuarioPodeVerGrupo({
+      company_id: companyId,
+      conversa_id: cid,
+      role,
+      departamento_ids,
+    })
+  }
+
   if (conv.atendente_id != null && Number(conv.atendente_id) === userId) return true
 
   const { data: transferRow } = await supabase

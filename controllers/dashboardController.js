@@ -1,6 +1,7 @@
 const supabase = require('../config/supabase')
 const { isEnabled, FLAGS } = require('../helpers/featureFlags')
 const { getDisplayName } = require('../helpers/contactEnrichment')
+const { normalizePositiveIds, isGroupRow } = require('../helpers/departamentoGruposHelper')
 const ExcelJS = require('exceljs')
 const PDFDocument = require('pdfkit')
 
@@ -805,6 +806,113 @@ exports.excluirDepartamento = async (req, res) => {
 // =====================================================
 // RESPOSTAS SALVAS (pessoais por usuário; setor opcional)
 // =====================================================
+async function getDepartamentoDaEmpresa(company_id, departamento_id) {
+  const depId = Number(departamento_id)
+  if (!Number.isFinite(depId) || depId <= 0) return null
+  const { data, error } = await supabase
+    .from('departamentos')
+    .select('id, nome')
+    .eq('company_id', Number(company_id))
+    .eq('id', depId)
+    .maybeSingle()
+  if (error) throw error
+  return data || null
+}
+
+exports.listarGruposDepartamento = async (req, res) => {
+  try {
+    const { company_id } = req.user
+    const departamento = await getDepartamentoDaEmpresa(company_id, req.params.id)
+    if (!departamento) return res.status(404).json({ error: 'Departamento nao encontrado' })
+
+    const { data: vinculos, error: errVinculos } = await supabase
+      .from('departamento_grupos')
+      .select('conversa_id')
+      .eq('company_id', Number(company_id))
+      .eq('departamento_id', Number(departamento.id))
+    if (errVinculos) return res.status(500).json({ error: errVinculos.message })
+
+    const vinculadosSet = new Set((vinculos || []).map((v) => Number(v.conversa_id)))
+
+    const { data: grupos, error } = await supabase
+      .from('conversas')
+      .select('id, telefone, tipo, nome_grupo, foto_grupo, criado_em, ultima_atividade')
+      .eq('company_id', Number(company_id))
+      .eq('tipo', 'grupo')
+      .order('nome_grupo', { ascending: true, nullsFirst: false })
+
+    if (error) return res.status(500).json({ error: error.message })
+
+    const rows = (grupos || [])
+      .filter(isGroupRow)
+      .map((g) => ({
+        id: g.id,
+        telefone: g.telefone,
+        tipo: g.tipo,
+        nome_grupo: g.nome_grupo,
+        foto_grupo: g.foto_grupo,
+        criado_em: g.criado_em,
+        ultima_atividade: g.ultima_atividade,
+        vinculado: vinculadosSet.has(Number(g.id)),
+      }))
+
+    return res.json({ departamento, grupos: rows })
+  } catch (err) {
+    console.error(err)
+    return res.status(500).json({ error: 'Erro ao listar grupos do departamento' })
+  }
+}
+
+exports.atualizarGruposDepartamento = async (req, res) => {
+  try {
+    const { company_id, id: usuario_id } = req.user
+    const departamento = await getDepartamentoDaEmpresa(company_id, req.params.id)
+    if (!departamento) return res.status(404).json({ error: 'Departamento nao encontrado' })
+
+    const conversaIds = normalizePositiveIds(req.body?.conversa_ids)
+
+    if (conversaIds.length > 0) {
+      const { data: conversas, error: errConversas } = await supabase
+        .from('conversas')
+        .select('id, tipo, telefone')
+        .eq('company_id', Number(company_id))
+        .in('id', conversaIds)
+      if (errConversas) return res.status(500).json({ error: errConversas.message })
+
+      const byId = new Map((conversas || []).map((c) => [Number(c.id), c]))
+      const invalid = conversaIds.filter((id) => !isGroupRow(byId.get(Number(id))))
+      if (invalid.length > 0) {
+        return res.status(400).json({ error: 'A lista contem conversa que nao e grupo desta empresa' })
+      }
+    }
+
+    const { error: delErr } = await supabase
+      .from('departamento_grupos')
+      .delete()
+      .eq('company_id', Number(company_id))
+      .eq('departamento_id', Number(departamento.id))
+    if (delErr) return res.status(500).json({ error: delErr.message })
+
+    if (conversaIds.length > 0) {
+      const rows = conversaIds.map((conversa_id) => ({
+        company_id: Number(company_id),
+        departamento_id: Number(departamento.id),
+        conversa_id,
+        criado_por: Number(usuario_id) || null,
+      }))
+      const { error: insertErr } = await supabase
+        .from('departamento_grupos')
+        .insert(rows)
+      if (insertErr) return res.status(500).json({ error: insertErr.message })
+    }
+
+    return res.json({ ok: true, departamento_id: Number(departamento.id), conversa_ids: conversaIds })
+  } catch (err) {
+    console.error(err)
+    return res.status(500).json({ error: 'Erro ao atualizar grupos do departamento' })
+  }
+}
+
 async function validarDepartamentoEmpresa(company_id, departamento_id) {
   if (departamento_id == null || departamento_id === '') return null
   const depId = Number(departamento_id)

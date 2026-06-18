@@ -1108,7 +1108,7 @@ exports.receberZapi = async (req, res) => {
           const io = req.app.get('io')
           if (io) {
             for (const row of data) {
-              io.to(`empresa_${company_id}`).emit('conversa_atualizada', {
+              await emitirParaUsuariosQuePodemVerConversa(io, company_id, row.id, 'conversa_atualizada', {
                 id: row.id,
                 foto_grupo: rawGroupPhoto
               })
@@ -1506,7 +1506,7 @@ exports.receberZapi = async (req, res) => {
                     emitPayload.foto_perfil_contato_cache = fotoCache
                     emitPayload.foto_perfil = fotoCache
                   }
-                  io.to(`empresa_${company_id}`).emit('conversa_atualizada', emitPayload)
+                  await emitirParaUsuariosQuePodemVerConversa(io, company_id, convRow.id, 'conversa_atualizada', emitPayload)
                 }
               } else if ((!telAtual || isLidTel) && isGroupDest) {
                 await supabase
@@ -1519,7 +1519,7 @@ exports.receberZapi = async (req, res) => {
                   const emitPayload = { id: convRow.id, telefone: canonical }
                   if (nomeCache) { emitPayload.nome_contato_cache = nomeCache; emitPayload.contato_nome = nomeCache }
                   if (fotoCache) { emitPayload.foto_perfil_contato_cache = fotoCache; emitPayload.foto_perfil = fotoCache }
-                  io.to(`empresa_${company_id}`).emit('conversa_atualizada', emitPayload)
+                  await emitirParaUsuariosQuePodemVerConversa(io, company_id, convRow.id, 'conversa_atualizada', emitPayload)
                 }
               }
             }
@@ -2038,7 +2038,7 @@ exports.receberZapi = async (req, res) => {
           // LID: enviar telefone: null e telefone_lid: true para frontend não exibir lid:xxx; permite atualização via conversa_atualizada
           const isLidPhone = !isGroup && phone && String(phone).trim().toLowerCase().startsWith('lid:')
           const telefoneForEmit = isLidPhone ? null : (getCanonicalPhone(phone) || phone)
-          io.to(`empresa_${company_id}`).emit(io.EVENTS?.NOVA_CONVERSA || 'nova_conversa', {
+          const novaConversaPayload = {
             id: conversa_id,
             telefone: telefoneForEmit,
             ...(isLidPhone ? { telefone_lid: true } : {}),
@@ -2049,7 +2049,17 @@ exports.receberZapi = async (req, res) => {
             foto_perfil: isGroup ? null : (senderPhoto || payload?.photo || null),
             unread_count: unreadInicial,
             tags: [],
-          })
+          }
+          const emittedNovaConversa = await emitirParaUsuariosQuePodemVerConversa(
+            io,
+            company_id,
+            conversa_id,
+            io.EVENTS?.NOVA_CONVERSA || 'nova_conversa',
+            novaConversaPayload
+          )
+          if (!emittedNovaConversa && !isGroup) {
+            io.to(`empresa_${company_id}`).emit(io.EVENTS?.NOVA_CONVERSA || 'nova_conversa', novaConversaPayload)
+          }
         }
       }
     } catch (errConv) {
@@ -3342,7 +3352,7 @@ exports.receberZapi = async (req, res) => {
           emitPayload
         )
         if (!emittedScoped) {
-          const rooms = [`conversa_${convIdForEmit}`, `empresa_${company_id}`]
+          const rooms = [`conversa_${convIdForEmit}`]
           if (departamento_id != null) rooms.push(`departamento_${departamento_id}`)
           io.to(rooms).emit('nova_mensagem', emitPayload)
         }
@@ -3372,7 +3382,7 @@ exports.receberZapi = async (req, res) => {
           'atualizar_conversa',
           { id: convIdForEmit }
         )
-        if (!emittedScoped) io.to(`empresa_${company_id}`).emit('atualizar_conversa', { id: convIdForEmit })
+        if (!emittedScoped) io.to(`conversa_${convIdForEmit}`).emit('atualizar_conversa', { id: convIdForEmit })
       }
       // conversa_atualizada: priorizar nome do sync (name) sobre cache; fallback nome_contato_cache
       const { data: convRow } = await supabase
@@ -3460,7 +3470,7 @@ exports.receberZapi = async (req, res) => {
         convPayload
       )
       if (!emittedConversaAtualizadaScoped) {
-        io.to(`empresa_${company_id}`).emit('conversa_atualizada', convPayload)
+        io.to(`conversa_${convIdForEmit}`).emit('conversa_atualizada', convPayload)
         if (depId != null) {
           // Não emitir atualizar_conversa em reconciliação (fromMe) — evita refetch que causa bug visual
           if (mensagemFoiInseridaPeloWebhook) io.to(`departamento_${depId}`).emit('atualizar_conversa', { id: convIdForEmit })

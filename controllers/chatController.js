@@ -28,6 +28,13 @@ const {
 const { usuarioPertenceSetorFinanceiro } = require('../helpers/financeiroSetorHelper')
 const { buildClienteSearchOr, buildTelefoneSearchOr, escapeIlikePattern } = require('../helpers/chatSearchHelper')
 const {
+  getGrupoDepartamentoIds,
+  getGrupoIdsPorDepartamentos,
+  usuarioPodeVerGrupo,
+  pushNonGroupVisibilityParts,
+  pushAllowedGroupIdsPart,
+} = require('../helpers/departamentoGruposHelper')
+const {
   countConversasWithFilter,
   overridesFromListQuery,
   getChatFilterCounts,
@@ -357,17 +364,26 @@ function emitirConversaAtualizada(io, company_id, conversa_id, payload = null, o
           }
           if (statusParaUi) enriched.status_atendimento = statusParaUi
           const eventName = io.EVENTS?.CONVERSA_ATUALIZADA || 'conversa_atualizada'
-          io.to(`empresa_${company_id}`).to(`conversa_${cid}`).emit(eventName, enriched)
+          emitirEventoConversaVisivel(io, company_id, cid, eventName, enriched)
+            .catch(() => io.to(`conversa_${cid}`).emit(eventName, enriched))
         } else {
           const eventName = io.EVENTS?.CONVERSA_ATUALIZADA || 'conversa_atualizada'
-          io.to(`empresa_${company_id}`).to(`conversa_${cid}`).emit(eventName, data)
+          emitirEventoConversaVisivel(io, company_id, cid, eventName, data)
+            .catch(() => io.to(`conversa_${cid}`).emit(eventName, data))
         }
-        if (!skipAtualizarConversa) io.to(`empresa_${company_id}`).emit('atualizar_conversa', { id: cid })
+        if (!skipAtualizarConversa) {
+          emitirEventoConversaVisivel(io, company_id, cid, 'atualizar_conversa', { id: cid })
+            .catch(() => io.to(`conversa_${cid}`).emit('atualizar_conversa', { id: cid }))
+        }
       })
       .catch(() => {
         const eventName = io.EVENTS?.CONVERSA_ATUALIZADA || 'conversa_atualizada'
-        io.to(`empresa_${company_id}`).to(`conversa_${cid}`).emit(eventName, data)
-        if (!skipAtualizarConversa) io.to(`empresa_${company_id}`).emit('atualizar_conversa', { id: cid })
+        emitirEventoConversaVisivel(io, company_id, cid, eventName, data)
+          .catch(() => io.to(`conversa_${cid}`).emit(eventName, data))
+        if (!skipAtualizarConversa) {
+          emitirEventoConversaVisivel(io, company_id, cid, 'atualizar_conversa', { id: cid })
+            .catch(() => io.to(`conversa_${cid}`).emit('atualizar_conversa', { id: cid }))
+        }
       })
     return
   }
@@ -375,10 +391,14 @@ function emitirConversaAtualizada(io, company_id, conversa_id, payload = null, o
   // Emite para empresa + conversa em UMA única operação (evita duplicidade
   // quando o mesmo socket está nas duas rooms).
   const eventName = io.EVENTS?.CONVERSA_ATUALIZADA || 'conversa_atualizada'
-  io.to(`empresa_${company_id}`).to(`conversa_${conversa_id}`).emit(eventName, data)
+  emitirEventoConversaVisivel(io, company_id, conversa_id, eventName, data)
+    .catch(() => io.to(`conversa_${conversa_id}`).emit(eventName, data))
 
   // skipAtualizarConversa: evita refetch que causa duplicata/glitch (payload já tem tudo)
-  if (!skipAtualizarConversa) io.to(`empresa_${company_id}`).emit('atualizar_conversa', { id: cid })
+  if (!skipAtualizarConversa) {
+    emitirEventoConversaVisivel(io, company_id, cid, 'atualizar_conversa', { id: cid })
+      .catch(() => io.to(`conversa_${cid}`).emit('atualizar_conversa', { id: cid }))
+  }
 }
 
 function aplicarAguardandoClienteNoPayload(payload, waitingResult) {
@@ -401,6 +421,18 @@ async function emitirParaUsuariosQuePodemVerConversa(io, company_id, conversa_id
   return true
 }
 
+async function emitirEventoConversaVisivel(io, company_id, conversa_id, eventName, payload) {
+  if (!io || !conversa_id) return false
+  const usuarioIds = await obterUsuarioIdsQuePodemVerConversa(company_id, conversa_id)
+  const idsUnicos = [...new Set((usuarioIds || []).map(Number).filter((id) => Number.isFinite(id) && id > 0))]
+  let target = io.to(`conversa_${Number(conversa_id)}`)
+  idsUnicos.forEach((uid) => {
+    target = target.to(`usuario_${uid}`)
+  })
+  target.emit(eventName, payload)
+  return idsUnicos.length > 0
+}
+
 function emitirEventoEmpresaConversa(io, company_id, conversa_id, eventName, payload) {
   if (!io) return
 
@@ -411,15 +443,12 @@ function emitirEventoEmpresaConversa(io, company_id, conversa_id, eventName, pay
     const { scheduleInboundWebPush } = require('../services/webPushDispatchService')
     // Evita "vazamento" cross-setor (ex.: financeiro recebendo vendas).
     // Fallback para room ampla apenas se não conseguirmos resolver os destinatários.
-    emitirParaUsuariosQuePodemVerConversa(io, company_id, conversa_id, eventName, payload)
-      .then((emitidoFiltrado) => {
-        if (!emitidoFiltrado) {
-          io.to(`empresa_${company_id}`).to(`conversa_${conversa_id}`).emit(eventName, payload)
-        }
+    emitirEventoConversaVisivel(io, company_id, conversa_id, eventName, payload)
+      .then(() => {
         scheduleInboundWebPush(company_id, conversa_id, eventName, payload)
       })
       .catch(() => {
-        io.to(`empresa_${company_id}`).to(`conversa_${conversa_id}`).emit(eventName, payload)
+        io.to(`conversa_${conversa_id}`).emit(eventName, payload)
         scheduleInboundWebPush(company_id, conversa_id, eventName, payload)
       })
     return
@@ -582,7 +611,7 @@ async function assertPermissaoConversa({ company_id, conversa_id, user_id, role,
   const depIds = Array.isArray(user_dep_ids) ? user_dep_ids : []
 
   // REGRA PRINCIPAL: Se a conversa está assumida pelo usuário, SEMPRE permitir acesso total
-  if (isAssignedToUser) return { ok: true, conv, reason: 'conversa_assumida_pelo_usuario' }
+  if (!isGroup && isAssignedToUser) return { ok: true, conv, reason: 'conversa_assumida_pelo_usuario' }
   if (r === 'admin') return { ok: true, conv }
 
   // EXCEÇÃO: usuário transferiu a conversa para outro — vê independente do setor
@@ -595,16 +624,26 @@ async function assertPermissaoConversa({ company_id, conversa_id, user_id, role,
     .eq('acao', 'transferiu')
     .limit(1)
     .maybeSingle()
-  if (transferRow) return { ok: true, conv, reason: 'usuario_transferiu_conversa' }
+  if (!isGroup && transferRow) return { ok: true, conv, reason: 'usuario_transferiu_conversa' }
 
   // Encerrada: qualquer atendente/supervisor pode reabrir (ex.: quem finalizou em outro setor).
-  if ((r === 'supervisor' || r === 'atendente') && isClosedAttendanceStatus(conv.status_atendimento)) {
+  if (!isGroup && (r === 'supervisor' || r === 'atendente') && isClosedAttendanceStatus(conv.status_atendimento)) {
     return { ok: true, conv, reason: 'conversa_encerrada_reabertura' }
   }
 
   // supervisor e atendente: conversas sem setor visíveis para TODOS; com setor só se usuário pertence
   if (r === 'supervisor' || r === 'atendente') {
-    if (!isGroup) {
+    if (isGroup) {
+      const podeVerGrupo = await usuarioPodeVerGrupo({
+        company_id,
+        conversa_id,
+        role,
+        departamento_ids: depIds,
+      })
+      if (!podeVerGrupo) {
+        return { ok: false, status: 403, error: 'Grupo nao vinculado ao seu setor' }
+      }
+    } else {
       const convDep = conv.departamento_id ?? null
       const userSemSetor = depIds.length === 0
       if (userSemSetor && convDep != null) return { ok: false, status: 403, error: 'Conversa de outro setor' }
@@ -621,7 +660,7 @@ async function assertPermissaoConversa({ company_id, conversa_id, user_id, role,
  * - Grupos: qualquer usuário pode enviar sem assumir.
  * - Demais conversas: só quem assumiu (atendente_id === user_id), inclusive admin.
  */
-async function assertPodeEnviarMensagem({ company_id, conversa_id, user_id }) {
+async function assertPodeEnviarMensagem({ company_id, conversa_id, user_id, role = null, user_dep_ids = [] }) {
   const { data: conv, error } = await supabase
     .from('conversas')
     .select('id, atendente_id, tipo, telefone, status_atendimento, whatsapp_instance_id')
@@ -632,6 +671,15 @@ async function assertPodeEnviarMensagem({ company_id, conversa_id, user_id }) {
   if (!conv) return { ok: false, status: 404, error: 'Conversa não encontrada' }
 
   if (isGroupConversation(conv)) {
+    const podeVerGrupo = await usuarioPodeVerGrupo({
+      company_id,
+      conversa_id,
+      role,
+      departamento_ids: user_dep_ids,
+    })
+    if (!podeVerGrupo) {
+      return { ok: false, status: 403, error: 'Grupo nao vinculado ao seu setor' }
+    }
     return { ok: true, reason: 'grupo_sem_exigir_assumir' }
   }
 
@@ -780,14 +828,15 @@ function payloadAlteraVisibilidadeConversa(payload) {
   return (
     Object.prototype.hasOwnProperty.call(payload, 'departamento_id') ||
     Object.prototype.hasOwnProperty.call(payload, 'atendente_id') ||
-    Object.prototype.hasOwnProperty.call(payload, 'tipo')
+    Object.prototype.hasOwnProperty.call(payload, 'tipo') ||
+    Object.prototype.hasOwnProperty.call(payload, 'departamento_grupos')
   )
 }
 
 async function carregarUsuarioIdsQuePodemVerConversaSemCache(company_id, conversa_id) {
   const { data: conv } = await supabase
     .from('conversas')
-    .select('departamento_id, atendente_id, tipo')
+    .select('departamento_id, atendente_id, tipo, telefone')
     .eq('company_id', Number(company_id))
     .eq('id', Number(conversa_id))
     .maybeSingle()
@@ -796,6 +845,8 @@ async function carregarUsuarioIdsQuePodemVerConversaSemCache(company_id, convers
   const isGroup = isGroupConversation(conv)
   const convDep = conv.departamento_id ?? null
   const atendenteId = conv.atendente_id ? Number(conv.atendente_id) : null
+  const grupoDepIds = isGroup ? await getGrupoDepartamentoIds(company_id, conversa_id) : []
+  const grupoDepSet = new Set(grupoDepIds.map(Number))
 
   const { data: transferiuRows } = await supabase
     .from('atendimentos')
@@ -830,10 +881,13 @@ async function carregarUsuarioIdsQuePodemVerConversaSemCache(company_id, convers
     const uid = Number(u.id)
     const isAdmin = String(u.perfil || '').toLowerCase() === 'admin'
     if (isAdmin) { ids.push(uid); continue }
+    const userDepIds = userDepMap.get(uid) ?? (u.departamento_id != null ? [Number(u.departamento_id)] : [])
+    if (isGroup) {
+      if (userDepIds.some((d) => grupoDepSet.has(Number(d)))) ids.push(uid)
+      continue
+    }
     if (atendenteId && uid === atendenteId) { ids.push(uid); continue }
     if (transferiuIds.has(uid)) { ids.push(uid); continue }
-    if (isGroup) { ids.push(uid); continue }
-    const userDepIds = userDepMap.get(uid) ?? (u.departamento_id != null ? [Number(u.departamento_id)] : [])
     if (convDep == null) ids.push(uid)
     else if (userDepIds.some((d) => Number(d) === Number(convDep))) ids.push(uid)
   }
@@ -1141,6 +1195,13 @@ exports.listarConversas = async (req, res) => {
       conversaIdsTransferidas = [...new Set((transferRows || []).map((r) => Number(r.conversa_id)).filter(Boolean))]
     }
 
+    let grupoIdsPermitidosPorDepartamento = []
+    if (!isAdmin) {
+      grupoIdsPermitidosPorDepartamento = await getGrupoIdsPorDepartamentos(company_id, departamento_ids)
+    } else if (filter_dep_id) {
+      grupoIdsPermitidosPorDepartamento = await getGrupoIdsPorDepartamentos(company_id, [filter_dep_id])
+    }
+
     let conversaIdsFilter = null
     let forceEmptyConversas = false
 
@@ -1350,15 +1411,20 @@ exports.listarConversas = async (req, res) => {
         const depIds = Array.isArray(departamento_ids) ? departamento_ids.filter((id) => id != null && Number.isFinite(Number(id))) : []
         const parts = []
         if (depIds.length > 0) {
-          depIds.forEach((d) => parts.push(`departamento_id.eq.${d}`))
+          pushNonGroupVisibilityParts(parts, 'departamento_id', depIds)
         }
-        parts.push('departamento_id.is.null', `tipo.eq.grupo`, `atendente_id.eq.${user_id}`)
+        parts.push('and(departamento_id.is.null,tipo.is.null)', 'and(departamento_id.is.null,tipo.neq.grupo)')
+        pushNonGroupVisibilityParts(parts, 'atendente_id', [user_id])
+        pushAllowedGroupIdsPart(parts, grupoIdsPermitidosPorDepartamento)
         if (conversaIdsTransferidas.length > 0) {
           parts.push(`id.in.(${conversaIdsTransferidas.join(',')})`)
         }
         q = q.or(parts.join(','))
       } else if (filter_dep_id) {
-        q = q.eq('departamento_id', Number(filter_dep_id))
+        const parts = []
+        pushNonGroupVisibilityParts(parts, 'departamento_id', [filter_dep_id])
+        pushAllowedGroupIdsPart(parts, grupoIdsPermitidosPorDepartamento)
+        q = parts.length > 0 ? q.or(parts.join(',')) : q.eq('departamento_id', Number(filter_dep_id))
       }
       if (forceEmptyConversas) {
         q = q.in('id', [0])
@@ -2754,7 +2820,7 @@ exports.atualizarNomeContato = async (req, res) => {
       return res.status(400).json({ error: 'ID da conversa inválido' })
     }
 
-    const permEnvio = await assertPodeEnviarMensagem({ company_id, conversa_id, user_id })
+    const permEnvio = await assertPodeEnviarMensagem({ company_id, conversa_id, user_id, role: req.user?.perfil, user_dep_ids: req.user?.departamento_ids })
     if (!permEnvio.ok) return res.status(permEnvio.status).json({ error: permEnvio.error })
 
     const nomeRaw = req.body?.nome != null ? String(req.body.nome) : ''
@@ -2837,7 +2903,7 @@ exports.atualizarObservacao = async (req, res) => {
     const { observacao } = req.body;
     const { company_id, id: user_id, perfil } = req.user;
 
-    const permEnvio = await assertPodeEnviarMensagem({ company_id, conversa_id: Number(id), user_id })
+    const permEnvio = await assertPodeEnviarMensagem({ company_id, conversa_id: Number(id), user_id, role: req.user?.perfil, user_dep_ids: req.user?.departamento_ids })
     if (!permEnvio.ok) return res.status(permEnvio.status).json({ error: permEnvio.error });
 
     // busca cliente ligado à conversa
@@ -3377,8 +3443,19 @@ exports.detalharChat = async (req, res) => {
     const isAssignedToUser = conversa.atendente_id && Number(conversa.atendente_id) === Number(user_id)
 
     // REGRA PRINCIPAL: Se a conversa está assumida pelo usuário, SEMPRE permitir acesso total
-    let podeAcessar = isAssignedToUser
+    let podeAcessar = !isGroup && isAssignedToUser
     const conversaEncerrada = isClosedAttendanceStatus(conversa.status_atendimento)
+    if (!podeAcessar && !isAdmin && isGroup) {
+      podeAcessar = await usuarioPodeVerGrupo({
+        company_id,
+        conversa_id: Number(id),
+        role,
+        departamento_ids,
+      })
+      if (!podeAcessar) {
+        return res.status(403).json({ error: 'Grupo nao vinculado ao seu setor' })
+      }
+    }
     if (!podeAcessar && !isAdmin && !isGroup && !conversaEncerrada) {
       const convDep = conversa.departamento_id ?? null
       const depIds = Array.isArray(departamento_ids) ? departamento_ids : []
@@ -4507,7 +4584,7 @@ exports.enviarMensagemChat = async (req, res) => {
       return res.status(400).json({ error: 'texto é obrigatório' })
     }
 
-    const permEnvio = await assertPodeEnviarMensagem({ company_id, conversa_id, user_id })
+    const permEnvio = await assertPodeEnviarMensagem({ company_id, conversa_id, user_id, role: req.user?.perfil, user_dep_ids: req.user?.departamento_ids })
     if (!permEnvio.ok) return res.status(permEnvio.status).json({ error: permEnvio.error })
 
     const { data: conversa, error: errConv } = await supabase
@@ -4842,7 +4919,7 @@ exports.enviarReacaoMensagem = async (req, res) => {
       return res.status(400).json({ error: 'reaction é obrigatório' })
     }
 
-    const permEnvio = await assertPodeEnviarMensagem({ company_id, conversa_id, user_id })
+    const permEnvio = await assertPodeEnviarMensagem({ company_id, conversa_id, user_id, role: req.user?.perfil, user_dep_ids: req.user?.departamento_ids })
     if (!permEnvio.ok) return res.status(permEnvio.status).json({ error: permEnvio.error })
 
     // busca conversa + mensagem para garantir que pertencem à empresa
@@ -4905,7 +4982,7 @@ exports.removerReacaoMensagem = async (req, res) => {
     const { company_id, id: user_id, perfil } = req.user
     const { id: conversa_id, mensagem_id } = req.params
 
-    const permEnvio = await assertPodeEnviarMensagem({ company_id, conversa_id, user_id })
+    const permEnvio = await assertPodeEnviarMensagem({ company_id, conversa_id, user_id, role: req.user?.perfil, user_dep_ids: req.user?.departamento_ids })
     if (!permEnvio.ok) return res.status(permEnvio.status).json({ error: permEnvio.error })
 
     const { data: conversa, error: errConv } = await supabase
@@ -4976,7 +5053,7 @@ exports.enviarContatoWhatsapp = async (req, res) => {
       return res.status(400).json({ error: 'cliente_id é obrigatório' })
     }
 
-    const permEnvio = await assertPodeEnviarMensagem({ company_id, conversa_id, user_id })
+    const permEnvio = await assertPodeEnviarMensagem({ company_id, conversa_id, user_id, role: req.user?.perfil, user_dep_ids: req.user?.departamento_ids })
     if (!permEnvio.ok) return res.status(permEnvio.status).json({ error: permEnvio.error })
 
     const { data: conversa, error: errConv } = await supabase
@@ -5148,7 +5225,7 @@ exports.enviarLocalizacao = async (req, res) => {
     const nomePlace = String(nomeRaw || '').trim().slice(0, 200) || null
     const endereco = String(addressRaw || '').trim().slice(0, 500) || null
 
-    const permEnvio = await assertPodeEnviarMensagem({ company_id, conversa_id, user_id })
+    const permEnvio = await assertPodeEnviarMensagem({ company_id, conversa_id, user_id, role: req.user?.perfil, user_dep_ids: req.user?.departamento_ids })
     if (!permEnvio.ok) return res.status(permEnvio.status).json({ error: permEnvio.error })
 
     const { data: conversa, error: errConv } = await supabase
@@ -5318,7 +5395,7 @@ exports.enviarLigacaoWhatsapp = async (req, res) => {
     const { id: conversa_id } = req.params
     const { callDuration } = req.body || {}
 
-    const permEnvio = await assertPodeEnviarMensagem({ company_id, conversa_id, user_id })
+    const permEnvio = await assertPodeEnviarMensagem({ company_id, conversa_id, user_id, role: req.user?.perfil, user_dep_ids: req.user?.departamento_ids })
     if (!permEnvio.ok) return res.status(permEnvio.status).json({ error: permEnvio.error })
 
     const { data: conversa, error: errConv } = await supabase
@@ -6351,7 +6428,7 @@ exports.enviarArquivo = async (req, res) => {
       return res.status(400).json({ error: `Máximo ${MAX_ARQUIVOS_LOTE_ENVIO} arquivos por envio.` })
     }
 
-    const permEnvio = await assertPodeEnviarMensagem({ company_id, conversa_id, user_id })
+    const permEnvio = await assertPodeEnviarMensagem({ company_id, conversa_id, user_id, role: req.user?.perfil, user_dep_ids: req.user?.departamento_ids })
     if (!permEnvio.ok) return res.status(permEnvio.status).json({ error: permEnvio.error })
 
     const { data: conversa } = await supabase
@@ -6812,7 +6889,7 @@ exports.encaminharMensagem = async (req, res) => {
       return res.status(400).json({ error: `No máximo ${MAX_ENC_AMINHAR_LOTE} mensagens por encaminhamento` })
     }
 
-    const permEnvio = await assertPodeEnviarMensagem({ company_id, conversa_id, user_id })
+    const permEnvio = await assertPodeEnviarMensagem({ company_id, conversa_id, user_id, role: req.user?.perfil, user_dep_ids: req.user?.departamento_ids })
     if (!permEnvio.ok) return res.status(permEnvio.status).json({ error: permEnvio.error })
 
     const { data: mensagensRows, error: errMsg } = await supabase

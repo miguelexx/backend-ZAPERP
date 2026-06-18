@@ -2,7 +2,7 @@ const supabase = require('../config/supabase')
 const ultramsgIntegrationService = require('../services/ultramsgIntegrationService')
 const whatsappConfigService = require('../services/whatsappConfigService')
 const whatsappInstanceService = require('../services/whatsappInstanceService')
-const { enqueue, JOB_TIPOS } = require('../services/queueManager')
+const { enqueue, getActiveJob, requestCancelJob, JOB_TIPOS } = require('../services/queueManager')
 const { syncGroups, syncAll } = require('../services/ultramsgGroupsSyncService')
 const { checkGuard, recordQrServed, resetOnConnected, getAttempts, THROTTLE_SECONDS } = require('../services/whatsappConnectGuardService')
 const { getConfig } = require('../services/configOperacionalService')
@@ -504,6 +504,68 @@ exports.syncOldMessages = async (req, res) => {
     job_id: result.job_id,
     message: 'Sincronizacao de mensagens antigas iniciada em segundo plano. O historico sera importado em lotes.'
   })
+}
+
+exports.getSyncOldMessagesStatus = async (req, res) => {
+  const company_id = req.user?.company_id
+  if (!company_id) return res.status(401).json({ error: 'Nao autenticado' })
+
+  const job = await getActiveJob(company_id, JOB_TIPOS.SYNC_MENSAGENS_ANTIGAS)
+  if (!job?.id) {
+    return res.json({ ok: true, running: false, queued: false, cancel_requested: false })
+  }
+
+  return res.json({
+    ok: true,
+    running: job.status === 'running' || job.status === 'cancel_requested',
+    queued: job.status === 'pending',
+    cancel_requested: job.status === 'cancel_requested',
+    job_id: job.id,
+    status: job.status,
+    message: job.status === 'cancel_requested'
+      ? 'Cancelamento solicitado. A sincronizacao vai parar em seguranca.'
+      : 'Sincronizacao de mensagens antigas ja esta em andamento.'
+  })
+}
+
+exports.cancelSyncOldMessages = async (req, res) => {
+  const company_id = req.user?.company_id
+  if (!company_id) return res.status(401).json({ error: 'Nao autenticado' })
+
+  const result = await requestCancelJob(company_id, JOB_TIPOS.SYNC_MENSAGENS_ANTIGAS)
+  if (!result.ok && !result.notFound) {
+    return res.status(400).json({ ok: false, error: result.error || 'Erro ao cancelar sincronizacao.' })
+  }
+
+  perCompanyBuckets.delete(`${company_id}:old-messages-sync`)
+
+  const payload = result.notFound
+    ? {
+        ok: true,
+        running: false,
+        queued: false,
+        cancelled: false,
+        message: 'Nenhuma sincronizacao ativa encontrada.'
+      }
+    : {
+        ok: true,
+        running: result.cancel_requested === true,
+        queued: false,
+        cancelled: result.cancelled === true,
+        cancel_requested: result.cancel_requested === true,
+        job_id: result.job_id,
+        status: result.status,
+        message: result.cancel_requested
+          ? 'Cancelamento solicitado. A sincronizacao vai parar em seguranca.'
+          : 'Sincronizacao de mensagens antigas cancelada.'
+      }
+
+  const io = req.app?.get?.('io')
+  if (io && !result.notFound) {
+    io.to(`empresa_${company_id}`).emit('whatsapp_sync_mensagens_antigas', payload)
+  }
+
+  return res.json(payload)
 }
 
 exports.syncGroups = async (req, res) => {

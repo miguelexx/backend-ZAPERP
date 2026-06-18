@@ -339,8 +339,18 @@ async function updateConversationActivity(company_id, conversa_id, current, last
 
 async function importMessagesForChat(ctx) {
   const { company_id, whatsapp_instance_id, whatsapp_instance_is_default, provider, chat, io } = ctx
+  const shouldCancel = typeof ctx.shouldCancel === 'function' ? ctx.shouldCancel : null
+  const cancelResult = {
+    skippedChat: false,
+    cancelled: true,
+    messagesFetched: 0,
+    messagesInserted: 0,
+    messagesSkipped: 0,
+  }
+  const isCancelled = async () => shouldCancel ? await shouldCancel() : false
   const chatId = chatIdFromChat(chat)
   if (isSkippableChatId(chatId)) return { skippedChat: true, messagesFetched: 0, messagesInserted: 0, messagesSkipped: 0 }
+  if (await isCancelled()) return cancelResult
 
   const isGroup = isGroupChatId(chatId)
   const found = await createConversationForChat({
@@ -352,6 +362,7 @@ async function importMessagesForChat(ctx) {
     isGroup,
   })
   if (!found?.conversa?.id) return { skippedChat: true, messagesFetched: 0, messagesInserted: 0, messagesSkipped: 0 }
+  if (await isCancelled()) return cancelResult
 
   const rawMessages = await provider.getChatMessages(chatId, MESSAGES_PER_CHAT, null, {
     companyId: company_id,
@@ -367,6 +378,18 @@ async function importMessagesForChat(ctx) {
   let lastImportedAt = null
 
   for (const raw of ordered) {
+    if (await isCancelled()) {
+      await updateConversationActivity(company_id, found.conversa.id, found.conversa.ultima_atividade, lastImportedAt)
+      return {
+        skippedChat: false,
+        cancelled: true,
+        conversationCreated: !!found.created,
+        messagesFetched: ordered.length,
+        messagesInserted,
+        messagesSkipped,
+      }
+    }
+
     const normalized = normalizeOldMessage(raw, { isGroup })
     if (!normalized?.insert?.whatsapp_id || !normalized.insert.texto) {
       messagesSkipped += 1
@@ -433,6 +456,8 @@ async function importMessagesForChat(ctx) {
 
 async function syncOldMessagesForCompany(company_id, opts = {}) {
   const provider = getProvider()
+  const shouldCancel = typeof opts.shouldCancel === 'function' ? opts.shouldCancel : null
+  const isCancelled = async () => shouldCancel ? await shouldCancel() : false
   if (!provider?.getChats || !provider?.getChatMessages) {
     return { ok: false, error: 'Provider nao suporta leitura de chats/mensagens.' }
   }
@@ -461,7 +486,16 @@ async function syncOldMessagesForCompany(company_id, opts = {}) {
   }
 
   const io = opts.io || null
+  const markCancelled = () => ({
+    ...stats,
+    ok: false,
+    cancelled: true,
+    error: 'Sincronizacao de mensagens antigas cancelada.',
+  })
+
   for (const instance of instances) {
+    if (await isCancelled()) return markCancelled()
+
     const whatsappInstanceId = instance.id || null
     const chats = await provider.getChats({
       companyId: company_id,
@@ -475,6 +509,8 @@ async function syncOldMessagesForCompany(company_id, opts = {}) {
     stats.chatsFetched += Array.isArray(chats) ? chats.length : 0
 
     for (const chat of (Array.isArray(chats) ? chats.slice(0, MAX_CHATS) : [])) {
+      if (await isCancelled()) return markCancelled()
+
       try {
         const result = await importMessagesForChat({
           company_id,
@@ -483,6 +519,7 @@ async function syncOldMessagesForCompany(company_id, opts = {}) {
           provider,
           chat,
           io,
+          shouldCancel,
         })
         if (result.skippedChat) stats.chatsSkipped += 1
         else stats.chatsProcessed += 1
@@ -490,9 +527,11 @@ async function syncOldMessagesForCompany(company_id, opts = {}) {
         stats.messagesFetched += result.messagesFetched || 0
         stats.messagesInserted += result.messagesInserted || 0
         stats.messagesSkipped += result.messagesSkipped || 0
+        if (result.cancelled) return markCancelled()
       } catch (e) {
         stats.errors.push(String(e?.message || e).slice(0, 120))
       }
+      if (await isCancelled()) return markCancelled()
       await sleep(CHAT_DELAY_MS)
     }
   }

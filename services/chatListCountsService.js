@@ -1,6 +1,11 @@
 const supabase = require('../config/supabase')
 const { usuarioPertenceSetorFinanceiro } = require('../helpers/financeiroSetorHelper')
 const { buildClienteSearchOr, buildTelefoneSearchOr, escapeIlikePattern } = require('../helpers/chatSearchHelper')
+const {
+  getGrupoIdsPorDepartamentos,
+  pushNonGroupVisibilityParts,
+  pushAllowedGroupIdsPart,
+} = require('../helpers/departamentoGruposHelper')
 
 function parseBooleanQuery(value) {
   return value === true || value === 1 || value === '1' || String(value || '').toLowerCase() === 'true'
@@ -117,6 +122,13 @@ async function resolveChatListCountsContext(req) {
     conversaIdsTransferidas = [...new Set((transferRows || []).map((r) => Number(r.conversa_id)).filter(Boolean))]
   }
 
+  let grupoIdsPermitidosPorDepartamento = []
+  if (!isAdmin) {
+    grupoIdsPermitidosPorDepartamento = await getGrupoIdsPorDepartamentos(company_id, departamento_ids)
+  } else if (filter_dep_id) {
+    grupoIdsPermitidosPorDepartamento = await getGrupoIdsPorDepartamentos(company_id, [filter_dep_id])
+  }
+
   const tagFilterAtivo =
     tag_id != null &&
     String(tag_id).trim() !== '' &&
@@ -200,6 +212,7 @@ async function resolveChatListCountsContext(req) {
     filter_dep_id,
     filtroAtendenteInformado,
     conversaIdsTransferidas,
+    grupoIdsPermitidosPorDepartamento,
     conversaIdsFilter,
     forceEmptyConversas,
     data_inicio,
@@ -223,6 +236,7 @@ function applyChatListSqlFilters(query, ctx, overrides = {}) {
     filter_dep_id,
     filtroAtendenteInformado,
     conversaIdsTransferidas,
+    grupoIdsPermitidosPorDepartamento,
     conversaIdsFilter,
     forceEmptyConversas,
     data_inicio,
@@ -256,15 +270,20 @@ function applyChatListSqlFilters(query, ctx, overrides = {}) {
       : []
     const parts = []
     if (depIds.length > 0) {
-      depIds.forEach((d) => parts.push(`departamento_id.eq.${d}`))
+      pushNonGroupVisibilityParts(parts, 'departamento_id', depIds)
     }
-    parts.push('departamento_id.is.null', 'tipo.eq.grupo', `atendente_id.eq.${user_id}`)
+    parts.push('and(departamento_id.is.null,tipo.is.null)', 'and(departamento_id.is.null,tipo.neq.grupo)')
+    pushNonGroupVisibilityParts(parts, 'atendente_id', [user_id])
+    pushAllowedGroupIdsPart(parts, grupoIdsPermitidosPorDepartamento)
     if (conversaIdsTransferidas.length > 0) {
       parts.push(`id.in.(${conversaIdsTransferidas.join(',')})`)
     }
     q = q.or(parts.join(','))
   } else if (filter_dep_id) {
-    q = q.eq('departamento_id', Number(filter_dep_id))
+    const parts = []
+    pushNonGroupVisibilityParts(parts, 'departamento_id', [filter_dep_id])
+    pushAllowedGroupIdsPart(parts, grupoIdsPermitidosPorDepartamento)
+    q = parts.length > 0 ? q.or(parts.join(',')) : q.eq('departamento_id', Number(filter_dep_id))
   }
 
   if (forceEmptyConversas) {
