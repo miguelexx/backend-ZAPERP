@@ -1955,7 +1955,10 @@ exports.receberZapi = async (req, res) => {
 
         if (!syncResult) {
           console.error('[Z-API] findOrCreateConversation retornou null para phone:', phone)
-          return res.status(500).json({ error: 'Não foi possível identificar conversa para o número' })
+          // IMPORTANTE: payload é 1 de N num lote (ver getPayloads) — abortar a requisição aqui
+          // descartaria as demais mensagens do lote. Pula só esta e segue para a próxima.
+          lastResult = { ok: false, error: 'Não foi possível identificar conversa para o número' }
+          continue
         }
 
         conversa_id = syncResult.conversa.id
@@ -2064,7 +2067,10 @@ exports.receberZapi = async (req, res) => {
       }
     } catch (errConv) {
       console.error('[Z-API] ❌ Erro ao obter/criar conversa:', errConv?.message || errConv)
-      return res.status(500).json({ error: 'Erro ao obter conversa' })
+      // IMPORTANTE: payload é 1 de N num lote (ver getPayloads) — abortar a requisição aqui
+      // descartaria as demais mensagens do lote. Pula só esta e segue para a próxima.
+      lastResult = { ok: false, error: 'Erro ao obter conversa' }
+      continue
     }
 
     // Captura avaliação (nota 0-10) e reabertura automática em conversa encerrada (fechada ou finalizada)
@@ -2464,7 +2470,10 @@ exports.receberZapi = async (req, res) => {
         .update({ ultima_atividade: nowIso })
         .eq('id', conversa_id)
         .eq('company_id', company_id)
-      return res.status(200).json({ ok: true, conversa_id, skip: 'placeholderMidia' })
+      // IMPORTANTE: payload é 1 de N num lote (ver getPayloads) — abortar a requisição aqui
+      // descartaria as demais mensagens do lote. Pula só esta (nada para salvar) e segue.
+      lastResult = { ok: true, conversa_id, skip: 'placeholderMidia' }
+      continue
     }
     if (soPlaceholderMidia && fromMe) texto = '(mensagem)' // espelhamento: mostrar algo no chat
 
@@ -3032,7 +3041,10 @@ exports.receberZapi = async (req, res) => {
             console.log('✅ Mensagem salva (fallback):', mensagemSalva.id)
           } else {
             console.error('❌ ULTRAMSG Erro ao salvar mensagem:', errMsg?.code, errMsg?.message, errMsg?.details)
-            return res.status(500).json({ error: 'Erro ao salvar mensagem' })
+            // IMPORTANTE: payload é 1 de N num lote (ver getPayloads) — abortar a requisição aqui
+            // descartaria as demais mensagens do lote. Pula só esta e segue para a próxima.
+            lastResult = { ok: false, error: 'Erro ao salvar mensagem' }
+            continue
           }
         }
       } else {
