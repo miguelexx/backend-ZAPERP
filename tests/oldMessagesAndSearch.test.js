@@ -62,4 +62,15 @@ describe('chat search helpers', () => {
     expect(or).toContain('telefone.ilike.%551140821000%')
     expect(or).toContain('telefone.ilike.%5511940821000%')
   })
+
+  test('ignora fragmentos numericos curtos misturados em texto livre (evita falso positivo de telefone)', () => {
+    // 'zzznonexistent999' so tem 3 digitos ('999') — curto demais para ser telefone,
+    // mas casava com qualquer numero que contivesse "999" em qualquer posicao.
+    expect(buildPhoneSearchTerms('zzznonexistent999')).toEqual([])
+  })
+
+  test('mantem busca por fragmento real de telefone com 4+ digitos', () => {
+    expect(buildPhoneSearchTerms('1246')).toEqual(['1246'])
+    expect(buildPhoneSearchTerms('9911246')).toEqual(expect.arrayContaining(['9911246']))
+  })
 })

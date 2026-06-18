@@ -12,9 +12,16 @@ function escapeIlikePattern(value) {
   return String(value || '').replace(/[\\%_]/g, (ch) => `\\${ch}`)
 }
 
+// Abaixo disso, um fragmento numérico vira ruído: '999' por exemplo aparece como
+// substring em quase qualquer telefone de 12-13 dígitos, gerando falsos positivos
+// quando o termo buscado não tem relação alguma com telefone (ex.: texto livre com
+// alguns dígitos no final). 4 dígitos cobre o padrão comum de busca pelos últimos
+// dígitos do número e ainda evita esse efeito colateral.
+const MIN_PHONE_SEARCH_DIGITS = 4
+
 function buildPhoneSearchTerms(raw) {
   const digits = digitsOnly(raw)
-  if (!digits) return []
+  if (!digits || digits.length < MIN_PHONE_SEARCH_DIGITS) return []
 
   const variants = possiblePhonesBR(digits)
   const withoutCountryCode = digits.startsWith('55') && digits.length > 4 ? digits.slice(2) : ''
