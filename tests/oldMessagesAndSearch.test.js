@@ -51,16 +51,23 @@ describe('chat search helpers', () => {
 
   test('busca de cliente cobre nome, pushname e telefone', () => {
     const or = buildClienteSearchOr('Sompo')
-    expect(or).toContain('nome.ilike.%Sompo%')
-    expect(or).toContain('pushname.ilike.%Sompo%')
-    expect(or).toContain('telefone.ilike.%Sompo%')
+    expect(or).toContain('nome.ilike."%Sompo%"')
+    expect(or).toContain('pushname.ilike."%Sompo%"')
+    expect(or).toContain('telefone.ilike."%Sompo%"')
   })
 
   test('busca de telefone em conversas usa termo bruto e variacoes numericas', () => {
     const or = buildTelefoneSearchOr('(11) 4082-1000')
-    expect(or).toContain('telefone.ilike.%(11) 4082-1000%')
-    expect(or).toContain('telefone.ilike.%551140821000%')
-    expect(or).toContain('telefone.ilike.%5511940821000%')
+    expect(or).toContain('telefone.ilike."%(11) 4082-1000%"')
+    expect(or).toContain('telefone.ilike."%551140821000%"')
+    expect(or).toContain('telefone.ilike."%5511940821000%"')
+  })
+
+  test('valor com parenteses (telefone mascarado) vai entre aspas duplas para nao quebrar o parser do .or() do PostgREST', () => {
+    const or = buildTelefoneSearchOr('+55 (34) 9991-1246')
+    // Sem aspas, "(" e ")" são caracteres de controle do .or() e quebram a expressão inteira.
+    expect(or).not.toMatch(/ilike\.%/) // nenhuma condição sem aspas
+    expect(or).toContain('telefone.ilike."%553499911246%"')
   })
 
   test('ignora fragmentos numericos curtos misturados em texto livre (evita falso positivo de telefone)', () => {
