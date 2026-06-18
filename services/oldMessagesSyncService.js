@@ -306,7 +306,14 @@ function normalizeOldMessage(raw, { isGroup }) {
     if (senderName) insert.remetente_nome = senderName
   }
 
-  return { insert, fromMe }
+  const emptyPlaceholder =
+    insert.texto === '(mensagem)' &&
+    !insert.tipo &&
+    !insert.url &&
+    !insert.contact_meta &&
+    !insert.location_meta
+
+  return { insert, fromMe, emptyPlaceholder }
 }
 
 async function selectExistingMessage(company_id, whatsapp_instance_id, whatsapp_id, allowLegacyNull = false) {
@@ -433,6 +440,12 @@ function prepareRawMessages(rawMessages, { isGroup }) {
   }
   for (const raw of ordered) {
     const normalized = normalizeOldMessage(raw, { isGroup })
+    if (normalized?.emptyPlaceholder === true) {
+      invalidSkipped += 1
+      placeholderCount += 1
+      incrementReason('placeholder_sem_conteudo')
+      continue
+    }
     if (!normalized?.insert?.whatsapp_id || !normalized.insert.texto) {
       invalidSkipped += 1
       incrementReason(!normalized?.insert?.whatsapp_id ? 'sem_whatsapp_id' : 'sem_texto')
@@ -783,6 +796,7 @@ async function syncOldMessagesForConversation(company_id, conversa_id, opts = {}
     returnDetails: true,
     debugOldMessages: oldMessagesDebugEnabled(opts),
     chatIdCandidates: chatCandidates,
+    fetchAllPages: true,
   }).catch((e) => ({
     ok: false,
     data: [],
