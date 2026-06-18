@@ -216,13 +216,13 @@ const logoStorage = multer.diskStorage({
 
 const uploadLogo = multer({
   storage: logoStorage,
-  limits: { fileSize: 2 * 1024 * 1024 },
+  limits: { fileSize: 5 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
     const baseMime = getBaseMime(file?.mimetype)
     const ext = extFromOriginalName(file?.originalname)
     if (LOGO_MIME.has(baseMime)) return cb(null, true)
     if (['jpg', 'jpeg', 'png', 'webp', 'gif'].includes(ext)) return cb(null, true)
-    cb(uploadValidationError('Apenas imagens são permitidas para o logo (JPEG, PNG, WebP, GIF — máx. 2 MB).', 'UPLOAD_NOT_IMAGE'), false)
+    cb(uploadValidationError('Apenas imagens são permitidas para o logo (JPEG, PNG, WebP, GIF — máx. 5 MB).', 'UPLOAD_NOT_IMAGE'), false)
   },
 })
 
