@@ -31,6 +31,61 @@ function firstString(...values) {
   return ''
 }
 
+function oldMessagesDebugEnabled(opts = {}) {
+  return opts?.debugOldMessages === true ||
+    String(process.env.OLD_MESSAGES_SYNC_DEBUG || '').trim() === '1' ||
+    String(process.env.WHATSAPP_DEBUG || '').trim() === '1'
+}
+
+function safeIdTail(value) {
+  const raw = String(value || '').trim()
+  if (!raw) return ''
+  return raw.length <= 14 ? raw : `...${raw.slice(-14)}`
+}
+
+function debugOldMessages(event, payload, opts = {}) {
+  if (!oldMessagesDebugEnabled(opts)) return
+  console.log(`[oldMessagesSync] ${event}`, payload)
+}
+
+function firstPayloadString(...values) {
+  for (const value of values) {
+    if (typeof value === 'string' && value.trim()) return value.trim()
+    if (value != null && typeof value !== 'object' && String(value).trim()) return String(value).trim()
+  }
+  return ''
+}
+
+function messagePayloadFrom(raw) {
+  const msg = raw?.message && typeof raw.message === 'object' ? raw.message : null
+  return firstPayloadString(
+    raw?.body,
+    raw?.caption,
+    raw?.text?.message,
+    raw?.text?.body,
+    raw?.text,
+    typeof raw?.message === 'string' ? raw.message : '',
+    msg?.body,
+    msg?.text,
+    msg?.conversation,
+    msg?.extendedTextMessage?.text,
+    msg?.imageMessage?.caption,
+    msg?.videoMessage?.caption,
+    msg?.documentMessage?.caption,
+    msg?.buttonsResponseMessage?.selectedDisplayText,
+    msg?.templateButtonReplyMessage?.selectedDisplayText,
+    msg?.listResponseMessage?.title,
+    msg?.listResponseMessage?.singleSelectReply?.selectedRowId,
+    msg?.editedMessage?.message?.conversation,
+    msg?.editedMessage?.message?.extendedTextMessage?.text,
+  )
+}
+
+function hasDeletedPayload(raw) {
+  const msg = raw?.message && typeof raw.message === 'object' ? raw.message : null
+  return !!(raw?.deleted || raw?.messageDeleted || msg?.protocolMessage)
+}
+
 function chatIdFromChat(chat) {
   if (!chat || typeof chat !== 'object') return ''
   return firstString(
@@ -122,12 +177,21 @@ function normalizeType(message) {
   if (message?.reaction && typeof message.reaction === 'object') type = 'reaction'
   if (message?.location && typeof message.location === 'object') type = 'location'
   if (message?.contact && typeof message.contact === 'object') type = 'contact'
+  const msg = message?.message && typeof message.message === 'object' ? message.message : null
+  if (msg?.reactionMessage) type = 'reaction'
+  if (msg?.locationMessage || msg?.liveLocationMessage) type = 'location'
+  if (msg?.contactMessage || msg?.contactsArrayMessage) type = 'contact'
   if (type === 'text') {
     if (message?.image || message?.imageUrl) type = 'image'
     else if (message?.audio || message?.audioUrl) type = 'audio'
     else if (message?.video || message?.videoUrl || message?.ptv) type = 'video'
     else if (message?.document || message?.documentUrl || message?.file) type = 'document'
     else if (message?.sticker || message?.stickerUrl) type = 'sticker'
+    else if (msg?.imageMessage) type = 'image'
+    else if (msg?.audioMessage) type = msg.audioMessage?.ptt ? 'voice' : 'audio'
+    else if (msg?.videoMessage) type = 'video'
+    else if (msg?.documentMessage) type = 'document'
+    else if (msg?.stickerMessage) type = 'sticker'
   }
   return type
 }
@@ -144,29 +208,22 @@ function normalizeOldMessage(raw, { isGroup }) {
 
   const fromMe = Boolean(raw.fromMe ?? raw.key?.fromMe ?? raw.from_me)
   const type = normalizeType(raw)
-  const rawMessage =
-    raw.message?.body ??
-    raw.message?.text ??
-    raw.text?.message ??
-    raw.body ??
-    raw.caption ??
-    raw.text ??
-    raw.message ??
-    ''
+  const nestedMessage = raw.message && typeof raw.message === 'object' ? raw.message : null
+  const rawMessage = messagePayloadFrom(raw)
 
   let texto = typeof rawMessage === 'object' ? '' : String(rawMessage || '').trim()
-  const imageUrl = urlFrom(raw.image?.imageUrl, raw.image?.url, raw.imageUrl, raw.message?.imageUrl, raw.image)
-  const documentUrl = urlFrom(raw.document?.documentUrl, raw.document?.url, raw.documentUrl, raw.file?.url, raw.fileUrl)
-  const audioUrl = urlFrom(raw.audio?.audioUrl, raw.audio?.url, raw.audioUrl, raw.message?.audioUrl)
-  const videoUrl = urlFrom(raw.video?.videoUrl, raw.video?.url, raw.videoUrl, raw.ptv?.url)
-  const stickerUrl = urlFrom(raw.sticker?.stickerUrl, raw.sticker?.url, raw.stickerUrl)
-  let locationUrl = urlFrom(raw.location?.url, raw.location?.thumbnailUrl)
+  const imageUrl = urlFrom(raw.image?.imageUrl, raw.image?.url, raw.imageUrl, nestedMessage?.imageUrl, nestedMessage?.imageMessage?.url, raw.image)
+  const documentUrl = urlFrom(raw.document?.documentUrl, raw.document?.url, raw.documentUrl, raw.file?.url, raw.fileUrl, nestedMessage?.documentMessage?.url)
+  const audioUrl = urlFrom(raw.audio?.audioUrl, raw.audio?.url, raw.audioUrl, nestedMessage?.audioUrl, nestedMessage?.audioMessage?.url)
+  const videoUrl = urlFrom(raw.video?.videoUrl, raw.video?.url, raw.videoUrl, raw.ptv?.url, nestedMessage?.videoMessage?.url)
+  const stickerUrl = urlFrom(raw.sticker?.stickerUrl, raw.sticker?.url, raw.stickerUrl, nestedMessage?.stickerMessage?.url)
+  let locationUrl = urlFrom(raw.location?.url, raw.location?.thumbnailUrl, nestedMessage?.locationMessage?.url)
 
   if (type === 'reaction') {
-    const val = raw.reaction?.value ?? raw.reaction?.emoji ?? ''
+    const val = raw.reaction?.value ?? raw.reaction?.emoji ?? nestedMessage?.reactionMessage?.text ?? ''
     texto = val ? `Reacao: ${String(val).trim()}` : 'Reacao'
   } else if (type === 'location') {
-    const loc = raw.location || {}
+    const loc = raw.location || nestedMessage?.locationMessage || nestedMessage?.liveLocationMessage || {}
     const lat = loc.latitude ?? loc.lat
     const lng = loc.longitude ?? loc.lng
     const latNum = Number(lat)
@@ -177,8 +234,8 @@ function normalizeOldMessage(raw, { isGroup }) {
     const parts = [loc.name, loc.address].filter(Boolean).map((s) => String(s).trim())
     texto = parts.length ? parts.join(' - ') : (locationUrl || '(localizacao)')
   } else if (type === 'contact') {
-    const contact = raw.contact || {}
-    texto = firstString(contact.displayName, contact.formattedName, contact.name, contact.vCard, rawMessage) || '(contato)'
+    const contact = raw.contact || nestedMessage?.contactMessage || {}
+    texto = firstString(contact.displayName, contact.formattedName, contact.name, contact.vCard, contact.vcard, rawMessage) || '(contato)'
   }
 
   if (!texto) {
@@ -187,6 +244,7 @@ function normalizeOldMessage(raw, { isGroup }) {
     else if (audioUrl) texto = '(audio)'
     else if (videoUrl) texto = raw.caption || '(video)'
     else if (stickerUrl) texto = '(sticker)'
+    else if (hasDeletedPayload(raw)) texto = '(mensagem apagada)'
     else texto = '(mensagem)'
   }
 
@@ -222,7 +280,7 @@ function normalizeOldMessage(raw, { isGroup }) {
     insert.tipo = 'location'
     if (locationUrl) insert.url = locationUrl
     insert.nome_arquivo = 'localizacao'
-    const loc = raw.location || {}
+    const loc = raw.location || nestedMessage?.locationMessage || nestedMessage?.liveLocationMessage || {}
     if (loc.latitude != null || loc.lat != null || loc.longitude != null || loc.lng != null) {
       insert.location_meta = {
         latitude: loc.latitude ?? loc.lat ?? null,
@@ -233,7 +291,7 @@ function normalizeOldMessage(raw, { isGroup }) {
     }
   } else if (type === 'contact') {
     insert.tipo = 'contact'
-    const contact = raw.contact || {}
+    const contact = raw.contact || nestedMessage?.contactMessage || {}
     insert.contact_meta = {
       nome: contact.displayName ?? contact.formattedName ?? contact.name ?? null,
       telefone: digitsOnly(contact.phone ?? contact.telephone ?? ''),
@@ -254,7 +312,7 @@ function normalizeOldMessage(raw, { isGroup }) {
 async function selectExistingMessage(company_id, whatsapp_instance_id, whatsapp_id, allowLegacyNull = false) {
   let query = supabase
     .from('mensagens')
-    .select('id')
+    .select('id, texto, tipo, url, nome_arquivo, contact_meta, location_meta')
     .eq('company_id', company_id)
     .eq('whatsapp_id', whatsapp_id)
     .limit(1)
@@ -269,7 +327,7 @@ async function selectExistingMessage(company_id, whatsapp_instance_id, whatsapp_
   if (whatsapp_instance_id && allowLegacyNull) {
     const { data: legacy } = await supabase
       .from('mensagens')
-      .select('id')
+      .select('id, texto, tipo, url, nome_arquivo, contact_meta, location_meta')
       .eq('company_id', company_id)
       .eq('whatsapp_id', whatsapp_id)
       .is('whatsapp_instance_id', null)
@@ -279,6 +337,30 @@ async function selectExistingMessage(company_id, whatsapp_instance_id, whatsapp_
   }
 
   return null
+}
+
+function isPlaceholderMessageText(value) {
+  return String(value || '').trim() === '(mensagem)'
+}
+
+async function updateExistingPlaceholderMessage(company_id, existing, nextInsert) {
+  if (!existing?.id || !isPlaceholderMessageText(existing.texto)) return false
+  if (!nextInsert || isPlaceholderMessageText(nextInsert.texto)) return false
+
+  const patch = {
+    texto: String(nextInsert.texto || '').trim(),
+  }
+  for (const field of ['tipo', 'url', 'nome_arquivo', 'contact_meta', 'location_meta']) {
+    if (nextInsert[field] != null && nextInsert[field] !== '') patch[field] = nextInsert[field]
+  }
+
+  const { error } = await supabase
+    .from('mensagens')
+    .update(patch)
+    .eq('company_id', company_id)
+    .eq('id', existing.id)
+
+  return !error
 }
 
 async function createConversationForChat({ company_id, whatsapp_instance_id, whatsapp_instance_is_default, chat, chatId, isGroup }) {
@@ -344,16 +426,23 @@ function prepareRawMessages(rawMessages, { isGroup }) {
 
   const prepared = []
   let invalidSkipped = 0
+  let placeholderCount = 0
+  const discardReasons = {}
+  const incrementReason = (reason) => {
+    discardReasons[reason] = (discardReasons[reason] || 0) + 1
+  }
   for (const raw of ordered) {
     const normalized = normalizeOldMessage(raw, { isGroup })
     if (!normalized?.insert?.whatsapp_id || !normalized.insert.texto) {
       invalidSkipped += 1
+      incrementReason(!normalized?.insert?.whatsapp_id ? 'sem_whatsapp_id' : 'sem_texto')
       continue
     }
+    if (normalized.insert.texto === '(mensagem)') placeholderCount += 1
     prepared.push(normalized)
   }
 
-  return { ordered, prepared, invalidSkipped }
+  return { ordered, prepared, invalidSkipped, placeholderCount, discardReasons }
 }
 
 async function hasAnyNewMessage(company_id, whatsapp_instance_id, prepared, allowLegacyNull) {
@@ -384,6 +473,7 @@ async function insertPreparedMessagesForConversation(ctx) {
 
   const isCancelled = async () => shouldCancel ? await shouldCancel() : false
   let messagesInserted = 0
+  let messagesUpdated = 0
   let messagesSkipped = initialMessagesSkipped
   let lastImportedAt = null
 
@@ -394,6 +484,7 @@ async function insertPreparedMessagesForConversation(ctx) {
         cancelled: true,
         messagesFetched,
         messagesInserted,
+        messagesUpdated,
         messagesSkipped,
       }
     }
@@ -405,7 +496,9 @@ async function insertPreparedMessagesForConversation(ctx) {
       whatsapp_instance_is_default === true
     )
     if (exists?.id) {
-      messagesSkipped += 1
+      const updated = await updateExistingPlaceholderMessage(company_id, exists, normalized.insert)
+      if (updated) messagesUpdated += 1
+      else messagesSkipped += 1
       continue
     }
 
@@ -450,6 +543,7 @@ async function insertPreparedMessagesForConversation(ctx) {
   return {
     messagesFetched,
     messagesInserted,
+    messagesUpdated,
     messagesSkipped,
   }
 }
@@ -614,13 +708,29 @@ async function resolveOldMessagesWhatsappInstanceId(company_id, conversa) {
   return Number.isFinite(id) && id > 0 ? id : null
 }
 
-function resolveChatIdForConversation(conversa) {
+function isUsableHistoryIdentifier(value) {
+  const raw = String(value || '').trim()
+  if (!raw) return false
+  const lower = raw.toLowerCase()
+  if (lower.startsWith('lid:') || lower.endsWith('@lid')) return false
+  if (lower.includes('@broadcast') || lower.includes('@newsletter')) return false
+  return true
+}
+
+function resolveChatIdsForConversation(conversa) {
+  const candidates = []
+  const push = (value) => {
+    const raw = String(value || '').trim()
+    if (isUsableHistoryIdentifier(raw) && !candidates.includes(raw)) candidates.push(raw)
+  }
   const telefone = String(conversa?.telefone || '').trim()
   const cliente = Array.isArray(conversa?.clientes) ? conversa.clientes[0] : conversa?.clientes
   const clienteTelefone = String(cliente?.telefone || '').trim()
-  if (telefone && !telefone.toLowerCase().startsWith('lid:')) return telefone
-  if (clienteTelefone && !clienteTelefone.toLowerCase().startsWith('lid:')) return clienteTelefone
-  return ''
+  const chatLid = String(conversa?.chat_lid || '').trim()
+  push(telefone)
+  push(clienteTelefone)
+  push(chatLid)
+  return candidates
 }
 
 async function syncOldMessagesForConversation(company_id, conversa_id, opts = {}) {
@@ -634,11 +744,14 @@ async function syncOldMessagesForConversation(company_id, conversa_id, opts = {}
     .select(`
       id,
       company_id,
+      cliente_id,
       telefone,
+      chat_lid,
       whatsapp_instance_id,
       ultima_atividade,
       tipo,
       nome_grupo,
+      nome_contato_cache,
       clientes!conversas_cliente_fk ( id, telefone, company_id )
     `)
     .eq('company_id', Number(company_id))
@@ -651,18 +764,69 @@ async function syncOldMessagesForConversation(company_id, conversa_id, opts = {}
     return { ok: false, error: 'Use esta acao apenas em conversas individuais.' }
   }
 
-  const chatId = resolveChatIdForConversation(conversa)
-  if (!chatId) {
-    return { ok: false, error: 'Conversa sem telefone valido para buscar historico.' }
+  const chatCandidates = resolveChatIdsForConversation(conversa)
+  if (!chatCandidates.length) {
+    debugOldMessages('contact-sync-no-identifier', {
+      company_id: Number(company_id),
+      conversa_id: Number(conversa_id),
+      telefoneTail: safeIdTail(conversa.telefone),
+      chatLidTail: safeIdTail(conversa.chat_lid),
+      cliente_id: conversa.cliente_id || null,
+    }, opts)
+    return { ok: false, error: 'Conversa sem telefone/chat valido para buscar historico. Verifique se ela nao foi criada apenas com LID interno.' }
   }
 
   const whatsappInstanceId = await resolveOldMessagesWhatsappInstanceId(company_id, conversa)
-  const rawMessages = await provider.getChatMessages(chatId, MESSAGES_PER_CHAT, null, {
+  const providerResult = await provider.getChatMessages(chatCandidates[0], MESSAGES_PER_CHAT, null, {
     companyId: company_id,
     whatsappInstanceId: whatsappInstanceId || undefined,
-  }).catch(() => [])
+    returnDetails: true,
+    debugOldMessages: oldMessagesDebugEnabled(opts),
+    chatIdCandidates: chatCandidates,
+  }).catch((e) => ({
+    ok: false,
+    data: [],
+    error: e?.message || 'Erro ao buscar mensagens antigas.',
+    attempts: [],
+  }))
 
-  const { ordered, prepared, invalidSkipped } = prepareRawMessages(rawMessages, { isGroup: false })
+  debugOldMessages('contact-sync-provider-result', {
+    company_id: Number(company_id),
+    conversa_id: Number(conversa_id),
+    endpoint: providerResult?.endpoint || '/chats/messages',
+    candidates: chatCandidates.map(safeIdTail),
+    attempts: Array.isArray(providerResult?.attempts) ? providerResult.attempts : [],
+    returned: Array.isArray(providerResult?.data) ? providerResult.data.length : 0,
+    selectedChatIdTail: safeIdTail(providerResult?.chatId),
+    ok: providerResult?.ok === true,
+    error: providerResult?.error || null,
+  }, opts)
+
+  if (providerResult?.ok !== true) {
+    return {
+      ok: false,
+      conversa_id: Number(conversa.id),
+      messagesPerChat: MESSAGES_PER_CHAT,
+      messagesFetched: 0,
+      messagesInserted: 0,
+      messagesSkipped: 0,
+      empty: false,
+      error: providerResult?.error || 'Erro ao buscar mensagens antigas deste contato.',
+      providerAttempts: Array.isArray(providerResult?.attempts) ? providerResult.attempts : [],
+    }
+  }
+
+  const rawMessages = Array.isArray(providerResult.data) ? providerResult.data : []
+  const { ordered, prepared, invalidSkipped, placeholderCount, discardReasons } = prepareRawMessages(rawMessages, { isGroup: false })
+  debugOldMessages('contact-sync-normalized', {
+    company_id: Number(company_id),
+    conversa_id: Number(conversa_id),
+    providerReturned: rawMessages.length,
+    normalized: prepared.length,
+    invalidSkipped,
+    placeholderCount,
+    discardReasons,
+  }, opts)
   if (ordered.length === 0 || prepared.length === 0) {
     return {
       ok: true,
@@ -671,8 +835,11 @@ async function syncOldMessagesForConversation(company_id, conversa_id, opts = {}
       messagesFetched: ordered.length,
       messagesInserted: 0,
       messagesSkipped: invalidSkipped,
+      placeholderMessages: placeholderCount,
       empty: true,
-      message: 'Nenhuma mensagem antiga encontrada para este contato.',
+      message: ordered.length === 0
+        ? 'Nenhuma mensagem antiga encontrada para este contato.'
+        : 'Nenhuma mensagem valida encontrada para importar neste contato.',
     }
   }
 
@@ -688,17 +855,31 @@ async function syncOldMessagesForConversation(company_id, conversa_id, opts = {}
     shouldCancel: null,
   })
 
+  debugOldMessages('contact-sync-inserted', {
+    company_id: Number(company_id),
+    conversa_id: Number(conversa_id),
+    providerReturned: rawMessages.length,
+    invalidSkipped,
+    placeholderCount,
+    messagesInserted: insertedStats.messagesInserted || 0,
+    messagesUpdated: insertedStats.messagesUpdated || 0,
+    messagesSkipped: insertedStats.messagesSkipped || 0,
+  }, opts)
+
+  const changedMessages = (insertedStats.messagesInserted || 0) + (insertedStats.messagesUpdated || 0)
   return {
     ok: true,
     conversa_id: Number(conversa.id),
     messagesPerChat: MESSAGES_PER_CHAT,
     messagesFetched: insertedStats.messagesFetched || 0,
     messagesInserted: insertedStats.messagesInserted || 0,
+    messagesUpdated: insertedStats.messagesUpdated || 0,
     messagesSkipped: insertedStats.messagesSkipped || 0,
-    empty: (insertedStats.messagesInserted || 0) === 0,
-    message: (insertedStats.messagesInserted || 0) > 0
+    placeholderMessages: placeholderCount,
+    empty: changedMessages === 0,
+    message: changedMessages > 0
       ? 'Mensagens antigas carregadas para este contato.'
-      : 'Nenhuma mensagem antiga encontrada para este contato.',
+      : 'Historico ja estava atualizado para este contato.',
   }
 }
 

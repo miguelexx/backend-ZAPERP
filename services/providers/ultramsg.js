@@ -541,6 +541,46 @@ function phoneCandidatesForLookup(phone) {
   return Array.from(new Set(candidates.filter(Boolean)))
 }
 
+function oldMessagesDebugEnabled(opts = {}) {
+  return opts?.debugOldMessages === true ||
+    String(process.env.OLD_MESSAGES_SYNC_DEBUG || '').trim() === '1' ||
+    String(process.env.WHATSAPP_DEBUG || '').trim() === '1'
+}
+
+function safeChatIdTail(value) {
+  const raw = String(value || '').trim()
+  if (!raw) return ''
+  return raw.length <= 14 ? raw : `...${raw.slice(-14)}`
+}
+
+function pushUniqueValue(list, value) {
+  const raw = String(value || '').trim()
+  if (raw && !list.includes(raw)) list.push(raw)
+}
+
+function chatMessageCandidatesForLookup(phone, opts = {}) {
+  const values = [phone]
+  if (Array.isArray(opts.chatIdCandidates)) values.push(...opts.chatIdCandidates)
+
+  const candidates = []
+  for (const value of values) {
+    const raw = String(value || '').trim()
+    if (!raw) continue
+
+    if (raw.endsWith('@g.us') || raw.endsWith('@c.us')) pushUniqueValue(candidates, raw)
+    if (/@s\.whatsapp\.net$/i.test(raw)) {
+      pushUniqueValue(candidates, raw.replace(/@s\.whatsapp\.net$/i, '@c.us'))
+    }
+
+    pushUniqueValue(candidates, toChatIdForChats(raw) || phoneToChatId(raw))
+    for (const candidate of phoneCandidatesForLookup(raw)) {
+      pushUniqueValue(candidates, phoneToChatId(candidate))
+    }
+  }
+
+  return candidates.filter(Boolean)
+}
+
 /**
  * Envia mensagem de texto.
  */
@@ -1607,23 +1647,93 @@ async function getContactMetadata(phone, opts = {}) {
  */
 async function getChatMessages(phone, amount = 10, lastMessageId = null, opts = {}) {
   const cfg = await resolveConfig(opts)
-  if (!cfg) return []
-  const nums = phoneCandidatesForLookup(phone)
-  if (!nums.length) return []
-  const raw = String(nums[0] || '').trim()
-  const chatId = raw.endsWith('@g.us') ? raw : phoneToChatId(raw) || toUltramsgPhone(raw)
-  if (!chatId) return []
+  const returnDetails = opts?.returnDetails === true
+  const endpoint = '/chats/messages'
+  const limit = Math.min(CHATS_MESSAGES_LIMIT_MAX, Math.max(1, Number(amount) || 10))
+  const debug = oldMessagesDebugEnabled(opts)
+  const emptyDetails = (overrides = {}) => ({
+    ok: false,
+    data: [],
+    endpoint,
+    limit,
+    attempts: [],
+    ...overrides,
+  })
+  if (!cfg) {
+    const result = emptyDetails({ error: 'Instancia UltraMsg nao configurada.' })
+    return returnDetails ? result : []
+  }
+  const chatIds = chatMessageCandidatesForLookup(phone, opts)
+  if (!chatIds.length) {
+    const result = emptyDetails({ error: 'Nenhum chatId valido para consultar mensagens.' })
+    return returnDetails ? result : []
+  }
+
+  const attempts = []
+  let firstEmptyOk = null
+  let lastError = null
   try {
-    const limit = Math.min(CHATS_MESSAGES_LIMIT_MAX, Math.max(1, Number(amount) || 10))
-    const { ok, data } = await getJson({
-      ...cfg,
-      endpoint: '/chats/messages',
-      extraParams: { chatId, limit: String(limit) }
+    for (const chatId of chatIds) {
+      let response = null
+      try {
+        response = await getJson({
+          ...cfg,
+          endpoint,
+          extraParams: { chatId, limit: String(limit) }
+        })
+      } catch (e) {
+        response = { ok: false, status: null, data: null, text: '', error: e?.message || String(e) }
+      }
+
+      const data = Array.isArray(response?.data) ? response.data : []
+      const attempt = {
+        chatIdTail: safeChatIdTail(chatId),
+        ok: response?.ok === true,
+        status: response?.status ?? null,
+        count: data.length,
+        error: response?.ok === true ? null : String(response?.error || response?.text || response?.status || 'erro na consulta').slice(0, 180),
+      }
+      attempts.push(attempt)
+
+      if (debug) {
+        console.log('[oldMessagesSync][provider] getChatMessages', {
+          companyId: opts?.companyId ?? opts?.company_id ?? null,
+          endpoint,
+          chatIdTail: attempt.chatIdTail,
+          ok: attempt.ok,
+          status: attempt.status,
+          returned: attempt.count,
+          error: attempt.error,
+        })
+      }
+
+      if (response?.ok === true && data.length > 0) {
+        const result = { ok: true, data, chatId, endpoint, limit, attempts }
+        return returnDetails ? result : data
+      }
+      if (response?.ok === true) {
+        if (!firstEmptyOk) firstEmptyOk = { chatId, data }
+        continue
+      }
+      lastError = attempt.error || 'Erro ao buscar mensagens antigas.'
+    }
+
+    if (firstEmptyOk) {
+      const result = { ok: true, data: [], chatId: firstEmptyOk.chatId, endpoint, limit, attempts }
+      return returnDetails ? result : []
+    }
+
+    const result = emptyDetails({
+      error: lastError || 'Erro ao buscar mensagens antigas.',
+      attempts,
     })
-    if (!ok) return []
-    return Array.isArray(data) ? data : []
-  } catch {
-    return []
+    return returnDetails ? result : []
+  } catch (e) {
+    const result = emptyDetails({
+      error: e?.message || 'Erro ao buscar mensagens antigas.',
+      attempts,
+    })
+    return returnDetails ? result : []
   }
 }
 

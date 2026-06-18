@@ -3728,7 +3728,7 @@ exports.carregarMensagensAntigasContato = async (req, res) => {
     if (!result.ok) return res.status(400).json({ ok: false, error: result.error || 'Erro ao carregar mensagens antigas.' })
 
     const io = req.app?.get?.('io') || null
-    if (io && (result.messagesInserted || 0) > 0) {
+    if (io && ((result.messagesInserted || 0) > 0 || (result.messagesUpdated || 0) > 0)) {
       emitirConversaAtualizada(io, company_id, Number(id), { id: Number(id) })
     }
 
@@ -3737,10 +3737,11 @@ exports.carregarMensagensAntigasContato = async (req, res) => {
       conversa_id: Number(id),
       mensagens_lidas: result.messagesFetched || 0,
       mensagens_importadas: result.messagesInserted || 0,
+      mensagens_atualizadas: result.messagesUpdated || 0,
       mensagens_ignoradas: result.messagesSkipped || 0,
       empty: result.empty === true,
       message: result.message || (
-        (result.messagesInserted || 0) > 0
+        ((result.messagesInserted || 0) > 0 || (result.messagesUpdated || 0) > 0)
           ? 'Mensagens antigas carregadas para este contato.'
           : 'Nenhuma mensagem antiga encontrada para este contato.'
       ),
