@@ -6,10 +6,10 @@ exports.obterMinhasPendencias = async (req, res) => {
     const usuario_id = Number(req.user?.id ?? req.user?.user_id)
 
     if (!Number.isFinite(company_id) || company_id <= 0) {
-      return res.status(401).json({ error: 'Tenant inválido' })
+      return res.status(401).json({ error: 'Tenant invalido' })
     }
     if (!Number.isFinite(usuario_id) || usuario_id <= 0) {
-      return res.status(401).json({ error: 'Usuário inválido' })
+      return res.status(401).json({ error: 'Usuario invalido' })
     }
 
     const categoria = req.query.categoria
@@ -29,6 +29,21 @@ exports.obterMinhasPendencias = async (req, res) => {
       return res.status(400).json({ error: error.message })
     }
     console.error('[MINHAS_PENDENCIAS] erro:', error)
-    return res.status(500).json({ error: 'Erro ao calcular minhas pendências' })
+    const categoria = req.query?.categoria
+    if (categoria != null && String(categoria).trim() !== '') {
+      return res.json({
+        categoria: String(categoria).trim(),
+        total: 0,
+        conversa_ids: [],
+        itens: [],
+        degraded: true,
+      })
+    }
+    return res.json({
+      transferidosParaVoce: 0,
+      aguardandoSuaResposta: 0,
+      emAtraso: 0,
+      degraded: true,
+    })
   }
 }

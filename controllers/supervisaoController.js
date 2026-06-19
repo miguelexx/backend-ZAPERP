@@ -22,7 +22,12 @@ exports.resumo = async (req, res) => {
     return res.json(data)
   } catch (error) {
     console.error('[SUPERVISAO][resumo] erro:', error)
-    return res.status(500).json({ error: 'Erro ao gerar resumo de supervisão' })
+    return res.json({
+      cards: {},
+      equipe_hoje: [],
+      aguardando_funcionario: 0,
+      degraded: true,
+    })
   }
 }
 
@@ -37,19 +42,19 @@ exports.clientesPendentes = async (req, res) => {
     const busca = req.query.busca ? String(req.query.busca) : null
 
     if (req.query.atendente_id !== undefined && atendenteId == null) {
-      return res.status(400).json({ error: 'atendente_id inválido' })
+      return res.status(400).json({ error: 'atendente_id invalido' })
     }
     if (req.query.departamento_id !== undefined && departamentoId == null) {
-      return res.status(400).json({ error: 'departamento_id inválido' })
+      return res.status(400).json({ error: 'departamento_id invalido' })
     }
     if (nivel && !['normal', 'atencao', 'prioritario', 'critico'].includes(nivel)) {
-      return res.status(400).json({ error: 'nivel inválido. Use: normal, atencao, prioritario ou critico' })
+      return res.status(400).json({ error: 'nivel invalido. Use: normal, atencao, prioritario ou critico' })
     }
     if (req.query.somente_atrasados !== undefined && somenteAtrasados == null) {
-      return res.status(400).json({ error: 'somente_atrasados inválido. Use true/false' })
+      return res.status(400).json({ error: 'somente_atrasados invalido. Use true/false' })
     }
     if (periodo && !['hoje', '7dias', 'mes'].includes(periodo)) {
-      return res.status(400).json({ error: 'periodo inválido. Use: hoje, 7dias ou mes' })
+      return res.status(400).json({ error: 'periodo invalido. Use: hoje, 7dias ou mes' })
     }
 
     const data = await supervisaoService.getClientesPendentes(company_id, {
@@ -63,7 +68,7 @@ exports.clientesPendentes = async (req, res) => {
     return res.json(data)
   } catch (error) {
     console.error('[SUPERVISAO][clientes-pendentes] erro:', error)
-    return res.status(500).json({ error: 'Erro ao listar clientes pendentes' })
+    return res.json([])
   }
 }
 
@@ -77,7 +82,7 @@ exports.relatorioDiarioGestor = async (req, res) => {
       return res.status(400).json({ error: error.message })
     }
     console.error('[SUPERVISAO][relatorio-diario] erro:', error)
-    return res.status(500).json({ error: 'Erro ao gerar relatório diário do gestor' })
+    return res.status(500).json({ error: 'Erro ao gerar relatorio diario do gestor' })
   }
 }
 
@@ -86,7 +91,7 @@ exports.movimentacaoFuncionario = async (req, res) => {
     const { company_id } = req.user
     const usuarioId = parseNullableInt(req.params.usuarioId)
     if (!usuarioId) {
-      return res.status(400).json({ error: 'usuarioId inválido' })
+      return res.status(400).json({ error: 'usuarioId invalido' })
     }
 
     const data = await supervisaoService.getMovimentacaoFuncionario(company_id, usuarioId)
@@ -96,6 +101,6 @@ exports.movimentacaoFuncionario = async (req, res) => {
       return res.status(404).json({ error: error.message })
     }
     console.error('[SUPERVISAO][movimentacao] erro:', error)
-    return res.status(500).json({ error: 'Erro ao buscar movimentação do funcionário' })
+    return res.status(500).json({ error: 'Erro ao buscar movimentacao do funcionario' })
   }
 }

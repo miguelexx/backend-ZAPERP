@@ -27,6 +27,9 @@ router.get('/zapi-status', auth, chatController.whatsappStatus) // alias para co
 router.get('/pix-config', auth, chatController.getPixConfig)
 router.put('/pix-config', auth, chatController.putPixConfig)
 router.get('/:id/messages/search', auth, chatController.buscarMensagensConversa)
+router.get('/:id/atendentes-disponiveis', auth, chatController.listarAtendentesDisponiveisConversa)
+router.get('/:id/atendentes', auth, chatController.listarAtendentesConversa)
+router.post('/:id/atendentes', auth, chatController.adicionarAtendenteConversa)
 router.get('/:id', auth, chatController.detalharChat)
 
 // Atendimento: todos os usuários autenticados (regras por setor no controller)

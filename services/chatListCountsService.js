@@ -3,6 +3,7 @@ const { usuarioPertenceSetorFinanceiro } = require('../helpers/financeiroSetorHe
 const { buildClienteSearchOr, buildTelefoneSearchOr, escapeIlikePattern } = require('../helpers/chatSearchHelper')
 const {
   getGrupoIdsPorDepartamentos,
+  getGrupoIdsSemDepartamento,
   pushNonGroupVisibilityParts,
   pushAllowedGroupIdsPart,
 } = require('../helpers/departamentoGruposHelper')
@@ -35,6 +36,30 @@ function getEndOfTodayIso() {
   return now.toISOString()
 }
 
+function deveIncluirGruposSemDepartamentoNoFiltroTodos({
+  isAdmin,
+  filter_dep_id,
+  filtroAtendenteInformado,
+  minhaFilaAtiva,
+  aguardandoClienteAtivo,
+  pagamentoPendenteAtivo,
+  emAtrasoAtivo,
+  hojeAtivo,
+  statusNorm,
+}) {
+  return (
+    !isAdmin &&
+    !filter_dep_id &&
+    filtroAtendenteInformado == null &&
+    !minhaFilaAtiva &&
+    !aguardandoClienteAtivo &&
+    !pagamentoPendenteAtivo &&
+    !emAtrasoAtivo &&
+    !hojeAtivo &&
+    !statusNorm
+  )
+}
+
 function parseConversaIdsQuery(raw) {
   if (raw == null || String(raw).trim() === '') return []
   return [
@@ -45,6 +70,30 @@ function parseConversaIdsQuery(raw) {
         .filter((n) => Number.isFinite(n) && n > 0)
     ),
   ]
+}
+
+function isConversaAtendentesMissingTable(error) {
+  const msg = String(error?.message || error || '').toLowerCase()
+  const code = String(error?.code || '')
+  return code === '42P01' || code === 'PGRST205' || (msg.includes('conversa_atendentes') && msg.includes('does not exist'))
+}
+
+async function getConversaIdsParticipanteAtivo(company_id, usuario_id) {
+  if (company_id == null || usuario_id == null) return []
+  const limit = getChatFilterIdLimit()
+  const { data, error } = await supabase
+    .from('conversa_atendentes')
+    .select('conversa_id')
+    .eq('company_id', Number(company_id))
+    .eq('usuario_id', Number(usuario_id))
+    .eq('ativo', true)
+    .order('criado_em', { ascending: false })
+    .limit(limit)
+  if (error) {
+    if (isConversaAtendentesMissingTable(error)) return []
+    throw error
+  }
+  return [...new Set((data || []).map((row) => Number(row.conversa_id)).filter((n) => Number.isFinite(n) && n > 0))]
 }
 
 async function buscarConversaIdsPorTextoMensagens({ company_id, term }) {
@@ -109,6 +158,7 @@ async function resolveChatListCountsContext(req) {
   const isFinanceiro = await usuarioPertenceSetorFinanceiro(departamento_ids, company_id)
 
   let conversaIdsTransferidas = []
+  let conversaIdsParticipanteAtivo = []
   if (!isAdmin) {
     const transferLimit = getChatFilterIdLimit()
     const { data: transferRows } = await supabase
@@ -120,6 +170,7 @@ async function resolveChatListCountsContext(req) {
       .order('criado_em', { ascending: false })
       .limit(transferLimit)
     conversaIdsTransferidas = [...new Set((transferRows || []).map((r) => Number(r.conversa_id)).filter(Boolean))]
+    conversaIdsParticipanteAtivo = await getConversaIdsParticipanteAtivo(company_id, user_id)
   }
 
   let grupoIdsPermitidosPorDepartamento = []
@@ -128,6 +179,8 @@ async function resolveChatListCountsContext(req) {
   } else if (filter_dep_id) {
     grupoIdsPermitidosPorDepartamento = await getGrupoIdsPorDepartamentos(company_id, [filter_dep_id])
   }
+  const grupoIdsSemDepartamento =
+    !isAdmin && !filter_dep_id ? await getGrupoIdsSemDepartamento(company_id) : []
 
   const tagFilterAtivo =
     tag_id != null &&
@@ -163,7 +216,7 @@ async function resolveChatListCountsContext(req) {
       .order('criado_em', { ascending: false })
       .limit(searchIdLimit)
     const clienteIds = (clientesMatch || []).map((c) => c.id)
-    const [convByCliente, convByTelefone, convByNomeGrupo, idsFromMsg] = await Promise.all([
+    const [convByCliente, convByTelefone, convByNomeGrupo, convByNomeContatoCache, idsFromMsg] = await Promise.all([
       supabase
         .from('conversas')
         .select('id')
@@ -185,12 +238,20 @@ async function resolveChatListCountsContext(req) {
         .ilike('nome_grupo', term)
         .order('ultima_atividade', { ascending: false, nullsFirst: false })
         .limit(searchIdLimit),
+      supabase
+        .from('conversas')
+        .select('id')
+        .eq('company_id', company_id)
+        .ilike('nome_contato_cache', term)
+        .order('ultima_atividade', { ascending: false, nullsFirst: false })
+        .limit(searchIdLimit),
       buscarConversaIdsPorTextoMensagens({ company_id, term: palavraTrim }),
     ])
     const mergedSet = new Set([
       ...(convByCliente.data || []).map((c) => c.id),
       ...(convByTelefone.data || []).map((c) => c.id),
       ...(convByNomeGrupo.data || []).map((c) => c.id),
+      ...(convByNomeContatoCache.data || []).map((c) => c.id),
       ...idsFromMsg,
     ])
     if (mergedSet.size === 0) {
@@ -212,7 +273,9 @@ async function resolveChatListCountsContext(req) {
     filter_dep_id,
     filtroAtendenteInformado,
     conversaIdsTransferidas,
+    conversaIdsParticipanteAtivo: Array.isArray(conversaIdsParticipanteAtivo) ? conversaIdsParticipanteAtivo : [],
     grupoIdsPermitidosPorDepartamento,
+    grupoIdsSemDepartamento,
     conversaIdsFilter,
     forceEmptyConversas,
     data_inicio,
@@ -236,7 +299,9 @@ function applyChatListSqlFilters(query, ctx, overrides = {}) {
     filter_dep_id,
     filtroAtendenteInformado,
     conversaIdsTransferidas,
+    conversaIdsParticipanteAtivo,
     grupoIdsPermitidosPorDepartamento,
+    grupoIdsSemDepartamento,
     conversaIdsFilter,
     forceEmptyConversas,
     data_inicio,
@@ -275,8 +340,24 @@ function applyChatListSqlFilters(query, ctx, overrides = {}) {
     parts.push('and(departamento_id.is.null,tipo.is.null)', 'and(departamento_id.is.null,tipo.neq.grupo)')
     pushNonGroupVisibilityParts(parts, 'atendente_id', [user_id])
     pushAllowedGroupIdsPart(parts, grupoIdsPermitidosPorDepartamento)
+    if (deveIncluirGruposSemDepartamentoNoFiltroTodos({
+      isAdmin,
+      filter_dep_id,
+      filtroAtendenteInformado,
+      minhaFilaAtiva,
+      aguardandoClienteAtivo,
+      pagamentoPendenteAtivo,
+      emAtrasoAtivo,
+      hojeAtivo,
+      statusNorm,
+    })) {
+      pushAllowedGroupIdsPart(parts, grupoIdsSemDepartamento)
+    }
     if (conversaIdsTransferidas.length > 0) {
       parts.push(`id.in.(${conversaIdsTransferidas.join(',')})`)
+    }
+    if (conversaIdsParticipanteAtivo.length > 0) {
+      parts.push(`id.in.(${conversaIdsParticipanteAtivo.join(',')})`)
     }
     q = q.or(parts.join(','))
   } else if (filter_dep_id) {
@@ -308,17 +389,25 @@ function applyChatListSqlFilters(query, ctx, overrides = {}) {
   if (minhaFilaAtiva) {
     q = q.or('tipo.is.null,tipo.neq.grupo')
     q = q.or(
-      `status_atendimento.eq.aberta,and(status_atendimento.eq.em_atendimento,atendente_id.eq.${user_id}),and(status_atendimento.eq.aguardando_cliente,atendente_id.eq.${user_id}),and(status_atendimento.eq.pagamento_pendente,atendente_id.eq.${user_id}),and(status_atendimento.eq.em_atraso,atendente_id.eq.${user_id})`
+      `status_atendimento.eq.aberta,and(status_atendimento.eq.em_atendimento,atendente_id.eq.${user_id}),and(status_atendimento.eq.aguardando_cliente,atendente_id.eq.${user_id}),and(status_atendimento.eq.pagamento_pendente,atendente_id.eq.${user_id}),and(status_atendimento.eq.em_atraso,atendente_id.eq.${user_id})${conversaIdsParticipanteAtivo.length > 0 ? `,and(status_atendimento.in.(em_atendimento,aguardando_cliente,pagamento_pendente,em_atraso),id.in.(${conversaIdsParticipanteAtivo.join(',')}))` : ''}`
     )
   } else if (pagamentoPendenteAtivo) {
     q = q.eq('status_atendimento', 'pagamento_pendente')
     q = q.not('atendente_id', 'is', null)
-    if (isAtendente) q = q.eq('atendente_id', Number(user_id))
+    if (isAtendente) {
+      q = conversaIdsParticipanteAtivo.length > 0
+        ? q.or(`atendente_id.eq.${Number(user_id)},id.in.(${conversaIdsParticipanteAtivo.join(',')})`)
+        : q.eq('atendente_id', Number(user_id))
+    }
     else if (filtroAtendenteInformado != null) q = q.eq('atendente_id', Number(filtroAtendenteInformado))
   } else if (emAtrasoAtivo) {
     q = q.eq('status_atendimento', 'em_atraso')
     q = q.not('atendente_id', 'is', null)
-    if (isAtendente) q = q.eq('atendente_id', Number(user_id))
+    if (isAtendente) {
+      q = conversaIdsParticipanteAtivo.length > 0
+        ? q.or(`atendente_id.eq.${Number(user_id)},id.in.(${conversaIdsParticipanteAtivo.join(',')})`)
+        : q.eq('atendente_id', Number(user_id))
+    }
     else if (filtroAtendenteInformado != null) q = q.eq('atendente_id', Number(filtroAtendenteInformado))
   } else if (statusNorm === 'mensagem_disparada') {
     q = q.eq('status_atendimento', 'mensagem_disparada')
@@ -352,7 +441,11 @@ function applyChatListSqlFilters(query, ctx, overrides = {}) {
       'and(status_atendimento.eq.em_atendimento,aguardando_cliente_desde.not.is.null),status_atendimento.eq.aguardando_cliente'
     )
     q = q.not('atendente_id', 'is', null)
-    if (isAtendente) q = q.eq('atendente_id', Number(user_id))
+    if (isAtendente) {
+      q = conversaIdsParticipanteAtivo.length > 0
+        ? q.or(`atendente_id.eq.${Number(user_id)},id.in.(${conversaIdsParticipanteAtivo.join(',')})`)
+        : q.eq('atendente_id', Number(user_id))
+    }
     else if (filtroAtendenteInformado != null) q = q.eq('atendente_id', Number(filtroAtendenteInformado))
   }
 
@@ -379,13 +472,17 @@ function rowVisibleInPostFilteredList(row, ctx, overrides = {}) {
   const status = String(row.status_atendimento || '').trim().toLowerCase()
   const atendenteId = row.atendente_id != null ? Number(row.atendente_id) : null
   const userId = ctx?.user_id != null ? Number(ctx.user_id) : null
+  const participanteSet = new Set((ctx?.conversaIdsParticipanteAtivo || []).map(Number))
+  const vinculadaAoUsuario =
+    (Number.isFinite(atendenteId) && Number.isFinite(userId) && atendenteId === userId) ||
+    participanteSet.has(Number(row.id))
   const filtroAtendente =
     ctx?.filtroAtendenteInformado != null ? Number(ctx.filtroAtendenteInformado) : null
 
   if (overrides.minha_fila === true) {
     if (isGroup) return false
     if (['em_atendimento', 'aguardando_cliente', 'pagamento_pendente', 'em_atraso'].includes(status)) {
-      return Number.isFinite(atendenteId) && Number.isFinite(userId) && atendenteId === userId
+      return vinculadaAoUsuario
     }
     if (status === 'aberta') {
       const livreOuMeu = atendenteId == null || (Number.isFinite(userId) && atendenteId === userId)
@@ -401,7 +498,7 @@ function rowVisibleInPostFilteredList(row, ctx, overrides = {}) {
 
   if (overrides.status_atendimento === 'em_atendimento' && !overrides.aguardando_cliente) {
     if (isGroup) return false
-    if (ctx?.isAtendente) return status === 'em_atendimento'
+    if (ctx?.isAtendente) return status === 'em_atendimento' && vinculadaAoUsuario
     if (filtroAtendente != null && atendenteId !== filtroAtendente) return false
     return status === 'em_atendimento' || status === 'aguardando_cliente'
   }

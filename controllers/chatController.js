@@ -31,6 +31,7 @@ const { buildClienteSearchOr, buildTelefoneSearchOr, escapeIlikePattern } = requ
 const {
   getGrupoDepartamentoIds,
   getGrupoIdsPorDepartamentos,
+  getGrupoIdsSemDepartamento,
   usuarioPodeVerGrupo,
   pushNonGroupVisibilityParts,
   pushAllowedGroupIdsPart,
@@ -613,6 +614,9 @@ async function assertPermissaoConversa({ company_id, conversa_id, user_id, role,
 
   // REGRA PRINCIPAL: Se a conversa está assumida pelo usuário, SEMPRE permitir acesso total
   if (!isGroup && isAssignedToUser) return { ok: true, conv, reason: 'conversa_assumida_pelo_usuario' }
+  if (!isGroup && conv.atendente_id && await usuarioParticipaAtivamenteDaConversa(company_id, conversa_id, user_id)) {
+    return { ok: true, conv, reason: 'usuario_participante_conversa' }
+  }
   if (r === 'admin') return { ok: true, conv }
 
   // EXCEÇÃO: usuário transferiu a conversa para outro — vê independente do setor
@@ -711,6 +715,10 @@ async function assertPodeEnviarMensagem({
   const isAssignedToUser = conv.atendente_id && Number(conv.atendente_id) === Number(user_id)
   if (isAssignedToUser) {
     return { ok: true, reason: 'conversa_assumida_pelo_usuario' }
+  }
+
+  if (conv.atendente_id && await usuarioParticipaAtivamenteDaConversa(company_id, conversa_id, user_id)) {
+    return { ok: true, reason: 'usuario_participante_conversa' }
   }
 
   if (!conv.atendente_id) {
@@ -863,6 +871,63 @@ function invalidateConversaVisibilityCache(company_id, conversa_id) {
   conversaVisibilityCache.delete(conversaVisibilityCacheKey(company_id, conversa_id))
 }
 
+function isConversaAtendentesMissingTable(error) {
+  const msg = String(error?.message || error || '').toLowerCase()
+  const code = String(error?.code || '')
+  return code === '42P01' || code === 'PGRST205' || msg.includes('conversa_atendentes') && msg.includes('does not exist')
+}
+
+async function getConversaParticipanteIdsAtivos(company_id, conversa_id) {
+  if (company_id == null || conversa_id == null) return []
+  const { data, error } = await supabase
+    .from('conversa_atendentes')
+    .select('usuario_id')
+    .eq('company_id', Number(company_id))
+    .eq('conversa_id', Number(conversa_id))
+    .eq('ativo', true)
+  if (error) {
+    if (isConversaAtendentesMissingTable(error)) return []
+    throw error
+  }
+  return [...new Set((data || []).map((row) => Number(row.usuario_id)).filter((n) => Number.isFinite(n) && n > 0))]
+}
+
+async function getConversaIdsParticipanteAtivo(company_id, usuario_id) {
+  if (company_id == null || usuario_id == null) return []
+  const limit = getChatFilterIdLimit()
+  const { data, error } = await supabase
+    .from('conversa_atendentes')
+    .select('conversa_id')
+    .eq('company_id', Number(company_id))
+    .eq('usuario_id', Number(usuario_id))
+    .eq('ativo', true)
+    .order('criado_em', { ascending: false })
+    .limit(limit)
+  if (error) {
+    if (isConversaAtendentesMissingTable(error)) return []
+    throw error
+  }
+  return [...new Set((data || []).map((row) => Number(row.conversa_id)).filter((n) => Number.isFinite(n) && n > 0))]
+}
+
+async function usuarioParticipaAtivamenteDaConversa(company_id, conversa_id, usuario_id) {
+  if (company_id == null || conversa_id == null || usuario_id == null) return false
+  const { data, error } = await supabase
+    .from('conversa_atendentes')
+    .select('id')
+    .eq('company_id', Number(company_id))
+    .eq('conversa_id', Number(conversa_id))
+    .eq('usuario_id', Number(usuario_id))
+    .eq('ativo', true)
+    .limit(1)
+    .maybeSingle()
+  if (error) {
+    if (isConversaAtendentesMissingTable(error)) return false
+    throw error
+  }
+  return !!data
+}
+
 function payloadAlteraVisibilidadeConversa(payload) {
   if (!payload || typeof payload !== 'object') return false
   return (
@@ -870,6 +935,30 @@ function payloadAlteraVisibilidadeConversa(payload) {
     Object.prototype.hasOwnProperty.call(payload, 'atendente_id') ||
     Object.prototype.hasOwnProperty.call(payload, 'tipo') ||
     Object.prototype.hasOwnProperty.call(payload, 'departamento_grupos')
+  )
+}
+
+function deveIncluirGruposSemDepartamentoNoFiltroTodos({
+  isAdmin,
+  filter_dep_id,
+  filtroAtendenteInformado,
+  minhaFilaAtiva,
+  aguardandoClienteAtivo,
+  pagamentoPendenteAtivo,
+  emAtrasoAtivo,
+  hojeAtivo,
+  statusNorm,
+}) {
+  return (
+    !isAdmin &&
+    !filter_dep_id &&
+    filtroAtendenteInformado == null &&
+    !minhaFilaAtiva &&
+    !aguardandoClienteAtivo &&
+    !pagamentoPendenteAtivo &&
+    !emAtrasoAtivo &&
+    !hojeAtivo &&
+    !statusNorm
   )
 }
 
@@ -895,6 +984,7 @@ async function carregarUsuarioIdsQuePodemVerConversaSemCache(company_id, convers
     .eq('conversa_id', Number(conversa_id))
     .eq('acao', 'transferiu')
   const transferiuIds = new Set((transferiuRows || []).map((r) => Number(r.de_usuario_id)).filter(Boolean))
+  const participanteIds = new Set(await getConversaParticipanteIdsAtivos(company_id, conversa_id))
 
   const { data: usuarios } = await supabase
     .from('usuarios')
@@ -923,10 +1013,11 @@ async function carregarUsuarioIdsQuePodemVerConversaSemCache(company_id, convers
     if (isAdmin) { ids.push(uid); continue }
     const userDepIds = userDepMap.get(uid) ?? (u.departamento_id != null ? [Number(u.departamento_id)] : [])
     if (isGroup) {
-      if (userDepIds.some((d) => grupoDepSet.has(Number(d)))) ids.push(uid)
+      if (grupoDepSet.size === 0 || userDepIds.some((d) => grupoDepSet.has(Number(d)))) ids.push(uid)
       continue
     }
     if (atendenteId && uid === atendenteId) { ids.push(uid); continue }
+    if (participanteIds.has(uid)) { ids.push(uid); continue }
     if (transferiuIds.has(uid)) { ids.push(uid); continue }
     if (convDep == null) ids.push(uid)
     else if (userDepIds.some((d) => Number(d) === Number(convDep))) ids.push(uid)
@@ -1222,6 +1313,7 @@ exports.listarConversas = async (req, res) => {
 
     // Exceção: conversas que o usuário transferiu para outro — aparecem na lista independente do setor
     let conversaIdsTransferidas = []
+    let conversaIdsParticipanteAtivo = []
     if (!isAdmin) {
       const transferLimit = getChatFilterIdLimit()
       const { data: transferRows } = await supabase
@@ -1233,7 +1325,9 @@ exports.listarConversas = async (req, res) => {
         .order('criado_em', { ascending: false })
         .limit(transferLimit)
       conversaIdsTransferidas = [...new Set((transferRows || []).map((r) => Number(r.conversa_id)).filter(Boolean))]
+      conversaIdsParticipanteAtivo = await getConversaIdsParticipanteAtivo(company_id, user_id)
     }
+    const conversaIdsParticipanteAtivoSet = new Set(conversaIdsParticipanteAtivo.map(Number))
 
     let grupoIdsPermitidosPorDepartamento = []
     if (!isAdmin) {
@@ -1241,6 +1335,19 @@ exports.listarConversas = async (req, res) => {
     } else if (filter_dep_id) {
       grupoIdsPermitidosPorDepartamento = await getGrupoIdsPorDepartamentos(company_id, [filter_dep_id])
     }
+    const incluirGruposSemDepartamentoNoTodos = deveIncluirGruposSemDepartamentoNoFiltroTodos({
+      isAdmin,
+      filter_dep_id,
+      filtroAtendenteInformado,
+      minhaFilaAtiva,
+      aguardandoClienteAtivo,
+      pagamentoPendenteAtivo,
+      emAtrasoAtivo,
+      hojeAtivo,
+      statusNorm,
+    })
+    const grupoIdsSemDepartamento =
+      incluirGruposSemDepartamentoNoTodos ? await getGrupoIdsSemDepartamento(company_id) : []
 
     let conversaIdsFilter = null
     let forceEmptyConversas = false
@@ -1293,22 +1400,32 @@ exports.listarConversas = async (req, res) => {
         .ilike('nome_grupo', term)
         .order('ultima_atividade', { ascending: false, nullsFirst: false })
         .limit(searchIdLimit)
+      const convByNomeContatoCachePromise = supabase
+        .from('conversas')
+        .select('id')
+        .eq('company_id', company_id)
+        .ilike('nome_contato_cache', term)
+        .order('ultima_atividade', { ascending: false, nullsFirst: false })
+        .limit(searchIdLimit)
       const msgMatchPromise = buscarConversaIdsPorTextoMensagens({ company_id, term })
       const [
         { data: convByCliente },
         { data: convByTelefone },
         { data: convByNomeGrupo },
+        { data: convByNomeContatoCache },
         idsFromMsg,
       ] = await Promise.all([
         convByClientePromise,
         convByTelefonePromise,
         convByNomeGrupoPromise,
+        convByNomeContatoCachePromise,
         msgMatchPromise,
       ])
       const idsFromCliente = (convByCliente || []).map((c) => c.id)
       const idsFromTel = (convByTelefone || []).map((c) => c.id)
       const idsFromGrupo = (convByNomeGrupo || []).map((c) => c.id)
-      const mergedSet = new Set([...idsFromCliente, ...idsFromTel, ...idsFromGrupo, ...idsFromMsg])
+      const idsFromNomeCache = (convByNomeContatoCache || []).map((c) => c.id)
+      const mergedSet = new Set([...idsFromCliente, ...idsFromTel, ...idsFromGrupo, ...idsFromNomeCache, ...idsFromMsg])
       const merged = [...mergedSet]
       if (merged.length === 0) {
         if (shouldIncludeClientesSemConversa({ incluirTodosClientesAtivo, palavraTrim })) {
@@ -1456,8 +1573,12 @@ exports.listarConversas = async (req, res) => {
         parts.push('and(departamento_id.is.null,tipo.is.null)', 'and(departamento_id.is.null,tipo.neq.grupo)')
         pushNonGroupVisibilityParts(parts, 'atendente_id', [user_id])
         pushAllowedGroupIdsPart(parts, grupoIdsPermitidosPorDepartamento)
+        pushAllowedGroupIdsPart(parts, grupoIdsSemDepartamento)
         if (conversaIdsTransferidas.length > 0) {
           parts.push(`id.in.(${conversaIdsTransferidas.join(',')})`)
+        }
+        if (conversaIdsParticipanteAtivo.length > 0) {
+          parts.push(`id.in.(${conversaIdsParticipanteAtivo.join(',')})`)
         }
         q = q.or(parts.join(','))
       } else if (filter_dep_id) {
@@ -1492,13 +1613,15 @@ exports.listarConversas = async (req, res) => {
           q = q.or('tipo.is.null,tipo.neq.grupo')
         }
         q = q.or(
-          `${incluirGruposSetor ? 'tipo.eq.grupo,' : ''}status_atendimento.eq.aberta,and(status_atendimento.eq.em_atendimento,atendente_id.eq.${user_id}),and(status_atendimento.eq.aguardando_cliente,atendente_id.eq.${user_id}),and(status_atendimento.eq.pagamento_pendente,atendente_id.eq.${user_id}),and(status_atendimento.eq.em_atraso,atendente_id.eq.${user_id})`
+          `${incluirGruposSetor ? `id.in.(${grupoIdsPermitidosPorDepartamento.join(',')}),` : ''}status_atendimento.eq.aberta,and(status_atendimento.eq.em_atendimento,atendente_id.eq.${user_id}),and(status_atendimento.eq.aguardando_cliente,atendente_id.eq.${user_id}),and(status_atendimento.eq.pagamento_pendente,atendente_id.eq.${user_id}),and(status_atendimento.eq.em_atraso,atendente_id.eq.${user_id})${conversaIdsParticipanteAtivo.length > 0 ? `,and(status_atendimento.in.(em_atendimento,aguardando_cliente,pagamento_pendente,em_atraso),id.in.(${conversaIdsParticipanteAtivo.join(',')}))` : ''}`
         )
       } else if (pagamentoPendenteAtivo) {
         q = q.eq('status_atendimento', 'pagamento_pendente')
         q = q.not('atendente_id', 'is', null)
         if (isAtendente) {
-          q = q.eq('atendente_id', Number(user_id))
+          q = conversaIdsParticipanteAtivo.length > 0
+            ? q.or(`atendente_id.eq.${Number(user_id)},id.in.(${conversaIdsParticipanteAtivo.join(',')})`)
+            : q.eq('atendente_id', Number(user_id))
         } else if (filtroAtendenteInformado != null) {
           q = q.eq('atendente_id', Number(filtroAtendenteInformado))
         }
@@ -1506,7 +1629,9 @@ exports.listarConversas = async (req, res) => {
         q = q.eq('status_atendimento', 'em_atraso')
         q = q.not('atendente_id', 'is', null)
         if (isAtendente) {
-          q = q.eq('atendente_id', Number(user_id))
+          q = conversaIdsParticipanteAtivo.length > 0
+            ? q.or(`atendente_id.eq.${Number(user_id)},id.in.(${conversaIdsParticipanteAtivo.join(',')})`)
+            : q.eq('atendente_id', Number(user_id))
         } else if (filtroAtendenteInformado != null) {
           q = q.eq('atendente_id', Number(filtroAtendenteInformado))
         }
@@ -1547,7 +1672,9 @@ exports.listarConversas = async (req, res) => {
         )
         q = q.not('atendente_id', 'is', null)
         if (isAtendente) {
-          q = q.eq('atendente_id', Number(user_id))
+          q = conversaIdsParticipanteAtivo.length > 0
+            ? q.or(`atendente_id.eq.${Number(user_id)},id.in.(${conversaIdsParticipanteAtivo.join(',')})`)
+            : q.eq('atendente_id', Number(user_id))
         } else if (filtroAtendenteInformado != null) {
           q = q.eq('atendente_id', Number(filtroAtendenteInformado))
         }
@@ -1583,6 +1710,9 @@ exports.listarConversas = async (req, res) => {
       filter_dep_id,
       filtroAtendenteInformado,
       conversaIdsTransferidas,
+      conversaIdsParticipanteAtivo,
+      grupoIdsPermitidosPorDepartamento,
+      grupoIdsSemDepartamento,
       conversaIdsFilter,
       forceEmptyConversas,
       data_inicio,
@@ -1930,7 +2060,12 @@ exports.listarConversas = async (req, res) => {
       conversasFormatadas = conversasFormatadas.filter((c) => {
         if (c.sem_conversa || c.is_group) return false
         const st = String(c.status_atendimento_real || '')
-        if (isAtendente) return st === 'em_atendimento'
+        if (isAtendente) {
+          const vinculadaAoUsuario =
+            Number(c.atendente_id) === Number(user_id) ||
+            conversaIdsParticipanteAtivoSet.has(Number(c.id))
+          return st === 'em_atendimento' && vinculadaAoUsuario
+        }
         if (filtroAtendenteInformado != null && Number(c.atendente_id) !== Number(filtroAtendenteInformado)) return false
         return st === 'em_atendimento' || st === 'aguardando_cliente'
       })
@@ -1949,7 +2084,7 @@ exports.listarConversas = async (req, res) => {
           c.status_atendimento === 'pagamento_pendente' ||
           c.status_atendimento === 'em_atraso'
         ) {
-          return Number(c.atendente_id) === Number(user_id)
+          return Number(c.atendente_id) === Number(user_id) || conversaIdsParticipanteAtivoSet.has(Number(c.id))
         }
         if (c.status_atendimento === 'aberta') {
           const livreOuMeu = c.atendente_id == null || Number(c.atendente_id) === Number(user_id)
@@ -1968,7 +2103,11 @@ exports.listarConversas = async (req, res) => {
         : Number(filtroAtendenteInformado)
       conversasFormatadas = conversasFormatadas.filter((c) => {
         if (c.sem_conversa || c.is_group) return false
-        if (restringirPorAtendente && Number(c.atendente_id) !== atendenteEscopoAguardando) return false
+        if (
+          restringirPorAtendente &&
+          Number(c.atendente_id) !== atendenteEscopoAguardando &&
+          !(isAtendente && conversaIdsParticipanteAtivoSet.has(Number(c.id)))
+        ) return false
         const statusReal = String(c.status_atendimento_real || '')
         const aguardandoAuto = statusReal === 'em_atendimento' && c.aguardando_cliente_desde != null
         const aguardandoManual = statusReal === 'aguardando_cliente'
@@ -1981,7 +2120,11 @@ exports.listarConversas = async (req, res) => {
       const atendenteEscopo = isAtendente ? Number(user_id) : Number(filtroAtendenteInformado)
       conversasFormatadas = conversasFormatadas.filter((c) => {
         if (c.sem_conversa || c.is_group) return false
-        if (restringirPorAtendente && Number(c.atendente_id) !== atendenteEscopo) return false
+        if (
+          restringirPorAtendente &&
+          Number(c.atendente_id) !== atendenteEscopo &&
+          !(isAtendente && conversaIdsParticipanteAtivoSet.has(Number(c.id)))
+        ) return false
         return String(c.status_atendimento_real || '') === 'pagamento_pendente'
       })
     }
@@ -1991,7 +2134,11 @@ exports.listarConversas = async (req, res) => {
       const atendenteEscopo = isAtendente ? Number(user_id) : Number(filtroAtendenteInformado)
       conversasFormatadas = conversasFormatadas.filter((c) => {
         if (c.sem_conversa || c.is_group) return false
-        if (restringirPorAtendente && Number(c.atendente_id) !== atendenteEscopo) return false
+        if (
+          restringirPorAtendente &&
+          Number(c.atendente_id) !== atendenteEscopo &&
+          !(isAtendente && conversaIdsParticipanteAtivoSet.has(Number(c.id)))
+        ) return false
         return String(c.status_atendimento_real || '') === 'em_atraso'
       })
     }
@@ -3689,6 +3836,13 @@ exports.detalharChat = async (req, res) => {
     // ao apenas abrir o chat sem mensagens. O status real do BD segue em `status_atendimento_real`.
     const statusDetalheReal = isGroup ? null : conversa.status_atendimento
     const statusDetalheLista = statusAtendimentoParaLista(isGroup, conversa.status_atendimento, exibirBadgeAberta)
+    let mensagensFormatadas = (mensagens || []).reverse()
+    try {
+      mensagensFormatadas = await enrichMensagensComAutorUsuario(supabase, company_id, mensagensFormatadas, user_id)
+    } catch (enrichErr) {
+      console.warn('[detalharChat] enriquecer mensagens:', enrichErr?.message || enrichErr)
+    }
+
     const conversaFormatada = {
       ...conversa,
       whatsapp_instance_id: conversa.whatsapp_instance_id ?? null,
@@ -3714,7 +3868,7 @@ exports.detalharChat = async (req, res) => {
       atendente_nome: conversa.usuarios?.nome ?? null,
       setor: conversa.departamentos?.nome ?? null,
       tags: (conversa.conversa_tags || []).map((ct) => ct.tags).filter(Boolean),
-      mensagens: await enrichMensagensComAutorUsuario(supabase, company_id, (mensagens || []).reverse(), user_id),
+      mensagens: mensagensFormatadas,
       next_cursor:
         hasMoreFromDb && oldestDbRow
           ? normalizarTimestampSemFusoAmbiguoParaApi(oldestDbRow.criado_em)
@@ -3724,7 +3878,11 @@ exports.detalharChat = async (req, res) => {
       mensagens_bloqueadas: deveBloquearMensagens || undefined
     }
 
-    await enrichConversasReabertaFaltaInteracao(company_id, [conversaFormatada])
+    try {
+      await enrichConversasReabertaFaltaInteracao(company_id, [conversaFormatada])
+    } catch (reabertaErr) {
+      console.warn('[detalharChat] enriquecer reaberta falta interacao:', reabertaErr?.message || reabertaErr)
+    }
 
     // ✅ emite SOMENTE mensagens_lidas (não dispara atualizar lista ao abrir)
     const io = req.app.get('io')
@@ -4456,6 +4614,230 @@ exports.transferirChat = async (req, res) => {
 // =====================================================
 // transferirSetor — altera departamento da conversa e registra no histórico
 // =====================================================
+// =====================================================
+// participantes do atendimento (nao transfere atendente principal)
+// =====================================================
+exports.listarAtendentesDisponiveisConversa = async (req, res) => {
+  try {
+    const { company_id, id: user_id, perfil, departamento_ids = [] } = req.user
+    const { id: conversa_id } = req.params
+
+    const perm = await assertPermissaoConversa({ company_id, conversa_id, user_id, role: perfil, user_dep_ids: departamento_ids })
+    if (!perm.ok) return res.status(perm.status).json({ error: perm.error })
+    if (perm.conv && isGroupConversation(perm.conv)) {
+      return res.status(400).json({ error: 'Nao e possivel adicionar atendente em conversa de grupo.' })
+    }
+
+    const participanteIds = new Set(await getConversaParticipanteIdsAtivos(company_id, conversa_id))
+    if (perm.conv?.atendente_id != null) participanteIds.add(Number(perm.conv.atendente_id))
+
+    const { data, error } = await supabase
+      .from('usuarios')
+      .select('id, nome, email, perfil, departamento_id')
+      .eq('company_id', Number(company_id))
+      .eq('ativo', true)
+      .order('nome', { ascending: true })
+
+    if (error) return res.status(500).json({ error: error.message })
+
+    return res.json((data || [])
+      .filter((u) => ['atendente', 'supervisor', 'admin'].includes(String(u.perfil || '').toLowerCase()))
+      .filter((u) => !participanteIds.has(Number(u.id)))
+      .map((u) => ({
+        usuario_id: Number(u.id),
+        id: Number(u.id),
+        nome: u.nome || null,
+        email: u.email || null,
+        perfil: u.perfil || null,
+        departamento_id: u.departamento_id ?? null,
+      })))
+  } catch (err) {
+    console.error(err)
+    return res.status(500).json({ error: 'Erro ao listar atendentes disponiveis' })
+  }
+}
+
+exports.listarAtendentesConversa = async (req, res) => {
+  try {
+    const { company_id, id: user_id, perfil, departamento_ids = [] } = req.user
+    const { id: conversa_id } = req.params
+
+    const perm = await assertPermissaoConversa({ company_id, conversa_id, user_id, role: perfil, user_dep_ids: departamento_ids })
+    if (!perm.ok) return res.status(perm.status).json({ error: perm.error })
+
+    const { data: participantes, error } = await supabase
+      .from('conversa_atendentes')
+      .select('id, usuario_id, adicionado_por, ativo, criado_em')
+      .eq('company_id', Number(company_id))
+      .eq('conversa_id', Number(conversa_id))
+      .eq('ativo', true)
+      .order('criado_em', { ascending: true })
+
+    if (error) {
+      if (isConversaAtendentesMissingTable(error)) return res.json([])
+      return res.status(500).json({ error: error.message })
+    }
+
+    const ids = [...new Set([
+      ...(perm.conv?.atendente_id != null ? [Number(perm.conv.atendente_id)] : []),
+      ...(participantes || []).map((p) => Number(p.usuario_id)),
+      ...(participantes || []).map((p) => Number(p.adicionado_por)).filter(Boolean),
+    ])]
+
+    let userMap = new Map()
+    if (ids.length > 0) {
+      const { data: usuarios } = await supabase
+        .from('usuarios')
+        .select('id, nome, email, perfil')
+        .eq('company_id', Number(company_id))
+        .in('id', ids)
+      userMap = new Map((usuarios || []).map((u) => [Number(u.id), u]))
+    }
+
+    const principal = perm.conv?.atendente_id != null
+      ? [{
+          usuario_id: Number(perm.conv.atendente_id),
+          id: null,
+          tipo: 'principal',
+          ativo: true,
+          criado_em: null,
+          usuario: userMap.get(Number(perm.conv.atendente_id)) || null,
+          adicionado_por_usuario: null,
+        }]
+      : []
+
+    const adicionais = (participantes || []).map((p) => ({
+      id: Number(p.id),
+      usuario_id: Number(p.usuario_id),
+      tipo: 'participante',
+      ativo: p.ativo === true,
+      criado_em: p.criado_em,
+      usuario: userMap.get(Number(p.usuario_id)) || null,
+      adicionado_por_usuario: p.adicionado_por ? (userMap.get(Number(p.adicionado_por)) || null) : null,
+    }))
+
+    return res.json([...principal, ...adicionais])
+  } catch (err) {
+    console.error(err)
+    return res.status(500).json({ error: 'Erro ao listar atendentes da conversa' })
+  }
+}
+
+exports.adicionarAtendenteConversa = async (req, res) => {
+  try {
+    const { company_id, id: user_id, perfil, departamento_ids = [] } = req.user
+    const { id: conversa_id } = req.params
+    const usuario_id = Number(req.body?.usuario_id ?? req.body?.para_usuario_id)
+
+    if (!Number.isInteger(usuario_id) || usuario_id <= 0) {
+      return res.status(400).json({ error: 'usuario_id e obrigatorio' })
+    }
+
+    const perm = await assertPermissaoConversa({ company_id, conversa_id, user_id, role: perfil, user_dep_ids: departamento_ids })
+    if (!perm.ok) return res.status(perm.status).json({ error: perm.error })
+    if (perm.conv && isGroupConversation(perm.conv)) {
+      return res.status(400).json({ error: 'Nao e possivel adicionar atendente em conversa de grupo.' })
+    }
+    if (isClosedAttendanceStatus(perm.conv?.status_atendimento)) {
+      return res.status(409).json({ error: 'Reabra a conversa antes de adicionar atendente.' })
+    }
+    if (!perm.conv?.atendente_id) {
+      return res.status(409).json({ error: 'Assuma a conversa antes de adicionar outro atendente.' })
+    }
+    if (perm.conv?.atendente_id && Number(perm.conv.atendente_id) === usuario_id) {
+      return res.status(409).json({ error: 'Este atendente ja e o responsavel principal da conversa.' })
+    }
+
+    const { data: targetUser, error: userError } = await supabase
+      .from('usuarios')
+      .select('id, nome, email, perfil, ativo')
+      .eq('company_id', Number(company_id))
+      .eq('id', usuario_id)
+      .eq('ativo', true)
+      .maybeSingle()
+
+    if (userError) return res.status(500).json({ error: 'Erro ao validar atendente' })
+    if (!targetUser) return res.status(404).json({ error: 'Atendente nao encontrado ou inativo' })
+
+    const perfilDestino = String(targetUser.perfil || '').toLowerCase()
+    if (!['atendente', 'supervisor', 'admin'].includes(perfilDestino)) {
+      return res.status(400).json({ error: 'Usuario selecionado nao possui perfil de atendimento' })
+    }
+
+    if (await usuarioParticipaAtivamenteDaConversa(company_id, conversa_id, usuario_id)) {
+      return res.status(409).json({ error: 'Este atendente ja participa da conversa.' })
+    }
+
+    const { data: inserted, error: insertError } = await supabase
+      .from('conversa_atendentes')
+      .insert({
+        company_id: Number(company_id),
+        conversa_id: Number(conversa_id),
+        usuario_id,
+        adicionado_por: Number(user_id),
+        ativo: true,
+      })
+      .select('id, company_id, conversa_id, usuario_id, adicionado_por, ativo, criado_em')
+      .single()
+
+    if (insertError) {
+      if (String(insertError?.code || '') === '23505') {
+        return res.status(409).json({ error: 'Este atendente ja participa da conversa.' })
+      }
+      return res.status(500).json({ error: insertError.message })
+    }
+
+    const { data: fromUser } = await supabase
+      .from('usuarios')
+      .select('nome')
+      .eq('company_id', Number(company_id))
+      .eq('id', Number(user_id))
+      .maybeSingle()
+    const fromNome = (fromUser?.nome && String(fromUser.nome).trim()) || 'Atendente'
+    const targetNome = (targetUser?.nome && String(targetUser.nome).trim()) || 'atendente'
+
+    await registrarAtendimento({
+      conversa_id,
+      company_id,
+      acao: 'adicionou_atendente',
+      de_usuario_id: user_id,
+      para_usuario_id: usuario_id,
+      observacao: `${fromNome} adicionou ${targetNome} ao atendimento.`,
+    })
+
+    invalidateConversaVisibilityCache(company_id, conversa_id)
+
+    const io = req.app.get('io')
+    if (io) {
+      const payload = {
+        conversa_id: Number(conversa_id),
+        company_id: Number(company_id),
+        usuario_id,
+        adicionado_por: Number(user_id),
+        participante: inserted,
+        lista_realtime: { minha_fila: true, motivo: 'atendente_adicionado' },
+      }
+      emitirParaUsuario(io, usuario_id, 'conversa_atendente_adicionado', payload)
+      emitirConversaAtualizada(io, company_id, conversa_id, { id: Number(conversa_id), company_id: Number(company_id) })
+      emitirSincronizacaoListaConversas(io, company_id, conversa_id)
+    }
+
+    return res.status(201).json({
+      ok: true,
+      participante: inserted,
+      usuario: {
+        id: Number(targetUser.id),
+        nome: targetUser.nome || null,
+        email: targetUser.email || null,
+        perfil: targetUser.perfil || null,
+      },
+    })
+  } catch (err) {
+    console.error(err)
+    return res.status(500).json({ error: 'Erro ao adicionar atendente a conversa' })
+  }
+}
+
 exports.transferirSetor = async (req, res) => {
   try {
     const { company_id, id: user_id, perfil, departamento_ids = [] } = req.user
@@ -5722,21 +6104,35 @@ exports.excluirMensagem = async (req, res) => {
       }
     }
 
-    // Apagar no WhatsApp (UltraMsg) se houver whatsapp_id e provider suportar
+    // Apagar no WhatsApp (UltraMsg) antes de alterar o histórico local.
+    // Se o provedor não confirmar a remoção, não marcamos como "apagada para todos" no sistema.
     const provider = getProvider()
     const isLidTelefone = String(conversa?.telefone || '').trim().toLowerCase().startsWith('lid:')
-    if (provider?.deleteMessage && msg?.whatsapp_id && conversa?.telefone && !isLidTelefone) {
-      try {
-        const delInstanceId = conversa.whatsapp_instance_id
-          ? await resolveConversationWhatsappInstance(company_id, conversa)
-          : null
-        await provider.deleteMessage(conversa.telefone, msg.whatsapp_id, {
-          companyId: company_id,
-          ...(delInstanceId ? { whatsappInstanceId: delInstanceId } : {}),
-        })
-      } catch (e) {
-        console.warn('[excluirMensagem] deleteMessage no WhatsApp:', e?.message || e)
+    if (!provider?.deleteMessage) {
+      return res.status(502).json({ error: 'O provedor WhatsApp atual não suporta apagar mensagem para todos.' })
+    }
+    if (!msg?.whatsapp_id) {
+      return res.status(409).json({ error: 'Mensagem ainda não possui ID do WhatsApp para apagar para todos.' })
+    }
+    if (!conversa?.telefone || isLidTelefone) {
+      return res.status(409).json({ error: 'Não foi possível apagar no WhatsApp: telefone da conversa indisponível.' })
+    }
+
+    try {
+      const delInstanceId = conversa.whatsapp_instance_id
+        ? await resolveConversationWhatsappInstance(company_id, conversa)
+        : null
+      const deleteResult = await provider.deleteMessage(conversa.telefone, msg.whatsapp_id, {
+        companyId: company_id,
+        ...(delInstanceId ? { whatsappInstanceId: delInstanceId } : {}),
+      })
+      const apagouNoWhatsapp = deleteResult === true || deleteResult?.ok === true
+      if (!apagouNoWhatsapp) {
+        return res.status(502).json({ error: 'O WhatsApp não confirmou a remoção da mensagem. Tente novamente.' })
       }
+    } catch (e) {
+      console.warn('[excluirMensagem] deleteMessage no WhatsApp:', e?.message || e)
+      return res.status(502).json({ error: 'Falha ao apagar a mensagem no WhatsApp. Tente novamente.' })
     }
 
     const textoRevogado = textoRevogadoApagadaParaTodos(msg, user_id)
