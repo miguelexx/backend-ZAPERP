@@ -1482,11 +1482,17 @@ exports.listarConversas = async (req, res) => {
       ) {
         q = q.or('tipo.eq.grupo,status_atendimento.neq.mensagem_disparada,status_atendimento.is.null')
       }
-      // Filtro personalizado "Minha fila": abertas (fila) + em atendimento só comigo; sem grupos; sem finalizadas
+      // Filtro personalizado "Minha fila": abertas (fila) + em atendimento só comigo + grupos do setor fixados; sem finalizadas
       if (minhaFilaAtiva) {
-        q = q.or('tipo.is.null,tipo.neq.grupo')
+        // Grupos vinculados ao setor do atendente (departamento_grupos) aparecem fixados na Minha fila.
+        // O bloco de visibilidade acima já restringe quais grupos o atendente pode ver.
+        // Admin ou usuário sem grupos vinculados: comportamento original (excluir grupos).
+        const incluirGruposSetor = !isAdmin && grupoIdsPermitidosPorDepartamento.length > 0
+        if (!incluirGruposSetor) {
+          q = q.or('tipo.is.null,tipo.neq.grupo')
+        }
         q = q.or(
-          `status_atendimento.eq.aberta,and(status_atendimento.eq.em_atendimento,atendente_id.eq.${user_id}),and(status_atendimento.eq.aguardando_cliente,atendente_id.eq.${user_id}),and(status_atendimento.eq.pagamento_pendente,atendente_id.eq.${user_id}),and(status_atendimento.eq.em_atraso,atendente_id.eq.${user_id})`
+          `${incluirGruposSetor ? 'tipo.eq.grupo,' : ''}status_atendimento.eq.aberta,and(status_atendimento.eq.em_atendimento,atendente_id.eq.${user_id}),and(status_atendimento.eq.aguardando_cliente,atendente_id.eq.${user_id}),and(status_atendimento.eq.pagamento_pendente,atendente_id.eq.${user_id}),and(status_atendimento.eq.em_atraso,atendente_id.eq.${user_id})`
         )
       } else if (pagamentoPendenteAtivo) {
         q = q.eq('status_atendimento', 'pagamento_pendente')
@@ -1930,10 +1936,12 @@ exports.listarConversas = async (req, res) => {
       })
     }
 
-    // "Minha fila": alinha com abas Abertas + Em atendimento só do usuário (exclui finalizadas e assumidas por outros)
+    // "Minha fila": alinha com abas Abertas + Em atendimento só do usuário + grupos do setor fixados; exclui finalizadas e assumidas por outros
     if (minhaFilaAtiva) {
       conversasFormatadas = conversasFormatadas.filter((c) => {
-        if (c.sem_conversa || c.is_group) return false
+        if (c.sem_conversa) return false
+        // Grupos do setor do atendente: sempre visíveis na Minha fila (visibilidade já restrita na query pelo bloco de departamento_grupos)
+        if (c.is_group) return true
         if (c.status_atendimento === 'ociosa') return false
         if (
           c.status_atendimento === 'em_atendimento' ||
