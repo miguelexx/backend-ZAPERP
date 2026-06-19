@@ -5,7 +5,6 @@ const {
 describe('reabertaFaltaInteracaoHelper', () => {
   it('só marca reaberta quando gestor foi notificado e conversa reaberta', () => {
     expect(resolveReabertaPorFaltaInteracao({ reaberta_por_falta_interacao: true })).toBe(true)
-    expect(resolveReabertaPorFaltaInteracao({ reaberta_falta_interacao_em: '2026-06-08T12:00:00Z' })).toBe(true)
     expect(
       resolveReabertaPorFaltaInteracao({
         reaberta_em: '2026-06-08T12:00:00Z',
@@ -21,6 +20,7 @@ describe('reabertaFaltaInteracaoHelper', () => {
       })
     ).toBe(false)
     expect(resolveReabertaPorFaltaInteracao({ reaberta_em: '2026-06-08T12:00:00Z' })).toBe(false)
+    expect(resolveReabertaPorFaltaInteracao({ reaberta_falta_interacao_em: '2026-06-08T12:00:00Z' })).toBe(false)
     expect(resolveReabertaPorFaltaInteracao({ status_atendimento: 'aberta' })).toBe(false)
   })
 })

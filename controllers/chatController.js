@@ -661,10 +661,58 @@ async function assertPermissaoConversa({ company_id, conversa_id, user_id, role,
  * - Grupos: qualquer usuário pode enviar sem assumir.
  * - Demais conversas: só quem assumiu (atendente_id === user_id), inclusive admin.
  */
-async function assertPodeEnviarMensagem({ company_id, conversa_id, user_id, role = null, user_dep_ids = [] }) {
+const BOT_LOGS_URA_ATIVA = ['menu_enviado', 'menu_reenviado', 'opcao_invalida', 'opcao_valida']
+
+async function conversaTemUraAtiva(company_id, conversa_id) {
+  try {
+    const { data, error } = await supabase
+      .from('bot_logs')
+      .select('id')
+      .eq('company_id', Number(company_id))
+      .eq('conversa_id', Number(conversa_id))
+      .in('tipo', BOT_LOGS_URA_ATIVA)
+      .limit(1)
+      .maybeSingle()
+    if (error) {
+      console.warn('[intervencao_ura] erro ao verificar bot_logs:', error.message || error)
+      return false
+    }
+    return !!data
+  } catch (err) {
+    console.warn('[intervencao_ura] falha ao verificar bot_logs:', err?.message || err)
+    return false
+  }
+}
+
+async function registrarIntervencaoHumanaUra({ company_id, conversa_id, user_id }) {
+  try {
+    await supabase.from('bot_logs').insert({
+      company_id: Number(company_id),
+      conversa_id: Number(conversa_id),
+      tipo: 'intervencao_humana',
+      detalhes: {
+        usuario_id: Number(user_id),
+        origem: 'envio_manual',
+        acao: 'assumiu_conversa_antes_do_envio'
+      }
+    })
+  } catch (err) {
+    console.warn('[intervencao_ura] falha ao registrar bot_logs:', err?.message || err)
+  }
+}
+
+async function assertPodeEnviarMensagem({
+  company_id,
+  conversa_id,
+  user_id,
+  role = null,
+  user_dep_ids = [],
+  autoAssumirUra = false,
+  io = null,
+}) {
   const { data: conv, error } = await supabase
     .from('conversas')
-    .select('id, atendente_id, tipo, telefone, status_atendimento, whatsapp_instance_id')
+    .select('id, atendente_id, departamento_id, tipo, telefone, status_atendimento, whatsapp_instance_id')
     .eq('company_id', Number(company_id))
     .eq('id', Number(conversa_id))
     .maybeSingle()
@@ -698,6 +746,30 @@ async function assertPodeEnviarMensagem({ company_id, conversa_id, user_id, role
   }
 
   if (!conv.atendente_id) {
+    const conversaSemDestino = conv.departamento_id == null
+    if (autoAssumirUra && conversaSemDestino) {
+      const temUraAtiva = await conversaTemUraAtiva(company_id, conversa_id)
+      if (temUraAtiva) {
+        const result = await executarAssumirConversa({
+          company_id,
+          conversa_id,
+          user_id,
+          perfil: role,
+          departamento_ids: user_dep_ids,
+          observacao: 'Intervencao humana na URA: conversa assumida antes do envio manual.'
+        })
+        if (!result.ok) return { ok: false, status: result.status, error: result.error }
+
+        await registrarIntervencaoHumanaUra({ company_id, conversa_id, user_id })
+        if (io) emitirRealtimeAposAssumir(io, company_id, conversa_id, user_id, result.conversa)
+
+        return {
+          ok: true,
+          reason: result.already_assigned ? 'intervencao_ura_ja_assumida_pelo_usuario' : 'intervencao_humana_ura',
+          conversa: result.conversa,
+        }
+      }
+    }
     return { ok: false, status: 403, error: 'Assuma a conversa antes de enviar mensagens' }
   }
 
@@ -2837,7 +2909,6 @@ exports.vincularClienteConversa = async (req, res) => {
       departamento_id: conversa.departamento_id,
     }
 
-    const io = req.app.get('io')
     if (io) {
       emitirConversaAtualizada(io, company_id, conversa_id, payload, { skipAtualizarConversa: true })
     }
@@ -2921,7 +2992,6 @@ exports.atualizarNomeContato = async (req, res) => {
       ...(clienteId ? { cliente_id: clienteId } : {}),
     }
 
-    const io = req.app.get('io')
     if (io) {
       emitirConversaAtualizada(io, company_id, conversa_id, payload, { skipAtualizarConversa: true })
     }
@@ -3044,7 +3114,6 @@ exports.patchConversaPrefs = async (req, res) => {
       return res.status(500).json({ error: error.message })
     }
 
-    const io = req.app.get('io')
     if (io) {
       emitirParaUsuario(io, user_id, 'conversa_prefs_atualizada', {
         conversa_id,
@@ -4677,7 +4746,16 @@ exports.enviarMensagemChat = async (req, res) => {
       return res.status(400).json({ error: 'texto é obrigatório' })
     }
 
-    const permEnvio = await assertPodeEnviarMensagem({ company_id, conversa_id, user_id, role: req.user?.perfil, user_dep_ids: req.user?.departamento_ids })
+    const io = req.app.get('io')
+    const permEnvio = await assertPodeEnviarMensagem({
+      company_id,
+      conversa_id,
+      user_id,
+      role: req.user?.perfil,
+      user_dep_ids: req.user?.departamento_ids,
+      autoAssumirUra: true,
+      io,
+    })
     if (!permEnvio.ok) return res.status(permEnvio.status).json({ error: permEnvio.error })
 
     const { data: conversa, error: errConv } = await supabase
@@ -4825,7 +4903,6 @@ exports.enviarMensagemChat = async (req, res) => {
       }
     } catch (_) {}
 
-    const io = req.app.get('io')
     if (io) {
       const basePayload = { ...msg, id: msg.id, conversa_id: msg.conversa_id ?? Number(conversa_id), status: 'sending', status_mensagem: 'sending', direcao: 'out' }
       const novaMsgPayload = await enrichMensagemComAutorUsuario(supabase, company_id, basePayload)
@@ -5146,7 +5223,16 @@ exports.enviarContatoWhatsapp = async (req, res) => {
       return res.status(400).json({ error: 'cliente_id é obrigatório' })
     }
 
-    const permEnvio = await assertPodeEnviarMensagem({ company_id, conversa_id, user_id, role: req.user?.perfil, user_dep_ids: req.user?.departamento_ids })
+    const io = req.app.get('io')
+    const permEnvio = await assertPodeEnviarMensagem({
+      company_id,
+      conversa_id,
+      user_id,
+      role: req.user?.perfil,
+      user_dep_ids: req.user?.departamento_ids,
+      autoAssumirUra: true,
+      io,
+    })
     if (!permEnvio.ok) return res.status(permEnvio.status).json({ error: permEnvio.error })
 
     const { data: conversa, error: errConv } = await supabase
@@ -5269,7 +5355,6 @@ exports.enviarContatoWhatsapp = async (req, res) => {
       .eq('company_id', company_id)
       .eq('id', msg.id)
 
-    const io = req.app.get('io')
     if (io) {
       const payload = await enrichMensagemComAutorUsuario(supabase, company_id, { ...msg, status: nextStatus, whatsapp_id: waMessageId || null })
       emitirEventoEmpresaConversa(io, company_id, conversa_id, io.EVENTS?.NOVA_MENSAGEM || 'nova_mensagem', payload)
@@ -5318,7 +5403,16 @@ exports.enviarLocalizacao = async (req, res) => {
     const nomePlace = String(nomeRaw || '').trim().slice(0, 200) || null
     const endereco = String(addressRaw || '').trim().slice(0, 500) || null
 
-    const permEnvio = await assertPodeEnviarMensagem({ company_id, conversa_id, user_id, role: req.user?.perfil, user_dep_ids: req.user?.departamento_ids })
+    const io = req.app.get('io')
+    const permEnvio = await assertPodeEnviarMensagem({
+      company_id,
+      conversa_id,
+      user_id,
+      role: req.user?.perfil,
+      user_dep_ids: req.user?.departamento_ids,
+      autoAssumirUra: true,
+      io,
+    })
     if (!permEnvio.ok) return res.status(permEnvio.status).json({ error: permEnvio.error })
 
     const { data: conversa, error: errConv } = await supabase
@@ -5444,7 +5538,6 @@ exports.enviarLocalizacao = async (req, res) => {
       .eq('company_id', company_id)
       .eq('id', msg.id)
 
-    const io = req.app.get('io')
     if (io) {
       const payload = await enrichMensagemComAutorUsuario(supabase, company_id, { ...msg, status: nextStatus, whatsapp_id: waMessageId || null, location_meta: msg.location_meta || location_meta })
       emitirEventoEmpresaConversa(io, company_id, conversa_id, io.EVENTS?.NOVA_MENSAGEM || 'nova_mensagem', payload)
@@ -5488,7 +5581,16 @@ exports.enviarLigacaoWhatsapp = async (req, res) => {
     const { id: conversa_id } = req.params
     const { callDuration } = req.body || {}
 
-    const permEnvio = await assertPodeEnviarMensagem({ company_id, conversa_id, user_id, role: req.user?.perfil, user_dep_ids: req.user?.departamento_ids })
+    const io = req.app.get('io')
+    const permEnvio = await assertPodeEnviarMensagem({
+      company_id,
+      conversa_id,
+      user_id,
+      role: req.user?.perfil,
+      user_dep_ids: req.user?.departamento_ids,
+      autoAssumirUra: true,
+      io,
+    })
     if (!permEnvio.ok) return res.status(permEnvio.status).json({ error: permEnvio.error })
 
     const { data: conversa, error: errConv } = await supabase
@@ -5550,7 +5652,6 @@ exports.enviarLigacaoWhatsapp = async (req, res) => {
       .eq('company_id', company_id)
       .eq('id', msg.id)
 
-    const io = req.app.get('io')
     if (io) {
       const payload = await enrichMensagemComAutorUsuario(supabase, company_id, { ...msg, status: nextStatus, whatsapp_id: waMessageId || null })
       emitirEventoEmpresaConversa(io, company_id, conversa_id, io.EVENTS?.NOVA_MENSAGEM || 'nova_mensagem', payload)
@@ -6521,7 +6622,15 @@ exports.enviarArquivo = async (req, res) => {
       return res.status(400).json({ error: `Máximo ${MAX_ARQUIVOS_LOTE_ENVIO} arquivos por envio.` })
     }
 
-    const permEnvio = await assertPodeEnviarMensagem({ company_id, conversa_id, user_id, role: req.user?.perfil, user_dep_ids: req.user?.departamento_ids })
+    const permEnvio = await assertPodeEnviarMensagem({
+      company_id,
+      conversa_id,
+      user_id,
+      role: req.user?.perfil,
+      user_dep_ids: req.user?.departamento_ids,
+      autoAssumirUra: true,
+      io,
+    })
     if (!permEnvio.ok) return res.status(permEnvio.status).json({ error: permEnvio.error })
 
     const { data: conversa } = await supabase
@@ -6982,7 +7091,16 @@ exports.encaminharMensagem = async (req, res) => {
       return res.status(400).json({ error: `No máximo ${MAX_ENC_AMINHAR_LOTE} mensagens por encaminhamento` })
     }
 
-    const permEnvio = await assertPodeEnviarMensagem({ company_id, conversa_id, user_id, role: req.user?.perfil, user_dep_ids: req.user?.departamento_ids })
+    const io = req.app.get('io')
+    const permEnvio = await assertPodeEnviarMensagem({
+      company_id,
+      conversa_id,
+      user_id,
+      role: req.user?.perfil,
+      user_dep_ids: req.user?.departamento_ids,
+      autoAssumirUra: true,
+      io,
+    })
     if (!permEnvio.ok) return res.status(permEnvio.status).json({ error: permEnvio.error })
 
     const { data: mensagensRows, error: errMsg } = await supabase
@@ -7037,7 +7155,6 @@ exports.encaminharMensagem = async (req, res) => {
 
     const { nome: usuarioNome } = await getUsuarioParaEnvioCliente(supabase, company_id, user_id)
 
-    const io = req.app.get('io')
     const resultados = []
     for (let i = 0; i < orderedIds.length; i++) {
       if (i > 0) {

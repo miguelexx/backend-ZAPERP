@@ -44,7 +44,7 @@ exports.putEmpresa = async (req, res) => {
       separar_mensagens_disparadas
     } = req.body
 
-    const FONTES_VALIDAS = new Set(['inter','plus-jakarta-sans','poppins','montserrat','nunito','raleway','playfair-display'])
+    const FONTES_VALIDAS = new Set(['inter','plus-jakarta-sans','poppins','montserrat','orbitron','nunito','raleway','playfair-display'])
 
     const update = {}
     if (nome !== undefined) update.nome = nome

@@ -36,6 +36,7 @@ const {
   logBotAction,
 } = require('../services/chatbotTriageService')
 const { emitBotMensagemRealtime, emitReaberturaSemSetorRealtime } = require('../helpers/chatbotRealtimeEmitter')
+const { clearReabertaFaltaInteracao } = require('../helpers/reabertaFaltaInteracaoHelper')
 const { processarOptOut } = require('../services/optOutService')
 const { processarRegras } = require('../services/regrasAutomaticasService')
 const {
@@ -2143,6 +2144,9 @@ exports.receberZapi = async (req, res) => {
               departamento_id = reabertaAusencia.departamento_id != null ? Number(reabertaAusencia.departamento_id) : null
               conversaReabertaAposFinalizacao = true
               reopenedFromAbsence = true
+              await clearReabertaFaltaInteracao(company_id, conversa_id)
+              reabertaAusencia.reaberta_falta_interacao_em = null
+              reabertaAusencia.reaberta_por_falta_interacao = false
               await supabase.from('historico_atendimentos').insert({
                 conversa_id,
                 usuario_id: null,
@@ -2211,6 +2215,9 @@ exports.receberZapi = async (req, res) => {
             if (reaberta) {
               departamento_id = null
               conversaReabertaAposFinalizacao = true
+              await clearReabertaFaltaInteracao(company_id, conversa_id)
+              reaberta.reaberta_falta_interacao_em = null
+              reaberta.reaberta_por_falta_interacao = false
               const { resetChatbotStateForConversa } = require('../services/chatbotTriageService')
               await resetChatbotStateForConversa(supabase, company_id, conversa_id)
               const io = req.app.get('io')

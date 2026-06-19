@@ -111,6 +111,8 @@ function emitReaberturaSemSetorRealtime({ io, company_id, conversa_id, reabertaR
     ultima_atividade: reabertaRow?.ultima_atividade ?? new Date().toISOString(),
     telefone: reabertaRow?.telefone ?? null,
     exibir_badge_aberta: true,
+    reaberta_por_falta_interacao: reabertaRow?.reaberta_por_falta_interacao === true,
+    reaberta_falta_interacao_em: reabertaRow?.reaberta_falta_interacao_em ?? null,
     reordenar_suave: true,
   }
   io.to(`empresa_${company_id}`).emit('atualizar_conversa', { id: cid })

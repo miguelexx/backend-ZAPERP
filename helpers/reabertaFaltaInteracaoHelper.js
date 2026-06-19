@@ -11,9 +11,32 @@ function isMissingColumnError(err, column) {
 
 function resolveReabertaPorFaltaInteracao(row = {}) {
   if (row.reaberta_por_falta_interacao === true) return true
-  if (row.reaberta_falta_interacao_em) return true
   if (row.reaberta_em && row.gestor_notificado_em) return true
   return false
+}
+
+function truthyConfig(value) {
+  if (value === true || value === 1) return true
+  const s = String(value || '').trim().toLowerCase()
+  return s === 'true' || s === '1' || s === 'on' || s === 'ativo'
+}
+
+async function isAlertaSemRespostaAtivo(company_id) {
+  try {
+    const { data, error } = await supabase
+      .from('ia_config')
+      .select('config')
+      .eq('company_id', Number(company_id))
+      .maybeSingle()
+    if (error) return false
+    const cfg = data?.config || {}
+    const alerta = cfg.alerta_sem_resposta && typeof cfg.alerta_sem_resposta === 'object'
+      ? cfg.alerta_sem_resposta
+      : {}
+    return truthyConfig(alerta.alerta_sem_resposta_ativo) || truthyConfig(alerta.ativo)
+  } catch (_) {
+    return false
+  }
 }
 
 async function markReabertaFaltaInteracao(
@@ -87,18 +110,6 @@ async function fetchReabertaGestorConversaIds(company_id, conversaIds) {
   const ids = [...new Set(conversaIds.map((id) => Number(id)).filter((n) => Number.isFinite(n) && n > 0))]
   if (!ids.length) return flagged
 
-  try {
-    const { data: rows, error } = await supabase
-      .from('conversas')
-      .select('id, reaberta_falta_interacao_em')
-      .eq('company_id', company_id)
-      .in('id', ids)
-      .not('reaberta_falta_interacao_em', 'is', null)
-    if (!error) {
-      for (const row of rows || []) flagged.add(Number(row.id))
-    }
-  } catch (_) {}
-
   const pending = ids.filter((id) => !flagged.has(id))
   if (pending.length) {
     try {
@@ -136,10 +147,6 @@ async function fetchReabertaGestorConversaIds(company_id, conversaIds) {
         for (const cid of reabertas) {
           if (gestores.has(cid)) flagged.add(cid)
         }
-        // Retroativo: gestor notificado + conversa aberta sem atendente (reabertura antiga sem evento conversa_reaberta)
-        for (const cid of stillPending) {
-          if (gestores.has(cid) && !flagged.has(cid)) flagged.add(cid)
-        }
       }
     } catch (_) {}
   }
@@ -174,6 +181,16 @@ function isCandidataReabertaFaltaInteracao(c) {
 async function enrichConversasReabertaFaltaInteracao(company_id, conversas) {
   if (!Array.isArray(conversas) || !conversas.length) return conversas
 
+  const alertaAtivo = await isAlertaSemRespostaAtivo(company_id)
+  if (!alertaAtivo) {
+    for (const c of conversas) {
+      if (!c || c.is_group || c.sem_conversa) continue
+      c.reaberta_por_falta_interacao = false
+      c.reaberta_falta_interacao_em = null
+    }
+    return conversas
+  }
+
   for (const c of conversas) {
     if (c.is_group || c.sem_conversa) continue
     if (resolveReabertaPorFaltaInteracao(c)) {
@@ -205,4 +222,5 @@ module.exports = {
   fetchReabertaGestorConversaIds,
   enrichConversasReabertaFaltaInteracao,
   isCandidataReabertaFaltaInteracao,
+  isAlertaSemRespostaAtivo,
 }
