@@ -3363,15 +3363,22 @@ exports.receberZapi = async (req, res) => {
         // - fromMe=false (recebida do cliente) → frontend DEVE notificar
         // - fromMe=true  (espelhamento: enviada pelo celular) → frontend NÃO deve notificar
         // O campo fromMe e direcao no payload permitem o frontend filtrar corretamente.
-        const emittedScoped = await emitirParaUsuariosQuePodemVerConversa(
-          io,
-          company_id,
-          convIdForEmit,
-          'nova_mensagem',
-          emitPayload
-        )
+        let emittedScoped = false
+        try {
+          emittedScoped = await emitirParaUsuariosQuePodemVerConversa(
+            io,
+            company_id,
+            convIdForEmit,
+            'nova_mensagem',
+            emitPayload
+          )
+        } catch (scopedErr) {
+          console.warn('[webhook] emitirParaUsuariosQuePodemVerConversa nova_mensagem falhou, usando fallback empresa:', scopedErr?.message)
+        }
         if (!emittedScoped) {
-          const rooms = [`conversa_${convIdForEmit}`]
+          // Fallback: garante entrega mesmo se a resolução de visibilidade falhar.
+          // empresa_${company_id} cobre todos os usuários conectados da empresa.
+          const rooms = [`conversa_${convIdForEmit}`, `empresa_${company_id}`]
           if (departamento_id != null) rooms.push(`departamento_${departamento_id}`)
           io.to(rooms).emit('nova_mensagem', emitPayload)
         }
@@ -3394,14 +3401,21 @@ exports.receberZapi = async (req, res) => {
       // — evita refetch que causa duplicação visual e flicker. status_mensagem já atualiza os ticks.
       // Só emitir para mensagens recebidas (inseridas pelo webhook)
       if (!fromMe) {
-        const emittedScoped = await emitirParaUsuariosQuePodemVerConversa(
-          io,
-          company_id,
-          convIdForEmit,
-          'atualizar_conversa',
-          { id: convIdForEmit }
-        )
-        if (!emittedScoped) io.to(`conversa_${convIdForEmit}`).emit('atualizar_conversa', { id: convIdForEmit })
+        let emittedScopedAtualizar = false
+        try {
+          emittedScopedAtualizar = await emitirParaUsuariosQuePodemVerConversa(
+            io,
+            company_id,
+            convIdForEmit,
+            'atualizar_conversa',
+            { id: convIdForEmit }
+          )
+        } catch (scopedAtualizarErr) {
+          console.warn('[webhook] emitirParaUsuariosQuePodemVerConversa atualizar_conversa falhou:', scopedAtualizarErr?.message)
+        }
+        if (!emittedScopedAtualizar) {
+          io.to(`conversa_${convIdForEmit}`).to(`empresa_${company_id}`).emit('atualizar_conversa', { id: convIdForEmit })
+        }
       }
       // conversa_atualizada: priorizar nome do sync (name) sobre cache; fallback nome_contato_cache
       const { data: convRow } = await supabase

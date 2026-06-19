@@ -886,8 +886,10 @@ async function getConversaParticipanteIdsAtivos(company_id, conversa_id) {
     .eq('conversa_id', Number(conversa_id))
     .eq('ativo', true)
   if (error) {
-    if (isConversaAtendentesMissingTable(error)) return []
-    throw error
+    if (!isConversaAtendentesMissingTable(error)) {
+      console.warn('[conversa_atendentes] erro ao buscar participantes (assumindo vazio):', error?.message || error)
+    }
+    return []
   }
   return [...new Set((data || []).map((row) => Number(row.usuario_id)).filter((n) => Number.isFinite(n) && n > 0))]
 }
