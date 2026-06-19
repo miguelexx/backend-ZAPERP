@@ -67,6 +67,8 @@ describe('Autorizacoes criticas de producao', () => {
 describe('Permissao de envio de mensagens', () => {
   beforeEach(() => {
     jest.clearAllMocks()
+    const chain = supabase.from()
+    if (!chain.is) chain.is = jest.fn().mockReturnThis()
   })
 
   it('nao permite enviar em conversa fechada sem reabrir', async () => {
@@ -92,5 +94,79 @@ describe('Permissao de envio de mensagens', () => {
 
     expect(result.ok).toBe(false)
     expect(result.status).toBe(409)
+  })
+
+  it('assume automaticamente conversa sem atendente no primeiro envio manual sem depender de bot_logs', async () => {
+    const { _test } = require('../controllers/chatController')
+    const chain = supabase.from()
+    const conversaInicial = {
+      id: 10,
+      atendente_id: null,
+      departamento_id: null,
+      tipo: null,
+      telefone: '5534999999999',
+      status_atendimento: 'aberta',
+    }
+    const conversaAssumida = {
+      ...conversaInicial,
+      atendente_id: 2,
+      status_atendimento: 'em_atendimento',
+    }
+
+    chain.maybeSingle
+      .mockResolvedValueOnce({ data: conversaInicial, error: null })
+      .mockResolvedValueOnce({ data: null, error: null })
+      .mockResolvedValueOnce({ data: null, error: null })
+      .mockResolvedValueOnce({ data: conversaAssumida, error: null })
+    chain.single
+      .mockResolvedValueOnce({ data: conversaInicial, error: null })
+      .mockResolvedValueOnce({ data: { limite_chats_por_atendente: 0 }, error: null })
+      .mockResolvedValueOnce({ data: { id: 123 }, error: null })
+
+    const result = await _test.assertPodeEnviarMensagem({
+      company_id: 1,
+      conversa_id: 10,
+      user_id: 2,
+      role: 'atendente',
+      user_dep_ids: [],
+      autoAssumirAoEnviar: true,
+    })
+
+    expect(result.ok).toBe(true)
+    expect(result.reason).toBe('auto_assumida_envio_manual')
+    expect(result.conversa).toEqual(expect.objectContaining({
+      atendente_id: 2,
+      status_atendimento: 'em_atendimento',
+    }))
+    expect(supabase.from).not.toHaveBeenCalledWith('bot_logs')
+  })
+
+  it('mantem bloqueio quando conversa sem atendente pertence a setor sem permissao', async () => {
+    const { _test } = require('../controllers/chatController')
+    const chain = supabase.from()
+    const conversaSetorRestrito = {
+      id: 10,
+      atendente_id: null,
+      departamento_id: 99,
+      tipo: null,
+      telefone: '5534999999999',
+      status_atendimento: 'aberta',
+    }
+
+    chain.maybeSingle.mockResolvedValueOnce({ data: conversaSetorRestrito, error: null })
+    chain.single.mockResolvedValueOnce({ data: conversaSetorRestrito, error: null })
+
+    const result = await _test.assertPodeEnviarMensagem({
+      company_id: 1,
+      conversa_id: 10,
+      user_id: 2,
+      role: 'atendente',
+      user_dep_ids: [10],
+      autoAssumirAoEnviar: true,
+    })
+
+    expect(result.ok).toBe(false)
+    expect(result.status).toBe(403)
+    expect(result.error).toBe('Conversa de outro setor')
   })
 })

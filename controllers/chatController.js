@@ -660,45 +660,12 @@ async function assertPermissaoConversa({ company_id, conversa_id, user_id, role,
  * Verifica se o usuário pode ENVIAR mensagens na conversa.
  * - Grupos: qualquer usuário pode enviar sem assumir.
  * - Demais conversas: só quem assumiu (atendente_id === user_id), inclusive admin.
+ * - Quando habilitado pelo caller, conversa sem atendente pode ser assumida
+ *   automaticamente no primeiro envio manual, respeitando setor/perfil/limite.
  */
-const BOT_LOGS_URA_ATIVA = ['menu_enviado', 'menu_reenviado', 'opcao_invalida', 'opcao_valida']
-
-async function conversaTemUraAtiva(company_id, conversa_id) {
-  try {
-    const { data, error } = await supabase
-      .from('bot_logs')
-      .select('id')
-      .eq('company_id', Number(company_id))
-      .eq('conversa_id', Number(conversa_id))
-      .in('tipo', BOT_LOGS_URA_ATIVA)
-      .limit(1)
-      .maybeSingle()
-    if (error) {
-      console.warn('[intervencao_ura] erro ao verificar bot_logs:', error.message || error)
-      return false
-    }
-    return !!data
-  } catch (err) {
-    console.warn('[intervencao_ura] falha ao verificar bot_logs:', err?.message || err)
-    return false
-  }
-}
-
-async function registrarIntervencaoHumanaUra({ company_id, conversa_id, user_id }) {
-  try {
-    await supabase.from('bot_logs').insert({
-      company_id: Number(company_id),
-      conversa_id: Number(conversa_id),
-      tipo: 'intervencao_humana',
-      detalhes: {
-        usuario_id: Number(user_id),
-        origem: 'envio_manual',
-        acao: 'assumiu_conversa_antes_do_envio'
-      }
-    })
-  } catch (err) {
-    console.warn('[intervencao_ura] falha ao registrar bot_logs:', err?.message || err)
-  }
+function podeAssumirConversaPorPerfil(role) {
+  const r = String(role || '').toLowerCase()
+  return r === 'admin' || r === 'supervisor' || r === 'atendente'
 }
 
 async function assertPodeEnviarMensagem({
@@ -708,6 +675,7 @@ async function assertPodeEnviarMensagem({
   role = null,
   user_dep_ids = [],
   autoAssumirUra = false,
+  autoAssumirAoEnviar = false,
   io = null,
 }) {
   const { data: conv, error } = await supabase
@@ -746,28 +714,27 @@ async function assertPodeEnviarMensagem({
   }
 
   if (!conv.atendente_id) {
-    const conversaSemDestino = conv.departamento_id == null
-    if (autoAssumirUra && conversaSemDestino) {
-      const temUraAtiva = await conversaTemUraAtiva(company_id, conversa_id)
-      if (temUraAtiva) {
-        const result = await executarAssumirConversa({
-          company_id,
-          conversa_id,
-          user_id,
-          perfil: role,
-          departamento_ids: user_dep_ids,
-          observacao: 'Intervencao humana na URA: conversa assumida antes do envio manual.'
-        })
-        if (!result.ok) return { ok: false, status: result.status, error: result.error }
+    const deveAutoAssumir = autoAssumirAoEnviar || autoAssumirUra
+    if (deveAutoAssumir) {
+      if (!podeAssumirConversaPorPerfil(role)) {
+        return { ok: false, status: 403, error: 'Seu perfil não permite assumir conversas' }
+      }
+      const result = await executarAssumirConversa({
+        company_id,
+        conversa_id,
+        user_id,
+        perfil: role,
+        departamento_ids: user_dep_ids,
+        observacao: 'Conversa assumida automaticamente no primeiro envio manual.'
+      })
+      if (!result.ok) return { ok: false, status: result.status, error: result.error }
 
-        await registrarIntervencaoHumanaUra({ company_id, conversa_id, user_id })
-        if (io) emitirRealtimeAposAssumir(io, company_id, conversa_id, user_id, result.conversa)
+      if (io) emitirRealtimeAposAssumir(io, company_id, conversa_id, user_id, result.conversa)
 
-        return {
-          ok: true,
-          reason: result.already_assigned ? 'intervencao_ura_ja_assumida_pelo_usuario' : 'intervencao_humana_ura',
-          conversa: result.conversa,
-        }
+      return {
+        ok: true,
+        reason: result.already_assigned ? 'auto_assumida_ja_estava_com_usuario' : 'auto_assumida_envio_manual',
+        conversa: result.conversa,
       }
     }
     return { ok: false, status: 403, error: 'Assuma a conversa antes de enviar mensagens' }
@@ -4753,7 +4720,7 @@ exports.enviarMensagemChat = async (req, res) => {
       user_id,
       role: req.user?.perfil,
       user_dep_ids: req.user?.departamento_ids,
-      autoAssumirUra: true,
+      autoAssumirAoEnviar: true,
       io,
     })
     if (!permEnvio.ok) return res.status(permEnvio.status).json({ error: permEnvio.error })
@@ -5230,7 +5197,7 @@ exports.enviarContatoWhatsapp = async (req, res) => {
       user_id,
       role: req.user?.perfil,
       user_dep_ids: req.user?.departamento_ids,
-      autoAssumirUra: true,
+      autoAssumirAoEnviar: true,
       io,
     })
     if (!permEnvio.ok) return res.status(permEnvio.status).json({ error: permEnvio.error })
@@ -5410,7 +5377,7 @@ exports.enviarLocalizacao = async (req, res) => {
       user_id,
       role: req.user?.perfil,
       user_dep_ids: req.user?.departamento_ids,
-      autoAssumirUra: true,
+      autoAssumirAoEnviar: true,
       io,
     })
     if (!permEnvio.ok) return res.status(permEnvio.status).json({ error: permEnvio.error })
@@ -5588,7 +5555,7 @@ exports.enviarLigacaoWhatsapp = async (req, res) => {
       user_id,
       role: req.user?.perfil,
       user_dep_ids: req.user?.departamento_ids,
-      autoAssumirUra: true,
+      autoAssumirAoEnviar: true,
       io,
     })
     if (!permEnvio.ok) return res.status(permEnvio.status).json({ error: permEnvio.error })
@@ -6628,7 +6595,7 @@ exports.enviarArquivo = async (req, res) => {
       user_id,
       role: req.user?.perfil,
       user_dep_ids: req.user?.departamento_ids,
-      autoAssumirUra: true,
+      autoAssumirAoEnviar: true,
       io,
     })
     if (!permEnvio.ok) return res.status(permEnvio.status).json({ error: permEnvio.error })
@@ -7098,7 +7065,7 @@ exports.encaminharMensagem = async (req, res) => {
       user_id,
       role: req.user?.perfil,
       user_dep_ids: req.user?.departamento_ids,
-      autoAssumirUra: true,
+      autoAssumirAoEnviar: true,
       io,
     })
     if (!permEnvio.ok) return res.status(permEnvio.status).json({ error: permEnvio.error })
