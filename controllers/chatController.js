@@ -4844,32 +4844,40 @@ exports.adicionarAtendenteConversa = async (req, res) => {
     const fromNome = (fromUser?.nome && String(fromUser.nome).trim()) || 'Atendente'
     const targetNome = (targetUser?.nome && String(targetUser.nome).trim()) || 'atendente'
 
-    const resultAt = await registrarAtendimento({
-      conversa_id,
-      company_id,
-      acao: 'adicionou_atendente',
-      de_usuario_id: user_id,
-      para_usuario_id: usuario_id,
-      observacao: `${fromNome} adicionou ${targetNome} ao atendimento.`,
-    })
-    if (resultAt?.error) {
-      console.warn('[adicionarAtendenteConversa] historico nao registrado:', resultAt.error?.message || resultAt.error)
+    try {
+      const resultAt = await registrarAtendimento({
+        conversa_id,
+        company_id,
+        acao: 'adicionou_atendente',
+        de_usuario_id: fromUser?.id != null ? user_id : null,
+        para_usuario_id: usuario_id,
+        observacao: `${fromNome} adicionou ${targetNome} ao atendimento.`,
+      })
+      if (resultAt?.error) {
+        console.warn('[adicionarAtendenteConversa] historico nao registrado:', resultAt.error?.message || resultAt.error)
+      }
+    } catch (historyError) {
+      console.warn('[adicionarAtendenteConversa] historico falhou sem bloquear resposta:', historyError?.message || historyError)
     }
 
     invalidateConversaVisibilityCache(company_id, conversa_id)
 
-    const io = req.app.get('io')
-    if (io) {
-      const payload = {
-        conversa_id: Number(conversa_id),
-        company_id: Number(company_id),
-        usuario_id,
-        adicionado_por: Number(user_id),
-        participante: inserted,
-        lista_realtime: { minha_fila: true, motivo: 'atendente_adicionado' },
+    try {
+      const io = req.app.get('io')
+      if (io) {
+        const payload = {
+          conversa_id: Number(conversa_id),
+          company_id: Number(company_id),
+          usuario_id,
+          adicionado_por: fromUser?.id != null ? Number(user_id) : null,
+          participante: inserted,
+          lista_realtime: { minha_fila: true, motivo: 'atendente_adicionado' },
+        }
+        emitirParaUsuario(io, usuario_id, 'conversa_atendente_adicionado', payload)
+        emitirConversaAtualizada(io, company_id, conversa_id, { id: Number(conversa_id), company_id: Number(company_id) })
       }
-      emitirParaUsuario(io, usuario_id, 'conversa_atendente_adicionado', payload)
-      emitirConversaAtualizada(io, company_id, conversa_id, { id: Number(conversa_id), company_id: Number(company_id) })
+    } catch (realtimeError) {
+      console.warn('[adicionarAtendenteConversa] realtime falhou sem bloquear resposta:', realtimeError?.message || realtimeError)
     }
 
     return res.status(201).json({
