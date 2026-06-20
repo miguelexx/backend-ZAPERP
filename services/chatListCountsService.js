@@ -75,7 +75,17 @@ function parseConversaIdsQuery(raw) {
 function isConversaAtendentesMissingTable(error) {
   const msg = String(error?.message || error || '').toLowerCase()
   const code = String(error?.code || '')
-  return code === '42P01' || code === 'PGRST205' || (msg.includes('conversa_atendentes') && msg.includes('does not exist'))
+  return (
+    code === '42P01' ||
+    code === '42501' ||
+    code === 'PGRST205' ||
+    (msg.includes('conversa_atendentes') &&
+      (msg.includes('does not exist') ||
+        msg.includes('could not find') ||
+        msg.includes('schema cache') ||
+        msg.includes('permission denied'))) ||
+    msg.includes('permission denied for table conversa_atendentes')
+  )
 }
 
 async function getConversaIdsParticipanteAtivo(company_id, usuario_id) {

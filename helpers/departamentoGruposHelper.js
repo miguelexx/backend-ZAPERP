@@ -22,6 +22,22 @@ function isGroupRow(row) {
   return tipo === 'grupo' || tipo === 'group' || telefone.endsWith('@g.us')
 }
 
+function isDepartamentoGruposUnavailable(error) {
+  const msg = String(error?.message || error || '').toLowerCase()
+  const code = String(error?.code || '')
+  return (
+    code === '42P01' ||
+    code === '42501' ||
+    code === 'PGRST205' ||
+    (msg.includes('departamento_grupos') &&
+      (msg.includes('does not exist') ||
+        msg.includes('could not find') ||
+        msg.includes('schema cache') ||
+        msg.includes('permission denied'))) ||
+    msg.includes('permission denied for table departamento_grupos')
+  )
+}
+
 async function getGrupoDepartamentoIds(company_id, conversa_id) {
   const { data, error } = await supabase
     .from('departamento_grupos')
@@ -29,7 +45,10 @@ async function getGrupoDepartamentoIds(company_id, conversa_id) {
     .eq('company_id', Number(company_id))
     .eq('conversa_id', Number(conversa_id))
 
-  if (error) throw error
+  if (error) {
+    if (isDepartamentoGruposUnavailable(error)) return []
+    throw error
+  }
   return normalizePositiveIds((data || []).map((row) => row.departamento_id))
 }
 
@@ -43,7 +62,10 @@ async function getGrupoIdsPorDepartamentos(company_id, departamentoIds) {
     .eq('company_id', Number(company_id))
     .in('departamento_id', depIds)
 
-  if (error) throw error
+  if (error) {
+    if (isDepartamentoGruposUnavailable(error)) return []
+    throw error
+  }
   return normalizePositiveIds((data || []).map((row) => row.conversa_id))
 }
 
@@ -80,7 +102,10 @@ async function getGrupoIdsSemDepartamento(company_id) {
       .eq('company_id', cid)
       .in('conversa_id', chunk)
 
-    if (error) throw error
+    if (error) {
+      if (isDepartamentoGruposUnavailable(error)) return uniqueGrupoIds
+      throw error
+    }
     for (const row of data || []) {
       const id = Number(row.conversa_id)
       if (Number.isFinite(id) && id > 0) vinculados.add(id)
@@ -126,4 +151,5 @@ module.exports = {
   usuarioPodeVerGrupo,
   pushNonGroupVisibilityParts,
   pushAllowedGroupIdsPart,
+  isDepartamentoGruposUnavailable,
 }
