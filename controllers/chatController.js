@@ -899,7 +899,7 @@ async function getConversaParticipanteIdsAtivos(company_id, conversa_id) {
     .eq('conversa_id', Number(conversa_id))
     .eq('ativo', true)
   if (error) {
-    if (!isConversaAtendentesMissingTable(error)) {
+    if (!isConversaAtendentesSchemaMissing(error)) {
       console.warn('[conversa_atendentes] erro ao buscar participantes (assumindo vazio):', error?.message || error)
     }
     return []
@@ -919,7 +919,7 @@ async function getConversaIdsParticipanteAtivo(company_id, usuario_id) {
     .order('criado_em', { ascending: false })
     .limit(limit)
   if (error) {
-    if (isConversaAtendentesMissingTable(error)) return []
+    if (isConversaAtendentesSchemaMissing(error)) return []
     throw error
   }
   return [...new Set((data || []).map((row) => Number(row.conversa_id)).filter((n) => Number.isFinite(n) && n > 0))]
@@ -937,7 +937,7 @@ async function usuarioParticipaAtivamenteDaConversa(company_id, conversa_id, usu
     .limit(1)
     .maybeSingle()
   if (error) {
-    if (isConversaAtendentesMissingTable(error)) return false
+    if (isConversaAtendentesSchemaMissing(error)) return false
     throw error
   }
   return !!data
@@ -7656,4 +7656,6 @@ exports._test = {
   getChatSearchIdLimit,
   getChatFilterIdLimit,
   resolveConversationWhatsappInstance,
+  isConversaAtendentesSchemaMissing,
+  isConversaAtendentesMissingTable,
 }
