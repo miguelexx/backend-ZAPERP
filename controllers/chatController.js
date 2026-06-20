@@ -890,6 +890,12 @@ function isConversaAtendentesSchemaMissing(error) {
   )
 }
 
+function isConversaAtendentesAdicionadoPorFkError(error) {
+  const msg = String(error?.message || error || '').toLowerCase()
+  const code = String(error?.code || '')
+  return code === '23503' && msg.includes('conversa_atendentes') && msg.includes('adicionado_por')
+}
+
 async function getConversaParticipanteIdsAtivos(company_id, conversa_id) {
   if (company_id == null || conversa_id == null) return []
   const { data, error } = await supabase
@@ -4787,17 +4793,41 @@ exports.adicionarAtendenteConversa = async (req, res) => {
       return res.status(409).json({ error: 'Este atendente ja participa da conversa.' })
     }
 
-    const { data: inserted, error: insertError } = await supabase
+    const { data: fromUser, error: fromUserError } = await supabase
+      .from('usuarios')
+      .select('id, nome')
+      .eq('company_id', Number(company_id))
+      .eq('id', Number(user_id))
+      .maybeSingle()
+    if (fromUserError) {
+      console.warn('[adicionarAtendenteConversa] adicionador nao validado:', fromUserError?.message || fromUserError)
+    }
+    const adicionadoPor = fromUser?.id != null ? Number(user_id) : null
+
+    const insertPayload = {
+      company_id: Number(company_id),
+      conversa_id: Number(conversa_id),
+      usuario_id,
+      adicionado_por: adicionadoPor,
+      ativo: true,
+    }
+
+    let { data: inserted, error: insertError } = await supabase
       .from('conversa_atendentes')
-      .insert({
-        company_id: Number(company_id),
-        conversa_id: Number(conversa_id),
-        usuario_id,
-        adicionado_por: Number(user_id),
-        ativo: true,
-      })
+      .insert(insertPayload)
       .select('id, company_id, conversa_id, usuario_id, adicionado_por, ativo, criado_em')
       .single()
+
+    if (insertError && adicionadoPor != null && isConversaAtendentesAdicionadoPorFkError(insertError)) {
+      console.warn('[adicionarAtendenteConversa] retry sem adicionado_por por FK:', insertError?.message || insertError)
+      const retry = await supabase
+        .from('conversa_atendentes')
+        .insert({ ...insertPayload, adicionado_por: null })
+        .select('id, company_id, conversa_id, usuario_id, adicionado_por, ativo, criado_em')
+        .single()
+      inserted = retry.data
+      insertError = retry.error
+    }
 
     if (insertError) {
       if (String(insertError?.code || '') === '23505') {
@@ -4811,12 +4841,6 @@ exports.adicionarAtendenteConversa = async (req, res) => {
       return res.status(500).json({ error: insertError.message })
     }
 
-    const { data: fromUser } = await supabase
-      .from('usuarios')
-      .select('nome')
-      .eq('company_id', Number(company_id))
-      .eq('id', Number(user_id))
-      .maybeSingle()
     const fromNome = (fromUser?.nome && String(fromUser.nome).trim()) || 'Atendente'
     const targetNome = (targetUser?.nome && String(targetUser.nome).trim()) || 'atendente'
 
@@ -4859,7 +4883,22 @@ exports.adicionarAtendenteConversa = async (req, res) => {
       },
     })
   } catch (err) {
-    console.error(err)
+    console.error('[adicionarAtendenteConversa]', {
+      message: err?.message || String(err),
+      code: err?.code || null,
+      details: err?.details || null,
+      hint: err?.hint || null,
+    })
+    if (isConversaAtendentesSchemaMissing(err)) {
+      return res.status(400).json({
+        error: 'Banco desatualizado: aplique a migration 20260619100000_conversa_atendentes.sql no Supabase antes de adicionar atendentes.',
+      })
+    }
+    if (isConversaAtendentesAdicionadoPorFkError(err)) {
+      return res.status(400).json({
+        error: 'Nao foi possivel validar o usuario logado para registrar quem adicionou o atendente. Faca login novamente e tente outra vez.',
+      })
+    }
     return res.status(500).json({ error: 'Erro ao adicionar atendente a conversa' })
   }
 }
@@ -7658,4 +7697,5 @@ exports._test = {
   resolveConversationWhatsappInstance,
   isConversaAtendentesSchemaMissing,
   isConversaAtendentesMissingTable,
+  isConversaAtendentesAdicionadoPorFkError,
 }

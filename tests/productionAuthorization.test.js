@@ -182,5 +182,9 @@ describe('Compatibilidade de schema para co-atendimento', () => {
     expect(_test.isConversaAtendentesSchemaMissing({
       message: "Could not find the 'adicionado_por' column of 'conversa_atendentes' in the schema cache",
     })).toBe(true)
+    expect(_test.isConversaAtendentesAdicionadoPorFkError({
+      code: '23503',
+      message: 'insert or update on table "conversa_atendentes" violates foreign key constraint "conversa_atendentes_adicionado_por_fkey"',
+    })).toBe(true)
   })
 })
