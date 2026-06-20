@@ -3793,7 +3793,7 @@ exports.detalharChat = async (req, res) => {
       !isGroup && !conversaEncerrada && conversaAssumidaPorOutro && !podeAcessar && !isAdmin && !isSupervisor
 
     // mensagens paginadas (remetente_nome/remetente_telefone para grupos; fallback se colunas não existirem)
-    const selectComRemetente = 'id, conversa_id, texto, direcao, criado_em, autor_usuario_id, status, whatsapp_id, whatsapp_instance_id, tipo, url, nome_arquivo, reply_meta, remetente_nome, remetente_telefone, contact_meta, location_meta, apagada_para_todos, apagada_em'
+    const selectComRemetente = '*'
     let mensagens = []
     let errMsgs = null
     let query
@@ -3815,8 +3815,8 @@ exports.detalharChat = async (req, res) => {
       errMsgs = result.error
     }
     // Compatibilidade: se reply_meta/remetente_*/contact_meta/location_meta não existirem ainda no banco, refaz select sem essas colunas.
-    const selectFallback = 'id, conversa_id, texto, direcao, criado_em, autor_usuario_id, status, whatsapp_id, whatsapp_instance_id, tipo, url, nome_arquivo'
-    if (errMsgs && (String(errMsgs.message || '').includes('reply_meta') || String(errMsgs.message || '').includes('remetente_nome') || String(errMsgs.message || '').includes('remetente_telefone') || String(errMsgs.message || '').includes('contact_meta') || String(errMsgs.message || '').includes('location_meta') || String(errMsgs.message || '').includes('apagada_para_todos') || String(errMsgs.message || '').includes('does not exist'))) {
+    const selectFallback = 'id, conversa_id, texto, direcao, criado_em, autor_usuario_id, status, whatsapp_id, tipo, url, nome_arquivo'
+    if (errMsgs && (String(errMsgs.message || '').includes('schema cache') || String(errMsgs.message || '').includes('does not exist') || String(errMsgs.code || '') === 'PGRST204' || String(errMsgs.code || '') === '42703')) {
       query = supabase
         .from('mensagens')
         .select(selectFallback)
@@ -3830,7 +3830,15 @@ exports.detalharChat = async (req, res) => {
       mensagens = result.data
       errMsgs = result.error
     }
-    if (errMsgs) return res.status(500).json({ error: errMsgs.message })
+    if (errMsgs) {
+      if (conversaEncerrada) {
+        console.warn('[detalharChat] mensagens indisponiveis em conversa encerrada:', errMsgs?.message || errMsgs)
+        mensagens = []
+        errMsgs = null
+      } else {
+        return res.status(500).json({ error: errMsgs.message })
+      }
+    }
 
     const messageHistoryPage = splitMessageHistoryPage(mensagens, limit)
     mensagens = messageHistoryPage.rows
