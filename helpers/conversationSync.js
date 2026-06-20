@@ -215,7 +215,9 @@ async function mergeAndReturnCliente(supabaseClient, company_id, existente, phon
   if (fields.pushname !== undefined && fields.pushname != null && String(fields.pushname).trim()) {
     updates.pushname = String(fields.pushname).trim()
   }
-  if (fields.foto_perfil) updates.foto_perfil = fields.foto_perfil
+  if (fields.foto_perfil && (!existente.foto_perfil || !String(existente.foto_perfil).trim())) {
+    updates.foto_perfil = fields.foto_perfil
+  }
   if (fields.wa_id != null && String(fields.wa_id).trim() && (!existente.wa_id || !String(existente.wa_id).trim())) {
     updates.wa_id = String(fields.wa_id).trim()
   }

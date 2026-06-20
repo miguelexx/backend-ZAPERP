@@ -877,6 +877,19 @@ function isConversaAtendentesMissingTable(error) {
   return code === '42P01' || code === 'PGRST205' || msg.includes('conversa_atendentes') && msg.includes('does not exist')
 }
 
+function isConversaAtendentesSchemaMissing(error) {
+  const msg = String(error?.message || error || '').toLowerCase()
+  const code = String(error?.code || '')
+  return (
+    isConversaAtendentesMissingTable(error) ||
+    code === 'PGRST204' ||
+    code === '42703' ||
+    (msg.includes('conversa_atendentes') && msg.includes('schema cache')) ||
+    (msg.includes('conversa_atendentes') && msg.includes('column')) ||
+    (msg.includes('adicionado_por') && msg.includes('does not exist'))
+  )
+}
+
 async function getConversaParticipanteIdsAtivos(company_id, conversa_id) {
   if (company_id == null || conversa_id == null) return []
   const { data, error } = await supabase
@@ -4584,7 +4597,7 @@ exports.transferirChat = async (req, res) => {
           transferido_por_nome: fromNome,
         })
       } catch (_) {}
-      
+
       // Notificar o usuário que transferiu
       emitirParaUsuario(io, user_id, 'conversa_transferida_sucesso', {
         conversa_id: Number(conversa_id),
@@ -4598,7 +4611,7 @@ exports.transferirChat = async (req, res) => {
           novo_atendente_id: Number(para_usuario_id)
         }
       })
-      
+
       // Linha completa da conversa (setor, nome, status, atendente) para botões e filtros em tempo real
       emitirConversaAtualizada(io, company_id, conversa_id, {
         ...data,
@@ -4786,6 +4799,11 @@ exports.adicionarAtendenteConversa = async (req, res) => {
       if (String(insertError?.code || '') === '23505') {
         return res.status(409).json({ error: 'Este atendente ja participa da conversa.' })
       }
+      if (isConversaAtendentesSchemaMissing(insertError)) {
+        return res.status(400).json({
+          error: 'Banco desatualizado: aplique a migration 20260619100000_conversa_atendentes.sql no Supabase antes de adicionar atendentes.',
+        })
+      }
       return res.status(500).json({ error: insertError.message })
     }
 
@@ -4798,7 +4816,7 @@ exports.adicionarAtendenteConversa = async (req, res) => {
     const fromNome = (fromUser?.nome && String(fromUser.nome).trim()) || 'Atendente'
     const targetNome = (targetUser?.nome && String(targetUser.nome).trim()) || 'atendente'
 
-    await registrarAtendimento({
+    const resultAt = await registrarAtendimento({
       conversa_id,
       company_id,
       acao: 'adicionou_atendente',
@@ -4806,6 +4824,9 @@ exports.adicionarAtendenteConversa = async (req, res) => {
       para_usuario_id: usuario_id,
       observacao: `${fromNome} adicionou ${targetNome} ao atendimento.`,
     })
+    if (resultAt?.error) {
+      console.warn('[adicionarAtendenteConversa] historico nao registrado:', resultAt.error?.message || resultAt.error)
+    }
 
     invalidateConversaVisibilityCache(company_id, conversa_id)
 
@@ -4821,7 +4842,6 @@ exports.adicionarAtendenteConversa = async (req, res) => {
       }
       emitirParaUsuario(io, usuario_id, 'conversa_atendente_adicionado', payload)
       emitirConversaAtualizada(io, company_id, conversa_id, { id: Number(conversa_id), company_id: Number(company_id) })
-      emitirSincronizacaoListaConversas(io, company_id, conversa_id)
     }
 
     return res.status(201).json({

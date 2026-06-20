@@ -53,20 +53,34 @@ async function getGrupoIdsSemDepartamento(company_id) {
 
   const grupoIds = []
   const pageSize = 1000
-  for (let from = 0; ; from += pageSize) {
-    const { data, error } = await supabase
-      .from('conversas')
-      .select('id')
-      .eq('company_id', cid)
-      .eq('tipo', 'grupo')
-      .order('id', { ascending: true })
-      .range(from, from + pageSize - 1)
 
-    if (error) throw error
-    const ids = normalizePositiveIds((data || []).map((row) => row.id))
-    grupoIds.push(...ids)
-    if (!data || data.length < pageSize) break
+  async function appendGrupoIds(buildQuery) {
+    for (let from = 0; ; from += pageSize) {
+      const { data, error } = await buildQuery()
+        .order('id', { ascending: true })
+        .range(from, from + pageSize - 1)
+
+      if (error) throw error
+      const ids = normalizePositiveIds((data || []).filter(isGroupRow).map((row) => row.id))
+      grupoIds.push(...ids)
+      if (!data || data.length < pageSize) break
+    }
   }
+
+  await appendGrupoIds(() =>
+    supabase
+      .from('conversas')
+      .select('id, tipo, telefone')
+      .eq('company_id', cid)
+      .in('tipo', ['grupo', 'group'])
+  )
+  await appendGrupoIds(() =>
+    supabase
+      .from('conversas')
+      .select('id, tipo, telefone')
+      .eq('company_id', cid)
+      .like('telefone', '%@g.us')
+  )
 
   const uniqueGrupoIds = normalizePositiveIds(grupoIds)
   if (uniqueGrupoIds.length === 0) return []
