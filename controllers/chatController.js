@@ -896,15 +896,6 @@ function isConversaAtendentesAdicionadoPorFkError(error) {
   return code === '23503' && msg.includes('conversa_atendentes') && msg.includes('adicionado_por')
 }
 
-function buildAdicionarAtendenteError(error, fallback = 'Erro ao adicionar atendente a conversa') {
-  return {
-    error: error?.message || fallback,
-    code: error?.code || null,
-    details: error?.details || null,
-    hint: error?.hint || null,
-  }
-}
-
 async function getConversaParticipanteIdsAtivos(company_id, conversa_id) {
   if (company_id == null || conversa_id == null) return []
   const { data, error } = await supabase
@@ -4790,10 +4781,7 @@ exports.adicionarAtendenteConversa = async (req, res) => {
       .eq('ativo', true)
       .maybeSingle()
 
-    if (userError) {
-      console.error('[adicionarAtendenteConversa] erro ao validar atendente alvo:', buildAdicionarAtendenteError(userError))
-      return res.status(500).json(buildAdicionarAtendenteError(userError, 'Erro ao validar atendente'))
-    }
+    if (userError) return res.status(500).json({ error: 'Erro ao validar atendente' })
     if (!targetUser) return res.status(404).json({ error: 'Atendente nao encontrado ou inativo' })
 
     const perfilDestino = String(targetUser.perfil || '').toLowerCase()
@@ -4850,47 +4838,38 @@ exports.adicionarAtendenteConversa = async (req, res) => {
           error: 'Banco desatualizado: aplique a migration 20260619100000_conversa_atendentes.sql no Supabase antes de adicionar atendentes.',
         })
       }
-      console.error('[adicionarAtendenteConversa] erro ao inserir participante:', buildAdicionarAtendenteError(insertError))
-      return res.status(500).json(buildAdicionarAtendenteError(insertError))
+      return res.status(500).json({ error: insertError.message })
     }
 
     const fromNome = (fromUser?.nome && String(fromUser.nome).trim()) || 'Atendente'
     const targetNome = (targetUser?.nome && String(targetUser.nome).trim()) || 'atendente'
 
-    try {
-      const resultAt = await registrarAtendimento({
-        conversa_id,
-        company_id,
-        acao: 'adicionou_atendente',
-        de_usuario_id: fromUser?.id != null ? user_id : null,
-        para_usuario_id: usuario_id,
-        observacao: `${fromNome} adicionou ${targetNome} ao atendimento.`,
-      })
-      if (resultAt?.error) {
-        console.warn('[adicionarAtendenteConversa] historico nao registrado:', resultAt.error?.message || resultAt.error)
-      }
-    } catch (historyError) {
-      console.warn('[adicionarAtendenteConversa] historico falhou sem bloquear resposta:', historyError?.message || historyError)
+    const resultAt = await registrarAtendimento({
+      conversa_id,
+      company_id,
+      acao: 'adicionou_atendente',
+      de_usuario_id: user_id,
+      para_usuario_id: usuario_id,
+      observacao: `${fromNome} adicionou ${targetNome} ao atendimento.`,
+    })
+    if (resultAt?.error) {
+      console.warn('[adicionarAtendenteConversa] historico nao registrado:', resultAt.error?.message || resultAt.error)
     }
 
     invalidateConversaVisibilityCache(company_id, conversa_id)
 
-    try {
-      const io = req.app.get('io')
-      if (io) {
-        const payload = {
-          conversa_id: Number(conversa_id),
-          company_id: Number(company_id),
-          usuario_id,
-          adicionado_por: fromUser?.id != null ? Number(user_id) : null,
-          participante: inserted,
-          lista_realtime: { minha_fila: true, motivo: 'atendente_adicionado' },
-        }
-        emitirParaUsuario(io, usuario_id, 'conversa_atendente_adicionado', payload)
-        emitirConversaAtualizada(io, company_id, conversa_id, { id: Number(conversa_id), company_id: Number(company_id) })
+    const io = req.app.get('io')
+    if (io) {
+      const payload = {
+        conversa_id: Number(conversa_id),
+        company_id: Number(company_id),
+        usuario_id,
+        adicionado_por: Number(user_id),
+        participante: inserted,
+        lista_realtime: { minha_fila: true, motivo: 'atendente_adicionado' },
       }
-    } catch (realtimeError) {
-      console.warn('[adicionarAtendenteConversa] realtime falhou sem bloquear resposta:', realtimeError?.message || realtimeError)
+      emitirParaUsuario(io, usuario_id, 'conversa_atendente_adicionado', payload)
+      emitirConversaAtualizada(io, company_id, conversa_id, { id: Number(conversa_id), company_id: Number(company_id) })
     }
 
     return res.status(201).json({
@@ -4920,7 +4899,7 @@ exports.adicionarAtendenteConversa = async (req, res) => {
         error: 'Nao foi possivel validar o usuario logado para registrar quem adicionou o atendente. Faca login novamente e tente outra vez.',
       })
     }
-    return res.status(500).json(buildAdicionarAtendenteError(err))
+    return res.status(500).json({ error: 'Erro ao adicionar atendente a conversa' })
   }
 }
 
