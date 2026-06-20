@@ -23,6 +23,7 @@ router.get('/whatsapp-status', auth, chatController.whatsappStatus)
 router.get('/zapi-status', auth, chatController.whatsappStatus) // alias para compatibilidade
 router.get('/pix-config', auth, chatController.getPixConfig)
 router.put('/pix-config', auth, chatController.putPixConfig)
+router.get('/counts', auth, chatController.contarConversasPorFiltros)
 router.get('/:id', auth, chatController.detalharChat)
 
 // Atendimento: todos os usuários autenticados (regras por setor no controller)

@@ -5563,3 +5563,100 @@ exports.finalizacaoAusenciaLoteAuth = async (req, res) => {
     return res.status(500).json({ error: err.message || 'Erro interno' })
   }
 }
+
+exports.contarConversasPorFiltros = async (req, res) => {
+  const zero = {
+    total: 0,
+    todas: 0,
+    minha_fila: 0,
+    hoje: 0,
+    abertas: 0,
+    em_atendimento: 0,
+    finalizadas: 0,
+    por_ausencia: 0,
+    aguardando_cliente: 0,
+    pagamentos_pendentes: 0,
+    em_atraso: 0,
+    mensagens_disparadas: 0,
+  }
+
+  try {
+    const company_id = Number(req.user?.company_id)
+    const user_id = Number(req.user?.id ?? req.user?.user_id)
+    const role = String(req.user?.perfil || req.user?.role || '').toLowerCase()
+    const isAdmin = role === 'admin'
+    const depIds = Array.isArray(req.user?.departamento_ids)
+      ? req.user.departamento_ids.map(Number).filter(Number.isFinite)
+      : req.user?.departamento_id != null
+        ? [Number(req.user.departamento_id)].filter(Number.isFinite)
+        : []
+
+    if (!Number.isFinite(company_id) || company_id <= 0) return res.json(zero)
+
+    const { data, error } = await supabase
+      .from('conversas')
+      .select('id, status_atendimento, atendente_id, departamento_id, tipo, ultima_atividade, criado_em, finalizacao_motivo, finalizada_automaticamente')
+      .eq('company_id', company_id)
+      .order('ultima_atividade', { ascending: false })
+      .limit(5000)
+
+    if (error) {
+      console.warn('[contarConversasPorFiltros] consulta:', error.message || error)
+      return res.json({ ...zero, degraded: true })
+    }
+
+    const start = new Date()
+    start.setHours(0, 0, 0, 0)
+    const end = new Date()
+    end.setHours(23, 59, 59, 999)
+
+    const rows = (data || []).filter((c) => {
+      if (isAdmin) return true
+      const isGroup = isGroupConversation(c)
+      if (isGroup) return true
+      const convDep = c.departamento_id != null ? Number(c.departamento_id) : null
+      if (convDep == null) return true
+      return depIds.some((id) => Number(id) === convDep)
+    })
+
+    const counts = { ...zero }
+    for (const c of rows) {
+      const isGroup = isGroupConversation(c)
+      const status = String(c.status_atendimento || '').toLowerCase()
+      const atendenteId = c.atendente_id != null ? Number(c.atendente_id) : null
+      const minha = Number.isFinite(user_id) && atendenteId === user_id
+      const atividade = c.ultima_atividade || c.criado_em
+      const dt = atividade ? new Date(atividade) : null
+      const hoje = dt && !Number.isNaN(dt.getTime()) && dt >= start && dt <= end
+
+      counts.total += 1
+      counts.todas += 1
+      if (hoje) counts.hoje += 1
+      if (status === 'aberta') counts.abertas += 1
+      if (status === 'mensagem_disparada') counts.mensagens_disparadas += 1
+      if (status === 'fechada' || status === 'finalizada' || status === 'encerrada') counts.finalizadas += 1
+      if (String(c.finalizacao_motivo || '').toLowerCase() === 'ausencia_cliente' || c.finalizada_automaticamente === true) {
+        counts.por_ausencia += 1
+      }
+      if (status === 'aguardando_cliente') counts.aguardando_cliente += 1
+      if (status === 'pagamento_pendente') counts.pagamentos_pendentes += 1
+      if (status === 'em_atraso') counts.em_atraso += 1
+
+      if (status === 'em_atendimento') {
+        if (isAdmin || role === 'supervisor' || minha || isGroup) counts.em_atendimento += 1
+      }
+
+      if (
+        status === 'aberta' ||
+        (['em_atendimento', 'aguardando_cliente', 'pagamento_pendente', 'em_atraso'].includes(status) && minha)
+      ) {
+        counts.minha_fila += 1
+      }
+    }
+
+    return res.json(counts)
+  } catch (err) {
+    console.warn('[contarConversasPorFiltros]', err?.message || err)
+    return res.json({ ...zero, degraded: true })
+  }
+}

@@ -237,6 +237,7 @@ const produtosRoutes = require('./routes/produtosRoutes')
 const printRoutes = require('./routes/printRoutes')
 const mediaProxyRoutes = require('./routes/mediaProxyRoutes')
 const pushRoutes = require('./routes/pushRoutes')
+const minhasPendenciasRoutes = require('./routes/minhasPendenciasRoutes')
 
 // Webhooks já registrados antes do CORS (evita 403 Origin)
 app.use('/dashboard', dashboardRoutes)
@@ -247,6 +248,7 @@ app.use('/integrations/whatsapp', whatsappIntegrationRoutes)
 app.use('/clientes', clienteRoutes)
 app.use('/usuarios', userRoutes)
 app.use('/chats', chatRoutes)
+app.use('/conversas', minhasPendenciasRoutes)
 app.use('/tags', tagsRoutes)
 app.use('/ai', aiRoutes)
 app.use('/campanhas', campanhaRoutes)
@@ -274,6 +276,7 @@ api.use('/integrations/whatsapp', whatsappIntegrationRoutes)
 api.use('/clientes', clienteRoutes)
 api.use('/usuarios', userRoutes)
 api.use('/chats', chatRoutes)
+api.use('/conversas', minhasPendenciasRoutes)
 api.use('/tags', tagsRoutes)
 api.use('/campanhas', campanhaRoutes)
 api.use('/opt-in', optInRouter)
@@ -343,6 +346,7 @@ if (hasFrontendDist) {
     '/config',
     '/integrations',
     '/clientes',
+    '/conversas',
     '/webhook',
     '/webhooks',
     '/usuarios',
