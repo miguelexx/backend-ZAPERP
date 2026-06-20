@@ -1,11 +1,11 @@
 const path = require('path')
 const { loadEnv } = require('./config/env')
+loadEnv()
 const http = require('http')
 const app = require('./app')
 const { Server } = require('socket.io')
 const jwt = require('jsonwebtoken')
 const supabase = require('./config/supabase')
-loadEnv()
 
 // Diagnóstico: em produção, logs mínimos (nunca expor tokens, senhas ou paths sensíveis)
 if (process.env.NODE_ENV !== 'production') {
