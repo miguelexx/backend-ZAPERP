@@ -67,19 +67,45 @@ function getCanonicalPhoneAnyIntl(phone) {
 async function mergeConversasIntoCanonico(supabaseClient, company_id, canonicalId, dupIds) {
   if (!dupIds || dupIds.length === 0) return
   try {
-    await supabaseClient.from('mensagens').update({ conversa_id: canonicalId }).in('conversa_id', dupIds).eq('company_id', company_id)
-    await supabaseClient.from('conversa_tags').update({ conversa_id: canonicalId }).in('conversa_id', dupIds).eq('company_id', company_id)
-    await supabaseClient.from('atendimentos').update({ conversa_id: canonicalId }).in('conversa_id', dupIds).eq('company_id', company_id)
-    await supabaseClient.from('historico_atendimentos').update({ conversa_id: canonicalId }).in('conversa_id', dupIds)
-    await supabaseClient.from('conversa_unreads').update({ conversa_id: canonicalId }).in('conversa_id', dupIds).eq('company_id', company_id)
-    const del = await supabaseClient.from('conversas').delete().in('id', dupIds).eq('company_id', company_id)
+    const canonicalNumber = Number(canonicalId)
+    const requestedDupIds = [...new Set(
+      dupIds
+        .map((id) => Number(id))
+        .filter((id) => Number.isFinite(id) && id !== canonicalNumber)
+    )]
+
+    if (!company_id || !Number.isFinite(canonicalNumber) || requestedDupIds.length === 0) return
+
+    const { data: scopedConversations, error: scopedError } = await supabaseClient
+      .from('conversas')
+      .select('id')
+      .eq('company_id', company_id)
+      .in('id', [canonicalNumber, ...requestedDupIds])
+
+    if (scopedError) throw scopedError
+
+    const scopedIds = new Set((scopedConversations || []).map((row) => Number(row.id)))
+    if (!scopedIds.has(canonicalNumber)) {
+      console.warn('[conversationSync] merge bloqueado: conversa canonica fora da empresa', { company_id, canonicalId })
+      return
+    }
+
+    const safeDupIds = requestedDupIds.filter((id) => scopedIds.has(id))
+    if (safeDupIds.length === 0) return
+
+    await supabaseClient.from('mensagens').update({ conversa_id: canonicalNumber }).in('conversa_id', safeDupIds).eq('company_id', company_id)
+    await supabaseClient.from('conversa_tags').update({ conversa_id: canonicalNumber }).in('conversa_id', safeDupIds).eq('company_id', company_id)
+    await supabaseClient.from('atendimentos').update({ conversa_id: canonicalNumber }).in('conversa_id', safeDupIds).eq('company_id', company_id)
+    await supabaseClient.from('historico_atendimentos').update({ conversa_id: canonicalNumber }).in('conversa_id', safeDupIds)
+    await supabaseClient.from('conversa_unreads').update({ conversa_id: canonicalNumber }).in('conversa_id', safeDupIds).eq('company_id', company_id)
+    const del = await supabaseClient.from('conversas').delete().in('id', safeDupIds).eq('company_id', company_id)
     if (del.error) {
       await supabaseClient.from('conversas')
         .update({ status_atendimento: 'fechada', lida: true })
-        .in('id', dupIds)
+        .in('id', safeDupIds)
         .eq('company_id', company_id)
     }
-    console.log(`[conversationSync] 🧹 ${dupIds.length} duplicata(s) mesclada(s) → conv ${canonicalId}`)
+    console.log(`[conversationSync] 🧹 ${safeDupIds.length} duplicata(s) mesclada(s) → conv ${canonicalNumber}`)
   } catch (e) {
     console.warn('[conversationSync] ⚠️ falha ao mesclar duplicatas:', e?.message || e)
   }
@@ -189,7 +215,9 @@ async function mergeAndReturnCliente(supabaseClient, company_id, existente, phon
   if (fields.pushname !== undefined && fields.pushname != null && String(fields.pushname).trim()) {
     updates.pushname = String(fields.pushname).trim()
   }
-  if (fields.foto_perfil) updates.foto_perfil = fields.foto_perfil
+  if (fields.foto_perfil && (!existente.foto_perfil || !String(existente.foto_perfil).trim())) {
+    updates.foto_perfil = fields.foto_perfil
+  }
   if (fields.wa_id != null && String(fields.wa_id).trim() && (!existente.wa_id || !String(existente.wa_id).trim())) {
     updates.wa_id = String(fields.wa_id).trim()
   }
@@ -226,10 +254,118 @@ function phonesMatchDigitally(a, b) {
   return false
 }
 
+function normalizeWhatsappInstanceId(value) {
+  const n = Number(value)
+  return Number.isFinite(n) && n > 0 ? n : null
+}
+
+function isUniqueViolationError(error) {
+  if (!error) return false
+  const code = String(error.code || '')
+  const msg = String(error.message || error.details || '').toLowerCase()
+  return code === '23505' || msg.includes('unique') || msg.includes('duplicate key')
+}
+
+async function refetchConversationInInstanceScope(
+  supabaseClient,
+  company_id,
+  variants,
+  whatsappInstanceId,
+  allowLegacyNullInstance,
+  limit = 20
+) {
+  const found = await selectConversationsByPhoneVariants(
+    supabaseClient,
+    company_id,
+    variants,
+    whatsappInstanceId,
+    allowLegacyNullInstance,
+    limit
+  )
+  const scoped = pickConversationForWhatsappInstance(found, whatsappInstanceId, allowLegacyNullInstance)
+  if (!Array.isArray(scoped) || scoped.length === 0) return null
+  let conv = scoped[0]
+  conv = await attachWhatsappInstanceToLegacyConversation(supabaseClient, company_id, conv, whatsappInstanceId)
+  return conv
+}
+
+function pickConversationForWhatsappInstance(rows, whatsappInstanceId, allowNullInstance) {
+  const list = Array.isArray(rows) ? rows : []
+  if (!whatsappInstanceId) return list
+  const exact = list.filter((row) => Number(row?.whatsapp_instance_id) === Number(whatsappInstanceId))
+  if (exact.length > 0) return exact
+  if (allowNullInstance === true) return list.filter((row) => row?.whatsapp_instance_id == null)
+  return []
+}
+
+async function attachWhatsappInstanceToLegacyConversation(supabaseClient, company_id, conversa, whatsappInstanceId) {
+  if (!conversa?.id || !whatsappInstanceId || conversa.whatsapp_instance_id != null) return conversa
+  try {
+    await supabaseClient
+      .from('conversas')
+      .update({ whatsapp_instance_id: whatsappInstanceId })
+      .eq('id', conversa.id)
+      .eq('company_id', company_id)
+      .is('whatsapp_instance_id', null)
+    return { ...conversa, whatsapp_instance_id: whatsappInstanceId }
+  } catch (_) {
+    return conversa
+  }
+}
+
 /**
  * Busca cliente existente por variantes 12/13 dígitos e phoneKeyBR (55… vs 9º dígito).
  * Cobre telefone salvo sem DDI ou formato diferente do canônico do INSERT.
  */
+const CONVERSA_INSTANCE_SELECT = 'id, departamento_id, telefone, cliente_id, whatsapp_instance_id'
+
+async function queryScopedConversationRows(buildBaseQuery, whatsappInstanceId, allowLegacyNullInstance) {
+  async function run(scope) {
+    let query = buildBaseQuery()
+    if (scope === 'exact') query = query.eq('whatsapp_instance_id', whatsappInstanceId)
+    if (scope === 'legacy') query = query.is('whatsapp_instance_id', null)
+    const { data, error } = await query
+    if (error) throw error
+    return Array.isArray(data) ? data : []
+  }
+
+  if (whatsappInstanceId) {
+    const exactRows = await run('exact')
+    if (exactRows.length > 0 || allowLegacyNullInstance !== true) return exactRows
+    return run('legacy')
+  }
+
+  return run('all')
+}
+
+function selectConversationsByChatLid(supabaseClient, company_id, lidPart, whatsappInstanceId, allowLegacyNullInstance) {
+  return queryScopedConversationRows(
+    () => supabaseClient
+      .from('conversas')
+      .select(CONVERSA_INSTANCE_SELECT)
+      .eq('company_id', company_id)
+      .eq('chat_lid', lidPart)
+      .order('ultima_atividade', { ascending: false })
+      .limit(20),
+    whatsappInstanceId,
+    allowLegacyNullInstance
+  )
+}
+
+function selectConversationsByPhoneVariants(supabaseClient, company_id, variants, whatsappInstanceId, allowLegacyNullInstance, limit = 50) {
+  return queryScopedConversationRows(
+    () => supabaseClient
+      .from('conversas')
+      .select(CONVERSA_INSTANCE_SELECT)
+      .eq('company_id', company_id)
+      .in('telefone', variants)
+      .order('id', { ascending: false })
+      .limit(limit),
+    whatsappInstanceId,
+    allowLegacyNullInstance
+  )
+}
+
 async function findClienteRowForPhone(supabaseClient, company_id, phone, telefoneCanonico, searchPhones) {
   const phonesToSearch = Array.from(
     new Set([telefoneCanonico, ...(Array.isArray(searchPhones) ? searchPhones : []), ...possiblePhonesBR(phone), ...possiblePhonesBR(telefoneCanonico)].filter(Boolean))
@@ -522,9 +658,14 @@ async function findOrCreateConversation(supabaseClient, {
   nomeGrupo = null,
   chatPhoto = null,
   chatLid = null,
+  whatsapp_instance_id = null,
+  whatsapp_instance_is_default = false,
   logPrefix = '',
   initial_status_atendimento = 'aberta',
 }) {
+  const whatsappInstanceId = normalizeWhatsappInstanceId(whatsapp_instance_id)
+  const allowLegacyNullInstance = !!(whatsappInstanceId && whatsapp_instance_is_default === true)
+
   if (!phone) {
     console.warn(`[findOrCreateConversation] ${logPrefix} phone vazio/nulo`)
     return null
@@ -536,17 +677,19 @@ async function findOrCreateConversation(supabaseClient, {
   if (isLidPhone && chatLid) {
     const lidPart = String(chatLid).replace(/@lid$/i, '').trim()
     if (lidPart) {
-      const { data: rows } = await supabaseClient
-        .from('conversas')
-        .select('id, departamento_id, telefone, cliente_id')
-        .eq('company_id', company_id)
-        .eq('chat_lid', lidPart)
-        .order('ultima_atividade', { ascending: false })
-        .limit(1)
-      const convByLid = Array.isArray(rows) && rows[0] ? rows[0] : null
+      const rows = await selectConversationsByChatLid(
+        supabaseClient,
+        company_id,
+        lidPart,
+        whatsappInstanceId,
+        allowLegacyNullInstance
+      )
+      const scopedRows = pickConversationForWhatsappInstance(rows, whatsappInstanceId, allowLegacyNullInstance)
+      const convByLid = Array.isArray(scopedRows) && scopedRows[0] ? scopedRows[0] : null
       if (convByLid?.id) {
         console.log(`[findOrCreateConversation] ${logPrefix} ✅ encontrada por chat_lid (evita duplicata LID) conv=${convByLid.id}`)
-        return { conversa: convByLid, created: false }
+        const convWithInstance = await attachWhatsappInstanceToLegacyConversation(supabaseClient, company_id, convByLid, whatsappInstanceId)
+        return { conversa: convWithInstance, created: false }
       }
     }
   }
@@ -575,28 +718,41 @@ async function findOrCreateConversation(supabaseClient, {
   console.log(`[findOrCreateConversation] ${logPrefix} canonical="${canonical}" variants=[${variants.join(',')}] isGroup=${isGroup}`)
 
   // 3) Buscar conversa(s) por qualquer variante do telefone (inclui fechadas para reutilizar — webhook reabre quando cliente manda msg)
-  const { data: found, error: errFind } = await supabaseClient
-    .from('conversas')
-    .select('id, departamento_id, telefone, cliente_id')
-    .eq('company_id', company_id)
-    .in('telefone', variants)
-    .order('id', { ascending: false })
-    .limit(10)
+  let found
+  let errFind
+  try {
+    found = await selectConversationsByPhoneVariants(
+      supabaseClient,
+      company_id,
+      variants,
+      whatsappInstanceId,
+      allowLegacyNullInstance,
+      50
+    )
+  } catch (err) {
+    errFind = err
+  }
 
   if (errFind) {
     console.error(`[findOrCreateConversation] ${logPrefix} erro ao buscar conversa:`, errFind.message)
     throw errFind
   }
 
-  if (Array.isArray(found) && found.length > 0) {
+  const foundScoped = pickConversationForWhatsappInstance(found, whatsappInstanceId, allowLegacyNullInstance)
+
+  if (Array.isArray(foundScoped) && foundScoped.length > 0) {
     // 4) Mesclar duplicatas automaticamente se houver mais de uma
-    if (found.length > 1 && !isGroup) {
-      const canonicalConv = found[0]
-      const dupIds = found.slice(1).map(c => c.id).filter(Boolean)
+    if (foundScoped.length > 1 && !isGroup) {
+      const exactRows = whatsappInstanceId
+        ? foundScoped.filter((row) => Number(row?.whatsapp_instance_id) === Number(whatsappInstanceId))
+        : foundScoped
+      const rowsToMerge = exactRows.length > 0 ? exactRows : foundScoped
+      const canonicalConv = rowsToMerge[0]
+      const dupIds = rowsToMerge.slice(1).map(c => c.id).filter(Boolean)
       await mergeConversasIntoCanonico(supabaseClient, company_id, canonicalConv.id, dupIds)
     }
 
-    const conv = found[0]
+    let conv = foundScoped[0]
     console.log(`[findOrCreateConversation] ${logPrefix} ✅ encontrada conv=${conv.id} phone_db="${conv.telefone}"`)
 
     // 5) Garantir telefone canônico na conversa encontrada (normalizar legado)
@@ -613,6 +769,7 @@ async function findOrCreateConversation(supabaseClient, {
       } catch (_) { /* não crítico */ }
     }
 
+    conv = await attachWhatsappInstanceToLegacyConversation(supabaseClient, company_id, conv, whatsappInstanceId)
     return { conversa: conv, created: false }
   }
 
@@ -631,6 +788,7 @@ async function findOrCreateConversation(supabaseClient, {
     company_id,
     ultima_atividade: new Date().toISOString(),
   }
+  if (whatsappInstanceId) insertData.whatsapp_instance_id = whatsappInstanceId
 
   if (isGroup) {
     insertData.tipo = 'grupo'
@@ -644,39 +802,38 @@ async function findOrCreateConversation(supabaseClient, {
   const { data: created, error: errCreate } = await supabaseClient
     .from('conversas')
     .insert(insertData)
-    .select('id, departamento_id')
+    .select(CONVERSA_INSTANCE_SELECT)
     .single()
 
   if (errCreate) {
-    // 7) Race condition: outra requisição criou antes de nós — rebuscar
-    const isUnique = String(errCreate.code || '') === '23505' || String(errCreate.message || '').toLowerCase().includes('unique')
+    // 7) Race condition / violacao de unique — rebuscar no escopo correto da instancia
+    const isUnique = isUniqueViolationError(errCreate)
     const isMissingCol = String(errCreate.message || '').includes('ultima_atividade') || String(errCreate.code || '') === 'PGRST204'
+    const legacyAllowed = whatsappInstanceId ? allowLegacyNullInstance === true : true
 
     if (isMissingCol) {
       delete insertData.ultima_atividade
       const { data: retry, error: errRetry } = await supabaseClient
-        .from('conversas').insert(insertData).select('id, departamento_id').single()
+        .from('conversas').insert(insertData).select(CONVERSA_INSTANCE_SELECT).single()
       if (!errRetry) {
         console.log(`[findOrCreateConversation] ${logPrefix} 🆕 criada (sem ultima_atividade) conv=${retry.id}`)
         return { conversa: retry, created: true }
       }
-      if (String(errRetry.code || '') !== '23505') throw errRetry
+      if (!isUniqueViolationError(errRetry)) throw errRetry
     }
 
     if (isUnique || isMissingCol) {
-      // Race condition resolvida: busca novamente (inclui fechadas)
-      const { data: raceFound } = await supabaseClient
-        .from('conversas')
-        .select('id, departamento_id, telefone, cliente_id')
-        .eq('company_id', company_id)
-        .in('telefone', variants)
-        .order('id', { ascending: false })
-        .limit(1)
-        .maybeSingle()
-
-      if (raceFound) {
-        console.log(`[findOrCreateConversation] ${logPrefix} ⚡ race condition → conv=${raceFound.id}`)
-        return { conversa: raceFound, created: false }
+      const raceConv = await refetchConversationInInstanceScope(
+        supabaseClient,
+        company_id,
+        variants,
+        whatsappInstanceId,
+        legacyAllowed,
+        20
+      )
+      if (raceConv?.id) {
+        console.log(`[findOrCreateConversation] ${logPrefix} ⚡ unique violation → conv=${raceConv.id} instance=${raceConv.whatsapp_instance_id ?? 'legacy'}`)
+        return { conversa: raceConv, created: false }
       }
     }
 
@@ -694,6 +851,16 @@ async function findOrCreateConversation(supabaseClient, {
  * @param {Array} conversas - Lista de conversas formatadas (com telefone, ultima_atividade, criado_em, is_group)
  * @returns {Array}
  */
+function conversationDedupeKey(c) {
+  if (!c || c.is_group) return `grupo:${c?.id ?? ''}`
+  const instanceId = normalizeWhatsappInstanceId(c.whatsapp_instance_id)
+  const instanceScope = instanceId ? `wi:${instanceId}` : 'wi:legacy'
+  const phoneKey = (c.telefone && (phoneKeyBR(c.telefone) || String(c.telefone).replace(/\D/g, ''))) || ''
+  const lid = String(c.chat_lid || c.chatLid || '').trim()
+  const contactKey = phoneKey || (lid ? `lid:${lid}` : `id:${c.id}`)
+  return `${instanceScope}:${contactKey}`
+}
+
 function deduplicateConversationsByContact(conversas) {
   if (!Array.isArray(conversas) || conversas.length === 0) return conversas
   const byKey = new Map()
@@ -702,7 +869,7 @@ function deduplicateConversationsByContact(conversas) {
       byKey.set(`grupo:${c.id}`, c)
       continue
     }
-    const key = (c.telefone && (phoneKeyBR(c.telefone) || String(c.telefone).replace(/\D/g, ''))) || `id:${c.id}`
+    const key = conversationDedupeKey(c)
     if (!key) {
       byKey.set(`id:${c.id}`, c)
       continue

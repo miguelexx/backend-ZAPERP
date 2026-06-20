@@ -16,6 +16,8 @@ const {
   CONFIRM_FINALIZE_ABSENCE,
 } = require('../services/absenceFinalizationService')
 const { runAdminAtendimentoAlertaForAllCompanies } = require('../services/adminAtendimentoAlertaService')
+const { runAtendimentoSemRespostaForAllCompanies } = require('../services/atendimentoSemRespostaService')
+const { processarVencimentosPagamentoFinanceiro } = require('../services/conversaPagamentoFinanceiroService')
 
 function timingSafeEqualStr(a, b) {
   const sa = String(a ?? '')
@@ -105,6 +107,7 @@ exports.timeoutInatividadeChatbot = async (req, res) => {
       const { data: mensagens } = await supabase
         .from('mensagens')
         .select('conversa_id, criado_em, direcao, texto')
+        .eq('company_id', company_id)
         .in('conversa_id', conversaIds)
         .order('criado_em', { ascending: false })
 
@@ -134,7 +137,8 @@ exports.timeoutInatividadeChatbot = async (req, res) => {
         try {
           const resultSend = await provider.sendText(telefone, mensagemEncerramento, {
             companyId: company_id,
-            conversaId: conv.id
+            conversaId: conv.id,
+            sendOrigin: 'timeout_inatividade_chatbot',
           })
 
           const statusMsg = resultSend?.ok ? 'sent' : 'erro'
@@ -209,6 +213,7 @@ exports.timeoutInatividade = async (req, res) => {
       const { data: ultimasMsg } = await supabase
         .from('mensagens')
         .select('conversa_id, criado_em, direcao')
+        .eq('company_id', emp.id)
         .in('conversa_id', conversaIds)
         .order('criado_em', { ascending: false })
 
@@ -333,14 +338,61 @@ exports.finalizacaoAusenciaLote = async (req, res) => {
  * Envia resumo diário ao número configurado (UltraMSG), por empresa, no horário + fuso do chatbot.
  * Idempotente via tabela admin_atendimento_alerta_envios. Recomenda-se cron a cada 1–3 minutos.
  */
+/** POST /jobs/vencimento-pagamento-financeiro — pagamento_pendente vencido → em_atraso */
+exports.vencimentoPagamentoFinanceiro = async (req, res) => {
+  try {
+    const dryRun =
+      req.query.dry_run === '1' ||
+      req.query.dry_run === 'true' ||
+      req.body?.dry_run === true
+    const result = await processarVencimentosPagamentoFinanceiro({ dryRun })
+    if (!result.ok) {
+      return res.status(500).json({ error: result.error || 'Falha ao processar vencimentos de pagamento' })
+    }
+    return res.json(result)
+  } catch (err) {
+    console.error('vencimentoPagamentoFinanceiro:', err)
+    return res.status(500).json({ error: err.message })
+  }
+}
+
+/** POST /jobs/atendimento-sem-resposta — alertas de conversa sem resposta do atendente */
+exports.atendimentoSemResposta = async (req, res) => {
+  try {
+    const dryRun =
+      req.query.dry_run === '1' ||
+      req.query.dry_run === 'true' ||
+      req.body?.dry_run === true
+    const io = req.app?.get?.('io') || null
+    const out = await runAtendimentoSemRespostaForAllCompanies({ dryRun, io })
+    if (!out.ok) {
+      return res.status(500).json({ error: out.error || 'Falha ao processar alertas sem resposta' })
+    }
+    return res.json({
+      ok: true,
+      dryRun,
+      processadas: out.processadas,
+      detalhes: out.detalhes,
+    })
+  } catch (err) {
+    console.error('atendimentoSemResposta:', err)
+    return res.status(500).json({ error: err.message })
+  }
+}
+
 exports.adminAtendimentoAlerta = async (req, res) => {
   try {
-    const out = await runAdminAtendimentoAlertaForAllCompanies()
+    const dryRun =
+      req.query.dry_run === '1' ||
+      req.query.dry_run === 'true' ||
+      req.body?.dry_run === true
+    const out = await runAdminAtendimentoAlertaForAllCompanies({ dryRun })
     if (!out.ok) {
       return res.status(500).json({ error: out.error || 'Falha ao processar alertas' })
     }
     return res.json({
       ok: true,
+      dryRun,
       empresas_com_alerta_ativo: out.processadas,
       enviadas: out.enviadas,
       detalhes: out.detalhes,

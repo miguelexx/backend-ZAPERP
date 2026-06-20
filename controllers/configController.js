@@ -1,5 +1,8 @@
 const supabase = require('../config/supabase')
 const { getProvider } = require('../services/providers')
+const fs = require('fs')
+const path = require('path')
+const { getUploadsRoot } = require('../config/uploadsRoot')
 
 /** GET /config/empresa — dados da empresa */
 exports.getEmpresa = async (req, res) => {
@@ -29,6 +32,7 @@ exports.putEmpresa = async (req, res) => {
       logo_url,
       tema,
       cor_primaria,
+      nome_fonte,
       horario_inicio,
       horario_fim,
       sla_minutos_sem_resposta,
@@ -39,12 +43,16 @@ exports.putEmpresa = async (req, res) => {
       crm_habilitado,
       separar_mensagens_disparadas
     } = req.body
+
+    const FONTES_VALIDAS = new Set(['inter','plus-jakarta-sans','poppins','montserrat','orbitron','nunito','raleway','playfair-display'])
+
     const update = {}
     if (nome !== undefined) update.nome = nome
     if (ativo !== undefined) update.ativo = !!ativo
     if (logo_url !== undefined) update.logo_url = logo_url || null
     if (tema !== undefined) update.tema = tema || 'light'
     if (cor_primaria !== undefined) update.cor_primaria = cor_primaria || '#2563eb'
+    if (nome_fonte !== undefined) update.nome_fonte = FONTES_VALIDAS.has(nome_fonte) ? nome_fonte : 'inter'
     if (horario_inicio !== undefined) update.horario_inicio = horario_inicio || '09:00'
     if (horario_fim !== undefined) update.horario_fim = horario_fim || '18:00'
     if (sla_minutos_sem_resposta !== undefined) update.sla_minutos_sem_resposta = Math.max(1, Math.min(1440, Number(sla_minutos_sem_resposta) || 30))
@@ -67,12 +75,83 @@ exports.putEmpresa = async (req, res) => {
       if (msg.includes('separar_mensagens_disparadas')) {
         return res.status(400).json({ error: 'Banco desatualizado: aplique a migration separar_mensagens_disparadas (coluna separar_mensagens_disparadas).' })
       }
+      if (msg.includes('nome_fonte')) {
+        return res.status(400).json({ error: 'Banco desatualizado: aplique a migration 20260618000000_empresa_nome_fonte.sql (coluna nome_fonte).' })
+      }
       return res.status(500).json({ error: error.message })
     }
     return res.json(data)
   } catch (err) {
     console.error(err)
     return res.status(500).json({ error: 'Erro ao atualizar empresa' })
+  }
+}
+
+/** POST /config/empresa/logo — upload de imagem de logo da empresa */
+exports.uploadLogoEmpresa = async (req, res) => {
+  try {
+    const { company_id } = req.user
+    if (!req.file) return res.status(400).json({ error: 'Nenhum arquivo de imagem enviado.' })
+
+    const file = req.file
+    const appUrl = (process.env.APP_URL || '').replace(/\/+$/, '') ||
+      `${req.protocol}://${req.get('host')}`
+    const logo_url = `${appUrl}/uploads/logos/${file.filename}`
+
+    const { data, error } = await supabase
+      .from('empresas')
+      .update({ logo_url })
+      .eq('id', company_id)
+      .select()
+      .single()
+
+    if (error) {
+      try { fs.unlinkSync(file.path) } catch (_) {}
+      return res.status(500).json({ error: error.message })
+    }
+
+    return res.json({ logo_url, empresa: data })
+  } catch (err) {
+    console.error(err)
+    return res.status(500).json({ error: 'Erro ao fazer upload do logo.' })
+  }
+}
+
+/** DELETE /config/empresa/logo — remove logo da empresa */
+exports.deleteLogoEmpresa = async (req, res) => {
+  try {
+    const { company_id } = req.user
+
+    const { data: atual } = await supabase
+      .from('empresas')
+      .select('logo_url')
+      .eq('id', company_id)
+      .single()
+
+    if (atual?.logo_url) {
+      try {
+        const uploadsRoot = getUploadsRoot()
+        const parsed = new URL(atual.logo_url)
+        const relPath = parsed.pathname.replace(/^\/uploads\//, '')
+        const filePath = path.join(uploadsRoot, relPath)
+        if (filePath.startsWith(uploadsRoot) && fs.existsSync(filePath)) {
+          fs.unlinkSync(filePath)
+        }
+      } catch (_) {}
+    }
+
+    const { data, error } = await supabase
+      .from('empresas')
+      .update({ logo_url: null })
+      .eq('id', company_id)
+      .select()
+      .single()
+
+    if (error) return res.status(500).json({ error: error.message })
+    return res.json({ logo_url: null, empresa: data })
+  } catch (err) {
+    console.error(err)
+    return res.status(500).json({ error: 'Erro ao remover logo.' })
   }
 }
 
@@ -226,17 +305,18 @@ exports.getAuditoria = async (req, res) => {
       auditoriaLog = al || []
     } catch (_) {}
 
-    const { data: convIds } = await supabase.from('conversas').select('id').eq('company_id', company_id)
-    const ids = (convIds || []).map(c => c.id)
     let hist = []
-    if (ids.length > 0) {
-      const { data: h } = await supabase
+    try {
+      const { data: h, error: histErr } = await supabase
         .from('historico_atendimentos')
-        .select('id, conversa_id, acao, observacao, criado_em, usuario_id')
-        .in('conversa_id', ids)
+        .select('id, conversa_id, acao, observacao, criado_em, usuario_id, conversas!inner(company_id)')
+        .eq('conversas.company_id', company_id)
         .order('criado_em', { ascending: false })
         .limit(limit)
+      if (histErr) throw histErr
       hist = h || []
+    } catch (e) {
+      console.warn('[getAuditoria] historico_atendimentos:', e?.message || e)
     }
 
     const userIds = new Set()

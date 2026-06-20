@@ -8,6 +8,8 @@ const {
 const {
   DEFAULT_ADMIN_ATENDIMENTO_ALERTA,
   normalizeAdminAtendimentoAlerta,
+  processCompanyAdminAlert,
+  parseIaConfigJson,
 } = require('../services/adminAtendimentoAlertaService')
 
 const DEFAULT_CONFIG = {
@@ -138,8 +140,9 @@ exports.getConfig = async (req, res) => {
 exports.putConfig = async (req, res) => {
   try {
     const { company_id } = req.user
+    const body = req.body && typeof req.body === 'object' ? req.body : {}
     const { chatbot_triage: ctBody, bot_global, roteamento, ia, automacoes, admin_atendimento_alerta: adminBody } =
-      req.body
+      body
 
     const { data: existing } = await supabase
       .from('ia_config')
@@ -213,7 +216,8 @@ exports.getRegras = async (req, res) => {
 exports.postRegra = async (req, res) => {
   try {
     const { company_id } = req.user
-    const { palavra_chave, resposta, departamento_id, tag_id, aplicar_tag, horario_comercial_only, ativo } = req.body
+    const body = req.body && typeof req.body === 'object' ? req.body : {}
+    const { palavra_chave, resposta, departamento_id, tag_id, aplicar_tag, horario_comercial_only, ativo } = body
 
     if (!palavra_chave?.trim() || !resposta?.trim()) {
       return res.status(400).json({ error: 'palavra_chave e resposta são obrigatórios' })
@@ -247,7 +251,8 @@ exports.putRegra = async (req, res) => {
   try {
     const { company_id } = req.user
     const { id } = req.params
-    const { palavra_chave, resposta, departamento_id, tag_id, aplicar_tag, horario_comercial_only, ativo } = req.body
+    const body = req.body && typeof req.body === 'object' ? req.body : {}
+    const { palavra_chave, resposta, departamento_id, tag_id, aplicar_tag, horario_comercial_only, ativo } = body
 
     const update = {}
     if (palavra_chave !== undefined) update.palavra_chave = String(palavra_chave).trim()
@@ -292,6 +297,73 @@ exports.deleteRegra = async (req, res) => {
   } catch (err) {
     console.error(err)
     return res.status(500).json({ error: 'Erro ao excluir regra' })
+  }
+}
+
+// POST /ia/admin-atendimento-alerta/testar — envia agora (ignora janela de horário e idempotência do dia)
+exports.testarAdminAtendimentoAlerta = async (req, res) => {
+  try {
+    const { company_id } = req.user
+    if (!company_id) {
+      return res.status(400).json({ error: 'Empresa não identificada' })
+    }
+
+    const { data: row, error } = await supabase
+      .from('ia_config')
+      .select('config')
+      .eq('company_id', company_id)
+      .maybeSingle()
+
+    if (error) return res.status(500).json({ error: error.message })
+
+    const cfg = parseIaConfigJson(row?.config)
+    const alert = normalizeAdminAtendimentoAlerta(cfg.admin_atendimento_alerta || {})
+    if (!alert.ativo) {
+      return res.status(400).json({ error: 'Ative o alerta e salve a configuração antes de testar.' })
+    }
+    const clienteId = Number(alert.cliente_id)
+    const telefoneAdmin = String(alert.telefone_admin || '').trim()
+    if (!((Number.isInteger(clienteId) && clienteId > 0) || telefoneAdmin.length >= 10)) {
+      return res.status(400).json({ error: 'Selecione o contato que receberá o alerta e salve.' })
+    }
+
+    const { getProvider } = require('../services/providers')
+    const provider = getProvider()
+    const result = await processCompanyAdminAlert({
+      company_id,
+      fullConfig: cfg,
+      provider,
+      dryRun: false,
+      forceSend: true,
+    })
+
+    if (result?.sent) {
+      return res.json({ ok: true, enviado: true, mensagem: 'Alerta de teste enviado pelo WhatsApp.' })
+    }
+
+    const reasonMessages = {
+      inactive: 'Alerta desativado.',
+      outside_window: 'Fora da janela de horário (não deveria ocorrer no teste).',
+      invalid_destination: 'Contato sem telefone válido.',
+      invalid_phone: 'Telefone inválido.',
+      invalid_contact_phone: 'O contato selecionado não tem telefone/WhatsApp válido.',
+      contact_not_found: 'Contato não encontrado.',
+      contact_lookup_failed: 'Erro ao buscar o contato.',
+      no_provider: 'WhatsApp (UltraMSG) não configurado para esta empresa.',
+      send_failed: result?.error || 'Falha ao enviar pelo UltraMSG.',
+      already_sent_today: 'Já enviado hoje com sucesso.',
+      reserve_failed: 'Erro ao registrar envio (verifique a migration admin_atendimento_alerta_envios).',
+    }
+    const msg = reasonMessages[result?.reason] || result?.error || result?.reason || 'Não foi possível enviar.'
+    return res.status(400).json({
+      ok: false,
+      enviado: false,
+      reason: result?.reason,
+      error: msg,
+    })
+  } catch (err) {
+    console.error('testarAdminAtendimentoAlerta:', err)
+    return res.status(500).json({ error: err.message || 'Erro ao enviar teste' })
   }
 }
 

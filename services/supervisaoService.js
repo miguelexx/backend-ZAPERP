@@ -1,5 +1,6 @@
 const supabase = require('../config/supabase')
 const { getDisplayName } = require('../helpers/contactEnrichment')
+const { isGroupConversation } = require('../helpers/conversaHelper')
 
 const OPEN_STATUSES = ['aberta', 'em_atendimento', 'aguardando_cliente']
 const PENDING_STATUSES = ['aberta', 'em_atendimento']
@@ -184,6 +185,7 @@ function toPendingApiShape(raw) {
     minutos_aguardando: Math.max(0, Math.floor(Number(raw.minutos_aguardando) || 0)),
     nivel: nivelOk,
     status_atendimento: safeDisplayString(raw.status_atendimento, 80),
+    tipo: raw.tipo != null ? safeDisplayString(raw.tipo, 40) : null,
     aguardando_funcionario: !!raw.aguardando_funcionario,
     atrasado: !!raw.atrasado,
     pode_abrir_conversa: !!raw.pode_abrir_conversa,
@@ -230,10 +232,12 @@ async function listOpenConversations(companyId) {
     id,
     company_id,
     telefone,
+    tipo,
     status_atendimento,
     departamento_id,
     atendente_id,
     criado_em,
+    whatsapp_instance_id,
     nome_contato_cache,
     foto_perfil_contato_cache,
     clientes!conversas_cliente_fk ( id, nome, pushname, telefone, foto_perfil ),
@@ -392,6 +396,7 @@ function buildPendingItem(conversa, lastMessage, depMap) {
     minutos_aguardando: minutosAguardando,
     nivel,
     status_atendimento: conversa.status_atendimento,
+    tipo: conversa.tipo,
     aguardando_funcionario: true,
     atrasado: minutosAguardando > DEFAULT_DELAY_MINUTES,
     pode_abrir_conversa: true,
@@ -414,6 +419,7 @@ async function buildConversationInsights(companyId) {
   const aguardandoCliente = []
 
   for (const conversa of conversations) {
+    if (isGroupConversation(conversa)) continue
     const lastMessage = lastMessagesMap.get(Number(conversa.id))
     if (!lastMessage) continue
     if (lastMessage.direcao === 'out') {
@@ -758,6 +764,7 @@ async function getClientesPendentes(companyId, filters) {
       minutos_aguardando: item.minutos_aguardando,
       nivel: item.nivel,
       status_atendimento: item.status_atendimento,
+      tipo: item.tipo,
       pode_abrir_conversa: true,
     })),
     clientes_pendentes: filtered.map((item) => ({
@@ -775,6 +782,7 @@ async function getClientesPendentes(companyId, filters) {
       minutos_aguardando: item.minutos_aguardando,
       nivel: item.nivel,
       status_atendimento: item.status_atendimento,
+      tipo: item.tipo,
       pode_abrir_conversa: true,
     })),
   }
@@ -899,17 +907,43 @@ function getDayRange(dateInput) {
  * Contagem alinhada ao selo "Aguardando funcionário" (última mensagem do cliente + status em fila/atendimento).
  * Exclui grupos (@g.us) e, com chatbot ativo, exclui triagem pura (aberta sem departamento).
  */
+function isPendingForAdminAlerta(p, { chatbotEnabled = false } = {}) {
+  if (isGroupConversation(p)) return false
+  const tel = String(p?.telefone || '')
+  if (tel.includes('@g.us')) return false
+  const st = String(p?.status_atendimento || '').toLowerCase()
+  if (chatbotEnabled && st === 'aberta' && (p.departamento_id == null || p.departamento_id === '')) return false
+  return true
+}
+
 async function countAguardandoFuncionarioParaAlertaAdmin(companyId, { chatbotEnabled = false } = {}) {
+  const { count } = await getAguardandoFuncionarioParaAlertaAdmin(companyId, { chatbotEnabled, limit: 1 })
+  return count
+}
+
+/** Lista resumida para o texto do alerta diário ao administrador (sem mídia). */
+async function listAguardandoFuncionarioParaAlertaAdmin(companyId, { chatbotEnabled = false, limit = 15 } = {}) {
+  const { items } = await getAguardandoFuncionarioParaAlertaAdmin(companyId, { chatbotEnabled, limit })
+  return items
+}
+
+/** Contagem + amostra para o alerta (uma passagem em insights.pending). */
+async function getAguardandoFuncionarioParaAlertaAdmin(companyId, { chatbotEnabled = false, limit = 15 } = {}) {
+  const max = Math.max(1, Math.min(30, Number(limit) || 15))
   const insights = await buildConversationInsights(companyId)
+  const items = []
   let count = 0
   for (const p of insights.pending) {
-    const tel = String(p.telefone || '')
-    if (tel.includes('@g.us')) continue
-    const st = String(p.status_atendimento || '').toLowerCase()
-    if (chatbotEnabled && st === 'aberta' && (p.departamento_id == null || p.departamento_id === '')) continue
+    if (!isPendingForAdminAlerta(p, { chatbotEnabled })) continue
     count++
+    if (items.length < max) {
+      items.push({
+        cliente_nome: p.cliente_nome || p.nome || 'Cliente',
+        telefone: p.telefone || null,
+      })
+    }
   }
-  return count
+  return { count, items }
 }
 
 async function getRelatorioDiarioGestor(companyId, dateStr) {
@@ -1030,4 +1064,5 @@ module.exports = {
   getMovimentacaoFuncionario,
   getRelatorioDiarioGestor,
   countAguardandoFuncionarioParaAlertaAdmin,
+  listAguardandoFuncionarioParaAlertaAdmin,
 }

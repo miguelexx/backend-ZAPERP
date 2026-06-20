@@ -8,6 +8,28 @@
 
 const { logAsync } = require('../services/webhookLogService')
 
+function compactWebhookPayload(body = {}, ctx = {}) {
+  const data = body && typeof body.data === 'object' ? body.data : {}
+  const rawMessage =
+    body.message ?? body.text ?? body.body ?? data.message ?? data.text ?? data.body ?? null
+  const mediaUrl =
+    body.media ?? body.image?.url ?? body.document?.url ?? body.audio?.url ?? body.video?.url ??
+    data.media ?? data.image?.url ?? data.document?.url ?? data.audio?.url ?? data.video?.url ?? null
+  const phone =
+    body.phone ?? body.from ?? body.to ?? data.phone ?? data.from ?? data.to ?? data.chatId ?? data.author ?? null
+
+  return {
+    _log: { path: ctx.path, method: ctx.method },
+    event_type: body.event_type ?? body.eventType ?? body.type ?? body.event ?? null,
+    instanceId_present: Boolean(body.instanceId ?? body.instance_id ?? data.instanceId ?? data.instance_id),
+    message_id: body.messageId ?? body.message_id ?? body.id ?? data.messageId ?? data.message_id ?? data.id ?? null,
+    fromMe: body.fromMe ?? data.fromMe ?? null,
+    phone_tail: phone ? String(phone).replace(/\D/g, '').slice(-6) || null : null,
+    text_length: rawMessage != null ? String(rawMessage).length : 0,
+    has_media: Boolean(mediaUrl),
+  }
+}
+
 /**
  * @param {string} provider - 'ultramsg' | 'meta'
  */
@@ -32,7 +54,10 @@ function webhookLogger(provider) {
       const companyId = logData.company_id ?? zapi.company_id
       const eventType = logData.event_type ?? zapi.eventType ?? body?.event_type ?? body?.eventType ?? body?.type
 
-      const payload = { ...(ctx.body || {}), _log: { path: ctx.path, method: ctx.method } }
+      const fullPayloadEnabled = String(process.env.WEBHOOK_LOG_FULL_PAYLOAD || '').trim() === '1'
+      const payload = fullPayloadEnabled
+        ? { ...(ctx.body || {}), _log: { path: ctx.path, method: ctx.method } }
+        : compactWebhookPayload(ctx.body || {}, ctx)
 
       logAsync({
         provider: ctx.provider || provider || 'unknown',

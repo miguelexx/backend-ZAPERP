@@ -42,6 +42,63 @@ function chunkArray(arr, size) {
   return out
 }
 
+function normalizeOpenAiUsage(usage) {
+  if (!usage || typeof usage !== 'object') return { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }
+  const prompt = Number(usage.prompt_tokens ?? usage.input_tokens ?? 0) || 0
+  const completion = Number(usage.completion_tokens ?? usage.output_tokens ?? 0) || 0
+  const total = Number(usage.total_tokens ?? (prompt + completion)) || 0
+  return {
+    prompt_tokens: Math.max(0, Math.floor(prompt)),
+    completion_tokens: Math.max(0, Math.floor(completion)),
+    total_tokens: Math.max(0, Math.floor(total)),
+  }
+}
+
+function addUsage(a, b) {
+  const x = normalizeOpenAiUsage(a)
+  const y = normalizeOpenAiUsage(b)
+  return {
+    prompt_tokens: x.prompt_tokens + y.prompt_tokens,
+    completion_tokens: x.completion_tokens + y.completion_tokens,
+    total_tokens: x.total_tokens + y.total_tokens,
+  }
+}
+
+function compactDataForPrompt(value, depth = 0) {
+  if (value == null) return value
+  if (typeof value === 'string') return value.length > 1200 ? `${value.slice(0, 1200)}... [truncado]` : value
+  if (typeof value !== 'object') return value
+  if (depth >= 7) return '[profundidade_truncada]'
+  if (Array.isArray(value)) {
+    const max = depth <= 2 ? 60 : 25
+    const items = value.slice(0, max).map((item) => compactDataForPrompt(item, depth + 1))
+    if (value.length > max) {
+      items.push({ __truncated: true, total_original: value.length, exibidos: max })
+    }
+    return items
+  }
+  const out = {}
+  const entries = Object.entries(value)
+  const maxKeys = 90
+  for (const [key, val] of entries.slice(0, maxKeys)) {
+    out[key] = compactDataForPrompt(val, depth + 1)
+  }
+  if (entries.length > maxKeys) out.__keys_truncated = entries.length - maxKeys
+  return out
+}
+
+function stringifyDataForPrompt(data) {
+  const maxChars = Math.max(8000, Math.min(60000, Number(process.env.AI_PROMPT_MAX_CHARS) || 28000))
+  const compact = compactDataForPrompt(data)
+  const json = JSON.stringify(compact)
+  if (!json || json.length <= maxChars) return json
+  return JSON.stringify({
+    __prompt_truncated: true,
+    total_chars: json.length,
+    preview_json_inicio: json.slice(0, maxChars),
+  })
+}
+
 // ── Schema de intent (zod) ────────────────────────────────────────────────────
 const IntentSchema = z.object({
   intent: z.enum([
@@ -74,6 +131,7 @@ const IntentSchema = z.object({
     'ATENDIMENTOS_TRANSFERIDOS', // linhas em atendimentos com transferência no período
     'CLIENTES_MENSAGEM_SEM_RESPOSTA_ATENDENTE', // cliente enviou (in) no período e o atendente não enviou (out) como autor no período
     'MENSAGENS_ENVIADAS_ATENDENTE_AUTOR', // mensagens out com autor_usuario_id = atendente no período
+    'RELATORIO_PRODUTIVIDADE_ATENDENTES', // relatório/planilha CSV de produtividade dos atendentes
     // GENERAL_CHAT: apenas síntese dos KPIs já carregados (sem conhecimento externo)
     'GENERAL_CHAT',
     'UNKNOWN',
@@ -135,7 +193,7 @@ function expandTermosForSearch(rawList, max = 22) {
   for (const raw of rawList || []) {
     const base = sanitizeIlikeTerm(String(raw))
     if (base.length < 2) continue
-    const variants = [base]
+    const variants = [base, ...buildPortugueseSearchVariants(base)]
     const n = normalizeSearchTerm(base)
     if (n && n !== base) variants.push(n)
     for (const v of variants) {
@@ -148,6 +206,24 @@ function expandTermosForSearch(rawList, max = 22) {
     }
   }
   return out
+}
+
+function buildPortugueseSearchVariants(term) {
+  const base = String(term || '').trim()
+  const n = normalizeSearchTerm(base)
+  const variants = []
+  const add = (v) => {
+    const s = sanitizeIlikeTerm(v)
+    if (s && s.length >= 2) variants.push(s)
+  }
+  if (base.toLowerCase().endsWith('ões') && base.length > 4) add(`${base.slice(0, -3)}ão`)
+  if (base.toLowerCase().endsWith('ães') && base.length > 4) add(`${base.slice(0, -3)}ão`)
+  if (n.endsWith('oes') && n.length > 4) add(`${n.slice(0, -3)}ao`)
+  if (n.endsWith('aes') && n.length > 4) add(`${n.slice(0, -3)}ao`)
+  if (n.endsWith('is') && n.length > 4) add(`${n.slice(0, -2)}il`)
+  if (n.endsWith('s') && n.length > 4) add(n.slice(0, -1))
+  if (!n.endsWith('s') && n.length >= 4) add(`${n}s`)
+  return variants
 }
 
 /** Pós-filtro: remove matches fracos para termos muito curtos (ex.: "nf" só como palavra). */
@@ -201,6 +277,7 @@ Intents permitidos:
 - ATENDIMENTOS_TRANSFERIDOS: transferências entre atendentes registradas (transferiu), "quem transferiu para quem", "atendimentos transferidos hoje"
 - CLIENTES_MENSAGEM_SEM_RESPOSTA_ATENDENTE: cliente mandou mensagem no período e o atendente citado não enviou resposta (como autor) no mesmo período na conversa sob responsabilidade dele
 - MENSAGENS_ENVIADAS_ATENDENTE_AUTOR: listar mensagens que o atendente realmente enviou (autor_usuario_id), "o que Larissa enviou", "mensagens que Wagner mandou hoje"
+- RELATORIO_PRODUTIVIDADE_ATENDENTES: relatorio, planilha, CSV ou exportacao de produtividade/desempenho dos atendentes/equipe
 - RELATORIO_ATENDENTE_COMPLETO: relatório amplo de desempenho/padrão de atendimento do funcionário X, "como X atende", análise do atendente
 - DETALHES_CONVERSA: detalhes de uma conversa específica (por id ou por cliente)
 - ANALISE_TOM_ATENDENTE: se o atendente é educado, cordial, profissional, tom da comunicação, "trata bem o cliente" (precisa de usuario_nome)
@@ -235,7 +312,8 @@ Regras de período:
   try { parsed = JSON.parse(raw) } catch { parsed = { intent: 'UNKNOWN' } }
 
   const safe = IntentSchema.safeParse(parsed)
-  return safe.success ? safe.data : { intent: 'UNKNOWN' }
+  const data = safe.success ? safe.data : { intent: 'UNKNOWN' }
+  return { ...data, _usage: normalizeOpenAiUsage(resp.usage) }
 }
 
 /** overview aninhado (GENERAL_CHAT) ou métricas na raiz (METRICS_OVERVIEW). */
@@ -302,6 +380,7 @@ function sanearNegacaoComEvidenciaMensagens(answer, intent, data) {
     'ATENDIMENTOS_TRANSFERIDOS',
     'CLIENTES_MENSAGEM_SEM_RESPOSTA_ATENDENTE',
     'MENSAGENS_ENVIADAS_ATENDENTE_AUTOR',
+    'RELATORIO_PRODUTIVIDADE_ATENDENTES',
   ])
   if (!intents.has(intent)) return answer
   const ev = evidenciaConversasOuMensagens(data, intent)
@@ -347,6 +426,7 @@ async function formatAnswer({ intent, data, question }) {
     'ATENDIMENTOS_TRANSFERIDOS',
     'CLIENTES_MENSAGEM_SEM_RESPOSTA_ATENDENTE',
     'MENSAGENS_ENVIADAS_ATENDENTE_AUTOR',
+    'RELATORIO_PRODUTIVIDADE_ATENDENTES',
   ].includes(intent)
 
   const system = isTom
@@ -399,8 +479,9 @@ Regras:
 - Se Dados trouxer atendimentosHoje e também totalConversas, conversasFechadas, ticketsAbertos ou mensagensRecebidas/mensagensEnviadas: não confunda — atendimentosHoje conta só linhas na tabela atendimentos desde hoje; não negue conversas/mensagens se esses totais forem > 0. Leia legenda_metricas se existir.
 - Não cite JSON, intent ou termos técnicos.`
 
-  const maxTokens = isConversaIntent ? 2200 : (isGeneral ? 500 : (isTom ? 600 : 400))
+  const maxTokens = isConversaIntent ? 1200 : (isGeneral ? 420 : (isTom ? 500 : 350))
   const temp = isConversaIntent ? 0.2 : (isGeneral ? 0.1 : (isTom ? 0.35 : 0.15))
+  const dadosJson = stringifyDataForPrompt(data)
   const resp = await openai.chat.completions.create({
     model: AI_MODEL(),
     temperature: temp,
@@ -409,12 +490,15 @@ Regras:
       { role: 'system', content: system },
       {
         role: 'user',
-        content: `Pergunta: ${question}\nIntenção: ${intent}\nDados: ${JSON.stringify(data)}\n\nNotas: (1) Se Dados.analitica_ui existir, use-o para período, alertas e ambiguidades; não contradiga. (2) Se Dados.recorte_temporal existir, a linguagem sobre "hoje"/datas deve obedecer a recorte_temporal.instrucao_temporal_obrigatoria. (3) Se Dados.resumo_operacional_ia existir, não contradiga seus totais nem omita clientes/conversas listados ali quando o usuário pedir lista completa.`,
+        content: `Pergunta: ${question}\nIntenção: ${intent}\nDados: ${dadosJson}\n\nNotas: (1) Se Dados.analitica_ui existir, use-o para período, alertas e ambiguidades; não contradiga. (2) Se Dados.recorte_temporal existir, a linguagem sobre "hoje"/datas deve obedecer a recorte_temporal.instrucao_temporal_obrigatoria. (3) Se Dados.resumo_operacional_ia existir, não contradiga seus totais nem omita clientes/conversas listados ali quando o usuário pedir lista completa.`,
       },
     ],
   })
 
-  return resp.choices?.[0]?.message?.content?.trim() || 'Não foi possível gerar a resposta.'
+  return {
+    answer: resp.choices?.[0]?.message?.content?.trim() || 'Não foi possível gerar a resposta.',
+    usage: normalizeOpenAiUsage(resp.usage),
+  }
 }
 
 // ── Helpers internos ──────────────────────────────────────────────────────────
@@ -1153,7 +1237,7 @@ function normalizeSearchTerm(s) {
 /** Remove caracteres que quebram padrões ILIKE no PostgREST e limita tamanho. */
 function sanitizeIlikeTerm(s) {
   if (!s || typeof s !== 'string') return ''
-  return String(s).trim().slice(0, 64).replace(/[%_\\,]/g, ' ').replace(/\s+/g, ' ').trim()
+  return String(s).trim().slice(0, 64).replace(/[%_\\,().:*]/g, ' ').replace(/\s+/g, ' ').trim()
 }
 
 /** Exclui conversas de grupo (tipo ou JID @g.us); mantém tipo NULL (legado). */
@@ -1390,6 +1474,7 @@ function resolveTemporalAnalyticsScope(question, cls) {
     'ATENDIMENTOS_TRANSFERIDOS',
     'CLIENTES_MENSAGEM_SEM_RESPOSTA_ATENDENTE',
     'MENSAGENS_ENVIADAS_ATENDENTE_AUTOR',
+    'RELATORIO_PRODUTIVIDADE_ATENDENTES',
   ])
   if (cls?.data_referencia_iso && INTENTS_DIA_UNICO.has(cls.intent)) {
     const b = dayBoundsSpForIsoDate(cls.data_referencia_iso)
@@ -1594,6 +1679,7 @@ function enrichDataReferenciaFromQuestion(cls, question) {
     'ATENDIMENTOS_TRANSFERIDOS',
     'CLIENTES_MENSAGEM_SEM_RESPOSTA_ATENDENTE',
     'MENSAGENS_ENVIADAS_ATENDENTE_AUTOR',
+    'RELATORIO_PRODUTIVIDADE_ATENDENTES',
   ])
   if (!intentsComData.has(cls.intent) || cls.data_referencia_iso) return cls
   const m = question.match(/\b(\d{1,2})[\/\-](\d{1,2})(?:[\/\-](\d{4}|\d{2}))?\b/)
@@ -1624,6 +1710,71 @@ function enrichTermosBuscaFromIntent(cls, question) {
     termos = extra
   }
   return { ...cls, termos_busca: termos.length ? termos : cls.termos_busca }
+}
+
+function splitTermosLivres(raw) {
+  const cleaned = String(raw || '')
+    .replace(/["'“”‘’]/g, ' ')
+    .replace(/\b(por exemplo|por favor|pfv|pfvr)\b/gi, ' ')
+    .replace(/\b(hoje|ontem|nesta semana|esta semana|neste mes|este mes|ultimos?|ultimas?)\b/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+  if (!cleaned) return []
+  const chunks = cleaned
+    .split(/\s+(?:e|ou)\s+|[,;]+/i)
+    .map((s) => s.trim())
+    .filter(Boolean)
+  return chunks
+    .map((s) => s.replace(/^(de|do|da|dos|das|sobre|o|a|os|as|um|uma)\s+/i, '').trim())
+    .filter((s) => s.length >= 2)
+    .slice(0, 8)
+}
+
+function extrairTermosBuscaLivre(question) {
+  const q = String(question || '').trim()
+  if (!q) return []
+  const patterns = [
+    /\b(?:falando|falam|fala|falaram|menciona(?:m)?|cita(?:m|ram)?|citou|trata(?:m)?|coment(?:a|am|aram))\s+(?:de|do|da|dos|das|sobre)?\s*([^?!.;]{2,90})/i,
+    /\b(?:conversas?|mensagens?|clientes?)\s+(?:sobre|com|de|do|da|dos|das)\s*([^?!.;]{2,90})/i,
+    /\b(?:buscar|procure|procurar|localizar|ache|encontre|encontrar)\s+(?:conversas?|mensagens?)?\s*(?:sobre|com|de|do|da|dos|das)?\s*([^?!.;]{2,90})/i,
+  ]
+  for (const p of patterns) {
+    const m = q.match(p)
+    const terms = splitTermosLivres(m?.[1])
+    if (terms.length) return terms
+  }
+  return extrairTermosCandidatosDaPergunta(question)
+}
+
+function isBuscaConversasQuestion(question) {
+  const q = normalizeSearchTerm(String(question || ''))
+  if (!q) return false
+  const fala = /\b(fala|falando|falam|falaram|menciona|mencionam|cita|citam|citou|comentam|comentaram|trata|tratam|sobre|assunto|tema)\b/.test(q)
+  const alvo = /\b(conversa|conversas|mensagem|mensagens|cliente|clientes|atendimento|atendimentos)\b/.test(q)
+  const busca = /\b(qual|quais|buscar|procure|procurar|localizar|ache|encontre|encontrar|liste|listar|mostre|mostrar)\b/.test(q)
+  return fala && (alvo || busca)
+}
+
+function isRelatorioProdutividadeQuestion(question) {
+  const q = normalizeSearchTerm(String(question || ''))
+  if (!q) return false
+  const exportar = /\b(planilha|csv|excel|xlsx|export|exportar|baixar|download|relatorio|relatorios)\b/.test(q)
+  const produtividade = /\b(produtividade|desempenho|performance|atendentes|equipe|funcionarios|usuarios|ranking)\b/.test(q)
+  return exportar && produtividade
+}
+
+function aplicarHeuristicasDeterministicas(cls, question) {
+  const base = cls && typeof cls === 'object' ? cls : { intent: 'UNKNOWN' }
+  if (isRelatorioProdutividadeQuestion(question)) {
+    return { ...base, intent: 'RELATORIO_PRODUTIVIDADE_ATENDENTES' }
+  }
+  if (isBuscaConversasQuestion(question)) {
+    const termos = base.termos_busca?.length ? base.termos_busca : extrairTermosBuscaLivre(question)
+    if (termos?.length) {
+      return { ...base, intent: 'BUSCA_CONTEUDO_MENSAGENS', termos_busca: termos }
+    }
+  }
+  return base
 }
 
 /** Desambiguação de atendentes por nome (máx. 8 candidatos). */
@@ -2120,6 +2271,224 @@ async function qConversasPorAssuntoOperacional(company_id, termos, days, dataIso
     recorte_temporal: busca.recorte_temporal || null,
     periodo_efetivo_consulta: busca.periodo_efetivo_consulta || null,
   }
+}
+
+function csvCell(value) {
+  const s = value == null ? '' : String(value)
+  return `"${s.replace(/"/g, '""')}"`
+}
+
+function buildCsvContent(columns, rows) {
+  const header = columns.map((c) => csvCell(c.label)).join(';')
+  const body = (rows || []).map((row) => columns.map((c) => csvCell(row[c.key])).join(';')).join('\n')
+  return `\uFEFF${header}${body ? `\n${body}` : ''}\n`
+}
+
+async function fetchConversasByIds(company_id, ids) {
+  const out = []
+  const unique = [...new Set((ids || []).filter(Boolean))]
+  for (const part of chunkArray(unique, 400)) {
+    const { data, error } = await supabase
+      .from('conversas')
+      .select('id, atendente_id, cliente_id, telefone, status_atendimento, tipo')
+      .eq('company_id', company_id)
+      .in('id', part)
+    if (error) throw error
+    out.push(...(data || []))
+  }
+  return out
+}
+
+async function qRelatorioProdutividadeAtendentes(company_id, days, opts = {}) {
+  const fxIn = opts.periodo_mensagens_inicio_iso || null
+  const fxEx = opts.periodo_mensagens_fim_exclusive_iso || null
+  let d = clampDays(days || 30)
+  let desde
+  if (fxIn && fxEx) {
+    desde = fxIn
+    d = Math.min(365, Math.max(1, Math.ceil((Date.parse(fxEx) - Date.parse(fxIn)) / 86400000)))
+  } else {
+    desde = new Date(Date.now() - d * 24 * 60 * 60 * 1000).toISOString()
+  }
+
+  let qConv = supabase
+    .from('conversas')
+    .select('id, atendente_id, status_atendimento, tipo, telefone')
+    .eq('company_id', company_id)
+    .gte('criado_em', desde)
+    .not('atendente_id', 'is', null)
+    .limit(10000)
+  if (fxEx) qConv = qConv.lt('criado_em', fxEx)
+  const { data: convPeriodoRaw, error: errConv } = await qConv
+  if (errConv) throw errConv
+  const convPeriodo = filtrarConversasIndividuais(convPeriodoRaw)
+
+  const convStats = new Map()
+  for (const c of convPeriodo || []) {
+    const uid = c.atendente_id
+    if (!uid) continue
+    if (!convStats.has(uid)) {
+      convStats.set(uid, { total_conversas: 0, conversas_abertas: 0, conversas_fechadas: 0 })
+    }
+    const rec = convStats.get(uid)
+    rec.total_conversas += 1
+    if (c.status_atendimento === 'fechada') rec.conversas_fechadas += 1
+    if (['aberta', 'em_atendimento', 'aguardando_cliente'].includes(c.status_atendimento)) rec.conversas_abertas += 1
+  }
+
+  const outMsgs = await fetchMensagensPaged((from, to) => {
+    let q = supabase
+      .from('mensagens')
+      .select('id, autor_usuario_id, criado_em')
+      .eq('company_id', company_id)
+      .eq('direcao', 'out')
+      .not('autor_usuario_id', 'is', null)
+      .gte('criado_em', desde)
+      .range(from, to)
+    if (fxEx) q = q.lt('criado_em', fxEx)
+    return q
+  }, { pageSize: 2500, maxRows: 50000 })
+
+  const mensagensEnviadas = new Map()
+  for (const m of outMsgs || []) {
+    const uid = m.autor_usuario_id
+    if (!uid) continue
+    mensagensEnviadas.set(uid, (mensagensEnviadas.get(uid) || 0) + 1)
+  }
+
+  const inMsgs = await fetchMensagensPaged((from, to) => {
+    let q = supabase
+      .from('mensagens')
+      .select('id, conversa_id, criado_em')
+      .eq('company_id', company_id)
+      .eq('direcao', 'in')
+      .gte('criado_em', desde)
+      .range(from, to)
+    if (fxEx) q = q.lt('criado_em', fxEx)
+    return q
+  }, { pageSize: 2500, maxRows: 50000 })
+
+  const convIdsIn = [...new Set((inMsgs || []).map((m) => m.conversa_id).filter(Boolean))]
+  const convsIn = filtrarConversasIndividuais(await fetchConversasByIds(company_id, convIdsIn))
+  const atendenteByConvIn = new Map(convsIn.map((c) => [c.id, c.atendente_id]))
+  const mensagensRecebidas = new Map()
+  for (const m of inMsgs || []) {
+    const uid = atendenteByConvIn.get(m.conversa_id)
+    if (!uid) continue
+    mensagensRecebidas.set(uid, (mensagensRecebidas.get(uid) || 0) + 1)
+  }
+
+  const convIdsTempo = convPeriodo.map((c) => c.id).slice(0, 4000)
+  const msgTempo = []
+  for (const part of chunkArray(convIdsTempo, 400)) {
+    let qT = supabase
+      .from('mensagens')
+      .select('conversa_id, criado_em, direcao')
+      .eq('company_id', company_id)
+      .in('conversa_id', part)
+      .in('direcao', ['in', 'out'])
+      .gte('criado_em', desde)
+      .order('criado_em', { ascending: true })
+      .limit(4000)
+    if (fxEx) qT = qT.lt('criado_em', fxEx)
+    const { data, error } = await qT
+    if (error) throw error
+    msgTempo.push(...(data || []))
+    if (msgTempo.length >= 20000) break
+  }
+
+  const atendenteByConv = new Map(convPeriodo.map((c) => [c.id, c.atendente_id]))
+  const msgsByConv = buildMsgsByConv(msgTempo)
+  const tempoStats = new Map()
+  for (const [convId, msgs] of msgsByConv.entries()) {
+    const uid = atendenteByConv.get(convId)
+    if (!uid) continue
+    const diff = calcFirstResponseDiff(msgs)
+    if (diff == null) continue
+    if (!tempoStats.has(uid)) tempoStats.set(uid, { soma: 0, count: 0 })
+    const rec = tempoStats.get(uid)
+    rec.soma += diff
+    rec.count += 1
+  }
+
+  const userIds = [...new Set([
+    ...convStats.keys(),
+    ...mensagensEnviadas.keys(),
+    ...mensagensRecebidas.keys(),
+    ...tempoStats.keys(),
+  ])]
+  const { data: usuarios } = userIds.length
+    ? await supabase.from('usuarios').select('id, nome').eq('company_id', company_id).in('id', userIds)
+    : { data: [] }
+  const nomeMap = new Map((usuarios || []).map((u) => [u.id, u.nome || 'Sem nome']))
+
+  const linhas = userIds.map((uid) => {
+    const cs = convStats.get(uid) || {}
+    const ts = tempoStats.get(uid) || {}
+    const totalConversas = cs.total_conversas || 0
+    const fechadas = cs.conversas_fechadas || 0
+    return {
+      usuario_id: uid,
+      atendente: nomeMap.get(uid) || 'Sem nome',
+      total_conversas: totalConversas,
+      conversas_abertas: cs.conversas_abertas || 0,
+      conversas_fechadas: fechadas,
+      taxa_fechamento_percentual: totalConversas > 0 ? Math.round((fechadas * 100 / totalConversas) * 10) / 10 : 0,
+      mensagens_enviadas_autor: mensagensEnviadas.get(uid) || 0,
+      mensagens_recebidas_conversas: mensagensRecebidas.get(uid) || 0,
+      tempo_medio_primeira_resposta_min: ts.count > 0 ? Math.round((ts.soma / ts.count) * 10) / 10 : null,
+      conversas_com_primeira_resposta_medida: ts.count || 0,
+    }
+  }).sort((a, b) => (
+    b.total_conversas - a.total_conversas
+    || b.mensagens_enviadas_autor - a.mensagens_enviadas_autor
+    || String(a.atendente).localeCompare(String(b.atendente), 'pt-BR')
+  ))
+
+  const columns = [
+    { key: 'usuario_id', label: 'usuario_id' },
+    { key: 'atendente', label: 'atendente' },
+    { key: 'total_conversas', label: 'total_conversas' },
+    { key: 'conversas_abertas', label: 'conversas_abertas' },
+    { key: 'conversas_fechadas', label: 'conversas_fechadas' },
+    { key: 'taxa_fechamento_percentual', label: 'taxa_fechamento_percentual' },
+    { key: 'mensagens_enviadas_autor', label: 'mensagens_enviadas_autor' },
+    { key: 'mensagens_recebidas_conversas', label: 'mensagens_recebidas_conversas' },
+    { key: 'tempo_medio_primeira_resposta_min', label: 'tempo_medio_primeira_resposta_min' },
+    { key: 'conversas_com_primeira_resposta_medida', label: 'conversas_com_primeira_resposta_medida' },
+  ]
+  const csv = buildCsvContent(columns, linhas)
+  const stamp = calendarKeyNowSp()
+
+  const out = {
+    periodo_dias: d,
+    linhas,
+    total_atendentes: linhas.length,
+    totais: {
+      conversas: linhas.reduce((s, r) => s + Number(r.total_conversas || 0), 0),
+      mensagens_enviadas: linhas.reduce((s, r) => s + Number(r.mensagens_enviadas_autor || 0), 0),
+      mensagens_recebidas: linhas.reduce((s, r) => s + Number(r.mensagens_recebidas_conversas || 0), 0),
+    },
+    csv_artifacts: [{
+      id: 'produtividade_atendentes_csv',
+      filename: `produtividade-atendentes-${stamp}.csv`,
+      mime_type: 'text/csv;charset=utf-8',
+      content: csv,
+      rows: linhas.length,
+      label: 'Planilha CSV de produtividade dos atendentes',
+    }],
+    observacao: 'Relatorio calculado apenas com dados reais do banco. Mensagens enviadas usam autor_usuario_id; mensagens recebidas sao atribuidas ao atendente atual da conversa.',
+  }
+  if (fxIn && fxEx) {
+    out.periodo_efetivo_consulta = {
+      fuso: RECORTE_TZ,
+      inicio_iso: fxIn,
+      fim_exclusive_iso: fxEx,
+      rotulo: opts.periodo_consulta_rotulo || null,
+      fonte_temporal_mensagens: 'mensagens.criado_em',
+    }
+  }
+  return out
 }
 
 /**
@@ -3465,6 +3834,7 @@ function inferFonteDados(intent) {
     'SINAIS_INTERESSE_COMPRA',
     'ATENDENTE_MAIS_MENSAGENS_COM_TEMA',
     'ATENDIMENTOS_LINGUAGEM_PROBLEMA',
+    'RELATORIO_PRODUTIVIDADE_ATENDENTES',
   ].includes(intent)) return 'mensagens_whatsapp'
   return null
 }
@@ -4077,6 +4447,27 @@ async function attachResumoOperacionalParaIa(company_id, data, intent, ctx) {
       case 'RELATORIO_ATENDENTE_COMPLETO':
         bloco = resumoOperacionalRelatorio(data)
         break
+      case 'RELATORIO_PRODUTIVIDADE_ATENDENTES':
+        bloco = {
+          clientes_unicos: [],
+          clientes_detalhes: [],
+          conversas_encontradas: [],
+          conversas_detalhes: [],
+          mensagens_encontradas: [],
+          mensagens_detalhes: 'Relatorio agregado por atendente; detalhes completos em Dados.linhas e arquivo em Dados.csv_artifacts.',
+          total_clientes_unicos: 0,
+          total_conversas: data.totais?.conversas || 0,
+          total_mensagens: (data.totais?.mensagens_enviadas || 0) + (data.totais?.mensagens_recebidas || 0),
+          ranking_por_atendente: (data.linhas || []).map((r) => ({
+            usuario_id: r.usuario_id,
+            nome: r.atendente,
+            total_conversas: r.total_conversas,
+            mensagens_enviadas_autor: r.mensagens_enviadas_autor,
+            tempo_medio_primeira_resposta_min: r.tempo_medio_primeira_resposta_min,
+          })),
+          distincao_entidades: 'Cada linha representa um atendente; total_conversas e mensagens sao metricas agregadas, nao evidencias individuais.',
+        }
+        break
       default:
         bloco = {
           clientes_unicos: [],
@@ -4144,6 +4535,7 @@ function sanearRespostaContagensInconsistentes(answer, intent, data) {
     'ATENDIMENTOS_TRANSFERIDOS',
     'CLIENTES_MENSAGEM_SEM_RESPOSTA_ATENDENTE',
     'MENSAGENS_ENVIADAS_ATENDENTE_AUTOR',
+    'RELATORIO_PRODUTIVIDADE_ATENDENTES',
   ]
   if (!intentsOk.includes(intent)) return answer
 
@@ -4233,8 +4625,11 @@ function attachAnaliticaUiMeta(data, ctx) {
  */
 async function answerDashboardQuestion({ company_id, question, period_days }) {
   let cls = await classifyQuestion(question)
+  const classifyUsage = cls._usage
+  cls = aplicarHeuristicasDeterministicas(cls, question)
   cls = enrichDataReferenciaFromQuestion(cls, question)
   cls = enrichTermosBuscaFromIntent(cls, question)
+  cls = aplicarHeuristicasDeterministicas(cls, question)
 
   if (cls.intent === 'UNKNOWN') {
     cls = { ...cls, intent: 'GENERAL_CHAT' }
@@ -4257,7 +4652,21 @@ async function answerDashboardQuestion({ company_id, question, period_days }) {
     && periodDaysNum <= 1
   const periodoDefinidoNoBody = bodyPeriodInformado && !ignorarPeriodBodyPadrao
 
-  let days = clampDays((periodoDefinidoNoBody ? periodDaysNum : undefined) ?? cls.period_days ?? 7)
+  const intentsBuscaAmpla = new Set([
+    'BUSCA_CONTEUDO_MENSAGENS',
+    'CLIENTES_POR_TEMA_FINANCEIRO',
+    'CONVERSAS_POR_ASSUNTO_OPERACIONAL',
+    'SINAIS_INTERESSE_COMPRA',
+  ])
+  const defaultDays = cls.intent === 'RELATORIO_PRODUTIVIDADE_ATENDENTES'
+    ? 30
+    : (intentsBuscaAmpla.has(cls.intent) ? 365 : 7)
+  const periodoInferidoClassificador = (
+    intentsBuscaAmpla.has(cls.intent)
+    && !periodoDefinidoNoBody
+    && tscope?.fixado_na_pergunta !== true
+  ) ? undefined : cls.period_days
+  let days = clampDays((periodoDefinidoNoBody ? periodDaysNum : undefined) ?? periodoInferidoClassificador ?? defaultDays)
   if (tscope?.opts?.periodo_mensagens_inicio_iso && tscope.opts.periodo_mensagens_fim_exclusive_iso) {
     const ms = Date.parse(tscope.opts.periodo_mensagens_fim_exclusive_iso) - Date.parse(tscope.opts.periodo_mensagens_inicio_iso)
     days = Math.min(365, Math.max(1, Math.ceil(ms / 86400000)))
@@ -4435,6 +4844,10 @@ async function answerDashboardQuestion({ company_id, question, period_days }) {
       data = await qMensagensEnviadasAutorAtendente(company_id, cls.usuario_nome || null, days, optsPeriodoApi)
       break
 
+    case 'RELATORIO_PRODUTIVIDADE_ATENDENTES':
+      data = await qRelatorioProdutividadeAtendentes(company_id, days, optsPeriodoApi)
+      break
+
     default:
       data = null
   }
@@ -4455,13 +4868,15 @@ async function answerDashboardQuestion({ company_id, question, period_days }) {
     })
   }
 
-  let answer = await formatAnswer({ intent: cls.intent, data, question })
+  const formatted = await formatAnswer({ intent: cls.intent, data, question })
+  let answer = formatted.answer
   answer = sanearRespostaContradicaoMetricas(answer, cls.intent, data)
   answer = sanearNegacaoComEvidenciaMensagens(answer, cls.intent, data)
   answer = sanearLinguagemTemporalIndevida(answer, cls.intent, data)
   answer = sanearRespostaContagensInconsistentes(answer, cls.intent, data)
+  const totalUsage = addUsage(classifyUsage, formatted.usage)
 
-  return { ok: true, intent: cls.intent, answer, data }
+  return { ok: true, intent: cls.intent, answer, data, _ai_usage: totalUsage }
 }
 
 module.exports = { answerDashboardQuestion }

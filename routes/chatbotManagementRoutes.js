@@ -14,6 +14,8 @@
 
 const express = require('express')
 const router = express.Router()
+const auth = require('../middleware/auth')
+const adminOnly = require('../middleware/adminOnly')
 
 const {
   generateChatbotConfig,
@@ -32,6 +34,9 @@ const {
   invalidateChatbotConfigCache,
 } = require('../services/chatbotTriageService')
 
+router.use(auth)
+router.use(adminOnly)
+
 /**
  * GET /api/chatbot/status
  * Retorna status do chatbot para todas as empresas
@@ -39,12 +44,13 @@ const {
 router.get('/status', async (req, res) => {
   try {
     const status = await getChatbotStatusForAllCompanies()
+    const companyStatus = status.filter(s => Number(s.company_id) === Number(req.user.company_id))
     
     const summary = {
-      total_companies: status.length,
-      configured_companies: status.filter(s => s.chatbot_configured).length,
-      enabled_companies: status.filter(s => s.chatbot_enabled).length,
-      companies: status
+      total_companies: companyStatus.length,
+      configured_companies: companyStatus.filter(s => s.chatbot_configured).length,
+      enabled_companies: companyStatus.filter(s => s.chatbot_enabled).length,
+      companies: companyStatus
     }
     
     res.json({
@@ -66,6 +72,11 @@ router.get('/status', async (req, res) => {
  * Configura chatbot para todas as empresas ativas
  */
 router.post('/configure-all', async (req, res) => {
+  return res.status(403).json({
+    success: false,
+    error: 'Configuração global de todas as empresas não está disponível por esta API'
+  })
+
   try {
     const customConfig = req.body.config || {}
     
@@ -111,6 +122,10 @@ router.post('/configure/:companyId', async (req, res) => {
       })
     }
     
+    if (companyId !== Number(req.user.company_id)) {
+      return res.status(403).json({ success: false, error: 'Acesso negado para esta empresa' })
+    }
+
     console.log(`[ChatbotRoutes] Configurando chatbot para empresa ${companyId}`)
     const success = await configureChatbotForCompany(companyId, customConfig)
     
@@ -151,6 +166,10 @@ router.put('/toggle/:companyId', async (req, res) => {
       })
     }
     
+    if (companyId !== Number(req.user.company_id)) {
+      return res.status(403).json({ success: false, error: 'Acesso negado para esta empresa' })
+    }
+
     if (typeof enabled !== 'boolean') {
       return res.status(400).json({
         success: false,
@@ -198,6 +217,10 @@ router.post('/reconfigure/:companyId', async (req, res) => {
       })
     }
     
+    if (companyId !== Number(req.user.company_id)) {
+      return res.status(403).json({ success: false, error: 'Acesso negado para esta empresa' })
+    }
+
     console.log(`[ChatbotRoutes] Reconfigurando chatbot para empresa ${companyId}`)
     const success = await reconfigureChatbotForCompany(companyId, customConfig)
     
@@ -237,13 +260,24 @@ router.get('/health', chatbotHealthCheck, (req, res) => {
     })
   }
   
-  const isHealthy = healthStatus.total_companies > 0 && 
-                   healthStatus.configured_companies === healthStatus.total_companies
+  const details = Array.isArray(healthStatus.details)
+    ? healthStatus.details.filter(s => Number(s.company_id) === Number(req.user.company_id))
+    : []
+  const scopedHealthStatus = {
+    ...healthStatus,
+    total_companies: details.length,
+    configured_companies: details.filter(s => s.chatbot_configured).length,
+    enabled_companies: details.filter(s => s.chatbot_enabled).length,
+    details
+  }
+
+  const isHealthy = scopedHealthStatus.total_companies > 0 &&
+                   scopedHealthStatus.configured_companies === scopedHealthStatus.total_companies
   
   res.status(isHealthy ? 200 : 206).json({
     success: true,
     status: isHealthy ? 'healthy' : 'partial',
-    data: healthStatus
+    data: scopedHealthStatus
   })
 })
 
@@ -263,6 +297,10 @@ router.post('/test/:companyId', async (req, res) => {
     }
     
     // Gerar configuração de teste
+    if (companyId !== Number(req.user.company_id)) {
+      return res.status(403).json({ success: false, error: 'Acesso negado para esta empresa' })
+    }
+
     const config = await generateChatbotConfig(companyId)
     
     // Verificar se configuração é válida
@@ -324,6 +362,10 @@ router.get('/config/:companyId', async (req, res) => {
       })
     }
     
+    if (companyId !== Number(req.user.company_id)) {
+      return res.status(403).json({ success: false, error: 'Acesso negado para esta empresa' })
+    }
+
     const supabase = require('../config/supabase')
     
     const { data: config, error } = await supabase
@@ -380,6 +422,10 @@ router.put('/config/:companyId', async (req, res) => {
       })
     }
     
+    if (companyId !== Number(req.user.company_id)) {
+      return res.status(403).json({ success: false, error: 'Acesso negado para esta empresa' })
+    }
+
     if (!config || typeof config !== 'object') {
       return res.status(400).json({
         success: false,

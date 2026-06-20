@@ -7,14 +7,19 @@ const auth = require('../middleware/auth')
 const supervisorOrAdmin = require('../middleware/supervisorOrAdmin')
 const aiController = require('../controllers/aiController')
 
+function numberFromEnv(name, fallback) {
+  const n = Number(process.env[name])
+  return Number.isFinite(n) && n > 0 ? n : fallback
+}
+
 /**
- * Rate limit por empresa + IP: 20 perguntas/minuto.
+ * Rate limit por empresa, configuravel por AI_RATE_LIMIT_MAX.
  * A chave é company_id + IP para isolar multi-tenant rigorosamente.
  * Só é avaliada APÓS auth (req.user já existe).
  */
 const aiLimiter = rateLimit({
   windowMs: 60 * 1000,
-  max: 20,
+  max: numberFromEnv('AI_RATE_LIMIT_MAX', 120),
   standardHeaders: true,
   legacyHeaders: false,
   // Chave por company_id (sem req.ip para evitar ERR_ERL_KEY_GEN_IPV6 no express-rate-limit v8)
@@ -26,7 +31,7 @@ const aiLimiter = rateLimit({
       intent: null,
       answer: null,
       data: null,
-      error: 'Limite de perguntas atingido (20/min). Aguarde 1 minuto.',
+      error: 'Limite de perguntas atingido. Aguarde 1 minuto.',
     }),
 })
 

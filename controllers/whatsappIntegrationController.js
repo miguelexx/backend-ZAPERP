@@ -1,14 +1,15 @@
 const supabase = require('../config/supabase')
 const ultramsgIntegrationService = require('../services/ultramsgIntegrationService')
 const whatsappConfigService = require('../services/whatsappConfigService')
-const { enqueue, JOB_TIPOS } = require('../services/queueManager')
+const whatsappInstanceService = require('../services/whatsappInstanceService')
+const { enqueue, getActiveJob, requestCancelJob, JOB_TIPOS } = require('../services/queueManager')
 const { syncGroups, syncAll } = require('../services/ultramsgGroupsSyncService')
 const { checkGuard, recordQrServed, resetOnConnected, getAttempts, THROTTLE_SECONDS } = require('../services/whatsappConnectGuardService')
 const { getConfig } = require('../services/configOperacionalService')
 const { getProvider } = require('../services/providers')
 
 const { getStatus, getQrCodeImage, restartInstance, getMe, getPhoneCode, buildMeSummary } = ultramsgIntegrationService
-const { getEmpresaWhatsappConfig } = whatsappConfigService
+const { getEmpresaWhatsappConfig, invalidateEmpresaWhatsappConfigCache } = whatsappConfigService
 
 const perCompanyBuckets = new Map()
 
@@ -24,6 +25,129 @@ function checkCompanyRate(companyId, key, windowMs, max) {
   if (bucket.count >= max) return false
   bucket.count += 1
   return true
+}
+
+function getInstanceParam(req) {
+  const id = Number(req.params?.id || req.params?.instanceId)
+  return Number.isFinite(id) && id > 0 ? id : null
+}
+
+function instanceErrorStatus(error) {
+  if (/duplicidade|duplicate/i.test(String(error || ''))) return 409
+  return /nao encontrada|não encontrada|invalido|inválido/i.test(String(error || '')) ? 404 : 400
+}
+
+exports.listInstances = async (req, res) => {
+  const company_id = req.user?.company_id
+  if (!company_id) return res.status(401).json({ error: 'Não autenticado' })
+  const result = await whatsappInstanceService.listWhatsappInstances(company_id)
+  if (result.error) return res.status(500).json({ error: result.error })
+  return res.json({ instances: result.instances || [] })
+}
+
+exports.createInstance = async (req, res) => {
+  const company_id = req.user?.company_id
+  if (!company_id) return res.status(401).json({ error: 'Não autenticado' })
+  const result = await whatsappInstanceService.createWhatsappInstance(company_id, req.body || {})
+  if (result.error) return res.status(400).json({ error: result.error })
+  invalidateEmpresaWhatsappConfigCache(company_id)
+  return res.status(201).json({ instance: result.instance })
+}
+
+exports.updateInstance = async (req, res) => {
+  const company_id = req.user?.company_id
+  if (!company_id) return res.status(401).json({ error: 'Não autenticado' })
+  const id = getInstanceParam(req)
+  if (!id) return res.status(400).json({ error: 'whatsapp_instance_id inválido' })
+  const result = await whatsappInstanceService.updateWhatsappInstance(company_id, id, req.body || {})
+  if (result.error) return res.status(instanceErrorStatus(result.error)).json({ error: result.error })
+  invalidateEmpresaWhatsappConfigCache(company_id)
+  return res.json({ instance: result.instance })
+}
+
+exports.activateInstance = async (req, res) => {
+  req.body = { ...(req.body || {}), ativo: true }
+  return exports.updateInstance(req, res)
+}
+
+exports.deactivateInstance = async (req, res) => {
+  req.body = { ...(req.body || {}), ativo: false }
+  return exports.updateInstance(req, res)
+}
+
+exports.setDefaultInstance = async (req, res) => {
+  const company_id = req.user?.company_id
+  if (!company_id) return res.status(401).json({ error: 'Não autenticado' })
+  const id = getInstanceParam(req)
+  if (!id) return res.status(400).json({ error: 'whatsapp_instance_id inválido' })
+  const result = await whatsappInstanceService.setDefaultWhatsappInstance(company_id, id)
+  if (result.error) return res.status(instanceErrorStatus(result.error)).json({ error: result.error })
+  invalidateEmpresaWhatsappConfigCache(company_id)
+  return res.json({ instance: result.instance })
+}
+
+exports.getInstanceStatus = async (req, res) => {
+  const company_id = req.user?.company_id
+  if (!company_id) return res.status(401).json({ error: 'Não autenticado' })
+  const id = getInstanceParam(req)
+  if (!id) return res.status(400).json({ error: 'whatsapp_instance_id inválido' })
+  if (!checkCompanyRate(company_id, `instance-status:${id}`, 60_000, 30)) {
+    return res.status(429).json({ error: 'Muitas consultas de status, tente novamente em instantes.', retryAfterSeconds: 60 })
+  }
+  const result = await getStatus(company_id, { whatsappInstanceId: id })
+  if (result.error) return res.status(instanceErrorStatus(result.error)).json({ error: result.error })
+  return res.json({
+    connected: !!result.connected,
+    smartphoneConnected: !!result.smartphoneConnected,
+    needsRestore: !!result.needsRestore,
+  })
+}
+
+exports.getInstanceQrCode = async (req, res) => {
+  const company_id = req.user?.company_id
+  if (!company_id) return res.status(401).json({ error: 'Não autenticado' })
+  const id = getInstanceParam(req)
+  if (!id) return res.status(400).json({ error: 'whatsapp_instance_id inválido' })
+  if (!checkCompanyRate(company_id, `instance-qrcode:${id}`, 60_000, 10)) {
+    return res.status(429).json({ error: 'Muitas solicitações de QR Code, tente novamente em instantes.', retryAfterSeconds: 60 })
+  }
+  const result = await getQrCodeImage(company_id, { whatsappInstanceId: id })
+  if (result.error) return res.status(instanceErrorStatus(result.error)).json({ error: result.error })
+  if (result.alreadyConnected) return res.json({ alreadyConnected: true, connected: true })
+  return res.json({ imageBase64: result.imageBase64, qrBase64: result.imageBase64 })
+}
+
+exports.restartInstance = async (req, res) => {
+  const company_id = req.user?.company_id
+  if (!company_id) return res.status(401).json({ error: 'Não autenticado' })
+  const id = getInstanceParam(req)
+  if (!id) return res.status(400).json({ error: 'whatsapp_instance_id inválido' })
+  const result = await restartInstance(company_id, { whatsappInstanceId: id })
+  if (result.error) return res.status(instanceErrorStatus(result.error)).json({ error: result.error })
+  return res.json({ value: !!result.value })
+}
+
+exports.configureInstanceWebhooks = async (req, res) => {
+  const company_id = req.user?.company_id
+  if (!company_id) return res.status(401).json({ error: 'Não autenticado' })
+  const id = getInstanceParam(req)
+  if (!id) return res.status(400).json({ error: 'whatsapp_instance_id inválido' })
+  const appUrl = String(process.env.APP_URL || '').trim()
+  if (!appUrl) return res.status(500).json({ error: 'APP_URL não configurado no servidor' })
+  const provider = getProvider()
+  if (!provider?.configureWebhooks) return res.status(501).json({ error: 'Provider não suporta configureWebhooks' })
+  try {
+    const results = await provider.configureWebhooks(appUrl, { companyId: company_id, whatsappInstanceId: id })
+    const ok = Array.isArray(results) && results.some((r) => r.ok)
+    return res.json({
+      ok: !!ok,
+      webhook_url: `${appUrl}/webhooks/ultramsg?token=***`,
+      results,
+    })
+  } catch (e) {
+    console.error('[configureInstanceWebhooks]', e?.message || e)
+    return res.status(500).json({ error: e?.message || 'Erro ao configurar webhooks' })
+  }
 }
 
 exports.getStatus = async (req, res) => {
@@ -345,6 +469,103 @@ exports.syncContacts = async (req, res) => {
     message: 'Sincronização iniciada em segundo plano. Os contatos serão importados em lotes.',
     totalFetched: 0, inserted: 0, updated: 0, skipped: 0
   })
+}
+
+exports.syncOldMessages = async (req, res) => {
+  const company_id = req.user?.company_id
+  if (!company_id) return res.status(401).json({ error: 'Nao autenticado' })
+
+  if (!checkCompanyRate(company_id, 'old-messages-sync', 300_000, 1)) {
+    return res.status(429).json({
+      error: 'Sincronizacao de mensagens antigas ja iniciada. Aguarde alguns minutos.',
+      retryAfterSeconds: 300
+    })
+  }
+
+  const result = await enqueue(company_id, JOB_TIPOS.SYNC_MENSAGENS_ANTIGAS, {
+    requestedBy: req.user?.id || null
+  })
+
+  if (!result.ok) {
+    const jaRodando = /enfileirado|execu/i.test(result.error || '')
+    console.log(`[SYNC-MENSAGENS-ANTIGAS] empresa=${company_id} enqueue: ${result.error}`)
+    return res.json({
+      ok: true,
+      queued: false,
+      running: jaRodando,
+      message: jaRodando ? 'Sincronizacao de mensagens antigas ja esta em andamento.' : result.error
+    })
+  }
+
+  console.log(`[SYNC-MENSAGENS-ANTIGAS] empresa=${company_id} job_id=${result.job_id} enfileirado`)
+  return res.json({
+    ok: true,
+    queued: true,
+    job_id: result.job_id,
+    message: 'Sincronizacao de mensagens antigas iniciada em segundo plano. O historico sera importado em lotes.'
+  })
+}
+
+exports.getSyncOldMessagesStatus = async (req, res) => {
+  const company_id = req.user?.company_id
+  if (!company_id) return res.status(401).json({ error: 'Nao autenticado' })
+
+  const job = await getActiveJob(company_id, JOB_TIPOS.SYNC_MENSAGENS_ANTIGAS)
+  if (!job?.id) {
+    return res.json({ ok: true, running: false, queued: false, cancel_requested: false })
+  }
+
+  return res.json({
+    ok: true,
+    running: job.status === 'running' || job.status === 'cancel_requested',
+    queued: job.status === 'pending',
+    cancel_requested: job.status === 'cancel_requested',
+    job_id: job.id,
+    status: job.status,
+    message: job.status === 'cancel_requested'
+      ? 'Cancelamento solicitado. A sincronizacao vai parar em seguranca.'
+      : 'Sincronizacao de mensagens antigas ja esta em andamento.'
+  })
+}
+
+exports.cancelSyncOldMessages = async (req, res) => {
+  const company_id = req.user?.company_id
+  if (!company_id) return res.status(401).json({ error: 'Nao autenticado' })
+
+  const result = await requestCancelJob(company_id, JOB_TIPOS.SYNC_MENSAGENS_ANTIGAS)
+  if (!result.ok && !result.notFound) {
+    return res.status(400).json({ ok: false, error: result.error || 'Erro ao cancelar sincronizacao.' })
+  }
+
+  perCompanyBuckets.delete(`${company_id}:old-messages-sync`)
+
+  const payload = result.notFound
+    ? {
+        ok: true,
+        running: false,
+        queued: false,
+        cancelled: false,
+        message: 'Nenhuma sincronizacao ativa encontrada.'
+      }
+    : {
+        ok: true,
+        running: result.cancel_requested === true,
+        queued: false,
+        cancelled: result.cancelled === true,
+        cancel_requested: result.cancel_requested === true,
+        job_id: result.job_id,
+        status: result.status,
+        message: result.cancel_requested
+          ? 'Cancelamento solicitado. A sincronizacao vai parar em seguranca.'
+          : 'Sincronizacao de mensagens antigas cancelada.'
+      }
+
+  const io = req.app?.get?.('io')
+  if (io && !result.notFound) {
+    io.to(`empresa_${company_id}`).emit('whatsapp_sync_mensagens_antigas', payload)
+  }
+
+  return res.json(payload)
 }
 
 exports.syncGroups = async (req, res) => {

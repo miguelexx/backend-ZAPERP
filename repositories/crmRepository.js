@@ -8,6 +8,15 @@ function asInt(v) {
   return Number.isFinite(n) ? n : null
 }
 
+function parseIdList(value) {
+  if (Array.isArray(value)) return value.map(Number).filter((x) => Number.isFinite(x) && x > 0)
+  if (value == null || value === '') return []
+  return String(value)
+    .split(',')
+    .map((x) => Number(String(x).trim()))
+    .filter((x) => Number.isFinite(x) && x > 0)
+}
+
 async function fetchUsuarioMap(companyId, userIds) {
   const ids = [...new Set((userIds || []).map(Number).filter((x) => Number.isFinite(x) && x > 0))]
   if (ids.length === 0) return {}
@@ -227,6 +236,51 @@ async function updateOrigem(companyId, id, patch) {
   return data
 }
 
+// ---------- Campanhas ----------
+async function listCampaigns(companyId, { ativo, origem_id } = {}) {
+  let q = supabase
+    .from('crm_campaigns')
+    .select('*')
+    .eq('company_id', companyId)
+    .order('data_inicio', { ascending: false, nullsFirst: false })
+    .order('nome', { ascending: true })
+  if (ativo === true) q = q.eq('ativo', true)
+  if (ativo === false) q = q.eq('ativo', false)
+  if (origem_id != null && origem_id !== '') q = q.eq('origem_id', asInt(origem_id))
+  const { data, error } = await q
+  if (error) throw error
+  return data || []
+}
+
+async function getCampaignById(companyId, id) {
+  const { data, error } = await supabase
+    .from('crm_campaigns')
+    .select('*')
+    .eq('company_id', companyId)
+    .eq('id', id)
+    .maybeSingle()
+  if (error) throw error
+  return data
+}
+
+async function insertCampaign(row) {
+  const { data, error } = await supabase.from('crm_campaigns').insert(row).select().single()
+  if (error) throw error
+  return data
+}
+
+async function updateCampaign(companyId, id, patch) {
+  const { data, error } = await supabase
+    .from('crm_campaigns')
+    .update({ ...patch, atualizado_em: new Date().toISOString() })
+    .eq('company_id', companyId)
+    .eq('id', id)
+    .select()
+    .maybeSingle()
+  if (error) throw error
+  return data
+}
+
 // ---------- Leads ----------
 function buildLeadFilters(q, query) {
   let qb = q
@@ -236,10 +290,18 @@ function buildLeadFilters(q, query) {
     responsavel_id,
     status,
     origem_id,
+    campanha_id,
     prioridade,
+    temperatura,
     sem_contato_dias,
     proximo_contato_de,
     proximo_contato_ate,
+    proxima_acao_de,
+    proxima_acao_ate,
+    fechamento_de,
+    fechamento_ate,
+    valor_min,
+    valor_max,
     criado_de,
     criado_ate,
     q: texto,
@@ -256,7 +318,9 @@ function buildLeadFilters(q, query) {
   }
   if (status) qb = qb.eq('status', String(status))
   if (origem_id != null && origem_id !== '') qb = qb.eq('origem_id', asInt(origem_id))
+  if (campanha_id != null && campanha_id !== '') qb = qb.eq('campanha_id', asInt(campanha_id))
   if (prioridade) qb = qb.eq('prioridade', String(prioridade))
+  if (temperatura) qb = qb.eq('temperatura', String(temperatura))
 
   const dias = sem_contato_dias != null && sem_contato_dias !== '' ? asInt(sem_contato_dias) : null
   if (dias != null && dias > 0) {
@@ -266,6 +330,12 @@ function buildLeadFilters(q, query) {
 
   if (proximo_contato_de) qb = qb.gte('data_proximo_contato', String(proximo_contato_de))
   if (proximo_contato_ate) qb = qb.lte('data_proximo_contato', String(proximo_contato_ate))
+  if (proxima_acao_de) qb = qb.gte('data_proxima_acao', String(proxima_acao_de))
+  if (proxima_acao_ate) qb = qb.lte('data_proxima_acao', String(proxima_acao_ate))
+  if (fechamento_de) qb = qb.gte('data_prevista_fechamento', String(fechamento_de))
+  if (fechamento_ate) qb = qb.lte('data_prevista_fechamento', String(fechamento_ate))
+  if (valor_min != null && valor_min !== '') qb = qb.gte('valor_estimado', Number(valor_min))
+  if (valor_max != null && valor_max !== '') qb = qb.lte('valor_estimado', Number(valor_max))
 
   const proximoVencido = query?.proximo_vencido === true || query?.proximo_vencido === 'true' || query?.proximo_vencido === '1'
   if (proximoVencido) {
@@ -279,30 +349,73 @@ function buildLeadFilters(q, query) {
   if (texto && String(texto).trim()) {
     const raw = String(texto).trim().replace(/"/g, '').replace(/,/g, ' ')
     const t = `%${raw}%`
-    qb = qb.or(`nome.ilike.${t},empresa.ilike.${t},telefone.ilike.${t},email.ilike.${t}`)
+    qb = qb.or(`nome.ilike.${t},empresa.ilike.${t},telefone.ilike.${t},whatsapp.ilike.${t},email.ilike.${t},cpf_cnpj.ilike.${t}`)
   }
   return qb
 }
 
+function extractLeadTagFilter(query) {
+  const ids = [
+    ...parseIdList(query?.tag_id),
+    ...parseIdList(query?.tag_ids),
+  ]
+  return [...new Set(ids)]
+}
+
+async function resolveLeadIdsByTagFilter(companyId, query) {
+  const tagIds = extractLeadTagFilter(query)
+  if (!tagIds.length) return null
+  const { data, error } = await supabase
+    .from('crm_lead_tags')
+    .select('lead_id')
+    .eq('company_id', companyId)
+    .in('tag_id', tagIds)
+  if (error) throw error
+  return [...new Set((data || []).map((r) => r.lead_id).filter(Boolean))]
+}
+
 async function countLeads(companyId, query) {
+  const tagLeadIds = await resolveLeadIdsByTagFilter(companyId, query)
+  if (tagLeadIds && tagLeadIds.length === 0) return 0
   let q = supabase
     .from('crm_leads')
     .select('id', { count: 'exact', head: true })
     .eq('company_id', companyId)
   q = buildLeadFilters(q, query)
+  if (tagLeadIds) q = q.in('id', tagLeadIds)
   const { count, error } = await q
   if (error) throw error
   return count || 0
 }
 
 async function listLeads(companyId, query) {
+  const tagLeadIds = await resolveLeadIdsByTagFilter(companyId, query)
+  if (tagLeadIds && tagLeadIds.length === 0) {
+    return {
+      items: [],
+      page: Math.max(asInt(query.page) || 1, 1),
+      page_size: Math.min(Math.max(asInt(query.page_size) || 20, 1), 200),
+      total: 0,
+    }
+  }
   const page = Math.max(asInt(query.page) || 1, 1)
   const pageSize = Math.min(Math.max(asInt(query.page_size) || 20, 1), 200)
   const offset = (page - 1) * pageSize
 
   const sort = String(query.sort || 'atualizado_em').toLowerCase()
   const dir = String(query.dir || 'desc').toLowerCase() === 'asc'
-  const sortCol = ['nome', 'valor_estimado', 'criado_em', 'atualizado_em', 'ultima_interacao_em', 'data_proximo_contato'].includes(sort)
+  const sortCol = [
+    'nome',
+    'valor_estimado',
+    'valor_ganho',
+    'criado_em',
+    'atualizado_em',
+    'ultima_interacao_em',
+    'data_ultimo_contato',
+    'data_proximo_contato',
+    'data_proxima_acao',
+    'data_prevista_fechamento',
+  ].includes(sort)
     ? sort
     : 'atualizado_em'
 
@@ -311,6 +424,7 @@ async function listLeads(companyId, query) {
     .select('*', { count: 'exact' })
     .eq('company_id', companyId)
   q = buildLeadFilters(q, query)
+  if (tagLeadIds) q = q.in('id', tagLeadIds)
   q = q.order(sortCol, { ascending: dir })
   q = q.range(offset, offset + pageSize - 1)
 
@@ -398,12 +512,14 @@ async function updateLead(companyId, id, patch) {
   return data
 }
 
-async function listLeadsByPipeline(companyId, pipelineId) {
-  const { data, error } = await supabase
+async function listLeadsByPipeline(companyId, pipelineId, { status } = {}) {
+  let q = supabase
     .from('crm_leads')
     .select('*')
     .eq('company_id', companyId)
     .eq('pipeline_id', pipelineId)
+  if (status) q = q.eq('status', String(status))
+  const { data, error } = await q
   if (error) throw error
   return data || []
 }
@@ -714,6 +830,27 @@ async function updateAtividade(companyId, id, patch) {
   return data
 }
 
+// ---------- Timeline ----------
+async function insertTimeline(row) {
+  const { data, error } = await supabase.from('crm_timeline').insert(row).select().single()
+  if (error) throw error
+  return data
+}
+
+async function listTimeline(companyId, leadId, { tipo, limit = 100 } = {}) {
+  let q = supabase
+    .from('crm_timeline')
+    .select('*')
+    .eq('company_id', companyId)
+    .eq('lead_id', leadId)
+    .order('criado_em', { ascending: false })
+    .limit(Math.min(Math.max(asInt(limit) || 100, 1), 500))
+  if (tipo) q = q.eq('tipo', String(tipo))
+  const { data, error } = await q
+  if (error) throw error
+  return data || []
+}
+
 // ---------- Movimentos ----------
 async function insertMovement(row) {
   const { data, error } = await supabase.from('crm_stage_movements').insert(row).select().single()
@@ -782,15 +919,77 @@ async function insertGoogleLog(row) {
 }
 
 // ---------- Lost reasons ----------
-async function listLostReasons(companyId) {
+async function listLostReasons(companyId, { ativo } = {}) {
+  let q = supabase
+    .from('crm_lost_reasons')
+    .select('*')
+    .eq('company_id', companyId)
+    .order('ordem', { ascending: true })
+  if (ativo === true) q = q.eq('ativo', true)
+  if (ativo === false) q = q.eq('ativo', false)
+  const { data, error } = await q
+  if (error) throw error
+  return data || []
+}
+
+async function getLostReasonById(companyId, id) {
   const { data, error } = await supabase
     .from('crm_lost_reasons')
     .select('*')
     .eq('company_id', companyId)
-    .eq('ativo', true)
-    .order('ordem', { ascending: true })
+    .eq('id', id)
+    .maybeSingle()
+  if (error) throw error
+  return data
+}
+
+async function insertLostReason(row) {
+  const { data, error } = await supabase.from('crm_lost_reasons').insert(row).select().single()
+  if (error) throw error
+  return data
+}
+
+async function updateLostReason(companyId, id, patch) {
+  const { data, error } = await supabase
+    .from('crm_lost_reasons')
+    .update({ ...patch, atualizado_em: new Date().toISOString() })
+    .eq('company_id', companyId)
+    .eq('id', id)
+    .select()
+    .maybeSingle()
+  if (error) throw error
+  return data
+}
+
+async function listCrmTags(companyId, { ativo } = {}) {
+  let q = supabase
+    .from('tags')
+    .select('id, nome, cor, ativo')
+    .eq('company_id', companyId)
+    .order('nome', { ascending: true })
+  if (ativo === true) q = q.eq('ativo', true)
+  if (ativo === false) q = q.eq('ativo', false)
+  const { data, error } = await q
   if (error) throw error
   return data || []
+}
+
+async function insertCrmTag(row) {
+  const { data, error } = await supabase.from('tags').insert(row).select('id, nome, cor, ativo').single()
+  if (error) throw error
+  return data
+}
+
+async function updateCrmTag(companyId, id, patch) {
+  const { data, error } = await supabase
+    .from('tags')
+    .update({ ...patch, atualizado_em: new Date().toISOString() })
+    .eq('company_id', companyId)
+    .eq('id', id)
+    .select('id, nome, cor, ativo')
+    .maybeSingle()
+  if (error) throw error
+  return data
 }
 
 async function fetchPipelineMap(companyId, ids) {
@@ -864,12 +1063,15 @@ async function fetchConversaMap(companyId, ids) {
 }
 
 async function listLeadsForExport(companyId, query, maxRows) {
+  const tagLeadIds = await resolveLeadIdsByTagFilter(companyId, query)
+  if (tagLeadIds && tagLeadIds.length === 0) return []
   const cap = Math.min(Math.max(asInt(maxRows) || 5000, 1), 10000)
   let q = supabase
     .from('crm_leads')
     .select('*')
     .eq('company_id', companyId)
   q = buildLeadFilters(q, query)
+  if (tagLeadIds) q = q.in('id', tagLeadIds)
   q = q.order('id', { ascending: false })
   q = q.limit(cap)
   const { data, error } = await q
@@ -893,6 +1095,10 @@ module.exports = {
   getOrigemById,
   insertOrigem,
   updateOrigem,
+  listCampaigns,
+  getCampaignById,
+  insertCampaign,
+  updateCampaign,
   listLeads,
   countLeads,
   getLeadById,
@@ -920,6 +1126,8 @@ module.exports = {
   getAtividadeById,
   insertAtividade,
   updateAtividade,
+  insertTimeline,
+  listTimeline,
   insertMovement,
   listMovements,
   getGoogleTokens,
@@ -928,6 +1136,12 @@ module.exports = {
   deleteGoogleTokens,
   insertGoogleLog,
   listLostReasons,
+  getLostReasonById,
+  insertLostReason,
+  updateLostReason,
+  listCrmTags,
+  insertCrmTag,
+  updateCrmTag,
   buildLeadFilters,
   listProximosContatosAgenda,
   countNotasByLeadIds,

@@ -2,23 +2,38 @@ const { z } = require('zod')
 
 const prioridadeEnum = z.enum(['baixa', 'normal', 'alta', 'urgente'])
 const statusLeadEnum = z.enum(['ativo', 'ganho', 'perdido', 'arquivado'])
+const temperaturaEnum = z.enum(['frio', 'morno', 'quente'])
 
 const createLeadSchema = z.object({
   nome: z.string().min(1).max(500),
   empresa: z.string().max(500).optional().nullable(),
+  cpf_cnpj: z.string().max(32).optional().nullable(),
   telefone: z.string().max(50).optional().nullable(),
+  whatsapp: z.string().max(50).optional().nullable(),
   email: z.string().max(320).optional().nullable(),
+  cidade: z.string().max(120).optional().nullable(),
+  uf: z.string().max(2).optional().nullable(),
   valor_estimado: z.number().optional().nullable(),
+  valor_ganho: z.number().optional().nullable(),
   probabilidade: z.number().int().min(0).max(100).optional().nullable(),
   prioridade: prioridadeEnum.optional(),
+  temperatura: temperaturaEnum.optional(),
   pipeline_id: z.number().int().positive().optional().nullable(),
   stage_id: z.number().int().positive().optional().nullable(),
   cliente_id: z.number().int().positive().optional().nullable(),
   conversa_id: z.number().int().positive().optional().nullable(),
   responsavel_id: z.union([z.number().int().positive(), z.null()]).optional(),
   origem_id: z.number().int().positive().optional().nullable(),
+  campanha_id: z.number().int().positive().optional().nullable(),
+  motivo_perda_id: z.number().int().positive().optional().nullable(),
+  motivo_perda_observacao: z.string().max(2000).optional().nullable(),
+  data_prevista_fechamento: z.string().optional().nullable(),
   data_proximo_contato: z.string().optional().nullable(),
+  data_proxima_acao: z.string().optional().nullable(),
+  data_primeiro_contato: z.string().optional().nullable(),
+  data_ultimo_contato: z.string().optional().nullable(),
   observacoes: z.string().max(20000).optional().nullable(),
+  produtos_interesse: z.union([z.array(z.unknown()), z.string()]).optional().nullable(),
   tag_ids: z.array(z.number().int().positive()).optional(),
   vincular_cliente_por_telefone: z.boolean().optional(),
 })
@@ -30,6 +45,9 @@ const moveLeadSchema = z.object({
   motivo: z.string().max(2000).optional().nullable(),
   motivo_perda: z.string().max(2000).optional().nullable(),
   perdido_motivo: z.string().max(2000).optional().nullable(),
+  motivo_perda_id: z.number().int().positive().optional().nullable(),
+  motivo_perda_observacao: z.string().max(2000).optional().nullable(),
+  valor_ganho: z.number().optional().nullable(),
   bloquear_cruzamento_pipeline: z.boolean().optional(),
   retornar_snapshot: z.boolean().optional(),
 })
@@ -71,16 +89,19 @@ const fromConversaBodySchema = z.object({
 const atividadeSchema = z.object({
   tipo: z.enum([
     'ligacao', 'reuniao', 'whatsapp', 'email', 'tarefa', 'nota',
-    'visita', 'proposta', 'demo', 'outro',
+    'visita', 'proposta', 'demo', 'demonstracao', 'retorno', 'outro',
   ]),
   titulo: z.string().min(1).max(500),
   descricao: z.string().max(20000).optional().nullable(),
   status: z.enum(['pendente', 'concluida', 'cancelada']).optional(),
+  prioridade: z.enum(['baixa', 'media', 'alta']).optional(),
   data_agendada: z.string().optional().nullable(),
   data_fim: z.string().optional().nullable(),
   timezone: z.string().max(64).optional().nullable(),
   participantes: z.array(z.object({ email: z.string().email(), nome: z.string().optional() })).optional(),
   responsavel_id: z.number().int().positive().optional().nullable(),
+  resultado: z.string().max(20000).optional().nullable(),
+  proximo_passo: z.string().max(20000).optional().nullable(),
   sync_google: z.boolean().optional(),
 })
 
@@ -104,5 +125,6 @@ module.exports = {
   atividadeSchema,
   prioridadeEnum,
   statusLeadEnum,
+  temperaturaEnum,
   safeParse,
 }

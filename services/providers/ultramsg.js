@@ -9,8 +9,17 @@
  */
 
 const { normalizePhoneBR, toZapiSendFormat, possiblePhonesBR } = require('../../helpers/phoneHelper')
-const { getEmpresaWhatsappConfig, invalidateEmpresaWhatsappConfigCache } = require('../whatsappConfigService')
+const { invalidateEmpresaWhatsappConfigCache } = require('../whatsappConfigService')
+const {
+  getDefaultWhatsappInstance,
+  getWhatsappInstanceById,
+} = require('../whatsappInstanceService')
 const { fetchWithRetry } = require('../../helpers/retryWithBackoff')
+const {
+  beforeWhatsAppSend,
+  afterWhatsAppSend,
+  buildSendMeta,
+} = require('../whatsappSendGuardService')
 
 const ULTRAMSG_BASE_URL = (process.env.ULTRAMSG_BASE_URL || 'https://api.ultramsg.com').replace(/\/$/, '')
 // Delay entre envios: 0 = sem delay (envio imediato). Ex: ULTRAMSG_SEND_DELAY_MS=0 para desativar.
@@ -19,8 +28,10 @@ const BODY_MAX_LEN = 4096
 const CAPTION_MAX_LEN = 1024
 const FILENAME_MAX_LEN = 255
 const CHATS_MESSAGES_LIMIT_MAX = 1000
+const OLD_MESSAGES_SYNC_MAX_PAGES = Math.min(20, Math.max(1, Number(process.env.OLD_MESSAGES_SYNC_MAX_PAGES) || 10))
 const ULTRAMSG_TIMEOUT_MS = Number(process.env.ULTRAMSG_TIMEOUT_MS) || 30_000
 const lastSendPerCompany = new Map()
+const LAST_SEND_MAP_MAX = 500
 const WHATSAPP_DEBUG = String(process.env.WHATSAPP_DEBUG || '').toLowerCase() === 'true'
 
 /** Resposta HTTP 200 com JSON de erro (ex.: token inválido após rotação no painel UltraMSG). */
@@ -200,7 +211,12 @@ async function tryMultipleAudioFormats(phone, originalAudioUrl, cfg, endpoint = 
       const audioUrl = `data:${mimeType};base64,${base64Data}`
       const body = { to: nums[0], audio: audioUrl }
       
-      const result = await postJson({ ...cfg, endpoint, body })
+      const result = await postJson({
+        ...cfg,
+        endpoint,
+        body,
+        meta: buildSendMeta('audio_format_retry', nums[0], { companyId: cfg.companyId }),
+      })
       const hasError = result.data?.error && result.data.error !== false && result.data.error !== 'false'
       const sentFailed = result.data?.sent === 'false' || result.data?.sent === false
       
@@ -309,6 +325,10 @@ async function awaitSendDelay(companyId, opts = {}) {
   const key = companyId ?? 'default'
   if (opts?.skipProviderDelay) {
     lastSendPerCompany.set(key, Date.now())
+    if (lastSendPerCompany.size > LAST_SEND_MAP_MAX) {
+      const oldest = lastSendPerCompany.keys().next().value
+      lastSendPerCompany.delete(oldest)
+    }
     return
   }
   const last = lastSendPerCompany.get(key) || 0
@@ -317,6 +337,10 @@ async function awaitSendDelay(companyId, opts = {}) {
     await new Promise(r => setTimeout(r, MIN_DELAY_BETWEEN_SENDS_MS - elapsed))
   }
   lastSendPerCompany.set(key, Date.now())
+  if (lastSendPerCompany.size > LAST_SEND_MAP_MAX) {
+    const oldest = lastSendPerCompany.keys().next().value
+    lastSendPerCompany.delete(oldest)
+  }
 }
 
 /**
@@ -326,9 +350,16 @@ async function awaitSendDelay(companyId, opts = {}) {
 async function resolveConfig(opts = {}) {
   const companyId = opts?.companyId ?? opts?.company_id
   if (companyId == null || companyId === '') return null
-  const { config, error } = await getEmpresaWhatsappConfig(Number(companyId))
-  if (error || !config) {
-    console.warn(`[ULTRAMSG] Empresa ${companyId} sem instância configurada (empresa_zapi).`, error || 'config vazio')
+  const cid = Number(companyId)
+  const whatsappInstanceId = opts?.whatsappInstanceId ?? opts?.whatsapp_instance_id
+  const resolved = whatsappInstanceId
+    ? await getWhatsappInstanceById(cid, whatsappInstanceId, { includeCredentials: true, requireActive: true })
+    : await getDefaultWhatsappInstance(cid, { includeCredentials: true })
+  const instance = resolved.instance
+  const config = instance
+  const error = resolved.error
+  if (resolved.error || !instance) {
+    console.warn(`[ULTRAMSG] Empresa ${companyId} sem instancia WhatsApp configurada.`, error || 'config vazio')
     return null
   }
   const instanceId = String(config.instance_id || '').trim()
@@ -336,7 +367,14 @@ async function resolveConfig(opts = {}) {
   if (!instanceId || !token) return null
   const segment = instanceId.toLowerCase().startsWith('instance') ? instanceId : `instance${instanceId}`
   const basePath = `${ULTRAMSG_BASE_URL}/${encodeURIComponent(segment)}`
-  return { basePath, token, instanceId: segment, companyId: Number(companyId) }
+  return {
+    basePath,
+    token,
+    instanceId: segment,
+    companyId: cid,
+    whatsappInstanceId: instance.id ?? null,
+    provider: instance.provider || 'ultramsg',
+  }
 }
 
 /**
@@ -403,25 +441,55 @@ function createFetchOptions(method, body, extra = {}) {
   return opts
 }
 
-async function post({ basePath, token, endpoint, body, companyId = null }) {
+async function post({ basePath, token, endpoint, body, companyId = null, meta = null }) {
   const url = `${basePath}${endpoint}`
   const payload = appendToken(body || {}, token)
   const fetchOpts = createFetchOptions('POST', payload)
-  const res = await fetchWithRetry(url, fetchOpts)
-  const text = await res.text().catch(() => '')
+  const guard = await beforeWhatsAppSend({ companyId, endpoint, body, meta })
+  const startedAt = Date.now()
+  let res
+  let text = ''
   let data = null
-  try { data = text ? JSON.parse(text) : null } catch { data = null }
-  maybeInvalidateCacheOnBadToken(companyId, data, text)
-  logUltramsgRequest({
-    method: 'POST',
-    url,
-    headers: fetchOpts.headers || {},
-    body: payload,
-    responseStatus: res.status,
-    responseData: data,
-    responseText: text
-  })
-  return { ok: res.ok, status: res.status, data, text }
+  try {
+    res = await fetchWithRetry(url, fetchOpts)
+    text = await res.text().catch(() => '')
+    try { data = text ? JSON.parse(text) : null } catch { data = null }
+    maybeInvalidateCacheOnBadToken(companyId, data, text)
+    logUltramsgRequest({
+      method: 'POST',
+      url,
+      headers: fetchOpts.headers || {},
+      body: payload,
+      responseStatus: res.status,
+      responseData: data,
+      responseText: text
+    })
+    afterWhatsAppSend({
+      guard,
+      companyId,
+      endpoint,
+      body,
+      meta,
+      ok: res.ok,
+      status: res.status,
+      data,
+      text,
+      durationMs: Date.now() - startedAt,
+    })
+    return { ok: res.ok, status: res.status, data, text }
+  } catch (e) {
+    afterWhatsAppSend({
+      guard,
+      companyId,
+      endpoint,
+      body,
+      meta,
+      ok: false,
+      error: e?.message || e,
+      durationMs: Date.now() - startedAt,
+    })
+    throw e
+  }
 }
 
 async function get({ basePath, token, endpoint, extraParams = {}, companyId = null }) {
@@ -449,8 +517,8 @@ async function get({ basePath, token, endpoint, extraParams = {}, companyId = nu
 }
 
 /** Alias para compatibilidade interna. */
-async function postJson({ basePath, token, endpoint, body, companyId = null }) {
-  return post({ basePath, token, endpoint, body, companyId })
+async function postJson({ basePath, token, endpoint, body, companyId = null, meta = null }) {
+  return post({ basePath, token, endpoint, body, companyId, meta })
 }
 
 async function getJson({ basePath, token, endpoint, extraParams = {}, companyId = null }) {
@@ -474,6 +542,61 @@ function phoneCandidatesForLookup(phone) {
   return Array.from(new Set(candidates.filter(Boolean)))
 }
 
+function oldMessagesDebugEnabled(opts = {}) {
+  return opts?.debugOldMessages === true ||
+    String(process.env.OLD_MESSAGES_SYNC_DEBUG || '').trim() === '1' ||
+    String(process.env.WHATSAPP_DEBUG || '').trim() === '1'
+}
+
+function safeChatIdTail(value) {
+  const raw = String(value || '').trim()
+  if (!raw) return ''
+  return raw.length <= 14 ? raw : `...${raw.slice(-14)}`
+}
+
+function oldProviderMessageId(message) {
+  const values = [
+    message?.messageId,
+    message?.zaapId,
+    message?.id,
+    message?.msgId,
+    message?.message_id,
+    message?.key?.id,
+  ]
+  for (const value of values) {
+    if (value != null && String(value).trim()) return String(value).trim()
+  }
+  return ''
+}
+
+function pushUniqueValue(list, value) {
+  const raw = String(value || '').trim()
+  if (raw && !list.includes(raw)) list.push(raw)
+}
+
+function chatMessageCandidatesForLookup(phone, opts = {}) {
+  const values = [phone]
+  if (Array.isArray(opts.chatIdCandidates)) values.push(...opts.chatIdCandidates)
+
+  const candidates = []
+  for (const value of values) {
+    const raw = String(value || '').trim()
+    if (!raw) continue
+
+    if (raw.endsWith('@g.us') || raw.endsWith('@c.us')) pushUniqueValue(candidates, raw)
+    if (/@s\.whatsapp\.net$/i.test(raw)) {
+      pushUniqueValue(candidates, raw.replace(/@s\.whatsapp\.net$/i, '@c.us'))
+    }
+
+    pushUniqueValue(candidates, toChatIdForChats(raw) || phoneToChatId(raw))
+    for (const candidate of phoneCandidatesForLookup(raw)) {
+      pushUniqueValue(candidates, phoneToChatId(candidate))
+    }
+  }
+
+  return candidates.filter(Boolean)
+}
+
 /**
  * Envia mensagem de texto.
  */
@@ -495,8 +618,15 @@ async function sendText(phone, message, opts = {}) {
   const replyMessageId = opts?.replyMessageId ? String(opts.replyMessageId).trim() : null
   const body = { to: nums[0], body: msg }
   if (replyMessageId) body.msgId = replyMessageId
+  const referenceId = opts?.referenceId ? String(opts.referenceId).trim().slice(0, 200) : null
+  if (referenceId) body.referenceId = referenceId
 
-  const { ok, status, data, text } = await postJson({ ...cfg, endpoint: '/messages/chat', body })
+  const { ok, status, data, text } = await postJson({
+    ...cfg,
+    endpoint: '/messages/chat',
+    body,
+    meta: buildSendMeta('text', nums[0], opts, { textLength: msg.length }),
+  })
   // UltraMsg retorna HTTP 200 mesmo em caso de erro (ex.: token inválido) — checar body também
   const bodyError = data?.error || (!data?.id && !data?.sent && !data?.messageId && data?.message)
   if (!ok || bodyError) {
@@ -535,8 +665,14 @@ async function sendImage(phone, url, caption = '', opts = {}) {
   const nums = phoneCandidatesForSend(phone)
   if (!nums.length || !url) return false
   const captionTrim = String(caption || '').trim().slice(0, CAPTION_MAX_LEN)
-  const body = { to: nums[0], image: String(url).trim(), caption: captionTrim }
-  const { ok, data, text } = await postJson({ ...cfg, endpoint: '/messages/image', body })
+  const body = { to: nums[0], image: String(url).trim() }
+  if (captionTrim) body.caption = captionTrim
+  const { ok, data, text } = await postJson({
+    ...cfg,
+    endpoint: '/messages/image',
+    body,
+    meta: buildSendMeta('image', nums[0], opts, { textLength: captionTrim.length }),
+  })
   if (!ok) {
     console.warn('❌ UltraMsg sendImage falhou:', nums[0]?.slice(-12), String(text || data?.error || '').slice(0, 150), '| token:', maskToken(cfg.token))
     return false
@@ -619,7 +755,12 @@ async function sendAudio(phone, audioUrl, opts = {}) {
   
   console.log(`[ULTRAMSG] Tentando enviar audio para ${nums[0]?.slice(-12)} com URL: ${processedAudioUrl.slice(0, 50)}...`)
   const body = { to: nums[0], audio: processedAudioUrl }
-  const { ok, status, data, text } = await postJson({ ...cfg, endpoint: '/messages/audio', body })
+  const { ok, status, data, text } = await postJson({
+    ...cfg,
+    endpoint: '/messages/audio',
+    body,
+    meta: buildSendMeta('audio', nums[0], opts),
+  })
   
   // UltraMsg retorna sent:"false" ou error em body mesmo com HTTP 200
   const explicitError = data?.error && data.error !== false && data.error !== 'false'
@@ -663,38 +804,73 @@ async function sendAudio(phone, audioUrl, opts = {}) {
  * Envia documento por URL.
  */
 async function sendFile(phone, url, fileName = '', opts = {}) {
+  const returnDetails = opts?.returnDetails === true
   await awaitSendDelay(opts?.companyId ?? opts?.company_id)
   const cfg = await resolveConfig(opts)
-  if (!cfg) return false
+  if (!cfg) return returnDetails ? { ok: false, messageId: null, error: 'Configuração UltraMsg indisponível' } : false
   const nums = phoneCandidatesForSend(phone)
-  if (!nums.length || !url) return false
+  if (!nums.length || !url) {
+    return returnDetails ? { ok: false, messageId: null, error: 'Destino ou URL do documento inválido' } : false
+  }
   const ext = fileName ? String(fileName).split('.').pop() : 'pdf'
   const safeExt = /^[a-z0-9]+$/i.test(ext) ? ext : 'pdf'
   const filenameRaw = fileName ? String(fileName).trim() : `file.${safeExt}`
   const filename = filenameRaw.slice(0, FILENAME_MAX_LEN)
   const captionTrim = String(opts?.caption || '').trim().slice(0, CAPTION_MAX_LEN)
-  const body = { to: nums[0], document: String(url).trim(), filename, caption: captionTrim }
-  const { ok } = await postJson({ ...cfg, endpoint: '/messages/document', body })
-  if (!ok) return false
-  console.log('✅ UltraMsg arquivo enviado:', nums[0]?.slice(-12))
-  return true
+  // UltraMsg exige caption no POST /messages/document (vazio falha o envio).
+  // Não usar o nome do arquivo como legenda visível no WhatsApp.
+  const captionForApi = captionTrim || ' '
+  const body = { to: nums[0], document: String(url).trim(), filename, caption: captionForApi }
+  const { ok, data, text } = await postJson({
+    ...cfg,
+    endpoint: '/messages/document',
+    body,
+    meta: buildSendMeta('file', nums[0], opts, { textLength: captionTrim.length }),
+  })
+  const bodyError = data?.error || (!data?.id && !data?.sent && !data?.messageId && data?.message)
+  if (!ok || bodyError) {
+    let errMsg = String(data?.error || data?.message || text?.slice(0, 200) || `HTTP ${ok ? 200 : 'erro'}`)
+    if (isFileExtensionError(errMsg) || isFileExtensionError(data?.error)) {
+      errMsg = `Extensão não suportada pelo WhatsApp (.${safeExt}). Tente ZIP, PDF ou outro formato.`
+    }
+    console.warn('❌ UltraMsg sendFile falhou:', nums[0]?.slice(-12), filename?.slice(-40), errMsg.slice(0, 200))
+    return returnDetails ? { ok: false, messageId: null, error: errMsg } : false
+  }
+  const msgId = data?.id ?? data?.messageId ?? null
+  console.log('✅ UltraMsg arquivo enviado:', nums[0]?.slice(-12), filename?.slice(-30))
+  return returnDetails ? { ok: true, messageId: msgId ? String(msgId) : null, error: null } : true
 }
 
 /**
  * Envia vídeo por URL.
  */
 async function sendVideo(phone, videoUrl, caption = '', opts = {}) {
+  const returnDetails = opts?.returnDetails === true
   await awaitSendDelay(opts?.companyId ?? opts?.company_id)
   const cfg = await resolveConfig(opts)
-  if (!cfg) return false
+  if (!cfg) return returnDetails ? { ok: false, messageId: null, error: 'Configuração UltraMsg indisponível' } : false
   const nums = phoneCandidatesForSend(phone)
-  if (!nums.length || !videoUrl) return false
+  if (!nums.length || !videoUrl) {
+    return returnDetails ? { ok: false, messageId: null, error: 'Destino ou URL do vídeo inválido' } : false
+  }
   const captionTrim = String(caption || '').trim().slice(0, CAPTION_MAX_LEN)
-  const body = { to: nums[0], video: String(videoUrl).trim(), caption: captionTrim }
-  const { ok } = await postJson({ ...cfg, endpoint: '/messages/video', body })
-  if (!ok) return false
-  console.log('✅ UltraMsg vídeo enviado:', nums[0]?.slice(-12))
-  return true
+  const body = { to: nums[0], video: String(videoUrl).trim() }
+  if (captionTrim) body.caption = captionTrim
+  const { ok, data, text } = await postJson({
+    ...cfg,
+    endpoint: '/messages/video',
+    body,
+    meta: buildSendMeta('video', nums[0], opts, { textLength: captionTrim.length }),
+  })
+  const bodyError = data?.error || (!data?.id && !data?.sent && !data?.messageId && data?.message)
+  if (!ok || bodyError) {
+    const errMsg = String(data?.error || data?.message || text?.slice(0, 200) || `HTTP ${ok ? 200 : 'erro'}`)
+    console.warn('❌ UltraMsg sendVideo falhou:', nums[0]?.slice(-12), errMsg.slice(0, 200))
+    return returnDetails ? { ok: false, messageId: null, error: errMsg } : false
+  }
+  const msgId = data?.id ?? data?.messageId ?? null
+  console.log('✅ UltraMsg vídeo enviado:', nums[0]?.slice(-12), msgId ? `id=${String(msgId).slice(0, 14)}...` : '')
+  return returnDetails ? { ok: true, messageId: msgId ? String(msgId) : null, error: null } : true
 }
 
 /**
@@ -707,7 +883,12 @@ async function sendSticker(phone, sticker, opts = {}) {
   const nums = phoneCandidatesForSend(phone)
   if (!nums.length || !sticker) return false
   const body = { to: nums[0], sticker: String(sticker).trim() }
-  const { ok } = await postJson({ ...cfg, endpoint: '/messages/sticker', body })
+  const { ok } = await postJson({
+    ...cfg,
+    endpoint: '/messages/sticker',
+    body,
+    meta: buildSendMeta('sticker', nums[0], opts),
+  })
   if (!ok) return false
   console.log('✅ UltraMsg sticker enviado:', nums[0]?.slice(-12))
   return true
@@ -726,7 +907,12 @@ async function sendReaction(phone, messageId, reaction, opts = {}) {
   const nums = phoneCandidatesForSend(phone)
   if (!nums.length) return false
   const body = { msgId: mid, emoji }
-  const { ok } = await postJson({ ...cfg, endpoint: '/messages/reaction', body })
+  const { ok } = await postJson({
+    ...cfg,
+    endpoint: '/messages/reaction',
+    body,
+    meta: buildSendMeta('reaction', nums[0], opts),
+  })
   return ok
 }
 
@@ -782,7 +968,12 @@ async function sendVoice(phone, audioUrl, opts = {}) {
 
   // Tenta endpoint voice primeiro
   console.log(`[ULTRAMSG] Tentando enviar voice para ${nums[0]?.slice(-12)} com URL: ${processedAudioUrl.slice(0, 50)}...`)
-  const { ok, status, data, text } = await postJson({ ...cfg, endpoint: '/messages/voice', body })
+  const { ok, status, data, text } = await postJson({
+    ...cfg,
+    endpoint: '/messages/voice',
+    body,
+    meta: buildSendMeta('voice', nums[0], opts),
+  })
   const explicitError = data?.error && data.error !== false && data.error !== 'false'
   const sentFailed = data?.sent === 'false' || data?.sent === false
   
@@ -820,7 +1011,12 @@ async function sendVoice(phone, audioUrl, opts = {}) {
     }
 
     // Fallback: tenta como áudio comum
-    const fb = await postJson({ ...cfg, endpoint: '/messages/audio', body })
+    const fb = await postJson({
+      ...cfg,
+      endpoint: '/messages/audio',
+      body,
+      meta: buildSendMeta('voice_audio_fallback', nums[0], opts),
+    })
     const fbExplicitError = fb.data?.error && fb.data.error !== false && fb.data.error !== 'false'
     const fbSentFailed = fb.data?.sent === 'false' || fb.data?.sent === false
     
@@ -866,7 +1062,12 @@ async function sendLocation(phone, { address = '', lat, lng }, opts = {}) {
   const longitude = Number(lng)
   if (!nums.length || (isNaN(latitude) && isNaN(longitude))) return { ok: false, messageId: null }
   const body = { to: nums[0], address: addr, lat: latitude, lng: longitude }
-  const { ok, data } = await postJson({ ...cfg, endpoint: '/messages/location', body })
+  const { ok, data } = await postJson({
+    ...cfg,
+    endpoint: '/messages/location',
+    body,
+    meta: buildSendMeta('location', nums[0], opts, { textLength: addr.length }),
+  })
   if (!ok) return { ok: false, messageId: null }
   const msgId = data?.id ?? data?.messageId ?? null
   console.log('✅ UltraMsg localização enviada:', nums[0]?.slice(-12))
@@ -979,7 +1180,12 @@ async function sendContact(phone, contactName, contactPhone, opts = {}) {
   const tel = contact.startsWith('55') ? contact : `55${contact}`
   const vcard = `BEGIN:VCARD\nVERSION:3.0\nN:${name};;;\nFN:${name}\nTEL;TYPE=CELL;waid=${tel}:+${tel}\nEND:VCARD`
   const body = { to: nums[0], vcard }
-  const { ok, data } = await postJson({ ...cfg, endpoint: '/messages/vcard', body })
+  const { ok, data } = await postJson({
+    ...cfg,
+    endpoint: '/messages/vcard',
+    body,
+    meta: buildSendMeta('contact', nums[0], opts),
+  })
   if (!ok) return { ok: false, messageId: null }
   const msgId = data?.id ?? data?.messageId ?? null
   console.log('✅ UltraMsg contato enviado:', nums[0]?.slice(-12))
@@ -1250,7 +1456,7 @@ const profilePictureRateLimit = new Map()
 const PROFILE_PICTURE_RATE_LIMIT_MS = 2000 // 2 segundos entre requisições por instância
 
 // Limpeza periódica dos caches (a cada 6 horas)
-setInterval(() => {
+const cacheCleanupInterval = setInterval(() => {
   const now = Date.now()
   
   // Limpar cache de contatos sem foto expirados
@@ -1274,6 +1480,9 @@ setInterval(() => {
     })
   }
 }, 6 * 60 * 60 * 1000) // 6 horas
+if (cacheCleanupInterval && typeof cacheCleanupInterval.unref === 'function') {
+  cacheCleanupInterval.unref()
+}
 
 /**
  * Busca URL da foto de perfil.
@@ -1454,23 +1663,135 @@ async function getContactMetadata(phone, opts = {}) {
  */
 async function getChatMessages(phone, amount = 10, lastMessageId = null, opts = {}) {
   const cfg = await resolveConfig(opts)
-  if (!cfg) return []
-  const nums = phoneCandidatesForLookup(phone)
-  if (!nums.length) return []
-  const raw = String(nums[0] || '').trim()
-  const chatId = raw.endsWith('@g.us') ? raw : phoneToChatId(raw) || toUltramsgPhone(raw)
-  if (!chatId) return []
+  const returnDetails = opts?.returnDetails === true
+  const endpoint = '/chats/messages'
+  const limit = Math.min(CHATS_MESSAGES_LIMIT_MAX, Math.max(1, Number(amount) || 10))
+  const debug = oldMessagesDebugEnabled(opts)
+  const emptyDetails = (overrides = {}) => ({
+    ok: false,
+    data: [],
+    endpoint,
+    limit,
+    attempts: [],
+    ...overrides,
+  })
+  if (!cfg) {
+    const result = emptyDetails({ error: 'Instancia UltraMsg nao configurada.' })
+    return returnDetails ? result : []
+  }
+  const chatIds = chatMessageCandidatesForLookup(phone, opts)
+  if (!chatIds.length) {
+    const result = emptyDetails({ error: 'Nenhum chatId valido para consultar mensagens.' })
+    return returnDetails ? result : []
+  }
+
+  const attempts = []
+  let firstEmptyOk = null
+  let lastError = null
   try {
-    const limit = Math.min(CHATS_MESSAGES_LIMIT_MAX, Math.max(1, Number(amount) || 10))
-    const { ok, data } = await getJson({
-      ...cfg,
-      endpoint: '/chats/messages',
-      extraParams: { chatId, limit: String(limit) }
+    for (const chatId of chatIds) {
+      const allData = []
+      const seenIds = new Set()
+      let cursor = lastMessageId ? String(lastMessageId).trim() : ''
+      let chatOk = false
+      const maxPages = opts?.fetchAllPages === true ? OLD_MESSAGES_SYNC_MAX_PAGES : 1
+
+      for (let page = 0; page < maxPages; page += 1) {
+        let response = null
+        try {
+          const extraParams = { chatId, limit: String(limit) }
+          if (cursor) extraParams.lastMessageId = cursor
+          response = await getJson({
+            ...cfg,
+            endpoint,
+            extraParams,
+          })
+        } catch (e) {
+          response = { ok: false, status: null, data: null, text: '', error: e?.message || String(e) }
+        }
+
+        const data = Array.isArray(response?.data) ? response.data : []
+        const idsInPage = data.map(oldProviderMessageId).filter(Boolean)
+        let newInPage = 0
+        for (const msg of data) {
+          const msgId = oldProviderMessageId(msg)
+          if (msgId) {
+            if (seenIds.has(msgId)) continue
+            seenIds.add(msgId)
+          }
+          allData.push(msg)
+          newInPage += 1
+        }
+
+        const attempt = {
+          chatIdTail: safeChatIdTail(chatId),
+          page: page + 1,
+          cursorTail: safeChatIdTail(cursor),
+          ok: response?.ok === true,
+          status: response?.status ?? null,
+          count: data.length,
+          newCount: newInPage,
+          error: response?.ok === true ? null : String(response?.error || response?.text || response?.status || 'erro na consulta').slice(0, 180),
+        }
+        attempts.push(attempt)
+
+        if (debug) {
+          console.log('[oldMessagesSync][provider] getChatMessages', {
+            companyId: opts?.companyId ?? opts?.company_id ?? null,
+            endpoint,
+            chatIdTail: attempt.chatIdTail,
+            page: attempt.page,
+            cursorTail: attempt.cursorTail,
+            ok: attempt.ok,
+            status: attempt.status,
+            returned: attempt.count,
+            newCount: attempt.newCount,
+            error: attempt.error,
+          })
+        }
+
+        if (response?.ok !== true) {
+          lastError = attempt.error || 'Erro ao buscar mensagens antigas.'
+          break
+        }
+
+        chatOk = true
+        if (data.length === 0) break
+        if (opts?.fetchAllPages !== true) break
+        if (data.length < limit) break
+        if (page > 0 && newInPage === 0) break
+
+        const nextCursor = idsInPage[idsInPage.length - 1] || ''
+        if (!nextCursor || nextCursor === cursor) break
+        cursor = nextCursor
+      }
+
+      if (chatOk && allData.length > 0) {
+        const result = { ok: true, data: allData, chatId, endpoint, limit, attempts }
+        return returnDetails ? result : allData
+      }
+      if (chatOk) {
+        if (!firstEmptyOk) firstEmptyOk = { chatId, data: [] }
+        continue
+      }
+    }
+
+    if (firstEmptyOk) {
+      const result = { ok: true, data: [], chatId: firstEmptyOk.chatId, endpoint, limit, attempts }
+      return returnDetails ? result : []
+    }
+
+    const result = emptyDetails({
+      error: lastError || 'Erro ao buscar mensagens antigas.',
+      attempts,
     })
-    if (!ok) return []
-    return Array.isArray(data) ? data : []
-  } catch {
-    return []
+    return returnDetails ? result : []
+  } catch (e) {
+    const result = emptyDetails({
+      error: e?.message || 'Erro ao buscar mensagens antigas.',
+      attempts,
+    })
+    return returnDetails ? result : []
   }
 }
 

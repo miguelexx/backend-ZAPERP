@@ -10,8 +10,8 @@ ALTER TABLE public.admin_atendimento_alerta_envios
 CREATE INDEX IF NOT EXISTS idx_admin_alerta_envios_company_criado
   ON public.admin_atendimento_alerta_envios (company_id, criado_em DESC);
 
--- 2) Limpar bloqueio de "já tentou hoje" (idempotência) — senão o job não reenvia no mesmo dia.
---    Só apaga registros da empresa de teste. Remova o bloco se quiser manter histórico.
+-- 2) Limpar bloqueio de envio com SUCESSO hoje (falhas antigas já permitem nova tentativa após o fix).
+--    Para forçar reenvio no mesmo dia após sucesso, apague o registro do dia. Ajuste company_id.
 DELETE FROM public.admin_atendimento_alerta_envios
 WHERE company_id = 1;
 

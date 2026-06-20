@@ -28,7 +28,11 @@ async function runCycle() {
       const resumo = (result.detalhes || [])
         .map((d) => `${d.company_id}:${d.reason || (d.sent ? 'sent' : '?')}${d.error ? `(${String(d.error).slice(0, 80)})` : ''}`)
         .join(' | ')
-      console.log('[adminAlertaScheduler] ciclo (alerta ativo; sem envio neste tick)', {
+      const hasActionable = (result.detalhes || []).some((d) =>
+        ['send_failed', 'invalid_phone', 'invalid_contact_phone', 'contact_not_found', 'contact_lookup_failed', 'reserve_failed', 'no_provider', 'no_metrics_enabled'].includes(d.reason)
+      )
+      const logFn = hasActionable ? console.warn : console.log
+      logFn('[adminAlertaScheduler] ciclo (alerta ativo; sem envio neste tick)', {
         empresas_com_alerta_ativo: result.processadas,
         elapsedMs,
         detalhes: resumo || undefined,
@@ -43,19 +47,11 @@ async function runCycle() {
 
 /**
  * Dispara a verificação de horários periodicamente (sem depender de cron externo).
- * Desative com ADMIN_ATENDIMENTO_ALERTA_SCHEDULER_ENABLED=0
+ * A liberação do alerta é controlada pela tela, por empresa.
  */
 function startAdminAtendimentoAlertaScheduler() {
   if (schedulerStarted) return
   schedulerStarted = true
-
-  const disabled = String(process.env.ADMIN_ATENDIMENTO_ALERTA_SCHEDULER_ENABLED || '')
-    .trim()
-    .toLowerCase()
-  if (disabled === '0' || disabled === 'false') {
-    console.log('[adminAlertaScheduler] desativado por ADMIN_ATENDIMENTO_ALERTA_SCHEDULER_ENABLED')
-    return
-  }
 
   const intervalMs = parseIntervalMs()
   timer = setInterval(() => {

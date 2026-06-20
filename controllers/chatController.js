@@ -2,23 +2,120 @@ const supabase = require('../config/supabase')
 const { registrarAtendimento } = require('../services/atendimentosRegistroService')
 const { ensureConversaForCliente } = require('../services/conversaAbrirClienteService')
 const { executarAssumirConversa } = require('../services/conversaAssumirInternoService')
+const { resetAlertaSemRespostaAoAssumirReaberta } = require('../services/atendimentoSemRespostaService')
 const { getProvider } = require('../services/providers')
 const { getStatus } = require('../services/ultramsgIntegrationService')
-const { isGroupConversation } = require('../helpers/conversaHelper')
+const { getDefaultWhatsappInstance, listWhatsappInstances, resolveWhatsappInstanceForManualAction, sanitizeWhatsappInstance } = require('../services/whatsappInstanceService')
+const { isGroupConversation, isClosedAttendanceStatus } = require('../helpers/conversaHelper')
 const { normalizePhoneBR, possiblePhonesBR, phoneKeyBR } = require('../helpers/phoneHelper')
 const { deduplicateConversationsByContact, sortConversationsByRecent, sortConversationsPinThenRecent, getCanonicalPhone, getOrCreateCliente, findOrCreateConversation, mergeConversasIntoCanonico } = require('../helpers/conversationSync')
 const { enrichConversationsWithContactData } = require('../helpers/conversaEnrichment')
-const { getDisplayName } = require('../helpers/contactEnrichment')
+const {
+  resolveReabertaPorFaltaInteracao,
+  enrichConversasReabertaFaltaInteracao,
+  clearReabertaFaltaInteracao,
+} = require('../helpers/reabertaFaltaInteracaoHelper')
+const { getDisplayName, normalizeName, isBadName } = require('../helpers/contactEnrichment')
 const { tryMarkWaitingAfterHumanOutbound } = require('../services/absenceFinalizationService')
+const { syncOldMessagesForConversation } = require('../services/oldMessagesSyncService')
 const {
   marcarAguardandoClienteManual,
   retomarEmAtendimentoManual,
 } = require('../services/conversaStatusManualService')
+const {
+  marcarAguardandoPagamento,
+  retomarDeCobrancaFinanceira,
+} = require('../services/conversaPagamentoFinanceiroService')
+const { usuarioPertenceSetorFinanceiro } = require('../helpers/financeiroSetorHelper')
+const { buildClienteSearchOr, buildTelefoneSearchOr, escapeIlikePattern } = require('../helpers/chatSearchHelper')
+const {
+  getGrupoDepartamentoIds,
+  getGrupoIdsPorDepartamentos,
+  getGrupoIdsSemDepartamento,
+  usuarioPodeVerGrupo,
+  pushNonGroupVisibilityParts,
+  pushAllowedGroupIdsPart,
+} = require('../helpers/departamentoGruposHelper')
+const {
+  countConversasWithFilter,
+  overridesFromListQuery,
+  getChatFilterCounts,
+  parseConversaIdsQuery,
+  getStartOfTodayIso,
+  getEndOfTodayIso,
+} = require('../services/chatListCountsService')
 const { normalizarTimestampSemFusoAmbiguoParaApi } = require('../helpers/timestampApiCompat')
 
 /** UltraMsg retorna id interno (ex: 35096), não o messageId do WhatsApp. Só usar como whatsapp_id se for o ID real. */
 function isRealWhatsAppId(waId) {
   return waId && (String(waId).includes('@') || String(waId).length > 20)
+}
+
+async function resolveTelefoneFromLidSiblingConversation(company_id, conversa, whatsappInstanceId) {
+  if (!conversa?.chat_lid) return null
+  let query = supabase
+    .from('conversas')
+    .select('telefone')
+    .eq('company_id', company_id)
+    .eq('chat_lid', conversa.chat_lid)
+    .not('telefone', 'like', 'lid:%')
+  if (whatsappInstanceId) {
+    query = query.eq('whatsapp_instance_id', whatsappInstanceId)
+  } else {
+    query = query.is('whatsapp_instance_id', null)
+  }
+  const { data: outra } = await query.limit(1).maybeSingle()
+  return outra?.telefone || null
+}
+
+async function resolveConversationWhatsappInstance(company_id, conversa) {
+  const current = Number(conversa?.whatsapp_instance_id)
+  if (Number.isFinite(current) && current > 0) return current
+  const { instance } = await getDefaultWhatsappInstance(company_id)
+  const defaultId = Number(instance?.id)
+  if (!Number.isFinite(defaultId) || defaultId <= 0) return null
+  if (conversa?.id) {
+    try {
+      await supabase
+        .from('conversas')
+        .update({ whatsapp_instance_id: defaultId })
+        .eq('company_id', Number(company_id))
+        .eq('id', Number(conversa.id))
+        .is('whatsapp_instance_id', null)
+      conversa.whatsapp_instance_id = defaultId
+    } catch (_) {}
+  }
+  return defaultId
+}
+
+function safeWhatsappInstanceMeta(instance) {
+  if (!instance) return {}
+  return {
+    whatsapp_instance_id: instance.id ?? null,
+    whatsapp_instance_nome: instance.nome ?? null,
+    whatsapp_instance_provider: instance.provider ?? null,
+    whatsapp_instance_display_phone: instance.display_phone ?? null,
+  }
+}
+
+async function loadWhatsappInstanceMetaMap(company_id, instanceIds) {
+  const ids = [...new Set((instanceIds || []).map((id) => Number(id)).filter((id) => Number.isFinite(id) && id > 0))]
+  if (ids.length === 0) return new Map()
+  try {
+    const { data, error } = await supabase
+      .from('whatsapp_instances')
+      .select('id, company_id, nome, provider, display_phone')
+      .eq('company_id', Number(company_id))
+      .in('id', ids)
+    if (error) {
+      console.warn('[whatsapp_instances] metadados indisponiveis para conversas:', error.message || error)
+      return new Map()
+    }
+    return new Map((data || []).map((row) => [Number(row.id), row]))
+  } catch (err) {
+    console.warn('[whatsapp_instances] falha ao enriquecer conversas:', err?.message || err)
+    return new Map()
+  }
 }
 
 /**
@@ -94,6 +191,123 @@ function applyDetalharChatMensagensCursor(query, cursorEm, cursorIdRaw) {
   return query.lt('criado_em', em)
 }
 
+function parsePositiveInt(value, fallback) {
+  const n = Number(value)
+  if (!Number.isFinite(n) || n <= 0) return fallback
+  return Math.floor(n)
+}
+
+function parseBooleanQuery(value) {
+  return value === true || value === 1 || value === '1' || String(value || '').toLowerCase() === 'true'
+}
+
+function parseChatListPagination(query = {}, env = process.env) {
+  const maxLimit = Math.max(1, parsePositiveInt(env.CHAT_LIST_MAX_LIMIT, 250))
+  const defaultLimit = Math.min(maxLimit, Math.max(1, parsePositiveInt(env.CHAT_LIST_DEFAULT_LIMIT, 100)))
+  const requestedLimit = query.limit ?? query.per_page ?? query.page_size
+  const limit = Math.min(maxLimit, Math.max(1, parsePositiveInt(requestedLimit, defaultLimit)))
+  const cursor =
+    query.cursor != null && String(query.cursor).trim() !== ''
+      ? String(query.cursor).trim()
+      : query.cursor_ultima_atividade != null && String(query.cursor_ultima_atividade).trim() !== ''
+        ? String(query.cursor_ultima_atividade).trim()
+        : null
+  const cursorIdRaw = query.cursor_id ?? query.next_cursor_id
+  const cursorId =
+    cursorIdRaw != null && String(cursorIdRaw).trim() !== '' && Number.isFinite(Number(cursorIdRaw))
+      ? Math.floor(Number(cursorIdRaw))
+      : null
+  const responseMode = String(query.response_mode || '').trim().toLowerCase()
+  const paginatedResponse =
+    parseBooleanQuery(query.paginated) ||
+    responseMode === 'paginated' ||
+    responseMode === 'pagination' ||
+    responseMode === 'object'
+  return { limit, cursor, cursor_id: cursorId, paginatedResponse, maxLimit, defaultLimit }
+}
+
+function applyChatListCursor(query, cursorUltimaAtividade, cursorIdRaw) {
+  const cursor = cursorUltimaAtividade != null && String(cursorUltimaAtividade).trim() !== ''
+    ? String(cursorUltimaAtividade).trim()
+    : null
+  if (!cursor) return query
+  const idNum =
+    cursorIdRaw !== undefined && cursorIdRaw !== null && String(cursorIdRaw).trim() !== ''
+      ? Number(cursorIdRaw)
+      : NaN
+  if (Number.isFinite(idNum)) {
+    const quoted = `"${cursor.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`
+    return query.or(`ultima_atividade.lt.${quoted},and(ultima_atividade.eq.${quoted},id.lt.${Math.floor(idNum)})`)
+  }
+  return query.lt('ultima_atividade', cursor)
+}
+
+function splitChatListPage(rows = [], limit = 100) {
+  const safeRows = Array.isArray(rows) ? rows : []
+  const safeLimit = Math.max(1, Math.floor(Number(limit) || 100))
+  const hasMore = safeRows.length > safeLimit
+  const pageRows = safeRows.slice(0, safeLimit)
+  const last = pageRows.length > 0 ? pageRows[pageRows.length - 1] : null
+  const nextCursor = hasMore && last ? (last.ultima_atividade || last.criado_em || null) : null
+  const nextCursorId = hasMore && last && last.id != null ? Number(last.id) : null
+  return {
+    rows: pageRows,
+    pagination: {
+      limit: safeLimit,
+      has_more: hasMore,
+      next_cursor: nextCursor,
+      next_cursor_id: Number.isFinite(nextCursorId) ? nextCursorId : null,
+    },
+  }
+}
+
+function parseMessageHistoryPagination(query = {}, env = process.env) {
+  const maxLimit = Math.max(1, parsePositiveInt(env.MESSAGE_HISTORY_MAX_LIMIT, 250))
+  const defaultLimit = Math.min(maxLimit, Math.max(1, parsePositiveInt(env.MESSAGE_HISTORY_DEFAULT_LIMIT, 100)))
+  const requestedLimit = query.limit ?? query.per_page ?? query.page_size
+  const limit = Math.min(maxLimit, Math.max(1, parsePositiveInt(requestedLimit, defaultLimit)))
+  const cursor = query.cursor != null && String(query.cursor).trim() !== '' ? String(query.cursor).trim() : null
+  const cursorIdRaw = query.cursor_id ?? query.next_cursor_id
+  const cursorId =
+    cursorIdRaw != null && String(cursorIdRaw).trim() !== '' && Number.isFinite(Number(cursorIdRaw))
+      ? Math.floor(Number(cursorIdRaw))
+      : null
+  return { limit, cursor, cursor_id: cursorId, maxLimit, defaultLimit }
+}
+
+function splitMessageHistoryPage(rows = [], limit = 100) {
+  const safeRows = Array.isArray(rows) ? rows : []
+  const safeLimit = Math.max(1, Math.floor(Number(limit) || 100))
+  const hasMore = safeRows.length > safeLimit
+  const pageRows = safeRows.slice(0, safeLimit)
+  const oldestRow = pageRows.length > 0 ? pageRows[pageRows.length - 1] : null
+  return {
+    rows: pageRows,
+    has_more: hasMore,
+    cursor_row: oldestRow,
+  }
+}
+
+function shouldIncludeClientesSemConversa({ incluirTodosClientesAtivo, palavraTrim }) {
+  return Boolean(incluirTodosClientesAtivo && palavraTrim && String(palavraTrim).trim())
+}
+
+function setChatListPaginationHeaders(res, pagination, extra = {}) {
+  if (!res || typeof res.set !== 'function') return
+  res.set('X-Chat-List-Limit', String(pagination.limit))
+  res.set('X-Chat-List-Has-More', pagination.has_more ? '1' : '0')
+  if (pagination.next_cursor) res.set('X-Chat-List-Next-Cursor', String(pagination.next_cursor))
+  if (pagination.next_cursor_id != null) res.set('X-Chat-List-Next-Cursor-Id', String(pagination.next_cursor_id))
+  if (extra.totalCount != null && Number.isFinite(Number(extra.totalCount))) {
+    res.set('X-Chat-List-Total-Count', String(Math.max(0, Math.floor(Number(extra.totalCount)))))
+  }
+  if (extra.semConversaIncluded != null) {
+    res.set('X-Chat-List-Sem-Conversa-Included', extra.semConversaIncluded ? '1' : '0')
+  }
+  const expose = ['X-Chat-List-Limit', 'X-Chat-List-Has-More', 'X-Chat-List-Next-Cursor', 'X-Chat-List-Next-Cursor-Id', 'X-Chat-List-Total-Count', 'X-Chat-List-Sem-Conversa-Included']
+  res.set('Access-Control-Expose-Headers', expose.join(', '))
+}
+
 // =====================================================
 // 1) HELPERS (TOPO DO ARQUIVO)
 // =====================================================
@@ -103,6 +317,9 @@ function emitirConversaAtualizada(io, company_id, conversa_id, payload = null, o
 
   const cid = Number(conversa_id)
   let data = payload || { id: cid }
+  if (payloadAlteraVisibilidadeConversa(data)) {
+    invalidateConversaVisibilityCache(company_id, cid)
+  }
 
   // Se payload é mínimo (só id), buscar nome/foto para não sobrescrever com vazio no frontend (Bug 3)
   const keys = Object.keys(data)
@@ -149,17 +366,26 @@ function emitirConversaAtualizada(io, company_id, conversa_id, payload = null, o
           }
           if (statusParaUi) enriched.status_atendimento = statusParaUi
           const eventName = io.EVENTS?.CONVERSA_ATUALIZADA || 'conversa_atualizada'
-          io.to(`empresa_${company_id}`).to(`conversa_${cid}`).emit(eventName, enriched)
+          emitirEventoConversaVisivel(io, company_id, cid, eventName, enriched)
+            .catch(() => io.to(`conversa_${cid}`).emit(eventName, enriched))
         } else {
           const eventName = io.EVENTS?.CONVERSA_ATUALIZADA || 'conversa_atualizada'
-          io.to(`empresa_${company_id}`).to(`conversa_${cid}`).emit(eventName, data)
+          emitirEventoConversaVisivel(io, company_id, cid, eventName, data)
+            .catch(() => io.to(`conversa_${cid}`).emit(eventName, data))
         }
-        if (!skipAtualizarConversa) io.to(`empresa_${company_id}`).emit('atualizar_conversa', { id: cid })
+        if (!skipAtualizarConversa) {
+          emitirEventoConversaVisivel(io, company_id, cid, 'atualizar_conversa', { id: cid })
+            .catch(() => io.to(`conversa_${cid}`).emit('atualizar_conversa', { id: cid }))
+        }
       })
       .catch(() => {
         const eventName = io.EVENTS?.CONVERSA_ATUALIZADA || 'conversa_atualizada'
-        io.to(`empresa_${company_id}`).to(`conversa_${cid}`).emit(eventName, data)
-        if (!skipAtualizarConversa) io.to(`empresa_${company_id}`).emit('atualizar_conversa', { id: cid })
+        emitirEventoConversaVisivel(io, company_id, cid, eventName, data)
+          .catch(() => io.to(`conversa_${cid}`).emit(eventName, data))
+        if (!skipAtualizarConversa) {
+          emitirEventoConversaVisivel(io, company_id, cid, 'atualizar_conversa', { id: cid })
+            .catch(() => io.to(`conversa_${cid}`).emit('atualizar_conversa', { id: cid }))
+        }
       })
     return
   }
@@ -167,10 +393,24 @@ function emitirConversaAtualizada(io, company_id, conversa_id, payload = null, o
   // Emite para empresa + conversa em UMA única operação (evita duplicidade
   // quando o mesmo socket está nas duas rooms).
   const eventName = io.EVENTS?.CONVERSA_ATUALIZADA || 'conversa_atualizada'
-  io.to(`empresa_${company_id}`).to(`conversa_${conversa_id}`).emit(eventName, data)
+  emitirEventoConversaVisivel(io, company_id, conversa_id, eventName, data)
+    .catch(() => io.to(`conversa_${conversa_id}`).emit(eventName, data))
 
   // skipAtualizarConversa: evita refetch que causa duplicata/glitch (payload já tem tudo)
-  if (!skipAtualizarConversa) io.to(`empresa_${company_id}`).emit('atualizar_conversa', { id: cid })
+  if (!skipAtualizarConversa) {
+    emitirEventoConversaVisivel(io, company_id, cid, 'atualizar_conversa', { id: cid })
+      .catch(() => io.to(`conversa_${cid}`).emit('atualizar_conversa', { id: cid }))
+  }
+}
+
+function aplicarAguardandoClienteNoPayload(payload, waitingResult) {
+  if (!payload || !waitingResult?.marked) return payload
+  payload.status_atendimento = 'em_atendimento'
+  payload.status_atendimento_real = 'em_atendimento'
+  payload.aguardando_cliente_desde = waitingResult.aguardando_cliente_desde || new Date().toISOString()
+  payload.exibir_badge_aberta = false
+  payload.tem_novas_mensagens_em_atendimento = false
+  return payload
 }
 
 async function emitirParaUsuariosQuePodemVerConversa(io, company_id, conversa_id, eventName, payload) {
@@ -183,22 +423,34 @@ async function emitirParaUsuariosQuePodemVerConversa(io, company_id, conversa_id
   return true
 }
 
+async function emitirEventoConversaVisivel(io, company_id, conversa_id, eventName, payload) {
+  if (!io || !conversa_id) return false
+  const usuarioIds = await obterUsuarioIdsQuePodemVerConversa(company_id, conversa_id)
+  const idsUnicos = [...new Set((usuarioIds || []).map(Number).filter((id) => Number.isFinite(id) && id > 0))]
+  let target = io.to(`conversa_${Number(conversa_id)}`)
+  idsUnicos.forEach((uid) => {
+    target = target.to(`usuario_${uid}`)
+  })
+  target.emit(eventName, payload)
+  return idsUnicos.length > 0
+}
+
 function emitirEventoEmpresaConversa(io, company_id, conversa_id, eventName, payload) {
   if (!io) return
 
   if (conversa_id) {
+    if (payloadAlteraVisibilidadeConversa(payload)) {
+      invalidateConversaVisibilityCache(company_id, conversa_id)
+    }
     const { scheduleInboundWebPush } = require('../services/webPushDispatchService')
     // Evita "vazamento" cross-setor (ex.: financeiro recebendo vendas).
     // Fallback para room ampla apenas se não conseguirmos resolver os destinatários.
-    emitirParaUsuariosQuePodemVerConversa(io, company_id, conversa_id, eventName, payload)
-      .then((emitidoFiltrado) => {
-        if (!emitidoFiltrado) {
-          io.to(`empresa_${company_id}`).to(`conversa_${conversa_id}`).emit(eventName, payload)
-        }
+    emitirEventoConversaVisivel(io, company_id, conversa_id, eventName, payload)
+      .then(() => {
         scheduleInboundWebPush(company_id, conversa_id, eventName, payload)
       })
       .catch(() => {
-        io.to(`empresa_${company_id}`).to(`conversa_${conversa_id}`).emit(eventName, payload)
+        io.to(`conversa_${conversa_id}`).emit(eventName, payload)
         scheduleInboundWebPush(company_id, conversa_id, eventName, payload)
       })
     return
@@ -253,31 +505,59 @@ function emitirDepartamento(io, departamento_id, eventName, payload) {
 }
 
 /** Enriquece mensagens com usuario_id, usuario_nome e enviado_por_usuario (apenas direcao out) */
-async function enrichMensagensComAutorUsuario(supabase, company_id, mensagens) {
-  if (!Array.isArray(mensagens) || mensagens.length === 0) return mensagens
-  const autorIds = [...new Set(mensagens.map((m) => m.autor_usuario_id).filter(Boolean))]
-  const base = (m) => ({
-    ...m,
-    criado_em: normalizarTimestampSemFusoAmbiguoParaApi(m.criado_em),
-    usuario_id: m.autor_usuario_id ?? null,
-    usuario_nome: null,
-    enviado_por_usuario: m.direcao === 'out' && m.autor_usuario_id != null
-  })
-  if (autorIds.length === 0) return mensagens.map(base)
-  const { data: us } = await supabase.from('usuarios').select('id, nome').eq('company_id', company_id).in('id', autorIds)
-  const usuarioMap = new Map((us || []).map((u) => [u.id, u.nome]))
-  return mensagens.map((m) => ({
-    ...base(m),
-    usuario_nome: m.direcao === 'out' && m.autor_usuario_id ? (usuarioMap.get(m.autor_usuario_id) ?? null) : null
-  }))
+function textoRevogadoApagadaParaTodos(m, viewerUserId) {
+  const souAutor =
+    m?.autor_usuario_id != null &&
+    viewerUserId != null &&
+    Number(m.autor_usuario_id) === Number(viewerUserId)
+  return souAutor ? 'Você apagou esta mensagem para todos.' : 'Esta mensagem foi apagada para todos.'
 }
 
-/** Retorna texto prefixado com nome do atendente para o cliente ver no WhatsApp */
+function aplicarApagadaParaTodosNaMensagem(m, viewerUserId) {
+  if (!m?.apagada_para_todos) return m
+  return {
+    ...m,
+    apagada_para_todos: true,
+    texto: textoRevogadoApagadaParaTodos(m, viewerUserId),
+    reply_meta: null,
+    mensagem_respondida_id: null,
+  }
+}
+
+async function enrichMensagensComAutorUsuario(supabase, company_id, mensagens, viewerUserId = null) {
+  if (!Array.isArray(mensagens) || mensagens.length === 0) return mensagens
+  const autorIds = [...new Set(mensagens.map((m) => m.autor_usuario_id).filter(Boolean))]
+  const decorate = (m, usuarioNome) => {
+    let row = {
+      ...m,
+      criado_em: normalizarTimestampSemFusoAmbiguoParaApi(m.criado_em),
+      usuario_id: m.autor_usuario_id ?? null,
+      usuario_nome: usuarioNome,
+      enviado_por_usuario: m.direcao === 'out' && m.autor_usuario_id != null,
+    }
+    if (viewerUserId != null) row = aplicarApagadaParaTodosNaMensagem(row, viewerUserId)
+    return row
+  }
+  if (autorIds.length === 0) return mensagens.map((m) => decorate(m, null))
+  const { data: us } = await supabase.from('usuarios').select('id, nome').eq('company_id', company_id).in('id', autorIds)
+  const usuarioMap = new Map((us || []).map((u) => [u.id, u.nome]))
+  return mensagens.map((m) =>
+    decorate(
+      m,
+      m.direcao === 'out' && m.autor_usuario_id ? (usuarioMap.get(m.autor_usuario_id) ?? null) : null
+    )
+  )
+}
+
+const { formatTextoWhatsappComNomeAtendente } = require('../helpers/mensagemAtendenteNomeHelper')
+
+/** Texto ao WhatsApp com *nome* na primeira linha (respeita getUsuarioParaEnvioCliente). CRM grava sem prefixo. */
+function textoParaEnvioWhatsapp(texto, usuarioNome) {
+  return formatTextoWhatsappComNomeAtendente(texto, usuarioNome)
+}
+
 function prefixarParaCliente(texto, usuarioNome) {
-  if (!usuarioNome || !String(usuarioNome).trim()) return texto
-  const t = String(texto || '').trim()
-  const nome = String(usuarioNome).trim()
-  return t ? `*${nome}*\n${t}` : `*${nome}*`
+  return formatTextoWhatsappComNomeAtendente(texto, usuarioNome)
 }
 
 /** Busca nome e preferência do usuário para exibir ao cliente no WhatsApp. Retorna { nome, mostrar } */
@@ -313,13 +593,14 @@ async function enrichMensagemComAutorUsuario(supabase, company_id, msg) {
     usuario_nome: u?.nome ?? null,
     enviado_por_usuario: true,
     fromMe: true,
+    apagada_para_todos: msg?.apagada_para_todos === true,
   }
 }
 
 async function assertPermissaoConversa({ company_id, conversa_id, user_id, role, user_dep_ids }) {
   const { data: conv, error } = await supabase
     .from('conversas')
-    .select('id, atendente_id, departamento_id, tipo, telefone')
+    .select('id, atendente_id, departamento_id, tipo, telefone, status_atendimento')
     .eq('company_id', Number(company_id))
     .eq('id', Number(conversa_id))
     .maybeSingle()
@@ -332,7 +613,10 @@ async function assertPermissaoConversa({ company_id, conversa_id, user_id, role,
   const depIds = Array.isArray(user_dep_ids) ? user_dep_ids : []
 
   // REGRA PRINCIPAL: Se a conversa está assumida pelo usuário, SEMPRE permitir acesso total
-  if (isAssignedToUser) return { ok: true, conv, reason: 'conversa_assumida_pelo_usuario' }
+  if (!isGroup && isAssignedToUser) return { ok: true, conv, reason: 'conversa_assumida_pelo_usuario' }
+  if (!isGroup && conv.atendente_id && await usuarioParticipaAtivamenteDaConversa(company_id, conversa_id, user_id)) {
+    return { ok: true, conv, reason: 'usuario_participante_conversa' }
+  }
   if (r === 'admin') return { ok: true, conv }
 
   // EXCEÇÃO: usuário transferiu a conversa para outro — vê independente do setor
@@ -345,11 +629,26 @@ async function assertPermissaoConversa({ company_id, conversa_id, user_id, role,
     .eq('acao', 'transferiu')
     .limit(1)
     .maybeSingle()
-  if (transferRow) return { ok: true, conv, reason: 'usuario_transferiu_conversa' }
+  if (!isGroup && transferRow) return { ok: true, conv, reason: 'usuario_transferiu_conversa' }
+
+  // Encerrada: qualquer atendente/supervisor pode reabrir (ex.: quem finalizou em outro setor).
+  if (!isGroup && (r === 'supervisor' || r === 'atendente') && isClosedAttendanceStatus(conv.status_atendimento)) {
+    return { ok: true, conv, reason: 'conversa_encerrada_reabertura' }
+  }
 
   // supervisor e atendente: conversas sem setor visíveis para TODOS; com setor só se usuário pertence
   if (r === 'supervisor' || r === 'atendente') {
-    if (!isGroup) {
+    if (isGroup) {
+      const podeVerGrupo = await usuarioPodeVerGrupo({
+        company_id,
+        conversa_id,
+        role,
+        departamento_ids: depIds,
+      })
+      if (!podeVerGrupo) {
+        return { ok: false, status: 403, error: 'Grupo nao vinculado ao seu setor' }
+      }
+    } else {
       const convDep = conv.departamento_id ?? null
       const userSemSetor = depIds.length === 0
       if (userSemSetor && convDep != null) return { ok: false, status: 403, error: 'Conversa de outro setor' }
@@ -363,40 +662,97 @@ async function assertPermissaoConversa({ company_id, conversa_id, user_id, role,
 
 /**
  * Verifica se o usuário pode ENVIAR mensagens na conversa.
- * Regras principais:
- * - GRUPOS: Qualquer usuário pode enviar SEM assumir
- * - Se a conversa está assumida pelo usuário (atendente_id === user_id), pode enviar
- * - Conversa em fila (atendente_id === null), qualquer usuário pode enviar
- * - FLEXÍVEL: Sistema permite envio para facilitar atendimento colaborativo
+ * - Grupos: qualquer usuário pode enviar sem assumir.
+ * - Demais conversas: só quem assumiu (atendente_id === user_id), inclusive admin.
+ * - Quando habilitado pelo caller, conversa sem atendente pode ser assumida
+ *   automaticamente no primeiro envio manual, respeitando setor/perfil/limite.
  */
-async function assertPodeEnviarMensagem({ company_id, conversa_id, user_id }) {
+function podeAssumirConversaPorPerfil(role) {
+  const r = String(role || '').toLowerCase()
+  return r === 'admin' || r === 'supervisor' || r === 'atendente'
+}
+
+async function assertPodeEnviarMensagem({
+  company_id,
+  conversa_id,
+  user_id,
+  role = null,
+  user_dep_ids = [],
+  autoAssumirUra = false,
+  autoAssumirAoEnviar = false,
+  io = null,
+}) {
   const { data: conv, error } = await supabase
     .from('conversas')
-    .select('id, atendente_id, tipo, telefone')
+    .select('id, atendente_id, departamento_id, tipo, telefone, status_atendimento, whatsapp_instance_id')
     .eq('company_id', Number(company_id))
     .eq('id', Number(conversa_id))
     .maybeSingle()
   if (error) return { ok: false, status: 500, error: error.message }
   if (!conv) return { ok: false, status: 404, error: 'Conversa não encontrada' }
 
-  // GRUPOS: qualquer usuário pode enviar sem assumir
   if (isGroupConversation(conv)) {
+    const podeVerGrupo = await usuarioPodeVerGrupo({
+      company_id,
+      conversa_id,
+      role,
+      departamento_ids: user_dep_ids,
+    })
+    if (!podeVerGrupo) {
+      return { ok: false, status: 403, error: 'Grupo nao vinculado ao seu setor' }
+    }
     return { ok: true, reason: 'grupo_sem_exigir_assumir' }
   }
 
-  // REGRA PRINCIPAL: Se a conversa está assumida pelo usuário, SEMPRE pode enviar
+  if (isClosedAttendanceStatus(conv.status_atendimento)) {
+    return {
+      ok: false,
+      status: 409,
+      error: 'Reabra a conversa antes de enviar mensagens.',
+    }
+  }
+
   const isAssignedToUser = conv.atendente_id && Number(conv.atendente_id) === Number(user_id)
   if (isAssignedToUser) {
     return { ok: true, reason: 'conversa_assumida_pelo_usuario' }
   }
 
-  // REGRA SECUNDÁRIA: Conversa em fila (sem atendente), qualquer usuário pode enviar
-  if (!conv.atendente_id) {
-    return { ok: true, reason: 'conversa_em_fila' }
+  if (conv.atendente_id && await usuarioParticipaAtivamenteDaConversa(company_id, conversa_id, user_id)) {
+    return { ok: true, reason: 'usuario_participante_conversa' }
   }
 
-  // REGRA FLEXÍVEL: Permitir envio mesmo se assumida por outro (para colaboração)
-  return { ok: true, reason: 'sistema_colaborativo' }
+  if (!conv.atendente_id) {
+    const deveAutoAssumir = autoAssumirAoEnviar || autoAssumirUra
+    if (deveAutoAssumir) {
+      if (!podeAssumirConversaPorPerfil(role)) {
+        return { ok: false, status: 403, error: 'Seu perfil não permite assumir conversas' }
+      }
+      const result = await executarAssumirConversa({
+        company_id,
+        conversa_id,
+        user_id,
+        perfil: role,
+        departamento_ids: user_dep_ids,
+        observacao: 'Conversa assumida automaticamente no primeiro envio manual.'
+      })
+      if (!result.ok) return { ok: false, status: result.status, error: result.error }
+
+      if (io) emitirRealtimeAposAssumir(io, company_id, conversa_id, user_id, result.conversa)
+
+      return {
+        ok: true,
+        reason: result.already_assigned ? 'auto_assumida_ja_estava_com_usuario' : 'auto_assumida_envio_manual',
+        conversa: result.conversa,
+      }
+    }
+    return { ok: false, status: 403, error: 'Assuma a conversa antes de enviar mensagens' }
+  }
+
+  return {
+    ok: false,
+    status: 403,
+    error: 'Esta conversa está com outro atendente. Assuma a conversa para enviar mensagens.',
+  }
 }
 
 // =====================================================
@@ -437,15 +793,194 @@ async function obterUnreadMap({ company_id, usuario_id }) {
   return map
 }
 
+function getSearchMessagesPageSize() {
+  const raw = Number(process.env.CHAT_SEARCH_MESSAGES_PAGE_SIZE)
+  if (!Number.isFinite(raw) || raw <= 0) return 1000
+  return Math.min(Math.max(Math.floor(raw), 100), 5000)
+}
+
+function getChatSearchScanLimit() {
+  const raw = Number(process.env.CHAT_SEARCH_SCAN_LIMIT)
+  if (!Number.isFinite(raw) || raw <= 0) return 3000
+  return Math.min(Math.max(Math.floor(raw), 100), 10000)
+}
+
+function getChatSearchIdLimit() {
+  const raw = Number(process.env.CHAT_SEARCH_ID_LIMIT)
+  if (!Number.isFinite(raw) || raw <= 0) return 1000
+  return Math.min(Math.max(Math.floor(raw), 100), 3000)
+}
+
+function getChatFilterIdLimit() {
+  const raw = Number(process.env.CHAT_FILTER_ID_LIMIT)
+  if (!Number.isFinite(raw) || raw <= 0) return 2000
+  return Math.min(Math.max(Math.floor(raw), 100), 5000)
+}
+
+function getConversaMessagesSearchLimit(rawLimit) {
+  const raw = Number(rawLimit)
+  if (!Number.isFinite(raw) || raw <= 0) return 30
+  return Math.min(Math.max(Math.floor(raw), 1), 100)
+}
+
+async function buscarConversaIdsPorTextoMensagens({ company_id, term }) {
+  const pageSize = getSearchMessagesPageSize()
+  const scanLimit = getChatSearchScanLimit()
+  const idLimit = getChatSearchIdLimit()
+  const ids = new Set()
+
+  for (let start = 0; start < scanLimit && ids.size < idLimit; start += pageSize) {
+    const end = Math.min(start + pageSize - 1, scanLimit - 1)
+    const { data, error } = await supabase
+      .from('mensagens')
+      .select('conversa_id')
+      .eq('company_id', Number(company_id))
+      .ilike('texto', term)
+      .order('criado_em', { ascending: false })
+      .order('id', { ascending: false })
+      .range(start, end)
+
+    if (error) throw error
+
+    const rows = Array.isArray(data) ? data : []
+    for (const row of rows) {
+      if (row?.conversa_id != null) ids.add(row.conversa_id)
+      if (ids.size >= idLimit) break
+    }
+
+    if (rows.length < (end - start + 1)) break
+  }
+
+  return [...ids]
+}
+
 /**
  * Retorna IDs dos usuários que podem ver a conversa (para unread/notificações).
  * Regras: admin vê tudo; conversa assumida → sempre; setor → só usuários do setor; sem setor → todos.
  * EXCEÇÃO: usuários que transferiram a conversa veem independente do setor.
  */
-async function obterUsuarioIdsQuePodemVerConversa(company_id, conversa_id) {
+const conversaVisibilityCache = new Map()
+const CONVERSA_VISIBILITY_CACHE_TTL_MS = 15_000
+
+function conversaVisibilityCacheKey(company_id, conversa_id) {
+  return `${Number(company_id)}:${Number(conversa_id)}`
+}
+
+function invalidateConversaVisibilityCache(company_id, conversa_id) {
+  if (company_id == null || conversa_id == null) return
+  conversaVisibilityCache.delete(conversaVisibilityCacheKey(company_id, conversa_id))
+}
+
+function isConversaAtendentesMissingTable(error) {
+  const msg = String(error?.message || error || '').toLowerCase()
+  const code = String(error?.code || '')
+  return code === '42P01' || code === 'PGRST205' || msg.includes('conversa_atendentes') && msg.includes('does not exist')
+}
+
+function isConversaAtendentesSchemaMissing(error) {
+  const msg = String(error?.message || error || '').toLowerCase()
+  const code = String(error?.code || '')
+  return (
+    isConversaAtendentesMissingTable(error) ||
+    code === 'PGRST204' ||
+    code === '42703' ||
+    (msg.includes('conversa_atendentes') && msg.includes('schema cache')) ||
+    (msg.includes('conversa_atendentes') && msg.includes('column')) ||
+    (msg.includes('adicionado_por') && msg.includes('does not exist'))
+  )
+}
+
+async function getConversaParticipanteIdsAtivos(company_id, conversa_id) {
+  if (company_id == null || conversa_id == null) return []
+  const { data, error } = await supabase
+    .from('conversa_atendentes')
+    .select('usuario_id')
+    .eq('company_id', Number(company_id))
+    .eq('conversa_id', Number(conversa_id))
+    .eq('ativo', true)
+  if (error) {
+    if (!isConversaAtendentesSchemaMissing(error)) {
+      console.warn('[conversa_atendentes] erro ao buscar participantes (assumindo vazio):', error?.message || error)
+    }
+    return []
+  }
+  return [...new Set((data || []).map((row) => Number(row.usuario_id)).filter((n) => Number.isFinite(n) && n > 0))]
+}
+
+async function getConversaIdsParticipanteAtivo(company_id, usuario_id) {
+  if (company_id == null || usuario_id == null) return []
+  const limit = getChatFilterIdLimit()
+  const { data, error } = await supabase
+    .from('conversa_atendentes')
+    .select('conversa_id')
+    .eq('company_id', Number(company_id))
+    .eq('usuario_id', Number(usuario_id))
+    .eq('ativo', true)
+    .order('criado_em', { ascending: false })
+    .limit(limit)
+  if (error) {
+    if (isConversaAtendentesSchemaMissing(error)) return []
+    throw error
+  }
+  return [...new Set((data || []).map((row) => Number(row.conversa_id)).filter((n) => Number.isFinite(n) && n > 0))]
+}
+
+async function usuarioParticipaAtivamenteDaConversa(company_id, conversa_id, usuario_id) {
+  if (company_id == null || conversa_id == null || usuario_id == null) return false
+  const { data, error } = await supabase
+    .from('conversa_atendentes')
+    .select('id')
+    .eq('company_id', Number(company_id))
+    .eq('conversa_id', Number(conversa_id))
+    .eq('usuario_id', Number(usuario_id))
+    .eq('ativo', true)
+    .limit(1)
+    .maybeSingle()
+  if (error) {
+    if (isConversaAtendentesSchemaMissing(error)) return false
+    throw error
+  }
+  return !!data
+}
+
+function payloadAlteraVisibilidadeConversa(payload) {
+  if (!payload || typeof payload !== 'object') return false
+  return (
+    Object.prototype.hasOwnProperty.call(payload, 'departamento_id') ||
+    Object.prototype.hasOwnProperty.call(payload, 'atendente_id') ||
+    Object.prototype.hasOwnProperty.call(payload, 'tipo') ||
+    Object.prototype.hasOwnProperty.call(payload, 'departamento_grupos')
+  )
+}
+
+function deveIncluirGruposSemDepartamentoNoFiltroTodos({
+  isAdmin,
+  filter_dep_id,
+  filtroAtendenteInformado,
+  minhaFilaAtiva,
+  aguardandoClienteAtivo,
+  pagamentoPendenteAtivo,
+  emAtrasoAtivo,
+  hojeAtivo,
+  statusNorm,
+}) {
+  return (
+    !isAdmin &&
+    !filter_dep_id &&
+    filtroAtendenteInformado == null &&
+    !minhaFilaAtiva &&
+    !aguardandoClienteAtivo &&
+    !pagamentoPendenteAtivo &&
+    !emAtrasoAtivo &&
+    !hojeAtivo &&
+    !statusNorm
+  )
+}
+
+async function carregarUsuarioIdsQuePodemVerConversaSemCache(company_id, conversa_id) {
   const { data: conv } = await supabase
     .from('conversas')
-    .select('departamento_id, atendente_id, tipo')
+    .select('departamento_id, atendente_id, tipo, telefone')
     .eq('company_id', Number(company_id))
     .eq('id', Number(conversa_id))
     .maybeSingle()
@@ -454,6 +989,8 @@ async function obterUsuarioIdsQuePodemVerConversa(company_id, conversa_id) {
   const isGroup = isGroupConversation(conv)
   const convDep = conv.departamento_id ?? null
   const atendenteId = conv.atendente_id ? Number(conv.atendente_id) : null
+  const grupoDepIds = isGroup ? await getGrupoDepartamentoIds(company_id, conversa_id) : []
+  const grupoDepSet = new Set(grupoDepIds.map(Number))
 
   const { data: transferiuRows } = await supabase
     .from('atendimentos')
@@ -462,6 +999,7 @@ async function obterUsuarioIdsQuePodemVerConversa(company_id, conversa_id) {
     .eq('conversa_id', Number(conversa_id))
     .eq('acao', 'transferiu')
   const transferiuIds = new Set((transferiuRows || []).map((r) => Number(r.de_usuario_id)).filter(Boolean))
+  const participanteIds = new Set(await getConversaParticipanteIdsAtivos(company_id, conversa_id))
 
   const { data: usuarios } = await supabase
     .from('usuarios')
@@ -488,14 +1026,46 @@ async function obterUsuarioIdsQuePodemVerConversa(company_id, conversa_id) {
     const uid = Number(u.id)
     const isAdmin = String(u.perfil || '').toLowerCase() === 'admin'
     if (isAdmin) { ids.push(uid); continue }
-    if (atendenteId && uid === atendenteId) { ids.push(uid); continue }
-    if (transferiuIds.has(uid)) { ids.push(uid); continue }
-    if (isGroup) { ids.push(uid); continue }
     const userDepIds = userDepMap.get(uid) ?? (u.departamento_id != null ? [Number(u.departamento_id)] : [])
+    if (isGroup) {
+      if (grupoDepSet.size === 0 || userDepIds.some((d) => grupoDepSet.has(Number(d)))) ids.push(uid)
+      continue
+    }
+    if (atendenteId && uid === atendenteId) { ids.push(uid); continue }
+    if (participanteIds.has(uid)) { ids.push(uid); continue }
+    if (transferiuIds.has(uid)) { ids.push(uid); continue }
     if (convDep == null) ids.push(uid)
     else if (userDepIds.some((d) => Number(d) === Number(convDep))) ids.push(uid)
   }
   return ids
+}
+
+async function obterUsuarioIdsQuePodemVerConversa(company_id, conversa_id) {
+  const key = conversaVisibilityCacheKey(company_id, conversa_id)
+  const now = Date.now()
+  const cached = conversaVisibilityCache.get(key)
+
+  if (cached?.ids && cached.expiresAt > now) return [...cached.ids]
+  if (cached?.promise) return [...(await cached.promise)]
+
+  const promise = carregarUsuarioIdsQuePodemVerConversaSemCache(company_id, conversa_id)
+  conversaVisibilityCache.set(key, {
+    promise,
+    expiresAt: now + CONVERSA_VISIBILITY_CACHE_TTL_MS,
+  })
+
+  try {
+    const ids = await promise
+    const safeIds = Array.isArray(ids) ? ids : []
+    conversaVisibilityCache.set(key, {
+      ids: safeIds,
+      expiresAt: Date.now() + CONVERSA_VISIBILITY_CACHE_TTL_MS,
+    })
+    return [...safeIds]
+  } catch (err) {
+    conversaVisibilityCache.delete(key)
+    throw err
+  }
 }
 
 /**
@@ -588,8 +1158,11 @@ exports.listarConversas = async (req, res) => {
       minha_fila: minhaFilaRaw,
       incluir_colaboradores_encaminhar: incluirColabEncRaw,
       aguardando_cliente: aguardandoClienteRaw,
+      pagamento_pendente: pagamentoPendenteRaw,
+      em_atraso: emAtrasoRaw,
       tempo_parado: tempoParadoRaw,
       finalizacao_motivo: finalizacaoMotivoRaw,
+      hoje: hojeRaw,
     } = req.query
 
     const filtroAusenciaLista =
@@ -619,11 +1192,65 @@ exports.listarConversas = async (req, res) => {
       aguardandoClienteRaw === 1 ||
       aguardandoClienteRaw === true
 
+    const pagamentoPendenteAtivo =
+      pagamentoPendenteRaw === '1' ||
+      pagamentoPendenteRaw === 'true' ||
+      pagamentoPendenteRaw === 1 ||
+      pagamentoPendenteRaw === true
+
+    const emAtrasoAtivo =
+      emAtrasoRaw === '1' ||
+      emAtrasoRaw === 'true' ||
+      emAtrasoRaw === 1 ||
+      emAtrasoRaw === true
+
+    const hojeAtivo =
+      hojeRaw === '1' ||
+      hojeRaw === 'true' ||
+      hojeRaw === 1 ||
+      hojeRaw === true
+
+    const tagFilterAtivo =
+      tag_id != null &&
+      String(tag_id).trim() !== '' &&
+      String(tag_id).trim().toLowerCase() !== 'todas'
+
     const incluirColaboradoresEncaminhar =
       incluirColabEncRaw === '1' ||
       incluirColabEncRaw === 'true' ||
       incluirColabEncRaw === 1 ||
       incluirColabEncRaw === true
+
+    const chatListPagination = parseChatListPagination(req.query)
+
+    async function sendEmptyChatListResponse(semConversaIncluded = false) {
+      const emptyPagination = {
+        limit: chatListPagination.limit,
+        has_more: false,
+        next_cursor: null,
+        next_cursor_id: null,
+        returned: 0,
+        sem_conversa_included: Boolean(semConversaIncluded),
+      }
+      setChatListPaginationHeaders(res, emptyPagination, {
+        semConversaIncluded: Boolean(semConversaIncluded),
+        totalCount: 0,
+      })
+      if (!incluirColaboradoresEncaminhar) {
+        if (chatListPagination.paginatedResponse) {
+          return res.json({ conversas: [], pagination: emptyPagination })
+        }
+        return res.json([])
+      }
+      const colaboradores_encaminhar = await loadColaboradoresEncaminhar()
+      return res.json({ conversas: [], colaboradores_encaminhar, pagination: emptyPagination })
+    }
+
+    const isFinanceiroUser = await usuarioPertenceSetorFinanceiro(departamento_ids, company_id)
+
+    if ((pagamentoPendenteAtivo || emAtrasoAtivo) && !isFinanceiroUser) {
+      return sendEmptyChatListResponse(false)
+    }
 
     const minhaFilaAtiva =
       minhaFilaRaw === '1' ||
@@ -637,15 +1264,16 @@ exports.listarConversas = async (req, res) => {
       incluirTodosClientes === 1 ||
       incluirTodosClientes === true
 
-    // Para a aba "Todas" (sem filtros de status/fila), incluir clientes sem conversa por padrão.
-    // Isso mantém a lista alinhada com a base real de clientes, mesmo sem parâmetro explícito no front.
-    const incluirTodosClientesDefault =
-      (incluirTodosClientes == null || String(incluirTodosClientes).trim() === '') &&
-      !minhaFilaAtiva &&
-      !aguardandoClienteAtivo
+    // Em producao, GET /chats nunca anexa a base inteira de clientes por padrao.
+    // Clientes sem conversa entram apenas em busca explicita e paginada.
+    const incluirTodosClientesDefault = false
+    const palavraTrim = palavra && String(palavra).trim() ? String(palavra).trim() : ''
 
     const statusNorm =
       !minhaFilaAtiva &&
+      !pagamentoPendenteAtivo &&
+      !emAtrasoAtivo &&
+      !hojeAtivo &&
       status_atendimento != null &&
       String(status_atendimento).trim() !== ''
         ? String(status_atendimento).toLowerCase().trim()
@@ -662,9 +1290,7 @@ exports.listarConversas = async (req, res) => {
     } catch (_) {}
 
     if (statusNorm === 'mensagem_disparada' && !separarMensagensDisparadasEmpresa) {
-      if (!incluirColaboradoresEncaminhar) return res.json([])
-      const colaboradores_encaminhar = await loadColaboradoresEncaminhar()
-      return res.json({ conversas: [], colaboradores_encaminhar })
+      return sendEmptyChatListResponse(false)
     }
 
     /** Inteiro positivo (usuarios.id). UUID não é coluna de atendente_id na conversa — rejeitar valores não inteiros. */
@@ -702,88 +1328,151 @@ exports.listarConversas = async (req, res) => {
 
     // Exceção: conversas que o usuário transferiu para outro — aparecem na lista independente do setor
     let conversaIdsTransferidas = []
+    let conversaIdsParticipanteAtivo = []
     if (!isAdmin) {
+      const transferLimit = getChatFilterIdLimit()
       const { data: transferRows } = await supabase
         .from('atendimentos')
         .select('conversa_id')
         .eq('company_id', company_id)
         .eq('de_usuario_id', user_id)
         .eq('acao', 'transferiu')
+        .order('criado_em', { ascending: false })
+        .limit(transferLimit)
       conversaIdsTransferidas = [...new Set((transferRows || []).map((r) => Number(r.conversa_id)).filter(Boolean))]
+      conversaIdsParticipanteAtivo = await getConversaIdsParticipanteAtivo(company_id, user_id)
     }
+    const conversaIdsParticipanteAtivoSet = new Set(conversaIdsParticipanteAtivo.map(Number))
+
+    let grupoIdsPermitidosPorDepartamento = []
+    if (!isAdmin) {
+      grupoIdsPermitidosPorDepartamento = await getGrupoIdsPorDepartamentos(company_id, departamento_ids)
+    } else if (filter_dep_id) {
+      grupoIdsPermitidosPorDepartamento = await getGrupoIdsPorDepartamentos(company_id, [filter_dep_id])
+    }
+    const incluirGruposSemDepartamentoNoTodos = deveIncluirGruposSemDepartamentoNoFiltroTodos({
+      isAdmin,
+      filter_dep_id,
+      filtroAtendenteInformado,
+      minhaFilaAtiva,
+      aguardandoClienteAtivo,
+      pagamentoPendenteAtivo,
+      emAtrasoAtivo,
+      hojeAtivo,
+      statusNorm,
+    })
+    const grupoIdsSemDepartamento =
+      incluirGruposSemDepartamentoNoTodos ? await getGrupoIdsSemDepartamento(company_id) : []
 
     let conversaIdsFilter = null
+    let forceEmptyConversas = false
 
-    if (tag_id) {
+    if (tagFilterAtivo) {
+      const filterIdLimit = getChatFilterIdLimit()
       const { data: tagRows } = await supabase
         .from('conversa_tags')
         .select('conversa_id')
         .eq('company_id', company_id)
         .eq('tag_id', tag_id)
+        .order('criado_em', { ascending: false })
+        .limit(filterIdLimit)
       const ids = (tagRows || []).map((r) => r.conversa_id)
       if (ids.length === 0) {
-        if (!incluirColaboradoresEncaminhar) return res.json([])
-        const colaboradores_encaminhar = await loadColaboradoresEncaminhar()
-        return res.json({ conversas: [], colaboradores_encaminhar })
+        return sendEmptyChatListResponse(false)
       }
       conversaIdsFilter = ids
     }
 
-    if (palavra && String(palavra).trim()) {
-      const term = `%${String(palavra).trim()}%`
+    if (palavraTrim) {
+      const term = `%${escapeIlikePattern(palavraTrim)}%`
+      const searchIdLimit = getChatSearchIdLimit()
       const { data: clientesMatch } = await supabase
         .from('clientes')
         .select('id')
         .eq('company_id', company_id)
-        .or(`nome.ilike.${term},pushname.ilike.${term},telefone.ilike.${term}`)
+        .or(buildClienteSearchOr(palavraTrim))
+        .order('criado_em', { ascending: false })
+        .limit(searchIdLimit)
       const clienteIds = (clientesMatch || []).map((c) => c.id)
       const convByClientePromise = supabase
         .from('conversas')
         .select('id')
         .eq('company_id', company_id)
         .in('cliente_id', clienteIds.length ? clienteIds : [0])
+        .order('ultima_atividade', { ascending: false, nullsFirst: false })
+        .limit(searchIdLimit)
       const convByTelefonePromise = supabase
         .from('conversas')
         .select('id')
         .eq('company_id', company_id)
-        .ilike('telefone', term)
+        .or(buildTelefoneSearchOr(palavraTrim))
+        .order('ultima_atividade', { ascending: false, nullsFirst: false })
+        .limit(searchIdLimit)
       const convByNomeGrupoPromise = supabase
         .from('conversas')
         .select('id')
         .eq('company_id', company_id)
         .ilike('nome_grupo', term)
-      const msgMatchPromise = supabase
-        .from('mensagens')
-        .select('conversa_id')
+        .order('ultima_atividade', { ascending: false, nullsFirst: false })
+        .limit(searchIdLimit)
+      const convByNomeContatoCachePromise = supabase
+        .from('conversas')
+        .select('id')
         .eq('company_id', company_id)
-        .ilike('texto', term)
+        .ilike('nome_contato_cache', term)
+        .order('ultima_atividade', { ascending: false, nullsFirst: false })
+        .limit(searchIdLimit)
+      const msgMatchPromise = buscarConversaIdsPorTextoMensagens({ company_id, term })
       const [
         { data: convByCliente },
         { data: convByTelefone },
         { data: convByNomeGrupo },
-        { data: msgMatch },
+        { data: convByNomeContatoCache },
+        idsFromMsg,
       ] = await Promise.all([
         convByClientePromise,
         convByTelefonePromise,
         convByNomeGrupoPromise,
+        convByNomeContatoCachePromise,
         msgMatchPromise,
       ])
-      const idsFromMsg = [...new Set((msgMatch || []).map((m) => m.conversa_id))]
       const idsFromCliente = (convByCliente || []).map((c) => c.id)
       const idsFromTel = (convByTelefone || []).map((c) => c.id)
       const idsFromGrupo = (convByNomeGrupo || []).map((c) => c.id)
-      const mergedSet = new Set([...idsFromCliente, ...idsFromTel, ...idsFromGrupo, ...idsFromMsg])
+      const idsFromNomeCache = (convByNomeContatoCache || []).map((c) => c.id)
+      const mergedSet = new Set([...idsFromCliente, ...idsFromTel, ...idsFromGrupo, ...idsFromNomeCache, ...idsFromMsg])
       const merged = [...mergedSet]
       if (merged.length === 0) {
-        if (!incluirColaboradoresEncaminhar) return res.json([])
-        const colaboradores_encaminhar = await loadColaboradoresEncaminhar()
-        return res.json({ conversas: [], colaboradores_encaminhar })
+        if (shouldIncludeClientesSemConversa({ incluirTodosClientesAtivo, palavraTrim })) {
+          conversaIdsFilter = []
+          forceEmptyConversas = true
+        } else {
+          return sendEmptyChatListResponse(false)
+        }
+      } else {
+        conversaIdsFilter = conversaIdsFilter ? conversaIdsFilter.filter((id) => mergedSet.has(id)) : merged
       }
-      conversaIdsFilter = conversaIdsFilter ? conversaIdsFilter.filter((id) => mergedSet.has(id)) : merged
+    }
+
+    const conversaIdsRaw = req.query.conversa_ids
+    if (conversaIdsRaw != null && String(conversaIdsRaw).trim() === '0') {
+      forceEmptyConversas = true
+    } else {
+      const conversaIdsExplicit = parseConversaIdsQuery(conversaIdsRaw)
+      if (conversaIdsExplicit.length > 0) {
+        const explicitSet = new Set(conversaIdsExplicit)
+        if (conversaIdsFilter && conversaIdsFilter.length > 0) {
+          conversaIdsFilter = conversaIdsFilter.filter((id) => explicitSet.has(Number(id)))
+          if (conversaIdsFilter.length === 0) forceEmptyConversas = true
+        } else {
+          conversaIdsFilter = conversaIdsExplicit
+        }
+      }
     }
 
     const selectCompleto = `
       id,
+      whatsapp_instance_id,
       telefone,
       cliente_id,
       usuario_id,
@@ -805,7 +1494,7 @@ exports.listarConversas = async (req, res) => {
       clientes!conversas_cliente_fk ( id, nome, pushname, telefone, foto_perfil, company_id ),
       atendente:usuarios!conversas_atendente_id_fkey ( id, nome, email ),
       departamentos ( id, nome ),
-      mensagens ( texto, criado_em, direcao, tipo, url, nome_arquivo, whatsapp_id, status, autor_usuario_id, contact_meta, location_meta ),
+      mensagens ( conversa_id, texto, criado_em, direcao, tipo, url, nome_arquivo, whatsapp_id, status, autor_usuario_id, contact_meta, location_meta ),
       conversa_tags (
         tag_id,
         tags (
@@ -817,17 +1506,22 @@ exports.listarConversas = async (req, res) => {
     `
     const selectMinimo = `
       id,
+      whatsapp_instance_id,
       telefone,
       cliente_id,
       usuario_id,
       status_atendimento,
       atendente_id,
       aguardando_cliente_desde,
+      pagamento_prazo_ate,
+      pagamento_prazo_origem,
+      pagamento_concluido_em,
       finalizacao_motivo,
       finalizada_automaticamente,
       finalizada_automaticamente_em,
       lida,
       criado_em,
+      ultima_atividade,
       departamento_id,
       tipo,
       nome_grupo,
@@ -837,7 +1531,7 @@ exports.listarConversas = async (req, res) => {
       clientes!conversas_cliente_fk ( id, nome, pushname, telefone, foto_perfil, company_id ),
       atendente:usuarios!conversas_atendente_id_fkey ( id, nome, email ),
       departamentos ( id, nome ),
-      mensagens ( texto, criado_em, direcao, tipo, url, nome_arquivo, whatsapp_id, status, autor_usuario_id, contact_meta, location_meta ),
+      mensagens ( conversa_id, texto, criado_em, direcao, tipo, url, nome_arquivo, whatsapp_id, status, autor_usuario_id, contact_meta, location_meta ),
       conversa_tags (
         tag_id,
         tags (
@@ -850,14 +1544,19 @@ exports.listarConversas = async (req, res) => {
     // Fallback mínimo mas com foto e última mensagem para não quebrar setas/fotos na UI ao atualizar
     const selectBare = `
       id,
+      whatsapp_instance_id,
       telefone,
       cliente_id,
       usuario_id,
       status_atendimento,
       atendente_id,
       aguardando_cliente_desde,
+      pagamento_prazo_ate,
+      pagamento_prazo_origem,
+      pagamento_concluido_em,
       lida,
       criado_em,
+      ultima_atividade,
       departamento_id,
       tipo,
       nome_grupo,
@@ -870,7 +1569,7 @@ exports.listarConversas = async (req, res) => {
       clientes!conversas_cliente_fk ( id, nome, pushname, telefone, foto_perfil, company_id ),
       atendente:usuarios!conversas_atendente_id_fkey ( id, nome, email ),
       departamentos ( id, nome ),
-      mensagens ( texto, criado_em, direcao, tipo, url, nome_arquivo, whatsapp_id, status, autor_usuario_id, contact_meta, location_meta )
+      mensagens ( conversa_id, texto, criado_em, direcao, tipo, url, nome_arquivo, whatsapp_id, status, autor_usuario_id, contact_meta, location_meta )
     `
 
     function buildQuery(select) {
@@ -884,29 +1583,73 @@ exports.listarConversas = async (req, res) => {
         const depIds = Array.isArray(departamento_ids) ? departamento_ids.filter((id) => id != null && Number.isFinite(Number(id))) : []
         const parts = []
         if (depIds.length > 0) {
-          depIds.forEach((d) => parts.push(`departamento_id.eq.${d}`))
+          pushNonGroupVisibilityParts(parts, 'departamento_id', depIds)
         }
-        parts.push('departamento_id.is.null', `tipo.eq.grupo`, `atendente_id.eq.${user_id}`)
+        parts.push('and(departamento_id.is.null,tipo.is.null)', 'and(departamento_id.is.null,tipo.neq.grupo)')
+        pushNonGroupVisibilityParts(parts, 'atendente_id', [user_id])
+        pushAllowedGroupIdsPart(parts, grupoIdsPermitidosPorDepartamento)
+        pushAllowedGroupIdsPart(parts, grupoIdsSemDepartamento)
         if (conversaIdsTransferidas.length > 0) {
           parts.push(`id.in.(${conversaIdsTransferidas.join(',')})`)
         }
+        if (conversaIdsParticipanteAtivo.length > 0) {
+          parts.push(`id.in.(${conversaIdsParticipanteAtivo.join(',')})`)
+        }
         q = q.or(parts.join(','))
       } else if (filter_dep_id) {
-        q = q.eq('departamento_id', Number(filter_dep_id))
+        const parts = []
+        pushNonGroupVisibilityParts(parts, 'departamento_id', [filter_dep_id])
+        pushAllowedGroupIdsPart(parts, grupoIdsPermitidosPorDepartamento)
+        q = parts.length > 0 ? q.or(parts.join(',')) : q.eq('departamento_id', Number(filter_dep_id))
       }
-      if (conversaIdsFilter && conversaIdsFilter.length > 0) {
+      if (forceEmptyConversas) {
+        q = q.in('id', [0])
+      } else if (conversaIdsFilter && conversaIdsFilter.length > 0) {
         q = q.in('id', conversaIdsFilter)
       }
       // Mensagens disparadas: fora da listagem geral quando sem filtro de status; se a empresa desligou a opção, nunca misturar esse status nas demais queries.
-      if (!minhaFilaAtiva && !aguardandoClienteAtivo && (!statusNorm || !separarMensagensDisparadasEmpresa)) {
+      if (
+        !minhaFilaAtiva &&
+        !aguardandoClienteAtivo &&
+        !pagamentoPendenteAtivo &&
+        !emAtrasoAtivo &&
+        !hojeAtivo &&
+        (!statusNorm || !separarMensagensDisparadasEmpresa)
+      ) {
         q = q.or('tipo.eq.grupo,status_atendimento.neq.mensagem_disparada,status_atendimento.is.null')
       }
-      // Filtro personalizado "Minha fila": abertas (fila) + em atendimento só comigo; sem grupos; sem finalizadas
+      // Filtro personalizado "Minha fila": abertas (fila) + em atendimento só comigo + grupos do setor fixados; sem finalizadas
       if (minhaFilaAtiva) {
-        q = q.or('tipo.is.null,tipo.neq.grupo')
+        // Grupos vinculados ao setor do atendente (departamento_grupos) aparecem fixados na Minha fila.
+        // O bloco de visibilidade acima já restringe quais grupos o atendente pode ver.
+        // Admin ou usuário sem grupos vinculados: comportamento original (excluir grupos).
+        const incluirGruposSetor = !isAdmin && grupoIdsPermitidosPorDepartamento.length > 0
+        if (!incluirGruposSetor) {
+          q = q.or('tipo.is.null,tipo.neq.grupo')
+        }
         q = q.or(
-          `status_atendimento.eq.aberta,and(status_atendimento.eq.em_atendimento,atendente_id.eq.${user_id}),and(status_atendimento.eq.aguardando_cliente,atendente_id.eq.${user_id})`
+          `${incluirGruposSetor ? `id.in.(${grupoIdsPermitidosPorDepartamento.join(',')}),` : ''}status_atendimento.eq.aberta,and(status_atendimento.eq.em_atendimento,atendente_id.eq.${user_id}),and(status_atendimento.eq.aguardando_cliente,atendente_id.eq.${user_id}),and(status_atendimento.eq.pagamento_pendente,atendente_id.eq.${user_id}),and(status_atendimento.eq.em_atraso,atendente_id.eq.${user_id})${conversaIdsParticipanteAtivo.length > 0 ? `,and(status_atendimento.in.(em_atendimento,aguardando_cliente,pagamento_pendente,em_atraso),id.in.(${conversaIdsParticipanteAtivo.join(',')}))` : ''}`
         )
+      } else if (pagamentoPendenteAtivo) {
+        q = q.eq('status_atendimento', 'pagamento_pendente')
+        q = q.not('atendente_id', 'is', null)
+        if (isAtendente) {
+          q = conversaIdsParticipanteAtivo.length > 0
+            ? q.or(`atendente_id.eq.${Number(user_id)},id.in.(${conversaIdsParticipanteAtivo.join(',')})`)
+            : q.eq('atendente_id', Number(user_id))
+        } else if (filtroAtendenteInformado != null) {
+          q = q.eq('atendente_id', Number(filtroAtendenteInformado))
+        }
+      } else if (emAtrasoAtivo) {
+        q = q.eq('status_atendimento', 'em_atraso')
+        q = q.not('atendente_id', 'is', null)
+        if (isAtendente) {
+          q = conversaIdsParticipanteAtivo.length > 0
+            ? q.or(`atendente_id.eq.${Number(user_id)},id.in.(${conversaIdsParticipanteAtivo.join(',')})`)
+            : q.eq('atendente_id', Number(user_id))
+        } else if (filtroAtendenteInformado != null) {
+          q = q.eq('atendente_id', Number(filtroAtendenteInformado))
+        }
       } else if (statusNorm === 'mensagem_disparada') {
         q = q.eq('status_atendimento', 'mensagem_disparada')
         q = q.neq('tipo', 'grupo')
@@ -932,6 +1675,10 @@ exports.listarConversas = async (req, res) => {
         q = q.lte('criado_em', end.toISOString())
       }
 
+      if (hojeAtivo) {
+        q = q.gte('ultima_atividade', getStartOfTodayIso()).lte('ultima_atividade', getEndOfTodayIso())
+      }
+
       // Filtro "Aguardando cliente": (1) aguardando_cliente_desde em em_atendimento ou (2) status manual aguardando_cliente.
       // Atendente comum: só o próprio responsável. Admin/supervisor: visão agregada; com atendente_id na query, restringe ao informado.
       if (aguardandoClienteAtivo) {
@@ -940,7 +1687,9 @@ exports.listarConversas = async (req, res) => {
         )
         q = q.not('atendente_id', 'is', null)
         if (isAtendente) {
-          q = q.eq('atendente_id', Number(user_id))
+          q = conversaIdsParticipanteAtivo.length > 0
+            ? q.or(`atendente_id.eq.${Number(user_id)},id.in.(${conversaIdsParticipanteAtivo.join(',')})`)
+            : q.eq('atendente_id', Number(user_id))
         } else if (filtroAtendenteInformado != null) {
           q = q.eq('atendente_id', Number(filtroAtendenteInformado))
         }
@@ -967,29 +1716,71 @@ exports.listarConversas = async (req, res) => {
       return q
     }
 
+    const countsCtx = {
+      company_id,
+      user_id,
+      isAdmin,
+      isAtendente,
+      departamento_ids,
+      filter_dep_id,
+      filtroAtendenteInformado,
+      conversaIdsTransferidas,
+      conversaIdsParticipanteAtivo,
+      grupoIdsPermitidosPorDepartamento,
+      grupoIdsSemDepartamento,
+      conversaIdsFilter,
+      forceEmptyConversas,
+      data_inicio,
+      data_fim,
+      separarMensagensDisparadasEmpresa,
+      isFinanceiro: isFinanceiroUser,
+    }
+    const listFilterOverrides = overridesFromListQuery(req.query)
+    const totalCountPromise =
+      chatListPagination.cursor
+        ? Promise.resolve(null)
+        : forceEmptyConversas
+          ? Promise.resolve(0)
+          : countConversasWithFilter(countsCtx, listFilterOverrides).catch((err) => {
+            console.warn('[listarConversas] total_count:', err?.message || err)
+            return null
+          })
+
     let data = null
     let error = null
 
-    const queryCompleto = buildQuery(selectCompleto)
-      .order('ultima_atividade', { ascending: false, nullsFirst: false })
-      .order('id', { ascending: false })
+    const queryCompleto = applyChatListCursor(
+      buildQuery(selectCompleto)
+        .order('ultima_atividade', { ascending: false, nullsFirst: false })
+        .order('id', { ascending: false }),
+      chatListPagination.cursor,
+      chatListPagination.cursor_id
+    ).limit(chatListPagination.limit + 1)
     let result = await queryCompleto
     data = result.data
     error = result.error
 
     if (error) {
-      const queryMinimo = buildQuery(selectMinimo)
-        .order('criado_em', { ascending: false })
-        .order('id', { ascending: false })
+      const queryMinimo = applyChatListCursor(
+        buildQuery(selectMinimo)
+          .order('ultima_atividade', { ascending: false, nullsFirst: false })
+          .order('id', { ascending: false }),
+        chatListPagination.cursor,
+        chatListPagination.cursor_id
+      ).limit(chatListPagination.limit + 1)
       result = await queryMinimo
       data = result.data
       error = result.error
     }
 
     if (error) {
-      const queryBare = buildQuery(selectBare)
-        .order('criado_em', { ascending: false })
-        .order('id', { ascending: false })
+      const queryBare = applyChatListCursor(
+        buildQuery(selectBare)
+          .order('ultima_atividade', { ascending: false, nullsFirst: false })
+          .order('id', { ascending: false }),
+        chatListPagination.cursor,
+        chatListPagination.cursor_id
+      ).limit(chatListPagination.limit + 1)
       result = await queryBare
       data = result.data
       error = result.error
@@ -997,13 +1788,20 @@ exports.listarConversas = async (req, res) => {
 
     if (error) return res.status(500).json({ error: error.message })
 
+    const rawSqlRows = Array.isArray(data) ? data : []
+    const rawSqlHadMore = rawSqlRows.length > chatListPagination.limit
+    const whatsappInstanceMetaMap = await loadWhatsappInstanceMetaMap(
+      company_id,
+      rawSqlRows.map((c) => c?.whatsapp_instance_id)
+    )
+
     // Enriquece última mensagem de cada conversa com usuario_nome
-    const allLastMsgs = (data || []).flatMap((c) => c.mensagens || [])
+    const allLastMsgs = (rawSqlRows || []).flatMap((c) => c.mensagens || [])
     const hasAuthorToEnrich = allLastMsgs.some((m) => m && m.autor_usuario_id != null)
     if (allLastMsgs.length > 0 && hasAuthorToEnrich) {
       const enriched = await enrichMensagensComAutorUsuario(supabase, company_id, allLastMsgs)
       let idx = 0
-      for (const c of data || []) {
+      for (const c of rawSqlRows || []) {
         if (c.mensagens && c.mensagens.length > 0) {
           c.mensagens = [enriched[idx++]]
         }
@@ -1015,7 +1813,7 @@ exports.listarConversas = async (req, res) => {
     // Usa possiblePhonesBR para matching entre formatos (5511... vs 11..., 12 vs 13 dígitos).
     const phoneToClientFallback = new Map()
     try {
-      const phonesSemCliente = (data || [])
+      const phonesSemCliente = (rawSqlRows || [])
         .filter((c) => !isGroupConversation(c) && !c.cliente_id && c.telefone && !String(c.telefone).startsWith('lid:'))
         .map((c) => String(c.telefone).trim())
       const uniquePhones = Array.from(new Set(phonesSemCliente.filter(Boolean)))
@@ -1046,7 +1844,7 @@ exports.listarConversas = async (req, res) => {
     }
 
     const cid = Number(company_id)
-    let conversasFormatadas = (data || []).map((c) => {
+    let conversasFormatadas = (rawSqlRows || []).map((c) => {
       const raw = c.clientes
       let clientesObj = Array.isArray(raw)
         ? (raw.find((cl) => cl && Number(cl.id) === Number(c.cliente_id)) || raw[0])
@@ -1135,6 +1933,8 @@ exports.listarConversas = async (req, res) => {
 
       return {
         id: c.id,
+        whatsapp_instance_id: c.whatsapp_instance_id ?? null,
+        ...safeWhatsappInstanceMeta(whatsappInstanceMetaMap.get(Number(c.whatsapp_instance_id))),
         cliente_id: c.cliente_id,
         telefone: c.telefone,
         telefone_exibivel: telefoneExibivel,
@@ -1143,6 +1943,9 @@ exports.listarConversas = async (req, res) => {
         exibir_badge_aberta,
         atendente_id: c.atendente_id,
         aguardando_cliente_desde: c.aguardando_cliente_desde ?? null,
+        pagamento_prazo_ate: c.pagamento_prazo_ate ?? null,
+        pagamento_prazo_origem: c.pagamento_prazo_origem ?? null,
+        pagamento_concluido_em: c.pagamento_concluido_em ?? null,
         atendente_nome: atendenteNome,
         atendente_email: atendenteEmail,
         lida: unreadCount === 0,
@@ -1169,8 +1972,51 @@ exports.listarConversas = async (req, res) => {
         finalizacao_motivo: c.finalizacao_motivo ?? null,
         finalizada_automaticamente: Boolean(c.finalizada_automaticamente),
         finalizada_automaticamente_em: c.finalizada_automaticamente_em ?? null,
+        reaberta_falta_interacao_em: null,
+        reaberta_por_falta_interacao: resolveReabertaPorFaltaInteracao(c),
       }
     })
+
+    conversasFormatadas = await enrichConversasReabertaFaltaInteracao(company_id, conversasFormatadas)
+
+    const encerradasVaziasIds = conversasFormatadas
+      .filter((c) =>
+        !c.is_group &&
+        c.sem_mensagens === true &&
+        c.atendente_id == null &&
+        isClosedAttendanceStatus(c.status_atendimento_real)
+      )
+      .map((c) => Number(c.id))
+      .filter((id) => Number.isFinite(id) && id > 0)
+    if (encerradasVaziasIds.length > 0) {
+      const comAtendimento = new Set()
+      const chunkSize = 300
+      let podeFiltrarEncerradasVazias = true
+      for (let i = 0; i < encerradasVaziasIds.length; i += chunkSize) {
+        const slice = encerradasVaziasIds.slice(i, i + chunkSize)
+        const { data: atendimentoRows, error: atendErr } = await supabase
+          .from('atendimentos')
+          .select('conversa_id')
+          .eq('company_id', company_id)
+          .in('conversa_id', slice)
+        if (atendErr) {
+          console.warn('[listarConversas] filtro encerradas vazias:', atendErr.message || atendErr)
+          podeFiltrarEncerradasVazias = false
+          break
+        }
+        for (const row of atendimentoRows || []) {
+          if (row?.conversa_id != null) comAtendimento.add(Number(row.conversa_id))
+        }
+      }
+      if (podeFiltrarEncerradasVazias) {
+        const encerradasVaziasSet = new Set(encerradasVaziasIds)
+        conversasFormatadas = conversasFormatadas.filter((c) => {
+          const id = Number(c.id)
+          if (!encerradasVaziasSet.has(id)) return true
+          return comAtendimento.has(id)
+        })
+      }
+    }
 
     // Um contato = uma conversa na lista (evita duplicata 55... vs 11...); conversas mais recentes no topo
     conversasFormatadas = deduplicateConversationsByContact(conversasFormatadas)
@@ -1229,19 +2075,31 @@ exports.listarConversas = async (req, res) => {
       conversasFormatadas = conversasFormatadas.filter((c) => {
         if (c.sem_conversa || c.is_group) return false
         const st = String(c.status_atendimento_real || '')
-        if (isAtendente) return st === 'em_atendimento'
+        if (isAtendente) {
+          const vinculadaAoUsuario =
+            Number(c.atendente_id) === Number(user_id) ||
+            conversaIdsParticipanteAtivoSet.has(Number(c.id))
+          return st === 'em_atendimento' && vinculadaAoUsuario
+        }
         if (filtroAtendenteInformado != null && Number(c.atendente_id) !== Number(filtroAtendenteInformado)) return false
         return st === 'em_atendimento' || st === 'aguardando_cliente'
       })
     }
 
-    // "Minha fila": alinha com abas Abertas + Em atendimento só do usuário (exclui finalizadas e assumidas por outros)
+    // "Minha fila": alinha com abas Abertas + Em atendimento só do usuário + grupos do setor fixados; exclui finalizadas e assumidas por outros
     if (minhaFilaAtiva) {
       conversasFormatadas = conversasFormatadas.filter((c) => {
-        if (c.sem_conversa || c.is_group) return false
+        if (c.sem_conversa) return false
+        // Grupos do setor do atendente: sempre visíveis na Minha fila (visibilidade já restrita na query pelo bloco de departamento_grupos)
+        if (c.is_group) return true
         if (c.status_atendimento === 'ociosa') return false
-        if (c.status_atendimento === 'em_atendimento' || c.status_atendimento === 'aguardando_cliente') {
-          return Number(c.atendente_id) === Number(user_id)
+        if (
+          c.status_atendimento === 'em_atendimento' ||
+          c.status_atendimento === 'aguardando_cliente' ||
+          c.status_atendimento === 'pagamento_pendente' ||
+          c.status_atendimento === 'em_atraso'
+        ) {
+          return Number(c.atendente_id) === Number(user_id) || conversaIdsParticipanteAtivoSet.has(Number(c.id))
         }
         if (c.status_atendimento === 'aberta') {
           const livreOuMeu = c.atendente_id == null || Number(c.atendente_id) === Number(user_id)
@@ -1260,7 +2118,11 @@ exports.listarConversas = async (req, res) => {
         : Number(filtroAtendenteInformado)
       conversasFormatadas = conversasFormatadas.filter((c) => {
         if (c.sem_conversa || c.is_group) return false
-        if (restringirPorAtendente && Number(c.atendente_id) !== atendenteEscopoAguardando) return false
+        if (
+          restringirPorAtendente &&
+          Number(c.atendente_id) !== atendenteEscopoAguardando &&
+          !(isAtendente && conversaIdsParticipanteAtivoSet.has(Number(c.id)))
+        ) return false
         const statusReal = String(c.status_atendimento_real || '')
         const aguardandoAuto = statusReal === 'em_atendimento' && c.aguardando_cliente_desde != null
         const aguardandoManual = statusReal === 'aguardando_cliente'
@@ -1268,70 +2130,204 @@ exports.listarConversas = async (req, res) => {
       })
     }
 
+    if (pagamentoPendenteAtivo) {
+      const restringirPorAtendente = isAtendente || (!isAtendente && filtroAtendenteInformado != null)
+      const atendenteEscopo = isAtendente ? Number(user_id) : Number(filtroAtendenteInformado)
+      conversasFormatadas = conversasFormatadas.filter((c) => {
+        if (c.sem_conversa || c.is_group) return false
+        if (
+          restringirPorAtendente &&
+          Number(c.atendente_id) !== atendenteEscopo &&
+          !(isAtendente && conversaIdsParticipanteAtivoSet.has(Number(c.id)))
+        ) return false
+        return String(c.status_atendimento_real || '') === 'pagamento_pendente'
+      })
+    }
+
+    if (emAtrasoAtivo) {
+      const restringirPorAtendente = isAtendente || (!isAtendente && filtroAtendenteInformado != null)
+      const atendenteEscopo = isAtendente ? Number(user_id) : Number(filtroAtendenteInformado)
+      conversasFormatadas = conversasFormatadas.filter((c) => {
+        if (c.sem_conversa || c.is_group) return false
+        if (
+          restringirPorAtendente &&
+          Number(c.atendente_id) !== atendenteEscopo &&
+          !(isAtendente && conversaIdsParticipanteAtivoSet.has(Number(c.id)))
+        ) return false
+        return String(c.status_atendimento_real || '') === 'em_atraso'
+      })
+    }
+
     // Incluir todos os clientes: quem não tem conversa aparece como "Sem conversa" (clicável para abrir)
     // Não misturar "sem conversa" em filtros por estado de atendimento (aberta / disparada / etc.).
     const incluirTodos =
-      (incluirTodosClientesAtivo || incluirTodosClientesDefault) &&
-      statusNorm !== 'aberta' &&
-      statusNorm !== 'mensagem_disparada' &&
+      (shouldIncludeClientesSemConversa({ incluirTodosClientesAtivo, palavraTrim }) || incluirTodosClientesDefault) &&
+      !statusNorm &&
       !minhaFilaAtiva &&
+      !hojeAtivo &&
       !aguardandoClienteAtivo &&
+      !pagamentoPendenteAtivo &&
+      !emAtrasoAtivo &&
+      !tagFilterAtivo &&
+      !data_inicio &&
+      !data_fim &&
+      !filter_dep_id &&
+      !tempoParadoHoras &&
+      !filtroAusenciaLista &&
       !(filtroAtendenteInformado != null && !isAtendente)
     if (incluirTodos) {
       const cid = Number(company_id)
-      // Sem limite fixo: busca em lotes para evitar teto do PostgREST/Supabase.
-      const CHUNK = 1000
-      const MAX_CLIENTES_SEM_CONVERSA = Number(process.env.CHAT_LIST_MAX_CLIENTES_SEM_CONVERSA || 200000)
       const todosClientes = []
-      for (let start = 0; start < MAX_CLIENTES_SEM_CONVERSA; start += CHUNK) {
-        const { data: chunkRows, error: chunkErr } = await supabase
+      const remainingSlots = Math.max(0, chatListPagination.limit - conversasFormatadas.length)
+      const semConversaLimit = Math.min(
+        remainingSlots,
+        Math.max(1, parsePositiveInt(process.env.CHAT_LIST_SEM_CONVERSA_LIMIT, 50))
+      )
+      if (semConversaLimit > 0) {
+        const term = `%${escapeIlikePattern(palavraTrim)}%`
+        const searchFetchLimit = Math.min(Math.max(semConversaLimit * 3, semConversaLimit), 150)
+        let clientesQuery = supabase
           .from('clientes')
           .select('id, nome, pushname, telefone, foto_perfil')
           .eq('company_id', cid)
+          .or(buildClienteSearchOr(palavraTrim))
+        const { data: chunkRows, error: chunkErr } = await clientesQuery
           .order('nome', { ascending: true, nullsFirst: false })
-          .range(start, start + CHUNK - 1)
+          .range(0, searchFetchLimit - 1)
         if (chunkErr) {
           console.warn('[listarConversas] carregar clientes sem conversa:', chunkErr.message || chunkErr)
-          break
+        } else {
+          todosClientes.push(...(chunkRows || []))
         }
-        const rows = chunkRows || []
-        todosClientes.push(...rows)
-        if (rows.length < CHUNK) break
       }
-      const clienteIdsComConversa = new Set(
-        conversasFormatadas
-          .filter((c) => c.cliente_id != null)
-          .map((c) => Number(c.cliente_id))
-      )
-      // ✅ Evita "Sem conversa" falso quando a conversa existe mas está ligada a outro cliente duplicado.
-      const convPhoneKeys = new Set(
-        (conversasFormatadas || [])
-          .filter((c) => !c.is_group && c.telefone)
-          .map((c) => phoneKeyBR(c.telefone))
-          .filter(Boolean)
-      )
-      const semConversa = (todosClientes || []).filter((cl) => {
-        if (clienteIdsComConversa.has(Number(cl.id))) return false
-        const key = phoneKeyBR(cl.telefone || '')
-        if (key && convPhoneKeys.has(key)) return false
+      const { instances: companyInstances } = await listWhatsappInstances(cid)
+      const activeInstances = (companyInstances || []).filter((i) => i && i.ativo !== false)
+      const multiInstanceMode = activeInstances.length > 1
+
+      /** Pares (cliente_id|phone, instância) que já possuem conversa */
+      const conversaScopeKeys = new Set()
+      const addConversaScope = (row) => {
+        if (!row) return
+        const instKey = row.whatsapp_instance_id != null ? String(row.whatsapp_instance_id) : 'legacy'
+        if (row.cliente_id != null) conversaScopeKeys.add(`c:${Number(row.cliente_id)}:wi:${instKey}`)
+        const pk = phoneKeyBR(row.telefone || '')
+        if (pk) conversaScopeKeys.add(`p:${pk}:wi:${instKey}`)
+      }
+      for (const c of conversasFormatadas || []) {
+        if (c.is_group || c.sem_conversa) continue
+        addConversaScope(c)
+      }
+
+      const candidatosClienteIds = [
+        ...new Set((todosClientes || []).map((cl) => Number(cl.id)).filter((n) => Number.isFinite(n) && n > 0)),
+      ]
+      const candidatosTelefones = [
+        ...new Set(
+          (todosClientes || [])
+            .flatMap((cl) => possiblePhonesBR(cl.telefone || ''))
+            .map((tel) => String(tel || '').trim())
+            .filter(Boolean)
+        ),
+      ]
+      if (candidatosClienteIds.length > 0 || candidatosTelefones.length > 0) {
+        const porClientePromise = candidatosClienteIds.length > 0
+          ? supabase
+              .from('conversas')
+              .select('cliente_id, telefone, whatsapp_instance_id')
+              .eq('company_id', cid)
+              .in('cliente_id', candidatosClienteIds)
+          : Promise.resolve({ data: [], error: null })
+        const porTelefonePromise = candidatosTelefones.length > 0
+          ? supabase
+              .from('conversas')
+              .select('cliente_id, telefone, whatsapp_instance_id')
+              .eq('company_id', cid)
+              .in('telefone', candidatosTelefones)
+          : Promise.resolve({ data: [], error: null })
+        const [{ data: convByClienteRows }, { data: convByTelefoneRows }] = await Promise.all([
+          porClientePromise,
+          porTelefonePromise,
+        ])
+        for (const row of [...(convByClienteRows || []), ...(convByTelefoneRows || [])]) {
+          addConversaScope(row)
+        }
+      }
+
+      const clienteHasAnyConversa = (cl) => {
+        if (conversaScopeKeys.has(`c:${Number(cl.id)}:wi:legacy`)) return true
+        for (const inst of activeInstances) {
+          if (conversaScopeKeys.has(`c:${Number(cl.id)}:wi:${inst.id}`)) return true
+        }
+        const pk = phoneKeyBR(cl.telefone || '')
+        if (pk) {
+          if (conversaScopeKeys.has(`p:${pk}:wi:legacy`)) return true
+          for (const inst of activeInstances) {
+            if (conversaScopeKeys.has(`p:${pk}:wi:${inst.id}`)) return true
+          }
+        }
+        return false
+      }
+
+      const clienteMissingInstance = (cl, inst) => {
+        const instKey = inst?.id != null ? String(inst.id) : 'legacy'
+        if (conversaScopeKeys.has(`c:${Number(cl.id)}:wi:${instKey}`)) return false
+        const pk = phoneKeyBR(cl.telefone || '')
+        if (pk && conversaScopeKeys.has(`p:${pk}:wi:${instKey}`)) return false
         return true
-      })
-      const itensSemConversa = semConversa.map((cl) => ({
-        id: null,
-        cliente_id: cl.id,
-        telefone: cl.telefone || '',
-        tipo: 'cliente',
-        contato_nome: getDisplayName(cl) || null,
-        foto_perfil: cl.foto_perfil || null,
-        sem_conversa: true,
-        mensagens: [],
-        unread_count: 0,
-        tags: [],
-        status_atendimento: null,
-        exibir_badge_aberta: false,
-        ultima_atividade: null,
-        criado_em: null
-      }))
+      }
+
+      const instanceScopes = multiInstanceMode
+        ? activeInstances.map((inst) => sanitizeWhatsappInstance(inst)).filter(Boolean)
+        : [null]
+
+      const itensSemConversa = []
+      for (const cl of todosClientes || []) {
+        if (!multiInstanceMode) {
+          if (clienteHasAnyConversa(cl)) continue
+          itensSemConversa.push({
+            id: null,
+            cliente_id: cl.id,
+            telefone: cl.telefone || '',
+            tipo: 'cliente',
+            contato_nome: getDisplayName(cl) || null,
+            foto_perfil: cl.foto_perfil || null,
+            sem_conversa: true,
+            mensagens: [],
+            unread_count: 0,
+            tags: [],
+            status_atendimento: null,
+            exibir_badge_aberta: false,
+            ultima_atividade: null,
+            criado_em: null,
+          })
+          if (itensSemConversa.length >= semConversaLimit) break
+          continue
+        }
+        for (const inst of instanceScopes) {
+          if (!clienteMissingInstance(cl, inst)) continue
+          itensSemConversa.push({
+            id: null,
+            cliente_id: cl.id,
+            telefone: cl.telefone || '',
+            tipo: 'cliente',
+            contato_nome: getDisplayName(cl) || null,
+            foto_perfil: cl.foto_perfil || null,
+            sem_conversa: true,
+            whatsapp_instance_id: inst?.id ?? null,
+            whatsapp_instance_nome: inst?.nome ?? null,
+            whatsapp_instance_display_phone: inst?.display_phone ?? null,
+            mensagens: [],
+            unread_count: 0,
+            tags: [],
+            status_atendimento: null,
+            exibir_badge_aberta: false,
+            ultima_atividade: null,
+            criado_em: null,
+          })
+          if (itensSemConversa.length >= semConversaLimit) break
+        }
+        if (itensSemConversa.length >= semConversaLimit) break
+      }
       conversasFormatadas = [...conversasFormatadas, ...itensSemConversa]
       conversasFormatadas.sort((a, b) => {
         if (a.sem_conversa && b.sem_conversa) {
@@ -1408,11 +2404,54 @@ exports.listarConversas = async (req, res) => {
       console.warn('[listarConversas] prefs:', e?.message || e)
     }
 
+    let chatListPage = splitChatListPage(conversasFormatadas || [], chatListPagination.limit)
+    if (
+      !chatListPage.pagination.has_more &&
+      rawSqlHadMore &&
+      (chatListPage.rows.length < chatListPagination.limit || chatListPage.rows.length === 0)
+    ) {
+      const cursorRow =
+        rawSqlRows[Math.min(chatListPagination.limit, rawSqlRows.length) - 1] ||
+        rawSqlRows[rawSqlRows.length - 1]
+      chatListPage = {
+        rows: chatListPage.rows,
+        pagination: {
+          ...chatListPage.pagination,
+          has_more: true,
+          next_cursor: cursorRow?.ultima_atividade || cursorRow?.criado_em || null,
+          next_cursor_id: cursorRow?.id != null ? Number(cursorRow.id) : null,
+        },
+      }
+    }
+    conversasFormatadas = chatListPage.rows
+
+    const responsePagination = {
+      ...chatListPage.pagination,
+      returned: Array.isArray(conversasFormatadas) ? conversasFormatadas.length : 0,
+      sem_conversa_included: Boolean(incluirTodos),
+    }
+    const totalCountRaw = await totalCountPromise
+    const totalCount =
+      totalCountRaw == null &&
+      !chatListPagination.cursor &&
+      Array.isArray(conversasFormatadas) &&
+      conversasFormatadas.length === 0 &&
+      !responsePagination.has_more
+        ? 0
+        : totalCountRaw
+    setChatListPaginationHeaders(res, responsePagination, {
+      semConversaIncluded: incluirTodos,
+      totalCount,
+    })
+
     if (!incluirColaboradoresEncaminhar) {
+      if (chatListPagination.paginatedResponse) {
+        return res.json({ conversas: conversasFormatadas, pagination: responsePagination })
+      }
       return res.json(conversasFormatadas)
     }
     const colaboradores_encaminhar = await loadColaboradoresEncaminhar()
-    return res.json({ conversas: conversasFormatadas, colaboradores_encaminhar })
+    return res.json({ conversas: conversasFormatadas, colaboradores_encaminhar, pagination: responsePagination })
   } catch (err) {
     console.error(err)
     return res.status(500).json({ error: 'Erro ao listar conversas' })
@@ -1546,7 +2585,7 @@ exports.mergeConversasDuplicadas = async (req, res) => {
     // 2) Mesclar conversas duplicadas
     const { data: conversas, error: errList } = await supabase
       .from('conversas')
-      .select('id, telefone, chat_lid, ultima_atividade, criado_em, tipo')
+      .select('id, telefone, chat_lid, ultima_atividade, criado_em, tipo, whatsapp_instance_id')
       .eq('company_id', cid)
       .neq('status_atendimento', 'fechada')
       .not('telefone', 'is', null)
@@ -1556,10 +2595,12 @@ exports.mergeConversasDuplicadas = async (req, res) => {
     const individuais = (conversas || []).filter((c) => !c.tipo || String(c.tipo).toLowerCase() !== 'grupo')
     const byKey = new Map()
     for (const c of individuais) {
-      const key = phoneKeyBR(c.telefone) || String(c.telefone || '').replace(/\D/g, '')
-      if (!key) continue
-      if (!byKey.has(key)) byKey.set(key, [])
-      byKey.get(key).push(c)
+      const phoneKey = phoneKeyBR(c.telefone) || String(c.telefone || '').replace(/\D/g, '')
+      if (!phoneKey) continue
+      const instanceScope = c.whatsapp_instance_id ? `wi:${c.whatsapp_instance_id}` : 'wi:legacy'
+      const scopedKey = `${instanceScope}:${phoneKey}`
+      if (!byKey.has(scopedKey)) byKey.set(scopedKey, [])
+      byKey.get(scopedKey).push(c)
     }
 
     let merged = 0
@@ -1588,7 +2629,15 @@ exports.mergeConversasDuplicadas = async (req, res) => {
       const lidPart = lidConv.telefone ? String(lidConv.telefone).replace(/^lid:/, '').trim() : (lidConv.chat_lid || '')
       if (!lidPart) continue
       const canonPhone = individuais
-        .filter((c) => c.id !== lidConv.id && !String(c.telefone || '').startsWith('lid:') && c.chat_lid === lidPart)
+        .filter((c) =>
+          c.id !== lidConv.id &&
+          !String(c.telefone || '').startsWith('lid:') &&
+          c.chat_lid === lidPart &&
+          (
+            (lidConv.whatsapp_instance_id == null && c.whatsapp_instance_id == null) ||
+            Number(c.whatsapp_instance_id) === Number(lidConv.whatsapp_instance_id)
+          )
+        )
         .sort((a, b) => new Date(b.ultima_atividade || 0).getTime() - new Date(a.ultima_atividade || 0).getTime())[0]
       if (canonPhone) {
         try {
@@ -1609,6 +2658,31 @@ exports.mergeConversasDuplicadas = async (req, res) => {
   } catch (err) {
     console.error(err)
     return res.status(500).json({ error: 'Erro ao mesclar duplicatas' })
+  }
+}
+
+// =====================================================
+// 3a) Instâncias WhatsApp ativas (atendimento — sem tokens)
+// GET /chats/whatsapp-instances
+// =====================================================
+exports.listWhatsappInstancesAtendimento = async (req, res) => {
+  try {
+    const company_id = req.user?.company_id
+    if (!company_id) return res.status(401).json({ error: 'Não autenticado' })
+    const result = await listWhatsappInstances(company_id)
+    if (result.error) return res.status(500).json({ error: result.error })
+    const active = (result.instances || [])
+      .filter((i) => i && i.ativo !== false)
+      .map(sanitizeWhatsappInstance)
+      .filter(Boolean)
+    return res.json({
+      instances: active,
+      has_multiple_whatsapp_instances: active.length > 1,
+      active_count: active.length,
+    })
+  } catch (err) {
+    console.error(err)
+    return res.status(500).json({ error: 'Erro ao listar instâncias WhatsApp' })
   }
 }
 
@@ -1903,13 +2977,180 @@ exports.criarComunidade = async (req, res) => {
     return res.status(500).json({ error: 'Erro ao criar comunidade' })
   }
 }
+
+// =====================================================
+// Vincular cliente existente a uma conversa — PUT /chats/:id/cliente
+// =====================================================
+exports.vincularClienteConversa = async (req, res) => {
+  try {
+    const conversa_id = Number(req.params.id)
+    const cliente_id = Number(req.body?.cliente_id)
+    const { company_id, id: user_id, perfil, departamento_ids = [] } = req.user
+
+    if (!Number.isFinite(conversa_id) || conversa_id <= 0) {
+      return res.status(400).json({ error: 'ID da conversa inválido' })
+    }
+    if (!Number.isFinite(cliente_id) || cliente_id <= 0) {
+      return res.status(400).json({ error: 'cliente_id inválido' })
+    }
+
+    const perm = await assertPermissaoConversa({
+      company_id,
+      conversa_id,
+      user_id,
+      role: perfil,
+      user_dep_ids: departamento_ids,
+    })
+    if (!perm.ok) return res.status(perm.status).json({ error: perm.error })
+    if (isGroupConversation(perm.conv)) {
+      return res.status(400).json({ error: 'Não é possível vincular cliente em conversa de grupo.' })
+    }
+
+    const { data: cliente, error: errCli } = await supabase
+      .from('clientes')
+      .select('id, nome, telefone, email, empresa, observacoes, foto_perfil')
+      .eq('id', cliente_id)
+      .eq('company_id', Number(company_id))
+      .maybeSingle()
+
+    if (errCli) return res.status(500).json({ error: errCli.message })
+    if (!cliente) return res.status(404).json({ error: 'Cliente não encontrado' })
+
+    const nomeContato = normalizeName(cliente.nome || '') || null
+    const patch = {
+      cliente_id,
+      ...(nomeContato ? { nome_contato_cache: nomeContato } : {}),
+      ...(cliente.foto_perfil ? { foto_perfil_contato_cache: cliente.foto_perfil } : {}),
+    }
+
+    const { data: conversa, error: errConv } = await supabase
+      .from('conversas')
+      .update(patch)
+      .eq('id', conversa_id)
+      .eq('company_id', Number(company_id))
+      .select('id, cliente_id, telefone, tipo, nome_contato_cache, foto_perfil_contato_cache, status_atendimento, atendente_id, departamento_id')
+      .maybeSingle()
+
+    if (errConv) return res.status(500).json({ error: errConv.message })
+    if (!conversa) return res.status(404).json({ error: 'Conversa não encontrada' })
+
+    const payload = {
+      id: conversa_id,
+      cliente_id,
+      contato_nome: nomeContato || undefined,
+      nome_contato_cache: nomeContato || undefined,
+      foto_perfil: cliente.foto_perfil || undefined,
+      foto_perfil_contato_cache: cliente.foto_perfil || undefined,
+      status_atendimento: conversa.status_atendimento,
+      atendente_id: conversa.atendente_id,
+      departamento_id: conversa.departamento_id,
+    }
+
+    if (io) {
+      emitirConversaAtualizada(io, company_id, conversa_id, payload, { skipAtualizarConversa: true })
+    }
+
+    return res.json({ ok: true, conversa: { ...conversa, ...payload }, cliente })
+  } catch (err) {
+    console.error('[vincularClienteConversa]', err)
+    return res.status(500).json({ error: 'Erro ao vincular cliente à conversa' })
+  }
+}
+
+// =====================================================
+// Nome exibido do contato (conversa + cliente vinculado) — PUT /chats/:id/nome-contato
+// =====================================================
+exports.atualizarNomeContato = async (req, res) => {
+  try {
+    const conversa_id = Number(req.params.id)
+    const { company_id, id: user_id } = req.user
+    if (!Number.isFinite(conversa_id) || conversa_id <= 0) {
+      return res.status(400).json({ error: 'ID da conversa inválido' })
+    }
+
+    const permEnvio = await assertPodeEnviarMensagem({ company_id, conversa_id, user_id, role: req.user?.perfil, user_dep_ids: req.user?.departamento_ids })
+    if (!permEnvio.ok) return res.status(permEnvio.status).json({ error: permEnvio.error })
+
+    const nomeRaw = req.body?.nome != null ? String(req.body.nome) : ''
+    const nome = normalizeName(nomeRaw)
+    if (!nome) {
+      return res.status(400).json({ error: 'Informe um nome válido para o contato.' })
+    }
+    if (isBadName(nome)) {
+      return res.status(400).json({ error: 'Nome inválido. Use o nome do contato, não apenas números.' })
+    }
+
+    const { data: conversa, error: errConv } = await supabase
+      .from('conversas')
+      .select('id, company_id, cliente_id, tipo, telefone, nome_contato_cache')
+      .eq('id', conversa_id)
+      .eq('company_id', Number(company_id))
+      .maybeSingle()
+
+    if (errConv) return res.status(500).json({ error: errConv.message })
+    if (!conversa) return res.status(404).json({ error: 'Conversa não encontrada' })
+    if (isGroupConversation(conversa)) {
+      return res.status(400).json({ error: 'Não é possível renomear contato em conversa de grupo.' })
+    }
+
+    const { error: errCache } = await supabase
+      .from('conversas')
+      .update({ nome_contato_cache: nome })
+      .eq('id', conversa_id)
+      .eq('company_id', Number(company_id))
+
+    if (errCache) return res.status(500).json({ error: errCache.message })
+
+    let clienteAtualizado = null
+    const clienteId = conversa.cliente_id != null ? Number(conversa.cliente_id) : null
+    if (clienteId) {
+      const { data: cli, error: errCli } = await supabase
+        .from('clientes')
+        .update({ nome, atualizado_em: new Date().toISOString() })
+        .eq('id', clienteId)
+        .eq('company_id', Number(company_id))
+        .select('id, nome, telefone, email, empresa, observacoes, foto_perfil')
+        .maybeSingle()
+
+      if (errCli) {
+        if (errCli.code === '23505') {
+          return res.status(409).json({ error: 'Já existe um cliente com este número de telefone.' })
+        }
+        return res.status(500).json({ error: errCli.message })
+      }
+      clienteAtualizado = cli
+    }
+
+    const payload = {
+      id: conversa_id,
+      contato_nome: nome,
+      nome_contato_cache: nome,
+      cliente_nome: nome,
+      ...(clienteId ? { cliente_id: clienteId } : {}),
+    }
+
+    if (io) {
+      emitirConversaAtualizada(io, company_id, conversa_id, payload, { skipAtualizarConversa: true })
+    }
+
+    return res.json({
+      ok: true,
+      conversa: payload,
+      cliente: clienteAtualizado,
+    })
+  } catch (err) {
+    console.error('[atualizarNomeContato]', err)
+    return res.status(500).json({ error: 'Erro ao atualizar nome do contato' })
+  }
+}
+
 exports.atualizarObservacao = async (req, res) => {
   try {
     const { id } = req.params;
     const { observacao } = req.body;
     const { company_id, id: user_id, perfil } = req.user;
 
-    const permEnvio = await assertPodeEnviarMensagem({ company_id, conversa_id: Number(id), user_id })
+    const permEnvio = await assertPodeEnviarMensagem({ company_id, conversa_id: Number(id), user_id, role: req.user?.perfil, user_dep_ids: req.user?.departamento_ids })
     if (!permEnvio.ok) return res.status(permEnvio.status).json({ error: permEnvio.error });
 
     // busca cliente ligado à conversa
@@ -2010,7 +3251,6 @@ exports.patchConversaPrefs = async (req, res) => {
       return res.status(500).json({ error: error.message })
     }
 
-    const io = req.app.get('io')
     if (io) {
       emitirParaUsuario(io, user_id, 'conversa_prefs_atualizada', {
         conversa_id,
@@ -2211,7 +3451,7 @@ exports.abrirConversaCliente = async (req, res) => {
   try {
     const io = req.app.get('io')
     const { company_id, id: usuario_id } = req.user
-    const { cliente_id } = req.body
+    const { cliente_id, whatsapp_instance_id } = req.body
 
     if (!cliente_id) {
       return res.status(400).json({ error: 'cliente_id é obrigatório' })
@@ -2229,8 +3469,15 @@ exports.abrirConversaCliente = async (req, res) => {
       return res.status(404).json({ error: 'Cliente não encontrado' })
     }
 
-    const r = await ensureConversaForCliente({ company_id, usuario_id, cliente })
+    const r = await ensureConversaForCliente({ company_id, usuario_id, cliente, whatsapp_instance_id })
     if (!r.ok) {
+      if (r.codigo === 'SELECIONE_WHATSAPP_INSTANCE') {
+        return res.status(400).json({
+          error: r.error,
+          codigo: r.codigo,
+          whatsapp_instances: r.whatsapp_instances || [],
+        })
+      }
       const st = r.error === 'Cliente sem telefone cadastrado' ? 400 : 500
       return res.status(st).json({ error: r.error })
     }
@@ -2270,11 +3517,23 @@ exports.criarContato = async (req, res) => {
   try {
     const io = req.app.get('io')
     const { company_id, id: usuario_id } = req.user
-    const { nome, telefone } = req.body
+    const { nome, telefone, whatsapp_instance_id } = req.body
 
     const telefoneRaw = telefone != null ? String(telefone).trim() : ''
     if (!telefoneRaw) {
       return res.status(400).json(erroTelefoneNovoContato('TELEFONE_OBRIGATORIO'))
+    }
+
+    const instanceRes = await resolveWhatsappInstanceForManualAction(company_id, whatsapp_instance_id)
+    if (instanceRes.code === 'SELECIONE_WHATSAPP_INSTANCE') {
+      return res.status(400).json({
+        error: instanceRes.error,
+        codigo: instanceRes.code,
+        whatsapp_instances: instanceRes.instances || [],
+      })
+    }
+    if (instanceRes.error || !instanceRes.instanceId) {
+      return res.status(400).json({ error: instanceRes.error || 'Instância WhatsApp indisponível' })
     }
 
     const telefoneCanonico = getCanonicalPhone(telefone)
@@ -2313,6 +3572,8 @@ exports.criarContato = async (req, res) => {
         phone: telefoneCanonico,
         cliente_id: clienteId,
         isGroup: false,
+        whatsapp_instance_id: instanceRes.instanceId,
+        whatsapp_instance_is_default: instanceRes.isDefault === true,
         logPrefix: '[criarContato]'
       })
     } catch (e) {
@@ -2355,8 +3616,15 @@ exports.criarContato = async (req, res) => {
       emitirEventoEmpresaConversa(io, company_id, conversa.id, 'nova_conversa', conversa)
     }
 
+    const whatsappInstanceMetaMap = await loadWhatsappInstanceMetaMap(company_id, [conversa.whatsapp_instance_id, instanceRes.instanceId])
+    const whatsappInstanceMeta = safeWhatsappInstanceMeta(
+      whatsappInstanceMetaMap.get(Number(conversa.whatsapp_instance_id)) ||
+      whatsappInstanceMetaMap.get(Number(instanceRes.instanceId)) ||
+      instanceRes.instance
+    )
+
     // reutilizada: número já tinha conversa (ex.: fechada ou duplicata) — frontend pode só navegar, sem toast de erro.
-    return res.json({ ...conversa, reutilizada: !convNova })
+    return res.json({ ...conversa, ...whatsappInstanceMeta, reutilizada: !convNova })
 
   } catch (err) {
     console.error(err)
@@ -2377,21 +3645,23 @@ exports.detalharChat = async (req, res) => {
     const role = String(perfil || '').toLowerCase()
     const isAdmin = role === 'admin'
 
-    const limit = Math.min(Number(req.query.limit || 50), 200)
-    const cursor = req.query.cursor || null
-    const cursor_id =
-      req.query.cursor_id !== undefined && req.query.cursor_id !== null && String(req.query.cursor_id).trim() !== ''
-        ? req.query.cursor_id
-        : null
+    const messageHistoryPagination = parseMessageHistoryPagination(req.query)
+    const { limit, cursor, cursor_id } = messageHistoryPagination
 
     // conversa (com cliente, atendente, departamento/setor; tipo, nome_grupo, fotos; nome_contato_cache para header quando cliente ainda não tem nome)
     const { data: conversa, error: errConv } = await supabase
       .from('conversas')
       .select(`
         id,
+        whatsapp_instance_id,
         telefone,
         status_atendimento,
         atendente_id,
+        aguardando_cliente_desde,
+        ultima_atividade,
+        finalizacao_motivo,
+        finalizada_automaticamente,
+        finalizada_automaticamente_em,
         lida,
         criado_em,
         departamento_id,
@@ -2423,9 +3693,24 @@ exports.detalharChat = async (req, res) => {
     const isGroup = isGroupConversation(conversa)
     const isAssignedToUser = conversa.atendente_id && Number(conversa.atendente_id) === Number(user_id)
 
-    // REGRA PRINCIPAL: Se a conversa está assumida pelo usuário, SEMPRE permitir acesso total
-    let podeAcessar = isAssignedToUser
-    if (!podeAcessar && !isAdmin && !isGroup) {
+    // REGRA PRINCIPAL: Se a conversa está assumida pelo usuário ou ele participa do co-atendimento, permitir acesso total
+    let podeAcessar = !isGroup && isAssignedToUser
+    const conversaEncerrada = isClosedAttendanceStatus(conversa.status_atendimento)
+    if (!podeAcessar && !isGroup && conversa.atendente_id) {
+      podeAcessar = await usuarioParticipaAtivamenteDaConversa(company_id, Number(id), user_id)
+    }
+    if (!podeAcessar && !isAdmin && isGroup) {
+      podeAcessar = await usuarioPodeVerGrupo({
+        company_id,
+        conversa_id: Number(id),
+        role,
+        departamento_ids,
+      })
+      if (!podeAcessar) {
+        return res.status(403).json({ error: 'Grupo nao vinculado ao seu setor' })
+      }
+    }
+    if (!podeAcessar && !isAdmin && !isGroup && !conversaEncerrada) {
       const convDep = conversa.departamento_id ?? null
       const depIds = Array.isArray(departamento_ids) ? departamento_ids : []
       const pertenceAoSetor = convDep == null || depIds.some((d) => Number(d) === Number(convDep))
@@ -2446,14 +3731,14 @@ exports.detalharChat = async (req, res) => {
     }
 
     // Bloqueia visão das mensagens quando a conversa está assumida por outro usuário
-    // (apenas admin e supervisor podem ver; atendente que não assumiu não vê o conteúdo)
+    // (exceto admin, supervisor e atendente participante do co-atendimento)
     const isSupervisor = role === 'supervisor'
     const conversaAssumidaPorOutro = conversa.atendente_id != null && Number(conversa.atendente_id) !== Number(user_id)
-    const deveBloquearMensagens = !isGroup && conversaAssumidaPorOutro && !isAdmin && !isSupervisor
+    const deveBloquearMensagens =
+      !isGroup && !conversaEncerrada && conversaAssumidaPorOutro && !podeAcessar && !isAdmin && !isSupervisor
 
     // mensagens paginadas (remetente_nome/remetente_telefone para grupos; fallback se colunas não existirem)
-    const selectComRemetente = 'id, texto, direcao, criado_em, autor_usuario_id, status, whatsapp_id, tipo, url, nome_arquivo, reply_meta, remetente_nome, remetente_telefone, contact_meta, location_meta'
-    const selectBasico = 'id, texto, direcao, criado_em, autor_usuario_id, status, whatsapp_id, tipo, url, nome_arquivo, reply_meta, contact_meta, location_meta'
+    const selectComRemetente = 'id, conversa_id, texto, direcao, criado_em, autor_usuario_id, status, whatsapp_id, whatsapp_instance_id, tipo, url, nome_arquivo, reply_meta, remetente_nome, remetente_telefone, contact_meta, location_meta, apagada_para_todos, apagada_em'
     let mensagens = []
     let errMsgs = null
     let query
@@ -2466,7 +3751,7 @@ exports.detalharChat = async (req, res) => {
         .eq('conversa_id', Number(id))
         .order('criado_em', { ascending: false })
         .order('id', { ascending: false })
-        .limit(limit)
+        .limit(limit + 1)
 
       query = applyDetalharChatMensagensCursor(query, cursor, cursor_id)
 
@@ -2475,8 +3760,8 @@ exports.detalharChat = async (req, res) => {
       errMsgs = result.error
     }
     // Compatibilidade: se reply_meta/remetente_*/contact_meta/location_meta não existirem ainda no banco, refaz select sem essas colunas.
-    const selectFallback = 'id, texto, direcao, criado_em, autor_usuario_id, status, whatsapp_id, tipo, url, nome_arquivo'
-    if (errMsgs && (String(errMsgs.message || '').includes('reply_meta') || String(errMsgs.message || '').includes('remetente_nome') || String(errMsgs.message || '').includes('remetente_telefone') || String(errMsgs.message || '').includes('contact_meta') || String(errMsgs.message || '').includes('location_meta') || String(errMsgs.message || '').includes('does not exist'))) {
+    const selectFallback = 'id, conversa_id, texto, direcao, criado_em, autor_usuario_id, status, whatsapp_id, whatsapp_instance_id, tipo, url, nome_arquivo'
+    if (errMsgs && (String(errMsgs.message || '').includes('reply_meta') || String(errMsgs.message || '').includes('remetente_nome') || String(errMsgs.message || '').includes('remetente_telefone') || String(errMsgs.message || '').includes('contact_meta') || String(errMsgs.message || '').includes('location_meta') || String(errMsgs.message || '').includes('apagada_para_todos') || String(errMsgs.message || '').includes('does not exist'))) {
       query = supabase
         .from('mensagens')
         .select(selectFallback)
@@ -2484,7 +3769,7 @@ exports.detalharChat = async (req, res) => {
         .eq('conversa_id', Number(id))
         .order('criado_em', { ascending: false })
         .order('id', { ascending: false })
-        .limit(limit)
+        .limit(limit + 1)
       query = applyDetalharChatMensagensCursor(query, cursor, cursor_id)
       const result = await query
       mensagens = result.data
@@ -2492,10 +3777,10 @@ exports.detalharChat = async (req, res) => {
     }
     if (errMsgs) return res.status(500).json({ error: errMsgs.message })
 
-    const mensagensDbBatch = Array.isArray(mensagens) ? mensagens : []
-    const dbBatchLen = mensagensDbBatch.length
-    const oldestDbRow = dbBatchLen > 0 ? mensagensDbBatch[dbBatchLen - 1] : null
-    const hasMoreFromDb = dbBatchLen >= limit
+    const messageHistoryPage = splitMessageHistoryPage(mensagens, limit)
+    mensagens = messageHistoryPage.rows
+    const oldestDbRow = messageHistoryPage.cursor_row
+    const hasMoreFromDb = messageHistoryPage.has_more
 
     // ✅ "Apagar pra mim" + marcar como lida em paralelo (reduz latência percebida ao abrir o chat)
     try {
@@ -2548,6 +3833,8 @@ exports.detalharChat = async (req, res) => {
     const telefoneExibivel = isLidConv ? null : (conversa.telefone ?? clientesConv?.telefone ?? null)
     const fotoCache = (conversa.foto_perfil_contato_cache && String(conversa.foto_perfil_contato_cache).trim()) ? String(conversa.foto_perfil_contato_cache).trim() : null
     const fotoUnica = isGroup ? (conversa.foto_grupo ?? null) : (clientesConv?.foto_perfil ?? fotoCache ?? null)
+    const whatsappInstanceMetaMap = await loadWhatsappInstanceMetaMap(company_id, [conversa.whatsapp_instance_id])
+    const whatsappInstanceMeta = safeWhatsappInstanceMeta(whatsappInstanceMetaMap.get(Number(conversa.whatsapp_instance_id)))
     // Badge "Aberta": só exibir quando há movimentação (mensagem ou atendente assumiu) — mesma regra da lista
     const temMensagem = Array.isArray(mensagens) && mensagens.length > 0
     const dbStatusAtend = String(conversa.status_atendimento || '')
@@ -2567,14 +3854,25 @@ exports.detalharChat = async (req, res) => {
     // ao apenas abrir o chat sem mensagens. O status real do BD segue em `status_atendimento_real`.
     const statusDetalheReal = isGroup ? null : conversa.status_atendimento
     const statusDetalheLista = statusAtendimentoParaLista(isGroup, conversa.status_atendimento, exibirBadgeAberta)
+    let mensagensFormatadas = (mensagens || []).reverse()
+    try {
+      mensagensFormatadas = await enrichMensagensComAutorUsuario(supabase, company_id, mensagensFormatadas, user_id)
+    } catch (enrichErr) {
+      console.warn('[detalharChat] enriquecer mensagens:', enrichErr?.message || enrichErr)
+    }
+
     const conversaFormatada = {
       ...conversa,
+      whatsapp_instance_id: conversa.whatsapp_instance_id ?? null,
+      ...whatsappInstanceMeta,
       status_atendimento: statusDetalheLista,
       status_atendimento_real: statusDetalheReal,
       status_atendimento_lista: statusDetalheLista,
       exibir_badge_aberta: exibirBadgeAberta,
       sem_mensagens: semMensagens,
       exibir_cta_assumir_sem_mensagens: exibirCtaAssumirSemMensagens,
+      reaberta_falta_interacao_em: null,
+      reaberta_por_falta_interacao: resolveReabertaPorFaltaInteracao(conversa),
       clientes: clientesConv,
       is_group: isGroup,
       nome_grupo: conversa.nome_grupo ?? null,
@@ -2588,7 +3886,7 @@ exports.detalharChat = async (req, res) => {
       atendente_nome: conversa.usuarios?.nome ?? null,
       setor: conversa.departamentos?.nome ?? null,
       tags: (conversa.conversa_tags || []).map((ct) => ct.tags).filter(Boolean),
-      mensagens: await enrichMensagensComAutorUsuario(supabase, company_id, (mensagens || []).reverse()),
+      mensagens: mensagensFormatadas,
       next_cursor:
         hasMoreFromDb && oldestDbRow
           ? normalizarTimestampSemFusoAmbiguoParaApi(oldestDbRow.criado_em)
@@ -2596,6 +3894,12 @@ exports.detalharChat = async (req, res) => {
       next_cursor_id:
         hasMoreFromDb && oldestDbRow != null && oldestDbRow.id != null ? oldestDbRow.id : null,
       mensagens_bloqueadas: deveBloquearMensagens || undefined
+    }
+
+    try {
+      await enrichConversasReabertaFaltaInteracao(company_id, [conversaFormatada])
+    } catch (reabertaErr) {
+      console.warn('[detalharChat] enriquecer reaberta falta interacao:', reabertaErr?.message || reabertaErr)
     }
 
     // ✅ emite SOMENTE mensagens_lidas (não dispara atualizar lista ao abrir)
@@ -2622,6 +3926,167 @@ exports.detalharChat = async (req, res) => {
   } catch (err) {
     console.error(err)
     return res.status(500).json({ error: 'Erro ao detalhar conversa' })
+  }
+}
+
+exports.carregarMensagensAntigasContato = async (req, res) => {
+  try {
+    const { id } = req.params
+    const { company_id, id: user_id, perfil, departamento_ids = [] } = req.user
+
+    const perm = await assertPermissaoConversa({
+      company_id,
+      conversa_id: id,
+      user_id,
+      role: perfil,
+      user_dep_ids: departamento_ids,
+    })
+    if (!perm.ok) return res.status(perm.status).json({ error: perm.error })
+
+    if (isGroupConversation(perm.conv)) {
+      return res.status(400).json({ error: 'Use esta acao apenas em conversas individuais.' })
+    }
+
+    const result = await syncOldMessagesForConversation(company_id, Number(id), {
+      io: req.app?.get?.('io') || null,
+    })
+    if (!result.ok) return res.status(400).json({ ok: false, error: result.error || 'Erro ao carregar mensagens antigas.' })
+
+    const io = req.app?.get?.('io') || null
+    if (io && ((result.messagesInserted || 0) > 0 || (result.messagesUpdated || 0) > 0)) {
+      emitirConversaAtualizada(io, company_id, Number(id), { id: Number(id) })
+    }
+
+    return res.json({
+      ok: true,
+      conversa_id: Number(id),
+      mensagens_lidas: result.messagesFetched || 0,
+      mensagens_importadas: result.messagesInserted || 0,
+      mensagens_atualizadas: result.messagesUpdated || 0,
+      mensagens_ignoradas: result.messagesSkipped || 0,
+      empty: result.empty === true,
+      message: result.message || (
+        ((result.messagesInserted || 0) > 0 || (result.messagesUpdated || 0) > 0)
+          ? 'Mensagens antigas carregadas para este contato.'
+          : 'Nenhuma mensagem antiga encontrada para este contato.'
+      ),
+    })
+  } catch (err) {
+    console.error('[carregarMensagensAntigasContato]', err)
+    return res.status(500).json({ error: 'Erro ao carregar mensagens antigas deste contato' })
+  }
+}
+
+exports.buscarMensagensConversa = async (req, res) => {
+  try {
+    const { id } = req.params
+    const { company_id, id: user_id, perfil, departamento_ids = [] } = req.user
+    const role = String(perfil || '').toLowerCase()
+    const q = String(req.query.q || '').trim()
+    const limit = getConversaMessagesSearchLimit(req.query.limit)
+    const cursor = req.query.cursor || null
+    const cursor_id =
+      req.query.cursor_id !== undefined && req.query.cursor_id !== null && String(req.query.cursor_id).trim() !== ''
+        ? req.query.cursor_id
+        : null
+
+    const perm = await assertPermissaoConversa({
+      company_id,
+      conversa_id: id,
+      user_id,
+      role: perfil,
+      user_dep_ids: departamento_ids,
+    })
+    if (!perm.ok) return res.status(perm.status).json({ error: perm.error })
+
+    if (!q) {
+      return res.json({
+        resultados: [],
+        has_more: false,
+        next_cursor: null,
+        next_cursor_id: null,
+        q: '',
+      })
+    }
+
+    const conv = perm.conv || {}
+    const isGroup = isGroupConversation(conv)
+    const isAdmin = role === 'admin'
+    const isSupervisor = role === 'supervisor'
+    const conversaAssumidaPorOutro = conv.atendente_id != null && Number(conv.atendente_id) !== Number(user_id)
+    const usuarioParticipanteConversa = perm.reason === 'usuario_participante_conversa'
+    if (!isGroup && conversaAssumidaPorOutro && !usuarioParticipanteConversa && !isAdmin && !isSupervisor) {
+      return res.status(403).json({ error: 'Mensagens indisponíveis para conversa assumida por outro usuário' })
+    }
+
+    const selectComRemetente = 'id, conversa_id, texto, direcao, criado_em, autor_usuario_id, status, whatsapp_id, whatsapp_instance_id, tipo, url, nome_arquivo, reply_meta, remetente_nome, remetente_telefone, contact_meta, location_meta, apagada_para_todos, apagada_em'
+    const selectFallback = 'id, conversa_id, texto, direcao, criado_em, autor_usuario_id, status, whatsapp_id, whatsapp_instance_id, tipo, url, nome_arquivo'
+    const term = `%${escapeIlikePattern(q)}%`
+
+    let query = supabase
+      .from('mensagens')
+      .select(selectComRemetente)
+      .eq('company_id', Number(company_id))
+      .eq('conversa_id', Number(id))
+      .ilike('texto', term)
+      .order('criado_em', { ascending: false })
+      .order('id', { ascending: false })
+
+    query = applyDetalharChatMensagensCursor(query, cursor, cursor_id).limit(limit + 1)
+    let { data: rows, error } = await query
+
+    if (error && (String(error.message || '').includes('reply_meta') || String(error.message || '').includes('remetente_nome') || String(error.message || '').includes('remetente_telefone') || String(error.message || '').includes('contact_meta') || String(error.message || '').includes('location_meta') || String(error.message || '').includes('apagada_para_todos') || String(error.message || '').includes('does not exist'))) {
+      let fallbackQuery = supabase
+        .from('mensagens')
+        .select(selectFallback)
+        .eq('company_id', Number(company_id))
+        .eq('conversa_id', Number(id))
+        .ilike('texto', term)
+        .order('criado_em', { ascending: false })
+        .order('id', { ascending: false })
+      fallbackQuery = applyDetalharChatMensagensCursor(fallbackQuery, cursor, cursor_id).limit(limit + 1)
+      ;({ data: rows, error } = await fallbackQuery)
+    }
+
+    if (error) return res.status(500).json({ error: error.message })
+
+    let dbRows = Array.isArray(rows) ? rows : []
+    const hasMoreRaw = dbRows.length > limit
+    dbRows = dbRows.slice(0, limit)
+    const cursorRow = dbRows.length > 0 ? dbRows[dbRows.length - 1] : null
+
+    try {
+      const { data: ocultas, error: errOcultas } = await supabase
+        .from('mensagens_ocultas')
+        .select('mensagem_id')
+        .eq('company_id', Number(company_id))
+        .eq('conversa_id', Number(id))
+        .eq('usuario_id', Number(user_id))
+      if (!errOcultas && Array.isArray(ocultas) && ocultas.length > 0) {
+        const hidden = new Set(ocultas.map((o) => String(o.mensagem_id)))
+        dbRows = dbRows.filter((m) => !hidden.has(String(m.id)))
+      }
+    } catch (_) {
+      // Tabela opcional em bancos antigos; busca continua sem expor dados fora da conversa.
+    }
+
+    const resultados = await enrichMensagensComAutorUsuario(supabase, company_id, dbRows, user_id)
+
+    return res.json({
+      resultados,
+      has_more: hasMoreRaw,
+      next_cursor:
+        hasMoreRaw && cursorRow
+          ? normalizarTimestampSemFusoAmbiguoParaApi(cursorRow.criado_em)
+          : null,
+      next_cursor_id:
+        hasMoreRaw && cursorRow != null && cursorRow.id != null ? cursorRow.id : null,
+      q,
+      limit,
+    })
+  } catch (err) {
+    console.error(err)
+    return res.status(500).json({ error: 'Erro ao buscar mensagens da conversa' })
   }
 }
 
@@ -2679,6 +4144,10 @@ exports.encerrarChat = async (req, res) => {
         finalizada_automaticamente_em: null,
         aguardando_cliente_desde: null,
         ausencia_mensagem_enviada_em: null,
+        pagamento_prazo_ate: null,
+        pagamento_prazo_origem: null,
+        pagamento_concluido_em: null,
+        reaberta_falta_interacao_em: null,
       })
       .eq('company_id', company_id)
       .eq('id', conversa_id)
@@ -2732,10 +4201,16 @@ exports.encerrarChat = async (req, res) => {
             let telefoneParaEnvio = data.telefone || ''
             const isGroup = String(data?.tipo || '').toLowerCase() === 'grupo' || String(data?.telefone || '').includes('@g.us')
             if (!isGroup && telefoneParaEnvio && !String(telefoneParaEnvio).trim().toLowerCase().startsWith('lid:')) {
+              const whatsappInstanceId = await resolveConversationWhatsappInstance(company_id, data)
               const { getProvider } = require('../services/providers')
               const provider = getProvider()
               if (provider?.sendText) {
-                const resultSend = await provider.sendText(telefoneParaEnvio, msg, { companyId: company_id, conversaId: conversa_id })
+                const resultSend = await provider.sendText(telefoneParaEnvio, msg, {
+                  companyId: company_id,
+                  conversaId: conversa_id,
+                  whatsappInstanceId: whatsappInstanceId || undefined,
+                  sendOrigin: 'mensagem_finalizacao_atendimento',
+                })
                 const statusMsg = resultSend?.ok ? 'sent' : 'erro'
                 const { data: msgInsert, error: errInsert } = await supabase
                   .from('mensagens')
@@ -2745,6 +4220,7 @@ exports.encerrarChat = async (req, res) => {
                     direcao: 'out',
                     company_id,
                     status: statusMsg,
+                    ...(whatsappInstanceId ? { whatsapp_instance_id: whatsappInstanceId } : {}),
                     autor_usuario_id: user_id
                   })
                   .select()
@@ -2783,25 +4259,51 @@ exports.reabrirChat = async (req, res) => {
       return res.status(400).json({ error: 'Grupos são apenas visuais. Não é possível reabrir conversa de grupo.' })
     }
 
-    // Reabrir já assume automaticamente para quem clicou
-    const { data, error } = await supabase
+    // Reabrir já assume automaticamente para quem clicou — sem setor (fila geral / visível a todos).
+    const assumidaEm = new Date().toISOString()
+    await resetAlertaSemRespostaAoAssumirReaberta(company_id, conversa_id, assumidaEm, {
+      reaberta_falta_interacao_em: perm.conv?.reaberta_falta_interacao_em,
+    })
+
+    const baseReabrirPatch = {
+      status_atendimento: 'em_atendimento',
+      atendente_id: user_id,
+      atendente_atribuido_em: assumidaEm,
+      departamento_id: null,
+      finalizacao_motivo: null,
+      finalizada_automaticamente: false,
+      finalizada_automaticamente_em: null,
+      aguardando_cliente_desde: null,
+      ausencia_mensagem_enviada_em: null,
+    }
+    const optionalReabrirPatch = {
+      pagamento_prazo_ate: null,
+      pagamento_prazo_origem: null,
+      pagamento_concluido_em: null,
+      reaberta_falta_interacao_em: null,
+    }
+
+    let { data, error } = await supabase
       .from('conversas')
-      .update({
-        status_atendimento: 'em_atendimento',
-        atendente_id: user_id,
-        atendente_atribuido_em: new Date().toISOString(),
-        finalizacao_motivo: null,
-        finalizada_automaticamente: false,
-        finalizada_automaticamente_em: null,
-        aguardando_cliente_desde: null,
-        ausencia_mensagem_enviada_em: null,
-      })
+      .update({ ...baseReabrirPatch, ...optionalReabrirPatch })
       .eq('company_id', company_id)
       .eq('id', conversa_id)
       .select()
       .single()
 
+    if (error && /column|schema cache/i.test(String(error.message || ''))) {
+      ;({ data, error } = await supabase
+        .from('conversas')
+        .update(baseReabrirPatch)
+        .eq('company_id', company_id)
+        .eq('id', conversa_id)
+        .select()
+        .single())
+    }
+
     if (error) return res.status(500).json({ error: error.message })
+
+    await clearReabertaFaltaInteracao(company_id, conversa_id)
 
     const resultAt = await registrarAtendimento({
       conversa_id,
@@ -2871,6 +4373,48 @@ exports.marcarAguardandoClienteManualChat = async (req, res) => {
   }
 }
 
+exports.marcarAguardandoPagamentoFinanceiroChat = async (req, res) => {
+  try {
+    const { company_id, id: user_id, perfil, departamento_ids = [] } = req.user
+    const { id: conversa_id } = req.params
+    const { prazo, data } = req.body || {}
+    const perm = await assertPermissaoConversa({ company_id, conversa_id, user_id, role: perfil, user_dep_ids: departamento_ids })
+    if (!perm.ok) return res.status(perm.status).json({ error: perm.error })
+    if (perm.conv && isGroupConversation(perm.conv)) {
+      return res.status(400).json({ error: 'Indisponível para conversas de grupo' })
+    }
+    const result = await marcarAguardandoPagamento({
+      company_id,
+      conversa_id,
+      usuario_id: user_id,
+      departamento_ids,
+      prazo,
+      data,
+    })
+    if (!result.ok) return res.status(result.status).json({ error: result.error })
+    const io = req.app.get('io')
+    if (io && result.conversa) {
+      const payloadAtualizacao = {
+        ...result.conversa,
+        status_atendimento_real: result.conversa.status_atendimento ?? null,
+        pagamento_prazo_ate: result.conversa.pagamento_prazo_ate ?? null,
+        pagamento_prazo_origem: result.conversa.pagamento_prazo_origem ?? null,
+        pagamento_concluido_em: null,
+        lista_realtime: { minha_fila: true, motivo: 'financeiro_aguardando_pagamento' },
+      }
+      emitirEventoEmpresaConversa(io, company_id, conversa_id, io.EVENTS?.CONVERSA_ATUALIZADA || 'conversa_atualizada', {
+        ...payloadAtualizacao,
+      })
+      emitirConversaAtualizada(io, company_id, conversa_id, payloadAtualizacao, { skipAtualizarConversa: true })
+      emitirSincronizacaoListaConversas(io, company_id, conversa_id)
+    }
+    return res.json({ ok: true, conversa: result.conversa, idempotent: !!result.idempotent })
+  } catch (err) {
+    console.error(err)
+    return res.status(500).json({ error: 'Erro ao marcar aguardando pagamento' })
+  }
+}
+
 exports.retomarEmAtendimentoManualChat = async (req, res) => {
   try {
     const { company_id, id: user_id, perfil, departamento_ids = [] } = req.user
@@ -2880,7 +4424,21 @@ exports.retomarEmAtendimentoManualChat = async (req, res) => {
     if (perm.conv && isGroupConversation(perm.conv)) {
       return res.status(400).json({ error: 'Indisponível para conversas de grupo' })
     }
-    const result = await retomarEmAtendimentoManual({ company_id, conversa_id, usuario_id: user_id })
+
+    const stConv = String(perm.conv?.status_atendimento || '')
+      .trim()
+      .toLowerCase()
+      .replace(/\s+/g, '_')
+    const isCobrancaFinanceira =
+      stConv === 'pagamento_pendente' || stConv === 'em_atraso'
+    const result = isCobrancaFinanceira
+        ? await retomarDeCobrancaFinanceira({
+            company_id,
+            conversa_id,
+            usuario_id: user_id,
+            departamento_ids,
+          })
+        : await retomarEmAtendimentoManual({ company_id, conversa_id, usuario_id: user_id })
     if (!result.ok) return res.status(result.status).json({ error: result.error })
     const io = req.app.get('io')
     if (io && result.conversa) {
@@ -2888,6 +4446,9 @@ exports.retomarEmAtendimentoManualChat = async (req, res) => {
         ...result.conversa,
         status_atendimento_real: result.conversa.status_atendimento ?? null,
         aguardando_cliente_desde: result.conversa.aguardando_cliente_desde ?? null,
+        pagamento_prazo_ate: result.conversa.pagamento_prazo_ate ?? null,
+        pagamento_prazo_origem: result.conversa.pagamento_prazo_origem ?? null,
+        pagamento_concluido_em: result.conversa.pagamento_concluido_em ?? null,
         lista_realtime: { minha_fila: true, motivo: 'manual_retomar_em_atendimento' },
       }
       emitirEventoEmpresaConversa(io, company_id, conversa_id, io.EVENTS?.CONVERSA_ATUALIZADA || 'conversa_atualizada', {
@@ -3040,7 +4601,7 @@ exports.transferirChat = async (req, res) => {
           transferido_por_nome: fromNome,
         })
       } catch (_) {}
-      
+
       // Notificar o usuário que transferiu
       emitirParaUsuario(io, user_id, 'conversa_transferida_sucesso', {
         conversa_id: Number(conversa_id),
@@ -3054,7 +4615,7 @@ exports.transferirChat = async (req, res) => {
           novo_atendente_id: Number(para_usuario_id)
         }
       })
-      
+
       // Linha completa da conversa (setor, nome, status, atendente) para botões e filtros em tempo real
       emitirConversaAtualizada(io, company_id, conversa_id, {
         ...data,
@@ -3072,6 +4633,237 @@ exports.transferirChat = async (req, res) => {
 // =====================================================
 // transferirSetor — altera departamento da conversa e registra no histórico
 // =====================================================
+// =====================================================
+// participantes do atendimento (nao transfere atendente principal)
+// =====================================================
+exports.listarAtendentesDisponiveisConversa = async (req, res) => {
+  try {
+    const { company_id, id: user_id, perfil, departamento_ids = [] } = req.user
+    const { id: conversa_id } = req.params
+
+    const perm = await assertPermissaoConversa({ company_id, conversa_id, user_id, role: perfil, user_dep_ids: departamento_ids })
+    if (!perm.ok) return res.status(perm.status).json({ error: perm.error })
+    if (perm.conv && isGroupConversation(perm.conv)) {
+      return res.status(400).json({ error: 'Nao e possivel adicionar atendente em conversa de grupo.' })
+    }
+
+    const participanteIds = new Set(await getConversaParticipanteIdsAtivos(company_id, conversa_id))
+    if (perm.conv?.atendente_id != null) participanteIds.add(Number(perm.conv.atendente_id))
+
+    const { data, error } = await supabase
+      .from('usuarios')
+      .select('id, nome, email, perfil, departamento_id')
+      .eq('company_id', Number(company_id))
+      .eq('ativo', true)
+      .order('nome', { ascending: true })
+
+    if (error) return res.status(500).json({ error: error.message })
+
+    return res.json((data || [])
+      .filter((u) => ['atendente', 'supervisor', 'admin'].includes(String(u.perfil || '').toLowerCase()))
+      .filter((u) => !participanteIds.has(Number(u.id)))
+      .map((u) => ({
+        usuario_id: Number(u.id),
+        id: Number(u.id),
+        nome: u.nome || null,
+        email: u.email || null,
+        perfil: u.perfil || null,
+        departamento_id: u.departamento_id ?? null,
+      })))
+  } catch (err) {
+    console.error(err)
+    return res.status(500).json({ error: 'Erro ao listar atendentes disponiveis' })
+  }
+}
+
+exports.listarAtendentesConversa = async (req, res) => {
+  try {
+    const { company_id, id: user_id, perfil, departamento_ids = [] } = req.user
+    const { id: conversa_id } = req.params
+
+    const perm = await assertPermissaoConversa({ company_id, conversa_id, user_id, role: perfil, user_dep_ids: departamento_ids })
+    if (!perm.ok) return res.status(perm.status).json({ error: perm.error })
+
+    const { data: participantes, error } = await supabase
+      .from('conversa_atendentes')
+      .select('id, usuario_id, adicionado_por, ativo, criado_em')
+      .eq('company_id', Number(company_id))
+      .eq('conversa_id', Number(conversa_id))
+      .eq('ativo', true)
+      .order('criado_em', { ascending: true })
+
+    if (error) {
+      if (isConversaAtendentesMissingTable(error)) return res.json([])
+      return res.status(500).json({ error: error.message })
+    }
+
+    const ids = [...new Set([
+      ...(perm.conv?.atendente_id != null ? [Number(perm.conv.atendente_id)] : []),
+      ...(participantes || []).map((p) => Number(p.usuario_id)),
+      ...(participantes || []).map((p) => Number(p.adicionado_por)).filter(Boolean),
+    ])]
+
+    let userMap = new Map()
+    if (ids.length > 0) {
+      const { data: usuarios } = await supabase
+        .from('usuarios')
+        .select('id, nome, email, perfil')
+        .eq('company_id', Number(company_id))
+        .in('id', ids)
+      userMap = new Map((usuarios || []).map((u) => [Number(u.id), u]))
+    }
+
+    const principal = perm.conv?.atendente_id != null
+      ? [{
+          usuario_id: Number(perm.conv.atendente_id),
+          id: null,
+          tipo: 'principal',
+          ativo: true,
+          criado_em: null,
+          usuario: userMap.get(Number(perm.conv.atendente_id)) || null,
+          adicionado_por_usuario: null,
+        }]
+      : []
+
+    const adicionais = (participantes || []).map((p) => ({
+      id: Number(p.id),
+      usuario_id: Number(p.usuario_id),
+      tipo: 'participante',
+      ativo: p.ativo === true,
+      criado_em: p.criado_em,
+      usuario: userMap.get(Number(p.usuario_id)) || null,
+      adicionado_por_usuario: p.adicionado_por ? (userMap.get(Number(p.adicionado_por)) || null) : null,
+    }))
+
+    return res.json([...principal, ...adicionais])
+  } catch (err) {
+    console.error(err)
+    return res.status(500).json({ error: 'Erro ao listar atendentes da conversa' })
+  }
+}
+
+exports.adicionarAtendenteConversa = async (req, res) => {
+  try {
+    const { company_id, id: user_id, perfil, departamento_ids = [] } = req.user
+    const { id: conversa_id } = req.params
+    const usuario_id = Number(req.body?.usuario_id ?? req.body?.para_usuario_id)
+
+    if (!Number.isInteger(usuario_id) || usuario_id <= 0) {
+      return res.status(400).json({ error: 'usuario_id e obrigatorio' })
+    }
+
+    const perm = await assertPermissaoConversa({ company_id, conversa_id, user_id, role: perfil, user_dep_ids: departamento_ids })
+    if (!perm.ok) return res.status(perm.status).json({ error: perm.error })
+    if (perm.conv && isGroupConversation(perm.conv)) {
+      return res.status(400).json({ error: 'Nao e possivel adicionar atendente em conversa de grupo.' })
+    }
+    if (isClosedAttendanceStatus(perm.conv?.status_atendimento)) {
+      return res.status(409).json({ error: 'Reabra a conversa antes de adicionar atendente.' })
+    }
+    if (!perm.conv?.atendente_id) {
+      return res.status(409).json({ error: 'Assuma a conversa antes de adicionar outro atendente.' })
+    }
+    if (perm.conv?.atendente_id && Number(perm.conv.atendente_id) === usuario_id) {
+      return res.status(409).json({ error: 'Este atendente ja e o responsavel principal da conversa.' })
+    }
+
+    const { data: targetUser, error: userError } = await supabase
+      .from('usuarios')
+      .select('id, nome, email, perfil, ativo')
+      .eq('company_id', Number(company_id))
+      .eq('id', usuario_id)
+      .eq('ativo', true)
+      .maybeSingle()
+
+    if (userError) return res.status(500).json({ error: 'Erro ao validar atendente' })
+    if (!targetUser) return res.status(404).json({ error: 'Atendente nao encontrado ou inativo' })
+
+    const perfilDestino = String(targetUser.perfil || '').toLowerCase()
+    if (!['atendente', 'supervisor', 'admin'].includes(perfilDestino)) {
+      return res.status(400).json({ error: 'Usuario selecionado nao possui perfil de atendimento' })
+    }
+
+    if (await usuarioParticipaAtivamenteDaConversa(company_id, conversa_id, usuario_id)) {
+      return res.status(409).json({ error: 'Este atendente ja participa da conversa.' })
+    }
+
+    const { data: inserted, error: insertError } = await supabase
+      .from('conversa_atendentes')
+      .insert({
+        company_id: Number(company_id),
+        conversa_id: Number(conversa_id),
+        usuario_id,
+        adicionado_por: Number(user_id),
+        ativo: true,
+      })
+      .select('id, company_id, conversa_id, usuario_id, adicionado_por, ativo, criado_em')
+      .single()
+
+    if (insertError) {
+      if (String(insertError?.code || '') === '23505') {
+        return res.status(409).json({ error: 'Este atendente ja participa da conversa.' })
+      }
+      if (isConversaAtendentesSchemaMissing(insertError)) {
+        return res.status(400).json({
+          error: 'Banco desatualizado: aplique a migration 20260619100000_conversa_atendentes.sql no Supabase antes de adicionar atendentes.',
+        })
+      }
+      return res.status(500).json({ error: insertError.message })
+    }
+
+    const { data: fromUser } = await supabase
+      .from('usuarios')
+      .select('nome')
+      .eq('company_id', Number(company_id))
+      .eq('id', Number(user_id))
+      .maybeSingle()
+    const fromNome = (fromUser?.nome && String(fromUser.nome).trim()) || 'Atendente'
+    const targetNome = (targetUser?.nome && String(targetUser.nome).trim()) || 'atendente'
+
+    const resultAt = await registrarAtendimento({
+      conversa_id,
+      company_id,
+      acao: 'adicionou_atendente',
+      de_usuario_id: user_id,
+      para_usuario_id: usuario_id,
+      observacao: `${fromNome} adicionou ${targetNome} ao atendimento.`,
+    })
+    if (resultAt?.error) {
+      console.warn('[adicionarAtendenteConversa] historico nao registrado:', resultAt.error?.message || resultAt.error)
+    }
+
+    invalidateConversaVisibilityCache(company_id, conversa_id)
+
+    const io = req.app.get('io')
+    if (io) {
+      const payload = {
+        conversa_id: Number(conversa_id),
+        company_id: Number(company_id),
+        usuario_id,
+        adicionado_por: Number(user_id),
+        participante: inserted,
+        lista_realtime: { minha_fila: true, motivo: 'atendente_adicionado' },
+      }
+      emitirParaUsuario(io, usuario_id, 'conversa_atendente_adicionado', payload)
+      emitirConversaAtualizada(io, company_id, conversa_id, { id: Number(conversa_id), company_id: Number(company_id) })
+    }
+
+    return res.status(201).json({
+      ok: true,
+      participante: inserted,
+      usuario: {
+        id: Number(targetUser.id),
+        nome: targetUser.nome || null,
+        email: targetUser.email || null,
+        perfil: targetUser.perfil || null,
+      },
+    })
+  } catch (err) {
+    console.error(err)
+    return res.status(500).json({ error: 'Erro ao adicionar atendente a conversa' })
+  }
+}
+
 exports.transferirSetor = async (req, res) => {
   try {
     const { company_id, id: user_id, perfil, departamento_ids = [] } = req.user
@@ -3096,7 +4888,6 @@ exports.transferirSetor = async (req, res) => {
       .eq('company_id', company_id)
       .eq('id', conversa_id)
       .single()
-
     if (errConv || !conversa) {
       return res.status(404).json({ error: 'Conversa não encontrada' })
     }
@@ -3338,12 +5129,21 @@ exports.enviarMensagemChat = async (req, res) => {
       return res.status(400).json({ error: 'texto é obrigatório' })
     }
 
-    const permEnvio = await assertPodeEnviarMensagem({ company_id, conversa_id, user_id })
+    const io = req.app.get('io')
+    const permEnvio = await assertPodeEnviarMensagem({
+      company_id,
+      conversa_id,
+      user_id,
+      role: req.user?.perfil,
+      user_dep_ids: req.user?.departamento_ids,
+      autoAssumirAoEnviar: true,
+      io,
+    })
     if (!permEnvio.ok) return res.status(permEnvio.status).json({ error: permEnvio.error })
 
     const { data: conversa, error: errConv } = await supabase
       .from('conversas')
-      .select('id, telefone, cliente_id, tipo, nome_contato_cache, foto_perfil_contato_cache, chat_lid')
+      .select('id, telefone, cliente_id, tipo, nome_contato_cache, foto_perfil_contato_cache, chat_lid, whatsapp_instance_id')
       .eq('company_id', company_id)
       .eq('id', conversa_id)
       .single()
@@ -3353,6 +5153,7 @@ exports.enviarMensagemChat = async (req, res) => {
     }
 
     // Resolver telefone real quando conversa tem apenas LID (lid:xxx) — Z-API não envia para LID
+    const whatsappInstanceId = await resolveConversationWhatsappInstance(company_id, conversa)
     let telefoneParaEnvio = conversa.telefone || ''
     if (telefoneParaEnvio && String(telefoneParaEnvio).trim().toLowerCase().startsWith('lid:')) {
       if (conversa.cliente_id) {
@@ -3360,15 +5161,8 @@ exports.enviarMensagemChat = async (req, res) => {
         if (cli?.telefone && !String(cli.telefone).startsWith('lid:')) telefoneParaEnvio = cli.telefone
       }
       if (telefoneParaEnvio.startsWith('lid:') && conversa.chat_lid) {
-        const { data: outra } = await supabase
-          .from('conversas')
-          .select('telefone')
-          .eq('company_id', company_id)
-          .eq('chat_lid', conversa.chat_lid)
-          .not('telefone', 'like', 'lid:%')
-          .limit(1)
-          .maybeSingle()
-        if (outra?.telefone) telefoneParaEnvio = outra.telefone
+        const telSibling = await resolveTelefoneFromLidSiblingConversation(company_id, conversa, whatsappInstanceId)
+        if (telSibling) telefoneParaEnvio = telSibling
       }
       if (telefoneParaEnvio.startsWith('lid:')) {
         return res.status(400).json({ error: 'Número do contato indisponível (conversa por LID). Aguarde o contato enviar uma mensagem ou sincronize os contatos.' })
@@ -3425,6 +5219,7 @@ exports.enviarMensagemChat = async (req, res) => {
       status: 'pending',
       criado_em: timestamp
     }
+    if (whatsappInstanceId) basePayload.whatsapp_instance_id = whatsappInstanceId
     const payloadWithReply =
       reply_meta && typeof reply_meta === 'object'
         ? {
@@ -3461,8 +5256,9 @@ exports.enviarMensagemChat = async (req, res) => {
 
     if (errMsg) return res.status(500).json({ error: errMsg.message })
 
+    let waitingAfterOutbound = null
     try {
-      await tryMarkWaitingAfterHumanOutbound({
+      waitingAfterOutbound = await tryMarkWaitingAfterHumanOutbound({
         company_id,
         conversa_id: Number(conversa_id),
         texto: String(texto || '').trim(),
@@ -3490,7 +5286,6 @@ exports.enviarMensagemChat = async (req, res) => {
       }
     } catch (_) {}
 
-    const io = req.app.get('io')
     if (io) {
       const basePayload = { ...msg, id: msg.id, conversa_id: msg.conversa_id ?? Number(conversa_id), status: 'sending', status_mensagem: 'sending', direcao: 'out' }
       const novaMsgPayload = await enrichMensagemComAutorUsuario(supabase, company_id, basePayload)
@@ -3511,10 +5306,14 @@ exports.enviarMensagemChat = async (req, res) => {
         } catch (_) {}
       }
       const telefoneParaPayload = conversa?.telefone && !String(conversa.telefone).startsWith('lid:') ? String(conversa.telefone).trim() : null
-      const convPayload = {
+      const whatsappInstanceMetaMap = await loadWhatsappInstanceMetaMap(company_id, [whatsappInstanceId])
+      const whatsappInstanceMeta = safeWhatsappInstanceMeta(whatsappInstanceMetaMap.get(Number(whatsappInstanceId)))
+      const convPayload = aplicarAguardandoClienteNoPayload({
         id: Number(conversa_id),
         ultima_atividade: novaMsgPayload.criado_em,
         exibir_badge_aberta: true,
+        whatsapp_instance_id: whatsappInstanceId ?? conversa?.whatsapp_instance_id ?? null,
+        ...whatsappInstanceMeta,
         ...(telefoneParaPayload ? { telefone: telefoneParaPayload } : {}),
         ...(conversa?.cliente_id != null ? { cliente_id: conversa.cliente_id } : {}),
         ...(contatoNome ? { nome_contato_cache: contatoNome, contato_nome: contatoNome } : {}),
@@ -3528,7 +5327,7 @@ exports.enviarMensagemChat = async (req, res) => {
           usuario_nome: novaMsgPayload.usuario_nome,
         },
         reordenar_suave: true // Frontend: animar item para o topo em vez de refetch (evita "desce e sobe")
-      }
+      }, waitingAfterOutbound)
       emitirConversaAtualizada(io, company_id, conversa_id, convPayload, { skipAtualizarConversa: true })
     }
 
@@ -3571,17 +5370,31 @@ exports.enviarMensagemChat = async (req, res) => {
           if (linkUrlStr && !messageToSend.includes(linkUrlStr)) {
             messageToSend = messageToSend ? `${messageToSend} ${linkUrlStr}` : linkUrlStr
           }
-          messageToSend = prefixarParaCliente(messageToSend, usuarioNome)
+          messageToSend = textoParaEnvioWhatsapp(messageToSend, usuarioNome)
           result = await provider.sendLink(telefoneParaEnvio, {
             message: messageToSend,
             image: link.image || '',
             linkUrl: linkUrlStr,
             title: String(link.title || '').trim() || linkUrlStr,
             linkDescription: String(link.linkDescription || link.description || '').trim() || messageToSend,
-          }, { companyId: company_id, conversaId: conversa_id, replyMessageId: replyMessageId || undefined })
+          }, {
+            companyId: company_id,
+            conversaId: conversa_id,
+            whatsappInstanceId: whatsappInstanceId || undefined,
+            replyMessageId: replyMessageId || undefined,
+            sendOrigin: 'atendimento_humano',
+          })
         } else {
-          const textoParaCliente = prefixarParaCliente(String(texto).trim(), usuarioNome)
-          result = await provider.sendText(telefoneParaEnvio, textoParaCliente, { companyId: company_id, conversaId: conversa_id, phoneId: phoneId || undefined, replyMessageId: replyMessageId || undefined })
+          const textoParaCliente = textoParaEnvioWhatsapp(String(texto).trim(), usuarioNome)
+          result = await provider.sendText(telefoneParaEnvio, textoParaCliente, {
+            companyId: company_id,
+            conversaId: conversa_id,
+            whatsappInstanceId: whatsappInstanceId || undefined,
+            phoneId: phoneId || undefined,
+            replyMessageId: replyMessageId || undefined,
+            referenceId: `crm-${msg.id}`,
+            sendOrigin: 'atendimento_humano',
+          })
         }
         const ok = typeof result === 'boolean' ? result : result?.ok === true
         const waMessageId = typeof result === 'object' && result?.messageId ? String(result.messageId).trim() : null
@@ -3659,13 +5472,13 @@ exports.enviarReacaoMensagem = async (req, res) => {
       return res.status(400).json({ error: 'reaction é obrigatório' })
     }
 
-    const permEnvio = await assertPodeEnviarMensagem({ company_id, conversa_id, user_id })
+    const permEnvio = await assertPodeEnviarMensagem({ company_id, conversa_id, user_id, role: req.user?.perfil, user_dep_ids: req.user?.departamento_ids })
     if (!permEnvio.ok) return res.status(permEnvio.status).json({ error: permEnvio.error })
 
     // busca conversa + mensagem para garantir que pertencem à empresa
     const { data: conversa, error: errConv } = await supabase
       .from('conversas')
-      .select('id, telefone, company_id')
+      .select('id, telefone, company_id, whatsapp_instance_id')
       .eq('company_id', company_id)
       .eq('id', conversa_id)
       .maybeSingle()
@@ -3690,12 +5503,21 @@ exports.enviarReacaoMensagem = async (req, res) => {
       return res.status(400).json({ error: 'Mensagem ainda não possui whatsapp_id para reagir' })
     }
 
+    const whatsappInstanceId = await resolveConversationWhatsappInstance(company_id, conversa)
+
+    if (String(conversa.telefone || '').trim().toLowerCase().startsWith('lid:')) {
+      return res.status(400).json({ error: 'Número do contato indisponível (conversa por LID). Aguarde o contato enviar uma mensagem.' })
+    }
+
     const provider = getProvider()
     if (!provider || !provider.sendReaction) {
       return res.status(500).json({ error: 'Provider WhatsApp não suporta reações' })
     }
 
-    const ok = await provider.sendReaction(conversa.telefone, msg.whatsapp_id, String(reaction).trim(), { companyId: company_id })
+    const ok = await provider.sendReaction(conversa.telefone, msg.whatsapp_id, String(reaction).trim(), {
+      companyId: company_id,
+      whatsappInstanceId: whatsappInstanceId || undefined,
+    })
     if (!ok) {
       return res.status(502).json({ error: 'Falha ao enviar reação para o WhatsApp' })
     }
@@ -3713,12 +5535,12 @@ exports.removerReacaoMensagem = async (req, res) => {
     const { company_id, id: user_id, perfil } = req.user
     const { id: conversa_id, mensagem_id } = req.params
 
-    const permEnvio = await assertPodeEnviarMensagem({ company_id, conversa_id, user_id })
+    const permEnvio = await assertPodeEnviarMensagem({ company_id, conversa_id, user_id, role: req.user?.perfil, user_dep_ids: req.user?.departamento_ids })
     if (!permEnvio.ok) return res.status(permEnvio.status).json({ error: permEnvio.error })
 
     const { data: conversa, error: errConv } = await supabase
       .from('conversas')
-      .select('id, telefone, company_id')
+      .select('id, telefone, company_id, whatsapp_instance_id')
       .eq('company_id', company_id)
       .eq('id', conversa_id)
       .maybeSingle()
@@ -3743,12 +5565,21 @@ exports.removerReacaoMensagem = async (req, res) => {
       return res.status(400).json({ error: 'Mensagem ainda não possui whatsapp_id para remover reação' })
     }
 
+    const whatsappInstanceId = await resolveConversationWhatsappInstance(company_id, conversa)
+
+    if (String(conversa.telefone || '').trim().toLowerCase().startsWith('lid:')) {
+      return res.status(400).json({ error: 'Número do contato indisponível (conversa por LID). Aguarde o contato enviar uma mensagem.' })
+    }
+
     const provider = getProvider()
     if (!provider || !provider.removeReaction) {
       return res.status(500).json({ error: 'Provider WhatsApp não suporta remoção de reação' })
     }
 
-    const ok = await provider.removeReaction(conversa.telefone, msg.whatsapp_id, { companyId: company_id })
+    const ok = await provider.removeReaction(conversa.telefone, msg.whatsapp_id, {
+      companyId: company_id,
+      whatsappInstanceId: whatsappInstanceId || undefined,
+    })
     if (!ok) {
       return res.status(502).json({ error: 'Falha ao remover reação no WhatsApp' })
     }
@@ -3775,18 +5606,43 @@ exports.enviarContatoWhatsapp = async (req, res) => {
       return res.status(400).json({ error: 'cliente_id é obrigatório' })
     }
 
-    const permEnvio = await assertPodeEnviarMensagem({ company_id, conversa_id, user_id })
+    const io = req.app.get('io')
+    const permEnvio = await assertPodeEnviarMensagem({
+      company_id,
+      conversa_id,
+      user_id,
+      role: req.user?.perfil,
+      user_dep_ids: req.user?.departamento_ids,
+      autoAssumirAoEnviar: true,
+      io,
+    })
     if (!permEnvio.ok) return res.status(permEnvio.status).json({ error: permEnvio.error })
 
     const { data: conversa, error: errConv } = await supabase
       .from('conversas')
-      .select('id, telefone, company_id')
+      .select('id, telefone, cliente_id, company_id, chat_lid, whatsapp_instance_id')
       .eq('company_id', company_id)
       .eq('id', conversa_id)
       .maybeSingle()
 
     if (errConv || !conversa) {
       return res.status(404).json({ error: 'Conversa não encontrada' })
+    }
+
+    const whatsappInstanceId = await resolveConversationWhatsappInstance(company_id, conversa)
+    let telefoneParaEnvio = conversa.telefone || ''
+    if (telefoneParaEnvio && String(telefoneParaEnvio).trim().toLowerCase().startsWith('lid:')) {
+      if (conversa.cliente_id) {
+        const { data: cliLid } = await supabase.from('clientes').select('telefone').eq('id', conversa.cliente_id).eq('company_id', company_id).maybeSingle()
+        if (cliLid?.telefone && !String(cliLid.telefone).startsWith('lid:')) telefoneParaEnvio = cliLid.telefone
+      }
+      if (telefoneParaEnvio.startsWith('lid:') && conversa.chat_lid) {
+        const telSibling = await resolveTelefoneFromLidSiblingConversation(company_id, conversa, whatsappInstanceId)
+        if (telSibling) telefoneParaEnvio = telSibling
+      }
+      if (telefoneParaEnvio.startsWith('lid:')) {
+        return res.status(400).json({ error: 'Número do contato indisponível (conversa por LID). Aguarde o contato enviar uma mensagem ou sincronize os contatos.' })
+      }
     }
 
     const { data: cliente, error: errCli } = await supabase
@@ -3834,6 +5690,7 @@ exports.enviarContatoWhatsapp = async (req, res) => {
         status: 'pending',
         autor_usuario_id: Number(user_id),
         criado_em: criadoEm,
+        ...(whatsappInstanceId ? { whatsapp_instance_id: whatsappInstanceId } : {}),
         contact_meta,
       })
       .select()
@@ -3843,8 +5700,9 @@ exports.enviarContatoWhatsapp = async (req, res) => {
       return res.status(500).json({ error: errMsg.message })
     }
 
+    let waitingAfterOutbound = null
     try {
-      await tryMarkWaitingAfterHumanOutbound({
+      waitingAfterOutbound = await tryMarkWaitingAfterHumanOutbound({
         company_id,
         conversa_id: Number(conversa_id),
         texto: contactName,
@@ -3855,11 +5713,18 @@ exports.enviarContatoWhatsapp = async (req, res) => {
 
     const { nome: usuarioNome } = await getUsuarioParaEnvioCliente(supabase, company_id, user_id)
     if (usuarioNome) {
-      await provider.sendText(conversa.telefone, prefixarParaCliente('Segue contato abaixo:', usuarioNome), { companyId: company_id, conversaId: conversa_id })
+      await provider.sendText(telefoneParaEnvio, prefixarParaCliente('Segue contato abaixo:', usuarioNome), {
+        companyId: company_id,
+        conversaId: conversa_id,
+        whatsappInstanceId: whatsappInstanceId || undefined,
+        sendOrigin: 'atendimento_humano_contato',
+      })
     }
-    const result = await provider.sendContact(conversa.telefone, contactName, contactPhone, {
+    const result = await provider.sendContact(telefoneParaEnvio, contactName, contactPhone, {
       companyId: company_id,
-      conversaId: conversa_id,
+      conversaId: Number(conversa_id),
+      whatsappInstanceId: whatsappInstanceId || undefined,
+      sendOrigin: 'atendimento_humano_contato',
       messageId: messageId || undefined,
     })
     const ok = typeof result === 'boolean' ? result : result?.ok === true
@@ -3873,11 +5738,22 @@ exports.enviarContatoWhatsapp = async (req, res) => {
       .eq('company_id', company_id)
       .eq('id', msg.id)
 
-    const io = req.app.get('io')
     if (io) {
       const payload = await enrichMensagemComAutorUsuario(supabase, company_id, { ...msg, status: nextStatus, whatsapp_id: waMessageId || null })
       emitirEventoEmpresaConversa(io, company_id, conversa_id, io.EVENTS?.NOVA_MENSAGEM || 'nova_mensagem', payload)
-      emitirConversaAtualizada(io, company_id, conversa_id, { id: Number(conversa_id) })
+      const convPayload = aplicarAguardandoClienteNoPayload({
+        id: Number(conversa_id),
+        ultima_atividade: payload.criado_em || criadoEm,
+        ultima_mensagem_preview: {
+          texto: contactName,
+          criado_em: payload.criado_em || criadoEm,
+          direcao: 'out',
+          tipo: 'contact',
+          contact_meta,
+        },
+        reordenar_suave: true,
+      }, waitingAfterOutbound)
+      emitirConversaAtualizada(io, company_id, conversa_id, convPayload, { skipAtualizarConversa: true })
     }
 
     return res.json({ ok: true })
@@ -3910,18 +5786,28 @@ exports.enviarLocalizacao = async (req, res) => {
     const nomePlace = String(nomeRaw || '').trim().slice(0, 200) || null
     const endereco = String(addressRaw || '').trim().slice(0, 500) || null
 
-    const permEnvio = await assertPodeEnviarMensagem({ company_id, conversa_id, user_id })
+    const io = req.app.get('io')
+    const permEnvio = await assertPodeEnviarMensagem({
+      company_id,
+      conversa_id,
+      user_id,
+      role: req.user?.perfil,
+      user_dep_ids: req.user?.departamento_ids,
+      autoAssumirAoEnviar: true,
+      io,
+    })
     if (!permEnvio.ok) return res.status(permEnvio.status).json({ error: permEnvio.error })
 
     const { data: conversa, error: errConv } = await supabase
       .from('conversas')
-      .select('id, telefone, cliente_id, tipo, nome_contato_cache, foto_perfil_contato_cache, chat_lid')
+      .select('id, telefone, cliente_id, tipo, nome_contato_cache, foto_perfil_contato_cache, chat_lid, whatsapp_instance_id')
       .eq('company_id', company_id)
       .eq('id', conversa_id)
       .maybeSingle()
 
     if (errConv || !conversa) return res.status(404).json({ error: 'Conversa não encontrada' })
 
+    const whatsappInstanceId = await resolveConversationWhatsappInstance(company_id, conversa)
     let telefoneParaEnvio = conversa.telefone || ''
     if (telefoneParaEnvio && String(telefoneParaEnvio).trim().toLowerCase().startsWith('lid:')) {
       if (conversa.cliente_id) {
@@ -3929,15 +5815,8 @@ exports.enviarLocalizacao = async (req, res) => {
         if (cli?.telefone && !String(cli.telefone).startsWith('lid:')) telefoneParaEnvio = cli.telefone
       }
       if (telefoneParaEnvio.startsWith('lid:') && conversa.chat_lid) {
-        const { data: outra } = await supabase
-          .from('conversas')
-          .select('telefone')
-          .eq('company_id', company_id)
-          .eq('chat_lid', conversa.chat_lid)
-          .not('telefone', 'like', 'lid:%')
-          .limit(1)
-          .maybeSingle()
-        if (outra?.telefone) telefoneParaEnvio = outra.telefone
+        const telSibling = await resolveTelefoneFromLidSiblingConversation(company_id, conversa, whatsappInstanceId)
+        if (telSibling) telefoneParaEnvio = telSibling
       }
       if (telefoneParaEnvio.startsWith('lid:')) {
         return res.status(400).json({ error: 'Número do contato indisponível (conversa por LID). Aguarde o contato enviar uma mensagem ou sincronize os contatos.' })
@@ -3971,6 +5850,7 @@ exports.enviarLocalizacao = async (req, res) => {
       nome_arquivo: 'localização',
       autor_usuario_id: Number(user_id),
       criado_em: criadoEm,
+      ...(whatsappInstanceId ? { whatsapp_instance_id: whatsappInstanceId } : {}),
       location_meta
     }
 
@@ -3987,8 +5867,9 @@ exports.enviarLocalizacao = async (req, res) => {
 
     if (errMsg) return res.status(500).json({ error: errMsg.message })
 
+    let waitingAfterOutbound = null
     try {
-      await tryMarkWaitingAfterHumanOutbound({
+      waitingAfterOutbound = await tryMarkWaitingAfterHumanOutbound({
         company_id,
         conversa_id: Number(conversa_id),
         texto: textoDisplay,
@@ -4022,7 +5903,9 @@ exports.enviarLocalizacao = async (req, res) => {
     if (telefoneParaEnvio) {
       result = await provider.sendLocation(telefoneParaEnvio, { address: addressParaCliente, lat: latitude, lng: longitude }, {
         companyId: company_id,
-        conversaId: conversa_id
+        conversaId: conversa_id,
+        whatsappInstanceId: whatsappInstanceId || undefined,
+        sendOrigin: 'atendimento_humano_localizacao',
       })
     } else {
       console.warn(`[WhatsApp] Conversa ${conversa_id} sem telefone — localização salva, não enviada ao WhatsApp`)
@@ -4038,11 +5921,10 @@ exports.enviarLocalizacao = async (req, res) => {
       .eq('company_id', company_id)
       .eq('id', msg.id)
 
-    const io = req.app.get('io')
     if (io) {
       const payload = await enrichMensagemComAutorUsuario(supabase, company_id, { ...msg, status: nextStatus, whatsapp_id: waMessageId || null, location_meta: msg.location_meta || location_meta })
       emitirEventoEmpresaConversa(io, company_id, conversa_id, io.EVENTS?.NOVA_MENSAGEM || 'nova_mensagem', payload)
-      const convPayload = {
+      const convPayload = aplicarAguardandoClienteNoPayload({
         id: Number(conversa_id),
         ultima_mensagem_preview: {
           texto: msg.texto,
@@ -4053,7 +5935,7 @@ exports.enviarLocalizacao = async (req, res) => {
           url: locationUrl
         },
         reordenar_suave: true
-      }
+      }, waitingAfterOutbound)
       emitirConversaAtualizada(io, company_id, conversa_id, convPayload, { skipAtualizarConversa: true })
     }
 
@@ -4082,12 +5964,21 @@ exports.enviarLigacaoWhatsapp = async (req, res) => {
     const { id: conversa_id } = req.params
     const { callDuration } = req.body || {}
 
-    const permEnvio = await assertPodeEnviarMensagem({ company_id, conversa_id, user_id })
+    const io = req.app.get('io')
+    const permEnvio = await assertPodeEnviarMensagem({
+      company_id,
+      conversa_id,
+      user_id,
+      role: req.user?.perfil,
+      user_dep_ids: req.user?.departamento_ids,
+      autoAssumirAoEnviar: true,
+      io,
+    })
     if (!permEnvio.ok) return res.status(permEnvio.status).json({ error: permEnvio.error })
 
     const { data: conversa, error: errConv } = await supabase
       .from('conversas')
-      .select('id, telefone, company_id')
+      .select('id, telefone, company_id, whatsapp_instance_id')
       .eq('company_id', company_id)
       .eq('id', conversa_id)
       .maybeSingle()
@@ -4098,6 +5989,7 @@ exports.enviarLigacaoWhatsapp = async (req, res) => {
 
     const dur = Number(callDuration)
     const safeDur = Number.isFinite(dur) ? Math.max(1, Math.min(15, dur)) : 5
+    const whatsappInstanceId = await resolveConversationWhatsappInstance(company_id, conversa)
 
     const criadoEm = new Date().toISOString()
     const texto = `Ligação via WhatsApp (${safeDur}s)`
@@ -4107,6 +5999,7 @@ exports.enviarLigacaoWhatsapp = async (req, res) => {
       .insert({
         company_id,
         conversa_id: Number(conversa_id),
+        ...(whatsappInstanceId ? { whatsapp_instance_id: whatsappInstanceId } : {}),
         texto,
         tipo: 'call',
         direcao: 'out',
@@ -4126,7 +6019,11 @@ exports.enviarLigacaoWhatsapp = async (req, res) => {
       return res.status(500).json({ error: 'Provider WhatsApp não suporta ligações' })
     }
 
-    const result = await provider.sendCall(conversa.telefone, safeDur, { companyId: company_id, conversaId: conversa_id })
+    const result = await provider.sendCall(conversa.telefone, safeDur, {
+      companyId: company_id,
+      conversaId: conversa_id,
+      whatsappInstanceId: whatsappInstanceId || undefined,
+    })
     const ok = typeof result === 'boolean' ? result : result?.ok === true
     const waMessageId =
       typeof result === 'object' && result?.messageId ? String(result.messageId).trim() : null
@@ -4138,7 +6035,6 @@ exports.enviarLigacaoWhatsapp = async (req, res) => {
       .eq('company_id', company_id)
       .eq('id', msg.id)
 
-    const io = req.app.get('io')
     if (io) {
       const payload = await enrichMensagemComAutorUsuario(supabase, company_id, { ...msg, status: nextStatus, whatsapp_id: waMessageId || null })
       emitirEventoEmpresaConversa(io, company_id, conversa_id, io.EVENTS?.NOVA_MENSAGEM || 'nova_mensagem', payload)
@@ -4168,7 +6064,7 @@ exports.excluirMensagem = async (req, res) => {
     // garante que a conversa pertence à empresa
     const { data: conversa, error: errConv } = await supabase
       .from('conversas')
-      .select('id, criado_em, telefone')
+      .select('id, criado_em, telefone, whatsapp_instance_id')
       .eq('company_id', company_id)
       .eq('id', cid)
       .maybeSingle()
@@ -4234,24 +6130,63 @@ exports.excluirMensagem = async (req, res) => {
       }
     }
 
-    // Apagar no WhatsApp (UltraMsg) se houver whatsapp_id e provider suportar
+    // Apagar no WhatsApp (UltraMsg) antes de alterar o histórico local.
+    // Se o provedor não confirmar a remoção, não marcamos como "apagada para todos" no sistema.
     const provider = getProvider()
-    if (provider?.deleteMessage && msg?.whatsapp_id && conversa?.telefone) {
-      try {
-        await provider.deleteMessage(conversa.telefone, msg.whatsapp_id, { companyId: company_id })
-      } catch (e) {
-        console.warn('[excluirMensagem] deleteMessage no WhatsApp:', e?.message || e)
-      }
+    const isLidTelefone = String(conversa?.telefone || '').trim().toLowerCase().startsWith('lid:')
+    if (!provider?.deleteMessage) {
+      return res.status(502).json({ error: 'O provedor WhatsApp atual não suporta apagar mensagem para todos.' })
+    }
+    if (!msg?.whatsapp_id) {
+      return res.status(409).json({ error: 'Mensagem ainda não possui ID do WhatsApp para apagar para todos.' })
+    }
+    if (!conversa?.telefone || isLidTelefone) {
+      return res.status(409).json({ error: 'Não foi possível apagar no WhatsApp: telefone da conversa indisponível.' })
     }
 
-    const { error: errDel } = await supabase
+    try {
+      const delInstanceId = conversa.whatsapp_instance_id
+        ? await resolveConversationWhatsappInstance(company_id, conversa)
+        : null
+      const deleteResult = await provider.deleteMessage(conversa.telefone, msg.whatsapp_id, {
+        companyId: company_id,
+        ...(delInstanceId ? { whatsappInstanceId: delInstanceId } : {}),
+      })
+      const apagouNoWhatsapp = deleteResult === true || deleteResult?.ok === true
+      if (!apagouNoWhatsapp) {
+        return res.status(502).json({ error: 'O WhatsApp não confirmou a remoção da mensagem. Tente novamente.' })
+      }
+    } catch (e) {
+      console.warn('[excluirMensagem] deleteMessage no WhatsApp:', e?.message || e)
+      return res.status(502).json({ error: 'Falha ao apagar a mensagem no WhatsApp. Tente novamente.' })
+    }
+
+    const textoRevogado = textoRevogadoApagadaParaTodos(msg, user_id)
+    const { data: msgRevogada, error: errUpd } = await supabase
       .from('mensagens')
-      .delete()
+      .update({
+        apagada_para_todos: true,
+        apagada_em: new Date().toISOString(),
+        texto: textoRevogado,
+        reply_meta: null,
+      })
       .eq('company_id', company_id)
       .eq('conversa_id', cid)
       .eq('id', mid)
+      .select('id, texto, direcao, criado_em, autor_usuario_id, status, whatsapp_id, tipo, url, nome_arquivo, apagada_para_todos, apagada_em')
+      .maybeSingle()
 
-    if (errDel) return res.status(500).json({ error: errDel.message })
+    if (errUpd) {
+      const errMsg = String(errUpd.message || '')
+      if (errMsg.includes('apagada_para_todos') || errMsg.includes('does not exist')) {
+        return res.status(400).json({
+          error:
+            'Banco desatualizado: execute a migration 20260525120000_mensagens_apagada_para_todos.sql no Supabase.',
+        })
+      }
+      return res.status(500).json({ error: errUpd.message })
+    }
+    if (!msgRevogada) return res.status(404).json({ error: 'Mensagem não encontrada' })
 
     // recalcula última mensagem (para o preview da lista)
     const { data: lastMsg, error: errLast } = await supabase
@@ -4293,7 +6228,18 @@ exports.excluirMensagem = async (req, res) => {
       emitirConversaAtualizada(io, company_id, cid, { id: cid })
     }
 
-    return res.json({ ok: true, conversa_id: cid, mensagem_id: mid, ultima_mensagem: ultima })
+    const msgApi = aplicarApagadaParaTodosNaMensagem(
+      await enrichMensagemComAutorUsuario(supabase, company_id, msgRevogada),
+      user_id
+    )
+    return res.json({
+      ok: true,
+      conversa_id: cid,
+      mensagem_id: mid,
+      ultima_mensagem: ultima,
+      mensagem: msgApi,
+      apagada_para_todos: true,
+    })
   } catch (err) {
     console.error(err)
     return res.status(500).json({ error: 'Erro ao excluir mensagem' })
@@ -4432,13 +6378,20 @@ exports.puxarChatFila = async (req, res) => {
       }
     }
 
+    const assumidaEm = new Date().toISOString()
+
+    await resetAlertaSemRespostaAoAssumirReaberta(company_id, conversa.id, assumidaEm, {
+      reaberta_falta_interacao_em: conversa.reaberta_falta_interacao_em,
+    })
+
     const { data: atualizada, error: errUpdate } = await supabase
       .from('conversas')
       .update({
         atendente_id: user_id,
         status_atendimento: 'em_atendimento',
         lida: true,
-        atendente_atribuido_em: new Date().toISOString()
+        atendente_atribuido_em: assumidaEm,
+        reaberta_falta_interacao_em: null,
       })
       .eq('company_id', company_id)
       .eq('id', conversa.id)
@@ -4451,6 +6404,8 @@ exports.puxarChatFila = async (req, res) => {
     if (!atualizada) {
       return res.status(409).json({ error: 'Outra pessoa puxou essa conversa antes de você' })
     }
+
+    await clearReabertaFaltaInteracao(company_id, conversa.id)
 
     const resultAt = await registrarAtendimento({
       conversa_id: conversa.id,
@@ -4523,7 +6478,7 @@ exports.adicionarTagConversa = async (req, res) => {
         io.EVENTS?.TAG_ADICIONADA || 'tag_adicionada',
         payload
       )
-      emitirConversaAtualizada(io, company_id, id, { id: Number(id) })
+      emitirConversaAtualizada(io, company_id, id, { id: Number(id) }, { skipAtualizarConversa: true })
     }
 
     return res.json({ success: true, tag: data.tags })
@@ -4558,7 +6513,7 @@ exports.removerTagConversa = async (req, res) => {
         io.EVENTS?.TAG_REMOVIDA || 'tag_removida',
         payload
       )
-      emitirConversaAtualizada(io, company_id, id, { id: Number(id) })
+      emitirConversaAtualizada(io, company_id, id, { id: Number(id) }, { skipAtualizarConversa: true })
     }
 
     return res.json({ success: true })
@@ -4734,6 +6689,26 @@ async function normalizeAudioForUltraMsg(file, tipo) {
 /** Lote de fotos/arquivos (galeria): mesmo contrato do WhatsApp Web. */
 const MAX_ARQUIVOS_LOTE_ENVIO = 30
 
+const {
+  parseClientTempIdsFromBody,
+  buildArquivoApiResultRow,
+} = require('../helpers/arquivoUploadResponseHelper')
+
+/** Evita processar o mesmo upload duas vezes quando multer recebe campos duplicados. */
+function dedupeMulterFiles(files) {
+  if (!Array.isArray(files) || files.length < 2) return files
+  const seen = new Set()
+  const out = []
+  for (const f of files) {
+    if (!f) continue
+    const key = `${String(f.originalname || '')}|${Number(f.size) || 0}|${String(f.path || f.filename || '')}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push(f)
+  }
+  return out
+}
+
 /** Legenda enviada com foto/vídeo/documento — mesmo limite prático da UltraMsg */
 const MAX_MEDIA_CAPTION_CHARS = 1024
 
@@ -4741,8 +6716,14 @@ const MAX_MEDIA_CAPTION_CHARS = 1024
  * Uma unidade de upload após multer; conversa e telefone já validados.
  * @returns {Promise<{ ok: true, msg: object } | { ok: false, status: number, error: string }>}
  */
-async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conversa_id, telefoneParaEnvio, io, captionUsuario = '' }) {
+async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conversa_id, telefoneParaEnvio, whatsappInstanceId = null, io, captionUsuario = '', clientTempId = null }) {
+  const { extFromOriginalName, isBlockedRiskExtension, blockedUploadErrorMessage } = require('../middleware/upload')
   let fileWork = file
+  const extUpload = extFromOriginalName(fileWork?.originalname)
+  if (isBlockedRiskExtension(extUpload)) {
+    return { ok: false, status: 400, error: blockedUploadErrorMessage(extUpload) }
+  }
+  const avisoWhatsapp = null
   const tipo = aplicarTipoForcadoSticker(fileWork, inferirTipoArquivo(fileWork))
   if (tipo === 'audio' || tipo === 'voice') {
     try {
@@ -4770,16 +6751,12 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
       ? ''
       : String(captionUsuario || '').trim().slice(0, MAX_MEDIA_CAPTION_CHARS)
 
-  const textoMensagem =
-    tipo === 'audio'
-      ? '(áudio)'
-      : tipo === 'voice'
-        ? '(áudio de voz)'
-        : tipo === 'sticker'
-          ? '(figurinha)'
-          : captionUsuarioTrim && (tipo === 'imagem' || tipo === 'video' || tipo === 'arquivo')
-            ? captionUsuarioTrim
-            : fileWork.originalname
+  const { textoMensagemMidiaParaBanco, captionWhatsappParaMidia } = require('../helpers/midiaMensagemHelper')
+  const textoMensagem = textoMensagemMidiaParaBanco({
+    tipo,
+    captionUsuarioTrim,
+    originalname: fileWork.originalname,
+  })
 
   const pathUrl = `/uploads/${fileWork.filename}`
 
@@ -4792,12 +6769,14 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
     direcao: "out",
     autor_usuario_id: user_id,
     company_id,
+    ...(whatsappInstanceId ? { whatsapp_instance_id: whatsappInstanceId } : {}),
   }).select().single()
 
   if (error) return { ok: false, status: 500, error: error.message }
 
+    let waitingAfterOutbound = null
     try {
-      await tryMarkWaitingAfterHumanOutbound({
+      waitingAfterOutbound = await tryMarkWaitingAfterHumanOutbound({
         company_id,
         conversa_id: Number(conversa_id),
         texto: String(msg?.texto || '').trim(),
@@ -4816,11 +6795,22 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
 
     // Emitir eventos para o frontend
     if (io) {
-      const basePayload = { ...msg, conversa_id: msg.conversa_id ?? Number(conversa_id), status: msg.status || 'pending', status_mensagem: msg.status_mensagem || msg.status || 'pending', direcao: 'out' }
+      const basePayload = {
+        ...msg,
+        conversa_id: msg.conversa_id ?? Number(conversa_id),
+        status: msg.status || 'pending',
+        status_mensagem: msg.status_mensagem || msg.status || 'pending',
+        direcao: 'out',
+        ...(clientTempId ? { client_temp_id: clientTempId } : {}),
+      }
       const novaMsgPayload = await enrichMensagemComAutorUsuario(supabase, company_id, basePayload)
       emitirEventoEmpresaConversa(io, company_id, conversa_id, io.EVENTS?.NOVA_MENSAGEM || 'nova_mensagem', novaMsgPayload)
       
-      const convPayload = { id: Number(conversa_id), ultima_atividade: timestampAtividade }
+      const convPayload = aplicarAguardandoClienteNoPayload({
+        id: Number(conversa_id),
+        ultima_atividade: timestampAtividade,
+        reordenar_suave: true,
+      }, waitingAfterOutbound)
       
       // Adicionar preview da última mensagem baseado no tipo
       if (msg.tipo === 'contact' && msg.contact_meta) {
@@ -4852,23 +6842,22 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
         }
       }
       
-      emitirConversaAtualizada(io, company_id, conversa_id, convPayload)
+      emitirConversaAtualizada(io, company_id, conversa_id, convPayload, { skipAtualizarConversa: true })
     }
 
     const { nome: usuarioNome } = await getUsuarioParaEnvioCliente(supabase, company_id, user_id)
-    const footerWa = usuarioNome ? `— ${usuarioNome}` : ''
-    const waCaption = captionUsuarioTrim
-      ? (footerWa
-          ? `${captionUsuarioTrim}\n${footerWa}`.slice(0, MAX_MEDIA_CAPTION_CHARS)
-          : captionUsuarioTrim)
-      : footerWa
+    const waCaption = captionWhatsappParaMidia({
+      tipo,
+      captionUsuarioTrim,
+      usuarioNome,
+    })
     const baseUrl = (process.env.APP_URL || process.env.BASE_URL || '').replace(/\/$/, '')
     const fullUrl = baseUrl ? `${baseUrl}${pathUrl}` : null
     const isLocalhost = /localhost|127\.0\.0\.1/i.test(baseUrl)
     // Para áudio/voice, prioriza sempre CDN da UltraMsg:
     // evita problemas de disponibilidade/headers em URLs próprias do backend
     // e melhora a reprodução no WhatsApp mobile e desktop.
-    const forceUploadMedia = (tipo === 'audio' || tipo === 'voice')
+    const forceUploadMedia = tipo === 'audio' || tipo === 'voice' || tipo === 'video'
 
     const sendMediaWithUrl = (mediaUrl) => {
       const provider = getProvider()
@@ -4877,6 +6866,8 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
       const opts = {
         companyId: company_id,
         conversaId: conversa_id,
+        whatsappInstanceId: whatsappInstanceId || undefined,
+        sendOrigin: 'atendimento_humano_midia',
         ...(isAudioTipo ? { returnDetails: true, audioMeta: { originalName: fileWork.originalname, mimeType: fileWork.mimetype } } : {}),
       }
       const promise =
@@ -4889,10 +6880,14 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
             : tipo === 'imagem' && provider.sendImage
               ? provider.sendImage(phone, mediaUrl, waCaption, opts)
               : tipo === 'video' && provider.sendVideo
-                ? provider.sendVideo(phone, mediaUrl, waCaption, opts)
+                ? provider.sendVideo(phone, mediaUrl, waCaption, { ...opts, returnDetails: true })
                 : provider.sendFile
-                  ? provider.sendFile(phone, mediaUrl, fileWork.originalname || '', { ...opts, caption: waCaption })
-                  : Promise.resolve(false)
+                  ? provider.sendFile(phone, mediaUrl, fileWork.originalname || '', {
+                      ...opts,
+                      caption: waCaption,
+                      returnDetails: true,
+                    })
+                  : Promise.resolve({ ok: false, error: 'Envio de documento indisponível' })
       promise
         .then(async (result) => {
           const normalizedResult = typeof result === 'boolean'
@@ -4953,7 +6948,7 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
         if (provider?.uploadMedia) {
           setImmediate(async () => {
             try {
-              const result = await provider.uploadMedia(fileWork.path, fileWork.originalname || 'file', { companyId: company_id })
+              const result = await provider.uploadMedia(fileWork.path, fileWork.originalname || 'file', { companyId: company_id, whatsappInstanceId: whatsappInstanceId || undefined })
               if (result?.ok && result?.url) {
                 console.log('[ULTRAMSG] Upload bem-sucedido, enviando mídia via CDN:', result.url.slice(0, 50) + '...')
                 sendMediaWithUrl(result.url)
@@ -4998,7 +6993,7 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
     }
 
   // Não retornar mensagem completa no HTTP — evita duplicação (API + socket). Mensagem chega via nova_mensagem.
-  return { ok: true, msg }
+  return { ok: true, msg, aviso_whatsapp: avisoWhatsapp }
 }
 
 exports.enviarArquivo = async (req, res) => {
@@ -5007,12 +7002,13 @@ exports.enviarArquivo = async (req, res) => {
     const { company_id, id: user_id } = req.user
     const io = req.app.get('io')
 
-    const files =
+    const filesRaw =
       req.files && Array.isArray(req.files) && req.files.length > 0
         ? req.files
         : req.file
           ? [req.file]
           : []
+    const files = dedupeMulterFiles(filesRaw)
 
     if (!files.length) {
       const hint = 'Envie multipart/form-data com campo "file", "files" ou "audio" (múltiplos arquivos no mesmo pedido).'
@@ -5023,12 +7019,20 @@ exports.enviarArquivo = async (req, res) => {
       return res.status(400).json({ error: `Máximo ${MAX_ARQUIVOS_LOTE_ENVIO} arquivos por envio.` })
     }
 
-    const permEnvio = await assertPodeEnviarMensagem({ company_id, conversa_id, user_id })
+    const permEnvio = await assertPodeEnviarMensagem({
+      company_id,
+      conversa_id,
+      user_id,
+      role: req.user?.perfil,
+      user_dep_ids: req.user?.departamento_ids,
+      autoAssumirAoEnviar: true,
+      io,
+    })
     if (!permEnvio.ok) return res.status(permEnvio.status).json({ error: permEnvio.error })
 
     const { data: conversa } = await supabase
       .from('conversas')
-      .select('id, telefone, cliente_id, tipo, chat_lid')
+      .select('id, telefone, cliente_id, tipo, chat_lid, whatsapp_instance_id')
       .eq('company_id', company_id)
       .eq('id', conversa_id)
       .single()
@@ -5037,6 +7041,7 @@ exports.enviarArquivo = async (req, res) => {
       return res.status(404).json({ error: 'Conversa não encontrada' })
     }
 
+    const whatsappInstanceId = await resolveConversationWhatsappInstance(company_id, conversa)
     let telefoneParaEnvio = conversa.telefone || ''
     if (telefoneParaEnvio && String(telefoneParaEnvio).trim().toLowerCase().startsWith('lid:')) {
       if (conversa.cliente_id) {
@@ -5044,15 +7049,8 @@ exports.enviarArquivo = async (req, res) => {
         if (cli?.telefone && !String(cli.telefone).startsWith('lid:')) telefoneParaEnvio = cli.telefone
       }
       if (telefoneParaEnvio.startsWith('lid:') && conversa.chat_lid) {
-        const { data: outra } = await supabase
-          .from('conversas')
-          .select('telefone')
-          .eq('company_id', company_id)
-          .eq('chat_lid', conversa.chat_lid)
-          .not('telefone', 'like', 'lid:%')
-          .limit(1)
-          .maybeSingle()
-        if (outra?.telefone) telefoneParaEnvio = outra.telefone
+        const telSibling = await resolveTelefoneFromLidSiblingConversation(company_id, conversa, whatsappInstanceId)
+        if (telSibling) telefoneParaEnvio = telSibling
       }
       if (telefoneParaEnvio.startsWith('lid:')) {
         return res.status(400).json({ error: 'Número do contato indisponível (conversa por LID). Aguarde o contato enviar uma mensagem ou sincronize os contatos.' })
@@ -5063,7 +7061,11 @@ exports.enviarArquivo = async (req, res) => {
     const captionFromBody = String(req.body?.caption ?? req.body?.legenda ?? '')
       .trim()
       .slice(0, MAX_MEDIA_CAPTION_CHARS)
+    const clientTempIds = parseClientTempIdsFromBody(req.body, files.length)
     const ids = []
+    const results = []
+    let avisoWhatsapp = null
+    let hadFailure = false
 
     for (let i = 0; i < files.length; i++) {
       const raw = files[i]
@@ -5071,30 +7073,71 @@ exports.enviarArquivo = async (req, res) => {
       else if (raw.__tipoForcado) delete raw.__tipoForcado
 
       const perFileCaption = i === 0 ? captionFromBody : ''
+      const clientTempId = clientTempIds[i] || null
 
       const r = await enviarArquivoProcessarUm(req, raw, {
         company_id,
         user_id,
         conversa_id,
         telefoneParaEnvio,
+        whatsappInstanceId,
         io,
         captionUsuario: perFileCaption,
+        clientTempId,
       })
-      if (!r.ok) return res.status(r.status).json({ error: r.error })
+      if (!r.ok) {
+        hadFailure = true
+        results.push({
+          ok: false,
+          client_temp_id: clientTempId,
+          error: r.error || 'Falha ao enviar arquivo.',
+          index: i,
+        })
+        continue
+      }
       ids.push(r.msg.id)
+      const row = buildArquivoApiResultRow(
+        { ...r.msg, conversa_id: r.msg.conversa_id ?? Number(conversa_id) },
+        clientTempId
+      )
+      if (row) results.push(row)
+      if (r.aviso_whatsapp) avisoWhatsapp = r.aviso_whatsapp
       if (i < files.length - 1) await new Promise((resolve) => setTimeout(resolve, 250))
     }
 
-    if (ids.length === 1) {
-      return res.json({ ok: true, id: ids[0], conversa_id: Number(conversa_id) })
+    if (!ids.length) {
+      const firstErr = results.find((x) => x && x.ok === false)
+      return res.status(firstErr?.status || 400).json({
+        error: firstErr?.error || 'Nenhum arquivo foi enviado.',
+        results,
+        conversa_id: Number(conversa_id),
+      })
     }
-    return res.json({
+
+    const avisoPayload = avisoWhatsapp ? { aviso_whatsapp: avisoWhatsapp } : {}
+    const basePayload = {
       ok: true,
       ids,
       id: ids[ids.length - 1],
       conversa_id: Number(conversa_id),
       count: ids.length,
-    })
+      results,
+      partial: hadFailure,
+      ...avisoPayload,
+    }
+
+    if (ids.length === 1) {
+      const only = results.find((x) => x?.ok) || null
+      return res.json({
+        ...basePayload,
+        ...(only?.client_temp_id ? { client_temp_id: only.client_temp_id } : {}),
+        ...(only?.tipo ? { tipo: only.tipo } : {}),
+        ...(only?.url ? { url: only.url } : {}),
+        ...(only?.nome_arquivo ? { nome_arquivo: only.nome_arquivo } : {}),
+        ...(only?.texto != null ? { texto: only.texto } : {}),
+      })
+    }
+    return res.json(basePayload)
   } catch (err) {
     console.error('Erro ao enviar arquivo:', err)
     return res.status(500).json({ error: 'Erro ao enviar arquivo' })
@@ -5139,6 +7182,7 @@ async function encaminharUmaMensagemParaConversa(ctx) {
     user_id,
     conversa_id,
     telefoneParaEnvio,
+    whatsappInstanceId = null,
     provider,
     usuarioNome,
     mensagemOriginal,
@@ -5171,6 +7215,7 @@ async function encaminharUmaMensagemParaConversa(ctx) {
       direcao: 'out',
       autor_usuario_id: user_id,
       company_id,
+      ...(whatsappInstanceId ? { whatsapp_instance_id: whatsappInstanceId } : {}),
       status: 'pending',
       criado_em: timestamp,
     }).select().single()
@@ -5182,6 +7227,8 @@ async function encaminharUmaMensagemParaConversa(ctx) {
       resultadoEnvio = await provider.sendText(telefoneParaEnvio, textoParaWhatsApp, {
         companyId: company_id,
         conversaId: conversa_id,
+        whatsappInstanceId: whatsappInstanceId || undefined,
+        sendOrigin: 'encaminhamento_atendimento',
       })
     }
   } else if (temUrl && (tipoOriginal === 'imagem' || tipoOriginal === 'video' || tipoOriginal === 'audio' || tipoOriginal === 'voice' || tipoOriginal === 'arquivo' || tipoOriginal === 'sticker')) {
@@ -5215,6 +7262,7 @@ async function encaminharUmaMensagemParaConversa(ctx) {
       direcao: 'out',
       autor_usuario_id: user_id,
       company_id,
+      ...(whatsappInstanceId ? { whatsapp_instance_id: whatsappInstanceId } : {}),
       status: 'pending',
       criado_em: timestamp,
     }).select().single()
@@ -5223,7 +7271,12 @@ async function encaminharUmaMensagemParaConversa(ctx) {
     novaMensagem = msg
 
     if (telefoneParaEnvio) {
-      const opts = { companyId: company_id, conversaId: conversa_id }
+      const opts = {
+        companyId: company_id,
+        conversaId: conversa_id,
+        whatsappInstanceId: whatsappInstanceId || undefined,
+        sendOrigin: 'encaminhamento_atendimento',
+      }
 
       switch (tipoOriginal) {
         case 'imagem':
@@ -5277,6 +7330,7 @@ async function encaminharUmaMensagemParaConversa(ctx) {
       direcao: 'out',
       autor_usuario_id: user_id,
       company_id,
+      ...(whatsappInstanceId ? { whatsapp_instance_id: whatsappInstanceId } : {}),
       status: 'pending',
       criado_em: timestamp,
     }).select().single()
@@ -5289,13 +7343,20 @@ async function encaminharUmaMensagemParaConversa(ctx) {
         telefoneParaEnvio,
         contactName,
         contactPhone,
-        { companyId: company_id, conversaId: conversa_id },
+        {
+          companyId: company_id,
+          conversaId: conversa_id,
+          whatsappInstanceId: whatsappInstanceId || undefined,
+          sendOrigin: 'encaminhamento_atendimento',
+        },
       )
     } else if (telefoneParaEnvio && provider.sendText && !contactPhone) {
       const textoContato = `${prefixoEncaminhado}\n${contactName}`
       resultadoEnvio = await provider.sendText(telefoneParaEnvio, textoContato, {
         companyId: company_id,
         conversaId: conversa_id,
+        whatsappInstanceId: whatsappInstanceId || undefined,
+        sendOrigin: 'encaminhamento_atendimento',
       })
     }
   } else if (tipoOriginal === 'location' && mensagemOriginal.location_meta) {
@@ -5308,6 +7369,7 @@ async function encaminharUmaMensagemParaConversa(ctx) {
       direcao: 'out',
       autor_usuario_id: user_id,
       company_id,
+      ...(whatsappInstanceId ? { whatsapp_instance_id: whatsappInstanceId } : {}),
       status: 'pending',
       criado_em: timestamp,
     }).select().single()
@@ -5328,6 +7390,8 @@ async function encaminharUmaMensagemParaConversa(ctx) {
       }, {
         companyId: company_id,
         conversaId: conversa_id,
+        whatsappInstanceId: whatsappInstanceId || undefined,
+        sendOrigin: 'encaminhamento_atendimento',
       })
     }
   } else {
@@ -5342,6 +7406,7 @@ async function encaminharUmaMensagemParaConversa(ctx) {
       direcao: 'out',
       autor_usuario_id: user_id,
       company_id,
+      ...(whatsappInstanceId ? { whatsapp_instance_id: whatsappInstanceId } : {}),
       status: 'pending',
       criado_em: timestamp,
     }).select().single()
@@ -5353,6 +7418,8 @@ async function encaminharUmaMensagemParaConversa(ctx) {
       resultadoEnvio = await provider.sendText(telefoneParaEnvio, textoComUsuario, {
         companyId: company_id,
         conversaId: conversa_id,
+        whatsappInstanceId: whatsappInstanceId || undefined,
+        sendOrigin: 'encaminhamento_atendimento',
       })
     }
   }
@@ -5421,7 +7488,16 @@ exports.encaminharMensagem = async (req, res) => {
       return res.status(400).json({ error: `No máximo ${MAX_ENC_AMINHAR_LOTE} mensagens por encaminhamento` })
     }
 
-    const permEnvio = await assertPodeEnviarMensagem({ company_id, conversa_id, user_id })
+    const io = req.app.get('io')
+    const permEnvio = await assertPodeEnviarMensagem({
+      company_id,
+      conversa_id,
+      user_id,
+      role: req.user?.perfil,
+      user_dep_ids: req.user?.departamento_ids,
+      autoAssumirAoEnviar: true,
+      io,
+    })
     if (!permEnvio.ok) return res.status(permEnvio.status).json({ error: permEnvio.error })
 
     const { data: mensagensRows, error: errMsg } = await supabase
@@ -5443,7 +7519,7 @@ exports.encaminharMensagem = async (req, res) => {
     // Buscar conversa de destino
     const { data: conversa } = await supabase
       .from('conversas')
-      .select('id, telefone, cliente_id, tipo, chat_lid')
+      .select('id, telefone, cliente_id, tipo, chat_lid, whatsapp_instance_id')
       .eq('company_id', company_id)
       .eq('id', conversa_id)
       .single()
@@ -5453,6 +7529,7 @@ exports.encaminharMensagem = async (req, res) => {
     }
 
     // Resolver telefone real quando conversa tem apenas LID
+    const whatsappInstanceId = await resolveConversationWhatsappInstance(company_id, conversa)
     let telefoneParaEnvio = conversa.telefone || ''
     if (telefoneParaEnvio && String(telefoneParaEnvio).trim().toLowerCase().startsWith('lid:')) {
       if (conversa.cliente_id) {
@@ -5460,15 +7537,8 @@ exports.encaminharMensagem = async (req, res) => {
         if (cli?.telefone && !String(cli.telefone).startsWith('lid:')) telefoneParaEnvio = cli.telefone
       }
       if (telefoneParaEnvio.startsWith('lid:') && conversa.chat_lid) {
-        const { data: outra } = await supabase
-          .from('conversas')
-          .select('telefone')
-          .eq('company_id', company_id)
-          .eq('chat_lid', conversa.chat_lid)
-          .not('telefone', 'like', 'lid:%')
-          .limit(1)
-          .maybeSingle()
-        if (outra?.telefone) telefoneParaEnvio = outra.telefone
+        const telSibling = await resolveTelefoneFromLidSiblingConversation(company_id, conversa, whatsappInstanceId)
+        if (telSibling) telefoneParaEnvio = telSibling
       }
       if (telefoneParaEnvio.startsWith('lid:')) {
         return res.status(400).json({ error: 'Número do contato indisponível (conversa por LID). Aguarde o contato enviar uma mensagem ou sincronize os contatos.' })
@@ -5482,7 +7552,6 @@ exports.encaminharMensagem = async (req, res) => {
 
     const { nome: usuarioNome } = await getUsuarioParaEnvioCliente(supabase, company_id, user_id)
 
-    const io = req.app.get('io')
     const resultados = []
     for (let i = 0; i < orderedIds.length; i++) {
       if (i > 0) {
@@ -5495,6 +7564,7 @@ exports.encaminharMensagem = async (req, res) => {
         user_id,
         conversa_id,
         telefoneParaEnvio,
+        whatsappInstanceId,
         provider,
         usuarioNome,
         mensagemOriginal: byId.get(orderedIds[i]),
@@ -5541,6 +7611,16 @@ exports.encaminharMensagem = async (req, res) => {
  * POST /chats/finalizacao-ausencia-lote — supervisor/admin, JWT.
  * Body: { conversa_ids, dry_run?, execute?, confirm? } — delega a finalizeAbsenceForConversaIds.
  */
+exports.contarConversasPorFiltros = async (req, res) => {
+  try {
+    const counts = await getChatFilterCounts(req)
+    return res.json(counts)
+  } catch (err) {
+    console.error('[contarConversasPorFiltros]', err)
+    return res.status(500).json({ error: 'Erro ao contar conversas' })
+  }
+}
+
 exports.finalizacaoAusenciaLoteAuth = async (req, res) => {
   try {
     const company_id = Number(req.user?.company_id)
@@ -5564,99 +7644,18 @@ exports.finalizacaoAusenciaLoteAuth = async (req, res) => {
   }
 }
 
-exports.contarConversasPorFiltros = async (req, res) => {
-  const zero = {
-    total: 0,
-    todas: 0,
-    minha_fila: 0,
-    hoje: 0,
-    abertas: 0,
-    em_atendimento: 0,
-    finalizadas: 0,
-    por_ausencia: 0,
-    aguardando_cliente: 0,
-    pagamentos_pendentes: 0,
-    em_atraso: 0,
-    mensagens_disparadas: 0,
-  }
-
-  try {
-    const company_id = Number(req.user?.company_id)
-    const user_id = Number(req.user?.id ?? req.user?.user_id)
-    const role = String(req.user?.perfil || req.user?.role || '').toLowerCase()
-    const isAdmin = role === 'admin'
-    const depIds = Array.isArray(req.user?.departamento_ids)
-      ? req.user.departamento_ids.map(Number).filter(Number.isFinite)
-      : req.user?.departamento_id != null
-        ? [Number(req.user.departamento_id)].filter(Number.isFinite)
-        : []
-
-    if (!Number.isFinite(company_id) || company_id <= 0) return res.json(zero)
-
-    const { data, error } = await supabase
-      .from('conversas')
-      .select('id, status_atendimento, atendente_id, departamento_id, tipo, ultima_atividade, criado_em, finalizacao_motivo, finalizada_automaticamente')
-      .eq('company_id', company_id)
-      .order('ultima_atividade', { ascending: false })
-      .limit(5000)
-
-    if (error) {
-      console.warn('[contarConversasPorFiltros] consulta:', error.message || error)
-      return res.json({ ...zero, degraded: true })
-    }
-
-    const start = new Date()
-    start.setHours(0, 0, 0, 0)
-    const end = new Date()
-    end.setHours(23, 59, 59, 999)
-
-    const rows = (data || []).filter((c) => {
-      if (isAdmin) return true
-      const isGroup = isGroupConversation(c)
-      if (isGroup) return true
-      const convDep = c.departamento_id != null ? Number(c.departamento_id) : null
-      if (convDep == null) return true
-      return depIds.some((id) => Number(id) === convDep)
-    })
-
-    const counts = { ...zero }
-    for (const c of rows) {
-      const isGroup = isGroupConversation(c)
-      const status = String(c.status_atendimento || '').toLowerCase()
-      const atendenteId = c.atendente_id != null ? Number(c.atendente_id) : null
-      const minha = Number.isFinite(user_id) && atendenteId === user_id
-      const atividade = c.ultima_atividade || c.criado_em
-      const dt = atividade ? new Date(atividade) : null
-      const hoje = dt && !Number.isNaN(dt.getTime()) && dt >= start && dt <= end
-
-      counts.total += 1
-      counts.todas += 1
-      if (hoje) counts.hoje += 1
-      if (status === 'aberta') counts.abertas += 1
-      if (status === 'mensagem_disparada') counts.mensagens_disparadas += 1
-      if (status === 'fechada' || status === 'finalizada' || status === 'encerrada') counts.finalizadas += 1
-      if (String(c.finalizacao_motivo || '').toLowerCase() === 'ausencia_cliente' || c.finalizada_automaticamente === true) {
-        counts.por_ausencia += 1
-      }
-      if (status === 'aguardando_cliente') counts.aguardando_cliente += 1
-      if (status === 'pagamento_pendente') counts.pagamentos_pendentes += 1
-      if (status === 'em_atraso') counts.em_atraso += 1
-
-      if (status === 'em_atendimento') {
-        if (isAdmin || role === 'supervisor' || minha || isGroup) counts.em_atendimento += 1
-      }
-
-      if (
-        status === 'aberta' ||
-        (['em_atendimento', 'aguardando_cliente', 'pagamento_pendente', 'em_atraso'].includes(status) && minha)
-      ) {
-        counts.minha_fila += 1
-      }
-    }
-
-    return res.json(counts)
-  } catch (err) {
-    console.warn('[contarConversasPorFiltros]', err?.message || err)
-    return res.json({ ...zero, degraded: true })
-  }
+exports._test = {
+  assertPodeEnviarMensagem,
+  parseChatListPagination,
+  splitChatListPage,
+  parseMessageHistoryPagination,
+  splitMessageHistoryPage,
+  shouldIncludeClientesSemConversa,
+  getSearchMessagesPageSize,
+  getChatSearchScanLimit,
+  getChatSearchIdLimit,
+  getChatFilterIdLimit,
+  resolveConversationWhatsappInstance,
+  isConversaAtendentesSchemaMissing,
+  isConversaAtendentesMissingTable,
 }

@@ -7,8 +7,12 @@ const { isGroupConversation } = require('../helpers/conversaHelper')
 const webPushService = require('./webPushService')
 const pushNotificationService = require('./pushNotificationService')
 
-/** Por defeito false = igual ao comportamento histórico (FCM só se não houver subscription Web Push). true = FCM em paralelo (útil com app nativo + PWA no mesmo utilizador). */
-const WEB_PUSH_FCM_ALONGSIDE_VAPID = getBooleanEnv('WEB_PUSH_FCM_ALONGSIDE_VAPID', false)
+/**
+ * Por defeito, FCM também dispara quando existe Web Push no mesmo usuário.
+ * Isso cobre o caso comum "PC com VAPID inscrito, celular com token FCM": uma
+ * subscription de outro dispositivo não pode silenciar o alerta mobile.
+ */
+const WEB_PUSH_FCM_ALONGSIDE_VAPID = getBooleanEnv('WEB_PUSH_FCM_ALONGSIDE_VAPID', true)
 
 // Webhooks/sync podem atrasar alguns minutos; tolerância maior evita silenciar push válido por “mensagem velha”.
 const MAX_MESSAGE_AGE_MS = (() => {
@@ -128,7 +132,7 @@ function buildPushPayloadJson({
     title: contactName || 'Nova mensagem',
     body: messagePreview || 'Nova mensagem',
     icon: absIcon,
-    badge: absolutizeUrl('/brand/zaperp-favicon.svg'),
+    badge: absolutizeUrl('/brand/pwa-192.png'),
     tag: `zap-${String(mensagem_id)}`,
     renotify: false,
     priority: 'high',
@@ -353,8 +357,8 @@ async function maybeDispatchInboundWebPush(opts) {
       }
     }
 
-    // FCM: por defeito só quando não há Web Push (comportamento histórico). Com WEB_PUSH_FCM_ALONGSIDE_VAPID=1,
-    // também envia FCM em paralelo (ex.: token FCM no telemóvel + subscription no PC).
+    // FCM deve acompanhar Web Push por defeito: VAPID pode estar no PC e o token FCM no celular.
+    // WEB_PUSH_FCM_ALONGSIDE_VAPID=0 mantém o comportamento legado em caso de rollout controlado.
     const usarFcm = fcmOk && (WEB_PUSH_FCM_ALONGSIDE_VAPID || !temSubscriptionVapid)
     if (usarFcm) {
       if (WEB_PUSH_DEBUG && temSubscriptionVapid && WEB_PUSH_FCM_ALONGSIDE_VAPID) {
