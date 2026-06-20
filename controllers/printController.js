@@ -15,8 +15,6 @@ const STATUS_ATENDIMENTO_LABEL = {
   aberta: 'Aberta',
   fechada: 'Fechada',
   aguardando_cliente: 'Aguardando cliente',
-  pagamento_pendente: 'Pagamento pendente',
-  em_atraso: 'Em atraso',
   em_atendimento: 'Em atendimento',
   finalizada: 'Finalizada',
   ociosa: 'Ociosa',

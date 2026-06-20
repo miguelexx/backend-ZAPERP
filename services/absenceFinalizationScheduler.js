@@ -40,6 +40,14 @@ function startAbsenceFinalizationScheduler() {
   if (schedulerStarted) return
   schedulerStarted = true
 
+  const disabled = String(process.env.ABSENCE_FINALIZATION_SCHEDULER_ENABLED || '')
+    .trim()
+    .toLowerCase()
+  if (disabled === '0' || disabled === 'false') {
+    console.log('[absenceScheduler] desativado por ABSENCE_FINALIZATION_SCHEDULER_ENABLED')
+    return
+  }
+
   const intervalMs = parseIntervalMs()
   timer = setInterval(() => {
     runCycle().catch(() => {})

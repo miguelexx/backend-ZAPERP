@@ -7,12 +7,6 @@ const iaController = require('../controllers/iaController')
 // Chatbot/IA: supervisor e admin (atendente não acessa)
 router.get('/config', auth, supervisorOrAdmin, iaController.getConfig)
 router.put('/config', auth, supervisorOrAdmin, iaController.putConfig)
-router.post(
-  '/admin-atendimento-alerta/testar',
-  auth,
-  supervisorOrAdmin,
-  iaController.testarAdminAtendimentoAlerta
-)
 router.get('/regras', auth, supervisorOrAdmin, iaController.getRegras)
 router.post('/regras', auth, supervisorOrAdmin, iaController.postRegra)
 router.put('/regras/:id', auth, supervisorOrAdmin, iaController.putRegra)

@@ -13,9 +13,27 @@ const CONFIRM_FINALIZE_ABSENCE = 'FINALIZAR_AUSENCIA_CLIENTE'
 const CONFIRM_FINALIZE_ABSENCE_BATCH = 'FINALIZAR_LOTE_AUSENCIA_CLIENTE'
 const SNAP_PREFIX = '|ausencia_snap:'
 
-function isAbsenceFinalizationEmergencyDisabled() {
-  const raw = String(process.env.ABSENCE_FINALIZATION_EMERGENCY_DISABLED || '').trim().toLowerCase()
+function isAbsenceFinalizationEnabledGlobally() {
+  const raw = String(process.env.ABSENCE_FINALIZATION_GLOBAL_ENABLED || '').trim().toLowerCase()
   return raw === '1' || raw === 'true'
+}
+
+/**
+ * Empresas onde o job de ausência pode rodar (opt-in explícito).
+ * Padrão: apenas company_id = 1 (teste / piloto). Lista vazia explícita = nenhuma empresa.
+ */
+function parseAllowedCompanyIdsForAbsenceJob() {
+  const rawEnv = process.env.ABSENCE_FINALIZATION_ALLOWED_COMPANY_IDS
+  const raw =
+    rawEnv === undefined || rawEnv === null
+      ? '1'
+      : String(rawEnv).trim()
+  if (!raw) return new Set()
+  const ids = raw
+    .split(',')
+    .map((s) => Number(String(s).trim()))
+    .filter((n) => Number.isInteger(n) && n > 0)
+  return new Set(ids)
 }
 
 function getMaxFinalizationsPerCycle() {
@@ -32,8 +50,9 @@ function getScanLimitPerCompany() {
 
 function getAbsenceConfig(chatbotConfig) {
   const cfg = chatbotConfig || {}
+  const globalEnabled = isAbsenceFinalizationEnabledGlobally()
   return {
-    ativo: !!cfg.finalizar_por_ausencia_ativo,
+    ativo: globalEnabled && !!cfg.finalizar_por_ausencia_ativo,
     prazo: Math.max(1, Number(cfg.finalizar_por_ausencia_prazo) || 24),
     unidade: String(cfg.finalizar_por_ausencia_unidade || 'horas_corridas').trim().toLowerCase(),
     mensagem: String(cfg.finalizar_por_ausencia_mensagem || '').trim() || ABSENCE_FALLBACK_MESSAGE,
@@ -231,7 +250,7 @@ async function clearWaitingForClient(company_id, conversa_id) {
 }
 
 async function tryMarkWaitingAfterHumanOutbound({ company_id, conversa_id, texto, criado_em, autor_usuario_id }) {
-  if (!company_id || !conversa_id) return { marked: false, reason: 'missing_context' }
+  if (!company_id || !conversa_id) return
   const ts = criado_em || new Date().toISOString()
   const { data: conv } = await supabase
     .from('conversas')
@@ -241,14 +260,10 @@ async function tryMarkWaitingAfterHumanOutbound({ company_id, conversa_id, texto
     .maybeSingle()
   const isGroup =
     String(conv?.tipo || '').toLowerCase() === 'grupo' || String(conv?.telefone || '').includes('@g.us')
-  if (!conv || isGroup) return { marked: false, reason: 'not_eligible_conversation' }
-  if (conv.status_atendimento !== 'em_atendimento' || conv.atendente_id == null) {
-    return { marked: false, reason: 'not_in_human_attendance' }
-  }
+  if (!conv || isGroup) return
+  if (conv.status_atendimento !== 'em_atendimento' || conv.atendente_id == null) return
   const { triageMerged, absence: absenceCfg } = await loadChatbotTriageMergeAndAbsence(company_id)
-  if (!outboundQualificaParaAguardandoCliente(texto, autor_usuario_id, triageMerged, absenceCfg)) {
-    return { marked: false, reason: 'message_not_qualified' }
-  }
+  if (!outboundQualificaParaAguardandoCliente(texto, autor_usuario_id, triageMerged, absenceCfg)) return
   const jaAguardando = !!conv.aguardando_cliente_desde
   await markWaitingForClient(company_id, conversa_id, ts)
   if (!jaAguardando) {
@@ -259,7 +274,6 @@ async function tryMarkWaitingAfterHumanOutbound({ company_id, conversa_id, texto
       observacao: 'Conversa marcada como aguardando cliente após mensagem do atendente',
     })
   }
-  return { marked: true, aguardando_cliente_desde: ts, jaAguardando }
 }
 
 async function sendAbsenceClosingMessage({ provider, company_id, conversa_id, telefone, mensagem }) {
@@ -272,11 +286,7 @@ async function sendAbsenceClosingMessage({ provider, company_id, conversa_id, te
   if (row?.ausencia_mensagem_enviada_em) {
     return { ok: true, skippedDuplicate: true }
   }
-  const result = await provider.sendText(telefone, mensagem, {
-    companyId: company_id,
-    conversaId: conversa_id,
-    sendOrigin: 'finalizacao_ausencia_cliente',
-  })
+  const result = await provider.sendText(telefone, mensagem, { companyId: company_id, conversaId: conversa_id })
   const ok = !!result?.ok
   if (!ok) return { ok: false }
   await supabase.from('mensagens').insert({
@@ -330,8 +340,20 @@ function msIdleFromLastOutbound(lastCriadoEm) {
  */
 async function finalizeConversationsByAbsence(opts = {}) {
   const dryRun = opts.dryRun === true || opts.execute === false
-  if (isAbsenceFinalizationEmergencyDisabled()) {
-    return { ok: true, processadas: 0, analisadas: 0, dryRun, emergencyDisabled: true, candidatos: [] }
+  if (!isAbsenceFinalizationEnabledGlobally()) {
+    return { ok: true, processadas: 0, analisadas: 0, dryRun, disabledByGlobalFlag: true, candidatos: [] }
+  }
+
+  const allowedCompanies = parseAllowedCompanyIdsForAbsenceJob()
+  if (!allowedCompanies.size) {
+    return {
+      ok: true,
+      processadas: 0,
+      analisadas: 0,
+      dryRun,
+      skippedNoAllowedCompanies: true,
+      candidatos: [],
+    }
   }
 
   const { data: configs } = await supabase.from('ia_config').select('company_id')
@@ -351,6 +373,7 @@ async function finalizeConversationsByAbsence(opts = {}) {
 
   for (const item of configs) {
     const company_id = Number(item.company_id)
+    if (!allowedCompanies.has(company_id)) continue
 
     const { triageMerged, absence } = await loadChatbotTriageMergeAndAbsence(company_id)
     if (!absence.ativo) continue
@@ -590,19 +613,18 @@ async function finalizeConversationsByAbsence(opts = {}) {
  */
 async function finalizeAbsenceForConversaIds(p) {
   const company_id = Number(p.company_id)
-  const dryRun = !!p.dryRun
-  if (isAbsenceFinalizationEmergencyDisabled()) {
-    return {
-      ok: false,
-      emergencyDisabled: true,
-      error: 'Finalização por ausência pausada por kill switch emergencial (ABSENCE_FINALIZATION_EMERGENCY_DISABLED).',
-    }
+  const allowed = parseAllowedCompanyIdsForAbsenceJob()
+  if (!allowed.has(company_id)) {
+    return { ok: false, error: 'Empresa não habilitada para finalização por ausência (ABSENCE_FINALIZATION_ALLOWED_COMPANY_IDS).' }
   }
-
+  const dryRun = !!p.dryRun
   if (p.execute === true && String(p.confirm || '').trim() !== CONFIRM_FINALIZE_ABSENCE_BATCH) {
     return { ok: false, error: `Para executar o lote, informe confirm: "${CONFIRM_FINALIZE_ABSENCE_BATCH}".` }
   }
   const execute = !!p.execute && !dryRun
+  if (!isAbsenceFinalizationEnabledGlobally()) {
+    return { ok: false, error: 'ABSENCE_FINALIZATION_GLOBAL_ENABLED desligado.' }
+  }
 
   const ids = Array.isArray(p.conversa_ids) ? p.conversa_ids.map((x) => Number(x)).filter((n) => n > 0) : []
   if (!ids.length) return { ok: false, error: 'Informe conversa_ids (array de inteiros).' }
@@ -774,7 +796,6 @@ module.exports = {
   ABSENCE_FALLBACK_MESSAGE,
   CONFIRM_FINALIZE_ABSENCE,
   CONFIRM_FINALIZE_ABSENCE_BATCH,
-  isAbsenceFinalizationEmergencyDisabled,
   getAbsenceConfig,
   getAbsencePolicyForCompany,
   loadChatbotTriageMergeAndAbsence,
@@ -786,6 +807,7 @@ module.exports = {
   tryMarkWaitingAfterHumanOutbound,
   finalizeConversationsByAbsence,
   finalizeAbsenceForConversaIds,
+  parseAllowedCompanyIdsForAbsenceJob,
   fetchLastAbsenceEncerramentoSnap,
   parseAbsenceSnapFromObservacao,
   resolveReopenAssignmentAfterAbsence,

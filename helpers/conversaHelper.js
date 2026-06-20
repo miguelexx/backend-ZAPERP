@@ -15,15 +15,4 @@ function isGroupConversation(conversa) {
   return false
 }
 
-/** Status de atendimento encerrado (permite reabrir sem restrição de setor). */
-function isClosedAttendanceStatus(status) {
-  const s = String(status ?? '').toLowerCase().trim().replace(/\s+/g, '_')
-  return s === 'fechada' || s === 'encerrada' || s === 'finalizada' || s === 'finalizado'
-}
-
-function isClosedAttendance(conversa) {
-  if (!conversa) return false
-  return isClosedAttendanceStatus(conversa.status_atendimento)
-}
-
-module.exports = { isGroupConversation, isClosedAttendanceStatus, isClosedAttendance }
+module.exports = { isGroupConversation }

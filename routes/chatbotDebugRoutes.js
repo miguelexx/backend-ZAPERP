@@ -14,16 +14,11 @@
 const express = require('express')
 const router = express.Router()
 const supabase = require('../config/supabase')
-const auth = require('../middleware/auth')
-const adminOnly = require('../middleware/adminOnly')
 const {
   DEFAULT_CHATBOT_CONFIG,
   validateChatbotConfig,
   normalizeChatbotTriageStrings,
 } = require('../services/chatbotTriageService')
-
-router.use(auth)
-router.use(adminOnly)
 
 /**
  * GET /api/chatbot/debug/logs/:companyId
@@ -41,10 +36,6 @@ router.get('/logs/:companyId', async (req, res) => {
       })
     }
     
-    if (companyId !== Number(req.user.company_id)) {
-      return res.status(403).json({ success: false, error: 'Acesso negado para esta empresa' })
-    }
-
     let query = supabase
       .from('bot_logs')
       .select(`
@@ -138,18 +129,10 @@ router.get('/conversation/:conversaId', async (req, res) => {
         )
       `)
       .eq('id', conversaId)
-      .eq('company_id', req.user.company_id)
-      .maybeSingle()
+      .single()
     
     if (conversaError) {
       throw new Error(conversaError.message)
-    }
-
-    if (!conversa) {
-      return res.status(404).json({
-        success: false,
-        error: 'Conversa não encontrada para esta empresa'
-      })
     }
     
     // Buscar mensagens da conversa
@@ -157,7 +140,6 @@ router.get('/conversation/:conversaId', async (req, res) => {
       .from('mensagens')
       .select('*')
       .eq('conversa_id', conversaId)
-      .eq('company_id', req.user.company_id)
       .order('criado_em', { ascending: true })
     
     if (mensagensError) {
@@ -169,7 +151,6 @@ router.get('/conversation/:conversaId', async (req, res) => {
       .from('bot_logs')
       .select('*')
       .eq('conversa_id', conversaId)
-      .eq('company_id', req.user.company_id)
       .order('criado_em', { ascending: true })
     
     if (logsError) {
@@ -238,10 +219,6 @@ router.post('/simulate/:companyId', async (req, res) => {
     }
     
     // Buscar ou criar cliente de teste
-    if (companyId !== Number(req.user.company_id)) {
-      return res.status(403).json({ success: false, error: 'Acesso negado para esta empresa' })
-    }
-
     const { data: cliente, error: clienteError } = await supabase
       .from('clientes')
       .select('id')
@@ -282,8 +259,8 @@ router.post('/simulate/:companyId', async (req, res) => {
     if (!conversaId || reset) {
       if (conversaId && reset) {
         // Limpar logs e mensagens para reset
-        await supabase.from('bot_logs').delete().eq('conversa_id', conversaId).eq('company_id', companyId)
-        await supabase.from('mensagens').delete().eq('conversa_id', conversaId).eq('company_id', companyId)
+        await supabase.from('bot_logs').delete().eq('conversa_id', conversaId)
+        await supabase.from('mensagens').delete().eq('conversa_id', conversaId)
         await supabase
           .from('conversas')
           .update({
@@ -292,7 +269,6 @@ router.post('/simulate/:companyId', async (req, res) => {
             status_atendimento: 'aberta'
           })
           .eq('id', conversaId)
-          .eq('company_id', companyId)
       } else {
         const { data: novaConversa, error: novaConversaError } = await supabase
           .from('conversas')
@@ -349,7 +325,6 @@ router.post('/simulate/:companyId', async (req, res) => {
       .from('mensagens')
       .select('*')
       .eq('conversa_id', conversaId)
-      .eq('company_id', companyId)
       .order('criado_em', { ascending: false })
       .limit(5)
     
@@ -357,7 +332,6 @@ router.post('/simulate/:companyId', async (req, res) => {
       .from('bot_logs')
       .select('*')
       .eq('conversa_id', conversaId)
-      .eq('company_id', companyId)
       .order('criado_em', { ascending: false })
       .limit(5)
     
@@ -398,10 +372,6 @@ router.get('/metrics/:companyId', async (req, res) => {
     }
     
     // Calcular data de início baseada no período
-    if (companyId !== Number(req.user.company_id)) {
-      return res.status(403).json({ success: false, error: 'Acesso negado para esta empresa' })
-    }
-
     const now = new Date()
     const startDate = new Date()
     
@@ -491,10 +461,6 @@ router.post('/reset/:companyId', async (req, res) => {
       })
     }
     
-    if (companyId !== Number(req.user.company_id)) {
-      return res.status(403).json({ success: false, error: 'Acesso negado para esta empresa' })
-    }
-
     if (!confirm) {
       return res.status(400).json({
         success: false,
@@ -556,10 +522,6 @@ router.get('/validate/:companyId', async (req, res) => {
       })
     }
     
-    if (companyId !== Number(req.user.company_id)) {
-      return res.status(403).json({ success: false, error: 'Acesso negado para esta empresa' })
-    }
-
     const { getChatbotConfig } = require('../services/chatbotTriageService')
     
     // Buscar configuração

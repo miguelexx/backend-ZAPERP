@@ -6,32 +6,10 @@
  * @see ../docs/_OFICIAL/ADR-LEGACY-NAMING.md
  */
 
-const { getWhatsappInstanceByProviderInstanceId } = require('../services/whatsappInstanceService')
+const { getCompanyIdByInstanceId } = require('../services/whatsappConfigService')
 
 function _logSafe(entry) {
   console.log('[WEBHOOK]', JSON.stringify({ ts: new Date().toISOString(), ...entry }))
-}
-
-function supabaseProjectHint() {
-  const raw = String(process.env.SUPABASE_URL || '').trim()
-  if (!raw) return 'not_configured'
-  try {
-    const url = new URL(raw)
-    const host = url.hostname || ''
-    const ref = host.endsWith('.supabase.co') ? host.split('.')[0] : host
-    return ref ? `${url.protocol}//${ref}` : url.protocol
-  } catch (_) {
-    return 'invalid_url'
-  }
-}
-
-function _logResolveDecision(entry) {
-  const payload = {
-    provider: 'ultramsg',
-    supabase_project: supabaseProjectHint(),
-    ...entry,
-  }
-  console.log('[WEBHOOK_RESOLVE]', JSON.stringify(payload))
 }
 
 function extractInstanceId(body) {
@@ -73,67 +51,18 @@ async function resolveWebhookCompany(req, res, next) {
       return res.status(200).json({ ok: true, ignored: 'missing_instanceId' })
     }
 
-    const eventType = inferEventType(body, path)
-    const resolved = await getWhatsappInstanceByProviderInstanceId('ultramsg', instanceIdRaw)
-    _logResolveDecision({
-      eventType,
-      instance_id_raw: instanceIdRaw,
-      service_return_shape: {
-        has_instance: Boolean(resolved?.instance),
-        has_error: Boolean(resolved?.error),
-        code: resolved?.code || null,
-      },
-      resolved_company_id: resolved?.instance?.company_id ?? null,
-      resolved_whatsapp_instance_id: resolved?.instance?.id ?? null,
-      resolved_provider_instance_id: resolved?.instance?.instance_id || null,
-    })
-
-    if (resolved?.code === 'DUPLICATE_PROVIDER_INSTANCE') {
-      req.webhookLogData = {
-        status: 'blocked_duplicate_instance',
-        instance_id: instanceIdRaw,
-        event_type: eventType,
-        provider: 'ultramsg',
-      }
-      _logSafe({ eventType, instanceId, companyIdResolved: 'duplicate_blocked' })
-      return res.status(200).json({ ok: true, ignored: 'duplicate_provider_instance' })
-    }
-
-    const instance = resolved?.instance || null
-    const company_id = instance?.company_id ?? null
-    const whatsapp_instance_id = instance?.id ?? null
-    const provider_instance_id = instance?.instance_id || instanceIdRaw
+    const company_id = await getCompanyIdByInstanceId(instanceIdRaw)
     const companyIdResolved = company_id != null ? company_id : 'not_mapped'
+    const eventType = inferEventType(body, path)
 
     _logSafe({ eventType, instanceId, companyIdResolved })
 
-    req.webhookContext = {
-      company_id,
-      whatsapp_instance_id,
-      provider: 'ultramsg',
-      provider_instance_id,
-      instanceId: instanceIdRaw,
-      eventType,
-      whatsapp_instance_is_default: instance?.is_default === true,
-      whatsapp_instance_source: instance?.source || 'whatsapp_instances',
-    }
+    req.webhookContext = { company_id, instanceId: instanceIdRaw, eventType }
     // Compat legado: manter alias até concluir renomeação total.
     req.zapiContext = req.webhookContext
 
     if (company_id == null) {
-      req.webhookLogData = {
-        status: 'ignored_not_mapped',
-        instance_id: instanceIdRaw,
-        event_type: eventType,
-        provider: 'ultramsg',
-        error_message: resolved?.error || 'Instancia WhatsApp nao encontrada para o instance_id recebido',
-      }
-      _logResolveDecision({
-        eventType,
-        instance_id_raw: instanceIdRaw,
-        final_status: 'ignored_not_mapped',
-        reason: resolved?.error || 'not_found',
-      })
+      req.webhookLogData = { status: 'ignored_not_mapped', instance_id: instanceIdRaw, event_type: eventType }
       return res.status(200).json({ ok: true, ignored: 'instance_not_mapped' })
     }
     next()

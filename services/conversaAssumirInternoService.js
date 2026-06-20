@@ -1,8 +1,6 @@
 const supabase = require('../config/supabase')
 const { isGroupConversation } = require('../helpers/conversaHelper')
 const { registrarAtendimento } = require('./atendimentosRegistroService')
-const { clearReabertaFaltaInteracao } = require('../helpers/reabertaFaltaInteracaoHelper')
-const { resetAlertaSemRespostaAoAssumirReaberta } = require('./atendimentoSemRespostaService')
 
 /**
  * Mesma regra de POST /chats/:id/assumir — atualiza conversa e registra atendimento.
@@ -13,14 +11,13 @@ async function executarAssumirConversa({
   conversa_id,
   user_id,
   perfil,
-  departamento_ids = [],
-  observacao = null
+  departamento_ids = []
 }) {
   const isAdmin = perfil === 'admin'
 
   const { data: atual, error: errAtual } = await supabase
     .from('conversas')
-    .select('id, atendente_id, departamento_id, tipo, telefone, reaberta_falta_interacao_em')
+    .select('id, atendente_id, departamento_id, tipo, telefone')
     .eq('company_id', company_id)
     .eq('id', conversa_id)
     .single()
@@ -66,62 +63,27 @@ async function executarAssumirConversa({
     }
   }
 
-  const assumidaEm = new Date().toISOString()
-
-  await resetAlertaSemRespostaAoAssumirReaberta(company_id, conversa_id, assumidaEm, {
-    reaberta_falta_interacao_em: atual.reaberta_falta_interacao_em,
-  })
-
-  let updateQuery = supabase
+  const { data, error } = await supabase
     .from('conversas')
     .update({
       atendente_id: user_id,
       status_atendimento: 'em_atendimento',
       lida: true,
-      atendente_atribuido_em: assumidaEm,
-      reaberta_falta_interacao_em: null,
+      atendente_atribuido_em: new Date().toISOString()
     })
     .eq('company_id', company_id)
     .eq('id', conversa_id)
-
-  if (atual.atendente_id == null) {
-    updateQuery = updateQuery.is('atendente_id', null)
-  } else {
-    updateQuery = updateQuery.eq('atendente_id', user_id)
-  }
-
-  const { data, error } = await updateQuery
     .select()
-    .maybeSingle()
+    .single()
 
   if (error) return { ok: false, status: 500, error: error.message, conversa: null }
-  if (!data) {
-    const { data: depois, error: errDepois } = await supabase
-      .from('conversas')
-      .select()
-      .eq('company_id', company_id)
-      .eq('id', conversa_id)
-      .maybeSingle()
-
-    if (errDepois) return { ok: false, status: 500, error: errDepois.message, conversa: null }
-    if (depois?.atendente_id && Number(depois.atendente_id) === Number(user_id)) {
-      return { ok: true, status: 200, error: null, conversa: depois, already_assigned: true }
-    }
-    if (depois?.atendente_id) {
-      return { ok: false, status: 409, error: 'Conversa ja esta em atendimento por outro usuario', conversa: null }
-    }
-    return { ok: false, status: 409, error: 'Nao foi possivel assumir a conversa. Tente novamente.', conversa: null }
-  }
-
-  await clearReabertaFaltaInteracao(company_id, conversa_id)
 
   const resultAt = await registrarAtendimento({
     conversa_id,
     company_id,
     acao: 'assumiu',
     de_usuario_id: user_id,
-    para_usuario_id: user_id,
-    observacao
+    para_usuario_id: user_id
   })
   if (resultAt.error) return { ok: false, status: 500, error: resultAt.error.message, conversa: null }
 

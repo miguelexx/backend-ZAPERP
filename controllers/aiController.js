@@ -22,13 +22,8 @@ const CACHE_TTL_HOURS = 24
 // Limite padrão de perguntas por mês.
 // Se quiser ilimitado por padrão, deixe como null. A empresa ainda pode
 // configurar um limite específico na coluna empresas.ai_limit_per_month.
-const MONTHLY_DEFAULT_LIMIT = (() => {
-  const raw = Number(process.env.AI_MONTHLY_DEFAULT_LIMIT)
-  if (Number.isFinite(raw) && raw >= 0) return Math.floor(raw) || null
-  return 300
-})()
+const MONTHLY_DEFAULT_LIMIT = null  // null = ilimitado se não configurado na empresa
 const MAX_QUESTION_LENGTH = 500
-const inFlightQuestions = new Map()
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -41,16 +36,6 @@ function logError(context) {
       ...context,
     }))
   } catch (_) {}
-}
-
-function redactSensitiveText(value, max = 500) {
-  let s = String(value || '').slice(0, max)
-  s = s.replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, '[email]')
-  s = s.replace(/\b(?:\+?55\s*)?(?:\(?\d{2}\)?\s*)?\d{4,5}[-.\s]?\d{4}\b/g, '[telefone]')
-  s = s.replace(/\b\d{3}\.?\d{3}\.?\d{3}-?\d{2}\b/g, '[cpf]')
-  s = s.replace(/\b\d{2}\.?\d{3}\.?\d{3}\/?\d{4}-?\d{2}\b/g, '[cnpj]')
-  s = s.replace(/\b\d{6,}\b/g, '[numero]')
-  return s
 }
 
 /** SHA-256 da pergunta normalizada, escopado por empresa. */
@@ -71,7 +56,7 @@ function startOfMonth() {
 /** Evita cache para perguntas sensíveis a atualização contínua/ranking. */
 function shouldBypassCache(question) {
   const q = String(question || '').toLowerCase()
-  return /(quem\s+mais|qual\s+atendente\s+mais|mais\s+educad|mais\s+ofert|mais\s+manda\s+mensagem|ranking|top\s+\d+|planilha|csv|excel|xlsx|relat[oó]rio|exportar|download|qual\s+conversa|quais\s+conversas|falando\s+de|fala\s+de|menciona)/i.test(q)
+  return /(quem\s+mais|qual\s+atendente\s+mais|mais\s+educad|mais\s+ofert|mais\s+manda\s+mensagem|ranking|top\s+\d+)/i.test(q)
 }
 
 // ── Verificação de limite mensal ──────────────────────────────────────────────
@@ -106,26 +91,6 @@ async function checkMonthlyLimit(company_id) {
   }
 }
 
-async function checkCompanyAiEnabled(company_id) {
-  try {
-    const { data, error } = await supabase
-      .from('ia_config')
-      .select('config')
-      .eq('company_id', company_id)
-      .maybeSingle()
-
-    if (error) {
-      logError({ error: error.message, company_id, phase: 'ai_enabled_check' })
-      return false
-    }
-
-    return data?.config?.ia?.usar_ia === true
-  } catch (err) {
-    logError({ error: err?.message, company_id, phase: 'ai_enabled_check' })
-    return false
-  }
-}
-
 // ── Cache ─────────────────────────────────────────────────────────────────────
 
 /** Busca resposta em cache válido. Retorna null se não encontrar. */
@@ -153,7 +118,7 @@ async function saveCache({ company_id, question_hash, question, response, intent
       {
         company_id,
         question_hash,
-        question: redactSensitiveText(question, MAX_QUESTION_LENGTH),
+        question: question.slice(0, MAX_QUESTION_LENGTH),
         response,           // objeto JSON completo { ok, intent, answer, data }
         intent,
         created_at: new Date().toISOString(),
@@ -168,15 +133,15 @@ async function saveCache({ company_id, question_hash, question, response, intent
 
 // ── Log de auditoria ──────────────────────────────────────────────────────────
 
-async function writeAuditLog({ company_id, usuario_id, question, intent, answer, success, ip, tokens_used }) {
+async function writeAuditLog({ company_id, usuario_id, question, intent, answer, success, ip }) {
   try {
     await supabase.from('ai_logs').insert({
       company_id,
       usuario_id: usuario_id || null,
-      question: redactSensitiveText(question, MAX_QUESTION_LENGTH),
+      question: question.slice(0, MAX_QUESTION_LENGTH),
       intent: intent || 'UNKNOWN',
-      response: typeof answer === 'string' ? redactSensitiveText(answer, 1200) : null,
-      tokens_used: Number.isFinite(Number(tokens_used)) ? Math.max(0, Math.floor(Number(tokens_used))) : null,
+      response: typeof answer === 'string' ? answer.slice(0, 2000) : null,
+      tokens_used: null,  // expandir futuramente expondo usage da OpenAI SDK
       success: !!success,
       ip: ip || null,
       created_at: new Date().toISOString(),
@@ -209,35 +174,8 @@ async function ask(req, res) {
     }
 
     const trimmedQuestion = question.trim()
-    let days
-    if (period_days !== undefined && period_days !== null && String(period_days).trim() !== '') {
-      days = Number(period_days)
-      if (!Number.isFinite(days) || days <= 0 || days > 365) {
-        return res.status(400).json({ ok: false, intent: null, answer: null, data: null, error: 'period_days invÃ¡lido.' })
-      }
-      days = Math.floor(days)
-    }
+    const days = period_days != null ? Number(period_days) : undefined
     const bypassCache = shouldBypassCache(trimmedQuestion)
-
-    const aiEnabled = await checkCompanyAiEnabled(company_id)
-    if (!aiEnabled) {
-      await writeAuditLog({
-        company_id,
-        usuario_id,
-        question: trimmedQuestion,
-        intent: 'DISABLED',
-        answer: null,
-        success: false,
-        ip,
-      })
-      return res.status(403).json({
-        ok: false,
-        intent: null,
-        answer: null,
-        data: null,
-        error: 'IA desativada para esta empresa. Ative em IA / Bot / Automação antes de usar.',
-      })
-    }
 
     // ── 1) Verificar limite mensal ────────────────────────────────────────────
     const { allowed, used, limit } = await checkMonthlyLimit(company_id)
@@ -265,27 +203,19 @@ async function ask(req, res) {
     }
 
     // ── 3) Chamar serviço de IA ───────────────────────────────────────────────
-    let resultPromise = inFlightQuestions.get(questionHash)
-    if (!resultPromise) {
-      resultPromise = answerDashboardQuestion({
-        company_id,
-        question: trimmedQuestion,
-        period_days: days,
-      })
-      inFlightQuestions.set(questionHash, resultPromise)
-      resultPromise.finally(() => inFlightQuestions.delete(questionHash)).catch(() => {})
-    }
-    const result = await resultPromise
+    const result = await answerDashboardQuestion({
+      company_id,
+      question: trimmedQuestion,
+      period_days: days,
+    })
 
     // ── 4) Salvar no cache (apenas respostas bem-sucedidas) ───────────────────
-    const { _ai_usage, ...cacheableResult } = result || {}
-
     if (result.ok && !bypassCache) {
       await saveCache({
         company_id,
         question_hash: questionHash,
         question: trimmedQuestion,
-        response: cacheableResult,   // armazena o objeto completo como JSONB
+        response: result,   // armazena o objeto completo como JSONB
         intent: result.intent,
       })
     }
@@ -299,10 +229,9 @@ async function ask(req, res) {
       answer: result.answer,
       success: result.ok,
       ip,
-      tokens_used: result._ai_usage?.total_tokens,
     })
 
-    return res.json(cacheableResult)
+    return res.json(result)
 
   } catch (err) {
     // ── Fallback automático — não crasha o servidor ───────────────────────────

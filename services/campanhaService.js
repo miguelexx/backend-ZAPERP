@@ -39,24 +39,13 @@ async function criar(company_id, payload) {
   return data
 }
 
-const CAMPOS_EDITAVEIS_CAMPANHA = ['nome', 'tipo', 'texto_template', 'filtros_json', 'agendado_para']
-
 /**
  * Atualiza campanha.
  */
 async function atualizar(company_id, id, payload) {
-  const update = {}
-  for (const campo of CAMPOS_EDITAVEIS_CAMPANHA) {
-    if (Object.prototype.hasOwnProperty.call(payload, campo)) {
-      update[campo] = payload[campo]
-    }
-  }
-  if (Object.keys(update).length === 0) {
-    throw new Error('Nenhum campo editável fornecido')
-  }
   const { data, error } = await supabase
     .from('campanhas')
-    .update(update)
+    .update(payload)
     .eq('id', id)
     .eq('company_id', company_id)
     .select()

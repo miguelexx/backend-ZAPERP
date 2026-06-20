@@ -72,7 +72,7 @@ async function processarRegras(ctx) {
       if (!telefone) continue
 
       try {
-        await sendMessage(telefone, resposta, { sendOrigin: 'regra_automatica' })
+        await sendMessage(telefone, resposta, {})
         await supabaseClient.from('bot_logs').insert({
           company_id,
           conversa_id,

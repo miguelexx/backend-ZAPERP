@@ -11,9 +11,6 @@ let adminRef = null
 let initAttempted = false
 let initOk = false
 
-const DEFAULT_PUSH_TTL_SECONDS = 60 * 60 * 24 * 7
-const MAX_PUSH_TTL_SECONDS = 60 * 60 * 24 * 28
-
 function safeLog(prefix, obj) {
   try {
     console.log(prefix, typeof obj === 'string' ? obj : JSON.stringify(obj))
@@ -80,12 +77,6 @@ function ensureFirebase() {
     initOk = false
     return false
   }
-}
-
-function resolvePushTtlSeconds() {
-  const raw = Number(process.env.WEB_PUSH_TTL_SECONDS)
-  if (!Number.isFinite(raw) || raw <= 0) return DEFAULT_PUSH_TTL_SECONDS
-  return Math.min(Math.floor(raw), MAX_PUSH_TTL_SECONDS)
 }
 
 function isInvalidTokenError(err) {
@@ -165,9 +156,6 @@ async function sendNovaMensagemToUser({
   const nome = String(nomeCliente || 'Cliente').trim() || 'Cliente'
   const admin = adminRef
   const messaging = admin.messaging()
-  const ttlSeconds = resolvePushTtlSeconds()
-  const ttlMs = ttlSeconds * 1000
-  const apnsExpiration = String(Math.floor(Date.now() / 1000) + ttlSeconds)
 
   const title = 'ZapERP'
   const body = `Nova mensagem de ${nome}`
@@ -198,13 +186,13 @@ async function sendNovaMensagemToUser({
         tokens: batch,
         notification: { title, body },
         data: dataPayload,
-        android: { priority: 'high', ttl: ttlMs, notification: { channelId: 'zaperp-messages', sound: 'default' } },
+        android: { priority: 'high', notification: { channelId: 'zaperp-messages', sound: 'default' } },
         apns: {
-          headers: { 'apns-priority': '10', 'apns-expiration': apnsExpiration },
+          headers: { 'apns-priority': '10' },
           payload: { aps: { sound: 'default', category: 'NEW_MESSAGE' } },
         },
         webpush: {
-          headers: { Urgency: 'high', TTL: String(ttlSeconds) },
+          headers: { Urgency: 'high' },
           notification: { title, body },
         },
       })
@@ -258,9 +246,6 @@ async function sendTransferenciaToUser({
 
   const admin = adminRef
   const messaging = admin.messaging()
-  const ttlSeconds = resolvePushTtlSeconds()
-  const ttlMs = ttlSeconds * 1000
-  const apnsExpiration = String(Math.floor(Date.now() / 1000) + ttlSeconds)
   const urlPath = `/atendimento?conversa=${encodeURIComponent(String(convId))}`
   const dataPayload = {
     tipo: 'conversa_transferida',
@@ -280,9 +265,9 @@ async function sendTransferenciaToUser({
         tokens: batch,
         notification: { title, body },
         data: dataPayload,
-        android: { priority: 'high', ttl: ttlMs },
-        apns: { headers: { 'apns-priority': '10', 'apns-expiration': apnsExpiration } },
-        webpush: { headers: { Urgency: 'high', TTL: String(ttlSeconds) }, notification: { title, body } },
+        android: { priority: 'high' },
+        apns: { headers: { 'apns-priority': '10' } },
+        webpush: { headers: { Urgency: 'high' }, notification: { title, body } },
       })
       res.responses.forEach((r, i) => {
         const tok = batch[i]
@@ -307,81 +292,6 @@ async function sendTransferenciaToUser({
   if (invalid.length) await deactivateTokens(invalid)
 }
 
-async function sendTestToUser({ empresa_id, usuario_id }) {
-  if (!ensureFirebase()) return { ok: false, reason: 'firebase_not_configured', status: 503 }
-  const cid = Number(empresa_id)
-  const uid = Number(usuario_id)
-  if (!Number.isFinite(cid) || cid <= 0 || !Number.isFinite(uid) || uid <= 0) {
-    return { ok: false, reason: 'invalid_session', status: 400 }
-  }
-
-  const tokens = await fetchActiveTokens(cid, uid)
-  if (tokens.length === 0) return { ok: false, reason: 'no_fcm_tokens', status: 404, tokens: 0 }
-
-  const admin = adminRef
-  const messaging = admin.messaging()
-  const ttlSeconds = resolvePushTtlSeconds()
-  const ttlMs = ttlSeconds * 1000
-  const apnsExpiration = String(Math.floor(Date.now() / 1000) + ttlSeconds)
-  const nowIso = new Date().toISOString()
-  const title = 'Teste ZapERP'
-  const body = 'Se recebeu, o FCM mobile está ativo.'
-  const dataPayload = {
-    tipo: 'fcm_push_test',
-    empresa_id: String(cid),
-    url: '/atendimento',
-    sent_at: nowIso,
-  }
-
-  const invalid = []
-  const successTokens = []
-  let failed = 0
-
-  for (const batch of chunk(tokens, 500)) {
-    try {
-      const res = await messaging.sendEachForMulticast({
-        tokens: batch,
-        notification: { title, body },
-        data: dataPayload,
-        android: { priority: 'high', ttl: ttlMs, notification: { channelId: 'zaperp-messages', sound: 'default' } },
-        apns: {
-          headers: { 'apns-priority': '10', 'apns-expiration': apnsExpiration },
-          payload: { aps: { sound: 'default', category: 'PUSH_TEST' } },
-        },
-        webpush: { headers: { Urgency: 'high', TTL: String(ttlSeconds) }, notification: { title, body } },
-      })
-
-      res.responses.forEach((r, i) => {
-        const tok = batch[i]
-        if (r.success) {
-          successTokens.push(tok)
-          return
-        }
-        failed += 1
-        const err = r.error
-        const tail = tok && tok.length > 8 ? `…${String(tok).slice(-8)}` : '(token)'
-        console.warn('[fcm] falha token (teste)', { code: err?.code, message: err?.message, token: tail })
-        if (err && isInvalidTokenError(err)) invalid.push(tok)
-      })
-    } catch (e) {
-      failed += batch.length
-      console.warn('[fcm] test sendEachForMulticast:', e?.message || e)
-    }
-  }
-
-  if (successTokens.length) await markTokensUsed(successTokens, cid)
-  if (invalid.length) await deactivateTokens(invalid)
-
-  return {
-    ok: successTokens.length > 0,
-    sent: successTokens.length,
-    failed,
-    tokens: tokens.length,
-    ttlSeconds,
-    sentAt: nowIso,
-  }
-}
-
 function scheduleHandoffFcmPush(opts) {
   setImmediate(() => {
     sendTransferenciaToUser(opts).catch((e) => console.warn('[fcm] scheduleHandoff:', e?.message || e))
@@ -391,6 +301,5 @@ function scheduleHandoffFcmPush(opts) {
 module.exports = {
   ensureFirebase,
   sendNovaMensagemToUser,
-  sendTestToUser,
   scheduleHandoffFcmPush,
 }

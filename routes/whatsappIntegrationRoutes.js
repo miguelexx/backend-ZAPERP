@@ -17,18 +17,6 @@ router.get('/operational-status', whatsappIntegrationController.getOperationalSt
 router.get('/qrcode', whatsappIntegrationController.getQrCodeLegacy)
 router.post('/restart', whatsappIntegrationController.restart)
 
-router.get('/instances', whatsappIntegrationController.listInstances)
-router.post('/instances', whatsappIntegrationController.createInstance)
-router.patch('/instances/:id', whatsappIntegrationController.updateInstance)
-router.post('/instances/:id/activate', whatsappIntegrationController.activateInstance)
-router.post('/instances/:id/deactivate', whatsappIntegrationController.deactivateInstance)
-router.post('/instances/:id/default', whatsappIntegrationController.setDefaultInstance)
-router.get('/instances/:id/status', whatsappIntegrationController.getInstanceStatus)
-router.get('/instances/:id/qrcode', whatsappIntegrationController.getInstanceQrCode)
-router.post('/instances/:id/qrcode', whatsappIntegrationController.getInstanceQrCode)
-router.post('/instances/:id/restart', whatsappIntegrationController.restartInstance)
-router.post('/instances/:id/configure-webhooks', whatsappIntegrationController.configureInstanceWebhooks)
-
 const connectRouter = express.Router()
 connectRouter.get('/status', whatsappIntegrationController.getConnectStatus)
 connectRouter.get('/qrcode', whatsappIntegrationController.getQrCode)
@@ -39,9 +27,6 @@ router.use('/connect', connectRouter)
 
 router.post('/configure-webhooks', whatsappIntegrationController.configureWebhooks)
 router.post('/contacts/sync', whatsappIntegrationController.syncContacts)
-router.get('/messages/sync-old/status', whatsappIntegrationController.getSyncOldMessagesStatus)
-router.post('/messages/sync-old/cancel', whatsappIntegrationController.cancelSyncOldMessages)
-router.post('/messages/sync-old', whatsappIntegrationController.syncOldMessages)
 router.post('/groups/sync', whatsappIntegrationController.syncGroups)
 router.post('/sync-all', whatsappIntegrationController.syncAll)
 

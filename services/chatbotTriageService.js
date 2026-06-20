@@ -191,11 +191,7 @@ async function sendWithThrottle(sendMessage, telefone, msg, opts, company_id, in
     await throttleChatbotSend(company_id, intervaloSegundos)
   }
   try {
-    return await sendMessage(telefone, msg, {
-      sendOrigin: 'chatbot_triage',
-      ...(opts || {}),
-      ...(sendOptions || {}),
-    })
+    return await sendMessage(telefone, msg, { ...(opts || {}), ...(sendOptions || {}) })
   } finally {
     lastChatbotSendPerCompany.set(company_id ?? 'default', Date.now())
   }

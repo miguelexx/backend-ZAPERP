@@ -5,7 +5,6 @@ const auth = require('../middleware/auth')
 const adminOnly = require('../middleware/adminOnly')
 const supervisorOrAdmin = require('../middleware/supervisorOrAdmin')
 const { uploadArquivo } = require('../middleware/upload')
-const { destructiveLimiter } = require('../middleware/rateLimit')
 
 // base: /chats
 
@@ -14,11 +13,9 @@ router.post('/abrir-conversa', auth, chatController.abrirConversaCliente);
 router.post("/grupos", auth, chatController.criarGrupo);
 router.post("/comunidades", auth, chatController.criarComunidade);
 router.post('/finalizacao-ausencia-lote', auth, supervisorOrAdmin, chatController.finalizacaoAusenciaLoteAuth)
-router.get('/whatsapp-instances', auth, chatController.listWhatsappInstancesAtendimento);
-router.get('/counts', auth, chatController.contarConversasPorFiltros)
 router.get('/', auth, chatController.listarConversas)
 router.get('/merge-duplicatas', auth, adminOnly, chatController.paginaMergeDuplicatas)
-router.post('/merge-duplicatas', auth, adminOnly, destructiveLimiter, chatController.mergeConversasDuplicadas)
+router.post('/merge-duplicatas', auth, adminOnly, chatController.mergeConversasDuplicadas)
 router.post('/sincronizar-contatos', auth, chatController.sincronizarContatosZapi)
 router.get('/debug-sync-contatos', auth, chatController.debugSyncContatos)
 router.post('/sincronizar-fotos-perfil', auth, chatController.sincronizarFotosPerfilZapi)
@@ -26,10 +23,6 @@ router.get('/whatsapp-status', auth, chatController.whatsappStatus)
 router.get('/zapi-status', auth, chatController.whatsappStatus) // alias para compatibilidade
 router.get('/pix-config', auth, chatController.getPixConfig)
 router.put('/pix-config', auth, chatController.putPixConfig)
-router.get('/:id/messages/search', auth, chatController.buscarMensagensConversa)
-router.get('/:id/atendentes-disponiveis', auth, chatController.listarAtendentesDisponiveisConversa)
-router.get('/:id/atendentes', auth, chatController.listarAtendentesConversa)
-router.post('/:id/atendentes', auth, chatController.adicionarAtendenteConversa)
 router.get('/:id', auth, chatController.detalharChat)
 
 // Atendimento: todos os usuários autenticados (regras por setor no controller)
@@ -38,7 +31,6 @@ router.post('/:id/assumir', auth, chatController.assumirChat)
 router.post('/:id/encerrar', auth, chatController.encerrarChat)
 router.post('/:id/reabrir', auth, chatController.reabrirChat)
 router.post('/:id/aguardando-cliente', auth, chatController.marcarAguardandoClienteManualChat)
-router.post('/:id/aguardando-pagamento', auth, chatController.marcarAguardandoPagamentoFinanceiroChat)
 router.post('/:id/retomar-atendimento', auth, chatController.retomarEmAtendimentoManualChat)
 router.post('/:id/transferir', auth, chatController.transferirChat)
 router.post("/:id/tags", auth, chatController.adicionarTagConversa);
@@ -49,7 +41,6 @@ router.put('/:id/departamento', auth, chatController.transferirSetor)
 
 router.post("/:id/arquivo", auth, uploadArquivo, chatController.enviarArquivo)
 
-router.post('/:id/mensagens/sync-old', auth, chatController.carregarMensagensAntigasContato)
 router.post('/:id/mensagens', auth, chatController.enviarMensagemChat)
 router.post('/:id/pix', auth, chatController.enviarMensagemPix)
 router.post('/:id/encaminhar', auth, chatController.encaminharMensagem)
@@ -59,17 +50,14 @@ router.delete('/:id/mensagens/:mensagem_id/reacao', auth, chatController.remover
 router.post('/:id/contatos', auth, chatController.enviarContatoWhatsapp)
 router.post('/:id/localizacao', auth, chatController.enviarLocalizacao)
 router.post('/:id/ligacao', auth, chatController.enviarLigacaoWhatsapp)
-router.put('/:id/cliente', auth, chatController.vincularClienteConversa)
-router.put('/:id/vincular-cliente', auth, chatController.vincularClienteConversa)
 router.put('/:id/observacao', auth, chatController.atualizarObservacao)
-router.put('/:id/nome-contato', auth, chatController.atualizarNomeContato)
 
 // Menu da lista (silenciar / fixar / favoritar / limpar / apagar) — ver migration conversa_usuario_prefs
 router.patch('/:id/prefs', auth, chatController.patchConversaPrefs)
-router.post('/:id/limpar-mensagens', auth, adminOnly, destructiveLimiter, chatController.limparMensagensConversa)
-router.delete('/:id', auth, adminOnly, destructiveLimiter, chatController.apagarConversa)
+router.post('/:id/limpar-mensagens', auth, chatController.limparMensagensConversa)
+router.delete('/:id', auth, chatController.apagarConversa)
 
 // auditoria
 router.get('/:id/atendimentos', auth, chatController.listarAtendimentos)
 
-module.exports = router
+module.exports = router 

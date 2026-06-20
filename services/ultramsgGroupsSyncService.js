@@ -240,8 +240,7 @@ async function syncConversationGroupOnJoin(supabase, conversaId, companyId, io, 
         .eq('company_id', companyId)
       if (!error && io) {
         const eventName = io.EVENTS?.CONVERSA_ATUALIZADA || 'conversa_atualizada'
-        const { emitirEventoEmpresaConversa } = require('../controllers/chatController')
-        emitirEventoEmpresaConversa(io, companyId, conversaId, eventName, {
+        io.to(`empresa_${companyId}`).to(`conversa_${conversaId}`).emit(eventName, {
           id: conversaId,
           nome_grupo: metadata.nome,
           contato_nome: metadata.nome,

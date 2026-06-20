@@ -1,7 +1,6 @@
 const supabase = require('../config/supabase')
 const { isEnabled, FLAGS } = require('../helpers/featureFlags')
 const { getDisplayName } = require('../helpers/contactEnrichment')
-const { normalizePositiveIds, isGroupRow } = require('../helpers/departamentoGruposHelper')
 const ExcelJS = require('exceljs')
 const PDFDocument = require('pdfkit')
 
@@ -804,156 +803,21 @@ exports.excluirDepartamento = async (req, res) => {
 }
 
 // =====================================================
-// RESPOSTAS SALVAS (pessoais por usuário; setor opcional)
+// RESPOSTAS SALVAS POR SETOR
 // =====================================================
-async function getDepartamentoDaEmpresa(company_id, departamento_id) {
-  const depId = Number(departamento_id)
-  if (!Number.isFinite(depId) || depId <= 0) return null
-  const { data, error } = await supabase
-    .from('departamentos')
-    .select('id, nome')
-    .eq('company_id', Number(company_id))
-    .eq('id', depId)
-    .maybeSingle()
-  if (error) throw error
-  return data || null
-}
-
-exports.listarGruposDepartamento = async (req, res) => {
-  try {
-    const { company_id } = req.user
-    const departamento = await getDepartamentoDaEmpresa(company_id, req.params.id)
-    if (!departamento) return res.status(404).json({ error: 'Departamento nao encontrado' })
-
-    const { data: vinculos, error: errVinculos } = await supabase
-      .from('departamento_grupos')
-      .select('conversa_id')
-      .eq('company_id', Number(company_id))
-      .eq('departamento_id', Number(departamento.id))
-    if (errVinculos) return res.status(500).json({ error: errVinculos.message })
-
-    const vinculadosSet = new Set((vinculos || []).map((v) => Number(v.conversa_id)))
-
-    const { data: grupos, error } = await supabase
-      .from('conversas')
-      .select('id, telefone, tipo, nome_grupo, foto_grupo, criado_em, ultima_atividade')
-      .eq('company_id', Number(company_id))
-      .eq('tipo', 'grupo')
-      .order('nome_grupo', { ascending: true, nullsFirst: false })
-
-    if (error) return res.status(500).json({ error: error.message })
-
-    const rows = (grupos || [])
-      .filter(isGroupRow)
-      .map((g) => ({
-        id: g.id,
-        telefone: g.telefone,
-        tipo: g.tipo,
-        nome_grupo: g.nome_grupo,
-        foto_grupo: g.foto_grupo,
-        criado_em: g.criado_em,
-        ultima_atividade: g.ultima_atividade,
-        vinculado: vinculadosSet.has(Number(g.id)),
-      }))
-
-    return res.json({ departamento, grupos: rows })
-  } catch (err) {
-    console.error(err)
-    return res.status(500).json({ error: 'Erro ao listar grupos do departamento' })
-  }
-}
-
-exports.atualizarGruposDepartamento = async (req, res) => {
-  try {
-    const { company_id, id: usuario_id } = req.user
-    const departamento = await getDepartamentoDaEmpresa(company_id, req.params.id)
-    if (!departamento) return res.status(404).json({ error: 'Departamento nao encontrado' })
-
-    const conversaIds = normalizePositiveIds(req.body?.conversa_ids)
-
-    if (conversaIds.length > 0) {
-      const { data: conversas, error: errConversas } = await supabase
-        .from('conversas')
-        .select('id, tipo, telefone')
-        .eq('company_id', Number(company_id))
-        .in('id', conversaIds)
-      if (errConversas) return res.status(500).json({ error: errConversas.message })
-
-      const byId = new Map((conversas || []).map((c) => [Number(c.id), c]))
-      const invalid = conversaIds.filter((id) => !isGroupRow(byId.get(Number(id))))
-      if (invalid.length > 0) {
-        return res.status(400).json({ error: 'A lista contem conversa que nao e grupo desta empresa' })
-      }
-    }
-
-    const { error: delErr } = await supabase
-      .from('departamento_grupos')
-      .delete()
-      .eq('company_id', Number(company_id))
-      .eq('departamento_id', Number(departamento.id))
-    if (delErr) return res.status(500).json({ error: delErr.message })
-
-    if (conversaIds.length > 0) {
-      const rows = conversaIds.map((conversa_id) => ({
-        company_id: Number(company_id),
-        departamento_id: Number(departamento.id),
-        conversa_id,
-        criado_por: Number(usuario_id) || null,
-      }))
-      const { error: insertErr } = await supabase
-        .from('departamento_grupos')
-        .insert(rows)
-      if (insertErr) return res.status(500).json({ error: insertErr.message })
-    }
-
-    return res.json({ ok: true, departamento_id: Number(departamento.id), conversa_ids: conversaIds })
-  } catch (err) {
-    console.error(err)
-    return res.status(500).json({ error: 'Erro ao atualizar grupos do departamento' })
-  }
-}
-
-async function validarDepartamentoEmpresa(company_id, departamento_id) {
-  if (departamento_id == null || departamento_id === '') return null
-  const depId = Number(departamento_id)
-  if (!Number.isFinite(depId) || depId <= 0) return { error: 'Setor inválido' }
-  const { data: dep, error } = await supabase
-    .from('departamentos')
-    .select('id')
-    .eq('id', depId)
-    .eq('company_id', company_id)
-    .maybeSingle()
-  if (error) return { error: error.message }
-  if (!dep) return { error: 'Setor não encontrado nesta empresa' }
-  return { departamento_id: depId }
-}
-
 exports.listarRespostasSalvas = async (req, res) => {
   try {
-    const { company_id, id: usuario_id } = req.user
-    const userId = Number(usuario_id)
-    if (!Number.isFinite(userId) || userId <= 0) {
-      return res.status(401).json({ error: 'Usuário inválido' })
-    }
+    const { company_id } = req.user
     const { departamento_id } = req.query
     let q = supabase
       .from('respostas_salvas')
       // NÃO embutir departamentos aqui: em alguns schemas o PostgREST detecta mais de 1 relacionamento
       // entre respostas_salvas e departamentos e retorna:
       // "Could not embed because more than one relationship was found..."
-      .select('id, titulo, texto, departamento_id, usuario_id, criado_em')
+      .select('id, titulo, texto, departamento_id, criado_em')
       .eq('company_id', company_id)
-      .eq('usuario_id', userId)
       .order('titulo')
-    if (departamento_id != null && departamento_id !== '') {
-      const depId = Number(departamento_id)
-      if (Number.isFinite(depId) && depId > 0) {
-        q = q.or(`departamento_id.eq.${depId},departamento_id.is.null`)
-      }
-    } else {
-      // Conversa sem setor: apenas respostas globais (não expor vinculadas a setor)
-      q = q.is('departamento_id', null)
-    }
+    if (departamento_id) q = q.eq('departamento_id', departamento_id)
     const { data, error } = await q
     if (error) return res.status(500).json({ error: error.message })
 
@@ -989,27 +853,12 @@ exports.listarRespostasSalvas = async (req, res) => {
 
 exports.criarRespostaSalva = async (req, res) => {
   try {
-    const { company_id, id: usuario_id } = req.user
-    const userId = Number(usuario_id)
-    if (!Number.isFinite(userId) || userId <= 0) {
-      return res.status(401).json({ error: 'Usuário inválido' })
-    }
+    const { company_id } = req.user
     const { titulo, texto, departamento_id } = req.body
-    const tituloTrim = String(titulo || '').trim()
-    const textoTrim = String(texto || '').trim()
-    if (!tituloTrim || !textoTrim) return res.status(400).json({ error: 'titulo e texto obrigatórios' })
-    if (tituloTrim.length > 255) return res.status(400).json({ error: 'titulo deve ter no máximo 255 caracteres' })
-    const depCheck = await validarDepartamentoEmpresa(company_id, departamento_id)
-    if (depCheck?.error) return res.status(400).json({ error: depCheck.error })
+    if (!titulo || !texto) return res.status(400).json({ error: 'titulo e texto obrigatórios' })
     const { data, error } = await supabase
       .from('respostas_salvas')
-      .insert({
-        company_id,
-        usuario_id: userId,
-        titulo: tituloTrim,
-        texto: textoTrim,
-        departamento_id: depCheck?.departamento_id ?? null,
-      })
+      .insert({ company_id, titulo, texto: String(texto).trim(), departamento_id: departamento_id || null })
       .select()
       .single()
     if (error) return res.status(500).json({ error: error.message })
@@ -1022,39 +871,18 @@ exports.criarRespostaSalva = async (req, res) => {
 
 exports.atualizarRespostaSalva = async (req, res) => {
   try {
-    const { company_id, id: usuario_id } = req.user
-    const userId = Number(usuario_id)
-    if (!Number.isFinite(userId) || userId <= 0) {
-      return res.status(401).json({ error: 'Usuário inválido' })
-    }
+    const { company_id } = req.user
     const { id } = req.params
     const { titulo, texto, departamento_id } = req.body
     const update = {}
-    if (titulo !== undefined) {
-      const tituloTrim = String(titulo || '').trim()
-      if (!tituloTrim) return res.status(400).json({ error: 'titulo obrigatório' })
-      if (tituloTrim.length > 255) return res.status(400).json({ error: 'titulo deve ter no máximo 255 caracteres' })
-      update.titulo = tituloTrim
-    }
-    if (texto !== undefined) {
-      const textoTrim = String(texto || '').trim()
-      if (!textoTrim) return res.status(400).json({ error: 'texto obrigatório' })
-      update.texto = textoTrim
-    }
-    if (departamento_id !== undefined) {
-      const depCheck = await validarDepartamentoEmpresa(company_id, departamento_id)
-      if (depCheck?.error) return res.status(400).json({ error: depCheck.error })
-      update.departamento_id = depCheck?.departamento_id ?? null
-    }
-    if (Object.keys(update).length === 0) {
-      return res.status(400).json({ error: 'Nenhum campo para atualizar' })
-    }
+    if (titulo !== undefined) update.titulo = titulo.trim()
+    if (texto !== undefined) update.texto = String(texto).trim()
+    if (departamento_id !== undefined) update.departamento_id = departamento_id || null
     const { data, error } = await supabase
       .from('respostas_salvas')
       .update(update)
       .eq('id', id)
       .eq('company_id', company_id)
-      .eq('usuario_id', userId)
       .select()
       .single()
     if (error) return res.status(500).json({ error: error.message })
@@ -1068,27 +896,13 @@ exports.atualizarRespostaSalva = async (req, res) => {
 
 exports.excluirRespostaSalva = async (req, res) => {
   try {
-    const { company_id, id: usuario_id } = req.user
-    const userId = Number(usuario_id)
-    if (!Number.isFinite(userId) || userId <= 0) {
-      return res.status(401).json({ error: 'Usuário inválido' })
-    }
+    const { company_id } = req.user
     const { id } = req.params
-    const { data: existing, error: findErr } = await supabase
-      .from('respostas_salvas')
-      .select('id')
-      .eq('id', id)
-      .eq('company_id', company_id)
-      .eq('usuario_id', userId)
-      .maybeSingle()
-    if (findErr) return res.status(500).json({ error: findErr.message })
-    if (!existing) return res.status(404).json({ error: 'Resposta não encontrada' })
     const { error } = await supabase
       .from('respostas_salvas')
       .delete()
       .eq('id', id)
       .eq('company_id', company_id)
-      .eq('usuario_id', userId)
     if (error) return res.status(500).json({ error: error.message })
     return res.json({ ok: true })
   } catch (err) {

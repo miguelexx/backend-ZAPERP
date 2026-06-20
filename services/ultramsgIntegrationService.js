@@ -4,31 +4,13 @@
  */
 
 const { getEmpresaWhatsappConfig, getCompanyIdByInstanceId, fetchWithTimeout } = require('./whatsappConfigService')
-const {
-  getDefaultWhatsappInstance,
-  getWhatsappInstanceById,
-  toEmpresaWhatsappConfig,
-} = require('./whatsappInstanceService')
 const supabase = require('../config/supabase')
 
 const ULTRAMSG_BASE_URL = (process.env.ULTRAMSG_BASE_URL || 'https://api.ultramsg.com').replace(/\/$/, '')
 const TIMEOUT_MS = 10_000
 const CONFIGURE_WEBHOOKS_THROTTLE_MS = 10 * 60 * 1000 // 10 minutos entre tentativas de configureWebhooks
-const MAP_MAX_ENTRIES = 500 // limite para evitar crescimento ilimitado em multi-tenant
 const lastConfigureWebhooksAt = new Map()
 const lastConnectedState = new Map() // companyId -> boolean (para detectar transição ao conectar QR)
-
-/** Evita crescimento ilimitado de Maps em deployments com muitas empresas. */
-function pruneMap(map, maxEntries) {
-  if (map.size <= maxEntries) return
-  const excess = map.size - maxEntries
-  let removed = 0
-  for (const key of map.keys()) {
-    if (removed >= excess) break
-    map.delete(key)
-    removed++
-  }
-}
 
 /** Normaliza instance_id: UltraMsg aceita numérico (51534) ou com prefixo (instance51534). Unifica com provider. */
 function normalizeInstanceId(instanceId) {
@@ -42,22 +24,8 @@ function buildUrl(instanceId, path) {
   return segment ? `${ULTRAMSG_BASE_URL}/${encodeURIComponent(segment)}${path}` : ''
 }
 
-async function resolveConfig(companyId, opts = {}) {
-  const whatsappInstanceId = opts?.whatsappInstanceId ?? opts?.whatsapp_instance_id
-  if (whatsappInstanceId) {
-    const { instance, error } = await getWhatsappInstanceById(companyId, whatsappInstanceId, { includeCredentials: true, requireActive: true })
-    if (error || !instance) return { error: error || 'Instancia WhatsApp nao encontrada' }
-    return { config: toEmpresaWhatsappConfig(instance), whatsappInstanceId: instance.id ?? null }
-  }
-
-  const { instance, error } = await getDefaultWhatsappInstance(companyId, { includeCredentials: true })
-  if (instance) return { config: toEmpresaWhatsappConfig(instance), whatsappInstanceId: instance.id ?? null }
-  if (error) return { error }
-  return getEmpresaWhatsappConfig(companyId)
-}
-
-async function request(companyId, method, path, body = null, opts = {}) {
-  const { config, error, whatsappInstanceId } = await resolveConfig(companyId, opts)
+async function request(companyId, method, path, body = null) {
+  const { config, error } = await getEmpresaWhatsappConfig(companyId)
   if (error || !config) return { error: error || 'Empresa sem instância configurada' }
   const url = buildUrl(config.instance_id, path)
   if (!url) return { error: 'Empresa sem instance_id configurado' }
@@ -69,21 +37,21 @@ async function request(companyId, method, path, body = null, opts = {}) {
       signal = AbortSignal.timeout(TIMEOUT_MS)
     }
   } catch { /* Node < 17.3 */ }
-  const fetchOpts = {
+  const opts = {
     method,
     headers: { accept: 'application/json' },
     ...(signal && { signal })
   }
   if (body && method === 'POST') {
-    fetchOpts.headers = { ...fetchOpts.headers, 'Content-Type': 'application/json' }
-    fetchOpts.body = JSON.stringify({ ...body, token: config.instance_token })
+    opts.headers = { ...opts.headers, 'Content-Type': 'application/json' }
+    opts.body = JSON.stringify({ ...body, token: config.instance_token })
   }
   try {
-    const res = await fetchWithTimeout(fullUrl, fetchOpts, TIMEOUT_MS)
+    const res = await fetchWithTimeout(fullUrl, opts, TIMEOUT_MS)
     const text = await res.text().catch(() => '')
     let data = null
     try { data = text ? JSON.parse(text) : null } catch { data = null }
-    return { ok: res.ok, status: res.status, data, text, whatsappInstanceId }
+    return { ok: res.ok, status: res.status, data, text }
   } catch (e) {
     return { error: e?.message || 'UltraMsg inacessível' }
   }
@@ -97,8 +65,8 @@ function extractBase64(value) {
   return s
 }
 
-async function getStatus(companyId, opts = {}) {
-  const { error, ok, data, text, whatsappInstanceId } = await request(companyId, 'GET', '/instance/status', null, opts)
+async function getStatus(companyId) {
+  const { error, ok, data, text } = await request(companyId, 'GET', '/instance/status')
   if (error) return { error }
   if (!ok) {
     return { error: data?.error || data?.message || `HTTP ${data?.status || 500}` }
@@ -117,13 +85,12 @@ async function getStatus(companyId, opts = {}) {
     const last = lastConfigureWebhooksAt.get(companyId) || 0
     if (now - last >= CONFIGURE_WEBHOOKS_THROTTLE_MS) {
       lastConfigureWebhooksAt.set(companyId, now)
-      pruneMap(lastConfigureWebhooksAt, MAP_MAX_ENTRIES)
       setImmediate(() => {
         const { getProvider } = require('./providers')
         const appUrl = String(process.env.APP_URL || '').trim()
         const provider = getProvider()
         if (appUrl && provider?.configureWebhooks) {
-          provider.configureWebhooks(appUrl, { companyId, whatsappInstanceId }).catch((e) => {
+          provider.configureWebhooks(appUrl, { companyId }).catch((e) => {
             console.warn('[ULTRAMSG] configureWebhooks ao conectar:', e?.message || e)
           })
         }
@@ -135,7 +102,6 @@ async function getStatus(companyId, opts = {}) {
     const wasConnected = lastConnectedState.get(companyId) ?? false
     if (!wasConnected && connected) {
       lastConnectedState.set(companyId, true)
-      pruneMap(lastConnectedState, MAP_MAX_ENTRIES)
       setImmediate(async () => {
         try {
           const { data: empresa } = await supabase
@@ -179,12 +145,12 @@ async function getStatus(companyId, opts = {}) {
   return { connected, smartphoneConnected }
 }
 
-async function getQrCodeImage(companyId, opts = {}) {
-  const status = await getStatus(companyId, opts)
+async function getQrCodeImage(companyId) {
+  const status = await getStatus(companyId)
   if (status.connected) return { alreadyConnected: true }
   if (status.error) return { error: status.error }
 
-  const { config, error } = await resolveConfig(companyId, opts)
+  const { config, error } = await getEmpresaWhatsappConfig(companyId)
   if (error || !config) return { error: error || 'Empresa sem instância configurada' }
   const baseUrl = buildUrl(config.instance_id, '/instance/qrCode')
   if (!baseUrl) return { error: 'Empresa sem instance_id configurado' }
@@ -232,8 +198,8 @@ async function getQrCodeImage(companyId, opts = {}) {
   }
 }
 
-async function restartInstance(companyId, opts = {}) {
-  const { error, ok, data } = await request(companyId, 'POST', '/instance/restart', {}, opts)
+async function restartInstance(companyId) {
+  const { error, ok, data } = await request(companyId, 'POST', '/instance/restart', {})
   if (error) return { error }
   if (!ok) return { error: data?.error || data?.message || 'Erro ao reiniciar' }
   return { value: true }
@@ -249,8 +215,8 @@ function buildMeSummary(raw) {
   return Object.keys(s).length ? s : null
 }
 
-async function getMe(companyId, opts = {}) {
-  const status = await getStatus(companyId, opts)
+async function getMe(companyId) {
+  const status = await getStatus(companyId)
   if (status.error) return { error: status.error }
   return {
     data: {

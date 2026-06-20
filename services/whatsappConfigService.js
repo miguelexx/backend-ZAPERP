@@ -6,11 +6,6 @@
  */
 
 const supabase = require('../config/supabase')
-const {
-  getDefaultWhatsappInstance,
-  getWhatsappInstanceByProviderInstanceId,
-  toEmpresaWhatsappConfig,
-} = require('./whatsappInstanceService')
 
 const TIMEOUT_MS = 10_000
 
@@ -60,12 +55,19 @@ async function getEmpresaWhatsappConfig(company_id) {
     return cached.result
   }
 
-  const { instance, error } = await getDefaultWhatsappInstance(company_id, { includeCredentials: true })
-  if (error && !/nao encontrada|sem inst/i.test(String(error))) {
-    console.error('[WHATSAPP-CONFIG] Erro ao buscar whatsapp_instances:', error)
+  const { data, error } = await supabase
+    .from('empresa_zapi')
+    .select('instance_id, instance_token, client_token, ativo')
+    .eq('company_id', company_id)
+    .eq('ativo', true)
+    .maybeSingle()
+
+  if (error) {
+    console.error('[WHATSAPP-CONFIG] Erro ao buscar empresa_zapi:', error.message)
+    return { error: 'Erro ao buscar configuração WhatsApp da empresa' }
   }
-  if (instance) {
-    const result = { config: toEmpresaWhatsappConfig(instance) }
+  if (data) {
+    const result = { config: data }
     _empresaConfigCache.set(cacheKey, { ts: Date.now(), result })
     return result
   }
@@ -84,18 +86,6 @@ async function getEmpresaWhatsappConfig(company_id) {
 async function getCompanyIdByInstanceId(instanceId) {
   const id = instanceId == null ? '' : String(instanceId).trim()
   if (!id) return null
-
-  const resolved = await getWhatsappInstanceByProviderInstanceId('ultramsg', id)
-  if (resolved.instance?.company_id != null) {
-    return Number(resolved.instance.company_id)
-  }
-  if (resolved.code === 'DUPLICATE_PROVIDER_INSTANCE') {
-    console.error('[WHATSAPP-CONFIG] Resolucao de webhook bloqueada por instance_id duplicado:', {
-      instanceId: id.slice(0, 48),
-      error: resolved.error,
-    })
-    return null
-  }
 
   /**
    * Com várias linhas ativas para o mesmo instance_id, a escolha depende de WEBHOOK_INSTANCE_DUPLICATE_STRATEGY
@@ -126,7 +116,6 @@ async function getCompanyIdByInstanceId(instanceId) {
         hint:
           'Corrija dados: deixe uma única linha ativa por instance_id. Opcional: WEBHOOK_INSTANCE_DUPLICATE_STRATEGY=recent usa atualizado_em (opt-in).',
       })
-      return null
     }
     const cid = rows?.[0]?.company_id
     return cid != null ? Number(cid) : null

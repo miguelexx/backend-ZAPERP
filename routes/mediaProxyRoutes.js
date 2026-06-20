@@ -1,8 +1,8 @@
 const express = require('express')
 const router = express.Router()
-const authBearerOrQuery = require('../middleware/authBearerOrQuery')
+const auth = require('../middleware/auth')
 const mediaProxyController = require('../controllers/mediaProxyController')
 
-router.get('/proxy', authBearerOrQuery, mediaProxyController.proxyMedia)
+router.get('/proxy', auth, mediaProxyController.proxyMedia)
 
 module.exports = router

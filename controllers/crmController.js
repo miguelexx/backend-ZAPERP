@@ -26,7 +26,7 @@ function err(res, e, fallback = 'Erro') {
   const status = Number(e?.status) || 500
   const msg = status < 500 ? (e?.message || fallback) : fallback
   if (status >= 500) console.error('[CRM]', e)
-  return res.status(status).json({ error: msg })
+  return res.status(status).json({ error: e?.message || fallback })
 }
 
 // ---------- Pipelines ----------
@@ -84,7 +84,7 @@ exports.setPipelinePadrao = async (req, res) => {
 
 exports.createPipeline = async (req, res) => {
   try {
-    const { company_id, id: userId } = req.user
+    const { company_id } = req.user
     const { nome, descricao, cor, ativo, ordem, padrao } = req.body || {}
     if (!nome || !String(nome).trim()) return res.status(400).json({ error: 'nome é obrigatório' })
     const existing = await repo.listPipelines(company_id, {})
@@ -97,8 +97,6 @@ exports.createPipeline = async (req, res) => {
       ativo: ativo !== false,
       ordem: ordem != null ? Number(ordem) : 0,
       padrao: padrao === true || isFirst,
-      criado_por: userId,
-      atualizado_por: userId,
     })
     if (row.padrao) await repo.clearPadraoExcept(company_id, row.id)
     await registrar({
@@ -128,7 +126,7 @@ exports.getPipeline = async (req, res) => {
 
 exports.updatePipeline = async (req, res) => {
   try {
-    const { company_id, id: userId } = req.user
+    const { company_id } = req.user
     const id = Number(req.params.id)
     const patch = {}
     const { nome, descricao, cor, ativo, ordem, padrao } = req.body || {}
@@ -137,7 +135,6 @@ exports.updatePipeline = async (req, res) => {
     if (cor !== undefined) patch.cor = cor
     if (ativo !== undefined) patch.ativo = !!ativo
     if (ordem !== undefined) patch.ordem = Number(ordem)
-    patch.atualizado_por = userId
     if (padrao === true) {
       await repo.clearPadraoExcept(company_id, id)
       patch.padrao = true
@@ -154,12 +151,10 @@ exports.updatePipeline = async (req, res) => {
 
 exports.deletePipeline = async (req, res) => {
   try {
-    const { company_id, id: userId } = req.user
+    const { company_id } = req.user
     const id = Number(req.params.id)
     const leads = await repo.listLeadsByPipeline(company_id, id)
     if (leads.length) {
-      const row = await repo.updatePipeline(company_id, id, { ativo: false, atualizado_por: userId })
-      return res.json({ ok: true, inativado: true, pipeline: row })
       return res.status(409).json({ error: 'Pipeline possui leads — mova ou exclua os leads antes' })
     }
     await repo.deletePipeline(company_id, id)
@@ -192,10 +187,9 @@ exports.listStages = async (req, res) => {
 
 exports.createStage = async (req, res) => {
   try {
-    const { company_id, id: userId } = req.user
+    const { company_id } = req.user
     const {
       pipeline_id, nome, descricao, cor, ordem, tipo_fechamento, exige_motivo_perda, ativo, inicial,
-      probabilidade_padrao, tempo_maximo_horas,
     } = req.body || {}
     if (!pipeline_id || !nome?.trim()) return res.status(400).json({ error: 'pipeline_id e nome são obrigatórios' })
     const pid = Number(pipeline_id)
@@ -209,12 +203,8 @@ exports.createStage = async (req, res) => {
       ordem: ordem != null ? Number(ordem) : 0,
       tipo_fechamento: tipo_fechamento || null,
       exige_motivo_perda: !!exige_motivo_perda,
-      probabilidade_padrao: probabilidade_padrao != null ? Number(probabilidade_padrao) : null,
-      tempo_maximo_horas: tempo_maximo_horas != null ? Number(tempo_maximo_horas) : null,
       ativo: ativo !== false,
       inicial: false,
-      criado_por: userId,
-      atualizado_por: userId,
     })
     if (inicial === true) await crmService.setStageInicial(company_id, pid, row.id)
     const fresh = await repo.getStageById(company_id, row.id)
@@ -226,7 +216,7 @@ exports.createStage = async (req, res) => {
 
 exports.updateStage = async (req, res) => {
   try {
-    const { company_id, id: userId } = req.user
+    const { company_id } = req.user
     const id = Number(req.params.id)
     const prev = await repo.getStageById(company_id, id)
     if (!prev) return res.status(404).json({ error: 'Não encontrado' })
@@ -236,8 +226,6 @@ exports.updateStage = async (req, res) => {
     if (b.descricao !== undefined) patch.descricao = b.descricao
     if (b.cor !== undefined) patch.cor = b.cor
     if (b.ordem !== undefined) patch.ordem = Number(b.ordem)
-    if (b.probabilidade_padrao !== undefined) patch.probabilidade_padrao = b.probabilidade_padrao != null ? Number(b.probabilidade_padrao) : null
-    if (b.tempo_maximo_horas !== undefined) patch.tempo_maximo_horas = b.tempo_maximo_horas != null ? Number(b.tempo_maximo_horas) : null
     if (b.tipo_fechamento !== undefined) {
       patch.tipo_fechamento = b.tipo_fechamento
       await crmService.assertStageTerminalUniqueness(
@@ -249,14 +237,7 @@ exports.updateStage = async (req, res) => {
     }
     if (b.exige_motivo_perda !== undefined) patch.exige_motivo_perda = !!b.exige_motivo_perda
     if (b.ativo !== undefined) patch.ativo = !!b.ativo
-    if (b.inicial === false && prev.inicial) {
-      const stages = await repo.listStages(company_id, { pipeline_id: prev.pipeline_id, ativo: true })
-      if (!stages.some((s) => s.id !== id && s.inicial)) {
-        return res.status(400).json({ error: 'Pipeline precisa manter ao menos um estÃ¡gio inicial' })
-      }
-      patch.inicial = false
-    } else if (b.inicial === false) patch.inicial = false
-    patch.atualizado_por = userId
+    if (b.inicial === false) patch.inicial = false
     const row = await repo.updateStage(company_id, id, patch)
     if (!row) return res.status(404).json({ error: 'Não encontrado' })
     if (b.inicial === true) await crmService.setStageInicial(company_id, prev.pipeline_id, id)
@@ -269,12 +250,10 @@ exports.updateStage = async (req, res) => {
 
 exports.deleteStage = async (req, res) => {
   try {
-    const { company_id, id: userId } = req.user
+    const { company_id } = req.user
     const id = Number(req.params.id)
     const leads = await repo.listLeadsByStage(company_id, id)
     if (leads.length) {
-      const row = await repo.updateStage(company_id, id, { ativo: false, atualizado_por: userId })
-      return res.json({ ok: true, inativado: true, stage: row })
       return res.status(409).json({ error: 'Estágio possui leads' })
     }
     await repo.deleteStage(company_id, id)
@@ -298,7 +277,7 @@ exports.listOrigens = async (req, res) => {
 
 exports.createOrigem = async (req, res) => {
   try {
-    const { company_id, id: userId } = req.user
+    const { company_id } = req.user
     const { nome, descricao, cor, ativo } = req.body || {}
     if (!nome?.trim()) return res.status(400).json({ error: 'nome é obrigatório' })
     const row = await repo.insertOrigem({
@@ -307,8 +286,6 @@ exports.createOrigem = async (req, res) => {
       descricao: descricao != null ? String(descricao) : null,
       cor: cor != null ? String(cor) : null,
       ativo: ativo !== false,
-      criado_por: userId,
-      atualizado_por: userId,
     })
     return res.status(201).json(row)
   } catch (e) {
@@ -318,7 +295,7 @@ exports.createOrigem = async (req, res) => {
 
 exports.updateOrigem = async (req, res) => {
   try {
-    const { company_id, id: userId } = req.user
+    const { company_id } = req.user
     const id = Number(req.params.id)
     const patch = {}
     const b = req.body || {}
@@ -326,150 +303,11 @@ exports.updateOrigem = async (req, res) => {
     if (b.descricao !== undefined) patch.descricao = b.descricao
     if (b.cor !== undefined) patch.cor = b.cor
     if (b.ativo !== undefined) patch.ativo = !!b.ativo
-    patch.atualizado_por = userId
     const row = await repo.updateOrigem(company_id, id, patch)
     if (!row) return res.status(404).json({ error: 'Não encontrado' })
     return res.json(row)
   } catch (e) {
     return err(res, e, 'Erro ao atualizar origem')
-  }
-}
-
-// ---------- Campanhas ----------
-exports.listCampaigns = async (req, res) => {
-  try {
-    const { company_id } = req.user
-    const ativo = req.query.ativo === 'true' ? true : req.query.ativo === 'false' ? false : undefined
-    const origem_id = req.query.origem_id != null ? Number(req.query.origem_id) : undefined
-    const data = await repo.listCampaigns(company_id, { ativo, origem_id })
-    return res.json(data)
-  } catch (e) {
-    return err(res, e, 'Erro ao listar campanhas')
-  }
-}
-
-exports.createCampaign = async (req, res) => {
-  try {
-    const { company_id, id: userId } = req.user
-    const b = req.body || {}
-    if (!b.nome || !String(b.nome).trim()) return res.status(400).json({ error: 'nome Ã© obrigatÃ³rio' })
-    const row = await repo.insertCampaign({
-      company_id,
-      nome: String(b.nome).trim(),
-      origem_id: b.origem_id != null ? Number(b.origem_id) : null,
-      custo: b.custo != null ? Number(b.custo) : null,
-      data_inicio: b.data_inicio || null,
-      data_fim: b.data_fim || null,
-      ativo: b.ativo !== false,
-      criado_por: userId,
-      atualizado_por: userId,
-    })
-    return res.status(201).json(row)
-  } catch (e) {
-    return err(res, e, 'Erro ao criar campanha')
-  }
-}
-
-exports.updateCampaign = async (req, res) => {
-  try {
-    const { company_id, id: userId } = req.user
-    const id = Number(req.params.id)
-    const b = req.body || {}
-    const patch = { atualizado_por: userId }
-    if (b.nome !== undefined) patch.nome = String(b.nome).trim()
-    if (b.origem_id !== undefined) patch.origem_id = b.origem_id != null ? Number(b.origem_id) : null
-    if (b.custo !== undefined) patch.custo = b.custo != null ? Number(b.custo) : null
-    if (b.data_inicio !== undefined) patch.data_inicio = b.data_inicio || null
-    if (b.data_fim !== undefined) patch.data_fim = b.data_fim || null
-    if (b.ativo !== undefined) patch.ativo = !!b.ativo
-    const row = await repo.updateCampaign(company_id, id, patch)
-    if (!row) return res.status(404).json({ error: 'NÃ£o encontrado' })
-    return res.json(row)
-  } catch (e) {
-    return err(res, e, 'Erro ao atualizar campanha')
-  }
-}
-
-// ---------- Tags ----------
-exports.listTags = async (req, res) => {
-  try {
-    const { company_id } = req.user
-    const ativo = req.query.ativo === 'true' ? true : req.query.ativo === 'false' ? false : undefined
-    const data = await repo.listCrmTags(company_id, { ativo })
-    return res.json(data)
-  } catch (e) {
-    return err(res, e, 'Erro ao listar tags')
-  }
-}
-
-exports.createTag = async (req, res) => {
-  try {
-    const { company_id } = req.user
-    const { nome, cor, ativo } = req.body || {}
-    if (!nome || !String(nome).trim()) return res.status(400).json({ error: 'nome Ã© obrigatÃ³rio' })
-    const row = await repo.insertCrmTag({
-      company_id,
-      nome: String(nome).trim(),
-      cor: cor != null ? String(cor) : null,
-      ativo: ativo !== false,
-    })
-    return res.status(201).json(row)
-  } catch (e) {
-    return err(res, e, 'Erro ao criar tag')
-  }
-}
-
-exports.updateTag = async (req, res) => {
-  try {
-    const { company_id } = req.user
-    const b = req.body || {}
-    const patch = {}
-    if (b.nome !== undefined) patch.nome = String(b.nome).trim()
-    if (b.cor !== undefined) patch.cor = b.cor != null ? String(b.cor) : null
-    if (b.ativo !== undefined) patch.ativo = !!b.ativo
-    const row = await repo.updateCrmTag(company_id, Number(req.params.id), patch)
-    if (!row) return res.status(404).json({ error: 'NÃ£o encontrado' })
-    return res.json(row)
-  } catch (e) {
-    return err(res, e, 'Erro ao atualizar tag')
-  }
-}
-
-// ---------- Motivos de perda ----------
-exports.createLostReason = async (req, res) => {
-  try {
-    const { company_id, id: userId } = req.user
-    const b = req.body || {}
-    if (!b.nome || !String(b.nome).trim()) return res.status(400).json({ error: 'nome Ã© obrigatÃ³rio' })
-    const row = await repo.insertLostReason({
-      company_id,
-      nome: String(b.nome).trim(),
-      descricao: b.descricao != null ? String(b.descricao) : null,
-      ativo: b.ativo !== false,
-      ordem: b.ordem != null ? Number(b.ordem) : 0,
-      criado_por: userId,
-      atualizado_por: userId,
-    })
-    return res.status(201).json(row)
-  } catch (e) {
-    return err(res, e, 'Erro ao criar motivo')
-  }
-}
-
-exports.updateLostReason = async (req, res) => {
-  try {
-    const { company_id, id: userId } = req.user
-    const b = req.body || {}
-    const patch = { atualizado_por: userId }
-    if (b.nome !== undefined) patch.nome = String(b.nome).trim()
-    if (b.descricao !== undefined) patch.descricao = b.descricao
-    if (b.ativo !== undefined) patch.ativo = !!b.ativo
-    if (b.ordem !== undefined) patch.ordem = Number(b.ordem)
-    const row = await repo.updateLostReason(company_id, Number(req.params.id), patch)
-    if (!row) return res.status(404).json({ error: 'NÃ£o encontrado' })
-    return res.json(row)
-  } catch (e) {
-    return err(res, e, 'Erro ao atualizar motivo')
   }
 }
 
@@ -602,90 +440,6 @@ exports.moveLead = async (req, res) => {
   }
 }
 
-exports.winLead = async (req, res) => {
-  try {
-    const { company_id, id: userId } = req.user
-    const leadId = Number(req.params.id)
-    const updated = await crmService.ganharLead(company_id, userId, leadId, req.body || {})
-    emitCrm(req, company_id, 'crm:lead_updated', { lead_id: leadId, action: 'win' })
-    emitCrm(req, company_id, 'crm:kanban_refresh', { pipeline_id: updated.pipeline_id })
-    return res.json(updated)
-  } catch (e) {
-    return err(res, e, 'Erro ao ganhar lead')
-  }
-}
-
-exports.loseLead = async (req, res) => {
-  try {
-    const { company_id, id: userId } = req.user
-    const leadId = Number(req.params.id)
-    const updated = await crmService.perderLead(company_id, userId, leadId, req.body || {})
-    emitCrm(req, company_id, 'crm:lead_updated', { lead_id: leadId, action: 'lose' })
-    emitCrm(req, company_id, 'crm:kanban_refresh', { pipeline_id: updated.pipeline_id })
-    return res.json(updated)
-  } catch (e) {
-    return err(res, e, 'Erro ao perder lead')
-  }
-}
-
-exports.reopenLead = async (req, res) => {
-  try {
-    const { company_id, id: userId } = req.user
-    const leadId = Number(req.params.id)
-    const updated = await crmService.reabrirLead(company_id, userId, leadId, req.body || {})
-    emitCrm(req, company_id, 'crm:lead_updated', { lead_id: leadId, action: 'reopen' })
-    emitCrm(req, company_id, 'crm:kanban_refresh', { pipeline_id: updated.pipeline_id })
-    return res.json(updated)
-  } catch (e) {
-    return err(res, e, 'Erro ao reabrir lead')
-  }
-}
-
-exports.transferLead = async (req, res) => {
-  try {
-    const { company_id, id: userId } = req.user
-    const leadId = Number(req.params.id)
-    const updated = await crmService.transferirResponsavel(
-      company_id,
-      userId,
-      leadId,
-      req.body?.responsavel_id ?? null
-    )
-    emitCrm(req, company_id, 'crm:lead_updated', { lead_id: leadId, action: 'transfer' })
-    return res.json(updated)
-  } catch (e) {
-    return err(res, e, 'Erro ao transferir responsÃ¡vel')
-  }
-}
-
-exports.registerContact = async (req, res) => {
-  try {
-    const { company_id, id: userId } = req.user
-    const leadId = Number(req.params.id)
-    const updated = await crmService.registrarContato(company_id, userId, leadId, req.body || {})
-    emitCrm(req, company_id, 'crm:lead_updated', { lead_id: leadId, action: 'contact' })
-    return res.json(updated)
-  } catch (e) {
-    return err(res, e, 'Erro ao registrar contato')
-  }
-}
-
-exports.getLeadTimeline = async (req, res) => {
-  try {
-    const { company_id } = req.user
-    const leadId = Number(req.params.id)
-    const lead = await repo.getLeadById(company_id, leadId)
-    if (!lead) return res.status(404).json({ error: 'Lead nÃ£o encontrado' })
-    const data = await repo.listTimeline(company_id, leadId, {
-      tipo: req.query.tipo,
-      limit: req.query.limit,
-    })
-    return res.json(data)
-  } catch (e) {
-    return err(res, e, 'Erro ao obter timeline')
-  }
-}
-
 exports.reorderLeads = async (req, res) => {
   try {
     const { company_id, id: userId } = req.user
@@ -742,9 +496,6 @@ exports.createNota = async (req, res) => {
       entidade: 'crm_lead',
       entidade_id: leadId,
       detalhes_json: { nota_id: row.id },
-    })
-    await crmService.recordTimeline(company_id, leadId, userId, 'nota_criada', 'Nota adicionada', {
-      metadata: { nota_id: row.id },
     })
     emitCrm(req, company_id, 'crm:lead_updated', { lead_id: leadId, action: 'nota' })
     return res.status(201).json(row)
@@ -810,14 +561,11 @@ exports.createAtividade = async (req, res) => {
       titulo: b.titulo,
       descricao: b.descricao ?? null,
       status: b.status || 'pendente',
-      prioridade: b.prioridade || 'media',
       data_agendada: b.data_agendada || null,
       data_fim: b.data_fim || null,
       participantes: Array.isArray(b.participantes) ? b.participantes : [],
       timezone: b.timezone || 'America/Sao_Paulo',
       responsavel_id: b.responsavel_id ?? null,
-      resultado: b.resultado ?? null,
-      proximo_passo: b.proximo_passo ?? null,
       criado_por: userId,
     })
     await repo.updateLead(company_id, leadId, { ultima_interacao_em: new Date().toISOString() })
@@ -836,9 +584,6 @@ exports.createAtividade = async (req, res) => {
       entidade: 'crm_atividade',
       entidade_id: row.id,
       detalhes_json: { lead_id: leadId, google: !!google?.synced },
-    })
-    await crmService.recordTimeline(company_id, leadId, userId, 'atividade_criada', 'Atividade criada', {
-      metadata: { atividade_id: row.id, tipo: row.tipo, data_agendada: row.data_agendada },
     })
     const fresh = await repo.getAtividadeById(company_id, row.id)
     emitCrm(req, company_id, 'crm:lead_updated', { lead_id: leadId, action: 'atividade' })
@@ -866,9 +611,6 @@ exports.updateAtividade = async (req, res) => {
     if (b.titulo !== undefined) patch.titulo = String(b.titulo)
     if (b.descricao !== undefined) patch.descricao = b.descricao
     if (b.status !== undefined) patch.status = b.status
-    if (b.prioridade !== undefined) patch.prioridade = b.prioridade
-    if (b.resultado !== undefined) patch.resultado = b.resultado
-    if (b.proximo_passo !== undefined) patch.proximo_passo = b.proximo_passo
     if (b.data_agendada !== undefined) patch.data_agendada = b.data_agendada
     if (b.data_fim !== undefined) patch.data_fim = b.data_fim
     if (b.timezone !== undefined) patch.timezone = b.timezone
@@ -877,10 +619,6 @@ exports.updateAtividade = async (req, res) => {
     if (b.status === 'concluida' && !existing.data_conclusao) {
       patch.data_conclusao = new Date().toISOString()
     }
-    if (b.status === 'cancelada' && !existing.cancelada_em) {
-      patch.cancelada_em = new Date().toISOString()
-    }
-    patch.atualizado_por = userId
     const row = await repo.updateAtividade(company_id, activityId, patch)
     if (b.status === 'concluida') {
       await registrar({
@@ -940,7 +678,7 @@ exports.getKanban = async (req, res) => {
   try {
     const { company_id } = req.user
     const pipeline_id = req.query.pipeline_id != null ? Number(req.query.pipeline_id) : null
-    const data = await crmService.getKanban(company_id, pipeline_id, req.query || {})
+    const data = await crmService.getKanban(company_id, pipeline_id)
     return res.json(data)
   } catch (e) {
     return err(res, e, 'Erro ao montar kanban')
@@ -1010,8 +748,7 @@ exports.getDashboardOrigens = async (req, res) => {
 exports.listLostReasons = async (req, res) => {
   try {
     const { company_id } = req.user
-    const ativo = req.query.ativo === 'false' ? false : req.query.ativo === 'true' ? true : undefined
-    const data = await repo.listLostReasons(company_id, { ativo })
+    const data = await repo.listLostReasons(company_id)
     return res.json(data)
   } catch (e) {
     return err(res, e, 'Erro ao listar motivos')

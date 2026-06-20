@@ -11,8 +11,7 @@
     "criar-admin": "node scripts/criar-admin.js",
     "cert:verificar": "node scripts/certificacao/verificar-sistema.js",
     "cert:verificar:local": "node scripts/certificacao/verificar-com-backend.js",
-    "webhook:logs": "node scripts/webhook-logs-query.js",
-    "load:smoke": "node scripts/load-smoke.js"
+    "webhook:logs": "node scripts/webhook-logs-query.js"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.90.1",
@@ -43,7 +42,6 @@
     "supertest": "^7.2.2"
   },
   "overrides": {
-    "tar": "^7.5.8",
-    "uuid": "^11.1.0"
+    "tar": "^7.5.8"
   }
 }

@@ -6,9 +6,9 @@ const path = require('path')
 const fs = require('fs')
 const { randomUUID } = require('crypto')
 const { loadEnv, isProduction } = require('./config/env')
-loadEnv()
 const { getUploadsRoot, ensureUploadsRootExists } = require('./config/uploadsRoot')
 const tagsRoutes = require('./routes/tagRoutes')
+loadEnv()
 ensureUploadsRootExists()
 
 const isProd = isProduction()
@@ -24,10 +24,7 @@ const allowedOrigins = [
     ? ['http://localhost:3000', 'http://localhost:5173', 'http://127.0.0.1:5173', 'http://127.0.0.1:3000']
     : [])
 ]
-const extraOrigins = [
-  ...String(process.env.CORS_ORIGINS || '').split(','),
-  ...String(process.env.ZAPERP_CORS_EXTRA_ORIGINS || '').split(','),
-].map((s) => s.trim()).filter(Boolean)
+const extraOrigins = String(process.env.CORS_ORIGINS || '').split(',').map((s) => s.trim()).filter(Boolean)
 extraOrigins.forEach((o) => { if (o && !allowedOrigins.includes(o)) allowedOrigins.push(o) })
 
 const allowedOriginPatterns = [
@@ -80,10 +77,6 @@ app.use(
     crossOriginOpenerPolicy: { policy: 'same-origin-allow-popups' },
     crossOriginResourcePolicy: { policy: 'cross-origin' },
     xFrameOptions: false,
-    // HSTS: apenas em produção (HTTPS obrigatório). 1 ano + subdomínios.
-    hsts: isProd
-      ? { maxAge: 31536000, includeSubDomains: true, preload: true }
-      : false,
   })
 )
 
@@ -121,7 +114,7 @@ app.use(express.json({
     try { req.rawBody = buf } catch (_) {}
   }
 }))
-app.use(express.urlencoded({ extended: false, limit: '1mb' }))
+app.use(express.urlencoded({ extended: true, limit: '1mb' }))
 
 // =====================================================
 // WEBHOOKS — registrados ANTES do CORS (provedores como UltraMSG enviam Origin).
@@ -157,23 +150,11 @@ const corsOptions = {
     'Pragma',
     'Expires',
   ],
-  exposedHeaders: [
-    'X-Request-Id',
-    'X-Chat-List-Limit',
-    'X-Chat-List-Has-More',
-    'X-Chat-List-Next-Cursor',
-    'X-Chat-List-Next-Cursor-Id',
-    'X-Chat-List-Sem-Conversa-Included',
-  ],
   credentials: true,
 }
 
 app.use(cors(corsOptions))
 app.options('*', cors(corsOptions))
-
-// Logging de requisições (após CORS para ter req.user disponível nos handlers)
-const requestLogger = require('./middleware/logger')
-app.use(requestLogger)
 
 // Arquivos estáticos (uploads: imagens, áudios, etc.)
 // Segurança:
@@ -256,35 +237,30 @@ const produtosRoutes = require('./routes/produtosRoutes')
 const printRoutes = require('./routes/printRoutes')
 const mediaProxyRoutes = require('./routes/mediaProxyRoutes')
 const pushRoutes = require('./routes/pushRoutes')
-const minhasPendenciasRoutes = require('./routes/minhasPendenciasRoutes')
 
 // Webhooks já registrados antes do CORS (evita 403 Origin)
-app.use('/dashboard', apiLimiter, dashboardRoutes)
-app.use('/jobs', apiLimiter, jobsRoutes)
-app.use('/ia', apiLimiter, iaRoutes)
-app.use('/config', apiLimiter, configRoutes)
-app.use('/integrations/whatsapp', apiLimiter, whatsappIntegrationRoutes)
-// Alias legado: o frontend historicamente chama /integrations/zapi.
-// O provider atual e o contrato real são UltraMsg/WhatsApp, mas as rotas são equivalentes.
-app.use('/integrations/zapi', apiLimiter, whatsappIntegrationRoutes)
-app.use('/clientes', apiLimiter, clienteRoutes)
-app.use('/usuarios', apiLimiter, userRoutes)
-app.use('/chats', apiLimiter, chatRoutes)
-app.use('/tags', apiLimiter, tagsRoutes)
-app.use('/ai', apiLimiter, aiRoutes)
-app.use('/campanhas', apiLimiter, campanhaRoutes)
-app.use('/opt-in', apiLimiter, optInRouter)
-app.use('/opt-out', apiLimiter, optOutRouter)
-app.use('/chatbot/debug', apiLimiter, chatbotDebugRoutes)
-app.use('/chatbot', apiLimiter, chatbotManagementRoutes)
-app.use('/internal-chat', apiLimiter, internalChatRoutes)
+app.use('/dashboard', dashboardRoutes)
+app.use('/jobs', jobsRoutes)
+app.use('/ia', iaRoutes)
+app.use('/config', configRoutes)
+app.use('/integrations/whatsapp', whatsappIntegrationRoutes)
+app.use('/clientes', clienteRoutes)
+app.use('/usuarios', userRoutes)
+app.use('/chats', chatRoutes)
+app.use('/tags', tagsRoutes)
+app.use('/ai', aiRoutes)
+app.use('/campanhas', campanhaRoutes)
+app.use('/opt-in', optInRouter)
+app.use('/opt-out', optOutRouter)
+app.use('/chatbot/debug', chatbotDebugRoutes)
+app.use('/chatbot', chatbotManagementRoutes)
+app.use('/internal-chat', internalChatRoutes)
 app.use('/crm', apiLimiter, crmRoutes)
-app.use('/supervisao', apiLimiter, supervisaoRoutes)
-app.use('/produtos', apiLimiter, produtosRoutes)
+app.use('/supervisao', supervisaoRoutes)
+app.use('/produtos', produtosRoutes)
 app.use('/print', apiLimiter, printRoutes)
 app.use('/media', apiLimiter, mediaProxyRoutes)
 app.use('/push', apiLimiter, pushRoutes)
-app.use('/conversas', apiLimiter, minhasPendenciasRoutes)
 
 // /api — prefixo opcional para SaaS; mantém compatibilidade com rotas antigas
 // Aplica apiLimiter globalmente para "rotas de API"
@@ -295,7 +271,6 @@ api.use('/ia', iaRoutes)
 api.use('/ai', aiRoutes)
 api.use('/config', configRoutes)
 api.use('/integrations/whatsapp', whatsappIntegrationRoutes)
-api.use('/integrations/zapi', whatsappIntegrationRoutes)
 api.use('/clientes', clienteRoutes)
 api.use('/usuarios', userRoutes)
 api.use('/chats', chatRoutes)
@@ -312,7 +287,6 @@ api.use('/produtos', produtosRoutes)
 api.use('/print', printRoutes)
 api.use('/media', mediaProxyRoutes)
 api.use('/push', pushRoutes)
-api.use('/conversas', minhasPendenciasRoutes)
 app.use('/api', apiLimiter, api)
 
 // =====================================================
@@ -335,8 +309,8 @@ if (hasFrontendDist) {
         '</head>',
         `  <link rel="stylesheet" href="${uiOverridesHref}" />\n  </head>`
       )
-  // Refresh automático a cada N minutos (AUTO_REFRESH_MINUTES=0 por padrão; defina >0 para ativar)
-  const autoRefreshMinutes = parseInt(process.env.AUTO_REFRESH_MINUTES || '0', 10)
+  // Refresh automático a cada N minutos (AUTO_REFRESH_MINUTES=5; 0 para desativar)
+  const autoRefreshMinutes = parseInt(process.env.AUTO_REFRESH_MINUTES || '5', 10)
   if (autoRefreshMinutes > 0 && !indexHtmlInjected.includes('auto-refresh-interval')) {
     const refreshScript = `<script id="auto-refresh-interval">(function(){var m=${autoRefreshMinutes}*60*1000;setInterval(function(){location.reload()},m)})();</script>`
     indexHtmlInjected = indexHtmlInjected.includes('</body>')
@@ -419,10 +393,9 @@ app.use((err, req, res, next) => {
   }
   // Outros erros: log + 500 JSON (nunca HTML)
   const status = Number(err?.status) || 500
-  if (status < 500) {
-    return res.status(status).json({ error: err?.message || 'Erro na requisição', requestId: req?.requestId || null })
-  }
-  const safeMessage = isProd ? 'Erro interno' : (err?.message || 'Erro interno')
+  const safeMessage = status < 500
+    ? (err?.message || 'Erro na requisição')
+    : (isProd ? 'Erro interno' : (err?.message || 'Erro interno'))
   console.error('[APP_ERROR]', {
     requestId: req?.requestId || null,
     method: req?.method || null,

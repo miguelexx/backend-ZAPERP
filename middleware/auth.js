@@ -9,7 +9,7 @@ module.exports = (req, res, next) => {
 
   const [scheme, token] = authHeader.split(' ')
 
-  if (!/^Bearer$/i.test(scheme) || !token) {
+  if (!/^Bearer$/i.test(scheme)) {
     return res.status(401).json({ error: 'Token mal formatado' })
   }
 

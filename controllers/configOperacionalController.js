@@ -26,13 +26,12 @@ exports.putOperacional = async (req, res) => {
     const { company_id, id: usuario_id } = req.user
     if (!company_id) return res.status(401).json({ error: 'Não autenticado' })
 
-    const body = req.body && typeof req.body === 'object' ? req.body : {}
-    const result = await updateConfig(company_id, body)
+    const result = await updateConfig(company_id, req.body)
     if (!result.ok) return res.status(400).json({ error: result.error })
 
     await registrarEvento(company_id, TIPOS.CONFIG_ALTERADA, 'Configuração operacional alterada', {
       usuario_id,
-      alteracoes: Object.keys(body)
+      alteracoes: Object.keys(req.body)
     })
 
     return res.json(result.data || await getConfig(company_id))

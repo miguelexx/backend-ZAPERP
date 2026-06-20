@@ -8,10 +8,8 @@ const { enqueue, listJobs, retryJob, pauseAll, resumeAll, JOB_TIPOS } = require(
 router.post('/timeout-inatividade', jobsController.checkCronSecret, jobsController.timeoutInatividade)
 router.post('/timeout-inatividade-chatbot', jobsController.checkCronSecret, jobsController.timeoutInatividadeChatbot)
 router.post('/finalizacao-ausencia-cliente', jobsController.checkCronSecret, jobsController.finalizacaoAusenciaCliente)
-router.post('/vencimento-pagamento-financeiro', jobsController.checkCronSecret, jobsController.vencimentoPagamentoFinanceiro)
 router.post('/finalizacao-ausencia-lote', jobsController.checkCronSecret, jobsController.finalizacaoAusenciaLote)
 router.post('/admin-atendimento-alerta', jobsController.checkCronSecret, jobsController.adminAtendimentoAlerta)
-router.post('/atendimento-sem-resposta', jobsController.checkCronSecret, jobsController.atendimentoSemResposta)
 
 // Operacional: requer auth + supervisor/admin
 const operacionalRouter = express.Router()

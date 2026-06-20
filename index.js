@@ -1,11 +1,11 @@
 const path = require('path')
-const { loadEnv, getBooleanEnv, isProduction } = require('./config/env')
-loadEnv()
+const { loadEnv } = require('./config/env')
 const http = require('http')
 const app = require('./app')
 const { Server } = require('socket.io')
 const jwt = require('jsonwebtoken')
 const supabase = require('./config/supabase')
+loadEnv()
 
 // Diagnóstico: em produção, logs mínimos (nunca expor tokens, senhas ou paths sensíveis)
 if (process.env.NODE_ENV !== 'production') {
@@ -17,7 +17,6 @@ console.log('NODE_ENV:', process.env.NODE_ENV || 'development')
 
 // Detecta NODE_ENV malformado (ex: falta newline no .env → NODE_ENV=productionULTRAMSG_BASE_URL=...)
 const nodeEnv = String(process.env.NODE_ENV || '').trim()
-const SOCKET_DEBUG = process.env.SOCKET_DEBUG === '1' || process.env.NODE_ENV !== 'production'
 if (nodeEnv && (nodeEnv.includes('ULTRAMSG') || nodeEnv.includes('='))) {
   console.warn(
     '[ENV] NODE_ENV parece concatenado com outra variável. Verifique o .env: cada variável deve estar em uma linha separada.'
@@ -41,45 +40,28 @@ if (!String(process.env.NODE_ENV || '').trim()) {
 
 const server = http.createServer(app)
 
-// CORS do Socket.IO: alinhado ao Express (CORS_ORIGINS + ZAPERP_CORS_EXTRA_ORIGINS + APP_URL + dev local).
-function collectAllowedSocketOrigins() {
-  const origins = new Set()
-  const pushCsv = (raw) => {
-    String(raw || '')
-      .split(',')
-      .map((s) => s.trim())
-      .filter(Boolean)
-      .forEach((o) => origins.add(o))
-  }
-  pushCsv(process.env.CORS_ORIGINS)
-  pushCsv(process.env.ZAPERP_CORS_EXTRA_ORIGINS)
-  try {
-    const u = new URL(String(process.env.APP_URL || '').trim())
-    if (u.origin) origins.add(u.origin)
-  } catch (_) {
-    /* ignore */
-  }
-  if (!isProduction()) {
-    ;[
-      'http://localhost:3000',
-      'http://localhost:5173',
-      'http://127.0.0.1:5173',
-      'http://127.0.0.1:3000',
-      'http://localhost:4173',
-      'http://127.0.0.1:4173',
-    ].forEach((o) => origins.add(o))
-  }
-  return Array.from(origins)
+// CORS do Socket.IO: segue mesma política do Express (CORS_ORIGINS + APP_URL).
+const allowedSocketOrigins = String(process.env.CORS_ORIGINS || '')
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean)
+
+let socketAppOrigin = null
+try {
+  const u = new URL(String(process.env.APP_URL || '').trim())
+  socketAppOrigin = u?.origin || null
+} catch (_) {
+  socketAppOrigin = null
 }
 
-const allowedSocketOrigins = collectAllowedSocketOrigins()
+if (socketAppOrigin && !allowedSocketOrigins.includes(socketAppOrigin)) {
+  allowedSocketOrigins.push(socketAppOrigin)
+}
 
 const internalChatSocket = require('./socket/internalChatSocket')
 const { startAbsenceFinalizationScheduler } = require('./services/absenceFinalizationScheduler')
 const { startAdminAtendimentoAlertaScheduler } = require('./services/adminAtendimentoAlertaScheduler')
-const { startAtendimentoSemRespostaScheduler } = require('./services/atendimentoSemRespostaScheduler')
 const { startProdutosSyncScheduler } = require('./services/produtosSyncScheduler')
-const { usuarioPodeVerGrupo } = require('./helpers/departamentoGruposHelper')
 
 async function canUserJoinConversationRoom({ company_id, user_id, role, departamento_ids, conversa_id }) {
   const cid = Number(conversa_id)
@@ -91,7 +73,7 @@ async function canUserJoinConversationRoom({ company_id, user_id, role, departam
 
   const { data: conv, error: convErr } = await supabase
     .from('conversas')
-    .select('id, atendente_id, departamento_id, tipo, telefone')
+    .select('id, atendente_id, departamento_id')
     .eq('company_id', companyId)
     .eq('id', cid)
     .maybeSingle()
@@ -99,31 +81,7 @@ async function canUserJoinConversationRoom({ company_id, user_id, role, departam
 
   const profile = String(role || '').toLowerCase()
   if (profile === 'admin') return true
-
-  const isGroup =
-    ['grupo', 'group'].includes(String(conv.tipo || '').toLowerCase()) ||
-    String(conv.telefone || '').toLowerCase().endsWith('@g.us')
-  if (isGroup) {
-    return usuarioPodeVerGrupo({
-      company_id: companyId,
-      conversa_id: cid,
-      role,
-      departamento_ids,
-    })
-  }
-
   if (conv.atendente_id != null && Number(conv.atendente_id) === userId) return true
-
-  const { data: participanteRow } = await supabase
-    .from('conversa_atendentes')
-    .select('id')
-    .eq('company_id', companyId)
-    .eq('conversa_id', cid)
-    .eq('usuario_id', userId)
-    .eq('ativo', true)
-    .limit(1)
-    .maybeSingle()
-  if (participanteRow) return true
 
   const { data: transferRow } = await supabase
     .from('atendimentos')
@@ -236,7 +194,7 @@ io.on('connection', (socket) => {
 
   internalChatSocket.handleConnection(socket)
 
-  if (SOCKET_DEBUG) console.log(`🟢 Socket conectado | Usuário ${id} | Empresa ${company_id}`)
+  console.log(`🟢 Socket conectado | Usuário ${id} | Empresa ${company_id}`)
 
   // rooms padrão: empresa (admin vê tudo) e usuário
   socket.join(`empresa_${company_id}`)
@@ -251,45 +209,41 @@ io.on('connection', (socket) => {
 
   // entrar na conversa (idempotente: evita join duplicado e log repetido)
   socket.on('join_conversa', async (conversaId) => {
-    try {
-      if (!conversaId) return
+    if (!conversaId) return
 
-      const convId = Number(conversaId)
-      if (!Number.isFinite(convId) || convId <= 0) return
+    const convId = Number(conversaId)
+    if (!Number.isFinite(convId) || convId <= 0) return
 
-      const allowed = await canUserJoinConversationRoom({
-        company_id,
-        user_id: id,
-        role: perfil,
-        departamento_ids,
-        conversa_id: convId
-      })
-      if (!allowed) {
-        console.warn(`[SOCKET_JOIN_DENIED] Usuario ${id} | Empresa ${company_id} | Conversa ${convId}`)
-        return
-      }
+    const allowed = await canUserJoinConversationRoom({
+      company_id,
+      user_id: id,
+      role: perfil,
+      departamento_ids,
+      conversa_id: convId
+    })
+    if (!allowed) {
+      console.warn(`🚫 Join negado | Usuário ${id} | Empresa ${company_id} | Conversa ${convId}`)
+      return
+    }
 
-      const room = `conversa_${convId}`
-      if (!socket.rooms.has(room)) {
-        socket.join(room)
-        if (SOCKET_DEBUG) console.log(`[SOCKET_JOIN_CONVERSA] Usuario ${id} entrou na conversa ${convId}`)
-      }
-    } catch (err) {
-      console.error('[SOCKET_JOIN_CONVERSA]', {
-        user_id: id,
-        company_id,
-        conversa_id: conversaId,
-        message: err?.message || String(err || ''),
+    const room = `conversa_${convId}`
+    if (!socket.rooms.has(room)) {
+      socket.join(room)
+      console.log(`💬 Socket entrou na conversa ${convId}`)
+      // Sincroniza contato com API UltraMsg ao abrir chat (atualiza nome/foto se necessário)
+      setImmediate(() => {
+        const { syncConversationContactOnJoin } = require('./services/ultramsgSyncContact')
+        syncConversationContactOnJoin(supabase, convId, company_id, io, { skipIfRecent: true }).catch(() => {})
       })
     }
   })
 
-  // sair da conversa (escala / limpeza de rooms)
+  // 🔥 NOVO: sair da conversa (escala / limpeza de rooms)
   socket.on('leave_conversa', (conversaId) => {
     if (!conversaId) return
 
     socket.leave(`conversa_${conversaId}`)
-    if (SOCKET_DEBUG) console.log(`💬 Socket saiu da conversa ${conversaId}`)
+    console.log(`💬 Socket saiu da conversa ${conversaId}`)
   })
 
   // =====================================================
@@ -317,7 +271,7 @@ io.on('connection', (socket) => {
   })
 
   socket.on('disconnect', () => {
-    if (SOCKET_DEBUG) console.log(`🔴 Socket desconectado | Usuário ${id}`)
+    console.log(`🔴 Socket desconectado | Usuário ${id}`)
   })
 })
 
@@ -334,53 +288,16 @@ server.listen(PORT, '0.0.0.0', () => {
   // Não há mais instância única em ENV para configurar no startup.
 
   // Inicia worker de jobs (sync_contatos, sync_fotos, etc.) em background.
+  // Passa io para o worker emitir o evento legado 'zapi_sync_contatos' (nome histórico; ver ../docs/_OFICIAL/ADR-LEGACY-NAMING.md) ao concluir cada job.
   const isTest = process.env.NODE_ENV === 'test' || !!process.env.JEST_WORKER_ID
-  const backgroundJobsDisabled = getBooleanEnv('ZAPERP_DISABLE_BACKGROUND_JOBS', false)
-  if (!isTest && !backgroundJobsDisabled) {
+  if (!isTest) {
     const { startWorker } = require('./services/queueManager')
     startWorker(5000, io)
     console.log('[WORKER] Job worker iniciado (polling a cada 5s)')
     startAbsenceFinalizationScheduler()
     startAdminAtendimentoAlertaScheduler()
-    startAtendimentoSemRespostaScheduler(io)
     startProdutosSyncScheduler()
     const { startInboundMediaRetryScheduler } = require('./services/inboundMediaPersistenceService')
     startInboundMediaRetryScheduler(supabase, io)
-  } else if (backgroundJobsDisabled) {
-    console.log('[WORKER] Rotinas em background desativadas por ZAPERP_DISABLE_BACKGROUND_JOBS')
   }
-})
-
-let shuttingDown = false
-function shutdown(signal) {
-  if (shuttingDown) return
-  shuttingDown = true
-  console.log(`[SHUTDOWN] Recebido ${signal}. Encerrando servidor HTTP/WebSocket...`)
-  try {
-    io.close()
-  } catch (e) {
-    console.error('[SHUTDOWN] Erro ao fechar Socket.IO:', e?.message || e)
-  }
-  server.close((err) => {
-    if (err) {
-      console.error('[SHUTDOWN] Erro ao fechar servidor:', err?.message || err)
-      process.exit(1)
-    }
-    console.log('[SHUTDOWN] Servidor encerrado com sucesso.')
-    process.exit(0)
-  })
-  setTimeout(() => {
-    console.error('[SHUTDOWN] Timeout ao encerrar servidor. Forcando saida.')
-    process.exit(1)
-  }, Number(process.env.SHUTDOWN_TIMEOUT_MS || 10000)).unref()
-}
-
-process.on('SIGTERM', () => shutdown('SIGTERM'))
-process.on('SIGINT', () => shutdown('SIGINT'))
-process.on('unhandledRejection', (err) => {
-  console.error('[UNHANDLED_REJECTION]', err?.message || err)
-})
-process.on('uncaughtException', (err) => {
-  console.error('[UNCAUGHT_EXCEPTION]', err?.message || err)
-  shutdown('uncaughtException')
 })

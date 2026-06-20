@@ -11,11 +11,8 @@ const { syncContactsFullProgressiva } = require('./syncProgressivaService')
 
 const JOB_TIPOS = {
   SYNC_CONTATOS: 'sync_contatos',
-  SYNC_FOTOS: 'sync_fotos',
-  SYNC_MENSAGENS_ANTIGAS: 'sync_mensagens_antigas'
+  SYNC_FOTOS: 'sync_fotos'
 }
-
-const ACTIVE_JOB_STATUSES = ['pending', 'running', 'cancel_requested']
 
 const MAX_CONCURRENT = parseInt(process.env.QUEUE_MAX_CONCURRENT_JOBS, 10) || 2
 const BACKOFF_BASE_MS = parseInt(process.env.QUEUE_BACKOFF_BASE_MS, 10) || 5000
@@ -31,7 +28,7 @@ async function jobDuplicado(company_id, tipo) {
     .select('id')
     .eq('company_id', company_id)
     .eq('tipo', tipo)
-    .in('status', ACTIVE_JOB_STATUSES)
+    .in('status', ['pending', 'running'])
     .limit(1)
   return data && data.length > 0
 }
@@ -86,43 +83,17 @@ async function listJobs(company_id, opts = {}) {
   return { ok: true, jobs: data || [] }
 }
 
-async function getActiveJob(company_id, tipo) {
-  if (!company_id || !tipo) return null
-  const { data } = await supabase
-    .from('jobs')
-    .select('*')
-    .eq('company_id', Number(company_id))
-    .eq('tipo', tipo)
-    .in('status', ACTIVE_JOB_STATUSES)
-    .order('criado_em', { ascending: false })
-    .limit(1)
-    .maybeSingle()
-  return data || null
-}
-
-async function isJobCancelRequested(company_id, jobId) {
-  if (!jobId) return false
-  const { data } = await supabase
-    .from('jobs')
-    .select('status')
-    .eq('company_id', Number(company_id))
-    .eq('id', Number(jobId))
-    .maybeSingle()
-  return data?.status === 'cancel_requested' || data?.status === 'cancelled'
-}
-
 /**
  * Obtém próximo job pendente (respeitando concorrência e processamento_pausado).
  */
 async function getNextPendingJob() {
   if (runningCount >= MAX_CONCURRENT) return null
 
-  const nowIso = new Date().toISOString()
   const { data } = await supabase
     .from('jobs')
     .select('*')
     .eq('status', 'pending')
-    .or('next_run_at.is.null,next_run_at.lte.' + nowIso)
+    .or('next_run_at.is.null,next_run_at.lte.' + new Date().toISOString())
     .order('criado_em', { ascending: true })
     .limit(1)
     .maybeSingle()
@@ -132,24 +103,14 @@ async function getNextPendingJob() {
   const pausado = await isProcessamentoPausado(data.company_id)
   if (pausado) return null
 
-  const nextTentativas = Number(data.tentativas || 0) + 1
-  const update = {
-    status: 'running',
-    tentativas: nextTentativas,
-    atualizado_em: new Date().toISOString()
-  }
-
-  const { data: locked, error } = await supabase
+  const { error } = await supabase
     .from('jobs')
-    .update(update)
+    .update({ status: 'running', tentativas: data.tentativas + 1, atualizado_em: new Date().toISOString() })
     .eq('id', data.id)
-    .eq('company_id', data.company_id)
     .eq('status', 'pending')
-    .select('id')
-    .maybeSingle()
 
-  if (error || !locked?.id) return null
-  return { ...data, ...update }
+  if (error) return null
+  return { ...data, tentativas: data.tentativas + 1 }
 }
 
 /**
@@ -173,16 +134,6 @@ async function executeJob(job) {
       return { ok: true, resultado: result }
     }
 
-    if (tipo === JOB_TIPOS.SYNC_MENSAGENS_ANTIGAS) {
-      const { syncOldMessagesForCompany } = require('./oldMessagesSyncService')
-      const result = await syncOldMessagesForCompany(company_id, {
-        ...payload,
-        jobId: id,
-        shouldCancel: () => isJobCancelRequested(company_id, id),
-      })
-      return { ok: true, resultado: result }
-    }
-
     return { ok: false, erro: `Tipo desconhecido: ${tipo}` }
   } catch (e) {
     return { ok: false, erro: e?.message || String(e) }
@@ -199,12 +150,7 @@ async function finalizeJob(jobId, success, job, resultado, erro) {
 
   let status, nextRunAt
 
-  const cancelled = success && (resultado?.cancelled === true || resultado?.resultado?.cancelled === true)
-
-  if (cancelled) {
-    status = 'cancelled'
-    nextRunAt = null
-  } else if (success) {
+  if (success) {
     status = 'completed'
     nextRunAt = null
   } else if (esgotouTentativas) {
@@ -219,14 +165,12 @@ async function finalizeJob(jobId, success, job, resultado, erro) {
   const update = {
     status,
     resultado_json: success ? (resultado?.resultado || resultado) : null,
-    erro: cancelled ? 'Cancelado pelo usuario' : (success ? null : (erro || 'Erro desconhecido')),
+    erro: success ? null : (erro || 'Erro desconhecido'),
     next_run_at: nextRunAt,
     atualizado_em: new Date().toISOString()
   }
 
-  let q = supabase.from('jobs').update(update).eq('id', jobId)
-  if (job?.company_id != null) q = q.eq('company_id', job.company_id)
-  await q
+  await supabase.from('jobs').update(update).eq('id', jobId)
 }
 
 /**
@@ -261,23 +205,6 @@ async function processJob(job, io = null) {
           fotos_atualizadas: result.resultado.totalAtualizados || 0
         })
       }
-      if (io && job.tipo === JOB_TIPOS.SYNC_MENSAGENS_ANTIGAS && result.resultado) {
-        const r = result.resultado
-        io.to(`empresa_${job.company_id}`).emit('whatsapp_sync_mensagens_antigas', {
-          ok: r.ok !== false,
-          job_id: job.id,
-          cancelled: r.cancelled === true,
-          error: r.cancelled === true ? null : (r.ok === false ? (r.error || 'Erro ao sincronizar mensagens antigas.') : null),
-          message: r.cancelled === true ? 'Sincronizacao de mensagens antigas cancelada.' : null,
-          messages_per_chat: r.messagesPerChat || 0,
-          chats_processados: r.chatsProcessed || 0,
-          conversas_criadas: r.conversationsCreated || 0,
-          mensagens_lidas: r.messagesFetched || 0,
-          mensagens_importadas: r.messagesInserted || 0,
-          mensagens_ignoradas: r.messagesSkipped || 0,
-          erros: Array.isArray(r.errors) ? r.errors.slice(0, 5) : []
-        })
-      }
       return
     }
 
@@ -296,49 +223,11 @@ async function processJob(job, io = null) {
 }
 
 /**
- * Recupera jobs travados em 'running' (processo anterior encerrou abruptamente).
- * Reseta para 'pending' jobs com mais de STALE_JOB_TIMEOUT_MS sem atualização.
- */
-async function recoverStaleRunningJobs() {
-  const STALE_JOB_TIMEOUT_MS = parseInt(process.env.QUEUE_STALE_JOB_TIMEOUT_MS, 10) || 10 * 60 * 1000
-  const staleBefore = new Date(Date.now() - STALE_JOB_TIMEOUT_MS).toISOString()
-  try {
-    const { data: staleJobs } = await supabase
-      .from('jobs')
-      .select('id, company_id, tipo, status, tentativas')
-      .in('status', ['running', 'cancel_requested'])
-      .lt('atualizado_em', staleBefore)
-    if (!staleJobs || staleJobs.length === 0) return
-    console.warn(`[queueManager] Recuperando ${staleJobs.length} job(s) travados`)
-    for (const job of staleJobs) {
-      const nextStatus = job.status === 'cancel_requested' ? 'cancelled' : 'pending'
-      await supabase
-        .from('jobs')
-        .update({
-          status: nextStatus,
-          erro: nextStatus === 'cancelled' ? 'Cancelado pelo usuario' : null,
-          next_run_at: nextStatus === 'pending' ? new Date().toISOString() : null,
-          atualizado_em: new Date().toISOString()
-        })
-        .eq('id', job.id)
-        .eq('company_id', job.company_id)
-        .eq('status', job.status)
-      console.warn(`[queueManager] Job ${job.id} (${job.tipo}) empresa ${job.company_id} ajustado para ${nextStatus}`)
-    }
-  } catch (e) {
-    console.warn('[queueManager] Erro ao recuperar jobs travados:', e?.message || e)
-  }
-}
-
-/**
  * Inicia polling do worker.
  * @param {number} intervalMs - intervalo entre verificações
  * @param {object} io - Socket.IO para emitir evento legado `zapi_sync_contatos` ao concluir (ver ../docs/_OFICIAL/ADR-LEGACY-NAMING.md)
  */
 function startWorker(intervalMs = 5000, io = null) {
-  // Recupera jobs travados de crashes anteriores antes de iniciar o polling
-  recoverStaleRunningJobs().catch(() => {})
-
   const poll = async () => {
     try {
       const job = await getNextPendingJob()
@@ -350,7 +239,7 @@ function startWorker(intervalMs = 5000, io = null) {
           await supabase.from('jobs').update({
             status: 'pending',
             tentativas: Math.max(0, (job.tentativas || 1) - 1)
-          }).eq('id', job.id).eq('company_id', job.company_id).eq('status', 'running')
+          }).eq('id', job.id)
         }
       }
     } catch (e) {
@@ -379,52 +268,9 @@ async function retryJob(jobId, company_id) {
       atualizado_em: new Date().toISOString()
     })
     .eq('id', jobId)
-    .eq('company_id', company_id)
 
   if (error) return { ok: false, error: error.message }
   return { ok: true }
-}
-
-async function requestCancelJob(company_id, tipo) {
-  if (!company_id || !tipo) return { ok: false, error: 'company_id e tipo obrigatorios' }
-
-  const job = await getActiveJob(company_id, tipo)
-  if (!job?.id) return { ok: false, notFound: true, error: 'Nenhuma sincronizacao ativa encontrada' }
-
-  if (job.status === 'pending') {
-    const { data: updated, error: updErr } = await supabase
-      .from('jobs')
-      .update({
-        status: 'cancelled',
-        erro: 'Cancelado pelo usuario antes de iniciar',
-        atualizado_em: new Date().toISOString(),
-      })
-      .eq('company_id', Number(company_id))
-      .eq('id', job.id)
-      .eq('status', 'pending')
-      .select('id')
-      .maybeSingle()
-    if (updErr) return { ok: false, error: updErr.message }
-    if (!updated?.id) return requestCancelJob(company_id, tipo)
-    return { ok: true, cancelled: true, job_id: job.id, status: 'cancelled' }
-  }
-
-  const { data: updated, error: updErr } = await supabase
-    .from('jobs')
-    .update({
-      status: 'cancel_requested',
-      erro: 'Cancelamento solicitado pelo usuario',
-      atualizado_em: new Date().toISOString(),
-    })
-    .eq('company_id', Number(company_id))
-    .eq('id', job.id)
-    .in('status', ['running', 'cancel_requested'])
-    .select('id')
-    .maybeSingle()
-
-  if (updErr) return { ok: false, error: updErr.message }
-  if (!updated?.id) return { ok: false, notFound: true, error: 'Nenhuma sincronizacao ativa encontrada' }
-  return { ok: true, cancel_requested: true, job_id: job.id, status: 'cancel_requested' }
 }
 
 /**
@@ -444,14 +290,11 @@ async function resumeAll(company_id) {
 module.exports = {
   enqueue,
   listJobs,
-  getActiveJob,
   getNextPendingJob,
   processJob,
   startWorker,
   retryJob,
-  requestCancelJob,
   pauseAll,
   resumeAll,
-  recoverStaleRunningJobs,
   JOB_TIPOS
 }
