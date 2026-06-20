@@ -3678,7 +3678,7 @@ exports.detalharChat = async (req, res) => {
         foto_perfil_contato_cache,
         cliente_id,
         clientes!conversas_cliente_fk ( id, nome, pushname, telefone, observacoes, foto_perfil, company_id ),
-        usuarios!conversas_atendente_fk ( id, nome ),
+        usuarios:usuarios!conversas_atendente_id_fkey ( id, nome ),
         departamentos ( id, nome ),
         conversa_tags (
           tag_id,
