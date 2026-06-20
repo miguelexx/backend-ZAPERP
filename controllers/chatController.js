@@ -3693,9 +3693,12 @@ exports.detalharChat = async (req, res) => {
     const isGroup = isGroupConversation(conversa)
     const isAssignedToUser = conversa.atendente_id && Number(conversa.atendente_id) === Number(user_id)
 
-    // REGRA PRINCIPAL: Se a conversa está assumida pelo usuário, SEMPRE permitir acesso total
+    // REGRA PRINCIPAL: Se a conversa está assumida pelo usuário ou ele participa do co-atendimento, permitir acesso total
     let podeAcessar = !isGroup && isAssignedToUser
     const conversaEncerrada = isClosedAttendanceStatus(conversa.status_atendimento)
+    if (!podeAcessar && !isGroup && conversa.atendente_id) {
+      podeAcessar = await usuarioParticipaAtivamenteDaConversa(company_id, Number(id), user_id)
+    }
     if (!podeAcessar && !isAdmin && isGroup) {
       podeAcessar = await usuarioPodeVerGrupo({
         company_id,
@@ -3728,11 +3731,11 @@ exports.detalharChat = async (req, res) => {
     }
 
     // Bloqueia visão das mensagens quando a conversa está assumida por outro usuário
-    // (apenas admin e supervisor podem ver; atendente que não assumiu não vê o conteúdo)
+    // (exceto admin, supervisor e atendente participante do co-atendimento)
     const isSupervisor = role === 'supervisor'
     const conversaAssumidaPorOutro = conversa.atendente_id != null && Number(conversa.atendente_id) !== Number(user_id)
     const deveBloquearMensagens =
-      !isGroup && !conversaEncerrada && conversaAssumidaPorOutro && !isAdmin && !isSupervisor
+      !isGroup && !conversaEncerrada && conversaAssumidaPorOutro && !podeAcessar && !isAdmin && !isSupervisor
 
     // mensagens paginadas (remetente_nome/remetente_telefone para grupos; fallback se colunas não existirem)
     const selectComRemetente = 'id, conversa_id, texto, direcao, criado_em, autor_usuario_id, status, whatsapp_id, whatsapp_instance_id, tipo, url, nome_arquivo, reply_meta, remetente_nome, remetente_telefone, contact_meta, location_meta, apagada_para_todos, apagada_em'
@@ -4011,7 +4014,8 @@ exports.buscarMensagensConversa = async (req, res) => {
     const isAdmin = role === 'admin'
     const isSupervisor = role === 'supervisor'
     const conversaAssumidaPorOutro = conv.atendente_id != null && Number(conv.atendente_id) !== Number(user_id)
-    if (!isGroup && conversaAssumidaPorOutro && !isAdmin && !isSupervisor) {
+    const usuarioParticipanteConversa = perm.reason === 'usuario_participante_conversa'
+    if (!isGroup && conversaAssumidaPorOutro && !usuarioParticipanteConversa && !isAdmin && !isSupervisor) {
       return res.status(403).json({ error: 'Mensagens indisponíveis para conversa assumida por outro usuário' })
     }
 

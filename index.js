@@ -114,6 +114,17 @@ async function canUserJoinConversationRoom({ company_id, user_id, role, departam
 
   if (conv.atendente_id != null && Number(conv.atendente_id) === userId) return true
 
+  const { data: participanteRow } = await supabase
+    .from('conversa_atendentes')
+    .select('id')
+    .eq('company_id', companyId)
+    .eq('conversa_id', cid)
+    .eq('usuario_id', userId)
+    .eq('ativo', true)
+    .limit(1)
+    .maybeSingle()
+  if (participanteRow) return true
+
   const { data: transferRow } = await supabase
     .from('atendimentos')
     .select('id')
