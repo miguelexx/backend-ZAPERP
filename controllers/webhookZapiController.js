@@ -161,10 +161,10 @@ function mediaFamilyForStorageTipo(tipo) {
   const t = String(tipo || '').toLowerCase().trim()
   if (t === 'text' || t === 'texto' || t === 'chat') return 'texto'
   if (t === 'audio' || t === 'voice' || t === 'ptt') return 'audio'
-  if (t === 'image' || t === 'imagem') return 'imagem'
+  // Figurinha e imagem compartilham família na reconciliação fromMe (webp pode vir como image no webhook).
+  if (t === 'image' || t === 'imagem' || t === 'sticker') return 'imagem'
   if (t === 'video' || t === 'vídeo') return 'video'
   if (t === 'document' || t === 'file' || t === 'arquivo' || t === 'documento') return 'arquivo'
-  if (t === 'sticker') return 'sticker'
   return t || ''
 }
 

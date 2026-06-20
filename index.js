@@ -131,6 +131,42 @@ async function canUserJoinConversationRoom({ company_id, user_id, role, departam
   return depIds.some((d) => d === convDep)
 }
 
+async function marcarConversaLidaSocket({ company_id, user_id, role, departamento_ids, conversa_id }) {
+  const cid = Number(conversa_id)
+  const companyId = Number(company_id)
+  const userId = Number(user_id)
+  if (!Number.isFinite(cid) || cid <= 0) return false
+  if (!Number.isFinite(companyId) || companyId <= 0) return false
+  if (!Number.isFinite(userId) || userId <= 0) return false
+
+  const allowed = await canUserJoinConversationRoom({
+    company_id: companyId,
+    user_id: userId,
+    role,
+    departamento_ids,
+    conversa_id: cid,
+  })
+  if (!allowed) return false
+
+  await Promise.all([
+    supabase
+      .from('conversa_unreads')
+      .update({
+        unread_count: 0,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('company_id', companyId)
+      .eq('conversa_id', cid)
+      .eq('usuario_id', userId),
+    supabase
+      .from('conversas')
+      .update({ lida: true })
+      .eq('company_id', companyId)
+      .eq('id', cid),
+  ])
+  return true
+}
+
 const io = new Server(server, {
   cors: {
     origin(origin, cb) {
@@ -303,6 +339,31 @@ io.on('connection', (socket) => {
     const room = `conversa_${conversa_id}`
     if (!socket.rooms.has(room)) return
     socket.to(room).emit('typing_stop', { conversa_id: Number(conversa_id) })
+  })
+
+  socket.on('marcar_conversa_lida', async (data = {}) => {
+    const conversa_id = data?.conversa_id ?? data?.id
+    try {
+      const ok = await marcarConversaLidaSocket({
+        company_id,
+        user_id: id,
+        role: perfil,
+        departamento_ids,
+        conversa_id,
+      })
+      if (!ok) return
+      socket.emit(io.EVENTS?.MENSAGENS_LIDAS || 'mensagens_lidas', {
+        conversa_id: Number(conversa_id),
+        usuario_id: Number(id),
+      })
+    } catch (err) {
+      console.error('[SOCKET_MARCAR_CONVERSA_LIDA]', {
+        user_id: id,
+        company_id,
+        conversa_id,
+        message: err?.message || String(err || ''),
+      })
+    }
   })
 
   socket.on('disconnect', () => {

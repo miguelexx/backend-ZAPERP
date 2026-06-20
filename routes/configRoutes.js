@@ -11,12 +11,16 @@ const { uploadLogo } = require('../middleware/upload')
 
 // Configurações: supervisor e admin (atendente não acessa)
 router.use(auth)
+
+// Dados basicos da empresa alimentam a marca/cabecalho do atendimento.
+// Atendentes podem ler; alteracoes continuam restritas abaixo.
+router.get('/empresa', configController.getEmpresa)
+
 router.use(supervisorOrAdmin)
 
 // Config operacional e auditoria de eventos (proteção WhatsApp)
 router.use('/', configOperacionalRoutes)
 
-router.get('/empresa', configController.getEmpresa)
 router.put('/empresa', configController.putEmpresa)
 router.post('/empresa/logo', adminOnly, uploadLogo.single('logo'), configController.uploadLogoEmpresa)
 router.delete('/empresa/logo', adminOnly, destructiveLimiter, configController.deleteLogoEmpresa)
