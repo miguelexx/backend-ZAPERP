@@ -1027,6 +1027,165 @@ async function anexarRelacionamentosDetalheConversa(conversa, company_id) {
   return conversa
 }
 
+function uniquePositiveIds(values) {
+  return [...new Set((values || []).map(Number).filter((id) => Number.isFinite(id) && id > 0))]
+}
+
+async function anexarRelacionamentosListaConversas(rows, company_id) {
+  if (!Array.isArray(rows) || rows.length === 0) return rows
+
+  const clienteIds = uniquePositiveIds(rows.filter((c) => !c.clientes).map((c) => c.cliente_id))
+  const atendenteIds = uniquePositiveIds(rows.filter((c) => !c.atendente).map((c) => c.atendente_id))
+  const departamentoIds = uniquePositiveIds(rows.filter((c) => !c.departamentos).map((c) => c.departamento_id))
+  const conversaIdsSemTags = uniquePositiveIds(rows.filter((c) => !Array.isArray(c.conversa_tags)).map((c) => c.id))
+
+  const clienteMap = new Map()
+  const atendenteMap = new Map()
+  const departamentoMap = new Map()
+  const conversaTagsMap = new Map()
+
+  await Promise.allSettled([
+    (async () => {
+      if (clienteIds.length === 0) return
+      const { data, error } = await supabase
+        .from('clientes')
+        .select('id, nome, pushname, telefone, foto_perfil, company_id')
+        .eq('company_id', Number(company_id))
+        .in('id', clienteIds)
+      if (error) {
+        console.warn('[listarConversas] clientes sem embed:', error?.message || error)
+        return
+      }
+      for (const row of data || []) clienteMap.set(Number(row.id), row)
+    })(),
+    (async () => {
+      if (atendenteIds.length === 0) return
+      const { data, error } = await supabase
+        .from('usuarios')
+        .select('id, nome, email')
+        .eq('company_id', Number(company_id))
+        .in('id', atendenteIds)
+      if (error) {
+        console.warn('[listarConversas] atendentes sem embed:', error?.message || error)
+        return
+      }
+      for (const row of data || []) atendenteMap.set(Number(row.id), row)
+    })(),
+    (async () => {
+      if (departamentoIds.length === 0) return
+      const { data, error } = await supabase
+        .from('departamentos')
+        .select('id, nome')
+        .eq('company_id', Number(company_id))
+        .in('id', departamentoIds)
+      if (error) {
+        console.warn('[listarConversas] departamentos sem embed:', error?.message || error)
+        return
+      }
+      for (const row of data || []) departamentoMap.set(Number(row.id), row)
+    })(),
+    (async () => {
+      if (conversaIdsSemTags.length === 0) return
+      const { data: tagRows, error: tagRowsError } = await supabase
+        .from('conversa_tags')
+        .select('conversa_id, tag_id')
+        .eq('company_id', Number(company_id))
+        .in('conversa_id', conversaIdsSemTags)
+      if (tagRowsError) {
+        console.warn('[listarConversas] conversa_tags sem embed:', tagRowsError?.message || tagRowsError)
+        return
+      }
+      const tagIds = uniquePositiveIds((tagRows || []).map((row) => row.tag_id))
+      if (tagIds.length === 0) return
+      const { data: tags, error: tagsError } = await supabase
+        .from('tags')
+        .select('id, nome, cor')
+        .eq('company_id', Number(company_id))
+        .in('id', tagIds)
+      if (tagsError) {
+        console.warn('[listarConversas] tags sem embed:', tagsError?.message || tagsError)
+        return
+      }
+      const tagsById = new Map((tags || []).map((tag) => [Number(tag.id), tag]))
+      for (const row of tagRows || []) {
+        const conversaId = Number(row.conversa_id)
+        const tagId = Number(row.tag_id)
+        const tag = tagsById.get(tagId)
+        if (!tag) continue
+        if (!conversaTagsMap.has(conversaId)) conversaTagsMap.set(conversaId, [])
+        conversaTagsMap.get(conversaId).push({ tag_id: tagId, tags: tag })
+      }
+    })(),
+  ])
+
+  for (const row of rows) {
+    if (!row || typeof row !== 'object') continue
+    if (!row.clientes && row.cliente_id != null) row.clientes = clienteMap.get(Number(row.cliente_id)) || null
+    if (!row.atendente && row.atendente_id != null) row.atendente = atendenteMap.get(Number(row.atendente_id)) || null
+    if (!row.departamentos && row.departamento_id != null) row.departamentos = departamentoMap.get(Number(row.departamento_id)) || null
+    if (!Array.isArray(row.conversa_tags)) row.conversa_tags = conversaTagsMap.get(Number(row.id)) || []
+  }
+
+  return rows
+}
+
+async function anexarUltimaMensagemListaConversas(rows, company_id) {
+  if (!Array.isArray(rows) || rows.length === 0) return rows
+  const conversaIds = uniquePositiveIds(rows.filter((c) => !Array.isArray(c.mensagens)).map((c) => c.id))
+  if (conversaIds.length === 0) return rows
+
+  const selectCompleto =
+    'conversa_id, texto, criado_em, direcao, tipo, url, nome_arquivo, whatsapp_id, status, autor_usuario_id, contact_meta, location_meta'
+  const selectFallback =
+    'conversa_id, texto, criado_em, direcao, tipo, url, nome_arquivo, whatsapp_id, status, autor_usuario_id'
+
+  let { data, error } = await supabase
+    .from('mensagens')
+    .select(selectCompleto)
+    .eq('company_id', Number(company_id))
+    .in('conversa_id', conversaIds)
+    .order('criado_em', { ascending: false })
+    .order('id', { ascending: false })
+    .limit(Math.min(Math.max(conversaIds.length * 20, 200), 5000))
+
+  if (error) {
+    const msg = String(error?.message || '').toLowerCase()
+    const code = String(error?.code || '')
+    if (msg.includes('schema cache') || msg.includes('does not exist') || code === 'PGRST204' || code === '42703') {
+      const retry = await supabase
+        .from('mensagens')
+        .select(selectFallback)
+        .eq('company_id', Number(company_id))
+        .in('conversa_id', conversaIds)
+        .order('criado_em', { ascending: false })
+        .order('id', { ascending: false })
+        .limit(Math.min(Math.max(conversaIds.length * 20, 200), 5000))
+      data = retry.data
+      error = retry.error
+    }
+  }
+
+  if (error) {
+    console.warn('[listarConversas] ultimas mensagens indisponiveis:', error?.message || error)
+    for (const row of rows) {
+      if (row && !Array.isArray(row.mensagens)) row.mensagens = []
+    }
+    return rows
+  }
+
+  const byConversa = new Map()
+  for (const msg of data || []) {
+    const conversaId = Number(msg?.conversa_id)
+    if (Number.isFinite(conversaId) && !byConversa.has(conversaId)) byConversa.set(conversaId, msg)
+  }
+  for (const row of rows) {
+    if (!row || Array.isArray(row.mensagens)) continue
+    const msg = byConversa.get(Number(row.id))
+    row.mensagens = msg ? [msg] : []
+  }
+  return rows
+}
+
 function payloadAlteraVisibilidadeConversa(payload) {
   if (!payload || typeof payload !== 'object') return false
   return (
@@ -1655,8 +1814,27 @@ exports.listarConversas = async (req, res) => {
       departamentos ( id, nome ),
       mensagens ( conversa_id, texto, criado_em, direcao, tipo, url, nome_arquivo, whatsapp_id, status, autor_usuario_id, contact_meta, location_meta )
     `
+    const selectSeguro = `
+      id,
+      telefone,
+      cliente_id,
+      usuario_id,
+      status_atendimento,
+      atendente_id,
+      aguardando_cliente_desde,
+      lida,
+      criado_em,
+      ultima_atividade,
+      departamento_id,
+      tipo,
+      nome_grupo,
+      foto_grupo,
+      nome_contato_cache,
+      foto_perfil_contato_cache
+    `
 
-    function buildQuery(select) {
+    function buildQuery(select, options = {}) {
+      const incluirUltimaMensagem = options.incluirUltimaMensagem !== false
       let q = supabase
         .from('conversas')
         .select(select)
@@ -1793,10 +1971,12 @@ exports.listarConversas = async (req, res) => {
       // PERFORMANCE: a lista de conversas só precisa da ÚLTIMA mensagem (preview).
       // Se vier todas as mensagens embutidas, a payload explode e a UI fica lenta.
       // Supabase-js v2: use referencedTable para ordenar/limitar relação.
-      q = q
-        .order('criado_em', { ascending: false, referencedTable: 'mensagens' })
-        .order('id', { ascending: false, referencedTable: 'mensagens' })
-        .limit(1, { referencedTable: 'mensagens' })
+      if (incluirUltimaMensagem) {
+        q = q
+          .order('criado_em', { ascending: false, referencedTable: 'mensagens' })
+          .order('id', { ascending: false, referencedTable: 'mensagens' })
+          .limit(1, { referencedTable: 'mensagens' })
+      }
       return q
     }
 
@@ -1870,10 +2050,26 @@ exports.listarConversas = async (req, res) => {
       error = result.error
     }
 
+    if (error) {
+      console.warn('[listarConversas] usando fallback seguro sem embeds:', error?.message || error)
+      const querySeguro = applyChatListCursor(
+        buildQuery(selectSeguro, { incluirUltimaMensagem: false })
+          .order('ultima_atividade', { ascending: false, nullsFirst: false })
+          .order('id', { ascending: false }),
+        chatListPagination.cursor,
+        chatListPagination.cursor_id
+      ).limit(chatListPagination.limit + 1)
+      result = await querySeguro
+      data = result.data
+      error = result.error
+    }
+
     if (error) return res.status(500).json({ error: error.message })
 
     const rawSqlRows = Array.isArray(data) ? data : []
     const rawSqlHadMore = rawSqlRows.length > chatListPagination.limit
+    await anexarRelacionamentosListaConversas(rawSqlRows, company_id)
+    await anexarUltimaMensagemListaConversas(rawSqlRows, company_id)
     const whatsappInstanceMetaMap = await loadWhatsappInstanceMetaMap(
       company_id,
       rawSqlRows.map((c) => c?.whatsapp_instance_id)
