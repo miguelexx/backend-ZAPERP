@@ -949,6 +949,84 @@ async function usuarioParticipaAtivamenteDaConversa(company_id, conversa_id, usu
   return !!data
 }
 
+async function anexarRelacionamentosDetalheConversa(conversa, company_id) {
+  if (!conversa || typeof conversa !== 'object') return conversa
+
+  conversa.clientes = null
+  conversa.usuarios = null
+  conversa.departamentos = null
+  conversa.conversa_tags = []
+
+  const tasks = []
+
+  if (conversa.cliente_id != null) {
+    tasks.push((async () => {
+      const { data, error } = await supabase
+        .from('clientes')
+        .select('id, nome, pushname, telefone, observacoes, foto_perfil, company_id')
+        .eq('company_id', Number(company_id))
+        .eq('id', Number(conversa.cliente_id))
+        .maybeSingle()
+      if (!error && data) conversa.clientes = data
+      else if (error) console.warn('[detalharChat] cliente sem embed:', error?.message || error)
+    })())
+  }
+
+  if (conversa.atendente_id != null) {
+    tasks.push((async () => {
+      const { data, error } = await supabase
+        .from('usuarios')
+        .select('id, nome')
+        .eq('company_id', Number(company_id))
+        .eq('id', Number(conversa.atendente_id))
+        .maybeSingle()
+      if (!error && data) conversa.usuarios = data
+      else if (error) console.warn('[detalharChat] atendente sem embed:', error?.message || error)
+    })())
+  }
+
+  if (conversa.departamento_id != null) {
+    tasks.push((async () => {
+      const { data, error } = await supabase
+        .from('departamentos')
+        .select('id, nome')
+        .eq('company_id', Number(company_id))
+        .eq('id', Number(conversa.departamento_id))
+        .maybeSingle()
+      if (!error && data) conversa.departamentos = data
+      else if (error) console.warn('[detalharChat] departamento sem embed:', error?.message || error)
+    })())
+  }
+
+  tasks.push((async () => {
+    const { data: tagRows, error: tagRowsError } = await supabase
+      .from('conversa_tags')
+      .select('tag_id')
+      .eq('company_id', Number(company_id))
+      .eq('conversa_id', Number(conversa.id))
+    if (tagRowsError) {
+      console.warn('[detalharChat] conversa_tags sem embed:', tagRowsError?.message || tagRowsError)
+      return
+    }
+    const tagIds = [...new Set((tagRows || []).map((row) => Number(row.tag_id)).filter((id) => Number.isFinite(id) && id > 0))]
+    if (tagIds.length === 0) return
+    const { data: tags, error: tagsError } = await supabase
+      .from('tags')
+      .select('id, nome, cor')
+      .eq('company_id', Number(company_id))
+      .in('id', tagIds)
+    if (tagsError) {
+      console.warn('[detalharChat] tags sem embed:', tagsError?.message || tagsError)
+      return
+    }
+    const byId = new Map((tags || []).map((tag) => [Number(tag.id), tag]))
+    conversa.conversa_tags = tagIds.map((tagId) => ({ tag_id: tagId, tags: byId.get(tagId) })).filter((row) => row.tags)
+  })())
+
+  await Promise.allSettled(tasks)
+  return conversa
+}
+
 function payloadAlteraVisibilidadeConversa(payload) {
   if (!payload || typeof payload !== 'object') return false
   return (
@@ -3657,44 +3735,15 @@ exports.detalharChat = async (req, res) => {
     // conversa (com cliente, atendente, departamento/setor; tipo, nome_grupo, fotos; nome_contato_cache para header quando cliente ainda não tem nome)
     const { data: conversa, error: errConv } = await supabase
       .from('conversas')
-      .select(`
-        id,
-        whatsapp_instance_id,
-        telefone,
-        status_atendimento,
-        atendente_id,
-        aguardando_cliente_desde,
-        ultima_atividade,
-        finalizacao_motivo,
-        finalizada_automaticamente,
-        finalizada_automaticamente_em,
-        lida,
-        criado_em,
-        departamento_id,
-        tipo,
-        nome_grupo,
-        foto_grupo,
-        nome_contato_cache,
-        foto_perfil_contato_cache,
-        cliente_id,
-        clientes!conversas_cliente_fk ( id, nome, pushname, telefone, observacoes, foto_perfil, company_id ),
-        usuarios:usuarios!conversas_atendente_id_fkey ( id, nome ),
-        departamentos ( id, nome ),
-        conversa_tags (
-          tag_id,
-          tags (
-            id,
-            nome,
-            cor
-          )
-        )
-      `)
+      .select('*')
       .eq('id', Number(id))
       .eq('company_id', Number(company_id))
       .single()
 
     if (errConv) return res.status(500).json({ error: errConv.message })
     if (!conversa) return res.status(404).json({ error: 'Conversa não encontrada' })
+
+    await anexarRelacionamentosDetalheConversa(conversa, company_id)
 
     const isGroup = isGroupConversation(conversa)
     const isAssignedToUser = conversa.atendente_id && Number(conversa.atendente_id) === Number(user_id)
