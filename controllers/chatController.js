@@ -877,19 +877,6 @@ function isConversaAtendentesMissingTable(error) {
   return code === '42P01' || code === 'PGRST205' || msg.includes('conversa_atendentes') && msg.includes('does not exist')
 }
 
-function isConversaAtendentesSchemaMissing(error) {
-  const msg = String(error?.message || error || '').toLowerCase()
-  const code = String(error?.code || '')
-  return (
-    isConversaAtendentesMissingTable(error) ||
-    code === 'PGRST204' ||
-    code === '42703' ||
-    (msg.includes('conversa_atendentes') && msg.includes('schema cache')) ||
-    (msg.includes('conversa_atendentes') && msg.includes('column')) ||
-    (msg.includes('adicionado_por') && msg.includes('does not exist'))
-  )
-}
-
 async function getConversaParticipanteIdsAtivos(company_id, conversa_id) {
   if (company_id == null || conversa_id == null) return []
   const { data, error } = await supabase
@@ -899,10 +886,8 @@ async function getConversaParticipanteIdsAtivos(company_id, conversa_id) {
     .eq('conversa_id', Number(conversa_id))
     .eq('ativo', true)
   if (error) {
-    if (!isConversaAtendentesSchemaMissing(error)) {
-      console.warn('[conversa_atendentes] erro ao buscar participantes (assumindo vazio):', error?.message || error)
-    }
-    return []
+    if (isConversaAtendentesMissingTable(error)) return []
+    throw error
   }
   return [...new Set((data || []).map((row) => Number(row.usuario_id)).filter((n) => Number.isFinite(n) && n > 0))]
 }
@@ -919,7 +904,7 @@ async function getConversaIdsParticipanteAtivo(company_id, usuario_id) {
     .order('criado_em', { ascending: false })
     .limit(limit)
   if (error) {
-    if (isConversaAtendentesSchemaMissing(error)) return []
+    if (isConversaAtendentesMissingTable(error)) return []
     throw error
   }
   return [...new Set((data || []).map((row) => Number(row.conversa_id)).filter((n) => Number.isFinite(n) && n > 0))]
@@ -937,7 +922,7 @@ async function usuarioParticipaAtivamenteDaConversa(company_id, conversa_id, usu
     .limit(1)
     .maybeSingle()
   if (error) {
-    if (isConversaAtendentesSchemaMissing(error)) return false
+    if (isConversaAtendentesMissingTable(error)) return false
     throw error
   }
   return !!data
@@ -3693,12 +3678,9 @@ exports.detalharChat = async (req, res) => {
     const isGroup = isGroupConversation(conversa)
     const isAssignedToUser = conversa.atendente_id && Number(conversa.atendente_id) === Number(user_id)
 
-    // REGRA PRINCIPAL: Se a conversa está assumida pelo usuário ou ele participa do co-atendimento, permitir acesso total
+    // REGRA PRINCIPAL: Se a conversa está assumida pelo usuário, SEMPRE permitir acesso total
     let podeAcessar = !isGroup && isAssignedToUser
     const conversaEncerrada = isClosedAttendanceStatus(conversa.status_atendimento)
-    if (!podeAcessar && !isGroup && conversa.atendente_id) {
-      podeAcessar = await usuarioParticipaAtivamenteDaConversa(company_id, Number(id), user_id)
-    }
     if (!podeAcessar && !isAdmin && isGroup) {
       podeAcessar = await usuarioPodeVerGrupo({
         company_id,
@@ -3731,11 +3713,11 @@ exports.detalharChat = async (req, res) => {
     }
 
     // Bloqueia visão das mensagens quando a conversa está assumida por outro usuário
-    // (exceto admin, supervisor e atendente participante do co-atendimento)
+    // (apenas admin e supervisor podem ver; atendente que não assumiu não vê o conteúdo)
     const isSupervisor = role === 'supervisor'
     const conversaAssumidaPorOutro = conversa.atendente_id != null && Number(conversa.atendente_id) !== Number(user_id)
     const deveBloquearMensagens =
-      !isGroup && !conversaEncerrada && conversaAssumidaPorOutro && !podeAcessar && !isAdmin && !isSupervisor
+      !isGroup && !conversaEncerrada && conversaAssumidaPorOutro && !isAdmin && !isSupervisor
 
     // mensagens paginadas (remetente_nome/remetente_telefone para grupos; fallback se colunas não existirem)
     const selectComRemetente = 'id, conversa_id, texto, direcao, criado_em, autor_usuario_id, status, whatsapp_id, whatsapp_instance_id, tipo, url, nome_arquivo, reply_meta, remetente_nome, remetente_telefone, contact_meta, location_meta, apagada_para_todos, apagada_em'
@@ -4014,8 +3996,7 @@ exports.buscarMensagensConversa = async (req, res) => {
     const isAdmin = role === 'admin'
     const isSupervisor = role === 'supervisor'
     const conversaAssumidaPorOutro = conv.atendente_id != null && Number(conv.atendente_id) !== Number(user_id)
-    const usuarioParticipanteConversa = perm.reason === 'usuario_participante_conversa'
-    if (!isGroup && conversaAssumidaPorOutro && !usuarioParticipanteConversa && !isAdmin && !isSupervisor) {
+    if (!isGroup && conversaAssumidaPorOutro && !isAdmin && !isSupervisor) {
       return res.status(403).json({ error: 'Mensagens indisponíveis para conversa assumida por outro usuário' })
     }
 
@@ -4601,7 +4582,7 @@ exports.transferirChat = async (req, res) => {
           transferido_por_nome: fromNome,
         })
       } catch (_) {}
-
+      
       // Notificar o usuário que transferiu
       emitirParaUsuario(io, user_id, 'conversa_transferida_sucesso', {
         conversa_id: Number(conversa_id),
@@ -4615,7 +4596,7 @@ exports.transferirChat = async (req, res) => {
           novo_atendente_id: Number(para_usuario_id)
         }
       })
-
+      
       // Linha completa da conversa (setor, nome, status, atendente) para botões e filtros em tempo real
       emitirConversaAtualizada(io, company_id, conversa_id, {
         ...data,
@@ -4803,11 +4784,6 @@ exports.adicionarAtendenteConversa = async (req, res) => {
       if (String(insertError?.code || '') === '23505') {
         return res.status(409).json({ error: 'Este atendente ja participa da conversa.' })
       }
-      if (isConversaAtendentesSchemaMissing(insertError)) {
-        return res.status(400).json({
-          error: 'Banco desatualizado: aplique a migration 20260619100000_conversa_atendentes.sql no Supabase antes de adicionar atendentes.',
-        })
-      }
       return res.status(500).json({ error: insertError.message })
     }
 
@@ -4820,7 +4796,7 @@ exports.adicionarAtendenteConversa = async (req, res) => {
     const fromNome = (fromUser?.nome && String(fromUser.nome).trim()) || 'Atendente'
     const targetNome = (targetUser?.nome && String(targetUser.nome).trim()) || 'atendente'
 
-    const resultAt = await registrarAtendimento({
+    await registrarAtendimento({
       conversa_id,
       company_id,
       acao: 'adicionou_atendente',
@@ -4828,9 +4804,6 @@ exports.adicionarAtendenteConversa = async (req, res) => {
       para_usuario_id: usuario_id,
       observacao: `${fromNome} adicionou ${targetNome} ao atendimento.`,
     })
-    if (resultAt?.error) {
-      console.warn('[adicionarAtendenteConversa] historico nao registrado:', resultAt.error?.message || resultAt.error)
-    }
 
     invalidateConversaVisibilityCache(company_id, conversa_id)
 
@@ -4846,6 +4819,7 @@ exports.adicionarAtendenteConversa = async (req, res) => {
       }
       emitirParaUsuario(io, usuario_id, 'conversa_atendente_adicionado', payload)
       emitirConversaAtualizada(io, company_id, conversa_id, { id: Number(conversa_id), company_id: Number(company_id) })
+      emitirSincronizacaoListaConversas(io, company_id, conversa_id)
     }
 
     return res.status(201).json({
@@ -7656,6 +7630,4 @@ exports._test = {
   getChatSearchIdLimit,
   getChatFilterIdLimit,
   resolveConversationWhatsappInstance,
-  isConversaAtendentesSchemaMissing,
-  isConversaAtendentesMissingTable,
 }

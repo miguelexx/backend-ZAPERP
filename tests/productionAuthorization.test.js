@@ -170,17 +170,3 @@ describe('Permissao de envio de mensagens', () => {
     expect(result.error).toBe('Conversa de outro setor')
   })
 })
-
-describe('Compatibilidade de schema para co-atendimento', () => {
-  it('classifica erros de conversa_atendentes com cache/coluna ausente como migration pendente', () => {
-    const { _test } = require('../controllers/chatController')
-
-    expect(_test.isConversaAtendentesMissingTable({ code: '42P01' })).toBe(true)
-    expect(_test.isConversaAtendentesMissingTable({ code: 'PGRST205' })).toBe(true)
-    expect(_test.isConversaAtendentesSchemaMissing({ code: 'PGRST204' })).toBe(true)
-    expect(_test.isConversaAtendentesSchemaMissing({ code: '42703' })).toBe(true)
-    expect(_test.isConversaAtendentesSchemaMissing({
-      message: "Could not find the 'adicionado_por' column of 'conversa_atendentes' in the schema cache",
-    })).toBe(true)
-  })
-})
