@@ -896,6 +896,15 @@ function isConversaAtendentesAdicionadoPorFkError(error) {
   return code === '23503' && msg.includes('conversa_atendentes') && msg.includes('adicionado_por')
 }
 
+function buildAdicionarAtendenteError(error, fallback = 'Erro ao adicionar atendente a conversa') {
+  return {
+    error: error?.message || fallback,
+    code: error?.code || null,
+    details: error?.details || null,
+    hint: error?.hint || null,
+  }
+}
+
 async function getConversaParticipanteIdsAtivos(company_id, conversa_id) {
   if (company_id == null || conversa_id == null) return []
   const { data, error } = await supabase
@@ -4781,7 +4790,10 @@ exports.adicionarAtendenteConversa = async (req, res) => {
       .eq('ativo', true)
       .maybeSingle()
 
-    if (userError) return res.status(500).json({ error: 'Erro ao validar atendente' })
+    if (userError) {
+      console.error('[adicionarAtendenteConversa] erro ao validar atendente alvo:', buildAdicionarAtendenteError(userError))
+      return res.status(500).json(buildAdicionarAtendenteError(userError, 'Erro ao validar atendente'))
+    }
     if (!targetUser) return res.status(404).json({ error: 'Atendente nao encontrado ou inativo' })
 
     const perfilDestino = String(targetUser.perfil || '').toLowerCase()
@@ -4838,7 +4850,8 @@ exports.adicionarAtendenteConversa = async (req, res) => {
           error: 'Banco desatualizado: aplique a migration 20260619100000_conversa_atendentes.sql no Supabase antes de adicionar atendentes.',
         })
       }
-      return res.status(500).json({ error: insertError.message })
+      console.error('[adicionarAtendenteConversa] erro ao inserir participante:', buildAdicionarAtendenteError(insertError))
+      return res.status(500).json(buildAdicionarAtendenteError(insertError))
     }
 
     const fromNome = (fromUser?.nome && String(fromUser.nome).trim()) || 'Atendente'
@@ -4907,7 +4920,7 @@ exports.adicionarAtendenteConversa = async (req, res) => {
         error: 'Nao foi possivel validar o usuario logado para registrar quem adicionou o atendente. Faca login novamente e tente outra vez.',
       })
     }
-    return res.status(500).json({ error: 'Erro ao adicionar atendente a conversa' })
+    return res.status(500).json(buildAdicionarAtendenteError(err))
   }
 }
 
