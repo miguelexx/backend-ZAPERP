@@ -2,6 +2,7 @@ const supabase = require('../config/supabase')
 const { isEnabled, FLAGS } = require('../helpers/featureFlags')
 const { getDisplayName } = require('../helpers/contactEnrichment')
 const { normalizePositiveIds, isGroupRow } = require('../helpers/departamentoGruposHelper')
+const slaCalculationService = require('../services/slaCalculationService')
 const ExcelJS = require('exceljs')
 const PDFDocument = require('pdfkit')
 
@@ -75,6 +76,161 @@ function findPrimeiraRespostaPair(msgs) {
     return Number.isFinite(outTs) && outTs >= inTs
   })
   return { primeiraIn, primeiraOut: primeiraOut || null }
+}
+
+const SAO_PAULO_TZ = 'America/Sao_Paulo'
+
+function parseDateOnly(value) {
+  const s = String(value || '').trim()
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s)
+  if (!match) return null
+  const y = Number(match[1])
+  const m = Number(match[2])
+  const d = Number(match[3])
+  if (!Number.isFinite(y) || !Number.isFinite(m) || !Number.isFinite(d)) return null
+  return { y, m, d, value: s }
+}
+
+function saoPauloDateStartIso(value) {
+  const parsed = parseDateOnly(value)
+  if (!parsed) return null
+  // Brasil nao usa DST atualmente; 00:00 em America/Sao_Paulo = 03:00 UTC.
+  return new Date(Date.UTC(parsed.y, parsed.m - 1, parsed.d, 3, 0, 0, 0)).toISOString()
+}
+
+function saoPauloDateEndIso(value) {
+  const parsed = parseDateOnly(value)
+  if (!parsed) return null
+  return new Date(Date.UTC(parsed.y, parsed.m - 1, parsed.d + 1, 2, 59, 59, 999)).toISOString()
+}
+
+function formatSaoPauloDateKey(value) {
+  const date = value instanceof Date ? value : new Date(value)
+  if (!Number.isFinite(date.getTime())) return null
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: SAO_PAULO_TZ,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(date)
+  const map = {}
+  for (const part of parts) map[part.type] = part.value
+  return `${map.year}-${map.month}-${map.day}`
+}
+
+function todaySaoPauloDateKey() {
+  return formatSaoPauloDateKey(new Date())
+}
+
+function addDaysDateKey(dateKey, days) {
+  const parsed = parseDateOnly(dateKey)
+  if (!parsed) return todaySaoPauloDateKey()
+  return formatSaoPauloDateKey(new Date(Date.UTC(parsed.y, parsed.m - 1, parsed.d + days, 12, 0, 0, 0)))
+}
+
+function getDateRangeFromQuery(query = {}) {
+  const today = todaySaoPauloDateKey()
+  const dataFim = parseDateOnly(query.data_fim)?.value || today
+  const dataInicio = parseDateOnly(query.data_inicio)?.value || addDaysDateKey(dataFim, -6)
+  return {
+    data_inicio: dataInicio,
+    data_fim: dataFim,
+    fromIso: saoPauloDateStartIso(dataInicio),
+    toIso: saoPauloDateEndIso(dataFim),
+  }
+}
+
+function toPositiveInt(value) {
+  const n = Number(value)
+  if (!Number.isFinite(n) || n <= 0) return null
+  return Math.trunc(n)
+}
+
+function avg(values) {
+  const nums = (values || []).filter((v) => Number.isFinite(v))
+  if (nums.length === 0) return null
+  return nums.reduce((sum, v) => sum + v, 0) / nums.length
+}
+
+function round1(value) {
+  return Number.isFinite(value) ? Math.round(value * 10) / 10 : null
+}
+
+function percent(part, total) {
+  if (!total) return null
+  return Math.round((part / total) * 1000) / 10
+}
+
+function buildGroupRanking(items, keyGetter, labelGetter) {
+  const map = new Map()
+  for (const item of items) {
+    const key = keyGetter(item)
+    const label = labelGetter(item)
+    if (!map.has(key)) {
+      map.set(key, { id: key, nome: label, total_analisadas: 0, dentro_sla: 0, fora_sla: 0, tempos: [] })
+    }
+    const row = map.get(key)
+    row.total_analisadas += 1
+    row.tempos.push(item.tempo_resposta_min)
+    if (item.cumpriu_sla) row.dentro_sla += 1
+    else row.fora_sla += 1
+  }
+  return Array.from(map.values())
+    .map((row) => ({
+      id: row.id,
+      nome: row.nome,
+      total_analisadas: row.total_analisadas,
+      dentro_sla: row.dentro_sla,
+      fora_sla: row.fora_sla,
+      percentual_cumprido: percent(row.dentro_sla, row.total_analisadas),
+      tempo_medio_primeira_resposta_min: round1(avg(row.tempos)),
+    }))
+    .sort((a, b) => b.total_analisadas - a.total_analisadas || (b.percentual_cumprido || 0) - (a.percentual_cumprido || 0))
+}
+
+async function fetchDepartamentosNomeMap(company_id, depIds) {
+  const ids = [...new Set((depIds || []).map((id) => Number(id)).filter((id) => Number.isFinite(id) && id > 0))]
+  const map = {}
+  if (ids.length === 0) return map
+  const { data, error } = await supabase
+    .from('departamentos')
+    .select('id, nome')
+    .eq('company_id', company_id)
+    .in('id', ids)
+  if (error) throw error
+  for (const d of data || []) {
+    if (d?.id != null) map[String(d.id)] = d?.nome || 'Sem setor'
+  }
+  return map
+}
+
+function chunkArray(items, size) {
+  const chunks = []
+  for (let i = 0; i < items.length; i += size) chunks.push(items.slice(i, i + size))
+  return chunks
+}
+
+async function fetchMensagensForConversas(company_id, conversaIds) {
+  const ids = [...new Set((conversaIds || []).filter(Boolean))]
+  if (ids.length === 0) return []
+  const all = []
+  for (const chunk of chunkArray(ids, 200)) {
+    const rows = await fetchAllRows(() =>
+      supabase
+        .from('mensagens')
+        .select('id, conversa_id, criado_em, direcao, autor_usuario_id')
+        .eq('company_id', company_id)
+        .in('conversa_id', chunk)
+        .in('direcao', ['in', 'out'])
+        .order('criado_em', { ascending: true })
+    )
+    all.push(...rows)
+  }
+  return all
+}
+
+async function buildSlaAnalytics(company_id, query = {}, opts = {}) {
+  return slaCalculationService.buildSlaAnalytics(company_id, query, opts)
 }
 
 exports.overview = async (req, res) => {
@@ -928,6 +1084,30 @@ async function validarDepartamentoEmpresa(company_id, departamento_id) {
   return { departamento_id: depId }
 }
 
+function isAdminOrSupervisor(user) {
+  const perfil = String(user?.perfil || '').toLowerCase()
+  return perfil === 'admin' || perfil === 'administrador' || perfil === 'supervisor'
+}
+
+async function buscarRespostaSalvaGerenciavel(company_id, id) {
+  const { data, error } = await supabase
+    .from('respostas_salvas')
+    .select('id, usuario_id, departamento_id')
+    .eq('id', id)
+    .eq('company_id', company_id)
+    .maybeSingle()
+  if (error) return { error: error.message }
+  if (!data) return { notFound: true }
+  return { resposta: data }
+}
+
+function podeGerenciarRespostaSalva(resposta, userId, user) {
+  if (resposta?.departamento_id == null) {
+    return Number(resposta.usuario_id) === userId || isAdminOrSupervisor(user)
+  }
+  return Number(resposta.usuario_id) === userId
+}
+
 exports.listarRespostasSalvas = async (req, res) => {
   try {
     const { company_id, id: usuario_id } = req.user
@@ -935,7 +1115,8 @@ exports.listarRespostasSalvas = async (req, res) => {
     if (!Number.isFinite(userId) || userId <= 0) {
       return res.status(401).json({ error: 'Usuário inválido' })
     }
-    const { departamento_id } = req.query
+    const { departamento_id, contexto } = req.query
+    const contextoAtendimento = String(contexto || '').toLowerCase() === 'atendimento'
     let q = supabase
       .from('respostas_salvas')
       // NÃO embutir departamentos aqui: em alguns schemas o PostgREST detecta mais de 1 relacionamento
@@ -943,14 +1124,14 @@ exports.listarRespostasSalvas = async (req, res) => {
       // "Could not embed because more than one relationship was found..."
       .select('id, titulo, texto, departamento_id, usuario_id, criado_em')
       .eq('company_id', company_id)
-      .eq('usuario_id', userId)
+      .or(`departamento_id.is.null,usuario_id.eq.${userId}`)
       .order('titulo')
     if (departamento_id != null && departamento_id !== '') {
       const depId = Number(departamento_id)
       if (Number.isFinite(depId) && depId > 0) {
         q = q.or(`departamento_id.eq.${depId},departamento_id.is.null`)
       }
-    } else {
+    } else if (contextoAtendimento) {
       // Conversa sem setor: apenas respostas globais (não expor vinculadas a setor)
       q = q.is('departamento_id', null)
     }
@@ -1001,6 +1182,7 @@ exports.criarRespostaSalva = async (req, res) => {
     if (tituloTrim.length > 255) return res.status(400).json({ error: 'titulo deve ter no máximo 255 caracteres' })
     const depCheck = await validarDepartamentoEmpresa(company_id, departamento_id)
     if (depCheck?.error) return res.status(400).json({ error: depCheck.error })
+    const depId = depCheck?.departamento_id ?? null
     const { data, error } = await supabase
       .from('respostas_salvas')
       .insert({
@@ -1008,7 +1190,7 @@ exports.criarRespostaSalva = async (req, res) => {
         usuario_id: userId,
         titulo: tituloTrim,
         texto: textoTrim,
-        departamento_id: depCheck?.departamento_id ?? null,
+        departamento_id: depId,
       })
       .select()
       .single()
@@ -1044,17 +1226,23 @@ exports.atualizarRespostaSalva = async (req, res) => {
     if (departamento_id !== undefined) {
       const depCheck = await validarDepartamentoEmpresa(company_id, departamento_id)
       if (depCheck?.error) return res.status(400).json({ error: depCheck.error })
-      update.departamento_id = depCheck?.departamento_id ?? null
+      const depId = depCheck?.departamento_id ?? null
+      update.departamento_id = depId
     }
     if (Object.keys(update).length === 0) {
       return res.status(400).json({ error: 'Nenhum campo para atualizar' })
+    }
+    const found = await buscarRespostaSalvaGerenciavel(company_id, id)
+    if (found?.error) return res.status(500).json({ error: found.error })
+    if (found?.notFound) return res.status(404).json({ error: 'Resposta não encontrada' })
+    if (!podeGerenciarRespostaSalva(found.resposta, userId, req.user)) {
+      return res.status(403).json({ error: 'Sem permissão para editar esta resposta' })
     }
     const { data, error } = await supabase
       .from('respostas_salvas')
       .update(update)
       .eq('id', id)
       .eq('company_id', company_id)
-      .eq('usuario_id', userId)
       .select()
       .single()
     if (error) return res.status(500).json({ error: error.message })
@@ -1074,21 +1262,17 @@ exports.excluirRespostaSalva = async (req, res) => {
       return res.status(401).json({ error: 'Usuário inválido' })
     }
     const { id } = req.params
-    const { data: existing, error: findErr } = await supabase
-      .from('respostas_salvas')
-      .select('id')
-      .eq('id', id)
-      .eq('company_id', company_id)
-      .eq('usuario_id', userId)
-      .maybeSingle()
-    if (findErr) return res.status(500).json({ error: findErr.message })
-    if (!existing) return res.status(404).json({ error: 'Resposta não encontrada' })
+    const found = await buscarRespostaSalvaGerenciavel(company_id, id)
+    if (found?.error) return res.status(500).json({ error: found.error })
+    if (found?.notFound) return res.status(404).json({ error: 'Resposta não encontrada' })
+    if (!podeGerenciarRespostaSalva(found.resposta, userId, req.user)) {
+      return res.status(403).json({ error: 'Sem permissão para excluir esta resposta' })
+    }
     const { error } = await supabase
       .from('respostas_salvas')
       .delete()
       .eq('id', id)
       .eq('company_id', company_id)
-      .eq('usuario_id', userId)
     if (error) return res.status(500).json({ error: error.message })
     return res.json({ ok: true })
   } catch (err) {
@@ -1407,13 +1591,17 @@ exports.exportRelatorio = async (req, res) => {
 exports.getSlaConfig = async (req, res) => {
   try {
     const { company_id } = req.user
-    const { data, error } = await supabase
-      .from('empresas')
-      .select('sla_minutos_sem_resposta')
-      .eq('id', company_id)
-      .single()
-    if (error) return res.status(500).json({ error: error.message })
-    return res.json({ sla_minutos_sem_resposta: data?.sla_minutos_sem_resposta ?? 30 })
+    const config = await slaCalculationService.loadSlaConfig(company_id)
+    const businessInfo = await slaCalculationService.loadSlaBusinessSchedule(company_id, config)
+    return res.json({
+      sla_minutos_sem_resposta: config.sla_minutos_sem_resposta,
+      sla_meta_percentual: config.sla_meta_percentual,
+      sla_usar_horario_comercial: config.sla_usar_horario_comercial,
+      sla_contar_bot_como_resposta: config.sla_contar_bot_como_resposta,
+      metas_departamentos: config.metas_departamentos,
+      metas_usuarios: config.metas_usuarios,
+      horario_comercial: businessInfo,
+    })
   } catch (err) {
     console.error(err)
     return res.status(500).json({ error: 'Erro ao obter config SLA' })
@@ -1423,16 +1611,20 @@ exports.getSlaConfig = async (req, res) => {
 exports.setSlaConfig = async (req, res) => {
   try {
     const { company_id } = req.user
-    const minutos = Math.max(1, Math.min(1440, Number(req.body.sla_minutos_sem_resposta) || 30))
-    const { error } = await supabase
-      .from('empresas')
-      .update({ sla_minutos_sem_resposta: minutos })
-      .eq('id', company_id)
-    if (error) return res.status(500).json({ error: error.message })
-    return res.json({ sla_minutos_sem_resposta: minutos })
+    const saved = await slaCalculationService.saveSlaConfig(company_id, req.body || {})
+    const businessInfo = await slaCalculationService.loadSlaBusinessSchedule(company_id, saved)
+    return res.json({
+      sla_minutos_sem_resposta: saved.sla_minutos_sem_resposta,
+      sla_meta_percentual: saved.sla_meta_percentual,
+      sla_usar_horario_comercial: saved.sla_usar_horario_comercial,
+      sla_contar_bot_como_resposta: saved.sla_contar_bot_como_resposta,
+      metas_departamentos: saved.metas_departamentos,
+      metas_usuarios: saved.metas_usuarios,
+      horario_comercial: businessInfo,
+    })
   } catch (err) {
     console.error(err)
-    return res.status(500).json({ error: 'Erro ao salvar config SLA' })
+    return res.status(500).json({ error: err.message || 'Erro ao salvar config SLA' })
   }
 }
 
@@ -1490,5 +1682,166 @@ exports.getSlaAlertas = async (req, res) => {
   } catch (err) {
     console.error(err)
     return res.status(500).json({ error: 'Erro ao listar alertas SLA' })
+  }
+}
+
+exports.slaResumo = async (req, res) => {
+  try {
+    const { company_id } = req.user
+    const data = await buildSlaAnalytics(company_id, req.query)
+    return res.json({
+      periodo: data.periodo,
+      limite_min: data.limite_min,
+      meta_percentual: data.meta_percentual,
+      config: data.config,
+      horario_comercial: data.horario_comercial,
+      resumo: data.resumo,
+      tendencia: data.tendencia,
+      por_tipo: data.por_tipo,
+      ranking_atendentes: data.ranking_atendentes,
+      ranking_atendentes_melhor: data.ranking_atendentes_melhor,
+      ranking_atendentes_violacoes: data.ranking_atendentes_violacoes,
+      ranking_setores: data.ranking_setores,
+      horarios_maior_violacao: data.horarios_maior_violacao,
+      dias_semana_pior_sla: data.dias_semana_pior_sla,
+      violacoes: data.violacoes,
+      sem_resposta: data.sem_resposta,
+      dados_insuficientes: data.dados_insuficientes,
+      criticas_sem_resposta: data.criticas_sem_resposta,
+      conversas_detalhadas: data.conversas_detalhadas,
+      reabertura: data.reabertura,
+    })
+  } catch (err) {
+    console.error(err)
+    return res.status(500).json({ error: 'Erro ao calcular SLA' })
+  }
+}
+
+exports.slaDiaria = async (req, res) => {
+  try {
+    const { company_id } = req.user
+    const data = await buildSlaAnalytics(company_id, req.query)
+    return res.json({
+      periodo: data.periodo,
+      limite_min: data.limite_min,
+      meta_percentual: data.meta_percentual,
+      config: data.config,
+      horario_comercial: data.horario_comercial,
+      resumo: data.resumo,
+      tendencia: data.tendencia,
+      diario: data.diario,
+      melhor_dia: data.melhor_dia,
+      pior_dia: data.pior_dia,
+      dias_abaixo_meta: data.dias_abaixo_meta,
+      ranking_atendentes: data.ranking_atendentes,
+      ranking_setores: data.ranking_setores,
+      dia_detalhe: data.dia_filtro ? {
+        dia: data.dia_filtro,
+        violacoes: data.violacoes,
+        sem_resposta: data.sem_resposta,
+        dados_insuficientes: data.dados_insuficientes,
+        conversas_detalhadas: data.conversas_detalhadas,
+      } : null,
+    })
+  } catch (err) {
+    console.error(err)
+    return res.status(500).json({ error: 'Erro ao calcular SLA diária' })
+  }
+}
+
+exports.slaValidacao = async (req, res) => {
+  try {
+    const { company_id } = req.user
+    const conversaId = req.params.conversa_id || req.query.conversa_id
+    const result = await slaCalculationService.validateConversaSla(company_id, conversaId)
+    if (result.error) return res.status(400).json({ error: result.error })
+    return res.json(result)
+  } catch (err) {
+    console.error(err)
+    return res.status(500).json({ error: 'Erro ao validar SLA da conversa' })
+  }
+}
+
+function escapeCsvCell(value) {
+  return String(value ?? '').replace(/;/g, ',').replace(/\n/g, ' ')
+}
+
+exports.exportSla = async (req, res) => {
+  try {
+    const { company_id } = req.user
+    const format = (req.query.format || 'csv').toLowerCase()
+    const tipo = String(req.query.tipo || 'detalhado').toLowerCase()
+    const data = await buildSlaAnalytics(company_id, req.query)
+    const exportRows = slaCalculationService.flattenSlaExportRows(data)
+
+    if (tipo === 'resumo') {
+      const resumoRows = [
+        ['Período início', data.periodo?.data_inicio],
+        ['Período fim', data.periodo?.data_fim],
+        ['Meta minutos (global)', data.limite_min],
+        ['Meta percentual', data.meta_percentual],
+        ['Modo contagem', data.horario_comercial?.modo_contagem],
+        ['Total analisadas', data.resumo?.total_analisadas],
+        ['Dentro SLA', data.resumo?.dentro_sla],
+        ['Fora SLA', data.resumo?.fora_sla],
+        ['Sem resposta', data.resumo?.sem_resposta],
+        ['Dados insuficientes', data.resumo?.dados_insuficientes],
+        ['Percentual cumprido', data.resumo?.percentual_cumprido],
+        ['Tempo médio (min)', data.resumo?.tempo_medio_primeira_resposta_min],
+        ['Pior tempo (min)', data.resumo?.pior_tempo_resposta_min],
+        ['Melhor tempo (min)', data.resumo?.melhor_tempo_resposta_min],
+      ]
+      if (format === 'xlsx' || format === 'excel') {
+        const workbook = new ExcelJS.Workbook()
+        const sheet = workbook.addWorksheet('Resumo SLA')
+        resumoRows.forEach((row) => sheet.addRow(row))
+        const buffer = await workbook.xlsx.writeBuffer()
+        res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+        res.setHeader('Content-Disposition', 'attachment; filename=sla-resumo.xlsx')
+        return res.send(Buffer.from(buffer))
+      }
+      const csv = '\uFEFF' + resumoRows.map((row) => row.map(escapeCsvCell).join(';')).join('\n')
+      res.setHeader('Content-Type', 'text/csv; charset=utf-8')
+      res.setHeader('Content-Disposition', 'attachment; filename=sla-resumo.csv')
+      return res.send(csv)
+    }
+
+    const header = ['Tipo SLA', 'Status SLA', 'Cliente', 'Telefone', 'Atendente', 'Setor', 'Primeira msg cliente', 'Primeira resposta', 'Tempo (min)', 'Meta (min)', 'Origem meta', 'Tipo resposta', 'Status conversa', 'Conversa ID']
+    const body = exportRows.map((r) => [
+      r.tipo_sla,
+      r.status_sla,
+      r.cliente,
+      r.telefone,
+      r.atendente,
+      r.setor,
+      r.primeira_msg_cliente ? new Date(r.primeira_msg_cliente).toLocaleString('pt-BR') : '',
+      r.primeira_resposta ? new Date(r.primeira_resposta).toLocaleString('pt-BR') : '',
+      r.tempo_min,
+      r.limite_min,
+      r.meta_origem,
+      r.tipo_resposta,
+      r.status_conversa,
+      r.conversa_id,
+    ])
+
+    if (format === 'xlsx' || format === 'excel') {
+      const workbook = new ExcelJS.Workbook()
+      const sheet = workbook.addWorksheet('SLA Detalhado', { views: [{ state: 'frozen', ySplit: 1 }] })
+      sheet.addRow(header)
+      sheet.getRow(1).font = { bold: true }
+      body.forEach((row) => sheet.addRow(row))
+      const buffer = await workbook.xlsx.writeBuffer()
+      res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+      res.setHeader('Content-Disposition', 'attachment; filename=sla-detalhado.xlsx')
+      return res.send(Buffer.from(buffer))
+    }
+
+    const csv = '\uFEFF' + [header, ...body].map((row) => row.map(escapeCsvCell).join(';')).join('\n')
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8')
+    res.setHeader('Content-Disposition', 'attachment; filename=sla-detalhado.csv')
+    return res.send(csv)
+  } catch (err) {
+    console.error(err)
+    return res.status(500).json({ error: 'Erro ao exportar SLA' })
   }
 }

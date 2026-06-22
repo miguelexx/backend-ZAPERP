@@ -26,5 +26,9 @@ router.get('/relatorios/export', auth, supervisorOrAdmin, dashboardController.ex
 router.get('/sla/config', auth, supervisorOrAdmin, dashboardController.getSlaConfig)
 router.put('/sla/config', auth, adminOnly, dashboardController.setSlaConfig)
 router.get('/sla/alertas', auth, supervisorOrAdmin, dashboardController.getSlaAlertas)
+router.get('/sla/resumo', auth, supervisorOrAdmin, dashboardController.slaResumo)
+router.get('/sla/diaria', auth, supervisorOrAdmin, dashboardController.slaDiaria)
+router.get('/sla/export', auth, supervisorOrAdmin, dashboardController.exportSla)
+router.get('/sla/validacao/:conversa_id', auth, supervisorOrAdmin, dashboardController.slaValidacao)
 
 module.exports = router
