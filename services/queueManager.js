@@ -345,7 +345,9 @@ function startWorker(intervalMs = 5000, io = null) {
       if (job) {
         const rateOk = await canRunJob(job.company_id)
         if (rateOk.ok) {
-          processJob(job, io)
+          processJob(job, io).catch((e) => {
+            console.warn(`[queueManager] Erro não tratado em processJob (job ${job.id}):`, e?.message || e)
+          })
         } else {
           await supabase.from('jobs').update({
             status: 'pending',

@@ -55,6 +55,10 @@ const WHATSAPP_DEBUG = String(process.env.WHATSAPP_DEBUG || '').toLowerCase() ==
 // IMPORTANTE: não depender de colunas opcionais para manter compatibilidade com bancos legados.
 const WEBHOOK_MSG_SELECT = 'id, conversa_id, company_id, whatsapp_instance_id, whatsapp_id, texto, url, tipo, direcao, criado_em, status, autor_usuario_id, reply_meta, nome_arquivo, contact_meta, location_meta, remetente_nome, remetente_telefone'
 
+// Ordem de progresso dos ticks de status. Usado em statusZapi para evitar que um ack atrasado
+// (ex.: "delivered" chegando depois de "read") regrida visualmente o status já persistido.
+const STATUS_RANK = { pending: 0, sent: 1, delivered: 2, read: 3, played: 4 }
+
 /** URL pública remota (CDN UltraMsg) — diferente de /uploads/ gravado pelo CRM no envio. */
 function isRemoteMediaUrl(url) {
   const u = String(url || '').trim().toLowerCase()
@@ -3703,6 +3707,18 @@ exports.statusZapi = async (req, res) => {
         }
       }
 
+      // Evita que um ack atrasado (ex.: "delivered") regrida uma mensagem já em status mais avançado (ex.: "read").
+      const { data: currentForRank } = await selectSingleMensagemByWhatsappId(supabase, {
+        company_id,
+        whatsapp_id: idStr,
+        whatsapp_instance_id,
+        select: 'status',
+        context: 'status.rank_check',
+      })
+      if (currentForRank?.status && STATUS_RANK[currentForRank.status] > (STATUS_RANK[effectiveStatus] ?? -1)) {
+        effectiveStatus = currentForRank.status
+      }
+
       // 1) Atualiza por (company_id, whatsapp_id) — match exato (inclui autor_usuario_id para emit ao remetente)
       let { data: msg } = await updateSingleMensagemByWhatsappId(supabase, {
         company_id,
@@ -3719,7 +3735,7 @@ exports.statusZapi = async (req, res) => {
         const prefix = idStr.slice(0, 20)
         let prefixQuery = supabase
           .from('mensagens')
-          .select('id, conversa_id, company_id, autor_usuario_id, whatsapp_id')
+          .select('id, conversa_id, company_id, autor_usuario_id, whatsapp_id, status')
           .eq('company_id', company_id)
           .ilike('whatsapp_id', `${prefix}%`)
           .order('id', { ascending: false })
@@ -3736,6 +3752,9 @@ exports.statusZapi = async (req, res) => {
         }
         const candidate = Array.isArray(prefixRows) && prefixRows.length === 1 ? prefixRows[0] : null
         if (candidate?.id) {
+          if (candidate.status && STATUS_RANK[candidate.status] > (STATUS_RANK[effectiveStatus] ?? -1)) {
+            effectiveStatus = candidate.status
+          }
           const { data: patched } = await supabase
             .from('mensagens')
             .update({ status: effectiveStatus })
