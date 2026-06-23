@@ -48,7 +48,16 @@ const { normalizarTimestampSemFusoAmbiguoParaApi } = require('../helpers/timesta
 
 /** UltraMsg retorna id interno (ex: 35096), não o messageId do WhatsApp. Só usar como whatsapp_id se for o ID real. */
 function isRealWhatsAppId(waId) {
-  return waId && (String(waId).includes('@') || String(waId).length > 20)
+  if (!waId) return false
+  const s = String(waId).trim()
+  if (!s || s === 'null' || s === 'undefined' || s === 'false' || s === '0') return false
+  // Formato WhatsApp nativo: contém @ (ex: false_5511...@c.us, 5511...@c.us)
+  if (s.includes('@')) return true
+  // IDs hexadecimais do UltraMsg: 12+ chars hex (ex: BAE543FE1CE17AFA = 16 chars)
+  if (/^[A-F0-9]{12,}$/i.test(s)) return true
+  // IDs longos de outros provedores (Z-API, Meta, etc.)
+  if (s.length > 20) return true
+  return false
 }
 
 async function resolveTelefoneFromLidSiblingConversation(company_id, conversa, whatsappInstanceId) {
@@ -5315,10 +5324,31 @@ exports.enviarMensagemChat = async (req, res) => {
       emitirConversaAtualizada(io, company_id, conversa_id, convPayload, { skipAtualizarConversa: true })
     }
 
-    // Envio para WhatsApp via provider (meta ou zapi, conforme WHATSAPP_PROVIDER)
+    // Envio para WhatsApp via provider (ultramsg, conforme instância configurada)
     let sendResult = null
     if (!telefoneParaEnvio) {
-      console.warn(`[WhatsApp] Conversa ${conversa_id} sem telefone (company ${company_id}) — mensagem salva, mas não enviada ao WhatsApp`)
+      // Mensagem manual sem telefone: não pode ficar como pending para sempre
+      console.warn('[ENVIO_MANUAL] ❌ Conversa sem telefone — mensagem não enviada ao WhatsApp', {
+        company_id,
+        conversa_id,
+        mensagem_id: msg.id,
+      })
+      await supabase
+        .from('mensagens')
+        .update({ status: 'erro', status_mensagem: 'failed' })
+        .eq('company_id', company_id)
+        .eq('id', msg.id)
+      const ioNoPhone = req.app.get('io')
+      if (ioNoPhone) {
+        ioNoPhone.to(`empresa_${company_id}`).to(`conversa_${conversa_id}`).to(`usuario_${user_id}`)
+          .emit('status_mensagem', {
+            mensagem_id: msg.id,
+            conversa_id: Number(conversa_id),
+            status: 'erro',
+            status_mensagem: 'failed',
+          })
+      }
+      sendResult = { ok: false, error: 'Número do contato indisponível para envio' }
     }
     if (telefoneParaEnvio) {
       let phoneId = null
@@ -5345,6 +5375,18 @@ exports.enviarMensagemChat = async (req, res) => {
 
       const { nome: usuarioNome } = await getUsuarioParaEnvioCliente(supabase, company_id, user_id)
       const provider = getProvider()
+
+      // Log de início de envio manual (auditoria e diagnóstico)
+      console.log('[ENVIO_MANUAL] Iniciando envio', {
+        company_id,
+        conversa_id,
+        mensagem_id: msg.id,
+        telefone_destino: String(telefoneParaEnvio || '').slice(-12),
+        whatsapp_instance_id: whatsappInstanceId,
+        provedor: 'ultramsg',
+        tipo: hasLinkPayload ? 'link' : 'texto',
+      })
+
       try {
         let result = null
 
@@ -5380,53 +5422,112 @@ exports.enviarMensagemChat = async (req, res) => {
             sendOrigin: 'atendimento_humano',
           })
         }
+
         const ok = typeof result === 'boolean' ? result : result?.ok === true
         const waMessageId = typeof result === 'object' && result?.messageId ? String(result.messageId).trim() : null
-        const nextStatus = ok ? 'sent' : 'erro'
+        const hasValidId = isRealWhatsAppId(waMessageId)
+        const providerError = (typeof result === 'object') ? (result?.error || result?.blockedBy || null) : null
+
+        // Só marca como 'sent' se o provider retornou OK *e* um ID de rastreamento válido.
+        // Isso evita o estado inválido: status=sent + whatsapp_id=NULL.
+        const nextStatus = (ok && hasValidId) ? 'sent' : 'erro'
+        const nextStatusMensagem = (ok && hasValidId) ? 'sent' : 'failed'
+
+        if (ok && hasValidId) {
+          console.log('[ENVIO_MANUAL] ✅ Sucesso', {
+            company_id,
+            conversa_id,
+            mensagem_id: msg.id,
+            telefone_destino: String(telefoneParaEnvio || '').slice(-12),
+            whatsapp_instance_id: whatsappInstanceId,
+            provedor: 'ultramsg',
+            provider_message_id: waMessageId,
+          })
+        } else if (ok && !hasValidId) {
+          // Provider aceitou mas não retornou ID válido — estado sent+null nunca deve ocorrer
+          console.warn('[ENVIO_MANUAL] ⚠️ Provider retornou ok=true sem messageId válido — marcando como erro', {
+            company_id,
+            conversa_id,
+            mensagem_id: msg.id,
+            telefone_destino: String(telefoneParaEnvio || '').slice(-12),
+            whatsapp_instance_id: whatsappInstanceId,
+            messageId_recebido: waMessageId || 'NULL',
+            dica: 'Verifique se a instância WhatsApp está conectada e se o número de destino possui WhatsApp.',
+          })
+        } else {
+          console.warn('[ENVIO_MANUAL] ❌ Falha no envio', {
+            company_id,
+            conversa_id,
+            mensagem_id: msg.id,
+            telefone_destino: String(telefoneParaEnvio || '').slice(-12),
+            whatsapp_instance_id: whatsappInstanceId,
+            provedor: 'ultramsg',
+            erro: String(providerError || '').slice(0, 200) || 'desconhecido',
+          })
+        }
+
         await supabase
           .from('mensagens')
-          .update({ status: nextStatus, ...(isRealWhatsAppId(waMessageId) ? { whatsapp_id: waMessageId } : {}) })
+          .update({
+            status: nextStatus,
+            status_mensagem: nextStatusMensagem,
+            ...(hasValidId ? { whatsapp_id: waMessageId } : {}),
+          })
           .eq('company_id', company_id)
           .eq('id', msg.id)
 
         const io2 = req.app.get('io')
         if (io2) {
-          const payload = { mensagem_id: msg.id, conversa_id: Number(conversa_id), status: nextStatus, status_mensagem: nextStatus, ...(waMessageId ? { whatsapp_id: waMessageId } : {}) }
           // Emite para empresa, conversa E usuario que enviou (garante ticks ✓✓ em tempo real)
-          let chain = io2.to(`empresa_${company_id}`).to(`conversa_${conversa_id}`).to(`usuario_${user_id}`)
-          chain.emit('status_mensagem', payload)
+          io2.to(`empresa_${company_id}`).to(`conversa_${conversa_id}`).to(`usuario_${user_id}`)
+            .emit('status_mensagem', {
+              mensagem_id: msg.id,
+              conversa_id: Number(conversa_id),
+              status: nextStatus,
+              status_mensagem: nextStatusMensagem,
+              ...(hasValidId ? { whatsapp_id: waMessageId } : {}),
+            })
         }
 
-        if (!ok) {
-          const errMsg = result?.error || result?.blockedBy
-          if (errMsg) {
-            console.warn('[WhatsApp] Falha ao entregar:', String(telefoneParaEnvio || '').slice(-8), '—', errMsg, '| mensagem_id:', msg.id)
-          } else {
-            console.warn('[WhatsApp] Falha ao entregar mensagem para', String(telefoneParaEnvio || '').slice(-8), '— verifique se a instância está conectada (escaneie o QR no painel) | mensagem_id:', msg.id)
-          }
-        }
         sendResult = result
       } catch (e) {
-        console.error('WhatsApp enviar:', e)
+        console.error('[ENVIO_MANUAL] ❌ Exceção ao enviar mensagem', {
+          company_id,
+          conversa_id,
+          mensagem_id: msg.id,
+          telefone_destino: String(telefoneParaEnvio || '').slice(-12),
+          whatsapp_instance_id: whatsappInstanceId,
+          erro: e?.message || String(e),
+        })
         sendResult = { ok: false, error: e?.message || 'Erro ao enviar mensagem' }
         await supabase
           .from('mensagens')
-          .update({ status: 'erro' })
+          .update({ status: 'erro', status_mensagem: 'failed' })
           .eq('company_id', company_id)
           .eq('id', msg.id)
         const io2 = req.app.get('io')
         if (io2) {
-          const payload = { mensagem_id: msg.id, conversa_id: Number(conversa_id), status: 'erro', status_mensagem: 'erro' }
-          let chain = io2.to(`empresa_${company_id}`).to(`conversa_${conversa_id}`).to(`usuario_${user_id}`)
-          chain.emit('status_mensagem', payload)
+          io2.to(`empresa_${company_id}`).to(`conversa_${conversa_id}`).to(`usuario_${user_id}`)
+            .emit('status_mensagem', {
+              mensagem_id: msg.id,
+              conversa_id: Number(conversa_id),
+              status: 'erro',
+              status_mensagem: 'failed',
+            })
         }
       }
     }
 
     // Não retornar mensagem completa — evita duplicação no frontend (API + socket).
     // A mensagem chega via socket nova_mensagem (única fonte de verdade para exibição).
-    const sendOk = !!telefoneParaEnvio && (typeof sendResult === 'boolean' ? sendResult : sendResult?.ok === true)
-    const motivoErro = sendResult?.error || sendResult?.blockedBy
+    const providerOk = !!telefoneParaEnvio && (typeof sendResult === 'boolean' ? sendResult : sendResult?.ok === true)
+    const providerMessageId = (typeof sendResult === 'object' && sendResult?.messageId) ? String(sendResult.messageId).trim() : null
+    // Considera enviado somente se provider retornou ok E um ID de rastreamento válido
+    const sendOk = providerOk && isRealWhatsAppId(providerMessageId)
+    const motivoErro = sendResult?.error || sendResult?.blockedBy ||
+      (!sendOk && providerOk && !isRealWhatsAppId(providerMessageId)
+        ? 'Provedor não retornou ID de rastreamento da mensagem'
+        : null)
     return res.json({
       ok: true,
       id: msg.id,
