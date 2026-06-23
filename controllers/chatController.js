@@ -5425,15 +5425,19 @@ exports.enviarMensagemChat = async (req, res) => {
 
         const ok = typeof result === 'boolean' ? result : result?.ok === true
         const waMessageId = typeof result === 'object' && result?.messageId ? String(result.messageId).trim() : null
+        // hasValidId: ID reconhecível como WhatsApp real (hex 12+ chars ou contém @).
+        // Usado apenas para salvar whatsapp_id e habilitar rastreamento de ACK.
+        // NÃO determina se o envio foi bem-sucedido — isso depende apenas de ok.
         const hasValidId = isRealWhatsAppId(waMessageId)
         const providerError = (typeof result === 'object') ? (result?.error || result?.blockedBy || null) : null
 
-        // Só marca como 'sent' se o provider retornou OK *e* um ID de rastreamento válido.
-        // Isso evita o estado inválido: status=sent + whatsapp_id=NULL.
-        const nextStatus = (ok && hasValidId) ? 'sent' : 'erro'
-        const nextStatusMensagem = (ok && hasValidId) ? 'sent' : 'failed'
+        // Regra: status='sent' quando provider aceitou a mensagem (ok=true).
+        //        status='erro' apenas quando provider recusou/falhou (ok=false).
+        // O whatsapp_id só é salvo quando o ID retornado é um WhatsApp ID rastreável.
+        const nextStatus = ok ? 'sent' : 'erro'
+        const nextStatusMensagem = ok ? 'sent' : 'failed'
 
-        if (ok && hasValidId) {
+        if (ok) {
           console.log('[ENVIO_MANUAL] ✅ Sucesso', {
             company_id,
             conversa_id,
@@ -5441,19 +5445,24 @@ exports.enviarMensagemChat = async (req, res) => {
             telefone_destino: String(telefoneParaEnvio || '').slice(-12),
             whatsapp_instance_id: whatsappInstanceId,
             provedor: 'ultramsg',
-            provider_message_id: waMessageId,
+            provider_message_id: waMessageId || null,
+            whatsapp_id_salvo: hasValidId ? waMessageId : null,
           })
-        } else if (ok && !hasValidId) {
-          // Provider aceitou mas não retornou ID válido — estado sent+null nunca deve ocorrer
-          console.warn('[ENVIO_MANUAL] ⚠️ Provider retornou ok=true sem messageId válido — marcando como erro', {
-            company_id,
-            conversa_id,
-            mensagem_id: msg.id,
-            telefone_destino: String(telefoneParaEnvio || '').slice(-12),
-            whatsapp_instance_id: whatsappInstanceId,
-            messageId_recebido: waMessageId || 'NULL',
-            dica: 'Verifique se a instância WhatsApp está conectada e se o número de destino possui WhatsApp.',
-          })
+          if (!hasValidId) {
+            // Provider aceitou a mensagem, mas o ID retornado não é rastreável como WhatsApp ID.
+            // Isso é normal quando UltraMsg retorna ID interno de fila (ex: "35096").
+            // A mensagem FOI enviada — o status 'sent' é correto.
+            // O rastreamento de entrega (ACK) pode não funcionar sem whatsapp_id.
+            console.warn('[ENVIO_MANUAL] ℹ️ Provider aceitou envio sem WhatsApp ID rastreável', {
+              company_id,
+              conversa_id,
+              mensagem_id: msg.id,
+              telefone_destino: String(telefoneParaEnvio || '').slice(-12),
+              whatsapp_instance_id: whatsappInstanceId,
+              provider_id_recebido: waMessageId || 'NULL',
+              nota: 'Mensagem marcada como sent. ACK de entrega pode não ser rastreado.',
+            })
+          }
         } else {
           console.warn('[ENVIO_MANUAL] ❌ Falha no envio', {
             company_id,
@@ -5520,14 +5529,8 @@ exports.enviarMensagemChat = async (req, res) => {
 
     // Não retornar mensagem completa — evita duplicação no frontend (API + socket).
     // A mensagem chega via socket nova_mensagem (única fonte de verdade para exibição).
-    const providerOk = !!telefoneParaEnvio && (typeof sendResult === 'boolean' ? sendResult : sendResult?.ok === true)
-    const providerMessageId = (typeof sendResult === 'object' && sendResult?.messageId) ? String(sendResult.messageId).trim() : null
-    // Considera enviado somente se provider retornou ok E um ID de rastreamento válido
-    const sendOk = providerOk && isRealWhatsAppId(providerMessageId)
-    const motivoErro = sendResult?.error || sendResult?.blockedBy ||
-      (!sendOk && providerOk && !isRealWhatsAppId(providerMessageId)
-        ? 'Provedor não retornou ID de rastreamento da mensagem'
-        : null)
+    const sendOk = !!telefoneParaEnvio && (typeof sendResult === 'boolean' ? sendResult : sendResult?.ok === true)
+    const motivoErro = sendResult?.error || sendResult?.blockedBy
     return res.json({
       ok: true,
       id: msg.id,

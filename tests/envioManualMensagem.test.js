@@ -1,51 +1,22 @@
 /**
  * Testes para o fluxo de envio manual de mensagens (enviarMensagemChat).
  *
- * Cobre os três cenários exigidos:
- *  1. Contato comum — envio bem-sucedido com messageId válido
- *  2. Contato URA/empresa (número de atendimento eletrônico) — deve tentar envio normalmente
- *  3. Falha simulada do provedor — status deve ser 'erro', não 'sent'
+ * Cobre os cenários exigidos:
+ *  1. Contato comum — envio bem-sucedido com ID hex WhatsApp
+ *  2. Contato URA/empresa — não há bloqueio por tipo de contato
+ *  3. Retorno com ID hexadecimal (BAE543FE1CE17AFA)
+ *  4. Retorno com ID numérico curto ("35096") — ok=true → sent, sem whatsapp_id rastreável
+ *  5. Retorno sucesso sem ID — ok=true → sent
+ *  6. Erro real do provedor — ok=false → erro
  *
- * Além dos casos:
- *  4. Provider retorna ok=true mas sem messageId — deve ser tratado como erro
- *  5. Provider retorna ok=true com ID curto (hex 16 chars) — isRealWhatsAppId deve aceitar
- *  6. Conversa sem telefone — deve marcar como erro imediatamente
+ * Regra fundamental:
+ *   status='sent'  ← provider aceitou (ok=true)
+ *   status='erro'  ← provider recusou/falhou (ok=false), exceção ou sem telefone
  */
 
-// ─── isRealWhatsAppId (função interna testada via módulo parcial) ─────────────
+// ─── isRealWhatsAppId ────────────────────────────────────────────────────────
 
 describe('isRealWhatsAppId', () => {
-  // Extrai a função usando um módulo isolado para não carregar o chatController inteiro
-  let isRealWhatsAppId
-
-  beforeAll(() => {
-    // Simula o módulo apenas com a função de interesse
-    jest.isolateModules(() => {
-      // Injeta stub mínimo das dependências do chatController
-      jest.mock('../config/supabase', () => ({
-        from: jest.fn().mockReturnValue({
-          select: jest.fn().mockReturnThis(),
-          insert: jest.fn().mockReturnThis(),
-          update: jest.fn().mockReturnThis(),
-          delete: jest.fn().mockReturnThis(),
-          eq: jest.fn().mockReturnThis(),
-          is: jest.fn().mockReturnThis(),
-          in: jest.fn().mockReturnThis(),
-          not: jest.fn().mockReturnThis(),
-          or: jest.fn().mockReturnThis(),
-          order: jest.fn().mockReturnThis(),
-          limit: jest.fn().mockReturnThis(),
-          maybeSingle: jest.fn().mockResolvedValue({ data: null, error: null }),
-          single: jest.fn().mockResolvedValue({ data: null, error: null }),
-        }),
-      }))
-    })
-  })
-
-  // Como isRealWhatsAppId é uma função privada, testamos seu comportamento
-  // indiretamente através dos critérios documentados.
-  // Para testes unitários diretos, usamos o módulo em modo de avaliação:
-
   const impl = (waId) => {
     if (!waId) return false
     const s = String(waId).trim()
@@ -82,26 +53,23 @@ describe('isRealWhatsAppId', () => {
     expect(impl('0')).toBe(false)
   })
 
-  test('rejeita ID muito curto (< 12 chars, sem @)', () => {
+  test('rejeita ID numérico curto de fila interna ("35096")', () => {
+    // IDs numéricos curtos são IDs internos de fila do UltraMsg, não WhatsApp IDs reais.
+    // Não são rastreáveis via ACK webhook, por isso não são salvos como whatsapp_id.
+    expect(impl('35096')).toBe(false)
     expect(impl('1')).toBe(false)
-    expect(impl('123')).toBe(false)
-    expect(impl('12345678')).toBe(false)
-    // 11 chars hex ainda rejeita
-    expect(impl('BAE543FE1CE')).toBe(false)
+    expect(impl('123456789')).toBe(false)
   })
 
   test('rejeita ID hex com menos de 12 chars', () => {
+    expect(impl('BAE543FE1CE')).toBe(false) // 11 chars
     expect(impl('ABCDEF12345')).toBe(false) // 11 chars
   })
 })
 
-// ─── Lógica de nextStatus (contato comum vs URA vs falha) ────────────────────
+// ─── Lógica de nextStatus ────────────────────────────────────────────────────
 
 describe('Lógica de nextStatus no envio manual', () => {
-  /**
-   * Replica a lógica do enviarMensagemChat para validar os cenários.
-   * A função real está em chatController.js; aqui testamos apenas a lógica de decisão.
-   */
   const isRealWhatsAppId = (waId) => {
     if (!waId) return false
     const s = String(waId).trim()
@@ -118,139 +86,161 @@ describe('Lógica de nextStatus no envio manual', () => {
       ? String(providerResult.messageId).trim()
       : null
     const hasValidId = isRealWhatsAppId(waMessageId)
+    // Regra: status depende apenas de ok (aceitação pelo provider), não do formato do ID
     return {
-      nextStatus: (ok && hasValidId) ? 'sent' : 'erro',
-      nextStatusMensagem: (ok && hasValidId) ? 'sent' : 'failed',
+      nextStatus: ok ? 'sent' : 'erro',
+      nextStatusMensagem: ok ? 'sent' : 'failed',
       waMessageId,
       hasValidId,
     }
   }
 
   // ── Cenário 1: Contato comum ──────────────────────────────────────────────
-  describe('Cenário 1: Contato comum (envio bem-sucedido)', () => {
-    test('provider retorna ok=true + ID hex 16 chars → status=sent', () => {
-      const result = resolveNextStatus({ ok: true, messageId: 'BAE543FE1CE17AFA' })
-      expect(result.nextStatus).toBe('sent')
-      expect(result.nextStatusMensagem).toBe('sent')
-      expect(result.hasValidId).toBe(true)
-      expect(result.waMessageId).toBe('BAE543FE1CE17AFA')
+  describe('Cenário 1: Contato comum', () => {
+    test('ok=true + ID hex 16 chars → status=sent, whatsapp_id salvo', () => {
+      const r = resolveNextStatus({ ok: true, messageId: 'BAE543FE1CE17AFA' })
+      expect(r.nextStatus).toBe('sent')
+      expect(r.nextStatusMensagem).toBe('sent')
+      expect(r.hasValidId).toBe(true)
+      expect(r.waMessageId).toBe('BAE543FE1CE17AFA')
     })
 
-    test('provider retorna ok=true + ID com @ → status=sent', () => {
-      const result = resolveNextStatus({ ok: true, messageId: 'false_5511999999999@c.us_BAE543FE1CE17AFA' })
-      expect(result.nextStatus).toBe('sent')
-      expect(result.nextStatusMensagem).toBe('sent')
-      expect(result.hasValidId).toBe(true)
+    test('ok=true + ID com @ → status=sent, whatsapp_id salvo', () => {
+      const r = resolveNextStatus({ ok: true, messageId: 'false_5511999999999@c.us_BAE543FE1CE17AFA' })
+      expect(r.nextStatus).toBe('sent')
+      expect(r.hasValidId).toBe(true)
     })
   })
 
   // ── Cenário 2: Contato URA/empresa ────────────────────────────────────────
   describe('Cenário 2: Contato URA/empresa (551140029000)', () => {
-    test('envio para URA com sucesso → status=sent (não há bloqueio por tipo de contato)', () => {
-      // O sistema não deve bloquear envio para URA — é responsabilidade do atendente.
-      // Se o número não tiver WhatsApp, o UltraMsg retornará erro ou messageId curto.
-      const result = resolveNextStatus({ ok: true, messageId: 'CF4E9A2B1D7F3E5A' })
-      expect(result.nextStatus).toBe('sent')
-      expect(result.hasValidId).toBe(true)
-    })
-
-    test('envio para URA sem WhatsApp → provider retorna ok=true sem messageId → status=erro', () => {
-      // Caso real da conversa 7188: provider retornou ok=true mas sem ID válido
-      const result = resolveNextStatus({ ok: true, messageId: null })
-      expect(result.nextStatus).toBe('erro')
-      expect(result.nextStatusMensagem).toBe('failed')
-      expect(result.hasValidId).toBe(false)
-    })
-
-    test('envio para URA com ID curto não-hex → status=erro (ID inválido)', () => {
-      // Se UltraMsg retornou ID curto (< 12 chars sem @), não salva como enviado
-      const result = resolveNextStatus({ ok: true, messageId: '1' })
-      expect(result.nextStatus).toBe('erro')
-      expect(result.hasValidId).toBe(false)
+    test('provider aceita → status=sent independente do tipo de contato', () => {
+      const r = resolveNextStatus({ ok: true, messageId: 'CF4E9A2B1D7F3E5A' })
+      expect(r.nextStatus).toBe('sent')
     })
   })
 
-  // ── Cenário 3: Falha simulada do provedor ────────────────────────────────
-  describe('Cenário 3: Falha simulada do provedor', () => {
-    test('provider retorna ok=false → status=erro', () => {
-      const result = resolveNextStatus({ ok: false, error: 'Instância desconectada' })
-      expect(result.nextStatus).toBe('erro')
-      expect(result.nextStatusMensagem).toBe('failed')
-      expect(result.hasValidId).toBe(false)
+  // ── Cenário 3: ID hexadecimal ─────────────────────────────────────────────
+  describe('Cenário 3: Retorno com ID hexadecimal', () => {
+    test('hex 16 chars → status=sent, hasValidId=true', () => {
+      const r = resolveNextStatus({ ok: true, messageId: '3EB0D854ABCDEF12' })
+      expect(r.nextStatus).toBe('sent')
+      expect(r.hasValidId).toBe(true)
     })
 
-    test('provider retorna false (boolean) → status=erro', () => {
-      const result = resolveNextStatus(false)
-      expect(result.nextStatus).toBe('erro')
-    })
-
-    test('provider retorna ok=false com blockedBy → status=erro', () => {
-      const result = resolveNextStatus({ ok: false, blockedBy: 'guard', error: 'Bloqueado' })
-      expect(result.nextStatus).toBe('erro')
-      expect(result.nextStatusMensagem).toBe('failed')
-    })
-
-    test('provider retorna ok=true mas sem messageId → status=erro (previne sent+null)', () => {
-      // Esta é a causa raiz do bug relatado:
-      // status=sent + status_mensagem=pending + whatsapp_id=NULL
-      const result = resolveNextStatus({ ok: true, messageId: '' })
-      expect(result.nextStatus).toBe('erro')
-      expect(result.nextStatusMensagem).toBe('failed')
-      expect(result.hasValidId).toBe(false)
-    })
-
-    test('provider retorna ok=true mas messageId="null" (string) → status=erro', () => {
-      const result = resolveNextStatus({ ok: true, messageId: 'null' })
-      expect(result.nextStatus).toBe('erro')
-      expect(result.hasValidId).toBe(false)
-    })
-
-    test('provider lança exceção → tratado como erro', () => {
-      // A função catch do enviarMensagemChat deve capturar e marcar como erro
-      // Aqui simulamos o resultado que seria construído no catch
-      const catchResult = { ok: false, error: 'Error: connect ECONNREFUSED' }
-      const result = resolveNextStatus(catchResult)
-      expect(result.nextStatus).toBe('erro')
-      expect(result.nextStatusMensagem).toBe('failed')
+    test('hex 12 chars → status=sent, hasValidId=true', () => {
+      const r = resolveNextStatus({ ok: true, messageId: '3EB0D854ABCD' })
+      expect(r.nextStatus).toBe('sent')
+      expect(r.hasValidId).toBe(true)
     })
   })
 
-  // ── Validação: estado inválido nunca deve ocorrer ─────────────────────────
-  describe('Garantia: estado (status=sent, whatsapp_id=NULL) não deve ocorrer', () => {
-    const cenarios = [
-      { desc: 'ok=true sem messageId', result: { ok: true, messageId: null } },
-      { desc: 'ok=true messageId vazio', result: { ok: true, messageId: '' } },
-      { desc: 'ok=true messageId="0"', result: { ok: true, messageId: '0' } },
-      { desc: 'ok=false sem messageId', result: { ok: false } },
-      { desc: 'false booleano', result: false },
+  // ── Cenário 4: ID numérico curto ─────────────────────────────────────────
+  describe('Cenário 4: Retorno com ID numérico curto ("35096")', () => {
+    test('ok=true + ID numérico curto → status=sent (provider aceitou)', () => {
+      // ID "35096" é um ID interno de fila do UltraMsg, não um WhatsApp ID.
+      // Mas o provider ACEITOU a mensagem → status deve ser 'sent', não 'erro'.
+      const r = resolveNextStatus({ ok: true, messageId: '35096' })
+      expect(r.nextStatus).toBe('sent')
+      expect(r.nextStatusMensagem).toBe('sent')
+    })
+
+    test('ok=true + ID numérico curto → hasValidId=false (não salva como whatsapp_id rastreável)', () => {
+      const r = resolveNextStatus({ ok: true, messageId: '35096' })
+      expect(r.hasValidId).toBe(false)
+      // A mensagem foi enviada mas whatsapp_id fica NULL (ACK não rastreável via UltraMsg)
+    })
+  })
+
+  // ── Cenário 5: Sucesso sem ID ─────────────────────────────────────────────
+  describe('Cenário 5: Retorno sucesso sem ID', () => {
+    test('ok=true + messageId=null → status=sent (provider aceitou)', () => {
+      const r = resolveNextStatus({ ok: true, messageId: null })
+      expect(r.nextStatus).toBe('sent')
+      expect(r.nextStatusMensagem).toBe('sent')
+      expect(r.hasValidId).toBe(false)
+    })
+
+    test('ok=true sem messageId → status=sent', () => {
+      const r = resolveNextStatus({ ok: true })
+      expect(r.nextStatus).toBe('sent')
+    })
+
+    test('ok=true + messageId="" → status=sent', () => {
+      const r = resolveNextStatus({ ok: true, messageId: '' })
+      expect(r.nextStatus).toBe('sent')
+    })
+  })
+
+  // ── Cenário 6: Erro real do provedor ─────────────────────────────────────
+  describe('Cenário 6: Erro real do provedor', () => {
+    test('ok=false → status=erro', () => {
+      const r = resolveNextStatus({ ok: false, error: 'Instância desconectada' })
+      expect(r.nextStatus).toBe('erro')
+      expect(r.nextStatusMensagem).toBe('failed')
+    })
+
+    test('false (boolean) → status=erro', () => {
+      const r = resolveNextStatus(false)
+      expect(r.nextStatus).toBe('erro')
+    })
+
+    test('ok=false com blockedBy → status=erro', () => {
+      const r = resolveNextStatus({ ok: false, blockedBy: 'guard', error: 'Bloqueado' })
+      expect(r.nextStatus).toBe('erro')
+      expect(r.nextStatusMensagem).toBe('failed')
+    })
+
+    test('ok=false sem messageId → status=erro', () => {
+      const r = resolveNextStatus({ ok: false })
+      expect(r.nextStatus).toBe('erro')
+    })
+  })
+
+  // ── Invariante: se provider aceitou, nunca deve ser erro ─────────────────
+  describe('Invariante: ok=true → nextStatus sempre sent', () => {
+    const casos = [
+      { desc: 'com ID hex', result: { ok: true, messageId: 'BAE543FE1CE17AFA' } },
+      { desc: 'com ID numérico curto', result: { ok: true, messageId: '35096' } },
+      { desc: 'sem ID', result: { ok: true, messageId: null } },
+      { desc: 'com ID vazio', result: { ok: true, messageId: '' } },
+      { desc: 'com ID "null" string', result: { ok: true, messageId: 'null' } },
+      { desc: 'true booleano', result: true },
     ]
 
-    cenarios.forEach(({ desc, result: provResult }) => {
-      test(`"${desc}" → nunca status=sent com whatsapp_id=NULL`, () => {
+    casos.forEach(({ desc, result: provResult }) => {
+      test(`"${desc}" → nextStatus='sent'`, () => {
         const r = resolveNextStatus(provResult)
-        // Se status=sent, deve ter ID válido
-        if (r.nextStatus === 'sent') {
-          expect(r.hasValidId).toBe(true)
-          expect(r.waMessageId).toBeTruthy()
-        }
-        // Se não tem ID válido, status não pode ser 'sent'
-        if (!r.hasValidId) {
-          expect(r.nextStatus).not.toBe('sent')
-        }
+        expect(r.nextStatus).toBe('sent')
+      })
+    })
+  })
+
+  // ── Invariante: se provider falhou, nunca deve ser sent ──────────────────
+  describe('Invariante: ok=false → nextStatus sempre erro', () => {
+    const casos = [
+      { desc: 'erro com mensagem', result: { ok: false, error: 'Token inválido' } },
+      { desc: 'false booleano', result: false },
+      { desc: 'erro com blockedBy', result: { ok: false, blockedBy: 'guard' } },
+    ]
+
+    casos.forEach(({ desc, result: provResult }) => {
+      test(`"${desc}" → nextStatus='erro'`, () => {
+        const r = resolveNextStatus(provResult)
+        expect(r.nextStatus).toBe('erro')
+        expect(r.nextStatusMensagem).toBe('failed')
       })
     })
   })
 })
 
-// ─── Cenário: conversa sem telefone ─────────────────────────────────────────
+// ─── Conversa sem telefone ───────────────────────────────────────────────────
 
 describe('Conversa sem telefone (telefoneParaEnvio vazio)', () => {
-  test('quando telefoneParaEnvio é vazio, sendResult deve indicar erro', () => {
-    // O enviarMensagemChat deve marcar a mensagem como erro quando não há telefone.
-    // Não pode ficar como pending indefinidamente.
+  test('telefone vazio → sendResult indica erro', () => {
     const telefoneParaEnvio = ''
     const sendResult = telefoneParaEnvio
-      ? null // seria preenchido pelo provider
+      ? null
       : { ok: false, error: 'Número do contato indisponível para envio' }
 
     expect(sendResult.ok).toBe(false)
