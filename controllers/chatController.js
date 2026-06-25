@@ -3067,13 +3067,10 @@ exports.vincularClienteConversa = async (req, res) => {
 exports.atualizarNomeContato = async (req, res) => {
   try {
     const conversa_id = Number(req.params.id)
-    const { company_id, id: user_id } = req.user
+    const { company_id, id: user_id, perfil: role } = req.user
     if (!Number.isFinite(conversa_id) || conversa_id <= 0) {
       return res.status(400).json({ error: 'ID da conversa inválido' })
     }
-
-    const permEnvio = await assertPodeEnviarMensagem({ company_id, conversa_id, user_id, role: req.user?.perfil, user_dep_ids: req.user?.departamento_ids })
-    if (!permEnvio.ok) return res.status(permEnvio.status).json({ error: permEnvio.error })
 
     const nomeRaw = req.body?.nome != null ? String(req.body.nome) : ''
     const nome = normalizeName(nomeRaw)
@@ -3086,7 +3083,7 @@ exports.atualizarNomeContato = async (req, res) => {
 
     const { data: conversa, error: errConv } = await supabase
       .from('conversas')
-      .select('id, company_id, cliente_id, tipo, telefone, nome_contato_cache')
+      .select('id, company_id, cliente_id, tipo, telefone, nome_contato_cache, atendente_id, status_atendimento')
       .eq('id', conversa_id)
       .eq('company_id', Number(company_id))
       .maybeSingle()
@@ -3095,6 +3092,13 @@ exports.atualizarNomeContato = async (req, res) => {
     if (!conversa) return res.status(404).json({ error: 'Conversa não encontrada' })
     if (isGroupConversation(conversa)) {
       return res.status(400).json({ error: 'Não é possível renomear contato em conversa de grupo.' })
+    }
+
+    // Permissão: atendente responsável pela conversa, supervisor ou admin podem renomear
+    const isAdmin = role === 'admin' || role === 'supervisor'
+    const isAtendente = conversa.atendente_id != null && Number(conversa.atendente_id) === Number(user_id)
+    if (!isAdmin && !isAtendente) {
+      return res.status(403).json({ error: 'Assuma a conversa para editar o nome do contato.' })
     }
 
     const { error: errCache } = await supabase

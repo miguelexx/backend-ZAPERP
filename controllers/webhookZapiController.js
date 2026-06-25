@@ -1159,12 +1159,12 @@ exports.receberZapi = async (req, res) => {
           if (n >= 4) return 'played'
         }
 
-        if (s === 'received' || s === 'entregue') return 'delivered'
+        if (s === 'received' || s === 'entregue' || s === 'device') return 'delivered'
         if (s === 'delivered') return 'delivered'
         if (s === 'read' || s === 'read_by_me' || s === 'seen' || s === 'visualizada' || s === 'lida') return 'read'
         if (s === 'played') return 'played'
         if (s === 'pending' || s === 'enviando') return 'pending'
-        if (s === 'sent' || s === 'enviada' || s === 'enviado') return 'sent'
+        if (s === 'sent' || s === 'enviada' || s === 'enviado' || s === 'server') return 'sent'
         if (s === 'failed' || s === 'error' || s === 'erro') return 'erro'
         return s || null
       }
@@ -1177,6 +1177,7 @@ exports.receberZapi = async (req, res) => {
             mensagem_id: msg.id,
             conversa_id: msg.conversa_id,
             status: statusNorm,
+            status_mensagem: statusNorm,
             ...(msg.whatsapp_id ? { whatsapp_id: msg.whatsapp_id } : {}),
             ...(whatsappId ? { whatsapp_id: whatsappId } : {})
           }
@@ -1194,7 +1195,7 @@ exports.receberZapi = async (req, res) => {
           company_id,
           whatsapp_id: waIdStr,
           whatsapp_instance_id,
-          updates: { status: statusNorm },
+          updates: { status: statusNorm, status_mensagem: statusNorm },
           select: 'id, conversa_id, company_id, whatsapp_instance_id, whatsapp_id, autor_usuario_id',
           context: 'receberZapi.status',
         })
@@ -1366,7 +1367,7 @@ exports.receberZapi = async (req, res) => {
               company_id,
               whatsapp_id: String(delivMsgId),
               whatsapp_instance_id,
-              updates: { status: 'sent' },
+              updates: { status: 'sent', status_mensagem: 'sent' },
               select: 'id, conversa_id, company_id, autor_usuario_id',
               context: 'deliverycallback.fromMe.no_content',
             })
@@ -1377,6 +1378,7 @@ exports.receberZapi = async (req, res) => {
                   mensagem_id: existByWaId.id,
                   conversa_id: existByWaId.conversa_id,
                   status: 'sent',
+                  status_mensagem: 'sent',
                   whatsapp_id: String(delivMsgId)
                 }
                 let chain = io.to(`empresa_${existByWaId.company_id}`).to(`conversa_${existByWaId.conversa_id}`)
@@ -1431,7 +1433,7 @@ exports.receberZapi = async (req, res) => {
           company_id,
           whatsapp_id: String(messageId),
           whatsapp_instance_id,
-          updates: { status: statusNorm },
+          updates: { status: statusNorm, status_mensagem: statusNorm },
           select: 'id, conversa_id, company_id, autor_usuario_id',
           context: 'deliverycallback.status',
         })
@@ -1573,7 +1575,7 @@ exports.receberZapi = async (req, res) => {
               if (picked?.id) {
                 const patched = await supabase
                   .from('mensagens')
-                  .update({ whatsapp_id: String(messageId), status: statusNorm })
+                  .update({ whatsapp_id: String(messageId), status: statusNorm, status_mensagem: statusNorm })
                   .eq('company_id', company_id)
                   .eq('id', picked.id)
                   .select('id, conversa_id, company_id')
@@ -1595,6 +1597,7 @@ exports.receberZapi = async (req, res) => {
               mensagem_id: msg.id,
               conversa_id: msg.conversa_id,
               status: statusNorm,
+              status_mensagem: statusNorm,
               whatsapp_id: String(messageId)
             }
             let chain = io.to(`empresa_${msg.company_id}`).to(`conversa_${msg.conversa_id}`)
@@ -3338,8 +3341,11 @@ exports.receberZapi = async (req, res) => {
     const io = req.app.get('io')
     if (io && mensagemSalva) {
       // Status canônico para os ticks no frontend (sent, delivered, read, pending, erro, played)
-      const rawStatus = (mensagemSalva.status_mensagem ?? mensagemSalva.status ?? '').toString().toLowerCase()
-      const canon = rawStatus === 'enviada' || rawStatus === 'enviado' ? 'sent' : (rawStatus === 'entregue' || rawStatus === 'received' ? 'delivered' : (rawStatus || (fromMe ? 'sent' : 'delivered')))
+      const statusMsgCanon = normalizeZapiStatus(mensagemSalva.status_mensagem)
+      const statusCanon = normalizeZapiStatus(mensagemSalva.status)
+      const canon = statusMsgCanon && STATUS_RANK[statusMsgCanon] >= (STATUS_RANK[statusCanon] ?? -1)
+        ? statusMsgCanon
+        : (statusCanon || (fromMe ? 'sent' : 'delivered'))
       const emitPayload = {
         ...mensagemSalva,
         criado_em: normalizarTimestampSemFusoAmbiguoParaApi(mensagemSalva.criado_em),
@@ -3639,12 +3645,12 @@ exports.statusZapi = async (req, res) => {
         if (n >= 4) return 'played'
       }
       return (
-        rawStatus === 'received' || rawStatus === 'entregue' ? 'delivered' :
+        rawStatus === 'received' || rawStatus === 'entregue' || rawStatus === 'device' ? 'delivered' :
         rawStatus === 'delivered' ? 'delivered' :
         rawStatus === 'read' || rawStatus === 'read_by_me' || rawStatus === 'seen' || rawStatus === 'visualizada' || rawStatus === 'lida' ? 'read' :
         rawStatus === 'played' ? 'played' :
         rawStatus === 'pending' || rawStatus === 'enviando' ? 'pending' :
-        rawStatus === 'sent' || rawStatus === 'enviada' || rawStatus === 'enviado' ? 'sent' :
+        rawStatus === 'sent' || rawStatus === 'enviada' || rawStatus === 'enviado' || rawStatus === 'server' ? 'sent' :
         rawStatus === 'erro' || rawStatus === 'error' || rawStatus === 'failed' ? 'erro' :
         (rawStatus || null)
       )
@@ -3712,11 +3718,17 @@ exports.statusZapi = async (req, res) => {
         company_id,
         whatsapp_id: idStr,
         whatsapp_instance_id,
-        select: 'status',
+        select: 'status, status_mensagem',
         context: 'status.rank_check',
       })
-      if (currentForRank?.status && STATUS_RANK[currentForRank.status] > (STATUS_RANK[effectiveStatus] ?? -1)) {
-        effectiveStatus = currentForRank.status
+      const currentStatusForRank = (() => {
+        const sMsg = normalizeZapiStatus(currentForRank?.status_mensagem)
+        const s = normalizeZapiStatus(currentForRank?.status)
+        if (sMsg && STATUS_RANK[sMsg] >= (STATUS_RANK[s] ?? -1)) return sMsg
+        return s
+      })()
+      if (currentStatusForRank && STATUS_RANK[currentStatusForRank] > (STATUS_RANK[effectiveStatus] ?? -1)) {
+        effectiveStatus = currentStatusForRank
       }
 
       // 1) Atualiza por (company_id, whatsapp_id) — match exato (inclui autor_usuario_id para emit ao remetente)
@@ -3724,7 +3736,7 @@ exports.statusZapi = async (req, res) => {
         company_id,
         whatsapp_id: idStr,
         whatsapp_instance_id,
-        updates: { status: effectiveStatus },
+        updates: { status: effectiveStatus, status_mensagem: effectiveStatus },
         select: 'id, conversa_id, company_id, autor_usuario_id, whatsapp_instance_id',
         context: 'status.exact',
       })
@@ -3735,7 +3747,7 @@ exports.statusZapi = async (req, res) => {
         const prefix = idStr.slice(0, 20)
         let prefixQuery = supabase
           .from('mensagens')
-          .select('id, conversa_id, company_id, autor_usuario_id, whatsapp_id, status')
+          .select('id, conversa_id, company_id, autor_usuario_id, whatsapp_id, status, status_mensagem')
           .eq('company_id', company_id)
           .ilike('whatsapp_id', `${prefix}%`)
           .order('id', { ascending: false })
@@ -3752,12 +3764,18 @@ exports.statusZapi = async (req, res) => {
         }
         const candidate = Array.isArray(prefixRows) && prefixRows.length === 1 ? prefixRows[0] : null
         if (candidate?.id) {
-          if (candidate.status && STATUS_RANK[candidate.status] > (STATUS_RANK[effectiveStatus] ?? -1)) {
-            effectiveStatus = candidate.status
+          const candidateStatusForRank = (() => {
+            const sMsg = normalizeZapiStatus(candidate.status_mensagem)
+            const s = normalizeZapiStatus(candidate.status)
+            if (sMsg && STATUS_RANK[sMsg] >= (STATUS_RANK[s] ?? -1)) return sMsg
+            return s
+          })()
+          if (candidateStatusForRank && STATUS_RANK[candidateStatusForRank] > (STATUS_RANK[effectiveStatus] ?? -1)) {
+            effectiveStatus = candidateStatusForRank
           }
           const { data: patched } = await supabase
             .from('mensagens')
-            .update({ status: effectiveStatus })
+            .update({ status: effectiveStatus, status_mensagem: effectiveStatus })
             .eq('company_id', company_id)
             .eq('id', candidate.id)
             .select('id, conversa_id, company_id, autor_usuario_id')
@@ -3787,7 +3805,7 @@ exports.statusZapi = async (req, res) => {
         if (cand?.id) {
           const { data: patched } = await supabase
             .from('mensagens')
-            .update({ status: effectiveStatus, whatsapp_id: idStr })
+            .update({ status: effectiveStatus, status_mensagem: effectiveStatus, whatsapp_id: idStr })
             .eq('company_id', company_id)
             .eq('id', cand.id)
             .select('id, conversa_id, company_id, autor_usuario_id')
@@ -3817,7 +3835,7 @@ exports.statusZapi = async (req, res) => {
         if (cand?.id) {
           const { data: patched } = await supabase
             .from('mensagens')
-            .update({ status: effectiveStatus })
+            .update({ status: effectiveStatus, status_mensagem: effectiveStatus })
             .eq('company_id', company_id)
             .eq('id', cand.id)
             .select('id, conversa_id, company_id, autor_usuario_id')

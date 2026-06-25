@@ -125,6 +125,20 @@ function isHumanAttendantLastOutbound(lastMsg, triageMerged, absenceCfg) {
 }
 
 /**
+ * Retorna o timestamp efetivo do início do prazo de ausência.
+ * Se o atendente assumiu/reabriu a conversa DEPOIS da última mensagem enviada,
+ * o prazo deve contar a partir da assunção — não da mensagem antiga.
+ * Isso evita que o scheduler feche imediatamente conversas recém-reabertas.
+ */
+function resolveAguardandoDesde(atendente_atribuido_em, lastMsgCriadoEm) {
+  if (!atendente_atribuido_em) return lastMsgCriadoEm
+  const tAtrib = new Date(atendente_atribuido_em).getTime()
+  const tMsg = new Date(lastMsgCriadoEm).getTime()
+  if (Number.isFinite(tAtrib) && tAtrib > tMsg) return atendente_atribuido_em
+  return lastMsgCriadoEm
+}
+
+/**
  * Prazo em horas (config da tela). `horas_uteis` ainda usa horas corridas no relógio — evolução futura: janelas comerciais.
  * `timezone` da empresa entra em logs/preview e em evoluções de horas úteis.
  */
@@ -401,7 +415,8 @@ async function finalizeConversationsByAbsence(opts = {}) {
         continue
       }
 
-      const aguardandoDesde = lastMsg.criado_em
+      // Se o atendente assumiu/reabriu depois da última msg, o prazo conta da assunção
+      const aguardandoDesde = resolveAguardandoDesde(conv.atendente_atribuido_em, lastMsg.criado_em)
       const inboundRecente = await hasInboundAfterTimestamp(company_id, conv.id, aguardandoDesde)
       if (inboundRecente) {
         if (!dryRun) await clearWaitingForClient(company_id, conv.id)
@@ -651,11 +666,13 @@ async function finalizeAbsenceForConversaIds(p) {
       resultados.push({ conversa_id: convId, ok: false, motivo: 'ultima_nao_e_atendente' })
       continue
     }
-    if (await hasInboundAfterTimestamp(company_id, conv.id, lastMsg.criado_em)) {
+    // Se o atendente assumiu/reabriu depois da última msg, o prazo conta da assunção
+    const aguardandoDesde = resolveAguardandoDesde(conv.atendente_atribuido_em, lastMsg.criado_em)
+    if (await hasInboundAfterTimestamp(company_id, conv.id, aguardandoDesde)) {
       resultados.push({ conversa_id: convId, ok: false, motivo: 'cliente_respondeu_depois' })
       continue
     }
-    if (new Date(lastMsg.criado_em).getTime() > cutoffMs) {
+    if (new Date(aguardandoDesde).getTime() > cutoffMs) {
       resultados.push({ conversa_id: convId, ok: false, motivo: 'prazo_nao_cumprido' })
       continue
     }
@@ -667,7 +684,8 @@ async function finalizeAbsenceForConversaIds(p) {
         dryRun: true,
         preview: {
           ultima_mensagem_criado_em: lastMsg.criado_em,
-          tempo_parado_h: msIdleFromLastOutbound(lastMsg.criado_em) / 3600000,
+          aguardando_desde: aguardandoDesde,
+          tempo_parado_h: msIdleFromLastOutbound(aguardandoDesde) / 3600000,
         },
       })
       continue
