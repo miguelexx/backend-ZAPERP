@@ -1168,6 +1168,8 @@ exports.listarRespostasSalvas = async (req, res) => {
   }
 }
 
+const LIMITE_RESPOSTAS_ATENDENTE = 5
+
 exports.criarRespostaSalva = async (req, res) => {
   try {
     const { company_id, id: usuario_id } = req.user
@@ -1180,6 +1182,26 @@ exports.criarRespostaSalva = async (req, res) => {
     const textoTrim = String(texto || '').trim()
     if (!tituloTrim || !textoTrim) return res.status(400).json({ error: 'titulo e texto obrigatórios' })
     if (tituloTrim.length > 255) return res.status(400).json({ error: 'titulo deve ter no máximo 255 caracteres' })
+
+    // Atendentes têm limite de respostas salvas próprias
+    if (!isAdminOrSupervisor(req.user)) {
+      const { count, error: countErr } = await supabase
+        .from('respostas_salvas')
+        .select('id', { count: 'exact', head: true })
+        .eq('company_id', company_id)
+        .eq('usuario_id', userId)
+      if (countErr) {
+        console.error('[respostas_salvas] count error:', countErr.message)
+      } else if ((count ?? 0) >= LIMITE_RESPOSTAS_ATENDENTE) {
+        return res.status(400).json({
+          error: `Limite de ${LIMITE_RESPOSTAS_ATENDENTE} respostas salvas atingido. Exclua uma existente antes de criar outra.`,
+          code: 'LIMITE_RESPOSTAS_ATINGIDO',
+          limite: LIMITE_RESPOSTAS_ATENDENTE,
+          total: count,
+        })
+      }
+    }
+
     const depCheck = await validarDepartamentoEmpresa(company_id, departamento_id)
     if (depCheck?.error) return res.status(400).json({ error: depCheck.error })
     const depId = depCheck?.departamento_id ?? null
