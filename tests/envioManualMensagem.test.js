@@ -67,6 +67,43 @@ describe('isRealWhatsAppId', () => {
   })
 })
 
+describe('Contrato de envio estruturado de link', () => {
+  test('aceita link.url enviado pelo frontend e normaliza para linkUrl', () => {
+    const { normalizeLinkPayload } = require('../controllers/chatController')._test
+    const normalized = normalizeLinkPayload({
+      url: ' https://exemplo.com/proposta ',
+      title: 'Proposta',
+      description: 'Veja a proposta',
+      image: 'https://exemplo.com/capa.png',
+    })
+
+    expect(normalized).toMatchObject({
+      linkUrl: 'https://exemplo.com/proposta',
+      title: 'Proposta',
+      linkDescription: 'Veja a proposta',
+      image: 'https://exemplo.com/capa.png',
+    })
+  })
+
+  test('mantem compatibilidade com link.linkUrl legado', () => {
+    const { normalizeLinkPayload } = require('../controllers/chatController')._test
+    const normalized = normalizeLinkPayload({
+      linkUrl: 'https://exemplo.com/legado',
+      title: 'Legado',
+    })
+
+    expect(normalized.linkUrl).toBe('https://exemplo.com/legado')
+    expect(normalized.title).toBe('Legado')
+  })
+
+  test('ignora payload de link sem URL confiavel', () => {
+    const { normalizeLinkPayload } = require('../controllers/chatController')._test
+
+    expect(normalizeLinkPayload(null)).toBeNull()
+    expect(normalizeLinkPayload({ url: '   ' })).toBeNull()
+  })
+})
+
 // ─── Lógica de nextStatus ────────────────────────────────────────────────────
 
 describe('Lógica de nextStatus no envio manual', () => {

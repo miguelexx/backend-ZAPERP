@@ -60,6 +60,19 @@ function isRealWhatsAppId(waId) {
   return false
 }
 
+function normalizeLinkPayload(link) {
+  if (!link || typeof link !== 'object') return null
+  const linkUrl = String(link.linkUrl ?? link.url ?? '').trim()
+  if (!linkUrl) return null
+  return {
+    ...link,
+    linkUrl,
+    title: String(link.title || '').trim(),
+    image: link.image || '',
+    linkDescription: String(link.linkDescription || link.description || '').trim(),
+  }
+}
+
 async function resolveTelefoneFromLidSiblingConversation(company_id, conversa, whatsappInstanceId) {
   if (!conversa?.chat_lid) return null
   let query = supabase
@@ -5203,7 +5216,8 @@ exports.enviarMensagemChat = async (req, res) => {
       }
     }
 
-    const hasLinkPayload = link && typeof link === 'object' && link.linkUrl
+    const linkPayload = normalizeLinkPayload(link)
+    const hasLinkPayload = !!linkPayload
 
     // Reply (citação) — opcional. Requer coluna mensagens.reply_meta (jsonb).
     const timestamp = new Date().toISOString()
@@ -5397,17 +5411,17 @@ exports.enviarMensagemChat = async (req, res) => {
 
         if (hasLinkPayload && provider.sendLink) {
           let messageToSend = String(texto).trim()
-          const linkUrlStr = String(link.linkUrl || '').trim()
+          const linkUrlStr = linkPayload.linkUrl
           if (linkUrlStr && !messageToSend.includes(linkUrlStr)) {
             messageToSend = messageToSend ? `${messageToSend} ${linkUrlStr}` : linkUrlStr
           }
           messageToSend = textoParaEnvioWhatsapp(messageToSend, usuarioNome)
           result = await provider.sendLink(telefoneParaEnvio, {
             message: messageToSend,
-            image: link.image || '',
+            image: linkPayload.image || '',
             linkUrl: linkUrlStr,
-            title: String(link.title || '').trim() || linkUrlStr,
-            linkDescription: String(link.linkDescription || link.description || '').trim() || messageToSend,
+            title: linkPayload.title || linkUrlStr,
+            linkDescription: linkPayload.linkDescription || messageToSend,
           }, {
             companyId: company_id,
             conversaId: conversa_id,
@@ -7750,4 +7764,5 @@ exports._test = {
   getChatSearchIdLimit,
   getChatFilterIdLimit,
   resolveConversationWhatsappInstance,
+  normalizeLinkPayload,
 }
