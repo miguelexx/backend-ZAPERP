@@ -5842,7 +5842,7 @@ exports.enviarContatoWhatsapp = async (req, res) => {
     const nextStatus = ok ? 'sent' : 'erro'
     await supabase
       .from('mensagens')
-      .update({ status: nextStatus, ...(isRealWhatsAppId(waMessageId) ? { whatsapp_id: waMessageId } : {}) })
+      .update({ status: nextStatus, status_mensagem: nextStatus, ...(isRealWhatsAppId(waMessageId) ? { whatsapp_id: waMessageId } : {}) })
       .eq('company_id', company_id)
       .eq('id', msg.id)
 
@@ -6025,7 +6025,7 @@ exports.enviarLocalizacao = async (req, res) => {
 
     await supabase
       .from('mensagens')
-      .update({ status: nextStatus, ...(isRealWhatsAppId(waMessageId) ? { whatsapp_id: waMessageId } : {}) })
+      .update({ status: nextStatus, status_mensagem: nextStatus, ...(isRealWhatsAppId(waMessageId) ? { whatsapp_id: waMessageId } : {}) })
       .eq('company_id', company_id)
       .eq('id', msg.id)
 
@@ -6139,7 +6139,7 @@ exports.enviarLigacaoWhatsapp = async (req, res) => {
     const nextStatus = ok ? 'sent' : 'erro'
     await supabase
       .from('mensagens')
-      .update({ status: nextStatus, ...(isRealWhatsAppId(waMessageId) ? { whatsapp_id: waMessageId } : {}) })
+      .update({ status: nextStatus, status_mensagem: nextStatus, ...(isRealWhatsAppId(waMessageId) ? { whatsapp_id: waMessageId } : {}) })
       .eq('company_id', company_id)
       .eq('id', msg.id)
 
@@ -7020,6 +7020,7 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
             .from('mensagens')
             .update({ 
               status: nextStatus,
+              status_mensagem: nextStatus,
               ...(isRealWhatsAppId(waMessageId) ? { whatsapp_id: waMessageId } : {})
             })
             .eq('company_id', company_id)
@@ -7039,7 +7040,7 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
         })
         .catch(async (e) => {
           console.error('WhatsApp enviar mídia (erro de rede/provider):', e?.message || e)
-          await supabase.from('mensagens').update({ status: 'erro' }).eq('company_id', company_id).eq('id', msg.id)
+          await supabase.from('mensagens').update({ status: 'erro', status_mensagem: 'erro' }).eq('company_id', company_id).eq('id', msg.id)
           const io2 = req.app?.get('io')
           if (io2) {
             const payload = { mensagem_id: msg.id, conversa_id: Number(conversa_id), status: 'erro', status_mensagem: 'erro' }
@@ -7074,7 +7075,7 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
                   sendMediaWithUrl(fullUrl)
                 } else {
                   console.warn('⚠️ UltraMsg uploadMedia falhou; mídia não enviada.', result?.error || '')
-                  await supabase.from('mensagens').update({ status: 'erro' }).eq('company_id', company_id).eq('id', msg.id)
+                  await supabase.from('mensagens').update({ status: 'erro', status_mensagem: 'erro' }).eq('company_id', company_id).eq('id', msg.id)
                   const io2 = req.app?.get('io')
                   if (io2) {
                     io2.to(`empresa_${company_id}`).to(`conversa_${conversa_id}`).to(`usuario_${user_id}`).emit(io2.EVENTS?.STATUS_MENSAGEM || 'status_mensagem', { mensagem_id: msg.id, conversa_id: Number(conversa_id), status: 'erro', status_mensagem: 'erro' })
@@ -7083,7 +7084,7 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
               }
             } catch (e) {
               console.error('WhatsApp uploadMedia:', e)
-              await supabase.from('mensagens').update({ status: 'erro' }).eq('company_id', company_id).eq('id', msg.id)
+              await supabase.from('mensagens').update({ status: 'erro', status_mensagem: 'erro' }).eq('company_id', company_id).eq('id', msg.id)
               const io2 = req.app?.get('io')
               if (io2) {
                 io2.to(`empresa_${company_id}`).to(`conversa_${conversa_id}`).to(`usuario_${user_id}`).emit(io2.EVENTS?.STATUS_MENSAGEM || 'status_mensagem', { mensagem_id: msg.id, conversa_id: Number(conversa_id), status: 'erro', status_mensagem: 'erro' })

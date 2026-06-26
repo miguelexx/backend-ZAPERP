@@ -1194,7 +1194,7 @@ exports.receberZapi = async (req, res) => {
           company_id,
           whatsapp_id: waIdStr,
           whatsapp_instance_id,
-          updates: { status: statusNorm },
+          updates: { status: statusNorm, status_mensagem: statusNorm },
           select: 'id, conversa_id, company_id, whatsapp_instance_id, whatsapp_id, autor_usuario_id',
           context: 'receberZapi.status',
         })
@@ -1366,7 +1366,7 @@ exports.receberZapi = async (req, res) => {
               company_id,
               whatsapp_id: String(delivMsgId),
               whatsapp_instance_id,
-              updates: { status: 'sent' },
+              updates: { status: 'sent', status_mensagem: 'sent' },
               select: 'id, conversa_id, company_id, autor_usuario_id',
               context: 'deliverycallback.fromMe.no_content',
             })
@@ -1431,7 +1431,7 @@ exports.receberZapi = async (req, res) => {
           company_id,
           whatsapp_id: String(messageId),
           whatsapp_instance_id,
-          updates: { status: statusNorm },
+          updates: { status: statusNorm, status_mensagem: statusNorm },
           select: 'id, conversa_id, company_id, autor_usuario_id',
           context: 'deliverycallback.status',
         })
@@ -3724,7 +3724,7 @@ exports.statusZapi = async (req, res) => {
         company_id,
         whatsapp_id: idStr,
         whatsapp_instance_id,
-        updates: { status: effectiveStatus },
+        updates: { status: effectiveStatus, status_mensagem: effectiveStatus },
         select: 'id, conversa_id, company_id, autor_usuario_id, whatsapp_instance_id',
         context: 'status.exact',
       })
@@ -3757,7 +3757,7 @@ exports.statusZapi = async (req, res) => {
           }
           const { data: patched } = await supabase
             .from('mensagens')
-            .update({ status: effectiveStatus })
+            .update({ status: effectiveStatus, status_mensagem: effectiveStatus })
             .eq('company_id', company_id)
             .eq('id', candidate.id)
             .select('id, conversa_id, company_id, autor_usuario_id')
@@ -3787,7 +3787,7 @@ exports.statusZapi = async (req, res) => {
         if (cand?.id) {
           const { data: patched } = await supabase
             .from('mensagens')
-            .update({ status: effectiveStatus, whatsapp_id: idStr })
+            .update({ status: effectiveStatus, status_mensagem: effectiveStatus, whatsapp_id: idStr })
             .eq('company_id', company_id)
             .eq('id', cand.id)
             .select('id, conversa_id, company_id, autor_usuario_id')
@@ -3817,7 +3817,7 @@ exports.statusZapi = async (req, res) => {
         if (cand?.id) {
           const { data: patched } = await supabase
             .from('mensagens')
-            .update({ status: effectiveStatus })
+            .update({ status: effectiveStatus, status_mensagem: effectiveStatus })
             .eq('company_id', company_id)
             .eq('id', cand.id)
             .select('id, conversa_id, company_id, autor_usuario_id')
