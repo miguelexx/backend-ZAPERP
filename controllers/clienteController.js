@@ -1,11 +1,35 @@
 const supabase = require('../config/supabase');
-const { normalizePhoneBR } = require('../helpers/phoneHelper');
 const { getDisplayName } = require('../helpers/contactEnrichment');
+const { getCanonicalPhone, getOrCreateCliente } = require('../helpers/conversationSync');
 const { ensureConversaForCliente } = require('../services/conversaAbrirClienteService');
 const { executarAssumirConversa } = require('../services/conversaAssumirInternoService');
 
+const CLIENTE_SELECT_COLS =
+  'id, telefone, wa_id, nome, pushname, observacoes, foto_perfil, email, empresa, ultimo_contato, criado_em, atualizado_em, company_id';
+
 function bodyFlagTrue(v) {
   return v === true || v === 1 || String(v || '').toLowerCase() === 'true';
+}
+
+function trimOrNull(v) {
+  if (v == null) return null;
+  const s = String(v).trim();
+  return s || null;
+}
+
+function erroTelefoneCliente(codigo, extra = {}) {
+  return {
+    erro: codigo === 'TELEFONE_OBRIGATORIO' ? 'Informe telefone ou wa_id' : 'Telefone inválido',
+    codigo,
+    detalhe:
+      codigo === 'TELEFONE_OBRIGATORIO'
+        ? 'Informe o número do contato para continuar.'
+        : 'Informe um número brasileiro válido: DDD + número (10 ou 11 dígitos), com ou sem o código 55. Espaços, parênteses e hífens são aceitos.',
+    formato_esperado:
+      'Somente números do Brasil. Celular com 9 após o DDD: ex. (11) 98765-4321 → armazenado como 5511987654321.',
+    exemplos: ['34999999999', '(34) 99999-9999', '+55 34 99999-9999', '5534999999999'],
+    ...extra,
+  };
 }
 
 /**
@@ -160,61 +184,87 @@ exports.criarCliente = async (req, res) => {
   const { telefone, wa_id, nome, observacoes, email, empresa, abrir_conversa, assumir, whatsapp_instance_id } = req.body;
   const cid = Number(company_id)
 
-  if (!telefone && !wa_id) {
-    return res.status(400).json({ erro: 'Informe telefone ou wa_id' });
+  const telefoneRaw = telefone != null ? String(telefone).trim() : ''
+  const waIdRaw = wa_id != null ? String(wa_id).trim() : ''
+
+  if (!telefoneRaw && !waIdRaw) {
+    return res.status(400).json(erroTelefoneCliente('TELEFONE_OBRIGATORIO'));
   }
 
-  const telefoneNorm = (telefone || wa_id) ? normalizePhoneBR(telefone || wa_id) : '';
-
   try {
-    if (wa_id) {
-      const { data: existente } = await supabase
-        .from('clientes')
-        .select('id')
-        .eq('company_id', cid)
-        .eq('wa_id', wa_id)
-        .maybeSingle();
-
-      if (existente) {
-        return res.status(409).json({
-          erro: 'Cliente já existe',
-          id: existente.id
-        });
+    if (telefoneRaw) {
+      const telefoneCanonico = getCanonicalPhone(telefoneRaw)
+      const bloqueado =
+        !telefoneCanonico ||
+        telefoneCanonico.startsWith('lid:') ||
+        telefoneCanonico.endsWith('@g.us')
+      if (bloqueado) {
+        return res.status(400).json(
+          erroTelefoneCliente('TELEFONE_INVALIDO', {
+            detalhe:
+              'Não foi possível interpretar um telefone brasileiro. Verifique DDD e quantidade de dígitos. Grupos e identificadores internos (LID) não podem ser cadastrados por este formulário.',
+          })
+        )
       }
     }
 
-    if (telefoneNorm) {
-      const { data: existenteTel } = await supabase
-        .from('clientes')
-        .select('id')
-        .eq('company_id', cid)
-        .eq('telefone', telefoneNorm)
-        .maybeSingle();
+    const nomeTrim = trimOrNull(nome)
+    const observacoesTrim = trimOrNull(observacoes)
+    const emailTrim = trimOrNull(email)
+    const empresaTrim = trimOrNull(empresa)
 
-      if (existenteTel) {
-        return res.status(409).json({
-          erro: 'Já existe cliente com este número',
-          id: existenteTel.id
-        });
-      }
+    const fields = {
+      ...(nomeTrim ? { nome: nomeTrim, nomeSource: 'manual' } : {}),
+      ...(emailTrim ? { email: emailTrim } : {}),
+      ...(empresaTrim ? { empresa: empresaTrim } : {}),
+      ...(waIdRaw ? { wa_id: waIdRaw } : {}),
     }
 
-    const { data, error } = await supabase
+    const phoneForLookup = telefoneRaw || waIdRaw
+    const { cliente_id: clienteId, created: clienteCriado } = await getOrCreateCliente(
+      supabase,
+      cid,
+      phoneForLookup,
+      fields
+    )
+
+    if (!clienteId) {
+      return res.status(400).json(
+        erroTelefoneCliente('TELEFONE_INVALIDO', {
+          detalhe: 'Não foi possível cadastrar ou localizar o cliente para este número.',
+        })
+      )
+    }
+
+    const { data: row, error: fetchErr } = await supabase
       .from('clientes')
-      .insert({
-        telefone: telefoneNorm || telefone || wa_id,
-        wa_id: wa_id || null,
-        nome: nome || null,
-        observacoes: observacoes || null,
-        email: email ? String(email).trim() : null,
-        empresa: empresa ? String(empresa).trim() : null,
-        company_id: cid
-      })
-      .select()
-      .single();
+      .select(CLIENTE_SELECT_COLS)
+      .eq('company_id', cid)
+      .eq('id', clienteId)
+      .maybeSingle()
 
-    if (error) throw error;
+    if (fetchErr) throw fetchErr
+    if (!row) {
+      return res.status(500).json({ erro: 'Erro ao carregar cliente cadastrado' })
+    }
 
+    let data = row
+    if (observacoesTrim != null && observacoesTrim !== trimOrNull(data.observacoes)) {
+      const { data: updated, error: updErr } = await supabase
+        .from('clientes')
+        .update({
+          observacoes: observacoesTrim,
+          atualizado_em: new Date().toISOString(),
+        })
+        .eq('id', clienteId)
+        .eq('company_id', cid)
+        .select(CLIENTE_SELECT_COLS)
+        .maybeSingle()
+      if (updErr) throw updErr
+      if (updated) data = updated
+    }
+
+    const statusCode = clienteCriado === true ? 201 : 200
     const abrirFlag = bodyFlagTrue(abrir_conversa)
     const assumirFlag = bodyFlagTrue(assumir)
     if (abrirFlag || assumirFlag) {
@@ -232,11 +282,12 @@ exports.criarCliente = async (req, res) => {
         whatsapp_instance_id,
       })
       if (!r.ok) {
-        return res.status(201).json({
+        return res.status(statusCode).json({
           ...data,
           conversa: null,
           conversa_criada: false,
           conversa_aviso: r.error,
+          cliente_reutilizado: clienteCriado !== true,
           ...(r.codigo === 'SELECIONE_WHATSAPP_INSTANCE'
             ? { codigo: r.codigo, whatsapp_instances: r.whatsapp_instances || [] }
             : {}),
@@ -250,7 +301,8 @@ exports.criarCliente = async (req, res) => {
       let payload = {
         ...data,
         conversa: r.conversa,
-        conversa_criada: r.criada
+        conversa_criada: r.criada,
+        cliente_reutilizado: clienteCriado !== true,
       }
       if (assumirFlag && r.conversa?.id) {
         const ar = await executarAssumirConversa({
@@ -271,10 +323,13 @@ exports.criarCliente = async (req, res) => {
           payload.assumir_status = ar.status
         }
       }
-      return res.status(201).json(payload)
+      return res.status(statusCode).json(payload)
     }
 
-    return res.status(201).json(data);
+    return res.status(statusCode).json({
+      ...data,
+      cliente_reutilizado: clienteCriado !== true,
+    });
   } catch (err) {
     console.error(err);
     return res.status(500).json({ erro: 'Erro ao criar cliente' });

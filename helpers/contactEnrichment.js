@@ -17,12 +17,14 @@
  * - nome_existente: 70 (já salvo, não sobrescrever com pior)
  * - senderName: 60 (notify/display do WhatsApp — não sobrescreve nome existente)
  * - pushname: 60
+ * - manual: cadastro explícito pelo atendente (modal Novo contato)
  */
 
 const WHATSAPP_DEBUG = String(process.env.WHATSAPP_DEBUG || '').toLowerCase() === 'true'
 
 /** Score por fonte (maior = mais confiável). Nome do celular (syncUltramsg/name) > perfil WhatsApp (senderName). */
 const SOURCE_SCORE = {
+  manual: 120,
   syncUltramsg: 110,
   name: 110,
   senderName: 60,

@@ -5120,7 +5120,8 @@ exports.enviarMensagemChat = async (req, res) => {
   try {
     const { company_id, id: user_id, perfil } = req.user
     const { id: conversa_id } = req.params
-    const { texto, reply_meta, link } = req.body
+    const { texto, reply_meta, link, client_temp_id } = req.body
+    const clientTempId = client_temp_id && String(client_temp_id).trim() ? String(client_temp_id).trim().slice(0, 64) : null
 
     if (!texto || !String(texto).trim()) {
       return res.status(400).json({ error: 'texto é obrigatório' })
@@ -5284,7 +5285,7 @@ exports.enviarMensagemChat = async (req, res) => {
     } catch (_) {}
 
     if (io) {
-      const basePayload = { ...msg, id: msg.id, conversa_id: msg.conversa_id ?? Number(conversa_id), status: 'sending', status_mensagem: 'sending', direcao: 'out' }
+      const basePayload = { ...msg, id: msg.id, conversa_id: msg.conversa_id ?? Number(conversa_id), status: 'sending', status_mensagem: 'sending', direcao: 'out', ...(clientTempId ? { client_temp_id: clientTempId } : {}) }
       const novaMsgPayload = await enrichMensagemComAutorUsuario(supabase, company_id, basePayload)
       emitirEventoEmpresaConversa(
         io,
@@ -5539,6 +5540,7 @@ exports.enviarMensagemChat = async (req, res) => {
       ok: true,
       id: msg.id,
       conversa_id: Number(conversa_id),
+      ...(clientTempId ? { client_temp_id: clientTempId } : {}),
       ...(sendOk ? { status: 'sent' } : {
         status: sendResult?.blockedBy ? 'blocked' : 'erro',
         ...(motivoErro ? { motivo: motivoErro } : {})
