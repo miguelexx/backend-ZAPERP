@@ -3856,8 +3856,6 @@ exports.detalharChat = async (req, res) => {
     const telefoneExibivel = isLidConv ? null : (conversa.telefone ?? clientesConv?.telefone ?? null)
     const fotoCache = (conversa.foto_perfil_contato_cache && String(conversa.foto_perfil_contato_cache).trim()) ? String(conversa.foto_perfil_contato_cache).trim() : null
     const fotoUnica = isGroup ? (conversa.foto_grupo ?? null) : (clientesConv?.foto_perfil ?? fotoCache ?? null)
-    const whatsappInstanceMetaMap = await loadWhatsappInstanceMetaMap(company_id, [conversa.whatsapp_instance_id])
-    const whatsappInstanceMeta = safeWhatsappInstanceMeta(whatsappInstanceMetaMap.get(Number(conversa.whatsapp_instance_id)))
     // Badge "Aberta": só exibir quando há movimentação (mensagem ou atendente assumiu) — mesma regra da lista
     const temMensagem = Array.isArray(mensagens) && mensagens.length > 0
     const dbStatusAtend = String(conversa.status_atendimento || '')
@@ -3878,11 +3876,16 @@ exports.detalharChat = async (req, res) => {
     const statusDetalheReal = isGroup ? null : conversa.status_atendimento
     const statusDetalheLista = statusAtendimentoParaLista(isGroup, conversa.status_atendimento, exibirBadgeAberta)
     let mensagensFormatadas = (mensagens || []).reverse()
-    try {
-      mensagensFormatadas = await enrichMensagensComAutorUsuario(supabase, company_id, mensagensFormatadas, user_id)
-    } catch (enrichErr) {
-      console.warn('[detalharChat] enriquecer mensagens:', enrichErr?.message || enrichErr)
-    }
+    // whatsappInstanceMetaMap e enrichMensagens são independentes entre si — executam em paralelo
+    const [whatsappInstanceMetaMap, enrichedMensagens] = await Promise.all([
+      loadWhatsappInstanceMetaMap(company_id, [conversa.whatsapp_instance_id]),
+      enrichMensagensComAutorUsuario(supabase, company_id, mensagensFormatadas, user_id).catch((enrichErr) => {
+        console.warn('[detalharChat] enriquecer mensagens:', enrichErr?.message || enrichErr)
+        return mensagensFormatadas
+      }),
+    ])
+    mensagensFormatadas = enrichedMensagens
+    const whatsappInstanceMeta = safeWhatsappInstanceMeta(whatsappInstanceMetaMap.get(Number(conversa.whatsapp_instance_id)))
 
     const conversaFormatada = {
       ...conversa,
