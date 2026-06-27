@@ -823,8 +823,8 @@ function getSearchMessagesPageSize() {
 
 function getChatSearchScanLimit() {
   const raw = Number(process.env.CHAT_SEARCH_SCAN_LIMIT)
-  if (!Number.isFinite(raw) || raw <= 0) return 3000
-  return Math.min(Math.max(Math.floor(raw), 100), 10000)
+  if (!Number.isFinite(raw) || raw <= 0) return 2000
+  return Math.min(Math.max(Math.floor(raw), 100), 2000)
 }
 
 function getChatSearchIdLimit() {
@@ -4182,14 +4182,16 @@ exports.encerrarChat = async (req, res) => {
     if (error) return res.status(500).json({ error: error.message })
 
     const { resetOpcaoInvalidaLimitForConversa } = require('../services/chatbotTriageService')
-    await resetOpcaoInvalidaLimitForConversa(supabase, company_id, conversa_id)
-
-    const resultAt = await registrarAtendimento({
-      conversa_id,
-      company_id,
-      acao: 'encerrou',
-      de_usuario_id: user_id
-    })
+    // Paralelo: resetOpcaoInvalidaLimit não tem dependência do resultado de registrarAtendimento
+    const [, resultAt] = await Promise.all([
+      resetOpcaoInvalidaLimitForConversa(supabase, company_id, conversa_id),
+      registrarAtendimento({
+        conversa_id,
+        company_id,
+        acao: 'encerrou',
+        de_usuario_id: user_id
+      }),
+    ])
     if (resultAt.error) return res.status(500).json({ error: resultAt.error.message })
 
     const io = req.app.get('io')
@@ -5276,35 +5278,29 @@ exports.enviarMensagemChat = async (req, res) => {
 
     if (errMsg) return res.status(500).json({ error: errMsg.message })
 
-    let waitingAfterOutbound = null
-    try {
-      waitingAfterOutbound = await tryMarkWaitingAfterHumanOutbound({
+    // Paralelo: tryMarkWaiting + UPDATE conversas + UPDATE clientes são independentes entre si
+    const updateNow = new Date().toISOString()
+    const [waitingAfterOutbound] = await Promise.all([
+      tryMarkWaitingAfterHumanOutbound({
         company_id,
         conversa_id: Number(conversa_id),
         texto: String(texto || '').trim(),
         criado_em: msg.criado_em,
         autor_usuario_id: Number(user_id),
-      })
-    } catch (_) {}
-
-    // compatibilidade: marca como lida e atualiza ordem na lista
-    await supabase
-      .from('conversas')
-      .update({ lida: true, ultima_atividade: new Date().toISOString() })
-      .eq('company_id', Number(company_id))
-      .eq('id', Number(conversa_id))
-
-    // CRM: atualiza último contato do cliente (apenas conversas individuais)
-    try {
-      const isGroup = String(conversa?.tipo || '').toLowerCase() === 'grupo' || String(conversa?.telefone || '').includes('@g.us')
-      if (!isGroup && conversa?.cliente_id != null) {
-        await supabase
-          .from('clientes')
-          .update({ ultimo_contato: basePayload.criado_em, atualizado_em: new Date().toISOString() })
-          .eq('company_id', Number(company_id))
-          .eq('id', Number(conversa.cliente_id))
-      }
-    } catch (_) {}
+      }).catch(() => null),
+      supabase
+        .from('conversas')
+        .update({ lida: true, ultima_atividade: updateNow })
+        .eq('company_id', Number(company_id))
+        .eq('id', Number(conversa_id)),
+      isGroup || conversa?.cliente_id == null
+        ? Promise.resolve()
+        : supabase
+            .from('clientes')
+            .update({ ultimo_contato: basePayload.criado_em, atualizado_em: updateNow })
+            .eq('company_id', Number(company_id))
+            .eq('id', Number(conversa.cliente_id)),
+    ])
 
     if (io) {
       const basePayload = { ...msg, id: msg.id, conversa_id: msg.conversa_id ?? Number(conversa_id), status: 'sending', status_mensagem: 'sending', direcao: 'out', ...(clientTempId ? { client_temp_id: clientTempId } : {}) }
