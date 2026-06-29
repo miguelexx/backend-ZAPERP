@@ -69,7 +69,7 @@ describe('GET /api/chats pagination contract', () => {
       process.env.CHAT_FILTER_ID_LIMIT = '999999'
 
       expect(_test.getSearchMessagesPageSize()).toBe(5000)
-      expect(_test.getChatSearchScanLimit()).toBe(10000)
+      expect(_test.getChatSearchScanLimit()).toBe(2000)
       expect(_test.getChatSearchIdLimit()).toBe(3000)
       expect(_test.getChatFilterIdLimit()).toBe(5000)
 
