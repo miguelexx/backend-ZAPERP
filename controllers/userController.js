@@ -26,11 +26,11 @@ exports.getMe = async (req, res) => {
       const res2 = await supabase.from('usuarios').select('id, nome, email, perfil, departamento_id').eq('id', user_id).eq('company_id', company_id).maybeSingle()
       data = res2.data
       error = res2.error
-      if (error) return res.status(500).json({ error: error.message })
+      if (error) { console.error('[userController]', error?.message); return res.status(500).json({ error: 'Erro interno' }) }
       if (!data) return res.status(404).json({ error: 'Usuário não encontrado' })
       return res.json({ ...data, mostrar_nome_ao_cliente: true, crm_habilitado, separar_mensagens_disparadas })
     }
-    if (error) return res.status(500).json({ error: error.message })
+    if (error) { console.error('[userController]', error?.message); return res.status(500).json({ error: 'Erro interno' }) }
     if (!data) return res.status(404).json({ error: 'Usuário não encontrado' })
     const { obterDepartamentoIdsDoUsuario } = require('../helpers/usuarioDepartamentosHelper')
     const departamento_ids = await obterDepartamentoIdsDoUsuario(user_id, company_id, data)
@@ -64,7 +64,8 @@ exports.patchMe = async (req, res) => {
       if (String(error.message || '').includes('mostrar_nome_ao_cliente') || String(error.message || '').includes('does not exist')) {
         return res.status(400).json({ error: 'Preferência indisponível. Execute a migration: ALTER TABLE usuarios ADD COLUMN mostrar_nome_ao_cliente boolean DEFAULT true;' })
       }
-      return res.status(500).json({ error: error.message })
+      console.error('[userController] updatePreferencias', error?.message)
+      return res.status(500).json({ error: 'Erro interno' })
     }
     if (!data) return res.status(404).json({ error: 'Usuário não encontrado' })
     return res.json(data)
@@ -87,7 +88,7 @@ exports.listar = async (req, res) => {
       query = query.eq('ativo', true)
     }
     const { data, error } = await query
-    if (error) return res.status(500).json({ error: error.message })
+    if (error) { console.error('[userController]', error?.message); return res.status(500).json({ error: 'Erro interno' }) }
 
     const list = Array.isArray(data) ? data : []
 
@@ -204,7 +205,7 @@ exports.criar = async (req, res) => {
       })
       .select('id, nome, email, perfil, ativo, departamento_id')
       .single()
-    if (error) return res.status(500).json({ error: error.message })
+    if (error) { console.error('[userController]', error?.message); return res.status(500).json({ error: 'Erro interno' }) }
     if (data?.id && depIds.length > 0) {
       await supabase.from('usuario_departamentos').insert(
         depIds.map((depId) => ({ usuario_id: data.id, departamento_id: Number(depId), company_id }))
@@ -250,7 +251,7 @@ exports.atualizar = async (req, res) => {
       .eq('company_id', company_id)
       .select('id, nome, email, perfil, ativo, departamento_id, mostrar_nome_ao_cliente')
       .single()
-    if (error) return res.status(500).json({ error: error.message })
+    if (error) { console.error('[userController]', error?.message); return res.status(500).json({ error: 'Erro interno' }) }
     if (!data) return res.status(404).json({ error: 'Usuário não encontrado' })
     if (depIds !== undefined) {
       await supabase.from('usuario_departamentos').delete().eq('usuario_id', id).eq('company_id', company_id)
@@ -298,7 +299,7 @@ exports.resetarSenhaPorEmail = async (req, res) => {
       .update({ senha_hash: hash })
       .eq('id', usuario.id)
       .eq('company_id', company_id)
-    if (error) return res.status(500).json({ error: error.message })
+    if (error) { console.error('[userController]', error?.message); return res.status(500).json({ error: 'Erro interno' }) }
     return res.json({ ok: true })
   } catch (err) {
     console.error(err)
@@ -321,7 +322,7 @@ exports.redefinirSenha = async (req, res) => {
       .update({ senha_hash: hash })
       .eq('id', id)
       .eq('company_id', company_id)
-    if (error) return res.status(500).json({ error: error.message })
+    if (error) { console.error('[userController]', error?.message); return res.status(500).json({ error: 'Erro interno' }) }
     return res.json({ ok: true })
   } catch (err) {
     console.error(err)
@@ -346,7 +347,7 @@ exports.excluir = async (req, res) => {
       .update({ ativo: false })
       .eq('id', id)
       .eq('company_id', company_id)
-    if (error) return res.status(500).json({ error: error.message })
+    if (error) { console.error('[userController]', error?.message); return res.status(500).json({ error: 'Erro interno' }) }
     return res.json({ ok: true })
   } catch (err) {
     console.error(err)

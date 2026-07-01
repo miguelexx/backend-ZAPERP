@@ -182,7 +182,7 @@ exports.putConfig = async (req, res) => {
       .select()
       .single()
 
-    if (error) return res.status(500).json({ error: error.message })
+    if (error) { console.error('[iaController]', error?.message); return res.status(500).json({ error: 'Erro interno' }) }
     invalidateChatbotConfigCache(company_id)
     return res.json(data?.config ?? merged)
   } catch (err) {
@@ -238,7 +238,7 @@ exports.postRegra = async (req, res) => {
       .select()
       .single()
 
-    if (error) return res.status(500).json({ error: error.message })
+    if (error) { console.error('[iaController]', error?.message); return res.status(500).json({ error: 'Erro interno' }) }
     return res.status(201).json(data)
   } catch (err) {
     console.error(err)
@@ -271,7 +271,7 @@ exports.putRegra = async (req, res) => {
       .select()
       .single()
 
-    if (error) return res.status(500).json({ error: error.message })
+    if (error) { console.error('[iaController]', error?.message); return res.status(500).json({ error: 'Erro interno' }) }
     if (!data) return res.status(404).json({ error: 'Regra não encontrada' })
     return res.json(data)
   } catch (err) {
@@ -292,7 +292,7 @@ exports.deleteRegra = async (req, res) => {
       .eq('id', id)
       .eq('company_id', company_id)
 
-    if (error) return res.status(500).json({ error: error.message })
+    if (error) { console.error('[iaController]', error?.message); return res.status(500).json({ error: 'Erro interno' }) }
     return res.json({ ok: true })
   } catch (err) {
     console.error(err)
@@ -314,7 +314,7 @@ exports.testarAdminAtendimentoAlerta = async (req, res) => {
       .eq('company_id', company_id)
       .maybeSingle()
 
-    if (error) return res.status(500).json({ error: error.message })
+    if (error) { console.error('[iaController]', error?.message); return res.status(500).json({ error: 'Erro interno' }) }
 
     const cfg = parseIaConfigJson(row?.config)
     const alert = normalizeAdminAtendimentoAlerta(cfg.admin_atendimento_alerta || {})
@@ -363,7 +363,7 @@ exports.testarAdminAtendimentoAlerta = async (req, res) => {
     })
   } catch (err) {
     console.error('testarAdminAtendimentoAlerta:', err)
-    return res.status(500).json({ error: err.message || 'Erro ao enviar teste' })
+    return res.status(500).json({ error: 'Erro ao enviar teste' })
   }
 }
 

@@ -23,11 +23,11 @@ exports.registrarOptIn = async (req, res) => {
       )
       .select()
       .single()
-    if (error) return res.status(500).json({ error: error.message })
+    if (error) { console.error('[optInOptOutController]', error?.message); return res.status(500).json({ error: 'Erro interno' }) }
     return res.status(201).json(data)
   } catch (e) {
     console.error('[optInOptOutController] registrarOptIn:', e)
-    return res.status(500).json({ error: e?.message || 'Erro' })
+    return res.status(500).json({ error: 'Erro interno' })
   }
 }
 
@@ -43,10 +43,10 @@ exports.listarOptOut = async (req, res) => {
       .eq('company_id', company_id)
       .order('criado_em', { ascending: false })
       .limit(limit)
-    if (error) return res.status(500).json({ error: error.message })
+    if (error) { console.error('[optInOptOutController]', error?.message); return res.status(500).json({ error: 'Erro interno' }) }
     return res.json(data || [])
   } catch (e) {
     console.error('[optInOptOutController] listarOptOut:', e)
-    return res.status(500).json({ error: e?.message || 'Erro' })
+    return res.status(500).json({ error: 'Erro interno' })
   }
 }

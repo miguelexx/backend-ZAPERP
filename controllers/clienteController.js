@@ -430,7 +430,7 @@ exports.apagarTodosClientes = async (req, res) => {
     return res.status(200).json({ ok: true, apagados: qtd, mensagem: `${qtd} cliente(s) apagado(s).` });
   } catch (err) {
     console.error('[apagarTodosClientes]', err);
-    return res.status(500).json({ erro: err.message || 'Erro ao apagar clientes' });
+    return res.status(500).json({ erro: 'Erro interno' });
   }
 };
 
@@ -482,7 +482,7 @@ exports.excluirCliente = async (req, res) => {
     return res.status(200).json({ ok: true, mensagem: 'Cliente excluído' });
   } catch (err) {
     console.error(err);
-    return res.status(500).json({ erro: err.message || 'Erro ao excluir cliente' });
+    return res.status(500).json({ erro: 'Erro interno' });
   }
 };
 
@@ -584,7 +584,8 @@ exports.desvincularTag = async (req, res) => {
       if (msg.includes('cliente_tags') || msg.includes('does not exist')) {
         return res.status(400).json({ erro: 'Banco desatualizado: rode o supabase/RUN_IN_SUPABASE.sql (tabela cliente_tags).' })
       }
-      return res.status(500).json({ erro: error.message })
+      console.error('[clienteController] desvincularTag', error?.message)
+      return res.status(500).json({ erro: 'Erro interno' })
     }
     return res.status(200).json({ sucesso: true })
   } catch (e) {
@@ -622,7 +623,8 @@ exports.listarTagsCliente = async (req, res) => {
       if (msg.includes('cliente_tags') || msg.includes('does not exist')) {
         return res.status(400).json({ erro: 'Banco desatualizado: rode o supabase/RUN_IN_SUPABASE.sql (tabela cliente_tags).' })
       }
-      return res.status(500).json({ erro: error.message })
+      console.error('[clienteController] getTagsCliente', error?.message)
+      return res.status(500).json({ erro: 'Erro interno' })
     }
 
     const tagIds = (rows || []).map((r) => r.tag_id).filter((x) => x != null)

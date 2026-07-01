@@ -3858,4 +3858,10 @@ exports._test = {
   applyWhatsappInstanceFilterOrLegacy,
   selectSingleMensagemByWhatsappId,
   updateSingleMensagemByWhatsappId,
+  looksLikeBRPhoneDigits,
+  isGroupPayload,
+  pickGroupChatId,
+  getPayloads,
+  resolveConversationKeyFromZapi,
+  extractMessage,
 }

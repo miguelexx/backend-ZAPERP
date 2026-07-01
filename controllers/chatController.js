@@ -1808,7 +1808,7 @@ exports.listarConversas = async (req, res) => {
       error = result.error
     }
 
-    if (error) return res.status(500).json({ error: error.message })
+    if (error) { console.error('[chatController]', error?.message); return res.status(500).json({ error: 'Erro interno' }) }
 
     const rawSqlRows = Array.isArray(data) ? data : []
     const rawSqlHadMore = rawSqlRows.length > chatListPagination.limit
@@ -2957,7 +2957,7 @@ exports.criarGrupo = async (req, res) => {
       .select()
       .single()
 
-    if (error) return res.status(500).json({ error: error.message })
+    if (error) { console.error('[chatController]', error?.message); return res.status(500).json({ error: 'Erro interno' }) }
 
     emitirEventoEmpresaConversa(io, company_id, data.id, 'nova_conversa', data)
 
@@ -2989,7 +2989,7 @@ exports.criarComunidade = async (req, res) => {
       .select()
       .single()
 
-    if (error) return res.status(500).json({ error: error.message })
+    if (error) { console.error('[chatController]', error?.message); return res.status(500).json({ error: 'Erro interno' }) }
 
     emitirEventoEmpresaConversa(io, company_id, data.id, 'nova_conversa', data)
 
@@ -3274,7 +3274,8 @@ exports.patchConversaPrefs = async (req, res) => {
       if (String(error.message || '').includes('conversa_usuario_prefs') || String(error.code || '') === '42P01') {
         return res.status(503).json({ error: 'Aplique a migration conversa_usuario_prefs no Supabase e tente novamente.' })
       }
-      return res.status(500).json({ error: error.message })
+      console.error('[chatController] conversa_prefs', error?.message)
+      return res.status(500).json({ error: 'Erro interno' })
     }
 
     if (io) {
@@ -4073,7 +4074,7 @@ exports.buscarMensagensConversa = async (req, res) => {
       ;({ data: rows, error } = await fallbackQuery)
     }
 
-    if (error) return res.status(500).json({ error: error.message })
+    if (error) { console.error('[chatController]', error?.message); return res.status(500).json({ error: 'Erro interno' }) }
 
     let dbRows = Array.isArray(rows) ? rows : []
     const hasMoreRaw = dbRows.length > limit
@@ -4179,7 +4180,7 @@ exports.encerrarChat = async (req, res) => {
       .select()
       .single()
 
-    if (error) return res.status(500).json({ error: error.message })
+    if (error) { console.error('[chatController]', error?.message); return res.status(500).json({ error: 'Erro interno' }) }
 
     const { resetOpcaoInvalidaLimitForConversa } = require('../services/chatbotTriageService')
     // Paralelo: resetOpcaoInvalidaLimit não tem dependência do resultado de registrarAtendimento
@@ -4192,7 +4193,7 @@ exports.encerrarChat = async (req, res) => {
         de_usuario_id: user_id
       }),
     ])
-    if (resultAt.error) return res.status(500).json({ error: resultAt.error.message })
+    if (resultAt.error) { console.error('[chatController]', resultAt.error?.message); return res.status(500).json({ error: 'Erro interno' }) }
 
     const io = req.app.get('io')
     if (io) {
@@ -4330,7 +4331,7 @@ exports.reabrirChat = async (req, res) => {
         .maybeSingle())
     }
 
-    if (error) return res.status(500).json({ error: error.message })
+    if (error) { console.error('[chatController]', error?.message); return res.status(500).json({ error: 'Erro interno' }) }
 
     if (!data) {
       return res.status(409).json({ error: 'Esta conversa já foi reaberta por outra pessoa' })
@@ -4344,7 +4345,7 @@ exports.reabrirChat = async (req, res) => {
       acao: 'reabriu',
       de_usuario_id: user_id
     })
-    if (resultAt.error) return res.status(500).json({ error: resultAt.error.message })
+    if (resultAt.error) { console.error('[chatController]', resultAt.error?.message); return res.status(500).json({ error: 'Erro interno' }) }
 
     const io = req.app.get('io')
     if (io) {
@@ -4549,7 +4550,7 @@ exports.transferirChat = async (req, res) => {
 
     const { data, error } = await queryTransferir.select().maybeSingle()
 
-    if (error) return res.status(500).json({ error: error.message })
+    if (error) { console.error('[chatController]', error?.message); return res.status(500).json({ error: 'Erro interno' }) }
 
     if (!data) {
       return res.status(409).json({ error: 'Esta conversa já foi transferida ou assumida por outra pessoa' })
@@ -4563,7 +4564,7 @@ exports.transferirChat = async (req, res) => {
       para_usuario_id,
       observacao
     })
-    if (resultAt.error) return res.status(500).json({ error: resultAt.error.message })
+    if (resultAt.error) { console.error('[chatController]', resultAt.error?.message); return res.status(500).json({ error: 'Erro interno' }) }
 
     const io = req.app.get('io')
     if (io) {
@@ -4698,7 +4699,7 @@ exports.listarAtendentesDisponiveisConversa = async (req, res) => {
       .eq('ativo', true)
       .order('nome', { ascending: true })
 
-    if (error) return res.status(500).json({ error: error.message })
+    if (error) { console.error('[chatController]', error?.message); return res.status(500).json({ error: 'Erro interno' }) }
 
     return res.json((data || [])
       .filter((u) => ['atendente', 'supervisor', 'admin'].includes(String(u.perfil || '').toLowerCase()))
@@ -4735,7 +4736,8 @@ exports.listarAtendentesConversa = async (req, res) => {
 
     if (error) {
       if (isConversaAtendentesMissingTable(error)) return res.json([])
-      return res.status(500).json({ error: error.message })
+      console.error('[chatController] conversa_atendentes', error?.message)
+      return res.status(500).json({ error: 'Erro interno' })
     }
 
     const ids = [...new Set([
@@ -5073,7 +5075,8 @@ exports.getPixConfig = async (req, res) => {
       if (msg.includes('empresa_pix_config') || msg.includes('does not exist')) {
         return res.json({ configured: false, config: null })
       }
-      return res.status(500).json({ error: error.message })
+      console.error('[chatController] getPixConfig', error?.message)
+      return res.status(500).json({ error: 'Erro interno' })
     }
 
     if (!data) return res.json({ configured: false, config: null })
@@ -5111,7 +5114,8 @@ exports.putPixConfig = async (req, res) => {
           error: 'Funcionalidade Pix ainda não habilitada no banco. Aplique a migration 20260427233000_empresa_pix_config.sql e tente novamente.'
         })
       }
-      return res.status(500).json({ error: error.message })
+      console.error('[chatController] putPixConfig', error?.message)
+      return res.status(500).json({ error: 'Erro interno' })
     }
     return res.json({ ok: true, config: data })
   } catch (err) {
@@ -5137,7 +5141,8 @@ exports.enviarMensagemPix = async (req, res) => {
           error: 'Funcionalidade Pix ainda não habilitada no banco. Aplique a migration 20260427233000_empresa_pix_config.sql.'
         })
       }
-      return res.status(500).json({ error: error.message })
+      console.error('[chatController] enviarMensagemPix', error?.message)
+      return res.status(500).json({ error: 'Erro interno' })
     }
     if (!data) return res.status(400).json({ error: 'Pix não configurado para esta empresa.' })
 
@@ -6398,7 +6403,7 @@ exports.listarAtendimentos = async (req, res) => {
       .eq('conversa_id', cid)
       .order('criado_em', { ascending: true })
 
-    if (error) return res.status(500).json({ error: error.message })
+    if (error) { console.error('[chatController]', error?.message); return res.status(500).json({ error: 'Erro interno' }) }
 
     const { data: histRows } = await supabase
       .from('historico_atendimentos')
@@ -6483,7 +6488,7 @@ exports.puxarChatFila = async (req, res) => {
 
     const { data: conversa, error } = await query.maybeSingle()
 
-    if (error) return res.status(500).json({ error: error.message })
+    if (error) { console.error('[chatController]', error?.message); return res.status(500).json({ error: 'Erro interno' }) }
 
     if (!conversa) {
       return res.status(404).json({ error: 'Nenhuma conversa na fila' })
@@ -6541,7 +6546,7 @@ exports.puxarChatFila = async (req, res) => {
       para_usuario_id: user_id, // ✅ corrigido
       observacao: 'Puxou da fila'
     })
-    if (resultAt.error) return res.status(500).json({ error: resultAt.error.message })
+    if (resultAt.error) { console.error('[chatController]', resultAt.error?.message); return res.status(500).json({ error: 'Erro interno' }) }
 
     const io = req.app.get('io')
     if (io) {
@@ -6591,7 +6596,7 @@ exports.adicionarTagConversa = async (req, res) => {
       `)
       .single()
 
-    if (error) return res.status(500).json({ error: error.message })
+    if (error) { console.error('[chatController]', error?.message); return res.status(500).json({ error: 'Erro interno' }) }
 
     const io = req.app.get('io')
     if (io) {
@@ -6626,7 +6631,7 @@ exports.removerTagConversa = async (req, res) => {
       .eq('tag_id', tag_id)
       .eq('company_id', company_id)
 
-    if (error) return res.status(500).json({ error: error.message })
+    if (error) { console.error('[chatController]', error?.message); return res.status(500).json({ error: 'Erro interno' }) }
 
     const io = req.app.get('io')
     if (io) {
@@ -7767,7 +7772,7 @@ exports.finalizacaoAusenciaLoteAuth = async (req, res) => {
     return res.json(result)
   } catch (err) {
     console.error('finalizacaoAusenciaLoteAuth:', err)
-    return res.status(500).json({ error: err.message || 'Erro interno' })
+    return res.status(500).json({ error: 'Erro interno' })
   }
 }
 

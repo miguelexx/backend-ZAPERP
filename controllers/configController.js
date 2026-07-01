@@ -13,7 +13,7 @@ exports.getEmpresa = async (req, res) => {
       .select('*')
       .eq('id', company_id)
       .single()
-    if (error) return res.status(500).json({ error: error.message })
+    if (error) { console.error('[configController]', error?.message); return res.status(500).json({ error: 'Erro interno' }) }
     if (!data) return res.status(404).json({ error: 'Empresa não encontrada' })
     return res.json(data)
   } catch (err) {
@@ -78,7 +78,8 @@ exports.putEmpresa = async (req, res) => {
       if (msg.includes('nome_fonte')) {
         return res.status(400).json({ error: 'Banco desatualizado: aplique a migration 20260618000000_empresa_nome_fonte.sql (coluna nome_fonte).' })
       }
-      return res.status(500).json({ error: error.message })
+      console.error('[configController] updateEmpresa', error?.message)
+      return res.status(500).json({ error: 'Erro interno' })
     }
     return res.json(data)
   } catch (err) {
@@ -107,7 +108,8 @@ exports.uploadLogoEmpresa = async (req, res) => {
 
     if (error) {
       try { fs.unlinkSync(file.path) } catch (_) {}
-      return res.status(500).json({ error: error.message })
+      console.error('[configController] uploadLogo', error?.message)
+      return res.status(500).json({ error: 'Erro interno' })
     }
 
     return res.json({ logo_url, empresa: data })
@@ -147,7 +149,7 @@ exports.deleteLogoEmpresa = async (req, res) => {
       .select()
       .single()
 
-    if (error) return res.status(500).json({ error: error.message })
+    if (error) { console.error('[configController]', error?.message); return res.status(500).json({ error: 'Erro interno' }) }
     return res.json({ logo_url: null, empresa: data })
   } catch (err) {
     console.error(err)
@@ -159,7 +161,7 @@ exports.deleteLogoEmpresa = async (req, res) => {
 exports.getPlanos = async (req, res) => {
   try {
     const { data, error } = await supabase.from('planos').select('*').order('id')
-    if (error) return res.status(500).json({ error: error.message })
+    if (error) { console.error('[configController]', error?.message); return res.status(500).json({ error: 'Erro interno' }) }
     return res.json(data || [])
   } catch (err) {
     console.error(err)
@@ -204,7 +206,7 @@ exports.postEmpresasWhatsapp = async (req, res) => {
       }, { onConflict: 'phone_number_id' })
       .select()
       .single()
-    if (error) return res.status(500).json({ error: error.message })
+    if (error) { console.error('[configController]', error?.message); return res.status(500).json({ error: 'Erro interno' }) }
     return res.status(201).json(data)
   } catch (err) {
     console.error(err)
@@ -222,7 +224,7 @@ exports.deleteEmpresasWhatsapp = async (req, res) => {
       .delete()
       .eq('id', id)
       .eq('company_id', company_id)
-    if (error) return res.status(500).json({ error: error.message })
+    if (error) { console.error('[configController]', error?.message); return res.status(500).json({ error: 'Erro interno' }) }
     return res.json({ ok: true })
   } catch (err) {
     console.error(err)
@@ -252,7 +254,8 @@ exports.getWebhookLogs = async (req, res) => {
     const { data, error, count } = await q
     if (error) {
       if (String(error.message || '').includes('does not exist')) return res.json({ items: [], total: 0 })
-      return res.status(500).json({ error: error.message })
+      console.error('[configController] webhookLogs', error?.message)
+      return res.status(500).json({ error: 'Erro interno' })
     }
     return res.json({ items: data || [], total: count ?? 0 })
   } catch (err) {
@@ -272,7 +275,7 @@ exports.getWebhookLogDetail = async (req, res) => {
       .eq('id', id)
       .or(`company_id.eq.${company_id},company_id.is.null`)
       .maybeSingle()
-    if (error) return res.status(500).json({ error: error.message })
+    if (error) { console.error('[configController]', error?.message); return res.status(500).json({ error: 'Erro interno' }) }
     if (!data) return res.status(404).json({ error: 'Log não encontrado' })
     return res.json(data)
   } catch (err) {

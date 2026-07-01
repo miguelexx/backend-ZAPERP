@@ -176,7 +176,7 @@ exports.timeoutInatividadeChatbot = async (req, res) => {
     return res.json({ ok: true, processadas: totalProcessadas })
   } catch (err) {
     console.error('timeoutInatividadeChatbot:', err)
-    return res.status(500).json({ error: err.message })
+    return res.status(500).json({ error: 'Erro interno' })
   }
 }
 
@@ -256,7 +256,7 @@ exports.timeoutInatividade = async (req, res) => {
     return res.json({ ok: true, processadas: totalProcessadas })
   } catch (err) {
     console.error('timeoutInatividade:', err)
-    return res.status(500).json({ error: err.message })
+    return res.status(500).json({ error: 'Erro interno' })
   }
 }
 
@@ -303,7 +303,7 @@ exports.finalizacaoAusenciaCliente = async (req, res) => {
     })
   } catch (err) {
     console.error('finalizacaoAusenciaCliente:', err)
-    return res.status(500).json({ error: err.message })
+    return res.status(500).json({ error: 'Erro interno' })
   }
 }
 
@@ -329,7 +329,7 @@ exports.finalizacaoAusenciaLote = async (req, res) => {
     return res.json(result)
   } catch (err) {
     console.error('finalizacaoAusenciaLote:', err)
-    return res.status(500).json({ error: err.message })
+    return res.status(500).json({ error: 'Erro interno' })
   }
 }
 
@@ -352,7 +352,7 @@ exports.vencimentoPagamentoFinanceiro = async (req, res) => {
     return res.json(result)
   } catch (err) {
     console.error('vencimentoPagamentoFinanceiro:', err)
-    return res.status(500).json({ error: err.message })
+    return res.status(500).json({ error: 'Erro interno' })
   }
 }
 
@@ -376,7 +376,7 @@ exports.atendimentoSemResposta = async (req, res) => {
     })
   } catch (err) {
     console.error('atendimentoSemResposta:', err)
-    return res.status(500).json({ error: err.message })
+    return res.status(500).json({ error: 'Erro interno' })
   }
 }
 
@@ -400,7 +400,7 @@ exports.adminAtendimentoAlerta = async (req, res) => {
     })
   } catch (err) {
     console.error('adminAtendimentoAlerta:', err)
-    return res.status(500).json({ error: err.message })
+    return res.status(500).json({ error: 'Erro interno' })
   }
 }
 

@@ -843,7 +843,7 @@ exports.listarDepartamentos = async (req, res) => {
       .select('id, nome, criado_em')
       .eq('company_id', company_id)
       .order('nome')
-    if (error) return res.status(500).json({ error: error.message })
+    if (error) { console.error('[dashboardController]', error?.message); return res.status(500).json({ error: 'Erro interno' }) }
     return res.json(data || [])
   } catch (err) {
     console.error(err)
@@ -861,7 +861,7 @@ exports.criarDepartamento = async (req, res) => {
       .insert({ company_id, nome: nome.trim() })
       .select()
       .single()
-    if (error) return res.status(500).json({ error: error.message })
+    if (error) { console.error('[dashboardController]', error?.message); return res.status(500).json({ error: 'Erro interno' }) }
     return res.status(201).json(data)
   } catch (err) {
     console.error(err)
@@ -882,7 +882,7 @@ exports.atualizarDepartamento = async (req, res) => {
       .eq('company_id', company_id)
       .select()
       .single()
-    if (error) return res.status(500).json({ error: error.message })
+    if (error) { console.error('[dashboardController]', error?.message); return res.status(500).json({ error: 'Erro interno' }) }
     if (!data) return res.status(404).json({ error: 'Departamento não encontrado' })
     return res.json(data)
   } catch (err) {
@@ -951,7 +951,7 @@ exports.excluirDepartamento = async (req, res) => {
       .delete()
       .eq('id', depId)
       .eq('company_id', company_id)
-    if (error) return res.status(500).json({ error: error.message })
+    if (error) { console.error('[dashboardController]', error?.message); return res.status(500).json({ error: 'Erro interno' }) }
     return res.json({ ok: true })
   } catch (err) {
     console.error(err)
@@ -997,7 +997,7 @@ exports.listarGruposDepartamento = async (req, res) => {
       .eq('tipo', 'grupo')
       .order('nome_grupo', { ascending: true, nullsFirst: false })
 
-    if (error) return res.status(500).json({ error: error.message })
+    if (error) { console.error('[dashboardController]', error?.message); return res.status(500).json({ error: 'Erro interno' }) }
 
     const rows = (grupos || [])
       .filter(isGroupRow)
@@ -1136,7 +1136,7 @@ exports.listarRespostasSalvas = async (req, res) => {
       q = q.is('departamento_id', null)
     }
     const { data, error } = await q
-    if (error) return res.status(500).json({ error: error.message })
+    if (error) { console.error('[dashboardController]', error?.message); return res.status(500).json({ error: 'Erro interno' }) }
 
     const list = Array.isArray(data) ? data : []
 
@@ -1216,7 +1216,7 @@ exports.criarRespostaSalva = async (req, res) => {
       })
       .select()
       .single()
-    if (error) return res.status(500).json({ error: error.message })
+    if (error) { console.error('[dashboardController]', error?.message); return res.status(500).json({ error: 'Erro interno' }) }
     return res.status(201).json(data)
   } catch (err) {
     console.error(err)
@@ -1267,7 +1267,7 @@ exports.atualizarRespostaSalva = async (req, res) => {
       .eq('company_id', company_id)
       .select()
       .single()
-    if (error) return res.status(500).json({ error: error.message })
+    if (error) { console.error('[dashboardController]', error?.message); return res.status(500).json({ error: 'Erro interno' }) }
     if (!data) return res.status(404).json({ error: 'Resposta não encontrada' })
     return res.json(data)
   } catch (err) {
@@ -1295,7 +1295,7 @@ exports.excluirRespostaSalva = async (req, res) => {
       .delete()
       .eq('id', id)
       .eq('company_id', company_id)
-    if (error) return res.status(500).json({ error: error.message })
+    if (error) { console.error('[dashboardController]', error?.message); return res.status(500).json({ error: 'Erro interno' }) }
     return res.json({ ok: true })
   } catch (err) {
     console.error(err)
@@ -1435,7 +1435,7 @@ exports.relatorioMensagens = async (req, res) => {
     }
 
     const { data: rows, error } = await q
-    if (error) return res.status(500).json({ error: error.message })
+    if (error) { console.error('[dashboardController]', error?.message); return res.status(500).json({ error: 'Erro interno' }) }
 
     const byDay = {}
     for (const r of rows || []) {
@@ -1646,7 +1646,7 @@ exports.setSlaConfig = async (req, res) => {
     })
   } catch (err) {
     console.error(err)
-    return res.status(500).json({ error: err.message || 'Erro ao salvar config SLA' })
+    return res.status(500).json({ error: 'Erro ao salvar config SLA' })
   }
 }
 

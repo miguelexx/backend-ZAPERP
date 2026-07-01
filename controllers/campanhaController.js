@@ -23,7 +23,7 @@ exports.listar = async (req, res) => {
     return res.json(campanhas)
   } catch (e) {
     console.error('[campanhaController] listar:', e)
-    return res.status(500).json({ error: e?.message || 'Erro ao listar campanhas' })
+    return res.status(500).json({ error: 'Erro interno' })
   }
 }
 
@@ -45,7 +45,7 @@ exports.obter = async (req, res) => {
     return res.json(camp)
   } catch (e) {
     console.error('[campanhaController] obter:', e)
-    return res.status(500).json({ error: e?.message || 'Erro' })
+    return res.status(500).json({ error: 'Erro interno' })
   }
 }
 
@@ -175,6 +175,6 @@ exports.listarEnvios = async (req, res) => {
     return res.json(envios)
   } catch (e) {
     console.error('[campanhaController] listarEnvios:', e)
-    return res.status(500).json({ error: e?.message || 'Erro ao listar envios' })
+    return res.status(500).json({ error: 'Erro interno' })
   }
 }
