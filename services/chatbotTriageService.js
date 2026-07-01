@@ -202,6 +202,61 @@ async function sendWithThrottle(sendMessage, telefone, msg, opts, company_id, in
 }
 
 /** Estrutura padrão do chatbot_triage em ia_config.config */
+function isTraceableWhatsappMessageId(value) {
+  if (!value) return false
+  const s = String(value).trim()
+  if (!s || s === 'null' || s === 'undefined' || s === 'false' || s === '0') return false
+  if (s.includes('@')) return true
+  if (/^[A-F0-9]{12,}$/i.test(s)) return true
+  if (s.length > 20) return true
+  return false
+}
+
+function buildBotOutboundPayload({ conversa_id, texto, company_id, sendResult, opts = {} }) {
+  const ok = typeof sendResult === 'boolean' ? sendResult : sendResult?.ok === true
+  const messageId = typeof sendResult === 'object' && sendResult?.messageId ? String(sendResult.messageId).trim() : null
+  const hasTraceableId = isTraceableWhatsappMessageId(messageId)
+  const whatsappInstanceId = opts?.whatsappInstanceId ?? opts?.whatsapp_instance_id ?? null
+  const status = ok ? (hasTraceableId ? 'sent' : 'pending') : 'erro'
+  const statusMensagem = ok ? (hasTraceableId ? 'sent' : 'sending') : 'failed'
+  const payload = {
+    conversa_id,
+    texto,
+    direcao: 'out',
+    company_id,
+    status,
+    status_mensagem: statusMensagem,
+  }
+  if (hasTraceableId) payload.whatsapp_id = messageId
+  if (whatsappInstanceId) payload.whatsapp_instance_id = whatsappInstanceId
+  return payload
+}
+
+function logBotSendResult(context, sendResult, opts = {}) {
+  const ok = typeof sendResult === 'boolean' ? sendResult : sendResult?.ok === true
+  const messageId = typeof sendResult === 'object' && sendResult?.messageId ? String(sendResult.messageId).trim() : null
+  const hasTraceableId = isTraceableWhatsappMessageId(messageId)
+  const error = typeof sendResult === 'object' ? (sendResult?.error || sendResult?.blockedBy || null) : null
+  const base = {
+    ...context,
+    whatsapp_instance_id: opts?.whatsappInstanceId ?? opts?.whatsapp_instance_id ?? null,
+    provider_message_id: messageId || null,
+  }
+  if (!ok) {
+    console.warn('[chatbotTriage] envio automatico falhou', {
+      ...base,
+      erro: String(error || 'desconhecido').slice(0, 200),
+    })
+    return
+  }
+  if (!hasTraceableId) {
+    console.warn('[chatbotTriage] envio automatico aceito sem ID rastreavel', {
+      ...base,
+      status_gravado: 'pending',
+    })
+  }
+}
+
 const DEFAULT_CHATBOT_CONFIG = {
   enabled: false,
   welcomeMessage: '',
@@ -1171,16 +1226,17 @@ async function processIncomingMessage(ctx) {
           })
           return { handled: true }
         }
-        await sendWithThrottle(sendMessage, telefone, config.mensagemForaHorario, opts, company_id, config.intervaloEnvioSegundos)
+        const sendResultFora = await sendWithThrottle(sendMessage, telefone, config.mensagemForaHorario, opts, company_id, config.intervaloEnvioSegundos)
+        logBotSendResult({ company_id, conversa_id, tipo: 'fora_horario' }, sendResultFora, opts)
         const { data: rowFora } = await sb
           .from('mensagens')
-          .insert({
+          .insert(buildBotOutboundPayload({
             conversa_id,
             texto: config.mensagemForaHorario,
-            direcao: 'out',
             company_id,
-            status: 'sent',
-          })
+            sendResult: sendResultFora,
+            opts,
+          }))
           .select('*')
           .single()
         await emitAfterBotMsg(rowFora)
@@ -1257,7 +1313,7 @@ async function processIncomingMessage(ctx) {
     })
 
     try {
-      await sendWithThrottle(
+      const sendResultConf = await sendWithThrottle(
         sendMessage,
         telefone,
         msgToSend,
@@ -1266,15 +1322,16 @@ async function processIncomingMessage(ctx) {
         config.intervaloEnvioSegundos,
         { bypassChatbotInterval: true, sendOptions: { skipProviderDelay: true } }
       )
+      logBotSendResult({ company_id, conversa_id, tipo: 'opcao_valida' }, sendResultConf, opts)
       const { data: rowConf } = await sb
         .from('mensagens')
-        .insert({
+        .insert(buildBotOutboundPayload({
           conversa_id,
           texto: msgToSend,
-          direcao: 'out',
           company_id,
-          status: 'sent',
-        })
+          sendResult: sendResultConf,
+          opts,
+        }))
         .select('*')
         .single()
       await emitAfterBotMsg(rowConf)
@@ -1296,7 +1353,7 @@ async function processIncomingMessage(ctx) {
     const msg = welcomeFull || menuOnly
     if (msg) {
       try {
-        await sendWithThrottle(
+        const sendResultReab = await sendWithThrottle(
           sendMessage,
           telefone,
           msg,
@@ -1305,15 +1362,16 @@ async function processIncomingMessage(ctx) {
           config.intervaloEnvioSegundos,
           { bypassChatbotInterval: true, sendOptions: { skipProviderDelay: true } }
         )
+        logBotSendResult({ company_id, conversa_id, tipo: 'menu_reenviado' }, sendResultReab, opts)
         const { data: rowReab } = await sb
           .from('mensagens')
-          .insert({
+          .insert(buildBotOutboundPayload({
             conversa_id,
             texto: msg,
-            direcao: 'out',
             company_id,
-            status: 'sent',
-          })
+            sendResult: sendResultReab,
+            opts,
+          }))
           .select('*')
           .single()
         await emitAfterBotMsg(rowReab)
@@ -1404,16 +1462,17 @@ async function processIncomingMessage(ctx) {
       const motivo = conversaReabertaAposFinalizacao ? 'conversa_reaberta' : 'primeira_mensagem'
       console.log('[chatbotTriage] enviando menu de boas-vindas', { conversa_id, company_id, motivo })
       try {
-        await sendWithThrottle(sendMessage, telefone, msg, opts, company_id, config.intervaloEnvioSegundos)
+        const sendResultMenu = await sendWithThrottle(sendMessage, telefone, msg, opts, company_id, config.intervaloEnvioSegundos)
+        logBotSendResult({ company_id, conversa_id, tipo: 'menu_enviado', motivo }, sendResultMenu, opts)
         const { data: rowMenu } = await sb
           .from('mensagens')
-          .insert({
+          .insert(buildBotOutboundPayload({
             conversa_id,
             texto: msg,
-            direcao: 'out',
             company_id,
-            status: 'sent',
-          })
+            sendResult: sendResultMenu,
+            opts,
+          }))
           .select('*')
           .single()
         await emitAfterBotMsg(rowMenu)
@@ -1551,16 +1610,17 @@ async function processIncomingMessage(ctx) {
   })
 
   try {
-    await sendWithThrottle(sendMessage, telefone, fullInvalid, opts, company_id, config.intervaloEnvioSegundos)
+    const sendResultInvalid = await sendWithThrottle(sendMessage, telefone, fullInvalid, opts, company_id, config.intervaloEnvioSegundos)
+    logBotSendResult({ company_id, conversa_id, tipo: 'opcao_invalida' }, sendResultInvalid, opts)
     const { data: rowInv } = await sb
       .from('mensagens')
-      .insert({
+      .insert(buildBotOutboundPayload({
         conversa_id,
         texto: fullInvalid,
-        direcao: 'out',
         company_id,
-        status: 'sent',
-      })
+        sendResult: sendResultInvalid,
+        opts,
+      }))
       .select('*')
       .single()
     await emitAfterBotMsg(rowInv)

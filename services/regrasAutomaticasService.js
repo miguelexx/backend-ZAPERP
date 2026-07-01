@@ -17,6 +17,32 @@ function isWithinBusinessHours(empresa, now = new Date()) {
   return minutosAgora >= minutosIni || minutosAgora <= minutosFim
 }
 
+function isTraceableWhatsappMessageId(value) {
+  if (!value) return false
+  const s = String(value).trim()
+  if (!s || s === 'null' || s === 'undefined' || s === 'false' || s === '0') return false
+  if (s.includes('@')) return true
+  if (/^[A-F0-9]{12,}$/i.test(s)) return true
+  if (s.length > 20) return true
+  return false
+}
+
+function buildOutboundPayload({ conversa_id, texto, company_id, sendResult, whatsappInstanceId }) {
+  const ok = typeof sendResult === 'boolean' ? sendResult : sendResult?.ok === true
+  const messageId = typeof sendResult === 'object' && sendResult?.messageId ? String(sendResult.messageId).trim() : null
+  const hasTraceableId = isTraceableWhatsappMessageId(messageId)
+  return {
+    conversa_id,
+    texto,
+    direcao: 'out',
+    company_id,
+    status: ok ? (hasTraceableId ? 'sent' : 'pending') : 'erro',
+    status_mensagem: ok ? (hasTraceableId ? 'sent' : 'sending') : 'failed',
+    ...(hasTraceableId ? { whatsapp_id: messageId } : {}),
+    ...(whatsappInstanceId ? { whatsapp_instance_id: whatsappInstanceId } : {}),
+  }
+}
+
 /**
  * Processa regras automáticas.
  * @param {object} ctx
@@ -72,7 +98,22 @@ async function processarRegras(ctx) {
       if (!telefone) continue
 
       try {
-        await sendMessage(telefone, resposta, { sendOrigin: 'regra_automatica' })
+        const sendResult = await sendMessage(telefone, resposta, { sendOrigin: 'regra_automatica' })
+        const sendOk = typeof sendResult === 'boolean' ? sendResult : sendResult?.ok === true
+        const { data: rowMensagem, error: insertMsgError } = await supabaseClient.from('mensagens').insert(buildOutboundPayload({
+          conversa_id,
+          texto: resposta,
+          company_id,
+          sendResult,
+          whatsappInstanceId: ctx.whatsapp_instance_id || ctx.whatsappInstanceId || null,
+        })).select('*').single()
+        if (insertMsgError) {
+          console.warn('[regrasAutomaticas] Erro ao salvar mensagem enviada:', insertMsgError.message || insertMsgError)
+        } else if (rowMensagem && typeof ctx.emitMensagemRealtime === 'function') {
+          await ctx.emitMensagemRealtime(rowMensagem).catch((e) => {
+            console.warn('[regrasAutomaticas] Erro ao emitir mensagem enviada:', e?.message || e)
+          })
+        }
         await supabaseClient.from('bot_logs').insert({
           company_id,
           conversa_id,
@@ -101,7 +142,7 @@ async function processarRegras(ctx) {
             }).catch(() => {})
           }
         }
-        return { matched: true, respostaEnviada: true }
+        return { matched: true, respostaEnviada: sendOk }
       } catch (e) {
         console.warn('[regrasAutomaticas] Erro ao enviar:', e?.message || e)
       }

@@ -10,12 +10,12 @@ describe('UltraMsg provider instance resolution', () => {
     delete process.env.ULTRAMSG_BASE_URL
   })
 
-  function mockProviderDeps(instances) {
-    const fetchWithRetry = jest.fn(async () => ({
+  function mockProviderDeps(instances, fetchImpl = null) {
+    const fetchWithRetry = jest.fn(fetchImpl || (async () => ({
       ok: true,
       status: 200,
       text: async () => JSON.stringify({ id: 'msg-1', sent: true }),
-    }))
+    })))
 
     jest.doMock('../services/whatsappConfigService', () => ({
       invalidateEmpresaWhatsappConfigCache: jest.fn(),
@@ -107,5 +107,50 @@ describe('UltraMsg provider instance resolution', () => {
 
     expect(result.ok).toBe(false)
     expect(deps.fetchWithRetry).not.toHaveBeenCalled()
+  })
+
+  test('sendAudio rejeita HTTP 200 sem aceite explicito do provedor', async () => {
+    mockProviderDeps({
+      defaultByCompany: {
+        10: { id: 1, company_id: 10, provider: 'ultramsg', instance_id: '111', instance_token: 'default-token', ativo: true },
+      },
+      byId: {},
+    }, async () => ({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({ message: 'queued internally' }),
+    }))
+
+    const provider = require('../services/providers/ultramsg')
+    const result = await provider.sendAudio('34999999999', 'https://cdn.example.com/audio.mp3', {
+      companyId: 10,
+      returnDetails: true,
+    })
+
+    expect(result.ok).toBe(false)
+    expect(result.messageId).toBeNull()
+  })
+
+  test('sendVoice rejeita HTTP 200 sem aceite explicito quando fallback esta desabilitado', async () => {
+    mockProviderDeps({
+      defaultByCompany: {
+        10: { id: 1, company_id: 10, provider: 'ultramsg', instance_id: '111', instance_token: 'default-token', ativo: true },
+      },
+      byId: {},
+    }, async () => ({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({ message: 'queued internally' }),
+    }))
+
+    const provider = require('../services/providers/ultramsg')
+    const result = await provider.sendVoice('34999999999', 'https://cdn.example.com/audio.ogg', {
+      companyId: 10,
+      returnDetails: true,
+      disableAudioFallback: true,
+    })
+
+    expect(result.ok).toBe(false)
+    expect(result.messageId).toBeNull()
   })
 })

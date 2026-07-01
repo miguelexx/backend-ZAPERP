@@ -60,6 +60,16 @@ const WEBHOOK_MSG_SELECT = 'id, conversa_id, company_id, whatsapp_instance_id, w
 const STATUS_RANK = { pending: 0, sent: 1, delivered: 2, read: 3, played: 4 }
 
 /** URL pública remota (CDN UltraMsg) — diferente de /uploads/ gravado pelo CRM no envio. */
+function isTraceableWhatsappMessageId(value) {
+  if (!value) return false
+  const s = String(value).trim()
+  if (!s || s === 'null' || s === 'undefined' || s === 'false' || s === '0') return false
+  if (s.includes('@')) return true
+  if (/^[A-F0-9]{12,}$/i.test(s)) return true
+  if (s.length > 20) return true
+  return false
+}
+
 function isRemoteMediaUrl(url) {
   const u = String(url || '').trim().toLowerCase()
   return u.startsWith('http://') || u.startsWith('https://')
@@ -2315,6 +2325,17 @@ exports.receberZapi = async (req, res) => {
         }
         let skipChatbot = false
         const chatbotHints = {}
+        const ioAutomacao = req.app.get('io')
+        const emitAutomacaoRealtime =
+          ioAutomacao &&
+          (async (mensagemRow) =>
+            emitBotMensagemRealtime({
+              io: ioAutomacao,
+              supabase,
+              company_id,
+              conversa_id,
+              mensagem: mensagemRow,
+            }))
 
         // Opt-out (complementar): PARAR, SAIR, DESCADASTRAR — antes do chatbot
         if (isEnabled(FLAGS.FEATURE_OPT_OUT_WEBHOOK)) {
@@ -2326,7 +2347,26 @@ exports.receberZapi = async (req, res) => {
             texto: texto || '',
           })
           if (optResult.isOptOut && optResult.mensagemConfirmacao) {
-            await sendMessage(phoneParaChatbot, optResult.mensagemConfirmacao, { sendOrigin: 'opt_out_confirmacao' })
+            const optSendResult = await sendMessage(phoneParaChatbot, optResult.mensagemConfirmacao, { sendOrigin: 'opt_out_confirmacao' })
+            const optMessageId = optSendResult?.messageId ? String(optSendResult.messageId).trim() : null
+            const optTraceable = isTraceableWhatsappMessageId(optMessageId)
+            const { data: optMensagemRow, error: optMensagemError } = await supabase.from('mensagens').insert({
+              conversa_id,
+              texto: optResult.mensagemConfirmacao,
+              direcao: 'out',
+              company_id,
+              status: optSendResult?.ok ? (optTraceable ? 'sent' : 'pending') : 'erro',
+              status_mensagem: optSendResult?.ok ? (optTraceable ? 'sent' : 'sending') : 'failed',
+              ...(optTraceable ? { whatsapp_id: optMessageId } : {}),
+              ...(whatsapp_instance_id ? { whatsapp_instance_id } : {}),
+            }).select('*').single()
+            if (optMensagemError) {
+              console.warn('[optOut] erro ao salvar confirmacao enviada:', optMensagemError.message || optMensagemError)
+            } else if (optMensagemRow && emitAutomacaoRealtime) {
+              await emitAutomacaoRealtime(optMensagemRow).catch((e) => {
+                console.warn('[optOut] erro ao emitir confirmacao enviada:', e?.message || e)
+              })
+            }
             skipChatbot = true
           }
         }
@@ -2339,7 +2379,9 @@ exports.receberZapi = async (req, res) => {
             conversa_id,
             texto: texto || '',
             telefone: phoneParaChatbot,
+            whatsapp_instance_id,
             sendMessage,
+            emitMensagemRealtime: emitAutomacaoRealtime || null,
           })
           if (regrasResult.matched) skipChatbot = true
         }

@@ -86,7 +86,7 @@ exports.timeoutInatividadeChatbot = async (req, res) => {
       // Conversas não fechadas, excluindo grupos
       const { data: conversas } = await supabase
         .from('conversas')
-        .select('id, telefone, tipo, status_atendimento')
+        .select('id, telefone, tipo, status_atendimento, whatsapp_instance_id')
         .eq('company_id', company_id)
         .neq('status_atendimento', 'fechada')
         .neq('status_atendimento', 'aguardando_cliente')
@@ -138,16 +138,33 @@ exports.timeoutInatividadeChatbot = async (req, res) => {
           const resultSend = await provider.sendText(telefone, mensagemEncerramento, {
             companyId: company_id,
             conversaId: conv.id,
+            whatsappInstanceId: conv.whatsapp_instance_id || undefined,
             sendOrigin: 'timeout_inatividade_chatbot',
           })
 
-          const statusMsg = resultSend?.ok ? 'sent' : 'erro'
+          const ok = resultSend?.ok === true
+          const messageId = resultSend?.messageId ? String(resultSend.messageId).trim() : null
+          const hasTraceableId = !!messageId && (messageId.includes('@') || /^[A-F0-9]{12,}$/i.test(messageId) || messageId.length > 20)
+          const statusMsg = ok ? (hasTraceableId ? 'sent' : 'pending') : 'erro'
+          if (!ok || !hasTraceableId) {
+            console.warn('[timeoutInatividadeChatbot] envio sem confirmacao rastreavel', {
+              company_id,
+              conversa_id: conv.id,
+              whatsapp_instance_id: conv.whatsapp_instance_id || null,
+              status: statusMsg,
+              provider_message_id: messageId || null,
+              erro: ok ? null : String(resultSend?.error || 'desconhecido').slice(0, 200),
+            })
+          }
           await supabase.from('mensagens').insert({
             conversa_id: conv.id,
             texto: mensagemEncerramento,
             direcao: 'out',
             company_id,
-            status: statusMsg
+            status: statusMsg,
+            status_mensagem: ok ? (hasTraceableId ? 'sent' : 'sending') : 'failed',
+            ...(hasTraceableId ? { whatsapp_id: messageId } : {}),
+            ...(conv.whatsapp_instance_id ? { whatsapp_instance_id: conv.whatsapp_instance_id } : {}),
           })
 
           const { error: updErr } = await supabase

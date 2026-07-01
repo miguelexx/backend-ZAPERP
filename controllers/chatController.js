@@ -4239,7 +4239,10 @@ exports.encerrarChat = async (req, res) => {
                   whatsappInstanceId: whatsappInstanceId || undefined,
                   sendOrigin: 'mensagem_finalizacao_atendimento',
                 })
-                const statusMsg = resultSend?.ok ? 'sent' : 'erro'
+                const finalizacaoMessageId = resultSend?.messageId ? String(resultSend.messageId).trim() : null
+                const finalizacaoTraceable = isRealWhatsAppId(finalizacaoMessageId)
+                const statusMsg = resultSend?.ok ? (finalizacaoTraceable ? 'sent' : 'pending') : 'erro'
+                const statusMensagem = resultSend?.ok ? (finalizacaoTraceable ? 'sent' : 'sending') : 'failed'
                 const { data: msgInsert, error: errInsert } = await supabase
                   .from('mensagens')
                   .insert({
@@ -4248,6 +4251,8 @@ exports.encerrarChat = async (req, res) => {
                     direcao: 'out',
                     company_id,
                     status: statusMsg,
+                    status_mensagem: statusMensagem,
+                    ...(finalizacaoTraceable ? { whatsapp_id: finalizacaoMessageId } : {}),
                     ...(whatsappInstanceId ? { whatsapp_instance_id: whatsappInstanceId } : {}),
                     autor_usuario_id: user_id
                   })
@@ -5472,12 +5477,13 @@ exports.enviarMensagemChat = async (req, res) => {
         // NÃO determina se o envio foi bem-sucedido — isso depende apenas de ok.
         const hasValidId = isRealWhatsAppId(waMessageId)
         const providerError = (typeof result === 'object') ? (result?.error || result?.blockedBy || null) : null
+        const acceptedWithoutTrace = ok && !hasValidId
 
-        // Regra: status='sent' quando provider aceitou a mensagem (ok=true).
-        //        status='erro' apenas quando provider recusou/falhou (ok=false).
+        // Regra: sent exige aceite do provider e ID rastreavel.
+        // Aceite sem ID rastreavel permanece pending/sending para evitar mensagem fantasma.
         // O whatsapp_id só é salvo quando o ID retornado é um WhatsApp ID rastreável.
-        const nextStatus = ok ? 'sent' : 'erro'
-        const nextStatusMensagem = ok ? 'sent' : 'failed'
+        const nextStatus = ok ? (hasValidId ? 'sent' : 'pending') : 'erro'
+        const nextStatusMensagem = ok ? (hasValidId ? 'sent' : 'sending') : 'failed'
 
         if (ok) {
           console.log('[ENVIO_MANUAL] ✅ Sucesso', {
@@ -5490,11 +5496,10 @@ exports.enviarMensagemChat = async (req, res) => {
             provider_message_id: waMessageId || null,
             whatsapp_id_salvo: hasValidId ? waMessageId : null,
           })
-          if (!hasValidId) {
+          if (acceptedWithoutTrace) {
             // Provider aceitou a mensagem, mas o ID retornado não é rastreável como WhatsApp ID.
             // Isso é normal quando UltraMsg retorna ID interno de fila (ex: "35096").
-            // A mensagem FOI enviada — o status 'sent' é correto.
-            // O rastreamento de entrega (ACK) pode não funcionar sem whatsapp_id.
+            // Não marcar como sent sem ID rastreável; o ACK pode chegar depois via webhook/reconciliação.
             console.warn('[ENVIO_MANUAL] ℹ️ Provider aceitou envio sem WhatsApp ID rastreável', {
               company_id,
               conversa_id,
@@ -5502,7 +5507,7 @@ exports.enviarMensagemChat = async (req, res) => {
               telefone_destino: String(telefoneParaEnvio || '').slice(-12),
               whatsapp_instance_id: whatsappInstanceId,
               provider_id_recebido: waMessageId || 'NULL',
-              nota: 'Mensagem marcada como sent. ACK de entrega pode não ser rastreado.',
+              nota: 'Mensagem mantida como pending/sending ate chegar ACK rastreavel ou retry confirmar falha.',
             })
           }
         } else {
@@ -5572,13 +5577,15 @@ exports.enviarMensagemChat = async (req, res) => {
     // Não retornar mensagem completa — evita duplicação no frontend (API + socket).
     // A mensagem chega via socket nova_mensagem (única fonte de verdade para exibição).
     const sendOk = !!telefoneParaEnvio && (typeof sendResult === 'boolean' ? sendResult : sendResult?.ok === true)
+    const sendWaMessageId = typeof sendResult === 'object' && sendResult?.messageId ? String(sendResult.messageId).trim() : null
+    const sendTraceable = sendOk && isRealWhatsAppId(sendWaMessageId)
     const motivoErro = sendResult?.error || sendResult?.blockedBy
     return res.json({
       ok: true,
       id: msg.id,
       conversa_id: Number(conversa_id),
       ...(clientTempId ? { client_temp_id: clientTempId } : {}),
-      ...(sendOk ? { status: 'sent' } : {
+      ...(sendTraceable ? { status: 'sent', whatsapp_id: sendWaMessageId } : sendOk ? { status: 'pending' } : {
         status: sendResult?.blockedBy ? 'blocked' : 'erro',
         ...(motivoErro ? { motivo: motivoErro } : {})
       })
@@ -5842,15 +5849,6 @@ exports.enviarContatoWhatsapp = async (req, res) => {
       })
     } catch (_) {}
 
-    const { nome: usuarioNome } = await getUsuarioParaEnvioCliente(supabase, company_id, user_id)
-    if (usuarioNome) {
-      await provider.sendText(telefoneParaEnvio, prefixarParaCliente('Segue contato abaixo:', usuarioNome), {
-        companyId: company_id,
-        conversaId: conversa_id,
-        whatsappInstanceId: whatsappInstanceId || undefined,
-        sendOrigin: 'atendimento_humano_contato',
-      })
-    }
     const result = await provider.sendContact(telefoneParaEnvio, contactName, contactPhone, {
       companyId: company_id,
       conversaId: Number(conversa_id),
@@ -5862,15 +5860,17 @@ exports.enviarContatoWhatsapp = async (req, res) => {
     const waMessageId =
       typeof result === 'object' && result?.messageId ? String(result.messageId).trim() : null
 
-    const nextStatus = ok ? 'sent' : 'erro'
+    const hasTraceableContactId = isRealWhatsAppId(waMessageId)
+    const nextStatus = ok ? (hasTraceableContactId ? 'sent' : 'pending') : 'erro'
+    const nextStatusMensagem = ok ? (hasTraceableContactId ? 'sent' : 'sending') : 'erro'
     await supabase
       .from('mensagens')
-      .update({ status: nextStatus, status_mensagem: nextStatus, ...(isRealWhatsAppId(waMessageId) ? { whatsapp_id: waMessageId } : {}) })
+      .update({ status: nextStatus, status_mensagem: nextStatusMensagem, ...(hasTraceableContactId ? { whatsapp_id: waMessageId } : {}) })
       .eq('company_id', company_id)
       .eq('id', msg.id)
 
     if (io) {
-      const payload = await enrichMensagemComAutorUsuario(supabase, company_id, { ...msg, status: nextStatus, whatsapp_id: waMessageId || null })
+      const payload = await enrichMensagemComAutorUsuario(supabase, company_id, { ...msg, status: nextStatus, status_mensagem: nextStatusMensagem, whatsapp_id: hasTraceableContactId ? waMessageId : null })
       emitirEventoEmpresaConversa(io, company_id, conversa_id, io.EVENTS?.NOVA_MENSAGEM || 'nova_mensagem', payload)
       const convPayload = aplicarAguardandoClienteNoPayload({
         id: Number(conversa_id),
@@ -6044,16 +6044,18 @@ exports.enviarLocalizacao = async (req, res) => {
 
     const ok = result?.ok === true
     const waMessageId = result?.messageId ? String(result.messageId).trim() : null
-    const nextStatus = ok ? 'sent' : 'erro'
+    const hasTraceableLocationId = isRealWhatsAppId(waMessageId)
+    const nextStatus = ok ? (hasTraceableLocationId ? 'sent' : 'pending') : 'erro'
+    const nextStatusMensagem = ok ? (hasTraceableLocationId ? 'sent' : 'sending') : 'erro'
 
     await supabase
       .from('mensagens')
-      .update({ status: nextStatus, status_mensagem: nextStatus, ...(isRealWhatsAppId(waMessageId) ? { whatsapp_id: waMessageId } : {}) })
+      .update({ status: nextStatus, status_mensagem: nextStatusMensagem, ...(hasTraceableLocationId ? { whatsapp_id: waMessageId } : {}) })
       .eq('company_id', company_id)
       .eq('id', msg.id)
 
     if (io) {
-      const payload = await enrichMensagemComAutorUsuario(supabase, company_id, { ...msg, status: nextStatus, whatsapp_id: waMessageId || null, location_meta: msg.location_meta || location_meta })
+      const payload = await enrichMensagemComAutorUsuario(supabase, company_id, { ...msg, status: nextStatus, status_mensagem: nextStatusMensagem, whatsapp_id: hasTraceableLocationId ? waMessageId : null, location_meta: msg.location_meta || location_meta })
       emitirEventoEmpresaConversa(io, company_id, conversa_id, io.EVENTS?.NOVA_MENSAGEM || 'nova_mensagem', payload)
       const convPayload = aplicarAguardandoClienteNoPayload({
         id: Number(conversa_id),
@@ -6077,7 +6079,7 @@ exports.enviarLocalizacao = async (req, res) => {
       id: msg.id,
       conversa_id: Number(conversa_id),
       location_meta: msg.location_meta || location_meta,
-      ...(sendOk ? { status: 'sent' } : { status: telefoneParaEnvio ? 'erro' : 'pending' })
+      ...(sendOk && hasTraceableLocationId ? { status: 'sent', whatsapp_id: waMessageId } : sendOk ? { status: 'pending' } : { status: telefoneParaEnvio ? 'erro' : 'pending' })
     })
   } catch (err) {
     console.error('Erro ao enviar localização:', err)
@@ -6159,15 +6161,17 @@ exports.enviarLigacaoWhatsapp = async (req, res) => {
     const waMessageId =
       typeof result === 'object' && result?.messageId ? String(result.messageId).trim() : null
 
-    const nextStatus = ok ? 'sent' : 'erro'
+    const hasTraceableCallId = isRealWhatsAppId(waMessageId)
+    const nextStatus = ok ? (hasTraceableCallId ? 'sent' : 'pending') : 'erro'
+    const nextStatusMensagem = ok ? (hasTraceableCallId ? 'sent' : 'sending') : 'erro'
     await supabase
       .from('mensagens')
-      .update({ status: nextStatus, status_mensagem: nextStatus, ...(isRealWhatsAppId(waMessageId) ? { whatsapp_id: waMessageId } : {}) })
+      .update({ status: nextStatus, status_mensagem: nextStatusMensagem, ...(hasTraceableCallId ? { whatsapp_id: waMessageId } : {}) })
       .eq('company_id', company_id)
       .eq('id', msg.id)
 
     if (io) {
-      const payload = await enrichMensagemComAutorUsuario(supabase, company_id, { ...msg, status: nextStatus, whatsapp_id: waMessageId || null })
+      const payload = await enrichMensagemComAutorUsuario(supabase, company_id, { ...msg, status: nextStatus, status_mensagem: nextStatusMensagem, whatsapp_id: hasTraceableCallId ? waMessageId : null })
       emitirEventoEmpresaConversa(io, company_id, conversa_id, io.EVENTS?.NOVA_MENSAGEM || 'nova_mensagem', payload)
       emitirConversaAtualizada(io, company_id, conversa_id, { id: Number(conversa_id) })
     }
@@ -6999,7 +7003,8 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
         conversaId: conversa_id,
         whatsappInstanceId: whatsappInstanceId || undefined,
         sendOrigin: 'atendimento_humano_midia',
-        ...(isAudioTipo ? { returnDetails: true, audioMeta: { originalName: fileWork.originalname, mimeType: fileWork.mimetype } } : {}),
+        returnDetails: true,
+        ...(isAudioTipo ? { audioMeta: { originalName: fileWork.originalname, mimeType: fileWork.mimetype } } : {}),
       }
       const promise =
         tipo === 'voice' && provider.sendVoice
@@ -7026,7 +7031,9 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
             : (result || { ok: false, error: 'resultado_provider_vazio', messageId: null })
           const ok = normalizedResult.ok === true
           const waMessageId = normalizedResult?.messageId ? String(normalizedResult.messageId).trim() : null
-          const nextStatus = ok ? 'sent' : 'erro'
+          const hasTraceableMediaId = isRealWhatsAppId(waMessageId)
+          const nextStatus = ok ? (hasTraceableMediaId ? 'sent' : 'pending') : 'erro'
+          const nextStatusMensagem = ok ? (hasTraceableMediaId ? 'sent' : 'sending') : 'erro'
           
           if (!ok) {
             console.warn('WhatsApp: falha ao enviar mídia', {
@@ -7043,8 +7050,8 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
             .from('mensagens')
             .update({ 
               status: nextStatus,
-              status_mensagem: nextStatus,
-              ...(isRealWhatsAppId(waMessageId) ? { whatsapp_id: waMessageId } : {})
+              status_mensagem: nextStatusMensagem,
+              ...(hasTraceableMediaId ? { whatsapp_id: waMessageId } : {})
             })
             .eq('company_id', company_id)
             .eq('id', msg.id)
@@ -7055,8 +7062,8 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
               mensagem_id: msg.id, 
               conversa_id: Number(conversa_id), 
               status: nextStatus, 
-              status_mensagem: nextStatus,
-              ...(waMessageId ? { whatsapp_id: waMessageId } : {})
+              status_mensagem: nextStatusMensagem,
+              ...(hasTraceableMediaId ? { whatsapp_id: waMessageId } : {})
             }
             io2.to(`empresa_${company_id}`).to(`conversa_${conversa_id}`).to(`usuario_${user_id}`).emit(io2.EVENTS?.STATUS_MENSAGEM || 'status_mensagem', payload)
           }
@@ -7408,6 +7415,7 @@ async function encaminharUmaMensagemParaConversa(ctx) {
         conversaId: conversa_id,
         whatsappInstanceId: whatsappInstanceId || undefined,
         sendOrigin: 'encaminhamento_atendimento',
+        returnDetails: true,
       }
 
       switch (tipoOriginal) {
@@ -7559,13 +7567,16 @@ async function encaminharUmaMensagemParaConversa(ctx) {
   const ok = resultadoEnvio === true || resultadoEnvio?.ok === true
   const waMessageId = (typeof resultadoEnvio === 'object' && resultadoEnvio?.messageId)
     ? String(resultadoEnvio.messageId).trim() : null
-  const nextStatus = ok ? 'sent' : 'erro'
+  const hasTraceableForwardId = isRealWhatsAppId(waMessageId)
+  const nextStatus = ok ? (hasTraceableForwardId ? 'sent' : 'pending') : 'erro'
+  const nextStatusMensagem = ok ? (hasTraceableForwardId ? 'sent' : 'sending') : 'erro'
 
   await supabase
     .from('mensagens')
     .update({
       status: nextStatus,
-      ...(isRealWhatsAppId(waMessageId) ? { whatsapp_id: waMessageId } : {}),
+      status_mensagem: nextStatusMensagem,
+      ...(hasTraceableForwardId ? { whatsapp_id: waMessageId } : {}),
     })
     .eq('company_id', company_id)
     .eq('id', novaMensagem.id)
@@ -7580,7 +7591,8 @@ async function encaminharUmaMensagemParaConversa(ctx) {
     const msgParaEmissao = {
       ...novaMensagem,
       status: nextStatus,
-      whatsapp_id: waMessageId || null,
+      status_mensagem: nextStatusMensagem,
+      whatsapp_id: hasTraceableForwardId ? waMessageId : null,
       encaminhado: true,
     }
     const payload = await enrichMensagemComAutorUsuario(supabase, company_id, msgParaEmissao)
@@ -7595,7 +7607,8 @@ async function encaminharUmaMensagemParaConversa(ctx) {
     mensagem: {
       ...novaMensagem,
       status: nextStatus,
-      whatsapp_id: waMessageId || null,
+      status_mensagem: nextStatusMensagem,
+      whatsapp_id: hasTraceableForwardId ? waMessageId : null,
       encaminhado: true,
     },
     enviado_whatsapp: ok,

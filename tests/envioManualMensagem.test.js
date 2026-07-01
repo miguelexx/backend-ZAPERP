@@ -5,12 +5,13 @@
  *  1. Contato comum — envio bem-sucedido com ID hex WhatsApp
  *  2. Contato URA/empresa — não há bloqueio por tipo de contato
  *  3. Retorno com ID hexadecimal (BAE543FE1CE17AFA)
- *  4. Retorno com ID numérico curto ("35096") — ok=true → sent, sem whatsapp_id rastreável
- *  5. Retorno sucesso sem ID — ok=true → sent
+ *  4. Retorno com ID numérico curto ("35096") — ok=true → pending, sem whatsapp_id rastreável
+ *  5. Retorno sucesso sem ID — ok=true → pending
  *  6. Erro real do provedor — ok=false → erro
  *
  * Regra fundamental:
- *   status='sent'  ← provider aceitou (ok=true)
+ *   status='sent'  ← provider aceitou (ok=true) e retornou ID rastreável
+ *   status='pending' ← provider aceitou sem ID rastreável
  *   status='erro'  ← provider recusou/falhou (ok=false), exceção ou sem telefone
  */
 
@@ -123,10 +124,10 @@ describe('Lógica de nextStatus no envio manual', () => {
       ? String(providerResult.messageId).trim()
       : null
     const hasValidId = isRealWhatsAppId(waMessageId)
-    // Regra: status depende apenas de ok (aceitação pelo provider), não do formato do ID
+    // Regra: sent exige aceite do provider e ID rastreável; aceite sem rastreio fica pending.
     return {
-      nextStatus: ok ? 'sent' : 'erro',
-      nextStatusMensagem: ok ? 'sent' : 'failed',
+      nextStatus: ok ? (hasValidId ? 'sent' : 'pending') : 'erro',
+      nextStatusMensagem: ok ? (hasValidId ? 'sent' : 'sending') : 'failed',
       waMessageId,
       hasValidId,
     }
@@ -174,12 +175,12 @@ describe('Lógica de nextStatus no envio manual', () => {
 
   // ── Cenário 4: ID numérico curto ─────────────────────────────────────────
   describe('Cenário 4: Retorno com ID numérico curto ("35096")', () => {
-    test('ok=true + ID numérico curto → status=sent (provider aceitou)', () => {
+    test('ok=true + ID numérico curto → status=pending (sem rastreio)', () => {
       // ID "35096" é um ID interno de fila do UltraMsg, não um WhatsApp ID.
-      // Mas o provider ACEITOU a mensagem → status deve ser 'sent', não 'erro'.
+      // Sem ID rastreável, a mensagem não pode aparecer como enviada normal.
       const r = resolveNextStatus({ ok: true, messageId: '35096' })
-      expect(r.nextStatus).toBe('sent')
-      expect(r.nextStatusMensagem).toBe('sent')
+      expect(r.nextStatus).toBe('pending')
+      expect(r.nextStatusMensagem).toBe('sending')
     })
 
     test('ok=true + ID numérico curto → hasValidId=false (não salva como whatsapp_id rastreável)', () => {
@@ -191,21 +192,21 @@ describe('Lógica de nextStatus no envio manual', () => {
 
   // ── Cenário 5: Sucesso sem ID ─────────────────────────────────────────────
   describe('Cenário 5: Retorno sucesso sem ID', () => {
-    test('ok=true + messageId=null → status=sent (provider aceitou)', () => {
+    test('ok=true + messageId=null → status=pending (sem rastreio)', () => {
       const r = resolveNextStatus({ ok: true, messageId: null })
-      expect(r.nextStatus).toBe('sent')
-      expect(r.nextStatusMensagem).toBe('sent')
+      expect(r.nextStatus).toBe('pending')
+      expect(r.nextStatusMensagem).toBe('sending')
       expect(r.hasValidId).toBe(false)
     })
 
-    test('ok=true sem messageId → status=sent', () => {
+    test('ok=true sem messageId → status=pending', () => {
       const r = resolveNextStatus({ ok: true })
-      expect(r.nextStatus).toBe('sent')
+      expect(r.nextStatus).toBe('pending')
     })
 
-    test('ok=true + messageId="" → status=sent', () => {
+    test('ok=true + messageId="" → status=pending', () => {
       const r = resolveNextStatus({ ok: true, messageId: '' })
-      expect(r.nextStatus).toBe('sent')
+      expect(r.nextStatus).toBe('pending')
     })
   })
 
@@ -234,21 +235,21 @@ describe('Lógica de nextStatus no envio manual', () => {
     })
   })
 
-  // ── Invariante: se provider aceitou, nunca deve ser erro ─────────────────
-  describe('Invariante: ok=true → nextStatus sempre sent', () => {
+  // ── Invariante: provider aceito sem ID rastreável não deve parecer enviado normal ──
+  describe('Invariante: ok=true exige ID rastreável para sent', () => {
     const casos = [
-      { desc: 'com ID hex', result: { ok: true, messageId: 'BAE543FE1CE17AFA' } },
-      { desc: 'com ID numérico curto', result: { ok: true, messageId: '35096' } },
-      { desc: 'sem ID', result: { ok: true, messageId: null } },
-      { desc: 'com ID vazio', result: { ok: true, messageId: '' } },
-      { desc: 'com ID "null" string', result: { ok: true, messageId: 'null' } },
-      { desc: 'true booleano', result: true },
+      { desc: 'com ID hex', result: { ok: true, messageId: 'BAE543FE1CE17AFA' }, expected: 'sent' },
+      { desc: 'com ID numérico curto', result: { ok: true, messageId: '35096' }, expected: 'pending' },
+      { desc: 'sem ID', result: { ok: true, messageId: null }, expected: 'pending' },
+      { desc: 'com ID vazio', result: { ok: true, messageId: '' }, expected: 'pending' },
+      { desc: 'com ID "null" string', result: { ok: true, messageId: 'null' }, expected: 'pending' },
+      { desc: 'true booleano', result: true, expected: 'pending' },
     ]
 
-    casos.forEach(({ desc, result: provResult }) => {
-      test(`"${desc}" → nextStatus='sent'`, () => {
+    casos.forEach(({ desc, result: provResult, expected }) => {
+      test(`"${desc}" → nextStatus='${expected}'`, () => {
         const r = resolveNextStatus(provResult)
-        expect(r.nextStatus).toBe('sent')
+        expect(r.nextStatus).toBe(expected)
       })
     })
   })

@@ -62,6 +62,83 @@ function maybeInvalidateCacheOnBadToken(companyId, data, text) {
   )
 }
 
+function isFalseLike(value) {
+  if (value === false || value === 0) return true
+  const s = String(value ?? '').trim().toLowerCase()
+  return s === 'false' || s === '0' || s === 'no' || s === 'erro' || s === 'error' || s === 'failed'
+}
+
+function isTrueLike(value) {
+  if (value === true || value === 1) return true
+  const s = String(value ?? '').trim().toLowerCase()
+  return s === 'true' || s === '1' || s === 'yes' || s === 'ok' || s === 'success' || s === 'sent'
+}
+
+function firstNonEmpty(...values) {
+  for (const value of values) {
+    if (value == null) continue
+    const s = String(value).trim()
+    if (s) return s
+  }
+  return null
+}
+
+function extractUltraMsgMessageId(data) {
+  if (!data || typeof data !== 'object') return null
+  return firstNonEmpty(
+    data.id,
+    data.messageId,
+    data.message_id,
+    data.msgId,
+    data.msg_id,
+    data.wamid,
+    data.whatsapp_id,
+    data?.data?.id,
+    data?.data?.messageId
+  )
+}
+
+function normalizeUltraMsgSendResult({ httpOk, status, data, text, fallbackError }) {
+  const messageId = extractUltraMsgMessageId(data)
+  const explicitError =
+    data && typeof data === 'object'
+      ? firstNonEmpty(
+          data.error && !isFalseLike(data.error) ? data.error : null,
+          data.errors,
+          data.exception,
+          isFalseLike(data.sent) ? data.message || 'UltraMsg retornou sent=false' : null,
+          isFalseLike(data.success) ? data.message || 'UltraMsg retornou success=false' : null,
+          isFalseLike(data.status) ? data.message || `UltraMsg retornou status=${data.status}` : null
+        )
+      : null
+  const acceptedByBody =
+    !!messageId ||
+    (data && typeof data === 'object' && (
+      isTrueLike(data.sent) ||
+      isTrueLike(data.success) ||
+      isTrueLike(data.ok) ||
+      isTrueLike(data.status)
+    ))
+
+  if (!httpOk || explicitError || !acceptedByBody) {
+    return {
+      ok: false,
+      messageId: messageId || null,
+      httpStatus: status ?? null,
+      error: String(explicitError || fallbackError || text || `HTTP ${status || 'erro'} sem aceite do provedor`).slice(0, 500),
+      rawResponse: data ?? text ?? null,
+    }
+  }
+
+  return {
+    ok: true,
+    messageId: messageId || null,
+    httpStatus: status ?? null,
+    error: null,
+    rawResponse: data ?? text ?? null,
+  }
+}
+
 // ========== Camada centralizada UltraMsg (contrato oficial) ==========
 
 /** Constrói base URL: https://api.ultramsg.com/instance{id} — UltraMsg exige prefixo "instance" */
@@ -628,19 +705,26 @@ async function sendText(phone, message, opts = {}) {
     meta: buildSendMeta('text', nums[0], opts, { textLength: msg.length }),
   })
   // UltraMsg retorna HTTP 200 mesmo em caso de erro (ex.: token inválido) — checar body também
-  const bodyError = data?.error || (!data?.id && !data?.sent && !data?.messageId && data?.message)
+  const normalized = normalizeUltraMsgSendResult({
+    httpOk: ok,
+    status,
+    data,
+    text,
+    fallbackError: data?.message,
+  })
+  const bodyError = !normalized.ok
   if (!ok || bodyError) {
-    let errMsg = String(data?.error || data?.message || text?.slice(0, 200) || `HTTP ${status}`)
+    let errMsg = String(normalized.error || data?.error || data?.message || text?.slice(0, 200) || `HTTP ${status}`)
     if (ultramsgResponseIndicatesBadInstanceToken(data, text)) {
       errMsg += ` — Atualize instance_token em empresa_zapi (token atual do painel UltraMSG, company_id=${cfg.companyId}).`
     }
     console.warn('❌ UltraMsg sendText falhou:', nums[0]?.slice(-12), status, errMsg.slice(0, 200), '| token:', maskToken(cfg.token))
-    return { ok: false, messageId: null, error: errMsg }
+    return { ...normalized, ok: false, error: errMsg }
   }
-  const msgId = data?.id ?? data?.messageId ?? null
+  const msgId = normalized.messageId
   const numLog = nums[0] ? (String(nums[0]).replace(/\D/g, '').length >= 13 ? String(nums[0]).slice(-13) : String(nums[0]).slice(-12)) : ''
   console.log('✅ UltraMsg mensagem enviada:', numLog || nums[0], msgId ? `id=${String(msgId).slice(0, 14)}...` : '')
-  return { ok: true, messageId: msgId ? String(msgId) : null }
+  return normalized
 }
 
 /**
@@ -659,26 +743,34 @@ async function sendLink(phone, payload, opts = {}) {
  * Envia imagem por URL.
  */
 async function sendImage(phone, url, caption = '', opts = {}) {
+  const returnDetails = opts?.returnDetails === true
   await awaitSendDelay(opts?.companyId ?? opts?.company_id)
   const cfg = await resolveConfig(opts)
-  if (!cfg) return false
+  if (!cfg) return returnDetails ? { ok: false, messageId: null, error: 'Configuração UltraMsg indisponível' } : false
   const nums = phoneCandidatesForSend(phone)
-  if (!nums.length || !url) return false
+  if (!nums.length || !url) return returnDetails ? { ok: false, messageId: null, error: 'Destino ou URL da imagem inválido' } : false
   const captionTrim = String(caption || '').trim().slice(0, CAPTION_MAX_LEN)
   const body = { to: nums[0], image: String(url).trim() }
   if (captionTrim) body.caption = captionTrim
-  const { ok, data, text } = await postJson({
+  const { ok, status, data, text } = await postJson({
     ...cfg,
     endpoint: '/messages/image',
     body,
     meta: buildSendMeta('image', nums[0], opts, { textLength: captionTrim.length }),
   })
-  if (!ok) {
+  const normalized = normalizeUltraMsgSendResult({
+    httpOk: ok,
+    status,
+    data,
+    text,
+    fallbackError: data?.message,
+  })
+  if (!normalized.ok) {
     console.warn('❌ UltraMsg sendImage falhou:', nums[0]?.slice(-12), String(text || data?.error || '').slice(0, 150), '| token:', maskToken(cfg.token))
-    return false
+    return returnDetails ? normalized : false
   }
   console.log('✅ UltraMsg imagem enviada:', nums[0]?.slice(-12))
-  return true
+  return returnDetails ? normalized : true
 }
 
 /**
@@ -762,7 +854,14 @@ async function sendAudio(phone, audioUrl, opts = {}) {
     meta: buildSendMeta('audio', nums[0], opts),
   })
   
-  // UltraMsg retorna sent:"false" ou error em body mesmo com HTTP 200
+  // UltraMsg pode responder HTTP 200 com erro no body ou sem aceite explícito.
+  const normalized = normalizeUltraMsgSendResult({
+    httpOk: ok,
+    status,
+    data,
+    text,
+    fallbackError: data?.message,
+  })
   const explicitError = data?.error && data.error !== false && data.error !== 'false'
   const sentFailed = data?.sent === 'false' || data?.sent === false
   
@@ -780,8 +879,8 @@ async function sendAudio(phone, audioUrl, opts = {}) {
     })
   }
   
-  if (!ok || explicitError || sentFailed) {
-    const errRaw = data?.error || (sentFailed ? 'sent:false' : null) || String(text || '').slice(0, 200) || `HTTP ${status}`
+  if (!normalized.ok) {
+    const errRaw = normalized.error || data?.error || (sentFailed ? 'sent:false' : null) || String(text || '').slice(0, 200) || `HTTP ${status}`
     const errMsg = typeof errRaw === 'object' ? JSON.stringify(errRaw) : String(errRaw)
     console.warn('❌ UltraMsg sendAudio falhou:', {
       to: nums[0]?.slice(-12),
@@ -794,10 +893,10 @@ async function sendAudio(phone, audioUrl, opts = {}) {
       response: { data: data || null, text: String(text || '').slice(0, 300) },
       token: maskToken(cfg.token),
     })
-    return returnDetails ? { ok: false, error: errMsg } : false
+    return returnDetails ? { ...normalized, ok: false, error: errMsg } : false
   }
   console.log('✅ UltraMsg áudio enviado:', nums[0]?.slice(-12))
-  return returnDetails ? { ok: true, messageId: data?.id ?? data?.messageId ?? null } : true
+  return returnDetails ? normalized : true
 }
 
 /**
@@ -821,22 +920,28 @@ async function sendFile(phone, url, fileName = '', opts = {}) {
   // Não usar o nome do arquivo como legenda visível no WhatsApp.
   const captionForApi = captionTrim || ' '
   const body = { to: nums[0], document: String(url).trim(), filename, caption: captionForApi }
-  const { ok, data, text } = await postJson({
+  const { ok, status, data, text } = await postJson({
     ...cfg,
     endpoint: '/messages/document',
     body,
     meta: buildSendMeta('file', nums[0], opts, { textLength: captionTrim.length }),
   })
-  const bodyError = data?.error || (!data?.id && !data?.sent && !data?.messageId && data?.message)
-  if (!ok || bodyError) {
-    let errMsg = String(data?.error || data?.message || text?.slice(0, 200) || `HTTP ${ok ? 200 : 'erro'}`)
+  const normalized = normalizeUltraMsgSendResult({
+    httpOk: ok,
+    status,
+    data,
+    text,
+    fallbackError: data?.message,
+  })
+  if (!normalized.ok) {
+    let errMsg = String(normalized.error || data?.error || data?.message || text?.slice(0, 200) || `HTTP ${status}`)
     if (isFileExtensionError(errMsg) || isFileExtensionError(data?.error)) {
       errMsg = `Extensão não suportada pelo WhatsApp (.${safeExt}). Tente ZIP, PDF ou outro formato.`
     }
     console.warn('❌ UltraMsg sendFile falhou:', nums[0]?.slice(-12), filename?.slice(-40), errMsg.slice(0, 200))
     return returnDetails ? { ok: false, messageId: null, error: errMsg } : false
   }
-  const msgId = data?.id ?? data?.messageId ?? null
+  const msgId = normalized.messageId
   console.log('✅ UltraMsg arquivo enviado:', nums[0]?.slice(-12), filename?.slice(-30))
   return returnDetails ? { ok: true, messageId: msgId ? String(msgId) : null, error: null } : true
 }
@@ -856,19 +961,25 @@ async function sendVideo(phone, videoUrl, caption = '', opts = {}) {
   const captionTrim = String(caption || '').trim().slice(0, CAPTION_MAX_LEN)
   const body = { to: nums[0], video: String(videoUrl).trim() }
   if (captionTrim) body.caption = captionTrim
-  const { ok, data, text } = await postJson({
+  const { ok, status, data, text } = await postJson({
     ...cfg,
     endpoint: '/messages/video',
     body,
     meta: buildSendMeta('video', nums[0], opts, { textLength: captionTrim.length }),
   })
-  const bodyError = data?.error || (!data?.id && !data?.sent && !data?.messageId && data?.message)
-  if (!ok || bodyError) {
-    const errMsg = String(data?.error || data?.message || text?.slice(0, 200) || `HTTP ${ok ? 200 : 'erro'}`)
+  const normalized = normalizeUltraMsgSendResult({
+    httpOk: ok,
+    status,
+    data,
+    text,
+    fallbackError: data?.message,
+  })
+  if (!normalized.ok) {
+    const errMsg = String(normalized.error || data?.error || data?.message || text?.slice(0, 200) || `HTTP ${status}`)
     console.warn('❌ UltraMsg sendVideo falhou:', nums[0]?.slice(-12), errMsg.slice(0, 200))
     return returnDetails ? { ok: false, messageId: null, error: errMsg } : false
   }
-  const msgId = data?.id ?? data?.messageId ?? null
+  const msgId = normalized.messageId
   console.log('✅ UltraMsg vídeo enviado:', nums[0]?.slice(-12), msgId ? `id=${String(msgId).slice(0, 14)}...` : '')
   return returnDetails ? { ok: true, messageId: msgId ? String(msgId) : null, error: null } : true
 }
@@ -877,21 +988,29 @@ async function sendVideo(phone, videoUrl, caption = '', opts = {}) {
  * Envia figurinha (sticker) por URL.
  */
 async function sendSticker(phone, sticker, opts = {}) {
+  const returnDetails = opts?.returnDetails === true
   await awaitSendDelay(opts?.companyId ?? opts?.company_id)
   const cfg = await resolveConfig(opts)
-  if (!cfg) return false
+  if (!cfg) return returnDetails ? { ok: false, messageId: null, error: 'Configuração UltraMsg indisponível' } : false
   const nums = phoneCandidatesForSend(phone)
-  if (!nums.length || !sticker) return false
+  if (!nums.length || !sticker) return returnDetails ? { ok: false, messageId: null, error: 'Destino ou sticker inválido' } : false
   const body = { to: nums[0], sticker: String(sticker).trim() }
-  const { ok } = await postJson({
+  const { ok, status, data, text } = await postJson({
     ...cfg,
     endpoint: '/messages/sticker',
     body,
     meta: buildSendMeta('sticker', nums[0], opts),
   })
-  if (!ok) return false
+  const normalized = normalizeUltraMsgSendResult({
+    httpOk: ok,
+    status,
+    data,
+    text,
+    fallbackError: data?.message,
+  })
+  if (!normalized.ok) return returnDetails ? normalized : false
   console.log('✅ UltraMsg sticker enviado:', nums[0]?.slice(-12))
-  return true
+  return returnDetails ? normalized : true
 }
 
 /**
@@ -974,6 +1093,13 @@ async function sendVoice(phone, audioUrl, opts = {}) {
     body,
     meta: buildSendMeta('voice', nums[0], opts),
   })
+  const normalized = normalizeUltraMsgSendResult({
+    httpOk: ok,
+    status,
+    data,
+    text,
+    fallbackError: data?.message,
+  })
   const explicitError = data?.error && data.error !== false && data.error !== 'false'
   const sentFailed = data?.sent === 'false' || data?.sent === false
   
@@ -991,8 +1117,8 @@ async function sendVoice(phone, audioUrl, opts = {}) {
     })
   }
   
-  if (!ok || explicitError || sentFailed) {
-    const errRaw = data?.error || (sentFailed ? 'sent:false' : null) || String(text || '').slice(0, 200) || `HTTP ${status}`
+  if (!normalized.ok) {
+    const errRaw = normalized.error || data?.error || (sentFailed ? 'sent:false' : null) || String(text || '').slice(0, 200) || `HTTP ${status}`
     const errMsg = typeof errRaw === 'object' ? JSON.stringify(errRaw) : String(errRaw)
     console.warn('❌ UltraMsg sendVoice falhou, tentando /messages/audio:', {
       to: nums[0]?.slice(-12),
@@ -1007,7 +1133,7 @@ async function sendVoice(phone, audioUrl, opts = {}) {
     })
 
     if (opts?.disableAudioFallback) {
-      return returnDetails ? { ok: false, error: errMsg } : false
+      return returnDetails ? { ...normalized, ok: false, error: errMsg } : false
     }
 
     // Fallback: tenta como áudio comum
@@ -1017,14 +1143,21 @@ async function sendVoice(phone, audioUrl, opts = {}) {
       body,
       meta: buildSendMeta('voice_audio_fallback', nums[0], opts),
     })
+    const fbNormalized = normalizeUltraMsgSendResult({
+      httpOk: fb.ok,
+      status: fb.status,
+      data: fb.data,
+      text: fb.text,
+      fallbackError: fb.data?.message,
+    })
     const fbExplicitError = fb.data?.error && fb.data.error !== false && fb.data.error !== 'false'
     const fbSentFailed = fb.data?.sent === 'false' || fb.data?.sent === false
     
     // Verifica se o fallback também tem erro de extensão
     const fbIsExtensionError = isFileExtensionError(fb.data?.error)
     
-    if (!fb.ok || fbExplicitError || fbSentFailed) {
-      const fbErrRaw = fb.data?.error || (fbSentFailed ? 'sent:false' : null) || String(fb.text || '').slice(0, 200) || `HTTP ${fb.status}`
+    if (!fbNormalized.ok) {
+      const fbErrRaw = fbNormalized.error || fb.data?.error || (fbSentFailed ? 'sent:false' : null) || String(fb.text || '').slice(0, 200) || `HTTP ${fb.status}`
       const fbErrMsg = typeof fbErrRaw === 'object' ? JSON.stringify(fbErrRaw) : String(fbErrRaw)
       console.warn('❌ UltraMsg sendAudio (fallback) falhou:', {
         to: nums[0]?.slice(-12),
@@ -1038,13 +1171,13 @@ async function sendVoice(phone, audioUrl, opts = {}) {
         isExtensionError: fbIsExtensionError || isExtensionError,
         token: maskToken(cfg.token),
       })
-      return returnDetails ? { ok: false, error: fbErrMsg } : false
+      return returnDetails ? { ...fbNormalized, ok: false, error: fbErrMsg } : false
     }
     console.log('✅ UltraMsg áudio enviado (fallback /messages/audio):', nums[0]?.slice(-12))
-    return returnDetails ? { ok: true, messageId: fb.data?.id ?? fb.data?.messageId ?? null } : true
+    return returnDetails ? fbNormalized : true
   }
   console.log('✅ UltraMsg voice enviado:', nums[0]?.slice(-12))
-  return returnDetails ? { ok: true, messageId: data?.id ?? data?.messageId ?? null } : true
+  return returnDetails ? normalized : true
 }
 
 /**
@@ -1062,16 +1195,23 @@ async function sendLocation(phone, { address = '', lat, lng }, opts = {}) {
   const longitude = Number(lng)
   if (!nums.length || (isNaN(latitude) && isNaN(longitude))) return { ok: false, messageId: null }
   const body = { to: nums[0], address: addr, lat: latitude, lng: longitude }
-  const { ok, data } = await postJson({
+  const { ok, status, data, text } = await postJson({
     ...cfg,
     endpoint: '/messages/location',
     body,
     meta: buildSendMeta('location', nums[0], opts, { textLength: addr.length }),
   })
-  if (!ok) return { ok: false, messageId: null }
-  const msgId = data?.id ?? data?.messageId ?? null
+  const normalized = normalizeUltraMsgSendResult({
+    httpOk: ok,
+    status,
+    data,
+    text,
+    fallbackError: data?.message,
+  })
+  if (!normalized.ok) return { ...normalized, ok: false }
+  const msgId = normalized.messageId
   console.log('✅ UltraMsg localização enviada:', nums[0]?.slice(-12))
-  return { ok: true, messageId: msgId ? String(msgId) : null }
+  return normalized
 }
 
 /**
@@ -1180,16 +1320,23 @@ async function sendContact(phone, contactName, contactPhone, opts = {}) {
   const tel = contact.startsWith('55') ? contact : `55${contact}`
   const vcard = `BEGIN:VCARD\nVERSION:3.0\nN:${name};;;\nFN:${name}\nTEL;TYPE=CELL;waid=${tel}:+${tel}\nEND:VCARD`
   const body = { to: nums[0], vcard }
-  const { ok, data } = await postJson({
+  const { ok, status, data, text } = await postJson({
     ...cfg,
     endpoint: '/messages/vcard',
     body,
     meta: buildSendMeta('contact', nums[0], opts),
   })
-  if (!ok) return { ok: false, messageId: null }
-  const msgId = data?.id ?? data?.messageId ?? null
+  const normalized = normalizeUltraMsgSendResult({
+    httpOk: ok,
+    status,
+    data,
+    text,
+    fallbackError: data?.message,
+  })
+  if (!normalized.ok) return { ...normalized, ok: false }
+  const msgId = normalized.messageId
   console.log('✅ UltraMsg contato enviado:', nums[0]?.slice(-12))
-  return { ok: true, messageId: msgId ? String(msgId) : null }
+  return normalized
 }
 
 /**

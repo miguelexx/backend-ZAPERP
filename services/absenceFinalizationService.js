@@ -279,7 +279,7 @@ async function tryMarkWaitingAfterHumanOutbound({ company_id, conversa_id, texto
 async function sendAbsenceClosingMessage({ provider, company_id, conversa_id, telefone, mensagem }) {
   const { data: row } = await supabase
     .from('conversas')
-    .select('ausencia_mensagem_enviada_em, finalizacao_motivo')
+    .select('ausencia_mensagem_enviada_em, finalizacao_motivo, whatsapp_instance_id')
     .eq('company_id', company_id)
     .eq('id', conversa_id)
     .maybeSingle()
@@ -289,18 +289,38 @@ async function sendAbsenceClosingMessage({ provider, company_id, conversa_id, te
   const result = await provider.sendText(telefone, mensagem, {
     companyId: company_id,
     conversaId: conversa_id,
+    whatsappInstanceId: row?.whatsapp_instance_id || undefined,
     sendOrigin: 'finalizacao_ausencia_cliente',
   })
   const ok = !!result?.ok
-  if (!ok) return { ok: false }
+  const messageId = result?.messageId ? String(result.messageId).trim() : null
+  const hasTraceableId = !!messageId && (messageId.includes('@') || /^[A-F0-9]{12,}$/i.test(messageId) || messageId.length > 20)
+  if (!ok) {
+    console.warn('[absenceFinalization] envio de mensagem de ausencia falhou', {
+      company_id,
+      conversa_id,
+      whatsapp_instance_id: row?.whatsapp_instance_id || null,
+      erro: String(result?.error || 'desconhecido').slice(0, 200),
+    })
+  } else if (!hasTraceableId) {
+    console.warn('[absenceFinalization] provider aceitou sem ID rastreavel', {
+      company_id,
+      conversa_id,
+      whatsapp_instance_id: row?.whatsapp_instance_id || null,
+      provider_message_id: messageId || null,
+    })
+  }
   await supabase.from('mensagens').insert({
     conversa_id,
     texto: mensagem,
     direcao: 'out',
     company_id,
-    status: 'sent',
+    status: ok ? (hasTraceableId ? 'sent' : 'pending') : 'erro',
+    status_mensagem: ok ? (hasTraceableId ? 'sent' : 'sending') : 'failed',
+    ...(hasTraceableId ? { whatsapp_id: messageId } : {}),
+    ...(row?.whatsapp_instance_id ? { whatsapp_instance_id: row.whatsapp_instance_id } : {}),
   })
-  return { ok: true }
+  return { ok }
 }
 
 async function getLastMessage(conversa_id, company_id) {
