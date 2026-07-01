@@ -592,23 +592,31 @@ function emitAlertaRealtime(io, company_id, payload, opts = {}) {
 const TAG_REABERTA_FALTA_RESPOSTA_COR = '#2563eb'
 
 async function fetchConversaTagsForRealtime(company_id, conversa_id) {
-  const { data } = await supabase
+  const { data, error } = await supabase
     .from('conversa_tags')
     .select('tags ( id, nome, cor )')
     .eq('company_id', company_id)
     .eq('conversa_id', conversa_id)
+  if (error) {
+    console.warn('[atendimentoSemResposta] fetchConversaTagsForRealtime:', error.message)
+    return []
+  }
   return (data || []).map((row) => row?.tags).filter(Boolean)
 }
 
 async function ensureTagForConversa(company_id, conversa_id, nomeTag) {
   const nome = String(nomeTag || '').trim()
   if (!nome) return null
-  const { data: tag } = await supabase
+  const { data: tag, error: tagLookupError } = await supabase
     .from('tags')
     .select('id, nome, cor')
     .eq('company_id', company_id)
     .ilike('nome', nome)
     .maybeSingle()
+  if (tagLookupError) {
+    console.warn('[atendimentoSemResposta] ensureTagForConversa lookup:', tagLookupError.message)
+    return null
+  }
   let tagId = tag?.id
   if (!tagId) {
     const { data: created, error: createError } = await supabase
@@ -637,13 +645,16 @@ async function ensureTagForConversa(company_id, conversa_id, nomeTag) {
       .catch(() => {})
   }
   if (!tagId) return null
-  const { data: existente } = await supabase
+  const { data: existente, error: existenteError } = await supabase
     .from('conversa_tags')
     .select('id')
     .eq('company_id', company_id)
     .eq('conversa_id', conversa_id)
     .eq('tag_id', tagId)
     .maybeSingle()
+  if (existenteError) {
+    console.warn('[atendimentoSemResposta] ensureTagForConversa existente:', existenteError.message)
+  }
   if (!existente) {
     const { error: relError } = await supabase
       .from('conversa_tags')
@@ -704,12 +715,16 @@ async function resolveGestorWhatsappDestination(company_id, cfg) {
 async function fetchAtendenteNome(company_id, atendente_id) {
   const id = Number(atendente_id)
   if (!Number.isFinite(id) || id <= 0) return null
-  const { data } = await supabase
+  const { data, error } = await supabase
     .from('usuarios')
     .select('nome, email')
     .eq('company_id', company_id)
     .eq('id', id)
     .maybeSingle()
+  if (error) {
+    console.warn('[atendimentoSemResposta] fetchAtendenteNome:', error.message)
+    return null
+  }
   return String(data?.nome || data?.email || '').trim() || null
 }
 

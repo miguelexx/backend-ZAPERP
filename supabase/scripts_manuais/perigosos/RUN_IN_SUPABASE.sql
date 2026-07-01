@@ -174,16 +174,22 @@ WHERE dep.id = d.id AND d.rn > 1;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_departamentos_company_nome_unique
   ON public.departamentos (company_id, lower(nome));
 
--- DEFAULT + NOT NULL para company_id (tabelas principais)
-ALTER TABLE public.clientes ALTER COLUMN company_id SET DEFAULT 1;
-ALTER TABLE public.tags ALTER COLUMN company_id SET DEFAULT 1;
-ALTER TABLE public.departamentos ALTER COLUMN company_id SET DEFAULT 1;
-ALTER TABLE public.conversas ALTER COLUMN company_id SET DEFAULT 1;
-ALTER TABLE public.mensagens ALTER COLUMN company_id SET DEFAULT 1;
-ALTER TABLE public.conversa_tags ALTER COLUMN company_id SET DEFAULT 1;
-ALTER TABLE public.usuarios ALTER COLUMN company_id SET DEFAULT 1;
-ALTER TABLE public.atendimentos ALTER COLUMN company_id SET DEFAULT 1;
-ALTER TABLE public.cliente_tags ALTER COLUMN company_id SET DEFAULT 1;
+-- NEUTRALIZADO em 2026-06-30: estas 9 linhas de "SET DEFAULT 1" reintroduziam
+-- exatamente o risco multi-tenant que as migrations 20260630120000 e
+-- 20260630130000 (backend/supabase/migrations/) removeram de propósito —
+-- um insert que esqueça company_id deve FALHAR (NOT NULL sem default), não
+-- cair silenciosamente na empresa 1. NÃO reative isto. Se este script for
+-- rodado de novo (ele é amplamente idempotente via IF NOT EXISTS/IF EXISTS),
+-- as defaults abaixo ficam de fora de propósito.
+-- ALTER TABLE public.clientes ALTER COLUMN company_id SET DEFAULT 1;
+-- ALTER TABLE public.tags ALTER COLUMN company_id SET DEFAULT 1;
+-- ALTER TABLE public.departamentos ALTER COLUMN company_id SET DEFAULT 1;
+-- ALTER TABLE public.conversas ALTER COLUMN company_id SET DEFAULT 1;
+-- ALTER TABLE public.mensagens ALTER COLUMN company_id SET DEFAULT 1;
+-- ALTER TABLE public.conversa_tags ALTER COLUMN company_id SET DEFAULT 1;
+-- ALTER TABLE public.usuarios ALTER COLUMN company_id SET DEFAULT 1;
+-- ALTER TABLE public.atendimentos ALTER COLUMN company_id SET DEFAULT 1;
+-- ALTER TABLE public.cliente_tags ALTER COLUMN company_id SET DEFAULT 1;
 
 ALTER TABLE public.clientes ALTER COLUMN company_id SET NOT NULL;
 ALTER TABLE public.tags ALTER COLUMN company_id SET NOT NULL;

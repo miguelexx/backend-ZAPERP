@@ -4315,8 +4315,9 @@ exports.reabrirChat = async (req, res) => {
       .update({ ...baseReabrirPatch, ...optionalReabrirPatch })
       .eq('company_id', company_id)
       .eq('id', conversa_id)
+      .eq('status_atendimento', perm.conv.status_atendimento) // LOCK REAL: só reabre se o status não mudou desde a checagem de permissão
       .select()
-      .single()
+      .maybeSingle()
 
     if (error && /column|schema cache/i.test(String(error.message || ''))) {
       ;({ data, error } = await supabase
@@ -4324,11 +4325,16 @@ exports.reabrirChat = async (req, res) => {
         .update(baseReabrirPatch)
         .eq('company_id', company_id)
         .eq('id', conversa_id)
+        .eq('status_atendimento', perm.conv.status_atendimento)
         .select()
-        .single())
+        .maybeSingle())
     }
 
     if (error) return res.status(500).json({ error: error.message })
+
+    if (!data) {
+      return res.status(409).json({ error: 'Esta conversa já foi reaberta por outra pessoa' })
+    }
 
     await clearReabertaFaltaInteracao(company_id, conversa_id)
 
@@ -4527,7 +4533,8 @@ exports.transferirChat = async (req, res) => {
       return res.status(400).json({ error: 'Usuário de destino não encontrado ou inativo' })
     }
 
-    const { data, error } = await supabase
+    // LOCK REAL: só transfere se o atendente atual ainda for o mesmo observado na checagem de permissão
+    let queryTransferir = supabase
       .from('conversas')
       .update({
         atendente_id: para_usuario_id,
@@ -4536,10 +4543,17 @@ exports.transferirChat = async (req, res) => {
       })
       .eq('company_id', company_id)
       .eq('id', conversa_id)
-      .select()
-      .single()
+    queryTransferir = perm.conv.atendente_id == null
+      ? queryTransferir.is('atendente_id', null)
+      : queryTransferir.eq('atendente_id', perm.conv.atendente_id)
+
+    const { data, error } = await queryTransferir.select().maybeSingle()
 
     if (error) return res.status(500).json({ error: error.message })
+
+    if (!data) {
+      return res.status(409).json({ error: 'Esta conversa já foi transferida ou assumida por outra pessoa' })
+    }
 
     const resultAt = await registrarAtendimento({
       conversa_id,

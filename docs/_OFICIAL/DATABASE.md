@@ -1,6 +1,6 @@
 # Base de dados — ZapERP
 
-**Fontes usadas:** migrações em `backend/supabase/migrations/`, alterações em `backend/supabase/RUN_IN_SUPABASE.sql`, referência `backend/supabase/schema.sql` (o próprio ficheiro avisa que é para contexto e pode não refletir a ordem exata de execução), e uso de `supabase.from(...)` no código.
+**Fontes usadas:** migrações em `backend/supabase/migrations/`, alterações em `backend/supabase/scripts_manuais/perigosos/RUN_IN_SUPABASE.sql` (movido para fora da raiz em 2026-06-30 — script manual histórico, não é uma migration), referência `backend/supabase/schema.sql` (o próprio ficheiro avisa que é para contexto e pode não refletir a ordem exata de execução), e uso de `supabase.from(...)` no código.
 
 **Supabase readonly MCP:** tentativa de consulta ao `information_schema` falhou por erro de rede (`ENOTFOUND` no host). Este documento **não** substitui uma validação ao vivo no projeto Supabase quando o MCP estiver disponível.
 
