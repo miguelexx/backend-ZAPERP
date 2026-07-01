@@ -176,7 +176,9 @@ const io = new Server(server, {
     },
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   },
-  transports: ['websocket', 'polling']
+  transports: ['websocket', 'polling'],
+  pingTimeout: 60000,
+  pingInterval: 30000,
 })
 
 internalChatSocket.attach(io)
