@@ -48,6 +48,11 @@ const {
 } = require('../services/absenceFinalizationService')
 const { isEnabled, FLAGS } = require('../helpers/featureFlags')
 const { parseNota, tentarRegistrarAvaliacao } = require('../services/avaliacaoService')
+const {
+  isUltramsgNumericQueueId,
+  parseCrmReferenceMensagemId,
+  isReconcilablePendingWhatsappId,
+} = require('../helpers/whatsappMessageIdHelper')
 
 // company_id NUNCA mais via ENV — resolvido por instanceId do payload em cada webhook
 const WHATSAPP_DEBUG = String(process.env.WHATSAPP_DEBUG || '').toLowerCase() === 'true'
@@ -185,7 +190,59 @@ function mediaFamilyForStorageTipo(tipo) {
 function whatsappIdCompativelParaReconcile(row, whatsappId) {
   const atual = row?.whatsapp_id != null ? String(row.whatsapp_id).trim() : ''
   const alvo = whatsappId != null ? String(whatsappId).trim() : ''
-  return !atual || !alvo || atual === alvo
+  if (!atual || !alvo) return true
+  if (atual === alvo) return true
+  // CRM pode ter guardado id de fila UltraMSG (ex: 35096); webhook traz id real do WhatsApp.
+  if (isUltramsgNumericQueueId(atual) && !isUltramsgNumericQueueId(alvo)) return true
+  return false
+}
+
+function filterRowsForFromMeReconcile(rows) {
+  return (Array.isArray(rows) ? rows : []).filter((r) => isReconcilablePendingWhatsappId(r?.whatsapp_id))
+}
+
+function getCrmReferenceIdFromPayload(payload) {
+  return payload?.ultramsgReferenceId ?? payload?.referenceId ?? null
+}
+
+async function tryReconcileFromMeByCrmReferenceId(supabase, {
+  company_id,
+  conversa_id,
+  whatsapp_instance_id,
+  payload,
+  whatsappIdStr,
+}) {
+  const crmMsgId = parseCrmReferenceMensagemId(getCrmReferenceIdFromPayload(payload))
+  if (!crmMsgId || !whatsappIdStr) return null
+  try {
+    let q = supabase
+      .from('mensagens')
+      .select(WEBHOOK_MSG_SELECT)
+      .eq('company_id', company_id)
+      .eq('id', crmMsgId)
+      .eq('direcao', 'out')
+    q = applyWhatsappInstanceFilterOrLegacy(q, whatsapp_instance_id)
+    const { data: row } = await q.maybeSingle()
+    if (!row?.id || !whatsappIdCompativelParaReconcile(row, whatsappIdStr)) return null
+    const { data: updated } = await supabase
+      .from('mensagens')
+      .update({ whatsapp_id: whatsappIdStr })
+      .eq('company_id', company_id)
+      .eq('id', row.id)
+      .select(WEBHOOK_MSG_SELECT)
+      .maybeSingle()
+    if (WHATSAPP_DEBUG && (updated || row)) {
+      console.log('[Z-API] fromMe reconcile via referenceId crm:', {
+        mensagem_id: row.id,
+        referenceId: getCrmReferenceIdFromPayload(payload),
+        whatsapp_id: String(whatsappIdStr).slice(0, 24),
+      })
+    }
+    return updated || row
+  } catch (e) {
+    console.warn('[Z-API] fromMe reconcile referenceId:', e?.message || e)
+    return null
+  }
 }
 
 function mapWebhookTypeToStorageTipo(type) {
@@ -2546,7 +2603,13 @@ exports.receberZapi = async (req, res) => {
       // Se não encontrou por whatsapp_id e é mensagem enviada por nós, reconciliar com outbound do CRM
       if (!existente && fromMe) {
         const recentFromIso = new Date(Date.now() - 15 * 60 * 1000).toISOString()
-        let tempExistente = null
+        let tempExistente = await tryReconcileFromMeByCrmReferenceId(supabase, {
+          company_id,
+          conversa_id,
+          whatsapp_instance_id,
+          payload,
+          whatsappIdStr,
+        })
 
         let tempNullWaQuery = supabase
           .from('mensagens')
@@ -2554,23 +2617,24 @@ exports.receberZapi = async (req, res) => {
           .eq('company_id', company_id)
           .eq('conversa_id', conversa_id)
           .eq('direcao', 'out')
-          .is('whatsapp_id', null)
           .gte('criado_em', recentFromIso)
           .order('criado_em', { ascending: false })
           .order('id', { ascending: false })
-          .limit(10)
+          .limit(15)
         tempNullWaQuery = applyWhatsappInstanceFilterOrLegacy(tempNullWaQuery, whatsapp_instance_id)
-        const { data: tempExistenteNullWa } = await tempNullWaQuery
+        const { data: tempExistenteRecentOut } = await tempNullWaQuery
 
         const nomeAtendenteFromMe = extrairNomePrefixoTexto(texto)
-        tempExistente =
-          findFromMeOutboundMediaCandidate(tempExistenteNullWa || [], {
-            fileName,
-            texto,
-            tipo: mapWebhookTypeToStorageTipo(type),
-            nomeAtendente: nomeAtendenteFromMe,
-            whatsappId: whatsappIdStr,
-          }) || null
+        if (!tempExistente) {
+          tempExistente =
+            findFromMeOutboundMediaCandidate(filterRowsForFromMeReconcile(tempExistenteRecentOut), {
+              fileName,
+              texto,
+              tipo: mapWebhookTypeToStorageTipo(type),
+              nomeAtendente: nomeAtendenteFromMe,
+              whatsappId: whatsappIdStr,
+            }) || null
+        }
 
         // ACK pode ter preenchido whatsapp_id (sid) antes do message_create (id) — buscar por nome/tipo
         if (!tempExistente && mapWebhookTypeToStorageTipo(type)) {
@@ -2583,11 +2647,11 @@ exports.receberZapi = async (req, res) => {
             .gte('criado_em', recentFromIso)
             .order('criado_em', { ascending: false })
             .order('id', { ascending: false })
-            .limit(10)
+            .limit(15)
           recentOutQuery = applyWhatsappInstanceFilterOrLegacy(recentOutQuery, whatsapp_instance_id)
           const { data: recentOut } = await recentOutQuery
           tempExistente =
-            findFromMeOutboundMediaCandidate(recentOut || [], {
+            findFromMeOutboundMediaCandidate(filterRowsForFromMeReconcile(recentOut), {
               fileName,
               texto,
               tipo: mapWebhookTypeToStorageTipo(type),
@@ -2754,6 +2818,18 @@ exports.receberZapi = async (req, res) => {
       try {
         const statusPayload = (payload.status && String(payload.status).toLowerCase()) || null
 
+        // referenceId crm-{id} enviado no POST UltraMSG — reconciliação mais confiável que texto
+        if (!mensagemSalva) {
+          mensagemSalva = await tryReconcileFromMeByCrmReferenceId(supabase, {
+            company_id,
+            conversa_id,
+            whatsapp_instance_id,
+            payload,
+            whatsappIdStr,
+          })
+        }
+
+        if (!mensagemSalva) {
         // assinatura da mídia para bater com a mensagem enviada pelo sistema
         const urlSig =
           (type === 'image' && imageUrl) ? imageUrl :
@@ -2773,13 +2849,12 @@ exports.receberZapi = async (req, res) => {
         const buildQuery = (filterConversa) => {
           let q = supabase
             .from('mensagens')
-            .select('id, criado_em, texto, url, nome_arquivo, tipo, whatsapp_id, reply_meta, conversa_id')
+            .select('id, criado_em, texto, url, nome_arquivo, tipo, whatsapp_id, reply_meta, conversa_id, autor_usuario_id')
             .eq('company_id', company_id)
             .eq('direcao', 'out')
-            .is('whatsapp_id', null)
             .order('criado_em', { ascending: false })
             .order('id', { ascending: false })
-            .limit(10)
+            .limit(15)
           if (filterConversa) q = q.eq('conversa_id', conversa_id)
           q = applyWhatsappInstanceFilterOrLegacy(q, whatsapp_instance_id)
           if (fromIso && toIso) q = q.gte('criado_em', fromIso).lte('criado_em', toIso)
@@ -2790,7 +2865,7 @@ exports.receberZapi = async (req, res) => {
 
         const nomeAtendenteReconcile = extrairNomePrefixoTexto(texto)
         const findCand = (rows) =>
-          findFromMeOutboundMediaCandidate(rows, {
+          findFromMeOutboundMediaCandidate(filterRowsForFromMeReconcile(rows), {
             fileName,
             texto,
             tipo: mapWebhookTypeToStorageTipo(type),
@@ -2838,6 +2913,21 @@ exports.receberZapi = async (req, res) => {
             mensagemSalva = patched
           } else if (patchErr) {
             console.warn('⚠️ fromMe reconcile: falha ao atualizar candidato:', patchErr?.message)
+          }
+        }
+        }
+
+        if (mensagemSalva?.id && statusPayload) {
+          const cur = String(mensagemSalva.status || mensagemSalva.status_mensagem || 'pending').toLowerCase()
+          if ((STATUS_RANK[statusPayload] ?? -1) >= (STATUS_RANK[cur] ?? -1)) {
+            const { data: statusPatched } = await supabase
+              .from('mensagens')
+              .update({ status: statusPayload, status_mensagem: statusPayload })
+              .eq('company_id', company_id)
+              .eq('id', mensagemSalva.id)
+              .select(WEBHOOK_MSG_SELECT)
+              .maybeSingle()
+            if (statusPatched) mensagemSalva = statusPatched
           }
         }
       } catch (e) {
@@ -3809,23 +3899,23 @@ exports.statusZapi = async (req, res) => {
       }
 
       // 3) Fallback UltraMsg: message_ack pode chegar ANTES do ReceivedCallback (id formato WhatsApp).
-      //    Busca mensagem out recente sem whatsapp_id e atualiza status + whatsapp_id.
+      //    Busca mensagem out recente com whatsapp_id pendente (null ou fila numérica) e atualiza status + whatsapp_id.
       const isWhatsAppFormatId = idStr.includes('@') || idStr.includes('_')
       if (!msg && isWhatsAppFormatId && company_id) {
         const fromIso = new Date(Date.now() - 5 * 60 * 1000).toISOString()
         let recentOutQuery = supabase
           .from('mensagens')
-          .select('id, conversa_id, company_id, autor_usuario_id, whatsapp_instance_id')
+          .select('id, conversa_id, company_id, autor_usuario_id, whatsapp_instance_id, whatsapp_id')
           .eq('company_id', company_id)
           .eq('direcao', 'out')
-          .is('whatsapp_id', null)
           .gte('criado_em', fromIso)
           .order('criado_em', { ascending: false })
           .order('id', { ascending: false })
-          .limit(1)
+          .limit(5)
         recentOutQuery = applyWhatsappInstanceFilterOrLegacy(recentOutQuery, whatsapp_instance_id)
-        const { data: cand } = await recentOutQuery
-          .maybeSingle()
+        const { data: recentOutRows } = await recentOutQuery
+        const pendingRows = filterRowsForFromMeReconcile(recentOutRows)
+        const cand = Array.isArray(pendingRows) && pendingRows.length === 1 ? pendingRows[0] : null
         if (cand?.id) {
           const { data: patched } = await supabase
             .from('mensagens')
@@ -3906,4 +3996,7 @@ exports._test = {
   getPayloads,
   resolveConversationKeyFromZapi,
   extractMessage,
+  whatsappIdCompativelParaReconcile,
+  filterRowsForFromMeReconcile,
+  findFromMeOutboundMediaCandidate,
 }

@@ -331,3 +331,43 @@ describe('extractMessage', () => {
     expect(r.messageId).toBe('ZAAP_1')
   })
 })
+
+// ─────────────────────────── fromMe reconcile helpers ─────────────────────────
+describe('fromMe reconcile helpers', () => {
+  const {
+    whatsappIdCompativelParaReconcile,
+    filterRowsForFromMeReconcile,
+    findFromMeOutboundMediaCandidate,
+  } = _test
+
+  test('whatsappIdCompativelParaReconcile: fila numérica → id real WhatsApp', () => {
+    const row = { id: 1, whatsapp_id: '35096', texto: 'Vamos', tipo: 'texto', direcao: 'out' }
+    const realId = 'false_5511999999999@c.us_ABC'
+    expect(whatsappIdCompativelParaReconcile(row, realId)).toBe(true)
+    expect(whatsappIdCompativelParaReconcile(row, '35096')).toBe(true)
+    expect(whatsappIdCompativelParaReconcile(row, '99999')).toBe(false)
+  })
+
+  test('filterRowsForFromMeReconcile inclui null e fila, exclui id real', () => {
+    const rows = [
+      { id: 1, whatsapp_id: null },
+      { id: 2, whatsapp_id: '35096' },
+      { id: 3, whatsapp_id: 'false_5511@c.us_X' },
+    ]
+    const filtered = filterRowsForFromMeReconcile(rows)
+    expect(filtered.map((r) => r.id)).toEqual([1, 2])
+  })
+
+  test('findFromMeOutboundMediaCandidate casa texto CRM com eco webhook prefixado', () => {
+    const rows = [
+      { id: 10, whatsapp_id: '35096', texto: 'Vamos', tipo: 'texto', autor_usuario_id: 5 },
+    ]
+    const cand = findFromMeOutboundMediaCandidate(rows, {
+      texto: '*Wagner*\nVamos',
+      tipo: 'texto',
+      nomeAtendente: 'Wagner',
+      whatsappId: 'false_5511@c.us_ABC',
+    })
+    expect(cand?.id).toBe(10)
+  })
+})

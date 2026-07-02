@@ -48,9 +48,29 @@ function buildCrmReferenceId(mensagemId) {
   return `crm-${Math.floor(id)}`
 }
 
+/** Extrai mensagens.id a partir de referenceId UltraMSG (ex: crm-12345). */
+function parseCrmReferenceMensagemId(referenceId) {
+  const s = String(referenceId || '').trim()
+  const m = s.match(/^crm-(\d+)$/i)
+  if (!m) return null
+  const id = Number(m[1])
+  if (!Number.isFinite(id) || id <= 0) return null
+  return Math.floor(id)
+}
+
+/** whatsapp_id ainda pendente de reconciliação com o id real do WhatsApp (null ou fila numérica). */
+function isReconcilablePendingWhatsappId(whatsappId) {
+  if (whatsappId == null) return true
+  const s = String(whatsappId).trim()
+  if (!s || s === 'null' || s === 'undefined') return true
+  return isUltramsgNumericQueueId(s)
+}
+
 module.exports = {
   isRealWhatsAppId,
   extractUltraMsgMessageId,
   isUltramsgNumericQueueId,
   buildCrmReferenceId,
+  parseCrmReferenceMensagemId,
+  isReconcilablePendingWhatsappId,
 }
