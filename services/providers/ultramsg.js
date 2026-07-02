@@ -474,54 +474,15 @@ function toUltramsgPhone(phone) {
   return fmt ? `+${fmt}` : ''
 }
 
-/** Converte dígitos BR em formatos +55... para tentativa de envio (com e sem nono dígito). */
-function brDigitVariantsToUltramsgPhones(digits) {
-  const d = String(digits || '').replace(/\D/g, '')
-  if (!d) return []
-  const out = []
-  const pushUnique = (value) => {
-    const v = String(value || '').trim()
-    if (v && !out.includes(v)) out.push(v)
-  }
-  if (d.endsWith('@g.us')) {
-    pushUnique(d)
-    return out
-  }
-  if (d.startsWith('120') && d.length >= 15) {
-    pushUnique(`${d}@g.us`)
-    return out
-  }
-  if (!d.startsWith('55')) return out
-  if (d.length === 13) {
-    pushUnique(`+${d}`)
-    if (d.slice(4, 5) === '9') pushUnique(`+${d.slice(0, 4)}${d.slice(5)}`)
-    return out
-  }
-  if (d.length === 12) {
-    pushUnique(`+${d}`)
-    const withNine = toZapiSendFormat(d)
-    if (withNine && withNine !== d) pushUnique(`+${withNine}`)
-    return out
-  }
-  const main = toUltramsgPhone(d)
-  if (main) pushUnique(main)
-  return out
-}
-
-/** Candidatos de telefone para envio (individual e grupo). Inclui variantes 12/13 dígitos BR. */
+/** Candidatos de telefone para envio (individual e grupo). */
 function phoneCandidatesForSend(phone) {
   const raw = String(phone || '').trim()
   if (!raw) return []
-  if (raw.endsWith('@g.us')) return [raw]
-  if (raw.includes('-group')) return [raw.replace(/-group$/, '') + '@g.us']
-
   const list = []
-  const variants = possiblePhonesBR(raw)
-  if (variants.length) {
-    for (const variant of variants) list.push(...brDigitVariantsToUltramsgPhones(variant))
-  }
   const main = toUltramsgPhone(raw)
   if (main) list.push(main)
+  if (raw.endsWith('@g.us') && !main.includes('@')) list.push(raw)
+  if (raw.includes('-group')) list.push(raw.replace(/-group$/, '') + '@g.us')
   return Array.from(new Set(list.filter(Boolean)))
 }
 
@@ -732,61 +693,38 @@ async function sendText(phone, message, opts = {}) {
     return { ok: false, messageId: null, error: `body excede ${BODY_MAX_LEN} caracteres` }
   }
   const replyMessageId = opts?.replyMessageId ? String(opts.replyMessageId).trim() : null
+  const body = { to: nums[0], body: msg }
+  if (replyMessageId) body.msgId = replyMessageId
   const referenceId = opts?.referenceId ? String(opts.referenceId).trim().slice(0, 200) : null
+  if (referenceId) body.referenceId = referenceId
 
-  let lastNormalized = null
-  for (let i = 0; i < nums.length; i++) {
-    const to = nums[i]
-    const body = { to, body: msg, priority: 10 }
-    if (replyMessageId) body.msgId = replyMessageId
-    if (referenceId) body.referenceId = referenceId
-
-    const { ok, status, data, text } = await postJson({
-      ...cfg,
-      endpoint: '/messages/chat',
-      body,
-      meta: buildSendMeta('text', to, opts, { textLength: msg.length, candidateIndex: i, candidatesTotal: nums.length }),
-    })
-    const normalized = normalizeUltraMsgSendResult({
-      httpOk: ok,
-      status,
-      data,
-      text,
-      fallbackError: data?.message,
-    })
-    lastNormalized = normalized
-    const bodyError = !normalized.ok
-    if (ok && !bodyError) {
-      const msgId = normalized.messageId
-      const numLog = to
-        ? String(to).replace(/\D/g, '').length >= 13
-          ? String(to).slice(-13)
-          : String(to).slice(-12)
-        : ''
-      if (i > 0) {
-        console.log('[UltraMsg] sendText OK com candidato alternativo:', { tentativa: i + 1, to: numLog || to })
-      }
-      console.log('✅ UltraMsg mensagem enviada:', numLog || to, msgId ? `id=${String(msgId).slice(0, 14)}...` : '')
-      return { ...normalized, phoneUsed: to, candidateIndex: i }
-    }
-
+  const { ok, status, data, text } = await postJson({
+    ...cfg,
+    endpoint: '/messages/chat',
+    body,
+    meta: buildSendMeta('text', nums[0], opts, { textLength: msg.length }),
+  })
+  // UltraMsg retorna HTTP 200 mesmo em caso de erro (ex.: token inválido) — checar body também
+  const normalized = normalizeUltraMsgSendResult({
+    httpOk: ok,
+    status,
+    data,
+    text,
+    fallbackError: data?.message,
+  })
+  const bodyError = !normalized.ok
+  if (!ok || bodyError) {
     let errMsg = String(normalized.error || data?.error || data?.message || text?.slice(0, 200) || `HTTP ${status}`)
     if (ultramsgResponseIndicatesBadInstanceToken(data, text)) {
-      errMsg += ` — Atualize instance_token em whatsapp_instances (token atual do painel UltraMSG, company_id=${cfg.companyId}).`
+      errMsg += ` — Atualize instance_token em empresa_zapi (token atual do painel UltraMSG, company_id=${cfg.companyId}).`
     }
-    lastNormalized = { ...normalized, ok: false, error: errMsg }
-    const hasNext = i < nums.length - 1
-    console.warn(
-      `❌ UltraMsg sendText falhou${hasNext ? ' (tentando próximo número)' : ''}:`,
-      to?.slice(-12),
-      status,
-      errMsg.slice(0, 200),
-      '| token:',
-      maskToken(cfg.token)
-    )
+    console.warn('❌ UltraMsg sendText falhou:', nums[0]?.slice(-12), status, errMsg.slice(0, 200), '| token:', maskToken(cfg.token))
+    return { ...normalized, ok: false, error: errMsg }
   }
-
-  return lastNormalized || { ok: false, messageId: null, error: 'Falha ao enviar para todos os candidatos de telefone.' }
+  const msgId = normalized.messageId
+  const numLog = nums[0] ? (String(nums[0]).replace(/\D/g, '').length >= 13 ? String(nums[0]).slice(-13) : String(nums[0]).slice(-12)) : ''
+  console.log('✅ UltraMsg mensagem enviada:', numLog || nums[0], msgId ? `id=${String(msgId).slice(0, 14)}...` : '')
+  return normalized
 }
 
 /**
