@@ -31,6 +31,7 @@ const PUBLIC_SELECT = [
 ].join(', ')
 
 const PRIVATE_SELECT = `${PUBLIC_SELECT}, instance_token, client_token`
+const NO_DEFAULT_INSTANCE_ERROR = 'Nenhuma instancia WhatsApp default ativa configurada para esta empresa'
 
 function normalizeProvider(provider) {
   const p = String(provider || DEFAULT_PROVIDER).trim().toLowerCase()
@@ -40,6 +41,17 @@ function normalizeProvider(provider) {
 function normalizeCompanyId(companyId) {
   const n = Number(companyId)
   return Number.isFinite(n) && n > 0 ? n : null
+}
+
+function isProductionEnv() {
+  return String(process.env.NODE_ENV || '').trim().toLowerCase() === 'production'
+}
+
+function shouldAllowImplicitDefaultFallback(opts = {}) {
+  if (opts.requireExplicitDefault === true) return false
+  if (opts.allowImplicitDefaultFallback === true) return true
+  if (opts.allowImplicitDefaultFallback === false) return false
+  return !isProductionEnv()
 }
 
 function stripInstancePrefix(instanceId) {
@@ -254,6 +266,14 @@ async function getDefaultWhatsappInstance(companyId, opts = {}) {
     return { instance: responseInstance(defaultQuery.data, opts), error: null }
   }
 
+  if (!shouldAllowImplicitDefaultFallback(opts)) {
+    return {
+      instance: null,
+      error: NO_DEFAULT_INSTANCE_ERROR,
+      code: 'NO_DEFAULT_INSTANCE',
+    }
+  }
+
   if (!defaultQuery.error) {
     const firstActive = await supabase
       .from('whatsapp_instances')
@@ -458,6 +478,16 @@ async function resolveWhatsappInstanceForManualAction(companyId, requestedInstan
 
   if (active.length === 1) {
     const only = active[0]
+    if (isProductionEnv() && only.is_default !== true) {
+      return {
+        error: NO_DEFAULT_INSTANCE_ERROR,
+        code: 'NO_DEFAULT_INSTANCE',
+        instanceId: null,
+        isDefault: false,
+        instance: null,
+        instances: safeActive,
+      }
+    }
     const safe = sanitizeWhatsappInstance(only)
     return {
       error: null,
@@ -525,9 +555,23 @@ async function listWhatsappInstances(companyId) {
   return { instances: legacy.instance ? [legacy.instance] : [], error: null }
 }
 
-async function hasActiveDefault(companyId) {
-  const { instance } = await getDefaultWhatsappInstance(companyId)
-  return !!instance && instance.source !== 'empresa_zapi'
+async function hasActiveDefault(companyId, provider = DEFAULT_PROVIDER) {
+  const cid = normalizeCompanyId(companyId)
+  if (!cid) return false
+  const p = normalizeProvider(provider)
+
+  const { data, error } = await supabase
+    .from('whatsapp_instances')
+    .select('id')
+    .eq('company_id', cid)
+    .eq('provider', p)
+    .eq('ativo', true)
+    .eq('is_default', true)
+    .limit(1)
+    .maybeSingle()
+
+  if (error) return false
+  return !!data
 }
 
 async function setDefaultWhatsappInstance(companyId, whatsappInstanceId) {
@@ -574,7 +618,7 @@ async function createWhatsappInstance(companyId, input = {}) {
     }
   }
 
-  const hasDefault = await hasActiveDefault(cid)
+  const hasDefault = await hasActiveDefault(cid, provider)
   const shouldBeDefault = makeDefault || !hasDefault
 
   const { data, error } = await supabase

@@ -1,3 +1,10 @@
+const ORIGINAL_NODE_ENV = process.env.NODE_ENV
+
+function restoreNodeEnv() {
+  if (ORIGINAL_NODE_ENV === undefined) delete process.env.NODE_ENV
+  else process.env.NODE_ENV = ORIGINAL_NODE_ENV
+}
+
 function createSupabaseMock(seed = {}) {
   const state = {
     whatsapp_instances: [...(seed.whatsapp_instances || [])],
@@ -128,6 +135,11 @@ function createSupabaseMock(seed = {}) {
 describe('whatsappInstanceService', () => {
   beforeEach(() => {
     jest.resetModules()
+    restoreNodeEnv()
+  })
+
+  afterEach(() => {
+    restoreNodeEnv()
   })
 
   test('retorna default de whatsapp_instances sem expor tokens em listagem', async () => {
@@ -161,6 +173,28 @@ describe('whatsappInstanceService', () => {
     expect(instance.source).toBe('empresa_zapi')
     expect(instance.instance_token).toBe('legacy-secret')
     expect(service.sanitizeWhatsappInstance(instance).instance_token).toBeUndefined()
+  })
+
+  test('em production nao usa primeira instancia ativa nem legado sem default explicita', async () => {
+    process.env.NODE_ENV = 'production'
+    const supabase = createSupabaseMock({
+      whatsapp_instances: [
+        { id: 1, company_id: 21, provider: 'ultramsg', nome: 'Ativa sem default', instance_id: '2101', instance_token: 'secret-1', ativo: true, is_default: false },
+      ],
+      empresa_zapi: [
+        { id: 5, company_id: 21, instance_id: 'legacy2101', instance_token: 'legacy-secret', client_token: 'legacy-client', ativo: true },
+      ],
+    })
+    jest.doMock('../config/supabase', () => supabase)
+
+    const service = require('../services/whatsappInstanceService')
+    const result = await service.getDefaultWhatsappInstance(21, { includeCredentials: true })
+
+    expect(result.instance).toBeNull()
+    expect(result.code).toBe('NO_DEFAULT_INSTANCE')
+    expect(result.error).toMatch(/default ativa configurada/i)
+    expect(supabase.calls.filter((c) => c.table === 'whatsapp_instances')).toHaveLength(1)
+    expect(supabase.calls.some((c) => c.table === 'empresa_zapi')).toBe(false)
   })
 
   test('valida company_id ao buscar instancia por id', async () => {
@@ -494,6 +528,24 @@ describe('whatsappInstanceService', () => {
     expect(result.error).toBeNull()
     expect(result.instanceId).toBe(1)
     expect(result.instance?.instance_token).toBeUndefined()
+  })
+
+  test('resolveWhatsappInstanceForManualAction em production exige default para uso implicito', async () => {
+    process.env.NODE_ENV = 'production'
+    const supabase = createSupabaseMock({
+      whatsapp_instances: [
+        { id: 1, company_id: 1, provider: 'ultramsg', nome: 'Unica sem default', instance_id: '1001', instance_token: 'secret-1', ativo: true, is_default: false },
+      ],
+    })
+    jest.doMock('../config/supabase', () => supabase)
+
+    const service = require('../services/whatsappInstanceService')
+    const result = await service.resolveWhatsappInstanceForManualAction(1, null)
+
+    expect(result.instanceId).toBeNull()
+    expect(result.instance).toBeNull()
+    expect(result.code).toBe('NO_DEFAULT_INSTANCE')
+    expect(result.error).toMatch(/default ativa configurada/i)
   })
 
   test('resolveWhatsappInstanceForManualAction exige escolha com multiplas instancias', async () => {

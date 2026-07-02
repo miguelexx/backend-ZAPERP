@@ -528,7 +528,7 @@ async function post({ basePath, token, endpoint, body, companyId = null, meta = 
   let text = ''
   let data = null
   try {
-    res = await fetchWithRetry(url, fetchOpts)
+    res = await fetchWithRetry(url, fetchOpts, { maxAttempts: 1 })
     text = await res.text().catch(() => '')
     try { data = text ? JSON.parse(text) : null } catch { data = null }
     maybeInvalidateCacheOnBadToken(companyId, data, text)
@@ -1977,7 +1977,7 @@ async function uploadMedia(filePath, filename, opts = {}) {
       body: form,
       headers: uploadHeaders,
       ...(signal && { signal })
-    })
+    }, { maxAttempts: 1 })
     const text = await res.text().catch(() => '')
     let data = null
     try { data = text ? JSON.parse(text) : null } catch { data = null }
