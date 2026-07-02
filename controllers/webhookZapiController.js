@@ -53,6 +53,13 @@ const {
   parseCrmReferenceMensagemId,
   isReconcilablePendingWhatsappId,
 } = require('../helpers/whatsappMessageIdHelper')
+const {
+  STATUS_RANK,
+  normalizeRawAckStatus,
+  normalizeMessageAckStatus,
+  canonStatusForEmit,
+  statusRank,
+} = require('../helpers/messageStatusHelper')
 
 // company_id NUNCA mais via ENV — resolvido por instanceId do payload em cada webhook
 const WHATSAPP_DEBUG = String(process.env.WHATSAPP_DEBUG || '').toLowerCase() === 'true'
@@ -62,7 +69,7 @@ const WEBHOOK_MSG_SELECT = 'id, conversa_id, company_id, whatsapp_instance_id, w
 
 // Ordem de progresso dos ticks de status. Usado em statusZapi para evitar que um ack atrasado
 // (ex.: "delivered" chegando depois de "read") regrida visualmente o status já persistido.
-const STATUS_RANK = { pending: 0, sent: 1, delivered: 2, read: 3, played: 4 }
+// STATUS_RANK importado de messageStatusHelper (inclui sending=0).
 
 /** URL pública remota (CDN UltraMsg) — diferente de /uploads/ gravado pelo CRM no envio. */
 function isTraceableWhatsappMessageId(value) {
@@ -163,6 +170,43 @@ async function updateSingleMensagemByWhatsappId(
   return { data, error, ambiguous: false }
 }
 
+/** Busca mensagem por whatsapp_id sem filtrar instância (fallback quando ACK não encontra por instance_id). */
+async function selectSingleMensagemByWhatsappIdRelaxed(
+  supabaseClient,
+  { company_id, whatsapp_id, select = 'id, conversa_id, company_id, autor_usuario_id, whatsapp_id, status, whatsapp_instance_id', context = 'webhook' }
+) {
+  const waId = whatsapp_id != null ? String(whatsapp_id).trim() : ''
+  if (!supabaseClient || !company_id || !waId) return { data: null, ambiguous: false }
+
+  const { data, error } = await supabaseClient
+    .from('mensagens')
+    .select(select)
+    .eq('company_id', company_id)
+    .eq('whatsapp_id', waId)
+    .order('id', { ascending: false })
+    .limit(2)
+  if (error) return { data: null, ambiguous: false, error }
+  const rows = Array.isArray(data) ? data : []
+  if (rows.length > 1) {
+    logAmbiguousWhatsappId(context, { company_id, whatsapp_instance_id: null, whatsapp_id: waId, count: rows.length })
+    return { data: null, ambiguous: true }
+  }
+  return { data: rows[0] || null, ambiguous: false }
+}
+
+async function patchMensagemStatusById(supabaseClient, { company_id, mensagem_id, effectiveStatus, whatsapp_id, select }) {
+  const updates = { status: effectiveStatus, status_mensagem: effectiveStatus }
+  if (whatsapp_id) updates.whatsapp_id = whatsapp_id
+  const { data, error } = await supabaseClient
+    .from('mensagens')
+    .update(updates)
+    .eq('company_id', company_id)
+    .eq('id', mensagem_id)
+    .select(select || 'id, conversa_id, company_id, autor_usuario_id, whatsapp_id')
+    .maybeSingle()
+  return { data, error }
+}
+
 function normalizeMediaFileNameForMatch(name) {
   return String(name || '')
     .trim()
@@ -211,6 +255,7 @@ async function tryReconcileFromMeByCrmReferenceId(supabase, {
   whatsapp_instance_id,
   payload,
   whatsappIdStr,
+  statusPayload = null,
 }) {
   const crmMsgId = parseCrmReferenceMensagemId(getCrmReferenceIdFromPayload(payload))
   if (!crmMsgId || !whatsappIdStr) return null
@@ -224,9 +269,15 @@ async function tryReconcileFromMeByCrmReferenceId(supabase, {
     q = applyWhatsappInstanceFilterOrLegacy(q, whatsapp_instance_id)
     const { data: row } = await q.maybeSingle()
     if (!row?.id || !whatsappIdCompativelParaReconcile(row, whatsappIdStr)) return null
+    const updates = { whatsapp_id: whatsappIdStr }
+    const ackStatus = normalizeRawAckStatus(statusPayload ?? payload?.status ?? payload?.ack)
+    if (ackStatus && statusRank(ackStatus) >= statusRank(row.status || row.status_mensagem || 'pending')) {
+      updates.status = ackStatus
+      updates.status_mensagem = ackStatus
+    }
     const { data: updated } = await supabase
       .from('mensagens')
-      .update({ whatsapp_id: whatsappIdStr })
+      .update(updates)
       .eq('company_id', company_id)
       .eq('id', row.id)
       .select(WEBHOOK_MSG_SELECT)
@@ -1211,30 +1262,8 @@ exports.receberZapi = async (req, res) => {
     }
 
     for (const payload of payloads) {
-      // Normaliza status Z-API para canônico interno
-      // Observação: alguns callbacks chegam como ACK numérico (0..4).
-      const normalizeZapiStatus = (raw) => {
-        const s = String(raw ?? '').trim().toLowerCase()
-
-        // ACK numérico (comum em callbacks): 0=pending,1=sent,2=delivered,3=read,4=played
-        if (/^\d+$/.test(s)) {
-          const n = Number(s)
-          if (n <= 0) return 'pending'
-          if (n === 1) return 'sent'
-          if (n === 2) return 'delivered'
-          if (n === 3) return 'read'
-          if (n >= 4) return 'played'
-        }
-
-        if (s === 'received' || s === 'entregue') return 'delivered'
-        if (s === 'delivered') return 'delivered'
-        if (s === 'read' || s === 'read_by_me' || s === 'seen' || s === 'visualizada' || s === 'lida') return 'read'
-        if (s === 'played') return 'played'
-        if (s === 'pending' || s === 'enviando') return 'pending'
-        if (s === 'sent' || s === 'enviada' || s === 'enviado') return 'sent'
-        if (s === 'failed' || s === 'error' || s === 'erro') return 'erro'
-        return s || null
-      }
+      // Normaliza status Z-API / UltraMSG para canônico interno (inclui device→delivered, server→sent)
+      const normalizeZapiStatus = (raw) => normalizeRawAckStatus(raw)
 
       // Helper: emite status_mensagem via socket (empresa + conversa + usuario do autor para garantir tempo real)
       const emitStatusMsg = (msg, statusNorm, whatsappId = null) => {
@@ -2609,6 +2638,7 @@ exports.receberZapi = async (req, res) => {
           whatsapp_instance_id,
           payload,
           whatsappIdStr,
+          statusPayload: payload.status ?? payload.ack ?? null,
         })
 
         let tempNullWaQuery = supabase
@@ -2664,6 +2694,11 @@ exports.receberZapi = async (req, res) => {
           // Atualizar com o whatsapp_id real
           try {
             const updateFromMe = { whatsapp_id: whatsappIdStr }
+            const ackStatus = normalizeRawAckStatus(payload?.status ?? payload?.ack)
+            if (ackStatus && statusRank(ackStatus) >= statusRank(tempExistente.status || tempExistente.status_mensagem || 'pending')) {
+              updateFromMe.status = ackStatus
+              updateFromMe.status_mensagem = ackStatus
+            }
             if ((audioUrl || imageUrl || documentUrl || videoUrl || stickerUrl) && !tempExistente.url) {
               if (imageUrl) { updateFromMe.url = imageUrl; updateFromMe.tipo = 'imagem' }
               else if (documentUrl) { updateFromMe.url = documentUrl; updateFromMe.tipo = 'arquivo' }
@@ -2897,8 +2932,11 @@ exports.receberZapi = async (req, res) => {
 
         if (cand?.id) {
           const updates = { whatsapp_id: whatsappIdStr }
-          if (statusPayload) updates.status = statusPayload
-          // Aplica reply_meta se o webhook trouxe citação e o registro pendente não tem
+          const ackStatus = normalizeRawAckStatus(statusPayload ?? payload?.status ?? payload?.ack)
+          if (ackStatus && statusRank(ackStatus) >= statusRank(cand.status || 'pending')) {
+            updates.status = ackStatus
+            updates.status_mensagem = ackStatus
+          }
           if (webhookReplyMeta && !cand.reply_meta) updates.reply_meta = webhookReplyMeta
 
           const { data: patched, error: patchErr } = await supabase
@@ -2918,11 +2956,12 @@ exports.receberZapi = async (req, res) => {
         }
 
         if (mensagemSalva?.id && statusPayload) {
-          const cur = String(mensagemSalva.status || mensagemSalva.status_mensagem || 'pending').toLowerCase()
-          if ((STATUS_RANK[statusPayload] ?? -1) >= (STATUS_RANK[cur] ?? -1)) {
+          const ackStatus = normalizeRawAckStatus(statusPayload)
+          const cur = mensagemSalva.status || mensagemSalva.status_mensagem || 'pending'
+          if (ackStatus && statusRank(ackStatus) >= statusRank(cur)) {
             const { data: statusPatched } = await supabase
               .from('mensagens')
-              .update({ status: statusPayload, status_mensagem: statusPayload })
+              .update({ status: ackStatus, status_mensagem: ackStatus })
               .eq('company_id', company_id)
               .eq('id', mensagemSalva.id)
               .select(WEBHOOK_MSG_SELECT)
@@ -3470,8 +3509,7 @@ exports.receberZapi = async (req, res) => {
     const io = req.app.get('io')
     if (io && mensagemSalva) {
       // Status canônico para os ticks no frontend (sent, delivered, read, pending, erro, played)
-      const rawStatus = (mensagemSalva.status_mensagem ?? mensagemSalva.status ?? '').toString().toLowerCase()
-      const canon = rawStatus === 'enviada' || rawStatus === 'enviado' ? 'sent' : (rawStatus === 'entregue' || rawStatus === 'received' ? 'delivered' : (rawStatus || (fromMe ? 'sent' : 'delivered')))
+      const canon = canonStatusForEmit(mensagemSalva.status_mensagem ?? mensagemSalva.status ?? (fromMe ? 'sent' : 'delivered'))
       const emitPayload = {
         ...mensagemSalva,
         criado_em: normalizarTimestampSemFusoAmbiguoParaApi(mensagemSalva.criado_em),
@@ -3742,8 +3780,7 @@ exports.statusZapi = async (req, res) => {
     const singleId = body?.messageId ?? body?.zaapId ?? body?.id ?? (messageIds.length > 0 ? messageIds[0] : null)
     const idsToProcess = messageIds.length > 0 ? messageIds : (singleId ? [String(singleId).trim()] : [])
 
-    const rawStatus =
-      body?.ack != null ? String(body.ack).trim().toLowerCase() : String(body?.status ?? '').trim().toLowerCase()
+    const statusNorm = normalizeMessageAckStatus(body)
 
     // Debug: log toda requisição recebida em /webhooks/ultramsg/status (apenas com WHATSAPP_DEBUG=1)
     const logDebug = process.env.WHATSAPP_DEBUG === '1'
@@ -3752,6 +3789,7 @@ exports.statusZapi = async (req, res) => {
         ids: idsToProcess.length ? idsToProcess.slice(0, 3).map((id) => id.slice(0, 24) + (id.length > 24 ? '…' : '')) : null,
         statusBruto: body?.status ?? body?.ack ?? '(vazio)',
         ack: body?.ack,
+        statusMapeado: statusNorm,
         erro: body?.error != null ? String(body.error).slice(0, 100) : null
       })
     }
@@ -3761,29 +3799,8 @@ exports.statusZapi = async (req, res) => {
       return res.status(200).json({ ok: true })
     }
 
-    const statusNorm = (() => {
-      if (/^\d+$/.test(rawStatus)) {
-        const n = Number(rawStatus)
-        if (n <= 0) return 'pending'
-        if (n === 1) return 'sent'
-        if (n === 2) return 'delivered'
-        if (n === 3) return 'read'
-        if (n >= 4) return 'played'
-      }
-      return (
-        rawStatus === 'received' || rawStatus === 'entregue' ? 'delivered' :
-        rawStatus === 'delivered' ? 'delivered' :
-        rawStatus === 'read' || rawStatus === 'read_by_me' || rawStatus === 'seen' || rawStatus === 'visualizada' || rawStatus === 'lida' ? 'read' :
-        rawStatus === 'played' ? 'played' :
-        rawStatus === 'pending' || rawStatus === 'enviando' ? 'pending' :
-        rawStatus === 'sent' || rawStatus === 'enviada' || rawStatus === 'enviado' ? 'sent' :
-        rawStatus === 'erro' || rawStatus === 'error' || rawStatus === 'failed' ? 'erro' :
-        (rawStatus || null)
-      )
-    })()
-
     if (!statusNorm) {
-      if (logDebug) console.log('[DEBUG] /webhooks/ultramsg/status: status não mapeado, ignorando. rawStatus=', rawStatus || '(vazio)')
+      if (logDebug) console.log('[DEBUG] /webhooks/ultramsg/status: status não mapeado, ignorando. raw=', body?.status ?? body?.ack ?? '(vazio)')
       return res.status(200).json({ ok: true })
     }
 
@@ -3847,19 +3864,44 @@ exports.statusZapi = async (req, res) => {
         select: 'status',
         context: 'status.rank_check',
       })
-      if (currentForRank?.status && STATUS_RANK[currentForRank.status] > (STATUS_RANK[effectiveStatus] ?? -1)) {
+      if (currentForRank?.status && statusRank(currentForRank.status) > statusRank(effectiveStatus)) {
         effectiveStatus = currentForRank.status
       }
 
-      // 1) Atualiza por (company_id, whatsapp_id) — match exato (inclui autor_usuario_id para emit ao remetente)
+      const statusUpdates = { status: effectiveStatus, status_mensagem: effectiveStatus }
+      const statusSelect = 'id, conversa_id, company_id, autor_usuario_id, whatsapp_instance_id, whatsapp_id'
+
+      // 1) Atualiza por (company_id, whatsapp_id) — match exato com filtro de instância
       let { data: msg } = await updateSingleMensagemByWhatsappId(supabase, {
         company_id,
         whatsapp_id: idStr,
         whatsapp_instance_id,
-        updates: { status: effectiveStatus, status_mensagem: effectiveStatus },
-        select: 'id, conversa_id, company_id, autor_usuario_id, whatsapp_instance_id',
+        updates: statusUpdates,
+        select: statusSelect,
         context: 'status.exact',
       })
+
+      // 1b) Fallback: ACK não encontrou por whatsapp_instance_id — tenta match exato na empresa
+      if (!msg) {
+        const relaxed = await selectSingleMensagemByWhatsappIdRelaxed(supabase, {
+          company_id,
+          whatsapp_id: idStr,
+          select: statusSelect,
+          context: 'status.exact_relaxed',
+        })
+        if (relaxed.data?.id) {
+          const cur = relaxed.data.status || 'pending'
+          if (statusRank(cur) > statusRank(effectiveStatus)) effectiveStatus = cur
+          const patched = await patchMensagemStatusById(supabase, {
+            company_id,
+            mensagem_id: relaxed.data.id,
+            effectiveStatus,
+            whatsapp_id: idStr,
+            select: statusSelect,
+          })
+          msg = patched.data || null
+        }
+      }
 
       // 2) Fallback: Z-API às vezes trunca o ID no status callback.
       //    Tenta prefixo (primeiros 20 chars) ainda dentro do company_id (sem cross-tenant).
@@ -3884,17 +3926,16 @@ exports.statusZapi = async (req, res) => {
         }
         const candidate = Array.isArray(prefixRows) && prefixRows.length === 1 ? prefixRows[0] : null
         if (candidate?.id) {
-          if (candidate.status && STATUS_RANK[candidate.status] > (STATUS_RANK[effectiveStatus] ?? -1)) {
+          if (candidate.status && statusRank(candidate.status) > statusRank(effectiveStatus)) {
             effectiveStatus = candidate.status
           }
-          const { data: patched } = await supabase
-            .from('mensagens')
-            .update({ status: effectiveStatus, status_mensagem: effectiveStatus })
-            .eq('company_id', company_id)
-            .eq('id', candidate.id)
-            .select('id, conversa_id, company_id, autor_usuario_id')
-            .maybeSingle()
-          msg = patched || null
+          const patched = await patchMensagemStatusById(supabase, {
+            company_id,
+            mensagem_id: candidate.id,
+            effectiveStatus,
+            select: statusSelect,
+          })
+          msg = patched.data || null
         }
       }
 
@@ -3917,56 +3958,50 @@ exports.statusZapi = async (req, res) => {
         const pendingRows = filterRowsForFromMeReconcile(recentOutRows)
         const cand = Array.isArray(pendingRows) && pendingRows.length === 1 ? pendingRows[0] : null
         if (cand?.id) {
-          const { data: patched } = await supabase
-            .from('mensagens')
-            .update({ status: effectiveStatus, status_mensagem: effectiveStatus, whatsapp_id: idStr })
-            .eq('company_id', company_id)
-            .eq('id', cand.id)
-            .select('id, conversa_id, company_id, autor_usuario_id')
-            .maybeSingle()
-          msg = patched || null
+          const patched = await patchMensagemStatusById(supabase, {
+            company_id,
+            mensagem_id: cand.id,
+            effectiveStatus,
+            whatsapp_id: idStr,
+            select: statusSelect,
+          })
+          msg = patched.data || null
           if (msg && logDebug) console.log('[DEBUG] status reconciliação: message_ack antes do ReceivedCallback', { mensagem_id: msg.id })
         }
       }
 
-      // 4) Fallback UltraMsg: message_ack envia id numérico (ex: 35096). Só atualiza quando há UMA
-      //    mensagem out recente (evita marcar a mensagem errada quando várias em sequência).
-      const isUltramsgNumericId = /^\d{1,15}$/.test(idStr)
+      // 4) Fallback UltraMsg: id numérico de fila — match exato em whatsapp_id (várias mensagens seguidas OK)
+      const isUltramsgNumericId = isUltramsgNumericQueueId(idStr)
       if (!msg && isUltramsgNumericId && company_id) {
-        const fromIso = new Date(Date.now() - 3 * 60 * 1000).toISOString()
-        let numericRecentQuery = supabase
-          .from('mensagens')
-          .select('id, conversa_id, company_id, autor_usuario_id, whatsapp_instance_id')
-          .eq('company_id', company_id)
-          .eq('direcao', 'out')
-          .gte('criado_em', fromIso)
-          .order('criado_em', { ascending: false })
-          .order('id', { ascending: false })
-          .limit(2)
-        numericRecentQuery = applyWhatsappInstanceFilterOrLegacy(numericRecentQuery, whatsapp_instance_id)
-        const { data: recent } = await numericRecentQuery
-        const cand = Array.isArray(recent) && recent.length === 1 ? recent[0] : null
-        if (cand?.id) {
-          const { data: patched } = await supabase
-            .from('mensagens')
-            .update({ status: effectiveStatus, status_mensagem: effectiveStatus })
-            .eq('company_id', company_id)
-            .eq('id', cand.id)
-            .select('id, conversa_id, company_id, autor_usuario_id')
-            .maybeSingle()
-          msg = patched || null
+        const relaxed = await selectSingleMensagemByWhatsappIdRelaxed(supabase, {
+          company_id,
+          whatsapp_id: idStr,
+          select: statusSelect,
+          context: 'status.numeric_queue',
+        })
+        if (relaxed.data?.id) {
+          const cur = relaxed.data.status || 'pending'
+          if (statusRank(cur) > statusRank(effectiveStatus)) effectiveStatus = cur
+          const patched = await patchMensagemStatusById(supabase, {
+            company_id,
+            mensagem_id: relaxed.data.id,
+            effectiveStatus,
+            select: statusSelect,
+          })
+          msg = patched.data || null
         }
       }
 
       if (msg) {
         updated++
         if (io) {
+          const emitStatus = canonStatusForEmit(effectiveStatus)
           const payload = {
             mensagem_id: msg.id,
             conversa_id: msg.conversa_id,
-            status: effectiveStatus,
-            status_mensagem: effectiveStatus,
-            whatsapp_id: idStr
+            status: emitStatus,
+            status_mensagem: emitStatus,
+            whatsapp_id: msg.whatsapp_id || idStr,
           }
           // Emite para empresa, conversa E usuario do autor (garante ticks ✓✓ em tempo real)
           let chain = io.to(`empresa_${msg.company_id}`).to(`conversa_${msg.conversa_id}`)
