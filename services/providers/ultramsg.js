@@ -479,6 +479,15 @@ function phoneCandidatesForSend(phone) {
   const raw = String(phone || '').trim()
   if (!raw) return []
   const list = []
+  const pushPhoneDigits = (value) => {
+    const digits = String(value || '').replace(/\D/g, '')
+    if (!digits || digits.startsWith('120')) return
+    list.push(`+${digits}`)
+  }
+  const norm = normalizePhoneBR(raw)
+  for (const candidate of possiblePhonesBR(norm || raw)) {
+    pushPhoneDigits(candidate)
+  }
   const main = toUltramsgPhone(raw)
   if (main) list.push(main)
   if (raw.endsWith('@g.us') && !main.includes('@')) list.push(raw)

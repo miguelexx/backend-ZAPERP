@@ -77,6 +77,26 @@ describe('UltraMsg provider instance resolution', () => {
     expect(deps.fetchWithRetry.mock.calls[0][1].body).toContain('token=default-token')
   })
 
+  test('sendText preserva telefone BR de 12 digitos antes da variante com nono digito', async () => {
+    const deps = mockProviderDeps({
+      defaultByCompany: {
+        10: { id: 1, company_id: 10, provider: 'ultramsg', instance_id: '111', instance_token: 'default-token', ativo: true },
+      },
+      byId: {},
+    })
+
+    const provider = require('../services/providers/ultramsg')
+    const result = await provider.sendText('553434251162', 'Ola', {
+      companyId: 10,
+      referenceId: 'crm-168719',
+    })
+
+    const body = new URLSearchParams(deps.fetchWithRetry.mock.calls[0][1].body)
+    expect(result.ok).toBe(true)
+    expect(body.get('to')).toBe('+553434251162')
+    expect(body.get('referenceId')).toBe('crm-168719')
+  })
+
   test('mantem instance_id prefixado salvo no banco sem duplicar prefixo no envio', async () => {
     const deps = mockProviderDeps({
       defaultByCompany: {
