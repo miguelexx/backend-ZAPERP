@@ -1273,6 +1273,7 @@ exports.receberZapi = async (req, res) => {
             mensagem_id: msg.id,
             conversa_id: msg.conversa_id,
             status: statusNorm,
+            status_mensagem: statusNorm,
             ...(msg.whatsapp_id ? { whatsapp_id: msg.whatsapp_id } : {}),
             ...(whatsappId ? { whatsapp_id: whatsappId } : {})
           }
@@ -1282,20 +1283,46 @@ exports.receberZapi = async (req, res) => {
         }
       }
 
-      // Helper: atualiza status no banco por whatsapp_id (retorna msg com whatsapp_id e autor_usuario_id para emit)
-      const updateStatusByWaId = async (waId, statusNorm) => {
-        if (!waId || !statusNorm) return null
+      const resolveEffectiveStatus = (current, next) => {
+        const currentStatus = current || 'pending'
+        if (next === 'erro' || next === 'failed') {
+          return statusRank(currentStatus) >= statusRank('delivered') ? currentStatus : next
+        }
+        return statusRank(currentStatus) > statusRank(next) ? currentStatus : next
+      }
+
+      // Helper: atualiza status no banco por whatsapp_id sem permitir regressao de ACK atrasado.
+      const updateStatusByWaId = async (waId, statusNorm, opts = {}) => {
+        const returnResult = opts?.returnResult === true
+        const emptyResult = { data: null, error: null, ambiguous: false, effectiveStatus: statusNorm || null }
+        if (!waId || !statusNorm) return returnResult ? emptyResult : null
         const waIdStr = String(waId)
-        const { data: msg } = await updateSingleMensagemByWhatsappId(supabase, {
+        const statusSelect = 'id, conversa_id, company_id, whatsapp_instance_id, whatsapp_id, autor_usuario_id, status, status_mensagem'
+        const found = await selectSingleMensagemByWhatsappId(supabase, {
           company_id,
           whatsapp_id: waIdStr,
           whatsapp_instance_id,
-          updates: { status: statusNorm, status_mensagem: statusNorm },
-          select: 'id, conversa_id, company_id, whatsapp_instance_id, whatsapp_id, autor_usuario_id',
-          context: 'receberZapi.status',
+          select: statusSelect,
+          context: opts?.context || 'receberZapi.status',
+        })
+        if (found.error || !found.data?.id) {
+          const result = { ...emptyResult, error: found.error || null, ambiguous: Boolean(found.ambiguous) }
+          return returnResult ? result : null
+        }
+
+        const currentStatus = found.data.status || found.data.status_mensagem || 'pending'
+        const effectiveStatus = resolveEffectiveStatus(currentStatus, statusNorm)
+        const { data: msg, error } = await patchMensagemStatusById(supabase, {
+          company_id,
+          mensagem_id: found.data.id,
+          effectiveStatus,
+          whatsapp_id: waIdStr,
+          select: statusSelect,
         })
         if (msg) msg.whatsapp_id = msg.whatsapp_id || waIdStr
-        return msg || null
+        if (msg) msg._effective_status = effectiveStatus
+        const result = { data: msg || null, error: error || null, ambiguous: false, effectiveStatus }
+        return returnResult ? result : msg || null
       }
 
       // payloadType: usa type > event como fonte primária de classificação.
@@ -1381,7 +1408,7 @@ exports.receberZapi = async (req, res) => {
         if (lidPartStatus && canonicalStatus) {
           try {
             const io = req.app.get('io')
-            await mergeConversationLidToPhone(supabase, company_id, lidPartStatus, canonicalStatus, { io })
+            await mergeConversationLidToPhone(supabase, company_id, lidPartStatus, canonicalStatus, { io, whatsapp_instance_id })
             logZapiCert({
               companyId: company_id,
               instanceId,
@@ -1399,9 +1426,10 @@ exports.receberZapi = async (req, res) => {
         }
 
         const msg = await updateStatusByWaId(String(msgId), statusNorm)
+        const effectiveStatus = msg?._effective_status || statusNorm
         if (msg) {
-          emitStatusMsg(msg, statusNorm, String(msgId))
-          console.log(`✅ Z-API status ${statusNorm.toUpperCase()} → msg ${msg.id} (conversa ${msg.conversa_id})`)
+          emitStatusMsg(msg, effectiveStatus, String(msgId))
+          console.log(`✅ Z-API status ${effectiveStatus.toUpperCase()} → msg ${msg.id} (conversa ${msg.conversa_id})`)
           logZapiCert({
             companyId: company_id,
             instanceId,
@@ -1421,7 +1449,7 @@ exports.receberZapi = async (req, res) => {
         } else {
           console.warn(`⚠️ Z-API status ${statusNorm.toUpperCase()} recebido mas messageId não encontrado: ${String(msgId).slice(0, 25)}`)
         }
-        lastResult = { ok: true, statusUpdate: true, messageId: String(msgId), status: statusNorm }
+        lastResult = { ok: true, statusUpdate: true, messageId: String(msgId), status: effectiveStatus }
         continue
       }
 
@@ -1458,21 +1486,18 @@ exports.receberZapi = async (req, res) => {
           // Regra: DeliveryCallback SEM conteúdo = APENAS status. Nunca inserir mensagem.
           // Se a mensagem já existe (CRM enviou antes), atualiza status. Se não existe, ignora (não criar placeholder).
           if (!hasRealContent && delivMsgId) {
-            const { data: existByWaId } = await updateSingleMensagemByWhatsappId(supabase, {
-              company_id,
-              whatsapp_id: String(delivMsgId),
-              whatsapp_instance_id,
-              updates: { status: 'sent', status_mensagem: 'sent' },
-              select: 'id, conversa_id, company_id, autor_usuario_id',
+            const existByWaId = await updateStatusByWaId(String(delivMsgId), 'sent', {
               context: 'deliverycallback.fromMe.no_content',
             })
-              if (existByWaId?.id) {
+            if (existByWaId?.id) {
+              const effectiveStatus = existByWaId._effective_status || 'sent'
               const io = req.app.get('io')
               if (io) {
                 const statusEventPayload = {
                   mensagem_id: existByWaId.id,
                   conversa_id: existByWaId.conversa_id,
-                  status: 'sent',
+                  status: effectiveStatus,
+                  status_mensagem: effectiveStatus,
                   whatsapp_id: String(delivMsgId)
                 }
                 let chain = io.to(`empresa_${existByWaId.company_id}`).to(`conversa_${existByWaId.conversa_id}`)
@@ -1523,14 +1548,13 @@ exports.receberZapi = async (req, res) => {
         const statusNorm = errorText ? 'erro' : 'sent'
 
         // 1) tenta atualizar por whatsapp_id (inclui autor_usuario_id para emit ao remetente)
-        let { data: msg, error } = await updateSingleMensagemByWhatsappId(supabase, {
-          company_id,
-          whatsapp_id: String(messageId),
-          whatsapp_instance_id,
-          updates: { status: statusNorm, status_mensagem: statusNorm },
-          select: 'id, conversa_id, company_id, autor_usuario_id',
+        const statusUpdate = await updateStatusByWaId(String(messageId), statusNorm, {
+          returnResult: true,
           context: 'deliverycallback.status',
         })
+        let msg = statusUpdate.data || null
+        let error = statusUpdate.error || null
+        let statusForEmit = statusUpdate.effectiveStatus || statusNorm
 
         // 1.1) Mesclagem LID→PHONE: sempre que temos chatLid + canonicalPhone no payload
         const lidFromPayload = String(payload?.phone ?? payload?.chatLid ?? payload?.chat?.id ?? payload?.data?.phone ?? payload?.value?.phone ?? '').trim()
@@ -1540,7 +1564,7 @@ exports.receberZapi = async (req, res) => {
           try {
             const io = req.app.get('io')
             // DeliveryCallback: NÃO enriquecer nome/foto — apenas merge LID→PHONE (evita regressão de nome)
-            const mergeRes = await mergeConversationLidToPhone(supabase, company_id, lidPartDeliv, canonicalDeliv, { io })
+            const mergeRes = await mergeConversationLidToPhone(supabase, company_id, lidPartDeliv, canonicalDeliv, { io, whatsapp_instance_id })
             if (mergeRes.merged && msg && mergeRes.conversa_id) msg = { ...msg, conversa_id: mergeRes.conversa_id }
             if (mergeRes.merged) {
               logZapiCert({
@@ -1629,7 +1653,24 @@ exports.receberZapi = async (req, res) => {
           }
         }
 
-        // 2) se não achou, tenta reconciliar a última mensagem out sem whatsapp_id na conversa de destino
+        // 2) se não achou, prioriza referenceId CRM quando o provedor envia esse vínculo.
+        if (!error && !msg) {
+          const byReference = await tryReconcileFromMeByCrmReferenceId(supabase, {
+            company_id,
+            conversa_id: null,
+            whatsapp_instance_id,
+            payload,
+            whatsappIdStr: String(messageId),
+            statusPayload: statusNorm,
+          })
+          if (byReference?.id) {
+            msg = byReference
+            statusForEmit = byReference.status || byReference.status_mensagem || statusForEmit
+          }
+        }
+
+        // 3) se não achou, tenta reconciliar mensagem out sem whatsapp_id na conversa de destino.
+        // Só aplica quando houver exatamente uma candidata; com duas ou mais, o ACK é ambíguo.
         if (!error && !msg && phoneDest) {
           try {
             const isGroup = String(phoneDest).startsWith('120')
@@ -1648,11 +1689,11 @@ exports.receberZapi = async (req, res) => {
 
             if (convId) {
               const ts = Date.now()
-              const fromIso = new Date(ts - 10 * 60 * 1000).toISOString()
-              const toIso = new Date(ts + 10 * 60 * 1000).toISOString()
+              const fromIso = new Date(ts - 5 * 60 * 1000).toISOString()
+              const toIso = new Date(ts + 5 * 60 * 1000).toISOString()
               let candQuery = supabase
                 .from('mensagens')
-                .select('id, conversa_id, company_id')
+                .select('id, conversa_id, company_id, autor_usuario_id, status, status_mensagem')
                 .eq('company_id', company_id)
                 .eq('conversa_id', convId)
                 .eq('direcao', 'out')
@@ -1661,20 +1702,32 @@ exports.receberZapi = async (req, res) => {
                 .lte('criado_em', toIso)
                 .order('criado_em', { ascending: false })
                 .order('id', { ascending: false })
-                .limit(1)
+                .limit(2)
               candQuery = applyWhatsappInstanceFilterOrLegacy(candQuery, whatsapp_instance_id)
-              const { data: cand } = await candQuery
+              const { data: candRows } = await candQuery
 
-              const picked = Array.isArray(cand) && cand[0] ? cand[0] : null
+              const candidates = Array.isArray(candRows) ? candRows : []
+              const picked = candidates.length === 1 ? candidates[0] : null
+              if (!picked && candidates.length > 1) {
+                console.warn('[Z-API] DeliveryCallback fallback ambíguo; ACK ignorado para evitar associar mensagem errada', {
+                  company_id,
+                  conversa_id: convId,
+                  messageId: String(messageId).slice(0, 24),
+                  count: candidates.length,
+                })
+              }
               if (picked?.id) {
-                const patched = await supabase
-                  .from('mensagens')
-                  .update({ whatsapp_id: String(messageId), status: statusNorm })
-                  .eq('company_id', company_id)
-                  .eq('id', picked.id)
-                  .select('id, conversa_id, company_id')
-                  .maybeSingle()
+                const currentStatus = picked.status || picked.status_mensagem || 'pending'
+                const effectiveStatus = resolveEffectiveStatus(currentStatus, statusNorm)
+                const patched = await patchMensagemStatusById(supabase, {
+                  company_id,
+                  mensagem_id: picked.id,
+                  effectiveStatus,
+                  whatsapp_id: String(messageId),
+                  select: 'id, conversa_id, company_id, autor_usuario_id, status, status_mensagem, whatsapp_id',
+                })
                 msg = patched.data || null
+                statusForEmit = effectiveStatus
               }
             }
           } catch (_) {}
@@ -1690,7 +1743,8 @@ exports.receberZapi = async (req, res) => {
             const payload = {
               mensagem_id: msg.id,
               conversa_id: msg.conversa_id,
-              status: statusNorm,
+              status: statusForEmit,
+              status_mensagem: statusForEmit,
               whatsapp_id: String(messageId)
             }
             let chain = io.to(`empresa_${msg.company_id}`).to(`conversa_${msg.conversa_id}`)
@@ -1711,7 +1765,7 @@ exports.receberZapi = async (req, res) => {
           })
         }
 
-        lastResult = { ok: true, delivery: true, messageId: String(messageId) }
+        lastResult = { ok: true, delivery: true, messageId: String(messageId), status: statusForEmit }
         continue
       }
       }
@@ -1743,7 +1797,7 @@ exports.receberZapi = async (req, res) => {
           if (existing) {
             if (statusNorm) {
               const updated = await updateStatusByWaId(String(msgId), statusNorm)
-              if (updated) emitStatusMsg(updated, statusNorm, String(msgId))
+              if (updated) emitStatusMsg(updated, updated._effective_status || statusNorm, String(msgId))
             }
             logZapiCert({
               companyId: company_id,

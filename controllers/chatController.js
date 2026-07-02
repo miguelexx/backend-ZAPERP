@@ -61,6 +61,94 @@ setInterval(() => {
   }
 }, 5 * 60 * 1000).unref()
 
+let _clientTempIdDbDedupeUnavailable = false
+
+function normalizeClientTempId(value) {
+  const normalized = value != null ? String(value).trim().slice(0, 64) : ''
+  return normalized || null
+}
+
+function clientTempIdDedupeKey(company_id, conversa_id, clientTempId) {
+  return `${company_id}:${conversa_id}:${clientTempId}`
+}
+
+function isMissingMensagemColumnError(error, columnName) {
+  const text = [
+    error?.message,
+    error?.details,
+    error?.hint,
+    error?.code,
+  ].filter(Boolean).join(' ').toLowerCase()
+  return text.includes(String(columnName).toLowerCase())
+}
+
+function isGenericMissingColumnError(error) {
+  const text = [
+    error?.message,
+    error?.details,
+    error?.hint,
+    error?.code,
+  ].filter(Boolean).join(' ').toLowerCase()
+  return text.includes('does not exist') || text.includes('schema cache') || text.includes('could not find')
+}
+
+function isClientTempIdUniqueViolation(error) {
+  const text = [
+    error?.message,
+    error?.details,
+    error?.hint,
+    error?.code,
+  ].filter(Boolean).join(' ').toLowerCase()
+  return String(error?.code || '') === '23505' && (
+    text.includes('client_temp_id') ||
+    text.includes('idx_mensagens_client_temp_id_unique')
+  )
+}
+
+function buildClientTempIdDedupResponse(row, conversa_id, clientTempId) {
+  if (!row?.id) return null
+  return {
+    ok: true,
+    id: row.id,
+    conversa_id: Number(row.conversa_id ?? conversa_id),
+    client_temp_id: clientTempId,
+    status: row.status || row.status_mensagem || 'pending',
+    ...(row.whatsapp_id ? { whatsapp_id: row.whatsapp_id } : {}),
+    deduplicated: true,
+  }
+}
+
+async function findMensagemByClientTempId(company_id, conversa_id, clientTempId, select = 'id, conversa_id, status, status_mensagem, whatsapp_id, client_temp_id') {
+  if (!clientTempId || _clientTempIdDbDedupeUnavailable) return null
+  try {
+    const { data, error } = await supabase
+      .from('mensagens')
+      .select(select)
+      .eq('company_id', company_id)
+      .eq('conversa_id', Number(conversa_id))
+      .eq('client_temp_id', clientTempId)
+      .order('id', { ascending: false })
+      .limit(1)
+      .maybeSingle()
+    if (error) {
+      if (isMissingMensagemColumnError(error, 'client_temp_id') || isGenericMissingColumnError(error)) {
+        _clientTempIdDbDedupeUnavailable = true
+        return null
+      }
+      console.warn('[client_temp_id] falha ao consultar dedupe persistente:', error?.message || error)
+      return null
+    }
+    return data || null
+  } catch (error) {
+    if (isMissingMensagemColumnError(error, 'client_temp_id') || isGenericMissingColumnError(error)) {
+      _clientTempIdDbDedupeUnavailable = true
+      return null
+    }
+    console.warn('[client_temp_id] excecao ao consultar dedupe persistente:', error?.message || error)
+    return null
+  }
+}
+
 function normalizeLinkPayload(link) {
   if (!link || typeof link !== 'object') return null
   const linkUrl = String(link.linkUrl ?? link.url ?? '').trim()
@@ -5169,7 +5257,7 @@ exports.enviarMensagemChat = async (req, res) => {
     const { company_id, id: user_id, perfil } = req.user
     const { id: conversa_id } = req.params
     const { texto, reply_meta, link, client_temp_id } = req.body
-    const clientTempId = client_temp_id && String(client_temp_id).trim() ? String(client_temp_id).trim().slice(0, 64) : null
+    const clientTempId = normalizeClientTempId(client_temp_id)
 
     if (!texto || !String(texto).trim()) {
       return res.status(400).json({ error: 'texto é obrigatório' })
@@ -5178,7 +5266,7 @@ exports.enviarMensagemChat = async (req, res) => {
     // Deduplicação por client_temp_id em memória: evita double-send por double-click ou retry do frontend.
     // Map com TTL de 30s por (company_id + conversa_id + client_temp_id).
     if (clientTempId) {
-      const dedupKey = `${company_id}:${conversa_id}:${clientTempId}`
+      const dedupKey = clientTempIdDedupeKey(company_id, conversa_id, clientTempId)
       const existing = _clientTempIdDeduplicationMap.get(dedupKey)
       if (existing && Date.now() - existing.ts < 30_000) {
         return res.json({
@@ -5189,6 +5277,16 @@ exports.enviarMensagemChat = async (req, res) => {
           status: existing.status || 'pending',
           deduplicated: true,
         })
+      }
+      const persisted = await findMensagemByClientTempId(company_id, conversa_id, clientTempId)
+      const persistedResponse = buildClientTempIdDedupResponse(persisted, conversa_id, clientTempId)
+      if (persistedResponse) {
+        _clientTempIdDeduplicationMap.set(dedupKey, {
+          id: persistedResponse.id,
+          status: persistedResponse.status,
+          ts: Date.now(),
+        })
+        return res.json(persistedResponse)
       }
     }
 
@@ -5284,6 +5382,7 @@ exports.enviarMensagemChat = async (req, res) => {
       criado_em: timestamp
     }
     if (whatsappInstanceId) basePayload.whatsapp_instance_id = whatsappInstanceId
+    if (clientTempId && !_clientTempIdDbDedupeUnavailable) basePayload.client_temp_id = clientTempId
     const payloadWithReply =
       reply_meta && typeof reply_meta === 'object'
         ? {
@@ -5303,26 +5402,53 @@ exports.enviarMensagemChat = async (req, res) => {
           }
         : basePayload
 
-    let { data: msg, error: errMsg } = await supabase
-      .from('mensagens')
-      .insert(payloadWithReply)
-      .select()
-      .single()
-
-    // Compatibilidade: se a coluna reply_meta não existir ainda, tenta sem ela
-    if (errMsg && (String(errMsg.message || '').includes('reply_meta') || String(errMsg.message || '').includes('does not exist'))) {
+    let msg = null
+    let errMsg = null
+    let insertPayload = payloadWithReply
+    for (let attempt = 0; attempt < 3; attempt++) {
       ;({ data: msg, error: errMsg } = await supabase
         .from('mensagens')
-        .insert(basePayload)
+        .insert(insertPayload)
         .select()
         .single())
+
+      if (!errMsg) break
+
+      if (clientTempId && isClientTempIdUniqueViolation(errMsg)) {
+        const persisted = await findMensagemByClientTempId(company_id, conversa_id, clientTempId)
+        const persistedResponse = buildClientTempIdDedupResponse(persisted, conversa_id, clientTempId)
+        if (persistedResponse) {
+          _clientTempIdDeduplicationMap.set(clientTempIdDedupeKey(company_id, conversa_id, clientTempId), {
+            id: persistedResponse.id,
+            status: persistedResponse.status,
+            ts: Date.now(),
+          })
+          return res.json(persistedResponse)
+        }
+      }
+
+      const missingClientTempId =
+        insertPayload.client_temp_id &&
+        (isMissingMensagemColumnError(errMsg, 'client_temp_id') || isGenericMissingColumnError(errMsg))
+      const missingReplyMeta =
+        insertPayload.reply_meta &&
+        (isMissingMensagemColumnError(errMsg, 'reply_meta') || (!missingClientTempId && isGenericMissingColumnError(errMsg)))
+
+      if (!missingClientTempId && !missingReplyMeta) break
+
+      insertPayload = { ...insertPayload }
+      if (missingClientTempId) {
+        delete insertPayload.client_temp_id
+        _clientTempIdDbDedupeUnavailable = true
+      }
+      if (missingReplyMeta) delete insertPayload.reply_meta
     }
 
     if (errMsg) return res.status(500).json({ error: errMsg.message })
 
     // Registrar no Map de deduplicação após INSERT bem-sucedido
     if (clientTempId && msg?.id) {
-      const dedupKey = `${company_id}:${conversa_id}:${clientTempId}`
+      const dedupKey = clientTempIdDedupeKey(company_id, conversa_id, clientTempId)
       _clientTempIdDeduplicationMap.set(dedupKey, { id: msg.id, status: 'pending', ts: Date.now() })
     }
 
@@ -5556,6 +5682,13 @@ exports.enviarMensagemChat = async (req, res) => {
           })
           .eq('company_id', company_id)
           .eq('id', msg.id)
+
+        if (clientTempId && msg?.id) {
+          _clientTempIdDeduplicationMap.set(
+            clientTempIdDedupeKey(company_id, conversa_id, clientTempId),
+            { id: msg.id, status: nextStatus, ts: Date.now() }
+          )
+        }
 
         const io2 = req.app.get('io')
         if (io2) {
@@ -6886,6 +7019,19 @@ const MAX_MEDIA_CAPTION_CHARS = 1024
  */
 async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conversa_id, telefoneParaEnvio, whatsappInstanceId = null, io, captionUsuario = '', clientTempId = null }) {
   const { extFromOriginalName, isBlockedRiskExtension, blockedUploadErrorMessage } = require('../middleware/upload')
+  clientTempId = normalizeClientTempId(clientTempId)
+  if (clientTempId) {
+    const existing = await findMensagemByClientTempId(
+      company_id,
+      conversa_id,
+      clientTempId,
+      'id, conversa_id, company_id, status, status_mensagem, whatsapp_id, client_temp_id, texto, tipo, url, nome_arquivo, criado_em'
+    )
+    if (existing?.id) {
+      return { ok: true, msg: existing, deduplicated: true }
+    }
+  }
+
   let fileWork = file
   const extUpload = extFromOriginalName(fileWork?.originalname)
   if (isBlockedRiskExtension(extUpload)) {
@@ -6928,7 +7074,7 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
 
   const pathUrl = `/uploads/${fileWork.filename}`
 
-  const { data: msg, error } = await supabase.from("mensagens").insert({
+  const insertArquivoPayload = {
     conversa_id: Number(conversa_id),
     texto: textoMensagem,
     tipo,
@@ -6938,7 +7084,28 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
     autor_usuario_id: user_id,
     company_id,
     ...(whatsappInstanceId ? { whatsapp_instance_id: whatsappInstanceId } : {}),
-  }).select().single()
+    ...(clientTempId && !_clientTempIdDbDedupeUnavailable ? { client_temp_id: clientTempId } : {}),
+  }
+
+  let { data: msg, error } = await supabase.from("mensagens").insert(insertArquivoPayload).select().single()
+
+  if (error && clientTempId && isClientTempIdUniqueViolation(error)) {
+    const existing = await findMensagemByClientTempId(
+      company_id,
+      conversa_id,
+      clientTempId,
+      'id, conversa_id, company_id, status, status_mensagem, whatsapp_id, client_temp_id, texto, tipo, url, nome_arquivo, criado_em'
+    )
+    if (existing?.id) {
+      return { ok: true, msg: existing, deduplicated: true }
+    }
+  }
+
+  if (error && insertArquivoPayload.client_temp_id && (isMissingMensagemColumnError(error, 'client_temp_id') || isGenericMissingColumnError(error))) {
+    _clientTempIdDbDedupeUnavailable = true
+    delete insertArquivoPayload.client_temp_id
+    ;({ data: msg, error } = await supabase.from("mensagens").insert(insertArquivoPayload).select().single())
+  }
 
   if (error) return { ok: false, status: 500, error: error.message }
 
@@ -7845,4 +8012,7 @@ exports._test = {
   getChatFilterIdLimit,
   resolveConversationWhatsappInstance,
   normalizeLinkPayload,
+  normalizeClientTempId,
+  buildClientTempIdDedupResponse,
+  isClientTempIdUniqueViolation,
 }

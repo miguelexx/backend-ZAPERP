@@ -122,6 +122,7 @@ async function mergeConversasIntoCanonico(supabaseClient, company_id, canonicalI
  * @param {string} canonicalPhone - Telefone canônico do contato (número real)
  * @param {object} [opts]
  * @param {object} [opts.io] - Socket.io para emitir conversa_atualizada/atualizar_conversa
+ * @param {number|string|null} [opts.whatsapp_instance_id] - Instancia WhatsApp do webhook atual
  * @param {string} [opts.nomeCache] - Nome para atualizar cache na conversa PHONE
  * @param {string} [opts.fotoCache] - Foto para atualizar cache na conversa PHONE
  * @returns {Promise<{merged: boolean, conversa_id?: number}>}
@@ -136,22 +137,31 @@ async function mergeConversationLidToPhone(supabaseClient, company_id, chatLid, 
   if (!canonical || canonical.startsWith('lid:')) return { merged: false }
 
   const variants = possiblePhonesBR(canonical).length > 0 ? possiblePhonesBR(canonical) : [canonical]
+  const whatsappInstanceId = opts.whatsapp_instance_id ?? opts.whatsappInstanceId ?? null
+  const applyInstanceScope = (query) => {
+    const id = Number(whatsappInstanceId)
+    if (Number.isFinite(id) && id > 0) return query.eq('whatsapp_instance_id', id)
+    return query.is('whatsapp_instance_id', null)
+  }
 
-  const { data: convByLid } = await supabaseClient
+  let convByLidQuery = supabaseClient
     .from('conversas')
-    .select('id, telefone, nome_contato_cache, foto_perfil_contato_cache')
+    .select('id, telefone, nome_contato_cache, foto_perfil_contato_cache, whatsapp_instance_id')
     .eq('company_id', company_id)
     .eq('chat_lid', lidPart)
-    .maybeSingle()
+  convByLidQuery = applyInstanceScope(convByLidQuery)
+  const { data: convByLid } = await convByLidQuery.maybeSingle()
 
-  const { data: convByPhoneRows } = await supabaseClient
+  let convByPhoneQuery = supabaseClient
     .from('conversas')
-    .select('id, telefone, nome_contato_cache, foto_perfil_contato_cache')
+    .select('id, telefone, nome_contato_cache, foto_perfil_contato_cache, whatsapp_instance_id')
     .eq('company_id', company_id)
     .in('telefone', variants)
     .neq('status_atendimento', 'fechada')
     .order('ultima_atividade', { ascending: false })
     .limit(1)
+  convByPhoneQuery = applyInstanceScope(convByPhoneQuery)
+  const { data: convByPhoneRows } = await convByPhoneQuery
 
   const convByPhone = Array.isArray(convByPhoneRows) && convByPhoneRows[0] ? convByPhoneRows[0] : null
 

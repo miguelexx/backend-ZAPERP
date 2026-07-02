@@ -19,6 +19,7 @@ function createSupabaseConversationMock(seed = {}) {
       payload: null,
       select() { return this },
       eq(field, value) { this.filters.push({ type: 'eq', field, value }); return this },
+      neq(field, value) { this.filters.push({ type: 'neq', field, value }); return this },
       in(field, values) { this.filters.push({ type: 'in', field, values }); return this },
       is(field, value) { this.filters.push({ type: 'is', field, value }); return this },
       order(field, opts = {}) { this.orders.push({ field, ascending: opts.ascending !== false }); return this },
@@ -46,6 +47,7 @@ function createSupabaseConversationMock(seed = {}) {
     return filters.every((f) => {
       if (f.type === 'in') return Array.isArray(f.values) && f.values.includes(row[f.field])
       if (f.type === 'is') return f.value === null ? row[f.field] == null : row[f.field] === f.value
+      if (f.type === 'neq') return row[f.field] !== f.value
       return row[f.field] === f.value
     })
   }
@@ -210,5 +212,29 @@ describe('Conversas open unique multi-instancia', () => {
     expect(mensagensUpdate.filters).toContainEqual({ type: 'eq', field: 'company_id', value: 1 })
     expect(conversaDelete.filters).toContainEqual({ type: 'in', field: 'id', values: [20] })
     expect(supabase.state.conversas.some((row) => row.id === 30 && row.company_id === 2)).toBe(true)
+  })
+
+  test('merge LID para telefone respeita whatsapp_instance_id', async () => {
+    const { mergeConversationLidToPhone } = require('../helpers/conversationSync')
+    const supabase = createSupabaseConversationMock({
+      conversas: [
+        { id: 10, company_id: 1, telefone: 'lid:abc', chat_lid: 'abc', whatsapp_instance_id: 1, status_atendimento: 'aberta', departamento_id: null },
+        { id: 11, company_id: 1, telefone: '5534999999999', chat_lid: null, whatsapp_instance_id: 1, status_atendimento: 'aberta', ultima_atividade: '2026-01-01T00:00:00.000Z', departamento_id: null },
+        { id: 20, company_id: 1, telefone: 'lid:abc', chat_lid: 'abc', whatsapp_instance_id: 8, status_atendimento: 'aberta', departamento_id: null },
+        { id: 21, company_id: 1, telefone: '5534999999999', chat_lid: null, whatsapp_instance_id: 8, status_atendimento: 'aberta', ultima_atividade: '2026-01-02T00:00:00.000Z', departamento_id: null },
+      ],
+    })
+
+    const result = await mergeConversationLidToPhone(supabase, 1, 'abc', '5534999999999', {
+      whatsapp_instance_id: 8,
+    })
+
+    expect(result).toMatchObject({ merged: true, conversa_id: 21 })
+    const deleteOp = supabase.state.operations.find(
+      (op) => op.table === 'conversas' && op.mode === 'delete'
+    )
+    expect(deleteOp.filters).toContainEqual({ type: 'in', field: 'id', values: [20] })
+    expect(supabase.state.conversas.some((row) => row.id === 10 && row.whatsapp_instance_id === 1)).toBe(true)
+    expect(supabase.state.conversas.some((row) => row.id === 11 && row.whatsapp_instance_id === 1)).toBe(true)
   })
 })
