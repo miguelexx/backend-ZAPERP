@@ -254,7 +254,7 @@ describe('WhatsApp multi-instance operational phase 2.1', () => {
     })
   })
 
-  test('sendCall retorna erro claro sem criar mensagem nem chamar provider', async () => {
+  test('sendCall grava e envia pela instancia vinculada a conversa', async () => {
     const supabase = createSupabaseMock({
       conversas: [{ id: 20, company_id: 10, telefone: '5534999999999', whatsapp_instance_id: 8, atendente_id: 5, status_atendimento: 'em_atendimento' }],
       mensagens: [],
@@ -265,9 +265,13 @@ describe('WhatsApp multi-instance operational phase 2.1', () => {
 
     await controller.enviarLigacaoWhatsapp(req, res)
 
-    expect(res.status).toHaveBeenCalledWith(501)
-    expect(provider.sendCall).not.toHaveBeenCalled()
-    expect(supabase.state.mensagens).toHaveLength(0)
+    expect(res.status).not.toHaveBeenCalled()
+    expect(provider.sendCall).toHaveBeenCalledWith('5534999999999', 4, {
+      companyId: 10,
+      conversaId: 20,
+      whatsappInstanceId: 8,
+    })
+    expect(supabase.state.mensagens[0].whatsapp_instance_id).toBe(8)
   })
 
   test('migration de unicidade permite mesmo whatsapp_id em instancias diferentes e preserva legado', () => {

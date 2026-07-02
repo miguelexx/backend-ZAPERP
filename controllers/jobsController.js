@@ -18,7 +18,6 @@ const {
 const { runAdminAtendimentoAlertaForAllCompanies } = require('../services/adminAtendimentoAlertaService')
 const { runAtendimentoSemRespostaForAllCompanies } = require('../services/atendimentoSemRespostaService')
 const { processarVencimentosPagamentoFinanceiro } = require('../services/conversaPagamentoFinanceiroService')
-const { buildQueuePayload } = require('../services/whatsappOutboundQueueService')
 
 function timingSafeEqualStr(a, b) {
   const sa = String(a ?? '')
@@ -63,7 +62,7 @@ exports.timeoutInatividadeChatbot = async (req, res) => {
 
     const { getProvider } = require('../services/providers')
     const provider = getProvider()
-    if (false && !provider?.sendText) {
+    if (!provider?.sendText) {
       return res.status(503).json({ error: 'Provider de envio não disponível' })
     }
 
@@ -136,25 +135,35 @@ exports.timeoutInatividadeChatbot = async (req, res) => {
         if (!telefone || String(telefone).includes('@g.us') || String(telefone).toLowerCase().startsWith('lid:')) continue
 
         try {
-          const nowIso = new Date().toISOString()
+          const resultSend = await provider.sendText(telefone, mensagemEncerramento, {
+            companyId: company_id,
+            conversaId: conv.id,
+            whatsappInstanceId: conv.whatsapp_instance_id || undefined,
+            sendOrigin: 'timeout_inatividade_chatbot',
+          })
+
+          const ok = resultSend?.ok === true
+          const messageId = resultSend?.messageId ? String(resultSend.messageId).trim() : null
+          const hasTraceableId = !!messageId && (messageId.includes('@') || /^[A-F0-9]{12,}$/i.test(messageId) || messageId.length > 20)
+          const statusMsg = ok ? (hasTraceableId ? 'sent' : 'pending') : 'erro'
+          if (!ok || !hasTraceableId) {
+            console.warn('[timeoutInatividadeChatbot] envio sem confirmacao rastreavel', {
+              company_id,
+              conversa_id: conv.id,
+              whatsapp_instance_id: conv.whatsapp_instance_id || null,
+              status: statusMsg,
+              provider_message_id: messageId || null,
+              erro: ok ? null : String(resultSend?.error || 'desconhecido').slice(0, 200),
+            })
+          }
           await supabase.from('mensagens').insert({
             conversa_id: conv.id,
             texto: mensagemEncerramento,
             direcao: 'out',
             company_id,
-            status: 'pending',
-            status_mensagem: 'pending',
-            send_status: 'queued',
-            send_payload: buildQueuePayload({
-              kind: 'text',
-              phone: telefone,
-              content: { text: mensagemEncerramento },
-              opts: {
-                sendOrigin: 'timeout_inatividade_chatbot',
-              },
-            }),
-            queued_at: nowIso,
-            next_attempt_at: nowIso,
+            status: statusMsg,
+            status_mensagem: ok ? (hasTraceableId ? 'sent' : 'sending') : 'failed',
+            ...(hasTraceableId ? { whatsapp_id: messageId } : {}),
             ...(conv.whatsapp_instance_id ? { whatsapp_instance_id: conv.whatsapp_instance_id } : {}),
           })
 
