@@ -9,6 +9,10 @@ const {
   markReabertaFaltaInteracao,
   clearReabertaFaltaInteracao,
 } = require('../helpers/reabertaFaltaInteracaoHelper')
+const {
+  buildQueuePayload,
+  enqueueOutboundJob,
+} = require('./whatsappOutboundQueueService')
 
 const DEFAULT_ALERTA_SEM_RESPOSTA = {
   alerta_sem_resposta_ativo: false,
@@ -765,21 +769,31 @@ function buildGestorWhatsappText({ clienteNome, atendenteNome, minutos, cfg }) {
   return lines.join('\n')
 }
 
-async function sendGestorWhatsapp(company_id, telefone, texto) {
+async function sendGestorWhatsapp(company_id, telefone, texto, opts = {}) {
   const tel = String(telefone || '').trim()
   const digits = tel.replace(/\D/g, '')
   if (!digits || digits.length < 10) return { ok: false, error: 'telefone_invalido' }
   try {
-    const { getProvider } = require('./providers')
-    const provider = getProvider()
-    const send = provider?.sendText
-    if (typeof send !== 'function') return { ok: false, error: 'sendText_indisponivel' }
-    const result = await send(tel, texto, {
+    const job = await enqueueOutboundJob({
       companyId: company_id,
-      sendOrigin: 'alerta_sem_resposta_gestor',
+      phone: tel,
+      conversaId: opts.conversaId || null,
+      whatsappInstanceId: opts.whatsappInstanceId || null,
+      metadata: {
+        origin: 'alerta_sem_resposta_gestor',
+        conversa_id: opts.conversaId || null,
+      },
+      payload: buildQueuePayload({
+        kind: 'text',
+        phone: tel,
+        content: { text: texto },
+        opts: {
+          sendOrigin: 'alerta_sem_resposta_gestor',
+          referenceId: opts.conversaId ? `alerta-sem-resposta-${opts.conversaId}` : undefined,
+        },
+      }),
     })
-    if (result?.ok === false || result?.error) return { ok: false, error: result.error || 'falha_envio' }
-    return { ok: true, messageId: result?.messageId ?? null }
+    return { ok: true, queued: true, jobId: job?.id || null }
   } catch (e) {
     return { ok: false, error: e?.message || String(e) }
   }
@@ -1117,7 +1131,7 @@ async function processCompanyAtendimentoSemResposta(company_id, opts = {}) {
 
   const { data: conversas, error: convErr } = await supabase
     .from('conversas')
-    .select('id, atendente_id, atendente_atribuido_em, nome_contato_cache, telefone, cliente_id')
+    .select('id, atendente_id, atendente_atribuido_em, nome_contato_cache, telefone, cliente_id, whatsapp_instance_id')
     .eq('company_id', company_id)
     .eq('status_atendimento', 'em_atendimento')
     .not('atendente_id', 'is', null)
@@ -1278,7 +1292,10 @@ async function processCompanyAtendimentoSemResposta(company_id, opts = {}) {
               minutos,
               cfg,
             })
-            const wa = await sendGestorWhatsapp(company_id, destination.telefone, waText)
+            const wa = await sendGestorWhatsapp(company_id, destination.telefone, waText, {
+              conversaId: conv.id,
+              whatsappInstanceId: conv.whatsapp_instance_id || null,
+            })
             if (!wa.ok) {
               gestorWhatsappOk = false
               await recordEvento(company_id, {

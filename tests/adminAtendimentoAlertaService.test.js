@@ -28,6 +28,9 @@ function createSupabaseMock({ lockRow = null, duplicateOnInsert = false } = {}) 
       if (table === 'avaliacoes_atendimento') {
         return { data: [{ nota: 8 }, { nota: 10 }], error: null }
       }
+      if (table === 'whatsapp_outbound_jobs') {
+        return { data: { id: 123, ...(state.payload || {}) }, error: null }
+      }
       return { data: null, error: null }
     }
 
@@ -53,6 +56,9 @@ function createSupabaseMock({ lockRow = null, duplicateOnInsert = false } = {}) 
       insert(payload) {
         state.payload = payload
         inserts.push({ table, payload })
+        return chain
+      },
+      single() {
         return Promise.resolve(resolve())
       },
       maybeSingle() {
@@ -93,6 +99,9 @@ describe('adminAtendimentoAlertaService', () => {
     jest.doMock('../services/supervisaoService', () => ({
       getAguardandoFuncionarioParaAlertaAdmin: jest.fn(),
     }))
+    jest.doMock('../services/whatsappInstanceService', () => ({
+      getDefaultWhatsappInstance: jest.fn().mockResolvedValue({ instance: null }),
+    }))
 
     const { processCompanyAdminAlert } = require('../services/adminAtendimentoAlertaService')
     const sendText = jest.fn().mockResolvedValue({ ok: true })
@@ -112,8 +121,9 @@ describe('adminAtendimentoAlertaService', () => {
     })
 
     expect(result.sent).toBe(true)
-    expect(sendText).toHaveBeenCalledTimes(1)
+    expect(sendText).not.toHaveBeenCalled()
     expect(supabase.inserts.some((x) => x.table === 'admin_atendimento_alerta_envios')).toBe(false)
+    expect(supabase.inserts.some((x) => x.table === 'whatsapp_outbound_jobs')).toBe(true)
   })
 
   it('bloqueia envio duplicado quando ja existe reserva recente no dia', async () => {
@@ -128,6 +138,9 @@ describe('adminAtendimentoAlertaService', () => {
     jest.doMock('../config/supabase', () => supabase)
     jest.doMock('../services/supervisaoService', () => ({
       getAguardandoFuncionarioParaAlertaAdmin: jest.fn(),
+    }))
+    jest.doMock('../services/whatsappInstanceService', () => ({
+      getDefaultWhatsappInstance: jest.fn().mockResolvedValue({ instance: null }),
     }))
 
     const { processCompanyAdminAlert } = require('../services/adminAtendimentoAlertaService')

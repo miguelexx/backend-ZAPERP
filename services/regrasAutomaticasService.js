@@ -31,16 +31,26 @@ function buildOutboundPayload({ conversa_id, texto, company_id, sendResult, what
   const ok = typeof sendResult === 'boolean' ? sendResult : sendResult?.ok === true
   const messageId = typeof sendResult === 'object' && sendResult?.messageId ? String(sendResult.messageId).trim() : null
   const hasTraceableId = isTraceableWhatsappMessageId(messageId)
-  return {
+  const queuedPayload = typeof sendResult === 'object' ? (sendResult?.queuedPayload || sendResult?.queuePayload || null) : null
+  const queued = !!queuedPayload
+  const payload = {
     conversa_id,
     texto,
     direcao: 'out',
     company_id,
-    status: ok ? (hasTraceableId ? 'sent' : 'pending') : 'erro',
-    status_mensagem: ok ? (hasTraceableId ? 'sent' : 'sending') : 'failed',
+    status: queued ? 'pending' : ok ? (hasTraceableId ? 'sent' : 'pending') : 'erro',
+    status_mensagem: queued ? 'pending' : ok ? (hasTraceableId ? 'sent' : 'sending') : 'failed',
     ...(hasTraceableId ? { whatsapp_id: messageId } : {}),
     ...(whatsappInstanceId ? { whatsapp_instance_id: whatsappInstanceId } : {}),
   }
+  if (queued) {
+    const nowIso = new Date().toISOString()
+    payload.send_payload = queuedPayload
+    payload.send_status = 'queued'
+    payload.queued_at = nowIso
+    payload.next_attempt_at = nowIso
+  }
+  return payload
 }
 
 /**

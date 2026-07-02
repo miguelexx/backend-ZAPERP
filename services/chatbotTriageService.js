@@ -217,8 +217,10 @@ function buildBotOutboundPayload({ conversa_id, texto, company_id, sendResult, o
   const messageId = typeof sendResult === 'object' && sendResult?.messageId ? String(sendResult.messageId).trim() : null
   const hasTraceableId = isTraceableWhatsappMessageId(messageId)
   const whatsappInstanceId = opts?.whatsappInstanceId ?? opts?.whatsapp_instance_id ?? null
-  const status = ok ? (hasTraceableId ? 'sent' : 'pending') : 'erro'
-  const statusMensagem = ok ? (hasTraceableId ? 'sent' : 'sending') : 'failed'
+  const queuedPayload = typeof sendResult === 'object' ? (sendResult?.queuedPayload || sendResult?.queuePayload || null) : null
+  const queued = !!queuedPayload
+  const status = queued ? 'pending' : ok ? (hasTraceableId ? 'sent' : 'pending') : 'erro'
+  const statusMensagem = queued ? 'pending' : ok ? (hasTraceableId ? 'sent' : 'sending') : 'failed'
   const payload = {
     conversa_id,
     texto,
@@ -226,6 +228,13 @@ function buildBotOutboundPayload({ conversa_id, texto, company_id, sendResult, o
     company_id,
     status,
     status_mensagem: statusMensagem,
+  }
+  if (queued) {
+    const nowIso = new Date().toISOString()
+    payload.send_payload = queuedPayload
+    payload.send_status = 'queued'
+    payload.queued_at = nowIso
+    payload.next_attempt_at = nowIso
   }
   if (hasTraceableId) payload.whatsapp_id = messageId
   if (whatsappInstanceId) payload.whatsapp_instance_id = whatsappInstanceId

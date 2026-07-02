@@ -5,6 +5,10 @@ const {
   looksLikeBotMessage,
   logBotAction,
 } = require('./chatbotTriageService')
+const {
+  buildQueuePayload,
+  enqueueOutboundMessage,
+} = require('./whatsappOutboundQueueService')
 
 const ABSENCE_FALLBACK_MESSAGE =
   'Seu atendimento foi encerrado por falta de interação no momento. Caso precise continuar, basta nos enviar uma nova mensagem.'
@@ -286,41 +290,39 @@ async function sendAbsenceClosingMessage({ provider, company_id, conversa_id, te
   if (row?.ausencia_mensagem_enviada_em) {
     return { ok: true, skippedDuplicate: true }
   }
-  const result = await provider.sendText(telefone, mensagem, {
-    companyId: company_id,
-    conversaId: conversa_id,
-    whatsappInstanceId: row?.whatsapp_instance_id || undefined,
-    sendOrigin: 'finalizacao_ausencia_cliente',
-  })
-  const ok = !!result?.ok
-  const messageId = result?.messageId ? String(result.messageId).trim() : null
-  const hasTraceableId = !!messageId && (messageId.includes('@') || /^[A-F0-9]{12,}$/i.test(messageId) || messageId.length > 20)
-  if (!ok) {
-    console.warn('[absenceFinalization] envio de mensagem de ausencia falhou', {
-      company_id,
-      conversa_id,
-      whatsapp_instance_id: row?.whatsapp_instance_id || null,
-      erro: String(result?.error || 'desconhecido').slice(0, 200),
-    })
-  } else if (!hasTraceableId) {
-    console.warn('[absenceFinalization] provider aceitou sem ID rastreavel', {
-      company_id,
-      conversa_id,
-      whatsapp_instance_id: row?.whatsapp_instance_id || null,
-      provider_message_id: messageId || null,
-    })
-  }
-  await supabase.from('mensagens').insert({
+  const { data: msgRow, error: msgError } = await supabase.from('mensagens').insert({
     conversa_id,
     texto: mensagem,
     direcao: 'out',
     company_id,
-    status: ok ? (hasTraceableId ? 'sent' : 'pending') : 'erro',
-    status_mensagem: ok ? (hasTraceableId ? 'sent' : 'sending') : 'failed',
-    ...(hasTraceableId ? { whatsapp_id: messageId } : {}),
+    status: 'pending',
+    status_mensagem: 'pending',
+    send_status: 'queued',
     ...(row?.whatsapp_instance_id ? { whatsapp_instance_id: row.whatsapp_instance_id } : {}),
+  }).select().single()
+  if (msgError) {
+    console.warn('[absenceFinalization] erro ao salvar mensagem de ausencia na fila', {
+      company_id,
+      conversa_id,
+      whatsapp_instance_id: row?.whatsapp_instance_id || null,
+      erro: msgError.message || msgError,
+    })
+    return { ok: false, error: msgError.message || 'Erro ao salvar mensagem de ausencia' }
+  }
+  await enqueueOutboundMessage({
+    messageId: msgRow.id,
+    companyId: company_id,
+    payload: buildQueuePayload({
+      kind: 'text',
+      phone: telefone,
+      content: { text: mensagem },
+      opts: {
+        referenceId: `crm-${msgRow.id}`,
+        sendOrigin: 'finalizacao_ausencia_cliente',
+      },
+    }),
   })
-  return { ok }
+  return { ok: true, queued: true, message_id: msgRow.id }
 }
 
 async function getLastMessage(conversa_id, company_id) {

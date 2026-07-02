@@ -392,6 +392,8 @@ server.listen(PORT, '0.0.0.0', () => {
     const { startWorker } = require('./services/queueManager')
     startWorker(5000, io)
     console.log('[WORKER] Job worker iniciado (polling a cada 5s)')
+    const { startOutboundWorker } = require('./services/whatsappOutboundQueueService')
+    startOutboundWorker(io)
     startAbsenceFinalizationScheduler()
     startAdminAtendimentoAlertaScheduler()
     startAtendimentoSemRespostaScheduler(io)

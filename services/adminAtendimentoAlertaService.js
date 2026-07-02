@@ -5,6 +5,10 @@
 
 const supabase = require('../config/supabase')
 const { getAguardandoFuncionarioParaAlertaAdmin } = require('./supervisaoService')
+const {
+  buildQueuePayload,
+  enqueueOutboundJob,
+} = require('./whatsappOutboundQueueService')
 
 /** Minutos após o horário em que ainda dispara (scheduler a cada 1–2 min + relógios; fim inclusivo). */
 const CRON_GRACE_MINUTES = 30
@@ -440,7 +444,7 @@ async function processCompanyAdminAlert({ company_id, fullConfig, provider, dryR
   }
 
   const send = provider?.sendText
-  if (!dryRun && typeof send !== 'function') {
+  if (false && !dryRun && typeof send !== 'function') {
     await logBotAdminAlert(company_id, { ok: false, dia_local: diaLocal, erro: 'sendText indisponível' })
     return { sent: false, reason: 'no_provider', ...destinationDiag }
   }
@@ -532,10 +536,27 @@ async function processCompanyAdminAlert({ company_id, fullConfig, provider, dryR
       filaItens,
     })
 
-    result = (await send(destination.telefone, texto, {
+    const job = await enqueueOutboundJob({
       companyId: company_id,
-      sendOrigin: 'admin_atendimento_alerta',
-    })) || { ok: false }
+      phone: destination.telefone,
+      metadata: {
+        origin: 'admin_atendimento_alerta',
+        dia_local: diaLocal,
+        horario: scheduled,
+        destino_origem: destination.source,
+        cliente_id: destination.cliente_id,
+      },
+      payload: buildQueuePayload({
+        kind: 'text',
+        phone: destination.telefone,
+        content: { text: texto },
+        opts: {
+          sendOrigin: 'admin_atendimento_alerta',
+          referenceId: `admin-alerta-${company_id}-${diaLocal}`,
+        },
+      }),
+    })
+    result = { ok: true, queued: true, jobId: job?.id || null }
   } catch (e) {
     result = { ok: false, error: String(e?.message || e || 'exceção no envio') }
     console.warn('[adminAtendimentoAlerta] exceção após reserva', { company_id, erro: result.error })
@@ -554,6 +575,7 @@ async function processCompanyAdminAlert({ company_id, fullConfig, provider, dryR
         cliente_nome: destination.cliente_nome,
         nota_media: notaMedia,
         conversas_sem_resposta: alert.incluir_conversas_sem_resposta ? qtdSemResp : undefined,
+        outbound_job_id: result?.jobId || null,
         ultramsg_error: ok ? null : (result?.error || null),
       },
     })
@@ -571,11 +593,13 @@ async function processCompanyAdminAlert({ company_id, fullConfig, provider, dryR
     destino_mascarado: maskPhoneTail(digits),
     nota_media: notaMedia,
     conversas_sem_resposta: alert.incluir_conversas_sem_resposta ? qtdSemResp : undefined,
+    outbound_job_id: result?.jobId || null,
+    queued: result?.queued === true,
     erro: ok ? null : (result?.error || null),
   })
 
   if (ok) {
-    console.log('[adminAtendimentoAlerta] enviado', { company_id, dia_local: diaLocal, destino: maskPhoneTail(digits) })
+    console.log('[adminAtendimentoAlerta] enfileirado', { company_id, dia_local: diaLocal, destino: maskPhoneTail(digits), job_id: result?.jobId || null })
     return { sent: true, ...destinationDiag }
   }
   console.warn('[adminAtendimentoAlerta] falha UltraMsg', { company_id, erro: result?.error })

@@ -26,6 +26,7 @@ const { resolvePeerPhone } = require('../helpers/conversationKeyHelper')
 const { incrementarUnreadParaConversa, emitirParaUsuariosQuePodemVerConversa } = require('./chatController')
 const { normalizarTimestampSemFusoAmbiguoParaApi } = require('../helpers/timestampApiCompat')
 const { scheduleInboundWebPush } = require('../services/webPushDispatchService')
+const { buildQueuePayload } = require('../services/whatsappOutboundQueueService')
 const {
   schedulePersistInboundMediaIfNeeded,
   tipoQualificaPersistencia,
@@ -2314,14 +2315,21 @@ exports.receberZapi = async (req, res) => {
     if (!fromMe && !isGroup && departamento_id == null && atendente_id == null && phoneParaChatbot) {
       try {
         const sendMessage = async (ph, msg, o = {}) => {
-          const r = await getProvider().sendText(ph, msg, {
-            companyId: company_id,
-            conversaId: conversa_id,
-            whatsappInstanceId: whatsapp_instance_id || undefined,
-            ...o,
-            sendOrigin: o?.sendOrigin || o?.origin || 'chatbot_triage',
-          })
-          return { ok: !!r?.ok, messageId: r?.messageId || null }
+          const sendOrigin = o?.sendOrigin || o?.origin || 'chatbot_triage'
+          return {
+            ok: true,
+            queued: true,
+            messageId: null,
+            queuedPayload: buildQueuePayload({
+              kind: 'text',
+              phone: ph,
+              content: { text: msg },
+              opts: {
+                sendOrigin,
+                replyMessageId: o?.replyMessageId || undefined,
+              },
+            }),
+          }
         }
         let skipChatbot = false
         const chatbotHints = {}
@@ -2350,13 +2358,17 @@ exports.receberZapi = async (req, res) => {
             const optSendResult = await sendMessage(phoneParaChatbot, optResult.mensagemConfirmacao, { sendOrigin: 'opt_out_confirmacao' })
             const optMessageId = optSendResult?.messageId ? String(optSendResult.messageId).trim() : null
             const optTraceable = isTraceableWhatsappMessageId(optMessageId)
+            const optQueuedPayload = optSendResult?.queuedPayload || optSendResult?.queuePayload || null
+            const optQueued = !!optQueuedPayload
+            const optNowIso = new Date().toISOString()
             const { data: optMensagemRow, error: optMensagemError } = await supabase.from('mensagens').insert({
               conversa_id,
               texto: optResult.mensagemConfirmacao,
               direcao: 'out',
               company_id,
-              status: optSendResult?.ok ? (optTraceable ? 'sent' : 'pending') : 'erro',
-              status_mensagem: optSendResult?.ok ? (optTraceable ? 'sent' : 'sending') : 'failed',
+              status: optQueued ? 'pending' : optSendResult?.ok ? (optTraceable ? 'sent' : 'pending') : 'erro',
+              status_mensagem: optQueued ? 'pending' : optSendResult?.ok ? (optTraceable ? 'sent' : 'sending') : 'failed',
+              ...(optQueued ? { send_payload: optQueuedPayload, send_status: 'queued', queued_at: optNowIso, next_attempt_at: optNowIso } : {}),
               ...(optTraceable ? { whatsapp_id: optMessageId } : {}),
               ...(whatsapp_instance_id ? { whatsapp_instance_id } : {}),
             }).select('*').single()

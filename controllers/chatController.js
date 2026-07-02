@@ -19,6 +19,13 @@ const { getDisplayName, normalizeName, isBadName } = require('../helpers/contact
 const { tryMarkWaitingAfterHumanOutbound } = require('../services/absenceFinalizationService')
 const { syncOldMessagesForConversation } = require('../services/oldMessagesSyncService')
 const {
+  buildQueuePayload,
+  enqueueOutboundMessage,
+  findExistingByClientTempId,
+  markQueuedMessageFailed,
+  requeueOutboundMessage,
+} = require('../services/whatsappOutboundQueueService')
+const {
   marcarAguardandoClienteManual,
   retomarEmAtendimentoManual,
 } = require('../services/conversaStatusManualService')
@@ -4232,7 +4239,44 @@ exports.encerrarChat = async (req, res) => {
               const whatsappInstanceId = await resolveConversationWhatsappInstance(company_id, data)
               const { getProvider } = require('../services/providers')
               const provider = getProvider()
-              if (provider?.sendText) {
+              const { data: msgInsert, error: errInsert } = await supabase
+                .from('mensagens')
+                .insert({
+                  conversa_id: Number(conversa_id),
+                  texto: msg,
+                  direcao: 'out',
+                  company_id,
+                  status: 'pending',
+                  status_mensagem: 'pending',
+                  send_status: 'queued',
+                  ...(whatsappInstanceId ? { whatsapp_instance_id: whatsappInstanceId } : {}),
+                  autor_usuario_id: user_id
+                })
+                .select()
+                .single()
+              if (!errInsert && msgInsert) {
+                await enqueueOutboundMessage({
+                  messageId: msgInsert.id,
+                  companyId: company_id,
+                  payload: buildQueuePayload({
+                    kind: 'text',
+                    phone: telefoneParaEnvio,
+                    content: { text: msg },
+                    opts: {
+                      referenceId: `crm-${msgInsert.id}`,
+                      sendOrigin: 'mensagem_finalizacao_atendimento',
+                    },
+                  }),
+                })
+                if (req.app?.get('io')) {
+                  const io2 = req.app.get('io')
+                  const payload = await enrichMensagemComAutorUsuario(supabase, company_id, msgInsert)
+                  emitirEventoEmpresaConversa(io2, company_id, conversa_id, io2.EVENTS?.NOVA_MENSAGEM || 'nova_mensagem', payload)
+                }
+              } else if (errInsert) {
+                console.warn('[mensagem_finalizacao_atendimento] erro ao salvar mensagem na fila:', errInsert.message || errInsert)
+              }
+              if (false && provider?.sendText) {
                 const resultSend = await provider.sendText(telefoneParaEnvio, msg, {
                   companyId: company_id,
                   conversaId: conversa_id,
@@ -5252,6 +5296,24 @@ exports.enviarMensagemChat = async (req, res) => {
 
     const linkPayload = normalizeLinkPayload(link)
     const hasLinkPayload = !!linkPayload
+    if (clientTempId) {
+      const existing = await findExistingByClientTempId({
+        companyId: company_id,
+        conversaId: conversa_id,
+        userId: user_id,
+        clientTempId,
+      })
+      if (existing) {
+        return res.json({
+          ok: true,
+          id: existing.id,
+          conversa_id: Number(conversa_id),
+          client_temp_id: clientTempId,
+          status: existing.status || 'pending',
+          deduped: true,
+        })
+      }
+    }
 
     // Reply (citação) — opcional. Requer coluna mensagens.reply_meta (jsonb).
     const timestamp = new Date().toISOString()
@@ -5263,8 +5325,11 @@ exports.enviarMensagemChat = async (req, res) => {
       direcao: 'out',
       autor_usuario_id: Number(user_id),
       status: 'pending',
+      status_mensagem: 'pending',
+      send_status: 'queued',
       criado_em: timestamp
     }
+    if (clientTempId) basePayload.client_temp_id = clientTempId
     if (whatsappInstanceId) basePayload.whatsapp_instance_id = whatsappInstanceId
     const payloadWithReply =
       reply_meta && typeof reply_meta === 'object'
@@ -5372,6 +5437,109 @@ exports.enviarMensagemChat = async (req, res) => {
     }
 
     // Envio para WhatsApp via provider (ultramsg, conforme instância configurada)
+    let queued = false
+    let motivoErroFila = null
+    if (!telefoneParaEnvio) {
+      motivoErroFila = 'Numero do contato indisponivel para envio'
+      await markQueuedMessageFailed({
+        messageId: msg.id,
+        companyId: company_id,
+        error: motivoErroFila,
+        code: 'missing_destination_phone',
+        io,
+      })
+    } else {
+      let replyMessageId = null
+      if (reply_meta?.replyToId != null) {
+        replyMessageId = await resolveUltraMsgReplyMessageId(supabase, company_id, conversa_id, reply_meta.replyToId)
+        if (!replyMessageId) {
+          console.warn('[WhatsApp reply] msgId da citacao nao resolvido; envio sem reply no WhatsApp.', {
+            conversa_id,
+            replyToId: String(reply_meta.replyToId).slice(0, 96),
+          })
+        }
+      }
+
+      const { nome: usuarioNome } = await getUsuarioParaEnvioCliente(supabase, company_id, user_id)
+      const textoBase = String(texto).trim()
+      let payloadFila = null
+      if (hasLinkPayload) {
+        let messageToSend = textoBase
+        const linkUrlStr = linkPayload.linkUrl
+        if (linkUrlStr && !messageToSend.includes(linkUrlStr)) {
+          messageToSend = messageToSend ? `${messageToSend} ${linkUrlStr}` : linkUrlStr
+        }
+        messageToSend = textoParaEnvioWhatsapp(messageToSend, usuarioNome)
+        payloadFila = buildQueuePayload({
+          kind: 'link',
+          phone: telefoneParaEnvio,
+          content: {
+            text: messageToSend,
+            link: {
+              message: messageToSend,
+              image: linkPayload.image || '',
+              linkUrl: linkUrlStr,
+              title: linkPayload.title || linkUrlStr,
+              linkDescription: linkPayload.linkDescription || messageToSend,
+            },
+          },
+          opts: {
+            replyMessageId: replyMessageId || undefined,
+            referenceId: `crm-${msg.id}`,
+            sendOrigin: 'atendimento_humano',
+          },
+        })
+      } else {
+        payloadFila = buildQueuePayload({
+          kind: 'text',
+          phone: telefoneParaEnvio,
+          content: { text: textoParaEnvioWhatsapp(textoBase, usuarioNome) },
+          opts: {
+            replyMessageId: replyMessageId || undefined,
+            referenceId: `crm-${msg.id}`,
+            sendOrigin: 'atendimento_humano',
+          },
+        })
+      }
+
+      try {
+        await enqueueOutboundMessage({
+          messageId: msg.id,
+          companyId: company_id,
+          payload: payloadFila,
+          clientTempId,
+        })
+        queued = true
+        console.log('[ENVIO_MANUAL] Mensagem enfileirada para envio WhatsApp', {
+          company_id,
+          conversa_id,
+          mensagem_id: msg.id,
+          telefone_destino: String(telefoneParaEnvio || '').slice(-12),
+          whatsapp_instance_id: whatsappInstanceId,
+          tipo: hasLinkPayload ? 'link' : 'texto',
+        })
+      } catch (e) {
+        motivoErroFila = e?.message || 'Erro ao enfileirar mensagem para envio'
+        await markQueuedMessageFailed({
+          messageId: msg.id,
+          companyId: company_id,
+          error: motivoErroFila,
+          code: 'enqueue_error',
+          io,
+        })
+      }
+    }
+
+    return res.json({
+      ok: true,
+      id: msg.id,
+      conversa_id: Number(conversa_id),
+      ...(clientTempId ? { client_temp_id: clientTempId } : {}),
+      status: queued ? 'pending' : 'erro',
+      queued,
+      ...(motivoErroFila ? { motivo: motivoErroFila } : {}),
+    })
+
     let sendResult = null
     if (!telefoneParaEnvio) {
       // Mensagem manual sem telefone: não pode ficar como pending para sempre
@@ -5803,8 +5971,8 @@ exports.enviarContatoWhatsapp = async (req, res) => {
       return res.status(400).json({ error: 'Contato não possui telefone válido para compartilhar' })
     }
 
-    const provider = getProvider()
-    if (!provider || !provider.sendContact) {
+    const provider = null
+    if (false && (!provider || !provider.sendContact)) {
       return res.status(500).json({ error: 'Provider WhatsApp não suporta compartilhamento de contato' })
     }
 
@@ -5826,6 +5994,8 @@ exports.enviarContatoWhatsapp = async (req, res) => {
         direcao: 'out',
         tipo: 'contact',
         status: 'pending',
+        status_mensagem: 'pending',
+        send_status: 'queued',
         autor_usuario_id: Number(user_id),
         criado_em: criadoEm,
         ...(whatsappInstanceId ? { whatsapp_instance_id: whatsappInstanceId } : {}),
@@ -5848,6 +6018,44 @@ exports.enviarContatoWhatsapp = async (req, res) => {
         autor_usuario_id: Number(user_id),
       })
     } catch (_) {}
+
+    await enqueueOutboundMessage({
+      messageId: msg.id,
+      companyId: company_id,
+      payload: buildQueuePayload({
+        kind: 'contact',
+        phone: telefoneParaEnvio,
+        content: {
+          name: contactName,
+          contactPhone,
+        },
+        opts: {
+          sendOrigin: 'atendimento_humano_contato',
+          referenceId: `crm-${msg.id}`,
+          messageId: messageId || undefined,
+        },
+      }),
+    })
+
+    if (io) {
+      const payload = await enrichMensagemComAutorUsuario(supabase, company_id, { ...msg, status: 'pending', status_mensagem: 'pending' })
+      emitirEventoEmpresaConversa(io, company_id, conversa_id, io.EVENTS?.NOVA_MENSAGEM || 'nova_mensagem', payload)
+      const convPayload = aplicarAguardandoClienteNoPayload({
+        id: Number(conversa_id),
+        ultima_atividade: payload.criado_em || criadoEm,
+        ultima_mensagem_preview: {
+          texto: contactName,
+          criado_em: payload.criado_em || criadoEm,
+          direcao: 'out',
+          tipo: 'contact',
+          contact_meta,
+        },
+        reordenar_suave: true,
+      }, waitingAfterOutbound)
+      emitirConversaAtualizada(io, company_id, conversa_id, convPayload, { skipAtualizarConversa: true })
+    }
+
+    return res.json({ ok: true, id: msg.id, status: 'pending', queued: true })
 
     const result = await provider.sendContact(telefoneParaEnvio, contactName, contactPhone, {
       companyId: company_id,
@@ -5961,8 +6169,8 @@ exports.enviarLocalizacao = async (req, res) => {
       ...(endereco ? { endereco } : {})
     }
 
-    const provider = getProvider()
-    if (!provider || !provider.sendLocation) {
+    const provider = null
+    if (false && (!provider || !provider.sendLocation)) {
       return res.status(500).json({ error: 'Provider WhatsApp não suporta envio de localização' })
     }
 
@@ -5977,6 +6185,8 @@ exports.enviarLocalizacao = async (req, res) => {
       direcao: 'out',
       tipo: 'location',
       status: 'pending',
+      status_mensagem: 'pending',
+      send_status: 'queued',
       url: locationUrl,
       nome_arquivo: 'localização',
       autor_usuario_id: Number(user_id),
@@ -6029,6 +6239,51 @@ exports.enviarLocalizacao = async (req, res) => {
     const { nome: usuarioNome } = await getUsuarioParaEnvioCliente(supabase, company_id, user_id)
     const baseAddress = [nomePlace, endereco].filter(Boolean).join('\n') || `${latitude},${longitude}`
     const addressParaCliente = usuarioNome ? `${usuarioNome} — ${String(baseAddress).slice(0, 280)}` : String(baseAddress).slice(0, 300)
+
+    await enqueueOutboundMessage({
+      messageId: msg.id,
+      companyId: company_id,
+      payload: buildQueuePayload({
+        kind: 'location',
+        phone: telefoneParaEnvio,
+        content: {
+          address: addressParaCliente,
+          lat: latitude,
+          lng: longitude,
+        },
+        opts: {
+          sendOrigin: 'atendimento_humano_localizacao',
+          referenceId: `crm-${msg.id}`,
+        },
+      }),
+    })
+
+    if (io) {
+      const payload = await enrichMensagemComAutorUsuario(supabase, company_id, { ...msg, status: 'pending', status_mensagem: 'pending', location_meta: msg.location_meta || location_meta })
+      emitirEventoEmpresaConversa(io, company_id, conversa_id, io.EVENTS?.NOVA_MENSAGEM || 'nova_mensagem', payload)
+      const convPayload = aplicarAguardandoClienteNoPayload({
+        id: Number(conversa_id),
+        ultima_mensagem_preview: {
+          texto: msg.texto,
+          criado_em: msg.criado_em,
+          direcao: 'out',
+          tipo: 'location',
+          location_meta: msg.location_meta || location_meta,
+          url: locationUrl
+        },
+        reordenar_suave: true
+      }, waitingAfterOutbound)
+      emitirConversaAtualizada(io, company_id, conversa_id, convPayload, { skipAtualizarConversa: true })
+    }
+
+    return res.json({
+      ok: true,
+      id: msg.id,
+      conversa_id: Number(conversa_id),
+      location_meta: msg.location_meta || location_meta,
+      status: 'pending',
+      queued: true,
+    })
 
     let result = { ok: false, messageId: null }
     if (telefoneParaEnvio) {
@@ -6096,6 +6351,18 @@ exports.enviarLigacaoWhatsapp = async (req, res) => {
     const { company_id, id: user_id, perfil } = req.user
     const { id: conversa_id } = req.params
     const { callDuration } = req.body || {}
+
+    console.warn('[WhatsApp] tentativa_ligacao_bloqueada', {
+      company_id,
+      conversa_id: Number(conversa_id),
+      usuario_id: Number(user_id),
+      motivo: 'send_call_nao_enfileirado',
+    })
+    return res.status(501).json({
+      ok: false,
+      error: 'Ligacao via WhatsApp nao e suportada com garantia pela fila outbound. Nenhuma mensagem foi criada ou enviada.',
+      code: 'whatsapp_call_not_supported',
+    })
 
     const io = req.app.get('io')
     const permEnvio = await assertPodeEnviarMensagem({
@@ -6186,6 +6453,27 @@ exports.enviarLigacaoWhatsapp = async (req, res) => {
 // =====================================================
 // excluirMensagem — remove do sistema (DB) + realtime
 // =====================================================
+exports.reenviarMensagemWhatsapp = async (req, res) => {
+  try {
+    const { company_id } = req.user
+    const { id: conversa_id, mensagem_id } = req.params
+    const io = req.app.get('io')
+    const result = await requeueOutboundMessage({
+      companyId: company_id,
+      conversaId: conversa_id,
+      messageId: mensagem_id,
+      io,
+    })
+    if (!result.ok) {
+      return res.status(result.status || 400).json({ ok: false, error: result.error })
+    }
+    return res.json({ ok: true, id: result.message?.id, status: 'pending', queued: true, em_retry: true })
+  } catch (err) {
+    console.error('Erro ao reenfileirar mensagem WhatsApp:', err)
+    return res.status(500).json({ ok: false, error: 'Erro ao reenfileirar mensagem WhatsApp' })
+  }
+}
+
 exports.excluirMensagem = async (req, res) => {
   try {
     const { company_id, id: user_id, perfil } = req.user
@@ -6904,6 +7192,10 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
     direcao: "out",
     autor_usuario_id: user_id,
     company_id,
+    status: 'pending',
+    status_mensagem: 'pending',
+    send_status: 'queued',
+    ...(clientTempId ? { client_temp_id: clientTempId } : {}),
     ...(whatsappInstanceId ? { whatsapp_instance_id: whatsappInstanceId } : {}),
   }).select().single()
 
@@ -6993,6 +7285,71 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
     // evita problemas de disponibilidade/headers em URLs próprias do backend
     // e melhora a reprodução no WhatsApp mobile e desktop.
     const forceUploadMedia = tipo === 'audio' || tipo === 'voice' || tipo === 'video'
+
+    const mediaKindByTipo = {
+      imagem: 'image',
+      video: 'video',
+      audio: 'audio',
+      voice: 'voice',
+      sticker: 'sticker',
+      arquivo: 'file',
+    }
+    const mediaKind = mediaKindByTipo[tipo] || 'file'
+    const mediaUrlPublica = fullUrl && !isLocalhost && !forceUploadMedia ? fullUrl : null
+    const fallbackMediaUrl = fullUrl && !isLocalhost ? fullUrl : null
+
+    if (!telefoneParaEnvio) {
+      await markQueuedMessageFailed({
+        messageId: msg.id,
+        companyId: company_id,
+        error: 'Numero do contato indisponivel para envio de midia',
+        code: 'missing_destination_phone',
+        io,
+      })
+    } else if (!mediaUrlPublica && !fileWork.path && !fallbackMediaUrl) {
+      await markQueuedMessageFailed({
+        messageId: msg.id,
+        companyId: company_id,
+        error: 'Midia sem URL publica ou arquivo local para envio',
+        code: 'missing_media_source',
+        io,
+      })
+    } else {
+      await enqueueOutboundMessage({
+        messageId: msg.id,
+        companyId: company_id,
+        clientTempId,
+        payload: buildQueuePayload({
+          kind: mediaKind,
+          phone: telefoneParaEnvio,
+          content: {
+            mediaUrl: mediaUrlPublica,
+            fallbackMediaUrl,
+            uploadFilePath: fileWork.path || null,
+            fileName: fileWork.originalname || '',
+            caption: waCaption,
+            audioMeta: tipo === 'audio' || tipo === 'voice'
+              ? { originalName: fileWork.originalname, mimeType: fileWork.mimetype }
+              : undefined,
+          },
+          opts: {
+            referenceId: `crm-${msg.id}`,
+            sendOrigin: 'atendimento_humano_midia',
+          },
+        }),
+      })
+      console.log('[ENVIO_MIDIA] Mensagem enfileirada para envio WhatsApp', {
+        company_id,
+        conversa_id,
+        mensagem_id: msg.id,
+        telefone_destino: String(telefoneParaEnvio || '').slice(-12),
+        whatsapp_instance_id: whatsappInstanceId,
+        tipo,
+      })
+    }
+
+  // Nao retornar mensagem completa no HTTP: mensagem chega via nova_mensagem.
+  return { ok: true, msg, aviso_whatsapp: avisoWhatsapp }
 
     const sendMediaWithUrl = (mediaUrl) => {
       const provider = getProvider()
@@ -7333,7 +7690,11 @@ async function encaminharUmaMensagemParaConversa(ctx) {
   const prefixoEncaminhado = '[Encaminhado]'
 
   let novaMensagem = null
-  let resultadoEnvio = false
+  let resultadoEnvio = { ok: true, messageId: null }
+  let queuePayloadEncaminhamento = null
+  if (!telefoneParaEnvio) {
+    return fail(400, 'Numero do contato indisponivel para encaminhamento')
+  }
 
   const tipoOriginal = String(mensagemOriginal.tipo || '').toLowerCase()
   const temUrl = !!(mensagemOriginal.url)
@@ -7564,6 +7925,86 @@ async function encaminharUmaMensagemParaConversa(ctx) {
     }
   }
 
+  if (novaMensagem && !queuePayloadEncaminhamento) {
+    const tipoNova = String(novaMensagem.tipo || '').toLowerCase()
+    const baseUrl = (process.env.APP_URL || process.env.BASE_URL || '').replace(/\/$/, '')
+    const mediaUrl = novaMensagem.url
+      ? (String(novaMensagem.url).startsWith('http') ? novaMensagem.url : baseUrl ? `${baseUrl}${novaMensagem.url}` : null)
+      : null
+    if (['imagem', 'video', 'audio', 'voice', 'arquivo', 'sticker'].includes(tipoNova) && mediaUrl) {
+      queuePayloadEncaminhamento = buildQueuePayload({
+        kind: ({ imagem: 'image', video: 'video', audio: 'audio', voice: 'voice', sticker: 'sticker', arquivo: 'file' })[tipoNova] || 'file',
+        phone: telefoneParaEnvio,
+        content: {
+          mediaUrl,
+          fileName: novaMensagem.nome_arquivo || '',
+          caption: usuarioNome ? `${prefixoEncaminhado} - ${usuarioNome}` : prefixoEncaminhado,
+        },
+        opts: {
+          referenceId: `crm-${novaMensagem.id}`,
+          sendOrigin: 'encaminhamento_atendimento',
+        },
+      })
+    } else if (tipoNova === 'contact') {
+      const meta = novaMensagem.contact_meta || {}
+      const contactPhone = String(meta.telefone || meta.phone || '').replace(/\D/g, '')
+      queuePayloadEncaminhamento = contactPhone
+        ? buildQueuePayload({
+            kind: 'contact',
+            phone: telefoneParaEnvio,
+            content: { name: meta.nome || meta.name || novaMensagem.texto || 'Contato', contactPhone },
+            opts: {
+              referenceId: `crm-${novaMensagem.id}`,
+              sendOrigin: 'encaminhamento_atendimento',
+            },
+          })
+        : buildQueuePayload({
+            kind: 'text',
+            phone: telefoneParaEnvio,
+            content: { text: `${prefixoEncaminhado}\n${novaMensagem.texto || 'Contato'}` },
+            opts: {
+              referenceId: `crm-${novaMensagem.id}`,
+              sendOrigin: 'encaminhamento_atendimento',
+            },
+          })
+    } else if (tipoNova === 'location' && novaMensagem.location_meta) {
+      const { latitude, longitude, nome, endereco } = novaMensagem.location_meta
+      const address = usuarioNome
+        ? `${usuarioNome} - ${[nome, endereco].filter(Boolean).join('\n') || `${latitude},${longitude}`}`
+        : [nome, endereco].filter(Boolean).join('\n') || `${latitude},${longitude}`
+      queuePayloadEncaminhamento = buildQueuePayload({
+        kind: 'location',
+        phone: telefoneParaEnvio,
+        content: { address, lat: latitude, lng: longitude },
+        opts: {
+          referenceId: `crm-${novaMensagem.id}`,
+          sendOrigin: 'encaminhamento_atendimento',
+        },
+      })
+    } else {
+      let textoFila = String(novaMensagem.texto || '').trim() || '(mensagem encaminhada)'
+      if (!textoFila.startsWith(prefixoEncaminhado)) textoFila = `${prefixoEncaminhado}\n${textoFila}`
+      if (usuarioNome && !textoFila.includes(usuarioNome)) textoFila = `${textoFila}\n- ${usuarioNome}`
+      queuePayloadEncaminhamento = buildQueuePayload({
+        kind: 'text',
+        phone: telefoneParaEnvio,
+        content: { text: textoFila },
+        opts: {
+          referenceId: `crm-${novaMensagem.id}`,
+          sendOrigin: 'encaminhamento_atendimento',
+        },
+      })
+    }
+  }
+
+  if (novaMensagem && queuePayloadEncaminhamento) {
+    await enqueueOutboundMessage({
+      messageId: novaMensagem.id,
+      companyId: company_id,
+      payload: queuePayloadEncaminhamento,
+    })
+  }
+
   const ok = resultadoEnvio === true || resultadoEnvio?.ok === true
   const waMessageId = (typeof resultadoEnvio === 'object' && resultadoEnvio?.messageId)
     ? String(resultadoEnvio.messageId).trim() : null
@@ -7710,7 +8151,7 @@ exports.encaminharMensagem = async (req, res) => {
         conversa_id,
         telefoneParaEnvio,
         whatsappInstanceId,
-        provider,
+        provider: {},
         usuarioNome,
         mensagemOriginal: byId.get(orderedIds[i]),
         tipo_encaminhamento,
