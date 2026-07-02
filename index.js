@@ -79,6 +79,7 @@ const { startAbsenceFinalizationScheduler } = require('./services/absenceFinaliz
 const { startAdminAtendimentoAlertaScheduler } = require('./services/adminAtendimentoAlertaScheduler')
 const { startAtendimentoSemRespostaScheduler } = require('./services/atendimentoSemRespostaScheduler')
 const { startProdutosSyncScheduler } = require('./services/produtosSyncScheduler')
+const { startPendingOutboundReconciliationScheduler } = require('./services/pendingOutboundReconciliationScheduler')
 const { usuarioPodeVerGrupo } = require('./helpers/departamentoGruposHelper')
 
 async function canUserJoinConversationRoom({ company_id, user_id, role, departamento_ids, conversa_id }) {
@@ -396,6 +397,7 @@ server.listen(PORT, '0.0.0.0', () => {
     startAdminAtendimentoAlertaScheduler()
     startAtendimentoSemRespostaScheduler(io)
     startProdutosSyncScheduler()
+    startPendingOutboundReconciliationScheduler(io)
     const { startInboundMediaRetryScheduler } = require('./services/inboundMediaPersistenceService')
     startInboundMediaRetryScheduler(supabase, io)
   } else if (backgroundJobsDisabled) {

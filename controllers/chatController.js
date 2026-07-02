@@ -45,20 +45,21 @@ const {
   getEndOfTodayIso,
 } = require('../services/chatListCountsService')
 const { normalizarTimestampSemFusoAmbiguoParaApi } = require('../helpers/timestampApiCompat')
+const { isRealWhatsAppId, isUltramsgNumericQueueId } = require('../helpers/whatsappMessageIdHelper')
+const { schedulePendingOutboundReconciliation } = require('../services/pendingOutboundReconciliationService')
 
-/** UltraMsg retorna id interno (ex: 35096), não o messageId do WhatsApp. Só usar como whatsapp_id se for o ID real. */
-function isRealWhatsAppId(waId) {
-  if (!waId) return false
-  const s = String(waId).trim()
-  if (!s || s === 'null' || s === 'undefined' || s === 'false' || s === '0') return false
-  // Formato WhatsApp nativo: contém @ (ex: false_5511...@c.us, 5511...@c.us)
-  if (s.includes('@')) return true
-  // IDs hexadecimais do UltraMsg: 12+ chars hex (ex: BAE543FE1CE17AFA = 16 chars)
-  if (/^[A-F0-9]{12,}$/i.test(s)) return true
-  // IDs longos de outros provedores (Z-API, Meta, etc.)
-  if (s.length > 20) return true
-  return false
-}
+/**
+ * Deduplicação in-memory para double-send de texto.
+ * Chave: `${company_id}:${conversa_id}:${client_temp_id}` → { id, status, ts }
+ * TTL: 30s. Limpo a cada 5 min para evitar memory leak.
+ */
+const _clientTempIdDeduplicationMap = new Map()
+setInterval(() => {
+  const cutoff = Date.now() - 30_000
+  for (const [key, val] of _clientTempIdDeduplicationMap.entries()) {
+    if (val.ts < cutoff) _clientTempIdDeduplicationMap.delete(key)
+  }
+}, 5 * 60 * 1000).unref()
 
 function normalizeLinkPayload(link) {
   if (!link || typeof link !== 'object') return null
@@ -5174,6 +5175,23 @@ exports.enviarMensagemChat = async (req, res) => {
       return res.status(400).json({ error: 'texto é obrigatório' })
     }
 
+    // Deduplicação por client_temp_id em memória: evita double-send por double-click ou retry do frontend.
+    // Map com TTL de 30s por (company_id + conversa_id + client_temp_id).
+    if (clientTempId) {
+      const dedupKey = `${company_id}:${conversa_id}:${clientTempId}`
+      const existing = _clientTempIdDeduplicationMap.get(dedupKey)
+      if (existing && Date.now() - existing.ts < 30_000) {
+        return res.json({
+          ok: true,
+          id: existing.id,
+          conversa_id: Number(conversa_id),
+          client_temp_id: clientTempId,
+          status: existing.status || 'pending',
+          deduplicated: true,
+        })
+      }
+    }
+
     const io = req.app.get('io')
     const permEnvio = await assertPodeEnviarMensagem({
       company_id,
@@ -5301,6 +5319,12 @@ exports.enviarMensagemChat = async (req, res) => {
     }
 
     if (errMsg) return res.status(500).json({ error: errMsg.message })
+
+    // Registrar no Map de deduplicação após INSERT bem-sucedido
+    if (clientTempId && msg?.id) {
+      const dedupKey = `${company_id}:${conversa_id}:${clientTempId}`
+      _clientTempIdDeduplicationMap.set(dedupKey, { id: msg.id, status: 'pending', ts: Date.now() })
+    }
 
     // Paralelo: tryMarkWaiting + UPDATE conversas + UPDATE clientes são independentes entre si
     const updateNow = new Date().toISOString()
@@ -5476,6 +5500,7 @@ exports.enviarMensagemChat = async (req, res) => {
         // Usado apenas para salvar whatsapp_id e habilitar rastreamento de ACK.
         // NÃO determina se o envio foi bem-sucedido — isso depende apenas de ok.
         const hasValidId = isRealWhatsAppId(waMessageId)
+        const hasQueueId = !!waMessageId && isUltramsgNumericQueueId(waMessageId)
         const providerError = (typeof result === 'object') ? (result?.error || result?.blockedBy || null) : null
         const acceptedWithoutTrace = ok && !hasValidId
 
@@ -5527,7 +5552,7 @@ exports.enviarMensagemChat = async (req, res) => {
           .update({
             status: nextStatus,
             status_mensagem: nextStatusMensagem,
-            ...(hasValidId ? { whatsapp_id: waMessageId } : {}),
+            ...(hasValidId || hasQueueId ? { whatsapp_id: waMessageId } : {}),
           })
           .eq('company_id', company_id)
           .eq('id', msg.id)
@@ -5541,8 +5566,16 @@ exports.enviarMensagemChat = async (req, res) => {
               conversa_id: Number(conversa_id),
               status: nextStatus,
               status_mensagem: nextStatusMensagem,
-              ...(hasValidId ? { whatsapp_id: waMessageId } : {}),
+              ...(hasValidId || hasQueueId ? { whatsapp_id: waMessageId } : {}),
             })
+        }
+
+        if (acceptedWithoutTrace) {
+          schedulePendingOutboundReconciliation({
+            companyId: company_id,
+            mensagemId: msg.id,
+            io: io2,
+          })
         }
 
         sendResult = result
@@ -7003,6 +7036,7 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
         conversaId: conversa_id,
         whatsappInstanceId: whatsappInstanceId || undefined,
         sendOrigin: 'atendimento_humano_midia',
+        referenceId: `crm-${msg.id}`,
         returnDetails: true,
         ...(isAudioTipo ? { audioMeta: { originalName: fileWork.originalname, mimeType: fileWork.mimetype } } : {}),
       }
@@ -7032,6 +7066,7 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
           const ok = normalizedResult.ok === true
           const waMessageId = normalizedResult?.messageId ? String(normalizedResult.messageId).trim() : null
           const hasTraceableMediaId = isRealWhatsAppId(waMessageId)
+          const hasQueueMediaId = !!waMessageId && isUltramsgNumericQueueId(waMessageId)
           const nextStatus = ok ? (hasTraceableMediaId ? 'sent' : 'pending') : 'erro'
           const nextStatusMensagem = ok ? (hasTraceableMediaId ? 'sent' : 'sending') : 'erro'
           
@@ -7051,7 +7086,7 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
             .update({ 
               status: nextStatus,
               status_mensagem: nextStatusMensagem,
-              ...(hasTraceableMediaId ? { whatsapp_id: waMessageId } : {})
+              ...(hasTraceableMediaId || hasQueueMediaId ? { whatsapp_id: waMessageId } : {})
             })
             .eq('company_id', company_id)
             .eq('id', msg.id)
@@ -7063,9 +7098,17 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
               conversa_id: Number(conversa_id), 
               status: nextStatus, 
               status_mensagem: nextStatusMensagem,
-              ...(hasTraceableMediaId ? { whatsapp_id: waMessageId } : {})
+              ...(hasTraceableMediaId || hasQueueMediaId ? { whatsapp_id: waMessageId } : {})
             }
             io2.to(`empresa_${company_id}`).to(`conversa_${conversa_id}`).to(`usuario_${user_id}`).emit(io2.EVENTS?.STATUS_MENSAGEM || 'status_mensagem', payload)
+          }
+
+          if (ok && !hasTraceableMediaId) {
+            schedulePendingOutboundReconciliation({
+              companyId: company_id,
+              mensagemId: msg.id,
+              io: io2,
+            })
           }
         })
         .catch(async (e) => {

@@ -731,7 +731,7 @@ async function sendText(phone, message, opts = {}) {
  * Envia link enriquecido (fallback: sendText com URL para preview automático).
  */
 async function sendLink(phone, payload, opts = {}) {
-  await awaitSendDelay(opts?.companyId ?? opts?.company_id)
+  await awaitSendDelay(opts?.companyId ?? opts?.company_id, opts)
   const linkUrl = String(payload?.linkUrl || '').trim()
   const title = String(payload?.title || '').trim()
   const desc = String(payload?.linkDescription || '').trim()
@@ -1296,6 +1296,14 @@ async function getMessages(opts = {}) {
   const validStatus = ['all', 'queue', 'sent', 'unsent', 'invalid', 'expired']
   const extraParams = { page: String(page), limit: String(limit), sort }
   if (validStatus.includes(status) && status !== 'all') extraParams.status = status
+  const referenceId = opts?.referenceId != null ? String(opts.referenceId).trim() : ''
+  const providerId = opts?.id != null ? String(opts.id).trim() : ''
+  const from = opts?.from != null ? String(opts.from).trim() : ''
+  const to = opts?.to != null ? String(opts.to).trim() : ''
+  if (referenceId) extraParams.referenceId = referenceId
+  if (providerId) extraParams.id = providerId
+  if (from) extraParams.from = from
+  if (to) extraParams.to = to
 
   const { ok, data, text } = await getJson({ ...cfg, endpoint: '/messages', extraParams })
   if (!ok) {
