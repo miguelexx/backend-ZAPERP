@@ -111,6 +111,32 @@ async function resolveConversationWhatsappInstance(company_id, conversa) {
   return defaultId
 }
 
+/** Bloqueia envio quando a instância UltraMsg está explicitamente desconectada. */
+async function assertWhatsappConnectedForSend(provider, { company_id, whatsappInstanceId }) {
+  if (!provider?.getConnectionStatus) return { ok: true }
+  try {
+    const conn = await provider.getConnectionStatus({
+      companyId: company_id,
+      whatsappInstanceId: whatsappInstanceId || undefined,
+    })
+    if (conn?.configured === false) {
+      return {
+        ok: false,
+        error: 'Instância WhatsApp não configurada. Verifique Integrações → WhatsApp.',
+      }
+    }
+    if (conn?.connected === false) {
+      return {
+        ok: false,
+        error: 'WhatsApp desconectado na UltraMsg. Reconecte a instância no painel antes de enviar.',
+      }
+    }
+    return { ok: true, conn }
+  } catch (_) {
+    return { ok: true }
+  }
+}
+
 function safeWhatsappInstanceMeta(instance) {
   if (!instance) return {}
   return {
@@ -5447,8 +5473,35 @@ exports.enviarMensagemChat = async (req, res) => {
       const { nome: usuarioNome } = await getUsuarioParaEnvioCliente(supabase, company_id, user_id)
       const provider = getProvider()
 
+      const connCheck = await assertWhatsappConnectedForSend(provider, { company_id, whatsappInstanceId })
+      if (!connCheck.ok) {
+        console.warn('[ENVIO_MANUAL] ❌ Instância desconectada ou não configurada', {
+          company_id,
+          conversa_id,
+          mensagem_id: msg.id,
+          whatsapp_instance_id: whatsappInstanceId,
+          erro: connCheck.error,
+        })
+        await supabase
+          .from('mensagens')
+          .update({ status: 'erro', status_mensagem: 'failed' })
+          .eq('company_id', company_id)
+          .eq('id', msg.id)
+        const ioConn = req.app.get('io')
+        if (ioConn) {
+          ioConn.to(`empresa_${company_id}`).to(`conversa_${conversa_id}`).to(`usuario_${user_id}`).emit('status_mensagem', {
+            mensagem_id: msg.id,
+            conversa_id: Number(conversa_id),
+            status: 'erro',
+            status_mensagem: 'failed',
+            motivo: connCheck.error,
+          })
+        }
+        sendResult = { ok: false, error: connCheck.error }
+      }
+
       // Log de início de envio manual (auditoria e diagnóstico)
-      console.log('[ENVIO_MANUAL] Iniciando envio', {
+      if (connCheck.ok) console.log('[ENVIO_MANUAL] Iniciando envio', {
         company_id,
         conversa_id,
         mensagem_id: msg.id,
@@ -5461,7 +5514,9 @@ exports.enviarMensagemChat = async (req, res) => {
       try {
         let result = null
 
-        if (hasLinkPayload && provider.sendLink) {
+        if (!connCheck.ok) {
+          result = sendResult
+        } else if (hasLinkPayload && provider.sendLink) {
           let messageToSend = String(texto).trim()
           const linkUrlStr = linkPayload.linkUrl
           if (linkUrlStr && !messageToSend.includes(linkUrlStr)) {
@@ -5570,11 +5625,12 @@ exports.enviarMensagemChat = async (req, res) => {
             })
         }
 
-        if (acceptedWithoutTrace) {
+        if (acceptedWithoutTrace || (ok && hasQueueId && !hasValidId)) {
           schedulePendingOutboundReconciliation({
             companyId: company_id,
             mensagemId: msg.id,
             io: io2,
+            delayMs: 20_000,
           })
         }
 
