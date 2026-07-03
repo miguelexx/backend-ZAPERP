@@ -1,4 +1,5 @@
 const supabase = require('../config/supabase')
+const { pgErrorStatus } = require('../helpers/pgErrorStatus')
 
 function getPublicKey(req, res) {
   const pub = String(process.env.VAPID_PUBLIC_KEY || '').trim()
@@ -43,8 +44,9 @@ async function subscribe(req, res) {
     )
 
     if (error) {
-      console.warn('[push] subscribe upsert:', error.message || error)
-      return res.status(500).json({ error: 'Não foi possível salvar a subscription' })
+      const { status, message } = pgErrorStatus(error)
+      console.warn('[push] subscribe upsert:', error.message || error, { code: error.code, httpStatus: status })
+      return res.status(status).json({ error: message || 'Não foi possível salvar a subscription' })
     }
 
     return res.json({ ok: true })
@@ -109,8 +111,9 @@ async function sendTestPush(req, res) {
       .eq('usuario_id', usuario_id)
 
     if (error) {
-      console.warn('[push] test subscriptions:', error.message || error)
-      return res.status(500).json({ error: 'Falha ao carregar subscriptions' })
+      const { status, message } = pgErrorStatus(error)
+      console.warn('[push] test subscriptions:', error.message || error, { code: error.code, httpStatus: status })
+      return res.status(status).json({ error: message || 'Falha ao carregar subscriptions' })
     }
 
     const subs = (rows || []).map(webPushService.subscriptionFromRow).filter(Boolean)

@@ -169,8 +169,9 @@ async function resolveFromProviderRow(row, providerRow, io) {
       status: nextStatus,
       status_mensagem: nextStatus,
     }
+    // whatsapp_id só recebe ID real do WhatsApp; queue ID numérico vai para provider_queue_id.
     if (isRealWhatsAppId(waId)) updates.whatsapp_id = String(waId).trim()
-    else if (isUltramsgNumericQueueId(waId) && !row.whatsapp_id) updates.whatsapp_id = String(waId).trim()
+    else if (isUltramsgNumericQueueId(waId) && !row.provider_queue_id) updates.provider_queue_id = String(waId).trim()
     return patchMessage(row, updates, io)
   }
 
@@ -190,10 +191,15 @@ async function queryProviderForMessage(row) {
     }
   }
 
-  const waStored = row.whatsapp_id != null ? String(row.whatsapp_id).trim() : ''
-  if (waStored) {
+  // Busca por ID: usa whatsapp_id (linhas antigas com queue id) ou provider_queue_id (linhas novas).
+  // O parâmetro `id` da UltraMsg espera o ID interno numérico deles — exatamente o queue id.
+  const idCandidates = [
+    row.whatsapp_id != null ? String(row.whatsapp_id).trim() : '',
+    row.provider_queue_id != null ? String(row.provider_queue_id).trim() : '',
+  ].filter(Boolean)
+  for (const idCandidate of idCandidates) {
     for (const status of ['all', 'sent', 'queue', 'unsent', 'invalid', 'expired']) {
-      const result = await fetchProviderMessages(opts, { id: waStored, status, limit: 3 })
+      const result = await fetchProviderMessages(opts, { id: idCandidate, status, limit: 3 })
       if (result.ok && Array.isArray(result.data) && result.data.length > 0) {
         return { source: `id:${status}`, row: result.data[0], list: result.data }
       }
@@ -280,7 +286,7 @@ async function fetchPendingOutboundRows({ companyId = null, limit = null, mensag
 
   let query = supabase
     .from('mensagens')
-    .select('id, company_id, conversa_id, whatsapp_instance_id, whatsapp_id, status, status_mensagem, direcao, criado_em, autor_usuario_id, tipo')
+    .select('id, company_id, conversa_id, whatsapp_instance_id, whatsapp_id, provider_queue_id, status, status_mensagem, direcao, criado_em, autor_usuario_id, tipo')
     .eq('direcao', 'out')
     .in('status', ['pending', 'sending'])
     .gte('criado_em', oldestIso)

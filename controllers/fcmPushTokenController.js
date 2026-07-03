@@ -1,21 +1,9 @@
 const supabase = require('../config/supabase')
 const { classifyIncomingPushToken } = require('../helpers/pushTokenFormat')
+const { pgErrorStatus } = require('../helpers/pgErrorStatus')
 
 /** PushSubscription.toJSON() pode ultrapassar 4k em edge cases */
 const MAX_TOKEN_LEN = 32768
-
-/** Detecta se o erro Postgres indica tabela/coluna ausente ou permissão negada. */
-function pgErrorStatus(error) {
-  const code = String(error?.code || '')
-  const msg = String(error?.message || '').toLowerCase()
-  if (code === '42P01' || msg.includes('does not exist')) {
-    return { status: 503, message: 'Tabela de push não encontrada — migration pendente em produção' }
-  }
-  if (code === '42501' || msg.includes('permission denied')) {
-    return { status: 503, message: 'Permissão negada ao salvar push — verificar configuração do banco' }
-  }
-  return { status: 500, message: null }
-}
 const MAX_FIELD = 512
 
 function normalizeStr(v, max) {

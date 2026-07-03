@@ -85,5 +85,11 @@ const destructiveLimiter = limiter({
   message: 'Muitas acoes sensiveis em pouco tempo. Aguarde 1 minuto e tente novamente.',
 })
 
-module.exports = { loginLimiter, webhookLimiter, apiLimiter, destructiveLimiter }
+module.exports = {
+  loginLimiter,
+  webhookLimiter,
+  apiLimiter,
+  destructiveLimiter,
+  _test: { extractJwtBucketKey, getClientIp },
+}
 

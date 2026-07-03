@@ -4061,13 +4061,14 @@ exports.statusZapi = async (req, res) => {
       if (!msg && isUltramsgNumericId && company_id) {
         let qIdQuery = supabase
           .from('mensagens')
-          .select(statusSelect)
+          .select(`${statusSelect}, status`)
           .eq('company_id', company_id)
           .eq('provider_queue_id', idStr)
           .order('id', { ascending: false })
           .limit(1)
         qIdQuery = applyWhatsappInstanceFilterOrLegacy(qIdQuery, whatsapp_instance_id)
-        const { data: queueRow } = await qIdQuery
+        const { data: queueRows } = await qIdQuery
+        const queueRow = Array.isArray(queueRows) ? queueRows[0] : queueRows
         if (queueRow?.id) {
           const cur = queueRow.status || 'pending'
           if (statusRank(cur) > statusRank(effectiveStatus)) effectiveStatus = cur

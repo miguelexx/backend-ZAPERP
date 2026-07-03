@@ -6032,11 +6032,12 @@ exports.enviarContatoWhatsapp = async (req, res) => {
       typeof result === 'object' && result?.messageId ? String(result.messageId).trim() : null
 
     const hasTraceableContactId = isRealWhatsAppId(waMessageId)
+    const hasQueueContactId = !!waMessageId && isUltramsgNumericQueueId(waMessageId)
     const nextStatus = ok ? (hasTraceableContactId ? 'sent' : 'pending') : 'erro'
     const nextStatusMensagem = ok ? (hasTraceableContactId ? 'sent' : 'sending') : 'erro'
     await supabase
       .from('mensagens')
-      .update({ status: nextStatus, status_mensagem: nextStatusMensagem, ...(hasTraceableContactId ? { whatsapp_id: waMessageId } : {}) })
+      .update({ status: nextStatus, status_mensagem: nextStatusMensagem, ...(hasTraceableContactId ? { whatsapp_id: waMessageId } : {}), ...(hasQueueContactId ? { provider_queue_id: waMessageId } : {}) })
       .eq('company_id', company_id)
       .eq('id', msg.id)
 
@@ -6216,12 +6217,13 @@ exports.enviarLocalizacao = async (req, res) => {
     const ok = result?.ok === true
     const waMessageId = result?.messageId ? String(result.messageId).trim() : null
     const hasTraceableLocationId = isRealWhatsAppId(waMessageId)
+    const hasQueueLocationId = !!waMessageId && isUltramsgNumericQueueId(waMessageId)
     const nextStatus = ok ? (hasTraceableLocationId ? 'sent' : 'pending') : 'erro'
     const nextStatusMensagem = ok ? (hasTraceableLocationId ? 'sent' : 'sending') : 'erro'
 
     await supabase
       .from('mensagens')
-      .update({ status: nextStatus, status_mensagem: nextStatusMensagem, ...(hasTraceableLocationId ? { whatsapp_id: waMessageId } : {}) })
+      .update({ status: nextStatus, status_mensagem: nextStatusMensagem, ...(hasTraceableLocationId ? { whatsapp_id: waMessageId } : {}), ...(hasQueueLocationId ? { provider_queue_id: waMessageId } : {}) })
       .eq('company_id', company_id)
       .eq('id', msg.id)
 
@@ -6333,11 +6335,12 @@ exports.enviarLigacaoWhatsapp = async (req, res) => {
       typeof result === 'object' && result?.messageId ? String(result.messageId).trim() : null
 
     const hasTraceableCallId = isRealWhatsAppId(waMessageId)
+    const hasQueueCallId = !!waMessageId && isUltramsgNumericQueueId(waMessageId)
     const nextStatus = ok ? (hasTraceableCallId ? 'sent' : 'pending') : 'erro'
     const nextStatusMensagem = ok ? (hasTraceableCallId ? 'sent' : 'sending') : 'erro'
     await supabase
       .from('mensagens')
-      .update({ status: nextStatus, status_mensagem: nextStatusMensagem, ...(hasTraceableCallId ? { whatsapp_id: waMessageId } : {}) })
+      .update({ status: nextStatus, status_mensagem: nextStatusMensagem, ...(hasTraceableCallId ? { whatsapp_id: waMessageId } : {}), ...(hasQueueCallId ? { provider_queue_id: waMessageId } : {}) })
       .eq('company_id', company_id)
       .eq('id', msg.id)
 
@@ -7253,24 +7256,26 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
             console.log('✅ WhatsApp mídia enviada:', phone?.slice(-12), tipo, waMessageId ? `(${waMessageId})` : '')
           }
           
+          // whatsapp_id só recebe ID real; queue ID numérico vai para provider_queue_id (reconciliação de ACK)
           await supabase
             .from('mensagens')
-            .update({ 
+            .update({
               status: nextStatus,
               status_mensagem: nextStatusMensagem,
-              ...(hasTraceableMediaId || hasQueueMediaId ? { whatsapp_id: waMessageId } : {})
+              ...(hasTraceableMediaId ? { whatsapp_id: waMessageId } : {}),
+              ...(hasQueueMediaId ? { provider_queue_id: waMessageId } : {})
             })
             .eq('company_id', company_id)
             .eq('id', msg.id)
-            
+
           const io2 = req.app?.get('io')
           if (io2) {
-            const payload = { 
-              mensagem_id: msg.id, 
-              conversa_id: Number(conversa_id), 
-              status: nextStatus, 
+            const payload = {
+              mensagem_id: msg.id,
+              conversa_id: Number(conversa_id),
+              status: nextStatus,
               status_mensagem: nextStatusMensagem,
-              ...(hasTraceableMediaId || hasQueueMediaId ? { whatsapp_id: waMessageId } : {})
+              ...(hasTraceableMediaId ? { whatsapp_id: waMessageId } : {})
             }
             io2.to(`empresa_${company_id}`).to(`conversa_${conversa_id}`).to(`usuario_${user_id}`).emit(io2.EVENTS?.STATUS_MENSAGEM || 'status_mensagem', payload)
           }
@@ -7783,6 +7788,7 @@ async function encaminharUmaMensagemParaConversa(ctx) {
   const waMessageId = (typeof resultadoEnvio === 'object' && resultadoEnvio?.messageId)
     ? String(resultadoEnvio.messageId).trim() : null
   const hasTraceableForwardId = isRealWhatsAppId(waMessageId)
+  const hasQueueForwardId = !!waMessageId && isUltramsgNumericQueueId(waMessageId)
   const nextStatus = ok ? (hasTraceableForwardId ? 'sent' : 'pending') : 'erro'
   const nextStatusMensagem = ok ? (hasTraceableForwardId ? 'sent' : 'sending') : 'erro'
 
@@ -7792,6 +7798,7 @@ async function encaminharUmaMensagemParaConversa(ctx) {
       status: nextStatus,
       status_mensagem: nextStatusMensagem,
       ...(hasTraceableForwardId ? { whatsapp_id: waMessageId } : {}),
+      ...(hasQueueForwardId ? { provider_queue_id: waMessageId } : {}),
     })
     .eq('company_id', company_id)
     .eq('id', novaMensagem.id)
