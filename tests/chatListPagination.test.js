@@ -37,6 +37,27 @@ describe('GET /api/chats pagination contract', () => {
     })
   })
 
+  test('orders Minha fila by recent activity even when a group is pinned', () => {
+    const rows = [
+      {
+        id: 100,
+        is_group: true,
+        fixada: true,
+        fixada_em: '2026-06-06T13:00:00.000Z',
+        ultima_atividade: '2026-06-06T11:41:00.000Z',
+      },
+      {
+        id: 200,
+        is_group: false,
+        fixada: false,
+        ultima_atividade: '2026-06-06T11:52:00.000Z',
+      },
+    ]
+
+    expect(_test.sortChatListAfterPrefs(rows, { minhaFilaAtiva: true }).map((row) => row.id)).toEqual([200, 100])
+    expect(_test.sortChatListAfterPrefs(rows, { minhaFilaAtiva: false }).map((row) => row.id)).toEqual([100, 200])
+  })
+
   test('does not include clients without conversation by default or without search', () => {
     expect(_test.shouldIncludeClientesSemConversa({
       incluirTodosClientesAtivo: false,
