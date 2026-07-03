@@ -6,7 +6,6 @@ const app = require('./app')
 const { Server } = require('socket.io')
 const jwt = require('jsonwebtoken')
 const supabase = require('./config/supabase')
-const { isOriginAllowed } = require('./config/corsOrigins')
 
 // Diagnóstico: em produção, logs mínimos (nunca expor tokens, senhas ou paths sensíveis)
 if (process.env.NODE_ENV !== 'production') {
@@ -42,7 +41,38 @@ if (!String(process.env.NODE_ENV || '').trim()) {
 
 const server = http.createServer(app)
 
-// CORS do Socket.IO: usa a mesma regra do Express.
+// CORS do Socket.IO: alinhado ao Express (CORS_ORIGINS + ZAPERP_CORS_EXTRA_ORIGINS + APP_URL + dev local).
+function collectAllowedSocketOrigins() {
+  const origins = new Set()
+  const pushCsv = (raw) => {
+    String(raw || '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .forEach((o) => origins.add(o))
+  }
+  pushCsv(process.env.CORS_ORIGINS)
+  pushCsv(process.env.ZAPERP_CORS_EXTRA_ORIGINS)
+  try {
+    const u = new URL(String(process.env.APP_URL || '').trim())
+    if (u.origin) origins.add(u.origin)
+  } catch (_) {
+    /* ignore */
+  }
+  if (!isProduction()) {
+    ;[
+      'http://localhost:3000',
+      'http://localhost:5173',
+      'http://127.0.0.1:5173',
+      'http://127.0.0.1:3000',
+      'http://localhost:4173',
+      'http://127.0.0.1:4173',
+    ].forEach((o) => origins.add(o))
+  }
+  return Array.from(origins)
+}
+
+const allowedSocketOrigins = collectAllowedSocketOrigins()
 
 const internalChatSocket = require('./socket/internalChatSocket')
 const { startAbsenceFinalizationScheduler } = require('./services/absenceFinalizationScheduler')
@@ -141,11 +171,11 @@ async function marcarConversaLidaSocket({ company_id, user_id, role, departament
 const io = new Server(server, {
   cors: {
     origin(origin, cb) {
-      if (isOriginAllowed(origin)) return cb(null, true)
+      if (!origin) return cb(null, true)
+      if (allowedSocketOrigins.includes(origin)) return cb(null, true)
       return cb(new Error('Not allowed by CORS'))
     },
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-    credentials: true,
   },
   transports: ['websocket', 'polling'],
   pingTimeout: 60000,

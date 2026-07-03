@@ -7,7 +7,6 @@ const fs = require('fs')
 const { randomUUID } = require('crypto')
 const { loadEnv, isProduction } = require('./config/env')
 loadEnv()
-const { collectAllowedOrigins, isOriginAllowed } = require('./config/corsOrigins')
 const { getUploadsRoot, ensureUploadsRootExists } = require('./config/uploadsRoot')
 const tagsRoutes = require('./routes/tagRoutes')
 ensureUploadsRootExists()
@@ -16,9 +15,28 @@ const isProd = isProduction()
 
 // Origens CORS (definidas antes do Helmet: também alimentam CSP frame-ancestors
 // para o SPA em outro host poder exibir PDFs/arquivos de GET /uploads em <iframe>.)
+const allowedOrigins = [
+  'https://zaperp.wmsistemas.inf.br',
+  'https://www.zaperp.wmsistemas.inf.br',
+  'http://zaperp.wmsistemas.inf.br',
+  'http://www.zaperp.wmsistemas.inf.br',
+  ...(process.env.NODE_ENV !== 'production'
+    ? ['http://localhost:3000', 'http://localhost:5173', 'http://127.0.0.1:5173', 'http://127.0.0.1:3000']
+    : [])
+]
+const extraOrigins = [
+  ...String(process.env.CORS_ORIGINS || '').split(','),
+  ...String(process.env.ZAPERP_CORS_EXTRA_ORIGINS || '').split(','),
+].map((s) => s.trim()).filter(Boolean)
+extraOrigins.forEach((o) => { if (o && !allowedOrigins.includes(o)) allowedOrigins.push(o) })
+
+const allowedOriginPatterns = [
+  /^https?:\/\/[a-z0-9-]+\.wmsistemas\.inf\.br$/i,
+  /^https?:\/\/[a-z0-9-]+\.wmsistemas\.ats$/i,
+]
+
 function buildFrameAncestorsDirective() {
   const s = new Set(["'self'"])
-  const allowedOrigins = collectAllowedOrigins()
   allowedOrigins.forEach((o) => {
     if (typeof o === 'string' && /^https?:\/\//i.test(o)) s.add(o)
   })
@@ -118,13 +136,15 @@ app.use('/webhooks/whatsapp', webhookLimiter, webhookUltramsgRoutes)
 // =====================================================
 // CORS — aplicado APÓS os webhooks.
 // Só as rotas da API/frontend passam por aqui.
-// A regra de origem fica centralizada em config/corsOrigins.js.
+// (allowedOrigins / allowedOriginPatterns definidos no topo do arquivo.)
 // =====================================================
 
 const corsOptions = {
   origin(origin, callback) {
     // Requisições sem origin (Postman, apps mobile) → sempre permitir
-    if (isOriginAllowed(origin)) return callback(null, true)
+    if (!origin) return callback(null, true)
+    if (allowedOrigins.includes(origin)) return callback(null, true)
+    if (allowedOriginPatterns.some((re) => re.test(origin))) return callback(null, true)
     return callback(new Error('CORS não permitido para esta origem: ' + origin))
   },
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
