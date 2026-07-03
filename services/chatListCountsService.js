@@ -397,12 +397,9 @@ function applyChatListSqlFilters(query, ctx, overrides = {}) {
   }
 
   if (minhaFilaAtiva) {
-    const incluirGruposSetor = !isAdmin && grupoIdsPermitidosPorDepartamento.length > 0
-    if (!incluirGruposSetor) {
-      q = q.or('tipo.is.null,tipo.neq.grupo')
-    }
+    q = q.or('tipo.is.null,tipo.neq.grupo')
     q = q.or(
-      `${incluirGruposSetor ? `id.in.(${grupoIdsPermitidosPorDepartamento.join(',')}),` : ''}status_atendimento.eq.aberta,and(status_atendimento.eq.em_atendimento,atendente_id.eq.${user_id}),and(status_atendimento.eq.aguardando_cliente,atendente_id.eq.${user_id}),and(status_atendimento.eq.pagamento_pendente,atendente_id.eq.${user_id}),and(status_atendimento.eq.em_atraso,atendente_id.eq.${user_id})${conversaIdsParticipanteAtivo.length > 0 ? `,and(status_atendimento.in.(em_atendimento,aguardando_cliente,pagamento_pendente,em_atraso),id.in.(${conversaIdsParticipanteAtivo.join(',')}))` : ''}`
+      `status_atendimento.eq.aberta,and(status_atendimento.eq.em_atendimento,atendente_id.eq.${user_id}),and(status_atendimento.eq.aguardando_cliente,atendente_id.eq.${user_id}),and(status_atendimento.eq.pagamento_pendente,atendente_id.eq.${user_id}),and(status_atendimento.eq.em_atraso,atendente_id.eq.${user_id})${conversaIdsParticipanteAtivo.length > 0 ? `,and(status_atendimento.in.(em_atendimento,aguardando_cliente,pagamento_pendente,em_atraso),id.in.(${conversaIdsParticipanteAtivo.join(',')}))` : ''}`
     )
   } else if (pagamentoPendenteAtivo) {
     q = q.eq('status_atendimento', 'pagamento_pendente')
@@ -493,7 +490,7 @@ function rowVisibleInPostFilteredList(row, ctx, overrides = {}) {
     ctx?.filtroAtendenteInformado != null ? Number(ctx.filtroAtendenteInformado) : null
 
   if (overrides.minha_fila === true) {
-    if (isGroup) return true
+    if (isGroup) return false
     if (['em_atendimento', 'aguardando_cliente', 'pagamento_pendente', 'em_atraso'].includes(status)) {
       return vinculadaAoUsuario
     }

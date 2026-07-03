@@ -85,7 +85,7 @@ describe('chatListCountsService', () => {
         ctx,
         { minha_fila: true }
       )
-    ).toBe(true)
+    ).toBe(false)
 
     expect(
       rowVisibleInPostFilteredList(

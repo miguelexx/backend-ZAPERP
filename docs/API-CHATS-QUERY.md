@@ -27,14 +27,6 @@ Sempre que precisar do valor **gravado no BD**, usar o campo **`status_atendimen
 
 ---
 
-## `minha_fila`
-
-- Inclui conversas abertas, conversas em atendimento do usuario logado e grupos vinculados aos departamentos do usuario via `departamento_grupos`.
-- Grupos de departamento entram como itens normais da lista: nao sao fixados automaticamente no topo.
-- A ordenacao deste filtro fica por `ultima_atividade DESC, id DESC`; apenas as conversas/grupos mais recentes aparecem primeiro.
-
----
-
 ## `atendente_id` (query string)
 
 - **Formato:** inteiro positivo = `usuarios.id`. **UUID não é aceite** neste parâmetro (`atendente_id` na conversa referencia `usuarios(id)` inteiro).

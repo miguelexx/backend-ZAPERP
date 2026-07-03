@@ -372,12 +372,6 @@ function splitChatListPage(rows = [], limit = 100) {
   }
 }
 
-function sortChatListAfterPrefs(conversas, { minhaFilaAtiva = false } = {}) {
-  return minhaFilaAtiva
-    ? sortConversationsByRecent(conversas)
-    : sortConversationsPinThenRecent(conversas)
-}
-
 function parseMessageHistoryPagination(query = {}, env = process.env) {
   const maxLimit = Math.max(1, parsePositiveInt(env.MESSAGE_HISTORY_MAX_LIMIT, 250))
   const defaultLimit = Math.min(maxLimit, Math.max(1, parsePositiveInt(env.MESSAGE_HISTORY_DEFAULT_LIMIT, 100)))
@@ -1247,7 +1241,7 @@ exports.obterUsuarioIdsQuePodemVerConversa = obterUsuarioIdsQuePodemVerConversa
 // =====================================================
 // 3) listarConversas (com unread_count + pesquisa avançada)
 // Query: tag_id, data_inicio, data_fim, status_atendimento, atendente_id, palavra, minha_fila, aguardando_cliente, tempo_parado, finalizacao_motivo (ex.: ausencia_cliente — filtra com status fechada)
-// minha_fila=1: conversas abertas (fila visível), em atendimento do usuário logado e grupos vinculados ao setor
+// minha_fila=1: só conversas (não grupo) em aberta (fila visível) + em_atendimento onde o responsável é o usuário logado
 // aguardando_cliente=1: só conversas “aguardando” em que o atendente responsável é o usuário logado (organização por atendente).
 //   Admin/supervisor pode combinar com atendente_id=<id> para ver a fila de outro colaborador (mesmo critério do restante da API).
 // atendente_id=<usuarios.id>: admin/supervisor — todas as conversas individuais com esse responsável (qualquer status_atendimento); sem minha_fila; ver docs/API-CHATS-QUERY.md
@@ -1735,9 +1729,9 @@ exports.listarConversas = async (req, res) => {
       ) {
         q = q.or('tipo.eq.grupo,status_atendimento.neq.mensagem_disparada,status_atendimento.is.null')
       }
-      // Filtro personalizado "Minha fila": abertas (fila) + em atendimento só comigo + grupos do setor; sem finalizadas
+      // Filtro personalizado "Minha fila": abertas (fila) + em atendimento só comigo + grupos do setor fixados; sem finalizadas
       if (minhaFilaAtiva) {
-        // Grupos vinculados ao setor do atendente (departamento_grupos) aparecem na Minha fila.
+        // Grupos vinculados ao setor do atendente (departamento_grupos) aparecem fixados na Minha fila.
         // O bloco de visibilidade acima já restringe quais grupos o atendente pode ver.
         // Admin ou usuário sem grupos vinculados: comportamento original (excluir grupos).
         const incluirGruposSetor = !isAdmin && grupoIdsPermitidosPorDepartamento.length > 0
@@ -2203,11 +2197,11 @@ exports.listarConversas = async (req, res) => {
       })
     }
 
-    // "Minha fila": alinha com abas Abertas + Em atendimento só do usuário + grupos do setor; exclui finalizadas e assumidas por outros
+    // "Minha fila": alinha com abas Abertas + Em atendimento só do usuário + grupos do setor fixados; exclui finalizadas e assumidas por outros
     if (minhaFilaAtiva) {
       conversasFormatadas = conversasFormatadas.filter((c) => {
         if (c.sem_conversa) return false
-        // Grupos do setor do atendente: visíveis na Minha fila, ordenados por atividade como qualquer conversa.
+        // Grupos do setor do atendente: sempre visíveis na Minha fila (visibilidade já restrita na query pelo bloco de departamento_grupos)
         if (c.is_group) return true
         if (c.status_atendimento === 'ociosa') return false
         if (
@@ -2513,7 +2507,7 @@ exports.listarConversas = async (req, res) => {
             }
           })
           if (!prefErr) {
-            conversasFormatadas = sortChatListAfterPrefs(conversasFormatadas, { minhaFilaAtiva })
+            conversasFormatadas = sortConversationsPinThenRecent(conversasFormatadas)
           }
         }
       }
@@ -8009,7 +8003,6 @@ exports._test = {
   assertPodeEnviarMensagem,
   parseChatListPagination,
   splitChatListPage,
-  sortChatListAfterPrefs,
   parseMessageHistoryPagination,
   splitMessageHistoryPage,
   shouldIncludeClientesSemConversa,
