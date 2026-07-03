@@ -102,13 +102,14 @@ function applyWhatsappInstanceFilterOrLegacy(query, whatsappInstanceId) {
   return query.is('whatsapp_instance_id', null)
 }
 
-function logAmbiguousWhatsappId(context, { company_id, whatsapp_instance_id, whatsapp_id, count }) {
+function logAmbiguousWhatsappId(context, { company_id, whatsapp_instance_id, whatsapp_id, count, conversa_ids }) {
   console.error('[webhook] whatsapp_id ambiguo; bloqueando atualizacao para evitar mistura multi-instancia', {
     context,
     company_id,
     whatsapp_instance_id: whatsapp_instance_id || null,
     whatsapp_id: whatsapp_id ? String(whatsapp_id).slice(0, 32) : null,
     count,
+    conversa_ids: conversa_ids || undefined,
   })
 }
 
@@ -119,9 +120,11 @@ async function selectSingleMensagemByWhatsappId(
   const waId = whatsapp_id != null ? String(whatsapp_id).trim() : ''
   if (!supabaseClient || !company_id || !waId) return { data: null, error: null, ambiguous: false }
 
+  // Inclui conversa_id na busca interna para diagnóstico de ambiguidade e dedup por conversa.
+  const internalSelect = select.includes('conversa_id') ? select : `${select}, conversa_id`
   let query = supabaseClient
     .from('mensagens')
-    .select(select)
+    .select(internalSelect)
     .eq('company_id', company_id)
     .eq('whatsapp_id', waId)
     .order('id', { ascending: false })
@@ -132,11 +135,18 @@ async function selectSingleMensagemByWhatsappId(
   if (error) return { data: null, error, ambiguous: false }
   const rows = Array.isArray(data) ? data : []
   if (rows.length > 1) {
+    // Se ambas as linhas pertencem à mesma conversa, é reentrega dupla — usar a mais recente (id maior).
+    const conversaIds = rows.map((r) => r.conversa_id)
+    const allSameConversa = conversaIds.every((c) => c != null && c === conversaIds[0])
+    if (allSameConversa) {
+      return { data: rows[0], error: null, ambiguous: false }
+    }
     logAmbiguousWhatsappId(context, {
       company_id,
       whatsapp_instance_id,
       whatsapp_id: waId,
       count: rows.length,
+      conversa_ids: conversaIds,
     })
     return {
       data: null,
@@ -4039,6 +4049,31 @@ exports.statusZapi = async (req, res) => {
           const patched = await patchMensagemStatusById(supabase, {
             company_id,
             mensagem_id: relaxed.data.id,
+            effectiveStatus,
+            select: statusSelect,
+          })
+          msg = patched.data || null
+        }
+      }
+
+      // 4b) Fallback: ID numérico de fila — busca por provider_queue_id (linhas novas após migration M2).
+      //     O fallback 4 acima cobre linhas antigas (whatsapp_id numérico); este cobre linhas novas.
+      if (!msg && isUltramsgNumericId && company_id) {
+        let qIdQuery = supabase
+          .from('mensagens')
+          .select(statusSelect)
+          .eq('company_id', company_id)
+          .eq('provider_queue_id', idStr)
+          .order('id', { ascending: false })
+          .limit(1)
+        qIdQuery = applyWhatsappInstanceFilterOrLegacy(qIdQuery, whatsapp_instance_id)
+        const { data: queueRow } = await qIdQuery
+        if (queueRow?.id) {
+          const cur = queueRow.status || 'pending'
+          if (statusRank(cur) > statusRank(effectiveStatus)) effectiveStatus = cur
+          const patched = await patchMensagemStatusById(supabase, {
+            company_id,
+            mensagem_id: queueRow.id,
             effectiveStatus,
             select: statusSelect,
           })

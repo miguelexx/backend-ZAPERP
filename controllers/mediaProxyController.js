@@ -162,6 +162,10 @@ exports.proxyMedia = async (req, res) => {
   }
 
   if (!isAllowedMediaUrl(target)) {
+    console.warn('[mediaProxy] URL bloqueada (403):', {
+      host: target.hostname,
+      path: String(target.pathname || '').slice(0, 80),
+    })
     return res.status(403).json({ error: 'Origem não permitida' })
   }
 

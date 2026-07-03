@@ -3,6 +3,19 @@ const { classifyIncomingPushToken } = require('../helpers/pushTokenFormat')
 
 /** PushSubscription.toJSON() pode ultrapassar 4k em edge cases */
 const MAX_TOKEN_LEN = 32768
+
+/** Detecta se o erro Postgres indica tabela/coluna ausente ou permissão negada. */
+function pgErrorStatus(error) {
+  const code = String(error?.code || '')
+  const msg = String(error?.message || '').toLowerCase()
+  if (code === '42P01' || msg.includes('does not exist')) {
+    return { status: 503, message: 'Tabela de push não encontrada — migration pendente em produção' }
+  }
+  if (code === '42501' || msg.includes('permission denied')) {
+    return { status: 503, message: 'Permissão negada ao salvar push — verificar configuração do banco' }
+  }
+  return { status: 500, message: null }
+}
 const MAX_FIELD = 512
 
 function normalizeStr(v, max) {
@@ -78,8 +91,9 @@ exports.upsertToken = async (req, res) => {
       )
 
       if (error) {
-        console.warn('[push] upsert push_subscriptions (/api/push/tokens):', error.message || error)
-        return res.status(500).json({ error: 'Não foi possível salvar a subscription' })
+        const { status, message } = pgErrorStatus(error)
+        console.warn('[push] upsert push_subscriptions (/api/push/tokens):', error.message || error, { code: error.code, httpStatus: status })
+        return res.status(status).json({ error: message || 'Não foi possível salvar a subscription' })
       }
 
       console.log('[push] subscription Web Push/VAPID salva', { empresa_id, usuario_id, plataforma, navegador })
@@ -103,8 +117,9 @@ exports.upsertToken = async (req, res) => {
     const { error } = await supabase.from('push_tokens').upsert(row, { onConflict: 'token' })
 
     if (error) {
-      console.warn('[fcm] upsert push_tokens:', error.message || error)
-      return res.status(500).json({ error: 'Não foi possível salvar o token' })
+      const { status, message } = pgErrorStatus(error)
+      console.warn('[fcm] upsert push_tokens:', error.message || error, { code: error.code, httpStatus: status })
+      return res.status(status).json({ error: message || 'Não foi possível salvar o token' })
     }
 
     console.log('[fcm] token FCM salvo', {

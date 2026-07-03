@@ -22,6 +22,9 @@ function isAllowedInboundMediaUrl(u) {
     return false
   }
 
+  // Previne proxy-of-proxy: rejeita URLs que apontam para o próprio endpoint /media/proxy.
+  if (String(u.pathname || '').startsWith('/media/proxy')) return false
+
   if (host.endsWith('.amazonaws.com')) {
     const pathname = (u.pathname || '').toLowerCase()
     const hn = host.toLowerCase()
@@ -36,6 +39,9 @@ function isAllowedInboundMediaUrl(u) {
   if (host.endsWith('.cloudfront.net') && String(u.pathname || '').toLowerCase().includes('ultramsg')) {
     return true
   }
+
+  // Domínios UltraMsg diretos (não-S3): files.ultramsg.com, media.ultramsg.com, etc.
+  if (host === 'ultramsg.com' || host.endsWith('.ultramsg.com')) return true
 
   const extra = String(process.env.MEDIA_PROXY_EXTRA_HOSTS || '')
     .split(',')

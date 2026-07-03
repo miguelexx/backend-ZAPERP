@@ -5674,12 +5674,16 @@ exports.enviarMensagemChat = async (req, res) => {
           })
         }
 
+        // whatsapp_id só recebe IDs reais do WhatsApp (rastreáveis).
+        // IDs de fila numéricos da UltraMsg (ex: "35096") vão para provider_queue_id
+        // para permitir reconciliação de ACK sem poluir whatsapp_id com IDs não reais.
         await supabase
           .from('mensagens')
           .update({
             status: nextStatus,
             status_mensagem: nextStatusMensagem,
-            ...(hasValidId || hasQueueId ? { whatsapp_id: waMessageId } : {}),
+            ...(hasValidId ? { whatsapp_id: waMessageId } : {}),
+            ...(hasQueueId ? { provider_queue_id: waMessageId } : {}),
           })
           .eq('company_id', company_id)
           .eq('id', msg.id)
@@ -5700,7 +5704,7 @@ exports.enviarMensagemChat = async (req, res) => {
               conversa_id: Number(conversa_id),
               status: nextStatus,
               status_mensagem: nextStatusMensagem,
-              ...(hasValidId || hasQueueId ? { whatsapp_id: waMessageId } : {}),
+              ...(hasValidId ? { whatsapp_id: waMessageId } : {}),
             })
         }
 

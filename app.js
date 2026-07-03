@@ -204,6 +204,18 @@ app.use(
   })
 )
 
+// Fallback 404 para /uploads: loga o path resolvido para facilitar diagnóstico de arquivos perdidos.
+app.use('/uploads', (req, res) => {
+  const resolvedPath = path.join(getUploadsRoot(), req.path)
+  console.warn('[uploads] 404 - arquivo não encontrado:', {
+    request_path: req.path,
+    resolved: resolvedPath,
+    uploads_root: getUploadsRoot(),
+    uploads_dir_env: process.env.UPLOADS_DIR || '(padrão — UPLOADS_DIR não configurado)',
+  })
+  res.status(404).json({ error: 'Arquivo não encontrado' })
+})
+
 // Health check: básico (LB) e detalhado (Supabase)
 const healthController = require('./controllers/healthController')
 app.get('/health', healthController.basic)

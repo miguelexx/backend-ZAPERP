@@ -143,6 +143,13 @@ async function resolveAdminAlertDestination(company_id, alert) {
     }
 
     const telefone = String(data.telefone || data.wa_id || '').trim()
+    if (
+      telefone.includes('@g.us') ||
+      telefone.toLowerCase().startsWith('lid:') ||
+      (telefone.replace(/\D/g, '').startsWith('120') && telefone.replace(/\D/g, '').length >= 15)
+    ) {
+      return { ok: false, reason: 'group_not_supported', cliente_id: clienteId, cliente_nome: contactDisplayName(data) }
+    }
     const digits = telefone.replace(/\D/g, '')
     if (!digits || digits.length < 10) {
       return {

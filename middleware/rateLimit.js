@@ -1,5 +1,24 @@
 const { rateLimit, ipKeyGenerator } = require('express-rate-limit')
 
+/**
+ * Extrai user+company do JWT sem verificar assinatura — usado apenas para bucketing de rate limit.
+ * Garante que usuários autenticados tenham cota individual mesmo atrás de proxy/Traefik compartilhado.
+ */
+function extractJwtBucketKey(req) {
+  try {
+    const auth = req.headers.authorization || ''
+    const token = auth.startsWith('Bearer ') ? auth.slice(7) : ''
+    if (!token) return null
+    const payload = token.split('.')[1]
+    if (!payload) return null
+    const decoded = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'))
+    const uid = decoded?.id || decoded?.sub
+    const cid = decoded?.company_id
+    if (uid && cid) return `u_${cid}_${uid}`
+  } catch { /* ignore */ }
+  return null
+}
+
 /** IP real do cliente (importante quando atrás de proxy/Nginx) — evita rate limit compartilhado entre todos os usuários */
 function shouldTrustForwardedFor(req) {
   const trustProxy = req?.app?.get?.('trust proxy')
@@ -45,9 +64,19 @@ const webhookLimiter = limiter({
   max: numberFromEnv('WEBHOOK_RATE_LIMIT_MAX', 60000),
 })
 
-const apiLimiter = limiter({
+// apiLimiter: usa user_id+company_id como chave quando o JWT está presente,
+// garantindo cota individual mesmo que múltiplos usuários compartilhem o mesmo IP de saída
+// (cenário comum atrás de Traefik/Coolify). Rotas sem JWT continuam usando IP.
+const apiLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: numberFromEnv('API_RATE_LIMIT_MAX', 30000),
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => {
+    const jwtKey = extractJwtBucketKey(req)
+    return jwtKey ? ipKeyGenerator(jwtKey) : ipKeyGenerator(getClientIp(req))
+  },
+  handler: (req, res) => res.status(429).json({ error: 'Too many requests, try again later' }),
 })
 
 const destructiveLimiter = limiter({

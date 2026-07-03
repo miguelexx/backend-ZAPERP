@@ -36,7 +36,7 @@ function getAbsenceConfig(chatbotConfig) {
     ativo: !!cfg.finalizar_por_ausencia_ativo,
     prazo: Math.max(1, Number(cfg.finalizar_por_ausencia_prazo) || 24),
     unidade: String(cfg.finalizar_por_ausencia_unidade || 'horas_corridas').trim().toLowerCase(),
-    mensagem: String(cfg.finalizar_por_ausencia_mensagem || '').trim() || ABSENCE_FALLBACK_MESSAGE,
+    mensagem: String(cfg.finalizar_por_ausencia_mensagem ?? '').trim(),
     reabrirAutomaticamente: cfg.finalizar_por_ausencia_reabrir_automaticamente !== false,
     reabrirSemChatbot: cfg.finalizar_por_ausencia_reabrir_sem_chatbot !== false,
     timezone: String(cfg.timezone || DEFAULT_CHATBOT_CONFIG.timezone || 'America/Sao_Paulo').trim() || 'America/Sao_Paulo',
@@ -277,6 +277,13 @@ async function tryMarkWaitingAfterHumanOutbound({ company_id, conversa_id, texto
 }
 
 async function sendAbsenceClosingMessage({ provider, company_id, conversa_id, telefone, mensagem }) {
+  const texto = String(mensagem || '').trim()
+  if (!texto) {
+    return { ok: true, skippedNoMessage: true }
+  }
+  if (!provider?.sendText) {
+    return { ok: false, error: 'Provider de envio não disponível' }
+  }
   const { data: row } = await supabase
     .from('conversas')
     .select('ausencia_mensagem_enviada_em, finalizacao_motivo, whatsapp_instance_id')
@@ -286,7 +293,7 @@ async function sendAbsenceClosingMessage({ provider, company_id, conversa_id, te
   if (row?.ausencia_mensagem_enviada_em) {
     return { ok: true, skippedDuplicate: true }
   }
-  const result = await provider.sendText(telefone, mensagem, {
+  const result = await provider.sendText(telefone, texto, {
     companyId: company_id,
     conversaId: conversa_id,
     whatsappInstanceId: row?.whatsapp_instance_id || undefined,
@@ -312,7 +319,7 @@ async function sendAbsenceClosingMessage({ provider, company_id, conversa_id, te
   }
   await supabase.from('mensagens').insert({
     conversa_id,
-    texto: mensagem,
+    texto,
     direcao: 'out',
     company_id,
     status: ok ? (hasTraceableId ? 'sent' : 'pending') : 'erro',
@@ -373,10 +380,6 @@ async function finalizeConversationsByAbsence(opts = {}) {
 
   const maxPerCycle = getMaxFinalizationsPerCycle()
   const scanLimit = getScanLimitPerCompany()
-  const provider = dryRun ? null : getProvider()
-  if (!dryRun && (!provider?.sendText)) {
-    return { ok: false, error: 'Provider de envio não disponível' }
-  }
 
   let processadas = 0
   let analisadas = 0
@@ -388,6 +391,11 @@ async function finalizeConversationsByAbsence(opts = {}) {
 
     const { triageMerged, absence } = await loadChatbotTriageMergeAndAbsence(company_id)
     if (!absence.ativo) continue
+    const enviaMensagemEncerramento = !!String(absence.mensagem || '').trim()
+    const provider = !dryRun && enviaMensagemEncerramento ? getProvider() : null
+    if (!dryRun && enviaMensagemEncerramento && !provider?.sendText) {
+      return { ok: false, error: 'Provider de envio não disponível' }
+    }
 
     const cutoff = getCutoffDate(absence).toISOString()
     const cutoffMs = new Date(cutoff).getTime()
@@ -542,6 +550,7 @@ async function finalizeConversationsByAbsence(opts = {}) {
 
       let sendOk = false
       let skippedDuplicate = false
+      let skippedNoMessage = false
       try {
         const sendRes = await sendAbsenceClosingMessage({
           provider,
@@ -552,6 +561,7 @@ async function finalizeConversationsByAbsence(opts = {}) {
         })
         sendOk = !!sendRes?.ok
         skippedDuplicate = !!sendRes?.skippedDuplicate
+        skippedNoMessage = !!sendRes?.skippedNoMessage
       } catch (e) {
         console.warn('[absenceFinalization] erro ao enviar mensagem de encerramento:', e?.message || e)
       }
@@ -582,12 +592,14 @@ async function finalizeConversationsByAbsence(opts = {}) {
         continue
       }
 
-      await supabase
-        .from('conversas')
-        .update({ ausencia_mensagem_enviada_em: nowIso })
-        .eq('company_id', company_id)
-        .eq('id', conv.id)
-        .eq('finalizacao_motivo', 'ausencia_cliente')
+      if (!skippedNoMessage) {
+        await supabase
+          .from('conversas')
+          .update({ ausencia_mensagem_enviada_em: nowIso })
+          .eq('company_id', company_id)
+          .eq('id', conv.id)
+          .eq('finalizacao_motivo', 'ausencia_cliente')
+      }
 
       const observacaoEncerramento = buildEncerramentoObservacao({
         prazo: absence.prazo,
@@ -606,6 +618,7 @@ async function finalizeConversationsByAbsence(opts = {}) {
         timezone: absence.timezone,
         snap,
         skippedDuplicate,
+        skippedNoMessage,
       })
       processadas++
     }
@@ -651,8 +664,11 @@ async function finalizeAbsenceForConversaIds(p) {
     return { ok: false, error: 'Política de ausência desativada para esta empresa.' }
   }
 
-  const provider = dryRun ? null : getProvider()
-  if (execute && !provider?.sendText) return { ok: false, error: 'Provider de envio não disponível' }
+  const enviaMensagemEncerramento = !!String(absence.mensagem || '').trim()
+  const provider = execute && enviaMensagemEncerramento ? getProvider() : null
+  if (execute && enviaMensagemEncerramento && !provider?.sendText) {
+    return { ok: false, error: 'Provider de envio não disponível' }
+  }
 
   const cutoff = getCutoffDate(absence).toISOString()
   const cutoffMs = new Date(cutoff).getTime()
@@ -745,6 +761,7 @@ async function finalizeAbsenceForConversaIds(p) {
 
     let sendOk = false
     let skippedDuplicate = false
+    let skippedNoMessage = false
     try {
       const sendRes = await sendAbsenceClosingMessage({
         provider,
@@ -755,6 +772,7 @@ async function finalizeAbsenceForConversaIds(p) {
       })
       sendOk = !!sendRes?.ok
       skippedDuplicate = !!sendRes?.skippedDuplicate
+      skippedNoMessage = !!sendRes?.skippedNoMessage
     } catch (e) {
       console.warn('[absenceFinalization][lote] envio:', e?.message || e)
     }
@@ -779,12 +797,14 @@ async function finalizeAbsenceForConversaIds(p) {
       continue
     }
 
-    await supabase
-      .from('conversas')
-      .update({ ausencia_mensagem_enviada_em: nowIso })
-      .eq('company_id', company_id)
-      .eq('id', conv.id)
-      .eq('finalizacao_motivo', 'ausencia_cliente')
+    if (!skippedNoMessage) {
+      await supabase
+        .from('conversas')
+        .update({ ausencia_mensagem_enviada_em: nowIso })
+        .eq('company_id', company_id)
+        .eq('id', conv.id)
+        .eq('finalizacao_motivo', 'ausencia_cliente')
+    }
 
     await supabase.from('historico_atendimentos').insert({
       conversa_id: conv.id,
@@ -801,6 +821,7 @@ async function finalizeAbsenceForConversaIds(p) {
       unidade: absence.unidade,
       snap,
       skippedDuplicate,
+      skippedNoMessage,
     })
     resultados.push({ conversa_id: convId, ok: true })
   }

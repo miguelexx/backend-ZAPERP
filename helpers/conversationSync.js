@@ -592,6 +592,21 @@ async function getOrCreateCliente(supabaseClient, company_id, phone, fields = {}
     return mergeAndReturnCliente(supabaseClient, company_id, foundRow, phone, fields)
   }
 
+  // Verificação direta antes do INSERT para evitar 23505 por race condition.
+  // O upsert com ignoreDuplicates:true pode ter silenciado um conflito sem retornar a linha;
+  // buscamos pelo telefone exato antes de arriscar o INSERT.
+  if (telefoneCanonico) {
+    const { data: preInsertCheck } = await supabaseClient
+      .from('clientes')
+      .select(CLIENTE_SELECT_COLS)
+      .eq('company_id', company_id)
+      .eq('telefone', telefoneCanonico)
+      .maybeSingle()
+    if (preInsertCheck?.id) {
+      return mergeAndReturnCliente(supabaseClient, company_id, preInsertCheck, phone, fields)
+    }
+  }
+
   const { data: novoCliente, error: errInsert } = await supabaseClient
     .from('clientes')
     .insert(insertData)

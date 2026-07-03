@@ -1,5 +1,4 @@
 const {
-  ABSENCE_FALLBACK_MESSAGE,
   isAbsenceFinalizationEmergencyDisabled,
   getAbsenceConfig,
 } = require('../services/absenceFinalizationService')
@@ -44,7 +43,7 @@ describe('absenceFinalizationService - configuracao por empresa', () => {
     expect(cfg.ativo).toBe(false)
   })
 
-  it('mantem defaults seguros para prazo, mensagem e reabertura', () => {
+  it('mantem defaults seguros para prazo e reabertura, permitindo mensagem vazia', () => {
     const cfg = getAbsenceConfig({
       finalizar_por_ausencia_ativo: true,
       finalizar_por_ausencia_prazo: 0,
@@ -53,7 +52,7 @@ describe('absenceFinalizationService - configuracao por empresa', () => {
 
     expect(cfg.ativo).toBe(true)
     expect(cfg.prazo).toBe(24)
-    expect(cfg.mensagem).toBe(ABSENCE_FALLBACK_MESSAGE)
+    expect(cfg.mensagem).toBe('')
     expect(cfg.reabrirAutomaticamente).toBe(true)
     expect(cfg.reabrirSemChatbot).toBe(true)
   })
