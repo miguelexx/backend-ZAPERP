@@ -231,6 +231,7 @@ io.EVENTS = {
   TAG_ADICIONADA: 'tag_adicionada',
   TAG_REMOVIDA: 'tag_removida',
   CONVERSA_TRANSFERIDA: 'conversa_transferida',
+  MENSAGEM_INTERNA_ATENDIMENTO: 'mensagem_interna_atendimento',
   CONVERSA_ENCERRADA: 'conversa_encerrada',
   CONVERSA_REABERTA: 'conversa_reaberta',
   CONVERSA_ATRIBUIDA: 'conversa_atribuida',

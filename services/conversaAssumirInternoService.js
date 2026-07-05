@@ -125,7 +125,7 @@ async function executarAssumirConversa({
   })
   if (resultAt.error) return { ok: false, status: 500, error: resultAt.error.message, conversa: null }
 
-  return { ok: true, status: 200, error: null, conversa: data }
+  return { ok: true, status: 200, error: null, conversa: data, atendimento: resultAt.atendimento }
 }
 
 module.exports = { executarAssumirConversa }

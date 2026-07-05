@@ -1,5 +1,9 @@
 const supabase = require('../config/supabase')
-const { registrarAtendimento } = require('../services/atendimentosRegistroService')
+const {
+  registrarAtendimento,
+  buildMensagemInternaMovimentacao,
+  listarMensagensInternasMovimentacao,
+} = require('../services/atendimentosRegistroService')
 const { ensureConversaForCliente } = require('../services/conversaAbrirClienteService')
 const { executarAssumirConversa } = require('../services/conversaAssumirInternoService')
 const { resetAlertaSemRespostaAoAssumirReaberta } = require('../services/atendimentoSemRespostaService')
@@ -47,6 +51,7 @@ const {
 const { normalizarTimestampSemFusoAmbiguoParaApi } = require('../helpers/timestampApiCompat')
 const { isRealWhatsAppId, isUltramsgNumericQueueId } = require('../helpers/whatsappMessageIdHelper')
 const { schedulePendingOutboundReconciliation } = require('../services/pendingOutboundReconciliationService')
+const { obterDepartamentoIdsDoUsuario } = require('../helpers/usuarioDepartamentosHelper')
 
 /**
  * Deduplicação in-memory para double-send de texto.
@@ -609,6 +614,104 @@ function emitirParaUsuario(io, usuario_id, eventName, payload) {
   else io.to(`usuario_${usuario_id}`).emit(eventName, payload)
 }
 
+function perfilPodeVerMovimentacaoInterna(perfil) {
+  const role = String(perfil || '').toLowerCase()
+  return role === 'admin' || role === 'administrador' || role === 'supervisor'
+}
+
+function ordenarMensagensHistoricoAsc(a, b) {
+  const ta = new Date(a?.criado_em || 0).getTime()
+  const tb = new Date(b?.criado_em || 0).getTime()
+  if (Number.isFinite(ta) && Number.isFinite(tb) && ta !== tb) return ta - tb
+  const ida = Number(a?.atendimento_id ?? a?.id)
+  const idb = Number(b?.atendimento_id ?? b?.id)
+  if (Number.isFinite(ida) && Number.isFinite(idb) && ida !== idb) return ida - idb
+  return String(a?.id ?? '').localeCompare(String(b?.id ?? ''))
+}
+
+async function supervisorPodeReceberMovimentacao({ company_id, conversa, usuario, atendimento }) {
+  const uid = Number(usuario?.id)
+  if (!Number.isFinite(uid) || uid <= 0) return false
+
+  if (conversa?.atendente_id != null && Number(conversa.atendente_id) === uid) return true
+  if (atendimento?.de_usuario_id != null && Number(atendimento.de_usuario_id) === uid) return true
+  if (atendimento?.para_usuario_id != null && Number(atendimento.para_usuario_id) === uid) return true
+
+  const convDep = conversa?.departamento_id != null ? Number(conversa.departamento_id) : null
+  if (convDep == null) return true
+
+  const depIds = await obterDepartamentoIdsDoUsuario(uid, Number(company_id), usuario)
+  return depIds.some((depId) => Number(depId) === convDep)
+}
+
+async function emitirMovimentacaoInternaAtendimento(io, {
+  company_id,
+  conversa,
+  atendimento,
+}) {
+  if (!io || !atendimento || !['assumiu', 'transferiu'].includes(String(atendimento.acao || '').toLowerCase())) return
+
+  try {
+    const idsParaNome = [
+      atendimento.de_usuario_id,
+      atendimento.para_usuario_id,
+    ].map(Number).filter((id) => Number.isFinite(id) && id > 0)
+
+    const userMap = {}
+    if (idsParaNome.length > 0) {
+      const { data: nomes } = await supabase
+        .from('usuarios')
+        .select('id, nome')
+        .eq('company_id', Number(company_id))
+        .in('id', [...new Set(idsParaNome)])
+      ;(nomes || []).forEach((u) => { userMap[Number(u.id)] = u.nome || '' })
+    }
+
+    const payload = buildMensagemInternaMovimentacao(atendimento, userMap)
+    if (!payload) return
+
+    const { data: candidatos, error } = await supabase
+      .from('usuarios')
+      .select('id, perfil, departamento_id')
+      .eq('company_id', Number(company_id))
+      .eq('ativo', true)
+      .in('perfil', ['admin', 'administrador', 'supervisor'])
+
+    if (error) {
+      console.warn('[movimentacaoInterna] usuarios:', error?.message || error)
+      return
+    }
+
+    const recipients = new Set()
+    for (const usuario of candidatos || []) {
+      const perfil = String(usuario?.perfil || '').toLowerCase()
+      if (perfil === 'admin' || perfil === 'administrador') {
+        recipients.add(Number(usuario.id))
+        continue
+      }
+      if (perfil === 'supervisor') {
+        const permitido = await supervisorPodeReceberMovimentacao({
+          company_id,
+          conversa,
+          usuario,
+          atendimento,
+        })
+        if (permitido) recipients.add(Number(usuario.id))
+      }
+    }
+
+    recipients.forEach((usuarioId) => {
+      if (Number.isFinite(usuarioId) && usuarioId > 0) {
+        emitirParaUsuario(io, usuarioId, io.EVENTS?.MENSAGEM_INTERNA_ATENDIMENTO || 'mensagem_interna_atendimento', payload)
+      }
+    })
+  } catch (err) {
+    console.warn('[movimentacaoInterna] emitir:', err?.message || err)
+  }
+}
+
+exports.emitirMovimentacaoInternaAtendimento = emitirMovimentacaoInternaAtendimento
+
 /** Emite para a room do departamento (realtime por setor) */
 function emitirDepartamento(io, departamento_id, eventName, payload) {
   if (!io || !departamento_id) return
@@ -848,7 +951,16 @@ async function assertPodeEnviarMensagem({
       })
       if (!result.ok) return { ok: false, status: result.status, error: result.error }
 
-      if (io) emitirRealtimeAposAssumir(io, company_id, conversa_id, user_id, result.conversa)
+      if (io) {
+        emitirRealtimeAposAssumir(io, company_id, conversa_id, user_id, result.conversa)
+        if (result.atendimento) {
+          await emitirMovimentacaoInternaAtendimento(io, {
+            company_id,
+            conversa: result.conversa,
+            atendimento: result.atendimento,
+          })
+        }
+      }
 
       return {
         ok: true,
@@ -3967,6 +4079,15 @@ exports.detalharChat = async (req, res) => {
     const statusDetalheReal = isGroup ? null : conversa.status_atendimento
     const statusDetalheLista = statusAtendimentoParaLista(isGroup, conversa.status_atendimento, exibirBadgeAberta)
     let mensagensFormatadas = (mensagens || []).reverse()
+    if (perfilPodeVerMovimentacaoInterna(perfil)) {
+      const movimentosInternos = await listarMensagensInternasMovimentacao({
+        company_id,
+        conversa_id: id,
+      })
+      if (movimentosInternos.length > 0) {
+        mensagensFormatadas = [...mensagensFormatadas, ...movimentosInternos].sort(ordenarMensagensHistoricoAsc)
+      }
+    }
     // whatsappInstanceMetaMap e enrichMensagens são independentes entre si — executam em paralelo
     const [whatsappInstanceMetaMap, enrichedMensagens] = await Promise.all([
       loadWhatsappInstanceMetaMap(company_id, [conversa.whatsapp_instance_id]),
@@ -4228,6 +4349,13 @@ exports.assumirChat = async (req, res) => {
     const io = req.app.get('io')
     if (io) {
       emitirRealtimeAposAssumir(io, company_id, conversa_id, user_id, result.conversa)
+      if (result.atendimento) {
+        await emitirMovimentacaoInternaAtendimento(io, {
+          company_id,
+          conversa: result.conversa,
+          atendimento: result.atendimento,
+        })
+      }
     }
 
     return res.json({ ok: true, conversa: result.conversa })
@@ -4757,6 +4885,11 @@ exports.transferirChat = async (req, res) => {
       emitirConversaAtualizada(io, company_id, conversa_id, {
         ...data,
         company_id: Number(company_id)
+      })
+      await emitirMovimentacaoInternaAtendimento(io, {
+        company_id,
+        conversa: data,
+        atendimento: resultAt.atendimento,
       })
     }
 
@@ -6730,7 +6863,11 @@ exports.puxarChatFila = async (req, res) => {
     if (io) {
       emitirConversaAtualizada(io, company_id, conversa.id, { id: Number(conversa.id) })
       emitirLock(io, conversa.id, user_id)
-
+      await emitirMovimentacaoInternaAtendimento(io, {
+        company_id,
+        conversa: atualizada,
+        atendimento: resultAt.atendimento,
+      })
     }
 
     return res.json({ conversa_id: conversa.id })

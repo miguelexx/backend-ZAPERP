@@ -315,8 +315,15 @@ exports.criarCliente = async (req, res) => {
         if (ar.ok && ar.conversa) {
           payload.conversa = { ...r.conversa, ...ar.conversa }
           if (io) {
-            const { emitirRealtimeAposAssumir } = require('./chatController')
+            const { emitirRealtimeAposAssumir, emitirMovimentacaoInternaAtendimento } = require('./chatController')
             emitirRealtimeAposAssumir(io, cid, r.conversa.id, usuario_id, ar.conversa)
+            if (ar.atendimento) {
+              await emitirMovimentacaoInternaAtendimento(io, {
+                company_id: cid,
+                conversa: ar.conversa,
+                atendimento: ar.atendimento,
+              })
+            }
           }
         } else {
           payload.assumir_erro = ar.error
