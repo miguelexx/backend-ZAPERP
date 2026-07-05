@@ -3,6 +3,8 @@ const {
   registrarAtendimento,
   buildMensagemInternaMovimentacao,
   listarMensagensInternasMovimentacao,
+  perfilPodeVerMovimentacaoInterna,
+  isMensagemLegadaMovimentacaoInterna,
 } = require('../services/atendimentosRegistroService')
 const { ensureConversaForCliente } = require('../services/conversaAbrirClienteService')
 const { executarAssumirConversa } = require('../services/conversaAssumirInternoService')
@@ -51,7 +53,6 @@ const {
 const { normalizarTimestampSemFusoAmbiguoParaApi } = require('../helpers/timestampApiCompat')
 const { isRealWhatsAppId, isUltramsgNumericQueueId } = require('../helpers/whatsappMessageIdHelper')
 const { schedulePendingOutboundReconciliation } = require('../services/pendingOutboundReconciliationService')
-const { obterDepartamentoIdsDoUsuario } = require('../helpers/usuarioDepartamentosHelper')
 
 /**
  * Deduplicação in-memory para double-send de texto.
@@ -614,11 +615,6 @@ function emitirParaUsuario(io, usuario_id, eventName, payload) {
   else io.to(`usuario_${usuario_id}`).emit(eventName, payload)
 }
 
-function perfilPodeVerMovimentacaoInterna(perfil) {
-  const role = String(perfil || '').toLowerCase()
-  return role === 'admin' || role === 'administrador' || role === 'supervisor'
-}
-
 function ordenarMensagensHistoricoAsc(a, b) {
   const ta = new Date(a?.criado_em || 0).getTime()
   const tb = new Date(b?.criado_em || 0).getTime()
@@ -627,21 +623,6 @@ function ordenarMensagensHistoricoAsc(a, b) {
   const idb = Number(b?.atendimento_id ?? b?.id)
   if (Number.isFinite(ida) && Number.isFinite(idb) && ida !== idb) return ida - idb
   return String(a?.id ?? '').localeCompare(String(b?.id ?? ''))
-}
-
-async function supervisorPodeReceberMovimentacao({ company_id, conversa, usuario, atendimento }) {
-  const uid = Number(usuario?.id)
-  if (!Number.isFinite(uid) || uid <= 0) return false
-
-  if (conversa?.atendente_id != null && Number(conversa.atendente_id) === uid) return true
-  if (atendimento?.de_usuario_id != null && Number(atendimento.de_usuario_id) === uid) return true
-  if (atendimento?.para_usuario_id != null && Number(atendimento.para_usuario_id) === uid) return true
-
-  const convDep = conversa?.departamento_id != null ? Number(conversa.departamento_id) : null
-  if (convDep == null) return true
-
-  const depIds = await obterDepartamentoIdsDoUsuario(uid, Number(company_id), usuario)
-  return depIds.some((depId) => Number(depId) === convDep)
 }
 
 async function emitirMovimentacaoInternaAtendimento(io, {
@@ -672,10 +653,10 @@ async function emitirMovimentacaoInternaAtendimento(io, {
 
     const { data: candidatos, error } = await supabase
       .from('usuarios')
-      .select('id, perfil, departamento_id')
+      .select('id, perfil')
       .eq('company_id', Number(company_id))
       .eq('ativo', true)
-      .in('perfil', ['admin', 'administrador', 'supervisor'])
+      .in('perfil', ['admin', 'administrador'])
 
     if (error) {
       console.warn('[movimentacaoInterna] usuarios:', error?.message || error)
@@ -684,19 +665,8 @@ async function emitirMovimentacaoInternaAtendimento(io, {
 
     const recipients = new Set()
     for (const usuario of candidatos || []) {
-      const perfil = String(usuario?.perfil || '').toLowerCase()
-      if (perfil === 'admin' || perfil === 'administrador') {
+      if (perfilPodeVerMovimentacaoInterna(usuario?.perfil)) {
         recipients.add(Number(usuario.id))
-        continue
-      }
-      if (perfil === 'supervisor') {
-        const permitido = await supervisorPodeReceberMovimentacao({
-          company_id,
-          conversa,
-          usuario,
-          atendimento,
-        })
-        if (permitido) recipients.add(Number(usuario.id))
       }
     }
 
@@ -3876,6 +3846,7 @@ exports.detalharChat = async (req, res) => {
 
     const messageHistoryPagination = parseMessageHistoryPagination(req.query)
     const { limit, cursor, cursor_id } = messageHistoryPagination
+    const messageHistoryFetchLimit = Math.min(300, Math.max(limit + 1, limit + 75))
 
     // conversa (com cliente, atendente, departamento/setor; tipo, nome_grupo, fotos; nome_contato_cache para header quando cliente ainda não tem nome)
     const { data: conversa, error: errConv } = await supabase
@@ -3977,7 +3948,7 @@ exports.detalharChat = async (req, res) => {
         .eq('conversa_id', Number(id))
         .order('criado_em', { ascending: false })
         .order('id', { ascending: false })
-        .limit(limit + 1)
+        .limit(messageHistoryFetchLimit)
 
       query = applyDetalharChatMensagensCursor(query, cursor, cursor_id)
 
@@ -3995,13 +3966,16 @@ exports.detalharChat = async (req, res) => {
         .eq('conversa_id', Number(id))
         .order('criado_em', { ascending: false })
         .order('id', { ascending: false })
-        .limit(limit + 1)
+        .limit(messageHistoryFetchLimit)
       query = applyDetalharChatMensagensCursor(query, cursor, cursor_id)
       const result = await query
       mensagens = result.data
       errMsgs = result.error
     }
     if (errMsgs) return res.status(500).json({ error: errMsgs.message })
+    if (Array.isArray(mensagens) && mensagens.length > 0) {
+      mensagens = mensagens.filter((m) => !isMensagemLegadaMovimentacaoInterna(m))
+    }
 
     const messageHistoryPage = splitMessageHistoryPage(mensagens, limit)
     mensagens = messageHistoryPage.rows
@@ -4080,10 +4054,26 @@ exports.detalharChat = async (req, res) => {
     const statusDetalheLista = statusAtendimentoParaLista(isGroup, conversa.status_atendimento, exibirBadgeAberta)
     let mensagensFormatadas = (mensagens || []).reverse()
     if (perfilPodeVerMovimentacaoInterna(perfil)) {
-      const movimentosInternos = await listarMensagensInternasMovimentacao({
+      const movimentosQuery = {
         company_id,
         conversa_id: id,
-      })
+      }
+      const pageRows = Array.isArray(mensagens) ? mensagens.filter((m) => m?.criado_em) : []
+      if (pageRows.length > 0) {
+        const newestMessageRow = pageRows[0]
+        const oldestMessageRow = pageRows[pageRows.length - 1]
+        movimentosQuery.from_criado_em = oldestMessageRow.criado_em
+        if (cursor) movimentosQuery.to_criado_em = newestMessageRow.criado_em
+        movimentosQuery.limit = Math.max(100, limit)
+      } else if (!cursor) {
+        movimentosQuery.limit = 20
+      } else {
+        movimentosQuery.limit = 0
+      }
+
+      const movimentosInternos = movimentosQuery.limit === 0
+        ? []
+        : await listarMensagensInternasMovimentacao(movimentosQuery)
       if (movimentosInternos.length > 0) {
         mensagensFormatadas = [...mensagensFormatadas, ...movimentosInternos].sort(ordenarMensagensHistoricoAsc)
       }
@@ -4287,7 +4277,9 @@ exports.buscarMensagensConversa = async (req, res) => {
 
     if (error) { console.error('[chatController]', error?.message); return res.status(500).json({ error: 'Erro interno' }) }
 
-    let dbRows = Array.isArray(rows) ? rows : []
+    let dbRows = Array.isArray(rows)
+      ? rows.filter((m) => !isMensagemLegadaMovimentacaoInterna(m))
+      : []
     const hasMoreRaw = dbRows.length > limit
     dbRows = dbRows.slice(0, limit)
     const cursorRow = dbRows.length > 0 ? dbRows[dbRows.length - 1] : null

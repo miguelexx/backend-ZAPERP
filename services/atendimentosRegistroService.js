@@ -2,6 +2,32 @@ const supabase = require('../config/supabase')
 
 const MOVIMENTACAO_INTERNA_TIPO = 'movimentacao_interna_atendimento'
 const MOVIMENTACAO_INTERNA_RODAPE = 'Mensagem invisível para o cliente.'
+const MOVIMENTACAO_INTERNA_PERFIS = ['admin', 'administrador']
+
+function perfilPodeVerMovimentacaoInterna(perfil) {
+  return MOVIMENTACAO_INTERNA_PERFIS.includes(String(perfil || '').toLowerCase())
+}
+
+function textoPareceMovimentacaoInterna(texto) {
+  const raw = String(texto || '').trim()
+  if (!raw) return false
+  const firstLine = raw.split(/\r?\n/)[0]?.trim() || raw
+  const normalized = firstLine
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+  return (
+    normalized.includes('movimentacao interna') ||
+    (firstLine.toLowerCase().includes('movimenta') && firstLine.toLowerCase().includes('interna'))
+  )
+}
+
+function isMensagemLegadaMovimentacaoInterna(msg) {
+  if (!msg || typeof msg !== 'object') return false
+  if (msg.mensagem_interna === true) return true
+  if (String(msg.tipo || '').toLowerCase() === MOVIMENTACAO_INTERNA_TIPO) return true
+  return textoPareceMovimentacaoInterna(msg.texto || msg.conteudo || msg.message || msg.body)
+}
 
 function nomeUsuario(userMap, id, fallback = 'Usuário') {
   if (id == null) return fallback
@@ -42,7 +68,7 @@ function buildMensagemInternaMovimentacao(atendimento, userMap = {}) {
     autor_usuario_id: null,
     fromMe: false,
     mensagem_interna: true,
-    visibilidade_perfis: ['admin', 'supervisor'],
+    visibilidade_perfis: [...MOVIMENTACAO_INTERNA_PERFIS],
     movimentacao_interna: {
       titulo: 'Movimentação interna',
       corpo,
@@ -56,14 +82,28 @@ function buildMensagemInternaMovimentacao(atendimento, userMap = {}) {
   }
 }
 
-async function listarMensagensInternasMovimentacao({ company_id, conversa_id }) {
-  const { data: rows, error } = await supabase
+async function listarMensagensInternasMovimentacao({
+  company_id,
+  conversa_id,
+  from_criado_em = null,
+  to_criado_em = null,
+  limit = null,
+} = {}) {
+  let query = supabase
     .from('atendimentos')
     .select('id, company_id, conversa_id, acao, observacao, criado_em, de_usuario_id, para_usuario_id')
     .eq('company_id', Number(company_id))
     .eq('conversa_id', Number(conversa_id))
     .in('acao', ['assumiu', 'transferiu'])
     .order('criado_em', { ascending: true })
+
+  if (from_criado_em) query = query.gte('criado_em', String(from_criado_em))
+  if (to_criado_em) query = query.lte('criado_em', String(to_criado_em))
+  if (limit != null && Number.isFinite(Number(limit)) && Number(limit) > 0) {
+    query = query.limit(Math.floor(Number(limit)))
+  }
+
+  const { data: rows, error } = await query
 
   if (error) {
     console.warn('[atendimentosRegistroService] listar movimentacoes internas:', error?.message || error)
@@ -120,7 +160,10 @@ async function registrarAtendimento({
 
 module.exports = {
   MOVIMENTACAO_INTERNA_TIPO,
+  MOVIMENTACAO_INTERNA_PERFIS,
   registrarAtendimento,
   buildMensagemInternaMovimentacao,
   listarMensagensInternasMovimentacao,
+  perfilPodeVerMovimentacaoInterna,
+  isMensagemLegadaMovimentacaoInterna,
 }
