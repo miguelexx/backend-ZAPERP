@@ -2167,6 +2167,7 @@ exports.listarConversas = async (req, res) => {
       const assumidaPorMimLista =
         c.atendente_id != null && Number(c.atendente_id) === Number(user_id)
       const exibir_cta_assumir_sem_mensagens =
+        !atendimentoModoSimplesEmpresa &&
         !isGroup &&
         !temMensagem &&
         dbStatusLista !== 'fechada' &&
@@ -3951,6 +3952,7 @@ exports.detalharChat = async (req, res) => {
 
     const isGroup = isGroupConversation(conversa)
     const isAssignedToUser = conversa.atendente_id && Number(conversa.atendente_id) === Number(user_id)
+    const detalheModoSimplesAtivo = await empresaModoSimplesAtivo(company_id).catch(() => false)
 
     // REGRA PRINCIPAL: Se a conversa está assumida pelo usuário, SEMPRE permitir acesso total
     let podeAcessar = !isGroup && isAssignedToUser
@@ -4102,6 +4104,7 @@ exports.detalharChat = async (req, res) => {
     const semMensagens = !temMensagem
     // Empty state: UI deve oferecer Assumir (POST /chats/:id/assumir) mesmo sem badge "aberta" / sem mensagens
     const exibirCtaAssumirSemMensagens =
+      !detalheModoSimplesAtivo &&
       !isGroup &&
       semMensagens &&
       dbStatusAtend !== 'fechada' &&
@@ -4184,7 +4187,7 @@ exports.detalharChat = async (req, res) => {
         mensagens_bloqueadas: deveBloquearMensagens || undefined,
       },
       conversa,
-      await empresaModoSimplesAtivo(company_id).catch(() => false)
+      detalheModoSimplesAtivo
     )
 
     try {
@@ -7204,6 +7207,81 @@ async function normalizeAudioForUltraMsg(file, tipo) {
   }
 }
 
+function shouldNormalizeImageForWhatsapp(file, tipo) {
+  if (tipo !== 'imagem' || !file?.path) return false
+  const base = mimeBase(file)
+  const ext = extBaseArquivo(file)
+  if (base === 'image/gif' || ext === 'gif') return false
+  return base.startsWith('image/') || IMAGE_FILE_EXTENSIONS.has(ext)
+}
+
+async function convertImageToWhatsappJpeg(inputPath, outputPath) {
+  const { spawn } = require('child_process')
+  return new Promise((resolve, reject) => {
+    let ffmpegPath
+    try {
+      ffmpegPath = require('ffmpeg-static')
+    } catch {
+      ffmpegPath = null
+    }
+    if (!ffmpegPath) {
+      reject(new Error('ffmpeg-static não disponível'))
+      return
+    }
+    const args = [
+      '-y',
+      '-i', inputPath,
+      '-frames:v', '1',
+      '-map_metadata', '-1',
+      '-pix_fmt', 'yuvj420p',
+      '-q:v', '3',
+      outputPath,
+    ]
+    const proc = spawn(ffmpegPath, args, { windowsHide: true })
+    let stderr = ''
+    proc.stderr.on('data', (d) => { stderr += String(d || '') })
+    proc.on('error', (err) => reject(err))
+    proc.on('close', (code) => {
+      if (code === 0) resolve()
+      else reject(new Error(`ffmpeg image exit=${code} ${stderr.slice(-240)}`.trim()))
+    })
+  })
+}
+
+async function normalizeImageForWhatsapp(file, tipo) {
+  if (!shouldNormalizeImageForWhatsapp(file, tipo)) return { file, converted: false, error: null }
+  const fs = require('fs')
+  const path = require('path')
+  const sourcePath = file.path
+  const parsedStored = path.parse(file.filename || path.basename(sourcePath))
+  const parsedOriginal = path.parse(file.originalname || parsedStored.base || 'imagem')
+  const targetFilename = `${parsedStored.name || `img-${Date.now()}`}-wa.jpg`
+  const targetPath = path.join(path.dirname(sourcePath), targetFilename)
+
+  try {
+    await convertImageToWhatsappJpeg(sourcePath, targetPath)
+    const stat = fs.statSync(targetPath)
+    if (!stat.size) throw new Error('JPEG normalizado ficou vazio')
+    return {
+      file: {
+        ...file,
+        path: targetPath,
+        filename: targetFilename,
+        originalname: `${parsedOriginal.name || 'imagem'}.jpg`,
+        mimetype: 'image/jpeg',
+        size: stat.size,
+      },
+      converted: true,
+      error: null,
+    }
+  } catch (error) {
+    try {
+      if (fs.existsSync(targetPath)) fs.unlinkSync(targetPath)
+    } catch (_) {}
+    return { file, converted: false, error: error?.message || 'Falha ao normalizar imagem para JPEG' }
+  }
+}
+
 /** Lote de fotos/arquivos (galeria): mesmo contrato do WhatsApp Web. */
 const MAX_ARQUIVOS_LOTE_ENVIO = 30
 
@@ -7274,6 +7352,25 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
       }
     } catch (e) {
       console.warn('[ULTRAMSG][AUDIO] Falha ao converter WAV para MP3:', e?.message || e)
+    }
+  }
+  if (tipo === 'imagem') {
+    try {
+      const normalizedImage = await normalizeImageForWhatsapp(fileWork, tipo)
+      if (normalizedImage?.converted && normalizedImage?.file) {
+        const beforeName = fileWork.originalname
+        fileWork = normalizedImage.file
+        req.file = fileWork
+        console.log('[ULTRAMSG][IMAGE] Imagem normalizada para JPEG compatível antes do envio:', {
+          from: beforeName,
+          to: fileWork.originalname,
+          mime: fileWork.mimetype,
+        })
+      } else if (normalizedImage?.error) {
+        console.warn('[ULTRAMSG][IMAGE] Normalização JPEG indisponível:', normalizedImage.error)
+      }
+    } catch (e) {
+      console.warn('[ULTRAMSG][IMAGE] Falha ao normalizar imagem para JPEG:', e?.message || e)
     }
   }
 
@@ -7804,9 +7901,30 @@ async function resolveForwardMediaForProvider({ provider, mensagemOriginal, comp
   const localPath = resolveLocalUploadPathFromMediaUrl(rawUrl)
   if (provider?.uploadMedia && localPath) {
     try {
+      let uploadPath = localPath
+      let uploadName = mensagemOriginal.nome_arquivo || 'arquivo'
+      if (normalizeForwardTipo(mensagemOriginal.tipo) === 'imagem') {
+        const path = require('path')
+        const normalizedImage = await normalizeImageForWhatsapp({
+          path: localPath,
+          filename: path.basename(localPath),
+          originalname: uploadName,
+          mimetype: '',
+        }, 'imagem')
+        if (normalizedImage?.converted && normalizedImage?.file) {
+          uploadPath = normalizedImage.file.path
+          uploadName = normalizedImage.file.originalname
+          console.log('[ULTRAMSG][FORWARD_IMAGE] Imagem encaminhada normalizada para JPEG:', {
+            from: mensagemOriginal.nome_arquivo || path.basename(localPath),
+            to: uploadName,
+          })
+        } else if (normalizedImage?.error) {
+          console.warn('[ULTRAMSG][FORWARD_IMAGE] Normalização JPEG indisponível:', normalizedImage.error)
+        }
+      }
       const upload = await provider.uploadMedia(
-        localPath,
-        mensagemOriginal.nome_arquivo || 'arquivo',
+        uploadPath,
+        uploadName,
         { companyId: company_id, whatsappInstanceId: whatsappInstanceId || undefined }
       )
       if (upload?.ok && upload?.url) return { ok: true, url: upload.url, source: 'provider_upload' }
@@ -8335,6 +8453,7 @@ exports._test = {
   buildClientTempIdDedupResponse,
   isClientTempIdUniqueViolation,
   inferirTipoArquivo,
+  shouldNormalizeImageForWhatsapp,
   normalizeForwardTipo,
   resolveForwardMediaForProvider,
 }
