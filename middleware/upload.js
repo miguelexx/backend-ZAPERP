@@ -18,6 +18,8 @@ const ALLOWED_MIME = new Map([
   ['image/webp', '.webp'],
   ['image/gif', '.gif'],
   ['image/bmp', '.bmp'],
+  ['image/heic', '.heic'],
+  ['image/heif', '.heif'],
   // Áudio
   ['audio/mpeg', '.mp3'],
   ['audio/mp3', '.mp3'],
@@ -66,7 +68,7 @@ const ALLOWED_MIME = new Map([
 
 /** Extensões aceitas quando o navegador envia MIME genérico (octet-stream) ou vazio. */
 const ALLOWED_EXTENSIONS = new Set([
-  'jpg', 'jpeg', 'png', 'webp', 'gif', 'bmp',
+  'jpg', 'jpeg', 'png', 'webp', 'gif', 'bmp', 'heic', 'heif',
   'mp3', 'ogg', 'aac', 'm4a', 'webm', 'opus', 'wav',
   'mp4', 'mov', 'avi', '3gp', 'webm', 'm4v', 'mkv', 'mpeg', 'mpg', 'ogv',
   'pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx',
@@ -88,6 +90,7 @@ const EXTENSOES_BLOQUEADAS_WHATSAPP = new Set([
   'com', // executável legado DOS/Windows
   'scr', // protetor de tela / vetor comum de malware
   'ps1', // PowerShell
+  'sh', // Shell script
   'vbs', // VBScript
   'reg', // registro Windows
   'dll', // biblioteca executável

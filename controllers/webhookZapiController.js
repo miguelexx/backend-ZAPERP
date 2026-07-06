@@ -46,6 +46,10 @@ const {
   fetchLastAbsenceEncerramentoSnap,
   resolveReopenAssignmentAfterAbsence,
 } = require('../services/absenceFinalizationService')
+const {
+  aplicarModoSimplesNoPayload,
+  recalcularStatusPorUltimaMensagem,
+} = require('../services/atendimentoModoSimplesService')
 const { isEnabled, FLAGS } = require('../helpers/featureFlags')
 const { parseNota, tentarRegistrarAvaliacao } = require('../services/avaliacaoService')
 const {
@@ -3642,9 +3646,18 @@ exports.receberZapi = async (req, res) => {
         if (!emittedScoped) io.to(`conversa_${convIdForEmit}`).emit('atualizar_conversa', { id: convIdForEmit })
       }
       // conversa_atualizada: priorizar nome do sync (name) sobre cache; fallback nome_contato_cache
+      let modoSimplesRecalc = null
+      if (!isGroup && convIdForEmit && mensagemFoiInseridaPeloWebhook && mensagemSalva) {
+        modoSimplesRecalc = await recalcularStatusPorUltimaMensagem({
+          company_id,
+          conversa_id: convIdForEmit,
+          mensagemNova: mensagemSalva,
+          io: null,
+        }).catch(() => null)
+      }
       const { data: convRow } = await supabase
         .from('conversas')
-        .select('id, ultima_atividade, nome_contato_cache, foto_perfil_contato_cache, telefone, cliente_id, departamento_id, status_atendimento, atendente_id, aguardando_cliente_desde, whatsapp_instance_id')
+        .select('id, ultima_atividade, nome_contato_cache, foto_perfil_contato_cache, telefone, cliente_id, departamento_id, status_atendimento, atendente_id, aguardando_cliente_desde, modo_simples_aguardando, whatsapp_instance_id')
         .eq('id', convIdForEmit)
         .eq('company_id', company_id)
         .maybeSingle()
@@ -3672,32 +3685,40 @@ exports.receberZapi = async (req, res) => {
         (convRow?.status_atendimento === 'em_atendimento' ||
           convRow?.status_atendimento === 'aguardando_cliente') &&
         convRow?.atendente_id != null
-      const convPayload = {
-        id: convIdForEmit,
-        whatsapp_instance_id: convRow?.whatsapp_instance_id ?? whatsapp_instance_id ?? null,
-        ultima_atividade: convRow?.ultima_atividade ?? new Date().toISOString(),
-        telefone: convRow?.telefone ?? null,
-        atendente_id: convRow?.atendente_id ?? null,
-        // Grupos nunca mostram badge "aberta" — não precisam ser assumidos
-        exibir_badge_aberta: !isGroup && convRow?.status_atendimento !== 'mensagem_disparada',
-        ...(isGroup
-          ? { status_atendimento: null, status_atendimento_real: null }
-          : {
-              status_atendimento: convRow?.status_atendimento ?? null,
-              status_atendimento_real: convRow?.status_atendimento ?? null,
-              aguardando_cliente_desde: convRow?.aguardando_cliente_desde ?? null,
-            }),
-        ...(depId != null ? { departamento_id: depId } : {}),
-        ...(contatoNome ? { nome_contato_cache: contatoNome, contato_nome: contatoNome } : {}),
-        ...(fotoPerfil ? { foto_perfil_contato_cache: fotoPerfil, foto_perfil: fotoPerfil } : {}),
-        ...(mensagemFoiInseridaPeloWebhook && !fromMe
-          ? {
-              tem_novas_mensagens: true,
-              tem_novas_mensagens_em_atendimento: temNotificacaoDiscretaEmAtendimento,
-              lida: false
-            }
-          : {})
-      }
+      const convPayload = aplicarModoSimplesNoPayload(
+        {
+          id: convIdForEmit,
+          whatsapp_instance_id: convRow?.whatsapp_instance_id ?? whatsapp_instance_id ?? null,
+          ultima_atividade: convRow?.ultima_atividade ?? new Date().toISOString(),
+          telefone: convRow?.telefone ?? null,
+          atendente_id: convRow?.atendente_id ?? null,
+          // Grupos nunca mostram badge "aberta" — não precisam ser assumidos
+          exibir_badge_aberta: !isGroup && convRow?.status_atendimento !== 'mensagem_disparada',
+          ...(isGroup
+            ? { status_atendimento: null, status_atendimento_real: null }
+            : {
+                status_atendimento: convRow?.status_atendimento ?? null,
+                status_atendimento_real: convRow?.status_atendimento ?? null,
+                aguardando_cliente_desde: convRow?.aguardando_cliente_desde ?? null,
+              }),
+          ...(depId != null ? { departamento_id: depId } : {}),
+          ...(contatoNome ? { nome_contato_cache: contatoNome, contato_nome: contatoNome } : {}),
+          ...(fotoPerfil ? { foto_perfil_contato_cache: fotoPerfil, foto_perfil: fotoPerfil } : {}),
+          ...(mensagemFoiInseridaPeloWebhook && !fromMe
+            ? {
+                tem_novas_mensagens: true,
+                tem_novas_mensagens_em_atendimento: temNotificacaoDiscretaEmAtendimento,
+                lida: false,
+              }
+            : {}),
+        },
+        {
+          modo_simples_aguardando:
+            modoSimplesRecalc?.modo_simples_aguardando ?? convRow?.modo_simples_aguardando ?? null,
+          atendimento_modo_simples: modoSimplesRecalc?.atendimento_modo_simples === true,
+        },
+        modoSimplesRecalc?.atendimento_modo_simples === true
+      )
       // ultima_mensagem_preview: preview na lista lateral — direcao correta ('in'/'out') para exibir seta/ícone certo.
       // Para mensagem de contato, incluir tipo e contact_meta para o frontend exibir card em vez do vCard bruto.
       if (mensagemFoiInseridaPeloWebhook && emitPayload) {

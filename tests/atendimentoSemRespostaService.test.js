@@ -17,9 +17,9 @@ describe('atendimentoSemRespostaService', () => {
   it('normaliza defaults', () => {
     const cfg = normalizeAlertaSemResposta({})
     expect(cfg.alerta_sem_resposta_ativo).toBe(false)
-    expect(cfg.tempo_primeiro_alerta_minutos).toBe(2)
-    expect(cfg.tempo_alerta_critico_minutos).toBe(10)
-    expect(cfg.tempo_notificar_gestor_minutos).toBe(15)
+    expect(cfg.tempo_primeiro_alerta_minutos).toBe(1)
+    expect(cfg.tempo_alerta_critico_minutos).toBe(3)
+    expect(cfg.tempo_notificar_gestor_minutos).toBe(5)
     expect(cfg.notificar_interno).toBe(true)
     expect(cfg.horario_comercial_ativo).toBe(true)
   })

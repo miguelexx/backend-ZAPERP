@@ -1,6 +1,10 @@
 const request = require('supertest')
 const jwt = require('jsonwebtoken')
 
+jest.mock('../helpers/empresaModoSimplesFlag', () => ({
+  empresaModoSimplesAtivo: jest.fn().mockResolvedValue(false),
+}))
+
 const supabase = require('../config/supabase')
 
 let app

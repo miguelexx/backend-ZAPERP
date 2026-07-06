@@ -2,7 +2,7 @@ const supabase = require('../config/supabase')
 
 const MOVIMENTACAO_INTERNA_TIPO = 'movimentacao_interna_atendimento'
 const MOVIMENTACAO_INTERNA_RODAPE = 'Mensagem invisível para o cliente.'
-const MOVIMENTACAO_INTERNA_PERFIS = ['admin', 'administrador']
+const MOVIMENTACAO_INTERNA_PERFIS = ['admin', 'administrador', 'supervisor']
 
 function perfilPodeVerMovimentacaoInterna(perfil) {
   return MOVIMENTACAO_INTERNA_PERFIS.includes(String(perfil || '').toLowerCase())

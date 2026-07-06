@@ -37,6 +37,40 @@ test('rejeita .apk', () => {
   )
 })
 
+test('rejeita .sh (script de shell)', () => {
+  assert.equal(isBlockedRiskExtension('sh'), true)
+  assert.equal(
+    isAllowedUploadFile({
+      mimetype: 'text/x-shellscript',
+      originalname: 'deploy.sh',
+      fieldname: 'file',
+    }),
+    false
+  )
+})
+
+test('aceita imagens HEIC/HEIF de celular', () => {
+  assert.equal(
+    isAllowedUploadFile({ mimetype: 'image/heic', originalname: 'IMG_001.HEIC', fieldname: 'file' }),
+    true
+  )
+  assert.equal(
+    isAllowedUploadFile({ mimetype: 'application/octet-stream', originalname: 'IMG_002.heif', fieldname: 'file' }),
+    true
+  )
+})
+
+test('aceita videos MOV/M4V de celular por MIME ou extensao', () => {
+  assert.equal(
+    isAllowedUploadFile({ mimetype: 'video/quicktime', originalname: 'IMG_003.mov', fieldname: 'file' }),
+    true
+  )
+  assert.equal(
+    isAllowedUploadFile({ mimetype: 'application/octet-stream', originalname: 'clip.m4v', fieldname: 'file' }),
+    true
+  )
+})
+
 test('mensagem de bloqueio menciona zip', () => {
   assert.match(blockedUploadErrorMessage('exe'), /zip/i)
 })

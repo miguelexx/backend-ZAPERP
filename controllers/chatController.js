@@ -23,6 +23,11 @@ const {
 } = require('../helpers/reabertaFaltaInteracaoHelper')
 const { getDisplayName, normalizeName, isBadName } = require('../helpers/contactEnrichment')
 const { tryMarkWaitingAfterHumanOutbound } = require('../services/absenceFinalizationService')
+const {
+  aplicarModoSimplesNoPayload,
+  recalcularStatusPorUltimaMensagem,
+} = require('../services/atendimentoModoSimplesService')
+const { empresaModoSimplesAtivo } = require('../helpers/empresaModoSimplesFlag')
 const { syncOldMessagesForConversation } = require('../services/oldMessagesSyncService')
 const {
   marcarAguardandoClienteManual,
@@ -520,14 +525,41 @@ function emitirConversaAtualizada(io, company_id, conversa_id, payload = null, o
   }
 }
 
-function aplicarAguardandoClienteNoPayload(payload, waitingResult) {
-  if (!payload || !waitingResult?.marked) return payload
+function aplicarAguardandoClienteNoPayload(payload, waitingResult, modoSimplesOpt) {
+  if (!payload || !waitingResult?.marked) {
+    return aplicarModoSimplesNoPayload(payload, modoSimplesOpt, modoSimplesOpt?.atendimento_modo_simples)
+  }
   payload.status_atendimento = 'em_atendimento'
   payload.status_atendimento_real = 'em_atendimento'
   payload.aguardando_cliente_desde = waitingResult.aguardando_cliente_desde || new Date().toISOString()
   payload.exibir_badge_aberta = false
   payload.tem_novas_mensagens_em_atendimento = false
-  return payload
+  return aplicarModoSimplesNoPayload(payload, modoSimplesOpt, modoSimplesOpt?.atendimento_modo_simples)
+}
+
+async function recalcularEMesclarModoSimples({
+  company_id,
+  conversa_id,
+  mensagemNova,
+  io,
+  payloadBase = null,
+}) {
+  const result = await recalcularStatusPorUltimaMensagem({
+    company_id,
+    conversa_id,
+    mensagemNova,
+    io,
+    emitirEvento: async (socket, cid, convId, recalc) => {
+      if (!recalc.changed || !socket) return
+      const base =
+        payloadBase && typeof payloadBase === 'object'
+          ? { ...payloadBase }
+          : { id: convId, ultima_atividade: new Date().toISOString() }
+      const eventPayload = aplicarModoSimplesNoPayload(base, recalc.conversa, true)
+      emitirConversaAtualizada(socket, cid, convId, eventPayload, { skipAtualizarConversa: true })
+    },
+  })
+  return result
 }
 
 async function emitirParaUsuariosQuePodemVerConversa(io, company_id, conversa_id, eventName, payload) {
@@ -906,6 +938,20 @@ async function assertPodeEnviarMensagem({
   }
 
   if (!conv.atendente_id) {
+    const modoSimplesAtivo = await empresaModoSimplesAtivo(company_id)
+    if (modoSimplesAtivo) {
+      const permVer = await assertPermissaoConversa({
+        company_id,
+        conversa_id,
+        user_id,
+        role,
+        user_dep_ids,
+      })
+      if (permVer.ok) {
+        return { ok: true, reason: 'modo_simples_sem_assumir', conversa: permVer.conv, modo_simples: true }
+      }
+      return { ok: false, status: permVer.status || 403, error: permVer.error || 'Sem permissão para esta conversa' }
+    }
     const deveAutoAssumir = autoAssumirAoEnviar || autoAssumirUra
     if (deveAutoAssumir) {
       if (!podeAssumirConversaPorPerfil(role)) {
@@ -1516,6 +1562,7 @@ exports.listarConversas = async (req, res) => {
     const transferLimit = getChatFilterIdLimit()
     const [
       separarMensagensDisparadasEmpresa,
+      atendimentoModoSimplesEmpresa,
       unreadMap,
       [conversaIdsTransferidas, conversaIdsParticipanteAtivo],
       grupoIdsPermitidosPorDepartamento,
@@ -1528,6 +1575,7 @@ exports.listarConversas = async (req, res) => {
         .maybeSingle()
         .then(({ data }) => !!data?.separar_mensagens_disparadas)
         .catch(() => false),
+      empresaModoSimplesAtivo(company_id).catch(() => false),
       obterUnreadMap({ company_id, usuario_id: user_id }),
       !isAdmin
         ? Promise.all([
@@ -1673,6 +1721,7 @@ exports.listarConversas = async (req, res) => {
       status_atendimento,
       atendente_id,
       aguardando_cliente_desde,
+      modo_simples_aguardando,
       lida,
       criado_em,
       ultima_atividade,
@@ -1707,6 +1756,7 @@ exports.listarConversas = async (req, res) => {
       status_atendimento,
       atendente_id,
       aguardando_cliente_desde,
+      modo_simples_aguardando,
       pagamento_prazo_ate,
       pagamento_prazo_origem,
       pagamento_concluido_em,
@@ -1745,6 +1795,7 @@ exports.listarConversas = async (req, res) => {
       status_atendimento,
       atendente_id,
       aguardando_cliente_desde,
+      modo_simples_aguardando,
       pagamento_prazo_ate,
       pagamento_prazo_origem,
       pagamento_concluido_em,
@@ -1873,19 +1924,24 @@ exports.listarConversas = async (req, res) => {
         q = q.gte('ultima_atividade', getStartOfTodayIso()).lte('ultima_atividade', getEndOfTodayIso())
       }
 
-      // Filtro "Aguardando cliente": (1) aguardando_cliente_desde em em_atendimento ou (2) status manual aguardando_cliente.
-      // Atendente comum: só o próprio responsável. Admin/supervisor: visão agregada; com atendente_id na query, restringe ao informado.
+      // Filtro "Aguardando cliente": modo simples usa modo_simples_aguardando; senão fluxo legado.
       if (aguardandoClienteAtivo) {
-        q = q.or(
-          `and(status_atendimento.eq.em_atendimento,aguardando_cliente_desde.not.is.null),status_atendimento.eq.aguardando_cliente`
-        )
-        q = q.not('atendente_id', 'is', null)
-        if (isAtendente) {
-          q = conversaIdsParticipanteAtivo.length > 0
-            ? q.or(`atendente_id.eq.${Number(user_id)},id.in.(${conversaIdsParticipanteAtivo.join(',')})`)
-            : q.eq('atendente_id', Number(user_id))
-        } else if (filtroAtendenteInformado != null) {
-          q = q.eq('atendente_id', Number(filtroAtendenteInformado))
+        if (atendimentoModoSimplesEmpresa) {
+          q = q.eq('modo_simples_aguardando', 'cliente')
+        } else {
+          q = q.or(
+            `and(status_atendimento.eq.em_atendimento,aguardando_cliente_desde.not.is.null),status_atendimento.eq.aguardando_cliente`
+          )
+          q = q.not('atendente_id', 'is', null)
+        }
+        if (!atendimentoModoSimplesEmpresa) {
+          if (isAtendente) {
+            q = conversaIdsParticipanteAtivo.length > 0
+              ? q.or(`atendente_id.eq.${Number(user_id)},id.in.(${conversaIdsParticipanteAtivo.join(',')})`)
+              : q.eq('atendente_id', Number(user_id))
+          } else if (filtroAtendenteInformado != null) {
+            q = q.eq('atendente_id', Number(filtroAtendenteInformado))
+          }
         }
       }
 
@@ -2137,6 +2193,8 @@ exports.listarConversas = async (req, res) => {
         exibir_badge_aberta,
         atendente_id: c.atendente_id,
         aguardando_cliente_desde: c.aguardando_cliente_desde ?? null,
+        modo_simples_aguardando: c.modo_simples_aguardando ?? null,
+        ...(atendimentoModoSimplesEmpresa ? { atendimento_modo_simples: true } : {}),
         pagamento_prazo_ate: c.pagamento_prazo_ate ?? null,
         pagamento_prazo_origem: c.pagamento_prazo_origem ?? null,
         pagamento_concluido_em: c.pagamento_concluido_em ?? null,
@@ -3858,6 +3916,7 @@ exports.detalharChat = async (req, res) => {
         status_atendimento,
         atendente_id,
         aguardando_cliente_desde,
+        modo_simples_aguardando,
         ultima_atividade,
         finalizacao_motivo,
         finalizada_automaticamente,
@@ -4089,40 +4148,44 @@ exports.detalharChat = async (req, res) => {
     mensagensFormatadas = enrichedMensagens
     const whatsappInstanceMeta = safeWhatsappInstanceMeta(whatsappInstanceMetaMap.get(Number(conversa.whatsapp_instance_id)))
 
-    const conversaFormatada = {
-      ...conversa,
-      whatsapp_instance_id: conversa.whatsapp_instance_id ?? null,
-      ...whatsappInstanceMeta,
-      status_atendimento: statusDetalheLista,
-      status_atendimento_real: statusDetalheReal,
-      status_atendimento_lista: statusDetalheLista,
-      exibir_badge_aberta: exibirBadgeAberta,
-      sem_mensagens: semMensagens,
-      exibir_cta_assumir_sem_mensagens: exibirCtaAssumirSemMensagens,
-      reaberta_falta_interacao_em: null,
-      reaberta_por_falta_interacao: resolveReabertaPorFaltaInteracao(conversa),
-      clientes: clientesConv,
-      is_group: isGroup,
-      nome_grupo: conversa.nome_grupo ?? null,
-      contato_nome: nomeUnico,
-      cliente_nome: nomeUnico,
-      cliente_telefone: clienteTelefoneExibivel,
-      telefone_exibivel: telefoneExibivel,
-      observacao: isGroup ? null : (clientesConv?.observacoes ?? null),
-      foto_perfil: fotoUnica,
-      foto_grupo: isGroup ? (conversa.foto_grupo ?? null) : null,
-      atendente_nome: conversa.usuarios?.nome ?? null,
-      setor: conversa.departamentos?.nome ?? null,
-      tags: (conversa.conversa_tags || []).map((ct) => ct.tags).filter(Boolean),
-      mensagens: mensagensFormatadas,
-      next_cursor:
-        hasMoreFromDb && oldestDbRow
-          ? normalizarTimestampSemFusoAmbiguoParaApi(oldestDbRow.criado_em)
-          : null,
-      next_cursor_id:
-        hasMoreFromDb && oldestDbRow != null && oldestDbRow.id != null ? oldestDbRow.id : null,
-      mensagens_bloqueadas: deveBloquearMensagens || undefined
-    }
+    const conversaFormatada = aplicarModoSimplesNoPayload(
+      {
+        ...conversa,
+        whatsapp_instance_id: conversa.whatsapp_instance_id ?? null,
+        ...whatsappInstanceMeta,
+        status_atendimento: statusDetalheLista,
+        status_atendimento_real: statusDetalheReal,
+        status_atendimento_lista: statusDetalheLista,
+        exibir_badge_aberta: exibirBadgeAberta,
+        sem_mensagens: semMensagens,
+        exibir_cta_assumir_sem_mensagens: exibirCtaAssumirSemMensagens,
+        reaberta_falta_interacao_em: null,
+        reaberta_por_falta_interacao: resolveReabertaPorFaltaInteracao(conversa),
+        clientes: clientesConv,
+        is_group: isGroup,
+        nome_grupo: conversa.nome_grupo ?? null,
+        contato_nome: nomeUnico,
+        cliente_nome: nomeUnico,
+        cliente_telefone: clienteTelefoneExibivel,
+        telefone_exibivel: telefoneExibivel,
+        observacao: isGroup ? null : (clientesConv?.observacoes ?? null),
+        foto_perfil: fotoUnica,
+        foto_grupo: isGroup ? (conversa.foto_grupo ?? null) : null,
+        atendente_nome: conversa.usuarios?.nome ?? null,
+        setor: conversa.departamentos?.nome ?? null,
+        tags: (conversa.conversa_tags || []).map((ct) => ct.tags).filter(Boolean),
+        mensagens: mensagensFormatadas,
+        next_cursor:
+          hasMoreFromDb && oldestDbRow
+            ? normalizarTimestampSemFusoAmbiguoParaApi(oldestDbRow.criado_em)
+            : null,
+        next_cursor_id:
+          hasMoreFromDb && oldestDbRow != null && oldestDbRow.id != null ? oldestDbRow.id : null,
+        mensagens_bloqueadas: deveBloquearMensagens || undefined,
+      },
+      conversa,
+      await empresaModoSimplesAtivo(company_id).catch(() => false)
+    )
 
     try {
       await enrichConversasReabertaFaltaInteracao(company_id, [conversaFormatada])
@@ -5417,13 +5480,14 @@ exports.enviarMensagemChat = async (req, res) => {
     }
 
     const io = req.app.get('io')
+    const modoSimplesEnvio = await empresaModoSimplesAtivo(company_id).catch(() => false)
     const permEnvio = await assertPodeEnviarMensagem({
       company_id,
       conversa_id,
       user_id,
       role: req.user?.perfil,
       user_dep_ids: req.user?.departamento_ids,
-      autoAssumirAoEnviar: true,
+      autoAssumirAoEnviar: !modoSimplesEnvio,
       io,
     })
     if (!permEnvio.ok) return res.status(permEnvio.status).json({ error: permEnvio.error })
@@ -5580,13 +5644,21 @@ exports.enviarMensagemChat = async (req, res) => {
 
     // Paralelo: tryMarkWaiting + UPDATE conversas + UPDATE clientes são independentes entre si
     const updateNow = new Date().toISOString()
-    const [waitingAfterOutbound] = await Promise.all([
-      tryMarkWaitingAfterHumanOutbound({
+    const [waitingAfterOutbound, modoSimplesResult] = await Promise.all([
+      modoSimplesEnvio
+        ? Promise.resolve(null)
+        : tryMarkWaitingAfterHumanOutbound({
+            company_id,
+            conversa_id: Number(conversa_id),
+            texto: String(texto || '').trim(),
+            criado_em: msg.criado_em,
+            autor_usuario_id: Number(user_id),
+          }).catch(() => null),
+      recalcularEMesclarModoSimples({
         company_id,
         conversa_id: Number(conversa_id),
-        texto: String(texto || '').trim(),
-        criado_em: msg.criado_em,
-        autor_usuario_id: Number(user_id),
+        mensagemNova: msg,
+        io: null,
       }).catch(() => null),
       supabase
         .from('conversas')
@@ -5643,7 +5715,11 @@ exports.enviarMensagemChat = async (req, res) => {
           usuario_nome: novaMsgPayload.usuario_nome,
         },
         reordenar_suave: true // Frontend: animar item para o topo em vez de refetch (evita "desce e sobe")
-      }, waitingAfterOutbound)
+      }, waitingAfterOutbound, {
+        ...(modoSimplesResult?.conversa || {}),
+        atendimento_modo_simples: modoSimplesEnvio,
+        modo_simples_aguardando: modoSimplesResult?.modo_simples_aguardando ?? null,
+      })
       emitirConversaAtualizada(io, company_id, conversa_id, convPayload, { skipAtualizarConversa: true })
     }
 
@@ -6970,44 +7046,48 @@ function mimeBase(file) {
  * Permite forçar envio como figurinha (endpoint /messages/sticker) quando o front envia
  * PNG/JPEG recortado na área "Criar" — sem depender só de .webp no nome/MIME.
  */
+const IMAGE_FILE_EXTENSIONS = new Set(['jpg', 'jpeg', 'png', 'webp', 'gif', 'bmp', 'heic', 'heif'])
+const VIDEO_FILE_EXTENSIONS = new Set(['mp4', 'mov', 'm4v', 'webm', 'avi', 'mkv', '3gp', 'mpeg', 'mpg', 'ogv'])
+const AUDIO_FILE_EXTENSIONS = new Set(['ogg', 'mp3', 'wav', 'm4a', 'aac', 'opus', 'amr'])
+const DOCUMENT_FILE_EXTENSIONS = new Set([
+  'pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx',
+  'txt', 'csv', 'md', 'html', 'htm', 'rtf',
+  'json', 'xml', 'sql', 'zip', 'rar', '7z',
+])
+
+function extBaseArquivo(file) {
+  const candidates = [file?.originalname, file?.filename, file?.path]
+  for (const candidate of candidates) {
+    const match = String(candidate || '').toLowerCase().match(/\.([a-z0-9]{2,8})$/i)
+    if (match?.[1]) return match[1].toLowerCase()
+  }
+  return ''
+}
+
 function aplicarTipoForcadoSticker(file, tipoInferido) {
   const forced = String(file?.__tipoForcado || '').toLowerCase().trim()
   if (forced !== 'sticker') return tipoInferido
   const base = mimeBase(file)
-  const n = String(file?.originalname || '').toLowerCase()
+  const ext = extBaseArquivo(file)
   const stickerish =
     ['image/webp', 'image/png', 'image/jpeg', 'image/jpg', 'image/gif'].includes(base) ||
-    /\.(webp|png|jpe?g|gif)$/i.test(n)
+    ['webp', 'png', 'jpg', 'jpeg', 'gif'].includes(ext)
   return stickerish ? 'sticker' : tipoInferido
 }
 
 function inferirTipoArquivo(file) {
-  const m = String(file.mimetype || '').toLowerCase()
-  const n = String(file.originalname || '').toLowerCase()
-  // Figurinha (WhatsApp): geralmente WEBP
-  if (m === 'image/webp' || /\.webp$/i.test(n)) return 'sticker'
+  const m = mimeBase(file)
+  const ext = extBaseArquivo(file)
+
   if (m.startsWith('image/')) return 'imagem'
-  
-  // Voice note (PTT): formatos tipicamente opus/ogg/webm.
-  // Áudios comuns (mp3/m4a/wav/aac) devem ir como "audio".
-  if (
-    m === 'audio/opus' ||
-    m === 'audio/ogg' ||
-    m === 'audio/webm' ||
-    /\.opus$/i.test(n) ||
-    /\.ogg$/i.test(n) ||
-    /\.webm$/i.test(n)
-  ) {
-    return 'voice'
-  }
-  
-  // Para outros formatos de áudio, verifica se parece ser uma gravação (voice note)
-  // Arquivos pequenos (< 5MB) e com nomes típicos de gravação são tratados como voice
-  if (m.startsWith('audio/') || /\.(mp3|ogg|wav|m4a|aac)$/i.test(n)) {
-    return 'audio'
-  }
-  
   if (m.startsWith('video/')) return 'video'
+  if (m.startsWith('audio/')) return 'audio'
+
+  if (IMAGE_FILE_EXTENSIONS.has(ext)) return 'imagem'
+  if (VIDEO_FILE_EXTENSIONS.has(ext)) return 'video'
+  if (AUDIO_FILE_EXTENSIONS.has(ext)) return 'audio'
+  if (DOCUMENT_FILE_EXTENSIONS.has(ext)) return 'arquivo'
+
   return 'arquivo'
 }
 
@@ -7658,6 +7738,98 @@ function collectOrderedMessageIds(body) {
   return ordered
 }
 
+function normalizeForwardTipo(tipo) {
+  const t = String(tipo || '').toLowerCase().trim()
+  if (t === 'image' || t === 'foto' || t === 'photo') return 'imagem'
+  if (t === 'vídeo') return 'video'
+  if (t === 'document' || t === 'documento' || t === 'file' || t === 'pdf') return 'arquivo'
+  if (t === 'ptt') return 'voice'
+  return t || 'texto'
+}
+
+function getForwardMediaUrlCandidate(mensagem) {
+  return String(
+    mensagem?.url ||
+    mensagem?.url_absoluta ||
+    mensagem?.media_url ||
+    mensagem?.mediaUrl ||
+    ''
+  ).trim()
+}
+
+function safeDecodeURIComponent(value) {
+  try {
+    return decodeURIComponent(value)
+  } catch {
+    return value
+  }
+}
+
+function resolveLocalUploadPathFromMediaUrl(mediaUrl) {
+  const raw = String(mediaUrl || '').trim()
+  if (!raw) return null
+  let pathname = raw
+  if (/^https?:\/\//i.test(raw)) {
+    try {
+      pathname = new URL(raw).pathname
+    } catch {
+      return null
+    }
+  }
+  pathname = safeDecodeURIComponent(String(pathname || '').split('?')[0])
+  if (!pathname.startsWith('/uploads/')) return null
+
+  const path = require('path')
+  const fs = require('fs')
+  const { getUploadsRoot } = require('../config/uploadsRoot')
+  const uploadsRoot = path.resolve(getUploadsRoot())
+  const rel = pathname.replace(/^\/uploads\//, '').replace(/^[\\/]+/, '')
+  const full = path.resolve(uploadsRoot, rel)
+  if (full !== uploadsRoot && !full.startsWith(`${uploadsRoot}${path.sep}`)) return null
+  if (!fs.existsSync(full)) return null
+  return full
+}
+
+async function resolveForwardMediaForProvider({ provider, mensagemOriginal, company_id, whatsappInstanceId, baseUrl }) {
+  const rawUrl = getForwardMediaUrlCandidate(mensagemOriginal)
+  if (!rawUrl) return { ok: false, error: 'Mensagem sem URL de mídia para encaminhamento.' }
+
+  const isLocalBase = !baseUrl || /localhost|127\.0\.0\.1/i.test(baseUrl)
+  const publicUrl = rawUrl.startsWith('http')
+    ? rawUrl
+    : baseUrl
+      ? `${baseUrl}${rawUrl.startsWith('/') ? rawUrl : `/${rawUrl}`}`
+      : null
+
+  const localPath = resolveLocalUploadPathFromMediaUrl(rawUrl)
+  if (provider?.uploadMedia && localPath) {
+    try {
+      const upload = await provider.uploadMedia(
+        localPath,
+        mensagemOriginal.nome_arquivo || 'arquivo',
+        { companyId: company_id, whatsappInstanceId: whatsappInstanceId || undefined }
+      )
+      if (upload?.ok && upload?.url) return { ok: true, url: upload.url, source: 'provider_upload' }
+      if (!publicUrl || isLocalBase) {
+        return { ok: false, error: upload?.error || 'Falha ao preparar mídia para encaminhamento.' }
+      }
+    } catch (error) {
+      if (!publicUrl || isLocalBase) {
+        return { ok: false, error: error?.message || 'Falha ao preparar mídia para encaminhamento.' }
+      }
+    }
+  }
+
+  if (publicUrl && !isLocalBase) return { ok: true, url: publicUrl, source: 'public_url' }
+  if (publicUrl && rawUrl.startsWith('http')) return { ok: true, url: publicUrl, source: 'remote_url' }
+  return {
+    ok: false,
+    error: provider?.uploadMedia
+      ? 'URL local da mídia indisponível para encaminhamento.'
+      : 'Provider não suporta uploadMedia e a URL pública da mídia não está configurada.',
+  }
+}
+
 /**
  * Encaminha uma mensagem já carregada para a conversa de destino (persistência + WhatsApp + socket).
  * @returns {Promise<{ ok: true, mensagem: object, enviado_whatsapp: boolean } | { ok: false, status: number, error: string }>}
@@ -7684,8 +7856,9 @@ async function encaminharUmaMensagemParaConversa(ctx) {
   let novaMensagem = null
   let resultadoEnvio = false
 
-  const tipoOriginal = String(mensagemOriginal.tipo || '').toLowerCase()
-  const temUrl = !!(mensagemOriginal.url)
+  const tipoOriginal = normalizeForwardTipo(mensagemOriginal.tipo)
+  const mediaUrlOriginal = getForwardMediaUrlCandidate(mensagemOriginal)
+  const temUrl = !!mediaUrlOriginal
 
   if (tipo_encaminhamento === 'texto' || (!temUrl && tipoOriginal === 'texto')) {
     const textoOriginal = mensagemOriginal.texto && !mensagemOriginal.texto.startsWith('[Encaminhado]')
@@ -7721,13 +7894,18 @@ async function encaminharUmaMensagemParaConversa(ctx) {
     }
   } else if (temUrl && (tipoOriginal === 'imagem' || tipoOriginal === 'video' || tipoOriginal === 'audio' || tipoOriginal === 'voice' || tipoOriginal === 'arquivo' || tipoOriginal === 'sticker')) {
     const baseUrl = (process.env.APP_URL || process.env.BASE_URL || '').replace(/\/$/, '')
-    const mediaUrl = mensagemOriginal.url.startsWith('http')
-      ? mensagemOriginal.url
-      : baseUrl ? `${baseUrl}${mensagemOriginal.url}` : null
+    const resolvedMedia = await resolveForwardMediaForProvider({
+      provider,
+      mensagemOriginal: { ...mensagemOriginal, url: mediaUrlOriginal },
+      company_id,
+      whatsappInstanceId,
+      baseUrl,
+    })
 
-    if (!mediaUrl) {
-      return fail(400, 'URL da mídia não pode ser resolvida para encaminhamento')
+    if (!resolvedMedia.ok || !resolvedMedia.url) {
+      return fail(400, resolvedMedia.error || 'URL da mídia não pode ser resolvida para encaminhamento')
     }
+    const mediaUrl = resolvedMedia.url
 
     const captionEncaminhado = usuarioNome ? `${prefixoEncaminhado} — ${usuarioNome}` : prefixoEncaminhado
 
@@ -7745,7 +7923,7 @@ async function encaminharUmaMensagemParaConversa(ctx) {
       conversa_id: Number(conversa_id),
       texto: textoParaBanco,
       tipo: tipoOriginal,
-      url: mensagemOriginal.url,
+      url: mediaUrlOriginal,
       nome_arquivo: mensagemOriginal.nome_arquivo,
       direcao: 'out',
       autor_usuario_id: user_id,
@@ -8156,4 +8334,7 @@ exports._test = {
   normalizeClientTempId,
   buildClientTempIdDedupResponse,
   isClientTempIdUniqueViolation,
+  inferirTipoArquivo,
+  normalizeForwardTipo,
+  resolveForwardMediaForProvider,
 }

@@ -41,7 +41,8 @@ exports.putEmpresa = async (req, res) => {
       timeout_inatividade_min,
       zapi_auto_sync_contatos,
       crm_habilitado,
-      separar_mensagens_disparadas
+      separar_mensagens_disparadas,
+      atendimento_modo_simples
     } = req.body
 
     const FONTES_VALIDAS = new Set(['inter','plus-jakarta-sans','poppins','montserrat','orbitron','nunito','raleway','playfair-display'])
@@ -62,6 +63,7 @@ exports.putEmpresa = async (req, res) => {
     if (zapi_auto_sync_contatos !== undefined) update.zapi_auto_sync_contatos = !!zapi_auto_sync_contatos
     if (crm_habilitado !== undefined) update.crm_habilitado = !!crm_habilitado
     if (separar_mensagens_disparadas !== undefined) update.separar_mensagens_disparadas = !!separar_mensagens_disparadas
+    if (atendimento_modo_simples !== undefined) update.atendimento_modo_simples = !!atendimento_modo_simples
 
     const { data, error } = await supabase.from('empresas').update(update).eq('id', company_id).select().single()
     if (error) {
@@ -74,6 +76,9 @@ exports.putEmpresa = async (req, res) => {
       }
       if (msg.includes('separar_mensagens_disparadas')) {
         return res.status(400).json({ error: 'Banco desatualizado: aplique a migration separar_mensagens_disparadas (coluna separar_mensagens_disparadas).' })
+      }
+      if (msg.includes('atendimento_modo_simples')) {
+        return res.status(400).json({ error: 'Banco desatualizado: aplique a migration atendimento_modo_simples (coluna atendimento_modo_simples).' })
       }
       if (msg.includes('nome_fonte')) {
         return res.status(400).json({ error: 'Banco desatualizado: aplique a migration 20260618000000_empresa_nome_fonte.sql (coluna nome_fonte).' })

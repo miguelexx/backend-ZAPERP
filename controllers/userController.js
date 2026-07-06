@@ -10,13 +10,16 @@ exports.getMe = async (req, res) => {
 
     const [crmResult, empFlagsResult, userResult] = await Promise.allSettled([
       empresaCrmHabilitada(company_id).catch(() => true),
-      supabase.from('empresas').select('separar_mensagens_disparadas').eq('id', company_id).maybeSingle(),
+      supabase.from('empresas').select('separar_mensagens_disparadas, atendimento_modo_simples').eq('id', company_id).maybeSingle(),
       supabase.from('usuarios').select('id, nome, email, perfil, departamento_id, mostrar_nome_ao_cliente').eq('id', user_id).eq('company_id', company_id).maybeSingle(),
     ])
 
     const crm_habilitado = crmResult.status === 'fulfilled' ? crmResult.value : true
     const separar_mensagens_disparadas = empFlagsResult.status === 'fulfilled'
       ? !!empFlagsResult.value?.data?.separar_mensagens_disparadas
+      : false
+    const atendimento_modo_simples = empFlagsResult.status === 'fulfilled'
+      ? !!empFlagsResult.value?.data?.atendimento_modo_simples
       : false
 
     let { data, error } = userResult.status === 'fulfilled'
@@ -28,7 +31,7 @@ exports.getMe = async (req, res) => {
       error = res2.error
       if (error) { console.error('[userController]', error?.message); return res.status(500).json({ error: 'Erro interno' }) }
       if (!data) return res.status(404).json({ error: 'Usuário não encontrado' })
-      return res.json({ ...data, mostrar_nome_ao_cliente: true, crm_habilitado, separar_mensagens_disparadas })
+      return res.json({ ...data, mostrar_nome_ao_cliente: true, crm_habilitado, separar_mensagens_disparadas, atendimento_modo_simples })
     }
     if (error) { console.error('[userController]', error?.message); return res.status(500).json({ error: 'Erro interno' }) }
     if (!data) return res.status(404).json({ error: 'Usuário não encontrado' })
@@ -40,6 +43,7 @@ exports.getMe = async (req, res) => {
       mostrar_nome_ao_cliente: data.mostrar_nome_ao_cliente !== false,
       crm_habilitado,
       separar_mensagens_disparadas,
+      atendimento_modo_simples,
     })
   } catch (err) {
     console.error(err)
@@ -428,13 +432,16 @@ exports.login = async (req, res) => {
     const [departamento_ids, crmHabResult, empFlagsResult] = await Promise.allSettled([
       obterDepartamentoIdsDoUsuario(usuario.id, usuario.company_id, usuario),
       empresaCrmHabilitada(Number(usuario.company_id)).catch(() => true),
-      supabase.from('empresas').select('separar_mensagens_disparadas').eq('id', usuario.company_id).maybeSingle(),
+      supabase.from('empresas').select('separar_mensagens_disparadas, atendimento_modo_simples').eq('id', usuario.company_id).maybeSingle(),
     ])
     const depIds = departamento_ids.status === 'fulfilled' ? departamento_ids.value : []
     const departamento_id = depIds.length > 0 ? depIds[0] : null
     const crm_habilitado = crmHabResult.status === 'fulfilled' ? crmHabResult.value : true
     const separar_mensagens_disparadas = empFlagsResult.status === 'fulfilled'
       ? !!empFlagsResult.value?.data?.separar_mensagens_disparadas
+      : false
+    const atendimento_modo_simples = empFlagsResult.status === 'fulfilled'
+      ? !!empFlagsResult.value?.data?.atendimento_modo_simples
       : false
 
     // Gera JWT com dados essenciais (user_id/company_id obrigatórios p/ multi-tenant)
@@ -466,6 +473,7 @@ exports.login = async (req, res) => {
         departamento_ids: depIds,
         crm_habilitado,
         separar_mensagens_disparadas,
+        atendimento_modo_simples,
       },
     })
   } catch (err) {

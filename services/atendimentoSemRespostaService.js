@@ -12,9 +12,9 @@ const {
 
 const DEFAULT_ALERTA_SEM_RESPOSTA = {
   alerta_sem_resposta_ativo: false,
-  tempo_primeiro_alerta_minutos: 2,
-  tempo_alerta_critico_minutos: 10,
-  tempo_notificar_gestor_minutos: 15,
+  tempo_primeiro_alerta_minutos: 1,
+  tempo_alerta_critico_minutos: 3,
+  tempo_notificar_gestor_minutos: 5,
   notificar_por_whatsapp: false,
   notificar_por_email: false,
   notificar_interno: true,
@@ -112,9 +112,9 @@ function normalizeAlertaSemResposta(raw) {
   const base = {
     ...DEFAULT_ALERTA_SEM_RESPOSTA,
     alerta_sem_resposta_ativo: alertaAtivo,
-    tempo_primeiro_alerta_minutos: normalizeMinutes(r.tempo_primeiro_alerta_minutos, 2),
-    tempo_alerta_critico_minutos: normalizeMinutes(r.tempo_alerta_critico_minutos, 10),
-    tempo_notificar_gestor_minutos: normalizeMinutes(r.tempo_notificar_gestor_minutos, 15),
+    tempo_primeiro_alerta_minutos: normalizeMinutes(r.tempo_primeiro_alerta_minutos, 1),
+    tempo_alerta_critico_minutos: normalizeMinutes(r.tempo_alerta_critico_minutos, 3),
+    tempo_notificar_gestor_minutos: normalizeMinutes(r.tempo_notificar_gestor_minutos, 5),
     notificar_por_whatsapp: r.notificar_por_whatsapp === true,
     notificar_por_email: r.notificar_por_email === true,
     notificar_interno: r.notificar_interno !== false,
