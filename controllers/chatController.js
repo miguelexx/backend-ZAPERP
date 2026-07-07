@@ -7276,10 +7276,24 @@ async function convertAudioWithFfmpeg(inputPath, outputPath, profile = 'audio_mp
     if (profile === 'voice_ogg_opus') {
       args = [
         '-y',
+        // Robustez contra WebM do MediaRecorder (streaming/sem header de duração):
+        // +genpts regenera timestamps ausentes; probesize/analyzeduration altos
+        // forçam o ffmpeg a ler o stream inteiro antes de inferir a duração,
+        // evitando estimativas erradas de gravações do navegador.
+        '-fflags', '+genpts',
+        '-analyzeduration', '2147483647',
+        '-probesize', '2147483647',
         '-i', inputPath,
         '-vn',
         '-ac', '1',
         '-ar', '48000',
+        // Reconstrói os timestamps a partir das amostras reais de áudio.
+        // O MediaRecorder do navegador costuma gravar o primeiro bloco com um
+        // timestamp inicial grande (relativo ao relógio da página/AudioContext),
+        // e o transcode preservava esse offset no granulepos do OGG/Opus, fazendo
+        // o WhatsApp exibir durações infladas (ex.: 20s virando ~5min). first_pts=0
+        // zera o início e async=1 mantém o stream monotônico sem preencher silêncio.
+        '-af', 'aresample=async=1:first_pts=0',
         '-c:a', 'libopus',
         '-b:a', '48k',
         '-avoid_negative_ts', 'make_zero',
