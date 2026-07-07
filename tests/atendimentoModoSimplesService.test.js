@@ -247,3 +247,34 @@ describe('assertPodeEnviarMensagem — modo simples', () => {
     expect(result.reason).toBe('modo_simples_sem_assumir')
   })
 })
+
+describe('Minha fila — modo simples', () => {
+  const {
+    conversaEntraMinhaFilaModoSimples,
+    isModoSimplesAguardandoAtendenteValor,
+  } = require('../services/atendimentoModoSimplesService')
+
+  it('aguardando atendente entra na Minha fila', () => {
+    expect(
+      conversaEntraMinhaFilaModoSimples({ tipo: null, modo_simples_aguardando: 'atendente' })
+    ).toBe(true)
+  })
+
+  it('aguardando cliente não entra na Minha fila', () => {
+    expect(
+      conversaEntraMinhaFilaModoSimples({ tipo: null, modo_simples_aguardando: 'cliente' })
+    ).toBe(false)
+  })
+
+  it('grupo nunca entra na Minha fila do modo simples', () => {
+    expect(
+      conversaEntraMinhaFilaModoSimples({ tipo: 'grupo', modo_simples_aguardando: 'atendente' })
+    ).toBe(false)
+  })
+
+  it('isModoSimplesAguardandoAtendenteValor normaliza valor', () => {
+    expect(isModoSimplesAguardandoAtendenteValor('ATENDENTE')).toBe(true)
+    expect(isModoSimplesAguardandoAtendenteValor('cliente')).toBe(false)
+    expect(isModoSimplesAguardandoAtendenteValor(null)).toBe(false)
+  })
+})

@@ -1,6 +1,8 @@
 const {
   isAbsenceFinalizationEmergencyDisabled,
   getAbsenceConfig,
+  outboundQualificaParaAguardandoCliente,
+  buildWaitingForClientAfterOutboundPatch,
 } = require('../services/absenceFinalizationService')
 
 describe('absenceFinalizationService - configuracao por empresa', () => {
@@ -66,5 +68,57 @@ describe('absenceFinalizationService - configuracao por empresa', () => {
 
     expect(cfg.ativo).toBe(true)
     expect(isAbsenceFinalizationEmergencyDisabled()).toBe(true)
+  })
+
+  it('permite midia enviada por atendente sem legenda marcar aguardando cliente', () => {
+    expect(
+      outboundQualificaParaAguardandoCliente('', 77, {}, {}, { permitirConteudoSemTexto: true })
+    ).toBe(true)
+    expect(outboundQualificaParaAguardandoCliente('', 77, {}, {})).toBe(false)
+  })
+
+  it('monta patch para foto enviada pelo atendente em conversa ainda aberta', () => {
+    const ts = '2026-07-06T20:30:00.000Z'
+    const patch = buildWaitingForClientAfterOutboundPatch(
+      { status_atendimento: 'aberta', atendente_id: null },
+      77,
+      ts
+    )
+
+    expect(patch).toMatchObject({
+      status_atendimento: 'em_atendimento',
+      atendente_id: 77,
+      atendente_atribuido_em: ts,
+      aguardando_cliente_desde: ts,
+      finalizacao_motivo: null,
+      finalizada_automaticamente: false,
+      finalizada_automaticamente_em: null,
+    })
+  })
+
+  it('preserva atendente existente ao marcar aguardando cliente', () => {
+    const ts = '2026-07-06T20:31:00.000Z'
+    const patch = buildWaitingForClientAfterOutboundPatch(
+      { status_atendimento: 'em_atendimento', atendente_id: 45 },
+      77,
+      ts
+    )
+
+    expect(patch).toMatchObject({
+      aguardando_cliente_desde: ts,
+      finalizacao_motivo: null,
+    })
+    expect(patch).not.toHaveProperty('status_atendimento')
+    expect(patch).not.toHaveProperty('atendente_id')
+  })
+
+  it('nao reabre conversa fechada para aguardando cliente', () => {
+    expect(
+      buildWaitingForClientAfterOutboundPatch(
+        { status_atendimento: 'fechada', atendente_id: 77 },
+        77,
+        '2026-07-06T20:32:00.000Z'
+      )
+    ).toBeNull()
   })
 })

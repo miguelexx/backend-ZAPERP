@@ -2,6 +2,10 @@ const supabase = require('../config/supabase')
 const { usuarioPertenceSetorFinanceiro } = require('../helpers/financeiroSetorHelper')
 const { buildClienteSearchOr, buildTelefoneSearchOr, escapeIlikePattern } = require('../helpers/chatSearchHelper')
 const {
+  conversaEntraMinhaFilaModoSimples,
+  applyMinhaFilaModoSimplesSqlFilter,
+} = require('./atendimentoModoSimplesService')
+const {
   getGrupoIdsPorDepartamentos,
   getGrupoIdsSemDepartamento,
   pushNonGroupVisibilityParts,
@@ -156,13 +160,15 @@ async function resolveChatListCountsContext(req) {
   }
 
   let separarMensagensDisparadasEmpresa = false
+  let atendimentoModoSimplesEmpresa = false
   try {
     const { data: empSep } = await supabase
       .from('empresas')
-      .select('separar_mensagens_disparadas')
+      .select('separar_mensagens_disparadas, atendimento_modo_simples')
       .eq('id', company_id)
       .maybeSingle()
     separarMensagensDisparadasEmpresa = !!empSep?.separar_mensagens_disparadas
+    atendimentoModoSimplesEmpresa = !!empSep?.atendimento_modo_simples
   } catch (_) {}
 
   const isFinanceiro = await usuarioPertenceSetorFinanceiro(departamento_ids, company_id)
@@ -291,6 +297,7 @@ async function resolveChatListCountsContext(req) {
     data_inicio,
     data_fim,
     separarMensagensDisparadasEmpresa,
+    atendimentoModoSimplesEmpresa,
     isFinanceiro,
   }
 }
@@ -397,10 +404,14 @@ function applyChatListSqlFilters(query, ctx, overrides = {}) {
   }
 
   if (minhaFilaAtiva) {
-    q = q.or('tipo.is.null,tipo.neq.grupo')
-    q = q.or(
-      `status_atendimento.eq.aberta,and(status_atendimento.eq.em_atendimento,atendente_id.eq.${user_id}),and(status_atendimento.eq.aguardando_cliente,atendente_id.eq.${user_id}),and(status_atendimento.eq.pagamento_pendente,atendente_id.eq.${user_id}),and(status_atendimento.eq.em_atraso,atendente_id.eq.${user_id})${conversaIdsParticipanteAtivo.length > 0 ? `,and(status_atendimento.in.(em_atendimento,aguardando_cliente,pagamento_pendente,em_atraso),id.in.(${conversaIdsParticipanteAtivo.join(',')}))` : ''}`
-    )
+    if (ctx.atendimentoModoSimplesEmpresa) {
+      q = applyMinhaFilaModoSimplesSqlFilter(q)
+    } else {
+      q = q.or('tipo.is.null,tipo.neq.grupo')
+      q = q.or(
+        `status_atendimento.eq.aberta,and(status_atendimento.eq.em_atendimento,atendente_id.eq.${user_id}),and(status_atendimento.eq.aguardando_cliente,atendente_id.eq.${user_id}),and(status_atendimento.eq.pagamento_pendente,atendente_id.eq.${user_id}),and(status_atendimento.eq.em_atraso,atendente_id.eq.${user_id})${conversaIdsParticipanteAtivo.length > 0 ? `,and(status_atendimento.in.(em_atendimento,aguardando_cliente,pagamento_pendente,em_atraso),id.in.(${conversaIdsParticipanteAtivo.join(',')}))` : ''}`
+      )
+    }
   } else if (pagamentoPendenteAtivo) {
     q = q.eq('status_atendimento', 'pagamento_pendente')
     q = q.not('atendente_id', 'is', null)
@@ -490,6 +501,9 @@ function rowVisibleInPostFilteredList(row, ctx, overrides = {}) {
     ctx?.filtroAtendenteInformado != null ? Number(ctx.filtroAtendenteInformado) : null
 
   if (overrides.minha_fila === true) {
+    if (ctx?.atendimentoModoSimplesEmpresa) {
+      return conversaEntraMinhaFilaModoSimples(row)
+    }
     if (isGroup) return false
     if (['em_atendimento', 'aguardando_cliente', 'pagamento_pendente', 'em_atraso'].includes(status)) {
       return vinculadaAoUsuario
@@ -516,7 +530,10 @@ function rowVisibleInPostFilteredList(row, ctx, overrides = {}) {
   return true
 }
 
-function countNeedsPostListRules(overrides = {}) {
+function countNeedsPostListRules(overrides = {}, ctx = {}) {
+  if (overrides.minha_fila === true && ctx?.atendimentoModoSimplesEmpresa) {
+    return false
+  }
   return (
     overrides.minha_fila === true ||
     overrides.status_atendimento === 'aberta' ||
@@ -560,7 +577,7 @@ async function countConversasWithFilter(ctx, overrides = {}) {
   if ((overrides.pagamento_pendente || overrides.em_atraso) && !ctx.isFinanceiro) {
     return 0
   }
-  if (countNeedsPostListRules(overrides)) {
+  if (countNeedsPostListRules(overrides, ctx)) {
     return countConversasWithPostListRules(ctx, overrides)
   }
 

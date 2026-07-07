@@ -100,11 +100,11 @@ function isHumanAttendantOutboundContent(texto, triageMerged, absenceCfg) {
   return true
 }
 
-function outboundQualificaParaAguardandoCliente(texto, autorUsuarioIdOpt, triageMerged, absenceCfg) {
+function outboundQualificaParaAguardandoCliente(texto, autorUsuarioIdOpt, triageMerged, absenceCfg, opts = {}) {
   const uid = autorUsuarioIdOpt != null ? Number(autorUsuarioIdOpt) : NaN
   if (Number.isFinite(uid) && uid > 0) {
     const t = String(texto || '').trim()
-    if (!t) return false
+    if (!t) return !!opts.permitirConteudoSemTexto
     return !textoEhSoMensagemAusencia(t, absenceCfg)
   }
   return isHumanAttendantOutboundContent(texto, triageMerged, absenceCfg)
@@ -244,7 +244,28 @@ async function clearWaitingForClient(company_id, conversa_id) {
   await supabase.from('conversas').update({ aguardando_cliente_desde: null }).eq('company_id', company_id).eq('id', conversa_id)
 }
 
-async function tryMarkWaitingAfterHumanOutbound({ company_id, conversa_id, texto, criado_em, autor_usuario_id }) {
+function buildWaitingForClientAfterOutboundPatch(conv, autorUsuarioIdOpt, aguardandoDesde) {
+  if (!conv || !aguardandoDesde) return null
+  const status = String(conv.status_atendimento || '').trim().toLowerCase()
+  if (status === 'fechada' || status === 'encerrada' || status === 'finalizada') return null
+
+  const uid = autorUsuarioIdOpt != null ? Number(autorUsuarioIdOpt) : NaN
+  const hasHumanUser = Number.isFinite(uid) && uid > 0
+  const hasAssignee = conv.atendente_id != null
+  const isHumanAttendance = status === 'em_atendimento' && hasAssignee
+  if (!isHumanAttendance && !hasHumanUser) return null
+
+  return {
+    aguardando_cliente_desde: aguardandoDesde,
+    finalizacao_motivo: null,
+    finalizada_automaticamente: false,
+    finalizada_automaticamente_em: null,
+    ...(status !== 'em_atendimento' ? { status_atendimento: 'em_atendimento' } : {}),
+    ...(!hasAssignee && hasHumanUser ? { atendente_id: uid, atendente_atribuido_em: aguardandoDesde } : {}),
+  }
+}
+
+async function tryMarkWaitingAfterHumanOutbound({ company_id, conversa_id, texto, criado_em, autor_usuario_id, permitir_conteudo_sem_texto = false }) {
   if (!company_id || !conversa_id) return { marked: false, reason: 'missing_context' }
   const ts = criado_em || new Date().toISOString()
   const { data: conv } = await supabase
@@ -256,24 +277,36 @@ async function tryMarkWaitingAfterHumanOutbound({ company_id, conversa_id, texto
   const isGroup =
     String(conv?.tipo || '').toLowerCase() === 'grupo' || String(conv?.telefone || '').includes('@g.us')
   if (!conv || isGroup) return { marked: false, reason: 'not_eligible_conversation' }
-  if (conv.status_atendimento !== 'em_atendimento' || conv.atendente_id == null) {
+  const waitingPatch = buildWaitingForClientAfterOutboundPatch(conv, autor_usuario_id, ts)
+  if (!waitingPatch) {
     return { marked: false, reason: 'not_in_human_attendance' }
   }
   const { triageMerged, absence: absenceCfg } = await loadChatbotTriageMergeAndAbsence(company_id)
-  if (!outboundQualificaParaAguardandoCliente(texto, autor_usuario_id, triageMerged, absenceCfg)) {
+  if (!outboundQualificaParaAguardandoCliente(texto, autor_usuario_id, triageMerged, absenceCfg, { permitirConteudoSemTexto: permitir_conteudo_sem_texto })) {
     return { marked: false, reason: 'message_not_qualified' }
   }
   const jaAguardando = !!conv.aguardando_cliente_desde
-  await markWaitingForClient(company_id, conversa_id, ts)
+  await supabase
+    .from('conversas')
+    .update(waitingPatch)
+    .eq('company_id', company_id)
+    .eq('id', conversa_id)
+    .neq('status_atendimento', 'fechada')
   if (!jaAguardando) {
     await supabase.from('historico_atendimentos').insert({
       conversa_id,
-      usuario_id: Number(conv.atendente_id) || null,
+      usuario_id: Number(conv.atendente_id ?? waitingPatch.atendente_id) || null,
       acao: 'aguardando_cliente',
       observacao: 'Conversa marcada como aguardando cliente após mensagem do atendente',
     })
   }
-  return { marked: true, aguardando_cliente_desde: ts, jaAguardando }
+  return {
+    marked: true,
+    aguardando_cliente_desde: ts,
+    jaAguardando,
+    status_atendimento: waitingPatch.status_atendimento || conv.status_atendimento,
+    atendente_id: conv.atendente_id ?? waitingPatch.atendente_id ?? null,
+  }
 }
 
 async function sendAbsenceClosingMessage({ provider, company_id, conversa_id, telefone, mensagem }) {
@@ -840,6 +873,7 @@ module.exports = {
   isHumanAttendantOutboundContent,
   outboundQualificaParaAguardandoCliente,
   isHumanAttendantLastOutbound,
+  buildWaitingForClientAfterOutboundPatch,
   markWaitingForClient,
   clearWaitingForClient,
   tryMarkWaitingAfterHumanOutbound,

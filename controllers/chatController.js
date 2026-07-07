@@ -26,6 +26,8 @@ const { tryMarkWaitingAfterHumanOutbound } = require('../services/absenceFinaliz
 const {
   aplicarModoSimplesNoPayload,
   recalcularStatusPorUltimaMensagem,
+  conversaEntraMinhaFilaModoSimples,
+  applyMinhaFilaModoSimplesSqlFilter,
 } = require('../services/atendimentoModoSimplesService')
 const { empresaModoSimplesAtivo } = require('../helpers/empresaModoSimplesFlag')
 const { syncOldMessagesForConversation } = require('../services/oldMessagesSyncService')
@@ -1863,18 +1865,22 @@ exports.listarConversas = async (req, res) => {
       ) {
         q = q.or('tipo.eq.grupo,status_atendimento.neq.mensagem_disparada,status_atendimento.is.null')
       }
-      // Filtro personalizado "Minha fila": abertas (fila) + em atendimento só comigo + grupos do setor; sem finalizadas
+      // Filtro personalizado "Minha fila": modo simples = pendências (aguardando atendente); legado = abertas + em atendimento comigo
       if (minhaFilaAtiva) {
-        // Grupos vinculados ao setor do atendente (departamento_grupos) aparecem na Minha fila.
-        // O bloco de visibilidade acima já restringe quais grupos o atendente pode ver.
-        // Admin ou usuário sem grupos vinculados: comportamento original (excluir grupos).
-        const incluirGruposSetor = !isAdmin && grupoIdsPermitidosPorDepartamento.length > 0
-        if (!incluirGruposSetor) {
-          q = q.or('tipo.is.null,tipo.neq.grupo')
+        if (atendimentoModoSimplesEmpresa) {
+          q = applyMinhaFilaModoSimplesSqlFilter(q)
+        } else {
+          // Grupos vinculados ao setor do atendente (departamento_grupos) aparecem na Minha fila.
+          // O bloco de visibilidade acima já restringe quais grupos o atendente pode ver.
+          // Admin ou usuário sem grupos vinculados: comportamento original (excluir grupos).
+          const incluirGruposSetor = !isAdmin && grupoIdsPermitidosPorDepartamento.length > 0
+          if (!incluirGruposSetor) {
+            q = q.or('tipo.is.null,tipo.neq.grupo')
+          }
+          q = q.or(
+            `${incluirGruposSetor ? `id.in.(${grupoIdsPermitidosPorDepartamento.join(',')}),` : ''}status_atendimento.eq.aberta,and(status_atendimento.eq.em_atendimento,atendente_id.eq.${user_id}),and(status_atendimento.eq.aguardando_cliente,atendente_id.eq.${user_id}),and(status_atendimento.eq.pagamento_pendente,atendente_id.eq.${user_id}),and(status_atendimento.eq.em_atraso,atendente_id.eq.${user_id})${conversaIdsParticipanteAtivo.length > 0 ? `,and(status_atendimento.in.(em_atendimento,aguardando_cliente,pagamento_pendente,em_atraso),id.in.(${conversaIdsParticipanteAtivo.join(',')}))` : ''}`
+          )
         }
-        q = q.or(
-          `${incluirGruposSetor ? `id.in.(${grupoIdsPermitidosPorDepartamento.join(',')}),` : ''}status_atendimento.eq.aberta,and(status_atendimento.eq.em_atendimento,atendente_id.eq.${user_id}),and(status_atendimento.eq.aguardando_cliente,atendente_id.eq.${user_id}),and(status_atendimento.eq.pagamento_pendente,atendente_id.eq.${user_id}),and(status_atendimento.eq.em_atraso,atendente_id.eq.${user_id})${conversaIdsParticipanteAtivo.length > 0 ? `,and(status_atendimento.in.(em_atendimento,aguardando_cliente,pagamento_pendente,em_atraso),id.in.(${conversaIdsParticipanteAtivo.join(',')}))` : ''}`
-        )
       } else if (pagamentoPendenteAtivo) {
         q = q.eq('status_atendimento', 'pagamento_pendente')
         q = q.not('atendente_id', 'is', null)
@@ -2339,10 +2345,13 @@ exports.listarConversas = async (req, res) => {
       })
     }
 
-    // "Minha fila": alinha com abas Abertas + Em atendimento só do usuário + grupos do setor; exclui finalizadas e assumidas por outros
+    // "Minha fila": modo simples = só aguardando atendente; legado = abertas + em atendimento do usuário + grupos do setor
     if (minhaFilaAtiva) {
       conversasFormatadas = conversasFormatadas.filter((c) => {
         if (c.sem_conversa) return false
+        if (atendimentoModoSimplesEmpresa) {
+          return conversaEntraMinhaFilaModoSimples(c)
+        }
         // Grupos do setor do atendente: visíveis na Minha fila e ordenados por atividade como os demais.
         if (c.is_group) return true
         if (c.status_atendimento === 'ociosa') return false
@@ -7431,6 +7440,7 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
         texto: String(msg?.texto || '').trim(),
         criado_em: msg.criado_em,
         autor_usuario_id: Number(user_id),
+        permitir_conteudo_sem_texto: true,
       })
     } catch (_) {}
 

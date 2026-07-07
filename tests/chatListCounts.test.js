@@ -95,4 +95,32 @@ describe('chatListCountsService', () => {
       )
     ).toBe(false)
   })
+
+  test('minha fila modo simples usa modo_simples_aguardando atendente', () => {
+    const ctx = { user_id: 84, isAtendente: true, atendimentoModoSimplesEmpresa: true }
+
+    expect(
+      rowVisibleInPostFilteredList(
+        { tipo: null, status_atendimento: 'aberta', atendente_id: null, modo_simples_aguardando: 'atendente' },
+        ctx,
+        { minha_fila: true }
+      )
+    ).toBe(true)
+
+    expect(
+      rowVisibleInPostFilteredList(
+        { tipo: null, status_atendimento: 'em_atendimento', atendente_id: 99, modo_simples_aguardando: 'cliente' },
+        ctx,
+        { minha_fila: true }
+      )
+    ).toBe(false)
+
+    expect(
+      rowVisibleInPostFilteredList(
+        { tipo: 'grupo', status_atendimento: 'aberta', modo_simples_aguardando: 'atendente', mensagens: [{ id: 1 }] },
+        ctx,
+        { minha_fila: true }
+      )
+    ).toBe(false)
+  })
 })
