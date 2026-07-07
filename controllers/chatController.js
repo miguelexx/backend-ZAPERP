@@ -2412,11 +2412,17 @@ exports.listarConversas = async (req, res) => {
           Number(c.atendente_id) !== atendenteEscopoAguardando &&
           !(isAtendente && conversaIdsParticipanteAtivoSet.has(Number(c.id)))
         ) return false
+        if (atendimentoModoSimplesEmpresa) {
+          return String(c.modo_simples_aguardando || '').toLowerCase() === 'cliente'
+        }
         const statusReal = String(c.status_atendimento_real || '')
         const aguardandoAuto = statusReal === 'em_atendimento' && c.aguardando_cliente_desde != null
         const aguardandoManual = statusReal === 'aguardando_cliente'
         return aguardandoAuto || aguardandoManual
       })
+      if (atendimentoModoSimplesEmpresa) {
+        conversasFormatadas = sortConversationsByRecent(conversasFormatadas)
+      }
     }
 
     if (aguardandoAtendenteAtivo) {
@@ -7572,25 +7578,32 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
 
   if (error) return { ok: false, status: 500, error: error.message }
 
-    let waitingAfterOutbound = null
-    try {
-      waitingAfterOutbound = await tryMarkWaitingAfterHumanOutbound({
+    const modoSimplesEnvio = await empresaModoSimplesAtivo(company_id).catch(() => false)
+    const timestampAtividade = new Date().toISOString()
+
+    const [waitingAfterOutbound, modoSimplesResult] = await Promise.all([
+      modoSimplesEnvio
+        ? Promise.resolve(null)
+        : tryMarkWaitingAfterHumanOutbound({
+            company_id,
+            conversa_id: Number(conversa_id),
+            texto: String(msg?.texto || '').trim(),
+            criado_em: msg.criado_em,
+            autor_usuario_id: Number(user_id),
+            permitir_conteudo_sem_texto: true,
+          }).catch(() => null),
+      recalcularEMesclarModoSimples({
         company_id,
         conversa_id: Number(conversa_id),
-        texto: String(msg?.texto || '').trim(),
-        criado_em: msg.criado_em,
-        autor_usuario_id: Number(user_id),
-        permitir_conteudo_sem_texto: true,
-      })
-    } catch (_) {}
-
-    // Atualizar conversa com timestamp correto
-    const timestampAtividade = new Date().toISOString()
-    await supabase
-      .from('conversas')
-      .update({ lida: true, ultima_atividade: timestampAtividade })
-      .eq('company_id', Number(company_id))
-      .eq('id', Number(conversa_id))
+        mensagemNova: msg,
+        io: null,
+      }).catch(() => null),
+      supabase
+        .from('conversas')
+        .update({ lida: true, ultima_atividade: timestampAtividade })
+        .eq('company_id', Number(company_id))
+        .eq('id', Number(conversa_id)),
+    ])
 
     // Emitir eventos para o frontend
     if (io) {
@@ -7609,7 +7622,11 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
         id: Number(conversa_id),
         ultima_atividade: timestampAtividade,
         reordenar_suave: true,
-      }, waitingAfterOutbound)
+      }, waitingAfterOutbound, {
+        ...(modoSimplesResult?.conversa || {}),
+        atendimento_modo_simples: modoSimplesEnvio,
+        modo_simples_aguardando: modoSimplesResult?.modo_simples_aguardando ?? null,
+      })
       
       // Adicionar preview da última mensagem baseado no tipo
       if (msg.tipo === 'contact' && msg.contact_meta) {
