@@ -157,6 +157,18 @@ async function recalcularStatusPorUltimaMensagem({
   const novoAguardando = resolverModoSimplesAguardando(lastMsg)
   const anterior = conv.modo_simples_aguardando ?? null
 
+  // Após "Marcar como lida", modo_simples_aguardando fica null até nova mensagem inbound.
+  // Recálculos sem mensagemNova não devem reativar aguardando só porque a última msg ainda é inbound.
+  if (!mensagemNova && anterior === null && novoAguardando === 'atendente') {
+    return {
+      changed: false,
+      skipped: false,
+      modo_simples_aguardando: null,
+      ultima_direcao: lastMsg?.direcao ?? null,
+      atendimento_modo_simples: true,
+    }
+  }
+
   if (anterior === novoAguardando) {
     return {
       changed: false,

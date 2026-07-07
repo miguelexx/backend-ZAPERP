@@ -27,6 +27,8 @@ const {
   aplicarModoSimplesNoPayload,
   recalcularStatusPorUltimaMensagem,
   limparAguardandoAtendenteModoSimples,
+  getUltimaMensagemReal,
+  resolverModoSimplesAguardando,
 } = require('../services/atendimentoModoSimplesService')
 const { empresaModoSimplesAtivo } = require('../helpers/empresaModoSimplesFlag')
 const {
@@ -4100,9 +4102,11 @@ exports.detalharChat = async (req, res) => {
         .eq('usuario_id', Number(user_id))
 
       const [, { data: ocultas, error: errOcultas }] = await Promise.all([
-        marcarComoLidaPorUsuario({ company_id, conversa_id: id, usuario_id: user_id }).catch((e) => {
-          console.warn('detalharChat: marcarComoLidaPorUsuario', e?.message || e)
-        }),
+        detalheModoSimplesAtivo
+          ? Promise.resolve()
+          : marcarComoLidaPorUsuario({ company_id, conversa_id: id, usuario_id: user_id }).catch((e) => {
+              console.warn('detalharChat: marcarComoLidaPorUsuario', e?.message || e)
+            }),
         ocultasQuery,
       ])
 
@@ -4245,7 +4249,7 @@ exports.detalharChat = async (req, res) => {
 
     // ✅ emite SOMENTE mensagens_lidas (não dispara atualizar lista ao abrir)
     const io = req.app.get('io')
-    if (io) {
+    if (io && !detalheModoSimplesAtivo) {
       const payload = { conversa_id: Number(id), usuario_id: Number(user_id) }
       emitirParaUsuario(io, user_id, io.EVENTS?.MENSAGENS_LIDAS || 'mensagens_lidas', payload)
     }
@@ -4727,24 +4731,30 @@ exports.marcarLidaModoSimplesChat = async (req, res) => {
 
     const conv = perm.conv
     const isGroup = isGroupConversation(conv)
-    const unreadMap = await obterUnreadMap({ company_id, usuario_id: user_id })
-    const unreadCount = unreadMap[conversa_id] || 0
-    const aguardandoAtendente = rowAguardandoAtendenteModoSimples(
-      { ...conv, modo_simples_aguardando: conv?.modo_simples_aguardando },
-      unreadCount
-    )
-    if (!aguardandoAtendente) {
-      return res.status(409).json({ error: 'Conversa não está aguardando atendente' })
+
+    const { data: convModoSimples, error: convModoErr } = await supabase
+      .from('conversas')
+      .select('id, tipo, telefone, status_atendimento, modo_simples_aguardando')
+      .eq('company_id', Number(company_id))
+      .eq('id', conversa_id)
+      .maybeSingle()
+    if (convModoErr) {
+      return res.status(500).json({ error: convModoErr.message || 'Erro ao carregar conversa' })
+    }
+    if (!convModoSimples) {
+      return res.status(404).json({ error: 'Conversa não encontrada' })
     }
 
-    await marcarComoLidaPorUsuario({ company_id, conversa_id, usuario_id: user_id })
+    const unreadMap = await obterUnreadMap({ company_id, usuario_id: user_id })
+    const unreadCount = unreadMap[conversa_id] || 0
+    let aguardandoAtendente = rowAguardandoAtendenteModoSimples(convModoSimples, unreadCount)
 
-    const limpar = await limparAguardandoAtendenteModoSimples({
-      company_id,
-      conversa_id,
-      isGroup,
-    })
-    if (!limpar.ok) return res.status(limpar.status || 500).json({ error: limpar.error })
+    if (!aguardandoAtendente && !isGroup) {
+      const lastMsg = await getUltimaMensagemReal(conversa_id, company_id)
+      if (resolverModoSimplesAguardando(lastMsg) === 'atendente') {
+        aguardandoAtendente = true
+      }
+    }
 
     const payloadBase = {
       id: conversa_id,
@@ -4756,6 +4766,19 @@ exports.marcarLidaModoSimplesChat = async (req, res) => {
       atendimento_modo_simples: true,
     }
     const eventPayload = aplicarModoSimplesNoPayload(payloadBase, payloadBase, true)
+
+    if (!aguardandoAtendente) {
+      return res.json({ ok: true, already_cleared: true, conversa: eventPayload })
+    }
+
+    await marcarComoLidaPorUsuario({ company_id, conversa_id, usuario_id: user_id })
+
+    const limpar = await limparAguardandoAtendenteModoSimples({
+      company_id,
+      conversa_id,
+      isGroup,
+    })
+    if (!limpar.ok) return res.status(limpar.status || 500).json({ error: limpar.error })
 
     const io = req.app.get('io')
     if (io) {
