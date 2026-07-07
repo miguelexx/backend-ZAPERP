@@ -21,6 +21,7 @@ const {
   resolverModoSimplesAguardando,
   mensagemQualificaParaModoSimples,
   recalcularStatusPorUltimaMensagem,
+  limparAguardandoAtendenteModoSimples,
 } = require('../services/atendimentoModoSimplesService')
 
 describe('atendimentoModoSimplesService', () => {
@@ -191,6 +192,34 @@ describe('atendimentoModoSimplesService', () => {
       expect(result.changed).toBe(false)
       expect(result.modo_simples_aguardando).toBe('atendente')
       expect(chain.update).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('limparAguardandoAtendenteModoSimples', () => {
+    it('grupo não altera modo_simples_aguardando', async () => {
+      const result = await limparAguardandoAtendenteModoSimples({
+        company_id: 1,
+        conversa_id: 5,
+        isGroup: true,
+      })
+      expect(result.ok).toBe(true)
+      expect(result.grupo).toBe(true)
+      expect(result.modo_simples_aguardando).toBe(null)
+    })
+
+    it('individual zera modo_simples_aguardando', async () => {
+      const chain = supabase.from()
+      chain.eq.mockReturnThis()
+      chain.update.mockReturnValue({ eq: chain.eq })
+
+      const result = await limparAguardandoAtendenteModoSimples({
+        company_id: 1,
+        conversa_id: 10,
+        isGroup: false,
+      })
+      expect(result.ok).toBe(true)
+      expect(result.modo_simples_aguardando).toBe(null)
+      expect(chain.update).toHaveBeenCalledWith({ modo_simples_aguardando: null })
     })
   })
 })

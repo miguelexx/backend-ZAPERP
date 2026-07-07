@@ -199,6 +199,31 @@ async function recalcularStatusPorUltimaMensagem({
   return result
 }
 
+/**
+ * Remove conversa individual da fila "Aguardando atendente" sem enviar mensagem.
+ * Nova mensagem inbound recalcula via recalcularStatusPorUltimaMensagem.
+ */
+async function limparAguardandoAtendenteModoSimples({ company_id, conversa_id, isGroup }) {
+  const cid = Number(company_id)
+  const convId = Number(conversa_id)
+  if (!Number.isFinite(cid) || !Number.isFinite(convId)) {
+    return { ok: false, status: 400, error: 'Contexto inválido' }
+  }
+  if (isGroup) {
+    return { ok: true, modo_simples_aguardando: null, grupo: true }
+  }
+  const { error } = await supabase
+    .from('conversas')
+    .update({ modo_simples_aguardando: null })
+    .eq('company_id', cid)
+    .eq('id', convId)
+  if (error) {
+    console.warn('[modoSimples] limparAguardandoAtendente:', error.message || error)
+    return { ok: false, status: 500, error: 'Erro ao atualizar conversa' }
+  }
+  return { ok: true, modo_simples_aguardando: null, grupo: false }
+}
+
 module.exports = {
   isClosedAttendanceStatus,
   mensagemQualificaParaModoSimples,
@@ -206,5 +231,6 @@ module.exports = {
   resolverModoSimplesAguardando,
   aplicarModoSimplesNoPayload,
   recalcularStatusPorUltimaMensagem,
+  limparAguardandoAtendenteModoSimples,
   empresaModoSimplesAtivo,
 }

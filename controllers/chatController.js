@@ -26,8 +26,14 @@ const { tryMarkWaitingAfterHumanOutbound } = require('../services/absenceFinaliz
 const {
   aplicarModoSimplesNoPayload,
   recalcularStatusPorUltimaMensagem,
+  limparAguardandoAtendenteModoSimples,
 } = require('../services/atendimentoModoSimplesService')
 const { empresaModoSimplesAtivo } = require('../helpers/empresaModoSimplesFlag')
+const {
+  resolveGrupoIdsComUnreadParaUsuario,
+  applyAguardandoAtendenteModoSimplesQuery,
+  rowAguardandoAtendenteModoSimples,
+} = require('../helpers/modoSimplesGrupoUnread')
 const { syncOldMessagesForConversation } = require('../services/oldMessagesSyncService')
 const {
   marcarAguardandoClienteManual,
@@ -1610,6 +1616,14 @@ exports.listarConversas = async (req, res) => {
     ])
     const conversaIdsParticipanteAtivoSet = new Set(conversaIdsParticipanteAtivo.map(Number))
 
+    let grupoUnreadIdsAguardando = []
+    if (aguardandoAtendenteAtivo && atendimentoModoSimplesEmpresa) {
+      grupoUnreadIdsAguardando = await resolveGrupoIdsComUnreadParaUsuario({
+        company_id,
+        unreadMap,
+      })
+    }
+
     // Exceção: conversas que o usuário transferiu para outro — aparecem na lista independente do setor
 
     if (statusNorm === 'mensagem_disparada' && !separarMensagensDisparadasEmpresa) {
@@ -1956,11 +1970,10 @@ exports.listarConversas = async (req, res) => {
         }
       }
 
-      // Filtro "Aguardando atendente" (modo simples): pendências com última mensagem do cliente.
+      // Filtro "Aguardando atendente" (modo simples): individuais + grupos não lidos (estilo WhatsApp).
       if (aguardandoAtendenteAtivo) {
         if (atendimentoModoSimplesEmpresa) {
-          q = q.or('tipo.is.null,tipo.neq.grupo')
-          q = q.eq('modo_simples_aguardando', 'atendente')
+          q = applyAguardandoAtendenteModoSimplesQuery(q, grupoUnreadIdsAguardando)
         } else {
           q = q.in('id', [0])
         }
@@ -2406,9 +2419,13 @@ exports.listarConversas = async (req, res) => {
 
     if (aguardandoAtendenteAtivo) {
       conversasFormatadas = conversasFormatadas.filter((c) => {
-        if (c.sem_conversa || c.is_group) return false
+        if (c.sem_conversa) return false
         if (!atendimentoModoSimplesEmpresa) return false
-        return String(c.modo_simples_aguardando || '').toLowerCase() === 'atendente'
+        const unread = unreadMap[Number(c.id)] || c.unread_count || 0
+        return rowAguardandoAtendenteModoSimples(
+          { ...c, tipo: c.is_group ? 'grupo' : c.tipo, modo_simples_aguardando: c.modo_simples_aguardando },
+          unread
+        )
       })
     }
 
@@ -4680,6 +4697,78 @@ exports.reabrirChat = async (req, res) => {
   } catch (err) {
     console.error(err)
     return res.status(500).json({ error: 'Erro ao reabrir conversa' })
+  }
+}
+
+// =====================================================
+// Modo simples: marcar como lida (sai de Aguardando atendente)
+// =====================================================
+exports.marcarLidaModoSimplesChat = async (req, res) => {
+  try {
+    const { company_id, id: user_id, perfil, departamento_ids = [] } = req.user
+    const conversa_id = Number(req.params.id)
+    if (!Number.isFinite(conversa_id) || conversa_id <= 0) {
+      return res.status(400).json({ error: 'ID da conversa inválido' })
+    }
+
+    const modoSimplesAtivo = await empresaModoSimplesAtivo(company_id)
+    if (!modoSimplesAtivo) {
+      return res.status(400).json({ error: 'Modo simples de atendimento não está ativo' })
+    }
+
+    const perm = await assertPermissaoConversa({
+      company_id,
+      conversa_id,
+      user_id,
+      role: perfil,
+      user_dep_ids: departamento_ids,
+    })
+    if (!perm.ok) return res.status(perm.status).json({ error: perm.error })
+
+    const conv = perm.conv
+    const isGroup = isGroupConversation(conv)
+    const unreadMap = await obterUnreadMap({ company_id, usuario_id: user_id })
+    const unreadCount = unreadMap[conversa_id] || 0
+    const aguardandoAtendente = rowAguardandoAtendenteModoSimples(
+      { ...conv, modo_simples_aguardando: conv?.modo_simples_aguardando },
+      unreadCount
+    )
+    if (!aguardandoAtendente) {
+      return res.status(409).json({ error: 'Conversa não está aguardando atendente' })
+    }
+
+    await marcarComoLidaPorUsuario({ company_id, conversa_id, usuario_id: user_id })
+
+    const limpar = await limparAguardandoAtendenteModoSimples({
+      company_id,
+      conversa_id,
+      isGroup,
+    })
+    if (!limpar.ok) return res.status(limpar.status || 500).json({ error: limpar.error })
+
+    const payloadBase = {
+      id: conversa_id,
+      lida: true,
+      tem_novas_mensagens: false,
+      tem_novas_mensagens_em_atendimento: false,
+      unread_count: 0,
+      modo_simples_aguardando: null,
+      atendimento_modo_simples: true,
+    }
+    const eventPayload = aplicarModoSimplesNoPayload(payloadBase, payloadBase, true)
+
+    const io = req.app.get('io')
+    if (io) {
+      emitirParaUsuario(io, user_id, io.EVENTS?.MENSAGENS_LIDAS || 'mensagens_lidas', {
+        conversa_id,
+      })
+      emitirConversaAtualizada(io, company_id, conversa_id, eventPayload, { skipAtualizarConversa: true })
+    }
+
+    return res.json({ ok: true, conversa: eventPayload })
+  } catch (err) {
+    console.error(err)
+    return res.status(500).json({ error: 'Erro ao marcar conversa como lida' })
   }
 }
 

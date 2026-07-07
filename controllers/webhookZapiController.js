@@ -1848,15 +1848,6 @@ exports.receberZapi = async (req, res) => {
       }
 
       const extracted = extractMessage(payload)
-      // Reações (reaction) não devem aparecer como mensagens no histórico do CRM.
-      // Deixamos a reação ser tratada apenas no app WhatsApp (ícone na própria mensagem),
-      // portanto ignoramos payloads cujo tipo final seja "reaction".
-      if (extracted && extracted.type === 'reaction') {
-        console.log('[Z-API] 🔁 reaction callback recebido — ignorando como mensagem (sem histórico separado)')
-        lastResult = { ok: true, skip: 'reaction' }
-        continue
-      }
-
       let {
         phone,
         debugReason,
@@ -3172,8 +3163,10 @@ exports.receberZapi = async (req, res) => {
         if (contactMeta && (contactMeta.nome || contactMeta.telefone)) {
           insertMsg.contact_meta = contactMeta
         }
+      } else if (type === 'reaction') {
+        insertMsg.tipo = 'reaction'
       }
-      // reaction e qualquer outro tipo: já têm texto preenchido; tipo padrão é texto
+      // Demais tipos: já têm texto preenchido; tipo padrão é texto
 
       let { data: inserted, error: errMsg } = await supabase
         .from('mensagens')

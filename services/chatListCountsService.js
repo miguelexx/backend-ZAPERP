@@ -196,6 +196,20 @@ async function resolveChatListCountsContext(req) {
   const grupoIdsSemDepartamento =
     !isAdmin && !filter_dep_id ? await getGrupoIdsSemDepartamento(company_id) : []
 
+  let grupoUnreadIdsAguardando = []
+  let unreadMap = {}
+  if (atendimentoModoSimplesEmpresa) {
+    const {
+      obterUnreadMap,
+      resolveGrupoIdsComUnreadParaUsuario,
+    } = require('../helpers/modoSimplesGrupoUnread')
+    unreadMap = await obterUnreadMap({ company_id, usuario_id: user_id })
+    grupoUnreadIdsAguardando = await resolveGrupoIdsComUnreadParaUsuario({
+      company_id,
+      unreadMap,
+    })
+  }
+
   const tagFilterAtivo =
     tag_id != null &&
     String(tag_id).trim() !== '' &&
@@ -297,6 +311,8 @@ async function resolveChatListCountsContext(req) {
     separarMensagensDisparadasEmpresa,
     atendimentoModoSimplesEmpresa,
     isFinanceiro,
+    grupoUnreadIdsAguardando,
+    unreadMap,
   }
 }
 
@@ -475,8 +491,8 @@ function applyChatListSqlFilters(query, ctx, overrides = {}) {
 
   if (aguardandoAtendenteAtivo) {
     if (ctx.atendimentoModoSimplesEmpresa) {
-      q = q.or('tipo.is.null,tipo.neq.grupo')
-      q = q.eq('modo_simples_aguardando', 'atendente')
+      const { applyAguardandoAtendenteModoSimplesQuery } = require('../helpers/modoSimplesGrupoUnread')
+      q = applyAguardandoAtendenteModoSimplesQuery(q, ctx.grupoUnreadIdsAguardando || [])
     } else {
       q = q.in('id', [0])
     }
@@ -525,9 +541,13 @@ function rowVisibleInPostFilteredList(row, ctx, overrides = {}) {
   }
 
   if (overrides.aguardando_atendente === true) {
-    if (isGroup) return false
     if (!ctx?.atendimentoModoSimplesEmpresa) return false
-    return String(row.modo_simples_aguardando || '').toLowerCase() === 'atendente'
+    const unread =
+      ctx?.unreadMap && ctx.unreadMap[Number(row.id)] != null
+        ? Number(ctx.unreadMap[Number(row.id)])
+        : 0
+    const { rowAguardandoAtendenteModoSimples } = require('../helpers/modoSimplesGrupoUnread')
+    return rowAguardandoAtendenteModoSimples(row, unread)
   }
 
   if (overrides.status_atendimento === 'aberta') {
