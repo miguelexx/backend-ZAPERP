@@ -19,6 +19,7 @@ describe('chatListCountsService', () => {
     expect(overridesFromListQuery({ minha_fila: '1' })).toEqual({ minha_fila: true })
     expect(overridesFromListQuery({ hoje: '1' })).toEqual({ hoje: true })
     expect(overridesFromListQuery({ aguardando_cliente: '1' })).toEqual({ aguardando_cliente: true })
+    expect(overridesFromListQuery({ aguardando_atendente: '1' })).toEqual({ aguardando_atendente: true })
     expect(overridesFromListQuery({ status_atendimento: 'fechada' })).toEqual({
       status_atendimento: 'fechada',
     })
@@ -92,34 +93,6 @@ describe('chatListCountsService', () => {
         { tipo: 'grupo', status_atendimento: 'em_atendimento', atendente_id: 84, mensagens: [{ id: 1 }] },
         ctx,
         { status_atendimento: 'em_atendimento' }
-      )
-    ).toBe(false)
-  })
-
-  test('minha fila modo simples usa modo_simples_aguardando atendente', () => {
-    const ctx = { user_id: 84, isAtendente: true, atendimentoModoSimplesEmpresa: true }
-
-    expect(
-      rowVisibleInPostFilteredList(
-        { tipo: null, status_atendimento: 'aberta', atendente_id: null, modo_simples_aguardando: 'atendente' },
-        ctx,
-        { minha_fila: true }
-      )
-    ).toBe(true)
-
-    expect(
-      rowVisibleInPostFilteredList(
-        { tipo: null, status_atendimento: 'em_atendimento', atendente_id: 99, modo_simples_aguardando: 'cliente' },
-        ctx,
-        { minha_fila: true }
-      )
-    ).toBe(false)
-
-    expect(
-      rowVisibleInPostFilteredList(
-        { tipo: 'grupo', status_atendimento: 'aberta', modo_simples_aguardando: 'atendente', mensagens: [{ id: 1 }] },
-        ctx,
-        { minha_fila: true }
       )
     ).toBe(false)
   })

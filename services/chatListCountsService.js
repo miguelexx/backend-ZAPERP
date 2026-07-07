@@ -2,10 +2,6 @@ const supabase = require('../config/supabase')
 const { usuarioPertenceSetorFinanceiro } = require('../helpers/financeiroSetorHelper')
 const { buildClienteSearchOr, buildTelefoneSearchOr, escapeIlikePattern } = require('../helpers/chatSearchHelper')
 const {
-  conversaEntraMinhaFilaModoSimples,
-  applyMinhaFilaModoSimplesSqlFilter,
-} = require('./atendimentoModoSimplesService')
-const {
   getGrupoIdsPorDepartamentos,
   getGrupoIdsSemDepartamento,
   pushNonGroupVisibilityParts,
@@ -46,6 +42,7 @@ function deveIncluirGruposSemDepartamentoNoFiltroTodos({
   filtroAtendenteInformado,
   minhaFilaAtiva,
   aguardandoClienteAtivo,
+  aguardandoAtendenteAtivo,
   pagamentoPendenteAtivo,
   emAtrasoAtivo,
   hojeAtivo,
@@ -57,6 +54,7 @@ function deveIncluirGruposSemDepartamentoNoFiltroTodos({
     filtroAtendenteInformado == null &&
     !minhaFilaAtiva &&
     !aguardandoClienteAtivo &&
+    !aguardandoAtendenteAtivo &&
     !pagamentoPendenteAtivo &&
     !emAtrasoAtivo &&
     !hojeAtivo &&
@@ -329,6 +327,7 @@ function applyChatListSqlFilters(query, ctx, overrides = {}) {
   const minhaFilaAtiva = overrides.minha_fila === true
   const hojeAtivo = overrides.hoje === true
   const aguardandoClienteAtivo = overrides.aguardando_cliente === true
+  const aguardandoAtendenteAtivo = overrides.aguardando_atendente === true
   const pagamentoPendenteAtivo = overrides.pagamento_pendente === true
   const emAtrasoAtivo = overrides.em_atraso === true
   const filtroAusenciaLista =
@@ -363,6 +362,7 @@ function applyChatListSqlFilters(query, ctx, overrides = {}) {
       filtroAtendenteInformado,
       minhaFilaAtiva,
       aguardandoClienteAtivo,
+      aguardandoAtendenteAtivo,
       pagamentoPendenteAtivo,
       emAtrasoAtivo,
       hojeAtivo,
@@ -395,6 +395,7 @@ function applyChatListSqlFilters(query, ctx, overrides = {}) {
   if (
     !minhaFilaAtiva &&
     !aguardandoClienteAtivo &&
+    !aguardandoAtendenteAtivo &&
     !pagamentoPendenteAtivo &&
     !emAtrasoAtivo &&
     !hojeAtivo &&
@@ -404,14 +405,10 @@ function applyChatListSqlFilters(query, ctx, overrides = {}) {
   }
 
   if (minhaFilaAtiva) {
-    if (ctx.atendimentoModoSimplesEmpresa) {
-      q = applyMinhaFilaModoSimplesSqlFilter(q)
-    } else {
-      q = q.or('tipo.is.null,tipo.neq.grupo')
-      q = q.or(
-        `status_atendimento.eq.aberta,and(status_atendimento.eq.em_atendimento,atendente_id.eq.${user_id}),and(status_atendimento.eq.aguardando_cliente,atendente_id.eq.${user_id}),and(status_atendimento.eq.pagamento_pendente,atendente_id.eq.${user_id}),and(status_atendimento.eq.em_atraso,atendente_id.eq.${user_id})${conversaIdsParticipanteAtivo.length > 0 ? `,and(status_atendimento.in.(em_atendimento,aguardando_cliente,pagamento_pendente,em_atraso),id.in.(${conversaIdsParticipanteAtivo.join(',')}))` : ''}`
-      )
-    }
+    q = q.or('tipo.is.null,tipo.neq.grupo')
+    q = q.or(
+      `status_atendimento.eq.aberta,and(status_atendimento.eq.em_atendimento,atendente_id.eq.${user_id}),and(status_atendimento.eq.aguardando_cliente,atendente_id.eq.${user_id}),and(status_atendimento.eq.pagamento_pendente,atendente_id.eq.${user_id}),and(status_atendimento.eq.em_atraso,atendente_id.eq.${user_id})${conversaIdsParticipanteAtivo.length > 0 ? `,and(status_atendimento.in.(em_atendimento,aguardando_cliente,pagamento_pendente,em_atraso),id.in.(${conversaIdsParticipanteAtivo.join(',')}))` : ''}`
+    )
   } else if (pagamentoPendenteAtivo) {
     q = q.eq('status_atendimento', 'pagamento_pendente')
     q = q.not('atendente_id', 'is', null)
@@ -458,16 +455,31 @@ function applyChatListSqlFilters(query, ctx, overrides = {}) {
   }
 
   if (aguardandoClienteAtivo) {
-    q = q.or(
-      'and(status_atendimento.eq.em_atendimento,aguardando_cliente_desde.not.is.null),status_atendimento.eq.aguardando_cliente'
-    )
-    q = q.not('atendente_id', 'is', null)
-    if (isAtendente) {
-      q = conversaIdsParticipanteAtivo.length > 0
-        ? q.or(`atendente_id.eq.${Number(user_id)},id.in.(${conversaIdsParticipanteAtivo.join(',')})`)
-        : q.eq('atendente_id', Number(user_id))
+    if (ctx.atendimentoModoSimplesEmpresa) {
+      q = q.eq('modo_simples_aguardando', 'cliente')
+    } else {
+      q = q.or(
+        'and(status_atendimento.eq.em_atendimento,aguardando_cliente_desde.not.is.null),status_atendimento.eq.aguardando_cliente'
+      )
+      q = q.not('atendente_id', 'is', null)
     }
-    else if (filtroAtendenteInformado != null) q = q.eq('atendente_id', Number(filtroAtendenteInformado))
+    if (!ctx.atendimentoModoSimplesEmpresa) {
+      if (isAtendente) {
+        q = conversaIdsParticipanteAtivo.length > 0
+          ? q.or(`atendente_id.eq.${Number(user_id)},id.in.(${conversaIdsParticipanteAtivo.join(',')})`)
+          : q.eq('atendente_id', Number(user_id))
+      }
+      else if (filtroAtendenteInformado != null) q = q.eq('atendente_id', Number(filtroAtendenteInformado))
+    }
+  }
+
+  if (aguardandoAtendenteAtivo) {
+    if (ctx.atendimentoModoSimplesEmpresa) {
+      q = q.or('tipo.is.null,tipo.neq.grupo')
+      q = q.eq('modo_simples_aguardando', 'atendente')
+    } else {
+      q = q.in('id', [0])
+    }
   }
 
   if (filtroAusenciaLista) {
@@ -501,9 +513,6 @@ function rowVisibleInPostFilteredList(row, ctx, overrides = {}) {
     ctx?.filtroAtendenteInformado != null ? Number(ctx.filtroAtendenteInformado) : null
 
   if (overrides.minha_fila === true) {
-    if (ctx?.atendimentoModoSimplesEmpresa) {
-      return conversaEntraMinhaFilaModoSimples(row)
-    }
     if (isGroup) return false
     if (['em_atendimento', 'aguardando_cliente', 'pagamento_pendente', 'em_atraso'].includes(status)) {
       return vinculadaAoUsuario
@@ -513,6 +522,12 @@ function rowVisibleInPostFilteredList(row, ctx, overrides = {}) {
       return livreOuMeu && (rowHasMessage(row) || atendenteId != null)
     }
     return false
+  }
+
+  if (overrides.aguardando_atendente === true) {
+    if (isGroup) return false
+    if (!ctx?.atendimentoModoSimplesEmpresa) return false
+    return String(row.modo_simples_aguardando || '').toLowerCase() === 'atendente'
   }
 
   if (overrides.status_atendimento === 'aberta') {
@@ -531,7 +546,7 @@ function rowVisibleInPostFilteredList(row, ctx, overrides = {}) {
 }
 
 function countNeedsPostListRules(overrides = {}, ctx = {}) {
-  if (overrides.minha_fila === true && ctx?.atendimentoModoSimplesEmpresa) {
+  if (overrides.aguardando_atendente === true && ctx?.atendimentoModoSimplesEmpresa) {
     return false
   }
   return (
@@ -627,6 +642,7 @@ function overridesFromListQuery(query = {}) {
 
   const minhaFilaAtiva = parseBooleanQuery(query.minha_fila)
   const aguardandoClienteAtivo = parseBooleanQuery(query.aguardando_cliente)
+  const aguardandoAtendenteAtivo = parseBooleanQuery(query.aguardando_atendente)
   const pagamentoPendenteAtivo = parseBooleanQuery(query.pagamento_pendente)
   const emAtrasoAtivo = parseBooleanQuery(query.em_atraso)
   const hojeAtivo = parseBooleanQuery(query.hoje)
@@ -634,6 +650,7 @@ function overridesFromListQuery(query = {}) {
     String(query.finalizacao_motivo || '').trim().toLowerCase() === 'ausencia_cliente'
 
   if (minhaFilaAtiva) return { minha_fila: true }
+  if (aguardandoAtendenteAtivo) return { aguardando_atendente: true }
   if (hojeAtivo) return { hoje: true }
   if (aguardandoClienteAtivo) return { aguardando_cliente: true }
   if (pagamentoPendenteAtivo) return { pagamento_pendente: true }
@@ -663,6 +680,9 @@ async function getChatFilterCounts(req) {
       finalizacao_motivo: 'ausencia_cliente',
     }),
     countConversasWithFilter(ctx, { aguardando_cliente: true }),
+    ctx.atendimentoModoSimplesEmpresa
+      ? countConversasWithFilter(ctx, { aguardando_atendente: true })
+      : Promise.resolve(0),
     countConversasWithFilter(ctx, { pagamento_pendente: true }),
     countConversasWithFilter(ctx, { em_atraso: true }),
     countConversasTransferidas(ctx),
@@ -680,13 +700,14 @@ async function getChatFilterCounts(req) {
     finalizadas: counts[5],
     por_ausencia: counts[6],
     aguardando_cliente: counts[7],
-    pagamentos_pendentes: counts[8],
-    em_atraso: counts[9],
-    transferidos: counts[10],
-    mensagens_disparadas: counts[11],
+    aguardando_atendente: counts[8],
+    pagamentos_pendentes: counts[9],
+    em_atraso: counts[10],
+    transferidos: counts[11],
+    mensagens_disparadas: counts[12],
     // aguardando_funcionario vem de GET /supervisao/resumo no frontend
     aguardando: counts[7],
-    atraso: counts[9],
+    atraso: counts[10],
   }
 }
 

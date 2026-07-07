@@ -199,21 +199,6 @@ async function recalcularStatusPorUltimaMensagem({
   return result
 }
 
-function isModoSimplesAguardandoAtendenteValor(val) {
-  return String(val || '').toLowerCase().trim() === 'atendente'
-}
-
-/** Conversa entra na aba Minha fila quando modo simples está ativo (pendência de resposta). */
-function conversaEntraMinhaFilaModoSimples(row) {
-  if (!row || isGroupConversation(row)) return false
-  return isModoSimplesAguardandoAtendenteValor(row.modo_simples_aguardando)
-}
-
-/** Filtro SQL da Minha fila no modo simples: só individuais aguardando atendente. */
-function applyMinhaFilaModoSimplesSqlFilter(q) {
-  return q.or('tipo.is.null,tipo.neq.grupo').eq('modo_simples_aguardando', 'atendente')
-}
-
 module.exports = {
   isClosedAttendanceStatus,
   mensagemQualificaParaModoSimples,
@@ -222,7 +207,4 @@ module.exports = {
   aplicarModoSimplesNoPayload,
   recalcularStatusPorUltimaMensagem,
   empresaModoSimplesAtivo,
-  isModoSimplesAguardandoAtendenteValor,
-  conversaEntraMinhaFilaModoSimples,
-  applyMinhaFilaModoSimplesSqlFilter,
 }

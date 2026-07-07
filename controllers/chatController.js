@@ -26,8 +26,6 @@ const { tryMarkWaitingAfterHumanOutbound } = require('../services/absenceFinaliz
 const {
   aplicarModoSimplesNoPayload,
   recalcularStatusPorUltimaMensagem,
-  conversaEntraMinhaFilaModoSimples,
-  applyMinhaFilaModoSimplesSqlFilter,
 } = require('../services/atendimentoModoSimplesService')
 const { empresaModoSimplesAtivo } = require('../helpers/empresaModoSimplesFlag')
 const { syncOldMessagesForConversation } = require('../services/oldMessagesSyncService')
@@ -1195,6 +1193,7 @@ function deveIncluirGruposSemDepartamentoNoFiltroTodos({
   filtroAtendenteInformado,
   minhaFilaAtiva,
   aguardandoClienteAtivo,
+  aguardandoAtendenteAtivo,
   pagamentoPendenteAtivo,
   emAtrasoAtivo,
   hojeAtivo,
@@ -1206,6 +1205,7 @@ function deveIncluirGruposSemDepartamentoNoFiltroTodos({
     filtroAtendenteInformado == null &&
     !minhaFilaAtiva &&
     !aguardandoClienteAtivo &&
+    !aguardandoAtendenteAtivo &&
     !pagamentoPendenteAtivo &&
     !emAtrasoAtivo &&
     !hojeAtivo &&
@@ -1395,6 +1395,7 @@ exports.listarConversas = async (req, res) => {
       minha_fila: minhaFilaRaw,
       incluir_colaboradores_encaminhar: incluirColabEncRaw,
       aguardando_cliente: aguardandoClienteRaw,
+      aguardando_atendente: aguardandoAtendenteRaw,
       pagamento_pendente: pagamentoPendenteRaw,
       em_atraso: emAtrasoRaw,
       tempo_parado: tempoParadoRaw,
@@ -1428,6 +1429,12 @@ exports.listarConversas = async (req, res) => {
       aguardandoClienteRaw === 'true' ||
       aguardandoClienteRaw === 1 ||
       aguardandoClienteRaw === true
+
+    const aguardandoAtendenteAtivo =
+      aguardandoAtendenteRaw === '1' ||
+      aguardandoAtendenteRaw === 'true' ||
+      aguardandoAtendenteRaw === 1 ||
+      aguardandoAtendenteRaw === true
 
     const pagamentoPendenteAtivo =
       pagamentoPendenteRaw === '1' ||
@@ -1554,6 +1561,7 @@ exports.listarConversas = async (req, res) => {
       filtroAtendenteInformado,
       minhaFilaAtiva,
       aguardandoClienteAtivo,
+      aguardandoAtendenteAtivo,
       pagamentoPendenteAtivo,
       emAtrasoAtivo,
       hojeAtivo,
@@ -1858,6 +1866,7 @@ exports.listarConversas = async (req, res) => {
       if (
         !minhaFilaAtiva &&
         !aguardandoClienteAtivo &&
+        !aguardandoAtendenteAtivo &&
         !pagamentoPendenteAtivo &&
         !emAtrasoAtivo &&
         !hojeAtivo &&
@@ -1865,22 +1874,18 @@ exports.listarConversas = async (req, res) => {
       ) {
         q = q.or('tipo.eq.grupo,status_atendimento.neq.mensagem_disparada,status_atendimento.is.null')
       }
-      // Filtro personalizado "Minha fila": modo simples = pendências (aguardando atendente); legado = abertas + em atendimento comigo
+      // Filtro personalizado "Minha fila": abertas (fila) + em atendimento só comigo + grupos do setor; sem finalizadas
       if (minhaFilaAtiva) {
-        if (atendimentoModoSimplesEmpresa) {
-          q = applyMinhaFilaModoSimplesSqlFilter(q)
-        } else {
-          // Grupos vinculados ao setor do atendente (departamento_grupos) aparecem na Minha fila.
-          // O bloco de visibilidade acima já restringe quais grupos o atendente pode ver.
-          // Admin ou usuário sem grupos vinculados: comportamento original (excluir grupos).
-          const incluirGruposSetor = !isAdmin && grupoIdsPermitidosPorDepartamento.length > 0
-          if (!incluirGruposSetor) {
-            q = q.or('tipo.is.null,tipo.neq.grupo')
-          }
-          q = q.or(
-            `${incluirGruposSetor ? `id.in.(${grupoIdsPermitidosPorDepartamento.join(',')}),` : ''}status_atendimento.eq.aberta,and(status_atendimento.eq.em_atendimento,atendente_id.eq.${user_id}),and(status_atendimento.eq.aguardando_cliente,atendente_id.eq.${user_id}),and(status_atendimento.eq.pagamento_pendente,atendente_id.eq.${user_id}),and(status_atendimento.eq.em_atraso,atendente_id.eq.${user_id})${conversaIdsParticipanteAtivo.length > 0 ? `,and(status_atendimento.in.(em_atendimento,aguardando_cliente,pagamento_pendente,em_atraso),id.in.(${conversaIdsParticipanteAtivo.join(',')}))` : ''}`
-          )
+        // Grupos vinculados ao setor do atendente (departamento_grupos) aparecem na Minha fila.
+        // O bloco de visibilidade acima já restringe quais grupos o atendente pode ver.
+        // Admin ou usuário sem grupos vinculados: comportamento original (excluir grupos).
+        const incluirGruposSetor = !isAdmin && grupoIdsPermitidosPorDepartamento.length > 0
+        if (!incluirGruposSetor) {
+          q = q.or('tipo.is.null,tipo.neq.grupo')
         }
+        q = q.or(
+          `${incluirGruposSetor ? `id.in.(${grupoIdsPermitidosPorDepartamento.join(',')}),` : ''}status_atendimento.eq.aberta,and(status_atendimento.eq.em_atendimento,atendente_id.eq.${user_id}),and(status_atendimento.eq.aguardando_cliente,atendente_id.eq.${user_id}),and(status_atendimento.eq.pagamento_pendente,atendente_id.eq.${user_id}),and(status_atendimento.eq.em_atraso,atendente_id.eq.${user_id})${conversaIdsParticipanteAtivo.length > 0 ? `,and(status_atendimento.in.(em_atendimento,aguardando_cliente,pagamento_pendente,em_atraso),id.in.(${conversaIdsParticipanteAtivo.join(',')}))` : ''}`
+        )
       } else if (pagamentoPendenteAtivo) {
         q = q.eq('status_atendimento', 'pagamento_pendente')
         q = q.not('atendente_id', 'is', null)
@@ -1948,6 +1953,16 @@ exports.listarConversas = async (req, res) => {
           } else if (filtroAtendenteInformado != null) {
             q = q.eq('atendente_id', Number(filtroAtendenteInformado))
           }
+        }
+      }
+
+      // Filtro "Aguardando atendente" (modo simples): pendências com última mensagem do cliente.
+      if (aguardandoAtendenteAtivo) {
+        if (atendimentoModoSimplesEmpresa) {
+          q = q.or('tipo.is.null,tipo.neq.grupo')
+          q = q.eq('modo_simples_aguardando', 'atendente')
+        } else {
+          q = q.in('id', [0])
         }
       }
 
@@ -2345,13 +2360,10 @@ exports.listarConversas = async (req, res) => {
       })
     }
 
-    // "Minha fila": modo simples = só aguardando atendente; legado = abertas + em atendimento do usuário + grupos do setor
+    // "Minha fila": alinha com abas Abertas + Em atendimento só do usuário + grupos do setor; exclui finalizadas e assumidas por outros
     if (minhaFilaAtiva) {
       conversasFormatadas = conversasFormatadas.filter((c) => {
         if (c.sem_conversa) return false
-        if (atendimentoModoSimplesEmpresa) {
-          return conversaEntraMinhaFilaModoSimples(c)
-        }
         // Grupos do setor do atendente: visíveis na Minha fila e ordenados por atividade como os demais.
         if (c.is_group) return true
         if (c.status_atendimento === 'ociosa') return false
@@ -2392,6 +2404,14 @@ exports.listarConversas = async (req, res) => {
       })
     }
 
+    if (aguardandoAtendenteAtivo) {
+      conversasFormatadas = conversasFormatadas.filter((c) => {
+        if (c.sem_conversa || c.is_group) return false
+        if (!atendimentoModoSimplesEmpresa) return false
+        return String(c.modo_simples_aguardando || '').toLowerCase() === 'atendente'
+      })
+    }
+
     if (pagamentoPendenteAtivo) {
       const restringirPorAtendente = isAtendente || (!isAtendente && filtroAtendenteInformado != null)
       const atendenteEscopo = isAtendente ? Number(user_id) : Number(filtroAtendenteInformado)
@@ -2428,6 +2448,7 @@ exports.listarConversas = async (req, res) => {
       !minhaFilaAtiva &&
       !hojeAtivo &&
       !aguardandoClienteAtivo &&
+      !aguardandoAtendenteAtivo &&
       !pagamentoPendenteAtivo &&
       !emAtrasoAtivo &&
       !tagFilterAtivo &&
