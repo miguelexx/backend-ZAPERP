@@ -7099,6 +7099,12 @@ function extBaseArquivo(file) {
 
 function aplicarTipoForcadoSticker(file, tipoInferido) {
   const forced = String(file?.__tipoForcado || '').toLowerCase().trim()
+  if (forced === 'voice' || forced === 'ptt') {
+    const base = mimeBase(file)
+    const ext = extBaseArquivo(file)
+    const audioish = base.startsWith('audio/') || AUDIO_FILE_EXTENSIONS.has(ext)
+    return audioish ? 'voice' : tipoInferido
+  }
   if (forced !== 'sticker') return tipoInferido
   const base = mimeBase(file)
   const ext = extBaseArquivo(file)
@@ -7765,7 +7771,9 @@ exports.enviarArquivo = async (req, res) => {
 
     for (let i = 0; i < files.length; i++) {
       const raw = files[i]
-      if (i === 0 && tipoBody === 'sticker') raw.__tipoForcado = 'sticker'
+      if (i === 0 && (tipoBody === 'sticker' || tipoBody === 'voice' || tipoBody === 'ptt')) {
+        raw.__tipoForcado = tipoBody === 'ptt' ? 'voice' : tipoBody
+      }
       else if (raw.__tipoForcado) delete raw.__tipoForcado
 
       const perFileCaption = i === 0 ? captionFromBody : ''
@@ -8484,6 +8492,7 @@ exports._test = {
   buildClientTempIdDedupResponse,
   isClientTempIdUniqueViolation,
   inferirTipoArquivo,
+  aplicarTipoForcadoSticker,
   shouldNormalizeImageForWhatsapp,
   normalizeForwardTipo,
   resolveForwardMediaForProvider,

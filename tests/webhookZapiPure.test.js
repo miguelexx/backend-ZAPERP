@@ -261,6 +261,41 @@ describe('extractMessage', () => {
     expect(r.texto).toBe('(figurinha)')
   })
 
+  test.each([
+    [
+      'image',
+      { type: 'image', image: { imageUrl: 'https://cdn/img-sem-legenda.jpg' } },
+      { type: 'image', texto: '(imagem)', urlField: 'imageUrl', url: 'https://cdn/img-sem-legenda.jpg' },
+    ],
+    [
+      'audio',
+      { type: 'audio', audio: { audioUrl: 'https://cdn/audio-sem-legenda.ogg' } },
+      { type: 'audio', texto: '(áudio)', urlField: 'audioUrl', url: 'https://cdn/audio-sem-legenda.ogg' },
+    ],
+    [
+      'video',
+      { type: 'video', video: { videoUrl: 'https://cdn/video-sem-legenda.mp4' } },
+      { type: 'video', texto: '(vídeo)', urlField: 'videoUrl', url: 'https://cdn/video-sem-legenda.mp4' },
+    ],
+    [
+      'document',
+      { type: 'document', document: { documentUrl: 'https://cdn/arquivo-sem-legenda.pdf' } },
+      { type: 'document', texto: '(arquivo)', urlField: 'documentUrl', url: 'https://cdn/arquivo-sem-legenda.pdf' },
+    ],
+    [
+      'sticker',
+      { type: 'sticker', sticker: { stickerUrl: 'https://cdn/figurinha-sem-legenda.webp' } },
+      { type: 'sticker', texto: '(figurinha)', urlField: 'stickerUrl', url: 'https://cdn/figurinha-sem-legenda.webp' },
+    ],
+  ])('client media without caption is still a persistable message: %s', (_label, payload, expected) => {
+    const r = extractMessage({ ...BASE, ...payload })
+    expect(r.fromMe).toBe(false)
+    expect(r.phone).toBe(BASE.phone)
+    expect(r.type).toBe(expected.type)
+    expect(r.texto).toBe(expected.texto)
+    expect(r[expected.urlField]).toBe(expected.url)
+  })
+
   test('reação com emoji', () => {
     const r = extractMessage({ ...BASE, reaction: { value: '👍' } })
     expect(r.type).toBe('reaction')

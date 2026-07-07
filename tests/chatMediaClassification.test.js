@@ -31,6 +31,15 @@ test('classifica audio e documentos sem transformar em imagem/video', () => {
   assert.equal(_test.inferirTipoArquivo(file({ mimetype: 'application/octet-stream', originalname: 'planilha.xlsx' })), 'arquivo')
 })
 
+test('audio gravado pelo sistema pode ser enviado como voice note', () => {
+  const gravado = file({ mimetype: 'audio/webm', originalname: 'audio.webm' })
+  gravado.__tipoForcado = 'voice'
+  assert.equal(_test.aplicarTipoForcadoSticker(gravado, _test.inferirTipoArquivo(gravado)), 'voice')
+
+  const anexoAudio = file({ mimetype: 'audio/mp4', originalname: 'musica.m4a' })
+  assert.equal(_test.aplicarTipoForcadoSticker(anexoAudio, _test.inferirTipoArquivo(anexoAudio)), 'audio')
+})
+
 test('normaliza imagens de galeria para JPEG compativel com WhatsApp', () => {
   assert.equal(
     _test.shouldNormalizeImageForWhatsapp(file({ mimetype: 'image/heic', originalname: 'IMG_1001.HEIC', path: '/tmp/IMG_1001.HEIC' }), 'imagem'),
