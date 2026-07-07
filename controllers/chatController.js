@@ -2429,6 +2429,7 @@ exports.listarConversas = async (req, res) => {
           unread
         )
       })
+      conversasFormatadas = sortConversationsByRecent(conversasFormatadas)
     }
 
     if (pagamentoPendenteAtivo) {

@@ -913,8 +913,22 @@ function deduplicateConversationsByContact(conversas) {
 function sortConversationsByRecent(conversas) {
   if (!Array.isArray(conversas)) return conversas
   return [...conversas].sort((a, b) => {
-    const ta = new Date(a.ultima_atividade || a.criado_em || 0).getTime()
-    const tb = new Date(b.ultima_atividade || b.criado_em || 0).getTime()
+    const pickTs = (c) => {
+      const candidates = [
+        c?.ultima_mensagem?.criado_em,
+        c?.ultima_mensagem_preview?.criado_em,
+        c?.ultima_atividade,
+        c?.criado_em,
+      ]
+      let best = 0
+      for (const raw of candidates) {
+        const t = new Date(raw || 0).getTime()
+        if (Number.isFinite(t) && t > best) best = t
+      }
+      return best
+    }
+    const ta = pickTs(a)
+    const tb = pickTs(b)
     if (tb !== ta) return tb - ta
     return (Number(b.id) || 0) - (Number(a.id) || 0)
   })
