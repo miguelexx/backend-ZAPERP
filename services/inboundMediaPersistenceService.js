@@ -262,13 +262,17 @@ async function persistInboundMediaToUploads({ supabase, io, company_id, mensagem
 
   if (io) {
     const conversa_id = updated.conversa_id
+    // fromMe deriva da direção real gravada (row/updated), não do parâmetro: o retry batch
+    // passa fromMe:false fixo, o que inverteria o flag para mídia outbound e poderia
+    // disparar notificação/som de mensagem nossa no frontend.
+    const fromMeReal = String(updated.direcao ?? row.direcao ?? '').toLowerCase() === 'out'
     const rawStatus = String(updated.status_mensagem ?? updated.status ?? '').toLowerCase()
     const canon =
       rawStatus === 'enviada' || rawStatus === 'enviado'
         ? 'sent'
         : rawStatus === 'entregue' || rawStatus === 'received'
           ? 'delivered'
-          : rawStatus || (fromMe ? 'sent' : 'delivered')
+          : rawStatus || (fromMeReal ? 'sent' : 'delivered')
 
     const emitPayload = {
       ...updated,
@@ -276,8 +280,8 @@ async function persistInboundMediaToUploads({ supabase, io, company_id, mensagem
       conversa_id,
       status: canon,
       status_mensagem: canon,
-      fromMe,
-      direcao: updated.direcao ?? (fromMe ? 'out' : 'in'),
+      fromMe: fromMeReal,
+      direcao: updated.direcao ?? (fromMeReal ? 'out' : 'in'),
     }
     try {
       const { emitirParaUsuariosQuePodemVerConversa } = require('../controllers/chatController')

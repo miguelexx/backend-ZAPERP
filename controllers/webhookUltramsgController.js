@@ -140,6 +140,22 @@ function normalizeUltramsgToZapi(body) {
   const quotedMsg = data.quotedMsg && typeof data.quotedMsg === 'object' && Object.keys(data.quotedMsg).length > 0 ? data.quotedMsg : null
   const referenceMessageId = quotedMsg ? (quotedMsg.id ?? quotedMsg.stanzaId ?? quotedMsg.messageId ?? null) : null
 
+  // Reação: UltraMsg envia event_type=webhook_message_reaction/message_reaction (ou data.type=reaction).
+  // O emoji costuma vir no body; o alvo (mensagem reagida) no quotedMsg/reactionMessage.
+  // Guarda forte: só trata como reação em evento comprovadamente de reação — nunca reclassifica texto/mídia.
+  // Sem emoji detectável, degrada para o comportamento atual (pipeline gera "Reação").
+  const isReactionEvent = eventType.includes('reaction') || msgType === 'reaction' || msgType === 'reactionmessage'
+  const reactionEmojiRaw = isReactionEvent
+    ? (data.reaction?.emoji ?? data.reaction?.text ?? data.reaction?.value ?? data.emoji
+        ?? (bodyText && String(bodyText).trim().length > 0 && String(bodyText).trim().length <= 16 ? String(bodyText).trim() : ''))
+    : ''
+  const reactionTargetId = isReactionEvent
+    ? (data.reaction?.messageId ?? data.reaction?.msgId ?? data.reactionMessage?.id ?? referenceMessageId ?? (quotedMsg ? quotedMsg.id : null) ?? null)
+    : null
+  const reactionPayload = isReactionEvent
+    ? { value: reactionEmojiRaw || '', emoji: reactionEmojiRaw || '', time: data.time ?? null, messageId: reactionTargetId }
+    : null
+
   // connectedPhone: nosso número (to quando recebemos, from quando enviamos) — necessário para resolveConversationKeyFromZapi
   const connectedPhone = fromMe ? jidToDigits(fromJid) : jidToDigits(toJid)
   const connectedPhoneNorm = connectedPhone ? (normalizePhoneBR(connectedPhone) || connectedPhone) : null
@@ -188,7 +204,7 @@ function normalizeUltramsgToZapi(body) {
     body: bodyForPayload,
     message: bodyForPayload,
     text: { message: bodyForPayload },
-    type: (msgType === 'ptt' ? 'audio' : (isContactType ? 'contact' : msgType)),
+    type: (msgType === 'ptt' ? 'audio' : (isReactionEvent ? 'reaction' : (isContactType ? 'contact' : msgType))),
     participantPhone: participantPhone || undefined,
     participant: participantPhone ? `${participantPhone}@c.us` : undefined,
     key: {
@@ -225,7 +241,8 @@ function normalizeUltramsgToZapi(body) {
     ultramsgHash: body.hash || undefined,
     ultramsgReferenceId: body.referenceId || undefined,
     ...(contactPayload ? { contact: { ...contactPayload, vCard: contactPayload.vCard || bodyText } } : {}),
-    ...(locationPayload ? { location: locationPayload } : {})
+    ...(locationPayload ? { location: locationPayload } : {}),
+    ...(reactionPayload ? { reaction: reactionPayload } : {})
   }
 
   return zapiLike

@@ -1230,7 +1230,9 @@ exports.receberZapi = async (req, res) => {
 
         if (error) {
           console.error('[Z-API] ❌ Erro ao atualizar foto de grupo via callback groupPhoto:', error)
-          return res.status(500).json({ error: 'Erro ao atualizar foto de grupo' })
+          // Webhook: sempre 200 para o UltraMsg não reentregar um callback puramente cosmético.
+          req.webhookLogData = { ...(req.webhookLogData || {}), status: 'error', error_message: 'group_photo_update_failed' }
+          return res.status(200).json({ ok: false, error: 'Erro ao atualizar foto de grupo' })
         }
 
         const updatedCount = Array.isArray(data) ? data.length : 0
@@ -1256,7 +1258,9 @@ exports.receberZapi = async (req, res) => {
         return res.status(200).json({ ok: true, updated: updatedCount })
       } catch (e) {
         console.error('[Z-API] ❌ Exceção ao processar callback groupPhoto:', e?.message || e)
-        return res.status(500).json({ error: 'Erro ao processar callback de foto de grupo' })
+        // Webhook: sempre 200 para o UltraMsg não reentregar um callback puramente cosmético.
+        req.webhookLogData = { ...(req.webhookLogData || {}), status: 'error', error_message: e?.message || 'group_photo_exception' }
+        return res.status(200).json({ ok: false, error: 'Erro ao processar callback de foto de grupo' })
       }
     }
 
