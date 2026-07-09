@@ -86,20 +86,77 @@ function normalizeUltramsgToZapi(body) {
 
   // data.media: UltraMSG envia string URL ou objeto { url, link, file } para imagem/áudio/vídeo/documento
   // webhook_message_download_media=true: UltraMsg inclui URL da mídia no payload
-  const mediaUrl = toUrl(data.media)
+  const mediaUrl = toUrl(data.media) ?? toUrl(data.mediaUrl)
 
   // Áudio: data.audio, data.audioUrl, data.mediaUrl, data.media, data.attachment (UltraMsg pode variar)
   let audioUrl =
     toUrl(data.audio) ??
     toUrl(data.audioUrl) ??
     toUrl(data.attachment) ??
-    (msgType === 'audio' || msgType === 'ptt' ? (mediaUrl ?? toUrl(data.mediaUrl) ?? toUrl(data.file)) : null)
+    (msgType === 'audio' || msgType === 'ptt' ? (mediaUrl ?? toUrl(data.file)) : null)
+
+  // Nome do arquivo: UltraMSG envia filename/caption no webhook de documentos (changelog Apr 2023).
+  // Sem isto, o pipeline interno nunca recebe fileName e grava só o texto do body (ex.: "relatorio.docx").
+  const looksLikeFileName = (v) => {
+    const s = String(v || '').trim()
+    if (!s || s.length > 255 || /\n/.test(s)) return false
+    return /\.(pdf|docx?|xlsx?|pptx?|txt|csv|zip|rar|7z|rtf|odt|ods|odp|json|xml|apk|bin)$/i.test(s)
+  }
+  const fileNameRaw =
+    data.filename ??
+    data.fileName ??
+    data.file_name ??
+    data.document?.filename ??
+    data.document?.fileName ??
+    data.document?.title ??
+    data.file?.filename ??
+    data.file?.fileName ??
+    data.media?.filename ??
+    data.media?.fileName ??
+    null
+  let fileName = fileNameRaw ? String(fileNameRaw).trim() : null
+  if (!fileName && looksLikeFileName(bodyText)) {
+    fileName = String(bodyText).trim()
+  }
+  const captionRaw = data.caption ?? data.document?.caption ?? null
+  const documentCaption = captionRaw && String(captionRaw).trim() ? String(captionRaw).trim() : null
+  const declaredDocumentType = msgType === 'document' || msgType === 'file' || msgType === 'documentmessage'
+  // UltraMSG às vezes manda type=chat com body=arquivo.docx (+ media) — tratar como documento.
+  // Também: type=chat só com filename no body (URL chega depois em webhook_message_download_media).
+  // Aceita nomes com espaços (ex.: "Ofício Dr. 13 - EMOF.docx"); evita frases longas.
+  // Só inferir a partir de chat/text — nunca reclassificar image/audio/video/sticker.
+  const canInferDocument = !msgType || msgType === 'chat' || msgType === 'text' || msgType === 'message'
+  const bodyLooksLikeStandaloneFile =
+    looksLikeFileName(bodyText) &&
+    String(bodyText).trim().length <= 200 &&
+    !/\n/.test(String(bodyText)) &&
+    !/\s+(https?:\/\/|www\.)/i.test(String(bodyText))
+  const inferredDocument = canInferDocument && !declaredDocumentType && (
+    !!fileNameRaw ||
+    (!!mediaUrl && (!!fileName || bodyLooksLikeStandaloneFile)) ||
+    bodyLooksLikeStandaloneFile
+  )
+  const isDocumentType = declaredDocumentType || inferredDocument
 
   // Mídia por tipo: UltraMSG doc — media (URL) é o campo principal; mediaUrl, document/file, etc. como fallback
-  const imageUrl = msgType === 'image' ? (mediaUrl ?? toUrl(data.mediaUrl) ?? toUrl(data.image)) : toUrl(data.image)
-  const documentUrl = toUrl(data.documentUrl) ?? toUrl(data.document) ?? toUrl(data.file) ?? (msgType === 'document' || msgType === 'file' ? mediaUrl : null)
+  const imageUrl = msgType === 'image' ? (mediaUrl ?? toUrl(data.image)) : toUrl(data.image)
+  const documentUrl =
+    toUrl(data.documentUrl) ??
+    toUrl(data.document) ??
+    toUrl(data.file) ??
+    toUrl(data.attachment) ??
+    (isDocumentType ? mediaUrl : null)
   const videoUrl = msgType === 'video' ? (mediaUrl ?? toUrl(data.videoUrl) ?? toUrl(data.video)) : (toUrl(data.videoUrl) ?? toUrl(data.video))
   const stickerUrl = msgType === 'sticker' ? (mediaUrl ?? toUrl(data.stickerUrl) ?? toUrl(data.sticker)) : (toUrl(data.stickerUrl) ?? toUrl(data.sticker))
+
+  const effectiveMsgType = isDocumentType
+    ? 'document'
+    : (msgType === 'documentmessage' ? 'document' : msgType)
+
+  // Body do documento: preferir caption real; se body for só o filename, manter filename (UI/lista)
+  const documentBodyText = isDocumentType
+    ? (documentCaption || (fileName && String(bodyText).trim() === fileName ? fileName : (String(bodyText || '').trim() || fileName || '')))
+    : bodyText
 
   // Localização: UltraMsg envia type=location com lat/lng (ou latitude/longitude).
   // UltraMSG pode enviar: data.lat/data.lng no root, ou data.location = { lat, lng, address }.
@@ -180,9 +237,14 @@ function normalizeUltramsgToZapi(body) {
 
   // Para localização: se body for Base64 (thumbnail do mapa), usar texto descritivo em vez do Base64
   const validCoords = locLat != null && locLng != null && !isNaN(Number(locLat)) && !isNaN(Number(locLng))
+  const bodySource = isDocumentType ? documentBodyText : bodyText
   const bodyForPayload = (locationPayload && isBodyBase64Image(bodyText))
     ? (safeAddress || (validCoords ? `${locLat},${locLng}` : null) || '(localização)')
-    : bodyText
+    : bodySource
+
+  const resolvedType = msgType === 'ptt'
+    ? 'audio'
+    : (isReactionEvent ? 'reaction' : (isContactType ? 'contact' : effectiveMsgType))
 
   const zapiLike = {
     instanceId: body.instanceId ?? body.instance_id,
@@ -204,7 +266,7 @@ function normalizeUltramsgToZapi(body) {
     body: bodyForPayload,
     message: bodyForPayload,
     text: { message: bodyForPayload },
-    type: (msgType === 'ptt' ? 'audio' : (isReactionEvent ? 'reaction' : (isContactType ? 'contact' : msgType))),
+    type: resolvedType,
     participantPhone: participantPhone || undefined,
     participant: participantPhone ? `${participantPhone}@c.us` : undefined,
     key: {
@@ -224,6 +286,18 @@ function normalizeUltramsgToZapi(body) {
     audioUrl: audioUrl || null,
     videoUrl: videoUrl || null,
     stickerUrl: stickerUrl || null,
+    fileName: fileName || null,
+    filename: fileName || null,
+    ...(isDocumentType && (documentUrl || fileName) ? {
+      document: {
+        documentUrl: documentUrl || undefined,
+        url: documentUrl || undefined,
+        fileName: fileName || undefined,
+        filename: fileName || undefined,
+        caption: documentCaption || undefined,
+        title: fileName || undefined,
+      }
+    } : {}),
     senderName: senderName ? String(senderName).trim() : null,
     senderPhoto: senderPhoto && String(senderPhoto).trim().startsWith('http') ? String(senderPhoto).trim() : null,
     name: senderName ? String(senderName).trim() : null,
@@ -349,3 +423,4 @@ async function handleWebhookUltramsg(req, res) {
 }
 
 exports.handleWebhookUltramsg = handleWebhookUltramsg
+exports._test = { normalizeUltramsgToZapi, resolveWebhookBody, mapUltramsgAckToStatus }

@@ -865,7 +865,19 @@ function extractMessage(payload) {
     payload.message?.documentUrl ??
     null
   if (documentUrl && typeof documentUrl === 'object') documentUrl = documentUrl.url ?? documentUrl.documentUrl ?? null
-  let fileName = payload.document?.fileName ?? payload.document?.title ?? payload.fileName ?? null
+  let fileName =
+    payload.document?.fileName ??
+    payload.document?.filename ??
+    payload.document?.title ??
+    payload.fileName ??
+    payload.filename ??
+    payload.file_name ??
+    null
+  if (fileName) fileName = String(fileName).trim() || null
+  // UltraMSG / normalizador: body pode ser só o nome do arquivo quando type=document
+  if (!fileName && (type === 'document' || type === 'file') && texto && /\.(pdf|docx?|xlsx?|pptx?|txt|csv|zip|rar|7z|rtf|odt)$/i.test(texto) && texto.length <= 255 && !/\n/.test(texto)) {
+    fileName = texto
+  }
   // Áudio: diferentes formatos (Z-API pode mandar em payload.audio, payload.message.audio, ou fields diretos)
   let audioUrl =
     payload.audio?.audioUrl ??
@@ -2782,10 +2794,17 @@ exports.receberZapi = async (req, res) => {
         // e o webhook atual traz conteúdo real → atualizar com o texto/mídia corretos.
         // Também: webhook_message_download_media pode chegar DEPOIS com URL da mídia — atualizar mensagem existente sem url.
         const savedTexto = String(existente.texto || '')
-        const isPlaceholder = savedTexto === '(mensagem)' || savedTexto === '(mídia)'
-        const textoReal = texto && texto !== '(mensagem)' && texto !== '(mídia)' ? texto : null
+        const isPlaceholder = isMediaPlaceholderText(savedTexto) || savedTexto === '(mensagem)'
+        const textoReal = texto && texto !== '(mensagem)' && !isMediaPlaceholderText(texto) ? texto : null
         const hasMediaToUpdate = (imageUrl || documentUrl || audioUrl || videoUrl || stickerUrl) && !String(existente.url || '').trim()
-        const shouldUpdate = (isPlaceholder && textoReal) || hasMediaToUpdate
+        const needsArquivoTipo =
+          (type === 'document' || type === 'file') &&
+          String(existente.tipo || '').toLowerCase() !== 'arquivo'
+        const needsNomeArquivo =
+          (type === 'document' || type === 'file') &&
+          fileName &&
+          !String(existente.nome_arquivo || '').trim()
+        const shouldUpdate = (isPlaceholder && textoReal) || hasMediaToUpdate || needsArquivoTipo || needsNomeArquivo
         if (shouldUpdate) {
           const upFields = {}
           if (textoReal && isPlaceholder) upFields.texto = textoReal
@@ -2794,6 +2813,11 @@ exports.receberZapi = async (req, res) => {
           else if (audioUrl && !existente.url) { upFields.url = audioUrl; upFields.tipo = (existente.tipo === 'voice' ? 'voice' : 'audio') }
           else if (videoUrl && !existente.url) { upFields.url = videoUrl; upFields.tipo = 'video' }
           else if (stickerUrl && !existente.url) { upFields.url = stickerUrl; upFields.tipo = 'sticker' }
+          if (needsArquivoTipo) upFields.tipo = 'arquivo'
+          if (needsNomeArquivo) upFields.nome_arquivo = fileName
+          else if ((type === 'document' || type === 'file') && fileName && String(existente.nome_arquivo || '').trim() === 'arquivo') {
+            upFields.nome_arquivo = fileName
+          }
           if (Object.keys(upFields).length > 0) {
             try {
               const { data: updMsg } = await supabase
@@ -2803,9 +2827,11 @@ exports.receberZapi = async (req, res) => {
                 .select(WEBHOOK_MSG_SELECT)
                 .single()
               mensagemSalva = updMsg || existente
-              if (WHATSAPP_DEBUG || hasMediaToUpdate) console.log('[Z-API] idempotência: mensagem atualizada com mídia/placeholder', existente.id, Object.keys(upFields))
-              // Emitir nova_mensagem para frontend atualizar player de áudio quando URL chega via webhook_message_download_media
-              if (hasMediaToUpdate && req.app?.get('io')) {
+              if (WHATSAPP_DEBUG || hasMediaToUpdate || needsArquivoTipo) {
+                console.log('[Z-API] idempotência: mensagem atualizada com mídia/placeholder', existente.id, Object.keys(upFields))
+              }
+              // Emitir nova_mensagem para frontend atualizar card/player quando URL ou tipo chega depois
+              if ((hasMediaToUpdate || needsArquivoTipo || needsNomeArquivo) && req.app?.get('io')) {
                 const io2 = req.app.get('io')
                 const rooms = [`conversa_${conversa_id}`, `empresa_${company_id}`]
                 const emitPayload = {
@@ -2818,7 +2844,7 @@ exports.receberZapi = async (req, res) => {
                   direcao: mensagemSalva.direcao ?? (fromMe ? 'out' : 'in'),
                 }
                 io2.to(rooms).emit(io2.EVENTS?.NOVA_MENSAGEM || 'nova_mensagem', emitPayload)
-                scheduleInboundWebPush(company_id, conversa_id, 'nova_mensagem', emitPayload)
+                if (hasMediaToUpdate) scheduleInboundWebPush(company_id, conversa_id, 'nova_mensagem', emitPayload)
               }
             } catch (_) {
               mensagemSalva = existente
@@ -3130,10 +3156,12 @@ exports.receberZapi = async (req, res) => {
         insertMsg.tipo = 'imagem'
         insertMsg.url = imageUrl
         insertMsg.nome_arquivo = fileName || 'imagem.jpg'
-      } else if ((type === 'document' || type === 'file') && documentUrl) {
+      } else if (type === 'document' || type === 'file') {
+        // Sempre marca como arquivo (mesmo sem URL): o link pode chegar depois via
+        // webhook_message_download_media. Sem tipo=arquivo a UI mostra só o nome como texto.
         insertMsg.tipo = 'arquivo'
-        insertMsg.url = documentUrl
-        insertMsg.nome_arquivo = fileName || 'arquivo'
+        if (documentUrl) insertMsg.url = documentUrl
+        insertMsg.nome_arquivo = fileName || (texto && texto !== '(arquivo)' ? texto : null) || 'arquivo'
       } else if ((type === 'audio' || type === 'ptt') && audioUrl) {
         // Só marca como áudio quando há URL — sem ela ficaria um player quebrado. Sem URL, permanece
         // linha de texto com placeholder '(áudio)' e é atualizada quando a URL chegar (idempotência).
@@ -3504,10 +3532,10 @@ exports.receberZapi = async (req, res) => {
                   insertMsg.tipo = 'imagem'
                   insertMsg.url = ex.imageUrl
                   insertMsg.nome_arquivo = ex.fileName || 'imagem.jpg'
-                } else if ((ex.type === 'document' || ex.type === 'file') && ex.documentUrl) {
+                } else if (ex.type === 'document' || ex.type === 'file') {
                   insertMsg.tipo = 'arquivo'
-                  insertMsg.url = ex.documentUrl
-                  insertMsg.nome_arquivo = ex.fileName || 'arquivo'
+                  if (ex.documentUrl) insertMsg.url = ex.documentUrl
+                  insertMsg.nome_arquivo = ex.fileName || (ex.texto && ex.texto !== '(arquivo)' ? ex.texto : null) || 'arquivo'
                 } else if (ex.type === 'audio' && ex.audioUrl) {
                   insertMsg.tipo = 'audio'
                   insertMsg.url = ex.audioUrl
