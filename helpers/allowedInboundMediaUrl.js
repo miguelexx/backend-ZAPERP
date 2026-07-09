@@ -43,6 +43,12 @@ function isAllowedInboundMediaUrl(u) {
   // Domínios UltraMsg diretos (não-S3): files.ultramsg.com, media.ultramsg.com, etc.
   if (host === 'ultramsg.com' || host.endsWith('.ultramsg.com')) return true
 
+  // WhatsApp/Meta media CDN: quando a mídia NÃO é rehospedada pela UltraMsg, a URL vem crua do
+  // WhatsApp (ex.: mmg.whatsapp.net, media-*.cdn.whatsapp.net, *.fbcdn.net). Documentos costumam
+  // cair nesse caso (imagens/áudio geralmente vêm rehospedados no S3 da UltraMsg). Hosts públicos.
+  if (host === 'whatsapp.net' || host.endsWith('.whatsapp.net')) return true
+  if (host.endsWith('.fbcdn.net')) return true
+
   const extra = String(process.env.MEDIA_PROXY_EXTRA_HOSTS || '')
     .split(',')
     .map((s) => s.trim().toLowerCase())
