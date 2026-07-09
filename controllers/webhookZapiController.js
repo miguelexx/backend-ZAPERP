@@ -322,6 +322,15 @@ function mapWebhookTypeToStorageTipo(type) {
   return t || null
 }
 
+// Placeholders de mídia (sem URL ainda). Uma mensagem de mídia recebe um destes quando o link
+// não veio no primeiro webhook — o link real pode chegar depois via webhook_message_download_media.
+const MEDIA_PLACEHOLDERS = new Set([
+  '(mídia)', '(imagem)', '(áudio)', '(vídeo)', '(vídeo visualização única)', '(arquivo)', '(figurinha)'
+])
+function isMediaPlaceholderText(texto) {
+  return MEDIA_PLACEHOLDERS.has(String(texto || '').trim())
+}
+
 /**
  * Casa eco fromMe (webhook) com mensagem outbound recente do CRM.
  * Não usa URL remota vs /uploads/ — evita segunda linha no chat ao enviar PDF/arquivo.
@@ -969,13 +978,17 @@ function extractMessage(payload) {
     }
   }
 
-  if (type === 'image' && imageUrl) {
+  // Placeholder por TIPO mesmo sem URL: o link da mídia pode não vir no primeiro webhook (chega depois
+  // via webhook_message_download_media). Sem isto, a mídia caía em '(mídia)' e era descartada (recebida)
+  // ou virava '(mensagem)' → "Sem conteudo" (enviada). Com placeholder por tipo, a mensagem é sempre
+  // registrada de forma legível e é atualizada para a mídia real quando a URL chegar.
+  if (type === 'image') {
     texto = texto || (payload.image?.caption && String(payload.image.caption).trim()) || '(imagem)'
-  } else if ((type === 'document' || type === 'file') && documentUrl) {
+  } else if (type === 'document' || type === 'file') {
     texto = texto || fileName || '(arquivo)'
-  } else if (type === 'audio') {
+  } else if (type === 'audio' || type === 'ptt') {
     texto = texto || '(áudio)'
-  } else if (type === 'video' && videoUrl) {
+  } else if (type === 'video') {
     texto = texto || (payload.video?.caption && String(payload.video.caption).trim()) || (payload.ptv ? '(vídeo visualização única)' : '(vídeo)')
   } else if (type === 'sticker') {
     texto = texto || '(figurinha)'
@@ -3121,12 +3134,12 @@ exports.receberZapi = async (req, res) => {
         insertMsg.tipo = 'arquivo'
         insertMsg.url = documentUrl
         insertMsg.nome_arquivo = fileName || 'arquivo'
-      } else if (type === 'audio' || type === 'ptt') {
+      } else if ((type === 'audio' || type === 'ptt') && audioUrl) {
+        // Só marca como áudio quando há URL — sem ela ficaria um player quebrado. Sem URL, permanece
+        // linha de texto com placeholder '(áudio)' e é atualizada quando a URL chegar (idempotência).
         insertMsg.tipo = type === 'ptt' ? 'voice' : 'audio'
-        if (audioUrl) {
-          insertMsg.url = audioUrl
-          insertMsg.nome_arquivo = fileName || (type === 'ptt' ? 'voice.ogg' : 'audio')
-        }
+        insertMsg.url = audioUrl
+        insertMsg.nome_arquivo = fileName || (type === 'ptt' ? 'voice.ogg' : 'audio')
       } else if (type === 'video' && videoUrl) {
         insertMsg.tipo = 'video'
         insertMsg.url = videoUrl
@@ -3445,7 +3458,7 @@ exports.receberZapi = async (req, res) => {
                 const ex = extractMessage(p)
                 const wId = ex.messageId ? String(ex.messageId).trim() : null
                 if (!ex.texto) continue
-                const placeholder = ex.texto === '(mídia)' && !ex.imageUrl && !ex.documentUrl && !ex.audioUrl && !ex.videoUrl && !ex.stickerUrl && !ex.locationUrl
+                const placeholder = isMediaPlaceholderText(ex.texto) && !ex.imageUrl && !ex.documentUrl && !ex.audioUrl && !ex.videoUrl && !ex.stickerUrl && !ex.locationUrl
                 if (placeholder) continue
                 if (!wId) continue
 
