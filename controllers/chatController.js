@@ -6379,6 +6379,8 @@ exports.enviarContatoWhatsapp = async (req, res) => {
       whatsappInstanceId: whatsappInstanceId || undefined,
       sendOrigin: 'atendimento_humano_contato',
       messageId: messageId || undefined,
+      // Reconciliação do eco fromMe → evita cartão de contato duplicado (mesmo padrão de mídia/texto).
+      referenceId: `crm-${msg.id}`,
     })
     const ok = typeof result === 'boolean' ? result : result?.ok === true
     const waMessageId =
@@ -8391,6 +8393,8 @@ async function encaminharUmaMensagemParaConversa(ctx) {
           conversaId: conversa_id,
           whatsappInstanceId: whatsappInstanceId || undefined,
           sendOrigin: 'encaminhamento_atendimento',
+          // Reconciliação do eco fromMe → evita cartão de contato duplicado ao encaminhar.
+          referenceId: `crm-${msg.id}`,
         },
       )
     } else if (telefoneParaEnvio && provider.sendText && !contactPhone) {

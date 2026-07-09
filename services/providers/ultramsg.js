@@ -1352,6 +1352,9 @@ async function sendContact(phone, contactName, contactPhone, opts = {}) {
   const tel = contact.startsWith('55') ? contact : `55${contact}`
   const vcard = `BEGIN:VCARD\nVERSION:3.0\nN:${name};;;\nFN:${name}\nTEL;TYPE=CELL;waid=${tel}:+${tel}\nEND:VCARD`
   const body = { to: nums[0], vcard }
+  // referenceId (crm-<id>): UltraMsg ecoa no webhook message_create → reconciliação casa o eco com a
+  // mensagem já persistida, evitando cartão de contato duplicado/triplicado. (Faltava só no sendContact.)
+  applyReferenceIdToBody(body, opts)
   const { ok, status, data, text } = await postJson({
     ...cfg,
     endpoint: '/messages/vcard',
