@@ -298,6 +298,29 @@ app.use('/media', apiLimiter, mediaProxyRoutes)
 app.use('/push', apiLimiter, pushRoutes)
 app.use('/conversas', apiLimiter, minhasPendenciasRoutes)
 
+// [push][config] Log único no boot: expõe imediatamente se o push está utilizável.
+// Sem VAPID (Web Push) nem FCM, NÃO há notificação com o app fechado — este log evita
+// horas de depuração à procura de um erro que na verdade é configuração ausente.
+try {
+  const webPushServiceBoot = require('./services/webPushService')
+  const pushNotificationServiceBoot = require('./services/pushNotificationService')
+  const vapidOkBoot = webPushServiceBoot.ensureVapidConfigured()
+  let fcmOkBoot = false
+  try {
+    fcmOkBoot = pushNotificationServiceBoot.ensureFirebase()
+  } catch (_) {
+    fcmOkBoot = false
+  }
+  console.log(
+    `[push][config] VAPID=${vapidOkBoot ? 'ok' : 'AUSENTE'} FCM=${fcmOkBoot ? 'ok' : 'ausente'}` +
+      (vapidOkBoot || fcmOkBoot
+        ? ''
+        : ' — sem provedor de push: notificação com o app fechado NÃO funciona (defina VAPID_PUBLIC_KEY/VAPID_PRIVATE_KEY).')
+  )
+} catch (e) {
+  console.warn('[push][config] falha ao verificar config de push no boot:', e?.message || e)
+}
+
 // /api — prefixo opcional para SaaS; mantém compatibilidade com rotas antigas
 // Aplica apiLimiter globalmente para "rotas de API"
 const api = express.Router()
