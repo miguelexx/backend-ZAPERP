@@ -331,6 +331,17 @@ function isMediaPlaceholderText(texto) {
   return MEDIA_PLACEHOLDERS.has(String(texto || '').trim())
 }
 
+// Eventos internos de protocolo/sistema do WhatsApp — NÃO são mensagens do cliente e não devem
+// virar linha no chat (evita ruído). Tudo que não estiver aqui é tratado como mensagem real e é
+// SEMPRE salvo (mesmo sem conteúdo detectável), para nunca perder mensagem do contato.
+const NON_MESSAGE_EVENT_TYPES = new Set([
+  'e2e_notification', 'notification_template', 'gp2', 'protocol', 'ciphertext',
+  'revoked', 'security_notification', 'call_log', 'notification',
+])
+function isNonMessageEventType(type) {
+  return NON_MESSAGE_EVENT_TYPES.has(String(type || '').toLowerCase().trim())
+}
+
 /**
  * Casa eco fromMe (webhook) com mensagem outbound recente do CRM.
  * Não usa URL remota vs /uploads/ — evita segunda linha no chat ao enviar PDF/arquivo.
@@ -2668,21 +2679,28 @@ exports.receberZapi = async (req, res) => {
     // fromMe: também persiste (você pediu "todas as mensagens"). O índice único por (conversa_id, whatsapp_id)
     // evita duplicatas quando o provider reenviar o mesmo evento.
 
-    // Não gravar evento que virou só "(mídia)" sem mídia real — exceto fromMe (espelhamento: mensagem enviada pelo celular deve aparecer)
+    // REQUISITO: toda mensagem (recebida ou enviada) precisa chegar ao sistema, mesmo que o tipo/conteúdo
+    // não venha no primeiro webhook (a URL/mídia pode chegar depois via webhook_message_download_media e faz
+    // upgrade por idempotência). Só descartamos eventos internos de protocolo (e2e_notification, gp2, …),
+    // que não são mensagem do cliente. Antes, mídia recebida sem URL/tipo era DESCARTADA aqui (perda de msg).
     const nowIso = new Date().toISOString()
     const soPlaceholderMidia = texto === '(mídia)' && !imageUrl && !documentUrl && !audioUrl && !videoUrl && !stickerUrl && !locationUrl
-    if (soPlaceholderMidia && !fromMe) {
-      await supabase
-        .from('conversas')
-        .update({ ultima_atividade: nowIso })
-        .eq('id', conversa_id)
-        .eq('company_id', company_id)
-      // IMPORTANTE: payload é 1 de N num lote (ver getPayloads) — abortar a requisição aqui
-      // descartaria as demais mensagens do lote. Pula só esta (nada para salvar) e segue.
-      lastResult = { ok: true, conversa_id, skip: 'placeholderMidia' }
-      continue
+    if (soPlaceholderMidia) {
+      if (!fromMe && isNonMessageEventType(type)) {
+        await supabase
+          .from('conversas')
+          .update({ ultima_atividade: nowIso })
+          .eq('id', conversa_id)
+          .eq('company_id', company_id)
+        // IMPORTANTE: payload é 1 de N num lote (ver getPayloads) — abortar a requisição aqui
+        // descartaria as demais mensagens do lote. Pula só esta (evento de protocolo) e segue.
+        lastResult = { ok: true, conversa_id, skip: 'nonMessageEvent' }
+        continue
+      }
+      // Mensagem real sem conteúdo detectável (recebida OU enviada): nunca descartar — salva placeholder
+      // legível ("Mensagem") que é atualizado quando a mídia/URL chegar. Evita "some do sistema".
+      texto = '(mensagem)'
     }
-    if (soPlaceholderMidia && fromMe) texto = '(mensagem)' // espelhamento: mostrar algo no chat
 
     // Histórico de nova conversa: agendado DEPOIS de persistir a mensagem atual + regra mensagem_disparada
     // (evita race: import antigo tornava outra linha a "primeira" e a conversa ficava aberta indevidamente).
