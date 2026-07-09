@@ -7257,19 +7257,31 @@ function getAudioFileExtension(file) {
   return ''
 }
 
+const AUDIO_FFMPEG_TIMEOUT_MS = Math.max(10000, Number(process.env.AUDIO_FFMPEG_TIMEOUT_MS) || 60000)
+
+/**
+ * Resolve o caminho do ffmpeg de forma robusta:
+ * 1) FFMPEG_PATH (override do host);
+ * 2) ffmpeg-static SÓ se o binário existir no disco (o postinstall pode não ter baixado
+ *    em hosts com --ignore-scripts, e require() devolve um caminho para arquivo inexistente);
+ * 3) 'ffmpeg' do PATH do sistema.
+ */
+function resolveFfmpegPath() {
+  const fs = require('fs')
+  const envPath = String(process.env.FFMPEG_PATH || '').trim()
+  if (envPath) { try { if (fs.existsSync(envPath)) return envPath } catch { /* ignore */ } }
+  try {
+    const staticPath = require('ffmpeg-static')
+    if (staticPath && fs.existsSync(staticPath)) return staticPath
+  } catch { /* ignore */ }
+  return 'ffmpeg'
+}
+
 async function convertAudioWithFfmpeg(inputPath, outputPath, profile = 'audio_mp3') {
   const { spawn } = require('child_process')
+  const fs = require('fs')
+  const ffmpegPath = resolveFfmpegPath()
   return new Promise((resolve, reject) => {
-    let ffmpegPath
-    try {
-      ffmpegPath = require('ffmpeg-static')
-    } catch {
-      ffmpegPath = null
-    }
-    if (!ffmpegPath) {
-      reject(new Error('ffmpeg-static não disponível'))
-      return
-    }
     let args
     // Voice (PTT): alinhado ao padrão usado por integrações WhatsApp estáveis (Evolution/Baileys):
     // 48 kHz, mono, Opus ~48k, sem metadados — evita áudio que toca no Web mas falha no iPhone.
@@ -7324,13 +7336,30 @@ async function convertAudioWithFfmpeg(inputPath, outputPath, profile = 'audio_mp
         outputPath,
       ]
     }
-    const proc = spawn(ffmpegPath, args, { windowsHide: true })
+    let proc
+    try {
+      proc = spawn(ffmpegPath, args, { windowsHide: true })
+    } catch (err) {
+      reject(new Error(`ffmpeg spawn falhou (${ffmpegPath}): ${err?.message || err}`))
+      return
+    }
     let stderr = ''
+    let settled = false
+    const finish = (fn, arg) => { if (settled) return; settled = true; clearTimeout(timer); fn(arg) }
+    // Timeout+kill: evita processo ffmpeg travado segurando o arquivo e o worker indefinidamente.
+    const timer = setTimeout(() => {
+      try { proc.kill('SIGKILL') } catch { /* ignore */ }
+      finish(reject, new Error(`ffmpeg timeout após ${AUDIO_FFMPEG_TIMEOUT_MS}ms`))
+    }, AUDIO_FFMPEG_TIMEOUT_MS)
     proc.stderr.on('data', (d) => { stderr += String(d || '') })
-    proc.on('error', (err) => reject(err))
+    proc.on('error', (err) => finish(reject, new Error(`ffmpeg indisponível (${ffmpegPath}): ${err?.message || err}`)))
     proc.on('close', (code) => {
-      if (code === 0) resolve()
-      else reject(new Error(`ffmpeg exit=${code} ${stderr.slice(-240)}`.trim()))
+      if (code !== 0) { finish(reject, new Error(`ffmpeg exit=${code} ${stderr.slice(-240)}`.trim())); return }
+      // Valida a saída: ffmpeg pode sair 0 e ainda assim gerar arquivo vazio em input ruim.
+      let outSize = 0
+      try { outSize = fs.existsSync(outputPath) ? fs.statSync(outputPath).size : 0 } catch { outSize = 0 }
+      if (outSize <= 0) { finish(reject, new Error('ffmpeg gerou saída vazia (0 bytes)')); return }
+      finish(resolve, undefined)
     })
   })
 }
@@ -7360,8 +7389,27 @@ async function normalizeAudioForUltraMsg(file, tipo) {
   const targetOriginalName = originalName.replace(/\.[a-z0-9]{2,5}$/i, `.${targetExt}`)
   const ffmpegProfile = isVoice ? 'voice_ogg_opus' : 'audio_mp3'
 
-  await convertAudioWithFfmpeg(file.path, targetPath, ffmpegProfile)
+  let inputSize = 0
+  try { inputSize = fs.existsSync(file.path) ? fs.statSync(file.path).size : 0 } catch { inputSize = 0 }
+
+  try {
+    await convertAudioWithFfmpeg(file.path, targetPath, ffmpegProfile)
+  } catch (e) {
+    // Não propaga exceção: o chamador decide abortar (nunca enviar áudio cru/quebrado ao WhatsApp).
+    try { if (fs.existsSync(targetPath)) fs.unlink(targetPath, () => {}) } catch { /* ignore */ }
+    console.warn('[ULTRAMSG][AUDIO] transcode falhou', {
+      tipo, srcExt: ext || '(sem)', profile: ffmpegProfile, inputBytes: inputSize,
+      erro: String(e?.message || e).slice(0, 240),
+    })
+    return { file, converted: false, error: 'audio_transcode_failed' }
+  }
+
+  let outputSize = 0
+  try { outputSize = fs.existsSync(targetPath) ? fs.statSync(targetPath).size : 0 } catch { outputSize = 0 }
   fs.unlink(file.path, () => {})
+  console.log('[ULTRAMSG][AUDIO] transcode ok', {
+    tipo, srcExt: ext || '(sem)', targetExt, inputBytes: inputSize, outputBytes: outputSize, profile: ffmpegProfile,
+  })
 
   return {
     converted: true,
@@ -7504,23 +7552,48 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
   const avisoWhatsapp = null
   const tipo = aplicarTipoForcadoSticker(fileWork, inferirTipoArquivo(fileWork))
   if (tipo === 'audio' || tipo === 'voice') {
+    // Formatos que o WhatsApp reproduz nativamente — seguros mesmo sem transcodificar.
+    // webm/opus (padrão do MediaRecorder no Android/desktop) NÃO entra aqui de propósito:
+    // enviado cru chega mudo/com duração errada no WhatsApp, principalmente no iPhone.
+    const srcExtAudio = getAudioFileExtension(fileWork)
+    const srcSeguroSemTranscode = ['mp3', 'ogg', 'aac'].includes(srcExtAudio)
+    let normalized = null
     try {
-      const normalized = await normalizeAudioForUltraMsg(fileWork, tipo)
-      if (normalized?.converted && normalized?.file) {
-        const beforeName = fileWork.originalname
-        fileWork = normalized.file
-        req.file = fileWork
-        console.log('[ULTRAMSG][AUDIO] Áudio convertido para formato compatível antes do envio:', {
-          tipo,
-          from: beforeName,
-          to: fileWork.originalname,
-          mime: fileWork.mimetype,
-        })
-      } else if (normalized?.error) {
-        console.warn('[ULTRAMSG][AUDIO] Conversão/normalização indisponível:', normalized.error)
-      }
+      normalized = await normalizeAudioForUltraMsg(fileWork, tipo)
     } catch (e) {
-      console.warn('[ULTRAMSG][AUDIO] Falha ao converter WAV para MP3:', e?.message || e)
+      console.warn('[ULTRAMSG][AUDIO] Falha inesperada ao normalizar áudio:', e?.message || e)
+      normalized = { converted: false, error: 'audio_transcode_failed', file: null }
+    }
+    if (normalized?.converted && normalized?.file) {
+      const beforeName = fileWork.originalname
+      fileWork = normalized.file
+      req.file = fileWork
+      console.log('[ULTRAMSG][AUDIO] Áudio convertido para formato compatível antes do envio:', {
+        tipo,
+        from: beforeName,
+        to: fileWork.originalname,
+        mime: fileWork.mimetype,
+      })
+    } else if (normalized?.error === 'audio_transcode_failed' && !srcSeguroSemTranscode) {
+      // Não dá para gerar OGG/Opus e o original não é reproduzível no WhatsApp → aborta e limpa o temp.
+      // Melhor um erro claro ("grave novamente") do que entregar áudio mudo/corrompido ao contato.
+      try {
+        const fsTmp = require('fs')
+        if (fileWork?.path && fsTmp.existsSync(fileWork.path)) fsTmp.unlink(fileWork.path, () => {})
+      } catch { /* ignore */ }
+      console.error('[ULTRAMSG][AUDIO] Envio abortado: transcode falhou e formato original incompatível', {
+        tipo, srcExt: srcExtAudio || '(sem extensão)',
+      })
+      return {
+        ok: false,
+        status: 422,
+        error: 'Não foi possível processar o áudio para envio. Grave novamente e tente de novo.',
+      }
+    } else if (normalized?.error) {
+      // Transcode indisponível, mas o formato original já é compatível (mp3/ogg/aac) → segue com o original.
+      console.warn('[ULTRAMSG][AUDIO] Transcode indisponível; enviando áudio no formato original compatível:', {
+        tipo, srcExt: srcExtAudio,
+      })
     }
   }
   if (tipo === 'imagem') {
@@ -7937,6 +8010,7 @@ exports.enviarArquivo = async (req, res) => {
         hadFailure = true
         results.push({
           ok: false,
+          status: r.status,
           client_temp_id: clientTempId,
           error: r.error || 'Falha ao enviar arquivo.',
           index: i,
