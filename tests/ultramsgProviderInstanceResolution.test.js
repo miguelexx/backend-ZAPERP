@@ -97,6 +97,49 @@ describe('UltraMsg provider instance resolution', () => {
     expect(body.get('referenceId')).toBe('crm-168719')
   })
 
+  test('sendImage propaga referenceId no body UltraMSG', async () => {
+    const deps = mockProviderDeps({
+      defaultByCompany: {
+        10: { id: 1, company_id: 10, provider: 'ultramsg', instance_id: '111', instance_token: 'default-token', ativo: true },
+      },
+      byId: {},
+    })
+
+    const provider = require('../services/providers/ultramsg')
+    const result = await provider.sendImage(
+      '34999999999',
+      'https://cdn.example.com/foto.jpg',
+      'legenda',
+      { companyId: 10, referenceId: 'crm-9001', returnDetails: true }
+    )
+
+    const body = new URLSearchParams(deps.fetchWithRetry.mock.calls[0][1].body)
+    expect(result.ok).toBe(true)
+    expect(body.get('referenceId')).toBe('crm-9001')
+    expect(body.get('image')).toBe('https://cdn.example.com/foto.jpg')
+  })
+
+  test('sendFile propaga referenceId no body UltraMSG', async () => {
+    const deps = mockProviderDeps({
+      defaultByCompany: {
+        10: { id: 1, company_id: 10, provider: 'ultramsg', instance_id: '111', instance_token: 'default-token', ativo: true },
+      },
+      byId: {},
+    })
+
+    const provider = require('../services/providers/ultramsg')
+    const result = await provider.sendFile(
+      '34999999999',
+      'https://cdn.example.com/doc.pdf',
+      'doc.pdf',
+      { companyId: 10, referenceId: 'crm-9002', returnDetails: true }
+    )
+
+    const body = new URLSearchParams(deps.fetchWithRetry.mock.calls[0][1].body)
+    expect(result.ok).toBe(true)
+    expect(body.get('referenceId')).toBe('crm-9002')
+  })
+
   test('mantem instance_id prefixado salvo no banco sem duplicar prefixo no envio', async () => {
     const deps = mockProviderDeps({
       defaultByCompany: {

@@ -8243,6 +8243,7 @@ async function encaminharUmaMensagemParaConversa(ctx) {
         conversaId: conversa_id,
         whatsappInstanceId: whatsappInstanceId || undefined,
         sendOrigin: 'encaminhamento_atendimento',
+        referenceId: `crm-${msg.id}`,
         returnDetails: true,
       }
 

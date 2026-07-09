@@ -18,6 +18,38 @@ console.log('NODE_ENV:', process.env.NODE_ENV || 'development')
 // Detecta NODE_ENV malformado (ex: falta newline no .env → NODE_ENV=productionULTRAMSG_BASE_URL=...)
 const nodeEnv = String(process.env.NODE_ENV || '').trim()
 const SOCKET_DEBUG = process.env.SOCKET_DEBUG === '1' || process.env.NODE_ENV !== 'production'
+
+/** Rate limit leve por socket (anti-flood inbound). Não altera autorização. */
+const SOCKET_RATE = {
+  join_conversa: { windowMs: 10_000, max: 40 },
+  marcar_conversa_lida: { windowMs: 10_000, max: 30 },
+  typing: { windowMs: 5_000, max: 25 },
+}
+
+function createSocketRateLimiter() {
+  const buckets = new Map()
+  return function allowSocketEvent(socketId, eventKey) {
+    const cfg = SOCKET_RATE[eventKey]
+    if (!cfg) return true
+    const now = Date.now()
+    const key = `${socketId}:${eventKey}`
+    let b = buckets.get(key)
+    if (!b || now - b.windowStart >= cfg.windowMs) {
+      b = { windowStart: now, count: 0 }
+      buckets.set(key, b)
+    }
+    b.count += 1
+    if (buckets.size > 5000) {
+      for (const [k, v] of buckets) {
+        if (now - v.windowStart >= 60_000) buckets.delete(k)
+      }
+    }
+    return b.count <= cfg.max
+  }
+}
+
+const allowSocketEvent = createSocketRateLimiter()
+
 if (nodeEnv && (nodeEnv.includes('ULTRAMSG') || nodeEnv.includes('='))) {
   console.warn(
     '[ENV] NODE_ENV parece concatenado com outra variável. Verifique o .env: cada variável deve estar em uma linha separada.'
@@ -282,9 +314,14 @@ io.on('connection', (socket) => {
   socket.on('join_conversa', async (conversaId) => {
     try {
       if (!conversaId) return
+      if (!allowSocketEvent(socket.id, 'join_conversa')) return
 
       const convId = Number(conversaId)
       if (!Number.isFinite(convId) || convId <= 0) return
+
+      const room = `conversa_${convId}`
+      // Já na room: não reconsultar DB (reduz carga sob reconnect/spam)
+      if (socket.rooms.has(room)) return
 
       const allowed = await canUserJoinConversationRoom({
         company_id,
@@ -298,11 +335,8 @@ io.on('connection', (socket) => {
         return
       }
 
-      const room = `conversa_${convId}`
-      if (!socket.rooms.has(room)) {
-        socket.join(room)
-        if (SOCKET_DEBUG) console.log(`[SOCKET_JOIN_CONVERSA] Usuario ${id} entrou na conversa ${convId}`)
-      }
+      socket.join(room)
+      if (SOCKET_DEBUG) console.log(`[SOCKET_JOIN_CONVERSA] Usuario ${id} entrou na conversa ${convId}`)
     } catch (err) {
       console.error('[SOCKET_JOIN_CONVERSA]', {
         user_id: id,
@@ -325,6 +359,7 @@ io.on('connection', (socket) => {
   // Indicador de digitação (typing) — re-broadcast na room da conversa
   // =====================================================
   socket.on('typing_start', (data) => {
+    if (!allowSocketEvent(socket.id, 'typing')) return
     const conversa_id = data?.conversa_id
     if (!conversa_id) return
     const room = `conversa_${conversa_id}`
@@ -338,6 +373,7 @@ io.on('connection', (socket) => {
   })
 
   socket.on('typing_stop', (data) => {
+    if (!allowSocketEvent(socket.id, 'typing')) return
     const conversa_id = data?.conversa_id
     if (!conversa_id) return
     const room = `conversa_${conversa_id}`
@@ -346,6 +382,7 @@ io.on('connection', (socket) => {
   })
 
   socket.on('marcar_conversa_lida', async (data = {}) => {
+    if (!allowSocketEvent(socket.id, 'marcar_conversa_lida')) return
     const conversa_id = data?.conversa_id ?? data?.id
     try {
       const ok = await marcarConversaLidaSocket({

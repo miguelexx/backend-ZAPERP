@@ -34,6 +34,16 @@ const lastSendPerCompany = new Map()
 const LAST_SEND_MAP_MAX = 500
 const WHATSAPP_DEBUG = String(process.env.WHATSAPP_DEBUG || '').toLowerCase() === 'true'
 
+/**
+ * Propaga referenceId (ex.: crm-{mensagem_id}) no body do POST UltraMSG.
+ * Usado em texto e mídia para reconciliação determinística do eco fromMe / ACK.
+ */
+function applyReferenceIdToBody(body, opts) {
+  const referenceId = opts?.referenceId ? String(opts.referenceId).trim().slice(0, 200) : null
+  if (referenceId) body.referenceId = referenceId
+  return body
+}
+
 /** Resposta HTTP 200 com JSON de erro (ex.: token inválido após rotação no painel UltraMSG). */
 function ultramsgResponseIndicatesBadInstanceToken(data, text) {
   const parts = []
@@ -704,8 +714,7 @@ async function sendText(phone, message, opts = {}) {
   const replyMessageId = opts?.replyMessageId ? String(opts.replyMessageId).trim() : null
   const body = { to: nums[0], body: msg }
   if (replyMessageId) body.msgId = replyMessageId
-  const referenceId = opts?.referenceId ? String(opts.referenceId).trim().slice(0, 200) : null
-  if (referenceId) body.referenceId = referenceId
+  applyReferenceIdToBody(body, opts)
 
   const { ok, status, data, text } = await postJson({
     ...cfg,
@@ -761,6 +770,7 @@ async function sendImage(phone, url, caption = '', opts = {}) {
   const captionTrim = String(caption || '').trim().slice(0, CAPTION_MAX_LEN)
   const body = { to: nums[0], image: String(url).trim() }
   if (captionTrim) body.caption = captionTrim
+  applyReferenceIdToBody(body, opts)
   const { ok, status, data, text } = await postJson({
     ...cfg,
     endpoint: '/messages/image',
@@ -856,6 +866,7 @@ async function sendAudio(phone, audioUrl, opts = {}) {
   
   console.log(`[ULTRAMSG] Tentando enviar audio para ${nums[0]?.slice(-12)} com URL: ${processedAudioUrl.slice(0, 50)}...`)
   const body = { to: nums[0], audio: processedAudioUrl }
+  applyReferenceIdToBody(body, opts)
   const { ok, status, data, text } = await postJson({
     ...cfg,
     endpoint: '/messages/audio',
@@ -929,6 +940,7 @@ async function sendFile(phone, url, fileName = '', opts = {}) {
   // Não usar o nome do arquivo como legenda visível no WhatsApp.
   const captionForApi = captionTrim || ' '
   const body = { to: nums[0], document: String(url).trim(), filename, caption: captionForApi }
+  applyReferenceIdToBody(body, opts)
   const { ok, status, data, text } = await postJson({
     ...cfg,
     endpoint: '/messages/document',
@@ -970,6 +982,7 @@ async function sendVideo(phone, videoUrl, caption = '', opts = {}) {
   const captionTrim = String(caption || '').trim().slice(0, CAPTION_MAX_LEN)
   const body = { to: nums[0], video: String(videoUrl).trim() }
   if (captionTrim) body.caption = captionTrim
+  applyReferenceIdToBody(body, opts)
   const { ok, status, data, text } = await postJson({
     ...cfg,
     endpoint: '/messages/video',
@@ -1004,6 +1017,7 @@ async function sendSticker(phone, sticker, opts = {}) {
   const nums = phoneCandidatesForSend(phone)
   if (!nums.length || !sticker) return returnDetails ? { ok: false, messageId: null, error: 'Destino ou sticker inválido' } : false
   const body = { to: nums[0], sticker: String(sticker).trim() }
+  applyReferenceIdToBody(body, opts)
   const { ok, status, data, text } = await postJson({
     ...cfg,
     endpoint: '/messages/sticker',
@@ -1093,6 +1107,7 @@ async function sendVoice(phone, audioUrl, opts = {}) {
   }
   
   const body = { to: nums[0], audio: processedAudioUrl }
+  applyReferenceIdToBody(body, opts)
 
   // Tenta endpoint voice primeiro
   console.log(`[ULTRAMSG] Tentando enviar voice para ${nums[0]?.slice(-12)} com URL: ${processedAudioUrl.slice(0, 50)}...`)

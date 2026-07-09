@@ -1965,37 +1965,17 @@ exports.receberZapi = async (req, res) => {
         let nomePayload = nomePayloadRaw ? String(nomePayloadRaw).trim() : null
         let nomeSource = (payload.name && String(payload.name).trim()) ? 'name' : (fromMe ? 'chatName' : 'senderName')
 
-        // Sincroniza nome/foto: UltraMsg webhook NUNCA traz profile picture — usar GET /contacts/image.
+        // Nome/foto: UltraMsg webhook NUNCA traz profile picture — usar GET /contacts/image.
         // Passar chatId (ex. payload.chatId = data.from) quando disponível para chamada correta à API.
+        // Caminho quente: NÃO bloquear o webhook no sync UltraMSG (latência 5–6s sob pico).
+        // Usar só payload para getOrCreateCliente; sync completo roda em pendingContactSync (background).
         if (phone) {
-          const syncChatId = !isGroup && payload.chatId && String(payload.chatId).trim().endsWith('@c.us')
-            ? String(payload.chatId).trim()
-            : phone
-          const syncTimeoutMs = fromMe ? 6000 : 5000
-          const syncOpts = { skipCache: true }
-          if (fromMe) syncOpts.skipCache = true
-          try {
-            const syncResult = await Promise.race([
-              syncUltraMsgContact(syncChatId, company_id, syncOpts),
-              new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), syncTimeoutMs))
-            ])
-            // syncUltraMsgContact pode retornar telefone como fallback quando API não tem nome — ignorar e usar pushname do payload
-            const syncNome = syncResult?.nome ? String(syncResult.nome).trim() : null
-            if (syncNome && !isBadName(syncNome)) {
-              nomePayload = syncNome
-              nomeSource = 'syncUltramsg'
-              nomeParaCache = nomePayload
-              nomeSourceParaCache = 'syncUltramsg'
-            }
-            // Foto: sempre usar da API quando disponível (payload só traz quando contato envia; when fromMe precisamos da API)
-            const syncFoto = syncResult?.foto_perfil && String(syncResult.foto_perfil).trim()
-            if (syncFoto && syncFoto.startsWith('http')) senderPhoto = syncFoto
-          } catch (_) {
-            // fallback: usa nome do payload (senderName/chatName) — SOMENTE quando !fromMe (payload traz pushname do contato)
-            // Quando fromMe: payload traz NOSSO nome — nunca usar como nome do contato
-          }
+          // Foto do payload quando presente (raro); sync async preenche depois se vazio
+          const fotoPayload = senderPhoto && String(senderPhoto).trim().startsWith('http') ? String(senderPhoto).trim() : null
+          if (fotoPayload) senderPhoto = fotoPayload
         }
         // Quando fromMe: nome do payload é do remetente (nós) — só usar nome vindo do sync (destinatário)
+        // No caminho quente sem sync: fromMe não usa nome do payload como contato
         if (nomePayload && !nomeParaCache && !fromMe) {
           nomeParaCache = nomePayload
           nomeSourceParaCache = nomeSource
@@ -2004,10 +1984,10 @@ exports.receberZapi = async (req, res) => {
         const pushnameRaw = payload.notifyName ?? payload.pushName ?? payload.notify ?? nomePayloadRaw
         const pushnamePayload = pushnameRaw ? String(pushnameRaw).trim() : null
         const { cliente_id: cid } = await getOrCreateCliente(supabase, company_id, phone, {
-          nome: nomePayload,
-          nomeSource,
+          nome: fromMe ? null : nomePayload,
+          nomeSource: fromMe ? null : nomeSource,
           fromMe,
-          pushname: pushnamePayload || undefined,
+          pushname: fromMe ? undefined : (pushnamePayload || undefined),
           foto_perfil: senderPhoto || undefined
         })
         cliente_id = cid
@@ -3779,6 +3759,7 @@ exports.receberZapi = async (req, res) => {
             await supabase.from('clientes').update(up).eq('id', syncClienteId).eq('company_id', company_id)
           }
           // Atualizar conversa (nome_contato_cache, foto_perfil_contato_cache) quando vazios e sync trouxe dados
+          // (caminho quente não bloqueia mais no sync UltraMSG — este background preenche cache vazio)
           const nomeConvVazio = !convRow?.nome_contato_cache || !String(convRow.nome_contato_cache).trim()
           const fotoConvVazia = !convRow?.foto_perfil_contato_cache || !String(convRow.foto_perfil_contato_cache).trim()
           // Priorizar name (nome salvo no celular) sobre pushname — nunca sobrescrever com pushname quando name existir
