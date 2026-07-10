@@ -1108,6 +1108,16 @@ async function buscarConversaIdsPorTextoMensagens({ company_id, term }) {
  */
 const conversaVisibilityCache = new Map()
 const CONVERSA_VISIBILITY_CACHE_TTL_MS = 15_000
+// Varredura periódica: entradas expiram logicamente (expiresAt) mas nunca eram removidas do Map
+// em conversas que deixam de receber mensagens — leak lento em processo de longa duração (PM2).
+// Mesmo padrão do _clientTempIdDeduplicationMap. Não remove entradas com promise em andamento.
+setInterval(() => {
+  const now = Date.now()
+  for (const [key, val] of conversaVisibilityCache.entries()) {
+    if (val?.promise && !val?.ids) continue
+    if (val?.expiresAt != null && val.expiresAt <= now) conversaVisibilityCache.delete(key)
+  }
+}, 5 * 60 * 1000).unref()
 
 function conversaVisibilityCacheKey(company_id, conversa_id) {
   return `${Number(company_id)}:${Number(conversa_id)}`
