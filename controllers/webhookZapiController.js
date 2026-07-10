@@ -331,6 +331,26 @@ function isMediaPlaceholderText(texto) {
   return MEDIA_PLACEHOLDERS.has(String(texto || '').trim())
 }
 
+/**
+ * Upgrade de placeholder GENÉRICO → placeholder TIPADO na idempotência.
+ * Cenário real: um primeiro webhook sem tipo detectável (ex.: create fora de ordem/ciphertext)
+ * grava a linha como '(mensagem)'/'(mídia)'. O webhook seguinte SABE o tipo (ex.: áudio) mas ainda
+ * não tem a URL (que só chega no webhook_message_download_media). Sem este upgrade, textoReal
+ * descarta placeholders (regra anti-sobrescrita) e hasMediaToUpdate exige URL → a bolha ficava
+ * "(mensagem)" para sempre. Genérico → tipado é estritamente melhor; nunca o contrário, e nunca
+ * troca um tipado por outro (evita flip-flop entre eventos).
+ * @returns {string|null} novo texto a gravar, ou null se não deve atualizar
+ */
+function resolvePlaceholderUpgradeTexto(savedTexto, textoIncoming) {
+  const saved = String(savedTexto || '').trim()
+  const incoming = String(textoIncoming || '').trim()
+  const savedIsGenerico = saved === '(mensagem)' || saved === '(mídia)'
+  if (!savedIsGenerico) return null
+  if (!isMediaPlaceholderText(incoming) || incoming === '(mídia)') return null
+  if (incoming === saved) return null
+  return incoming
+}
+
 // Eventos internos de protocolo/sistema do WhatsApp — NÃO são mensagens do cliente e não devem
 // virar linha no chat (evita ruído). Tudo que não estiver aqui é tratado como mensagem real e é
 // SEMPRE salvo (mesmo sem conteúdo detectável), para nunca perder mensagem do contato.
@@ -2699,6 +2719,18 @@ exports.receberZapi = async (req, res) => {
       }
       // Mensagem real sem conteúdo detectável (recebida OU enviada): nunca descartar — salva placeholder
       // legível ("Mensagem") que é atualizado quando a mídia/URL chegar. Evita "some do sistema".
+      // Diagnóstico (sem conteúdo sensível): registra o evento/tipo bruto para rastrear a origem
+      // de bolhas "(mensagem)" — se aparecer aqui com frequência, o normalizador não está
+      // reconhecendo o data.type deste provedor/evento.
+      console.warn('[Z-API] mensagem sem tipo/conteúdo detectável → placeholder genérico "(mensagem)"', {
+        type_extraido: type || null,
+        event_type: String(payload?.event_type ?? payload?.eventType ?? payload?.type ?? '').slice(0, 40) || null,
+        fromMe,
+        whatsapp_id: messageId ? String(messageId).slice(0, 64) : null,
+        conversa_id,
+        company_id,
+        payload_keys: Object.keys(payload || {}).slice(0, 24),
+      })
       texto = '(mensagem)'
     }
 
@@ -2814,6 +2846,9 @@ exports.receberZapi = async (req, res) => {
         const savedTexto = String(existente.texto || '')
         const isPlaceholder = isMediaPlaceholderText(savedTexto) || savedTexto === '(mensagem)'
         const textoReal = texto && texto !== '(mensagem)' && !isMediaPlaceholderText(texto) ? texto : null
+        // Genérico '(mensagem)'/'(mídia)' → placeholder tipado ('(áudio)', '(imagem)'…) quando o
+        // webhook atual conhece o tipo mas a URL ainda não chegou. Ver resolvePlaceholderUpgradeTexto.
+        const textoPlaceholderTipado = resolvePlaceholderUpgradeTexto(savedTexto, texto)
         const hasMediaToUpdate = (imageUrl || documentUrl || audioUrl || videoUrl || stickerUrl) && !String(existente.url || '').trim()
         const needsArquivoTipo =
           (type === 'document' || type === 'file') &&
@@ -2822,10 +2857,11 @@ exports.receberZapi = async (req, res) => {
           (type === 'document' || type === 'file') &&
           fileName &&
           !String(existente.nome_arquivo || '').trim()
-        const shouldUpdate = (isPlaceholder && textoReal) || hasMediaToUpdate || needsArquivoTipo || needsNomeArquivo
+        const shouldUpdate = (isPlaceholder && textoReal) || !!textoPlaceholderTipado || hasMediaToUpdate || needsArquivoTipo || needsNomeArquivo
         if (shouldUpdate) {
           const upFields = {}
           if (textoReal && isPlaceholder) upFields.texto = textoReal
+          else if (textoPlaceholderTipado) upFields.texto = textoPlaceholderTipado
           if (imageUrl && !existente.url) { upFields.url = imageUrl; upFields.tipo = 'imagem' }
           else if (documentUrl && !existente.url) { upFields.url = documentUrl; upFields.tipo = 'arquivo' }
           else if (audioUrl && !existente.url) { upFields.url = audioUrl; upFields.tipo = (existente.tipo === 'voice' ? 'voice' : 'audio') }
@@ -2845,11 +2881,12 @@ exports.receberZapi = async (req, res) => {
                 .select(WEBHOOK_MSG_SELECT)
                 .single()
               mensagemSalva = updMsg || existente
-              if (WHATSAPP_DEBUG || hasMediaToUpdate || needsArquivoTipo) {
+              if (WHATSAPP_DEBUG || hasMediaToUpdate || needsArquivoTipo || textoPlaceholderTipado) {
                 console.log('[Z-API] idempotência: mensagem atualizada com mídia/placeholder', existente.id, Object.keys(upFields))
               }
               // Emitir nova_mensagem para frontend atualizar card/player quando URL ou tipo chega depois
-              if ((hasMediaToUpdate || needsArquivoTipo || needsNomeArquivo) && req.app?.get('io')) {
+              // (inclui upgrade de placeholder genérico → tipado, para a bolha sair de "Mensagem" ao vivo)
+              if ((hasMediaToUpdate || needsArquivoTipo || needsNomeArquivo || textoPlaceholderTipado) && req.app?.get('io')) {
                 const io2 = req.app.get('io')
                 const rooms = [`conversa_${conversa_id}`, `empresa_${company_id}`]
                 const emitPayload = {
@@ -4179,6 +4216,8 @@ exports._test = {
   getPayloads,
   resolveConversationKeyFromZapi,
   extractMessage,
+  isMediaPlaceholderText,
+  resolvePlaceholderUpgradeTexto,
   whatsappIdCompativelParaReconcile,
   filterRowsForFromMeReconcile,
   findFromMeOutboundMediaCandidate,

@@ -12,6 +12,7 @@ const {
   getPayloads,
   resolveConversationKeyFromZapi,
   extractMessage,
+  resolvePlaceholderUpgradeTexto,
 } = _test
 
 // Silencia console.warn (resolveConversationKeyFromZapi avisa quando connectedPhone está ausente)
@@ -404,5 +405,38 @@ describe('fromMe reconcile helpers', () => {
       whatsappId: 'false_5511@c.us_ABC',
     })
     expect(cand?.id).toBe(10)
+  })
+})
+
+// ─────────────────────────── resolvePlaceholderUpgradeTexto ───────────────────────────
+// Upgrade '(mensagem)'/'(mídia)' → placeholder tipado quando um webhook posterior conhece o
+// tipo mas a URL da mídia ainda não chegou (áudio pelo celular: create fora de ordem +
+// download_media atrasado deixava a bolha "(mensagem)" para sempre).
+describe('resolvePlaceholderUpgradeTexto', () => {
+  test.each([
+    ['(mensagem)', '(áudio)',   '(áudio)',   'genérico → áudio (caso do áudio pelo celular)'],
+    ['(mensagem)', '(imagem)',  '(imagem)',  'genérico → imagem'],
+    ['(mensagem)', '(vídeo)',   '(vídeo)',   'genérico → vídeo'],
+    ['(mensagem)', '(figurinha)', '(figurinha)', 'genérico → figurinha'],
+    ['(mensagem)', '(arquivo)', '(arquivo)', 'genérico → arquivo'],
+    ['(mídia)',    '(áudio)',   '(áudio)',   'mídia genérica → áudio'],
+    ['(mensagem)', '(vídeo visualização única)', '(vídeo visualização única)', 'genérico → ptv'],
+  ])('%s + %s → %s (%s)', (saved, incoming, expected) => {
+    expect(resolvePlaceholderUpgradeTexto(saved, incoming)).toBe(expected)
+  })
+
+  test.each([
+    ['(mensagem)', '(mensagem)', 'mesmo genérico — nada a fazer'],
+    ['(mensagem)', '(mídia)',    'genérico → genérico não melhora'],
+    ['(mensagem)', 'Oi, tudo bem?', 'texto real é tratado por textoReal, não aqui'],
+    ['(mensagem)', '',           'incoming vazio'],
+    ['(áudio)',    '(imagem)',   'tipado nunca troca por outro tipado (anti flip-flop)'],
+    ['(áudio)',    '(mensagem)', 'tipado nunca regride para genérico'],
+    ['Texto real', '(áudio)',    'texto real salvo nunca é sobrescrito'],
+    ['',           '(áudio)',    'saved vazio não é genérico'],
+    [null,         '(áudio)',    'saved null'],
+    ['(mensagem)', null,         'incoming null'],
+  ])('%s + %s → null (%s)', (saved, incoming) => {
+    expect(resolvePlaceholderUpgradeTexto(saved, incoming)).toBe(null)
   })
 })
