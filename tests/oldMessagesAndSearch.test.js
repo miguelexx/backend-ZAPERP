@@ -37,6 +37,127 @@ describe('old messages contact sync', () => {
     expect(normalized?.insert?.texto).toBe('(imagem)')
     expect(normalized?.emptyPlaceholder).toBe(false)
   })
+
+  // Formato REAL do GET /messages da UltraMsg: a URL vem em `media` (não em imageUrl/audioUrl).
+  // Antes, toda mídia do sync caía em "(mensagem)" e era pulada — áudios/fotos sumiam do histórico.
+  test('audio ptt com URL em media (formato UltraMsg) vira voice com url', () => {
+    const normalized = normalizeOldMessage(
+      {
+        id: 'false_5534@c.us_AUDIO1',
+        fromMe: false,
+        time: 1760000000,
+        type: 'ptt',
+        body: '',
+        media: 'https://cdn.ultramsg.com/media/voice-abc.ogg',
+      },
+      { isGroup: false }
+    )
+
+    expect(normalized?.insert?.tipo).toBe('voice')
+    expect(normalized?.insert?.url).toBe('https://cdn.ultramsg.com/media/voice-abc.ogg')
+    expect(normalized?.emptyPlaceholder).toBe(false)
+  })
+
+  test('imagem com URL em media + caption no body preserva legenda', () => {
+    const normalized = normalizeOldMessage(
+      {
+        id: 'false_5534@c.us_IMG1',
+        fromMe: true,
+        time: 1760000000,
+        type: 'image',
+        body: 'Olha essa foto',
+        media: 'https://cdn.ultramsg.com/media/foto.jpg',
+      },
+      { isGroup: false }
+    )
+
+    expect(normalized?.insert?.tipo).toBe('imagem')
+    expect(normalized?.insert?.url).toBe('https://cdn.ultramsg.com/media/foto.jpg')
+    expect(normalized?.insert?.texto).toBe('Olha essa foto')
+    expect(normalized?.insert?.direcao).toBe('out')
+  })
+
+  test('type alias "voice" de aparelho variante com media vira voice', () => {
+    const normalized = normalizeOldMessage(
+      {
+        id: 'false_5534@c.us_AUDIO2',
+        fromMe: false,
+        time: 1760000000,
+        type: 'voice',
+        body: '',
+        media: 'https://cdn.ultramsg.com/media/voice-x.oga',
+      },
+      { isGroup: false }
+    )
+    expect(normalized?.insert?.tipo).toBe('voice')
+    expect(normalized?.insert?.url).toBe('https://cdn.ultramsg.com/media/voice-x.oga')
+  })
+
+  test('type MIME cru "audio/ogg; codecs=opus" com media vira voice', () => {
+    const normalized = normalizeOldMessage(
+      {
+        id: 'false_5534@c.us_AUDIO3',
+        fromMe: false,
+        time: 1760000000,
+        type: 'audio/ogg; codecs=opus',
+        body: '',
+        media: 'https://cdn.ultramsg.com/media/voice-y.ogg',
+      },
+      { isGroup: false }
+    )
+    expect(normalized?.insert?.tipo).toBe('voice')
+    expect(normalized?.insert?.url).toBe('https://cdn.ultramsg.com/media/voice-y.ogg')
+  })
+
+  test('type=chat sem texto com media .ogg infere voice por extensao', () => {
+    const normalized = normalizeOldMessage(
+      {
+        id: 'false_5534@c.us_AUDIO4',
+        fromMe: false,
+        time: 1760000000,
+        type: 'chat',
+        body: '',
+        media: 'https://cdn.ultramsg.com/media/voice-z.ogg?token=1',
+      },
+      { isGroup: false }
+    )
+    expect(normalized?.insert?.tipo).toBe('voice')
+    expect(normalized?.insert?.url).toBe('https://cdn.ultramsg.com/media/voice-z.ogg?token=1')
+  })
+
+  test('documento com media + filename', () => {
+    const normalized = normalizeOldMessage(
+      {
+        id: 'false_5534@c.us_DOC1',
+        fromMe: false,
+        time: 1760000000,
+        type: 'document',
+        body: 'contrato.pdf',
+        media: 'https://cdn.ultramsg.com/docs/contrato.pdf',
+        filename: 'contrato.pdf',
+      },
+      { isGroup: false }
+    )
+    expect(normalized?.insert?.tipo).toBe('arquivo')
+    expect(normalized?.insert?.url).toBe('https://cdn.ultramsg.com/docs/contrato.pdf')
+    expect(normalized?.emptyPlaceholder).toBe(false)
+  })
+
+  test('texto normal com type=chat NAO e reclassificado', () => {
+    const normalized = normalizeOldMessage(
+      {
+        id: 'false_5534@c.us_TXT1',
+        fromMe: false,
+        time: 1760000000,
+        type: 'chat',
+        body: 'Oi, tudo bem?',
+      },
+      { isGroup: false }
+    )
+    expect(normalized?.insert?.tipo).toBeUndefined()
+    expect(normalized?.insert?.texto).toBe('Oi, tudo bem?')
+    expect(normalized?.emptyPlaceholder).toBe(false)
+  })
 })
 
 describe('chat search helpers', () => {

@@ -174,6 +174,20 @@ function normalizeType(message) {
   let type = String(message?.type || message?.msgType || message?.messageType || 'text').toLowerCase()
   if (type === 'chat' || type === 'receivedcallback' || type === 'receivedcall') type = 'text'
   if (type === 'ptt') type = 'voice'
+  // Aliases por aparelho/versão de WhatsApp (mesma tolerância do webhook ao vivo)
+  if (['voicemessage', 'audiomessage', 'pttmessage'].includes(type)) type = 'voice'
+  else if (['imagemessage', 'photo', 'picture'].includes(type)) type = 'image'
+  else if (['videomessage', 'gif'].includes(type)) type = 'video'
+  else if (type === 'stickermessage') type = 'sticker'
+  else if (type === 'documentmessage') type = 'document'
+  // type como MIME cru ('audio/ogg; codecs=opus')
+  if (type.includes('/')) {
+    if (type.startsWith('audio/')) type = 'voice'
+    else if (type.startsWith('image/webp')) type = 'sticker'
+    else if (type.startsWith('image/')) type = 'image'
+    else if (type.startsWith('video/')) type = 'video'
+    else if (type.startsWith('application/')) type = 'document'
+  }
   if (message?.reaction && typeof message.reaction === 'object') type = 'reaction'
   if (message?.location && typeof message.location === 'object') type = 'location'
   if (message?.contact && typeof message.contact === 'object') type = 'contact'
@@ -207,17 +221,41 @@ function normalizeOldMessage(raw, { isGroup }) {
   if (!whatsappId) return null
 
   const fromMe = Boolean(raw.fromMe ?? raw.key?.fromMe ?? raw.from_me)
-  const type = normalizeType(raw)
+  let type = normalizeType(raw)
   const nestedMessage = raw.message && typeof raw.message === 'object' ? raw.message : null
   const rawMessage = messagePayloadFrom(raw)
 
   let texto = typeof rawMessage === 'object' ? '' : String(rawMessage || '').trim()
-  const imageUrl = urlFrom(raw.image?.imageUrl, raw.image?.url, raw.imageUrl, nestedMessage?.imageUrl, nestedMessage?.imageMessage?.url, raw.image)
-  const documentUrl = urlFrom(raw.document?.documentUrl, raw.document?.url, raw.documentUrl, raw.file?.url, raw.fileUrl, nestedMessage?.documentMessage?.url)
-  const audioUrl = urlFrom(raw.audio?.audioUrl, raw.audio?.url, raw.audioUrl, nestedMessage?.audioUrl, nestedMessage?.audioMessage?.url)
-  const videoUrl = urlFrom(raw.video?.videoUrl, raw.video?.url, raw.videoUrl, raw.ptv?.url, nestedMessage?.videoMessage?.url)
-  const stickerUrl = urlFrom(raw.sticker?.stickerUrl, raw.sticker?.url, raw.stickerUrl, nestedMessage?.stickerMessage?.url)
+  let imageUrl = urlFrom(raw.image?.imageUrl, raw.image?.url, raw.imageUrl, nestedMessage?.imageUrl, nestedMessage?.imageMessage?.url, raw.image)
+  let documentUrl = urlFrom(raw.document?.documentUrl, raw.document?.url, raw.documentUrl, raw.file?.url, raw.fileUrl, nestedMessage?.documentMessage?.url)
+  let audioUrl = urlFrom(raw.audio?.audioUrl, raw.audio?.url, raw.audioUrl, nestedMessage?.audioUrl, nestedMessage?.audioMessage?.url)
+  let videoUrl = urlFrom(raw.video?.videoUrl, raw.video?.url, raw.videoUrl, raw.ptv?.url, nestedMessage?.videoMessage?.url)
+  let stickerUrl = urlFrom(raw.sticker?.stickerUrl, raw.sticker?.url, raw.stickerUrl, nestedMessage?.stickerMessage?.url)
   let locationUrl = urlFrom(raw.location?.url, raw.location?.thumbnailUrl, nestedMessage?.locationMessage?.url)
+
+  // UltraMsg GET /messages entrega a URL da mídia em `media` (string ou objeto) — NÃO nos campos
+  // estilo Z-API acima. Sem esta leitura, toda mídia do sync caía em "(mensagem)"/era pulada,
+  // perdendo áudios/fotos/vídeos/documentos do histórico.
+  const genericMediaUrl = urlFrom(
+    typeof raw.media === 'string' ? raw.media : (raw.media?.url ?? raw.media?.link ?? raw.media?.file),
+    typeof raw.mediaUrl === 'string' ? raw.mediaUrl : raw.mediaUrl?.url
+  )
+  if (genericMediaUrl) {
+    if ((type === 'audio' || type === 'voice') && !audioUrl) audioUrl = genericMediaUrl
+    else if (type === 'image' && !imageUrl) imageUrl = genericMediaUrl
+    else if (type === 'video' && !videoUrl) videoUrl = genericMediaUrl
+    else if (type === 'sticker' && !stickerUrl) stickerUrl = genericMediaUrl
+    else if ((type === 'document' || type === 'file') && !documentUrl) documentUrl = genericMediaUrl
+    else if (type === 'text' && !texto) {
+      // type genérico com mídia e sem texto: infere pela extensão da URL (paridade com o webhook)
+      const urlPath = genericMediaUrl.split(/[?#]/)[0].toLowerCase()
+      if (/\.(ogg|oga|opus|mp3|m4a|aac|amr|wav)$/.test(urlPath)) { type = 'voice'; audioUrl = genericMediaUrl }
+      else if (/\.webp$/.test(urlPath)) { type = 'sticker'; stickerUrl = genericMediaUrl }
+      else if (/\.(jpe?g|png|gif|bmp|heic)$/.test(urlPath)) { type = 'image'; imageUrl = genericMediaUrl }
+      else if (/\.(mp4|mov|3gp|webm|mkv)$/.test(urlPath)) { type = 'video'; videoUrl = genericMediaUrl }
+      else { type = 'document'; documentUrl = genericMediaUrl }
+    }
+  }
 
   if (type === 'reaction') {
     const val = raw.reaction?.value ?? raw.reaction?.emoji ?? nestedMessage?.reactionMessage?.text ?? ''

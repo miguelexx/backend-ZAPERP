@@ -3538,6 +3538,31 @@ exports.receberZapi = async (req, res) => {
 
               for (const m of ordered) {
                 const p = { ...(m || {}), isGroup: isGroupForHistory, phone: phoneForHistory }
+                // UltraMsg GET /messages entrega a URL da mídia em `media` — extractMessage lê
+                // campos estilo Z-API (imageUrl/audioUrl/...). Sem este mapeamento, TODA mídia do
+                // histórico caía no filtro de placeholder abaixo e era pulada (perda silenciosa).
+                const mediaHistRaw = typeof m?.media === 'string'
+                  ? m.media.trim()
+                  : String(m?.media?.url ?? m?.media?.link ?? m?.media?.file ?? '').trim()
+                if (mediaHistRaw && /^https?:\/\//i.test(mediaHistRaw)) {
+                  const tHist = String(m?.type || '').toLowerCase()
+                  if (['audio', 'ptt', 'voice', 'audiomessage', 'pttmessage', 'voicemessage'].includes(tHist)) {
+                    p.audioUrl = p.audioUrl || mediaHistRaw
+                    if (tHist !== 'audio' && tHist !== 'ptt') p.type = 'ptt'
+                  } else if (tHist === 'image' || tHist === 'imagemessage') {
+                    p.imageUrl = p.imageUrl || mediaHistRaw
+                    if (tHist !== 'image') p.type = 'image'
+                  } else if (tHist === 'video' || tHist === 'videomessage' || tHist === 'gif') {
+                    p.videoUrl = p.videoUrl || mediaHistRaw
+                    if (tHist !== 'video') p.type = 'video'
+                  } else if (tHist === 'sticker' || tHist === 'stickermessage') {
+                    p.stickerUrl = p.stickerUrl || mediaHistRaw
+                    if (tHist !== 'sticker') p.type = 'sticker'
+                  } else if (tHist === 'document' || tHist === 'file' || tHist === 'documentmessage') {
+                    p.documentUrl = p.documentUrl || mediaHistRaw
+                    if (tHist === 'documentmessage') p.type = 'document'
+                  }
+                }
                 const ex = extractMessage(p)
                 const wId = ex.messageId ? String(ex.messageId).trim() : null
                 if (!ex.texto) continue
