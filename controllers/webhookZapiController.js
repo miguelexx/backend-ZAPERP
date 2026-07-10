@@ -2722,7 +2722,7 @@ exports.receberZapi = async (req, res) => {
       // Diagnóstico (sem conteúdo sensível): registra o evento/tipo bruto para rastrear a origem
       // de bolhas "(mensagem)" — se aparecer aqui com frequência, o normalizador não está
       // reconhecendo o data.type deste provedor/evento.
-      console.warn('[Z-API] mensagem sem tipo/conteúdo detectável → placeholder genérico "(mensagem)"', {
+      console.warn('[WEBHOOK_ULTRAMSG] mensagem sem tipo/conteúdo detectável → placeholder genérico "(mensagem)"', {
         type_extraido: type || null,
         event_type: String(payload?.event_type ?? payload?.eventType ?? payload?.type ?? '').slice(0, 40) || null,
         fromMe,

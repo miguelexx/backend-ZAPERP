@@ -22,7 +22,13 @@ function compactWebhookPayload(body = {}, ctx = {}) {
     _log: { path: ctx.path, method: ctx.method },
     event_type: body.event_type ?? body.eventType ?? body.type ?? body.event ?? null,
     instanceId_present: Boolean(body.instanceId ?? body.instance_id ?? data.instanceId ?? data.instance_id),
-    message_id: body.messageId ?? body.message_id ?? body.id ?? data.messageId ?? data.message_id ?? data.id ?? null,
+    // message_id: priorizar o id da MENSAGEM (data.id — formato "true_xxx@lid_ABC").
+    // Antes, body.id (id numérico do ENVELOPE do evento UltraMsg) vencia e impedia
+    // correlacionar webhook_logs com mensagens.whatsapp_id no diagnóstico.
+    message_id: data.id ?? data.messageId ?? data.message_id ?? body.messageId ?? body.message_id ?? body.id ?? null,
+    event_envelope_id: body.id ?? null,
+    // msg_type: o data.type bruto é a chave para diagnosticar mensagens "(mensagem)" sem conteúdo
+    msg_type: data.type ?? body.type ?? null,
     fromMe: body.fromMe ?? data.fromMe ?? null,
     phone_tail: phone ? String(phone).replace(/\D/g, '').slice(-6) || null : null,
     text_length: rawMessage != null ? String(rawMessage).length : 0,
