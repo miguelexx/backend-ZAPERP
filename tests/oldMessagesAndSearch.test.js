@@ -1,4 +1,4 @@
-const { normalizeOldMessage } = require('../services/oldMessagesSyncService')
+const { normalizeOldMessage, buildPlaceholderRepairPatch } = require('../services/oldMessagesSyncService')
 const {
   buildClienteSearchOr,
   buildTelefoneSearchOr,
@@ -157,6 +157,75 @@ describe('old messages contact sync', () => {
     expect(normalized?.insert?.tipo).toBeUndefined()
     expect(normalized?.insert?.texto).toBe('Oi, tudo bem?')
     expect(normalized?.emptyPlaceholder).toBe(false)
+  })
+})
+
+// Reparo de linhas quebradas pelo sync: agora cobre placeholders TIPADOS ('(áudio)' sem URL,
+// de instância com download_media desligado), não só '(mensagem)'.
+describe('buildPlaceholderRepairPatch', () => {
+  const S3 = 'https://s3.eu-central-1.amazonaws.com/ultramsgmedia/2026/7/182261/abc123'
+
+  test('linha "(áudio)" tipo texto sem url + provider com url → ganha url e tipo voice', () => {
+    const patch = buildPlaceholderRepairPatch(
+      { id: 1, texto: '(áudio)', tipo: 'texto', url: null },
+      { texto: '(audio)', tipo: 'voice', url: S3, nome_arquivo: 'voice.ogg' }
+    )
+    expect(patch).toEqual({ tipo: 'voice', url: S3, nome_arquivo: 'voice.ogg' })
+  })
+
+  test('linha "(mensagem)" + provider com texto real → texto substituído', () => {
+    const patch = buildPlaceholderRepairPatch(
+      { id: 1, texto: '(mensagem)', tipo: 'texto', url: null },
+      { texto: 'Oi, tudo bem?' }
+    )
+    expect(patch).toEqual({ texto: 'Oi, tudo bem?' })
+  })
+
+  test('linha "(mensagem)" + provider tipado sem url → sobe para placeholder tipado', () => {
+    const patch = buildPlaceholderRepairPatch(
+      { id: 1, texto: '(mensagem)', tipo: 'texto', url: null },
+      { texto: '(audio)' }
+    )
+    expect(patch).toEqual({ texto: '(audio)' })
+  })
+
+  test('linha "(imagem)" com caption real do provider → caption + url + tipo', () => {
+    const patch = buildPlaceholderRepairPatch(
+      { id: 1, texto: '(imagem)', tipo: 'texto', url: null },
+      { texto: 'Olha essa foto', tipo: 'imagem', url: S3 }
+    )
+    expect(patch).toEqual({ texto: 'Olha essa foto', tipo: 'imagem', url: S3 })
+  })
+
+  test('texto real existente NUNCA é sobrescrito; só completa url de mídia perdida', () => {
+    const semUrl = buildPlaceholderRepairPatch(
+      { id: 1, texto: 'Orçamento fechado', tipo: 'texto', url: null },
+      { texto: '(audio)', tipo: 'voice' }
+    )
+    expect(semUrl).toBe(null)
+
+    const comUrl = buildPlaceholderRepairPatch(
+      { id: 1, texto: 'legenda real', tipo: 'imagem', url: null },
+      { texto: '(imagem)', tipo: 'imagem', url: S3 }
+    )
+    expect(comUrl).toEqual({ url: S3 })
+  })
+
+  test('linha já completa (url presente) → nada a reparar', () => {
+    expect(
+      buildPlaceholderRepairPatch(
+        { id: 1, texto: '(áudio)', tipo: 'voice', url: '/uploads/inbound-x.ogg' },
+        { texto: '(audio)', tipo: 'voice', url: S3 }
+      )
+    ).toBe(null)
+  })
+
+  test('tipo de mídia já definido nunca é trocado por outro', () => {
+    const patch = buildPlaceholderRepairPatch(
+      { id: 1, texto: '(áudio)', tipo: 'voice', url: null },
+      { texto: '(imagem)', tipo: 'imagem', url: S3 }
+    )
+    expect(patch).toEqual({ url: S3 })
   })
 })
 

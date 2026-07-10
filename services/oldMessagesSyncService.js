@@ -388,16 +388,60 @@ function isPlaceholderMessageText(value) {
   return String(value || '').trim() === '(mensagem)'
 }
 
-async function updateExistingPlaceholderMessage(company_id, existing, nextInsert) {
-  if (!existing?.id || !isPlaceholderMessageText(existing.texto)) return false
-  if (!nextInsert || isPlaceholderMessageText(nextInsert.texto)) return false
+// Placeholders reparáveis: genérico ('(mensagem)'/'(mídia)') E tipados ('(áudio)', '(imagem)'…).
+// Antes só '(mensagem)' era reparado — linhas tipadas sem URL (áudio/foto de instância com
+// download_media desligado) ficavam quebradas para sempre mesmo re-rodando o sync.
+const REPAIRABLE_PLACEHOLDER_TEXTS = new Set([
+  '(mensagem)', '(mídia)', '(midia)', '(imagem)', '(áudio)', '(audio)', '(áudio de voz)',
+  '(vídeo)', '(video)', '(vídeo visualização única)', '(figurinha)', '(sticker)',
+  '(arquivo)', '(documento)', '(localizacao)', '(localização)', '(contato)',
+])
+function isRepairablePlaceholderText(value) {
+  return REPAIRABLE_PLACEHOLDER_TEXTS.has(String(value || '').trim().toLowerCase())
+}
 
-  const patch = {
-    texto: String(nextInsert.texto || '').trim(),
+/**
+ * Decide o patch de reparo de uma mensagem existente a partir de uma versão mais rica do
+ * provider. Regras: nunca sobrescreve texto real; nunca troca tipo de mídia já definido;
+ * placeholder tipado ganha URL/tipo mantendo o rótulo; '(mensagem)' pode subir para tipado.
+ * @returns {object|null} campos a atualizar, ou null se não há reparo
+ */
+function buildPlaceholderRepairPatch(existing, nextInsert) {
+  if (!existing || !nextInsert) return null
+  const exTexto = String(existing.texto || '').trim()
+  const exIsPlaceholder = isRepairablePlaceholderText(exTexto)
+  const exSemUrl = !String(existing.url || '').trim()
+  const nextTexto = String(nextInsert.texto || '').trim()
+  const nextIsPlaceholder = isRepairablePlaceholderText(nextTexto)
+
+  const patch = {}
+  if (exIsPlaceholder && nextTexto && !nextIsPlaceholder) {
+    patch.texto = nextTexto
+  } else if (
+    exTexto.toLowerCase() === '(mensagem)' &&
+    nextTexto && nextIsPlaceholder && nextTexto.toLowerCase() !== '(mensagem)'
+  ) {
+    patch.texto = nextTexto
   }
   for (const field of ['tipo', 'url', 'nome_arquivo', 'contact_meta', 'location_meta']) {
-    if (nextInsert[field] != null && nextInsert[field] !== '') patch[field] = nextInsert[field]
+    const val = nextInsert[field]
+    if (val == null || val === '') continue
+    const cur = existing[field]
+    const curEmpty = cur == null || cur === '' || (field === 'tipo' && String(cur).toLowerCase() === 'texto')
+    if (curEmpty) patch[field] = val
   }
+  if (!exIsPlaceholder) {
+    // Mensagem com texto real: só completar URL de mídia perdida — nunca tocar no texto.
+    delete patch.texto
+    if (!exSemUrl || !patch.url) return null
+  }
+  return Object.keys(patch).length > 0 ? patch : null
+}
+
+async function updateExistingPlaceholderMessage(company_id, existing, nextInsert) {
+  if (!existing?.id) return false
+  const patch = buildPlaceholderRepairPatch(existing, nextInsert)
+  if (!patch) return false
 
   const { error } = await supabase
     .from('mensagens')
@@ -505,6 +549,10 @@ async function hasAnyNewMessage(company_id, whatsapp_instance_id, prepared, allo
       allowLegacyNull === true
     )
     if (!exists?.id) return true
+    // Placeholder reparável ("(mensagem)"/"(áudio)" sem URL...) também é ação pendente:
+    // sem isto, o chat era pulado inteiro quando todas as mensagens já existiam no banco,
+    // e as linhas quebradas nunca eram consertadas pelo sync.
+    if (buildPlaceholderRepairPatch(exists, normalized.insert)) return true
   }
   return false
 }
@@ -939,4 +987,5 @@ module.exports = {
   syncOldMessagesForCompany,
   syncOldMessagesForConversation,
   normalizeOldMessage,
+  buildPlaceholderRepairPatch,
 }

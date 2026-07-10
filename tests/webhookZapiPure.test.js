@@ -13,6 +13,7 @@ const {
   resolveConversationKeyFromZapi,
   extractMessage,
   resolvePlaceholderUpgradeTexto,
+  familiaMidiaDeMensagemExistente,
 } = _test
 
 // Silencia console.warn (resolveConversationKeyFromZapi avisa quando connectedPhone está ausente)
@@ -438,5 +439,28 @@ describe('resolvePlaceholderUpgradeTexto', () => {
     ['(mensagem)', null,         'incoming null'],
   ])('%s + %s → null (%s)', (saved, incoming) => {
     expect(resolvePlaceholderUpgradeTexto(saved, incoming)).toBe(null)
+  })
+})
+
+// ─────────────────────────── familiaMidiaDeMensagemExistente ───────────────────────────
+// Evento posterior com URL genérica (data.media, S3 sem extensão) e sem type: a família vem
+// da PRÓPRIA linha existente (tipo gravado ou placeholder tipado no texto).
+describe('familiaMidiaDeMensagemExistente', () => {
+  test.each([
+    [{ tipo: 'voice', texto: '(áudio)' }, 'voice', 'tipo voice gravado'],
+    [{ tipo: 'audio', texto: '' }, 'audio', 'tipo audio gravado'],
+    [{ tipo: 'texto', texto: '(áudio)' }, 'voice', 'placeholder áudio com acento'],
+    [{ tipo: 'texto', texto: '(audio)' }, 'voice', 'placeholder audio ASCII'],
+    [{ tipo: 'texto', texto: '(imagem)' }, 'imagem', 'placeholder imagem'],
+    [{ tipo: 'texto', texto: '(vídeo)' }, 'video', 'placeholder vídeo'],
+    [{ tipo: 'texto', texto: '(vídeo visualização única)' }, 'video', 'placeholder ptv'],
+    [{ tipo: 'texto', texto: '(figurinha)' }, 'sticker', 'placeholder figurinha'],
+    [{ tipo: 'texto', texto: '(arquivo)' }, 'arquivo', 'placeholder arquivo'],
+    [{ tipo: 'texto', texto: 'Oi, tudo bem?' }, null, 'texto real não é mídia'],
+    [{ tipo: 'texto', texto: '(mensagem)' }, null, 'genérico não tem família'],
+    [{ tipo: 'location', texto: '' }, null, 'location não recebe URL genérica'],
+    [null, null, 'null'],
+  ])('%j → %s (%s)', (existente, expected) => {
+    expect(familiaMidiaDeMensagemExistente(existente)).toBe(expected)
   })
 })

@@ -326,6 +326,11 @@ function normalizeUltramsgToZapi(body) {
     audioUrl: audioUrl || null,
     videoUrl: videoUrl || null,
     stickerUrl: stickerUrl || null,
+    // URL genérica de mídia (data.media): mantida mesmo quando o type não permitiu classificá-la.
+    // O pipeline usa como último recurso para anexar a URL à mensagem existente (idempotência),
+    // inferindo a família pela própria linha do banco (ex.: evento download_media sem type,
+    // com URL S3 sem extensão).
+    mediaUrl: mediaUrl || null,
     fileName: fileName || null,
     filename: fileName || null,
     ...(isDocumentType && (documentUrl || fileName) ? {
