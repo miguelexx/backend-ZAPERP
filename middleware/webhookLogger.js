@@ -14,7 +14,9 @@ function compactWebhookPayload(body = {}, ctx = {}) {
     body.message ?? body.text ?? body.body ?? data.message ?? data.text ?? data.body ?? null
   const mediaUrl =
     body.media ?? body.image?.url ?? body.document?.url ?? body.audio?.url ?? body.video?.url ??
-    data.media ?? data.image?.url ?? data.document?.url ?? data.audio?.url ?? data.video?.url ?? null
+    data.media ?? data.image?.url ?? data.document?.url ?? data.audio?.url ?? data.video?.url ??
+    // formato normalizado interno (quando o handler substitui req.body)
+    body.imageUrl ?? body.audioUrl ?? body.videoUrl ?? body.documentUrl ?? body.stickerUrl ?? null
   const phone =
     body.phone ?? body.from ?? body.to ?? data.phone ?? data.from ?? data.to ?? data.chatId ?? data.author ?? null
 
@@ -55,15 +57,22 @@ function webhookLogger(provider) {
       const zapi = req.zapiContext || {}
       const logData = req.webhookLogData || {}
 
+      // Body para o log: snapshot da entrada quando útil; senão o req.body atual —
+      // que já foi resolvido pelo webhookBodyResolver e/ou normalizado pelo handler.
+      // Sem este fallback, payloads que chegam fora do JSON padrão geravam payload {} (tudo null).
+      const snapshotBody = ctx.body && typeof ctx.body === 'object' ? ctx.body : {}
+      const resolvedBody = req.body && typeof req.body === 'object' ? req.body : {}
+      const bodyForLog = Object.keys(snapshotBody).length > 0 ? snapshotBody : resolvedBody
+
       let status = logData.status || 'received'
-      const instanceId = logData.instance_id ?? zapi.instanceId ?? (body?.instanceId ?? body?.instance_id)
+      const instanceId = logData.instance_id ?? zapi.instanceId ?? (bodyForLog?.instanceId ?? bodyForLog?.instance_id)
       const companyId = logData.company_id ?? zapi.company_id
-      const eventType = logData.event_type ?? zapi.eventType ?? body?.event_type ?? body?.eventType ?? body?.type
+      const eventType = logData.event_type ?? zapi.eventType ?? bodyForLog?.event_type ?? bodyForLog?.eventType ?? bodyForLog?.type
 
       const fullPayloadEnabled = String(process.env.WEBHOOK_LOG_FULL_PAYLOAD || '').trim() === '1'
       const payload = fullPayloadEnabled
-        ? { ...(ctx.body || {}), _log: { path: ctx.path, method: ctx.method } }
-        : compactWebhookPayload(ctx.body || {}, ctx)
+        ? { ...bodyForLog, _log: { path: ctx.path, method: ctx.method } }
+        : compactWebhookPayload(bodyForLog, ctx)
 
       logAsync({
         provider: ctx.provider || provider || 'unknown',

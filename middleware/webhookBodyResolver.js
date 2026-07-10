@@ -17,6 +17,10 @@ function webhookBodyResolver(req, res, next) {
       const parsed = JSON.parse(str)
       if (parsed && typeof parsed === 'object') {
         req.body = parsed
+        // Atualiza o snapshot do webhookLogger (que roda ANTES deste resolver):
+        // sem isto, o webhook_logs.payload compacto sai vazio (tudo null) e o
+        // diagnóstico por message_id/msg_type/text_length fica impossível.
+        if (req._webhookLogCtx) req._webhookLogCtx.body = parsed
       }
     } catch (_) {}
   }
