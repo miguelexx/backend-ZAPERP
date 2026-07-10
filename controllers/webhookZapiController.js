@@ -1029,7 +1029,7 @@ function extractMessage(payload) {
     texto = texto || (payload.image?.caption && String(payload.image.caption).trim()) || '(imagem)'
   } else if (type === 'document' || type === 'file') {
     texto = texto || fileName || '(arquivo)'
-  } else if (type === 'audio' || type === 'ptt') {
+  } else if (type === 'audio' || type === 'ptt' || type === 'voice') {
     texto = texto || '(áudio)'
   } else if (type === 'video') {
     texto = texto || (payload.video?.caption && String(payload.video.caption).trim()) || (payload.ptv ? '(vídeo visualização única)' : '(vídeo)')
@@ -3217,12 +3217,12 @@ exports.receberZapi = async (req, res) => {
         insertMsg.tipo = 'arquivo'
         if (documentUrl) insertMsg.url = documentUrl
         insertMsg.nome_arquivo = fileName || (texto && texto !== '(arquivo)' ? texto : null) || 'arquivo'
-      } else if ((type === 'audio' || type === 'ptt') && audioUrl) {
+      } else if ((type === 'audio' || type === 'ptt' || type === 'voice') && audioUrl) {
         // Só marca como áudio quando há URL — sem ela ficaria um player quebrado. Sem URL, permanece
         // linha de texto com placeholder '(áudio)' e é atualizada quando a URL chegar (idempotência).
-        insertMsg.tipo = type === 'ptt' ? 'voice' : 'audio'
+        insertMsg.tipo = (type === 'ptt' || type === 'voice') ? 'voice' : 'audio'
         insertMsg.url = audioUrl
-        insertMsg.nome_arquivo = fileName || (type === 'ptt' ? 'voice.ogg' : 'audio')
+        insertMsg.nome_arquivo = fileName || ((type === 'ptt' || type === 'voice') ? 'voice.ogg' : 'audio')
       } else if (type === 'video' && videoUrl) {
         insertMsg.tipo = 'video'
         insertMsg.url = videoUrl

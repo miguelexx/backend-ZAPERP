@@ -74,7 +74,15 @@ function normalizeUltramsgToZapi(body) {
   // messageId: UltraMSG usa id (formato "false_xxx@c.us_SID") como identificador canônico - message_ack envia o mesmo id
   const messageId = (data.id && String(data.id).trim()) ? data.id : (data.sid && String(data.sid).trim()) ? data.sid : null
   const bodyText = data.body ?? data.text ?? data.message ?? ''
-  const msgType = String(data.type || 'chat').toLowerCase()
+  // type bruto: aparelhos/versões de WhatsApp variam — já vimos 'ptt', 'audio' e derivados.
+  // Variantes fora do par exato audio/ptt (ex.: 'voice', 'audiomessage') derrubavam o tipo e a
+  // mensagem virava "(mensagem)" sem conteúdo SÓ para os contatos daquele aparelho.
+  const msgTypeRaw = String(data.type || '').toLowerCase().trim()
+  let msgType = msgTypeRaw || 'chat'
+  if (['voice', 'voicemessage', 'audiomessage', 'pttmessage'].includes(msgType)) msgType = 'ptt'
+  else if (['imagemessage', 'photo', 'picture'].includes(msgType)) msgType = 'image'
+  else if (['videomessage', 'gif'].includes(msgType)) msgType = 'video'
+  else if (['stickermessage'].includes(msgType)) msgType = 'sticker'
 
   /** Normaliza campo de mídia (string URL ou objeto com url/link/file) para string URL. */
   const toUrl = (v) => {
@@ -87,6 +95,38 @@ function normalizeUltramsgToZapi(body) {
   // data.media: UltraMSG envia string URL ou objeto { url, link, file } para imagem/áudio/vídeo/documento
   // webhook_message_download_media=true: UltraMsg inclui URL da mídia no payload
   const mediaUrl = toUrl(data.media) ?? toUrl(data.mediaUrl)
+
+  // Inferência de tipo quando o type vem ausente/genérico ou como MIME cru ('audio/ogg; codecs=opus'):
+  // usa mimetype do payload, o próprio type-como-MIME e a extensão da URL da mídia.
+  // NUNCA reclassifica um type já reconhecido — só resgata payloads que cairiam em "(mensagem)"
+  // com a URL da mídia descartada.
+  const mimeHint =
+    String(data.mimetype ?? data.mime_type ?? data.media?.mimetype ?? data.media?.mime_type ?? '')
+      .toLowerCase().trim() ||
+    (msgTypeRaw.includes('/') ? msgTypeRaw : '')
+  const msgTypeGenerico = !msgTypeRaw || ['chat', 'text', 'message'].includes(msgType) || msgTypeRaw.includes('/')
+  if (msgTypeGenerico && (mediaUrl || mimeHint)) {
+    const urlPath = String(mediaUrl || '').split(/[?#]/)[0].toLowerCase()
+    if (mimeHint.startsWith('audio/') || /\.(ogg|oga|opus|mp3|m4a|aac|amr|wav)$/.test(urlPath)) {
+      msgType = 'ptt'
+    } else if (mimeHint.startsWith('image/webp') || /\.webp$/.test(urlPath)) {
+      msgType = 'sticker'
+    } else if (mimeHint.startsWith('image/') || /\.(jpe?g|png|gif|bmp|heic)$/.test(urlPath)) {
+      msgType = 'image'
+    } else if (mimeHint.startsWith('video/') || /\.(mp4|mov|3gp|webm|mkv)$/.test(urlPath)) {
+      msgType = 'video'
+    } else if (mediaUrl && (mimeHint.startsWith('application/') || /\.(pdf|docx?|xlsx?|pptx?|zip|rar|7z|txt|csv|rtf)$/.test(urlPath))) {
+      msgType = 'document'
+    }
+    if (msgType !== 'chat' && msgType !== msgTypeRaw) {
+      console.log('[WEBHOOK_ULTRAMSG] tipo inferido por mime/URL (type bruto não reconhecido)', {
+        type_bruto: (msgTypeRaw || '(vazio)').slice(0, 40),
+        mime: mimeHint.slice(0, 40) || null,
+        inferido: msgType,
+        has_media: !!mediaUrl,
+      })
+    }
+  }
 
   // Áudio: data.audio, data.audioUrl, data.mediaUrl, data.media, data.attachment (UltraMsg pode variar)
   let audioUrl =
