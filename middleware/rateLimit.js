@@ -61,7 +61,7 @@ const loginLimiter = limiter({
 
 const webhookLimiter = limiter({
   windowMs: 60 * 1000,
-  max: numberFromEnv('WEBHOOK_RATE_LIMIT_MAX', 60000),
+  max: numberFromEnv('WEBHOOK_RATE_LIMIT_MAX', 12000),
 })
 
 // apiLimiter: usa user_id+company_id como chave quando o JWT está presente,
@@ -69,7 +69,7 @@ const webhookLimiter = limiter({
 // (cenário comum atrás de Traefik/Coolify). Rotas sem JWT continuam usando IP.
 const apiLimiter = rateLimit({
   windowMs: 60 * 1000,
-  max: numberFromEnv('API_RATE_LIMIT_MAX', 30000),
+  max: numberFromEnv('API_RATE_LIMIT_MAX', 6000),
   standardHeaders: true,
   legacyHeaders: false,
   keyGenerator: (req) => {

@@ -66,6 +66,7 @@ const {
 const { normalizarTimestampSemFusoAmbiguoParaApi } = require('../helpers/timestampApiCompat')
 const { isRealWhatsAppId, isUltramsgNumericQueueId } = require('../helpers/whatsappMessageIdHelper')
 const { schedulePendingOutboundReconciliation } = require('../services/pendingOutboundReconciliationService')
+const { departamentoRoom } = require('../helpers/socketRooms')
 
 /**
  * Deduplicação in-memory para double-send de texto.
@@ -723,9 +724,10 @@ async function emitirMovimentacaoInternaAtendimento(io, {
 exports.emitirMovimentacaoInternaAtendimento = emitirMovimentacaoInternaAtendimento
 
 /** Emite para a room do departamento (realtime por setor) */
-function emitirDepartamento(io, departamento_id, eventName, payload) {
-  if (!io || !departamento_id) return
-  io.to(`departamento_${departamento_id}`).emit(eventName, payload)
+function emitirDepartamento(io, company_id, departamento_id, eventName, payload) {
+  if (!io || !company_id || !departamento_id) return
+  const room = departamentoRoom(company_id, departamento_id)
+  if (room) io.to(room).emit(eventName, payload)
 }
 
 /** Enriquece mensagens com usuario_id, usuario_nome e enviado_por_usuario (apenas direcao out) */
@@ -5432,10 +5434,10 @@ exports.transferirSetor = async (req, res) => {
       emitirConversaAtualizada(io, company_id, conversa_id, payload)
       emitirLock(io, conversa_id, null)
       if (depAntigoId != null) {
-        emitirDepartamento(io, depAntigoId, io.EVENTS?.CONVERSA_ATUALIZADA || 'conversa_atualizada', payload)
+        emitirDepartamento(io, company_id, depAntigoId, io.EVENTS?.CONVERSA_ATUALIZADA || 'conversa_atualizada', payload)
       }
       if (departamentoIdFinal != null) {
-        emitirDepartamento(io, departamentoIdFinal, io.EVENTS?.CONVERSA_ATUALIZADA || 'conversa_atualizada', payload)
+        emitirDepartamento(io, company_id, departamentoIdFinal, io.EVENTS?.CONVERSA_ATUALIZADA || 'conversa_atualizada', payload)
       }
       // `emitirConversaAtualizada` já emite `atualizar_conversa` na empresa (skip padrão false).
     }

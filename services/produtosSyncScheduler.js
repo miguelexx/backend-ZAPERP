@@ -1,5 +1,6 @@
 const { getBooleanEnv } = require('../config/env')
 const { syncProdutosFromWm } = require('./produtosSyncService')
+const { withSchedulerRunLock } = require('./schedulerLock')
 
 let started = false
 let timer = null
@@ -11,11 +12,14 @@ function getIntervalMinutes() {
 }
 
 async function runSyncCycle() {
+  const ttlMs = getIntervalMinutes() * 2 * 60 * 1000
   try {
-    await syncProdutosFromWm()
+    await withSchedulerRunLock('produtos_sync', ttlMs, async () => {
+      await syncProdutosFromWm()
+    })
   } catch (error) {
     if (error?.statusCode === 409) {
-      console.log('[PRODUTOS_SYNC_SCHEDULER] sincronização já em andamento, ciclo ignorado')
+      console.log('[PRODUTOS_SYNC_SCHEDULER] sincronizacao ja em andamento, ciclo ignorado')
       return
     }
     console.error('[PRODUTOS_SYNC_SCHEDULER] erro no ciclo:', error?.message || error)
@@ -55,4 +59,5 @@ function startProdutosSyncScheduler() {
 
 module.exports = {
   startProdutosSyncScheduler,
+  _test: { getIntervalMinutes, runSyncCycle },
 }

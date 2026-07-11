@@ -1,4 +1,5 @@
 const { runPendingOutboundReconciliation } = require('./pendingOutboundReconciliationService')
+const { withSchedulerRunLock } = require('./schedulerLock')
 
 let schedulerStarted = false
 let timer = null
@@ -20,7 +21,9 @@ function startPendingOutboundReconciliationScheduler(io) {
     if (running) return
     running = true
     try {
-      await runPendingOutboundReconciliation({ io })
+      await withSchedulerRunLock('pending_outbound_reconciliation', intervalMs * 2, async () => {
+        await runPendingOutboundReconciliation({ io })
+      })
     } catch (e) {
       console.warn('[pendingOutboundReconciliationScheduler] erro:', e?.message || e)
     } finally {
@@ -42,4 +45,4 @@ function startPendingOutboundReconciliationScheduler(io) {
   })
 }
 
-module.exports = { startPendingOutboundReconciliationScheduler }
+module.exports = { startPendingOutboundReconciliationScheduler, _test: { parseIntervalMs } }

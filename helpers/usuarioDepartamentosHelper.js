@@ -1,18 +1,68 @@
 /**
- * Helper para usuários com múltiplos departamentos.
- * Retorna departamento_ids (array) do usuário a partir da tabela usuario_departamentos.
- * Compatível com legado: se tabela não existir ou usuário não tiver registros, usa departamento_id de usuarios.
+ * Helper para usuarios com multiplos departamentos.
+ * Retorna departamento_ids a partir da tabela usuario_departamentos.
+ * Compat com legado: se a tabela nao existir ou nao houver registros, usa usuarios.departamento_id.
  */
 
 const supabase = require('../config/supabase')
 
-/**
- * Retorna array de departamento_ids do usuário.
- * @param {number} usuario_id
- * @param {number} company_id
- * @param {object} usuarioLegado - usuário com departamento_id (fallback)
- * @returns {Promise<number[]>}
- */
+function normalizeDepartamentoIds(ids) {
+  const source = Array.isArray(ids) ? ids : (ids != null ? [ids] : [])
+  return [...new Set(
+    source
+      .map((id) => Number(id))
+      .filter((id) => Number.isFinite(id) && id > 0)
+      .map((id) => Math.floor(id))
+  )]
+}
+
+async function filtrarDepartamentosDaEmpresa(company_id, ids) {
+  const cid = Number(company_id)
+  const normalized = normalizeDepartamentoIds(ids)
+  if (!Number.isFinite(cid) || cid <= 0 || normalized.length === 0) {
+    return { validIds: [], invalidIds: normalized }
+  }
+
+  const { data, error } = await supabase
+    .from('departamentos')
+    .select('id')
+    .eq('company_id', cid)
+    .in('id', normalized)
+
+  if (error) throw error
+
+  const validSet = new Set((data || []).map((row) => Number(row.id)).filter((id) => Number.isFinite(id) && id > 0))
+  return {
+    validIds: normalized.filter((id) => validSet.has(id)),
+    invalidIds: normalized.filter((id) => !validSet.has(id)),
+  }
+}
+
+async function validarDepartamentoIdsDaEmpresa(company_id, ids) {
+  const { validIds, invalidIds } = await filtrarDepartamentosDaEmpresa(company_id, ids)
+  if (invalidIds.length > 0) {
+    return {
+      ok: false,
+      validIds,
+      invalidIds,
+      error: 'Departamento invalido para esta empresa',
+    }
+  }
+  return { ok: true, validIds, invalidIds: [] }
+}
+
+async function fallbackDepartamentoId(usuarioLegado, company_id = null) {
+  const ids = normalizeDepartamentoIds(usuarioLegado?.departamento_id)
+  if (ids.length === 0) return []
+  if (company_id == null) return ids
+  try {
+    const { validIds } = await filtrarDepartamentosDaEmpresa(company_id, ids)
+    return validIds
+  } catch (_) {
+    return []
+  }
+}
+
 async function obterDepartamentoIdsDoUsuario(usuario_id, company_id, usuarioLegado = null) {
   try {
     const { data, error } = await supabase
@@ -24,49 +74,37 @@ async function obterDepartamentoIdsDoUsuario(usuario_id, company_id, usuarioLega
     if (error) {
       const msg = String(error.message || '')
       if (msg.includes('usuario_departamentos') || msg.includes('does not exist') || msg.includes('relation')) {
-        return fallbackDepartamentoId(usuarioLegado)
+        return await fallbackDepartamentoId(usuarioLegado, company_id)
       }
       throw error
     }
 
-    const ids = (data || []).map((r) => Number(r.departamento_id)).filter((id) => Number.isFinite(id) && id > 0)
-    if (ids.length > 0) return ids
-    return fallbackDepartamentoId(usuarioLegado)
-  } catch (e) {
-    return fallbackDepartamentoId(usuarioLegado)
+    const ids = normalizeDepartamentoIds((data || []).map((r) => r.departamento_id))
+    if (ids.length > 0) {
+      const { validIds } = await filtrarDepartamentosDaEmpresa(company_id, ids)
+      if (validIds.length > 0) return validIds
+    }
+    return await fallbackDepartamentoId(usuarioLegado, company_id)
+  } catch (_) {
+    return await fallbackDepartamentoId(usuarioLegado, company_id)
   }
 }
 
-function fallbackDepartamentoId(usuarioLegado) {
-  const depId = usuarioLegado?.departamento_id
-  if (depId != null && Number.isFinite(Number(depId))) return [Number(depId)]
-  return []
-}
-
-/**
- * Verifica se o usuário pertence ao departamento (por ID ou array de IDs).
- * @param {number|number[]} userDepIds - departamento_id (legado) ou array de departamento_ids
- * @param {number|null} convDepId - departamento_id da conversa
- * @returns {boolean}
- */
 function usuarioPertenceAoDepartamento(userDepIds, convDepId) {
   if (convDepId == null) return true
-  const ids = Array.isArray(userDepIds) ? userDepIds : (userDepIds != null ? [Number(userDepIds)] : [])
+  const ids = normalizeDepartamentoIds(userDepIds)
   return ids.some((id) => Number(id) === Number(convDepId))
 }
 
-/**
- * Retorna condição para usuário sem departamentos (sem setor).
- * @param {number|number[]} userDepIds
- * @returns {boolean}
- */
 function usuarioSemDepartamentos(userDepIds) {
-  const ids = Array.isArray(userDepIds) ? userDepIds : (userDepIds != null ? [Number(userDepIds)] : [])
-  return ids.length === 0
+  return normalizeDepartamentoIds(userDepIds).length === 0
 }
 
 module.exports = {
   obterDepartamentoIdsDoUsuario,
+  validarDepartamentoIdsDaEmpresa,
+  filtrarDepartamentosDaEmpresa,
+  normalizeDepartamentoIds,
   usuarioPertenceAoDepartamento,
-  usuarioSemDepartamentos
+  usuarioSemDepartamentos,
 }

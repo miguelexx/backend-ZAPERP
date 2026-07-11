@@ -113,6 +113,13 @@ const { startAtendimentoSemRespostaScheduler } = require('./services/atendimento
 const { startProdutosSyncScheduler } = require('./services/produtosSyncScheduler')
 const { startPendingOutboundReconciliationScheduler } = require('./services/pendingOutboundReconciliationScheduler')
 const { usuarioPodeVerGrupo } = require('./helpers/departamentoGruposHelper')
+const { obterDepartamentoIdsDoUsuario } = require('./helpers/usuarioDepartamentosHelper')
+const {
+  empresaRoom,
+  usuarioRoom,
+  conversaRoom,
+  departamentoRoom,
+} = require('./helpers/socketRooms')
 
 async function canUserJoinConversationRoom({ company_id, user_id, role, departamento_ids, conversa_id }) {
   const cid = Number(conversa_id)
@@ -219,7 +226,7 @@ internalChatSocket.attach(io)
 // =====================================================
 // 🔐 middleware de autenticação do socket (MANTIDO)
 // =====================================================
-io.use((socket, next) => {
+io.use(async (socket, next) => {
   try {
     const token = socket.handshake.auth?.token
     if (!token) {
@@ -238,7 +245,16 @@ io.use((socket, next) => {
       return next(new Error('Tenant inválido'))
     }
     payload.company_id = cid
-    if (!Array.isArray(payload.departamento_ids)) {
+    const userId = Number(payload.id ?? payload.user_id)
+    if ((!payload.id || !Number.isFinite(Number(payload.id))) && Number.isFinite(userId) && userId > 0) {
+      payload.id = userId
+    }
+    const fallbackUser = { departamento_id: payload.departamento_id }
+    if (Number.isFinite(userId) && userId > 0) {
+      const depIds = await obterDepartamentoIdsDoUsuario(userId, cid, fallbackUser)
+      payload.departamento_ids = depIds
+      payload.departamento_id = depIds.length > 0 ? depIds[0] : null
+    } else if (!Array.isArray(payload.departamento_ids)) {
       payload.departamento_ids = payload.departamento_id != null ? [Number(payload.departamento_id)] : []
     }
     socket.user = payload
@@ -276,17 +292,26 @@ io.EVENTS = {
 // =====================================================
 io.emitEmpresa = (company_id, event, payload) => {
   if (!company_id || !event) return
-  io.to(`empresa_${company_id}`).emit(event, payload)
+  const room = empresaRoom(company_id)
+  if (room) io.to(room).emit(event, payload)
 }
 
 io.emitConversa = (conversa_id, event, payload) => {
   if (!conversa_id || !event) return
-  io.to(`conversa_${conversa_id}`).emit(event, payload)
+  const room = conversaRoom(conversa_id)
+  if (room) io.to(room).emit(event, payload)
 }
 
 io.emitUsuario = (usuario_id, event, payload) => {
   if (!usuario_id || !event) return
-  io.to(`usuario_${usuario_id}`).emit(event, payload)
+  const room = usuarioRoom(usuario_id)
+  if (room) io.to(room).emit(event, payload)
+}
+
+io.emitDepartamento = (company_id, departamento_id, event, payload) => {
+  if (!company_id || !departamento_id || !event) return
+  const room = departamentoRoom(company_id, departamento_id)
+  if (room) io.to(room).emit(event, payload)
 }
 
 // =====================================================
@@ -300,13 +325,16 @@ io.on('connection', (socket) => {
   if (SOCKET_DEBUG) console.log(`🟢 Socket conectado | Usuário ${id} | Empresa ${company_id}`)
 
   // rooms padrão: empresa (admin vê tudo) e usuário
-  socket.join(`empresa_${company_id}`)
-  socket.join(`usuario_${id}`)
+  const empRoom = empresaRoom(company_id)
+  const userRoom = usuarioRoom(id)
+  if (empRoom) socket.join(empRoom)
+  if (userRoom) socket.join(userRoom)
   // rooms por setor: usuário entra em todos os departamentos que pertence (Comercial + Financeiro, etc.)
   const depIds = Array.isArray(departamento_ids) ? departamento_ids : []
   depIds.forEach((depId) => {
     if (depId != null && Number.isFinite(Number(depId))) {
-      socket.join(`departamento_${depId}`)
+      const depRoom = departamentoRoom(company_id, depId)
+      if (depRoom) socket.join(depRoom)
     }
   })
 
@@ -319,7 +347,8 @@ io.on('connection', (socket) => {
       const convId = Number(conversaId)
       if (!Number.isFinite(convId) || convId <= 0) return
 
-      const room = `conversa_${convId}`
+      const room = conversaRoom(convId)
+      if (!room) return
       // Já na room: não reconsultar DB (reduz carga sob reconnect/spam)
       if (socket.rooms.has(room)) return
 
@@ -351,7 +380,8 @@ io.on('connection', (socket) => {
   socket.on('leave_conversa', (conversaId) => {
     if (!conversaId) return
 
-    socket.leave(`conversa_${conversaId}`)
+    const room = conversaRoom(conversaId)
+    if (room) socket.leave(room)
     if (SOCKET_DEBUG) console.log(`💬 Socket saiu da conversa ${conversaId}`)
   })
 
@@ -362,7 +392,8 @@ io.on('connection', (socket) => {
     if (!allowSocketEvent(socket.id, 'typing')) return
     const conversa_id = data?.conversa_id
     if (!conversa_id) return
-    const room = `conversa_${conversa_id}`
+    const room = conversaRoom(conversa_id)
+    if (!room) return
     if (!socket.rooms.has(room)) return
     const payload = {
       conversa_id: Number(conversa_id),
@@ -376,7 +407,8 @@ io.on('connection', (socket) => {
     if (!allowSocketEvent(socket.id, 'typing')) return
     const conversa_id = data?.conversa_id
     if (!conversa_id) return
-    const room = `conversa_${conversa_id}`
+    const room = conversaRoom(conversa_id)
+    if (!room) return
     if (!socket.rooms.has(room)) return
     socket.to(room).emit('typing_stop', { conversa_id: Number(conversa_id) })
   })

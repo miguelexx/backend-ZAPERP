@@ -85,7 +85,10 @@ exports.listarClientes = async (req, res) => {
     } else {
       // Modo "todos": evita teto de 1000 do PostgREST fazendo fetch em lotes internos.
       const CHUNK = 1000
-      const MAX_RETURN = 50000
+      const maxReturnEnv = Number(process.env.CLIENTES_LIST_MAX_RETURN)
+      const MAX_RETURN = Number.isFinite(maxReturnEnv)
+        ? Math.max(1000, Math.min(50000, Math.floor(maxReturnEnv)))
+        : 10000
       const target = Math.min(totalReal || MAX_RETURN, MAX_RETURN)
       const allRows = []
 
