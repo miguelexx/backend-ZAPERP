@@ -3380,15 +3380,20 @@ exports.receberZapi = async (req, res) => {
           }
           mensagemSalva = mergedDup
         } else {
-          // Fallback: qualquer mensagem que chega TEM que ficar no sistema — tenta inserir com payload mínimo
+          // Fallback: qualquer mensagem que chega TEM que ficar no sistema — tenta inserir com payload mínimo.
+          // Preserva tipo/url/nome_arquivo do insert principal: o fallback NÃO pode rebaixar mídia
+          // (foto/áudio/vídeo/arquivo) para uma bolha de texto genérica "(mensagem)" e perder o link.
           console.warn('⚠️ ULTRAMSG fallback insert após erro:', errMsg.message)
           let fallbackPayload = {
             conversa_id,
-            texto: texto || '(mensagem)',
+            texto: texto || '(mídia)',
             direcao: fromMe ? 'out' : 'in',
             company_id,
             whatsapp_id: whatsappIdStr || null,
-            criado_em
+            criado_em,
+            ...(insertMsg.tipo ? { tipo: insertMsg.tipo } : {}),
+            ...(insertMsg.url ? { url: insertMsg.url } : {}),
+            ...(insertMsg.nome_arquivo ? { nome_arquivo: insertMsg.nome_arquivo } : {})
           }
           if (isGroup && senderName) fallbackPayload.remetente_nome = senderName
           if (isGroup && participantPhone) fallbackPayload.remetente_telefone = participantPhone
