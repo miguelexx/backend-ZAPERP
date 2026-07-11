@@ -3325,23 +3325,32 @@ exports.receberZapi = async (req, res) => {
             select: WEBHOOK_MSG_SELECT,
             context: 'received.insert.duplicate',
           })
-          // Corrida: outro processo inseriu primeiro (sem URL) e este webhook traz mídia https —
-          // sem merge, a linha fica sem url até expirar o link remoto. Mescla só mídia persistível.
+          // Corrida (unique violation): dois eventos do MESMO áudio/foto chegam quase juntos —
+          // um sem `type` grava a linha como "(mensagem)"/"(mídia)"; o outro (ex.: type=ptt) perde
+          // a corrida e caía aqui. Antes só mesclava URL https; se o evento vencedor não tinha URL,
+          // a bolha ficava congelada em "(mensagem)". Agora TAMBÉM faz o upgrade do placeholder
+          // (genérico → tipado '(áudio)', ou texto real), como o caminho de idempotência sem corrida.
           let mergedDup = existente
           const insUrl = String(insertMsg.url || '').trim()
           const exUrl = String(existente?.url || '').trim()
-          if (
-            existente?.id &&
-            insUrl.startsWith('https://') &&
-            !exUrl &&
-            insertMsg.tipo &&
-            tipoQualificaPersistencia(insertMsg.tipo)
-          ) {
-            try {
-              const upDup = {
-                url: insUrl,
-                tipo: insertMsg.tipo || existente.tipo,
-              }
+          if (existente?.id) {
+            const upDup = {}
+            const exTexto = String(existente.texto || '').trim()
+            const exIsPlaceholder = isMediaPlaceholderText(exTexto) || exTexto === '(mensagem)'
+            if (exIsPlaceholder && texto && texto !== '(mensagem)' && !isMediaPlaceholderText(texto)) {
+              upDup.texto = texto // legenda/texto real chegou no evento perdedor
+            } else {
+              const upT = resolvePlaceholderUpgradeTexto(exTexto, texto) // '(mensagem)' → '(áudio)' etc.
+              if (upT) upDup.texto = upT
+            }
+            if (
+              insUrl.startsWith('https://') &&
+              !exUrl &&
+              insertMsg.tipo &&
+              tipoQualificaPersistencia(insertMsg.tipo)
+            ) {
+              upDup.url = insUrl
+              upDup.tipo = insertMsg.tipo || existente.tipo
               if (insertMsg.nome_arquivo) upDup.nome_arquivo = insertMsg.nome_arquivo
               if (insertMsg.location_meta && typeof insertMsg.location_meta === 'object') {
                 upDup.location_meta = insertMsg.location_meta
@@ -3349,33 +3358,37 @@ exports.receberZapi = async (req, res) => {
               if (insertMsg.contact_meta && typeof insertMsg.contact_meta === 'object') {
                 upDup.contact_meta = insertMsg.contact_meta
               }
-              const { data: patchedDup, error: patchDupErr } = await supabase
-                .from('mensagens')
-                .update(upDup)
-                .eq('id', existente.id)
-                .eq('company_id', company_id)
-                .select(WEBHOOK_MSG_SELECT)
-                .single()
-              if (!patchDupErr && patchedDup) {
-                mergedDup = patchedDup
-                if (req.app?.get('io')) {
-                  const io2 = req.app.get('io')
-                  const rooms = [`conversa_${conversa_id}`, `empresa_${company_id}`]
-                  const emitPayload = {
-                    ...patchedDup,
-                    criado_em: normalizarTimestampSemFusoAmbiguoParaApi(patchedDup.criado_em),
-                    conversa_id: patchedDup.conversa_id ?? conversa_id,
-                    status: patchedDup.status || 'delivered',
-                    status_mensagem: patchedDup.status_mensagem || patchedDup.status || 'delivered',
-                    fromMe,
-                    direcao: patchedDup.direcao ?? (fromMe ? 'out' : 'in'),
+            }
+            if (Object.keys(upDup).length > 0) {
+              try {
+                const { data: patchedDup, error: patchDupErr } = await supabase
+                  .from('mensagens')
+                  .update(upDup)
+                  .eq('id', existente.id)
+                  .eq('company_id', company_id)
+                  .select(WEBHOOK_MSG_SELECT)
+                  .single()
+                if (!patchDupErr && patchedDup) {
+                  mergedDup = patchedDup
+                  if (req.app?.get('io')) {
+                    const io2 = req.app.get('io')
+                    const rooms = [`conversa_${conversa_id}`, `empresa_${company_id}`]
+                    const emitPayload = {
+                      ...patchedDup,
+                      criado_em: normalizarTimestampSemFusoAmbiguoParaApi(patchedDup.criado_em),
+                      conversa_id: patchedDup.conversa_id ?? conversa_id,
+                      status: patchedDup.status || 'delivered',
+                      status_mensagem: patchedDup.status_mensagem || patchedDup.status || 'delivered',
+                      fromMe,
+                      direcao: patchedDup.direcao ?? (fromMe ? 'out' : 'in'),
+                    }
+                    io2.to(rooms).emit(io2.EVENTS?.NOVA_MENSAGEM || 'nova_mensagem', emitPayload)
+                    scheduleInboundWebPush(company_id, conversa_id, 'nova_mensagem', emitPayload)
                   }
-                  io2.to(rooms).emit(io2.EVENTS?.NOVA_MENSAGEM || 'nova_mensagem', emitPayload)
-                  scheduleInboundWebPush(company_id, conversa_id, 'nova_mensagem', emitPayload)
                 }
+              } catch (e) {
+                console.warn('[webhook] duplicate+media merge:', e?.message || e)
               }
-            } catch (e) {
-              console.warn('[webhook] duplicate+media merge:', e?.message || e)
             }
           }
           mensagemSalva = mergedDup
