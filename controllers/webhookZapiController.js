@@ -870,14 +870,7 @@ function extractMessage(payload) {
     payload.listResponseMessage?.message ??
     ''
   let type = String(payload.type || payload.msgType || 'text').toLowerCase()
-  if (type === 'receivedcallback' || type === 'receivedcall') {
-    // O envelope 'ReceivedCallback' apaga o tipo real da mensagem. Reconstrói pelo hint
-    // messageType (preservado pelo normalizador UltraMsg). Sem isto, mídia SEM URL (a URL pode
-    // chegar depois) não tinha como ser re-inferida e caía em 'text' → '(mídia)' → '(mensagem)'.
-    // 'chat'/'text' continuam virando 'text' (preserva detecção de link e comportamento atual).
-    const hint = String(payload.messageType || '').toLowerCase().trim()
-    type = (hint && hint !== 'chat' && hint !== 'text' && hint !== 'receivedcallback') ? hint : 'text'
-  }
+  if (type === 'receivedcallback' || type === 'receivedcall') type = 'text'
 
   // Reação (Z-API: reaction.value)
   if (payload.reaction && typeof payload.reaction === 'object') {
