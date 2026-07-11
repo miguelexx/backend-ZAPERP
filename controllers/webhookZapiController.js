@@ -64,6 +64,7 @@ const {
   canonStatusForEmit,
   statusRank,
 } = require('../helpers/messageStatusHelper')
+const { departamentoRoom } = require('../helpers/socketRooms')
 
 // company_id NUNCA mais via ENV — resolvido por instanceId do payload em cada webhook
 const WHATSAPP_DEBUG = String(process.env.WHATSAPP_DEBUG || '').toLowerCase() === 'true'
@@ -392,6 +393,7 @@ const {
 
 function findFromMeOutboundMediaCandidate(rows, { fileName, texto, tipo, nomeAtendente, whatsappId }) {
   if (!Array.isArray(rows) || rows.length === 0) return null
+  const pickUnique = (matches) => (matches.length === 1 ? matches[0] : null)
   const nomeW = normalizeMediaFileNameForMatch(fileName)
   const nomeBaseW = normalizeMediaBaseNameForMatch(fileName)
   const tipoW = tipo ? String(tipo).toLowerCase() : null
@@ -400,35 +402,38 @@ function findFromMeOutboundMediaCandidate(rows, { fileName, texto, tipo, nomeAte
   if (candidates.length === 0) return null
 
   if (nomeW) {
-    const byNome = candidates.find((c) => {
+    const byNome = candidates.filter((c) => {
       const candNome = normalizeMediaFileNameForMatch(c.nome_arquivo || c.texto)
       const candBase = normalizeMediaBaseNameForMatch(c.nome_arquivo || c.texto)
       if (!candNome || (candNome !== nomeW && candBase !== nomeBaseW)) return false
       if (familiaW && mediaFamilyForStorageTipo(c.tipo) !== familiaW) return false
       return true
     })
-    if (byNome) return byNome
+    const uniqueByNome = pickUnique(byNome)
+    if (uniqueByNome) return uniqueByNome
   }
 
   if (texto) {
     const textoNorm = String(texto || '').trim()
-    const byTexto = candidates.find((c) => {
+    const byTexto = candidates.filter((c) => {
       const t = String(c.texto || '').trim()
       if (!t) return false
       if (familiaW && mediaFamilyForStorageTipo(c.tipo) !== familiaW) return false
       if (textosOutboundFromMeEquivalentes(textoNorm, t, nomeAtendente)) return true
       return false
     })
-    if (byTexto) return byTexto
+    const uniqueByTexto = pickUnique(byTexto)
+    if (uniqueByTexto) return uniqueByTexto
   }
 
   if (familiaW) {
-    const byTipoCrm = candidates.find(
+    const byTipoCrm = candidates.filter(
       (c) =>
         mediaFamilyForStorageTipo(c.tipo) === familiaW &&
         (c.autor_usuario_id != null || isLocalUploadMediaUrl(c.url))
     )
-    if (byTipoCrm) return byTipoCrm
+    const uniqueByTipoCrm = pickUnique(byTipoCrm)
+    if (uniqueByTipoCrm) return uniqueByTipoCrm
   }
 
   return null
@@ -2723,7 +2728,10 @@ exports.receberZapi = async (req, res) => {
     // upgrade por idempotência). Só descartamos eventos internos de protocolo (e2e_notification, gp2, …),
     // que não são mensagem do cliente. Antes, mídia recebida sem URL/tipo era DESCARTADA aqui (perda de msg).
     const nowIso = new Date().toISOString()
-    const soPlaceholderMidia = texto === '(mídia)' && !imageUrl && !documentUrl && !audioUrl && !videoUrl && !stickerUrl && !locationUrl
+    // URL genérica de mídia (data.media sem tipo classificável): a mensagem TEM conteúdo (mídia),
+    // não pode virar "(mensagem)" e perder o link. Mantém '(mídia)' — o backfill/idempotência anexam.
+    const temMediaGenerica = typeof payload?.mediaUrl === 'string' && payload.mediaUrl.trim().startsWith('http')
+    const soPlaceholderMidia = texto === '(mídia)' && !imageUrl && !documentUrl && !audioUrl && !videoUrl && !stickerUrl && !locationUrl && !temMediaGenerica
     if (soPlaceholderMidia) {
       if (!fromMe && isNonMessageEventType(type)) {
         await supabase
@@ -3079,9 +3087,11 @@ exports.receberZapi = async (req, res) => {
         const { data: candidates } = await buildQuery(true)
         let cand = findCand(candidates)
 
-        // Busca 2 (fallback): na empresa inteira — cobre divergência de conversa_id entre
-        // chatController (URL param) e webhook (findOrCreateConversation pode resolver diferente)
-        if (!cand) {
+        // Fallback amplo desligado por padrao: buscar na empresa inteira pode casar mensagens
+        // identicas em conversas diferentes. Ative apenas para diagnostico legado controlado.
+        const allowCompanyWideFromMeFallback =
+          String(process.env.WHATSAPP_FROMME_COMPANY_FALLBACK || '').trim().toLowerCase() === 'true'
+        if (!cand && allowCompanyWideFromMeFallback) {
           const { data: fallbackCandidates } = await buildQuery(false)
           cand = findCand(fallbackCandidates)
           if (cand && WHATSAPP_DEBUG) {
@@ -3425,6 +3435,23 @@ exports.receberZapi = async (req, res) => {
         })
       }
 
+      // Mídia recebida SEM URL no webhook (instância cujo download_media não entrega o link):
+      // busca a URL real via GET /chats/messages em background (mesmo mecanismo do botão
+      // "Carregar mensagens antigas"), com debounce por conversa. Auto-repara a bolha sem
+      // depender do webhook de mídia nem de ação do atendente.
+      try {
+        const { scheduleInboundMediaBackfill } = require('../services/inboundMediaBackfillService')
+        scheduleInboundMediaBackfill({
+          supabase,
+          io: req.app.get('io'),
+          company_id,
+          conversa_id: mPersist.conversa_id ?? conversa_id,
+          mensagemSalva: mPersist,
+        })
+      } catch (e) {
+        console.warn('[webhook] backfill mídia agendamento:', e?.message || e)
+      }
+
       // Usar conversa_id da mensagem quando idempotência retornou existente de outra conversa
       const convIdForUpdate = mensagemSalva.conversa_id ?? conversa_id
       const nowIsoUpdate = new Date().toISOString()
@@ -3742,7 +3769,8 @@ exports.receberZapi = async (req, res) => {
         )
         if (!emittedScoped) {
           const rooms = [`conversa_${convIdForEmit}`]
-          if (departamento_id != null) rooms.push(`departamento_${departamento_id}`)
+          const depRoom = departamentoRoom(company_id, departamento_id)
+          if (depRoom) rooms.push(depRoom)
           io.to(rooms).emit('nova_mensagem', emitPayload)
         }
         scheduleInboundWebPush(company_id, convIdForEmit, 'nova_mensagem', emitPayload)
@@ -3877,10 +3905,11 @@ exports.receberZapi = async (req, res) => {
       )
       if (!emittedConversaAtualizadaScoped) {
         io.to(`conversa_${convIdForEmit}`).emit('conversa_atualizada', convPayload)
-        if (depId != null) {
+        const depRoom = departamentoRoom(company_id, depId)
+        if (depRoom) {
           // Não emitir atualizar_conversa em reconciliação (fromMe) — evita refetch que causa bug visual
-          if (mensagemFoiInseridaPeloWebhook) io.to(`departamento_${depId}`).emit('atualizar_conversa', { id: convIdForEmit })
-          io.to(`departamento_${depId}`).emit('conversa_atualizada', convPayload)
+          if (mensagemFoiInseridaPeloWebhook) io.to(depRoom).emit('atualizar_conversa', { id: convIdForEmit })
+          io.to(depRoom).emit('conversa_atualizada', convPayload)
         }
       }
     }
