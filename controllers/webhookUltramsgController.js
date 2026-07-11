@@ -448,7 +448,17 @@ async function handleWebhookUltramsg(req, res) {
     if (isMessageEvent || hasMessageData) {
       const normalized = normalizeUltramsgToZapi(body)
       if (!normalized) return res.status(200).json({ ok: true })
-      req.body = { ...normalized, type: 'ReceivedCallback', instanceId: body.instanceId, instance_id: body.instanceId }
+      // type='ReceivedCallback' é o discriminador de envelope esperado pelo pipeline (isStatusCallback).
+      // Mas ele SOBRESCREVE o tipo REAL da mensagem (audio/imagem/...) que o normalizador calculou.
+      // Preservamos o tipo real em `messageType` para o extractMessage reconstruir o tipo quando a
+      // mídia chega SEM URL (senão o áudio/foto vira 'text' → '(mídia)' → '(mensagem)').
+      req.body = {
+        ...normalized,
+        type: 'ReceivedCallback',
+        messageType: normalized.type || null,
+        instanceId: body.instanceId,
+        instance_id: body.instanceId,
+      }
       return webhookCoreController.receberZapi(req, res)
     }
 
