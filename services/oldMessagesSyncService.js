@@ -7,6 +7,7 @@ const {
   schedulePersistInboundMediaIfNeeded,
   tipoQualificaPersistencia,
 } = require('./inboundMediaPersistenceService')
+const { normalizarTimestampSemFusoAmbiguoParaApi } = require('../helpers/timestampApiCompat')
 
 const MSG_SELECT =
   'id, conversa_id, company_id, whatsapp_instance_id, whatsapp_id, texto, url, tipo, direcao, criado_em, status, autor_usuario_id, reply_meta, nome_arquivo, contact_meta, location_meta, remetente_nome, remetente_telefone'
@@ -439,17 +440,51 @@ function buildPlaceholderRepairPatch(existing, nextInsert) {
 }
 
 async function updateExistingPlaceholderMessage(company_id, existing, nextInsert) {
-  if (!existing?.id) return false
+  if (!existing?.id) return null
   const patch = buildPlaceholderRepairPatch(existing, nextInsert)
-  if (!patch) return false
+  if (!patch) return null
 
-  const { error } = await supabase
+  const { data: patched, error } = await supabase
     .from('mensagens')
     .update(patch)
     .eq('company_id', company_id)
     .eq('id', existing.id)
+    .select(MSG_SELECT)
+    .maybeSingle()
 
-  return !error
+  if (error) return null
+  return patched || null
+}
+
+/**
+ * Emite nova_mensagem com a linha reparada — sem isto o reparo era silencioso: o banco ficava
+ * certo mas a conversa ABERTA continuava mostrando "Áudio" sem player até recarregar
+ * (o frontend faz upsert por id/whatsapp_id, então o emit atualiza a bolha ao vivo).
+ */
+function emitRepairedMessage(io, company_id, patched) {
+  if (!io || !patched?.id || patched.conversa_id == null) return
+  const fromMeReal = String(patched.direcao || '').toLowerCase() === 'out'
+  const emitPayload = {
+    ...patched,
+    criado_em: normalizarTimestampSemFusoAmbiguoParaApi(patched.criado_em),
+    conversa_id: patched.conversa_id,
+    status: patched.status || (fromMeReal ? 'sent' : 'delivered'),
+    status_mensagem: patched.status || (fromMeReal ? 'sent' : 'delivered'),
+    fromMe: fromMeReal,
+    direcao: patched.direcao || (fromMeReal ? 'out' : 'in'),
+  }
+  try {
+    const { emitirParaUsuariosQuePodemVerConversa } = require('../controllers/chatController')
+    emitirParaUsuariosQuePodemVerConversa(io, company_id, patched.conversa_id, 'nova_mensagem', emitPayload)
+      .then((emitted) => {
+        if (!emitted) io.to(`conversa_${patched.conversa_id}`).emit('nova_mensagem', emitPayload)
+      })
+      .catch(() => {
+        io.to(`conversa_${patched.conversa_id}`).emit('nova_mensagem', emitPayload)
+      })
+  } catch (_) {
+    io.to(`conversa_${patched.conversa_id}`).emit('nova_mensagem', emitPayload)
+  }
 }
 
 async function createConversationForChat({ company_id, whatsapp_instance_id, whatsapp_instance_is_default, chat, chatId, isGroup }) {
@@ -595,9 +630,25 @@ async function insertPreparedMessagesForConversation(ctx) {
       whatsapp_instance_is_default === true
     )
     if (exists?.id) {
-      const updated = await updateExistingPlaceholderMessage(company_id, exists, normalized.insert)
-      if (updated) messagesUpdated += 1
-      else messagesSkipped += 1
+      const patched = await updateExistingPlaceholderMessage(company_id, exists, normalized.insert)
+      if (patched) {
+        messagesUpdated += 1
+        // Tela aberta atualiza ao vivo (bolha "Áudio" vira player sem F5)
+        emitRepairedMessage(io, company_id, patched)
+        // URL remota recuperada: copiar para /uploads antes do link S3 expirar
+        if (patched.url && String(patched.url).startsWith('https://') && tipoQualificaPersistencia(patched.tipo)) {
+          schedulePersistInboundMediaIfNeeded({
+            supabase,
+            io,
+            company_id,
+            mensagem_id: patched.id,
+            fromMe: String(patched.direcao || '').toLowerCase() === 'out',
+            departamento_id: null,
+          })
+        }
+      } else {
+        messagesSkipped += 1
+      }
       continue
     }
 
