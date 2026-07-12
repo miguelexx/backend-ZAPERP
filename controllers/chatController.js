@@ -5971,6 +5971,7 @@ exports.enviarMensagemChat = async (req, res) => {
             conversaId: conversa_id,
             whatsappInstanceId: whatsappInstanceId || undefined,
             replyMessageId: replyMessageId || undefined,
+            referenceId: `crm-${msg.id}`,
             sendOrigin: 'atendimento_humano',
           })
         } else {
@@ -6575,6 +6576,7 @@ exports.enviarLocalizacao = async (req, res) => {
         companyId: company_id,
         conversaId: conversa_id,
         whatsappInstanceId: whatsappInstanceId || undefined,
+        referenceId: `crm-${msg.id}`,
         sendOrigin: 'atendimento_humano_localizacao',
       })
     } else {
@@ -8278,6 +8280,9 @@ async function encaminharUmaMensagemParaConversa(ctx) {
         companyId: company_id,
         conversaId: conversa_id,
         whatsappInstanceId: whatsappInstanceId || undefined,
+        // Reconciliação do eco fromMe: texto encaminhado vai com prefixo "[Encaminhado]" mas é salvo
+        // sem prefixo — sem referenceId o eco não casa por texto e inseriria linha duplicada.
+        referenceId: `crm-${msg.id}`,
         sendOrigin: 'encaminhamento_atendimento',
       })
     }
@@ -8415,6 +8420,7 @@ async function encaminharUmaMensagemParaConversa(ctx) {
         companyId: company_id,
         conversaId: conversa_id,
         whatsappInstanceId: whatsappInstanceId || undefined,
+        referenceId: `crm-${msg.id}`,
         sendOrigin: 'encaminhamento_atendimento',
       })
     }
@@ -8450,6 +8456,7 @@ async function encaminharUmaMensagemParaConversa(ctx) {
         companyId: company_id,
         conversaId: conversa_id,
         whatsappInstanceId: whatsappInstanceId || undefined,
+        referenceId: `crm-${msg.id}`,
         sendOrigin: 'encaminhamento_atendimento',
       })
     }
@@ -8478,6 +8485,7 @@ async function encaminharUmaMensagemParaConversa(ctx) {
         companyId: company_id,
         conversaId: conversa_id,
         whatsappInstanceId: whatsappInstanceId || undefined,
+        referenceId: `crm-${msg.id}`,
         sendOrigin: 'encaminhamento_atendimento',
       })
     }
@@ -8731,4 +8739,5 @@ exports._test = {
   shouldNormalizeImageForWhatsapp,
   normalizeForwardTipo,
   resolveForwardMediaForProvider,
+  encaminharUmaMensagemParaConversa,
 }

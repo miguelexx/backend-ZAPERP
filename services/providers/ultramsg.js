@@ -1219,6 +1219,9 @@ async function sendLocation(phone, { address = '', lat, lng }, opts = {}) {
   const longitude = Number(lng)
   if (!nums.length || (isNaN(latitude) && isNaN(longitude))) return { ok: false, messageId: null }
   const body = { to: nums[0], address: addr, lat: latitude, lng: longitude }
+  // referenceId (crm-<id>): UltraMsg ecoa no webhook message_create → reconciliação casa o eco com a
+  // mensagem já persistida, evitando localização duplicada (mesmo padrão do sendText/sendContact).
+  applyReferenceIdToBody(body, opts)
   const { ok, status, data, text } = await postJson({
     ...cfg,
     endpoint: '/messages/location',
