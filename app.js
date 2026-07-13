@@ -115,13 +115,15 @@ if (process.env.TRUST_PROXY === '1' || process.env.NODE_ENV === 'production') {
 // =====================================================
 // JSON + urlencoded parsers — UltraMSG pode enviar application/json ou form-urlencoded
 // verify: mantém rawBody em Buffer (útil para verificação HMAC de webhooks, se aplicável)
+// limit 2mb: webhook de localização pode trazer thumbnail base64 no body (>100kb do default)
 // =====================================================
 app.use(express.json({
+  limit: '2mb',
   verify: (req, res, buf) => {
     try { req.rawBody = buf } catch (_) {}
   }
 }))
-app.use(express.urlencoded({ extended: false, limit: '1mb' }))
+app.use(express.urlencoded({ extended: false, limit: '2mb' }))
 
 // =====================================================
 // WEBHOOKS — registrados ANTES do CORS (provedores como UltraMSG enviam Origin).
