@@ -18,7 +18,9 @@
  */
 
 const { z } = require('zod')
-const { client: openai } = require('./openaiClient')
+// Lazy: NÃO desestruturar `client` aqui — o getter valida OPENAI_API_KEY e a
+// desestruturação no require derrubava o boot inteiro quando a chave faltava.
+const { getClient } = require('./openaiClient')
 const supabase = require('../config/supabase')
 const { getDisplayName } = require('../helpers/contactEnrichment')
 
@@ -297,7 +299,7 @@ Regras de período:
 - Se "period_days" não for mencionado, use 7.
 - Se a pergunta deixar claro um dia civil específico (ex.: "hoje", "ontem", "nesta semana", "neste mês", "dia 14/04"), use period_days=1 quando for só um dia, ou um número coerente com a semana/mês pedido; o backend ainda refina o recorte — sua prioridade é classificar intent e entidades corretamente.`
 
-  const resp = await openai.chat.completions.create({
+  const resp = await getClient().chat.completions.create({
     model: AI_MODEL(),
     temperature: 0,
     max_tokens: 320,
@@ -482,7 +484,7 @@ Regras:
   const maxTokens = isConversaIntent ? 1200 : (isGeneral ? 420 : (isTom ? 500 : 350))
   const temp = isConversaIntent ? 0.2 : (isGeneral ? 0.1 : (isTom ? 0.35 : 0.15))
   const dadosJson = stringifyDataForPrompt(data)
-  const resp = await openai.chat.completions.create({
+  const resp = await getClient().chat.completions.create({
     model: AI_MODEL(),
     temperature: temp,
     max_tokens: maxTokens,

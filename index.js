@@ -249,6 +249,12 @@ io.use(async (socket, next) => {
     if ((!payload.id || !Number.isFinite(Number(payload.id))) && Number.isFinite(userId) && userId > 0) {
       payload.id = userId
     }
+    // Revogação: usuário desativado não conecta no tempo real (mesmo critério do middleware auth HTTP).
+    const { usuarioEstaAtivo } = require('./helpers/usuarioAtivoGuard')
+    const ativo = await usuarioEstaAtivo(userId, cid)
+    if (!ativo) {
+      return next(new Error('Usuário inativo'))
+    }
     const fallbackUser = { departamento_id: payload.departamento_id }
     if (Number.isFinite(userId) && userId > 0) {
       const depIds = await obterDepartamentoIdsDoUsuario(userId, cid, fallbackUser)

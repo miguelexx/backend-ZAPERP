@@ -1,7 +1,8 @@
 const jwt = require('jsonwebtoken')
+const { usuarioEstaAtivo } = require('../helpers/usuarioAtivoGuard')
 
 /** JWT via Authorization Bearer ou ?access_token= (tags <video>/<img> sem header). */
-module.exports = (req, res, next) => {
+module.exports = async (req, res, next) => {
   let token = null
   const authHeader = req.headers.authorization
   if (authHeader) {
@@ -16,11 +17,22 @@ module.exports = (req, res, next) => {
     return res.status(401).json({ error: 'Token não informado' })
   }
 
+  let decoded
   try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET)
+    decoded = jwt.verify(token, process.env.JWT_SECRET)
+  } catch {
+    return res.status(401).json({ error: 'Token inválido' })
+  }
+
+  try {
     const cid = Number(decoded?.company_id)
     if (!Number.isFinite(cid) || cid <= 0) {
       return res.status(401).json({ error: 'Tenant inválido' })
+    }
+    // Revogação: mesmo critério do middleware auth (usuário desativado não acessa mídia).
+    const ativo = await usuarioEstaAtivo(decoded?.id ?? decoded?.user_id, cid)
+    if (!ativo) {
+      return res.status(401).json({ error: 'Usuário inativo' })
     }
     decoded.company_id = cid
     if (!Array.isArray(decoded.departamento_ids)) {

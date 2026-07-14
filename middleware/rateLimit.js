@@ -1,21 +1,24 @@
 const { rateLimit, ipKeyGenerator } = require('express-rate-limit')
+const jwt = require('jsonwebtoken')
 
 /**
- * Extrai user+company do JWT sem verificar assinatura — usado apenas para bucketing de rate limit.
+ * Extrai user+company do JWT VERIFICADO — usado apenas para bucketing de rate limit.
  * Garante que usuários autenticados tenham cota individual mesmo atrás de proxy/Traefik compartilhado.
+ * A assinatura é verificada: token forjado/inválido cai no bucket por IP (senão qualquer cliente
+ * criaria buckets ilimitados e anularia o limite por IP).
  */
 function extractJwtBucketKey(req) {
   try {
     const auth = req.headers.authorization || ''
     const token = auth.startsWith('Bearer ') ? auth.slice(7) : ''
     if (!token) return null
-    const payload = token.split('.')[1]
-    if (!payload) return null
-    const decoded = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'))
+    const secret = process.env.JWT_SECRET
+    if (!secret) return null
+    const decoded = jwt.verify(token, secret)
     const uid = decoded?.id || decoded?.sub
     const cid = decoded?.company_id
     if (uid && cid) return `u_${cid}_${uid}`
-  } catch { /* ignore */ }
+  } catch { /* token inválido/expirado → bucket por IP */ }
   return null
 }
 
