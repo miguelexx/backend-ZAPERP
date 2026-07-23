@@ -23,7 +23,9 @@ const {
 
 const ULTRAMSG_BASE_URL = (process.env.ULTRAMSG_BASE_URL || 'https://api.ultramsg.com').replace(/\/$/, '')
 // Delay entre envios: 0 = sem delay (envio imediato). Ex: ULTRAMSG_SEND_DELAY_MS=0 para desativar.
-const MIN_DELAY_BETWEEN_SENDS_MS = Math.max(0, Number(process.env.ULTRAMSG_SEND_DELAY_MS) ?? 0)
+// `?? 0` não protegia contra NaN (env ausente → Number('') = NaN, e `NaN ?? 0` = NaN): o valor
+// virava NaN e o early-return `<= 0` de awaitSendDelay nunca disparava. `|| 0` normaliza NaN → 0.
+const MIN_DELAY_BETWEEN_SENDS_MS = Math.max(0, Number(process.env.ULTRAMSG_SEND_DELAY_MS) || 0)
 const BODY_MAX_LEN = 4096
 const CAPTION_MAX_LEN = 1024
 const FILENAME_MAX_LEN = 255

@@ -67,6 +67,10 @@ const { normalizarTimestampSemFusoAmbiguoParaApi } = require('../helpers/timesta
 const { isRealWhatsAppId, isUltramsgNumericQueueId } = require('../helpers/whatsappMessageIdHelper')
 const { schedulePendingOutboundReconciliation } = require('../services/pendingOutboundReconciliationService')
 const { departamentoRoom } = require('../helpers/socketRooms')
+const {
+  validateAndConsumeForMessage,
+  limitErrorResponse,
+} = require('../services/atendimentoLimitsService')
 
 /**
  * Deduplicação in-memory para double-send de texto.
@@ -1234,41 +1238,53 @@ function deveIncluirGruposSemDepartamentoNoFiltroTodos({
 }
 
 async function carregarUsuarioIdsQuePodemVerConversaSemCache(company_id, conversa_id) {
-  const { data: conv } = await supabase
-    .from('conversas')
-    .select('departamento_id, atendente_id, tipo, telefone')
-    .eq('company_id', Number(company_id))
-    .eq('id', Number(conversa_id))
-    .maybeSingle()
+  const cid = Number(company_id)
+  const convId = Number(conversa_id)
+  // Queries independentes disparadas em paralelo — antes eram 5 round-trips sequenciais no hot path
+  // da emissão em tempo real. Semântica idêntica; só reduz a latência acumulada (cache 15s à frente).
+  const [convRes, transferiuRes, participanteIdsArr, usuariosRes, udRes] = await Promise.all([
+    supabase
+      .from('conversas')
+      .select('departamento_id, atendente_id, tipo, telefone')
+      .eq('company_id', cid)
+      .eq('id', convId)
+      .maybeSingle(),
+    supabase
+      .from('atendimentos')
+      .select('de_usuario_id')
+      .eq('company_id', cid)
+      .eq('conversa_id', convId)
+      .eq('acao', 'transferiu'),
+    getConversaParticipanteIdsAtivos(company_id, conversa_id),
+    supabase
+      .from('usuarios')
+      .select('id, perfil, departamento_id')
+      .eq('company_id', cid)
+      .eq('ativo', true),
+    supabase
+      .from('usuario_departamentos')
+      .select('usuario_id, departamento_id')
+      .eq('company_id', cid),
+  ])
+
+  const conv = convRes?.data
   if (!conv) return []
 
   const isGroup = isGroupConversation(conv)
   const convDep = conv.departamento_id ?? null
   const atendenteId = conv.atendente_id ? Number(conv.atendente_id) : null
+  // grupoDepIds depende de isGroup → resolvido depois que o conv chega.
   const grupoDepIds = isGroup ? await getGrupoDepartamentoIds(company_id, conversa_id) : []
   const grupoDepSet = new Set(grupoDepIds.map(Number))
 
-  const { data: transferiuRows } = await supabase
-    .from('atendimentos')
-    .select('de_usuario_id')
-    .eq('company_id', Number(company_id))
-    .eq('conversa_id', Number(conversa_id))
-    .eq('acao', 'transferiu')
-  const transferiuIds = new Set((transferiuRows || []).map((r) => Number(r.de_usuario_id)).filter(Boolean))
-  const participanteIds = new Set(await getConversaParticipanteIdsAtivos(company_id, conversa_id))
+  const transferiuIds = new Set((transferiuRes?.data || []).map((r) => Number(r.de_usuario_id)).filter(Boolean))
+  const participanteIds = new Set(participanteIdsArr || [])
 
-  const { data: usuarios } = await supabase
-    .from('usuarios')
-    .select('id, perfil, departamento_id')
-    .eq('company_id', Number(company_id))
-    .eq('ativo', true)
+  const usuarios = usuariosRes?.data
   if (!Array.isArray(usuarios) || usuarios.length === 0) return []
 
   let userDepMap = new Map()
-  const { data: udRows } = await supabase
-    .from('usuario_departamentos')
-    .select('usuario_id, departamento_id')
-    .eq('company_id', Number(company_id))
+  const udRows = udRes?.data
   if (Array.isArray(udRows)) {
     udRows.forEach((r) => {
       const uid = Number(r.usuario_id)
@@ -5685,6 +5701,20 @@ exports.enviarMensagemChat = async (req, res) => {
     }
 
     // Garantir que o contato (número + nome) esteja salvo em clientes antes de enviar
+    const linkPayload = normalizeLinkPayload(link)
+    const hasLinkPayload = !!linkPayload
+
+    const atendimentoLimit = await validateAndConsumeForMessage({
+      company_id,
+      usuario_id: user_id,
+      conversa_id,
+      client_temp_id: clientTempId,
+      message_type: hasLinkPayload ? 'link' : 'texto',
+    })
+    if (atendimentoLimit.allowed === false) {
+      return res.status(atendimentoLimit.status || 429).json(limitErrorResponse(atendimentoLimit))
+    }
+
     const isGroup = String(conversa?.tipo || '').toLowerCase() === 'grupo' || String(conversa?.telefone || '').includes('@g.us')
     if (!isGroup && conversa?.telefone && !conversa?.cliente_id) {
       const nomeCache = conversa?.nome_contato_cache ? String(conversa.nome_contato_cache).trim() : null
@@ -5719,9 +5749,6 @@ exports.enviarMensagemChat = async (req, res) => {
         })
       }
     }
-
-    const linkPayload = normalizeLinkPayload(link)
-    const hasLinkPayload = !!linkPayload
 
     // Reply (citação) — opcional. Requer coluna mensagens.reply_meta (jsonb).
     const timestamp = new Date().toISOString()
@@ -6346,6 +6373,18 @@ exports.enviarContatoWhatsapp = async (req, res) => {
     }
 
     // contact_meta para o frontend exibir cartão de contato (nome, telefone, foto)
+    const atendimentoLimit = await validateAndConsumeForMessage({
+      company_id,
+      usuario_id: user_id,
+      conversa_id,
+      message_id: messageId,
+      fallback_idempotency_key: messageId ? null : `contact:${conversa_id}:${cliente_id}`,
+      message_type: 'contact',
+    })
+    if (atendimentoLimit.allowed === false) {
+      return res.status(atendimentoLimit.status || 429).json(limitErrorResponse(atendimentoLimit))
+    }
+
     const contact_meta = {
       nome: contactName,
       telefone: contactPhoneNorm,
@@ -6507,6 +6546,18 @@ exports.enviarLocalizacao = async (req, res) => {
     }
 
     const textoDisplay = [nomePlace, endereco].filter(Boolean).join(' • ') || '(localização)'
+    const atendimentoLimit = await validateAndConsumeForMessage({
+      company_id,
+      usuario_id: user_id,
+      conversa_id,
+      client_temp_id: body.client_temp_id,
+      fallback_idempotency_key: body.client_temp_id ? null : `location:${conversa_id}:${latitude}:${longitude}`,
+      message_type: 'location',
+    })
+    if (atendimentoLimit.allowed === false) {
+      return res.status(atendimentoLimit.status || 429).json(limitErrorResponse(atendimentoLimit))
+    }
+
     const locationUrl = `https://www.google.com/maps?q=${latitude},${longitude}`
     const criadoEm = new Date().toISOString()
 
@@ -7809,7 +7860,9 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
                       returnDetails: true,
                     })
                   : Promise.resolve({ ok: false, error: 'Envio de documento indisponível' })
-      promise
+      // Retorna a promise (antes era fire-and-forget) para a fila serial por conversa poder
+      // AGUARDAR a conclusão de um envio antes de iniciar o próximo → ordem preservada na entrega.
+      return promise
         .then(async (result) => {
           const normalizedResult = typeof result === 'boolean'
             ? { ok: result, error: null, messageId: null }
@@ -7876,17 +7929,21 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
     }
 
     if (telefoneParaEnvio) {
+      // Fila serial por conversa: com vários áudios em sequência, o próximo só despacha depois que
+      // o anterior conclui (upload + envio), preservando a ordem de entrega ao contato.
+      const { enqueueSerialByKey } = require('../helpers/serialDispatchQueue')
+      const dispatchKey = `${company_id}:${Number(conversa_id)}`
       if (fullUrl && !isLocalhost && !forceUploadMedia) {
-        setImmediate(() => sendMediaWithUrl(fullUrl))
+        enqueueSerialByKey(dispatchKey, () => sendMediaWithUrl(fullUrl))
       } else if ((!baseUrl || isLocalhost || forceUploadMedia) && fileWork.path) {
         const provider = getProvider()
         if (provider?.uploadMedia) {
-          setImmediate(async () => {
+          enqueueSerialByKey(dispatchKey, async () => {
             try {
               const result = await provider.uploadMedia(fileWork.path, fileWork.originalname || 'file', { companyId: company_id, whatsappInstanceId: whatsappInstanceId || undefined })
               if (result?.ok && result?.url) {
                 console.log('[ULTRAMSG] Upload bem-sucedido, enviando mídia via CDN:', result.url.slice(0, 50) + '...')
-                sendMediaWithUrl(result.url)
+                return sendMediaWithUrl(result.url)
               } else {
                 console.warn('[ULTRAMSG] Upload de mídia falhou:', {
                   ok: result?.ok,
@@ -7898,7 +7955,7 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
                 // Fallback seguro: se temos URL pública do backend, tenta enviar direto sem upload.
                 if (fullUrl && !isLocalhost) {
                   console.warn('[ULTRAMSG] Tentando fallback com URL pública do backend após falha no upload.')
-                  sendMediaWithUrl(fullUrl)
+                  return sendMediaWithUrl(fullUrl)
                 } else {
                   console.warn('⚠️ UltraMsg uploadMedia falhou; mídia não enviada.', result?.error || '')
                   await supabase.from('mensagens').update({ status: 'erro', status_mensagem: 'erro' }).eq('company_id', company_id).eq('id', msg.id)
@@ -8011,6 +8068,28 @@ exports.enviarArquivo = async (req, res) => {
 
       const perFileCaption = i === 0 ? captionFromBody : ''
       const clientTempId = clientTempIds[i] || null
+      const atendimentoLimit = await validateAndConsumeForMessage({
+        company_id,
+        usuario_id: user_id,
+        conversa_id,
+        client_temp_id: clientTempId,
+        fallback_idempotency_key: clientTempId ? null : `upload:${conversa_id}:${raw.originalname || 'arquivo'}:${raw.size || 0}:${i}`,
+        message_type: aplicarTipoForcadoSticker(raw, inferirTipoArquivo(raw)),
+      })
+      if (atendimentoLimit.allowed === false) {
+        const payload = limitErrorResponse(atendimentoLimit)
+        if (!ids.length) return res.status(atendimentoLimit.status || 429).json(payload)
+        hadFailure = true
+        results.push({
+          ok: false,
+          status: atendimentoLimit.status || 429,
+          client_temp_id: clientTempId,
+          error: payload.error,
+          limit: payload.limit,
+          index: i,
+        })
+        continue
+      }
 
       const r = await enviarArquivoProcessarUm(req, raw, {
         company_id,
@@ -8631,6 +8710,19 @@ exports.encaminharMensagem = async (req, res) => {
       if (i > 0) {
         await new Promise((r) => setTimeout(r, 400))
       }
+      const original = byId.get(orderedIds[i])
+      const atendimentoLimit = await validateAndConsumeForMessage({
+        company_id,
+        usuario_id: user_id,
+        conversa_id,
+        fallback_idempotency_key: `forward:${conversa_id}:${orderedIds[i]}`,
+        message_type: normalizeForwardTipo(original?.tipo || 'texto'),
+      })
+      if (atendimentoLimit.allowed === false) {
+        const payload = limitErrorResponse(atendimentoLimit)
+        resultados.push({ mensagem_id: orderedIds[i], ok: false, error: payload.error, status: atendimentoLimit.status || 429, limit: payload.limit })
+        continue
+      }
       const r = await encaminharUmaMensagemParaConversa({
         io,
         supabase,
@@ -8641,7 +8733,7 @@ exports.encaminharMensagem = async (req, res) => {
         whatsappInstanceId,
         provider,
         usuarioNome,
-        mensagemOriginal: byId.get(orderedIds[i]),
+        mensagemOriginal: original,
         tipo_encaminhamento,
         timestamp: new Date(Date.now() + i * 50).toISOString(),
       })
@@ -8736,6 +8828,9 @@ exports._test = {
   isClientTempIdUniqueViolation,
   inferirTipoArquivo,
   aplicarTipoForcadoSticker,
+  normalizeAudioForUltraMsg,
+  convertAudioWithFfmpeg,
+  resolveFfmpegPath,
   shouldNormalizeImageForWhatsapp,
   normalizeForwardTipo,
   resolveForwardMediaForProvider,

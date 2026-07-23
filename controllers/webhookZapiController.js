@@ -1220,6 +1220,38 @@ async function conversaTemAlgumaMensagemInbound(supabaseClient, company_id, conv
   }
 }
 
+// Cache curto da flag empresas.separar_mensagens_disparadas: era 1 query por webhook inbound.
+// TTL de 60s reduz a carga no banco no hot path sem atrasar mudanças de config de forma perceptível.
+const SEPARAR_MSG_CACHE_TTL_MS = Math.max(5_000, Number(process.env.SEPARAR_MSG_CACHE_TTL_MS) || 60_000)
+const _separarMsgCache = new Map() // company_id -> { value, expiresAt }
+setInterval(() => {
+  const now = Date.now()
+  for (const [k, v] of _separarMsgCache.entries()) {
+    if (v?.expiresAt != null && v.expiresAt <= now) _separarMsgCache.delete(k)
+  }
+}, 5 * 60 * 1000).unref()
+
+async function getSepararMensagensDisparadasEmpresa(company_id) {
+  const cid = Number(company_id)
+  if (!Number.isFinite(cid) || cid <= 0) return false
+  const now = Date.now()
+  const cached = _separarMsgCache.get(cid)
+  if (cached && cached.expiresAt > now) return cached.value
+  let value = false
+  try {
+    const { data: empCfgRow, error: empCfgErr } = await supabase
+      .from('empresas')
+      .select('separar_mensagens_disparadas')
+      .eq('id', cid)
+      .maybeSingle()
+    if (!empCfgErr && empCfgRow) value = !!empCfgRow.separar_mensagens_disparadas
+  } catch (_) {
+    value = false
+  }
+  _separarMsgCache.set(cid, { value, expiresAt: now + SEPARAR_MSG_CACHE_TTL_MS })
+  return value
+}
+
 exports.receberZapi = async (req, res) => {
   try {
     const body = req.body || {}
@@ -1354,17 +1386,7 @@ exports.receberZapi = async (req, res) => {
     const payloads = getPayloads(body)
     let lastResult = { ok: true }
 
-    let separarMensagensDisparadasEmpresa = false
-    try {
-      const { data: empCfgRow, error: empCfgErr } = await supabase
-        .from('empresas')
-        .select('separar_mensagens_disparadas')
-        .eq('id', company_id)
-        .maybeSingle()
-      if (!empCfgErr && empCfgRow) separarMensagensDisparadasEmpresa = !!empCfgRow.separar_mensagens_disparadas
-    } catch (_) {
-      separarMensagensDisparadasEmpresa = false
-    }
+    const separarMensagensDisparadasEmpresa = await getSepararMensagensDisparadasEmpresa(company_id)
 
     for (const payload of payloads) {
       // Normaliza status Z-API / UltraMSG para canônico interno (inclui device→delivered, server→sent)
@@ -1496,8 +1518,11 @@ exports.receberZapi = async (req, res) => {
           payloadType === 'receivedcallback_ack' ||
           (STATUS_ONLY_KEYWORDS.includes(payloadStatusRaw.toLowerCase()) && (payload?.messageId || payload?.zaapId)))
 
-      // Log de pipeline — sempre visível, para rastrear o que chega e como é classificado
-      console.log(`[ULTRAMSG] 🔍 pipeline: type="${payloadType || '(vazio)'}" status="${payloadStatusRaw || '(vazio)'}" fromMe=${payloadFromMe} hasContent=${hasMessageContent} isStatus=${isStatusCallback} phone=${String(payload?.phone || '').slice(-10) || '(vazio)'}`)
+      // Log de pipeline — atrás de WHATSAPP_DEBUG (era 1 log por payload no hot path). O rastro
+      // de suporte sempre-on continua no log [ULTRAMSG_WEBHOOK] (1 por webhook, acima).
+      if (WHATSAPP_DEBUG) {
+        console.log(`[ULTRAMSG] 🔍 pipeline: type="${payloadType || '(vazio)'}" status="${payloadStatusRaw || '(vazio)'}" fromMe=${payloadFromMe} hasContent=${hasMessageContent} isStatus=${isStatusCallback} phone=${String(payload?.phone || '').slice(-10) || '(vazio)'}`)
+      }
 
       if (isStatusCallback) {
         const msgId = payload?.messageId ?? payload?.zaapId ?? null
