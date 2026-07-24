@@ -474,6 +474,8 @@ server.listen(PORT, '0.0.0.0', () => {
     startAtendimentoSemRespostaScheduler(io)
     startProdutosSyncScheduler()
     startPendingOutboundReconciliationScheduler(io)
+    const { startOutboundMediaResendScheduler } = require('./services/outboundMediaResendScheduler')
+    startOutboundMediaResendScheduler(io)
     const { startInboundMediaRetryScheduler } = require('./services/inboundMediaPersistenceService')
     startInboundMediaRetryScheduler(supabase, io)
     const { startInboundMediaBackfillSweepScheduler } = require('./services/inboundMediaBackfillService')

@@ -66,6 +66,7 @@ const {
 const { normalizarTimestampSemFusoAmbiguoParaApi } = require('../helpers/timestampApiCompat')
 const { isRealWhatsAppId, isUltramsgNumericQueueId } = require('../helpers/whatsappMessageIdHelper')
 const { schedulePendingOutboundReconciliation } = require('../services/pendingOutboundReconciliationService')
+const { scheduleOutboundMediaResend } = require('../services/outboundMediaResendService')
 const { departamentoRoom } = require('../helpers/socketRooms')
 const {
   validateAndConsumeForMessage,
@@ -7916,6 +7917,11 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
               io: io2,
             })
           }
+          // Falha de envio: agenda reenvio automático a partir do arquivo salvo no servidor
+          // (não depende do navegador). A checagem no provedor evita duplicidade.
+          if (!ok) {
+            scheduleOutboundMediaResend({ companyId: company_id, mensagemId: msg.id, io: io2 })
+          }
         })
         .catch(async (e) => {
           console.error('WhatsApp enviar mídia (erro de rede/provider):', e?.message || e)
@@ -7925,6 +7931,7 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
             const payload = { mensagem_id: msg.id, conversa_id: Number(conversa_id), status: 'erro', status_mensagem: 'erro' }
             io2.to(`empresa_${company_id}`).to(`conversa_${conversa_id}`).to(`usuario_${user_id}`).emit(io2.EVENTS?.STATUS_MENSAGEM || 'status_mensagem', payload)
           }
+          scheduleOutboundMediaResend({ companyId: company_id, mensagemId: msg.id, io: io2 })
         })
     }
 
@@ -7963,6 +7970,7 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
                   if (io2) {
                     io2.to(`empresa_${company_id}`).to(`conversa_${conversa_id}`).to(`usuario_${user_id}`).emit(io2.EVENTS?.STATUS_MENSAGEM || 'status_mensagem', { mensagem_id: msg.id, conversa_id: Number(conversa_id), status: 'erro', status_mensagem: 'erro' })
                   }
+                  scheduleOutboundMediaResend({ companyId: company_id, mensagemId: msg.id, io: io2 })
                 }
               }
             } catch (e) {
@@ -7972,6 +7980,7 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
               if (io2) {
                 io2.to(`empresa_${company_id}`).to(`conversa_${conversa_id}`).to(`usuario_${user_id}`).emit(io2.EVENTS?.STATUS_MENSAGEM || 'status_mensagem', { mensagem_id: msg.id, conversa_id: Number(conversa_id), status: 'erro', status_mensagem: 'erro' })
               }
+              scheduleOutboundMediaResend({ companyId: company_id, mensagemId: msg.id, io: io2 })
             }
           })
         } else if (!baseUrl && !forceUploadMedia) {
