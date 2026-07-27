@@ -888,7 +888,8 @@ async function assertPermissaoConversa({ company_id, conversa_id, user_id, role,
     return { ok: true, conv }
   }
 
-  return { ok: true, conv }
+  // Deny-by-default: perfis desconhecidos/legados não recebem acesso implícito.
+  return { ok: false, status: 403, error: 'Perfil sem permissão para esta conversa' }
 }
 
 /**
@@ -8821,6 +8822,7 @@ exports.finalizacaoAusenciaLoteAuth = async (req, res) => {
 
 exports._test = {
   assertPodeEnviarMensagem,
+  assertPermissaoConversa,
   parseChatListPagination,
   splitChatListPage,
   parseMessageHistoryPagination,

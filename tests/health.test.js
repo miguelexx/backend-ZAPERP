@@ -15,6 +15,23 @@ describe('GET /health', () => {
     expect(res.status).toBe(200)
     expect(res.body).toEqual({ ok: true })
   })
+
+  it('expõe a versão da release quando configurada', async () => {
+    process.env.RELEASE_VERSION = '2026.07.27'
+    process.env.BUILD_SHA = 'abcdef123456'
+    try {
+      const res = await request(app).get('/health')
+      expect(res.status).toBe(200)
+      expect(res.body).toMatchObject({
+        ok: true,
+        release: '2026.07.27',
+        build_sha: 'abcdef123456',
+      })
+    } finally {
+      delete process.env.RELEASE_VERSION
+      delete process.env.BUILD_SHA
+    }
+  })
 })
 
 describe('GET /health/detailed', () => {

@@ -6,6 +6,7 @@ const path = require('path')
 const fs = require('fs')
 const { randomUUID } = require('crypto')
 const { loadEnv, isProduction } = require('./config/env')
+const { sanitizeRequestUrl } = require('./helpers/sanitizeRequestUrl')
 loadEnv()
 const { getUploadsRoot, ensureUploadsRootExists } = require('./config/uploadsRoot')
 const tagsRoutes = require('./routes/tagRoutes')
@@ -18,29 +19,45 @@ const isProd = isProduction()
 const allowedOrigins = [
   'https://zaperp.wmsistemas.inf.br',
   'https://www.zaperp.wmsistemas.inf.br',
-  'http://zaperp.wmsistemas.inf.br',
-  'http://www.zaperp.wmsistemas.inf.br',
   ...(process.env.NODE_ENV !== 'production'
-    ? ['http://localhost:3000', 'http://localhost:5173', 'http://127.0.0.1:5173', 'http://127.0.0.1:3000']
+    ? [
+        'http://zaperp.wmsistemas.inf.br',
+        'http://www.zaperp.wmsistemas.inf.br',
+        'http://localhost:3000',
+        'http://localhost:5173',
+        'http://127.0.0.1:5173',
+        'http://127.0.0.1:3000',
+      ]
     : [])
 ]
 const extraOrigins = [
   ...String(process.env.CORS_ORIGINS || '').split(','),
-  ...String(process.env.ZAPERP_CORS_EXTRA_ORIGINS || '').split(','),
-].map((s) => s.trim()).filter(Boolean)
+  ...(isProd ? [] : String(process.env.ZAPERP_CORS_EXTRA_ORIGINS || '').split(',')),
+]
+  .map((s) => s.trim())
+  .filter((origin) => origin && (!isProd || origin.startsWith('https://')))
 extraOrigins.forEach((o) => { if (o && !allowedOrigins.includes(o)) allowedOrigins.push(o) })
 
-const allowedOriginPatterns = [
-  /^https?:\/\/[a-z0-9-]+\.wmsistemas\.inf\.br$/i,
-  /^https?:\/\/[a-z0-9-]+\.wmsistemas\.ats$/i,
-]
+const allowedOriginPatterns = isProd
+  ? [
+      /^https:\/\/[a-z0-9-]+\.wmsistemas\.inf\.br$/i,
+      /^https:\/\/[a-z0-9-]+\.wmsistemas\.ats$/i,
+    ]
+  : [
+      /^https?:\/\/[a-z0-9-]+\.wmsistemas\.inf\.br$/i,
+      /^https?:\/\/[a-z0-9-]+\.wmsistemas\.ats$/i,
+    ]
 
 function buildFrameAncestorsDirective() {
   const s = new Set(["'self'"])
   allowedOrigins.forEach((o) => {
     if (typeof o === 'string' && /^https?:\/\//i.test(o)) s.add(o)
   })
-  ;['https://*.wmsistemas.inf.br', 'http://*.wmsistemas.inf.br', 'https://*.wmsistemas.ats', 'http://*.wmsistemas.ats'].forEach((h) => s.add(h))
+  ;[
+    'https://*.wmsistemas.inf.br',
+    'https://*.wmsistemas.ats',
+    ...(isProd ? [] : ['http://*.wmsistemas.inf.br', 'http://*.wmsistemas.ats']),
+  ].forEach((h) => s.add(h))
   return Array.from(s)
 }
 
@@ -186,6 +203,16 @@ app.use(
   express.static(getUploadsRoot(), {
     index: false,
     dotfiles: 'deny',
+    // Arquivos de /uploads têm nome único e imutável (ex.: `<timestamp>-<rand>.ogg`,
+    // `inbound-c<co>-m<msg>-<rand>.ogg`): uma vez gravado, o conteúdo daquele caminho nunca muda
+    // (retry/reencode geram um nome novo, nunca sobrescrevem). Por isso servimos com cache longo +
+    // immutable. Isso também CORRIGE o `net::ERR_CACHE_OPERATION_NOT_SUPPORTED` no áudio/vídeo do
+    // Chrome: <audio preload="metadata"> busca mídia por Range (206, entrada de cache "sparse"). Com
+    // o antigo `max-age=0`, o Chrome revalidava a cada Range e o ETag FRACO (W/"...", padrão do
+    // express) não pode revalidar uma entrada sparse — o disk cache aborta a operação e o áudio não
+    // carrega. Com cache fresco+immutable não há revalidação, some o erro e o replay fica instantâneo.
+    maxAge: '365d',
+    immutable: true,
     setHeaders(res, filePath) {
       res.setHeader('X-Content-Type-Options', 'nosniff')
       const p = String(filePath || '').toLowerCase()
@@ -446,7 +473,12 @@ if (hasFrontendDist) {
 // eslint-disable-next-line no-unused-vars
 app.use((err, req, res, next) => {
   // Multer: tipo não permitido, tamanho excedido ou campo inesperado
-  if (err && (err.code === 'LIMIT_FILE_SIZE' || err.code === 'LIMIT_UNEXPECTED_FILE' || (err.message && err.message.includes('não permitido')))) {
+  const uploadErrorCode = String(err?.code || '')
+  const isUploadError =
+    err?.name === 'MulterError' ||
+    uploadErrorCode.startsWith('LIMIT_') ||
+    uploadErrorCode.startsWith('UPLOAD_')
+  if (isUploadError) {
     const msg = err.code === 'LIMIT_UNEXPECTED_FILE' ? 'Use multipart/form-data com campo "file" ou "audio"' : (err.message || 'Arquivo inválido')
     return res.status(400).json({ error: msg })
   }
@@ -463,7 +495,7 @@ app.use((err, req, res, next) => {
   console.error('[APP_ERROR]', {
     requestId: req?.requestId || null,
     method: req?.method || null,
-    path: req?.originalUrl || req?.url || null,
+    path: sanitizeRequestUrl(req?.originalUrl || req?.url || ''),
     status,
     message: err?.message || String(err || ''),
   })

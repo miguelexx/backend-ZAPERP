@@ -3770,9 +3770,10 @@ exports.receberZapi = async (req, res) => {
       }
     }
 
-    // Mensagem de entrada: incrementa unread no banco para todos os usuários (igual WhatsApp; refetch da lista já vem com contador certo)
+    // Mensagem de entrada: incrementa unread só quando o webhook INSERIU a mensagem.
+    // Reentrega/idempotência (mesmo whatsapp_id) não deve inflar o contador.
     const convIdForEmit = mensagemSalva?.conversa_id ?? conversa_id
-    if (!fromMe) {
+    if (!fromMe && mensagemFoiInseridaPeloWebhook) {
       await incrementarUnreadParaConversa(company_id, convIdForEmit)
     }
 

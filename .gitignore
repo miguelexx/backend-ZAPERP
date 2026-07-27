@@ -29,6 +29,9 @@ coverage/
 .nyc_output/
 .cache/
 .eslintcache
+__pycache__/
+*.py[cod]
+*.zip
 
 #############################################
 # Runtime / temp

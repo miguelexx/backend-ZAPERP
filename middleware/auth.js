@@ -1,5 +1,6 @@
 const jwt = require('jsonwebtoken')
 const { usuarioEstaAtivo } = require('../helpers/usuarioAtivoGuard')
+const { sanitizeRequestUrl } = require('../helpers/sanitizeRequestUrl')
 
 module.exports = async (req, res, next) => {
   const authHeader = req.headers.authorization
@@ -28,7 +29,7 @@ module.exports = async (req, res, next) => {
     const cid = Number(decoded?.company_id)
     if (!Number.isFinite(cid) || cid <= 0) {
       console.error('[TENANT_INCONSISTENT] Token sem company_id válido', {
-        path: req.originalUrl,
+        path: sanitizeRequestUrl(req.originalUrl || req.url || ''),
         method: req.method,
         user_id: decoded?.id ?? null,
         company_id: decoded?.company_id ?? null,
