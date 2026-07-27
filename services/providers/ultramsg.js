@@ -2110,10 +2110,19 @@ async function getConnectionStatus(opts = {}) {
   try {
     const { ok, data } = await getJson({ ...cfg, endpoint: '/instance/status' })
     if (!ok) return { connected: false, configured: true }
-    const status = String(data?.status || data?.state || '').toLowerCase()
-    const connected = ['authenticated', 'connected', 'standby'].includes(status) || data?.connected === true
+    // Mesma leitura tolerante do integrationService: a resposta pode vir aninhada
+    // ({status:{accountStatus:{status:'authenticated'}}}) e o String() direto virava
+    // "[object object]" → "desconectado" falso. Ver helpers/ultramsgStatusPayload.
+    const { lerStatusUltramsg } = require('../../helpers/ultramsgStatusPayload')
+    const leitura = lerStatusUltramsg(data)
     const phone = data?.phone ?? data?.wid ?? null
-    return { connected, configured: true, phone, session: data?.session ?? null }
+    return {
+      connected: leitura.indefinido ? false : leitura.connected,
+      configured: true,
+      statusText: leitura.statusText,
+      phone,
+      session: data?.session ?? null,
+    }
   } catch (e) {
     console.warn('[ULTRAMSG] getConnectionStatus:', e?.message || e)
     return { connected: false, configured: true }

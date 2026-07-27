@@ -103,11 +103,23 @@ async function getStatus(companyId, opts = {}) {
   if (!ok) {
     return { error: data?.error || data?.message || `HTTP ${data?.status || 500}` }
   }
-  // UltraMsg pode retornar status em vários formatos: data.status, data.state, data.instance?.status ou texto
-  const status = String(
-    data?.status ?? data?.state ?? data?.instance?.status ?? data?.response?.status ?? ''
-  ).toLowerCase().trim() || String(text || '').toLowerCase().trim()
-  const connected = ['authenticated', 'connected', 'standby'].includes(status) || data?.connected === true
+  // A UltraMsg responde tanto plano ({status:'authenticated'}) quanto ANINHADO
+  // ({status:{accountStatus:{status:'authenticated'}}}). O código antigo fazia String() no
+  // campo direto: com a forma aninhada isso virava "[object object]", não batia com estado
+  // nenhum e o sistema declarava DESCONECTADO com o WhatsApp funcionando — acendendo o
+  // banner "mensagens não serão entregues" sem motivo. Ver helpers/ultramsgStatusPayload.
+  const { lerStatusUltramsg, resumirPayloadStatus } = require('../helpers/ultramsgStatusPayload')
+  const leitura = lerStatusUltramsg(data, text)
+  if (leitura.indefinido) {
+    // Formato não reconhecido: não afirmar desconexão (alarme falso é pior que silêncio).
+    // O payload vai para o log para descobrirmos o formato novo sem adivinhação.
+    console.warn('[ULTRAMSG] /instance/status em formato não reconhecido:', {
+      companyId, payload: resumirPayloadStatus(data, text),
+    })
+    return { connected: true, smartphoneConnected: true, statusIndefinido: true }
+  }
+  const status = leitura.statusText
+  const connected = leitura.connected
   const smartphoneConnected = connected
 
   // Ao detectar conexão: configurar webhooks na instância UltraMsg (message_received, message_create, message_ack)
