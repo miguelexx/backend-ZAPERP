@@ -4165,15 +4165,34 @@ exports.statusZapi = async (req, res) => {
       const statusUpdates = { status: effectiveStatus, status_mensagem: effectiveStatus }
       const statusSelect = 'id, conversa_id, company_id, autor_usuario_id, whatsapp_instance_id, whatsapp_id'
 
+      // 0) Match determinístico por referenceId (crm-<mensagem_id>) — vínculo que NÓS enviamos no POST.
+      //    Precede os fallbacks heurísticos porque não depende de whatsapp_id já estar preenchido nem
+      //    de haver candidato único: resolve rajadas (várias mensagens seguidas sem whatsapp_id), onde
+      //    o fallback por "out recente" descartava o ACK e a mensagem entregue ficava com relógio.
+      //    Só quando o id do ACK é um WhatsApp ID real — esta rota grava whatsapp_id, e id numérico
+      //    de fila pertence a provider_queue_id (tratado nos fallbacks 4/4b).
+      let msg = isTraceableWhatsappMessageId(idStr)
+        ? await tryReconcileFromMeByCrmReferenceId(supabase, {
+            company_id,
+            conversa_id: null,
+            whatsapp_instance_id,
+            payload: body,
+            whatsappIdStr: idStr,
+            statusPayload: effectiveStatus,
+          })
+        : null
+
       // 1) Atualiza por (company_id, whatsapp_id) — match exato com filtro de instância
-      let { data: msg } = await updateSingleMensagemByWhatsappId(supabase, {
-        company_id,
-        whatsapp_id: idStr,
-        whatsapp_instance_id,
-        updates: statusUpdates,
-        select: statusSelect,
-        context: 'status.exact',
-      })
+      if (!msg) {
+        ;({ data: msg } = await updateSingleMensagemByWhatsappId(supabase, {
+          company_id,
+          whatsapp_id: idStr,
+          whatsapp_instance_id,
+          updates: statusUpdates,
+          select: statusSelect,
+          context: 'status.exact',
+        }))
+      }
 
       // 1b) Fallback: ACK não encontrou por whatsapp_instance_id — tenta match exato na empresa
       if (!msg) {
@@ -4315,7 +4334,10 @@ exports.statusZapi = async (req, res) => {
       if (msg) {
         updated++
         if (io) {
-          const emitStatus = canonStatusForEmit(effectiveStatus)
+          // Emite o status realmente persistido quando a linha o trouxe (caminho 0/referenceId, que
+          // aplica sua própria proteção de rank). Evita anunciar 'delivered' para uma mensagem que já
+          // estava 'read' no banco. Os demais caminhos não selecionam `status` → usam effectiveStatus.
+          const emitStatus = canonStatusForEmit(msg.status || effectiveStatus)
           const payload = {
             mensagem_id: msg.id,
             conversa_id: msg.conversa_id,

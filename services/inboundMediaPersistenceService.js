@@ -40,9 +40,19 @@ function extFromContentType(ct) {
     'image/png': '.png',
     'image/webp': '.webp',
     'image/gif': '.gif',
+    'image/avif': '.avif',
+    'image/heic': '.heic',
+    'image/heif': '.heif',
+    'image/bmp': '.bmp',
+    'image/tiff': '.tiff',
     'video/mp4': '.mp4',
     'video/webm': '.webm',
     'video/quicktime': '.mov',
+    'video/x-msvideo': '.avi',
+    'video/3gpp': '.3gp',
+    'video/x-m4v': '.m4v',
+    'video/x-matroska': '.mkv',
+    'video/mpeg': '.mpeg',
     'audio/ogg': '.ogg',
     'audio/opus': '.ogg',
     'audio/mpeg': '.mp3',
@@ -51,6 +61,8 @@ function extFromContentType(ct) {
     'audio/aac': '.aac',
     'audio/wav': '.wav',
     'audio/webm': '.webm',
+    'audio/amr': '.amr',
+    'audio/flac': '.flac',
     'application/pdf': '.pdf',
     'application/zip': '.zip',
     'application/x-zip-compressed': '.zip',
@@ -62,6 +74,12 @@ function extFromContentType(ct) {
     'application/vnd.ms-powerpoint': '.ppt',
     'text/plain': '.txt',
     'text/csv': '.csv',
+    'application/rtf': '.rtf',
+    'text/rtf': '.rtf',
+    'application/vnd.oasis.opendocument.text': '.odt',
+    'application/vnd.oasis.opendocument.spreadsheet': '.ods',
+    'application/vnd.oasis.opendocument.presentation': '.odp',
+    'application/epub+zip': '.epub',
   }
   return map[c] || null
 }
@@ -72,8 +90,20 @@ const ALLOW_EXT_FROM_NAME = new Set([
   '.png',
   '.webp',
   '.gif',
+  '.avif',
+  '.heic',
+  '.heif',
+  '.bmp',
+  '.tif',
+  '.tiff',
   '.mp4',
   '.mov',
+  '.avi',
+  '.3gp',
+  '.m4v',
+  '.mkv',
+  '.mpeg',
+  '.mpg',
   '.ogg',
   '.opus',
   '.mp3',
@@ -81,6 +111,8 @@ const ALLOW_EXT_FROM_NAME = new Set([
   '.aac',
   '.wav',
   '.webm',
+  '.amr',
+  '.flac',
   '.pdf',
   '.doc',
   '.docx',
@@ -96,6 +128,15 @@ const ALLOW_EXT_FROM_NAME = new Set([
   '.apk',
   '.json',
   '.xml',
+  '.svg',
+  '.rtf',
+  '.odt',
+  '.ods',
+  '.odp',
+  '.epub',
+  '.pages',
+  '.numbers',
+  '.key',
 ])
 
 function safeExtFromNomeArquivo(nome) {
@@ -216,6 +257,21 @@ async function persistInboundMediaToUploads({ supabase, io, company_id, mensagem
   const arrayBuffer = await upstream.arrayBuffer()
   if (arrayBuffer.byteLength > MAX_BYTES) {
     console.warn('[inboundMediaPersist] arquivo muito grande (body):', mensagem_id)
+    return
+  }
+  // Download incompleto (conexão caiu / proxy cortou o corpo): salvar o pedaço deixaria o
+  // atendente ouvindo um áudio truncado do cliente, e a cópia local sobrescreveria a URL
+  // remota que ainda funciona. Não persiste — a mensagem fica na URL da UltraMsg e a
+  // varredura de retry (TIPOS_HTTPS_RETRY) tenta de novo mais tarde.
+  const esperado = Number(cl)
+  if (Number.isFinite(esperado) && esperado > 0 && arrayBuffer.byteLength !== esperado) {
+    console.warn('[inboundMediaPersist] download incompleto; não persiste:', {
+      company_id, mensagem_id, tipo: row.tipo, esperado, recebido: arrayBuffer.byteLength,
+    })
+    return
+  }
+  if (arrayBuffer.byteLength === 0) {
+    console.warn('[inboundMediaPersist] corpo vazio; não persiste:', { company_id, mensagem_id, tipo: row.tipo })
     return
   }
 
@@ -416,4 +472,10 @@ module.exports = {
   schedulePersistInboundMediaIfNeeded,
   runInboundMediaPersistenceRetryBatch,
   startInboundMediaRetryScheduler,
+  _test: {
+    persistInboundMediaToUploads,
+    extFromContentType,
+    safeExtFromNomeArquivo,
+    pickStoredFilename,
+  },
 }

@@ -19,6 +19,11 @@ const deferredTimers = new Map()
 const companyProviderCache = new Map()
 const COMPANY_CACHE_TTL_MS = 60_000
 
+// Mensagens presas na fila da UltraMSG (status 'queue'): quantas vezes já pedimos resendById.
+// Estado por processo — a varredura periódica cobre reinícios.
+const queueFlushAttemptsById = new Map()
+const QUEUE_FLUSH_MAP_MAX = 2000
+
 function parsePositiveIntEnv(name, fallback, { min = 1, max = 10_080 } = {}) {
   const n = Number(process.env[name])
   if (!Number.isFinite(n)) return fallback
@@ -44,6 +49,32 @@ function getBatchLimit() {
 
 function getLookbackMs() {
   return parsePositiveIntEnv('PENDING_OUTBOUND_RECONCILE_LOOKBACK_HOURS', 168, { min: 1, max: 336 }) * 60 * 60 * 1000
+}
+
+// Tempo que uma mensagem pode ficar na fila da UltraMSG antes de tentarmos destravá-la (resendById).
+function getQueueFlushAfterMs() {
+  return parsePositiveIntEnv('PENDING_OUTBOUND_QUEUE_FLUSH_AFTER_MINUTES', 10, { min: 1, max: 720 }) * 60_000
+}
+
+// Quantas vezes pedimos resendById antes de desistir e marcar 'erro'.
+function getQueueFlushMaxAttempts() {
+  return parsePositiveIntEnv('PENDING_OUTBOUND_QUEUE_FLUSH_MAX_ATTEMPTS', 3, { min: 1, max: 10 })
+}
+
+// Tempo total na fila após o qual a mensagem deixa de ser "a caminho" e passa a 'erro' —
+// tick vermelho no atendimento, em vez de relógio eterno que ninguém sabe interpretar.
+function getQueueGiveUpAfterMs() {
+  return parsePositiveIntEnv('PENDING_OUTBOUND_QUEUE_GIVE_UP_AFTER_MINUTES', 120, { min: 5, max: 2880 }) * 60_000
+}
+
+function rememberQueueFlushAttempt(mensagemId) {
+  const prev = queueFlushAttemptsById.get(mensagemId) || 0
+  queueFlushAttemptsById.set(mensagemId, prev + 1)
+  if (queueFlushAttemptsById.size > QUEUE_FLUSH_MAP_MAX) {
+    const oldest = queueFlushAttemptsById.keys().next().value
+    queueFlushAttemptsById.delete(oldest)
+  }
+  return prev + 1
 }
 
 function messageAgeMs(row) {
@@ -151,6 +182,82 @@ async function patchMessage(row, updates, io) {
   return { ok: true, action: 'patched', status: updates.status, mensagem_id: data.id }
 }
 
+/**
+ * Mensagem parada na fila da UltraMSG (status 'queue').
+ *
+ * Fila significa que a UltraMSG aceitou o POST mas AINDA NÃO entregou ao WhatsApp — tipicamente
+ * porque a instância/celular está fora do ar. Antes isso devolvia 'keep_queue' e a mensagem ficava
+ * em 'pending' para sempre: relógio eterno no atendimento, nenhum alerta, nenhuma nova tentativa —
+ * o atendente seguia digitando acreditando que o cliente estava recebendo.
+ *
+ * Agora: passado o tempo de tolerância, pedimos à própria UltraMSG que destrave o item
+ * (POST /messages/resendById). Se depois de N tentativas continuar na fila, marca 'erro' —
+ * tick vermelho visível, e a mídia entra na varredura de reenvio automático.
+ */
+async function handleQueuedProviderRow(row, providerRow, io) {
+  const ageMs = messageAgeMs(row)
+
+  if (ageMs < getQueueFlushAfterMs()) {
+    return { ok: true, action: 'keep_queue' }
+  }
+
+  const queueId = firstQueueIdCandidate(row, providerRow)
+  const attempts = queueFlushAttemptsById.get(row.id) || 0
+
+  if (queueId && attempts < getQueueFlushMaxAttempts()) {
+    const provider = getProvider()
+    if (provider?.resendById) {
+      const attemptNo = rememberQueueFlushAttempt(row.id)
+      try {
+        const res = await provider.resendById(queueId, buildProviderOpts(row))
+        console.warn('[pendingOutboundReconciliation] fila UltraMSG — resendById solicitado', {
+          company_id: row.company_id,
+          conversa_id: row.conversa_id,
+          mensagem_id: row.id,
+          queue_id: queueId,
+          tentativa: attemptNo,
+          provider_ok: res?.ok === true,
+        })
+      } catch (e) {
+        console.warn('[pendingOutboundReconciliation] resendById falhou', {
+          mensagem_id: row.id,
+          queue_id: queueId,
+          error: e?.message || e,
+        })
+      }
+      return { ok: true, action: 'queue_flush_requested' }
+    }
+  }
+
+  if (ageMs >= getQueueGiveUpAfterMs()) {
+    console.warn('[pendingOutboundReconciliation] ❌ mensagem presa na fila UltraMSG — marcando erro', {
+      company_id: row.company_id,
+      conversa_id: row.conversa_id,
+      mensagem_id: row.id,
+      tipo: row.tipo,
+      queue_id: queueId || null,
+      minutos_na_fila: Math.round(ageMs / 60000),
+      nota: 'WhatsApp provavelmente desconectado quando a mensagem foi enviada.',
+    })
+    return patchMessage(row, { status: 'erro', status_mensagem: 'failed' }, io)
+  }
+
+  return { ok: true, action: 'keep_queue' }
+}
+
+function firstQueueIdCandidate(row, providerRow) {
+  const candidates = [
+    providerRow?.id,
+    row?.provider_queue_id,
+    row?.whatsapp_id,
+  ]
+  for (const value of candidates) {
+    const s = value == null ? '' : String(value).trim()
+    if (s && isUltramsgNumericQueueId(s)) return s
+  }
+  return null
+}
+
 async function resolveFromProviderRow(row, providerRow, io) {
   if (!providerRow) return { ok: true, action: 'noop' }
 
@@ -159,7 +266,7 @@ async function resolveFromProviderRow(row, providerRow, io) {
   }
 
   if (providerRowInQueue(providerRow)) {
-    return { ok: true, action: 'keep_queue' }
+    return handleQueuedProviderRow(row, providerRow, io)
   }
 
   if (providerRowIndicatesSuccess(providerRow)) {
@@ -271,11 +378,26 @@ async function reconcilePendingOutboundMessage(row, { io = null, force = false }
     return patchMessage(row, { status: 'erro', status_mensagem: 'failed' }, io)
   }
 
-  if (providerHit?.list?.some((item) => providerRowInQueue(item))) {
-    return { ok: true, action: 'keep_queue_after_fail_window' }
+  const queuedItem = providerHit?.list?.find((item) => providerRowInQueue(item))
+  if (queuedItem) {
+    return handleQueuedProviderRow(row, queuedItem, io)
   }
 
-  // Sem confirmação do provedor: mantém pending (não inventar erro).
+  // O provedor não tem registro algum desta mensagem. Passado o prazo de desistência isso significa
+  // que ela nunca saiu — deixar em 'pending' apenas esconde a falha do atendente. Marca 'erro' para
+  // aparecer o tick vermelho e, no caso de mídia, entrar no reenvio automático a partir de /uploads.
+  if (ageMs >= getQueueGiveUpAfterMs()) {
+    console.warn('[pendingOutboundReconciliation] ❌ provedor sem registro da mensagem — marcando erro', {
+      company_id: row.company_id,
+      conversa_id: row.conversa_id,
+      mensagem_id: row.id,
+      tipo: row.tipo,
+      minutos_presa: Math.round(ageMs / 60000),
+    })
+    return patchMessage(row, { status: 'erro', status_mensagem: 'failed' }, io)
+  }
+
+  // Ainda dentro da janela: mantém pending (não inventar erro).
   return { ok: true, action: 'keep_unknown' }
 }
 
@@ -389,5 +511,10 @@ module.exports = {
     buildCrmReferenceId,
     getGraceMs,
     getFailAfterMs,
+    getQueueFlushAfterMs,
+    getQueueFlushMaxAttempts,
+    getQueueGiveUpAfterMs,
+    firstQueueIdCandidate,
+    queueFlushAttemptsById,
   },
 }

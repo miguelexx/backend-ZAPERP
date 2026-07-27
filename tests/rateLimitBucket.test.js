@@ -94,3 +94,50 @@ describe('extractJwtBucketKey', () => {
     }
   })
 })
+
+/**
+ * O <audio>/<video>/<img> não consegue mandar header Authorization: o JWT vai em
+ * ?access_token= (middleware/authBearerOrQuery). Sem ler a query, TODA reprodução de
+ * mídia caía no bucket por IP — um escritório inteiro dividindo uma cota só, e o
+ * sintoma de estouro é o áudio simplesmente não tocar (429 silencioso no <audio>).
+ */
+describe('extractJwtBucketKey — token na query (mídia em <audio>/<video>)', () => {
+  const reqWithQuery = (query, headers = {}) => ({ headers, query })
+
+  test('access_token assinado gera bucket por usuário, igual ao header', () => {
+    const token = signedJwt({ id: 42, company_id: 7 })
+    expect(extractJwtBucketKey(reqWithQuery({ access_token: token }))).toBe('u_7_42')
+    expect(extractJwtBucketKey(reqWithQuery({ access_token: token }))).toBe(
+      extractJwtBucketKey(reqWithAuth(`Bearer ${token}`))
+    )
+  })
+
+  test('aceita também ?token= (mesma tolerância do authBearerOrQuery)', () => {
+    expect(extractJwtBucketKey(reqWithQuery({ token: signedJwt({ id: 8, company_id: 4 }) }))).toBe('u_4_8')
+  })
+
+  test('atendentes distintos no mesmo IP não dividem cota ao ouvir áudio', () => {
+    const a = extractJwtBucketKey(reqWithQuery({ access_token: signedJwt({ id: 1, company_id: 7 }) }))
+    const b = extractJwtBucketKey(reqWithQuery({ access_token: signedJwt({ id: 2, company_id: 7 }) }))
+    expect(a).toBe('u_7_1')
+    expect(b).toBe('u_7_2')
+  })
+
+  test('header tem prioridade sobre a query', () => {
+    const req = reqWithQuery(
+      { access_token: signedJwt({ id: 99, company_id: 9 }) },
+      { authorization: `Bearer ${signedJwt({ id: 42, company_id: 7 })}` }
+    )
+    expect(extractJwtBucketKey(req)).toBe('u_7_42')
+  })
+
+  test('access_token forjado continua caindo no bucket por IP', () => {
+    expect(extractJwtBucketKey(reqWithQuery({ access_token: forgedJwt({ id: 42, company_id: 7 }) }))).toBeNull()
+  })
+
+  test('query ausente ou com tipo errado não lança', () => {
+    expect(extractJwtBucketKey({ headers: {} })).toBeNull()
+    expect(extractJwtBucketKey(reqWithQuery({ access_token: ['a', 'b'] }))).toBeNull()
+    expect(extractJwtBucketKey(reqWithQuery({ access_token: '' }))).toBeNull()
+  })
+})

@@ -17,6 +17,7 @@ const MIME_BY_EXT = {
   png:  'image/png',
   gif:  'image/gif',
   webp: 'image/webp',
+  avif: 'image/avif',
   bmp:  'image/bmp',
   svg:  'image/svg+xml',
   heic: 'image/heic',
@@ -31,6 +32,8 @@ const MIME_BY_EXT = {
   '3gp':'video/3gpp',
   m4v:  'video/x-m4v',
   mkv:  'video/x-matroska',
+  mpeg: 'video/mpeg',
+  mpg:  'video/mpeg',
   // Áudio
   mp3:  'audio/mpeg',
   m4a:  'audio/mp4',
@@ -39,6 +42,7 @@ const MIME_BY_EXT = {
   wav:  'audio/wav',
   aac:  'audio/aac',
   amr:  'audio/amr',
+  flac: 'audio/flac',
   // Documentos
   pdf:  'application/pdf',
   doc:  'application/msword',
@@ -51,6 +55,11 @@ const MIME_BY_EXT = {
   csv:  'text/csv',
   xml:  'application/xml',
   json: 'application/json',
+  rtf:  'application/rtf',
+  odt:  'application/vnd.oasis.opendocument.text',
+  ods:  'application/vnd.oasis.opendocument.spreadsheet',
+  odp:  'application/vnd.oasis.opendocument.presentation',
+  epub: 'application/epub+zip',
   // Compactados
   zip:  'application/zip',
   rar:  'application/x-rar-compressed',
@@ -59,6 +68,39 @@ const MIME_BY_EXT = {
 
 const INLINE_MIME_PREFIXES = ['image/', 'video/', 'audio/']
 const INLINE_MIME_EXACT = new Set(['application/pdf'])
+
+/**
+ * Monta Content-Disposition sem colocar Unicode/controles diretamente no header HTTP.
+ *
+ * Nomes recebidos do WhatsApp podem conter emoji, acentos e até caracteres de controle.
+ * O Node rejeita esses valores em setHeader (ERR_INVALID_CHAR), o que antes transformava
+ * um arquivo válido em 502. O filename ASCII é apenas fallback; filename* preserva UTF-8.
+ */
+function buildContentDisposition(dispositionType, filename) {
+  const basename = String(filename || '')
+    .replace(/[\u0000-\u001f\u007f]/g, ' ')
+    .split(/[\\/]/)
+    .pop()
+    .trim()
+  if (!basename) return ''
+
+  // Buffer normaliza eventuais surrogate code points isolados para U+FFFD.
+  const unicodeName = Array.from(Buffer.from(basename, 'utf8').toString('utf8'))
+    .slice(0, 180)
+    .join('')
+  const asciiFallback =
+    unicodeName
+      .normalize('NFKD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/[^\x20-\x7e]/g, '_')
+      .replace(/["\\]/g, '_')
+      .trim() || 'download'
+  const encoded = encodeURIComponent(unicodeName).replace(/[!'()*]/g, (char) =>
+    `%${char.charCodeAt(0).toString(16).toUpperCase()}`
+  )
+
+  return `${dispositionType}; filename="${asciiFallback}"; filename*=UTF-8''${encoded}`
+}
 
 /**
  * Tenta determinar o MIME type a partir de um nome de arquivo ou path de URL.
@@ -267,12 +309,8 @@ exports.proxyMedia = async (req, res) => {
     res.setHeader('Accept-Ranges', 'bytes')
 
     if (effectiveFilename) {
-      // RFC 5987 (UTF-8 encoded filename* para suporte a acentos/unicode)
-      const encoded = encodeURIComponent(effectiveFilename).replace(/'/g, '%27')
-      res.setHeader(
-        'Content-Disposition',
-        `${dispositionType}; filename="${effectiveFilename.replace(/"/g, '\\"')}"; filename*=UTF-8''${encoded}`
-      )
+      const contentDisposition = buildContentDisposition(dispositionType, effectiveFilename)
+      if (contentDisposition) res.setHeader('Content-Disposition', contentDisposition)
     }
 
     const body = Buffer.from(arrayBuffer)
@@ -326,3 +364,4 @@ exports.proxyMedia = async (req, res) => {
 }
 
 exports.parseSingleByteRange = parseSingleByteRange
+exports.buildContentDisposition = buildContentDisposition

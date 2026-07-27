@@ -10,7 +10,16 @@ const jwt = require('jsonwebtoken')
 function extractJwtBucketKey(req) {
   try {
     const auth = req.headers.authorization || ''
-    const token = auth.startsWith('Bearer ') ? auth.slice(7) : ''
+    let token = auth.startsWith('Bearer ') ? auth.slice(7) : ''
+    // <audio>/<video>/<img> não mandam header: o JWT vai em ?access_token= (ver
+    // middleware/authBearerOrQuery). Sem ler a query, TODA reprodução de mídia caía no
+    // bucket por IP — um escritório inteiro dividindo uma cota só, e o sintoma de estouro
+    // é o áudio simplesmente não tocar (429 silencioso no <audio>). Mesma verificação de
+    // assinatura do header: token forjado continua caindo no bucket por IP.
+    if (!token) {
+      const q = req.query?.access_token ?? req.query?.token
+      if (q && typeof q === 'string') token = q.trim()
+    }
     if (!token) return null
     const secret = process.env.JWT_SECRET
     if (!secret) return null

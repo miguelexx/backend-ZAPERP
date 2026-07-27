@@ -166,15 +166,18 @@ async function validateAndConsumeForMessage(input = {}, client = supabase) {
     if (isMissingLimitsSchemaError(error)) {
       return { allowed: true, consumed: false, skipped: 'schema_missing' }
     }
-    return {
-      allowed: false,
-      status: 500,
-      limit: {
-        code: 'ATTENDANCE_LIMIT_VALIDATION_ERROR',
-        message: 'Nao foi possivel validar os limites de atendimento.',
-      },
-      error,
-    }
+    // Falha ao CONSULTAR a cota (blip de rede/DB, timeout no RPC) não é o mesmo que cota estourada.
+    // Antes isto devolvia allowed:false/500 e o envio era abortado: uma instabilidade momentânea numa
+    // funcionalidade acessória impedia o atendente de falar com o cliente. Agora libera e registra —
+    // mesma postura já adotada para schema ausente. Recusa deliberada de cota continua barrando (429).
+    console.warn('[atendimentoLimits] falha ao validar cota — liberando envio (fail-open)', {
+      company_id: companyId,
+      usuario_id: usuarioId,
+      conversa_id: conversaId,
+      code: error?.code || null,
+      error: String(error?.message || error).slice(0, 200),
+    })
+    return { allowed: true, consumed: false, skipped: 'validation_error', error }
   }
 
   return normalizeLimitResult(data)

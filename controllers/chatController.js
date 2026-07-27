@@ -3034,23 +3034,30 @@ exports.listWhatsappInstancesAtendimento = async (req, res) => {
 exports.whatsappStatus = async (req, res) => {
   try {
     const company_id = req.user?.company_id
-    // Z-API removida; banner "WhatsApp desconectado" oculto por padrão. Use HIDE_WHATSAPP_DISCONNECT_BANNER=0 para exibir.
-    const hideBanner = process.env.HIDE_WHATSAPP_DISCONNECT_BANNER !== '0'
+    // O banner "WhatsApp desconectado — mensagens não serão entregues" nasceu na época da Z-API e ficou
+    // desligado por padrão após a migração para UltraMsg. Consequência real: com o WhatsApp fora do ar a
+    // UltraMsg ACEITA o POST e apenas enfileira (status 'queue'); o atendimento mostrava relógio e o
+    // atendente seguia digitando sem saber que nada saía. Agora o padrão é reportar o estado real —
+    // HIDE_WHATSAPP_DISCONNECT_BANNER=1 volta a esconder, se necessário.
+    const hideBanner = process.env.HIDE_WHATSAPP_DISCONNECT_BANNER === '1'
     // Usa UltraMsg como único provider WhatsApp; empresa_zapi armazena instance_id/token
     if (!company_id) {
-      return res.json({ ok: true, hasInstance: false, connected: hideBanner, configured: false })
+      return res.json({ ok: true, hasInstance: false, connected: true, configured: false })
     }
 
     const { getStatus } = require('../services/ultramsgIntegrationService')
     const { getEmpresaWhatsappConfig } = require('../services/whatsappConfigService')
     const configResult = await getEmpresaWhatsappConfig(company_id)
     if (configResult.error || !configResult.config) {
-      return res.json({ ok: true, hasInstance: false, connected: hideBanner, configured: false })
+      return res.json({ ok: true, hasInstance: false, connected: true, configured: false })
     }
 
     const statusResult = await getStatus(company_id)
-    let connected = !!statusResult?.connected
-    if (hideBanner) connected = true // Oculta banner (Z-API removida; sistema usa UltraMsg)
+    // Só afirma "desconectado" quando a UltraMsg respondeu de forma definitiva. Falha de rede/API
+    // devolve { error } — nesse caso não acende alarme falso (mantém connected=true).
+    const statusIndefinido = !statusResult || !!statusResult.error
+    let connected = statusIndefinido ? true : !!statusResult.connected
+    if (hideBanner) connected = true
     const smartphoneConnected = !!statusResult?.smartphoneConnected
     return res.json({
       ok: true,
@@ -7371,13 +7378,24 @@ async function convertAudioWithFfmpeg(inputPath, outputPath, profile = 'audio_mp
         '-vn',
         '-ac', '1',
         '-ar', '48000',
-        // Reconstrói os timestamps a partir das amostras reais de áudio.
-        // O MediaRecorder do navegador costuma gravar o primeiro bloco com um
-        // timestamp inicial grande (relativo ao relógio da página/AudioContext),
-        // e o transcode preservava esse offset no granulepos do OGG/Opus, fazendo
-        // o WhatsApp exibir durações infladas (ex.: 20s virando ~5min). first_pts=0
-        // zera o início e async=1 mantém o stream monotônico sem preencher silêncio.
-        '-af', 'aresample=async=1:first_pts=0',
+        // Reconstrói os timestamps A PARTIR DA CONTAGEM DE AMOSTRAS decodificadas
+        // (asetpts=N/SR/TB): a duração de saída passa a ser exatamente
+        // amostras/48000, independentemente do que o container de entrada diga.
+        //
+        // O MediaRecorder do navegador entrega WebM de streaming, sem duração no
+        // header e com timestamps que podem vir deslocados (1º bloco com PTS
+        // grande, relativo ao relógio da página) ou NÃO-MONOTÔNICOS quando a
+        // gravação junta blocos de origens/relógios diferentes. A versão anterior
+        // usava `aresample=async=1:first_pts=0`, que corrige o deslocamento mas
+        // TAMBÉM decide o que fazer com o áudio olhando esses timestamps ruins:
+        //   - salto para frente  → enche o vão com silêncio (30s viravam 5min);
+        //   - salto para trás    → DESCARTA todo o áudio até a linha do tempo
+        //                          alcançar o ponto (30s de fala viravam ~1-3s,
+        //                          começando mudo e com a voz cortada).
+        // Reproduzido em tests/audioTranscodeDuration.test.js. Com asetpts nenhuma
+        // amostra decodificada é descartada nem duplicada: o áudio sai contínuo,
+        // na duração real, e os timestamps de entrada deixam de poder corrompê-lo.
+        '-af', 'aresample=async=0,asetpts=N/SR/TB',
         '-c:a', 'libopus',
         '-b:a', '48k',
         '-avoid_negative_ts', 'make_zero',
@@ -7436,6 +7454,86 @@ async function convertAudioWithFfmpeg(inputPath, outputPath, profile = 'audio_mp
   })
 }
 
+/**
+ * Duração real de um arquivo de áudio, em segundos, lida do próprio ffmpeg
+ * (`Duration: HH:MM:SS.ss`). Só lê cabeçalho/última página — não decodifica.
+ * Devolve null se o ffmpeg não estiver disponível ou não reportar duração.
+ */
+async function probeAudioDurationSec(filePath) {
+  const { spawn } = require('child_process')
+  const ffmpegPath = resolveFfmpegPath()
+  return new Promise((resolve) => {
+    let proc
+    try {
+      proc = spawn(ffmpegPath, ['-hide_banner', '-i', filePath], { windowsHide: true })
+    } catch {
+      resolve(null)
+      return
+    }
+    let stderr = ''
+    let settled = false
+    const finish = (v) => { if (settled) return; settled = true; clearTimeout(timer); resolve(v) }
+    const timer = setTimeout(() => {
+      try { proc.kill('SIGKILL') } catch { /* ignore */ }
+      finish(null)
+    }, 15000)
+    proc.stderr.on('data', (d) => { stderr += String(d || '') })
+    proc.on('error', () => finish(null))
+    proc.on('close', () => {
+      const m = stderr.match(/Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/i)
+      if (!m) { finish(null); return }
+      const sec = Number(m[1]) * 3600 + Number(m[2]) * 60 + Number(m[3])
+      finish(Number.isFinite(sec) && sec > 0 ? sec : null)
+    })
+  })
+}
+
+/**
+ * O áudio transcodificado precisa cobrir o que foi realmente gravado no navegador.
+ * Se o arquivo que chegou perdeu blocos (conexão do microfone caiu no meio, chunks
+ * perdidos no upload), o ffmpeg converte só o pedaço legível e sai com sucesso — o
+ * contato receberia 3s de uma gravação de 30s, começando mudo e com a voz cortada.
+ * Só vale para gravações do composer, que enviam a duração medida no navegador.
+ */
+const AUDIO_DURATION_MIN_RATIO = 0.6
+const AUDIO_DURATION_MIN_GAP_MS = 3000
+
+function audioDurationShortfall(expectedMs, actualSec) {
+  const expected = Number(expectedMs)
+  if (!Number.isFinite(expected) || expected <= 0) return null
+  if (!Number.isFinite(actualSec) || actualSec <= 0) return null
+  const actualMs = actualSec * 1000
+  const faltandoMs = expected - actualMs
+  if (faltandoMs <= AUDIO_DURATION_MIN_GAP_MS) return null
+  if (actualMs >= expected * AUDIO_DURATION_MIN_RATIO) return null
+  return { expectedMs: Math.round(expected), actualMs: Math.round(actualMs), faltandoMs: Math.round(faltandoMs) }
+}
+
+/**
+ * Duração medida no navegador (enviada pelo composer junto do arquivo).
+ *
+ * Usa o MENOR entre os dois campos, de propósito:
+ *  - `audio_elapsed_ms` é tempo de relógio entre iniciar e parar a gravação — nunca
+ *    pode ser maior que a realidade;
+ *  - `audio_duration_ms` sai do elemento <audio> lendo o WebM cru, que é justamente o
+ *    container cuja duração vem INFLADA quando os timestamps estão deslocados (o
+ *    defeito que este pipeline existe para corrigir). Confiar nele sozinho faria a
+ *    guarda recusar gravação boa.
+ * O menor dos dois é o piso seguro: nunca acusa corte que não houve, e continua
+ * acusando quando os dois concordam que faltou áudio.
+ *
+ * Só vale para um único arquivo por requisição — os campos são do corpo, não por
+ * arquivo, então num upload múltiplo eles não descrevem nenhum arquivo em especial.
+ */
+function expectedAudioDurationMsFromRequest(req, { totalArquivos = 1 } = {}) {
+  if (Number(totalArquivos) !== 1) return null
+  const body = req?.body || {}
+  const valores = [body.audio_elapsed_ms, body.audio_duration_ms]
+    .map((raw) => Number(Array.isArray(raw) ? raw[0] : raw))
+    .filter((v) => Number.isFinite(v) && v > 0)
+  return valores.length ? Math.min(...valores) : null
+}
+
 async function normalizeAudioForUltraMsg(file, tipo) {
   if (!file || !file.path || (tipo !== 'audio' && tipo !== 'voice')) return { file, converted: false, error: null }
   const ext = getAudioFileExtension(file)
@@ -7478,14 +7576,17 @@ async function normalizeAudioForUltraMsg(file, tipo) {
 
   let outputSize = 0
   try { outputSize = fs.existsSync(targetPath) ? fs.statSync(targetPath).size : 0 } catch { outputSize = 0 }
+  const durationSec = await probeAudioDurationSec(targetPath)
   fs.unlink(file.path, () => {})
   console.log('[ULTRAMSG][AUDIO] transcode ok', {
     tipo, srcExt: ext || '(sem)', targetExt, inputBytes: inputSize, outputBytes: outputSize, profile: ffmpegProfile,
+    duracaoSaidaSec: durationSec == null ? null : Number(durationSec.toFixed(2)),
   })
 
   return {
     converted: true,
     error: null,
+    durationSec,
     file: {
       ...file,
       path: targetPath,
@@ -7601,7 +7702,7 @@ const MAX_MEDIA_CAPTION_CHARS = 1024
  * Uma unidade de upload após multer; conversa e telefone já validados.
  * @returns {Promise<{ ok: true, msg: object } | { ok: false, status: number, error: string }>}
  */
-async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conversa_id, telefoneParaEnvio, whatsappInstanceId = null, io, captionUsuario = '', clientTempId = null }) {
+async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conversa_id, telefoneParaEnvio, whatsappInstanceId = null, io, captionUsuario = '', clientTempId = null, totalArquivos = 1 }) {
   const { extFromOriginalName, isBlockedRiskExtension, blockedUploadErrorMessage } = require('../middleware/upload')
   clientTempId = normalizeClientTempId(clientTempId)
   if (clientTempId) {
@@ -7637,6 +7738,37 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
       normalized = { converted: false, error: 'audio_transcode_failed', file: null }
     }
     if (normalized?.converted && normalized?.file) {
+      // Gravação incompleta: o arquivo que chegou cobre bem menos tempo do que o
+      // navegador gravou (blocos perdidos no caminho). Enviar assim entregaria ao
+      // contato só o começo do áudio — melhor abortar e pedir para gravar de novo.
+      const faltando = audioDurationShortfall(
+        expectedAudioDurationMsFromRequest(req, { totalArquivos }),
+        normalized.durationSec
+      )
+      if (faltando) {
+        try {
+          const fsTmp = require('fs')
+          if (normalized.file?.path && fsTmp.existsSync(normalized.file.path)) fsTmp.unlink(normalized.file.path, () => {})
+        } catch { /* ignore */ }
+        // company_id/conversa_id/user_id no log de propósito: é o que permite responder,
+        // lendo o log de produção, se o corte acontece em uma empresa/aparelho específico
+        // ou está espalhado. Ver scripts/diagnosticar-audio-logs.js.
+        console.error('[ULTRAMSG][AUDIO] Envio abortado: gravação chegou incompleta', {
+          company_id,
+          conversa_id: Number(conversa_id),
+          user_id,
+          tipo,
+          srcExt: srcExtAudio || '(sem extensão)',
+          gravadoMs: faltando.expectedMs,
+          recebidoMs: faltando.actualMs,
+          faltandoMs: faltando.faltandoMs,
+        })
+        return {
+          ok: false,
+          status: 422,
+          error: 'A gravação chegou incompleta ao servidor (o microfone pode ter sido interrompido). Grave o áudio novamente.',
+        }
+      }
       const beforeName = fileWork.originalname
       fileWork = normalized.file
       req.file = fileWork
@@ -8113,6 +8245,7 @@ exports.enviarArquivo = async (req, res) => {
         io,
         captionUsuario: perFileCaption,
         clientTempId,
+        totalArquivos: files.length,
       })
       if (!r.ok) {
         hadFailure = true
@@ -8845,6 +8978,10 @@ exports._test = {
   normalizeAudioForUltraMsg,
   convertAudioWithFfmpeg,
   resolveFfmpegPath,
+  probeAudioDurationSec,
+  audioDurationShortfall,
+  expectedAudioDurationMsFromRequest,
+  enviarArquivoProcessarUm,
   shouldNormalizeImageForWhatsapp,
   normalizeForwardTipo,
   resolveForwardMediaForProvider,

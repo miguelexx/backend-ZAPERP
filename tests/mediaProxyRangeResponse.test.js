@@ -103,6 +103,76 @@ describe('mediaProxy: resposta para players de mídia', () => {
   })
 })
 
+describe('mediaProxy: abertura de documentos recebidos', () => {
+  test('nome Unicode/controles não invalida o header nem transforma arquivo válido em 502', async () => {
+    const res = await request(app)
+      .get('/media/proxy')
+      .query({
+        url: URL_ORIGEM,
+        filename: 'Relatório ✅\r\nfinal.pdf',
+        disposition: 'inline',
+      })
+
+    expect(res.status).toBe(200)
+    expect(res.headers['content-disposition']).toContain("filename*=UTF-8''Relat%C3%B3rio")
+    expect(res.headers['content-disposition']).not.toMatch(/[\r\n]/)
+  })
+
+  test('filename corrige MIME genérico de documento recebido em URL sem extensão', async () => {
+    global.fetch = jest.fn(async () => ({
+      ok: true,
+      status: 200,
+      headers: new Map([
+        ['content-type', 'application/octet-stream'],
+        ['content-length', String(PAYLOAD.length)],
+      ]),
+      arrayBuffer: async () => paraArrayBuffer(PAYLOAD),
+    }))
+
+    const res = await request(app)
+      .get('/media/proxy')
+      .query({
+        url: 'https://media.exemplo.test/download/abc123',
+        filename: 'contrato.pdf',
+        disposition: 'inline',
+      })
+
+    expect(res.status).toBe(200)
+    expect(res.headers['content-type']).toContain('application/pdf')
+    expect(res.headers['content-disposition']).toMatch(/^inline;/)
+  })
+
+  test.each([
+    ['foto.avif', 'image/avif'],
+    ['texto.rtf', 'application/rtf'],
+    ['documento.odt', 'application/vnd.oasis.opendocument.text'],
+    ['planilha.ods', 'application/vnd.oasis.opendocument.spreadsheet'],
+    ['apresentacao.odp', 'application/vnd.oasis.opendocument.presentation'],
+    ['livro.epub', 'application/epub+zip'],
+  ])('%s recebe MIME correto mesmo quando a origem responde octet-stream', async (filename, expectedType) => {
+    global.fetch = jest.fn(async () => ({
+      ok: true,
+      status: 200,
+      headers: new Map([
+        ['content-type', 'application/octet-stream'],
+        ['content-length', String(PAYLOAD.length)],
+      ]),
+      arrayBuffer: async () => paraArrayBuffer(PAYLOAD),
+    }))
+
+    const res = await request(app)
+      .get('/media/proxy')
+      .query({
+        url: 'https://media.exemplo.test/download/sem-extensao',
+        filename,
+        disposition: 'inline',
+      })
+
+    expect(res.status).toBe(200)
+    expect(res.headers['content-type']).toContain(expectedType)
+  })
+})
+
 describe('mediaProxy: Range repassado à origem', () => {
   test('o header Range vai para a origem (evita baixar o arquivo inteiro a cada seek)', async () => {
     await get({ Range: 'bytes=10-19' })

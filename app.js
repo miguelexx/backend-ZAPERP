@@ -216,9 +216,38 @@ app.use(
     setHeaders(res, filePath) {
       res.setHeader('X-Content-Type-Options', 'nosniff')
       const p = String(filePath || '').toLowerCase()
-      const isImage = p.endsWith('.jpg') || p.endsWith('.jpeg') || p.endsWith('.png') || p.endsWith('.webp')
-      const isAudio = p.endsWith('.mp3') || p.endsWith('.ogg') || p.endsWith('.aac') || p.endsWith('.m4a') || p.endsWith('.wav') || p.endsWith('.opus') || p.endsWith('.webm')
-      const isVideo = p.endsWith('.mp4') || p.endsWith('.mov') || p.endsWith('.avi') || p.endsWith('.3gp')
+      const isImage =
+        p.endsWith('.jpg') ||
+        p.endsWith('.jpeg') ||
+        p.endsWith('.png') ||
+        p.endsWith('.gif') ||
+        p.endsWith('.webp') ||
+        p.endsWith('.bmp') ||
+        p.endsWith('.avif') ||
+        p.endsWith('.heic') ||
+        p.endsWith('.heif') ||
+        p.endsWith('.tif') ||
+        p.endsWith('.tiff')
+      const isAudio =
+        p.endsWith('.mp3') ||
+        p.endsWith('.ogg') ||
+        p.endsWith('.aac') ||
+        p.endsWith('.m4a') ||
+        p.endsWith('.wav') ||
+        p.endsWith('.opus') ||
+        p.endsWith('.webm') ||
+        p.endsWith('.amr') ||
+        p.endsWith('.flac')
+      const isVideo =
+        p.endsWith('.mp4') ||
+        p.endsWith('.mov') ||
+        p.endsWith('.avi') ||
+        p.endsWith('.3gp') ||
+        p.endsWith('.webm') ||
+        p.endsWith('.m4v') ||
+        p.endsWith('.mkv') ||
+        p.endsWith('.mpeg') ||
+        p.endsWith('.mpg')
       const isPdf = p.endsWith('.pdf')
       const isMedia = isImage || isAudio || isVideo || isPdf
       // Para mídia (imagem/áudio/vídeo/PDF), manter Content-Type adequado para provedores

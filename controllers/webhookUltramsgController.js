@@ -33,6 +33,11 @@ function normalizeUltramsgToZapi(body) {
   if (eventType === 'message_ack' || eventType === 'webhook_message_ack') {
     const msgId = data.id ?? data.sid ?? data.msgId ?? null
     const ids = msgId ? [String(msgId).trim()] : []
+    // referenceId (crm-<mensagem_id>) vem no envelope de TODO evento UltraMSG, inclusive message_ack.
+    // Antes era descartado aqui: o ACK só podia casar por whatsapp_id, que ainda é NULL quando a
+    // UltraMSG devolveu apenas id de fila no envio. Em rajada (várias mensagens seguidas) o fallback
+    // heurístico exige candidato único e descartava o ACK — a mensagem entregue ficava com relógio.
+    const referenceId = body.referenceId ?? body.reference_id ?? data.referenceId ?? data.reference_id ?? null
     return {
       instanceId: body.instanceId ?? body.instance_id,
       instance_id: body.instanceId ?? body.instance_id,
@@ -41,7 +46,8 @@ function normalizeUltramsgToZapi(body) {
       id: msgId,
       ack: data.ack ?? data.status ?? 'pending',
       status: mapUltramsgAckToStatus(data.ack ?? data.status),
-      ids
+      ids,
+      ...(referenceId ? { referenceId, ultramsgReferenceId: referenceId } : {})
     }
   }
 

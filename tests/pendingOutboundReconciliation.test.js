@@ -49,3 +49,30 @@ describe('pendingOutboundReconciliationService helpers', () => {
     expect(_test.mapProviderAckToStatus({ status: 'sent' })).toBe('sent')
   })
 })
+
+describe('escalonamento de mensagem presa na fila UltraMSG', () => {
+  test('firstQueueIdCandidate prioriza id do provedor e ignora id nao-fila', () => {
+    expect(_test.firstQueueIdCandidate({}, { id: '35096' })).toBe('35096')
+    expect(_test.firstQueueIdCandidate({ provider_queue_id: '777' }, { id: 'BAE543FE1CE17AFA' })).toBe('777')
+    expect(_test.firstQueueIdCandidate({ whatsapp_id: '4321' }, {})).toBe('4321')
+    expect(_test.firstQueueIdCandidate({ whatsapp_id: 'BAE543FE1CE17AFA' }, {})).toBeNull()
+    expect(_test.firstQueueIdCandidate({}, {})).toBeNull()
+  })
+
+  test('janelas de escalonamento tem ordem coerente: flush antes de desistir', () => {
+    expect(_test.getQueueFlushAfterMs()).toBeLessThan(_test.getQueueGiveUpAfterMs())
+    expect(_test.getQueueFlushMaxAttempts()).toBeGreaterThanOrEqual(1)
+  })
+
+  test('defaults: flush em 10min, desistencia em 2h', () => {
+    expect(_test.getQueueFlushAfterMs()).toBe(10 * 60_000)
+    expect(_test.getQueueGiveUpAfterMs()).toBe(120 * 60_000)
+    expect(_test.getQueueFlushMaxAttempts()).toBe(3)
+  })
+
+  test("status 'queue' nao e mais tratado como sucesso nem como falha", () => {
+    expect(_test.providerRowInQueue({ status: 'queue' })).toBe(true)
+    expect(_test.providerRowIndicatesSuccess({ status: 'queue' })).toBe(false)
+    expect(_test.providerRowIndicatesFailure({ status: 'queue' })).toBe(false)
+  })
+})

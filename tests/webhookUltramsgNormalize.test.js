@@ -269,3 +269,41 @@ describe('ReceivedCallback envelope — tipo de mídia preservado via messageTyp
     expect(r.type).toBe('link')
   })
 })
+
+describe('normalizeUltramsgToZapi — message_ack propaga referenceId', () => {
+  const ackBody = (extra = {}) => ({
+    event_type: 'message_ack',
+    instanceId: '123',
+    referenceId: 'crm-4321',
+    data: { id: 'false_5511999999999@c.us_ABC123', ack: 'device' },
+    ...extra,
+  })
+
+  test('referenceId do envelope chega ao pipeline (casamento determinístico do ACK)', () => {
+    const n = normalizeUltramsgToZapi(ackBody())
+    expect(n.referenceId).toBe('crm-4321')
+    expect(n.ultramsgReferenceId).toBe('crm-4321')
+  })
+
+  test('ack device vira delivered e mantém o id como identificador', () => {
+    const n = normalizeUltramsgToZapi(ackBody())
+    expect(n.status).toBe('delivered')
+    expect(n.ids).toEqual(['false_5511999999999@c.us_ABC123'])
+  })
+
+  test('sem referenceId não inventa campo (payloads antigos seguem iguais)', () => {
+    const body = ackBody()
+    delete body.referenceId
+    const n = normalizeUltramsgToZapi(body)
+    expect(n.referenceId).toBeUndefined()
+    expect(n.ultramsgReferenceId).toBeUndefined()
+  })
+
+  test('aceita referenceId aninhado em data (variação de payload)', () => {
+    const body = ackBody({ data: { id: 'x_y_z', ack: 'read', referenceId: 'crm-99' } })
+    delete body.referenceId
+    const n = normalizeUltramsgToZapi(body)
+    expect(n.referenceId).toBe('crm-99')
+    expect(n.status).toBe('read')
+  })
+})

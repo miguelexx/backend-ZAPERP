@@ -101,4 +101,44 @@ describe('atendimentoLimitsService', () => {
     expect(response.limit_code).toBe('MESSAGE_INTERVAL_ACTIVE')
     expect(response.limit.retry_after_seconds).toBe(18)
   })
+
+  test('erro transitorio no RPC nao pode barrar o envio (fail-open)', async () => {
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {})
+    const client = {
+      rpc: jest.fn().mockResolvedValue({
+        data: null,
+        error: { code: '57014', message: 'canceling statement due to statement timeout' },
+      }),
+    }
+
+    const result = await validateAndConsumeForMessage({
+      company_id: 1,
+      usuario_id: 2,
+      conversa_id: 3,
+    }, client)
+
+    expect(result.allowed).toBe(true)
+    expect(result.consumed).toBe(false)
+    expect(result.skipped).toBe('validation_error')
+    expect(warn).toHaveBeenCalled()
+    warn.mockRestore()
+  })
+
+  test('recusa deliberada de cota continua bloqueando (fail-open nao vira bypass)', async () => {
+    const client = {
+      rpc: jest.fn().mockResolvedValue({
+        data: { allowed: false, code: 'DAILY_LIMIT_REACHED', message: 'Limite diario atingido.' },
+        error: null,
+      }),
+    }
+
+    const result = await validateAndConsumeForMessage({
+      company_id: 1,
+      usuario_id: 2,
+      conversa_id: 3,
+    }, client)
+
+    expect(result.allowed).toBe(false)
+    expect(result.status).toBe(429)
+  })
 })
