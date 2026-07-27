@@ -4082,7 +4082,10 @@ exports.detalharChat = async (req, res) => {
       !isGroup && !conversaEncerrada && conversaAssumidaPorOutro && !isAdmin && !isSupervisor
 
     // mensagens paginadas (remetente_nome/remetente_telefone para grupos; fallback se colunas não existirem)
-    const selectComRemetente = 'id, conversa_id, texto, direcao, criado_em, autor_usuario_id, status, whatsapp_id, whatsapp_instance_id, tipo, url, nome_arquivo, reply_meta, remetente_nome, remetente_telefone, contact_meta, location_meta, apagada_para_todos, apagada_em'
+    // client_temp_id vai junto porque é ele que liga a linha do banco à bolha otimista do frontend:
+    // sem ele, um refresh logo após o envio traz a mídia sem correlação e a bolha otimista do áudio
+    // (que exige correlação explícita para fundir) fica na tela ao lado da confirmada → bolha duplicada.
+    const selectComRemetente = 'id, conversa_id, texto, direcao, criado_em, autor_usuario_id, status, whatsapp_id, whatsapp_instance_id, tipo, url, nome_arquivo, reply_meta, remetente_nome, remetente_telefone, contact_meta, location_meta, apagada_para_todos, apagada_em, client_temp_id'
     let mensagens = []
     let errMsgs = null
     let query

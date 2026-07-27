@@ -38,6 +38,18 @@ function maxConcurrent() {
   return parsePositiveIntEnv('INBOUND_MEDIA_BACKFILL_MAX_CONCURRENT', 3, { min: 1, max: 20 })
 }
 
+/**
+ * Espera máxima da passada de arrasto numa rajada.
+ *
+ * O debounce existe para não disparar um GET por mensagem, mas ele NÃO deve definir quanto tempo
+ * o áudio fica sem tocar: um único GET repara todas as mensagens pendentes da conversa de uma vez.
+ * Sem este teto, o 2º/3º áudio de uma rajada só ficava audível ao fim da janela de debounce
+ * (até 60s). Com ele, a rajada continua coalescida em UMA passada extra, só que em segundos.
+ */
+function trailingMaxDelayMs() {
+  return parsePositiveIntEnv('INBOUND_MEDIA_BACKFILL_TRAILING_MS', 8_000, { min: 1_000, max: 120_000 })
+}
+
 /** URL renderável já presente? (https remota ou /uploads local) */
 function hasUsableMediaUrl(url) {
   const u = String(url || '').trim()
@@ -150,9 +162,12 @@ function scheduleInboundMediaBackfill(ctx) {
   const runCtx = { supabase, io, company_id, conversa_id, source: 'inbound_media_backfill' }
 
   if (last && now - last < debounceMs()) {
-    // Já rodou há pouco: agenda a passada de arrasto ao FIM da janela de debounce, capturando
-    // os áudios que chegaram depois do GET anterior sem re-disparar um GET por mensagem.
-    _armTrailingBackfill(runCtx, (last + debounceMs()) - now)
+    // Já rodou há pouco: agenda a passada de arrasto para capturar os áudios que chegaram depois
+    // do GET anterior, sem re-disparar um GET por mensagem. O atraso é limitado a poucos segundos
+    // (não ao fim da janela de debounce) — quem manda 3 áudios seguidos precisa ouvir os três na
+    // hora, e uma única passada repara todos de uma vez.
+    const restanteDaJanela = (last + debounceMs()) - now
+    _armTrailingBackfill(runCtx, Math.min(restanteDaJanela, trailingMaxDelayMs()))
     return
   }
 
