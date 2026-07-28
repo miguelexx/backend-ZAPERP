@@ -10,6 +10,10 @@ describe('hasUsableMediaUrl', () => {
     ['/uploads/inbound-c1-m2.ogg', true],
     ['', false],
     [null, false],
+    [false, false],
+    ['false', false],
+    ['null', false],
+    ['undefined', false],
     ['(áudio)', false],
   ])('%s → %s', (url, expected) => {
     expect(hasUsableMediaUrl(url)).toBe(expected)
@@ -26,6 +30,11 @@ describe('precisaBackfillMidia', () => {
     expect(precisaBackfillMidia({ tipo: 'texto', texto: '(imagem)', url: null })).toBe(true)
     expect(precisaBackfillMidia({ tipo: 'arquivo', texto: '(arquivo)', url: null })).toBe(true)
     expect(precisaBackfillMidia({ tipo: 'texto', texto: '(vídeo)', url: null })).toBe(true)
+  })
+
+  test('arquivo com sentinela antiga no campo URL → precisa de reparo', () => {
+    expect(precisaBackfillMidia({ tipo: 'arquivo', texto: '(arquivo)', url: false })).toBe(true)
+    expect(precisaBackfillMidia({ tipo: 'arquivo', texto: 'comprovante.pdf', url: 'false' })).toBe(true)
   })
 
   test('placeholder genérico "(mensagem)" sem URL → precisa (pode ser mídia sem tipo)', () => {

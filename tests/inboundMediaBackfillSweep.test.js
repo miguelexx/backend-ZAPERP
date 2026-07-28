@@ -51,15 +51,18 @@ test('repara conversas com áudio sem URL e ignora linhas já com URL', async ()
     [
       { id: 4, company_id: 7, conversa_id: 300, tipo: 'voice', texto: '(áudio)', url: null }, // linha tipada sem URL
     ],
+    [
+      { id: 5, company_id: 7, conversa_id: 400, tipo: 'arquivo', texto: 'comprovante.pdf', url: 'false' }, // legado
+    ],
   ])
 
   const out = await runInboundMediaBackfillSweep(supabase, null)
 
-  // Deve reparar conversas 100 e 300 (uma vez cada); 200 ignorada.
-  expect(syncOldMessagesForConversation).toHaveBeenCalledTimes(2)
+  // Deve reparar conversas 100, 300 e o documento legado 400; 200 já tem URL.
+  expect(syncOldMessagesForConversation).toHaveBeenCalledTimes(3)
   const convs = syncOldMessagesForConversation.mock.calls.map((c) => c[1]).sort()
-  expect(convs).toEqual([100, 300])
-  expect(out.conversationsTriggered).toBe(2)
+  expect(convs).toEqual([100, 300, 400])
+  expect(out.conversationsTriggered).toBe(3)
 })
 
 test('desligado por env não faz nada', async () => {
@@ -73,6 +76,7 @@ test('desligado por env não faz nada', async () => {
 test('nenhuma mídia sem URL → não dispara reparo', async () => {
   const supabase = makeSupabase([
     [{ id: 1, company_id: 7, conversa_id: 100, tipo: 'imagem', texto: '(imagem)', url: '/uploads/x.jpg' }],
+    [],
     [],
   ])
   const out = await runInboundMediaBackfillSweep(supabase, null)

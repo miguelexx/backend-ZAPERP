@@ -96,4 +96,33 @@ describe('chatListCountsService', () => {
       )
     ).toBe(false)
   })
+
+  test('minha fila conta grupos do setor igual a listagem (chip nao fica menor que a lista)', () => {
+    const grupoRow = { id: 7, tipo: 'grupo', status_atendimento: null, atendente_id: null, mensagens: [{ id: 1 }] }
+
+    // Atendente com grupos vinculados ao setor: listarConversas mostra o grupo, então conta.
+    expect(
+      rowVisibleInPostFilteredList(
+        grupoRow,
+        { user_id: 84, isAtendente: true, isAdmin: false, grupoIdsPermitidosPorDepartamento: [7] },
+        { minha_fila: true }
+      )
+    ).toBe(true)
+
+    // Admin (ou usuário sem grupos de setor): grupos seguem fora da Minha fila, como na listagem.
+    expect(
+      rowVisibleInPostFilteredList(
+        grupoRow,
+        { user_id: 84, isAtendente: false, isAdmin: true, grupoIdsPermitidosPorDepartamento: [7] },
+        { minha_fila: true }
+      )
+    ).toBe(false)
+    expect(
+      rowVisibleInPostFilteredList(
+        grupoRow,
+        { user_id: 84, isAtendente: true, isAdmin: false, grupoIdsPermitidosPorDepartamento: [] },
+        { minha_fila: true }
+      )
+    ).toBe(false)
+  })
 })

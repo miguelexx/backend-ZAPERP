@@ -37,6 +37,60 @@ describe('GET /api/chats pagination contract', () => {
     })
   })
 
+  test('next cursor comes from the SQL order, not from the JS-reordered page', () => {
+    const { resolveChatListNextCursor, CHAT_LIST_SQL_INDEX: SQL_INDEX } = _test
+    // Ordem do SQL: ultima_atividade DESC. Índice 2 é a fronteira real desta página.
+    const sqlRows = [
+      { id: 30, ultima_atividade: '2026-06-06T12:00:00.000Z' },
+      { id: 20, ultima_atividade: '2026-06-06T11:00:00.000Z' },
+      { id: 10, ultima_atividade: '2026-06-06T10:00:00.000Z' },
+      { id: 5, ultima_atividade: '2026-06-06T09:00:00.000Z' },
+    ]
+    // Lista entregue já reordenada em JS (fixada no topo) — a última linha exibida é a de 11:00.
+    const pageRows = [
+      { id: 10, [SQL_INDEX]: 2, fixada: true },
+      { id: 30, [SQL_INDEX]: 0 },
+      { id: 20, [SQL_INDEX]: 1 },
+    ]
+
+    expect(resolveChatListNextCursor(pageRows, sqlRows, true, true)).toEqual({
+      has_more: true,
+      next_cursor: '2026-06-06T10:00:00.000Z',
+      next_cursor_id: 10,
+    })
+  })
+
+  test('next cursor uses the last consumed SQL row when nothing was truncated', () => {
+    const { resolveChatListNextCursor, CHAT_LIST_SQL_INDEX: SQL_INDEX } = _test
+    const sqlRows = [
+      { id: 30, ultima_atividade: '2026-06-06T12:00:00.000Z' },
+      { id: 20, ultima_atividade: '2026-06-06T11:00:00.000Z' },
+    ]
+    // Pós-filtros derrubaram a linha 20; ainda assim ela foi consumida do SQL.
+    const pageRows = [{ id: 30, [SQL_INDEX]: 0 }]
+
+    expect(resolveChatListNextCursor(pageRows, sqlRows, false, true)).toEqual({
+      has_more: true,
+      next_cursor: '2026-06-06T11:00:00.000Z',
+      next_cursor_id: 20,
+    })
+  })
+
+  test('stops paginating instead of emitting an unusable cursor', () => {
+    const { resolveChatListNextCursor, CHAT_LIST_SQL_INDEX: SQL_INDEX } = _test
+    const semMais = resolveChatListNextCursor([], [{ id: 1, ultima_atividade: null }], false, false)
+    expect(semMais).toEqual({ has_more: false, next_cursor: null, next_cursor_id: null })
+
+    // Cauda de ultima_atividade NULL: não há keyset válido (o cursor compara ultima_atividade).
+    const semCursor = resolveChatListNextCursor(
+      [{ id: 1, [SQL_INDEX]: 0 }],
+      [{ id: 1, ultima_atividade: null, criado_em: '2026-06-06T10:00:00.000Z' }],
+      false,
+      true
+    )
+    expect(semCursor).toEqual({ has_more: false, next_cursor: null, next_cursor_id: null })
+  })
+
   test('does not include clients without conversation by default or without search', () => {
     expect(_test.shouldIncludeClientesSemConversa({
       incluirTodosClientesAtivo: false,

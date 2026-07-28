@@ -92,6 +92,44 @@ function isRemoteMediaUrl(url) {
   return u.startsWith('http://') || u.startsWith('https://')
 }
 
+/**
+ * Providers podem responder `false` enquanto o download ainda não está pronto.
+ * Isso representa "sem URL", permitindo que o backfill recupere o arquivo depois.
+ */
+function normalizeInboundMediaUrl(value) {
+  let candidate = value
+  if (candidate && typeof candidate === 'object') {
+    candidate =
+      candidate.url ??
+      candidate.link ??
+      candidate.file ??
+      candidate.src ??
+      candidate.documentUrl ??
+      candidate.imageUrl ??
+      candidate.audioUrl ??
+      candidate.videoUrl ??
+      candidate.stickerUrl ??
+      null
+  }
+  if (typeof candidate !== 'string') return null
+  const url = candidate.trim()
+  if (!url || !/^https:\/\//i.test(url)) return null
+  try {
+    const parsed = new URL(url)
+    return parsed.protocol === 'https:' && parsed.hostname ? parsed.href : null
+  } catch {
+    return null
+  }
+}
+
+function firstInboundMediaUrl(...values) {
+  for (const value of values) {
+    const normalized = normalizeInboundMediaUrl(value)
+    if (normalized) return normalized
+  }
+  return null
+}
+
 function isLocalUploadMediaUrl(url) {
   return String(url || '').trim().startsWith('/uploads/')
 }
@@ -908,25 +946,23 @@ function extractMessage(payload) {
 
   let texto = String(rawMessage || '').trim()
   // URLs de mídia
-  let imageUrl =
-    payload.image?.imageUrl ??
-    payload.image?.url ??
-    payload.imageUrl ??
-    payload.message?.image?.imageUrl ??
-    payload.message?.image?.url ??
-    payload.message?.imageUrl ??
-    payload.image ??
-    null
-  if (imageUrl && typeof imageUrl === 'object') imageUrl = imageUrl.url ?? imageUrl.imageUrl ?? null
-  let documentUrl =
-    payload.document?.documentUrl ??
-    payload.document?.url ??
-    payload.documentUrl ??
-    payload.message?.document?.documentUrl ??
-    payload.message?.document?.url ??
-    payload.message?.documentUrl ??
-    null
-  if (documentUrl && typeof documentUrl === 'object') documentUrl = documentUrl.url ?? documentUrl.documentUrl ?? null
+  const imageUrl = firstInboundMediaUrl(
+    payload.image?.imageUrl,
+    payload.image?.url,
+    payload.imageUrl,
+    payload.message?.image?.imageUrl,
+    payload.message?.image?.url,
+    payload.message?.imageUrl,
+    payload.image
+  )
+  const documentUrl = firstInboundMediaUrl(
+    payload.document?.documentUrl,
+    payload.document?.url,
+    payload.documentUrl,
+    payload.message?.document?.documentUrl,
+    payload.message?.document?.url,
+    payload.message?.documentUrl
+  )
   let fileName =
     payload.document?.fileName ??
     payload.document?.filename ??
@@ -941,36 +977,33 @@ function extractMessage(payload) {
     fileName = texto
   }
   // Áudio: diferentes formatos (Z-API pode mandar em payload.audio, payload.message.audio, ou fields diretos)
-  let audioUrl =
-    payload.audio?.audioUrl ??
-    payload.audio?.url ??
-    payload.audioUrl ??
-    payload.message?.audio?.audioUrl ??
-    payload.message?.audio?.url ??
-    payload.message?.audioUrl ??
-    null
-  if (audioUrl && typeof audioUrl === 'object') audioUrl = audioUrl.url ?? audioUrl.audioUrl ?? null
-  let videoUrl =
-    payload.video?.videoUrl ??
-    payload.video?.url ??
-    payload.videoUrl ??
-    payload.message?.video?.videoUrl ??
-    payload.message?.video?.url ??
-    payload.message?.videoUrl ??
-    payload.ptv?.url ??
-    null
-  if (videoUrl && typeof videoUrl === 'object') videoUrl = videoUrl.url ?? videoUrl.videoUrl ?? null
+  const audioUrl = firstInboundMediaUrl(
+    payload.audio?.audioUrl,
+    payload.audio?.url,
+    payload.audioUrl,
+    payload.message?.audio?.audioUrl,
+    payload.message?.audio?.url,
+    payload.message?.audioUrl
+  )
+  const videoUrl = firstInboundMediaUrl(
+    payload.video?.videoUrl,
+    payload.video?.url,
+    payload.videoUrl,
+    payload.message?.video?.videoUrl,
+    payload.message?.video?.url,
+    payload.message?.videoUrl,
+    payload.ptv?.url
+  )
 
-  let stickerUrl =
-    payload.sticker?.stickerUrl ??
-    payload.sticker?.url ??
-    payload.stickerUrl ??
-    payload.message?.sticker?.stickerUrl ??
-    payload.message?.sticker?.url ??
-    payload.message?.stickerUrl ??
-    null
-  if (stickerUrl && typeof stickerUrl === 'object') stickerUrl = stickerUrl.url ?? stickerUrl.stickerUrl ?? null
-  let locationUrl = payload.location?.url ?? payload.location?.thumbnailUrl ?? null
+  const stickerUrl = firstInboundMediaUrl(
+    payload.sticker?.stickerUrl,
+    payload.sticker?.url,
+    payload.stickerUrl,
+    payload.message?.sticker?.stickerUrl,
+    payload.message?.sticker?.url,
+    payload.message?.stickerUrl
+  )
+  let locationUrl = firstInboundMediaUrl(payload.location?.url, payload.location?.thumbnailUrl)
   // Se não tiver URL mas tiver lat/lng (ex: UltraMsg), monta link do Google Maps
   const loc = payload.location || {}
   if (!locationUrl && (loc.latitude != null || loc.lat != null) && (loc.longitude != null || loc.lng != null)) {
@@ -4376,6 +4409,7 @@ exports._test = {
   isMediaPlaceholderText,
   resolvePlaceholderUpgradeTexto,
   familiaMidiaDeMensagemExistente,
+  normalizeInboundMediaUrl,
   whatsappIdCompativelParaReconcile,
   filterRowsForFromMeReconcile,
   findFromMeOutboundMediaCandidate,

@@ -220,6 +220,17 @@ describe('buildPlaceholderRepairPatch', () => {
     ).toBe(null)
   })
 
+  test.each([false, 'false', 'null', 'undefined', '0'])(
+    'URL sentinela antiga %p é substituída pela URL real do provider',
+    (invalidUrl) => {
+      const patch = buildPlaceholderRepairPatch(
+        { id: 1, texto: '(arquivo)', tipo: 'arquivo', url: invalidUrl },
+        { texto: '(arquivo)', tipo: 'arquivo', url: S3, nome_arquivo: 'comprovante.pdf' }
+      )
+      expect(patch).toEqual({ url: S3, nome_arquivo: 'comprovante.pdf' })
+    }
+  )
+
   test('tipo de mídia já definido nunca é trocado por outro', () => {
     const patch = buildPlaceholderRepairPatch(
       { id: 1, texto: '(áudio)', tipo: 'voice', url: null },

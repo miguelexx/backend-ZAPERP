@@ -181,6 +181,7 @@ function scheduleInboundMediaBackfill(ctx) {
 // ('(áudio)'…); linhas tipadas sem URL (voice/audio/imagem…) também entram por garantia.
 const SWEEP_PLACEHOLDER_TEXTS = Array.from(MEDIA_PLACEHOLDER_TEXTS)
 const SWEEP_MEDIA_TIPOS = ['voice', 'audio', 'imagem', 'video', 'sticker', 'arquivo']
+const SWEEP_INVALID_URL_SENTINELS = ['', 'false', 'null', 'undefined', '0']
 
 function isSweepDisabled() {
   return isBackfillDisabled() ||
@@ -219,8 +220,8 @@ async function runInboundMediaBackfillSweep(supabase, io = null) {
     }
   }
 
-  // Duas queries simples (evita .or() do PostgREST, que já mordeu este projeto): mídia sem URL
-  // chega como placeholder de texto E, por garantia, como tipo de mídia sem URL.
+  // Queries simples (evita .or() do PostgREST, que já mordeu este projeto): placeholders,
+  // tipos com SQL NULL e sentinelas legadas como "false".
   try {
     const { data: porTexto, error: e1 } = await supabase
       .from('mensagens')
@@ -248,6 +249,21 @@ async function runInboundMediaBackfillSweep(supabase, io = null) {
     else coletar(porTipo)
   } catch (e) {
     console.warn('[inboundMediaBackfill/sweep] query tipo (throw):', e?.message || e)
+  }
+
+  try {
+    const { data: porSentinela, error: e3 } = await supabase
+      .from('mensagens')
+      .select('id, company_id, conversa_id, tipo, texto, url, criado_em')
+      .in('tipo', SWEEP_MEDIA_TIPOS)
+      .in('url', SWEEP_INVALID_URL_SENTINELS)
+      .gte('criado_em', sinceIso)
+      .order('criado_em', { ascending: false })
+      .limit(batch)
+    if (e3) console.warn('[inboundMediaBackfill/sweep] query sentinela:', e3.message)
+    else coletar(porSentinela)
+  } catch (e) {
+    console.warn('[inboundMediaBackfill/sweep] query sentinela (throw):', e?.message || e)
   }
 
   const { syncOldMessagesForConversation } = require('./oldMessagesSyncService')

@@ -906,29 +906,49 @@ function deduplicateConversationsByContact(conversas) {
 }
 
 /**
+ * Conversa já tem alguma mensagem? Linhas sem nenhuma mensagem existem só porque a conversa foi
+ * criada ao abrir/importar um contato (ultima_atividade = momento da criação). Elas não são
+ * atividade real e não podem ocupar o topo da lista à frente de conversas com mensagem recente.
+ * @param {object} c
+ * @returns {boolean}
+ */
+function conversationHasMensagem(c) {
+  if (!c || c.sem_conversa) return false
+  if (c.ultima_mensagem && c.ultima_mensagem.criado_em) return true
+  if (c.ultima_mensagem_preview && c.ultima_mensagem_preview.criado_em) return true
+  return Array.isArray(c.mensagens) && c.mensagens.length > 0
+}
+
+/** Timestamp efetivo de atividade da conversa (mais recente entre mensagem e atividade). */
+function conversationActivityTs(c) {
+  const candidates = [
+    c?.ultima_mensagem?.criado_em,
+    c?.ultima_mensagem_preview?.criado_em,
+    c?.ultima_atividade,
+    c?.criado_em,
+  ]
+  let best = 0
+  for (const raw of candidates) {
+    const t = new Date(raw || 0).getTime()
+    if (Number.isFinite(t) && t > best) best = t
+  }
+  return best
+}
+
+/**
  * Ordena conversas: mais recentes no topo (como WhatsApp).
+ * Conversas sem nenhuma mensagem vão para o fim — não disputam o topo com conversas reais.
  * @param {Array} conversas
  * @returns {Array}
  */
 function sortConversationsByRecent(conversas) {
   if (!Array.isArray(conversas)) return conversas
   return [...conversas].sort((a, b) => {
-    const pickTs = (c) => {
-      const candidates = [
-        c?.ultima_mensagem?.criado_em,
-        c?.ultima_mensagem_preview?.criado_em,
-        c?.ultima_atividade,
-        c?.criado_em,
-      ]
-      let best = 0
-      for (const raw of candidates) {
-        const t = new Date(raw || 0).getTime()
-        if (Number.isFinite(t) && t > best) best = t
-      }
-      return best
-    }
-    const ta = pickTs(a)
-    const tb = pickTs(b)
+    const aTem = conversationHasMensagem(a)
+    const bTem = conversationHasMensagem(b)
+    if (aTem !== bTem) return aTem ? -1 : 1
+    const ta = conversationActivityTs(a)
+    const tb = conversationActivityTs(b)
     if (tb !== ta) return tb - ta
     return (Number(b.id) || 0) - (Number(a.id) || 0)
   })
@@ -949,6 +969,9 @@ function sortConversationsPinThenRecent(conversas) {
       const tfb = new Date(b.fixada_em || b.ultima_atividade || b.criado_em || 0).getTime()
       if (tfb !== tfa) return tfb - tfa
     }
+    const aTem = conversationHasMensagem(a)
+    const bTem = conversationHasMensagem(b)
+    if (aTem !== bTem) return aTem ? -1 : 1
     const ta = new Date(a.ultima_atividade || a.criado_em || 0).getTime()
     const tb = new Date(b.ultima_atividade || b.criado_em || 0).getTime()
     if (tb !== ta) return tb - ta
@@ -963,6 +986,7 @@ module.exports = {
   mergeConversasIntoCanonico,
   mergeConversationLidToPhone,
   deduplicateConversationsByContact,
+  conversationHasMensagem,
   sortConversationsByRecent,
   sortConversationsPinThenRecent,
 }

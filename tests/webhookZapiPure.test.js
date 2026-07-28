@@ -14,6 +14,7 @@ const {
   extractMessage,
   resolvePlaceholderUpgradeTexto,
   familiaMidiaDeMensagemExistente,
+  normalizeInboundMediaUrl,
 } = _test
 
 // Silencia console.warn (resolveConversationKeyFromZapi avisa quando connectedPhone está ausente)
@@ -256,6 +257,33 @@ describe('extractMessage', () => {
     expect(r.texto).toBe('relatorio.pdf')
   })
 
+  test.each([false, 'false', 'null', 'undefined', 0, { url: false }])(
+    'documento com sentinela de URL %p permanece sem URL para permitir backfill',
+    (invalidUrl) => {
+      const r = extractMessage({
+        ...BASE,
+        document: { documentUrl: invalidUrl, fileName: 'comprovante.pdf' },
+        type: 'document',
+      })
+      expect(r.type).toBe('document')
+      expect(r.documentUrl).toBeNull()
+      expect(r.fileName).toBe('comprovante.pdf')
+    }
+  )
+
+  test('sentinela em documentUrl não mascara uma URL válida no campo alternativo', () => {
+    const r = extractMessage({
+      ...BASE,
+      document: {
+        documentUrl: false,
+        url: 'https://cdn.example.com/comprovante.pdf',
+        fileName: 'comprovante.pdf',
+      },
+      type: 'document',
+    })
+    expect(r.documentUrl).toBe('https://cdn.example.com/comprovante.pdf')
+  })
+
   test('sticker — texto padrão (figurinha)', () => {
     const r = extractMessage({ ...BASE, sticker: { stickerUrl: 'https://cdn/stk.webp' } })
     expect(r.type).toBe('sticker')
@@ -367,6 +395,18 @@ describe('extractMessage', () => {
     const r = extractMessage({ ...BASE, zaapId: 'ZAAP_1', key: { id: 'KEY_1' } })
     expect(r.messageId).toBe('ZAAP_1')
   })
+})
+
+describe('normalizeInboundMediaUrl', () => {
+  test('aceita HTTPS em string ou objeto conhecido', () => {
+    expect(normalizeInboundMediaUrl('https://cdn.example.com/a.pdf')).toBe('https://cdn.example.com/a.pdf')
+    expect(normalizeInboundMediaUrl({ link: 'https://cdn.example.com/a.pdf' })).toBe('https://cdn.example.com/a.pdf')
+  })
+
+  test.each([false, true, 0, 'false', 'null', 'undefined', '/uploads/a.pdf', 'http://cdn/a.pdf', {}])(
+    'rejeita valor que não é URL remota HTTPS: %p',
+    (value) => expect(normalizeInboundMediaUrl(value)).toBeNull()
+  )
 })
 
 // ─────────────────────────── fromMe reconcile helpers ─────────────────────────

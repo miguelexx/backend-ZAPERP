@@ -378,6 +378,51 @@ function applyChatListCursor(query, cursorUltimaAtividade, cursorIdRaw) {
   return query.lt('ultima_atividade', cursor)
 }
 
+/**
+ * Marca a posição original (ordem do SQL) de cada linha da lista de conversas.
+ * Symbol: sobrevive ao spread dos pós-processamentos e some sozinho no JSON da resposta.
+ */
+const CHAT_LIST_SQL_INDEX = Symbol('chatListSqlIndex')
+
+/**
+ * Cursor keyset da próxima página a partir da ordem do SQL (ultima_atividade DESC, id DESC).
+ * `pageRows` já vem reordenado/filtrado em JS, então a fronteira é a MAIOR posição de SQL
+ * ainda entregue — usar a última linha exibida devolveria linhas repetidas na página seguinte.
+ * @param {Array} pageRows linhas efetivamente devolvidas nesta página
+ * @param {Array} sqlRows linhas cruas do SQL (na ordem do banco)
+ * @param {boolean} truncated a lista formatada era maior que o limite (sobrou linha visível)
+ * @param {boolean} sqlHadMore o SQL trouxe mais linhas que o limite
+ */
+function resolveChatListNextCursor(pageRows, sqlRows, truncated, sqlHadMore) {
+  const rows = Array.isArray(sqlRows) ? sqlRows : []
+  const hasMore = Boolean(truncated || sqlHadMore)
+  if (!hasMore || rows.length === 0) {
+    return { has_more: false, next_cursor: null, next_cursor_id: null }
+  }
+
+  let boundary = rows[rows.length - 1]
+  if (truncated) {
+    // Truncamos linhas visíveis: a fronteira é a última linha do SQL que ainda entrou na página.
+    let maxIndex = -1
+    for (const row of Array.isArray(pageRows) ? pageRows : []) {
+      const idx = row ? row[CHAT_LIST_SQL_INDEX] : undefined
+      if (Number.isInteger(idx) && idx > maxIndex) maxIndex = idx
+    }
+    if (maxIndex >= 0) boundary = rows[maxIndex]
+  }
+
+  // O cursor é comparado contra `ultima_atividade`; sem esse valor não há keyset válido
+  // (a cauda de NULL fica no fim do ORDER BY e não é paginável) — encerra a paginação.
+  const cursor = boundary && boundary.ultima_atividade ? boundary.ultima_atividade : null
+  if (!cursor) return { has_more: false, next_cursor: null, next_cursor_id: null }
+
+  return {
+    has_more: true,
+    next_cursor: cursor,
+    next_cursor_id: boundary.id != null ? Number(boundary.id) : null,
+  }
+}
+
 function splitChatListPage(rows = [], limit = 100) {
   const safeRows = Array.isArray(rows) ? rows : []
   const safeLimit = Math.max(1, Math.floor(Number(limit) || 100))
@@ -2160,7 +2205,7 @@ exports.listarConversas = async (req, res) => {
     }
 
     const cid = Number(company_id)
-    let conversasFormatadas = (rawSqlRows || []).map((c) => {
+    let conversasFormatadas = (rawSqlRows || []).map((c, sqlRowIndex) => {
       const raw = c.clientes
       let clientesObj = Array.isArray(raw)
         ? (raw.find((cl) => cl && Number(cl.id) === Number(c.cliente_id)) || raw[0])
@@ -2249,6 +2294,10 @@ exports.listarConversas = async (req, res) => {
         temNovasMensagens
 
       return {
+        // Posição da linha na ordem do SQL (ultima_atividade DESC, id DESC).
+        // A lista é reordenada em JS depois daqui, então o cursor da próxima página precisa
+        // sair da ordem do SQL — senão a página seguinte repete linhas já entregues.
+        [CHAT_LIST_SQL_INDEX]: sqlRowIndex,
         id: c.id,
         whatsapp_instance_id: c.whatsapp_instance_id ?? null,
         ...safeWhatsappInstanceMeta(whatsappInstanceMetaMap.get(Number(c.whatsapp_instance_id))),
@@ -2743,25 +2792,17 @@ exports.listarConversas = async (req, res) => {
       console.warn('[listarConversas] prefs:', e?.message || e)
     }
 
-    let chatListPage = splitChatListPage(conversasFormatadas || [], chatListPagination.limit)
-    if (
-      !chatListPage.pagination.has_more &&
-      rawSqlHadMore &&
-      (chatListPage.rows.length < chatListPagination.limit || chatListPage.rows.length === 0)
-    ) {
-      const cursorRow =
-        rawSqlRows[Math.min(chatListPagination.limit, rawSqlRows.length) - 1] ||
-        rawSqlRows[rawSqlRows.length - 1]
-      chatListPage = {
-        rows: chatListPage.rows,
-        pagination: {
-          ...chatListPage.pagination,
-          has_more: true,
-          next_cursor: cursorRow?.ultima_atividade || cursorRow?.criado_em || null,
-          next_cursor_id: cursorRow?.id != null ? Number(cursorRow.id) : null,
-        },
-      }
-    }
+    const chatListPage = splitChatListPage(conversasFormatadas || [], chatListPagination.limit)
+    // O cursor sai SEMPRE da ordem do SQL, nunca da lista reordenada em JS (fixadas no topo,
+    // ordenação por última mensagem, dedupe por contato). Caso contrário a página seguinte
+    // recomeça acima da fronteira real e devolve conversas já entregues.
+    const chatListCursor = resolveChatListNextCursor(
+      chatListPage.rows,
+      rawSqlRows,
+      chatListPage.pagination.has_more,
+      rawSqlHadMore
+    )
+    chatListPage.pagination = { ...chatListPage.pagination, ...chatListCursor }
     conversasFormatadas = chatListPage.rows
 
     const responsePagination = {
@@ -8961,6 +9002,8 @@ exports._test = {
   assertPermissaoConversa,
   parseChatListPagination,
   splitChatListPage,
+  resolveChatListNextCursor,
+  CHAT_LIST_SQL_INDEX,
   parseMessageHistoryPagination,
   splitMessageHistoryPage,
   shouldIncludeClientesSemConversa,

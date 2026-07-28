@@ -216,6 +216,11 @@ function urlFrom(...values) {
   return value && /^https?:\/\//i.test(value) ? value : ''
 }
 
+function hasUsableStoredMediaUrl(value) {
+  const url = String(value || '').trim()
+  return /^https?:\/\//i.test(url) || url.startsWith('/uploads/')
+}
+
 function normalizeOldMessage(raw, { isGroup }) {
   if (!raw || typeof raw !== 'object') return null
   const whatsappId = messageIdFrom(raw)
@@ -411,7 +416,7 @@ function buildPlaceholderRepairPatch(existing, nextInsert) {
   if (!existing || !nextInsert) return null
   const exTexto = String(existing.texto || '').trim()
   const exIsPlaceholder = isRepairablePlaceholderText(exTexto)
-  const exSemUrl = !String(existing.url || '').trim()
+  const exSemUrl = !hasUsableStoredMediaUrl(existing.url)
   const nextTexto = String(nextInsert.texto || '').trim()
   const nextIsPlaceholder = isRepairablePlaceholderText(nextTexto)
 
@@ -428,7 +433,11 @@ function buildPlaceholderRepairPatch(existing, nextInsert) {
     const val = nextInsert[field]
     if (val == null || val === '') continue
     const cur = existing[field]
-    const curEmpty = cur == null || cur === '' || (field === 'tipo' && String(cur).toLowerCase() === 'texto')
+    const curEmpty =
+      cur == null ||
+      cur === '' ||
+      (field === 'url' && !hasUsableStoredMediaUrl(cur)) ||
+      (field === 'tipo' && String(cur).toLowerCase() === 'texto')
     if (curEmpty) patch[field] = val
   }
   if (!exIsPlaceholder) {
