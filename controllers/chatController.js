@@ -72,6 +72,15 @@ const {
   validateAndConsumeForMessage,
   limitErrorResponse,
 } = require('../services/atendimentoLimitsService')
+const {
+  INTERNAL_NOTE_MAX_LEN,
+  INTERNAL_NOTE_PERMISSAO,
+  REAL_MESSAGE_DIRECOES,
+  isInternalNoteRow,
+  sanitizeInternalNoteTexto,
+  buildInternalNoteInsert,
+} = require('../helpers/internalNote')
+const { usuarioTemPermissao } = require('../helpers/permissoesService')
 
 /**
  * Deduplicação in-memory para double-send de texto.
@@ -534,6 +543,8 @@ function emitirConversaAtualizada(io, company_id, conversa_id, payload = null, o
                 .select('id')
                 .eq('company_id', company_id)
                 .eq('conversa_id', cid)
+                // Nota interna não conta como movimentação: não pode promover conversa ociosa para "aberta".
+                .in('direcao', REAL_MESSAGE_DIRECOES)
                 .limit(1)
                 .maybeSingle()
               temMsg = !!um
@@ -820,7 +831,10 @@ async function enrichMensagensComAutorUsuario(supabase, company_id, mensagens, v
   return mensagens.map((m) =>
     decorate(
       m,
-      m.direcao === 'out' && m.autor_usuario_id ? (usuarioMap.get(m.autor_usuario_id) ?? null) : null
+      // Nota interna precisa do nome do autor no card, mas não é mensagem enviada (enviado_por_usuario segue false).
+      (m.direcao === 'out' || isInternalNoteRow(m)) && m.autor_usuario_id
+        ? (usuarioMap.get(m.autor_usuario_id) ?? null)
+        : null
     )
   )
 }
@@ -848,6 +862,23 @@ async function getUsuarioParaEnvioCliente(supabase, company_id, user_id) {
 
 /** Enriquece uma mensagem única com usuario_nome (para evento nova_mensagem) */
 async function enrichMensagemComAutorUsuario(supabase, company_id, msg) {
+  // Nota interna: precisa do nome do autor, mas nunca é "enviada"/fromMe.
+  if (msg && isInternalNoteRow(msg) && msg.autor_usuario_id) {
+    const { data: uNota } = await supabase
+      .from('usuarios')
+      .select('id, nome')
+      .eq('company_id', company_id)
+      .eq('id', msg.autor_usuario_id)
+      .maybeSingle()
+    return {
+      ...msg,
+      criado_em: normalizarTimestampSemFusoAmbiguoParaApi(msg?.criado_em),
+      usuario_id: msg.autor_usuario_id,
+      usuario_nome: uNota?.nome ?? null,
+      enviado_por_usuario: false,
+      fromMe: false,
+    }
+  }
   const isOut = msg?.direcao === 'out'
   if (!msg || !isOut || !msg.autor_usuario_id) {
     return {
@@ -2256,7 +2287,8 @@ exports.listarConversas = async (req, res) => {
           )
       const unreadCount = unreadMap[Number(c.id)] || 0
       // Grupos não têm estado de atendimento: sem badge "aberta", sem status, sem atendente obrigatório
-      const temMensagem = Array.isArray(c.mensagens) && c.mensagens.length > 0
+      // Nota interna não conta como movimentação da conversa (não muda status nem badge).
+      const temMensagem = Array.isArray(c.mensagens) && c.mensagens.some((m) => !isInternalNoteRow(m))
       // Igual a detalharChat: badge "Aberta" só com mensagem ou atendente (sem movimentação → ociosa, fora de Abertas)
       const exibir_badge_aberta =
         !isGroup &&
@@ -4233,8 +4265,9 @@ exports.detalharChat = async (req, res) => {
     const telefoneExibivel = isLidConv ? null : (conversa.telefone ?? clientesConv?.telefone ?? null)
     const fotoCache = (conversa.foto_perfil_contato_cache && String(conversa.foto_perfil_contato_cache).trim()) ? String(conversa.foto_perfil_contato_cache).trim() : null
     const fotoUnica = isGroup ? (conversa.foto_grupo ?? null) : (clientesConv?.foto_perfil ?? fotoCache ?? null)
-    // Badge "Aberta": só exibir quando há movimentação (mensagem ou atendente assumiu) — mesma regra da lista
-    const temMensagem = Array.isArray(mensagens) && mensagens.length > 0
+    // Badge "Aberta": só exibir quando há movimentação (mensagem ou atendente assumiu) — mesma regra da lista.
+    // Nota interna não conta: adicionar nota não pode promover conversa ociosa para "aberta".
+    const temMensagem = Array.isArray(mensagens) && mensagens.some((m) => !isInternalNoteRow(m))
     const dbStatusAtend = String(conversa.status_atendimento || '')
     const exibirBadgeAberta =
       !isGroup &&
@@ -6856,7 +6889,7 @@ exports.excluirMensagem = async (req, res) => {
     // valida que a mensagem é desta conversa/empresa
     const { data: msg, error: errMsgSel } = await supabase
       .from('mensagens')
-      .select('id, conversa_id, criado_em, direcao, autor_usuario_id, whatsapp_id')
+      .select('id, conversa_id, criado_em, direcao, tipo, autor_usuario_id, whatsapp_id')
       .eq('company_id', company_id)
       .eq('conversa_id', cid)
       .eq('id', mid)
@@ -6864,6 +6897,16 @@ exports.excluirMensagem = async (req, res) => {
 
     if (errMsgSel) return res.status(500).json({ error: errMsgSel.message })
     if (!msg) return res.status(404).json({ error: 'Mensagem não encontrada' })
+
+    // Nota interna nunca existiu no WhatsApp: "apagar para todos" (que chama o provedor)
+    // não se aplica. "Apagar para mim" segue permitido logo abaixo.
+    const scopeSomenteParaMim = scope === 'me' || scope === 'mim' || scope === 'self'
+    if (isInternalNoteRow(msg) && !scopeSomenteParaMim) {
+      return res.status(400).json({
+        error: 'Nota interna não existe no WhatsApp — não há o que apagar para todos.',
+        code: 'INTERNAL_NOTE_SEM_WHATSAPP',
+      })
+    }
 
     // =====================================================
     // Apagar "pra mim" (persistente): oculta para este usuário
@@ -8842,7 +8885,7 @@ exports.encaminharMensagem = async (req, res) => {
 
     const { data: mensagensRows, error: errMsg } = await supabase
       .from('mensagens')
-      .select('id, texto, tipo, url, nome_arquivo, contact_meta, location_meta, conversa_id')
+      .select('id, texto, tipo, direcao, url, nome_arquivo, contact_meta, location_meta, conversa_id')
       .eq('company_id', company_id)
       .in('id', orderedIds)
 
@@ -8854,6 +8897,23 @@ exports.encaminharMensagem = async (req, res) => {
     const missing = orderedIds.filter((id) => !byId.has(id))
     if (missing.length) {
       return res.status(404).json({ error: `Mensagem(ns) não encontrada(s): ${missing.join(', ')}` })
+    }
+
+    // Nota interna nunca pode ser encaminhada: este é o único caminho em que o texto de
+    // uma mensagem de OUTRA conversa entra no envio ao WhatsApp (a seleção acima filtra
+    // apenas por company_id, não pela conversa de origem).
+    const notasInternasSelecionadas = orderedIds.filter((id) => isInternalNoteRow(byId.get(id)))
+    if (notasInternasSelecionadas.length) {
+      console.warn('[NOTA_INTERNA] tentativa de encaminhamento bloqueada', {
+        company_id,
+        conversa_id,
+        usuario_id: user_id,
+        mensagem_ids: notasInternasSelecionadas,
+      })
+      return res.status(400).json({
+        error: 'Nota interna não pode ser encaminhada — ela nunca sai para o WhatsApp.',
+        code: 'INTERNAL_NOTE_NAO_ENCAMINHAVEL',
+      })
     }
 
     // Buscar conversa de destino
@@ -8971,6 +9031,170 @@ exports.contarConversasPorFiltros = async (req, res) => {
   } catch (err) {
     console.error('[contarConversasPorFiltros]', err)
     return res.status(500).json({ error: 'Erro ao contar conversas' })
+  }
+}
+
+// =====================================================
+// NOTA INTERNA ("mensagem invisível")
+//
+// Fluxo deliberadamente separado do envio: este handler NÃO chama getProvider(),
+// NÃO passa por assertPodeEnviarMensagem (que auto-assume a conversa e bloqueia
+// conversa fechada), NÃO toca em `conversas` e NÃO mexe em unread/SLA/status.
+// Persiste primeiro, só depois emite o evento realtime.
+// =====================================================
+exports.criarNotaInterna = async (req, res) => {
+  const company_id = Number(req.user?.company_id)
+  const user_id = Number(req.user?.id)
+  const conversa_id = Number(req.params?.id)
+
+  try {
+    if (!Number.isFinite(conversa_id) || conversa_id <= 0) {
+      return res.status(400).json({ error: 'Conversa inválida' })
+    }
+
+    // Conteúdo: valida antes de qualquer I/O.
+    const sanitized = sanitizeInternalNoteTexto(req.body?.texto ?? req.body?.conteudo)
+    if (!sanitized.ok) {
+      const mensagens = {
+        conteudo_vazio: 'Escreva o conteúdo da nota interna.',
+        conteudo_invalido: 'Conteúdo da nota interna inválido.',
+        conteudo_muito_longo: `A nota interna pode ter no máximo ${INTERNAL_NOTE_MAX_LEN} caracteres.`,
+      }
+      return res.status(400).json({ error: mensagens[sanitized.error] || 'Nota interna inválida', code: sanitized.error })
+    }
+
+    // Permissão de criar (catálogo central; override por usuário respeitado).
+    const podeCriar = await usuarioTemPermissao({
+      usuario_id: user_id,
+      company_id,
+      perfil: req.user?.perfil,
+      permissao_codigo: INTERNAL_NOTE_PERMISSAO,
+    })
+    if (!podeCriar) {
+      console.warn('[NOTA_INTERNA] permissão negada', { company_id, conversa_id, usuario_id: user_id, motivo: 'permissao_ausente' })
+      return res.status(403).json({ error: 'Seu perfil não permite criar notas internas.' })
+    }
+
+    // Acesso à conversa: mesma regra central usada pelo restante do atendimento.
+    // Confirma implicitamente que a conversa existe E pertence à empresa do token
+    // (o SELECT interno filtra por company_id) — nada vindo do corpo é confiado.
+    const perm = await assertPermissaoConversa({
+      company_id,
+      conversa_id,
+      user_id,
+      role: req.user?.perfil,
+      user_dep_ids: req.user?.departamento_ids,
+    })
+    if (!perm.ok) {
+      console.warn('[NOTA_INTERNA] acesso negado à conversa', {
+        company_id,
+        conversa_id,
+        usuario_id: user_id,
+        status: perm.status,
+      })
+      return res.status(perm.status).json({ error: perm.error })
+    }
+
+    // Mesma regra de `detalharChat`: quem não pode LER a conversa (assumida por outro
+    // atendente) também não pode escrever nela — a nota apareceria em uma linha do tempo
+    // que o autor sequer enxerga.
+    const conv = perm.conv || {}
+    const role = String(req.user?.perfil || '').toLowerCase()
+    const conversaAssumidaPorOutro = conv.atendente_id != null && Number(conv.atendente_id) !== user_id
+    const leituraBloqueada =
+      !isGroupConversation(conv) &&
+      !isClosedAttendanceStatus(conv.status_atendimento) &&
+      conversaAssumidaPorOutro &&
+      role !== 'admin' &&
+      role !== 'supervisor'
+    if (leituraBloqueada) {
+      console.warn('[NOTA_INTERNA] acesso negado à conversa', {
+        company_id,
+        conversa_id,
+        usuario_id: user_id,
+        status: 403,
+        motivo: 'conversa_assumida_por_outro',
+      })
+      return res.status(403).json({ error: 'Esta conversa está com outro atendente.' })
+    }
+
+    const insertPayload = buildInternalNoteInsert({
+      company_id,
+      conversa_id,
+      autor_usuario_id: user_id,
+      texto: sanitized.texto,
+    })
+
+    // 1) PERSISTE PRIMEIRO. Sem linha no banco não existe nota — nada é emitido.
+    let { data: nota, error: errInsert } = await supabase
+      .from('mensagens')
+      .insert(insertPayload)
+      .select('id, conversa_id, company_id, texto, tipo, direcao, status, criado_em, autor_usuario_id')
+      .single()
+
+    // Compat: bases sem a coluna status_mensagem (migration 20260508120000 não aplicada).
+    if (errInsert && isMissingMensagemColumnError(errInsert, 'status_mensagem')) {
+      const semStatusMensagem = { ...insertPayload }
+      delete semStatusMensagem.status_mensagem
+      ;({ data: nota, error: errInsert } = await supabase
+        .from('mensagens')
+        .insert(semStatusMensagem)
+        .select('id, conversa_id, company_id, texto, tipo, direcao, status, criado_em, autor_usuario_id')
+        .single())
+    }
+
+    if (errInsert || !nota?.id) {
+      console.error('[NOTA_INTERNA] falha ao persistir', {
+        company_id,
+        conversa_id,
+        usuario_id: user_id,
+        erro: errInsert?.message || 'insert_sem_retorno',
+      })
+      return res.status(500).json({ error: 'Não foi possível salvar a nota interna.' })
+    }
+
+    const notaPayload = await enrichMensagemComAutorUsuario(supabase, company_id, {
+      ...nota,
+      // fromMe/enviado_por_usuario ficam falsos: nota não é mensagem enviada ao cliente.
+      fromMe: false,
+      enviado_por_usuario: false,
+    })
+
+    console.log('[NOTA_INTERNA] criada', {
+      company_id,
+      conversa_id,
+      usuario_id: user_id,
+      nota_id: nota.id,
+    })
+
+    // 2) SÓ DEPOIS emite. Destinatários resolvidos pelo mesmo helper central de
+    // visibilidade da conversa — nunca broadcast por empresa, nunca cross-empresa.
+    const io = req.app.get('io')
+    if (io) {
+      try {
+        await emitirParaUsuariosQuePodemVerConversa(
+          io,
+          company_id,
+          conversa_id,
+          io.EVENTS?.MENSAGEM_INTERNA_ATENDIMENTO || 'mensagem_interna_atendimento',
+          notaPayload
+        )
+      } catch (emitErr) {
+        // A nota já está salva: uma falha de emissão não pode virar erro para o autor.
+        console.warn('[NOTA_INTERNA] falha ao emitir realtime:', emitErr?.message || emitErr)
+      }
+    }
+
+    // Devolve a linha para o autor renderizar imediatamente (dedup por id no store).
+    return res.status(201).json({ ok: true, nota: notaPayload })
+  } catch (err) {
+    console.error('[NOTA_INTERNA] erro inesperado', {
+      company_id,
+      conversa_id,
+      usuario_id: user_id,
+      erro: err?.message || String(err),
+    })
+    return res.status(500).json({ error: 'Erro ao criar nota interna' })
   }
 }
 

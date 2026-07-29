@@ -7,6 +7,7 @@
  */
 
 const supabase = require('../config/supabase')
+const { isInternalNoteRow } = require('../helpers/internalNote')
 const { getProvider } = require('./providers')
 const {
   isRealWhatsAppId,
@@ -422,6 +423,9 @@ async function fetchPendingOutboundRows({ companyId = null, limit = null, mensag
   const { data, error } = await query
   if (error) return { ok: false, rows: [], error: error.message }
   const rows = (data || []).filter((row) => {
+    // Rede de segurança: a query já filtra direcao='out', mas nota interna jamais
+    // pode entrar em reconciliação/retry de envio, nem por engano futuro.
+    if (isInternalNoteRow(row)) return false
     const st = String(row.status_mensagem || row.status || '').toLowerCase()
     return ['pending', 'sending'].includes(st)
   })

@@ -52,6 +52,8 @@ router.post("/:id/arquivo", auth, uploadArquivo, chatController.enviarArquivo)
 
 router.post('/:id/mensagens/sync-old', auth, chatController.carregarMensagensAntigasContato)
 router.post('/:id/mensagens', auth, chatController.enviarMensagemChat)
+// Nota interna ("mensagem invisível"): rota própria, fora de qualquer caminho de envio ao WhatsApp.
+router.post('/:id/notas-internas', auth, chatController.criarNotaInterna)
 router.post('/:id/pix', auth, chatController.enviarMensagemPix)
 router.post('/:id/encaminhar', auth, chatController.encaminharMensagem)
 router.delete('/:id/mensagens/:mensagem_id', auth, chatController.excluirMensagem)

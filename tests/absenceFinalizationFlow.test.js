@@ -75,6 +75,10 @@ function createSupabaseMock({ lastMessage, absenceMessage = 'Encerrando por ause
         state.filters.push(['neq', key, value])
         return chain
       },
+      in(key, values) {
+        state.filters.push(['in', key, values])
+        return chain
+      },
       not(key, op, value) {
         state.filters.push(['not', key, op, value])
         return chain

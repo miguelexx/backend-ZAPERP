@@ -1,4 +1,5 @@
 const supabase = require('../config/supabase')
+const { REAL_MESSAGE_DIRECOES } = require('../helpers/internalNote')
 const { isGroupConversation } = require('../helpers/conversaHelper')
 const { getDisplayName } = require('../helpers/contactEnrichment')
 
@@ -77,6 +78,8 @@ async function fetchMensagensParaImpressao(company_id, conversa_id, selectCols) 
       .select(selectCols)
       .eq('company_id', cid)
       .eq('conversa_id', convId)
+      // Impressão da conversa pode ser entregue ao cliente: nota interna nunca entra.
+      .in('direcao', REAL_MESSAGE_DIRECOES)
       .order('criado_em', { ascending: true })
       .order('id', { ascending: true })
       .range(offset, offset + pageSize - 1)

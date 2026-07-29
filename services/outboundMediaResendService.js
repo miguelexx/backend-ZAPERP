@@ -24,6 +24,7 @@
 const path = require('path')
 const fs = require('fs')
 const supabase = require('../config/supabase')
+const { isInternalNoteRow } = require('../helpers/internalNote')
 const { getProvider } = require('./providers')
 const { getUploadsRoot } = require('../config/uploadsRoot')
 const { isRealWhatsAppId, buildCrmReferenceId } = require('../helpers/whatsappMessageIdHelper')
@@ -306,7 +307,9 @@ async function fetchResendableRows({ companyId = null, mensagemId = null, limit 
 
   const { data, error } = await query
   if (error) return { ok: false, rows: [], error: error.message }
-  return { ok: true, rows: data || [] }
+  // Rede de segurança: a query já filtra direcao='out' + tipos de mídia, mas nota
+  // interna jamais pode entrar no reenvio automático ao provedor.
+  return { ok: true, rows: (data || []).filter((row) => !isInternalNoteRow(row)) }
 }
 
 async function runOutboundMediaResendSweep({ io = null, companyId = null, mensagemId = null } = {}) {
