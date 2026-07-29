@@ -5,7 +5,6 @@
  */
 
 const supabase = require('../config/supabase')
-const { REAL_MESSAGE_DIRECOES } = require('../helpers/internalNote')
 const {
   markReabertaFaltaInteracao,
   clearReabertaFaltaInteracao,
@@ -475,8 +474,6 @@ async function fetchUltimaMensagem(company_id, conversa_id) {
     .select('id, conversa_id, criado_em, direcao, texto')
     .eq('company_id', company_id)
     .eq('conversa_id', conversa_id)
-    // Nota interna não é interação com o cliente: não pode zerar/adiar o alerta de falta de resposta.
-    .in('direcao', REAL_MESSAGE_DIRECOES)
     .order('criado_em', { ascending: false })
     .order('id', { ascending: false })
     .limit(1)

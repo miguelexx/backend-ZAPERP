@@ -2,7 +2,6 @@
  * Regras de negócio CRM — validação de tenant, movimentação Kanban, estágios terminais.
  */
 const supabase = require('../config/supabase')
-const { REAL_MESSAGE_DIRECOES } = require('../helpers/internalNote')
 const { registrar } = require('../helpers/auditoriaLog')
 const { normalizePhoneBR } = require('../helpers/phoneHelper')
 const repo = require('../repositories/crmRepository')
@@ -1353,8 +1352,6 @@ async function fetchUltimaMensagemIso(companyId, conversaId) {
     .select('criado_em')
     .eq('company_id', companyId)
     .eq('conversa_id', conversaId)
-    // "Última mensagem" no CRM é interação com o cliente — nota interna não conta.
-    .in('direcao', REAL_MESSAGE_DIRECOES)
     .order('criado_em', { ascending: false })
     .limit(1)
     .maybeSingle()
@@ -1367,8 +1364,6 @@ async function fetchMensagensParaResumo(companyId, conversaId, limit = 28) {
     .select('texto, criado_em, direcao, tipo')
     .eq('company_id', companyId)
     .eq('conversa_id', conversaId)
-    // Resumo do histórico é o diálogo com o cliente; nota interna fica fora.
-    .in('direcao', REAL_MESSAGE_DIRECOES)
     .order('criado_em', { ascending: false })
     .limit(limit)
   if (error) throw error

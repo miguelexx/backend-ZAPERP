@@ -15,7 +15,6 @@ const {
   getWhatsappInstanceById,
 } = require('../whatsappInstanceService')
 const { fetchWithRetry } = require('../../helpers/retryWithBackoff')
-const { assertNotInternalNote } = require('../../helpers/internalNote')
 const {
   beforeWhatsAppSend,
   afterWhatsAppSend,
@@ -541,9 +540,6 @@ function createFetchOptions(method, body, extra = {}) {
 }
 
 async function post({ basePath, token, endpoint, body, companyId = null, meta = null }) {
-  // Barreira final: nenhuma nota interna pode sair por aqui, seja qual for o chamador.
-  // Lança em vez de retornar erro — um envio silenciosamente ignorado seria pior de diagnosticar.
-  assertNotInternalNote(meta, `ultramsg.post ${endpoint}`)
   const url = `${basePath}${endpoint}`
   const payload = appendToken(body || {}, token)
   const fetchOpts = createFetchOptions('POST', payload)

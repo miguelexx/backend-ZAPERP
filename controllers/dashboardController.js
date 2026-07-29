@@ -1,5 +1,4 @@
 const supabase = require('../config/supabase')
-const { REAL_MESSAGE_DIRECOES } = require('../helpers/internalNote')
 const { isEnabled, FLAGS } = require('../helpers/featureFlags')
 const { getDisplayName } = require('../helpers/contactEnrichment')
 const { normalizePositiveIds, isGroupRow } = require('../helpers/departamentoGruposHelper')
@@ -1426,8 +1425,6 @@ exports.relatorioMensagens = async (req, res) => {
       .from('mensagens')
       .select('criado_em, direcao, tipo')
       .eq('company_id', company_id)
-      // Relatório de mensagens do WhatsApp: nota interna não é mensagem de WhatsApp.
-      .in('direcao', REAL_MESSAGE_DIRECOES)
       .order('criado_em', { ascending: true })
 
     if (data_inicio) q = q.gte('criado_em', new Date(data_inicio).toISOString())

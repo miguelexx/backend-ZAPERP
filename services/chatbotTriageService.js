@@ -12,7 +12,6 @@
  */
 
 const supabase = require('../config/supabase')
-const { REAL_MESSAGE_DIRECOES } = require('../helpers/internalNote')
 
 /**
  * Corrige mojibake típico: texto UTF-8 foi gravado/lido como Latin-1 (ex.: "OpÃ§Ã£o" → "Opção").
@@ -703,9 +702,6 @@ async function hasHumanIntervenedRecently(supabaseClient, company_id, conversa_i
       .select('id, direcao, texto, criado_em')
       .eq('conversa_id', conversa_id)
       .eq('company_id', company_id)
-      // Nota interna não é intervenção humana perante o cliente e não pode ocupar
-      // a janela das 40 últimas, escondendo a última mensagem 'out' real.
-      .in('direcao', REAL_MESSAGE_DIRECOES)
       .order('criado_em', { ascending: false })
       .limit(40)
 
@@ -1416,9 +1412,6 @@ async function processIncomingMessage(ctx) {
           .select('id, direcao')
           .eq('conversa_id', conversa_id)
           .eq('company_id', company_id)
-          // Nota interna não invalida "primeira mensagem do cliente" (o every() abaixo
-          // passaria a ser falso e o menu deixaria de ser enviado).
-          .in('direcao', REAL_MESSAGE_DIRECOES)
           .order('criado_em', { ascending: true })
           .limit(10)
 

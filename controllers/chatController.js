@@ -72,15 +72,6 @@ const {
   validateAndConsumeForMessage,
   limitErrorResponse,
 } = require('../services/atendimentoLimitsService')
-const {
-  INTERNAL_NOTE_MAX_LEN,
-  INTERNAL_NOTE_PERMISSAO,
-  REAL_MESSAGE_DIRECOES,
-  isInternalNoteRow,
-  sanitizeInternalNoteTexto,
-  buildInternalNoteInsert,
-} = require('../helpers/internalNote')
-const { usuarioTemPermissao } = require('../helpers/permissoesService')
 
 /**
  * Deduplicação in-memory para double-send de texto.
@@ -387,51 +378,6 @@ function applyChatListCursor(query, cursorUltimaAtividade, cursorIdRaw) {
   return query.lt('ultima_atividade', cursor)
 }
 
-/**
- * Marca a posição original (ordem do SQL) de cada linha da lista de conversas.
- * Symbol: sobrevive ao spread dos pós-processamentos e some sozinho no JSON da resposta.
- */
-const CHAT_LIST_SQL_INDEX = Symbol('chatListSqlIndex')
-
-/**
- * Cursor keyset da próxima página a partir da ordem do SQL (ultima_atividade DESC, id DESC).
- * `pageRows` já vem reordenado/filtrado em JS, então a fronteira é a MAIOR posição de SQL
- * ainda entregue — usar a última linha exibida devolveria linhas repetidas na página seguinte.
- * @param {Array} pageRows linhas efetivamente devolvidas nesta página
- * @param {Array} sqlRows linhas cruas do SQL (na ordem do banco)
- * @param {boolean} truncated a lista formatada era maior que o limite (sobrou linha visível)
- * @param {boolean} sqlHadMore o SQL trouxe mais linhas que o limite
- */
-function resolveChatListNextCursor(pageRows, sqlRows, truncated, sqlHadMore) {
-  const rows = Array.isArray(sqlRows) ? sqlRows : []
-  const hasMore = Boolean(truncated || sqlHadMore)
-  if (!hasMore || rows.length === 0) {
-    return { has_more: false, next_cursor: null, next_cursor_id: null }
-  }
-
-  let boundary = rows[rows.length - 1]
-  if (truncated) {
-    // Truncamos linhas visíveis: a fronteira é a última linha do SQL que ainda entrou na página.
-    let maxIndex = -1
-    for (const row of Array.isArray(pageRows) ? pageRows : []) {
-      const idx = row ? row[CHAT_LIST_SQL_INDEX] : undefined
-      if (Number.isInteger(idx) && idx > maxIndex) maxIndex = idx
-    }
-    if (maxIndex >= 0) boundary = rows[maxIndex]
-  }
-
-  // O cursor é comparado contra `ultima_atividade`; sem esse valor não há keyset válido
-  // (a cauda de NULL fica no fim do ORDER BY e não é paginável) — encerra a paginação.
-  const cursor = boundary && boundary.ultima_atividade ? boundary.ultima_atividade : null
-  if (!cursor) return { has_more: false, next_cursor: null, next_cursor_id: null }
-
-  return {
-    has_more: true,
-    next_cursor: cursor,
-    next_cursor_id: boundary.id != null ? Number(boundary.id) : null,
-  }
-}
-
 function splitChatListPage(rows = [], limit = 100) {
   const safeRows = Array.isArray(rows) ? rows : []
   const safeLimit = Math.max(1, Math.floor(Number(limit) || 100))
@@ -543,8 +489,6 @@ function emitirConversaAtualizada(io, company_id, conversa_id, payload = null, o
                 .select('id')
                 .eq('company_id', company_id)
                 .eq('conversa_id', cid)
-                // Nota interna não conta como movimentação: não pode promover conversa ociosa para "aberta".
-                .in('direcao', REAL_MESSAGE_DIRECOES)
                 .limit(1)
                 .maybeSingle()
               temMsg = !!um
@@ -831,10 +775,7 @@ async function enrichMensagensComAutorUsuario(supabase, company_id, mensagens, v
   return mensagens.map((m) =>
     decorate(
       m,
-      // Nota interna precisa do nome do autor no card, mas não é mensagem enviada (enviado_por_usuario segue false).
-      (m.direcao === 'out' || isInternalNoteRow(m)) && m.autor_usuario_id
-        ? (usuarioMap.get(m.autor_usuario_id) ?? null)
-        : null
+      m.direcao === 'out' && m.autor_usuario_id ? (usuarioMap.get(m.autor_usuario_id) ?? null) : null
     )
   )
 }
@@ -862,23 +803,6 @@ async function getUsuarioParaEnvioCliente(supabase, company_id, user_id) {
 
 /** Enriquece uma mensagem única com usuario_nome (para evento nova_mensagem) */
 async function enrichMensagemComAutorUsuario(supabase, company_id, msg) {
-  // Nota interna: precisa do nome do autor, mas nunca é "enviada"/fromMe.
-  if (msg && isInternalNoteRow(msg) && msg.autor_usuario_id) {
-    const { data: uNota } = await supabase
-      .from('usuarios')
-      .select('id, nome')
-      .eq('company_id', company_id)
-      .eq('id', msg.autor_usuario_id)
-      .maybeSingle()
-    return {
-      ...msg,
-      criado_em: normalizarTimestampSemFusoAmbiguoParaApi(msg?.criado_em),
-      usuario_id: msg.autor_usuario_id,
-      usuario_nome: uNota?.nome ?? null,
-      enviado_por_usuario: false,
-      fromMe: false,
-    }
-  }
   const isOut = msg?.direcao === 'out'
   if (!msg || !isOut || !msg.autor_usuario_id) {
     return {
@@ -2236,7 +2160,7 @@ exports.listarConversas = async (req, res) => {
     }
 
     const cid = Number(company_id)
-    let conversasFormatadas = (rawSqlRows || []).map((c, sqlRowIndex) => {
+    let conversasFormatadas = (rawSqlRows || []).map((c) => {
       const raw = c.clientes
       let clientesObj = Array.isArray(raw)
         ? (raw.find((cl) => cl && Number(cl.id) === Number(c.cliente_id)) || raw[0])
@@ -2287,8 +2211,7 @@ exports.listarConversas = async (req, res) => {
           )
       const unreadCount = unreadMap[Number(c.id)] || 0
       // Grupos não têm estado de atendimento: sem badge "aberta", sem status, sem atendente obrigatório
-      // Nota interna não conta como movimentação da conversa (não muda status nem badge).
-      const temMensagem = Array.isArray(c.mensagens) && c.mensagens.some((m) => !isInternalNoteRow(m))
+      const temMensagem = Array.isArray(c.mensagens) && c.mensagens.length > 0
       // Igual a detalharChat: badge "Aberta" só com mensagem ou atendente (sem movimentação → ociosa, fora de Abertas)
       const exibir_badge_aberta =
         !isGroup &&
@@ -2326,10 +2249,6 @@ exports.listarConversas = async (req, res) => {
         temNovasMensagens
 
       return {
-        // Posição da linha na ordem do SQL (ultima_atividade DESC, id DESC).
-        // A lista é reordenada em JS depois daqui, então o cursor da próxima página precisa
-        // sair da ordem do SQL — senão a página seguinte repete linhas já entregues.
-        [CHAT_LIST_SQL_INDEX]: sqlRowIndex,
         id: c.id,
         whatsapp_instance_id: c.whatsapp_instance_id ?? null,
         ...safeWhatsappInstanceMeta(whatsappInstanceMetaMap.get(Number(c.whatsapp_instance_id))),
@@ -2824,17 +2743,25 @@ exports.listarConversas = async (req, res) => {
       console.warn('[listarConversas] prefs:', e?.message || e)
     }
 
-    const chatListPage = splitChatListPage(conversasFormatadas || [], chatListPagination.limit)
-    // O cursor sai SEMPRE da ordem do SQL, nunca da lista reordenada em JS (fixadas no topo,
-    // ordenação por última mensagem, dedupe por contato). Caso contrário a página seguinte
-    // recomeça acima da fronteira real e devolve conversas já entregues.
-    const chatListCursor = resolveChatListNextCursor(
-      chatListPage.rows,
-      rawSqlRows,
-      chatListPage.pagination.has_more,
-      rawSqlHadMore
-    )
-    chatListPage.pagination = { ...chatListPage.pagination, ...chatListCursor }
+    let chatListPage = splitChatListPage(conversasFormatadas || [], chatListPagination.limit)
+    if (
+      !chatListPage.pagination.has_more &&
+      rawSqlHadMore &&
+      (chatListPage.rows.length < chatListPagination.limit || chatListPage.rows.length === 0)
+    ) {
+      const cursorRow =
+        rawSqlRows[Math.min(chatListPagination.limit, rawSqlRows.length) - 1] ||
+        rawSqlRows[rawSqlRows.length - 1]
+      chatListPage = {
+        rows: chatListPage.rows,
+        pagination: {
+          ...chatListPage.pagination,
+          has_more: true,
+          next_cursor: cursorRow?.ultima_atividade || cursorRow?.criado_em || null,
+          next_cursor_id: cursorRow?.id != null ? Number(cursorRow.id) : null,
+        },
+      }
+    }
     conversasFormatadas = chatListPage.rows
 
     const responsePagination = {
@@ -4265,9 +4192,8 @@ exports.detalharChat = async (req, res) => {
     const telefoneExibivel = isLidConv ? null : (conversa.telefone ?? clientesConv?.telefone ?? null)
     const fotoCache = (conversa.foto_perfil_contato_cache && String(conversa.foto_perfil_contato_cache).trim()) ? String(conversa.foto_perfil_contato_cache).trim() : null
     const fotoUnica = isGroup ? (conversa.foto_grupo ?? null) : (clientesConv?.foto_perfil ?? fotoCache ?? null)
-    // Badge "Aberta": só exibir quando há movimentação (mensagem ou atendente assumiu) — mesma regra da lista.
-    // Nota interna não conta: adicionar nota não pode promover conversa ociosa para "aberta".
-    const temMensagem = Array.isArray(mensagens) && mensagens.some((m) => !isInternalNoteRow(m))
+    // Badge "Aberta": só exibir quando há movimentação (mensagem ou atendente assumiu) — mesma regra da lista
+    const temMensagem = Array.isArray(mensagens) && mensagens.length > 0
     const dbStatusAtend = String(conversa.status_atendimento || '')
     const exibirBadgeAberta =
       !isGroup &&
@@ -5446,156 +5372,6 @@ exports.adicionarAtendenteConversa = async (req, res) => {
   } catch (err) {
     console.error(err)
     return res.status(500).json({ error: 'Erro ao adicionar atendente a conversa' })
-  }
-}
-
-/**
- * DELETE /chats/:id/atendentes/:usuario_id — remove um CO-ATENDENTE (soft-delete).
- *
- * Não toca em `conversas`: status, fila, responsável principal, setor e SLA ficam
- * exatamente como estavam, e conversa finalizada não é reaberta.
- * O atendente principal NUNCA sai por aqui — para trocar o responsável existe a
- * transferência, que continua sendo o único caminho.
- */
-exports.removerAtendenteConversa = async (req, res) => {
-  try {
-    const { company_id, id: user_id, perfil, departamento_ids = [] } = req.user
-    const { id: conversa_id } = req.params
-    const usuario_id = Number(req.params?.usuario_id)
-
-    if (!Number.isInteger(usuario_id) || usuario_id <= 0) {
-      return res.status(400).json({ error: 'usuario_id inválido' })
-    }
-
-    const perm = await assertPermissaoConversa({ company_id, conversa_id, user_id, role: perfil, user_dep_ids: departamento_ids })
-    if (!perm.ok) return res.status(perm.status).json({ error: perm.error })
-    if (perm.conv && isGroupConversation(perm.conv)) {
-      return res.status(400).json({ error: 'Conversa de grupo não possui participantes de atendimento.' })
-    }
-
-    // O principal só muda por transferência — nunca por remoção de participante.
-    if (perm.conv?.atendente_id != null && Number(perm.conv.atendente_id) === usuario_id) {
-      return res.status(409).json({
-        error: 'Este é o responsável principal. Transfira a conversa antes de removê-lo.',
-        code: 'PRINCIPAL_EXIGE_TRANSFERENCIA',
-      })
-    }
-
-    const role = String(perfil || '').toLowerCase()
-    const souPrincipal = perm.conv?.atendente_id != null && Number(perm.conv.atendente_id) === Number(user_id)
-    const souEuMesmo = usuario_id === Number(user_id)
-    const podeRemover = role === 'admin' || role === 'supervisor' || souPrincipal || souEuMesmo
-    if (!podeRemover) {
-      return res.status(403).json({ error: 'Apenas o responsável principal, um supervisor ou um administrador pode remover participantes.' })
-    }
-
-    const { data: participante, error: findError } = await supabase
-      .from('conversa_atendentes')
-      .select('id, usuario_id, ativo')
-      .eq('company_id', Number(company_id))
-      .eq('conversa_id', Number(conversa_id))
-      .eq('usuario_id', usuario_id)
-      .eq('ativo', true)
-      .maybeSingle()
-
-    if (findError) {
-      if (isConversaAtendentesMissingTable(findError)) {
-        return res.status(404).json({ error: 'Participante não encontrado nesta conversa.' })
-      }
-      console.error('[chatController] conversa_atendentes', findError?.message)
-      return res.status(500).json({ error: 'Erro interno' })
-    }
-    if (!participante) {
-      return res.status(404).json({ error: 'Participante não encontrado nesta conversa.' })
-    }
-
-    // Soft-delete: a linha é preservada para auditoria (entrada, saída e autores).
-    const removidoEm = new Date().toISOString()
-    const desativar = async (comColunasDeSaida) => {
-      const patch = comColunasDeSaida
-        ? { ativo: false, removido_em: removidoEm, removido_por: Number(user_id), atualizado_em: removidoEm }
-        : { ativo: false, atualizado_em: removidoEm }
-      return supabase
-        .from('conversa_atendentes')
-        .update(patch)
-        .eq('company_id', Number(company_id))
-        .eq('conversa_id', Number(conversa_id))
-        .eq('id', Number(participante.id))
-        .eq('ativo', true)
-        .select('id, usuario_id, ativo')
-        .maybeSingle()
-    }
-
-    let { data: removido, error: updateError } = await desativar(true)
-    // Compat: base sem a migration 20260729120000 (colunas de saída ainda não existem).
-    if (updateError && isGenericMissingColumnError(updateError)) {
-      ;({ data: removido, error: updateError } = await desativar(false))
-    }
-    if (updateError) {
-      console.error('[chatController] remover atendente', updateError?.message)
-      return res.status(500).json({ error: 'Erro ao remover atendente da conversa' })
-    }
-    // Corrida: outro usuário removeu o mesmo participante primeiro.
-    if (!removido) {
-      return res.status(409).json({ error: 'Este participante já foi removido da conversa.' })
-    }
-
-    const [{ data: fromUser }, { data: targetUser }] = await Promise.all([
-      supabase.from('usuarios').select('nome').eq('company_id', Number(company_id)).eq('id', Number(user_id)).maybeSingle(),
-      supabase.from('usuarios').select('id, nome, email, perfil').eq('company_id', Number(company_id)).eq('id', usuario_id).maybeSingle(),
-    ])
-    const fromNome = (fromUser?.nome && String(fromUser.nome).trim()) || 'Atendente'
-    const targetNome = (targetUser?.nome && String(targetUser.nome).trim()) || 'atendente'
-
-    await registrarAtendimento({
-      conversa_id,
-      company_id,
-      acao: 'removeu_atendente',
-      de_usuario_id: user_id,
-      para_usuario_id: usuario_id,
-      observacao: souEuMesmo
-        ? `${fromNome} saiu do atendimento.`
-        : `${fromNome} removeu ${targetNome} do atendimento.`,
-    }).catch((e) => console.warn('[removerAtendente] registrarAtendimento:', e?.message || e))
-
-    // Sem isto o removido continuaria recebendo eventos até o cache de 15s expirar.
-    invalidateConversaVisibilityCache(company_id, conversa_id)
-
-    const io = req.app.get('io')
-    if (io) {
-      const payload = {
-        conversa_id: Number(conversa_id),
-        company_id: Number(company_id),
-        usuario_id,
-        removido_por: Number(user_id),
-        lista_realtime: { minha_fila: true, motivo: 'atendente_removido' },
-      }
-      // O removido precisa saber que perdeu o acesso — ele não está mais na lista
-      // de destinatários resolvida por obterUsuarioIdsQuePodemVerConversa.
-      emitirParaUsuario(io, usuario_id, 'conversa_atendente_removido', payload)
-      emitirParaUsuariosQuePodemVerConversa(io, company_id, conversa_id, 'conversa_participantes_atualizados', payload)
-        .catch((e) => console.warn('[removerAtendente] emitir participantes:', e?.message || e))
-      emitirSincronizacaoListaConversas(io, company_id, conversa_id)
-    }
-
-    console.log('[ATENDENTES] participante removido', {
-      company_id,
-      conversa_id: Number(conversa_id),
-      usuario_id,
-      removido_por: Number(user_id),
-    })
-
-    return res.json({
-      ok: true,
-      conversa_id: Number(conversa_id),
-      usuario_id,
-      usuario: targetUser
-        ? { id: Number(targetUser.id), nome: targetUser.nome || null, email: targetUser.email || null, perfil: targetUser.perfil || null }
-        : null,
-    })
-  } catch (err) {
-    console.error(err)
-    return res.status(500).json({ error: 'Erro ao remover atendente da conversa' })
   }
 }
 
@@ -7039,7 +6815,7 @@ exports.excluirMensagem = async (req, res) => {
     // valida que a mensagem é desta conversa/empresa
     const { data: msg, error: errMsgSel } = await supabase
       .from('mensagens')
-      .select('id, conversa_id, criado_em, direcao, tipo, autor_usuario_id, whatsapp_id')
+      .select('id, conversa_id, criado_em, direcao, autor_usuario_id, whatsapp_id')
       .eq('company_id', company_id)
       .eq('conversa_id', cid)
       .eq('id', mid)
@@ -7047,16 +6823,6 @@ exports.excluirMensagem = async (req, res) => {
 
     if (errMsgSel) return res.status(500).json({ error: errMsgSel.message })
     if (!msg) return res.status(404).json({ error: 'Mensagem não encontrada' })
-
-    // Nota interna nunca existiu no WhatsApp: "apagar para todos" (que chama o provedor)
-    // não se aplica. "Apagar para mim" segue permitido logo abaixo.
-    const scopeSomenteParaMim = scope === 'me' || scope === 'mim' || scope === 'self'
-    if (isInternalNoteRow(msg) && !scopeSomenteParaMim) {
-      return res.status(400).json({
-        error: 'Nota interna não existe no WhatsApp — não há o que apagar para todos.',
-        code: 'INTERNAL_NOTE_SEM_WHATSAPP',
-      })
-    }
 
     // =====================================================
     // Apagar "pra mim" (persistente): oculta para este usuário
@@ -9035,7 +8801,7 @@ exports.encaminharMensagem = async (req, res) => {
 
     const { data: mensagensRows, error: errMsg } = await supabase
       .from('mensagens')
-      .select('id, texto, tipo, direcao, url, nome_arquivo, contact_meta, location_meta, conversa_id')
+      .select('id, texto, tipo, url, nome_arquivo, contact_meta, location_meta, conversa_id')
       .eq('company_id', company_id)
       .in('id', orderedIds)
 
@@ -9047,23 +8813,6 @@ exports.encaminharMensagem = async (req, res) => {
     const missing = orderedIds.filter((id) => !byId.has(id))
     if (missing.length) {
       return res.status(404).json({ error: `Mensagem(ns) não encontrada(s): ${missing.join(', ')}` })
-    }
-
-    // Nota interna nunca pode ser encaminhada: este é o único caminho em que o texto de
-    // uma mensagem de OUTRA conversa entra no envio ao WhatsApp (a seleção acima filtra
-    // apenas por company_id, não pela conversa de origem).
-    const notasInternasSelecionadas = orderedIds.filter((id) => isInternalNoteRow(byId.get(id)))
-    if (notasInternasSelecionadas.length) {
-      console.warn('[NOTA_INTERNA] tentativa de encaminhamento bloqueada', {
-        company_id,
-        conversa_id,
-        usuario_id: user_id,
-        mensagem_ids: notasInternasSelecionadas,
-      })
-      return res.status(400).json({
-        error: 'Nota interna não pode ser encaminhada — ela nunca sai para o WhatsApp.',
-        code: 'INTERNAL_NOTE_NAO_ENCAMINHAVEL',
-      })
     }
 
     // Buscar conversa de destino
@@ -9184,170 +8933,6 @@ exports.contarConversasPorFiltros = async (req, res) => {
   }
 }
 
-// =====================================================
-// NOTA INTERNA ("mensagem invisível")
-//
-// Fluxo deliberadamente separado do envio: este handler NÃO chama getProvider(),
-// NÃO passa por assertPodeEnviarMensagem (que auto-assume a conversa e bloqueia
-// conversa fechada), NÃO toca em `conversas` e NÃO mexe em unread/SLA/status.
-// Persiste primeiro, só depois emite o evento realtime.
-// =====================================================
-exports.criarNotaInterna = async (req, res) => {
-  const company_id = Number(req.user?.company_id)
-  const user_id = Number(req.user?.id)
-  const conversa_id = Number(req.params?.id)
-
-  try {
-    if (!Number.isFinite(conversa_id) || conversa_id <= 0) {
-      return res.status(400).json({ error: 'Conversa inválida' })
-    }
-
-    // Conteúdo: valida antes de qualquer I/O.
-    const sanitized = sanitizeInternalNoteTexto(req.body?.texto ?? req.body?.conteudo)
-    if (!sanitized.ok) {
-      const mensagens = {
-        conteudo_vazio: 'Escreva o conteúdo da nota interna.',
-        conteudo_invalido: 'Conteúdo da nota interna inválido.',
-        conteudo_muito_longo: `A nota interna pode ter no máximo ${INTERNAL_NOTE_MAX_LEN} caracteres.`,
-      }
-      return res.status(400).json({ error: mensagens[sanitized.error] || 'Nota interna inválida', code: sanitized.error })
-    }
-
-    // Permissão de criar (catálogo central; override por usuário respeitado).
-    const podeCriar = await usuarioTemPermissao({
-      usuario_id: user_id,
-      company_id,
-      perfil: req.user?.perfil,
-      permissao_codigo: INTERNAL_NOTE_PERMISSAO,
-    })
-    if (!podeCriar) {
-      console.warn('[NOTA_INTERNA] permissão negada', { company_id, conversa_id, usuario_id: user_id, motivo: 'permissao_ausente' })
-      return res.status(403).json({ error: 'Seu perfil não permite criar notas internas.' })
-    }
-
-    // Acesso à conversa: mesma regra central usada pelo restante do atendimento.
-    // Confirma implicitamente que a conversa existe E pertence à empresa do token
-    // (o SELECT interno filtra por company_id) — nada vindo do corpo é confiado.
-    const perm = await assertPermissaoConversa({
-      company_id,
-      conversa_id,
-      user_id,
-      role: req.user?.perfil,
-      user_dep_ids: req.user?.departamento_ids,
-    })
-    if (!perm.ok) {
-      console.warn('[NOTA_INTERNA] acesso negado à conversa', {
-        company_id,
-        conversa_id,
-        usuario_id: user_id,
-        status: perm.status,
-      })
-      return res.status(perm.status).json({ error: perm.error })
-    }
-
-    // Mesma regra de `detalharChat`: quem não pode LER a conversa (assumida por outro
-    // atendente) também não pode escrever nela — a nota apareceria em uma linha do tempo
-    // que o autor sequer enxerga.
-    const conv = perm.conv || {}
-    const role = String(req.user?.perfil || '').toLowerCase()
-    const conversaAssumidaPorOutro = conv.atendente_id != null && Number(conv.atendente_id) !== user_id
-    const leituraBloqueada =
-      !isGroupConversation(conv) &&
-      !isClosedAttendanceStatus(conv.status_atendimento) &&
-      conversaAssumidaPorOutro &&
-      role !== 'admin' &&
-      role !== 'supervisor'
-    if (leituraBloqueada) {
-      console.warn('[NOTA_INTERNA] acesso negado à conversa', {
-        company_id,
-        conversa_id,
-        usuario_id: user_id,
-        status: 403,
-        motivo: 'conversa_assumida_por_outro',
-      })
-      return res.status(403).json({ error: 'Esta conversa está com outro atendente.' })
-    }
-
-    const insertPayload = buildInternalNoteInsert({
-      company_id,
-      conversa_id,
-      autor_usuario_id: user_id,
-      texto: sanitized.texto,
-    })
-
-    // 1) PERSISTE PRIMEIRO. Sem linha no banco não existe nota — nada é emitido.
-    let { data: nota, error: errInsert } = await supabase
-      .from('mensagens')
-      .insert(insertPayload)
-      .select('id, conversa_id, company_id, texto, tipo, direcao, status, criado_em, autor_usuario_id')
-      .single()
-
-    // Compat: bases sem a coluna status_mensagem (migration 20260508120000 não aplicada).
-    if (errInsert && isMissingMensagemColumnError(errInsert, 'status_mensagem')) {
-      const semStatusMensagem = { ...insertPayload }
-      delete semStatusMensagem.status_mensagem
-      ;({ data: nota, error: errInsert } = await supabase
-        .from('mensagens')
-        .insert(semStatusMensagem)
-        .select('id, conversa_id, company_id, texto, tipo, direcao, status, criado_em, autor_usuario_id')
-        .single())
-    }
-
-    if (errInsert || !nota?.id) {
-      console.error('[NOTA_INTERNA] falha ao persistir', {
-        company_id,
-        conversa_id,
-        usuario_id: user_id,
-        erro: errInsert?.message || 'insert_sem_retorno',
-      })
-      return res.status(500).json({ error: 'Não foi possível salvar a nota interna.' })
-    }
-
-    const notaPayload = await enrichMensagemComAutorUsuario(supabase, company_id, {
-      ...nota,
-      // fromMe/enviado_por_usuario ficam falsos: nota não é mensagem enviada ao cliente.
-      fromMe: false,
-      enviado_por_usuario: false,
-    })
-
-    console.log('[NOTA_INTERNA] criada', {
-      company_id,
-      conversa_id,
-      usuario_id: user_id,
-      nota_id: nota.id,
-    })
-
-    // 2) SÓ DEPOIS emite. Destinatários resolvidos pelo mesmo helper central de
-    // visibilidade da conversa — nunca broadcast por empresa, nunca cross-empresa.
-    const io = req.app.get('io')
-    if (io) {
-      try {
-        await emitirParaUsuariosQuePodemVerConversa(
-          io,
-          company_id,
-          conversa_id,
-          io.EVENTS?.MENSAGEM_INTERNA_ATENDIMENTO || 'mensagem_interna_atendimento',
-          notaPayload
-        )
-      } catch (emitErr) {
-        // A nota já está salva: uma falha de emissão não pode virar erro para o autor.
-        console.warn('[NOTA_INTERNA] falha ao emitir realtime:', emitErr?.message || emitErr)
-      }
-    }
-
-    // Devolve a linha para o autor renderizar imediatamente (dedup por id no store).
-    return res.status(201).json({ ok: true, nota: notaPayload })
-  } catch (err) {
-    console.error('[NOTA_INTERNA] erro inesperado', {
-      company_id,
-      conversa_id,
-      usuario_id: user_id,
-      erro: err?.message || String(err),
-    })
-    return res.status(500).json({ error: 'Erro ao criar nota interna' })
-  }
-}
-
 exports.finalizacaoAusenciaLoteAuth = async (req, res) => {
   try {
     const company_id = Number(req.user?.company_id)
@@ -9376,8 +8961,6 @@ exports._test = {
   assertPermissaoConversa,
   parseChatListPagination,
   splitChatListPage,
-  resolveChatListNextCursor,
-  CHAT_LIST_SQL_INDEX,
   parseMessageHistoryPagination,
   splitMessageHistoryPage,
   shouldIncludeClientesSemConversa,

@@ -8,16 +8,11 @@
 const fs = require('fs')
 const path = require('path')
 const crypto = require('crypto')
-const { Readable, Transform } = require('stream')
-const { pipeline } = require('stream/promises')
 const { ensureUploadsRootExists } = require('../config/uploadsRoot')
 const { isAllowedInboundMediaUrl } = require('../helpers/allowedInboundMediaUrl')
 const { normalizarTimestampSemFusoAmbiguoParaApi } = require('../helpers/timestampApiCompat')
 
-const MAX_BYTES = Math.max(
-  80 * 1024 * 1024,
-  (Number(process.env.INBOUND_MEDIA_MAX_MB) || 512) * 1024 * 1024
-)
+const MAX_BYTES = 80 * 1024 * 1024
 const FETCH_TIMEOUT_MS = Math.max(1000, Number(process.env.INBOUND_MEDIA_FETCH_TIMEOUT_MS) || 30000)
 const MAX_REDIRECTS = 3
 
@@ -166,28 +161,6 @@ function pickStoredFilename({ company_id, mensagem_id, contentType, nome_arquivo
   return `inbound-c${Number(company_id)}-m${Number(mensagem_id)}-${rand}${ext}`
 }
 
-async function streamBodyToFileWithLimit(webBody, filePath, maxBytes) {
-  let received = 0
-  const limiter = new Transform({
-    transform(chunk, _encoding, callback) {
-      received += chunk.length
-      if (received > maxBytes) {
-        const error = new Error('inbound_media_too_large')
-        error.code = 'INBOUND_MEDIA_TOO_LARGE'
-        callback(error)
-        return
-      }
-      callback(null, chunk)
-    },
-  })
-  await pipeline(
-    Readable.fromWeb(webBody),
-    limiter,
-    fs.createWriteStream(filePath, { flags: 'wx' })
-  )
-  return received
-}
-
 async function fetchAllowedInboundMedia(target, signal) {
   let current = target
   for (let i = 0; i <= MAX_REDIRECTS; i += 1) {
@@ -276,9 +249,29 @@ async function persistInboundMediaToUploads({ supabase, io, company_id, mensagem
   }
 
   const cl = upstream.headers.get('content-length')
-  const esperado = Number(cl)
-  if (Number.isFinite(esperado) && esperado > MAX_BYTES) {
+  if (cl && Number(cl) > MAX_BYTES) {
     console.warn('[inboundMediaPersist] arquivo muito grande (content-length):', mensagem_id)
+    return
+  }
+
+  const arrayBuffer = await upstream.arrayBuffer()
+  if (arrayBuffer.byteLength > MAX_BYTES) {
+    console.warn('[inboundMediaPersist] arquivo muito grande (body):', mensagem_id)
+    return
+  }
+  // Download incompleto (conexão caiu / proxy cortou o corpo): salvar o pedaço deixaria o
+  // atendente ouvindo um áudio truncado do cliente, e a cópia local sobrescreveria a URL
+  // remota que ainda funciona. Não persiste — a mensagem fica na URL da UltraMsg e a
+  // varredura de retry (TIPOS_HTTPS_RETRY) tenta de novo mais tarde.
+  const esperado = Number(cl)
+  if (Number.isFinite(esperado) && esperado > 0 && arrayBuffer.byteLength !== esperado) {
+    console.warn('[inboundMediaPersist] download incompleto; não persiste:', {
+      company_id, mensagem_id, tipo: row.tipo, esperado, recebido: arrayBuffer.byteLength,
+    })
+    return
+  }
+  if (arrayBuffer.byteLength === 0) {
+    console.warn('[inboundMediaPersist] corpo vazio; não persiste:', { company_id, mensagem_id, tipo: row.tipo })
     return
   }
 
@@ -293,57 +286,7 @@ async function persistInboundMediaToUploads({ supabase, io, company_id, mensagem
 
   const root = ensureUploadsRootExists()
   const absPath = path.join(root, storedName)
-  const partialPath = `${absPath}.part-${process.pid}-${crypto.randomBytes(4).toString('hex')}`
-  let recebido = 0
-
-  try {
-    if (upstream.body && typeof upstream.body.getReader === 'function') {
-      // A resposta real do fetch é um Web ReadableStream. Grave por streaming para que
-      // documentos grandes não ocupem centenas de MB de heap e possam ser preservados.
-      recebido = await streamBodyToFileWithLimit(upstream.body, partialPath, MAX_BYTES)
-      if (Number.isFinite(esperado) && esperado > 0 && recebido !== esperado) {
-        console.warn('[inboundMediaPersist] download incompleto; não persiste:', {
-          company_id, mensagem_id, tipo: row.tipo, esperado, recebido,
-        })
-        await fs.promises.unlink(partialPath).catch(() => {})
-        return
-      }
-      if (recebido === 0) {
-        console.warn('[inboundMediaPersist] corpo vazio; não persiste:', { company_id, mensagem_id, tipo: row.tipo })
-        await fs.promises.unlink(partialPath).catch(() => {})
-        return
-      }
-      await fs.promises.rename(partialPath, absPath)
-    } else {
-      // Compatibilidade com respostas simuladas nos testes e runtimes antigos sem body stream.
-      const arrayBuffer = await upstream.arrayBuffer()
-      recebido = arrayBuffer.byteLength
-      if (recebido > MAX_BYTES) {
-        console.warn('[inboundMediaPersist] arquivo muito grande (body):', mensagem_id)
-        return
-      }
-      if (Number.isFinite(esperado) && esperado > 0 && recebido !== esperado) {
-        console.warn('[inboundMediaPersist] download incompleto; não persiste:', {
-          company_id, mensagem_id, tipo: row.tipo, esperado, recebido,
-        })
-        return
-      }
-      if (recebido === 0) {
-        console.warn('[inboundMediaPersist] corpo vazio; não persiste:', { company_id, mensagem_id, tipo: row.tipo })
-        return
-      }
-      await fs.promises.writeFile(absPath, Buffer.from(arrayBuffer))
-    }
-  } catch (e) {
-    await fs.promises.unlink(partialPath).catch(() => {})
-    await fs.promises.unlink(absPath).catch(() => {})
-    if (e?.code === 'INBOUND_MEDIA_TOO_LARGE') {
-      console.warn('[inboundMediaPersist] arquivo muito grande (stream):', mensagem_id)
-      return
-    }
-    console.warn('[inboundMediaPersist] falha ao salvar arquivo:', mensagem_id, e?.message || e)
-    return
-  }
+  await fs.promises.writeFile(absPath, Buffer.from(arrayBuffer))
 
   const publicPath = `/uploads/${storedName}`
   const nomeFinal = row.nome_arquivo && String(row.nome_arquivo).trim() ? String(row.nome_arquivo).trim() : storedName

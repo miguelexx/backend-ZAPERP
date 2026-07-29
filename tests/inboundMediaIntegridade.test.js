@@ -11,7 +11,6 @@
 const fs = require('fs')
 const path = require('path')
 const os = require('os')
-const { Readable } = require('stream')
 
 const tmpUploads = fs.mkdtempSync(path.join(os.tmpdir(), 'zaperp-inbound-'))
 process.env.UPLOADS_DIR = tmpUploads
@@ -109,30 +108,6 @@ test('download COMPLETO é persistido e a URL passa a apontar para /uploads', as
   const salvos = arquivosSalvos()
   expect(salvos).toHaveLength(1)
   expect(fs.statSync(path.join(tmpUploads, salvos[0])).size).toBe(CORPO.byteLength)
-})
-
-test('resposta real do fetch é persistida por streaming, sem arrayBuffer', async () => {
-  const arrayBuffer = jest.fn(async () => {
-    throw new Error('não deve materializar o arquivo inteiro na memória')
-  })
-  global.fetch = async () => ({
-    ...respostaFake({ body: CORPO, contentLength: CORPO.byteLength }),
-    body: Readable.toWeb(Readable.from([CORPO])),
-    arrayBuffer,
-  })
-  const updates = []
-
-  await persistInboundMediaToUploads({
-    supabase: fakeSupabase(linhaAudio, updates),
-    io: null,
-    company_id: 1,
-    mensagem_id: 77,
-    fromMe: false,
-  })
-
-  expect(updates).toHaveLength(1)
-  expect(arquivosSalvos()).toHaveLength(1)
-  expect(arrayBuffer).not.toHaveBeenCalled()
 })
 
 test('download CORTADO não é persistido — mensagem continua na URL remota', async () => {

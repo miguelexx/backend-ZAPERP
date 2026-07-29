@@ -1,5 +1,4 @@
 const supabase = require('../config/supabase')
-const { REAL_MESSAGE_DIRECOES } = require('../helpers/internalNote')
 const { getProvider } = require('./providers')
 const {
   DEFAULT_CHATBOT_CONFIG,
@@ -370,8 +369,6 @@ async function getLastMessage(conversa_id, company_id) {
     .select('id, direcao, criado_em, autor_usuario_id, texto')
     .eq('conversa_id', conversa_id)
     .eq('company_id', company_id)
-    // Nota interna não é interação com o cliente: não pode adiar a finalização por ausência.
-    .in('direcao', REAL_MESSAGE_DIRECOES)
     .order('criado_em', { ascending: false })
     .order('id', { ascending: false })
     .limit(1)

@@ -4,11 +4,6 @@ const fs = require('fs')
 const { ensureUploadsRootExists, getUploadsRoot } = require('../config/uploadsRoot')
 
 const uploadDir = ensureUploadsRootExists()
-const UPLOAD_MAX_FILE_MB = Math.max(
-  1,
-  Math.min(2048, Math.floor(Number(process.env.UPLOAD_MAX_FILE_MB) || 128))
-)
-const UPLOAD_MAX_FILE_BYTES = UPLOAD_MAX_FILE_MB * 1024 * 1024
 
 const logosDir = path.join(getUploadsRoot(), 'logos')
 if (!fs.existsSync(logosDir)) {
@@ -176,7 +171,7 @@ const storage = multer.diskStorage({
 
 const upload = multer({
   storage,
-  limits: { fileSize: UPLOAD_MAX_FILE_BYTES },
+  limits: { fileSize: 32 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
     const ext = extFromOriginalName(file.originalname)
     if (isBlockedRiskExtension(ext)) {
@@ -197,13 +192,7 @@ const upload = multer({
 const uploadArquivo = (req, res, next) => {
   const mw = upload.any()
   mw(req, res, (err) => {
-    if (err) {
-      if (err.code === 'LIMIT_FILE_SIZE') {
-        err.status = 413
-        err.message = `O arquivo excede o limite de ${UPLOAD_MAX_FILE_MB} MB.`
-      }
-      return next(err)
-    }
+    if (err) return next(err)
     if (!req.file && req.files && Array.isArray(req.files) && req.files.length > 0) {
       req.file = req.files[0]
     }
@@ -253,6 +242,4 @@ module.exports = {
   isBlockedRiskExtension,
   blockedUploadErrorMessage,
   uploadValidationError,
-  UPLOAD_MAX_FILE_MB,
-  UPLOAD_MAX_FILE_BYTES,
 }

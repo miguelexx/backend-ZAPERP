@@ -421,14 +421,9 @@ function applyChatListSqlFilters(query, ctx, overrides = {}) {
   }
 
   if (minhaFilaAtiva) {
-    // Espelha listarConversas: grupos do setor do atendente entram na Minha fila.
-    // Sem isso o chip conta menos conversas do que a lista mostra.
-    const incluirGruposSetor = incluiGruposSetorNaMinhaFila(ctx)
-    if (!incluirGruposSetor) {
-      q = q.or('tipo.is.null,tipo.neq.grupo')
-    }
+    q = q.or('tipo.is.null,tipo.neq.grupo')
     q = q.or(
-      `${incluirGruposSetor ? `id.in.(${grupoIdsPermitidosPorDepartamento.join(',')}),` : ''}status_atendimento.eq.aberta,and(status_atendimento.eq.em_atendimento,atendente_id.eq.${user_id}),and(status_atendimento.eq.aguardando_cliente,atendente_id.eq.${user_id}),and(status_atendimento.eq.pagamento_pendente,atendente_id.eq.${user_id}),and(status_atendimento.eq.em_atraso,atendente_id.eq.${user_id})${conversaIdsParticipanteAtivo.length > 0 ? `,and(status_atendimento.in.(em_atendimento,aguardando_cliente,pagamento_pendente,em_atraso),id.in.(${conversaIdsParticipanteAtivo.join(',')}))` : ''}`
+      `status_atendimento.eq.aberta,and(status_atendimento.eq.em_atendimento,atendente_id.eq.${user_id}),and(status_atendimento.eq.aguardando_cliente,atendente_id.eq.${user_id}),and(status_atendimento.eq.pagamento_pendente,atendente_id.eq.${user_id}),and(status_atendimento.eq.em_atraso,atendente_id.eq.${user_id})${conversaIdsParticipanteAtivo.length > 0 ? `,and(status_atendimento.in.(em_atendimento,aguardando_cliente,pagamento_pendente,em_atraso),id.in.(${conversaIdsParticipanteAtivo.join(',')}))` : ''}`
     )
   } else if (pagamentoPendenteAtivo) {
     q = q.eq('status_atendimento', 'pagamento_pendente')
@@ -515,17 +510,6 @@ function isGroupConversationRow(row) {
   return String(row?.tipo || '').trim().toLowerCase() === 'grupo'
 }
 
-/**
- * Mesma condição de listarConversas: só o atendente (não-admin) com grupos vinculados ao seu
- * setor vê grupos dentro da Minha fila. Admin, ou usuário sem grupos de setor, segue sem grupos.
- */
-function incluiGruposSetorNaMinhaFila(ctx) {
-  const grupos = Array.isArray(ctx?.grupoIdsPermitidosPorDepartamento)
-    ? ctx.grupoIdsPermitidosPorDepartamento
-    : []
-  return !ctx?.isAdmin && grupos.length > 0
-}
-
 function rowHasMessage(row) {
   return Array.isArray(row?.mensagens) && row.mensagens.length > 0
 }
@@ -545,9 +529,7 @@ function rowVisibleInPostFilteredList(row, ctx, overrides = {}) {
     ctx?.filtroAtendenteInformado != null ? Number(ctx.filtroAtendenteInformado) : null
 
   if (overrides.minha_fila === true) {
-    // Espelha listarConversas: grupos do setor entram na Minha fila (não têm estado de
-    // atendimento, então contam direto). Fora desse caso, grupo continua fora da fila.
-    if (isGroup) return incluiGruposSetorNaMinhaFila(ctx)
+    if (isGroup) return false
     if (['em_atendimento', 'aguardando_cliente', 'pagamento_pendente', 'em_atraso'].includes(status)) {
       return vinculadaAoUsuario
     }

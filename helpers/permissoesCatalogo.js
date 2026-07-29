@@ -23,7 +23,6 @@ const PERMISSOES_CATALOGO = [
   { codigo: 'atendimentos.puxar_fila', nome: 'Puxar da fila', descricao: 'Puxar próxima conversa aberta da fila', categoria: 'Atendimentos', perfis: ['admin', 'supervisor', 'atendente'] },
   { codigo: 'atendimentos.tags', nome: 'Gerenciar tags', descricao: 'Adicionar e remover tags em conversas', categoria: 'Atendimentos', perfis: ['admin', 'supervisor', 'atendente'] },
   { codigo: 'atendimentos.respostas_salvas', nome: 'Respostas salvas pessoais', descricao: 'Cadastrar e usar respostas rápidas no atendimento (atalho /)', categoria: 'Atendimentos', perfis: ['admin', 'supervisor', 'atendente'] },
-  { codigo: 'atendimentos.nota_interna', nome: 'Nota interna', descricao: 'Registrar notas internas na conversa (o cliente nunca recebe)', categoria: 'Atendimentos', perfis: ['admin', 'supervisor', 'atendente'] },
   { codigo: 'atendimentos.merge', nome: 'Mesclar duplicatas', descricao: 'Mesclar conversas duplicadas', categoria: 'Atendimentos', perfis: ['admin'] },
 
   // --- CONFIGURAÇÕES ---

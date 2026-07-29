@@ -4,17 +4,8 @@
  */
 
 const { isAllowedInboundMediaUrl: isAllowedMediaUrl } = require('../helpers/allowedInboundMediaUrl')
-const { Readable } = require('stream')
-const { pipeline } = require('stream/promises')
 
-const BUFFER_MAX_BYTES = Math.max(
-  1024 * 1024,
-  (Number(process.env.MEDIA_PROXY_BUFFER_MAX_MB) || 80) * 1024 * 1024
-)
-const MAX_BYTES = Math.max(
-  BUFFER_MAX_BYTES,
-  (Number(process.env.MEDIA_PROXY_MAX_MB) || 512) * 1024 * 1024
-)
+const MAX_BYTES = 80 * 1024 * 1024 // 80 MB (impressão / preview)
 const FETCH_TIMEOUT_MS = Math.max(1000, Number(process.env.MEDIA_PROXY_TIMEOUT_MS) || 30000)
 const MAX_REDIRECTS = 3
 
@@ -284,6 +275,11 @@ exports.proxyMedia = async (req, res) => {
       return res.status(413).json({ error: 'Arquivo muito grande' })
     }
 
+    const arrayBuffer = await upstream.arrayBuffer()
+    if (arrayBuffer.byteLength > MAX_BYTES) {
+      return res.status(413).json({ error: 'Arquivo muito grande' })
+    }
+
     // Resolve Content-Type: prioriza upstream específico; fallback por extensão do filename/URL
     const ct = resolveContentType(
       upstream.headers.get('content-type'),
@@ -315,42 +311,6 @@ exports.proxyMedia = async (req, res) => {
     if (effectiveFilename) {
       const contentDisposition = buildContentDisposition(dispositionType, effectiveFilename)
       if (contentDisposition) res.setHeader('Content-Disposition', contentDisposition)
-    }
-
-    // Documentos grandes não podem ser materializados num único Buffer: além de impedir
-    // arquivos acima do antigo teto de 80 MB, isso multiplicava o uso de memória do processo.
-    // Quando a origem informa o tamanho, transmite diretamente para o navegador. Pedidos Range
-    // honrados pela origem também podem seguir por streaming sem perder Content-Range.
-    const canStreamUpstream =
-      cl > BUFFER_MAX_BYTES &&
-      upstream.body &&
-      typeof upstream.body.getReader === 'function' &&
-      (!clientRange || upstream.status === 206)
-
-    if (canStreamUpstream) {
-      if (clientRange && upstream.status === 206) {
-        const upstreamRange = String(upstream.headers.get('content-range') || '').trim()
-        if (!upstreamRange) {
-          console.warn('[mediaProxy] origem devolveu 206 sem Content-Range:', target.hostname)
-          return res.status(502).json({ error: 'Resposta parcial inválida da origem' })
-        }
-        res.setHeader('Content-Range', upstreamRange)
-        res.status(206)
-      } else {
-        res.status(200)
-      }
-      res.setHeader('Content-Length', String(cl))
-
-      // O timeout protege a obtenção dos headers. Depois que o download começou, abortá-lo
-      // aos 30 s quebraria anexos grandes em conexões mais lentas.
-      clearTimeout(timeout)
-      await pipeline(Readable.fromWeb(upstream.body), res)
-      return
-    }
-
-    const arrayBuffer = await upstream.arrayBuffer()
-    if (arrayBuffer.byteLength > MAX_BYTES) {
-      return res.status(413).json({ error: 'Arquivo muito grande' })
     }
 
     const body = Buffer.from(arrayBuffer)
@@ -397,10 +357,6 @@ exports.proxyMedia = async (req, res) => {
   } catch (e) {
     const timedOut = e?.name === 'AbortError'
     console.error('[mediaProxy] fetch:', timedOut ? 'timeout' : (e?.message || e))
-    if (res.headersSent) {
-      res.destroy(e)
-      return
-    }
     return res.status(502).json({ error: 'Não foi possível obter a mídia' })
   } finally {
     clearTimeout(timeout)
