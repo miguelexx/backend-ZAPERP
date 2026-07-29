@@ -5449,6 +5449,156 @@ exports.adicionarAtendenteConversa = async (req, res) => {
   }
 }
 
+/**
+ * DELETE /chats/:id/atendentes/:usuario_id — remove um CO-ATENDENTE (soft-delete).
+ *
+ * Não toca em `conversas`: status, fila, responsável principal, setor e SLA ficam
+ * exatamente como estavam, e conversa finalizada não é reaberta.
+ * O atendente principal NUNCA sai por aqui — para trocar o responsável existe a
+ * transferência, que continua sendo o único caminho.
+ */
+exports.removerAtendenteConversa = async (req, res) => {
+  try {
+    const { company_id, id: user_id, perfil, departamento_ids = [] } = req.user
+    const { id: conversa_id } = req.params
+    const usuario_id = Number(req.params?.usuario_id)
+
+    if (!Number.isInteger(usuario_id) || usuario_id <= 0) {
+      return res.status(400).json({ error: 'usuario_id inválido' })
+    }
+
+    const perm = await assertPermissaoConversa({ company_id, conversa_id, user_id, role: perfil, user_dep_ids: departamento_ids })
+    if (!perm.ok) return res.status(perm.status).json({ error: perm.error })
+    if (perm.conv && isGroupConversation(perm.conv)) {
+      return res.status(400).json({ error: 'Conversa de grupo não possui participantes de atendimento.' })
+    }
+
+    // O principal só muda por transferência — nunca por remoção de participante.
+    if (perm.conv?.atendente_id != null && Number(perm.conv.atendente_id) === usuario_id) {
+      return res.status(409).json({
+        error: 'Este é o responsável principal. Transfira a conversa antes de removê-lo.',
+        code: 'PRINCIPAL_EXIGE_TRANSFERENCIA',
+      })
+    }
+
+    const role = String(perfil || '').toLowerCase()
+    const souPrincipal = perm.conv?.atendente_id != null && Number(perm.conv.atendente_id) === Number(user_id)
+    const souEuMesmo = usuario_id === Number(user_id)
+    const podeRemover = role === 'admin' || role === 'supervisor' || souPrincipal || souEuMesmo
+    if (!podeRemover) {
+      return res.status(403).json({ error: 'Apenas o responsável principal, um supervisor ou um administrador pode remover participantes.' })
+    }
+
+    const { data: participante, error: findError } = await supabase
+      .from('conversa_atendentes')
+      .select('id, usuario_id, ativo')
+      .eq('company_id', Number(company_id))
+      .eq('conversa_id', Number(conversa_id))
+      .eq('usuario_id', usuario_id)
+      .eq('ativo', true)
+      .maybeSingle()
+
+    if (findError) {
+      if (isConversaAtendentesMissingTable(findError)) {
+        return res.status(404).json({ error: 'Participante não encontrado nesta conversa.' })
+      }
+      console.error('[chatController] conversa_atendentes', findError?.message)
+      return res.status(500).json({ error: 'Erro interno' })
+    }
+    if (!participante) {
+      return res.status(404).json({ error: 'Participante não encontrado nesta conversa.' })
+    }
+
+    // Soft-delete: a linha é preservada para auditoria (entrada, saída e autores).
+    const removidoEm = new Date().toISOString()
+    const desativar = async (comColunasDeSaida) => {
+      const patch = comColunasDeSaida
+        ? { ativo: false, removido_em: removidoEm, removido_por: Number(user_id), atualizado_em: removidoEm }
+        : { ativo: false, atualizado_em: removidoEm }
+      return supabase
+        .from('conversa_atendentes')
+        .update(patch)
+        .eq('company_id', Number(company_id))
+        .eq('conversa_id', Number(conversa_id))
+        .eq('id', Number(participante.id))
+        .eq('ativo', true)
+        .select('id, usuario_id, ativo')
+        .maybeSingle()
+    }
+
+    let { data: removido, error: updateError } = await desativar(true)
+    // Compat: base sem a migration 20260729120000 (colunas de saída ainda não existem).
+    if (updateError && isGenericMissingColumnError(updateError)) {
+      ;({ data: removido, error: updateError } = await desativar(false))
+    }
+    if (updateError) {
+      console.error('[chatController] remover atendente', updateError?.message)
+      return res.status(500).json({ error: 'Erro ao remover atendente da conversa' })
+    }
+    // Corrida: outro usuário removeu o mesmo participante primeiro.
+    if (!removido) {
+      return res.status(409).json({ error: 'Este participante já foi removido da conversa.' })
+    }
+
+    const [{ data: fromUser }, { data: targetUser }] = await Promise.all([
+      supabase.from('usuarios').select('nome').eq('company_id', Number(company_id)).eq('id', Number(user_id)).maybeSingle(),
+      supabase.from('usuarios').select('id, nome, email, perfil').eq('company_id', Number(company_id)).eq('id', usuario_id).maybeSingle(),
+    ])
+    const fromNome = (fromUser?.nome && String(fromUser.nome).trim()) || 'Atendente'
+    const targetNome = (targetUser?.nome && String(targetUser.nome).trim()) || 'atendente'
+
+    await registrarAtendimento({
+      conversa_id,
+      company_id,
+      acao: 'removeu_atendente',
+      de_usuario_id: user_id,
+      para_usuario_id: usuario_id,
+      observacao: souEuMesmo
+        ? `${fromNome} saiu do atendimento.`
+        : `${fromNome} removeu ${targetNome} do atendimento.`,
+    }).catch((e) => console.warn('[removerAtendente] registrarAtendimento:', e?.message || e))
+
+    // Sem isto o removido continuaria recebendo eventos até o cache de 15s expirar.
+    invalidateConversaVisibilityCache(company_id, conversa_id)
+
+    const io = req.app.get('io')
+    if (io) {
+      const payload = {
+        conversa_id: Number(conversa_id),
+        company_id: Number(company_id),
+        usuario_id,
+        removido_por: Number(user_id),
+        lista_realtime: { minha_fila: true, motivo: 'atendente_removido' },
+      }
+      // O removido precisa saber que perdeu o acesso — ele não está mais na lista
+      // de destinatários resolvida por obterUsuarioIdsQuePodemVerConversa.
+      emitirParaUsuario(io, usuario_id, 'conversa_atendente_removido', payload)
+      emitirParaUsuariosQuePodemVerConversa(io, company_id, conversa_id, 'conversa_participantes_atualizados', payload)
+        .catch((e) => console.warn('[removerAtendente] emitir participantes:', e?.message || e))
+      emitirSincronizacaoListaConversas(io, company_id, conversa_id)
+    }
+
+    console.log('[ATENDENTES] participante removido', {
+      company_id,
+      conversa_id: Number(conversa_id),
+      usuario_id,
+      removido_por: Number(user_id),
+    })
+
+    return res.json({
+      ok: true,
+      conversa_id: Number(conversa_id),
+      usuario_id,
+      usuario: targetUser
+        ? { id: Number(targetUser.id), nome: targetUser.nome || null, email: targetUser.email || null, perfil: targetUser.perfil || null }
+        : null,
+    })
+  } catch (err) {
+    console.error(err)
+    return res.status(500).json({ error: 'Erro ao remover atendente da conversa' })
+  }
+}
+
 exports.transferirSetor = async (req, res) => {
   try {
     const { company_id, id: user_id, perfil, departamento_ids = [] } = req.user
