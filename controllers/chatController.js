@@ -62,8 +62,6 @@ const {
   parseConversaIdsQuery,
   getStartOfTodayIso,
   getEndOfTodayIso,
-  rowVisibleInPostFilteredList,
-  countNeedsPostListRules,
 } = require('../services/chatListCountsService')
 const { normalizarTimestampSemFusoAmbiguoParaApi } = require('../helpers/timestampApiCompat')
 const { isRealWhatsAppId, isUltramsgNumericQueueId } = require('../helpers/whatsappMessageIdHelper')
@@ -378,63 +376,6 @@ function applyChatListCursor(query, cursorUltimaAtividade, cursorIdRaw) {
     return query.or(`ultima_atividade.lt.${quoted},and(ultima_atividade.eq.${quoted},id.lt.${Math.floor(idNum)})`)
   }
   return query.lt('ultima_atividade', cursor)
-}
-
-/** Teto de linhas varridas quando a aba filtra depois do SQL (Minha fila / Abertas / Em atendimento). */
-function getChatListPostFilterScanLimit(env = process.env) {
-  const raw = Number(env.CHAT_LIST_POST_FILTER_SCAN_LIMIT)
-  if (!Number.isFinite(raw) || raw <= 0) return 3000
-  return Math.min(Math.max(Math.floor(raw), 200), 10000)
-}
-
-/**
- * Percorre páginas do cursor até juntar `limit + 1` conversas que sobrevivem ao filtro aplicado em JS.
- * O SQL pagina por `ultima_atividade` antes desse filtro: sem varrer, uma página inteira podia sair
- * vazia (Minha fila / Abertas apareciam sem nenhuma conversa mesmo com o contador acusando várias).
- * Devolve os ids na ordem do SQL, ou `null` quando a varredura falhou (aí a listagem usa a página crua).
- */
-async function coletarIdsPaginaPosFiltro({
-  fetchPage,
-  keepRow,
-  limit,
-  cursor = null,
-  cursorId = null,
-  pageSize = 200,
-  maxRows = 3000,
-}) {
-  const ids = []
-  let cursorAtual = cursor
-  let cursorIdAtual = cursorId
-  let linhasVarridas = 0
-
-  while (ids.length <= limit && linhasVarridas < maxRows) {
-    const { data, error } = await fetchPage({
-      cursor: cursorAtual,
-      cursorId: cursorIdAtual,
-      pageSize,
-    })
-    if (error) {
-      // Sem varredura: a listagem segue com a página crua em vez de falhar.
-      console.warn('[listarConversas] varredura pos-filtro:', error?.message || error)
-      return null
-    }
-    const linhas = Array.isArray(data) ? data : []
-    linhasVarridas += linhas.length
-    for (const row of linhas) {
-      if (!keepRow(row)) continue
-      ids.push(Number(row.id))
-      if (ids.length > limit) break
-    }
-    if (ids.length > limit) break
-    const ultima = linhas[linhas.length - 1]
-    if (linhas.length < pageSize || !ultima) break
-    const proximoCursor = ultima.ultima_atividade || ultima.criado_em || null
-    if (!proximoCursor) break
-    cursorAtual = proximoCursor
-    cursorIdAtual = ultima.id != null ? Number(ultima.id) : null
-  }
-
-  return ids
 }
 
 function splitChatListPage(rows = [], limit = 100) {
@@ -2121,69 +2062,42 @@ exports.listarConversas = async (req, res) => {
             return null
           })
 
-    /**
-     * Abas com regra aplicada DEPOIS do SQL (Minha fila, Abertas, Em atendimento): o SQL pagina por
-     * `ultima_atividade` e só então o JS descarta o que não pertence à aba. Com muitas conversas sem
-     * movimentação no topo, uma página inteira saía sem nenhuma linha da aba — a lista ficava vazia
-     * mesmo com o contador acusando conversas (e sem botão "Carregar mais" para escapar).
-     * Aqui varremos páginas leves (só as colunas da regra) até completar a página pedida e depois
-     * buscamos as linhas completas por id.
-     */
-    const precisaVarreduraPosFiltro =
-      !forceEmptyConversas && countNeedsPostListRules(listFilterOverrides, countsCtx)
-
-    const idsPaginaPosFiltro = precisaVarreduraPosFiltro
-      ? await coletarIdsPaginaPosFiltro({
-          limit: chatListPagination.limit,
-          cursor: chatListPagination.cursor,
-          cursorId: chatListPagination.cursor_id,
-          // Página de varredura larga: as linhas são leves e cada ida ao banco custa mais que os bytes.
-          pageSize: Math.min(Math.max(chatListPagination.limit * 8, 500), 1000),
-          maxRows: getChatListPostFilterScanLimit(),
-          keepRow: (row) => rowVisibleInPostFilteredList(row, countsCtx, listFilterOverrides),
-          fetchPage: ({ cursor, cursorId, pageSize }) =>
-            applyChatListCursor(
-              buildQuery(
-                'id, tipo, status_atendimento, atendente_id, ultima_atividade, criado_em, mensagens ( id )'
-              )
-                .order('ultima_atividade', { ascending: false, nullsFirst: false })
-                .order('id', { ascending: false }),
-              cursor,
-              cursorId
-            ).limit(pageSize),
-        })
-      : null
-
-    /** Linhas completas da página: por id quando houve varredura, senão a página bruta do cursor. */
-    function buildListaQuery(select) {
-      const base = buildQuery(select)
-        .order('ultima_atividade', { ascending: false, nullsFirst: false })
-        .order('id', { ascending: false })
-      if (idsPaginaPosFiltro) {
-        return base.in('id', idsPaginaPosFiltro.length > 0 ? idsPaginaPosFiltro : [0])
-      }
-      return applyChatListCursor(
-        base,
-        chatListPagination.cursor,
-        chatListPagination.cursor_id
-      ).limit(chatListPagination.limit + 1)
-    }
-
     let data = null
     let error = null
 
-    let result = await buildListaQuery(selectCompleto)
+    const queryCompleto = applyChatListCursor(
+      buildQuery(selectCompleto)
+        .order('ultima_atividade', { ascending: false, nullsFirst: false })
+        .order('id', { ascending: false }),
+      chatListPagination.cursor,
+      chatListPagination.cursor_id
+    ).limit(chatListPagination.limit + 1)
+    let result = await queryCompleto
     data = result.data
     error = result.error
 
     if (error) {
-      result = await buildListaQuery(selectMinimo)
+      const queryMinimo = applyChatListCursor(
+        buildQuery(selectMinimo)
+          .order('ultima_atividade', { ascending: false, nullsFirst: false })
+          .order('id', { ascending: false }),
+        chatListPagination.cursor,
+        chatListPagination.cursor_id
+      ).limit(chatListPagination.limit + 1)
+      result = await queryMinimo
       data = result.data
       error = result.error
     }
 
     if (error) {
-      result = await buildListaQuery(selectBare)
+      const queryBare = applyChatListCursor(
+        buildQuery(selectBare)
+          .order('ultima_atividade', { ascending: false, nullsFirst: false })
+          .order('id', { ascending: false }),
+        chatListPagination.cursor,
+        chatListPagination.cursor_id
+      ).limit(chatListPagination.limit + 1)
+      result = await queryBare
       data = result.data
       error = result.error
     }
@@ -2191,38 +2105,11 @@ exports.listarConversas = async (req, res) => {
     if (error) { console.error('[chatController]', error?.message); return res.status(500).json({ error: 'Erro interno' }) }
 
     const rawSqlRows = Array.isArray(data) ? data : []
-    const rawSqlHadMore = idsPaginaPosFiltro
-      ? idsPaginaPosFiltro.length > chatListPagination.limit
-      : rawSqlRows.length > chatListPagination.limit
+    const rawSqlHadMore = rawSqlRows.length > chatListPagination.limit
     const whatsappInstanceMetaMap = await loadWhatsappInstanceMetaMap(
       company_id,
       rawSqlRows.map((c) => c?.whatsapp_instance_id)
     )
-
-    /**
-     * O cursor precisa sair da ordem do SQL (`ultima_atividade`), não da lista já reordenada por
-     * fixadas/última mensagem — senão "Carregar mais" devolve linhas repetidas ou pula conversas.
-     */
-    const indiceSqlPorId = new Map()
-    rawSqlRows.forEach((row, indice) => {
-      if (row?.id != null) indiceSqlPorId.set(Number(row.id), indice)
-    })
-    function resolveCursorNaOrdemSql(pageRows) {
-      let maiorIndice = -1
-      for (const row of pageRows || []) {
-        if (!row || row.sem_conversa || row.id == null) continue
-        const indice = indiceSqlPorId.get(Number(row.id))
-        if (indice != null && indice > maiorIndice) maiorIndice = indice
-      }
-      if (maiorIndice < 0) return null
-      const rawRow = rawSqlRows[maiorIndice]
-      const cursor = rawRow?.ultima_atividade || rawRow?.criado_em || null
-      if (!cursor) return null
-      return {
-        next_cursor: cursor,
-        next_cursor_id: rawRow?.id != null ? Number(rawRow.id) : null,
-      }
-    }
 
     // Enriquece última mensagem de cada conversa com usuario_nome
     const allLastMsgs = (rawSqlRows || []).flatMap((c) => c.mensagens || [])
@@ -2857,15 +2744,6 @@ exports.listarConversas = async (req, res) => {
     }
 
     let chatListPage = splitChatListPage(conversasFormatadas || [], chatListPagination.limit)
-    if (chatListPage.pagination.has_more) {
-      const cursorSql = resolveCursorNaOrdemSql(chatListPage.rows)
-      if (cursorSql) {
-        chatListPage = {
-          rows: chatListPage.rows,
-          pagination: { ...chatListPage.pagination, ...cursorSql },
-        }
-      }
-    }
     if (
       !chatListPage.pagination.has_more &&
       rawSqlHadMore &&
@@ -9083,8 +8961,6 @@ exports._test = {
   assertPermissaoConversa,
   parseChatListPagination,
   splitChatListPage,
-  coletarIdsPaginaPosFiltro,
-  getChatListPostFilterScanLimit,
   parseMessageHistoryPagination,
   splitMessageHistoryPage,
   shouldIncludeClientesSemConversa,

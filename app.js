@@ -509,7 +509,8 @@ app.use((err, req, res, next) => {
     uploadErrorCode.startsWith('UPLOAD_')
   if (isUploadError) {
     const msg = err.code === 'LIMIT_UNEXPECTED_FILE' ? 'Use multipart/form-data com campo "file" ou "audio"' : (err.message || 'Arquivo inválido')
-    return res.status(400).json({ error: msg })
+    const status = Number(err?.status) || (err.code === 'LIMIT_FILE_SIZE' ? 413 : 400)
+    return res.status(status).json({ error: msg })
   }
   // CORS
   if (err && String(err.message || '').startsWith('CORS não permitido para esta origem:')) {

@@ -5,6 +5,8 @@ const {
   isBlockedRiskExtension,
   blockedUploadErrorMessage,
   uploadValidationError,
+  UPLOAD_MAX_FILE_MB,
+  UPLOAD_MAX_FILE_BYTES,
 } = require('../middleware/upload')
 
 test('aceita application/json', () => {
@@ -79,6 +81,11 @@ test('erro de upload inválido carrega status 400', () => {
   const err = uploadValidationError('Arquivo inválido', 'UPLOAD_TEST')
   assert.equal(err.status, 400)
   assert.equal(err.code, 'UPLOAD_TEST')
+})
+
+test('limite padrão de upload aceita o anexo de 102,6 MB do caso reportado', () => {
+  assert.equal(UPLOAD_MAX_FILE_BYTES, UPLOAD_MAX_FILE_MB * 1024 * 1024)
+  assert.ok(UPLOAD_MAX_FILE_BYTES > 102.6 * 1024 * 1024)
 })
 
 test('extFromOriginalName', () => {
