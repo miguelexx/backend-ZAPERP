@@ -80,9 +80,28 @@ describe('chatListCountsService', () => {
       )
     ).toBe(true)
 
+    // Grupo do setor aparece na Minha fila (listarConversas devolve) — contador precisa contar igual.
     expect(
       rowVisibleInPostFilteredList(
         { tipo: 'grupo', status_atendimento: 'aberta', atendente_id: 84, mensagens: [{ id: 1 }] },
+        ctx,
+        { minha_fila: true }
+      )
+    ).toBe(true)
+
+    // Conversa aberta sem mensagem e sem atendente é "ociosa": fora da fila e fora de Abertas.
+    expect(
+      rowVisibleInPostFilteredList(
+        { tipo: null, status_atendimento: 'aberta', atendente_id: null, mensagens: [] },
+        ctx,
+        { minha_fila: true }
+      )
+    ).toBe(false)
+
+    // Em atendimento de outro atendente não entra na minha fila.
+    expect(
+      rowVisibleInPostFilteredList(
+        { tipo: null, status_atendimento: 'em_atendimento', atendente_id: 99, mensagens: [{ id: 1 }] },
         ctx,
         { minha_fila: true }
       )
