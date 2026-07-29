@@ -70,7 +70,7 @@ const { departamentoRoom } = require('../helpers/socketRooms')
 const WHATSAPP_DEBUG = String(process.env.WHATSAPP_DEBUG || '').toLowerCase() === 'true'
 // Seleção enxuta para evitar payload desnecessário em caminhos quentes de webhook.
 // IMPORTANTE: não depender de colunas opcionais para manter compatibilidade com bancos legados.
-const WEBHOOK_MSG_SELECT = 'id, conversa_id, company_id, whatsapp_instance_id, whatsapp_id, texto, url, tipo, direcao, criado_em, status, autor_usuario_id, reply_meta, nome_arquivo, contact_meta, location_meta, remetente_nome, remetente_telefone'
+const WEBHOOK_MSG_SELECT = 'id, conversa_id, company_id, whatsapp_instance_id, whatsapp_id, texto, url, tipo, direcao, criado_em, status, autor_usuario_id, origem, reply_meta, nome_arquivo, contact_meta, location_meta, remetente_nome, remetente_telefone'
 
 // Ordem de progresso dos ticks de status. Usado em statusZapi para evitar que um ack atrasado
 // (ex.: "delivered" chegando depois de "read") regrida visualmente o status já persistido.
@@ -2958,7 +2958,6 @@ exports.receberZapi = async (req, res) => {
               // (inclui upgrade de placeholder genérico → tipado, para a bolha sair de "Mensagem" ao vivo)
               if ((hasMediaToUpdate || hasGenericMediaToAttach || needsArquivoTipo || needsNomeArquivo || textoPlaceholderTipado) && req.app?.get('io')) {
                 const io2 = req.app.get('io')
-                const rooms = [`conversa_${conversa_id}`, `empresa_${company_id}`]
                 const emitPayload = {
                   ...mensagemSalva,
                   criado_em: normalizarTimestampSemFusoAmbiguoParaApi(mensagemSalva.criado_em),
@@ -2968,7 +2967,16 @@ exports.receberZapi = async (req, res) => {
                   fromMe,
                   direcao: mensagemSalva.direcao ?? (fromMe ? 'out' : 'in'),
                 }
-                io2.to(rooms).emit(io2.EVENTS?.NOVA_MENSAGEM || 'nova_mensagem', emitPayload)
+                const emittedScoped = await emitirParaUsuariosQuePodemVerConversa(
+                  io2,
+                  company_id,
+                  conversa_id,
+                  io2.EVENTS?.NOVA_MENSAGEM || 'nova_mensagem',
+                  emitPayload
+                )
+                if (!emittedScoped) {
+                  io2.to(`conversa_${conversa_id}`).emit(io2.EVENTS?.NOVA_MENSAGEM || 'nova_mensagem', emitPayload)
+                }
                 if (hasMediaToUpdate) scheduleInboundWebPush(company_id, conversa_id, 'nova_mensagem', emitPayload)
               }
             } catch (_) {
@@ -3199,11 +3207,19 @@ exports.receberZapi = async (req, res) => {
           console.log(`✏️ Z-API isEdit: mensagem ${editTarget.id} atualizada (conversa ${conversa_id})`)
           const io = req.app.get('io')
           if (io) {
-            io.to(`conversa_${conversa_id}`).to(`empresa_${company_id}`).emit('mensagem_editada', {
+            const editPayload = {
               id: editTarget.id,
               conversa_id,
               texto,
-            })
+            }
+            const emittedScoped = await emitirParaUsuariosQuePodemVerConversa(
+              io,
+              company_id,
+              conversa_id,
+              'mensagem_editada',
+              editPayload
+            )
+            if (!emittedScoped) io.to(`conversa_${conversa_id}`).emit('mensagem_editada', editPayload)
           }
         }
       } catch (editErr) {
@@ -3222,6 +3238,7 @@ exports.receberZapi = async (req, res) => {
         conversa_id,
         texto,
         direcao: fromMe ? 'out' : 'in',
+        origem: fromMe ? 'whatsapp_celular' : 'cliente',
         company_id,
         ...(whatsapp_instance_id ? { whatsapp_instance_id } : {}),
         whatsapp_id: whatsappIdStr || null,
@@ -3404,7 +3421,6 @@ exports.receberZapi = async (req, res) => {
                   mergedDup = patchedDup
                   if (req.app?.get('io')) {
                     const io2 = req.app.get('io')
-                    const rooms = [`conversa_${conversa_id}`, `empresa_${company_id}`]
                     const emitPayload = {
                       ...patchedDup,
                       criado_em: normalizarTimestampSemFusoAmbiguoParaApi(patchedDup.criado_em),
@@ -3414,7 +3430,16 @@ exports.receberZapi = async (req, res) => {
                       fromMe,
                       direcao: patchedDup.direcao ?? (fromMe ? 'out' : 'in'),
                     }
-                    io2.to(rooms).emit(io2.EVENTS?.NOVA_MENSAGEM || 'nova_mensagem', emitPayload)
+                    const emittedScoped = await emitirParaUsuariosQuePodemVerConversa(
+                      io2,
+                      company_id,
+                      conversa_id,
+                      io2.EVENTS?.NOVA_MENSAGEM || 'nova_mensagem',
+                      emitPayload
+                    )
+                    if (!emittedScoped) {
+                      io2.to(`conversa_${conversa_id}`).emit(io2.EVENTS?.NOVA_MENSAGEM || 'nova_mensagem', emitPayload)
+                    }
                     scheduleInboundWebPush(company_id, conversa_id, 'nova_mensagem', emitPayload)
                   }
                 }
@@ -3682,6 +3707,7 @@ exports.receberZapi = async (req, res) => {
                   conversa_id: convIdForHistory,
                   texto: ex.texto,
                   direcao: direcaoHistory,
+                  origem: ex.fromMe ? 'whatsapp_celular' : 'cliente',
                   company_id,
                   ...(whatsapp_instance_id ? { whatsapp_instance_id } : {}),
                   whatsapp_id: wId,

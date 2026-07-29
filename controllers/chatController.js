@@ -143,6 +143,30 @@ function buildClientTempIdDedupResponse(row, conversa_id, clientTempId) {
   }
 }
 
+function buildMediaClientTempIdDedupResult(row) {
+  if (!row?.id) return null
+  const status = String(row.status_mensagem || row.status || '').trim().toLowerCase()
+  const providerAccepted =
+    isRealWhatsAppId(row.whatsapp_id) ||
+    (row.provider_queue_id != null && String(row.provider_queue_id).trim() !== '') ||
+    ['sent', 'delivered', 'read', 'played'].includes(status)
+
+  if (providerAccepted) {
+    return { ok: true, msg: row, deduplicated: true }
+  }
+
+  const failed = ['erro', 'error', 'failed', 'invalid', 'unsent', 'expired'].includes(status)
+  return {
+    ok: false,
+    status: failed ? 502 : 409,
+    error: failed
+      ? 'O envio anterior da mídia falhou e ainda não foi confirmado pelo WhatsApp.'
+      : 'O envio anterior da mídia ainda não foi confirmado pelo WhatsApp.',
+    msg: row,
+    deduplicated: true,
+  }
+}
+
 async function findMensagemByClientTempId(company_id, conversa_id, clientTempId, select = 'id, conversa_id, status, status_mensagem, whatsapp_id, client_temp_id') {
   if (!clientTempId || _clientTempIdDbDedupeUnavailable) return null
   try {
@@ -7700,7 +7724,7 @@ const MAX_MEDIA_CAPTION_CHARS = 1024
 
 /**
  * Uma unidade de upload após multer; conversa e telefone já validados.
- * @returns {Promise<{ ok: true, msg: object } | { ok: false, status: number, error: string }>}
+ * @returns {Promise<{ ok: true, msg: object } | { ok: false, status: number, error: string, msg?: object }>}
  */
 async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conversa_id, telefoneParaEnvio, whatsappInstanceId = null, io, captionUsuario = '', clientTempId = null, totalArquivos = 1 }) {
   const { extFromOriginalName, isBlockedRiskExtension, blockedUploadErrorMessage } = require('../middleware/upload')
@@ -7710,10 +7734,10 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
       company_id,
       conversa_id,
       clientTempId,
-      'id, conversa_id, company_id, status, status_mensagem, whatsapp_id, client_temp_id, texto, tipo, url, nome_arquivo, criado_em'
+      'id, conversa_id, company_id, status, status_mensagem, whatsapp_id, provider_queue_id, client_temp_id, texto, tipo, url, nome_arquivo, criado_em'
     )
     if (existing?.id) {
-      return { ok: true, msg: existing, deduplicated: true }
+      return buildMediaClientTempIdDedupResult(existing)
     }
   }
 
@@ -7854,10 +7878,10 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
       company_id,
       conversa_id,
       clientTempId,
-      'id, conversa_id, company_id, status, status_mensagem, whatsapp_id, client_temp_id, texto, tipo, url, nome_arquivo, criado_em'
+      'id, conversa_id, company_id, status, status_mensagem, whatsapp_id, provider_queue_id, client_temp_id, texto, tipo, url, nome_arquivo, criado_em'
     )
     if (existing?.id) {
-      return { ok: true, msg: existing, deduplicated: true }
+      return buildMediaClientTempIdDedupResult(existing)
     }
   }
 
@@ -8058,6 +8082,14 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
           if (!ok) {
             scheduleOutboundMediaResend({ companyId: company_id, mensagemId: msg.id, io: io2 })
           }
+          return {
+            ok,
+            status: nextStatus,
+            status_mensagem: nextStatusMensagem,
+            messageId: waMessageId,
+            ...(normalizedResult?.error ? { error: normalizedResult.error } : {}),
+            recorded: true,
+          }
         })
         .catch(async (e) => {
           console.error('WhatsApp enviar mídia (erro de rede/provider):', e?.message || e)
@@ -8068,20 +8100,30 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
             io2.to(`empresa_${company_id}`).to(`conversa_${conversa_id}`).to(`usuario_${user_id}`).emit(io2.EVENTS?.STATUS_MENSAGEM || 'status_mensagem', payload)
           }
           scheduleOutboundMediaResend({ companyId: company_id, mensagemId: msg.id, io: io2 })
+          return {
+            ok: false,
+            status: 'erro',
+            status_mensagem: 'erro',
+            error: e?.message || 'erro_rede_provider',
+            recorded: true,
+          }
         })
     }
 
+    let dispatchResult = null
     if (telefoneParaEnvio) {
       // Fila serial por conversa: com vários áudios em sequência, o próximo só despacha depois que
       // o anterior conclui (upload + envio), preservando a ordem de entrega ao contato.
+      // A Promise é aguardada antes da resposta HTTP: persistir no banco, sozinho, não significa
+      // que o provedor aceitou o envio.
       const { enqueueSerialByKey } = require('../helpers/serialDispatchQueue')
       const dispatchKey = `${company_id}:${Number(conversa_id)}`
       if (fullUrl && !isLocalhost && !forceUploadMedia) {
-        enqueueSerialByKey(dispatchKey, () => sendMediaWithUrl(fullUrl))
+        dispatchResult = await enqueueSerialByKey(dispatchKey, () => sendMediaWithUrl(fullUrl))
       } else if ((!baseUrl || isLocalhost || forceUploadMedia) && fileWork.path) {
         const provider = getProvider()
         if (provider?.uploadMedia) {
-          enqueueSerialByKey(dispatchKey, async () => {
+          dispatchResult = await enqueueSerialByKey(dispatchKey, async () => {
             try {
               const result = await provider.uploadMedia(fileWork.path, fileWork.originalname || 'file', { companyId: company_id, whatsappInstanceId: whatsappInstanceId || undefined })
               if (result?.ok && result?.url) {
@@ -8101,36 +8143,81 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
                   return sendMediaWithUrl(fullUrl)
                 } else {
                   console.warn('⚠️ UltraMsg uploadMedia falhou; mídia não enviada.', result?.error || '')
-                  await supabase.from('mensagens').update({ status: 'erro', status_mensagem: 'erro' }).eq('company_id', company_id).eq('id', msg.id)
-                  const io2 = req.app?.get('io')
-                  if (io2) {
-                    io2.to(`empresa_${company_id}`).to(`conversa_${conversa_id}`).to(`usuario_${user_id}`).emit(io2.EVENTS?.STATUS_MENSAGEM || 'status_mensagem', { mensagem_id: msg.id, conversa_id: Number(conversa_id), status: 'erro', status_mensagem: 'erro' })
+                  return {
+                    ok: false,
+                    status: 'erro',
+                    status_mensagem: 'erro',
+                    error: result?.error || 'upload_midia_falhou',
+                    recorded: false,
                   }
-                  scheduleOutboundMediaResend({ companyId: company_id, mensagemId: msg.id, io: io2 })
                 }
               }
             } catch (e) {
               console.error('WhatsApp uploadMedia:', e)
-              await supabase.from('mensagens').update({ status: 'erro', status_mensagem: 'erro' }).eq('company_id', company_id).eq('id', msg.id)
-              const io2 = req.app?.get('io')
-              if (io2) {
-                io2.to(`empresa_${company_id}`).to(`conversa_${conversa_id}`).to(`usuario_${user_id}`).emit(io2.EVENTS?.STATUS_MENSAGEM || 'status_mensagem', { mensagem_id: msg.id, conversa_id: Number(conversa_id), status: 'erro', status_mensagem: 'erro' })
+              return {
+                ok: false,
+                status: 'erro',
+                status_mensagem: 'erro',
+                error: e?.message || 'upload_midia_falhou',
+                recorded: false,
               }
-              scheduleOutboundMediaResend({ companyId: company_id, mensagemId: msg.id, io: io2 })
             }
           })
         } else if (!baseUrl && !forceUploadMedia) {
           console.warn('⚠️ APP_URL/BASE_URL não configurado; mídia não enviada ao WhatsApp.')
+          dispatchResult = { ok: false, error: 'url_publica_indisponivel', recorded: false }
         } else {
           console.warn('⚠️ APP_URL é localhost e provider sem uploadMedia; mídia não enviada ao WhatsApp.')
+          dispatchResult = { ok: false, error: 'upload_midia_indisponivel', recorded: false }
         }
       } else if (!baseUrl) {
         console.warn('⚠️ APP_URL/BASE_URL não configurado; mídia não enviada ao WhatsApp.')
+        dispatchResult = { ok: false, error: 'url_publica_indisponivel', recorded: false }
+      }
+    } else {
+      dispatchResult = { ok: false, error: 'telefone_indisponivel', recorded: false }
+    }
+
+    if (!dispatchResult?.ok) {
+      if (dispatchResult?.recorded !== true) {
+        await supabase
+          .from('mensagens')
+          .update({ status: 'erro', status_mensagem: 'erro' })
+          .eq('company_id', company_id)
+          .eq('id', msg.id)
+        const io2 = req.app?.get('io')
+        if (io2) {
+          io2
+            .to(`empresa_${company_id}`)
+            .to(`conversa_${conversa_id}`)
+            .to(`usuario_${user_id}`)
+            .emit(io2.EVENTS?.STATUS_MENSAGEM || 'status_mensagem', {
+              mensagem_id: msg.id,
+              conversa_id: Number(conversa_id),
+              status: 'erro',
+              status_mensagem: 'erro',
+            })
+        }
+        scheduleOutboundMediaResend({ companyId: company_id, mensagemId: msg.id, io: io2 })
+      }
+      return {
+        ok: false,
+        status: 502,
+        error: 'Arquivo salvo, mas o WhatsApp não confirmou o envio. Tente novamente.',
+        msg: { ...msg, status: 'erro', status_mensagem: 'erro' },
       }
     }
 
-  // Não retornar mensagem completa no HTTP — evita duplicação (API + socket). Mensagem chega via nova_mensagem.
-  return { ok: true, msg, aviso_whatsapp: avisoWhatsapp }
+    const msgConfirmada = {
+      ...msg,
+      status: dispatchResult.status || 'pending',
+      status_mensagem: dispatchResult.status_mensagem || dispatchResult.status || 'sending',
+      ...(isRealWhatsAppId(dispatchResult.messageId) ? { whatsapp_id: dispatchResult.messageId } : {}),
+      ...(isUltramsgNumericQueueId(dispatchResult.messageId) ? { provider_queue_id: dispatchResult.messageId } : {}),
+    }
+
+    // Só confirma sucesso HTTP depois que o provedor aceitou explicitamente o envio.
+    return { ok: true, msg: msgConfirmada, aviso_whatsapp: avisoWhatsapp }
 }
 
 exports.enviarArquivo = async (req, res) => {
@@ -8252,6 +8339,7 @@ exports.enviarArquivo = async (req, res) => {
         results.push({
           ok: false,
           status: r.status,
+          ...(r.msg?.id != null ? { id: r.msg.id, persisted: true } : {}),
           client_temp_id: clientTempId,
           error: r.error || 'Falha ao enviar arquivo.',
           index: i,
@@ -8972,6 +9060,7 @@ exports._test = {
   normalizeLinkPayload,
   normalizeClientTempId,
   buildClientTempIdDedupResponse,
+  buildMediaClientTempIdDedupResult,
   isClientTempIdUniqueViolation,
   inferirTipoArquivo,
   aplicarTipoForcadoSticker,

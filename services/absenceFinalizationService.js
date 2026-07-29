@@ -354,6 +354,7 @@ async function sendAbsenceClosingMessage({ provider, company_id, conversa_id, te
     conversa_id,
     texto,
     direcao: 'out',
+    origem: 'automacao',
     company_id,
     status: ok ? (hasTraceableId ? 'sent' : 'pending') : 'erro',
     status_mensagem: ok ? (hasTraceableId ? 'sent' : 'sending') : 'failed',

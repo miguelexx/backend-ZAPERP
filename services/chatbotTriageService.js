@@ -223,6 +223,7 @@ function buildBotOutboundPayload({ conversa_id, texto, company_id, sendResult, o
     conversa_id,
     texto,
     direcao: 'out',
+    origem: 'automacao',
     company_id,
     status,
     status_mensagem: statusMensagem,

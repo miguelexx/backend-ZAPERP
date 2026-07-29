@@ -52,11 +52,29 @@ async function emitBotMensagemRealtime({ io, supabase, company_id, conversa_id, 
   }
 
   const depId = convRow?.departamento_id != null ? Number(convRow.departamento_id) : null
-  const rooms = [conversaRoom(cid), empresaRoom(company_id)].filter(Boolean)
   const depRoom = departamentoRoom(company_id, depId)
-  if (depRoom) rooms.push(depRoom)
+  const emitScoped = async (eventName, payload) => {
+    try {
+      // Lazy require evita ciclo de inicialização: webhook -> este helper -> chatController.
+      const { emitirParaUsuariosQuePodemVerConversa } = require('../controllers/chatController')
+      const emitted = await emitirParaUsuariosQuePodemVerConversa(
+        io,
+        company_id,
+        cid,
+        eventName,
+        payload
+      )
+      if (emitted) return true
+    } catch (e) {
+      console.warn('[chatbotRealtimeEmitter] emissão escopada:', e?.message || e)
+    }
+    // A room da conversa só admite sockets que passaram pela autorização de join.
+    const convRoom = conversaRoom(cid)
+    if (convRoom) io.to(convRoom).emit(eventName, payload)
+    return false
+  }
 
-  io.to(rooms).emit('nova_mensagem', emitPayload)
+  await emitScoped('nova_mensagem', emitPayload)
   const empRoom = empresaRoom(company_id)
   if (empRoom) io.to(empRoom).emit('atualizar_conversa', { id: cid })
 
@@ -83,12 +101,9 @@ async function emitBotMensagemRealtime({ io, supabase, company_id, conversa_id, 
     reordenar_suave: true,
   }
 
-  const convRoom = conversaRoom(cid)
-  if (empRoom) io.to(empRoom).emit('conversa_atualizada', convPayload)
-  if (convRoom) io.to(convRoom).emit('conversa_atualizada', convPayload)
+  await emitScoped('conversa_atualizada', convPayload)
   if (depRoom) {
     io.to(depRoom).emit('atualizar_conversa', { id: cid })
-    io.to(depRoom).emit('conversa_atualizada', convPayload)
   }
 }
 

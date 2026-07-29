@@ -160,6 +160,7 @@ exports.timeoutInatividadeChatbot = async (req, res) => {
             conversa_id: conv.id,
             texto: mensagemEncerramento,
             direcao: 'out',
+            origem: 'automacao',
             company_id,
             status: statusMsg,
             status_mensagem: ok ? (hasTraceableId ? 'sent' : 'sending') : 'failed',

@@ -105,7 +105,13 @@ async function queryProviderForReference(row) {
       limit: 5,
       sort: 'desc',
     })
-    const list = res?.ok && Array.isArray(res.data) ? res.data : []
+    // Só uma resposta válida e explícita do provedor autoriza concluir que a referência
+    // não existe. Timeout, erro HTTP/body ou contrato inesperado são estado INCONCLUSIVO:
+    // reenviar nesses casos pode duplicar uma mídia que o provedor já aceitou.
+    if (res?.ok !== true || !Array.isArray(res.data)) {
+      return { checked: false, found: false, list: [] }
+    }
+    const list = res.data
     return { checked: true, found: list.length > 0, list }
   } catch (_) {
     return { checked: false, found: false, list: [] }
@@ -218,6 +224,12 @@ async function resendOutboundMediaMessage(row, { io = null } = {}) {
   try {
     // Guarda anti-duplicidade: se o provedor já conhece a mensagem, não reenvia.
     const providerHit = await queryProviderForReference(row)
+    // Fail-closed: indisponibilidade da checagem NÃO equivale a "mensagem inexistente".
+    // Mantém status=erro para a próxima varredura tentar novamente, sem consumir tentativa
+    // e, principalmente, sem arriscar entregar a mesma mídia duas vezes ao cliente.
+    if (!providerHit.checked) {
+      return { action: 'provider_check_inconclusive' }
+    }
     if (providerHit.found) {
       const anySuccessOrQueue = providerHit.list.some((r) => PROVIDER_SUCCESS_OR_QUEUE.includes(providerRowStatus(r)))
       const anyFail = providerHit.list.some((r) => PROVIDER_FAILURE.includes(providerRowStatus(r)))

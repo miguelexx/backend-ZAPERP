@@ -3,6 +3,15 @@ const { isEnabled, FLAGS } = require('../helpers/featureFlags')
 const { getDisplayName } = require('../helpers/contactEnrichment')
 const { normalizePositiveIds, isGroupRow } = require('../helpers/departamentoGruposHelper')
 const slaCalculationService = require('../services/slaCalculationService')
+const {
+  resolveDashboardInstanceScope,
+  applyDashboardInstanceScope,
+} = require('../services/dashboardInstanceScopeService')
+const {
+  normalizeMessageType,
+  dedupeOperationalMessages,
+  isExplicitHumanOutbound,
+} = require('../services/dashboardDataRulesService')
 const ExcelJS = require('exceljs')
 const PDFDocument = require('pdfkit')
 
@@ -140,6 +149,34 @@ function getDateRangeFromQuery(query = {}) {
   }
 }
 
+function getOverviewDateRange(query = {}) {
+  const rawRangeDays = Number(query.range_days)
+  if (Number.isFinite(rawRangeDays) && rawRangeDays <= 0) {
+    return { range_days: 0, data_inicio: null, data_fim: null, fromIso: null, toIso: new Date().toISOString() }
+  }
+  const rangeDays = clampInt(rawRangeDays || 7, 1, 365) || 7
+  const dataFim = todaySaoPauloDateKey()
+  const dataInicio = addDaysDateKey(dataFim, -(rangeDays - 1))
+  return {
+    range_days: rangeDays,
+    data_inicio: dataInicio,
+    data_fim: dataFim,
+    fromIso: saoPauloDateStartIso(dataInicio),
+    toIso: new Date().toISOString(),
+  }
+}
+
+function saoPauloHourKey(value) {
+  const date = value instanceof Date ? value : new Date(value)
+  if (!Number.isFinite(date.getTime())) return null
+  const hour = new Intl.DateTimeFormat('en-US', {
+    timeZone: SAO_PAULO_TZ,
+    hour: '2-digit',
+    hour12: false,
+  }).format(date)
+  return `${String(hour).padStart(2, '0')}:00`
+}
+
 function toPositiveInt(value) {
   const n = Number(value)
   if (!Number.isFinite(n) || n <= 0) return null
@@ -233,7 +270,7 @@ async function buildSlaAnalytics(company_id, query = {}, opts = {}) {
   return slaCalculationService.buildSlaAnalytics(company_id, query, opts)
 }
 
-exports.overview = async (req, res) => {
+async function overviewLegacy(req, res) {
   const { company_id } = req.user
 
   try {
@@ -485,6 +522,203 @@ exports.overview = async (req, res) => {
   } catch (err) {
     console.error(err)
     res.status(500).json({ error: 'Erro ao gerar dashboard' })
+  }
+}
+
+exports.overview = async (req, res) => {
+  const { company_id } = req.user
+  try {
+    const range = getOverviewDateRange(req.query || {})
+    const instanceScope = await resolveDashboardInstanceScope(company_id, req.query?.whatsapp_instance_id)
+
+    const rawMessages = await fetchAllRows(() => {
+      let query = supabase
+        .from('mensagens')
+        .select('id, conversa_id, criado_em, direcao, tipo, whatsapp_id, whatsapp_instance_id, autor_usuario_id, origem, apagada_para_todos')
+        .eq('company_id', company_id)
+        .in('direcao', ['in', 'out'])
+        .order('criado_em', { ascending: true })
+      query = applyDashboardInstanceScope(query, instanceScope)
+      if (range.fromIso) query = query.gte('criado_em', range.fromIso)
+      if (range.toIso) query = query.lte('criado_em', range.toIso)
+      return query
+    })
+    const deduped = dedupeOperationalMessages(rawMessages)
+    const mensagens = deduped.rows
+    const conversaIds = [...new Set(mensagens.map((m) => m.conversa_id).filter(Boolean))]
+
+    const conversas = []
+    for (const ids of chunkArray(conversaIds, 200)) {
+      let query = supabase
+        .from('conversas')
+        .select('id, status_atendimento, criado_em, atendente_id, departamento_id, whatsapp_instance_id')
+        .eq('company_id', company_id)
+        .in('id', ids)
+      query = applyDashboardInstanceScope(query, instanceScope)
+      const { data, error } = await query
+      if (error) throw error
+      conversas.push(...(data || []))
+    }
+
+    const abertasAtuais = await fetchAllRows(() => {
+      let query = supabase
+        .from('conversas')
+        .select('id, status_atendimento, whatsapp_instance_id')
+        .eq('company_id', company_id)
+        .in('status_atendimento', ['aberta', 'em_atendimento', 'aguardando_cliente'])
+      return applyDashboardInstanceScope(query, instanceScope)
+    })
+
+    const [{ data: empresa, error: empresaError }, { data: usuarios, error: usuariosError }] = await Promise.all([
+      supabase.from('empresas').select('atendimento_modo_simples').eq('id', company_id).maybeSingle(),
+      supabase.from('usuarios').select('id, nome, perfil, ativo').eq('company_id', company_id),
+    ])
+    if (empresaError) throw empresaError
+    if (usuariosError) throw usuariosError
+    const activeUsers = (usuarios || []).filter((u) => u.ativo !== false)
+    const attendants = activeUsers.filter((u) => String(u.perfil || '').toLowerCase() === 'atendente')
+    const soleOperator = attendants.length === 1
+      ? attendants[0]
+      : activeUsers.length === 1
+        ? activeUsers[0]
+        : null
+
+    const userNameMap = Object.fromEntries((usuarios || []).map((u) => [String(u.id), u.nome || 'Sem nome']))
+    const depIds = [...new Set(conversas.map((c) => c.departamento_id).filter(Boolean))]
+    const depNameMap = await fetchDepartamentosNomeMap(company_id, depIds)
+    const slaQuery = {
+      whatsapp_instance_id: instanceScope.whatsapp_instance_id || undefined,
+      data_inicio: range.data_inicio || undefined,
+      data_fim: range.data_fim || undefined,
+    }
+    if (!range.data_inicio && mensagens.length > 0) {
+      slaQuery.data_inicio = formatSaoPauloDateKey(mensagens[0].criado_em)
+      slaQuery.data_fim = todaySaoPauloDateKey()
+    }
+    const slaData = mensagens.length > 0
+      ? await slaCalculationService.buildSlaAnalytics(company_id, slaQuery, { skipTrend: true, instanceScope })
+      : null
+
+    const msgTipoMap = {}
+    const origemMap = {}
+    let msgIn = 0
+    let msgOut = 0
+    for (const msg of mensagens) {
+      const tipo = normalizeMessageType(msg.tipo)
+      msgTipoMap[tipo] = (msgTipoMap[tipo] || 0) + 1
+      const origem = String(msg.origem || (msg.direcao === 'in' ? 'cliente' : 'desconhecida'))
+      origemMap[origem] = (origemMap[origem] || 0) + 1
+      if (msg.direcao === 'in') msgIn += 1
+      else if (msg.direcao === 'out') msgOut += 1
+    }
+
+    const todayKey = todaySaoPauloDateKey()
+    const atendimentosHoje = new Set(
+      mensagens
+        .filter((m) => formatSaoPauloDateKey(m.criado_em) === todayKey)
+        .map((m) => m.conversa_id)
+        .filter(Boolean)
+    ).size
+
+    const statusMap = {}
+    const setorMap = {}
+    const atendenteMap = {}
+    const horaMap = {}
+    const firstMessageByConversation = new Map()
+    for (const msg of mensagens) {
+      const key = String(msg.conversa_id)
+      if (!firstMessageByConversation.has(key)) firstMessageByConversation.set(key, msg)
+    }
+
+    for (const conversa of conversas) {
+      const status = conversa.status_atendimento || 'sem_status'
+      statusMap[status] = (statusMap[status] || 0) + 1
+
+      const setor = conversa.departamento_id
+        ? (depNameMap[String(conversa.departamento_id)] || 'Sem setor')
+        : empresa?.atendimento_modo_simples === true
+          ? 'Atendimento simples'
+          : 'Sem setor'
+      setorMap[setor] = (setorMap[setor] || 0) + 1
+
+      const attendantId = conversa.atendente_id || (
+        empresa?.atendimento_modo_simples === true && soleOperator ? soleOperator.id : null
+      )
+      if (attendantId) {
+        const name = userNameMap[String(attendantId)] || soleOperator?.nome || 'Sem nome'
+        atendenteMap[name] = (atendenteMap[name] || 0) + 1
+      }
+
+      const firstMessage = firstMessageByConversation.get(String(conversa.id))
+      const hour = firstMessage ? saoPauloHourKey(firstMessage.criado_em) : null
+      if (hour) horaMap[hour] = (horaMap[hour] || 0) + 1
+    }
+
+    const conversasPorAtendente = Object.entries(atendenteMap)
+      .map(([nome, total]) => ({ nome, total }))
+      .sort((a, b) => b.total - a.total)
+    const topAttendant = conversasPorAtendente[0]?.nome
+      || (
+        empresa?.atendimento_modo_simples === true
+        && soleOperator
+        && (conversas.length > 0 || mensagens.some(isExplicitHumanOutbound))
+          ? soleOperator.nome
+          : null
+      )
+      || null
+    const resumoSla = slaData?.resumo || {}
+
+    return res.json({
+      periodo: {
+        range_days: range.range_days,
+        data_inicio: range.data_inicio,
+        data_fim: range.data_fim,
+        from: range.fromIso,
+        to: range.toIso,
+        timezone: SAO_PAULO_TZ,
+        regra: range.range_days ? 'dias_locais_completos_inclusivos' : 'historico_ate_agora',
+      },
+      instancia: instanceScope,
+      kpis: {
+        total: conversas.length,
+        atendimentos_hoje: atendimentosHoje,
+        tempo_primeira_resposta_min: resumoSla.tempo_medio_primeira_resposta_min ?? null,
+        tempo_medio_resposta_min: resumoSla.tempo_medio_primeira_resposta_min ?? null,
+        sla_percent: resumoSla.percentual_cumprido ?? null,
+        sla_sem_resposta: resumoSla.sem_resposta ?? 0,
+        atendente_mais_produtivo: topAttendant,
+        tickets_abertos: abertasAtuais.length,
+        tickets_abertos_escopo: 'fotografia_atual',
+        taxa_conversao_percent: null,
+      },
+      mensagens_kpis: {
+        total: mensagens.length,
+        in: msgIn,
+        out: msgOut,
+        origens: origemMap,
+      },
+      mensagens_por_tipo: Object.entries(msgTipoMap)
+        .map(([tipo, total]) => ({ tipo, total }))
+        .sort((a, b) => b.total - a.total),
+      conversas_por_setor: Object.entries(setorMap)
+        .map(([nome, total]) => ({ nome, total }))
+        .sort((a, b) => b.total - a.total),
+      conversas_por_atendente: conversasPorAtendente,
+      conversas_por_status: Object.entries(statusMap)
+        .map(([status, total]) => ({ status, total }))
+        .sort((a, b) => b.total - a.total),
+      conversas_por_hora: Object.entries(horaMap)
+        .map(([hora, total]) => ({ hora, total }))
+        .sort((a, b) => a.hora.localeCompare(b.hora)),
+      auditoria: {
+        mensagens_duplicadas_excluidas: deduped.duplicateCount,
+        mensagens_invalidas_excluidas: deduped.invalidCount,
+        mensagens_legadas_sem_instancia: mensagens.filter((m) => m.whatsapp_instance_id == null).length,
+      },
+    })
+  } catch (err) {
+    console.error(err)
+    return res.status(err?.status || 500).json({ error: err?.message || 'Erro ao gerar dashboard' })
   }
 }
 
@@ -1307,31 +1541,42 @@ exports.excluirRespostaSalva = async (req, res) => {
 // RELATÓRIO COMPLETO (conversas + cliente + observações + tags + atendente)
 // =====================================================
 async function buildRelatorioConversas(company_id, filters = {}) {
-  const { data: conversas, error } = await supabase
-    .from('conversas')
-    .select(`
-      id, telefone, status_atendimento, criado_em, atendente_id, departamento_id,
-      clientes!conversas_cliente_fk ( nome, observacoes ),
-      conversa_tags ( tag_id, tags ( id, nome ) )
-    `)
-    .eq('company_id', company_id)
+  const instanceScope = await resolveDashboardInstanceScope(company_id, filters.whatsapp_instance_id)
+  const conversas = await fetchAllRows(() => {
+    let query = supabase
+      .from('conversas')
+      .select(`
+        id, telefone, status_atendimento, criado_em, atendente_id, departamento_id,
+        clientes!conversas_cliente_fk ( nome, observacoes ),
+        conversa_tags ( tag_id, tags ( id, nome ) ),
+        whatsapp_instance_id
+      `)
+      .eq('company_id', company_id)
+      .order('criado_em', { ascending: false })
+    query = applyDashboardInstanceScope(query, instanceScope)
+    if (filters.data_inicio) query = query.gte('criado_em', saoPauloDateStartIso(filters.data_inicio))
+    if (filters.data_fim) query = query.lte('criado_em', saoPauloDateEndIso(filters.data_fim))
+    return query
+  })
 
-  if (error) throw error
+  const [{ data: empresa, error: empresaError }, { data: usuarios, error: usuariosError }] = await Promise.all([
+    supabase.from('empresas').select('atendimento_modo_simples').eq('id', company_id).maybeSingle(),
+    supabase.from('usuarios').select('id, nome, perfil, ativo').eq('company_id', company_id),
+  ])
+  if (empresaError) throw empresaError
+  if (usuariosError) throw usuariosError
+  const activeUsers = (usuarios || []).filter((user) => user.ativo !== false)
+  const attendants = activeUsers.filter((user) => String(user.perfil || '').toLowerCase() === 'atendente')
+  const soleOperator = empresa?.atendimento_modo_simples === true
+    ? (attendants.length === 1 ? attendants[0] : activeUsers.length === 1 ? activeUsers[0] : null)
+    : null
+  const effectiveAtendenteId = (conversa) => conversa?.atendente_id || soleOperator?.id || null
+  const atendenteNomeMap = Object.fromEntries((usuarios || []).map((user) => [String(user.id), user.nome || 'Sem nome']))
+
   let list = conversas || []
 
-  const atendenteNomeMap = await fetchUsuariosNomeMap(
-    company_id,
-    list.map((c) => c?.atendente_id)
-  )
-
-  if (filters.data_inicio) list = list.filter(c => new Date(c.criado_em) >= new Date(filters.data_inicio))
-  if (filters.data_fim) {
-    const fim = new Date(filters.data_fim)
-    fim.setHours(23, 59, 59, 999)
-    list = list.filter(c => new Date(c.criado_em) <= fim)
-  }
   if (filters.status_atendimento) list = list.filter(c => c.status_atendimento === filters.status_atendimento)
-  if (filters.atendente_id) list = list.filter(c => Number(c.atendente_id) === Number(filters.atendente_id))
+  if (filters.atendente_id) list = list.filter(c => Number(effectiveAtendenteId(c)) === Number(filters.atendente_id))
   if (filters.departamento_id) list = list.filter(c => Number(c.departamento_id) === Number(filters.departamento_id))
 
   const conversaIds = list.map(c => c.id)
@@ -1353,12 +1598,20 @@ async function buildRelatorioConversas(company_id, filters = {}) {
     }
   }
 
-  const { data: mensagens } = await supabase
-    .from('mensagens')
-    .select('conversa_id, texto, criado_em, direcao')
-    .eq('company_id', company_id)
-    .in('conversa_id', conversaIds)
-    .order('criado_em', { ascending: false })
+  const mensagensRaw = []
+  for (const ids of chunkArray(conversaIds, 200)) {
+    const chunkRows = await fetchAllRows(() => {
+      let query = supabase
+        .from('mensagens')
+        .select('id, conversa_id, texto, criado_em, direcao, whatsapp_id, whatsapp_instance_id, apagada_para_todos')
+        .eq('company_id', company_id)
+        .in('conversa_id', ids)
+        .order('criado_em', { ascending: false })
+      return applyDashboardInstanceScope(query, instanceScope)
+    })
+    mensagensRaw.push(...chunkRows)
+  }
+  const mensagens = dedupeOperationalMessages(mensagensRaw).rows
 
   const ultimaPorConversa = {}
   const ultimaInPorConversa = {}
@@ -1382,9 +1635,13 @@ async function buildRelatorioConversas(company_id, filters = {}) {
       cliente_nome: getDisplayName(c.clientes) || '—',
       telefone: c.telefone,
       observacoes: c.clientes?.observacoes || '',
-      setor: c?.departamento_id != null ? (depMap[String(c.departamento_id)] || '—') : '—',
+      setor: c?.departamento_id != null
+        ? (depMap[String(c.departamento_id)] || '—')
+        : empresa?.atendimento_modo_simples === true
+          ? 'Atendimento simples'
+          : '—',
       status_atendimento: c.status_atendimento,
-      atendente_nome: atendenteNomeMap[String(c?.atendente_id)] || '—',
+      atendente_nome: atendenteNomeMap[String(effectiveAtendenteId(c))] || soleOperator?.nome || '—',
       tags: tags.map(t => t.nome).join(', '),
       criado_em: c.criado_em,
       ultima_mensagem: ultima?.texto?.slice(0, 200) || '—',
@@ -1403,6 +1660,7 @@ exports.relatorioConversas = async (req, res) => {
       status_atendimento: req.query.status_atendimento,
       atendente_id: req.query.atendente_id,
       departamento_id: req.query.departamento_id,
+      whatsapp_instance_id: req.query.whatsapp_instance_id,
     }
     const data = await buildRelatorioConversas(company_id, filters)
     return res.json(data)
@@ -1420,28 +1678,26 @@ exports.relatorioMensagens = async (req, res) => {
     const { company_id } = req.user
     const data_inicio = req.query.data_inicio || null
     const data_fim = req.query.data_fim || null
+    const instanceScope = await resolveDashboardInstanceScope(company_id, req.query.whatsapp_instance_id)
 
-    let q = supabase
-      .from('mensagens')
-      .select('criado_em, direcao, tipo')
-      .eq('company_id', company_id)
-      .order('criado_em', { ascending: true })
-
-    if (data_inicio) q = q.gte('criado_em', new Date(data_inicio).toISOString())
-    if (data_fim) {
-      const fim = new Date(data_fim)
-      fim.setHours(23, 59, 59, 999)
-      q = q.lte('criado_em', fim.toISOString())
-    }
-
-    const { data: rows, error } = await q
-    if (error) { console.error('[dashboardController]', error?.message); return res.status(500).json({ error: 'Erro interno' }) }
+    const rawRows = await fetchAllRows(() => {
+      let query = supabase
+        .from('mensagens')
+        .select('id, criado_em, direcao, tipo, whatsapp_id, whatsapp_instance_id, apagada_para_todos')
+        .eq('company_id', company_id)
+        .order('criado_em', { ascending: true })
+      query = applyDashboardInstanceScope(query, instanceScope)
+      if (data_inicio) query = query.gte('criado_em', saoPauloDateStartIso(data_inicio))
+      if (data_fim) query = query.lte('criado_em', saoPauloDateEndIso(data_fim))
+      return query
+    })
+    const rows = dedupeOperationalMessages(rawRows || []).rows
 
     const byDay = {}
     for (const r of rows || []) {
       const d = r?.criado_em ? new Date(r.criado_em) : null
       if (!d || Number.isNaN(d.getTime())) continue
-      const key = d.toISOString().slice(0, 10) // YYYY-MM-DD
+      const key = formatSaoPauloDateKey(d)
       if (!byDay[key]) {
         byDay[key] = {
           dia: key,
@@ -1452,8 +1708,8 @@ exports.relatorioMensagens = async (req, res) => {
           audio: 0,
           imagem: 0,
           video: 0,
-          sticker: 0,
-          arquivo: 0,
+          documento: 0,
+          outros: 0,
         }
       }
       const agg = byDay[key]
@@ -1461,13 +1717,8 @@ exports.relatorioMensagens = async (req, res) => {
       if (r?.direcao === 'in') agg.in++
       if (r?.direcao === 'out') agg.out++
 
-      const t = String(r?.tipo || 'texto').toLowerCase()
-      if (t === 'audio') agg.audio++
-      else if (t === 'imagem') agg.imagem++
-      else if (t === 'video') agg.video++
-      else if (t === 'sticker') agg.sticker++
-      else if (t === 'arquivo') agg.arquivo++
-      else agg.texto++
+      const t = normalizeMessageType(r?.tipo)
+      agg[t] += 1
     }
 
     const list = Object.values(byDay).sort((a, b) => a.dia.localeCompare(b.dia))
@@ -1493,6 +1744,7 @@ exports.exportRelatorio = async (req, res) => {
       status_atendimento: req.query.status_atendimento,
       atendente_id: req.query.atendente_id,
       departamento_id: req.query.departamento_id,
+      whatsapp_instance_id: req.query.whatsapp_instance_id,
     }
     const data = await buildRelatorioConversas(company_id, filters)
 
@@ -1828,7 +2080,7 @@ exports.exportSla = async (req, res) => {
       return res.send(csv)
     }
 
-    const header = ['Tipo SLA', 'Status SLA', 'Cliente', 'Telefone', 'Atendente', 'Setor', 'Primeira msg cliente', 'Primeira resposta', 'Tempo (min)', 'Meta (min)', 'Origem meta', 'Tipo resposta', 'Status conversa', 'Conversa ID']
+    const header = ['Tipo SLA', 'Status SLA', 'Cliente', 'Telefone', 'Atendente', 'Setor', 'Primeira msg cliente', 'Primeira resposta', 'Tempo (min)', 'Meta (min)', 'Origem meta', 'Tipo resposta', 'Origem resposta', 'Status conversa', 'Conversa ID']
     const body = exportRows.map((r) => [
       r.tipo_sla,
       r.status_sla,
@@ -1842,6 +2094,7 @@ exports.exportSla = async (req, res) => {
       r.limite_min,
       r.meta_origem,
       r.tipo_resposta,
+      r.origem_resposta,
       r.status_conversa,
       r.conversa_id,
     ])

@@ -118,6 +118,25 @@ describe('resendOutboundMediaMessage — filtros', () => {
 })
 
 describe('resendOutboundMediaMessage — guarda anti-duplicidade', () => {
+  test.each([
+    ['timeout/erro de rede', () => Promise.reject(new Error('timeout'))],
+    ['resposta de erro do provedor', () => Promise.resolve({ ok: false, error: 'indisponivel' })],
+  ])('checagem inconclusiva (%s) não reenvia', async (_label, providerResult) => {
+    const uploadMedia = jest.fn()
+    const sendVoice = jest.fn()
+    mockProvider = {
+      getMessages: jest.fn().mockImplementation(providerResult),
+      uploadMedia,
+      sendVoice,
+    }
+    const row = baseRow()
+    const r = await svc.resendOutboundMediaMessage(row)
+    expect(r.action).toBe('provider_check_inconclusive')
+    expect(uploadMedia).not.toHaveBeenCalled()
+    expect(sendVoice).not.toHaveBeenCalled()
+    expect(svc._test._state.attemptsById.has(row.id)).toBe(false)
+  })
+
   test('se o provedor já tem a mensagem (sent), NÃO reenvia — só corrige status', async () => {
     const sendVoice = jest.fn()
     mockProvider = {
