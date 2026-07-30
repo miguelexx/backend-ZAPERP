@@ -3,6 +3,7 @@ const {
   analyzeSlaCycle,
   classifyOutbound,
   calcDiffMinutes,
+  loadSlaBusinessSchedule,
   formatSaoPauloDateKey,
   analyzeConversationSlaCycles,
   summarizeResponseCycleTimes,
@@ -246,6 +247,25 @@ describe('slaCalculationService', () => {
   test('calcDiffMinutes usa tempo corrido sem horário comercial', () => {
     const min = calcDiffMinutes('2026-06-22T10:00:00Z', '2026-06-22T10:30:00Z', { enabled: false })
     expect(min).toBe(30)
+  })
+
+  test('SLA usa sempre a janela fixa de 07:00 às 18:00 em São Paulo', async () => {
+    const info = await loadSlaBusinessSchedule(1, { sla_usar_horario_comercial: false })
+    expect(info.modo_contagem).toBe('horario_comercial')
+    expect(info.schedule.timezone).toBe('America/Sao_Paulo')
+    expect(info.schedule.diasSemanaDesativados).toEqual([])
+    expect(info.schedule.windows).toEqual([{ start: 7 * 60, end: 18 * 60 }])
+  })
+
+  test.each([
+    ['antes da abertura', '2026-07-29T09:50:00Z', '2026-07-29T10:10:00Z', 10],
+    ['depois do fechamento', '2026-07-29T20:50:00Z', '2026-07-29T21:10:00Z', 10],
+    ['durante a noite', '2026-07-29T21:10:00Z', '2026-07-30T10:10:00Z', 10],
+    ['inteiramente fora da janela', '2026-07-29T21:10:00Z', '2026-07-30T09:50:00Z', 0],
+    ['sábado também é operacional', '2026-08-01T09:50:00Z', '2026-08-01T10:10:00Z', 10],
+  ])('janela 07:00–18:00: %s', async (_, start, end, expected) => {
+    const { schedule } = await loadSlaBusinessSchedule(1, {})
+    expect(calcDiffMinutes(start, end, schedule)).toBe(expected)
   })
 
   test('separa média de todas as respostas da primeira resposta de cada cliente no período', () => {

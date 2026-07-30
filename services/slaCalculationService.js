@@ -11,9 +11,6 @@ const {
 } = require('./absenceFinalizationService')
 const {
   businessMinutesBetween,
-  normalizeBusinessSchedule,
-  describeBusinessSchedule,
-  mergeScheduleSource,
 } = require('./atendimentoSemRespostaService')
 const {
   resolveDashboardInstanceScope,
@@ -26,6 +23,8 @@ const {
 } = require('./dashboardDataRulesService')
 
 const SAO_PAULO_TZ = 'America/Sao_Paulo'
+const SLA_BUSINESS_START_MINUTE = 7 * 60
+const SLA_BUSINESS_END_MINUTE = 18 * 60
 const PAGE_SIZE = 1000
 const OPEN_STATUSES = new Set(['aberta', 'em_atendimento', 'aguardando_cliente'])
 
@@ -205,15 +204,6 @@ async function loadSimpleModeOperator(company_id) {
   return { enabled: true, operator }
 }
 
-async function loadIaConfig(company_id) {
-  const { data } = await supabase
-    .from('ia_config')
-    .select('config')
-    .eq('company_id', company_id)
-    .maybeSingle()
-  return data?.config && typeof data.config === 'object' ? data.config : {}
-}
-
 function normalizeMinutes(value, fallback = 30) {
   const n = Number(value)
   if (!Number.isFinite(n) || n <= 0) return fallback
@@ -249,10 +239,11 @@ async function loadSlaConfig(company_id) {
   return {
     sla_minutos_sem_resposta: normalizeMinutes(emp?.sla_minutos_sem_resposta, 30),
     sla_meta_percentual: clampInt(emp?.sla_meta_percentual, 1, 100) ?? 90,
-    sla_usar_horario_comercial: emp?.sla_usar_horario_comercial === true,
+    // O Dashboard/SLA usa uma janela operacional fixa e auditável.
+    sla_usar_horario_comercial: true,
     sla_contar_bot_como_resposta: emp?.sla_contar_bot_como_resposta === true,
-    horario_inicio: emp?.horario_inicio || null,
-    horario_fim: emp?.horario_fim || null,
+    horario_inicio: '07:00',
+    horario_fim: '18:00',
     metas_departamentos: deptMap,
     metas_usuarios: userMap,
   }
@@ -272,40 +263,30 @@ function resolveMetaMinutos(slaConfig, { atendente_id, departamento_id } = {}) {
   return { limite_min: empresaMin, meta_origem: 'empresa', meta_origem_label: 'Empresa' }
 }
 
-async function loadSlaBusinessSchedule(company_id, slaConfig) {
-  const iaConfig = await loadIaConfig(company_id)
-  const ct = iaConfig.chatbot_triage && typeof iaConfig.chatbot_triage === 'object' ? iaConfig.chatbot_triage : {}
-
-  if (!slaConfig?.sla_usar_horario_comercial) {
-    return {
-      schedule: { enabled: false },
-      horario_comercial_ativo: false,
-      modo_contagem: 'tempo_corrido',
-      resumo: 'Cálculo em tempo corrido (24h). Ative o horário comercial nas configurações de SLA para pausar fora do expediente.',
-    }
+async function loadSlaBusinessSchedule(_company_id, _slaConfig) {
+  // Regra única do Dashboard: todos os dias, das 07:00 às 18:00 em São Paulo.
+  // Não herdamos a agenda do chatbot, pois ela pode conter janelas ou dias
+  // desativados diferentes e tornaria o mesmo ciclo variável entre telas.
+  const schedule = {
+    enabled: true,
+    timezone: SAO_PAULO_TZ,
+    diasSemanaDesativados: [],
+    datasEspecificasFechadas: [],
+    windows: [{
+      start: SLA_BUSINESS_START_MINUTE,
+      end: SLA_BUSINESS_END_MINUTE,
+    }],
   }
-
-  const empresaHorario = {}
-  if (slaConfig.horario_inicio && slaConfig.horario_fim) {
-    const hi = String(slaConfig.horario_inicio).slice(0, 5)
-    const hf = String(slaConfig.horario_fim).slice(0, 5)
-    if (/^\d{2}:\d{2}$/.test(hi) && /^\d{2}:\d{2}$/.test(hf)) {
-      empresaHorario.horarioInicio = hi
-      empresaHorario.horarioFim = hf
-    }
-  }
-
-  const mergedSource = Object.keys(ct).length ? ct : empresaHorario
-  const schedule = normalizeBusinessSchedule(
-    { horario_comercial_ativo: true, timezone: ct.timezone || 'America/Sao_Paulo' },
-    { chatbot_triage: mergedSource }
-  )
 
   return {
     schedule,
     horario_comercial_ativo: true,
     modo_contagem: 'horario_comercial',
-    resumo: describeBusinessSchedule(schedule),
+    timezone: SAO_PAULO_TZ,
+    dias_semana_desativados: [],
+    datas_especificas_fechadas: [],
+    janelas: [{ inicio: '07:00', fim: '18:00' }],
+    resumo: 'Contagem ativa todos os dias, das 07:00 às 18:00, no fuso America/Sao_Paulo. Fora dessa janela, os minutos ficam pausados.',
   }
 }
 
@@ -1217,15 +1198,15 @@ async function validateConversaSla(company_id, conversaId) {
 }
 
 async function saveSlaConfig(company_id, body = {}) {
-  const update = {}
+  const update = {
+    // Mantém o banco coerente com a regra obrigatória usada pelo motor.
+    sla_usar_horario_comercial: true,
+  }
   if (body.sla_minutos_sem_resposta != null) {
     update.sla_minutos_sem_resposta = normalizeMinutes(body.sla_minutos_sem_resposta, 30)
   }
   if (body.sla_meta_percentual != null) {
     update.sla_meta_percentual = clampInt(body.sla_meta_percentual, 1, 100) ?? 90
-  }
-  if (body.sla_usar_horario_comercial != null) {
-    update.sla_usar_horario_comercial = body.sla_usar_horario_comercial === true
   }
   if (body.sla_contar_bot_como_resposta != null) {
     update.sla_contar_bot_como_resposta = body.sla_contar_bot_como_resposta === true
@@ -1293,6 +1274,8 @@ function flattenSlaExportRows(data) {
 
 module.exports = {
   SAO_PAULO_TZ,
+  SLA_BUSINESS_START_MINUTE,
+  SLA_BUSINESS_END_MINUTE,
   loadSlaConfig,
   saveSlaConfig,
   resolveMetaMinutos,

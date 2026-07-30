@@ -1592,6 +1592,7 @@ exports.excluirRespostaSalva = async (req, res) => {
 // =====================================================
 async function buildRelatorioConversas(company_id, filters = {}) {
   const instanceScope = await resolveDashboardInstanceScope(company_id, filters.whatsapp_instance_id)
+  const { schedule: slaSchedule } = await slaCalculationService.loadSlaBusinessSchedule(company_id, {})
   const conversas = await fetchAllRows(() => {
     let query = supabase
       .from('conversas')
@@ -1677,7 +1678,11 @@ async function buildRelatorioConversas(company_id, filters = {}) {
     // Tempo sem responder: só quando a ÚLTIMA mensagem foi do cliente (aguardando resposta)
     let tempo_sem_responder_min = null
     if (ultima?.direcao === 'in' && ultimaIn?.criado_em) {
-      tempo_sem_responder_min = Math.round((now - new Date(ultimaIn.criado_em).getTime()) / 60000)
+      tempo_sem_responder_min = slaCalculationService.calcDiffMinutes(
+        ultimaIn.criado_em,
+        new Date(now).toISOString(),
+        slaSchedule
+      )
     }
     const tags = (c.conversa_tags || []).map(ct => ct.tags).filter(Boolean)
     return {
@@ -1958,51 +1963,20 @@ exports.setSlaConfig = async (req, res) => {
 exports.getSlaAlertas = async (req, res) => {
   try {
     const { company_id } = req.user
-    const { data: emp } = await supabase.from('empresas').select('sla_minutos_sem_resposta').eq('id', company_id).single()
-    const limiteMin = emp?.sla_minutos_sem_resposta ?? 30
-
-    const { data: conversas } = await supabase
-      .from('conversas')
-      .select('id, telefone, status_atendimento, criado_em, atendente_id, clientes!conversas_cliente_fk ( nome )')
-      .eq('company_id', company_id)
-      .in('status_atendimento', ['aberta', 'em_atendimento'])
-
-    const atendenteNomeMap = await fetchUsuariosNomeMap(
-      company_id,
-      (conversas || []).map((c) => c?.atendente_id)
-    )
-
-    const { data: mensagens } = await supabase
-      .from('mensagens')
-      .select('conversa_id, criado_em, direcao')
-      .eq('company_id', company_id)
-      .in('direcao', ['in', 'out'])
-      .order('criado_em', { ascending: false })
-
-    const ultimaInPorConversa = {}
-    ;(mensagens || []).forEach(m => {
-      if (m.direcao === 'in' && !ultimaInPorConversa[m.conversa_id]) ultimaInPorConversa[m.conversa_id] = m
+    const data = await buildSlaAnalytics(company_id, req.query)
+    const alertas = (data.criticas_sem_resposta || []).map((item) => ({
+      conversa_id: item.conversa_id,
+      cliente_nome: item.cliente_nome,
+      telefone: item.telefone,
+      atendente_nome: item.atendente_nome,
+      tempo_sem_responder_min: item.minutos_aguardando,
+      limite_min: item.limite_min,
+    }))
+    return res.json({
+      limite_min: data.limite_min,
+      horario_comercial: data.horario_comercial,
+      alertas,
     })
-
-    const now = Date.now()
-    const alertas = []
-    ;(conversas || []).forEach(c => {
-      const ultimaIn = ultimaInPorConversa[c.id]
-      if (!ultimaIn) return
-      const minSemResponder = Math.floor((now - new Date(ultimaIn.criado_em).getTime()) / 60000)
-      if (minSemResponder >= limiteMin) {
-        alertas.push({
-          conversa_id: c.id,
-          cliente_nome: getDisplayName(c.clientes) || c.telefone,
-          telefone: c.telefone,
-          atendente_nome: atendenteNomeMap[String(c?.atendente_id)] || '—',
-          tempo_sem_responder_min: minSemResponder,
-          limite_min: limiteMin,
-        })
-      }
-    })
-    alertas.sort((a, b) => b.tempo_sem_responder_min - a.tempo_sem_responder_min)
-    return res.json({ limite_min: limiteMin, alertas })
   } catch (err) {
     console.error(err)
     return res.status(500).json({ error: 'Erro ao listar alertas SLA' })
