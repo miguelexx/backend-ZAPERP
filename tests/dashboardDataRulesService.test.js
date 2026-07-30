@@ -3,6 +3,8 @@ const {
   dedupeOperationalMessages,
   explicitMessageOrigin,
   isExplicitHumanOutbound,
+  isIndividualCustomerConversation,
+  summarizeDailyCustomerActivity,
 } = require('../services/dashboardDataRulesService')
 
 describe('dashboardDataRulesService', () => {
@@ -50,5 +52,34 @@ describe('dashboardDataRulesService', () => {
     expect(explicitMessageOrigin(mobile)).toBe('whatsapp_celular')
     expect(isExplicitHumanOutbound(mobile)).toBe(true)
     expect(isExplicitHumanOutbound(bot)).toBe(false)
+  })
+
+  test('clientes do dia conta toda conversa individual real e exclui grupos', () => {
+    const summary = summarizeDailyCustomerActivity({
+      todayKey: '2026-07-29',
+      dateKeyFor: (value) => String(value).slice(0, 10),
+      conversations: [
+        { id: 1, cliente_id: 10, tipo: null, telefone: '5511999999999' },
+        { id: 2, cliente_id: 11, tipo: null, telefone: '5511888888888' },
+        { id: 3, cliente_id: null, tipo: 'grupo', telefone: '120@g.us' },
+      ],
+      messages: [
+        { id: 1, conversa_id: 1, criado_em: '2026-07-29T10:00:00Z', direcao: 'in' },
+        { id: 2, conversa_id: 1, criado_em: '2026-07-29T10:01:00Z', direcao: 'out', origem: 'whatsapp_celular' },
+        { id: 3, conversa_id: 2, criado_em: '2026-07-29T11:00:00Z', direcao: 'in' },
+        { id: 4, conversa_id: 3, criado_em: '2026-07-29T12:00:00Z', direcao: 'in' },
+        { id: 5, conversa_id: 2, criado_em: '2026-07-28T11:00:00Z', direcao: 'out', origem: 'sistema_humano' },
+      ],
+    })
+    expect(summary).toEqual({
+      clientes_com_conversa: 2,
+      clientes_com_resposta_humana: 1,
+    })
+  })
+
+  test('SLA reconhece somente conversas individuais de clientes', () => {
+    expect(isIndividualCustomerConversation({ tipo: null, telefone: '5511999999999' })).toBe(true)
+    expect(isIndividualCustomerConversation({ tipo: 'grupo', telefone: '1203630' })).toBe(false)
+    expect(isIndividualCustomerConversation({ tipo: null, telefone: '1203630@g.us' })).toBe(false)
   })
 })

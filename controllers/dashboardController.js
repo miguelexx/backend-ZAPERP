@@ -11,6 +11,7 @@ const {
   normalizeMessageType,
   dedupeOperationalMessages,
   isExplicitHumanOutbound,
+  summarizeDailyCustomerActivity,
 } = require('../services/dashboardDataRulesService')
 const ExcelJS = require('exceljs')
 const PDFDocument = require('pdfkit')
@@ -551,7 +552,7 @@ exports.overview = async (req, res) => {
     for (const ids of chunkArray(conversaIds, 200)) {
       let query = supabase
         .from('conversas')
-        .select('id, status_atendimento, criado_em, atendente_id, departamento_id, whatsapp_instance_id')
+        .select('id, cliente_id, telefone, tipo, status_atendimento, criado_em, atendente_id, departamento_id, whatsapp_instance_id')
         .eq('company_id', company_id)
         .in('id', ids)
       query = applyDashboardInstanceScope(query, instanceScope)
@@ -647,18 +648,21 @@ exports.overview = async (req, res) => {
     }
 
     const todayKey = todaySaoPauloDateKey()
-    const conversasComAtividadeHoje = new Set(
-      mensagens
-        .filter((m) => formatSaoPauloDateKey(m.criado_em) === todayKey)
-        .map((m) => m.conversa_id)
-        .filter(Boolean)
-    ).size
-    const atendimentosHoje = new Set(
-      mensagens
-        .filter((m) => formatSaoPauloDateKey(m.criado_em) === todayKey && isExplicitHumanOutbound(m))
-        .map((m) => m.conversa_id)
-        .filter(Boolean)
-    ).size
+    const dailyCustomerActivity = summarizeDailyCustomerActivity({
+      messages: mensagens,
+      conversations: conversas,
+      todayKey,
+      dateKeyFor: formatSaoPauloDateKey,
+    })
+    const conversasComAtividadeHoje = dailyCustomerActivity.clientes_com_conversa
+    const clientesComRespostaHumanaHoje = dailyCustomerActivity.clientes_com_resposta_humana
+    // No modo simples com um único operador, toda conversa individual com
+    // atividade real no dia pertence à operação dessa atendente. Exigir apenas
+    // uma saída explicitamente classificada descartava contatos reais e legado
+    // do celular, subcontando o card.
+    const atendimentosHoje = simpleModeEnabled
+      ? conversasComAtividadeHoje
+      : clientesComRespostaHumanaHoje
 
     const statusMap = {}
     const setorMap = {}
@@ -723,7 +727,7 @@ exports.overview = async (req, res) => {
         total: conversas.length,
         atendimentos_hoje: atendimentosHoje,
         tempo_primeira_resposta_min: resumoSla.tempo_medio_primeira_resposta_min ?? null,
-        tempo_medio_resposta_min: resumoSla.tempo_medio_primeira_resposta_min ?? null,
+        tempo_medio_resposta_min: resumoSla.tempo_medio_resposta_min ?? null,
         sla_percent: resumoSla.percentual_cumprido ?? null,
         sla_sem_resposta: resumoSla.sem_resposta ?? 0,
         sla_conta_automacao: slaData?.config?.sla_contar_bot_como_resposta === true,
@@ -734,6 +738,7 @@ exports.overview = async (req, res) => {
         aguardando_atendente: aguardandoAtendente,
         aguardando_cliente: aguardandoCliente,
         conversas_com_atividade_hoje: conversasComAtividadeHoje,
+        clientes_com_resposta_humana_hoje: clientesComRespostaHumanaHoje,
         taxa_conversao_percent: null,
       },
       mensagens_kpis: {
@@ -2106,7 +2111,8 @@ exports.exportSla = async (req, res) => {
         ['Sem resposta', data.resumo?.sem_resposta],
         ['Dados insuficientes', data.resumo?.dados_insuficientes],
         ['Percentual cumprido', data.resumo?.percentual_cumprido],
-        ['Tempo médio (min)', data.resumo?.tempo_medio_primeira_resposta_min],
+        ['Tempo médio de resposta (min)', data.resumo?.tempo_medio_resposta_min],
+        ['Tempo médio da primeira resposta (min)', data.resumo?.tempo_medio_primeira_resposta_min],
         ['Pior tempo (min)', data.resumo?.pior_tempo_resposta_min],
         ['Melhor tempo (min)', data.resumo?.melhor_tempo_resposta_min],
       ]

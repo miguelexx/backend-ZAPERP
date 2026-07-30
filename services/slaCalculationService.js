@@ -22,6 +22,7 @@ const {
 const {
   explicitMessageOrigin,
   dedupeOperationalMessages,
+  isIndividualCustomerConversation,
 } = require('./dashboardDataRulesService')
 
 const SAO_PAULO_TZ = 'America/Sao_Paulo'
@@ -713,6 +714,38 @@ function buildResumoFromAnalisadas(analisadas, extras = {}) {
   }
 }
 
+function summarizeResponseCycleTimes(rows = []) {
+  const ordered = (rows || [])
+    .slice()
+    .sort((a, b) => (
+      new Date(a.primeira_mensagem_cliente_em).getTime()
+      - new Date(b.primeira_mensagem_cliente_em).getTime()
+    ))
+  const firstCycleByConversation = new Map()
+  for (const row of ordered) {
+    const key = row.cliente_id != null
+      ? `cliente:${row.cliente_id}`
+      : `conversa:${row.conversa_id}`
+    if (!firstCycleByConversation.has(key)) firstCycleByConversation.set(key, row)
+  }
+  const firstCycles = Array.from(firstCycleByConversation.values())
+  const responded = ordered.filter(
+    (row) => (row.status_sla === 'cumpriu' || row.status_sla === 'violou')
+      && Number.isFinite(row.tempo_resposta_min)
+  )
+  const firstResponded = firstCycles.filter(
+    (row) => (row.status_sla === 'cumpriu' || row.status_sla === 'violou')
+      && Number.isFinite(row.tempo_resposta_min)
+  )
+  return {
+    responded,
+    firstCycles,
+    firstResponded,
+    tempo_medio_resposta_min: round1(avg(responded.map((row) => row.tempo_resposta_min))),
+    tempo_medio_primeira_resposta_min: round1(avg(firstResponded.map((row) => row.tempo_resposta_min))),
+  }
+}
+
 function buildDiarioFromItems(items, semRespostaItems, dadosInsuficientesItems) {
   const porDiaMap = new Map()
 
@@ -750,6 +783,7 @@ function buildDiarioFromItems(items, semRespostaItems, dadosInsuficientesItems) 
         sem_resposta: row.sem_resposta,
         dados_insuficientes: row.dados_insuficientes,
         percentual_cumprido: percent(row.dentro_sla, row.total_analisadas),
+        tempo_medio_resposta_min: round1(avg(row.tempos)),
         tempo_medio_primeira_resposta_min: round1(avg(row.tempos)),
         pior_tempo_resposta_min: sorted.length ? round1(sorted[sorted.length - 1]) : null,
         melhor_tempo_resposta_min: sorted.length ? round1(sorted[0]) : null,
@@ -794,7 +828,7 @@ async function buildSlaAnalytics(company_id, query = {}, opts = {}) {
 
   let conversasQuery = supabase
     .from('conversas')
-    .select('id, telefone, status_atendimento, modo_simples_aguardando, tipo, criado_em, atendente_id, departamento_id, reaberta_falta_interacao_em, clientes!conversas_cliente_fk ( nome )')
+    .select('id, cliente_id, telefone, status_atendimento, modo_simples_aguardando, tipo, criado_em, atendente_id, departamento_id, reaberta_falta_interacao_em, clientes!conversas_cliente_fk ( nome )')
     .eq('company_id', company_id)
   conversasQuery = applyDashboardInstanceScope(conversasQuery, instanceScope)
 
@@ -810,7 +844,8 @@ async function buildSlaAnalytics(company_id, query = {}, opts = {}) {
   const { data: conversasRows, error: conversasError } = await conversasQuery
   if (conversasError) throw conversasError
 
-  const conversas = Array.isArray(conversasRows) ? conversasRows : []
+  const conversas = (Array.isArray(conversasRows) ? conversasRows : [])
+    .filter(isIndividualCustomerConversation)
   const conversaById = new Map(conversas.map((c) => [String(c.id), c]))
   const mensagens = await fetchMensagensForConversas(company_id, conversas.map((c) => c.id), instanceScope)
   const reaberturasPorConversa = new Map()
@@ -871,6 +906,7 @@ async function buildSlaAnalytics(company_id, query = {}, opts = {}) {
         : 'Sem setor'
     const base = {
       conversa_id: conversa.id,
+      cliente_id: conversa.cliente_id || null,
       cliente_nome: getDisplayName(conversa.clientes) || conversa.telefone || 'Cliente',
       telefone: conversa.telefone || '',
       status_atendimento: conversa.status_atendimento || '',
@@ -920,6 +956,7 @@ async function buildSlaAnalytics(company_id, query = {}, opts = {}) {
   const violacoes = analisadas.filter((x) => x.status_sla === 'violou')
   const respostaHumana = analisadas.filter((x) => x.tipo_resposta === 'humana').length
   const respostaAutomacao = allRows.filter((x) => x.tipo_resposta === 'automacao').length
+  const responseTimeSummary = summarizeResponseCycleTimes(allRows)
 
   const now = Date.now()
   const criticasSemResposta = semResposta
@@ -953,6 +990,9 @@ async function buildSlaAnalytics(company_id, query = {}, opts = {}) {
     reabertura_total: reaberturaRows.filter((x) => x.status_sla === 'cumpriu' || x.status_sla === 'violou').length,
     total_ciclos_com_cliente: allRows.length,
     total_conversas_com_cliente: new Set(allRows.map((item) => String(item.conversa_id))).size,
+    total_primeiras_respostas_analisadas: responseTimeSummary.firstResponded.length,
+    tempo_medio_resposta_min: responseTimeSummary.tempo_medio_resposta_min,
+    tempo_medio_primeira_resposta_min: responseTimeSummary.tempo_medio_primeira_resposta_min,
     meta_minutos_global: slaConfig.sla_minutos_sem_resposta,
     meta_percentual_configurada: slaConfig.sla_meta_percentual,
   })
@@ -994,10 +1034,8 @@ async function buildSlaAnalytics(company_id, query = {}, opts = {}) {
   const conversasDetalhadas = allRows
     .slice()
     .sort((a, b) => new Date(b.primeira_mensagem_cliente_em).getTime() - new Date(a.primeira_mensagem_cliente_em).getTime())
-  const ciclosOperacionais = allRows.filter((item) => item.tipo_sla !== 'reabertura')
-  const ciclosOperacionaisRespondidos = ciclosOperacionais.filter(
-    (item) => item.status_sla === 'cumpriu' || item.status_sla === 'violou'
-  )
+  const primeirasDoPeriodo = responseTimeSummary.firstCycles
+  const primeirasRespondidas = responseTimeSummary.firstResponded
 
   return {
     periodo: range,
@@ -1018,11 +1056,12 @@ async function buildSlaAnalytics(company_id, query = {}, opts = {}) {
     tendencia,
     por_tipo: {
       primeira_resposta: {
-        analisadas: ciclosOperacionaisRespondidos.length,
-        dentro_sla: ciclosOperacionaisRespondidos.filter((item) => item.status_sla === 'cumpriu').length,
-        fora_sla: ciclosOperacionaisRespondidos.filter((item) => item.status_sla === 'violou').length,
-        sem_resposta: ciclosOperacionais.filter((item) => item.status_sla === 'sem_resposta').length,
-        dados_insuficientes: ciclosOperacionais.filter((item) => item.status_sla === 'dados_insuficientes').length,
+        analisadas: primeirasRespondidas.length,
+        dentro_sla: primeirasRespondidas.filter((item) => item.status_sla === 'cumpriu').length,
+        fora_sla: primeirasRespondidas.filter((item) => item.status_sla === 'violou').length,
+        sem_resposta: primeirasDoPeriodo.filter((item) => item.status_sla === 'sem_resposta').length,
+        dados_insuficientes: primeirasDoPeriodo.filter((item) => item.status_sla === 'dados_insuficientes').length,
+        tempo_medio_min: responseTimeSummary.tempo_medio_primeira_resposta_min,
       },
       ciclos_resposta: {
         total: allRows.length,
@@ -1069,7 +1108,7 @@ async function validateConversaSla(company_id, conversaId) {
   const instanceScope = await resolveDashboardInstanceScope(company_id)
   let conversaQuery = supabase
     .from('conversas')
-    .select('id, telefone, status_atendimento, modo_simples_aguardando, tipo, criado_em, atendente_id, departamento_id, reaberta_falta_interacao_em, clientes!conversas_cliente_fk ( nome )')
+    .select('id, cliente_id, telefone, status_atendimento, modo_simples_aguardando, tipo, criado_em, atendente_id, departamento_id, reaberta_falta_interacao_em, clientes!conversas_cliente_fk ( nome )')
     .eq('company_id', company_id)
     .eq('id', id)
   conversaQuery = applyDashboardInstanceScope(conversaQuery, instanceScope)
@@ -1097,6 +1136,7 @@ async function validateConversaSla(company_id, conversaId) {
 
   const base = {
     conversa_id: conversa.id,
+    cliente_id: conversa.cliente_id || null,
     cliente_nome: getDisplayName(conversa.clientes) || conversa.telefone || 'Cliente',
     telefone: conversa.telefone || '',
     status_atendimento: conversa.status_atendimento || '',
@@ -1265,5 +1305,6 @@ module.exports = {
   calcDiffMinutes,
   analyzeSlaCycle,
   analyzeConversationSlaCycles,
+  summarizeResponseCycleTimes,
   classifyOutbound,
 }

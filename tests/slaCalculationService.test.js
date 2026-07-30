@@ -5,6 +5,7 @@ const {
   calcDiffMinutes,
   formatSaoPauloDateKey,
   analyzeConversationSlaCycles,
+  summarizeResponseCycleTimes,
 } = require('../services/slaCalculationService')
 
 describe('slaCalculationService', () => {
@@ -245,5 +246,16 @@ describe('slaCalculationService', () => {
   test('calcDiffMinutes usa tempo corrido sem horário comercial', () => {
     const min = calcDiffMinutes('2026-06-22T10:00:00Z', '2026-06-22T10:30:00Z', { enabled: false })
     expect(min).toBe(30)
+  })
+
+  test('separa média de todas as respostas da primeira resposta de cada cliente no período', () => {
+    const summary = summarizeResponseCycleTimes([
+      { conversa_id: 1, cliente_id: 101, primeira_mensagem_cliente_em: '2026-07-29T10:00:00Z', status_sla: 'cumpriu', tempo_resposta_min: 5 },
+      { conversa_id: 1, cliente_id: 101, primeira_mensagem_cliente_em: '2026-07-29T11:00:00Z', status_sla: 'cumpriu', tempo_resposta_min: 15 },
+      { conversa_id: 2, cliente_id: 102, primeira_mensagem_cliente_em: '2026-07-29T12:00:00Z', status_sla: 'cumpriu', tempo_resposta_min: 10 },
+    ])
+    expect(summary.tempo_medio_resposta_min).toBe(10)
+    expect(summary.tempo_medio_primeira_resposta_min).toBe(7.5)
+    expect(summary.firstResponded).toHaveLength(2)
   })
 })

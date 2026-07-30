@@ -65,6 +65,42 @@ function isExplicitHumanOutbound(message) {
   return Number(message.autor_usuario_id) > 0
 }
 
+function isIndividualCustomerConversation(conversation) {
+  if (!conversation) return false
+  return String(conversation.tipo || '').toLowerCase() !== 'grupo'
+    && !String(conversation.telefone || '').toLowerCase().includes('@g.us')
+}
+
+function summarizeDailyCustomerActivity({
+  messages = [],
+  conversations = [],
+  todayKey,
+  dateKeyFor,
+} = {}) {
+  const conversationById = new Map(
+    (conversations || []).map((conversation) => [String(conversation.id), conversation])
+  )
+  const activeCustomers = new Set()
+  const humanRespondedCustomers = new Set()
+
+  for (const message of messages || []) {
+    if (!message?.conversa_id || dateKeyFor?.(message.criado_em) !== todayKey) continue
+    const conversation = conversationById.get(String(message.conversa_id))
+    if (!conversation) continue
+    if (!isIndividualCustomerConversation(conversation)) continue
+    const customerKey = conversation.cliente_id
+      ? `cliente:${conversation.cliente_id}`
+      : `conversa:${message.conversa_id}`
+    activeCustomers.add(customerKey)
+    if (isExplicitHumanOutbound(message)) humanRespondedCustomers.add(customerKey)
+  }
+
+  return {
+    clientes_com_conversa: activeCustomers.size,
+    clientes_com_resposta_humana: humanRespondedCustomers.size,
+  }
+}
+
 module.exports = {
   normalizeMessageType,
   isWhatsappOperationalMessage,
@@ -72,4 +108,6 @@ module.exports = {
   dedupeOperationalMessages,
   explicitMessageOrigin,
   isExplicitHumanOutbound,
+  isIndividualCustomerConversation,
+  summarizeDailyCustomerActivity,
 }
