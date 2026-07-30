@@ -560,12 +560,11 @@ exports.overview = async (req, res) => {
       conversas.push(...(data || []))
     }
 
-    const abertasAtuais = await fetchAllRows(() => {
+    const estadoAtualRows = await fetchAllRows(() => {
       let query = supabase
         .from('conversas')
-        .select('id, status_atendimento, whatsapp_instance_id')
+        .select('id, status_atendimento, modo_simples_aguardando, tipo, whatsapp_instance_id')
         .eq('company_id', company_id)
-        .in('status_atendimento', ['aberta', 'em_atendimento', 'aguardando_cliente'])
       return applyDashboardInstanceScope(query, instanceScope)
     })
 
@@ -582,6 +581,41 @@ exports.overview = async (req, res) => {
       : activeUsers.length === 1
         ? activeUsers[0]
         : null
+    const simpleModeEnabled = empresa?.atendimento_modo_simples === true
+    const closedStatuses = new Set(['fechada', 'finalizada', 'encerrada', 'finalizado'])
+    const simpleOperationalRows = estadoAtualRows.filter(
+      (row) => String(row.status_atendimento || '').toLowerCase() !== 'mensagem_disparada'
+    )
+    const currentOperationalRows = estadoAtualRows.filter(
+      (row) => !closedStatuses.has(String(row.status_atendimento || '').toLowerCase())
+        && String(row.status_atendimento || '').toLowerCase() !== 'mensagem_disparada'
+    )
+    let simpleGroupUnreadIds = new Set()
+    if (simpleModeEnabled && soleOperator?.id) {
+      const {
+        obterUnreadMap,
+        resolveGrupoIdsComUnreadParaUsuario,
+      } = require('../helpers/modoSimplesGrupoUnread')
+      const unreadMap = await obterUnreadMap({ company_id, usuario_id: soleOperator.id })
+      const ids = await resolveGrupoIdsComUnreadParaUsuario({ company_id, unreadMap })
+      const scopedIds = new Set(simpleOperationalRows.map((row) => Number(row.id)))
+      simpleGroupUnreadIds = new Set(ids.filter((id) => scopedIds.has(Number(id))))
+    }
+    const aguardandoAtendente = simpleModeEnabled
+      ? simpleOperationalRows.filter((row) => (
+        String(row.tipo || '').toLowerCase() === 'grupo'
+          ? simpleGroupUnreadIds.has(Number(row.id))
+          : row.modo_simples_aguardando === 'atendente'
+      )).length
+      : 0
+    const aguardandoCliente = simpleModeEnabled
+      ? simpleOperationalRows.filter((row) => row.modo_simples_aguardando === 'cliente').length
+      : 0
+    const ticketsAbertos = simpleModeEnabled
+      ? null
+      : currentOperationalRows.filter((row) =>
+        ['aberta', 'em_atendimento', 'aguardando_cliente'].includes(String(row.status_atendimento || '').toLowerCase())
+      ).length
 
     const userNameMap = Object.fromEntries((usuarios || []).map((u) => [String(u.id), u.nome || 'Sem nome']))
     const depIds = [...new Set(conversas.map((c) => c.departamento_id).filter(Boolean))]
@@ -613,9 +647,15 @@ exports.overview = async (req, res) => {
     }
 
     const todayKey = todaySaoPauloDateKey()
-    const atendimentosHoje = new Set(
+    const conversasComAtividadeHoje = new Set(
       mensagens
         .filter((m) => formatSaoPauloDateKey(m.criado_em) === todayKey)
+        .map((m) => m.conversa_id)
+        .filter(Boolean)
+    ).size
+    const atendimentosHoje = new Set(
+      mensagens
+        .filter((m) => formatSaoPauloDateKey(m.criado_em) === todayKey && isExplicitHumanOutbound(m))
         .map((m) => m.conversa_id)
         .filter(Boolean)
     ).size
@@ -686,9 +726,14 @@ exports.overview = async (req, res) => {
         tempo_medio_resposta_min: resumoSla.tempo_medio_primeira_resposta_min ?? null,
         sla_percent: resumoSla.percentual_cumprido ?? null,
         sla_sem_resposta: resumoSla.sem_resposta ?? 0,
+        sla_conta_automacao: slaData?.config?.sla_contar_bot_como_resposta === true,
         atendente_mais_produtivo: topAttendant,
-        tickets_abertos: abertasAtuais.length,
+        tickets_abertos: ticketsAbertos,
         tickets_abertos_escopo: 'fotografia_atual',
+        atendimento_modo_simples: simpleModeEnabled,
+        aguardando_atendente: aguardandoAtendente,
+        aguardando_cliente: aguardandoCliente,
+        conversas_com_atividade_hoje: conversasComAtividadeHoje,
         taxa_conversao_percent: null,
       },
       mensagens_kpis: {

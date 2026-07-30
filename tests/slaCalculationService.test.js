@@ -4,6 +4,7 @@ const {
   classifyOutbound,
   calcDiffMinutes,
   formatSaoPauloDateKey,
+  analyzeConversationSlaCycles,
 } = require('../services/slaCalculationService')
 
 describe('slaCalculationService', () => {
@@ -150,6 +151,90 @@ describe('slaCalculationService', () => {
     })
     expect(result.primeira_mensagem_cliente_em).toBe('2026-07-29T12:00:00Z')
     expect(result.tempo_resposta_min).toBe(7)
+  })
+
+  test('conversa persistente gera um ciclo por nova espera do cliente', () => {
+    const cycles = analyzeConversationSlaCycles({
+      msgs: [
+        { id: 1, direcao: 'in', criado_em: '2026-07-29T11:00:00Z', texto: 'Oi' },
+        { id: 2, direcao: 'in', criado_em: '2026-07-29T11:01:00Z', texto: 'Consegue me ajudar?' },
+        { id: 3, direcao: 'out', origem: 'sistema_humano', criado_em: '2026-07-29T11:03:00Z', texto: 'Claro' },
+        { id: 4, direcao: 'out', origem: 'sistema_humano', criado_em: '2026-07-29T11:04:00Z', texto: 'Pode enviar' },
+        { id: 5, direcao: 'in', criado_em: '2026-07-29T11:10:00Z', texto: 'Enviei' },
+        { id: 6, direcao: 'out', origem: 'whatsapp_celular', criado_em: '2026-07-29T11:12:00Z', texto: 'Recebi' },
+      ],
+      limiteMin: 30,
+      metaOrigem: 'empresa',
+      metaOrigemLabel: 'Empresa',
+      schedule: scheduleCorrido,
+      ctx: baseCtx,
+      base: { conversa_id: 30 },
+    })
+    expect(cycles).toHaveLength(2)
+    expect(cycles.map((item) => item.tempo_resposta_min)).toEqual([3, 2])
+    expect(cycles.map((item) => item.tipo_sla)).toEqual(['primeira_resposta', 'nova_interacao'])
+  })
+
+  test('automação não encerra ciclo e nova mensagem após resposta abre outro ciclo pendente', () => {
+    const cycles = analyzeConversationSlaCycles({
+      msgs: [
+        { id: 1, direcao: 'in', criado_em: '2026-07-29T11:00:00Z', texto: 'Oi' },
+        { id: 2, direcao: 'out', origem: 'automacao', criado_em: '2026-07-29T11:01:00Z', texto: 'Menu' },
+        { id: 3, direcao: 'out', origem: 'sistema_humano', criado_em: '2026-07-29T11:04:00Z', texto: 'Olá' },
+        { id: 4, direcao: 'in', criado_em: '2026-07-29T11:10:00Z', texto: 'Outra dúvida' },
+      ],
+      limiteMin: 30,
+      metaOrigem: 'empresa',
+      metaOrigemLabel: 'Empresa',
+      schedule: scheduleCorrido,
+      ctx: baseCtx,
+      base: { conversa_id: 31 },
+    })
+    expect(cycles).toHaveLength(2)
+    expect(cycles[0].tempo_resposta_min).toBe(4)
+    expect(cycles[0].tipo_resposta).toBe('humana')
+    expect(cycles[1].status_sla).toBe('sem_resposta')
+  })
+
+  test('ciclo iniciado depois de evento de reabertura é identificado', () => {
+    const cycles = analyzeConversationSlaCycles({
+      msgs: [
+        { id: 1, direcao: 'out', origem: 'sistema_humano', criado_em: '2026-07-29T10:00:00Z', texto: 'Anterior' },
+        { id: 2, direcao: 'in', criado_em: '2026-07-29T12:00:00Z', texto: 'Voltei' },
+        { id: 3, direcao: 'out', origem: 'whatsapp_celular', criado_em: '2026-07-29T12:05:00Z', texto: 'Olá' },
+      ],
+      reopenAnchors: ['2026-07-29T11:59:00Z'],
+      limiteMin: 30,
+      metaOrigem: 'empresa',
+      metaOrigemLabel: 'Empresa',
+      schedule: scheduleCorrido,
+      ctx: baseCtx,
+      base: { conversa_id: 32 },
+    })
+    expect(cycles).toHaveLength(1)
+    expect(cycles[0].tipo_sla).toBe('reabertura')
+    expect(cycles[0].tempo_resposta_min).toBe(5)
+  })
+
+  test('reabertura descarta espera antiga não respondida e inicia um ciclo limpo', () => {
+    const cycles = analyzeConversationSlaCycles({
+      msgs: [
+        { id: 1, direcao: 'in', criado_em: '2026-07-29T10:00:00Z', texto: 'Mensagem antiga' },
+        { id: 2, direcao: 'in', criado_em: '2026-07-29T12:00:00Z', texto: 'Novo contato' },
+        { id: 3, direcao: 'out', origem: 'sistema_humano', criado_em: '2026-07-29T12:04:00Z', texto: 'Olá' },
+      ],
+      reopenAnchors: ['2026-07-29T11:59:00Z'],
+      limiteMin: 30,
+      metaOrigem: 'empresa',
+      metaOrigemLabel: 'Empresa',
+      schedule: scheduleCorrido,
+      ctx: baseCtx,
+      base: { conversa_id: 33 },
+    })
+    expect(cycles).toHaveLength(1)
+    expect(cycles[0].tipo_sla).toBe('reabertura')
+    expect(cycles[0].primeira_mensagem_cliente_em).toBe('2026-07-29T12:00:00Z')
+    expect(cycles[0].tempo_resposta_min).toBe(4)
   })
 
   test('mensagem próxima da meia-noite entra no dia de São Paulo', () => {
