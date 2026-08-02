@@ -140,6 +140,29 @@ describe('UltraMsg provider instance resolution', () => {
     expect(body.get('referenceId')).toBe('crm-9002')
   })
 
+  test('sendContact propaga referenceId no vCard para reconciliar o eco sem duplicar o cartao', async () => {
+    const deps = mockProviderDeps({
+      defaultByCompany: {
+        10: { id: 1, company_id: 10, provider: 'ultramsg', instance_id: '111', instance_token: 'default-token', ativo: true },
+      },
+      byId: {},
+    })
+
+    const provider = require('../services/providers/ultramsg')
+    const result = await provider.sendContact(
+      '34999999999',
+      'LINCOLN | WM SISTEMAS',
+      '553434251162',
+      { companyId: 10, referenceId: 'crm-9003' }
+    )
+
+    const body = new URLSearchParams(deps.fetchWithRetry.mock.calls[0][1].body)
+    expect(result.ok).toBe(true)
+    expect(body.get('referenceId')).toBe('crm-9003')
+    expect(body.get('vcard')).toContain('FN:LINCOLN | WM SISTEMAS')
+    expect(body.get('vcard')).toContain('waid=553434251162')
+  })
+
   test('mantem instance_id prefixado salvo no banco sem duplicar prefixo no envio', async () => {
     const deps = mockProviderDeps({
       defaultByCompany: {

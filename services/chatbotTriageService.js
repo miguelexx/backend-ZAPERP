@@ -298,6 +298,8 @@ const DEFAULT_CHATBOT_CONFIG = {
   finalizar_por_ausencia_ativo: false,
   finalizar_por_ausencia_prazo: 24,
   finalizar_por_ausencia_unidade: 'horas_corridas',
+  // null preserva empresas antigas: mensagem preenchida = enviar; vazia = somente encerramento interno.
+  finalizar_por_ausencia_enviar_mensagem: null,
   finalizar_por_ausencia_mensagem: '',
   finalizar_por_ausencia_reabrir_automaticamente: true,
   finalizar_por_ausencia_reabrir_sem_chatbot: true,
@@ -407,6 +409,10 @@ function validateChatbotConfig(raw) {
         .toLowerCase()
       return v === 'horas_uteis' ? 'horas_uteis' : 'horas_corridas'
     })(),
+    finalizar_por_ausencia_enviar_mensagem:
+      src.finalizar_por_ausencia_enviar_mensagem == null
+        ? Boolean(String(src.finalizar_por_ausencia_mensagem || '').trim())
+        : src.finalizar_por_ausencia_enviar_mensagem !== false,
     finalizar_por_ausencia_mensagem: String(src.finalizar_por_ausencia_mensagem || '').trim(),
     finalizar_por_ausencia_reabrir_automaticamente: src.finalizar_por_ausencia_reabrir_automaticamente !== false,
     finalizar_por_ausencia_reabrir_sem_chatbot: src.finalizar_por_ausencia_reabrir_sem_chatbot !== false,

@@ -37,6 +37,7 @@ const DEFAULT_CONFIG = {
     finalizar_por_ausencia_ativo: false,
     finalizar_por_ausencia_prazo: 24,
     finalizar_por_ausencia_unidade: 'horas_corridas',
+    finalizar_por_ausencia_enviar_mensagem: null,
     finalizar_por_ausencia_mensagem: '',
     finalizar_por_ausencia_reabrir_automaticamente: true,
     finalizar_por_ausencia_reabrir_sem_chatbot: true,

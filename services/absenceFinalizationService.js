@@ -32,11 +32,17 @@ function getScanLimitPerCompany() {
 
 function getAbsenceConfig(chatbotConfig) {
   const cfg = chatbotConfig || {}
+  const mensagem = String(cfg.finalizar_por_ausencia_mensagem ?? '').trim()
+  const enviarMensagem =
+    cfg.finalizar_por_ausencia_enviar_mensagem == null
+      ? Boolean(mensagem)
+      : cfg.finalizar_por_ausencia_enviar_mensagem !== false
   return {
     ativo: !!cfg.finalizar_por_ausencia_ativo,
     prazo: Math.max(1, Number(cfg.finalizar_por_ausencia_prazo) || 24),
     unidade: String(cfg.finalizar_por_ausencia_unidade || 'horas_corridas').trim().toLowerCase(),
-    mensagem: String(cfg.finalizar_por_ausencia_mensagem ?? '').trim(),
+    enviarMensagem,
+    mensagem,
     reabrirAutomaticamente: cfg.finalizar_por_ausencia_reabrir_automaticamente !== false,
     reabrirSemChatbot: cfg.finalizar_por_ausencia_reabrir_sem_chatbot !== false,
     timezone: String(cfg.timezone || DEFAULT_CHATBOT_CONFIG.timezone || 'America/Sao_Paulo').trim() || 'America/Sao_Paulo',
@@ -309,7 +315,10 @@ async function tryMarkWaitingAfterHumanOutbound({ company_id, conversa_id, texto
   }
 }
 
-async function sendAbsenceClosingMessage({ provider, company_id, conversa_id, telefone, mensagem }) {
+async function sendAbsenceClosingMessage({ provider, company_id, conversa_id, telefone, enviarMensagem, mensagem }) {
+  if (enviarMensagem === false) {
+    return { ok: true, skippedNoMessage: true }
+  }
   const texto = String(mensagem || '').trim()
   if (!texto) {
     return { ok: true, skippedNoMessage: true }
@@ -425,7 +434,7 @@ async function finalizeConversationsByAbsence(opts = {}) {
 
     const { triageMerged, absence } = await loadChatbotTriageMergeAndAbsence(company_id)
     if (!absence.ativo) continue
-    const enviaMensagemEncerramento = !!String(absence.mensagem || '').trim()
+    const enviaMensagemEncerramento = absence.enviarMensagem === true && !!String(absence.mensagem || '').trim()
     const provider = !dryRun && enviaMensagemEncerramento ? getProvider() : null
     if (!dryRun && enviaMensagemEncerramento && !provider?.sendText) {
       return { ok: false, error: 'Provider de envio não disponível' }
@@ -549,6 +558,7 @@ async function finalizeConversationsByAbsence(opts = {}) {
           prazo_config_h: absence.prazo,
           unidade: absence.unidade,
           timezone_config: absence.timezone,
+          enviar_mensagem_cliente: enviaMensagemEncerramento,
         })
         continue
       }
@@ -591,6 +601,7 @@ async function finalizeConversationsByAbsence(opts = {}) {
           company_id,
           conversa_id: conv.id,
           telefone,
+          enviarMensagem: absence.enviarMensagem,
           mensagem: absence.mensagem,
         })
         sendOk = !!sendRes?.ok
@@ -650,6 +661,7 @@ async function finalizeConversationsByAbsence(opts = {}) {
         prazo: absence.prazo,
         unidade: absence.unidade,
         timezone: absence.timezone,
+        enviarMensagem: enviaMensagemEncerramento,
         snap,
         skippedDuplicate,
         skippedNoMessage,
@@ -698,7 +710,7 @@ async function finalizeAbsenceForConversaIds(p) {
     return { ok: false, error: 'Política de ausência desativada para esta empresa.' }
   }
 
-  const enviaMensagemEncerramento = !!String(absence.mensagem || '').trim()
+  const enviaMensagemEncerramento = absence.enviarMensagem === true && !!String(absence.mensagem || '').trim()
   const provider = execute && enviaMensagemEncerramento ? getProvider() : null
   if (execute && enviaMensagemEncerramento && !provider?.sendText) {
     return { ok: false, error: 'Provider de envio não disponível' }
@@ -802,6 +814,7 @@ async function finalizeAbsenceForConversaIds(p) {
         company_id,
         conversa_id: conv.id,
         telefone,
+        enviarMensagem: absence.enviarMensagem,
         mensagem: absence.mensagem,
       })
       sendOk = !!sendRes?.ok
@@ -853,6 +866,7 @@ async function finalizeAbsenceForConversaIds(p) {
     await logBotAction(company_id, conv.id, 'encerramento_automatico_ausencia_lote', {
       prazo: absence.prazo,
       unidade: absence.unidade,
+      enviarMensagem: enviaMensagemEncerramento,
       snap,
       skippedDuplicate,
       skippedNoMessage,
