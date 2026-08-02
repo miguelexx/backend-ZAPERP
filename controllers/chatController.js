@@ -64,7 +64,7 @@ const {
   getEndOfTodayIso,
 } = require('../services/chatListCountsService')
 const { normalizarTimestampSemFusoAmbiguoParaApi } = require('../helpers/timestampApiCompat')
-const { isRealWhatsAppId, isUltramsgNumericQueueId } = require('../helpers/whatsappMessageIdHelper')
+const { isRealWhatsAppId, isUltramsgNumericQueueId, buildCrmReferenceId } = require('../helpers/whatsappMessageIdHelper')
 const { schedulePendingOutboundReconciliation } = require('../services/pendingOutboundReconciliationService')
 const { scheduleOutboundMediaResend } = require('../services/outboundMediaResendService')
 const { departamentoRoom } = require('../helpers/socketRooms')
@@ -72,6 +72,17 @@ const {
   validateAndConsumeForMessage,
   limitErrorResponse,
 } = require('../services/atendimentoLimitsService')
+const {
+  classifyManualTextProviderResult,
+  executeManualTextProviderAttempt,
+  manualTextHasProviderAcceptance,
+  lookupManualTextAtProvider,
+  decideManualTextRetry,
+  buildManualTextProviderAuditPatch,
+  buildManualTextProviderConfirmationPatch,
+  manualTextResponseFromClassification,
+  sanitizeAuditJson,
+} = require('../services/manualTextOutboundService')
 
 /**
  * Deduplicação in-memory para double-send de texto.
@@ -195,6 +206,587 @@ async function findMensagemByClientTempId(company_id, conversa_id, clientTempId,
     }
     console.warn('[client_temp_id] excecao ao consultar dedupe persistente:', error?.message || error)
     return null
+  }
+}
+
+const MANUAL_TEXT_AUDIT_COLUMNS = [
+  'provider_reference_id',
+  'provider_request',
+  'provider_delivery_state',
+  'provider_http_status',
+  'provider_response',
+  'provider_error',
+  'provider_retryable',
+  'provider_attempts',
+  'provider_last_attempt_at',
+]
+
+const MANUAL_TEXT_BASE_SELECT = [
+  'id',
+  'company_id',
+  'conversa_id',
+  'texto',
+  'tipo',
+  'direcao',
+  'autor_usuario_id',
+  'status',
+  'status_mensagem',
+  'whatsapp_id',
+  'whatsapp_instance_id',
+  'provider_queue_id',
+  'client_temp_id',
+  'reply_meta',
+  'criado_em',
+].join(', ')
+
+function isMissingManualTextAuditColumn(error) {
+  return MANUAL_TEXT_AUDIT_COLUMNS.some((column) => isMissingMensagemColumnError(error, column)) ||
+    isGenericMissingColumnError(error)
+}
+
+function withoutManualTextAuditColumns(payload) {
+  const clean = { ...(payload || {}) }
+  for (const column of MANUAL_TEXT_AUDIT_COLUMNS) delete clean[column]
+  return clean
+}
+
+async function loadManualTextAuditRow(row) {
+  if (!row?.id) return row || null
+  const select = `${MANUAL_TEXT_BASE_SELECT}, ${MANUAL_TEXT_AUDIT_COLUMNS.join(', ')}`
+  const { data, error } = await supabase
+    .from('mensagens')
+    .select(select)
+    .eq('company_id', Number(row.company_id))
+    .eq('id', Number(row.id))
+    .maybeSingle()
+  if (!error) return data || row
+  if (isMissingManualTextAuditColumn(error)) return { ...row, _manual_text_audit_unavailable: true }
+  console.warn('[ENVIO_MANUAL] Falha ao carregar auditoria persistida:', error?.message || error)
+  return { ...row, _manual_text_audit_load_error: true }
+}
+
+async function fetchManualTextRow(company_id, mensagem_id) {
+  const { data, error } = await supabase
+    .from('mensagens')
+    .select(MANUAL_TEXT_BASE_SELECT)
+    .eq('company_id', Number(company_id))
+    .eq('id', Number(mensagem_id))
+    .maybeSingle()
+  if (error) return null
+  return loadManualTextAuditRow(data)
+}
+
+/**
+ * Atualização monotônica: um ACK concorrente pode promover a mensagem para sent/delivered/read
+ * enquanto o POST ainda termina. Nesse caso o resultado tardio nunca pode rebaixá-la.
+ */
+async function updateManualTextRowMonotonic(company_id, row, payload) {
+  if (!row?.id) return { row: null, error: new Error('Mensagem manual inválida') }
+  const allowedCurrentStatuses = ['pending', 'sending', 'erro', 'error', 'failed']
+  let updatePayload = { ...(payload || {}) }
+  let result = await supabase
+    .from('mensagens')
+    .update(updatePayload)
+    .eq('company_id', Number(company_id))
+    .eq('id', Number(row.id))
+    .in('status', allowedCurrentStatuses)
+    .or('status_mensagem.is.null,status_mensagem.in.(pending,sending,erro,error,failed)')
+    .select()
+    .maybeSingle()
+
+  if (result.error && isMissingManualTextAuditColumn(result.error)) {
+    updatePayload = withoutManualTextAuditColumns(updatePayload)
+    result = await supabase
+      .from('mensagens')
+      .update(updatePayload)
+      .eq('company_id', Number(company_id))
+      .eq('id', Number(row.id))
+      .in('status', allowedCurrentStatuses)
+      .or('status_mensagem.is.null,status_mensagem.in.(pending,sending,erro,error,failed)')
+      .select()
+      .maybeSingle()
+  }
+
+  if (result.error) return { row: await fetchManualTextRow(company_id, row.id), error: result.error }
+  if (result.data) return { row: { ...row, ...result.data }, error: null }
+  return { row: await fetchManualTextRow(company_id, row.id), error: null }
+}
+
+/**
+ * Compare-and-set durável antes do POST. O contador impede dois workers/processos de
+ * conquistarem simultaneamente a mesma tentativa de reenvio.
+ */
+async function claimManualTextDispatch({
+  company_id,
+  row,
+  whatsappInstanceId,
+  referenceId,
+  providerRequest,
+  isRetry = false,
+}) {
+  if (!row?.id) return { claimed: false, row, reason: 'message_missing' }
+  if (manualTextHasProviderAcceptance(row)) {
+    return { claimed: false, row, reason: 'already_accepted' }
+  }
+
+  const expectedStatus = String(row.status || 'pending')
+  const expectedAttempts = Number(row.provider_attempts || 0)
+  const attemptedAt = new Date().toISOString()
+  const payload = {
+    status: 'sending',
+    status_mensagem: 'sending',
+    ...(Number.isFinite(Number(whatsappInstanceId)) && Number(whatsappInstanceId) > 0
+      ? { whatsapp_instance_id: Number(whatsappInstanceId) }
+      : {}),
+    provider_reference_id: referenceId,
+    provider_request: sanitizeAuditJson(providerRequest),
+    provider_delivery_state: 'dispatching',
+    provider_http_status: null,
+    provider_response: null,
+    provider_error: null,
+    provider_retryable: true,
+    provider_attempts: expectedAttempts + 1,
+    provider_last_attempt_at: attemptedAt,
+  }
+
+  let query = supabase
+    .from('mensagens')
+    .update(payload)
+    .eq('company_id', Number(company_id))
+    .eq('id', Number(row.id))
+    .eq('status', expectedStatus)
+    .or('status_mensagem.is.null,status_mensagem.in.(pending,sending,erro,error,failed)')
+    .eq('provider_attempts', expectedAttempts)
+    .select()
+    .maybeSingle()
+  let result = await query
+
+  if (result.error && isMissingManualTextAuditColumn(result.error)) {
+    // Reenvio seguro depende do contador durável. Sem a migration, falhar fechado evita duplicidade.
+    if (isRetry) {
+      return {
+        claimed: false,
+        row: { ...row, _manual_text_audit_unavailable: true },
+        reason: 'audit_schema_unavailable',
+        error: result.error,
+      }
+    }
+    result = await supabase
+      .from('mensagens')
+      .update(withoutManualTextAuditColumns(payload))
+      .eq('company_id', Number(company_id))
+      .eq('id', Number(row.id))
+      .eq('status', expectedStatus)
+      .or('status_mensagem.is.null,status_mensagem.in.(pending,sending,erro,error,failed)')
+      .select()
+      .maybeSingle()
+  }
+
+  if (result.error) return { claimed: false, row, reason: 'claim_error', error: result.error }
+  if (!result.data) {
+    return {
+      claimed: false,
+      row: await fetchManualTextRow(company_id, row.id),
+      reason: 'concurrent_attempt',
+    }
+  }
+  return {
+    claimed: true,
+    row: { ...row, ...result.data, provider_last_attempt_at: attemptedAt },
+    attemptedAt,
+  }
+}
+
+function manualTextProviderFailureHttpStatus(classification) {
+  if (classification?.timeout) return 504
+  if (classification?.network || classification?.retryable) return 503
+  return 502
+}
+
+function emitManualTextStatus(io, company_id, conversa_id, user_id, row, classification) {
+  if (!io || !row?.id) return
+  io.to(`empresa_${company_id}`).to(`conversa_${conversa_id}`).to(`usuario_${user_id}`)
+    .emit('status_mensagem', {
+      mensagem_id: row.id,
+      conversa_id: Number(conversa_id),
+      status: classification.status,
+      status_mensagem: classification.status_mensagem,
+      ...(classification.whatsapp_id ? { whatsapp_id: classification.whatsapp_id } : {}),
+    })
+}
+
+async function dispatchPersistedManualText({
+  company_id,
+  conversa_id,
+  user_id,
+  row,
+  phone,
+  text,
+  whatsappInstanceId,
+  phoneId,
+  replyMessageId,
+  io,
+  isRetry = false,
+}) {
+  const referenceId = buildCrmReferenceId(row?.id)
+  const providerRequest = {
+    text,
+    ...(replyMessageId ? { replyMessageId } : {}),
+  }
+  const claim = await claimManualTextDispatch({
+    company_id,
+    row,
+    whatsappInstanceId,
+    referenceId,
+    providerRequest,
+    isRetry,
+  })
+
+  if (!claim.claimed) {
+    const current = claim.row || await fetchManualTextRow(company_id, row?.id)
+    if (manualTextHasProviderAcceptance(current)) {
+      const accepted = {
+        ok: true,
+        accepted: true,
+        queued: isUltramsgNumericQueueId(current?.provider_queue_id),
+        traceable: isRealWhatsAppId(current?.whatsapp_id),
+        state: current?.provider_delivery_state || 'accepted',
+        status: current?.status || 'sent',
+        status_mensagem: current?.status_mensagem || current?.status || 'sent',
+        whatsapp_id: current?.whatsapp_id || null,
+        provider_queue_id: current?.provider_queue_id || null,
+        provider_error: null,
+        retryable: false,
+      }
+      return { classification: accepted, row: current, httpStatus: 200, deduplicated: true }
+    }
+    return {
+      classification: {
+        ok: false,
+        accepted: false,
+        queued: false,
+        state: 'uncertain',
+        status: current?.status || 'erro',
+        status_mensagem: current?.status_mensagem || 'failed',
+        provider_error: claim.reason === 'audit_schema_unavailable'
+          ? 'A migração de auditoria do envio manual ainda não foi aplicada; reenvio bloqueado para evitar duplicidade.'
+          : 'Outra tentativa desta mensagem está em andamento.',
+        retryable: true,
+      },
+      row: current || row,
+      httpStatus: claim.reason === 'audit_schema_unavailable' ? 503 : 409,
+      deduplicated: true,
+    }
+  }
+
+  const provider = getProvider()
+  const options = {
+    companyId: Number(company_id),
+    conversaId: Number(conversa_id),
+    ...(Number.isFinite(Number(whatsappInstanceId)) && Number(whatsappInstanceId) > 0
+      ? { whatsappInstanceId: Number(whatsappInstanceId) }
+      : {}),
+    ...(phoneId ? { phoneId } : {}),
+    ...(replyMessageId ? { replyMessageId } : {}),
+    referenceId,
+    sendOrigin: 'atendimento_humano',
+  }
+  const classification = await executeManualTextProviderAttempt(provider, phone, text, options)
+  const auditPatch = buildManualTextProviderAuditPatch({
+    row: claim.row,
+    classification,
+    referenceId,
+    request: providerRequest,
+    attemptedAt: claim.attemptedAt,
+  })
+  const updatePatch = {
+    status: classification.status,
+    status_mensagem: classification.status_mensagem,
+    ...(Number.isFinite(Number(whatsappInstanceId)) && Number(whatsappInstanceId) > 0
+      ? { whatsapp_instance_id: Number(whatsappInstanceId) }
+      : {}),
+    ...auditPatch,
+    ...(classification.whatsapp_id ? { whatsapp_id: classification.whatsapp_id } : {}),
+    ...(classification.provider_queue_id ? { provider_queue_id: classification.provider_queue_id } : {}),
+  }
+  const persisted = await updateManualTextRowMonotonic(company_id, claim.row, updatePatch)
+  const current = persisted.row || { ...claim.row, ...updatePatch }
+
+  // Um ACK pode ter chegado entre o POST e o UPDATE. A linha terminal prevalece
+  // sobre qualquer timeout/falha tardia desta chamada.
+  let effective = classification
+  if (manualTextHasProviderAcceptance(current) && !classification.ok) {
+    effective = {
+      ok: true,
+      accepted: true,
+      queued: isUltramsgNumericQueueId(current.provider_queue_id),
+      traceable: isRealWhatsAppId(current.whatsapp_id),
+      state: current.provider_delivery_state || 'accepted',
+      status: current.status || 'sent',
+      status_mensagem: current.status_mensagem || current.status || 'sent',
+      whatsapp_id: current.whatsapp_id || null,
+      provider_queue_id: current.provider_queue_id || null,
+      provider_error: null,
+      retryable: false,
+    }
+  }
+
+  emitManualTextStatus(io, company_id, conversa_id, user_id, current, effective)
+  if (effective.ok && !effective.traceable) {
+    schedulePendingOutboundReconciliation({
+      companyId: company_id,
+      mensagemId: row.id,
+      io,
+    })
+  }
+
+  return {
+    classification: effective,
+    row: current,
+    httpStatus: effective.ok ? 200 : manualTextProviderFailureHttpStatus(effective),
+  }
+}
+
+function manualTextClassificationFromRow(row) {
+  const status = String(row?.status || row?.status_mensagem || 'pending').toLowerCase()
+  const accepted = manualTextHasProviderAcceptance(row)
+  const providerState = String(row?.provider_delivery_state || '').toLowerCase()
+  const queued = providerState === 'queued' ||
+    (accepted && !providerState && isUltramsgNumericQueueId(row?.provider_queue_id))
+  return {
+    ok: accepted,
+    accepted,
+    queued,
+    traceable: isRealWhatsAppId(row?.whatsapp_id),
+    state: row?.provider_delivery_state || (accepted ? (queued ? 'queued' : 'accepted') : 'uncertain'),
+    status: row?.status || (accepted ? 'sent' : 'erro'),
+    status_mensagem: row?.status_mensagem || row?.status || (accepted ? 'sent' : 'failed'),
+    whatsapp_id: row?.whatsapp_id || null,
+    provider_queue_id: row?.provider_queue_id || null,
+    provider_error: accepted ? null : (row?.provider_error || 'O envio anterior não foi confirmado pela UltraMsg.'),
+    retryable: accepted ? false : row?.provider_retryable !== false,
+    timeout: !accepted && status === 'erro' && String(row?.provider_error || '').toLowerCase().includes('timeout'),
+    network: false,
+  }
+}
+
+async function handleExistingManualTextRequest({
+  company_id,
+  conversa_id,
+  user_id,
+  row,
+  requestedText,
+  retryRequested,
+  phone,
+  whatsappInstanceId,
+  io,
+}) {
+  const persisted = await loadManualTextAuditRow(row)
+  if (!persisted?.id) return { handled: false }
+
+  if (String(persisted.tipo || 'texto').toLowerCase() !== 'texto') {
+    return {
+      handled: true,
+      httpStatus: 409,
+      body: {
+        ok: false,
+        id: persisted.id,
+        conversa_id: Number(conversa_id),
+        client_temp_id: persisted.client_temp_id,
+        status: persisted.status || 'pending',
+        error: 'client_temp_id já pertence a outro tipo de mensagem.',
+      },
+    }
+  }
+  if (String(persisted.texto || '').trim() !== String(requestedText || '').trim()) {
+    return {
+      handled: true,
+      httpStatus: 409,
+      body: {
+        ok: false,
+        id: persisted.id,
+        conversa_id: Number(conversa_id),
+        client_temp_id: persisted.client_temp_id,
+        status: persisted.status || 'pending',
+        error: 'client_temp_id já pertence a outro texto; reenvio bloqueado para evitar duplicidade.',
+      },
+    }
+  }
+
+  const persistedInstanceId = Number(persisted.whatsapp_instance_id)
+  if (
+    Number.isFinite(persistedInstanceId) &&
+    persistedInstanceId > 0 &&
+    persistedInstanceId !== Number(whatsappInstanceId)
+  ) {
+    return {
+      handled: true,
+      httpStatus: 409,
+      body: {
+        ok: false,
+        id: persisted.id,
+        conversa_id: Number(conversa_id),
+        client_temp_id: persisted.client_temp_id,
+        status: persisted.status || 'erro',
+        error: 'A instância da conversa mudou; reenvio automático bloqueado por segurança.',
+        retryable: false,
+      },
+    }
+  }
+  if (!Number.isFinite(Number(whatsappInstanceId)) || Number(whatsappInstanceId) <= 0) {
+    return {
+      handled: true,
+      httpStatus: 503,
+      body: {
+        ok: false,
+        id: persisted.id,
+        conversa_id: Number(conversa_id),
+        client_temp_id: persisted.client_temp_id,
+        status: persisted.status || 'erro',
+        error: 'Nenhuma instância WhatsApp válida está configurada para esta conversa.',
+        retryable: true,
+      },
+    }
+  }
+
+  if (manualTextHasProviderAcceptance(persisted)) {
+    const classification = manualTextClassificationFromRow(persisted)
+    return {
+      handled: true,
+      httpStatus: 200,
+      body: manualTextResponseFromClassification(classification, persisted, { deduplicated: true }),
+    }
+  }
+
+  const provider = getProvider()
+  const providerLookup = await lookupManualTextAtProvider(provider, persisted, {
+    companyId: Number(company_id),
+    conversaId: Number(conversa_id),
+    whatsappInstanceId: Number(whatsappInstanceId),
+  })
+  const decision = decideManualTextRetry({
+    row: persisted,
+    retryRequested,
+    providerLookup,
+  })
+
+  if (decision.action === 'confirm_provider') {
+    const confirmationPatch = buildManualTextProviderConfirmationPatch(providerLookup)
+    const updated = await updateManualTextRowMonotonic(company_id, persisted, confirmationPatch)
+    const current = updated.row || { ...persisted, ...confirmationPatch }
+    const classification = manualTextClassificationFromRow(current)
+    emitManualTextStatus(io, company_id, conversa_id, user_id, current, classification)
+    if (classification.queued) {
+      schedulePendingOutboundReconciliation({
+        companyId: company_id,
+        mensagemId: current.id,
+        io,
+      })
+    }
+    return {
+      handled: true,
+      httpStatus: 200,
+      body: manualTextResponseFromClassification(classification, current, {
+        deduplicated: true,
+        provider_verified: true,
+      }),
+    }
+  }
+
+  if (decision.action !== 'send') {
+    const classification = manualTextClassificationFromRow(persisted)
+    const persistedStatus = String(persisted.status || persisted.status_mensagem || '').toLowerCase()
+    const isAttemptInProgress =
+      decision.reason === 'retry_not_requested' &&
+      ['pending', 'sending'].includes(persistedStatus)
+    if (isAttemptInProgress) {
+      return {
+        handled: true,
+        httpStatus: 202,
+        body: manualTextResponseFromClassification({
+          ...classification,
+          ok: false,
+          accepted: false,
+          provider_error: null,
+          retryable: true,
+        }, persisted, {
+          deduplicated: true,
+          in_progress: true,
+        }),
+      }
+    }
+    const error = decision.reason === 'provider_check_failed'
+      ? 'Não foi possível confirmar a tentativa anterior na UltraMsg; nada foi reenviado.'
+      : decision.reason === 'uncertain_attempt_in_grace_period'
+        ? 'A tentativa anterior ainda pode estar sendo processada; nada foi reenviado para evitar duplicidade.'
+        : classification.provider_error
+    return {
+      handled: true,
+      httpStatus: decision.httpStatus || 409,
+      body: {
+        ...manualTextResponseFromClassification({ ...classification, ok: false, accepted: false }, persisted, {
+          deduplicated: true,
+          retryable: decision.retryable === true,
+        }),
+        error,
+        motivo: error,
+        ...(decision.retryAfterMs ? { retry_after_ms: Math.ceil(decision.retryAfterMs) } : {}),
+      },
+    }
+  }
+
+  let phoneId = null
+  try {
+    const { data: ew } = await supabase
+      .from('empresas_whatsapp')
+      .select('phone_number_id')
+      .eq('company_id', company_id)
+      .maybeSingle()
+    if (ew?.phone_number_id) phoneId = String(ew.phone_number_id)
+  } catch (_) {}
+
+  const storedRequest = persisted.provider_request && typeof persisted.provider_request === 'object'
+    ? persisted.provider_request
+    : {}
+  let replyMessageId = storedRequest.replyMessageId || null
+  if (!replyMessageId && persisted.reply_meta?.replyToId != null) {
+    replyMessageId = await resolveUltraMsgReplyMessageId(
+      supabase,
+      company_id,
+      conversa_id,
+      persisted.reply_meta.replyToId
+    )
+  }
+  let textToProvider = storedRequest.text ? String(storedRequest.text) : null
+  if (!textToProvider) {
+    const { nome: usuarioNome } = await getUsuarioParaEnvioCliente(
+      supabase,
+      company_id,
+      persisted.autor_usuario_id || user_id
+    )
+    textToProvider = textoParaEnvioWhatsapp(String(persisted.texto).trim(), usuarioNome)
+  }
+
+  const attempt = await dispatchPersistedManualText({
+    company_id,
+    conversa_id,
+    user_id,
+    row: persisted,
+    phone,
+    text: textToProvider,
+    whatsappInstanceId,
+    phoneId,
+    replyMessageId,
+    io,
+    isRetry: true,
+  })
+  return {
+    handled: true,
+    httpStatus: attempt.httpStatus,
+    body: manualTextResponseFromClassification(attempt.classification, attempt.row, {
+      deduplicated: true,
+      retried: attempt.classification.ok === true,
+    }),
   }
 }
 
@@ -5661,19 +6253,24 @@ exports.enviarMensagemChat = async (req, res) => {
   try {
     const { company_id, id: user_id, perfil } = req.user
     const { id: conversa_id } = req.params
-    const { texto, reply_meta, link, client_temp_id } = req.body
+    const { texto, reply_meta, link, client_temp_id, retry_manual } = req.body
     const clientTempId = normalizeClientTempId(client_temp_id)
+    const retryManual = retry_manual === true || String(retry_manual || '').toLowerCase() === 'true'
 
     if (!texto || !String(texto).trim()) {
       return res.status(400).json({ error: 'texto é obrigatório' })
     }
 
-    // Deduplicação por client_temp_id em memória: evita double-send por double-click ou retry do frontend.
-    // Map com TTL de 30s por (company_id + conversa_id + client_temp_id).
+    const linkPayload = normalizeLinkPayload(link)
+    const hasLinkPayload = !!linkPayload
+    let persistedManualText = null
+
+    // Links mantêm o comportamento existente. Texto manual sempre consulta a linha durável:
+    // o cache em memória não sobrevive a restart e não distingue aceite, fila, rejeição ou incerteza.
     if (clientTempId) {
       const dedupKey = clientTempIdDedupeKey(company_id, conversa_id, clientTempId)
       const existing = _clientTempIdDeduplicationMap.get(dedupKey)
-      if (existing && Date.now() - existing.ts < 30_000) {
+      if (hasLinkPayload && existing && Date.now() - existing.ts < 30_000) {
         return res.json({
           ok: true,
           id: existing.id,
@@ -5683,7 +6280,12 @@ exports.enviarMensagemChat = async (req, res) => {
           deduplicated: true,
         })
       }
-      const persisted = await findMensagemByClientTempId(company_id, conversa_id, clientTempId)
+      const persisted = await findMensagemByClientTempId(
+        company_id,
+        conversa_id,
+        clientTempId,
+        MANUAL_TEXT_BASE_SELECT
+      )
       const persistedResponse = buildClientTempIdDedupResponse(persisted, conversa_id, clientTempId)
       if (persistedResponse) {
         _clientTempIdDeduplicationMap.set(dedupKey, {
@@ -5691,7 +6293,8 @@ exports.enviarMensagemChat = async (req, res) => {
           status: persistedResponse.status,
           ts: Date.now(),
         })
-        return res.json(persistedResponse)
+        if (hasLinkPayload) return res.json(persistedResponse)
+        persistedManualText = persisted
       }
     }
 
@@ -5736,9 +6339,22 @@ exports.enviarMensagemChat = async (req, res) => {
       }
     }
 
-    // Garantir que o contato (número + nome) esteja salvo em clientes antes de enviar
-    const linkPayload = normalizeLinkPayload(link)
-    const hasLinkPayload = !!linkPayload
+    if (!hasLinkPayload && persistedManualText) {
+      const existingResult = await handleExistingManualTextRequest({
+        company_id,
+        conversa_id,
+        user_id,
+        row: persistedManualText,
+        requestedText: texto,
+        retryRequested: retryManual,
+        phone: telefoneParaEnvio,
+        whatsappInstanceId,
+        io,
+      })
+      if (existingResult.handled) {
+        return res.status(existingResult.httpStatus || 200).json(existingResult.body)
+      }
+    }
 
     const atendimentoLimit = await validateAndConsumeForMessage({
       company_id,
@@ -5832,7 +6448,12 @@ exports.enviarMensagemChat = async (req, res) => {
       if (!errMsg) break
 
       if (clientTempId && isClientTempIdUniqueViolation(errMsg)) {
-        const persisted = await findMensagemByClientTempId(company_id, conversa_id, clientTempId)
+        const persisted = await findMensagemByClientTempId(
+          company_id,
+          conversa_id,
+          clientTempId,
+          MANUAL_TEXT_BASE_SELECT
+        )
         const persistedResponse = buildClientTempIdDedupResponse(persisted, conversa_id, clientTempId)
         if (persistedResponse) {
           _clientTempIdDeduplicationMap.set(clientTempIdDedupeKey(company_id, conversa_id, clientTempId), {
@@ -5840,6 +6461,22 @@ exports.enviarMensagemChat = async (req, res) => {
             status: persistedResponse.status,
             ts: Date.now(),
           })
+          if (!hasLinkPayload) {
+            const existingResult = await handleExistingManualTextRequest({
+              company_id,
+              conversa_id,
+              user_id,
+              row: persisted,
+              requestedText: texto,
+              retryRequested: retryManual,
+              phone: telefoneParaEnvio,
+              whatsappInstanceId,
+              io,
+            })
+            if (existingResult.handled) {
+              return res.status(existingResult.httpStatus || 200).json(existingResult.body)
+            }
+          }
           return res.json(persistedResponse)
         }
       }
@@ -5952,6 +6589,33 @@ exports.enviarMensagemChat = async (req, res) => {
 
     // Envio para WhatsApp via provider (ultramsg, conforme instância configurada)
     let sendResult = null
+    if (
+      !hasLinkPayload &&
+      (!Number.isFinite(Number(whatsappInstanceId)) || Number(whatsappInstanceId) <= 0)
+    ) {
+      const classification = {
+        ...classifyManualTextProviderResult({
+          ok: false,
+          error: 'Nenhuma instância WhatsApp válida está configurada para esta conversa.',
+        }),
+        retryable: true,
+      }
+      const auditPatch = buildManualTextProviderAuditPatch({
+        row: msg,
+        classification,
+        referenceId: buildCrmReferenceId(msg.id),
+        request: { text: String(texto).trim() },
+      })
+      const updated = await updateManualTextRowMonotonic(company_id, msg, {
+        status: classification.status,
+        status_mensagem: classification.status_mensagem,
+        ...auditPatch,
+      })
+      emitManualTextStatus(io, company_id, conversa_id, user_id, updated.row || msg, classification)
+      return res.status(503).json(
+        manualTextResponseFromClassification(classification, updated.row || msg)
+      )
+    }
     if (!telefoneParaEnvio) {
       // Mensagem manual sem telefone: não pode ficar como pending para sempre
       console.warn('[ENVIO_MANUAL] ❌ Conversa sem telefone — mensagem não enviada ao WhatsApp', {
@@ -5975,6 +6639,23 @@ exports.enviarMensagemChat = async (req, res) => {
           })
       }
       sendResult = { ok: false, error: 'Número do contato indisponível para envio' }
+      if (!hasLinkPayload) {
+        const classification = classifyManualTextProviderResult(sendResult)
+        const auditPatch = buildManualTextProviderAuditPatch({
+          row: msg,
+          classification,
+          referenceId: buildCrmReferenceId(msg.id),
+          request: { text: String(texto).trim() },
+        })
+        const updated = await updateManualTextRowMonotonic(company_id, msg, {
+          status: classification.status,
+          status_mensagem: classification.status_mensagem,
+          ...auditPatch,
+        })
+        return res.status(422).json(
+          manualTextResponseFromClassification(classification, updated.row || msg)
+        )
+      }
     }
     if (telefoneParaEnvio) {
       let phoneId = null
@@ -6012,6 +6693,56 @@ exports.enviarMensagemChat = async (req, res) => {
         provedor: 'ultramsg',
         tipo: hasLinkPayload ? 'link' : 'texto',
       })
+
+      if (!hasLinkPayload) {
+        const textoParaCliente = textoParaEnvioWhatsapp(String(texto).trim(), usuarioNome)
+        const attempt = await dispatchPersistedManualText({
+          company_id,
+          conversa_id,
+          user_id,
+          row: msg,
+          phone: telefoneParaEnvio,
+          text: textoParaCliente,
+          whatsappInstanceId,
+          phoneId,
+          replyMessageId,
+          io: req.app.get('io'),
+          isRetry: false,
+        })
+        const classification = attempt.classification
+        const current = attempt.row || msg
+
+        if (clientTempId && current?.id) {
+          _clientTempIdDeduplicationMap.set(
+            clientTempIdDedupeKey(company_id, conversa_id, clientTempId),
+            { id: current.id, status: classification.status, ts: Date.now() }
+          )
+        }
+
+        if (classification.ok) {
+          console.log('[ENVIO_MANUAL] Texto aceito pelo provedor', {
+            company_id,
+            conversa_id,
+            mensagem_id: current.id,
+            whatsapp_instance_id: whatsappInstanceId,
+            provider_state: classification.state,
+            provider_message_id: classification.whatsapp_id || classification.provider_queue_id || null,
+          })
+        } else {
+          console.warn('[ENVIO_MANUAL] Texto não aceito/confirmado pelo provedor', {
+            company_id,
+            conversa_id,
+            mensagem_id: current.id,
+            whatsapp_instance_id: whatsappInstanceId,
+            provider_state: classification.state,
+            erro: String(classification.provider_error || '').slice(0, 500),
+          })
+        }
+
+        return res.status(attempt.httpStatus || 500).json(
+          manualTextResponseFromClassification(classification, current)
+        )
+      }
 
       try {
         let result = null
