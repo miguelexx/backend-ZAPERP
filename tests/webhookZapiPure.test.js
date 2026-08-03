@@ -14,11 +14,20 @@ const {
   extractMessage,
   resolvePlaceholderUpgradeTexto,
   familiaMidiaDeMensagemExistente,
+  shouldSkipChatbotAfterRule,
 } = _test
 
 // Silencia console.warn (resolveConversationKeyFromZapi avisa quando connectedPhone está ausente)
 beforeAll(() => { jest.spyOn(console, 'warn').mockImplementation(() => {}) })
 afterAll(() => { jest.restoreAllMocks() })
+
+describe('regra automatica x chatbot', () => {
+  test('so silencia chatbot quando a resposta da regra foi aceita', () => {
+    expect(shouldSkipChatbotAfterRule({ matched: true, respostaEnviada: true })).toBe(true)
+    expect(shouldSkipChatbotAfterRule({ matched: true, respostaEnviada: false })).toBe(false)
+    expect(shouldSkipChatbotAfterRule({ matched: false })).toBe(false)
+  })
+})
 
 // ─────────────────────────── looksLikeBRPhoneDigits ───────────────────────────
 describe('looksLikeBRPhoneDigits', () => {

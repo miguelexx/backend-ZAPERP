@@ -34,6 +34,17 @@ const {
   invalidateChatbotConfigCache,
 } = require('../services/chatbotTriageService')
 
+function chatbotConfigForManagementApi(config) {
+  const valid = validateChatbotConfig(config)
+  if (valid) return valid
+  return {
+    ...normalizeChatbotTriageStrings(config),
+    enabled: false,
+    config_invalid: true,
+    config_validation_error: 'Chatbot ativo exige ao menos uma opção ativa vinculada a um departamento.',
+  }
+}
+
 router.use(auth)
 router.use(adminOnly)
 
@@ -387,7 +398,7 @@ router.get('/config/:companyId', async (req, res) => {
     
     const ctRaw = config.config?.chatbot_triage || {}
     const ctMerged = { ...DEFAULT_CHATBOT_CONFIG, ...ctRaw }
-    const ctOut = validateChatbotConfig(ctMerged) || normalizeChatbotTriageStrings(ctMerged)
+    const ctOut = chatbotConfigForManagementApi(ctMerged)
 
     res.json({
       success: true,
@@ -449,7 +460,15 @@ router.put('/config/:companyId', async (req, res) => {
     // Mesclar configuração atual com nova (textos com mojibake são normalizados)
     const fullConfig = currentConfig?.config || {}
     const ctMerged = { ...DEFAULT_CHATBOT_CONFIG, ...(fullConfig.chatbot_triage || {}), ...config }
-    fullConfig.chatbot_triage = validateChatbotConfig(ctMerged) || normalizeChatbotTriageStrings(ctMerged)
+    const ctValid = validateChatbotConfig(ctMerged)
+    if (!ctValid) {
+      return res.status(400).json({
+        success: false,
+        error: 'Configuração do chatbot inválida',
+        details: 'Para ativar o chatbot, configure ao menos uma opção ativa vinculada a um departamento.',
+      })
+    }
+    fullConfig.chatbot_triage = ctValid
 
     // Atualizar configuração
     const { error: updateError } = await supabase

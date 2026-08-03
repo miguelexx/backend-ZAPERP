@@ -50,3 +50,34 @@ describe('jobsController.checkCronSecret', () => {
     expect(next).toHaveBeenCalled()
   })
 })
+
+describe('jobsController.isChatbotOutboundMessage', () => {
+  const { isChatbotOutboundMessage } = require('../controllers/jobsController')
+
+  test('nao confunde mensagem do atendente com mensagem do bot', () => {
+    expect(isChatbotOutboundMessage({
+      direcao: 'out',
+      origem: 'painel',
+      autor_usuario_id: 55,
+      texto: 'Posso ajudar em algo mais?',
+      status: 'sent',
+    }, {})).toBe(false)
+  })
+
+  test('aceita automacao entregue e rejeita automacao com falha', () => {
+    const bot = {
+      direcao: 'out',
+      origem: 'automacao',
+      autor_usuario_id: null,
+      texto: 'Menu personalizado',
+      status: 'sent',
+      provider_request: { options: { sendOrigin: 'chatbot_triage' } },
+    }
+    expect(isChatbotOutboundMessage(bot, {})).toBe(true)
+    expect(isChatbotOutboundMessage({ ...bot, status: 'erro', status_mensagem: 'failed' }, {})).toBe(false)
+    expect(isChatbotOutboundMessage({
+      ...bot,
+      provider_request: { options: { sendOrigin: 'regra_automatica' } },
+    }, {})).toBe(false)
+  })
+})

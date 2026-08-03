@@ -14,6 +14,10 @@ const {
   isUltramsgNumericQueueId,
   buildCrmReferenceId,
 } = require('../helpers/whatsappMessageIdHelper')
+const {
+  classifyManualTextProviderResult,
+  sanitizeAuditJson,
+} = require('./manualTextOutboundService')
 
 const deferredTimers = new Map()
 const companyProviderCache = new Map()
@@ -288,12 +292,14 @@ async function resolveFromProviderRow(row, providerRow, io) {
 async function queryProviderForMessage(row) {
   const opts = buildProviderOpts(row)
   const referenceId = buildCrmReferenceId(row.id)
+  let lookupSucceeded = false
 
   if (referenceId) {
     for (const status of ['all', 'sent', 'queue', 'unsent', 'invalid', 'expired']) {
       const result = await fetchProviderMessages(opts, { referenceId, status, limit: 3 })
+      if (result.ok) lookupSucceeded = true
       if (result.ok && Array.isArray(result.data) && result.data.length > 0) {
-        return { source: `referenceId:${status}`, row: result.data[0], list: result.data }
+        return { source: `referenceId:${status}`, row: result.data[0], list: result.data, lookupSucceeded }
       }
     }
   }
@@ -307,13 +313,84 @@ async function queryProviderForMessage(row) {
   for (const idCandidate of idCandidates) {
     for (const status of ['all', 'sent', 'queue', 'unsent', 'invalid', 'expired']) {
       const result = await fetchProviderMessages(opts, { id: idCandidate, status, limit: 3 })
+      if (result.ok) lookupSucceeded = true
       if (result.ok && Array.isArray(result.data) && result.data.length > 0) {
-        return { source: `id:${status}`, row: result.data[0], list: result.data }
+        return { source: `id:${status}`, row: result.data[0], list: result.data, lookupSucceeded }
       }
     }
   }
 
-  return null
+  return { source: 'none', row: null, list: [], lookupSucceeded }
+}
+
+function isRetryableAutomaticText(row) {
+  const tipo = String(row?.tipo || 'texto').trim().toLowerCase()
+  const state = String(row?.provider_delivery_state || '').trim().toLowerCase()
+  return (
+    String(row?.origem || '').trim().toLowerCase() === 'automacao' &&
+    row?.autor_usuario_id == null &&
+    (!tipo || tipo === 'texto' || tipo === 'text') &&
+    !!String(row?.texto || '').trim() &&
+    state === 'uncertain' &&
+    row?.provider_retryable !== false &&
+    Number(row?.provider_attempt_count || 0) < 2
+  )
+}
+
+async function retryAutomaticTextAfterConfirmedAbsence(row, io) {
+  const provider = getProvider()
+  if (!provider?.sendText) return { ok: false, action: 'provider_indisponivel' }
+
+  const referenceId = row.provider_reference_id || buildCrmReferenceId(row.id)
+  const attemptedAt = new Date().toISOString()
+  const requestOptions = row?.provider_request?.options && typeof row.provider_request.options === 'object'
+    ? row.provider_request.options
+    : {}
+  const options = {
+    ...requestOptions,
+    companyId: row.company_id,
+    conversaId: row.conversa_id,
+    whatsappInstanceId: row.whatsapp_instance_id || undefined,
+    sendOrigin: requestOptions.sendOrigin || 'automatic_text_reconciliation',
+    referenceId,
+  }
+
+  // O contador sobe antes do POST. Se o processo cair no meio, não haverá loop de reenvio.
+  await supabase
+    .from('mensagens')
+    .update({
+      provider_delivery_state: 'retrying',
+      provider_last_attempt_at: attemptedAt,
+      provider_attempt_count: 2,
+    })
+    .eq('company_id', row.company_id)
+    .eq('id', row.id)
+
+  let rawResult = null
+  let thrownError = null
+  try {
+    rawResult = await provider.sendText(row.provider_request?.telefone || row.telefone, row.texto, options)
+  } catch (error) {
+    thrownError = error
+  }
+  const classification = classifyManualTextProviderResult(rawResult, thrownError)
+  const uncertain = classification.state === 'uncertain'
+  const updates = {
+    status: uncertain ? 'pending' : classification.status,
+    status_mensagem: uncertain ? 'sending' : classification.status_mensagem,
+    provider_reference_id: referenceId,
+    provider_delivery_state: classification.state,
+    provider_http_status: classification.provider_http_status,
+    provider_response: sanitizeAuditJson(classification.provider_response ?? rawResult),
+    provider_error: classification.provider_error,
+    provider_retryable: false,
+    provider_last_attempt_at: attemptedAt,
+    provider_attempt_count: 2,
+    ...(classification.whatsapp_id ? { whatsapp_id: classification.whatsapp_id } : {}),
+    ...(classification.provider_queue_id ? { provider_queue_id: classification.provider_queue_id } : {}),
+  }
+  const patched = await patchMessage(row, updates, io)
+  return { ...patched, action: patched.ok ? 'automatic_text_retried' : patched.action }
 }
 
 async function reconcilePendingOutboundMessage(row, { io = null, force = false } = {}) {
@@ -369,6 +446,10 @@ async function reconcilePendingOutboundMessage(row, { io = null, force = false }
     if (resolved.action !== 'noop') return resolved
   }
 
+  if (!providerHit.row && providerHit.lookupSucceeded && isRetryableAutomaticText(row)) {
+    return retryAutomaticTextAfterConfirmedAbsence(row, io)
+  }
+
   if (ageMs < getFailAfterMs()) {
     return { ok: true, action: 'keep_waiting' }
   }
@@ -408,7 +489,7 @@ async function fetchPendingOutboundRows({ companyId = null, limit = null, mensag
 
   let query = supabase
     .from('mensagens')
-    .select('id, company_id, conversa_id, whatsapp_instance_id, whatsapp_id, provider_queue_id, status, status_mensagem, direcao, criado_em, autor_usuario_id, tipo')
+    .select('id, company_id, conversa_id, whatsapp_instance_id, whatsapp_id, provider_queue_id, status, status_mensagem, direcao, criado_em, autor_usuario_id, tipo, texto, origem, provider_reference_id, provider_request, provider_delivery_state, provider_retryable, provider_last_attempt_at, provider_attempt_count')
     .eq('direcao', 'out')
     .in('status', ['pending', 'sending'])
     .gte('criado_em', oldestIso)
@@ -515,6 +596,7 @@ module.exports = {
     getQueueFlushMaxAttempts,
     getQueueGiveUpAfterMs,
     firstQueueIdCandidate,
+    isRetryableAutomaticText,
     queueFlushAttemptsById,
   },
 }

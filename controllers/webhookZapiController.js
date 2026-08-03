@@ -39,6 +39,7 @@ const { emitBotMensagemRealtime, emitReaberturaSemSetorRealtime } = require('../
 const { clearReabertaFaltaInteracao } = require('../helpers/reabertaFaltaInteracaoHelper')
 const { processarOptOut } = require('../services/optOutService')
 const { processarRegras } = require('../services/regrasAutomaticasService')
+const { sendAutomaticText } = require('../services/automaticTextOutboundService')
 const {
   loadChatbotTriageMergeAndAbsence,
   tryMarkWaitingAfterHumanOutbound,
@@ -85,6 +86,10 @@ function isTraceableWhatsappMessageId(value) {
   if (/^[A-F0-9]{12,}$/i.test(s)) return true
   if (s.length > 20) return true
   return false
+}
+
+function shouldSkipChatbotAfterRule(result) {
+  return result?.matched === true && result?.respostaEnviada === true
 }
 
 function isRemoteMediaUrl(url) {
@@ -2562,7 +2567,7 @@ exports.receberZapi = async (req, res) => {
             ...o,
             sendOrigin: o?.sendOrigin || o?.origin || 'chatbot_triage',
           })
-          return { ok: !!r?.ok, messageId: r?.messageId || null }
+          return { ...(r || {}), ok: !!r?.ok, messageId: r?.messageId || null }
         }
         let skipChatbot = false
         const chatbotHints = {}
@@ -2588,26 +2593,18 @@ exports.receberZapi = async (req, res) => {
             texto: texto || '',
           })
           if (optResult.isOptOut && optResult.mensagemConfirmacao) {
-            const optSendResult = await sendMessage(phoneParaChatbot, optResult.mensagemConfirmacao, { sendOrigin: 'opt_out_confirmacao' })
-            const optMessageId = optSendResult?.messageId ? String(optSendResult.messageId).trim() : null
-            const optTraceable = isTraceableWhatsappMessageId(optMessageId)
-            const { data: optMensagemRow, error: optMensagemError } = await supabase.from('mensagens').insert({
-              conversa_id,
+            await sendAutomaticText({
+              supabase,
+              sendMessage,
+              telefone: phoneParaChatbot,
               texto: optResult.mensagemConfirmacao,
-              direcao: 'out',
-              company_id,
-              status: optSendResult?.ok ? (optTraceable ? 'sent' : 'pending') : 'erro',
-              status_mensagem: optSendResult?.ok ? (optTraceable ? 'sent' : 'sending') : 'failed',
-              ...(optTraceable ? { whatsapp_id: optMessageId } : {}),
-              ...(whatsapp_instance_id ? { whatsapp_instance_id } : {}),
-            }).select('*').single()
-            if (optMensagemError) {
-              console.warn('[optOut] erro ao salvar confirmacao enviada:', optMensagemError.message || optMensagemError)
-            } else if (optMensagemRow && emitAutomacaoRealtime) {
-              await emitAutomacaoRealtime(optMensagemRow).catch((e) => {
-                console.warn('[optOut] erro ao emitir confirmacao enviada:', e?.message || e)
-              })
-            }
+              companyId: company_id,
+              conversaId: conversa_id,
+              whatsappInstanceId: whatsapp_instance_id,
+              sendOrigin: 'opt_out_confirmacao',
+              emitMensagemRealtime: emitAutomacaoRealtime || null,
+              io: ioAutomacao || null,
+            })
             skipChatbot = true
           }
         }
@@ -2623,8 +2620,9 @@ exports.receberZapi = async (req, res) => {
             whatsapp_instance_id,
             sendMessage,
             emitMensagemRealtime: emitAutomacaoRealtime || null,
+            io: ioAutomacao || null,
           })
-          if (regrasResult.matched) skipChatbot = true
+          if (shouldSkipChatbotAfterRule(regrasResult)) skipChatbot = true
         }
 
         // Chatbot só envia quando o CLIENTE iniciou a conversa. Se o usuário/atendente enviou a 1ª msg, não enviar nada.
@@ -2729,7 +2727,11 @@ exports.receberZapi = async (req, res) => {
             texto: texto || '',
             supabase,
             sendMessage,
-            opts: { companyId: company_id },
+            opts: {
+              companyId: company_id,
+              whatsappInstanceId: whatsapp_instance_id || undefined,
+              io: ioAutomacao || null,
+            },
             conversaReabertaAposFinalizacao,
             hints: chatbotHints,
             emitChatbotRealtime,
@@ -4405,4 +4407,5 @@ exports._test = {
   whatsappIdCompativelParaReconcile,
   filterRowsForFromMeReconcile,
   findFromMeOutboundMediaCandidate,
+  shouldSkipChatbotAfterRule,
 }

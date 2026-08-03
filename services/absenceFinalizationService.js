@@ -1,5 +1,10 @@
 const supabase = require('../config/supabase')
 const { getProvider } = require('./providers')
+const { sendAutomaticText } = require('./automaticTextOutboundService')
+const {
+  normalizeBusinessSchedule,
+  businessMinutesBetween,
+} = require('./atendimentoSemRespostaService')
 const {
   DEFAULT_CHATBOT_CONFIG,
   looksLikeBotMessage,
@@ -46,6 +51,15 @@ function getAbsenceConfig(chatbotConfig) {
     reabrirAutomaticamente: cfg.finalizar_por_ausencia_reabrir_automaticamente !== false,
     reabrirSemChatbot: cfg.finalizar_por_ausencia_reabrir_sem_chatbot !== false,
     timezone: String(cfg.timezone || DEFAULT_CHATBOT_CONFIG.timezone || 'America/Sao_Paulo').trim() || 'America/Sao_Paulo',
+    horarioInicio: cfg.horarioInicio || DEFAULT_CHATBOT_CONFIG.horarioInicio || '09:00',
+    horarioFim: cfg.horarioFim || DEFAULT_CHATBOT_CONFIG.horarioFim || '18:00',
+    horariosJanelas: Array.isArray(cfg.horariosJanelas) ? cfg.horariosJanelas : [],
+    diasSemanaDesativados: Array.isArray(cfg.diasSemanaDesativados)
+      ? cfg.diasSemanaDesativados
+      : (DEFAULT_CHATBOT_CONFIG.diasSemanaDesativados || [0, 6]),
+    datasEspecificasFechadas: Array.isArray(cfg.datasEspecificasFechadas)
+      ? cfg.datasEspecificasFechadas
+      : [],
   }
 }
 
@@ -144,16 +158,28 @@ function resolveAguardandoDesde(atendente_atribuido_em, lastMsgCriadoEm) {
   return lastMsgCriadoEm
 }
 
-/**
- * Prazo em horas (config da tela). `horas_uteis` ainda usa horas corridas no relógio — evolução futura: janelas comerciais.
- * `timezone` da empresa entra em logs/preview e em evoluções de horas úteis.
- */
-function getCutoffDate(absence) {
-  const hours = absence.prazo
-  if (absence.unidade === 'horas_uteis') {
-    return new Date(Date.now() - hours * 60 * 60 * 1000)
+function buildAbsenceBusinessSchedule(absence = {}) {
+  return normalizeBusinessSchedule({
+    horario_comercial_ativo: true,
+    timezone: absence.timezone,
+    horarioInicio: absence.horarioInicio,
+    horarioFim: absence.horarioFim,
+    horariosJanelas: absence.horariosJanelas,
+    diasSemanaDesativados: absence.diasSemanaDesativados,
+    datasEspecificasFechadas: absence.datasEspecificasFechadas,
+  })
+}
+
+function hasAbsenceDeadlineElapsed(startIso, absence, now = new Date()) {
+  const startMs = new Date(startIso).getTime()
+  const nowMs = new Date(now).getTime()
+  if (!Number.isFinite(startMs) || !Number.isFinite(nowMs) || nowMs <= startMs) return false
+  const requiredMinutes = Math.max(1, Number(absence?.prazo) || 24) * 60
+  if (absence?.unidade !== 'horas_uteis') {
+    return nowMs - startMs >= requiredMinutes * 60_000
   }
-  return new Date(Date.now() - hours * 60 * 60 * 1000)
+  const schedule = buildAbsenceBusinessSchedule(absence)
+  return businessMinutesBetween(startIso, new Date(nowMs), schedule, requiredMinutes) >= requiredMinutes
 }
 
 function buildEncerramentoObservacao({ prazo, unidade, snap }) {
@@ -335,15 +361,17 @@ async function sendAbsenceClosingMessage({ provider, company_id, conversa_id, te
   if (row?.ausencia_mensagem_enviada_em) {
     return { ok: true, skippedDuplicate: true }
   }
-  const result = await provider.sendText(telefone, texto, {
+  const result = await sendAutomaticText({
+    supabase,
+    sendMessage: provider.sendText.bind(provider),
+    telefone,
+    texto,
     companyId: company_id,
     conversaId: conversa_id,
-    whatsappInstanceId: row?.whatsapp_instance_id || undefined,
+    whatsappInstanceId: row?.whatsapp_instance_id || null,
     sendOrigin: 'finalizacao_ausencia_cliente',
   })
   const ok = !!result?.ok
-  const messageId = result?.messageId ? String(result.messageId).trim() : null
-  const hasTraceableId = !!messageId && (messageId.includes('@') || /^[A-F0-9]{12,}$/i.test(messageId) || messageId.length > 20)
   if (!ok) {
     console.warn('[absenceFinalization] envio de mensagem de ausencia falhou', {
       company_id,
@@ -351,25 +379,7 @@ async function sendAbsenceClosingMessage({ provider, company_id, conversa_id, te
       whatsapp_instance_id: row?.whatsapp_instance_id || null,
       erro: String(result?.error || 'desconhecido').slice(0, 200),
     })
-  } else if (!hasTraceableId) {
-    console.warn('[absenceFinalization] provider aceitou sem ID rastreavel', {
-      company_id,
-      conversa_id,
-      whatsapp_instance_id: row?.whatsapp_instance_id || null,
-      provider_message_id: messageId || null,
-    })
   }
-  await supabase.from('mensagens').insert({
-    conversa_id,
-    texto,
-    direcao: 'out',
-    origem: 'automacao',
-    company_id,
-    status: ok ? (hasTraceableId ? 'sent' : 'pending') : 'erro',
-    status_mensagem: ok ? (hasTraceableId ? 'sent' : 'sending') : 'failed',
-    ...(hasTraceableId ? { whatsapp_id: messageId } : {}),
-    ...(row?.whatsapp_instance_id ? { whatsapp_instance_id: row.whatsapp_instance_id } : {}),
-  })
   return { ok }
 }
 
@@ -440,8 +450,7 @@ async function finalizeConversationsByAbsence(opts = {}) {
       return { ok: false, error: 'Provider de envio não disponível' }
     }
 
-    const cutoff = getCutoffDate(absence).toISOString()
-    const cutoffMs = new Date(cutoff).getTime()
+    const deadlineNow = opts.now ? new Date(opts.now) : new Date()
 
     const { data: conversas } = await supabase
       .from('conversas')
@@ -507,7 +516,7 @@ async function finalizeConversationsByAbsence(opts = {}) {
         }
       }
 
-      if (new Date(aguardandoDesde).getTime() > cutoffMs) continue
+      if (!hasAbsenceDeadlineElapsed(aguardandoDesde, absence, deadlineNow)) continue
 
       const lastBeforeLock = dryRun ? lastMsg : await getLastMessage(conv.id, company_id)
       if (!lastBeforeLock || lastBeforeLock.direcao !== 'out') {
@@ -519,7 +528,7 @@ async function finalizeConversationsByAbsence(opts = {}) {
         continue
       }
       const aguardandoParaLock = lastBeforeLock.criado_em
-      if (new Date(aguardandoParaLock).getTime() > cutoffMs) continue
+      if (!hasAbsenceDeadlineElapsed(aguardandoParaLock, absence, deadlineNow)) continue
       if (!dryRun && (await hasInboundAfterTimestamp(company_id, conv.id, aguardandoParaLock))) {
         await clearWaitingForClient(company_id, conv.id)
         continue
@@ -716,8 +725,7 @@ async function finalizeAbsenceForConversaIds(p) {
     return { ok: false, error: 'Provider de envio não disponível' }
   }
 
-  const cutoff = getCutoffDate(absence).toISOString()
-  const cutoffMs = new Date(cutoff).getTime()
+  const deadlineNow = p.now ? new Date(p.now) : new Date()
   const resultados = []
 
   for (const convId of ids) {
@@ -754,7 +762,7 @@ async function finalizeAbsenceForConversaIds(p) {
       resultados.push({ conversa_id: convId, ok: false, motivo: 'cliente_respondeu_depois' })
       continue
     }
-    if (new Date(aguardandoDesde).getTime() > cutoffMs) {
+    if (!hasAbsenceDeadlineElapsed(aguardandoDesde, absence, deadlineNow)) {
       resultados.push({ conversa_id: convId, ok: false, motivo: 'prazo_nao_cumprido' })
       continue
     }
@@ -897,4 +905,6 @@ module.exports = {
   fetchLastAbsenceEncerramentoSnap,
   parseAbsenceSnapFromObservacao,
   resolveReopenAssignmentAfterAbsence,
+  buildAbsenceBusinessSchedule,
+  hasAbsenceDeadlineElapsed,
 }

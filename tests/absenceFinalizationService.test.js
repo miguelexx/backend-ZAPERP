@@ -3,6 +3,7 @@ const {
   getAbsenceConfig,
   outboundQualificaParaAguardandoCliente,
   buildWaitingForClientAfterOutboundPatch,
+  hasAbsenceDeadlineElapsed,
 } = require('../services/absenceFinalizationService')
 const { validateChatbotConfig } = require('../services/chatbotTriageService')
 
@@ -150,5 +151,28 @@ describe('absenceFinalizationService - configuracao por empresa', () => {
         '2026-07-06T20:32:00.000Z'
       )
     ).toBeNull()
+  })
+
+  it('horas uteis pausam durante noite e fim de semana', () => {
+    const cfg = getAbsenceConfig({
+      finalizar_por_ausencia_prazo: 2,
+      finalizar_por_ausencia_unidade: 'horas_uteis',
+      timezone: 'America/Sao_Paulo',
+      horarioInicio: '09:00',
+      horarioFim: '18:00',
+      diasSemanaDesativados: [0, 6],
+    })
+    const sexta17h = '2026-08-07T20:00:00.000Z'
+
+    expect(hasAbsenceDeadlineElapsed(sexta17h, cfg, '2026-08-10T12:59:00.000Z')).toBe(false)
+    expect(hasAbsenceDeadlineElapsed(sexta17h, cfg, '2026-08-10T13:00:00.000Z')).toBe(true)
+  })
+
+  it('horas corridas continuam contando durante o fim de semana', () => {
+    const cfg = getAbsenceConfig({
+      finalizar_por_ausencia_prazo: 2,
+      finalizar_por_ausencia_unidade: 'horas_corridas',
+    })
+    expect(hasAbsenceDeadlineElapsed('2026-08-07T20:00:00.000Z', cfg, '2026-08-07T22:00:00.000Z')).toBe(true)
   })
 })

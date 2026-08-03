@@ -9,7 +9,9 @@ const {
   DEFAULT_CHATBOT_CONFIG,
   validateChatbotConfig,
   normalizeChatbotTriageStrings,
+  looksLikeBotMessage,
 } = require('../services/chatbotTriageService')
+const { sendAutomaticText } = require('../services/automaticTextOutboundService')
 const {
   finalizeConversationsByAbsence,
   finalizeAbsenceForConversaIds,
@@ -40,6 +42,21 @@ function checkCronSecret(req, res, next) {
     return res.status(401).json({ error: 'Unauthorized' })
   }
   next()
+}
+
+function isChatbotOutboundMessage(message, chatbotConfig) {
+  if (!message || message.direcao !== 'out') return false
+  const status = String(message.status_mensagem || message.status || '').toLowerCase()
+  if (['erro', 'error', 'failed'].includes(status)) return false
+  const origem = String(message.origem || '').trim().toLowerCase()
+  const autorHumano = message.autor_usuario_id != null && Number(message.autor_usuario_id) > 0
+  if (autorHumano) return false
+  const sendOrigin = String(message?.provider_request?.options?.sendOrigin || '').trim().toLowerCase()
+  if (sendOrigin) return sendOrigin === 'chatbot_triage'
+  if (['automacao', 'bot', 'sistema'].includes(origem)) {
+    return looksLikeBotMessage(message.texto, chatbotConfig)
+  }
+  return !origem && looksLikeBotMessage(message.texto, chatbotConfig)
 }
 
 /**
@@ -106,7 +123,7 @@ exports.timeoutInatividadeChatbot = async (req, res) => {
 
       const { data: mensagens } = await supabase
         .from('mensagens')
-        .select('conversa_id, criado_em, direcao, texto')
+        .select('conversa_id, criado_em, direcao, texto, origem, autor_usuario_id, status, status_mensagem, provider_request')
         .eq('company_id', company_id)
         .in('conversa_id', conversaIds)
         .order('criado_em', { ascending: false })
@@ -124,8 +141,9 @@ exports.timeoutInatividadeChatbot = async (req, res) => {
         const ultima = ultimaPorConversa[conv.id]
         if (!ultima) continue
 
-        // Só encerra se a ÚLTIMA mensagem foi do BOT (out) = cliente não respondeu
+        // Direção `out` sozinha não identifica bot: mensagens de atendente também são outbound.
         if (ultima.direcao !== 'out') continue
+        if (!isChatbotOutboundMessage(ultima, triageNorm)) continue
         if (new Date(ultima.criado_em) > limite) continue
 
         // Exceção: se a última msg do bot foi "fora do horário", não encerra
@@ -135,38 +153,25 @@ exports.timeoutInatividadeChatbot = async (req, res) => {
         if (!telefone || String(telefone).includes('@g.us') || String(telefone).toLowerCase().startsWith('lid:')) continue
 
         try {
-          const resultSend = await provider.sendText(telefone, mensagemEncerramento, {
+          const resultSend = await sendAutomaticText({
+            supabase,
+            sendMessage: provider.sendText.bind(provider),
+            telefone,
+            texto: mensagemEncerramento,
             companyId: company_id,
             conversaId: conv.id,
-            whatsappInstanceId: conv.whatsapp_instance_id || undefined,
+            whatsappInstanceId: conv.whatsapp_instance_id || null,
             sendOrigin: 'timeout_inatividade_chatbot',
           })
-
-          const ok = resultSend?.ok === true
-          const messageId = resultSend?.messageId ? String(resultSend.messageId).trim() : null
-          const hasTraceableId = !!messageId && (messageId.includes('@') || /^[A-F0-9]{12,}$/i.test(messageId) || messageId.length > 20)
-          const statusMsg = ok ? (hasTraceableId ? 'sent' : 'pending') : 'erro'
-          if (!ok || !hasTraceableId) {
-            console.warn('[timeoutInatividadeChatbot] envio sem confirmacao rastreavel', {
+          if (!resultSend?.ok) {
+            console.warn('[timeoutInatividadeChatbot] conversa mantida aberta: envio não aceito', {
               company_id,
               conversa_id: conv.id,
-              whatsapp_instance_id: conv.whatsapp_instance_id || null,
-              status: statusMsg,
-              provider_message_id: messageId || null,
-              erro: ok ? null : String(resultSend?.error || 'desconhecido').slice(0, 200),
+              uncertain: resultSend?.uncertain === true,
+              erro: String(resultSend?.error || 'desconhecido').slice(0, 200),
             })
+            continue
           }
-          await supabase.from('mensagens').insert({
-            conversa_id: conv.id,
-            texto: mensagemEncerramento,
-            direcao: 'out',
-            origem: 'automacao',
-            company_id,
-            status: statusMsg,
-            status_mensagem: ok ? (hasTraceableId ? 'sent' : 'sending') : 'failed',
-            ...(hasTraceableId ? { whatsapp_id: messageId } : {}),
-            ...(conv.whatsapp_instance_id ? { whatsapp_instance_id: conv.whatsapp_instance_id } : {}),
-          })
 
           const { error: updErr } = await supabase
             .from('conversas')
@@ -423,3 +428,4 @@ exports.adminAtendimentoAlerta = async (req, res) => {
 }
 
 exports.checkCronSecret = checkCronSecret
+exports.isChatbotOutboundMessage = isChatbotOutboundMessage

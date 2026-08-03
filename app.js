@@ -421,20 +421,23 @@ if (hasFrontendDist) {
   const uiOverridesPath = path.join(__dirname, 'ui-overrides.css')
   const uiOverridesHref = '/ui-overrides.css'
   const indexHtmlPath = path.join(frontendDist, 'index.html')
-  const indexHtmlRaw = fs.readFileSync(indexHtmlPath, 'utf8')
-  let indexHtmlInjected = indexHtmlRaw.includes(uiOverridesHref)
-    ? indexHtmlRaw
-    : indexHtmlRaw.replace(
-        '</head>',
-        `  <link rel="stylesheet" href="${uiOverridesHref}" />\n  </head>`
-      )
-  // Refresh automático a cada N minutos (AUTO_REFRESH_MINUTES=0 por padrão; defina >0 para ativar)
-  const autoRefreshMinutes = parseInt(process.env.AUTO_REFRESH_MINUTES || '0', 10)
-  if (autoRefreshMinutes > 0 && !indexHtmlInjected.includes('auto-refresh-interval')) {
-    const refreshScript = `<script id="auto-refresh-interval">(function(){var m=${autoRefreshMinutes}*60*1000;setInterval(function(){location.reload()},m)})();</script>`
-    indexHtmlInjected = indexHtmlInjected.includes('</body>')
-      ? indexHtmlInjected.replace('</body>', `${refreshScript}\n</body>`)
-      : indexHtmlInjected.replace('</html>', `${refreshScript}\n</html>`)
+  const buildIndexHtml = () => {
+    const indexHtmlRaw = fs.readFileSync(indexHtmlPath, 'utf8')
+    let indexHtmlInjected = indexHtmlRaw.includes(uiOverridesHref)
+      ? indexHtmlRaw
+      : indexHtmlRaw.replace(
+          '</head>',
+          `  <link rel="stylesheet" href="${uiOverridesHref}" />\n  </head>`
+        )
+    // Refresh automatico a cada N minutos (AUTO_REFRESH_MINUTES=0 por padrao; defina >0 para ativar)
+    const autoRefreshMinutes = parseInt(process.env.AUTO_REFRESH_MINUTES || '0', 10)
+    if (autoRefreshMinutes > 0 && !indexHtmlInjected.includes('auto-refresh-interval')) {
+      const refreshScript = `<script id="auto-refresh-interval">(function(){var m=${autoRefreshMinutes}*60*1000;setInterval(function(){location.reload()},m)})();</script>`
+      indexHtmlInjected = indexHtmlInjected.includes('</body>')
+        ? indexHtmlInjected.replace('</body>', `${refreshScript}\n</body>`)
+        : indexHtmlInjected.replace('</html>', `${refreshScript}\n</html>`)
+    }
+    return indexHtmlInjected
   }
 
   app.get(uiOverridesHref, (req, res) => {
@@ -487,7 +490,12 @@ if (hasFrontendDist) {
       if (!accept.includes('text/html')) return next()
       const p = String(req.path || '/')
       if (apiPrefixes.some((pre) => p === pre || p.startsWith(pre + '/'))) return next()
-      return res.status(200).type('html').send(indexHtmlInjected)
+      // O index aponta para assets com hash. Revalidar evita servir referencias
+      // antigas depois de um deploy que removeu os chunks da versao anterior.
+      res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate')
+      res.setHeader('Pragma', 'no-cache')
+      res.setHeader('Expires', '0')
+      return res.status(200).type('html').send(buildIndexHtml())
     } catch (e) {
       return next(e)
     }

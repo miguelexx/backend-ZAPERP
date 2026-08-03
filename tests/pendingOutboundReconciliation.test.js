@@ -75,4 +75,21 @@ describe('escalonamento de mensagem presa na fila UltraMSG', () => {
     expect(_test.providerRowIndicatesSuccess({ status: 'queue' })).toBe(false)
     expect(_test.providerRowIndicatesFailure({ status: 'queue' })).toBe(false)
   })
+
+  test('reenvio de texto exige automacao incerta, permissao e no maximo uma tentativa anterior', () => {
+    const base = {
+      origem: 'automacao',
+      direcao: 'out',
+      texto: 'Mensagem do bot',
+      tipo: 'texto',
+      autor_usuario_id: null,
+      provider_delivery_state: 'uncertain',
+      provider_retryable: true,
+      provider_attempt_count: 1,
+    }
+    expect(_test.isRetryableAutomaticText(base)).toBe(true)
+    expect(_test.isRetryableAutomaticText({ ...base, autor_usuario_id: 9 })).toBe(false)
+    expect(_test.isRetryableAutomaticText({ ...base, provider_attempt_count: 2 })).toBe(false)
+    expect(_test.isRetryableAutomaticText({ ...base, provider_delivery_state: 'queued' })).toBe(false)
+  })
 })
