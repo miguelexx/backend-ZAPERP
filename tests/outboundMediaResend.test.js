@@ -9,6 +9,7 @@ const fs = require('fs')
 // Mocks (variáveis prefixadas com "mock" são permitidas dentro do factory do jest.mock).
 let mockProvider = {}
 let mockConversaRow = { id: 10, telefone: '5511999999999', tipo: 'individual', whatsapp_instance_id: 1 }
+let mockMensagemRow = null
 const mockUpdates = []
 
 jest.mock('../services/providers', () => ({ getProvider: () => mockProvider }))
@@ -33,12 +34,17 @@ jest.mock('../config/supabase', () => {
     limit() { return this },
     eq() { return this },
     maybeSingle() {
-      const data = this._table === 'conversas' ? mockConversaRow : null
+      const data = this._table === 'conversas'
+        ? mockConversaRow
+        : this._table === 'mensagens'
+          ? mockMensagemRow
+          : null
       return Promise.resolve({ data, error: null })
     },
     then(resolve, reject) {
       if (this._op === 'update' && this._table === 'mensagens') {
         mockUpdates.push({ ...this._payload })
+        if (mockMensagemRow) mockMensagemRow = { ...mockMensagemRow, ...this._payload }
       }
       return Promise.resolve({ data: null, error: null }).then(resolve, reject)
     },
@@ -69,6 +75,7 @@ beforeEach(() => {
   mockUpdates.length = 0
   schedulePendingOutboundReconciliation.mockClear()
   mockConversaRow = { id: 10, telefone: '5511999999999', tipo: 'individual', whatsapp_instance_id: 1 }
+  mockMensagemRow = null
   mockProvider = {}
   jest.spyOn(fs, 'existsSync').mockReturnValue(true)
 })
@@ -208,5 +215,60 @@ describe('resendOutboundMediaMessage — reenvio', () => {
     const r = await svc.resendOutboundMediaMessage(row)
     expect(r.action).toBe('skip_max_attempts')
     expect(mockProvider.uploadMedia).not.toHaveBeenCalled()
+  })
+})
+
+describe('retryOutboundMediaByMessageId', () => {
+  test('reenvia a mensagem persistida e ignora somente o teto do agendador automático', async () => {
+    mockMensagemRow = baseRow()
+    svc._test._state.attemptsById.set(mockMensagemRow.id, svc._test.getMaxAttempts())
+    mockProvider = {
+      getMessages: jest.fn().mockResolvedValue({ ok: true, data: [] }),
+      uploadMedia: jest.fn().mockResolvedValue({ ok: true, url: 'https://cdn/x.ogg' }),
+      sendVoice: jest.fn().mockResolvedValue({ ok: true, messageId: 'BAE543FE1CE17AFA' }),
+    }
+
+    const previousEnabled = process.env.OUTBOUND_MEDIA_RESEND_ENABLED
+    process.env.OUTBOUND_MEDIA_RESEND_ENABLED = 'false'
+    let result
+    try {
+      result = await svc.retryOutboundMediaByMessageId({
+        companyId: 1,
+        conversaId: 10,
+        mensagemId: 555,
+      })
+    } finally {
+      if (previousEnabled == null) delete process.env.OUTBOUND_MEDIA_RESEND_ENABLED
+      else process.env.OUTBOUND_MEDIA_RESEND_ENABLED = previousEnabled
+    }
+
+    expect(result).toMatchObject({
+      ok: true,
+      httpStatus: 200,
+      action: 'resent',
+      mensagem: { id: 555, status: 'sent', whatsapp_id: 'BAE543FE1CE17AFA' },
+    })
+    expect(mockProvider.uploadMedia).toHaveBeenCalledTimes(1)
+    expect(mockProvider.sendVoice).toHaveBeenCalledTimes(1)
+  })
+
+  test('retorna 404 sem falar com o provedor quando a mensagem não pertence à conversa/empresa', async () => {
+    mockMensagemRow = null
+    mockProvider = {
+      getMessages: jest.fn(),
+      uploadMedia: jest.fn(),
+      sendVoice: jest.fn(),
+    }
+
+    const result = await svc.retryOutboundMediaByMessageId({
+      companyId: 1,
+      conversaId: 10,
+      mensagemId: 999,
+    })
+
+    expect(result).toMatchObject({ ok: false, httpStatus: 404, action: 'not_found' })
+    expect(mockProvider.getMessages).not.toHaveBeenCalled()
+    expect(mockProvider.uploadMedia).not.toHaveBeenCalled()
+    expect(mockProvider.sendVoice).not.toHaveBeenCalled()
   })
 })

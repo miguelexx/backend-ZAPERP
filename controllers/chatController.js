@@ -66,7 +66,10 @@ const {
 const { normalizarTimestampSemFusoAmbiguoParaApi } = require('../helpers/timestampApiCompat')
 const { isRealWhatsAppId, isUltramsgNumericQueueId, buildCrmReferenceId } = require('../helpers/whatsappMessageIdHelper')
 const { schedulePendingOutboundReconciliation } = require('../services/pendingOutboundReconciliationService')
-const { scheduleOutboundMediaResend } = require('../services/outboundMediaResendService')
+const {
+  scheduleOutboundMediaResend,
+  retryOutboundMediaByMessageId,
+} = require('../services/outboundMediaResendService')
 const { departamentoRoom } = require('../helpers/socketRooms')
 const {
   validateAndConsumeForMessage,
@@ -83,6 +86,10 @@ const {
   manualTextResponseFromClassification,
   sanitizeAuditJson,
 } = require('../services/manualTextOutboundService')
+const {
+  buildSpecialtyOutboundHttpResult,
+  resolveSpecialtyClientTempDedup,
+} = require('../helpers/specialtyOutboundResponse')
 
 /**
  * Deduplicação in-memory para double-send de texto.
@@ -6271,7 +6278,7 @@ exports.enviarMensagemChat = async (req, res) => {
       const dedupKey = clientTempIdDedupeKey(company_id, conversa_id, clientTempId)
       const existing = _clientTempIdDeduplicationMap.get(dedupKey)
       if (hasLinkPayload && existing && Date.now() - existing.ts < 30_000) {
-        return res.json({
+        const dedup = resolveSpecialtyClientTempDedup({
           ok: true,
           id: existing.id,
           conversa_id: Number(conversa_id),
@@ -6279,6 +6286,7 @@ exports.enviarMensagemChat = async (req, res) => {
           status: existing.status || 'pending',
           deduplicated: true,
         })
+        return res.status(dedup.httpStatus).json(dedup.body)
       }
       const persisted = await findMensagemByClientTempId(
         company_id,
@@ -6293,7 +6301,10 @@ exports.enviarMensagemChat = async (req, res) => {
           status: persistedResponse.status,
           ts: Date.now(),
         })
-        if (hasLinkPayload) return res.json(persistedResponse)
+        if (hasLinkPayload) {
+          const dedup = resolveSpecialtyClientTempDedup(persistedResponse)
+          return res.status(dedup.httpStatus).json(dedup.body)
+        }
         persistedManualText = persisted
       }
     }
@@ -6476,6 +6487,9 @@ exports.enviarMensagemChat = async (req, res) => {
             if (existingResult.handled) {
               return res.status(existingResult.httpStatus || 200).json(existingResult.body)
             }
+          } else {
+            const dedup = resolveSpecialtyClientTempDedup(persistedResponse)
+            return res.status(dedup.httpStatus).json(dedup.body)
           }
           return res.json(persistedResponse)
         }
@@ -6905,22 +6919,24 @@ exports.enviarMensagemChat = async (req, res) => {
       }
     }
 
+    // Caminho de LINK (texto manual já retornou acima). Contrato: ok:true só com aceite do provedor.
     // Não retornar mensagem completa — evita duplicação no frontend (API + socket).
-    // A mensagem chega via socket nova_mensagem (única fonte de verdade para exibição).
-    const sendOk = !!telefoneParaEnvio && (typeof sendResult === 'boolean' ? sendResult : sendResult?.ok === true)
-    const sendWaMessageId = typeof sendResult === 'object' && sendResult?.messageId ? String(sendResult.messageId).trim() : null
-    const sendTraceable = sendOk && isRealWhatsAppId(sendWaMessageId)
-    const motivoErro = sendResult?.error || sendResult?.blockedBy
-    return res.json({
-      ok: true,
-      id: msg.id,
-      conversa_id: Number(conversa_id),
-      ...(clientTempId ? { client_temp_id: clientTempId } : {}),
-      ...(sendTraceable ? { status: 'sent', whatsapp_id: sendWaMessageId } : sendOk ? { status: 'pending' } : {
-        status: sendResult?.blockedBy ? 'blocked' : 'erro',
-        ...(motivoErro ? { motivo: motivoErro } : {})
-      })
-    })
+    const linkProviderResult = !telefoneParaEnvio
+      ? { ok: false, error: 'Número do contato indisponível para envio' }
+      : (sendResult == null
+        ? { ok: false, error: 'Falha ao enviar link para o WhatsApp' }
+        : sendResult)
+    const linkHttp = buildSpecialtyOutboundHttpResult(
+      linkProviderResult,
+      {
+        id: msg.id,
+        conversa_id: Number(conversa_id),
+        client_temp_id: clientTempId || null,
+      },
+      null,
+      { tipo: 'link' }
+    )
+    return res.status(linkHttp.httpStatus).json(linkHttp.body)
   } catch (err) {
     console.error(err)
     return res.status(500).json({ error: 'Erro ao enviar mensagem' })
@@ -7192,31 +7208,50 @@ exports.enviarContatoWhatsapp = async (req, res) => {
       })
     } catch (_) {}
 
-    const result = await provider.sendContact(telefoneParaEnvio, contactName, contactPhone, {
-      companyId: company_id,
-      conversaId: Number(conversa_id),
-      whatsappInstanceId: whatsappInstanceId || undefined,
-      sendOrigin: 'atendimento_humano_contato',
-      messageId: messageId || undefined,
-      // Reconciliação do eco fromMe → evita cartão de contato duplicado (mesmo padrão de mídia/texto).
-      referenceId: `crm-${msg.id}`,
-    })
-    const ok = typeof result === 'boolean' ? result : result?.ok === true
-    const waMessageId =
-      typeof result === 'object' && result?.messageId ? String(result.messageId).trim() : null
+    let providerResult = null
+    let providerThrown = null
+    try {
+      providerResult = await provider.sendContact(telefoneParaEnvio, contactName, contactPhone, {
+        companyId: company_id,
+        conversaId: Number(conversa_id),
+        whatsappInstanceId: whatsappInstanceId || undefined,
+        sendOrigin: 'atendimento_humano_contato',
+        messageId: messageId || undefined,
+        // Reconciliação do eco fromMe → evita cartão de contato duplicado (mesmo padrão de mídia/texto).
+        referenceId: `crm-${msg.id}`,
+      })
+    } catch (e) {
+      providerThrown = e
+      providerResult = { ok: false, error: e?.message || 'Erro ao enviar contato' }
+    }
 
-    const hasTraceableContactId = isRealWhatsAppId(waMessageId)
-    const hasQueueContactId = !!waMessageId && isUltramsgNumericQueueId(waMessageId)
-    const nextStatus = ok ? (hasTraceableContactId ? 'sent' : 'pending') : 'erro'
-    const nextStatusMensagem = ok ? (hasTraceableContactId ? 'sent' : 'sending') : 'erro'
+    const contactHttp = buildSpecialtyOutboundHttpResult(
+      providerResult,
+      msg,
+      providerThrown,
+      { tipo: 'contact' }
+    )
+    const classification = contactHttp.classification
+    const nextStatus = classification.status
+    const nextStatusMensagem = classification.status_mensagem
     await supabase
       .from('mensagens')
-      .update({ status: nextStatus, status_mensagem: nextStatusMensagem, ...(hasTraceableContactId ? { whatsapp_id: waMessageId } : {}), ...(hasQueueContactId ? { provider_queue_id: waMessageId } : {}) })
+      .update({
+        status: nextStatus,
+        status_mensagem: nextStatusMensagem,
+        ...(classification.whatsapp_id ? { whatsapp_id: classification.whatsapp_id } : {}),
+        ...(classification.provider_queue_id ? { provider_queue_id: classification.provider_queue_id } : {}),
+      })
       .eq('company_id', company_id)
       .eq('id', msg.id)
 
     if (io) {
-      const payload = await enrichMensagemComAutorUsuario(supabase, company_id, { ...msg, status: nextStatus, status_mensagem: nextStatusMensagem, whatsapp_id: hasTraceableContactId ? waMessageId : null })
+      const payload = await enrichMensagemComAutorUsuario(supabase, company_id, {
+        ...msg,
+        status: nextStatus,
+        status_mensagem: nextStatusMensagem,
+        whatsapp_id: classification.whatsapp_id || null,
+      })
       emitirEventoEmpresaConversa(io, company_id, conversa_id, io.EVENTS?.NOVA_MENSAGEM || 'nova_mensagem', payload)
       const convPayload = aplicarAguardandoClienteNoPayload({
         id: Number(conversa_id),
@@ -7233,7 +7268,7 @@ exports.enviarContatoWhatsapp = async (req, res) => {
       emitirConversaAtualizada(io, company_id, conversa_id, convPayload, { skipAtualizarConversa: true })
     }
 
-    return res.json({ ok: true })
+    return res.status(contactHttp.httpStatus).json(contactHttp.body)
   } catch (err) {
     console.error('Erro ao enviar contato:', err)
     return res.status(500).json({ error: 'Erro ao enviar contato' })
@@ -7388,34 +7423,57 @@ exports.enviarLocalizacao = async (req, res) => {
     const baseAddress = [nomePlace, endereco].filter(Boolean).join('\n') || `${latitude},${longitude}`
     const addressParaCliente = usuarioNome ? `${usuarioNome} — ${String(baseAddress).slice(0, 280)}` : String(baseAddress).slice(0, 300)
 
-    let result = { ok: false, messageId: null }
+    let providerResult = { ok: false, messageId: null, error: 'Número do contato indisponível para envio' }
+    let providerThrown = null
     if (telefoneParaEnvio) {
-      result = await provider.sendLocation(telefoneParaEnvio, { address: addressParaCliente, lat: latitude, lng: longitude }, {
-        companyId: company_id,
-        conversaId: conversa_id,
-        whatsappInstanceId: whatsappInstanceId || undefined,
-        referenceId: `crm-${msg.id}`,
-        sendOrigin: 'atendimento_humano_localizacao',
-      })
+      try {
+        providerResult = await provider.sendLocation(telefoneParaEnvio, { address: addressParaCliente, lat: latitude, lng: longitude }, {
+          companyId: company_id,
+          conversaId: conversa_id,
+          whatsappInstanceId: whatsappInstanceId || undefined,
+          referenceId: `crm-${msg.id}`,
+          sendOrigin: 'atendimento_humano_localizacao',
+        })
+      } catch (e) {
+        providerThrown = e
+        providerResult = { ok: false, error: e?.message || 'Erro ao enviar localização' }
+      }
     } else {
       console.warn(`[WhatsApp] Conversa ${conversa_id} sem telefone — localização salva, não enviada ao WhatsApp`)
     }
 
-    const ok = result?.ok === true
-    const waMessageId = result?.messageId ? String(result.messageId).trim() : null
-    const hasTraceableLocationId = isRealWhatsAppId(waMessageId)
-    const hasQueueLocationId = !!waMessageId && isUltramsgNumericQueueId(waMessageId)
-    const nextStatus = ok ? (hasTraceableLocationId ? 'sent' : 'pending') : 'erro'
-    const nextStatusMensagem = ok ? (hasTraceableLocationId ? 'sent' : 'sending') : 'erro'
+    const locationHttp = buildSpecialtyOutboundHttpResult(
+      providerResult,
+      msg,
+      providerThrown,
+      {
+        tipo: 'location',
+        location_meta: msg.location_meta || location_meta,
+      }
+    )
+    const classification = locationHttp.classification
+    const nextStatus = classification.status
+    const nextStatusMensagem = classification.status_mensagem
 
     await supabase
       .from('mensagens')
-      .update({ status: nextStatus, status_mensagem: nextStatusMensagem, ...(hasTraceableLocationId ? { whatsapp_id: waMessageId } : {}), ...(hasQueueLocationId ? { provider_queue_id: waMessageId } : {}) })
+      .update({
+        status: nextStatus,
+        status_mensagem: nextStatusMensagem,
+        ...(classification.whatsapp_id ? { whatsapp_id: classification.whatsapp_id } : {}),
+        ...(classification.provider_queue_id ? { provider_queue_id: classification.provider_queue_id } : {}),
+      })
       .eq('company_id', company_id)
       .eq('id', msg.id)
 
     if (io) {
-      const payload = await enrichMensagemComAutorUsuario(supabase, company_id, { ...msg, status: nextStatus, status_mensagem: nextStatusMensagem, whatsapp_id: hasTraceableLocationId ? waMessageId : null, location_meta: msg.location_meta || location_meta })
+      const payload = await enrichMensagemComAutorUsuario(supabase, company_id, {
+        ...msg,
+        status: nextStatus,
+        status_mensagem: nextStatusMensagem,
+        whatsapp_id: classification.whatsapp_id || null,
+        location_meta: msg.location_meta || location_meta,
+      })
       emitirEventoEmpresaConversa(io, company_id, conversa_id, io.EVENTS?.NOVA_MENSAGEM || 'nova_mensagem', payload)
       const convPayload = aplicarAguardandoClienteNoPayload({
         id: Number(conversa_id),
@@ -7432,15 +7490,7 @@ exports.enviarLocalizacao = async (req, res) => {
       emitirConversaAtualizada(io, company_id, conversa_id, convPayload, { skipAtualizarConversa: true })
     }
 
-    const sendOk = !!telefoneParaEnvio && ok
-
-    return res.json({
-      ok: true,
-      id: msg.id,
-      conversa_id: Number(conversa_id),
-      location_meta: msg.location_meta || location_meta,
-      ...(sendOk && hasTraceableLocationId ? { status: 'sent', whatsapp_id: waMessageId } : sendOk ? { status: 'pending' } : { status: telefoneParaEnvio ? 'erro' : 'pending' })
-    })
+    return res.status(locationHttp.httpStatus).json(locationHttp.body)
   } catch (err) {
     console.error('Erro ao enviar localização:', err)
     return res.status(500).json({ error: 'Erro ao enviar localização' })
@@ -7512,32 +7562,53 @@ exports.enviarLigacaoWhatsapp = async (req, res) => {
       return res.status(500).json({ error: 'Provider WhatsApp não suporta ligações' })
     }
 
-    const result = await provider.sendCall(conversa.telefone, safeDur, {
-      companyId: company_id,
-      conversaId: conversa_id,
-      whatsappInstanceId: whatsappInstanceId || undefined,
-    })
-    const ok = typeof result === 'boolean' ? result : result?.ok === true
-    const waMessageId =
-      typeof result === 'object' && result?.messageId ? String(result.messageId).trim() : null
+    let providerResult = null
+    let providerThrown = null
+    try {
+      providerResult = await provider.sendCall(conversa.telefone, safeDur, {
+        companyId: company_id,
+        conversaId: conversa_id,
+        whatsappInstanceId: whatsappInstanceId || undefined,
+        // Mesmo padrão de referência das demais especialidades — evita eco/duplicata em retry futuro.
+        referenceId: `crm-${msg.id}`,
+      })
+    } catch (e) {
+      providerThrown = e
+      providerResult = { ok: false, error: e?.message || 'Erro ao registrar ligação' }
+    }
 
-    const hasTraceableCallId = isRealWhatsAppId(waMessageId)
-    const hasQueueCallId = !!waMessageId && isUltramsgNumericQueueId(waMessageId)
-    const nextStatus = ok ? (hasTraceableCallId ? 'sent' : 'pending') : 'erro'
-    const nextStatusMensagem = ok ? (hasTraceableCallId ? 'sent' : 'sending') : 'erro'
+    const callHttp = buildSpecialtyOutboundHttpResult(
+      providerResult,
+      msg,
+      providerThrown,
+      { tipo: 'call' }
+    )
+    const classification = callHttp.classification
+    const nextStatus = classification.status
+    const nextStatusMensagem = classification.status_mensagem
     await supabase
       .from('mensagens')
-      .update({ status: nextStatus, status_mensagem: nextStatusMensagem, ...(hasTraceableCallId ? { whatsapp_id: waMessageId } : {}), ...(hasQueueCallId ? { provider_queue_id: waMessageId } : {}) })
+      .update({
+        status: nextStatus,
+        status_mensagem: nextStatusMensagem,
+        ...(classification.whatsapp_id ? { whatsapp_id: classification.whatsapp_id } : {}),
+        ...(classification.provider_queue_id ? { provider_queue_id: classification.provider_queue_id } : {}),
+      })
       .eq('company_id', company_id)
       .eq('id', msg.id)
 
     if (io) {
-      const payload = await enrichMensagemComAutorUsuario(supabase, company_id, { ...msg, status: nextStatus, status_mensagem: nextStatusMensagem, whatsapp_id: hasTraceableCallId ? waMessageId : null })
+      const payload = await enrichMensagemComAutorUsuario(supabase, company_id, {
+        ...msg,
+        status: nextStatus,
+        status_mensagem: nextStatusMensagem,
+        whatsapp_id: classification.whatsapp_id || null,
+      })
       emitirEventoEmpresaConversa(io, company_id, conversa_id, io.EVENTS?.NOVA_MENSAGEM || 'nova_mensagem', payload)
       emitirConversaAtualizada(io, company_id, conversa_id, { id: Number(conversa_id) })
     }
 
-    return res.json({ ok: true })
+    return res.status(callHttp.httpStatus).json(callHttp.body)
   } catch (err) {
     console.error('Erro ao registrar ligação:', err)
     return res.status(500).json({ error: 'Erro ao registrar ligação' })
@@ -9123,6 +9194,166 @@ exports.enviarArquivo = async (req, res) => {
   } catch (err) {
     console.error('Erro ao enviar arquivo:', err)
     return res.status(500).json({ error: 'Erro ao enviar arquivo' })
+  }
+}
+
+/**
+ * Reenvia texto outbound já persistido em erro, sem criar novo registro.
+ * Reutiliza handleExistingManualTextRequest + dispatchPersistedManualText (CAS/idempotência).
+ */
+exports.reenviarTextoFalha = async (req, res) => {
+  try {
+    const conversaId = Number(req.params?.id)
+    const mensagemId = Number(req.params?.mensagem_id)
+    const companyId = Number(req.user?.company_id)
+    const userId = Number(req.user?.id)
+
+    if (![conversaId, mensagemId, companyId, userId].every((value) => Number.isSafeInteger(value) && value > 0)) {
+      return res.status(400).json({ ok: false, error: 'Conversa ou mensagem inválida para reenvio.' })
+    }
+
+    const io = req.app.get('io')
+    const permEnvio = await assertPodeEnviarMensagem({
+      company_id: companyId,
+      conversa_id: conversaId,
+      user_id: userId,
+      role: req.user?.perfil,
+      user_dep_ids: req.user?.departamento_ids,
+      autoAssumirAoEnviar: false,
+      io,
+    })
+    if (!permEnvio.ok) {
+      return res.status(permEnvio.status).json({ ok: false, error: permEnvio.error })
+    }
+
+    const { data: conversa, error: errConv } = await supabase
+      .from('conversas')
+      .select('id, telefone, chat_lid, cliente_id, whatsapp_instance_id')
+      .eq('company_id', companyId)
+      .eq('id', conversaId)
+      .maybeSingle()
+    if (errConv || !conversa) {
+      return res.status(404).json({ ok: false, error: 'Conversa não encontrada' })
+    }
+
+    const { data: row, error: errMsg } = await supabase
+      .from('mensagens')
+      .select(MANUAL_TEXT_BASE_SELECT)
+      .eq('company_id', companyId)
+      .eq('conversa_id', conversaId)
+      .eq('id', mensagemId)
+      .eq('direcao', 'out')
+      .maybeSingle()
+    if (errMsg) {
+      return res.status(500).json({ ok: false, error: 'Não foi possível consultar a mensagem.' })
+    }
+    if (!row) {
+      return res.status(404).json({ ok: false, error: 'Mensagem de texto não encontrada nesta conversa.' })
+    }
+    if (String(row.tipo || 'texto').toLowerCase() !== 'texto') {
+      return res.status(400).json({
+        ok: false,
+        error: 'Esta mensagem não é texto. Use o reenvio de mídia.',
+        id: row.id,
+      })
+    }
+
+    const status = String(row.status_mensagem || row.status || '').toLowerCase()
+    if (['sent', 'delivered', 'read', 'played', 'enviada', 'entregue', 'lida'].includes(status) || isRealWhatsAppId(row.whatsapp_id)) {
+      const classification = manualTextClassificationFromRow(row)
+      return res.status(200).json(
+        manualTextResponseFromClassification(classification, row, {
+          deduplicated: true,
+          already_sent: true,
+        })
+      )
+    }
+    if (!['erro', 'error', 'failed', 'falhou'].includes(status)) {
+      return res.status(409).json({
+        ok: false,
+        id: row.id,
+        conversa_id: conversaId,
+        status: row.status || status,
+        error: 'Só é possível reenviar mensagens com falha confirmada.',
+        retryable: ['pending', 'sending', 'status_indefinido'].includes(status),
+      })
+    }
+
+    const whatsappInstanceId = await resolveConversationWhatsappInstance(companyId, conversa)
+    let telefoneParaEnvio = String(conversa.telefone || '').trim()
+    if (telefoneParaEnvio.toLowerCase().startsWith('lid:')) {
+      return res.status(422).json({
+        ok: false,
+        id: row.id,
+        error: 'Número do contato indisponível para reenvio.',
+        retryable: false,
+      })
+    }
+
+    const existingResult = await handleExistingManualTextRequest({
+      company_id: companyId,
+      conversa_id: conversaId,
+      user_id: userId,
+      row,
+      requestedText: row.texto,
+      retryRequested: true,
+      phone: telefoneParaEnvio,
+      whatsappInstanceId,
+      io,
+    })
+    if (!existingResult.handled) {
+      return res.status(500).json({ ok: false, error: 'Não foi possível processar o reenvio do texto.' })
+    }
+    return res.status(existingResult.httpStatus || 500).json(existingResult.body)
+  } catch (error) {
+    console.error('[manualTextRetry] falha no endpoint manual:', error?.message || error)
+    return res.status(500).json({ ok: false, error: 'Erro interno ao tentar reenviar o texto.' })
+  }
+}
+
+/**
+ * Reenvia uma mídia outbound já persistida que está em erro.
+ *
+ * Diferente de POST /arquivo, este endpoint não recebe o binário novamente e não cria outra
+ * mensagem. Ele usa mensagem_id + company_id + conversa_id, consulta o provedor pelo referenceId
+ * original e só despacha o arquivo salvo quando a UltraMsg confirma que ainda não o conhece.
+ */
+exports.reenviarMidiaFalha = async (req, res) => {
+  try {
+    const conversaId = Number(req.params?.id)
+    const mensagemId = Number(req.params?.mensagem_id)
+    const companyId = Number(req.user?.company_id)
+    const userId = Number(req.user?.id)
+
+    if (![conversaId, mensagemId, companyId, userId].every((value) => Number.isSafeInteger(value) && value > 0)) {
+      return res.status(400).json({ ok: false, error: 'Conversa ou mensagem inválida para reenvio.' })
+    }
+
+    const io = req.app.get('io')
+    const permEnvio = await assertPodeEnviarMensagem({
+      company_id: companyId,
+      conversa_id: conversaId,
+      user_id: userId,
+      role: req.user?.perfil,
+      user_dep_ids: req.user?.departamento_ids,
+      autoAssumirAoEnviar: false,
+      io,
+    })
+    if (!permEnvio.ok) {
+      return res.status(permEnvio.status).json({ ok: false, error: permEnvio.error })
+    }
+
+    const result = await retryOutboundMediaByMessageId({
+      companyId,
+      conversaId,
+      mensagemId,
+      io,
+    })
+    const { httpStatus = result.ok ? 200 : 500, ...body } = result
+    return res.status(httpStatus).json(body)
+  } catch (error) {
+    console.error('[outboundMediaRetry] falha no endpoint manual:', error?.message || error)
+    return res.status(500).json({ ok: false, error: 'Erro interno ao tentar reenviar a mídia.' })
   }
 }
 

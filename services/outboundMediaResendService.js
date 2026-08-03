@@ -141,10 +141,79 @@ async function markMessage(row, status, statusMensagem, io, extra = {}) {
   emitStatus(io, row, status, statusMensagem, extra.whatsapp_id)
 }
 
+const FAILED_OUTBOUND_STATUSES = new Set(['erro', 'error', 'failed', 'falhou'])
+const TERMINAL_OK_STATUSES = new Set(['sent', 'delivered', 'read', 'played', 'enviada', 'entregue', 'lida'])
+
+const OUTBOUND_MEDIA_RETRY_SELECT = [
+  'id',
+  'company_id',
+  'conversa_id',
+  'whatsapp_instance_id',
+  'whatsapp_id',
+  'provider_queue_id',
+  'status',
+  'status_mensagem',
+  'direcao',
+  'tipo',
+  'url',
+  'nome_arquivo',
+  'criado_em',
+  'autor_usuario_id',
+].join(', ')
+
+function normalizeOutboundStatus(row) {
+  return String(row?.status_mensagem || row?.status || '').toLowerCase().trim()
+}
+
+async function loadOutboundMediaRetryRow({ companyId, conversaId, mensagemId }) {
+  const { data, error } = await supabase
+    .from('mensagens')
+    .select(OUTBOUND_MEDIA_RETRY_SELECT)
+    .eq('company_id', Number(companyId))
+    .eq('conversa_id', Number(conversaId))
+    .eq('id', Number(mensagemId))
+    .eq('direcao', 'out')
+    .maybeSingle()
+  return { row: data || null, error: error || null }
+}
+
+/**
+ * CAS: só um reenvio ativo por mensagem (dois cliques / dois atendentes / duas abas).
+ * Transiciona erro → sending de forma atômica no banco.
+ */
+async function claimManualMediaRetry(row, io) {
+  const attemptedAt = new Date().toISOString()
+  const { data, error } = await supabase
+    .from('mensagens')
+    .update({
+      status: 'sending',
+      status_mensagem: 'sending',
+    })
+    .eq('company_id', Number(row.company_id))
+    .eq('conversa_id', Number(row.conversa_id))
+    .eq('id', Number(row.id))
+    .eq('direcao', 'out')
+    .in('status', [...FAILED_OUTBOUND_STATUSES])
+    .select(OUTBOUND_MEDIA_RETRY_SELECT)
+    .maybeSingle()
+
+  if (error) return { claimed: false, row, reason: 'claim_error', error }
+  if (!data) {
+    const reloaded = await loadOutboundMediaRetryRow({
+      companyId: row.company_id,
+      conversaId: row.conversa_id,
+      mensagemId: row.id,
+    })
+    return { claimed: false, row: reloaded.row || row, reason: 'concurrent_or_resolved' }
+  }
+  emitStatus(io, data, 'sending', 'sending')
+  return { claimed: true, row: { ...row, ...data }, attemptedAt }
+}
+
 // Sobe o arquivo salvo e reenvia pelo método correto do provedor. Sem legenda no reenvio:
 // a mídia foi salva sem re-derivar a legenda com prefixo do atendente; entregar a mídia (que antes
 // nunca chegou) é o objetivo — melhor que não entregar. Áudio/sticker não têm legenda de qualquer modo.
-async function sendStoredMediaOnce(row, tipo, phone, filePath, whatsappInstanceId) {
+async function sendStoredMediaOnce(row, tipo, phone, filePath, whatsappInstanceId, { manual = false } = {}) {
   const provider = getProvider()
   if (!provider) return { ok: false, error: 'provider_indisponivel' }
   if (!provider.uploadMedia) return { ok: false, error: 'upload_indisponivel' }
@@ -166,7 +235,7 @@ async function sendStoredMediaOnce(row, tipo, phone, filePath, whatsappInstanceI
     companyId: row.company_id,
     conversaId: row.conversa_id,
     whatsappInstanceId,
-    sendOrigin: 'reenvio_automatico_midia',
+    sendOrigin: manual ? 'reenvio_manual_midia' : 'reenvio_automatico_midia',
     referenceId: `crm-${row.id}`,
     returnDetails: true,
     ...(isAudio ? { audioMeta: { originalName: displayName } } : {}),
@@ -192,21 +261,23 @@ async function sendStoredMediaOnce(row, tipo, phone, filePath, whatsappInstanceI
   }
 }
 
-async function resendOutboundMediaMessage(row, { io = null } = {}) {
-  if (!isEnabled()) return { action: 'disabled' }
+async function resendOutboundMediaMessage(row, { io = null, manual = false } = {}) {
+  // A flag desliga apenas o agendador/varredura. O retry solicitado pelo atendente continua
+  // disponível e mantém todas as validações e a guarda anti-duplicidade abaixo.
+  if (!manual && !isEnabled()) return { action: 'disabled' }
   if (!row?.id || !row?.company_id) return { action: 'invalid_row' }
 
   const tipo = String(row.tipo || '').toLowerCase().trim()
   if (!isResendableTipo(tipo)) return { action: 'skip_tipo' }
 
-  const status = String(row.status_mensagem || row.status || '').toLowerCase()
-  if (status !== 'erro') return { action: 'skip_not_erro' }
-
-  // Já tem ID real do WhatsApp → na verdade foi entregue; só conserta o status.
-  if (isRealWhatsAppId(row.whatsapp_id)) {
-    await markMessage(row, 'sent', 'sent', io)
+  const status = normalizeOutboundStatus(row)
+  if (TERMINAL_OK_STATUSES.has(status) || isRealWhatsAppId(row.whatsapp_id)) {
+    if (!TERMINAL_OK_STATUSES.has(status) && isRealWhatsAppId(row.whatsapp_id)) {
+      await markMessage(row, 'sent', 'sent', io)
+    }
     return { action: 'already_sent' }
   }
+  if (!FAILED_OUTBOUND_STATUSES.has(status)) return { action: 'skip_not_erro' }
 
   const filePath = resolveStoredMediaPath(row.url)
   if (!filePath) return { action: 'skip_sem_url' }
@@ -217,81 +288,173 @@ async function resendOutboundMediaMessage(row, { io = null } = {}) {
     return { action: 'skip_arquivo_ausente' }
   }
 
-  if ((attemptsById.get(row.id) || 0) >= getMaxAttempts()) return { action: 'skip_max_attempts' }
+  // O teto protege a varredura automática contra loops. Uma ação manual explícita pode
+  // tentar novamente, mas continua passando pela consulta anti-duplicidade ao provedor e pelo
+  // bloqueio inFlight abaixo.
+  if (!manual && (attemptsById.get(row.id) || 0) >= getMaxAttempts()) return { action: 'skip_max_attempts' }
   if (inFlight.has(row.id)) return { action: 'skip_in_flight' }
 
-  inFlight.add(row.id)
+  let workingRow = row
+  if (manual) {
+    const claim = await claimManualMediaRetry(row, io)
+    if (!claim.claimed) {
+      const cur = normalizeOutboundStatus(claim.row)
+      if (TERMINAL_OK_STATUSES.has(cur) || isRealWhatsAppId(claim.row?.whatsapp_id)) {
+        return { action: 'already_sent' }
+      }
+      return { action: 'skip_in_flight' }
+    }
+    workingRow = claim.row
+  }
+
+  inFlight.add(workingRow.id)
   try {
     // Guarda anti-duplicidade: se o provedor já conhece a mensagem, não reenvia.
-    const providerHit = await queryProviderForReference(row)
+    const providerHit = await queryProviderForReference(workingRow)
     // Fail-closed: indisponibilidade da checagem NÃO equivale a "mensagem inexistente".
     // Mantém status=erro para a próxima varredura tentar novamente, sem consumir tentativa
     // e, principalmente, sem arriscar entregar a mesma mídia duas vezes ao cliente.
     if (!providerHit.checked) {
+      if (manual) await markMessage(workingRow, 'erro', 'erro', io)
       return { action: 'provider_check_inconclusive' }
     }
     if (providerHit.found) {
       const anySuccessOrQueue = providerHit.list.some((r) => PROVIDER_SUCCESS_OR_QUEUE.includes(providerRowStatus(r)))
       const anyFail = providerHit.list.some((r) => PROVIDER_FAILURE.includes(providerRowStatus(r)))
       if (anySuccessOrQueue) {
-        await markMessage(row, 'pending', 'sending', io)
-        schedulePendingOutboundReconciliation({ companyId: row.company_id, mensagemId: row.id, io })
+        await markMessage(workingRow, 'pending', 'sending', io)
+        schedulePendingOutboundReconciliation({ companyId: workingRow.company_id, mensagemId: workingRow.id, io })
         return { action: 'already_at_provider' }
       }
       if (anyFail) {
         // Provedor rejeitou explicitamente (número inválido etc.) — reenviar não resolve.
-        attemptsById.set(row.id, getMaxAttempts())
+        attemptsById.set(workingRow.id, getMaxAttempts())
+        await markMessage(workingRow, 'erro', 'erro', io)
         return { action: 'provider_confirmou_falha' }
       }
       // Encontrou mas ambíguo → trata como já no provedor e deixa a reconciliação decidir.
-      await markMessage(row, 'pending', 'sending', io)
-      schedulePendingOutboundReconciliation({ companyId: row.company_id, mensagemId: row.id, io })
+      await markMessage(workingRow, 'pending', 'sending', io)
+      schedulePendingOutboundReconciliation({ companyId: workingRow.company_id, mensagemId: workingRow.id, io })
       return { action: 'already_at_provider' }
     }
 
     const { data: conversa } = await supabase
       .from('conversas')
       .select('id, telefone, tipo, whatsapp_instance_id')
-      .eq('company_id', row.company_id)
-      .eq('id', row.conversa_id)
+      .eq('company_id', workingRow.company_id)
+      .eq('id', workingRow.conversa_id)
       .maybeSingle()
 
     const tel = String(conversa?.telefone || '').trim()
-    if (!tel) return { action: 'skip_sem_conversa' }
+    if (!tel) {
+      if (manual) await markMessage(workingRow, 'erro', 'erro', io)
+      return { action: 'skip_sem_conversa' }
+    }
     if (tel.toLowerCase().startsWith('lid:')) {
-      attemptsById.set(row.id, getMaxAttempts())
+      attemptsById.set(workingRow.id, getMaxAttempts())
+      await markMessage(workingRow, 'erro', 'erro', io)
       return { action: 'skip_telefone_invalido' }
     }
 
-    const whatsappInstanceId = row.whatsapp_instance_id || conversa?.whatsapp_instance_id || undefined
-    attemptsById.set(row.id, (attemptsById.get(row.id) || 0) + 1)
+    const whatsappInstanceId = workingRow.whatsapp_instance_id || conversa?.whatsapp_instance_id || undefined
+    attemptsById.set(workingRow.id, (attemptsById.get(workingRow.id) || 0) + 1)
 
-    const result = await sendStoredMediaOnce(row, tipo, tel, filePath, whatsappInstanceId)
+    const result = await sendStoredMediaOnce(workingRow, tipo, tel, filePath, whatsappInstanceId, { manual })
     const ok = result.ok === true
     const traceable = isRealWhatsAppId(result.messageId)
 
     if (ok) {
       const nextStatus = traceable ? 'sent' : 'pending'
       const nextStatusMensagem = traceable ? 'sent' : 'sending'
-      await markMessage(row, nextStatus, nextStatusMensagem, io, traceable ? { whatsapp_id: result.messageId } : {})
-      attemptsById.delete(row.id)
-      if (!traceable) schedulePendingOutboundReconciliation({ companyId: row.company_id, mensagemId: row.id, io })
+      await markMessage(workingRow, nextStatus, nextStatusMensagem, io, traceable ? { whatsapp_id: result.messageId } : {})
+      attemptsById.delete(workingRow.id)
+      if (!traceable) schedulePendingOutboundReconciliation({ companyId: workingRow.company_id, mensagemId: workingRow.id, io })
       console.log('[outboundMediaResend] mídia reenviada com sucesso', {
-        mensagem_id: row.id, company_id: row.company_id, tipo,
+        mensagem_id: workingRow.id, company_id: workingRow.company_id, tipo,
       })
       return { action: 'resent', status: nextStatus }
     }
 
     // Continua 'erro'; próximo ciclo tenta de novo até o teto de tentativas.
-    await markMessage(row, 'erro', 'erro', io)
+    await markMessage(workingRow, 'erro', 'erro', io)
     console.warn('[outboundMediaResend] reenvio falhou', {
-      mensagem_id: row.id, company_id: row.company_id, tipo, erro: result.error,
-      tentativa: attemptsById.get(row.id), teto: getMaxAttempts(),
+      mensagem_id: workingRow.id, company_id: workingRow.company_id, tipo, erro: result.error,
+      tentativa: attemptsById.get(workingRow.id), teto: getMaxAttempts(),
     })
     return { action: 'resend_failed', error: result.error }
   } finally {
-    inFlight.delete(row.id)
+    inFlight.delete(workingRow.id)
   }
+}
+
+function buildManualRetryResponse(result, row) {
+  const action = String(result?.action || 'error')
+  const successActions = new Set(['resent', 'already_sent', 'already_at_provider'])
+  if (successActions.has(action)) {
+    return { ok: true, httpStatus: 200, action, mensagem: row }
+  }
+
+  if (action === 'skip_not_erro') {
+    const status = String(row?.status_mensagem || row?.status || '').toLowerCase()
+    const resolved = isRealWhatsAppId(row?.whatsapp_id) || ['sent', 'delivered', 'read', 'played'].includes(status)
+    if (resolved) return { ok: true, httpStatus: 200, action: 'already_sent', mensagem: row }
+    return {
+      ok: false,
+      httpStatus: 409,
+      action,
+      retryable: true,
+      error: 'Esta mensagem já está sendo processada. Aguarde a confirmação do WhatsApp.',
+      mensagem: row,
+    }
+  }
+
+  const failures = {
+    not_found: [404, 'Mensagem de mídia não encontrada nesta conversa.', false],
+    skip_tipo: [400, 'Esta mensagem não é uma mídia compatível com reenvio.', false],
+    skip_sem_url: [410, 'O arquivo desta mensagem não está mais disponível para reenvio.', false],
+    skip_arquivo_ausente: [410, 'O arquivo desta mensagem não está mais disponível para reenvio.', false],
+    skip_sem_conversa: [404, 'A conversa desta mensagem não está mais disponível.', false],
+    skip_telefone_invalido: [422, 'O telefone do contato não está disponível para reenvio.', false],
+    provider_confirmou_falha: [422, 'O WhatsApp confirmou que esta mensagem não pode ser entregue.', false],
+    provider_check_inconclusive: [503, 'Não foi possível confirmar com o WhatsApp se a mensagem já foi recebida. Tente novamente em instantes.', true],
+    resend_failed: [502, 'O WhatsApp não confirmou o reenvio da mídia. Tente novamente em instantes.', true],
+    skip_in_flight: [409, 'O reenvio desta mensagem já está em andamento.', true],
+    skip_max_attempts: [429, 'O limite temporário de tentativas desta mensagem foi atingido.', true],
+    disabled: [503, 'O reenvio de mídia está temporariamente indisponível.', true],
+    invalid_row: [400, 'Mensagem inválida para reenvio.', false],
+    query_error: [500, 'Não foi possível consultar a mensagem para reenvio.', true],
+  }
+  const [httpStatus, error, retryable] = failures[action] || [500, 'Não foi possível reenviar esta mensagem.', true]
+  return {
+    ok: false,
+    httpStatus,
+    action,
+    retryable,
+    error: result?.error || error,
+    ...(row ? { mensagem: row } : {}),
+  }
+}
+
+/**
+ * Reenvio manual seguro por mensagem_id. O escopo company/conversa/direção impede acessar
+ * mensagens de outra empresa ou mensagens recebidas. O despacho reutiliza a mesma guarda por
+ * referenceId do reenvio automático, portanto um aceite já existente apenas reconcilia o status.
+ */
+async function retryOutboundMediaByMessageId({ companyId, conversaId, mensagemId, io = null }) {
+  const ids = [companyId, conversaId, mensagemId].map(Number)
+  if (ids.some((value) => !Number.isSafeInteger(value) || value <= 0)) {
+    return buildManualRetryResponse({ action: 'invalid_row' }, null)
+  }
+
+  const loaded = await loadOutboundMediaRetryRow({ companyId, conversaId, mensagemId })
+  if (loaded.error) {
+    return buildManualRetryResponse({ action: 'query_error', error: loaded.error.message }, null)
+  }
+  if (!loaded.row) return buildManualRetryResponse({ action: 'not_found' }, null)
+
+  const result = await resendOutboundMediaMessage(loaded.row, { io, manual: true })
+  const refreshed = await loadOutboundMediaRetryRow({ companyId, conversaId, mensagemId })
+  return buildManualRetryResponse(result, refreshed.row || loaded.row)
 }
 
 async function fetchResendableRows({ companyId = null, mensagemId = null, limit = null } = {}) {
@@ -384,6 +547,7 @@ function scheduleOutboundMediaResend({ companyId, mensagemId, io = null, delayMs
 module.exports = {
   runOutboundMediaResendSweep,
   resendOutboundMediaMessage,
+  retryOutboundMediaByMessageId,
   scheduleOutboundMediaResend,
   RESENDABLE_TIPOS,
   _test: {
@@ -394,6 +558,8 @@ module.exports = {
     getMaxAttempts,
     getLookbackMs,
     getMinAgeMs,
+    buildManualRetryResponse,
+    loadOutboundMediaRetryRow,
     _state: { attemptsById, inFlight, deferredTimers },
   },
 }
