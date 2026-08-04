@@ -137,56 +137,13 @@ async function fetchAllowedMedia(target, signal) {
 }
 
 /**
- * Parseia um header `Range: bytes=...` simples (um único intervalo).
- * Retorna null se ausente/inválido/multipart (caller serve 200 completo).
- * Retorna { unsatisfiable: true } se o intervalo está fora do tamanho.
- * Retorna { start, end } inclusivos se ok.
- */
-function parseBytesRangeHeader(rangeHeader, size) {
-  if (!rangeHeader || !Number.isFinite(size) || size <= 0) return null
-  const raw = String(rangeHeader).trim()
-  // Multipart (bytes=0-1,2-3) — não suportamos; deixa o caller responder 200.
-  if (raw.includes(',')) return null
-  const m = /^bytes=(\d*)-(\d*)$/i.exec(raw)
-  if (!m) return null
-
-  const hasStart = m[1] !== ''
-  const hasEnd = m[2] !== ''
-  let start
-  let end
-
-  if (!hasStart && hasEnd) {
-    // Sufixo: bytes=-N → últimos N bytes
-    const suffix = Number(m[2])
-    if (!Number.isFinite(suffix) || suffix <= 0) return null
-    start = Math.max(0, size - suffix)
-    end = size - 1
-  } else if (hasStart) {
-    start = Number(m[1])
-    if (!Number.isFinite(start) || start < 0) return null
-    // Antes de validar end: start além do arquivo é 416, não "range inválido".
-    if (start >= size) return { unsatisfiable: true }
-    end = hasEnd ? Number(m[2]) : size - 1
-    if (!Number.isFinite(end) || end < start) return null
-    end = Math.min(end, size - 1)
-  } else {
-    return null
-  }
-
-  return { start, end }
-}
-
-/**
  * GET /media/proxy?url=<https...>[&filename=<nome>[&disposition=attachment|inline]]
  * Requer JWT (middleware auth na rota).
  *
  * - filename : nome a usar no Content-Disposition (ex.: contrato.pdf)
  * - disposition: forçar "attachment" (download) ou "inline" (exibir no browser).
  *               Se omitido, usa "inline" para imagens/vídeos/áudio/PDF, "attachment" para o resto.
- * - Range: responde 206 Partial Content quando o cliente pede bytes=... (áudio/vídeo seek/resume).
  */
-exports.parseBytesRangeHeader = parseBytesRangeHeader
-
 exports.proxyMedia = async (req, res) => {
   const raw = req.query.url
   if (!raw || typeof raw !== 'string') {
@@ -253,9 +210,6 @@ exports.proxyMedia = async (req, res) => {
       dispositionType = isInline ? 'inline' : 'attachment'
     }
 
-    const body = Buffer.from(arrayBuffer)
-    const total = body.byteLength
-
     res.setHeader('Content-Type', ct)
     res.setHeader('Cache-Control', 'private, max-age=120')
     res.setHeader('Accept-Ranges', 'bytes')
@@ -269,22 +223,9 @@ exports.proxyMedia = async (req, res) => {
       )
     }
 
-    // Seek/resume de <audio>/<video>: o browser manda Range. Antes anunciávamos
-    // Accept-Ranges sem cumprir — Chrome mobile travava no resume no meio da faixa.
-    const range = parseBytesRangeHeader(req.headers.range, total)
-    if (range?.unsatisfiable) {
-      res.setHeader('Content-Range', `bytes */${total}`)
-      return res.status(416).end()
-    }
-    if (range) {
-      const chunk = body.subarray(range.start, range.end + 1)
-      res.setHeader('Content-Range', `bytes ${range.start}-${range.end}/${total}`)
-      res.setHeader('Content-Length', String(chunk.byteLength))
-      return res.status(206).send(chunk)
-    }
-
-    res.setHeader('Content-Length', String(total))
-    return res.status(200).send(body)
+    // Sempre arquivo completo (200). Honrar Range com 206 quebrou OGG/Opus no Chrome
+    // (seek/resume com pedaço). Mantém Accept-Ranges como antes deste experimento.
+    return res.status(200).send(Buffer.from(arrayBuffer))
   } catch (e) {
     const timedOut = e?.name === 'AbortError'
     console.error('[mediaProxy] fetch:', timedOut ? 'timeout' : (e?.message || e))
