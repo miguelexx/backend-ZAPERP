@@ -53,4 +53,70 @@ describe('fetchWithRetry', () => {
     expect(res.status).toBe(200)
     expect(global.fetch).toHaveBeenCalledTimes(2)
   })
+
+  describe('retryConnectionErrors em POST de envio', () => {
+    function erroDeConexao(code) {
+      const err = new TypeError('fetch failed')
+      err.cause = Object.assign(new Error(code), { code })
+      return err
+    }
+
+    test('retenta quando a conexao nunca foi estabelecida', async () => {
+      global.fetch = jest.fn()
+        .mockRejectedValueOnce(erroDeConexao('ECONNREFUSED'))
+        .mockRejectedValueOnce(erroDeConexao('EAI_AGAIN'))
+        .mockResolvedValueOnce({ status: 200 })
+
+      const res = await fetchWithRetry(
+        'https://api.ultramsg.test/messages/chat',
+        { method: 'POST' },
+        { baseDelayMs: 0, maxAttempts: 3, retryConnectionErrors: true }
+      )
+
+      expect(res.status).toBe(200)
+      expect(global.fetch).toHaveBeenCalledTimes(3)
+    })
+
+    test('nao retenta timeout: mensagem pode ter sido aceita e duplicaria no cliente', async () => {
+      const timeout = Object.assign(new Error('The operation was aborted'), { name: 'TimeoutError' })
+      global.fetch = jest.fn().mockRejectedValue(timeout)
+
+      await expect(
+        fetchWithRetry(
+          'https://api.ultramsg.test/messages/chat',
+          { method: 'POST' },
+          { baseDelayMs: 0, maxAttempts: 3, retryConnectionErrors: true }
+        )
+      ).rejects.toThrow('The operation was aborted')
+
+      expect(global.fetch).toHaveBeenCalledTimes(1)
+    })
+
+    test('nao retenta ECONNRESET: requisicao pode ter sido processada', async () => {
+      global.fetch = jest.fn().mockRejectedValue(erroDeConexao('ECONNRESET'))
+
+      await expect(
+        fetchWithRetry(
+          'https://api.ultramsg.test/messages/chat',
+          { method: 'POST' },
+          { baseDelayMs: 0, maxAttempts: 3, retryConnectionErrors: true }
+        )
+      ).rejects.toThrow()
+
+      expect(global.fetch).toHaveBeenCalledTimes(1)
+    })
+
+    test('nao retenta por status HTTP: resposta recebida significa envio processado', async () => {
+      global.fetch = jest.fn().mockResolvedValue({ status: 502 })
+
+      const res = await fetchWithRetry(
+        'https://api.ultramsg.test/messages/chat',
+        { method: 'POST' },
+        { baseDelayMs: 0, maxAttempts: 3, retryConnectionErrors: true }
+      )
+
+      expect(res.status).toBe(502)
+      expect(global.fetch).toHaveBeenCalledTimes(1)
+    })
+  })
 })
