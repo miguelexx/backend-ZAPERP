@@ -37,7 +37,6 @@ const DEFAULT_CONFIG = {
     finalizar_por_ausencia_ativo: false,
     finalizar_por_ausencia_prazo: 24,
     finalizar_por_ausencia_unidade: 'horas_corridas',
-    finalizar_por_ausencia_enviar_mensagem: null,
     finalizar_por_ausencia_mensagem: '',
     finalizar_por_ausencia_reabrir_automaticamente: true,
     finalizar_por_ausencia_reabrir_sem_chatbot: true,
@@ -77,19 +76,6 @@ const DEFAULT_CONFIG = {
   admin_atendimento_alerta: { ...DEFAULT_ADMIN_ATENDIMENTO_ALERTA },
 }
 
-function chatbotConfigForApi(config) {
-  const valid = validateChatbotConfig(config)
-  if (valid) return valid
-  return {
-    ...normalizeChatbotTriageStrings(config),
-    enabled: false,
-    config_invalid: true,
-    config_validation_error: 'Chatbot ativo exige ao menos uma opção ativa vinculada a um departamento.',
-  }
-}
-
-exports._test = { chatbotConfigForApi }
-
 // GET /ia/config — retorna config mesclada; se tabela não existir, retorna defaults
 exports.getConfig = async (req, res) => {
   try {
@@ -121,7 +107,7 @@ exports.getConfig = async (req, res) => {
     const config = data?.config ?? {}
     const ctRaw = config.chatbot_triage || {}
     const ctMerged = { ...DEFAULT_CONFIG.chatbot_triage, ...ctRaw }
-    const ctValid = chatbotConfigForApi(ctMerged)
+    const ctValid = validateChatbotConfig(ctMerged) || normalizeChatbotTriageStrings(ctMerged)
     const merged = {
       chatbot_triage: ctValid,
       bot_global: { ...DEFAULT_CONFIG.bot_global, ...(config.bot_global || {}) },
@@ -166,13 +152,7 @@ exports.putConfig = async (req, res) => {
 
     const current = existing?.config ?? {}
     const ctMerged = { ...DEFAULT_CONFIG.chatbot_triage, ...(current.chatbot_triage || {}), ...(ctBody || {}) }
-    const ctValid = validateChatbotConfig(ctMerged)
-    if (!ctValid) {
-      return res.status(400).json({
-        error: 'Configuração do chatbot inválida',
-        details: 'Para ativar o chatbot, configure ao menos uma opção ativa vinculada a um departamento.',
-      })
-    }
+    const ctValid = validateChatbotConfig(ctMerged) || normalizeChatbotTriageStrings(ctMerged)
     const merged = {
       ...current,
       chatbot_triage: ctValid,

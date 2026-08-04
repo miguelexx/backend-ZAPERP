@@ -4,7 +4,6 @@
  */
 
 const { normalizarTimestampSemFusoAmbiguoParaApi } = require('./timestampApiCompat')
-const { empresaRoom, conversaRoom, departamentoRoom } = require('./socketRooms')
 
 function canonicalMsgStatus(row) {
   const raw = (row?.status_mensagem ?? row?.status ?? '').toString().toLowerCase()
@@ -52,31 +51,11 @@ async function emitBotMensagemRealtime({ io, supabase, company_id, conversa_id, 
   }
 
   const depId = convRow?.departamento_id != null ? Number(convRow.departamento_id) : null
-  const depRoom = departamentoRoom(company_id, depId)
-  const emitScoped = async (eventName, payload) => {
-    try {
-      // Lazy require evita ciclo de inicialização: webhook -> este helper -> chatController.
-      const { emitirParaUsuariosQuePodemVerConversa } = require('../controllers/chatController')
-      const emitted = await emitirParaUsuariosQuePodemVerConversa(
-        io,
-        company_id,
-        cid,
-        eventName,
-        payload
-      )
-      if (emitted) return true
-    } catch (e) {
-      console.warn('[chatbotRealtimeEmitter] emissão escopada:', e?.message || e)
-    }
-    // A room da conversa só admite sockets que passaram pela autorização de join.
-    const convRoom = conversaRoom(cid)
-    if (convRoom) io.to(convRoom).emit(eventName, payload)
-    return false
-  }
+  const rooms = [`conversa_${cid}`, `empresa_${company_id}`]
+  if (depId != null) rooms.push(`departamento_${depId}`)
 
-  await emitScoped('nova_mensagem', emitPayload)
-  const empRoom = empresaRoom(company_id)
-  if (empRoom) io.to(empRoom).emit('atualizar_conversa', { id: cid })
+  io.to(rooms).emit('nova_mensagem', emitPayload)
+  io.to(`empresa_${company_id}`).emit('atualizar_conversa', { id: cid })
 
   const isGroup = String(convRow?.tipo || '').toLowerCase() === 'grupo' || String(convRow?.telefone || '').includes('@g.us')
   const contatoNome = convRow?.nome_contato_cache ? String(convRow.nome_contato_cache).trim() : null
@@ -101,9 +80,11 @@ async function emitBotMensagemRealtime({ io, supabase, company_id, conversa_id, 
     reordenar_suave: true,
   }
 
-  await emitScoped('conversa_atualizada', convPayload)
-  if (depRoom) {
-    io.to(depRoom).emit('atualizar_conversa', { id: cid })
+  io.to(`empresa_${company_id}`).emit('conversa_atualizada', convPayload)
+  io.to(`conversa_${cid}`).emit('conversa_atualizada', convPayload)
+  if (depId != null) {
+    io.to(`departamento_${depId}`).emit('atualizar_conversa', { id: cid })
+    io.to(`departamento_${depId}`).emit('conversa_atualizada', convPayload)
   }
 }
 
@@ -134,28 +115,20 @@ function emitReaberturaSemSetorRealtime({ io, company_id, conversa_id, reabertaR
     reaberta_falta_interacao_em: reabertaRow?.reaberta_falta_interacao_em ?? null,
     reordenar_suave: true,
   }
-  const empRoom = empresaRoom(company_id)
-  const convRoom = conversaRoom(cid)
-  if (empRoom) io.to(empRoom).emit('atualizar_conversa', { id: cid })
-  if (empRoom) io.to(empRoom).emit('conversa_atualizada', convPayload)
-  if (convRoom) io.to(convRoom).emit('conversa_atualizada', convPayload)
+  io.to(`empresa_${company_id}`).emit('atualizar_conversa', { id: cid })
+  io.to(`empresa_${company_id}`).emit('conversa_atualizada', convPayload)
+  io.to(`conversa_${cid}`).emit('conversa_atualizada', convPayload)
   const antigo =
     departamentoIdAntigo != null && Number.isFinite(Number(departamentoIdAntigo))
       ? Number(departamentoIdAntigo)
       : null
   if (antigo != null && antigo !== depNovo) {
-    const oldRoom = departamentoRoom(company_id, antigo)
-    if (oldRoom) {
-      io.to(oldRoom).emit('atualizar_conversa', { id: cid })
-      io.to(oldRoom).emit('conversa_atualizada', convPayload)
-    }
+    io.to(`departamento_${antigo}`).emit('atualizar_conversa', { id: cid })
+    io.to(`departamento_${antigo}`).emit('conversa_atualizada', convPayload)
   }
   if (depNovo != null) {
-    const newRoom = departamentoRoom(company_id, depNovo)
-    if (newRoom) {
-      io.to(newRoom).emit('atualizar_conversa', { id: cid })
-      io.to(newRoom).emit('conversa_atualizada', convPayload)
-    }
+    io.to(`departamento_${depNovo}`).emit('atualizar_conversa', { id: cid })
+    io.to(`departamento_${depNovo}`).emit('conversa_atualizada', convPayload)
   }
 }
 

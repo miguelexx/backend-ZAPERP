@@ -7,7 +7,6 @@ const {
   schedulePersistInboundMediaIfNeeded,
   tipoQualificaPersistencia,
 } = require('./inboundMediaPersistenceService')
-const { normalizarTimestampSemFusoAmbiguoParaApi } = require('../helpers/timestampApiCompat')
 
 const MSG_SELECT =
   'id, conversa_id, company_id, whatsapp_instance_id, whatsapp_id, texto, url, tipo, direcao, criado_em, status, autor_usuario_id, reply_meta, nome_arquivo, contact_meta, location_meta, remetente_nome, remetente_telefone'
@@ -175,20 +174,6 @@ function normalizeType(message) {
   let type = String(message?.type || message?.msgType || message?.messageType || 'text').toLowerCase()
   if (type === 'chat' || type === 'receivedcallback' || type === 'receivedcall') type = 'text'
   if (type === 'ptt') type = 'voice'
-  // Aliases por aparelho/versão de WhatsApp (mesma tolerância do webhook ao vivo)
-  if (['voicemessage', 'audiomessage', 'pttmessage'].includes(type)) type = 'voice'
-  else if (['imagemessage', 'photo', 'picture'].includes(type)) type = 'image'
-  else if (['videomessage', 'gif'].includes(type)) type = 'video'
-  else if (type === 'stickermessage') type = 'sticker'
-  else if (type === 'documentmessage') type = 'document'
-  // type como MIME cru ('audio/ogg; codecs=opus')
-  if (type.includes('/')) {
-    if (type.startsWith('audio/')) type = 'voice'
-    else if (type.startsWith('image/webp')) type = 'sticker'
-    else if (type.startsWith('image/')) type = 'image'
-    else if (type.startsWith('video/')) type = 'video'
-    else if (type.startsWith('application/')) type = 'document'
-  }
   if (message?.reaction && typeof message.reaction === 'object') type = 'reaction'
   if (message?.location && typeof message.location === 'object') type = 'location'
   if (message?.contact && typeof message.contact === 'object') type = 'contact'
@@ -222,41 +207,17 @@ function normalizeOldMessage(raw, { isGroup }) {
   if (!whatsappId) return null
 
   const fromMe = Boolean(raw.fromMe ?? raw.key?.fromMe ?? raw.from_me)
-  let type = normalizeType(raw)
+  const type = normalizeType(raw)
   const nestedMessage = raw.message && typeof raw.message === 'object' ? raw.message : null
   const rawMessage = messagePayloadFrom(raw)
 
   let texto = typeof rawMessage === 'object' ? '' : String(rawMessage || '').trim()
-  let imageUrl = urlFrom(raw.image?.imageUrl, raw.image?.url, raw.imageUrl, nestedMessage?.imageUrl, nestedMessage?.imageMessage?.url, raw.image)
-  let documentUrl = urlFrom(raw.document?.documentUrl, raw.document?.url, raw.documentUrl, raw.file?.url, raw.fileUrl, nestedMessage?.documentMessage?.url)
-  let audioUrl = urlFrom(raw.audio?.audioUrl, raw.audio?.url, raw.audioUrl, nestedMessage?.audioUrl, nestedMessage?.audioMessage?.url)
-  let videoUrl = urlFrom(raw.video?.videoUrl, raw.video?.url, raw.videoUrl, raw.ptv?.url, nestedMessage?.videoMessage?.url)
-  let stickerUrl = urlFrom(raw.sticker?.stickerUrl, raw.sticker?.url, raw.stickerUrl, nestedMessage?.stickerMessage?.url)
+  const imageUrl = urlFrom(raw.image?.imageUrl, raw.image?.url, raw.imageUrl, nestedMessage?.imageUrl, nestedMessage?.imageMessage?.url, raw.image)
+  const documentUrl = urlFrom(raw.document?.documentUrl, raw.document?.url, raw.documentUrl, raw.file?.url, raw.fileUrl, nestedMessage?.documentMessage?.url)
+  const audioUrl = urlFrom(raw.audio?.audioUrl, raw.audio?.url, raw.audioUrl, nestedMessage?.audioUrl, nestedMessage?.audioMessage?.url)
+  const videoUrl = urlFrom(raw.video?.videoUrl, raw.video?.url, raw.videoUrl, raw.ptv?.url, nestedMessage?.videoMessage?.url)
+  const stickerUrl = urlFrom(raw.sticker?.stickerUrl, raw.sticker?.url, raw.stickerUrl, nestedMessage?.stickerMessage?.url)
   let locationUrl = urlFrom(raw.location?.url, raw.location?.thumbnailUrl, nestedMessage?.locationMessage?.url)
-
-  // UltraMsg GET /messages entrega a URL da mídia em `media` (string ou objeto) — NÃO nos campos
-  // estilo Z-API acima. Sem esta leitura, toda mídia do sync caía em "(mensagem)"/era pulada,
-  // perdendo áudios/fotos/vídeos/documentos do histórico.
-  const genericMediaUrl = urlFrom(
-    typeof raw.media === 'string' ? raw.media : (raw.media?.url ?? raw.media?.link ?? raw.media?.file),
-    typeof raw.mediaUrl === 'string' ? raw.mediaUrl : raw.mediaUrl?.url
-  )
-  if (genericMediaUrl) {
-    if ((type === 'audio' || type === 'voice') && !audioUrl) audioUrl = genericMediaUrl
-    else if (type === 'image' && !imageUrl) imageUrl = genericMediaUrl
-    else if (type === 'video' && !videoUrl) videoUrl = genericMediaUrl
-    else if (type === 'sticker' && !stickerUrl) stickerUrl = genericMediaUrl
-    else if ((type === 'document' || type === 'file') && !documentUrl) documentUrl = genericMediaUrl
-    else if (type === 'text' && !texto) {
-      // type genérico com mídia e sem texto: infere pela extensão da URL (paridade com o webhook)
-      const urlPath = genericMediaUrl.split(/[?#]/)[0].toLowerCase()
-      if (/\.(ogg|oga|opus|mp3|m4a|aac|amr|wav)$/.test(urlPath)) { type = 'voice'; audioUrl = genericMediaUrl }
-      else if (/\.webp$/.test(urlPath)) { type = 'sticker'; stickerUrl = genericMediaUrl }
-      else if (/\.(jpe?g|png|gif|bmp|heic)$/.test(urlPath)) { type = 'image'; imageUrl = genericMediaUrl }
-      else if (/\.(mp4|mov|3gp|webm|mkv)$/.test(urlPath)) { type = 'video'; videoUrl = genericMediaUrl }
-      else { type = 'document'; documentUrl = genericMediaUrl }
-    }
-  }
 
   if (type === 'reaction') {
     const val = raw.reaction?.value ?? raw.reaction?.emoji ?? nestedMessage?.reactionMessage?.text ?? ''
@@ -389,102 +350,24 @@ function isPlaceholderMessageText(value) {
   return String(value || '').trim() === '(mensagem)'
 }
 
-// Placeholders reparáveis: genérico ('(mensagem)'/'(mídia)') E tipados ('(áudio)', '(imagem)'…).
-// Antes só '(mensagem)' era reparado — linhas tipadas sem URL (áudio/foto de instância com
-// download_media desligado) ficavam quebradas para sempre mesmo re-rodando o sync.
-const REPAIRABLE_PLACEHOLDER_TEXTS = new Set([
-  '(mensagem)', '(mídia)', '(midia)', '(imagem)', '(áudio)', '(audio)', '(áudio de voz)',
-  '(vídeo)', '(video)', '(vídeo visualização única)', '(figurinha)', '(sticker)',
-  '(arquivo)', '(documento)', '(localizacao)', '(localização)', '(contato)',
-])
-function isRepairablePlaceholderText(value) {
-  return REPAIRABLE_PLACEHOLDER_TEXTS.has(String(value || '').trim().toLowerCase())
-}
+async function updateExistingPlaceholderMessage(company_id, existing, nextInsert) {
+  if (!existing?.id || !isPlaceholderMessageText(existing.texto)) return false
+  if (!nextInsert || isPlaceholderMessageText(nextInsert.texto)) return false
 
-/**
- * Decide o patch de reparo de uma mensagem existente a partir de uma versão mais rica do
- * provider. Regras: nunca sobrescreve texto real; nunca troca tipo de mídia já definido;
- * placeholder tipado ganha URL/tipo mantendo o rótulo; '(mensagem)' pode subir para tipado.
- * @returns {object|null} campos a atualizar, ou null se não há reparo
- */
-function buildPlaceholderRepairPatch(existing, nextInsert) {
-  if (!existing || !nextInsert) return null
-  const exTexto = String(existing.texto || '').trim()
-  const exIsPlaceholder = isRepairablePlaceholderText(exTexto)
-  const exSemUrl = !String(existing.url || '').trim()
-  const nextTexto = String(nextInsert.texto || '').trim()
-  const nextIsPlaceholder = isRepairablePlaceholderText(nextTexto)
-
-  const patch = {}
-  if (exIsPlaceholder && nextTexto && !nextIsPlaceholder) {
-    patch.texto = nextTexto
-  } else if (
-    exTexto.toLowerCase() === '(mensagem)' &&
-    nextTexto && nextIsPlaceholder && nextTexto.toLowerCase() !== '(mensagem)'
-  ) {
-    patch.texto = nextTexto
+  const patch = {
+    texto: String(nextInsert.texto || '').trim(),
   }
   for (const field of ['tipo', 'url', 'nome_arquivo', 'contact_meta', 'location_meta']) {
-    const val = nextInsert[field]
-    if (val == null || val === '') continue
-    const cur = existing[field]
-    const curEmpty = cur == null || cur === '' || (field === 'tipo' && String(cur).toLowerCase() === 'texto')
-    if (curEmpty) patch[field] = val
+    if (nextInsert[field] != null && nextInsert[field] !== '') patch[field] = nextInsert[field]
   }
-  if (!exIsPlaceholder) {
-    // Mensagem com texto real: só completar URL de mídia perdida — nunca tocar no texto.
-    delete patch.texto
-    if (!exSemUrl || !patch.url) return null
-  }
-  return Object.keys(patch).length > 0 ? patch : null
-}
 
-async function updateExistingPlaceholderMessage(company_id, existing, nextInsert) {
-  if (!existing?.id) return null
-  const patch = buildPlaceholderRepairPatch(existing, nextInsert)
-  if (!patch) return null
-
-  const { data: patched, error } = await supabase
+  const { error } = await supabase
     .from('mensagens')
     .update(patch)
     .eq('company_id', company_id)
     .eq('id', existing.id)
-    .select(MSG_SELECT)
-    .maybeSingle()
 
-  if (error) return null
-  return patched || null
-}
-
-/**
- * Emite nova_mensagem com a linha reparada — sem isto o reparo era silencioso: o banco ficava
- * certo mas a conversa ABERTA continuava mostrando "Áudio" sem player até recarregar
- * (o frontend faz upsert por id/whatsapp_id, então o emit atualiza a bolha ao vivo).
- */
-function emitRepairedMessage(io, company_id, patched) {
-  if (!io || !patched?.id || patched.conversa_id == null) return
-  const fromMeReal = String(patched.direcao || '').toLowerCase() === 'out'
-  const emitPayload = {
-    ...patched,
-    criado_em: normalizarTimestampSemFusoAmbiguoParaApi(patched.criado_em),
-    conversa_id: patched.conversa_id,
-    status: patched.status || (fromMeReal ? 'sent' : 'delivered'),
-    status_mensagem: patched.status || (fromMeReal ? 'sent' : 'delivered'),
-    fromMe: fromMeReal,
-    direcao: patched.direcao || (fromMeReal ? 'out' : 'in'),
-  }
-  try {
-    const { emitirParaUsuariosQuePodemVerConversa } = require('../controllers/chatController')
-    emitirParaUsuariosQuePodemVerConversa(io, company_id, patched.conversa_id, 'nova_mensagem', emitPayload)
-      .then((emitted) => {
-        if (!emitted) io.to(`conversa_${patched.conversa_id}`).emit('nova_mensagem', emitPayload)
-      })
-      .catch(() => {
-        io.to(`conversa_${patched.conversa_id}`).emit('nova_mensagem', emitPayload)
-      })
-  } catch (_) {
-    io.to(`conversa_${patched.conversa_id}`).emit('nova_mensagem', emitPayload)
-  }
+  return !error
 }
 
 async function createConversationForChat({ company_id, whatsapp_instance_id, whatsapp_instance_is_default, chat, chatId, isGroup }) {
@@ -584,10 +467,6 @@ async function hasAnyNewMessage(company_id, whatsapp_instance_id, prepared, allo
       allowLegacyNull === true
     )
     if (!exists?.id) return true
-    // Placeholder reparável ("(mensagem)"/"(áudio)" sem URL...) também é ação pendente:
-    // sem isto, o chat era pulado inteiro quando todas as mensagens já existiam no banco,
-    // e as linhas quebradas nunca eram consertadas pelo sync.
-    if (buildPlaceholderRepairPatch(exists, normalized.insert)) return true
   }
   return false
 }
@@ -630,25 +509,9 @@ async function insertPreparedMessagesForConversation(ctx) {
       whatsapp_instance_is_default === true
     )
     if (exists?.id) {
-      const patched = await updateExistingPlaceholderMessage(company_id, exists, normalized.insert)
-      if (patched) {
-        messagesUpdated += 1
-        // Tela aberta atualiza ao vivo (bolha "Áudio" vira player sem F5)
-        emitRepairedMessage(io, company_id, patched)
-        // URL remota recuperada: copiar para /uploads antes do link S3 expirar
-        if (patched.url && String(patched.url).startsWith('https://') && tipoQualificaPersistencia(patched.tipo)) {
-          schedulePersistInboundMediaIfNeeded({
-            supabase,
-            io,
-            company_id,
-            mensagem_id: patched.id,
-            fromMe: String(patched.direcao || '').toLowerCase() === 'out',
-            departamento_id: null,
-          })
-        }
-      } else {
-        messagesSkipped += 1
-      }
+      const updated = await updateExistingPlaceholderMessage(company_id, exists, normalized.insert)
+      if (updated) messagesUpdated += 1
+      else messagesSkipped += 1
       continue
     }
 
@@ -1038,5 +901,4 @@ module.exports = {
   syncOldMessagesForCompany,
   syncOldMessagesForConversation,
   normalizeOldMessage,
-  buildPlaceholderRepairPatch,
 }

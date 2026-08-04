@@ -64,32 +64,8 @@ const {
   getEndOfTodayIso,
 } = require('../services/chatListCountsService')
 const { normalizarTimestampSemFusoAmbiguoParaApi } = require('../helpers/timestampApiCompat')
-const { isRealWhatsAppId, isUltramsgNumericQueueId, buildCrmReferenceId } = require('../helpers/whatsappMessageIdHelper')
+const { isRealWhatsAppId, isUltramsgNumericQueueId } = require('../helpers/whatsappMessageIdHelper')
 const { schedulePendingOutboundReconciliation } = require('../services/pendingOutboundReconciliationService')
-const {
-  scheduleOutboundMediaResend,
-  retryOutboundMediaByMessageId,
-} = require('../services/outboundMediaResendService')
-const { departamentoRoom } = require('../helpers/socketRooms')
-const {
-  validateAndConsumeForMessage,
-  limitErrorResponse,
-} = require('../services/atendimentoLimitsService')
-const {
-  classifyManualTextProviderResult,
-  executeManualTextProviderAttempt,
-  manualTextHasProviderAcceptance,
-  lookupManualTextAtProvider,
-  decideManualTextRetry,
-  buildManualTextProviderAuditPatch,
-  buildManualTextProviderConfirmationPatch,
-  manualTextResponseFromClassification,
-  sanitizeAuditJson,
-} = require('../services/manualTextOutboundService')
-const {
-  buildSpecialtyOutboundHttpResult,
-  resolveSpecialtyClientTempDedup,
-} = require('../helpers/specialtyOutboundResponse')
 
 /**
  * Deduplicação in-memory para double-send de texto.
@@ -161,30 +137,6 @@ function buildClientTempIdDedupResponse(row, conversa_id, clientTempId) {
   }
 }
 
-function buildMediaClientTempIdDedupResult(row) {
-  if (!row?.id) return null
-  const status = String(row.status_mensagem || row.status || '').trim().toLowerCase()
-  const providerAccepted =
-    isRealWhatsAppId(row.whatsapp_id) ||
-    (row.provider_queue_id != null && String(row.provider_queue_id).trim() !== '') ||
-    ['sent', 'delivered', 'read', 'played'].includes(status)
-
-  if (providerAccepted) {
-    return { ok: true, msg: row, deduplicated: true }
-  }
-
-  const failed = ['erro', 'error', 'failed', 'invalid', 'unsent', 'expired'].includes(status)
-  return {
-    ok: false,
-    status: failed ? 502 : 409,
-    error: failed
-      ? 'O envio anterior da mídia falhou e ainda não foi confirmado pelo WhatsApp.'
-      : 'O envio anterior da mídia ainda não foi confirmado pelo WhatsApp.',
-    msg: row,
-    deduplicated: true,
-  }
-}
-
 async function findMensagemByClientTempId(company_id, conversa_id, clientTempId, select = 'id, conversa_id, status, status_mensagem, whatsapp_id, client_temp_id') {
   if (!clientTempId || _clientTempIdDbDedupeUnavailable) return null
   try {
@@ -213,587 +165,6 @@ async function findMensagemByClientTempId(company_id, conversa_id, clientTempId,
     }
     console.warn('[client_temp_id] excecao ao consultar dedupe persistente:', error?.message || error)
     return null
-  }
-}
-
-const MANUAL_TEXT_AUDIT_COLUMNS = [
-  'provider_reference_id',
-  'provider_request',
-  'provider_delivery_state',
-  'provider_http_status',
-  'provider_response',
-  'provider_error',
-  'provider_retryable',
-  'provider_attempts',
-  'provider_last_attempt_at',
-]
-
-const MANUAL_TEXT_BASE_SELECT = [
-  'id',
-  'company_id',
-  'conversa_id',
-  'texto',
-  'tipo',
-  'direcao',
-  'autor_usuario_id',
-  'status',
-  'status_mensagem',
-  'whatsapp_id',
-  'whatsapp_instance_id',
-  'provider_queue_id',
-  'client_temp_id',
-  'reply_meta',
-  'criado_em',
-].join(', ')
-
-function isMissingManualTextAuditColumn(error) {
-  return MANUAL_TEXT_AUDIT_COLUMNS.some((column) => isMissingMensagemColumnError(error, column)) ||
-    isGenericMissingColumnError(error)
-}
-
-function withoutManualTextAuditColumns(payload) {
-  const clean = { ...(payload || {}) }
-  for (const column of MANUAL_TEXT_AUDIT_COLUMNS) delete clean[column]
-  return clean
-}
-
-async function loadManualTextAuditRow(row) {
-  if (!row?.id) return row || null
-  const select = `${MANUAL_TEXT_BASE_SELECT}, ${MANUAL_TEXT_AUDIT_COLUMNS.join(', ')}`
-  const { data, error } = await supabase
-    .from('mensagens')
-    .select(select)
-    .eq('company_id', Number(row.company_id))
-    .eq('id', Number(row.id))
-    .maybeSingle()
-  if (!error) return data || row
-  if (isMissingManualTextAuditColumn(error)) return { ...row, _manual_text_audit_unavailable: true }
-  console.warn('[ENVIO_MANUAL] Falha ao carregar auditoria persistida:', error?.message || error)
-  return { ...row, _manual_text_audit_load_error: true }
-}
-
-async function fetchManualTextRow(company_id, mensagem_id) {
-  const { data, error } = await supabase
-    .from('mensagens')
-    .select(MANUAL_TEXT_BASE_SELECT)
-    .eq('company_id', Number(company_id))
-    .eq('id', Number(mensagem_id))
-    .maybeSingle()
-  if (error) return null
-  return loadManualTextAuditRow(data)
-}
-
-/**
- * Atualização monotônica: um ACK concorrente pode promover a mensagem para sent/delivered/read
- * enquanto o POST ainda termina. Nesse caso o resultado tardio nunca pode rebaixá-la.
- */
-async function updateManualTextRowMonotonic(company_id, row, payload) {
-  if (!row?.id) return { row: null, error: new Error('Mensagem manual inválida') }
-  const allowedCurrentStatuses = ['pending', 'sending', 'erro', 'error', 'failed']
-  let updatePayload = { ...(payload || {}) }
-  let result = await supabase
-    .from('mensagens')
-    .update(updatePayload)
-    .eq('company_id', Number(company_id))
-    .eq('id', Number(row.id))
-    .in('status', allowedCurrentStatuses)
-    .or('status_mensagem.is.null,status_mensagem.in.(pending,sending,erro,error,failed)')
-    .select()
-    .maybeSingle()
-
-  if (result.error && isMissingManualTextAuditColumn(result.error)) {
-    updatePayload = withoutManualTextAuditColumns(updatePayload)
-    result = await supabase
-      .from('mensagens')
-      .update(updatePayload)
-      .eq('company_id', Number(company_id))
-      .eq('id', Number(row.id))
-      .in('status', allowedCurrentStatuses)
-      .or('status_mensagem.is.null,status_mensagem.in.(pending,sending,erro,error,failed)')
-      .select()
-      .maybeSingle()
-  }
-
-  if (result.error) return { row: await fetchManualTextRow(company_id, row.id), error: result.error }
-  if (result.data) return { row: { ...row, ...result.data }, error: null }
-  return { row: await fetchManualTextRow(company_id, row.id), error: null }
-}
-
-/**
- * Compare-and-set durável antes do POST. O contador impede dois workers/processos de
- * conquistarem simultaneamente a mesma tentativa de reenvio.
- */
-async function claimManualTextDispatch({
-  company_id,
-  row,
-  whatsappInstanceId,
-  referenceId,
-  providerRequest,
-  isRetry = false,
-}) {
-  if (!row?.id) return { claimed: false, row, reason: 'message_missing' }
-  if (manualTextHasProviderAcceptance(row)) {
-    return { claimed: false, row, reason: 'already_accepted' }
-  }
-
-  const expectedStatus = String(row.status || 'pending')
-  const expectedAttempts = Number(row.provider_attempts || 0)
-  const attemptedAt = new Date().toISOString()
-  const payload = {
-    status: 'sending',
-    status_mensagem: 'sending',
-    ...(Number.isFinite(Number(whatsappInstanceId)) && Number(whatsappInstanceId) > 0
-      ? { whatsapp_instance_id: Number(whatsappInstanceId) }
-      : {}),
-    provider_reference_id: referenceId,
-    provider_request: sanitizeAuditJson(providerRequest),
-    provider_delivery_state: 'dispatching',
-    provider_http_status: null,
-    provider_response: null,
-    provider_error: null,
-    provider_retryable: true,
-    provider_attempts: expectedAttempts + 1,
-    provider_last_attempt_at: attemptedAt,
-  }
-
-  let query = supabase
-    .from('mensagens')
-    .update(payload)
-    .eq('company_id', Number(company_id))
-    .eq('id', Number(row.id))
-    .eq('status', expectedStatus)
-    .or('status_mensagem.is.null,status_mensagem.in.(pending,sending,erro,error,failed)')
-    .eq('provider_attempts', expectedAttempts)
-    .select()
-    .maybeSingle()
-  let result = await query
-
-  if (result.error && isMissingManualTextAuditColumn(result.error)) {
-    // Reenvio seguro depende do contador durável. Sem a migration, falhar fechado evita duplicidade.
-    if (isRetry) {
-      return {
-        claimed: false,
-        row: { ...row, _manual_text_audit_unavailable: true },
-        reason: 'audit_schema_unavailable',
-        error: result.error,
-      }
-    }
-    result = await supabase
-      .from('mensagens')
-      .update(withoutManualTextAuditColumns(payload))
-      .eq('company_id', Number(company_id))
-      .eq('id', Number(row.id))
-      .eq('status', expectedStatus)
-      .or('status_mensagem.is.null,status_mensagem.in.(pending,sending,erro,error,failed)')
-      .select()
-      .maybeSingle()
-  }
-
-  if (result.error) return { claimed: false, row, reason: 'claim_error', error: result.error }
-  if (!result.data) {
-    return {
-      claimed: false,
-      row: await fetchManualTextRow(company_id, row.id),
-      reason: 'concurrent_attempt',
-    }
-  }
-  return {
-    claimed: true,
-    row: { ...row, ...result.data, provider_last_attempt_at: attemptedAt },
-    attemptedAt,
-  }
-}
-
-function manualTextProviderFailureHttpStatus(classification) {
-  if (classification?.timeout) return 504
-  if (classification?.network || classification?.retryable) return 503
-  return 502
-}
-
-function emitManualTextStatus(io, company_id, conversa_id, user_id, row, classification) {
-  if (!io || !row?.id) return
-  io.to(`empresa_${company_id}`).to(`conversa_${conversa_id}`).to(`usuario_${user_id}`)
-    .emit('status_mensagem', {
-      mensagem_id: row.id,
-      conversa_id: Number(conversa_id),
-      status: classification.status,
-      status_mensagem: classification.status_mensagem,
-      ...(classification.whatsapp_id ? { whatsapp_id: classification.whatsapp_id } : {}),
-    })
-}
-
-async function dispatchPersistedManualText({
-  company_id,
-  conversa_id,
-  user_id,
-  row,
-  phone,
-  text,
-  whatsappInstanceId,
-  phoneId,
-  replyMessageId,
-  io,
-  isRetry = false,
-}) {
-  const referenceId = buildCrmReferenceId(row?.id)
-  const providerRequest = {
-    text,
-    ...(replyMessageId ? { replyMessageId } : {}),
-  }
-  const claim = await claimManualTextDispatch({
-    company_id,
-    row,
-    whatsappInstanceId,
-    referenceId,
-    providerRequest,
-    isRetry,
-  })
-
-  if (!claim.claimed) {
-    const current = claim.row || await fetchManualTextRow(company_id, row?.id)
-    if (manualTextHasProviderAcceptance(current)) {
-      const accepted = {
-        ok: true,
-        accepted: true,
-        queued: isUltramsgNumericQueueId(current?.provider_queue_id),
-        traceable: isRealWhatsAppId(current?.whatsapp_id),
-        state: current?.provider_delivery_state || 'accepted',
-        status: current?.status || 'sent',
-        status_mensagem: current?.status_mensagem || current?.status || 'sent',
-        whatsapp_id: current?.whatsapp_id || null,
-        provider_queue_id: current?.provider_queue_id || null,
-        provider_error: null,
-        retryable: false,
-      }
-      return { classification: accepted, row: current, httpStatus: 200, deduplicated: true }
-    }
-    return {
-      classification: {
-        ok: false,
-        accepted: false,
-        queued: false,
-        state: 'uncertain',
-        status: current?.status || 'erro',
-        status_mensagem: current?.status_mensagem || 'failed',
-        provider_error: claim.reason === 'audit_schema_unavailable'
-          ? 'A migração de auditoria do envio manual ainda não foi aplicada; reenvio bloqueado para evitar duplicidade.'
-          : 'Outra tentativa desta mensagem está em andamento.',
-        retryable: true,
-      },
-      row: current || row,
-      httpStatus: claim.reason === 'audit_schema_unavailable' ? 503 : 409,
-      deduplicated: true,
-    }
-  }
-
-  const provider = getProvider()
-  const options = {
-    companyId: Number(company_id),
-    conversaId: Number(conversa_id),
-    ...(Number.isFinite(Number(whatsappInstanceId)) && Number(whatsappInstanceId) > 0
-      ? { whatsappInstanceId: Number(whatsappInstanceId) }
-      : {}),
-    ...(phoneId ? { phoneId } : {}),
-    ...(replyMessageId ? { replyMessageId } : {}),
-    referenceId,
-    sendOrigin: 'atendimento_humano',
-  }
-  const classification = await executeManualTextProviderAttempt(provider, phone, text, options)
-  const auditPatch = buildManualTextProviderAuditPatch({
-    row: claim.row,
-    classification,
-    referenceId,
-    request: providerRequest,
-    attemptedAt: claim.attemptedAt,
-  })
-  const updatePatch = {
-    status: classification.status,
-    status_mensagem: classification.status_mensagem,
-    ...(Number.isFinite(Number(whatsappInstanceId)) && Number(whatsappInstanceId) > 0
-      ? { whatsapp_instance_id: Number(whatsappInstanceId) }
-      : {}),
-    ...auditPatch,
-    ...(classification.whatsapp_id ? { whatsapp_id: classification.whatsapp_id } : {}),
-    ...(classification.provider_queue_id ? { provider_queue_id: classification.provider_queue_id } : {}),
-  }
-  const persisted = await updateManualTextRowMonotonic(company_id, claim.row, updatePatch)
-  const current = persisted.row || { ...claim.row, ...updatePatch }
-
-  // Um ACK pode ter chegado entre o POST e o UPDATE. A linha terminal prevalece
-  // sobre qualquer timeout/falha tardia desta chamada.
-  let effective = classification
-  if (manualTextHasProviderAcceptance(current) && !classification.ok) {
-    effective = {
-      ok: true,
-      accepted: true,
-      queued: isUltramsgNumericQueueId(current.provider_queue_id),
-      traceable: isRealWhatsAppId(current.whatsapp_id),
-      state: current.provider_delivery_state || 'accepted',
-      status: current.status || 'sent',
-      status_mensagem: current.status_mensagem || current.status || 'sent',
-      whatsapp_id: current.whatsapp_id || null,
-      provider_queue_id: current.provider_queue_id || null,
-      provider_error: null,
-      retryable: false,
-    }
-  }
-
-  emitManualTextStatus(io, company_id, conversa_id, user_id, current, effective)
-  if (effective.ok && !effective.traceable) {
-    schedulePendingOutboundReconciliation({
-      companyId: company_id,
-      mensagemId: row.id,
-      io,
-    })
-  }
-
-  return {
-    classification: effective,
-    row: current,
-    httpStatus: effective.ok ? 200 : manualTextProviderFailureHttpStatus(effective),
-  }
-}
-
-function manualTextClassificationFromRow(row) {
-  const status = String(row?.status || row?.status_mensagem || 'pending').toLowerCase()
-  const accepted = manualTextHasProviderAcceptance(row)
-  const providerState = String(row?.provider_delivery_state || '').toLowerCase()
-  const queued = providerState === 'queued' ||
-    (accepted && !providerState && isUltramsgNumericQueueId(row?.provider_queue_id))
-  return {
-    ok: accepted,
-    accepted,
-    queued,
-    traceable: isRealWhatsAppId(row?.whatsapp_id),
-    state: row?.provider_delivery_state || (accepted ? (queued ? 'queued' : 'accepted') : 'uncertain'),
-    status: row?.status || (accepted ? 'sent' : 'erro'),
-    status_mensagem: row?.status_mensagem || row?.status || (accepted ? 'sent' : 'failed'),
-    whatsapp_id: row?.whatsapp_id || null,
-    provider_queue_id: row?.provider_queue_id || null,
-    provider_error: accepted ? null : (row?.provider_error || 'O envio anterior não foi confirmado pela UltraMsg.'),
-    retryable: accepted ? false : row?.provider_retryable !== false,
-    timeout: !accepted && status === 'erro' && String(row?.provider_error || '').toLowerCase().includes('timeout'),
-    network: false,
-  }
-}
-
-async function handleExistingManualTextRequest({
-  company_id,
-  conversa_id,
-  user_id,
-  row,
-  requestedText,
-  retryRequested,
-  phone,
-  whatsappInstanceId,
-  io,
-}) {
-  const persisted = await loadManualTextAuditRow(row)
-  if (!persisted?.id) return { handled: false }
-
-  if (String(persisted.tipo || 'texto').toLowerCase() !== 'texto') {
-    return {
-      handled: true,
-      httpStatus: 409,
-      body: {
-        ok: false,
-        id: persisted.id,
-        conversa_id: Number(conversa_id),
-        client_temp_id: persisted.client_temp_id,
-        status: persisted.status || 'pending',
-        error: 'client_temp_id já pertence a outro tipo de mensagem.',
-      },
-    }
-  }
-  if (String(persisted.texto || '').trim() !== String(requestedText || '').trim()) {
-    return {
-      handled: true,
-      httpStatus: 409,
-      body: {
-        ok: false,
-        id: persisted.id,
-        conversa_id: Number(conversa_id),
-        client_temp_id: persisted.client_temp_id,
-        status: persisted.status || 'pending',
-        error: 'client_temp_id já pertence a outro texto; reenvio bloqueado para evitar duplicidade.',
-      },
-    }
-  }
-
-  const persistedInstanceId = Number(persisted.whatsapp_instance_id)
-  if (
-    Number.isFinite(persistedInstanceId) &&
-    persistedInstanceId > 0 &&
-    persistedInstanceId !== Number(whatsappInstanceId)
-  ) {
-    return {
-      handled: true,
-      httpStatus: 409,
-      body: {
-        ok: false,
-        id: persisted.id,
-        conversa_id: Number(conversa_id),
-        client_temp_id: persisted.client_temp_id,
-        status: persisted.status || 'erro',
-        error: 'A instância da conversa mudou; reenvio automático bloqueado por segurança.',
-        retryable: false,
-      },
-    }
-  }
-  if (!Number.isFinite(Number(whatsappInstanceId)) || Number(whatsappInstanceId) <= 0) {
-    return {
-      handled: true,
-      httpStatus: 503,
-      body: {
-        ok: false,
-        id: persisted.id,
-        conversa_id: Number(conversa_id),
-        client_temp_id: persisted.client_temp_id,
-        status: persisted.status || 'erro',
-        error: 'Nenhuma instância WhatsApp válida está configurada para esta conversa.',
-        retryable: true,
-      },
-    }
-  }
-
-  if (manualTextHasProviderAcceptance(persisted)) {
-    const classification = manualTextClassificationFromRow(persisted)
-    return {
-      handled: true,
-      httpStatus: 200,
-      body: manualTextResponseFromClassification(classification, persisted, { deduplicated: true }),
-    }
-  }
-
-  const provider = getProvider()
-  const providerLookup = await lookupManualTextAtProvider(provider, persisted, {
-    companyId: Number(company_id),
-    conversaId: Number(conversa_id),
-    whatsappInstanceId: Number(whatsappInstanceId),
-  })
-  const decision = decideManualTextRetry({
-    row: persisted,
-    retryRequested,
-    providerLookup,
-  })
-
-  if (decision.action === 'confirm_provider') {
-    const confirmationPatch = buildManualTextProviderConfirmationPatch(providerLookup)
-    const updated = await updateManualTextRowMonotonic(company_id, persisted, confirmationPatch)
-    const current = updated.row || { ...persisted, ...confirmationPatch }
-    const classification = manualTextClassificationFromRow(current)
-    emitManualTextStatus(io, company_id, conversa_id, user_id, current, classification)
-    if (classification.queued) {
-      schedulePendingOutboundReconciliation({
-        companyId: company_id,
-        mensagemId: current.id,
-        io,
-      })
-    }
-    return {
-      handled: true,
-      httpStatus: 200,
-      body: manualTextResponseFromClassification(classification, current, {
-        deduplicated: true,
-        provider_verified: true,
-      }),
-    }
-  }
-
-  if (decision.action !== 'send') {
-    const classification = manualTextClassificationFromRow(persisted)
-    const persistedStatus = String(persisted.status || persisted.status_mensagem || '').toLowerCase()
-    const isAttemptInProgress =
-      decision.reason === 'retry_not_requested' &&
-      ['pending', 'sending'].includes(persistedStatus)
-    if (isAttemptInProgress) {
-      return {
-        handled: true,
-        httpStatus: 202,
-        body: manualTextResponseFromClassification({
-          ...classification,
-          ok: false,
-          accepted: false,
-          provider_error: null,
-          retryable: true,
-        }, persisted, {
-          deduplicated: true,
-          in_progress: true,
-        }),
-      }
-    }
-    const error = decision.reason === 'provider_check_failed'
-      ? 'Não foi possível confirmar a tentativa anterior na UltraMsg; nada foi reenviado.'
-      : decision.reason === 'uncertain_attempt_in_grace_period'
-        ? 'A tentativa anterior ainda pode estar sendo processada; nada foi reenviado para evitar duplicidade.'
-        : classification.provider_error
-    return {
-      handled: true,
-      httpStatus: decision.httpStatus || 409,
-      body: {
-        ...manualTextResponseFromClassification({ ...classification, ok: false, accepted: false }, persisted, {
-          deduplicated: true,
-          retryable: decision.retryable === true,
-        }),
-        error,
-        motivo: error,
-        ...(decision.retryAfterMs ? { retry_after_ms: Math.ceil(decision.retryAfterMs) } : {}),
-      },
-    }
-  }
-
-  let phoneId = null
-  try {
-    const { data: ew } = await supabase
-      .from('empresas_whatsapp')
-      .select('phone_number_id')
-      .eq('company_id', company_id)
-      .maybeSingle()
-    if (ew?.phone_number_id) phoneId = String(ew.phone_number_id)
-  } catch (_) {}
-
-  const storedRequest = persisted.provider_request && typeof persisted.provider_request === 'object'
-    ? persisted.provider_request
-    : {}
-  let replyMessageId = storedRequest.replyMessageId || null
-  if (!replyMessageId && persisted.reply_meta?.replyToId != null) {
-    replyMessageId = await resolveUltraMsgReplyMessageId(
-      supabase,
-      company_id,
-      conversa_id,
-      persisted.reply_meta.replyToId
-    )
-  }
-  let textToProvider = storedRequest.text ? String(storedRequest.text) : null
-  if (!textToProvider) {
-    const { nome: usuarioNome } = await getUsuarioParaEnvioCliente(
-      supabase,
-      company_id,
-      persisted.autor_usuario_id || user_id
-    )
-    textToProvider = textoParaEnvioWhatsapp(String(persisted.texto).trim(), usuarioNome)
-  }
-
-  const attempt = await dispatchPersistedManualText({
-    company_id,
-    conversa_id,
-    user_id,
-    row: persisted,
-    phone,
-    text: textToProvider,
-    whatsappInstanceId,
-    phoneId,
-    replyMessageId,
-    io,
-    isRetry: true,
-  })
-  return {
-    handled: true,
-    httpStatus: attempt.httpStatus,
-    body: manualTextResponseFromClassification(attempt.classification, attempt.row, {
-      deduplicated: true,
-      retried: attempt.classification.ok === true,
-    }),
   }
 }
 
@@ -1352,10 +723,9 @@ async function emitirMovimentacaoInternaAtendimento(io, {
 exports.emitirMovimentacaoInternaAtendimento = emitirMovimentacaoInternaAtendimento
 
 /** Emite para a room do departamento (realtime por setor) */
-function emitirDepartamento(io, company_id, departamento_id, eventName, payload) {
-  if (!io || !company_id || !departamento_id) return
-  const room = departamentoRoom(company_id, departamento_id)
-  if (room) io.to(room).emit(eventName, payload)
+function emitirDepartamento(io, departamento_id, eventName, payload) {
+  if (!io || !departamento_id) return
+  io.to(`departamento_${departamento_id}`).emit(eventName, payload)
 }
 
 /** Enriquece mensagens com usuario_id, usuario_nome e enviado_por_usuario (apenas direcao out) */
@@ -1511,8 +881,7 @@ async function assertPermissaoConversa({ company_id, conversa_id, user_id, role,
     return { ok: true, conv }
   }
 
-  // Deny-by-default: perfis desconhecidos/legados não recebem acesso implícito.
-  return { ok: false, status: 403, error: 'Perfil sem permissão para esta conversa' }
+  return { ok: true, conv }
 }
 
 /**
@@ -1739,16 +1108,6 @@ async function buscarConversaIdsPorTextoMensagens({ company_id, term }) {
  */
 const conversaVisibilityCache = new Map()
 const CONVERSA_VISIBILITY_CACHE_TTL_MS = 15_000
-// Varredura periódica: entradas expiram logicamente (expiresAt) mas nunca eram removidas do Map
-// em conversas que deixam de receber mensagens — leak lento em processo de longa duração (PM2).
-// Mesmo padrão do _clientTempIdDeduplicationMap. Não remove entradas com promise em andamento.
-setInterval(() => {
-  const now = Date.now()
-  for (const [key, val] of conversaVisibilityCache.entries()) {
-    if (val?.promise && !val?.ids) continue
-    if (val?.expiresAt != null && val.expiresAt <= now) conversaVisibilityCache.delete(key)
-  }
-}, 5 * 60 * 1000).unref()
 
 function conversaVisibilityCacheKey(company_id, conversa_id) {
   return `${Number(company_id)}:${Number(conversa_id)}`
@@ -1863,53 +1222,41 @@ function deveIncluirGruposSemDepartamentoNoFiltroTodos({
 }
 
 async function carregarUsuarioIdsQuePodemVerConversaSemCache(company_id, conversa_id) {
-  const cid = Number(company_id)
-  const convId = Number(conversa_id)
-  // Queries independentes disparadas em paralelo — antes eram 5 round-trips sequenciais no hot path
-  // da emissão em tempo real. Semântica idêntica; só reduz a latência acumulada (cache 15s à frente).
-  const [convRes, transferiuRes, participanteIdsArr, usuariosRes, udRes] = await Promise.all([
-    supabase
-      .from('conversas')
-      .select('departamento_id, atendente_id, tipo, telefone')
-      .eq('company_id', cid)
-      .eq('id', convId)
-      .maybeSingle(),
-    supabase
-      .from('atendimentos')
-      .select('de_usuario_id')
-      .eq('company_id', cid)
-      .eq('conversa_id', convId)
-      .eq('acao', 'transferiu'),
-    getConversaParticipanteIdsAtivos(company_id, conversa_id),
-    supabase
-      .from('usuarios')
-      .select('id, perfil, departamento_id')
-      .eq('company_id', cid)
-      .eq('ativo', true),
-    supabase
-      .from('usuario_departamentos')
-      .select('usuario_id, departamento_id')
-      .eq('company_id', cid),
-  ])
-
-  const conv = convRes?.data
+  const { data: conv } = await supabase
+    .from('conversas')
+    .select('departamento_id, atendente_id, tipo, telefone')
+    .eq('company_id', Number(company_id))
+    .eq('id', Number(conversa_id))
+    .maybeSingle()
   if (!conv) return []
 
   const isGroup = isGroupConversation(conv)
   const convDep = conv.departamento_id ?? null
   const atendenteId = conv.atendente_id ? Number(conv.atendente_id) : null
-  // grupoDepIds depende de isGroup → resolvido depois que o conv chega.
   const grupoDepIds = isGroup ? await getGrupoDepartamentoIds(company_id, conversa_id) : []
   const grupoDepSet = new Set(grupoDepIds.map(Number))
 
-  const transferiuIds = new Set((transferiuRes?.data || []).map((r) => Number(r.de_usuario_id)).filter(Boolean))
-  const participanteIds = new Set(participanteIdsArr || [])
+  const { data: transferiuRows } = await supabase
+    .from('atendimentos')
+    .select('de_usuario_id')
+    .eq('company_id', Number(company_id))
+    .eq('conversa_id', Number(conversa_id))
+    .eq('acao', 'transferiu')
+  const transferiuIds = new Set((transferiuRows || []).map((r) => Number(r.de_usuario_id)).filter(Boolean))
+  const participanteIds = new Set(await getConversaParticipanteIdsAtivos(company_id, conversa_id))
 
-  const usuarios = usuariosRes?.data
+  const { data: usuarios } = await supabase
+    .from('usuarios')
+    .select('id, perfil, departamento_id')
+    .eq('company_id', Number(company_id))
+    .eq('ativo', true)
   if (!Array.isArray(usuarios) || usuarios.length === 0) return []
 
   let userDepMap = new Map()
-  const udRows = udRes?.data
+  const { data: udRows } = await supabase
+    .from('usuario_departamentos')
+    .select('usuario_id, departamento_id')
+    .eq('company_id', Number(company_id))
   if (Array.isArray(udRows)) {
     udRows.forEach((r) => {
       const uid = Number(r.usuario_id)
@@ -3657,30 +3004,23 @@ exports.listWhatsappInstancesAtendimento = async (req, res) => {
 exports.whatsappStatus = async (req, res) => {
   try {
     const company_id = req.user?.company_id
-    // O banner "WhatsApp desconectado — mensagens não serão entregues" nasceu na época da Z-API e ficou
-    // desligado por padrão após a migração para UltraMsg. Consequência real: com o WhatsApp fora do ar a
-    // UltraMsg ACEITA o POST e apenas enfileira (status 'queue'); o atendimento mostrava relógio e o
-    // atendente seguia digitando sem saber que nada saía. Agora o padrão é reportar o estado real —
-    // HIDE_WHATSAPP_DISCONNECT_BANNER=1 volta a esconder, se necessário.
-    const hideBanner = process.env.HIDE_WHATSAPP_DISCONNECT_BANNER === '1'
+    // Z-API removida; banner "WhatsApp desconectado" oculto por padrão. Use HIDE_WHATSAPP_DISCONNECT_BANNER=0 para exibir.
+    const hideBanner = process.env.HIDE_WHATSAPP_DISCONNECT_BANNER !== '0'
     // Usa UltraMsg como único provider WhatsApp; empresa_zapi armazena instance_id/token
     if (!company_id) {
-      return res.json({ ok: true, hasInstance: false, connected: true, configured: false })
+      return res.json({ ok: true, hasInstance: false, connected: hideBanner, configured: false })
     }
 
     const { getStatus } = require('../services/ultramsgIntegrationService')
     const { getEmpresaWhatsappConfig } = require('../services/whatsappConfigService')
     const configResult = await getEmpresaWhatsappConfig(company_id)
     if (configResult.error || !configResult.config) {
-      return res.json({ ok: true, hasInstance: false, connected: true, configured: false })
+      return res.json({ ok: true, hasInstance: false, connected: hideBanner, configured: false })
     }
 
     const statusResult = await getStatus(company_id)
-    // Só afirma "desconectado" quando a UltraMsg respondeu de forma definitiva. Falha de rede/API
-    // devolve { error } — nesse caso não acende alarme falso (mantém connected=true).
-    const statusIndefinido = !statusResult || !!statusResult.error
-    let connected = statusIndefinido ? true : !!statusResult.connected
-    if (hideBanner) connected = true
+    let connected = !!statusResult?.connected
+    if (hideBanner) connected = true // Oculta banner (Z-API removida; sistema usa UltraMsg)
     const smartphoneConnected = !!statusResult?.smartphoneConnected
     return res.json({
       ok: true,
@@ -4712,10 +4052,7 @@ exports.detalharChat = async (req, res) => {
       !isGroup && !conversaEncerrada && conversaAssumidaPorOutro && !isAdmin && !isSupervisor
 
     // mensagens paginadas (remetente_nome/remetente_telefone para grupos; fallback se colunas não existirem)
-    // client_temp_id vai junto porque é ele que liga a linha do banco à bolha otimista do frontend:
-    // sem ele, um refresh logo após o envio traz a mídia sem correlação e a bolha otimista do áudio
-    // (que exige correlação explícita para fundir) fica na tela ao lado da confirmada → bolha duplicada.
-    const selectComRemetente = 'id, conversa_id, texto, direcao, criado_em, autor_usuario_id, status, whatsapp_id, whatsapp_instance_id, tipo, url, nome_arquivo, reply_meta, remetente_nome, remetente_telefone, contact_meta, location_meta, apagada_para_todos, apagada_em, client_temp_id'
+    const selectComRemetente = 'id, conversa_id, texto, direcao, criado_em, autor_usuario_id, status, whatsapp_id, whatsapp_instance_id, tipo, url, nome_arquivo, reply_meta, remetente_nome, remetente_telefone, contact_meta, location_meta, apagada_para_todos, apagada_em'
     let mensagens = []
     let errMsgs = null
     let query
@@ -6085,10 +5422,10 @@ exports.transferirSetor = async (req, res) => {
       emitirConversaAtualizada(io, company_id, conversa_id, payload)
       emitirLock(io, conversa_id, null)
       if (depAntigoId != null) {
-        emitirDepartamento(io, company_id, depAntigoId, io.EVENTS?.CONVERSA_ATUALIZADA || 'conversa_atualizada', payload)
+        emitirDepartamento(io, depAntigoId, io.EVENTS?.CONVERSA_ATUALIZADA || 'conversa_atualizada', payload)
       }
       if (departamentoIdFinal != null) {
-        emitirDepartamento(io, company_id, departamentoIdFinal, io.EVENTS?.CONVERSA_ATUALIZADA || 'conversa_atualizada', payload)
+        emitirDepartamento(io, departamentoIdFinal, io.EVENTS?.CONVERSA_ATUALIZADA || 'conversa_atualizada', payload)
       }
       // `emitirConversaAtualizada` já emite `atualizar_conversa` na empresa (skip padrão false).
     }
@@ -6260,25 +5597,20 @@ exports.enviarMensagemChat = async (req, res) => {
   try {
     const { company_id, id: user_id, perfil } = req.user
     const { id: conversa_id } = req.params
-    const { texto, reply_meta, link, client_temp_id, retry_manual } = req.body
+    const { texto, reply_meta, link, client_temp_id } = req.body
     const clientTempId = normalizeClientTempId(client_temp_id)
-    const retryManual = retry_manual === true || String(retry_manual || '').toLowerCase() === 'true'
 
     if (!texto || !String(texto).trim()) {
       return res.status(400).json({ error: 'texto é obrigatório' })
     }
 
-    const linkPayload = normalizeLinkPayload(link)
-    const hasLinkPayload = !!linkPayload
-    let persistedManualText = null
-
-    // Links mantêm o comportamento existente. Texto manual sempre consulta a linha durável:
-    // o cache em memória não sobrevive a restart e não distingue aceite, fila, rejeição ou incerteza.
+    // Deduplicação por client_temp_id em memória: evita double-send por double-click ou retry do frontend.
+    // Map com TTL de 30s por (company_id + conversa_id + client_temp_id).
     if (clientTempId) {
       const dedupKey = clientTempIdDedupeKey(company_id, conversa_id, clientTempId)
       const existing = _clientTempIdDeduplicationMap.get(dedupKey)
-      if (hasLinkPayload && existing && Date.now() - existing.ts < 30_000) {
-        const dedup = resolveSpecialtyClientTempDedup({
+      if (existing && Date.now() - existing.ts < 30_000) {
+        return res.json({
           ok: true,
           id: existing.id,
           conversa_id: Number(conversa_id),
@@ -6286,14 +5618,8 @@ exports.enviarMensagemChat = async (req, res) => {
           status: existing.status || 'pending',
           deduplicated: true,
         })
-        return res.status(dedup.httpStatus).json(dedup.body)
       }
-      const persisted = await findMensagemByClientTempId(
-        company_id,
-        conversa_id,
-        clientTempId,
-        MANUAL_TEXT_BASE_SELECT
-      )
+      const persisted = await findMensagemByClientTempId(company_id, conversa_id, clientTempId)
       const persistedResponse = buildClientTempIdDedupResponse(persisted, conversa_id, clientTempId)
       if (persistedResponse) {
         _clientTempIdDeduplicationMap.set(dedupKey, {
@@ -6301,11 +5627,7 @@ exports.enviarMensagemChat = async (req, res) => {
           status: persistedResponse.status,
           ts: Date.now(),
         })
-        if (hasLinkPayload) {
-          const dedup = resolveSpecialtyClientTempDedup(persistedResponse)
-          return res.status(dedup.httpStatus).json(dedup.body)
-        }
-        persistedManualText = persisted
+        return res.json(persistedResponse)
       }
     }
 
@@ -6350,34 +5672,7 @@ exports.enviarMensagemChat = async (req, res) => {
       }
     }
 
-    if (!hasLinkPayload && persistedManualText) {
-      const existingResult = await handleExistingManualTextRequest({
-        company_id,
-        conversa_id,
-        user_id,
-        row: persistedManualText,
-        requestedText: texto,
-        retryRequested: retryManual,
-        phone: telefoneParaEnvio,
-        whatsappInstanceId,
-        io,
-      })
-      if (existingResult.handled) {
-        return res.status(existingResult.httpStatus || 200).json(existingResult.body)
-      }
-    }
-
-    const atendimentoLimit = await validateAndConsumeForMessage({
-      company_id,
-      usuario_id: user_id,
-      conversa_id,
-      client_temp_id: clientTempId,
-      message_type: hasLinkPayload ? 'link' : 'texto',
-    })
-    if (atendimentoLimit.allowed === false) {
-      return res.status(atendimentoLimit.status || 429).json(limitErrorResponse(atendimentoLimit))
-    }
-
+    // Garantir que o contato (número + nome) esteja salvo em clientes antes de enviar
     const isGroup = String(conversa?.tipo || '').toLowerCase() === 'grupo' || String(conversa?.telefone || '').includes('@g.us')
     if (!isGroup && conversa?.telefone && !conversa?.cliente_id) {
       const nomeCache = conversa?.nome_contato_cache ? String(conversa.nome_contato_cache).trim() : null
@@ -6412,6 +5707,9 @@ exports.enviarMensagemChat = async (req, res) => {
         })
       }
     }
+
+    const linkPayload = normalizeLinkPayload(link)
+    const hasLinkPayload = !!linkPayload
 
     // Reply (citação) — opcional. Requer coluna mensagens.reply_meta (jsonb).
     const timestamp = new Date().toISOString()
@@ -6459,12 +5757,7 @@ exports.enviarMensagemChat = async (req, res) => {
       if (!errMsg) break
 
       if (clientTempId && isClientTempIdUniqueViolation(errMsg)) {
-        const persisted = await findMensagemByClientTempId(
-          company_id,
-          conversa_id,
-          clientTempId,
-          MANUAL_TEXT_BASE_SELECT
-        )
+        const persisted = await findMensagemByClientTempId(company_id, conversa_id, clientTempId)
         const persistedResponse = buildClientTempIdDedupResponse(persisted, conversa_id, clientTempId)
         if (persistedResponse) {
           _clientTempIdDeduplicationMap.set(clientTempIdDedupeKey(company_id, conversa_id, clientTempId), {
@@ -6472,25 +5765,6 @@ exports.enviarMensagemChat = async (req, res) => {
             status: persistedResponse.status,
             ts: Date.now(),
           })
-          if (!hasLinkPayload) {
-            const existingResult = await handleExistingManualTextRequest({
-              company_id,
-              conversa_id,
-              user_id,
-              row: persisted,
-              requestedText: texto,
-              retryRequested: retryManual,
-              phone: telefoneParaEnvio,
-              whatsappInstanceId,
-              io,
-            })
-            if (existingResult.handled) {
-              return res.status(existingResult.httpStatus || 200).json(existingResult.body)
-            }
-          } else {
-            const dedup = resolveSpecialtyClientTempDedup(persistedResponse)
-            return res.status(dedup.httpStatus).json(dedup.body)
-          }
           return res.json(persistedResponse)
         }
       }
@@ -6603,33 +5877,6 @@ exports.enviarMensagemChat = async (req, res) => {
 
     // Envio para WhatsApp via provider (ultramsg, conforme instância configurada)
     let sendResult = null
-    if (
-      !hasLinkPayload &&
-      (!Number.isFinite(Number(whatsappInstanceId)) || Number(whatsappInstanceId) <= 0)
-    ) {
-      const classification = {
-        ...classifyManualTextProviderResult({
-          ok: false,
-          error: 'Nenhuma instância WhatsApp válida está configurada para esta conversa.',
-        }),
-        retryable: true,
-      }
-      const auditPatch = buildManualTextProviderAuditPatch({
-        row: msg,
-        classification,
-        referenceId: buildCrmReferenceId(msg.id),
-        request: { text: String(texto).trim() },
-      })
-      const updated = await updateManualTextRowMonotonic(company_id, msg, {
-        status: classification.status,
-        status_mensagem: classification.status_mensagem,
-        ...auditPatch,
-      })
-      emitManualTextStatus(io, company_id, conversa_id, user_id, updated.row || msg, classification)
-      return res.status(503).json(
-        manualTextResponseFromClassification(classification, updated.row || msg)
-      )
-    }
     if (!telefoneParaEnvio) {
       // Mensagem manual sem telefone: não pode ficar como pending para sempre
       console.warn('[ENVIO_MANUAL] ❌ Conversa sem telefone — mensagem não enviada ao WhatsApp', {
@@ -6653,23 +5900,6 @@ exports.enviarMensagemChat = async (req, res) => {
           })
       }
       sendResult = { ok: false, error: 'Número do contato indisponível para envio' }
-      if (!hasLinkPayload) {
-        const classification = classifyManualTextProviderResult(sendResult)
-        const auditPatch = buildManualTextProviderAuditPatch({
-          row: msg,
-          classification,
-          referenceId: buildCrmReferenceId(msg.id),
-          request: { text: String(texto).trim() },
-        })
-        const updated = await updateManualTextRowMonotonic(company_id, msg, {
-          status: classification.status,
-          status_mensagem: classification.status_mensagem,
-          ...auditPatch,
-        })
-        return res.status(422).json(
-          manualTextResponseFromClassification(classification, updated.row || msg)
-        )
-      }
     }
     if (telefoneParaEnvio) {
       let phoneId = null
@@ -6708,56 +5938,6 @@ exports.enviarMensagemChat = async (req, res) => {
         tipo: hasLinkPayload ? 'link' : 'texto',
       })
 
-      if (!hasLinkPayload) {
-        const textoParaCliente = textoParaEnvioWhatsapp(String(texto).trim(), usuarioNome)
-        const attempt = await dispatchPersistedManualText({
-          company_id,
-          conversa_id,
-          user_id,
-          row: msg,
-          phone: telefoneParaEnvio,
-          text: textoParaCliente,
-          whatsappInstanceId,
-          phoneId,
-          replyMessageId,
-          io: req.app.get('io'),
-          isRetry: false,
-        })
-        const classification = attempt.classification
-        const current = attempt.row || msg
-
-        if (clientTempId && current?.id) {
-          _clientTempIdDeduplicationMap.set(
-            clientTempIdDedupeKey(company_id, conversa_id, clientTempId),
-            { id: current.id, status: classification.status, ts: Date.now() }
-          )
-        }
-
-        if (classification.ok) {
-          console.log('[ENVIO_MANUAL] Texto aceito pelo provedor', {
-            company_id,
-            conversa_id,
-            mensagem_id: current.id,
-            whatsapp_instance_id: whatsappInstanceId,
-            provider_state: classification.state,
-            provider_message_id: classification.whatsapp_id || classification.provider_queue_id || null,
-          })
-        } else {
-          console.warn('[ENVIO_MANUAL] Texto não aceito/confirmado pelo provedor', {
-            company_id,
-            conversa_id,
-            mensagem_id: current.id,
-            whatsapp_instance_id: whatsappInstanceId,
-            provider_state: classification.state,
-            erro: String(classification.provider_error || '').slice(0, 500),
-          })
-        }
-
-        return res.status(attempt.httpStatus || 500).json(
-          manualTextResponseFromClassification(classification, current)
-        )
-      }
-
       try {
         let result = null
 
@@ -6779,7 +5959,6 @@ exports.enviarMensagemChat = async (req, res) => {
             conversaId: conversa_id,
             whatsappInstanceId: whatsappInstanceId || undefined,
             replyMessageId: replyMessageId || undefined,
-            referenceId: `crm-${msg.id}`,
             sendOrigin: 'atendimento_humano',
           })
         } else {
@@ -6919,24 +6098,22 @@ exports.enviarMensagemChat = async (req, res) => {
       }
     }
 
-    // Caminho de LINK (texto manual já retornou acima). Contrato: ok:true só com aceite do provedor.
     // Não retornar mensagem completa — evita duplicação no frontend (API + socket).
-    const linkProviderResult = !telefoneParaEnvio
-      ? { ok: false, error: 'Número do contato indisponível para envio' }
-      : (sendResult == null
-        ? { ok: false, error: 'Falha ao enviar link para o WhatsApp' }
-        : sendResult)
-    const linkHttp = buildSpecialtyOutboundHttpResult(
-      linkProviderResult,
-      {
-        id: msg.id,
-        conversa_id: Number(conversa_id),
-        client_temp_id: clientTempId || null,
-      },
-      null,
-      { tipo: 'link' }
-    )
-    return res.status(linkHttp.httpStatus).json(linkHttp.body)
+    // A mensagem chega via socket nova_mensagem (única fonte de verdade para exibição).
+    const sendOk = !!telefoneParaEnvio && (typeof sendResult === 'boolean' ? sendResult : sendResult?.ok === true)
+    const sendWaMessageId = typeof sendResult === 'object' && sendResult?.messageId ? String(sendResult.messageId).trim() : null
+    const sendTraceable = sendOk && isRealWhatsAppId(sendWaMessageId)
+    const motivoErro = sendResult?.error || sendResult?.blockedBy
+    return res.json({
+      ok: true,
+      id: msg.id,
+      conversa_id: Number(conversa_id),
+      ...(clientTempId ? { client_temp_id: clientTempId } : {}),
+      ...(sendTraceable ? { status: 'sent', whatsapp_id: sendWaMessageId } : sendOk ? { status: 'pending' } : {
+        status: sendResult?.blockedBy ? 'blocked' : 'erro',
+        ...(motivoErro ? { motivo: motivoErro } : {})
+      })
+    })
   } catch (err) {
     console.error(err)
     return res.status(500).json({ error: 'Erro ao enviar mensagem' })
@@ -7156,18 +6333,6 @@ exports.enviarContatoWhatsapp = async (req, res) => {
     }
 
     // contact_meta para o frontend exibir cartão de contato (nome, telefone, foto)
-    const atendimentoLimit = await validateAndConsumeForMessage({
-      company_id,
-      usuario_id: user_id,
-      conversa_id,
-      message_id: messageId,
-      fallback_idempotency_key: messageId ? null : `contact:${conversa_id}:${cliente_id}`,
-      message_type: 'contact',
-    })
-    if (atendimentoLimit.allowed === false) {
-      return res.status(atendimentoLimit.status || 429).json(limitErrorResponse(atendimentoLimit))
-    }
-
     const contact_meta = {
       nome: contactName,
       telefone: contactPhoneNorm,
@@ -7208,50 +6373,29 @@ exports.enviarContatoWhatsapp = async (req, res) => {
       })
     } catch (_) {}
 
-    let providerResult = null
-    let providerThrown = null
-    try {
-      providerResult = await provider.sendContact(telefoneParaEnvio, contactName, contactPhone, {
-        companyId: company_id,
-        conversaId: Number(conversa_id),
-        whatsappInstanceId: whatsappInstanceId || undefined,
-        sendOrigin: 'atendimento_humano_contato',
-        messageId: messageId || undefined,
-        // Reconciliação do eco fromMe → evita cartão de contato duplicado (mesmo padrão de mídia/texto).
-        referenceId: `crm-${msg.id}`,
-      })
-    } catch (e) {
-      providerThrown = e
-      providerResult = { ok: false, error: e?.message || 'Erro ao enviar contato' }
-    }
+    const result = await provider.sendContact(telefoneParaEnvio, contactName, contactPhone, {
+      companyId: company_id,
+      conversaId: Number(conversa_id),
+      whatsappInstanceId: whatsappInstanceId || undefined,
+      sendOrigin: 'atendimento_humano_contato',
+      messageId: messageId || undefined,
+    })
+    const ok = typeof result === 'boolean' ? result : result?.ok === true
+    const waMessageId =
+      typeof result === 'object' && result?.messageId ? String(result.messageId).trim() : null
 
-    const contactHttp = buildSpecialtyOutboundHttpResult(
-      providerResult,
-      msg,
-      providerThrown,
-      { tipo: 'contact' }
-    )
-    const classification = contactHttp.classification
-    const nextStatus = classification.status
-    const nextStatusMensagem = classification.status_mensagem
+    const hasTraceableContactId = isRealWhatsAppId(waMessageId)
+    const hasQueueContactId = !!waMessageId && isUltramsgNumericQueueId(waMessageId)
+    const nextStatus = ok ? (hasTraceableContactId ? 'sent' : 'pending') : 'erro'
+    const nextStatusMensagem = ok ? (hasTraceableContactId ? 'sent' : 'sending') : 'erro'
     await supabase
       .from('mensagens')
-      .update({
-        status: nextStatus,
-        status_mensagem: nextStatusMensagem,
-        ...(classification.whatsapp_id ? { whatsapp_id: classification.whatsapp_id } : {}),
-        ...(classification.provider_queue_id ? { provider_queue_id: classification.provider_queue_id } : {}),
-      })
+      .update({ status: nextStatus, status_mensagem: nextStatusMensagem, ...(hasTraceableContactId ? { whatsapp_id: waMessageId } : {}), ...(hasQueueContactId ? { provider_queue_id: waMessageId } : {}) })
       .eq('company_id', company_id)
       .eq('id', msg.id)
 
     if (io) {
-      const payload = await enrichMensagemComAutorUsuario(supabase, company_id, {
-        ...msg,
-        status: nextStatus,
-        status_mensagem: nextStatusMensagem,
-        whatsapp_id: classification.whatsapp_id || null,
-      })
+      const payload = await enrichMensagemComAutorUsuario(supabase, company_id, { ...msg, status: nextStatus, status_mensagem: nextStatusMensagem, whatsapp_id: hasTraceableContactId ? waMessageId : null })
       emitirEventoEmpresaConversa(io, company_id, conversa_id, io.EVENTS?.NOVA_MENSAGEM || 'nova_mensagem', payload)
       const convPayload = aplicarAguardandoClienteNoPayload({
         id: Number(conversa_id),
@@ -7268,7 +6412,7 @@ exports.enviarContatoWhatsapp = async (req, res) => {
       emitirConversaAtualizada(io, company_id, conversa_id, convPayload, { skipAtualizarConversa: true })
     }
 
-    return res.status(contactHttp.httpStatus).json(contactHttp.body)
+    return res.json({ ok: true })
   } catch (err) {
     console.error('Erro ao enviar contato:', err)
     return res.status(500).json({ error: 'Erro ao enviar contato' })
@@ -7348,18 +6492,6 @@ exports.enviarLocalizacao = async (req, res) => {
     }
 
     const textoDisplay = [nomePlace, endereco].filter(Boolean).join(' • ') || '(localização)'
-    const atendimentoLimit = await validateAndConsumeForMessage({
-      company_id,
-      usuario_id: user_id,
-      conversa_id,
-      client_temp_id: body.client_temp_id,
-      fallback_idempotency_key: body.client_temp_id ? null : `location:${conversa_id}:${latitude}:${longitude}`,
-      message_type: 'location',
-    })
-    if (atendimentoLimit.allowed === false) {
-      return res.status(atendimentoLimit.status || 429).json(limitErrorResponse(atendimentoLimit))
-    }
-
     const locationUrl = `https://www.google.com/maps?q=${latitude},${longitude}`
     const criadoEm = new Date().toISOString()
 
@@ -7423,57 +6555,33 @@ exports.enviarLocalizacao = async (req, res) => {
     const baseAddress = [nomePlace, endereco].filter(Boolean).join('\n') || `${latitude},${longitude}`
     const addressParaCliente = usuarioNome ? `${usuarioNome} — ${String(baseAddress).slice(0, 280)}` : String(baseAddress).slice(0, 300)
 
-    let providerResult = { ok: false, messageId: null, error: 'Número do contato indisponível para envio' }
-    let providerThrown = null
+    let result = { ok: false, messageId: null }
     if (telefoneParaEnvio) {
-      try {
-        providerResult = await provider.sendLocation(telefoneParaEnvio, { address: addressParaCliente, lat: latitude, lng: longitude }, {
-          companyId: company_id,
-          conversaId: conversa_id,
-          whatsappInstanceId: whatsappInstanceId || undefined,
-          referenceId: `crm-${msg.id}`,
-          sendOrigin: 'atendimento_humano_localizacao',
-        })
-      } catch (e) {
-        providerThrown = e
-        providerResult = { ok: false, error: e?.message || 'Erro ao enviar localização' }
-      }
+      result = await provider.sendLocation(telefoneParaEnvio, { address: addressParaCliente, lat: latitude, lng: longitude }, {
+        companyId: company_id,
+        conversaId: conversa_id,
+        whatsappInstanceId: whatsappInstanceId || undefined,
+        sendOrigin: 'atendimento_humano_localizacao',
+      })
     } else {
       console.warn(`[WhatsApp] Conversa ${conversa_id} sem telefone — localização salva, não enviada ao WhatsApp`)
     }
 
-    const locationHttp = buildSpecialtyOutboundHttpResult(
-      providerResult,
-      msg,
-      providerThrown,
-      {
-        tipo: 'location',
-        location_meta: msg.location_meta || location_meta,
-      }
-    )
-    const classification = locationHttp.classification
-    const nextStatus = classification.status
-    const nextStatusMensagem = classification.status_mensagem
+    const ok = result?.ok === true
+    const waMessageId = result?.messageId ? String(result.messageId).trim() : null
+    const hasTraceableLocationId = isRealWhatsAppId(waMessageId)
+    const hasQueueLocationId = !!waMessageId && isUltramsgNumericQueueId(waMessageId)
+    const nextStatus = ok ? (hasTraceableLocationId ? 'sent' : 'pending') : 'erro'
+    const nextStatusMensagem = ok ? (hasTraceableLocationId ? 'sent' : 'sending') : 'erro'
 
     await supabase
       .from('mensagens')
-      .update({
-        status: nextStatus,
-        status_mensagem: nextStatusMensagem,
-        ...(classification.whatsapp_id ? { whatsapp_id: classification.whatsapp_id } : {}),
-        ...(classification.provider_queue_id ? { provider_queue_id: classification.provider_queue_id } : {}),
-      })
+      .update({ status: nextStatus, status_mensagem: nextStatusMensagem, ...(hasTraceableLocationId ? { whatsapp_id: waMessageId } : {}), ...(hasQueueLocationId ? { provider_queue_id: waMessageId } : {}) })
       .eq('company_id', company_id)
       .eq('id', msg.id)
 
     if (io) {
-      const payload = await enrichMensagemComAutorUsuario(supabase, company_id, {
-        ...msg,
-        status: nextStatus,
-        status_mensagem: nextStatusMensagem,
-        whatsapp_id: classification.whatsapp_id || null,
-        location_meta: msg.location_meta || location_meta,
-      })
+      const payload = await enrichMensagemComAutorUsuario(supabase, company_id, { ...msg, status: nextStatus, status_mensagem: nextStatusMensagem, whatsapp_id: hasTraceableLocationId ? waMessageId : null, location_meta: msg.location_meta || location_meta })
       emitirEventoEmpresaConversa(io, company_id, conversa_id, io.EVENTS?.NOVA_MENSAGEM || 'nova_mensagem', payload)
       const convPayload = aplicarAguardandoClienteNoPayload({
         id: Number(conversa_id),
@@ -7490,7 +6598,15 @@ exports.enviarLocalizacao = async (req, res) => {
       emitirConversaAtualizada(io, company_id, conversa_id, convPayload, { skipAtualizarConversa: true })
     }
 
-    return res.status(locationHttp.httpStatus).json(locationHttp.body)
+    const sendOk = !!telefoneParaEnvio && ok
+
+    return res.json({
+      ok: true,
+      id: msg.id,
+      conversa_id: Number(conversa_id),
+      location_meta: msg.location_meta || location_meta,
+      ...(sendOk && hasTraceableLocationId ? { status: 'sent', whatsapp_id: waMessageId } : sendOk ? { status: 'pending' } : { status: telefoneParaEnvio ? 'erro' : 'pending' })
+    })
   } catch (err) {
     console.error('Erro ao enviar localização:', err)
     return res.status(500).json({ error: 'Erro ao enviar localização' })
@@ -7562,53 +6678,32 @@ exports.enviarLigacaoWhatsapp = async (req, res) => {
       return res.status(500).json({ error: 'Provider WhatsApp não suporta ligações' })
     }
 
-    let providerResult = null
-    let providerThrown = null
-    try {
-      providerResult = await provider.sendCall(conversa.telefone, safeDur, {
-        companyId: company_id,
-        conversaId: conversa_id,
-        whatsappInstanceId: whatsappInstanceId || undefined,
-        // Mesmo padrão de referência das demais especialidades — evita eco/duplicata em retry futuro.
-        referenceId: `crm-${msg.id}`,
-      })
-    } catch (e) {
-      providerThrown = e
-      providerResult = { ok: false, error: e?.message || 'Erro ao registrar ligação' }
-    }
+    const result = await provider.sendCall(conversa.telefone, safeDur, {
+      companyId: company_id,
+      conversaId: conversa_id,
+      whatsappInstanceId: whatsappInstanceId || undefined,
+    })
+    const ok = typeof result === 'boolean' ? result : result?.ok === true
+    const waMessageId =
+      typeof result === 'object' && result?.messageId ? String(result.messageId).trim() : null
 
-    const callHttp = buildSpecialtyOutboundHttpResult(
-      providerResult,
-      msg,
-      providerThrown,
-      { tipo: 'call' }
-    )
-    const classification = callHttp.classification
-    const nextStatus = classification.status
-    const nextStatusMensagem = classification.status_mensagem
+    const hasTraceableCallId = isRealWhatsAppId(waMessageId)
+    const hasQueueCallId = !!waMessageId && isUltramsgNumericQueueId(waMessageId)
+    const nextStatus = ok ? (hasTraceableCallId ? 'sent' : 'pending') : 'erro'
+    const nextStatusMensagem = ok ? (hasTraceableCallId ? 'sent' : 'sending') : 'erro'
     await supabase
       .from('mensagens')
-      .update({
-        status: nextStatus,
-        status_mensagem: nextStatusMensagem,
-        ...(classification.whatsapp_id ? { whatsapp_id: classification.whatsapp_id } : {}),
-        ...(classification.provider_queue_id ? { provider_queue_id: classification.provider_queue_id } : {}),
-      })
+      .update({ status: nextStatus, status_mensagem: nextStatusMensagem, ...(hasTraceableCallId ? { whatsapp_id: waMessageId } : {}), ...(hasQueueCallId ? { provider_queue_id: waMessageId } : {}) })
       .eq('company_id', company_id)
       .eq('id', msg.id)
 
     if (io) {
-      const payload = await enrichMensagemComAutorUsuario(supabase, company_id, {
-        ...msg,
-        status: nextStatus,
-        status_mensagem: nextStatusMensagem,
-        whatsapp_id: classification.whatsapp_id || null,
-      })
+      const payload = await enrichMensagemComAutorUsuario(supabase, company_id, { ...msg, status: nextStatus, status_mensagem: nextStatusMensagem, whatsapp_id: hasTraceableCallId ? waMessageId : null })
       emitirEventoEmpresaConversa(io, company_id, conversa_id, io.EVENTS?.NOVA_MENSAGEM || 'nova_mensagem', payload)
       emitirConversaAtualizada(io, company_id, conversa_id, { id: Number(conversa_id) })
     }
 
-    return res.status(callHttp.httpStatus).json(callHttp.body)
+    return res.json({ ok: true })
   } catch (err) {
     console.error('Erro ao registrar ligação:', err)
     return res.status(500).json({ error: 'Erro ao registrar ligação' })
@@ -8162,66 +7257,29 @@ function getAudioFileExtension(file) {
   return ''
 }
 
-const AUDIO_FFMPEG_TIMEOUT_MS = Math.max(10000, Number(process.env.AUDIO_FFMPEG_TIMEOUT_MS) || 60000)
-
-/**
- * Resolve o caminho do ffmpeg de forma robusta:
- * 1) FFMPEG_PATH (override do host);
- * 2) ffmpeg-static SÓ se o binário existir no disco (o postinstall pode não ter baixado
- *    em hosts com --ignore-scripts, e require() devolve um caminho para arquivo inexistente);
- * 3) 'ffmpeg' do PATH do sistema.
- */
-function resolveFfmpegPath() {
-  const fs = require('fs')
-  const envPath = String(process.env.FFMPEG_PATH || '').trim()
-  if (envPath) { try { if (fs.existsSync(envPath)) return envPath } catch { /* ignore */ } }
-  try {
-    const staticPath = require('ffmpeg-static')
-    if (staticPath && fs.existsSync(staticPath)) return staticPath
-  } catch { /* ignore */ }
-  return 'ffmpeg'
-}
-
 async function convertAudioWithFfmpeg(inputPath, outputPath, profile = 'audio_mp3') {
   const { spawn } = require('child_process')
-  const fs = require('fs')
-  const ffmpegPath = resolveFfmpegPath()
   return new Promise((resolve, reject) => {
+    let ffmpegPath
+    try {
+      ffmpegPath = require('ffmpeg-static')
+    } catch {
+      ffmpegPath = null
+    }
+    if (!ffmpegPath) {
+      reject(new Error('ffmpeg-static não disponível'))
+      return
+    }
     let args
     // Voice (PTT): alinhado ao padrão usado por integrações WhatsApp estáveis (Evolution/Baileys):
     // 48 kHz, mono, Opus ~48k, sem metadados — evita áudio que toca no Web mas falha no iPhone.
     if (profile === 'voice_ogg_opus') {
       args = [
         '-y',
-        // Robustez contra WebM do MediaRecorder (streaming/sem header de duração):
-        // +genpts regenera timestamps ausentes; probesize/analyzeduration altos
-        // forçam o ffmpeg a ler o stream inteiro antes de inferir a duração,
-        // evitando estimativas erradas de gravações do navegador.
-        '-fflags', '+genpts',
-        '-analyzeduration', '2147483647',
-        '-probesize', '2147483647',
         '-i', inputPath,
         '-vn',
         '-ac', '1',
         '-ar', '48000',
-        // Reconstrói os timestamps A PARTIR DA CONTAGEM DE AMOSTRAS decodificadas
-        // (asetpts=N/SR/TB): a duração de saída passa a ser exatamente
-        // amostras/48000, independentemente do que o container de entrada diga.
-        //
-        // O MediaRecorder do navegador entrega WebM de streaming, sem duração no
-        // header e com timestamps que podem vir deslocados (1º bloco com PTS
-        // grande, relativo ao relógio da página) ou NÃO-MONOTÔNICOS quando a
-        // gravação junta blocos de origens/relógios diferentes. A versão anterior
-        // usava `aresample=async=1:first_pts=0`, que corrige o deslocamento mas
-        // TAMBÉM decide o que fazer com o áudio olhando esses timestamps ruins:
-        //   - salto para frente  → enche o vão com silêncio (30s viravam 5min);
-        //   - salto para trás    → DESCARTA todo o áudio até a linha do tempo
-        //                          alcançar o ponto (30s de fala viravam ~1-3s,
-        //                          começando mudo e com a voz cortada).
-        // Reproduzido em tests/audioTranscodeDuration.test.js. Com asetpts nenhuma
-        // amostra decodificada é descartada nem duplicada: o áudio sai contínuo,
-        // na duração real, e os timestamps de entrada deixam de poder corrompê-lo.
-        '-af', 'aresample=async=0,asetpts=N/SR/TB',
         '-c:a', 'libopus',
         '-b:a', '48k',
         '-avoid_negative_ts', 'make_zero',
@@ -8252,112 +7310,15 @@ async function convertAudioWithFfmpeg(inputPath, outputPath, profile = 'audio_mp
         outputPath,
       ]
     }
-    let proc
-    try {
-      proc = spawn(ffmpegPath, args, { windowsHide: true })
-    } catch (err) {
-      reject(new Error(`ffmpeg spawn falhou (${ffmpegPath}): ${err?.message || err}`))
-      return
-    }
+    const proc = spawn(ffmpegPath, args, { windowsHide: true })
     let stderr = ''
-    let settled = false
-    const finish = (fn, arg) => { if (settled) return; settled = true; clearTimeout(timer); fn(arg) }
-    // Timeout+kill: evita processo ffmpeg travado segurando o arquivo e o worker indefinidamente.
-    const timer = setTimeout(() => {
-      try { proc.kill('SIGKILL') } catch { /* ignore */ }
-      finish(reject, new Error(`ffmpeg timeout após ${AUDIO_FFMPEG_TIMEOUT_MS}ms`))
-    }, AUDIO_FFMPEG_TIMEOUT_MS)
     proc.stderr.on('data', (d) => { stderr += String(d || '') })
-    proc.on('error', (err) => finish(reject, new Error(`ffmpeg indisponível (${ffmpegPath}): ${err?.message || err}`)))
+    proc.on('error', (err) => reject(err))
     proc.on('close', (code) => {
-      if (code !== 0) { finish(reject, new Error(`ffmpeg exit=${code} ${stderr.slice(-240)}`.trim())); return }
-      // Valida a saída: ffmpeg pode sair 0 e ainda assim gerar arquivo vazio em input ruim.
-      let outSize = 0
-      try { outSize = fs.existsSync(outputPath) ? fs.statSync(outputPath).size : 0 } catch { outSize = 0 }
-      if (outSize <= 0) { finish(reject, new Error('ffmpeg gerou saída vazia (0 bytes)')); return }
-      finish(resolve, undefined)
+      if (code === 0) resolve()
+      else reject(new Error(`ffmpeg exit=${code} ${stderr.slice(-240)}`.trim()))
     })
   })
-}
-
-/**
- * Duração real de um arquivo de áudio, em segundos, lida do próprio ffmpeg
- * (`Duration: HH:MM:SS.ss`). Só lê cabeçalho/última página — não decodifica.
- * Devolve null se o ffmpeg não estiver disponível ou não reportar duração.
- */
-async function probeAudioDurationSec(filePath) {
-  const { spawn } = require('child_process')
-  const ffmpegPath = resolveFfmpegPath()
-  return new Promise((resolve) => {
-    let proc
-    try {
-      proc = spawn(ffmpegPath, ['-hide_banner', '-i', filePath], { windowsHide: true })
-    } catch {
-      resolve(null)
-      return
-    }
-    let stderr = ''
-    let settled = false
-    const finish = (v) => { if (settled) return; settled = true; clearTimeout(timer); resolve(v) }
-    const timer = setTimeout(() => {
-      try { proc.kill('SIGKILL') } catch { /* ignore */ }
-      finish(null)
-    }, 15000)
-    proc.stderr.on('data', (d) => { stderr += String(d || '') })
-    proc.on('error', () => finish(null))
-    proc.on('close', () => {
-      const m = stderr.match(/Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/i)
-      if (!m) { finish(null); return }
-      const sec = Number(m[1]) * 3600 + Number(m[2]) * 60 + Number(m[3])
-      finish(Number.isFinite(sec) && sec > 0 ? sec : null)
-    })
-  })
-}
-
-/**
- * O áudio transcodificado precisa cobrir o que foi realmente gravado no navegador.
- * Se o arquivo que chegou perdeu blocos (conexão do microfone caiu no meio, chunks
- * perdidos no upload), o ffmpeg converte só o pedaço legível e sai com sucesso — o
- * contato receberia 3s de uma gravação de 30s, começando mudo e com a voz cortada.
- * Só vale para gravações do composer, que enviam a duração medida no navegador.
- */
-const AUDIO_DURATION_MIN_RATIO = 0.6
-const AUDIO_DURATION_MIN_GAP_MS = 3000
-
-function audioDurationShortfall(expectedMs, actualSec) {
-  const expected = Number(expectedMs)
-  if (!Number.isFinite(expected) || expected <= 0) return null
-  if (!Number.isFinite(actualSec) || actualSec <= 0) return null
-  const actualMs = actualSec * 1000
-  const faltandoMs = expected - actualMs
-  if (faltandoMs <= AUDIO_DURATION_MIN_GAP_MS) return null
-  if (actualMs >= expected * AUDIO_DURATION_MIN_RATIO) return null
-  return { expectedMs: Math.round(expected), actualMs: Math.round(actualMs), faltandoMs: Math.round(faltandoMs) }
-}
-
-/**
- * Duração medida no navegador (enviada pelo composer junto do arquivo).
- *
- * Usa o MENOR entre os dois campos, de propósito:
- *  - `audio_elapsed_ms` é tempo de relógio entre iniciar e parar a gravação — nunca
- *    pode ser maior que a realidade;
- *  - `audio_duration_ms` sai do elemento <audio> lendo o WebM cru, que é justamente o
- *    container cuja duração vem INFLADA quando os timestamps estão deslocados (o
- *    defeito que este pipeline existe para corrigir). Confiar nele sozinho faria a
- *    guarda recusar gravação boa.
- * O menor dos dois é o piso seguro: nunca acusa corte que não houve, e continua
- * acusando quando os dois concordam que faltou áudio.
- *
- * Só vale para um único arquivo por requisição — os campos são do corpo, não por
- * arquivo, então num upload múltiplo eles não descrevem nenhum arquivo em especial.
- */
-function expectedAudioDurationMsFromRequest(req, { totalArquivos = 1 } = {}) {
-  if (Number(totalArquivos) !== 1) return null
-  const body = req?.body || {}
-  const valores = [body.audio_elapsed_ms, body.audio_duration_ms]
-    .map((raw) => Number(Array.isArray(raw) ? raw[0] : raw))
-    .filter((v) => Number.isFinite(v) && v > 0)
-  return valores.length ? Math.min(...valores) : null
 }
 
 async function normalizeAudioForUltraMsg(file, tipo) {
@@ -8385,34 +7346,12 @@ async function normalizeAudioForUltraMsg(file, tipo) {
   const targetOriginalName = originalName.replace(/\.[a-z0-9]{2,5}$/i, `.${targetExt}`)
   const ffmpegProfile = isVoice ? 'voice_ogg_opus' : 'audio_mp3'
 
-  let inputSize = 0
-  try { inputSize = fs.existsSync(file.path) ? fs.statSync(file.path).size : 0 } catch { inputSize = 0 }
-
-  try {
-    await convertAudioWithFfmpeg(file.path, targetPath, ffmpegProfile)
-  } catch (e) {
-    // Não propaga exceção: o chamador decide abortar (nunca enviar áudio cru/quebrado ao WhatsApp).
-    try { if (fs.existsSync(targetPath)) fs.unlink(targetPath, () => {}) } catch { /* ignore */ }
-    console.warn('[ULTRAMSG][AUDIO] transcode falhou', {
-      tipo, srcExt: ext || '(sem)', profile: ffmpegProfile, inputBytes: inputSize,
-      erro: String(e?.message || e).slice(0, 240),
-    })
-    return { file, converted: false, error: 'audio_transcode_failed' }
-  }
-
-  let outputSize = 0
-  try { outputSize = fs.existsSync(targetPath) ? fs.statSync(targetPath).size : 0 } catch { outputSize = 0 }
-  const durationSec = await probeAudioDurationSec(targetPath)
+  await convertAudioWithFfmpeg(file.path, targetPath, ffmpegProfile)
   fs.unlink(file.path, () => {})
-  console.log('[ULTRAMSG][AUDIO] transcode ok', {
-    tipo, srcExt: ext || '(sem)', targetExt, inputBytes: inputSize, outputBytes: outputSize, profile: ffmpegProfile,
-    duracaoSaidaSec: durationSec == null ? null : Number(durationSec.toFixed(2)),
-  })
 
   return {
     converted: true,
     error: null,
-    durationSec,
     file: {
       ...file,
       path: targetPath,
@@ -8526,9 +7465,9 @@ const MAX_MEDIA_CAPTION_CHARS = 1024
 
 /**
  * Uma unidade de upload após multer; conversa e telefone já validados.
- * @returns {Promise<{ ok: true, msg: object } | { ok: false, status: number, error: string, msg?: object }>}
+ * @returns {Promise<{ ok: true, msg: object } | { ok: false, status: number, error: string }>}
  */
-async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conversa_id, telefoneParaEnvio, whatsappInstanceId = null, io, captionUsuario = '', clientTempId = null, totalArquivos = 1 }) {
+async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conversa_id, telefoneParaEnvio, whatsappInstanceId = null, io, captionUsuario = '', clientTempId = null }) {
   const { extFromOriginalName, isBlockedRiskExtension, blockedUploadErrorMessage } = require('../middleware/upload')
   clientTempId = normalizeClientTempId(clientTempId)
   if (clientTempId) {
@@ -8536,10 +7475,10 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
       company_id,
       conversa_id,
       clientTempId,
-      'id, conversa_id, company_id, status, status_mensagem, whatsapp_id, provider_queue_id, client_temp_id, texto, tipo, url, nome_arquivo, criado_em'
+      'id, conversa_id, company_id, status, status_mensagem, whatsapp_id, client_temp_id, texto, tipo, url, nome_arquivo, criado_em'
     )
     if (existing?.id) {
-      return buildMediaClientTempIdDedupResult(existing)
+      return { ok: true, msg: existing, deduplicated: true }
     }
   }
 
@@ -8551,79 +7490,23 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
   const avisoWhatsapp = null
   const tipo = aplicarTipoForcadoSticker(fileWork, inferirTipoArquivo(fileWork))
   if (tipo === 'audio' || tipo === 'voice') {
-    // Formatos que o WhatsApp reproduz nativamente — seguros mesmo sem transcodificar.
-    // webm/opus (padrão do MediaRecorder no Android/desktop) NÃO entra aqui de propósito:
-    // enviado cru chega mudo/com duração errada no WhatsApp, principalmente no iPhone.
-    const srcExtAudio = getAudioFileExtension(fileWork)
-    const srcSeguroSemTranscode = ['mp3', 'ogg', 'aac'].includes(srcExtAudio)
-    let normalized = null
     try {
-      normalized = await normalizeAudioForUltraMsg(fileWork, tipo)
-    } catch (e) {
-      console.warn('[ULTRAMSG][AUDIO] Falha inesperada ao normalizar áudio:', e?.message || e)
-      normalized = { converted: false, error: 'audio_transcode_failed', file: null }
-    }
-    if (normalized?.converted && normalized?.file) {
-      // Gravação incompleta: o arquivo que chegou cobre bem menos tempo do que o
-      // navegador gravou (blocos perdidos no caminho). Enviar assim entregaria ao
-      // contato só o começo do áudio — melhor abortar e pedir para gravar de novo.
-      const faltando = audioDurationShortfall(
-        expectedAudioDurationMsFromRequest(req, { totalArquivos }),
-        normalized.durationSec
-      )
-      if (faltando) {
-        try {
-          const fsTmp = require('fs')
-          if (normalized.file?.path && fsTmp.existsSync(normalized.file.path)) fsTmp.unlink(normalized.file.path, () => {})
-        } catch { /* ignore */ }
-        // company_id/conversa_id/user_id no log de propósito: é o que permite responder,
-        // lendo o log de produção, se o corte acontece em uma empresa/aparelho específico
-        // ou está espalhado. Ver scripts/diagnosticar-audio-logs.js.
-        console.error('[ULTRAMSG][AUDIO] Envio abortado: gravação chegou incompleta', {
-          company_id,
-          conversa_id: Number(conversa_id),
-          user_id,
+      const normalized = await normalizeAudioForUltraMsg(fileWork, tipo)
+      if (normalized?.converted && normalized?.file) {
+        const beforeName = fileWork.originalname
+        fileWork = normalized.file
+        req.file = fileWork
+        console.log('[ULTRAMSG][AUDIO] Áudio convertido para formato compatível antes do envio:', {
           tipo,
-          srcExt: srcExtAudio || '(sem extensão)',
-          gravadoMs: faltando.expectedMs,
-          recebidoMs: faltando.actualMs,
-          faltandoMs: faltando.faltandoMs,
+          from: beforeName,
+          to: fileWork.originalname,
+          mime: fileWork.mimetype,
         })
-        return {
-          ok: false,
-          status: 422,
-          error: 'A gravação chegou incompleta ao servidor (o microfone pode ter sido interrompido). Grave o áudio novamente.',
-        }
+      } else if (normalized?.error) {
+        console.warn('[ULTRAMSG][AUDIO] Conversão/normalização indisponível:', normalized.error)
       }
-      const beforeName = fileWork.originalname
-      fileWork = normalized.file
-      req.file = fileWork
-      console.log('[ULTRAMSG][AUDIO] Áudio convertido para formato compatível antes do envio:', {
-        tipo,
-        from: beforeName,
-        to: fileWork.originalname,
-        mime: fileWork.mimetype,
-      })
-    } else if (normalized?.error === 'audio_transcode_failed' && !srcSeguroSemTranscode) {
-      // Não dá para gerar OGG/Opus e o original não é reproduzível no WhatsApp → aborta e limpa o temp.
-      // Melhor um erro claro ("grave novamente") do que entregar áudio mudo/corrompido ao contato.
-      try {
-        const fsTmp = require('fs')
-        if (fileWork?.path && fsTmp.existsSync(fileWork.path)) fsTmp.unlink(fileWork.path, () => {})
-      } catch { /* ignore */ }
-      console.error('[ULTRAMSG][AUDIO] Envio abortado: transcode falhou e formato original incompatível', {
-        tipo, srcExt: srcExtAudio || '(sem extensão)',
-      })
-      return {
-        ok: false,
-        status: 422,
-        error: 'Não foi possível processar o áudio para envio. Grave novamente e tente de novo.',
-      }
-    } else if (normalized?.error) {
-      // Transcode indisponível, mas o formato original já é compatível (mp3/ogg/aac) → segue com o original.
-      console.warn('[ULTRAMSG][AUDIO] Transcode indisponível; enviando áudio no formato original compatível:', {
-        tipo, srcExt: srcExtAudio,
-      })
+    } catch (e) {
+      console.warn('[ULTRAMSG][AUDIO] Falha ao converter WAV para MP3:', e?.message || e)
     }
   }
   if (tipo === 'imagem') {
@@ -8680,10 +7563,10 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
       company_id,
       conversa_id,
       clientTempId,
-      'id, conversa_id, company_id, status, status_mensagem, whatsapp_id, provider_queue_id, client_temp_id, texto, tipo, url, nome_arquivo, criado_em'
+      'id, conversa_id, company_id, status, status_mensagem, whatsapp_id, client_temp_id, texto, tipo, url, nome_arquivo, criado_em'
     )
     if (existing?.id) {
-      return buildMediaClientTempIdDedupResult(existing)
+      return { ok: true, msg: existing, deduplicated: true }
     }
   }
 
@@ -8823,9 +7706,7 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
                       returnDetails: true,
                     })
                   : Promise.resolve({ ok: false, error: 'Envio de documento indisponível' })
-      // Retorna a promise (antes era fire-and-forget) para a fila serial por conversa poder
-      // AGUARDAR a conclusão de um envio antes de iniciar o próximo → ordem preservada na entrega.
-      return promise
+      promise
         .then(async (result) => {
           const normalizedResult = typeof result === 'boolean'
             ? { ok: result, error: null, messageId: null }
@@ -8879,19 +7760,6 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
               io: io2,
             })
           }
-          // Falha de envio: agenda reenvio automático a partir do arquivo salvo no servidor
-          // (não depende do navegador). A checagem no provedor evita duplicidade.
-          if (!ok) {
-            scheduleOutboundMediaResend({ companyId: company_id, mensagemId: msg.id, io: io2 })
-          }
-          return {
-            ok,
-            status: nextStatus,
-            status_mensagem: nextStatusMensagem,
-            messageId: waMessageId,
-            ...(normalizedResult?.error ? { error: normalizedResult.error } : {}),
-            recorded: true,
-          }
         })
         .catch(async (e) => {
           console.error('WhatsApp enviar mídia (erro de rede/provider):', e?.message || e)
@@ -8901,36 +7769,21 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
             const payload = { mensagem_id: msg.id, conversa_id: Number(conversa_id), status: 'erro', status_mensagem: 'erro' }
             io2.to(`empresa_${company_id}`).to(`conversa_${conversa_id}`).to(`usuario_${user_id}`).emit(io2.EVENTS?.STATUS_MENSAGEM || 'status_mensagem', payload)
           }
-          scheduleOutboundMediaResend({ companyId: company_id, mensagemId: msg.id, io: io2 })
-          return {
-            ok: false,
-            status: 'erro',
-            status_mensagem: 'erro',
-            error: e?.message || 'erro_rede_provider',
-            recorded: true,
-          }
         })
     }
 
-    let dispatchResult = null
     if (telefoneParaEnvio) {
-      // Fila serial por conversa: com vários áudios em sequência, o próximo só despacha depois que
-      // o anterior conclui (upload + envio), preservando a ordem de entrega ao contato.
-      // A Promise é aguardada antes da resposta HTTP: persistir no banco, sozinho, não significa
-      // que o provedor aceitou o envio.
-      const { enqueueSerialByKey } = require('../helpers/serialDispatchQueue')
-      const dispatchKey = `${company_id}:${Number(conversa_id)}`
       if (fullUrl && !isLocalhost && !forceUploadMedia) {
-        dispatchResult = await enqueueSerialByKey(dispatchKey, () => sendMediaWithUrl(fullUrl))
+        setImmediate(() => sendMediaWithUrl(fullUrl))
       } else if ((!baseUrl || isLocalhost || forceUploadMedia) && fileWork.path) {
         const provider = getProvider()
         if (provider?.uploadMedia) {
-          dispatchResult = await enqueueSerialByKey(dispatchKey, async () => {
+          setImmediate(async () => {
             try {
               const result = await provider.uploadMedia(fileWork.path, fileWork.originalname || 'file', { companyId: company_id, whatsappInstanceId: whatsappInstanceId || undefined })
               if (result?.ok && result?.url) {
                 console.log('[ULTRAMSG] Upload bem-sucedido, enviando mídia via CDN:', result.url.slice(0, 50) + '...')
-                return sendMediaWithUrl(result.url)
+                sendMediaWithUrl(result.url)
               } else {
                 console.warn('[ULTRAMSG] Upload de mídia falhou:', {
                   ok: result?.ok,
@@ -8942,84 +7795,37 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
                 // Fallback seguro: se temos URL pública do backend, tenta enviar direto sem upload.
                 if (fullUrl && !isLocalhost) {
                   console.warn('[ULTRAMSG] Tentando fallback com URL pública do backend após falha no upload.')
-                  return sendMediaWithUrl(fullUrl)
+                  sendMediaWithUrl(fullUrl)
                 } else {
                   console.warn('⚠️ UltraMsg uploadMedia falhou; mídia não enviada.', result?.error || '')
-                  return {
-                    ok: false,
-                    status: 'erro',
-                    status_mensagem: 'erro',
-                    error: result?.error || 'upload_midia_falhou',
-                    recorded: false,
+                  await supabase.from('mensagens').update({ status: 'erro', status_mensagem: 'erro' }).eq('company_id', company_id).eq('id', msg.id)
+                  const io2 = req.app?.get('io')
+                  if (io2) {
+                    io2.to(`empresa_${company_id}`).to(`conversa_${conversa_id}`).to(`usuario_${user_id}`).emit(io2.EVENTS?.STATUS_MENSAGEM || 'status_mensagem', { mensagem_id: msg.id, conversa_id: Number(conversa_id), status: 'erro', status_mensagem: 'erro' })
                   }
                 }
               }
             } catch (e) {
               console.error('WhatsApp uploadMedia:', e)
-              return {
-                ok: false,
-                status: 'erro',
-                status_mensagem: 'erro',
-                error: e?.message || 'upload_midia_falhou',
-                recorded: false,
+              await supabase.from('mensagens').update({ status: 'erro', status_mensagem: 'erro' }).eq('company_id', company_id).eq('id', msg.id)
+              const io2 = req.app?.get('io')
+              if (io2) {
+                io2.to(`empresa_${company_id}`).to(`conversa_${conversa_id}`).to(`usuario_${user_id}`).emit(io2.EVENTS?.STATUS_MENSAGEM || 'status_mensagem', { mensagem_id: msg.id, conversa_id: Number(conversa_id), status: 'erro', status_mensagem: 'erro' })
               }
             }
           })
         } else if (!baseUrl && !forceUploadMedia) {
           console.warn('⚠️ APP_URL/BASE_URL não configurado; mídia não enviada ao WhatsApp.')
-          dispatchResult = { ok: false, error: 'url_publica_indisponivel', recorded: false }
         } else {
           console.warn('⚠️ APP_URL é localhost e provider sem uploadMedia; mídia não enviada ao WhatsApp.')
-          dispatchResult = { ok: false, error: 'upload_midia_indisponivel', recorded: false }
         }
       } else if (!baseUrl) {
         console.warn('⚠️ APP_URL/BASE_URL não configurado; mídia não enviada ao WhatsApp.')
-        dispatchResult = { ok: false, error: 'url_publica_indisponivel', recorded: false }
-      }
-    } else {
-      dispatchResult = { ok: false, error: 'telefone_indisponivel', recorded: false }
-    }
-
-    if (!dispatchResult?.ok) {
-      if (dispatchResult?.recorded !== true) {
-        await supabase
-          .from('mensagens')
-          .update({ status: 'erro', status_mensagem: 'erro' })
-          .eq('company_id', company_id)
-          .eq('id', msg.id)
-        const io2 = req.app?.get('io')
-        if (io2) {
-          io2
-            .to(`empresa_${company_id}`)
-            .to(`conversa_${conversa_id}`)
-            .to(`usuario_${user_id}`)
-            .emit(io2.EVENTS?.STATUS_MENSAGEM || 'status_mensagem', {
-              mensagem_id: msg.id,
-              conversa_id: Number(conversa_id),
-              status: 'erro',
-              status_mensagem: 'erro',
-            })
-        }
-        scheduleOutboundMediaResend({ companyId: company_id, mensagemId: msg.id, io: io2 })
-      }
-      return {
-        ok: false,
-        status: 502,
-        error: 'Arquivo salvo, mas o WhatsApp não confirmou o envio. Tente novamente.',
-        msg: { ...msg, status: 'erro', status_mensagem: 'erro' },
       }
     }
 
-    const msgConfirmada = {
-      ...msg,
-      status: dispatchResult.status || 'pending',
-      status_mensagem: dispatchResult.status_mensagem || dispatchResult.status || 'sending',
-      ...(isRealWhatsAppId(dispatchResult.messageId) ? { whatsapp_id: dispatchResult.messageId } : {}),
-      ...(isUltramsgNumericQueueId(dispatchResult.messageId) ? { provider_queue_id: dispatchResult.messageId } : {}),
-    }
-
-    // Só confirma sucesso HTTP depois que o provedor aceitou explicitamente o envio.
-    return { ok: true, msg: msgConfirmada, aviso_whatsapp: avisoWhatsapp }
+  // Não retornar mensagem completa no HTTP — evita duplicação (API + socket). Mensagem chega via nova_mensagem.
+  return { ok: true, msg, aviso_whatsapp: avisoWhatsapp }
 }
 
 exports.enviarArquivo = async (req, res) => {
@@ -9102,28 +7908,6 @@ exports.enviarArquivo = async (req, res) => {
 
       const perFileCaption = i === 0 ? captionFromBody : ''
       const clientTempId = clientTempIds[i] || null
-      const atendimentoLimit = await validateAndConsumeForMessage({
-        company_id,
-        usuario_id: user_id,
-        conversa_id,
-        client_temp_id: clientTempId,
-        fallback_idempotency_key: clientTempId ? null : `upload:${conversa_id}:${raw.originalname || 'arquivo'}:${raw.size || 0}:${i}`,
-        message_type: aplicarTipoForcadoSticker(raw, inferirTipoArquivo(raw)),
-      })
-      if (atendimentoLimit.allowed === false) {
-        const payload = limitErrorResponse(atendimentoLimit)
-        if (!ids.length) return res.status(atendimentoLimit.status || 429).json(payload)
-        hadFailure = true
-        results.push({
-          ok: false,
-          status: atendimentoLimit.status || 429,
-          client_temp_id: clientTempId,
-          error: payload.error,
-          limit: payload.limit,
-          index: i,
-        })
-        continue
-      }
 
       const r = await enviarArquivoProcessarUm(req, raw, {
         company_id,
@@ -9134,14 +7918,11 @@ exports.enviarArquivo = async (req, res) => {
         io,
         captionUsuario: perFileCaption,
         clientTempId,
-        totalArquivos: files.length,
       })
       if (!r.ok) {
         hadFailure = true
         results.push({
           ok: false,
-          status: r.status,
-          ...(r.msg?.id != null ? { id: r.msg.id, persisted: true } : {}),
           client_temp_id: clientTempId,
           error: r.error || 'Falha ao enviar arquivo.',
           index: i,
@@ -9194,166 +7975,6 @@ exports.enviarArquivo = async (req, res) => {
   } catch (err) {
     console.error('Erro ao enviar arquivo:', err)
     return res.status(500).json({ error: 'Erro ao enviar arquivo' })
-  }
-}
-
-/**
- * Reenvia texto outbound já persistido em erro, sem criar novo registro.
- * Reutiliza handleExistingManualTextRequest + dispatchPersistedManualText (CAS/idempotência).
- */
-exports.reenviarTextoFalha = async (req, res) => {
-  try {
-    const conversaId = Number(req.params?.id)
-    const mensagemId = Number(req.params?.mensagem_id)
-    const companyId = Number(req.user?.company_id)
-    const userId = Number(req.user?.id)
-
-    if (![conversaId, mensagemId, companyId, userId].every((value) => Number.isSafeInteger(value) && value > 0)) {
-      return res.status(400).json({ ok: false, error: 'Conversa ou mensagem inválida para reenvio.' })
-    }
-
-    const io = req.app.get('io')
-    const permEnvio = await assertPodeEnviarMensagem({
-      company_id: companyId,
-      conversa_id: conversaId,
-      user_id: userId,
-      role: req.user?.perfil,
-      user_dep_ids: req.user?.departamento_ids,
-      autoAssumirAoEnviar: false,
-      io,
-    })
-    if (!permEnvio.ok) {
-      return res.status(permEnvio.status).json({ ok: false, error: permEnvio.error })
-    }
-
-    const { data: conversa, error: errConv } = await supabase
-      .from('conversas')
-      .select('id, telefone, chat_lid, cliente_id, whatsapp_instance_id')
-      .eq('company_id', companyId)
-      .eq('id', conversaId)
-      .maybeSingle()
-    if (errConv || !conversa) {
-      return res.status(404).json({ ok: false, error: 'Conversa não encontrada' })
-    }
-
-    const { data: row, error: errMsg } = await supabase
-      .from('mensagens')
-      .select(MANUAL_TEXT_BASE_SELECT)
-      .eq('company_id', companyId)
-      .eq('conversa_id', conversaId)
-      .eq('id', mensagemId)
-      .eq('direcao', 'out')
-      .maybeSingle()
-    if (errMsg) {
-      return res.status(500).json({ ok: false, error: 'Não foi possível consultar a mensagem.' })
-    }
-    if (!row) {
-      return res.status(404).json({ ok: false, error: 'Mensagem de texto não encontrada nesta conversa.' })
-    }
-    if (String(row.tipo || 'texto').toLowerCase() !== 'texto') {
-      return res.status(400).json({
-        ok: false,
-        error: 'Esta mensagem não é texto. Use o reenvio de mídia.',
-        id: row.id,
-      })
-    }
-
-    const status = String(row.status_mensagem || row.status || '').toLowerCase()
-    if (['sent', 'delivered', 'read', 'played', 'enviada', 'entregue', 'lida'].includes(status) || isRealWhatsAppId(row.whatsapp_id)) {
-      const classification = manualTextClassificationFromRow(row)
-      return res.status(200).json(
-        manualTextResponseFromClassification(classification, row, {
-          deduplicated: true,
-          already_sent: true,
-        })
-      )
-    }
-    if (!['erro', 'error', 'failed', 'falhou'].includes(status)) {
-      return res.status(409).json({
-        ok: false,
-        id: row.id,
-        conversa_id: conversaId,
-        status: row.status || status,
-        error: 'Só é possível reenviar mensagens com falha confirmada.',
-        retryable: ['pending', 'sending', 'status_indefinido'].includes(status),
-      })
-    }
-
-    const whatsappInstanceId = await resolveConversationWhatsappInstance(companyId, conversa)
-    let telefoneParaEnvio = String(conversa.telefone || '').trim()
-    if (telefoneParaEnvio.toLowerCase().startsWith('lid:')) {
-      return res.status(422).json({
-        ok: false,
-        id: row.id,
-        error: 'Número do contato indisponível para reenvio.',
-        retryable: false,
-      })
-    }
-
-    const existingResult = await handleExistingManualTextRequest({
-      company_id: companyId,
-      conversa_id: conversaId,
-      user_id: userId,
-      row,
-      requestedText: row.texto,
-      retryRequested: true,
-      phone: telefoneParaEnvio,
-      whatsappInstanceId,
-      io,
-    })
-    if (!existingResult.handled) {
-      return res.status(500).json({ ok: false, error: 'Não foi possível processar o reenvio do texto.' })
-    }
-    return res.status(existingResult.httpStatus || 500).json(existingResult.body)
-  } catch (error) {
-    console.error('[manualTextRetry] falha no endpoint manual:', error?.message || error)
-    return res.status(500).json({ ok: false, error: 'Erro interno ao tentar reenviar o texto.' })
-  }
-}
-
-/**
- * Reenvia uma mídia outbound já persistida que está em erro.
- *
- * Diferente de POST /arquivo, este endpoint não recebe o binário novamente e não cria outra
- * mensagem. Ele usa mensagem_id + company_id + conversa_id, consulta o provedor pelo referenceId
- * original e só despacha o arquivo salvo quando a UltraMsg confirma que ainda não o conhece.
- */
-exports.reenviarMidiaFalha = async (req, res) => {
-  try {
-    const conversaId = Number(req.params?.id)
-    const mensagemId = Number(req.params?.mensagem_id)
-    const companyId = Number(req.user?.company_id)
-    const userId = Number(req.user?.id)
-
-    if (![conversaId, mensagemId, companyId, userId].every((value) => Number.isSafeInteger(value) && value > 0)) {
-      return res.status(400).json({ ok: false, error: 'Conversa ou mensagem inválida para reenvio.' })
-    }
-
-    const io = req.app.get('io')
-    const permEnvio = await assertPodeEnviarMensagem({
-      company_id: companyId,
-      conversa_id: conversaId,
-      user_id: userId,
-      role: req.user?.perfil,
-      user_dep_ids: req.user?.departamento_ids,
-      autoAssumirAoEnviar: false,
-      io,
-    })
-    if (!permEnvio.ok) {
-      return res.status(permEnvio.status).json({ ok: false, error: permEnvio.error })
-    }
-
-    const result = await retryOutboundMediaByMessageId({
-      companyId,
-      conversaId,
-      mensagemId,
-      io,
-    })
-    const { httpStatus = result.ok ? 200 : 500, ...body } = result
-    return res.status(httpStatus).json(body)
-  } catch (error) {
-    console.error('[outboundMediaRetry] falha no endpoint manual:', error?.message || error)
-    return res.status(500).json({ ok: false, error: 'Erro interno ao tentar reenviar a mídia.' })
   }
 }
 
@@ -9555,9 +8176,6 @@ async function encaminharUmaMensagemParaConversa(ctx) {
         companyId: company_id,
         conversaId: conversa_id,
         whatsappInstanceId: whatsappInstanceId || undefined,
-        // Reconciliação do eco fromMe: texto encaminhado vai com prefixo "[Encaminhado]" mas é salvo
-        // sem prefixo — sem referenceId o eco não casa por texto e inseriria linha duplicada.
-        referenceId: `crm-${msg.id}`,
         sendOrigin: 'encaminhamento_atendimento',
       })
     }
@@ -9611,7 +8229,6 @@ async function encaminharUmaMensagemParaConversa(ctx) {
         conversaId: conversa_id,
         whatsappInstanceId: whatsappInstanceId || undefined,
         sendOrigin: 'encaminhamento_atendimento',
-        referenceId: `crm-${msg.id}`,
         returnDetails: true,
       }
 
@@ -9685,8 +8302,6 @@ async function encaminharUmaMensagemParaConversa(ctx) {
           conversaId: conversa_id,
           whatsappInstanceId: whatsappInstanceId || undefined,
           sendOrigin: 'encaminhamento_atendimento',
-          // Reconciliação do eco fromMe → evita cartão de contato duplicado ao encaminhar.
-          referenceId: `crm-${msg.id}`,
         },
       )
     } else if (telefoneParaEnvio && provider.sendText && !contactPhone) {
@@ -9695,7 +8310,6 @@ async function encaminharUmaMensagemParaConversa(ctx) {
         companyId: company_id,
         conversaId: conversa_id,
         whatsappInstanceId: whatsappInstanceId || undefined,
-        referenceId: `crm-${msg.id}`,
         sendOrigin: 'encaminhamento_atendimento',
       })
     }
@@ -9731,7 +8345,6 @@ async function encaminharUmaMensagemParaConversa(ctx) {
         companyId: company_id,
         conversaId: conversa_id,
         whatsappInstanceId: whatsappInstanceId || undefined,
-        referenceId: `crm-${msg.id}`,
         sendOrigin: 'encaminhamento_atendimento',
       })
     }
@@ -9760,7 +8373,6 @@ async function encaminharUmaMensagemParaConversa(ctx) {
         companyId: company_id,
         conversaId: conversa_id,
         whatsappInstanceId: whatsappInstanceId || undefined,
-        referenceId: `crm-${msg.id}`,
         sendOrigin: 'encaminhamento_atendimento',
       })
     }
@@ -9906,19 +8518,6 @@ exports.encaminharMensagem = async (req, res) => {
       if (i > 0) {
         await new Promise((r) => setTimeout(r, 400))
       }
-      const original = byId.get(orderedIds[i])
-      const atendimentoLimit = await validateAndConsumeForMessage({
-        company_id,
-        usuario_id: user_id,
-        conversa_id,
-        fallback_idempotency_key: `forward:${conversa_id}:${orderedIds[i]}`,
-        message_type: normalizeForwardTipo(original?.tipo || 'texto'),
-      })
-      if (atendimentoLimit.allowed === false) {
-        const payload = limitErrorResponse(atendimentoLimit)
-        resultados.push({ mensagem_id: orderedIds[i], ok: false, error: payload.error, status: atendimentoLimit.status || 429, limit: payload.limit })
-        continue
-      }
       const r = await encaminharUmaMensagemParaConversa({
         io,
         supabase,
@@ -9929,7 +8528,7 @@ exports.encaminharMensagem = async (req, res) => {
         whatsappInstanceId,
         provider,
         usuarioNome,
-        mensagemOriginal: original,
+        mensagemOriginal: byId.get(orderedIds[i]),
         tipo_encaminhamento,
         timestamp: new Date(Date.now() + i * 50).toISOString(),
       })
@@ -10008,7 +8607,6 @@ exports.finalizacaoAusenciaLoteAuth = async (req, res) => {
 
 exports._test = {
   assertPodeEnviarMensagem,
-  assertPermissaoConversa,
   parseChatListPagination,
   splitChatListPage,
   parseMessageHistoryPagination,
@@ -10022,19 +8620,10 @@ exports._test = {
   normalizeLinkPayload,
   normalizeClientTempId,
   buildClientTempIdDedupResponse,
-  buildMediaClientTempIdDedupResult,
   isClientTempIdUniqueViolation,
   inferirTipoArquivo,
   aplicarTipoForcadoSticker,
-  normalizeAudioForUltraMsg,
-  convertAudioWithFfmpeg,
-  resolveFfmpegPath,
-  probeAudioDurationSec,
-  audioDurationShortfall,
-  expectedAudioDurationMsFromRequest,
-  enviarArquivoProcessarUm,
   shouldNormalizeImageForWhatsapp,
   normalizeForwardTipo,
   resolveForwardMediaForProvider,
-  encaminharUmaMensagemParaConversa,
 }

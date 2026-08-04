@@ -1,5 +1,4 @@
 const { runAdminAtendimentoAlertaForAllCompanies } = require('./adminAtendimentoAlertaService')
-const { withSchedulerRunLock } = require('./schedulerLock')
 
 let schedulerStarted = false
 let timer = null
@@ -16,31 +15,29 @@ async function runCycle() {
   if (running) return
   running = true
   try {
-    await withSchedulerRunLock('admin_atendimento_alerta', parseIntervalMs() * 2, async () => {
-      const startedAt = Date.now()
-      const result = await runAdminAtendimentoAlertaForAllCompanies()
-      const elapsedMs = Date.now() - startedAt
-      if (!result?.ok) {
-        console.warn('[adminAlertaScheduler] ciclo com erro', { error: result?.error, elapsedMs })
-        return
-      }
-      if (result.enviadas > 0) {
-        console.log('[adminAlertaScheduler] enviadas', { enviadas: result.enviadas, processadas: result.processadas, elapsedMs })
-      } else if (result.processadas > 0) {
-        const resumo = (result.detalhes || [])
-          .map((d) => `${d.company_id}:${d.reason || (d.sent ? 'sent' : '?')}${d.error ? `(${String(d.error).slice(0, 80)})` : ''}`)
-          .join(' | ')
-        const hasActionable = (result.detalhes || []).some((d) =>
-          ['send_failed', 'invalid_phone', 'invalid_contact_phone', 'contact_not_found', 'contact_lookup_failed', 'reserve_failed', 'no_provider', 'no_metrics_enabled'].includes(d.reason)
-        )
-        const logFn = hasActionable ? console.warn : console.log
-        logFn('[adminAlertaScheduler] ciclo (alerta ativo; sem envio neste tick)', {
-          empresas_com_alerta_ativo: result.processadas,
-          elapsedMs,
-          detalhes: resumo || undefined,
-        })
-      }
-    })
+    const startedAt = Date.now()
+    const result = await runAdminAtendimentoAlertaForAllCompanies()
+    const elapsedMs = Date.now() - startedAt
+    if (!result?.ok) {
+      console.warn('[adminAlertaScheduler] ciclo com erro', { error: result?.error, elapsedMs })
+      return
+    }
+    if (result.enviadas > 0) {
+      console.log('[adminAlertaScheduler] enviadas', { enviadas: result.enviadas, processadas: result.processadas, elapsedMs })
+    } else if (result.processadas > 0) {
+      const resumo = (result.detalhes || [])
+        .map((d) => `${d.company_id}:${d.reason || (d.sent ? 'sent' : '?')}${d.error ? `(${String(d.error).slice(0, 80)})` : ''}`)
+        .join(' | ')
+      const hasActionable = (result.detalhes || []).some((d) =>
+        ['send_failed', 'invalid_phone', 'invalid_contact_phone', 'contact_not_found', 'contact_lookup_failed', 'reserve_failed', 'no_provider', 'no_metrics_enabled'].includes(d.reason)
+      )
+      const logFn = hasActionable ? console.warn : console.log
+      logFn('[adminAlertaScheduler] ciclo (alerta ativo; sem envio neste tick)', {
+        empresas_com_alerta_ativo: result.processadas,
+        elapsedMs,
+        detalhes: resumo || undefined,
+      })
+    }
   } catch (e) {
     console.warn('[adminAlertaScheduler] erro no ciclo:', e?.message || e)
   } finally {
@@ -48,6 +45,10 @@ async function runCycle() {
   }
 }
 
+/**
+ * Dispara a verificação de horários periodicamente (sem depender de cron externo).
+ * A liberação do alerta é controlada pela tela, por empresa.
+ */
 function startAdminAtendimentoAlertaScheduler() {
   if (schedulerStarted) return
   schedulerStarted = true
@@ -69,5 +70,4 @@ function startAdminAtendimentoAlertaScheduler() {
 
 module.exports = {
   startAdminAtendimentoAlertaScheduler,
-  _test: { runCycle, parseIntervalMs },
 }

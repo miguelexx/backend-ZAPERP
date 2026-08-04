@@ -86,7 +86,7 @@ async function testarEncaminhamento() {
     if (config?.instance_id && config?.instance_token) {
       console.log('✅ Configuração WhatsApp encontrada')
       console.log(`   Instance ID: ${config.instance_id}`)
-      console.log('   Token: configurado (valor omitido)')
+      console.log(`   Token: ${config.instance_token.substring(0, 10)}...`)
     } else {
       console.log('⚠️  Configuração WhatsApp não encontrada')
     }

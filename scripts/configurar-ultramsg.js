@@ -4,7 +4,7 @@
  *
  * Variáveis de ambiente:
  *   ULTRAMSG_INSTANCE_ID=instance51534
- *   ULTRAMSG_TOKEN=<token da instância no painel UltraMsg>
+ *   ULTRAMSG_TOKEN=r6ztawoqwcfhzrd
  *   COMPANY_ID=1 (ou passar como arg)
  */
 
@@ -13,11 +13,7 @@ const supabase = require('../config/supabase')
 const { invalidateEmpresaWhatsappConfigCache } = require('../services/whatsappConfigService')
 
 const instanceId = process.env.ULTRAMSG_INSTANCE_ID || 'instance51534'
-const token = String(process.env.ULTRAMSG_TOKEN || '').trim()
-if (!token) {
-  console.error('ULTRAMSG_TOKEN não definido no .env (nunca hardcodar token neste script)')
-  process.exit(1)
-}
+const token = process.env.ULTRAMSG_TOKEN || 'r6ztawoqwcfhzrd'
 const companyId = Number(process.argv[2] || process.env.COMPANY_ID || 1)
 
 async function main() {

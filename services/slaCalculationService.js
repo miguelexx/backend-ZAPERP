@@ -11,20 +11,12 @@ const {
 } = require('./absenceFinalizationService')
 const {
   businessMinutesBetween,
+  normalizeBusinessSchedule,
+  describeBusinessSchedule,
+  mergeScheduleSource,
 } = require('./atendimentoSemRespostaService')
-const {
-  resolveDashboardInstanceScope,
-  applyDashboardInstanceScope,
-} = require('./dashboardInstanceScopeService')
-const {
-  explicitMessageOrigin,
-  dedupeOperationalMessages,
-  isIndividualCustomerConversation,
-} = require('./dashboardDataRulesService')
 
 const SAO_PAULO_TZ = 'America/Sao_Paulo'
-const SLA_BUSINESS_START_MINUTE = 7 * 60
-const SLA_BUSINESS_END_MINUTE = 18 * 60
 const PAGE_SIZE = 1000
 const OPEN_STATUSES = new Set(['aberta', 'em_atendimento', 'aguardando_cliente'])
 
@@ -49,6 +41,13 @@ function avg(values) {
   const nums = (values || []).filter((v) => Number.isFinite(v))
   if (nums.length === 0) return null
   return nums.reduce((sum, v) => sum + v, 0) / nums.length
+}
+
+function minutesSince(startIso, endDate = new Date()) {
+  const start = new Date(startIso).getTime()
+  const end = new Date(endDate).getTime()
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return 0
+  return Math.floor((end - start) / 60000)
 }
 
 function parseDateOnly(value) {
@@ -178,30 +177,13 @@ async function fetchAllRows(buildQuery) {
   return all
 }
 
-async function loadSimpleModeOperator(company_id) {
-  const [{ data: empresa, error: empresaError }, { data: usuarios, error: usuariosError }] = await Promise.all([
-    supabase
-      .from('empresas')
-      .select('atendimento_modo_simples')
-      .eq('id', company_id)
-      .maybeSingle(),
-    supabase
-      .from('usuarios')
-      .select('id, nome, perfil, ativo')
-      .eq('company_id', company_id),
-  ])
-  if (empresaError) throw empresaError
-  if (usuariosError) throw usuariosError
-  if (empresa?.atendimento_modo_simples !== true) return { enabled: false, operator: null }
-
-  const activeUsers = (usuarios || []).filter((user) => user.ativo !== false)
-  const attendants = activeUsers.filter((user) => String(user.perfil || '').toLowerCase() === 'atendente')
-  const operator = attendants.length === 1
-    ? attendants[0]
-    : activeUsers.length === 1
-      ? activeUsers[0]
-      : null
-  return { enabled: true, operator }
+async function loadIaConfig(company_id) {
+  const { data } = await supabase
+    .from('ia_config')
+    .select('config')
+    .eq('company_id', company_id)
+    .maybeSingle()
+  return data?.config && typeof data.config === 'object' ? data.config : {}
 }
 
 function normalizeMinutes(value, fallback = 30) {
@@ -239,11 +221,10 @@ async function loadSlaConfig(company_id) {
   return {
     sla_minutos_sem_resposta: normalizeMinutes(emp?.sla_minutos_sem_resposta, 30),
     sla_meta_percentual: clampInt(emp?.sla_meta_percentual, 1, 100) ?? 90,
-    // O Dashboard/SLA usa uma janela operacional fixa e auditável.
-    sla_usar_horario_comercial: true,
+    sla_usar_horario_comercial: emp?.sla_usar_horario_comercial === true,
     sla_contar_bot_como_resposta: emp?.sla_contar_bot_como_resposta === true,
-    horario_inicio: '07:00',
-    horario_fim: '18:00',
+    horario_inicio: emp?.horario_inicio || null,
+    horario_fim: emp?.horario_fim || null,
     metas_departamentos: deptMap,
     metas_usuarios: userMap,
   }
@@ -263,30 +244,40 @@ function resolveMetaMinutos(slaConfig, { atendente_id, departamento_id } = {}) {
   return { limite_min: empresaMin, meta_origem: 'empresa', meta_origem_label: 'Empresa' }
 }
 
-async function loadSlaBusinessSchedule(_company_id, _slaConfig) {
-  // Regra única do Dashboard: todos os dias, das 07:00 às 18:00 em São Paulo.
-  // Não herdamos a agenda do chatbot, pois ela pode conter janelas ou dias
-  // desativados diferentes e tornaria o mesmo ciclo variável entre telas.
-  const schedule = {
-    enabled: true,
-    timezone: SAO_PAULO_TZ,
-    diasSemanaDesativados: [],
-    datasEspecificasFechadas: [],
-    windows: [{
-      start: SLA_BUSINESS_START_MINUTE,
-      end: SLA_BUSINESS_END_MINUTE,
-    }],
+async function loadSlaBusinessSchedule(company_id, slaConfig) {
+  const iaConfig = await loadIaConfig(company_id)
+  const ct = iaConfig.chatbot_triage && typeof iaConfig.chatbot_triage === 'object' ? iaConfig.chatbot_triage : {}
+
+  if (!slaConfig?.sla_usar_horario_comercial) {
+    return {
+      schedule: { enabled: false },
+      horario_comercial_ativo: false,
+      modo_contagem: 'tempo_corrido',
+      resumo: 'Cálculo em tempo corrido (24h). Ative o horário comercial nas configurações de SLA para pausar fora do expediente.',
+    }
   }
+
+  const empresaHorario = {}
+  if (slaConfig.horario_inicio && slaConfig.horario_fim) {
+    const hi = String(slaConfig.horario_inicio).slice(0, 5)
+    const hf = String(slaConfig.horario_fim).slice(0, 5)
+    if (/^\d{2}:\d{2}$/.test(hi) && /^\d{2}:\d{2}$/.test(hf)) {
+      empresaHorario.horarioInicio = hi
+      empresaHorario.horarioFim = hf
+    }
+  }
+
+  const mergedSource = Object.keys(ct).length ? ct : empresaHorario
+  const schedule = normalizeBusinessSchedule(
+    { horario_comercial_ativo: true, timezone: ct.timezone || 'America/Sao_Paulo' },
+    { chatbot_triage: mergedSource }
+  )
 
   return {
     schedule,
     horario_comercial_ativo: true,
     modo_contagem: 'horario_comercial',
-    timezone: SAO_PAULO_TZ,
-    dias_semana_desativados: [],
-    datas_especificas_fechadas: [],
-    janelas: [{ inicio: '07:00', fim: '18:00' }],
-    resumo: 'Contagem ativa todos os dias, das 07:00 às 18:00, no fuso America/Sao_Paulo. Fora dessa janela, os minutos ficam pausados.',
+    resumo: describeBusinessSchedule(schedule),
   }
 }
 
@@ -298,18 +289,11 @@ function calcDiffMinutes(startIso, endIso, schedule) {
 
 function classifyOutbound(msg, { triageMerged, absenceCfg, contarBot }) {
   if (!msg || msg.direcao !== 'out' || !msg.criado_em) return { tipo: null, valida: false }
-  const origem = explicitMessageOrigin(msg)
-  if (origem === 'sistema_humano' || origem === 'whatsapp_celular') {
-    return { tipo: 'humana', origem, valida: true }
-  }
-  if (['automacao', 'bot', 'campanha', 'sistema'].includes(origem)) {
-    return { tipo: 'automacao', origem, valida: contarBot === true }
-  }
   const isHuman = outboundQualificaParaAguardandoCliente(msg.texto, msg.autor_usuario_id, triageMerged, absenceCfg)
-  if (isHuman) return { tipo: 'humana', origem, valida: true }
-  if (contarBot) return { tipo: 'automacao', origem, valida: true }
+  if (isHuman) return { tipo: 'humana', valida: true }
+  if (contarBot) return { tipo: 'automacao', valida: true }
   const isBot = looksLikeBotMessage(String(msg.texto || ''), triageMerged) || msg.autor_usuario_id == null
-  return { tipo: isBot ? 'automacao' : 'automacao', origem, valida: false }
+  return { tipo: isBot ? 'automacao' : 'automacao', valida: false }
 }
 
 function findFirstInboundAfter(msgs, afterTs = 0) {
@@ -378,11 +362,10 @@ function analyzeSlaCycle({
         ...rowBase,
         primeira_resposta_em: primeiraOutQualquer.criado_em,
         tipo_resposta: cls.tipo || 'automacao',
-        origem_resposta: cls.origem || explicitMessageOrigin(primeiraOutQualquer),
-        status_sla: 'sem_resposta',
+        status_sla: 'dados_insuficientes',
         cumpriu_sla: null,
         tempo_resposta_min: null,
-        motivo: 'Aguardando primeira resposta humana; automação/bot não encerrou o prazo.',
+        motivo: 'Apenas resposta automática/bot detectada; não conta como primeira resposta humana.',
       }
     }
     return {
@@ -416,151 +399,11 @@ function analyzeSlaCycle({
     primeira_resposta_em: primeiraOutValida.criado_em,
     primeira_resposta_atendente_em: primeiraOutValida.criado_em,
     tipo_resposta: cls.tipo || 'humana',
-    origem_resposta: cls.origem || explicitMessageOrigin(primeiraOutValida),
     status_sla: cumpriu ? 'cumpriu' : 'violou',
     cumpriu_sla: cumpriu,
     tempo_resposta_min: diffMin,
     motivo: null,
   }
-}
-
-/**
- * Divide uma conversa persistente em ciclos operacionais de espera:
- * primeira mensagem inbound de uma rajada -> primeira resposta humana válida.
- * Inbounds consecutivas pertencem ao mesmo ciclo e bot/automação não encerram
- * a espera, salvo quando a configuração da empresa permite.
- */
-function analyzeConversationSlaCycles({
-  msgs,
-  reopenAnchors = [],
-  limiteMin,
-  metaOrigem,
-  metaOrigemLabel,
-  schedule,
-  ctx,
-  base,
-}) {
-  const sorted = (msgs || [])
-    .filter((msg) => msg?.criado_em && ['in', 'out'].includes(msg?.direcao))
-    .slice()
-    .sort((a, b) => {
-      const diff = new Date(a.criado_em).getTime() - new Date(b.criado_em).getTime()
-      return diff || Number(a.id || 0) - Number(b.id || 0)
-    })
-  const anchors = (reopenAnchors || [])
-    .map((value) => ({ value, ts: new Date(value).getTime() }))
-    .filter((item) => Number.isFinite(item.ts))
-    .sort((a, b) => a.ts - b.ts)
-
-  const rows = []
-  let pending = null
-  let lastValidOutboundTs = 0
-
-  const startPending = (msg, ts) => {
-    const reopen = anchors
-      .filter((item) => item.ts <= ts && item.ts > lastValidOutboundTs)
-      .slice(-1)[0] || null
-    pending = {
-      firstInbound: msg,
-      firstAutomation: null,
-      tipoSla: reopen ? 'reabertura' : rows.length === 0 ? 'primeira_resposta' : 'nova_interacao',
-      anchorEm: reopen?.value || msg.criado_em,
-    }
-  }
-
-  const buildBase = () => ({
-    ...base,
-    ciclo_numero: rows.length + 1,
-    tipo_sla: pending.tipoSla,
-    primeira_mensagem_cliente_em: pending.firstInbound.criado_em,
-    dia: formatSaoPauloDateKey(pending.firstInbound.criado_em),
-    hora: saoPauloHourKey(pending.firstInbound.criado_em),
-    dia_semana: saoPauloWeekdayIndex(pending.firstInbound.criado_em),
-    limite_min: limiteMin,
-    meta_origem: metaOrigem,
-    meta_origem_label: metaOrigemLabel,
-    anchor_em: pending.anchorEm,
-  })
-
-  for (const msg of sorted) {
-    const ts = new Date(msg.criado_em).getTime()
-    if (!Number.isFinite(ts)) continue
-
-    if (msg.direcao === 'in') {
-      if (!pending) {
-        startPending(msg, ts)
-      } else {
-        const pendingTs = new Date(pending.firstInbound.criado_em).getTime()
-        const reopenedAfterPending = anchors.some(
-          (item) => item.ts > pendingTs && item.ts <= ts
-        )
-        // Uma reabertura inicia uma nova espera operacional. Isso evita que uma
-        // mensagem antiga, nunca respondida antes do encerramento, contamine o
-        // ciclo atual.
-        if (reopenedAfterPending) startPending(msg, ts)
-      }
-      continue
-    }
-
-    const classification = classifyOutbound(msg, ctx)
-    if (!pending) {
-      if (classification.valida) lastValidOutboundTs = ts
-      continue
-    }
-    if (!classification.valida) {
-      if (!pending.firstAutomation) pending.firstAutomation = { msg, classification }
-      continue
-    }
-
-    const rowBase = buildBase()
-    const diffMin = calcDiffMinutes(pending.firstInbound.criado_em, msg.criado_em, schedule)
-    if (diffMin == null || diffMin < 0) {
-      rows.push({
-        ...rowBase,
-        primeira_resposta_em: msg.criado_em,
-        tipo_resposta: classification.tipo || 'humana',
-        origem_resposta: classification.origem || explicitMessageOrigin(msg),
-        status_sla: 'dados_insuficientes',
-        cumpriu_sla: null,
-        tempo_resposta_min: null,
-        motivo: 'Não foi possível calcular o tempo entre mensagens.',
-      })
-    } else {
-      const cumpriu = diffMin <= limiteMin
-      rows.push({
-        ...rowBase,
-        primeira_resposta_em: msg.criado_em,
-        primeira_resposta_atendente_em: msg.criado_em,
-        tipo_resposta: classification.tipo || 'humana',
-        origem_resposta: classification.origem || explicitMessageOrigin(msg),
-        status_sla: cumpriu ? 'cumpriu' : 'violou',
-        cumpriu_sla: cumpriu,
-        tempo_resposta_min: diffMin,
-        motivo: cumpriu ? 'Resposta dentro da meta configurada.' : 'Resposta acima da meta configurada.',
-      })
-    }
-    lastValidOutboundTs = ts
-    pending = null
-  }
-
-  if (pending) {
-    const rowBase = buildBase()
-    const auto = pending.firstAutomation
-    rows.push({
-      ...rowBase,
-      primeira_resposta_em: auto?.msg?.criado_em || null,
-      tipo_resposta: auto?.classification?.tipo || null,
-      origem_resposta: auto?.classification?.origem || (auto?.msg ? explicitMessageOrigin(auto.msg) : null),
-      status_sla: 'sem_resposta',
-      cumpriu_sla: null,
-      tempo_resposta_min: null,
-      motivo: auto
-        ? 'Aguardando resposta humana; automação/bot não encerrou o prazo.'
-        : 'Aguardando resposta humana.',
-    })
-  }
-
-  return rows
 }
 
 async function fetchUsuariosNomeMap(company_id, userIds) {
@@ -595,25 +438,23 @@ async function fetchDepartamentosNomeMap(company_id, depIds) {
   return map
 }
 
-async function fetchMensagensForConversas(company_id, conversaIds, instanceScope = null) {
+async function fetchMensagensForConversas(company_id, conversaIds) {
   const ids = [...new Set((conversaIds || []).filter(Boolean))]
   if (ids.length === 0) return []
   const all = []
   for (const chunk of chunkArray(ids, 200)) {
-    const rows = await fetchAllRows(() => {
-      let query = supabase
+    const rows = await fetchAllRows(() =>
+      supabase
         .from('mensagens')
-        .select('id, conversa_id, criado_em, direcao, autor_usuario_id, texto, tipo, whatsapp_id, whatsapp_instance_id, origem, apagada_para_todos')
+        .select('id, conversa_id, criado_em, direcao, autor_usuario_id, texto')
         .eq('company_id', company_id)
         .in('conversa_id', chunk)
         .in('direcao', ['in', 'out'])
         .order('criado_em', { ascending: true })
-      if (instanceScope) query = applyDashboardInstanceScope(query, instanceScope)
-      return query
-    })
+    )
     all.push(...rows)
   }
-  return dedupeOperationalMessages(all).rows
+  return all
 }
 
 function buildGroupRanking(items, keyGetter, labelGetter) {
@@ -695,38 +536,6 @@ function buildResumoFromAnalisadas(analisadas, extras = {}) {
   }
 }
 
-function summarizeResponseCycleTimes(rows = []) {
-  const ordered = (rows || [])
-    .slice()
-    .sort((a, b) => (
-      new Date(a.primeira_mensagem_cliente_em).getTime()
-      - new Date(b.primeira_mensagem_cliente_em).getTime()
-    ))
-  const firstCycleByConversation = new Map()
-  for (const row of ordered) {
-    const key = row.cliente_id != null
-      ? `cliente:${row.cliente_id}`
-      : `conversa:${row.conversa_id}`
-    if (!firstCycleByConversation.has(key)) firstCycleByConversation.set(key, row)
-  }
-  const firstCycles = Array.from(firstCycleByConversation.values())
-  const responded = ordered.filter(
-    (row) => (row.status_sla === 'cumpriu' || row.status_sla === 'violou')
-      && Number.isFinite(row.tempo_resposta_min)
-  )
-  const firstResponded = firstCycles.filter(
-    (row) => (row.status_sla === 'cumpriu' || row.status_sla === 'violou')
-      && Number.isFinite(row.tempo_resposta_min)
-  )
-  return {
-    responded,
-    firstCycles,
-    firstResponded,
-    tempo_medio_resposta_min: round1(avg(responded.map((row) => row.tempo_resposta_min))),
-    tempo_medio_primeira_resposta_min: round1(avg(firstResponded.map((row) => row.tempo_resposta_min))),
-  }
-}
-
 function buildDiarioFromItems(items, semRespostaItems, dadosInsuficientesItems) {
   const porDiaMap = new Map()
 
@@ -764,7 +573,6 @@ function buildDiarioFromItems(items, semRespostaItems, dadosInsuficientesItems) 
         sem_resposta: row.sem_resposta,
         dados_insuficientes: row.dados_insuficientes,
         percentual_cumprido: percent(row.dentro_sla, row.total_analisadas),
-        tempo_medio_resposta_min: round1(avg(row.tempos)),
         tempo_medio_primeira_resposta_min: round1(avg(row.tempos)),
         pior_tempo_resposta_min: sorted.length ? round1(sorted[sorted.length - 1]) : null,
         melhor_tempo_resposta_min: sorted.length ? round1(sorted[0]) : null,
@@ -791,13 +599,8 @@ async function buildSlaAnalytics(company_id, query = {}, opts = {}) {
   const departamentoId = toPositiveInt(query.departamento_id)
   const statusAtendimento = String(query.status_atendimento || '').trim()
   const skipTrend = opts.skipTrend === true
-  const instanceScope = opts.instanceScope || await resolveDashboardInstanceScope(company_id, query.whatsapp_instance_id)
 
-  const [slaConfig, simpleMode] = await Promise.all([
-    loadSlaConfig(company_id),
-    loadSimpleModeOperator(company_id),
-  ])
-  const simpleOperator = simpleMode.operator
+  const slaConfig = await loadSlaConfig(company_id)
   const businessInfo = await loadSlaBusinessSchedule(company_id, slaConfig)
   const schedule = businessInfo.schedule
   const { triageMerged, absence } = await loadChatbotTriageMergeAndAbsence(company_id)
@@ -809,15 +612,10 @@ async function buildSlaAnalytics(company_id, query = {}, opts = {}) {
 
   let conversasQuery = supabase
     .from('conversas')
-    .select('id, cliente_id, telefone, status_atendimento, modo_simples_aguardando, tipo, criado_em, atendente_id, departamento_id, reaberta_falta_interacao_em, clientes!conversas_cliente_fk ( nome )')
+    .select('id, telefone, status_atendimento, criado_em, atendente_id, departamento_id, reaberta_falta_interacao_em, clientes!conversas_cliente_fk ( nome )')
     .eq('company_id', company_id)
-  conversasQuery = applyDashboardInstanceScope(conversasQuery, instanceScope)
 
-  if (atendenteId) {
-    conversasQuery = simpleOperator && Number(simpleOperator.id) === atendenteId
-      ? conversasQuery.or(`atendente_id.eq.${atendenteId},atendente_id.is.null`)
-      : conversasQuery.eq('atendente_id', atendenteId)
-  }
+  if (atendenteId) conversasQuery = conversasQuery.eq('atendente_id', atendenteId)
   if (departamentoId) conversasQuery = conversasQuery.eq('departamento_id', departamentoId)
   if (statusAtendimento) conversasQuery = conversasQuery.eq('status_atendimento', statusAtendimento)
   if (range.toIso) conversasQuery = conversasQuery.lte('criado_em', range.toIso)
@@ -825,35 +623,11 @@ async function buildSlaAnalytics(company_id, query = {}, opts = {}) {
   const { data: conversasRows, error: conversasError } = await conversasQuery
   if (conversasError) throw conversasError
 
-  const conversas = (Array.isArray(conversasRows) ? conversasRows : [])
-    .filter(isIndividualCustomerConversation)
+  const conversas = Array.isArray(conversasRows) ? conversasRows : []
   const conversaById = new Map(conversas.map((c) => [String(c.id), c]))
-  const mensagens = await fetchMensagensForConversas(company_id, conversas.map((c) => c.id), instanceScope)
-  const reaberturasPorConversa = new Map()
-  if (conversas.length > 0) {
-    const conversaIds = conversas.map((c) => c.id)
-    for (const ids of chunkArray(conversaIds, 200)) {
-      const rows = await fetchAllRows(() =>
-        supabase
-          .from('atendimentos')
-          .select('id, conversa_id, criado_em, acao')
-          .eq('company_id', company_id)
-          .eq('acao', 'reabriu')
-          .in('conversa_id', ids)
-          .order('criado_em', { ascending: true })
-      )
-      for (const row of rows) {
-        const key = String(row.conversa_id)
-        if (!reaberturasPorConversa.has(key)) reaberturasPorConversa.set(key, [])
-        reaberturasPorConversa.get(key).push(row.criado_em)
-      }
-    }
-  }
+  const mensagens = await fetchMensagensForConversas(company_id, conversas.map((c) => c.id))
 
-  const usuarioNomeMap = await fetchUsuariosNomeMap(company_id, [
-    ...conversas.map((c) => c?.atendente_id),
-    simpleOperator?.id,
-  ])
+  const usuarioNomeMap = await fetchUsuariosNomeMap(company_id, conversas.map((c) => c?.atendente_id))
   const depNomeMap = await fetchDepartamentosNomeMap(company_id, conversas.map((c) => c?.departamento_id))
 
   const mensagensPorConversa = new Map()
@@ -868,44 +642,35 @@ async function buildSlaAnalytics(company_id, query = {}, opts = {}) {
   const semResposta = []
   const dadosInsuficientes = []
   const allRows = []
+
   for (const [conversaId, msgs] of mensagensPorConversa.entries()) {
     const conversa = conversaById.get(String(conversaId))
     if (!conversa) continue
     msgs.sort((a, b) => new Date(a.criado_em).getTime() - new Date(b.criado_em).getTime())
 
-    const effectiveAtendenteId = conversa.atendente_id || simpleOperator?.id || null
     const meta = resolveMetaMinutos(slaConfig, {
-      atendente_id: effectiveAtendenteId,
+      atendente_id: conversa.atendente_id,
       departamento_id: conversa.departamento_id,
     })
 
-    const atendenteNome = usuarioNomeMap[String(effectiveAtendenteId)] || simpleOperator?.nome || 'Sem atendente'
-    const setorNome = conversa?.departamento_id != null
-      ? (depNomeMap[String(conversa.departamento_id)] || 'Sem setor')
-      : simpleMode.enabled
-        ? 'Atendimento simples'
-        : 'Sem setor'
+    const atendenteNome = usuarioNomeMap[String(conversa?.atendente_id)] || 'Sem atendente'
+    const setorNome = conversa?.departamento_id != null ? (depNomeMap[String(conversa.departamento_id)] || 'Sem setor') : 'Sem setor'
     const base = {
       conversa_id: conversa.id,
-      cliente_id: conversa.cliente_id || null,
       cliente_nome: getDisplayName(conversa.clientes) || conversa.telefone || 'Cliente',
       telefone: conversa.telefone || '',
       status_atendimento: conversa.status_atendimento || '',
-      modo_simples_aguardando: conversa.modo_simples_aguardando || null,
-      tipo_conversa: conversa.tipo || null,
-      atendente_id: effectiveAtendenteId,
+      atendente_id: conversa.atendente_id || null,
       atendente_nome: atendenteNome,
       departamento_id: conversa.departamento_id || null,
       setor: setorNome,
     }
 
-    const reopenAnchors = [
-      conversa.reaberta_falta_interacao_em,
-      ...(reaberturasPorConversa.get(String(conversaId)) || []),
-    ].filter(Boolean)
-    const ciclos = analyzeConversationSlaCycles({
+    const primeira = analyzeSlaCycle({
       msgs,
-      reopenAnchors,
+      anchorTs: 0,
+      anchorEm: null,
+      tipoSla: 'primeira_resposta',
       limiteMin: meta.limite_min,
       metaOrigem: meta.meta_origem,
       metaOrigemLabel: meta.meta_origem_label,
@@ -913,22 +678,52 @@ async function buildSlaAnalytics(company_id, query = {}, opts = {}) {
       ctx,
       base,
     })
+    if (!primeira) continue
 
-    for (const ciclo of ciclos) {
-      const inboundTs = new Date(ciclo.primeira_mensagem_cliente_em).getTime()
-      if (!Number.isFinite(inboundTs)) continue
-      if (range.fromIso && inboundTs < new Date(range.fromIso).getTime()) continue
-      if (range.toIso && inboundTs > new Date(range.toIso).getTime()) continue
-      if (diaFiltro && ciclo.dia !== diaFiltro) continue
+    const primeiraInTs = new Date(primeira.primeira_mensagem_cliente_em).getTime()
+    if (!Number.isFinite(primeiraInTs)) continue
+    if (range.fromIso && primeiraInTs < new Date(range.fromIso).getTime()) continue
+    if (range.toIso && primeiraInTs > new Date(range.toIso).getTime()) continue
+    if (diaFiltro && primeira.dia !== diaFiltro) continue
 
-      allRows.push(ciclo)
-      if (ciclo.tipo_sla === 'reabertura') reaberturaRows.push(ciclo)
-      if (ciclo.status_sla === 'cumpriu' || ciclo.status_sla === 'violou') {
-        primeiraRespostaRows.push(ciclo)
-      } else if (ciclo.status_sla === 'sem_resposta') {
-        semResposta.push(ciclo)
-      } else if (ciclo.status_sla === 'dados_insuficientes') {
-        dadosInsuficientes.push(ciclo)
+    allRows.push(primeira)
+
+    if (primeira.status_sla === 'cumpriu' || primeira.status_sla === 'violou') {
+      primeiraRespostaRows.push(primeira)
+    } else if (primeira.status_sla === 'sem_resposta') {
+      semResposta.push(primeira)
+    } else if (primeira.status_sla === 'dados_insuficientes') {
+      dadosInsuficientes.push(primeira)
+    }
+
+    const reabertaEm = conversa.reaberta_falta_interacao_em
+    if (reabertaEm) {
+      const reabertaTs = new Date(reabertaEm).getTime()
+      if (Number.isFinite(reabertaTs)) {
+        const reabertura = analyzeSlaCycle({
+          msgs,
+          anchorTs: reabertaTs,
+          anchorEm: reabertaEm,
+          tipoSla: 'reabertura',
+          limiteMin: meta.limite_min,
+          metaOrigem: meta.meta_origem,
+          metaOrigemLabel: meta.meta_origem_label,
+          schedule,
+          ctx,
+          base,
+        })
+        if (reabertura) {
+          const reabInTs = new Date(reabertura.primeira_mensagem_cliente_em).getTime()
+          if (Number.isFinite(reabInTs) && reabInTs >= reabertaTs) {
+            if (range.fromIso && reabInTs < new Date(range.fromIso).getTime()) {
+              // fora do período
+            } else if (range.toIso && reabInTs > new Date(range.toIso).getTime()) {
+              // fora do período
+            } else if (!diaFiltro || reabertura.dia === diaFiltro) {
+              reaberturaRows.push(reabertura)
+            }
+          }
+        }
       }
     }
   }
@@ -937,26 +732,17 @@ async function buildSlaAnalytics(company_id, query = {}, opts = {}) {
   const violacoes = analisadas.filter((x) => x.status_sla === 'violou')
   const respostaHumana = analisadas.filter((x) => x.tipo_resposta === 'humana').length
   const respostaAutomacao = allRows.filter((x) => x.tipo_resposta === 'automacao').length
-  const responseTimeSummary = summarizeResponseCycleTimes(allRows)
 
   const now = Date.now()
   const criticasSemResposta = semResposta
-    .filter((x) => (
-      simpleMode.enabled
-        ? x.modo_simples_aguardando === 'atendente'
-        : OPEN_STATUSES.has(x.status_atendimento)
-    ))
+    .filter((x) => OPEN_STATUSES.has(x.status_atendimento))
     .map((x) => {
-      const minAguardando = calcDiffMinutes(
-        x.primeira_mensagem_cliente_em,
-        new Date(now).toISOString(),
-        schedule
-      )
+      const minAguardando = minutesSince(x.primeira_mensagem_cliente_em, new Date(now))
       const limite = x.limite_min || slaConfig.sla_minutos_sem_resposta
       return {
         ...x,
-        minutos_aguardando: Number.isFinite(minAguardando) ? minAguardando : 0,
-        critica: Number.isFinite(minAguardando) && minAguardando >= limite,
+        minutos_aguardando: minAguardando,
+        critica: minAguardando >= limite,
       }
     })
     .filter((x) => x.critica)
@@ -969,11 +755,7 @@ async function buildSlaAnalytics(company_id, query = {}, opts = {}) {
     resposta_humana: respostaHumana,
     resposta_automacao: respostaAutomacao,
     reabertura_total: reaberturaRows.filter((x) => x.status_sla === 'cumpriu' || x.status_sla === 'violou').length,
-    total_ciclos_com_cliente: allRows.length,
-    total_conversas_com_cliente: new Set(allRows.map((item) => String(item.conversa_id))).size,
-    total_primeiras_respostas_analisadas: responseTimeSummary.firstResponded.length,
-    tempo_medio_resposta_min: responseTimeSummary.tempo_medio_resposta_min,
-    tempo_medio_primeira_resposta_min: responseTimeSummary.tempo_medio_primeira_resposta_min,
+    total_conversas_com_cliente: allRows.length,
     meta_minutos_global: slaConfig.sla_minutos_sem_resposta,
     meta_percentual_configurada: slaConfig.sla_meta_percentual,
   })
@@ -1000,7 +782,7 @@ async function buildSlaAnalytics(company_id, query = {}, opts = {}) {
         ...query,
         data_inicio: prevRange.data_inicio,
         data_fim: prevRange.data_fim,
-      }, { skipTrend: true, instanceScope })
+      }, { skipTrend: true })
       const atualPct = resumo.percentual_cumprido
       const prevPct = prev?.resumo?.percentual_cumprido
       tendencia = {
@@ -1012,15 +794,12 @@ async function buildSlaAnalytics(company_id, query = {}, opts = {}) {
     }
   }
 
-  const conversasDetalhadas = allRows
-    .slice()
+  const conversasDetalhadas = [...analisadas, ...violacoes, ...semResposta, ...dadosInsuficientes]
+    .filter((x, i, arr) => arr.findIndex((y) => y.conversa_id === x.conversa_id && y.tipo_sla === x.tipo_sla) === i)
     .sort((a, b) => new Date(b.primeira_mensagem_cliente_em).getTime() - new Date(a.primeira_mensagem_cliente_em).getTime())
-  const primeirasDoPeriodo = responseTimeSummary.firstCycles
-  const primeirasRespondidas = responseTimeSummary.firstResponded
 
   return {
     periodo: range,
-    instancia: instanceScope,
     dia_filtro: diaFiltro,
     limite_min: slaConfig.sla_minutos_sem_resposta,
     meta_percentual: slaConfig.sla_meta_percentual,
@@ -1037,16 +816,7 @@ async function buildSlaAnalytics(company_id, query = {}, opts = {}) {
     tendencia,
     por_tipo: {
       primeira_resposta: {
-        analisadas: primeirasRespondidas.length,
-        dentro_sla: primeirasRespondidas.filter((item) => item.status_sla === 'cumpriu').length,
-        fora_sla: primeirasRespondidas.filter((item) => item.status_sla === 'violou').length,
-        sem_resposta: primeirasDoPeriodo.filter((item) => item.status_sla === 'sem_resposta').length,
-        dados_insuficientes: primeirasDoPeriodo.filter((item) => item.status_sla === 'dados_insuficientes').length,
-        tempo_medio_min: responseTimeSummary.tempo_medio_primeira_resposta_min,
-      },
-      ciclos_resposta: {
-        total: allRows.length,
-        respondidos: analisadas.length,
+        analisadas: analisadas.length,
         dentro_sla: resumo.dentro_sla,
         fora_sla: resumo.fora_sla,
         sem_resposta: semResposta.length,
@@ -1086,61 +856,39 @@ async function validateConversaSla(company_id, conversaId) {
   const id = Number(conversaId)
   if (!Number.isFinite(id) || id <= 0) return { error: 'conversa_id inválido' }
 
-  const instanceScope = await resolveDashboardInstanceScope(company_id)
-  let conversaQuery = supabase
+  const { data: conversa, error } = await supabase
     .from('conversas')
-    .select('id, cliente_id, telefone, status_atendimento, modo_simples_aguardando, tipo, criado_em, atendente_id, departamento_id, reaberta_falta_interacao_em, clientes!conversas_cliente_fk ( nome )')
+    .select('id, telefone, status_atendimento, criado_em, atendente_id, departamento_id, reaberta_falta_interacao_em, clientes!conversas_cliente_fk ( nome )')
     .eq('company_id', company_id)
     .eq('id', id)
-  conversaQuery = applyDashboardInstanceScope(conversaQuery, instanceScope)
-  const { data: conversa, error } = await conversaQuery.maybeSingle()
+    .maybeSingle()
   if (error) throw error
   if (!conversa) return { error: 'Conversa não encontrada' }
 
-  const [slaConfig, simpleMode] = await Promise.all([
-    loadSlaConfig(company_id),
-    loadSimpleModeOperator(company_id),
-  ])
-  const simpleOperator = simpleMode.operator
+  const slaConfig = await loadSlaConfig(company_id)
   const businessInfo = await loadSlaBusinessSchedule(company_id, slaConfig)
   const { triageMerged, absence } = await loadChatbotTriageMergeAndAbsence(company_id)
   const ctx = { triageMerged, absenceCfg: absence, contarBot: slaConfig.sla_contar_bot_como_resposta }
 
-  const msgs = await fetchMensagensForConversas(company_id, [id], instanceScope)
+  const msgs = await fetchMensagensForConversas(company_id, [id])
   msgs.sort((a, b) => new Date(a.criado_em).getTime() - new Date(b.criado_em).getTime())
 
-  const effectiveAtendenteId = conversa.atendente_id || simpleOperator?.id || null
   const meta = resolveMetaMinutos(slaConfig, {
-    atendente_id: effectiveAtendenteId,
+    atendente_id: conversa.atendente_id,
     departamento_id: conversa.departamento_id,
   })
 
   const base = {
     conversa_id: conversa.id,
-    cliente_id: conversa.cliente_id || null,
     cliente_nome: getDisplayName(conversa.clientes) || conversa.telefone || 'Cliente',
     telefone: conversa.telefone || '',
-    status_atendimento: conversa.status_atendimento || '',
-    modo_simples_aguardando: conversa.modo_simples_aguardando || null,
-    tipo_conversa: conversa.tipo || null,
-    atendente_id: effectiveAtendenteId,
-    atendente_nome: simpleOperator?.nome || 'Sem atendente',
   }
 
-  const { data: reopenRows, error: reopenError } = await supabase
-    .from('atendimentos')
-    .select('criado_em')
-    .eq('company_id', company_id)
-    .eq('conversa_id', id)
-    .eq('acao', 'reabriu')
-    .order('criado_em', { ascending: true })
-  if (reopenError) throw reopenError
-  const ciclos = analyzeConversationSlaCycles({
+  const primeira = analyzeSlaCycle({
     msgs,
-    reopenAnchors: [
-      conversa.reaberta_falta_interacao_em,
-      ...(reopenRows || []).map((row) => row.criado_em),
-    ].filter(Boolean),
+    anchorTs: 0,
+    anchorEm: null,
+    tipoSla: 'primeira_resposta',
     limiteMin: meta.limite_min,
     metaOrigem: meta.meta_origem,
     metaOrigemLabel: meta.meta_origem_label,
@@ -1148,17 +896,12 @@ async function validateConversaSla(company_id, conversaId) {
     ctx,
     base,
   })
-  const resultado = ciclos[ciclos.length - 1] || null
 
   const passos = []
-  const primeiraIn = resultado
-    ? msgs.find((msg) => msg.direcao === 'in' && msg.criado_em === resultado.primeira_mensagem_cliente_em)
-    : null
+  const primeiraIn = findFirstInboundAfter(msgs, 0)
   if (primeiraIn) {
-    passos.push({ passo: 1, descricao: 'Início do ciclo mais recente: mensagem do cliente', em: primeiraIn.criado_em, mensagem_id: primeiraIn.id })
-    const outValida = resultado.primeira_resposta_atendente_em
-      ? msgs.find((msg) => msg.direcao === 'out' && msg.criado_em === resultado.primeira_resposta_atendente_em)
-      : null
+    passos.push({ passo: 1, descricao: 'Primeira mensagem do cliente (inbound)', em: primeiraIn.criado_em, mensagem_id: primeiraIn.id })
+    const outValida = findFirstValidOutboundAfter(msgs, new Date(primeiraIn.criado_em).getTime(), ctx)
     const outQualquer = findFirstAnyOutboundAfter(msgs, new Date(primeiraIn.criado_em).getTime())
     if (outValida) {
       passos.push({ passo: 2, descricao: 'Primeira resposta humana válida', em: outValida.criado_em, mensagem_id: outValida.id, autor_usuario_id: outValida.autor_usuario_id })
@@ -1167,25 +910,24 @@ async function validateConversaSla(company_id, conversaId) {
     } else {
       passos.push({ passo: 2, descricao: 'Sem resposta outbound após a primeira mensagem do cliente', em: null })
     }
-    if (resultado?.tempo_resposta_min != null) {
+    if (primeira?.tempo_resposta_min != null) {
       passos.push({
         passo: 3,
         descricao: 'Tempo calculado',
-        minutos: resultado.tempo_resposta_min,
+        minutos: primeira.tempo_resposta_min,
         modo: businessInfo.modo_contagem,
         limite_min: meta.limite_min,
         meta_origem: meta.meta_origem_label,
-        status_sla: resultado.status_sla,
+        status_sla: primeira.status_sla,
       })
     }
   } else {
-    passos.push({ passo: 1, descricao: 'Nenhum ciclo inbound encontrado', em: null })
+    passos.push({ passo: 1, descricao: 'Nenhuma mensagem inbound encontrada', em: null })
   }
 
   return {
     conversa_id: id,
-    resultado,
-    ciclos: ciclos.slice(-50),
+    resultado: primeira,
     passos_validacao: passos,
     horario_comercial: businessInfo,
     config: {
@@ -1198,15 +940,15 @@ async function validateConversaSla(company_id, conversaId) {
 }
 
 async function saveSlaConfig(company_id, body = {}) {
-  const update = {
-    // Mantém o banco coerente com a regra obrigatória usada pelo motor.
-    sla_usar_horario_comercial: true,
-  }
+  const update = {}
   if (body.sla_minutos_sem_resposta != null) {
     update.sla_minutos_sem_resposta = normalizeMinutes(body.sla_minutos_sem_resposta, 30)
   }
   if (body.sla_meta_percentual != null) {
     update.sla_meta_percentual = clampInt(body.sla_meta_percentual, 1, 100) ?? 90
+  }
+  if (body.sla_usar_horario_comercial != null) {
+    update.sla_usar_horario_comercial = body.sla_usar_horario_comercial === true
   }
   if (body.sla_contar_bot_como_resposta != null) {
     update.sla_contar_bot_como_resposta = body.sla_contar_bot_como_resposta === true
@@ -1264,7 +1006,6 @@ function flattenSlaExportRows(data) {
       limite_min: item.limite_min,
       meta_origem: item.meta_origem_label || item.meta_origem,
       tipo_resposta: item.tipo_resposta || '',
-      origem_resposta: item.origem_resposta || '',
       status_conversa: item.status_atendimento,
       conversa_id: item.conversa_id,
     })
@@ -1274,8 +1015,6 @@ function flattenSlaExportRows(data) {
 
 module.exports = {
   SAO_PAULO_TZ,
-  SLA_BUSINESS_START_MINUTE,
-  SLA_BUSINESS_END_MINUTE,
   loadSlaConfig,
   saveSlaConfig,
   resolveMetaMinutos,
@@ -1287,7 +1026,5 @@ module.exports = {
   formatSaoPauloDateKey,
   calcDiffMinutes,
   analyzeSlaCycle,
-  analyzeConversationSlaCycles,
-  summarizeResponseCycleTimes,
   classifyOutbound,
 }

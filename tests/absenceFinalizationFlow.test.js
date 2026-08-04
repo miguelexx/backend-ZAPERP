@@ -1,8 +1,4 @@
-function createSupabaseMock({
-  lastMessage,
-  absenceMessage = 'Encerrando por ausencia.',
-  absenceSendMessage,
-}) {
+function createSupabaseMock({ lastMessage, absenceMessage = 'Encerrando por ausencia.' }) {
   const updates = []
   const inserts = []
 
@@ -27,9 +23,6 @@ function createSupabaseMock({
                 finalizar_por_ausencia_ativo: true,
                 finalizar_por_ausencia_prazo: 1,
                 finalizar_por_ausencia_unidade: 'horas_corridas',
-                ...(absenceSendMessage !== undefined
-                  ? { finalizar_por_ausencia_enviar_mensagem: absenceSendMessage }
-                  : {}),
                 finalizar_por_ausencia_mensagem: absenceMessage,
               },
             },
@@ -221,35 +214,5 @@ describe('absenceFinalizationService - fluxo de seguranca', () => {
         (u) => u.table === 'conversas' && !u.patch.status_atendimento && !!u.patch.ausencia_mensagem_enviada_em
       )
     ).toBe(false)
-  })
-
-  it('encerra apenas no sistema quando o admin desativa o envio, mesmo com mensagem preenchida', async () => {
-    process.env = { ...ORIGINAL_ENV, ABSENCE_FINALIZATION_EMERGENCY_DISABLED: 'false' }
-    const sendText = jest.fn().mockResolvedValue({ ok: true })
-    const getProvider = jest.fn(() => ({ sendText }))
-    const supabase = createSupabaseMock({
-      absenceMessage: 'Esta mensagem deve permanecer salva, mas não pode ser enviada.',
-      absenceSendMessage: false,
-      lastMessage: {
-        id: 503,
-        direcao: 'out',
-        criado_em: '2026-05-30T08:00:00.000Z',
-        autor_usuario_id: 22,
-        texto: 'Fico no aguardo do seu retorno.',
-      },
-    })
-
-    jest.resetModules()
-    jest.doMock('../config/supabase', () => supabase)
-    jest.doMock('../services/providers', () => ({ getProvider }))
-
-    const { finalizeConversationsByAbsence } = require('../services/absenceFinalizationService')
-    const result = await finalizeConversationsByAbsence()
-
-    expect(result.processadas).toBe(1)
-    expect(getProvider).not.toHaveBeenCalled()
-    expect(sendText).not.toHaveBeenCalled()
-    expect(supabase.updates.some((u) => u.table === 'conversas' && u.patch.status_atendimento === 'fechada')).toBe(true)
-    expect(supabase.inserts.some((i) => i.table === 'mensagens')).toBe(false)
   })
 })

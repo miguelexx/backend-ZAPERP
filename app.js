@@ -6,7 +6,6 @@ const path = require('path')
 const fs = require('fs')
 const { randomUUID } = require('crypto')
 const { loadEnv, isProduction } = require('./config/env')
-const { sanitizeRequestUrl } = require('./helpers/sanitizeRequestUrl')
 loadEnv()
 const { getUploadsRoot, ensureUploadsRootExists } = require('./config/uploadsRoot')
 const tagsRoutes = require('./routes/tagRoutes')
@@ -19,45 +18,29 @@ const isProd = isProduction()
 const allowedOrigins = [
   'https://zaperp.wmsistemas.inf.br',
   'https://www.zaperp.wmsistemas.inf.br',
+  'http://zaperp.wmsistemas.inf.br',
+  'http://www.zaperp.wmsistemas.inf.br',
   ...(process.env.NODE_ENV !== 'production'
-    ? [
-        'http://zaperp.wmsistemas.inf.br',
-        'http://www.zaperp.wmsistemas.inf.br',
-        'http://localhost:3000',
-        'http://localhost:5173',
-        'http://127.0.0.1:5173',
-        'http://127.0.0.1:3000',
-      ]
+    ? ['http://localhost:3000', 'http://localhost:5173', 'http://127.0.0.1:5173', 'http://127.0.0.1:3000']
     : [])
 ]
 const extraOrigins = [
   ...String(process.env.CORS_ORIGINS || '').split(','),
-  ...(isProd ? [] : String(process.env.ZAPERP_CORS_EXTRA_ORIGINS || '').split(',')),
-]
-  .map((s) => s.trim())
-  .filter((origin) => origin && (!isProd || origin.startsWith('https://')))
+  ...String(process.env.ZAPERP_CORS_EXTRA_ORIGINS || '').split(','),
+].map((s) => s.trim()).filter(Boolean)
 extraOrigins.forEach((o) => { if (o && !allowedOrigins.includes(o)) allowedOrigins.push(o) })
 
-const allowedOriginPatterns = isProd
-  ? [
-      /^https:\/\/[a-z0-9-]+\.wmsistemas\.inf\.br$/i,
-      /^https:\/\/[a-z0-9-]+\.wmsistemas\.ats$/i,
-    ]
-  : [
-      /^https?:\/\/[a-z0-9-]+\.wmsistemas\.inf\.br$/i,
-      /^https?:\/\/[a-z0-9-]+\.wmsistemas\.ats$/i,
-    ]
+const allowedOriginPatterns = [
+  /^https?:\/\/[a-z0-9-]+\.wmsistemas\.inf\.br$/i,
+  /^https?:\/\/[a-z0-9-]+\.wmsistemas\.ats$/i,
+]
 
 function buildFrameAncestorsDirective() {
   const s = new Set(["'self'"])
   allowedOrigins.forEach((o) => {
     if (typeof o === 'string' && /^https?:\/\//i.test(o)) s.add(o)
   })
-  ;[
-    'https://*.wmsistemas.inf.br',
-    'https://*.wmsistemas.ats',
-    ...(isProd ? [] : ['http://*.wmsistemas.inf.br', 'http://*.wmsistemas.ats']),
-  ].forEach((h) => s.add(h))
+  ;['https://*.wmsistemas.inf.br', 'http://*.wmsistemas.inf.br', 'https://*.wmsistemas.ats', 'http://*.wmsistemas.ats'].forEach((h) => s.add(h))
   return Array.from(s)
 }
 
@@ -132,15 +115,13 @@ if (process.env.TRUST_PROXY === '1' || process.env.NODE_ENV === 'production') {
 // =====================================================
 // JSON + urlencoded parsers — UltraMSG pode enviar application/json ou form-urlencoded
 // verify: mantém rawBody em Buffer (útil para verificação HMAC de webhooks, se aplicável)
-// limit 2mb: webhook de localização pode trazer thumbnail base64 no body (>100kb do default)
 // =====================================================
 app.use(express.json({
-  limit: '2mb',
   verify: (req, res, buf) => {
     try { req.rawBody = buf } catch (_) {}
   }
 }))
-app.use(express.urlencoded({ extended: false, limit: '2mb' }))
+app.use(express.urlencoded({ extended: false, limit: '1mb' }))
 
 // =====================================================
 // WEBHOOKS — registrados ANTES do CORS (provedores como UltraMSG enviam Origin).
@@ -203,51 +184,12 @@ app.use(
   express.static(getUploadsRoot(), {
     index: false,
     dotfiles: 'deny',
-    // Arquivos de /uploads têm nome único e imutável (ex.: `<timestamp>-<rand>.ogg`,
-    // `inbound-c<co>-m<msg>-<rand>.ogg`): uma vez gravado, o conteúdo daquele caminho nunca muda
-    // (retry/reencode geram um nome novo, nunca sobrescrevem). Por isso servimos com cache longo +
-    // immutable. Isso também CORRIGE o `net::ERR_CACHE_OPERATION_NOT_SUPPORTED` no áudio/vídeo do
-    // Chrome: <audio preload="metadata"> busca mídia por Range (206, entrada de cache "sparse"). Com
-    // o antigo `max-age=0`, o Chrome revalidava a cada Range e o ETag FRACO (W/"...", padrão do
-    // express) não pode revalidar uma entrada sparse — o disk cache aborta a operação e o áudio não
-    // carrega. Com cache fresco+immutable não há revalidação, some o erro e o replay fica instantâneo.
-    maxAge: '365d',
-    immutable: true,
     setHeaders(res, filePath) {
       res.setHeader('X-Content-Type-Options', 'nosniff')
       const p = String(filePath || '').toLowerCase()
-      const isImage =
-        p.endsWith('.jpg') ||
-        p.endsWith('.jpeg') ||
-        p.endsWith('.png') ||
-        p.endsWith('.gif') ||
-        p.endsWith('.webp') ||
-        p.endsWith('.bmp') ||
-        p.endsWith('.avif') ||
-        p.endsWith('.heic') ||
-        p.endsWith('.heif') ||
-        p.endsWith('.tif') ||
-        p.endsWith('.tiff')
-      const isAudio =
-        p.endsWith('.mp3') ||
-        p.endsWith('.ogg') ||
-        p.endsWith('.aac') ||
-        p.endsWith('.m4a') ||
-        p.endsWith('.wav') ||
-        p.endsWith('.opus') ||
-        p.endsWith('.webm') ||
-        p.endsWith('.amr') ||
-        p.endsWith('.flac')
-      const isVideo =
-        p.endsWith('.mp4') ||
-        p.endsWith('.mov') ||
-        p.endsWith('.avi') ||
-        p.endsWith('.3gp') ||
-        p.endsWith('.webm') ||
-        p.endsWith('.m4v') ||
-        p.endsWith('.mkv') ||
-        p.endsWith('.mpeg') ||
-        p.endsWith('.mpg')
+      const isImage = p.endsWith('.jpg') || p.endsWith('.jpeg') || p.endsWith('.png') || p.endsWith('.webp')
+      const isAudio = p.endsWith('.mp3') || p.endsWith('.ogg') || p.endsWith('.aac') || p.endsWith('.m4a') || p.endsWith('.wav') || p.endsWith('.opus') || p.endsWith('.webm')
+      const isVideo = p.endsWith('.mp4') || p.endsWith('.mov') || p.endsWith('.avi') || p.endsWith('.3gp')
       const isPdf = p.endsWith('.pdf')
       const isMedia = isImage || isAudio || isVideo || isPdf
       // Para mídia (imagem/áudio/vídeo/PDF), manter Content-Type adequado para provedores
@@ -356,29 +298,6 @@ app.use('/media', apiLimiter, mediaProxyRoutes)
 app.use('/push', apiLimiter, pushRoutes)
 app.use('/conversas', apiLimiter, minhasPendenciasRoutes)
 
-// [push][config] Log único no boot: expõe imediatamente se o push está utilizável.
-// Sem VAPID (Web Push) nem FCM, NÃO há notificação com o app fechado — este log evita
-// horas de depuração à procura de um erro que na verdade é configuração ausente.
-try {
-  const webPushServiceBoot = require('./services/webPushService')
-  const pushNotificationServiceBoot = require('./services/pushNotificationService')
-  const vapidOkBoot = webPushServiceBoot.ensureVapidConfigured()
-  let fcmOkBoot = false
-  try {
-    fcmOkBoot = pushNotificationServiceBoot.ensureFirebase()
-  } catch (_) {
-    fcmOkBoot = false
-  }
-  console.log(
-    `[push][config] VAPID=${vapidOkBoot ? 'ok' : 'AUSENTE'} FCM=${fcmOkBoot ? 'ok' : 'ausente'}` +
-      (vapidOkBoot || fcmOkBoot
-        ? ''
-        : ' — sem provedor de push: notificação com o app fechado NÃO funciona (defina VAPID_PUBLIC_KEY/VAPID_PRIVATE_KEY).')
-  )
-} catch (e) {
-  console.warn('[push][config] falha ao verificar config de push no boot:', e?.message || e)
-}
-
 // /api — prefixo opcional para SaaS; mantém compatibilidade com rotas antigas
 // Aplica apiLimiter globalmente para "rotas de API"
 const api = express.Router()
@@ -421,23 +340,20 @@ if (hasFrontendDist) {
   const uiOverridesPath = path.join(__dirname, 'ui-overrides.css')
   const uiOverridesHref = '/ui-overrides.css'
   const indexHtmlPath = path.join(frontendDist, 'index.html')
-  const buildIndexHtml = () => {
-    const indexHtmlRaw = fs.readFileSync(indexHtmlPath, 'utf8')
-    let indexHtmlInjected = indexHtmlRaw.includes(uiOverridesHref)
-      ? indexHtmlRaw
-      : indexHtmlRaw.replace(
-          '</head>',
-          `  <link rel="stylesheet" href="${uiOverridesHref}" />\n  </head>`
-        )
-    // Refresh automatico a cada N minutos (AUTO_REFRESH_MINUTES=0 por padrao; defina >0 para ativar)
-    const autoRefreshMinutes = parseInt(process.env.AUTO_REFRESH_MINUTES || '0', 10)
-    if (autoRefreshMinutes > 0 && !indexHtmlInjected.includes('auto-refresh-interval')) {
-      const refreshScript = `<script id="auto-refresh-interval">(function(){var m=${autoRefreshMinutes}*60*1000;setInterval(function(){location.reload()},m)})();</script>`
-      indexHtmlInjected = indexHtmlInjected.includes('</body>')
-        ? indexHtmlInjected.replace('</body>', `${refreshScript}\n</body>`)
-        : indexHtmlInjected.replace('</html>', `${refreshScript}\n</html>`)
-    }
-    return indexHtmlInjected
+  const indexHtmlRaw = fs.readFileSync(indexHtmlPath, 'utf8')
+  let indexHtmlInjected = indexHtmlRaw.includes(uiOverridesHref)
+    ? indexHtmlRaw
+    : indexHtmlRaw.replace(
+        '</head>',
+        `  <link rel="stylesheet" href="${uiOverridesHref}" />\n  </head>`
+      )
+  // Refresh automático a cada N minutos (AUTO_REFRESH_MINUTES=0 por padrão; defina >0 para ativar)
+  const autoRefreshMinutes = parseInt(process.env.AUTO_REFRESH_MINUTES || '0', 10)
+  if (autoRefreshMinutes > 0 && !indexHtmlInjected.includes('auto-refresh-interval')) {
+    const refreshScript = `<script id="auto-refresh-interval">(function(){var m=${autoRefreshMinutes}*60*1000;setInterval(function(){location.reload()},m)})();</script>`
+    indexHtmlInjected = indexHtmlInjected.includes('</body>')
+      ? indexHtmlInjected.replace('</body>', `${refreshScript}\n</body>`)
+      : indexHtmlInjected.replace('</html>', `${refreshScript}\n</html>`)
   }
 
   app.get(uiOverridesHref, (req, res) => {
@@ -490,12 +406,7 @@ if (hasFrontendDist) {
       if (!accept.includes('text/html')) return next()
       const p = String(req.path || '/')
       if (apiPrefixes.some((pre) => p === pre || p.startsWith(pre + '/'))) return next()
-      // O index aponta para assets com hash. Revalidar evita servir referencias
-      // antigas depois de um deploy que removeu os chunks da versao anterior.
-      res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate')
-      res.setHeader('Pragma', 'no-cache')
-      res.setHeader('Expires', '0')
-      return res.status(200).type('html').send(buildIndexHtml())
+      return res.status(200).type('html').send(indexHtmlInjected)
     } catch (e) {
       return next(e)
     }
@@ -510,15 +421,9 @@ if (hasFrontendDist) {
 // eslint-disable-next-line no-unused-vars
 app.use((err, req, res, next) => {
   // Multer: tipo não permitido, tamanho excedido ou campo inesperado
-  const uploadErrorCode = String(err?.code || '')
-  const isUploadError =
-    err?.name === 'MulterError' ||
-    uploadErrorCode.startsWith('LIMIT_') ||
-    uploadErrorCode.startsWith('UPLOAD_')
-  if (isUploadError) {
+  if (err && (err.code === 'LIMIT_FILE_SIZE' || err.code === 'LIMIT_UNEXPECTED_FILE' || (err.message && err.message.includes('não permitido')))) {
     const msg = err.code === 'LIMIT_UNEXPECTED_FILE' ? 'Use multipart/form-data com campo "file" ou "audio"' : (err.message || 'Arquivo inválido')
-    const status = Number(err?.status) || (err.code === 'LIMIT_FILE_SIZE' ? 413 : 400)
-    return res.status(status).json({ error: msg })
+    return res.status(400).json({ error: msg })
   }
   // CORS
   if (err && String(err.message || '').startsWith('CORS não permitido para esta origem:')) {
@@ -533,7 +438,7 @@ app.use((err, req, res, next) => {
   console.error('[APP_ERROR]', {
     requestId: req?.requestId || null,
     method: req?.method || null,
-    path: sanitizeRequestUrl(req?.originalUrl || req?.url || ''),
+    path: req?.originalUrl || req?.url || null,
     status,
     message: err?.message || String(err || ''),
   })

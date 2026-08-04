@@ -33,22 +33,22 @@ Esta documentação descreve as rotas implementadas para acessar mensagens envia
 
 ```bash
 # Listar todas as mensagens (página 1, 100 itens)
-GET /integrations/whatsapp/messages?token=SEU_TOKEN_ULTRAMSG&page=1&limit=100
+GET /integrations/whatsapp/messages?token=r6ztawoqwcfhzrdc&page=1&limit=100
 
 # Listar apenas mensagens enviadas
-GET /integrations/whatsapp/messages?token=SEU_TOKEN_ULTRAMSG&status=sent
+GET /integrations/whatsapp/messages?token=r6ztawoqwcfhzrdc&status=sent
 
 # Listar mensagens na fila
-GET /integrations/whatsapp/messages?token=SEU_TOKEN_ULTRAMSG&status=queue
+GET /integrations/whatsapp/messages?token=r6ztawoqwcfhzrdc&status=queue
 
 # Listar mensagens não enviadas
-GET /integrations/whatsapp/messages?token=SEU_TOKEN_ULTRAMSG&status=unsent
+GET /integrations/whatsapp/messages?token=r6ztawoqwcfhzrdc&status=unsent
 
 # Listar mensagens inválidas
-GET /integrations/whatsapp/messages?token=SEU_TOKEN_ULTRAMSG&status=invalid
+GET /integrations/whatsapp/messages?token=r6ztawoqwcfhzrdc&status=invalid
 
 # Listar mensagens expiradas
-GET /integrations/whatsapp/messages?token=SEU_TOKEN_ULTRAMSG&status=expired
+GET /integrations/whatsapp/messages?token=r6ztawoqwcfhzrdc&status=expired
 ```
 
 #### Resposta de Sucesso (200)
@@ -91,7 +91,7 @@ GET /integrations/whatsapp/messages?token=SEU_TOKEN_ULTRAMSG&status=expired
 #### Exemplo de Uso
 
 ```bash
-GET /integrations/whatsapp/messages/statistics?token=SEU_TOKEN_ULTRAMSG
+GET /integrations/whatsapp/messages/statistics?token=r6ztawoqwcfhzrdc
 ```
 
 #### Resposta de Sucesso (200)

@@ -18,38 +18,6 @@ console.log('NODE_ENV:', process.env.NODE_ENV || 'development')
 // Detecta NODE_ENV malformado (ex: falta newline no .env → NODE_ENV=productionULTRAMSG_BASE_URL=...)
 const nodeEnv = String(process.env.NODE_ENV || '').trim()
 const SOCKET_DEBUG = process.env.SOCKET_DEBUG === '1' || process.env.NODE_ENV !== 'production'
-
-/** Rate limit leve por socket (anti-flood inbound). Não altera autorização. */
-const SOCKET_RATE = {
-  join_conversa: { windowMs: 10_000, max: 40 },
-  marcar_conversa_lida: { windowMs: 10_000, max: 30 },
-  typing: { windowMs: 5_000, max: 25 },
-}
-
-function createSocketRateLimiter() {
-  const buckets = new Map()
-  return function allowSocketEvent(socketId, eventKey) {
-    const cfg = SOCKET_RATE[eventKey]
-    if (!cfg) return true
-    const now = Date.now()
-    const key = `${socketId}:${eventKey}`
-    let b = buckets.get(key)
-    if (!b || now - b.windowStart >= cfg.windowMs) {
-      b = { windowStart: now, count: 0 }
-      buckets.set(key, b)
-    }
-    b.count += 1
-    if (buckets.size > 5000) {
-      for (const [k, v] of buckets) {
-        if (now - v.windowStart >= 60_000) buckets.delete(k)
-      }
-    }
-    return b.count <= cfg.max
-  }
-}
-
-const allowSocketEvent = createSocketRateLimiter()
-
 if (nodeEnv && (nodeEnv.includes('ULTRAMSG') || nodeEnv.includes('='))) {
   console.warn(
     '[ENV] NODE_ENV parece concatenado com outra variável. Verifique o .env: cada variável deve estar em uma linha separada.'
@@ -73,7 +41,37 @@ if (!String(process.env.NODE_ENV || '').trim()) {
 
 const server = http.createServer(app)
 
-const { collectAllowedSocketOrigins } = require('./helpers/socketCorsOrigins')
+// CORS do Socket.IO: alinhado ao Express (CORS_ORIGINS + ZAPERP_CORS_EXTRA_ORIGINS + APP_URL + dev local).
+function collectAllowedSocketOrigins() {
+  const origins = new Set()
+  const pushCsv = (raw) => {
+    String(raw || '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .forEach((o) => origins.add(o))
+  }
+  pushCsv(process.env.CORS_ORIGINS)
+  pushCsv(process.env.ZAPERP_CORS_EXTRA_ORIGINS)
+  try {
+    const u = new URL(String(process.env.APP_URL || '').trim())
+    if (u.origin) origins.add(u.origin)
+  } catch (_) {
+    /* ignore */
+  }
+  if (!isProduction()) {
+    ;[
+      'http://localhost:3000',
+      'http://localhost:5173',
+      'http://127.0.0.1:5173',
+      'http://127.0.0.1:3000',
+      'http://localhost:4173',
+      'http://127.0.0.1:4173',
+    ].forEach((o) => origins.add(o))
+  }
+  return Array.from(origins)
+}
+
 const allowedSocketOrigins = collectAllowedSocketOrigins()
 
 const internalChatSocket = require('./socket/internalChatSocket')
@@ -83,13 +81,6 @@ const { startAtendimentoSemRespostaScheduler } = require('./services/atendimento
 const { startProdutosSyncScheduler } = require('./services/produtosSyncScheduler')
 const { startPendingOutboundReconciliationScheduler } = require('./services/pendingOutboundReconciliationScheduler')
 const { usuarioPodeVerGrupo } = require('./helpers/departamentoGruposHelper')
-const { obterDepartamentoIdsDoUsuario } = require('./helpers/usuarioDepartamentosHelper')
-const {
-  empresaRoom,
-  usuarioRoom,
-  conversaRoom,
-  departamentoRoom,
-} = require('./helpers/socketRooms')
 
 async function canUserJoinConversationRoom({ company_id, user_id, role, departamento_ids, conversa_id }) {
   const cid = Number(conversa_id)
@@ -196,7 +187,7 @@ internalChatSocket.attach(io)
 // =====================================================
 // 🔐 middleware de autenticação do socket (MANTIDO)
 // =====================================================
-io.use(async (socket, next) => {
+io.use((socket, next) => {
   try {
     const token = socket.handshake.auth?.token
     if (!token) {
@@ -215,22 +206,7 @@ io.use(async (socket, next) => {
       return next(new Error('Tenant inválido'))
     }
     payload.company_id = cid
-    const userId = Number(payload.id ?? payload.user_id)
-    if ((!payload.id || !Number.isFinite(Number(payload.id))) && Number.isFinite(userId) && userId > 0) {
-      payload.id = userId
-    }
-    // Revogação: usuário desativado não conecta no tempo real (mesmo critério do middleware auth HTTP).
-    const { usuarioEstaAtivo } = require('./helpers/usuarioAtivoGuard')
-    const ativo = await usuarioEstaAtivo(userId, cid)
-    if (!ativo) {
-      return next(new Error('Usuário inativo'))
-    }
-    const fallbackUser = { departamento_id: payload.departamento_id }
-    if (Number.isFinite(userId) && userId > 0) {
-      const depIds = await obterDepartamentoIdsDoUsuario(userId, cid, fallbackUser)
-      payload.departamento_ids = depIds
-      payload.departamento_id = depIds.length > 0 ? depIds[0] : null
-    } else if (!Array.isArray(payload.departamento_ids)) {
+    if (!Array.isArray(payload.departamento_ids)) {
       payload.departamento_ids = payload.departamento_id != null ? [Number(payload.departamento_id)] : []
     }
     socket.user = payload
@@ -268,26 +244,17 @@ io.EVENTS = {
 // =====================================================
 io.emitEmpresa = (company_id, event, payload) => {
   if (!company_id || !event) return
-  const room = empresaRoom(company_id)
-  if (room) io.to(room).emit(event, payload)
+  io.to(`empresa_${company_id}`).emit(event, payload)
 }
 
 io.emitConversa = (conversa_id, event, payload) => {
   if (!conversa_id || !event) return
-  const room = conversaRoom(conversa_id)
-  if (room) io.to(room).emit(event, payload)
+  io.to(`conversa_${conversa_id}`).emit(event, payload)
 }
 
 io.emitUsuario = (usuario_id, event, payload) => {
   if (!usuario_id || !event) return
-  const room = usuarioRoom(usuario_id)
-  if (room) io.to(room).emit(event, payload)
-}
-
-io.emitDepartamento = (company_id, departamento_id, event, payload) => {
-  if (!company_id || !departamento_id || !event) return
-  const room = departamentoRoom(company_id, departamento_id)
-  if (room) io.to(room).emit(event, payload)
+  io.to(`usuario_${usuario_id}`).emit(event, payload)
 }
 
 // =====================================================
@@ -301,16 +268,13 @@ io.on('connection', (socket) => {
   if (SOCKET_DEBUG) console.log(`🟢 Socket conectado | Usuário ${id} | Empresa ${company_id}`)
 
   // rooms padrão: empresa (admin vê tudo) e usuário
-  const empRoom = empresaRoom(company_id)
-  const userRoom = usuarioRoom(id)
-  if (empRoom) socket.join(empRoom)
-  if (userRoom) socket.join(userRoom)
+  socket.join(`empresa_${company_id}`)
+  socket.join(`usuario_${id}`)
   // rooms por setor: usuário entra em todos os departamentos que pertence (Comercial + Financeiro, etc.)
   const depIds = Array.isArray(departamento_ids) ? departamento_ids : []
   depIds.forEach((depId) => {
     if (depId != null && Number.isFinite(Number(depId))) {
-      const depRoom = departamentoRoom(company_id, depId)
-      if (depRoom) socket.join(depRoom)
+      socket.join(`departamento_${depId}`)
     }
   })
 
@@ -318,15 +282,9 @@ io.on('connection', (socket) => {
   socket.on('join_conversa', async (conversaId) => {
     try {
       if (!conversaId) return
-      if (!allowSocketEvent(socket.id, 'join_conversa')) return
 
       const convId = Number(conversaId)
       if (!Number.isFinite(convId) || convId <= 0) return
-
-      const room = conversaRoom(convId)
-      if (!room) return
-      // Já na room: não reconsultar DB (reduz carga sob reconnect/spam)
-      if (socket.rooms.has(room)) return
 
       const allowed = await canUserJoinConversationRoom({
         company_id,
@@ -340,8 +298,11 @@ io.on('connection', (socket) => {
         return
       }
 
-      socket.join(room)
-      if (SOCKET_DEBUG) console.log(`[SOCKET_JOIN_CONVERSA] Usuario ${id} entrou na conversa ${convId}`)
+      const room = `conversa_${convId}`
+      if (!socket.rooms.has(room)) {
+        socket.join(room)
+        if (SOCKET_DEBUG) console.log(`[SOCKET_JOIN_CONVERSA] Usuario ${id} entrou na conversa ${convId}`)
+      }
     } catch (err) {
       console.error('[SOCKET_JOIN_CONVERSA]', {
         user_id: id,
@@ -356,8 +317,7 @@ io.on('connection', (socket) => {
   socket.on('leave_conversa', (conversaId) => {
     if (!conversaId) return
 
-    const room = conversaRoom(conversaId)
-    if (room) socket.leave(room)
+    socket.leave(`conversa_${conversaId}`)
     if (SOCKET_DEBUG) console.log(`💬 Socket saiu da conversa ${conversaId}`)
   })
 
@@ -365,11 +325,9 @@ io.on('connection', (socket) => {
   // Indicador de digitação (typing) — re-broadcast na room da conversa
   // =====================================================
   socket.on('typing_start', (data) => {
-    if (!allowSocketEvent(socket.id, 'typing')) return
     const conversa_id = data?.conversa_id
     if (!conversa_id) return
-    const room = conversaRoom(conversa_id)
-    if (!room) return
+    const room = `conversa_${conversa_id}`
     if (!socket.rooms.has(room)) return
     const payload = {
       conversa_id: Number(conversa_id),
@@ -380,17 +338,14 @@ io.on('connection', (socket) => {
   })
 
   socket.on('typing_stop', (data) => {
-    if (!allowSocketEvent(socket.id, 'typing')) return
     const conversa_id = data?.conversa_id
     if (!conversa_id) return
-    const room = conversaRoom(conversa_id)
-    if (!room) return
+    const room = `conversa_${conversa_id}`
     if (!socket.rooms.has(room)) return
     socket.to(room).emit('typing_stop', { conversa_id: Number(conversa_id) })
   })
 
   socket.on('marcar_conversa_lida', async (data = {}) => {
-    if (!allowSocketEvent(socket.id, 'marcar_conversa_lida')) return
     const conversa_id = data?.conversa_id ?? data?.id
     try {
       const ok = await marcarConversaLidaSocket({
@@ -444,12 +399,8 @@ server.listen(PORT, '0.0.0.0', () => {
     startAtendimentoSemRespostaScheduler(io)
     startProdutosSyncScheduler()
     startPendingOutboundReconciliationScheduler(io)
-    const { startOutboundMediaResendScheduler } = require('./services/outboundMediaResendScheduler')
-    startOutboundMediaResendScheduler(io)
     const { startInboundMediaRetryScheduler } = require('./services/inboundMediaPersistenceService')
     startInboundMediaRetryScheduler(supabase, io)
-    const { startInboundMediaBackfillSweepScheduler } = require('./services/inboundMediaBackfillService')
-    startInboundMediaBackfillSweepScheduler(supabase, io)
   } else if (backgroundJobsDisabled) {
     console.log('[WORKER] Rotinas em background desativadas por ZAPERP_DISABLE_BACKGROUND_JOBS')
   }

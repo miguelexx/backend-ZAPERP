@@ -1,5 +1,4 @@
 const { finalizeConversationsByAbsence } = require('./absenceFinalizationService')
-const { withSchedulerRunLock } = require('./schedulerLock')
 
 let schedulerStarted = false
 let timer = null
@@ -16,22 +15,20 @@ async function runCycle() {
   if (running) return
   running = true
   try {
-    await withSchedulerRunLock('absence_finalization', parseIntervalMs() * 2, async () => {
-      const startedAt = Date.now()
-      const result = await finalizeConversationsByAbsence()
-      const elapsedMs = Date.now() - startedAt
-      if (!result?.ok) {
-        console.warn('[absenceScheduler] ciclo concluido com erro', { result, elapsedMs })
-        return
-      }
-      if (result.processadas > 0 || result.analisadas > 0) {
-        console.log('[absenceScheduler] ciclo concluido', {
-          processadas: result.processadas,
-          analisadas: result.analisadas,
-          elapsedMs,
-        })
-      }
-    })
+    const startedAt = Date.now()
+    const result = await finalizeConversationsByAbsence()
+    const elapsedMs = Date.now() - startedAt
+    if (!result?.ok) {
+      console.warn('[absenceScheduler] ciclo concluído com erro', { result, elapsedMs })
+      return
+    }
+    if (result.processadas > 0 || result.analisadas > 0) {
+      console.log('[absenceScheduler] ciclo concluído', {
+        processadas: result.processadas,
+        analisadas: result.analisadas,
+        elapsedMs,
+      })
+    }
   } catch (e) {
     console.warn('[absenceScheduler] erro no ciclo:', e?.message || e)
   } finally {
@@ -49,6 +46,7 @@ function startAbsenceFinalizationScheduler() {
   }, intervalMs)
   if (typeof timer.unref === 'function') timer.unref()
 
+  // Executa rapidamente no startup para não depender do primeiro intervalo.
   setTimeout(() => {
     runCycle().catch(() => {})
   }, 20 * 1000)
@@ -60,5 +58,4 @@ function startAbsenceFinalizationScheduler() {
 
 module.exports = {
   startAbsenceFinalizationScheduler,
-  _test: { runCycle, parseIntervalMs },
 }

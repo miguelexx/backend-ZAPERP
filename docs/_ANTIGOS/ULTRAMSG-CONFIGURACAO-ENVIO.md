@@ -127,22 +127,22 @@ Receba mensagens enviadas no formato JSON via solicitações GET.
 
 ```
 # Todas
-/messages?token=SEU_TOKEN_ULTRAMSG&page=1&limit=100
+/messages?token=r6ztawoqwcfhzrdc&page=1&limit=100
 
 # Só enviadas
-/messages?token=SEU_TOKEN_ULTRAMSG&page=1&limit=100&status=sent
+/messages?token=r6ztawoqwcfhzrdc&page=1&limit=100&status=sent
 
 # Fila
-/messages?token=SEU_TOKEN_ULTRAMSG&page=1&limit=100&status=queue
+/messages?token=r6ztawoqwcfhzrdc&page=1&limit=100&status=queue
 
 # Não enviadas
-/messages?token=SEU_TOKEN_ULTRAMSG&page=1&limit=100&status=unsent
+/messages?token=r6ztawoqwcfhzrdc&page=1&limit=100&status=unsent
 
 # Inválidas
-/messages?token=SEU_TOKEN_ULTRAMSG&page=1&limit=100&status=invalid
+/messages?token=r6ztawoqwcfhzrdc&page=1&limit=100&status=invalid
 
 # Expiradas
-/messages?token=SEU_TOKEN_ULTRAMSG&page=1&limit=100&status=expired
+/messages?token=r6ztawoqwcfhzrdc&page=1&limit=100&status=expired
 ```
 
 ---
@@ -157,7 +157,7 @@ O backend envia mensagens via UltraMsg nos seguintes formatos. **Todos os endpoi
 
 ```json
 {
-  "token": "SEU_TOKEN_ULTRAMSG",
+  "token": "r6ztawoqwcfhzrdc",
   "to": "+5534999999999",
   "body": "Texto da mensagem",
   "msgId": "opcional_id_para_reply"
@@ -321,7 +321,7 @@ WHATSAPP_WEBHOOK_TOKEN=seu_token_seguro
 # UltraMsg (opcional se usar empresa_zapi)
 ULTRAMSG_BASE_URL=https://api.ultramsg.com
 ULTRAMSG_INSTANCE_ID=instance51534
-ULTRAMSG_TOKEN=SEU_TOKEN_ULTRAMSG
+ULTRAMSG_TOKEN=r6ztawoqwcfhzrdc
 
 # Configuração de webhooks (ao chamar configureWebhooks)
 # sendDelay em segundos (default 1)

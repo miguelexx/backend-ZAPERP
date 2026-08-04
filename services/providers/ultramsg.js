@@ -23,9 +23,7 @@ const {
 
 const ULTRAMSG_BASE_URL = (process.env.ULTRAMSG_BASE_URL || 'https://api.ultramsg.com').replace(/\/$/, '')
 // Delay entre envios: 0 = sem delay (envio imediato). Ex: ULTRAMSG_SEND_DELAY_MS=0 para desativar.
-// `?? 0` não protegia contra NaN (env ausente → Number('') = NaN, e `NaN ?? 0` = NaN): o valor
-// virava NaN e o early-return `<= 0` de awaitSendDelay nunca disparava. `|| 0` normaliza NaN → 0.
-const MIN_DELAY_BETWEEN_SENDS_MS = Math.max(0, Number(process.env.ULTRAMSG_SEND_DELAY_MS) || 0)
+const MIN_DELAY_BETWEEN_SENDS_MS = Math.max(0, Number(process.env.ULTRAMSG_SEND_DELAY_MS) ?? 0)
 const BODY_MAX_LEN = 4096
 const CAPTION_MAX_LEN = 1024
 const FILENAME_MAX_LEN = 255
@@ -35,16 +33,6 @@ const ULTRAMSG_TIMEOUT_MS = Number(process.env.ULTRAMSG_TIMEOUT_MS) || 30_000
 const lastSendPerCompany = new Map()
 const LAST_SEND_MAP_MAX = 500
 const WHATSAPP_DEBUG = String(process.env.WHATSAPP_DEBUG || '').toLowerCase() === 'true'
-
-/**
- * Propaga referenceId (ex.: crm-{mensagem_id}) no body do POST UltraMSG.
- * Usado em texto e mídia para reconciliação determinística do eco fromMe / ACK.
- */
-function applyReferenceIdToBody(body, opts) {
-  const referenceId = opts?.referenceId ? String(opts.referenceId).trim().slice(0, 200) : null
-  if (referenceId) body.referenceId = referenceId
-  return body
-}
 
 /** Resposta HTTP 200 com JSON de erro (ex.: token inválido após rotação no painel UltraMSG). */
 function ultramsgResponseIndicatesBadInstanceToken(data, text) {
@@ -716,7 +704,8 @@ async function sendText(phone, message, opts = {}) {
   const replyMessageId = opts?.replyMessageId ? String(opts.replyMessageId).trim() : null
   const body = { to: nums[0], body: msg }
   if (replyMessageId) body.msgId = replyMessageId
-  applyReferenceIdToBody(body, opts)
+  const referenceId = opts?.referenceId ? String(opts.referenceId).trim().slice(0, 200) : null
+  if (referenceId) body.referenceId = referenceId
 
   const { ok, status, data, text } = await postJson({
     ...cfg,
@@ -772,7 +761,6 @@ async function sendImage(phone, url, caption = '', opts = {}) {
   const captionTrim = String(caption || '').trim().slice(0, CAPTION_MAX_LEN)
   const body = { to: nums[0], image: String(url).trim() }
   if (captionTrim) body.caption = captionTrim
-  applyReferenceIdToBody(body, opts)
   const { ok, status, data, text } = await postJson({
     ...cfg,
     endpoint: '/messages/image',
@@ -868,7 +856,6 @@ async function sendAudio(phone, audioUrl, opts = {}) {
   
   console.log(`[ULTRAMSG] Tentando enviar audio para ${nums[0]?.slice(-12)} com URL: ${processedAudioUrl.slice(0, 50)}...`)
   const body = { to: nums[0], audio: processedAudioUrl }
-  applyReferenceIdToBody(body, opts)
   const { ok, status, data, text } = await postJson({
     ...cfg,
     endpoint: '/messages/audio',
@@ -942,7 +929,6 @@ async function sendFile(phone, url, fileName = '', opts = {}) {
   // Não usar o nome do arquivo como legenda visível no WhatsApp.
   const captionForApi = captionTrim || ' '
   const body = { to: nums[0], document: String(url).trim(), filename, caption: captionForApi }
-  applyReferenceIdToBody(body, opts)
   const { ok, status, data, text } = await postJson({
     ...cfg,
     endpoint: '/messages/document',
@@ -984,7 +970,6 @@ async function sendVideo(phone, videoUrl, caption = '', opts = {}) {
   const captionTrim = String(caption || '').trim().slice(0, CAPTION_MAX_LEN)
   const body = { to: nums[0], video: String(videoUrl).trim() }
   if (captionTrim) body.caption = captionTrim
-  applyReferenceIdToBody(body, opts)
   const { ok, status, data, text } = await postJson({
     ...cfg,
     endpoint: '/messages/video',
@@ -1019,7 +1004,6 @@ async function sendSticker(phone, sticker, opts = {}) {
   const nums = phoneCandidatesForSend(phone)
   if (!nums.length || !sticker) return returnDetails ? { ok: false, messageId: null, error: 'Destino ou sticker inválido' } : false
   const body = { to: nums[0], sticker: String(sticker).trim() }
-  applyReferenceIdToBody(body, opts)
   const { ok, status, data, text } = await postJson({
     ...cfg,
     endpoint: '/messages/sticker',
@@ -1109,7 +1093,6 @@ async function sendVoice(phone, audioUrl, opts = {}) {
   }
   
   const body = { to: nums[0], audio: processedAudioUrl }
-  applyReferenceIdToBody(body, opts)
 
   // Tenta endpoint voice primeiro
   console.log(`[ULTRAMSG] Tentando enviar voice para ${nums[0]?.slice(-12)} com URL: ${processedAudioUrl.slice(0, 50)}...`)
@@ -1221,9 +1204,6 @@ async function sendLocation(phone, { address = '', lat, lng }, opts = {}) {
   const longitude = Number(lng)
   if (!nums.length || (isNaN(latitude) && isNaN(longitude))) return { ok: false, messageId: null }
   const body = { to: nums[0], address: addr, lat: latitude, lng: longitude }
-  // referenceId (crm-<id>): UltraMsg ecoa no webhook message_create → reconciliação casa o eco com a
-  // mensagem já persistida, evitando localização duplicada (mesmo padrão do sendText/sendContact).
-  applyReferenceIdToBody(body, opts)
   const { ok, status, data, text } = await postJson({
     ...cfg,
     endpoint: '/messages/location',
@@ -1357,9 +1337,6 @@ async function sendContact(phone, contactName, contactPhone, opts = {}) {
   const tel = contact.startsWith('55') ? contact : `55${contact}`
   const vcard = `BEGIN:VCARD\nVERSION:3.0\nN:${name};;;\nFN:${name}\nTEL;TYPE=CELL;waid=${tel}:+${tel}\nEND:VCARD`
   const body = { to: nums[0], vcard }
-  // referenceId (crm-<id>): UltraMsg ecoa no webhook message_create → reconciliação casa o eco com a
-  // mensagem já persistida, evitando cartão de contato duplicado/triplicado. (Faltava só no sendContact.)
-  applyReferenceIdToBody(body, opts)
   const { ok, status, data, text } = await postJson({
     ...cfg,
     endpoint: '/messages/vcard',
@@ -2110,19 +2087,10 @@ async function getConnectionStatus(opts = {}) {
   try {
     const { ok, data } = await getJson({ ...cfg, endpoint: '/instance/status' })
     if (!ok) return { connected: false, configured: true }
-    // Mesma leitura tolerante do integrationService: a resposta pode vir aninhada
-    // ({status:{accountStatus:{status:'authenticated'}}}) e o String() direto virava
-    // "[object object]" → "desconectado" falso. Ver helpers/ultramsgStatusPayload.
-    const { lerStatusUltramsg } = require('../../helpers/ultramsgStatusPayload')
-    const leitura = lerStatusUltramsg(data)
+    const status = String(data?.status || data?.state || '').toLowerCase()
+    const connected = ['authenticated', 'connected', 'standby'].includes(status) || data?.connected === true
     const phone = data?.phone ?? data?.wid ?? null
-    return {
-      connected: leitura.indefinido ? false : leitura.connected,
-      configured: true,
-      statusText: leitura.statusText,
-      phone,
-      session: data?.session ?? null,
-    }
+    return { connected, configured: true, phone, session: data?.session ?? null }
   } catch (e) {
     console.warn('[ULTRAMSG] getConnectionStatus:', e?.message || e)
     return { connected: false, configured: true }

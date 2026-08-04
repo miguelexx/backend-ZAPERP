@@ -6,7 +6,7 @@ API HTTP, webhooks **UltraMSG** e **Socket.IO** para o sistema de atendimento Wh
 
 ## Requisitos
 
-- Node.js 24 LTS
+- Node.js 18+ (recomendado 20+)
 - Supabase (PostgreSQL)
 - Instância **UltraMSG** por empresa (credenciais em `empresa_zapi` — nome histórico da tabela; ver ADR)
 

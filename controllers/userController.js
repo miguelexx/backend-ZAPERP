@@ -2,12 +2,6 @@ const supabase = require('../config/supabase')
 const jwt = require('jsonwebtoken')
 const bcrypt = require('bcryptjs')
 const { empresaCrmHabilitada } = require('../helpers/crmEmpresaFlag')
-const {
-  obterDepartamentoIdsDoUsuario,
-  validarDepartamentoIdsDaEmpresa,
-  normalizeDepartamentoIds,
-} = require('../helpers/usuarioDepartamentosHelper')
-const { invalidateUsuarioAtivoCache } = require('../helpers/usuarioAtivoGuard')
 
 /** GET /usuarios/me — perfil do usuário logado (inclui preferências) */
 exports.getMe = async (req, res) => {
@@ -41,6 +35,7 @@ exports.getMe = async (req, res) => {
     }
     if (error) { console.error('[userController]', error?.message); return res.status(500).json({ error: 'Erro interno' }) }
     if (!data) return res.status(404).json({ error: 'Usuário não encontrado' })
+    const { obterDepartamentoIdsDoUsuario } = require('../helpers/usuarioDepartamentosHelper')
     const departamento_ids = await obterDepartamentoIdsDoUsuario(user_id, company_id, data)
     return res.json({
       ...data,
@@ -198,16 +193,7 @@ exports.criar = async (req, res) => {
     if (!PERFIS_VALIDOS.includes(perfilNorm)) {
       return res.status(400).json({ error: `perfil deve ser: ${PERFIS_VALIDOS.join(', ')}` })
     }
-    const depIds = normalizeDepartamentoIds(Array.isArray(departamento_ids) ? departamento_ids : (departamento_id != null ? [departamento_id] : []))
-    if (depIds.length > 0) {
-      const depValidation = await validarDepartamentoIdsDaEmpresa(company_id, depIds)
-      if (!depValidation.ok) {
-        return res.status(400).json({
-          error: depValidation.error,
-          departamento_ids_invalidos: depValidation.invalidIds,
-        })
-      }
-    }
+    const depIds = [...new Set((Array.isArray(departamento_ids) ? departamento_ids : (departamento_id != null ? [departamento_id] : [])).map((id) => Number(id)).filter((id) => Number.isFinite(id) && id > 0))]
     const primeiroDep = depIds.length > 0 ? depIds[0] : null
     const hash = await bcrypt.hash(senha, 10)
     const { data, error } = await supabase
@@ -255,18 +241,7 @@ exports.atualizar = async (req, res) => {
     let depIds = departamento_ids !== undefined
       ? (Array.isArray(departamento_ids) ? departamento_ids : (departamento_ids != null ? [departamento_ids] : []))
       : (departamento_id !== undefined ? (departamento_id != null ? [departamento_id] : []) : undefined)
-    if (depIds !== undefined) {
-      depIds = normalizeDepartamentoIds(depIds)
-      if (depIds.length > 0) {
-        const depValidation = await validarDepartamentoIdsDaEmpresa(company_id, depIds)
-        if (!depValidation.ok) {
-          return res.status(400).json({
-            error: depValidation.error,
-            departamento_ids_invalidos: depValidation.invalidIds,
-          })
-        }
-      }
-    }
+    if (depIds !== undefined) depIds = [...new Set(depIds.map((id) => Number(id)).filter((id) => Number.isFinite(id) && id > 0))]
     if (depIds !== undefined) {
       update.departamento_id = depIds.length > 0 ? depIds[0] : null
     }
@@ -282,7 +257,6 @@ exports.atualizar = async (req, res) => {
       .single()
     if (error) { console.error('[userController]', error?.message); return res.status(500).json({ error: 'Erro interno' }) }
     if (!data) return res.status(404).json({ error: 'Usuário não encontrado' })
-    if (ativo !== undefined) invalidateUsuarioAtivoCache(id, company_id)
     if (depIds !== undefined) {
       await supabase.from('usuario_departamentos').delete().eq('usuario_id', id).eq('company_id', company_id)
       if (depIds.length > 0) {
@@ -378,7 +352,6 @@ exports.excluir = async (req, res) => {
       .eq('id', id)
       .eq('company_id', company_id)
     if (error) { console.error('[userController]', error?.message); return res.status(500).json({ error: 'Erro interno' }) }
-    invalidateUsuarioAtivoCache(id, company_id)
     return res.json({ ok: true })
   } catch (err) {
     console.error(err)
@@ -455,6 +428,7 @@ exports.login = async (req, res) => {
     }
 
     // Múltiplos departamentos + flags da empresa: busca em paralelo
+    const { obterDepartamentoIdsDoUsuario } = require('../helpers/usuarioDepartamentosHelper')
     const [departamento_ids, crmHabResult, empFlagsResult] = await Promise.allSettled([
       obterDepartamentoIdsDoUsuario(usuario.id, usuario.company_id, usuario),
       empresaCrmHabilitada(Number(usuario.company_id)).catch(() => true),

@@ -12,7 +12,6 @@
  */
 
 const supabase = require('../config/supabase')
-const { sendAutomaticText } = require('./automaticTextOutboundService')
 
 /**
  * Corrige mojibake típico: texto UTF-8 foi gravado/lido como Latin-1 (ex.: "OpÃ§Ã£o" → "Opção").
@@ -183,42 +182,23 @@ function isOutsideBusinessDays(diasSemanaDesativados, datasEspecificasFechadas, 
   return datasFechadas.some((dStr) => String(dStr).trim() === hoje)
 }
 
-async function sendTrackedBotText({
-  sb,
-  sendMessage,
-  telefone,
-  texto,
-  conversa_id,
-  company_id,
-  opts = {},
-  intervaloSegundos = 0,
-  behavior = {},
-  emitMensagemRealtime = null,
-}) {
+/**
+ * Envia mensagem pelo chatbot com throttle (intervalo configurável por empresa).
+ */
+async function sendWithThrottle(sendMessage, telefone, msg, opts, company_id, intervaloSegundos, behavior = {}) {
   const { bypassChatbotInterval = false, sendOptions = {} } = behavior || {}
-  const { io = null, ...providerBaseOptions } = opts || {}
-  return sendAutomaticText({
-    supabase: sb,
-    telefone,
-    texto,
-    companyId: company_id,
-    conversaId: conversa_id,
-    whatsappInstanceId: opts?.whatsappInstanceId ?? opts?.whatsapp_instance_id ?? null,
-    sendOrigin: 'chatbot_triage',
-    emitMensagemRealtime,
-    io,
-    sendOptions: { ...providerBaseOptions, ...(sendOptions || {}) },
-    sendMessage: async (phone, body, providerOptions) => {
-      if (!bypassChatbotInterval) {
-        await throttleChatbotSend(company_id, intervaloSegundos)
-      }
-      try {
-        return await sendMessage(phone, body, providerOptions)
-      } finally {
-        lastChatbotSendPerCompany.set(company_id ?? 'default', Date.now())
-      }
-    },
-  })
+  if (!bypassChatbotInterval) {
+    await throttleChatbotSend(company_id, intervaloSegundos)
+  }
+  try {
+    return await sendMessage(telefone, msg, {
+      sendOrigin: 'chatbot_triage',
+      ...(opts || {}),
+      ...(sendOptions || {}),
+    })
+  } finally {
+    lastChatbotSendPerCompany.set(company_id ?? 'default', Date.now())
+  }
 }
 
 /** Estrutura padrão do chatbot_triage em ia_config.config */
@@ -230,6 +210,26 @@ function isTraceableWhatsappMessageId(value) {
   if (/^[A-F0-9]{12,}$/i.test(s)) return true
   if (s.length > 20) return true
   return false
+}
+
+function buildBotOutboundPayload({ conversa_id, texto, company_id, sendResult, opts = {} }) {
+  const ok = typeof sendResult === 'boolean' ? sendResult : sendResult?.ok === true
+  const messageId = typeof sendResult === 'object' && sendResult?.messageId ? String(sendResult.messageId).trim() : null
+  const hasTraceableId = isTraceableWhatsappMessageId(messageId)
+  const whatsappInstanceId = opts?.whatsappInstanceId ?? opts?.whatsapp_instance_id ?? null
+  const status = ok ? (hasTraceableId ? 'sent' : 'pending') : 'erro'
+  const statusMensagem = ok ? (hasTraceableId ? 'sent' : 'sending') : 'failed'
+  const payload = {
+    conversa_id,
+    texto,
+    direcao: 'out',
+    company_id,
+    status,
+    status_mensagem: statusMensagem,
+  }
+  if (hasTraceableId) payload.whatsapp_id = messageId
+  if (whatsappInstanceId) payload.whatsapp_instance_id = whatsappInstanceId
+  return payload
 }
 
 function logBotSendResult(context, sendResult, opts = {}) {
@@ -297,8 +297,6 @@ const DEFAULT_CHATBOT_CONFIG = {
   finalizar_por_ausencia_ativo: false,
   finalizar_por_ausencia_prazo: 24,
   finalizar_por_ausencia_unidade: 'horas_corridas',
-  // null preserva empresas antigas: mensagem preenchida = enviar; vazia = somente encerramento interno.
-  finalizar_por_ausencia_enviar_mensagem: null,
   finalizar_por_ausencia_mensagem: '',
   finalizar_por_ausencia_reabrir_automaticamente: true,
   finalizar_por_ausencia_reabrir_sem_chatbot: true,
@@ -340,7 +338,6 @@ function validateChatbotConfig(raw) {
   if (activeOptions.length === 0 && src.enabled) return null
   const tipoDist = String(src.tipo_distribuicao || 'fila').trim().toLowerCase()
   const tipoDistribuicao = tipoDist === 'menor_carga' ? 'menor_carga' : (tipoDist === 'round_robin' ? 'round_robin' : 'fila')
-  const mensagemFinalizacao = String(src.mensagemFinalizacao || '').trim()
 
   return {
     enabled: !!src.enabled,
@@ -353,8 +350,8 @@ function validateChatbotConfig(raw) {
     transferMode: src.transferMode || 'departamento',
     tipo_distribuicao: tipoDistribuicao,
     reopenMenuCommand: String(src.reopenMenuCommand || '0').trim().toLowerCase(),
-    enviarMensagemFinalizacao: !!src.enviarMensagemFinalizacao && mensagemFinalizacao.length > 0,
-    mensagemFinalizacao: mensagemFinalizacao || DEFAULT_CHATBOT_CONFIG.mensagemFinalizacao,
+    enviarMensagemFinalizacao: !!src.enviarMensagemFinalizacao,
+    mensagemFinalizacao: String(src.mensagemFinalizacao || DEFAULT_CHATBOT_CONFIG.mensagemFinalizacao || '').trim() || DEFAULT_CHATBOT_CONFIG.mensagemFinalizacao,
     foraHorarioEnabled: !!src.foraHorarioEnabled,
     horarioInicio: (() => {
       const v = String(src.horarioInicio || DEFAULT_CHATBOT_CONFIG.horarioInicio || '09:00').trim()
@@ -409,10 +406,6 @@ function validateChatbotConfig(raw) {
         .toLowerCase()
       return v === 'horas_uteis' ? 'horas_uteis' : 'horas_corridas'
     })(),
-    finalizar_por_ausencia_enviar_mensagem:
-      src.finalizar_por_ausencia_enviar_mensagem == null
-        ? Boolean(String(src.finalizar_por_ausencia_mensagem || '').trim())
-        : src.finalizar_por_ausencia_enviar_mensagem !== false,
     finalizar_por_ausencia_mensagem: String(src.finalizar_por_ausencia_mensagem || '').trim(),
     finalizar_por_ausencia_reabrir_automaticamente: src.finalizar_por_ausencia_reabrir_automaticamente !== false,
     finalizar_por_ausencia_reabrir_sem_chatbot: src.finalizar_por_ausencia_reabrir_sem_chatbot !== false,
@@ -598,16 +591,13 @@ async function wasMenuLikelySentViaOutboundMensagens(supabaseClient, company_id,
   try {
     const { data: rows } = await supabaseClient
       .from('mensagens')
-      .select('texto, status, status_mensagem')
+      .select('texto')
       .eq('conversa_id', conversa_id)
       .eq('company_id', company_id)
       .eq('direcao', 'out')
       .order('criado_em', { ascending: false })
       .limit(40)
-    return (rows || []).some((r) => {
-      const status = String(r.status_mensagem || r.status || '').toLowerCase()
-      return !['erro', 'error', 'failed'].includes(status) && String(r.texto || '').includes(needle)
-    })
+    return (rows || []).some((r) => String(r.texto || '').includes(needle))
   } catch (e) {
     console.warn('[chatbotTriage] wasMenuLikelySentViaOutboundMensagens:', e?.message || e)
     return false
@@ -1236,30 +1226,30 @@ async function processIncomingMessage(ctx) {
           })
           return { handled: true }
         }
-        const sendResultFora = await sendTrackedBotText({
-          sb,
-          sendMessage,
-          telefone,
-          texto: config.mensagemForaHorario,
-          conversa_id,
-          company_id,
-          opts,
-          intervaloSegundos: config.intervaloEnvioSegundos,
-          emitMensagemRealtime: emitAfterBotMsg,
-        })
+        const sendResultFora = await sendWithThrottle(sendMessage, telefone, config.mensagemForaHorario, opts, company_id, config.intervaloEnvioSegundos)
         logBotSendResult({ company_id, conversa_id, tipo: 'fora_horario' }, sendResultFora, opts)
-        if (sendResultFora.ok) {
-          await logBotAction(company_id, conversa_id, 'fora_horario', {
-            horario_inicio: config.horarioInicio,
-            horario_fim: config.horarioFim,
-            dias_semana_desativados: config.diasSemanaDesativados,
-            data_fechada: foraDia,
-            debounce_segundos: config.foraHorarioDebounceSegundos,
-            cooldown_minutos: config.foraHorarioCooldownMinutos,
-            max_envios_24h: config.foraHorarioMaxEnvios24h,
-          })
-          lastForaHorarioSentAt.set(Number(conversa_id), Date.now())
-        }
+        const { data: rowFora } = await sb
+          .from('mensagens')
+          .insert(buildBotOutboundPayload({
+            conversa_id,
+            texto: config.mensagemForaHorario,
+            company_id,
+            sendResult: sendResultFora,
+            opts,
+          }))
+          .select('*')
+          .single()
+        await emitAfterBotMsg(rowFora)
+        await logBotAction(company_id, conversa_id, 'fora_horario', {
+          horario_inicio: config.horarioInicio,
+          horario_fim: config.horarioFim,
+          dias_semana_desativados: config.diasSemanaDesativados,
+          data_fechada: foraDia,
+          debounce_segundos: config.foraHorarioDebounceSegundos,
+          cooldown_minutos: config.foraHorarioCooldownMinutos,
+          max_envios_24h: config.foraHorarioMaxEnvios24h,
+        })
+        lastForaHorarioSentAt.set(Number(conversa_id), Date.now())
       } catch (e) {
         console.error('[chatbotTriage] ❌ Erro ao enviar mensagem fora do horário:', e?.message || e)
       } finally {
@@ -1323,19 +1313,28 @@ async function processIncomingMessage(ctx) {
     })
 
     try {
-      const sendResultConf = await sendTrackedBotText({
-        sb,
+      const sendResultConf = await sendWithThrottle(
         sendMessage,
         telefone,
-        texto: msgToSend,
-        conversa_id,
-        company_id,
+        msgToSend,
         opts,
-        intervaloSegundos: config.intervaloEnvioSegundos,
-        behavior: { bypassChatbotInterval: true, sendOptions: { skipProviderDelay: true } },
-        emitMensagemRealtime: emitAfterBotMsg,
-      })
+        company_id,
+        config.intervaloEnvioSegundos,
+        { bypassChatbotInterval: true, sendOptions: { skipProviderDelay: true } }
+      )
       logBotSendResult({ company_id, conversa_id, tipo: 'opcao_valida' }, sendResultConf, opts)
+      const { data: rowConf } = await sb
+        .from('mensagens')
+        .insert(buildBotOutboundPayload({
+          conversa_id,
+          texto: msgToSend,
+          company_id,
+          sendResult: sendResultConf,
+          opts,
+        }))
+        .select('*')
+        .single()
+      await emitAfterBotMsg(rowConf)
     } catch (sendErr) {
       console.error('[chatbotTriage] ❌ Erro ao enviar mensagem de confirmação:', sendErr?.message || sendErr)
     }
@@ -1354,23 +1353,30 @@ async function processIncomingMessage(ctx) {
     const msg = welcomeFull || menuOnly
     if (msg) {
       try {
-        const sendResultReab = await sendTrackedBotText({
-          sb,
+        const sendResultReab = await sendWithThrottle(
           sendMessage,
           telefone,
-          texto: msg,
-          conversa_id,
-          company_id,
+          msg,
           opts,
-          intervaloSegundos: config.intervaloEnvioSegundos,
-          behavior: { bypassChatbotInterval: true, sendOptions: { skipProviderDelay: true } },
-          emitMensagemRealtime: emitAfterBotMsg,
-        })
+          company_id,
+          config.intervaloEnvioSegundos,
+          { bypassChatbotInterval: true, sendOptions: { skipProviderDelay: true } }
+        )
         logBotSendResult({ company_id, conversa_id, tipo: 'menu_reenviado' }, sendResultReab, opts)
-        if (sendResultReab.ok) {
-          lastMenuEnviadoServerAt.set(Number(conversa_id), Date.now())
-          await logBotAction(company_id, conversa_id, 'menu_reenviado', { comando: textoNorm })
-        }
+        const { data: rowReab } = await sb
+          .from('mensagens')
+          .insert(buildBotOutboundPayload({
+            conversa_id,
+            texto: msg,
+            company_id,
+            sendResult: sendResultReab,
+            opts,
+          }))
+          .select('*')
+          .single()
+        await emitAfterBotMsg(rowReab)
+        lastMenuEnviadoServerAt.set(Number(conversa_id), Date.now())
+        await logBotAction(company_id, conversa_id, 'menu_reenviado', { comando: textoNorm })
       } catch (e) {
         console.error('[chatbotTriage] ❌ Erro ao reenviar menu:', e?.message || e)
       }
@@ -1403,7 +1409,7 @@ async function processIncomingMessage(ctx) {
       try {
         const { data: mensagensAnteriores } = await sb
           .from('mensagens')
-          .select('id, direcao, status, status_mensagem')
+          .select('id, direcao')
           .eq('conversa_id', conversa_id)
           .eq('company_id', company_id)
           .order('criado_em', { ascending: true })
@@ -1413,11 +1419,7 @@ async function processIncomingMessage(ctx) {
         isPrimeiraMensagemCliente =
           !mensagensAnteriores ||
           mensagensAnteriores.length === 0 ||
-          mensagensAnteriores.every((m) => {
-            if (m.direcao === 'in') return true
-            const status = String(m.status_mensagem || m.status || '').toLowerCase()
-            return ['erro', 'error', 'failed'].includes(status)
-          })
+          mensagensAnteriores.every((m) => m.direcao === 'in')
       } catch (e) {
         console.warn('[chatbotTriage] Erro ao verificar mensagens anteriores:', e?.message)
         isPrimeiraMensagemCliente = true // Assume primeira mensagem em caso de erro — melhor enviar menu do que ignorar
@@ -1460,25 +1462,25 @@ async function processIncomingMessage(ctx) {
       const motivo = conversaReabertaAposFinalizacao ? 'conversa_reaberta' : 'primeira_mensagem'
       console.log('[chatbotTriage] enviando menu de boas-vindas', { conversa_id, company_id, motivo })
       try {
-        const sendResultMenu = await sendTrackedBotText({
-          sb,
-          sendMessage,
-          telefone,
-          texto: msg,
-          conversa_id,
-          company_id,
-          opts,
-          intervaloSegundos: config.intervaloEnvioSegundos,
-          emitMensagemRealtime: emitAfterBotMsg,
-        })
+        const sendResultMenu = await sendWithThrottle(sendMessage, telefone, msg, opts, company_id, config.intervaloEnvioSegundos)
         logBotSendResult({ company_id, conversa_id, tipo: 'menu_enviado', motivo }, sendResultMenu, opts)
-        if (sendResultMenu.ok) {
-          lastMenuEnviadoServerAt.set(Number(conversa_id), Date.now())
-          await logBotAction(company_id, conversa_id, 'menu_enviado', {
-            opcoes: config.options.map((o) => o.key),
-            motivo,
-          })
-        }
+        const { data: rowMenu } = await sb
+          .from('mensagens')
+          .insert(buildBotOutboundPayload({
+            conversa_id,
+            texto: msg,
+            company_id,
+            sendResult: sendResultMenu,
+            opts,
+          }))
+          .select('*')
+          .single()
+        await emitAfterBotMsg(rowMenu)
+        lastMenuEnviadoServerAt.set(Number(conversa_id), Date.now())
+        await logBotAction(company_id, conversa_id, 'menu_enviado', {
+          opcoes: config.options.map((o) => o.key),
+          motivo,
+        })
       } catch (e) {
         console.error('[chatbotTriage] ❌ Erro ao enviar menu de boas-vindas:', e?.message || e)
       }
@@ -1608,19 +1610,21 @@ async function processIncomingMessage(ctx) {
   })
 
   try {
-    const sendResultInvalid = await sendTrackedBotText({
-      sb,
-      sendMessage,
-      telefone,
-      texto: fullInvalid,
-      conversa_id,
-      company_id,
-      opts,
-      intervaloSegundos: config.intervaloEnvioSegundos,
-      emitMensagemRealtime: emitAfterBotMsg,
-    })
+    const sendResultInvalid = await sendWithThrottle(sendMessage, telefone, fullInvalid, opts, company_id, config.intervaloEnvioSegundos)
     logBotSendResult({ company_id, conversa_id, tipo: 'opcao_invalida' }, sendResultInvalid, opts)
-    if (sendResultInvalid.ok && !usouRpc) {
+    const { data: rowInv } = await sb
+      .from('mensagens')
+      .insert(buildBotOutboundPayload({
+        conversa_id,
+        texto: fullInvalid,
+        company_id,
+        sendResult: sendResultInvalid,
+        opts,
+      }))
+      .select('*')
+      .single()
+    await emitAfterBotMsg(rowInv)
+    if (!usouRpc) {
       await (sb || supabase).from('bot_logs').insert({
         company_id,
         conversa_id: conversa_id || null,

@@ -1,5 +1,4 @@
 const { runAtendimentoSemRespostaForAllCompanies } = require('./atendimentoSemRespostaService')
-const { withSchedulerRunLock } = require('./schedulerLock')
 
 let schedulerStarted = false
 let timer = null
@@ -21,18 +20,16 @@ function startAtendimentoSemRespostaScheduler(io) {
     if (running) return
     running = true
     try {
-      await withSchedulerRunLock('atendimento_sem_resposta', intervalMs * 2, async () => {
-        const result = await runAtendimentoSemRespostaForAllCompanies({ dryRun: false, io })
-        if (!result.ok) {
-          console.warn('[atendimentoSemRespostaScheduler] ciclo com erro', { error: result.error })
-          return
-        }
-        if (result.processadas > 0) {
-          console.log('[atendimentoSemRespostaScheduler] processadas', {
-            processadas: result.processadas,
-          })
-        }
-      })
+      const result = await runAtendimentoSemRespostaForAllCompanies({ dryRun: false, io })
+      if (!result.ok) {
+        console.warn('[atendimentoSemRespostaScheduler] ciclo com erro', { error: result.error })
+        return
+      }
+      if (result.processadas > 0) {
+        console.log('[atendimentoSemRespostaScheduler] processadas', {
+          processadas: result.processadas,
+        })
+      }
     } catch (e) {
       console.warn('[atendimentoSemRespostaScheduler] erro:', e?.message || e)
     } finally {
@@ -54,4 +51,4 @@ function startAtendimentoSemRespostaScheduler(io) {
   })
 }
 
-module.exports = { startAtendimentoSemRespostaScheduler, _test: { parseIntervalMs } }
+module.exports = { startAtendimentoSemRespostaScheduler }

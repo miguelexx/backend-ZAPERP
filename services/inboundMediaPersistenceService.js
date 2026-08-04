@@ -8,16 +8,11 @@
 const fs = require('fs')
 const path = require('path')
 const crypto = require('crypto')
-const { Readable, Transform } = require('stream')
-const { pipeline } = require('stream/promises')
 const { ensureUploadsRootExists } = require('../config/uploadsRoot')
 const { isAllowedInboundMediaUrl } = require('../helpers/allowedInboundMediaUrl')
 const { normalizarTimestampSemFusoAmbiguoParaApi } = require('../helpers/timestampApiCompat')
 
-const MAX_BYTES = Math.max(
-  80 * 1024 * 1024,
-  (Number(process.env.INBOUND_MEDIA_MAX_MB) || 512) * 1024 * 1024
-)
+const MAX_BYTES = 80 * 1024 * 1024
 const FETCH_TIMEOUT_MS = Math.max(1000, Number(process.env.INBOUND_MEDIA_FETCH_TIMEOUT_MS) || 30000)
 const MAX_REDIRECTS = 3
 
@@ -45,19 +40,9 @@ function extFromContentType(ct) {
     'image/png': '.png',
     'image/webp': '.webp',
     'image/gif': '.gif',
-    'image/avif': '.avif',
-    'image/heic': '.heic',
-    'image/heif': '.heif',
-    'image/bmp': '.bmp',
-    'image/tiff': '.tiff',
     'video/mp4': '.mp4',
     'video/webm': '.webm',
     'video/quicktime': '.mov',
-    'video/x-msvideo': '.avi',
-    'video/3gpp': '.3gp',
-    'video/x-m4v': '.m4v',
-    'video/x-matroska': '.mkv',
-    'video/mpeg': '.mpeg',
     'audio/ogg': '.ogg',
     'audio/opus': '.ogg',
     'audio/mpeg': '.mp3',
@@ -66,8 +51,6 @@ function extFromContentType(ct) {
     'audio/aac': '.aac',
     'audio/wav': '.wav',
     'audio/webm': '.webm',
-    'audio/amr': '.amr',
-    'audio/flac': '.flac',
     'application/pdf': '.pdf',
     'application/zip': '.zip',
     'application/x-zip-compressed': '.zip',
@@ -79,12 +62,6 @@ function extFromContentType(ct) {
     'application/vnd.ms-powerpoint': '.ppt',
     'text/plain': '.txt',
     'text/csv': '.csv',
-    'application/rtf': '.rtf',
-    'text/rtf': '.rtf',
-    'application/vnd.oasis.opendocument.text': '.odt',
-    'application/vnd.oasis.opendocument.spreadsheet': '.ods',
-    'application/vnd.oasis.opendocument.presentation': '.odp',
-    'application/epub+zip': '.epub',
   }
   return map[c] || null
 }
@@ -95,20 +72,8 @@ const ALLOW_EXT_FROM_NAME = new Set([
   '.png',
   '.webp',
   '.gif',
-  '.avif',
-  '.heic',
-  '.heif',
-  '.bmp',
-  '.tif',
-  '.tiff',
   '.mp4',
   '.mov',
-  '.avi',
-  '.3gp',
-  '.m4v',
-  '.mkv',
-  '.mpeg',
-  '.mpg',
   '.ogg',
   '.opus',
   '.mp3',
@@ -116,8 +81,6 @@ const ALLOW_EXT_FROM_NAME = new Set([
   '.aac',
   '.wav',
   '.webm',
-  '.amr',
-  '.flac',
   '.pdf',
   '.doc',
   '.docx',
@@ -133,15 +96,6 @@ const ALLOW_EXT_FROM_NAME = new Set([
   '.apk',
   '.json',
   '.xml',
-  '.svg',
-  '.rtf',
-  '.odt',
-  '.ods',
-  '.odp',
-  '.epub',
-  '.pages',
-  '.numbers',
-  '.key',
 ])
 
 function safeExtFromNomeArquivo(nome) {
@@ -164,28 +118,6 @@ function pickStoredFilename({ company_id, mensagem_id, contentType, nome_arquivo
   if (!ext.startsWith('.')) ext = `.${ext}`
   const rand = crypto.randomBytes(6).toString('hex')
   return `inbound-c${Number(company_id)}-m${Number(mensagem_id)}-${rand}${ext}`
-}
-
-async function streamBodyToFileWithLimit(webBody, filePath, maxBytes) {
-  let received = 0
-  const limiter = new Transform({
-    transform(chunk, _encoding, callback) {
-      received += chunk.length
-      if (received > maxBytes) {
-        const error = new Error('inbound_media_too_large')
-        error.code = 'INBOUND_MEDIA_TOO_LARGE'
-        callback(error)
-        return
-      }
-      callback(null, chunk)
-    },
-  })
-  await pipeline(
-    Readable.fromWeb(webBody),
-    limiter,
-    fs.createWriteStream(filePath, { flags: 'wx' })
-  )
-  return received
 }
 
 async function fetchAllowedInboundMedia(target, signal) {
@@ -276,9 +208,14 @@ async function persistInboundMediaToUploads({ supabase, io, company_id, mensagem
   }
 
   const cl = upstream.headers.get('content-length')
-  const esperado = Number(cl)
-  if (Number.isFinite(esperado) && esperado > MAX_BYTES) {
+  if (cl && Number(cl) > MAX_BYTES) {
     console.warn('[inboundMediaPersist] arquivo muito grande (content-length):', mensagem_id)
+    return
+  }
+
+  const arrayBuffer = await upstream.arrayBuffer()
+  if (arrayBuffer.byteLength > MAX_BYTES) {
+    console.warn('[inboundMediaPersist] arquivo muito grande (body):', mensagem_id)
     return
   }
 
@@ -293,57 +230,7 @@ async function persistInboundMediaToUploads({ supabase, io, company_id, mensagem
 
   const root = ensureUploadsRootExists()
   const absPath = path.join(root, storedName)
-  const partialPath = `${absPath}.part-${process.pid}-${crypto.randomBytes(4).toString('hex')}`
-  let recebido = 0
-
-  try {
-    if (upstream.body && typeof upstream.body.getReader === 'function') {
-      // A resposta real do fetch é um Web ReadableStream. Grave por streaming para que
-      // documentos grandes não ocupem centenas de MB de heap e possam ser preservados.
-      recebido = await streamBodyToFileWithLimit(upstream.body, partialPath, MAX_BYTES)
-      if (Number.isFinite(esperado) && esperado > 0 && recebido !== esperado) {
-        console.warn('[inboundMediaPersist] download incompleto; não persiste:', {
-          company_id, mensagem_id, tipo: row.tipo, esperado, recebido,
-        })
-        await fs.promises.unlink(partialPath).catch(() => {})
-        return
-      }
-      if (recebido === 0) {
-        console.warn('[inboundMediaPersist] corpo vazio; não persiste:', { company_id, mensagem_id, tipo: row.tipo })
-        await fs.promises.unlink(partialPath).catch(() => {})
-        return
-      }
-      await fs.promises.rename(partialPath, absPath)
-    } else {
-      // Compatibilidade com respostas simuladas nos testes e runtimes antigos sem body stream.
-      const arrayBuffer = await upstream.arrayBuffer()
-      recebido = arrayBuffer.byteLength
-      if (recebido > MAX_BYTES) {
-        console.warn('[inboundMediaPersist] arquivo muito grande (body):', mensagem_id)
-        return
-      }
-      if (Number.isFinite(esperado) && esperado > 0 && recebido !== esperado) {
-        console.warn('[inboundMediaPersist] download incompleto; não persiste:', {
-          company_id, mensagem_id, tipo: row.tipo, esperado, recebido,
-        })
-        return
-      }
-      if (recebido === 0) {
-        console.warn('[inboundMediaPersist] corpo vazio; não persiste:', { company_id, mensagem_id, tipo: row.tipo })
-        return
-      }
-      await fs.promises.writeFile(absPath, Buffer.from(arrayBuffer))
-    }
-  } catch (e) {
-    await fs.promises.unlink(partialPath).catch(() => {})
-    await fs.promises.unlink(absPath).catch(() => {})
-    if (e?.code === 'INBOUND_MEDIA_TOO_LARGE') {
-      console.warn('[inboundMediaPersist] arquivo muito grande (stream):', mensagem_id)
-      return
-    }
-    console.warn('[inboundMediaPersist] falha ao salvar arquivo:', mensagem_id, e?.message || e)
-    return
-  }
+  await fs.promises.writeFile(absPath, Buffer.from(arrayBuffer))
 
   const publicPath = `/uploads/${storedName}`
   const nomeFinal = row.nome_arquivo && String(row.nome_arquivo).trim() ? String(row.nome_arquivo).trim() : storedName
@@ -529,10 +416,4 @@ module.exports = {
   schedulePersistInboundMediaIfNeeded,
   runInboundMediaPersistenceRetryBatch,
   startInboundMediaRetryScheduler,
-  _test: {
-    persistInboundMediaToUploads,
-    extFromContentType,
-    safeExtFromNomeArquivo,
-    pickStoredFilename,
-  },
 }

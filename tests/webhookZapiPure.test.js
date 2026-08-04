@@ -12,22 +12,11 @@ const {
   getPayloads,
   resolveConversationKeyFromZapi,
   extractMessage,
-  resolvePlaceholderUpgradeTexto,
-  familiaMidiaDeMensagemExistente,
-  shouldSkipChatbotAfterRule,
 } = _test
 
 // Silencia console.warn (resolveConversationKeyFromZapi avisa quando connectedPhone está ausente)
 beforeAll(() => { jest.spyOn(console, 'warn').mockImplementation(() => {}) })
 afterAll(() => { jest.restoreAllMocks() })
-
-describe('regra automatica x chatbot', () => {
-  test('so silencia chatbot quando a resposta da regra foi aceita', () => {
-    expect(shouldSkipChatbotAfterRule({ matched: true, respostaEnviada: true })).toBe(true)
-    expect(shouldSkipChatbotAfterRule({ matched: true, respostaEnviada: false })).toBe(false)
-    expect(shouldSkipChatbotAfterRule({ matched: false })).toBe(false)
-  })
-})
 
 // ─────────────────────────── looksLikeBRPhoneDigits ───────────────────────────
 describe('looksLikeBRPhoneDigits', () => {
@@ -415,61 +404,5 @@ describe('fromMe reconcile helpers', () => {
       whatsappId: 'false_5511@c.us_ABC',
     })
     expect(cand?.id).toBe(10)
-  })
-})
-
-// ─────────────────────────── resolvePlaceholderUpgradeTexto ───────────────────────────
-// Upgrade '(mensagem)'/'(mídia)' → placeholder tipado quando um webhook posterior conhece o
-// tipo mas a URL da mídia ainda não chegou (áudio pelo celular: create fora de ordem +
-// download_media atrasado deixava a bolha "(mensagem)" para sempre).
-describe('resolvePlaceholderUpgradeTexto', () => {
-  test.each([
-    ['(mensagem)', '(áudio)',   '(áudio)',   'genérico → áudio (caso do áudio pelo celular)'],
-    ['(mensagem)', '(imagem)',  '(imagem)',  'genérico → imagem'],
-    ['(mensagem)', '(vídeo)',   '(vídeo)',   'genérico → vídeo'],
-    ['(mensagem)', '(figurinha)', '(figurinha)', 'genérico → figurinha'],
-    ['(mensagem)', '(arquivo)', '(arquivo)', 'genérico → arquivo'],
-    ['(mídia)',    '(áudio)',   '(áudio)',   'mídia genérica → áudio'],
-    ['(mensagem)', '(vídeo visualização única)', '(vídeo visualização única)', 'genérico → ptv'],
-  ])('%s + %s → %s (%s)', (saved, incoming, expected) => {
-    expect(resolvePlaceholderUpgradeTexto(saved, incoming)).toBe(expected)
-  })
-
-  test.each([
-    ['(mensagem)', '(mensagem)', 'mesmo genérico — nada a fazer'],
-    ['(mensagem)', '(mídia)',    'genérico → genérico não melhora'],
-    ['(mensagem)', 'Oi, tudo bem?', 'texto real é tratado por textoReal, não aqui'],
-    ['(mensagem)', '',           'incoming vazio'],
-    ['(áudio)',    '(imagem)',   'tipado nunca troca por outro tipado (anti flip-flop)'],
-    ['(áudio)',    '(mensagem)', 'tipado nunca regride para genérico'],
-    ['Texto real', '(áudio)',    'texto real salvo nunca é sobrescrito'],
-    ['',           '(áudio)',    'saved vazio não é genérico'],
-    [null,         '(áudio)',    'saved null'],
-    ['(mensagem)', null,         'incoming null'],
-  ])('%s + %s → null (%s)', (saved, incoming) => {
-    expect(resolvePlaceholderUpgradeTexto(saved, incoming)).toBe(null)
-  })
-})
-
-// ─────────────────────────── familiaMidiaDeMensagemExistente ───────────────────────────
-// Evento posterior com URL genérica (data.media, S3 sem extensão) e sem type: a família vem
-// da PRÓPRIA linha existente (tipo gravado ou placeholder tipado no texto).
-describe('familiaMidiaDeMensagemExistente', () => {
-  test.each([
-    [{ tipo: 'voice', texto: '(áudio)' }, 'voice', 'tipo voice gravado'],
-    [{ tipo: 'audio', texto: '' }, 'audio', 'tipo audio gravado'],
-    [{ tipo: 'texto', texto: '(áudio)' }, 'voice', 'placeholder áudio com acento'],
-    [{ tipo: 'texto', texto: '(audio)' }, 'voice', 'placeholder audio ASCII'],
-    [{ tipo: 'texto', texto: '(imagem)' }, 'imagem', 'placeholder imagem'],
-    [{ tipo: 'texto', texto: '(vídeo)' }, 'video', 'placeholder vídeo'],
-    [{ tipo: 'texto', texto: '(vídeo visualização única)' }, 'video', 'placeholder ptv'],
-    [{ tipo: 'texto', texto: '(figurinha)' }, 'sticker', 'placeholder figurinha'],
-    [{ tipo: 'texto', texto: '(arquivo)' }, 'arquivo', 'placeholder arquivo'],
-    [{ tipo: 'texto', texto: 'Oi, tudo bem?' }, null, 'texto real não é mídia'],
-    [{ tipo: 'texto', texto: '(mensagem)' }, null, 'genérico não tem família'],
-    [{ tipo: 'location', texto: '' }, null, 'location não recebe URL genérica'],
-    [null, null, 'null'],
-  ])('%j → %s (%s)', (existente, expected) => {
-    expect(familiaMidiaDeMensagemExistente(existente)).toBe(expected)
   })
 })

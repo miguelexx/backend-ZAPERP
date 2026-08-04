@@ -14,19 +14,10 @@ const {
   isUltramsgNumericQueueId,
   buildCrmReferenceId,
 } = require('../helpers/whatsappMessageIdHelper')
-const {
-  classifyManualTextProviderResult,
-  sanitizeAuditJson,
-} = require('./manualTextOutboundService')
 
 const deferredTimers = new Map()
 const companyProviderCache = new Map()
 const COMPANY_CACHE_TTL_MS = 60_000
-
-// Mensagens presas na fila da UltraMSG (status 'queue'): quantas vezes já pedimos resendById.
-// Estado por processo — a varredura periódica cobre reinícios.
-const queueFlushAttemptsById = new Map()
-const QUEUE_FLUSH_MAP_MAX = 2000
 
 function parsePositiveIntEnv(name, fallback, { min = 1, max = 10_080 } = {}) {
   const n = Number(process.env[name])
@@ -53,32 +44,6 @@ function getBatchLimit() {
 
 function getLookbackMs() {
   return parsePositiveIntEnv('PENDING_OUTBOUND_RECONCILE_LOOKBACK_HOURS', 168, { min: 1, max: 336 }) * 60 * 60 * 1000
-}
-
-// Tempo que uma mensagem pode ficar na fila da UltraMSG antes de tentarmos destravá-la (resendById).
-function getQueueFlushAfterMs() {
-  return parsePositiveIntEnv('PENDING_OUTBOUND_QUEUE_FLUSH_AFTER_MINUTES', 10, { min: 1, max: 720 }) * 60_000
-}
-
-// Quantas vezes pedimos resendById antes de desistir e marcar 'erro'.
-function getQueueFlushMaxAttempts() {
-  return parsePositiveIntEnv('PENDING_OUTBOUND_QUEUE_FLUSH_MAX_ATTEMPTS', 3, { min: 1, max: 10 })
-}
-
-// Tempo total na fila após o qual a mensagem deixa de ser "a caminho" e passa a 'erro' —
-// tick vermelho no atendimento, em vez de relógio eterno que ninguém sabe interpretar.
-function getQueueGiveUpAfterMs() {
-  return parsePositiveIntEnv('PENDING_OUTBOUND_QUEUE_GIVE_UP_AFTER_MINUTES', 120, { min: 5, max: 2880 }) * 60_000
-}
-
-function rememberQueueFlushAttempt(mensagemId) {
-  const prev = queueFlushAttemptsById.get(mensagemId) || 0
-  queueFlushAttemptsById.set(mensagemId, prev + 1)
-  if (queueFlushAttemptsById.size > QUEUE_FLUSH_MAP_MAX) {
-    const oldest = queueFlushAttemptsById.keys().next().value
-    queueFlushAttemptsById.delete(oldest)
-  }
-  return prev + 1
 }
 
 function messageAgeMs(row) {
@@ -186,82 +151,6 @@ async function patchMessage(row, updates, io) {
   return { ok: true, action: 'patched', status: updates.status, mensagem_id: data.id }
 }
 
-/**
- * Mensagem parada na fila da UltraMSG (status 'queue').
- *
- * Fila significa que a UltraMSG aceitou o POST mas AINDA NÃO entregou ao WhatsApp — tipicamente
- * porque a instância/celular está fora do ar. Antes isso devolvia 'keep_queue' e a mensagem ficava
- * em 'pending' para sempre: relógio eterno no atendimento, nenhum alerta, nenhuma nova tentativa —
- * o atendente seguia digitando acreditando que o cliente estava recebendo.
- *
- * Agora: passado o tempo de tolerância, pedimos à própria UltraMSG que destrave o item
- * (POST /messages/resendById). Se depois de N tentativas continuar na fila, marca 'erro' —
- * tick vermelho visível, e a mídia entra na varredura de reenvio automático.
- */
-async function handleQueuedProviderRow(row, providerRow, io) {
-  const ageMs = messageAgeMs(row)
-
-  if (ageMs < getQueueFlushAfterMs()) {
-    return { ok: true, action: 'keep_queue' }
-  }
-
-  const queueId = firstQueueIdCandidate(row, providerRow)
-  const attempts = queueFlushAttemptsById.get(row.id) || 0
-
-  if (queueId && attempts < getQueueFlushMaxAttempts()) {
-    const provider = getProvider()
-    if (provider?.resendById) {
-      const attemptNo = rememberQueueFlushAttempt(row.id)
-      try {
-        const res = await provider.resendById(queueId, buildProviderOpts(row))
-        console.warn('[pendingOutboundReconciliation] fila UltraMSG — resendById solicitado', {
-          company_id: row.company_id,
-          conversa_id: row.conversa_id,
-          mensagem_id: row.id,
-          queue_id: queueId,
-          tentativa: attemptNo,
-          provider_ok: res?.ok === true,
-        })
-      } catch (e) {
-        console.warn('[pendingOutboundReconciliation] resendById falhou', {
-          mensagem_id: row.id,
-          queue_id: queueId,
-          error: e?.message || e,
-        })
-      }
-      return { ok: true, action: 'queue_flush_requested' }
-    }
-  }
-
-  if (ageMs >= getQueueGiveUpAfterMs()) {
-    console.warn('[pendingOutboundReconciliation] ❌ mensagem presa na fila UltraMSG — marcando erro', {
-      company_id: row.company_id,
-      conversa_id: row.conversa_id,
-      mensagem_id: row.id,
-      tipo: row.tipo,
-      queue_id: queueId || null,
-      minutos_na_fila: Math.round(ageMs / 60000),
-      nota: 'WhatsApp provavelmente desconectado quando a mensagem foi enviada.',
-    })
-    return patchMessage(row, { status: 'erro', status_mensagem: 'failed' }, io)
-  }
-
-  return { ok: true, action: 'keep_queue' }
-}
-
-function firstQueueIdCandidate(row, providerRow) {
-  const candidates = [
-    providerRow?.id,
-    row?.provider_queue_id,
-    row?.whatsapp_id,
-  ]
-  for (const value of candidates) {
-    const s = value == null ? '' : String(value).trim()
-    if (s && isUltramsgNumericQueueId(s)) return s
-  }
-  return null
-}
-
 async function resolveFromProviderRow(row, providerRow, io) {
   if (!providerRow) return { ok: true, action: 'noop' }
 
@@ -270,7 +159,7 @@ async function resolveFromProviderRow(row, providerRow, io) {
   }
 
   if (providerRowInQueue(providerRow)) {
-    return handleQueuedProviderRow(row, providerRow, io)
+    return { ok: true, action: 'keep_queue' }
   }
 
   if (providerRowIndicatesSuccess(providerRow)) {
@@ -292,14 +181,12 @@ async function resolveFromProviderRow(row, providerRow, io) {
 async function queryProviderForMessage(row) {
   const opts = buildProviderOpts(row)
   const referenceId = buildCrmReferenceId(row.id)
-  let lookupSucceeded = false
 
   if (referenceId) {
     for (const status of ['all', 'sent', 'queue', 'unsent', 'invalid', 'expired']) {
       const result = await fetchProviderMessages(opts, { referenceId, status, limit: 3 })
-      if (result.ok) lookupSucceeded = true
       if (result.ok && Array.isArray(result.data) && result.data.length > 0) {
-        return { source: `referenceId:${status}`, row: result.data[0], list: result.data, lookupSucceeded }
+        return { source: `referenceId:${status}`, row: result.data[0], list: result.data }
       }
     }
   }
@@ -313,84 +200,13 @@ async function queryProviderForMessage(row) {
   for (const idCandidate of idCandidates) {
     for (const status of ['all', 'sent', 'queue', 'unsent', 'invalid', 'expired']) {
       const result = await fetchProviderMessages(opts, { id: idCandidate, status, limit: 3 })
-      if (result.ok) lookupSucceeded = true
       if (result.ok && Array.isArray(result.data) && result.data.length > 0) {
-        return { source: `id:${status}`, row: result.data[0], list: result.data, lookupSucceeded }
+        return { source: `id:${status}`, row: result.data[0], list: result.data }
       }
     }
   }
 
-  return { source: 'none', row: null, list: [], lookupSucceeded }
-}
-
-function isRetryableAutomaticText(row) {
-  const tipo = String(row?.tipo || 'texto').trim().toLowerCase()
-  const state = String(row?.provider_delivery_state || '').trim().toLowerCase()
-  return (
-    String(row?.origem || '').trim().toLowerCase() === 'automacao' &&
-    row?.autor_usuario_id == null &&
-    (!tipo || tipo === 'texto' || tipo === 'text') &&
-    !!String(row?.texto || '').trim() &&
-    state === 'uncertain' &&
-    row?.provider_retryable !== false &&
-    Number(row?.provider_attempt_count || 0) < 2
-  )
-}
-
-async function retryAutomaticTextAfterConfirmedAbsence(row, io) {
-  const provider = getProvider()
-  if (!provider?.sendText) return { ok: false, action: 'provider_indisponivel' }
-
-  const referenceId = row.provider_reference_id || buildCrmReferenceId(row.id)
-  const attemptedAt = new Date().toISOString()
-  const requestOptions = row?.provider_request?.options && typeof row.provider_request.options === 'object'
-    ? row.provider_request.options
-    : {}
-  const options = {
-    ...requestOptions,
-    companyId: row.company_id,
-    conversaId: row.conversa_id,
-    whatsappInstanceId: row.whatsapp_instance_id || undefined,
-    sendOrigin: requestOptions.sendOrigin || 'automatic_text_reconciliation',
-    referenceId,
-  }
-
-  // O contador sobe antes do POST. Se o processo cair no meio, não haverá loop de reenvio.
-  await supabase
-    .from('mensagens')
-    .update({
-      provider_delivery_state: 'retrying',
-      provider_last_attempt_at: attemptedAt,
-      provider_attempt_count: 2,
-    })
-    .eq('company_id', row.company_id)
-    .eq('id', row.id)
-
-  let rawResult = null
-  let thrownError = null
-  try {
-    rawResult = await provider.sendText(row.provider_request?.telefone || row.telefone, row.texto, options)
-  } catch (error) {
-    thrownError = error
-  }
-  const classification = classifyManualTextProviderResult(rawResult, thrownError)
-  const uncertain = classification.state === 'uncertain'
-  const updates = {
-    status: uncertain ? 'pending' : classification.status,
-    status_mensagem: uncertain ? 'sending' : classification.status_mensagem,
-    provider_reference_id: referenceId,
-    provider_delivery_state: classification.state,
-    provider_http_status: classification.provider_http_status,
-    provider_response: sanitizeAuditJson(classification.provider_response ?? rawResult),
-    provider_error: classification.provider_error,
-    provider_retryable: false,
-    provider_last_attempt_at: attemptedAt,
-    provider_attempt_count: 2,
-    ...(classification.whatsapp_id ? { whatsapp_id: classification.whatsapp_id } : {}),
-    ...(classification.provider_queue_id ? { provider_queue_id: classification.provider_queue_id } : {}),
-  }
-  const patched = await patchMessage(row, updates, io)
-  return { ...patched, action: patched.ok ? 'automatic_text_retried' : patched.action }
+  return null
 }
 
 async function reconcilePendingOutboundMessage(row, { io = null, force = false } = {}) {
@@ -446,10 +262,6 @@ async function reconcilePendingOutboundMessage(row, { io = null, force = false }
     if (resolved.action !== 'noop') return resolved
   }
 
-  if (!providerHit.row && providerHit.lookupSucceeded && isRetryableAutomaticText(row)) {
-    return retryAutomaticTextAfterConfirmedAbsence(row, io)
-  }
-
   if (ageMs < getFailAfterMs()) {
     return { ok: true, action: 'keep_waiting' }
   }
@@ -459,26 +271,11 @@ async function reconcilePendingOutboundMessage(row, { io = null, force = false }
     return patchMessage(row, { status: 'erro', status_mensagem: 'failed' }, io)
   }
 
-  const queuedItem = providerHit?.list?.find((item) => providerRowInQueue(item))
-  if (queuedItem) {
-    return handleQueuedProviderRow(row, queuedItem, io)
+  if (providerHit?.list?.some((item) => providerRowInQueue(item))) {
+    return { ok: true, action: 'keep_queue_after_fail_window' }
   }
 
-  // O provedor não tem registro algum desta mensagem. Passado o prazo de desistência isso significa
-  // que ela nunca saiu — deixar em 'pending' apenas esconde a falha do atendente. Marca 'erro' para
-  // aparecer o tick vermelho e, no caso de mídia, entrar no reenvio automático a partir de /uploads.
-  if (ageMs >= getQueueGiveUpAfterMs()) {
-    console.warn('[pendingOutboundReconciliation] ❌ provedor sem registro da mensagem — marcando erro', {
-      company_id: row.company_id,
-      conversa_id: row.conversa_id,
-      mensagem_id: row.id,
-      tipo: row.tipo,
-      minutos_presa: Math.round(ageMs / 60000),
-    })
-    return patchMessage(row, { status: 'erro', status_mensagem: 'failed' }, io)
-  }
-
-  // Ainda dentro da janela: mantém pending (não inventar erro).
+  // Sem confirmação do provedor: mantém pending (não inventar erro).
   return { ok: true, action: 'keep_unknown' }
 }
 
@@ -489,7 +286,7 @@ async function fetchPendingOutboundRows({ companyId = null, limit = null, mensag
 
   let query = supabase
     .from('mensagens')
-    .select('id, company_id, conversa_id, whatsapp_instance_id, whatsapp_id, provider_queue_id, status, status_mensagem, direcao, criado_em, autor_usuario_id, tipo, texto, origem, provider_reference_id, provider_request, provider_delivery_state, provider_retryable, provider_last_attempt_at, provider_attempt_count')
+    .select('id, company_id, conversa_id, whatsapp_instance_id, whatsapp_id, provider_queue_id, status, status_mensagem, direcao, criado_em, autor_usuario_id, tipo')
     .eq('direcao', 'out')
     .in('status', ['pending', 'sending'])
     .gte('criado_em', oldestIso)
@@ -592,11 +389,5 @@ module.exports = {
     buildCrmReferenceId,
     getGraceMs,
     getFailAfterMs,
-    getQueueFlushAfterMs,
-    getQueueFlushMaxAttempts,
-    getQueueGiveUpAfterMs,
-    firstQueueIdCandidate,
-    isRetryableAutomaticText,
-    queueFlushAttemptsById,
   },
 }

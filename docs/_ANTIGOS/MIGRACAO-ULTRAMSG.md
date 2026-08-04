@@ -12,7 +12,7 @@ O sistema utiliza **apenas UltraMsg** para integração com WhatsApp.
 WHATSAPP_WEBHOOK_TOKEN=seu_token_seguro
 ULTRAMSG_BASE_URL=https://api.ultramsg.com
 ULTRAMSG_INSTANCE_ID=instance51534
-ULTRAMSG_TOKEN=SEU_TOKEN_ULTRAMSG
+ULTRAMSG_TOKEN=r6ztawoqwcfhzrd
 APP_URL=https://sua-api.seudominio.com
 ```
 
@@ -30,7 +30,7 @@ Ou insira manualmente:
 
 ```sql
 INSERT INTO empresa_zapi (company_id, instance_id, instance_token, client_token, ativo)
-VALUES (1, 'instance51534', 'SEU_TOKEN_ULTRAMSG', '', true)
+VALUES (1, 'instance51534', 'r6ztawoqwcfhzrd', '', true)
 ON CONFLICT (company_id) DO UPDATE SET
   instance_id = EXCLUDED.instance_id,
   instance_token = EXCLUDED.instance_token,

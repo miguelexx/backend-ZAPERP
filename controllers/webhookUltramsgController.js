@@ -33,11 +33,6 @@ function normalizeUltramsgToZapi(body) {
   if (eventType === 'message_ack' || eventType === 'webhook_message_ack') {
     const msgId = data.id ?? data.sid ?? data.msgId ?? null
     const ids = msgId ? [String(msgId).trim()] : []
-    // referenceId (crm-<mensagem_id>) vem no envelope de TODO evento UltraMSG, inclusive message_ack.
-    // Antes era descartado aqui: o ACK só podia casar por whatsapp_id, que ainda é NULL quando a
-    // UltraMSG devolveu apenas id de fila no envio. Em rajada (várias mensagens seguidas) o fallback
-    // heurístico exige candidato único e descartava o ACK — a mensagem entregue ficava com relógio.
-    const referenceId = body.referenceId ?? body.reference_id ?? data.referenceId ?? data.reference_id ?? null
     return {
       instanceId: body.instanceId ?? body.instance_id,
       instance_id: body.instanceId ?? body.instance_id,
@@ -46,8 +41,7 @@ function normalizeUltramsgToZapi(body) {
       id: msgId,
       ack: data.ack ?? data.status ?? 'pending',
       status: mapUltramsgAckToStatus(data.ack ?? data.status),
-      ids,
-      ...(referenceId ? { referenceId, ultramsgReferenceId: referenceId } : {})
+      ids
     }
   }
 
@@ -80,15 +74,7 @@ function normalizeUltramsgToZapi(body) {
   // messageId: UltraMSG usa id (formato "false_xxx@c.us_SID") como identificador canônico - message_ack envia o mesmo id
   const messageId = (data.id && String(data.id).trim()) ? data.id : (data.sid && String(data.sid).trim()) ? data.sid : null
   const bodyText = data.body ?? data.text ?? data.message ?? ''
-  // type bruto: aparelhos/versões de WhatsApp variam — já vimos 'ptt', 'audio' e derivados.
-  // Variantes fora do par exato audio/ptt (ex.: 'voice', 'audiomessage') derrubavam o tipo e a
-  // mensagem virava "(mensagem)" sem conteúdo SÓ para os contatos daquele aparelho.
-  const msgTypeRaw = String(data.type || '').toLowerCase().trim()
-  let msgType = msgTypeRaw || 'chat'
-  if (['voice', 'voicemessage', 'audiomessage', 'pttmessage'].includes(msgType)) msgType = 'ptt'
-  else if (['imagemessage', 'photo', 'picture'].includes(msgType)) msgType = 'image'
-  else if (['videomessage', 'gif'].includes(msgType)) msgType = 'video'
-  else if (['stickermessage'].includes(msgType)) msgType = 'sticker'
+  const msgType = String(data.type || 'chat').toLowerCase()
 
   /** Normaliza campo de mídia (string URL ou objeto com url/link/file) para string URL. */
   const toUrl = (v) => {
@@ -100,109 +86,20 @@ function normalizeUltramsgToZapi(body) {
 
   // data.media: UltraMSG envia string URL ou objeto { url, link, file } para imagem/áudio/vídeo/documento
   // webhook_message_download_media=true: UltraMsg inclui URL da mídia no payload
-  const mediaUrl = toUrl(data.media) ?? toUrl(data.mediaUrl)
-
-  // Inferência de tipo quando o type vem ausente/genérico ou como MIME cru ('audio/ogg; codecs=opus'):
-  // usa mimetype do payload, o próprio type-como-MIME e a extensão da URL da mídia.
-  // NUNCA reclassifica um type já reconhecido — só resgata payloads que cairiam em "(mensagem)"
-  // com a URL da mídia descartada.
-  const mimeHint =
-    String(data.mimetype ?? data.mime_type ?? data.media?.mimetype ?? data.media?.mime_type ?? '')
-      .toLowerCase().trim() ||
-    (msgTypeRaw.includes('/') ? msgTypeRaw : '')
-  const msgTypeGenerico = !msgTypeRaw || ['chat', 'text', 'message'].includes(msgType) || msgTypeRaw.includes('/')
-  if (msgTypeGenerico && (mediaUrl || mimeHint)) {
-    const urlPath = String(mediaUrl || '').split(/[?#]/)[0].toLowerCase()
-    if (mimeHint.startsWith('audio/') || /\.(ogg|oga|opus|mp3|m4a|aac|amr|wav)$/.test(urlPath)) {
-      msgType = 'ptt'
-    } else if (mimeHint.startsWith('image/webp') || /\.webp$/.test(urlPath)) {
-      msgType = 'sticker'
-    } else if (mimeHint.startsWith('image/') || /\.(jpe?g|png|gif|bmp|heic)$/.test(urlPath)) {
-      msgType = 'image'
-    } else if (mimeHint.startsWith('video/') || /\.(mp4|mov|3gp|webm|mkv)$/.test(urlPath)) {
-      msgType = 'video'
-    } else if (mediaUrl && (mimeHint.startsWith('application/') || /\.(pdf|docx?|xlsx?|pptx?|zip|rar|7z|txt|csv|rtf)$/.test(urlPath))) {
-      msgType = 'document'
-    }
-    if (msgType !== 'chat' && msgType !== msgTypeRaw) {
-      console.log('[WEBHOOK_ULTRAMSG] tipo inferido por mime/URL (type bruto não reconhecido)', {
-        type_bruto: (msgTypeRaw || '(vazio)').slice(0, 40),
-        mime: mimeHint.slice(0, 40) || null,
-        inferido: msgType,
-        has_media: !!mediaUrl,
-      })
-    }
-  }
+  const mediaUrl = toUrl(data.media)
 
   // Áudio: data.audio, data.audioUrl, data.mediaUrl, data.media, data.attachment (UltraMsg pode variar)
   let audioUrl =
     toUrl(data.audio) ??
     toUrl(data.audioUrl) ??
     toUrl(data.attachment) ??
-    (msgType === 'audio' || msgType === 'ptt' ? (mediaUrl ?? toUrl(data.file)) : null)
-
-  // Nome do arquivo: UltraMSG envia filename/caption no webhook de documentos (changelog Apr 2023).
-  // Sem isto, o pipeline interno nunca recebe fileName e grava só o texto do body (ex.: "relatorio.docx").
-  const looksLikeFileName = (v) => {
-    const s = String(v || '').trim()
-    if (!s || s.length > 255 || /\n/.test(s)) return false
-    return /\.(pdf|docx?|xlsx?|pptx?|txt|csv|zip|rar|7z|rtf|odt|ods|odp|json|xml|apk|bin)$/i.test(s)
-  }
-  const fileNameRaw =
-    data.filename ??
-    data.fileName ??
-    data.file_name ??
-    data.document?.filename ??
-    data.document?.fileName ??
-    data.document?.title ??
-    data.file?.filename ??
-    data.file?.fileName ??
-    data.media?.filename ??
-    data.media?.fileName ??
-    null
-  let fileName = fileNameRaw ? String(fileNameRaw).trim() : null
-  if (!fileName && looksLikeFileName(bodyText)) {
-    fileName = String(bodyText).trim()
-  }
-  const captionRaw = data.caption ?? data.document?.caption ?? null
-  const documentCaption = captionRaw && String(captionRaw).trim() ? String(captionRaw).trim() : null
-  const declaredDocumentType = msgType === 'document' || msgType === 'file' || msgType === 'documentmessage'
-  // UltraMSG às vezes manda type=chat com body=arquivo.docx (+ media) — tratar como documento.
-  // Também: type=chat só com filename no body (URL chega depois em webhook_message_download_media).
-  // Aceita nomes com espaços (ex.: "Ofício Dr. 13 - EMOF.docx"); evita frases longas.
-  // Só inferir a partir de chat/text — nunca reclassificar image/audio/video/sticker.
-  const canInferDocument = !msgType || msgType === 'chat' || msgType === 'text' || msgType === 'message'
-  const bodyLooksLikeStandaloneFile =
-    looksLikeFileName(bodyText) &&
-    String(bodyText).trim().length <= 200 &&
-    !/\n/.test(String(bodyText)) &&
-    !/\s+(https?:\/\/|www\.)/i.test(String(bodyText))
-  const inferredDocument = canInferDocument && !declaredDocumentType && (
-    !!fileNameRaw ||
-    (!!mediaUrl && (!!fileName || bodyLooksLikeStandaloneFile)) ||
-    bodyLooksLikeStandaloneFile
-  )
-  const isDocumentType = declaredDocumentType || inferredDocument
+    (msgType === 'audio' || msgType === 'ptt' ? (mediaUrl ?? toUrl(data.mediaUrl) ?? toUrl(data.file)) : null)
 
   // Mídia por tipo: UltraMSG doc — media (URL) é o campo principal; mediaUrl, document/file, etc. como fallback
-  const imageUrl = msgType === 'image' ? (mediaUrl ?? toUrl(data.image)) : toUrl(data.image)
-  const documentUrl =
-    toUrl(data.documentUrl) ??
-    toUrl(data.document) ??
-    toUrl(data.file) ??
-    toUrl(data.attachment) ??
-    (isDocumentType ? mediaUrl : null)
+  const imageUrl = msgType === 'image' ? (mediaUrl ?? toUrl(data.mediaUrl) ?? toUrl(data.image)) : toUrl(data.image)
+  const documentUrl = toUrl(data.documentUrl) ?? toUrl(data.document) ?? toUrl(data.file) ?? (msgType === 'document' || msgType === 'file' ? mediaUrl : null)
   const videoUrl = msgType === 'video' ? (mediaUrl ?? toUrl(data.videoUrl) ?? toUrl(data.video)) : (toUrl(data.videoUrl) ?? toUrl(data.video))
   const stickerUrl = msgType === 'sticker' ? (mediaUrl ?? toUrl(data.stickerUrl) ?? toUrl(data.sticker)) : (toUrl(data.stickerUrl) ?? toUrl(data.sticker))
-
-  const effectiveMsgType = isDocumentType
-    ? 'document'
-    : (msgType === 'documentmessage' ? 'document' : msgType)
-
-  // Body do documento: preferir caption real; se body for só o filename, manter filename (UI/lista)
-  const documentBodyText = isDocumentType
-    ? (documentCaption || (fileName && String(bodyText).trim() === fileName ? fileName : (String(bodyText || '').trim() || fileName || '')))
-    : bodyText
 
   // Localização: UltraMsg envia type=location com lat/lng (ou latitude/longitude).
   // UltraMSG pode enviar: data.lat/data.lng no root, ou data.location = { lat, lng, address }.
@@ -283,14 +180,9 @@ function normalizeUltramsgToZapi(body) {
 
   // Para localização: se body for Base64 (thumbnail do mapa), usar texto descritivo em vez do Base64
   const validCoords = locLat != null && locLng != null && !isNaN(Number(locLat)) && !isNaN(Number(locLng))
-  const bodySource = isDocumentType ? documentBodyText : bodyText
   const bodyForPayload = (locationPayload && isBodyBase64Image(bodyText))
     ? (safeAddress || (validCoords ? `${locLat},${locLng}` : null) || '(localização)')
-    : bodySource
-
-  const resolvedType = msgType === 'ptt'
-    ? 'audio'
-    : (isReactionEvent ? 'reaction' : (isContactType ? 'contact' : effectiveMsgType))
+    : bodyText
 
   const zapiLike = {
     instanceId: body.instanceId ?? body.instance_id,
@@ -312,7 +204,7 @@ function normalizeUltramsgToZapi(body) {
     body: bodyForPayload,
     message: bodyForPayload,
     text: { message: bodyForPayload },
-    type: resolvedType,
+    type: (msgType === 'ptt' ? 'audio' : (isReactionEvent ? 'reaction' : (isContactType ? 'contact' : msgType))),
     participantPhone: participantPhone || undefined,
     participant: participantPhone ? `${participantPhone}@c.us` : undefined,
     key: {
@@ -332,23 +224,6 @@ function normalizeUltramsgToZapi(body) {
     audioUrl: audioUrl || null,
     videoUrl: videoUrl || null,
     stickerUrl: stickerUrl || null,
-    // URL genérica de mídia (data.media): mantida mesmo quando o type não permitiu classificá-la.
-    // O pipeline usa como último recurso para anexar a URL à mensagem existente (idempotência),
-    // inferindo a família pela própria linha do banco (ex.: evento download_media sem type,
-    // com URL S3 sem extensão).
-    mediaUrl: mediaUrl || null,
-    fileName: fileName || null,
-    filename: fileName || null,
-    ...(isDocumentType && (documentUrl || fileName) ? {
-      document: {
-        documentUrl: documentUrl || undefined,
-        url: documentUrl || undefined,
-        fileName: fileName || undefined,
-        filename: fileName || undefined,
-        caption: documentCaption || undefined,
-        title: fileName || undefined,
-      }
-    } : {}),
     senderName: senderName ? String(senderName).trim() : null,
     senderPhoto: senderPhoto && String(senderPhoto).trim().startsWith('http') ? String(senderPhoto).trim() : null,
     name: senderName ? String(senderName).trim() : null,
@@ -454,17 +329,7 @@ async function handleWebhookUltramsg(req, res) {
     if (isMessageEvent || hasMessageData) {
       const normalized = normalizeUltramsgToZapi(body)
       if (!normalized) return res.status(200).json({ ok: true })
-      // type='ReceivedCallback' é o discriminador de envelope esperado pelo pipeline (isStatusCallback).
-      // Mas ele SOBRESCREVE o tipo REAL da mensagem (audio/imagem/...) que o normalizador calculou.
-      // Preservamos o tipo real em `messageType` para o extractMessage reconstruir o tipo quando a
-      // mídia chega SEM URL (senão o áudio/foto vira 'text' → '(mídia)' → '(mensagem)').
-      req.body = {
-        ...normalized,
-        type: 'ReceivedCallback',
-        messageType: normalized.type || null,
-        instanceId: body.instanceId,
-        instance_id: body.instanceId,
-      }
+      req.body = { ...normalized, type: 'ReceivedCallback', instanceId: body.instanceId, instance_id: body.instanceId }
       return webhookCoreController.receberZapi(req, res)
     }
 
@@ -484,4 +349,3 @@ async function handleWebhookUltramsg(req, res) {
 }
 
 exports.handleWebhookUltramsg = handleWebhookUltramsg
-exports._test = { normalizeUltramsgToZapi, resolveWebhookBody, mapUltramsgAckToStatus }

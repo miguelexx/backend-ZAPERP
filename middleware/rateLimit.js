@@ -1,33 +1,21 @@
 const { rateLimit, ipKeyGenerator } = require('express-rate-limit')
-const jwt = require('jsonwebtoken')
 
 /**
- * Extrai user+company do JWT VERIFICADO — usado apenas para bucketing de rate limit.
+ * Extrai user+company do JWT sem verificar assinatura — usado apenas para bucketing de rate limit.
  * Garante que usuários autenticados tenham cota individual mesmo atrás de proxy/Traefik compartilhado.
- * A assinatura é verificada: token forjado/inválido cai no bucket por IP (senão qualquer cliente
- * criaria buckets ilimitados e anularia o limite por IP).
  */
 function extractJwtBucketKey(req) {
   try {
     const auth = req.headers.authorization || ''
-    let token = auth.startsWith('Bearer ') ? auth.slice(7) : ''
-    // <audio>/<video>/<img> não mandam header: o JWT vai em ?access_token= (ver
-    // middleware/authBearerOrQuery). Sem ler a query, TODA reprodução de mídia caía no
-    // bucket por IP — um escritório inteiro dividindo uma cota só, e o sintoma de estouro
-    // é o áudio simplesmente não tocar (429 silencioso no <audio>). Mesma verificação de
-    // assinatura do header: token forjado continua caindo no bucket por IP.
-    if (!token) {
-      const q = req.query?.access_token ?? req.query?.token
-      if (q && typeof q === 'string') token = q.trim()
-    }
+    const token = auth.startsWith('Bearer ') ? auth.slice(7) : ''
     if (!token) return null
-    const secret = process.env.JWT_SECRET
-    if (!secret) return null
-    const decoded = jwt.verify(token, secret)
+    const payload = token.split('.')[1]
+    if (!payload) return null
+    const decoded = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'))
     const uid = decoded?.id || decoded?.sub
     const cid = decoded?.company_id
     if (uid && cid) return `u_${cid}_${uid}`
-  } catch { /* token inválido/expirado → bucket por IP */ }
+  } catch { /* ignore */ }
   return null
 }
 
@@ -73,7 +61,7 @@ const loginLimiter = limiter({
 
 const webhookLimiter = limiter({
   windowMs: 60 * 1000,
-  max: numberFromEnv('WEBHOOK_RATE_LIMIT_MAX', 12000),
+  max: numberFromEnv('WEBHOOK_RATE_LIMIT_MAX', 60000),
 })
 
 // apiLimiter: usa user_id+company_id como chave quando o JWT está presente,
@@ -81,7 +69,7 @@ const webhookLimiter = limiter({
 // (cenário comum atrás de Traefik/Coolify). Rotas sem JWT continuam usando IP.
 const apiLimiter = rateLimit({
   windowMs: 60 * 1000,
-  max: numberFromEnv('API_RATE_LIMIT_MAX', 6000),
+  max: numberFromEnv('API_RATE_LIMIT_MAX', 30000),
   standardHeaders: true,
   legacyHeaders: false,
   keyGenerator: (req) => {

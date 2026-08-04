@@ -2,7 +2,6 @@ const express = require('express')
 const auth = require('../middleware/auth')
 const requireCrmHabilitado = require('../middleware/requireCrmHabilitado')
 const c = require('../controllers/crmController')
-const crmSso = require('../controllers/crmSsoController')
 
 const router = express.Router()
 
@@ -10,10 +9,6 @@ const router = express.Router()
 const authCrm = [auth, requireCrmHabilitado]
 
 router.get('/google/callback', c.googleCallback)
-
-// Hand-off (SSO) para o CRM Avançado. Só exige autenticação do ZapERP —
-// a presença de CRM_AVANCADO_URL/ZAP_SSO_SECRET é o interruptor mestre.
-router.get('/abrir-avancado', auth, crmSso.abrirCrmAvancado)
 
 router.get('/pipelines', ...authCrm, c.listPipelines)
 router.post('/pipelines', ...authCrm, c.createPipeline)

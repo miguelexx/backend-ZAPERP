@@ -7,7 +7,6 @@ const { destructiveLimiter } = require('../middleware/rateLimit')
 const configController = require('../controllers/configController')
 const permissoesController = require('../controllers/permissoesController')
 const configOperacionalRoutes = require('./configOperacionalRoutes')
-const atendimentoLimitsRoutes = require('./atendimentoLimitsRoutes')
 const { uploadLogo } = require('../middleware/upload')
 
 // Configurações: supervisor e admin (atendente não acessa)
@@ -21,7 +20,6 @@ router.use(supervisorOrAdmin)
 
 // Config operacional e auditoria de eventos (proteção WhatsApp)
 router.use('/', configOperacionalRoutes)
-router.use('/atendimento-limits', atendimentoLimitsRoutes)
 
 router.put('/empresa', configController.putEmpresa)
 router.post('/empresa/logo', adminOnly, uploadLogo.single('logo'), configController.uploadLogoEmpresa)

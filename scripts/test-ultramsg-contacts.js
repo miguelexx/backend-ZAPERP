@@ -1,14 +1,9 @@
 /**
  * Script para testar a API UltraMsg GET /contacts e GET /contacts/contact
- * Uso: ULTRAMSG_INSTANCE_ID=51534 ULTRAMSG_TOKEN=<token> node scripts/test-ultramsg-contacts.js
+ * Uso: node scripts/test-ultramsg-contacts.js
  */
-require('dotenv').config({ path: require('path').join(__dirname, '..', '.env') })
-const instanceId = String(process.env.ULTRAMSG_INSTANCE_ID || '51534').trim()
-const token = String(process.env.ULTRAMSG_TOKEN || '').trim()
-if (!token) {
-  console.error('ULTRAMSG_TOKEN não definido (env ou .env) — nunca hardcodar token neste script')
-  process.exit(1)
-}
+const instanceId = '51534'
+const token = 'r6ztawoqwcfhzrdc'
 
 async function fetchApi(endpoint, extraParams = {}) {
   const params = new URLSearchParams({ token, ...extraParams })

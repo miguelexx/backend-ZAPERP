@@ -5,7 +5,6 @@
  */
 
 const supabase = require('../config/supabase')
-const { sendAutomaticText } = require('./automaticTextOutboundService')
 
 function isWithinBusinessHours(empresa, now = new Date()) {
   if (!empresa?.horario_inicio || !empresa?.horario_fim) return true
@@ -16,6 +15,32 @@ function isWithinBusinessHours(empresa, now = new Date()) {
   const minutosFim = hFim * 60 + (mFim || 0)
   if (minutosIni <= minutosFim) return minutosAgora >= minutosIni && minutosAgora <= minutosFim
   return minutosAgora >= minutosIni || minutosAgora <= minutosFim
+}
+
+function isTraceableWhatsappMessageId(value) {
+  if (!value) return false
+  const s = String(value).trim()
+  if (!s || s === 'null' || s === 'undefined' || s === 'false' || s === '0') return false
+  if (s.includes('@')) return true
+  if (/^[A-F0-9]{12,}$/i.test(s)) return true
+  if (s.length > 20) return true
+  return false
+}
+
+function buildOutboundPayload({ conversa_id, texto, company_id, sendResult, whatsappInstanceId }) {
+  const ok = typeof sendResult === 'boolean' ? sendResult : sendResult?.ok === true
+  const messageId = typeof sendResult === 'object' && sendResult?.messageId ? String(sendResult.messageId).trim() : null
+  const hasTraceableId = isTraceableWhatsappMessageId(messageId)
+  return {
+    conversa_id,
+    texto,
+    direcao: 'out',
+    company_id,
+    status: ok ? (hasTraceableId ? 'sent' : 'pending') : 'erro',
+    status_mensagem: ok ? (hasTraceableId ? 'sent' : 'sending') : 'failed',
+    ...(hasTraceableId ? { whatsapp_id: messageId } : {}),
+    ...(whatsappInstanceId ? { whatsapp_instance_id: whatsappInstanceId } : {}),
+  }
 }
 
 /**
@@ -73,35 +98,22 @@ async function processarRegras(ctx) {
       if (!telefone) continue
 
       try {
-        const sendResult = await sendAutomaticText({
-          supabase: supabaseClient,
-          sendMessage,
-          telefone,
+        const sendResult = await sendMessage(telefone, resposta, { sendOrigin: 'regra_automatica' })
+        const sendOk = typeof sendResult === 'boolean' ? sendResult : sendResult?.ok === true
+        const { data: rowMensagem, error: insertMsgError } = await supabaseClient.from('mensagens').insert(buildOutboundPayload({
+          conversa_id,
           texto: resposta,
-          companyId: company_id,
-          conversaId: conversa_id,
+          company_id,
+          sendResult,
           whatsappInstanceId: ctx.whatsapp_instance_id || ctx.whatsappInstanceId || null,
-          sendOrigin: 'regra_automatica',
-          emitMensagemRealtime: ctx.emitMensagemRealtime || null,
-          io: ctx.io || null,
-        })
-        const sendOk = sendResult?.ok === true
-
-        if (!sendOk) {
-          await supabaseClient.from('bot_logs').insert({
-            company_id,
-            conversa_id,
-            tipo: 'regra_automatica_falha_envio',
-            detalhes: {
-              regra_id: r.id,
-              palavra_chave: r.palavra_chave,
-              uncertain: sendResult?.uncertain === true,
-              erro: String(sendResult?.error || 'envio não aceito').slice(0, 500),
-            },
-          }).catch(() => {})
-          return { matched: true, respostaEnviada: false }
+        })).select('*').single()
+        if (insertMsgError) {
+          console.warn('[regrasAutomaticas] Erro ao salvar mensagem enviada:', insertMsgError.message || insertMsgError)
+        } else if (rowMensagem && typeof ctx.emitMensagemRealtime === 'function') {
+          await ctx.emitMensagemRealtime(rowMensagem).catch((e) => {
+            console.warn('[regrasAutomaticas] Erro ao emitir mensagem enviada:', e?.message || e)
+          })
         }
-
         await supabaseClient.from('bot_logs').insert({
           company_id,
           conversa_id,

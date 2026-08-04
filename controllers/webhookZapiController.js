@@ -39,7 +39,6 @@ const { emitBotMensagemRealtime, emitReaberturaSemSetorRealtime } = require('../
 const { clearReabertaFaltaInteracao } = require('../helpers/reabertaFaltaInteracaoHelper')
 const { processarOptOut } = require('../services/optOutService')
 const { processarRegras } = require('../services/regrasAutomaticasService')
-const { sendAutomaticText } = require('../services/automaticTextOutboundService')
 const {
   loadChatbotTriageMergeAndAbsence,
   tryMarkWaitingAfterHumanOutbound,
@@ -65,13 +64,12 @@ const {
   canonStatusForEmit,
   statusRank,
 } = require('../helpers/messageStatusHelper')
-const { departamentoRoom } = require('../helpers/socketRooms')
 
 // company_id NUNCA mais via ENV — resolvido por instanceId do payload em cada webhook
 const WHATSAPP_DEBUG = String(process.env.WHATSAPP_DEBUG || '').toLowerCase() === 'true'
 // Seleção enxuta para evitar payload desnecessário em caminhos quentes de webhook.
 // IMPORTANTE: não depender de colunas opcionais para manter compatibilidade com bancos legados.
-const WEBHOOK_MSG_SELECT = 'id, conversa_id, company_id, whatsapp_instance_id, whatsapp_id, texto, url, tipo, direcao, criado_em, status, autor_usuario_id, origem, reply_meta, nome_arquivo, contact_meta, location_meta, remetente_nome, remetente_telefone'
+const WEBHOOK_MSG_SELECT = 'id, conversa_id, company_id, whatsapp_instance_id, whatsapp_id, texto, url, tipo, direcao, criado_em, status, autor_usuario_id, reply_meta, nome_arquivo, contact_meta, location_meta, remetente_nome, remetente_telefone'
 
 // Ordem de progresso dos ticks de status. Usado em statusZapi para evitar que um ack atrasado
 // (ex.: "delivered" chegando depois de "read") regrida visualmente o status já persistido.
@@ -86,10 +84,6 @@ function isTraceableWhatsappMessageId(value) {
   if (/^[A-F0-9]{12,}$/i.test(s)) return true
   if (s.length > 20) return true
   return false
-}
-
-function shouldSkipChatbotAfterRule(result) {
-  return result?.matched === true && result?.respostaEnviada === true
 }
 
 function isRemoteMediaUrl(url) {
@@ -328,65 +322,6 @@ function mapWebhookTypeToStorageTipo(type) {
   return t || null
 }
 
-// Placeholders de mídia (sem URL ainda). Uma mensagem de mídia recebe um destes quando o link
-// não veio no primeiro webhook — o link real pode chegar depois via webhook_message_download_media.
-const MEDIA_PLACEHOLDERS = new Set([
-  '(mídia)', '(imagem)', '(áudio)', '(vídeo)', '(vídeo visualização única)', '(arquivo)', '(figurinha)'
-])
-function isMediaPlaceholderText(texto) {
-  return MEDIA_PLACEHOLDERS.has(String(texto || '').trim())
-}
-
-/**
- * Upgrade de placeholder GENÉRICO → placeholder TIPADO na idempotência.
- * Cenário real: um primeiro webhook sem tipo detectável (ex.: create fora de ordem/ciphertext)
- * grava a linha como '(mensagem)'/'(mídia)'. O webhook seguinte SABE o tipo (ex.: áudio) mas ainda
- * não tem a URL (que só chega no webhook_message_download_media). Sem este upgrade, textoReal
- * descarta placeholders (regra anti-sobrescrita) e hasMediaToUpdate exige URL → a bolha ficava
- * "(mensagem)" para sempre. Genérico → tipado é estritamente melhor; nunca o contrário, e nunca
- * troca um tipado por outro (evita flip-flop entre eventos).
- * @returns {string|null} novo texto a gravar, ou null se não deve atualizar
- */
-function resolvePlaceholderUpgradeTexto(savedTexto, textoIncoming) {
-  const saved = String(savedTexto || '').trim()
-  const incoming = String(textoIncoming || '').trim()
-  const savedIsGenerico = saved === '(mensagem)' || saved === '(mídia)'
-  if (!savedIsGenerico) return null
-  if (!isMediaPlaceholderText(incoming) || incoming === '(mídia)') return null
-  if (incoming === saved) return null
-  return incoming
-}
-
-/**
- * Família de mídia de uma mensagem EXISTENTE (tipo gravado ou placeholder tipado no texto).
- * Usada para anexar uma URL genérica de mídia (data.media) que chega em evento posterior
- * SEM type reconhecível (ex.: webhook_message_download_media com URL S3 sem extensão) —
- * a linha do banco já sabe o que ela é; o evento só traz o link.
- * @returns {'voice'|'audio'|'imagem'|'video'|'sticker'|'arquivo'|null} tipo de storage, ou null
- */
-function familiaMidiaDeMensagemExistente(existente) {
-  const tipo = String(existente?.tipo || '').toLowerCase().trim()
-  if (['voice', 'audio', 'imagem', 'video', 'sticker', 'arquivo'].includes(tipo)) return tipo
-  const t = String(existente?.texto || '').trim().toLowerCase()
-  if (t === '(áudio)' || t === '(audio)' || t === '(áudio de voz)') return 'voice'
-  if (t === '(imagem)') return 'imagem'
-  if (t === '(vídeo)' || t === '(video)' || t === '(vídeo visualização única)') return 'video'
-  if (t === '(figurinha)' || t === '(sticker)') return 'sticker'
-  if (t === '(arquivo)' || t === '(documento)') return 'arquivo'
-  return null
-}
-
-// Eventos internos de protocolo/sistema do WhatsApp — NÃO são mensagens do cliente e não devem
-// virar linha no chat (evita ruído). Tudo que não estiver aqui é tratado como mensagem real e é
-// SEMPRE salvo (mesmo sem conteúdo detectável), para nunca perder mensagem do contato.
-const NON_MESSAGE_EVENT_TYPES = new Set([
-  'e2e_notification', 'notification_template', 'gp2', 'protocol', 'ciphertext',
-  'revoked', 'security_notification', 'call_log', 'notification',
-])
-function isNonMessageEventType(type) {
-  return NON_MESSAGE_EVENT_TYPES.has(String(type || '').toLowerCase().trim())
-}
-
 /**
  * Casa eco fromMe (webhook) com mensagem outbound recente do CRM.
  * Não usa URL remota vs /uploads/ — evita segunda linha no chat ao enviar PDF/arquivo.
@@ -398,7 +333,6 @@ const {
 
 function findFromMeOutboundMediaCandidate(rows, { fileName, texto, tipo, nomeAtendente, whatsappId }) {
   if (!Array.isArray(rows) || rows.length === 0) return null
-  const pickUnique = (matches) => (matches.length === 1 ? matches[0] : null)
   const nomeW = normalizeMediaFileNameForMatch(fileName)
   const nomeBaseW = normalizeMediaBaseNameForMatch(fileName)
   const tipoW = tipo ? String(tipo).toLowerCase() : null
@@ -407,38 +341,35 @@ function findFromMeOutboundMediaCandidate(rows, { fileName, texto, tipo, nomeAte
   if (candidates.length === 0) return null
 
   if (nomeW) {
-    const byNome = candidates.filter((c) => {
+    const byNome = candidates.find((c) => {
       const candNome = normalizeMediaFileNameForMatch(c.nome_arquivo || c.texto)
       const candBase = normalizeMediaBaseNameForMatch(c.nome_arquivo || c.texto)
       if (!candNome || (candNome !== nomeW && candBase !== nomeBaseW)) return false
       if (familiaW && mediaFamilyForStorageTipo(c.tipo) !== familiaW) return false
       return true
     })
-    const uniqueByNome = pickUnique(byNome)
-    if (uniqueByNome) return uniqueByNome
+    if (byNome) return byNome
   }
 
   if (texto) {
     const textoNorm = String(texto || '').trim()
-    const byTexto = candidates.filter((c) => {
+    const byTexto = candidates.find((c) => {
       const t = String(c.texto || '').trim()
       if (!t) return false
       if (familiaW && mediaFamilyForStorageTipo(c.tipo) !== familiaW) return false
       if (textosOutboundFromMeEquivalentes(textoNorm, t, nomeAtendente)) return true
       return false
     })
-    const uniqueByTexto = pickUnique(byTexto)
-    if (uniqueByTexto) return uniqueByTexto
+    if (byTexto) return byTexto
   }
 
   if (familiaW) {
-    const byTipoCrm = candidates.filter(
+    const byTipoCrm = candidates.find(
       (c) =>
         mediaFamilyForStorageTipo(c.tipo) === familiaW &&
         (c.autor_usuario_id != null || isLocalUploadMediaUrl(c.url))
     )
-    const uniqueByTipoCrm = pickUnique(byTipoCrm)
-    if (uniqueByTipoCrm) return uniqueByTipoCrm
+    if (byTipoCrm) return byTipoCrm
   }
 
   return null
@@ -875,14 +806,7 @@ function extractMessage(payload) {
     payload.listResponseMessage?.message ??
     ''
   let type = String(payload.type || payload.msgType || 'text').toLowerCase()
-  if (type === 'receivedcallback' || type === 'receivedcall') {
-    // O envelope 'ReceivedCallback' apaga o tipo real da mensagem. Reconstrói pelo hint
-    // messageType (preservado pelo normalizador UltraMsg). Sem isto, mídia SEM URL (a URL pode
-    // chegar depois) não tinha como ser re-inferida e caía em 'text' → '(mídia)' → '(mensagem)'.
-    // 'chat'/'text' continuam virando 'text' (preserva detecção de link e comportamento atual).
-    const hint = String(payload.messageType || '').toLowerCase().trim()
-    type = (hint && hint !== 'chat' && hint !== 'text' && hint !== 'receivedcallback') ? hint : 'text'
-  }
+  if (type === 'receivedcallback' || type === 'receivedcall') type = 'text'
 
   // Reação (Z-API: reaction.value)
   if (payload.reaction && typeof payload.reaction === 'object') {
@@ -932,19 +856,7 @@ function extractMessage(payload) {
     payload.message?.documentUrl ??
     null
   if (documentUrl && typeof documentUrl === 'object') documentUrl = documentUrl.url ?? documentUrl.documentUrl ?? null
-  let fileName =
-    payload.document?.fileName ??
-    payload.document?.filename ??
-    payload.document?.title ??
-    payload.fileName ??
-    payload.filename ??
-    payload.file_name ??
-    null
-  if (fileName) fileName = String(fileName).trim() || null
-  // UltraMSG / normalizador: body pode ser só o nome do arquivo quando type=document
-  if (!fileName && (type === 'document' || type === 'file') && texto && /\.(pdf|docx?|xlsx?|pptx?|txt|csv|zip|rar|7z|rtf|odt)$/i.test(texto) && texto.length <= 255 && !/\n/.test(texto)) {
-    fileName = texto
-  }
+  let fileName = payload.document?.fileName ?? payload.document?.title ?? payload.fileName ?? null
   // Áudio: diferentes formatos (Z-API pode mandar em payload.audio, payload.message.audio, ou fields diretos)
   let audioUrl =
     payload.audio?.audioUrl ??
@@ -1057,17 +969,13 @@ function extractMessage(payload) {
     }
   }
 
-  // Placeholder por TIPO mesmo sem URL: o link da mídia pode não vir no primeiro webhook (chega depois
-  // via webhook_message_download_media). Sem isto, a mídia caía em '(mídia)' e era descartada (recebida)
-  // ou virava '(mensagem)' → "Sem conteudo" (enviada). Com placeholder por tipo, a mensagem é sempre
-  // registrada de forma legível e é atualizada para a mídia real quando a URL chegar.
-  if (type === 'image') {
+  if (type === 'image' && imageUrl) {
     texto = texto || (payload.image?.caption && String(payload.image.caption).trim()) || '(imagem)'
-  } else if (type === 'document' || type === 'file') {
+  } else if ((type === 'document' || type === 'file') && documentUrl) {
     texto = texto || fileName || '(arquivo)'
-  } else if (type === 'audio' || type === 'ptt' || type === 'voice') {
+  } else if (type === 'audio') {
     texto = texto || '(áudio)'
-  } else if (type === 'video') {
+  } else if (type === 'video' && videoUrl) {
     texto = texto || (payload.video?.caption && String(payload.video.caption).trim()) || (payload.ptv ? '(vídeo visualização única)' : '(vídeo)')
   } else if (type === 'sticker') {
     texto = texto || '(figurinha)'
@@ -1225,38 +1133,6 @@ async function conversaTemAlgumaMensagemInbound(supabaseClient, company_id, conv
   }
 }
 
-// Cache curto da flag empresas.separar_mensagens_disparadas: era 1 query por webhook inbound.
-// TTL de 60s reduz a carga no banco no hot path sem atrasar mudanças de config de forma perceptível.
-const SEPARAR_MSG_CACHE_TTL_MS = Math.max(5_000, Number(process.env.SEPARAR_MSG_CACHE_TTL_MS) || 60_000)
-const _separarMsgCache = new Map() // company_id -> { value, expiresAt }
-setInterval(() => {
-  const now = Date.now()
-  for (const [k, v] of _separarMsgCache.entries()) {
-    if (v?.expiresAt != null && v.expiresAt <= now) _separarMsgCache.delete(k)
-  }
-}, 5 * 60 * 1000).unref()
-
-async function getSepararMensagensDisparadasEmpresa(company_id) {
-  const cid = Number(company_id)
-  if (!Number.isFinite(cid) || cid <= 0) return false
-  const now = Date.now()
-  const cached = _separarMsgCache.get(cid)
-  if (cached && cached.expiresAt > now) return cached.value
-  let value = false
-  try {
-    const { data: empCfgRow, error: empCfgErr } = await supabase
-      .from('empresas')
-      .select('separar_mensagens_disparadas')
-      .eq('id', cid)
-      .maybeSingle()
-    if (!empCfgErr && empCfgRow) value = !!empCfgRow.separar_mensagens_disparadas
-  } catch (_) {
-    value = false
-  }
-  _separarMsgCache.set(cid, { value, expiresAt: now + SEPARAR_MSG_CACHE_TTL_MS })
-  return value
-}
-
 exports.receberZapi = async (req, res) => {
   try {
     const body = req.body || {}
@@ -1391,7 +1267,17 @@ exports.receberZapi = async (req, res) => {
     const payloads = getPayloads(body)
     let lastResult = { ok: true }
 
-    const separarMensagensDisparadasEmpresa = await getSepararMensagensDisparadasEmpresa(company_id)
+    let separarMensagensDisparadasEmpresa = false
+    try {
+      const { data: empCfgRow, error: empCfgErr } = await supabase
+        .from('empresas')
+        .select('separar_mensagens_disparadas')
+        .eq('id', company_id)
+        .maybeSingle()
+      if (!empCfgErr && empCfgRow) separarMensagensDisparadasEmpresa = !!empCfgRow.separar_mensagens_disparadas
+    } catch (_) {
+      separarMensagensDisparadasEmpresa = false
+    }
 
     for (const payload of payloads) {
       // Normaliza status Z-API / UltraMSG para canônico interno (inclui device→delivered, server→sent)
@@ -1523,11 +1409,8 @@ exports.receberZapi = async (req, res) => {
           payloadType === 'receivedcallback_ack' ||
           (STATUS_ONLY_KEYWORDS.includes(payloadStatusRaw.toLowerCase()) && (payload?.messageId || payload?.zaapId)))
 
-      // Log de pipeline — atrás de WHATSAPP_DEBUG (era 1 log por payload no hot path). O rastro
-      // de suporte sempre-on continua no log [ULTRAMSG_WEBHOOK] (1 por webhook, acima).
-      if (WHATSAPP_DEBUG) {
-        console.log(`[ULTRAMSG] 🔍 pipeline: type="${payloadType || '(vazio)'}" status="${payloadStatusRaw || '(vazio)'}" fromMe=${payloadFromMe} hasContent=${hasMessageContent} isStatus=${isStatusCallback} phone=${String(payload?.phone || '').slice(-10) || '(vazio)'}`)
-      }
+      // Log de pipeline — sempre visível, para rastrear o que chega e como é classificado
+      console.log(`[ULTRAMSG] 🔍 pipeline: type="${payloadType || '(vazio)'}" status="${payloadStatusRaw || '(vazio)'}" fromMe=${payloadFromMe} hasContent=${hasMessageContent} isStatus=${isStatusCallback} phone=${String(payload?.phone || '').slice(-10) || '(vazio)'}`)
 
       if (isStatusCallback) {
         const msgId = payload?.messageId ?? payload?.zaapId ?? null
@@ -2082,17 +1965,37 @@ exports.receberZapi = async (req, res) => {
         let nomePayload = nomePayloadRaw ? String(nomePayloadRaw).trim() : null
         let nomeSource = (payload.name && String(payload.name).trim()) ? 'name' : (fromMe ? 'chatName' : 'senderName')
 
-        // Nome/foto: UltraMsg webhook NUNCA traz profile picture — usar GET /contacts/image.
+        // Sincroniza nome/foto: UltraMsg webhook NUNCA traz profile picture — usar GET /contacts/image.
         // Passar chatId (ex. payload.chatId = data.from) quando disponível para chamada correta à API.
-        // Caminho quente: NÃO bloquear o webhook no sync UltraMSG (latência 5–6s sob pico).
-        // Usar só payload para getOrCreateCliente; sync completo roda em pendingContactSync (background).
         if (phone) {
-          // Foto do payload quando presente (raro); sync async preenche depois se vazio
-          const fotoPayload = senderPhoto && String(senderPhoto).trim().startsWith('http') ? String(senderPhoto).trim() : null
-          if (fotoPayload) senderPhoto = fotoPayload
+          const syncChatId = !isGroup && payload.chatId && String(payload.chatId).trim().endsWith('@c.us')
+            ? String(payload.chatId).trim()
+            : phone
+          const syncTimeoutMs = fromMe ? 6000 : 5000
+          const syncOpts = { skipCache: true }
+          if (fromMe) syncOpts.skipCache = true
+          try {
+            const syncResult = await Promise.race([
+              syncUltraMsgContact(syncChatId, company_id, syncOpts),
+              new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), syncTimeoutMs))
+            ])
+            // syncUltraMsgContact pode retornar telefone como fallback quando API não tem nome — ignorar e usar pushname do payload
+            const syncNome = syncResult?.nome ? String(syncResult.nome).trim() : null
+            if (syncNome && !isBadName(syncNome)) {
+              nomePayload = syncNome
+              nomeSource = 'syncUltramsg'
+              nomeParaCache = nomePayload
+              nomeSourceParaCache = 'syncUltramsg'
+            }
+            // Foto: sempre usar da API quando disponível (payload só traz quando contato envia; when fromMe precisamos da API)
+            const syncFoto = syncResult?.foto_perfil && String(syncResult.foto_perfil).trim()
+            if (syncFoto && syncFoto.startsWith('http')) senderPhoto = syncFoto
+          } catch (_) {
+            // fallback: usa nome do payload (senderName/chatName) — SOMENTE quando !fromMe (payload traz pushname do contato)
+            // Quando fromMe: payload traz NOSSO nome — nunca usar como nome do contato
+          }
         }
         // Quando fromMe: nome do payload é do remetente (nós) — só usar nome vindo do sync (destinatário)
-        // No caminho quente sem sync: fromMe não usa nome do payload como contato
         if (nomePayload && !nomeParaCache && !fromMe) {
           nomeParaCache = nomePayload
           nomeSourceParaCache = nomeSource
@@ -2101,10 +2004,10 @@ exports.receberZapi = async (req, res) => {
         const pushnameRaw = payload.notifyName ?? payload.pushName ?? payload.notify ?? nomePayloadRaw
         const pushnamePayload = pushnameRaw ? String(pushnameRaw).trim() : null
         const { cliente_id: cid } = await getOrCreateCliente(supabase, company_id, phone, {
-          nome: fromMe ? null : nomePayload,
-          nomeSource: fromMe ? null : nomeSource,
+          nome: nomePayload,
+          nomeSource,
           fromMe,
-          pushname: fromMe ? undefined : (pushnamePayload || undefined),
+          pushname: pushnamePayload || undefined,
           foto_perfil: senderPhoto || undefined
         })
         cliente_id = cid
@@ -2567,7 +2470,7 @@ exports.receberZapi = async (req, res) => {
             ...o,
             sendOrigin: o?.sendOrigin || o?.origin || 'chatbot_triage',
           })
-          return { ...(r || {}), ok: !!r?.ok, messageId: r?.messageId || null }
+          return { ok: !!r?.ok, messageId: r?.messageId || null }
         }
         let skipChatbot = false
         const chatbotHints = {}
@@ -2593,18 +2496,26 @@ exports.receberZapi = async (req, res) => {
             texto: texto || '',
           })
           if (optResult.isOptOut && optResult.mensagemConfirmacao) {
-            await sendAutomaticText({
-              supabase,
-              sendMessage,
-              telefone: phoneParaChatbot,
+            const optSendResult = await sendMessage(phoneParaChatbot, optResult.mensagemConfirmacao, { sendOrigin: 'opt_out_confirmacao' })
+            const optMessageId = optSendResult?.messageId ? String(optSendResult.messageId).trim() : null
+            const optTraceable = isTraceableWhatsappMessageId(optMessageId)
+            const { data: optMensagemRow, error: optMensagemError } = await supabase.from('mensagens').insert({
+              conversa_id,
               texto: optResult.mensagemConfirmacao,
-              companyId: company_id,
-              conversaId: conversa_id,
-              whatsappInstanceId: whatsapp_instance_id,
-              sendOrigin: 'opt_out_confirmacao',
-              emitMensagemRealtime: emitAutomacaoRealtime || null,
-              io: ioAutomacao || null,
-            })
+              direcao: 'out',
+              company_id,
+              status: optSendResult?.ok ? (optTraceable ? 'sent' : 'pending') : 'erro',
+              status_mensagem: optSendResult?.ok ? (optTraceable ? 'sent' : 'sending') : 'failed',
+              ...(optTraceable ? { whatsapp_id: optMessageId } : {}),
+              ...(whatsapp_instance_id ? { whatsapp_instance_id } : {}),
+            }).select('*').single()
+            if (optMensagemError) {
+              console.warn('[optOut] erro ao salvar confirmacao enviada:', optMensagemError.message || optMensagemError)
+            } else if (optMensagemRow && emitAutomacaoRealtime) {
+              await emitAutomacaoRealtime(optMensagemRow).catch((e) => {
+                console.warn('[optOut] erro ao emitir confirmacao enviada:', e?.message || e)
+              })
+            }
             skipChatbot = true
           }
         }
@@ -2620,9 +2531,8 @@ exports.receberZapi = async (req, res) => {
             whatsapp_instance_id,
             sendMessage,
             emitMensagemRealtime: emitAutomacaoRealtime || null,
-            io: ioAutomacao || null,
           })
-          if (shouldSkipChatbotAfterRule(regrasResult)) skipChatbot = true
+          if (regrasResult.matched) skipChatbot = true
         }
 
         // Chatbot só envia quando o CLIENTE iniciou a conversa. Se o usuário/atendente enviou a 1ª msg, não enviar nada.
@@ -2727,11 +2637,7 @@ exports.receberZapi = async (req, res) => {
             texto: texto || '',
             supabase,
             sendMessage,
-            opts: {
-              companyId: company_id,
-              whatsappInstanceId: whatsapp_instance_id || undefined,
-              io: ioAutomacao || null,
-            },
+            opts: { companyId: company_id },
             conversaReabertaAposFinalizacao,
             hints: chatbotHints,
             emitChatbotRealtime,
@@ -2757,43 +2663,21 @@ exports.receberZapi = async (req, res) => {
     // fromMe: também persiste (você pediu "todas as mensagens"). O índice único por (conversa_id, whatsapp_id)
     // evita duplicatas quando o provider reenviar o mesmo evento.
 
-    // REQUISITO: toda mensagem (recebida ou enviada) precisa chegar ao sistema, mesmo que o tipo/conteúdo
-    // não venha no primeiro webhook (a URL/mídia pode chegar depois via webhook_message_download_media e faz
-    // upgrade por idempotência). Só descartamos eventos internos de protocolo (e2e_notification, gp2, …),
-    // que não são mensagem do cliente. Antes, mídia recebida sem URL/tipo era DESCARTADA aqui (perda de msg).
+    // Não gravar evento que virou só "(mídia)" sem mídia real — exceto fromMe (espelhamento: mensagem enviada pelo celular deve aparecer)
     const nowIso = new Date().toISOString()
-    // URL genérica de mídia (data.media sem tipo classificável): a mensagem TEM conteúdo (mídia),
-    // não pode virar "(mensagem)" e perder o link. Mantém '(mídia)' — o backfill/idempotência anexam.
-    const temMediaGenerica = typeof payload?.mediaUrl === 'string' && payload.mediaUrl.trim().startsWith('http')
-    const soPlaceholderMidia = texto === '(mídia)' && !imageUrl && !documentUrl && !audioUrl && !videoUrl && !stickerUrl && !locationUrl && !temMediaGenerica
-    if (soPlaceholderMidia) {
-      if (!fromMe && isNonMessageEventType(type)) {
-        await supabase
-          .from('conversas')
-          .update({ ultima_atividade: nowIso })
-          .eq('id', conversa_id)
-          .eq('company_id', company_id)
-        // IMPORTANTE: payload é 1 de N num lote (ver getPayloads) — abortar a requisição aqui
-        // descartaria as demais mensagens do lote. Pula só esta (evento de protocolo) e segue.
-        lastResult = { ok: true, conversa_id, skip: 'nonMessageEvent' }
-        continue
-      }
-      // Mensagem real sem conteúdo detectável (recebida OU enviada): nunca descartar — salva placeholder
-      // legível ("Mensagem") que é atualizado quando a mídia/URL chegar. Evita "some do sistema".
-      // Diagnóstico (sem conteúdo sensível): registra o evento/tipo bruto para rastrear a origem
-      // de bolhas "(mensagem)" — se aparecer aqui com frequência, o normalizador não está
-      // reconhecendo o data.type deste provedor/evento.
-      console.warn('[WEBHOOK_ULTRAMSG] mensagem sem tipo/conteúdo detectável → placeholder genérico "(mensagem)"', {
-        type_extraido: type || null,
-        event_type: String(payload?.event_type ?? payload?.eventType ?? payload?.type ?? '').slice(0, 40) || null,
-        fromMe,
-        whatsapp_id: messageId ? String(messageId).slice(0, 64) : null,
-        conversa_id,
-        company_id,
-        payload_keys: Object.keys(payload || {}).slice(0, 24),
-      })
-      texto = '(mensagem)'
+    const soPlaceholderMidia = texto === '(mídia)' && !imageUrl && !documentUrl && !audioUrl && !videoUrl && !stickerUrl && !locationUrl
+    if (soPlaceholderMidia && !fromMe) {
+      await supabase
+        .from('conversas')
+        .update({ ultima_atividade: nowIso })
+        .eq('id', conversa_id)
+        .eq('company_id', company_id)
+      // IMPORTANTE: payload é 1 de N num lote (ver getPayloads) — abortar a requisição aqui
+      // descartaria as demais mensagens do lote. Pula só esta (nada para salvar) e segue.
+      lastResult = { ok: true, conversa_id, skip: 'placeholderMidia' }
+      continue
     }
+    if (soPlaceholderMidia && fromMe) texto = '(mensagem)' // espelhamento: mostrar algo no chat
 
     // Histórico de nova conversa: agendado DEPOIS de persistir a mensagem atual + regra mensagem_disparada
     // (evita race: import antigo tornava outra linha a "primeira" e a conversa ficava aberta indevidamente).
@@ -2905,45 +2789,18 @@ exports.receberZapi = async (req, res) => {
         // e o webhook atual traz conteúdo real → atualizar com o texto/mídia corretos.
         // Também: webhook_message_download_media pode chegar DEPOIS com URL da mídia — atualizar mensagem existente sem url.
         const savedTexto = String(existente.texto || '')
-        const isPlaceholder = isMediaPlaceholderText(savedTexto) || savedTexto === '(mensagem)'
-        const textoReal = texto && texto !== '(mensagem)' && !isMediaPlaceholderText(texto) ? texto : null
-        // Genérico '(mensagem)'/'(mídia)' → placeholder tipado ('(áudio)', '(imagem)'…) quando o
-        // webhook atual conhece o tipo mas a URL ainda não chegou. Ver resolvePlaceholderUpgradeTexto.
-        const textoPlaceholderTipado = resolvePlaceholderUpgradeTexto(savedTexto, texto)
-        // URL genérica (data.media) de evento posterior sem type reconhecível (ex.:
-        // download_media com URL S3 sem extensão): anexa usando a família da PRÓPRIA linha.
-        const genericIncomingMediaUrl =
-          typeof payload?.mediaUrl === 'string' && payload.mediaUrl.trim().startsWith('http')
-            ? payload.mediaUrl.trim()
-            : null
-        const familiaExistenteSemUrl = !String(existente.url || '').trim()
-          ? familiaMidiaDeMensagemExistente(existente)
-          : null
-        const hasGenericMediaToAttach = !!(genericIncomingMediaUrl && familiaExistenteSemUrl)
+        const isPlaceholder = savedTexto === '(mensagem)' || savedTexto === '(mídia)'
+        const textoReal = texto && texto !== '(mensagem)' && texto !== '(mídia)' ? texto : null
         const hasMediaToUpdate = (imageUrl || documentUrl || audioUrl || videoUrl || stickerUrl) && !String(existente.url || '').trim()
-        const needsArquivoTipo =
-          (type === 'document' || type === 'file') &&
-          String(existente.tipo || '').toLowerCase() !== 'arquivo'
-        const needsNomeArquivo =
-          (type === 'document' || type === 'file') &&
-          fileName &&
-          !String(existente.nome_arquivo || '').trim()
-        const shouldUpdate = (isPlaceholder && textoReal) || !!textoPlaceholderTipado || hasMediaToUpdate || hasGenericMediaToAttach || needsArquivoTipo || needsNomeArquivo
+        const shouldUpdate = (isPlaceholder && textoReal) || hasMediaToUpdate
         if (shouldUpdate) {
           const upFields = {}
           if (textoReal && isPlaceholder) upFields.texto = textoReal
-          else if (textoPlaceholderTipado) upFields.texto = textoPlaceholderTipado
           if (imageUrl && !existente.url) { upFields.url = imageUrl; upFields.tipo = 'imagem' }
           else if (documentUrl && !existente.url) { upFields.url = documentUrl; upFields.tipo = 'arquivo' }
           else if (audioUrl && !existente.url) { upFields.url = audioUrl; upFields.tipo = (existente.tipo === 'voice' ? 'voice' : 'audio') }
           else if (videoUrl && !existente.url) { upFields.url = videoUrl; upFields.tipo = 'video' }
           else if (stickerUrl && !existente.url) { upFields.url = stickerUrl; upFields.tipo = 'sticker' }
-          else if (hasGenericMediaToAttach) { upFields.url = genericIncomingMediaUrl; upFields.tipo = familiaExistenteSemUrl }
-          if (needsArquivoTipo) upFields.tipo = 'arquivo'
-          if (needsNomeArquivo) upFields.nome_arquivo = fileName
-          else if ((type === 'document' || type === 'file') && fileName && String(existente.nome_arquivo || '').trim() === 'arquivo') {
-            upFields.nome_arquivo = fileName
-          }
           if (Object.keys(upFields).length > 0) {
             try {
               const { data: updMsg } = await supabase
@@ -2953,13 +2810,11 @@ exports.receberZapi = async (req, res) => {
                 .select(WEBHOOK_MSG_SELECT)
                 .single()
               mensagemSalva = updMsg || existente
-              if (WHATSAPP_DEBUG || hasMediaToUpdate || hasGenericMediaToAttach || needsArquivoTipo || textoPlaceholderTipado) {
-                console.log('[Z-API] idempotência: mensagem atualizada com mídia/placeholder', existente.id, Object.keys(upFields))
-              }
-              // Emitir nova_mensagem para frontend atualizar card/player quando URL ou tipo chega depois
-              // (inclui upgrade de placeholder genérico → tipado, para a bolha sair de "Mensagem" ao vivo)
-              if ((hasMediaToUpdate || hasGenericMediaToAttach || needsArquivoTipo || needsNomeArquivo || textoPlaceholderTipado) && req.app?.get('io')) {
+              if (WHATSAPP_DEBUG || hasMediaToUpdate) console.log('[Z-API] idempotência: mensagem atualizada com mídia/placeholder', existente.id, Object.keys(upFields))
+              // Emitir nova_mensagem para frontend atualizar player de áudio quando URL chega via webhook_message_download_media
+              if (hasMediaToUpdate && req.app?.get('io')) {
                 const io2 = req.app.get('io')
+                const rooms = [`conversa_${conversa_id}`, `empresa_${company_id}`]
                 const emitPayload = {
                   ...mensagemSalva,
                   criado_em: normalizarTimestampSemFusoAmbiguoParaApi(mensagemSalva.criado_em),
@@ -2969,17 +2824,8 @@ exports.receberZapi = async (req, res) => {
                   fromMe,
                   direcao: mensagemSalva.direcao ?? (fromMe ? 'out' : 'in'),
                 }
-                const emittedScoped = await emitirParaUsuariosQuePodemVerConversa(
-                  io2,
-                  company_id,
-                  conversa_id,
-                  io2.EVENTS?.NOVA_MENSAGEM || 'nova_mensagem',
-                  emitPayload
-                )
-                if (!emittedScoped) {
-                  io2.to(`conversa_${conversa_id}`).emit(io2.EVENTS?.NOVA_MENSAGEM || 'nova_mensagem', emitPayload)
-                }
-                if (hasMediaToUpdate) scheduleInboundWebPush(company_id, conversa_id, 'nova_mensagem', emitPayload)
+                io2.to(rooms).emit(io2.EVENTS?.NOVA_MENSAGEM || 'nova_mensagem', emitPayload)
+                scheduleInboundWebPush(company_id, conversa_id, 'nova_mensagem', emitPayload)
               }
             } catch (_) {
               mensagemSalva = existente
@@ -3129,11 +2975,9 @@ exports.receberZapi = async (req, res) => {
         const { data: candidates } = await buildQuery(true)
         let cand = findCand(candidates)
 
-        // Fallback amplo desligado por padrao: buscar na empresa inteira pode casar mensagens
-        // identicas em conversas diferentes. Ative apenas para diagnostico legado controlado.
-        const allowCompanyWideFromMeFallback =
-          String(process.env.WHATSAPP_FROMME_COMPANY_FALLBACK || '').trim().toLowerCase() === 'true'
-        if (!cand && allowCompanyWideFromMeFallback) {
+        // Busca 2 (fallback): na empresa inteira — cobre divergência de conversa_id entre
+        // chatController (URL param) e webhook (findOrCreateConversation pode resolver diferente)
+        if (!cand) {
           const { data: fallbackCandidates } = await buildQuery(false)
           cand = findCand(fallbackCandidates)
           if (cand && WHATSAPP_DEBUG) {
@@ -3209,19 +3053,11 @@ exports.receberZapi = async (req, res) => {
           console.log(`✏️ Z-API isEdit: mensagem ${editTarget.id} atualizada (conversa ${conversa_id})`)
           const io = req.app.get('io')
           if (io) {
-            const editPayload = {
+            io.to(`conversa_${conversa_id}`).to(`empresa_${company_id}`).emit('mensagem_editada', {
               id: editTarget.id,
               conversa_id,
               texto,
-            }
-            const emittedScoped = await emitirParaUsuariosQuePodemVerConversa(
-              io,
-              company_id,
-              conversa_id,
-              'mensagem_editada',
-              editPayload
-            )
-            if (!emittedScoped) io.to(`conversa_${conversa_id}`).emit('mensagem_editada', editPayload)
+            })
           }
         }
       } catch (editErr) {
@@ -3240,7 +3076,6 @@ exports.receberZapi = async (req, res) => {
         conversa_id,
         texto,
         direcao: fromMe ? 'out' : 'in',
-        origem: fromMe ? 'whatsapp_celular' : 'cliente',
         company_id,
         ...(whatsapp_instance_id ? { whatsapp_instance_id } : {}),
         whatsapp_id: whatsappIdStr || null,
@@ -3302,18 +3137,16 @@ exports.receberZapi = async (req, res) => {
         insertMsg.tipo = 'imagem'
         insertMsg.url = imageUrl
         insertMsg.nome_arquivo = fileName || 'imagem.jpg'
-      } else if (type === 'document' || type === 'file') {
-        // Sempre marca como arquivo (mesmo sem URL): o link pode chegar depois via
-        // webhook_message_download_media. Sem tipo=arquivo a UI mostra só o nome como texto.
+      } else if ((type === 'document' || type === 'file') && documentUrl) {
         insertMsg.tipo = 'arquivo'
-        if (documentUrl) insertMsg.url = documentUrl
-        insertMsg.nome_arquivo = fileName || (texto && texto !== '(arquivo)' ? texto : null) || 'arquivo'
-      } else if ((type === 'audio' || type === 'ptt' || type === 'voice') && audioUrl) {
-        // Só marca como áudio quando há URL — sem ela ficaria um player quebrado. Sem URL, permanece
-        // linha de texto com placeholder '(áudio)' e é atualizada quando a URL chegar (idempotência).
-        insertMsg.tipo = (type === 'ptt' || type === 'voice') ? 'voice' : 'audio'
-        insertMsg.url = audioUrl
-        insertMsg.nome_arquivo = fileName || ((type === 'ptt' || type === 'voice') ? 'voice.ogg' : 'audio')
+        insertMsg.url = documentUrl
+        insertMsg.nome_arquivo = fileName || 'arquivo'
+      } else if (type === 'audio' || type === 'ptt') {
+        insertMsg.tipo = type === 'ptt' ? 'voice' : 'audio'
+        if (audioUrl) {
+          insertMsg.url = audioUrl
+          insertMsg.nome_arquivo = fileName || (type === 'ptt' ? 'voice.ogg' : 'audio')
+        }
       } else if (type === 'video' && videoUrl) {
         insertMsg.tipo = 'video'
         insertMsg.url = videoUrl
@@ -3376,32 +3209,23 @@ exports.receberZapi = async (req, res) => {
             select: WEBHOOK_MSG_SELECT,
             context: 'received.insert.duplicate',
           })
-          // Corrida (unique violation): dois eventos do MESMO áudio/foto chegam quase juntos —
-          // um sem `type` grava a linha como "(mensagem)"/"(mídia)"; o outro (ex.: type=ptt) perde
-          // a corrida e caía aqui. Antes só mesclava URL https; se o evento vencedor não tinha URL,
-          // a bolha ficava congelada em "(mensagem)". Agora TAMBÉM faz o upgrade do placeholder
-          // (genérico → tipado '(áudio)', ou texto real), como o caminho de idempotência sem corrida.
+          // Corrida: outro processo inseriu primeiro (sem URL) e este webhook traz mídia https —
+          // sem merge, a linha fica sem url até expirar o link remoto. Mescla só mídia persistível.
           let mergedDup = existente
           const insUrl = String(insertMsg.url || '').trim()
           const exUrl = String(existente?.url || '').trim()
-          if (existente?.id) {
-            const upDup = {}
-            const exTexto = String(existente.texto || '').trim()
-            const exIsPlaceholder = isMediaPlaceholderText(exTexto) || exTexto === '(mensagem)'
-            if (exIsPlaceholder && texto && texto !== '(mensagem)' && !isMediaPlaceholderText(texto)) {
-              upDup.texto = texto // legenda/texto real chegou no evento perdedor
-            } else {
-              const upT = resolvePlaceholderUpgradeTexto(exTexto, texto) // '(mensagem)' → '(áudio)' etc.
-              if (upT) upDup.texto = upT
-            }
-            if (
-              insUrl.startsWith('https://') &&
-              !exUrl &&
-              insertMsg.tipo &&
-              tipoQualificaPersistencia(insertMsg.tipo)
-            ) {
-              upDup.url = insUrl
-              upDup.tipo = insertMsg.tipo || existente.tipo
+          if (
+            existente?.id &&
+            insUrl.startsWith('https://') &&
+            !exUrl &&
+            insertMsg.tipo &&
+            tipoQualificaPersistencia(insertMsg.tipo)
+          ) {
+            try {
+              const upDup = {
+                url: insUrl,
+                tipo: insertMsg.tipo || existente.tipo,
+              }
               if (insertMsg.nome_arquivo) upDup.nome_arquivo = insertMsg.nome_arquivo
               if (insertMsg.location_meta && typeof insertMsg.location_meta === 'object') {
                 upDup.location_meta = insertMsg.location_meta
@@ -3409,63 +3233,46 @@ exports.receberZapi = async (req, res) => {
               if (insertMsg.contact_meta && typeof insertMsg.contact_meta === 'object') {
                 upDup.contact_meta = insertMsg.contact_meta
               }
-            }
-            if (Object.keys(upDup).length > 0) {
-              try {
-                const { data: patchedDup, error: patchDupErr } = await supabase
-                  .from('mensagens')
-                  .update(upDup)
-                  .eq('id', existente.id)
-                  .eq('company_id', company_id)
-                  .select(WEBHOOK_MSG_SELECT)
-                  .single()
-                if (!patchDupErr && patchedDup) {
-                  mergedDup = patchedDup
-                  if (req.app?.get('io')) {
-                    const io2 = req.app.get('io')
-                    const emitPayload = {
-                      ...patchedDup,
-                      criado_em: normalizarTimestampSemFusoAmbiguoParaApi(patchedDup.criado_em),
-                      conversa_id: patchedDup.conversa_id ?? conversa_id,
-                      status: patchedDup.status || 'delivered',
-                      status_mensagem: patchedDup.status_mensagem || patchedDup.status || 'delivered',
-                      fromMe,
-                      direcao: patchedDup.direcao ?? (fromMe ? 'out' : 'in'),
-                    }
-                    const emittedScoped = await emitirParaUsuariosQuePodemVerConversa(
-                      io2,
-                      company_id,
-                      conversa_id,
-                      io2.EVENTS?.NOVA_MENSAGEM || 'nova_mensagem',
-                      emitPayload
-                    )
-                    if (!emittedScoped) {
-                      io2.to(`conversa_${conversa_id}`).emit(io2.EVENTS?.NOVA_MENSAGEM || 'nova_mensagem', emitPayload)
-                    }
-                    scheduleInboundWebPush(company_id, conversa_id, 'nova_mensagem', emitPayload)
+              const { data: patchedDup, error: patchDupErr } = await supabase
+                .from('mensagens')
+                .update(upDup)
+                .eq('id', existente.id)
+                .eq('company_id', company_id)
+                .select(WEBHOOK_MSG_SELECT)
+                .single()
+              if (!patchDupErr && patchedDup) {
+                mergedDup = patchedDup
+                if (req.app?.get('io')) {
+                  const io2 = req.app.get('io')
+                  const rooms = [`conversa_${conversa_id}`, `empresa_${company_id}`]
+                  const emitPayload = {
+                    ...patchedDup,
+                    criado_em: normalizarTimestampSemFusoAmbiguoParaApi(patchedDup.criado_em),
+                    conversa_id: patchedDup.conversa_id ?? conversa_id,
+                    status: patchedDup.status || 'delivered',
+                    status_mensagem: patchedDup.status_mensagem || patchedDup.status || 'delivered',
+                    fromMe,
+                    direcao: patchedDup.direcao ?? (fromMe ? 'out' : 'in'),
                   }
+                  io2.to(rooms).emit(io2.EVENTS?.NOVA_MENSAGEM || 'nova_mensagem', emitPayload)
+                  scheduleInboundWebPush(company_id, conversa_id, 'nova_mensagem', emitPayload)
                 }
-              } catch (e) {
-                console.warn('[webhook] duplicate+media merge:', e?.message || e)
               }
+            } catch (e) {
+              console.warn('[webhook] duplicate+media merge:', e?.message || e)
             }
           }
           mensagemSalva = mergedDup
         } else {
-          // Fallback: qualquer mensagem que chega TEM que ficar no sistema — tenta inserir com payload mínimo.
-          // Preserva tipo/url/nome_arquivo do insert principal: o fallback NÃO pode rebaixar mídia
-          // (foto/áudio/vídeo/arquivo) para uma bolha de texto genérica "(mensagem)" e perder o link.
+          // Fallback: qualquer mensagem que chega TEM que ficar no sistema — tenta inserir com payload mínimo
           console.warn('⚠️ ULTRAMSG fallback insert após erro:', errMsg.message)
           let fallbackPayload = {
             conversa_id,
-            texto: texto || '(mídia)',
+            texto: texto || '(mensagem)',
             direcao: fromMe ? 'out' : 'in',
             company_id,
             whatsapp_id: whatsappIdStr || null,
-            criado_em,
-            ...(insertMsg.tipo ? { tipo: insertMsg.tipo } : {}),
-            ...(insertMsg.url ? { url: insertMsg.url } : {}),
-            ...(insertMsg.nome_arquivo ? { nome_arquivo: insertMsg.nome_arquivo } : {})
+            criado_em
           }
           if (isGroup && senderName) fallbackPayload.remetente_nome = senderName
           if (isGroup && participantPhone) fallbackPayload.remetente_telefone = participantPhone
@@ -3510,23 +3317,6 @@ exports.receberZapi = async (req, res) => {
           fromMe,
           departamento_id,
         })
-      }
-
-      // Mídia recebida SEM URL no webhook (instância cujo download_media não entrega o link):
-      // busca a URL real via GET /chats/messages em background (mesmo mecanismo do botão
-      // "Carregar mensagens antigas"), com debounce por conversa. Auto-repara a bolha sem
-      // depender do webhook de mídia nem de ação do atendente.
-      try {
-        const { scheduleInboundMediaBackfill } = require('../services/inboundMediaBackfillService')
-        scheduleInboundMediaBackfill({
-          supabase,
-          io: req.app.get('io'),
-          company_id,
-          conversa_id: mPersist.conversa_id ?? conversa_id,
-          mensagemSalva: mPersist,
-        })
-      } catch (e) {
-        console.warn('[webhook] backfill mídia agendamento:', e?.message || e)
       }
 
       // Usar conversa_id da mensagem quando idempotência retornou existente de outra conversa
@@ -3672,35 +3462,10 @@ exports.receberZapi = async (req, res) => {
 
               for (const m of ordered) {
                 const p = { ...(m || {}), isGroup: isGroupForHistory, phone: phoneForHistory }
-                // UltraMsg GET /messages entrega a URL da mídia em `media` — extractMessage lê
-                // campos estilo Z-API (imageUrl/audioUrl/...). Sem este mapeamento, TODA mídia do
-                // histórico caía no filtro de placeholder abaixo e era pulada (perda silenciosa).
-                const mediaHistRaw = typeof m?.media === 'string'
-                  ? m.media.trim()
-                  : String(m?.media?.url ?? m?.media?.link ?? m?.media?.file ?? '').trim()
-                if (mediaHistRaw && /^https?:\/\//i.test(mediaHistRaw)) {
-                  const tHist = String(m?.type || '').toLowerCase()
-                  if (['audio', 'ptt', 'voice', 'audiomessage', 'pttmessage', 'voicemessage'].includes(tHist)) {
-                    p.audioUrl = p.audioUrl || mediaHistRaw
-                    if (tHist !== 'audio' && tHist !== 'ptt') p.type = 'ptt'
-                  } else if (tHist === 'image' || tHist === 'imagemessage') {
-                    p.imageUrl = p.imageUrl || mediaHistRaw
-                    if (tHist !== 'image') p.type = 'image'
-                  } else if (tHist === 'video' || tHist === 'videomessage' || tHist === 'gif') {
-                    p.videoUrl = p.videoUrl || mediaHistRaw
-                    if (tHist !== 'video') p.type = 'video'
-                  } else if (tHist === 'sticker' || tHist === 'stickermessage') {
-                    p.stickerUrl = p.stickerUrl || mediaHistRaw
-                    if (tHist !== 'sticker') p.type = 'sticker'
-                  } else if (tHist === 'document' || tHist === 'file' || tHist === 'documentmessage') {
-                    p.documentUrl = p.documentUrl || mediaHistRaw
-                    if (tHist === 'documentmessage') p.type = 'document'
-                  }
-                }
                 const ex = extractMessage(p)
                 const wId = ex.messageId ? String(ex.messageId).trim() : null
                 if (!ex.texto) continue
-                const placeholder = isMediaPlaceholderText(ex.texto) && !ex.imageUrl && !ex.documentUrl && !ex.audioUrl && !ex.videoUrl && !ex.stickerUrl && !ex.locationUrl
+                const placeholder = ex.texto === '(mídia)' && !ex.imageUrl && !ex.documentUrl && !ex.audioUrl && !ex.videoUrl && !ex.stickerUrl && !ex.locationUrl
                 if (placeholder) continue
                 if (!wId) continue
 
@@ -3709,7 +3474,6 @@ exports.receberZapi = async (req, res) => {
                   conversa_id: convIdForHistory,
                   texto: ex.texto,
                   direcao: direcaoHistory,
-                  origem: ex.fromMe ? 'whatsapp_celular' : 'cliente',
                   company_id,
                   ...(whatsapp_instance_id ? { whatsapp_instance_id } : {}),
                   whatsapp_id: wId,
@@ -3747,10 +3511,10 @@ exports.receberZapi = async (req, res) => {
                   insertMsg.tipo = 'imagem'
                   insertMsg.url = ex.imageUrl
                   insertMsg.nome_arquivo = ex.fileName || 'imagem.jpg'
-                } else if (ex.type === 'document' || ex.type === 'file') {
+                } else if ((ex.type === 'document' || ex.type === 'file') && ex.documentUrl) {
                   insertMsg.tipo = 'arquivo'
-                  if (ex.documentUrl) insertMsg.url = ex.documentUrl
-                  insertMsg.nome_arquivo = ex.fileName || (ex.texto && ex.texto !== '(arquivo)' ? ex.texto : null) || 'arquivo'
+                  insertMsg.url = ex.documentUrl
+                  insertMsg.nome_arquivo = ex.fileName || 'arquivo'
                 } else if (ex.type === 'audio' && ex.audioUrl) {
                   insertMsg.tipo = 'audio'
                   insertMsg.url = ex.audioUrl
@@ -3798,10 +3562,9 @@ exports.receberZapi = async (req, res) => {
       }
     }
 
-    // Mensagem de entrada: incrementa unread só quando o webhook INSERIU a mensagem.
-    // Reentrega/idempotência (mesmo whatsapp_id) não deve inflar o contador.
+    // Mensagem de entrada: incrementa unread no banco para todos os usuários (igual WhatsApp; refetch da lista já vem com contador certo)
     const convIdForEmit = mensagemSalva?.conversa_id ?? conversa_id
-    if (!fromMe && mensagemFoiInseridaPeloWebhook) {
+    if (!fromMe) {
       await incrementarUnreadParaConversa(company_id, convIdForEmit)
     }
 
@@ -3848,8 +3611,7 @@ exports.receberZapi = async (req, res) => {
         )
         if (!emittedScoped) {
           const rooms = [`conversa_${convIdForEmit}`]
-          const depRoom = departamentoRoom(company_id, departamento_id)
-          if (depRoom) rooms.push(depRoom)
+          if (departamento_id != null) rooms.push(`departamento_${departamento_id}`)
           io.to(rooms).emit('nova_mensagem', emitPayload)
         }
         scheduleInboundWebPush(company_id, convIdForEmit, 'nova_mensagem', emitPayload)
@@ -3984,11 +3746,10 @@ exports.receberZapi = async (req, res) => {
       )
       if (!emittedConversaAtualizadaScoped) {
         io.to(`conversa_${convIdForEmit}`).emit('conversa_atualizada', convPayload)
-        const depRoom = departamentoRoom(company_id, depId)
-        if (depRoom) {
+        if (depId != null) {
           // Não emitir atualizar_conversa em reconciliação (fromMe) — evita refetch que causa bug visual
-          if (mensagemFoiInseridaPeloWebhook) io.to(depRoom).emit('atualizar_conversa', { id: convIdForEmit })
-          io.to(depRoom).emit('conversa_atualizada', convPayload)
+          if (mensagemFoiInseridaPeloWebhook) io.to(`departamento_${depId}`).emit('atualizar_conversa', { id: convIdForEmit })
+          io.to(`departamento_${depId}`).emit('conversa_atualizada', convPayload)
         }
       }
     }
@@ -4018,7 +3779,6 @@ exports.receberZapi = async (req, res) => {
             await supabase.from('clientes').update(up).eq('id', syncClienteId).eq('company_id', company_id)
           }
           // Atualizar conversa (nome_contato_cache, foto_perfil_contato_cache) quando vazios e sync trouxe dados
-          // (caminho quente não bloqueia mais no sync UltraMSG — este background preenche cache vazio)
           const nomeConvVazio = !convRow?.nome_contato_cache || !String(convRow.nome_contato_cache).trim()
           const fotoConvVazia = !convRow?.foto_perfil_contato_cache || !String(convRow.foto_perfil_contato_cache).trim()
           // Priorizar name (nome salvo no celular) sobre pushname — nunca sobrescrever com pushname quando name existir
@@ -4193,34 +3953,15 @@ exports.statusZapi = async (req, res) => {
       const statusUpdates = { status: effectiveStatus, status_mensagem: effectiveStatus }
       const statusSelect = 'id, conversa_id, company_id, autor_usuario_id, whatsapp_instance_id, whatsapp_id'
 
-      // 0) Match determinístico por referenceId (crm-<mensagem_id>) — vínculo que NÓS enviamos no POST.
-      //    Precede os fallbacks heurísticos porque não depende de whatsapp_id já estar preenchido nem
-      //    de haver candidato único: resolve rajadas (várias mensagens seguidas sem whatsapp_id), onde
-      //    o fallback por "out recente" descartava o ACK e a mensagem entregue ficava com relógio.
-      //    Só quando o id do ACK é um WhatsApp ID real — esta rota grava whatsapp_id, e id numérico
-      //    de fila pertence a provider_queue_id (tratado nos fallbacks 4/4b).
-      let msg = isTraceableWhatsappMessageId(idStr)
-        ? await tryReconcileFromMeByCrmReferenceId(supabase, {
-            company_id,
-            conversa_id: null,
-            whatsapp_instance_id,
-            payload: body,
-            whatsappIdStr: idStr,
-            statusPayload: effectiveStatus,
-          })
-        : null
-
       // 1) Atualiza por (company_id, whatsapp_id) — match exato com filtro de instância
-      if (!msg) {
-        ;({ data: msg } = await updateSingleMensagemByWhatsappId(supabase, {
-          company_id,
-          whatsapp_id: idStr,
-          whatsapp_instance_id,
-          updates: statusUpdates,
-          select: statusSelect,
-          context: 'status.exact',
-        }))
-      }
+      let { data: msg } = await updateSingleMensagemByWhatsappId(supabase, {
+        company_id,
+        whatsapp_id: idStr,
+        whatsapp_instance_id,
+        updates: statusUpdates,
+        select: statusSelect,
+        context: 'status.exact',
+      })
 
       // 1b) Fallback: ACK não encontrou por whatsapp_instance_id — tenta match exato na empresa
       if (!msg) {
@@ -4362,10 +4103,7 @@ exports.statusZapi = async (req, res) => {
       if (msg) {
         updated++
         if (io) {
-          // Emite o status realmente persistido quando a linha o trouxe (caminho 0/referenceId, que
-          // aplica sua própria proteção de rank). Evita anunciar 'delivered' para uma mensagem que já
-          // estava 'read' no banco. Os demais caminhos não selecionam `status` → usam effectiveStatus.
-          const emitStatus = canonStatusForEmit(msg.status || effectiveStatus)
+          const emitStatus = canonStatusForEmit(effectiveStatus)
           const payload = {
             mensagem_id: msg.id,
             conversa_id: msg.conversa_id,
@@ -4401,11 +4139,7 @@ exports._test = {
   getPayloads,
   resolveConversationKeyFromZapi,
   extractMessage,
-  isMediaPlaceholderText,
-  resolvePlaceholderUpgradeTexto,
-  familiaMidiaDeMensagemExistente,
   whatsappIdCompativelParaReconcile,
   filterRowsForFromMeReconcile,
   findFromMeOutboundMediaCandidate,
-  shouldSkipChatbotAfterRule,
 }
