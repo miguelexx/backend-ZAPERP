@@ -274,15 +274,25 @@ async function tryReconcileFromMeByCrmReferenceId(supabase, {
   const crmMsgId = parseCrmReferenceMensagemId(getCrmReferenceIdFromPayload(payload))
   if (!crmMsgId || !whatsappIdStr) return null
   try {
-    let q = supabase
+    // company_id + id (chave primaria) ja identifica a mensagem sem ambiguidade.
+    // Filtrar por instancia aqui so produz falso negativo quando um dos lados esta null,
+    // e o eco cai na heuristica por conteudo, criando linha duplicada.
+    const q = supabase
       .from('mensagens')
       .select(WEBHOOK_MSG_SELECT)
       .eq('company_id', company_id)
       .eq('id', crmMsgId)
       .eq('direcao', 'out')
-    q = applyWhatsappInstanceFilterOrLegacy(q, whatsapp_instance_id)
     const { data: row } = await q.maybeSingle()
     if (!row?.id || !whatsappIdCompativelParaReconcile(row, whatsappIdStr)) return null
+    // Divergencia real de instancia (ambos conhecidos) segue bloqueada: nao misturar instancias.
+    if (
+      whatsapp_instance_id &&
+      row.whatsapp_instance_id &&
+      Number(row.whatsapp_instance_id) !== Number(whatsapp_instance_id)
+    ) {
+      return null
+    }
     const updates = { whatsapp_id: whatsappIdStr }
     const ackStatus = normalizeRawAckStatus(statusPayload ?? payload?.status ?? payload?.ack)
     if (ackStatus && statusRank(ackStatus) >= statusRank(row.status || row.status_mensagem || 'pending')) {
@@ -4142,4 +4152,5 @@ exports._test = {
   whatsappIdCompativelParaReconcile,
   filterRowsForFromMeReconcile,
   findFromMeOutboundMediaCandidate,
+  tryReconcileFromMeByCrmReferenceId,
 }

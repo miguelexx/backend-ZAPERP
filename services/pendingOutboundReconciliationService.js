@@ -14,6 +14,8 @@ const {
   isUltramsgNumericQueueId,
   buildCrmReferenceId,
 } = require('../helpers/whatsappMessageIdHelper')
+const { formatTextoWhatsappComNomeAtendente } = require('../helpers/mensagemAtendenteNomeHelper')
+const { captionWhatsappParaMidia } = require('../helpers/midiaMensagemHelper')
 
 const deferredTimers = new Map()
 const companyProviderCache = new Map()
@@ -36,6 +38,17 @@ function getGraceMs() {
 
 function getFailAfterMs() {
   return parsePositiveIntEnv('PENDING_OUTBOUND_RECONCILE_FAIL_AFTER_MINUTES', 60, { min: 5, max: 1440 }) * 60_000
+}
+
+/** Reenvio automatico de mensagens que o provedor nunca aceitou. */
+function isResendEnabled() {
+  const raw = String(process.env.PENDING_OUTBOUND_RESEND_ENABLED ?? 'true').trim().toLowerCase()
+  return !['0', 'false', 'no', 'off'].includes(raw)
+}
+
+/** Janela em que ainda vale reenviar. Depois dela a mensagem vira falha definitiva. */
+function getResendWindowMs() {
+  return parsePositiveIntEnv('PENDING_OUTBOUND_RESEND_WINDOW_MINUTES', 30, { min: 5, max: 240 }) * 60_000
 }
 
 function getBatchLimit() {
@@ -181,12 +194,16 @@ async function resolveFromProviderRow(row, providerRow, io) {
 async function queryProviderForMessage(row) {
   const opts = buildProviderOpts(row)
   const referenceId = buildCrmReferenceId(row.id)
+  // consultaOk distingue "provedor respondeu e nao tem a mensagem" de "nao consegui perguntar".
+  // Sem essa distincao um reenvio automatico duplicaria mensagem ja entregue quando a API falha.
+  let consultaOk = false
 
   if (referenceId) {
     for (const status of ['all', 'sent', 'queue', 'unsent', 'invalid', 'expired']) {
       const result = await fetchProviderMessages(opts, { referenceId, status, limit: 3 })
+      if (result.ok) consultaOk = true
       if (result.ok && Array.isArray(result.data) && result.data.length > 0) {
-        return { source: `referenceId:${status}`, row: result.data[0], list: result.data }
+        return { source: `referenceId:${status}`, row: result.data[0], list: result.data, consultaOk: true }
       }
     }
   }
@@ -200,13 +217,170 @@ async function queryProviderForMessage(row) {
   for (const idCandidate of idCandidates) {
     for (const status of ['all', 'sent', 'queue', 'unsent', 'invalid', 'expired']) {
       const result = await fetchProviderMessages(opts, { id: idCandidate, status, limit: 3 })
+      if (result.ok) consultaOk = true
       if (result.ok && Array.isArray(result.data) && result.data.length > 0) {
-        return { source: `id:${status}`, row: result.data[0], list: result.data }
+        return { source: `id:${status}`, row: result.data[0], list: result.data, consultaOk: true }
       }
     }
   }
 
-  return null
+  return { source: null, row: null, list: [], consultaOk }
+}
+
+/**
+ * Provedor comprovadamente nunca aceitou a mensagem.
+ * Qualquer id de fila ou WhatsApp id significa que o UltraMSG a recebeu: reenviar duplicaria no cliente.
+ */
+function provedorNuncaAceitou(row) {
+  if (isRealWhatsAppId(row?.whatsapp_id)) return false
+  if (String(row?.provider_queue_id || '').trim()) return false
+  if (isUltramsgNumericQueueId(String(row?.whatsapp_id || '').trim())) return false
+  return true
+}
+
+/** URL publica da midia persistida; null quando o backend nao esta acessivel de fora. */
+function urlPublicaDeMidia(row) {
+  const raw = String(row?.url || '').trim()
+  if (!raw) return null
+  if (/^https?:\/\//i.test(raw)) return raw
+  const baseUrl = (process.env.APP_URL || process.env.BASE_URL || '').replace(/\/$/, '')
+  if (!baseUrl || /localhost|127\.0\.0\.1/i.test(baseUrl)) return null
+  return `${baseUrl}${raw.startsWith('/') ? raw : `/${raw}`}`
+}
+
+async function nomeAtendenteParaEnvio(company_id, autor_usuario_id) {
+  if (!autor_usuario_id) return null
+  const { data } = await supabase
+    .from('usuarios')
+    .select('nome, mostrar_nome_ao_cliente')
+    .eq('company_id', company_id)
+    .eq('id', autor_usuario_id)
+    .maybeSingle()
+  if (data?.mostrar_nome_ao_cliente === false) return null
+  return (data?.nome && String(data.nome).trim()) || null
+}
+
+/** Legenda original do atendente a partir do texto persistido (inverte placeholders de midia). */
+function captionUsuarioDeMidia(row) {
+  const texto = String(row?.texto || '').trim()
+  if (!texto) return ''
+  const placeholders = new Set(['(áudio)', '(áudio de voz)', '(figurinha)', '(imagem)', '(vídeo)', '(arquivo)'])
+  if (placeholders.has(texto.toLowerCase())) return ''
+  if (texto === String(row?.nome_arquivo || '').trim()) return ''
+  return texto
+}
+
+async function despacharReenvioAoProvedor(row, telefone, usuarioNome) {
+  const provider = getProvider()
+  const tipo = String(row?.tipo || '').toLowerCase().trim()
+  const opts = {
+    companyId: row.company_id,
+    conversaId: row.conversa_id,
+    whatsappInstanceId: row.whatsapp_instance_id || undefined,
+    referenceId: buildCrmReferenceId(row.id),
+    sendOrigin: 'reconciliacao_reenvio_automatico',
+    returnDetails: true,
+  }
+
+  const isTexto = !tipo || ['texto', 'text', 'chat', 'link'].includes(tipo)
+  if (isTexto) {
+    const texto = String(row?.texto || '').trim()
+    if (!texto) return { skip: 'sem_texto' }
+    if (!provider?.sendText) return { skip: 'provider_sem_sendtext' }
+    return {
+      result: await provider.sendText(telefone, formatTextoWhatsappComNomeAtendente(texto, usuarioNome), opts),
+    }
+  }
+
+  const mediaUrl = urlPublicaDeMidia(row)
+  if (!mediaUrl) return { skip: 'midia_sem_url_publica' }
+  const caption = captionWhatsappParaMidia({
+    tipo,
+    captionUsuarioTrim: captionUsuarioDeMidia(row),
+    usuarioNome,
+  })
+
+  if (tipo === 'voice' && provider?.sendVoice) return { result: await provider.sendVoice(telefone, mediaUrl, opts) }
+  if (tipo === 'audio' && provider?.sendAudio) return { result: await provider.sendAudio(telefone, mediaUrl, opts) }
+  if (tipo === 'sticker' && provider?.sendSticker) {
+    return { result: await provider.sendSticker(telefone, mediaUrl, { ...opts, stickerAuthor: 'ZapERP' }) }
+  }
+  if (tipo === 'imagem' && provider?.sendImage) {
+    return { result: await provider.sendImage(telefone, mediaUrl, caption, opts) }
+  }
+  if ((tipo === 'video' || tipo === 'vídeo') && provider?.sendVideo) {
+    return { result: await provider.sendVideo(telefone, mediaUrl, caption, opts) }
+  }
+  if (provider?.sendFile) {
+    return {
+      result: await provider.sendFile(telefone, mediaUrl, row?.nome_arquivo || 'arquivo', { ...opts, caption }),
+    }
+  }
+  return { skip: 'provider_sem_envio_midia' }
+}
+
+/**
+ * Reenvia mensagem que o provedor nunca aceitou. Chamado somente apos confirmar,
+ * consultando a API, que o UltraMSG nao tem registro dela.
+ */
+async function reenviarMensagemNaoAceita(row, io) {
+  const { data: conversa } = await supabase
+    .from('conversas')
+    .select('id, telefone')
+    .eq('company_id', row.company_id)
+    .eq('id', row.conversa_id)
+    .maybeSingle()
+
+  const telefone = String(conversa?.telefone || '').trim()
+  if (!telefone || telefone.toLowerCase().startsWith('lid:')) {
+    return { ok: true, action: 'skip_reenvio_sem_telefone' }
+  }
+
+  const usuarioNome = await nomeAtendenteParaEnvio(row.company_id, row.autor_usuario_id)
+
+  let despacho
+  try {
+    despacho = await despacharReenvioAoProvedor(row, telefone, usuarioNome)
+  } catch (e) {
+    console.warn('[pendingOutboundReconciliation] reenvio falhou no transporte', {
+      mensagem_id: row.id,
+      company_id: row.company_id,
+      error: e?.message || e,
+    })
+    return { ok: true, action: 'reenvio_erro_transporte' }
+  }
+
+  if (despacho?.skip) return { ok: true, action: `skip_reenvio_${despacho.skip}` }
+
+  const result = despacho.result
+  const ok = typeof result === 'boolean' ? result : result?.ok === true
+  const waMessageId =
+    typeof result === 'object' && result?.messageId ? String(result.messageId).trim() : null
+  const hasValidId = isRealWhatsAppId(waMessageId)
+  const hasQueueId = !!waMessageId && isUltramsgNumericQueueId(waMessageId)
+
+  console.log(`[pendingOutboundReconciliation] reenvio automatico ${ok ? 'aceito' : 'recusado'}`, {
+    mensagem_id: row.id,
+    company_id: row.company_id,
+    conversa_id: row.conversa_id,
+    tipo: row.tipo || 'texto',
+    idade_min: Math.round(messageAgeMs(row) / 60_000),
+    provider_message_id: waMessageId || null,
+    ...(ok ? {} : { erro: String((typeof result === 'object' && (result?.error || result?.blockedBy)) || '').slice(0, 200) }),
+  })
+
+  if (!ok) {
+    return patchMessage(row, { status: 'erro', status_mensagem: 'failed' }, io)
+  }
+
+  const updates = {
+    status: hasValidId ? 'sent' : 'pending',
+    status_mensagem: hasValidId ? 'sent' : 'sending',
+    ...(hasValidId ? { whatsapp_id: waMessageId } : {}),
+    ...(hasQueueId ? { provider_queue_id: waMessageId } : {}),
+  }
+  const patched = await patchMessage(row, updates, io)
+  return { ...patched, action: patched.ok ? 'reenviada' : patched.action }
 }
 
 async function reconcilePendingOutboundMessage(row, { io = null, force = false } = {}) {
@@ -262,6 +436,19 @@ async function reconcilePendingOutboundMessage(row, { io = null, force = false }
     if (resolved.action !== 'noop') return resolved
   }
 
+  // Provedor respondeu que nao tem registro da mensagem e nunca a aceitou: o envio se perdeu.
+  // Reenviar aqui e seguro justamente porque a ausencia foi confirmada, nao presumida.
+  const provedorSemRegistro = providerHit?.consultaOk === true && !providerHit?.row
+  if (provedorSemRegistro && provedorNuncaAceitou(row)) {
+    if (isResendEnabled() && ageMs <= getResendWindowMs()) {
+      return await reenviarMensagemNaoAceita(row, io)
+    }
+    if (ageMs > getResendWindowMs()) {
+      // Fora da janela de reenvio e sem registro no provedor: falha definitiva, nao relogio eterno.
+      return patchMessage(row, { status: 'erro', status_mensagem: 'failed' }, io)
+    }
+  }
+
   if (ageMs < getFailAfterMs()) {
     return { ok: true, action: 'keep_waiting' }
   }
@@ -286,7 +473,7 @@ async function fetchPendingOutboundRows({ companyId = null, limit = null, mensag
 
   let query = supabase
     .from('mensagens')
-    .select('id, company_id, conversa_id, whatsapp_instance_id, whatsapp_id, provider_queue_id, status, status_mensagem, direcao, criado_em, autor_usuario_id, tipo')
+    .select('id, company_id, conversa_id, whatsapp_instance_id, whatsapp_id, provider_queue_id, status, status_mensagem, direcao, criado_em, autor_usuario_id, tipo, texto, url, nome_arquivo')
     .eq('direcao', 'out')
     .in('status', ['pending', 'sending'])
     .gte('criado_em', oldestIso)
@@ -389,5 +576,9 @@ module.exports = {
     buildCrmReferenceId,
     getGraceMs,
     getFailAfterMs,
+    getResendWindowMs,
+    provedorNuncaAceitou,
+    urlPublicaDeMidia,
+    captionUsuarioDeMidia,
   },
 }

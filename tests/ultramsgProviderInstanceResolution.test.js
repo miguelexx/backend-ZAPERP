@@ -173,4 +173,102 @@ describe('UltraMsg provider instance resolution', () => {
     expect(result.ok).toBe(false)
     expect(result.messageId).toBeNull()
   })
+
+  describe('referenceId propagado no envio (reconciliacao do eco fromMe)', () => {
+    function ambienteEnvio() {
+      return mockProviderDeps({
+        defaultByCompany: {
+          10: { id: 1, company_id: 10, provider: 'ultramsg', instance_id: '111', instance_token: 'default-token', ativo: true },
+        },
+        byId: {},
+      })
+    }
+
+    function corpoDaChamada(deps, indice = 0) {
+      return new URLSearchParams(deps.fetchWithRetry.mock.calls[indice][1].body)
+    }
+
+    test('sendText envia referenceId', async () => {
+      const deps = ambienteEnvio()
+      const provider = require('../services/providers/ultramsg')
+      await provider.sendText('34999999999', 'Ola', { companyId: 10, referenceId: 'crm-777' })
+
+      expect(corpoDaChamada(deps).get('referenceId')).toBe('crm-777')
+    })
+
+    test('sendImage envia referenceId', async () => {
+      const deps = ambienteEnvio()
+      const provider = require('../services/providers/ultramsg')
+      await provider.sendImage('34999999999', 'https://cdn.example.com/a.jpg', 'legenda', {
+        companyId: 10,
+        referenceId: 'crm-778',
+        returnDetails: true,
+      })
+
+      expect(corpoDaChamada(deps).get('referenceId')).toBe('crm-778')
+    })
+
+    test('sendFile envia referenceId', async () => {
+      const deps = ambienteEnvio()
+      const provider = require('../services/providers/ultramsg')
+      await provider.sendFile('34999999999', 'https://cdn.example.com/a.pdf', 'nota.pdf', {
+        companyId: 10,
+        referenceId: 'crm-779',
+        returnDetails: true,
+      })
+
+      expect(corpoDaChamada(deps).get('referenceId')).toBe('crm-779')
+    })
+
+    test('sendAudio envia referenceId', async () => {
+      const deps = ambienteEnvio()
+      const provider = require('../services/providers/ultramsg')
+      await provider.sendAudio('34999999999', 'https://cdn.example.com/a.mp3', {
+        companyId: 10,
+        referenceId: 'crm-780',
+        returnDetails: true,
+      })
+
+      expect(corpoDaChamada(deps).get('referenceId')).toBe('crm-780')
+    })
+
+    test('sendVoice envia referenceId inclusive no fallback para audio', async () => {
+      const deps = mockProviderDeps({
+        defaultByCompany: {
+          10: { id: 1, company_id: 10, provider: 'ultramsg', instance_id: '111', instance_token: 'default-token', ativo: true },
+        },
+        byId: {},
+      }, async (url) => ({
+        ok: true,
+        status: 200,
+        // /voice falha para forcar o fallback em /audio; o fallback precisa manter o referenceId.
+        text: async () =>
+          String(url).includes('/messages/voice')
+            ? JSON.stringify({ error: 'voice indisponivel' })
+            : JSON.stringify({ id: 'msg-1', sent: true }),
+      }))
+
+      const provider = require('../services/providers/ultramsg')
+      await provider.sendVoice('34999999999', 'https://cdn.example.com/a.ogg', {
+        companyId: 10,
+        referenceId: 'crm-781',
+        returnDetails: true,
+      })
+
+      expect(deps.fetchWithRetry.mock.calls.length).toBeGreaterThan(1)
+      expect(corpoDaChamada(deps, 0).get('referenceId')).toBe('crm-781')
+      expect(corpoDaChamada(deps, 1).get('referenceId')).toBe('crm-781')
+    })
+
+    test('sem referenceId o corpo nao ganha o campo', async () => {
+      const deps = ambienteEnvio()
+      const provider = require('../services/providers/ultramsg')
+      await provider.sendImage('34999999999', 'https://cdn.example.com/a.jpg', '', {
+        companyId: 10,
+        returnDetails: true,
+      })
+
+      expect(corpoDaChamada(deps).has('referenceId')).toBe(false)
+    })
+  })
 })

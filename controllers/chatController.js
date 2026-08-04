@@ -6379,6 +6379,7 @@ exports.enviarContatoWhatsapp = async (req, res) => {
       whatsappInstanceId: whatsappInstanceId || undefined,
       sendOrigin: 'atendimento_humano_contato',
       messageId: messageId || undefined,
+      referenceId: `crm-${msg.id}`,
     })
     const ok = typeof result === 'boolean' ? result : result?.ok === true
     const waMessageId =
@@ -6581,6 +6582,7 @@ exports.enviarLocalizacao = async (req, res) => {
         conversaId: conversa_id,
         whatsappInstanceId: whatsappInstanceId || undefined,
         sendOrigin: 'atendimento_humano_localizacao',
+        referenceId: `crm-${msg.id}`,
       })
     } else {
       console.warn(`[WhatsApp] Conversa ${conversa_id} sem telefone — localização salva, não enviada ao WhatsApp`)
@@ -7571,6 +7573,10 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
     direcao: "out",
     autor_usuario_id: user_id,
     company_id,
+    // Explicito como nos demais envios: o despacho ao provedor ocorre depois do INSERT,
+    // e a reconciliacao/reenvio so varre status pending|sending. Depender do default do
+    // banco deixaria a midia invisivel para esse laco caso o default mude.
+    status: 'pending',
     ...(whatsappInstanceId ? { whatsapp_instance_id: whatsappInstanceId } : {}),
     ...(clientTempId && !_clientTempIdDbDedupeUnavailable ? { client_temp_id: clientTempId } : {}),
   }

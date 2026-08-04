@@ -527,6 +527,17 @@ function createFetchOptions(method, body, extra = {}) {
   return opts
 }
 
+/**
+ * referenceId (crm-{mensagem_id}) permite localizar o envio depois via GET /messages?referenceId.
+ * Sem ele a reconciliacao nao consegue casar o eco do webhook com a mensagem original,
+ * e a mensagem fica presa em pending. Suportado pela UltraMsg em chat, image, document, audio e voice.
+ */
+function aplicarReferenceId(body, opts) {
+  const referenceId = opts?.referenceId ? String(opts.referenceId).trim().slice(0, 200) : null
+  if (referenceId) body.referenceId = referenceId
+  return body
+}
+
 async function post({ basePath, token, endpoint, body, companyId = null, meta = null }) {
   const url = `${basePath}${endpoint}`
   const payload = appendToken(body || {}, token)
@@ -704,10 +715,8 @@ async function sendText(phone, message, opts = {}) {
     return { ok: false, messageId: null, error: `body excede ${BODY_MAX_LEN} caracteres` }
   }
   const replyMessageId = opts?.replyMessageId ? String(opts.replyMessageId).trim() : null
-  const body = { to: nums[0], body: msg }
+  const body = aplicarReferenceId({ to: nums[0], body: msg }, opts)
   if (replyMessageId) body.msgId = replyMessageId
-  const referenceId = opts?.referenceId ? String(opts.referenceId).trim().slice(0, 200) : null
-  if (referenceId) body.referenceId = referenceId
 
   const { ok, status, data, text } = await postJson({
     ...cfg,
@@ -761,7 +770,7 @@ async function sendImage(phone, url, caption = '', opts = {}) {
   const nums = phoneCandidatesForSend(phone)
   if (!nums.length || !url) return returnDetails ? { ok: false, messageId: null, error: 'Destino ou URL da imagem inválido' } : false
   const captionTrim = String(caption || '').trim().slice(0, CAPTION_MAX_LEN)
-  const body = { to: nums[0], image: String(url).trim() }
+  const body = aplicarReferenceId({ to: nums[0], image: String(url).trim() }, opts)
   if (captionTrim) body.caption = captionTrim
   const { ok, status, data, text } = await postJson({
     ...cfg,
@@ -857,7 +866,7 @@ async function sendAudio(phone, audioUrl, opts = {}) {
   }
   
   console.log(`[ULTRAMSG] Tentando enviar audio para ${nums[0]?.slice(-12)} com URL: ${processedAudioUrl.slice(0, 50)}...`)
-  const body = { to: nums[0], audio: processedAudioUrl }
+  const body = aplicarReferenceId({ to: nums[0], audio: processedAudioUrl }, opts)
   const { ok, status, data, text } = await postJson({
     ...cfg,
     endpoint: '/messages/audio',
@@ -930,7 +939,10 @@ async function sendFile(phone, url, fileName = '', opts = {}) {
   // UltraMsg exige caption no POST /messages/document (vazio falha o envio).
   // Não usar o nome do arquivo como legenda visível no WhatsApp.
   const captionForApi = captionTrim || ' '
-  const body = { to: nums[0], document: String(url).trim(), filename, caption: captionForApi }
+  const body = aplicarReferenceId(
+    { to: nums[0], document: String(url).trim(), filename, caption: captionForApi },
+    opts
+  )
   const { ok, status, data, text } = await postJson({
     ...cfg,
     endpoint: '/messages/document',
@@ -970,7 +982,7 @@ async function sendVideo(phone, videoUrl, caption = '', opts = {}) {
     return returnDetails ? { ok: false, messageId: null, error: 'Destino ou URL do vídeo inválido' } : false
   }
   const captionTrim = String(caption || '').trim().slice(0, CAPTION_MAX_LEN)
-  const body = { to: nums[0], video: String(videoUrl).trim() }
+  const body = aplicarReferenceId({ to: nums[0], video: String(videoUrl).trim() }, opts)
   if (captionTrim) body.caption = captionTrim
   const { ok, status, data, text } = await postJson({
     ...cfg,
@@ -1005,7 +1017,7 @@ async function sendSticker(phone, sticker, opts = {}) {
   if (!cfg) return returnDetails ? { ok: false, messageId: null, error: 'Configuração UltraMsg indisponível' } : false
   const nums = phoneCandidatesForSend(phone)
   if (!nums.length || !sticker) return returnDetails ? { ok: false, messageId: null, error: 'Destino ou sticker inválido' } : false
-  const body = { to: nums[0], sticker: String(sticker).trim() }
+  const body = aplicarReferenceId({ to: nums[0], sticker: String(sticker).trim() }, opts)
   const { ok, status, data, text } = await postJson({
     ...cfg,
     endpoint: '/messages/sticker',
@@ -1094,7 +1106,7 @@ async function sendVoice(phone, audioUrl, opts = {}) {
     return returnDetails ? { ok: false, error: reason } : false
   }
   
-  const body = { to: nums[0], audio: processedAudioUrl }
+  const body = aplicarReferenceId({ to: nums[0], audio: processedAudioUrl }, opts)
 
   // Tenta endpoint voice primeiro
   console.log(`[ULTRAMSG] Tentando enviar voice para ${nums[0]?.slice(-12)} com URL: ${processedAudioUrl.slice(0, 50)}...`)
@@ -1205,7 +1217,7 @@ async function sendLocation(phone, { address = '', lat, lng }, opts = {}) {
   const latitude = Number(lat)
   const longitude = Number(lng)
   if (!nums.length || (isNaN(latitude) && isNaN(longitude))) return { ok: false, messageId: null }
-  const body = { to: nums[0], address: addr, lat: latitude, lng: longitude }
+  const body = aplicarReferenceId({ to: nums[0], address: addr, lat: latitude, lng: longitude }, opts)
   const { ok, status, data, text } = await postJson({
     ...cfg,
     endpoint: '/messages/location',
@@ -1338,7 +1350,7 @@ async function sendContact(phone, contactName, contactPhone, opts = {}) {
   if (!nums.length || !name || !contact) return { ok: false, messageId: null }
   const tel = contact.startsWith('55') ? contact : `55${contact}`
   const vcard = `BEGIN:VCARD\nVERSION:3.0\nN:${name};;;\nFN:${name}\nTEL;TYPE=CELL;waid=${tel}:+${tel}\nEND:VCARD`
-  const body = { to: nums[0], vcard }
+  const body = aplicarReferenceId({ to: nums[0], vcard }, opts)
   const { ok, status, data, text } = await postJson({
     ...cfg,
     endpoint: '/messages/vcard',
