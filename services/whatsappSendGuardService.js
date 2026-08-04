@@ -111,6 +111,14 @@ function buildContext(input = {}) {
   const destination = meta.phone || body.to || null
   return {
     company_id: input.companyId ?? input.company_id ?? meta.companyId ?? meta.company_id ?? null,
+    // Instancia resolvida pelo provider. Usada apenas para espacar envios por numero;
+    // nao vai para a auditoria enquanto a coluna nao existir na tabela de logs.
+    whatsapp_instance_id:
+      input.whatsappInstanceId ??
+      input.whatsapp_instance_id ??
+      meta.whatsappInstanceId ??
+      meta.whatsapp_instance_id ??
+      null,
     conversa_id: meta.conversaId ?? meta.conversa_id ?? null,
     endpoint,
     tipo: meta.type || endpoint.replace('/messages/', '') || 'unknown',
@@ -129,6 +137,20 @@ async function sleep(ms) {
   await new Promise((resolve) => setTimeout(resolve, ms))
 }
 
+/**
+ * Espacamento e por numero do WhatsApp, nao por empresa: uma instancia em rajada
+ * nao deve atrasar os outros numeros da mesma empresa, e cada numero tem seu
+ * proprio limite no provedor. Cai para a empresa quando a instancia e desconhecida.
+ * Prefixos distintos evitam colisao entre as duas formas de chave.
+ */
+function pacingKey(ctx, kind) {
+  const instancia = ctx?.whatsapp_instance_id
+  if (instancia != null && String(instancia).trim() !== '') {
+    return `inst:${instancia}:${kind}`
+  }
+  return `company:${ctx?.company_id}:${kind}`
+}
+
 function computeSoftDelay(ctx, mode) {
   if (mode !== MODE_SOFT && mode !== MODE_STRICT) return 0
   if (!ctx.company_id) return 0
@@ -140,7 +162,7 @@ function computeSoftDelay(ctx, mode) {
       ? numberFromEnv('WHATSAPP_SEND_GUARD_HUMAN_INTERVAL_MS', defaultHumanMs)
       : numberFromEnv('WHATSAPP_SEND_GUARD_AUTOMATION_INTERVAL_MS', defaultAutomationMs)
   if (intervalMs <= 0) return 0
-  const key = `${ctx.company_id}:${kind}`
+  const key = pacingKey(ctx, kind)
   const now = Date.now()
   const last = lastSoftSendByKey.get(key) || 0
   const delay = Math.max(0, intervalMs - (now - last))
@@ -257,6 +279,7 @@ function buildSendMeta(type, phone, opts = {}, extra = {}) {
     phone,
     companyId: opts?.companyId ?? opts?.company_id,
     conversaId: opts?.conversaId ?? opts?.conversa_id,
+    whatsappInstanceId: opts?.whatsappInstanceId ?? opts?.whatsapp_instance_id,
     origin: opts?.sendOrigin || opts?.origin || opts?.source || 'nao_informado',
     ...extra,
   }
@@ -269,4 +292,5 @@ module.exports = {
   shouldTrackEndpoint,
   inferOriginKind,
   getGuardMode,
+  _test: { pacingKey, buildContext, computeSoftDelay },
 }

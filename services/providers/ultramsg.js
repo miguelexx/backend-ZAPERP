@@ -538,11 +538,13 @@ function aplicarReferenceId(body, opts) {
   return body
 }
 
-async function post({ basePath, token, endpoint, body, companyId = null, meta = null }) {
+async function post({ basePath, token, endpoint, body, companyId = null, meta = null, whatsappInstanceId = null }) {
   const url = `${basePath}${endpoint}`
   const payload = appendToken(body || {}, token)
   const fetchOpts = createFetchOptions('POST', payload)
-  const guard = await beforeWhatsAppSend({ companyId, endpoint, body, meta })
+  // whatsappInstanceId vem do resolveConfig (ja resolvido, inclusive na instancia default),
+  // para a guarda espacar envios por numero e nao por empresa.
+  const guard = await beforeWhatsAppSend({ companyId, endpoint, body, meta, whatsappInstanceId })
   const startedAt = Date.now()
   let res
   let text = ''
@@ -569,6 +571,7 @@ async function post({ basePath, token, endpoint, body, companyId = null, meta = 
       endpoint,
       body,
       meta,
+      whatsappInstanceId,
       ok: res.ok,
       status: res.status,
       data,
@@ -583,6 +586,7 @@ async function post({ basePath, token, endpoint, body, companyId = null, meta = 
       endpoint,
       body,
       meta,
+      whatsappInstanceId,
       ok: false,
       error: e?.message || e,
       durationMs: Date.now() - startedAt,
@@ -616,8 +620,8 @@ async function get({ basePath, token, endpoint, extraParams = {}, companyId = nu
 }
 
 /** Alias para compatibilidade interna. */
-async function postJson({ basePath, token, endpoint, body, companyId = null, meta = null }) {
-  return post({ basePath, token, endpoint, body, companyId, meta })
+async function postJson({ basePath, token, endpoint, body, companyId = null, meta = null, whatsappInstanceId = null }) {
+  return post({ basePath, token, endpoint, body, companyId, meta, whatsappInstanceId })
 }
 
 async function getJson({ basePath, token, endpoint, extraParams = {}, companyId = null }) {
