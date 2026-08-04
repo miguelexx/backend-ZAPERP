@@ -399,8 +399,12 @@ server.listen(PORT, '0.0.0.0', () => {
     startAtendimentoSemRespostaScheduler(io)
     startProdutosSyncScheduler()
     startPendingOutboundReconciliationScheduler(io)
-    const { startInboundMediaRetryScheduler } = require('./services/inboundMediaPersistenceService')
+    const {
+      startInboundMediaRetryScheduler,
+      startInboundMediaDueRetryScheduler,
+    } = require('./services/inboundMediaPersistenceService')
     startInboundMediaRetryScheduler(supabase, io)
+    startInboundMediaDueRetryScheduler(supabase, io)
   } else if (backgroundJobsDisabled) {
     console.log('[WORKER] Rotinas em background desativadas por ZAPERP_DISABLE_BACKGROUND_JOBS')
   }

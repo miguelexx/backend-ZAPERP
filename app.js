@@ -8,6 +8,7 @@ const { randomUUID } = require('crypto')
 const { loadEnv, isProduction } = require('./config/env')
 loadEnv()
 const { getUploadsRoot, ensureUploadsRootExists } = require('./config/uploadsRoot')
+const { contentTypeForAudioPath } = require('./helpers/audioFormatSniffer')
 const tagsRoutes = require('./routes/tagRoutes')
 ensureUploadsRootExists()
 
@@ -188,7 +189,7 @@ app.use(
       res.setHeader('X-Content-Type-Options', 'nosniff')
       const p = String(filePath || '').toLowerCase()
       const isImage = p.endsWith('.jpg') || p.endsWith('.jpeg') || p.endsWith('.png') || p.endsWith('.webp')
-      const isAudio = p.endsWith('.mp3') || p.endsWith('.ogg') || p.endsWith('.aac') || p.endsWith('.m4a') || p.endsWith('.wav') || p.endsWith('.opus') || p.endsWith('.webm')
+      const isAudio = p.endsWith('.mp3') || p.endsWith('.ogg') || p.endsWith('.oga') || p.endsWith('.aac') || p.endsWith('.m4a') || p.endsWith('.wav') || p.endsWith('.opus') || p.endsWith('.amr') || p.endsWith('.webm')
       const isVideo = p.endsWith('.mp4') || p.endsWith('.mov') || p.endsWith('.avi') || p.endsWith('.3gp')
       const isPdf = p.endsWith('.pdf')
       const isMedia = isImage || isAudio || isVideo || isPdf
@@ -199,7 +200,13 @@ app.use(
         res.setHeader('Content-Disposition', `attachment; filename="${name.replace(/"/g, '')}"`)
         // força um tipo genérico para não permitir renderização ativa
         res.setHeader('Content-Type', 'application/octet-stream')
+        return
       }
+      // O mime padrão do express.static devolve octet-stream para .opus/.amr e audio/x-aac para .aac.
+      // Com nosniff, tipo genérico deixa o <audio> sem dica alguma do formato. Só extensões que não
+      // existem como vídeo entram aqui — .webm/.3gp seguem com o tipo do container.
+      const audioContentType = contentTypeForAudioPath(p)
+      if (audioContentType) res.setHeader('Content-Type', audioContentType)
     },
   })
 )
