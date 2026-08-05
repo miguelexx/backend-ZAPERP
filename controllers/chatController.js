@@ -81,6 +81,32 @@ setInterval(() => {
 }, 5 * 60 * 1000).unref()
 
 let _clientTempIdDbDedupeUnavailable = false
+let _audioDuracaoSecColumnUnavailable = false
+
+/**
+ * Duração em segundos a partir do FormData do upload de áudio/voice.
+ * Preferência: audio_duration_ms (metadado da gravação) → audio_elapsed_ms → audio_duracao_sec.
+ */
+function parseAudioDuracaoSecFromBody(body) {
+  if (!body || typeof body !== 'object') return null
+  const fromMs = (raw) => {
+    const n = Number(raw)
+    if (!Number.isFinite(n) || n <= 0) return null
+    return Math.max(1, Math.min(600, Math.round(n / 1000)))
+  }
+  const fromSec = (raw) => {
+    const n = Number(raw)
+    if (!Number.isFinite(n) || n <= 0) return null
+    return Math.max(1, Math.min(600, Math.round(n)))
+  }
+  return (
+    fromMs(body.audio_duration_ms) ||
+    fromMs(body.audio_elapsed_ms) ||
+    fromSec(body.audio_duracao_sec) ||
+    fromSec(body.audio_duration_sec) ||
+    null
+  )
+}
 
 function normalizeClientTempId(value) {
   const normalized = value != null ? String(value).trim().slice(0, 64) : ''
@@ -2119,10 +2145,12 @@ exports.listarConversas = async (req, res) => {
           if (!cl || !cl.telefone) continue
           const variants = possiblePhonesBR(cl.telefone)
           const keys = variants.length > 0 ? variants : [String(cl.telefone).trim()]
+          // Não sobrescrever chave já mapeada — evita foto/nome de outro cliente no mesmo variant.
           for (const k of keys) {
-            if (k) phoneToClientFallback.set(k, cl)
+            if (k && !phoneToClientFallback.has(k)) phoneToClientFallback.set(k, cl)
           }
-          phoneToClientFallback.set(String(cl.telefone).trim(), cl)
+          const exact = String(cl.telefone).trim()
+          if (exact) phoneToClientFallback.set(exact, cl)
         }
       }
     } catch (_) {
@@ -2132,11 +2160,20 @@ exports.listarConversas = async (req, res) => {
     const cid = Number(company_id)
     let conversasFormatadas = (rawSqlRows || []).map((c) => {
       const raw = c.clientes
+      // NUNCA usar raw[0] — pega outro cliente do join e coloca a foto errada no card.
       let clientesObj = Array.isArray(raw)
-        ? (raw.find((cl) => cl && Number(cl.id) === Number(c.cliente_id)) || raw[0])
+        ? (raw.find((cl) => cl && c.cliente_id != null && Number(cl.id) === Number(c.cliente_id)) || null)
         : raw
       // Isolamento multi-tenant: descarta cliente de outra empresa (evita vazamento entre companies)
       if (clientesObj && clientesObj.company_id != null && Number(clientesObj.company_id) !== cid) {
+        clientesObj = null
+      }
+      if (
+        clientesObj &&
+        c.cliente_id != null &&
+        clientesObj.id != null &&
+        Number(clientesObj.id) !== Number(c.cliente_id)
+      ) {
         clientesObj = null
       }
       if (!clientesObj && !isGroupConversation(c) && !c.cliente_id && c.telefone) {
@@ -4052,7 +4089,7 @@ exports.detalharChat = async (req, res) => {
       !isGroup && !conversaEncerrada && conversaAssumidaPorOutro && !isAdmin && !isSupervisor
 
     // mensagens paginadas (remetente_nome/remetente_telefone para grupos; fallback se colunas não existirem)
-    const selectComRemetente = 'id, conversa_id, texto, direcao, criado_em, autor_usuario_id, status, whatsapp_id, whatsapp_instance_id, tipo, url, nome_arquivo, reply_meta, remetente_nome, remetente_telefone, contact_meta, location_meta, apagada_para_todos, apagada_em'
+    const selectComRemetente = 'id, conversa_id, texto, direcao, criado_em, autor_usuario_id, status, whatsapp_id, whatsapp_instance_id, tipo, url, nome_arquivo, reply_meta, remetente_nome, remetente_telefone, contact_meta, location_meta, apagada_para_todos, apagada_em, audio_duracao_sec'
     let mensagens = []
     let errMsgs = null
     let query
@@ -4075,7 +4112,7 @@ exports.detalharChat = async (req, res) => {
     }
     // Compatibilidade: se reply_meta/remetente_*/contact_meta/location_meta não existirem ainda no banco, refaz select sem essas colunas.
     const selectFallback = 'id, conversa_id, texto, direcao, criado_em, autor_usuario_id, status, whatsapp_id, whatsapp_instance_id, tipo, url, nome_arquivo'
-    if (errMsgs && (String(errMsgs.message || '').includes('reply_meta') || String(errMsgs.message || '').includes('remetente_nome') || String(errMsgs.message || '').includes('remetente_telefone') || String(errMsgs.message || '').includes('contact_meta') || String(errMsgs.message || '').includes('location_meta') || String(errMsgs.message || '').includes('apagada_para_todos') || String(errMsgs.message || '').includes('does not exist'))) {
+    if (errMsgs && (String(errMsgs.message || '').includes('reply_meta') || String(errMsgs.message || '').includes('remetente_nome') || String(errMsgs.message || '').includes('remetente_telefone') || String(errMsgs.message || '').includes('contact_meta') || String(errMsgs.message || '').includes('location_meta') || String(errMsgs.message || '').includes('apagada_para_todos') || String(errMsgs.message || '').includes('audio_duracao_sec') || String(errMsgs.message || '').includes('does not exist'))) {
       query = supabase
         .from('mensagens')
         .select(selectFallback)
@@ -4370,7 +4407,7 @@ exports.buscarMensagensConversa = async (req, res) => {
       return res.status(403).json({ error: 'Mensagens indisponíveis para conversa assumida por outro usuário' })
     }
 
-    const selectComRemetente = 'id, conversa_id, texto, direcao, criado_em, autor_usuario_id, status, whatsapp_id, whatsapp_instance_id, tipo, url, nome_arquivo, reply_meta, remetente_nome, remetente_telefone, contact_meta, location_meta, apagada_para_todos, apagada_em'
+    const selectComRemetente = 'id, conversa_id, texto, direcao, criado_em, autor_usuario_id, status, whatsapp_id, whatsapp_instance_id, tipo, url, nome_arquivo, reply_meta, remetente_nome, remetente_telefone, contact_meta, location_meta, apagada_para_todos, apagada_em, audio_duracao_sec'
     const selectFallback = 'id, conversa_id, texto, direcao, criado_em, autor_usuario_id, status, whatsapp_id, whatsapp_instance_id, tipo, url, nome_arquivo'
     const term = `%${escapeIlikePattern(q)}%`
 
@@ -4386,7 +4423,7 @@ exports.buscarMensagensConversa = async (req, res) => {
     query = applyDetalharChatMensagensCursor(query, cursor, cursor_id).limit(limit + 1)
     let { data: rows, error } = await query
 
-    if (error && (String(error.message || '').includes('reply_meta') || String(error.message || '').includes('remetente_nome') || String(error.message || '').includes('remetente_telefone') || String(error.message || '').includes('contact_meta') || String(error.message || '').includes('location_meta') || String(error.message || '').includes('apagada_para_todos') || String(error.message || '').includes('does not exist'))) {
+    if (error && (String(error.message || '').includes('reply_meta') || String(error.message || '').includes('remetente_nome') || String(error.message || '').includes('remetente_telefone') || String(error.message || '').includes('contact_meta') || String(error.message || '').includes('location_meta') || String(error.message || '').includes('apagada_para_todos') || String(error.message || '').includes('audio_duracao_sec') || String(error.message || '').includes('does not exist'))) {
       let fallbackQuery = supabase
         .from('mensagens')
         .select(selectFallback)
@@ -7230,13 +7267,25 @@ function extBaseArquivo(file) {
   return ''
 }
 
+/**
+ * Nota de voz gravada no browser: MIME costuma ser audio/webm, mas em alguns clients
+ * chega vazio, application/octet-stream ou até video/webm com extensão .webm.
+ * Sem este aceite, tipo=voice era ignorado e o arquivo caía como vídeo.
+ */
+function isForcedVoiceAudioish(file) {
+  const base = mimeBase(file)
+  const ext = extBaseArquivo(file)
+  if (base.startsWith('audio/')) return true
+  if (AUDIO_FILE_EXTENSIONS.has(ext)) return true
+  if (ext === 'webm') return true
+  if (base === 'video/webm') return true
+  return false
+}
+
 function aplicarTipoForcadoSticker(file, tipoInferido) {
   const forced = String(file?.__tipoForcado || '').toLowerCase().trim()
   if (forced === 'voice' || forced === 'ptt') {
-    const base = mimeBase(file)
-    const ext = extBaseArquivo(file)
-    const audioish = base.startsWith('audio/') || AUDIO_FILE_EXTENSIONS.has(ext)
-    return audioish ? 'voice' : tipoInferido
+    return isForcedVoiceAudioish(file) ? 'voice' : tipoInferido
   }
   if (forced !== 'sticker') return tipoInferido
   const base = mimeBase(file)
@@ -7336,15 +7385,32 @@ async function convertAudioWithFfmpeg(inputPath, outputPath, profile = 'audio_mp
 }
 
 async function normalizeAudioForUltraMsg(file, tipo) {
-  if (!file || !file.path || (tipo !== 'audio' && tipo !== 'voice')) return { file, converted: false, error: null }
+  if (!file || !file.path || (tipo !== 'audio' && tipo !== 'voice')) {
+    return { file, converted: false, error: null, required: false }
+  }
   const ext = getAudioFileExtension(file)
   const isVoice = tipo === 'voice'
   const isAudio = tipo === 'audio'
   const allowedAudioExt = ['mp3', 'ogg', 'aac']
-  // Para voice, sempre transcodificar para OGG/Opus.
-  // Isso elimina variações de codec/container que tocam no desktop mas falham no mobile.
+  const mime = mimeBase(file)
+  // Voice: se já for OGG/Opus (ex.: Firefox MediaRecorder), pula ffmpeg — reduz latência até o CDN.
+  // WebM/outros containers continuam obrigatórios a transcodificar (compatibilidade iPhone/WhatsApp).
+  if (isVoice) {
+    const alreadyOggOpus =
+      ext === 'ogg' &&
+      (mime === 'audio/ogg' || mime === 'audio/opus' || mime.includes('opus'))
+    if (alreadyOggOpus) {
+      return {
+        file: { ...file, mimetype: file.mimetype || 'audio/ogg' },
+        converted: false,
+        error: null,
+        required: false,
+      }
+    }
+  }
+  // Para audio comum, mp3/ogg/aac já são aceitos no endpoint /messages/audio.
   if (isAudio && allowedAudioExt.includes(ext)) {
-    return { file, converted: false, error: null }
+    return { file, converted: false, error: null, required: false }
   }
 
   const path = require('path')
@@ -7360,20 +7426,39 @@ async function normalizeAudioForUltraMsg(file, tipo) {
   const targetOriginalName = originalName.replace(/\.[a-z0-9]{2,5}$/i, `.${targetExt}`)
   const ffmpegProfile = isVoice ? 'voice_ogg_opus' : 'audio_mp3'
 
-  await convertAudioWithFfmpeg(file.path, targetPath, ffmpegProfile)
-  fs.unlink(file.path, () => {})
+  try {
+    await convertAudioWithFfmpeg(file.path, targetPath, ffmpegProfile)
+    fs.unlink(file.path, () => {})
 
-  return {
-    converted: true,
-    error: null,
-    file: {
-      ...file,
-      path: targetPath,
-      filename: targetStoredName,
-      originalname: targetOriginalName,
-      mimetype: isVoice ? 'audio/ogg' : 'audio/mpeg',
+    return {
+      converted: true,
+      error: null,
+      required: true,
+      file: {
+        ...file,
+        path: targetPath,
+        filename: targetStoredName,
+        originalname: targetOriginalName,
+        mimetype: isVoice ? 'audio/ogg' : 'audio/mpeg',
+      },
+    }
+  } catch (e) {
+    // Não apaga o original: o caller decide se aborta (voice) ou reporta falha.
+    return {
+      file,
+      converted: false,
+      required: true,
+      error: e?.message || 'Falha ao converter áudio com ffmpeg',
     }
   }
+}
+
+/** Voice (e áudio que precisa transcodificar) não pode seguir com o arquivo cru — UltraMSG/iPhone falham. */
+function shouldAbortAudioAfterNormalize(tipo, normalized) {
+  if (tipo !== 'voice' && tipo !== 'audio') return false
+  if (normalized?.converted) return false
+  if (!normalized?.required) return false
+  return !!normalized?.error
 }
 
 function shouldNormalizeImageForWhatsapp(file, tipo) {
@@ -7504,23 +7589,45 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
   const avisoWhatsapp = null
   const tipo = aplicarTipoForcadoSticker(fileWork, inferirTipoArquivo(fileWork))
   if (tipo === 'audio' || tipo === 'voice') {
+    let normalized
     try {
-      const normalized = await normalizeAudioForUltraMsg(fileWork, tipo)
-      if (normalized?.converted && normalized?.file) {
-        const beforeName = fileWork.originalname
-        fileWork = normalized.file
-        req.file = fileWork
-        console.log('[ULTRAMSG][AUDIO] Áudio convertido para formato compatível antes do envio:', {
-          tipo,
-          from: beforeName,
-          to: fileWork.originalname,
-          mime: fileWork.mimetype,
-        })
-      } else if (normalized?.error) {
-        console.warn('[ULTRAMSG][AUDIO] Conversão/normalização indisponível:', normalized.error)
-      }
+      normalized = await normalizeAudioForUltraMsg(fileWork, tipo)
     } catch (e) {
-      console.warn('[ULTRAMSG][AUDIO] Falha ao converter WAV para MP3:', e?.message || e)
+      // normalizeAudioForUltraMsg já captura falhas do ffmpeg; este catch é rede de segurança.
+      normalized = {
+        file: fileWork,
+        converted: false,
+        required: true,
+        error: e?.message || 'Falha ao converter áudio',
+      }
+    }
+    if (normalized?.converted && normalized?.file) {
+      const beforeName = fileWork.originalname
+      fileWork = normalized.file
+      req.file = fileWork
+      console.log('[ULTRAMSG][AUDIO] Áudio convertido para formato compatível antes do envio:', {
+        tipo,
+        from: beforeName,
+        to: fileWork.originalname,
+        mime: fileWork.mimetype,
+      })
+    } else if (shouldAbortAudioAfterNormalize(tipo, normalized)) {
+      console.warn('[ULTRAMSG][AUDIO] Conversão obrigatória falhou; abortando envio:', {
+        tipo,
+        error: normalized?.error,
+        original: fileWork?.originalname,
+        mime: fileWork?.mimetype,
+      })
+      return {
+        ok: false,
+        status: 422,
+        error:
+          tipo === 'voice'
+            ? 'Não foi possível converter o áudio de voz. Grave novamente e tente enviar.'
+            : 'Não foi possível converter o áudio para um formato compatível com o WhatsApp.',
+      }
+    } else if (normalized?.error) {
+      console.warn('[ULTRAMSG][AUDIO] Conversão/normalização indisponível:', normalized.error)
     }
   }
   if (tipo === 'imagem') {
@@ -7556,6 +7663,10 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
   })
 
   const pathUrl = `/uploads/${fileWork.filename}`
+  const audioDuracaoSec =
+    (tipo === 'audio' || tipo === 'voice') && !_audioDuracaoSecColumnUnavailable
+      ? parseAudioDuracaoSecFromBody(req?.body)
+      : null
 
   const insertArquivoPayload = {
     conversa_id: Number(conversa_id),
@@ -7572,6 +7683,7 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
     status: 'pending',
     ...(whatsappInstanceId ? { whatsapp_instance_id: whatsappInstanceId } : {}),
     ...(clientTempId && !_clientTempIdDbDedupeUnavailable ? { client_temp_id: clientTempId } : {}),
+    ...(audioDuracaoSec != null ? { audio_duracao_sec: audioDuracaoSec } : {}),
   }
 
   let { data: msg, error } = await supabase.from("mensagens").insert(insertArquivoPayload).select().single()
@@ -7581,11 +7693,23 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
       company_id,
       conversa_id,
       clientTempId,
-      'id, conversa_id, company_id, status, status_mensagem, whatsapp_id, client_temp_id, texto, tipo, url, nome_arquivo, criado_em'
+      'id, conversa_id, company_id, status, status_mensagem, whatsapp_id, client_temp_id, texto, tipo, url, nome_arquivo, criado_em' +
+        (_audioDuracaoSecColumnUnavailable ? '' : ', audio_duracao_sec')
     )
     if (existing?.id) {
       return { ok: true, msg: existing, deduplicated: true }
     }
+  }
+
+  // Coluna nova: tenta de novo sem ela antes de mexer em client_temp_id (evita falso positivo no "does not exist").
+  if (
+    error &&
+    insertArquivoPayload.audio_duracao_sec != null &&
+    (isMissingMensagemColumnError(error, 'audio_duracao_sec') || isGenericMissingColumnError(error))
+  ) {
+    _audioDuracaoSecColumnUnavailable = true
+    delete insertArquivoPayload.audio_duracao_sec
+    ;({ data: msg, error } = await supabase.from("mensagens").insert(insertArquivoPayload).select().single())
   }
 
   if (error && insertArquivoPayload.client_temp_id && (isMissingMensagemColumnError(error, 'client_temp_id') || isGenericMissingColumnError(error))) {
@@ -7632,6 +7756,10 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
         status_mensagem: msg.status_mensagem || msg.status || 'pending',
         direcao: 'out',
         ...(clientTempId ? { client_temp_id: clientTempId } : {}),
+        // Mesmo sem a coluna no banco, a bolha recebe a duração medida no upload.
+        ...(audioDuracaoSec != null && msg.audio_duracao_sec == null
+          ? { audio_duracao_sec: audioDuracaoSec }
+          : {}),
       }
       const novaMsgPayload = await enrichMensagemComAutorUsuario(supabase, company_id, basePayload)
       emitirEventoEmpresaConversa(io, company_id, conversa_id, io.EVENTS?.NOVA_MENSAGEM || 'nova_mensagem', novaMsgPayload)
@@ -7943,6 +8071,7 @@ exports.enviarArquivo = async (req, res) => {
           ok: false,
           client_temp_id: clientTempId,
           error: r.error || 'Falha ao enviar arquivo.',
+          status: r.status || 400,
           index: i,
         })
         continue
@@ -8995,6 +9124,9 @@ exports._test = {
   isClientTempIdUniqueViolation,
   inferirTipoArquivo,
   aplicarTipoForcadoSticker,
+  isForcedVoiceAudioish,
+  shouldAbortAudioAfterNormalize,
+  parseAudioDuracaoSecFromBody,
   shouldNormalizeImageForWhatsapp,
   normalizeForwardTipo,
   resolveForwardMediaForProvider,

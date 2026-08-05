@@ -25,7 +25,14 @@ describe('UltraMsg provider instance resolution', () => {
       afterWhatsAppSend: jest.fn(),
       buildSendMeta: jest.fn((type, to, opts, extra) => ({ type, to, opts, extra })),
     }))
-    jest.doMock('../helpers/retryWithBackoff', () => ({ fetchWithRetry }))
+    jest.doMock('../helpers/retryWithBackoff', () => ({
+      fetchWithRetry,
+      sleep: jest.fn(async () => {}),
+      isConnectionLevelError: jest.fn((err) => {
+        const code = err?.code != null ? String(err.code) : ''
+        return ['ENOTFOUND', 'ECONNREFUSED', 'EAI_AGAIN'].includes(code)
+      }),
+    }))
     jest.doMock('../services/whatsappInstanceService', () => ({
       getDefaultWhatsappInstance: jest.fn(async (companyId) => ({
         instance: instances.defaultByCompany[companyId] || null,
@@ -270,5 +277,84 @@ describe('UltraMsg provider instance resolution', () => {
 
       expect(corpoDaChamada(deps).has('referenceId')).toBe(false)
     })
+  })
+
+  test('uploadMedia retenta em HTTP 5xx e sobe o arquivo na tentativa seguinte', async () => {
+    const fs = require('fs')
+    const os = require('os')
+    const path = require('path')
+    const tmpFile = path.join(os.tmpdir(), `zaperp-upload-retry-${Date.now()}.ogg`)
+    fs.writeFileSync(tmpFile, Buffer.from('ogg-fake'))
+
+    let calls = 0
+    const deps = mockProviderDeps(
+      {
+        defaultByCompany: {
+          10: { id: 1, company_id: 10, provider: 'ultramsg', instance_id: '111', instance_token: 'tok', ativo: true },
+        },
+        byId: {},
+      },
+      async () => {
+        calls += 1
+        if (calls === 1) {
+          return { ok: false, status: 503, text: async () => JSON.stringify({ error: 'temporary' }) }
+        }
+        return {
+          ok: true,
+          status: 200,
+          text: async () => JSON.stringify({ url: 'https://cdn.ultramsg.test/a.ogg' }),
+        }
+      }
+    )
+
+    try {
+      const provider = require('../services/providers/ultramsg')
+      const result = await provider.uploadMedia(tmpFile, 'a.ogg', {
+        companyId: 10,
+        maxAttempts: 3,
+        baseDelayMs: 0,
+      })
+      expect(result.ok).toBe(true)
+      expect(result.url).toBe('https://cdn.ultramsg.test/a.ogg')
+      expect(deps.fetchWithRetry).toHaveBeenCalledTimes(2)
+    } finally {
+      try { fs.unlinkSync(tmpFile) } catch (_) {}
+    }
+  })
+
+  test('uploadMedia nao retenta erro semantico no body (4xx util)', async () => {
+    const fs = require('fs')
+    const os = require('os')
+    const path = require('path')
+    const tmpFile = path.join(os.tmpdir(), `zaperp-upload-noretry-${Date.now()}.ogg`)
+    fs.writeFileSync(tmpFile, Buffer.from('ogg-fake'))
+
+    const deps = mockProviderDeps(
+      {
+        defaultByCompany: {
+          10: { id: 1, company_id: 10, provider: 'ultramsg', instance_id: '111', instance_token: 'tok', ativo: true },
+        },
+        byId: {},
+      },
+      async () => ({
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({ error: 'wrong token' }),
+      })
+    )
+
+    try {
+      const provider = require('../services/providers/ultramsg')
+      const result = await provider.uploadMedia(tmpFile, 'a.ogg', {
+        companyId: 10,
+        maxAttempts: 3,
+        baseDelayMs: 0,
+      })
+      expect(result.ok).toBe(false)
+      expect(String(result.error || '')).toMatch(/wrong token/i)
+      expect(deps.fetchWithRetry).toHaveBeenCalledTimes(1)
+    } finally {
+      try { fs.unlinkSync(tmpFile) } catch (_) {}
+    }
   })
 })

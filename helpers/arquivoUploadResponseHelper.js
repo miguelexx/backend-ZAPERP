@@ -35,6 +35,9 @@ function buildArquivoApiResultRow(msg, clientTempId) {
     status: msg.status || 'pending',
     status_mensagem: msg.status_mensagem || msg.status || 'pending',
     ...(msg.whatsapp_id ? { whatsapp_id: msg.whatsapp_id } : {}),
+    ...(msg.audio_duracao_sec != null && Number.isFinite(Number(msg.audio_duracao_sec))
+      ? { audio_duracao_sec: Number(msg.audio_duracao_sec) }
+      : {}),
   }
 }
 

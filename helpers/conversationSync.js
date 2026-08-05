@@ -203,8 +203,16 @@ async function mergeConversationLidToPhone(supabaseClient, company_id, chatLid, 
   }
 }
 
+/** URL de foto de perfil utilizável (não sobrescrever se já houver uma). */
+function hasValidFotoPerfil(url) {
+  const s = url != null ? String(url).trim() : ''
+  if (!s || s.toLowerCase() === 'null') return false
+  return /^https?:\/\//i.test(s)
+}
+
 /**
  * Aplica campos no cliente existente (sem anular com vazio) e retorna o id.
+ * foto_perfil: sticky — só preenche se ainda vazia/inválida (evita foto de outro contato).
  */
 async function mergeAndReturnCliente(supabaseClient, company_id, existente, phone, fields) {
   const updates = {}
@@ -225,7 +233,11 @@ async function mergeAndReturnCliente(supabaseClient, company_id, existente, phon
   if (fields.pushname !== undefined && fields.pushname != null && String(fields.pushname).trim()) {
     updates.pushname = String(fields.pushname).trim()
   }
-  if (fields.foto_perfil) updates.foto_perfil = fields.foto_perfil
+  // Sticky: nunca trocar foto já válida (match errado / CDN de outro sync).
+  // Sync em lote (syncFotosProgressiva) atualiza direto por cliente_id e não passa por aqui.
+  if (fields.foto_perfil && hasValidFotoPerfil(fields.foto_perfil) && !hasValidFotoPerfil(existente.foto_perfil)) {
+    updates.foto_perfil = String(fields.foto_perfil).trim()
+  }
   if (fields.wa_id != null && String(fields.wa_id).trim() && (!existente.wa_id || !String(existente.wa_id).trim())) {
     updates.wa_id = String(fields.wa_id).trim()
   }
@@ -248,7 +260,11 @@ function digitsOnlyPhone(v) {
   return String(v || '').replace(/\D/g, '')
 }
 
-/** Compara números BR mesmo com/sem 55, com/sem 9º dígito ou só DDD+número no banco. */
+/**
+ * Compara números BR mesmo com/sem 55, com/sem 9º dígito.
+ * Apenas igualdade exata ou phoneKeyBR (remove o 9º dígito de forma canônica).
+ * NÃO usa últimos 8 nem últimos 10 do E.164 — colidem entre DDDs (ex.: 11 vs 21 → foto errada).
+ */
 function phonesMatchDigitally(a, b) {
   const da = digitsOnlyPhone(a)
   const db = digitsOnlyPhone(b)
@@ -257,8 +273,6 @@ function phonesMatchDigitally(a, b) {
   const ka = phoneKeyBR(da)
   const kb = phoneKeyBR(db)
   if (ka && kb && ka === kb) return true
-  if (da.length >= 10 && db.length >= 10 && da.slice(-10) === db.slice(-10)) return true
-  if (da.length >= 8 && db.length >= 8 && da.slice(-8) === db.slice(-8)) return true
   return false
 }
 
@@ -394,28 +408,23 @@ async function findClienteRowForPhone(supabaseClient, company_id, phone, telefon
   }
 
   const refPhone = telefoneCanonico || phone
-  const digits8 = digitsOnlyPhone(refPhone).slice(-8)
-  if (digits8.length === 8) {
-    const { data: candidates, error: errLike } = await supabaseClient
-      .from('clientes')
-      .select(CLIENTE_SELECT_COLS)
-      .eq('company_id', company_id)
-      .like('telefone', `%${digits8}`)
-      .order('id', { ascending: true })
-      .limit(40)
-    if (!errLike && Array.isArray(candidates)) {
-      const match = candidates.find((row) => row?.id && phonesMatchDigitally(refPhone, row.telefone))
-      if (match?.id) return match
+  // Fallback LIKE: sufixos nacionais com DDD completo (10 = DDD+8, 11 = DDD+9+8).
+  // Sem LIKE %últimos8%/%últimos10% do E.164 — colidem entre DDDs.
+  const key = phoneKeyBR(refPhone)
+  const likeSuffixes = []
+  if (key && key.startsWith('55') && key.length === 12) {
+    const national10 = key.slice(2)
+    if (national10.length === 10) {
+      likeSuffixes.push(national10)
+      likeSuffixes.push(national10.slice(0, 2) + '9' + national10.slice(2))
     }
   }
-
-  const digits10 = digitsOnlyPhone(refPhone).slice(-10)
-  if (digits10.length === 10) {
+  for (const suf of Array.from(new Set(likeSuffixes.filter(Boolean)))) {
     const { data: legacyRows } = await supabaseClient
       .from('clientes')
       .select(CLIENTE_SELECT_COLS)
       .eq('company_id', company_id)
-      .like('telefone', `%${digits10}`)
+      .like('telefone', `%${suf}`)
       .order('id', { ascending: true })
       .limit(20)
     if (Array.isArray(legacyRows)) {
@@ -569,7 +578,7 @@ async function getOrCreateCliente(supabaseClient, company_id, phone, fields = {}
     observacoes: null,
     company_id,
     ...(pushname ? { pushname } : {}),
-    ...(fields.foto_perfil ? { foto_perfil: fields.foto_perfil } : {}),
+    ...(fields.foto_perfil && hasValidFotoPerfil(fields.foto_perfil) ? { foto_perfil: String(fields.foto_perfil).trim() } : {}),
     ...(fields.wa_id && String(fields.wa_id).trim() ? { wa_id: String(fields.wa_id).trim() } : {}),
     ...(fields.email && String(fields.email).trim() ? { email: String(fields.email).trim() } : {}),
     ...(fields.empresa && String(fields.empresa).trim() ? { empresa: String(fields.empresa).trim() } : {})
@@ -965,4 +974,6 @@ module.exports = {
   deduplicateConversationsByContact,
   sortConversationsByRecent,
   sortConversationsPinThenRecent,
+  phonesMatchDigitally,
+  hasValidFotoPerfil,
 }

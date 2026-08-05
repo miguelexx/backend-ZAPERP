@@ -8,13 +8,13 @@
  * Formato telefone: +5534999999999 (individual) ou 120363...@g.us (grupo).
  */
 
-const { normalizePhoneBR, toZapiSendFormat, possiblePhonesBR } = require('../../helpers/phoneHelper')
+const { normalizePhoneBR, toZapiSendFormat, possiblePhonesBR, phoneKeyBR } = require('../../helpers/phoneHelper')
 const { invalidateEmpresaWhatsappConfigCache } = require('../whatsappConfigService')
 const {
   getDefaultWhatsappInstance,
   getWhatsappInstanceById,
 } = require('../whatsappInstanceService')
-const { fetchWithRetry } = require('../../helpers/retryWithBackoff')
+const { fetchWithRetry, sleep, isConnectionLevelError } = require('../../helpers/retryWithBackoff')
 const {
   beforeWhatsAppSend,
   afterWhatsAppSend,
@@ -1076,7 +1076,8 @@ async function removeReaction(phone, messageId, opts = {}) {
  */
 async function sendVoice(phone, audioUrl, opts = {}) {
   const returnDetails = opts?.returnDetails === true
-  await awaitSendDelay(opts?.companyId ?? opts?.company_id)
+  // Respeita skipProviderDelay (ex.: fallback audio→voice) para não pagar o delay duas vezes.
+  await awaitSendDelay(opts?.companyId ?? opts?.company_id, opts)
   const cfg = await resolveConfig(opts)
   if (!cfg) return returnDetails ? { ok: false, error: 'Configuração UltraMsg indisponível' } : false
   const nums = phoneCandidatesForSend(phone)
@@ -1806,9 +1807,10 @@ async function getContactMetadata(phone, opts = {}) {
     }
   }
   try {
-    // Fallback: busca em getContacts (lista paginada)
+    // Fallback: busca em getContacts (lista paginada).
+    // Match canônico (exato / phoneKeyBR) — sem endsWith(8) (colide entre DDDs → foto errada).
     const digits = String(phone || '').replace(/\D/g, '')
-    const searchTail = digits.slice(-8)
+    const key = phoneKeyBR(digits) || ''
     for (let page = 1; page <= 3; page++) {
       const { ok: okList, data: listData } = await getJson({
         ...cfg,
@@ -1819,7 +1821,10 @@ async function getContactMetadata(phone, opts = {}) {
       const arr = Array.isArray(listData) ? listData : (listData?.contacts || [])
       const found = arr.find((c) => {
         const cPhone = String(c.id ?? c.phone ?? c.wa_id ?? '').replace(/\D/g, '')
-        return cPhone.endsWith(searchTail) || cPhone === digits
+        if (!cPhone) return false
+        if (cPhone === digits) return true
+        const cKey = phoneKeyBR(cPhone) || ''
+        return Boolean(key && cKey && key === cKey)
       })
       if (found) {
         const pushname = found.pushname ?? found.pushName ?? found.notify ?? null
@@ -1978,8 +1983,34 @@ async function getChatMessages(phone, amount = 10, lastMessageId = null, opts = 
 }
 
 /**
+ * Classifica status HTTP em que o upload CDN pode ser retentado com segurança.
+ */
+function isRetriableUploadHttpStatus(status) {
+  const code = Number(status)
+  return code >= 500 || code === 429 || code === 408
+}
+
+function isRetriableUploadError(err) {
+  if (!err) return false
+  if (isConnectionLevelError(err)) return true
+  const name = String(err.name || '')
+  if (name === 'AbortError' || name === 'TimeoutError') return true
+  const msg = String(err.message || err).toLowerCase()
+  return (
+    msg.includes('timeout') ||
+    msg.includes('aborted') ||
+    msg.includes('network') ||
+    msg.includes('fetch failed') ||
+    msg.includes('socket hang up')
+  )
+}
+
+/**
  * Upload de mídia para UltraMsg. POST /{instance_id}/media/upload
  * Retorna URL pública para usar em sendImage/sendFile/etc quando APP_URL não é acessível.
+ *
+ * Retry seguro: o upload só sobe o arquivo à CDN (não dispara mensagem WhatsApp).
+ * Recria FormData/stream a cada tentativa — ReadStream não pode ser reutilizado.
  */
 async function uploadMedia(filePath, filename, opts = {}) {
   const cfg = await resolveConfig(opts)
@@ -1988,63 +2019,109 @@ async function uploadMedia(filePath, filename, opts = {}) {
   const path = require('path')
   if (!fs.existsSync(filePath)) return { ok: false, url: null, error: 'Arquivo não encontrado' }
   const safeFilename = filename || path.basename(filePath) || 'file'
-  try {
-    const FormData = require('form-data')
-    const form = new FormData()
-    form.append('token', cfg.token)
+  // Não renomear extensão sem transcodificar bytes reais.
+  const uploadFilename = String(safeFilename).slice(0, FILENAME_MAX_LEN)
+  const uploadTimeout = 60_000
+  const maxAttempts = Math.max(1, Math.min(3, Number(opts.maxAttempts) || 3))
+  const rawDelay = Number(opts.baseDelayMs)
+  const baseDelayMs = Number.isFinite(rawDelay) ? Math.max(0, rawDelay) : 400
+  const uploadUrl = `${cfg.basePath}/media/upload`
+  let lastError = null
 
-    // Não renomear extensão sem transcodificar bytes reais.
-    // UltraMsg pode validar conteúdo e extensão; renomear "na marra" tende a falhar.
-    let uploadFilename = safeFilename.slice(0, FILENAME_MAX_LEN)
-
-    form.append('file', fs.createReadStream(filePath), { filename: uploadFilename })
-    const uploadTimeout = 60_000 // 60s para arquivos até 30MB
-    let signal
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
-      if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function') {
-        signal = AbortSignal.timeout(uploadTimeout)
+      const FormData = require('form-data')
+      const form = new FormData()
+      form.append('token', cfg.token)
+      form.append('file', fs.createReadStream(filePath), { filename: uploadFilename })
+      let signal
+      try {
+        if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function') {
+          signal = AbortSignal.timeout(uploadTimeout)
+        }
+      } catch { /* Node < 17.3 */ }
+      const uploadHeaders = form.getHeaders()
+      // Uma tentativa por volta do loop: o stream precisa ser recriado a cada retry.
+      const res = await fetchWithRetry(uploadUrl, {
+        method: 'POST',
+        body: form,
+        headers: uploadHeaders,
+        ...(signal && { signal }),
+      }, { maxAttempts: 1 })
+      const text = await res.text().catch(() => '')
+      let data = null
+      try { data = text ? JSON.parse(text) : null } catch { data = null }
+      logUltramsgRequest({
+        method: 'POST',
+        url: uploadUrl,
+        headers: { ...uploadHeaders, token: maskToken(cfg.token) },
+        body: {
+          file_original: safeFilename,
+          file_upload: uploadFilename,
+          token: maskToken(cfg.token),
+          attempt,
+          maxAttempts,
+        },
+        responseStatus: res.status,
+        responseData: data,
+        responseText: text,
+      })
+      if (!res.ok) {
+        const err = data?.error || data?.message || `HTTP ${res.status}`
+        lastError = err
+        if (attempt < maxAttempts && isRetriableUploadHttpStatus(res.status)) {
+          const delay = Math.min(baseDelayMs * Math.pow(2, attempt - 1), 4000)
+          console.warn('[ULTRAMSG] uploadMedia retry:', {
+            attempt,
+            maxAttempts,
+            status: res.status,
+            delay,
+            file: safeFilename?.slice(-20),
+          })
+          if (delay > 0) await sleep(delay)
+          continue
+        }
+        console.warn('❌ UltraMsg uploadMedia falhou:', safeFilename?.slice(-20), err, '| token:', maskToken(cfg.token))
+        return { ok: false, url: null, error: err }
       }
-    } catch { /* Node < 17.3 */ }
-    const uploadUrl = `${cfg.basePath}/media/upload`
-    const uploadHeaders = form.getHeaders()
-    const res = await fetchWithRetry(uploadUrl, {
-      method: 'POST',
-      body: form,
-      headers: uploadHeaders,
-      ...(signal && { signal })
-    }, { maxAttempts: 1 })
-    const text = await res.text().catch(() => '')
-    let data = null
-    try { data = text ? JSON.parse(text) : null } catch { data = null }
-    logUltramsgRequest({
-      method: 'POST',
-      url: uploadUrl,
-      headers: { ...uploadHeaders, token: maskToken(cfg.token) },
-      body: { file_original: safeFilename, file_upload: uploadFilename, token: maskToken(cfg.token) },
-      responseStatus: res.status,
-      responseData: data,
-      responseText: text
-    })
-    if (!res.ok) {
-      const err = data?.error || data?.message || `HTTP ${res.status}`
-      console.warn('❌ UltraMsg uploadMedia falhou:', safeFilename?.slice(-20), err, '| token:', maskToken(cfg.token))
-      return { ok: false, url: null, error: err }
+      if (data?.error) {
+        const err = typeof data.error === 'string' ? data.error : JSON.stringify(data.error)
+        // Erro semântico no body (formato/token): não retentar — não é transitório.
+        console.warn('❌ UltraMsg uploadMedia respondeu erro no body:', safeFilename?.slice(-20), err, '| token:', maskToken(cfg.token))
+        return { ok: false, url: null, error: err }
+      }
+      const url = data?.url || data?.link || data?.file || null
+      if (!url) {
+        const err = data?.message || text?.slice(0, 200) || 'Upload sem URL retornada pela UltraMsg'
+        lastError = err
+        if (attempt < maxAttempts) {
+          const delay = Math.min(baseDelayMs * Math.pow(2, attempt - 1), 4000)
+          if (delay > 0) await sleep(delay)
+          continue
+        }
+        return { ok: false, url: null, error: err }
+      }
+      return { ok: true, url, error: null }
+    } catch (e) {
+      lastError = e?.message || 'Erro no upload'
+      if (attempt < maxAttempts && isRetriableUploadError(e)) {
+        const delay = Math.min(baseDelayMs * Math.pow(2, attempt - 1), 4000)
+        console.warn('[ULTRAMSG] uploadMedia retry (rede/timeout):', {
+          attempt,
+          maxAttempts,
+          delay,
+          error: lastError,
+          file: safeFilename?.slice(-20),
+        })
+        if (delay > 0) await sleep(delay)
+        continue
+      }
+      console.warn('[ULTRAMSG] uploadMedia:', e?.message || e, '| token:', maskToken(cfg.token))
+      return { ok: false, url: null, error: lastError }
     }
-    if (data?.error) {
-      const err = typeof data.error === 'string' ? data.error : JSON.stringify(data.error)
-      console.warn('❌ UltraMsg uploadMedia respondeu erro no body:', safeFilename?.slice(-20), err, '| token:', maskToken(cfg.token))
-      return { ok: false, url: null, error: err }
-    }
-    const url = data?.url || data?.link || data?.file || null
-    if (!url) {
-      const err = data?.message || text?.slice(0, 200) || 'Upload sem URL retornada pela UltraMsg'
-      return { ok: false, url: null, error: err }
-    }
-    return { ok: true, url, error: null }
-  } catch (e) {
-    console.warn('[ULTRAMSG] uploadMedia:', e?.message || e, '| token:', maskToken(cfg.token))
-    return { ok: false, url: null, error: e?.message || 'Erro no upload' }
   }
+
+  return { ok: false, url: null, error: lastError || 'Erro no upload' }
 }
 
 /**

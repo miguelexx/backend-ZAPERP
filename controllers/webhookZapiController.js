@@ -2223,7 +2223,23 @@ exports.receberZapi = async (req, res) => {
           if (bestNome && decision === 'updated') cacheUpdates.nome_contato_cache = bestNome
         }
         const fotoCacheVazia = !convAtual?.foto_perfil_contato_cache || !String(convAtual.foto_perfil_contato_cache).trim()
-        if (fotoCacheVazia && senderPhoto && String(senderPhoto).trim()) cacheUpdates.foto_perfil_contato_cache = String(senderPhoto).trim()
+        if (fotoCacheVazia && senderPhoto && String(senderPhoto).trim().startsWith('http')) {
+          // Preferir foto já estável em clientes antes da URL fresca do sync (evita gravar foto errada/CDN).
+          let fotoParaCache = String(senderPhoto).trim()
+          if (cliente_id) {
+            try {
+              const { data: cliFoto } = await supabase
+                .from('clientes')
+                .select('foto_perfil')
+                .eq('id', cliente_id)
+                .eq('company_id', company_id)
+                .maybeSingle()
+              const existente = cliFoto?.foto_perfil ? String(cliFoto.foto_perfil).trim() : ''
+              if (existente.startsWith('http')) fotoParaCache = existente
+            } catch (_) {}
+          }
+          cacheUpdates.foto_perfil_contato_cache = fotoParaCache
+        }
         if (Object.keys(cacheUpdates).length > 0) {
           await supabase.from('conversas')
             .update(cacheUpdates)
