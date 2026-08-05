@@ -383,6 +383,13 @@ describe('fromMe reconcile helpers', () => {
     expect(whatsappIdCompativelParaReconcile(row, '99999')).toBe(false)
   })
 
+  test('whatsappIdCompativelParaReconcile: sid hex equivalente a false_jid_sid', () => {
+    const sid = '3EB0C767D0A4F1B2A9C8D5E6'
+    const row = { id: 1, whatsapp_id: sid }
+    expect(whatsappIdCompativelParaReconcile(row, `false_5511999999999@c.us_${sid}`)).toBe(true)
+    expect(whatsappIdCompativelParaReconcile(row, '3EB0AAAAAAAAAAAAAAAAAAAA')).toBe(false)
+  })
+
   test('filterRowsForFromMeReconcile inclui null e fila, exclui id real', () => {
     const rows = [
       { id: 1, whatsapp_id: null },

@@ -5,6 +5,9 @@
  * whatsapp_instance_id so gerava falso negativo quando um dos lados estava null:
  * o eco nao casava com a linha original e acabava virando mensagem duplicada no banco.
  * Divergencia real de instancia (ambos os lados conhecidos) continua bloqueada.
+ *
+ * Quando a linha ja tem outro whatsapp_id real distinto: absorve o eco (retorna a
+ * linha, evita INSERT) sem sobrescrever o id canonico (ACK/delete/reacao).
  */
 
 const { _test } = require('../controllers/webhookZapiController')
@@ -119,11 +122,12 @@ test('reconcilia normalmente quando as duas instancias coincidem', async () => {
   expect(resultado?.id).toBe(777)
 })
 
-test('nao reconcilia quando a linha ja tem outro whatsapp_id real', async () => {
+test('absorve eco quando a linha ja tem outro whatsapp_id real (sem overwrite)', async () => {
+  const idAtual = '3EB0AAAAAAAAAAAAAAAAAAAA'
   const supabase = fakeSupabase({
     ...rowBase,
     whatsapp_instance_id: 3,
-    whatsapp_id: '3EB0AAAAAAAAAAAAAAAAAAAA',
+    whatsapp_id: idAtual,
   })
 
   const resultado = await tryReconcileFromMeByCrmReferenceId(supabase, {
@@ -134,7 +138,32 @@ test('nao reconcilia quando a linha ja tem outro whatsapp_id real', async () => 
     whatsappIdStr: WA_ID_REAL,
   })
 
-  expect(resultado).toBeNull()
+  // referenceId prova identidade: nao INSERT (retorna a linha), mas nao troca o id canonico.
+  expect(resultado?.id).toBe(777)
+  expect(resultado?.whatsapp_id).toBe(idAtual)
+  expect(supabase.updateChain.updates).toBeNull()
+})
+
+test('reconcilia sid hex com id composto false_jid_sid (mesmo envio)', async () => {
+  const sid = '3EB0C767D0A4F1B2A9C8D5E6'
+  const composto = `false_5511999999999@c.us_${sid}`
+  const supabase = fakeSupabase({
+    ...rowBase,
+    whatsapp_instance_id: 3,
+    whatsapp_id: sid,
+    status: 'sent',
+  })
+
+  const resultado = await tryReconcileFromMeByCrmReferenceId(supabase, {
+    company_id: 10,
+    conversa_id: 55,
+    whatsapp_instance_id: 3,
+    payload: { referenceId: 'crm-777' },
+    whatsappIdStr: composto,
+  })
+
+  expect(resultado?.id).toBe(777)
+  expect(supabase.updateChain.updates.whatsapp_id).toBe(composto)
 })
 
 test('ignora payload sem referenceId crm', async () => {

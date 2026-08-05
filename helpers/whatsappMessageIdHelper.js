@@ -66,6 +66,36 @@ function isReconcilablePendingWhatsappId(whatsappId) {
   return isUltramsgNumericQueueId(s)
 }
 
+/**
+ * Extrai o SID UltraMSG quando o id vem completo (false_jid@c.us_SID) ou como hex puro.
+ * Usado para equivalência sid ↔ false_…_sid (mesmo envio, formatos diferentes).
+ */
+function extractUltramsgSid(waId) {
+  const s = String(waId || '').trim()
+  if (!s) return null
+  const composed = s.match(/^(?:false|true)_.+?@[^_]+_(.+)$/i)
+  if (composed) return String(composed[1] || '').trim() || null
+  if (/^[A-F0-9]{12,}$/i.test(s)) return s
+  return null
+}
+
+/** True quando dois ids representam o mesmo envio UltraMSG (string igual ou sid equivalente). */
+function areEquivalentWhatsAppIds(a, b) {
+  const x = String(a || '').trim()
+  const y = String(b || '').trim()
+  if (!x || !y) return false
+  if (x === y) return true
+  const sx = extractUltramsgSid(x)
+  const sy = extractUltramsgSid(y)
+  if (sx && sy && sx.toLowerCase() === sy.toLowerCase()) return true
+  if (x.length !== y.length) {
+    const longer = x.length > y.length ? x : y
+    const shorter = x.length > y.length ? y : x
+    if (shorter.length >= 12 && longer.toLowerCase().endsWith(`_${shorter.toLowerCase()}`)) return true
+  }
+  return false
+}
+
 module.exports = {
   isRealWhatsAppId,
   extractUltraMsgMessageId,
@@ -73,4 +103,6 @@ module.exports = {
   buildCrmReferenceId,
   parseCrmReferenceMensagemId,
   isReconcilablePendingWhatsappId,
+  extractUltramsgSid,
+  areEquivalentWhatsAppIds,
 }

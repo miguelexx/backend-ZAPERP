@@ -56,6 +56,7 @@ const {
   isUltramsgNumericQueueId,
   parseCrmReferenceMensagemId,
   isReconcilablePendingWhatsappId,
+  areEquivalentWhatsAppIds,
 } = require('../helpers/whatsappMessageIdHelper')
 const {
   STATUS_RANK,
@@ -250,6 +251,8 @@ function whatsappIdCompativelParaReconcile(row, whatsappId) {
   const alvo = whatsappId != null ? String(whatsappId).trim() : ''
   if (!atual || !alvo) return true
   if (atual === alvo) return true
+  // Mesmo envio UltraMSG em formatos diferentes (sid hex vs false_jid@c.us_sid).
+  if (areEquivalentWhatsAppIds(atual, alvo)) return true
   // CRM pode ter guardado id de fila UltraMSG (ex: 35096); webhook traz id real do WhatsApp.
   if (isUltramsgNumericQueueId(atual) && !isUltramsgNumericQueueId(alvo)) return true
   return false
@@ -284,7 +287,7 @@ async function tryReconcileFromMeByCrmReferenceId(supabase, {
       .eq('id', crmMsgId)
       .eq('direcao', 'out')
     const { data: row } = await q.maybeSingle()
-    if (!row?.id || !whatsappIdCompativelParaReconcile(row, whatsappIdStr)) return null
+    if (!row?.id) return null
     // Divergencia real de instancia (ambos conhecidos) segue bloqueada: nao misturar instancias.
     if (
       whatsapp_instance_id &&
@@ -293,12 +296,33 @@ async function tryReconcileFromMeByCrmReferenceId(supabase, {
     ) {
       return null
     }
-    const updates = { whatsapp_id: whatsappIdStr }
+
+    const idsCompat = whatsappIdCompativelParaReconcile(row, whatsappIdStr)
+    const updates = {}
+    // referenceId crm-{id} e identidade forte: absorve o eco sem INSERT.
+    // So promove whatsapp_id quando e promocao segura (null/fila→real ou formatos equivalentes).
+    // IDs reais genuinamente distintos: nao sobrescreve o canonico (ACK/delete/reacao).
+    if (idsCompat) {
+      updates.whatsapp_id = whatsappIdStr
+    } else {
+      console.warn('[Z-API] fromMe reconcile referenceId: IDs divergentes, absorvendo eco sem overwrite', {
+        mensagem_id: row.id,
+        referenceId: getCrmReferenceIdFromPayload(payload),
+        whatsapp_id_atual: String(row.whatsapp_id || '').slice(0, 40),
+        whatsapp_id_webhook: String(whatsappIdStr).slice(0, 40),
+      })
+    }
+
     const ackStatus = normalizeRawAckStatus(statusPayload ?? payload?.status ?? payload?.ack)
     if (ackStatus && statusRank(ackStatus) >= statusRank(row.status || row.status_mensagem || 'pending')) {
       updates.status = ackStatus
       updates.status_mensagem = ackStatus
     }
+
+    if (Object.keys(updates).length === 0) {
+      return row
+    }
+
     const { data: updated } = await supabase
       .from('mensagens')
       .update(updates)
@@ -311,6 +335,7 @@ async function tryReconcileFromMeByCrmReferenceId(supabase, {
         mensagem_id: row.id,
         referenceId: getCrmReferenceIdFromPayload(payload),
         whatsapp_id: String(whatsappIdStr).slice(0, 24),
+        ids_compat: idsCompat,
       })
     }
     return updated || row
@@ -2764,9 +2789,13 @@ exports.receberZapi = async (req, res) => {
         }
 
         if (tempExistente) {
-          // Atualizar com o whatsapp_id real
+          // Atualizar com o whatsapp_id real apenas quando a promoção é segura.
+          // referenceId pode ter absorvido o eco sem overwrite — não reescrever o id canônico aqui.
           try {
-            const updateFromMe = { whatsapp_id: whatsappIdStr }
+            const updateFromMe = {}
+            if (whatsappIdCompativelParaReconcile(tempExistente, whatsappIdStr)) {
+              updateFromMe.whatsapp_id = whatsappIdStr
+            }
             const ackStatus = normalizeRawAckStatus(payload?.status ?? payload?.ack)
             if (ackStatus && statusRank(ackStatus) >= statusRank(tempExistente.status || tempExistente.status_mensagem || 'pending')) {
               updateFromMe.status = ackStatus
@@ -2779,14 +2808,18 @@ exports.receberZapi = async (req, res) => {
               else if (videoUrl) { updateFromMe.url = videoUrl; updateFromMe.tipo = 'video' }
               else if (stickerUrl) { updateFromMe.url = stickerUrl; updateFromMe.tipo = 'sticker' }
             }
-            const { data: updatedMsg } = await supabase
-              .from('mensagens')
-              .update(updateFromMe)
-              .eq('company_id', company_id)
-              .eq('id', tempExistente.id)
-              .select(WEBHOOK_MSG_SELECT)
-              .single()
-            existente = updatedMsg || tempExistente
+            if (Object.keys(updateFromMe).length === 0) {
+              existente = tempExistente
+            } else {
+              const { data: updatedMsg } = await supabase
+                .from('mensagens')
+                .update(updateFromMe)
+                .eq('company_id', company_id)
+                .eq('id', tempExistente.id)
+                .select(WEBHOOK_MSG_SELECT)
+                .single()
+              existente = updatedMsg || tempExistente
+            }
           } catch (e) {
             console.warn('Erro ao atualizar whatsapp_id:', e.message)
             existente = tempExistente
@@ -3004,7 +3037,10 @@ exports.receberZapi = async (req, res) => {
         }
 
         if (cand?.id) {
-          const updates = { whatsapp_id: whatsappIdStr }
+          const updates = {}
+          if (whatsappIdCompativelParaReconcile(cand, whatsappIdStr)) {
+            updates.whatsapp_id = whatsappIdStr
+          }
           const ackStatus = normalizeRawAckStatus(statusPayload ?? payload?.status ?? payload?.ack)
           if (ackStatus && statusRank(ackStatus) >= statusRank(cand.status || 'pending')) {
             updates.status = ackStatus
@@ -3012,18 +3048,24 @@ exports.receberZapi = async (req, res) => {
           }
           if (webhookReplyMeta && !cand.reply_meta) updates.reply_meta = webhookReplyMeta
 
-          const { data: patched, error: patchErr } = await supabase
-            .from('mensagens')
-            .update(updates)
-            .eq('company_id', company_id)
-            .eq('id', cand.id)
-            .select(WEBHOOK_MSG_SELECT)
-            .single()
+          if (Object.keys(updates).length === 0) {
+            mensagemSalva = cand
+          } else {
+            const { data: patched, error: patchErr } = await supabase
+              .from('mensagens')
+              .update(updates)
+              .eq('company_id', company_id)
+              .eq('id', cand.id)
+              .select(WEBHOOK_MSG_SELECT)
+              .single()
 
-          if (!patchErr && patched) {
-            mensagemSalva = patched
-          } else if (patchErr) {
-            console.warn('⚠️ fromMe reconcile: falha ao atualizar candidato:', patchErr?.message)
+            if (!patchErr && patched) {
+              mensagemSalva = patched
+            } else if (patchErr) {
+              console.warn('⚠️ fromMe reconcile: falha ao atualizar candidato:', patchErr?.message)
+            } else {
+              mensagemSalva = cand
+            }
           }
         }
         }

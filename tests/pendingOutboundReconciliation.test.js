@@ -3,6 +3,8 @@ const {
   isUltramsgNumericQueueId,
   buildCrmReferenceId,
   extractUltraMsgMessageId,
+  areEquivalentWhatsAppIds,
+  extractUltramsgSid,
 } = require('../helpers/whatsappMessageIdHelper')
 const { _test } = require('../services/pendingOutboundReconciliationService')
 
@@ -28,6 +30,15 @@ describe('whatsappMessageIdHelper', () => {
 
   test('extractUltraMsgMessageId', () => {
     expect(extractUltraMsgMessageId({ id: 'BAE543FE1CE17AFA', status: 'sent' })).toBe('BAE543FE1CE17AFA')
+  })
+
+  test('areEquivalentWhatsAppIds casa sid com false_jid_sid', () => {
+    const sid = '3EB0C767D0A4F1B2A9C8D5E6'
+    const full = `false_5511999999999@c.us_${sid}`
+    expect(areEquivalentWhatsAppIds(sid, full)).toBe(true)
+    expect(areEquivalentWhatsAppIds(full, sid)).toBe(true)
+    expect(extractUltramsgSid(full)).toBe(sid)
+    expect(areEquivalentWhatsAppIds(sid, '3EB0AAAAAAAAAAAAAAAAAAAA')).toBe(false)
   })
 })
 
