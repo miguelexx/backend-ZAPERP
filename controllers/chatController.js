@@ -5836,15 +5836,9 @@ exports.enviarMensagemChat = async (req, res) => {
         io.EVENTS?.NOVA_MENSAGEM || 'nova_mensagem',
         novaMsgPayload
       )
-      // Atualizar sidebar (preview) sem disparar refetch que causa duplicação
+      // Atualizar sidebar (preview) sem disparar refetch que causa duplicação.
+      // Não reenviar foto_perfil: cache e cliente.foto_perfil podem diferir (CDN) e o card “pula”.
       let contatoNome = conversa?.nome_contato_cache ? String(conversa.nome_contato_cache).trim() : null
-      let fotoPerfil = conversa?.foto_perfil_contato_cache ? String(conversa.foto_perfil_contato_cache).trim() : null
-      if (!fotoPerfil && conversa?.cliente_id) {
-        try {
-          const { data: cli } = await supabase.from('clientes').select('foto_perfil').eq('id', conversa.cliente_id).eq('company_id', company_id).maybeSingle()
-          if (cli?.foto_perfil) fotoPerfil = String(cli.foto_perfil).trim()
-        } catch (_) {}
-      }
       const telefoneParaPayload = conversa?.telefone && !String(conversa.telefone).startsWith('lid:') ? String(conversa.telefone).trim() : null
       const whatsappInstanceMetaMap = await loadWhatsappInstanceMetaMap(company_id, [whatsappInstanceId])
       const whatsappInstanceMeta = safeWhatsappInstanceMeta(whatsappInstanceMetaMap.get(Number(whatsappInstanceId)))
@@ -5857,7 +5851,6 @@ exports.enviarMensagemChat = async (req, res) => {
         ...(telefoneParaPayload ? { telefone: telefoneParaPayload } : {}),
         ...(conversa?.cliente_id != null ? { cliente_id: conversa.cliente_id } : {}),
         ...(contatoNome ? { nome_contato_cache: contatoNome, contato_nome: contatoNome } : {}),
-        ...(fotoPerfil ? { foto_perfil_contato_cache: fotoPerfil, foto_perfil: fotoPerfil } : {}),
         ultima_mensagem_preview: {
           texto: basePayload.texto,
           criado_em: novaMsgPayload.criado_em,
