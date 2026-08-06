@@ -17,8 +17,11 @@ const {
   audioExtensionFromFilename,
   resolveInboundAudioExtension,
   contentTypeForAudioPath,
+  contentTypeFromAudioMagicBytes,
 } = require('../helpers/audioFormatSniffer')
 const { _test } = require('../services/inboundMediaPersistenceService')
+const { _test: mediaProxyTest } = require('../controllers/mediaProxyController')
+const { _test: webhookTest } = require('../controllers/webhookZapiController')
 
 const ffmpegPath = require('ffmpeg-static')
 
@@ -254,6 +257,79 @@ test('containers ambíguos e não-áudio ficam com o tipo padrão do express.sta
   for (const p of ['/uploads/x.webm', '/uploads/x.3gp', '/uploads/x.mp4', '/uploads/x.jpg', '/uploads/x.pdf']) {
     assert.equal(contentTypeForAudioPath(p), null, p)
   }
+})
+
+test('proxy remoto: magic bytes definem Content-Type quando upstream é octet-stream (OGG/M4A/MP3/WebM)', () => {
+  const urlSemExt = 'https://ultramsgmedia.s3.amazonaws.com/instance/abc/audio'
+  assert.equal(
+    mediaProxyTest.resolveContentType('application/octet-stream', urlSemExt, 'audio', amostras.ogg),
+    'audio/ogg'
+  )
+  assert.equal(
+    mediaProxyTest.resolveContentType('application/octet-stream', urlSemExt, '', amostras.m4a),
+    'audio/mp4'
+  )
+  assert.equal(
+    mediaProxyTest.resolveContentType('binary/octet-stream', urlSemExt, 'audio', amostras.mp3),
+    'audio/mpeg'
+  )
+  assert.equal(
+    mediaProxyTest.resolveContentType('application/octet-stream', urlSemExt, 'audio', amostras.webm),
+    'audio/webm'
+  )
+})
+
+test('proxy remoto: Content-Type específico do upstream é preservado (sem sniff)', () => {
+  assert.equal(
+    mediaProxyTest.resolveContentType('audio/ogg; codecs=opus', 'https://cdn.example/x', 'audio', amostras.m4a),
+    'audio/ogg'
+  )
+})
+
+test('proxy remoto: sem assinatura, mantém fallback filename/URL/octet-stream', () => {
+  const opaco = Buffer.alloc(64, 0x5a)
+  assert.equal(
+    mediaProxyTest.resolveContentType('application/octet-stream', 'https://cdn.example/voz.mp3', '', opaco),
+    'audio/mpeg'
+  )
+  assert.equal(
+    mediaProxyTest.resolveContentType('application/octet-stream', 'https://cdn.example/uuid-sem-ext', 'audio', opaco),
+    'application/octet-stream'
+  )
+  assert.equal(
+    mediaProxyTest.resolveContentType('application/octet-stream', 'https://cdn.example/uuid-sem-ext', '', null),
+    'application/octet-stream'
+  )
+})
+
+test('contentTypeFromAudioMagicBytes cobre Android OGG, iPhone M4A, MP3 e WebM', () => {
+  assert.equal(contentTypeFromAudioMagicBytes(amostras.ogg), 'audio/ogg')
+  assert.equal(contentTypeFromAudioMagicBytes(amostras.m4a), 'audio/mp4')
+  assert.equal(contentTypeFromAudioMagicBytes(amostras.mp3), 'audio/mpeg')
+  assert.equal(contentTypeFromAudioMagicBytes(amostras.webm), 'audio/webm')
+  assert.equal(contentTypeFromAudioMagicBytes(Buffer.alloc(64, 0)), null)
+})
+
+test('fallback de insert webhook preserva tipo e url da mídia', () => {
+  const base = { conversa_id: 1, texto: '(áudio)', direcao: 'in', company_id: 7 }
+  const withMedia = webhookTest.preserveMediaFieldsOnWebhookFallback(
+    { ...base },
+    { tipo: 'audio', url: 'https://ultramsgmedia.s3.amazonaws.com/a/audio', nome_arquivo: 'audio' }
+  )
+  assert.equal(withMedia.tipo, 'audio')
+  assert.equal(withMedia.url, 'https://ultramsgmedia.s3.amazonaws.com/a/audio')
+  assert.equal(withMedia.nome_arquivo, 'audio')
+
+  const uploads = webhookTest.preserveMediaFieldsOnWebhookFallback(
+    { ...base },
+    { tipo: 'voice', url: '/uploads/inbound-c7-m1-abc.ogg', nome_arquivo: 'inbound-c7-m1-abc.ogg' }
+  )
+  assert.equal(uploads.tipo, 'voice')
+  assert.equal(uploads.url, '/uploads/inbound-c7-m1-abc.ogg')
+
+  const semMidia = webhookTest.preserveMediaFieldsOnWebhookFallback({ ...base }, { texto: 'oi' })
+  assert.equal(semMidia.tipo, undefined)
+  assert.equal(semMidia.url, undefined)
 })
 
 /**

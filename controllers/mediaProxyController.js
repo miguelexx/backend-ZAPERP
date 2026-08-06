@@ -4,6 +4,7 @@
  */
 
 const { isAllowedInboundMediaUrl: isAllowedMediaUrl } = require('../helpers/allowedInboundMediaUrl')
+const { contentTypeFromAudioMagicBytes } = require('../helpers/audioFormatSniffer')
 
 const MAX_BYTES = 80 * 1024 * 1024 // 80 MB (impressão / preview)
 const FETCH_TIMEOUT_MS = Math.max(1000, Number(process.env.MEDIA_PROXY_TIMEOUT_MS) || 30000)
@@ -59,6 +60,11 @@ const MIME_BY_EXT = {
 
 const INLINE_MIME_PREFIXES = ['image/', 'video/', 'audio/']
 const INLINE_MIME_EXACT = new Set(['application/pdf'])
+const GENERIC_CONTENT_TYPES = new Set([
+  '',
+  'application/octet-stream',
+  'binary/octet-stream',
+])
 
 /**
  * Tenta determinar o MIME type a partir de um nome de arquivo ou path de URL.
@@ -87,19 +93,32 @@ function filenameFromUrlPath(urlStr) {
 }
 
 /**
- * Garante que o Content-Type não seja genérico quando temos a extensão disponível.
- * Retorna o MIME original se já for específico, ou o derivado da extensão.
+ * Content-Type para resposta do proxy.
+ * 1) Upstream específico → mantém
+ * 2) Upstream genérico + magic bytes de áudio → CT correto (OGG/M4A/MP3/WebM…)
+ * 3) Senão → filename/URL (comportamento anterior)
+ * 4) Senão → octet-stream
+ *
+ * @param {string|null} upstreamCt
+ * @param {string} urlStr
+ * @param {string} filename
+ * @param {Buffer} [buffer]
  */
-function resolveContentType(upstreamCt, urlStr, filename) {
+function resolveContentType(upstreamCt, urlStr, filename, buffer) {
   const ct = String(upstreamCt || '').trim().split(';')[0].trim()
-  const isGeneric = !ct || ct === 'application/octet-stream' || ct === 'binary/octet-stream'
+  const isGeneric = GENERIC_CONTENT_TYPES.has(ct.toLowerCase())
   if (!isGeneric) return ct
 
-  // Tenta resolver pelo filename do parâmetro (maior prioridade)
+  // Bytes reais primeiro — UltraMSG/S3 costuma mandar octet-stream sem extensão no path.
+  if (buffer) {
+    const fromBytes = contentTypeFromAudioMagicBytes(buffer)
+    if (fromBytes) return fromBytes
+  }
+
+  // Fallback idêntico ao comportamento anterior (filename → path da URL → genérico).
   const fromFilename = mimeFromFilename(filename)
   if (fromFilename) return fromFilename
 
-  // Tenta resolver pela extensão no path da URL upstream
   const fromUrl = mimeFromFilename(filenameFromUrlPath(urlStr))
   if (fromUrl) return fromUrl
 
@@ -189,11 +208,13 @@ exports.proxyMedia = async (req, res) => {
       return res.status(413).json({ error: 'Arquivo muito grande' })
     }
 
-    // Resolve Content-Type: prioriza upstream específico; fallback por extensão do filename/URL
+    const body = Buffer.from(arrayBuffer)
+    // Resolve Content-Type: upstream específico, senão magic bytes (áudio), senão filename/URL.
     const ct = resolveContentType(
       upstream.headers.get('content-type'),
       target.href,
-      filenameParam
+      filenameParam,
+      body
     )
 
     // Resolve filename para o Content-Disposition
@@ -225,7 +246,7 @@ exports.proxyMedia = async (req, res) => {
 
     // Sempre arquivo completo (200). Honrar Range com 206 quebrou OGG/Opus no Chrome
     // (seek/resume com pedaço). Mantém Accept-Ranges como antes deste experimento.
-    return res.status(200).send(Buffer.from(arrayBuffer))
+    return res.status(200).send(body)
   } catch (e) {
     const timedOut = e?.name === 'AbortError'
     console.error('[mediaProxy] fetch:', timedOut ? 'timeout' : (e?.message || e))
@@ -233,4 +254,11 @@ exports.proxyMedia = async (req, res) => {
   } finally {
     clearTimeout(timeout)
   }
+}
+
+/** Helpers puros para testes de regressão (não alteram o fluxo HTTP). */
+exports._test = {
+  resolveContentType,
+  mimeFromFilename,
+  filenameFromUrlPath,
 }

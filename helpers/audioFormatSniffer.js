@@ -183,6 +183,23 @@ function contentTypeForAudioPath(pathOrExt) {
   return UNAMBIGUOUS_AUDIO_CONTENT_TYPE[ext] || null
 }
 
+/**
+ * Content-Type a partir dos primeiros bytes (proxy de URL remota UltraMSG).
+ * Inclui webm/3gp como audio/* — no proxy o CT upstream costuma ser genérico e sem extensão no path;
+ * sem isso o browser não toca. Em /uploads use contentTypeForAudioPath (webm/3gp ficam de fora).
+ * @param {Buffer} buffer
+ * @returns {string|null} null = formato não identificado (caller mantém comportamento atual)
+ */
+function contentTypeFromAudioMagicBytes(buffer) {
+  const ext = sniffAudioExtension(buffer)
+  if (!ext) return null
+  const unambiguous = UNAMBIGUOUS_AUDIO_CONTENT_TYPE[ext]
+  if (unambiguous) return unambiguous
+  if (ext === 'webm') return 'audio/webm'
+  if (ext === '3gp') return 'audio/3gpp'
+  return null
+}
+
 module.exports = {
   SUPPORTED_AUDIO_EXTENSIONS,
   sniffAudioExtension,
@@ -190,4 +207,5 @@ module.exports = {
   audioExtensionFromFilename,
   resolveInboundAudioExtension,
   contentTypeForAudioPath,
+  contentTypeFromAudioMagicBytes,
 }

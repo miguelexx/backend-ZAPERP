@@ -96,6 +96,18 @@ function isLocalUploadMediaUrl(url) {
   return String(url || '').trim().startsWith('/uploads/')
 }
 
+/**
+ * No fallback de insert (erro de schema), nunca descartar tipo/url/nome da mídia já montados.
+ * Mutates and returns fallbackPayload.
+ */
+function preserveMediaFieldsOnWebhookFallback(fallbackPayload, insertMsg) {
+  if (!fallbackPayload || !insertMsg || typeof insertMsg !== 'object') return fallbackPayload
+  if (insertMsg.tipo) fallbackPayload.tipo = insertMsg.tipo
+  if (insertMsg.url) fallbackPayload.url = insertMsg.url
+  if (insertMsg.nome_arquivo) fallbackPayload.nome_arquivo = insertMsg.nome_arquivo
+  return fallbackPayload
+}
+
 function applyWhatsappInstanceFilter(query, whatsappInstanceId) {
   if (!query || !whatsappInstanceId) return query
   return query.eq('whatsapp_instance_id', whatsappInstanceId)
@@ -3214,6 +3226,20 @@ exports.receberZapi = async (req, res) => {
         if (audioUrl) {
           insertMsg.url = audioUrl
           insertMsg.nome_arquivo = fileName || (type === 'ptt' ? 'voice.ogg' : 'audio')
+        } else {
+          console.warn('[webhook] áudio inbound sem URL de mídia:', {
+            company_id,
+            conversa_id,
+            whatsapp_id: whatsappIdStr || null,
+            whatsapp_instance_id: whatsapp_instance_id || null,
+            type,
+            fromMe,
+            fileName: fileName || null,
+            hasImageUrl: !!imageUrl,
+            hasDocumentUrl: !!documentUrl,
+            hasVideoUrl: !!videoUrl,
+            hasStickerUrl: !!stickerUrl,
+          })
         }
       } else if (type === 'video' && videoUrl) {
         insertMsg.tipo = 'video'
@@ -3342,6 +3368,8 @@ exports.receberZapi = async (req, res) => {
             whatsapp_id: whatsappIdStr || null,
             criado_em
           }
+          // Nunca remover tipo/url/caminho da mídia já resolvidos no insertMsg.
+          preserveMediaFieldsOnWebhookFallback(fallbackPayload, insertMsg)
           if (isGroup && senderName) fallbackPayload.remetente_nome = senderName
           if (isGroup && participantPhone) fallbackPayload.remetente_telefone = participantPhone
           let fallback = await supabase.from('mensagens').insert(fallbackPayload).select(WEBHOOK_MSG_SELECT).single()
@@ -4211,4 +4239,5 @@ exports._test = {
   filterRowsForFromMeReconcile,
   findFromMeOutboundMediaCandidate,
   tryReconcileFromMeByCrmReferenceId,
+  preserveMediaFieldsOnWebhookFallback,
 }
