@@ -72,6 +72,12 @@ const foraHorarioInFlight = new Set()
 const FORA_HORARIO_IDEMPOTENCIA_MS = 10_000
 
 /**
+ * Lock específico da seleção de setor (claim antes de transferir/confirmar).
+ * Evita race de webhooks paralelos confirmando setores diferentes.
+ */
+const optionSelectInFlight = new Set()
+
+/**
  * Instant em que o menu (boas-vindas ou reenvio) foi efetivamente persistido/enviado no servidor.
  * Usado para não disparar "opção inválida" em rajadas de "oi" logo após o menu, quando o timestamp
  * do WhatsApp não bate com bot_logs ou cai em Date.now() por payload incompleto.
@@ -79,6 +85,12 @@ const FORA_HORARIO_IDEMPOTENCIA_MS = 10_000
 const lastMenuEnviadoServerAt = new Map()
 /** Após este ms desde o envio do menu, volta a valer "opção inválida" para texto não numérico. */
 const POS_MENU_OPCAO_INVALIDA_GRACE_MS = 8_000
+
+/** Normaliza conversa_id para chave de Map/Set (evita "123" vs 123 furarem debounce/lock). */
+function conversaLockKey(conversa_id) {
+  const n = Number(conversa_id)
+  return Number.isFinite(n) && n > 0 ? n : String(conversa_id || '')
+}
 
 /** Texto só com dígitos = tentativa de escolher opção do menu (válida ou não). Saudações em rajada não casam. */
 function pareceTentativaOpcaoSoNumeros(texto) {
@@ -497,7 +509,13 @@ async function resetChatbotStateForConversa(supabaseClient, company_id, conversa
       return
     }
     console.log('[chatbotTriage] 🔄 Estado do chatbot resetado para conversa reaberta', { conversa_id, company_id })
-    lastMenuEnviadoServerAt.delete(Number(conversa_id))
+    const cid = Number(conversa_id)
+    if (Number.isFinite(cid) && cid > 0) {
+      lastMenuEnviadoServerAt.delete(cid)
+      lastWelcomeSentAt.delete(cid)
+      lastOpcaoInvalidaSentAt.delete(cid)
+      lastForaHorarioSentAt.delete(cid)
+    }
   } catch (e) {
     console.warn('[chatbotTriage] resetChatbotStateForConversa:', e?.message || e)
   }
@@ -637,7 +655,28 @@ function looksLikeBotMessage(texto, config) {
   if (lower.includes('opção inválida') || lower.includes('opcao invalida')) return true
   if (config?.invalidOptionMessage && t.includes(config.invalidOptionMessage.slice(0, 40))) return true
   if (lower.includes('responda com o número') || lower.includes('responda apenas com o número')) return true
-  if (lower.includes('perfeito!') || lower.includes('seu atendimento foi direcionado')) return true
+  // Confirmação padrão e templates customizados ("Perfeito, você foi direcionado para…")
+  if (
+    lower.includes('perfeito!') ||
+    lower.includes('perfeito,') ||
+    lower.includes('seu atendimento foi direcionado') ||
+    lower.includes('você foi direcionado') ||
+    lower.includes('voce foi direcionado')
+  ) {
+    return true
+  }
+  if (config?.confirmSelectionMessage) {
+    const confHint = String(config.confirmSelectionMessage)
+      .replace(/\{\{departamento\}\}/gi, '')
+      .trim()
+      .slice(0, 40)
+      .toLowerCase()
+    if (confHint.length >= 12 && lower.includes(confHint)) return true
+  }
+  if (config?.welcomeMessage) {
+    const welcomeHint = String(config.welcomeMessage).trim().slice(0, 40).toLowerCase()
+    if (welcomeHint.length >= 12 && lower.includes(welcomeHint)) return true
+  }
   // Menu no painel costuma ser "1 - X" ou "1. X" / "1) X"; sem isso a última out parecia "humana" e bloqueava opção inválida
   const linhaMenuNumerada = /\d+\s*[-–—.\)]\s*[\w\sáàâãéèêíìîóòôõúùûç]+/i.test(t)
   const pareceSetorNoTexto =
@@ -650,11 +689,36 @@ function looksLikeBotMessage(texto, config) {
     lower.includes('suporte') ||
     lower.includes('comercial') ||
     lower.includes('administrativo') ||
+    lower.includes('crediário') ||
+    lower.includes('crediario') ||
     lower.includes('setor') ||
-    lower.includes('escolha')
+    lower.includes('escolha') ||
+    lower.includes('bem-vindo') ||
+    lower.includes('bem vindo')
   if (linhaMenuNumerada && pareceSetorNoTexto) return true
   if (config?.mensagemForaHorario && t.includes(String(config.mensagemForaHorario || '').slice(0, 30))) return true
   return false
+}
+
+/**
+ * Persiste mensagem outbound do bot e registra falha de insert (WA pode ter recebido mesmo assim).
+ */
+async function insertBotOutboundMensagem(supabaseClient, payload) {
+  const { data, error } = await supabaseClient
+    .from('mensagens')
+    .insert(payload)
+    .select('*')
+    .single()
+  if (error) {
+    console.error('[chatbotTriage] ❌ falha ao gravar mensagem outbound no ZapERP (WhatsApp pode ter recebido)', {
+      conversa_id: payload?.conversa_id,
+      company_id: payload?.company_id,
+      erro: error.message,
+      textoPreview: String(payload?.texto || '').slice(0, 80),
+    })
+    return null
+  }
+  return data
 }
 
 /**
@@ -958,15 +1022,26 @@ async function transferToDepartment(supabaseClient, company_id, conversa_id, dep
     }
   }
 
-  const { error } = await supabaseClient
+  const { data: updatedRow, error } = await supabaseClient
     .from('conversas')
     .update(updatePayload)
     .eq('id', conversa_id)
     .eq('company_id', company_id)
+    .is('departamento_id', null) // claim atômico: não sobrescreve setor já escolhido (race de webhooks)
+    .select('id, departamento_id')
+    .maybeSingle()
 
   if (error) {
     console.warn('[chatbotTriage] transferToDepartment:', error.message)
-    return { ok: false }
+    return { ok: false, reason: 'db_error' }
+  }
+  if (!updatedRow?.id) {
+    console.log('[chatbotTriage] transferToDepartment: setor já atribuído — claim ignorado', {
+      conversa_id,
+      company_id,
+      depIdTentativa: depId,
+    })
+    return { ok: false, reason: 'already_assigned', departamento_nome: dep.nome }
   }
 
   await supabaseClient.from('atendimentos').insert({
@@ -1103,6 +1178,66 @@ async function processIncomingMessage(ctx) {
     company_id,
     conversa_id,
     telefone,
+    sendMessage,
+    conversaReabertaAposFinalizacao = false,
+  } = ctx
+  
+  console.log('[chatbotTriage] 🤖 INÍCIO DO PROCESSAMENTO', {
+    company_id,
+    conversa_id,
+    telefone: String(telefone || '').slice(-8),
+    texto: String(ctx.texto || '').slice(0, 50),
+    conversaReabertaAposFinalizacao,
+    timestamp: new Date().toISOString()
+  })
+  
+  if (!company_id || !conversa_id || !telefone || !sendMessage) {
+    console.log('[chatbotTriage] ❌ skip: falta company_id, conversa_id, telefone ou sendMessage')
+    return { handled: false }
+  }
+  if (String(telefone).startsWith('lid:')) {
+    console.log('[chatbotTriage] ❌ skip: telefone é LID (não é possível enviar via Z-API)')
+    return { handled: false }
+  }
+
+  // Human takeover / setor já escolhido: não processar se atendente ou departamento já definidos
+  let conversaEstado = null
+  try {
+    const { data: conv } = await (ctx.supabase || supabase)
+      .from('conversas')
+      .select('atendente_id, departamento_id')
+      .eq('id', conversa_id)
+      .eq('company_id', company_id)
+      .maybeSingle()
+    conversaEstado = conv || null
+    if (conv?.atendente_id != null) {
+      console.log('[chatbotTriage] ❌ skip: atendente assumiu a conversa — chatbot desativado', { conversa_id, atendente_id: conv.atendente_id })
+      return { handled: false }
+    }
+    if (conv?.departamento_id != null && !conversaReabertaAposFinalizacao) {
+      console.log('[chatbotTriage] ❌ skip: conversa já possui setor — triagem encerrada', {
+        conversa_id,
+        departamento_id: conv.departamento_id,
+      })
+      return { handled: true, departamento_id: conv.departamento_id }
+    }
+  } catch (e) {
+    console.warn('[chatbotTriage] Erro ao verificar estado da conversa:', e?.message || e)
+    return { handled: false }
+  }
+
+  return processIncomingMessageLocked(ctx, conversaEstado)
+}
+
+/**
+ * Corpo do processamento (após checagens iniciais de estado).
+ * @private
+ */
+async function processIncomingMessageLocked(ctx, conversaEstadoInicial) {
+  const {
+    company_id,
+    conversa_id,
+    telefone,
     texto,
     supabase: supabaseClient,
     sendMessage,
@@ -1122,41 +1257,6 @@ async function processIncomingMessage(ctx) {
         console.warn('[chatbotTriage] emitChatbotRealtime:', e?.message || e)
       }
     }
-  }
-  
-  console.log('[chatbotTriage] 🤖 INÍCIO DO PROCESSAMENTO', {
-    company_id,
-    conversa_id,
-    telefone: String(telefone || '').slice(-8),
-    texto: String(texto || '').slice(0, 50),
-    conversaReabertaAposFinalizacao,
-    timestamp: new Date().toISOString()
-  })
-  
-  if (!company_id || !conversa_id || !telefone || !sendMessage) {
-    console.log('[chatbotTriage] ❌ skip: falta company_id, conversa_id, telefone ou sendMessage')
-    return { handled: false }
-  }
-  if (String(telefone).startsWith('lid:')) {
-    console.log('[chatbotTriage] ❌ skip: telefone é LID (não é possível enviar via Z-API)')
-    return { handled: false }
-  }
-
-  // Human takeover: não processar se atendente já está conversando com o cliente
-  try {
-    const { data: conv } = await (supabaseClient || supabase)
-      .from('conversas')
-      .select('atendente_id, departamento_id')
-      .eq('id', conversa_id)
-      .eq('company_id', company_id)
-      .maybeSingle()
-    if (conv?.atendente_id != null) {
-      console.log('[chatbotTriage] ❌ skip: atendente assumiu a conversa — chatbot desativado', { conversa_id, atendente_id: conv.atendente_id })
-      return { handled: false }
-    }
-  } catch (e) {
-    console.warn('[chatbotTriage] Erro ao verificar atendente_id:', e?.message || e)
-    return { handled: false }
   }
 
   const config = await getChatbotConfig(company_id)
@@ -1204,12 +1304,12 @@ async function processIncomingMessage(ctx) {
     }
     if (deveEnviarForaHorario) {
       const sb = supabaseClient || supabase
-      const lockKey = `${company_id}:${conversa_id}`
-      if (foraHorarioInFlight.has(lockKey)) {
+      const fhLockKey = `${company_id}:${conversaLockKey(conversa_id)}`
+      if (foraHorarioInFlight.has(fhLockKey)) {
         console.log('[chatbotTriage] ❌ skip fora_horario: envio concorrente em andamento', { conversa_id, company_id })
         return { handled: true }
       }
-      foraHorarioInFlight.add(lockKey)
+      foraHorarioInFlight.add(fhLockKey)
       try {
         // Se houve intervenção humana, não enviar fora-horário para não se intrometer no atendimento.
         const humanIntervened = await hasHumanIntervenedRecently(sb, company_id, conversa_id, config)
@@ -1228,17 +1328,13 @@ async function processIncomingMessage(ctx) {
         }
         const sendResultFora = await sendWithThrottle(sendMessage, telefone, config.mensagemForaHorario, opts, company_id, config.intervaloEnvioSegundos)
         logBotSendResult({ company_id, conversa_id, tipo: 'fora_horario' }, sendResultFora, opts)
-        const { data: rowFora } = await sb
-          .from('mensagens')
-          .insert(buildBotOutboundPayload({
-            conversa_id,
-            texto: config.mensagemForaHorario,
-            company_id,
-            sendResult: sendResultFora,
-            opts,
-          }))
-          .select('*')
-          .single()
+        const rowFora = await insertBotOutboundMensagem(sb, buildBotOutboundPayload({
+          conversa_id,
+          texto: config.mensagemForaHorario,
+          company_id,
+          sendResult: sendResultFora,
+          opts,
+        }))
         await emitAfterBotMsg(rowFora)
         await logBotAction(company_id, conversa_id, 'fora_horario', {
           horario_inicio: config.horarioInicio,
@@ -1249,11 +1345,11 @@ async function processIncomingMessage(ctx) {
           cooldown_minutos: config.foraHorarioCooldownMinutos,
           max_envios_24h: config.foraHorarioMaxEnvios24h,
         })
-        lastForaHorarioSentAt.set(Number(conversa_id), Date.now())
+        lastForaHorarioSentAt.set(conversaLockKey(conversa_id), Date.now())
       } catch (e) {
         console.error('[chatbotTriage] ❌ Erro ao enviar mensagem fora do horário:', e?.message || e)
       } finally {
-        foraHorarioInFlight.delete(lockKey)
+        foraHorarioInFlight.delete(fhLockKey)
       }
       return { handled: true }
     }
@@ -1263,90 +1359,163 @@ async function processIncomingMessage(ctx) {
   const textoNorm = String(texto || '').trim().toLowerCase()
   const welcomeFull = buildWelcomeMessage(config)
   const menuOnly = buildMenuText(config)
+  const lockCid = conversaLockKey(conversa_id)
+
+  // Já houve escolha válida nesta conversa? Não reenviar menu nem confirmar outro setor.
+  // (Exceto reabertura explícita, que reseta bot_logs antes de chamar o chatbot.)
+  if (!conversaReabertaAposFinalizacao) {
+    const alreadySelected = await wasOptionSelectedForConversa(sb, company_id, conversa_id)
+    if (alreadySelected || conversaEstadoInicial?.departamento_id != null) {
+      console.log('[chatbotTriage] ❌ skip: opção já selecionada / setor já definido — sem novas msgs do bot', {
+        conversa_id,
+        company_id,
+        alreadySelected,
+        departamento_id: conversaEstadoInicial?.departamento_id ?? null,
+        texto: String(texto || '').slice(0, 30),
+      })
+      return {
+        handled: true,
+        departamento_id: conversaEstadoInicial?.departamento_id != null
+          ? Number(conversaEstadoInicial.departamento_id)
+          : undefined,
+      }
+    }
+  }
+
+  // Outra requisição está reivindicando o setor — não enviar menu/opção inválida em paralelo.
+  if (optionSelectInFlight.has(lockCid)) {
+    console.log('[chatbotTriage] ❌ skip: seleção de setor em andamento', { conversa_id, company_id })
+    return { handled: true }
+  }
 
   const isReopenCommand = config.reopenMenuCommand && textoNorm === config.reopenMenuCommand.toLowerCase()
   const option = findOptionByKey(config, textoNorm) || findOptionByKey(config, texto)
 
   if (option) {
-    const depId = option.departamento_id
-    const result = await transferToDepartment(sb, company_id, conversa_id, depId, config)
-
-    let depNome = option.label || 'setor'
-
-    if (!result.ok) {
-      // Fallback: transferToDepartment falhou (departamento não encontrado ou erro de DB).
-      // Tenta atualização direta para não deixar o cliente sem resposta.
-      console.warn('[chatbotTriage] ⚠️ transferToDepartment falhou — tentando atualização direta da conversa', {
-        depId, conversa_id, company_id
-      })
-      try {
-        const { error: directErr } = await sb
-          .from('conversas')
-          .update({
-            departamento_id: depId,
-            atendente_id: null,
-            status_atendimento: 'aberta',
-            ultima_atividade: new Date().toISOString(),
-          })
-          .eq('id', conversa_id)
-          .eq('company_id', company_id)
-
-        if (directErr) {
-          console.error('[chatbotTriage] ❌ Falha crítica ao atribuir departamento (fallback direto):', directErr.message)
-        } else {
-          console.log('[chatbotTriage] ✅ Departamento atribuído via fallback direto', { depId, conversa_id })
-        }
-      } catch (e) {
-        console.error('[chatbotTriage] ❌ Exceção no fallback direto de departamento:', e?.message || e)
-      }
-    } else {
-      depNome = result.departamento_nome || option.label || 'setor'
+    if (optionSelectInFlight.has(lockCid)) {
+      console.log('[chatbotTriage] ❌ skip opção: seleção concorrente em andamento', { conversa_id, company_id })
+      return { handled: true }
     }
-
-    await applyTagIfConfigured(sb, company_id, conversa_id, option.tag_id)
-
-    const confirmMsg = (config.confirmSelectionMessage || '').replace(/\{\{departamento\}\}/gi, depNome)
-    const msgToSend = confirmMsg || `Seu atendimento foi direcionado para ${depNome}. Em instantes nossa equipe dará continuidade.`
-
-    console.log('[chatbotTriage] ✅ Enviando confirmação de seleção', {
-      conversa_id, company_id, opcao: option.key, depNome, transfer_ok: result.ok
-    })
-
+    optionSelectInFlight.add(lockCid)
     try {
-      const sendResultConf = await sendWithThrottle(
-        sendMessage,
-        telefone,
-        msgToSend,
-        opts,
-        company_id,
-        config.intervaloEnvioSegundos,
-        { bypassChatbotInterval: true, sendOptions: { skipProviderDelay: true } }
-      )
-      logBotSendResult({ company_id, conversa_id, tipo: 'opcao_valida' }, sendResultConf, opts)
-      const { data: rowConf } = await sb
-        .from('mensagens')
-        .insert(buildBotOutboundPayload({
+      // Revalida estado fresco imediatamente antes do claim (webhooks paralelos).
+      const { data: convFresh } = await sb
+        .from('conversas')
+        .select('departamento_id, atendente_id')
+        .eq('id', conversa_id)
+        .eq('company_id', company_id)
+        .maybeSingle()
+      if (convFresh?.atendente_id != null) {
+        console.log('[chatbotTriage] ❌ skip opção: atendente assumiu durante o processamento', { conversa_id })
+        return { handled: true }
+      }
+      if (convFresh?.departamento_id != null) {
+        console.log('[chatbotTriage] ❌ skip opção: setor já definido por outro webhook', {
+          conversa_id,
+          departamento_id: convFresh.departamento_id,
+          opcaoIgnorada: option.key,
+        })
+        return { handled: true, departamento_id: Number(convFresh.departamento_id) }
+      }
+      if (await wasOptionSelectedForConversa(sb, company_id, conversa_id)) {
+        console.log('[chatbotTriage] ❌ skip opção: opcao_valida já registrada', { conversa_id, opcaoIgnorada: option.key })
+        return { handled: true }
+      }
+
+      const depId = option.departamento_id
+      const result = await transferToDepartment(sb, company_id, conversa_id, depId, config)
+
+      // Outro webhook ganhou o claim — não enviar confirmação do setor "errado"/atrasado.
+      if (!result.ok && result.reason === 'already_assigned') {
+        console.log('[chatbotTriage] ❌ skip confirmação: claim perdido (já havia setor)', {
+          conversa_id, company_id, opcao: option.key,
+        })
+        return { handled: true }
+      }
+
+      let depNome = option.label || 'setor'
+
+      if (!result.ok) {
+        // Fallback só se ainda estiver sem setor (não sobrescrever claim alheio).
+        console.warn('[chatbotTriage] ⚠️ transferToDepartment falhou — tentando claim direto', {
+          depId, conversa_id, company_id, reason: result.reason
+        })
+        try {
+          const { data: claimed, error: directErr } = await sb
+            .from('conversas')
+            .update({
+              departamento_id: depId,
+              atendente_id: null,
+              status_atendimento: 'aberta',
+              ultima_atividade: new Date().toISOString(),
+            })
+            .eq('id', conversa_id)
+            .eq('company_id', company_id)
+            .is('departamento_id', null)
+            .select('id')
+            .maybeSingle()
+
+          if (directErr) {
+            console.error('[chatbotTriage] ❌ Falha crítica ao atribuir departamento (fallback direto):', directErr.message)
+            return { handled: true }
+          }
+          if (!claimed?.id) {
+            console.log('[chatbotTriage] ❌ skip confirmação: fallback perdeu claim', { conversa_id, depId })
+            return { handled: true }
+          }
+          console.log('[chatbotTriage] ✅ Departamento atribuído via fallback direto', { depId, conversa_id })
+        } catch (e) {
+          console.error('[chatbotTriage] ❌ Exceção no fallback direto de departamento:', e?.message || e)
+          return { handled: true }
+        }
+      } else {
+        depNome = result.departamento_nome || option.label || 'setor'
+      }
+
+      // Loga a escolha ANTES do envio — webhooks paralelos veem opcao_valida e param.
+      await logBotAction(company_id, conversa_id, 'opcao_valida', {
+        opcao_key: option.key,
+        departamento_id: depId,
+        departamento_nome: depNome,
+        transfer_ok: result.ok,
+      })
+
+      await applyTagIfConfigured(sb, company_id, conversa_id, option.tag_id)
+
+      const confirmMsg = (config.confirmSelectionMessage || '').replace(/\{\{departamento\}\}/gi, depNome)
+      const msgToSend = confirmMsg || `Seu atendimento foi direcionado para ${depNome}. Em instantes nossa equipe dará continuidade.`
+
+      console.log('[chatbotTriage] ✅ Enviando confirmação de seleção', {
+        conversa_id, company_id, opcao: option.key, depNome, transfer_ok: result.ok
+      })
+
+      try {
+        const sendResultConf = await sendWithThrottle(
+          sendMessage,
+          telefone,
+          msgToSend,
+          opts,
+          company_id,
+          config.intervaloEnvioSegundos,
+          { bypassChatbotInterval: true, sendOptions: { skipProviderDelay: true } }
+        )
+        logBotSendResult({ company_id, conversa_id, tipo: 'opcao_valida' }, sendResultConf, opts)
+        const rowConf = await insertBotOutboundMensagem(sb, buildBotOutboundPayload({
           conversa_id,
           texto: msgToSend,
           company_id,
           sendResult: sendResultConf,
           opts,
         }))
-        .select('*')
-        .single()
-      await emitAfterBotMsg(rowConf)
-    } catch (sendErr) {
-      console.error('[chatbotTriage] ❌ Erro ao enviar mensagem de confirmação:', sendErr?.message || sendErr)
+        await emitAfterBotMsg(rowConf)
+      } catch (sendErr) {
+        console.error('[chatbotTriage] ❌ Erro ao enviar mensagem de confirmação:', sendErr?.message || sendErr)
+      }
+
+      return { handled: true, departamento_id: depId }
+    } finally {
+      optionSelectInFlight.delete(lockCid)
     }
-
-    await logBotAction(company_id, conversa_id, 'opcao_valida', {
-      opcao_key: option.key,
-      departamento_id: depId,
-      departamento_nome: depNome,
-      transfer_ok: result.ok,
-    })
-
-    return { handled: true, departamento_id: depId }
   }
 
   if (isReopenCommand) {
@@ -1363,19 +1532,15 @@ async function processIncomingMessage(ctx) {
           { bypassChatbotInterval: true, sendOptions: { skipProviderDelay: true } }
         )
         logBotSendResult({ company_id, conversa_id, tipo: 'menu_reenviado' }, sendResultReab, opts)
-        const { data: rowReab } = await sb
-          .from('mensagens')
-          .insert(buildBotOutboundPayload({
-            conversa_id,
-            texto: msg,
-            company_id,
-            sendResult: sendResultReab,
-            opts,
-          }))
-          .select('*')
-          .single()
+        const rowReab = await insertBotOutboundMensagem(sb, buildBotOutboundPayload({
+          conversa_id,
+          texto: msg,
+          company_id,
+          sendResult: sendResultReab,
+          opts,
+        }))
         await emitAfterBotMsg(rowReab)
-        lastMenuEnviadoServerAt.set(Number(conversa_id), Date.now())
+        lastMenuEnviadoServerAt.set(lockCid, Date.now())
         await logBotAction(company_id, conversa_id, 'menu_reenviado', { comando: textoNorm })
       } catch (e) {
         console.error('[chatbotTriage] ❌ Erro ao reenviar menu:', e?.message || e)
@@ -1436,16 +1601,17 @@ async function processIncomingMessage(ctx) {
   })
 
   // Determinar se deve enviar boas-vindas (menu de triagem):
-  // 1. Conversa reaberta após finalização — SEMPRE enviar
-  // 2. Primeira mensagem do cliente E (menu ainda não enviado OU sendOnlyFirstTime=false)
+  // 1. Conversa reaberta após finalização — enviar (estado do bot já foi resetado)
+  // 2. Primeira mensagem do cliente E menu ainda não enviado
+  // Nunca reenviar se menuAlreadySent (mesmo com sendOnlyFirstTime=false).
   const shouldSendWelcome =
     conversaReabertaAposFinalizacao ||
-    (isPrimeiraMensagemCliente && (!menuAlreadySent || !config.sendOnlyFirstTime))
+    (isPrimeiraMensagemCliente && !menuAlreadySent)
 
   if (shouldSendWelcome) {
     // Debounce em memória para evitar menu duplicado em requisições paralelas da mesma conversa.
     const nowMs = Date.now()
-    const lastWelcomeMs = lastWelcomeSentAt.get(conversa_id) || 0
+    const lastWelcomeMs = lastWelcomeSentAt.get(lockCid) || 0
     if (nowMs - lastWelcomeMs < WELCOME_DEBOUNCE_MS) {
       console.log('[chatbotTriage] ❌ skip menu: debounce ativo (proteção anti-duplicação)', {
         conversa_id,
@@ -1455,7 +1621,7 @@ async function processIncomingMessage(ctx) {
       return { handled: true }
     }
     // Marca antes do envio para bloquear concorrência em rajada.
-    lastWelcomeSentAt.set(conversa_id, nowMs)
+    lastWelcomeSentAt.set(lockCid, nowMs)
 
     const msg = welcomeFull || menuOnly
     if (msg) {
@@ -1464,19 +1630,15 @@ async function processIncomingMessage(ctx) {
       try {
         const sendResultMenu = await sendWithThrottle(sendMessage, telefone, msg, opts, company_id, config.intervaloEnvioSegundos)
         logBotSendResult({ company_id, conversa_id, tipo: 'menu_enviado', motivo }, sendResultMenu, opts)
-        const { data: rowMenu } = await sb
-          .from('mensagens')
-          .insert(buildBotOutboundPayload({
-            conversa_id,
-            texto: msg,
-            company_id,
-            sendResult: sendResultMenu,
-            opts,
-          }))
-          .select('*')
-          .single()
+        const rowMenu = await insertBotOutboundMensagem(sb, buildBotOutboundPayload({
+          conversa_id,
+          texto: msg,
+          company_id,
+          sendResult: sendResultMenu,
+          opts,
+        }))
         await emitAfterBotMsg(rowMenu)
-        lastMenuEnviadoServerAt.set(Number(conversa_id), Date.now())
+        lastMenuEnviadoServerAt.set(lockCid, Date.now())
         await logBotAction(company_id, conversa_id, 'menu_enviado', {
           opcoes: config.options.map((o) => o.key),
           motivo,
@@ -1517,8 +1679,7 @@ async function processIncomingMessage(ctx) {
 
   // Rajada inicial: várias "oi" / saudações com o mesmo horário no WhatsApp ou webhook sem timestamp fiel —
   // não enviar opção inválida até passar a janela, exceto se o cliente mandar só número (tentativa de opção).
-  const cidKey = Number(conversa_id)
-  const menuServerMs = lastMenuEnviadoServerAt.get(cidKey) || 0
+  const menuServerMs = lastMenuEnviadoServerAt.get(lockCid) || 0
   if (menuServerMs && Date.now() - menuServerMs < POS_MENU_OPCAO_INVALIDA_GRACE_MS) {
     if (!pareceTentativaOpcaoSoNumeros(texto)) {
       console.log('[chatbotTriage] ❌ skip opção inválida: janela pós-menu (rajada / texto não é tentativa numérica)', {
@@ -1544,7 +1705,7 @@ async function processIncomingMessage(ctx) {
   // Regra 2: Debounce em memória por conversa (60 s) — evita envio múltiplo em rajada de mensagens.
   // O Map é por processo; em caso de restart os contadores são zerados (comportamento aceitável).
   const agoraMs = Date.now()
-  const ultimoEnvioMs = lastOpcaoInvalidaSentAt.get(conversa_id) || 0
+  const ultimoEnvioMs = lastOpcaoInvalidaSentAt.get(lockCid) || 0
   if (agoraMs - ultimoEnvioMs < OPCAO_INVALIDA_DEBOUNCE_MS) {
     console.log('[chatbotTriage] ❌ skip opção inválida: debounce ativo (janela 60 s)', {
       conversa_id,
@@ -1554,7 +1715,7 @@ async function processIncomingMessage(ctx) {
     return { handled: true }
   }
   // Marcar antes de prosseguir para que requisições paralelas que ainda não finalizaram também sejam bloqueadas
-  lastOpcaoInvalidaSentAt.set(conversa_id, agoraMs)
+  lastOpcaoInvalidaSentAt.set(lockCid, agoraMs)
 
   // Regra 3: Enviar no máximo 2 vezes por conversa (total) — camada adicional via RPC atômico no banco.
   // Garante o limite mesmo após restart do servidor (estado persistente).
@@ -1612,17 +1773,13 @@ async function processIncomingMessage(ctx) {
   try {
     const sendResultInvalid = await sendWithThrottle(sendMessage, telefone, fullInvalid, opts, company_id, config.intervaloEnvioSegundos)
     logBotSendResult({ company_id, conversa_id, tipo: 'opcao_invalida' }, sendResultInvalid, opts)
-    const { data: rowInv } = await sb
-      .from('mensagens')
-      .insert(buildBotOutboundPayload({
-        conversa_id,
-        texto: fullInvalid,
-        company_id,
-        sendResult: sendResultInvalid,
-        opts,
-      }))
-      .select('*')
-      .single()
+    const rowInv = await insertBotOutboundMensagem(sb, buildBotOutboundPayload({
+      conversa_id,
+      texto: fullInvalid,
+      company_id,
+      sendResult: sendResultInvalid,
+      opts,
+    }))
     await emitAfterBotMsg(rowInv)
     if (!usouRpc) {
       await (sb || supabase).from('bot_logs').insert({

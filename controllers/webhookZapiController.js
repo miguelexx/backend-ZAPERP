@@ -2513,15 +2513,19 @@ exports.receberZapi = async (req, res) => {
       }
     }
     // Human takeover: não processar chatbot se atendente já assumiu a conversa
+    // Revalida departamento/atendente no banco (snapshot inicial pode estar stale em webhooks paralelos).
     let atendente_id = null
-    if (!fromMe && !isGroup && departamento_id == null && phoneParaChatbot) {
+    if (!fromMe && !isGroup && phoneParaChatbot) {
       const { data: convEstado } = await supabase
         .from('conversas')
-        .select('atendente_id')
+        .select('atendente_id, departamento_id')
         .eq('id', conversa_id)
         .eq('company_id', company_id)
         .maybeSingle()
       atendente_id = convEstado?.atendente_id ?? null
+      if (convEstado?.departamento_id != null) {
+        departamento_id = Number(convEstado.departamento_id)
+      }
     }
     if (!fromMe && !isGroup && departamento_id == null && atendente_id == null && phoneParaChatbot) {
       try {
