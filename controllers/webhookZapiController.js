@@ -2566,6 +2566,7 @@ exports.receberZapi = async (req, res) => {
             const optSendResult = await sendMessage(phoneParaChatbot, optResult.mensagemConfirmacao, { sendOrigin: 'opt_out_confirmacao' })
             const optMessageId = optSendResult?.messageId ? String(optSendResult.messageId).trim() : null
             const optTraceable = isTraceableWhatsappMessageId(optMessageId)
+            const optQueueId = !!optMessageId && isUltramsgNumericQueueId(optMessageId)
             const { data: optMensagemRow, error: optMensagemError } = await supabase.from('mensagens').insert({
               conversa_id,
               texto: optResult.mensagemConfirmacao,
@@ -2574,6 +2575,7 @@ exports.receberZapi = async (req, res) => {
               status: optSendResult?.ok ? (optTraceable ? 'sent' : 'pending') : 'erro',
               status_mensagem: optSendResult?.ok ? (optTraceable ? 'sent' : 'sending') : 'failed',
               ...(optTraceable ? { whatsapp_id: optMessageId } : {}),
+              ...(optQueueId ? { provider_queue_id: optMessageId } : {}),
               ...(whatsapp_instance_id ? { whatsapp_instance_id } : {}),
             }).select('*').single()
             if (optMensagemError) {
@@ -2704,7 +2706,12 @@ exports.receberZapi = async (req, res) => {
             texto: texto || '',
             supabase,
             sendMessage,
-            opts: { companyId: company_id },
+            opts: {
+              companyId: company_id,
+              ...(whatsapp_instance_id
+                ? { whatsappInstanceId: whatsapp_instance_id, whatsapp_instance_id }
+                : {}),
+            },
             conversaReabertaAposFinalizacao,
             hints: chatbotHints,
             emitChatbotRealtime,

@@ -440,6 +440,19 @@ async function reconcilePendingOutboundMessage(row, { io = null, force = false }
   // Reenviar aqui e seguro justamente porque a ausencia foi confirmada, nao presumida.
   const provedorSemRegistro = providerHit?.consultaOk === true && !providerHit?.row
   if (provedorSemRegistro && provedorNuncaAceitou(row)) {
+    // Chatbot / automações (sem autor humano): o envio original NÃO usa referenceId crm-{id}
+    // (insert depois do sendText). A consulta UltraMSG por referenceId sempre falha →
+    // reenviar duplicaria menu/confirmação no WhatsApp do cliente (~5 min depois).
+    if (row.autor_usuario_id == null) {
+      console.log('[pendingOutboundReconciliation] skip reenvio automacao/chatbot — marca sent para nao duplicar no cliente', {
+        mensagem_id: row.id,
+        company_id: row.company_id,
+        conversa_id: row.conversa_id,
+        idade_min: Math.round(ageMs / 60_000),
+        textoPreview: String(row.texto || '').slice(0, 60),
+      })
+      return patchMessage(row, { status: 'sent', status_mensagem: 'sent' }, io)
+    }
     if (isResendEnabled() && ageMs <= getResendWindowMs()) {
       return await reenviarMensagemNaoAceita(row, io)
     }

@@ -12,6 +12,7 @@
  */
 
 const supabase = require('../config/supabase')
+const { isUltramsgNumericQueueId, isRealWhatsAppId } = require('../helpers/whatsappMessageIdHelper')
 
 /**
  * Corrige mojibake típico: texto UTF-8 foi gravado/lido como Latin-1 (ex.: "OpÃ§Ã£o" → "Opção").
@@ -214,21 +215,19 @@ async function sendWithThrottle(sendMessage, telefone, msg, opts, company_id, in
 }
 
 /** Estrutura padrão do chatbot_triage em ia_config.config */
+/** Aceita ID real do WhatsApp (hex / jid) — NÃO aceita fila numérica UltraMSG. */
 function isTraceableWhatsappMessageId(value) {
-  if (!value) return false
-  const s = String(value).trim()
-  if (!s || s === 'null' || s === 'undefined' || s === 'false' || s === '0') return false
-  if (s.includes('@')) return true
-  if (/^[A-F0-9]{12,}$/i.test(s)) return true
-  if (s.length > 20) return true
-  return false
+  return isRealWhatsAppId(value)
 }
 
 function buildBotOutboundPayload({ conversa_id, texto, company_id, sendResult, opts = {} }) {
   const ok = typeof sendResult === 'boolean' ? sendResult : sendResult?.ok === true
   const messageId = typeof sendResult === 'object' && sendResult?.messageId ? String(sendResult.messageId).trim() : null
   const hasTraceableId = isTraceableWhatsappMessageId(messageId)
+  const hasQueueId = !!messageId && isUltramsgNumericQueueId(messageId)
   const whatsappInstanceId = opts?.whatsappInstanceId ?? opts?.whatsapp_instance_id ?? null
+  // Aceito pelo UltraMSG (ok) com queue id: pending/sending + provider_queue_id (igual chatController).
+  // Sem isso o reconciliador de 5 min reenvia menu/confirmação e o cliente recebe duplicata.
   const status = ok ? (hasTraceableId ? 'sent' : 'pending') : 'erro'
   const statusMensagem = ok ? (hasTraceableId ? 'sent' : 'sending') : 'failed'
   const payload = {
@@ -240,6 +239,7 @@ function buildBotOutboundPayload({ conversa_id, texto, company_id, sendResult, o
     status_mensagem: statusMensagem,
   }
   if (hasTraceableId) payload.whatsapp_id = messageId
+  if (hasQueueId) payload.provider_queue_id = messageId
   if (whatsappInstanceId) payload.whatsapp_instance_id = whatsappInstanceId
   return payload
 }
@@ -248,6 +248,7 @@ function logBotSendResult(context, sendResult, opts = {}) {
   const ok = typeof sendResult === 'boolean' ? sendResult : sendResult?.ok === true
   const messageId = typeof sendResult === 'object' && sendResult?.messageId ? String(sendResult.messageId).trim() : null
   const hasTraceableId = isTraceableWhatsappMessageId(messageId)
+  const hasQueueId = !!messageId && isUltramsgNumericQueueId(messageId)
   const error = typeof sendResult === 'object' ? (sendResult?.error || sendResult?.blockedBy || null) : null
   const base = {
     ...context,
@@ -261,8 +262,8 @@ function logBotSendResult(context, sendResult, opts = {}) {
     })
     return
   }
-  if (!hasTraceableId) {
-    console.warn('[chatbotTriage] envio automatico aceito sem ID rastreavel', {
+  if (!hasTraceableId && !hasQueueId) {
+    console.warn('[chatbotTriage] envio automatico aceito sem ID rastreavel nem fila', {
       ...base,
       status_gravado: 'pending',
     })

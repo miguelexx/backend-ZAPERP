@@ -174,6 +174,22 @@ describe('reenvio automatico de pendentes', () => {
     expect(res.action).not.toBe('reenviada')
   })
 
+  test('nao reenvia mensagens do chatbot/automacao (autor_usuario_id null) — evita duplicar menu no cliente', async () => {
+    const { svc, sendText, updates } = montarAmbiente({ getMessagesResult: { ok: true, data: [] } })
+
+    const res = await svc.reconcilePendingOutboundMessage(
+      linhaPendente({
+        autor_usuario_id: null,
+        texto: 'Olá! Bem-vindo(a) à Empório Hazime. Escolha uma opção:',
+      }),
+      { io: null }
+    )
+
+    expect(sendText).not.toHaveBeenCalled()
+    expect(res.action).not.toBe('reenviada')
+    expect(updates[0]).toMatchObject({ status: 'sent', status_mensagem: 'sent' })
+  })
+
   test('fora da janela de reenvio marca falha definitiva em vez de relogio eterno', async () => {
     const { svc, sendText, updates } = montarAmbiente({ getMessagesResult: { ok: true, data: [] } })
 

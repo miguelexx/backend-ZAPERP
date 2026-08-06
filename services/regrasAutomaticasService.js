@@ -5,6 +5,7 @@
  */
 
 const supabase = require('../config/supabase')
+const { isUltramsgNumericQueueId, isRealWhatsAppId } = require('../helpers/whatsappMessageIdHelper')
 
 function isWithinBusinessHours(empresa, now = new Date()) {
   if (!empresa?.horario_inicio || !empresa?.horario_fim) return true
@@ -17,20 +18,11 @@ function isWithinBusinessHours(empresa, now = new Date()) {
   return minutosAgora >= minutosIni || minutosAgora <= minutosFim
 }
 
-function isTraceableWhatsappMessageId(value) {
-  if (!value) return false
-  const s = String(value).trim()
-  if (!s || s === 'null' || s === 'undefined' || s === 'false' || s === '0') return false
-  if (s.includes('@')) return true
-  if (/^[A-F0-9]{12,}$/i.test(s)) return true
-  if (s.length > 20) return true
-  return false
-}
-
 function buildOutboundPayload({ conversa_id, texto, company_id, sendResult, whatsappInstanceId }) {
   const ok = typeof sendResult === 'boolean' ? sendResult : sendResult?.ok === true
   const messageId = typeof sendResult === 'object' && sendResult?.messageId ? String(sendResult.messageId).trim() : null
-  const hasTraceableId = isTraceableWhatsappMessageId(messageId)
+  const hasTraceableId = isRealWhatsAppId(messageId)
+  const hasQueueId = !!messageId && isUltramsgNumericQueueId(messageId)
   return {
     conversa_id,
     texto,
@@ -39,6 +31,7 @@ function buildOutboundPayload({ conversa_id, texto, company_id, sendResult, what
     status: ok ? (hasTraceableId ? 'sent' : 'pending') : 'erro',
     status_mensagem: ok ? (hasTraceableId ? 'sent' : 'sending') : 'failed',
     ...(hasTraceableId ? { whatsapp_id: messageId } : {}),
+    ...(hasQueueId ? { provider_queue_id: messageId } : {}),
     ...(whatsappInstanceId ? { whatsapp_instance_id: whatsappInstanceId } : {}),
   }
 }
