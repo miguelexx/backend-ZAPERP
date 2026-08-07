@@ -218,7 +218,7 @@ async function syncConversationGroupOnJoin(supabase, conversaId, companyId, io, 
   try {
     const { data: conv } = await supabase
       .from('conversas')
-      .select('id, telefone, tipo, nome_grupo')
+      .select('id, telefone, tipo, nome_grupo, foto_grupo')
       .eq('id', conversaId)
       .eq('company_id', companyId)
       .maybeSingle()
@@ -229,24 +229,47 @@ async function syncConversationGroupOnJoin(supabase, conversaId, companyId, io, 
 
     const groupId = tf.endsWith('@g.us') ? tf : `${tf}@g.us`
     const metadata = await getGroupMetadata(groupId, companyId)
-    if (!metadata?.nome) return
+    if (!metadata?.nome && !metadata?.foto) return
 
+    const updates = {}
     const nomeAtual = (conv.nome_grupo || '').trim()
-    if (metadata.nome !== nomeAtual) {
+    const fotoAtual = (conv.foto_grupo || '').trim()
+    if (metadata.nome && metadata.nome !== nomeAtual) {
+      updates.nome_grupo = metadata.nome
+    }
+    if (metadata.foto && String(metadata.foto).trim().startsWith('http') && metadata.foto !== fotoAtual) {
+      updates.foto_grupo = String(metadata.foto).trim()
+    }
+
+    if (Object.keys(updates).length > 0) {
       const { error } = await supabase
         .from('conversas')
-        .update({ nome_grupo: metadata.nome })
+        .update(updates)
         .eq('id', conversaId)
         .eq('company_id', companyId)
       if (!error && io) {
         const eventName = io.EVENTS?.CONVERSA_ATUALIZADA || 'conversa_atualizada'
         const { emitirEventoEmpresaConversa } = require('../controllers/chatController')
+        const nomeEmit = updates.nome_grupo || nomeAtual || null
         emitirEventoEmpresaConversa(io, companyId, conversaId, eventName, {
           id: conversaId,
-          nome_grupo: metadata.nome,
-          contato_nome: metadata.nome,
-          cliente_nome: metadata.nome
+          ...(updates.nome_grupo
+            ? {
+                nome_grupo: updates.nome_grupo,
+                contato_nome: updates.nome_grupo,
+                cliente_nome: updates.nome_grupo,
+              }
+            : {}),
+          ...(updates.foto_grupo ? { foto_grupo: updates.foto_grupo } : {}),
         })
+        if (nomeEmit || updates.foto_grupo) {
+          io.to(`empresa_${companyId}`).emit('contato_atualizado', {
+            conversa_id: Number(conversaId),
+            contato_nome: nomeEmit || null,
+            nome_grupo: nomeEmit || null,
+            foto_grupo: updates.foto_grupo || fotoAtual || null,
+          })
+        }
       }
     }
     _lastGroupSyncByConv.set(key, Date.now())

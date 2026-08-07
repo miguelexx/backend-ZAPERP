@@ -3,6 +3,7 @@ const { getDisplayName } = require('../helpers/contactEnrichment');
 const { getCanonicalPhone, getOrCreateCliente } = require('../helpers/conversationSync');
 const { ensureConversaForCliente } = require('../services/conversaAbrirClienteService');
 const { executarAssumirConversa } = require('../services/conversaAssumirInternoService');
+const { buildClienteListagemSearchOr } = require('../helpers/chatSearchHelper');
 
 const CLIENTE_SELECT_COLS =
   'id, telefone, wa_id, nome, pushname, observacoes, foto_perfil, email, empresa, ultimo_contato, criado_em, atualizado_em, company_id';
@@ -56,9 +57,9 @@ exports.listarClientes = async (req, res) => {
       .select('id', { count: 'exact', head: true })
       .eq('company_id', cid)
 
-    if (termoBusca) {
-      const term = `%${termoBusca}%`
-      countQuery = countQuery.or(`nome.ilike.${term},telefone.ilike.${term},observacoes.ilike.${term}`)
+    const clienteSearchOr = termoBusca ? buildClienteListagemSearchOr(termoBusca) : null
+    if (clienteSearchOr) {
+      countQuery = countQuery.or(clienteSearchOr)
     }
 
     const { count, error: countErr } = await countQuery
@@ -75,9 +76,8 @@ exports.listarClientes = async (req, res) => {
         .eq('company_id', cid)
         .order('id', { ascending: false })
         .range(offset, offset + limitNum - 1)
-      if (termoBusca) {
-        const term = `%${termoBusca}%`
-        listQuery = listQuery.or(`nome.ilike.${term},telefone.ilike.${term},observacoes.ilike.${term}`)
+      if (clienteSearchOr) {
+        listQuery = listQuery.or(clienteSearchOr)
       }
       const { data: pageRows, error } = await listQuery
       if (error) throw error
@@ -96,9 +96,8 @@ exports.listarClientes = async (req, res) => {
           .eq('company_id', cid)
           .order('id', { ascending: false })
           .range(start, start + CHUNK - 1)
-        if (termoBusca) {
-          const term = `%${termoBusca}%`
-          chunkQuery = chunkQuery.or(`nome.ilike.${term},telefone.ilike.${term},observacoes.ilike.${term}`)
+        if (clienteSearchOr) {
+          chunkQuery = chunkQuery.or(clienteSearchOr)
         }
 
         const { data: chunkRows, error } = await chunkQuery

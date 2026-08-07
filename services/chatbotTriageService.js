@@ -13,6 +13,7 @@
 
 const supabase = require('../config/supabase')
 const { isUltramsgNumericQueueId, isRealWhatsAppId } = require('../helpers/whatsappMessageIdHelper')
+const { REAL_MESSAGE_DIRECOES, isInternalNoteRow } = require('../helpers/internalNote')
 
 /**
  * Corrige mojibake típico: texto UTF-8 foi gravado/lido como Latin-1 (ex.: "OpÃ§Ã£o" → "Opção").
@@ -743,7 +744,7 @@ async function hasHumanIntervenedRecently(supabaseClient, company_id, conversa_i
     if (menuRow?.criado_em) {
       const { data: outsDepoisMenu } = await supabaseClient
         .from('mensagens')
-        .select('id, texto, criado_em')
+        .select('id, texto, direcao, tipo, status, criado_em')
         .eq('conversa_id', conversa_id)
         .eq('company_id', company_id)
         .eq('direcao', 'out')
@@ -751,6 +752,7 @@ async function hasHumanIntervenedRecently(supabaseClient, company_id, conversa_i
         .order('criado_em', { ascending: true })
 
       for (const m of outsDepoisMenu || []) {
+        if (isInternalNoteRow(m)) continue
         if (!looksLikeBotMessage(m.texto, config)) {
           console.log('[chatbotTriage] intervenção humana após menu (mensagem out não reconhecida como bot)', {
             conversa_id,
@@ -764,14 +766,15 @@ async function hasHumanIntervenedRecently(supabaseClient, company_id, conversa_i
 
     const { data: ultimas } = await supabaseClient
       .from('mensagens')
-      .select('id, direcao, texto, criado_em')
+      .select('id, direcao, tipo, status, texto, criado_em')
       .eq('conversa_id', conversa_id)
       .eq('company_id', company_id)
+      .in('direcao', REAL_MESSAGE_DIRECOES)
       .order('criado_em', { ascending: false })
       .limit(40)
 
     if (!ultimas || ultimas.length === 0) return false
-    const ultimaOut = ultimas.find((m) => m.direcao === 'out')
+    const ultimaOut = ultimas.find((m) => m.direcao === 'out' && !isInternalNoteRow(m))
     if (!ultimaOut) return false
     if (looksLikeBotMessage(ultimaOut.texto, config)) return false
     return true

@@ -57,6 +57,12 @@ function buildClienteSearchOr(raw) {
   ].join(',')
 }
 
+/** Mesmo critério da lista + observacoes (GET /clientes e listagens administrativas). */
+function buildClienteListagemSearchOr(raw) {
+  const term = quoteOrValue(`%${escapeIlikePattern(raw)}%`)
+  return [buildClienteSearchOr(raw), `observacoes.ilike.${term}`].join(',')
+}
+
 function buildTelefoneSearchOr(raw) {
   const term = quoteOrValue(`%${escapeIlikePattern(raw)}%`)
   const phoneTerms = buildPhoneSearchTerms(raw)
@@ -68,8 +74,10 @@ function buildTelefoneSearchOr(raw) {
 
 module.exports = {
   buildClienteSearchOr,
+  buildClienteListagemSearchOr,
   buildTelefoneSearchOr,
   buildPhoneSearchTerms,
   digitsOnly,
   escapeIlikePattern,
+  quoteOrValue,
 }

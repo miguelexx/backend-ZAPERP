@@ -1,4 +1,5 @@
 const supabase = require('../config/supabase')
+const { isInternalNoteRow } = require('../helpers/internalNote')
 
 const MOVIMENTACAO_INTERNA_TIPO = 'movimentacao_interna_atendimento'
 const MOVIMENTACAO_INTERNA_RODAPE = 'Mensagem invisível para o cliente.'
@@ -24,6 +25,8 @@ function textoPareceMovimentacaoInterna(texto) {
 
 function isMensagemLegadaMovimentacaoInterna(msg) {
   if (!msg || typeof msg !== 'object') return false
+  // Nota interna não é movimentação de atendimento — verificar antes do heurístico de texto
+  if (isInternalNoteRow(msg)) return false
   if (msg.mensagem_interna === true) return true
   if (String(msg.tipo || '').toLowerCase() === MOVIMENTACAO_INTERNA_TIPO) return true
   return textoPareceMovimentacaoInterna(msg.texto || msg.conteudo || msg.message || msg.body)

@@ -13,7 +13,7 @@ const {
   extractPhoneFromChatId,
   possiblePhonesBR
 } = require('../helpers/phoneHelper')
-const { getOrCreateCliente } = require('../helpers/conversationSync')
+const { getOrCreateCliente, shouldUpdateFotoPerfil } = require('../helpers/conversationSync')
 const { chooseBestName, isBadName, getDisplayName } = require('../helpers/contactEnrichment')
 
 const CACHE_TTL_MS = 5 * 60 * 1000
@@ -26,6 +26,17 @@ function cacheKey(phone, companyId) {
 
 function isValidPhotoUrl(url) {
   return url && typeof url === 'string' && url.trim().startsWith('http')
+}
+
+function tryInvalidateNoProfilePictureCache(chatId) {
+  try {
+    const provider = getProvider()
+    if (typeof provider?.invalidateNoProfilePictureCache === 'function') {
+      provider.invalidateNoProfilePictureCache(chatId)
+    }
+  } catch {
+    /* ignore */
+  }
 }
 
 /**
@@ -80,9 +91,10 @@ async function syncUltraMsgContact(chatIdOrPhone, companyId, opts = {}) {
 
   const { telefone, chatId } = resolved
   const key = cacheKey(telefone, companyId)
+  const refreshFoto = opts.refreshFoto === true
 
   let result = null
-  const useCache = !opts.skipCache
+  const useCache = !opts.skipCache && !refreshFoto
   if (useCache) {
     const cached = cache.get(key)
     if (cached && cached.exp > Date.now()) {
@@ -109,6 +121,7 @@ async function syncUltraMsgContact(chatIdOrPhone, companyId, opts = {}) {
       // Só buscar foto se os metadados indicarem que o contato existe e está na lista
       let pic = null
       if (meta && !meta.error) {
+        if (refreshFoto) tryInvalidateNoProfilePictureCache(chatId)
         pic = await provider.getProfilePicture?.(chatId, picOpts).catch(() => null) ?? null
       }
       
@@ -180,8 +193,11 @@ async function syncUltraMsgContact(chatIdOrPhone, companyId, opts = {}) {
         )
         if (bestNome && decision === 'updated') cacheUpdates.nome_contato_cache = bestNome
       }
-      const fotoAtual = conv.foto_perfil_contato_cache && String(conv.foto_perfil_contato_cache).trim()
-      if (fotoFromResult && isValidPhotoUrl(fotoFromResult) && !fotoAtual) {
+      if (
+        shouldUpdateFotoPerfil(conv.foto_perfil_contato_cache, fotoFromResult, {
+          refresh: refreshFoto,
+        })
+      ) {
         cacheUpdates.foto_perfil_contato_cache = String(fotoFromResult).trim()
       }
       if (Object.keys(cacheUpdates).length > 0) {
@@ -193,7 +209,8 @@ async function syncUltraMsgContact(chatIdOrPhone, companyId, opts = {}) {
       nome: nomeFromResult || undefined,
       nomeSource: 'syncUltramsg',
       pushname: pushnameFromResult || undefined,
-      foto_perfil: fotoFromResult || undefined
+      foto_perfil: fotoFromResult || undefined,
+      foto_perfil_refresh: refreshFoto,
     })
     if (clienteId) {
       for (const conv of convRows) {
@@ -236,7 +253,10 @@ async function syncContactFromUltramsg(phone, companyId) {
  * @param {object} opts - { skipIfRecent } - evita sync se já fez nos últimos 60s (por conversa)
  */
 const _lastSyncByConv = new Map()
+const _lastFotoRefreshByConv = new Map()
 const SYNC_DEBOUNCE_MS = 60_000
+/** Reconsulta foto no UltraMSG no máximo a cada 6h por conversa (B03/B09). */
+const FOTO_REFRESH_TTL_MS = 6 * 60 * 60 * 1000
 
 async function syncConversationContactOnJoin(supabase, conversaId, companyId, io, opts = {}) {
   if (!conversaId || !companyId || !io) return
@@ -257,15 +277,25 @@ async function syncConversationContactOnJoin(supabase, conversaId, companyId, io
 
     const hasNomeCache = Boolean(conv.nome_contato_cache && String(conv.nome_contato_cache).trim())
     const hasFotoCache = Boolean(conv.foto_perfil_contato_cache && String(conv.foto_perfil_contato_cache).trim())
-    if (opts.skipIfRecent && conv.cliente_id && hasNomeCache && hasFotoCache) {
+    const lastFotoRefresh = _lastFotoRefreshByConv.get(key) || 0
+    // Sem foto: tenta de novo a cada 30min. Com foto: refresh no máximo a cada 6h.
+    const fotoTtlMs = hasFotoCache ? FOTO_REFRESH_TTL_MS : 30 * 60 * 1000
+    const needsFotoRefresh = !lastFotoRefresh || Date.now() - lastFotoRefresh > fotoTtlMs
+
+    // Com nome+foto e foto ainda “fresca”, não bate na API (preserva rate limit).
+    if (opts.skipIfRecent && conv.cliente_id && hasNomeCache && hasFotoCache && !needsFotoRefresh) {
       return
     }
 
     const chatId = conv.telefone.includes('@c.us') ? conv.telefone : `${String(conv.telefone).replace(/\D/g, '')}@c.us`
-    const synced = await syncUltraMsgContact(chatId, companyId, { skipCache: !conv.cliente_id })
+    const synced = await syncUltraMsgContact(chatId, companyId, {
+      skipCache: !conv.cliente_id || needsFotoRefresh,
+      refreshFoto: needsFotoRefresh,
+    })
     if (!synced) return
 
     _lastSyncByConv.set(key, Date.now())
+    if (needsFotoRefresh) _lastFotoRefreshByConv.set(key, Date.now())
 
     const variants = possiblePhonesBR(conv.telefone).length > 0 ? possiblePhonesBR(conv.telefone) : [conv.telefone]
     const { data: cliente } = conv.cliente_id
@@ -278,7 +308,13 @@ async function syncConversationContactOnJoin(supabase, conversaId, companyId, io
       upCliente.nome = String(synced.nome).trim()
     }
     if (synced.pushname && (!cliente?.pushname || !String(cliente.pushname).trim())) upCliente.pushname = synced.pushname
-    if (synced.foto_perfil && (!cliente?.foto_perfil || !String(cliente.foto_perfil).trim())) upCliente.foto_perfil = synced.foto_perfil
+    if (
+      shouldUpdateFotoPerfil(cliente?.foto_perfil, synced.foto_perfil, {
+        refresh: needsFotoRefresh,
+      })
+    ) {
+      upCliente.foto_perfil = String(synced.foto_perfil).trim()
+    }
     const clienteIdToUpdate = conv.cliente_id || cliente?.id
     if (Object.keys(upCliente).length > 0 && clienteIdToUpdate) {
       await supabase.from('clientes').update(upCliente).eq('id', clienteIdToUpdate).eq('company_id', companyId)
@@ -288,7 +324,11 @@ async function syncConversationContactOnJoin(supabase, conversaId, companyId, io
     if (syncNomeValido && (!conv.nome_contato_cache || !String(conv.nome_contato_cache).trim())) {
       upConv.nome_contato_cache = String(synced.nome).trim()
     }
-    if (synced.foto_perfil && (!conv.foto_perfil_contato_cache || !String(conv.foto_perfil_contato_cache).trim())) {
+    if (
+      shouldUpdateFotoPerfil(conv.foto_perfil_contato_cache, synced.foto_perfil, {
+        refresh: needsFotoRefresh,
+      })
+    ) {
       upConv.foto_perfil_contato_cache = String(synced.foto_perfil).trim()
     }
     if (Object.keys(upConv).length > 0) {

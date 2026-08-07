@@ -1,6 +1,7 @@
 const supabase = require('../config/supabase')
 const { isGroupConversation } = require('../helpers/conversaHelper')
 const { getDisplayName } = require('../helpers/contactEnrichment')
+const { isLidPhoneKey, pickRealPhoneCandidate } = require('../helpers/phoneHelper')
 
 function escapeHtml(s) {
   if (s == null) return ''
@@ -282,7 +283,21 @@ exports.imprimirConversa = async (req, res) => {
 
     const isSupervisor = role === 'supervisor'
     const conversaAssumidaPorOutro = conversa.atendente_id != null && Number(conversa.atendente_id) !== Number(user_id)
-    const deveBloquearMensagens = !isGroup && conversaAssumidaPorOutro && !isAdmin && !isSupervisor
+    let isParticipanteAtivo = false
+    if (!isGroup && conversaAssumidaPorOutro && !isAdmin && !isSupervisor) {
+      const { data: partRow, error: partErr } = await supabase
+        .from('conversa_atendentes')
+        .select('id')
+        .eq('company_id', Number(cid))
+        .eq('conversa_id', Number(convId))
+        .eq('usuario_id', Number(user_id))
+        .eq('ativo', true)
+        .limit(1)
+        .maybeSingle()
+      if (!partErr && partRow?.id) isParticipanteAtivo = true
+    }
+    const deveBloquearMensagens =
+      !isGroup && conversaAssumidaPorOutro && !isAdmin && !isSupervisor && !isParticipanteAtivo
     if (deveBloquearMensagens) {
       return res.status(403).send('Sem permissão para imprimir esta conversa')
     }
@@ -332,19 +347,18 @@ exports.imprimirConversa = async (req, res) => {
       clientesConv = null
     }
 
-    const isLidConv = !isGroup && conversa.telefone && String(conversa.telefone).trim().toLowerCase().startsWith('lid:')
+    const isLidConv = !isGroup && isLidPhoneKey(conversa.telefone)
     const clienteNome = getDisplayName(clientesConv)
     const nomeCache = conversa.nome_contato_cache ? String(conversa.nome_contato_cache).trim() : null
+    const telefoneRealLid = isLidConv ? pickRealPhoneCandidate(clientesConv?.telefone) : null
     const nomeCliente = isGroup
       ? conversa.nome_grupo || conversa.telefone || 'Grupo'
-      : isLidConv
-        ? 'Contato'
-        : clienteNome || nomeCache || conversa.telefone || '—'
+      : clienteNome || nomeCache || telefoneRealLid || (isLidConv ? 'Contato' : conversa.telefone) || '—'
 
     const telefoneExibir = isGroup
       ? escapeHtml(conversa.telefone || '—')
       : isLidConv
-        ? '—'
+        ? escapeHtml(telefoneRealLid || '—')
         : escapeHtml(String(conversa.telefone || clientesConv?.telefone || '—'))
 
     const dataAtendimento = formatDateTime(conversa.criado_em)

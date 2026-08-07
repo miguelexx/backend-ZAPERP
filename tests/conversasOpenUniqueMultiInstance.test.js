@@ -194,8 +194,16 @@ describe('Conversas open unique multi-instancia', () => {
       ],
     })
 
-    await mergeConversasIntoCanonico(supabase, 1, 10, [20, 30])
+    const emitted = []
+    const io = {
+      to: (room) => ({
+        emit: (event, payload) => emitted.push({ room, event, payload }),
+      }),
+    }
 
+    const result = await mergeConversasIntoCanonico(supabase, 1, 10, [20, 30], { io })
+
+    expect(result).toMatchObject({ ok: true, canonicalId: 10, mergedFrom: [20] })
     const historicoUpdate = supabase.state.operations.find(
       (op) => op.table === 'historico_atendimentos' && op.mode === 'update'
     )
@@ -212,6 +220,8 @@ describe('Conversas open unique multi-instancia', () => {
     expect(mensagensUpdate.filters).toContainEqual({ type: 'eq', field: 'company_id', value: 1 })
     expect(conversaDelete.filters).toContainEqual({ type: 'in', field: 'id', values: [20] })
     expect(supabase.state.conversas.some((row) => row.id === 30 && row.company_id === 2)).toBe(true)
+    expect(emitted.some((e) => e.event === 'conversa_apagada' && e.payload?.merged_into === 10 && e.payload?.id === 20)).toBe(true)
+    expect(emitted.some((e) => e.event === 'atualizar_conversa' && e.payload?.id === 10)).toBe(true)
   })
 
   test('merge LID para telefone respeita whatsapp_instance_id', async () => {

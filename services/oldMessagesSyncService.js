@@ -1,5 +1,9 @@
 const supabase = require('../config/supabase')
-const { normalizePhoneBR } = require('../helpers/phoneHelper')
+const {
+  normalizePhoneBR,
+  possiblePhonesBR,
+  pickRealPhoneCandidate,
+} = require('../helpers/phoneHelper')
 const { getOrCreateCliente, findOrCreateConversation } = require('../helpers/conversationSync')
 const { getProvider } = require('./providers')
 const { listWhatsappInstances } = require('./whatsappInstanceService')
@@ -722,27 +726,63 @@ async function resolveOldMessagesWhatsappInstanceId(company_id, conversa) {
 }
 
 function isUsableHistoryIdentifier(value) {
-  const raw = String(value || '').trim()
-  if (!raw) return false
-  const lower = raw.toLowerCase()
-  if (lower.startsWith('lid:') || lower.endsWith('@lid')) return false
-  if (lower.includes('@broadcast') || lower.includes('@newsletter')) return false
-  return true
+  // Só telefone BR normalizável ou @c.us equivalente — nunca LID/`chat_lid` cru.
+  return Boolean(pickRealPhoneCandidate(value))
 }
 
-function resolveChatIdsForConversation(conversa) {
+async function resolveSiblingPhoneForOldSync(company_id, conversa) {
+  const chatLid = String(conversa?.chat_lid || '').trim()
+  if (!chatLid || !company_id) return null
+  let query = supabase
+    .from('conversas')
+    .select('telefone')
+    .eq('company_id', Number(company_id))
+    .eq('chat_lid', chatLid)
+    .not('telefone', 'like', 'lid:%')
+  const selfId = Number(conversa?.id)
+  if (Number.isFinite(selfId) && selfId > 0) {
+    query = query.neq('id', selfId)
+  }
+  const instanceId = Number(conversa?.whatsapp_instance_id)
+  if (Number.isFinite(instanceId) && instanceId > 0) {
+    query = query.eq('whatsapp_instance_id', instanceId)
+  } else {
+    query = query.is('whatsapp_instance_id', null)
+  }
+  const { data: outra, error } = await query.limit(1).maybeSingle()
+  if (error) {
+    console.warn('[oldMessagesSync] sibling phone:', error.message || error)
+    return null
+  }
+  return pickRealPhoneCandidate(outra?.telefone)
+}
+
+/**
+ * Monta candidatos de chatId para UltraMSG.
+ * Nunca usa LID/`chat_lid` cru — só telefone real (conversa, cliente ou irmã).
+ */
+async function resolveChatIdsForConversation(company_id, conversa) {
   const candidates = []
   const push = (value) => {
     const raw = String(value || '').trim()
-    if (isUsableHistoryIdentifier(raw) && !candidates.includes(raw)) candidates.push(raw)
+    if (!raw || !isUsableHistoryIdentifier(raw)) return
+    if (!candidates.includes(raw)) candidates.push(raw)
+    for (const variant of possiblePhonesBR(raw)) {
+      if (variant && !candidates.includes(variant)) candidates.push(variant)
+    }
   }
-  const telefone = String(conversa?.telefone || '').trim()
+
   const cliente = Array.isArray(conversa?.clientes) ? conversa.clientes[0] : conversa?.clientes
-  const clienteTelefone = String(cliente?.telefone || '').trim()
-  const chatLid = String(conversa?.chat_lid || '').trim()
-  push(telefone)
-  push(clienteTelefone)
-  push(chatLid)
+  const fromConversa = pickRealPhoneCandidate(conversa?.telefone)
+  const fromCliente = pickRealPhoneCandidate(cliente?.telefone)
+  push(fromConversa)
+  push(fromCliente)
+
+  if (!candidates.length) {
+    const sibling = await resolveSiblingPhoneForOldSync(company_id, conversa)
+    push(sibling)
+  }
+
   return candidates
 }
 
@@ -777,7 +817,7 @@ async function syncOldMessagesForConversation(company_id, conversa_id, opts = {}
     return { ok: false, error: 'Use esta acao apenas em conversas individuais.' }
   }
 
-  const chatCandidates = resolveChatIdsForConversation(conversa)
+  const chatCandidates = await resolveChatIdsForConversation(company_id, conversa)
   if (!chatCandidates.length) {
     debugOldMessages('contact-sync-no-identifier', {
       company_id: Number(company_id),
@@ -786,7 +826,11 @@ async function syncOldMessagesForConversation(company_id, conversa_id, opts = {}
       chatLidTail: safeIdTail(conversa.chat_lid),
       cliente_id: conversa.cliente_id || null,
     }, opts)
-    return { ok: false, error: 'Conversa sem telefone/chat valido para buscar historico. Verifique se ela nao foi criada apenas com LID interno.' }
+    return {
+      ok: false,
+      error:
+        'Conversa sem telefone valido para buscar historico no WhatsApp. Aguarde uma mensagem do contato com numero, vincule um cliente com telefone, ou verifique se nao foi criada apenas com LID interno.',
+    }
   }
 
   const whatsappInstanceId = await resolveOldMessagesWhatsappInstanceId(company_id, conversa)
@@ -901,4 +945,6 @@ module.exports = {
   syncOldMessagesForCompany,
   syncOldMessagesForConversation,
   normalizeOldMessage,
+  isUsableHistoryIdentifier,
+  resolveChatIdsForConversation,
 }

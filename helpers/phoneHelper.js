@@ -187,6 +187,41 @@ function extractPhoneFromChatId(chatId) {
   return phone || ''
 }
 
+/**
+ * Chave sintética LID (espelhamento WhatsApp sem número real).
+ * Nunca deve ser exibida como telefone nem enviada ao UltraMSG como chatId.
+ */
+function isLidPhoneKey(phone) {
+  const s = String(phone || '').trim().toLowerCase()
+  if (!s) return false
+  return s.startsWith('lid:') || s.endsWith('@lid')
+}
+
+/**
+ * Primeiro telefone real entre candidatos (ignora vazio, LID, broadcast).
+ * Usado em UI (telefone_exibivel) e sync-old.
+ * Só aceita números que passam em normalizePhoneBR (evita IDs LID numéricos longos).
+ *
+ * @param {...unknown} values
+ * @returns {string|null}
+ */
+function pickRealPhoneCandidate(...values) {
+  for (const value of values) {
+    const raw = String(value || '').trim()
+    if (!raw || isLidPhoneKey(raw)) continue
+    const lower = raw.toLowerCase()
+    if (lower.includes('@broadcast') || lower.includes('@newsletter')) continue
+    if (lower.endsWith('@g.us')) continue
+    if (lower.endsWith('@c.us')) {
+      const fromChat = extractPhoneFromChatId(raw)
+      if (normalizePhoneBR(fromChat)) return raw
+      continue
+    }
+    if (normalizePhoneBR(raw)) return raw
+  }
+  return null
+}
+
 module.exports = {
   normalizePhoneBR,
   toZapiSendFormat,
@@ -195,5 +230,7 @@ module.exports = {
   normalizeGroupIdForStorage,
   isGroupChat,
   isIndividualChat,
-  extractPhoneFromChatId
+  extractPhoneFromChatId,
+  isLidPhoneKey,
+  pickRealPhoneCandidate,
 }

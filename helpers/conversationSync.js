@@ -64,8 +64,49 @@ function getCanonicalPhoneAnyIntl(phone) {
  * @param {number} canonicalId   - ID da conversa que fica
  * @param {number[]} dupIds      - IDs das conversas a eliminar
  */
-async function mergeConversasIntoCanonico(supabaseClient, company_id, canonicalId, dupIds) {
-  if (!dupIds || dupIds.length === 0) return
+/**
+ * Avisa clientes em tempo real que IDs antigos foram unificados no canônico.
+ * Frontend usa `merged_into` para redirecionar a conversa aberta (evita 404).
+ */
+function emitConversasMerged(io, company_id, canonicalId, mergedFromIds = []) {
+  if (!io || !company_id || !canonicalId) return
+  const room = `empresa_${Number(company_id)}`
+  const canonicalNumber = Number(canonicalId)
+  const fromIds = [...new Set(
+    (Array.isArray(mergedFromIds) ? mergedFromIds : [])
+      .map((id) => Number(id))
+      .filter((id) => Number.isFinite(id) && id > 0 && id !== canonicalNumber)
+  )]
+  for (const dupId of fromIds) {
+    const payload = {
+      id: dupId,
+      conversa_id: dupId,
+      removida: true,
+      merged_into: canonicalNumber,
+      company_id: Number(company_id),
+      motivo: 'merge_duplicata',
+    }
+    try {
+      io.to(room).emit('conversa_apagada', payload)
+      io.to(room).emit('atualizar_conversa', payload)
+    } catch (e) {
+      console.warn('[conversationSync] emit merge dup:', e?.message || e)
+    }
+  }
+  try {
+    io.to(room).emit('conversa_atualizada', { id: canonicalNumber, company_id: Number(company_id) })
+    io.to(room).emit('atualizar_conversa', { id: canonicalNumber, company_id: Number(company_id) })
+  } catch (e) {
+    console.warn('[conversationSync] emit merge canonico:', e?.message || e)
+  }
+}
+
+/**
+ * @returns {Promise<{ ok: boolean, canonicalId?: number, mergedFrom: number[] }>}
+ */
+async function mergeConversasIntoCanonico(supabaseClient, company_id, canonicalId, dupIds, opts = {}) {
+  const empty = { ok: false, mergedFrom: [] }
+  if (!dupIds || dupIds.length === 0) return empty
   try {
     const canonicalNumber = Number(canonicalId)
     const requestedDupIds = [...new Set(
@@ -74,7 +115,7 @@ async function mergeConversasIntoCanonico(supabaseClient, company_id, canonicalI
         .filter((id) => Number.isFinite(id) && id !== canonicalNumber)
     )]
 
-    if (!company_id || !Number.isFinite(canonicalNumber) || requestedDupIds.length === 0) return
+    if (!company_id || !Number.isFinite(canonicalNumber) || requestedDupIds.length === 0) return empty
 
     const { data: scopedConversations, error: scopedError } = await supabaseClient
       .from('conversas')
@@ -87,11 +128,11 @@ async function mergeConversasIntoCanonico(supabaseClient, company_id, canonicalI
     const scopedIds = new Set((scopedConversations || []).map((row) => Number(row.id)))
     if (!scopedIds.has(canonicalNumber)) {
       console.warn('[conversationSync] merge bloqueado: conversa canonica fora da empresa', { company_id, canonicalId })
-      return
+      return empty
     }
 
     const safeDupIds = requestedDupIds.filter((id) => scopedIds.has(id))
-    if (safeDupIds.length === 0) return
+    if (safeDupIds.length === 0) return empty
 
     await supabaseClient.from('mensagens').update({ conversa_id: canonicalNumber }).in('conversa_id', safeDupIds).eq('company_id', company_id)
     await supabaseClient.from('conversa_tags').update({ conversa_id: canonicalNumber }).in('conversa_id', safeDupIds).eq('company_id', company_id)
@@ -106,8 +147,11 @@ async function mergeConversasIntoCanonico(supabaseClient, company_id, canonicalI
         .eq('company_id', company_id)
     }
     console.log(`[conversationSync] 🧹 ${safeDupIds.length} duplicata(s) mesclada(s) → conv ${canonicalNumber}`)
+    emitConversasMerged(opts.io, company_id, canonicalNumber, safeDupIds)
+    return { ok: true, canonicalId: canonicalNumber, mergedFrom: safeDupIds }
   } catch (e) {
     console.warn('[conversationSync] ⚠️ falha ao mesclar duplicatas:', e?.message || e)
+    return empty
   }
 }
 
@@ -170,7 +214,13 @@ async function mergeConversationLidToPhone(supabaseClient, company_id, chatLid, 
   }
 
   try {
-    await mergeConversasIntoCanonico(supabaseClient, company_id, convByPhone.id, [convByLid.id])
+    const mergeResult = await mergeConversasIntoCanonico(
+      supabaseClient,
+      company_id,
+      convByPhone.id,
+      [convByLid.id],
+      { io: opts.io }
+    )
     await supabaseClient.from('conversas').update({ chat_lid: lidPart }).eq('id', convByPhone.id).eq('company_id', company_id)
 
     const cacheUpdates = {}
@@ -190,13 +240,22 @@ async function mergeConversationLidToPhone(supabaseClient, company_id, chatLid, 
 
     const io = opts.io
     if (io) {
-      const payload = { id: convByPhone.id, telefone: canonical, ...cacheUpdates }
+      // Cache/telefone do canônico (redirect dos IDs antigos já foi emitido no merge).
+      const payload = { id: convByPhone.id, telefone: canonical, company_id, ...cacheUpdates }
       io.to(`empresa_${company_id}`).emit('conversa_atualizada', payload)
-      io.to(`empresa_${company_id}`).emit('atualizar_conversa', { id: convByPhone.id })
     }
 
-    console.log('[conversationSync] 🔗 LID→PHONE:', { lidPart, canonical: canonical.slice(-8), conversa_id: convByPhone.id })
-    return { merged: true, conversa_id: convByPhone.id }
+    console.log('[conversationSync] 🔗 LID→PHONE:', {
+      lidPart,
+      canonical: canonical.slice(-8),
+      conversa_id: convByPhone.id,
+      mergedFrom: mergeResult?.mergedFrom || [],
+    })
+    return {
+      merged: true,
+      conversa_id: convByPhone.id,
+      merged_from: mergeResult?.mergedFrom || [convByLid.id],
+    }
   } catch (e) {
     console.warn('[conversationSync] ⚠️ mergeConversationLidToPhone:', e?.message || e)
     return { merged: false }
@@ -211,8 +270,19 @@ function hasValidFotoPerfil(url) {
 }
 
 /**
+ * Sticky por padrão (evita foto de match errado).
+ * Com refresh=true (sync UltraMSG do mesmo contato), permite trocar se a URL nova for diferente.
+ */
+function shouldUpdateFotoPerfil(existenteUrl, novoUrl, { refresh = false } = {}) {
+  if (!hasValidFotoPerfil(novoUrl)) return false
+  if (!hasValidFotoPerfil(existenteUrl)) return true
+  if (!refresh) return false
+  return String(novoUrl).trim() !== String(existenteUrl).trim()
+}
+
+/**
  * Aplica campos no cliente existente (sem anular com vazio) e retorna o id.
- * foto_perfil: sticky — só preenche se ainda vazia/inválida (evita foto de outro contato).
+ * foto_perfil: sticky — só preenche se ainda vazia/inválida; refresh explícito atualiza URL.
  */
 async function mergeAndReturnCliente(supabaseClient, company_id, existente, phone, fields) {
   const updates = {}
@@ -233,9 +303,12 @@ async function mergeAndReturnCliente(supabaseClient, company_id, existente, phon
   if (fields.pushname !== undefined && fields.pushname != null && String(fields.pushname).trim()) {
     updates.pushname = String(fields.pushname).trim()
   }
-  // Sticky: nunca trocar foto já válida (match errado / CDN de outro sync).
-  // Sync em lote (syncFotosProgressiva) atualiza direto por cliente_id e não passa por aqui.
-  if (fields.foto_perfil && hasValidFotoPerfil(fields.foto_perfil) && !hasValidFotoPerfil(existente.foto_perfil)) {
+  // Sticky padrão; sync UltraMSG do mesmo contato pode passar foto_perfil_refresh.
+  if (
+    shouldUpdateFotoPerfil(existente.foto_perfil, fields.foto_perfil, {
+      refresh: fields.foto_perfil_refresh === true,
+    })
+  ) {
     updates.foto_perfil = String(fields.foto_perfil).trim()
   }
   if (fields.wa_id != null && String(fields.wa_id).trim() && (!existente.wa_id || !String(existente.wa_id).trim())) {
@@ -694,6 +767,7 @@ async function findOrCreateConversation(supabaseClient, {
   whatsapp_instance_is_default = false,
   logPrefix = '',
   initial_status_atendimento = 'aberta',
+  io = null,
 }) {
   const whatsappInstanceId = normalizeWhatsappInstanceId(whatsapp_instance_id)
   const allowLegacyNullInstance = !!(whatsappInstanceId && whatsapp_instance_is_default === true)
@@ -781,7 +855,7 @@ async function findOrCreateConversation(supabaseClient, {
       const rowsToMerge = exactRows.length > 0 ? exactRows : foundScoped
       const canonicalConv = rowsToMerge[0]
       const dupIds = rowsToMerge.slice(1).map(c => c.id).filter(Boolean)
-      await mergeConversasIntoCanonico(supabaseClient, company_id, canonicalConv.id, dupIds)
+      await mergeConversasIntoCanonico(supabaseClient, company_id, canonicalConv.id, dupIds, { io })
     }
 
     let conv = foundScoped[0]
@@ -971,9 +1045,11 @@ module.exports = {
   findOrCreateConversation,
   mergeConversasIntoCanonico,
   mergeConversationLidToPhone,
+  emitConversasMerged,
   deduplicateConversationsByContact,
   sortConversationsByRecent,
   sortConversationsPinThenRecent,
   phonesMatchDigitally,
   hasValidFotoPerfil,
+  shouldUpdateFotoPerfil,
 }

@@ -13,7 +13,13 @@ const { getProvider } = require('../services/providers')
 const { getStatus } = require('../services/ultramsgIntegrationService')
 const { getDefaultWhatsappInstance, listWhatsappInstances, resolveWhatsappInstanceForManualAction, sanitizeWhatsappInstance } = require('../services/whatsappInstanceService')
 const { isGroupConversation, isClosedAttendanceStatus } = require('../helpers/conversaHelper')
-const { normalizePhoneBR, possiblePhonesBR, phoneKeyBR } = require('../helpers/phoneHelper')
+const {
+  normalizePhoneBR,
+  possiblePhonesBR,
+  phoneKeyBR,
+  isLidPhoneKey,
+  pickRealPhoneCandidate,
+} = require('../helpers/phoneHelper')
 const { deduplicateConversationsByContact, sortConversationsByRecent, sortConversationsPinThenRecent, getCanonicalPhone, getOrCreateCliente, findOrCreateConversation, mergeConversasIntoCanonico } = require('../helpers/conversationSync')
 const { enrichConversationsWithContactData } = require('../helpers/conversaEnrichment')
 const {
@@ -66,6 +72,14 @@ const {
 const { normalizarTimestampSemFusoAmbiguoParaApi } = require('../helpers/timestampApiCompat')
 const { isRealWhatsAppId, isUltramsgNumericQueueId } = require('../helpers/whatsappMessageIdHelper')
 const { schedulePendingOutboundReconciliation } = require('../services/pendingOutboundReconciliationService')
+const {
+  INTERNAL_NOTE_PERMISSAO,
+  REAL_MESSAGE_DIRECOES,
+  isInternalNoteRow,
+  sanitizeInternalNoteTexto,
+  buildInternalNoteInsert,
+} = require('../helpers/internalNote')
+const { usuarioTemPermissao } = require('../helpers/permissoesService')
 
 /**
  * Deduplicação in-memory para double-send de texto.
@@ -1437,7 +1451,7 @@ exports.listarConversas = async (req, res) => {
       hoje: hojeRaw,
     } = req.query
 
-    const filtroAusenciaLista =
+    const filtroAusenciaListaRaw =
       String(finalizacaoMotivoRaw ?? '')
         .trim()
         .toLowerCase() === 'ausencia_cliente'
@@ -1453,40 +1467,46 @@ exports.listarConversas = async (req, res) => {
       tempoParadoRaw != null && String(tempoParadoRaw).trim() !== ''
         ? String(tempoParadoRaw).trim().toLowerCase()
         : null
-    const tempoParadoHoras =
+    const tempoParadoHorasRaw =
       tempoParadoKey && Object.prototype.hasOwnProperty.call(TEMPO_PARADO_HORAS, tempoParadoKey)
         ? TEMPO_PARADO_HORAS[tempoParadoKey]
         : null
 
-    const aguardandoClienteAtivo =
+    const aguardandoClienteRawAtivo =
       aguardandoClienteRaw === '1' ||
       aguardandoClienteRaw === 'true' ||
       aguardandoClienteRaw === 1 ||
       aguardandoClienteRaw === true
 
-    const aguardandoAtendenteAtivo =
+    const aguardandoAtendenteRawAtivo =
       aguardandoAtendenteRaw === '1' ||
       aguardandoAtendenteRaw === 'true' ||
       aguardandoAtendenteRaw === 1 ||
       aguardandoAtendenteRaw === true
 
-    const pagamentoPendenteAtivo =
+    const pagamentoPendenteRawAtivo =
       pagamentoPendenteRaw === '1' ||
       pagamentoPendenteRaw === 'true' ||
       pagamentoPendenteRaw === 1 ||
       pagamentoPendenteRaw === true
 
-    const emAtrasoAtivo =
+    const emAtrasoRawAtivo =
       emAtrasoRaw === '1' ||
       emAtrasoRaw === 'true' ||
       emAtrasoRaw === 1 ||
       emAtrasoRaw === true
 
-    const hojeAtivo =
+    const hojeRawAtivo =
       hojeRaw === '1' ||
       hojeRaw === 'true' ||
       hojeRaw === 1 ||
       hojeRaw === true
+
+    const minhaFilaRawAtiva =
+      minhaFilaRaw === '1' ||
+      minhaFilaRaw === 'true' ||
+      minhaFilaRaw === 1 ||
+      minhaFilaRaw === true
 
     const tagFilterAtivo =
       tag_id != null &&
@@ -1524,18 +1544,6 @@ exports.listarConversas = async (req, res) => {
       return res.json({ conversas: [], colaboradores_encaminhar, pagination: emptyPagination })
     }
 
-    const isFinanceiroUser = await usuarioPertenceSetorFinanceiro(departamento_ids, company_id)
-
-    if ((pagamentoPendenteAtivo || emAtrasoAtivo) && !isFinanceiroUser) {
-      return sendEmptyChatListResponse(false)
-    }
-
-    const minhaFilaAtiva =
-      minhaFilaRaw === '1' ||
-      minhaFilaRaw === 'true' ||
-      minhaFilaRaw === 1 ||
-      minhaFilaRaw === true
-
     const incluirTodosClientesAtivo =
       incluirTodosClientes === '1' ||
       incluirTodosClientes === 'true' ||
@@ -1546,16 +1554,36 @@ exports.listarConversas = async (req, res) => {
     // Clientes sem conversa entram apenas em busca explicita e paginada.
     const incluirTodosClientesDefault = false
     const palavraTrim = palavra && String(palavra).trim() ? String(palavra).trim() : ''
+    // B01: com termo de busca, não restringir por aba/chip de estado (comportamento tipo WhatsApp).
+    // Mantém filtros avançados explícitos (tag, setor, datas, atendente_id).
+    const searchBypassesStateFilters = Boolean(palavraTrim)
+
+    const aguardandoClienteAtivo = searchBypassesStateFilters ? false : aguardandoClienteRawAtivo
+    const aguardandoAtendenteAtivo = searchBypassesStateFilters ? false : aguardandoAtendenteRawAtivo
+    const pagamentoPendenteAtivo = searchBypassesStateFilters ? false : pagamentoPendenteRawAtivo
+    const emAtrasoAtivo = searchBypassesStateFilters ? false : emAtrasoRawAtivo
+    const hojeAtivo = searchBypassesStateFilters ? false : hojeRawAtivo
+    const minhaFilaAtiva = searchBypassesStateFilters ? false : minhaFilaRawAtiva
+    const tempoParadoHoras = searchBypassesStateFilters ? null : tempoParadoHorasRaw
+    const filtroAusenciaLista = searchBypassesStateFilters ? false : filtroAusenciaListaRaw
+
+    const isFinanceiroUser = await usuarioPertenceSetorFinanceiro(departamento_ids, company_id)
+
+    if ((pagamentoPendenteAtivo || emAtrasoAtivo) && !isFinanceiroUser) {
+      return sendEmptyChatListResponse(false)
+    }
 
     const statusNorm =
-      !minhaFilaAtiva &&
-      !pagamentoPendenteAtivo &&
-      !emAtrasoAtivo &&
-      !hojeAtivo &&
-      status_atendimento != null &&
-      String(status_atendimento).trim() !== ''
-        ? String(status_atendimento).toLowerCase().trim()
-        : null
+      searchBypassesStateFilters
+        ? null
+        : !minhaFilaAtiva &&
+            !pagamentoPendenteAtivo &&
+            !emAtrasoAtivo &&
+            !hojeAtivo &&
+            status_atendimento != null &&
+            String(status_atendimento).trim() !== ''
+          ? String(status_atendimento).toLowerCase().trim()
+          : null
 
     /** Inteiro positivo (usuarios.id). UUID não é coluna de atendente_id na conversa — rejeitar valores não inteiros. */
     let filtroAtendenteInformado = null
@@ -2197,8 +2225,14 @@ exports.listarConversas = async (req, res) => {
       const isGroup = isGroupConversation(c)
       const ultimaMsg = Array.isArray(c.mensagens) && c.mensagens.length > 0 ? c.mensagens[0] : null
 
-      const isLid = !isGroup && c.telefone && String(c.telefone).trim().toLowerCase().startsWith('lid:')
-      const telefoneExibivel = isLid ? null : c.telefone
+      const isLid = !isGroup && isLidPhoneKey(c.telefone)
+      // LID: nunca exibir lid:xxx; se houver telefone real no cliente vinculado, liberar na UI.
+      // Não-LID: mantém o telefone da conversa (não exigir BR estrito só para exibir).
+      const telefoneExibivel = isGroup
+        ? c.telefone
+        : (isLid
+          ? (pickRealPhoneCandidate(clientesObj?.telefone) || null)
+          : (String(c.telefone || '').trim() || pickRealPhoneCandidate(clientesObj?.telefone) || null))
 
       const contatoNome = isGroup
         ? (c.nome_grupo || telefoneExibivel || 'Grupo')
@@ -2206,7 +2240,7 @@ exports.listarConversas = async (req, res) => {
             nomeCliente ||
             (c.nome_contato_cache && String(c.nome_contato_cache).trim()) ||
             telefoneExibivel ||
-            'Sem nome'
+            (isLid ? 'Contato' : 'Sem nome')
           )
 
       const fotoPerfil = isGroup
@@ -2950,6 +2984,8 @@ exports.mergeConversasDuplicadas = async (req, res) => {
     }
 
     let merged = 0
+    const redirects = []
+    const ioMerge = req.app.get('io')
     for (const [, list] of byKey) {
       if (list.length <= 1) continue
       list.sort((a, b) => {
@@ -2962,8 +2998,13 @@ exports.mergeConversasDuplicadas = async (req, res) => {
       const otherIds = list.slice(1).map((c) => c.id).filter(Boolean)
       if (otherIds.length === 0) continue
       try {
-        await mergeConversasIntoCanonico(supabase, cid, canonical.id, otherIds)
-        merged += otherIds.length
+        const mergeResult = await mergeConversasIntoCanonico(supabase, cid, canonical.id, otherIds, { io: ioMerge })
+        if (mergeResult?.ok && Array.isArray(mergeResult.mergedFrom)) {
+          merged += mergeResult.mergedFrom.length
+          for (const fromId of mergeResult.mergedFrom) {
+            redirects.push({ from: Number(fromId), to: Number(canonical.id) })
+          }
+        }
       } catch (e) {
         console.warn('mergeConversasDuplicadas:', e?.message || e)
       }
@@ -2987,9 +3028,14 @@ exports.mergeConversasDuplicadas = async (req, res) => {
         .sort((a, b) => new Date(b.ultima_atividade || 0).getTime() - new Date(a.ultima_atividade || 0).getTime())[0]
       if (canonPhone) {
         try {
-          await mergeConversasIntoCanonico(supabase, cid, canonPhone.id, [lidConv.id])
-          merged += 1
-          await supabase.from('conversas').update({ chat_lid: lidPart }).eq('id', canonPhone.id).eq('company_id', cid)
+          const mergeResult = await mergeConversasIntoCanonico(supabase, cid, canonPhone.id, [lidConv.id], { io: ioMerge })
+          if (mergeResult?.ok && Array.isArray(mergeResult.mergedFrom) && mergeResult.mergedFrom.length) {
+            merged += mergeResult.mergedFrom.length
+            for (const fromId of mergeResult.mergedFrom) {
+              redirects.push({ from: Number(fromId), to: Number(canonPhone.id) })
+            }
+            await supabase.from('conversas').update({ chat_lid: lidPart }).eq('id', canonPhone.id).eq('company_id', cid)
+          }
         } catch (e) {
           console.warn('mergeConversasDuplicadas LID:', e?.message || e)
         }
@@ -3000,7 +3046,7 @@ exports.mergeConversasDuplicadas = async (req, res) => {
     if (clientesRemovidos) msgParts.push(`${clientesRemovidos} contato(s) removido(s)`)
     if (merged) msgParts.push(`${merged} conversa(s) unificada(s)`)
     const message = msgParts.length ? msgParts.join('. ') + '.' : 'Nenhuma duplicata encontrada.'
-    return res.json({ ok: true, merged, clientesRemovidos, message })
+    return res.json({ ok: true, merged, clientesRemovidos, redirects, message })
   } catch (err) {
     console.error(err)
     return res.status(500).json({ error: 'Erro ao mesclar duplicatas' })
@@ -4081,12 +4127,21 @@ exports.detalharChat = async (req, res) => {
       }
     }
 
-    // Bloqueia visão das mensagens quando a conversa está assumida por outro usuário
-    // (apenas admin e supervisor podem ver; atendente que não assumiu não vê o conteúdo)
+    // Bloqueia visão das mensagens quando a conversa está assumida por outro usuário.
+    // Exceções: admin, supervisor, conversa encerrada, participante ativo (alinha com assertPermissaoConversa/envio).
     const isSupervisor = role === 'supervisor'
     const conversaAssumidaPorOutro = conversa.atendente_id != null && Number(conversa.atendente_id) !== Number(user_id)
+    let isParticipanteAtivo = false
+    if (!isGroup && !conversaEncerrada && conversaAssumidaPorOutro && !isAdmin && !isSupervisor) {
+      isParticipanteAtivo = await usuarioParticipaAtivamenteDaConversa(company_id, id, user_id)
+    }
     const deveBloquearMensagens =
-      !isGroup && !conversaEncerrada && conversaAssumidaPorOutro && !isAdmin && !isSupervisor
+      !isGroup &&
+      !conversaEncerrada &&
+      conversaAssumidaPorOutro &&
+      !isAdmin &&
+      !isSupervisor &&
+      !isParticipanteAtivo
 
     // mensagens paginadas (remetente_nome/remetente_telefone para grupos; fallback se colunas não existirem)
     const selectComRemetente = 'id, conversa_id, texto, direcao, criado_em, autor_usuario_id, status, whatsapp_id, whatsapp_instance_id, tipo, url, nome_arquivo, reply_meta, remetente_nome, remetente_telefone, contact_meta, location_meta, apagada_para_todos, apagada_em, audio_duracao_sec'
@@ -4176,17 +4231,38 @@ exports.detalharChat = async (req, res) => {
     if (clientesConv && clientesConv.company_id != null && Number(clientesConv.company_id) !== Number(company_id)) {
       clientesConv = null
     }
-    // Nunca exibir LID (lid:xxx) como nome ou número — identificador interno do WhatsApp
-    const isLidConv = !isGroup && conversa.telefone && String(conversa.telefone).trim().toLowerCase().startsWith('lid:')
+    // Nunca exibir LID (lid:xxx) como nome ou número — identificador interno do WhatsApp.
+    // Se a conversa ainda é lid: mas há telefone real no cliente (ou irmã), exibir esse número.
+    const isLidConv = !isGroup && isLidPhoneKey(conversa.telefone)
     const clienteNome = getDisplayName(clientesConv)
     const nomeCache = (conversa.nome_contato_cache && String(conversa.nome_contato_cache).trim()) ? String(conversa.nome_contato_cache).trim() : null
+    let telefoneExibivel = null
+    if (isGroup) {
+      telefoneExibivel = conversa.telefone || null
+    } else if (isLidConv) {
+      telefoneExibivel = pickRealPhoneCandidate(clientesConv?.telefone) || null
+      if (!telefoneExibivel && conversa.chat_lid) {
+        try {
+          const siblingPhone = await resolveTelefoneFromLidSiblingConversation(
+            company_id,
+            conversa,
+            conversa.whatsapp_instance_id
+          )
+          telefoneExibivel = pickRealPhoneCandidate(siblingPhone)
+        } catch (siblingErr) {
+          console.warn('[detalharChat] telefone irma LID:', siblingErr?.message || siblingErr)
+        }
+      }
+    } else {
+      const rawTel = String(conversa.telefone || '').trim()
+      telefoneExibivel = rawTel || pickRealPhoneCandidate(clientesConv?.telefone) || null
+    }
     const nomeUnico = isGroup
       ? (conversa.nome_grupo ?? conversa.telefone ?? 'Grupo')
-      : (isLidConv ? 'Contato' : (clienteNome || nomeCache || null))
+      : (clienteNome || nomeCache || (isLidConv && !telefoneExibivel ? 'Contato' : null))
     const clienteTelefoneExibivel = isGroup
       ? conversa.telefone
-      : (isLidConv ? null : (conversa.telefone ?? clientesConv?.telefone ?? null))
-    const telefoneExibivel = isLidConv ? null : (conversa.telefone ?? clientesConv?.telefone ?? null)
+      : (telefoneExibivel || pickRealPhoneCandidate(clientesConv?.telefone) || null)
     const fotoCache = (conversa.foto_perfil_contato_cache && String(conversa.foto_perfil_contato_cache).trim()) ? String(conversa.foto_perfil_contato_cache).trim() : null
     const fotoUnica = isGroup ? (conversa.foto_grupo ?? null) : (clientesConv?.foto_perfil ?? fotoCache ?? null)
     // Badge "Aberta": só exibir quando há movimentação (mensagem ou atendente assumiu) — mesma regra da lista
@@ -4403,8 +4479,12 @@ exports.buscarMensagensConversa = async (req, res) => {
     const isAdmin = role === 'admin'
     const isSupervisor = role === 'supervisor'
     const conversaAssumidaPorOutro = conv.atendente_id != null && Number(conv.atendente_id) !== Number(user_id)
-    if (!isGroup && conversaAssumidaPorOutro && !isAdmin && !isSupervisor) {
-      return res.status(403).json({ error: 'Mensagens indisponíveis para conversa assumida por outro usuário' })
+    const conversaEncerradaBusca = isClosedAttendanceStatus(conv.status_atendimento)
+    if (!isGroup && conversaAssumidaPorOutro && !isAdmin && !isSupervisor && !conversaEncerradaBusca) {
+      const isParticipanteAtivo = await usuarioParticipaAtivamenteDaConversa(company_id, id, user_id)
+      if (!isParticipanteAtivo) {
+        return res.status(403).json({ error: 'Mensagens indisponíveis para conversa assumida por outro usuário' })
+      }
     }
 
     const selectComRemetente = 'id, conversa_id, texto, direcao, criado_em, autor_usuario_id, status, whatsapp_id, whatsapp_instance_id, tipo, url, nome_arquivo, reply_meta, remetente_nome, remetente_telefone, contact_meta, location_meta, apagada_para_todos, apagada_em, audio_duracao_sec'
@@ -5187,6 +5267,173 @@ exports.listarAtendentesDisponiveisConversa = async (req, res) => {
   } catch (err) {
     console.error(err)
     return res.status(500).json({ error: 'Erro ao listar atendentes disponiveis' })
+  }
+}
+
+exports.criarNotaInterna = async (req, res) => {
+  try {
+    const { company_id, id: user_id, perfil, departamento_ids = [] } = req.user
+    const { id: conversa_id } = req.params
+
+    let texto
+    try {
+      texto = sanitizeInternalNoteTexto(req.body?.texto)
+    } catch (e) {
+      return res.status(400).json({ error: e.message })
+    }
+
+    const podeAnotar = await usuarioTemPermissao({
+      usuario_id: user_id,
+      company_id,
+      perfil,
+      permissao_codigo: INTERNAL_NOTE_PERMISSAO,
+    })
+    if (!podeAnotar) {
+      return res.status(403).json({ error: 'Sem permissão para criar nota interna' })
+    }
+
+    const perm = await assertPermissaoConversa({ company_id, conversa_id, user_id, role: perfil, user_dep_ids: departamento_ids })
+    if (!perm.ok) return res.status(perm.status).json({ error: perm.error })
+
+    if (perm.conv && isGroupConversation(perm.conv)) {
+      return res.status(400).json({ error: 'Notas internas não são suportadas em grupos' })
+    }
+
+    const { data: nota, error: insertErr } = await supabase
+      .from('mensagens')
+      .insert(buildInternalNoteInsert({ company_id, conversa_id, autor_usuario_id: user_id, texto }))
+      .select('id, company_id, conversa_id, texto, tipo, direcao, status, autor_usuario_id, criado_em')
+      .single()
+
+    if (insertErr) {
+      console.error('[criarNotaInterna] insert error:', insertErr?.message)
+      return res.status(500).json({ error: 'Erro ao salvar nota interna' })
+    }
+
+    const { data: autorRow } = await supabase
+      .from('usuarios')
+      .select('id, nome')
+      .eq('company_id', Number(company_id))
+      .eq('id', Number(user_id))
+      .maybeSingle()
+
+    const notaEnriquecida = {
+      ...nota,
+      criado_em: normalizarTimestampSemFusoAmbiguoParaApi(nota.criado_em),
+      usuario_id: Number(user_id),
+      usuario_nome: autorRow?.nome || null,
+      enviado_por_usuario: false,
+      fromMe: false,
+    }
+
+    const io = req.app.get('io')
+    if (io) {
+      await emitirParaUsuariosQuePodemVerConversa(io, company_id, conversa_id, 'mensagem_interna_atendimento', notaEnriquecida)
+    }
+
+    return res.status(201).json({ ok: true, nota: notaEnriquecida })
+  } catch (err) {
+    console.error('[criarNotaInterna]', err)
+    return res.status(500).json({ error: 'Erro ao criar nota interna' })
+  }
+}
+
+exports.removerAtendenteConversa = async (req, res) => {
+  try {
+    const { company_id, id: user_id, perfil, departamento_ids = [] } = req.user
+    const { id: conversa_id, usuario_id: usuarioParaRemoverId } = req.params
+
+    const uidRemover = Number(usuarioParaRemoverId)
+    if (!Number.isInteger(uidRemover) || uidRemover <= 0) {
+      return res.status(400).json({ error: 'usuario_id inválido' })
+    }
+
+    const perm = await assertPermissaoConversa({ company_id, conversa_id, user_id, role: perfil, user_dep_ids: departamento_ids })
+    if (!perm.ok) return res.status(perm.status).json({ error: perm.error })
+
+    // Responsável principal não pode ser removido — transferir é o fluxo correto
+    if (perm.conv?.atendente_id && Number(perm.conv.atendente_id) === uidRemover) {
+      return res.status(409).json({ error: 'O responsável principal não pode ser removido. Use Transferir.' })
+    }
+
+    // Verifica se existe participação ativa
+    const { data: participante } = await supabase
+      .from('conversa_atendentes')
+      .select('id')
+      .eq('company_id', Number(company_id))
+      .eq('conversa_id', Number(conversa_id))
+      .eq('usuario_id', uidRemover)
+      .eq('ativo', true)
+      .maybeSingle()
+
+    if (!participante) {
+      return res.status(404).json({ error: 'Participante não encontrado nesta conversa' })
+    }
+
+    // Soft-delete: marca como inativo com timestamp e quem removeu
+    const updatePayload = { ativo: false }
+    try {
+      updatePayload.removido_em = new Date().toISOString()
+      updatePayload.removido_por = Number(user_id)
+    } catch (_) {}
+
+    const { data: updated, error: updateErr } = await supabase
+      .from('conversa_atendentes')
+      .update(updatePayload)
+      .eq('id', participante.id)
+      .eq('ativo', true)
+      .select('id')
+      .maybeSingle()
+
+    if (updateErr) {
+      return res.status(500).json({ error: 'Erro ao remover atendente' })
+    }
+
+    if (!updated) {
+      return res.status(409).json({ error: 'Conflito: participante já foi removido por outra operação' })
+    }
+
+    const { data: removedUser } = await supabase
+      .from('usuarios')
+      .select('nome')
+      .eq('company_id', Number(company_id))
+      .eq('id', uidRemover)
+      .maybeSingle()
+    const { data: byUser } = await supabase
+      .from('usuarios')
+      .select('nome')
+      .eq('company_id', Number(company_id))
+      .eq('id', Number(user_id))
+      .maybeSingle()
+
+    await registrarAtendimento({
+      conversa_id,
+      company_id,
+      acao: 'removeu_atendente',
+      de_usuario_id: user_id,
+      para_usuario_id: uidRemover,
+      observacao: `${byUser?.nome || 'Usuário'} removeu ${removedUser?.nome || 'atendente'} do atendimento.`,
+    })
+
+    invalidateConversaVisibilityCache(company_id, conversa_id)
+
+    const io = req.app.get('io')
+    if (io) {
+      const payload = {
+        conversa_id: Number(conversa_id),
+        company_id: Number(company_id),
+        usuario_id: uidRemover,
+        removido_por: Number(user_id),
+      }
+      emitirParaUsuario(io, uidRemover, 'conversa_atendente_removido', payload)
+      emitirConversaAtualizada(io, company_id, conversa_id, { id: Number(conversa_id), company_id: Number(company_id) })
+      emitirSincronizacaoListaConversas(io, company_id, conversa_id)
+    }
+
+    return res.json({ ok: true })
+  } catch (err) {
+    console.error('[removerAtendenteConversa]', err)
+    return res.status(500).json({ error: 'Erro ao remover atendente da conversa' })
   }
 }
 
@@ -6795,6 +7042,11 @@ exports.excluirMensagem = async (req, res) => {
 
     if (errMsgSel) return res.status(500).json({ error: errMsgSel.message })
     if (!msg) return res.status(404).json({ error: 'Mensagem não encontrada' })
+
+    // Notas internas não existem no WhatsApp — "apagar para todos" não faz sentido
+    if (isInternalNoteRow(msg) && scope !== 'me' && scope !== 'mim' && scope !== 'self') {
+      return res.status(400).json({ error: 'Notas internas não podem ser apagadas para todos (não existem no WhatsApp)' })
+    }
 
     // =====================================================
     // Apagar "pra mim" (persistente): oculta para este usuário
@@ -8610,7 +8862,7 @@ exports.encaminharMensagem = async (req, res) => {
 
     const { data: mensagensRows, error: errMsg } = await supabase
       .from('mensagens')
-      .select('id, texto, tipo, url, nome_arquivo, contact_meta, location_meta, conversa_id')
+      .select('id, texto, tipo, direcao, url, nome_arquivo, contact_meta, location_meta, conversa_id')
       .eq('company_id', company_id)
       .in('id', orderedIds)
 
@@ -8622,6 +8874,12 @@ exports.encaminharMensagem = async (req, res) => {
     const missing = orderedIds.filter((id) => !byId.has(id))
     if (missing.length) {
       return res.status(404).json({ error: `Mensagem(ns) não encontrada(s): ${missing.join(', ')}` })
+    }
+
+    // Notas internas não existem no WhatsApp — não podem ser encaminhadas
+    const notasInternas = orderedIds.filter((id) => isInternalNoteRow(byId.get(id)))
+    if (notasInternas.length > 0) {
+      return res.status(400).json({ error: 'Notas internas não podem ser encaminhadas (não existem no WhatsApp)' })
     }
 
     // Buscar conversa de destino

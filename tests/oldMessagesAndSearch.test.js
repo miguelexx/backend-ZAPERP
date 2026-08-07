@@ -1,11 +1,43 @@
-const { normalizeOldMessage } = require('../services/oldMessagesSyncService')
+const {
+  normalizeOldMessage,
+  isUsableHistoryIdentifier,
+  resolveChatIdsForConversation,
+} = require('../services/oldMessagesSyncService')
+const { pickRealPhoneCandidate, isLidPhoneKey } = require('../helpers/phoneHelper')
 const {
   buildClienteSearchOr,
+  buildClienteListagemSearchOr,
   buildTelefoneSearchOr,
   buildPhoneSearchTerms,
 } = require('../helpers/chatSearchHelper')
 
 describe('old messages contact sync', () => {
+  test('rejeita LID e chat_lid numerico como identificador de historico UltraMSG', () => {
+    expect(isUsableHistoryIdentifier('lid:123456789012345')).toBe(false)
+    expect(isUsableHistoryIdentifier('123456789012345@lid')).toBe(false)
+    expect(isUsableHistoryIdentifier('22099032859659')).toBe(false)
+    expect(isUsableHistoryIdentifier('553499911246')).toBe(true)
+    expect(isUsableHistoryIdentifier('553499911246@c.us')).toBe(true)
+  })
+
+  test('resolve candidatos de sync-old pelo telefone do cliente mesmo com conversa lid:', async () => {
+    const candidates = await resolveChatIdsForConversation(1, {
+      id: 10,
+      telefone: 'lid:999888777',
+      chat_lid: '999888777',
+      clientes: { telefone: '3499911246', company_id: 1 },
+    })
+    expect(candidates.some((c) => String(c).includes('3499911246') || String(c).includes('553499911246'))).toBe(true)
+    expect(candidates.every((c) => !String(c).toLowerCase().startsWith('lid:'))).toBe(true)
+    expect(candidates).not.toContain('999888777')
+  })
+
+  test('pickRealPhoneCandidate ignora LID e aceita telefone BR do cliente', () => {
+    expect(isLidPhoneKey('lid:abc')).toBe(true)
+    expect(pickRealPhoneCandidate('lid:abc', '3499911246')).toBe('3499911246')
+    expect(pickRealPhoneCandidate('lid:abc', null)).toBe(null)
+  })
+
   test('marca item sem texto/midia como placeholder vazio para nao importar preview falso', () => {
     const normalized = normalizeOldMessage(
       {
@@ -54,6 +86,17 @@ describe('chat search helpers', () => {
     expect(or).toContain('nome.ilike."%Sompo%"')
     expect(or).toContain('pushname.ilike."%Sompo%"')
     expect(or).toContain('telefone.ilike."%Sompo%"')
+  })
+
+  test('listagem GET /clientes inclui observacoes e variantes BR com quote PostgREST', () => {
+    const or = buildClienteListagemSearchOr('+55 (34) 9991-1246')
+    expect(or).toContain('observacoes.ilike.')
+    expect(or).toContain('nome.ilike.')
+    expect(or).toContain('pushname.ilike.')
+    expect(or).toContain('telefone.ilike."%553499911246%"')
+    expect(or).toContain('telefone.ilike."%3499911246%"')
+    expect(or).toEqual(expect.stringMatching(/telefone\.ilike\."%55\d{10,11}%"/))
+    expect(or).not.toMatch(/ilike\.%/)
   })
 
   test('busca de telefone em conversas usa termo bruto e variacoes numericas', () => {

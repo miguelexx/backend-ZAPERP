@@ -2116,7 +2116,9 @@ exports.receberZapi = async (req, res) => {
         }
 
         if (convByLid && convByPhone && convByLid.id !== convByPhone.id) {
-          await mergeConversasIntoCanonico(supabase, company_id, convByPhone.id, [convByLid.id])
+          await mergeConversasIntoCanonico(supabase, company_id, convByPhone.id, [convByLid.id], {
+            io: req.app.get('io'),
+          })
           await supabase.from('conversas').update({ chat_lid: lidPart }).eq('id', convByPhone.id).eq('company_id', company_id)
           conversa_id = convByPhone.id
           departamento_id = convByPhone.departamento_id ?? null
@@ -2162,6 +2164,7 @@ exports.receberZapi = async (req, res) => {
           logPrefix: `[Z-API fromMe=${fromMe}]`,
           // Sempre aberta ao criar; mensagem_disparada só após insert se for 1ª msg e WhatsApp externo (sem autor).
           initial_status_atendimento: 'aberta',
+          io: req.app.get('io'),
         })
 
         if (!syncResult) {

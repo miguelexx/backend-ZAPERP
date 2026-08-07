@@ -16,6 +16,7 @@ const {
 } = require('../helpers/whatsappMessageIdHelper')
 const { formatTextoWhatsappComNomeAtendente } = require('../helpers/mensagemAtendenteNomeHelper')
 const { captionWhatsappParaMidia } = require('../helpers/midiaMensagemHelper')
+const { isInternalNoteRow } = require('../helpers/internalNote')
 
 const deferredTimers = new Map()
 const companyProviderCache = new Map()
@@ -500,6 +501,7 @@ async function fetchPendingOutboundRows({ companyId = null, limit = null, mensag
   const { data, error } = await query
   if (error) return { ok: false, rows: [], error: error.message }
   const rows = (data || []).filter((row) => {
+    if (isInternalNoteRow(row)) return false
     const st = String(row.status_mensagem || row.status || '').toLowerCase()
     return ['pending', 'sending'].includes(st)
   })

@@ -1632,11 +1632,31 @@ function phoneToChatId(phone) {
 
 // Cache para contatos sem foto (evita requisições repetidas)
 const noProfilePictureCache = new Map()
-const NO_PICTURE_CACHE_TTL = 24 * 60 * 60 * 1000 // 24 horas
+// B09: 1h (antes 24h) — permite nova tentativa se o contato passar a ter foto
+const NO_PICTURE_CACHE_TTL = 60 * 60 * 1000
 
 // Rate limiting para requisições de foto de perfil
 const profilePictureRateLimit = new Map()
 const PROFILE_PICTURE_RATE_LIMIT_MS = 2000 // 2 segundos entre requisições por instância
+
+/**
+ * Invalida cache “sem foto” para um chatId/telefone (ex.: ao abrir conversa / refresh).
+ * Aceita chatId completo ou dígitos; remove chaves que terminam com o chatId normalizado.
+ */
+function invalidateNoProfilePictureCache(chatIdOrPhone) {
+  const raw = String(chatIdOrPhone || '').trim()
+  if (!raw) return false
+  const chatId = raw.includes('@') ? raw : phoneToChatId(raw)
+  if (!chatId) return false
+  let removed = false
+  for (const key of [...noProfilePictureCache.keys()]) {
+    if (key === chatId || key.endsWith(`:${chatId}`)) {
+      noProfilePictureCache.delete(key)
+      removed = true
+    }
+  }
+  return removed
+}
 
 // Limpeza periódica dos caches (a cada 6 horas)
 const cacheCleanupInterval = setInterval(() => {
@@ -2223,6 +2243,7 @@ module.exports = {
   getGroup,
   uploadMedia,
   getProfilePicture,
+  invalidateNoProfilePictureCache,
   getContactMetadata,
   getChatMessages,
   configureWebhooks,

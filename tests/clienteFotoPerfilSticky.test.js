@@ -1,12 +1,13 @@
 /**
  * Evita foto de perfil de um cliente em outro:
  * - match de telefone sem colisão por últimos 8/10 do E.164
- * - foto_perfil sticky no merge
+ * - foto_perfil sticky no merge (com refresh explícito)
  */
 
 const {
   phonesMatchDigitally,
   hasValidFotoPerfil,
+  shouldUpdateFotoPerfil,
 } = require('../helpers/conversationSync')
 
 describe('phonesMatchDigitally — sem colisão entre clientes', () => {
@@ -39,5 +40,39 @@ describe('hasValidFotoPerfil — sticky', () => {
     expect(hasValidFotoPerfil(null)).toBe(false)
     expect(hasValidFotoPerfil('')).toBe(false)
     expect(hasValidFotoPerfil('null')).toBe(false)
+  })
+})
+
+describe('shouldUpdateFotoPerfil — sticky + refresh', () => {
+  test('preenche quando existente vazia', () => {
+    expect(shouldUpdateFotoPerfil(null, 'https://cdn.example/a.jpg')).toBe(true)
+    expect(shouldUpdateFotoPerfil('', 'https://cdn.example/a.jpg')).toBe(true)
+  })
+
+  test('sem refresh não troca foto já válida', () => {
+    expect(
+      shouldUpdateFotoPerfil('https://cdn.example/old.jpg', 'https://cdn.example/new.jpg')
+    ).toBe(false)
+  })
+
+  test('com refresh troca se URL diferente', () => {
+    expect(
+      shouldUpdateFotoPerfil('https://cdn.example/old.jpg', 'https://cdn.example/new.jpg', {
+        refresh: true,
+      })
+    ).toBe(true)
+  })
+
+  test('com refresh não atualiza se URL igual', () => {
+    expect(
+      shouldUpdateFotoPerfil('https://cdn.example/a.jpg', 'https://cdn.example/a.jpg', {
+        refresh: true,
+      })
+    ).toBe(false)
+  })
+
+  test('nunca aplica URL inválida', () => {
+    expect(shouldUpdateFotoPerfil(null, 'null')).toBe(false)
+    expect(shouldUpdateFotoPerfil('https://cdn.example/a.jpg', '', { refresh: true })).toBe(false)
   })
 })
