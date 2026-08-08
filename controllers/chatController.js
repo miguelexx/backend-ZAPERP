@@ -5307,8 +5307,9 @@ exports.criarNotaInterna = async (req, res) => {
       .single()
 
     if (insertErr) {
-      console.error('[criarNotaInterna] insert error:', insertErr?.message, insertErr?.details, insertErr?.hint)
-      return res.status(500).json({ error: 'Erro ao salvar nota interna', _debug: insertErr?.message })
+      console.error('[criarNotaInterna] insert error:', insertErr?.message, insertErr?.details, insertErr?.hint, insertErr?.code)
+      const _debug = [insertErr?.code, insertErr?.message, insertErr?.details, insertErr?.hint].filter(Boolean).join(' | ')
+      return res.status(500).json({ error: 'Erro ao salvar nota interna', _debug })
     }
 
     const { data: autorRow } = await supabase
