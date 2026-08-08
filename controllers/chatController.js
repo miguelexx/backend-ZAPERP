@@ -74,6 +74,7 @@ const { isRealWhatsAppId, isUltramsgNumericQueueId } = require('../helpers/whats
 const { schedulePendingOutboundReconciliation } = require('../services/pendingOutboundReconciliationService')
 const {
   INTERNAL_NOTE_PERMISSAO,
+  INTERNAL_NOTE_STATUS,
   REAL_MESSAGE_DIRECOES,
   isInternalNoteRow,
   sanitizeInternalNoteTexto,
@@ -5302,12 +5303,12 @@ exports.criarNotaInterna = async (req, res) => {
     const { data: nota, error: insertErr } = await supabase
       .from('mensagens')
       .insert(buildInternalNoteInsert({ company_id, conversa_id, autor_usuario_id: user_id, texto }))
-      .select('id, company_id, conversa_id, texto, tipo, direcao, status, autor_usuario_id, criado_em')
+      .select('id, company_id, conversa_id, texto, tipo, direcao, autor_usuario_id, criado_em')
       .single()
 
     if (insertErr) {
-      console.error('[criarNotaInterna] insert error:', insertErr?.message)
-      return res.status(500).json({ error: 'Erro ao salvar nota interna' })
+      console.error('[criarNotaInterna] insert error:', insertErr?.message, insertErr?.details, insertErr?.hint)
+      return res.status(500).json({ error: 'Erro ao salvar nota interna', _debug: insertErr?.message })
     }
 
     const { data: autorRow } = await supabase
@@ -5319,6 +5320,7 @@ exports.criarNotaInterna = async (req, res) => {
 
     const notaEnriquecida = {
       ...nota,
+      status: INTERNAL_NOTE_STATUS,
       criado_em: normalizarTimestampSemFusoAmbiguoParaApi(nota.criado_em),
       usuario_id: Number(user_id),
       usuario_nome: autorRow?.nome || null,
@@ -5547,6 +5549,11 @@ exports.adicionarAtendenteConversa = async (req, res) => {
 
     if (await usuarioParticipaAtivamenteDaConversa(company_id, conversa_id, usuario_id)) {
       return res.status(409).json({ error: 'Este atendente ja participa da conversa.' })
+    }
+
+    const participantesAtivos = await getConversaParticipanteIdsAtivos(company_id, conversa_id)
+    if (participantesAtivos.length >= 3) {
+      return res.status(409).json({ error: 'Limite de 4 atendentes por conversa atingido (1 principal + 3 co-atendentes).' })
     }
 
     const { data: inserted, error: insertError } = await supabase

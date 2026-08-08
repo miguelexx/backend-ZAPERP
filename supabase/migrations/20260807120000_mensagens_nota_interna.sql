@@ -1,15 +1,31 @@
 -- Suporte a notas internas no thread de mensagens.
--- Uma nota interna usa tipo='internal_note', direcao='interna', status='interna'
--- e nunca sai para o WhatsApp.
+-- Uma nota interna usa tipo='internal_note' e direcao='interna'.
+-- Nunca sai para o WhatsApp.
 
--- Autor da nota interna (usuario que criou, nullable para msgs normais)
-ALTER TABLE public.mensagens
-  ADD COLUMN IF NOT EXISTS autor_usuario_id integer REFERENCES public.usuarios(id) ON DELETE SET NULL;
+-- Remove qualquer check constraint em direcao que bloquearia o valor 'interna'.
+-- (Seguro: a constraint pode não existir; o DO-block verifica antes de dropar.)
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conrelid = 'public.mensagens'::regclass
+      AND contype = 'c'
+      AND conname ILIKE '%direcao%'
+  ) THEN
+    EXECUTE (
+      SELECT 'ALTER TABLE public.mensagens DROP CONSTRAINT ' || quote_ident(conname)
+      FROM pg_constraint
+      WHERE conrelid = 'public.mensagens'::regclass
+        AND contype = 'c'
+        AND conname ILIKE '%direcao%'
+      LIMIT 1
+    );
+  END IF;
+END $$;
 
--- Índice para listar/verificar notas internas de uma conversa com performance
+-- Índice para listar notas internas de uma conversa com performance
 CREATE INDEX IF NOT EXISTS idx_mensagens_nota_interna
   ON public.mensagens (company_id, conversa_id, criado_em DESC)
   WHERE tipo = 'internal_note';
 
--- Garante que a coluna pode ser lida via PostgREST
 COMMENT ON COLUMN public.mensagens.autor_usuario_id IS 'Usuário que criou a nota interna (NULL para mensagens normais).';

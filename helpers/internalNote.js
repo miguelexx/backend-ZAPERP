@@ -65,7 +65,8 @@ function sanitizeInternalNoteTexto(raw) {
 
 /**
  * Monta o payload de INSERT para nota interna.
- * Garante que campos sensíveis estejam corretos independente do body HTTP.
+ * Usa apenas colunas essenciais (NOT NULL + identificadores da nota) para máxima compatibilidade.
+ * Campos opcionais (url, nome_arquivo, etc.) ficam com DEFAULT do banco.
  */
 function buildInternalNoteInsert({ company_id, conversa_id, autor_usuario_id, texto }) {
   return {
@@ -73,13 +74,8 @@ function buildInternalNoteInsert({ company_id, conversa_id, autor_usuario_id, te
     conversa_id: Number(conversa_id),
     autor_usuario_id: Number(autor_usuario_id),
     texto: texto,
-    tipo: INTERNAL_NOTE_TIPO,
-    direcao: INTERNAL_NOTE_DIRECAO,
-    status: INTERNAL_NOTE_STATUS,
-    whatsapp_id: null,
-    url: null,
-    nome_arquivo: null,
-    client_temp_id: null,
+    tipo: INTERNAL_NOTE_TIPO,   // 'internal_note' — identificador primário
+    direcao: INTERNAL_NOTE_DIRECAO, // 'interna' — exclui de queries in/out
   }
 }
 
