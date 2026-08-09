@@ -100,7 +100,8 @@ let _audioDuracaoSecColumnUnavailable = false
 
 /**
  * Duração em segundos a partir do FormData do upload de áudio/voice.
- * Preferência: audio_duration_ms (metadado da gravação) → audio_elapsed_ms → audio_duracao_sec.
+ * Usa o MENOR entre elapsed e duration: elapsed (relógio de parede) é confiável;
+ * duration vem do <audio> lendo o WebM cru e pode ser inflado no container sem Duration.
  */
 function parseAudioDuracaoSecFromBody(body) {
   if (!body || typeof body !== 'object') return null
@@ -114,9 +115,12 @@ function parseAudioDuracaoSecFromBody(body) {
     if (!Number.isFinite(n) || n <= 0) return null
     return Math.max(1, Math.min(600, Math.round(n)))
   }
+  const elapsed = fromMs(body.audio_elapsed_ms)
+  const duration = fromMs(body.audio_duration_ms)
+  if (elapsed && duration) return Math.min(elapsed, duration)
   return (
-    fromMs(body.audio_duration_ms) ||
-    fromMs(body.audio_elapsed_ms) ||
+    elapsed ||
+    duration ||
     fromSec(body.audio_duracao_sec) ||
     fromSec(body.audio_duration_sec) ||
     null
@@ -7580,66 +7584,91 @@ function getAudioFileExtension(file) {
   return ''
 }
 
+function resolveFfmpegPath() {
+  try {
+    const p = require('ffmpeg-static')
+    if (p) return p
+  } catch {}
+  return null
+}
+
 async function convertAudioWithFfmpeg(inputPath, outputPath, profile = 'audio_mp3') {
   const { spawn } = require('child_process')
+  const ffmpegPath = resolveFfmpegPath()
+  if (!ffmpegPath) throw new Error('ffmpeg-static não disponível')
+
+  let args
+  // Voice (PTT): asetpts=N/SR/TB reescreve os timestamps de saída com base na contagem de
+  // amostras decodificadas, ignorando completamente os timestamps irregulares do WebM do
+  // MediaRecorder (dispositivos Android podem ter lacunas ou saltos que inflam a duração).
+  // aresample=async=0 impede que o resampler ajuste o áudio com base nos timestamps de entrada.
+  if (profile === 'voice_ogg_opus') {
+    args = [
+      '-y',
+      '-i', inputPath,
+      '-vn',
+      '-af', 'aresample=async=0,asetpts=N/SR/TB',
+      '-ac', '1',
+      '-ar', '48000',
+      '-c:a', 'libopus',
+      '-b:a', '48k',
+      '-compression_level', '10',
+      '-application', 'voip',
+      '-fflags', '+bitexact',
+      '-flags', '+bitexact',
+      '-map_metadata', '-1',
+      '-map_chapters', '-1',
+      outputPath,
+    ]
+  } else {
+    args = [
+      '-y',
+      '-i', inputPath,
+      '-vn',
+      '-ac', '1',
+      '-ar', '44100',
+      '-c:a', 'libmp3lame',
+      '-b:a', '128k',
+      '-write_xing', '0',
+      '-id3v2_version', '0',
+      '-map_metadata', '-1',
+      '-map_chapters', '-1',
+      outputPath,
+    ]
+  }
   return new Promise((resolve, reject) => {
-    let ffmpegPath
-    try {
-      ffmpegPath = require('ffmpeg-static')
-    } catch {
-      ffmpegPath = null
-    }
-    if (!ffmpegPath) {
-      reject(new Error('ffmpeg-static não disponível'))
-      return
-    }
-    let args
-    // Voice (PTT): alinhado ao padrão usado por integrações WhatsApp estáveis (Evolution/Baileys):
-    // 48 kHz, mono, Opus ~48k, sem metadados — evita áudio que toca no Web mas falha no iPhone.
-    if (profile === 'voice_ogg_opus') {
-      args = [
-        '-y',
-        '-i', inputPath,
-        '-vn',
-        '-ac', '1',
-        '-ar', '48000',
-        '-c:a', 'libopus',
-        '-b:a', '48k',
-        '-avoid_negative_ts', 'make_zero',
-        '-write_xing', '0',
-        '-compression_level', '10',
-        '-application', 'voip',
-        '-fflags', '+bitexact',
-        '-flags', '+bitexact',
-        '-id3v2_version', '0',
-        '-map_metadata', '-1',
-        '-map_chapters', '-1',
-        '-write_bext', '0',
-        outputPath,
-      ]
-    } else {
-      args = [
-        '-y',
-        '-i', inputPath,
-        '-vn',
-        '-ac', '1',
-        '-ar', '44100',
-        '-c:a', 'libmp3lame',
-        '-b:a', '128k',
-        '-write_xing', '0',
-        '-id3v2_version', '0',
-        '-map_metadata', '-1',
-        '-map_chapters', '-1',
-        outputPath,
-      ]
-    }
     const proc = spawn(ffmpegPath, args, { windowsHide: true })
     let stderr = ''
     proc.stderr.on('data', (d) => { stderr += String(d || '') })
-    proc.on('error', (err) => reject(err))
+    const tid = setTimeout(() => {
+      try { proc.kill('SIGKILL') } catch {}
+      reject(new Error('ffmpeg timeout (60s)'))
+    }, 60000)
+    proc.on('error', (err) => { clearTimeout(tid); reject(err) })
     proc.on('close', (code) => {
+      clearTimeout(tid)
       if (code === 0) resolve()
       else reject(new Error(`ffmpeg exit=${code} ${stderr.slice(-240)}`.trim()))
+    })
+  })
+}
+
+/** Mede duração real de um arquivo de áudio via ffmpeg -i (parse do stderr). */
+async function probeAudioDurationSec(filePath) {
+  const { spawn } = require('child_process')
+  const ffmpegPath = resolveFfmpegPath()
+  if (!ffmpegPath) return null
+  return new Promise((resolve) => {
+    const proc = spawn(ffmpegPath, ['-i', filePath], { windowsHide: true })
+    let stderr = ''
+    proc.stderr.on('data', (d) => { stderr += String(d || '') })
+    const tid = setTimeout(() => { try { proc.kill('SIGKILL') } catch {}; resolve(null) }, 8000)
+    proc.on('error', () => { clearTimeout(tid); resolve(null) })
+    proc.on('close', () => {
+      clearTimeout(tid)
+      const m = stderr.match(/Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/)
+      if (!m) { resolve(null); return }
+      resolve(parseInt(m[1], 10) * 3600 + parseInt(m[2], 10) * 60 + parseFloat(m[3]))
     })
   })
 }
@@ -7871,6 +7900,30 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
         to: fileWork.originalname,
         mime: fileWork.mimetype,
       })
+      // Guard de duração: confere se o OGG produzido é coerente com o tempo gravado.
+      // Protege contra timestamp irregulares do WebM de celulares que causam OGG inflado ou truncado.
+      if (tipo === 'voice') {
+        const elapsedMs = Number(req?.body?.audio_elapsed_ms || 0)
+        if (elapsedMs >= 1000) {
+          const probedSec = await probeAudioDurationSec(fileWork.path)
+          if (probedSec !== null) {
+            const elapsedSec = elapsedMs / 1000
+            const isInflated = probedSec > elapsedSec * 2 && (probedSec - elapsedSec) > 30
+            const isTruncated = probedSec < elapsedSec * 0.6 && (elapsedSec - probedSec) > 3
+            if (isInflated || isTruncated) {
+              console.error('[AUDIO][GUARD] OGG com duração incoerente após transcode:', {
+                probedSec, elapsedSec, isInflated, isTruncated,
+              })
+              try { require('fs').unlink(fileWork.path, () => {}) } catch {}
+              return {
+                ok: false,
+                status: 422,
+                error: 'Não foi possível processar o áudio. Grave novamente e tente enviar.',
+              }
+            }
+          }
+        }
+      }
     } else if (shouldAbortAudioAfterNormalize(tipo, normalized)) {
       console.warn('[ULTRAMSG][AUDIO] Conversão obrigatória falhou; abortando envio:', {
         tipo,
