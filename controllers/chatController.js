@@ -5529,9 +5529,6 @@ exports.adicionarAtendenteConversa = async (req, res) => {
     if (isClosedAttendanceStatus(perm.conv?.status_atendimento)) {
       return res.status(409).json({ error: 'Reabra a conversa antes de adicionar atendente.' })
     }
-    if (!perm.conv?.atendente_id) {
-      return res.status(409).json({ error: 'Assuma a conversa antes de adicionar outro atendente.' })
-    }
     if (perm.conv?.atendente_id && Number(perm.conv.atendente_id) === usuario_id) {
       return res.status(409).json({ error: 'Este atendente ja e o responsavel principal da conversa.' })
     }
