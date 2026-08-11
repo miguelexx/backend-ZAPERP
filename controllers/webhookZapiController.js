@@ -535,6 +535,8 @@ function _logWebhook(entry) {
 function isGroupPayload(payload) {
   if (!payload || typeof payload !== 'object') return false
   if (payload.isGroup === true) return true
+  // UltraMsg usa isGroupMsg em vez de isGroup
+  if (payload.isGroupMsg === true) return true
   const tipo = String(payload.tipo || payload.type || '').toLowerCase()
   if (tipo === 'grupo' || tipo === 'group') return true
 
@@ -548,7 +550,10 @@ function isGroupPayload(payload) {
     payload.groupId,
     payload.group?.id,
     payload.data?.remoteJid,
-    payload.data?.key?.remoteJid
+    payload.data?.key?.remoteJid,
+    // UltraMsg envia o group JID em payload.to / payload.data.to
+    payload.to,
+    payload.data?.to,
   ].filter(Boolean).map((v) => String(v).trim())
 
   // 1) Sinais explícitos: @g.us ou sufixo -group
@@ -592,7 +597,10 @@ function pickGroupChatId(payload) {
     payload.groupId,
     payload.group?.id,
     payload.data?.remoteJid,
-    payload.data?.key?.remoteJid
+    payload.data?.key?.remoteJid,
+    // UltraMsg envia o group JID em payload.to / payload.data.to
+    payload.to,
+    payload.data?.to,
   ]
     .filter((v) => v != null)
     .map((v) => String(v).trim())
@@ -651,7 +659,8 @@ function resolveConversationKeyFromZapi(payload) {
   if (isGroup) {
     const groupKey = pickGroupChatId(payload)
     const key = groupKey ? normalizeGroupIdForStorage(groupKey) : ''
-    const participantPhone = digits(payload.participantPhone ?? payload.participant ?? payload.author ?? payload.key?.participant ?? '')
+    // UltraMsg usa payload.from / payload.data.from como JID do remetente dentro do grupo
+    const participantPhone = digits(payload.participantPhone ?? payload.participant ?? payload.author ?? payload.key?.participant ?? payload.from ?? payload.data?.from ?? '')
     return {
       key,
       isGroup: true,
