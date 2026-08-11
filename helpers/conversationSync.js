@@ -768,6 +768,7 @@ async function findOrCreateConversation(supabaseClient, {
   logPrefix = '',
   initial_status_atendimento = 'aberta',
   io = null,
+  allowNonBR = false,
 }) {
   const whatsappInstanceId = normalizeWhatsappInstanceId(whatsapp_instance_id)
   const allowLegacyNullInstance = !!(whatsappInstanceId && whatsapp_instance_is_default === true)
@@ -801,7 +802,10 @@ async function findOrCreateConversation(supabaseClient, {
   }
 
   // 1) Normalização: SEMPRE usar telefone canônico
-  const canonical = getCanonicalPhone(phone)
+  let canonical = getCanonicalPhone(phone)
+  if (!canonical && allowNonBR) {
+    canonical = getCanonicalPhoneAnyIntl(phone)
+  }
   if (!canonical) {
     console.warn(`[findOrCreateConversation] ${logPrefix} não foi possível normalizar o phone: "${phone}"`)
     return null
@@ -1041,6 +1045,7 @@ function sortConversationsPinThenRecent(conversas) {
 
 module.exports = {
   getCanonicalPhone,
+  getCanonicalPhoneAnyIntl,
   getOrCreateCliente,
   findOrCreateConversation,
   mergeConversasIntoCanonico,

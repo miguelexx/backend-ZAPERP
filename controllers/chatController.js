@@ -20,7 +20,7 @@ const {
   isLidPhoneKey,
   pickRealPhoneCandidate,
 } = require('../helpers/phoneHelper')
-const { deduplicateConversationsByContact, sortConversationsByRecent, sortConversationsPinThenRecent, getCanonicalPhone, getOrCreateCliente, findOrCreateConversation, mergeConversasIntoCanonico } = require('../helpers/conversationSync')
+const { deduplicateConversationsByContact, sortConversationsByRecent, sortConversationsPinThenRecent, getCanonicalPhone, getCanonicalPhoneAnyIntl, getOrCreateCliente, findOrCreateConversation, mergeConversasIntoCanonico } = require('../helpers/conversationSync')
 const { enrichConversationsWithContactData } = require('../helpers/conversaEnrichment')
 const {
   resolveReabertaPorFaltaInteracao,
@@ -52,7 +52,7 @@ const {
   retomarDeCobrancaFinanceira,
 } = require('../services/conversaPagamentoFinanceiroService')
 const { usuarioPertenceSetorFinanceiro } = require('../helpers/financeiroSetorHelper')
-const { buildClienteSearchOr, buildTelefoneSearchOr, escapeIlikePattern } = require('../helpers/chatSearchHelper')
+const { buildClienteSearchOr, buildTelefoneSearchOr, buildPhoneSearchTerms, escapeIlikePattern } = require('../helpers/chatSearchHelper')
 const {
   getGrupoDepartamentoIds,
   getGrupoIdsPorDepartamentos,
@@ -1120,6 +1120,8 @@ async function buscarConversaIdsPorTextoMensagens({ company_id, term }) {
   const scanLimit = getChatSearchScanLimit()
   const idLimit = getChatSearchIdLimit()
   const ids = new Set()
+  // term chega sem wildcards; construímos aqui para manter contrato uniforme com o service
+  const likePattern = `%${escapeIlikePattern(term)}%`
 
   for (let start = 0; start < scanLimit && ids.size < idLimit; start += pageSize) {
     const end = Math.min(start + pageSize - 1, scanLimit - 1)
@@ -1127,12 +1129,15 @@ async function buscarConversaIdsPorTextoMensagens({ company_id, term }) {
       .from('mensagens')
       .select('conversa_id')
       .eq('company_id', Number(company_id))
-      .ilike('texto', term)
+      .ilike('texto', likePattern)
       .order('criado_em', { ascending: false })
       .order('id', { ascending: false })
       .range(start, end)
 
-    if (error) throw error
+    if (error) {
+      console.warn('[busca-msg] erro na varredura de mensagens:', error.message)
+      break
+    }
 
     const rows = Array.isArray(data) ? data : []
     for (const row of rows) {
@@ -1711,63 +1716,41 @@ exports.listarConversas = async (req, res) => {
     }
 
     if (palavraTrim) {
-      const term = `%${escapeIlikePattern(palavraTrim)}%`
       const searchIdLimit = getChatSearchIdLimit()
-      const { data: clientesMatch } = await supabase
-        .from('clientes')
-        .select('id')
-        .eq('company_id', company_id)
-        .or(buildClienteSearchOr(palavraTrim))
-        .order('criado_em', { ascending: false })
-        .limit(searchIdLimit)
-      const clienteIds = (clientesMatch || []).map((c) => c.id)
-      const convByClientePromise = supabase
-        .from('conversas')
-        .select('id')
-        .eq('company_id', company_id)
-        .in('cliente_id', clienteIds.length ? clienteIds : [0])
-        .order('ultima_atividade', { ascending: false, nullsFirst: false })
-        .limit(searchIdLimit)
-      const convByTelefonePromise = supabase
-        .from('conversas')
-        .select('id')
-        .eq('company_id', company_id)
-        .or(buildTelefoneSearchOr(palavraTrim))
-        .order('ultima_atividade', { ascending: false, nullsFirst: false })
-        .limit(searchIdLimit)
-      const convByNomeGrupoPromise = supabase
-        .from('conversas')
-        .select('id')
-        .eq('company_id', company_id)
-        .ilike('nome_grupo', term)
-        .order('ultima_atividade', { ascending: false, nullsFirst: false })
-        .limit(searchIdLimit)
-      const convByNomeContatoCachePromise = supabase
-        .from('conversas')
-        .select('id')
-        .eq('company_id', company_id)
-        .ilike('nome_contato_cache', term)
-        .order('ultima_atividade', { ascending: false, nullsFirst: false })
-        .limit(searchIdLimit)
-      const msgMatchPromise = buscarConversaIdsPorTextoMensagens({ company_id, term })
-      const [
-        { data: convByCliente },
-        { data: convByTelefone },
-        { data: convByNomeGrupo },
-        { data: convByNomeContatoCache },
-        idsFromMsg,
-      ] = await Promise.all([
-        convByClientePromise,
-        convByTelefonePromise,
-        convByNomeGrupoPromise,
-        convByNomeContatoCachePromise,
-        msgMatchPromise,
+      const phoneVariacoes = buildPhoneSearchTerms(palavraTrim)
+
+      // 3 branches em paralelo (B3 fix: elimina await sequencial de clientes):
+      //   (1) RPC buscar_conversas_por_nome_ids: nome/pushname do cliente + nome_contato_cache
+      //       + nome_grupo — tudo com suporte a acentos via unaccent (L1 fix)
+      //   (2) Telefone direto em conversas (com variantes BR)
+      //   (3) Texto de mensagens (paginado)
+      const [convByNomeIds, { data: convByTelefone }, idsFromMsg] = await Promise.all([
+        supabase
+          .rpc('buscar_conversas_por_nome_ids', {
+            p_company_id: Number(company_id),
+            p_termo: palavraTrim,
+            p_phone_variacoes: phoneVariacoes.length ? phoneVariacoes : null,
+            p_limit: searchIdLimit,
+          })
+          .then(({ data, error }) => {
+            if (error) console.warn('[busca-nome] RPC error:', error.message)
+            return Array.isArray(data) ? data : []
+          }),
+        supabase
+          .from('conversas')
+          .select('id')
+          .eq('company_id', company_id)
+          .or(buildTelefoneSearchOr(palavraTrim))
+          .order('ultima_atividade', { ascending: false, nullsFirst: false })
+          .limit(searchIdLimit),
+        buscarConversaIdsPorTextoMensagens({ company_id, term: palavraTrim }),
       ])
-      const idsFromCliente = (convByCliente || []).map((c) => c.id)
-      const idsFromTel = (convByTelefone || []).map((c) => c.id)
-      const idsFromGrupo = (convByNomeGrupo || []).map((c) => c.id)
-      const idsFromNomeCache = (convByNomeContatoCache || []).map((c) => c.id)
-      const mergedSet = new Set([...idsFromCliente, ...idsFromTel, ...idsFromGrupo, ...idsFromNomeCache, ...idsFromMsg])
+
+      const mergedSet = new Set([
+        ...convByNomeIds,
+        ...(convByTelefone || []).map((c) => c.id),
+        ...idsFromMsg,
+      ])
       const merged = [...mergedSet]
       if (merged.length === 0) {
         if (shouldIncludeClientesSemConversa({ incluirTodosClientesAtivo, palavraTrim })) {
@@ -3938,25 +3921,37 @@ exports.criarContato = async (req, res) => {
       return res.status(400).json({ error: instanceRes.error || 'Instância WhatsApp indisponível' })
     }
 
-    const telefoneCanonico = getCanonicalPhone(telefone)
-    const bloqueadoManual =
-      !telefoneCanonico ||
-      telefoneCanonico.startsWith('lid:') ||
-      telefoneCanonico.endsWith('@g.us')
-    if (bloqueadoManual) {
+    // Bloquear apenas LID e JID de grupo — números internacionais são permitidos como fallback
+    let telefoneCanonico = getCanonicalPhone(telefoneRaw)
+    const isLidOrGroup = telefoneCanonico.startsWith('lid:') || telefoneCanonico.endsWith('@g.us')
+    if (isLidOrGroup) {
       return res.status(400).json(
         erroTelefoneNovoContato('TELEFONE_INVALIDO', {
-          detalhe:
-            'Não foi possível interpretar um telefone brasileiro. Verifique DDD e quantidade de dígitos. Grupos e identificadores internos (LID) não podem ser cadastrados por este formulário.'
+          detalhe: 'Grupos e identificadores internos (LID) não podem ser cadastrados por este formulário.'
         })
       )
+    }
+
+    let allowNonBR = false
+    if (!telefoneCanonico) {
+      const intlCanonical = getCanonicalPhoneAnyIntl(telefoneRaw)
+      if (!intlCanonical) {
+        return res.status(400).json(
+          erroTelefoneNovoContato('TELEFONE_INVALIDO', {
+            detalhe: 'Não foi possível interpretar um telefone válido. Verifique DDD e quantidade de dígitos.'
+          })
+        )
+      }
+      telefoneCanonico = intlCanonical
+      allowNonBR = true
     }
 
     const nomeTrim = nome != null ? String(nome).trim() : ''
 
     // Cliente: getOrCreateCliente evita 23505 e unifica variantes (55… vs DDD…).
     const { cliente_id: clienteId } = await getOrCreateCliente(supabase, company_id, telefoneRaw, {
-      ...(nomeTrim ? { nome: nomeTrim } : {})
+      ...(nomeTrim ? { nome: nomeTrim } : {}),
+      allowNonBR,
     })
     if (!clienteId) {
       return res.status(400).json(
@@ -3976,7 +3971,8 @@ exports.criarContato = async (req, res) => {
         isGroup: false,
         whatsapp_instance_id: instanceRes.instanceId,
         whatsapp_instance_is_default: instanceRes.isDefault === true,
-        logPrefix: '[criarContato]'
+        logPrefix: '[criarContato]',
+        allowNonBR,
       })
     } catch (e) {
       console.error(e)
@@ -7512,6 +7508,9 @@ function mimeBase(file) {
  */
 const IMAGE_FILE_EXTENSIONS = new Set(['jpg', 'jpeg', 'png', 'webp', 'gif', 'bmp', 'heic', 'heif'])
 const VIDEO_FILE_EXTENSIONS = new Set(['mp4', 'mov', 'm4v', 'webm', 'avi', 'mkv', '3gp', 'mpeg', 'mpg', 'ogv'])
+// Contrato oficial do endpoint UltraMSG /messages/video.
+const ULTRAMSG_VIDEO_FILE_EXTENSIONS = new Set(['mp4', '3gp', 'mov'])
+const ULTRAMSG_VIDEO_MAX_BYTES = 32 * 1024 * 1024
 const AUDIO_FILE_EXTENSIONS = new Set(['ogg', 'mp3', 'wav', 'm4a', 'aac', 'opus', 'amr'])
 const DOCUMENT_FILE_EXTENSIONS = new Set([
   'pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx',
@@ -7747,6 +7746,120 @@ function shouldAbortAudioAfterNormalize(tipo, normalized) {
   return !!normalized?.error
 }
 
+function shouldNormalizeVideoForUltraMsg(file, tipo) {
+  if (tipo !== 'video' || !file?.path) return false
+  const ext = extBaseArquivo(file)
+  return !ULTRAMSG_VIDEO_FILE_EXTENSIONS.has(ext)
+}
+
+async function convertVideoToUltraMsgMp4(inputPath, outputPath) {
+  const { spawn } = require('child_process')
+  const ffmpegPath = resolveFfmpegPath()
+  if (!ffmpegPath) throw new Error('ffmpeg-static nao disponivel')
+
+  const args = [
+    '-y',
+    '-i', inputPath,
+    '-map', '0:v:0',
+    '-map', '0:a?',
+    '-c:v', 'libx264',
+    '-preset', 'veryfast',
+    '-crf', '28',
+    '-vf', 'scale=min(1280\\,iw):-2,format=yuv420p',
+    '-c:a', 'aac',
+    '-b:a', '96k',
+    '-ac', '2',
+    '-movflags', '+faststart',
+    '-map_metadata', '-1',
+    '-map_chapters', '-1',
+    outputPath,
+  ]
+
+  return new Promise((resolve, reject) => {
+    const proc = spawn(ffmpegPath, args, { windowsHide: true })
+    let stderr = ''
+    let settled = false
+    const finish = (fn, value) => {
+      if (settled) return
+      settled = true
+      clearTimeout(tid)
+      fn(value)
+    }
+    proc.stderr.on('data', (d) => { stderr += String(d || '') })
+    const tid = setTimeout(() => {
+      try { proc.kill('SIGKILL') } catch {}
+      finish(reject, new Error('ffmpeg video timeout (5 min)'))
+    }, 5 * 60 * 1000)
+    proc.on('error', (error) => finish(reject, error))
+    proc.on('close', (code) => {
+      if (code === 0) finish(resolve)
+      else finish(reject, new Error(`ffmpeg video exit=${code} ${stderr.slice(-300)}`.trim()))
+    })
+  })
+}
+
+async function normalizeVideoForUltraMsg(file, tipo) {
+  if (!file || tipo !== 'video') {
+    return { file, converted: false, required: false, error: null }
+  }
+
+  const fs = require('fs')
+  const path = require('path')
+  const currentSize = Number(file.size) || (() => {
+    try { return fs.statSync(file.path).size } catch { return 0 }
+  })()
+  if (!shouldNormalizeVideoForUltraMsg(file, tipo)) {
+    if (currentSize > ULTRAMSG_VIDEO_MAX_BYTES) {
+      return {
+        file,
+        converted: false,
+        required: true,
+        error: 'Video maior que o limite de 32 MB da UltraMSG.',
+      }
+    }
+    return { file, converted: false, required: false, error: null }
+  }
+
+  const sourcePath = file.path
+  const parsedStored = path.parse(file.filename || path.basename(sourcePath))
+  const parsedOriginal = path.parse(file.originalname || parsedStored.base || 'video')
+  const targetFilename = `${parsedStored.name || `video-${Date.now()}`}-wa.mp4`
+  const targetPath = path.join(path.dirname(sourcePath), targetFilename)
+
+  try {
+    await convertVideoToUltraMsgMp4(sourcePath, targetPath)
+    const stat = fs.statSync(targetPath)
+    if (!stat.size) throw new Error('MP4 convertido ficou vazio')
+    if (stat.size > ULTRAMSG_VIDEO_MAX_BYTES) {
+      throw new Error('Video convertido excede o limite de 32 MB da UltraMSG')
+    }
+    fs.unlink(sourcePath, () => {})
+    return {
+      file: {
+        ...file,
+        path: targetPath,
+        filename: targetFilename,
+        originalname: `${parsedOriginal.name || 'video'}.mp4`,
+        mimetype: 'video/mp4',
+        size: stat.size,
+      },
+      converted: true,
+      required: true,
+      error: null,
+    }
+  } catch (error) {
+    try {
+      if (fs.existsSync(targetPath)) fs.unlinkSync(targetPath)
+    } catch (_) {}
+    return {
+      file,
+      converted: false,
+      required: true,
+      error: error?.message || 'Falha ao converter video para MP4',
+    }
+  }
+}
+
 function shouldNormalizeImageForWhatsapp(file, tipo) {
   if (tipo !== 'imagem' || !file?.path) return false
   const base = mimeBase(file)
@@ -7938,6 +8051,31 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
       }
     } else if (normalized?.error) {
       console.warn('[ULTRAMSG][AUDIO] Conversão/normalização indisponível:', normalized.error)
+    }
+  }
+  if (tipo === 'video') {
+    const normalizedVideo = await normalizeVideoForUltraMsg(fileWork, tipo)
+    if (normalizedVideo?.converted && normalizedVideo?.file) {
+      const beforeName = fileWork.originalname
+      fileWork = normalizedVideo.file
+      req.file = fileWork
+      console.log('[ULTRAMSG][VIDEO] Video convertido para MP4 compativel antes do envio:', {
+        from: beforeName,
+        to: fileWork.originalname,
+        mime: fileWork.mimetype,
+        size: fileWork.size,
+      })
+    } else if (normalizedVideo?.required && normalizedVideo?.error) {
+      console.warn('[ULTRAMSG][VIDEO] Conversao obrigatoria falhou; abortando envio:', {
+        original: fileWork?.originalname,
+        mime: fileWork?.mimetype,
+        error: normalizedVideo.error,
+      })
+      return {
+        ok: false,
+        status: 422,
+        error: 'Nao foi possivel preparar o video para a UltraMSG. Use MP4, MOV ou 3GP com ate 32 MB.',
+      }
     }
   }
   if (tipo === 'imagem') {
@@ -9442,6 +9580,8 @@ exports._test = {
   aplicarTipoForcadoSticker,
   isForcedVoiceAudioish,
   shouldAbortAudioAfterNormalize,
+  shouldNormalizeVideoForUltraMsg,
+  normalizeVideoForUltraMsg,
   parseAudioDuracaoSecFromBody,
   shouldNormalizeImageForWhatsapp,
   normalizeForwardTipo,

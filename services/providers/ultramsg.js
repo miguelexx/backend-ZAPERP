@@ -2050,18 +2050,25 @@ async function uploadMedia(filePath, filename, opts = {}) {
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
-      const FormData = require('form-data')
+      // `fetch` nativo do Node nao serializa o pacote npm `form-data`: ele envia
+      // literalmente "[object FormData]" com um boundary que nao existe no corpo.
+      // Use as implementacoes WHATWG nativas, que sao as mesmas esperadas por fetch.
+      if (typeof FormData === 'undefined' || typeof Blob === 'undefined') {
+        throw new Error('Runtime Node sem suporte a FormData/Blob nativos')
+      }
+      const fileBuffer = await fs.promises.readFile(filePath)
       const form = new FormData()
       form.append('token', cfg.token)
-      form.append('file', fs.createReadStream(filePath), { filename: uploadFilename })
+      form.append('file', new Blob([fileBuffer]), uploadFilename)
       let signal
       try {
         if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function') {
           signal = AbortSignal.timeout(uploadTimeout)
         }
       } catch { /* Node < 17.3 */ }
-      const uploadHeaders = form.getHeaders()
-      // Uma tentativa por volta do loop: o stream precisa ser recriado a cada retry.
+      // Nao definir Content-Type manualmente: fetch inclui o boundary real do FormData.
+      const uploadHeaders = { accept: 'application/json' }
+      // Uma tentativa por volta do loop: o FormData precisa ser recriado a cada retry.
       const res = await fetchWithRetry(uploadUrl, {
         method: 'POST',
         body: form,

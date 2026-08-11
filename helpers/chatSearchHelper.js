@@ -72,6 +72,26 @@ function buildTelefoneSearchOr(raw) {
   ].join(',')
 }
 
+// Limites de busca configuráveis por env var.
+// Exportados para uso compartilhado entre chatController e chatListCountsService.
+function getSearchMessagesPageSize() {
+  const raw = Number(process.env.CHAT_SEARCH_MESSAGES_PAGE_SIZE)
+  if (!Number.isFinite(raw) || raw <= 0) return 1000
+  return Math.min(Math.max(Math.floor(raw), 100), 5000)
+}
+
+function getChatSearchScanLimit() {
+  const raw = Number(process.env.CHAT_SEARCH_SCAN_LIMIT)
+  if (!Number.isFinite(raw) || raw <= 0) return 2000
+  return Math.min(Math.max(Math.floor(raw), 100), 2000)
+}
+
+function getChatSearchIdLimit() {
+  const raw = Number(process.env.CHAT_SEARCH_ID_LIMIT)
+  if (!Number.isFinite(raw) || raw <= 0) return 1000
+  return Math.min(Math.max(Math.floor(raw), 100), 3000)
+}
+
 module.exports = {
   buildClienteSearchOr,
   buildClienteListagemSearchOr,
@@ -80,4 +100,7 @@ module.exports = {
   digitsOnly,
   escapeIlikePattern,
   quoteOrValue,
+  getSearchMessagesPageSize,
+  getChatSearchScanLimit,
+  getChatSearchIdLimit,
 }

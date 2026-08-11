@@ -429,7 +429,11 @@ if (hasFrontendDist) {
 app.use((err, req, res, next) => {
   // Multer: tipo não permitido, tamanho excedido ou campo inesperado
   if (err && (err.code === 'LIMIT_FILE_SIZE' || err.code === 'LIMIT_UNEXPECTED_FILE' || (err.message && err.message.includes('não permitido')))) {
-    const msg = err.code === 'LIMIT_UNEXPECTED_FILE' ? 'Use multipart/form-data com campo "file" ou "audio"' : (err.message || 'Arquivo inválido')
+    const msg = err.code === 'LIMIT_FILE_SIZE'
+      ? 'Arquivo maior que 32 MB. Esse é o limite de vídeo aceito pela UltraMSG.'
+      : err.code === 'LIMIT_UNEXPECTED_FILE'
+        ? 'Use multipart/form-data com campo "file" ou "audio"'
+        : (err.message || 'Arquivo inválido')
     return res.status(400).json({ error: msg })
   }
   // CORS

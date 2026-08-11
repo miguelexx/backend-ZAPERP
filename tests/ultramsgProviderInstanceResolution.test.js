@@ -215,6 +215,26 @@ describe('UltraMsg provider instance resolution', () => {
       expect(corpoDaChamada(deps).get('referenceId')).toBe('crm-778')
     })
 
+    test('sendVideo usa endpoint e campos oficiais com legenda no mesmo payload', async () => {
+      const deps = ambienteEnvio()
+      const provider = require('../services/providers/ultramsg')
+      const result = await provider.sendVideo(
+        '34999999999',
+        'https://cdn.example.com/video.mp4',
+        'Boa tarde Carol',
+        { companyId: 10, referenceId: 'crm-video-1', returnDetails: true }
+      )
+
+      const [url] = deps.fetchWithRetry.mock.calls[0]
+      const body = corpoDaChamada(deps)
+      expect(result.ok).toBe(true)
+      expect(url).toContain('/instance111/messages/video')
+      expect(body.get('to')).toBe('+5534999999999')
+      expect(body.get('video')).toBe('https://cdn.example.com/video.mp4')
+      expect(body.get('caption')).toBe('Boa tarde Carol')
+      expect(body.get('referenceId')).toBe('crm-video-1')
+    })
+
     test('sendFile envia referenceId', async () => {
       const deps = ambienteEnvio()
       const provider = require('../services/providers/ultramsg')
@@ -317,6 +337,43 @@ describe('UltraMsg provider instance resolution', () => {
       expect(result.ok).toBe(true)
       expect(result.url).toBe('https://cdn.ultramsg.test/a.ogg')
       expect(deps.fetchWithRetry).toHaveBeenCalledTimes(2)
+    } finally {
+      try { fs.unlinkSync(tmpFile) } catch (_) {}
+    }
+  })
+
+  test('uploadMedia entrega FormData nativo compativel com fetch, incluindo token e arquivo', async () => {
+    const fs = require('fs')
+    const os = require('os')
+    const path = require('path')
+    const tmpFile = path.join(os.tmpdir(), `zaperp-upload-native-${Date.now()}.mp4`)
+    fs.writeFileSync(tmpFile, Buffer.from('video-fake'))
+
+    const deps = mockProviderDeps({
+      defaultByCompany: {
+        10: { id: 1, company_id: 10, provider: 'ultramsg', instance_id: '111', instance_token: 'tok', ativo: true },
+      },
+      byId: {},
+    }, async () => ({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({ url: 'https://cdn.ultramsg.test/video.mp4' }),
+    }))
+
+    try {
+      const provider = require('../services/providers/ultramsg')
+      const result = await provider.uploadMedia(tmpFile, 'video.mp4', { companyId: 10 })
+      const options = deps.fetchWithRetry.mock.calls[0][1]
+      const uploadedFile = options.body.get('file')
+
+      expect(result.ok).toBe(true)
+      expect(options.body).toBeInstanceOf(FormData)
+      expect(options.body.get('token')).toBe('tok')
+      expect(uploadedFile).toBeInstanceOf(Blob)
+      expect(uploadedFile.name).toBe('video.mp4')
+      expect(uploadedFile.size).toBe(Buffer.byteLength('video-fake'))
+      expect(options.headers['Content-Type']).toBeUndefined()
+      expect(options.headers['content-type']).toBeUndefined()
     } finally {
       try { fs.unlinkSync(tmpFile) } catch (_) {}
     }

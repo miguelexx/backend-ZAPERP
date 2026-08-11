@@ -9,6 +9,9 @@ const {
   buildClienteListagemSearchOr,
   buildTelefoneSearchOr,
   buildPhoneSearchTerms,
+  getSearchMessagesPageSize,
+  getChatSearchScanLimit,
+  getChatSearchIdLimit,
 } = require('../helpers/chatSearchHelper')
 
 describe('old messages contact sync', () => {
@@ -122,5 +125,37 @@ describe('chat search helpers', () => {
   test('mantem busca por fragmento real de telefone com 4+ digitos', () => {
     expect(buildPhoneSearchTerms('1246')).toEqual(['1246'])
     expect(buildPhoneSearchTerms('9911246')).toEqual(expect.arrayContaining(['9911246']))
+  })
+
+  test('buildPhoneSearchTerms retorna array vazio para texto sem digitos suficientes', () => {
+    expect(buildPhoneSearchTerms('')).toEqual([])
+    expect(buildPhoneSearchTerms('abc')).toEqual([])
+    expect(buildPhoneSearchTerms('12')).toEqual([]) // abaixo do MIN_PHONE_SEARCH_DIGITS
+  })
+
+  test('buildPhoneSearchTerms nao duplica variacoes', () => {
+    const terms = buildPhoneSearchTerms('5511937316767')
+    expect(new Set(terms).size).toBe(terms.length)
+  })
+
+  test('helpers de limite de busca retornam valores dentro dos bounds', () => {
+    const pageSize = getSearchMessagesPageSize()
+    expect(pageSize).toBeGreaterThanOrEqual(100)
+    expect(pageSize).toBeLessThanOrEqual(5000)
+
+    const scanLimit = getChatSearchScanLimit()
+    expect(scanLimit).toBeGreaterThanOrEqual(100)
+    expect(scanLimit).toBeLessThanOrEqual(2000)
+
+    const idLimit = getChatSearchIdLimit()
+    expect(idLimit).toBeGreaterThanOrEqual(100)
+    expect(idLimit).toBeLessThanOrEqual(3000)
+  })
+
+  test('escapeIlikePattern escapa % e _ para nao quebrar o padrao ILIKE', () => {
+    const { escapeIlikePattern } = require('../helpers/chatSearchHelper')
+    expect(escapeIlikePattern('50% off')).toBe('50\\% off')
+    expect(escapeIlikePattern('user_name')).toBe('user\\_name')
+    expect(escapeIlikePattern('normal')).toBe('normal')
   })
 })

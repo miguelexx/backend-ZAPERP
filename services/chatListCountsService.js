@@ -1,6 +1,13 @@
 const supabase = require('../config/supabase')
 const { usuarioPertenceSetorFinanceiro } = require('../helpers/financeiroSetorHelper')
-const { buildClienteSearchOr, buildTelefoneSearchOr, escapeIlikePattern } = require('../helpers/chatSearchHelper')
+const {
+  buildTelefoneSearchOr,
+  buildPhoneSearchTerms,
+  escapeIlikePattern,
+  getSearchMessagesPageSize,
+  getChatSearchScanLimit,
+  getChatSearchIdLimit,
+} = require('../helpers/chatSearchHelper')
 const {
   getGrupoIdsPorDepartamentos,
   getGrupoIdsSemDepartamento,
@@ -18,11 +25,6 @@ function getChatFilterIdLimit() {
   return Math.min(Math.max(Math.floor(raw), 100), 5000)
 }
 
-function getChatSearchIdLimit() {
-  const raw = Number(process.env.CHAT_SEARCH_ID_LIMIT)
-  if (!Number.isFinite(raw) || raw <= 0) return 1000
-  return Math.min(Math.max(Math.floor(raw), 100), 3000)
-}
 
 function getStartOfTodayIso() {
   const now = new Date()
@@ -109,27 +111,29 @@ async function getConversaIdsParticipanteAtivo(company_id, usuario_id) {
 }
 
 async function buscarConversaIdsPorTextoMensagens({ company_id, term }) {
-  const pageSize = 1000
-  const scanLimit = 3000
+  const pageSize = getSearchMessagesPageSize()
+  const scanLimit = getChatSearchScanLimit()
   const idLimit = getChatSearchIdLimit()
   const ids = new Set()
-  const safeTerm = escapeIlikePattern(term)
+  // term chega sem wildcards; construímos aqui (uniforme com chatController)
+  const likePattern = `%${escapeIlikePattern(term)}%`
 
   for (let start = 0; start < scanLimit && ids.size < idLimit; start += pageSize) {
     const end = Math.min(start + pageSize - 1, scanLimit - 1)
     const { data, error } = await supabase
       .from('mensagens')
       .select('conversa_id')
-      .eq('company_id', company_id)
-      .ilike('texto', `%${safeTerm}%`)
+      .eq('company_id', Number(company_id))
+      .ilike('texto', likePattern)
       .order('criado_em', { ascending: false })
+      .order('id', { ascending: false })
       .range(start, end)
     if (error) break
     for (const row of data || []) {
       if (row?.conversa_id != null) ids.add(Number(row.conversa_id))
       if (ids.size >= idLimit) break
     }
-    if (!data || data.length < pageSize) break
+    if (!data || data.length < (end - start + 1)) break
   }
   return [...ids]
 }
@@ -234,24 +238,22 @@ async function resolveChatListCountsContext(req) {
 
   const palavraTrim = palavra && String(palavra).trim() ? String(palavra).trim() : ''
   if (palavraTrim) {
-    const term = `%${escapeIlikePattern(palavraTrim)}%`
     const searchIdLimit = getChatSearchIdLimit()
-    const { data: clientesMatch } = await supabase
-      .from('clientes')
-      .select('id')
-      .eq('company_id', company_id)
-      .or(buildClienteSearchOr(palavraTrim))
-      .order('criado_em', { ascending: false })
-      .limit(searchIdLimit)
-    const clienteIds = (clientesMatch || []).map((c) => c.id)
-    const [convByCliente, convByTelefone, convByNomeGrupo, convByNomeContatoCache, idsFromMsg] = await Promise.all([
+    const phoneVariacoes = buildPhoneSearchTerms(palavraTrim)
+
+    // Idêntico ao chatController: 3 branches paralelas, RPC unaccent para nomes
+    const [convByNomeIds, convByTelefone, idsFromMsg] = await Promise.all([
       supabase
-        .from('conversas')
-        .select('id')
-        .eq('company_id', company_id)
-        .in('cliente_id', clienteIds.length ? clienteIds : [0])
-        .order('ultima_atividade', { ascending: false, nullsFirst: false })
-        .limit(searchIdLimit),
+        .rpc('buscar_conversas_por_nome_ids', {
+          p_company_id: Number(company_id),
+          p_termo: palavraTrim,
+          p_phone_variacoes: phoneVariacoes.length ? phoneVariacoes : null,
+          p_limit: searchIdLimit,
+        })
+        .then(({ data, error }) => {
+          if (error) console.warn('[counts-busca-nome] RPC error:', error.message)
+          return Array.isArray(data) ? data : []
+        }),
       supabase
         .from('conversas')
         .select('id')
@@ -259,27 +261,12 @@ async function resolveChatListCountsContext(req) {
         .or(buildTelefoneSearchOr(palavraTrim))
         .order('ultima_atividade', { ascending: false, nullsFirst: false })
         .limit(searchIdLimit),
-      supabase
-        .from('conversas')
-        .select('id')
-        .eq('company_id', company_id)
-        .ilike('nome_grupo', term)
-        .order('ultima_atividade', { ascending: false, nullsFirst: false })
-        .limit(searchIdLimit),
-      supabase
-        .from('conversas')
-        .select('id')
-        .eq('company_id', company_id)
-        .ilike('nome_contato_cache', term)
-        .order('ultima_atividade', { ascending: false, nullsFirst: false })
-        .limit(searchIdLimit),
       buscarConversaIdsPorTextoMensagens({ company_id, term: palavraTrim }),
     ])
+
     const mergedSet = new Set([
-      ...(convByCliente.data || []).map((c) => c.id),
+      ...convByNomeIds,
       ...(convByTelefone.data || []).map((c) => c.id),
-      ...(convByNomeGrupo.data || []).map((c) => c.id),
-      ...(convByNomeContatoCache.data || []).map((c) => c.id),
       ...idsFromMsg,
     ])
     if (mergedSet.size === 0) {

@@ -1,4 +1,8 @@
 const assert = require('node:assert/strict')
+const fs = require('fs')
+const os = require('os')
+const path = require('path')
+const { spawnSync } = require('child_process')
 const { _test } = require('../controllers/chatController')
 
 function file({ mimetype = '', originalname = 'arquivo.bin', filename = '', path = '' } = {}) {
@@ -22,6 +26,66 @@ test('classifica videos de galeria e iPhone como video', () => {
   assert.equal(_test.inferirTipoArquivo(file({ mimetype: 'video/quicktime', originalname: 'IMG_004.mov' })), 'video')
   assert.equal(_test.inferirTipoArquivo(file({ mimetype: 'application/octet-stream', originalname: 'IMG_005.MOV' })), 'video')
   assert.equal(_test.inferirTipoArquivo(file({ mimetype: '', originalname: 'clip.m4v' })), 'video')
+})
+
+test('normaliza somente formatos de video que a UltraMSG nao aceita diretamente', () => {
+  assert.equal(
+    _test.shouldNormalizeVideoForUltraMsg(file({ mimetype: 'video/mp4', originalname: 'video.mp4', path: '/tmp/video.mp4' }), 'video'),
+    false
+  )
+  assert.equal(
+    _test.shouldNormalizeVideoForUltraMsg(file({ mimetype: 'video/quicktime', originalname: 'IMG_004.mov', path: '/tmp/IMG_004.mov' }), 'video'),
+    false
+  )
+  assert.equal(
+    _test.shouldNormalizeVideoForUltraMsg(file({ mimetype: 'video/3gpp', originalname: 'clip.3gp', path: '/tmp/clip.3gp' }), 'video'),
+    false
+  )
+  for (const ext of ['webm', 'avi', 'mkv', 'm4v', 'mpeg', 'mpg', 'ogv']) {
+    assert.equal(
+      _test.shouldNormalizeVideoForUltraMsg(file({ mimetype: `video/${ext}`, originalname: `clip.${ext}`, path: `/tmp/clip.${ext}` }), 'video'),
+      true,
+      `esperava conversao para .${ext}`
+    )
+  }
+  assert.equal(
+    _test.shouldNormalizeVideoForUltraMsg(file({ mimetype: 'video/webm', originalname: 'clip.webm', path: '/tmp/clip.webm' }), 'arquivo'),
+    false
+  )
+})
+
+test('converte WebM real para MP4 H.264 antes de enviar a UltraMSG', async () => {
+  const ffmpegPath = require('ffmpeg-static')
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'zaperp-video-normalize-'))
+  const sourcePath = path.join(tempDir, 'clip.webm')
+  try {
+    const generated = spawnSync(ffmpegPath, [
+      '-y',
+      '-f', 'lavfi',
+      '-i', 'color=c=blue:s=320x240:d=0.3',
+      '-an',
+      '-c:v', 'libvpx-vp9',
+      sourcePath,
+    ], { windowsHide: true })
+    assert.equal(generated.status, 0, String(generated.stderr || '').slice(-300))
+
+    const result = await _test.normalizeVideoForUltraMsg({
+      mimetype: 'video/webm',
+      originalname: 'clip.webm',
+      filename: 'clip.webm',
+      path: sourcePath,
+      size: fs.statSync(sourcePath).size,
+    }, 'video')
+
+    assert.equal(result.converted, true, result.error)
+    assert.equal(result.file.mimetype, 'video/mp4')
+    assert.match(result.file.originalname, /\.mp4$/i)
+    assert.ok(result.file.size > 0)
+    assert.equal(fs.existsSync(result.file.path), true)
+    assert.equal(fs.existsSync(sourcePath), false)
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true })
+  }
 })
 
 test('classifica audio e documentos sem transformar em imagem/video', () => {
