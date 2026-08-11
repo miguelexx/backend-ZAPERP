@@ -54,3 +54,36 @@ test('resolveForwardMediaForProvider rejeita /uploads local sem uploadMedia e se
   assert.equal(result.ok, false)
   assert.match(result.error, /uploadMedia|URL/i)
 })
+
+test('video MP4 encaminhado preserva URL publica e nao passa por upload de documento', async () => {
+  const uploadsRoot = ensureUploadsRootExists()
+  const fileName = `forward-video-${Date.now()}.mp4`
+  const filePath = path.join(uploadsRoot, fileName)
+  fs.writeFileSync(filePath, Buffer.from('mp4-fake'))
+  let uploadCalls = 0
+  try {
+    const result = await _test.resolveForwardMediaForProvider({
+      provider: {
+        uploadMedia: async () => {
+          uploadCalls += 1
+          return { ok: true, url: 'https://cdn.example.test/sem-extensao' }
+        },
+      },
+      mensagemOriginal: {
+        tipo: 'video',
+        url: `/uploads/${fileName}`,
+        nome_arquivo: fileName,
+      },
+      company_id: 1,
+      whatsappInstanceId: 2,
+      baseUrl: 'https://crm.example.test',
+    })
+
+    assert.equal(result.ok, true)
+    assert.equal(result.source, 'public_video_url')
+    assert.equal(result.url, `https://crm.example.test/uploads/${fileName}`)
+    assert.equal(uploadCalls, 0)
+  } finally {
+    if (fs.existsSync(filePath)) fs.unlinkSync(filePath)
+  }
+})

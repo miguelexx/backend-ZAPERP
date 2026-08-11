@@ -185,6 +185,10 @@ app.use(
   express.static(getUploadsRoot(), {
     index: false,
     dotfiles: 'deny',
+    // Nomes incluem hex aleatório (ex.: inbound-c1-m123-a4b5c6.ogg) → conteúdo imutável.
+    // immutable + 365d = browser não revalida; 206 nativo do express.static funciona normalmente.
+    maxAge: '365d',
+    immutable: true,
     setHeaders(res, filePath) {
       res.setHeader('X-Content-Type-Options', 'nosniff')
       const p = String(filePath || '').toLowerCase()

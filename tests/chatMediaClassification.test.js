@@ -54,6 +54,24 @@ test('normaliza somente formatos de video que a UltraMSG nao aceita diretamente'
   )
 })
 
+test('video usa URL publica direta e nao forca segundo upload na UltraMSG', () => {
+  assert.equal(_test.shouldForceProviderUploadForMedia('video'), false)
+  assert.equal(_test.shouldForceProviderUploadForMedia('vídeo'), false)
+  assert.equal(_test.shouldForceProviderUploadForMedia('imagem'), false)
+  assert.equal(_test.shouldForceProviderUploadForMedia('audio'), true)
+  assert.equal(_test.shouldForceProviderUploadForMedia('voice'), true)
+})
+
+test('tipo video explicito so e aplicado a arquivo realmente de video', () => {
+  const mp4Generico = file({ mimetype: 'application/octet-stream', originalname: 'camera.mp4' })
+  mp4Generico.__tipoForcado = 'video'
+  assert.equal(_test.aplicarTipoForcadoSticker(mp4Generico, 'arquivo'), 'video')
+
+  const pdf = file({ mimetype: 'application/pdf', originalname: 'contrato.pdf' })
+  pdf.__tipoForcado = 'video'
+  assert.equal(_test.aplicarTipoForcadoSticker(pdf, 'arquivo'), 'arquivo')
+})
+
 test('converte WebM real para MP4 H.264 antes de enviar a UltraMSG', async () => {
   const ffmpegPath = require('ffmpeg-static')
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'zaperp-video-normalize-'))

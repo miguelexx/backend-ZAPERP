@@ -232,7 +232,11 @@ exports.proxyMedia = async (req, res) => {
     }
 
     res.setHeader('Content-Type', ct)
-    res.setHeader('Cache-Control', 'private, max-age=120')
+    // max-age=86400: 24h cobrem o TTL típico das URLs do provedor (UltraMsg/S3).
+    // immutable: o nome do arquivo em /uploads inclui hex aleatório — o conteúdo nunca muda.
+    // res.end() em vez de res.send(): res.send adiciona ETag FRACO, que colide com a entrada
+    // "sparse" de mídia do Chrome (ERR_CACHE_OPERATION_NOT_SUPPORTED visto em /uploads antes).
+    res.setHeader('Cache-Control', 'private, max-age=86400, immutable')
     res.setHeader('Accept-Ranges', 'bytes')
 
     if (effectiveFilename) {
@@ -244,9 +248,23 @@ exports.proxyMedia = async (req, res) => {
       )
     }
 
-    // Sempre arquivo completo (200). Honrar Range com 206 quebrou OGG/Opus no Chrome
-    // (seek/resume com pedaço). Mantém Accept-Ranges como antes deste experimento.
-    return res.status(200).send(body)
+    const total = body.length
+    const rangeHeader = req.headers['range']
+    if (rangeHeader) {
+      const range = parseSingleByteRange(rangeHeader, total)
+      if (!range) {
+        // Intervalo inválido ou fora do arquivo — RFC 7233 §4.4
+        res.setHeader('Content-Range', `bytes */${total}`)
+        return res.status(416).end()
+      }
+      const { start, end } = range
+      res.setHeader('Content-Range', `bytes ${start}-${end}/${total}`)
+      res.setHeader('Content-Length', String(end - start + 1))
+      return res.status(206).end(body.slice(start, end + 1))
+    }
+
+    res.setHeader('Content-Length', String(total))
+    return res.status(200).end(body)
   } catch (e) {
     const timedOut = e?.name === 'AbortError'
     console.error('[mediaProxy] fetch:', timedOut ? 'timeout' : (e?.message || e))
@@ -256,9 +274,39 @@ exports.proxyMedia = async (req, res) => {
   }
 }
 
+/**
+ * Parseia um único intervalo byte-range da forma definida em RFC 7233 §2.1.
+ * Suporta: bytes=a-b, bytes=a-, bytes=-n.
+ * Retorna { start, end } (ambos inclusivos) ou null para intervalo inválido/multi-range.
+ * Nunca retorna um intervalo fora de [0, totalLength-1].
+ */
+function parseSingleByteRange(rangeHeader, totalLength) {
+  if (!rangeHeader || !String(rangeHeader).startsWith('bytes=')) return null
+  const spec = String(rangeHeader).slice(6).trim()
+  if (spec.includes(',')) return null // multi-range não implementado
+  const m = spec.match(/^(\d*)-(\d*)$/)
+  if (!m) return null
+  const [, startStr, endStr] = m
+  if (startStr === '' && endStr === '') return null
+  let start, end
+  if (startStr === '') {
+    const suffix = parseInt(endStr, 10)
+    if (!Number.isFinite(suffix) || suffix <= 0) return null
+    start = Math.max(0, totalLength - suffix)
+    end = totalLength - 1
+  } else {
+    start = parseInt(startStr, 10)
+    end = endStr === '' ? totalLength - 1 : parseInt(endStr, 10)
+  }
+  if (!Number.isFinite(start) || !Number.isFinite(end)) return null
+  if (start < 0 || start > end || end >= totalLength) return null
+  return { start, end }
+}
+
 /** Helpers puros para testes de regressão (não alteram o fluxo HTTP). */
 exports._test = {
   resolveContentType,
   mimeFromFilename,
   filenameFromUrlPath,
+  parseSingleByteRange,
 }

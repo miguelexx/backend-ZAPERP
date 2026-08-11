@@ -30,6 +30,9 @@ const {
   schedulePersistInboundMediaIfNeeded,
   tipoQualificaPersistencia,
 } = require('../services/inboundMediaPersistenceService')
+const {
+  scheduleInboundMediaBackfill,
+} = require('../services/inboundMediaBackfillService')
 
 const {
   processIncomingMessage: processChatbotTriage,
@@ -3428,6 +3431,16 @@ exports.receberZapi = async (req, res) => {
           departamento_id,
         })
       }
+
+      // Repara URL ausente: quando o webhook entrega áudio/imagem sem media URL,
+      // busca via GET /chats/messages (mesma fonte do "Carregar mensagens antigas").
+      scheduleInboundMediaBackfill({
+        supabase,
+        io: req.app.get('io'),
+        company_id,
+        conversa_id: mPersist?.conversa_id ?? conversa_id,
+        mensagemSalva: mPersist,
+      })
 
       // Usar conversa_id da mensagem quando idempotência retornou existente de outra conversa
       const convIdForUpdate = mensagemSalva.conversa_id ?? conversa_id
