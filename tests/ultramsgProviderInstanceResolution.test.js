@@ -371,6 +371,7 @@ describe('UltraMsg provider instance resolution', () => {
       expect(options.body.get('token')).toBe('tok')
       expect(uploadedFile).toBeInstanceOf(Blob)
       expect(uploadedFile.name).toBe('video.mp4')
+      expect(uploadedFile.type).toBe('video/mp4')
       expect(uploadedFile.size).toBe(Buffer.byteLength('video-fake'))
       expect(options.headers['Content-Type']).toBeUndefined()
       expect(options.headers['content-type']).toBeUndefined()

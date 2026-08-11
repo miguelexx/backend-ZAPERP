@@ -28,18 +28,18 @@ test('classifica videos de galeria e iPhone como video', () => {
   assert.equal(_test.inferirTipoArquivo(file({ mimetype: '', originalname: 'clip.m4v' })), 'video')
 })
 
-test('normaliza somente formatos de video que a UltraMSG nao aceita diretamente', () => {
+test('prepara todo video para codec e container nativos do WhatsApp', () => {
   assert.equal(
     _test.shouldNormalizeVideoForUltraMsg(file({ mimetype: 'video/mp4', originalname: 'video.mp4', path: '/tmp/video.mp4' }), 'video'),
-    false
+    true
   )
   assert.equal(
     _test.shouldNormalizeVideoForUltraMsg(file({ mimetype: 'video/quicktime', originalname: 'IMG_004.mov', path: '/tmp/IMG_004.mov' }), 'video'),
-    false
+    true
   )
   assert.equal(
     _test.shouldNormalizeVideoForUltraMsg(file({ mimetype: 'video/3gpp', originalname: 'clip.3gp', path: '/tmp/clip.3gp' }), 'video'),
-    false
+    true
   )
   for (const ext of ['webm', 'avi', 'mkv', 'm4v', 'mpeg', 'mpg', 'ogv']) {
     assert.equal(
@@ -54,8 +54,42 @@ test('normaliza somente formatos de video que a UltraMSG nao aceita diretamente'
   )
 })
 
-test('video usa URL publica direta e nao forca segundo upload na UltraMSG', () => {
-  assert.equal(_test.shouldForceProviderUploadForMedia('video'), false)
+test('reprocessa ate MP4 real e produz MP4 H.264 identificado com sufixo -wa', async () => {
+  const ffmpegPath = require('ffmpeg-static')
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'zaperp-video-mp4-normalize-'))
+  const sourcePath = path.join(tempDir, 'camera.mp4')
+  try {
+    const generated = spawnSync(ffmpegPath, [
+      '-y',
+      '-f', 'lavfi',
+      '-i', 'color=c=green:s=320x240:d=0.3',
+      '-an',
+      '-c:v', 'libx264',
+      '-pix_fmt', 'yuv420p',
+      sourcePath,
+    ], { windowsHide: true })
+    assert.equal(generated.status, 0, String(generated.stderr || '').slice(-300))
+
+    const result = await _test.normalizeVideoForUltraMsg({
+      mimetype: 'video/mp4',
+      originalname: 'camera.mp4',
+      filename: 'camera.mp4',
+      path: sourcePath,
+      size: fs.statSync(sourcePath).size,
+    }, 'video')
+
+    assert.equal(result.converted, true, result.error)
+    assert.match(result.file.filename, /-wa\.mp4$/i)
+    assert.equal(result.file.mimetype, 'video/mp4')
+    const inspected = spawnSync(ffmpegPath, ['-hide_banner', '-i', result.file.path], { windowsHide: true })
+    assert.match(String(inspected.stderr || ''), /Video:\s+h264/i)
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true })
+  }
+})
+
+test('video usa CDN da UltraMSG para nao depender da URL publica do backend', () => {
+  assert.equal(_test.shouldForceProviderUploadForMedia('video'), true)
   assert.equal(_test.shouldForceProviderUploadForMedia('vídeo'), false)
   assert.equal(_test.shouldForceProviderUploadForMedia('imagem'), false)
   assert.equal(_test.shouldForceProviderUploadForMedia('audio'), true)

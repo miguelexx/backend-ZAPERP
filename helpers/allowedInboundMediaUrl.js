@@ -4,6 +4,41 @@
  */
 
 /**
+ * Domínios WhatsApp/Facebook CDN que podem hospedar mídia recebida via UltraMsg/Z-API.
+ * Suporta wildcards no formato "*.dominio.tld" — o host deve terminar com ".dominio.tld".
+ */
+const WHATSAPP_FACEBOOK_CDN_PATTERNS = [
+  // WhatsApp media servers (mmg, pps, v1..v99.fna, etc.)
+  '*.whatsapp.net',
+  'whatsapp.net',
+  // Facebook CDN (fotos de perfil, stickers, mídia via Graph)
+  '*.fbcdn.net',
+  'fbcdn.net',
+  // Facebook storage (lookaside.fbsbx.com e afins)
+  '*.fbsbx.com',
+  'fbsbx.com',
+  // WhatsApp web static (stickers, emojis)
+  '*.whatsapp.com',
+]
+
+/**
+ * Verifica se o host bate em algum padrão da lista acima.
+ * Padrão "*.dominio.tld" → host termina com ".dominio.tld" (subdomínio obrigatório).
+ * Padrão sem "*" → match exato.
+ */
+function matchesCdnPattern(host) {
+  for (const pattern of WHATSAPP_FACEBOOK_CDN_PATTERNS) {
+    if (pattern.startsWith('*.')) {
+      const suffix = pattern.slice(1) // ".dominio.tld"
+      if (host === suffix.slice(1) || host.endsWith(suffix)) return true
+    } else {
+      if (host === pattern) return true
+    }
+  }
+  return false
+}
+
+/**
  * @param {URL} u
  * @returns {boolean}
  */
@@ -25,6 +60,9 @@ function isAllowedInboundMediaUrl(u) {
   // Previne proxy-of-proxy: rejeita URLs que apontam para o próprio endpoint /media/proxy.
   if (String(u.pathname || '').startsWith('/media/proxy')) return false
 
+  // WhatsApp / Facebook CDN — incluem mmg.whatsapp.net, *.fna.whatsapp.net, *.fbcdn.net, etc.
+  if (matchesCdnPattern(host)) return true
+
   if (host.endsWith('.amazonaws.com')) {
     const pathname = (u.pathname || '').toLowerCase()
     const hn = host.toLowerCase()
@@ -43,11 +81,19 @@ function isAllowedInboundMediaUrl(u) {
   // Domínios UltraMsg diretos (não-S3): files.ultramsg.com, media.ultramsg.com, etc.
   if (host === 'ultramsg.com' || host.endsWith('.ultramsg.com')) return true
 
+  // MEDIA_PROXY_EXTRA_HOSTS: suporta wildcards no formato "*.dominio.tld" além de match exato.
   const extra = String(process.env.MEDIA_PROXY_EXTRA_HOSTS || '')
     .split(',')
     .map((s) => s.trim().toLowerCase())
     .filter(Boolean)
-  if (extra.length && extra.includes(host)) return true
+  for (const entry of extra) {
+    if (entry.startsWith('*.')) {
+      const suffix = entry.slice(1) // ".dominio.tld"
+      if (host === suffix.slice(1) || host.endsWith(suffix)) return true
+    } else {
+      if (host === entry) return true
+    }
+  }
 
   return false
 }

@@ -7755,12 +7755,16 @@ function shouldAbortAudioAfterNormalize(tipo, normalized) {
 function shouldNormalizeVideoForUltraMsg(file, tipo) {
   if (tipo !== 'video' || !file?.path) return false
   const ext = extBaseArquivo(file)
-  return !ULTRAMSG_VIDEO_FILE_EXTENSIONS.has(ext)
+  const base = mimeBase(file)
+  // A extensao MP4 identifica apenas o container. Ele ainda pode conter HEVC,
+  // AV1, audio nao-AAC ou metadata que o WhatsApp rebaixa para documento.
+  // Todo video enviado pelo painel passa pela preparacao deterministica abaixo.
+  return base.startsWith('video/') || VIDEO_FILE_EXTENSIONS.has(ext)
 }
 
 function shouldForceProviderUploadForMedia(tipo) {
   const normalized = String(tipo || '').toLowerCase().trim()
-  return normalized === 'audio' || normalized === 'voice'
+  return normalized === 'audio' || normalized === 'voice' || normalized === 'video'
 }
 
 async function convertVideoToUltraMsgMp4(inputPath, outputPath) {
@@ -7776,10 +7780,16 @@ async function convertVideoToUltraMsgMp4(inputPath, outputPath) {
     '-c:v', 'libx264',
     '-preset', 'veryfast',
     '-crf', '28',
-    '-vf', 'scale=min(1280\\,iw):-2,format=yuv420p',
+    '-profile:v', 'main',
+    '-level:v', '4.0',
+    '-tag:v', 'avc1',
+    '-vf', 'scale=1280:1280:force_original_aspect_ratio=decrease:force_divisible_by=2,format=yuv420p',
     '-c:a', 'aac',
     '-b:a', '96k',
     '-ac', '2',
+    '-ar', '44100',
+    '-sn',
+    '-dn',
     '-movflags', '+faststart',
     '-map_metadata', '-1',
     '-map_chapters', '-1',
@@ -8280,12 +8290,11 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
     const baseUrl = (process.env.APP_URL || process.env.BASE_URL || '').replace(/\/$/, '')
     const fullUrl = baseUrl ? `${baseUrl}${pathUrl}` : null
     const isLocalhost = /localhost|127\.0\.0\.1/i.test(baseUrl)
-    // Para áudio/voice, prioriza sempre CDN da UltraMsg:
+    // Para áudio/voice/video, prioriza sempre CDN da UltraMsg:
     // evita problemas de disponibilidade/headers em URLs próprias do backend
     // e melhora a reprodução no WhatsApp mobile e desktop.
-    // Vídeo deve preservar a URL pública com extensão e Content-Type video/*.
-    // Reenviar o MP4 para /media/upload pode devolver URL sem hint de MIME e o
-    // WhatsApp acaba exibindo a mídia como documento, além de duplicar o upload.
+    // O vídeo chega ao upload como MP4 H.264/AAC e o multipart informa video/mp4;
+    // assim /messages/video não depende do APP_URL estar acessível naquele instante.
     const forceUploadMedia = shouldForceProviderUploadForMedia(tipo)
 
     const sendMediaWithUrl = (mediaUrl) => {
@@ -8393,7 +8402,10 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
         if (provider?.uploadMedia) {
           setImmediate(async () => {
             try {
-              const result = await provider.uploadMedia(fileWork.path, fileWork.originalname || 'file', { companyId: company_id, whatsappInstanceId: whatsappInstanceId || undefined })
+              const providerUploadFilename = tipo === 'video'
+                ? (fileWork.filename || fileWork.originalname || 'video.mp4')
+                : (fileWork.originalname || 'file')
+              const result = await provider.uploadMedia(fileWork.path, providerUploadFilename, { companyId: company_id, whatsappInstanceId: whatsappInstanceId || undefined })
               if (result?.ok && result?.url) {
                 console.log('[ULTRAMSG] Upload bem-sucedido, enviando mídia via CDN:', result.url.slice(0, 50) + '...')
                 sendMediaWithUrl(result.url)
@@ -8406,7 +8418,7 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
                   forceUploadMedia
                 })
                 // Fallback seguro: se temos URL pública do backend, tenta enviar direto sem upload.
-                if (fullUrl && !isLocalhost) {
+                if (tipo !== 'video' && fullUrl && !isLocalhost) {
                   console.warn('[ULTRAMSG] Tentando fallback com URL pública do backend após falha no upload.')
                   sendMediaWithUrl(fullUrl)
                 } else {
@@ -8703,9 +8715,8 @@ async function resolveForwardMediaForProvider({ provider, mensagemOriginal, comp
       return { ok: false, error: 'Não foi possível preparar o vídeo para encaminhamento.' }
     }
 
-    // Mantém extensão .mp4 e Content-Type video/mp4 até o endpoint /messages/video.
-    // Isto evita que o WhatsApp apresente o vídeo encaminhado como documento.
-    if (publicUrl && !isLocalBase) return { ok: true, url: publicUrl, source: 'public_video_url' }
+    // O MP4 preparado segue primeiro para o CDN da UltraMSG com MIME video/mp4.
+    // A URL própria permanece abaixo apenas como fallback se o upload falhar.
   }
 
   if (provider?.uploadMedia && localPath) {
@@ -8730,17 +8741,20 @@ async function resolveForwardMediaForProvider({ provider, mensagemOriginal, comp
           console.warn('[ULTRAMSG][FORWARD_IMAGE] Normalização JPEG indisponível:', normalizedImage.error)
         }
       }
+      const providerUploadName = tipo === 'video'
+        ? require('path').basename(uploadPath)
+        : uploadName
       const upload = await provider.uploadMedia(
         uploadPath,
-        uploadName,
+        providerUploadName,
         { companyId: company_id, whatsappInstanceId: whatsappInstanceId || undefined }
       )
       if (upload?.ok && upload?.url) return { ok: true, url: upload.url, source: 'provider_upload' }
-      if (!publicUrl || isLocalBase) {
+      if (tipo === 'video' || !publicUrl || isLocalBase) {
         return { ok: false, error: upload?.error || 'Falha ao preparar mídia para encaminhamento.' }
       }
     } catch (error) {
-      if (!publicUrl || isLocalBase) {
+      if (tipo === 'video' || !publicUrl || isLocalBase) {
         return { ok: false, error: error?.message || 'Falha ao preparar mídia para encaminhamento.' }
       }
     }

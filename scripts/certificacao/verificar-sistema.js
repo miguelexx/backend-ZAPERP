@@ -3,7 +3,7 @@
  * Script de certificação: verifica se o sistema está funcionando conforme a revisão completa.
  * Uso: node scripts/certificacao/verificar-sistema.js [BASE_URL]
  * Ex:  node scripts/certificacao/verificar-sistema.js http://localhost:5000
- * Ex:  node scripts/certificacao/verificar-sistema.js https://zaperpapi.wmsistemas.inf.br
+ * Ex:  node scripts/certificacao/verificar-sistema.js https://zapapi.wmsistemas.inf.br
  *
  * Carrega .env do backend automaticamente. APP_URL é usado se nenhum argumento for passado.
  *
@@ -153,7 +153,7 @@ async function main() {
           console.log('   • Verifique se o servidor remoto está online e acessível')
         }
       } catch (_) {}
-      console.log('   • Teste remoto: node scripts/certificacao/verificar-sistema.js https://zaperpapi.wmsistemas.inf.br')
+      console.log('   • Teste remoto: node scripts/certificacao/verificar-sistema.js https://zapapi.wmsistemas.inf.br')
       console.log('   • Verifique firewall/proxy se o host for remoto')
     } else {
       console.log('❌ Alguns checks falharam. Revise a configuração.')

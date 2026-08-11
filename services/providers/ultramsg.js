@@ -2025,6 +2025,28 @@ function isRetriableUploadError(err) {
   )
 }
 
+function contentTypeForUploadFilename(filename) {
+  const ext = String(filename || '').toLowerCase().split('?')[0].split('.').pop()
+  const byExt = {
+    mp4: 'video/mp4',
+    mov: 'video/quicktime',
+    '3gp': 'video/3gpp',
+    webm: 'video/webm',
+    jpg: 'image/jpeg',
+    jpeg: 'image/jpeg',
+    png: 'image/png',
+    webp: 'image/webp',
+    gif: 'image/gif',
+    mp3: 'audio/mpeg',
+    ogg: 'audio/ogg',
+    opus: 'audio/ogg',
+    aac: 'audio/aac',
+    m4a: 'audio/mp4',
+    pdf: 'application/pdf',
+  }
+  return byExt[ext] || 'application/octet-stream'
+}
+
 /**
  * Upload de mídia para UltraMsg. POST /{instance_id}/media/upload
  * Retorna URL pública para usar em sendImage/sendFile/etc quando APP_URL não é acessível.
@@ -2041,6 +2063,7 @@ async function uploadMedia(filePath, filename, opts = {}) {
   const safeFilename = filename || path.basename(filePath) || 'file'
   // Não renomear extensão sem transcodificar bytes reais.
   const uploadFilename = String(safeFilename).slice(0, FILENAME_MAX_LEN)
+  const uploadContentType = contentTypeForUploadFilename(uploadFilename)
   const uploadTimeout = 60_000
   const maxAttempts = Math.max(1, Math.min(3, Number(opts.maxAttempts) || 3))
   const rawDelay = Number(opts.baseDelayMs)
@@ -2059,7 +2082,7 @@ async function uploadMedia(filePath, filename, opts = {}) {
       const fileBuffer = await fs.promises.readFile(filePath)
       const form = new FormData()
       form.append('token', cfg.token)
-      form.append('file', new Blob([fileBuffer]), uploadFilename)
+      form.append('file', new Blob([fileBuffer], { type: uploadContentType }), uploadFilename)
       let signal
       try {
         if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function') {
@@ -2085,6 +2108,7 @@ async function uploadMedia(filePath, filename, opts = {}) {
         body: {
           file_original: safeFilename,
           file_upload: uploadFilename,
+          content_type: uploadContentType,
           token: maskToken(cfg.token),
           attempt,
           maxAttempts,

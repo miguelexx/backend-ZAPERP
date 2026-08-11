@@ -1,6 +1,7 @@
 const assert = require('node:assert/strict')
 const fs = require('fs')
 const path = require('path')
+const { spawnSync } = require('child_process')
 const { _test } = require('../controllers/chatController')
 const { ensureUploadsRootExists } = require('../config/uploadsRoot')
 
@@ -55,17 +56,32 @@ test('resolveForwardMediaForProvider rejeita /uploads local sem uploadMedia e se
   assert.match(result.error, /uploadMedia|URL/i)
 })
 
-test('video MP4 encaminhado preserva URL publica e nao passa por upload de documento', async () => {
+test('video MP4 encaminhado e normalizado e sobe para o CDN antes de /messages/video', async () => {
   const uploadsRoot = ensureUploadsRootExists()
   const fileName = `forward-video-${Date.now()}.mp4`
   const filePath = path.join(uploadsRoot, fileName)
-  fs.writeFileSync(filePath, Buffer.from('mp4-fake'))
+  const normalizedPath = path.join(uploadsRoot, fileName.replace(/\.mp4$/i, '-wa.mp4'))
+  const ffmpegPath = require('ffmpeg-static')
+  const generated = spawnSync(ffmpegPath, [
+    '-y',
+    '-f', 'lavfi',
+    '-i', 'color=c=blue:s=320x240:d=0.2',
+    '-an',
+    '-c:v', 'libx264',
+    '-pix_fmt', 'yuv420p',
+    filePath,
+  ], { windowsHide: true })
+  assert.equal(generated.status, 0, String(generated.stderr || '').slice(-300))
   let uploadCalls = 0
+  let uploadedPath = null
+  let uploadedName = null
   try {
     const result = await _test.resolveForwardMediaForProvider({
       provider: {
-        uploadMedia: async () => {
+        uploadMedia: async (localPath, originalName) => {
           uploadCalls += 1
+          uploadedPath = localPath
+          uploadedName = originalName
           return { ok: true, url: 'https://cdn.example.test/sem-extensao' }
         },
       },
@@ -80,10 +96,13 @@ test('video MP4 encaminhado preserva URL publica e nao passa por upload de docum
     })
 
     assert.equal(result.ok, true)
-    assert.equal(result.source, 'public_video_url')
-    assert.equal(result.url, `https://crm.example.test/uploads/${fileName}`)
-    assert.equal(uploadCalls, 0)
+    assert.equal(result.source, 'provider_upload')
+    assert.equal(result.url, 'https://cdn.example.test/sem-extensao')
+    assert.equal(uploadCalls, 1)
+    assert.match(uploadedPath, /-wa\.mp4$/i)
+    assert.match(uploadedName, /-wa\.mp4$/i)
   } finally {
     if (fs.existsSync(filePath)) fs.unlinkSync(filePath)
+    if (fs.existsSync(normalizedPath)) fs.unlinkSync(normalizedPath)
   }
 })
