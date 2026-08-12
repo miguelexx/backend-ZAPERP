@@ -1,20 +1,20 @@
 const supabase = require('../config/supabase')
 const jwt = require('jsonwebtoken')
 const bcrypt = require('bcryptjs')
-const { empresaCrmHabilitada } = require('../helpers/crmEmpresaFlag')
+// Módulo CRM legado removido; o campo crm_habilitado é fixado em false para
+// compatibilidade com frontends que ainda leem a flag (crm_habilitado !== false).
+const crm_habilitado = false
 
 /** GET /usuarios/me — perfil do usuário logado (inclui preferências) */
 exports.getMe = async (req, res) => {
   try {
     const { id: user_id, company_id } = req.user
 
-    const [crmResult, empFlagsResult, userResult] = await Promise.allSettled([
-      empresaCrmHabilitada(company_id).catch(() => true),
+    const [empFlagsResult, userResult] = await Promise.allSettled([
       supabase.from('empresas').select('separar_mensagens_disparadas, atendimento_modo_simples').eq('id', company_id).maybeSingle(),
       supabase.from('usuarios').select('id, nome, email, perfil, departamento_id, mostrar_nome_ao_cliente').eq('id', user_id).eq('company_id', company_id).maybeSingle(),
     ])
 
-    const crm_habilitado = crmResult.status === 'fulfilled' ? crmResult.value : true
     const separar_mensagens_disparadas = empFlagsResult.status === 'fulfilled'
       ? !!empFlagsResult.value?.data?.separar_mensagens_disparadas
       : false
@@ -429,14 +429,12 @@ exports.login = async (req, res) => {
 
     // Múltiplos departamentos + flags da empresa: busca em paralelo
     const { obterDepartamentoIdsDoUsuario } = require('../helpers/usuarioDepartamentosHelper')
-    const [departamento_ids, crmHabResult, empFlagsResult] = await Promise.allSettled([
+    const [departamento_ids, empFlagsResult] = await Promise.allSettled([
       obterDepartamentoIdsDoUsuario(usuario.id, usuario.company_id, usuario),
-      empresaCrmHabilitada(Number(usuario.company_id)).catch(() => true),
       supabase.from('empresas').select('separar_mensagens_disparadas, atendimento_modo_simples').eq('id', usuario.company_id).maybeSingle(),
     ])
     const depIds = departamento_ids.status === 'fulfilled' ? departamento_ids.value : []
     const departamento_id = depIds.length > 0 ? depIds[0] : null
-    const crm_habilitado = crmHabResult.status === 'fulfilled' ? crmHabResult.value : true
     const separar_mensagens_disparadas = empFlagsResult.status === 'fulfilled'
       ? !!empFlagsResult.value?.data?.separar_mensagens_disparadas
       : false

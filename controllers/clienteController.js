@@ -419,17 +419,7 @@ exports.apagarTodosClientes = async (req, res) => {
       }
     }
 
-    // 3) campanha_envios não tem company_id — remove via clientes da empresa
-    const { data: clienteIds } = await supabase.from('clientes').select('id').eq('company_id', cid);
-    const ids = (clienteIds || []).map((c) => c.id).filter(Boolean);
-    if (ids.length > 0) {
-      const { error: errEnvios } = await supabase.from('campanha_envios').delete().in('cliente_id', ids);
-      if (errEnvios && !String(errEnvios.message || '').includes('does not exist')) {
-        console.warn('[apagarTodosClientes] campanha_envios:', errEnvios?.message);
-      }
-    }
-
-    // 4) Deleta os clientes
+    // 3) Deleta os clientes
     const { data: delData, error: errDel } = await supabase.from('clientes').delete().eq('company_id', cid).select('id');
     if (errDel) throw errDel;
     const qtd = Array.isArray(delData) ? delData.length : 0;
@@ -475,13 +465,7 @@ exports.excluirCliente = async (req, res) => {
       }
     }
 
-    // 3) campanha_envios — sem company_id, filtra pelo cliente_id
-    const { error: errEnvios } = await supabase.from('campanha_envios').delete().eq('cliente_id', clienteId);
-    if (errEnvios && !String(errEnvios.message || '').includes('does not exist')) {
-      console.warn('[excluirCliente] campanha_envios:', errEnvios?.message);
-    }
-
-    // 4) Deleta o cliente
+    // 3) Deleta o cliente
     const { error: errDelete } = await supabase.from('clientes').delete().eq('id', clienteId).eq('company_id', cid);
     if (errDelete) throw errDelete;
 

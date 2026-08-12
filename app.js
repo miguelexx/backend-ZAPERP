@@ -69,7 +69,9 @@ defaultDirectives['frame-ancestors'] = buildFrameAncestorsDirective()
 defaultDirectives['img-src'] = [...new Set([...(defaultDirectives['img-src'] || []), 'blob:'])]
 defaultDirectives['media-src'] = ["'self'", 'blob:', 'https:']
 defaultDirectives['connect-src'] = ["'self'", 'https:', 'wss:', 'ws:']
-defaultDirectives['frame-src'] = ["'none'"]
+// O visualizador baixa o PDF autenticado e o exibe em <iframe src="blob:...">.
+// Sem blob: em frame-src o download termina, mas o navegador bloqueia a renderização.
+defaultDirectives['frame-src'] = ["'self'", 'blob:']
 defaultDirectives['worker-src'] = ["'self'", 'blob:']
 
 app.use(
@@ -266,14 +268,12 @@ const configRoutes = require('./routes/configRoutes')
 const whatsappIntegrationRoutes = require('./routes/whatsappIntegrationRoutes')
 const clienteRoutes = require('./routes/clienteRoutes')
 const jobsRoutes = require('./routes/jobsRoutes')
-const campanhaRoutes = require('./routes/campanhaRoutes')
 const { optInRouter, optOutRouter } = require('./routes/optInOptOutRoutes')
 const { apiLimiter } = require('./middleware/rateLimit')
 const aiRoutes = require('./routes/aiRoutes')
 const chatbotDebugRoutes = require('./routes/chatbotDebugRoutes')
 const chatbotManagementRoutes = require('./routes/chatbotManagementRoutes')
 const internalChatRoutes = require('./routes/internalChatRoutes')
-const crmRoutes = require('./routes/crmRoutes')
 const supervisaoRoutes = require('./routes/supervisaoRoutes')
 const produtosRoutes = require('./routes/produtosRoutes')
 const printRoutes = require('./routes/printRoutes')
@@ -295,13 +295,11 @@ app.use('/usuarios', apiLimiter, userRoutes)
 app.use('/chats', apiLimiter, chatRoutes)
 app.use('/tags', apiLimiter, tagsRoutes)
 app.use('/ai', apiLimiter, aiRoutes)
-app.use('/campanhas', apiLimiter, campanhaRoutes)
 app.use('/opt-in', apiLimiter, optInRouter)
 app.use('/opt-out', apiLimiter, optOutRouter)
 app.use('/chatbot/debug', apiLimiter, chatbotDebugRoutes)
 app.use('/chatbot', apiLimiter, chatbotManagementRoutes)
 app.use('/internal-chat', apiLimiter, internalChatRoutes)
-app.use('/crm', apiLimiter, crmRoutes)
 app.use('/supervisao', apiLimiter, supervisaoRoutes)
 app.use('/produtos', apiLimiter, produtosRoutes)
 app.use('/print', apiLimiter, printRoutes)
@@ -323,13 +321,11 @@ api.use('/clientes', clienteRoutes)
 api.use('/usuarios', userRoutes)
 api.use('/chats', chatRoutes)
 api.use('/tags', tagsRoutes)
-api.use('/campanhas', campanhaRoutes)
 api.use('/opt-in', optInRouter)
 api.use('/opt-out', optOutRouter)
 api.use('/chatbot/debug', chatbotDebugRoutes)
 api.use('/chatbot', chatbotManagementRoutes)
 api.use('/internal-chat', internalChatRoutes)
-api.use('/crm', crmRoutes)
 api.use('/supervisao', supervisaoRoutes)
 api.use('/produtos', produtosRoutes)
 api.use('/print', printRoutes)
@@ -397,12 +393,10 @@ if (hasFrontendDist) {
     '/usuarios',
     '/chats',
     '/tags',
-    '/campanhas',
     '/opt-in',
     '/opt-out',
     '/chatbot',
     '/internal-chat',
-    '/crm',
     '/supervisao',
     '/print',
     '/media',

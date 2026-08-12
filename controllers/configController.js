@@ -36,11 +36,9 @@ exports.putEmpresa = async (req, res) => {
       horario_inicio,
       horario_fim,
       sla_minutos_sem_resposta,
-      plano_id,
       limite_chats_por_atendente,
       timeout_inatividade_min,
       zapi_auto_sync_contatos,
-      crm_habilitado,
       separar_mensagens_disparadas,
       atendimento_modo_simples
     } = req.body
@@ -57,11 +55,9 @@ exports.putEmpresa = async (req, res) => {
     if (horario_inicio !== undefined) update.horario_inicio = horario_inicio || '09:00'
     if (horario_fim !== undefined) update.horario_fim = horario_fim || '18:00'
     if (sla_minutos_sem_resposta !== undefined) update.sla_minutos_sem_resposta = Math.max(1, Math.min(1440, Number(sla_minutos_sem_resposta) || 30))
-    if (plano_id !== undefined) update.plano_id = plano_id || null
     if (limite_chats_por_atendente !== undefined) update.limite_chats_por_atendente = Math.max(0, Number(limite_chats_por_atendente) || 0)
     if (timeout_inatividade_min !== undefined) update.timeout_inatividade_min = Math.max(0, Number(timeout_inatividade_min) || 0)
     if (zapi_auto_sync_contatos !== undefined) update.zapi_auto_sync_contatos = !!zapi_auto_sync_contatos
-    if (crm_habilitado !== undefined) update.crm_habilitado = !!crm_habilitado
     if (separar_mensagens_disparadas !== undefined) update.separar_mensagens_disparadas = !!separar_mensagens_disparadas
     if (atendimento_modo_simples !== undefined) update.atendimento_modo_simples = !!atendimento_modo_simples
 
@@ -70,9 +66,6 @@ exports.putEmpresa = async (req, res) => {
       const msg = String(error.message || '')
       if (msg.includes('zapi_auto_sync_contatos') || msg.includes('does not exist')) {
         return res.status(400).json({ error: 'Banco desatualizado: rode o supabase/RUN_IN_SUPABASE.sql (coluna zapi_auto_sync_contatos).' })
-      }
-      if (msg.includes('crm_habilitado')) {
-        return res.status(400).json({ error: 'Banco desatualizado: aplique a migration empresas_crm_habilitado (coluna crm_habilitado).' })
       }
       if (msg.includes('separar_mensagens_disparadas')) {
         return res.status(400).json({ error: 'Banco desatualizado: aplique a migration separar_mensagens_disparadas (coluna separar_mensagens_disparadas).' })
@@ -159,18 +152,6 @@ exports.deleteLogoEmpresa = async (req, res) => {
   } catch (err) {
     console.error(err)
     return res.status(500).json({ error: 'Erro ao remover logo.' })
-  }
-}
-
-/** GET /config/planos */
-exports.getPlanos = async (req, res) => {
-  try {
-    const { data, error } = await supabase.from('planos').select('*').order('id')
-    if (error) { console.error('[configController]', error?.message); return res.status(500).json({ error: 'Erro interno' }) }
-    return res.json(data || [])
-  } catch (err) {
-    console.error(err)
-    return res.status(500).json({ error: 'Erro ao listar planos' })
   }
 }
 

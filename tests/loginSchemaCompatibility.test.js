@@ -54,9 +54,6 @@ describe('userController.login', () => {
     jest.doMock('jsonwebtoken', () => ({
       sign: jest.fn().mockReturnValue('jwt-token'),
     }))
-    jest.doMock('../helpers/crmEmpresaFlag', () => ({
-      empresaCrmHabilitada: jest.fn().mockResolvedValue(true),
-    }))
     jest.doMock('../helpers/usuarioDepartamentosHelper', () => ({
       obterDepartamentoIdsDoUsuario: jest.fn().mockResolvedValue([]),
     }))

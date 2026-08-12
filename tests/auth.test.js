@@ -30,11 +30,6 @@ describe('Rotas protegidas sem token', () => {
     expect(res.status).toBe(401)
   })
 
-  it('GET /api/campanhas retorna 401 sem Authorization', async () => {
-    const res = await request(app).get('/api/campanhas')
-    expect(res.status).toBe(401)
-  })
-
   it('GET /api/chatbot/status retorna 401 sem Authorization', async () => {
     const res = await request(app).get('/api/chatbot/status')
     expect(res.status).toBe(401)

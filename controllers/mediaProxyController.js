@@ -138,6 +138,10 @@ function isOwnPublicUploadUrl(target) {
   }
 }
 
+function isAllowedProxyTarget(target) {
+  return isAllowedMediaUrl(target) || isOwnPublicUploadUrl(target)
+}
+
 /**
  * Content-Type para resposta do proxy.
  * 1) Upstream específico → mantém
@@ -184,7 +188,7 @@ async function fetchAllowedMedia(target, signal) {
       const location = upstream.headers.get('location')
       if (!location) return upstream
       const next = new URL(location, current)
-      if (!isAllowedMediaUrl(next)) {
+      if (!isAllowedProxyTarget(next)) {
         const err = new Error('redirect_not_allowed')
         err.code = 'REDIRECT_NOT_ALLOWED'
         throw err
@@ -226,7 +230,7 @@ exports.proxyMedia = async (req, res) => {
     return res.status(400).json({ error: 'URL inválida' })
   }
 
-  if (!isAllowedMediaUrl(target) && !isOwnPublicUploadUrl(target)) {
+  if (!isAllowedProxyTarget(target)) {
     console.warn('[mediaProxy] URL bloqueada (403):', {
       host: target.hostname,
       path: String(target.pathname || '').slice(0, 80),
@@ -357,4 +361,5 @@ exports._test = {
   parseSingleByteRange,
   unwrapNestedProxyTarget,
   isOwnPublicUploadUrl,
+  isAllowedProxyTarget,
 }
