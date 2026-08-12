@@ -5,6 +5,11 @@ const { ensureUploadsRootExists, getUploadsRoot } = require('../config/uploadsRo
 
 const uploadDir = ensureUploadsRootExists()
 
+// A UltraMSG aceita vídeo final de até 32 MB. O arquivo-fonte precisa poder ser maior
+// para que o backend tenha a oportunidade de compactá-lo antes do envio.
+const DEFAULT_UPLOAD_MAX_BYTES = 32 * 1024 * 1024
+const VIDEO_SOURCE_UPLOAD_MAX_BYTES = 128 * 1024 * 1024
+
 const logosDir = path.join(getUploadsRoot(), 'logos')
 if (!fs.existsSync(logosDir)) {
   fs.mkdirSync(logosDir, { recursive: true })
@@ -149,6 +154,14 @@ function isAllowedUploadFile(file) {
   return false
 }
 
+function isVideoUploadFile(file) {
+  const baseMime = getBaseMime(file?.mimetype)
+  const ext = extFromOriginalName(file?.originalname)
+  return baseMime.startsWith('video/') || [
+    'mp4', 'mov', 'avi', '3gp', 'webm', 'm4v', 'mkv', 'mpeg', 'mpg', 'ogv',
+  ].includes(ext)
+}
+
 function resolveStorageExtension(file) {
   const baseMime = getBaseMime(file?.mimetype)
   let ext = ALLOWED_MIME.get(baseMime)
@@ -171,7 +184,8 @@ const storage = multer.diskStorage({
 
 const upload = multer({
   storage,
-  limits: { fileSize: 32 * 1024 * 1024 },
+  // Limite físico do parser. Tipos não-vídeo continuam limitados a 32 MB logo abaixo.
+  limits: { fileSize: VIDEO_SOURCE_UPLOAD_MAX_BYTES },
   fileFilter: (req, file, cb) => {
     const ext = extFromOriginalName(file.originalname)
     if (isBlockedRiskExtension(ext)) {
@@ -192,9 +206,35 @@ const upload = multer({
 const uploadArquivo = (req, res, next) => {
   const mw = upload.any()
   mw(req, res, (err) => {
-    if (err) return next(err)
+    if (err) {
+      if (err.code === 'LIMIT_FILE_SIZE') {
+        err.uploadLimitMessage = 'Vídeo maior que 128 MB. Reduza o arquivo original e tente novamente.'
+      }
+      return next(err)
+    }
     if (!req.file && req.files && Array.isArray(req.files) && req.files.length > 0) {
       req.file = req.files[0]
+    }
+
+    const requestFiles = Array.isArray(req.files) ? req.files : (req.file ? [req.file] : [])
+    // Respeita tipo explícito do body: quando o cliente envia tipo=video (ex.: MIME genérico
+    // de alguns browsers/Android), o backend irá transcodificar — não rejeitar.
+    const explicitTipo = String(req.body?.tipo || req.query?.tipo || '').toLowerCase().trim()
+    const clientForcedVideo = explicitTipo === 'video' || explicitTipo === 'vídeo'
+    const oversizedNonVideo = requestFiles.find(
+      (file) => Number(file?.size) > DEFAULT_UPLOAD_MAX_BYTES && !isVideoUploadFile(file) && !clientForcedVideo
+    )
+    if (oversizedNonVideo) {
+      // O multer já gravou os arquivos em disco; remova todo o lote antes de rejeitar.
+      for (const file of requestFiles) {
+        try {
+          if (file?.path && fs.existsSync(file.path)) fs.unlinkSync(file.path)
+        } catch (_) {}
+      }
+      return next(uploadValidationError(
+        'Arquivo maior que 32 MB. Apenas vídeos podem ultrapassar esse tamanho para compactação automática.',
+        'UPLOAD_NON_VIDEO_TOO_LARGE'
+      ))
     }
     next()
   })
@@ -242,4 +282,7 @@ module.exports = {
   isBlockedRiskExtension,
   blockedUploadErrorMessage,
   uploadValidationError,
+  isVideoUploadFile,
+  DEFAULT_UPLOAD_MAX_BYTES,
+  VIDEO_SOURCE_UPLOAD_MAX_BYTES,
 }

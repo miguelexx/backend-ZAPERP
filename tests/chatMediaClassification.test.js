@@ -96,6 +96,48 @@ test('video usa CDN da UltraMSG para nao depender da URL publica do backend', ()
   assert.equal(_test.shouldForceProviderUploadForMedia('voice'), true)
 })
 
+test('calcula bitrate adaptativo para manter o MP4 final abaixo de 32 MB', () => {
+  for (const durationSec of [30, 120, 600, 1800]) {
+    const profile = _test.buildVideoTranscodeProfile(durationSec)
+    assert.ok(profile)
+    const estimatedBytes = ((profile.videoKbps + profile.audioKbps) * 1000 * durationSec) / 8
+    assert.ok(estimatedBytes < 32 * 1024 * 1024, `estimativa excedeu teto para ${durationSec}s`)
+    assert.ok(profile.maxWidth >= 360 && profile.maxWidth <= 1280)
+  }
+})
+
+test('video-fonte declarado com mais de 32 MB e compactado em vez de rejeitado', async () => {
+  const ffmpegPath = require('ffmpeg-static')
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'zaperp-video-large-source-'))
+  const sourcePath = path.join(tempDir, 'camera-grande.mp4')
+  try {
+    const generated = spawnSync(ffmpegPath, [
+      '-y',
+      '-f', 'lavfi',
+      '-i', 'color=c=yellow:s=640x360:d=0.5',
+      '-an',
+      '-c:v', 'libx264',
+      '-pix_fmt', 'yuv420p',
+      sourcePath,
+    ], { windowsHide: true })
+    assert.equal(generated.status, 0, String(generated.stderr || '').slice(-300))
+
+    const result = await _test.normalizeVideoForUltraMsg({
+      mimetype: 'video/mp4',
+      originalname: 'camera-grande.mp4',
+      filename: 'camera-grande.mp4',
+      path: sourcePath,
+      size: 48 * 1024 * 1024,
+    }, 'video')
+
+    assert.equal(result.converted, true, result.error)
+    assert.ok(result.file.size > 0)
+    assert.ok(result.file.size < 32 * 1024 * 1024)
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true })
+  }
+})
+
 test('tipo video explicito so e aplicado a arquivo realmente de video', () => {
   const mp4Generico = file({ mimetype: 'application/octet-stream', originalname: 'camera.mp4' })
   mp4Generico.__tipoForcado = 'video'

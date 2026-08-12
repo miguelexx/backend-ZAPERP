@@ -1,10 +1,14 @@
 const assert = require('node:assert/strict')
 const {
+  upload,
   isAllowedUploadFile,
   extFromOriginalName,
   isBlockedRiskExtension,
   blockedUploadErrorMessage,
   uploadValidationError,
+  isVideoUploadFile,
+  DEFAULT_UPLOAD_MAX_BYTES,
+  VIDEO_SOURCE_UPLOAD_MAX_BYTES,
 } = require('../middleware/upload')
 
 test('aceita application/json', () => {
@@ -69,6 +73,15 @@ test('aceita videos MOV/M4V de celular por MIME ou extensao', () => {
     isAllowedUploadFile({ mimetype: 'application/octet-stream', originalname: 'clip.m4v', fieldname: 'file' }),
     true
   )
+})
+
+test('permite video-fonte maior que 32 MB para compactacao sem ampliar outros arquivos', () => {
+  assert.equal(isVideoUploadFile({ mimetype: 'video/mp4', originalname: 'camera.mp4' }), true)
+  assert.equal(isVideoUploadFile({ mimetype: 'application/octet-stream', originalname: 'camera.MOV' }), true)
+  assert.equal(isVideoUploadFile({ mimetype: 'application/pdf', originalname: 'contrato.pdf' }), false)
+  assert.equal(DEFAULT_UPLOAD_MAX_BYTES, 32 * 1024 * 1024)
+  assert.equal(VIDEO_SOURCE_UPLOAD_MAX_BYTES, 128 * 1024 * 1024)
+  assert.equal(upload.limits.fileSize, VIDEO_SOURCE_UPLOAD_MAX_BYTES)
 })
 
 test('mensagem de bloqueio menciona zip', () => {

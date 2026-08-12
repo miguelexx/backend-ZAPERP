@@ -7511,6 +7511,8 @@ const VIDEO_FILE_EXTENSIONS = new Set(['mp4', 'mov', 'm4v', 'webm', 'avi', 'mkv'
 // Contrato oficial do endpoint UltraMSG /messages/video.
 const ULTRAMSG_VIDEO_FILE_EXTENSIONS = new Set(['mp4', '3gp', 'mov'])
 const ULTRAMSG_VIDEO_MAX_BYTES = 32 * 1024 * 1024
+// Margem para overhead do container/CDN e diferenças entre MB decimal e MiB.
+const ULTRAMSG_VIDEO_TARGET_BYTES = 29 * 1024 * 1024
 const AUDIO_FILE_EXTENSIONS = new Set(['ogg', 'mp3', 'wav', 'm4a', 'aac', 'opus', 'amr'])
 const DOCUMENT_FILE_EXTENSIONS = new Set([
   'pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx',
@@ -7547,7 +7549,16 @@ function aplicarTipoForcadoSticker(file, tipoInferido) {
   if (forced === 'video' || forced === 'vídeo') {
     const base = mimeBase(file)
     const ext = extBaseArquivo(file)
-    const videoish = base.startsWith('video/') || VIDEO_FILE_EXTENSIONS.has(ext)
+    // Aceita MIME video/* e extensões de vídeo conhecidas.
+    // Também aceita application/octet-stream e MIME ausente: browsers Android/iOS
+    // frequentemente enviam MIME genérico para vídeos de câmera — o frontend
+    // já validou via isVideoFile (extensão/tipo) antes de forçar tipo=video.
+    // Rejeita apenas tipos que são claramente não-vídeo (ex.: application/pdf).
+    const videoish =
+      base.startsWith('video/') ||
+      VIDEO_FILE_EXTENSIONS.has(ext) ||
+      base === 'application/octet-stream' ||
+      !base
     return videoish ? 'video' : tipoInferido
   }
   if (forced === 'voice' || forced === 'ptt') {
@@ -7754,12 +7765,10 @@ function shouldAbortAudioAfterNormalize(tipo, normalized) {
 
 function shouldNormalizeVideoForUltraMsg(file, tipo) {
   if (tipo !== 'video' || !file?.path) return false
-  const ext = extBaseArquivo(file)
-  const base = mimeBase(file)
-  // A extensao MP4 identifica apenas o container. Ele ainda pode conter HEVC,
-  // AV1, audio nao-AAC ou metadata que o WhatsApp rebaixa para documento.
-  // Todo video enviado pelo painel passa pela preparacao deterministica abaixo.
-  return base.startsWith('video/') || VIDEO_FILE_EXTENSIONS.has(ext)
+  // Todo vídeo enviado pelo painel passa pela preparação determinística:
+  // garante H.264/AAC dentro de um MP4 compatível com WhatsApp independente do
+  // MIME ou extensão original (inclusive application/octet-stream de alguns browsers).
+  return true
 }
 
 function shouldForceProviderUploadForMedia(tipo) {
@@ -7767,10 +7776,46 @@ function shouldForceProviderUploadForMedia(tipo) {
   return normalized === 'audio' || normalized === 'voice' || normalized === 'video'
 }
 
-async function convertVideoToUltraMsgMp4(inputPath, outputPath) {
+function buildVideoTranscodeProfile(durationSec, opts = {}) {
+  const duration = Number(durationSec)
+  if (!Number.isFinite(duration) || duration <= 0) return null
+
+  const targetBytes = Math.max(4 * 1024 * 1024, Number(opts.targetBytes) || ULTRAMSG_VIDEO_TARGET_BYTES)
+  // Reserva 6% para índices/metadata do MP4. O áudio reduz dinamicamente em vídeos longos.
+  const totalKbps = Math.max(48, Math.floor((targetBytes * 8 * 0.94) / duration / 1000))
+  const audioKbps = totalKbps >= 500 ? 64 : totalKbps >= 260 ? 48 : totalKbps >= 120 ? 32 : 24
+  const videoKbps = Math.max(24, Math.min(4000, totalKbps - audioKbps))
+  const maxWidth = videoKbps >= 1800 ? 1280 : videoKbps >= 900 ? 960 : videoKbps >= 450 ? 720 : videoKbps >= 240 ? 540 : 360
+
+  return {
+    durationSec: duration,
+    targetBytes,
+    totalKbps,
+    videoKbps,
+    audioKbps,
+    maxWidth,
+  }
+}
+
+async function probeVideoDurationSec(filePath) {
+  return probeAudioDurationSec(filePath)
+}
+
+async function convertVideoToUltraMsgMp4(inputPath, outputPath, opts = {}) {
   const { spawn } = require('child_process')
   const ffmpegPath = resolveFfmpegPath()
   if (!ffmpegPath) throw new Error('ffmpeg-static nao disponivel')
+
+  const profile = opts.profile || null
+  const maxWidth = Number(profile?.maxWidth) || 1280
+  const videoCodecArgs = profile
+    ? [
+        '-b:v', `${profile.videoKbps}k`,
+        '-maxrate', `${Math.max(profile.videoKbps, Math.ceil(profile.videoKbps * 1.08))}k`,
+        '-bufsize', `${Math.max(96, profile.videoKbps * 2)}k`,
+      ]
+    : ['-crf', '28']
+  const audioKbps = Number(profile?.audioKbps) || 96
 
   const args = [
     '-y',
@@ -7779,13 +7824,13 @@ async function convertVideoToUltraMsgMp4(inputPath, outputPath) {
     '-map', '0:a?',
     '-c:v', 'libx264',
     '-preset', 'veryfast',
-    '-crf', '28',
+    ...videoCodecArgs,
     '-profile:v', 'main',
     '-level:v', '4.0',
     '-tag:v', 'avc1',
-    '-vf', 'scale=1280:1280:force_original_aspect_ratio=decrease:force_divisible_by=2,format=yuv420p',
+    '-vf', `scale=${maxWidth}:${maxWidth}:force_original_aspect_ratio=decrease:force_divisible_by=2,format=yuv420p`,
     '-c:a', 'aac',
-    '-b:a', '96k',
+    '-b:a', `${audioKbps}k`,
     '-ac', '2',
     '-ar', '44100',
     '-sn',
@@ -7807,10 +7852,11 @@ async function convertVideoToUltraMsgMp4(inputPath, outputPath) {
       fn(value)
     }
     proc.stderr.on('data', (d) => { stderr += String(d || '') })
+    const timeoutMs = Math.max(5 * 60 * 1000, Math.min(15 * 60 * 1000, Number(opts.timeoutMs) || 10 * 60 * 1000))
     const tid = setTimeout(() => {
       try { proc.kill('SIGKILL') } catch {}
-      finish(reject, new Error('ffmpeg video timeout (5 min)'))
-    }, 5 * 60 * 1000)
+      finish(reject, new Error(`ffmpeg video timeout (${Math.round(timeoutMs / 60000)} min)`))
+    }, timeoutMs)
     proc.on('error', (error) => finish(reject, error))
     proc.on('close', (code) => {
       if (code === 0) finish(resolve)
@@ -7848,11 +7894,25 @@ async function normalizeVideoForUltraMsg(file, tipo, opts = {}) {
   const targetPath = path.join(path.dirname(sourcePath), targetFilename)
 
   try {
-    await convertVideoToUltraMsgMp4(sourcePath, targetPath)
-    const stat = fs.statSync(targetPath)
+    const durationSec = await probeVideoDurationSec(sourcePath)
+    let profile = buildVideoTranscodeProfile(durationSec)
+    await convertVideoToUltraMsgMp4(sourcePath, targetPath, { profile })
+    let stat = fs.statSync(targetPath)
     if (!stat.size) throw new Error('MP4 convertido ficou vazio')
+
+    // Bitrate médio pode variar em encode de uma passagem. Se ultrapassar o teto,
+    // recalcula com margem adicional e tenta uma única vez a partir do original.
     if (stat.size > ULTRAMSG_VIDEO_MAX_BYTES) {
-      throw new Error('Video convertido excede o limite de 32 MB da UltraMSG')
+      const measuredDuration = durationSec || await probeVideoDurationSec(targetPath)
+      profile = buildVideoTranscodeProfile(measuredDuration, {
+        targetBytes: Math.floor(ULTRAMSG_VIDEO_TARGET_BYTES * 0.88),
+      })
+      if (!profile) throw new Error('Nao foi possivel medir a duracao para compactar o video')
+      await convertVideoToUltraMsgMp4(sourcePath, targetPath, { profile })
+      stat = fs.statSync(targetPath)
+      if (!stat.size || stat.size > ULTRAMSG_VIDEO_MAX_BYTES) {
+        throw new Error('Video muito longo para compactacao abaixo de 32 MB')
+      }
     }
     // O arquivo recebido por upload e temporario. Remova-o antes de retornar
     // para que o contrato seja deterministico e nao deixe WebM/MOV orfao.
@@ -8097,10 +8157,13 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
         mime: fileWork?.mimetype,
         error: normalizedVideo.error,
       })
+      try {
+        if (fileWork?.path && require('fs').existsSync(fileWork.path)) require('fs').unlinkSync(fileWork.path)
+      } catch (_) {}
       return {
         ok: false,
         status: 422,
-        error: 'Nao foi possivel preparar o video para a UltraMSG. Use MP4, MOV ou 3GP com ate 32 MB.',
+        error: 'Não foi possível compactar o vídeo para envio. O arquivo original pode ter até 128 MB; tente reduzir a duração se o problema continuar.',
       }
     }
   }
@@ -9640,6 +9703,7 @@ exports._test = {
   shouldAbortAudioAfterNormalize,
   shouldNormalizeVideoForUltraMsg,
   shouldForceProviderUploadForMedia,
+  buildVideoTranscodeProfile,
   normalizeVideoForUltraMsg,
   parseAudioDuracaoSecFromBody,
   shouldNormalizeImageForWhatsapp,

@@ -9,6 +9,7 @@ const { contentTypeFromAudioMagicBytes } = require('../helpers/audioFormatSniffe
 const MAX_BYTES = 80 * 1024 * 1024 // 80 MB (impressão / preview)
 const FETCH_TIMEOUT_MS = Math.max(1000, Number(process.env.MEDIA_PROXY_TIMEOUT_MS) || 30000)
 const MAX_REDIRECTS = 3
+const MAX_PROXY_UNWRAPS = 3
 
 /** Mapa extensão → MIME type. Cobre os formatos mais comuns do ZapERP. */
 const MIME_BY_EXT = {
@@ -90,6 +91,51 @@ function filenameFromUrlPath(urlStr) {
     /* ignore */
   }
   return ''
+}
+
+function isMediaProxyPath(pathname) {
+  return pathname === '/media/proxy' || pathname === '/api/media/proxy'
+}
+
+/**
+ * Remove camadas acidentais de /media/proxy?url=/media/proxy?... antes de
+ * validar o destino real. O destino final continua passando pela allowlist,
+ * portanto isto não amplia os hosts que o servidor pode acessar.
+ */
+function unwrapNestedProxyTarget(raw) {
+  let current = new URL(raw)
+
+  for (let i = 0; i < MAX_PROXY_UNWRAPS && isMediaProxyPath(current.pathname); i += 1) {
+    const inner = current.searchParams.get('url')
+    if (!inner) break
+    current = new URL(inner)
+  }
+
+  if (isMediaProxyPath(current.pathname) && current.searchParams.get('url')) {
+    const err = new Error('too_many_proxy_layers')
+    err.code = 'TOO_MANY_PROXY_LAYERS'
+    throw err
+  }
+
+  return current
+}
+
+/**
+ * PDFs recebidos e persistidos localmente ficam em APP_URL/uploads. Permitir
+ * somente esse path no host público da própria aplicação evita um 403 quando
+ * um cliente antigo envia o arquivo local ao proxy, sem liberar outros paths.
+ */
+function isOwnPublicUploadUrl(target) {
+  try {
+    const appUrl = new URL(String(process.env.APP_URL || '').trim())
+    return (
+      target.protocol === 'https:' &&
+      target.origin === appUrl.origin &&
+      String(target.pathname || '').startsWith('/uploads/')
+    )
+  } catch {
+    return false
+  }
 }
 
 /**
@@ -175,12 +221,12 @@ exports.proxyMedia = async (req, res) => {
 
   let target
   try {
-    target = new URL(raw)
+    target = unwrapNestedProxyTarget(raw)
   } catch {
     return res.status(400).json({ error: 'URL inválida' })
   }
 
-  if (!isAllowedMediaUrl(target)) {
+  if (!isAllowedMediaUrl(target) && !isOwnPublicUploadUrl(target)) {
     console.warn('[mediaProxy] URL bloqueada (403):', {
       host: target.hostname,
       path: String(target.pathname || '').slice(0, 80),
@@ -309,4 +355,6 @@ exports._test = {
   mimeFromFilename,
   filenameFromUrlPath,
   parseSingleByteRange,
+  unwrapNestedProxyTarget,
+  isOwnPublicUploadUrl,
 }

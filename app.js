@@ -434,7 +434,7 @@ app.use((err, req, res, next) => {
   // Multer: tipo não permitido, tamanho excedido ou campo inesperado
   if (err && (err.code === 'LIMIT_FILE_SIZE' || err.code === 'LIMIT_UNEXPECTED_FILE' || (err.message && err.message.includes('não permitido')))) {
     const msg = err.code === 'LIMIT_FILE_SIZE'
-      ? 'Arquivo maior que 32 MB. Esse é o limite de vídeo aceito pela UltraMSG.'
+      ? (err.uploadLimitMessage || 'Vídeo maior que 128 MB. Reduza o arquivo original e tente novamente.')
       : err.code === 'LIMIT_UNEXPECTED_FILE'
         ? 'Use multipart/form-data com campo "file" ou "audio"'
         : (err.message || 'Arquivo inválido')
