@@ -1,6 +1,27 @@
 const supabase = require('../config/supabase')
 const { getDisplayName } = require('../helpers/contactEnrichment')
 const { isGroupConversation } = require('../helpers/conversaHelper')
+const { empresaModoSimplesAtivo } = require('../helpers/empresaModoSimplesFlag')
+const {
+  loadChatbotTriageMergeAndAbsence,
+  outboundQualificaParaAguardandoCliente,
+} = require('./absenceFinalizationService')
+
+/**
+ * Só resposta HUMANA de atendente fecha o ciclo de tempo de resposta.
+ * Bot/menu de triagem/mensagem de ausência NÃO contam (mesma regra do SLA — slaCalculationService).
+ * Sem config de triagem carregada, faz fallback conservador (conta como humana) para não zerar médias.
+ */
+function outboundEhRespostaHumana(msg, triage) {
+  if (!msg || String(msg.direcao || '').toLowerCase() !== 'out') return false
+  if (!triage) return true
+  return outboundQualificaParaAguardandoCliente(
+    msg.texto,
+    msg.autor_usuario_id,
+    triage.triageMerged,
+    triage.absence
+  )
+}
 
 const OPEN_STATUSES = ['aberta', 'em_atendimento', 'aguardando_cliente']
 const PENDING_STATUSES = ['aberta', 'em_atendimento']
@@ -95,7 +116,7 @@ async function fetchMensagensInOutPaginated(companyId, conversationIds, { fromDa
     for (;;) {
       let q = supabase
         .from('mensagens')
-        .select('conversa_id, criado_em, direcao')
+        .select('conversa_id, criado_em, direcao, texto, autor_usuario_id')
         .eq('company_id', companyId)
         .in('conversa_id', convIds)
         .in('direcao', ['in', 'out'])
@@ -240,6 +261,7 @@ async function listOpenConversations(companyId) {
     whatsapp_instance_id,
     nome_contato_cache,
     foto_perfil_contato_cache,
+    modo_simples_aguardando,
     clientes!conversas_cliente_fk ( id, nome, pushname, telefone, foto_perfil ),
     usuarios!conversas_atendente_fk ( id, nome, perfil )
   `
@@ -404,9 +426,11 @@ function buildPendingItem(conversa, lastMessage, depMap) {
 }
 
 async function buildConversationInsights(companyId) {
-  const [slaConfig, conversations] = await Promise.all([
+  const [slaConfig, conversations, modoSimplesAtivo, triage] = await Promise.all([
     getSlaConfig(companyId),
     listOpenConversations(companyId),
+    empresaModoSimplesAtivo(companyId),
+    loadChatbotTriageMergeAndAbsence(companyId),
   ])
 
   const conversationIds = conversations.map((c) => c.id)
@@ -429,6 +453,15 @@ async function buildConversationInsights(companyId) {
       })
       continue
     }
+    // Modo simples: "Marcar como lida" zera modo_simples_aguardando. Só conta como
+    // aguardando atendente quando explicitamente marcado (mesma regra da lista de conversas),
+    // senão a conversa lida continuaria contando na Supervisão mesmo com a última msg inbound.
+    if (
+      modoSimplesAtivo &&
+      String(conversa.modo_simples_aguardando || '').toLowerCase() !== 'atendente'
+    ) {
+      continue
+    }
     const pendingItem = buildPendingItem(conversa, lastMessage, depMap)
     if (pendingItem) pending.push(pendingItem)
   }
@@ -439,66 +472,25 @@ async function buildConversationInsights(companyId) {
     conversations,
     pending,
     aguardandoCliente,
+    triage,
   }
 }
 
-async function calculateAvgResponseMinutes(companyId, conversationIds, fromDate, toDateExclusive = null) {
-  if (!conversationIds?.length) return null
-
-  const data = await fetchMensagensInOutPaginated(companyId, conversationIds, {
-    fromDate,
-    toDateExclusive,
-  })
-
-  const byConversation = new Map()
-  for (const m of data || []) {
-    const cid = Number(m.conversa_id)
-    if (!Number.isFinite(cid)) continue
-    if (!byConversation.has(cid)) byConversation.set(cid, [])
-    byConversation.get(cid).push(m)
-  }
-
-  let totalPairs = 0
-  let totalMinutes = 0
-
-  for (const messages of byConversation.values()) {
-    let pendingIn = null
-    for (const m of messages) {
-      if (m.direcao === 'in' && pendingIn == null) {
-        pendingIn = m
-        continue
-      }
-      if (m.direcao === 'out' && pendingIn) {
-        const diff = (new Date(m.criado_em).getTime() - new Date(pendingIn.criado_em).getTime()) / 60000
-        if (diff >= 0) {
-          totalMinutes += diff
-          totalPairs += 1
-        }
-        pendingIn = null
-      }
-    }
-  }
-
-  if (totalPairs === 0) return null
-  return Number((totalMinutes / totalPairs).toFixed(2))
-}
-
-async function calculateResponseStatsByConversation(companyId, conversations, fromDate, toDateExclusive = null) {
-  const conversationIds = (conversations || []).map((c) => c.id).filter((id) => id != null)
-  if (!conversationIds.length) {
-    return {
-      globalAverage: null,
-      byConversation: new Map(),
-    }
-  }
-
-  const data = await fetchMensagensInOutPaginated(companyId, conversationIds, {
-    fromDate,
-    toDateExclusive,
-  })
-
+/**
+ * Tempo de resposta: pareia cada 1ª mensagem pendente do cliente com a PRÓXIMA resposta
+ * HUMANA do atendente (bot/menu/ausência não fecham o ciclo). Retorna:
+ *  - globalAverage: média (min) de todos os pares no período
+ *  - byConversation: média por conversa
+ *  - byAuthor: média por autor REAL da resposta (autor_usuario_id) — base do "tempo médio
+ *    de resposta do usuário", creditando quem respondeu e não o atendente atribuído atual.
+ */
+/**
+ * Núcleo puro (sem I/O) do cálculo de tempo de resposta — testável isoladamente.
+ * @param {Array} rows mensagens {conversa_id, criado_em, direcao, texto, autor_usuario_id}
+ */
+function aggregateResponseStats(rows, triage = null) {
   const byConversationRows = new Map()
-  for (const row of data || []) {
+  for (const row of rows || []) {
     const cid = Number(row.conversa_id)
     if (!Number.isFinite(cid)) continue
     if (!byConversationRows.has(cid)) byConversationRows.set(cid, [])
@@ -506,25 +498,40 @@ async function calculateResponseStatsByConversation(companyId, conversations, fr
   }
 
   const avgByConversation = new Map()
+  const authorAgg = new Map() // autor_usuario_id -> { minutes, pairs }
   let globalMinutes = 0
   let globalPairs = 0
 
-  for (const [convId, rows] of byConversationRows.entries()) {
+  for (const [convId, convRows] of byConversationRows.entries()) {
+    // Ordena por tempo para não depender da ordem de chegada.
+    const ordered = convRows
+      .slice()
+      .sort((a, b) => new Date(a.criado_em).getTime() - new Date(b.criado_em).getTime())
     let pendingIn = null
     let convPairs = 0
     let convMinutes = 0
-    for (const row of rows) {
-      if (row.direcao === 'in' && pendingIn == null) {
-        pendingIn = row
+    for (const row of ordered) {
+      const dir = String(row.direcao || '').toLowerCase()
+      if (dir === 'in') {
+        if (pendingIn == null) pendingIn = row
         continue
       }
-      if (row.direcao === 'out' && pendingIn) {
+      if (dir === 'out' && pendingIn) {
+        // Bot/automação/ausência não fecham o ciclo: o cliente segue aguardando um humano.
+        if (!outboundEhRespostaHumana(row, triage)) continue
         const diff = (new Date(row.criado_em).getTime() - new Date(pendingIn.criado_em).getTime()) / 60000
         if (diff >= 0) {
           convMinutes += diff
           convPairs += 1
           globalMinutes += diff
           globalPairs += 1
+          const autorId = Number(row.autor_usuario_id)
+          if (Number.isFinite(autorId) && autorId > 0) {
+            const agg = authorAgg.get(autorId) || { minutes: 0, pairs: 0 }
+            agg.minutes += diff
+            agg.pairs += 1
+            authorAgg.set(autorId, agg)
+          }
         }
         pendingIn = null
       }
@@ -534,10 +541,38 @@ async function calculateResponseStatsByConversation(companyId, conversations, fr
     }
   }
 
+  const byAuthor = new Map()
+  for (const [autorId, agg] of authorAgg.entries()) {
+    if (agg.pairs > 0) byAuthor.set(autorId, Number((agg.minutes / agg.pairs).toFixed(2)))
+  }
+
   return {
     globalAverage: globalPairs > 0 ? Number((globalMinutes / globalPairs).toFixed(2)) : null,
     byConversation: avgByConversation,
+    byAuthor,
   }
+}
+
+/**
+ * Tempo de resposta: pareia cada 1ª mensagem pendente do cliente com a PRÓXIMA resposta
+ * HUMANA do atendente (bot/menu/ausência não fecham o ciclo). Retorna:
+ *  - globalAverage: média (min) de todos os pares no período
+ *  - byConversation: média por conversa
+ *  - byAuthor: média por autor REAL da resposta (autor_usuario_id) — base do "tempo médio
+ *    de resposta do usuário", creditando quem respondeu e não o atendente atribuído atual.
+ */
+async function calculateResponseStatsByConversation(companyId, conversations, fromDate, toDateExclusive = null, triage = null) {
+  const conversationIds = (conversations || []).map((c) => c.id).filter((id) => id != null)
+  if (!conversationIds.length) {
+    return { globalAverage: null, byConversation: new Map(), byAuthor: new Map() }
+  }
+
+  const data = await fetchMensagensInOutPaginated(companyId, conversationIds, {
+    fromDate,
+    toDateExclusive,
+  })
+
+  return aggregateResponseStats(data, triage)
 }
 
 async function listAtendimentosToday(companyId) {
@@ -646,7 +681,7 @@ async function getResumo(companyId) {
   const [usuarios, atendimentosHoje, responseStats] = await Promise.all([
     listUsuariosCompany(companyId),
     listAtendimentosToday(companyId),
-    calculateResponseStatsByConversation(companyId, insights.conversations, startOfToday()),
+    calculateResponseStatsByConversation(companyId, insights.conversations, startOfToday(), null, insights.triage),
   ])
 
   const funcionarios = usuarios.map((u) => {
@@ -657,12 +692,9 @@ async function getResumo(companyId) {
     const finalizadasHoje = atendimentosHoje.filter(
       (a) => a.acao === 'encerrou' && Number(a.de_usuario_id) === Number(u.id)
     ).length
-    const mediasAtendente = assignedOpen
-      .map((c) => responseStats.byConversation.get(Number(c.id)))
-      .filter((x) => Number.isFinite(Number(x)))
-    const mediaAtendente = mediasAtendente.length > 0
-      ? Number((mediasAtendente.reduce((acc, x) => acc + Number(x), 0) / mediasAtendente.length).toFixed(2))
-      : null
+    // Tempo médio de resposta do usuário: média dos pares que ELE respondeu (autor real),
+    // só respostas humanas. Não é média-de-médias nem depende de quem está atribuído agora.
+    const mediaAtendente = responseStats.byAuthor.get(Number(u.id)) ?? null
     const emAtendimento = countConversasEmAtendimento(assignedOpen, u.id)
     const nivel = assignedPending.some((p) => p.nivel === 'critico')
       ? 'critico'
@@ -807,12 +839,18 @@ async function getMovimentacaoFuncionario(companyId, usuarioId) {
     throw err
   }
 
-  const assignedConversations = insights.conversations.filter((c) => Number(c.atendente_id) === Number(usuarioId))
   const pendingAssigned = insights.pending.filter((p) => Number(p.atendente_id) === Number(usuarioId))
   const atrasados = pendingAssigned.filter((p) => p.atrasado)
 
-  const convIds = assignedConversations.map((c) => c.id)
-  const tempoMedio = await calculateAvgResponseMinutes(companyId, convIds, startOfToday())
+  // Tempo médio = pares que este usuário respondeu (autor real, só respostas humanas).
+  const responseStats = await calculateResponseStatsByConversation(
+    companyId,
+    insights.conversations,
+    startOfToday(),
+    null,
+    insights.triage
+  )
+  const tempoMedio = responseStats.byAuthor.get(Number(usuarioId)) ?? null
 
   const movimentosUsuario = atendimentosHoje.filter((a) => Number(a.de_usuario_id) === Number(usuarioId) || Number(a.para_usuario_id) === Number(usuarioId))
   const eventoConvIds = [...new Set(movimentosUsuario.map((m) => m.conversa_id).filter((id) => id != null))]
@@ -957,17 +995,15 @@ async function getRelatorioDiarioGestor(companyId, dateStr) {
   const insights = await buildConversationInsights(companyId)
   const [atendimentosRows, responseStats] = await Promise.all([
     listAtendimentosDayRange(companyId, start, end),
-    calculateResponseStatsByConversation(companyId, insights.conversations, start, end),
+    calculateResponseStatsByConversation(companyId, insights.conversations, start, end, insights.triage),
   ])
 
   const funcionariosBase = await listUsuariosCompany(companyId)
   const ranking = funcionariosBase.map((u) => {
     const convsUser = insights.conversations.filter((c) => Number(c.atendente_id) === Number(u.id))
     const pendUser = insights.pending.filter((p) => Number(p.atendente_id) === Number(u.id))
-    const medias = convsUser
-      .map((c) => responseStats.byConversation.get(Number(c.id)))
-      .filter((x) => Number.isFinite(Number(x)))
-    const tempoMedio = medias.length ? Number((medias.reduce((a, b) => a + Number(b), 0) / medias.length).toFixed(2)) : null
+    // Tempo médio = pares que este usuário respondeu (autor real, só respostas humanas).
+    const tempoMedio = responseStats.byAuthor.get(Number(u.id)) ?? null
     const assumidosNoDia = atendimentosRows.filter(
       (a) =>
         a.acao === 'assumiu' &&
@@ -1065,4 +1101,7 @@ module.exports = {
   getRelatorioDiarioGestor,
   countAguardandoFuncionarioParaAlertaAdmin,
   listAguardandoFuncionarioParaAlertaAdmin,
+  // Exportados para teste/certificação do cálculo de tempo de resposta:
+  aggregateResponseStats,
+  outboundEhRespostaHumana,
 }

@@ -15,6 +15,7 @@ const {
   describeBusinessSchedule,
   mergeScheduleSource,
 } = require('./atendimentoSemRespostaService')
+const { empresaModoSimplesAtivo } = require('../helpers/empresaModoSimplesFlag')
 
 const SAO_PAULO_TZ = 'America/Sao_Paulo'
 const PAGE_SIZE = 1000
@@ -603,6 +604,7 @@ async function buildSlaAnalytics(company_id, query = {}, opts = {}) {
   const slaConfig = await loadSlaConfig(company_id)
   const businessInfo = await loadSlaBusinessSchedule(company_id, slaConfig)
   const schedule = businessInfo.schedule
+  const modoSimplesAtivo = await empresaModoSimplesAtivo(company_id)
   const { triageMerged, absence } = await loadChatbotTriageMergeAndAbsence(company_id)
   const ctx = {
     triageMerged,
@@ -612,7 +614,7 @@ async function buildSlaAnalytics(company_id, query = {}, opts = {}) {
 
   let conversasQuery = supabase
     .from('conversas')
-    .select('id, telefone, status_atendimento, criado_em, atendente_id, departamento_id, reaberta_falta_interacao_em, clientes!conversas_cliente_fk ( nome )')
+    .select('id, telefone, status_atendimento, criado_em, atendente_id, departamento_id, reaberta_falta_interacao_em, modo_simples_aguardando, clientes!conversas_cliente_fk ( nome )')
     .eq('company_id', company_id)
 
   if (atendenteId) conversasQuery = conversasQuery.eq('atendente_id', atendenteId)
@@ -691,7 +693,15 @@ async function buildSlaAnalytics(company_id, query = {}, opts = {}) {
     if (primeira.status_sla === 'cumpriu' || primeira.status_sla === 'violou') {
       primeiraRespostaRows.push(primeira)
     } else if (primeira.status_sla === 'sem_resposta') {
-      semResposta.push(primeira)
+      // Modo simples: "Marcar como lida" resolve o ciclo — a conversa sai de "Aguardando
+      // resposta" e de "Precisa de atenção agora" (listas ao vivo). Não afeta o % histórico
+      // de SLA, pois ciclos 'sem_resposta' nunca entram em `analisadas` (cumpriu/violou).
+      const marcadaComoLidaModoSimples =
+        modoSimplesAtivo &&
+        String(conversa.modo_simples_aguardando || '').toLowerCase() !== 'atendente'
+      if (!marcadaComoLidaModoSimples) {
+        semResposta.push(primeira)
+      }
     } else if (primeira.status_sla === 'dados_insuficientes') {
       dadosInsuficientes.push(primeira)
     }
