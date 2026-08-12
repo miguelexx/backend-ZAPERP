@@ -2141,7 +2141,15 @@ async function uploadMedia(filePath, filename, opts = {}) {
         console.warn('❌ UltraMsg uploadMedia respondeu erro no body:', safeFilename?.slice(-20), err, '| token:', maskToken(cfg.token))
         return { ok: false, url: null, error: err }
       }
-      const url = data?.url || data?.link || data?.file || null
+      // UltraMsg /media/upload retorna a URL da CDN no campo `success`
+      // (ex.: { "success": "https://s3.../ultramsgmedia/..." }), não em `url`.
+      // Aceitar também url/link/file como fallback. `success` só vale como URL
+      // quando é string http(s) — outros endpoints usam success=true booleano.
+      const successUrl =
+        typeof data?.success === 'string' && /^https?:\/\//i.test(data.success.trim())
+          ? data.success.trim()
+          : null
+      const url = successUrl || data?.url || data?.link || data?.file || null
       if (!url) {
         const err = data?.message || text?.slice(0, 200) || 'Upload sem URL retornada pela UltraMsg'
         lastError = err

@@ -380,6 +380,68 @@ describe('UltraMsg provider instance resolution', () => {
     }
   })
 
+  test('uploadMedia trata resposta oficial { success: <url> } como upload valido', async () => {
+    const fs = require('fs')
+    const os = require('os')
+    const path = require('path')
+    const tmpFile = path.join(os.tmpdir(), `zaperp-upload-success-${Date.now()}.mp4`)
+    fs.writeFileSync(tmpFile, Buffer.from('video-fake'))
+
+    // UltraMsg /media/upload retorna a URL da CDN em `success`, nao em `url`.
+    const s3Url = 'https://s3.eu-central-1.amazonaws.com/ultramsgmedia/2026/8/51534/abc.mp4'
+    const deps = mockProviderDeps({
+      defaultByCompany: {
+        10: { id: 1, company_id: 10, provider: 'ultramsg', instance_id: '111', instance_token: 'tok', ativo: true },
+      },
+      byId: {},
+    }, async () => ({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({ success: s3Url }),
+    }))
+
+    try {
+      const provider = require('../services/providers/ultramsg')
+      const result = await provider.uploadMedia(tmpFile, 'video.mp4', { companyId: 10, baseDelayMs: 0 })
+      expect(result.ok).toBe(true)
+      expect(result.url).toBe(s3Url)
+      // Nao pode retentar: o upload ja foi aceito na primeira tentativa.
+      expect(deps.fetchWithRetry).toHaveBeenCalledTimes(1)
+    } finally {
+      try { fs.unlinkSync(tmpFile) } catch (_) {}
+    }
+  })
+
+  test('uploadMedia ignora success booleano e reporta ausencia de URL', async () => {
+    const fs = require('fs')
+    const os = require('os')
+    const path = require('path')
+    const tmpFile = path.join(os.tmpdir(), `zaperp-upload-boolsuccess-${Date.now()}.mp4`)
+    fs.writeFileSync(tmpFile, Buffer.from('video-fake'))
+
+    // success=true (sem URL) nao deve ser confundido com a URL da CDN.
+    const deps = mockProviderDeps({
+      defaultByCompany: {
+        10: { id: 1, company_id: 10, provider: 'ultramsg', instance_id: '111', instance_token: 'tok', ativo: true },
+      },
+      byId: {},
+    }, async () => ({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({ success: true }),
+    }))
+
+    try {
+      const provider = require('../services/providers/ultramsg')
+      const result = await provider.uploadMedia(tmpFile, 'video.mp4', { companyId: 10, maxAttempts: 1, baseDelayMs: 0 })
+      expect(result.ok).toBe(false)
+      expect(result.url).toBeNull()
+      expect(deps.fetchWithRetry).toHaveBeenCalledTimes(1)
+    } finally {
+      try { fs.unlinkSync(tmpFile) } catch (_) {}
+    }
+  })
+
   test('uploadMedia nao retenta erro semantico no body (4xx util)', async () => {
     const fs = require('fs')
     const os = require('os')
