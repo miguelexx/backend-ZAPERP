@@ -187,6 +187,10 @@ app.use(
   express.static(getUploadsRoot(), {
     index: false,
     dotfiles: 'deny',
+    // Nomes incluem hex aleatório (ex.: inbound-c1-m123-a4b5c6.ogg) → conteúdo imutável.
+    // immutable + 365d = browser não revalida; 206 nativo do express.static funciona normalmente.
+    maxAge: '365d',
+    immutable: true,
     setHeaders(res, filePath) {
       res.setHeader('X-Content-Type-Options', 'nosniff')
       const p = String(filePath || '').toLowerCase()
@@ -426,7 +430,11 @@ if (hasFrontendDist) {
 app.use((err, req, res, next) => {
   // Multer: tipo não permitido, tamanho excedido ou campo inesperado
   if (err && (err.code === 'LIMIT_FILE_SIZE' || err.code === 'LIMIT_UNEXPECTED_FILE' || (err.message && err.message.includes('não permitido')))) {
-    const msg = err.code === 'LIMIT_UNEXPECTED_FILE' ? 'Use multipart/form-data com campo "file" ou "audio"' : (err.message || 'Arquivo inválido')
+    const msg = err.code === 'LIMIT_FILE_SIZE'
+      ? (err.uploadLimitMessage || 'Vídeo maior que 128 MB. Reduza o arquivo original e tente novamente.')
+      : err.code === 'LIMIT_UNEXPECTED_FILE'
+        ? 'Use multipart/form-data com campo "file" ou "audio"'
+        : (err.message || 'Arquivo inválido')
     return res.status(400).json({ error: msg })
   }
   // CORS
