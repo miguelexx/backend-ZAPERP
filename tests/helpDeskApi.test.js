@@ -16,7 +16,7 @@ function token(payload = {}) {
 
 function query(result) {
   const chain = {}
-  for (const method of ['select', 'eq', 'order', 'range', 'insert', 'update', 'ilike', 'or', 'gte', 'lte']) {
+  for (const method of ['select', 'eq', 'is', 'in', 'limit', 'order', 'range', 'insert', 'update', 'ilike', 'or', 'gte', 'lte']) {
     chain[method] = jest.fn(() => chain)
   }
   chain.single = jest.fn().mockResolvedValue(result)
@@ -53,11 +53,14 @@ describe('HelpDesk API', () => {
   })
 
   it('cria chamado do Icthus usando empresa e cliente exclusivamente da integração', async () => {
+    const departmentQuery = query({ data: { id: 5, nome: 'Suporte' }, error: null })
     const insertQuery = query({
-      data: { id: 91, company_id: 1, cnpj: '12.345.678/0001-90', criado_por: null, titulo: 'Acesso bloqueado' },
+      data: { id: 91, company_id: 1, cnpj: '12.345.678/0001-90', criado_por: null, departamento: 'Suporte', titulo: 'Acesso bloqueado' },
       error: null,
     })
-    supabase.from.mockReturnValueOnce(insertQuery)
+    supabase.from
+      .mockReturnValueOnce(departmentQuery)
+      .mockReturnValueOnce(insertQuery)
 
     const response = await request(app)
       .post('/api/helpdesk/tickets')
@@ -69,6 +72,10 @@ describe('HelpDesk API', () => {
         empresa_nome: 'Cliente Teste Ltda',
         cnpj: '12.345.678/0001-90',
         solicitante_nome: 'Maria Cliente',
+        departamento: 'Suporte',
+        sistema_operacional: 'Windows 11 Pro',
+        nome_maquina: 'FINANCEIRO-01',
+        versao_sistema: 'Icthus 4.12.3',
         company_id: 999,
         criado_por: 999,
       })
@@ -78,12 +85,18 @@ describe('HelpDesk API', () => {
       company_id: 1,
       cnpj: '12.345.678/0001-90',
       criado_por: null,
+      sistema_operacional: 'Windows 11 Pro',
+      nome_maquina: 'FINANCEIRO-01',
+      versao_sistema: 'Icthus 4.12.3',
       titulo: 'Acesso bloqueado',
       empresa_nome: 'Cliente Teste Ltda',
       cnpj: '12.345.678/0001-90',
       solicitante_nome: 'Maria Cliente',
+      departamento: 'Suporte',
       status: 'aberto',
     }))
+    expect(departmentQuery.eq).toHaveBeenCalledWith('company_id', 1)
+    expect(departmentQuery.ilike).toHaveBeenCalledWith('nome', 'Suporte')
   })
 
   it('rejeita criação com JWT porque chamados nascem no Icthus', async () => {
@@ -110,7 +123,7 @@ describe('HelpDesk API', () => {
     expect(listQuery.eq).toHaveBeenCalledWith('cnpj', '12.345.678/0001-90')
   })
 
-  it('não aceita departamento pertencente a outro tenant', async () => {
+  it('não aceita nome de departamento inexistente no tenant da integração', async () => {
     const departmentQuery = query({ data: null, error: null })
     supabase.from.mockReturnValueOnce(departmentQuery)
 
@@ -124,29 +137,111 @@ describe('HelpDesk API', () => {
         empresa_nome: 'Cliente Teste Ltda',
         cnpj: '12.345.678/0001-90',
         solicitante_nome: 'Maria Cliente',
-        departamento_id: 44,
+        departamento: 'Departamento inexistente',
       })
 
     expect(response.status).toBe(400)
-    expect(response.body.error).toBe('departamento_id inválido')
-    expect(departmentQuery.eq).toHaveBeenCalledWith('company_id', 23)
+    expect(response.body.error).toBe('departamento inválido')
+    expect(departmentQuery.eq).toHaveBeenCalledWith('company_id', 1)
   })
 
-  it('restringe transferência a supervisor ou administrador', async () => {
+  it('inclui o nome do responsável na listagem de chamados', async () => {
+    const listQuery = query({
+      data: [{ id: 1, company_id: 23, responsavel_id: 7, responsavel: { nome: 'Felipe Suporte' }, titulo: 'Impressora' }],
+      error: null,
+      count: 1,
+    })
+    supabase.from.mockReturnValueOnce(listQuery)
+
+    const response = await request(app)
+      .get('/api/helpdesk/tickets')
+      .set('Authorization', `Bearer ${token()}`)
+
+    expect(response.status).toBe(200)
+    expect(response.body.items[0]).toMatchObject({
+      responsavel_id: 7,
+      responsavel_nome: 'Felipe Suporte',
+    })
+    expect(listQuery.select).toHaveBeenCalledWith(
+      expect.stringContaining('responsavel:usuarios!helpdesk_tickets_responsavel_id_fkey(nome)'),
+      { count: 'exact' }
+    )
+  })
+
+  it('localiza CNPJ com máscara quando a busca é enviada sem máscara', async () => {
+    const listQuery = query({ data: [], error: null, count: 0 })
+    supabase.from.mockReturnValueOnce(listQuery)
+
+    const response = await request(app)
+      .get('/api/helpdesk/tickets?q=12345678000190')
+      .set('Authorization', `Bearer ${token()}`)
+
+    expect(response.status).toBe(200)
+    expect(listQuery.or).toHaveBeenCalledWith(expect.stringContaining(
+      'cnpj.ilike.%1%2%3%4%5%6%7%8%0%0%0%1%9%0%'
+    ))
+  })
+
+  it('permite ao atendente assumir chamado aberto no próprio departamento', async () => {
+    const departmentQuery = query({ data: { id: 44, nome: 'Suporte' }, error: null })
+    const ticketQuery = query({ data: { id: 10, company_id: 23, status: 'aberto', departamento: 'Financeiro', responsavel_id: null }, error: null })
+    const updateQuery = query({ data: { id: 10, company_id: 23, status: 'em_atendimento', departamento: 'Suporte', responsavel_id: 7 }, error: null })
+    const previousDepartmentQuery = query({ data: { id: 33, nome: 'Financeiro' }, error: null })
+    const historyQuery = query({ data: null, error: null })
+    supabase.from
+      .mockReturnValueOnce(departmentQuery)
+      .mockReturnValueOnce(ticketQuery)
+      .mockReturnValueOnce(updateQuery)
+      .mockReturnValueOnce(previousDepartmentQuery)
+      .mockReturnValueOnce(historyQuery)
+
+    const response = await request(app)
+      .post('/api/helpdesk/tickets/10/assume')
+      .set('Authorization', `Bearer ${token({ perfil: 'atendente', departamento_id: 44, departamento_ids: [44] })}`)
+
+    expect(response.status).toBe(200)
+    expect(updateQuery.update).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'em_atendimento',
+      departamento: 'Suporte',
+      responsavel_id: 7,
+      atualizado_por: 7,
+    }))
+    expect(historyQuery.insert).toHaveBeenCalledWith(expect.objectContaining({
+      ticket_id: 10,
+      para_departamento_id: 44,
+      para_responsavel_id: 7,
+      motivo: 'Chamado assumido',
+    }))
+  })
+
+  it('permite transferência por atendente autenticado', async () => {
+    const ticketQuery = query({ data: { id: 10, company_id: 23, departamento: 'Financeiro', responsavel_id: 7 }, error: null })
+    const assigneeQuery = query({ data: { id: 8, ativo: true, departamento_id: 44 }, error: null })
+    const currentDepartmentQuery = query({ data: { id: 33, nome: 'Financeiro' }, error: null })
+    const assigneeDepartmentQuery = query({ data: { id: 44, nome: 'Suporte' }, error: null })
+    const updateQuery = query({ data: { id: 10, company_id: 23, departamento: 'Suporte', responsavel_id: 8 }, error: null })
+    const historyQuery = query({ data: null, error: null })
+    supabase.from
+      .mockReturnValueOnce(ticketQuery)
+      .mockReturnValueOnce(assigneeQuery)
+      .mockReturnValueOnce(currentDepartmentQuery)
+      .mockReturnValueOnce(assigneeDepartmentQuery)
+      .mockReturnValueOnce(updateQuery)
+      .mockReturnValueOnce(historyQuery)
+
     const response = await request(app)
       .post('/api/helpdesk/tickets/10/transfer')
       .set('Authorization', `Bearer ${token({ perfil: 'atendente' })}`)
       .send({ responsavel_id: 8 })
 
-    expect(response.status).toBe(403)
-    expect(supabase.from).not.toHaveBeenCalled()
+    expect(response.status).toBe(200)
   })
 
   it('atualiza status, prioridade e departamento dentro do tenant', async () => {
     const ticketQuery = query({ data: { id: 10, company_id: 23 }, error: null })
-    const departmentQuery = query({ data: { id: 44 }, error: null })
+    const departmentQuery = query({ data: { id: 44, nome: 'Suporte' }, error: null })
     const updateQuery = query({
-      data: { id: 10, company_id: 23, status: 'em_atendimento', prioridade: 'urgente', departamento_id: 44 },
+      data: { id: 10, company_id: 23, status: 'em_atendimento', prioridade: 'urgente', departamento: 'Suporte' },
       error: null,
     })
     supabase.from
@@ -163,7 +258,7 @@ describe('HelpDesk API', () => {
     expect(updateQuery.update).toHaveBeenCalledWith(expect.objectContaining({
       status: 'em_atendimento',
       prioridade: 'urgente',
-      departamento_id: 44,
+      departamento: 'Suporte',
       atualizado_por: 7,
     }))
     expect(updateQuery.eq).toHaveBeenCalledWith('company_id', 23)
