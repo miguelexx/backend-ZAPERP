@@ -8445,6 +8445,17 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
               io: io2,
             })
           }
+
+          // Rollout R2 (empresa 1): assim que a mídia enviada é confirmada (status sent),
+          // espelha para o Cloudflare R2 na hora, sem esperar a varredura periódica.
+          // No-op para outras empresas / R2 desligado. Mídia sem ID rastreável fica pending
+          // e será espelhada pela varredura quando a reconciliação confirmar o envio.
+          if (ok && hasTraceableMediaId) {
+            try {
+              const { scheduleR2MirrorIfNeeded } = require('../services/mediaR2MirrorService')
+              scheduleR2MirrorIfNeeded({ supabase, io: io2, company_id, mensagem_id: msg.id })
+            } catch (_) { /* espelhamento é best-effort; nunca afeta o envio */ }
+          }
         })
         .catch(async (e) => {
           console.error('WhatsApp enviar mídia (erro de rede/provider):', e?.message || e)

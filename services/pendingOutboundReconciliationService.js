@@ -162,6 +162,16 @@ async function patchMessage(row, updates, io) {
   }
 
   emitStatusUpdate(io, data, updates)
+
+  // Rollout R2 (empresa 1): quando a reconciliação confirma o envio (status final), espelha a
+  // mídia para o Cloudflare R2 na hora. No-op para texto / outras empresas / R2 desligado.
+  if (['sent', 'delivered', 'read', 'played'].includes(String(updates.status || '').toLowerCase())) {
+    try {
+      const { scheduleR2MirrorIfNeeded } = require('./mediaR2MirrorService')
+      scheduleR2MirrorIfNeeded({ supabase, io, company_id: row.company_id, mensagem_id: row.id })
+    } catch (_) { /* best-effort */ }
+  }
+
   return { ok: true, action: 'patched', status: updates.status, mensagem_id: data.id }
 }
 
