@@ -30,8 +30,12 @@ async function findTenantEntity(table, id, companyId, select = 'id') {
   return data
 }
 
-async function findTicket(id, companyId) {
-  return findTenantEntity('helpdesk_tickets', id, companyId, '*')
+async function findTicket(id, companyId, integrationCnpj = null) {
+  let query = supabase.from('helpdesk_tickets').select('*').eq('id', id).eq('company_id', companyId)
+  if (integrationCnpj) query = query.eq('cnpj', integrationCnpj)
+  const { data, error } = await query.maybeSingle()
+  if (error) throw error
+  return data
 }
 
 exports.createTicket = async (req, res) => {
@@ -42,7 +46,7 @@ exports.createTicket = async (req, res) => {
     const title = cleanText(body.titulo, 180)
     const description = cleanText(body.descricao, 10000)
     const companyName = cleanText(body.empresa_nome, 180)
-    const cnpj = cleanText(body.cnpj, 18)
+    const cnpj = req.helpDeskIntegration ? req.integrationCnpj : cleanText(body.cnpj, 18)
     const requesterName = cleanText(body.solicitante_nome, 180)
     const phone = cleanText(body.telefone, 30) || null
     const priority = body.prioridade == null ? 'normal' : String(body.prioridade).toLowerCase()
@@ -122,6 +126,8 @@ exports.listTickets = async (req, res) => {
       .order('atualizado_em', { ascending: false })
       .range(from, from + limit - 1)
 
+    if (req.helpDeskIntegration) query = query.eq('cnpj', req.integrationCnpj)
+
     if (status) query = query.eq('status', status)
     if (priority) query = query.eq('prioridade', priority)
     if (positiveInt(req.query.departamento_id)) query = query.eq('departamento_id', positiveInt(req.query.departamento_id))
@@ -157,12 +163,16 @@ exports.getTicket = async (req, res) => {
     const ticketId = positiveInt(req.params.id)
     if (!ticketId) return res.status(400).json({ error: 'id inválido' })
 
-    const ticket = await findTicket(ticketId, companyId)
+    const ticket = await findTicket(ticketId, companyId, req.helpDeskIntegration ? req.integrationCnpj : null)
     if (!ticket) return res.status(404).json({ error: 'Chamado não encontrado' })
 
+    let messagesQuery = supabase.from('helpdesk_mensagens').select('*').eq('ticket_id', ticketId).eq('company_id', companyId)
+    if (req.helpDeskIntegration) messagesQuery = messagesQuery.eq('interna', false)
     const [messagesResult, transfersResult] = await Promise.all([
-      supabase.from('helpdesk_mensagens').select('*').eq('ticket_id', ticketId).eq('company_id', companyId).order('criado_em', { ascending: true }),
-      supabase.from('helpdesk_transferencias').select('*').eq('ticket_id', ticketId).eq('company_id', companyId).order('criado_em', { ascending: true }),
+      messagesQuery.order('criado_em', { ascending: true }),
+      req.helpDeskIntegration
+        ? Promise.resolve({ data: [], error: null })
+        : supabase.from('helpdesk_transferencias').select('*').eq('ticket_id', ticketId).eq('company_id', companyId).order('criado_em', { ascending: true }),
     ])
     if (messagesResult.error) throw messagesResult.error
     if (transfersResult.error) throw transfersResult.error
@@ -246,11 +256,13 @@ exports.addMessage = async (req, res) => {
     const userId = positiveInt(req.user.id)
     const ticketId = positiveInt(req.params.id)
     const message = cleanText(req.body?.mensagem, 10000)
-    const internal = req.body?.interna === true
+    const internal = req.helpDeskIntegration ? false : req.body?.interna === true
 
     if (!ticketId) return res.status(400).json({ error: 'id inválido' })
     if (!message) return res.status(400).json({ error: 'mensagem é obrigatória' })
-    if (!(await findTicket(ticketId, companyId))) return res.status(404).json({ error: 'Chamado não encontrado' })
+    if (!(await findTicket(ticketId, companyId, req.helpDeskIntegration ? req.integrationCnpj : null))) {
+      return res.status(404).json({ error: 'Chamado não encontrado' })
+    }
 
     const { data, error } = await supabase
       .from('helpdesk_mensagens')

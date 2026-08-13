@@ -3,6 +3,8 @@ const jwt = require('jsonwebtoken')
 const supabase = require('../config/supabase')
 
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'helpdesk-test-secret'
+process.env.HELPDESK_INTEGRATION_TOKEN = 'icthus-helpdesk-test-token'
+process.env.HELPDESK_INTEGRATION_COMPANY_ID = '1'
 const app = require('../app')
 
 function token(payload = {}) {
@@ -50,16 +52,17 @@ describe('HelpDesk API', () => {
     expect(listQuery.eq).toHaveBeenCalledWith('company_id', 23)
   })
 
-  it('cria chamado usando company_id e usuário exclusivamente do token', async () => {
+  it('cria chamado do Icthus usando empresa e cliente exclusivamente da integração', async () => {
     const insertQuery = query({
-      data: { id: 91, company_id: 23, criado_por: 7, titulo: 'Acesso bloqueado' },
+      data: { id: 91, company_id: 1, cnpj: '12.345.678/0001-90', criado_por: null, titulo: 'Acesso bloqueado' },
       error: null,
     })
     supabase.from.mockReturnValueOnce(insertQuery)
 
     const response = await request(app)
       .post('/api/helpdesk/tickets')
-      .set('Authorization', `Bearer ${token()}`)
+      .set('X-HelpDesk-Token', process.env.HELPDESK_INTEGRATION_TOKEN)
+      .set('X-Icthus-CNPJ', '12345678000190')
       .send({
         titulo: 'Acesso bloqueado',
         descricao: 'Não consigo entrar',
@@ -72,8 +75,9 @@ describe('HelpDesk API', () => {
 
     expect(response.status).toBe(201)
     expect(insertQuery.insert).toHaveBeenCalledWith(expect.objectContaining({
-      company_id: 23,
-      criado_por: 7,
+      company_id: 1,
+      cnpj: '12.345.678/0001-90',
+      criado_por: null,
       titulo: 'Acesso bloqueado',
       empresa_nome: 'Cliente Teste Ltda',
       cnpj: '12.345.678/0001-90',
@@ -82,13 +86,38 @@ describe('HelpDesk API', () => {
     }))
   })
 
+  it('rejeita criação com JWT porque chamados nascem no Icthus', async () => {
+    const response = await request(app)
+      .post('/api/helpdesk/tickets')
+      .set('Authorization', `Bearer ${token()}`)
+      .send({ titulo: 'Acesso bloqueado' })
+
+    expect(response.status).toBe(401)
+    expect(response.body.error).toBe('Token de integracao nao informado')
+  })
+
+  it('restringe a listagem do Icthus ao cliente externo autenticado', async () => {
+    const listQuery = query({ data: [], error: null, count: 0 })
+    supabase.from.mockReturnValueOnce(listQuery)
+
+    const response = await request(app)
+      .get('/api/helpdesk/tickets')
+      .set('X-HelpDesk-Token', process.env.HELPDESK_INTEGRATION_TOKEN)
+      .set('X-Icthus-CNPJ', '12.345.678/0001-90')
+
+    expect(response.status).toBe(200)
+    expect(listQuery.eq).toHaveBeenCalledWith('company_id', 1)
+    expect(listQuery.eq).toHaveBeenCalledWith('cnpj', '12.345.678/0001-90')
+  })
+
   it('não aceita departamento pertencente a outro tenant', async () => {
     const departmentQuery = query({ data: null, error: null })
     supabase.from.mockReturnValueOnce(departmentQuery)
 
     const response = await request(app)
       .post('/api/helpdesk/tickets')
-      .set('Authorization', `Bearer ${token()}`)
+      .set('X-HelpDesk-Token', process.env.HELPDESK_INTEGRATION_TOKEN)
+      .set('X-Icthus-CNPJ', '12.345.678/0001-90')
       .send({
         titulo: 'Rede',
         descricao: 'Sem conexão',
