@@ -113,6 +113,20 @@ function getWelcomeMaxInboundAgeMs() {
 }
 
 /**
+ * Decide se o inbound é antigo demais para iniciar boas-vindas (reentrega/re-sync).
+ * true = suprimir welcome. Timestamp inválido/ausente ou guarda desativada → false (não bloqueia).
+ * @param {string} mensagemClienteCriadoEm - ISO do instante WhatsApp do inbound
+ * @param {number} [nowMs] - agora (injeção p/ teste)
+ */
+function isInboundTooOldForWelcome(mensagemClienteCriadoEm, nowMs = Date.now()) {
+  const maxAgeMs = getWelcomeMaxInboundAgeMs()
+  if (maxAgeMs <= 0 || !mensagemClienteCriadoEm) return false
+  const inboundMs = Date.parse(String(mensagemClienteCriadoEm).trim())
+  if (!Number.isFinite(inboundMs)) return false
+  return nowMs - inboundMs > maxAgeMs
+}
+
+/**
  * Aguarda o intervalo configurado desde o último envio do chatbot (por empresa).
  * @param {number} company_id
  * @param {number} intervaloSegundos - Configurado pelo usuário (0 = sem delay)
@@ -1620,18 +1634,14 @@ async function processIncomingMessageLocked(ctx, conversaEstadoInicial) {
   // Anti-replay: só iniciar o menu para inbound recente. Uma reentrega/re-sync de mensagem antiga
   // (timestamp do WhatsApp de horas/dias atrás) não deve disparar boas-vindas do zero — foi o bug
   // de "boas-vindas sem o cliente ter mandado mensagem". Usa o instante real do WhatsApp (webhook).
-  const welcomeMaxAgeMs = getWelcomeMaxInboundAgeMs()
-  let inboundAntigoParaWelcome = false
-  if (welcomeMaxAgeMs > 0 && mensagemClienteCriadoEm) {
+  const inboundAntigoParaWelcome = isInboundTooOldForWelcome(mensagemClienteCriadoEm)
+  if (inboundAntigoParaWelcome) {
     const inboundMs = Date.parse(String(mensagemClienteCriadoEm).trim())
-    if (Number.isFinite(inboundMs) && Date.now() - inboundMs > welcomeMaxAgeMs) {
-      inboundAntigoParaWelcome = true
-      console.log('[chatbotTriage] ❌ skip boas-vindas: inbound antigo (reentrega/re-sync), não iniciar menu', {
-        conversa_id,
-        company_id,
-        idade_min: Math.round((Date.now() - inboundMs) / 60000),
-      })
-    }
+    console.log('[chatbotTriage] ❌ skip boas-vindas: inbound antigo (reentrega/re-sync), não iniciar menu', {
+      conversa_id,
+      company_id,
+      idade_min: Number.isFinite(inboundMs) ? Math.round((Date.now() - inboundMs) / 60000) : null,
+    })
   }
 
   // Determinar se deve enviar boas-vindas (menu de triagem):
@@ -1849,4 +1859,6 @@ module.exports = {
   resetOpcaoInvalidaLimitForConversa,
   wasMenuSentForConversa,
   wasOptionSelectedForConversa,
+  getWelcomeMaxInboundAgeMs,
+  isInboundTooOldForWelcome,
 }
