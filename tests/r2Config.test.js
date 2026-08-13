@@ -65,3 +65,19 @@ test('endpoint derivado do account id; presign clamp em 7 dias', () => {
     assert.equal(mod.getPresignExpiresSeconds(), 604800)
   } finally { restore() }
 })
+
+test('janela de limpeza do local: default 5min, 0 imediato, clamp 24h', () => {
+  let { mod, restore } = loadR2Config(CREDS_OK)
+  try { assert.equal(mod.getLocalCleanupDelayMs(), 5 * 60 * 1000) } finally { restore() }
+  ;({ mod, restore } = loadR2Config({ ...CREDS_OK, R2_LOCAL_CLEANUP_DELAY_MINUTES: '0' }))
+  try { assert.equal(mod.getLocalCleanupDelayMs(), 0) } finally { restore() }
+  ;({ mod, restore } = loadR2Config({ ...CREDS_OK, R2_LOCAL_CLEANUP_DELAY_MINUTES: '99999' }))
+  try { assert.equal(mod.getLocalCleanupDelayMs(), 24 * 60 * 60 * 1000) } finally { restore() }
+})
+
+test('keepLocalForever: só com R2_KEEP_LOCAL=1', () => {
+  let { mod, restore } = loadR2Config(CREDS_OK)
+  try { assert.equal(mod.keepLocalForever(), false) } finally { restore() }
+  ;({ mod, restore } = loadR2Config({ ...CREDS_OK, R2_KEEP_LOCAL: '1' }))
+  try { assert.equal(mod.keepLocalForever(), true) } finally { restore() }
+})

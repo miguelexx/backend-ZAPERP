@@ -4,8 +4,9 @@
  *
  * Princípios (não derrubar o método antigo):
  *   - Só age sobre empresas habilitadas (empresaUsaR2 — default: só company_id = 1).
- *   - O arquivo local é PRESERVADO por padrão (rede de segurança + rollback + reenvio/encaminhamento
- *     via arquivo local). Só remove se R2_DELETE_LOCAL_AFTER_MIRROR=1.
+ *   - Empresa em R2 = armazenamento ÚNICO: após o upload ser verificado e o banco atualizado,
+ *     o arquivo local é REMOVIDO (opt-out: R2_KEEP_LOCAL=1). Nada é apagado antes de o objeto
+ *     estar confirmado no bucket — se qualquer etapa falhar, o local permanece intacto.
  *   - Idempotente: nunca re-sobe algo já espelhado; reexecutar é seguro.
  *   - Só espelha mídia OUTBOUND já aceita pelo provedor (status final). Mídia pending/sending/erro
  *     fica intocada para não atrapalhar reconciliação/reenvio (que dependem do /uploads).
@@ -18,7 +19,7 @@
 const fs = require('fs')
 const path = require('path')
 const { getUploadsRoot } = require('../config/uploadsRoot')
-const { empresaUsaR2, deleteLocalAfterMirror } = require('../config/r2')
+const { empresaUsaR2, keepLocalForever, getLocalCleanupDelayMs } = require('../config/r2')
 const r2 = require('./storage/r2Client')
 
 /** Prefixo da rota pública de entrega (302 -> presigned R2). Ver app.js. */
@@ -187,7 +188,7 @@ async function mirrorMensagemParaR2({ supabase, io = null, company_id, mensagem_
         url: novaUrl,
         storage_backend: 'r2',
         storage_key: key,
-        url_legado: row.url, // preserva o /uploads original para rollback e reenvio local
+        url_legado: row.url, // caminho /uploads original: usado pela limpeza p/ purgar e como rollback
       })
       .eq('id', mensagem_id)
       .eq('company_id', company_id)
@@ -207,14 +208,13 @@ async function mirrorMensagemParaR2({ supabase, io = null, company_id, mensagem_
       return { ok: true, ignorado: 'ja_espelhado' }
     }
 
-    // Remoção do local é opcional e desligada por padrão (segurança/rollback).
-    if (deleteLocalAfterMirror()) {
-      try { await fs.promises.unlink(localPath) } catch (_) {}
-    }
-
-    console.log('[mediaR2] mídia espelhada para R2', {
+    // R2 é o armazenamento de registro (a url já aponta para o R2). O arquivo local de staging
+    // NÃO é apagado aqui: para imagem/documento a UltraMSG pode ainda estar baixando a mídia
+    // enviada por URL pública. A purga acontece na varredura de limpeza, após a janela de
+    // segurança (getLocalCleanupDelayMs). url_legado preserva o caminho até lá.
+    console.log('[mediaR2] mídia copiada para R2', {
       mensagem_id, company_id, tipo: row.tipo, key, bytes: buffer.length,
-      local_mantido: !deleteLocalAfterMirror(),
+      local_purga: keepLocalForever() ? 'nunca (R2_KEEP_LOCAL)' : `em ~${Math.round(getLocalCleanupDelayMs() / 60000)}min`,
     })
 
     emitirMidiaAtualizada({ io, company_id, row, updated })
@@ -298,6 +298,57 @@ async function runMediaR2MirrorSweep(supabase, io = null) {
 }
 
 /**
+ * Purga arquivos locais de staging já copiados ao R2, depois da janela de segurança.
+ * É o que efetiva "armazenar apenas no R2": o objeto já está no bucket (storage_backend='r2'),
+ * e passado o tempo suficiente para a UltraMSG ter baixado mídia enviada por URL pública,
+ * o /uploads é removido e url_legado é zerado (não reprocessa). Restart-safe e idempotente.
+ */
+async function runR2LocalCleanup(supabase) {
+  const out = { checked: 0, purged: 0 }
+  if (_colunasStorageIndisponiveis || !supabase || keepLocalForever()) return out
+  const { getR2CompanyIds, isR2Configured } = require('../config/r2')
+  if (!isR2Configured()) return out
+  const companyIds = [...getR2CompanyIds()]
+  if (!companyIds.length) return out
+
+  const cutoffIso = new Date(Date.now() - getLocalCleanupDelayMs()).toISOString()
+  const batch = Math.min(500, Math.max(1, Number(process.env.R2_CLEANUP_BATCH) || 200))
+
+  const { data: rows, error } = await supabase
+    .from('mensagens')
+    .select('id, company_id, url_legado')
+    .in('company_id', companyIds)
+    .eq('storage_backend', 'r2')
+    .like('url_legado', '/uploads/%')
+    .lt('criado_em', cutoffIso)
+    .order('id', { ascending: true })
+    .limit(batch)
+
+  if (error) {
+    if (isColunaStorageAusente(error)) { _colunasStorageIndisponiveis = true; return out }
+    console.warn('[mediaR2/cleanup] query:', error.message)
+    return out
+  }
+
+  for (const r of rows || []) {
+    out.checked += 1
+    const local = resolveLocalPath(r.url_legado)
+    if (local) {
+      try { await fs.promises.unlink(local) } catch (_) { /* já removido */ }
+    }
+    const { error: upErr } = await supabase
+      .from('mensagens')
+      .update({ url_legado: null })
+      .eq('id', r.id)
+      .eq('company_id', r.company_id)
+    if (!upErr) out.purged += 1
+  }
+
+  if (out.purged > 0) console.log('[mediaR2/cleanup]', out)
+  return out
+}
+
+/**
  * Agenda a varredura periódica (default: 5min). Desligar: R2_MIRROR_DISABLED=1.
  * @returns {() => void} cancela o intervalo
  */
@@ -316,6 +367,8 @@ function startMediaR2MirrorScheduler(supabase, io = null) {
     try {
       const r = await runMediaR2MirrorSweep(supabase, io)
       if (r.mirrored > 0) console.log('[mediaR2/sweep]', r)
+      // Purga o staging local já copiado ao R2 (após a janela de segurança).
+      await runR2LocalCleanup(supabase)
     } catch (e) {
       console.warn('[mediaR2/sweep] tick', e?.message || e)
     } finally {
@@ -333,6 +386,7 @@ module.exports = {
   mirrorMensagemParaR2,
   scheduleR2MirrorIfNeeded,
   runMediaR2MirrorSweep,
+  runR2LocalCleanup,
   startMediaR2MirrorScheduler,
   _test: {
     buildStorageKey,

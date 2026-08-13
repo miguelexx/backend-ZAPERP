@@ -8714,16 +8714,8 @@ function normalizeForwardTipo(tipo) {
 }
 
 function getForwardMediaUrlCandidate(mensagem) {
-  // Mídia migrada ao R2 tem url "/media/r2/...". Para o encaminhamento (que sobe o arquivo ao
-  // provedor via uploadMedia) preferimos o /uploads local preservado em url_legado — assim o
-  // envio não depende de o provedor seguir o redirect 302 do R2.
-  const url = String(mensagem?.url || '').trim()
-  const legado = String(mensagem?.url_legado || '').trim()
-  if (url.startsWith('/media/r2/') && legado.startsWith('/uploads/')) {
-    return legado
-  }
   return String(
-    url ||
+    mensagem?.url ||
     mensagem?.url_absoluta ||
     mensagem?.media_url ||
     mensagem?.mediaUrl ||
@@ -8764,6 +8756,35 @@ function resolveLocalUploadPathFromMediaUrl(mediaUrl) {
   return full
 }
 
+/**
+ * Baixa mídia armazenada no R2 (url "/media/r2/<key>") para um arquivo temporário efêmero em
+ * os.tmpdir(). Usado no encaminhamento quando a empresa usa R2 como armazenamento único (sem
+ * cópia local). Retorna o caminho do temporário, ou null se o R2 não estiver configurado / chave
+ * inválida. O chamador é responsável por remover o temporário (try/finally).
+ */
+async function downloadR2MediaToTemp(mediaUrl) {
+  const os = require('os')
+  const path = require('path')
+  const fs = require('fs')
+  const { isR2Configured, getPresignExpiresSeconds } = require('../config/r2')
+  if (!isR2Configured()) return null
+
+  const key = String(mediaUrl || '').replace(/^\/media\/r2\//, '').split('?')[0]
+  if (!key || key.includes('..') || !key.startsWith('media/')) return null
+
+  const { presignGetUrl } = require('../services/storage/r2Client')
+  const signed = presignGetUrl(key, Math.min(120, getPresignExpiresSeconds()))
+  const res = await fetch(signed)
+  if (!res.ok) throw new Error(`R2 GET ${res.status}`)
+  const buf = Buffer.from(await res.arrayBuffer())
+  if (!buf.length) throw new Error('R2 corpo vazio')
+
+  const base = path.basename(key).replace(/[^A-Za-z0-9._-]/g, '_') || 'midia'
+  const tmp = path.join(os.tmpdir(), `zaperp-fwd-${Date.now()}-${Math.random().toString(36).slice(2, 8)}-${base}`)
+  await fs.promises.writeFile(tmp, buf)
+  return tmp
+}
+
 async function resolveForwardMediaForProvider({ provider, mensagemOriginal, company_id, whatsappInstanceId, baseUrl }) {
   const rawUrl = getForwardMediaUrlCandidate(mensagemOriginal)
   if (!rawUrl) return { ok: false, error: 'Mensagem sem URL de mídia para encaminhamento.' }
@@ -8779,6 +8800,19 @@ async function resolveForwardMediaForProvider({ provider, mensagemOriginal, comp
   let localPath = resolveLocalUploadPathFromMediaUrl(rawUrl)
   let uploadName = mensagemOriginal.nome_arquivo || 'arquivo'
 
+  // R2 como armazenamento único (empresa 1): quando não há arquivo local mas a mídia está no R2,
+  // baixa os bytes para um temporário efêmero. Assim uploadMedia/normalização funcionam sem
+  // depender de o provedor seguir o redirect 302. Removido no finally.
+  let tempR2Path = null
+  if (!localPath && rawUrl.startsWith('/media/r2/')) {
+    tempR2Path = await downloadR2MediaToTemp(rawUrl).catch((e) => {
+      console.warn('[ULTRAMSG][FORWARD] download do R2 para encaminhamento falhou:', e?.message || e)
+      return null
+    })
+    if (tempR2Path) localPath = tempR2Path
+  }
+
+  try {
   if (tipo === 'video' && localPath) {
     const path = require('path')
     const normalizedVideo = await normalizeVideoForUltraMsg({
@@ -8849,6 +8883,12 @@ async function resolveForwardMediaForProvider({ provider, mensagemOriginal, comp
     error: provider?.uploadMedia
       ? 'URL local da mídia indisponível para encaminhamento.'
       : 'Provider não suporta uploadMedia e a URL pública da mídia não está configurada.',
+  }
+  } finally {
+    // Remove o temporário baixado do R2 (se houver). Só chega aqui após uploadMedia ter lido o arquivo.
+    if (tempR2Path) {
+      try { require('fs').unlinkSync(tempR2Path) } catch (_) { /* já removido */ }
+    }
   }
 }
 
@@ -9196,21 +9236,11 @@ exports.encaminharMensagem = async (req, res) => {
     })
     if (!permEnvio.ok) return res.status(permEnvio.status).json({ error: permEnvio.error })
 
-    const FORWARD_SELECT_BASE = 'id, texto, tipo, direcao, url, nome_arquivo, contact_meta, location_meta, conversa_id'
-    let { data: mensagensRows, error: errMsg } = await supabase
+    const { data: mensagensRows, error: errMsg } = await supabase
       .from('mensagens')
-      // url_legado só existe após a migration de storage R2; se ausente, refazemos sem ela.
-      .select(`${FORWARD_SELECT_BASE}, url_legado`)
+      .select('id, texto, tipo, direcao, url, nome_arquivo, contact_meta, location_meta, conversa_id')
       .eq('company_id', company_id)
       .in('id', orderedIds)
-
-    if (errMsg && isGenericMissingColumnError(errMsg)) {
-      ;({ data: mensagensRows, error: errMsg } = await supabase
-        .from('mensagens')
-        .select(FORWARD_SELECT_BASE)
-        .eq('company_id', company_id)
-        .in('id', orderedIds))
-    }
 
     if (errMsg) {
       return res.status(500).json({ error: errMsg.message })

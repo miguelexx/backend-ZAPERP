@@ -85,8 +85,24 @@ function getPresignExpiresSeconds() {
   return Math.min(604800, Math.max(60, Math.floor(n)))
 }
 
-function deleteLocalAfterMirror() {
-  return trimEnv('R2_DELETE_LOCAL_AFTER_MIRROR') === '1'
+/**
+ * Empresas em R2 usam o R2 como armazenamento ÚNICO. O objeto é copiado para o bucket
+ * imediatamente, mas o arquivo local de staging só é purgado depois de uma janela de
+ * segurança — tempo para a UltraMSG terminar de baixar a mídia enviada por URL pública
+ * (imagem/documento) sem quebrar a entrega. Depois disso, resta apenas o R2.
+ * R2_KEEP_LOCAL=1 mantém a cópia local para sempre (transição/depuração).
+ */
+function keepLocalForever() {
+  return trimEnv('R2_KEEP_LOCAL') === '1'
+}
+
+/** Janela antes de purgar o arquivo local de staging (default 5min; 0 explícito = purga imediata). */
+function getLocalCleanupDelayMs() {
+  const raw = trimEnv('R2_LOCAL_CLEANUP_DELAY_MINUTES')
+  if (!raw) return 5 * 60 * 1000 // vazio = default (Number('') seria 0 e purgaria cedo demais)
+  const n = Number(raw)
+  if (!Number.isFinite(n) || n < 0) return 5 * 60 * 1000
+  return Math.min(24 * 60, n) * 60 * 1000
 }
 
 module.exports = {
@@ -95,5 +111,6 @@ module.exports = {
   getR2CompanyIds,
   empresaUsaR2,
   getPresignExpiresSeconds,
-  deleteLocalAfterMirror,
+  keepLocalForever,
+  getLocalCleanupDelayMs,
 }
