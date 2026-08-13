@@ -562,6 +562,14 @@ async function persistInboundMediaToUploads({ supabase, io, company_id, mensagem
     })
 
     await emitirMidiaAtualizada({ io, company_id, row, updated })
+
+    // Rollout R2 (empresa habilitada): espelha o arquivo recém-copiado para o Cloudflare R2
+    // em background. No-op para as demais empresas — o fluxo em disco acima permanece intacto.
+    try {
+      const { scheduleR2MirrorIfNeeded } = require('./mediaR2MirrorService')
+      scheduleR2MirrorIfNeeded({ supabase, io, company_id, mensagem_id })
+    } catch (_) { /* espelhamento é best-effort; nunca afeta a cópia local */ }
+
     return { ok: true, url: publicPath, arquivo: storedName }
   } finally {
     emExecucao.delete(chave)

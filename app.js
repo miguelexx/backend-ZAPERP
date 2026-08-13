@@ -229,6 +229,11 @@ app.use('/uploads', (req, res) => {
   res.status(404).json({ error: 'Arquivo não encontrado' })
 })
 
+// Entrega de mídia no Cloudflare R2 (rollout por empresa; ver config/r2.js).
+// Pública como o /uploads (imutável + hex no nome). Redireciona 302 para presigned R2.
+const mediaR2Controller = require('./controllers/mediaR2Controller')
+app.get('/media/r2/*', mediaR2Controller.redirectToR2)
+
 // Health check: básico (LB) e detalhado (Supabase)
 const healthController = require('./controllers/healthController')
 app.get('/health', healthController.basic)

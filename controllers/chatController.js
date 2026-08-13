@@ -8703,8 +8703,16 @@ function normalizeForwardTipo(tipo) {
 }
 
 function getForwardMediaUrlCandidate(mensagem) {
+  // Mídia migrada ao R2 tem url "/media/r2/...". Para o encaminhamento (que sobe o arquivo ao
+  // provedor via uploadMedia) preferimos o /uploads local preservado em url_legado — assim o
+  // envio não depende de o provedor seguir o redirect 302 do R2.
+  const url = String(mensagem?.url || '').trim()
+  const legado = String(mensagem?.url_legado || '').trim()
+  if (url.startsWith('/media/r2/') && legado.startsWith('/uploads/')) {
+    return legado
+  }
   return String(
-    mensagem?.url ||
+    url ||
     mensagem?.url_absoluta ||
     mensagem?.media_url ||
     mensagem?.mediaUrl ||
@@ -9177,11 +9185,21 @@ exports.encaminharMensagem = async (req, res) => {
     })
     if (!permEnvio.ok) return res.status(permEnvio.status).json({ error: permEnvio.error })
 
-    const { data: mensagensRows, error: errMsg } = await supabase
+    const FORWARD_SELECT_BASE = 'id, texto, tipo, direcao, url, nome_arquivo, contact_meta, location_meta, conversa_id'
+    let { data: mensagensRows, error: errMsg } = await supabase
       .from('mensagens')
-      .select('id, texto, tipo, direcao, url, nome_arquivo, contact_meta, location_meta, conversa_id')
+      // url_legado só existe após a migration de storage R2; se ausente, refazemos sem ela.
+      .select(`${FORWARD_SELECT_BASE}, url_legado`)
       .eq('company_id', company_id)
       .in('id', orderedIds)
+
+    if (errMsg && isGenericMissingColumnError(errMsg)) {
+      ;({ data: mensagensRows, error: errMsg } = await supabase
+        .from('mensagens')
+        .select(FORWARD_SELECT_BASE)
+        .eq('company_id', company_id)
+        .in('id', orderedIds))
+    }
 
     if (errMsg) {
       return res.status(500).json({ error: errMsg.message })

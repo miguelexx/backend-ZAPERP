@@ -405,6 +405,10 @@ server.listen(PORT, '0.0.0.0', () => {
     } = require('./services/inboundMediaPersistenceService')
     startInboundMediaRetryScheduler(supabase, io)
     startInboundMediaDueRetryScheduler(supabase, io)
+    // Espelhamento de mídia para Cloudflare R2 (rollout por empresa; default só company 1).
+    // No-op se o R2 não estiver configurado no .env — o fluxo em disco permanece intacto.
+    const { startMediaR2MirrorScheduler } = require('./services/mediaR2MirrorService')
+    startMediaR2MirrorScheduler(supabase, io)
   } else if (backgroundJobsDisabled) {
     console.log('[WORKER] Rotinas em background desativadas por ZAPERP_DISABLE_BACKGROUND_JOBS')
   }

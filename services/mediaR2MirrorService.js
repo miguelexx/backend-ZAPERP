@@ -1,0 +1,347 @@
+/**
+ * Espelha mídia local (/uploads) da empresa habilitada para o Cloudflare R2 e
+ * reescreve a referência no banco para servir a partir do R2.
+ *
+ * Princípios (não derrubar o método antigo):
+ *   - Só age sobre empresas habilitadas (empresaUsaR2 — default: só company_id = 1).
+ *   - O arquivo local é PRESERVADO por padrão (rede de segurança + rollback + reenvio/encaminhamento
+ *     via arquivo local). Só remove se R2_DELETE_LOCAL_AFTER_MIRROR=1.
+ *   - Idempotente: nunca re-sobe algo já espelhado; reexecutar é seguro.
+ *   - Só espelha mídia OUTBOUND já aceita pelo provedor (status final). Mídia pending/sending/erro
+ *     fica intocada para não atrapalhar reconciliação/reenvio (que dependem do /uploads).
+ *   - Degrada sem as colunas storage_* (migration não aplicada): apenas não espelha.
+ *
+ * O mesmo mecanismo migra o histórico existente da empresa: a varredura periódica
+ * encontra as mensagens antigas em /uploads e as move para o R2 em lotes.
+ */
+
+const fs = require('fs')
+const path = require('path')
+const { getUploadsRoot } = require('../config/uploadsRoot')
+const { empresaUsaR2, deleteLocalAfterMirror } = require('../config/r2')
+const r2 = require('./storage/r2Client')
+
+/** Prefixo da rota pública de entrega (302 -> presigned R2). Ver app.js. */
+const R2_DELIVERY_PREFIX = '/media/r2/'
+
+const MSG_SELECT =
+  'id, conversa_id, company_id, tipo, direcao, status, status_mensagem, url, nome_arquivo, criado_em, storage_backend, storage_key, url_legado'
+
+/** Uma vez detectado que as colunas não existem, para de tentar espelhar (degrada em silêncio). */
+let _colunasStorageIndisponiveis = false
+
+/** Trava em processo: uma mensagem por vez dentro desta instância. */
+const emExecucao = new Set()
+
+function isColunaStorageAusente(error) {
+  const texto = [error?.message, error?.details, error?.hint, error?.code].filter(Boolean).join(' ').toLowerCase()
+  if (!texto) return false
+  return (
+    texto.includes('storage_backend') ||
+    texto.includes('storage_key') ||
+    texto.includes('url_legado') ||
+    texto.includes('does not exist') ||
+    texto.includes('schema cache') ||
+    texto.includes('could not find') ||
+    texto.includes('42703') ||
+    texto.includes('pgrst204')
+  )
+}
+
+/** Extensão -> MIME para gravar o Content-Type correto no objeto R2. */
+const MIME_BY_EXT = {
+  jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif',
+  webp: 'image/webp', bmp: 'image/bmp', heic: 'image/heic', heif: 'image/heif',
+  mp4: 'video/mp4', mov: 'video/quicktime', webm: 'video/webm', avi: 'video/x-msvideo',
+  '3gp': 'video/3gpp', m4v: 'video/x-m4v', mkv: 'video/x-matroska',
+  mp3: 'audio/mpeg', m4a: 'audio/mp4', ogg: 'audio/ogg', oga: 'audio/ogg',
+  opus: 'audio/ogg', wav: 'audio/wav', aac: 'audio/aac', amr: 'audio/amr',
+  pdf: 'application/pdf', doc: 'application/msword',
+  docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  xls: 'application/vnd.ms-excel',
+  xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  ppt: 'application/vnd.ms-powerpoint',
+  pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  txt: 'text/plain', csv: 'text/csv', xml: 'application/xml', json: 'application/json',
+  zip: 'application/zip', rar: 'application/x-rar-compressed', '7z': 'application/x-7z-compressed',
+}
+
+function extOf(name) {
+  const m = String(name || '').match(/\.([a-z0-9]{2,8})$/i)
+  return m ? m[1].toLowerCase() : ''
+}
+
+function mimeFromName(name) {
+  return MIME_BY_EXT[extOf(name)] || 'application/octet-stream'
+}
+
+/** Só estes tipos qualificam para R2 (mídia real). */
+function tipoQualifica(tipo) {
+  const t = String(tipo || '').toLowerCase()
+  return ['imagem', 'sticker', 'video', 'audio', 'voice', 'arquivo'].includes(t)
+}
+
+function pastaDoTipo(tipo) {
+  const t = String(tipo || '').toLowerCase()
+  if (t === 'voice') return 'audio'
+  return ['imagem', 'sticker', 'video', 'audio', 'arquivo'].includes(t) ? t : 'outros'
+}
+
+/**
+ * Mídia OUTBOUND só é espelhada depois de aceita pelo provedor. Inbound é sempre seguro.
+ * Isso evita reescrever a url de uma mensagem que ainda pode ser reenviada (o reenvio lê /uploads).
+ */
+function podeEspelharAgora(row) {
+  if (String(row?.direcao || '').toLowerCase() === 'in') return true
+  const st = String(row?.status_mensagem || row?.status || '').toLowerCase()
+  const finais = ['sent', 'delivered', 'read', 'played', 'received', 'enviada', 'entregue', 'lida']
+  return finais.includes(st)
+}
+
+/** Caminho absoluto do arquivo local a partir de "/uploads/<nome>" (com guarda anti-traversal). */
+function resolveLocalPath(url) {
+  const raw = String(url || '').trim()
+  if (!raw.startsWith('/uploads/')) return null
+  const root = path.resolve(getUploadsRoot())
+  const rel = raw.replace(/^\/uploads\//, '').replace(/^[\\/]+/, '')
+  const full = path.resolve(root, decodeURIComponent(rel.split('?')[0]))
+  if (full !== root && !full.startsWith(`${root}${path.sep}`)) return null
+  return full
+}
+
+/** Chave do objeto: media/<company>/<ano>/<mes>/<tipo>/<nome-em-disco>. */
+function buildStorageKey({ company_id, tipo, criado_em, localFilename }) {
+  const d = criado_em ? new Date(criado_em) : new Date()
+  const dref = Number.isNaN(d.getTime()) ? new Date() : d
+  const ano = dref.getUTCFullYear()
+  const mes = String(dref.getUTCMonth() + 1).padStart(2, '0')
+  const base = path.basename(String(localFilename || '')).replace(/[^A-Za-z0-9._-]/g, '_')
+  return `media/${Number(company_id)}/${ano}/${mes}/${pastaDoTipo(tipo)}/${base}`
+}
+
+/**
+ * Espelha UMA mensagem para o R2. Idempotente e seguro.
+ * @returns {Promise<{ ok: boolean, [k: string]: any }>}
+ */
+async function mirrorMensagemParaR2({ supabase, io = null, company_id, mensagem_id }) {
+  if (_colunasStorageIndisponiveis) return { ok: false, ignorado: 'colunas_ausentes' }
+  if (!supabase || !empresaUsaR2(company_id)) return { ok: false, ignorado: 'empresa_nao_habilitada' }
+
+  const chave = `${Number(company_id)}:${Number(mensagem_id)}`
+  if (emExecucao.has(chave)) return { ok: false, ignorado: 'em_execucao' }
+  emExecucao.add(chave)
+
+  try {
+    const { data: row, error } = await supabase
+      .from('mensagens')
+      .select(MSG_SELECT)
+      .eq('id', mensagem_id)
+      .eq('company_id', company_id)
+      .maybeSingle()
+
+    if (error) {
+      if (isColunaStorageAusente(error)) {
+        _colunasStorageIndisponiveis = true
+        console.warn('[mediaR2] colunas storage_* ausentes; espelhamento desativado. Aplique 20260813120000_mensagens_storage_r2.sql')
+      }
+      return { ok: false, ignorado: 'erro_leitura' }
+    }
+    if (!row) return { ok: false, ignorado: 'mensagem_ausente' }
+    if (!tipoQualifica(row.tipo)) return { ok: false, ignorado: 'tipo_nao_qualifica' }
+
+    // Já espelhado?
+    if (row.storage_backend === 'r2' && row.storage_key) return { ok: true, ignorado: 'ja_espelhado' }
+    if (String(row.url || '').startsWith(R2_DELIVERY_PREFIX)) return { ok: true, ignorado: 'ja_espelhado' }
+
+    // Ainda em disco?
+    if (!String(row.url || '').startsWith('/uploads/')) return { ok: false, ignorado: 'sem_arquivo_local' }
+    if (!podeEspelharAgora(row)) return { ok: false, ignorado: 'status_nao_final' }
+
+    const localPath = resolveLocalPath(row.url)
+    if (!localPath || !fs.existsSync(localPath)) return { ok: false, ignorado: 'arquivo_local_inexistente' }
+
+    const localFilename = path.basename(localPath)
+    const key = buildStorageKey({
+      company_id,
+      tipo: row.tipo,
+      criado_em: row.criado_em,
+      localFilename,
+    })
+    const contentType = mimeFromName(localFilename)
+    const buffer = await fs.promises.readFile(localPath)
+    if (!buffer || buffer.length === 0) return { ok: false, ignorado: 'arquivo_vazio' }
+
+    // Upload + verificação de integridade por tamanho.
+    await r2.putObject(key, buffer, contentType)
+    const head = await r2.headObject(key).catch(() => null)
+    if (!head?.exists || (head.size && head.size !== buffer.length)) {
+      // Não confia na cópia: remove o objeto parcial e aborta (o arquivo local continua íntegro).
+      await r2.deleteObject(key).catch(() => {})
+      return { ok: false, ignorado: 'verificacao_falhou' }
+    }
+
+    const novaUrl = `${R2_DELIVERY_PREFIX}${key}`
+    const { data: updated, error: upErr } = await supabase
+      .from('mensagens')
+      .update({
+        url: novaUrl,
+        storage_backend: 'r2',
+        storage_key: key,
+        url_legado: row.url, // preserva o /uploads original para rollback e reenvio local
+      })
+      .eq('id', mensagem_id)
+      .eq('company_id', company_id)
+      .like('url', '/uploads/%') // só troca se ninguém já migrou (evita corrida/duplicidade)
+      .select(MSG_SELECT)
+      .maybeSingle()
+
+    if (upErr) {
+      if (isColunaStorageAusente(upErr)) _colunasStorageIndisponiveis = true
+      // objeto no R2 fica órfão inofensivo; a varredura tenta de novo depois.
+      console.warn('[mediaR2] update DB falhou:', { mensagem_id, erro: upErr.message })
+      return { ok: false, ignorado: 'update_db' }
+    }
+    if (!updated) {
+      // Outra tentativa já migrou: o objeto que subimos é duplicata órfã.
+      await r2.deleteObject(key).catch(() => {})
+      return { ok: true, ignorado: 'ja_espelhado' }
+    }
+
+    // Remoção do local é opcional e desligada por padrão (segurança/rollback).
+    if (deleteLocalAfterMirror()) {
+      try { await fs.promises.unlink(localPath) } catch (_) {}
+    }
+
+    console.log('[mediaR2] mídia espelhada para R2', {
+      mensagem_id, company_id, tipo: row.tipo, key, bytes: buffer.length,
+      local_mantido: !deleteLocalAfterMirror(),
+    })
+
+    emitirMidiaAtualizada({ io, company_id, row, updated })
+    return { ok: true, url: novaUrl, key }
+  } catch (e) {
+    console.warn('[mediaR2] falha ao espelhar:', { mensagem_id, company_id, erro: e?.message || String(e) })
+    return { ok: false, ignorado: 'excecao', erro: e?.message || String(e) }
+  } finally {
+    emExecucao.delete(chave)
+  }
+}
+
+function emitirMidiaAtualizada({ io, company_id, row, updated }) {
+  if (!io) return
+  try {
+    const conversa_id = updated.conversa_id ?? row.conversa_id
+    const fromMe = String(updated.direcao ?? row.direcao ?? '').toLowerCase() === 'out'
+    const payload = { ...updated, conversa_id, fromMe }
+    io.to(`conversa_${conversa_id}`).emit(io.EVENTS?.NOVA_MENSAGEM || 'nova_mensagem', payload)
+  } catch (_) { /* emissão é best-effort */ }
+}
+
+/** Agenda espelhamento assíncrono (não bloqueia o fluxo). No-op se a empresa não usa R2. */
+function scheduleR2MirrorIfNeeded({ supabase, io = null, company_id, mensagem_id }) {
+  if (_colunasStorageIndisponiveis) return
+  if (!supabase || company_id == null || mensagem_id == null) return
+  if (!empresaUsaR2(company_id)) return
+  setImmediate(() => {
+    mirrorMensagemParaR2({ supabase, io, company_id, mensagem_id }).catch((e) => {
+      console.warn('[mediaR2] agendamento falhou:', { mensagem_id, erro: e?.message || String(e) })
+    })
+  })
+}
+
+/**
+ * Varredura em lote: migra mídia da(s) empresa(s) habilitada(s) ainda em /uploads.
+ * Cobre outbound pós-envio e o HISTÓRICO existente. Idempotente e retomável (cursor por id).
+ */
+async function runMediaR2MirrorSweep(supabase, io = null) {
+  const out = { scanned: 0, mirrored: 0, skipped: 0 }
+  if (_colunasStorageIndisponiveis || !supabase) return out
+  const { getR2CompanyIds, isR2Configured } = require('../config/r2')
+  if (!isR2Configured()) return out
+
+  const companyIds = [...getR2CompanyIds()]
+  if (!companyIds.length) return out
+
+  const batch = Math.min(500, Math.max(1, Number(process.env.R2_MIRROR_BATCH) || 100))
+
+  const { data: rows, error } = await supabase
+    .from('mensagens')
+    .select('id, company_id')
+    .in('company_id', companyIds)
+    .is('storage_key', null)
+    .like('url', '/uploads/%')
+    .order('id', { ascending: true })
+    .limit(batch)
+
+  if (error) {
+    if (isColunaStorageAusente(error)) {
+      _colunasStorageIndisponiveis = true
+      console.warn('[mediaR2/sweep] colunas storage_* ausentes; varredura desativada.')
+    } else {
+      console.warn('[mediaR2/sweep] query:', error.message)
+    }
+    return out
+  }
+
+  for (const r of rows || []) {
+    out.scanned += 1
+    try {
+      const res = await mirrorMensagemParaR2({ supabase, io, company_id: r.company_id, mensagem_id: r.id })
+      if (res?.ok && res?.key) out.mirrored += 1
+      else out.skipped += 1
+    } catch (e) {
+      out.skipped += 1
+      console.warn('[mediaR2/sweep] item:', { mensagem_id: r.id, erro: e?.message || e })
+    }
+  }
+  return out
+}
+
+/**
+ * Agenda a varredura periódica (default: 5min). Desligar: R2_MIRROR_DISABLED=1.
+ * @returns {() => void} cancela o intervalo
+ */
+function startMediaR2MirrorScheduler(supabase, io = null) {
+  if (process.env.NODE_ENV === 'test' || process.env.JEST_WORKER_ID) return () => {}
+  if (String(process.env.R2_MIRROR_DISABLED || '').trim() === '1') return () => {}
+  const { isR2Configured } = require('../config/r2')
+  if (!isR2Configured()) return () => {}
+
+  const intervalMs = Math.max(60 * 1000, Number(process.env.R2_MIRROR_INTERVAL_MS) || 5 * 60 * 1000)
+
+  let rodando = false
+  const tick = async () => {
+    if (rodando) return
+    rodando = true
+    try {
+      const r = await runMediaR2MirrorSweep(supabase, io)
+      if (r.mirrored > 0) console.log('[mediaR2/sweep]', r)
+    } catch (e) {
+      console.warn('[mediaR2/sweep] tick', e?.message || e)
+    } finally {
+      rodando = false
+    }
+  }
+
+  setImmediate(tick)
+  const id = setInterval(tick, intervalMs)
+  if (typeof id.unref === 'function') id.unref()
+  return () => clearInterval(id)
+}
+
+module.exports = {
+  mirrorMensagemParaR2,
+  scheduleR2MirrorIfNeeded,
+  runMediaR2MirrorSweep,
+  startMediaR2MirrorScheduler,
+  _test: {
+    buildStorageKey,
+    pastaDoTipo,
+    podeEspelharAgora,
+    resolveLocalPath,
+    mimeFromName,
+    tipoQualifica,
+    resetColunasFlag: () => { _colunasStorageIndisponiveis = false },
+    setColunasFlag: (v) => { _colunasStorageIndisponiveis = !!v },
+  },
+}
