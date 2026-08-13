@@ -2315,11 +2315,39 @@ exports.receberZapi = async (req, res) => {
       continue
     }
 
+    // Idempotência de EFEITOS COLATERAIS antes do insert.
+    // A dedup por whatsapp_id que evita linha duplicada só roda mais abaixo (ver ~2775), mas a
+    // reabertura de conversa encerrada e o chatbot de triagem executam ANTES dela. Sem esta guarda,
+    // uma REENTREGA/replay de um inbound antigo (reconexão da instância, retry de webhook UltraMSG,
+    // re-sync) dispara boas-vindas/menu "sem o cliente ter mandado mensagem" — o bug relatado.
+    // Mensagem genuinamente nova tem whatsapp_id inédito e nunca é bloqueada aqui.
+    let inboundReentregue = false
+    if (!fromMe && !isGroup && conversa_id && messageId) {
+      const waIdReentrega = String(messageId).trim()
+      if (waIdReentrega) {
+        const { data: jaProcessado } = await selectSingleMensagemByWhatsappId(supabase, {
+          company_id,
+          whatsapp_id: waIdReentrega,
+          whatsapp_instance_id,
+          select: 'id, direcao',
+          context: 'received.preprocess.idempotency',
+        })
+        if (jaProcessado?.id) {
+          inboundReentregue = true
+          console.log('[Z-API] ⏭️ inbound reentregue/replay — pulando reabertura e chatbot (sem novo menu de boas-vindas)', {
+            conversa_id,
+            company_id,
+            whatsappIdTail: waIdReentrega.slice(-8),
+          })
+        }
+      }
+    }
+
     // Captura avaliação (nota 0-10) e reabertura automática em conversa encerrada (fechada ou finalizada)
     let conversaReabertaAposFinalizacao = false
     let reopenedFromAbsence = false
     let absenceReopenExplicitlyDisabled = false
-    if (!fromMe && !isGroup && conversa_id) {
+    if (!fromMe && !isGroup && conversa_id && !inboundReentregue) {
       const { data: convStatus } = await supabase
         .from('conversas')
         .select('id, status_atendimento, cliente_id, departamento_id, finalizacao_motivo, atendente_id')
@@ -2542,7 +2570,7 @@ exports.receberZapi = async (req, res) => {
         departamento_id = Number(convEstado.departamento_id)
       }
     }
-    if (!fromMe && !isGroup && departamento_id == null && atendente_id == null && phoneParaChatbot) {
+    if (!fromMe && !isGroup && !inboundReentregue && departamento_id == null && atendente_id == null && phoneParaChatbot) {
       try {
         const sendMessage = async (ph, msg, o = {}) => {
           const r = await getProvider().sendText(ph, msg, {

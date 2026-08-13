@@ -100,6 +100,19 @@ function pareceTentativaOpcaoSoNumeros(texto) {
 }
 
 /**
+ * Idade máxima (ms) do inbound para ainda disparar boas-vindas/menu.
+ * Defesa contra reentrega/re-sync de mensagem antiga (timestamp do WhatsApp de horas/dias atrás):
+ * o menu de triagem só deve iniciar para uma mensagem recente do cliente, nunca para um replay.
+ * Configurável via CHATBOT_WELCOME_MAX_INBOUND_AGE_MINUTES; <= 0 desativa a guarda. Default: 6 h.
+ */
+function getWelcomeMaxInboundAgeMs() {
+  const raw = Number(process.env.CHATBOT_WELCOME_MAX_INBOUND_AGE_MINUTES)
+  const minutes = Number.isFinite(raw) ? raw : 360
+  if (minutes <= 0) return 0
+  return Math.min(60 * 24 * 30, minutes) * 60 * 1000
+}
+
+/**
  * Aguarda o intervalo configurado desde o último envio do chatbot (por empresa).
  * @param {number} company_id
  * @param {number} intervaloSegundos - Configurado pelo usuário (0 = sem delay)
@@ -1604,13 +1617,31 @@ async function processIncomingMessageLocked(ctx, conversaEstadoInicial) {
     isPrimeiraMensagemCliente,
   })
 
+  // Anti-replay: só iniciar o menu para inbound recente. Uma reentrega/re-sync de mensagem antiga
+  // (timestamp do WhatsApp de horas/dias atrás) não deve disparar boas-vindas do zero — foi o bug
+  // de "boas-vindas sem o cliente ter mandado mensagem". Usa o instante real do WhatsApp (webhook).
+  const welcomeMaxAgeMs = getWelcomeMaxInboundAgeMs()
+  let inboundAntigoParaWelcome = false
+  if (welcomeMaxAgeMs > 0 && mensagemClienteCriadoEm) {
+    const inboundMs = Date.parse(String(mensagemClienteCriadoEm).trim())
+    if (Number.isFinite(inboundMs) && Date.now() - inboundMs > welcomeMaxAgeMs) {
+      inboundAntigoParaWelcome = true
+      console.log('[chatbotTriage] ❌ skip boas-vindas: inbound antigo (reentrega/re-sync), não iniciar menu', {
+        conversa_id,
+        company_id,
+        idade_min: Math.round((Date.now() - inboundMs) / 60000),
+      })
+    }
+  }
+
   // Determinar se deve enviar boas-vindas (menu de triagem):
   // 1. Conversa reaberta após finalização — enviar (estado do bot já foi resetado)
   // 2. Primeira mensagem do cliente E menu ainda não enviado
   // Nunca reenviar se menuAlreadySent (mesmo com sendOnlyFirstTime=false).
   const shouldSendWelcome =
-    conversaReabertaAposFinalizacao ||
-    (isPrimeiraMensagemCliente && !menuAlreadySent)
+    !inboundAntigoParaWelcome &&
+    (conversaReabertaAposFinalizacao ||
+      (isPrimeiraMensagemCliente && !menuAlreadySent))
 
   if (shouldSendWelcome) {
     // Debounce em memória para evitar menu duplicado em requisições paralelas da mesma conversa.
