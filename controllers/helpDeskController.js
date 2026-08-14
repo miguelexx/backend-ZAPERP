@@ -3,6 +3,7 @@ const supabase = require('../config/supabase')
 const PRIORITIES = new Set(['baixa', 'normal', 'alta', 'urgente'])
 const STATUSES = new Set(['aberto', 'em_atendimento', 'resolvido'])
 const TICKET_DETAIL_SELECT = '*, responsavel:usuarios!helpdesk_tickets_responsavel_id_fkey(nome)'
+const MESSAGE_DETAIL_SELECT = '*, autor_usuario:usuarios!helpdesk_mensagens_autor_usuario_id_fkey(nome)'
 const TRANSFER_DETAIL_SELECT = [
   '*',
   'transferido_por_usuario:usuarios!helpdesk_transferencias_transferido_por_fkey(nome)',
@@ -63,6 +64,20 @@ function flattenResponsible(ticket) {
   return { ...fields, responsavel_nome: responsavel?.nome || null }
 }
 
+function optionalNonNegativeInteger(value) {
+  if (value === undefined || value === null || value === '') return null
+  const number = Number(value)
+  return Number.isSafeInteger(number) && number >= 0 ? number : Number.NaN
+}
+
+function flattenMessage(message, fallbackName = null) {
+  const { autor_usuario, ...fields } = message
+  return {
+    ...fields,
+    autor_nome: autor_usuario?.nome || fields.solicitante_nome || fallbackName || null,
+  }
+}
+
 function flattenTransfer(transfer) {
   const {
     transferido_por_usuario,
@@ -98,12 +113,19 @@ exports.createTicket = async (req, res) => {
     const title = cleanText(body.titulo, 180)
     const description = cleanText(body.descricao, 10000)
     const companyName = cleanText(body.empresa_nome, 180)
+    const companyLegalName = cleanText(body.empresa_razao, 180) || null
     const cnpj = req.helpDeskIntegration ? req.integrationCnpj : cleanText(body.cnpj, 18)
     const requesterName = cleanText(body.solicitante_nome, 180)
     const phone = cleanText(body.telefone, 30) || null
     const operatingSystem = cleanText(body.sistema_operacional, 120) || null
     const machineName = cleanText(body.nome_maquina, 120) || null
     const systemVersion = cleanText(body.versao_sistema, 120) || null
+    const memoryBytes = optionalNonNegativeInteger(body.memoria_ram_bytes)
+    const processorName = cleanText(body.processador_nome, 180) || null
+    const logicalProcessors = optionalNonNegativeInteger(body.processadores_logicos)
+    const uptimeSeconds = optionalNonNegativeInteger(body.tempo_atividade_segundos)
+    const availableDiskBytes = optionalNonNegativeInteger(body.espaco_disponivel_disco_c_bytes)
+    const totalDiskBytes = optionalNonNegativeInteger(body.espaco_total_disco_c_bytes)
     const priority = body.prioridade == null ? 'normal' : String(body.prioridade).toLowerCase()
     const departmentName = cleanText(body.departamento, 120)
     const assigneeId = positiveInt(body.responsavel_id)
@@ -116,6 +138,22 @@ exports.createTicket = async (req, res) => {
     if (!requesterName) return res.status(400).json({ error: 'solicitante_nome é obrigatório' })
     if (!departmentName) return res.status(400).json({ error: 'departamento é obrigatório' })
     if (!PRIORITIES.has(priority)) return res.status(400).json({ error: 'prioridade inválida' })
+    const invalidNumericField = [
+      ['memoria_ram_bytes', memoryBytes],
+      ['processadores_logicos', logicalProcessors],
+      ['tempo_atividade_segundos', uptimeSeconds],
+      ['espaco_disponivel_disco_c_bytes', availableDiskBytes],
+      ['espaco_total_disco_c_bytes', totalDiskBytes],
+    ].find(([, value]) => Number.isNaN(value))
+    if (invalidNumericField) {
+      return res.status(400).json({ error: `${invalidNumericField[0]} deve ser um número inteiro não negativo` })
+    }
+    if (logicalProcessors === 0) {
+      return res.status(400).json({ error: 'processadores_logicos deve ser maior que zero' })
+    }
+    if (availableDiskBytes !== null && totalDiskBytes !== null && availableDiskBytes > totalDiskBytes) {
+      return res.status(400).json({ error: 'espaco_disponivel_disco_c_bytes não pode ser maior que espaco_total_disco_c_bytes' })
+    }
 
     const department = await findTenantDepartmentByName(departmentName, companyId)
     if (!department) return res.status(400).json({ error: 'departamento inválido' })
@@ -135,12 +173,19 @@ exports.createTicket = async (req, res) => {
         titulo: title,
         descricao: description,
         empresa_nome: companyName,
+        empresa_razao: companyLegalName,
         cnpj,
         solicitante_nome: requesterName,
         telefone: phone,
         sistema_operacional: operatingSystem,
         nome_maquina: machineName,
         versao_sistema: systemVersion,
+        memoria_ram_bytes: memoryBytes,
+        processador_nome: processorName,
+        processadores_logicos: logicalProcessors,
+        tempo_atividade_segundos: uptimeSeconds,
+        espaco_disponivel_disco_c_bytes: availableDiskBytes,
+        espaco_total_disco_c_bytes: totalDiskBytes,
         prioridade: priority,
         status: 'aberto',
         cliente_id: clientId,
@@ -194,6 +239,7 @@ exports.listTickets = async (req, res) => {
       const safeSearch = search.replace(/[,%()]/g, ' ')
       const filters = [
         `empresa_nome.ilike.%${safeSearch}%`,
+        `empresa_razao.ilike.%${safeSearch}%`,
         `cnpj.ilike.%${safeSearch}%`,
       ]
       if (/^[\d\s./-]+$/.test(search)) {
@@ -238,7 +284,7 @@ exports.getTicket = async (req, res) => {
     )
     if (!ticket) return res.status(404).json({ error: 'Chamado não encontrado' })
 
-    let messagesQuery = supabase.from('helpdesk_mensagens').select('*').eq('ticket_id', ticketId).eq('company_id', companyId)
+    let messagesQuery = supabase.from('helpdesk_mensagens').select(MESSAGE_DETAIL_SELECT).eq('ticket_id', ticketId).eq('company_id', companyId)
     if (req.helpDeskIntegration) messagesQuery = messagesQuery.eq('interna', false)
     const [messagesResult, transfersResult] = await Promise.all([
       messagesQuery.order('criado_em', { ascending: true }),
@@ -249,7 +295,10 @@ exports.getTicket = async (req, res) => {
 
     return res.json({
       ...flattenResponsible(ticket),
-      mensagens: messagesResult.data || [],
+      mensagens: (messagesResult.data || []).map((message) => flattenMessage(
+        message,
+        message.autor_usuario_id ? null : ticket.solicitante_nome
+      )),
       transferencias: (transfersResult.data || []).map(flattenTransfer),
     })
   } catch (error) {
@@ -326,17 +375,28 @@ exports.addMessage = async (req, res) => {
     const userId = positiveInt(req.user.id)
     const ticketId = positiveInt(req.params.id)
     const message = cleanText(req.body?.mensagem, 10000)
+    const requesterName = cleanText(req.body?.solicitante_nome, 180)
     const internal = req.helpDeskIntegration ? false : req.body?.interna === true
 
     if (!ticketId) return res.status(400).json({ error: 'id inválido' })
     if (!message) return res.status(400).json({ error: 'mensagem é obrigatória' })
+    if (req.helpDeskIntegration && !requesterName) {
+      return res.status(400).json({ error: 'solicitante_nome é obrigatório' })
+    }
     if (!(await findTicket(ticketId, companyId, req.helpDeskIntegration ? req.integrationCnpj : null))) {
       return res.status(404).json({ error: 'Chamado não encontrado' })
     }
 
     const { data, error } = await supabase
       .from('helpdesk_mensagens')
-      .insert({ company_id: companyId, ticket_id: ticketId, autor_usuario_id: userId, mensagem: message, interna: internal })
+      .insert({
+        company_id: companyId,
+        ticket_id: ticketId,
+        autor_usuario_id: userId,
+        solicitante_nome: req.helpDeskIntegration ? requesterName : null,
+        mensagem: message,
+        interna: internal,
+      })
       .select('*')
       .single()
     if (error) return databaseError(res, error, 'Erro ao adicionar mensagem')
@@ -347,9 +407,40 @@ exports.addMessage = async (req, res) => {
       .eq('id', ticketId)
       .eq('company_id', companyId)
 
-    return res.status(201).json(data)
+    return res.status(201).json(flattenMessage(data, requesterName || cleanText(req.user?.nome, 180)))
   } catch (error) {
     return databaseError(res, error, 'Erro ao adicionar mensagem')
+  }
+}
+
+exports.rateTicket = async (req, res) => {
+  try {
+    const companyId = req.user.company_id
+    const ticketId = positiveInt(req.params.id)
+    const rating = Number(req.body?.avaliacao)
+
+    if (!ticketId) return res.status(400).json({ error: 'id inválido' })
+    if (!Number.isInteger(rating) || rating < 1 || rating > 5) {
+      return res.status(400).json({ error: 'avaliacao deve ser um número inteiro de 1 a 5' })
+    }
+    if (!(await findTicket(ticketId, companyId, req.integrationCnpj))) {
+      return res.status(404).json({ error: 'Chamado não encontrado' })
+    }
+
+    const { data, error } = await supabase
+      .from('helpdesk_tickets')
+      .update({ avaliacao: rating, atualizado_em: new Date().toISOString() })
+      .eq('id', ticketId)
+      .eq('company_id', companyId)
+      .eq('cnpj', req.integrationCnpj)
+      .select('id, avaliacao')
+      .maybeSingle()
+
+    if (error) return databaseError(res, error, 'Erro ao avaliar chamado')
+    if (!data) return res.status(404).json({ error: 'Chamado não encontrado' })
+    return res.json(data)
+  } catch (error) {
+    return databaseError(res, error, 'Erro ao avaliar chamado')
   }
 }
 
