@@ -13,6 +13,11 @@ function cleanText(value, maxLength) {
   return value.trim().slice(0, maxLength)
 }
 
+function cnpjSearchPattern(value) {
+  const digits = String(value || '').replace(/\D/g, '').slice(0, 14)
+  return digits ? digits.split('').join('%') : ''
+}
+
 function databaseError(res, error, fallback) {
   console.error('[helpDesk]', fallback, error)
   return res.status(500).json({ error: fallback })
@@ -28,6 +33,25 @@ async function findTenantEntity(table, id, companyId, select = 'id') {
     .maybeSingle()
   if (error) throw error
   return data
+}
+
+async function findTenantDepartmentByName(name, companyId) {
+  if (!name) return null
+  const { data, error } = await supabase
+    .from('departamentos')
+    .select('id, nome')
+    .eq('company_id', companyId)
+    .ilike('nome', name)
+    .limit(1)
+    .maybeSingle()
+  if (error) throw error
+  return data
+}
+
+function flattenResponsible(ticket) {
+  if (!ticket) return ticket
+  const { responsavel, ...fields } = ticket
+  return { ...fields, responsavel_nome: responsavel?.nome || null }
 }
 
 async function findTicket(id, companyId, integrationCnpj = null) {
@@ -49,8 +73,11 @@ exports.createTicket = async (req, res) => {
     const cnpj = req.helpDeskIntegration ? req.integrationCnpj : cleanText(body.cnpj, 18)
     const requesterName = cleanText(body.solicitante_nome, 180)
     const phone = cleanText(body.telefone, 30) || null
+    const operatingSystem = cleanText(body.sistema_operacional, 120) || null
+    const machineName = cleanText(body.nome_maquina, 120) || null
+    const systemVersion = cleanText(body.versao_sistema, 120) || null
     const priority = body.prioridade == null ? 'normal' : String(body.prioridade).toLowerCase()
-    const departmentId = positiveInt(body.departamento_id)
+    const departmentName = cleanText(body.departamento, 120)
     const assigneeId = positiveInt(body.responsavel_id)
     const clientId = positiveInt(body.cliente_id)
 
@@ -59,11 +86,11 @@ exports.createTicket = async (req, res) => {
     if (!companyName) return res.status(400).json({ error: 'empresa_nome é obrigatório' })
     if (!cnpj) return res.status(400).json({ error: 'cnpj é obrigatório' })
     if (!requesterName) return res.status(400).json({ error: 'solicitante_nome é obrigatório' })
+    if (!departmentName) return res.status(400).json({ error: 'departamento é obrigatório' })
     if (!PRIORITIES.has(priority)) return res.status(400).json({ error: 'prioridade inválida' })
 
-    if (departmentId && !(await findTenantEntity('departamentos', departmentId, companyId))) {
-      return res.status(400).json({ error: 'departamento_id inválido' })
-    }
+    const department = await findTenantDepartmentByName(departmentName, companyId)
+    if (!department) return res.status(400).json({ error: 'departamento inválido' })
     if (clientId && !(await findTenantEntity('clientes', clientId, companyId))) {
       return res.status(400).json({ error: 'cliente_id inválido' })
     }
@@ -83,10 +110,13 @@ exports.createTicket = async (req, res) => {
         cnpj,
         solicitante_nome: requesterName,
         telefone: phone,
+        sistema_operacional: operatingSystem,
+        nome_maquina: machineName,
+        versao_sistema: systemVersion,
         prioridade: priority,
         status: 'aberto',
         cliente_id: clientId,
-        departamento_id: departmentId,
+        departamento: department.nome,
         responsavel_id: assigneeId,
         criado_por: userId,
         atualizado_por: userId,
@@ -121,7 +151,7 @@ exports.listTickets = async (req, res) => {
 
     let query = supabase
       .from('helpdesk_tickets')
-      .select('*', { count: 'exact' })
+      .select('*, responsavel:usuarios!helpdesk_tickets_responsavel_id_fkey(nome)', { count: 'exact' })
       .eq('company_id', companyId)
       .order('atualizado_em', { ascending: false })
       .range(from, from + limit - 1)
@@ -130,14 +160,22 @@ exports.listTickets = async (req, res) => {
 
     if (status) query = query.eq('status', status)
     if (priority) query = query.eq('prioridade', priority)
-    if (positiveInt(req.query.departamento_id)) query = query.eq('departamento_id', positiveInt(req.query.departamento_id))
+    if (cleanText(req.query.departamento, 120)) query = query.ilike('departamento', cleanText(req.query.departamento, 120))
     if (positiveInt(req.query.responsavel_id)) query = query.eq('responsavel_id', positiveInt(req.query.responsavel_id))
     if (search) {
       const safeSearch = search.replace(/[,%()]/g, ' ')
-      query = query.or(`empresa_nome.ilike.%${safeSearch}%,cnpj.ilike.%${safeSearch}%`)
+      const filters = [
+        `empresa_nome.ilike.%${safeSearch}%`,
+        `cnpj.ilike.%${safeSearch}%`,
+      ]
+      if (/^[\d\s./-]+$/.test(search)) {
+        const digitPattern = cnpjSearchPattern(search)
+        if (digitPattern) filters.push(`cnpj.ilike.%${digitPattern}%`)
+      }
+      query = query.or(filters.join(','))
     }
     if (clientName) query = query.ilike('empresa_nome', `%${clientName}%`)
-    if (cnpj) query = query.ilike('cnpj', `%${cnpj}%`)
+    if (cnpj) query = query.ilike('cnpj', `%${cnpjSearchPattern(cnpj) || cnpj}%`)
     if (startDate) {
       const parsed = new Date(`${startDate}T00:00:00.000`)
       if (Number.isNaN(parsed.getTime())) return res.status(400).json({ error: 'data_inicio inválida' })
@@ -151,7 +189,8 @@ exports.listTickets = async (req, res) => {
 
     const { data, error, count } = await query
     if (error) return databaseError(res, error, 'Erro ao listar chamados')
-    return res.json({ items: data || [], page, limit, total: count || 0 })
+    const items = (data || []).map(flattenResponsible)
+    return res.json({ items, page, limit, total: count || 0 })
   } catch (error) {
     return databaseError(res, error, 'Erro ao listar chamados')
   }
@@ -216,22 +255,22 @@ exports.updateTicket = async (req, res) => {
       changed = true
     }
 
-    if (body.departamento_id !== undefined) {
-      const departmentId = body.departamento_id == null || body.departamento_id === ''
-        ? null
-        : positiveInt(body.departamento_id)
-      if (body.departamento_id != null && body.departamento_id !== '' && !departmentId) {
-        return res.status(400).json({ error: 'departamento_id inválido' })
+    if (body.departamento !== undefined || body.departamento_id !== undefined) {
+      let department = null
+      if (body.departamento !== undefined) {
+        const departmentName = cleanText(body.departamento, 120)
+        if (departmentName) department = await findTenantDepartmentByName(departmentName, companyId)
+      } else {
+        const departmentId = positiveInt(body.departamento_id)
+        if (departmentId) department = await findTenantEntity('departamentos', departmentId, companyId, 'id, nome')
       }
-      if (departmentId && !(await findTenantEntity('departamentos', departmentId, companyId))) {
-        return res.status(400).json({ error: 'departamento_id inválido' })
-      }
-      patch.departamento_id = departmentId
+      if (!department) return res.status(400).json({ error: 'departamento inválido' })
+      patch.departamento = department.nome
       changed = true
     }
 
     if (!changed) {
-      return res.status(400).json({ error: 'Informe status, prioridade ou departamento_id' })
+      return res.status(400).json({ error: 'Informe status, prioridade ou departamento' })
     }
 
     const { data, error } = await supabase
@@ -283,6 +322,67 @@ exports.addMessage = async (req, res) => {
   }
 }
 
+exports.assumeTicket = async (req, res) => {
+  try {
+    const companyId = req.user.company_id
+    const userId = positiveInt(req.user.id)
+    const ticketId = positiveInt(req.params.id)
+    const departmentIds = Array.isArray(req.user.departamento_ids)
+      ? req.user.departamento_ids.map(positiveInt).filter(Boolean)
+      : []
+    const departmentId = positiveInt(req.user.departamento_id) || departmentIds[0] || null
+
+    if (!ticketId) return res.status(400).json({ error: 'id inválido' })
+    if (!userId) return res.status(401).json({ error: 'Usuário inválido' })
+    if (!departmentId) return res.status(400).json({ error: 'Usuário sem departamento vinculado' })
+
+    const department = await findTenantEntity('departamentos', departmentId, companyId, 'id, nome')
+    if (!department) return res.status(400).json({ error: 'Departamento do usuário inválido' })
+
+    const ticket = await findTicket(ticketId, companyId)
+    if (!ticket) return res.status(404).json({ error: 'Chamado não encontrado' })
+    if (ticket.status === 'resolvido') return res.status(409).json({ error: 'Chamado resolvido não pode ser assumido' })
+    if (ticket.responsavel_id) return res.status(409).json({ error: 'Chamado já possui responsável' })
+
+    const now = new Date().toISOString()
+    const { data, error } = await supabase
+      .from('helpdesk_tickets')
+      .update({
+        status: 'em_atendimento',
+        departamento: department.nome,
+        responsavel_id: userId,
+        atribuido_em: now,
+        atualizado_em: now,
+        atualizado_por: userId,
+      })
+      .eq('id', ticketId)
+      .eq('company_id', companyId)
+      .is('responsavel_id', null)
+      .select('*')
+      .maybeSingle()
+
+    if (error) return databaseError(res, error, 'Erro ao assumir chamado')
+    if (!data) return res.status(409).json({ error: 'Chamado foi assumido por outro usuário' })
+
+    const previousDepartment = await findTenantDepartmentByName(ticket.departamento, companyId)
+    const transferResult = await supabase.from('helpdesk_transferencias').insert({
+      company_id: companyId,
+      ticket_id: ticketId,
+      de_departamento_id: previousDepartment?.id || null,
+      para_departamento_id: departmentId,
+      de_responsavel_id: ticket.responsavel_id,
+      para_responsavel_id: userId,
+      transferido_por: userId,
+      motivo: 'Chamado assumido',
+    })
+    if (transferResult.error) return databaseError(res, transferResult.error, 'Chamado assumido, mas o histórico não pôde ser registrado')
+
+    return res.json(data)
+  } catch (error) {
+    return databaseError(res, error, 'Erro ao assumir chamado')
+  }
+}
+
 exports.transferTicket = async (req, res) => {
   try {
     const companyId = req.user.company_id
@@ -299,21 +399,27 @@ exports.transferTicket = async (req, res) => {
 
     const ticket = await findTicket(ticketId, companyId)
     if (!ticket) return res.status(404).json({ error: 'Chamado não encontrado' })
-    if (departmentId && !(await findTenantEntity('departamentos', departmentId, companyId))) {
-      return res.status(400).json({ error: 'departamento_id inválido' })
-    }
+    const requestedDepartment = departmentId
+      ? await findTenantEntity('departamentos', departmentId, companyId, 'id, nome')
+      : null
+    if (departmentId && !requestedDepartment) return res.status(400).json({ error: 'departamento_id inválido' })
+    let assignee = null
     if (assigneeId) {
-      const assignee = await findTenantEntity('usuarios', assigneeId, companyId, 'id, ativo, departamento_id')
+      assignee = await findTenantEntity('usuarios', assigneeId, companyId, 'id, ativo, departamento_id')
       if (!assignee || assignee.ativo === false) return res.status(400).json({ error: 'responsavel_id inválido' })
     }
 
     const now = new Date().toISOString()
-    const nextDepartmentId = departmentId || ticket.departamento_id
+    const currentDepartment = await findTenantDepartmentByName(ticket.departamento, companyId)
+    const assigneeDepartment = !requestedDepartment && assignee?.departamento_id
+      ? await findTenantEntity('departamentos', assignee.departamento_id, companyId, 'id, nome')
+      : null
+    const nextDepartment = requestedDepartment || assigneeDepartment || currentDepartment
     const nextAssigneeId = assigneeId || null
     const { data, error } = await supabase
       .from('helpdesk_tickets')
       .update({
-        departamento_id: nextDepartmentId,
+        departamento: nextDepartment?.nome || ticket.departamento || null,
         responsavel_id: nextAssigneeId,
         status: nextAssigneeId ? 'em_atendimento' : 'aberto',
         atribuido_em: nextAssigneeId ? now : null,
@@ -330,8 +436,8 @@ exports.transferTicket = async (req, res) => {
     const transferResult = await supabase.from('helpdesk_transferencias').insert({
       company_id: companyId,
       ticket_id: ticketId,
-      de_departamento_id: ticket.departamento_id,
-      para_departamento_id: nextDepartmentId,
+      de_departamento_id: currentDepartment?.id || null,
+      para_departamento_id: nextDepartment?.id || null,
       de_responsavel_id: ticket.responsavel_id,
       para_responsavel_id: nextAssigneeId,
       transferido_por: userId,
@@ -345,4 +451,4 @@ exports.transferTicket = async (req, res) => {
   }
 }
 
-exports._private = { positiveInt, cleanText, PRIORITIES, STATUSES }
+exports._private = { positiveInt, cleanText, cnpjSearchPattern, PRIORITIES, STATUSES }
