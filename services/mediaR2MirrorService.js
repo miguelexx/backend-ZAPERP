@@ -4,12 +4,13 @@
  *
  * Princípios (não derrubar o método antigo):
  *   - Só age sobre empresas habilitadas (empresaUsaR2 — default: só company_id = 1).
- *   - Empresa em R2 = armazenamento ÚNICO: após o upload ser verificado e o banco atualizado,
- *     o arquivo local é REMOVIDO (opt-out: R2_KEEP_LOCAL=1). Nada é apagado antes de o objeto
- *     estar confirmado no bucket — se qualquer etapa falhar, o local permanece intacto.
+ *   - Empresa em R2 = armazenamento ÚNICO: copia para o bucket (verifica) e reescreve a url para
+ *     /media/r2/<key>. O arquivo local NÃO é apagado aqui — a purga acontece na varredura de
+ *     limpeza (runR2LocalCleanup), após a janela de segurança (opt-out total: R2_KEEP_LOCAL=1).
+ *     Nada é apagado antes de o objeto estar confirmado no bucket.
  *   - Idempotente: nunca re-sobe algo já espelhado; reexecutar é seguro.
- *   - Só espelha mídia OUTBOUND já aceita pelo provedor (status final). Mídia pending/sending/erro
- *     fica intocada para não atrapalhar reconciliação/reenvio (que dependem do /uploads).
+ *   - Espelha inbound e OUTBOUND imediatamente (ver podeEspelharAgora): a entrega usa a URL /uploads
+ *     capturada no envio e o reenvio usa URL assinada do R2, então não é preciso esperar ACK.
  *   - Degrada sem as colunas storage_* (migration não aplicada): apenas não espelha.
  *
  * O mesmo mecanismo migra o histórico existente da empresa: a varredura periódica
@@ -89,14 +90,16 @@ function pastaDoTipo(tipo) {
 }
 
 /**
- * Mídia OUTBOUND só é espelhada depois de aceita pelo provedor. Inbound é sempre seguro.
- * Isso evita reescrever a url de uma mensagem que ainda pode ser reenviada (o reenvio lê /uploads).
+ * Espelha assim que a mídia existe em /uploads — inbound e OUTBOUND, sem esperar confirmação do
+ * provedor. É seguro porque:
+ *  - a ENTREGA usa a URL /uploads capturada no momento do envio (variável local), não a url do banco;
+ *  - o REENVIO automático usa URL assinada do R2 (ver urlPublicaDeMidia na reconciliação), então não
+ *    depende do arquivo local nem da troca da url;
+ *  - o arquivo local é mantido pela janela de segurança antes da purga.
+ * Assim o outbound vai para o R2 na hora, independente de ACK/webhook de status.
  */
-function podeEspelharAgora(row) {
-  if (String(row?.direcao || '').toLowerCase() === 'in') return true
-  const st = String(row?.status_mensagem || row?.status || '').toLowerCase()
-  const finais = ['sent', 'delivered', 'read', 'played', 'received', 'enviada', 'entregue', 'lida']
-  return finais.includes(st)
+function podeEspelharAgora(_row) {
+  return true
 }
 
 /** Caminho absoluto do arquivo local a partir de "/uploads/<nome>" (com guarda anti-traversal). */

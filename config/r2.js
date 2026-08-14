@@ -79,9 +79,10 @@ function empresaUsaR2(company_id) {
 }
 
 function getPresignExpiresSeconds() {
+  // Default 1h: cobre a reprodução contínua de vídeos longos (as requisições de Range vão à mesma
+  // URL assinada durante toda a sessão; se expirar no meio, o player recebe 403). Máx R2: 7 dias.
   const n = Number(trimEnv('R2_PRESIGN_EXPIRES_SECONDS'))
-  if (!Number.isFinite(n) || n <= 0) return 900
-  // R2 permite no máximo 7 dias (604800s) para presigned URLs.
+  if (!Number.isFinite(n) || n <= 0) return 3600
   return Math.min(604800, Math.max(60, Math.floor(n)))
 }
 

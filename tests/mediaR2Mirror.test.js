@@ -34,14 +34,13 @@ test('tipoQualifica: só mídia real', () => {
   assert.equal(_test.tipoQualifica('interna'), false)
 })
 
-test('podeEspelharAgora: inbound sempre; outbound só em status final', () => {
+test('podeEspelharAgora: espelha inbound e outbound imediatamente (independe de status)', () => {
+  // O outbound agora é espelhado na hora do envio; entrega usa a URL capturada no envio e o
+  // reenvio usa URL assinada do R2, então não é preciso esperar status final.
   assert.equal(_test.podeEspelharAgora({ direcao: 'in', status: 'received' }), true)
   assert.equal(_test.podeEspelharAgora({ direcao: 'out', status: 'sent' }), true)
-  assert.equal(_test.podeEspelharAgora({ direcao: 'out', status_mensagem: 'delivered' }), true)
-  // pending/sending/erro NÃO podem ser espelhados (reenvio depende do /uploads).
-  assert.equal(_test.podeEspelharAgora({ direcao: 'out', status: 'pending' }), false)
-  assert.equal(_test.podeEspelharAgora({ direcao: 'out', status: 'sending' }), false)
-  assert.equal(_test.podeEspelharAgora({ direcao: 'out', status: 'erro' }), false)
+  assert.equal(_test.podeEspelharAgora({ direcao: 'out', status: 'pending' }), true)
+  assert.equal(_test.podeEspelharAgora({ direcao: 'out', status: 'sending' }), true)
 })
 
 test('resolveLocalPath: resolve /uploads e bloqueia traversal', () => {

@@ -253,6 +253,15 @@ function provedorNuncaAceitou(row) {
 function urlPublicaDeMidia(row) {
   const raw = String(row?.url || '').trim()
   if (!raw) return null
+  // Mídia no Cloudflare R2: devolve URL assinada DIRETA (o provedor baixa sem redirect e sem
+  // depender do arquivo local, que pode já ter sido purgado). Cobre o reenvio de mídia da empresa 1.
+  if (String(row?.storage_backend || '').toLowerCase() === 'r2' && row?.storage_key) {
+    try {
+      const { presignGetUrl } = require('./storage/r2Client')
+      const { getPresignExpiresSeconds } = require('../config/r2')
+      return presignGetUrl(row.storage_key, Math.max(3600, getPresignExpiresSeconds()))
+    } catch (_) { /* cai para o comportamento antigo abaixo */ }
+  }
   if (/^https?:\/\//i.test(raw)) return raw
   const baseUrl = (process.env.APP_URL || process.env.BASE_URL || '').replace(/\/$/, '')
   if (!baseUrl || /localhost|127\.0\.0\.1/i.test(baseUrl)) return null
@@ -495,20 +504,33 @@ async function fetchPendingOutboundRows({ companyId = null, limit = null, mensag
   const oldestIso = new Date(Date.now() - getLookbackMs()).toISOString()
   const graceIso = new Date(Date.now() - getGraceMs()).toISOString()
 
-  let query = supabase
-    .from('mensagens')
-    .select('id, company_id, conversa_id, whatsapp_instance_id, whatsapp_id, provider_queue_id, status, status_mensagem, direcao, criado_em, autor_usuario_id, tipo, texto, url, nome_arquivo')
-    .eq('direcao', 'out')
-    .in('status', ['pending', 'sending'])
-    .gte('criado_em', oldestIso)
-    .lte('criado_em', graceIso)
-    .order('criado_em', { ascending: true })
-    .limit(batch)
+  const BASE_COLS = 'id, company_id, conversa_id, whatsapp_instance_id, whatsapp_id, provider_queue_id, status, status_mensagem, direcao, criado_em, autor_usuario_id, tipo, texto, url, nome_arquivo'
+  // storage_* só existem após a migration de R2; sem elas, refazemos a consulta sem as colunas.
+  const buildQuery = (cols) => {
+    let q = supabase
+      .from('mensagens')
+      .select(cols)
+      .eq('direcao', 'out')
+      .in('status', ['pending', 'sending'])
+      .gte('criado_em', oldestIso)
+      .lte('criado_em', graceIso)
+      .order('criado_em', { ascending: true })
+      .limit(batch)
+    if (companyId != null) q = q.eq('company_id', Number(companyId))
+    if (mensagemId != null) q = q.eq('id', Number(mensagemId))
+    return q
+  }
 
-  if (companyId != null) query = query.eq('company_id', Number(companyId))
-  if (mensagemId != null) query = query.eq('id', Number(mensagemId))
+  function isMissingStorageColumn(err) {
+    const t = [err?.message, err?.details, err?.hint, err?.code].filter(Boolean).join(' ').toLowerCase()
+    return t.includes('storage_backend') || t.includes('storage_key') ||
+      t.includes('does not exist') || t.includes('42703') || t.includes('pgrst204') || t.includes('schema cache')
+  }
 
-  const { data, error } = await query
+  let { data, error } = await buildQuery(`${BASE_COLS}, storage_backend, storage_key`)
+  if (error && isMissingStorageColumn(error)) {
+    ;({ data, error } = await buildQuery(BASE_COLS))
+  }
   if (error) return { ok: false, rows: [], error: error.message }
   const rows = (data || []).filter((row) => {
     if (isInternalNoteRow(row)) return false

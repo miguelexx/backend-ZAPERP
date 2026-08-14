@@ -8257,6 +8257,15 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
 
   if (error) return { ok: false, status: 500, error: error.message }
 
+    // Rollout R2 (empresa 1): espelha a mídia enviada para o Cloudflare R2 JÁ NO ENVIO, sem esperar
+    // confirmação do provedor. A entrega ao WhatsApp usa a URL /uploads capturada abaixo (não a url
+    // do banco), e o reenvio automático usa URL assinada do R2 — então isto não interfere no envio.
+    // No-op para outras empresas / R2 desligado / tipo não-mídia.
+    try {
+      const { scheduleR2MirrorIfNeeded } = require('../services/mediaR2MirrorService')
+      scheduleR2MirrorIfNeeded({ supabase, io, company_id, mensagem_id: msg.id })
+    } catch (_) { /* espelhamento é best-effort; nunca afeta o envio */ }
+
     const modoSimplesEnvio = await empresaModoSimplesAtivo(company_id).catch(() => false)
     const timestampAtividade = new Date().toISOString()
 

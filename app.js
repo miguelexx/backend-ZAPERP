@@ -66,7 +66,9 @@ app.use((req, res, next) => {
 
 // Ajustes para este projeto (SPA + mídia blob + WS)
 defaultDirectives['frame-ancestors'] = buildFrameAncestorsDirective()
-defaultDirectives['img-src'] = [...new Set([...(defaultDirectives['img-src'] || []), 'blob:'])]
+// img-src: inclui o host do Cloudflare R2 (mídia da empresa 1 é servida via 302 → presigned R2).
+// Sem isto, imagens do R2 embutidas em páginas servidas pelo backend seriam bloqueadas pela CSP.
+defaultDirectives['img-src'] = [...new Set([...(defaultDirectives['img-src'] || []), 'blob:', 'https://*.r2.cloudflarestorage.com'])]
 defaultDirectives['media-src'] = ["'self'", 'blob:', 'https:']
 defaultDirectives['connect-src'] = ["'self'", 'https:', 'wss:', 'ws:']
 // O visualizador baixa o PDF autenticado e o exibe em <iframe src="blob:...">.

@@ -3166,6 +3166,16 @@ exports.receberZapi = async (req, res) => {
             if (statusPatched) mensagemSalva = statusPatched
           }
         }
+
+        // Rollout R2 (empresa 1): mensagem outbound confirmada pelo webhook → espelha para o R2
+        // agora (mesmo gatilho inline do inbound). Cobre envios que ficaram pending por ID de fila
+        // e só chegam a status final aqui. No-op para outras empresas / R2 desligado / tipo não-mídia.
+        if (mensagemSalva?.id && String(mensagemSalva.direcao || '') === 'out') {
+          try {
+            const { scheduleR2MirrorIfNeeded } = require('../services/mediaR2MirrorService')
+            scheduleR2MirrorIfNeeded({ supabase, io: req.app.get('io'), company_id, mensagem_id: mensagemSalva.id })
+          } catch (_) { /* best-effort; nunca afeta o webhook */ }
+        }
       } catch (e) {
         console.warn('⚠️ fromMe reconcile: erro ao reconciliar:', e?.message || e)
       }
@@ -4276,6 +4286,14 @@ exports.statusZapi = async (req, res) => {
           if (msg.autor_usuario_id != null) chain = chain.to(`usuario_${msg.autor_usuario_id}`)
           chain.emit('status_mensagem', payload)
         }
+
+        // Rollout R2 (empresa 1): ACK confirmou o envio (status final) → espelha a mídia para o R2
+        // agora. ACKs só existem para mensagens outbound. No-op p/ outras empresas / tipo não-mídia.
+        try {
+          const { scheduleR2MirrorIfNeeded } = require('../services/mediaR2MirrorService')
+          scheduleR2MirrorIfNeeded({ supabase, io, company_id: msg.company_id, mensagem_id: msg.id })
+        } catch (_) { /* best-effort; nunca afeta o webhook */ }
+
         if (logDebug) console.log('[DEBUG] /webhooks/ultramsg/status resultado:', { status: statusNorm, mensagem_id: msg.id, conversa_id: msg.conversa_id, whatsapp_id: idStr.slice(0, 20) + '…' })
       } else {
         console.log('[ULTRAMSG] Status', statusNorm, 'para id', idStr.slice(0, 20) + '… — mensagem não encontrada no banco (ignorado)')
