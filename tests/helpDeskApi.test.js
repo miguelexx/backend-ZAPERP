@@ -70,12 +70,19 @@ describe('HelpDesk API', () => {
         titulo: 'Acesso bloqueado',
         descricao: 'Não consigo entrar',
         empresa_nome: 'Cliente Teste Ltda',
+        empresa_razao: 'Cliente Teste Comércio e Serviços Ltda',
         cnpj: '12.345.678/0001-90',
         solicitante_nome: 'Maria Cliente',
         departamento: 'Suporte',
         sistema_operacional: 'Windows 11 Pro',
         nome_maquina: 'FINANCEIRO-01',
         versao_sistema: 'Icthus 4.12.3',
+        memoria_ram_bytes: 17179869184,
+        processador_nome: 'Intel Core i5-12400',
+        processadores_logicos: 12,
+        tempo_atividade_segundos: 289200,
+        espaco_disponivel_disco_c_bytes: 256000000000,
+        espaco_total_disco_c_bytes: 512000000000,
         company_id: 999,
         criado_por: 999,
       })
@@ -88,6 +95,13 @@ describe('HelpDesk API', () => {
       sistema_operacional: 'Windows 11 Pro',
       nome_maquina: 'FINANCEIRO-01',
       versao_sistema: 'Icthus 4.12.3',
+      empresa_razao: 'Cliente Teste Comércio e Serviços Ltda',
+      memoria_ram_bytes: 17179869184,
+      processador_nome: 'Intel Core i5-12400',
+      processadores_logicos: 12,
+      tempo_atividade_segundos: 289200,
+      espaco_disponivel_disco_c_bytes: 256000000000,
+      espaco_total_disco_c_bytes: 512000000000,
       titulo: 'Acesso bloqueado',
       empresa_nome: 'Cliente Teste Ltda',
       cnpj: '12.345.678/0001-90',
@@ -97,6 +111,26 @@ describe('HelpDesk API', () => {
     }))
     expect(departmentQuery.eq).toHaveBeenCalledWith('company_id', 1)
     expect(departmentQuery.ilike).toHaveBeenCalledWith('nome', 'Suporte')
+  })
+
+  it('rejeita informações numéricas inválidas do ambiente', async () => {
+    const response = await request(app)
+      .post('/api/helpdesk/tickets')
+      .set('X-HelpDesk-Token', process.env.HELPDESK_INTEGRATION_TOKEN)
+      .set('X-Icthus-CNPJ', '12345678000190')
+      .send({
+        titulo: 'Disco cheio',
+        descricao: 'Teste de validação do ambiente.',
+        empresa_nome: 'Cliente Teste Ltda',
+        solicitante_nome: 'Maria Cliente',
+        departamento: 'Suporte',
+        espaco_disponivel_disco_c_bytes: 600,
+        espaco_total_disco_c_bytes: 500,
+      })
+
+    expect(response.status).toBe(400)
+    expect(response.body.error).toContain('não pode ser maior')
+    expect(supabase.from).not.toHaveBeenCalled()
   })
 
   it('rejeita criação com JWT porque chamados nascem no Icthus', async () => {
@@ -168,6 +202,209 @@ describe('HelpDesk API', () => {
     )
   })
 
+  it('retorna responsável atual e nomes do histórico no detalhe do chamado', async () => {
+    const ticketQuery = query({
+      data: {
+        id: 10,
+        company_id: 23,
+        responsavel_id: 7,
+        responsavel: { nome: 'Felipe Suporte' },
+      },
+      error: null,
+    })
+    const messagesQuery = query({ data: [], error: null })
+    const transfersQuery = query({
+      data: [{
+        id: 30,
+        ticket_id: 10,
+        transferido_por: 7,
+        transferido_por_usuario: { nome: 'Felipe Suporte' },
+        de_responsavel_usuario: { nome: 'Administrador' },
+        para_responsavel_usuario: { nome: 'Carlos Financeiro' },
+        de_departamento: { nome: 'Suporte' },
+        para_departamento: { nome: 'Financeiro' },
+      }],
+      error: null,
+    })
+    supabase.from
+      .mockReturnValueOnce(ticketQuery)
+      .mockReturnValueOnce(messagesQuery)
+      .mockReturnValueOnce(transfersQuery)
+
+    const response = await request(app)
+      .get('/api/helpdesk/tickets/10')
+      .set('Authorization', `Bearer ${token()}`)
+
+    expect(response.status).toBe(200)
+    expect(response.body).toMatchObject({
+      responsavel_id: 7,
+      responsavel_nome: 'Felipe Suporte',
+    })
+    expect(response.body.transferencias[0]).toMatchObject({
+      transferido_por: 7,
+      transferido_por_nome: 'Felipe Suporte',
+      de_responsavel_nome: 'Administrador',
+      para_responsavel_nome: 'Carlos Financeiro',
+      de_departamento_nome: 'Suporte',
+      para_departamento_nome: 'Financeiro',
+    })
+    expect(transfersQuery.select).toHaveBeenCalledWith(expect.stringContaining('transferido_por_usuario'))
+  })
+
+  it('retorna transferências ao Icthus sem expor notas internas', async () => {
+    const ticketQuery = query({
+      data: {
+        id: 10,
+        company_id: 1,
+        cnpj: '12.345.678/0001-90',
+        responsavel_id: 7,
+        avaliacao: 4,
+        responsavel: { nome: 'Felipe Suporte' },
+      },
+      error: null,
+    })
+    const messagesQuery = query({
+      data: [{ id: 40, ticket_id: 10, autor_usuario_id: null, solicitante_nome: 'Bruno Lima', interna: false, mensagem: 'Mensagem pública' }],
+      error: null,
+    })
+    const transfersQuery = query({
+      data: [{
+        id: 30,
+        ticket_id: 10,
+        transferido_por: 7,
+        transferido_por_usuario: { nome: 'Felipe Suporte' },
+        de_responsavel_usuario: null,
+        para_responsavel_usuario: { nome: 'Felipe Suporte' },
+        de_departamento: { nome: 'Financeiro' },
+        para_departamento: { nome: 'Suporte' },
+      }],
+      error: null,
+    })
+    supabase.from
+      .mockReturnValueOnce(ticketQuery)
+      .mockReturnValueOnce(messagesQuery)
+      .mockReturnValueOnce(transfersQuery)
+
+    const response = await request(app)
+      .get('/api/helpdesk/tickets/10')
+      .set('X-HelpDesk-Token', process.env.HELPDESK_INTEGRATION_TOKEN)
+      .set('X-Icthus-CNPJ', '12.345.678/0001-90')
+
+    expect(response.status).toBe(200)
+    expect(ticketQuery.eq).toHaveBeenCalledWith('cnpj', '12.345.678/0001-90')
+    expect(messagesQuery.eq).toHaveBeenCalledWith('interna', false)
+    expect(response.body.mensagens).toEqual([
+      expect.objectContaining({
+        solicitante_nome: 'Bruno Lima',
+        autor_nome: 'Bruno Lima',
+        interna: false,
+        mensagem: 'Mensagem pública',
+      }),
+    ])
+    expect(response.body.avaliacao).toBe(4)
+    expect(response.body.transferencias[0]).toMatchObject({
+      transferido_por_nome: 'Felipe Suporte',
+      de_departamento_nome: 'Financeiro',
+      para_departamento_nome: 'Suporte',
+      para_responsavel_nome: 'Felipe Suporte',
+    })
+  })
+
+  it('registra o nome do usuário do Icthus em cada mensagem', async () => {
+    const ticketQuery = query({
+      data: { id: 10, company_id: 1, cnpj: '12.345.678/0001-90' },
+      error: null,
+    })
+    const insertQuery = query({
+      data: {
+        id: 41,
+        company_id: 1,
+        ticket_id: 10,
+        autor_usuario_id: null,
+        solicitante_nome: 'Bruno Lima',
+        mensagem: 'O erro também ocorre comigo.',
+        interna: false,
+      },
+      error: null,
+    })
+    const ticketUpdateQuery = query({ data: null, error: null })
+    supabase.from
+      .mockReturnValueOnce(ticketQuery)
+      .mockReturnValueOnce(insertQuery)
+      .mockReturnValueOnce(ticketUpdateQuery)
+
+    const response = await request(app)
+      .post('/api/helpdesk/tickets/10/messages')
+      .set('X-HelpDesk-Token', process.env.HELPDESK_INTEGRATION_TOKEN)
+      .set('X-Icthus-CNPJ', '12.345.678/0001-90')
+      .send({
+        mensagem: 'O erro também ocorre comigo.',
+        solicitante_nome: 'Bruno Lima',
+        interna: true,
+      })
+
+    expect(response.status).toBe(201)
+    expect(insertQuery.insert).toHaveBeenCalledWith(expect.objectContaining({
+      autor_usuario_id: null,
+      solicitante_nome: 'Bruno Lima',
+      interna: false,
+    }))
+    expect(response.body).toMatchObject({
+      solicitante_nome: 'Bruno Lima',
+      autor_nome: 'Bruno Lima',
+      interna: false,
+    })
+  })
+
+  it('exige solicitante_nome nas mensagens enviadas pelo Icthus', async () => {
+    const response = await request(app)
+      .post('/api/helpdesk/tickets/10/messages')
+      .set('X-HelpDesk-Token', process.env.HELPDESK_INTEGRATION_TOKEN)
+      .set('X-Icthus-CNPJ', '12.345.678/0001-90')
+      .send({ mensagem: 'Mensagem sem identificação.' })
+
+    expect(response.status).toBe(400)
+    expect(response.body.error).toBe('solicitante_nome é obrigatório')
+    expect(supabase.from).not.toHaveBeenCalled()
+  })
+
+  it('permite ao Icthus avaliar seu chamado de 1 a 5', async () => {
+    const ticketQuery = query({
+      data: { id: 10, company_id: 1, cnpj: '12.345.678/0001-90', avaliacao: 0 },
+      error: null,
+    })
+    const updateQuery = query({
+      data: { id: 10, avaliacao: 5 },
+      error: null,
+    })
+    supabase.from
+      .mockReturnValueOnce(ticketQuery)
+      .mockReturnValueOnce(updateQuery)
+
+    const response = await request(app)
+      .post('/api/helpdesk/tickets/10/avaliacao')
+      .set('X-HelpDesk-Token', process.env.HELPDESK_INTEGRATION_TOKEN)
+      .set('X-Icthus-CNPJ', '12.345.678/0001-90')
+      .send({ avaliacao: 5 })
+
+    expect(response.status).toBe(200)
+    expect(updateQuery.update).toHaveBeenCalledWith(expect.objectContaining({ avaliacao: 5 }))
+    expect(updateQuery.eq).toHaveBeenCalledWith('cnpj', '12.345.678/0001-90')
+    expect(response.body).toEqual({ id: 10, avaliacao: 5 })
+  })
+
+  it('rejeita avaliação fora do intervalo de 1 a 5', async () => {
+    const response = await request(app)
+      .post('/api/helpdesk/tickets/10/avaliacao')
+      .set('X-HelpDesk-Token', process.env.HELPDESK_INTEGRATION_TOKEN)
+      .set('X-Icthus-CNPJ', '12.345.678/0001-90')
+      .send({ avaliacao: 0 })
+
+    expect(response.status).toBe(400)
+    expect(response.body.error).toBe('avaliacao deve ser um número inteiro de 1 a 5')
+    expect(supabase.from).not.toHaveBeenCalled()
+  })
+
   it('localiza CNPJ com máscara quando a busca é enviada sem máscara', async () => {
     const listQuery = query({ data: [], error: null, count: 0 })
     supabase.from.mockReturnValueOnce(listQuery)
@@ -177,6 +414,7 @@ describe('HelpDesk API', () => {
       .set('Authorization', `Bearer ${token()}`)
 
     expect(response.status).toBe(200)
+    expect(listQuery.or).toHaveBeenCalledWith(expect.stringContaining('empresa_razao.ilike'))
     expect(listQuery.or).toHaveBeenCalledWith(expect.stringContaining(
       'cnpj.ilike.%1%2%3%4%5%6%7%8%0%0%0%1%9%0%'
     ))

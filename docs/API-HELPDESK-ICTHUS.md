@@ -7,7 +7,8 @@ Esta API permite que o Icthus:
 - abra chamados no HelpDesk do ZapERP;
 - liste apenas os chamados do CNPJ autenticado;
 - consulte os detalhes de um chamado do mesmo CNPJ;
-- envie mensagens em um chamado do mesmo CNPJ.
+- envie mensagens identificando o usuário logado no Icthus;
+- avalie um chamado com uma nota de 1 a 5 estrelas.
 
 As operações administrativas de alteração e transferência continuam restritas aos usuários autenticados no ZapERP.
 
@@ -54,6 +55,7 @@ O ZapERP normaliza o valor para `12.345.678/0001-90`.
 | Listar chamados | Somente do CNPJ | Todos da empresa WM |
 | Consultar detalhe | Somente do CNPJ | Sim |
 | Enviar mensagem | Somente no chamado do CNPJ | Sim |
+| Avaliar chamado | Somente no chamado do CNPJ | Não |
 | Enviar nota interna | Não | Sim |
 | Alterar status/prioridade/departamento | Não | Sim |
 | Assumir chamado | Não | Usuário autenticado da Central |
@@ -65,9 +67,10 @@ Antes de publicar esta versão da API, execute no Supabase o script:
 
 ```text
 scripts/aplicar_helpdesk_dados_ambiente.sql
+scripts/adicionar_helpdesk_autor_avaliacao.sql
 ```
 
-Ele adiciona de forma idempotente as colunas `sistema_operacional`, `nome_maquina` e `versao_sistema` à tabela `helpdesk_tickets`.
+Eles adicionam de forma idempotente os dados do ambiente, o autor externo das mensagens e a avaliação do chamado.
 
 ### Prioridade
 
@@ -110,13 +113,20 @@ X-Icthus-CNPJ: 12.345.678/0001-90
 {
   "titulo": "Erro ao emitir NF-e",
   "descricao": "A transmissão da nota fiscal retorna erro.",
-  "empresa_nome": "Cliente Icthus Teste Ltda",
+  "empresa_nome": "Cliente Teste",
+  "empresa_razao": "Cliente Icthus Teste Ltda",
   "solicitante_nome": "Maria Cliente",
   "departamento": "Suporte",
   "telefone": "(11) 99999-9999",
   "sistema_operacional": "Windows 11 Pro",
   "nome_maquina": "FINANCEIRO-01",
   "versao_sistema": "Icthus 4.12.3",
+  "memoria_ram_bytes": 17179869184,
+  "processador_nome": "Intel Core i5-12400",
+  "processadores_logicos": 12,
+  "tempo_atividade_segundos": 289200,
+  "espaco_disponivel_disco_c_bytes": 256000000000,
+  "espaco_total_disco_c_bytes": 512000000000,
   "prioridade": "alta"
 }
 ```
@@ -125,17 +135,26 @@ Campos obrigatórios:
 
 - `titulo`: até 180 caracteres;
 - `descricao`: até 10.000 caracteres;
-- `empresa_nome`: até 180 caracteres;
+- `empresa_nome`: nome fantasia, até 180 caracteres;
 - `solicitante_nome`: até 180 caracteres;
 - `departamento`: nome exato de um departamento existente na WM, por exemplo `Suporte`.
 
 Campos opcionais:
 
+- `empresa_razao`: razão social, até 180 caracteres;
 - `telefone`: até 30 caracteres;
 - `sistema_operacional`: até 120 caracteres;
 - `nome_maquina`: até 120 caracteres;
 - `versao_sistema`: até 120 caracteres;
+- `memoria_ram_bytes`: memória RAM total em bytes;
+- `processador_nome`: até 180 caracteres;
+- `processadores_logicos`: número inteiro maior que zero;
+- `tempo_atividade_segundos`: tempo de atividade da máquina em segundos;
+- `espaco_disponivel_disco_c_bytes`: espaço disponível no disco C: em bytes;
+- `espaco_total_disco_c_bytes`: espaço total no disco C: em bytes;
 - `prioridade`: padrão `normal`.
+
+Os campos numéricos do ambiente devem ser inteiros não negativos. O espaço disponível não pode ser maior que o espaço total.
 
 O campo `cnpj` não precisa ser enviado no body. O backend utiliza exclusivamente `X-Icthus-CNPJ` para identificar o cliente.
 
@@ -147,13 +166,20 @@ O campo `cnpj` não precisa ser enviado no body. O backend utiliza exclusivament
   "company_id": 1,
   "titulo": "Erro ao emitir NF-e",
   "descricao": "A transmissão da nota fiscal retorna erro.",
-  "empresa_nome": "Cliente Icthus Teste Ltda",
+  "empresa_nome": "Cliente Teste",
+  "empresa_razao": "Cliente Icthus Teste Ltda",
   "cnpj": "12.345.678/0001-90",
   "solicitante_nome": "Maria Cliente",
   "telefone": "(11) 99999-9999",
   "sistema_operacional": "Windows 11 Pro",
   "nome_maquina": "FINANCEIRO-01",
   "versao_sistema": "Icthus 4.12.3",
+  "memoria_ram_bytes": 17179869184,
+  "processador_nome": "Intel Core i5-12400",
+  "processadores_logicos": 12,
+  "tempo_atividade_segundos": 289200,
+  "espaco_disponivel_disco_c_bytes": 256000000000,
+  "espaco_total_disco_c_bytes": 512000000000,
   "prioridade": "alta",
   "status": "aberto",
   "cliente_id": null,
@@ -183,7 +209,7 @@ O backend sempre limita a consulta ao CNPJ de `X-Icthus-CNPJ`.
 | `limit` | Itens por página, máximo 100 | `25` |
 | `status` | Status do chamado | `aberto` |
 | `prioridade` | Prioridade | `alta` |
-| `q` | Pesquisa parcial em empresa/CNPJ, com ou sem máscara | `12345678000190` |
+| `q` | Pesquisa parcial em nome fantasia, razão social ou CNPJ, com ou sem máscara | `12345678000190` |
 | `data_inicio` | Data inicial | `2026-08-01` |
 | `data_fim` | Data final | `2026-08-31` |
 
@@ -203,13 +229,20 @@ GET /api/helpdesk/tickets?page=1&limit=25&status=aberto
       "company_id": 1,
       "titulo": "Erro ao emitir NF-e",
       "descricao": "A transmissão da nota fiscal retorna erro.",
-      "empresa_nome": "Cliente Icthus Teste Ltda",
+      "empresa_nome": "Cliente Teste",
+      "empresa_razao": "Cliente Icthus Teste Ltda",
       "cnpj": "12.345.678/0001-90",
       "solicitante_nome": "Maria Cliente",
       "telefone": "(11) 99999-9999",
       "sistema_operacional": "Windows 11 Pro",
       "nome_maquina": "FINANCEIRO-01",
       "versao_sistema": "Icthus 4.12.3",
+      "memoria_ram_bytes": 17179869184,
+      "processador_nome": "Intel Core i5-12400",
+      "processadores_logicos": 12,
+      "tempo_atividade_segundos": 289200,
+      "espaco_disponivel_disco_c_bytes": 256000000000,
+      "espaco_total_disco_c_bytes": 512000000000,
       "prioridade": "alta",
       "status": "aberto",
       "departamento": "Suporte",
@@ -247,15 +280,23 @@ O chamado somente será retornado quando pertencer ao CNPJ enviado no cabeçalho
   "company_id": 1,
   "titulo": "Erro ao emitir NF-e",
   "descricao": "A transmissão da nota fiscal retorna erro.",
-  "empresa_nome": "Cliente Icthus Teste Ltda",
+  "empresa_nome": "Cliente Teste",
+  "empresa_razao": "Cliente Icthus Teste Ltda",
   "cnpj": "12.345.678/0001-90",
   "solicitante_nome": "Maria Cliente",
   "telefone": "(11) 99999-9999",
   "sistema_operacional": "Windows 11 Pro",
   "nome_maquina": "FINANCEIRO-01",
   "versao_sistema": "Icthus 4.12.3",
+  "memoria_ram_bytes": 17179869184,
+  "processador_nome": "Intel Core i5-12400",
+  "processadores_logicos": 12,
+  "tempo_atividade_segundos": 289200,
+  "espaco_disponivel_disco_c_bytes": 256000000000,
+  "espaco_total_disco_c_bytes": 512000000000,
   "prioridade": "alta",
   "status": "em_atendimento",
+  "avaliacao": 0,
   "departamento": "Suporte",
   "responsavel_id": 7,
   "mensagens": [
@@ -264,19 +305,40 @@ O chamado somente será retornado quando pertencer ao CNPJ enviado no cabeçalho
       "company_id": 1,
       "ticket_id": 123,
       "autor_usuario_id": null,
+      "solicitante_nome": "Maria Cliente",
+      "autor_nome": "Maria Cliente",
       "mensagem": "O problema continua acontecendo.",
       "interna": false,
       "criado_em": "2026-08-13T15:40:00.000Z"
     }
   ],
-  "transferencias": []
+  "transferencias": [
+    {
+      "id": 701,
+      "company_id": 1,
+      "ticket_id": 123,
+      "de_departamento_id": 2,
+      "de_departamento_nome": "Suporte",
+      "para_departamento_id": 4,
+      "para_departamento_nome": "Financeiro",
+      "de_responsavel_id": 7,
+      "de_responsavel_nome": "Felipe Suporte",
+      "para_responsavel_id": 9,
+      "para_responsavel_nome": "Carlos Financeiro",
+      "transferido_por": 1,
+      "transferido_por_nome": "Administrador",
+      "motivo": "Necessária análise financeira",
+      "criado_em": "2026-08-13T16:00:00.000Z"
+    }
+  ]
 }
 ```
 
 Regras:
 
 - notas internas nunca são retornadas ao Icthus;
-- o histórico administrativo de transferências nunca é retornado ao Icthus;
+- o histórico de movimentações é retornado ao Icthus, incluindo quem transferiu, responsáveis, departamentos, motivo e data;
+- a aplicação Icthus decide quais movimentações serão apresentadas ao cliente;
 - chamado de outro CNPJ retorna `404`.
 
 ## 9. Enviar mensagem
@@ -289,11 +351,12 @@ POST /api/helpdesk/tickets/{ticketId}/messages
 
 ```json
 {
-  "mensagem": "O problema continua após uma nova tentativa."
+  "mensagem": "O problema continua após uma nova tentativa.",
+  "solicitante_nome": "Maria Cliente"
 }
 ```
 
-`mensagem` é obrigatória e aceita até 10.000 caracteres.
+`mensagem` é obrigatória e aceita até 10.000 caracteres. `solicitante_nome` também é obrigatório e deve conter o nome do usuário atualmente logado no Icthus, mesmo que outra pessoa tenha aberto o chamado.
 
 Se o Icthus enviar `"interna": true`, o backend substituirá o valor por `false`.
 
@@ -305,13 +368,42 @@ Se o Icthus enviar `"interna": true`, o backend substituirá o valor por `false`
   "company_id": 1,
   "ticket_id": 123,
   "autor_usuario_id": null,
+  "solicitante_nome": "Maria Cliente",
+  "autor_nome": "Maria Cliente",
   "mensagem": "O problema continua após uma nova tentativa.",
   "interna": false,
   "criado_em": "2026-08-13T15:40:00.000Z"
 }
 ```
 
-## 10. Rotas não permitidas ao Icthus
+## 10. Avaliar chamado
+
+```http
+POST /api/helpdesk/tickets/{ticketId}/avaliacao
+```
+
+### Body
+
+```json
+{
+  "avaliacao": 5
+}
+```
+
+`avaliacao` deve ser um número inteiro de 1 a 5. Enquanto o usuário não avaliar, o GET retorna `avaliacao: 0`. Uma nova avaliação do mesmo chamado substitui a anterior.
+
+### Resposta — `200 OK`
+
+```json
+{
+  "id": 123,
+  "avaliacao": 5
+}
+```
+
+O chamado somente pode ser avaliado com o token de integração e o CNPJ ao qual pertence. A avaliação não é aceita no POST de criação do chamado.
+
+## 11. Rotas não permitidas ao Icthus
 
 Estas rotas exigem o JWT de um usuário do ZapERP:
 
@@ -323,7 +415,7 @@ POST  /api/helpdesk/tickets/{ticketId}/transfer
 
 O token de integração do Icthus não concede acesso administrativo.
 
-## 11. Erros HTTP
+## 12. Erros HTTP
 
 | Código | Situação |
 |---:|---|
@@ -355,7 +447,7 @@ Erros específicos de autenticação:
 { "error": "X-Icthus-CNPJ deve conter 14 digitos" }
 ```
 
-## 12. Exemplo C# para a DLL
+## 13. Exemplo C# para a DLL
 
 O exemplo abaixo utiliza APIs disponíveis no .NET 6 ou superior (`System.Net.Http.Json`). Para DLLs em .NET Framework, mantenha o mesmo contrato HTTP e substitua apenas a serialização JSON pela biblioteca adotada no Icthus.
 
@@ -434,17 +526,37 @@ public sealed class ZapErpHelpDeskClient
         string cnpj,
         long ticketId,
         string mensagem,
+        string solicitanteNome,
         CancellationToken cancellationToken = default)
     {
         using var request = CreateRequest(
             HttpMethod.Post,
             $"tickets/{ticketId}/messages",
             cnpj);
-        request.Content = JsonContent.Create(new { mensagem });
+        request.Content = JsonContent.Create(new
+        {
+            mensagem,
+            solicitante_nome = solicitanteNome
+        });
         using var response = await _http.SendAsync(request, cancellationToken);
         await EnsureSuccessAsync(response, cancellationToken);
         return (await response.Content.ReadFromJsonAsync<HelpDeskMessage>(
             cancellationToken: cancellationToken))!;
+    }
+
+    public async Task AvaliarChamadoAsync(
+        string cnpj,
+        long ticketId,
+        int avaliacao,
+        CancellationToken cancellationToken = default)
+    {
+        using var request = CreateRequest(
+            HttpMethod.Post,
+            $"tickets/{ticketId}/avaliacao",
+            cnpj);
+        request.Content = JsonContent.Create(new { avaliacao });
+        using var response = await _http.SendAsync(request, cancellationToken);
+        await EnsureSuccessAsync(response, cancellationToken);
     }
 
     private static async Task EnsureSuccessAsync(
@@ -466,10 +578,17 @@ public sealed record CriarChamadoRequest(
     string empresa_nome,
     string solicitante_nome,
     string departamento,
+    string? empresa_razao = null,
     string? telefone = null,
     string? sistema_operacional = null,
     string? nome_maquina = null,
     string? versao_sistema = null,
+    long? memoria_ram_bytes = null,
+    string? processador_nome = null,
+    int? processadores_logicos = null,
+    long? tempo_atividade_segundos = null,
+    long? espaco_disponivel_disco_c_bytes = null,
+    long? espaco_total_disco_c_bytes = null,
     string prioridade = "normal");
 
 public sealed record HelpDeskTicket(
@@ -478,14 +597,22 @@ public sealed record HelpDeskTicket(
     string titulo,
     string descricao,
     string empresa_nome,
+    string? empresa_razao,
     string cnpj,
     string solicitante_nome,
     string? telefone,
     string? sistema_operacional,
     string? nome_maquina,
     string? versao_sistema,
+    long? memoria_ram_bytes,
+    string? processador_nome,
+    int? processadores_logicos,
+    long? tempo_atividade_segundos,
+    long? espaco_disponivel_disco_c_bytes,
+    long? espaco_total_disco_c_bytes,
     string prioridade,
     string status,
+    int avaliacao,
     string departamento,
     int? responsavel_id,
     string? responsavel_nome,
@@ -497,6 +624,8 @@ public sealed record HelpDeskMessage(
     int company_id,
     long ticket_id,
     int? autor_usuario_id,
+    string? solicitante_nome,
+    string? autor_nome,
     string mensagem,
     bool interna,
     DateTimeOffset criado_em);
@@ -513,16 +642,25 @@ public sealed record HelpDeskTicketDetail(
     string titulo,
     string descricao,
     string empresa_nome,
+    string? empresa_razao,
     string cnpj,
     string solicitante_nome,
     string? telefone,
     string? sistema_operacional,
     string? nome_maquina,
     string? versao_sistema,
+    long? memoria_ram_bytes,
+    string? processador_nome,
+    int? processadores_logicos,
+    long? tempo_atividade_segundos,
+    long? espaco_disponivel_disco_c_bytes,
+    long? espaco_total_disco_c_bytes,
     string prioridade,
     string status,
+    int avaliacao,
     string departamento,
     int? responsavel_id,
+    string? responsavel_nome,
     DateTimeOffset criado_em,
     DateTimeOffset atualizado_em,
     IReadOnlyList<HelpDeskMessage> mensagens,
@@ -543,7 +681,7 @@ var helpDesk = new ZapErpHelpDeskClient(
     configuration["ZapErp:HelpDeskToken"]!);
 ```
 
-## 13. Checklist de integração
+## 14. Checklist de integração
 
 - [ ] URL de produção confirmada;
 - [ ] token configurado fora do código-fonte;
@@ -554,4 +692,6 @@ var helpDesk = new ZapErpHelpDeskClient(
 - [ ] isolamento entre dois CNPJs validado;
 - [ ] consulta de detalhe validada;
 - [ ] envio de mensagem validado;
+- [ ] nome do usuário logado enviado em cada mensagem;
+- [ ] avaliação de 1 a 5 validada;
 - [ ] logs sem token de integração.
