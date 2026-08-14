@@ -168,6 +168,107 @@ describe('HelpDesk API', () => {
     )
   })
 
+  it('retorna responsável atual e nomes do histórico no detalhe do chamado', async () => {
+    const ticketQuery = query({
+      data: {
+        id: 10,
+        company_id: 23,
+        responsavel_id: 7,
+        responsavel: { nome: 'Felipe Suporte' },
+      },
+      error: null,
+    })
+    const messagesQuery = query({ data: [], error: null })
+    const transfersQuery = query({
+      data: [{
+        id: 30,
+        ticket_id: 10,
+        transferido_por: 7,
+        transferido_por_usuario: { nome: 'Felipe Suporte' },
+        de_responsavel_usuario: { nome: 'Administrador' },
+        para_responsavel_usuario: { nome: 'Carlos Financeiro' },
+        de_departamento: { nome: 'Suporte' },
+        para_departamento: { nome: 'Financeiro' },
+      }],
+      error: null,
+    })
+    supabase.from
+      .mockReturnValueOnce(ticketQuery)
+      .mockReturnValueOnce(messagesQuery)
+      .mockReturnValueOnce(transfersQuery)
+
+    const response = await request(app)
+      .get('/api/helpdesk/tickets/10')
+      .set('Authorization', `Bearer ${token()}`)
+
+    expect(response.status).toBe(200)
+    expect(response.body).toMatchObject({
+      responsavel_id: 7,
+      responsavel_nome: 'Felipe Suporte',
+    })
+    expect(response.body.transferencias[0]).toMatchObject({
+      transferido_por: 7,
+      transferido_por_nome: 'Felipe Suporte',
+      de_responsavel_nome: 'Administrador',
+      para_responsavel_nome: 'Carlos Financeiro',
+      de_departamento_nome: 'Suporte',
+      para_departamento_nome: 'Financeiro',
+    })
+    expect(transfersQuery.select).toHaveBeenCalledWith(expect.stringContaining('transferido_por_usuario'))
+  })
+
+  it('retorna transferências ao Icthus sem expor notas internas', async () => {
+    const ticketQuery = query({
+      data: {
+        id: 10,
+        company_id: 1,
+        cnpj: '12.345.678/0001-90',
+        responsavel_id: 7,
+        responsavel: { nome: 'Felipe Suporte' },
+      },
+      error: null,
+    })
+    const messagesQuery = query({
+      data: [{ id: 40, ticket_id: 10, interna: false, mensagem: 'Mensagem pública' }],
+      error: null,
+    })
+    const transfersQuery = query({
+      data: [{
+        id: 30,
+        ticket_id: 10,
+        transferido_por: 7,
+        transferido_por_usuario: { nome: 'Felipe Suporte' },
+        de_responsavel_usuario: null,
+        para_responsavel_usuario: { nome: 'Felipe Suporte' },
+        de_departamento: { nome: 'Financeiro' },
+        para_departamento: { nome: 'Suporte' },
+      }],
+      error: null,
+    })
+    supabase.from
+      .mockReturnValueOnce(ticketQuery)
+      .mockReturnValueOnce(messagesQuery)
+      .mockReturnValueOnce(transfersQuery)
+
+    const response = await request(app)
+      .get('/api/helpdesk/tickets/10')
+      .set('X-HelpDesk-Token', process.env.HELPDESK_INTEGRATION_TOKEN)
+      .set('X-Icthus-CNPJ', '12.345.678/0001-90')
+
+    expect(response.status).toBe(200)
+    expect(ticketQuery.eq).toHaveBeenCalledWith('cnpj', '12.345.678/0001-90')
+    expect(messagesQuery.eq).toHaveBeenCalledWith('interna', false)
+    expect(response.body.mensagens).toEqual([
+      expect.objectContaining({ interna: false, mensagem: 'Mensagem pública' }),
+    ])
+    expect(response.body.transferencias[0]).toMatchObject({
+      transferido_por_nome: 'Felipe Suporte',
+      de_departamento_nome: 'Financeiro',
+      para_departamento_nome: 'Suporte',
+      para_responsavel_nome: 'Felipe Suporte',
+    })
+  })
+
   it('localiza CNPJ com máscara quando a busca é enviada sem máscara', async () => {
     const listQuery = query({ data: [], error: null, count: 0 })
     supabase.from.mockReturnValueOnce(listQuery)

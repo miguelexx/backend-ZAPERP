@@ -2,6 +2,15 @@ const supabase = require('../config/supabase')
 
 const PRIORITIES = new Set(['baixa', 'normal', 'alta', 'urgente'])
 const STATUSES = new Set(['aberto', 'em_atendimento', 'resolvido'])
+const TICKET_DETAIL_SELECT = '*, responsavel:usuarios!helpdesk_tickets_responsavel_id_fkey(nome)'
+const TRANSFER_DETAIL_SELECT = [
+  '*',
+  'transferido_por_usuario:usuarios!helpdesk_transferencias_transferido_por_fkey(nome)',
+  'de_responsavel_usuario:usuarios!helpdesk_transferencias_de_responsavel_id_fkey(nome)',
+  'para_responsavel_usuario:usuarios!helpdesk_transferencias_para_responsavel_id_fkey(nome)',
+  'de_departamento:departamentos!helpdesk_transferencias_de_departamento_id_fkey(nome)',
+  'para_departamento:departamentos!helpdesk_transferencias_para_departamento_id_fkey(nome)',
+].join(', ')
 
 function positiveInt(value) {
   const number = Number(value)
@@ -54,8 +63,27 @@ function flattenResponsible(ticket) {
   return { ...fields, responsavel_nome: responsavel?.nome || null }
 }
 
-async function findTicket(id, companyId, integrationCnpj = null) {
-  let query = supabase.from('helpdesk_tickets').select('*').eq('id', id).eq('company_id', companyId)
+function flattenTransfer(transfer) {
+  const {
+    transferido_por_usuario,
+    de_responsavel_usuario,
+    para_responsavel_usuario,
+    de_departamento,
+    para_departamento,
+    ...fields
+  } = transfer
+  return {
+    ...fields,
+    transferido_por_nome: transferido_por_usuario?.nome || null,
+    de_responsavel_nome: de_responsavel_usuario?.nome || null,
+    para_responsavel_nome: para_responsavel_usuario?.nome || null,
+    de_departamento_nome: de_departamento?.nome || null,
+    para_departamento_nome: para_departamento?.nome || null,
+  }
+}
+
+async function findTicket(id, companyId, integrationCnpj = null, select = '*') {
+  let query = supabase.from('helpdesk_tickets').select(select).eq('id', id).eq('company_id', companyId)
   if (integrationCnpj) query = query.eq('cnpj', integrationCnpj)
   const { data, error } = await query.maybeSingle()
   if (error) throw error
@@ -202,24 +230,27 @@ exports.getTicket = async (req, res) => {
     const ticketId = positiveInt(req.params.id)
     if (!ticketId) return res.status(400).json({ error: 'id inválido' })
 
-    const ticket = await findTicket(ticketId, companyId, req.helpDeskIntegration ? req.integrationCnpj : null)
+    const ticket = await findTicket(
+      ticketId,
+      companyId,
+      req.helpDeskIntegration ? req.integrationCnpj : null,
+      TICKET_DETAIL_SELECT
+    )
     if (!ticket) return res.status(404).json({ error: 'Chamado não encontrado' })
 
     let messagesQuery = supabase.from('helpdesk_mensagens').select('*').eq('ticket_id', ticketId).eq('company_id', companyId)
     if (req.helpDeskIntegration) messagesQuery = messagesQuery.eq('interna', false)
     const [messagesResult, transfersResult] = await Promise.all([
       messagesQuery.order('criado_em', { ascending: true }),
-      req.helpDeskIntegration
-        ? Promise.resolve({ data: [], error: null })
-        : supabase.from('helpdesk_transferencias').select('*').eq('ticket_id', ticketId).eq('company_id', companyId).order('criado_em', { ascending: true }),
+      supabase.from('helpdesk_transferencias').select(TRANSFER_DETAIL_SELECT).eq('ticket_id', ticketId).eq('company_id', companyId).order('criado_em', { ascending: true }),
     ])
     if (messagesResult.error) throw messagesResult.error
     if (transfersResult.error) throw transfersResult.error
 
     return res.json({
-      ...ticket,
+      ...flattenResponsible(ticket),
       mensagens: messagesResult.data || [],
-      transferencias: transfersResult.data || [],
+      transferencias: (transfersResult.data || []).map(flattenTransfer),
     })
   } catch (error) {
     return databaseError(res, error, 'Erro ao obter chamado')

@@ -269,14 +269,33 @@ O chamado somente será retornado quando pertencer ao CNPJ enviado no cabeçalho
       "criado_em": "2026-08-13T15:40:00.000Z"
     }
   ],
-  "transferencias": []
+  "transferencias": [
+    {
+      "id": 701,
+      "company_id": 1,
+      "ticket_id": 123,
+      "de_departamento_id": 2,
+      "de_departamento_nome": "Suporte",
+      "para_departamento_id": 4,
+      "para_departamento_nome": "Financeiro",
+      "de_responsavel_id": 7,
+      "de_responsavel_nome": "Felipe Suporte",
+      "para_responsavel_id": 9,
+      "para_responsavel_nome": "Carlos Financeiro",
+      "transferido_por": 1,
+      "transferido_por_nome": "Administrador",
+      "motivo": "Necessária análise financeira",
+      "criado_em": "2026-08-13T16:00:00.000Z"
+    }
+  ]
 }
 ```
 
 Regras:
 
 - notas internas nunca são retornadas ao Icthus;
-- o histórico administrativo de transferências nunca é retornado ao Icthus;
+- o histórico de movimentações é retornado ao Icthus, incluindo quem transferiu, responsáveis, departamentos, motivo e data;
+- a aplicação Icthus decide quais movimentações serão apresentadas ao cliente;
 - chamado de outro CNPJ retorna `404`.
 
 ## 9. Enviar mensagem
