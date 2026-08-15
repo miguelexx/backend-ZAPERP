@@ -12,6 +12,7 @@ const TRANSFER_DETAIL_SELECT = [
   'de_departamento:departamentos!helpdesk_transferencias_de_departamento_id_fkey(nome)',
   'para_departamento:departamentos!helpdesk_transferencias_para_departamento_id_fkey(nome)',
 ].join(', ')
+const TICKET_CHANGED_EVENT = 'helpdesk:ticket_changed'
 
 function positiveInt(value) {
   const number = Number(value)
@@ -62,6 +63,22 @@ function flattenResponsible(ticket) {
   if (!ticket) return ticket
   const { responsavel, ...fields } = ticket
   return { ...fields, responsavel_nome: responsavel?.nome || null }
+}
+
+function emitTicketChanged(req, companyId, ticketId, action) {
+  const io = req.app?.get?.('io')
+  if (!io || !companyId || !ticketId) return
+  const payload = {
+    company_id: Number(companyId),
+    ticket_id: Number(ticketId),
+    action,
+    ocorrido_em: new Date().toISOString(),
+  }
+  if (typeof io.emitEmpresa === 'function') {
+    io.emitEmpresa(companyId, TICKET_CHANGED_EVENT, payload)
+    return
+  }
+  io.to?.(`empresa_${companyId}`)?.emit?.(TICKET_CHANGED_EVENT, payload)
 }
 
 function optionalNonNegativeInteger(value) {
@@ -199,6 +216,7 @@ exports.createTicket = async (req, res) => {
       .single()
 
     if (error) return databaseError(res, error, 'Erro ao criar chamado')
+    emitTicketChanged(req, companyId, data.id, 'ticket_created')
     return res.status(201).json(data)
   } catch (error) {
     return databaseError(res, error, 'Erro ao criar chamado')
@@ -242,6 +260,8 @@ exports.listTickets = async (req, res) => {
         `empresa_razao.ilike.%${safeSearch}%`,
         `cnpj.ilike.%${safeSearch}%`,
       ]
+      const searchedTicketId = positiveInt(search.replace(/^#\s*/, ''))
+      if (searchedTicketId) filters.push(`id.eq.${searchedTicketId}`)
       if (/^[\d\s./-]+$/.test(search)) {
         const digitPattern = cnpjSearchPattern(search)
         if (digitPattern) filters.push(`cnpj.ilike.%${digitPattern}%`)
@@ -363,6 +383,7 @@ exports.updateTicket = async (req, res) => {
 
     if (error) return databaseError(res, error, 'Erro ao atualizar chamado')
     if (!data) return res.status(409).json({ error: 'Chamado foi alterado por outro usuário' })
+    emitTicketChanged(req, companyId, ticketId, 'ticket_updated')
     return res.json(data)
   } catch (error) {
     return databaseError(res, error, 'Erro ao atualizar chamado')
@@ -383,8 +404,55 @@ exports.addMessage = async (req, res) => {
     if (req.helpDeskIntegration && !requesterName) {
       return res.status(400).json({ error: 'solicitante_nome é obrigatório' })
     }
-    if (!(await findTicket(ticketId, companyId, req.helpDeskIntegration ? req.integrationCnpj : null))) {
+    const ticket = await findTicket(ticketId, companyId, req.helpDeskIntegration ? req.integrationCnpj : null)
+    if (!ticket) {
       return res.status(404).json({ error: 'Chamado não encontrado' })
+    }
+
+    if (!req.helpDeskIntegration && !ticket.responsavel_id && ticket.status !== 'resolvido') {
+      const departmentIds = Array.isArray(req.user.departamento_ids)
+        ? req.user.departamento_ids.map(positiveInt).filter(Boolean)
+        : []
+      const departmentId = positiveInt(req.user.departamento_id) || departmentIds[0] || null
+      if (!departmentId) return res.status(400).json({ error: 'Usuário sem departamento vinculado' })
+
+      const department = await findTenantEntity('departamentos', departmentId, companyId, 'id, nome')
+      if (!department) return res.status(400).json({ error: 'Departamento do usuário inválido' })
+
+      const now = new Date().toISOString()
+      const { data: assumedTicket, error: assumeError } = await supabase
+        .from('helpdesk_tickets')
+        .update({
+          status: 'em_atendimento',
+          departamento: department.nome,
+          responsavel_id: userId,
+          atribuido_em: now,
+          atualizado_em: now,
+          atualizado_por: userId,
+        })
+        .eq('id', ticketId)
+        .eq('company_id', companyId)
+        .is('responsavel_id', null)
+        .select('*')
+        .maybeSingle()
+      if (assumeError) return databaseError(res, assumeError, 'Erro ao assumir chamado antes de responder')
+
+      if (assumedTicket) {
+        const previousDepartment = await findTenantDepartmentByName(ticket.departamento, companyId)
+        const transferResult = await supabase.from('helpdesk_transferencias').insert({
+          company_id: companyId,
+          ticket_id: ticketId,
+          de_departamento_id: previousDepartment?.id || null,
+          para_departamento_id: departmentId,
+          de_responsavel_id: ticket.responsavel_id,
+          para_responsavel_id: userId,
+          transferido_por: userId,
+          motivo: 'Chamado assumido ao responder',
+        })
+        if (transferResult.error) {
+          return databaseError(res, transferResult.error, 'Chamado assumido, mas o histórico não pôde ser registrado')
+        }
+      }
     }
 
     const { data, error } = await supabase
@@ -407,6 +475,7 @@ exports.addMessage = async (req, res) => {
       .eq('id', ticketId)
       .eq('company_id', companyId)
 
+    emitTicketChanged(req, companyId, ticketId, 'message_created')
     return res.status(201).json(flattenMessage(data, requesterName || cleanText(req.user?.nome, 180)))
   } catch (error) {
     return databaseError(res, error, 'Erro ao adicionar mensagem')
@@ -438,6 +507,7 @@ exports.rateTicket = async (req, res) => {
 
     if (error) return databaseError(res, error, 'Erro ao avaliar chamado')
     if (!data) return res.status(404).json({ error: 'Chamado não encontrado' })
+    emitTicketChanged(req, companyId, ticketId, 'ticket_rated')
     return res.json(data)
   } catch (error) {
     return databaseError(res, error, 'Erro ao avaliar chamado')
@@ -499,6 +569,7 @@ exports.assumeTicket = async (req, res) => {
     })
     if (transferResult.error) return databaseError(res, transferResult.error, 'Chamado assumido, mas o histórico não pôde ser registrado')
 
+    emitTicketChanged(req, companyId, ticketId, 'ticket_assumed')
     return res.json(data)
   } catch (error) {
     return databaseError(res, error, 'Erro ao assumir chamado')
@@ -567,10 +638,11 @@ exports.transferTicket = async (req, res) => {
     })
     if (transferResult.error) return databaseError(res, transferResult.error, 'Chamado transferido, mas o histórico não pôde ser registrado')
 
+    emitTicketChanged(req, companyId, ticketId, 'ticket_transferred')
     return res.json(data)
   } catch (error) {
     return databaseError(res, error, 'Erro ao transferir chamado')
   }
 }
 
-exports._private = { positiveInt, cleanText, cnpjSearchPattern, PRIORITIES, STATUSES }
+exports._private = { positiveInt, cleanText, cnpjSearchPattern, emitTicketChanged, PRIORITIES, STATUSES }
