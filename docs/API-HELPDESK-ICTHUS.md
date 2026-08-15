@@ -209,7 +209,7 @@ O backend sempre limita a consulta ao CNPJ de `X-Icthus-CNPJ`.
 | `limit` | Itens por página, máximo 100 | `25` |
 | `status` | Status do chamado | `aberto` |
 | `prioridade` | Prioridade | `alta` |
-| `q` | Pesquisa parcial em nome fantasia, razão social ou CNPJ, com ou sem máscara | `12345678000190` |
+| `q` | Pesquisa por ID exato (`10` ou `#10`) e parcial em nome fantasia, razão social ou CNPJ, com ou sem máscara | `#123` |
 | `data_inicio` | Data inicial | `2026-08-01` |
 | `data_fim` | Data final | `2026-08-31` |
 
@@ -414,6 +414,8 @@ POST  /api/helpdesk/tickets/{ticketId}/transfer
 ```
 
 O token de integração do Icthus não concede acesso administrativo.
+
+Quando um usuário autenticado do ZapERP envia a primeira mensagem em um chamado ainda sem responsável, o backend assume automaticamente o chamado para esse usuário, altera o status para `em_atendimento` e registra a movimentação no histórico. Mensagens enviadas pelo Icthus não provocam essa atribuição automática.
 
 ## 12. Erros HTTP
 

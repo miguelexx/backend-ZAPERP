@@ -368,6 +368,56 @@ describe('HelpDesk API', () => {
     expect(supabase.from).not.toHaveBeenCalled()
   })
 
+  it('assume automaticamente o chamado quando o atendente envia a primeira mensagem', async () => {
+    const ticketQuery = query({
+      data: { id: 10, company_id: 23, status: 'aberto', departamento: 'Financeiro', responsavel_id: null },
+      error: null,
+    })
+    const departmentQuery = query({ data: { id: 44, nome: 'Suporte' }, error: null })
+    const assumeQuery = query({
+      data: { id: 10, company_id: 23, status: 'em_atendimento', departamento: 'Suporte', responsavel_id: 7 },
+      error: null,
+    })
+    const previousDepartmentQuery = query({ data: { id: 33, nome: 'Financeiro' }, error: null })
+    const historyQuery = query({ data: null, error: null })
+    const messageQuery = query({
+      data: { id: 42, company_id: 23, ticket_id: 10, autor_usuario_id: 7, mensagem: 'Vou verificar.', interna: false },
+      error: null,
+    })
+    const ticketUpdateQuery = query({ data: null, error: null })
+    supabase.from
+      .mockReturnValueOnce(ticketQuery)
+      .mockReturnValueOnce(departmentQuery)
+      .mockReturnValueOnce(assumeQuery)
+      .mockReturnValueOnce(previousDepartmentQuery)
+      .mockReturnValueOnce(historyQuery)
+      .mockReturnValueOnce(messageQuery)
+      .mockReturnValueOnce(ticketUpdateQuery)
+
+    const response = await request(app)
+      .post('/api/helpdesk/tickets/10/messages')
+      .set('Authorization', `Bearer ${token({ perfil: 'atendente', departamento_id: 44, departamento_ids: [44] })}`)
+      .send({ mensagem: 'Vou verificar.' })
+
+    expect(response.status).toBe(201)
+    expect(assumeQuery.update).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'em_atendimento',
+      departamento: 'Suporte',
+      responsavel_id: 7,
+    }))
+    expect(historyQuery.insert).toHaveBeenCalledWith(expect.objectContaining({
+      ticket_id: 10,
+      para_departamento_id: 44,
+      para_responsavel_id: 7,
+      motivo: 'Chamado assumido ao responder',
+    }))
+    expect(messageQuery.insert).toHaveBeenCalledWith(expect.objectContaining({
+      ticket_id: 10,
+      autor_usuario_id: 7,
+      mensagem: 'Vou verificar.',
+    }))
+  })
+
   it('permite ao Icthus avaliar seu chamado de 1 a 5', async () => {
     const ticketQuery = query({
       data: { id: 10, company_id: 1, cnpj: '12.345.678/0001-90', avaliacao: 0 },
@@ -418,6 +468,18 @@ describe('HelpDesk API', () => {
     expect(listQuery.or).toHaveBeenCalledWith(expect.stringContaining(
       'cnpj.ilike.%1%2%3%4%5%6%7%8%0%0%0%1%9%0%'
     ))
+  })
+
+  it('localiza chamado pelo ID na pesquisa unificada', async () => {
+    const listQuery = query({ data: [], error: null, count: 0 })
+    supabase.from.mockReturnValueOnce(listQuery)
+
+    const response = await request(app)
+      .get('/api/helpdesk/tickets?q=%2310')
+      .set('Authorization', `Bearer ${token()}`)
+
+    expect(response.status).toBe(200)
+    expect(listQuery.or).toHaveBeenCalledWith(expect.stringContaining('id.eq.10'))
   })
 
   it('permite ao atendente assumir chamado aberto no próprio departamento', async () => {
