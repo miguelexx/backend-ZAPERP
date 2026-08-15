@@ -212,14 +212,16 @@ async function mirrorMensagemParaR2({ supabase, io = null, company_id, mensagem_
     }
 
     // R2 é o armazenamento de registro (a url já aponta para o R2). O arquivo local de staging
-    // NÃO é apagado aqui: para imagem/documento a UltraMSG pode ainda estar baixando a mídia
-    // enviada por URL pública. A purga acontece na varredura de limpeza, após a janela de
-    // segurança (getLocalCleanupDelayMs). url_legado preserva o caminho até lá.
+    // NÃO é apagado imediatamente: para imagem/documento a UltraMSG pode ainda estar baixando a
+    // mídia enviada por URL pública. A purga acontece após a janela de segurança por DOIS caminhos
+    // redundantes: (1) um timer por-arquivo agendado aqui (não depende do scheduler periódico) e
+    // (2) a varredura runR2LocalCleanup (restart-safe). url_legado preserva o caminho até a purga.
     console.log('[mediaR2] mídia copiada para R2', {
       mensagem_id, company_id, tipo: row.tipo, key, bytes: buffer.length,
       local_purga: keepLocalForever() ? 'nunca (R2_KEEP_LOCAL)' : `em ~${Math.round(getLocalCleanupDelayMs() / 60000)}min`,
     })
 
+    agendarPurgaLocal({ supabase, company_id, mensagem_id, localPath })
     emitirMidiaAtualizada({ io, company_id, row, updated })
     return { ok: true, url: novaUrl, key }
   } catch (e) {
@@ -300,6 +302,34 @@ async function runMediaR2MirrorSweep(supabase, io = null) {
   return out
 }
 
+/** Remove o arquivo local e zera url_legado (marca como purgado). Idempotente. */
+async function purgarLocalDeMensagem(supabase, company_id, mensagem_id, localPath) {
+  try {
+    if (localPath) { try { await fs.promises.unlink(localPath) } catch (_) { /* já removido */ } }
+    if (supabase) {
+      await supabase.from('mensagens').update({ url_legado: null }).eq('id', mensagem_id).eq('company_id', company_id)
+    }
+    return true
+  } catch (e) {
+    console.warn('[mediaR2] purga local falhou:', { mensagem_id, erro: e?.message || e })
+    return false
+  }
+}
+
+/**
+ * Agenda a purga do arquivo local após a janela de segurança, POR ARQUIVO — não depende do
+ * scheduler periódico rodar neste processo. unref: não segura o processo vivo. A varredura
+ * runR2LocalCleanup continua como backstop restart-safe (o timer morre se o processo reiniciar).
+ */
+function agendarPurgaLocal({ supabase, company_id, mensagem_id, localPath }) {
+  if (keepLocalForever()) return
+  const delay = getLocalCleanupDelayMs()
+  const t = setTimeout(() => {
+    purgarLocalDeMensagem(supabase, company_id, mensagem_id, localPath).catch(() => {})
+  }, delay)
+  if (typeof t.unref === 'function') t.unref()
+}
+
 /**
  * Purga arquivos locais de staging já copiados ao R2, depois da janela de segurança.
  * É o que efetiva "armazenar apenas no R2": o objeto já está no bucket (storage_backend='r2'),
@@ -336,15 +366,7 @@ async function runR2LocalCleanup(supabase) {
   for (const r of rows || []) {
     out.checked += 1
     const local = resolveLocalPath(r.url_legado)
-    if (local) {
-      try { await fs.promises.unlink(local) } catch (_) { /* já removido */ }
-    }
-    const { error: upErr } = await supabase
-      .from('mensagens')
-      .update({ url_legado: null })
-      .eq('id', r.id)
-      .eq('company_id', r.company_id)
-    if (!upErr) out.purged += 1
+    if (await purgarLocalDeMensagem(supabase, r.company_id, r.id, local)) out.purged += 1
   }
 
   if (out.purged > 0) console.log('[mediaR2/cleanup]', out)
