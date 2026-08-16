@@ -413,6 +413,17 @@ server.listen(PORT, '0.0.0.0', () => {
     console.log('[WORKER] Rotinas em background desativadas por ZAPERP_DISABLE_BACKGROUND_JOBS')
   }
 
+  // Log de diagnóstico SEMPRE no arranque: confirma que este código está rodando e o estado do R2.
+  if (!isTest) {
+    try {
+      const { isR2Configured } = require('./config/r2')
+      console.log('[mediaR2] boot:', {
+        migrar_historico: String(process.env.R2_MIGRATE_HISTORICO_ON_BOOT || '(off)').trim(),
+        r2_configurado: isR2Configured(),
+      })
+    } catch (e) { console.warn('[mediaR2] boot log falhou:', e?.message || e) }
+  }
+
   // Migração ÚNICA do histórico de mídia para o R2, disparada por env (R2_MIGRATE_HISTORICO_ON_BOOT=1).
   // Roda mesmo com as rotinas de background desativadas. É idempotente: depois que migrar tudo,
   // desligue a env. Não bloqueia o boot (setImmediate) e não afeta outras empresas.
