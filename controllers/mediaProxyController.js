@@ -138,6 +138,23 @@ function isOwnPublicUploadUrl(target) {
   }
 }
 
+/**
+ * Mídia migrada ao Cloudflare R2 é servida pela própria aplicação em APP_URL/media/r2/<key>.
+ * Quando o frontend pede áudio/mídia por este proxy (ex.: player de áudio), reconhecemos esse
+ * caminho para gerar a URL assinada do R2 direto — sem depender da allowlist externa nem do 302.
+ */
+function isOwnR2DeliveryUrl(target) {
+  try {
+    const appUrl = new URL(String(process.env.APP_URL || '').trim())
+    return (
+      target.origin === appUrl.origin &&
+      String(target.pathname || '').startsWith('/media/r2/media/')
+    )
+  } catch {
+    return false
+  }
+}
+
 function isAllowedProxyTarget(target) {
   return isAllowedMediaUrl(target) || isOwnPublicUploadUrl(target)
 }
@@ -230,7 +247,26 @@ exports.proxyMedia = async (req, res) => {
     return res.status(400).json({ error: 'URL inválida' })
   }
 
-  if (!isAllowedProxyTarget(target)) {
+  // Mídia própria migrada ao R2 (APP_URL/media/r2/<key>): gera a URL assinada do R2 e serve dela
+  // direto — assim áudio/mídia que o frontend pede via proxy funciona igual funcionava com /uploads.
+  let trustedTarget = false
+  if (isOwnR2DeliveryUrl(target)) {
+    try {
+      const key = decodeURIComponent(String(target.pathname).replace(/^\/media\/r2\//, '').split('?')[0])
+      if (key.includes('..') || !key.startsWith('media/')) {
+        return res.status(400).json({ error: 'Chave de mídia inválida' })
+      }
+      const { presignGetUrl } = require('../services/storage/r2Client')
+      const { getPresignExpiresSeconds } = require('../config/r2')
+      target = new URL(presignGetUrl(key, getPresignExpiresSeconds()))
+      trustedTarget = true
+    } catch (e) {
+      console.error('[mediaProxy] presign R2 falhou:', e?.message || e)
+      return res.status(502).json({ error: 'Não foi possível acessar a mídia' })
+    }
+  }
+
+  if (!trustedTarget && !isAllowedProxyTarget(target)) {
     console.warn('[mediaProxy] URL bloqueada (403):', {
       host: target.hostname,
       path: String(target.pathname || '').slice(0, 80),
@@ -361,5 +397,6 @@ exports._test = {
   parseSingleByteRange,
   unwrapNestedProxyTarget,
   isOwnPublicUploadUrl,
+  isOwnR2DeliveryUrl,
   isAllowedProxyTarget,
 }
