@@ -374,6 +374,40 @@ async function runR2LocalCleanup(supabase) {
 }
 
 /**
+ * Migração COMPLETA do histórico: drena todo o backlog de /uploads → R2 (em lotes, do mais antigo
+ * ao mais novo) e depois libera o espaço purgando o staging local já confirmado no R2.
+ * Idempotente e não-destrutivo (a url só troca após upload verificado; o local só é apagado depois
+ * de o objeto estar no bucket). Serve ao gatilho de boot (R2_MIGRATE_HISTORICO_ON_BOOT=1).
+ */
+async function runFullHistoryMigration(supabase, io = null, { maxLotes = 2000 } = {}) {
+  const { isR2Configured } = require('../config/r2')
+  if (!supabase || !isR2Configured()) {
+    console.warn('[mediaR2/historico] R2 não configurado ou supabase ausente — migração não executada.')
+    return { migradas: 0, purgadas: 0 }
+  }
+
+  console.log('[mediaR2/historico] iniciando migração completa do histórico para o R2…')
+  let migradas = 0
+  for (let i = 0; i < maxLotes; i += 1) {
+    const r = await runMediaR2MirrorSweep(supabase, io)
+    migradas += r.mirrored || 0
+    if ((r.mirrored || 0) === 0) break
+    if (i % 5 === 0) console.log('[mediaR2/historico] migradas até agora:', migradas)
+  }
+  console.log('[mediaR2/historico] cópia concluída. Total migradas para o R2:', migradas)
+
+  // Libera o espaço: purga o staging local já no R2 (respeita a janela de segurança).
+  let purgadas = 0
+  for (let i = 0; i < maxLotes; i += 1) {
+    const r = await runR2LocalCleanup(supabase)
+    purgadas += r.purged || 0
+    if ((r.purged || 0) === 0) break
+  }
+  console.log('[mediaR2/historico] limpeza concluída. Arquivos locais purgados:', purgadas)
+  return { migradas, purgadas }
+}
+
+/**
  * Agenda a varredura periódica (default: 5min). Desligar: R2_MIRROR_DISABLED=1.
  * @returns {() => void} cancela o intervalo
  */
@@ -412,6 +446,7 @@ module.exports = {
   scheduleR2MirrorIfNeeded,
   runMediaR2MirrorSweep,
   runR2LocalCleanup,
+  runFullHistoryMigration,
   startMediaR2MirrorScheduler,
   _test: {
     buildStorageKey,

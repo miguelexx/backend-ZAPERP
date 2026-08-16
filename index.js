@@ -412,6 +412,19 @@ server.listen(PORT, '0.0.0.0', () => {
   } else if (backgroundJobsDisabled) {
     console.log('[WORKER] Rotinas em background desativadas por ZAPERP_DISABLE_BACKGROUND_JOBS')
   }
+
+  // Migração ÚNICA do histórico de mídia para o R2, disparada por env (R2_MIGRATE_HISTORICO_ON_BOOT=1).
+  // Roda mesmo com as rotinas de background desativadas. É idempotente: depois que migrar tudo,
+  // desligue a env. Não bloqueia o boot (setImmediate) e não afeta outras empresas.
+  if (!isTest && String(process.env.R2_MIGRATE_HISTORICO_ON_BOOT || '').trim() === '1') {
+    const { runFullHistoryMigration } = require('./services/mediaR2MirrorService')
+    console.log('[mediaR2/historico] R2_MIGRATE_HISTORICO_ON_BOOT=1 — agendando migração completa do histórico.')
+    setImmediate(() => {
+      runFullHistoryMigration(supabase, io).catch((e) => {
+        console.error('[mediaR2/historico] falha:', e?.message || e)
+      })
+    })
+  }
 })
 
 let shuttingDown = false

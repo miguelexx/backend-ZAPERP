@@ -64,3 +64,9 @@ test('scheduleR2MirrorIfNeeded: no-op quando R2 não configurado (não lança)',
     scheduleR2MirrorIfNeeded({ supabase: {}, company_id: 1, mensagem_id: 123 })
   )
 })
+
+test('runFullHistoryMigration: no-op seguro quando R2 não configurado', async () => {
+  const svc = require('../services/mediaR2MirrorService')
+  const out = await svc.runFullHistoryMigration({}, null)
+  assert.deepEqual(out, { migradas: 0, purgadas: 0 })
+})
