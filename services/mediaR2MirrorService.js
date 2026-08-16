@@ -259,8 +259,8 @@ function scheduleR2MirrorIfNeeded({ supabase, io = null, company_id, mensagem_id
  * Cobre outbound pós-envio e o HISTÓRICO existente. Idempotente e retomável (cursor por id).
  */
 async function runMediaR2MirrorSweep(supabase, io = null) {
-  const out = { scanned: 0, mirrored: 0, skipped: 0 }
-  if (_colunasStorageIndisponiveis || !supabase) return out
+  const out = { scanned: 0, mirrored: 0, skipped: 0, motivos: {} }
+  if (_colunasStorageIndisponiveis || !supabase) { out.motivos.colunas_indisponiveis = 1; return out }
   const { getR2CompanyIds, isR2Configured } = require('../config/r2')
   if (!isR2Configured()) return out
 
@@ -293,9 +293,14 @@ async function runMediaR2MirrorSweep(supabase, io = null) {
     try {
       const res = await mirrorMensagemParaR2({ supabase, io, company_id: r.company_id, mensagem_id: r.id })
       if (res?.ok && res?.key) out.mirrored += 1
-      else out.skipped += 1
+      else {
+        out.skipped += 1
+        const m = res?.ignorado || (res?.erro ? 'excecao' : 'desconhecido')
+        out.motivos[m] = (out.motivos[m] || 0) + 1
+      }
     } catch (e) {
       out.skipped += 1
+      out.motivos.excecao = (out.motivos.excecao || 0) + 1
       console.warn('[mediaR2/sweep] item:', { mensagem_id: r.id, erro: e?.message || e })
     }
   }
@@ -379,22 +384,64 @@ async function runR2LocalCleanup(supabase) {
  * Idempotente e não-destrutivo (a url só troca após upload verificado; o local só é apagado depois
  * de o objeto estar no bucket). Serve ao gatilho de boot (R2_MIGRATE_HISTORICO_ON_BOOT=1).
  */
-async function runFullHistoryMigration(supabase, io = null, { maxLotes = 2000 } = {}) {
-  const { isR2Configured } = require('../config/r2')
+async function runFullHistoryMigration(supabase, io = null, { maxLotes = 10000 } = {}) {
+  const { isR2Configured, getR2CompanyIds } = require('../config/r2')
   if (!supabase || !isR2Configured()) {
     console.warn('[mediaR2/historico] R2 não configurado ou supabase ausente — migração não executada.')
     return { migradas: 0, purgadas: 0 }
   }
 
-  console.log('[mediaR2/historico] iniciando migração completa do histórico para o R2…')
-  let migradas = 0
+  // Reseta a flag de "colunas ausentes": um erro transitório anterior neste processo poderia
+  // tê-la ligado e deixado a varredura retornar cedo (0 migradas). Migração é ação deliberada.
+  _colunasStorageIndisponiveis = false
+
+  const companyIds = [...getR2CompanyIds()]
+  const batch = Math.min(500, Math.max(1, Number(process.env.R2_MIGRATE_BATCH) || 100))
+
+  console.log('[mediaR2/historico] iniciando migração completa do histórico para o R2…', { companyIds, batch })
+
+  // CURSOR por id: avança por TODAS as candidatas, inclusive as que não têm arquivo local (que
+  // ficam com storage_key null). Sem cursor, as mais antigas sem arquivo bloqueariam a fila
+  // (a query sempre devolveria as mesmas primeiro) e a migração pararia no 1º lote.
+  let lastId = 0
+  const total = { lidas: 0, migradas: 0, ausentes: 0, ja_no_r2: 0, outros: 0 }
+
   for (let i = 0; i < maxLotes; i += 1) {
-    const r = await runMediaR2MirrorSweep(supabase, io)
-    migradas += r.mirrored || 0
-    if ((r.mirrored || 0) === 0) break
-    if (i % 5 === 0) console.log('[mediaR2/historico] migradas até agora:', migradas)
+    const { data: rows, error } = await supabase
+      .from('mensagens')
+      .select('id, company_id')
+      .in('company_id', companyIds)
+      .is('storage_key', null)
+      .like('url', '/uploads/%')
+      .gt('id', lastId)
+      .order('id', { ascending: true })
+      .limit(batch)
+
+    if (error) {
+      console.warn('[mediaR2/historico] query falhou:', error.message)
+      break
+    }
+    if (!rows || rows.length === 0) break
+
+    for (const r of rows) {
+      total.lidas += 1
+      lastId = Math.max(lastId, Number(r.id))
+      let res
+      try {
+        res = await mirrorMensagemParaR2({ supabase, io, company_id: r.company_id, mensagem_id: r.id })
+      } catch (e) {
+        res = { ok: false, ignorado: 'excecao', erro: e?.message || String(e) }
+      }
+      if (res.ok && res.key) total.migradas += 1
+      else if (res.ignorado === 'ja_espelhado') total.ja_no_r2 += 1
+      else if (res.ignorado === 'arquivo_local_inexistente') total.ausentes += 1
+      else total.outros += 1
+    }
+
+    if (i % 5 === 0) console.log('[mediaR2/historico] progresso:', { ...total, lastId })
   }
-  console.log('[mediaR2/historico] cópia concluída. Total migradas para o R2:', migradas)
+
+  console.log('[mediaR2/historico] cópia concluída:', total)
 
   // Libera o espaço: purga o staging local já no R2 (respeita a janela de segurança).
   let purgadas = 0
@@ -404,7 +451,7 @@ async function runFullHistoryMigration(supabase, io = null, { maxLotes = 2000 } 
     if ((r.purged || 0) === 0) break
   }
   console.log('[mediaR2/historico] limpeza concluída. Arquivos locais purgados:', purgadas)
-  return { migradas, purgadas }
+  return { migradas: total.migradas, ausentes: total.ausentes, purgadas }
 }
 
 /**
