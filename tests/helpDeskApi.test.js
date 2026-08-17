@@ -63,6 +63,45 @@ describe('HelpDesk API', () => {
     expect(listQuery.order).toHaveBeenNthCalledWith(2, 'id', { ascending: false })
   })
 
+  it('limita a listagem do atendente aos departamentos vinculados', async () => {
+    const departmentsQuery = query({ data: [{ nome: 'Suporte' }], error: null })
+    const listQuery = query({
+      data: [{ id: 1, company_id: 23, departamento: 'Suporte', titulo: 'Impressora' }],
+      error: null,
+      count: 1,
+    })
+    supabase.from
+      .mockReturnValueOnce(departmentsQuery)
+      .mockReturnValueOnce(listQuery)
+
+    const response = await request(app)
+      .get('/api/helpdesk/tickets')
+      .set('Authorization', `Bearer ${token({ perfil: 'atendente', departamento_id: 44, departamento_ids: [44] })}`)
+
+    expect(response.status).toBe(200)
+    expect(listQuery.in).toHaveBeenCalledWith('departamento', ['Suporte'])
+  })
+
+  it('permite ao supervisor visualizar chamados de todos os departamentos', async () => {
+    const listQuery = query({
+      data: [
+        { id: 1, company_id: 23, departamento: 'Suporte' },
+        { id: 2, company_id: 23, departamento: 'Financeiro' },
+      ],
+      error: null,
+      count: 2,
+    })
+    supabase.from.mockReturnValueOnce(listQuery)
+
+    const response = await request(app)
+      .get('/api/helpdesk/tickets')
+      .set('Authorization', `Bearer ${token({ perfil: 'supervisor', departamento_id: 44, departamento_ids: [44] })}`)
+
+    expect(response.status).toBe(200)
+    expect(response.body.total).toBe(2)
+    expect(listQuery.in).not.toHaveBeenCalledWith('departamento', expect.any(Array))
+  })
+
   it('ordena chamados somente pelos campos permitidos', async () => {
     const listQuery = query({ data: [], error: null, count: 0 })
     supabase.from.mockReturnValueOnce(listQuery)
@@ -391,6 +430,24 @@ describe('HelpDesk API', () => {
     expect(transfersQuery.select).toHaveBeenCalledWith(expect.stringContaining('transferido_por_usuario'))
   })
 
+  it('não permite ao atendente abrir chamado de outro departamento pelo ID', async () => {
+    const ticketQuery = query({
+      data: { id: 10, company_id: 23, departamento: 'Financeiro' },
+      error: null,
+    })
+    const departmentsQuery = query({ data: [{ nome: 'Suporte' }], error: null })
+    supabase.from
+      .mockReturnValueOnce(ticketQuery)
+      .mockReturnValueOnce(departmentsQuery)
+
+    const response = await request(app)
+      .get('/api/helpdesk/tickets/10')
+      .set('Authorization', `Bearer ${token({ perfil: 'atendente', departamento_id: 44, departamento_ids: [44] })}`)
+
+    expect(response.status).toBe(404)
+    expect(response.body.error).toBe('Chamado não encontrado')
+  })
+
   it('retorna transferências ao Icthus sem expor notas internas', async () => {
     const ticketQuery = query({
       data: {
@@ -514,6 +571,7 @@ describe('HelpDesk API', () => {
       error: null,
     })
     const departmentQuery = query({ data: { id: 44, nome: 'Suporte' }, error: null })
+    const allowedDepartmentsQuery = query({ data: [{ nome: 'Financeiro' }, { nome: 'Suporte' }], error: null })
     const assumeQuery = query({
       data: { id: 10, company_id: 23, status: 'em_atendimento', departamento: 'Suporte', responsavel_id: 7 },
       error: null,
@@ -527,6 +585,7 @@ describe('HelpDesk API', () => {
     const ticketUpdateQuery = query({ data: null, error: null })
     supabase.from
       .mockReturnValueOnce(ticketQuery)
+      .mockReturnValueOnce(allowedDepartmentsQuery)
       .mockReturnValueOnce(departmentQuery)
       .mockReturnValueOnce(assumeQuery)
       .mockReturnValueOnce(previousDepartmentQuery)
@@ -630,12 +689,14 @@ describe('HelpDesk API', () => {
   it('permite ao atendente assumir chamado aberto no próprio departamento', async () => {
     const departmentQuery = query({ data: { id: 44, nome: 'Suporte' }, error: null })
     const ticketQuery = query({ data: { id: 10, company_id: 23, status: 'aberto', departamento: 'Financeiro', responsavel_id: null }, error: null })
+    const allowedDepartmentsQuery = query({ data: [{ nome: 'Financeiro' }, { nome: 'Suporte' }], error: null })
     const updateQuery = query({ data: { id: 10, company_id: 23, status: 'em_atendimento', departamento: 'Suporte', responsavel_id: 7 }, error: null })
     const previousDepartmentQuery = query({ data: { id: 33, nome: 'Financeiro' }, error: null })
     const historyQuery = query({ data: null, error: null })
     supabase.from
       .mockReturnValueOnce(departmentQuery)
       .mockReturnValueOnce(ticketQuery)
+      .mockReturnValueOnce(allowedDepartmentsQuery)
       .mockReturnValueOnce(updateQuery)
       .mockReturnValueOnce(previousDepartmentQuery)
       .mockReturnValueOnce(historyQuery)
@@ -666,6 +727,7 @@ describe('HelpDesk API', () => {
 
   it('permite transferência por atendente autenticado', async () => {
     const ticketQuery = query({ data: { id: 10, company_id: 23, departamento: 'Financeiro', responsavel_id: 7 }, error: null })
+    const allowedDepartmentsQuery = query({ data: [{ nome: 'Financeiro' }], error: null })
     const assigneeQuery = query({ data: { id: 8, ativo: true, departamento_id: 44 }, error: null })
     const currentDepartmentQuery = query({ data: { id: 33, nome: 'Financeiro' }, error: null })
     const assigneeDepartmentQuery = query({ data: { id: 44, nome: 'Suporte' }, error: null })
@@ -673,6 +735,7 @@ describe('HelpDesk API', () => {
     const historyQuery = query({ data: null, error: null })
     supabase.from
       .mockReturnValueOnce(ticketQuery)
+      .mockReturnValueOnce(allowedDepartmentsQuery)
       .mockReturnValueOnce(assigneeQuery)
       .mockReturnValueOnce(currentDepartmentQuery)
       .mockReturnValueOnce(assigneeDepartmentQuery)
@@ -681,7 +744,7 @@ describe('HelpDesk API', () => {
 
     const response = await request(app)
       .post('/api/helpdesk/tickets/10/transfer')
-      .set('Authorization', `Bearer ${token({ perfil: 'atendente' })}`)
+      .set('Authorization', `Bearer ${token({ perfil: 'atendente', departamento_id: 33, departamento_ids: [33] })}`)
       .send({ responsavel_id: 8 })
 
     expect(response.status).toBe(200)

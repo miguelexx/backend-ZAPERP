@@ -37,6 +37,38 @@ function cnpjSearchPattern(value) {
   return digits ? digits.split('').join('%') : ''
 }
 
+function isDepartmentRestrictedUser(user) {
+  return String(user?.perfil || '').trim().toLowerCase() === 'atendente'
+}
+
+function userDepartmentIds(user) {
+  return [...new Set([
+    ...(Array.isArray(user?.departamento_ids) ? user.departamento_ids : []),
+    user?.departamento_id,
+  ].map(positiveInt).filter(Boolean))]
+}
+
+async function allowedDepartmentNames(user) {
+  if (!isDepartmentRestrictedUser(user)) return null
+  const companyId = positiveInt(user?.company_id)
+  const departmentIds = userDepartmentIds(user)
+  if (!companyId || departmentIds.length === 0) return []
+  const { data, error } = await supabase
+    .from('departamentos')
+    .select('nome')
+    .eq('company_id', companyId)
+    .in('id', departmentIds)
+  if (error) throw error
+  return [...new Set((data || []).map((item) => cleanText(item.nome, 120)).filter(Boolean))]
+}
+
+async function userCanAccessTicket(user, ticket) {
+  const names = await allowedDepartmentNames(user)
+  if (names === null) return true
+  const ticketDepartment = cleanText(ticket?.departamento, 120).toLocaleLowerCase('pt-BR')
+  return Boolean(ticketDepartment) && names.some((name) => name.toLocaleLowerCase('pt-BR') === ticketDepartment)
+}
+
 function databaseError(res, error, fallback) {
   console.error('[helpDesk]', fallback, error)
   return res.status(500).json({ error: fallback })
@@ -253,6 +285,11 @@ exports.listTickets = async (req, res) => {
     if (status && !STATUSES.has(status)) return res.status(400).json({ error: 'status inválido' })
     if (priority && !PRIORITIES.has(priority)) return res.status(400).json({ error: 'prioridade inválida' })
 
+    const restrictedDepartments = req.helpDeskIntegration ? null : await allowedDepartmentNames(req.user)
+    if (Array.isArray(restrictedDepartments) && restrictedDepartments.length === 0) {
+      return res.json({ items: [], page, limit, total: 0 })
+    }
+
     let query = supabase
       .from('helpdesk_tickets')
       .select('*, responsavel:usuarios!helpdesk_tickets_responsavel_id_fkey(nome)', { count: 'exact' })
@@ -263,6 +300,7 @@ exports.listTickets = async (req, res) => {
     query = query.range(from, from + limit - 1)
 
     if (req.helpDeskIntegration) query = query.eq('cnpj', req.integrationCnpj)
+    if (Array.isArray(restrictedDepartments)) query = query.in('departamento', restrictedDepartments)
 
     if (status) query = query.eq('status', status)
     if (priority) query = query.eq('prioridade', priority)
@@ -318,6 +356,9 @@ exports.getTicket = async (req, res) => {
       TICKET_DETAIL_SELECT
     )
     if (!ticket) return res.status(404).json({ error: 'Chamado não encontrado' })
+    if (!req.helpDeskIntegration && !(await userCanAccessTicket(req.user, ticket))) {
+      return res.status(404).json({ error: 'Chamado não encontrado' })
+    }
 
     let messagesQuery = supabase.from('helpdesk_mensagens').select(MESSAGE_DETAIL_SELECT).eq('ticket_id', ticketId).eq('company_id', companyId)
     if (req.helpDeskIntegration) messagesQuery = messagesQuery.eq('interna', false)
@@ -351,6 +392,9 @@ exports.updateTicket = async (req, res) => {
     if (!ticketId) return res.status(400).json({ error: 'id inválido' })
     const existingTicket = await findTicket(ticketId, companyId)
     if (!existingTicket) {
+      return res.status(404).json({ error: 'Chamado não encontrado' })
+    }
+    if (!(await userCanAccessTicket(req.user, existingTicket))) {
       return res.status(404).json({ error: 'Chamado não encontrado' })
     }
 
@@ -438,6 +482,9 @@ exports.addMessage = async (req, res) => {
     }
     const ticket = await findTicket(ticketId, companyId, req.helpDeskIntegration ? req.integrationCnpj : null)
     if (!ticket) {
+      return res.status(404).json({ error: 'Chamado não encontrado' })
+    }
+    if (!req.helpDeskIntegration && !(await userCanAccessTicket(req.user, ticket))) {
       return res.status(404).json({ error: 'Chamado não encontrado' })
     }
 
@@ -575,6 +622,9 @@ exports.assumeTicket = async (req, res) => {
 
     const ticket = await findTicket(ticketId, companyId)
     if (!ticket) return res.status(404).json({ error: 'Chamado não encontrado' })
+    if (!(await userCanAccessTicket(req.user, ticket))) {
+      return res.status(404).json({ error: 'Chamado não encontrado' })
+    }
     if (ticket.status === 'resolvido') return res.status(409).json({ error: 'Chamado resolvido não pode ser assumido' })
     if (ticket.responsavel_id) return res.status(409).json({ error: 'Chamado já possui responsável' })
 
@@ -641,6 +691,9 @@ exports.transferTicket = async (req, res) => {
 
     const ticket = await findTicket(ticketId, companyId)
     if (!ticket) return res.status(404).json({ error: 'Chamado não encontrado' })
+    if (!(await userCanAccessTicket(req.user, ticket))) {
+      return res.status(404).json({ error: 'Chamado não encontrado' })
+    }
     const requestedDepartment = departmentId
       ? await findTenantEntity('departamentos', departmentId, companyId, 'id, nome')
       : null
@@ -703,4 +756,15 @@ exports.transferTicket = async (req, res) => {
   }
 }
 
-exports._private = { positiveInt, cleanText, cnpjSearchPattern, emitTicketChanged, PRIORITIES, STATUSES }
+exports._private = {
+  positiveInt,
+  cleanText,
+  cnpjSearchPattern,
+  emitTicketChanged,
+  isDepartmentRestrictedUser,
+  userDepartmentIds,
+  allowedDepartmentNames,
+  userCanAccessTicket,
+  PRIORITIES,
+  STATUSES,
+}
