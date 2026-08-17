@@ -409,6 +409,10 @@ server.listen(PORT, '0.0.0.0', () => {
     // No-op se o R2 não estiver configurado no .env — o fluxo em disco permanece intacto.
     const { startMediaR2MirrorScheduler } = require('./services/mediaR2MirrorService')
     startMediaR2MirrorScheduler(supabase, io)
+    // Retenção de mídia: apaga o ARQUIVO após MEDIA_RETENTION_DAYS (mantém a mensagem).
+    // No-op se MEDIA_RETENTION_DAYS<=0 (padrão) ou R2 desligado. Escopo = empresas em R2.
+    const { startMediaRetentionScheduler } = require('./services/mediaRetentionService')
+    startMediaRetentionScheduler(supabase)
   } else if (backgroundJobsDisabled) {
     console.log('[WORKER] Rotinas em background desativadas por ZAPERP_DISABLE_BACKGROUND_JOBS')
   }

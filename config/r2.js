@@ -106,6 +106,26 @@ function getLocalCleanupDelayMs() {
   return Math.min(24 * 60, n) * 60 * 1000
 }
 
+/**
+ * Retenção de mídia: dias após a DATA DA MENSAGEM em que o ARQUIVO de mídia é apagado
+ * (R2 e/ou disco), mantendo a mensagem no histórico (marcada como "mídia expirada").
+ * 0 ou vazio = DESLIGADO (padrão seguro). Ex.: MEDIA_RETENTION_DAYS=60 (2 meses).
+ */
+function getMediaRetentionDays() {
+  const raw = trimEnv('MEDIA_RETENTION_DAYS')
+  if (!raw) return 0
+  const n = Number(raw)
+  if (!Number.isFinite(n) || n <= 0) return 0
+  return Math.floor(n)
+}
+
+/** Intervalo da varredura de retenção (default 24h; mín 1h, máx 168h). */
+function getMediaRetentionIntervalMs() {
+  const n = Number(trimEnv('MEDIA_RETENTION_INTERVAL_HOURS'))
+  if (!Number.isFinite(n) || n <= 0) return 24 * 60 * 60 * 1000
+  return Math.min(168, Math.max(1, n)) * 60 * 60 * 1000
+}
+
 module.exports = {
   getR2Config,
   isR2Configured,
@@ -114,4 +134,6 @@ module.exports = {
   getPresignExpiresSeconds,
   keepLocalForever,
   getLocalCleanupDelayMs,
+  getMediaRetentionDays,
+  getMediaRetentionIntervalMs,
 }
