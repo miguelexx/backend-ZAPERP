@@ -1,7 +1,15 @@
 const supabase = require('../config/supabase')
+const helpDeskNotifications = require('../services/helpDeskNotificationService')
 
 const PRIORITIES = new Set(['baixa', 'normal', 'alta', 'urgente'])
 const STATUSES = new Set(['aberto', 'em_atendimento', 'resolvido'])
+const TICKET_ORDER_FIELDS = {
+  status: 'status',
+  empresa: 'empresa_nome',
+  numero: 'id',
+  atualizado: 'atualizado_em',
+  criado: 'criado_em',
+}
 const TICKET_DETAIL_SELECT = '*, responsavel:usuarios!helpdesk_tickets_responsavel_id_fkey(nome)'
 const MESSAGE_DETAIL_SELECT = '*, autor_usuario:usuarios!helpdesk_mensagens_autor_usuario_id_fkey(nome)'
 const TRANSFER_DETAIL_SELECT = [
@@ -217,6 +225,7 @@ exports.createTicket = async (req, res) => {
 
     if (error) return databaseError(res, error, 'Erro ao criar chamado')
     emitTicketChanged(req, companyId, data.id, 'ticket_created')
+    await helpDeskNotifications.notifyTicketCreated(req, data, department.id)
     return res.status(201).json(data)
   } catch (error) {
     return databaseError(res, error, 'Erro ao criar chamado')
@@ -236,6 +245,10 @@ exports.listTickets = async (req, res) => {
     const cnpj = cleanText(req.query.cnpj, 18)
     const startDate = cleanText(req.query.data_inicio, 40)
     const endDate = cleanText(req.query.data_fim, 40)
+    const requestedOrder = cleanText(req.query.ordenar_por, 30).toLowerCase()
+    const orderField = TICKET_ORDER_FIELDS[requestedOrder] || TICKET_ORDER_FIELDS.atualizado
+    const orderDirection = cleanText(req.query.ordem, 4).toLowerCase()
+    const ascending = orderDirection === 'asc'
 
     if (status && !STATUSES.has(status)) return res.status(400).json({ error: 'status inválido' })
     if (priority && !PRIORITIES.has(priority)) return res.status(400).json({ error: 'prioridade inválida' })
@@ -244,8 +257,10 @@ exports.listTickets = async (req, res) => {
       .from('helpdesk_tickets')
       .select('*, responsavel:usuarios!helpdesk_tickets_responsavel_id_fkey(nome)', { count: 'exact' })
       .eq('company_id', companyId)
-      .order('atualizado_em', { ascending: false })
-      .range(from, from + limit - 1)
+
+    query = query.order(orderField, { ascending })
+    if (orderField !== 'id') query = query.order('id', { ascending: false })
+    query = query.range(from, from + limit - 1)
 
     if (req.helpDeskIntegration) query = query.eq('cnpj', req.integrationCnpj)
 
@@ -334,18 +349,21 @@ exports.updateTicket = async (req, res) => {
     const body = req.body || {}
 
     if (!ticketId) return res.status(400).json({ error: 'id inválido' })
-    if (!(await findTicket(ticketId, companyId))) {
+    const existingTicket = await findTicket(ticketId, companyId)
+    if (!existingTicket) {
       return res.status(404).json({ error: 'Chamado não encontrado' })
     }
 
     const patch = { atualizado_em: new Date().toISOString(), atualizado_por: userId }
     let changed = false
+    let queueChanged = false
 
     if (body.status !== undefined) {
       const status = String(body.status).toLowerCase()
       if (!STATUSES.has(status)) return res.status(400).json({ error: 'status inválido' })
       patch.status = status
       changed = true
+      queueChanged = true
     }
 
     if (body.prioridade !== undefined) {
@@ -367,6 +385,7 @@ exports.updateTicket = async (req, res) => {
       if (!department) return res.status(400).json({ error: 'departamento inválido' })
       patch.departamento = department.nome
       changed = true
+      queueChanged = true
     }
 
     if (!changed) {
@@ -383,6 +402,19 @@ exports.updateTicket = async (req, res) => {
 
     if (error) return databaseError(res, error, 'Erro ao atualizar chamado')
     if (!data) return res.status(409).json({ error: 'Chamado foi alterado por outro usuário' })
+    if (patch.status === 'resolvido') {
+      await helpDeskNotifications.settleAllTicketNotifications(req, data, 'ticket_resolved')
+    } else if (patch.status === 'em_atendimento') {
+      await helpDeskNotifications.settleTicketCreated(req, data, 'ticket_in_service')
+    }
+    if (queueChanged) {
+      await helpDeskNotifications.notifyQueueChanged(
+        req,
+        data,
+        [existingTicket.departamento, data.departamento],
+        patch.status === 'resolvido' ? 'ticket_resolved' : 'ticket_updated'
+      )
+    }
     emitTicketChanged(req, companyId, ticketId, 'ticket_updated')
     return res.json(data)
   } catch (error) {
@@ -452,6 +484,13 @@ exports.addMessage = async (req, res) => {
         if (transferResult.error) {
           return databaseError(res, transferResult.error, 'Chamado assumido, mas o histórico não pôde ser registrado')
         }
+        await helpDeskNotifications.settleTicketCreated(req, assumedTicket, 'ticket_assumed')
+        await helpDeskNotifications.notifyQueueChanged(
+          req,
+          assumedTicket,
+          [ticket.departamento, assumedTicket.departamento],
+          'ticket_assumed'
+        )
       }
     }
 
@@ -476,6 +515,9 @@ exports.addMessage = async (req, res) => {
       .eq('company_id', companyId)
 
     emitTicketChanged(req, companyId, ticketId, 'message_created')
+    if (req.helpDeskIntegration) {
+      await helpDeskNotifications.notifyExternalMessage(req, ticket, requesterName)
+    }
     return res.status(201).json(flattenMessage(data, requesterName || cleanText(req.user?.nome, 180)))
   } catch (error) {
     return databaseError(res, error, 'Erro ao adicionar mensagem')
@@ -569,6 +611,13 @@ exports.assumeTicket = async (req, res) => {
     })
     if (transferResult.error) return databaseError(res, transferResult.error, 'Chamado assumido, mas o histórico não pôde ser registrado')
 
+    await helpDeskNotifications.settleTicketCreated(req, data, 'ticket_assumed')
+    await helpDeskNotifications.notifyQueueChanged(
+      req,
+      data,
+      [ticket.departamento, data.departamento],
+      'ticket_assumed'
+    )
     emitTicketChanged(req, companyId, ticketId, 'ticket_assumed')
     return res.json(data)
   } catch (error) {
@@ -638,7 +687,16 @@ exports.transferTicket = async (req, res) => {
     })
     if (transferResult.error) return databaseError(res, transferResult.error, 'Chamado transferido, mas o histórico não pôde ser registrado')
 
+    await helpDeskNotifications.settleTicketCreated(req, data, 'ticket_transferred')
+    await helpDeskNotifications.settlePreviousAssignee(req, data, ticket.responsavel_id, 'ticket_transferred')
+    await helpDeskNotifications.notifyQueueChanged(
+      req,
+      data,
+      [ticket.departamento, data.departamento],
+      'ticket_transferred'
+    )
     emitTicketChanged(req, companyId, ticketId, 'ticket_transferred')
+    await helpDeskNotifications.notifyTicketTransferred(req, data, userId)
     return res.json(data)
   } catch (error) {
     return databaseError(res, error, 'Erro ao transferir chamado')

@@ -1,6 +1,7 @@
 const request = require('supertest')
 const jwt = require('jsonwebtoken')
 const supabase = require('../config/supabase')
+const helpDeskNotificationService = require('../services/helpDeskNotificationService')
 
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'helpdesk-test-secret'
 process.env.HELPDESK_INTEGRATION_TOKEN = 'icthus-helpdesk-test-token'
@@ -28,6 +29,14 @@ function query(result) {
 describe('HelpDesk API', () => {
   beforeEach(() => {
     jest.clearAllMocks()
+    jest.spyOn(helpDeskNotificationService, 'settleTicketCreated').mockResolvedValue([])
+    jest.spyOn(helpDeskNotificationService, 'settlePreviousAssignee').mockResolvedValue([])
+    jest.spyOn(helpDeskNotificationService, 'settleAllTicketNotifications').mockResolvedValue([])
+    jest.spyOn(helpDeskNotificationService, 'notifyQueueChanged').mockResolvedValue([])
+  })
+
+  afterEach(() => {
+    jest.restoreAllMocks()
   })
 
   it('protege as rotas sem token', async () => {
@@ -50,6 +59,137 @@ describe('HelpDesk API', () => {
     expect(response.status).toBe(200)
     expect(response.body).toMatchObject({ total: 1, page: 1, limit: 25 })
     expect(listQuery.eq).toHaveBeenCalledWith('company_id', 23)
+    expect(listQuery.order).toHaveBeenNthCalledWith(1, 'atualizado_em', { ascending: false })
+    expect(listQuery.order).toHaveBeenNthCalledWith(2, 'id', { ascending: false })
+  })
+
+  it('ordena chamados somente pelos campos permitidos', async () => {
+    const listQuery = query({ data: [], error: null, count: 0 })
+    supabase.from.mockReturnValueOnce(listQuery)
+
+    const response = await request(app)
+      .get('/api/helpdesk/tickets?ordenar_por=empresa&ordem=asc')
+      .set('Authorization', `Bearer ${token()}`)
+
+    expect(response.status).toBe(200)
+    expect(listQuery.order).toHaveBeenNthCalledWith(1, 'empresa_nome', { ascending: true })
+    expect(listQuery.order).toHaveBeenNthCalledWith(2, 'id', { ascending: false })
+  })
+
+  it('soma notificações individuais com a fila aberta dos departamentos do usuário', async () => {
+    const itemsQuery = query({
+      data: [{ id: 80, company_id: 23, usuario_id: 7, ticket_id: 10, lida: false }],
+      error: null,
+    })
+    const countQuery = query({ data: null, error: null, count: 1 })
+    const departmentsQuery = query({ data: [{ nome: 'Suporte' }], error: null })
+    const queueCountQuery = query({ data: null, error: null, count: 3 })
+    supabase.from
+      .mockReturnValueOnce(itemsQuery)
+      .mockReturnValueOnce(countQuery)
+      .mockReturnValueOnce(departmentsQuery)
+      .mockReturnValueOnce(queueCountQuery)
+
+    const response = await request(app)
+      .get('/api/helpdesk/notifications')
+      .set('Authorization', `Bearer ${token({ departamento_id: 44, departamento_ids: [44] })}`)
+
+    expect(response.status).toBe(200)
+    expect(response.body).toMatchObject({ personal_unread_count: 1, queue_count: 3, unread_count: 4 })
+    expect(response.body.items).toHaveLength(1)
+    expect(itemsQuery.eq).toHaveBeenCalledWith('company_id', 23)
+    expect(itemsQuery.eq).toHaveBeenCalledWith('usuario_id', 7)
+    expect(countQuery.eq).toHaveBeenCalledWith('lida', false)
+    expect(queueCountQuery.eq).toHaveBeenCalledWith('status', 'aberto')
+    expect(queueCountQuery.is).toHaveBeenCalledWith('responsavel_id', null)
+    expect(queueCountQuery.in).toHaveBeenCalledWith('departamento', ['Suporte'])
+  })
+
+  it('marca como lidas somente as notificações do chamado e usuário autenticado', async () => {
+    const updateQuery = query({ data: [{ id: 80 }, { id: 81 }], error: null })
+    supabase.from.mockReturnValueOnce(updateQuery)
+
+    const response = await request(app)
+      .post('/api/helpdesk/notifications/tickets/10/read')
+      .set('Authorization', `Bearer ${token()}`)
+
+    expect(response.status).toBe(200)
+    expect(response.body).toMatchObject({ ok: true, updated: 2 })
+    expect(updateQuery.eq).toHaveBeenCalledWith('company_id', 23)
+    expect(updateQuery.eq).toHaveBeenCalledWith('usuario_id', 7)
+    expect(updateQuery.eq).toHaveBeenCalledWith('ticket_id', 10)
+    expect(updateQuery.eq).toHaveBeenCalledWith('lida', false)
+  })
+
+  it('envia chamado novo somente ao departamento sem persistir notificações por usuário', async () => {
+    const usersQuery = query({
+      data: [
+        { id: 7, departamento_id: 5 },
+        { id: 9, departamento_id: null },
+        { id: 11, departamento_id: 6 },
+      ],
+      error: null,
+    })
+    const membershipsQuery = query({ data: [{ usuario_id: 9 }], error: null })
+    supabase.from
+      .mockReturnValueOnce(usersQuery)
+      .mockReturnValueOnce(membershipsQuery)
+    const emit = jest.fn()
+    const to = jest.fn(() => ({ emit }))
+    const req = { app: { get: jest.fn(() => ({ to })) } }
+
+    const result = await helpDeskNotificationService.notifyTicketCreated(req, {
+      id: 10,
+      company_id: 23,
+      departamento: 'Suporte',
+      empresa_nome: 'Cliente Teste',
+      titulo: 'Erro ao emitir nota',
+    }, 5)
+
+    expect(result).toHaveLength(2)
+    expect(result).toEqual(expect.arrayContaining([
+      expect.objectContaining({ usuario_id: 7, ticket_id: 10, tipo: 'ticket_created', efemera: true }),
+      expect.objectContaining({ usuario_id: 9, ticket_id: 10, tipo: 'ticket_created', efemera: true }),
+    ]))
+    expect(to).toHaveBeenCalledWith('usuario_7')
+    expect(to).toHaveBeenCalledWith('usuario_9')
+    expect(to).not.toHaveBeenCalledWith('usuario_11')
+    expect(emit).toHaveBeenCalledWith('helpdesk:notification', expect.any(Object))
+    expect(emit).toHaveBeenCalledWith('helpdesk:queue_changed', expect.any(Object))
+  })
+
+  it('encerra notificações pendentes e sincroniza o contador de cada usuário', async () => {
+    const updateQuery = query({
+      data: [
+        { id: 90, usuario_id: 7, ticket_id: 10 },
+        { id: 91, usuario_id: 9, ticket_id: 10 },
+      ],
+      error: null,
+    })
+    supabase.from.mockReturnValueOnce(updateQuery)
+    const emit = jest.fn()
+    const to = jest.fn(() => ({ emit }))
+    const req = { app: { get: jest.fn(() => ({ to })) } }
+
+    const result = await helpDeskNotificationService.markTicketNotificationsRead(req, {
+      companyId: 23,
+      ticketId: 10,
+      types: ['ticket_created'],
+      reason: 'ticket_assumed',
+    })
+
+    expect(result).toHaveLength(2)
+    expect(updateQuery.eq).toHaveBeenCalledWith('company_id', 23)
+    expect(updateQuery.eq).toHaveBeenCalledWith('ticket_id', 10)
+    expect(updateQuery.eq).toHaveBeenCalledWith('lida', false)
+    expect(updateQuery.in).toHaveBeenCalledWith('tipo', ['ticket_created'])
+    expect(to).toHaveBeenCalledWith('usuario_7')
+    expect(to).toHaveBeenCalledWith('usuario_9')
+    expect(emit).toHaveBeenCalledWith('helpdesk:notifications_changed', expect.objectContaining({
+      ticket_id: 10,
+      updated: 1,
+      reason: 'ticket_assumed',
+    }))
   })
 
   it('cria chamado do Icthus usando empresa e cliente exclusivamente da integração', async () => {
@@ -411,6 +551,11 @@ describe('HelpDesk API', () => {
       para_responsavel_id: 7,
       motivo: 'Chamado assumido ao responder',
     }))
+    expect(helpDeskNotificationService.settleTicketCreated).toHaveBeenCalledWith(
+      expect.any(Object),
+      expect.objectContaining({ id: 10, responsavel_id: 7 }),
+      'ticket_assumed'
+    )
     expect(messageQuery.insert).toHaveBeenCalledWith(expect.objectContaining({
       ticket_id: 10,
       autor_usuario_id: 7,
@@ -512,6 +657,11 @@ describe('HelpDesk API', () => {
       para_responsavel_id: 7,
       motivo: 'Chamado assumido',
     }))
+    expect(helpDeskNotificationService.settleTicketCreated).toHaveBeenCalledWith(
+      expect.any(Object),
+      expect.objectContaining({ id: 10, responsavel_id: 7 }),
+      'ticket_assumed'
+    )
   })
 
   it('permite transferência por atendente autenticado', async () => {
@@ -535,6 +685,17 @@ describe('HelpDesk API', () => {
       .send({ responsavel_id: 8 })
 
     expect(response.status).toBe(200)
+    expect(helpDeskNotificationService.settleTicketCreated).toHaveBeenCalledWith(
+      expect.any(Object),
+      expect.objectContaining({ id: 10, responsavel_id: 8 }),
+      'ticket_transferred'
+    )
+    expect(helpDeskNotificationService.settlePreviousAssignee).toHaveBeenCalledWith(
+      expect.any(Object),
+      expect.objectContaining({ id: 10 }),
+      7,
+      'ticket_transferred'
+    )
   })
 
   it('atualiza status, prioridade e departamento dentro do tenant', async () => {
@@ -562,5 +723,33 @@ describe('HelpDesk API', () => {
       atualizado_por: 7,
     }))
     expect(updateQuery.eq).toHaveBeenCalledWith('company_id', 23)
+    expect(helpDeskNotificationService.settleTicketCreated).toHaveBeenCalledWith(
+      expect.any(Object),
+      expect.objectContaining({ id: 10 }),
+      'ticket_in_service'
+    )
+  })
+
+  it('encerra todas as notificações pendentes quando o chamado é resolvido', async () => {
+    const ticketQuery = query({ data: { id: 10, company_id: 23, status: 'em_atendimento' }, error: null })
+    const updateQuery = query({
+      data: { id: 10, company_id: 23, status: 'resolvido' },
+      error: null,
+    })
+    supabase.from
+      .mockReturnValueOnce(ticketQuery)
+      .mockReturnValueOnce(updateQuery)
+
+    const response = await request(app)
+      .patch('/api/helpdesk/tickets/10')
+      .set('Authorization', `Bearer ${token()}`)
+      .send({ status: 'resolvido' })
+
+    expect(response.status).toBe(200)
+    expect(helpDeskNotificationService.settleAllTicketNotifications).toHaveBeenCalledWith(
+      expect.any(Object),
+      expect.objectContaining({ id: 10, status: 'resolvido' }),
+      'ticket_resolved'
+    )
   })
 })
