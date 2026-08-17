@@ -2,6 +2,7 @@ const express = require('express')
 const auth = require('../middleware/auth')
 const integrationAuth = require('../middleware/helpDeskIntegrationAuth')
 const controller = require('../controllers/helpDeskController')
+const notificationController = require('../controllers/helpDeskNotificationController')
 
 const router = express.Router()
 
@@ -13,5 +14,8 @@ router.post('/tickets/:id/avaliacao', integrationAuth.integrationOnly, controlle
 router.post('/tickets/:id/assume', auth, controller.assumeTicket)
 router.patch('/tickets/:id', auth, controller.updateTicket)
 router.post('/tickets/:id/transfer', auth, controller.transferTicket)
+router.get('/notifications', auth, notificationController.listNotifications)
+router.post('/notifications/tickets/:ticketId/read', auth, notificationController.markTicketRead)
+router.post('/notifications/read-all', auth, notificationController.markAllRead)
 
 module.exports = router
