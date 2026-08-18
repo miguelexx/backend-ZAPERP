@@ -11,7 +11,6 @@ const crypto = require('crypto')
 const { ensureUploadsRootExists } = require('../config/uploadsRoot')
 const { isAllowedInboundMediaUrl } = require('../helpers/allowedInboundMediaUrl')
 const { normalizarTimestampSemFusoAmbiguoParaApi } = require('../helpers/timestampApiCompat')
-const { logMessageChronology } = require('../helpers/messageChronology')
 const {
   resolveInboundAudioExtension,
   audioExtensionFromContentType,
@@ -32,7 +31,7 @@ const MAX_REDIRECTS = 3
 const LOCK_TTL_MS = FETCH_TIMEOUT_MS + 60 * 1000
 
 const MSG_SELECT_PERSIST =
-  'id, conversa_id, company_id, whatsapp_id, texto, url, tipo, direcao, message_timestamp, criado_em, status, autor_usuario_id, reply_meta, nome_arquivo, contact_meta, location_meta, remetente_nome, remetente_telefone'
+  'id, conversa_id, company_id, whatsapp_id, texto, url, tipo, direcao, criado_em, status, autor_usuario_id, reply_meta, nome_arquivo, contact_meta, location_meta, remetente_nome, remetente_telefone'
 
 const ESTADO_COLUNAS =
   'midia_persist_status, midia_persist_tentativas, midia_persist_erro, midia_persist_erro_tipo, midia_persist_ultima_em, midia_persist_proxima_em, midia_persist_lock_ate'
@@ -395,7 +394,6 @@ function schedulePersistInboundMediaIfNeeded(ctx) {
  * @returns {Promise<{ ok: boolean, [k: string]: any }>}
  */
 async function persistInboundMediaToUploads({ supabase, io, company_id, mensagem_id, fromMe, force = false }) {
-  const processingStartedAt = new Date().toISOString()
   const ctx = { supabase, io, company_id, mensagem_id, fromMe }
   const chave = chaveMidia(company_id, mensagem_id)
   if (emExecucao.has(chave)) return { ok: false, ignorado: 'em_execucao' }
@@ -564,12 +562,6 @@ async function persistInboundMediaToUploads({ supabase, io, company_id, mensagem
     })
 
     await emitirMidiaAtualizada({ io, company_id, row, updated })
-    logMessageChronology('inbound_media_processed', updated, {
-      processing_started_at: processingStartedAt,
-      processing_finished_at: new Date().toISOString(),
-      reason: 'media_fields_updated_without_chronology_change',
-    })
-
     // Rollout R2 (empresa habilitada): espelha o arquivo recém-copiado para o Cloudflare R2
     // em background. No-op para as demais empresas — o fluxo em disco acima permanece intacto.
     try {

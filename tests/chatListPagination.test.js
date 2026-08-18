@@ -107,30 +107,15 @@ describe('GET /api/chats pagination contract', () => {
 
   test('trims message history limit + 1 rows and keeps oldest delivered row as cursor', () => {
     const rows = [
-      { id: 30, message_timestamp: '2026-06-06T12:00:00.000Z' },
-      { id: 20, message_timestamp: '2026-06-06T11:00:00.000Z' },
-      { id: 10, message_timestamp: '2026-06-06T10:00:00.000Z' },
+      { id: 30, criado_em: '2026-06-06T12:00:00.000Z' },
+      { id: 20, criado_em: '2026-06-06T11:00:00.000Z' },
+      { id: 10, criado_em: '2026-06-06T10:00:00.000Z' },
     ]
 
     const page = _test.splitMessageHistoryPage(rows, 2)
 
     expect(page.rows).toHaveLength(2)
     expect(page.has_more).toBe(true)
-    expect(page.cursor_row).toEqual({ id: 20, message_timestamp: '2026-06-06T11:00:00.000Z' })
-  })
-
-  test('pagina mensagens com cursor composto por timestamp canônico e id', () => {
-    const calls = []
-    const query = {
-      or(value) { calls.push(['or', value]); return this },
-      lt(column, value) { calls.push(['lt', column, value]); return this },
-    }
-
-    _test.applyDetalharChatMensagensCursor(query, '2026-06-06T11:00:00.000Z', '20')
-
-    expect(calls).toEqual([[
-      'or',
-      'message_timestamp.lt."2026-06-06T11:00:00.000Z",and(message_timestamp.eq."2026-06-06T11:00:00.000Z",id.lt.20)',
-    ]])
+    expect(page.cursor_row).toEqual({ id: 20, criado_em: '2026-06-06T11:00:00.000Z' })
   })
 })

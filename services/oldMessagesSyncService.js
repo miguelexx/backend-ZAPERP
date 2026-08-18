@@ -7,14 +7,13 @@ const {
 const { getOrCreateCliente, findOrCreateConversation } = require('../helpers/conversationSync')
 const { getProvider } = require('./providers')
 const { listWhatsappInstances } = require('./whatsappInstanceService')
-const { normalizeMessageTimestamp } = require('../helpers/messageChronology')
 const {
   schedulePersistInboundMediaIfNeeded,
   tipoQualificaPersistencia,
 } = require('./inboundMediaPersistenceService')
 
 const MSG_SELECT =
-  'id, conversa_id, company_id, whatsapp_instance_id, whatsapp_id, texto, url, tipo, direcao, message_timestamp, criado_em, status, autor_usuario_id, reply_meta, nome_arquivo, contact_meta, location_meta, remetente_nome, remetente_telefone'
+  'id, conversa_id, company_id, whatsapp_instance_id, whatsapp_id, texto, url, tipo, direcao, criado_em, status, autor_usuario_id, reply_meta, nome_arquivo, contact_meta, location_meta, remetente_nome, remetente_telefone'
 
 const MESSAGES_PER_CHAT = Math.min(1000, Math.max(1, Number(process.env.OLD_MESSAGES_SYNC_MESSAGES_PER_CHAT) || 1000))
 const MAX_CHATS = Math.max(1, Number(process.env.OLD_MESSAGES_SYNC_MAX_CHATS) || 5000)
@@ -152,8 +151,16 @@ function photoFromChat(chat) {
 }
 
 function messageTimestampToIso(message) {
-  const ts = message?.timestamp ?? message?.momment ?? message?.t ?? message?.time ?? message?.date ?? message?.created_at
-  return normalizeMessageTimestamp(ts)
+  let ts = message?.timestamp ?? message?.momment ?? message?.t ?? message?.time ?? message?.date ?? message?.created_at
+  const num = Number(ts)
+  if (Number.isFinite(num) && num > 0) {
+    const ms = num < 1e12 ? num * 1000 : num
+    const date = new Date(ms)
+    if (!Number.isNaN(date.getTime()) && date.getFullYear() >= 2020) return date.toISOString()
+  }
+  const parsed = ts ? new Date(ts) : null
+  if (parsed && !Number.isNaN(parsed.getTime()) && parsed.getFullYear() >= 2020) return parsed.toISOString()
+  return new Date().toISOString()
 }
 
 function messageIdFrom(message) {
@@ -245,13 +252,11 @@ function normalizeOldMessage(raw, { isGroup }) {
     else texto = '(mensagem)'
   }
 
-  const chronologicalTimestamp = messageTimestampToIso(raw)
   const insert = {
     texto: String(texto || '').trim(),
     direcao: fromMe ? 'out' : 'in',
     whatsapp_id: String(whatsappId).trim(),
-    criado_em: chronologicalTimestamp,
-    message_timestamp: chronologicalTimestamp,
+    criado_em: messageTimestampToIso(raw),
   }
 
   const fileName = firstString(raw.document?.fileName, raw.document?.title, raw.fileName, raw.filename, raw.file?.name)
