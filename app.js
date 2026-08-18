@@ -288,6 +288,8 @@ const mediaProxyRoutes = require('./routes/mediaProxyRoutes')
 const pushRoutes = require('./routes/pushRoutes')
 const minhasPendenciasRoutes = require('./routes/minhasPendenciasRoutes')
 const helpDeskRoutes = require('./routes/helpDeskRoutes')
+// Hand-off (SSO) para o CRM Avançado — substitui o CRM interno removido.
+const crmSsoRoutes = require('./routes/crmSsoRoutes')
 
 // Webhooks já registrados antes do CORS (evita 403 Origin)
 app.use('/dashboard', apiLimiter, dashboardRoutes)
@@ -315,6 +317,7 @@ app.use('/media', apiLimiter, mediaProxyRoutes)
 app.use('/push', apiLimiter, pushRoutes)
 app.use('/conversas', apiLimiter, minhasPendenciasRoutes)
 app.use('/helpdesk', apiLimiter, helpDeskRoutes)
+app.use('/crm', apiLimiter, crmSsoRoutes)
 
 // /api — prefixo opcional para SaaS; mantém compatibilidade com rotas antigas
 // Aplica apiLimiter globalmente para "rotas de API"
@@ -342,6 +345,7 @@ api.use('/media', mediaProxyRoutes)
 api.use('/push', pushRoutes)
 api.use('/conversas', minhasPendenciasRoutes)
 api.use('/helpdesk', helpDeskRoutes)
+api.use('/crm', crmSsoRoutes)
 app.use('/api', apiLimiter, api)
 
 // =====================================================
