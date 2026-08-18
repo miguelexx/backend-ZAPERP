@@ -212,11 +212,15 @@ O backend sempre limita a consulta ao CNPJ de `X-Icthus-CNPJ`.
 | `q` | Pesquisa por ID exato (`10` ou `#10`) e parcial em nome fantasia, razão social ou CNPJ, com ou sem máscara | `#123` |
 | `data_inicio` | Data inicial | `2026-08-01` |
 | `data_fim` | Data final | `2026-08-31` |
+| `ordenar_por` | Campo de ordenação: `atualizado`, `criado`, `status`, `empresa` ou `numero` | `atualizado` |
+| `ordem` | Direção da ordenação: `asc` ou `desc` | `desc` |
+
+Sem esses parâmetros, a API ordena por `atualizado_em` do mais recente para o mais antigo. Em caso de empate, utiliza o maior número de chamado primeiro.
 
 Exemplo:
 
 ```http
-GET /api/helpdesk/tickets?page=1&limit=25&status=aberto
+GET /api/helpdesk/tickets?page=1&limit=25&status=aberto&ordenar_por=atualizado&ordem=desc
 ```
 
 ### Resposta — `200 OK`
