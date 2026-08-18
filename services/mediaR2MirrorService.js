@@ -258,21 +258,27 @@ function scheduleR2MirrorIfNeeded({ supabase, io = null, company_id, mensagem_id
  * Varredura em lote: migra mídia da(s) empresa(s) habilitada(s) ainda em /uploads.
  * Cobre outbound pós-envio e o HISTÓRICO existente. Idempotente e retomável (cursor por id).
  */
+/**
+ * Aplica o filtro por empresa numa query — EXCETO no modo "todas as empresas" (aí não filtra,
+ * processando todas). Mantém o comportamento idêntico ao de hoje quando há lista (só a 1).
+ */
+function filtrarPorEmpresa(query) {
+  const { isAllCompaniesR2, getR2CompanyIds } = require('../config/r2')
+  if (isAllCompaniesR2()) return query
+  return query.in('company_id', [...getR2CompanyIds()])
+}
+
 async function runMediaR2MirrorSweep(supabase, io = null) {
   const out = { scanned: 0, mirrored: 0, skipped: 0, motivos: {} }
   if (_colunasStorageIndisponiveis || !supabase) { out.motivos.colunas_indisponiveis = 1; return out }
-  const { getR2CompanyIds, isR2Configured } = require('../config/r2')
+  const { isR2Configured } = require('../config/r2')
   if (!isR2Configured()) return out
-
-  const companyIds = [...getR2CompanyIds()]
-  if (!companyIds.length) return out
 
   const batch = Math.min(500, Math.max(1, Number(process.env.R2_MIRROR_BATCH) || 100))
 
-  const { data: rows, error } = await supabase
-    .from('mensagens')
-    .select('id, company_id')
-    .in('company_id', companyIds)
+  let q = supabase.from('mensagens').select('id, company_id')
+  q = filtrarPorEmpresa(q)
+  const { data: rows, error } = await q
     .is('storage_key', null)
     .like('url', '/uploads/%')
     .order('id', { ascending: true })
@@ -344,18 +350,15 @@ function agendarPurgaLocal({ supabase, company_id, mensagem_id, localPath }) {
 async function runR2LocalCleanup(supabase) {
   const out = { checked: 0, purged: 0 }
   if (_colunasStorageIndisponiveis || !supabase || keepLocalForever()) return out
-  const { getR2CompanyIds, isR2Configured } = require('../config/r2')
+  const { isR2Configured } = require('../config/r2')
   if (!isR2Configured()) return out
-  const companyIds = [...getR2CompanyIds()]
-  if (!companyIds.length) return out
 
   const cutoffIso = new Date(Date.now() - getLocalCleanupDelayMs()).toISOString()
   const batch = Math.min(500, Math.max(1, Number(process.env.R2_CLEANUP_BATCH) || 200))
 
-  const { data: rows, error } = await supabase
-    .from('mensagens')
-    .select('id, company_id, url_legado')
-    .in('company_id', companyIds)
+  let q = supabase.from('mensagens').select('id, company_id, url_legado')
+  q = filtrarPorEmpresa(q)
+  const { data: rows, error } = await q
     .eq('storage_backend', 'r2')
     .like('url_legado', '/uploads/%')
     .lt('criado_em', cutoffIso)
@@ -385,7 +388,7 @@ async function runR2LocalCleanup(supabase) {
  * de o objeto estar no bucket). Serve ao gatilho de boot (R2_MIGRATE_HISTORICO_ON_BOOT=1).
  */
 async function runFullHistoryMigration(supabase, io = null, { maxLotes = 10000 } = {}) {
-  const { isR2Configured, getR2CompanyIds } = require('../config/r2')
+  const { isR2Configured, isAllCompaniesR2, getR2CompanyIds } = require('../config/r2')
   if (!supabase || !isR2Configured()) {
     console.warn('[mediaR2/historico] R2 não configurado ou supabase ausente — migração não executada.')
     return { migradas: 0, purgadas: 0 }
@@ -395,10 +398,10 @@ async function runFullHistoryMigration(supabase, io = null, { maxLotes = 10000 }
   // tê-la ligado e deixado a varredura retornar cedo (0 migradas). Migração é ação deliberada.
   _colunasStorageIndisponiveis = false
 
-  const companyIds = [...getR2CompanyIds()]
+  const escopo = isAllCompaniesR2() ? 'todas as empresas' : [...getR2CompanyIds()].join(',')
   const batch = Math.min(500, Math.max(1, Number(process.env.R2_MIGRATE_BATCH) || 100))
 
-  console.log('[mediaR2/historico] iniciando migração completa do histórico para o R2…', { companyIds, batch })
+  console.log('[mediaR2/historico] iniciando migração completa do histórico para o R2…', { escopo, batch })
 
   // CURSOR por id: avança por TODAS as candidatas, inclusive as que não têm arquivo local (que
   // ficam com storage_key null). Sem cursor, as mais antigas sem arquivo bloqueariam a fila
@@ -407,10 +410,9 @@ async function runFullHistoryMigration(supabase, io = null, { maxLotes = 10000 }
   const total = { lidas: 0, migradas: 0, ausentes: 0, ja_no_r2: 0, outros: 0 }
 
   for (let i = 0; i < maxLotes; i += 1) {
-    const { data: rows, error } = await supabase
-      .from('mensagens')
-      .select('id, company_id')
-      .in('company_id', companyIds)
+    let q = supabase.from('mensagens').select('id, company_id')
+    q = filtrarPorEmpresa(q)
+    const { data: rows, error } = await q
       .is('storage_key', null)
       .like('url', '/uploads/%')
       .gt('id', lastId)

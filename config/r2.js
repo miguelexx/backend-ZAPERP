@@ -54,7 +54,18 @@ function isR2Configured() {
   return Boolean(cfg.accessKeyId && cfg.secretAccessKey && cfg.bucket && cfg.endpoint)
 }
 
-/** company_id habilitados para R2. Default: apenas a empresa 1. */
+/**
+ * Modo "todas as empresas": R2_COMPANY_IDS = * / all / todas, ou R2_ALL_COMPANIES=1.
+ * Quando ligado, TODAS as empresas usam R2 (inclusive as criadas depois) e as varreduras
+ * não filtram por company_id.
+ */
+function isAllCompaniesR2() {
+  const raw = trimEnv('R2_COMPANY_IDS').toLowerCase()
+  if (raw === '*' || raw === 'all' || raw === 'todas') return true
+  return trimEnv('R2_ALL_COMPANIES') === '1'
+}
+
+/** company_id habilitados para R2 (lista). Ignorado quando isAllCompaniesR2(). Default: só a 1. */
 function getR2CompanyIds() {
   const raw = trimEnv('R2_COMPANY_IDS')
   if (!raw) return new Set([1])
@@ -68,13 +79,14 @@ function getR2CompanyIds() {
 /**
  * Decide se uma empresa usa R2. É o único portão do rollout:
  * - R2 precisa estar configurado no .env, E
- * - o company_id precisa estar na lista habilitada (default: só 1).
+ * - o modo "todas" está ligado, OU o company_id está na lista habilitada (default: só 1).
  * Qualquer outra empresa cai no fluxo antigo (disco).
  */
 function empresaUsaR2(company_id) {
   const cid = Number(company_id)
   if (!Number.isFinite(cid) || cid <= 0) return false
   if (!isR2Configured()) return false
+  if (isAllCompaniesR2()) return true
   return getR2CompanyIds().has(cid)
 }
 
@@ -129,6 +141,7 @@ function getMediaRetentionIntervalMs() {
 module.exports = {
   getR2Config,
   isR2Configured,
+  isAllCompaniesR2,
   getR2CompanyIds,
   empresaUsaR2,
   getPresignExpiresSeconds,

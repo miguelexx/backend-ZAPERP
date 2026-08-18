@@ -48,6 +48,33 @@ test('empresaUsaR2: respeita R2_COMPANY_IDS (CSV)', () => {
   } finally { restore() }
 })
 
+test('empresaUsaR2: modo TODAS as empresas (R2_COMPANY_IDS=*)', () => {
+  const { mod, restore } = loadR2Config({ ...CREDS_OK, R2_COMPANY_IDS: '*' })
+  try {
+    assert.equal(mod.isAllCompaniesR2(), true)
+    assert.equal(mod.empresaUsaR2(1), true)
+    assert.equal(mod.empresaUsaR2(2), true)
+    assert.equal(mod.empresaUsaR2(999), true)
+    assert.equal(mod.empresaUsaR2(0), false) // id inválido continua false
+  } finally { restore() }
+})
+
+test('empresaUsaR2: modo TODAS via R2_ALL_COMPANIES=1', () => {
+  const { mod, restore } = loadR2Config({ ...CREDS_OK, R2_ALL_COMPANIES: '1' })
+  try {
+    assert.equal(mod.isAllCompaniesR2(), true)
+    assert.equal(mod.empresaUsaR2(42), true)
+  } finally { restore() }
+})
+
+test('isAllCompaniesR2: desligado por padrão (lista fixa)', () => {
+  const { mod, restore } = loadR2Config(CREDS_OK)
+  try {
+    assert.equal(mod.isAllCompaniesR2(), false)
+    assert.equal(mod.empresaUsaR2(2), false)
+  } finally { restore() }
+})
+
 test('empresaUsaR2: entradas inválidas', () => {
   const { mod, restore } = loadR2Config(CREDS_OK)
   try {

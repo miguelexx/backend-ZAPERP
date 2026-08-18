@@ -18,6 +18,7 @@ const path = require('path')
 const { getUploadsRoot } = require('../config/uploadsRoot')
 const {
   isR2Configured,
+  isAllCompaniesR2,
   getR2CompanyIds,
   getMediaRetentionDays,
   getMediaRetentionIntervalMs,
@@ -74,9 +75,8 @@ async function runMediaRetentionSweep(supabase) {
   const out = { r2: 0, local: 0, erros: 0 }
   const days = getMediaRetentionDays()
   if (!supabase || days <= 0) return out
-  if (!isR2Configured()) return out // escopo atual = empresas em R2
-  const companyIds = [...getR2CompanyIds()]
-  if (!companyIds.length) return out
+  if (!isR2Configured()) return out // escopo = empresas em R2 (lista ou "todas")
+  const allMode = isAllCompaniesR2()
 
   const cutoffIso = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString()
   const batch = Math.min(500, Math.max(1, Number(process.env.MEDIA_RETENTION_BATCH) || 100))
@@ -89,12 +89,12 @@ async function runMediaRetentionSweep(supabase) {
       let q = supabase
         .from('mensagens')
         .select(SELECT)
-        .in('company_id', companyIds)
         .in('tipo', MEDIA_TYPES)
         .lt('criado_em', cutoffIso)
         .gt('id', lastId)
         .order('id', { ascending: true })
         .limit(batch)
+      if (!allMode) q = q.in('company_id', [...getR2CompanyIds()])
       q = modo === 'r2' ? q.eq('storage_backend', 'r2') : q.like('url', '/uploads/%')
 
       const { data: rows, error } = await q
