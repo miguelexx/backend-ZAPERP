@@ -59,6 +59,7 @@ const defaultDirectives = helmet.contentSecurityPolicy.getDefaultDirectives()
 
 // Correlaciona logs e respostas sem expor dados sensíveis.
 app.use((req, res, next) => {
+  req.messageReceivedAt = new Date().toISOString()
   req.requestId = req.get('X-Request-Id') || randomUUID()
   res.setHeader('X-Request-Id', req.requestId)
   next()

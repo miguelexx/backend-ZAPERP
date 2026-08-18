@@ -20,7 +20,7 @@ const {
   isLidPhoneKey,
   pickRealPhoneCandidate,
 } = require('../helpers/phoneHelper')
-const { deduplicateConversationsByContact, sortConversationsByRecent, sortConversationsPinThenRecent, getCanonicalPhone, getCanonicalPhoneAnyIntl, getOrCreateCliente, findOrCreateConversation, mergeConversasIntoCanonico } = require('../helpers/conversationSync')
+const { deduplicateConversationsByContact, sortConversationsByRecent, sortConversationsPinThenRecent, sortConversationsBySearchRelevance, getCanonicalPhone, getCanonicalPhoneAnyIntl, getOrCreateCliente, findOrCreateConversation, mergeConversasIntoCanonico } = require('../helpers/conversationSync')
 const { enrichConversationsWithContactData } = require('../helpers/conversaEnrichment')
 const {
   resolveReabertaPorFaltaInteracao,
@@ -70,6 +70,11 @@ const {
   getEndOfTodayIso,
 } = require('../services/chatListCountsService')
 const { normalizarTimestampSemFusoAmbiguoParaApi } = require('../helpers/timestampApiCompat')
+const {
+  compareMessagesChronologically,
+  requestReceivedTimestamp,
+  logMessageChronology,
+} = require('../helpers/messageChronology')
 const { isRealWhatsAppId, isUltramsgNumericQueueId } = require('../helpers/whatsappMessageIdHelper')
 const { schedulePendingOutboundReconciliation } = require('../services/pendingOutboundReconciliationService')
 const {
@@ -349,8 +354,8 @@ function statusAtendimentoParaLista(isGroup, dbStatus, exibirBadgeAberta) {
 
 /**
  * Paginação de mensagens em GET /chats/:id (detalharChat).
- * Com `cursor_id`: desempate quando várias mensagens compartilham o mesmo `criado_em` (ordem id DESC).
- * Sem `cursor_id`: compatível com clientes antigos — apenas `criado_em.lt`.
+ * Com `cursor_id`: desempate quando várias mensagens compartilham o mesmo `message_timestamp` (ordem id DESC).
+ * Sem `cursor_id`: compatível com clientes antigos — apenas `message_timestamp.lt`.
  */
 function applyDetalharChatMensagensCursor(query, cursorEm, cursorIdRaw) {
   const em = cursorEm != null && String(cursorEm).trim() !== '' ? String(cursorEm).trim() : null
@@ -361,9 +366,9 @@ function applyDetalharChatMensagensCursor(query, cursorEm, cursorIdRaw) {
       : NaN
   if (Number.isFinite(idNum)) {
     const quoted = `"${em.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`
-    return query.or(`criado_em.lt.${quoted},and(criado_em.eq.${quoted},id.lt.${idNum})`)
+    return query.or(`message_timestamp.lt.${quoted},and(message_timestamp.eq.${quoted},id.lt.${idNum})`)
   }
-  return query.lt('criado_em', em)
+  return query.lt('message_timestamp', em)
 }
 
 function parsePositiveInt(value, fallback) {
@@ -701,9 +706,8 @@ function emitirParaUsuario(io, usuario_id, eventName, payload) {
 }
 
 function ordenarMensagensHistoricoAsc(a, b) {
-  const ta = new Date(a?.criado_em || 0).getTime()
-  const tb = new Date(b?.criado_em || 0).getTime()
-  if (Number.isFinite(ta) && Number.isFinite(tb) && ta !== tb) return ta - tb
+  const chronological = compareMessagesChronologically(a, b)
+  if (chronological !== 0) return chronological
   const ida = Number(a?.atendimento_id ?? a?.id)
   const idb = Number(b?.atendimento_id ?? b?.id)
   if (Number.isFinite(ida) && Number.isFinite(idb) && ida !== idb) return ida - idb
@@ -1698,6 +1702,9 @@ exports.listarConversas = async (req, res) => {
 
     let conversaIdsFilter = null
     let forceEmptyConversas = false
+    // Busca por texto: IDs cujo match veio de nome/telefone (faixa prioritária na ordenação).
+    let searchPriorityIdSet = null
+    let isTextSearch = false
 
     if (tagFilterAtivo) {
       const filterIdLimit = getChatFilterIdLimit()
@@ -1746,11 +1753,29 @@ exports.listarConversas = async (req, res) => {
         buscarConversaIdsPorTextoMensagens({ company_id, term: palavraTrim }),
       ])
 
-      const mergedSet = new Set([
-        ...convByNomeIds,
-        ...(convByTelefone || []).map((c) => c.id),
-        ...idsFromMsg,
-      ])
+      isTextSearch = true
+      // Faixa prioritária: match em nome/pushname/telefone (RPC + telefone direto).
+      const priorityIds = new Set(
+        [
+          ...convByNomeIds,
+          ...(convByTelefone || []).map((c) => c.id),
+        ]
+          .map((v) => Number(v))
+          .filter((n) => Number.isFinite(n) && n > 0)
+      )
+      // Faixa secundária: match apenas no texto de mensagens — limitada para não
+      // "afogar" o contato procurado (busca de cliente prioriza nome/telefone).
+      const msgTierLimit = Math.max(1, parsePositiveInt(process.env.CHAT_SEARCH_MSG_TIER_LIMIT, 30))
+      const messageOnlyIds = []
+      for (const raw of idsFromMsg) {
+        const n = Number(raw)
+        if (!Number.isFinite(n) || n <= 0 || priorityIds.has(n)) continue
+        messageOnlyIds.push(n)
+        if (messageOnlyIds.length >= msgTierLimit) break
+      }
+      searchPriorityIdSet = priorityIds
+
+      const mergedSet = new Set([...priorityIds, ...messageOnlyIds])
       const merged = [...mergedSet]
       if (merged.length === 0) {
         if (shouldIncludeClientesSemConversa({ incluirTodosClientesAtivo, palavraTrim })) {
@@ -1760,7 +1785,7 @@ exports.listarConversas = async (req, res) => {
           return sendEmptyChatListResponse(false)
         }
       } else {
-        conversaIdsFilter = conversaIdsFilter ? conversaIdsFilter.filter((id) => mergedSet.has(id)) : merged
+        conversaIdsFilter = conversaIdsFilter ? conversaIdsFilter.filter((id) => mergedSet.has(Number(id))) : merged
       }
     }
 
@@ -2077,13 +2102,25 @@ exports.listarConversas = async (req, res) => {
     let data = null
     let error = null
 
+    // Busca por texto: buscar TODOS os matches (até um teto) numa página só, para que
+    // a ordenação por relevância (nome/telefone antes de texto) não seja truncada pelo
+    // corte por ultima_atividade do banco. Fora da busca, mantém a paginação normal.
+    const searchListFetchCap = Math.max(
+      chatListPagination.limit,
+      parsePositiveInt(process.env.CHAT_SEARCH_LIST_FETCH_CAP, 300)
+    )
+    const effectivePageLimit =
+      isTextSearch && Array.isArray(conversaIdsFilter)
+        ? Math.min(searchListFetchCap, Math.max(chatListPagination.limit, conversaIdsFilter.length))
+        : chatListPagination.limit
+
     const queryCompleto = applyChatListCursor(
       buildQuery(selectCompleto)
         .order('ultima_atividade', { ascending: false, nullsFirst: false })
         .order('id', { ascending: false }),
       chatListPagination.cursor,
       chatListPagination.cursor_id
-    ).limit(chatListPagination.limit + 1)
+    ).limit(effectivePageLimit + 1)
     let result = await queryCompleto
     data = result.data
     error = result.error
@@ -2095,7 +2132,7 @@ exports.listarConversas = async (req, res) => {
           .order('id', { ascending: false }),
         chatListPagination.cursor,
         chatListPagination.cursor_id
-      ).limit(chatListPagination.limit + 1)
+      ).limit(effectivePageLimit + 1)
       result = await queryMinimo
       data = result.data
       error = result.error
@@ -2108,7 +2145,7 @@ exports.listarConversas = async (req, res) => {
           .order('id', { ascending: false }),
         chatListPagination.cursor,
         chatListPagination.cursor_id
-      ).limit(chatListPagination.limit + 1)
+      ).limit(effectivePageLimit + 1)
       result = await queryBare
       data = result.data
       error = result.error
@@ -2117,7 +2154,7 @@ exports.listarConversas = async (req, res) => {
     if (error) { console.error('[chatController]', error?.message); return res.status(500).json({ error: 'Erro interno' }) }
 
     const rawSqlRows = Array.isArray(data) ? data : []
-    const rawSqlHadMore = rawSqlRows.length > chatListPagination.limit
+    const rawSqlHadMore = rawSqlRows.length > effectivePageLimit
     const whatsappInstanceMetaMap = await loadWhatsappInstanceMetaMap(
       company_id,
       rawSqlRows.map((c) => c?.whatsapp_instance_id)
@@ -2546,7 +2583,7 @@ exports.listarConversas = async (req, res) => {
     if (incluirTodos) {
       const cid = Number(company_id)
       const todosClientes = []
-      const remainingSlots = Math.max(0, chatListPagination.limit - conversasFormatadas.length)
+      const remainingSlots = Math.max(0, effectivePageLimit - conversasFormatadas.length)
       const semConversaLimit = Math.min(
         remainingSlots,
         Math.max(1, parsePositiveInt(process.env.CHAT_LIST_SEM_CONVERSA_LIMIT, 50))
@@ -2772,14 +2809,28 @@ exports.listarConversas = async (req, res) => {
       console.warn('[listarConversas] prefs:', e?.message || e)
     }
 
-    let chatListPage = splitChatListPage(conversasFormatadas || [], chatListPagination.limit)
+    // Busca por texto: reordena por relevância (nome/telefone antes de match só no texto),
+    // recência dentro de cada faixa. É a última ordenação aplicada antes de paginar.
+    // Marca `busca_rank` (0 = nome/telefone, 1 = só texto) para o frontend preservar a
+    // prioridade — ele re-ordena por recência e sem esse rank perderia o "nome/telefone no topo".
+    if (isTextSearch && searchPriorityIdSet) {
+      conversasFormatadas = sortConversationsBySearchRelevance(conversasFormatadas, searchPriorityIdSet)
+      for (const c of conversasFormatadas) {
+        if (!c) continue
+        const id = Number(c.id)
+        const isPrioridade = c.sem_conversa === true || (Number.isFinite(id) && searchPriorityIdSet.has(id))
+        c.busca_rank = isPrioridade ? 0 : 1
+      }
+    }
+
+    let chatListPage = splitChatListPage(conversasFormatadas || [], effectivePageLimit)
     if (
       !chatListPage.pagination.has_more &&
       rawSqlHadMore &&
-      (chatListPage.rows.length < chatListPagination.limit || chatListPage.rows.length === 0)
+      (chatListPage.rows.length < effectivePageLimit || chatListPage.rows.length === 0)
     ) {
       const cursorRow =
-        rawSqlRows[Math.min(chatListPagination.limit, rawSqlRows.length) - 1] ||
+        rawSqlRows[Math.min(effectivePageLimit, rawSqlRows.length) - 1] ||
         rawSqlRows[rawSqlRows.length - 1]
       chatListPage = {
         rows: chatListPage.rows,
@@ -4145,7 +4196,7 @@ exports.detalharChat = async (req, res) => {
       !isParticipanteAtivo
 
     // mensagens paginadas (remetente_nome/remetente_telefone para grupos; fallback se colunas não existirem)
-    const selectComRemetente = 'id, conversa_id, texto, direcao, criado_em, autor_usuario_id, status, whatsapp_id, whatsapp_instance_id, tipo, url, nome_arquivo, reply_meta, remetente_nome, remetente_telefone, contact_meta, location_meta, apagada_para_todos, apagada_em, audio_duracao_sec'
+    const selectComRemetente = 'id, conversa_id, texto, direcao, message_timestamp, criado_em, autor_usuario_id, status, whatsapp_id, whatsapp_instance_id, tipo, url, nome_arquivo, reply_meta, remetente_nome, remetente_telefone, contact_meta, location_meta, apagada_para_todos, apagada_em, audio_duracao_sec'
     let mensagens = []
     let errMsgs = null
     let query
@@ -4156,7 +4207,7 @@ exports.detalharChat = async (req, res) => {
         .select(selectComRemetente)
         .eq('company_id', Number(company_id))
         .eq('conversa_id', Number(id))
-        .order('criado_em', { ascending: false })
+        .order('message_timestamp', { ascending: false })
         .order('id', { ascending: false })
         .limit(messageHistoryFetchLimit)
 
@@ -4167,14 +4218,14 @@ exports.detalharChat = async (req, res) => {
       errMsgs = result.error
     }
     // Compatibilidade: se reply_meta/remetente_*/contact_meta/location_meta não existirem ainda no banco, refaz select sem essas colunas.
-    const selectFallback = 'id, conversa_id, texto, direcao, criado_em, autor_usuario_id, status, whatsapp_id, whatsapp_instance_id, tipo, url, nome_arquivo'
+    const selectFallback = 'id, conversa_id, texto, direcao, message_timestamp, criado_em, autor_usuario_id, status, whatsapp_id, whatsapp_instance_id, tipo, url, nome_arquivo'
     if (errMsgs && (String(errMsgs.message || '').includes('reply_meta') || String(errMsgs.message || '').includes('remetente_nome') || String(errMsgs.message || '').includes('remetente_telefone') || String(errMsgs.message || '').includes('contact_meta') || String(errMsgs.message || '').includes('location_meta') || String(errMsgs.message || '').includes('apagada_para_todos') || String(errMsgs.message || '').includes('audio_duracao_sec') || String(errMsgs.message || '').includes('does not exist'))) {
       query = supabase
         .from('mensagens')
         .select(selectFallback)
         .eq('company_id', Number(company_id))
         .eq('conversa_id', Number(id))
-        .order('criado_em', { ascending: false })
+        .order('message_timestamp', { ascending: false })
         .order('id', { ascending: false })
         .limit(messageHistoryFetchLimit)
       query = applyDetalharChatMensagensCursor(query, cursor, cursor_id)
@@ -4352,7 +4403,7 @@ exports.detalharChat = async (req, res) => {
         mensagens: mensagensFormatadas,
         next_cursor:
           hasMoreFromDb && oldestDbRow
-            ? normalizarTimestampSemFusoAmbiguoParaApi(oldestDbRow.criado_em)
+            ? normalizarTimestampSemFusoAmbiguoParaApi(oldestDbRow.message_timestamp || oldestDbRow.criado_em)
             : null,
         next_cursor_id:
           hasMoreFromDb && oldestDbRow != null && oldestDbRow.id != null ? oldestDbRow.id : null,
@@ -4488,8 +4539,8 @@ exports.buscarMensagensConversa = async (req, res) => {
       }
     }
 
-    const selectComRemetente = 'id, conversa_id, texto, direcao, criado_em, autor_usuario_id, status, whatsapp_id, whatsapp_instance_id, tipo, url, nome_arquivo, reply_meta, remetente_nome, remetente_telefone, contact_meta, location_meta, apagada_para_todos, apagada_em, audio_duracao_sec'
-    const selectFallback = 'id, conversa_id, texto, direcao, criado_em, autor_usuario_id, status, whatsapp_id, whatsapp_instance_id, tipo, url, nome_arquivo'
+    const selectComRemetente = 'id, conversa_id, texto, direcao, message_timestamp, criado_em, autor_usuario_id, status, whatsapp_id, whatsapp_instance_id, tipo, url, nome_arquivo, reply_meta, remetente_nome, remetente_telefone, contact_meta, location_meta, apagada_para_todos, apagada_em, audio_duracao_sec'
+    const selectFallback = 'id, conversa_id, texto, direcao, message_timestamp, criado_em, autor_usuario_id, status, whatsapp_id, whatsapp_instance_id, tipo, url, nome_arquivo'
     const term = `%${escapeIlikePattern(q)}%`
 
     let query = supabase
@@ -4498,7 +4549,7 @@ exports.buscarMensagensConversa = async (req, res) => {
       .eq('company_id', Number(company_id))
       .eq('conversa_id', Number(id))
       .ilike('texto', term)
-      .order('criado_em', { ascending: false })
+      .order('message_timestamp', { ascending: false })
       .order('id', { ascending: false })
 
     query = applyDetalharChatMensagensCursor(query, cursor, cursor_id).limit(limit + 1)
@@ -4511,7 +4562,7 @@ exports.buscarMensagensConversa = async (req, res) => {
         .eq('company_id', Number(company_id))
         .eq('conversa_id', Number(id))
         .ilike('texto', term)
-        .order('criado_em', { ascending: false })
+        .order('message_timestamp', { ascending: false })
         .order('id', { ascending: false })
       fallbackQuery = applyDetalharChatMensagensCursor(fallbackQuery, cursor, cursor_id).limit(limit + 1)
       ;({ data: rows, error } = await fallbackQuery)
@@ -4548,7 +4599,7 @@ exports.buscarMensagensConversa = async (req, res) => {
       has_more: hasMoreRaw,
       next_cursor:
         hasMoreRaw && cursorRow
-          ? normalizarTimestampSemFusoAmbiguoParaApi(cursorRow.criado_em)
+          ? normalizarTimestampSemFusoAmbiguoParaApi(cursorRow.message_timestamp || cursorRow.criado_em)
           : null,
       next_cursor_id:
         hasMoreRaw && cursorRow != null && cursorRow.id != null ? cursorRow.id : null,
@@ -6001,7 +6052,7 @@ exports.enviarMensagemChat = async (req, res) => {
     const hasLinkPayload = !!linkPayload
 
     // Reply (citação) — opcional. Requer coluna mensagens.reply_meta (jsonb).
-    const timestamp = new Date().toISOString()
+    const timestamp = requestReceivedTimestamp(req)
     const basePayload = {
       company_id,
       conversa_id: Number(conversa_id),
@@ -6010,7 +6061,8 @@ exports.enviarMensagemChat = async (req, res) => {
       direcao: 'out',
       autor_usuario_id: Number(user_id),
       status: 'pending',
-      criado_em: timestamp
+      criado_em: timestamp,
+      message_timestamp: timestamp,
     }
     if (whatsappInstanceId) basePayload.whatsapp_instance_id = whatsappInstanceId
     if (clientTempId && !_clientTempIdDbDedupeUnavailable) basePayload.client_temp_id = clientTempId
@@ -6077,6 +6129,11 @@ exports.enviarMensagemChat = async (req, res) => {
 
     if (errMsg) return res.status(500).json({ error: errMsg.message })
 
+    logMessageChronology('outbound_text_persisted', msg, {
+      persisted_at: new Date().toISOString(),
+      reason: 'server_request_received_at',
+    })
+
     // Registrar no Map de deduplicação após INSERT bem-sucedido
     if (clientTempId && msg?.id) {
       const dedupKey = clientTempIdDedupeKey(company_id, conversa_id, clientTempId)
@@ -6085,6 +6142,7 @@ exports.enviarMensagemChat = async (req, res) => {
 
     // Paralelo: tryMarkWaiting + UPDATE conversas + UPDATE clientes são independentes entre si
     const updateNow = new Date().toISOString()
+    const messageActivityTimestamp = msg.message_timestamp || msg.criado_em
     const [waitingAfterOutbound, modoSimplesResult] = await Promise.all([
       modoSimplesEnvio
         ? Promise.resolve(null)
@@ -6103,7 +6161,7 @@ exports.enviarMensagemChat = async (req, res) => {
       }).catch(() => null),
       supabase
         .from('conversas')
-        .update({ lida: true, ultima_atividade: updateNow })
+        .update({ lida: true, ultima_atividade: messageActivityTimestamp })
         .eq('company_id', Number(company_id))
         .eq('id', Number(conversa_id)),
       isGroup || conversa?.cliente_id == null
@@ -8066,6 +8124,8 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
     }
   }
 
+  const processingStartedAt = new Date().toISOString()
+  const chronologicalTimestamp = requestReceivedTimestamp(req)
   let fileWork = file
   const extUpload = extFromOriginalName(fileWork?.originalname)
   if (isBlockedRiskExtension(extUpload)) {
@@ -8218,6 +8278,8 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
     // e a reconciliacao/reenvio so varre status pending|sending. Depender do default do
     // banco deixaria a midia invisivel para esse laco caso o default mude.
     status: 'pending',
+    criado_em: chronologicalTimestamp,
+    message_timestamp: chronologicalTimestamp,
     ...(whatsappInstanceId ? { whatsapp_instance_id: whatsappInstanceId } : {}),
     ...(clientTempId && !_clientTempIdDbDedupeUnavailable ? { client_temp_id: clientTempId } : {}),
     ...(audioDuracaoSec != null ? { audio_duracao_sec: audioDuracaoSec } : {}),
@@ -8257,6 +8319,13 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
 
   if (error) return { ok: false, status: 500, error: error.message }
 
+    logMessageChronology('outbound_media_persisted', msg, {
+      processing_started_at: processingStartedAt,
+      processing_finished_at: new Date().toISOString(),
+      persisted_at: new Date().toISOString(),
+      reason: 'request_received_before_upload_processing',
+    })
+
     // Rollout R2 (empresa 1): espelha a mídia enviada para o Cloudflare R2 JÁ NO ENVIO, sem esperar
     // confirmação do provedor. A entrega ao WhatsApp usa a URL /uploads capturada abaixo (não a url
     // do banco), e o reenvio automático usa URL assinada do R2 — então isto não interfere no envio.
@@ -8267,7 +8336,7 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
     } catch (_) { /* espelhamento é best-effort; nunca afeta o envio */ }
 
     const modoSimplesEnvio = await empresaModoSimplesAtivo(company_id).catch(() => false)
-    const timestampAtividade = new Date().toISOString()
+    const timestampAtividade = msg.message_timestamp || msg.criado_em
 
     const [waitingAfterOutbound, modoSimplesResult] = await Promise.all([
       modoSimplesEnvio
@@ -9751,6 +9820,7 @@ exports._test = {
   assertPodeEnviarMensagem,
   avaliarElegibilidadeReenvio,
   captionUsuarioDeMidiaPersistida,
+  applyDetalharChatMensagensCursor,
   parseChatListPagination,
   splitChatListPage,
   parseMessageHistoryPagination,

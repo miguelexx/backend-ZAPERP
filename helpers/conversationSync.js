@@ -1043,6 +1043,62 @@ function sortConversationsPinThenRecent(conversas) {
   })
 }
 
+/**
+ * Ordena resultados de BUSCA por relevância (estilo WhatsApp):
+ *   1) fixadas primeiro;
+ *   2) match em nome/telefone do contato (inclui clientes sem conversa) antes de
+ *      match encontrado apenas no texto de mensagens;
+ *   3) dentro de cada faixa, mais recentes no topo.
+ *
+ * `prioritySet` é um Set de IDs de conversa cujo match veio de nome/telefone.
+ * Clientes sem conversa (sem_conversa=true) só aparecem em busca explícita e são
+ * sempre match de nome/telefone — por isso entram na faixa prioritária.
+ *
+ * @param {Array} conversas
+ * @param {Set<number>} prioritySet
+ * @returns {Array}
+ */
+function sortConversationsBySearchRelevance(conversas, prioritySet) {
+  if (!Array.isArray(conversas)) return conversas
+  const priority = prioritySet instanceof Set ? prioritySet : new Set()
+  const pickTs = (c) => {
+    const candidates = [
+      c?.ultima_mensagem?.criado_em,
+      c?.ultima_mensagem_preview?.criado_em,
+      c?.ultima_atividade,
+      c?.criado_em,
+    ]
+    let best = 0
+    for (const raw of candidates) {
+      const t = new Date(raw || 0).getTime()
+      if (Number.isFinite(t) && t > best) best = t
+    }
+    return best
+  }
+  const isPriority = (c) => {
+    if (!c) return false
+    if (c.sem_conversa === true) return true
+    const id = Number(c.id)
+    return Number.isFinite(id) && priority.has(id)
+  }
+  return [...conversas].sort((a, b) => {
+    const ap = a?.fixada === true ? 1 : 0
+    const bp = b?.fixada === true ? 1 : 0
+    if (ap !== bp) return bp - ap
+    const apr = isPriority(a) ? 1 : 0
+    const bpr = isPriority(b) ? 1 : 0
+    if (apr !== bpr) return bpr - apr
+    // Dentro da faixa prioritária, contatos com conversa vêm antes dos "sem conversa".
+    const asem = a?.sem_conversa === true ? 1 : 0
+    const bsem = b?.sem_conversa === true ? 1 : 0
+    if (asem !== bsem) return asem - bsem
+    const ta = pickTs(a)
+    const tb = pickTs(b)
+    if (tb !== ta) return tb - ta
+    return (Number(b.id) || 0) - (Number(a.id) || 0)
+  })
+}
+
 module.exports = {
   getCanonicalPhone,
   getCanonicalPhoneAnyIntl,
@@ -1054,6 +1110,7 @@ module.exports = {
   deduplicateConversationsByContact,
   sortConversationsByRecent,
   sortConversationsPinThenRecent,
+  sortConversationsBySearchRelevance,
   phonesMatchDigitally,
   hasValidFotoPerfil,
   shouldUpdateFotoPerfil,

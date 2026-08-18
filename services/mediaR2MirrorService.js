@@ -27,7 +27,7 @@ const r2 = require('./storage/r2Client')
 const R2_DELIVERY_PREFIX = '/media/r2/'
 
 const MSG_SELECT =
-  'id, conversa_id, company_id, tipo, direcao, status, status_mensagem, url, nome_arquivo, criado_em, storage_backend, storage_key, url_legado'
+  'id, conversa_id, company_id, tipo, direcao, status, status_mensagem, url, nome_arquivo, message_timestamp, criado_em, storage_backend, storage_key, url_legado'
 
 /** Uma vez detectado que as colunas não existem, para de tentar espelhar (degrada em silêncio). */
 let _colunasStorageIndisponiveis = false
@@ -168,7 +168,7 @@ async function mirrorMensagemParaR2({ supabase, io = null, company_id, mensagem_
     const key = buildStorageKey({
       company_id,
       tipo: row.tipo,
-      criado_em: row.criado_em,
+      criado_em: row.message_timestamp || row.criado_em,
       localFilename,
     })
     const contentType = mimeFromName(localFilename)

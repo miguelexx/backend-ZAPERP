@@ -25,6 +25,7 @@ const { parseVcardForContact } = require('../helpers/vcardHelper')
 const { resolvePeerPhone } = require('../helpers/conversationKeyHelper')
 const { incrementarUnreadParaConversa, emitirParaUsuariosQuePodemVerConversa } = require('./chatController')
 const { normalizarTimestampSemFusoAmbiguoParaApi } = require('../helpers/timestampApiCompat')
+const { normalizeMessageTimestamp, logMessageChronology } = require('../helpers/messageChronology')
 const { scheduleInboundWebPush } = require('../services/webPushDispatchService')
 const {
   schedulePersistInboundMediaIfNeeded,
@@ -73,7 +74,7 @@ const {
 const WHATSAPP_DEBUG = String(process.env.WHATSAPP_DEBUG || '').toLowerCase() === 'true'
 // Seleção enxuta para evitar payload desnecessário em caminhos quentes de webhook.
 // IMPORTANTE: não depender de colunas opcionais para manter compatibilidade com bancos legados.
-const WEBHOOK_MSG_SELECT = 'id, conversa_id, company_id, whatsapp_instance_id, whatsapp_id, texto, url, tipo, direcao, criado_em, status, autor_usuario_id, reply_meta, nome_arquivo, contact_meta, location_meta, remetente_nome, remetente_telefone'
+const WEBHOOK_MSG_SELECT = 'id, conversa_id, company_id, whatsapp_instance_id, whatsapp_id, texto, url, tipo, direcao, message_timestamp, criado_em, status, autor_usuario_id, reply_meta, nome_arquivo, contact_meta, location_meta, remetente_nome, remetente_telefone'
 
 // Ordem de progresso dos ticks de status. Usado em statusZapi para evitar que um ack atrasado
 // (ex.: "delivered" chegando depois de "read") regrida visualmente o status já persistido.
@@ -832,9 +833,10 @@ function resolveConversationKeyFromZapi(payload) {
   }
 }
 
-function extractMessage(payload) {
+function extractMessage(payload, receivedAt = Date.now()) {
   if (!payload || typeof payload !== 'object') {
-    return { phone: '', texto: '(vazio)', fromMe: false, messageId: null, criado_em: new Date().toISOString(), type: 'text', imageUrl: null, documentUrl: null, audioUrl: null, videoUrl: null, stickerUrl: null, locationUrl: null, fileName: null, isGroup: false, isEdit: false, isNewsletter: false, waitingMessage: false, participantPhone: null, senderName: null, senderLid: null, nomeGrupo: null, senderPhoto: null, chatPhoto: null }
+    const fallbackTimestamp = new Date().toISOString()
+    return { phone: '', texto: '(vazio)', fromMe: false, messageId: null, criado_em: fallbackTimestamp, message_timestamp: fallbackTimestamp, provider_timestamp: null, type: 'text', imageUrl: null, documentUrl: null, audioUrl: null, videoUrl: null, stickerUrl: null, locationUrl: null, fileName: null, isGroup: false, isEdit: false, isNewsletter: false, waitingMessage: false, participantPhone: null, senderName: null, senderLid: null, nomeGrupo: null, senderPhoto: null, chatPhoto: null }
   }
   const fromMe = Boolean(payload.fromMe ?? payload.key?.fromMe)
   const isEdit        = Boolean(payload.isEdit)
@@ -848,12 +850,13 @@ function extractMessage(payload) {
   const { key: phone, isGroup, participantPhone: partPhoneResolved, debugReason } = resolveConversationKeyFromZapi(payload)
   // Doc Z-API: messageId e zaapId = identificador da mensagem (ReceivedCallback e DeliveryCallback)
   const messageId = payload.messageId ?? payload.zaapId ?? payload.id ?? payload.instanceId ?? payload.key?.id ?? null
-  let ts = payload.timestamp ?? payload.momment ?? payload.t ?? payload.reaction?.time ?? Date.now()
-  // Timestamp pode vir em segundos (ex: API histórico) ou ms. Valores antigos/inválidos geram data 1970.
-  const tsNum = Number(ts)
-  if (tsNum && tsNum < 1e12) ts = tsNum * 1000
-  const dateFromTs = ts ? new Date(Number(ts)) : null
-  if (!dateFromTs || dateFromTs.getFullYear() < 2020) ts = Date.now()
+  const providerTimestamp = payload.timestamp ?? payload.momment ?? payload.t ?? payload.reaction?.time ?? null
+  // Aceita Unix em segundos/milissegundos e ISO com timezone. Fallback é o instante em que
+  // o servidor recebeu o webhook, nunca o fim do download/processamento da mídia.
+  const messageTimestamp = normalizeMessageTimestamp(
+    providerTimestamp,
+    receivedAt
+  )
 
   // Texto: Z-API envia text.message, template, botões, list, reação, localização, contato
   const rawMessage =
@@ -1057,7 +1060,9 @@ function extractMessage(payload) {
     texto,
     fromMe,
     messageId,
-    criado_em: (ts ? new Date(Number(ts)) : new Date()).toISOString(),
+    criado_em: messageTimestamp,
+    message_timestamp: messageTimestamp,
+    provider_timestamp: providerTimestamp,
     type,
     imageUrl,
     documentUrl,
@@ -1910,7 +1915,7 @@ exports.receberZapi = async (req, res) => {
         continue
       }
 
-      const extracted = extractMessage(payload)
+      const extracted = extractMessage(payload, req.messageReceivedAt)
       let {
         phone,
         debugReason,
@@ -1918,6 +1923,8 @@ exports.receberZapi = async (req, res) => {
         fromMe,
         messageId,
         criado_em,
+        message_timestamp,
+        provider_timestamp,
         type,
         imageUrl,
         documentUrl,
@@ -2776,6 +2783,7 @@ exports.receberZapi = async (req, res) => {
     let mensagemSalva = null
     /** true apenas quando inserimos nova mensagem; false quando idempotência ou reconciliação (CRM já emitiu nova_mensagem) */
     let mensagemFoiInseridaPeloWebhook = false
+    let mensagemEhMaisRecenteDaConversa = true
 
     // fromMe: também persiste (você pediu "todas as mensagens"). O índice único por (conversa_id, whatsapp_id)
     // evita duplicatas quando o provider reenviar o mesmo evento.
@@ -3224,6 +3232,7 @@ exports.receberZapi = async (req, res) => {
         ...(whatsapp_instance_id ? { whatsapp_instance_id } : {}),
         whatsapp_id: whatsappIdStr || null,
         criado_em,
+        message_timestamp: message_timestamp || criado_em,
         ...(statusPayload ? { status: statusPayload } : {})
       }
       if (reply_meta) insertMsg.reply_meta = reply_meta
@@ -3430,7 +3439,8 @@ exports.receberZapi = async (req, res) => {
             direcao: fromMe ? 'out' : 'in',
             company_id,
             whatsapp_id: whatsappIdStr || null,
-            criado_em
+            criado_em,
+            message_timestamp: message_timestamp || criado_em,
           }
           // Nunca remover tipo/url/caminho da mídia já resolvidos no insertMsg.
           preserveMediaFieldsOnWebhookFallback(fallbackPayload, insertMsg)
@@ -3461,6 +3471,12 @@ exports.receberZapi = async (req, res) => {
     }
 
     if (mensagemSalva) {
+      logMessageChronology('webhook_message_persisted', mensagemSalva, {
+        provider_timestamp,
+        message_timestamp: message_timestamp || criado_em,
+        persisted_at: new Date().toISOString(),
+        reason: mensagemFoiInseridaPeloWebhook ? 'webhook_insert' : 'idempotent_or_reconciled',
+      })
       // Mídia remota (UltraMSG/S3): copiar para /uploads em background para não depender de URL com TTL curto.
       const mPersist = mensagemSalva
       if (
@@ -3489,12 +3505,32 @@ exports.receberZapi = async (req, res) => {
         mensagemSalva: mPersist,
       })
 
-      // Usar conversa_id da mensagem quando idempotência retornou existente de outra conversa
+      // Usar conversa_id da mensagem quando idempotência retornou existente de outra conversa.
+      // Um webhook atrasado (especialmente mídia) entra na posição histórica correta, mas não
+      // pode substituir o preview/atividade de uma mensagem cronologicamente posterior.
       const convIdForUpdate = mensagemSalva.conversa_id ?? conversa_id
       const nowIsoUpdate = new Date().toISOString()
+      const { data: latestChronological } = await supabase
+        .from('mensagens')
+        .select('id, message_timestamp, criado_em')
+        .eq('company_id', company_id)
+        .eq('conversa_id', convIdForUpdate)
+        .order('message_timestamp', { ascending: false })
+        .order('id', { ascending: false })
+        .limit(1)
+        .maybeSingle()
+      mensagemEhMaisRecenteDaConversa =
+        !latestChronological?.id || Number(latestChronological.id) === Number(mensagemSalva.id)
+
+      const activityTimestamp =
+        latestChronological?.message_timestamp ||
+        latestChronological?.criado_em ||
+        mensagemSalva.message_timestamp ||
+        mensagemSalva.criado_em ||
+        nowIsoUpdate
       const { error: errUpdate } = await supabase
         .from('conversas')
-        .update({ ultima_atividade: nowIsoUpdate })
+        .update({ ultima_atividade: activityTimestamp })
         .eq('id', convIdForUpdate)
         .eq('company_id', company_id)
       if (errUpdate && (String(errUpdate.message || '').includes('ultima_atividade') || String(errUpdate.code || '') === 'PGRST204')) {
@@ -3647,7 +3683,8 @@ exports.receberZapi = async (req, res) => {
                   company_id,
                   ...(whatsapp_instance_id ? { whatsapp_instance_id } : {}),
                   whatsapp_id: wId,
-                  criado_em: ex.criado_em
+                  criado_em: ex.criado_em,
+                  message_timestamp: ex.message_timestamp || ex.criado_em,
                 }
 
                 if (ex.fromMe) {
@@ -3785,6 +3822,11 @@ exports.receberZapi = async (req, res) => {
           io.to(rooms).emit('nova_mensagem', emitPayload)
         }
         scheduleInboundWebPush(company_id, convIdForEmit, 'nova_mensagem', emitPayload)
+        logMessageChronology('webhook_message_emitted', emitPayload, {
+          provider_timestamp,
+          emitted_at: new Date().toISOString(),
+          reason: 'nova_mensagem',
+        })
       } else {
         // Mensagem já existe (enviada pelo usuário): apenas atualizar status, não duplicar mensagem
         const statusPayload = {
@@ -3888,7 +3930,7 @@ exports.receberZapi = async (req, res) => {
       )
       // ultima_mensagem_preview: preview na lista lateral — direcao correta ('in'/'out') para exibir seta/ícone certo.
       // Para mensagem de contato, incluir tipo e contact_meta para o frontend exibir card em vez do vCard bruto.
-      if (mensagemFoiInseridaPeloWebhook && emitPayload) {
+      if (mensagemFoiInseridaPeloWebhook && mensagemEhMaisRecenteDaConversa && emitPayload) {
         const preview = {
           texto: emitPayload.texto ?? '(mensagem)',
           criado_em: emitPayload.criado_em,
@@ -3906,7 +3948,7 @@ exports.receberZapi = async (req, res) => {
         convPayload.ultima_mensagem_preview = preview
       }
       // reordenar_suave: true — frontend deve animar o item para o topo em vez de refetch (evita "desce e sobe")
-      convPayload.reordenar_suave = true
+      convPayload.reordenar_suave = mensagemEhMaisRecenteDaConversa
       const emittedConversaAtualizadaScoped = await emitirParaUsuariosQuePodemVerConversa(
         io,
         company_id,

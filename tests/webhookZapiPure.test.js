@@ -361,6 +361,20 @@ describe('extractMessage', () => {
     expect(new Date(r.criado_em).getTime()).toBe(1700000000 * 1000)
   })
 
+  test('timestamp ISO com fuso vira o instante canônico UTC', () => {
+    const r = extractMessage({ ...BASE, message: 'Hi', timestamp: '2026-08-18T16:47:00-03:00' })
+    expect(r.message_timestamp).toBe('2026-08-18T19:47:00.000Z')
+  })
+
+  test.each([undefined, 'timestamp-inválido'])(
+    'timestamp ausente/inválido usa o recebimento HTTP: %s',
+    (timestamp) => {
+      const receivedAt = '2026-08-18T19:48:00.000Z'
+      const r = extractMessage({ ...BASE, message: 'Hi', timestamp }, receivedAt)
+      expect(r.message_timestamp).toBe(receivedAt)
+    }
+  )
+
   test('messageId: zaapId tem prioridade sobre key.id', () => {
     const r = extractMessage({ ...BASE, zaapId: 'ZAAP_1', key: { id: 'KEY_1' } })
     expect(r.messageId).toBe('ZAAP_1')

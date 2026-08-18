@@ -34,6 +34,8 @@ function buildArquivoApiResultRow(msg, clientTempId) {
     texto: msg.texto || null,
     status: msg.status || 'pending',
     status_mensagem: msg.status_mensagem || msg.status || 'pending',
+    ...(msg.message_timestamp ? { message_timestamp: msg.message_timestamp } : {}),
+    ...(msg.criado_em ? { criado_em: msg.criado_em } : {}),
     ...(msg.whatsapp_id ? { whatsapp_id: msg.whatsapp_id } : {}),
     ...(msg.audio_duracao_sec != null && Number.isFinite(Number(msg.audio_duracao_sec))
       ? { audio_duracao_sec: Number(msg.audio_duracao_sec) }
