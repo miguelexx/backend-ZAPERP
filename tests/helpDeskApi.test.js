@@ -606,6 +606,7 @@ describe('HelpDesk API', () => {
     }))
     expect(historyQuery.insert).toHaveBeenCalledWith(expect.objectContaining({
       ticket_id: 10,
+      tipo: 'assumido',
       para_departamento_id: 44,
       para_responsavel_id: 7,
       motivo: 'Chamado assumido ao responder',
@@ -799,9 +800,11 @@ describe('HelpDesk API', () => {
       data: { id: 10, company_id: 23, status: 'resolvido' },
       error: null,
     })
+    const historyQuery = query({ data: null, error: null })
     supabase.from
       .mockReturnValueOnce(ticketQuery)
       .mockReturnValueOnce(updateQuery)
+      .mockReturnValueOnce(historyQuery)
 
     const response = await request(app)
       .patch('/api/helpdesk/tickets/10')
@@ -809,6 +812,13 @@ describe('HelpDesk API', () => {
       .send({ status: 'resolvido' })
 
     expect(response.status).toBe(200)
+    expect(historyQuery.insert).toHaveBeenCalledWith(expect.objectContaining({
+      company_id: 23,
+      ticket_id: 10,
+      tipo: 'encerrado',
+      transferido_por: 7,
+      motivo: 'Chamado encerrado',
+    }))
     expect(helpDeskNotificationService.settleAllTicketNotifications).toHaveBeenCalledWith(
       expect.any(Object),
       expect.objectContaining({ id: 10, status: 'resolvido' }),
