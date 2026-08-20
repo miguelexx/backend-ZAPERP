@@ -341,6 +341,10 @@ const DEFAULT_CHATBOT_CONFIG = {
   finalizar_por_ausencia_mensagem: '',
   finalizar_por_ausencia_reabrir_automaticamente: true,
   finalizar_por_ausencia_reabrir_sem_chatbot: true,
+  // Encaminhamento automático quando o cliente não escolhe uma opção do menu.
+  encaminhar_sem_escolha_ativo: false,
+  encaminhar_sem_escolha_minutos: 10,
+  encaminhar_sem_escolha_departamentos_ids: [],
 }
 
 /**
@@ -450,6 +454,17 @@ function validateChatbotConfig(raw) {
     finalizar_por_ausencia_mensagem: String(src.finalizar_por_ausencia_mensagem || '').trim(),
     finalizar_por_ausencia_reabrir_automaticamente: src.finalizar_por_ausencia_reabrir_automaticamente !== false,
     finalizar_por_ausencia_reabrir_sem_chatbot: src.finalizar_por_ausencia_reabrir_sem_chatbot !== false,
+    encaminhar_sem_escolha_ativo: !!src.encaminhar_sem_escolha_ativo,
+    encaminhar_sem_escolha_minutos: (() => {
+      const n = Number(src.encaminhar_sem_escolha_minutos ?? DEFAULT_CHATBOT_CONFIG.encaminhar_sem_escolha_minutos ?? 10)
+      return Number.isFinite(n) ? Math.max(1, Math.min(1440, Math.round(n))) : 10
+    })(),
+    encaminhar_sem_escolha_departamentos_ids: (() => {
+      const ids = Array.isArray(src.encaminhar_sem_escolha_departamentos_ids)
+        ? src.encaminhar_sem_escolha_departamentos_ids
+        : []
+      return [...new Set(ids.map(Number).filter((id) => Number.isInteger(id) && id > 0))]
+    })(),
     intervaloEnvioSegundos: (() => {
       const v = src.intervaloEnvioSegundos ?? DEFAULT_CHATBOT_CONFIG.intervaloEnvioSegundos ?? 3
       const n = Number(v)

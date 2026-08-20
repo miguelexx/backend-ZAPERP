@@ -40,6 +40,9 @@ const DEFAULT_CONFIG = {
     finalizar_por_ausencia_mensagem: '',
     finalizar_por_ausencia_reabrir_automaticamente: true,
     finalizar_por_ausencia_reabrir_sem_chatbot: true,
+    encaminhar_sem_escolha_ativo: false,
+    encaminhar_sem_escolha_minutos: 10,
+    encaminhar_sem_escolha_departamentos_ids: [],
   },
   bot_global: {
     ativo: false,
@@ -152,6 +155,38 @@ exports.putConfig = async (req, res) => {
 
     const current = existing?.config ?? {}
     const ctMerged = { ...DEFAULT_CONFIG.chatbot_triage, ...(current.chatbot_triage || {}), ...(ctBody || {}) }
+
+    if (ctMerged.encaminhar_sem_escolha_ativo) {
+      const minutos = Number(ctMerged.encaminhar_sem_escolha_minutos)
+      if (!Number.isInteger(minutos) || minutos < 1 || minutos > 1440) {
+        return res.status(400).json({ error: 'O prazo do encaminhamento automático deve ser de 1 a 1440 minutos.' })
+      }
+
+      const rawIds = Array.isArray(ctMerged.encaminhar_sem_escolha_departamentos_ids)
+        ? ctMerged.encaminhar_sem_escolha_departamentos_ids
+        : []
+      if (rawIds.some((id) => !Number.isInteger(Number(id)) || Number(id) <= 0)) {
+        return res.status(400).json({ error: 'A lista de setores do encaminhamento automático contém um valor inválido.' })
+      }
+      const ids = [...new Set(rawIds.map(Number))]
+      if (ids.length === 0) {
+        return res.status(400).json({ error: 'Selecione pelo menos um setor para o encaminhamento automático.' })
+      }
+
+      const { data: deps, error: depsError } = await supabase
+        .from('departamentos')
+        .select('id')
+        .eq('company_id', company_id)
+        .in('id', ids)
+      if (depsError) {
+        console.warn('[iaController] validação de departamentos:', depsError.message)
+        return res.status(500).json({ error: 'Não foi possível validar os setores selecionados.' })
+      }
+      if ((deps || []).length !== ids.length) {
+        return res.status(400).json({ error: 'Um ou mais setores selecionados são inválidos para esta empresa.' })
+      }
+      ctMerged.encaminhar_sem_escolha_departamentos_ids = ids
+    }
     const ctValid = validateChatbotConfig(ctMerged) || normalizeChatbotTriageStrings(ctMerged)
     const merged = {
       ...current,
