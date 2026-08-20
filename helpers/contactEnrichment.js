@@ -31,6 +31,9 @@ const SOURCE_SCORE = {
   chatName: 80,
   pushname: 60,
   nome_existente: 70,
+  // import: nome vindo de planilha (.xlsx). Baixo (abaixo de nome_existente=70) para
+  // preencher contato sem nome, mas NUNCA sobrescrever um nome bom já cadastrado.
+  import: 50,
   unknown: 0
 }
 
