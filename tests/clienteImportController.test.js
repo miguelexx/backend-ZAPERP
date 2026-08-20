@@ -78,6 +78,22 @@ describe('clienteImportController — preview', () => {
     })
   })
 
+  it('respeita "não usar" (null) para a série mesmo que a detecção automática a encontre', async () => {
+    const buffer = await montarXlsx(
+      [linha({ nome: 'João Silva', serie: '6º Ano', cel: '34999991234' })],
+      HEADERS
+    )
+    const res = makeRes()
+    // usuário mapeou nome/telefone mas escolheu NÃO usar a coluna de série
+    await controller.previewImportacao(
+      { file: { buffer, size: buffer.length }, body: { mapping: JSON.stringify({ nome: 1, telefone: 5, serie: null }) }, user: { company_id: 7 } },
+      res
+    )
+    expect(res.statusCode).toBe(200)
+    expect(res.body.mapping.serie).toBeNull() // NÃO re-detecta a coluna 3
+    expect(res.body.amostra[0].tags).toEqual([])
+  })
+
   it('respeita override de mapeamento vindo do body', async () => {
     // Cabeçalhos genéricos que a detecção automática não reconhece.
     const buffer = await montarXlsx(

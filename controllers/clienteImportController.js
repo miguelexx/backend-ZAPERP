@@ -78,21 +78,23 @@ async function lerPlanilha(buffer) {
  */
 function resolverMapeamento(headers, bodyMapping) {
   const auto = detectColumns(headers)
+  // Índice válido → número; null/vazio/ inválido → null ("não usar esta coluna")
   const parseIdx = (v) => {
-    if (v == null || v === '') return undefined
+    if (v == null || v === '') return null
     const n = Number(v)
-    if (!Number.isInteger(n) || n < 0 || n >= headers.length) return undefined
+    if (!Number.isInteger(n) || n < 0 || n >= headers.length) return null
     return n
   }
   const override = bodyMapping || {}
-  const nome = parseIdx(override.nome)
-  const telefone = parseIdx(override.telefone)
-  const serie = parseIdx(override.serie)
+  const has = (k) => Object.prototype.hasOwnProperty.call(override, k)
+  // Se o campo veio no override (mesmo que null), respeita a escolha do usuário.
+  // Se não veio, usa a detecção automática pelos cabeçalhos.
+  const resolve = (field) => (has(field) ? parseIdx(override[field]) : auto[field])
 
   return {
-    nome: nome !== undefined ? nome : auto.nome,
-    telefone: telefone !== undefined ? telefone : auto.telefone,
-    serie: serie !== undefined ? serie : auto.serie,
+    nome: resolve('nome'),
+    telefone: resolve('telefone'),
+    serie: resolve('serie'),
     auto: { nome: auto.nome, telefone: auto.telefone, serie: auto.serie },
   }
 }
