@@ -4,7 +4,9 @@ const adminOnly = require('../middleware/adminOnly')
 const campanhasController = require('../controllers/disparoController')
 const destController = require('../controllers/disparoDestinatariosController')
 const instController = require('../controllers/disparoInstanciasController')
+const varController = require('../controllers/disparoVariacoesController')
 const { uploadDisparoFile } = require('../middleware/uploadDisparoFile')
+const { uploadDisparoMidia } = require('../middleware/uploadDisparoMidia')
 
 const router = express.Router()
 
@@ -52,5 +54,30 @@ router.post('/campanhas/:id/instancias/recalcular', instController.recalcularDis
 // ── Instâncias — atribuição manual ───────────────────────────────────────────
 router.post('/campanhas/:id/instancias/atribuir-manual', instController.atribuirManual)
 router.post('/campanhas/:id/instancias/mover', instController.moverDestinatarios)
+
+// ── Variações — CRUD ─────────────────────────────────────────────────────────
+router.get('/campanhas/:id/variacoes', varController.listarVariacoes)
+router.post('/campanhas/:id/variacoes', varController.criarVariacao)
+// Rotas de ação com nomes literais devem vir ANTES de :varId para não serem capturadas como parâmetro
+router.post('/campanhas/:id/variacoes/reordenar', varController.reordenarVariacoes)
+router.post('/campanhas/:id/variacoes/valores-padrao', varController.salvarValoresPadrao)
+router.post('/campanhas/:id/variacoes/preview-distribuicao', varController.previewDistribuicaoVariacoes)
+router.post('/campanhas/:id/variacoes/confirmar-distribuicao', varController.confirmarDistribuicaoVariacoes)
+router.post('/campanhas/:id/variacoes/atribuir-manual', varController.atribuirVariacaoManual)
+router.post('/campanhas/:id/variacoes/recalcular', varController.recalcularDistribuicaoVariacoes)
+// Rotas com :varId depois das rotas literais
+router.post('/campanhas/:id/variacoes/:varId/duplicar', varController.duplicarVariacao)
+router.post('/campanhas/:id/variacoes/:varId/midia', uploadDisparoMidia, varController.uploadMidia)
+router.patch('/campanhas/:id/variacoes/:varId', varController.editarVariacao)
+router.delete('/campanhas/:id/variacoes/:varId/midia', varController.removerMidia)
+router.delete('/campanhas/:id/variacoes/:varId', varController.excluirVariacao)
+
+// ── Variações — variáveis ────────────────────────────────────────────────────
+router.get('/campanhas/:id/variacoes/variaveis', varController.catalogoVariaveis)
+router.get('/campanhas/:id/variacoes/variaveis/:chave/sem-valor', varController.destinatariosSemVariavel)
+
+// ── Variações — preview e resumo ──────────────────────────────────────────────
+router.get('/campanhas/:id/variacoes/preview/:destId', varController.previewDestinatario)
+router.get('/campanhas/:id/variacoes/resumo', varController.resumoMensagens)
 
 module.exports = router
