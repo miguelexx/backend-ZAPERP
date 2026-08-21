@@ -19,6 +19,17 @@ function positiveInt(v) {
   const n = Number(v); return Number.isInteger(n) && n > 0 ? n : null
 }
 
+/** Marca distribuição como "necessita revisão" se já estava confirmada. */
+async function marcarRevisaoDistribuicao(campanhaId, companyId) {
+  try {
+    await supabase.from('disparo_campanhas')
+      .update({ distribuicao_revisao: true, atualizado_em: new Date().toISOString() })
+      .eq('id', campanhaId)
+      .eq('company_id', companyId)
+      .eq('distribuicao_confirmada', true)
+  } catch (_) { /* não bloqueia a operação principal */ }
+}
+
 function cleanText(v, max = 255) {
   if (typeof v !== 'string') return ''
   return v.trim().slice(0, max)
@@ -308,14 +319,14 @@ exports.addContatos = async (req, res) => {
         .eq('id', campanhaId).eq('company_id', companyId)
     }
 
+    await marcarRevisaoDistribuicao(campanhaId, companyId)
+
     res.json({ inseridos, ignorados, total_selecionados: clienteIds.length })
   } catch (err) {
     console.error('[disparo:destinatarios] addContatos', err)
     res.status(500).json({ error: 'Erro ao adicionar contatos.' })
   }
 }
-
-// ─── Remover destinatário individual ────────────────────────────────────────
 
 /**
  * DELETE /disparo/campanhas/:id/destinatarios/:destId
@@ -341,6 +352,8 @@ exports.removerDestinatario = async (req, res) => {
       .eq('campanha_id', campanhaId)
       .eq('company_id', companyId)
     if (error) throw error
+
+    await marcarRevisaoDistribuicao(campanhaId, companyId)
 
     res.json({ ok: true })
   } catch (err) {
@@ -379,6 +392,8 @@ exports.removerVarios = async (req, res) => {
       .eq('company_id', companyId)
     if (error) throw error
 
+    await marcarRevisaoDistribuicao(campanhaId, companyId)
+
     res.json({ ok: true, removidos: ids.length })
   } catch (err) {
     console.error('[disparo:destinatarios] removerVarios', err)
@@ -416,6 +431,8 @@ exports.limparDestinatarios = async (req, res) => {
       .eq('company_id', companyId)
       .neq('status', 'excluido')
     if (error) throw error
+
+    await marcarRevisaoDistribuicao(campanhaId, companyId)
 
     res.json({ ok: true })
   } catch (err) {
@@ -490,9 +507,10 @@ exports.previewImportacao = async (req, res) => {
     }
 
     const ext = String(req.file.originalname ?? '').split('.').pop().toLowerCase()
-    const sheetId = positiveInt(req.body.sheet_id) ?? null
+    const sheetIdx = req.body.sheet_idx != null ? Number(req.body.sheet_idx) : null
+    const validSheetIdx = Number.isInteger(sheetIdx) && sheetIdx >= 0 ? sheetIdx : null
 
-    const { sheets, sheetIdAtual, headers, dataRows } = await parseArquivo(req.file.buffer, ext, sheetId)
+    const { sheets, sheetIdxAtual, headers, dataRows } = await parseArquivo(req.file.buffer, ext, validSheetIdx)
 
     const autoMapping = detectMappingAuto(headers)
     const mapping = parseMapping(req.body.mapping, autoMapping, headers.length)
@@ -502,7 +520,7 @@ exports.previewImportacao = async (req, res) => {
 
     res.json({
       sheets,
-      sheet_id_atual: sheetIdAtual,
+      sheet_idx_atual: sheetIdxAtual,
       headers,
       mapping,
       mapping_auto: autoMapping,
@@ -542,10 +560,11 @@ exports.confirmarImportacao = async (req, res) => {
     }
 
     const ext = String(req.file.originalname ?? '').split('.').pop().toLowerCase()
-    const sheetId = positiveInt(req.body.sheet_id) ?? null
+    const sheetIdx = req.body.sheet_idx != null ? Number(req.body.sheet_idx) : null
+    const validSheetIdx = Number.isInteger(sheetIdx) && sheetIdx >= 0 ? sheetIdx : null
     const arquivoNome = cleanText(req.body.arquivo_nome ?? req.file.originalname ?? '', 255)
 
-    const { headers, dataRows } = await parseArquivo(req.file.buffer, ext, sheetId)
+    const { headers, dataRows } = await parseArquivo(req.file.buffer, ext, validSheetIdx)
 
     const autoMapping = detectMappingAuto(headers)
     const mapping = parseMapping(req.body.mapping, autoMapping, headers.length)
