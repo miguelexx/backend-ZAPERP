@@ -82,6 +82,18 @@ const {
 } = require('../helpers/internalNote')
 const { usuarioTemPermissao } = require('../helpers/permissoesService')
 
+function mergeConversaClienteTags(c) {
+  const conversaTags = (c.conversa_tags || []).map((ct) => ct?.tags).filter(Boolean)
+  const clienteTags = (c.clientes?.cliente_tags || []).map((ct) => ct?.tags).filter(Boolean)
+  if (clienteTags.length === 0) return conversaTags
+  const seen = new Set(conversaTags.map((t) => t.id))
+  const merged = [...conversaTags]
+  for (const t of clienteTags) {
+    if (!seen.has(t.id)) { merged.push(t); seen.add(t.id) }
+  }
+  return merged
+}
+
 /**
  * Deduplicação in-memory para double-send de texto.
  * Chave: `${company_id}:${conversa_id}:${client_temp_id}` → { id, status, ts }
@@ -1722,11 +1734,19 @@ exports.listarConversas = async (req, res) => {
       const searchIdLimit = getChatSearchIdLimit()
       const phoneVariacoes = buildPhoneSearchTerms(palavraTrim)
 
-      // 3 branches em paralelo (B3 fix: elimina await sequencial de clientes):
+      // Busca de cliente = nome ou telefone da base da empresa (com/sem conversa).
+      // O 3º ramo (texto de mensagens) trazia conversas que só *mencionavam* o termo
+      // no corpo de uma mensagem antiga — clientes sem relação com o texto buscado —
+      // e afogava/poluía o contato procurado. Fica DESLIGADO por padrão; reative com
+      // CHAT_SEARCH_INCLUDE_MESSAGE_TEXT=1 se algum dia a busca por conteúdo voltar.
+      const incluirTextoMensagens =
+        String(process.env.CHAT_SEARCH_INCLUDE_MESSAGE_TEXT ?? '').trim() === '1'
+
+      // Branches em paralelo (B3 fix: elimina await sequencial de clientes):
       //   (1) RPC buscar_conversas_por_nome_ids: nome/pushname do cliente + nome_contato_cache
       //       + nome_grupo — tudo com suporte a acentos via unaccent (L1 fix)
       //   (2) Telefone direto em conversas (com variantes BR)
-      //   (3) Texto de mensagens (paginado)
+      //   (3) Texto de mensagens (paginado) — apenas quando explicitamente habilitado
       const [convByNomeIds, { data: convByTelefone }, idsFromMsg] = await Promise.all([
         supabase
           .rpc('buscar_conversas_por_nome_ids', {
@@ -1746,7 +1766,9 @@ exports.listarConversas = async (req, res) => {
           .or(buildTelefoneSearchOr(palavraTrim))
           .order('ultima_atividade', { ascending: false, nullsFirst: false })
           .limit(searchIdLimit),
-        buscarConversaIdsPorTextoMensagens({ company_id, term: palavraTrim }),
+        incluirTextoMensagens
+          ? buscarConversaIdsPorTextoMensagens({ company_id, term: palavraTrim })
+          : Promise.resolve([]),
       ])
 
       isTextSearch = true
@@ -1823,7 +1845,7 @@ exports.listarConversas = async (req, res) => {
       finalizacao_motivo,
       finalizada_automaticamente,
       finalizada_automaticamente_em,
-      clientes!conversas_cliente_fk ( id, nome, pushname, telefone, foto_perfil, company_id ),
+      clientes!conversas_cliente_fk ( id, nome, pushname, telefone, foto_perfil, company_id, cliente_tags ( tag_id, tags ( id, nome, cor ) ) ),
       atendente:usuarios!conversas_atendente_id_fkey ( id, nome, email ),
       departamentos ( id, nome ),
       mensagens ( conversa_id, texto, criado_em, direcao, tipo, url, nome_arquivo, whatsapp_id, status, autor_usuario_id, contact_meta, location_meta ),
@@ -1861,7 +1883,7 @@ exports.listarConversas = async (req, res) => {
       foto_grupo,
       nome_contato_cache,
       foto_perfil_contato_cache,
-      clientes!conversas_cliente_fk ( id, nome, pushname, telefone, foto_perfil, company_id ),
+      clientes!conversas_cliente_fk ( id, nome, pushname, telefone, foto_perfil, company_id, cliente_tags ( tag_id, tags ( id, nome, cor ) ) ),
       atendente:usuarios!conversas_atendente_id_fkey ( id, nome, email ),
       departamentos ( id, nome ),
       mensagens ( conversa_id, texto, criado_em, direcao, tipo, url, nome_arquivo, whatsapp_id, status, autor_usuario_id, contact_meta, location_meta ),
@@ -1900,7 +1922,7 @@ exports.listarConversas = async (req, res) => {
       finalizacao_motivo,
       finalizada_automaticamente,
       finalizada_automaticamente_em,
-      clientes!conversas_cliente_fk ( id, nome, pushname, telefone, foto_perfil, company_id ),
+      clientes!conversas_cliente_fk ( id, nome, pushname, telefone, foto_perfil, company_id, cliente_tags ( tag_id, tags ( id, nome, cor ) ) ),
       atendente:usuarios!conversas_atendente_id_fkey ( id, nome, email ),
       departamentos ( id, nome ),
       mensagens ( conversa_id, texto, criado_em, direcao, tipo, url, nome_arquivo, whatsapp_id, status, autor_usuario_id, contact_meta, location_meta )
@@ -2346,7 +2368,7 @@ exports.listarConversas = async (req, res) => {
         contato_nome: contatoNome,
         foto_perfil: fotoPerfil,
         setor: c.departamentos?.nome || null,
-        tags: (c.conversa_tags || []).map((ct) => ct?.tags).filter(Boolean),
+        tags: mergeConversaClienteTags(c),
         unread_count: unreadCount,
         sem_mensagens: !temMensagem,
         exibir_cta_assumir_sem_mensagens,
@@ -2585,20 +2607,40 @@ exports.listarConversas = async (req, res) => {
         Math.max(1, parsePositiveInt(process.env.CHAT_LIST_SEM_CONVERSA_LIMIT, 50))
       )
       if (semConversaLimit > 0) {
-        const term = `%${escapeIlikePattern(palavraTrim)}%`
         const searchFetchLimit = Math.min(Math.max(semConversaLimit * 3, semConversaLimit), 150)
-        let clientesQuery = supabase
-          .from('clientes')
-          .select('id, nome, pushname, telefone, foto_perfil')
-          .eq('company_id', cid)
-          .or(buildClienteSearchOr(palavraTrim))
-        const { data: chunkRows, error: chunkErr } = await clientesQuery
-          .order('nome', { ascending: true, nullsFirst: false })
-          .range(0, searchFetchLimit - 1)
-        if (chunkErr) {
-          console.warn('[listarConversas] carregar clientes sem conversa:', chunkErr.message || chunkErr)
+        const phoneVariacoesCliente = buildPhoneSearchTerms(palavraTrim)
+
+        // Preferência: RPC accent-insensitive (unaccent_lower) para casar "José" com "jose".
+        // A busca de conversas já é sem acento (RPC buscar_conversas_por_nome_ids); aqui
+        // espelhamos isso para o cliente SEM conversa, senão ele seria o único ramo que
+        // ignora acento. Fallback gracioso para .ilike caso a RPC ainda não exista no banco.
+        const { data: rpcRows, error: rpcErr } = await supabase.rpc(
+          'buscar_clientes_por_nome_telefone',
+          {
+            p_company_id: cid,
+            p_termo: palavraTrim,
+            p_phone_variacoes: phoneVariacoesCliente.length ? phoneVariacoesCliente : null,
+            p_limit: searchFetchLimit,
+          }
+        )
+        if (!rpcErr && Array.isArray(rpcRows)) {
+          todosClientes.push(...rpcRows)
         } else {
-          todosClientes.push(...(chunkRows || []))
+          if (rpcErr) {
+            console.warn('[listarConversas] RPC clientes sem conversa (fallback ilike):', rpcErr.message || rpcErr)
+          }
+          const { data: chunkRows, error: chunkErr } = await supabase
+            .from('clientes')
+            .select('id, nome, pushname, telefone, foto_perfil')
+            .eq('company_id', cid)
+            .or(buildClienteSearchOr(palavraTrim))
+            .order('nome', { ascending: true, nullsFirst: false })
+            .range(0, searchFetchLimit - 1)
+          if (chunkErr) {
+            console.warn('[listarConversas] carregar clientes sem conversa:', chunkErr.message || chunkErr)
+          } else {
+            todosClientes.push(...(chunkRows || []))
+          }
         }
       }
       const { instances: companyInstances } = await listWhatsappInstances(cid)
@@ -2691,6 +2733,7 @@ exports.listarConversas = async (req, res) => {
             telefone: cl.telefone || '',
             tipo: 'cliente',
             contato_nome: getDisplayName(cl) || null,
+            pushname: cl.pushname || null,
             foto_perfil: cl.foto_perfil || null,
             sem_conversa: true,
             mensagens: [],
@@ -2712,6 +2755,7 @@ exports.listarConversas = async (req, res) => {
             telefone: cl.telefone || '',
             tipo: 'cliente',
             contato_nome: getDisplayName(cl) || null,
+            pushname: cl.pushname || null,
             foto_perfil: cl.foto_perfil || null,
             sem_conversa: true,
             whatsapp_instance_id: inst?.id ?? null,
@@ -4118,7 +4162,7 @@ exports.detalharChat = async (req, res) => {
         nome_contato_cache,
         foto_perfil_contato_cache,
         cliente_id,
-        clientes!conversas_cliente_fk ( id, nome, pushname, telefone, observacoes, foto_perfil, company_id ),
+        clientes!conversas_cliente_fk ( id, nome, pushname, telefone, observacoes, foto_perfil, company_id, cliente_tags ( tag_id, tags ( id, nome, cor ) ) ),
         usuarios!conversas_atendente_fk ( id, nome ),
         departamentos ( id, nome ),
         conversa_tags (
@@ -4395,7 +4439,7 @@ exports.detalharChat = async (req, res) => {
         foto_grupo: isGroup ? (conversa.foto_grupo ?? null) : null,
         atendente_nome: conversa.usuarios?.nome ?? null,
         setor: conversa.departamentos?.nome ?? null,
-        tags: (conversa.conversa_tags || []).map((ct) => ct.tags).filter(Boolean),
+        tags: mergeConversaClienteTags(conversa),
         mensagens: mensagensFormatadas,
         next_cursor:
           hasMoreFromDb && oldestDbRow
