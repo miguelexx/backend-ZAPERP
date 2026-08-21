@@ -72,6 +72,57 @@ async function getOrCreateTag(supabase, companyId, nomeTag, cache) {
 }
 
 /**
+ * Torna as etiquetas do cliente IGUAIS às da planilha (planilha manda): remove os vínculos que
+ * não estão no conjunto-alvo e adiciona os que faltam. Assim, quando um aluno passa de "5º Ano"
+ * para "8º Ano", a etiqueta antiga sai e não fica "aparecendo duas".
+ *
+ * Guarda de segurança: só remove quando a linha da planilha trouxe PELO MENOS uma etiqueta.
+ * Linha sem etiqueta não apaga o que já existe — evita zerar todo mundo por uma planilha
+ * incompleta/sem a coluna de série.
+ *
+ * @returns {Promise<{ vinculadas:number, removidas:number }>}
+ */
+async function syncClienteTags(supabase, companyId, clienteId, targetTagIds) {
+  const alvo = new Set(
+    (Array.isArray(targetTagIds) ? targetTagIds : [])
+      .map((id) => Number(id))
+      .filter((id) => Number.isFinite(id))
+  )
+  let vinculadas = 0
+  let removidas = 0
+
+  const { data: atuaisRows } = await supabase
+    .from('cliente_tags')
+    .select('tag_id')
+    .eq('company_id', companyId)
+    .eq('cliente_id', clienteId)
+
+  const atuais = new Set((Array.isArray(atuaisRows) ? atuaisRows : []).map((r) => Number(r.tag_id)))
+
+  // Remove as que não estão na planilha (apenas quando a planilha trouxe etiquetas).
+  if (alvo.size > 0) {
+    const remover = [...atuais].filter((id) => !alvo.has(id))
+    if (remover.length > 0) {
+      const { error } = await supabase
+        .from('cliente_tags')
+        .delete()
+        .eq('company_id', companyId)
+        .eq('cliente_id', clienteId)
+        .in('tag_id', remover)
+      if (!error) removidas += remover.length
+    }
+  }
+
+  // Adiciona as que faltam.
+  for (const tagId of alvo) {
+    if (atuais.has(tagId)) continue
+    if (await linkClienteTag(supabase, companyId, clienteId, tagId)) vinculadas++
+  }
+
+  return { vinculadas, removidas }
+}
+
+/**
  * Vincula a tag ao cliente se ainda não estiver vinculada.
  * @returns {Promise<boolean>} true se um novo vínculo foi criado
  */
@@ -119,6 +170,7 @@ async function executarImportacao(supabase, companyId, plano) {
   let clientesJaExistentes = 0
   let tagsVinculadas = 0
   let tagsCriadas = 0
+  let tagsRemovidas = 0
   const falhas = []
 
   for (const entry of entries) {
@@ -144,21 +196,35 @@ async function executarImportacao(supabase, companyId, plano) {
       if (created === true) clientesImportados++
       else clientesJaExistentes++
 
-      // 2) tags das séries → cria as que faltam, vincula as ausentes (sem apagar existentes)
+      // 2) tags das séries → a planilha manda: cliente fica só com as etiquetas da linha atual.
+      //    Resolve os ids-alvo (criando as que faltam) e depois sincroniza (remove as antigas
+      //    que saíram da planilha + adiciona as novas). Assim 5º→8º não deixa etiqueta órfã.
+      const targetTagIds = []
       for (const nomeTag of entry.tags || []) {
         try {
           const { id: tagId, criada } = await getOrCreateTag(supabase, cid, nomeTag, tagCache)
           if (!tagId) continue
           if (criada) tagsCriadas++
-          const vinculou = await linkClienteTag(supabase, cid, clienteId, tagId)
-          if (vinculou) tagsVinculadas++
+          targetTagIds.push(tagId)
         } catch (tagErr) {
           falhas.push({
             telefone: entry.telefone,
             nome: entry.nome,
-            motivo: `Erro ao vincular tag "${nomeTag}": ${tagErr.message || tagErr}`,
+            motivo: `Erro ao resolver tag "${nomeTag}": ${tagErr.message || tagErr}`,
           })
         }
+      }
+
+      try {
+        const { vinculadas, removidas } = await syncClienteTags(supabase, cid, clienteId, targetTagIds)
+        tagsVinculadas += vinculadas
+        tagsRemovidas += removidas
+      } catch (syncErr) {
+        falhas.push({
+          telefone: entry.telefone,
+          nome: entry.nome,
+          motivo: `Erro ao sincronizar etiquetas: ${syncErr.message || syncErr}`,
+        })
       }
     } catch (err) {
       falhas.push({
@@ -179,6 +245,7 @@ async function executarImportacao(supabase, companyId, plano) {
       clientesJaExistentes,
       tagsCriadas,
       tagsVinculadas,
+      tagsRemovidas,
       linhasIgnoradas: Array.isArray(plano?.ignored) ? plano.ignored.length : 0,
       conflitos: Array.isArray(plano?.conflicts) ? plano.conflicts.length : 0,
       falhas: falhas.length,
@@ -193,4 +260,5 @@ module.exports = {
   executarImportacao,
   getOrCreateTag,
   linkClienteTag,
+  syncClienteTags,
 }

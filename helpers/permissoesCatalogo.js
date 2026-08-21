@@ -57,7 +57,13 @@ const PERMISSOES_CATALOGO = [
 
   // --- TAGS ---
   { codigo: 'tags.ver', nome: 'Ver tags', descricao: 'Listar tags da empresa', categoria: 'Tags', perfis: ['admin', 'supervisor', 'atendente'] },
-  { codigo: 'tags.gerenciar', nome: 'Gerenciar tags', descricao: 'Criar, editar e excluir tags', categoria: 'Tags', perfis: ['admin', 'supervisor'] }
+  { codigo: 'tags.gerenciar', nome: 'Gerenciar tags', descricao: 'Criar, editar e excluir tags', categoria: 'Tags', perfis: ['admin', 'supervisor'] },
+
+  // --- DISPARO DE MENSAGENS ---
+  { codigo: 'disparo.ver', nome: 'Ver campanhas', descricao: 'Acessar o módulo Disparo de Mensagens', categoria: 'Disparo de Mensagens', perfis: ['admin'] },
+  { codigo: 'disparo.criar', nome: 'Criar campanha', descricao: 'Criar novas campanhas de disparo', categoria: 'Disparo de Mensagens', perfis: ['admin'] },
+  { codigo: 'disparo.editar', nome: 'Editar campanha', descricao: 'Editar campanhas em rascunho', categoria: 'Disparo de Mensagens', perfis: ['admin'] },
+  { codigo: 'disparo.arquivar', nome: 'Arquivar campanha', descricao: 'Arquivar e restaurar campanhas', categoria: 'Disparo de Mensagens', perfis: ['admin'] }
 ]
 
 const PERMISSOES_POR_CODIGO = Object.fromEntries(

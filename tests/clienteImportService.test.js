@@ -21,15 +21,18 @@ function makeFakeSupabase() {
   let linkSeq = 1
 
   function from(table) {
-    const filters = []
+    const preds = []
     let payload = null
+    let op = 'select'
     const builder = {
       _table: table,
       select() { return builder },
-      insert(data) { payload = data; return builder },
-      eq(col, val) { filters.push([col, val]); return builder },
-      match(obj) { Object.entries(obj).forEach(([k, v]) => filters.push([k, v])); return builder },
-      _matches(row) { return filters.every(([c, v]) => row[c] === v) },
+      insert(data) { payload = data; op = 'insert'; return builder },
+      delete() { op = 'delete'; return builder },
+      eq(col, val) { preds.push((row) => row[col] === val); return builder },
+      in(col, arr) { const set = new Set(arr); preds.push((row) => set.has(row[col])); return builder },
+      match(obj) { Object.entries(obj).forEach(([k, v]) => preds.push((row) => row[k] === v)); return builder },
+      _matches(row) { return preds.every((p) => p(row)) },
       async maybeSingle() {
         const row = db[table].find((r) => builder._matches(r))
         return { data: row ? { ...row } : null, error: null }
@@ -46,9 +49,9 @@ function makeFakeSupabase() {
         const row = db[table].find((r) => builder._matches(r))
         return { data: row ? { ...row } : null, error: row ? null : { message: 'not found' } }
       },
-      // insert sem .select() encadeado (cliente_tags): retorna thenable
+      // Await direto no builder: insert (cliente_tags), delete, ou select em lista.
       then(resolve) {
-        if (payload && table === 'cliente_tags') {
+        if (op === 'insert' && payload && table === 'cliente_tags') {
           // simula UNIQUE(company_id, cliente_id, tag_id)
           const dup = db.cliente_tags.find(
             (r) => r.company_id === payload.company_id && r.cliente_id === payload.cliente_id && r.tag_id === payload.tag_id
@@ -58,7 +61,13 @@ function makeFakeSupabase() {
           db.cliente_tags.push(novo)
           return resolve({ data: novo, error: null })
         }
-        return resolve({ data: null, error: null })
+        if (op === 'delete') {
+          const antes = db[table].length
+          db[table] = db[table].filter((r) => !builder._matches(r))
+          return resolve({ data: null, error: null, count: antes - db[table].length })
+        }
+        // select em lista: devolve todas as linhas que casam
+        return resolve({ data: db[table].filter((r) => builder._matches(r)).map((r) => ({ ...r })), error: null })
       },
     }
     return builder
@@ -135,6 +144,54 @@ describe('clienteImportService — execução', () => {
 
     expect(res.resumo.tagsVinculadas).toBe(0)
     expect(sb.__db.cliente_tags).toHaveLength(1)
+  })
+
+  it('planilha manda: aluno que virou 8º perde a etiqueta antiga de 5º (não fica duas)', async () => {
+    getOrCreateCliente.mockResolvedValue({ cliente_id: 10, created: false })
+    const sb = makeFakeSupabase()
+    sb.__db.tags.push({ id: 1, nome: '5º Ano', cor: null, company_id: 7 })
+    sb.__db.tags.push({ id: 2, nome: '8º Ano', cor: null, company_id: 7 })
+    sb.__db.cliente_tags.push({ id: 1, company_id: 7, cliente_id: 10, tag_id: 1 }) // 5º antigo
+
+    const res = await executarImportacao(sb, 7, plano([
+      { telefone: '5534999991234', nome: 'João', tags: ['8º Ano'] },
+    ]))
+
+    expect(res.resumo.tagsRemovidas).toBe(1)
+    expect(res.resumo.tagsVinculadas).toBe(1)
+    // cliente fica SÓ com o 8º (tag_id 2)
+    expect(sb.__db.cliente_tags.map((r) => r.tag_id)).toEqual([2])
+  })
+
+  it('linha sem etiqueta NÃO apaga as etiquetas existentes (guarda contra planilha incompleta)', async () => {
+    getOrCreateCliente.mockResolvedValue({ cliente_id: 10, created: false })
+    const sb = makeFakeSupabase()
+    sb.__db.tags.push({ id: 1, nome: '5º Ano', cor: null, company_id: 7 })
+    sb.__db.cliente_tags.push({ id: 1, company_id: 7, cliente_id: 10, tag_id: 1 })
+
+    const res = await executarImportacao(sb, 7, plano([
+      { telefone: '5534999991234', nome: 'João', tags: [] },
+    ]))
+
+    expect(res.resumo.tagsRemovidas).toBe(0)
+    expect(sb.__db.cliente_tags).toHaveLength(1)
+  })
+
+  it('preserva outras etiquetas do cliente que também estão na planilha (só tira as ausentes)', async () => {
+    getOrCreateCliente.mockResolvedValue({ cliente_id: 10, created: false })
+    const sb = makeFakeSupabase()
+    sb.__db.tags.push({ id: 1, nome: '5º Ano', cor: null, company_id: 7 })
+    sb.__db.tags.push({ id: 2, nome: '8º Ano', cor: null, company_id: 7 })
+    sb.__db.tags.push({ id: 3, nome: 'Bolsista', cor: null, company_id: 7 })
+    sb.__db.cliente_tags.push({ id: 1, company_id: 7, cliente_id: 10, tag_id: 1 }) // 5º (sai)
+    sb.__db.cliente_tags.push({ id: 2, company_id: 7, cliente_id: 10, tag_id: 3 }) // Bolsista (fica)
+
+    const res = await executarImportacao(sb, 7, plano([
+      { telefone: '5534999991234', nome: 'João', tags: ['8º Ano', 'Bolsista'] },
+    ]))
+
+    expect(res.resumo.tagsRemovidas).toBe(1) // só o 5º
+    expect(sb.__db.cliente_tags.map((r) => r.tag_id).sort()).toEqual([2, 3])
   })
 
   it('mesma tag em vários contatos é criada uma única vez (cache) e vinculada a todos', async () => {

@@ -40,6 +40,9 @@ const DEFAULT_CONFIG = {
     finalizar_por_ausencia_mensagem: '',
     finalizar_por_ausencia_reabrir_automaticamente: true,
     finalizar_por_ausencia_reabrir_sem_chatbot: true,
+    redirecionar_sem_resposta_ativo: false,
+    redirecionar_sem_resposta_minutos: 5,
+    redirecionar_sem_resposta_departamento_id: null,
   },
   bot_global: {
     ativo: false,

@@ -80,6 +80,7 @@ const { startAdminAtendimentoAlertaScheduler } = require('./services/adminAtendi
 const { startAtendimentoSemRespostaScheduler } = require('./services/atendimentoSemRespostaScheduler')
 const { startProdutosSyncScheduler } = require('./services/produtosSyncScheduler')
 const { startPendingOutboundReconciliationScheduler } = require('./services/pendingOutboundReconciliationScheduler')
+const { startTriageRedirectScheduler } = require('./services/triageRedirectScheduler')
 const { usuarioPodeVerGrupo } = require('./helpers/departamentoGruposHelper')
 
 async function canUserJoinConversationRoom({ company_id, user_id, role, departamento_ids, conversa_id }) {
@@ -399,6 +400,7 @@ server.listen(PORT, '0.0.0.0', () => {
     startAtendimentoSemRespostaScheduler(io)
     startProdutosSyncScheduler()
     startPendingOutboundReconciliationScheduler(io)
+    startTriageRedirectScheduler(io)
     const {
       startInboundMediaRetryScheduler,
       startInboundMediaDueRetryScheduler,

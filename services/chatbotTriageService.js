@@ -341,6 +341,12 @@ const DEFAULT_CHATBOT_CONFIG = {
   finalizar_por_ausencia_mensagem: '',
   finalizar_por_ausencia_reabrir_automaticamente: true,
   finalizar_por_ausencia_reabrir_sem_chatbot: true,
+  // Redirecionamento por falta de resposta ao menu de triagem (backend scheduler).
+  // Após enviar o menu de boas-vindas, se o cliente não responder dentro do prazo,
+  // a conversa é encaminhada automaticamente para o setor padrão. Desligado por padrão.
+  redirecionar_sem_resposta_ativo: false,
+  redirecionar_sem_resposta_minutos: 5,
+  redirecionar_sem_resposta_departamento_id: null,
 }
 
 /**
@@ -450,6 +456,15 @@ function validateChatbotConfig(raw) {
     finalizar_por_ausencia_mensagem: String(src.finalizar_por_ausencia_mensagem || '').trim(),
     finalizar_por_ausencia_reabrir_automaticamente: src.finalizar_por_ausencia_reabrir_automaticamente !== false,
     finalizar_por_ausencia_reabrir_sem_chatbot: src.finalizar_por_ausencia_reabrir_sem_chatbot !== false,
+    redirecionar_sem_resposta_ativo: !!src.redirecionar_sem_resposta_ativo,
+    redirecionar_sem_resposta_minutos: (() => {
+      const n = Number(src.redirecionar_sem_resposta_minutos ?? DEFAULT_CHATBOT_CONFIG.redirecionar_sem_resposta_minutos ?? 5)
+      return Number.isFinite(n) ? Math.max(1, Math.min(1440, Math.round(n))) : 5
+    })(),
+    redirecionar_sem_resposta_departamento_id: (() => {
+      const n = Number(src.redirecionar_sem_resposta_departamento_id)
+      return Number.isFinite(n) && n > 0 ? Math.round(n) : null
+    })(),
     intervaloEnvioSegundos: (() => {
       const v = src.intervaloEnvioSegundos ?? DEFAULT_CHATBOT_CONFIG.intervaloEnvioSegundos ?? 3
       const n = Number(v)
