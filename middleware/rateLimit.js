@@ -59,9 +59,10 @@ const loginLimiter = limiter({
   message: 'Muitas tentativas de login. Aguarde 1 minuto e tente novamente.',
 })
 
+// UltraMSG não envia HMAC — rate limit é camada complementar de proteção.
 const webhookLimiter = limiter({
   windowMs: 60 * 1000,
-  max: numberFromEnv('WEBHOOK_RATE_LIMIT_MAX', 60000),
+  max: numberFromEnv('WEBHOOK_RATE_LIMIT_MAX', 3000),
 })
 
 // apiLimiter: usa user_id+company_id como chave quando o JWT está presente,

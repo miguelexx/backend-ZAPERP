@@ -3600,6 +3600,50 @@ exports.receberZapi = async (req, res) => {
 
       console.log('✅ Mensagem salva no sistema:', { conversa_id, mensagem_id: mensagemSalva.id, phone: phone?.slice(-6), direcao: fromMe ? 'out' : 'in' })
       if (fromMe) console.log('📤 Espelhamento: mensagem enviada pelo celular registrada no sistema')
+
+      // Etapa 8 Disparo: opt-out exact match + vínculo de resposta (best-effort; não bloqueia webhook)
+      if (!fromMe && !isGroup && mensagemFoiInseridaPeloWebhook && mensagemSalva?.id && company_id) {
+        const phoneForDisparo = phone
+        const textoForDisparo = mensagemSalva.texto || texto || ''
+        const msgIdDisparo = mensagemSalva.id
+        const convIdDisparo = conversa_id || mensagemSalva.conversa_id
+        const instanciaDisparo = whatsapp_instance_id || null
+        const ioDisparo = req.app?.get?.('io') || null
+        setImmediate(() => {
+          Promise.resolve()
+            .then(async () => {
+              try {
+                const { processInboundOptOut } = require('../services/disparoOptOutService')
+                await processInboundOptOut({
+                  companyId: company_id,
+                  telefone: phoneForDisparo,
+                  texto: textoForDisparo,
+                  mensagemId: msgIdDisparo,
+                  conversaId: convIdDisparo,
+                  instanciaId: instanciaDisparo,
+                  io: ioDisparo,
+                })
+              } catch (e) {
+                console.warn('[disparo:optout] hook:', e?.message || e)
+              }
+              try {
+                const { vincularRespostaInbound } = require('../services/disparoRespostaService')
+                await vincularRespostaInbound({
+                  companyId: company_id,
+                  telefone: phoneForDisparo,
+                  mensagemId: msgIdDisparo,
+                  conversaId: convIdDisparo,
+                  instanciaId: instanciaDisparo,
+                  io: ioDisparo,
+                })
+              } catch (e) {
+                console.warn('[disparo:resposta] hook:', e?.message || e)
+              }
+            })
+            .catch(() => {})
+        })
+      }
+
       logZapiCert({
         companyId: company_id,
         instanceId,

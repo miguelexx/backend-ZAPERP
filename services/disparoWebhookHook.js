@@ -37,14 +37,16 @@ function timestampsParaStatus(novoStatus, agora) {
   return patch
 }
 
-async function carregarItemFila({ filaItemId, referenceId, companyId }) {
+const FILA_ITEM_SELECT = 'id, company_id, campanha_id, execucao_id, status, reference_id, provider_message_id'
+
+async function carregarItemFila({ filaItemId, referenceId, providerMessageId, companyId }) {
   const cid = Number(companyId)
   if (!cid) return null
 
   if (filaItemId) {
     const { data, error } = await supabase
       .from('disparo_fila_itens')
-      .select('id, company_id, campanha_id, execucao_id, status, reference_id, provider_message_id')
+      .select(FILA_ITEM_SELECT)
       .eq('id', filaItemId)
       .eq('company_id', cid)
       .maybeSingle()
@@ -55,12 +57,26 @@ async function carregarItemFila({ filaItemId, referenceId, companyId }) {
   if (referenceId) {
     const { data, error } = await supabase
       .from('disparo_fila_itens')
-      .select('id, company_id, campanha_id, execucao_id, status, reference_id, provider_message_id')
+      .select(FILA_ITEM_SELECT)
       .eq('reference_id', referenceId)
       .eq('company_id', cid)
       .maybeSingle()
     if (error) throw error
     return data
+  }
+
+  if (providerMessageId) {
+    const pid = String(providerMessageId).trim()
+    if (pid) {
+      const { data, error } = await supabase
+        .from('disparo_fila_itens')
+        .select(FILA_ITEM_SELECT)
+        .eq('provider_message_id', pid)
+        .eq('company_id', cid)
+        .maybeSingle()
+      if (error) throw error
+      return data
+    }
   }
 
   return null
@@ -77,16 +93,31 @@ async function aplicarStatusDisparoFromWebhook({
   io = null,
 }) {
   const ref = String(referenceId ?? '').trim()
-  if (!ref.startsWith('disp-')) return { ok: false, ignored: 'not_disp_reference' }
+  const refDisp = ref.startsWith('disp-')
+  const pid = providerMessageId ? String(providerMessageId).trim() : ''
 
-  const filaItemId = parseDispReferenceId(ref)
-  if (!filaItemId) return { ok: false, ignored: 'invalid_reference' }
+  if (!refDisp && !pid) {
+    return { ok: false, ignored: 'not_disp_reference' }
+  }
+
+  const filaItemIdFromRef = refDisp ? parseDispReferenceId(ref) : null
+  if (refDisp && !filaItemIdFromRef) {
+    return { ok: false, ignored: 'invalid_reference' }
+  }
 
   const novoStatus = mapAckToFilaStatus(status)
   if (!novoStatus) return { ok: false, ignored: 'status_not_mapped', status }
 
-  const item = await carregarItemFila({ filaItemId, referenceId: ref, companyId })
-  if (!item) return { ok: false, ignored: 'item_not_found', filaItemId }
+  let item = null
+  if (filaItemIdFromRef) {
+    item = await carregarItemFila({ filaItemId: filaItemIdFromRef, referenceId: ref, companyId })
+  }
+  if (!item && pid) {
+    item = await carregarItemFila({ providerMessageId: pid, companyId })
+  }
+  if (!item) {
+    return { ok: false, ignored: 'item_not_found', filaItemId: filaItemIdFromRef ?? null }
+  }
 
   if (!podeAvancarStatusFila(item.status, novoStatus)) {
     return {
@@ -107,7 +138,7 @@ async function aplicarStatusDisparoFromWebhook({
   if (providerMessageId && !item.provider_message_id) {
     updates.provider_message_id = String(providerMessageId)
   }
-  if (!item.reference_id) {
+  if (!item.reference_id && refDisp) {
     updates.reference_id = ref
   }
 

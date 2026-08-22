@@ -11,6 +11,13 @@ const EVENTS = {
   ITEM_ATUALIZADO: 'disparo_item_atualizado',
   INSTANCIA_DESCONECTADA: 'disparo_instancia_desconectada',
   LIMITE_ATINGIDO: 'disparo_limite_atingido',
+  OPTOUT_REGISTRADO: 'disparo_optout_registrado',
+  OPTOUT_REATIVADO: 'disparo_optout_reativado',
+  RESPOSTA_VINCULADA: 'disparo_resposta_vinculada',
+  /** Aliases Etapa 8 (nomes canônicos curtos) */
+  OPTOUT: 'disparo_optout',
+  RESPOSTA: 'disparo_resposta',
+  RECONCILIADO: 'disparo_reconciliado',
 }
 
 function emitDisparo(io, companyId, event, payload) {

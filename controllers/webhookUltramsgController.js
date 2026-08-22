@@ -33,6 +33,12 @@ function normalizeUltramsgToZapi(body) {
   if (eventType === 'message_ack' || eventType === 'webhook_message_ack') {
     const msgId = data.id ?? data.sid ?? data.msgId ?? null
     const ids = msgId ? [String(msgId).trim()] : []
+    const referenceId =
+      body.referenceId
+      ?? data.referenceId
+      ?? body.ultramsgReferenceId
+      ?? data.ultramsgReferenceId
+      ?? null
     return {
       instanceId: body.instanceId ?? body.instance_id,
       instance_id: body.instanceId ?? body.instance_id,
@@ -41,7 +47,9 @@ function normalizeUltramsgToZapi(body) {
       id: msgId,
       ack: data.ack ?? data.status ?? 'pending',
       status: mapUltramsgAckToStatus(data.ack ?? data.status),
-      ids
+      ids,
+      referenceId,
+      ultramsgReferenceId: referenceId,
     }
   }
 
@@ -314,7 +322,15 @@ async function handleWebhookUltramsg(req, res) {
     if (eventType === 'message_ack' || eventType === 'webhook_message_ack') {
       const normalized = normalizeUltramsgToZapi(body)
       if (!normalized) return res.status(200).json({ ok: true })
-      req.body = { ...normalized, type: 'MessageStatusCallback', instanceId: body.instanceId, instance_id: body.instanceId }
+      const refId = normalized.referenceId || body.referenceId || null
+      req.body = {
+        ...normalized,
+        type: 'MessageStatusCallback',
+        instanceId: body.instanceId,
+        instance_id: body.instanceId,
+        referenceId: refId,
+        ultramsgReferenceId: normalized.ultramsgReferenceId || refId,
+      }
       return webhookCoreController.statusZapi(req, res)
     }
 
@@ -349,3 +365,4 @@ async function handleWebhookUltramsg(req, res) {
 }
 
 exports.handleWebhookUltramsg = handleWebhookUltramsg
+exports._test = { normalizeUltramsgToZapi }

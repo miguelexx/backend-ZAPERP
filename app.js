@@ -120,8 +120,10 @@ if (process.env.TRUST_PROXY === '1' || process.env.NODE_ENV === 'production') {
 // =====================================================
 // JSON + urlencoded parsers — UltraMSG pode enviar application/json ou form-urlencoded
 // verify: mantém rawBody em Buffer (útil para verificação HMAC de webhooks, se aplicável)
+// limit: webhook payload bound — evita bodies JSON excessivamente grandes
 // =====================================================
 app.use(express.json({
+  limit: '512kb',
   verify: (req, res, buf) => {
     try { req.rawBody = buf } catch (_) {}
   }

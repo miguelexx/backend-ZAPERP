@@ -6,6 +6,7 @@ const {
   classificarErro,
   calcularProximaTentativa,
   podeAvancarStatusFila,
+  FILA_STATUS_RANK,
   PERMANENTE_CODES,
 } = require('../helpers/disparoFilaRetryHelper')
 
@@ -136,10 +137,32 @@ describe('disparoFilaRetryHelper — podeAvancarStatusFila', () => {
     expect(podeAvancarStatusFila('entregue', 'enviada')).toBe(false)
   })
 
-  it('lida é terminal — não avança nem regride', () => {
+  it('lida pode avançar para respondida', () => {
+    expect(podeAvancarStatusFila('lida', 'respondida')).toBe(true)
+    expect(podeAvancarStatusFila('lida', 'entregue')).toBe(false)
+  })
+
+  it('respondida é terminal', () => {
+    expect(podeAvancarStatusFila('respondida', 'lida')).toBe(false)
+    expect(podeAvancarStatusFila('respondida', 'respondida')).toBe(true)
+  })
+
+  it('pendente pode ir para ignorada/optout', () => {
+    expect(podeAvancarStatusFila('pendente', 'ignorada')).toBe(true)
+    expect(podeAvancarStatusFila('pendente', 'optout')).toBe(true)
+  })
+
+  it('optout é terminal', () => {
+    expect(podeAvancarStatusFila('optout', 'ignorada')).toBe(false)
+  })
+
+  it('incerta pode avançar para respondida', () => {
+    expect(podeAvancarStatusFila('incerta', 'respondida')).toBe(true)
+  })
+
+  it('lida é terminal para webhook — não regride para entregue', () => {
     expect(podeAvancarStatusFila('lida', 'entregue')).toBe(false)
     expect(podeAvancarStatusFila('lida', 'enviada')).toBe(false)
-    expect(podeAvancarStatusFila('lida', 'lida')).toBe(false)
   })
 
   it('incerta pode avançar para enviada/entregue/lida/falhou', () => {
@@ -163,5 +186,27 @@ describe('disparoFilaRetryHelper — podeAvancarStatusFila', () => {
   it('webhook fora de ordem: entregue não volta para enviada', () => {
     expect(podeAvancarStatusFila('entregue', 'enviada')).toBe(false)
     expect(podeAvancarStatusFila('lida', 'entregue')).toBe(false)
+  })
+})
+
+describe('disparoFilaRetryHelper — FILA_STATUS_RANK respondida/optout', () => {
+  it('respondida e optout têm rank terminal 6', () => {
+    expect(FILA_STATUS_RANK.respondida).toBe(6)
+    expect(FILA_STATUS_RANK.optout).toBe(6)
+  })
+
+  it('entregue/lida podem avançar para respondida', () => {
+    expect(podeAvancarStatusFila('entregue', 'respondida')).toBe(true)
+    expect(podeAvancarStatusFila('lida', 'respondida')).toBe(true)
+  })
+
+  it('respondida não regride para lida/entregue', () => {
+    expect(podeAvancarStatusFila('respondida', 'lida')).toBe(false)
+    expect(podeAvancarStatusFila('respondida', 'entregue')).toBe(false)
+  })
+
+  it('pendente pode ir para optout (Etapa 8)', () => {
+    expect(podeAvancarStatusFila('pendente', 'optout')).toBe(true)
+    expect(podeAvancarStatusFila('optout', 'pendente')).toBe(false)
   })
 })

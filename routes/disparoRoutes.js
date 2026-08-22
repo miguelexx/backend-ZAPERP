@@ -9,6 +9,7 @@ const limitesController = require('../controllers/disparoLimitesController')
 const revisaoController = require('../controllers/disparoRevisaoController')
 const execController = require('../controllers/disparoExecucaoController')
 const exclController = require('../controllers/disparoExclusaoController')
+const etapa8Controller = require('../controllers/disparoEtapa8Controller')
 const { uploadDisparoFile } = require('../middleware/uploadDisparoFile')
 const { uploadDisparoMidia } = require('../middleware/uploadDisparoMidia')
 
@@ -127,5 +128,20 @@ router.get('/exclusoes', exclController.listar)
 router.post('/exclusoes', exclController.adicionar)
 router.post('/exclusoes/importar', exclController.importar)
 router.delete('/exclusoes/:exclId', exclController.remover)
+
+// ── Etapa 8: opt-out, respostas, reconciliação, relatório ───────────────────
+router.get('/config/optout', etapa8Controller.obterConfigOptOut)
+router.put('/config/optout', etapa8Controller.salvarConfigOptOut)
+router.get('/optouts', etapa8Controller.listarOptOuts)
+router.post('/optouts/reativar', etapa8Controller.reativarOptOut)
+router.get('/campanhas/:id/respostas', etapa8Controller.listarRespostasCampanha)
+router.get('/campanhas/:id/incertos', etapa8Controller.listarIncertosCampanha)
+router.post('/campanhas/:id/reconciliar', etapa8Controller.reconciliarCampanha)
+router.post('/campanhas/:id/incertos/:itemId/decisao', etapa8Controller.decisaoManualIncerto)
+router.get('/campanhas/:id/relatorio', etapa8Controller.relatorioCampanha)
+router.get('/campanhas/:id/relatorio/instancias', etapa8Controller.relatorioInstancias)
+router.get('/campanhas/:id/relatorio/variacoes', etapa8Controller.relatorioVariacoes)
+router.get('/campanhas/:id/relatorio/erros', etapa8Controller.relatorioErros)
+router.get('/campanhas/:id/export/:tipo', etapa8Controller.exportarCampanha)
 
 module.exports = router

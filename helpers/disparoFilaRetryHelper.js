@@ -77,21 +77,35 @@ const FILA_STATUS_RANK = {
   enviada: 3,
   entregue: 4,
   lida: 5,
+  respondida: 6,
   falhou: 6,
   incerta: 3,
   ignorada: 6,
   cancelada: 6,
+  optout: 6,
 }
 
 function podeAvancarStatusFila(atual, novo) {
   const a = FILA_STATUS_RANK[atual]
   const b = FILA_STATUS_RANK[novo]
   if (a == null || b == null) return false
+
+  if (atual === 'optout') return false
+
   // falhou/cancelada/ignorada são terminais (exceto reconciliação especial)
   if (['falhou', 'cancelada', 'ignorada'].includes(atual) && novo !== atual) return false
-  if (atual === 'lida') return false
+
+  if (atual === 'respondida' && novo !== 'respondida') return false
+
+  if (atual === 'lida') return novo === 'respondida'
+
+  if (['pendente', 'reservada', 'enviando'].includes(atual) && ['ignorada', 'optout'].includes(novo)) {
+    return true
+  }
+
   if (atual === 'entregue' && novo === 'enviada') return false
-  return b >= a || (atual === 'incerta' && ['enviada', 'entregue', 'lida', 'falhou'].includes(novo))
+
+  return b >= a || (atual === 'incerta' && ['enviada', 'entregue', 'lida', 'respondida', 'falhou'].includes(novo))
 }
 
 module.exports = {

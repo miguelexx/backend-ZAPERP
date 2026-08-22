@@ -163,4 +163,42 @@ describe('disparoWebhookHook — aplicarStatusDisparoFromWebhook', () => {
     expect(r.ok).toBe(false)
     expect(r.ignored).toBe('item_not_found')
   })
+
+  it('fallback por provider_message_id quando reference ausente', async () => {
+    let updatePayload = null
+    supabase.from.mockImplementation((table) => {
+      if (table === 'disparo_fila_itens') {
+        const selectChain = mockChain({ data: itemEnviada, error: null })
+        const updateChain = mockChain({
+          data: { ...itemEnviada, status: 'entregue' },
+          error: null,
+        })
+        updateChain.update = jest.fn((payload) => {
+          updatePayload = payload
+          return updateChain
+        })
+        let callCount = 0
+        return {
+          select: jest.fn(() => selectChain),
+          update: updateChain.update,
+          eq: jest.fn(function eq() {
+            callCount += 1
+            if (callCount > 2) return updateChain
+            return this || updateChain
+          }),
+        }
+      }
+      return mockChain()
+    })
+
+    const r = await aplicarStatusDisparoFromWebhook({
+      providerMessageId: 'wamid-1',
+      status: 'delivered',
+      companyId: 10,
+    })
+
+    expect(r.ok).toBe(true)
+    expect(r.status).toBe('entregue')
+    expect(updatePayload?.status).toBe('entregue')
+  })
 })
