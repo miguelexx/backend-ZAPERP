@@ -4298,6 +4298,21 @@ exports.statusZapi = async (req, res) => {
       } else {
         console.log('[ULTRAMSG] Status', statusNorm, 'para id', idStr.slice(0, 20) + '… — mensagem não encontrada no banco (ignorado)')
       }
+
+      const ref = body?.ultramsgReferenceId ?? body?.referenceId ?? null
+      if (String(ref || '').startsWith('disp-')) {
+        try {
+          await require('../services/disparoWebhookHook').aplicarStatusDisparoFromWebhook({
+            referenceId: ref,
+            providerMessageId: idStr,
+            status: statusNorm,
+            companyId: company_id,
+            io,
+          })
+        } catch (e) {
+          console.warn('[disparo] webhook status hook:', e?.message || e)
+        }
+      }
     }
 
     return res.status(200).json({ ok: true })

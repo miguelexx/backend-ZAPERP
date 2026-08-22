@@ -7,6 +7,8 @@ const instController = require('../controllers/disparoInstanciasController')
 const varController = require('../controllers/disparoVariacoesController')
 const limitesController = require('../controllers/disparoLimitesController')
 const revisaoController = require('../controllers/disparoRevisaoController')
+const execController = require('../controllers/disparoExecucaoController')
+const exclController = require('../controllers/disparoExclusaoController')
 const { uploadDisparoFile } = require('../middleware/uploadDisparoFile')
 const { uploadDisparoMidia } = require('../middleware/uploadDisparoMidia')
 
@@ -105,5 +107,25 @@ router.get('/campanhas/:id/revisao/exportar', revisaoController.exportarResumo)
 router.post('/campanhas/:id/revisao/validar', revisaoController.validarRevisao)
 router.post('/campanhas/:id/revisao/confirmar', revisaoController.confirmarCampanha)
 router.post('/campanhas/:id/revisao/voltar-edicao', revisaoController.voltarEdicao)
+
+// ── Execução / fila (Etapa 7) ───────────────────────────────────────────────
+router.post('/campanhas/:id/execucao/iniciar', execController.iniciarCampanha)
+router.get('/campanhas/:id/execucao', execController.obterExecucao)
+router.get('/campanhas/:id/execucao/resumo', execController.resumoExecucao)
+router.get('/campanhas/:id/execucao/fila', execController.listarFila)
+router.get('/campanhas/:id/execucao/eventos', execController.listarEventos)
+router.get('/campanhas/:id/execucao/instancias', execController.saudeInstancias)
+router.post('/campanhas/:id/execucao/pausar', execController.pausar)
+router.post('/campanhas/:id/execucao/continuar', execController.continuar)
+router.post('/campanhas/:id/execucao/cancelar', execController.cancelar)
+router.post('/campanhas/:id/execucao/reprocessar-falhas', execController.reprocessarFalhas)
+router.post('/execucao/emergencia', execController.emergencia)
+router.get('/worker/saude', execController.saudeWorker)
+
+// ── Exclusões globais (Etapa 7) ───────────────────────────────────────────────
+router.get('/exclusoes', exclController.listar)
+router.post('/exclusoes', exclController.adicionar)
+router.post('/exclusoes/importar', exclController.importar)
+router.delete('/exclusoes/:exclId', exclController.remover)
 
 module.exports = router
