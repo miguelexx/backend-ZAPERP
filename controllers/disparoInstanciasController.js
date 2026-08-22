@@ -89,19 +89,55 @@ exports.listarInstanciasDisponiveis = async (req, res) => {
       return m
     }, new Map())
 
-    const result = (instancias ?? []).map(inst => {
+    const result = await Promise.all((instancias ?? []).map(async (inst) => {
       const sel = selMap.get(inst.id)
+      let statusLive = inst.status || 'unknown'
+      let conectada = statusLive === 'connected' && inst.ativo !== false
+
+      // Status no banco pode ficar desatualizado (ex.: "unknown") enquanto o atendimento já usa a instância.
+      // Consulta leve ao UltraMSG para refletir conexão real na UI de seleção.
+      if (inst.ativo) {
+        try {
+          const { getStatus } = require('../services/ultramsgIntegrationService')
+          const live = await getStatus(companyId, { whatsappInstanceId: inst.id })
+          if (live && !live.error) {
+            if (live.connected === true) {
+              statusLive = 'connected'
+              conectada = true
+              if (inst.status !== 'connected') {
+                supabase
+                  .from('whatsapp_instances')
+                  .update({ status: 'connected', status_at: new Date().toISOString() })
+                  .eq('id', inst.id)
+                  .eq('company_id', companyId)
+                  .then(() => {})
+                  .catch(() => {})
+              }
+            } else if (statusLive === 'connected') {
+              statusLive = 'disconnected'
+              conectada = false
+            }
+          }
+        } catch (_) { /* best-effort */ }
+      }
+
       return {
         ...inst,
+        status: statusLive,
         selecionada: !!sel,
         ativa_na_campanha: sel?.ativa ?? false,
         quantidade_configurada: sel?.quantidade ?? null,
         percentual_configurado: sel?.percentual ?? null,
         ordem: sel?.ordem ?? 0,
         destinatarios_atribuidos: contagemPorInstancia.get(inst.id) ?? 0,
-        disponivel: inst.status === 'connected' && inst.ativo,
+        /** Pode ser marcada na campanha (instância ativa da empresa). */
+        selecionavel: inst.ativo === true,
+        /** Conectada de fato (banco ou status live). */
+        conectada,
+        /** Compat: seleção liberada para ativas; aviso visual se não conectada. */
+        disponivel: inst.ativo === true,
       }
-    })
+    }))
 
     res.json({ instancias: result })
   } catch (err) {
@@ -623,13 +659,34 @@ async function calcularPreviewDistribuicao(campanhaId, companyId, modo, configur
     return { plano: { total, instancias: [], nao_atribuidos: total }, erros }
   }
 
-  // Verifica status (conectadas) das instâncias
+  // Verifica status (conectadas) das instâncias — revalida ao vivo se o banco estiver desatualizado
   const { data: instStatus } = await supabase
     .from('whatsapp_instances')
-    .select('id, nome, status, display_phone, telefone_conectado')
+    .select('id, nome, status, display_phone, telefone_conectado, ativo')
     .in('id', instanciasAtivas)
     .eq('company_id', companyId)
   const statusMap = (instStatus ?? []).reduce((m, i) => { m[i.id] = i; return m }, {})
+
+  try {
+    const { getStatus } = require('../services/ultramsgIntegrationService')
+    await Promise.all(instanciasAtivas.map(async (id) => {
+      const row = statusMap[id]
+      if (!row || row.status === 'connected') return
+      try {
+        const live = await getStatus(companyId, { whatsappInstanceId: id })
+        if (live?.connected === true) {
+          statusMap[id] = { ...row, status: 'connected' }
+          supabase
+            .from('whatsapp_instances')
+            .update({ status: 'connected', status_at: new Date().toISOString() })
+            .eq('id', id)
+            .eq('company_id', companyId)
+            .then(() => {})
+            .catch(() => {})
+        }
+      } catch (_) { /* ignore */ }
+    }))
+  } catch (_) { /* getStatus indisponível */ }
 
   const desconectadas = instanciasAtivas.filter(id => statusMap[id]?.status !== 'connected')
   if (desconectadas.length) {
