@@ -1,9 +1,7 @@
 const supabase = require('../config/supabase')
+const { statusPermiteEdicao, mensagemBloqueioEdicao, STATUS_TODOS } = require('../helpers/disparoStatusHelper')
 
-const CAMPANHA_STATUS_VALIDOS = new Set([
-  'rascunho', 'configurando', 'agendada',
-  'em_execucao', 'pausada', 'concluida', 'cancelada', 'arquivada',
-])
+const CAMPANHA_STATUS_VALIDOS = STATUS_TODOS
 
 const ORDER_FIELDS = { criado: 'criado_em', atualizado: 'atualizado_em' }
 const DEFAULT_PAGE_LIMIT = 20
@@ -166,8 +164,8 @@ exports.editarCampanha = async (req, res) => {
 
     if (fetchErr) throw fetchErr
     if (!existente) return res.status(404).json({ error: 'Campanha não encontrada.' })
-    if (existente.status !== 'rascunho' && existente.status !== 'configurando') {
-      return res.status(422).json({ error: 'Apenas campanhas em rascunho ou configurando podem ser editadas.' })
+    if (!statusPermiteEdicao(existente.status)) {
+      return res.status(422).json({ error: mensagemBloqueioEdicao(existente.status) })
     }
 
     const nome = cleanText(req.body.nome || '', 180)

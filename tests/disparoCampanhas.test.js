@@ -156,7 +156,7 @@ describe('Disparo de Mensagens — segurança e isolamento', () => {
       .send({ nome: 'Alterado' })
 
     expect(res.status).toBe(422)
-    expect(res.body.error).toMatch(/rascunho/i)
+    expect(res.body.error).toMatch(/rascunho|congelada|alterar|configurando/i)
   })
 
   // ── Arquivar ────────────────────────────────────────────────────────────────

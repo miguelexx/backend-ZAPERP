@@ -12,6 +12,7 @@ const {
   detectMappingAuto,
   PREVIEW_SAMPLE,
 } = require('../helpers/disparoPlanilhaHelper')
+const { statusPermiteEdicao, mensagemBloqueioEdicao } = require('../helpers/disparoStatusHelper')
 
 // ─── Helpers locais ──────────────────────────────────────────────────────────
 
@@ -23,7 +24,11 @@ function positiveInt(v) {
 async function marcarRevisaoDistribuicao(campanhaId, companyId) {
   try {
     await supabase.from('disparo_campanhas')
-      .update({ distribuicao_revisao: true, atualizado_em: new Date().toISOString() })
+      .update({
+        distribuicao_revisao: true,
+        limites_revisao: true,
+        atualizado_em: new Date().toISOString(),
+      })
       .eq('id', campanhaId)
       .eq('company_id', companyId)
       .eq('distribuicao_confirmada', true)
@@ -62,9 +67,6 @@ async function carregarCampanha(campanhaId, companyId, res) {
 }
 
 /** Verifica se o status permite edição de destinatários. */
-function statusPermiteEdicao(status) {
-  return status === 'rascunho' || status === 'configurando'
-}
 
 /** Retorna conjunto de telefones normalizados já na campanha (para dedup). */
 async function telefonesNaCampanha(campanhaId) {

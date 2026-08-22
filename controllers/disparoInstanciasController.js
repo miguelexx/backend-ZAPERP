@@ -5,6 +5,7 @@
  */
 
 const supabase = require('../config/supabase')
+const { statusPermiteEdicao, mensagemBloqueioEdicao } = require('../helpers/disparoStatusHelper')
 
 // ─── Helpers locais ──────────────────────────────────────────────────────────
 
@@ -31,9 +32,6 @@ async function carregarCampanha(campanhaId, companyId, res) {
   return data
 }
 
-function statusPermiteEdicao(status) {
-  return status === 'rascunho' || status === 'configurando'
-}
 
 const INSTANCIA_SELECT = [
   'id', 'company_id', 'nome', 'descricao', 'instance_id',

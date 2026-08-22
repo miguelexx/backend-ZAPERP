@@ -5,6 +5,8 @@ const campanhasController = require('../controllers/disparoController')
 const destController = require('../controllers/disparoDestinatariosController')
 const instController = require('../controllers/disparoInstanciasController')
 const varController = require('../controllers/disparoVariacoesController')
+const limitesController = require('../controllers/disparoLimitesController')
+const revisaoController = require('../controllers/disparoRevisaoController')
 const { uploadDisparoFile } = require('../middleware/uploadDisparoFile')
 const { uploadDisparoMidia } = require('../middleware/uploadDisparoMidia')
 
@@ -79,5 +81,29 @@ router.get('/campanhas/:id/variacoes/variaveis/:chave/sem-valor', varController.
 // ── Variações — preview e resumo ──────────────────────────────────────────────
 router.get('/campanhas/:id/variacoes/preview/:destId', varController.previewDestinatario)
 router.get('/campanhas/:id/variacoes/resumo', varController.resumoMensagens)
+
+// ── Limites / horários / agendamento (Etapa 5) ───────────────────────────────
+router.get('/campanhas/:id/limites', limitesController.obterConfigLimites)
+router.get('/campanhas/:id/limites/revisao', limitesController.necessidadeRevisao)
+router.get('/campanhas/:id/limites/conflitos', limitesController.localizarConflitos)
+router.post('/campanhas/:id/limites', limitesController.salvarLimitesGlobais)
+router.post('/campanhas/:id/limites/instancias', limitesController.salvarLimitesInstancias)
+router.post('/campanhas/:id/limites/janelas', limitesController.salvarJanelas)
+router.post('/campanhas/:id/limites/agendamento', limitesController.salvarAgendamento)
+router.post('/campanhas/:id/limites/agendamento/cancelar', limitesController.cancelarAgendamento)
+router.post('/campanhas/:id/limites/validar', limitesController.validarConfigLimites)
+router.post('/campanhas/:id/limites/conflitos', limitesController.localizarConflitos)
+router.post('/campanhas/:id/limites/simular', limitesController.simular)
+router.post('/campanhas/:id/limites/confirmar', limitesController.confirmarLimites)
+
+// ── Revisão final (Etapa 6) ───────────────────────────────────────────────────
+router.get('/campanhas/:id/revisao', revisaoController.obterRevisao)
+router.get('/campanhas/:id/revisao/bloqueio', revisaoController.estadoBloqueio)
+router.get('/campanhas/:id/revisao/historico', revisaoController.historicoRevisoes)
+router.get('/campanhas/:id/revisao/previa', revisaoController.previaDestinatarios)
+router.get('/campanhas/:id/revisao/exportar', revisaoController.exportarResumo)
+router.post('/campanhas/:id/revisao/validar', revisaoController.validarRevisao)
+router.post('/campanhas/:id/revisao/confirmar', revisaoController.confirmarCampanha)
+router.post('/campanhas/:id/revisao/voltar-edicao', revisaoController.voltarEdicao)
 
 module.exports = router

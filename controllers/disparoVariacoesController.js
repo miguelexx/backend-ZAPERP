@@ -10,6 +10,7 @@ const crypto = require('crypto')
 const supabase = require('../config/supabase')
 const { empresaUsaR2, getPresignExpiresSeconds } = require('../config/r2')
 const { putObject, deleteObject, presignGetUrl } = require('../services/storage/r2Client')
+const { statusPermiteEdicao, mensagemBloqueioEdicao } = require('../helpers/disparoStatusHelper')
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -34,8 +35,6 @@ async function carregarCampanha(campanhaId, companyId, res) {
   if (!data) { res.status(404).json({ error: 'Campanha não encontrada.' }); return null }
   return data
 }
-
-function statusPermiteEdicao(status) { return status === 'rascunho' || status === 'configurando' }
 
 const MODOS_VARIACAO = new Set(['unica', 'equilibrada', 'percentual', 'manual'])
 const TIPOS_MENSAGEM = new Set(['texto', 'imagem', 'video', 'audio', 'documento'])
@@ -104,24 +103,71 @@ function buildMidiaUrl(variacao) {
 
 async function salvarMidiaVariacao(companyId, campanhaId, variacaoId, midiaInfo) {
   if (!midiaInfo) return { storage_key: null, url_disco: null }
-  const { buffer, nomeOriginal, mime, ext, tamanho } = midiaInfo
+  const { buffer, tempPath, mime, ext } = midiaInfo
   const uuid = crypto.randomBytes(12).toString('hex')
   const nomeArquivo = `${uuid}${ext ? '.' + ext : ''}`
 
+  // Preferir stream/arquivo temporário — evita carregar 100 MB na RAM
+  let dataBuf = buffer
+  if (!dataBuf && tempPath) {
+    dataBuf = fs.readFileSync(tempPath)
+  }
+  if (!dataBuf) throw Object.assign(new Error('Arquivo de mídia ausente.'), { status: 400 })
+
   if (empresaUsaR2(companyId)) {
     const key = `media/disparo/${companyId}/${campanhaId}/${variacaoId}/${nomeArquivo}`
-    await putObject(key, buffer, mime || 'application/octet-stream')
+    await putObject(key, dataBuf, mime || 'application/octet-stream')
     return { storage_key: key, url_disco: null }
   }
 
-  // Fallback: disco local
   const { getUploadsRoot } = require('../config/uploadsRoot')
   const dir = path.join(getUploadsRoot(), 'disparo', String(companyId), String(campanhaId), String(variacaoId))
   fs.mkdirSync(dir, { recursive: true })
   const filePath = path.join(dir, nomeArquivo)
-  fs.writeFileSync(filePath, buffer)
+  if (tempPath && fs.existsSync(tempPath)) {
+    fs.copyFileSync(tempPath, filePath)
+  } else {
+    fs.writeFileSync(filePath, dataBuf)
+  }
   const relPath = path.join('disparo', String(companyId), String(campanhaId), String(variacaoId), nomeArquivo).replace(/\\/g, '/')
   return { storage_key: null, url_disco: relPath }
+}
+
+/**
+ * Padroniza texto vs legenda por tipo de mensagem.
+ * - texto: usa `texto`; legenda limpa
+ * - imagem/video/documento: conteúdo editorial em `legenda`; `texto` preservado se já existir (compat)
+ * - audio: não exige legenda
+ * Compatibilidade: se midia recebe só `texto` (legado), copia para legenda.
+ */
+function normalizarTextoLegenda(tipo, textoIn, legendaIn, { legacyMigrate = true } = {}) {
+  let texto = cleanText(textoIn ?? '', 5000) || null
+  let legenda = cleanText(legendaIn ?? '', 1024) || null
+
+  if (tipo === 'texto') {
+    return { texto, legenda: null }
+  }
+  if (tipo === 'audio') {
+    // Áudio não exige legenda; se vier texto legado, move para legenda opcional
+    if (legacyMigrate && !legenda && texto) {
+      legenda = texto.slice(0, 1024)
+      texto = null
+    }
+    return { texto: null, legenda }
+  }
+  // imagem | video | documento
+  if (legacyMigrate && !legenda && texto) {
+    legenda = texto.slice(0, 1024)
+  }
+  return { texto: null, legenda }
+}
+
+/** Conteúdo usado para variáveis / preview conforme o tipo. */
+function conteudoEditorial(variacao) {
+  const tipo = variacao?.tipo_mensagem || 'texto'
+  if (tipo === 'texto') return variacao.texto || ''
+  // Compat: legenda preferencial; fallback para texto antigo
+  return variacao.legenda || variacao.texto || ''
 }
 
 async function removerMidiaVariacao(variacao) {
@@ -207,13 +253,14 @@ exports.criarVariacao = async (req, res) => {
       .eq('campanha_id', campanhaId).eq('company_id', companyId)
 
     const nome = cleanText(req.body.nome || `Variação ${String.fromCharCode(65 + (count || 0))}`, 100)
+    const { texto, legenda } = normalizarTextoLegenda(tipo, req.body.texto, req.body.legenda)
     const row = {
       company_id: companyId,
       campanha_id: campanhaId,
       nome,
       tipo_mensagem: tipo,
-      texto: cleanText(req.body.texto || '', 5000) || null,
-      legenda: cleanText(req.body.legenda || '', 1024) || null,
+      texto,
+      legenda,
       ordem: (count ?? 0),
       peso: Math.max(0.01, Number(req.body.peso) || 100),
       ativa: true,
@@ -247,12 +294,23 @@ exports.editarVariacao = async (req, res) => {
 
     const updates = {}
     if (req.body.nome !== undefined) updates.nome = cleanText(req.body.nome, 100)
-    if (req.body.texto !== undefined) updates.texto = cleanText(req.body.texto, 5000) || null
-    if (req.body.legenda !== undefined) updates.legenda = cleanText(req.body.legenda, 1024) || null
+
+    const tipoNovo = req.body.tipo_mensagem !== undefined
+      ? String(req.body.tipo_mensagem)
+      : existing.tipo_mensagem
     if (req.body.tipo_mensagem !== undefined) {
       if (!TIPOS_MENSAGEM.has(req.body.tipo_mensagem)) return res.status(400).json({ error: 'Tipo inválido.' })
       updates.tipo_mensagem = req.body.tipo_mensagem
     }
+
+    if (req.body.texto !== undefined || req.body.legenda !== undefined || req.body.tipo_mensagem !== undefined) {
+      const textoIn = req.body.texto !== undefined ? req.body.texto : existing.texto
+      const legendaIn = req.body.legenda !== undefined ? req.body.legenda : existing.legenda
+      const norm = normalizarTextoLegenda(tipoNovo, textoIn, legendaIn)
+      updates.texto = norm.texto
+      updates.legenda = norm.legenda
+    }
+
     if (req.body.peso !== undefined) updates.peso = Math.max(0.01, Number(req.body.peso) || 100)
     if (req.body.percentual !== undefined) updates.percentual = req.body.percentual === null ? null : Math.max(0, Math.min(100, Number(req.body.percentual)))
     if (req.body.ativa !== undefined) updates.ativa = Boolean(req.body.ativa)
@@ -606,10 +664,23 @@ exports.previewDestinatario = async (req, res) => {
     }
 
     const padrao = campanha.variacao_padrao_valores ?? {}
-    const textoOriginal = variacao?.texto ?? ''
-    const legendaOriginal = variacao?.legenda ?? ''
+    const tipo = variacao?.tipo_mensagem || 'texto'
+    // Compat: registros antigos podem ter texto onde deveria ser legenda
+    let textoOriginal = variacao?.texto ?? ''
+    let legendaOriginal = variacao?.legenda ?? ''
+    if (tipo !== 'texto' && !legendaOriginal && textoOriginal) {
+      legendaOriginal = textoOriginal
+      textoOriginal = ''
+    }
+    if (tipo === 'texto') legendaOriginal = ''
+    if (tipo === 'audio' && !legendaOriginal) {
+      // áudio sem legenda é válido
+    }
+
     const textoSubstituido = substituirVariaveis(textoOriginal, dest, padrao)
     const legendaSubstituida = substituirVariaveis(legendaOriginal, dest, padrao)
+    const editorialOriginal = tipo === 'texto' ? textoOriginal : legendaOriginal
+    const editorialSubstituido = tipo === 'texto' ? textoSubstituido : legendaSubstituida
 
     const varsUsadasTexto = extrairVariaveisUsadas(textoOriginal)
     const varsUsadasLegenda = extrairVariaveisUsadas(legendaOriginal)
@@ -628,6 +699,8 @@ exports.previewDestinatario = async (req, res) => {
       texto_substituido: textoSubstituido,
       legenda_original: legendaOriginal,
       legenda_substituida: legendaSubstituida,
+      conteudo_editorial: editorialOriginal,
+      conteudo_editorial_substituido: editorialSubstituido,
       variaveis_usadas: varsUsadas,
       variaveis_ausentes: varsAusentes,
       instancia_id: dest.instancia_id,
@@ -799,7 +872,11 @@ async function obterVariacaoPorId(id, campanhaId, companyId) {
 async function marcarRevisaoVariacoes(campanhaId, companyId, campanha) {
   if (campanha?.variacao_confirmada) {
     await supabase.from('disparo_campanhas')
-      .update({ variacao_revisao: true, atualizado_em: new Date().toISOString() })
+      .update({
+        variacao_revisao: true,
+        limites_revisao: true,
+        atualizado_em: new Date().toISOString(),
+      })
       .eq('id', campanhaId).eq('company_id', companyId).eq('variacao_confirmada', true)
   }
 }
@@ -901,5 +978,8 @@ async function aplicarDistribuicaoVariacoes(campanhaId, companyId, modo, plano, 
 
 // ─── Hook: revisão ao alterar destinatários ───────────────────────────────────
 exports._marcarRevisaoVariacoes = marcarRevisaoVariacoes
+exports._normalizarTextoLegenda = normalizarTextoLegenda
+exports._conteudoEditorial = conteudoEditorial
+
 exports._substituirVariaveis = substituirVariaveis
 exports._extrairVariaveisUsadas = extrairVariaveisUsadas
