@@ -211,15 +211,15 @@ describe('[E3] Validação de parâmetros', () => {
 describe('[E3] Algoritmos de distribuição (unitário)', () => {
   // Testa lógica pura de cálculo via chamada HTTP com mock
 
-  function makeCampanhaAtivaMock() {
+  function makeCampanhaAtivaMock(statusOverride = 'connected') {
     // Mock chain que retorna campanha configurando e destinatários
     const instanciasConfig = [
       { instancia_id: 10, ordem: 0, ativa: true },
       { instancia_id: 20, ordem: 1, ativa: true },
     ]
     const instanciaStatus = [
-      { id: 10, nome: 'Inst A', status: 'connected', display_phone: '11999990001', telefone_conectado: null },
-      { id: 20, nome: 'Inst B', status: 'connected', display_phone: '11999990002', telefone_conectado: null },
+      { id: 10, nome: 'Inst A', status: statusOverride, display_phone: '11999990001', telefone_conectado: null, ativo: true },
+      { id: 20, nome: 'Inst B', status: statusOverride, display_phone: '11999990002', telefone_conectado: null, ativo: true },
     ]
     const destinatarios = Array.from({ length: 10 }, (_, i) => ({ id: i + 1, instancia_id: null }))
 
@@ -289,6 +289,29 @@ describe('[E3] Algoritmos de distribuição (unitário)', () => {
       instancias.forEach(i => expect(i.quantidade).toBe(5))
       expect(res.body.plano.nao_atribuidos).toBe(0)
     }
+  })
+
+  it('preview com status unknown permite avançar (aviso, sem erro)', async () => {
+    makeCampanhaAtivaMock('unknown')
+    const res = await request(app)
+      .post('/api/disparo/campanhas/1/instancias/preview-distribuicao')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ modo: 'equilibrada', configuracoes: [] })
+    expect(res.status).toBe(200)
+    expect(res.body.erros || []).toHaveLength(0)
+    expect((res.body.avisos || []).length).toBeGreaterThan(0)
+    expect(res.body.plano?.nao_atribuidos).toBe(0)
+  })
+
+  it('preview com status disconnected bloqueia com erro', async () => {
+    makeCampanhaAtivaMock('disconnected')
+    const res = await request(app)
+      .post('/api/disparo/campanhas/1/instancias/preview-distribuicao')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ modo: 'equilibrada', configuracoes: [] })
+    expect(res.status).toBe(200)
+    expect((res.body.erros || []).length).toBeGreaterThan(0)
+    expect(res.body.erros[0]).toMatch(/desconectada/i)
   })
 
   it('preview quantidade com soma correta', async () => {

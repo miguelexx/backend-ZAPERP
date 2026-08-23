@@ -42,6 +42,26 @@ const INSTANCIA_SELECT = [
 const BATCH_SIZE = 500
 const MODOS_VALIDOS = new Set(['equilibrada', 'quantidade', 'percentual', 'manual'])
 
+/** Status que impedem confirmar distribuição no wizard (conexão claramente offline). */
+const STATUS_INSTANCIA_BLOQUEIA = new Set([
+  'disconnected', 'desconectado', 'desconectada',
+  'qr_code', 'qrcode', 'qr',
+  'logged_out', 'logout', 'inactive', 'inativa',
+])
+
+function statusInstanciaNormalizado(status) {
+  return String(status || 'unknown').toLowerCase().trim()
+}
+
+function instanciaClaramenteOffline(status) {
+  return STATUS_INSTANCIA_BLOQUEIA.has(statusInstanciaNormalizado(status))
+}
+
+function instanciaConsideradaConectada(status) {
+  const s = statusInstanciaNormalizado(status)
+  return s === 'connected' || s === 'authenticated' || s === 'standby'
+}
+
 // ─── 1. Listar instâncias disponíveis da empresa ──────────────────────────────
 
 /**
@@ -92,7 +112,8 @@ exports.listarInstanciasDisponiveis = async (req, res) => {
     const result = await Promise.all((instancias ?? []).map(async (inst) => {
       const sel = selMap.get(inst.id)
       let statusLive = inst.status || 'unknown'
-      let conectada = statusLive === 'connected' && inst.ativo !== false
+      let conectada = instanciaConsideradaConectada(statusLive) && inst.ativo !== false
+      let statusIncerto = !conectada && !instanciaClaramenteOffline(statusLive)
 
       // Status no banco pode ficar desatualizado (ex.: "unknown") enquanto o atendimento já usa a instância.
       // Consulta leve ao UltraMSG para refletir conexão real na UI de seleção.
@@ -104,6 +125,7 @@ exports.listarInstanciasDisponiveis = async (req, res) => {
             if (live.connected === true) {
               statusLive = 'connected'
               conectada = true
+              statusIncerto = false
               if (inst.status !== 'connected') {
                 supabase
                   .from('whatsapp_instances')
@@ -113,11 +135,14 @@ exports.listarInstanciasDisponiveis = async (req, res) => {
                   .then(() => {})
                   .catch(() => {})
               }
-            } else if (statusLive === 'connected') {
+            } else {
+              // Só marca offline se a API respondeu com sucesso e connected=false
               statusLive = 'disconnected'
               conectada = false
+              statusIncerto = false
             }
           }
+          // Se live.error: mantém status do banco (incerto) — não bloqueia a seleção
         } catch (_) { /* best-effort */ }
       }
 
@@ -134,6 +159,8 @@ exports.listarInstanciasDisponiveis = async (req, res) => {
         selecionavel: inst.ativo === true,
         /** Conectada de fato (banco ou status live). */
         conectada,
+        /** Status ainda não confirmado ao vivo — permitido no wizard. */
+        status_incerto: statusIncerto,
         /** Compat: seleção liberada para ativas; aviso visual se não conectada. */
         disponivel: inst.ativo === true,
       }
@@ -289,9 +316,9 @@ exports.previewDistribuicao = async (req, res) => {
     }
 
     const configuracoes = Array.isArray(req.body.configuracoes) ? req.body.configuracoes : []
-    const { plano, erros } = await calcularPreviewDistribuicao(campanhaId, companyId, modo, configuracoes)
+    const { plano, erros, avisos } = await calcularPreviewDistribuicao(campanhaId, companyId, modo, configuracoes)
 
-    res.json({ plano, erros, modo })
+    res.json({ plano, erros, avisos: avisos || [], modo })
   } catch (err) {
     console.error('[disparo:instancias] previewDistribuicao', err)
     res.status(500).json({ error: 'Erro ao calcular preview.' })
@@ -326,16 +353,17 @@ exports.confirmarDistribuicao = async (req, res) => {
     const configuracoes = Array.isArray(req.body.configuracoes) ? req.body.configuracoes : []
     const preservar = req.body.preservar_existentes === true
 
-    const { plano, erros } = await calcularPreviewDistribuicao(campanhaId, companyId, modo, configuracoes, preservar)
+    const { plano, erros, avisos } = await calcularPreviewDistribuicao(campanhaId, companyId, modo, configuracoes, preservar)
 
     if (erros.length) {
-      return res.status(422).json({ error: erros[0], erros, plano })
+      return res.status(422).json({ error: erros[0], erros, avisos: avisos || [], plano })
     }
     if (plano.nao_atribuidos > 0 && modo !== 'manual') {
       return res.status(422).json({
         error: `${plano.nao_atribuidos} destinatário(s) sem instância atribuída.`,
         plano,
         erros,
+        avisos: avisos || [],
       })
     }
 
@@ -353,7 +381,7 @@ exports.confirmarDistribuicao = async (req, res) => {
       })
       .eq('id', campanhaId).eq('company_id', companyId)
 
-    res.json({ ok: true, plano, modo })
+    res.json({ ok: true, plano, modo, avisos: avisos || [] })
   } catch (err) {
     console.error('[disparo:instancias] confirmarDistribuicao', err)
     res.status(500).json({ error: 'Erro ao confirmar distribuição.' })
@@ -656,24 +684,27 @@ async function calcularPreviewDistribuicao(campanhaId, companyId, modo, configur
 
   if (!instanciasAtivas.length) {
     erros.push('Selecione ao menos uma instância antes de distribuir.')
-    return { plano: { total, instancias: [], nao_atribuidos: total }, erros }
+    return { plano: { total, instancias: [], nao_atribuidos: total }, erros, avisos: [] }
   }
 
-  // Verifica status (conectadas) das instâncias — revalida ao vivo se o banco estiver desatualizado
+  // Status: bloqueia só offline claro; unknown/incerto permite wizard (revalida no envio)
   const { data: instStatus } = await supabase
     .from('whatsapp_instances')
     .select('id, nome, status, display_phone, telefone_conectado, ativo')
     .in('id', instanciasAtivas)
     .eq('company_id', companyId)
   const statusMap = (instStatus ?? []).reduce((m, i) => { m[i.id] = i; return m }, {})
+  const avisos = []
 
   try {
     const { getStatus } = require('../services/ultramsgIntegrationService')
     await Promise.all(instanciasAtivas.map(async (id) => {
       const row = statusMap[id]
-      if (!row || row.status === 'connected') return
+      if (!row) return
+      if (instanciaConsideradaConectada(row.status)) return
       try {
         const live = await getStatus(companyId, { whatsappInstanceId: id })
+        if (live?.error) return
         if (live?.connected === true) {
           statusMap[id] = { ...row, status: 'connected' }
           supabase
@@ -683,17 +714,28 @@ async function calcularPreviewDistribuicao(campanhaId, companyId, modo, configur
             .eq('company_id', companyId)
             .then(() => {})
             .catch(() => {})
+        } else if (live && live.connected === false) {
+          statusMap[id] = { ...row, status: 'disconnected' }
         }
       } catch (_) { /* ignore */ }
     }))
   } catch (_) { /* getStatus indisponível */ }
 
-  const desconectadas = instanciasAtivas.filter(id => statusMap[id]?.status !== 'connected')
-  if (desconectadas.length) {
-    desconectadas.forEach(id => {
-      const inst = statusMap[id]
+  for (const id of instanciasAtivas) {
+    const inst = statusMap[id]
+    if (inst?.ativo === false) {
+      erros.push(`Instância "${inst?.nome ?? id}" está inativa.`)
+      continue
+    }
+    const st = statusInstanciaNormalizado(inst?.status)
+    if (instanciaClaramenteOffline(st)) {
       erros.push(`Instância "${inst?.nome ?? id}" está desconectada (status: ${inst?.status ?? 'desconhecido'}).`)
-    })
+    } else if (!instanciaConsideradaConectada(st)) {
+      avisos.push(
+        `Instância "${inst?.nome ?? id}" com status ainda não confirmado (${inst?.status || 'unknown'}). `
+        + 'Pode continuar — a conexão será revalidada antes do envio.',
+      )
+    }
   }
 
   // Contagem de destinatários já atribuídos (para modo preservar)
@@ -744,6 +786,7 @@ async function calcularPreviewDistribuicao(campanhaId, companyId, modo, configur
       modo,
     },
     erros,
+    avisos,
   }
 }
 
