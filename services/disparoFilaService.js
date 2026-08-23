@@ -362,6 +362,8 @@ async function recalcularContadores(execucaoId, companyId) {
     total_incertos: 0,
     total_ignorados: 0,
     total_cancelados: 0,
+    total_respondidas: 0,
+    total_optouts: 0,
   }
 
   for (const item of itens ?? []) {
@@ -378,6 +380,16 @@ async function recalcularContadores(execucaoId, companyId) {
         counts.total_enviados += 1
         counts.total_entregues += 1
         counts.total_lidos += 1
+        break
+      case 'respondida':
+        // Já foi enviada; resposta é métrica adicional
+        counts.total_enviados += 1
+        counts.total_entregues += 1
+        counts.total_lidos += 1
+        counts.total_respondidas = (counts.total_respondidas || 0) + 1
+        break
+      case 'optout':
+        counts.total_optouts = (counts.total_optouts || 0) + 1
         break
       case 'falhou':
         counts.total_falhas += 1
@@ -396,6 +408,11 @@ async function recalcularContadores(execucaoId, companyId) {
     }
   }
 
+  // Campos novos podem não existir até migration Etapa 9 — remove se update falhar? Preferir enviar sempre;
+  // PostgREST ignora? Não — remove se undefined. Garantir defaults:
+  if (counts.total_respondidas == null) counts.total_respondidas = 0
+  if (counts.total_optouts == null) counts.total_optouts = 0
+
   const { error: updErr } = await supabase
     .from('disparo_execucoes')
     .update({
@@ -404,7 +421,20 @@ async function recalcularContadores(execucaoId, companyId) {
     })
     .eq('id', execucaoId)
     .eq('company_id', companyId)
-  if (updErr) throw updErr
+  if (updErr) {
+    // Compat pré-migration 9: tenta sem colunas novas
+    if (/total_respondidas|total_optouts/i.test(updErr.message || '')) {
+      const { total_respondidas, total_optouts, ...legacy } = counts
+      const { error: legacyErr } = await supabase
+        .from('disparo_execucoes')
+        .update({ ...legacy, atualizado_em: new Date().toISOString() })
+        .eq('id', execucaoId)
+        .eq('company_id', companyId)
+      if (legacyErr) throw legacyErr
+    } else {
+      throw updErr
+    }
+  }
 
   return counts
 }

@@ -37,7 +37,7 @@ function installRpcMock(handlers = {}) {
 
 function mockChain(result = { data: null, error: null, count: 0 }) {
   const chain = {}
-  const methods = ['select', 'eq', 'in', 'order', 'limit', 'update', 'upsert']
+  const methods = ['select', 'eq', 'in', 'order', 'limit', 'update', 'upsert', 'insert', 'gte', 'lte', 'gt', 'lt', 'neq', 'is', 'not']
   for (const m of methods) chain[m] = jest.fn(() => chain)
   chain.single = jest.fn().mockResolvedValue(result)
   chain.maybeSingle = jest.fn().mockResolvedValue(result)
@@ -211,5 +211,99 @@ describe('disparoWorker — exports para testes', () => {
     expect(typeof worker.recuperarLeases).toBe('function')
     expect(typeof worker.claimItens).toBe('function')
     expect(typeof worker._setIo).toBe('function')
+  })
+})
+
+describe('disparoWorker — errorCodigo EXCLUIDO sem retry', () => {
+  const { enviarItemFila } = require('../services/disparoSendService')
+  let updatePayloads
+
+  beforeEach(() => {
+    jest.clearAllMocks()
+    updatePayloads = []
+    installRpcMock({
+      disparo_try_lock_instancia: () => ({ data: true, error: null }),
+      disparo_unlock_instancia: () => ({ data: null, error: null }),
+    })
+    enviarItemFila.mockResolvedValue({
+      ok: false,
+      error: 'Telefone na lista de exclusão',
+      httpStatus: 403,
+      beforeSend: true,
+      errorCodigo: 'EXCLUIDO',
+    })
+
+    supabase.from.mockImplementation((table) => {
+      const chain = mockChain({ data: null, error: null, count: 0 })
+      if (table === 'disparo_campanha_limites') {
+        return mockChain({
+          data: {
+            max_por_hora: 1000,
+            max_por_dia: 5000,
+            intervalo_min_sec: 0,
+            intervalo_max_sec: 0,
+            fuso_horario: 'America/Sao_Paulo',
+            pausa_auto_desconexao: false,
+          },
+          error: null,
+        })
+      }
+      if (table === 'disparo_campanha_janelas') {
+        return mockChain({ data: [], error: null })
+      }
+      if (table === 'disparo_campanha_instancia_limites') {
+        return mockChain({ data: null, error: null })
+      }
+      if (table === 'disparo_execucoes') {
+        return mockChain({ data: { id: 50, status: 'em_execucao', dry_run: true }, error: null })
+      }
+      if (table === 'whatsapp_instances') {
+        return mockChain({
+          data: { id: 5, status: 'connected', ativo: true, nome: 'A' },
+          error: null,
+        })
+      }
+      if (table === 'disparo_fila_itens') {
+        chain.update = jest.fn((payload) => {
+          updatePayloads.push(payload)
+          return chain
+        })
+        chain.maybeSingle = jest.fn().mockResolvedValue({ data: null, error: null })
+        return chain
+      }
+      if (table === 'disparo_worker_heartbeat') {
+        return mockChain({ data: null, error: null })
+      }
+      return chain
+    })
+    worker._setIo(null)
+  })
+
+  it('marca optout permanente quando send retorna errorCodigo EXCLUIDO', async () => {
+    await worker.processarItem(itemSample)
+
+    const final = updatePayloads.find((p) => p.status === 'optout' && p.erro_codigo === 'EXCLUIDO')
+    expect(final).toBeTruthy()
+    expect(final.erro_classificacao).toBe('permanente')
+    expect(final.optout_em).toBeTruthy()
+    // Não deve voltar para pendente (retry)
+    expect(updatePayloads.some((p) => p.status === 'pendente' && p.erro_codigo === 'EXCLUIDO')).toBe(false)
+  })
+
+  it('marca ignorada quando send retorna errorCodigo ALLOWLIST', async () => {
+    enviarItemFila.mockResolvedValue({
+      ok: false,
+      error: 'Telefone fora da allowlist de testes',
+      httpStatus: 403,
+      beforeSend: true,
+      errorCodigo: 'ALLOWLIST',
+    })
+
+    await worker.processarItem(itemSample)
+
+    const final = updatePayloads.find((p) => p.status === 'ignorada' && p.erro_codigo === 'ALLOWLIST')
+    expect(final).toBeTruthy()
+    expect(final.erro_classificacao).toBe('permanente')
+    expect(final.optout_em).toBeUndefined()
   })
 })

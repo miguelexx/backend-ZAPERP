@@ -30,6 +30,27 @@ describe('disparoFilaRetryHelper — classificarErro', () => {
     expect(r.code).toBe('CREDENCIAL_INVALIDA')
   })
 
+  it('errorCodigo EXCLUIDO/ALLOWLIST (como sendService) → permanente', () => {
+    // sendService devolve errorCodigo; worker deve passar code: result.code || result.errorCodigo
+    const excl = classificarErro({
+      httpStatus: 403,
+      code: undefined || 'EXCLUIDO',
+      message: 'Telefone na lista de exclusão',
+      beforeSend: true,
+    })
+    expect(excl.classificacao).toBe('permanente')
+    expect(excl.code).toBe('EXCLUIDO')
+
+    const allow = classificarErro({
+      httpStatus: 403,
+      code: undefined || 'ALLOWLIST',
+      message: 'Telefone fora da allowlist',
+      beforeSend: true,
+    })
+    expect(allow.classificacao).toBe('permanente')
+    expect(allow.code).toBe('ALLOWLIST')
+  })
+
   it('telefone inválido na mensagem → permanente', () => {
     const r = classificarErro({ message: 'not a whatsapp user' })
     expect(r.classificacao).toBe('permanente')

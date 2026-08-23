@@ -1,0 +1,32 @@
+# Problemas conhecidos e dívida técnica
+
+> Análise estática/testes: 2026-08-23 · `master` · commit-base `66e0771d9f61f840524cd4b0645e742df374a77a`. “Provável” é inferência técnica com evidência local; itens de VPS/provider não foram inventados.
+
+| Estado/risco | Problema e evidência | Impacto / direção de correção |
+|---|---|---|
+| **CONFIRMADO · alto** | Cliente Supabase usa service role (`config/supabase.js`) e ignora RLS; isolamento depende de cada filtro de controller/service. | Uma query sem `company_id` pode vazar/alterar outro tenant. Centralizar contexto, testes de dois tenants e considerar role/RPC restrita. |
+| **CONFIRMADO · alto** | `disparoSaudeController.js`/`helpers/disparoObservabilidade.js` consulta `disparo_worker_heartbeat` global; tabela/migration não traz `company_id`, e rota é admin de qualquer empresa. | Expõe hostname/pid/meta operacionais entre empresas. Definir health restrito global ou heartbeat tenant-scoped, com autorização própria. |
+| **CONFIRMADO · alto** | `middleware/logger.js` registra `req.originalUrl`; `authBearerOrQuery` aceita `access_token` em `/media/proxy`. | JWT em query pode ir a logs. Remover query auth ou redigir query antes do logger. Reprodução: chamada local com token fictício e inspeção de log. |
+| **CONFIRMADO · médio** | JWT checa usuário ativo só no login; `middleware/auth.js` não relê/revoga sessão. | Usuário desativado conserva acesso até expirar. Introduzir versão/revogação/cache de sessão conforme requisito. |
+| **CONFIRMADO · alto operacional** | Socket, presença, rate limit, dedupe rápido, locks e schedulers são in-memory; `ecosystem.config.js` usa uma instância; não há Redis adapter. | Restart perde estado; escala horizontal duplica jobs e fragmenta emits. Adotar coordenação distribuída antes de escalar. |
+| **CONFIRMADO · alto** | Mensagem cruza banco e UltraMSG sem transação distribuída; `chatController.js`, provider, webhook e reconciliadores possuem caminhos de `pending/incerta`. | Timeout/erro entre aceitação e persistência pode duplicar se reenviado. Preservar `referenceId`, provider id, constraints e reconciliação; nunca retry cego. |
+| **CONFIRMADO · médio** | Inbound webhook retorna 500 após falha de processamento, ACK captura e retorna 200; efeitos são parte síncronos e parte `setImmediate`. | Retry pode reordenar eventos/side effects. Fortalecer inbox persistente/idempotência e separar ACK rápido do processamento. |
+| **CONFIRMADO · médio** | Broadcasts para `empresa_<id>` carregam alguns eventos de conversa/campanha (`controllers`, `socket/`). | Tenant está isolado, mas setor/atendente pode receber metadado mais amplo. Usar sala mínima e teste de visibilidade por departamento. |
+| **CONFIRMADO · médio** | `supabase/schema.sql` declara-se contextual e diverge de migrations; CRM interno e `empresas_whatsapp` foram removidos, enquanto `empresa_zapi` foi explicitamente preservada como legado pelas migrations de multi-instância. | Nova IA pode modelar banco errado ou remover fallback ainda necessário. Migrations ordenadas são fonte; validar banco antes de remover compatibilidade. |
+| **CONFIRMADO · médio** | `helpDeskNotificationService.js` e controller consultam `helpdesk_notificacoes`, mas a busca em `supabase/migrations`/`schema.sql` não encontrou criação dessa tabela. | Ambiente novo pode falhar em notificações; localizar origem manual/estado real e criar migration somente após validação. |
+| **PROVÁVEL · médio** | Proxy bloqueia IPv4 privado/localhost e hosts, mas não há resolução DNS fixada nem bloqueio IPv6 privado explícito (`inboundMediaPersistenceService`, media proxy). | DNS rebinding/IPv6 pode contornar SSRF dependendo da pilha. Resolver/validar todos endereços e fixar conexão; adicionar testes. |
+| **PROVÁVEL · médio** | Upload geral valida MIME/extensão, mas magic bytes completos aparecem apenas no upload de Disparo. `/uploads` é público. | Arquivo disfarçado/conteúdo sensível pode ser servido. Aplicar sniffing comum, download autenticado ou storage privado. |
+| **CONFIRMADO · médio** | Etapa 9 de Disparo está não commitada; migration `20260823120000_disparo_etapa9_auditoria.sql` não foi aplicada nesta auditoria. | Código pode esperar tabela/RPC/colunas ausentes. Tratar deploy como incompatível até inventário real. |
+| **CONFIRMADO · baixo/médio** | As 100 suites/1.015 testes passam, mas Jest não encerra um segundo após o resumo e fica com handle aberto, inclusive no rerun isolado de Disparo. | CI/processo pode ficar pendurado. Executar com `--detectOpenHandles`, localizar timer/socket/pool não fechado e corrigir teardown sem desabilitar detecção. |
+| **CONFIRMADO · baixo/médio** | `disparoRevisao.test.js` provoca `TypeError: (configs ?? []).map is not a function` e HTTP 500 no export, mas o teste passa ao checar não exposição de token. | Mock/handler não exercita sucesso real do export e mascara regressão. Corrigir fixture/asserção e testar `200` + schema. |
+| **CONFIRMADO · médio** | Health não contém commit/build e não foi comparado com VPS. | Não é possível provar versão implantada. Injetar `build_sha` no artefato/health. Estado da VPS: **NÃO CONFIRMADO**. |
+| **PROVÁVEL · médio** | Migrations mostram unique completa de conversa por empresa/instância/telefone e depois unique parcial para conversa aberta. | Pode impedir múltiplos históricos onde a intenção seria só uma aberta. Confirmar constraints no banco e regra de histórico antes de mudar. |
+| **CONFIRMADO · segurança** | `.env.example` contém string com aparência de credencial; há `.env` e backup ignorados em artefato local. Valores não foram lidos/copied. | Risco de segredo reutilizado/vazamento local. Revisar histórico, remover exemplo realista e rotacionar por canal seguro. |
+| **CONFIRMADO · baixo** | Default do webhook limiter no código é 3.000/min, comentário do `.env.example` indica outro valor. | Operador pode dimensionar errado. Alinhar documento/exemplo ao código após decisão. |
+
+## Itens solicitados sem evidência suficiente
+
+- Comportamento “diferente após atualizar a página”: arquitetura local sugere perda de estado efêmero, mas nenhum bug específico foi reproduzido — **PENDENTE DE VALIDAÇÃO**.
+- Query lenta em produção: há consultas/agregações amplas e índices nas migrations, porém não houve `EXPLAIN`/telemetria — **NÃO CONFIRMADO**.
+- Listener duplicado em produção: existe risco ao reinstalar handlers, mas nenhum duplicado atual foi comprovado — **NÃO CONFIRMADO**.
+- Divergência local/VPS, taxa de ACK e limites UltraMSG: sem acesso externo — **NÃO CONFIRMADO**.

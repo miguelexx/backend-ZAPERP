@@ -6,7 +6,7 @@
 const supabase = require('../config/supabase')
 const ultramsg = require('./providers/ultramsg')
 const { findOrCreateConversation } = require('../helpers/conversationSync')
-const { telefoneNaAllowlist } = require('../helpers/disparoWorkerConfig')
+const { telefoneNaAllowlist, getDisparoFlags } = require('../helpers/disparoWorkerConfig')
 const { buildDispReferenceId } = require('../helpers/disparoReferenceHelper')
 const {
   _substituirVariaveis: substituirVariaveis,
@@ -350,7 +350,8 @@ async function enviarItemFila(item, { dryRun, liveEnabled, allowlist, timeoutMs,
     }
   }
 
-  const effectiveDryRun = dryRun !== false || !liveEnabled
+  const flags = getDisparoFlags()
+  const effectiveDryRun = dryRun !== false || !liveEnabled || !flags.canSendLive
 
   if (effectiveDryRun) {
     await sleep(DRY_RUN_DELAY_MS)

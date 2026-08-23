@@ -28,6 +28,9 @@ describe('disparoCsvExportHelper', () => {
     expect(escapeCsvCell('+5511999999999')).toBe("'+5511999999999")
     expect(escapeCsvCell('-formula')).toBe("'-formula")
     expect(escapeCsvCell('@cmd')).toBe("'@cmd")
+    expect(escapeCsvCell('\tcmd')).toBe("'\tcmd")
+    // \r dispara quoting CSV além do prefixo de injection
+    expect(escapeCsvCell('\rcmd')).toBe('"\'\rcmd"')
   })
 
   it('escapa aspas e quebras de linha', () => {

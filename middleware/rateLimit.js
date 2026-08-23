@@ -60,6 +60,7 @@ const loginLimiter = limiter({
 })
 
 // UltraMSG não envia HMAC — rate limit é camada complementar de proteção.
+// Ajuste WEBHOOK_RATE_LIMIT_MAX conforme volume (ex.: 1000–5000 req/min); default 3000.
 const webhookLimiter = limiter({
   windowMs: 60 * 1000,
   max: numberFromEnv('WEBHOOK_RATE_LIMIT_MAX', 3000),

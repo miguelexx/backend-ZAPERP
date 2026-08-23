@@ -24,9 +24,23 @@ jest.mock('../services/storage/r2Client', () => ({
   presignGetUrl: jest.fn(),
 }))
 
+jest.mock('../helpers/disparoWorkerConfig', () => {
+  const actual = jest.requireActual('../helpers/disparoWorkerConfig')
+  return {
+    ...actual,
+    getDisparoFlags: jest.fn(() => ({
+      workerEnabled: false,
+      liveEnabled: false,
+      dryRun: true,
+      canSendLive: false,
+    })),
+  }
+})
+
 const supabase = require('../config/supabase')
 const ultramsg = require('../services/providers/ultramsg')
 const { findOrCreateConversation } = require('../helpers/conversationSync')
+const { getDisparoFlags } = require('../helpers/disparoWorkerConfig')
 const { enviarItemFila } = require('../services/disparoSendService')
 
 function mockChain(result = { data: null, error: null }) {
@@ -208,6 +222,12 @@ describe('disparoSendService — dry-run e segurança', () => {
 describe('disparoSendService — live (mock ultramsg)', () => {
   beforeEach(() => {
     jest.clearAllMocks()
+    getDisparoFlags.mockReturnValue({
+      workerEnabled: true,
+      liveEnabled: true,
+      dryRun: false,
+      canSendLive: true,
+    })
     mockContextoCompleto()
     findOrCreateConversation.mockResolvedValue({
       conversa: { id: 999 },
@@ -236,6 +256,25 @@ describe('disparoSendService — live (mock ultramsg)', () => {
       }
       return mockChain({ data: null, error: null })
     })
+  })
+
+  it('canSendLive=false força dry-run mesmo com liveEnabled=true e dryRun=false', async () => {
+    getDisparoFlags.mockReturnValue({
+      workerEnabled: false,
+      liveEnabled: true,
+      dryRun: false,
+      canSendLive: false,
+    })
+
+    const result = await enviarItemFila(itemBase, {
+      dryRun: false,
+      liveEnabled: true,
+      allowlist: [],
+    })
+
+    expect(result.ok).toBe(true)
+    expect(result.dryRun).toBe(true)
+    expect(ultramsg.sendText).not.toHaveBeenCalled()
   })
 
   it('live chama ultramsg.sendText e persiste mensagem', async () => {

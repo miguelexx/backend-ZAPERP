@@ -10,6 +10,7 @@ const revisaoController = require('../controllers/disparoRevisaoController')
 const execController = require('../controllers/disparoExecucaoController')
 const exclController = require('../controllers/disparoExclusaoController')
 const etapa8Controller = require('../controllers/disparoEtapa8Controller')
+const saudeController = require('../controllers/disparoSaudeController')
 const { uploadDisparoFile } = require('../middleware/uploadDisparoFile')
 const { uploadDisparoMidia } = require('../middleware/uploadDisparoMidia')
 
@@ -17,6 +18,9 @@ const router = express.Router()
 
 router.use(auth)
 router.use(adminOnly)
+
+// ── Saúde operacional (Etapa 9) ─────────────────────────────────────────────
+router.get('/saude', saudeController.obterSaude)
 
 // ── Campanhas ────────────────────────────────────────────────────────────────
 router.get('/campanhas/resumo', campanhasController.resumoCampanhas)
@@ -63,7 +67,11 @@ router.post('/campanhas/:id/instancias/mover', instController.moverDestinatarios
 // ── Variações — CRUD ─────────────────────────────────────────────────────────
 router.get('/campanhas/:id/variacoes', varController.listarVariacoes)
 router.post('/campanhas/:id/variacoes', varController.criarVariacao)
-// Rotas de ação com nomes literais devem vir ANTES de :varId para não serem capturadas como parâmetro
+// Rotas literais / com path fixo ANTES de :varId (evita captura indevida)
+router.get('/campanhas/:id/variacoes/variaveis', varController.catalogoVariaveis)
+router.get('/campanhas/:id/variacoes/variaveis/:chave/sem-valor', varController.destinatariosSemVariavel)
+router.get('/campanhas/:id/variacoes/preview/:destId', varController.previewDestinatario)
+router.get('/campanhas/:id/variacoes/resumo', varController.resumoMensagens)
 router.post('/campanhas/:id/variacoes/reordenar', varController.reordenarVariacoes)
 router.post('/campanhas/:id/variacoes/valores-padrao', varController.salvarValoresPadrao)
 router.post('/campanhas/:id/variacoes/preview-distribuicao', varController.previewDistribuicaoVariacoes)
@@ -76,14 +84,6 @@ router.post('/campanhas/:id/variacoes/:varId/midia', uploadDisparoMidia, varCont
 router.patch('/campanhas/:id/variacoes/:varId', varController.editarVariacao)
 router.delete('/campanhas/:id/variacoes/:varId/midia', varController.removerMidia)
 router.delete('/campanhas/:id/variacoes/:varId', varController.excluirVariacao)
-
-// ── Variações — variáveis ────────────────────────────────────────────────────
-router.get('/campanhas/:id/variacoes/variaveis', varController.catalogoVariaveis)
-router.get('/campanhas/:id/variacoes/variaveis/:chave/sem-valor', varController.destinatariosSemVariavel)
-
-// ── Variações — preview e resumo ──────────────────────────────────────────────
-router.get('/campanhas/:id/variacoes/preview/:destId', varController.previewDestinatario)
-router.get('/campanhas/:id/variacoes/resumo', varController.resumoMensagens)
 
 // ── Limites / horários / agendamento (Etapa 5) ───────────────────────────────
 router.get('/campanhas/:id/limites', limitesController.obterConfigLimites)

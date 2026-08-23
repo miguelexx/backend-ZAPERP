@@ -24,12 +24,13 @@ function extractInstanceId(body) {
 
 /**
  * Comparação em tempo constante — previne timing-attacks.
- * Sempre compara buffers de mesmo comprimento (zeroed padding interno do Node).
+ * Retorna false se qualquer lado estiver vazio após trim (caller também valida presença).
+ * Buffers são normalizados ao maior comprimento antes do compare (padding interno do Node).
  */
 function timingSafeEqual(a, b) {
-  const sa = String(a || '')
-  const sb = String(b || '')
-  // Se tamanhos diferentes, cria buffer maior para comparação (sempre constante)
+  const sa = String(a ?? '').trim()
+  const sb = String(b ?? '').trim()
+  if (!sa || !sb) return false
   const maxLen = Math.max(Buffer.byteLength(sa, 'utf8'), Buffer.byteLength(sb, 'utf8'))
   const ba = Buffer.alloc(maxLen)
   const bb = Buffer.alloc(maxLen)

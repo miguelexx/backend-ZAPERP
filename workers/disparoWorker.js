@@ -87,8 +87,8 @@ async function carregarLimitesContexto(item) {
   const [{ data: limites }, { data: janelas }, { data: override }, { data: execucao }] = await Promise.all([
     supabase.from('disparo_campanha_limites').select('*').eq('campanha_id', item.campanha_id).eq('company_id', item.company_id).maybeSingle(),
     supabase.from('disparo_campanha_janelas').select('*').eq('campanha_id', item.campanha_id).eq('company_id', item.company_id),
-    supabase.from('disparo_campanha_instancia_limites').select('*').eq('campanha_id', item.campanha_id).eq('instancia_id', item.instancia_id).maybeSingle(),
-    supabase.from('disparo_execucoes').select('id, status, dry_run').eq('id', item.execucao_id).maybeSingle(),
+    supabase.from('disparo_campanha_instancia_limites').select('*').eq('campanha_id', item.campanha_id).eq('instancia_id', item.instancia_id).eq('company_id', item.company_id).maybeSingle(),
+    supabase.from('disparo_execucoes').select('id, status, dry_run').eq('id', item.execucao_id).eq('company_id', item.company_id).maybeSingle(),
   ])
   return { limites, janelas: janelas || [], override, execucao }
 }
@@ -135,7 +135,8 @@ async function pausarExecucaoAutomatica(item, { tipoPausa, motivo }) {
       company_id: item.company_id,
       campanha_id: item.campanha_id,
       execucao_id: item.execucao_id,
-      tipo: tipoPausa || 'operacional',
+      tipo_pausa: tipoPausa || 'operacional',
+      escopo: 'campanha',
       motivo: String(motivo || '').slice(0, 500),
       iniciado_em: agora,
     })
@@ -291,13 +292,27 @@ async function processarItem(item) {
       return
     }
 
+    // Anti-duplicidade: se já houve envio aceito, não chamar o provedor de novo
+    if (item.provider_message_id || item.enviado_em) {
+      await supabase.from('disparo_fila_itens').update({
+        status: 'incerta',
+        erro_codigo: 'JA_ENVIADO',
+        erro_mensagem: 'Item já possui evidência de envio — requer reconciliação',
+        erro_classificacao: 'temporario',
+        lease_ate: null,
+        worker_id: null,
+        atualizado_em: new Date().toISOString(),
+      }).eq('id', item.id).eq('company_id', item.company_id)
+      return
+    }
+
     // Marca enviando ANTES da chamada (idempotência / incerteza)
     await supabase.from('disparo_fila_itens').update({
       status: 'enviando',
       tentativas: (item.tentativas || 0) + 1,
       lease_ate: new Date(Date.now() + cfg.leaseSeconds * 1000).toISOString(),
       atualizado_em: new Date().toISOString(),
-    }).eq('id', item.id)
+    }).eq('id', item.id).eq('company_id', item.company_id)
 
     await heartbeat({ last_item: item.id })
 
@@ -325,7 +340,7 @@ async function processarItem(item) {
         erro_mensagem: null,
         erro_classificacao: null,
         atualizado_em: new Date().toISOString(),
-      }).eq('id', item.id)
+      }).eq('id', item.id).eq('company_id', item.company_id)
 
       emitDisparo(io, item.company_id, EVENTS.ITEM_ATUALIZADO, {
         campanha_id: item.campanha_id,
@@ -337,34 +352,53 @@ async function processarItem(item) {
     } else {
       const classif = classificarErro({
         httpStatus: result.httpStatus,
-        code: result.code,
+        code: result.code || result.errorCodigo,
         message: result.error,
         beforeSend: result.beforeSend === true,
       })
       const marcarIncerto = result.incerto === true || classif.incerto === true
+      const codigo = classif.code || result.code || result.errorCodigo || 'TEMPORARIO'
 
-      if (marcarIncerto) {
+      // Exclusão / allowlist: não retriable; não conta como falha de envio
+      if (codigo === 'EXCLUIDO' || codigo === 'ALLOWLIST') {
+        const statusFinal = codigo === 'EXCLUIDO' ? 'optout' : 'ignorada'
+        const patch = {
+          status: statusFinal,
+          falhou_em: null,
+          erro_codigo: codigo,
+          erro_mensagem: String(result.error || '').slice(0, 500),
+          erro_classificacao: 'permanente',
+          lease_ate: null,
+          worker_id: null,
+          atualizado_em: new Date().toISOString(),
+        }
+        if (codigo === 'EXCLUIDO') {
+          patch.optout_em = new Date().toISOString()
+        }
+        await supabase.from('disparo_fila_itens').update(patch)
+          .eq('id', item.id).eq('company_id', item.company_id)
+      } else if (marcarIncerto) {
         await supabase.from('disparo_fila_itens').update({
           status: 'incerta',
-          erro_codigo: classif.code || result.code || 'INCERTA',
+          erro_codigo: codigo || 'INCERTA',
           erro_mensagem: String(result.error || 'Resposta perdida após chamada').slice(0, 500),
           erro_classificacao: 'temporario',
           atualizado_em: new Date().toISOString(),
           lease_ate: null,
-        }).eq('id', item.id)
+        }).eq('id', item.id).eq('company_id', item.company_id)
       } else {
         const tentativas = (item.tentativas || 0) + 1
-        if (classif.code === 'CREDENCIAL_INVALIDA') {
+        if (codigo === 'CREDENCIAL_INVALIDA' || classif.code === 'CREDENCIAL_INVALIDA') {
           await supabase.from('disparo_fila_itens').update({
             status: 'falhou',
             falhou_em: new Date().toISOString(),
-            erro_codigo: classif.code,
+            erro_codigo: codigo,
             erro_mensagem: String(result.error || '').slice(0, 500),
             erro_classificacao: 'permanente',
             lease_ate: null,
             worker_id: null,
             atualizado_em: new Date().toISOString(),
-          }).eq('id', item.id)
+          }).eq('id', item.id).eq('company_id', item.company_id)
           await pausarExecucaoAutomatica(item, {
             tipoPausa: 'erro',
             motivo: 'Erro de autenticação no provedor',
@@ -373,13 +407,13 @@ async function processarItem(item) {
           await supabase.from('disparo_fila_itens').update({
             status: 'falhou',
             falhou_em: new Date().toISOString(),
-            erro_codigo: classif.code,
+            erro_codigo: codigo,
             erro_mensagem: String(result.error || '').slice(0, 500),
             erro_classificacao: classif.classificacao,
             lease_ate: null,
             worker_id: null,
             atualizado_em: new Date().toISOString(),
-          }).eq('id', item.id)
+          }).eq('id', item.id).eq('company_id', item.company_id)
           await avaliarPausaPorFalhas(item, ctx.limites)
         } else {
           const proxima = calcularProximaTentativa({
@@ -391,14 +425,14 @@ async function processarItem(item) {
           await supabase.from('disparo_fila_itens').update({
             status: 'pendente',
             proxima_tentativa_em: proxima,
-            erro_codigo: classif.code,
+            erro_codigo: codigo,
             erro_mensagem: String(result.error || '').slice(0, 500),
             erro_classificacao: 'temporario',
             lease_ate: null,
             worker_id: null,
             atualizado_em: new Date().toISOString(),
-          }).eq('id', item.id)
-          if (classif.code === 'RATE_LIMIT' || result.httpStatus === 429) {
+          }).eq('id', item.id).eq('company_id', item.company_id)
+          if (codigo === 'RATE_LIMIT' || result.httpStatus === 429) {
             await pausarExecucaoAutomatica(item, {
               tipoPausa: 'limite',
               motivo: 'Limitação do provedor (HTTP 429 / rate limit)',
@@ -420,6 +454,7 @@ async function talvezConcluir(execucaoId, companyId, campanhaId) {
   const { count } = await supabase.from('disparo_fila_itens')
     .select('id', { count: 'exact', head: true })
     .eq('execucao_id', execucaoId)
+    .eq('company_id', companyId)
     .in('status', ativos)
   if ((count || 0) > 0) return
 

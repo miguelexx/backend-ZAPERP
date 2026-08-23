@@ -5,7 +5,7 @@
 
 const { mascararTelefone } = require('./disparoRevisaoChecklist')
 
-const CSV_INJECTION_PREFIX_RE = /^[=+\-@]/
+const CSV_INJECTION_PREFIX_RE = /^[=+\-@\t\r]/
 
 function escapeCsvCell(val) {
   let s = val == null ? '' : String(val)

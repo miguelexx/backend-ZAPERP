@@ -169,7 +169,7 @@ async function marcarFilaItensOptOut({ companyId, telefoneNormalizado, agora, io
   const { error: updErr } = await supabase
     .from('disparo_fila_itens')
     .update({
-      status: 'ignorada',
+      status: 'optout',
       optout_em: agora,
       atualizado_em: agora,
     })
@@ -187,7 +187,7 @@ async function marcarFilaItensOptOut({ companyId, telefoneNormalizado, agora, io
       campanha_id: item.campanha_id,
       execucao_id: item.execucao_id,
       item_id: item.id,
-      status: 'ignorada',
+      status: 'optout',
       origem: 'optout',
     })
   }

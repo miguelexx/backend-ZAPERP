@@ -11,6 +11,7 @@ const { revalidarInstanciasConectadas } = require('../controllers/disparoLimites
 const {
   chaveIdempotencia,
   gerarFilaParaCampanha,
+  recalcularContadores,
   DisparoFilaError,
 } = require('../services/disparoFilaService')
 
@@ -263,5 +264,45 @@ describe('disparoFilaService — idempotência', () => {
     expect(chaves).toContain('campanha:1:v2:dest:11')
     const ignorada = upsertRows.find((r) => r.status === 'ignorada')
     expect(ignorada?.erro_codigo).toBe('EXCLUIDO')
+  })
+})
+
+describe('disparoFilaService — recalcularContadores', () => {
+  beforeEach(() => jest.clearAllMocks())
+
+  it('optout incrementa total_optouts sem inflar total_ignorados', async () => {
+    let updatePayload = null
+    supabase.from.mockImplementation((table) => {
+      if (table === 'disparo_fila_itens') {
+        return mockChain({
+          data: [
+            { status: 'optout' },
+            { status: 'ignorada' },
+            { status: 'enviada' },
+            { status: 'falhou' },
+          ],
+          error: null,
+        })
+      }
+      if (table === 'disparo_execucoes') {
+        const chain = mockChain({ data: null, error: null })
+        chain.update = jest.fn((payload) => {
+          updatePayload = payload
+          return chain
+        })
+        return chain
+      }
+      return mockChain({ data: null, error: null })
+    })
+
+    const counts = await recalcularContadores(50, 10)
+
+    expect(counts.total_optouts).toBe(1)
+    expect(counts.total_ignorados).toBe(1)
+    expect(counts.total_enviados).toBe(1)
+    expect(counts.total_falhas).toBe(1)
+    expect(counts.total_itens).toBe(4)
+    expect(updatePayload.total_optouts).toBe(1)
+    expect(updatePayload.total_ignorados).toBe(1)
   })
 })

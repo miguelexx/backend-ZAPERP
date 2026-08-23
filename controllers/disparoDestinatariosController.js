@@ -69,12 +69,14 @@ async function carregarCampanha(campanhaId, companyId, res) {
 /** Verifica se o status permite edição de destinatários. */
 
 /** Retorna conjunto de telefones normalizados já na campanha (para dedup). */
-async function telefonesNaCampanha(campanhaId) {
-  const { data, error } = await supabase
+async function telefonesNaCampanha(campanhaId, companyId) {
+  let q = supabase
     .from('disparo_campanha_destinatarios')
     .select('telefone_normalizado')
     .eq('campanha_id', campanhaId)
     .neq('status', 'excluido')
+  if (companyId != null) q = q.eq('company_id', companyId)
+  const { data, error } = await q
   if (error) throw error
   return new Set((data ?? []).map(r => r.telefone_normalizado))
 }
@@ -143,7 +145,7 @@ exports.buscarContatos = async (req, res) => {
     if (error) throw error
 
     // Telefones já na campanha para marcar como "já adicionado"
-    const jaNaCampanha = await telefonesNaCampanha(campanhaId)
+    const jaNaCampanha = await telefonesNaCampanha(campanhaId, companyId)
     const norm = validarTelefoneDisparo
 
     const contatos = (data ?? []).map(c => {
@@ -275,7 +277,7 @@ exports.addContatos = async (req, res) => {
       .eq('company_id', companyId)
     if (cErr) throw cErr
 
-    const jaNaCampanha = await telefonesNaCampanha(campanhaId)
+    const jaNaCampanha = await telefonesNaCampanha(campanhaId, companyId)
 
     const rows = []
     const ignorados = []
@@ -517,7 +519,7 @@ exports.previewImportacao = async (req, res) => {
     const autoMapping = detectMappingAuto(headers)
     const mapping = parseMapping(req.body.mapping, autoMapping, headers.length)
 
-    const telefonesExistentes = await telefonesNaCampanha(campanhaId)
+    const telefonesExistentes = await telefonesNaCampanha(campanhaId, companyId)
     const plano = planejarImportacao(headers, dataRows, mapping, telefonesExistentes)
 
     res.json({
@@ -578,7 +580,7 @@ exports.confirmarImportacao = async (req, res) => {
       })
     }
 
-    const telefonesExistentes = await telefonesNaCampanha(campanhaId)
+    const telefonesExistentes = await telefonesNaCampanha(campanhaId, companyId)
     const plano = planejarImportacao(headers, dataRows, mapping, telefonesExistentes)
 
     if (plano.valid.length === 0) {
