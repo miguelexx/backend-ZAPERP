@@ -233,10 +233,10 @@ describe('Etapa 5 — Agendamento', () => {
   })
 })
 
-describe('Etapa 5 — Instância desconectada', () => {
+describe('Etapa 5 — Instância status / ativa', () => {
   beforeEach(() => jest.clearAllMocks())
 
-  it('validarConfigLimites falha se instância desconectada', async () => {
+  it('validarConfigLimites NÃO falha se status disconnected mas instância ativa', async () => {
     supabase.from.mockImplementation((table) => {
       if (table === 'disparo_campanhas') return mockChain({ data: campanhaBase, error: null })
       if (table === 'disparo_campanha_limites') {
@@ -279,7 +279,69 @@ describe('Etapa 5 — Instância desconectada', () => {
       }
       if (table === 'whatsapp_instances') {
         return mockChain({
-          data: [{ id: 7, nome: 'WA Offline', status: 'disconnected', ativo: true }],
+          data: [{ id: 7, nome: 'WA Stale', status: 'disconnected', ativo: true }],
+          error: null,
+        })
+      }
+      if (table === 'disparo_campanha_destinatarios') {
+        return mockChain({ data: [{ id: 1 }], error: null, count: 10 })
+      }
+      return mockChain({ data: [], error: null, count: 0 })
+    })
+
+    const res = await request(app)
+      .post('/api/disparo/campanhas/1/limites/validar')
+      .set('Authorization', `Bearer ${token()}`)
+      .send({})
+
+    expect(res.status).toBe(200)
+    expect(res.body.ok).toBe(true)
+  })
+
+  it('validarConfigLimites falha se instância inativa', async () => {
+    supabase.from.mockImplementation((table) => {
+      if (table === 'disparo_campanhas') return mockChain({ data: campanhaBase, error: null })
+      if (table === 'disparo_campanha_limites') {
+        return mockChain({
+          data: {
+            campanha_id: 1,
+            company_id: COMPANY_ID,
+            limite_por_hora: 60,
+            limite_por_dia: 500,
+            intervalo_min_sec: 8,
+            intervalo_max_sec: 20,
+            lote_tamanho: 20,
+            pausa_lote_min_sec: 60,
+            pausa_lote_max_sec: 180,
+            fuso_horario: 'America/Sao_Paulo',
+            inicio_modo: 'imediato',
+            perfil: 'moderado',
+            pausa_auto_desconexao: true,
+            pausa_auto_erros_consecutivos: 5,
+            pausa_auto_taxa_falha_pct: 25,
+            confirmada: false,
+          },
+          error: null,
+        })
+      }
+      if (table === 'disparo_campanha_janelas') {
+        return mockChain({
+          data: [
+            { dia_semana: 1, hora_inicio: '08:00:00', hora_fim: '18:00:00', ativo: true, instancia_id: null },
+            { dia_semana: 2, hora_inicio: '08:00:00', hora_fim: '18:00:00', ativo: true, instancia_id: null },
+            { dia_semana: 3, hora_inicio: '08:00:00', hora_fim: '18:00:00', ativo: true, instancia_id: null },
+            { dia_semana: 4, hora_inicio: '08:00:00', hora_fim: '18:00:00', ativo: true, instancia_id: null },
+            { dia_semana: 5, hora_inicio: '08:00:00', hora_fim: '18:00:00', ativo: true, instancia_id: null },
+          ],
+          error: null,
+        })
+      }
+      if (table === 'disparo_campanha_instancias') {
+        return mockChain({ data: [{ instancia_id: 7 }], error: null })
+      }
+      if (table === 'whatsapp_instances') {
+        return mockChain({
+          data: [{ id: 7, nome: 'WA Inativa', status: 'connected', ativo: false }],
           error: null,
         })
       }
@@ -296,7 +358,6 @@ describe('Etapa 5 — Instância desconectada', () => {
 
     expect(res.status).toBe(200)
     expect(res.body.ok).toBe(false)
-    expect(JSON.stringify(res.body)).toMatch(/desconect/i)
   })
 })
 

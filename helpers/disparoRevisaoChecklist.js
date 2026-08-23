@@ -132,13 +132,23 @@ function montarChecklist(ctx) {
     itens.push(item('revisao', SEVERIDADE.APROVADO, 'Nenhuma revisão pendente', 'Todas as etapas confirmadas estão atualizadas.'))
   }
 
-  const desconectadas = (instanciasStatus || []).filter((i) => i.status !== 'connected' || i.ativo === false)
-  if (desconectadas.length) {
-    itens.push(item('inst_conn', SEVERIDADE.BLOQUEIO, 'Instâncias desconectadas ou inativas',
-      desconectadas.map((i) => `${i.nome || i.id} (${i.status})`).join('; '),
-      'instancias', 'Reconecte as instâncias no WhatsApp e revalide.'))
+  const inativas = (instanciasStatus || []).filter((i) => i.ativo === false)
+  const statusDuvidoso = (instanciasStatus || []).filter((i) => {
+    if (i.ativo === false) return false
+    const st = String(i.status || '').toLowerCase()
+    return !['connected', 'authenticated', 'standby'].includes(st)
+  })
+  if (inativas.length) {
+    itens.push(item('inst_conn', SEVERIDADE.BLOQUEIO, 'Instâncias inativas',
+      inativas.map((i) => `${i.nome || i.id} (${i.status})`).join('; '),
+      'instancias', 'Reative a instância nas configurações WhatsApp.'))
+  } else if (statusDuvidoso.length) {
+    itens.push(item('inst_conn', SEVERIDADE.AVISO, 'Status de conexão não confirmado no banco',
+      statusDuvidoso.map((i) => `${i.nome || i.id} (${i.status || 'unknown'})`).join('; ')
+      + ' — se o atendimento já usa a instância, pode confirmar e enviar.',
+      'instancias', 'Opcional: reconecte no painel UltraMSG; o envio tenta mesmo assim.'))
   } else if ((instanciasStatus || []).length) {
-    itens.push(item('inst_conn', SEVERIDADE.APROVADO, 'Instâncias conectadas', 'Todas as selecionadas estão connected e ativas.'))
+    itens.push(item('inst_conn', SEVERIDADE.APROVADO, 'Instâncias ativas', 'Todas as selecionadas estão ativas.'))
   } else {
     itens.push(item('inst_conn', SEVERIDADE.BLOQUEIO, 'Nenhuma instância selecionada',
       'Selecione ao menos uma instância.', 'instancias', 'Volte à etapa Instâncias.'))

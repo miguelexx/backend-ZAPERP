@@ -93,9 +93,18 @@ describe('disparoRevisaoChecklist', () => {
     expect(r.bloqueios.some((b) => b.codigo === 'dest_var')).toBe(true)
   })
 
-  it('bloqueia instância desconectada', () => {
+  it('status disconnected no banco vira aviso (não bloqueia) se instância ativa', () => {
     const r = montarChecklist(baseCtx({
       instanciasStatus: [{ id: 1, nome: 'WA', status: 'disconnected', ativo: true }],
+    }))
+    expect(r.ok).toBe(true)
+    expect(r.bloqueios.some((b) => b.codigo === 'inst_conn')).toBe(false)
+    expect(r.avisos.some((b) => b.codigo === 'inst_conn')).toBe(true)
+  })
+
+  it('bloqueia instância inativa', () => {
+    const r = montarChecklist(baseCtx({
+      instanciasStatus: [{ id: 1, nome: 'WA', status: 'connected', ativo: false }],
     }))
     expect(r.ok).toBe(false)
     expect(r.bloqueios.some((b) => b.codigo === 'inst_conn')).toBe(true)

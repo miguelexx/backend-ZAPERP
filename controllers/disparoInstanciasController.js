@@ -123,10 +123,12 @@ exports.listarInstanciasDisponiveis = async (req, res) => {
           const live = await getStatus(companyId, { whatsappInstanceId: inst.id })
           if (live && !live.error) {
             if (live.connected === true) {
-              statusLive = 'connected'
+              statusLive = live.status && ['authenticated', 'standby'].includes(live.status)
+                ? live.status
+                : 'connected'
               conectada = true
               statusIncerto = false
-              if (inst.status !== 'connected') {
+              if (!['connected', 'authenticated', 'standby'].includes(String(inst.status || ''))) {
                 supabase
                   .from('whatsapp_instances')
                   .update({ status: 'connected', status_at: new Date().toISOString() })
@@ -135,14 +137,14 @@ exports.listarInstanciasDisponiveis = async (req, res) => {
                   .then(() => {})
                   .catch(() => {})
               }
-            } else {
-              // Só marca offline se a API respondeu com sucesso e connected=false
-              statusLive = 'disconnected'
+            } else if (live.conclusive === true) {
+              // Só marca offline se o parser UltraMSG tiver certeza
+              statusLive = live.status || 'disconnected'
               conectada = false
               statusIncerto = false
             }
+            // live.conclusive === false → mantém status do banco (não força disconnected)
           }
-          // Se live.error: mantém status do banco (incerto) — não bloqueia a seleção
         } catch (_) { /* best-effort */ }
       }
 
@@ -714,9 +716,10 @@ async function calcularPreviewDistribuicao(campanhaId, companyId, modo, configur
             .eq('company_id', companyId)
             .then(() => {})
             .catch(() => {})
-        } else if (live && live.connected === false) {
-          statusMap[id] = { ...row, status: 'disconnected' }
+        } else if (live?.conclusive === true && live.connected === false) {
+          statusMap[id] = { ...row, status: live.status || 'disconnected' }
         }
+        // inconclusive: não força disconnected (payload UltraMSG aninhado era lido errado)
       } catch (_) { /* ignore */ }
     }))
   } catch (_) { /* getStatus indisponível */ }
@@ -728,12 +731,12 @@ async function calcularPreviewDistribuicao(campanhaId, companyId, modo, configur
       continue
     }
     const st = statusInstanciaNormalizado(inst?.status)
-    if (instanciaClaramenteOffline(st)) {
-      erros.push(`Instância "${inst?.nome ?? id}" está desconectada (status: ${inst?.status ?? 'desconhecido'}).`)
-    } else if (!instanciaConsideradaConectada(st)) {
+    // No wizard: nunca bloqueia por status de conexão (UltraMSG às vezes mente / payload aninhado).
+    // Só avisa. Bloqueio real fica no envio se o provedor rejeitar.
+    if (!instanciaConsideradaConectada(st)) {
       avisos.push(
-        `Instância "${inst?.nome ?? id}" com status ainda não confirmado (${inst?.status || 'unknown'}). `
-        + 'Pode continuar — a conexão será revalidada antes do envio.',
+        `Instância "${inst?.nome ?? id}" com status "${inst?.status || 'unknown'}" no banco. `
+        + 'Pode continuar e enviar — o atendimento já usa esta instância se estiver ativa.',
       )
     }
   }

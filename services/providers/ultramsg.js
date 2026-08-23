@@ -2235,19 +2235,27 @@ async function updateProfileDescription(description, opts = {}) {
 /**
  * Status de conexão da instância.
  */
+const { interpretUltramsgInstanceStatus } = require('../../helpers/ultramsgStatusHelper')
+
 async function getConnectionStatus(opts = {}) {
   const cfg = await resolveConfig(opts)
-  if (!cfg) return { connected: false, configured: false }
+  if (!cfg) return { connected: false, configured: false, conclusive: false }
   try {
-    const { ok, data } = await getJson({ ...cfg, endpoint: '/instance/status' })
-    if (!ok) return { connected: false, configured: true }
-    const status = String(data?.status || data?.state || '').toLowerCase()
-    const connected = ['authenticated', 'connected', 'standby'].includes(status) || data?.connected === true
-    const phone = data?.phone ?? data?.wid ?? null
-    return { connected, configured: true, phone, session: data?.session ?? null }
+    const { ok, data, text } = await getJson({ ...cfg, endpoint: '/instance/status' })
+    if (!ok) return { connected: false, configured: true, conclusive: false }
+    const interpreted = interpretUltramsgInstanceStatus(data, text)
+    const phone = data?.phone ?? data?.wid ?? data?.status?.phone ?? null
+    return {
+      connected: interpreted.connected,
+      configured: true,
+      conclusive: interpreted.conclusive,
+      status: interpreted.status,
+      phone,
+      session: data?.session ?? null,
+    }
   } catch (e) {
     console.warn('[ULTRAMSG] getConnectionStatus:', e?.message || e)
-    return { connected: false, configured: true }
+    return { connected: false, configured: true, conclusive: false }
   }
 }
 

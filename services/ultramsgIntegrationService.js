@@ -10,6 +10,7 @@ const {
   toEmpresaWhatsappConfig,
 } = require('./whatsappInstanceService')
 const supabase = require('../config/supabase')
+const { interpretUltramsgInstanceStatus } = require('../helpers/ultramsgStatusHelper')
 
 const ULTRAMSG_BASE_URL = (process.env.ULTRAMSG_BASE_URL || 'https://api.ultramsg.com').replace(/\/$/, '')
 const TIMEOUT_MS = 10_000
@@ -99,16 +100,20 @@ function extractBase64(value) {
 
 async function getStatus(companyId, opts = {}) {
   const { error, ok, data, text, whatsappInstanceId } = await request(companyId, 'GET', '/instance/status', null, opts)
-  if (error) return { error }
+  if (error) return { error, connected: false, conclusive: false, status: 'unknown' }
   if (!ok) {
-    return { error: data?.error || data?.message || `HTTP ${data?.status || 500}` }
+    return {
+      error: data?.error || data?.message || `HTTP ${data?.status || 500}`,
+      connected: false,
+      conclusive: false,
+      status: 'unknown',
+    }
   }
-  // UltraMsg pode retornar status em vários formatos: data.status, data.state, data.instance?.status ou texto
-  const status = String(
-    data?.status ?? data?.state ?? data?.instance?.status ?? data?.response?.status ?? ''
-  ).toLowerCase().trim() || String(text || '').toLowerCase().trim()
-  const connected = ['authenticated', 'connected', 'standby'].includes(status) || data?.connected === true
+
+  const interpreted = interpretUltramsgInstanceStatus(data, text)
+  const connected = interpreted.connected === true
   const smartphoneConnected = connected
+  const status = interpreted.status
 
   // Ao detectar conexão: configurar webhooks na instância UltraMsg (message_received, message_create, message_ack)
   // Throttle: máximo 1 vez a cada 10 min por empresa para evitar spam à API
@@ -172,11 +177,16 @@ async function getStatus(companyId, opts = {}) {
     } else if (connected) {
       lastConnectedState.set(companyId, true)
     }
-  } else if (companyId) {
+  } else if (companyId && interpreted.conclusive) {
     lastConnectedState.set(companyId, false)
   }
 
-  return { connected, smartphoneConnected }
+  return {
+    connected,
+    smartphoneConnected,
+    status,
+    conclusive: interpreted.conclusive,
+  }
 }
 
 async function getQrCodeImage(companyId, opts = {}) {

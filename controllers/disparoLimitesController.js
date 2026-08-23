@@ -184,12 +184,15 @@ async function carregarInstanciasCampanha(campanhaId, companyId) {
       status: inst.status ?? 'unknown',
       ativo: inst.ativo ?? false,
       display_phone: inst.display_phone ?? inst.telefone_conectado ?? null,
-      conectada: inst.status === 'connected' && inst.ativo === true,
+      conectada: (inst.status === 'connected' || inst.status === 'authenticated' || inst.status === 'standby')
+        && inst.ativo === true,
     }
   })
 
+  // Só trata como bloqueante se inativa. Status stale/unknown não impede o wizard
+  // (parser UltraMSG aninhado já gerou falso "disconnected" no passado).
   const desconectadas = instancias
-    .filter((i) => i.status !== 'connected' || !i.ativo)
+    .filter((i) => i.ativo === false)
     .map((i) => ({ id: i.id, nome: i.nome, status: i.status, ativo: i.ativo }))
 
   return { instancias, desconectadas }
@@ -240,9 +243,31 @@ async function revalidarInstanciasConectadas(campanhaId, companyId) {
   if (iErr) throw iErr
 
   const desconectadas = (instancias ?? [])
-    .filter((i) => i.status !== 'connected' || !i.ativo)
+    .filter((i) => i.ativo === false)
     .map((i) => ({ id: i.id, nome: i.nome, status: i.status }))
 
+  // Tenta corrigir status stale via UltraMSG (parser aninhado)
+  try {
+    const { getStatus } = require('../services/ultramsgIntegrationService')
+    const ativas = (instancias ?? []).filter((i) => i.ativo !== false)
+    await Promise.all(ativas.map(async (inst) => {
+      if (['connected', 'authenticated', 'standby'].includes(String(inst.status || ''))) return
+      try {
+        const live = await getStatus(companyId, { whatsappInstanceId: inst.id })
+        if (live?.connected === true) {
+          inst.status = 'connected'
+          supabase.from('whatsapp_instances')
+            .update({ status: 'connected', status_at: new Date().toISOString() })
+            .eq('id', inst.id)
+            .eq('company_id', companyId)
+            .then(() => {})
+            .catch(() => {})
+        }
+      } catch (_) { /* ignore */ }
+    }))
+  } catch (_) { /* getStatus indisponível */ }
+
+  // ok=true se todas ativas (status de conexão não bloqueia mais o wizard/revisão)
   return { ok: desconectadas.length === 0, desconectadas }
 }
 

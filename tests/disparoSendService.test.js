@@ -192,10 +192,10 @@ describe('disparoSendService — dry-run e segurança', () => {
     expect(ultramsg.sendText).not.toHaveBeenCalled()
   })
 
-  it('instância desconectada retorna erro antes do envio', async () => {
+  it('instância com status disconnected no banco ainda permite dry-run se ativa', async () => {
     supabase.from.mockImplementation((table) => {
       if (table === 'whatsapp_instances') {
-        return mockChain({ data: { ...instancia, status: 'disconnected' }, error: null })
+        return mockChain({ data: { ...instancia, status: 'disconnected', ativo: true }, error: null })
       }
       if (table === 'disparo_campanha_destinatarios') {
         return mockChain({ data: destinatario, error: null })
@@ -212,7 +212,33 @@ describe('disparoSendService — dry-run e segurança', () => {
       return mockChain({ data: null, error: null })
     })
 
-    const result = await enviarItemFila(itemBase, { dryRun: false, liveEnabled: true, allowlist: [] })
+    const result = await enviarItemFila(itemBase, { dryRun: true, liveEnabled: false, allowlist: [] })
+    expect(result.ok).toBe(true)
+    expect(result.dryRun).toBe(true)
+    expect(ultramsg.sendText).not.toHaveBeenCalled()
+  })
+
+  it('instância inativa bloqueia envio', async () => {
+    supabase.from.mockImplementation((table) => {
+      if (table === 'whatsapp_instances') {
+        return mockChain({ data: { ...instancia, status: 'connected', ativo: false }, error: null })
+      }
+      if (table === 'disparo_campanha_destinatarios') {
+        return mockChain({ data: destinatario, error: null })
+      }
+      if (table === 'disparo_campanha_variacoes') {
+        return mockChain({ data: variacao, error: null })
+      }
+      if (table === 'disparo_campanhas') {
+        return mockChain({ data: { variacao_padrao_valores: {} }, error: null })
+      }
+      if (table === 'disparo_exclusoes') {
+        return mockChain({ data: null, error: null })
+      }
+      return mockChain({ data: null, error: null })
+    })
+
+    const result = await enviarItemFila(itemBase, { dryRun: true, allowlist: [] })
     expect(result.ok).toBe(false)
     expect(result.httpStatus).toBe(409)
     expect(ultramsg.sendText).not.toHaveBeenCalled()

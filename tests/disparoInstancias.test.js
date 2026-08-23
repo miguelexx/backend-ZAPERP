@@ -303,15 +303,15 @@ describe('[E3] Algoritmos de distribuição (unitário)', () => {
     expect(res.body.plano?.nao_atribuidos).toBe(0)
   })
 
-  it('preview com status disconnected bloqueia com erro', async () => {
+  it('preview com status disconnected NÃO bloqueia (aviso; parser UltraMSG é falível)', async () => {
     makeCampanhaAtivaMock('disconnected')
     const res = await request(app)
       .post('/api/disparo/campanhas/1/instancias/preview-distribuicao')
       .set('Authorization', `Bearer ${adminToken}`)
       .send({ modo: 'equilibrada', configuracoes: [] })
     expect(res.status).toBe(200)
-    expect((res.body.erros || []).length).toBeGreaterThan(0)
-    expect(res.body.erros[0]).toMatch(/desconectada/i)
+    expect(res.body.erros || []).toHaveLength(0)
+    expect((res.body.avisos || []).length).toBeGreaterThan(0)
   })
 
   it('preview quantidade com soma correta', async () => {

@@ -218,26 +218,36 @@ async function processarItem(item) {
       return
     }
 
-    // Instância conectada?
+    // Instância: só bloqueia se inativa. Status "disconnected" no banco pode ser falso
+    // (payload UltraMSG aninhado). Tenta live; se incerto, segue com o envio.
     const { data: inst } = await supabase.from('whatsapp_instances')
       .select('id, status, ativo, nome')
       .eq('id', item.instancia_id)
       .eq('company_id', item.company_id)
       .maybeSingle()
-    if (!inst || inst.status !== 'connected' || inst.ativo === false) {
-      await adiarItem(item, new Date(Date.now() + 60000).toISOString(), 'Instância desconectada')
+    if (!inst || inst.ativo === false) {
+      await adiarItem(item, new Date(Date.now() + 60000).toISOString(), 'Instância inativa')
       emitDisparo(io, item.company_id, EVENTS.INSTANCIA_DESCONECTADA, {
         campanha_id: item.campanha_id,
         instancia_id: item.instancia_id,
         nome: inst?.nome,
       })
-      if (ctx.limites?.pausa_auto_desconexao !== false) {
-        await pausarExecucaoAutomatica(item, {
-          tipoPausa: 'desconexao',
-          motivo: `Instância ${inst?.nome || item.instancia_id} desconectada`,
-        })
-      }
       return
+    }
+
+    const statusOk = ['connected', 'authenticated', 'standby'].includes(String(inst.status || ''))
+    if (!statusOk) {
+      try {
+        const { getStatus } = require('../services/ultramsgIntegrationService')
+        const live = await getStatus(item.company_id, { whatsappInstanceId: item.instancia_id })
+        if (live?.connected === true) {
+          await supabase.from('whatsapp_instances')
+            .update({ status: 'connected', status_at: new Date().toISOString() })
+            .eq('id', inst.id)
+            .eq('company_id', item.company_id)
+        }
+        // conclusive offline OR inconclusive: ainda tenta enviar (atendimento já usa a instância)
+      } catch (_) { /* segue para envio */ }
     }
 
     const agora = DateTime.utc()

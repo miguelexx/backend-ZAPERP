@@ -299,8 +299,14 @@ async function enviarItemFila(item, { dryRun, liveEnabled, allowlist, timeoutMs,
   if (!variacao || variacao.ativa === false) {
     return { ok: false, error: 'Variação inválida ou inativa', httpStatus: 404, beforeSend: true }
   }
-  if (!instancia || instancia.status !== 'connected' || !instancia.ativo) {
-    return { ok: false, error: 'Instância desconectada ou inativa', httpStatus: 409, beforeSend: true }
+  if (!instancia || !instancia.ativo) {
+    return { ok: false, error: 'Instância inativa', httpStatus: 409, beforeSend: true }
+  }
+  // Status no banco pode estar stale/"disconnected" por parser UltraMSG aninhado.
+  // Se a instância está ativa, permite o envio (igual ao atendimento).
+  const statusInst = String(instancia.status || '').toLowerCase()
+  if (['qr', 'qr_code', 'qrcode'].includes(statusInst)) {
+    return { ok: false, error: 'Instância aguardando QR Code', httpStatus: 409, beforeSend: true }
   }
 
   const telefone = destinatario.telefone_normalizado || destinatario.telefone_original
