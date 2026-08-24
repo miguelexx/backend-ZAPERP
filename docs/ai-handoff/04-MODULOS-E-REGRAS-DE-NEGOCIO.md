@@ -1,6 +1,18 @@
 # Módulos e regras de negócio
 
-> Análise: 2026-08-23 · branch `master` · commit-base `66e0771d9f61f840524cd4b0645e742df374a77a` + working tree. Endpoints completos em [05](05-API-ENDPOINTS.md).
+> Análise: 2026-08-23 · branch `master` · commit-base `66e0771d9f61f840524cd4b0645e742df374a77a` + working tree. Endpoints completos em [05](05-API-ENDPOINTS.md).  
+> **Atualizado 2026-08-24:** módulos removidos registrados abaixo.
+
+## Módulos REMOVIDOS (pós commit-base)
+
+| Módulo | Migration | O que foi removido |
+|--------|-----------|-------------------|
+| Campanhas (legado) | `20260812140000_drop_campanhas_module.sql` | `campanhaController`, `campanhaService`, `campanhaRoutes`, tabelas `campanhas`/`campanha_envios`. Substituído pelo módulo **Disparo** (ver abaixo). |
+| CRM interno | `20260812130000_drop_empresas_crm_habilitado.sql` | `crmController`, `crmService`, `crmGoogleService`, `crmRepository`, `crmEmpresaFlag`, `requireCrmHabilitado`, `crmRoutes`. Mantido apenas SSO (`crmSsoController`) para CRM externo. |
+| Planos | `20260812160000_drop_planos.sql` + `20260812170000` | Tabelas `planos`, coluna `empresas.plano_id`. |
+| `empresas_whatsapp` legado | `20260812150000_drop_empresas_whatsapp_legacy.sql` | Tabela dropada. |
+
+---
 
 | Módulo | Arquivos/entidades | Regras, efeitos, testes e riscos |
 |---|---|---|
@@ -20,5 +32,6 @@
 | Produtos | `produtos*`, dois clientes DB | Consulta em PostgreSQL separado; sync opcional SQL Server→Postgres com transação, lock em memória e scheduler. Integração real não validada. |
 | IA analítica | `/ai/ask`, OpenAI client, tabelas `ai_*` | Supervisor/admin, rate limit por tenant, cache/log/cota. Só ativa com chave. Não foi chamada. |
 | CRM avançado | `crmSsoController` | Gera handoff JWT HS256 para URL externa; CRM interno foi removido. Testes cobrem segredo/URL. |
+| Proteção de envio | `services/protecao/` (4 arquivos) | **DESATIVADO globalmente** (`PROTECAO_DESATIVADA = true` em `protecaoOrchestrator.js`). Quando ativo: verifica volume (msg/min e msg/hora por empresa), frequência (intervalo entre envios ao mesmo contato) e opt-in comercial. Fail-open: erro → permite envio. Tabelas: `mensagens` (contagem), `contato_opt_in`, `empresas` (limites). Ativar: mudar o const + calibrar limites nas empresas. Detalhes: [`reference/PROTECAO-ENVIO.md`](../reference/PROTECAO-ENVIO.md). |
 
 Estados detalhados de Disparo: campanha `rascunho/configurando/pronta/agendada/em_execucao/pausada/concluida/cancelada/arquivada`; fila `pendente/reservada/enviando/enviada/entregue/lida/respondida/optout/falhou/incerta/ignorada/cancelada`. Estados terminais e progressão estão em `helpers/disparoStatusHelper.js` e `helpers/disparoFilaRetryHelper.js`.

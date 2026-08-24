@@ -2,7 +2,7 @@
 
 API HTTP, webhooks **UltraMSG** e **Socket.IO** para o sistema de atendimento WhatsApp multi-tenant.
 
-**Documentação canónica:** [`docs/_OFICIAL/README.md`](./docs/_OFICIAL/README.md) · [ADR — nomes legados](./docs/_OFICIAL/ADR-LEGACY-NAMING.md)
+**Documentação canónica:** [`docs/README.md`](./docs/README.md) (índice mestre) · [`docs/AI_HANDOFF.md`](./docs/AI_HANDOFF.md) (contexto rápido para IAs) · [ADR — nomes legados](./docs/reference/ADR-LEGACY-NAMING.md)
 
 ## Requisitos
 
@@ -22,6 +22,16 @@ API HTTP, webhooks **UltraMSG** e **Socket.IO** para o sistema de atendimento Wh
    npm install
    npm run dev
    ```
+
+## Testes
+
+```bash
+npm test                     # Jest em série (todos os ~100 arquivos)
+npm run test:watch           # Modo watch
+```
+
+Variáveis obrigatórias no ambiente de teste: `NODE_ENV=test`, `ZAPERP_DISABLE_BACKGROUND_JOBS=1`.  
+Mocks em `tests/` para Supabase, provider, push, R2 e OpenAI — nunca usar serviços reais nos testes.
 
 ## Atualizar na VPS
 

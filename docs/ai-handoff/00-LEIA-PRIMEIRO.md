@@ -2,6 +2,25 @@
 
 > Análise estática em 2026-08-23, branch `master`, commit-base `66e0771d9f61f840524cd4b0645e742df374a77a`. A árvore já continha mudanças não commitadas, sobretudo a Etapa 9 de Disparo. Nenhuma afirmação sobre banco/VPS significa que a migration ou o código estejam implantados.
 
+> **Atualização 2026-08-24:** Documentação reorganizada. Ver [`docs/README.md`](../README.md) e [`docs/AI_HANDOFF.md`](../AI_HANDOFF.md). Mudanças pós commit-base registradas na seção abaixo.
+
+Frontend (UI React): não está nesta série. Use [`frontend/docs/ai-handoff/00-LEIA-PRIMEIRO.md`](../../../frontend/docs/ai-handoff/00-LEIA-PRIMEIRO.md) e o [índice-mestre por sessão](../../../docs/ai-handoff/00-LEIA-PRIMEIRO.md).
+
+## Mudanças pós commit-base (2026-08-24)
+
+As seguintes mudanças ocorreram no working tree e/ou foram commitadas após a análise inicial:
+
+| Mudança | Migration / arquivo | Impacto |
+|---------|---------------------|---------|
+| Módulo `campanhas` removido | `20260812140000_drop_campanhas_module.sql` | Tabelas `campanhas`, `campanha_envios` dropadas; código em `controllers/campanhaController.js`, `services/campanhaService.js`, `routes/campanhaRoutes.js` removido |
+| CRM interno removido | `20260812130000_drop_empresas_crm_habilitado.sql` | `services/crmService.js`, `services/crmGoogleService.js`, `controllers/crmController.js`, `repositories/crmRepository.js`, `helpers/crmEmpresaFlag.js`, `middleware/requireCrmHabilitado.js` removidos; mantido apenas `crmSsoController` (handoff JWT para CRM externo) |
+| `empresas_whatsapp` legado removido | `20260812150000_drop_empresas_whatsapp_legacy.sql` | Tabela dropada |
+| `planos` removido | `20260812160000_drop_planos.sql` + `20260812170000_drop_empresas_plano_id.sql` | Tabelas dropadas |
+| `scheduler_locks` users removido | `20260812130000_drop_scheduler_locks_users.sql` | Tabela dropada |
+| Disparo etapas 5–9 adicionadas | `20260821*` a `20260823*` | Tabelas `disparo_*` para limites, revisão, fila, opt-out, respostas, auditoria |
+| Busca por prefixo de palavra | `20260823230000_chat_search_word_prefix.sql` | Nova RPC de busca |
+| R2 storage para mensagens | `20260813120000_mensagens_storage_r2.sql` | Campo `r2_key` em mensagens |
+
 ## Objetivo e estado
 
 Backend Node.js/CommonJS para atendimento WhatsApp multiempresa: HTTP Express, Socket.IO, Supabase/PostgreSQL, UltraMSG, mídia local/R2, chatbot, alertas, help desk, produtos e campanhas de disparo. O processo principal é funcional e coberto por 100 arquivos Jest; o módulo Disparo está em evolução e possui arquivos da Etapa 9 ainda fora do commit-base.

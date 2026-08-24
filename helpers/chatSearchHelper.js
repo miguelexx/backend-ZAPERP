@@ -4,6 +4,49 @@ function digitsOnly(value) {
   return String(value || '').replace(/\D/g, '')
 }
 
+/**
+ * Chave de nome equivalente ao search_name_key(text) do Postgres.
+ * A pontuação vira separador de palavra para que "Shuarts/Marcela" possa ser
+ * encontrada por "mar", sem fazer "hu" casar no meio de "Shuarts".
+ */
+function normalizeNameSearchKey(value) {
+  return String(value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+}
+
+/** Busca no início do nome ou no início de qualquer palavra do nome. */
+function nameMatchesWordPrefix(value, rawTerm) {
+  const nameKey = normalizeNameSearchKey(value)
+  const termKey = normalizeNameSearchKey(rawTerm)
+  if (!nameKey || !termKey) return false
+  return nameKey.startsWith(termKey) || nameKey.includes(` ${termKey}`)
+}
+
+/**
+ * Filtro defensivo aplicado à resposta da lista. Mantém a API correta durante
+ * rollout, mesmo se o banco ainda estiver com a RPC antiga baseada em %termo%.
+ */
+function chatIdentityMatchesSearch(row, rawTerm) {
+  const names = [
+    row?.contato_nome,
+    row?.nome_contato_cache,
+    row?.nome_grupo,
+    row?.cliente_nome,
+    row?.pushname,
+    row?.nome,
+  ]
+  if (names.some((name) => nameMatchesWordPrefix(name, rawTerm))) return true
+
+  const termDigits = digitsOnly(rawTerm)
+  if (!termDigits) return false
+  const phones = [row?.telefone_exibivel, row?.cliente_telefone, row?.telefone, row?.numero]
+  return phones.some((phone) => digitsOnly(phone).includes(termDigits))
+}
+
 function unique(values) {
   return [...new Set(values.map((v) => String(v || '').trim()).filter(Boolean))]
 }
@@ -98,6 +141,9 @@ module.exports = {
   buildTelefoneSearchOr,
   buildPhoneSearchTerms,
   digitsOnly,
+  normalizeNameSearchKey,
+  nameMatchesWordPrefix,
+  chatIdentityMatchesSearch,
   escapeIlikePattern,
   quoteOrValue,
   getSearchMessagesPageSize,

@@ -52,7 +52,13 @@ const {
   retomarDeCobrancaFinanceira,
 } = require('../services/conversaPagamentoFinanceiroService')
 const { usuarioPertenceSetorFinanceiro } = require('../helpers/financeiroSetorHelper')
-const { buildClienteSearchOr, buildTelefoneSearchOr, buildPhoneSearchTerms, escapeIlikePattern } = require('../helpers/chatSearchHelper')
+const {
+  buildClienteSearchOr,
+  buildTelefoneSearchOr,
+  buildPhoneSearchTerms,
+  chatIdentityMatchesSearch,
+  escapeIlikePattern,
+} = require('../helpers/chatSearchHelper')
 const {
   getGrupoDepartamentoIds,
   getGrupoIdsPorDepartamentos,
@@ -1725,6 +1731,8 @@ exports.listarConversas = async (req, res) => {
     let forceEmptyConversas = false
     // Busca por texto: IDs cujo match veio de nome/telefone (faixa prioritária na ordenação).
     let searchPriorityIdSet = null
+    let searchMessageOnlyIdSet = new Set()
+    let searchDefensiveRemovedConversationCount = 0
     let isTextSearch = false
 
     if (tagFilterAtivo) {
@@ -1804,6 +1812,7 @@ exports.listarConversas = async (req, res) => {
         messageOnlyIds.push(n)
         if (messageOnlyIds.length >= msgTierLimit) break
       }
+      searchMessageOnlyIdSet = new Set(messageOnlyIds)
       searchPriorityIdSet = priorityIds
 
       const mergedSet = new Set([...priorityIds, ...messageOnlyIds])
@@ -2812,6 +2821,25 @@ exports.listarConversas = async (req, res) => {
       })
     }
 
+    // Defesa de rollout: a RPC antiga usava %termo% e fazia "hu" casar em
+    // S-hu-arts / C-hu-rrascaria. A migration nova corrige isso no banco, mas
+    // esta camada impede falsos positivos mesmo antes de ela ser aplicada.
+    // Resultados que vieram exclusivamente do texto de mensagens continuam
+    // válidos somente quando esse recurso foi explicitamente habilitado.
+    if (isTextSearch && palavraTrim) {
+      const realConversationCountBefore = conversasFormatadas.filter((c) => c?.id != null && !c?.sem_conversa).length
+      conversasFormatadas = conversasFormatadas.filter((c) => {
+        const id = Number(c?.id)
+        if (Number.isFinite(id) && searchMessageOnlyIdSet.has(id)) return true
+        return chatIdentityMatchesSearch(c, palavraTrim)
+      })
+      const realConversationCountAfter = conversasFormatadas.filter((c) => c?.id != null && !c?.sem_conversa).length
+      searchDefensiveRemovedConversationCount = Math.max(
+        0,
+        realConversationCountBefore - realConversationCountAfter
+      )
+    }
+
     // Preferências por usuário (silenciar / fixar / favoritar) — migration: conversa_usuario_prefs
     try {
       const idsComConversa = conversasFormatadas
@@ -2902,7 +2930,14 @@ exports.listarConversas = async (req, res) => {
       returned: Array.isArray(conversasFormatadas) ? conversasFormatadas.length : 0,
       sem_conversa_included: Boolean(incluirTodos),
     }
-    const totalCountRaw = await totalCountPromise
+    const totalCountFromQuery = await totalCountPromise
+    // Durante o rollout da RPC nova, o count SQL ainda pode incluir os falsos
+    // positivos eliminados pela defesa acima. Ajusta o cabeçalho "X de Y" para
+    // ele não continuar anunciando resultados que a lista corretamente removeu.
+    const totalCountRaw =
+      totalCountFromQuery != null && searchDefensiveRemovedConversationCount > 0
+        ? Math.max(0, Number(totalCountFromQuery) - searchDefensiveRemovedConversationCount)
+        : totalCountFromQuery
     const totalCount =
       totalCountRaw == null &&
       !chatListPagination.cursor &&

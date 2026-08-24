@@ -261,7 +261,9 @@ async function resolveChatListCountsContext(req) {
         .or(buildTelefoneSearchOr(palavraTrim))
         .order('ultima_atividade', { ascending: false, nullsFirst: false })
         .limit(searchIdLimit),
-      buscarConversaIdsPorTextoMensagens({ company_id, term: palavraTrim }),
+      String(process.env.CHAT_SEARCH_INCLUDE_MESSAGE_TEXT ?? '').trim() === '1'
+        ? buscarConversaIdsPorTextoMensagens({ company_id, term: palavraTrim })
+        : Promise.resolve([]),
     ])
 
     const mergedSet = new Set([

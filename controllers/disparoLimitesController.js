@@ -34,6 +34,32 @@ function requireAdmin(req, res) {
   return true
 }
 
+/** Detecta tabelas/colunas da Etapa 5 ainda não migradas no banco. */
+function isLimitesSchemaMissingError(err) {
+  const msg = [
+    err?.message,
+    err?.details,
+    err?.hint,
+    err?.code,
+    typeof err === 'string' ? err : '',
+  ].filter(Boolean).join(' ')
+  return /disparo_campanha_limites|disparo_campanha_janelas|disparo_campanha_instancia_limites|limites_confirmados|limites_revisao|does not exist|Could not find the table|schema cache/i.test(msg)
+}
+
+function responderErroLimitesSchema(res, err, fallbackMsg) {
+  if (isLimitesSchemaMissingError(err)) {
+    console.error('[disparo:limites] schema Etapa 5 ausente:', err?.message || err)
+    return res.status(503).json({
+      error: 'Migration da Etapa 5 (limites) ainda não aplicada no banco.',
+      code: 'DISPARO_LIMITES_MIGRATION_REQUIRED',
+      migration: '20260821180000_disparo_limites_etapa5.sql',
+      detail: String(err?.message || '').slice(0, 300),
+    })
+  }
+  console.error('[disparo:limites]', fallbackMsg, err)
+  return res.status(500).json({ error: fallbackMsg })
+}
+
 async function carregarCampanha(campanhaId, companyId, res) {
   const { data, error } = await supabase
     .from('disparo_campanhas')
@@ -534,8 +560,7 @@ exports.obterConfigLimites = async (req, res) => {
       regra_retentativa: REGRA_RETENTATIVA,
     })
   } catch (err) {
-    console.error('[disparo:limites] obterConfigLimites', err)
-    res.status(500).json({ error: 'Erro ao carregar configuração de limites.' })
+    return responderErroLimitesSchema(res, err, 'Erro ao carregar configuração de limites.')
   }
 }
 
@@ -976,8 +1001,7 @@ exports.localizarConflitos = async (req, res) => {
     const resultado = await executarLocalizarConflitos(campanhaId, companyId)
     res.json(resultado)
   } catch (err) {
-    console.error('[disparo:limites] localizarConflitos', err)
-    res.status(500).json({ error: 'Erro ao localizar conflitos.' })
+    return responderErroLimitesSchema(res, err, 'Erro ao localizar conflitos.')
   }
 }
 
@@ -1168,8 +1192,7 @@ exports.necessidadeRevisao = async (req, res) => {
       motivos: [...new Set(motivos)],
     })
   } catch (err) {
-    console.error('[disparo:limites] necessidadeRevisao', err)
-    res.status(500).json({ error: 'Erro ao verificar necessidade de revisão.' })
+    return responderErroLimitesSchema(res, err, 'Erro ao verificar necessidade de revisão.')
   }
 }
 
