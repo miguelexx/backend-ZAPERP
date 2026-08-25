@@ -23,6 +23,49 @@ const OPEN_STATUSES = new Set(['aberta', 'em_atendimento', 'aguardando_cliente']
 
 const WEEKDAY_NAMES = ['Domingo', 'Segunda', 'Terça', 'Quarta', 'Quinta', 'Sexta', 'Sábado']
 
+/**
+ * Intervalo de almoço excluído da contagem de tempo de resposta / SLA.
+ * Fixo por decisão de produto (12:00–14:00). Kill-switch/override via env:
+ *   SLA_LUNCH_BREAK="12:00-14:00"  → janela custom
+ *   SLA_LUNCH_BREAK="off"          → desliga a exclusão
+ * Aplica-se SOMENTE ao cálculo de SLA (aba SLA + Visão geral). Não afeta o
+ * horário do chatbot, que carrega o schedule por outro caminho.
+ */
+const SLA_LUNCH_BREAK_MIN = (() => {
+  const raw = String(process.env.SLA_LUNCH_BREAK || '12:00-14:00').trim().toLowerCase()
+  if (raw === 'off' || raw === 'false' || raw === '0') return null
+  const m = raw.match(/^(\d{1,2}):(\d{2})-(\d{1,2}):(\d{2})$/)
+  if (!m) return { start: 12 * 60, end: 14 * 60 }
+  const start = Number(m[1]) * 60 + Number(m[2])
+  const end = Number(m[3]) * 60 + Number(m[4])
+  return Number.isFinite(start) && Number.isFinite(end) && end > start ? { start, end } : { start: 12 * 60, end: 14 * 60 }
+})()
+
+/**
+ * Remove o intervalo [brk.start, brk.end) de uma lista de janelas {start,end}
+ * (minutos do dia), dividindo a janela quando o intervalo cai no meio dela.
+ * Idempotente: se a empresa já configurou o almoço nas janelas, nada muda.
+ */
+function formatMinuteOfDay(minutes) {
+  const n = Math.max(0, Math.min(1439, Math.floor(Number(minutes) || 0)))
+  return `${String(Math.floor(n / 60)).padStart(2, '0')}:${String(n % 60).padStart(2, '0')}`
+}
+
+function carveBreakFromWindows(windows, brk) {
+  if (!brk || !(brk.end > brk.start)) return Array.isArray(windows) ? windows : []
+  const out = []
+  for (const w of windows || []) {
+    if (brk.end <= w.start || brk.start >= w.end) {
+      out.push({ ...w }) // sem sobreposição
+      continue
+    }
+    if (brk.start > w.start) out.push({ start: w.start, end: Math.min(brk.start, w.end) })
+    if (brk.end < w.end) out.push({ start: Math.max(brk.end, w.start), end: w.end })
+    // intervalo cobre a janela inteira → janela removida
+  }
+  return out.filter((w) => w.end > w.start)
+}
+
 function clampInt(n, min, max) {
   const x = Number(n)
   if (!Number.isFinite(x)) return null
@@ -274,10 +317,16 @@ async function loadSlaBusinessSchedule(company_id, slaConfig) {
     { chatbot_triage: mergedSource }
   )
 
+  // Exclui o almoço (12:00–14:00 por padrão) da contagem — só no SLA, não no chatbot.
+  schedule.windows = carveBreakFromWindows(schedule.windows, SLA_LUNCH_BREAK_MIN)
+
   return {
     schedule,
     horario_comercial_ativo: true,
     modo_contagem: 'horario_comercial',
+    intervalo_almoco: SLA_LUNCH_BREAK_MIN
+      ? { inicio: formatMinuteOfDay(SLA_LUNCH_BREAK_MIN.start), fim: formatMinuteOfDay(SLA_LUNCH_BREAK_MIN.end) }
+      : null,
     resumo: describeBusinessSchedule(schedule),
   }
 }
@@ -743,6 +792,14 @@ async function buildSlaAnalytics(company_id, query = {}, opts = {}) {
   const respostaHumana = analisadas.filter((x) => x.tipo_resposta === 'humana').length
   const respostaAutomacao = allRows.filter((x) => x.tipo_resposta === 'automacao').length
 
+  // "Tempo médio de resposta" = média de TODAS as esperas respondidas (1ª resposta +
+  // reaberturas), enquanto tempo_medio_primeira_resposta_min olha só a 1ª de cada cliente.
+  const reaberturaAnalisadas = reaberturaRows.filter((x) => x.status_sla === 'cumpriu' || x.status_sla === 'violou')
+  const temposTodasEsperas = [...analisadas, ...reaberturaAnalisadas]
+    .map((x) => x.tempo_resposta_min)
+    .filter((v) => Number.isFinite(v))
+  const tempoMedioTodasEsperas = round1(avg(temposTodasEsperas))
+
   const now = Date.now()
   const criticasSemResposta = semResposta
     .filter((x) => OPEN_STATUSES.has(x.status_atendimento))
@@ -764,8 +821,9 @@ async function buildSlaAnalytics(company_id, query = {}, opts = {}) {
     dados_insuficientes: dadosInsuficientes.length,
     resposta_humana: respostaHumana,
     resposta_automacao: respostaAutomacao,
-    reabertura_total: reaberturaRows.filter((x) => x.status_sla === 'cumpriu' || x.status_sla === 'violou').length,
+    reabertura_total: reaberturaAnalisadas.length,
     total_conversas_com_cliente: allRows.length,
+    tempo_medio_resposta_min: tempoMedioTodasEsperas,
     meta_minutos_global: slaConfig.sla_minutos_sem_resposta,
     meta_percentual_configurada: slaConfig.sla_meta_percentual,
   })
@@ -1037,4 +1095,6 @@ module.exports = {
   calcDiffMinutes,
   analyzeSlaCycle,
   classifyOutbound,
+  carveBreakFromWindows,
+  SLA_LUNCH_BREAK_MIN,
 }

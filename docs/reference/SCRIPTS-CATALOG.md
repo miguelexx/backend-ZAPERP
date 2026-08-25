@@ -80,6 +80,18 @@ Scripts e SQLs em `scripts/certificacao/` para verificação do sistema antes de
 
 ---
 
+## Scripts de teste manual
+
+Scripts de diagnóstico rápido que simulam chamadas reais ao sistema. Não fazem parte da suite Jest — são acionados manualmente durante desenvolvimento ou debug.
+
+| Script | Uso | Efeito |
+|--------|-----|--------|
+| `test-chatbot.js` | `node scripts/test-chatbot.js` | Testa fluxo do chatbot de triagem para uma empresa. Pode gerar mensagens de teste no banco. |
+| `test-encaminhamento.js` | `node scripts/test-encaminhamento.js` | Testa funcionalidade de encaminhamento de mensagens entre conversas. |
+| `test-ultramsg-contacts.js` | `node scripts/test-ultramsg-contacts.js` | Consulta `GET /contacts` e `GET /contacts/contact` na API UltraMSG e imprime resposta. Não altera banco. |
+
+---
+
 ## Aviso de segurança
 
 Scripts que escrevem no banco de produção (`criar-admin`, `configurar-ultramsg`, `reprocessar-webhooks-ultramsg-falhos --apply`, `r2-disk-cleanup`, `r2-migrate-historico`, `certificacao/fix-*.sql`) devem ser executados **só com `.env` de produção apontando para o banco correto** e com backup recente. Confirmar `SUPABASE_URL` antes de rodar.

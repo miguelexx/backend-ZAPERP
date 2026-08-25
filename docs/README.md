@@ -37,13 +37,15 @@ docs/
 │   ├── 14-DECISOES-TECNICAS.md  ADRs
 │   ├── 15-GLOSSARIO.md
 │   ├── 16-MAPA-DE-ARQUIVOS-CRITICOS.md  qual arquivo ler para cada tarefa
-│   └── 17-CHECKLIST-PARA-PROXIMA-IA.md
+│   ├── 17-CHECKLIST-PARA-PROXIMA-IA.md
+│   └── 18-ANTI-PADROES-E-ARMADILHAS.md  15 armadilhas específicas desta codebase
 │
 └── reference/                  ← referência suplementar por domínio
     ├── PROJECT_RULES.md        regras do projeto (multi-tenant, segurança, padrões)
     ├── ADR-LEGACY-NAMING.md   nomenclatura legada zapi_* vs UltraMSG atual
     ├── PROTECAO-ENVIO.md      módulo de rate limit + opt-in (ATUALMENTE DESATIVADO)
     ├── SCRIPTS-CATALOG.md     catálogo de todos os scripts de manutenção em scripts/
+    ├── chatbot-config-example.json  exemplo completo de config do chatbot de triagem
     ├── API-CHATS-QUERY.md     parâmetros de query de /chats
     ├── API-ENCAMINHAMENTO-MENSAGENS.md
     ├── API-HELPDESK-ICTHUS.md integração help desk externa
@@ -75,6 +77,7 @@ docs/
 | Módulo de Disparo (campanhas) | `ai-handoff/04-MODULOS-E-REGRAS-DE-NEGOCIO.md` |
 | Autenticação / permissões | `ai-handoff/08-AUTENTICACAO-SEGURANCA-E-MULTITENANCY.md` |
 | Qualquer mudança nova | `ai-handoff/17-CHECKLIST-PARA-PROXIMA-IA.md` |
+| Evitar erros comuns de IAs | `ai-handoff/18-ANTI-PADROES-E-ARMADILHAS.md` |
 | Proteção de envio / rate limit / opt-in | `reference/PROTECAO-ENVIO.md` |
 | Scripts de manutenção / diagnóstico / R2 | `reference/SCRIPTS-CATALOG.md` |
 

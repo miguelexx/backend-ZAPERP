@@ -1094,11 +1094,25 @@ async function getRelatorioDiarioGestor(companyId, dateStr) {
   }
 }
 
+/**
+ * Contadores ao vivo da fila (modo simples): quantos clientes aguardam o atendente
+ * (última msg foi do cliente + regra de "marcar como lida") e quantos aguardam o
+ * cliente (última interação foi resposta humana). Reaproveita buildConversationInsights.
+ */
+async function getFilaModoSimplesCounts(companyId) {
+  const insights = await buildConversationInsights(companyId)
+  return {
+    aguardando_atendente: insights.pending.length,
+    aguardando_cliente: insights.aguardandoCliente.length,
+  }
+}
+
 module.exports = {
   getResumo,
   getClientesPendentes,
   getMovimentacaoFuncionario,
   getRelatorioDiarioGestor,
+  getFilaModoSimplesCounts,
   countAguardandoFuncionarioParaAlertaAdmin,
   listAguardandoFuncionarioParaAlertaAdmin,
   // Exportados para teste/certificação do cálculo de tempo de resposta:

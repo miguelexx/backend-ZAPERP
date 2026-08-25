@@ -2,7 +2,7 @@
 
 > Revisado em 2026-08-23 · branch `master` · commit-base `66e0771d9f61f840524cd4b0645e742df374a77a` + working tree existente.
 
-Documentação oficial de handoff: [`docs/ai-handoff/`](docs/ai-handoff/). Comece por [`00-LEIA-PRIMEIRO.md`](docs/ai-handoff/00-LEIA-PRIMEIRO.md).
+Documentação oficial de handoff: [`docs/AI_HANDOFF.md`](docs/AI_HANDOFF.md) (contexto rápido, uma página) · [`docs/README.md`](docs/README.md) (índice mestre) · [`docs/ai-handoff/`](docs/ai-handoff/) (série técnica completa, 17 docs — comece por [`00-LEIA-PRIMEIRO.md`](docs/ai-handoff/00-LEIA-PRIMEIRO.md)).
 
 Frontend (série separada, carregar só a sessão da tarefa): [`../frontend/docs/ai-handoff/00-LEIA-PRIMEIRO.md`](../frontend/docs/ai-handoff/00-LEIA-PRIMEIRO.md). Índice-mestre: [`../docs/ai-handoff/00-LEIA-PRIMEIRO.md`](../docs/ai-handoff/00-LEIA-PRIMEIRO.md).
 

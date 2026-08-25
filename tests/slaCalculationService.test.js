@@ -3,7 +3,9 @@ const {
   analyzeSlaCycle,
   classifyOutbound,
   calcDiffMinutes,
+  carveBreakFromWindows,
 } = require('../services/slaCalculationService')
+const { businessMinutesBetween } = require('../services/atendimentoSemRespostaService')
 
 describe('slaCalculationService', () => {
   const baseCtx = {
@@ -88,5 +90,45 @@ describe('slaCalculationService', () => {
   test('calcDiffMinutes usa tempo corrido sem horário comercial', () => {
     const min = calcDiffMinutes('2026-06-22T10:00:00Z', '2026-06-22T10:30:00Z', { enabled: false })
     expect(min).toBe(30)
+  })
+
+  describe('carveBreakFromWindows (exclusão de almoço)', () => {
+    const almoco = { start: 12 * 60, end: 14 * 60 } // 12:00–14:00
+
+    test('divide a janela 07:00–18:00 em duas ao redor do almoço', () => {
+      const out = carveBreakFromWindows([{ start: 7 * 60, end: 18 * 60 }], almoco)
+      expect(out).toEqual([
+        { start: 7 * 60, end: 12 * 60 },
+        { start: 14 * 60, end: 18 * 60 },
+      ])
+    })
+
+    test('janela inteiramente dentro do almoço é removida', () => {
+      const out = carveBreakFromWindows([{ start: 12 * 60 + 30, end: 13 * 60 + 30 }], almoco)
+      expect(out).toEqual([])
+    })
+
+    test('janela sem sobreposição fica intacta', () => {
+      const janelas = [{ start: 14 * 60, end: 18 * 60 }]
+      expect(carveBreakFromWindows(janelas, almoco)).toEqual(janelas)
+    })
+
+    test('almoço "off" (brk nulo) não altera as janelas', () => {
+      const janelas = [{ start: 7 * 60, end: 18 * 60 }]
+      expect(carveBreakFromWindows(janelas, null)).toEqual(janelas)
+    })
+
+    test('integração: businessMinutesBetween ignora o almoço nas janelas carvadas', () => {
+      const schedule = {
+        enabled: true,
+        timezone: 'America/Sao_Paulo',
+        diasSemanaDesativados: [],
+        datasEspecificasFechadas: [],
+        windows: carveBreakFromWindows([{ start: 7 * 60, end: 18 * 60 }], almoco),
+      }
+      // 11:30 → 14:30 (horário local SP = UTC-3): conta 11:30–12:00 (30) + 14:00–14:30 (30) = 60
+      const min = businessMinutesBetween('2026-06-15T14:30:00.000Z', new Date('2026-06-15T17:30:00.000Z'), schedule)
+      expect(min).toBe(60)
+    })
   })
 })

@@ -18,11 +18,11 @@ Consolida **obrigações** para humanos e agentes (Cursor).
 
 | Regra | Detalhe |
 |-------|---------|
-| **Sempre** filtrar por `company_id`** em queries de negócio | JWT e socket exigem `company_id`; reforçar na camada de dados |
+| **Sempre** filtrar por `company_id` em queries de negócio | JWT e socket exigem `company_id`; reforçar na camada de dados |
 | **Nunca** expor dados de outra empresa por omissão de filtro | Revisar joins e RPCs |
 | **Evitar `SELECT *`** | Colunas explícitas; melhor para índices e segurança |
 | **Não** executar SQL destrutivo em produção sem confirmação explícita | Inclui scripts em `supabase/` |
-| Respeitar **RLS/políticas** quando existirem | Supabase |
+| **`SERVICE_ROLE_KEY` ignora RLS globalmente** | O cliente Supabase usa `SERVICE_ROLE_KEY` — isso bypassa **todo** RLS do banco. Todo isolamento entre empresas é **exclusivamente app-layer**, via filtro `company_id` no código. Não existe proteção de banco compensando uma query sem filtro. |
 
 ---
 

@@ -5,6 +5,20 @@
 
 ---
 
+## Atualização 2026-08-24 (segunda rodada)
+
+| Arquivo | Ação | Motivo |
+|---------|------|--------|
+| `backend/CLAUDE.md` | Criado | Claude Code lê automaticamente; aponta para AI_HANDOFF, 17-CHECKLIST e 18-ANTI-PADROES; inclui hardstops e vulnerabilidades ativas |
+| `CLAUDE.md` (raiz do repo) | Criado | Contexto global: aponta para backend/CLAUDE.md e resume zonas de perigo do frontend |
+| `docs/ai-handoff/17-CHECKLIST-PARA-PROXIMA-IA.md` | Atualizado | Adicionados: protocolo de declaração pré-ação, mandato de documentação, validação de PENDENTE |
+| `docs/ai-handoff/18-ANTI-PADROES-E-ARMADILHAS.md` | Criado | 15 armadilhas específicas desta codebase (nomes legados, multitenancy, retry cego, socket leak, etc.) |
+| `docs/reference/FEATURE-FLAGS.md` | Corrigido | Removida `FEATURE_CAMPANHAS` (módulo deletado); adicionada nota sobre override hard-coded `PROTECAO_DESATIVADA` |
+| `docs/README.md` | Atualizado | Doc 18 adicionado ao índice e ao guia de leitura por tarefa |
+| `docs/ai-handoff/00-LEIA-PRIMEIRO.md` | Atualizado | Doc 18 adicionado à ordem de leitura |
+
+---
+
 ## Documentos criados
 
 | Arquivo | Motivo |
@@ -12,6 +26,10 @@
 | `docs/README.md` | Índice mestre ausente; necessário como ponto de entrada único |
 | `docs/AI_HANDOFF.md` | Arquivo compacto de handoff para IAs; documentação existente era só uma pasta com 17 arquivos, sem sumário executivo de uma página |
 | `docs/DOCUMENTATION_AUDIT.md` | Este arquivo; rastreabilidade das mudanças |
+| `docs/reference/PROTECAO-ENVIO.md` | Módulo `services/protecao/` totalmente indocumentado; `PROTECAO_DESATIVADA=true` é fato crítico operacional |
+| `docs/reference/SCRIPTS-CATALOG.md` | 14 scripts em `scripts/` sem qualquer catálogo; frequentemente necessários para manutenção/diagnóstico |
+| `docs/reference/chatbot-config-example.json` | Movido de `examples/` (pasta isolada, sem referências) para consolidar com a documentação |
+| `public/README.md` | Pasta `public/` continha 3 arquivos sem explicação de propósito |
 
 ---
 
@@ -84,6 +102,32 @@ Série completa e muito detalhada criada um dia antes desta auditoria. Preservad
 A pasta contém ~70 documentos históricos: relatórios de certificação, prompts para frontend, análises de bugs, checklists temporários. **Nenhum foi deletado** — toda informação válida já está incorporada nos documentos oficiais e na série `ai-handoff/`.
 
 **Recomendação:** esses arquivos podem ser deletados com segurança a qualquer momento. Nenhum contém informação que não esteja documentada em outro lugar da pasta `docs/` atual. O risco de apagar é zero — o histórico está no git.
+
+---
+
+## Reorganização da raiz do backend (2026-08-24, fase 2)
+
+### Arquivos deletados da raiz e do código
+
+| Arquivo | Motivo |
+|---------|--------|
+| `TODO.md` | Artefato estagnado de sessão de auditoria de IA; todas as tarefas concluídas ou incorporadas nos docs |
+| `test-webhook-zapi.ps1` | Já estava no `.gitignore`; endpoint `/webhooks/zapi` não existe mais (é `/webhooks/ultramsg`); supersedido por `scripts/simular-msg-celular.js` |
+| `validators/crmValidators.js` | CRM interno removido via migration `20260812130000`; arquivo sem nenhuma referência em controllers/routes/services — dead code |
+| `examples/` (pasta inteira) | Continha apenas `chatbot-config-example.json`; movido para `docs/reference/` |
+
+### Arquivos movidos
+
+| De | Para | Motivo |
+|----|------|--------|
+| `ui-overrides.css` (raiz) | `public/ui-overrides.css` | Pertence a `public/`; app.js atualizado para `path.join(__dirname, 'public', 'ui-overrides.css')` |
+| `examples/chatbot-config-example.json` | `docs/reference/chatbot-config-example.json` | Consolidar referências técnicas na pasta `docs/reference/` |
+
+### Arquivos criados
+
+| Arquivo | Motivo |
+|---------|--------|
+| `public/README.md` | Pasta sem explicação de propósito; 3 arquivos com papéis não óbvios |
 
 ---
 

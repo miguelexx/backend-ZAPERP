@@ -31,6 +31,8 @@ Somente nomes/finalidades; valores devem vir do cofre/ambiente.
 
 Para o nome exato antes de configurar, cruzar `.env.example` com `rg "process\.env"`; nem toda variável no exemplo está ativa e algumas referências possuem default. O `.env.example` existente contém exemplo com aparência de credencial e não é considerado padrão seguro; não foi criado outro nem copiado valor.
 
+> **Nota sobre vars `META_*` / `WHATSAPP_TOKEN` no `.env.example`:** As variáveis `WHATSAPP_TOKEN`, `META_ACCESS_TOKEN`, `META_APP_SECRET`, `PHONE_NUMBER_ID`, `WHATSAPP_PHONE_ID` e `WEBHOOK_VERIFY_TOKEN` aparecem comentadas no `.env.example`. Pertencem à **Meta Cloud API (provider removido)**. O sistema **não usa Meta Cloud API** — o único provider ativo é UltraMSG. Essas vars estão no exemplo por legado histórico e podem ser ignoradas completamente. Não implementar nenhuma lógica com base nelas.
+
 ## Desenvolvimento e produção
 
 Desenvolvimento usa nodemon e normalmente `.env` local ignorado. Produção confirmada no repositório: PM2 via `ecosystem.config.js`, modo `fork`, `instances: 1`, autorestart e `NODE_ENV=production`. Não há Dockerfile, Compose ou workflow CI/CD no backend. TLS/reverse proxy, diretório da VPS, usuário do processo, agendador externo, backup e sequência real de deploy são **NÃO CONFIRMADOS**.

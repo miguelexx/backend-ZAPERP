@@ -3,6 +3,9 @@ const { isEnabled, FLAGS } = require('../helpers/featureFlags')
 const { getDisplayName } = require('../helpers/contactEnrichment')
 const { normalizePositiveIds, isGroupRow } = require('../helpers/departamentoGruposHelper')
 const slaCalculationService = require('../services/slaCalculationService')
+const supervisaoService = require('../services/supervisaoService')
+const { empresaModoSimplesAtivo } = require('../helpers/empresaModoSimplesFlag')
+const { loadChatbotTriageMergeAndAbsence } = require('../services/absenceFinalizationService')
 const ExcelJS = require('exceljs')
 const PDFDocument = require('pdfkit')
 
@@ -35,18 +38,6 @@ async function fetchAllRows(buildQuery) {
   return all
 }
 
-async function getSlaMinutes(company_id) {
-  const { data: emp, error } = await supabase
-    .from('empresas')
-    .select('sla_minutos_sem_resposta')
-    .eq('id', company_id)
-    .maybeSingle()
-  if (error) return 5
-  const raw = Number(emp?.sla_minutos_sem_resposta)
-  if (!Number.isFinite(raw)) return 5
-  return Math.max(1, Math.min(1440, Math.trunc(raw)))
-}
-
 /** Nomes de atendentes sem embed PostgREST (FK `conversas_atendente_fk` foi removida na dedupe). */
 async function fetchUsuariosNomeMap(company_id, userIds) {
   const ids = [...new Set((userIds || []).map((id) => Number(id)).filter((id) => Number.isFinite(id) && id > 0))]
@@ -62,20 +53,6 @@ async function fetchUsuariosNomeMap(company_id, userIds) {
     if (u?.id != null) map[String(u.id)] = u?.nome || 'Sem nome'
   }
   return map
-}
-
-/** Primeira resposta outbound após a primeira inbound (evita TypeError se não houver msg `in`). */
-function findPrimeiraRespostaPair(msgs) {
-  const primeiraIn = (msgs || []).find((m) => m?.direcao === 'in')
-  if (!primeiraIn?.criado_em) return { primeiraIn: null, primeiraOut: null }
-  const inTs = new Date(primeiraIn.criado_em).getTime()
-  if (!Number.isFinite(inTs)) return { primeiraIn: null, primeiraOut: null }
-  const primeiraOut = (msgs || []).find((m) => {
-    if (m?.direcao !== 'out' || !m?.criado_em) return false
-    const outTs = new Date(m.criado_em).getTime()
-    return Number.isFinite(outTs) && outTs >= inTs
-  })
-  return { primeiraIn, primeiraOut: primeiraOut || null }
 }
 
 const SAO_PAULO_TZ = 'America/Sao_Paulo'
@@ -233,6 +210,71 @@ async function buildSlaAnalytics(company_id, query = {}, opts = {}) {
   return slaCalculationService.buildSlaAnalytics(company_id, query, opts)
 }
 
+/**
+ * "Clientes com conversa hoje": clientes distintos (não-grupo) com ao menos uma
+ * mensagem real (in/out) hoje, no fuso America/Sao_Paulo. NÃO é contagem da tabela
+ * `atendimentos` (que registra movimentações, não presença de conversa).
+ */
+async function countClientesComConversaHoje(company_id) {
+  const inicioHojeIso = saoPauloDateStartIso(todaySaoPauloDateKey())
+  const msgs = await fetchAllRows(() =>
+    supabase
+      .from('mensagens')
+      .select('conversa_id')
+      .eq('company_id', company_id)
+      .in('direcao', ['in', 'out'])
+      .gte('criado_em', inicioHojeIso)
+  )
+  const convIds = [...new Set((msgs || []).map((m) => m?.conversa_id).filter((x) => x != null))]
+  if (!convIds.length) return 0
+  let total = 0
+  for (const chunk of chunkArray(convIds, 200)) {
+    const { data, error } = await supabase
+      .from('conversas')
+      .select('id, tipo, telefone')
+      .eq('company_id', company_id)
+      .in('id', chunk)
+    if (error) throw error
+    for (const c of data || []) {
+      if (!isGroupRow(c)) total++
+    }
+  }
+  return total
+}
+
+/**
+ * Taxa de conversão = leads GANHOS ÷ leads DECIDIDOS (ganho + perdido) cujo desfecho
+ * caiu no período, via CRM (`crm_leads`). Retorna null quando a base é pequena demais
+ * para ser confiável (< MIN_BASE decididos) ou o CRM não está em uso — o card então
+ * mostra "Sem dados" em vez de um número enganoso.
+ */
+async function calcTaxaConversao(company_id, fromIso, toIso) {
+  const MIN_BASE = 3
+  let ganhoQ = supabase
+    .from('crm_leads')
+    .select('id', { count: 'exact', head: true })
+    .eq('company_id', company_id)
+    .eq('status', 'ganho')
+  if (fromIso) ganhoQ = ganhoQ.gte('ganho_em', fromIso)
+  if (toIso) ganhoQ = ganhoQ.lte('ganho_em', toIso)
+
+  let perdidoQ = supabase
+    .from('crm_leads')
+    .select('id', { count: 'exact', head: true })
+    .eq('company_id', company_id)
+    .eq('status', 'perdido')
+  if (fromIso) perdidoQ = perdidoQ.gte('perdido_em', fromIso)
+  if (toIso) perdidoQ = perdidoQ.lte('perdido_em', toIso)
+
+  const [ganhoRes, perdidoRes] = await Promise.all([ganhoQ, perdidoQ])
+  if (ganhoRes.error || perdidoRes.error) return null
+  const ganhos = Number(ganhoRes.count) || 0
+  const perdidos = Number(perdidoRes.count) || 0
+  const decididos = ganhos + perdidos
+  if (decididos < MIN_BASE) return null
+  return Math.round((ganhos / decididos) * 100)
+}
+
 exports.overview = async (req, res) => {
   const { company_id } = req.user
 
@@ -241,9 +283,11 @@ exports.overview = async (req, res) => {
     // - Sem range_days → mantém comportamento antigo (tudo)
     // - Com range_days → evita dashboard "pesado" e deixa mais útil
     const rangeDays = clampInt(req.query?.range_days, 1, 365)
-    const now = new Date()
-    const fromIso = rangeDays ? new Date(now.getTime() - rangeDays * 24 * 60 * 60 * 1000).toISOString() : null
-    const toIso = now.toISOString()
+    // Janela em DIAS LOCAIS (America/Sao_Paulo), coerente com "últimos N dias locais, incluindo hoje".
+    const dataFim = todaySaoPauloDateKey()
+    const dataInicio = rangeDays ? addDaysDateKey(dataFim, -(rangeDays - 1)) : null
+    const fromIso = dataInicio ? saoPauloDateStartIso(dataInicio) : null
+    const toIso = saoPauloDateEndIso(dataFim)
 
     /* ===============================
        1. STATUS DAS CONVERSAS (KPIs)
@@ -317,19 +361,13 @@ exports.overview = async (req, res) => {
       .sort((a, b) => b.total - a.total)
 
     /* ===============================
-       ATENDIMENTOS HOJE (registros na tabela atendimentos)
+       CLIENTES COM CONVERSA HOJE (clientes distintos com msg real hoje)
     =============================== */
-    const hoje = startOfToday()
     try {
-      const atendimentosHoje = await fetchAllRows(() =>
-        supabase
-          .from('atendimentos')
-          .select('id')
-          .eq('company_id', company_id)
-          .gte('criado_em', hoje)
-      )
-      kpis.atendimentos_hoje = atendimentosHoje.length
-    } catch (_) {}
+      kpis.atendimentos_hoje = await countClientesComConversaHoje(company_id)
+    } catch (e) {
+      console.error('[overview] clientes com conversa hoje falhou:', e?.message || e)
+    }
 
     /* ===============================
        2. TEMPO MÉDIO DA 1ª RESPOSTA (SLA)
@@ -337,7 +375,7 @@ exports.overview = async (req, res) => {
     const mensagens = await fetchAllRows(() => {
       let q = supabase
         .from('mensagens')
-        .select('conversa_id, criado_em, direcao, tipo')
+        .select('conversa_id, criado_em, direcao, tipo, autor_usuario_id, texto, whatsapp_id, whatsapp_instance_id')
         .eq('company_id', company_id)
         .in('direcao', ['in', 'out'])
         .order('criado_em', { ascending: true })
@@ -345,71 +383,73 @@ exports.overview = async (req, res) => {
       return q
     })
 
-    const mensagensPorConversa = {}
+    // Origem da mensagem enviada + deduplicação por whatsapp_id + trilha de auditoria.
+    // Origem (outbound): autor_usuario_id != null → sistema (humano no ZapERP);
+    // null + texto humano → celular (espelho fromMe do WhatsApp Web); null + texto de bot → automação.
+    const triageOverview = await loadChatbotTriageMergeAndAbsence(company_id).catch(() => null)
+
     const msgTipoMap = {}
     let msgIn = 0
     let msgOut = 0
+    const origens = { sistema_humano: 0, whatsapp_celular: 0, automacao: 0, bot: 0 }
+    let dupExcluidas = 0
+    let invalidExcluidas = 0
+    let legadasSemInstancia = 0
+    const whatsappIdsVistos = new Set()
 
-    mensagens.forEach(msg => {
-      if (!mensagensPorConversa[msg.conversa_id]) {
-        mensagensPorConversa[msg.conversa_id] = []
+    for (const msg of mensagens || []) {
+      if (!msg?.criado_em) { invalidExcluidas++; continue }
+      const wid = msg?.whatsapp_id != null ? String(msg.whatsapp_id) : ''
+      if (wid) {
+        if (whatsappIdsVistos.has(wid)) { dupExcluidas++; continue }
+        whatsappIdsVistos.add(wid)
       }
-      mensagensPorConversa[msg.conversa_id].push(msg)
+      if (msg?.whatsapp_instance_id == null) legadasSemInstancia++
 
       const t = String(msg?.tipo || 'texto').toLowerCase()
       msgTipoMap[t] = (msgTipoMap[t] || 0) + 1
-      if (msg?.direcao === 'in') msgIn++
-      if (msg?.direcao === 'out') msgOut++
-    })
-
-    let totalMinutos = 0
-    let totalConversasComResposta = 0
-
-    Object.values(mensagensPorConversa).forEach((msgs) => {
-      const { primeiraIn, primeiraOut } = findPrimeiraRespostaPair(msgs)
-      if (primeiraIn && primeiraOut) {
-        const diff =
-          (new Date(primeiraOut.criado_em) - new Date(primeiraIn.criado_em)) / 60000
-        if (diff >= 0) {
-          totalMinutos += diff
-          totalConversasComResposta++
-        }
+      if (msg?.direcao === 'in') {
+        msgIn++
+      } else if (msg?.direcao === 'out') {
+        msgOut++
+        if (msg?.autor_usuario_id != null) origens.sistema_humano++
+        else if (supervisaoService.outboundEhRespostaHumana(msg, triageOverview)) origens.whatsapp_celular++
+        else origens.automacao++
       }
-    })
-
-    if (totalConversasComResposta > 0) {
-      const media = totalMinutos / totalConversasComResposta
-      kpis.tempo_primeira_resposta_min = Math.round(media)
-      kpis.tempo_medio_resposta_min = Math.round(media * 10) / 10
     }
 
-    const slaMinutes = await getSlaMinutes(company_id)
-    /* SLA: % de conversas com 1ª resposta dentro da configuração da empresa */
-    let conversasComSla = 0
-    Object.values(mensagensPorConversa).forEach((msgs) => {
-      const { primeiraIn, primeiraOut } = findPrimeiraRespostaPair(msgs)
-      if (primeiraIn && primeiraOut) {
-        const diff = (new Date(primeiraOut.criado_em) - new Date(primeiraIn.criado_em)) / 60000
-        if (diff >= 0 && diff <= slaMinutes) conversasComSla++
-      }
-    })
-    const totalComResposta = Object.values(mensagensPorConversa).filter(msgs => {
-      const primeiraIn = msgs.find(m => m.direcao === 'in')
-      const primeiraOut = msgs.find(m => m.direcao === 'out')
-      return primeiraIn && primeiraOut
-    }).length
-    if (totalComResposta > 0) {
-      kpis.sla_percent = Math.round((conversasComSla / totalComResposta) * 100)
+    // Tempo de resposta + SLA% saem do MOTOR DE SLA (mesma lógica da aba SLA):
+    // só resposta humana, horário comercial e almoço (12:00–14:00) excluídos.
+    // Assim os dois cards deixam de ser idênticos, o bot não conta como resposta,
+    // e a Visão geral passa a bater com a aba SLA. Isolado em try/catch para não
+    // derrubar o dashboard inteiro caso o cálculo falhe.
+    try {
+      const slaAnalytics = await slaCalculationService.buildSlaAnalytics(
+        company_id,
+        { data_inicio: dataInicio || '2000-01-01', data_fim: dataFim },
+        { skipTrend: true }
+      )
+      const r = slaAnalytics?.resumo || {}
+      kpis.tempo_primeira_resposta_min =
+        r.tempo_medio_primeira_resposta_min != null ? Math.round(r.tempo_medio_primeira_resposta_min) : null
+      kpis.tempo_medio_resposta_min =
+        r.tempo_medio_resposta_min != null ? Math.round(r.tempo_medio_resposta_min * 10) / 10 : null
+      kpis.sla_percent = r.percentual_cumprido != null ? Math.round(r.percentual_cumprido) : null
+      kpis.sla_conta_automacao = slaAnalytics?.config?.sla_contar_bot_como_resposta === true
+    } catch (e) {
+      console.error('[overview] cálculo de SLA/tempo de resposta falhou:', e?.message || e)
     }
 
     const mensagens_por_tipo = Object.entries(msgTipoMap)
       .map(([tipo, total]) => ({ tipo, total }))
       .sort((a, b) => b.total - a.total)
 
+    // Total já deduplicado por whatsapp_id (in + out), coerente com "por tipo" e "origens".
     const mensagens_kpis = {
-      total: (mensagens || []).length,
+      total: msgIn + msgOut,
       in: msgIn,
       out: msgOut,
+      origens,
     }
 
     /* ===============================
@@ -467,19 +507,84 @@ exports.overview = async (req, res) => {
       .sort((a, b) => a.hora.localeCompare(b.hora))
 
     /* ===============================
+       5. CONVERSAS POR STATUS (do período)
+    =============================== */
+    const statusMap = {}
+    for (const c of conversas || []) {
+      const st = String(c?.status_atendimento || 'sem_status')
+      statusMap[st] = (statusMap[st] || 0) + 1
+    }
+    const conversas_por_status = Object.entries(statusMap)
+      .map(([status, total]) => ({ status, total }))
+      .sort((a, b) => b.total - a.total)
+
+    /* ===============================
+       6. MODO SIMPLES + FILA AO VIVO
+    =============================== */
+    const modoSimplesAtivo = await empresaModoSimplesAtivo(company_id).catch(() => false)
+    kpis.atendimento_modo_simples = modoSimplesAtivo === true
+    if (modoSimplesAtivo) {
+      try {
+        const fila = await supervisaoService.getFilaModoSimplesCounts(company_id)
+        kpis.aguardando_atendente = fila.aguardando_atendente
+        kpis.aguardando_cliente = fila.aguardando_cliente
+      } catch (e) {
+        console.error('[overview] fila modo simples falhou:', e?.message || e)
+      }
+    }
+
+    /* ===============================
+       7. TAXA DE CONVERSÃO (CRM) — só quando confiável
+    =============================== */
+    try {
+      kpis.taxa_conversao_percent = await calcTaxaConversao(company_id, fromIso, toIso)
+    } catch (e) {
+      console.error('[overview] taxa de conversão falhou:', e?.message || e)
+    }
+
+    /* ===============================
+       8. INSTÂNCIA PRINCIPAL (nome exibido no cabeçalho)
+    =============================== */
+    let instancia = null
+    try {
+      const { data: inst } = await supabase
+        .from('whatsapp_instances')
+        .select('id, nome, is_default, status')
+        .eq('company_id', company_id)
+        .eq('ativo', true)
+        .order('is_default', { ascending: false })
+        .order('id', { ascending: true })
+        .limit(1)
+        .maybeSingle()
+      if (inst) instancia = { id: inst.id, nome: inst.nome || 'WhatsApp principal', status: inst.status || null }
+    } catch (_) {}
+
+    const auditoria = {
+      mensagens_duplicadas_excluidas: dupExcluidas,
+      mensagens_invalidas_excluidas: invalidExcluidas,
+      mensagens_legadas_sem_instancia: legadasSemInstancia,
+    }
+
+    /* ===============================
        RESPONSE FINAL
     =============================== */
     res.json({
       periodo: {
         range_days: rangeDays,
+        timezone: SAO_PAULO_TZ,
+        data_inicio: dataInicio,
+        data_fim: dataFim,
         from: fromIso,
         to: toIso,
       },
+      instancia,
+      auditoria,
       kpis,
       mensagens_kpis,
       mensagens_por_tipo,
       conversas_por_setor,
       conversas_por_atendente: conversasPorAtendente,
+      conversas_por_status,
       conversas_por_hora: conversasPorHora,
     })
   } catch (err) {
@@ -520,19 +625,6 @@ exports.metrics = async (req, res) => {
     const hoje = new Date()
     hoje.setHours(0, 0, 0, 0)
     const hojeIso = hoje.toISOString()
-
-    // 1) Carregar config de SLA da empresa (minutos sem resposta)
-    let slaMinutos = 30
-    {
-      const { data: emp, error: errEmp } = await supabase
-        .from('empresas')
-        .select('sla_minutos_sem_resposta')
-        .eq('id', company_id)
-        .single()
-      if (!errEmp && emp && typeof emp.sla_minutos_sem_resposta === 'number') {
-        slaMinutos = Math.max(1, Math.min(1440, emp.sla_minutos_sem_resposta))
-      }
-    }
 
     // 2) Conversas da empresa (base para várias métricas)
     const { data: conversas, error: errConversas } = await supabase
@@ -603,77 +695,37 @@ exports.metrics = async (req, res) => {
       }
     }
 
-    // 3) Mensagens: tempo médio da 1ª resposta + SLA + volume
-    const { data: mensagens, error: errMensagens } = await supabase
-      .from('mensagens')
-      .select('conversa_id, criado_em, direcao')
-      .eq('company_id', company_id)
-      .in('direcao', ['in', 'out'])
+    // 3) Volume de mensagens — contagem EXATA (head), sem o teto de 1000 linhas do PostgREST.
+    const [recRes, envRes] = await Promise.all([
+      supabase.from('mensagens').select('id', { count: 'exact', head: true })
+        .eq('company_id', company_id).eq('direcao', 'in'),
+      supabase.from('mensagens').select('id', { count: 'exact', head: true })
+        .eq('company_id', company_id).eq('direcao', 'out'),
+    ])
+    const mensagensRecebidas = Number(recRes.count) || 0
+    const mensagensEnviadas = Number(envRes.count) || 0
 
-    if (errMensagens) throw errMensagens
-
-    // Agrupa mensagens por conversa para calcular 1ª mensagem do cliente (in)
-    // e 1ª resposta do atendente (out) APÓS a primeira in.
-    const mensagensPorConversa = new Map() // conversa_id -> array de msgs
-    let mensagensRecebidas = 0
-    let mensagensEnviadas = 0
-
-    for (const m of mensagens || []) {
-      const convId = m.conversa_id
-      const ts = m?.criado_em ? new Date(m.criado_em).getTime() : NaN
-      if (!convId || Number.isNaN(ts)) continue
-
-      if (m.direcao === 'in') {
-        mensagensRecebidas++
-      } else if (m.direcao === 'out') {
-        mensagensEnviadas++
-      }
-
-      if (!mensagensPorConversa.has(convId)) {
-        mensagensPorConversa.set(convId, [])
-      }
-      mensagensPorConversa.get(convId).push({ ts, direcao: m.direcao })
-    }
-
-    let somaMinutosPrimeiraResposta = 0
-    let conversasComResposta = 0
-    let conversasDentroSla = 0
-    let conversasComCliente = 0
-
-    for (const [convId, arr] of mensagensPorConversa.entries()) {
-      if (!Array.isArray(arr) || arr.length === 0) continue
-      // ordena cronologicamente
-      arr.sort((a, b) => a.ts - b.ts)
-
-      const primeiraInMsg = arr.find((m) => m.direcao === 'in')
-      if (!primeiraInMsg) continue
-      conversasComCliente++
-
-      const primeiraOutMsg = arr.find(
-        (m) => m.direcao === 'out' && m.ts >= primeiraInMsg.ts
+    // 4) Tempo de 1ª resposta + SLA via MOTOR DE SLA (só resposta humana, horário
+    // comercial e almoço excluídos) — mesma verdade da aba SLA e da Visão geral.
+    // Antes: pareava 1º outbound QUALQUER (bot contava) em relógio corrido = número errado.
+    let tempoMedioPrimeiraResposta = null
+    let slaPercentualRespondidas = null
+    let slaPercentualTotal = null
+    try {
+      const sla = await slaCalculationService.buildSlaAnalytics(
+        company_id,
+        { data_inicio: '2000-01-01', data_fim: todaySaoPauloDateKey() },
+        { skipTrend: true }
       )
-      if (!primeiraOutMsg) continue
-
-      const diffMin = (primeiraOutMsg.ts - primeiraInMsg.ts) / 60000
-      if (diffMin < 0) continue
-
-      somaMinutosPrimeiraResposta += diffMin
-      conversasComResposta++
-      if (diffMin <= slaMinutos) conversasDentroSla++
+      const r = sla?.resumo || {}
+      tempoMedioPrimeiraResposta = r.tempo_medio_primeira_resposta_min ?? null
+      slaPercentualRespondidas = r.percentual_cumprido ?? null
+      slaPercentualTotal = r.total_conversas_com_cliente > 0
+        ? Math.round((r.dentro_sla * 1000) / r.total_conversas_com_cliente) / 10
+        : null
+    } catch (e) {
+      console.error('[metrics] cálculo de SLA falhou:', e?.message || e)
     }
-
-    const tempoMedioPrimeiraResposta =
-      conversasComResposta > 0 ? somaMinutosPrimeiraResposta / conversasComResposta : null
-
-    const slaPercentualRespondidas =
-      conversasComResposta > 0
-        ? (conversasDentroSla * 100) / conversasComResposta
-        : null
-
-    const slaPercentualTotal =
-      conversasComCliente > 0
-        ? (conversasDentroSla * 100) / conversasComCliente
-        : null
 
     // 4) Atendimentos hoje (ações na tabela atendimentos)
     let atendimentosHoje = 0

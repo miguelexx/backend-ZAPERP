@@ -1,13 +1,32 @@
 # Checklist para a próxima IA
 
-> Análise: 2026-08-23 · `master` · commit-base `66e0771d9f61f840524cd4b0645e742df374a77a`.
+> Análise: 2026-08-23 · `master` · commit-base `66e0771d9f61f840524cd4b0645e742df374a77a`.  
+> Atualizado: 2026-08-24 — adicionados protocolos de declaração pré-ação e mandato de documentação.
+
+## Declaração pré-ação (obrigatório antes de escrever qualquer código)
+
+Antes de tocar em qualquer arquivo, declare explicitamente:
+
+- [ ] **Módulos e arquivos afetados** — listar os arquivos que serão lidos e/ou editados
+- [ ] **Riscos de regressão** — o que pode quebrar além do que está sendo alterado
+- [ ] **Testes existentes relevantes** — quais suites cobrem o módulo
+- [ ] **Dependências de infraestrutura** — precisa de migration? De atualizar evento Socket.IO? De variável de ambiente nova?
+
+Não prosseguir sem esta declaração. Se o escopo for maior do que esperado, reportar antes de implementar.
+
+## Mandato de documentação (obrigatório ao terminar)
+
+- [ ] Se encontrou algo relevante ao sistema que **não estava documentado** → adicionar ao doc correspondente em `docs/ai-handoff/` antes de encerrar
+- [ ] Se um item está marcado **PENDENTE DE VALIDAÇÃO** e você validou no código → atualizar o status no doc
+- [ ] Nunca encerrar a sessão com conhecimento novo não registrado
 
 ## Antes de qualquer alteração
 
-- [ ] Ler [00](00-LEIA-PRIMEIRO.md), [arquitetura](01-ARQUITETURA.md), [banco](03-BANCO-DE-DADOS.md), [segurança](08-AUTENTICACAO-SEGURANCA-E-MULTITENANCY.md), [riscos](13-PROBLEMAS-CONHECIDOS-E-DIVIDA-TECNICA.md) e [mapa crítico](16-MAPA-DE-ARQUIVOS-CRITICOS.md).
+- [ ] Ler [00](00-LEIA-PRIMEIRO.md), [arquitetura](01-ARQUITETURA.md), [banco](03-BANCO-DE-DADOS.md), [segurança](08-AUTENTICACAO-SEGURANCA-E-MULTITENANCY.md), [riscos](13-PROBLEMAS-CONHECIDOS-E-DIVIDA-TECNICA.md), [mapa crítico](16-MAPA-DE-ARQUIVOS-CRITICOS.md) e [anti-padrões](18-ANTI-PADROES-E-ARMADILHAS.md).
 - [ ] Executar `git status --short` e distinguir mudanças preexistentes. Nunca descartar trabalho do usuário.
 - [ ] Declarar escopo e não analisar/alterar frontend.
 - [ ] Localizar route → controller → service/helper/repository → migration → teste. Buscar também aliases e chamadas legadas; nome “Zapi” não significa inativo.
+- [ ] Para qualquer item marcado **PENDENTE DE VALIDAÇÃO** relevante à tarefa: validar no código antes de assumir como verdade.
 
 ## Banco e multitenancy
 

@@ -58,3 +58,11 @@ Como o backend usa service role, RLS é ignorado: toda leitura/update/delete pre
 ## Ordem segura
 
 Aplicar migrations por nome, depois de backup e prechecks. Para índices grandes, comparar a migration normal com `supabase/production/*_concurrently.sql`; não aplicar ambas cegamente. Migrations destrutivas de agosto removem CRM/campanhas legadas/planos/tabelas auxiliares e exigem confirmação do estado. Nunca executar `supabase/scripts_manuais/perigosos/` automaticamente.
+
+### Migration mais recente (2026-08-23)
+
+`20260823230000_chat_search_word_prefix.sql` — **sem novas tabelas**. Adiciona:
+- Extensões `unaccent` e `pg_trgm` (se não existirem)
+- Função `search_name_key(text)` que normaliza texto em chave de busca (remove acentos, pontuação vira separador)
+- Índice funcional em `clientes(nome)` usando a função, permitindo busca por prefixo de palavra em vez de `LIKE %termo%` (que casava no meio de palavras)
+- Objetivo: "hu" não casava mais em "Shuarts" — só no início de palavra ou nome

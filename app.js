@@ -363,7 +363,7 @@ const hasFrontendDist = fs.existsSync(frontendDist) && fs.existsSync(path.join(f
 
 if (hasFrontendDist) {
   // CSS de overrides para melhorar legibilidade/visual sem rebuild do frontend
-  const uiOverridesPath = path.join(__dirname, 'ui-overrides.css')
+  const uiOverridesPath = path.join(__dirname, 'public', 'ui-overrides.css')
   const uiOverridesHref = '/ui-overrides.css'
   const indexHtmlPath = path.join(frontendDist, 'index.html')
   const indexHtmlRaw = fs.readFileSync(indexHtmlPath, 'utf8')

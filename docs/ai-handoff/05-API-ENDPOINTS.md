@@ -22,6 +22,8 @@ Todas as operações autenticadas devem limitar consultas por `req.user.company_
 | `GET /webhooks/ultramsg/` e alias | `webhookLimiter`; `testarUltramsg` | Verificação básica do endpoint. |
 | `POST /webhooks/ultramsg/` e alias | limiter, `requireWebhookToken`, `resolveWebhookInstance`; `webhookUltramsgController` | Body UltraMSG. Resolve instância/tenant, normaliza inbound ou ACK, persiste e emite eventos. `401/403/404/429/500`; detalhes em [06](06-WHATSAPP-ULTRAMSG-E-WEBHOOKS.md). |
 | `GET /uploads/*` | middleware inline/static | Arquivo local por nome não previsível; `nosniff`, sem JWT. |
+| `GET /permissoes` | inline em `app.js`; serve `public/permissoes.html` | Sem auth HTTP; página HTML estática de referência do catálogo de permissões. Uso interno/admin pelo navegador. |
+| `GET /painel-supervisao` | inline em `app.js`; serve `public/supervisao.html` | Sem auth HTTP; painel HTML de supervisão autônomo. Uso interno/admin pelo navegador. |
 | `GET /media/r2/*` | inline em `app.js` | Redireciona para URL R2 assinada quando objeto está autorizado. |
 | `GET /media/proxy?url=...` | `authBearerOrQuery`; `mediaProxyController.proxyMedia` | JWT Bearer ou `access_token`; busca HTTPS de host permitido, valida redirects/tamanho. Não grava banco. |
 

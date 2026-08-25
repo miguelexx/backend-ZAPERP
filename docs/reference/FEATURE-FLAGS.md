@@ -1,21 +1,24 @@
 # Feature Flags (ENV)
 
-Flags para ativar funcionalidades do Plano SaaS sem alterar código.
+> Atualizado: 2026-08-24. Flags lidas em `helpers/featureFlags.js`.  
+> **`FEATURE_CAMPANHAS` foi removida** junto com o módulo de campanhas legado (migration `20260812140000_drop_campanhas_module.sql`). O módulo atual de campanhas chama-se **Disparo** e é controlado por `DISPARO_WORKER_ENABLED` / `DISPARO_LIVE_ENABLED`.
 
-| Variável | Descrição | Valores |
-|----------|-----------|---------|
-| `FEATURE_OPT_OUT_WEBHOOK` | Processar comandos PARAR, SAIR, DESCADASTRAR no webhook | `1` ou `true` = ativo |
-| `FEATURE_REGRA_AUTO_WEBHOOK` | Processar regras automáticas (palavra-chave) no webhook | `1` ou `true` = ativo |
-| `FEATURE_CAMPANHAS` | Módulo de campanhas (APIs /campanhas, /opt-in, /opt-out) | `1` ou `true` = ativo |
-| `FEATURE_PROTECAO` | Módulos de proteção (frequência, volume, opt-in) | `1` ou `true` = ativo |
-| `FEATURE_METRICAS_AVANCADAS` | Endpoint /dashboard/metrics-avancadas | `1` ou `true` = ativo |
+Flags para ativar funcionalidades sem alterar código. Quando não definida ou com valor diferente de `1` / `true` / `yes`, a feature fica **desativada**.
 
-**Exemplo .env:**
+| Variável | Descrição | Padrão |
+|----------|-----------|--------|
+| `FEATURE_OPT_OUT_WEBHOOK` | Processar comandos PARAR/SAIR/DESCADASTRAR no webhook inbound | desativada |
+| `FEATURE_REGRA_AUTO_WEBHOOK` | Processar regras automáticas por palavra-chave no webhook inbound | desativada |
+| `FEATURE_PROTECAO` | Ativa verificação de volume/frequência/opt-in antes de cada envio | desativada |
+| `FEATURE_METRICAS_AVANCADAS` | Habilita endpoint `GET /dashboard/metrics-avancadas` | desativada |
+
+**Nota sobre `FEATURE_PROTECAO`:**  
+Além desta flag, há um override hard-coded: `const PROTECAO_DESATIVADA = true` em `services/protecao/protecaoOrchestrator.js`. Para ativar a proteção em produção, é necessário: (1) mudar essa constante para `false` **e** (2) definir `FEATURE_PROTECAO=1`. Só a flag não é suficiente. Ver detalhes em [`PROTECAO-ENVIO.md`](PROTECAO-ENVIO.md).
+
+**Exemplo `.env`:**
 ```
 FEATURE_OPT_OUT_WEBHOOK=1
 FEATURE_REGRA_AUTO_WEBHOOK=1
-FEATURE_CAMPANHAS=1
 FEATURE_METRICAS_AVANCADAS=1
+# FEATURE_PROTECAO=1  ← requer calibrar limites + mudar PROTECAO_DESATIVADA antes de ativar
 ```
-
-Quando não definida ou com valor diferente de `1`/`true`/`yes`, a funcionalidade fica **desativada**.
