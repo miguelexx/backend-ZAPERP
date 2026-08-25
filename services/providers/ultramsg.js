@@ -694,6 +694,15 @@ function chatMessageCandidatesForLookup(phone, opts = {}) {
     pushUniqueValue(candidates, toChatIdForChats(raw) || phoneToChatId(raw))
     for (const candidate of phoneCandidatesForLookup(raw)) {
       pushUniqueValue(candidates, phoneToChatId(candidate))
+      // JID cru, sem forçar o nono dígito: o WhatsApp/UltraMSG guardam muitos números BR
+      // de celular no formato de 12 dígitos (55 + DDD + 8), SEM o "9". phoneToChatId sempre
+      // reinsere o 9 (é o formato de ENVIO, via toZapiSendFormat), então o JID de 12 dígitos
+      // nunca era consultado e /chats/messages devolvia vazio → falso "nenhuma mensagem antiga".
+      // possiblePhonesBR já entrega as duas variantes (com e sem 9); tentamos ambas como @c.us.
+      const candDigits = String(candidate || '').replace(/\D/g, '')
+      if (candDigits && !candDigits.startsWith('120')) {
+        pushUniqueValue(candidates, `${candDigits}@c.us`)
+      }
     }
   }
 
@@ -1866,7 +1875,45 @@ async function getContactMetadata(phone, opts = {}) {
 }
 
 /**
+ * Classifica uma resposta de /chats/messages.
+ *
+ * A UltraMSG responde HTTP 200 mesmo em erro (token inválido, instância desconectada),
+ * devolvendo um objeto `{ error: ... }` no lugar do array de mensagens. Sem esta guarda,
+ * esse corpo de erro era lido como "0 mensagens" e o usuário via
+ * "Nenhuma mensagem antiga encontrada" em vez do erro real — um erro silencioso.
+ *
+ * @returns {{ ok: boolean, data: any[], error: string|null, bodyIsErrorObject: boolean }}
+ */
+function classifyChatMessagesPage(response) {
+  const data = Array.isArray(response?.data) ? response.data : []
+  const bodyIsErrorObject =
+    response?.ok === true &&
+    !Array.isArray(response?.data) &&
+    !!response?.data &&
+    typeof response.data === 'object' &&
+    response.data.error != null &&
+    response.data.error !== false &&
+    String(response.data.error).toLowerCase() !== 'false'
+  const ok = response?.ok === true && !bodyIsErrorObject
+  const error = ok
+    ? null
+    : String(
+        (bodyIsErrorObject ? response.data.error : null) ||
+          response?.error ||
+          response?.text ||
+          response?.status ||
+          'erro na consulta'
+      ).slice(0, 180)
+  return { ok, data, error, bodyIsErrorObject }
+}
+
+/**
  * Mensagens do chat. UltraMsg: GET /chats/messages (limit obrigatório, max 1000).
+ *
+ * IMPORTANTE (limitação da UltraMSG): este endpoint só devolve o que a UltraMSG tem
+ * armazenado para a instância — mensagens que transitaram pela instância DESDE a conexão.
+ * Não recupera o histórico anterior à conexão nem mensagens que existem apenas no celular.
+ * Para um contato cujo histórico é todo pré-conexão, a resposta legítima é um array vazio.
  */
 async function getChatMessages(phone, amount = 10, lastMessageId = null, opts = {}) {
   const cfg = await resolveConfig(opts)
@@ -1917,7 +1964,7 @@ async function getChatMessages(phone, amount = 10, lastMessageId = null, opts = 
           response = { ok: false, status: null, data: null, text: '', error: e?.message || String(e) }
         }
 
-        const data = Array.isArray(response?.data) ? response.data : []
+        const { ok: pageOk, data, error: pageError } = classifyChatMessagesPage(response)
         const idsInPage = data.map(oldProviderMessageId).filter(Boolean)
         let newInPage = 0
         for (const msg of data) {
@@ -1934,11 +1981,11 @@ async function getChatMessages(phone, amount = 10, lastMessageId = null, opts = 
           chatIdTail: safeChatIdTail(chatId),
           page: page + 1,
           cursorTail: safeChatIdTail(cursor),
-          ok: response?.ok === true,
+          ok: pageOk,
           status: response?.status ?? null,
           count: data.length,
           newCount: newInPage,
-          error: response?.ok === true ? null : String(response?.error || response?.text || response?.status || 'erro na consulta').slice(0, 180),
+          error: pageOk ? null : pageError,
         }
         attempts.push(attempt)
 
@@ -1957,7 +2004,7 @@ async function getChatMessages(phone, amount = 10, lastMessageId = null, opts = 
           })
         }
 
-        if (response?.ok !== true) {
+        if (!pageOk) {
           lastError = attempt.error || 'Erro ao buscar mensagens antigas.'
           break
         }
@@ -2288,6 +2335,8 @@ module.exports = {
   getChats,
   getGroups,
   getGroup,
+  classifyChatMessagesPage,
+  chatMessageCandidatesForLookup,
   uploadMedia,
   getProfilePicture,
   invalidateNoProfilePictureCache,

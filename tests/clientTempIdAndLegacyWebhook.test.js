@@ -40,6 +40,21 @@ describe('client_temp_id durable idempotency contract', () => {
     expect(sql).toContain('on public.mensagens (company_id, conversa_id, client_temp_id)')
     expect(sql).toContain('where client_temp_id is not null')
   })
+
+  // Guarda contra a regressão de mídia duplicada: o GET detalharChat (refresh de
+  // consistência pós-envio, "carregar mais" e F5) DEVE trazer client_temp_id, senão a
+  // linha do servidor não correlaciona com a bolha otimista e a mídia duplica no chat.
+  test('detalharChat paginated select includes client_temp_id', () => {
+    const fs = require('fs')
+    const path = require('path')
+    const src = fs.readFileSync(path.join(__dirname, '../controllers/chatController.js'), 'utf8')
+
+    // O select paginado do detalharChat termina em audio_duracao_sec, client_temp_id.
+    expect(src).toContain('apagada_em, audio_duracao_sec, client_temp_id')
+
+    // E o fallback de coluna ausente cobre client_temp_id (banco antigo sem a coluna).
+    expect(src).toContain("String(errMsgs.message || '').includes('client_temp_id')")
+  })
 })
 
 describe('legacy webhook controller', () => {

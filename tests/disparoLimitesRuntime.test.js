@@ -114,6 +114,45 @@ describe('disparoLimitesRuntime — limites hora/dia', () => {
     expect(gate.motivo).toMatch(/intervalo/i)
     expect(gate.proxima_tentativa_em).toBeTruthy()
   })
+
+  it('intervalo mínimo já cumprido → não bloqueia (avalia em agoraIso)', () => {
+    // Último envio 20s antes de "agora" e intervalo mínimo de 8s ⇒ liberado.
+    // Regressão do bug em que o gate usava o relógio de parede em vez de agoraIso.
+    const ultimoEnvio = DateTime.fromISO(SEGUNDA_10H_SP, { zone: 'utc' }).minus({ seconds: 20 }).toISO()
+
+    const gate = podeEnviarAgora({
+      limites: { ...limitesBase, intervalo_min_sec: 8 },
+      janelas: janelaSegunda,
+      instanciaId: 5,
+      agoraIso: SEGUNDA_10H_SP,
+      ultimoEnvioIso: ultimoEnvio,
+      enviadosUltimaHora: 1,
+      enviadosHoje: 1,
+    })
+
+    expect(gate.ok).toBe(true)
+    expect(gate.proxima_tentativa_em).toBeNull()
+  })
+
+  it('pausa entre lotes respeita o instante avaliado (agoraIso), não o relógio real', () => {
+    // Lote completo 2s antes de "agora"; pausa de 30s ⇒ ainda em pausa no instante avaliado.
+    const loteCompletoEm = DateTime.fromISO(SEGUNDA_10H_SP, { zone: 'utc' }).minus({ seconds: 2 }).toISO()
+
+    const gate = podeEnviarAgora({
+      limites: limitesBase,
+      janelas: janelaSegunda,
+      instanciaId: 5,
+      agoraIso: SEGUNDA_10H_SP,
+      enviadosUltimaHora: 0,
+      enviadosHoje: 0,
+      loteAtualTamanho: 99999, // garante >= lote_tamanho do perfil
+      loteConfig: { loteCompletoEm, pausaSec: 30 },
+    })
+
+    expect(gate.ok).toBe(false)
+    expect(gate.motivo).toMatch(/pausa entre lotes/i)
+    expect(gate.proxima_tentativa_em).toBeTruthy()
+  })
 })
 
 describe('disparoLimitesRuntime — contarEnviosJanela', () => {

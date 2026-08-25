@@ -96,7 +96,9 @@ function podeEnviarAgora({
       Math.floor((cfg.pausa_lote_min_sec + cfg.pausa_lote_max_sec) / 2)
     const fimPausa = DateTime.fromISO(loteConfig.loteCompletoEm, { zone: 'utc' })
       .plus({ seconds: pausaSec })
-    if (DateTime.utc() < fimPausa) {
+    // `agora` (instante avaliado) e não relógio de parede — mesma consistência do gate de
+    // intervalo mínimo abaixo. Em produção o worker passa agoraIso = now (no-op).
+    if (agora < fimPausa) {
       return {
         ok: false,
         motivo: 'Pausa entre lotes em andamento',
@@ -134,7 +136,11 @@ function podeEnviarAgora({
   // Intervalo mínimo desde o último envio
   if (ultimoEnvioIso) {
     const ultimo = DateTime.fromISO(ultimoEnvioIso, { zone: 'utc' })
-    const diffSec = DateTime.utc().diff(ultimo, 'seconds').seconds
+    // Usa `agora` (o instante avaliado, vindo de agoraIso) e não o relógio de parede:
+    // todos os outros gates desta função avaliam em `agora`. Em produção o worker passa
+    // agoraIso = DateTime.utc() (no-op), mas isto torna o gate determinístico/testável e
+    // correto caso agoraIso seja um instante simulado.
+    const diffSec = agora.diff(ultimo, 'seconds').seconds
     if (diffSec < cfg.intervalo_min_sec) {
       const prox = ultimo.plus({ seconds: cfg.intervalo_min_sec })
       return {

@@ -412,4 +412,73 @@ describe('fromMe reconcile helpers', () => {
     })
     expect(cand?.id).toBe(10)
   })
+
+  // Certificação: eco fromMe de DOCUMENTO/PDF sem referenceId reconcilia pela linha do CRM
+  // (por nome de arquivo) → não cria 2ª linha no banco. Este é o último recurso quando a
+  // UltraMSG não ecoa o referenceId crm-{id}. Cobre o bug de mídia duplicada relatado.
+  const PDF_NOME = 'NUTRIGRAOS COMERCIO E REPRESENTACOES LTDA (1).pdf'
+
+  test('documento fromMe casa pela linha CRM pelo nome do arquivo (sem 2ª linha)', () => {
+    const rows = [
+      { id: 20, whatsapp_id: '35096', tipo: 'arquivo', nome_arquivo: PDF_NOME, autor_usuario_id: 7, url: '/uploads/20.pdf' },
+    ]
+    const cand = findFromMeOutboundMediaCandidate(rows, {
+      fileName: PDF_NOME,
+      texto: PDF_NOME,
+      tipo: 'document', // webhook UltraMSG usa "document"
+      nomeAtendente: 'Larissa',
+      whatsappId: 'false_5511999999999@c.us_ABC',
+    })
+    expect(cand?.id).toBe(20)
+  })
+
+  test('documento fromMe casa por nome-base quando o provedor muda extensão/caixa', () => {
+    const rows = [
+      { id: 21, whatsapp_id: null, tipo: 'arquivo', nome_arquivo: PDF_NOME, autor_usuario_id: 7 },
+    ]
+    const cand = findFromMeOutboundMediaCandidate(rows, {
+      fileName: 'NUTRIGRAOS COMERCIO E REPRESENTACOES LTDA (1).PDF', // caixa diferente
+      tipo: 'file',
+      whatsappId: 'false_5511@c.us_XYZ',
+    })
+    expect(cand?.id).toBe(21)
+  })
+
+  test('não casa documento com linha de imagem de mesmo nome (guarda entre famílias)', () => {
+    const rows = [
+      { id: 22, whatsapp_id: '35096', tipo: 'imagem', nome_arquivo: PDF_NOME, autor_usuario_id: 7, url: '/uploads/22.jpg' },
+    ]
+    const cand = findFromMeOutboundMediaCandidate(rows, {
+      fileName: PDF_NOME,
+      tipo: 'document',
+      whatsappId: 'false_5511@c.us_ABC',
+    })
+    expect(cand).toBeNull()
+  })
+
+  test('byTipoCrm: documento fromMe sem nome ainda reconcilia com documento recente do CRM', () => {
+    const rows = [
+      { id: 23, whatsapp_id: null, tipo: 'arquivo', nome_arquivo: PDF_NOME, autor_usuario_id: 7 },
+    ]
+    const cand = findFromMeOutboundMediaCandidate(rows, {
+      fileName: null,
+      texto: null,
+      tipo: 'document',
+      whatsappId: 'false_5511@c.us_ABC',
+    })
+    expect(cand?.id).toBe(23)
+  })
+
+  test('dois PDFs distintos: eco casa o do nome certo (sem colapsar o outro)', () => {
+    const rows = [
+      { id: 24, whatsapp_id: '35096', tipo: 'arquivo', nome_arquivo: 'contrato-A.pdf', autor_usuario_id: 7 },
+      { id: 25, whatsapp_id: '35097', tipo: 'arquivo', nome_arquivo: 'contrato-B.pdf', autor_usuario_id: 7 },
+    ]
+    const cand = findFromMeOutboundMediaCandidate(rows, {
+      fileName: 'contrato-B.pdf',
+      tipo: 'document',
+      whatsappId: 'false_5511@c.us_ONLY_B',
+    })
+    expect(cand?.id).toBe(25)
+  })
 })

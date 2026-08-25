@@ -84,7 +84,24 @@ describe('Etapa 7 Execução — auth', () => {
 })
 
 describe('Etapa 7 Execução — iniciar campanha', () => {
-  beforeEach(() => jest.clearAllMocks())
+  // Este bloco valida o comportamento com flags DEFAULT (dry-run on, live off). Não pode
+  // depender do .env local, que na máquina do dev pode ligar o disparo (DISPARO_LIVE_ENABLED=true,
+  // DISPARO_DRY_RUN=false). Forçamos os defaults seguros e restauramos o env após cada teste.
+  const disparoEnvKeys = ['DISPARO_WORKER_ENABLED', 'DISPARO_LIVE_ENABLED', 'DISPARO_DRY_RUN']
+  let disparoEnvSnapshot
+  beforeEach(() => {
+    jest.clearAllMocks()
+    disparoEnvSnapshot = disparoEnvKeys.map((k) => [k, process.env[k]])
+    process.env.DISPARO_WORKER_ENABLED = 'false'
+    process.env.DISPARO_LIVE_ENABLED = 'false'
+    process.env.DISPARO_DRY_RUN = 'true'
+  })
+  afterEach(() => {
+    for (const [k, v] of disparoEnvSnapshot) {
+      if (v === undefined) delete process.env[k]
+      else process.env[k] = v
+    }
+  })
 
   it('inicia campanha pronta com dry_run true (flags default)', async () => {
     gerarFilaParaCampanha.mockResolvedValue({

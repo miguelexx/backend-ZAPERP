@@ -5,6 +5,10 @@ const {
 } = require('../services/oldMessagesSyncService')
 const { pickRealPhoneCandidate, isLidPhoneKey } = require('../helpers/phoneHelper')
 const {
+  classifyChatMessagesPage,
+  chatMessageCandidatesForLookup,
+} = require('../services/providers/ultramsg')
+const {
   buildClienteSearchOr,
   buildClienteListagemSearchOr,
   buildTelefoneSearchOr,
@@ -71,6 +75,56 @@ describe('old messages contact sync', () => {
     expect(normalized?.insert?.tipo).toBe('imagem')
     expect(normalized?.insert?.texto).toBe('(imagem)')
     expect(normalized?.emptyPlaceholder).toBe(false)
+  })
+})
+
+describe('UltraMSG /chats/messages — telefone/JID e resposta', () => {
+  test('gera candidatos @c.us COM e SEM o nono dígito (JID BR de 12 e 13 dígitos)', () => {
+    // Muitos números BR de celular ficam armazenados no WhatsApp/UltraMSG sem o "9".
+    // Ambas as variantes precisam ser consultadas, senão o histórico volta vazio.
+    const candidates = chatMessageCandidatesForLookup('553499911246')
+    expect(candidates).toContain('5534999911246@c.us') // com o 9 (13 dígitos)
+    expect(candidates).toContain('553499911246@c.us') // sem o 9 (12 dígitos)
+  })
+
+  test('aceita entrada já com o nono dígito e ainda oferece a variante sem 9', () => {
+    const candidates = chatMessageCandidatesForLookup('5534999911246')
+    expect(candidates).toContain('5534999911246@c.us')
+    expect(candidates).toContain('553499911246@c.us')
+  })
+
+  test('preserva chatId @c.us explícito e não gera lixo para vazio', () => {
+    expect(chatMessageCandidatesForLookup('553499911246@c.us')).toContain('553499911246@c.us')
+    expect(chatMessageCandidatesForLookup('')).toEqual([])
+  })
+
+  test('array de mensagens é interpretado como sucesso com os dados', () => {
+    const r = classifyChatMessagesPage({ ok: true, status: 200, data: [{ id: 'a' }, { id: 'b' }] })
+    expect(r.ok).toBe(true)
+    expect(r.data).toHaveLength(2)
+    expect(r.error).toBeNull()
+  })
+
+  test('resposta vazia (200 + array vazio) é sucesso vazio, não erro', () => {
+    const r = classifyChatMessagesPage({ ok: true, status: 200, data: [] })
+    expect(r.ok).toBe(true)
+    expect(r.data).toEqual([])
+    expect(r.bodyIsErrorObject).toBe(false)
+  })
+
+  test('200 com corpo de erro NÃO vira "vazio" silencioso — surface do erro real', () => {
+    // UltraMSG responde HTTP 200 com { error: "..." } em token inválido / instância desconectada.
+    const r = classifyChatMessagesPage({ ok: true, status: 200, data: { error: 'Wrong token' } })
+    expect(r.ok).toBe(false)
+    expect(r.bodyIsErrorObject).toBe(true)
+    expect(r.error).toMatch(/wrong token/i)
+  })
+
+  test('erro HTTP (ex.: 500) é classificado como falha', () => {
+    const r = classifyChatMessagesPage({ ok: false, status: 500, text: 'Internal Server Error' })
+    expect(r.ok).toBe(false)
+    expect(r.data).toEqual([])
+    expect(String(r.error)).toBeTruthy()
   })
 })
 

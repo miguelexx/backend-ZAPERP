@@ -24,6 +24,18 @@
 | **CONFIRMADO · segurança** | `.env.example` contém string com aparência de credencial; há `.env` e backup ignorados em artefato local. Valores não foram lidos/copied. | Risco de segredo reutilizado/vazamento local. Revisar histórico, remover exemplo realista e rotacionar por canal seguro. |
 | **CONFIRMADO · baixo** | Default do webhook limiter no código é 3.000/min, comentário do `.env.example` indica outro valor. | Operador pode dimensionar errado. Alinhar documento/exemplo ao código após decisão. |
 
+## "Buscar histórico no WhatsApp" — causa e limitação (2026-08-25)
+
+Fluxo rastreado: botão em `frontend/src/conversa/ConversaThread.jsx` → `carregarMensagensAntigasContato` (chatService) → `POST /chats/:id/mensagens/sync-old` → `chatController.carregarMensagensAntigasContato` → `oldMessagesSyncService.syncOldMessagesForConversation` → `providers/ultramsg.getChatMessages` → `GET /instance{id}/chats/messages?chatId=…&limit=1000` (com paginação por `lastMessageId`, até `OLD_MESSAGES_SYNC_MAX_PAGES`). A importação já é idempotente (dedup por `whatsapp_id`, upgrade de placeholder, tratamento de `23505`), cria a conversa como `fechada`/`lida` e **não** dispara chatbot, notificação nem reabertura.
+
+| Estado/risco | Problema e evidência | Impacto / correção |
+|---|---|---|
+| **CONFIRMADO · alto** | `chatMessageCandidatesForLookup` roteava todo candidato por `phoneToChatId`, que sempre reinsere o nono dígito (`toZapiSendFormat`, formato de ENVIO). O JID BR de 12 dígitos (55+DDD+8, **sem** o 9) — muito comum no store do WhatsApp/UltraMSG — nunca era consultado. | `/chats/messages` voltava vazio → falso "Nenhuma mensagem antiga encontrada". **Corrigido**: agora também tenta `${digits}@c.us` cru para cada variante de `possiblePhonesBR` (com e sem 9). Teste em `oldMessagesAndSearch.test.js`. |
+| **CONFIRMADO · médio** | `getChatMessages` tratava HTTP 200 com corpo `{error:…}` (token inválido / instância desconectada) como array vazio → erro silencioso mascarado de "sem histórico". | **Corrigido**: `classifyChatMessagesPage` distingue array (ok), array vazio (ok/vazio) e corpo-de-erro (falha com mensagem). Erro real agora sobe ao usuário. |
+| **LIMITAÇÃO comprovada por design** | UltraMSG só expõe `GET /chats/messages` e `GET /messages`, ambos lendo o **store da própria UltraMSG** — mensagens que transitaram pela instância **desde a conexão**. Não há endpoint para o arquivo pré-conexão que vive só no celular. | Para contato cujo histórico é todo anterior à conexão, o vazio é legítimo. UI e mensagem de retorno ajustadas para não prometer o impossível. **Não** foi criado scraping/solução falsa. |
+
+**Como provar em produção (log seguro, sem token/PII):** `OLD_MESSAGES_SYNC_DEBUG=1` no backend, clicar o botão e ler os eventos `[oldMessagesSync] contact-sync-provider-result` — o campo `attempts` mostra, por candidato de JID, `status` HTTP e `count` retornado pela UltraMSG. `count:0` com `status:200` em todos os candidatos = UltraMSG realmente não tem o histórico armazenado (limitação); `count>0` em algum candidato = importação prossegue.
+
 ## Itens solicitados sem evidência suficiente
 
 - Comportamento “diferente após atualizar a página”: arquitetura local sugere perda de estado efêmero, mas nenhum bug específico foi reproduzido — **PENDENTE DE VALIDAÇÃO**.

@@ -896,7 +896,7 @@ async function syncOldMessagesForConversation(company_id, conversa_id, opts = {}
       placeholderMessages: placeholderCount,
       empty: true,
       message: ordered.length === 0
-        ? 'Nenhuma mensagem antiga encontrada para este contato.'
+        ? 'Nenhuma mensagem antiga encontrada para este contato. A UltraMSG so disponibiliza mensagens que passaram pela instancia desde que o WhatsApp foi conectado; conversas antigas que existem apenas no celular nao podem ser importadas.'
         : 'Nenhuma mensagem valida encontrada para importar neste contato.',
     }
   }
