@@ -1,4 +1,5 @@
 const supabase = require('../config/supabase')
+const crmSync = require('../services/crmSyncService')
 const { getProvider } = require('../services/providers')
 const fs = require('fs')
 const path = require('path')
@@ -79,6 +80,14 @@ exports.putEmpresa = async (req, res) => {
       console.error('[configController] updateEmpresa', error?.message)
       return res.status(500).json({ error: 'Erro interno' })
     }
+
+    // Espelha a empresa no CRM Avançado (fire-and-forget). O CRM usa o company_id
+    // do ZapERP como próprio ID. A tabela empresas não tem cnpj/email/telefone —
+    // o serviço envia só o que existe (campos vazios são podados).
+    if (update.nome !== undefined) {
+      crmSync.syncEmpresa({ empresaId: company_id, nome: data.nome })
+    }
+
     return res.json(data)
   } catch (err) {
     console.error(err)

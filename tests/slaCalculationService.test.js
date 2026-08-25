@@ -4,6 +4,7 @@ const {
   classifyOutbound,
   calcDiffMinutes,
   carveBreakFromWindows,
+  collectTurnResponseGaps,
 } = require('../services/slaCalculationService')
 const { businessMinutesBetween } = require('../services/atendimentoSemRespostaService')
 
@@ -129,6 +130,67 @@ describe('slaCalculationService', () => {
       // 11:30 → 14:30 (horário local SP = UTC-3): conta 11:30–12:00 (30) + 14:00–14:30 (30) = 60
       const min = businessMinutesBetween('2026-06-15T14:30:00.000Z', new Date('2026-06-15T17:30:00.000Z'), schedule)
       expect(min).toBe(60)
+    })
+  })
+
+  describe('collectTurnResponseGaps (tempo de resposta turn-by-turn)', () => {
+    const ctx = { triageMerged: {}, absenceCfg: {}, contarBot: false }
+    // Comercial 09:00–18:00 SP (SP = UTC-3 → 12:00 UTC = 09:00 SP).
+    const scheduleComercial = {
+      enabled: true,
+      timezone: 'America/Sao_Paulo',
+      diasSemanaDesativados: [],
+      datasEspecificasFechadas: [],
+      windows: [{ start: 9 * 60, end: 18 * 60 }],
+    }
+
+    test('mede cada resposta humana (não só a 1ª da conversa)', () => {
+      const msgs = [
+        { direcao: 'in', criado_em: '2026-06-15T13:00:00Z' }, // 10:00 SP
+        { direcao: 'out', criado_em: '2026-06-15T13:08:00Z', autor_usuario_id: 5, texto: 'Oi, como posso ajudar?' }, // +8min
+        { direcao: 'in', criado_em: '2026-06-15T14:00:00Z' }, // 11:00 SP
+        { direcao: 'out', criado_em: '2026-06-15T14:05:00Z', autor_usuario_id: 5, texto: 'Claro!' }, // +5min
+      ]
+      expect(collectTurnResponseGaps(msgs, scheduleComercial, ctx)).toEqual([8, 5])
+    })
+
+    test('bot no meio não encerra a espera; conta até o humano', () => {
+      const msgs = [
+        { direcao: 'in', criado_em: '2026-06-15T13:00:00Z' },
+        { direcao: 'out', criado_em: '2026-06-15T13:02:00Z', autor_usuario_id: null, texto: '1 - Financeiro\n2 - Suporte' }, // bot
+        { direcao: 'out', criado_em: '2026-06-15T13:09:00Z', autor_usuario_id: 5, texto: 'Boa tarde!' }, // humano +9min
+      ]
+      expect(collectTurnResponseGaps(msgs, scheduleComercial, ctx)).toEqual([9])
+    })
+
+    test('rajada do cliente conta a partir da 1ª mensagem sem resposta', () => {
+      const msgs = [
+        { direcao: 'in', criado_em: '2026-06-15T13:00:00Z' },
+        { direcao: 'in', criado_em: '2026-06-15T13:03:00Z' },
+        { direcao: 'out', criado_em: '2026-06-15T13:10:00Z', autor_usuario_id: 5, texto: 'Oi!' }, // 10min desde a 1ª
+      ]
+      expect(collectTurnResponseGaps(msgs, scheduleComercial, ctx)).toEqual([10])
+    })
+
+    test('espera fora do período é ignorada pelo filtro', () => {
+      const msgs = [
+        { direcao: 'in', criado_em: '2026-06-10T13:00:00Z' }, // antes do período
+        { direcao: 'out', criado_em: '2026-06-10T13:05:00Z', autor_usuario_id: 5, texto: 'Oi' },
+        { direcao: 'in', criado_em: '2026-06-15T13:00:00Z' }, // dentro
+        { direcao: 'out', criado_em: '2026-06-15T13:06:00Z', autor_usuario_id: 5, texto: 'Oi' },
+      ]
+      const fromMs = new Date('2026-06-15T00:00:00Z').getTime()
+      expect(collectTurnResponseGaps(msgs, scheduleComercial, ctx, { fromMs })).toEqual([6])
+    })
+
+    test('sem horário comercial, a espera overnight infla (documenta o pré-requisito)', () => {
+      const msgs = [
+        { direcao: 'in', criado_em: '2026-06-15T20:00:00Z' }, // 17:00 SP
+        { direcao: 'out', criado_em: '2026-06-16T12:00:00Z', autor_usuario_id: 5, texto: 'Oi' }, // 09:00 SP dia seguinte
+      ]
+      // 24h corridas: ~16h = 960min. Com horário comercial ficaria só 1h (17:00–18:00).
+      expect(collectTurnResponseGaps(msgs, { enabled: false }, ctx)).toEqual([960])
+      expect(collectTurnResponseGaps(msgs, scheduleComercial, ctx)).toEqual([60])
     })
   })
 })

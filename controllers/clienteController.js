@@ -4,6 +4,7 @@ const { getCanonicalPhone, getOrCreateCliente } = require('../helpers/conversati
 const { ensureConversaForCliente } = require('../services/conversaAbrirClienteService');
 const { executarAssumirConversa } = require('../services/conversaAssumirInternoService');
 const { buildClienteListagemSearchOr } = require('../helpers/chatSearchHelper');
+const crmSync = require('../services/crmSyncService');
 
 const CLIENTE_SELECT_COLS =
   'id, telefone, wa_id, nome, pushname, observacoes, foto_perfil, email, empresa, ultimo_contato, criado_em, atualizado_em, company_id';
@@ -263,6 +264,17 @@ exports.criarCliente = async (req, res) => {
       if (updated) data = updated
     }
 
+    // Espelha o contato no CRM Avançado (fire-and-forget; o serviço trata erro e
+    // não rejeita, então nunca quebra o cadastro). empresaId = company_id do JWT.
+    crmSync.syncContato({
+      empresaId: cid,
+      contatoId: data.id,
+      nome: data.nome,
+      email: data.email,
+      telefone: data.telefone,
+      empresaNome: data.empresa,
+    })
+
     const statusCode = clienteCriado === true ? 201 : 200
     const abrirFlag = bodyFlagTrue(abrir_conversa)
     const assumirFlag = bodyFlagTrue(assumir)
@@ -387,6 +399,16 @@ exports.atualizarCliente = async (req, res) => {
     if (!data) {
       return res.status(404).json({ erro: 'Cliente não encontrado' });
     }
+
+    // Espelha a atualização no CRM Avançado (fire-and-forget). empresaId = company_id do JWT.
+    crmSync.syncContato({
+      empresaId: cid,
+      contatoId: data.id,
+      nome: data.nome,
+      email: data.email,
+      telefone: data.telefone,
+      empresaNome: data.empresa,
+    })
 
     return res.status(200).json(data);
   } catch (err) {

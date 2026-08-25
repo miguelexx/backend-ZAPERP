@@ -20,6 +20,7 @@ const { getWhatsappInstanceByProviderInstanceId } = require('../services/whatsap
 const { getStatus } = require('../services/ultramsgIntegrationService')
 const { normalizePhoneBR, possiblePhonesBR, normalizeGroupIdForStorage } = require('../helpers/phoneHelper')
 const { getCanonicalPhone, getOrCreateCliente, findOrCreateConversation, mergeConversasIntoCanonico, mergeConversationLidToPhone } = require('../helpers/conversationSync')
+const crmSync = require('../services/crmSyncService')
 const { chooseBestName, isBadName, getDisplayName } = require('../helpers/contactEnrichment')
 const { parseVcardForContact } = require('../helpers/vcardHelper')
 const { resolvePeerPhone } = require('../helpers/conversationKeyHelper')
@@ -2305,6 +2306,27 @@ exports.receberZapi = async (req, res) => {
           if (!emittedNovaConversa && !isGroup) {
             io.to(`empresa_${company_id}`).emit(io.EVENTS?.NOVA_CONVERSA || 'nova_conversa', novaConversaPayload)
           }
+        }
+
+        // Captura de lead: nova conversa individual iniciada pelo cliente (inbound).
+        // Só quando é contato real (!isGroup), o cliente falou (!fromMe) e temos cliente_id.
+        // Espelha no CRM Avançado fora do caminho quente (setImmediate) e fire-and-forget.
+        if (!isGroup && !fromMe && cliente_id) {
+          const leadNome = (nomeParaCache && String(nomeParaCache).trim())
+            || (senderName && String(senderName).trim())
+            || (payload?.chatName && String(payload.chatName).trim())
+            || null
+          const leadTelefone = getCanonicalPhone(phone) || null
+          const convParaLead = conversa_id
+          setImmediate(() => {
+            crmSync.syncLead({
+              empresaId: company_id,
+              leadId: convParaLead,
+              nome: leadNome || leadTelefone || String(convParaLead),
+              telefone: leadTelefone,
+              origemNome: 'WhatsApp',
+            })
+          })
         }
       }
     } catch (errConv) {

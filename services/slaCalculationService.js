@@ -371,6 +371,38 @@ function findFirstAnyOutboundAfter(msgs, afterTs) {
   }) || null
 }
 
+/**
+ * Coleta as esperas turn-by-turn de UMA conversa: cada vez que o cliente aguarda e recebe
+ * a próxima resposta HUMANA, mede o gap em minutos comerciais (schedule). Bot/automação não
+ * encerram a espera. `msgs` deve vir ordenado por criado_em ascendente.
+ * Espera de rajada: conta a partir da PRIMEIRA mensagem do cliente sem resposta.
+ */
+function collectTurnResponseGaps(msgs, schedule, ctx, { fromMs = -Infinity, toMs = Infinity, diaFiltro = null } = {}) {
+  const gaps = []
+  let pendingInTs = null
+  for (const m of msgs || []) {
+    const dir = String(m?.direcao || '').toLowerCase()
+    if (dir === 'in') {
+      if (pendingInTs == null && m?.criado_em) {
+        const ts = new Date(m.criado_em).getTime()
+        if (Number.isFinite(ts)) pendingInTs = ts
+      }
+      continue
+    }
+    if (dir === 'out' && pendingInTs != null && m?.criado_em) {
+      if (!classifyOutbound(m, ctx).valida) continue // bot/automação não encerra a espera
+      const dentroPeriodo = pendingInTs >= fromMs && pendingInTs <= toMs
+      const dentroDia = !diaFiltro || formatSaoPauloDateKey(pendingInTs) === diaFiltro
+      if (dentroPeriodo && dentroDia) {
+        const gap = businessMinutesBetween(new Date(pendingInTs).toISOString(), m.criado_em, schedule)
+        if (Number.isFinite(gap) && gap >= 0) gaps.push(gap)
+      }
+      pendingInTs = null
+    }
+  }
+  return gaps
+}
+
 function analyzeSlaCycle({
   msgs,
   anchorTs,
@@ -694,10 +726,23 @@ async function buildSlaAnalytics(company_id, query = {}, opts = {}) {
   const dadosInsuficientes = []
   const allRows = []
 
+  // Turn-by-turn: cada espera do cliente até a PRÓXIMA resposta humana, em minutos
+  // comerciais. É a "agilidade real" do atendente — mede TODA resposta ao longo da
+  // conversa, não só a 1ª resposta da conversa (que infla por handoff do bot e por
+  // contatos iniciados fora do expediente).
+  const turnGaps = []
+  const turnFromMs = range.fromIso ? new Date(range.fromIso).getTime() : -Infinity
+  const turnToMs = range.toIso ? new Date(range.toIso).getTime() : Infinity
+
   for (const [conversaId, msgs] of mensagensPorConversa.entries()) {
     const conversa = conversaById.get(String(conversaId))
     if (!conversa) continue
     msgs.sort((a, b) => new Date(a.criado_em).getTime() - new Date(b.criado_em).getTime())
+
+    // Pares espera→resposta humana desta conversa (todas as esperas do período).
+    for (const gap of collectTurnResponseGaps(msgs, schedule, ctx, { fromMs: turnFromMs, toMs: turnToMs, diaFiltro })) {
+      turnGaps.push(gap)
+    }
 
     const meta = resolveMetaMinutos(slaConfig, {
       atendente_id: conversa.atendente_id,
@@ -792,13 +837,11 @@ async function buildSlaAnalytics(company_id, query = {}, opts = {}) {
   const respostaHumana = analisadas.filter((x) => x.tipo_resposta === 'humana').length
   const respostaAutomacao = allRows.filter((x) => x.tipo_resposta === 'automacao').length
 
-  // "Tempo médio de resposta" = média de TODAS as esperas respondidas (1ª resposta +
-  // reaberturas), enquanto tempo_medio_primeira_resposta_min olha só a 1ª de cada cliente.
+  // "Tempo médio de resposta" = média turn-by-turn (cada espera do cliente até a próxima
+  // resposta humana), enquanto tempo_medio_primeira_resposta_min olha só a 1ª resposta de
+  // cada conversa. Turn-by-turn reflete a agilidade real do atendente ao longo do papo.
   const reaberturaAnalisadas = reaberturaRows.filter((x) => x.status_sla === 'cumpriu' || x.status_sla === 'violou')
-  const temposTodasEsperas = [...analisadas, ...reaberturaAnalisadas]
-    .map((x) => x.tempo_resposta_min)
-    .filter((v) => Number.isFinite(v))
-  const tempoMedioTodasEsperas = round1(avg(temposTodasEsperas))
+  const tempoMedioTodasEsperas = round1(avg(turnGaps))
 
   const now = Date.now()
   const criticasSemResposta = semResposta
@@ -1096,5 +1139,6 @@ module.exports = {
   analyzeSlaCycle,
   classifyOutbound,
   carveBreakFromWindows,
+  collectTurnResponseGaps,
   SLA_LUNCH_BREAK_MIN,
 }

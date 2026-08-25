@@ -10,6 +10,8 @@ const dashboardController = require('../controllers/dashboardController')
 router.get('/overview', auth, supervisorOrAdmin, dashboardController.overview)
 router.get('/metrics', auth, supervisorOrAdmin, dashboardController.metrics)
 router.get('/metrics-avancadas', auth, supervisorOrAdmin, dashboardController.metricsAvancadas)
+// Resumo do CRM Avançado (integração externa) — bloco lazy do painel
+router.get('/crm-resumo', auth, supervisorOrAdmin, dashboardController.crmResumo)
 router.get('/departamentos', auth, dashboardController.listarDepartamentos)
 router.post('/departamentos', auth, adminOnly, dashboardController.criarDepartamento)
 router.get('/departamentos/:id/grupos', auth, supervisorOrAdmin, dashboardController.listarGruposDepartamento)
