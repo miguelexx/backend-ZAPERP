@@ -451,6 +451,7 @@ exports.overview = async (req, res) => {
     // Assim os dois cards deixam de ser idênticos, o bot não conta como resposta,
     // e a Visão geral passa a bater com a aba SLA. Isolado em try/catch para não
     // derrubar o dashboard inteiro caso o cálculo falhe.
+    let horario_comercial = null
     try {
       const slaAnalytics = await slaCalculationService.buildSlaAnalytics(
         company_id,
@@ -464,6 +465,20 @@ exports.overview = async (req, res) => {
         r.tempo_medio_resposta_min != null ? Math.round(r.tempo_medio_resposta_min * 10) / 10 : null
       kpis.sla_percent = r.percentual_cumprido != null ? Math.round(r.percentual_cumprido) : null
       kpis.sla_conta_automacao = slaAnalytics?.config?.sla_contar_bot_como_resposta === true
+      // Horário/dias REALMENTE usados no cálculo (para o admin certificar a configuração).
+      const bi = slaAnalytics?.horario_comercial || null
+      kpis.sla_horario_comercial_ativo = slaAnalytics?.config?.sla_usar_horario_comercial === true
+      horario_comercial = bi ? {
+        ativo: bi.horario_comercial_ativo === true,
+        modo_contagem: bi.modo_contagem || null,
+        resumo: bi.resumo || null,
+        intervalo_almoco: bi.intervalo_almoco || null,
+        janelas: (bi.schedule?.windows || []).map((w) => ({
+          inicio: `${String(Math.floor(w.start / 60)).padStart(2, '0')}:${String(w.start % 60).padStart(2, '0')}`,
+          fim: `${String(Math.floor(w.end / 60)).padStart(2, '0')}:${String(w.end % 60).padStart(2, '0')}`,
+        })),
+        dias_semana_desativados: bi.schedule?.diasSemanaDesativados || [],
+      } : null
     } catch (e) {
       console.error('[overview] cálculo de SLA/tempo de resposta falhou:', e?.message || e)
     }
@@ -606,6 +621,7 @@ exports.overview = async (req, res) => {
         to: toIso,
       },
       instancia,
+      horario_comercial,
       auditoria,
       kpis,
       mensagens_kpis,

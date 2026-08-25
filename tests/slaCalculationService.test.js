@@ -163,13 +163,23 @@ describe('slaCalculationService', () => {
       expect(collectTurnResponseGaps(msgs, scheduleComercial, ctx)).toEqual([9])
     })
 
-    test('rajada do cliente conta a partir da 1ª mensagem sem resposta', () => {
+    test('rajada do cliente conta a partir da ÚLTIMA mensagem (a que é respondida)', () => {
       const msgs = [
         { direcao: 'in', criado_em: '2026-06-15T13:00:00Z' },
         { direcao: 'in', criado_em: '2026-06-15T13:03:00Z' },
-        { direcao: 'out', criado_em: '2026-06-15T13:10:00Z', autor_usuario_id: 5, texto: 'Oi!' }, // 10min desde a 1ª
+        { direcao: 'out', criado_em: '2026-06-15T13:10:00Z', autor_usuario_id: 5, texto: 'Oi!' }, // 7min desde a última (13:03)
       ]
-      expect(collectTurnResponseGaps(msgs, scheduleComercial, ctx)).toEqual([10])
+      expect(collectTurnResponseGaps(msgs, scheduleComercial, ctx)).toEqual([7])
+    })
+
+    test('tempo de menu do bot não infla: conta da última msg do cliente antes do humano', () => {
+      const msgs = [
+        { direcao: 'in', criado_em: '2026-06-15T13:00:00Z' },  // cliente inicia
+        { direcao: 'out', criado_em: '2026-06-15T13:00:30Z', autor_usuario_id: null, texto: '1 - Vendas\n2 - Suporte' }, // bot menu
+        { direcao: 'in', criado_em: '2026-06-15T13:20:00Z' },  // cliente escolhe 20min depois
+        { direcao: 'out', criado_em: '2026-06-15T13:25:00Z', autor_usuario_id: 5, texto: 'Oi, sou a Ana!' }, // humano +5min da última
+      ]
+      expect(collectTurnResponseGaps(msgs, scheduleComercial, ctx)).toEqual([5])
     })
 
     test('espera fora do período é ignorada pelo filtro', () => {

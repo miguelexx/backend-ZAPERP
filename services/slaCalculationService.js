@@ -372,10 +372,11 @@ function findFirstAnyOutboundAfter(msgs, afterTs) {
 }
 
 /**
- * Coleta as esperas turn-by-turn de UMA conversa: cada vez que o cliente aguarda e recebe
- * a próxima resposta HUMANA, mede o gap em minutos comerciais (schedule). Bot/automação não
- * encerram a espera. `msgs` deve vir ordenado por criado_em ascendente.
- * Espera de rajada: conta a partir da PRIMEIRA mensagem do cliente sem resposta.
+ * Coleta as esperas turn-by-turn de UMA conversa: para cada resposta HUMANA da atendente,
+ * mede o tempo desde a ÚLTIMA mensagem do cliente antes dela (a mensagem que está sendo
+ * respondida), em minutos comerciais (schedule). Bot/automação não encerram a espera e não
+ * resetam o relógio — assim o tempo de menu do bot NÃO infla a resposta. `msgs` deve vir
+ * ordenado por criado_em ascendente.
  */
 function collectTurnResponseGaps(msgs, schedule, ctx, { fromMs = -Infinity, toMs = Infinity, diaFiltro = null } = {}) {
   const gaps = []
@@ -383,7 +384,8 @@ function collectTurnResponseGaps(msgs, schedule, ctx, { fromMs = -Infinity, toMs
   for (const m of msgs || []) {
     const dir = String(m?.direcao || '').toLowerCase()
     if (dir === 'in') {
-      if (pendingInTs == null && m?.criado_em) {
+      // Mensagem que a atendente vai responder = a MAIS RECENTE do cliente (última da rajada).
+      if (m?.criado_em) {
         const ts = new Date(m.criado_em).getTime()
         if (Number.isFinite(ts)) pendingInTs = ts
       }
