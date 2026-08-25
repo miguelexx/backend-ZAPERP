@@ -8,7 +8,7 @@
  * Formato telefone: +5534999999999 (individual) ou 120363...@g.us (grupo).
  */
 
-const { normalizePhoneBR, toZapiSendFormat, possiblePhonesBR, phoneKeyBR } = require('../../helpers/phoneHelper')
+const { normalizePhoneBR, toZapiSendFormat, preferredBrSendDigits, possiblePhonesBR, phoneKeyBR } = require('../../helpers/phoneHelper')
 const { invalidateEmpresaWhatsappConfigCache } = require('../whatsappConfigService')
 const {
   getDefaultWhatsappInstance,
@@ -484,13 +484,20 @@ function phoneCandidatesForSend(phone) {
     if (!digits || digits.startsWith('120')) return
     list.push(`+${digits}`)
   }
+  // nums[0] é o ÚNICO candidato realmente usado no envio (body.to). Para celular BR
+  // guardado sem o nono dígito (55+DDD+8, local começando em 6-9), o WhatsApp exige o
+  // 9 — mandar sem ele cai em "número não existe" e a mensagem falha. `possiblePhonesBR`
+  // é para match/dedup (não envio) e lista o número cru primeiro, o que empurrava o
+  // formato correto para trás. Aqui o formato de envio ciente de celular/fixo vem primeiro.
+  const preferred = preferredBrSendDigits(raw)
+  if (preferred) list.push(`+${preferred}`)
   const norm = normalizePhoneBR(raw)
   for (const candidate of possiblePhonesBR(norm || raw)) {
     pushPhoneDigits(candidate)
   }
   const main = toUltramsgPhone(raw)
   if (main) list.push(main)
-  if (raw.endsWith('@g.us') && !main.includes('@')) list.push(raw)
+  if (raw.endsWith('@g.us') && main && !main.includes('@')) list.push(raw)
   if (raw.includes('-group')) list.push(raw.replace(/-group$/, '') + '@g.us')
   return Array.from(new Set(list.filter(Boolean)))
 }

@@ -104,6 +104,24 @@ describe('UltraMsg provider instance resolution', () => {
     expect(body.get('referenceId')).toBe('crm-168719')
   })
 
+  test('sendText insere o nono digito em celular BR guardado sem o 9 (55+DDD+8)', async () => {
+    const deps = mockProviderDeps({
+      defaultByCompany: {
+        10: { id: 1, company_id: 10, provider: 'ultramsg', instance_id: '111', instance_token: 'default-token', ativo: true },
+      },
+      byId: {},
+    })
+
+    const provider = require('../services/providers/ultramsg')
+    // Numero da conversa guardado sem o nono digito (local comeca em 9 => celular).
+    // Sem o 9 o WhatsApp responde "numero nao existe" e a mensagem falha.
+    const result = await provider.sendText('553499697592', 'Ola', { companyId: 10 })
+
+    const body = new URLSearchParams(deps.fetchWithRetry.mock.calls[0][1].body)
+    expect(result.ok).toBe(true)
+    expect(body.get('to')).toBe('+5534999697592')
+  })
+
   test('mantem instance_id prefixado salvo no banco sem duplicar prefixo no envio', async () => {
     const deps = mockProviderDeps({
       defaultByCompany: {

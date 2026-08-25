@@ -5,6 +5,12 @@ const { ensureConversaForCliente } = require('../services/conversaAbrirClienteSe
 const { executarAssumirConversa } = require('../services/conversaAssumirInternoService');
 const { buildClienteListagemSearchOr } = require('../helpers/chatSearchHelper');
 const crmSync = require('../services/crmSyncService');
+const { syncUltraMsgContact } = require('../services/ultramsgSyncContact');
+
+// Espera máxima (ms) para o enriquecimento via UltraMSG (nome real + foto) no cadastro
+// manual de contato. O WhatsApp não envia foto por webhook; buscamos aqui. Se a instância
+// estiver desconectada ou o número não estiver na lista, o cadastro segue sem foto.
+const CONTACT_ENRICH_TIMEOUT_MS = Math.max(0, Number(process.env.CONTACT_ENRICH_TIMEOUT_MS) || 7000);
 
 const CLIENTE_SELECT_COLS =
   'id, telefone, wa_id, nome, pushname, observacoes, foto_perfil, email, empresa, ultimo_contato, criado_em, atualizado_em, company_id';
@@ -262,6 +268,34 @@ exports.criarCliente = async (req, res) => {
         .maybeSingle()
       if (updErr) throw updErr
       if (updated) data = updated
+    }
+
+    // Enriquecimento via UltraMSG: nome real + foto de perfil. O webhook do WhatsApp NÃO
+    // traz a foto, e o cadastro manual antes nunca a buscava — o contato nascia sem foto.
+    // syncUltraMsgContact consulta a API e persiste foto_perfil/nome/pushname em clientes de
+    // forma sticky (NÃO sobrescreve o nome digitado manualmente). Espera limitada para o
+    // formulário já devolver a foto quando o WhatsApp responde rápido; no timeout o sync segue
+    // em background e persiste para o próximo carregamento. Nunca quebra o cadastro.
+    const enrichPhone = String(data.telefone || '').trim()
+    const enriquecivel = enrichPhone && !enrichPhone.startsWith('lid:') && !enrichPhone.endsWith('@g.us')
+    if (enriquecivel) {
+      try {
+        const enriched = await Promise.race([
+          syncUltraMsgContact(enrichPhone, cid).catch(() => null),
+          new Promise((resolve) => setTimeout(() => resolve(null), CONTACT_ENRICH_TIMEOUT_MS)),
+        ])
+        if (enriched) {
+          const { data: fresh } = await supabase
+            .from('clientes')
+            .select(CLIENTE_SELECT_COLS)
+            .eq('company_id', cid)
+            .eq('id', clienteId)
+            .maybeSingle()
+          if (fresh) data = fresh
+        }
+      } catch (_) {
+        // best-effort: falha no enriquecimento não impede o cadastro
+      }
     }
 
     // Espelha o contato no CRM Avançado (fire-and-forget; o serviço trata erro e

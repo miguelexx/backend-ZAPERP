@@ -147,6 +147,39 @@ function toZapiSendFormat(phone) {
 }
 
 /**
+ * Escolhe o MELHOR número BR para ENVIO, ciente de celular vs fixo.
+ *
+ * Motivação: `toZapiSendFormat` insere o nono dígito em QUALQUER número de 12
+ * dígitos, o que está certo para celular mas erra o fixo (fixo não tem nono
+ * dígito). Já mandar o celular guardado sem o 9 (55+DDD+8) cai em "número não
+ * existe" no WhatsApp. Aqui decidimos pelo 1º dígito do número local (8 díg):
+ *   - 6,7,8,9 → celular → insere o 9 → 13 dígitos
+ *   - 2,3,4,5 → fixo    → mantém 12 dígitos (sem 9)
+ * Números já com 13 dígitos ou não-BR passam sem alteração.
+ *
+ * Retorna somente dígitos (sem "+"), ou '' quando não se aplica (grupo/LID/inválido),
+ * deixando o chamador cair no fluxo padrão.
+ *
+ * @param {string} phone
+ * @returns {string}
+ */
+function preferredBrSendDigits(phone) {
+  const s = String(phone || '').trim()
+  if (!s || s.endsWith('@g.us') || s.includes('-group') || isLidPhoneKey(s)) return ''
+  const rawDigits = s.replace(/\D/g, '')
+  if (!rawDigits || rawDigits.startsWith('120')) return ''
+  const norm = String(normalizePhoneBR(s) || '').replace(/\D/g, '')
+  if (!norm.startsWith('55')) return ''
+  if (norm.length === 13) return norm // já completo (55+DDD+9+8)
+  if (norm.length === 12) {
+    const localFirst = norm.charAt(4) // 1º dígito do número local de 8 dígitos
+    if ('6789'.includes(localFirst)) return norm.slice(0, 4) + '9' + norm.slice(4) // celular
+    return norm // fixo: mantém 12 dígitos
+  }
+  return ''
+}
+
+/**
  * Verifica se o chatId é de um grupo WhatsApp (@g.us ou ID 120...).
  *
  * @param {string} chatId - JID ou identificador (ex: 5511999999999@c.us, 120363...@g.us)
@@ -225,6 +258,7 @@ function pickRealPhoneCandidate(...values) {
 module.exports = {
   normalizePhoneBR,
   toZapiSendFormat,
+  preferredBrSendDigits,
   possiblePhonesBR,
   phoneKeyBR,
   normalizeGroupIdForStorage,
