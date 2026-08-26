@@ -14,6 +14,9 @@ const router = express.Router()
 
 router.get('/abrir-avancado', auth, crmSso.abrirCrmAvancado)
 
+// Etapas do funil do CRM Avançado → botões de "para qual etapa enviar".
+router.get('/etapas', auth, crmLead.listarEtapasCrm)
+
 // "Enviar ao CRM" a partir de uma conversa → cria/atualiza o lead no CRM Avançado.
 router.post('/leads/from-conversa/:conversaId', auth, crmLead.enviarLeadDaConversa)
 

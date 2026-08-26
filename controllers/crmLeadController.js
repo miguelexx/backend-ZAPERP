@@ -96,6 +96,18 @@ async function enviarLeadDaConversa(req, res) {
       (cliente?.observacoes ? String(cliente.observacoes).trim() : '') ||
       null
 
+    // Etapa do funil escolhida pelo usuário (opcional). O front manda o id e/ou
+    // o nome da etapa; o CRM Avançado cria/move o lead direto para ela.
+    const etapaIdRaw = req.body?.etapa_id
+    const etapaId =
+      etapaIdRaw === null || etapaIdRaw === undefined || String(etapaIdRaw).trim() === ''
+        ? null
+        : String(etapaIdRaw).trim()
+    const etapaNome =
+      typeof req.body?.etapa_nome === 'string' && req.body.etapa_nome.trim()
+        ? req.body.etapa_nome.trim()
+        : null
+
     // 4. Sincroniza contato + lead no CRM Avançado.
     //    contatoId = cliente.id (quando há cliente cadastrado).
     if (cliente?.id) {
@@ -118,6 +130,8 @@ async function enviarLeadDaConversa(req, res) {
       origemNome: 'WhatsApp',
       responsavelEmail: (req.user?.email && String(req.user.email).trim()) || null,
       observacoes,
+      etapaId,
+      etapaNome,
     })
 
     // syncLead é fire-and-forget: retorna null em falha de comunicação. Como já
@@ -143,4 +157,65 @@ async function enviarLeadDaConversa(req, res) {
   }
 }
 
-module.exports = { enviarLeadDaConversa }
+/**
+ * GET /api/crm/etapas
+ *
+ * Lista as etapas (colunas do funil) do CRM Avançado da empresa, para o usuário
+ * escolher em qual etapa o lead deve entrar ao "Enviar ao CRM".
+ *
+ * SEGURANÇA: company_id vem SEMPRE de req.user (JWT).
+ *
+ * DEGRADAÇÃO GRACIOSA: se o CRM Avançado ainda não expõe o endpoint de etapas
+ * (ou não respondeu), devolve 200 { etapas: [], disponivel:false } — o front
+ * então cai no envio simples, sem erro. Só a ausência de configuração do CRM
+ * (interruptor mestre) devolve 403.
+ */
+async function listarEtapasCrm(req, res) {
+  const companyId = Number(req.user?.company_id)
+  if (!companyId) return res.status(401).json({ error: 'Sessão inválida.' })
+
+  if (!crmSync.isEnabled()) {
+    return res.status(403).json({
+      error: 'O CRM Avançado não está configurado neste ambiente.',
+      code: 'CRM_DISABLED',
+    })
+  }
+
+  try {
+    const raw = await crmSync.listEtapas(companyId)
+
+    // Aceita { etapas: [...] } ou um array direto; normaliza cada etapa.
+    const lista = Array.isArray(raw) ? raw : Array.isArray(raw?.etapas) ? raw.etapas : []
+    const etapas = lista
+      .map((e, i) => {
+        if (!e || typeof e !== 'object') return null
+        const id = e.id ?? e.etapaId ?? e.stage_id ?? e.stageId ?? null
+        const nome = (e.nome ?? e.name ?? e.label ?? '').toString().trim()
+        if (!nome) return null
+        return {
+          id: id != null ? String(id) : null,
+          nome,
+          ordem: Number.isFinite(Number(e.ordem ?? e.order)) ? Number(e.ordem ?? e.order) : i,
+          tipo: (e.tipo ?? e.type ?? '').toString().trim() || null,
+          cor: (e.cor ?? e.color ?? '').toString().trim() || null,
+        }
+      })
+      .filter(Boolean)
+      .sort((a, b) => a.ordem - b.ordem)
+
+    return res.status(200).json({
+      etapas,
+      disponivel: raw != null,
+      // O CRM Avançado devolve o funil em `funil.nome`; aceitamos também
+      // pipelineNome/pipeline_nome caso o contrato evolua.
+      pipeline_nome:
+        (raw?.funil?.nome ?? raw?.pipelineNome ?? raw?.pipeline_nome ?? null) || null,
+    })
+  } catch (err) {
+    console.error('[crmLead] Falha ao listar etapas do CRM', err?.message || err)
+    // Não quebra a UI: devolve vazio para o front cair no envio simples.
+    return res.status(200).json({ etapas: [], disponivel: false })
+  }
+}
+
+module.exports = { enviarLeadDaConversa, listarEtapasCrm }

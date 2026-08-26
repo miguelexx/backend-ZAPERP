@@ -157,7 +157,16 @@ function syncContato(p = {}) {
 
 /**
  * Sync lead (captura via WhatsApp) → POST /lead
- * @param {{ empresaId:number|string, leadId:number|string, nome:string, email?:string, telefone?:string, origemNome?:string, responsavelEmail?:string, observacoes?:string }} p
+ *
+ * ETAPA (funil): quando o usuário escolhe para qual etapa mandar o lead, o
+ * ZapERP envia `etapaId` e/ou `etapaNome`. O CRM Avançado deve criar/mover o
+ * lead direto para essa etapa (upsert por leadId). Ambos são opcionais — sem
+ * eles, o CRM usa a etapa padrão do funil (comportamento atual).
+ *
+ * @param {{ empresaId:number|string, leadId:number|string, nome:string,
+ *           email?:string, telefone?:string, origemNome?:string,
+ *           responsavelEmail?:string, observacoes?:string,
+ *           etapaId?:number|string, etapaNome?:string }} p
  */
 function syncLead(p = {}) {
   const empresaId = idToString(p.empresaId)
@@ -172,7 +181,31 @@ function syncLead(p = {}) {
     origemNome: p.origemNome,
     responsavelEmail: p.responsavelEmail,
     observacoes: p.observacoes,
+    etapaId: idToString(p.etapaId),
+    etapaNome: p.etapaNome,
   }))
+}
+
+/**
+ * Lista as etapas (colunas do funil) do CRM Avançado da empresa.
+ *   → GET /api/webhooks/zaperp/empresa/:empresaId/etapas
+ *
+ * CONTRATO ESPERADO (a implementar no CRM Avançado):
+ *   Resposta 200 (qualquer um dos formatos é aceito pelo caller):
+ *     { etapas: [ { id, nome, ordem?, cor?, tipo? }, ... ], pipelineNome? }
+ *     ou diretamente um array [ { id, nome, ... }, ... ]
+ *   - `id`   : identificador da etapa no CRM (usado como etapaId no /lead)
+ *   - `nome` : rótulo exibido no botão (ex.: "Perdido", "Negociação")
+ *   - `ordem`: opcional — para ordenar os botões na mesma ordem do Kanban
+ *   - `tipo` : opcional — ex.: "ganho" | "perdido" | "aberto" (para cor do botão)
+ *
+ * @param {number|string} empresaId
+ * @returns {Promise<object|null>} payload do CRM, ou null se desativado/falha.
+ */
+function listEtapas(empresaId) {
+  const id = idToString(empresaId)
+  if (!id) return Promise.resolve(null)
+  return get(`/empresa/${encodeURIComponent(id)}/etapas`)
 }
 
 /**
@@ -192,4 +225,5 @@ module.exports = {
   syncContato,
   syncLead,
   resumoEmpresa,
+  listEtapas,
 }
