@@ -1,9 +1,12 @@
 const supabase = require('../config/supabase')
 const jwt = require('jsonwebtoken')
 const bcrypt = require('bcryptjs')
-// Módulo CRM legado removido; o campo crm_habilitado é fixado em false para
-// compatibilidade com frontends que ainda leem a flag (crm_habilitado !== false).
-const crm_habilitado = false
+const crmSync = require('../services/crmSyncService')
+// O CRM interno foi removido; hoje a flag crm_habilitado reflete a integração
+// com o CRM Avançado (env CRM_AVANCADO_URL + ZAP_SSO_SECRET). Quando ativa, o
+// frontend mostra o botão «Enviar ao CRM» no chat. Avaliado no carregamento do
+// módulo — reinicie o processo (pm2 restart --update-env) após alterar as vars.
+const crm_habilitado = crmSync.isEnabled()
 
 /** GET /usuarios/me — perfil do usuário logado (inclui preferências) */
 exports.getMe = async (req, res) => {

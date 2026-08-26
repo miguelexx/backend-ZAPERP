@@ -8,9 +8,13 @@
 const express = require('express')
 const auth = require('../middleware/auth')
 const crmSso = require('../controllers/crmSsoController')
+const crmLead = require('../controllers/crmLeadController')
 
 const router = express.Router()
 
 router.get('/abrir-avancado', auth, crmSso.abrirCrmAvancado)
+
+// "Enviar ao CRM" a partir de uma conversa → cria/atualiza o lead no CRM Avançado.
+router.post('/leads/from-conversa/:conversaId', auth, crmLead.enviarLeadDaConversa)
 
 module.exports = router

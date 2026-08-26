@@ -50,7 +50,18 @@ async function abrirCrmAvancado(req, res) {
     { algorithm: 'HS256', expiresIn: '2m' },
   )
 
-  const url = `${baseUrl}/sso?token=${encodeURIComponent(token)}`
+  let url = `${baseUrl}/sso?token=${encodeURIComponent(token)}`
+
+  // Deep-link opcional: o CRM Avançado (SsoPage) lê ?redirect=<path> e navega para
+  // essa rota interna após autenticar (ex.: /leads/<id>). Só aceitamos um CAMINHO
+  // relativo — começa com "/" e não com "//" — para não virar open-redirect para
+  // outro host. O token vai para o /sso do CRM de qualquer forma; o redirect é só o
+  // destino interno.
+  const redirect = typeof req.query?.redirect === 'string' ? req.query.redirect.trim() : ''
+  if (redirect && /^\/(?!\/)[A-Za-z0-9/_\-.?=&%]*$/.test(redirect)) {
+    url += `&redirect=${encodeURIComponent(redirect)}`
+  }
+
   return res.json({ url })
 }
 

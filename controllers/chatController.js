@@ -3268,7 +3268,18 @@ exports.sincronizarContatosZapi = async (req, res) => {
 
     // Enfileira job que o worker (iniciado no index.js) vai processar em background.
     // Continua mesmo se o usuário sair da tela.
-    const { enqueue, JOB_TIPOS } = require('../services/queueManager')
+    const { enqueue, JOB_TIPOS, resumeAll, recoverStaleRunningJobs } = require('../services/queueManager')
+
+    // Clique manual = intenção explícita de sincronizar. Dois estados silenciosos
+    // impediam o botão de "puxar nada":
+    //  1) processamento_pausado=true — o worker auto-pausa a empresa após falhas
+    //     repetidas de job; enquanto pausado, getNextPendingJob ignora a fila e o
+    //     job novo fica pendente para sempre. Retomamos aqui.
+    //  2) job anterior travado em 'running' (crash/deploy) — bloqueia novo enqueue
+    //     por jobDuplicado até a varredura de stale (10 min). Recuperamos agora.
+    try { await resumeAll(company_id) } catch (e) { console.warn('[SYNC-CONTATOS] resumeAll:', e?.message || e) }
+    try { await recoverStaleRunningJobs() } catch (e) { console.warn('[SYNC-CONTATOS] recoverStale:', e?.message || e) }
+
     const result = await enqueue(company_id, JOB_TIPOS.SYNC_CONTATOS, {
       reset: true,
       includeConversationCache: false

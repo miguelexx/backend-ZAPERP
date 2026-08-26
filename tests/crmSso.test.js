@@ -67,6 +67,28 @@ describe('GET /api/crm/abrir-avancado', () => {
     expect(decoded.nome).toBe('Ana')
   })
 
+  it('anexa ?redirect quando é um caminho interno válido (/leads/<id>)', async () => {
+    const token = makeZapToken({ id: 7, company_id: 1, email: 'ana@empresa.com', nome: 'Ana' })
+    const res = await request(app)
+      .get('/api/crm/abrir-avancado')
+      .query({ redirect: '/leads/abc-123-uuid' })
+      .set('Authorization', `Bearer ${token}`)
+    expect(res.status).toBe(200)
+    expect(res.body.url).toContain(`redirect=${encodeURIComponent('/leads/abc-123-uuid')}`)
+  })
+
+  it('ignora redirect que aponta para outro host (anti open-redirect)', async () => {
+    const token = makeZapToken({ id: 7, company_id: 1, email: 'ana@empresa.com', nome: 'Ana' })
+    for (const mau of ['//evil.com', 'https://evil.com', 'javascript:alert(1)', 'leads/1']) {
+      const res = await request(app)
+        .get('/api/crm/abrir-avancado')
+        .query({ redirect: mau })
+        .set('Authorization', `Bearer ${token}`)
+      expect(res.status).toBe(200)
+      expect(res.body.url).not.toContain('redirect=')
+    }
+  })
+
   it('503 quando ZAP_SSO_SECRET não está setado', async () => {
     const orig = process.env.ZAP_SSO_SECRET
     delete process.env.ZAP_SSO_SECRET

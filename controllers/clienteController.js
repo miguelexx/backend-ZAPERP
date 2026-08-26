@@ -1,6 +1,6 @@
 const supabase = require('../config/supabase');
 const { getDisplayName } = require('../helpers/contactEnrichment');
-const { getCanonicalPhone, getOrCreateCliente } = require('../helpers/conversationSync');
+const { getCanonicalPhone, getCanonicalPhoneAnyIntl, getOrCreateCliente } = require('../helpers/conversationSync');
 const { ensureConversaForCliente } = require('../services/conversaAbrirClienteService');
 const { executarAssumirConversa } = require('../services/conversaAssumirInternoService');
 const { buildClienteListagemSearchOr } = require('../helpers/chatSearchHelper');
@@ -199,16 +199,23 @@ exports.criarCliente = async (req, res) => {
 
   try {
     if (telefoneRaw) {
+      // Aceita telefone BR canônico OU número internacional válido (10–15 dígitos).
+      // Antes, só passava o padrão BR estrito (normalizePhoneBR), então números
+      // válidos fora desse molde — internacionais, ou colados em formatos que não
+      // normalizavam — caíam em "Telefone inválido" mesmo sendo reais. Só bloqueamos
+      // de fato grupos, identificadores internos (LID) e o que não tem dígitos de
+      // telefone algum. getOrCreateCliente (com allowNonBR) revalida o formato no INSERT.
       const telefoneCanonico = getCanonicalPhone(telefoneRaw)
-      const bloqueado =
-        !telefoneCanonico ||
-        telefoneCanonico.startsWith('lid:') ||
-        telefoneCanonico.endsWith('@g.us')
+      const telefoneIntl = getCanonicalPhoneAnyIntl(telefoneRaw)
+      const ehGrupoOuLid =
+        telefoneCanonico.startsWith('lid:') || telefoneCanonico.endsWith('@g.us')
+      const bloqueado = ehGrupoOuLid || (!telefoneCanonico && !telefoneIntl)
       if (bloqueado) {
         return res.status(400).json(
           erroTelefoneCliente('TELEFONE_INVALIDO', {
-            detalhe:
-              'Não foi possível interpretar um telefone brasileiro. Verifique DDD e quantidade de dígitos. Grupos e identificadores internos (LID) não podem ser cadastrados por este formulário.',
+            detalhe: ehGrupoOuLid
+              ? 'Grupos e identificadores internos (LID) não podem ser cadastrados por este formulário.'
+              : 'Informe um número com DDD (Brasil) ou o número completo com código do país. Espaços, parênteses, hífens e "+" são aceitos.',
           })
         )
       }
@@ -220,6 +227,10 @@ exports.criarCliente = async (req, res) => {
     const empresaTrim = trimOrNull(empresa)
 
     const fields = {
+      // allowNonBR: aceita também números internacionais válidos no cadastro manual.
+      // Não afeta números BR (o caminho BR canônico continua sendo o preferido); só
+      // adiciona um fallback quando o número não cai no padrão 55+DDD+8/9.
+      allowNonBR: true,
       ...(nomeTrim ? { nome: nomeTrim, nomeSource: 'manual' } : {}),
       ...(emailTrim ? { email: emailTrim } : {}),
       ...(empresaTrim ? { empresa: empresaTrim } : {}),
