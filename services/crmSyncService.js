@@ -29,7 +29,12 @@
  * (não é dependência do projeto).
  */
 
-const TIMEOUT_MS = 8000
+// O CRM Avançado pede pelo menos 10s (upsert de lead + oportunidade pode ter
+// cold start / consulta de funil). Mantemos folga em 12s. Só o botão "Enviar ao
+// CRM" e o resumo do dashboard fazem await disto; os hooks de background rodam
+// fire-and-forget (setImmediate / sem await), então este teto não afeta latência
+// do inbound nem do cadastro de cliente.
+const TIMEOUT_MS = 12000
 
 function baseUrl() {
   return (process.env.CRM_AVANCADO_URL || '').replace(/\/+$/, '')
@@ -82,10 +87,18 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = TIMEOUT_MS) {
   }
 }
 
+// Motivo legível de uma exceção do fetch (timeout vs. rede/DNS) para o log.
+// NÃO inclui o segredo (ele só vai no header x-zaperp-secret, nunca na URL).
+function reasonFromErr(err) {
+  if (err?.name === 'AbortError') return `timeout após ${TIMEOUT_MS}ms`
+  return err?.message || String(err)
+}
+
 async function post(path, body) {
   if (!isEnabled()) return null // CRM não configurado — ignora silenciosamente
+  const url = `${baseUrl()}/api/webhooks/zaperp${path}`
   try {
-    const res = await fetchWithTimeout(`${baseUrl()}/api/webhooks/zaperp${path}`, {
+    const res = await fetchWithTimeout(url, {
       method: 'POST',
       headers: headers(),
       body: JSON.stringify(body || {}),
@@ -93,30 +106,33 @@ async function post(path, body) {
     if (!res.ok) {
       let detalhe = ''
       try { detalhe = await res.text() } catch (_) {}
-      console.error('[CRM Sync] Erro em', path, res.status, detalhe.slice(0, 500))
+      // URL completa + status + corpo: permite diferenciar 404 (rota inexistente)
+      // de 401 (segredo errado) de 5xx (erro interno do CRM) direto no pm2 logs.
+      console.error(`[CRM Sync] POST ${url} respondeu ${res.status}:`, detalhe.slice(0, 500))
       return null
     }
     try { return await res.json() } catch (_) { return { ok: true } }
   } catch (err) {
-    console.error('[CRM Sync] Falha em POST', path, err?.message || err)
+    console.error(`[CRM Sync] Falha ao chamar POST ${url}:`, reasonFromErr(err))
     return null
   }
 }
 
 async function get(path) {
   if (!isEnabled()) return null
+  const url = `${baseUrl()}/api/webhooks/zaperp${path}`
   try {
-    const res = await fetchWithTimeout(`${baseUrl()}/api/webhooks/zaperp${path}`, {
+    const res = await fetchWithTimeout(url, {
       method: 'GET',
       headers: headers(),
     })
     if (!res.ok) {
-      console.error('[CRM Sync] Erro GET', path, res.status)
+      console.error(`[CRM Sync] GET ${url} respondeu ${res.status}`)
       return null
     }
     return await res.json()
   } catch (err) {
-    console.error('[CRM Sync] Falha em GET', path, err?.message || err)
+    console.error(`[CRM Sync] Falha ao chamar GET ${url}:`, reasonFromErr(err))
     return null
   }
 }
