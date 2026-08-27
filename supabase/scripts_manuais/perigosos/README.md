@@ -24,6 +24,12 @@ multi-tenant aplicado em `backend/supabase/migrations/20260630120000_rls_company
 
 `APAGAR_DADOS_COMPANY_4.sql`, `EXCLUIR_CLIENTE_ESPECIFICO.sql`, `EXCLUIR_CONVERSAS_LISTA_ESPECIFICA.sql`,
 `EXCLUIR_TODOS_CLIENTES_COMPANY_4.sql`, `LIMPAR_CONVERSAS_CLIENTES.sql` fazem `DELETE` em massa.
+
+`EXCLUIR_TODOS_CLIENTES_COMPANY_4.sql` limpa **clientes + conversas + mensagens** só da empresa 4
+(não apaga usuários, instâncias nem campanhas). Rode o `SELECT` de preview, depois o bloco com
+`v_aplicar := false` (DRY_RUN). Só mude para `true` depois de conferir. Não use
+`APAGAR_DADOS_COMPANY_4.sql` para este caso: aquele também apaga usuários e departamentos.
+
 `AUTO_CONFIGURE_CHATBOT_ALL_COMPANIES.sql`, `CONFIGURE_CHATBOT_EMPRESA_2.sql`,
 `FIX_OPCAO_INVALIDA_RPC_SUPABASE.sql`, `QUICK_CHATBOT_SETUP.sql`, `VERIFY_OPCAO_INVALIDA_SETUP.sql`,
 `EXEMPLOS_PRATICOS_CHATBOT.sql` fazem `INSERT`/`UPDATE`/`DELETE` pontuais de configuração de chatbot —

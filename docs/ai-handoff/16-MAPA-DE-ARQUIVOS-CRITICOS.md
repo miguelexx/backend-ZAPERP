@@ -28,7 +28,7 @@
 | `services/inboundMediaPersistenceService.js` | download seguro/retry | crítico | `inboundMediaPersistence`, áudio, SSRF; revalidar redirect/host e remover parcial. |
 | `controllers/mediaProxyController.js` / `routes/mediaProxyRoutes.js` | proxy autenticado | alto | `mediaProxy*`; evitar token em query/log e SSRF. |
 | `config/r2.js`, `services/storage/r2Client.js`, mirror/retention | storage/assinatura/remoção | crítico | suites R2; não habilitar rollout/retenção automaticamente. |
-| `workers/disparoWorker.js` | loop/claim/lease/envio campanha | crítico | worker/lease/retry; manter três gates e anti-reenvio incerto. |
+| `workers/disparoWorker.js` | loop/claim/lease/envio campanha | crítico | loop embarcado no HTTP + processo opcional; manter três gates de live e anti-reenvio incerto. |
 | `services/disparoFilaService.js`, `disparoSendService.js` | fila/idempotência/envio | crítico | `disparoFilaService`, `disparoSendService`; teste live mock atualmente divergente. |
 | `services/disparoOptOutService.js`, reconciliação | exclusão, resposta, incerto | crítico | opt-out/reconciliação; comando exato, tenant, terminalidade. |
 | `controllers/disparoSaudeController.js`, `helpers/disparoObservabilidade.js` | health Etapa 9 | crítico | novos testes de isolamento; heartbeat global hoje expõe metadado cross-tenant. |

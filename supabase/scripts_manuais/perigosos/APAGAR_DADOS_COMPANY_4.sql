@@ -1,7 +1,10 @@
 -- =========================================================
 -- APAGAR_DADOS_COMPANY_4.sql
--- Remove dados da empresa (company_id) de forma transacional.
--- Ajuste v_company_id se precisar reaproveitar para outro id.
+-- WIPE AMPLO da empresa: conversas, mensagens, clientes, tags,
+-- usuarios e departamentos. NÃO use isto só para limpar o chat.
+--
+-- Para apagar APENAS contatos + conversas + mensagens da empresa 4,
+-- use EXCLUIR_TODOS_CLIENTES_COMPANY_4.sql
 -- =========================================================
 
 BEGIN;
@@ -76,6 +79,33 @@ BEGIN
   -- Conversas e entidades-base da empresa
   DELETE FROM public.conversas
   WHERE company_id = v_company_id;
+
+  -- Filhas de clientes (FK RESTRICT — tem que sair ANTES do DELETE em clientes)
+  DELETE FROM public.cliente_tags
+  WHERE company_id = v_company_id
+     OR cliente_id IN (SELECT cl.id FROM public.clientes cl WHERE cl.company_id = v_company_id);
+
+  DELETE FROM public.contato_opt_in
+  WHERE company_id = v_company_id
+     OR cliente_id IN (SELECT cl.id FROM public.clientes cl WHERE cl.company_id = v_company_id);
+
+  DELETE FROM public.contato_opt_out
+  WHERE company_id = v_company_id
+     OR cliente_id IN (SELECT cl.id FROM public.clientes cl WHERE cl.company_id = v_company_id);
+
+  IF to_regclass('public.helpdesk_tickets') IS NOT NULL THEN
+    UPDATE public.helpdesk_tickets
+    SET cliente_id = NULL
+    WHERE company_id = v_company_id
+       OR cliente_id IN (SELECT cl.id FROM public.clientes cl WHERE cl.company_id = v_company_id);
+  END IF;
+
+  IF to_regclass('public.disparo_campanha_destinatarios') IS NOT NULL THEN
+    UPDATE public.disparo_campanha_destinatarios
+    SET cliente_id = NULL
+    WHERE company_id = v_company_id
+       OR cliente_id IN (SELECT cl.id FROM public.clientes cl WHERE cl.company_id = v_company_id);
+  END IF;
 
   DELETE FROM public.clientes
   WHERE company_id = v_company_id;

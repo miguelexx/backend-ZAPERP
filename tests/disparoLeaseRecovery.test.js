@@ -15,23 +15,27 @@ jest.mock('../services/disparoSendService', () => ({
   enviarItemFila: jest.fn().mockResolvedValue({ ok: true, dryRun: true, messageId: 'dry-1' }),
 }))
 
-jest.mock('../helpers/disparoWorkerConfig', () => ({
-  getDisparoWorkerConfig: jest.fn(() => ({
-    workerEnabled: true,
-    liveEnabled: false,
-    dryRun: true,
-    canSendLive: false,
-    pollMs: 2000,
-    leaseSeconds: 120,
-    batchSize: 1,
-    workerId: 'test-worker',
-    sendTimeoutMs: 45000,
-    maxTentativas: 5,
-    backoffBaseSec: 30,
-    backoffMaxSec: 3600,
-    allowlist: [],
-  })),
-}))
+jest.mock('../helpers/disparoWorkerConfig', () => {
+  const actual = jest.requireActual('../helpers/disparoWorkerConfig')
+  return {
+    ...actual,
+    getDisparoWorkerConfig: jest.fn(() => ({
+      workerEnabled: true,
+      liveEnabled: false,
+      dryRun: true,
+      canSendLive: false,
+      pollMs: 2000,
+      leaseSeconds: 120,
+      batchSize: 1,
+      workerId: 'test-worker',
+      sendTimeoutMs: 45000,
+      maxTentativas: 5,
+      backoffBaseSec: 30,
+      backoffMaxSec: 3600,
+      allowlist: [],
+    })),
+  }
+})
 
 jest.mock('../services/disparoLimitesRuntime', () => ({
   contarEnviosJanela: jest.fn().mockResolvedValue(0),

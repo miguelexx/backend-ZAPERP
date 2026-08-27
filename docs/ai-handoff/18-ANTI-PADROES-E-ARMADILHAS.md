@@ -121,15 +121,18 @@ const PROTECAO_DESATIVADA = true; // ← não mudar sem calibrar limites primeir
 
 ---
 
-## 9. Worker de Disparo tem 3 gates — todos precisam estar ligados
+## 9. Worker de Disparo: fila no HTTP, três gates para envio real
 
 ```bash
-DISPARO_WORKER_ENABLED=true   # gate 1 — worker processa?
+# Loop da fila: ligado no processo HTTP (index.js). Kill switch:
+# DISPARO_EMBEDDED_WORKER=false
+
+DISPARO_WORKER_ENABLED=true   # gate 1 — entra em canSendLive
 DISPARO_LIVE_ENABLED=true     # gate 2 — envio real ou simulado?
 DISPARO_DRY_RUN=false         # gate 3 — dry run desligado?
 ```
 
-**Armadilha:** mudar apenas um gate e achar que está tudo funcionando. Por padrão, todos estão desligados. Para envio real em produção, os três precisam ser alterados explicitamente.
+**Armadilha:** a fila agora processa no HTTP mesmo com `DISPARO_WORKER_ENABLED=false` (dry-run). Envio real no WhatsApp ainda exige os três gates. Não ligar live automaticamente. Processo `npm run worker:disparo` é opcional.
 
 ---
 
@@ -207,3 +210,23 @@ if (io) emitirConversaAtualizada(io, company_id, conversa_id, payload, { skipAtu
 ```
 
 Falha de emit **não** pode virar 500 depois que o nome já foi persistido.
+
+---
+
+## 17. Não ler planilha real com ExcelJS
+
+**Armadilha:** usar `exceljs` (`wb.xlsx.load` + `ws.getRow` em loop até `rowCount`/`actualRowCount`) para **ler** `.xlsx` de secretaria/escola.
+
+Arquivos reais costumam ter dimensão `A1:XFD1048576`, estilos, várias abas e linha de título. O ExcelJS materializa `Row` por índice e pode estourar memória — o preview vira HTTP 500 (`Erro ao analisar a planilha`) e o processo cai (`ERR_CONNECTION_CLOSED` nas outras APIs).
+
+```js
+// ❌ ERRADO — leitura
+await workbook.xlsx.load(buffer)
+for (let r = 2; r <= ws.rowCount; r++) ws.getRow(r)
+
+// ✅ CORRETO — leitura (igual ao Disparo)
+XLSX.read(buffer, { type: 'buffer', cellStyles: false, sheetRows: MAX })
+XLSX.utils.sheet_to_json(ws, { header: 1, blankrows: false, raw: true })
+```
+
+ExcelJS continua adequado para **escrever** relatórios (dashboard). Importação de clientes: `clienteImportController.lerPlanilha` (SheetJS). Importação de disparo: `helpers/disparoPlanilhaHelper.js`.

@@ -39,7 +39,7 @@ Health, auth inválida, login de conta de homologação, listagem tenant-scoped,
 
 - manter PM2 `instances: 1`; não clusterizar sem Redis/pub-sub e locks distribuídos;
 - não executar schedulers internos e cron externo duplicados;
-- worker de Disparo é processo separado e deve iniciar off/dry-run antes de live;
+- worker de Disparo roda no HTTP por padrão (`DISPARO_EMBEDDED_WORKER`); live continua off/dry-run até flags explícitas;
 - disco `/uploads` deve persistir entre releases; em múltiplos hosts não é compartilhado;
 - preservar env/cofre fora do repositório; rotacionar exemplos com aparência de credencial;
 - antes de restart, entender leases e mensagens externas aceitas ainda sem ACK.

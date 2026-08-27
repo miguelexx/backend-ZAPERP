@@ -63,12 +63,13 @@
 - **Não fazer:** resolver “primeira ativa” em produção ou permitir provider instance duplicada.
 - **Revisar quando:** remover legado após confirmar dados/migrations ou adicionar provider novo via contrato explícito.
 
-## DT-09 — Disparo com worker separado e três gates
+## DT-09 — Disparo com worker embarcado no HTTP e três gates de live
 
-- **Decisão/evidência:** `workers/disparoWorker.js` e config: worker+live+`dryRun=false` para envio.
-- **Consequência:** falha segura e fila persistente; operação exige processo separado/heartbeat.
-- **Não fazer:** reduzir gates, iniciar worker no HTTP ou auto-reenviar `incerta`.
+- **Decisão/evidência:** `workers/disparoWorker.js` + `index.js`: o loop da fila roda no processo HTTP (`startEmbeddedWorker`). `npm run worker:disparo` continua opcional. Envio real exige worker+live+`dryRun=false`.
+- **Consequência:** clicar em iniciar campanha processa a fila sem processo extra (PM2 só sobe `index.js`). Heartbeat passa a existir no HTTP. Kill switch: `DISPARO_EMBEDDED_WORKER=false`.
+- **Não fazer:** reduzir gates de live, auto-reenviar `incerta`, ligar `DISPARO_LIVE_ENABLED` automaticamente.
 - **Revisar quando:** homologação, observabilidade tenant-safe e runbook estiverem completos.
+- **Revisado em:** 2026-08-27 — a regra anterior (“não iniciar worker no HTTP”) impedia disparo em produção, porque o worker separado não está no `ecosystem.config.js`.
 
 ## DT-10 — Migrations como fonte canônica
 

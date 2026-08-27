@@ -12,7 +12,7 @@
 | `middleware/` | JWT/perfis, webhooks, rate limit e uploads |
 | `helpers/`, `validators/` | regras pequenas e validação Zod/manual |
 | `repositories/`, `socket/` | chat interno e presença/socket |
-| `workers/` | worker persistente do Disparo |
+| `workers/` | worker persistente do Disparo (embarcado no HTTP; processo separado opcional) |
 | `supabase/migrations/` | evolução canônica do banco, por timestamp |
 | `supabase/prechecks/`, `supabase/production/` | verificações e variantes para índices concorrentes |
 | `supabase/scripts_manuais/perigosos/` | scripts destrutivos; nunca executar automaticamente |

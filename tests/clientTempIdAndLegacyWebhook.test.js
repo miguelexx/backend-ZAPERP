@@ -47,13 +47,26 @@ describe('client_temp_id durable idempotency contract', () => {
   test('detalharChat paginated select includes client_temp_id', () => {
     const fs = require('fs')
     const path = require('path')
-    const src = fs.readFileSync(path.join(__dirname, '../controllers/chatController.js'), 'utf8')
+    // A camada de chat foi modularizada: o handler detalharChat vive em
+    // controllers/chat/historyController.js e o detector de coluna ausente em
+    // controllers/chat/shared.js. O guard verifica a camada inteira (chatController
+    // fachada + módulos chat/*), tolerante a onde cada trecho reside.
+    const chatDir = path.join(__dirname, '../controllers/chat')
+    const parts = [fs.readFileSync(path.join(__dirname, '../controllers/chatController.js'), 'utf8')]
+    if (fs.existsSync(chatDir)) {
+      for (const f of fs.readdirSync(chatDir)) {
+        if (f.endsWith('.js')) parts.push(fs.readFileSync(path.join(chatDir, f), 'utf8'))
+      }
+    }
+    const src = parts.join('\n')
 
     // O select paginado do detalharChat termina em audio_duracao_sec, client_temp_id.
     expect(src).toContain('apagada_em, audio_duracao_sec, client_temp_id')
 
-    // E o fallback de coluna ausente cobre client_temp_id (banco antigo sem a coluna).
-    expect(src).toContain("String(errMsgs.message || '').includes('client_temp_id')")
+    // E o fallback de coluna ausente cobre client_temp_id (banco antigo sem a coluna),
+    // via helper isMensagemColumnFallbackError usado por detalharChat/buscarMensagensConversa.
+    expect(src).toContain("msg.includes('client_temp_id')")
+    expect(src).toContain('if (errMsgs && isMensagemColumnFallbackError(errMsgs))')
   })
 })
 

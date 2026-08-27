@@ -65,6 +65,17 @@ function getIo(req) {
   }
 }
 
+/** Acorda o loop embarcado para a fila começar a sair no mesmo clique de iniciar/retomar. */
+function kickFilaDisparo(io) {
+  try {
+    const worker = require('../workers/disparoWorker')
+    if (io) worker._setIo(io)
+    worker.kickWorker()
+  } catch (e) {
+    console.warn('[disparo:execucao] kick worker:', e?.message)
+  }
+}
+
 async function carregarCampanha(campanhaId, companyId, res) {
   const { data, error } = await supabase
     .from('disparo_campanhas')
@@ -253,6 +264,7 @@ exports.iniciarCampanha = async (req, res) => {
 
     if (iniciavel.idempotente) {
       const exec = await buscarExecucaoAtiva(campanhaId, companyId)
+      kickFilaDisparo(getIo(req))
       return res.json({
         ok: true,
         idempotente: true,
@@ -289,6 +301,7 @@ exports.iniciarCampanha = async (req, res) => {
     let execucao = filaResult.execucao
 
     if (execucao.status === 'em_execucao' && campanha.status === 'em_execucao') {
+      kickFilaDisparo(getIo(req))
       return res.json({
         ok: true,
         idempotente: true,
@@ -346,6 +359,8 @@ exports.iniciarCampanha = async (req, res) => {
       execucao_id: execucao.id,
       dry_run: execucao.dry_run,
     })
+
+    kickFilaDisparo(io)
 
     res.json({
       ok: true,
@@ -692,6 +707,8 @@ exports.continuar = async (req, res) => {
       execucao_id: execucao.id,
     })
 
+    kickFilaDisparo(io)
+
     res.json({ ok: true, status: 'em_execucao', execucao: execAtualizada, instancias: instCheck })
   } catch (err) {
     console.error('[disparo:execucao] continuar', err)
@@ -959,6 +976,8 @@ exports.reprocessarFalhas = async (req, res) => {
       payload: { item_ids: ids, quantidade: ids.length },
       usuarioId: userId,
     })
+
+    kickFilaDisparo(getIo(req))
 
     res.json({ ok: true, reprocessados: ids.length, item_ids: ids })
   } catch (err) {
