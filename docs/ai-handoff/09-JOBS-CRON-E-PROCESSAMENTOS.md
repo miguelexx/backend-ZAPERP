@@ -29,9 +29,7 @@ Há ainda a fila operacional autenticada (JWT + supervisor/admin) no mesmo prefi
 
 ## Worker de Disparo
 
-Roda **embarcado no processo HTTP** (`startEmbeddedWorker` em `index.js`), o mesmo padrão dos demais schedulers. `npm run worker:disparo` continua disponível como processo opcional (claim `SKIP LOCKED`). Kill switch: `DISPARO_EMBEDDED_WORKER=false`. `ZAPERP_DISABLE_BACKGROUND_JOBS` também impede o loop.
-
-Defaults seguros de envio: live desligado e dry-run ligado. O loop processa a fila mesmo com `DISPARO_WORKER_ENABLED=false` (simulação/dry-run). Envio real só ocorre quando `DISPARO_WORKER_ENABLED=true`, `DISPARO_LIVE_ENABLED=true` e `DISPARO_DRY_RUN=false`. Poll default 2 s, lease 120 s, lote 5. Allowlist vazia permite qualquer empresa, mas os três gates de live continuam necessários. `POST .../execucao/iniciar` (e retomar/reprocessar) dispara um tick imediato (`kickWorker`).
+Executa separadamente com `npm run worker:disparo`. Defaults seguros: worker desligado, live desligado e dry-run ligado. Envio real só ocorre quando `DISPARO_WORKER_ENABLED=true`, `DISPARO_LIVE_ENABLED=true` e `DISPARO_DRY_RUN=false`. Poll default 2 s, lease 120 s, lote 5. Allowlist vazia permite qualquer empresa, mas os três gates continuam necessários.
 
 A fila é persistente; claim usa RPC PostgreSQL com `SKIP LOCKED`/advisory lock. Backoff e leases recuperam crash. Na Etapa 9 do working tree, lease expirado em `reservada` volta a pendente; `enviando` vira `incerta`. Item com provider id/data de envio não é reenviado automaticamente. Heartbeat/auditoria registram saúde; a migration correspondente ainda não foi confirmada como aplicada.
 

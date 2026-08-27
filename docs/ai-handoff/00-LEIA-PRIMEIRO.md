@@ -47,7 +47,7 @@ Estados de certeza usados:
 - Mensagem outbound cruza persistência, chamada UltraMSG, webhook/ACK, reconciliação e Socket.IO; mudanças locais podem duplicar envio.
 - `whatsapp_instance_id` participa da identidade de conversa/mensagem; manter compatibilidade com linhas legadas nulas.
 - Schedulers e presença/dedupe em memória pressupõem um processo; PM2 confirma `instances: 1`.
-- Disparo real (WhatsApp) requer simultaneamente worker ligado, live ligado e dry-run falso. Não habilitar automaticamente. A fila em si é processada no HTTP (`startEmbeddedWorker`); não depende de `npm run worker:disparo`.
+- Disparo real requer simultaneamente worker ligado, live ligado e dry-run falso. Não habilitar automaticamente.
 - Migrations recentes têm prechecks e variantes `CONCURRENTLY`; não escolher/aplicar sem inventário do banco real.
 - Mídia em `/uploads`, R2 e retenção possui efeitos irreversíveis.
 

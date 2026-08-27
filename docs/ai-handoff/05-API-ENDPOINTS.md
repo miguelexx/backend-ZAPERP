@@ -53,7 +53,7 @@ Todas as operações autenticadas devem limitar consultas por `req.user.company_
 | Rotas | Controller/middleware | Entrada, resposta e efeitos relevantes |
 |---|---|---|
 | `GET/POST /clientes`, `GET/PUT/DELETE /clientes/:id` | `clienteController`; delete AD+D | Filtros/JSON de cliente; CRUD tenant-scoped. |
-| `POST /clientes/importar/preview`, `POST /clientes/importar` | `clienteImportController`; AD, `uploadXlsx`; confirmação também D | Multipart XLSX lido com SheetJS (não ExcelJS); preview não confirma; detecta aba/cabeçalho; import faz upsert/lote. |
+| `POST /clientes/importar/preview`, `POST /clientes/importar` | `clienteImportController`; AD, `uploadXlsx`; confirmação também D | Multipart XLSX; preview não confirma, import faz upsert/lote. |
 | `DELETE /clientes/todos` | `clienteController.apagarTodosClientes`; AD+D | Exclusão em massa da empresa. |
 | `GET/POST /clientes/:id/tags`, `DELETE /clientes/:id/tags/:tagId` | controllers cliente | Vínculo cliente–tag. |
 | `GET/POST /tags`, `PUT/DELETE /tags/:id` | `tagController` | A; mutações AD; delete D. |

@@ -415,16 +415,6 @@ server.listen(PORT, '0.0.0.0', () => {
     // No-op se MEDIA_RETENTION_DAYS<=0 (padrão) ou R2 desligado. Escopo = empresas em R2.
     const { startMediaRetentionScheduler } = require('./services/mediaRetentionService')
     startMediaRetentionScheduler(supabase)
-
-    // Disparo: processa a fila neste processo (PM2 só sobe index.js).
-    // Envio real no WhatsApp continua gated por DISPARO_LIVE_ENABLED + DISPARO_DRY_RUN=false.
-    if (getBooleanEnv('DISPARO_EMBEDDED_WORKER', true)) {
-      const { startEmbeddedWorker } = require('./workers/disparoWorker')
-      startEmbeddedWorker(io)
-      console.log('[WORKER] Disparo embarcado no HTTP — fila processada neste processo')
-    } else {
-      console.log('[WORKER] Disparo embarcado desligado (DISPARO_EMBEDDED_WORKER=false). Use npm run worker:disparo')
-    }
   } else if (backgroundJobsDisabled) {
     console.log('[WORKER] Rotinas em background desativadas por ZAPERP_DISABLE_BACKGROUND_JOBS')
   }
@@ -459,12 +449,6 @@ function shutdown(signal) {
   if (shuttingDown) return
   shuttingDown = true
   console.log(`[SHUTDOWN] Recebido ${signal}. Encerrando servidor HTTP/WebSocket...`)
-  try {
-    const { stopEmbeddedWorker } = require('./workers/disparoWorker')
-    stopEmbeddedWorker()
-  } catch (e) {
-    console.warn('[SHUTDOWN] Disparo worker:', e?.message || e)
-  }
   try {
     io.close()
   } catch (e) {

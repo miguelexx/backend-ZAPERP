@@ -1,19 +1,16 @@
 /**
  * Worker do Disparo de Mensagens (Etapa 7).
+ * Processo separado do HTTP. Defaults seguros: não inicia se WORKER_ENABLED=false.
  *
- * Modo padrão: loop embarcado no processo HTTP (`startEmbeddedWorker` em index.js).
- * Assim "Iniciar campanha" processa a fila sem um processo extra.
- * Processo separado continua opcional: npm run worker:disparo
- *
+ * Uso: npm run worker:disparo
  * Envio real somente com WORKER_ENABLED=true + LIVE_ENABLED=true + DRY_RUN=false.
- * O loop embarcado processa a fila mesmo com WORKER_ENABLED=false (dry-run / simulação).
  */
 
 require('dotenv').config({ path: require('path').join(__dirname, '..', '.env') })
 
 const os = require('os')
 const supabase = require('../config/supabase')
-const { getDisparoWorkerConfig, getBooleanEnv } = require('../helpers/disparoWorkerConfig')
+const { getDisparoWorkerConfig } = require('../helpers/disparoWorkerConfig')
 const { classificarErro, calcularProximaTentativa } = require('../helpers/disparoFilaRetryHelper')
 const { enviarItemFila } = require('../services/disparoSendService')
 const { recalcularContadores, registrarEvento } = require('../services/disparoFilaService')
@@ -23,78 +20,9 @@ const { DateTime } = require('luxon')
 
 const cfg = getDisparoWorkerConfig()
 let shuttingDown = false
-let io = null // no HTTP, index.js injeta o Socket.IO via startEmbeddedWorker
+let io = null // worker standalone: sem Socket.IO a menos que conecte depois
 let loopTimer = null
 let processing = false
-let embeddedStarted = false
-
-function embeddedWorkerAllowed() {
-  if (typeof getBooleanEnv !== 'function') return true
-  return getBooleanEnv('DISPARO_EMBEDDED_WORKER', true)
-}
-
-function isEmbeddedRunning() {
-  return loopTimer != null
-}
-
-function logBootFlags(mode) {
-  console.log(`[disparoWorker] iniciando (${mode})`, {
-    workerId: cfg.workerId,
-    workerEnabled: cfg.workerEnabled,
-    liveEnabled: cfg.liveEnabled,
-    dryRun: cfg.dryRun,
-    canSendLive: cfg.canSendLive,
-  })
-  if (!cfg.canSendLive) {
-    console.log('[disparoWorker] Modo seguro: dry-run ou live desligado — UltraMSG NÃO será chamado.')
-  } else {
-    console.warn('[disparoWorker] ATENÇÃO: envio REAL habilitado (WORKER+LIVE+DRY_RUN=false).')
-  }
-}
-
-function startLoop() {
-  if (loopTimer) return
-  loopTimer = setInterval(() => { tick().catch(() => {}) }, cfg.pollMs)
-  tick().catch(() => {})
-}
-
-/**
- * Loop no mesmo processo HTTP. Não exige DISPARO_WORKER_ENABLED.
- * Kill switch: DISPARO_EMBEDDED_WORKER=false.
- */
-function startEmbeddedWorker(socketIo = null) {
-  if (socketIo) io = socketIo
-  if (!embeddedWorkerAllowed()) {
-    console.log('[disparoWorker] DISPARO_EMBEDDED_WORKER=false — loop não inicia no HTTP.')
-    return { started: false, skipped: true, alreadyRunning: false }
-  }
-  if (loopTimer || embeddedStarted) {
-    return { started: false, skipped: false, alreadyRunning: true }
-  }
-  shuttingDown = false
-  embeddedStarted = true
-  logBootFlags('embarcado no HTTP')
-  heartbeat({ boot: true, embedded: true }).catch(() => {})
-  startLoop()
-  return { started: true, skipped: false, alreadyRunning: false }
-}
-
-/** Dispara um tick imediato se o loop estiver ativo (iniciar/retomar campanha). */
-function kickWorker() {
-  if (shuttingDown || !loopTimer) return false
-  tick().catch((e) => {
-    console.warn('[disparoWorker] kick falhou:', e?.message)
-  })
-  return true
-}
-
-function stopEmbeddedWorker() {
-  if (loopTimer) {
-    clearInterval(loopTimer)
-    loopTimer = null
-  }
-  embeddedStarted = false
-}
 
 async function heartbeat(extra = {}) {
   try {
@@ -582,20 +510,33 @@ async function tick() {
 }
 
 async function main() {
-  logBootFlags('processo separado')
+  console.log('[disparoWorker] iniciando', {
+    workerId: cfg.workerId,
+    workerEnabled: cfg.workerEnabled,
+    liveEnabled: cfg.liveEnabled,
+    dryRun: cfg.dryRun,
+    canSendLive: cfg.canSendLive,
+  })
 
   if (!cfg.workerEnabled) {
-    console.log('[disparoWorker] DISPARO_WORKER_ENABLED=false — worker separado não inicia.')
+    console.log('[disparoWorker] DISPARO_WORKER_ENABLED=false — worker não inicia.')
     process.exit(0)
   }
 
-  await heartbeat({ boot: true, embedded: false })
+  if (!cfg.canSendLive) {
+    console.log('[disparoWorker] Modo seguro: dry-run ou live desligado — UltraMSG NÃO será chamado.')
+  } else {
+    console.warn('[disparoWorker] ATENÇÃO: envio REAL habilitado (WORKER+LIVE+DRY_RUN=false).')
+  }
+
+  await heartbeat({ boot: true })
 
   const shutdown = async (signal) => {
     if (shuttingDown) return
     shuttingDown = true
     console.log(`[disparoWorker] desligamento gracioso (${signal})…`)
-    stopEmbeddedWorker()
+    if (loopTimer) clearInterval(loopTimer)
+    // Aguarda processamento atual
     const start = Date.now()
     while (processing && Date.now() - start < 30000) {
       await new Promise((r) => setTimeout(r, 200))
@@ -606,7 +547,8 @@ async function main() {
   process.on('SIGINT', () => shutdown('SIGINT'))
   process.on('SIGTERM', () => shutdown('SIGTERM'))
 
-  startLoop()
+  loopTimer = setInterval(() => { tick().catch(() => {}) }, cfg.pollMs)
+  tick().catch(() => {})
 }
 
 if (require.main === module) {
@@ -621,9 +563,5 @@ module.exports = {
   processarItem,
   recuperarLeases,
   claimItens,
-  startEmbeddedWorker,
-  stopEmbeddedWorker,
-  kickWorker,
-  isEmbeddedRunning,
   _setIo: (socketIo) => { io = socketIo },
 }

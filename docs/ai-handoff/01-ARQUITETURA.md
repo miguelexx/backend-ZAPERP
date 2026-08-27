@@ -48,7 +48,7 @@ Não existe unidade de transação geral entre provider e Supabase. Transações
 
 ## Assíncrono e escala
 
-O processo principal inicia fila genérica, seis schedulers de negócio, dois de mídia inbound, mirror R2, retenção e o loop do Disparo (`startEmbeddedWorker`). `npm run worker:disparo` é opcional. Guardas `running` evitam sobreposição somente no mesmo processo.
+O processo principal inicia fila genérica, seis schedulers de negócio, dois de mídia inbound, mirror R2 e retenção. O worker de Disparo é processo separado (`npm run worker:disparo`). Guardas `running` evitam sobreposição somente no mesmo processo.
 
 Socket.IO usa adapter padrão em memória; não há dependência/configuração Redis. PM2 fixa um processo em modo fork. Escala horizontal sem Redis/locks distribuídos duplicaria schedulers, fragmentaria salas/presença/rate limits/dedupe e exigiria sticky sessions. O Disparo é exceção parcial: claim `SKIP LOCKED` e advisory lock PostgreSQL suportam concorrência de workers, mas sockets de progresso continuam locais.
 

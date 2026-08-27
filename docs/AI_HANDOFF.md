@@ -41,7 +41,7 @@ Cliente (SPA/Socket) → Express (app.js) → Controllers → Services/Helpers �
 
 - `app.js` — segurança (Helmet, CSP), parsers, webhooks **antes** do CORS, rotas REST, estáticos (`/uploads`), handler de erro global
 - `index.js` — fail-fast de env, Socket.IO, autenticação de socket, salas, eventos, boot de schedulers
-- `workers/disparoWorker.js` — loop da fila de campanhas (embarcado no HTTP; processo separado opcional)
+- `workers/disparoWorker.js` — processo **separado** para envio de campanhas
 
 ---
 
@@ -192,12 +192,12 @@ POST /chats/:id/mensagens (ou /arquivo, /pix, etc.)
 | `conversa_{id}` | Após `join_conversa` autorizado |
 | `internal_user_{id}` | Chat interno |
 
-### Disparo (fila no processo HTTP)
+### Disparo (worker separado)
 
 1. API cria campanha → configura destinatários → instâncias → variações → limites → revisão → confirma
-2. `POST /disparo/campanhas/:id/execucao/iniciar` muda status para `em_execucao` e acorda o loop (`kickWorker`)
-3. `disparoWorker.js` processa a fila no mesmo processo HTTP (`startEmbeddedWorker`). `npm run worker:disparo` é opcional
-4. **Gates de envio real:** `DISPARO_WORKER_ENABLED=true` + `DISPARO_LIVE_ENABLED=true` + `DISPARO_DRY_RUN=false`
+2. `POST /disparo/campanhas/:id/execucao/iniciar` muda status para `em_execucao`
+3. `disparoWorker.js` (`npm run worker:disparo`) faz poll e processa fila
+4. **Gates de segurança:** `DISPARO_WORKER_ENABLED=true` + `DISPARO_LIVE_ENABLED=true` + `DISPARO_DRY_RUN=false`
 
 ---
 
@@ -206,7 +206,6 @@ POST /chats/:id/mensagens (ou /arquivo, /pix, etc.)
 | Job | Frequência | Efeito |
 |-----|-----------|--------|
 | fila genérica | poll 5s | sync_contatos, sync_fotos, etc. |
-| **Disparo (fila de campanhas)** | poll 2s + kick ao iniciar | processa `disparo_fila_itens` neste processo |
 | finalização ausência | 5 min | encerra conversas sem resposta |
 | alerta admin | 2 min | detecta atendimentos sem resposta |
 | atendimento sem resposta | 1 min | alertas e sockets |
@@ -296,7 +295,7 @@ npm test
 4. **Não aplicar migrations em produção** sem inventário real e autorização explícita
 5. **Não commitar/pushar** sem autorização do usuário
 6. **Não expor `SUPABASE_SERVICE_ROLE_KEY`** em logs, respostas ou documentação
-7. **Envio real de Disparo tem 3 gates** — `DISPARO_WORKER_ENABLED`, `DISPARO_LIVE_ENABLED`, `DISPARO_DRY_RUN` — todos devem ser conscientemente configurados. A fila em si roda no HTTP.
+7. **Worker de Disparo tem 3 gates** — `DISPARO_WORKER_ENABLED`, `DISPARO_LIVE_ENABLED`, `DISPARO_DRY_RUN` — todos devem ser conscientemente configurados
 8. **Migrations são a fonte do schema** — `schema.sql` é só contexto
 
 ---

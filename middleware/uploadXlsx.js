@@ -11,10 +11,6 @@ const XLSX_MAX_BYTES = 8 * 1024 * 1024 // 8 MB — planilha de contatos é peque
 
 const XLSX_MIME = new Set([
   'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', // .xlsx
-  'application/vnd.ms-excel', // Excel no Windows às vezes manda isto até para .xlsx
-  'application/haansoftxlsx',
-  'application/zip',
-  'application/x-zip-compressed',
   'application/octet-stream', // alguns navegadores enviam genérico; validamos por extensão
   '', // fallback: sem MIME
 ])
@@ -60,16 +56,6 @@ function uploadXlsx(req, res, next) {
     if (err) {
       if (err.code === 'LIMIT_FILE_SIZE') {
         return next(validationError('Arquivo maior que 8 MB. Reduza a planilha e tente novamente.', 'UPLOAD_XLSX_TAMANHO'))
-      }
-      if (!err.status) {
-        const msg = String(err.message || '')
-        const boundary = /boundary/i.test(msg)
-        return next(validationError(
-          boundary
-            ? 'Falha ao enviar o arquivo. Tente novamente.'
-            : (msg || 'Falha ao enviar o arquivo. Tente novamente.'),
-          err.code || 'UPLOAD_XLSX_FALHOU'
-        ))
       }
       return next(err)
     }

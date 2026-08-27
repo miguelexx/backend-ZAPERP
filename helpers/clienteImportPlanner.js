@@ -20,9 +20,6 @@ const { normalizePhoneBR, phoneKeyBR } = require('./phoneHelper')
 /** Máximo de linhas de dados aceitas por importação (proteção contra arquivo gigante). */
 const MAX_DATA_ROWS = 20000
 
-/** Quantas linhas do topo varrer à procura do cabeçalho real (título/relatório acima). */
-const HEADER_SCAN_ROWS = 20
-
 /**
  * Normaliza um cabeçalho para casamento tolerante:
  * minúsculas, sem acentos, sem pontuação, espaços colapsados.
@@ -50,12 +47,7 @@ function normalizeHeader(value) {
 function cellToString(value) {
   if (value == null) return ''
   if (typeof value === 'string') return value.trim()
-  if (typeof value === 'number') {
-    if (!Number.isFinite(value)) return ''
-    // Telefone gravado como número no Excel: evita "3.4999e+10" e "34999991234.0".
-    if (Math.abs(value - Math.round(value)) < 1e-9) return String(Math.round(value))
-    return String(value)
-  }
+  if (typeof value === 'number') return String(value).trim()
   if (typeof value === 'boolean') return value ? 'true' : 'false'
   if (value instanceof Date) return value.toISOString()
   if (typeof value === 'object') {
@@ -82,10 +74,6 @@ function cellToString(value) {
  */
 const COLUMN_ALIASES = {
   nome: [
-    // cabeçalhos simples (planilha nova)
-    'nome',
-    'nome completo',
-    // modelo da secretaria e variações
     'nome do a aluno a',
     'nome do aluno a',
     'nome do a aluno',
@@ -98,13 +86,6 @@ const COLUMN_ALIASES = {
     'nome do estudante',
   ],
   telefone: [
-    // cabeçalhos simples (planilha nova)
-    'telefone',
-    'celular',
-    'whatsapp',
-    'fone',
-    'tel',
-    // modelo da secretaria e variações
     'celular do a responsavel pedagogico',
     'celular do responsavel pedagogico',
     'celular da responsavel pedagogico',
@@ -115,12 +96,6 @@ const COLUMN_ALIASES = {
     'celular do a responsavel',
   ],
   serie: [
-    // cabeçalhos simples (planilha nova)
-    'tags',
-    'tag',
-    'etiqueta',
-    'etiquetas',
-    // modelo da secretaria e variações
     'serie ano',
     'serie',
     'ano serie',
@@ -159,47 +134,6 @@ function detectColumns(headerRow) {
   return result
 }
 
-function scoreMapping(mapping) {
-  return [mapping?.nome, mapping?.telefone, mapping?.serie].filter((idx) => idx != null).length
-}
-
-/**
- * Linha de cabeçalho plausível: várias células curtas (não um parágrafo de instruções).
- * @param {Array<*>} row
- * @returns {boolean}
- */
-function headerRowPlausible(row) {
-  const cells = (Array.isArray(row) ? row : []).map((c) => cellToString(c)).filter(Boolean)
-  if (cells.length < 2) return false
-  if (cells.some((c) => c.length > 120)) return false
-  return true
-}
-
-/**
- * Encontra a linha de cabeçalho nas primeiras linhas (relatórios da secretaria costumam
- * ter título na linha 1 e os nomes das colunas mais abaixo).
- *
- * @param {Array<Array<*>>} rows
- * @param {number} [maxScan]
- * @returns {{ index: number, score: number, mapping: ReturnType<typeof detectColumns> }}
- */
-function findHeaderRow(rows, maxScan = HEADER_SCAN_ROWS) {
-  const list = Array.isArray(rows) ? rows : []
-  const limit = Math.min(list.length, Math.max(1, Number(maxScan) || HEADER_SCAN_ROWS))
-  let best = { index: 0, score: 0, mapping: detectColumns(list[0] || []) }
-
-  for (let i = 0; i < limit; i++) {
-    const row = list[i] || []
-    if (i > 0 && !headerRowPlausible(row)) continue
-    const mapping = detectColumns(row)
-    const score = scoreMapping(mapping)
-    if (score > best.score) best = { index: i, score, mapping }
-    if (score === 3) break
-  }
-
-  return best
-}
-
 /**
  * Extrai o valor textual de uma célula por índice de coluna (0-indexed).
  * @param {Array<*>} row
@@ -233,7 +167,6 @@ function cleanText(s) {
  *
  * @param {Array<Array<*>>} dataRows - linhas de dados (sem o cabeçalho), 0-indexed por coluna
  * @param {{ nome:number|null, telefone:number|null, serie:number|null }} mapping
- * @param {{ headerRowNumber?: number }} [opts] - número 1-based da linha de cabeçalho no Excel
  * @returns {{
  *   entries: Array<{ telefone:string, telefoneNormalizado:string, phoneKey:string, nome:string, tags:string[], nomesConflitantes:string[], linhas:number[] }>,
  *   ignored: Array<{ linha:number, nome:string, telefone:string, serie:string, motivo:string }>,
@@ -241,10 +174,9 @@ function cleanText(s) {
  *   stats: { totalLinhas:number, validas:number, ignoradas:number, telefonesUnicos:number, conflitos:number }
  * }}
  */
-function planImport(dataRows, mapping, opts) {
+function planImport(dataRows, mapping) {
   const rows = Array.isArray(dataRows) ? dataRows : []
   const map = mapping || {}
-  const headerRowNumber = Number(opts?.headerRowNumber) > 0 ? Math.floor(Number(opts.headerRowNumber)) : 1
 
   const ignored = []
   // Mapa por chave de telefone → agregação do contato
@@ -252,7 +184,7 @@ function planImport(dataRows, mapping, opts) {
 
   let ordinal = 0 // preserva ordem de primeira aparição
   rows.forEach((row, i) => {
-    const linha = headerRowNumber + 1 + i // linha humana no Excel (cabeçalho + offset)
+    const linha = i + 2 // +1 pelo header, +1 porque humanos contam a partir de 1
     const nome = cleanText(valueAt(row, map.nome))
     const telefoneRaw = cleanText(valueAt(row, map.telefone))
     const serie = cleanText(valueAt(row, map.serie))
@@ -344,11 +276,9 @@ function nomesIguais(a, b) {
 
 module.exports = {
   MAX_DATA_ROWS,
-  HEADER_SCAN_ROWS,
   normalizeHeader,
   cellToString,
   detectColumns,
-  findHeaderRow,
   planImport,
   COLUMN_ALIASES,
 }
