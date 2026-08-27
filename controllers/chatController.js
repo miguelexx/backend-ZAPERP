@@ -3576,6 +3576,7 @@ exports.vincularClienteConversa = async (req, res) => {
       departamento_id: conversa.departamento_id,
     }
 
+    const io = req.app?.get?.('io') || null
     if (io) {
       emitirConversaAtualizada(io, company_id, conversa_id, payload, { skipAtualizarConversa: true })
     }
@@ -3591,11 +3592,29 @@ exports.vincularClienteConversa = async (req, res) => {
 // Nome exibido do contato (conversa + cliente vinculado) — PUT /chats/:id/nome-contato
 // =====================================================
 exports.atualizarNomeContato = async (req, res) => {
+  const conversa_id = Number(req.params.id)
+  const company_id = Number(req.user?.company_id)
+  const user_id = req.user?.id
+  const role = req.user?.perfil
+  let gravouConversa = false
+  let payload = null
+  let clienteAtualizado = null
+
+  const responderOk = () => {
+    if (res.headersSent) return
+    return res.json({
+      ok: true,
+      conversa: payload,
+      cliente: clienteAtualizado,
+    })
+  }
+
   try {
-    const conversa_id = Number(req.params.id)
-    const { company_id, id: user_id, perfil: role } = req.user
     if (!Number.isFinite(conversa_id) || conversa_id <= 0) {
       return res.status(400).json({ error: 'ID da conversa inválido' })
+    }
+    if (!Number.isFinite(company_id) || company_id <= 0) {
+      return res.status(401).json({ error: 'Tenant inválido' })
     }
 
     const nomeRaw = req.body?.nome != null ? String(req.body.nome) : ''
@@ -3603,7 +3622,14 @@ exports.atualizarNomeContato = async (req, res) => {
     if (!nome) {
       return res.status(400).json({ error: 'Informe um nome válido para o contato.' })
     }
-    if (isBadName(nome)) {
+    let nomeInvalido = false
+    try {
+      nomeInvalido = isBadName(nome)
+    } catch (badNameErr) {
+      console.error('[atualizarNomeContato] isBadName', badNameErr)
+      nomeInvalido = false
+    }
+    if (nomeInvalido) {
       return res.status(400).json({ error: 'Nome inválido. Use o nome do contato, não apenas números.' })
     }
 
@@ -3611,7 +3637,7 @@ exports.atualizarNomeContato = async (req, res) => {
       .from('conversas')
       .select('id, company_id, cliente_id, tipo, telefone, nome_contato_cache, atendente_id, status_atendimento')
       .eq('id', conversa_id)
-      .eq('company_id', Number(company_id))
+      .eq('company_id', company_id)
       .maybeSingle()
 
     if (errConv) return res.status(500).json({ error: errConv.message })
@@ -3620,7 +3646,6 @@ exports.atualizarNomeContato = async (req, res) => {
       return res.status(400).json({ error: 'Não é possível renomear contato em conversa de grupo.' })
     }
 
-    // Permissão: atendente responsável pela conversa, supervisor ou admin podem renomear
     const isAdmin = role === 'admin' || role === 'supervisor'
     const isAtendente = conversa.atendente_id != null && Number(conversa.atendente_id) === Number(user_id)
     if (!isAdmin && !isAtendente) {
@@ -3631,31 +3656,13 @@ exports.atualizarNomeContato = async (req, res) => {
       .from('conversas')
       .update({ nome_contato_cache: nome })
       .eq('id', conversa_id)
-      .eq('company_id', Number(company_id))
+      .eq('company_id', company_id)
 
     if (errCache) return res.status(500).json({ error: errCache.message })
+    gravouConversa = true
 
-    let clienteAtualizado = null
     const clienteId = conversa.cliente_id != null ? Number(conversa.cliente_id) : null
-    if (clienteId) {
-      const { data: cli, error: errCli } = await supabase
-        .from('clientes')
-        .update({ nome, atualizado_em: new Date().toISOString() })
-        .eq('id', clienteId)
-        .eq('company_id', Number(company_id))
-        .select('id, nome, telefone, email, empresa, observacoes, foto_perfil')
-        .maybeSingle()
-
-      if (errCli) {
-        if (errCli.code === '23505') {
-          return res.status(409).json({ error: 'Já existe um cliente com este número de telefone.' })
-        }
-        return res.status(500).json({ error: errCli.message })
-      }
-      clienteAtualizado = cli
-    }
-
-    const payload = {
+    payload = {
       id: conversa_id,
       contato_nome: nome,
       nome_contato_cache: nome,
@@ -3663,17 +3670,55 @@ exports.atualizarNomeContato = async (req, res) => {
       ...(clienteId ? { cliente_id: clienteId } : {}),
     }
 
-    if (io) {
-      emitirConversaAtualizada(io, company_id, conversa_id, payload, { skipAtualizarConversa: true })
+    if (clienteId) {
+      try {
+        const first = await supabase
+          .from('clientes')
+          .update({ nome, atualizado_em: new Date().toISOString() })
+          .eq('id', clienteId)
+          .eq('company_id', company_id)
+          .select('id, nome, telefone, email, empresa, observacoes, foto_perfil')
+          .maybeSingle()
+
+        let cli = first.data
+        let errCli = first.error
+
+        if (errCli) {
+          const retry = await supabase
+            .from('clientes')
+            .update({ nome })
+            .eq('id', clienteId)
+            .eq('company_id', company_id)
+            .select('id, nome, telefone, email, empresa, observacoes, foto_perfil')
+            .maybeSingle()
+          cli = retry.data
+          errCli = retry.error
+        }
+
+        if (errCli) {
+          console.error('[atualizarNomeContato] cliente', errCli)
+        } else {
+          clienteAtualizado = cli
+        }
+      } catch (cliErr) {
+        console.error('[atualizarNomeContato] cliente', cliErr)
+      }
     }
 
-    return res.json({
-      ok: true,
-      conversa: payload,
-      cliente: clienteAtualizado,
-    })
+    try {
+      const io = req.app?.get?.('io') || null
+      if (io) {
+        emitirConversaAtualizada(io, company_id, conversa_id, payload, { skipAtualizarConversa: true })
+      }
+    } catch (emitErr) {
+      console.error('[atualizarNomeContato] emit', emitErr)
+    }
+
+    return responderOk()
   } catch (err) {
     console.error('[atualizarNomeContato]', err)
+    if (gravouConversa && payload) return responderOk()
+    if (res.headersSent) return
     return res.status(500).json({ error: 'Erro ao atualizar nome do contato' })
   }
 }

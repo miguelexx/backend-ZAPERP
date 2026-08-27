@@ -188,3 +188,22 @@ frontend/docs/ai-handoff/  ← série separada (frontend)
 ```
 
 Ao trabalhar no frontend, ler `frontend/docs/ai-handoff/00-LEIA-PRIMEIRO.md`, não os docs do backend.
+
+---
+
+## 16. `io` não existe no escopo — pegar de `req.app.get('io')`
+
+**Armadilha:** copiar `if (io) emitirConversaAtualizada(...)` de outro handler sem declarar `const io = req.app.get('io')`.
+
+Em `atualizarNomeContato` / `vincularClienteConversa` isso gerava `ReferenceError` **depois** do UPDATE no banco: a API voltava 500 (`Erro ao atualizar nome do contato`) e o frontend não pintava o nome novo, embora o cache já tivesse gravado.
+
+```js
+// ❌ ERRADO
+if (io) emitirConversaAtualizada(io, company_id, conversa_id, payload)
+
+// ✅ CORRETO
+const io = req.app?.get?.('io') || null
+if (io) emitirConversaAtualizada(io, company_id, conversa_id, payload, { skipAtualizarConversa: true })
+```
+
+Falha de emit **não** pode virar 500 depois que o nome já foi persistido.

@@ -29,6 +29,7 @@ const mockSyncContato = jest.fn()
 let mockCrmEnabled = true
 jest.mock('../services/crmSyncService', () => ({
   isEnabled: () => mockCrmEnabled,
+  isCrmError: (v) => v != null && typeof v === 'object' && v._crmError === true,
   syncLead: (...a) => mockSyncLead(...a),
   syncContato: (...a) => mockSyncContato(...a),
 }))
@@ -177,5 +178,15 @@ describe('POST /api/crm/leads/from-conversa/:conversaId', () => {
       .post('/api/crm/leads/from-conversa/10')
       .set('Authorization', `Bearer ${authToken}`)
     expect(res.status).toBe(502)
+  })
+
+  it('502 quando o CRM retorna _crmError (com retry)', async () => {
+    mockConversaRow = { id: 10, tipo: 'individual', telefone: '5511999', cliente_id: null }
+    mockSyncLead.mockResolvedValue({ _crmError: true, status: 500, detail: 'Internal Server Error' })
+    const res = await request(app)
+      .post('/api/crm/leads/from-conversa/10')
+      .set('Authorization', `Bearer ${authToken}`)
+    expect(res.status).toBe(502)
+    expect(mockSyncLead).toHaveBeenCalledTimes(2) // retry automático
   })
 })

@@ -73,7 +73,7 @@ Todas as operações autenticadas devem limitar consultas por `req.user.company_
 | `POST /chats/:id/mensagens/sync-old` | `carregarMensagensAntigasContato`; A | Aciona sincronização de histórico. |
 | `DELETE /chats/:id/mensagens/:mensagem_id`, `POST/DELETE .../reacao` | `excluirMensagem/enviarReacaoMensagem/removerReacaoMensagem`; A | Chama provider quando necessário, atualiza mensagem/socket. |
 | `POST .../:mensagem_id/retry-text`, `/retry-media` | `reenviarTextoMensagem/reenviarMidiaMensagem`; A | Reenvio explícito; risco de duplicidade exige conferir estado/provider. |
-| `PUT /chats/:id/cliente`, `/vincular-cliente`, `/observacao`, `/nome-contato`; `PATCH /chats/:id/prefs` | `chatController`; A | Atualiza relações/metadados e emite conversa/contato atualizado. |
+| `PUT /chats/:id/cliente`, `/vincular-cliente`, `/observacao`, `/nome-contato`; `PATCH /chats/:id/prefs` | `chatController`; A | `nome-contato` grava `conversas.nome_contato_cache` + `clientes.nome` (se vinculado) e emite `conversa_atualizada`. Sempre obter `io` via `req.app.get('io')` antes de emitir — variável `io` solta dá 500 depois do UPDATE. |
 | `POST /chats/:id/limpar-mensagens`, `DELETE /chats/:id` | `chatController`; A+AD+D | Operações destrutivas tenant-scoped. |
 | `GET /conversas/minhas-pendencias` | `minhasPendenciasController`; A | Contadores/lista do usuário autenticado. |
 | `GET /print/conversas/:conversaId` | `printController`; A | Gera representação imprimível; não altera banco. |

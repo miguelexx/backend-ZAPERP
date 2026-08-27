@@ -30,6 +30,7 @@ const mockSyncContato = jest.fn()
 let mockCrmEnabled = true
 jest.mock('../services/crmSyncService', () => ({
   isEnabled: () => mockCrmEnabled,
+  isCrmError: (v) => v != null && typeof v === 'object' && v._crmError === true,
   listEtapas: (...a) => mockListEtapas(...a),
   syncLead: (...a) => mockSyncLead(...a),
   syncContato: (...a) => mockSyncContato(...a),

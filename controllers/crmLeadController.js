@@ -121,7 +121,7 @@ async function enviarLeadDaConversa(req, res) {
       })
     }
 
-    const leadRes = await crmSync.syncLead({
+    const leadPayload = {
       empresaId: companyId,
       leadId: conversaId,
       nome,
@@ -132,10 +132,26 @@ async function enviarLeadDaConversa(req, res) {
       observacoes,
       etapaId,
       etapaNome,
-    })
+    }
 
-    // syncLead é fire-and-forget: retorna null em falha de comunicação. Como já
-    // validamos isEnabled() acima, null aqui = o CRM não respondeu de fato.
+    let leadRes = await crmSync.syncLead(leadPayload)
+
+    // Retry automático: se a primeira tentativa falhou, tenta mais uma vez.
+    if (crmSync.isCrmError(leadRes)) {
+      console.warn('[crmLead] Primeira tentativa falhou, retentando syncLead…')
+      leadRes = await crmSync.syncLead(leadPayload)
+    }
+
+    if (crmSync.isCrmError(leadRes)) {
+      const detail = leadRes.detail || ''
+      const status = leadRes.status || 0
+      console.error(`[crmLead] CRM rejeitou lead: status=${status} detail=${detail}`)
+      const msgUsuario = status === 0
+        ? 'Não foi possível conectar ao CRM Avançado. Verifique sua conexão e tente novamente.'
+        : `O CRM Avançado retornou erro (${status}). Tente novamente.`
+      return res.status(502).json({ error: msgUsuario })
+    }
+
     if (leadRes === null) {
       return res.status(502).json({ error: 'O CRM Avançado não respondeu. Tente novamente.' })
     }
@@ -183,6 +199,10 @@ async function listarEtapasCrm(req, res) {
 
   try {
     const raw = await crmSync.listEtapas(companyId)
+
+    if (crmSync.isCrmError(raw)) {
+      return res.status(200).json({ etapas: [], disponivel: false, pipeline_nome: null })
+    }
 
     // Aceita { etapas: [...] } ou um array direto; normaliza cada etapa.
     const lista = Array.isArray(raw) ? raw : Array.isArray(raw?.etapas) ? raw.etapas : []

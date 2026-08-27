@@ -36,15 +36,18 @@
 // do inbound nem do cadastro de cliente.
 const TIMEOUT_MS = 12000
 
+// CRM_API_URL aponta para o backend da API (ex.: https://crm-zap-api.wmsistemas.inf.br).
+// Se não configurado, usa CRM_AVANCADO_URL como fallback (configuração legada de 1 domínio só).
+// CRM_AVANCADO_URL é reservado para o redirect SSO no browser (frontend SPA).
 function baseUrl() {
-  return (process.env.CRM_AVANCADO_URL || '').replace(/\/+$/, '')
+  return (process.env.CRM_API_URL || process.env.CRM_AVANCADO_URL || '').replace(/\/+$/, '')
 }
 
 function secret() {
   return process.env.ZAP_SSO_SECRET || ''
 }
 
-/** Integração habilitada só quando as duas variáveis existem (igual ao SSO). */
+/** Integração habilitada só quando URL da API e segredo existem. */
 function isEnabled() {
   return !!(baseUrl() && secret())
 }
@@ -106,15 +109,13 @@ async function post(path, body) {
     if (!res.ok) {
       let detalhe = ''
       try { detalhe = await res.text() } catch (_) {}
-      // URL completa + status + corpo: permite diferenciar 404 (rota inexistente)
-      // de 401 (segredo errado) de 5xx (erro interno do CRM) direto no pm2 logs.
       console.error(`[CRM Sync] POST ${url} respondeu ${res.status}:`, detalhe.slice(0, 500))
-      return null
+      return { _crmError: true, status: res.status, detail: detalhe.slice(0, 500) }
     }
     try { return await res.json() } catch (_) { return { ok: true } }
   } catch (err) {
     console.error(`[CRM Sync] Falha ao chamar POST ${url}:`, reasonFromErr(err))
-    return null
+    return { _crmError: true, status: 0, detail: reasonFromErr(err) }
   }
 }
 
@@ -127,13 +128,15 @@ async function get(path) {
       headers: headers(),
     })
     if (!res.ok) {
-      console.error(`[CRM Sync] GET ${url} respondeu ${res.status}`)
-      return null
+      let detalhe = ''
+      try { detalhe = await res.text() } catch (_) {}
+      console.error(`[CRM Sync] GET ${url} respondeu ${res.status}:`, detalhe.slice(0, 500))
+      return { _crmError: true, status: res.status, detail: detalhe.slice(0, 500) }
     }
     return await res.json()
   } catch (err) {
     console.error(`[CRM Sync] Falha ao chamar GET ${url}:`, reasonFromErr(err))
-    return null
+    return { _crmError: true, status: 0, detail: reasonFromErr(err) }
   }
 }
 
@@ -235,8 +238,13 @@ function resumoEmpresa(empresaId) {
   return get(`/empresa/${encodeURIComponent(id)}/resumo`)
 }
 
+function isCrmError(v) {
+  return v != null && typeof v === 'object' && v._crmError === true
+}
+
 module.exports = {
   isEnabled,
+  isCrmError,
   syncEmpresa,
   syncContato,
   syncLead,

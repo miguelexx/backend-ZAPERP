@@ -137,20 +137,26 @@ describe('resumoEmpresa', () => {
     expect(r.crm.totalLeads).toBe(3)
   })
 
-  test('resposta não-ok → null, sem lançar', async () => {
+  test('resposta não-ok → _crmError, sem lançar', async () => {
     global.fetch.mockResolvedValueOnce({ ok: false, status: 500, json: async () => ({}), text: async () => 'boom' })
-    await expect(crmSync.resumoEmpresa(5)).resolves.toBeNull()
+    const r = await crmSync.resumoEmpresa(5)
+    expect(crmSync.isCrmError(r)).toBe(true)
+    expect(r.status).toBe(500)
   })
 })
 
 describe('fire-and-forget (nunca rejeita)', () => {
-  test('fetch rejeitando (CRM fora do ar) → resolve null, não lança', async () => {
+  test('fetch rejeitando (CRM fora do ar) → resolve _crmError, não lança', async () => {
     global.fetch.mockRejectedValueOnce(new Error('ECONNREFUSED'))
-    await expect(crmSync.syncEmpresa({ empresaId: 1, nome: 'X' })).resolves.toBeNull()
+    const r = await crmSync.syncEmpresa({ empresaId: 1, nome: 'X' })
+    expect(crmSync.isCrmError(r)).toBe(true)
+    expect(r.status).toBe(0)
   })
 
-  test('resposta 4xx do CRM → resolve null, não lança', async () => {
+  test('resposta 4xx do CRM → resolve _crmError, não lança', async () => {
     global.fetch.mockResolvedValueOnce({ ok: false, status: 401, json: async () => ({}), text: async () => 'unauthorized' })
-    await expect(crmSync.syncContato({ empresaId: 1, contatoId: 2, nome: 'Zé' })).resolves.toBeNull()
+    const r = await crmSync.syncContato({ empresaId: 1, contatoId: 2, nome: 'Zé' })
+    expect(crmSync.isCrmError(r)).toBe(true)
+    expect(r.status).toBe(401)
   })
 })
