@@ -19,8 +19,8 @@ const { processContactsPage, parseAgendaContact } = require('./contactSyncServic
 
 // Chunks alinhados ao max da API (~1000); paginação correta via hasMore (ver ultramsg getContacts)
 const PAGE_SIZE = 1000
-/** Evita laço infinito se a API ignorar offset e repetir a mesma página. */
-const MAX_SYNC_PAGES = 200
+/** Evita laço infinito se a API ignorar offset e repetir a mesma página. Configurável. */
+const MAX_SYNC_PAGES = Math.max(1, parseInt(process.env.SYNC_MAX_PAGES, 10) || 200)
 const ERROR_MESSAGE_MAX_LENGTH = 80
 
 /**
@@ -43,7 +43,7 @@ async function syncViaContactsApi(company_id) {
     return { mode: 'contacts_api', totalFetched: 0, inserted: 0, updated: 0, skipped: 0, errors: ['getContacts não disponível'] }
   }
 
-  const stats = { totalFetched: 0, inserted: 0, updated: 0, skipped: 0, errors: [] }
+  const stats = { totalFetched: 0, inserted: 0, updated: 0, skipped: 0, errors: [], truncado: false }
   const opts = { companyId: company_id }
 
   let page = 1
@@ -52,8 +52,9 @@ async function syncViaContactsApi(company_id) {
 
   while (hasMore) {
     if (page > MAX_SYNC_PAGES) {
+      stats.truncado = true
       stats.errors.push(
-        `Limite de ${MAX_SYNC_PAGES} páginas de agenda atingido (proteção). Sincronização progressiva pode continuar o restante.`
+        `Limite de ${MAX_SYNC_PAGES} páginas de agenda atingido (proteção). Ajuste SYNC_MAX_PAGES e rode novamente para continuar o restante.`
       )
       break
     }
@@ -286,7 +287,8 @@ async function syncContacts(company_id) {
     inserted: result.inserted,
     updated: result.updated,
     skipped: result.skipped,
-    errors: result.errors
+    errors: result.errors,
+    truncado: result.truncado === true
   }
 }
 

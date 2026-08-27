@@ -296,10 +296,9 @@ async function mergeAndReturnCliente(supabaseClient, company_id, existente, phon
     )
     if (bestNome && bestNome !== (existente.nome || '')) updates.nome = bestNome
   }
-  if (!updates.nome && (!existente.nome || !String(existente.nome).trim())) {
-    const numericDisplay = String(phone).replace(/\D/g, '')
-    if (numericDisplay) updates.nome = numericDisplay
-  }
+  // (Removido) NÃO preencher nome com o telefone quando o contato está sem nome.
+  // O campo nome deve permanecer NULL; a exibição cai para pushname/telefone via
+  // getDisplayName(). Antes, isso gravava o número no nome (contato "556692307008").
   if (fields.pushname !== undefined && fields.pushname != null && String(fields.pushname).trim()) {
     updates.pushname = String(fields.pushname).trim()
   }
@@ -643,7 +642,10 @@ async function getOrCreateCliente(supabaseClient, company_id, phone, fields = {}
   // 4) INSERT — cada empresa tem seus próprios clientes (UNIQUE company_id + telefone).
   // Prioridade: name (salvo no celular) > pushname (perfil WhatsApp) > telefone
   const nomeRaw = (fields.nome && String(fields.nome).trim()) || (fields.pushname && String(fields.pushname).trim())
-  const nome = (nomeRaw && !isBadName(nomeRaw)) ? nomeRaw : telefoneCanonico || null
+  // Sem nome válido → nome fica NULL. NUNCA gravar o telefone como nome: a exibição
+  // já resolve nome || pushname || telefone via getDisplayName(); o banco não deve
+  // nascer com o número no campo nome (poluía a lista de Clientes).
+  const nome = (nomeRaw && !isBadName(nomeRaw)) ? nomeRaw : null
   const pushname = (fields.pushname !== undefined && fields.pushname != null && String(fields.pushname).trim()) ? String(fields.pushname).trim() : null
   const insertData = {
     telefone: telefoneCanonico,

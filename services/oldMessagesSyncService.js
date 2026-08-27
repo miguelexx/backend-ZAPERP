@@ -384,7 +384,7 @@ async function createConversationForChat({ company_id, whatsapp_instance_id, wha
 
   if (!isGroup) {
     const cliente = await getOrCreateCliente(supabase, company_id, phone, {
-      nome: nome || phone,
+      nome: nome || undefined, // nunca usar o telefone como nome; sem nome fica NULL
       nomeSource: 'old_messages_sync',
       pushname: nome || undefined,
       foto_perfil: foto || undefined,

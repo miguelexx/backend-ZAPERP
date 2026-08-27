@@ -94,11 +94,13 @@ async function syncFotosProgressiva(company_id, opts = {}) {
       const fotoFinal = (fotoUrl && String(fotoUrl).startsWith('http') ? fotoUrl : null) || metaImg
 
       const updates = {}
-      if (missingName || metaNome) {
-        const candidate = metaNome || (missingName ? phone : null)
-        const { name: bestNome } = chooseBestName(nomeDb || null, candidate, 'syncUltramsg', { fromMe: false, company_id: cid, telefoneTail: phone.slice(-6) })
+      // Só grava nome quando a API trouxe um nome real; NUNCA usar o telefone como nome.
+      if (metaNome) {
+        const { name: bestNome } = chooseBestName(nomeDb || null, metaNome, 'syncUltramsg', { fromMe: false, company_id: cid, telefoneTail: phone.slice(-6) })
         if (bestNome && bestNome !== nomeDb) updates.nome = bestNome
-        else if (missingName) updates.nome = phone
+      } else if (nomeDb && nomeDb === phone) {
+        // Limpa legado: contatos que nasceram com o telefone gravado no campo nome.
+        updates.nome = null
       }
       if (!pushDb && metaPush) updates.pushname = metaPush
       if (fotoFinal) updates.foto_perfil = fotoFinal

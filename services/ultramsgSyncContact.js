@@ -145,12 +145,12 @@ async function syncUltraMsgContact(chatIdOrPhone, companyId, opts = {}) {
       ? (profilePicUrl || imgUrl || null)
       : null
 
-    const telefoneFormatado = telefone.replace(/\D/g, '').length >= 10 ? telefone : null
-
     result = {
       chatId,
       telefone,
-      nome: nomeFromApi || telefoneFormatado,
+      // Sem nome real na API → null (nunca devolver o telefone como "nome"; os
+      // chamadores fazem o fallback de exibição por conta própria via getDisplayName).
+      nome: nomeFromApi || null,
       pushname: pushnameFromApi || null,
       foto_perfil: fotoFromApi || null
     }

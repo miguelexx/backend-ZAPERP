@@ -554,13 +554,22 @@ async function runContactSyncFull(company_id, opts = {}) {
     // 2. Buscar TODOS os contatos da API, percorrendo páginas até hasMore=false.
     //    UltraMsg tipicamente devolve tudo na página 1, mas o loop garante que
     //    nenhum contato seja perdido caso a API tenha limite interno e retorne hasMore.
-    const MAX_FETCH_PAGES = 50  // teto de segurança (50 x 10000 = 500000 contatos)
+    // Teto de segurança configurável (padrão 50 × 10000 = 500 mil contatos).
+    const MAX_FETCH_PAGES = Math.max(1, parseInt(process.env.SYNC_MAX_FETCH_PAGES, 10) || 50)
     let allContacts = []
     let fetchPage = 1
     let keepFetching = true
     let totalAgendaRaw = 0
+    let fetchTruncado = false
 
-    while (keepFetching && fetchPage <= MAX_FETCH_PAGES) {
+    while (keepFetching) {
+      if (fetchPage > MAX_FETCH_PAGES) {
+        // A agenda ainda tinha mais páginas (hasMore=true) mas batemos no teto.
+        fetchTruncado = true
+        console.warn(`[CONTACT-SYNC] empresa=${company_id} atingiu MAX_FETCH_PAGES=${MAX_FETCH_PAGES}; a agenda pode não ter sido lida por completo. Ajuste SYNC_MAX_FETCH_PAGES e rode novamente.`)
+        break
+      }
+
       const gcr = await provider.getContacts(fetchPage, 10000, { companyId: company_id })
       const pageData = Array.isArray(gcr?.data) ? gcr.data : []
       allContacts = allContacts.concat(pageData)
@@ -686,7 +695,8 @@ async function runContactSyncFull(company_id, opts = {}) {
       totalDuplicadosNoLote,
       totalConflitados,
       totalClientesBanco: Number(totalClientesBanco || 0),
-      lotes: loteNum - 1
+      lotes: loteNum - 1,
+      truncado: fetchTruncado
     })
 
     return {
@@ -701,7 +711,12 @@ async function runContactSyncFull(company_id, opts = {}) {
       totalDuplicadosNoLote,
       totalConflitados,
       totalClientesBanco: Number(totalClientesBanco || 0),
-      paginas: loteNum - 1
+      paginas: loteNum - 1,
+      // true = batemos no teto de páginas e a agenda pode não ter vindo inteira.
+      truncado: fetchTruncado,
+      aviso: fetchTruncado
+        ? 'A agenda é muito grande e não foi lida por completo nesta execução. Clique em "Sincronizar" novamente para continuar.'
+        : null
     }
   } catch (e) {
     const msg = e?.message || String(e)

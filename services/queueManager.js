@@ -248,7 +248,9 @@ async function processJob(job, io = null) {
           total_contatos: r.totalProcessados || 0,
           criados: r.totalCriados || 0,
           atualizados: r.totalAtualizados || 0,
-          fotos_atualizadas: 0
+          fotos_atualizadas: 0,
+          truncado: r.truncado === true,
+          aviso: r.aviso || null
         })
       }
       if (io && job.tipo === JOB_TIPOS.SYNC_FOTOS && result.resultado) {

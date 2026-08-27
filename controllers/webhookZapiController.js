@@ -4006,7 +4006,11 @@ exports.receberZapi = async (req, res) => {
           const telefoneTail = String(syncPhone).replace(/\D/g, '').slice(-6) || null
           const { name: bestNome } = chooseBestName(current?.nome, synced?.nome, 'syncUltramsg', { fromMe: false, company_id, telefoneTail })
           if (bestNome && bestNome !== (current?.nome || '')) up.nome = bestNome
-          else if (!current?.nome || !String(current.nome).trim()) up.nome = (synced.nome && String(synced.nome).trim() && !isBadName(synced.nome)) ? String(synced.nome).trim() : syncPhone
+          else if ((!current?.nome || !String(current.nome).trim()) && synced.nome && String(synced.nome).trim() && !isBadName(synced.nome)) {
+            up.nome = String(synced.nome).trim()
+          }
+          // Sem nome válido do sync e cliente sem nome → NÃO gravar (nome permanece NULL).
+          // Nunca usar o telefone como nome; getDisplayName() já faz o fallback só na exibição.
           const pushnameVazio = !current?.pushname || !String(current.pushname).trim()
           const fotoVazia = !current?.foto_perfil || !String(current.foto_perfil).trim()
           if (pushnameVazio && synced.pushname !== undefined) up.pushname = synced.pushname

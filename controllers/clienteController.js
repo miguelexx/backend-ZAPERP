@@ -3,7 +3,7 @@ const { getDisplayName } = require('../helpers/contactEnrichment');
 const { getCanonicalPhone, getCanonicalPhoneAnyIntl, getOrCreateCliente } = require('../helpers/conversationSync');
 const { ensureConversaForCliente } = require('../services/conversaAbrirClienteService');
 const { executarAssumirConversa } = require('../services/conversaAssumirInternoService');
-const { buildClienteListagemSearchOr } = require('../helpers/chatSearchHelper');
+const { buildClienteListagemSearchOr, buildPhoneSearchTerms } = require('../helpers/chatSearchHelper');
 const crmSync = require('../services/crmSyncService');
 const { syncUltraMsgContact } = require('../services/ultramsgSyncContact');
 
@@ -57,6 +57,46 @@ exports.listarClientes = async (req, res) => {
     const hasPageParam = Object.prototype.hasOwnProperty.call(req.query || {}, 'page')
 
     const termoBusca = palavra && String(palavra).trim() ? String(palavra).trim() : null
+
+    // Busca por nome/telefone: usa a RPC unaccent (acento-insensível, um só round-trip
+    // com o total via count-over-window). Se a RPC/migration ainda não estiver aplicada,
+    // cai no caminho ILIKE legado abaixo — nunca quebra a listagem. Só para busca; a
+    // listagem "todos" (sem termo) segue o caminho rápido por índice.
+    if (termoBusca) {
+      try {
+        const phoneVariacoes = buildPhoneSearchTerms(termoBusca)
+        const rpcLimit = Math.max(limitNum, 5000)
+        const { data: rpcRows, error: rpcErr } = await supabase.rpc('buscar_clientes_listagem', {
+          p_company_id: cid,
+          p_termo: termoBusca,
+          p_phone_variacoes: phoneVariacoes.length ? phoneVariacoes : null,
+          p_limit: rpcLimit,
+          p_offset: 0,
+        })
+        if (rpcErr) throw rpcErr
+        const rows = Array.isArray(rpcRows) ? rpcRows : []
+        const totalReal = rows.length > 0 ? (Number(rows[0].total) || rows.length) : 0
+        const clientes = rows.map((c) => ({
+          id: c.id,
+          telefone: c.telefone,
+          wa_id: c.wa_id,
+          nome: getDisplayName(c) || null,
+          pushname: c.pushname || null,
+          observacoes: c.observacoes,
+          foto_perfil: c.foto_perfil || null,
+          email: c.email || null,
+          empresa: c.empresa || null,
+          ultimo_contato: c.ultimo_contato || null,
+          criado_em: c.criado_em,
+        }))
+        res.setHeader('X-Total-Count', String(totalReal))
+        res.setHeader('Access-Control-Expose-Headers', 'X-Total-Count')
+        return res.status(200).json(clientes)
+      } catch (rpcFail) {
+        console.warn('[listarClientes] RPC buscar_clientes_listagem indisponível, usando ILIKE legado:', rpcFail?.message || rpcFail)
+        // segue para o caminho legado abaixo
+      }
+    }
 
     // Query de contagem real (sem limite de linhas) — roda em paralelo com a listagem
     let countQuery = supabase
