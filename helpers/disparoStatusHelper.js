@@ -34,17 +34,17 @@ function statusEstaCongelado(status) {
   return STATUS_CONGELADOS.has(String(status || ''))
 }
 
-/** Após confirmação, voltar à edição só é permitido em pronta/agendada (antes de executar). */
+/** Após confirmação: pronta/agendada, ou pausada (encerra a execução atual e reabre o wizard). */
 function statusPermiteVoltarEdicao(status) {
-  return status === 'pronta' || status === 'agendada'
+  return status === 'pronta' || status === 'agendada' || status === 'pausada'
 }
 
 function mensagemBloqueioEdicao(status) {
-  if (status === 'pronta' || status === 'agendada') {
-    return 'Campanha confirmada e congelada. Use "Voltar para edição" na Revisão para alterar.'
+  if (status === 'pronta' || status === 'agendada' || status === 'pausada') {
+    return 'Campanha confirmada e congelada. Use "Voltar para edição" para alterar.'
   }
-  if (status === 'em_execucao' || status === 'pausada') {
-    return 'Não é possível alterar uma campanha em execução ou pausada.'
+  if (status === 'em_execucao') {
+    return 'Pause a campanha antes de alterar a configuração.'
   }
   if (status === 'concluida' || status === 'cancelada' || status === 'arquivada') {
     return 'Não é possível alterar uma campanha finalizada.'

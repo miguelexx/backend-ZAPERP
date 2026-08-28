@@ -215,6 +215,9 @@ describe('disparoWorker — exports para testes', () => {
     expect(typeof worker.liberarReservas).toBe('function')
     expect(typeof worker.startDisparoWorker).toBe('function')
     expect(typeof worker.stopDisparoWorker).toBe('function')
+    expect(typeof worker.rememberEnvioInstancia).toBe('function')
+    expect(typeof worker.ultimoEnvioConhecido).toBe('function')
+    expect(typeof worker._resetUltimoEnvioLocal).toBe('function')
     expect(typeof worker._setIo).toBe('function')
   })
 })
@@ -225,6 +228,7 @@ describe('disparoWorker — errorCodigo EXCLUIDO sem retry', () => {
 
   beforeEach(() => {
     jest.clearAllMocks()
+    worker._resetUltimoEnvioLocal()
     updatePayloads = []
     installRpcMock({
       disparo_try_lock_instancia: () => ({ data: true, error: null }),
@@ -310,5 +314,24 @@ describe('disparoWorker — errorCodigo EXCLUIDO sem retry', () => {
     expect(final).toBeTruthy()
     expect(final.erro_classificacao).toBe('permanente')
     expect(final.optout_em).toBeUndefined()
+  })
+})
+
+describe('disparoWorker — último envio em memória no mesmo tick', () => {
+  beforeEach(() => {
+    worker._resetUltimoEnvioLocal()
+  })
+
+  it('combina memória local com o banco e fica com o mais recente', () => {
+    expect(worker.ultimoEnvioConhecido(5, null)).toBeNull()
+    worker.rememberEnvioInstancia(5, '2026-08-28T18:59:30.000Z')
+    expect(worker.ultimoEnvioConhecido(5, null)).toBe('2026-08-28T18:59:30.000Z')
+    expect(worker.ultimoEnvioConhecido(5, '2026-08-28T18:59:10.000Z')).toBe('2026-08-28T18:59:30.000Z')
+    expect(worker.ultimoEnvioConhecido(5, '2026-08-28T19:00:00.000Z')).toBe('2026-08-28T19:00:00.000Z')
+  })
+
+  it('não mistura instâncias', () => {
+    worker.rememberEnvioInstancia(5, '2026-08-28T18:59:30.000Z')
+    expect(worker.ultimoEnvioConhecido(9, null)).toBeNull()
   })
 })

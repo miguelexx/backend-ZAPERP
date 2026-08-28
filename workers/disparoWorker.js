@@ -27,6 +27,26 @@ let io = null // worker standalone: sem Socket.IO a menos que conecte depois
 let loopTimer = null
 let heartbeatTimer = null
 let processing = false
+/** Último envio por instância neste processo — o lote do tick não pode depender só do banco. */
+const ultimoEnvioLocalPorInstancia = new Map()
+
+function rememberEnvioInstancia(instanciaId, iso) {
+  const id = Number(instanciaId)
+  if (!id || !iso) return
+  const prev = ultimoEnvioLocalPorInstancia.get(id)
+  if (!prev || iso > prev) ultimoEnvioLocalPorInstancia.set(id, iso)
+}
+
+function ultimoEnvioConhecido(instanciaId, dbIso) {
+  const mem = ultimoEnvioLocalPorInstancia.get(Number(instanciaId))
+  if (!mem) return dbIso || null
+  if (!dbIso) return mem
+  return mem > dbIso ? mem : dbIso
+}
+
+function _resetUltimoEnvioLocal() {
+  ultimoEnvioLocalPorInstancia.clear()
+}
 
 function heartbeatStatus(extra = {}) {
   if (extra.status) return extra.status
@@ -327,18 +347,19 @@ async function processarItem(item) {
 
     const desdeHora = agora.minus({ minutes: 60 }).toISO()
     const inicioDia = agora.setZone(ctx.limites?.fuso_horario || 'America/Sao_Paulo').startOf('day').toUTC().toISO()
-    const [enviadosHora, enviadosDia, { data: ultimo }] = await Promise.all([
+    const [enviadosHora, enviadosDia, ultimosRes] = await Promise.all([
       contarEnviosJanela(supabase, { companyId: item.company_id, instanciaId: item.instancia_id, desdeIso: desdeHora }),
       contarEnviosJanela(supabase, { companyId: item.company_id, instanciaId: item.instancia_id, desdeIso: inicioDia }),
       supabase.from('disparo_fila_itens')
         .select('enviado_em')
         .eq('company_id', item.company_id)
         .eq('instancia_id', item.instancia_id)
-        .in('status', ['enviada', 'entregue', 'lida'])
+        .not('enviado_em', 'is', null)
         .order('enviado_em', { ascending: false })
-        .limit(1)
-        .maybeSingle(),
+        .limit(1),
     ])
+    const ultimos = ultimosRes?.data
+    const ultimoDb = Array.isArray(ultimos) ? ultimos[0] : ultimos
 
     const gate = podeEnviarAgora({
       limites: ctx.limites,
@@ -346,7 +367,7 @@ async function processarItem(item) {
       instanciaId: item.instancia_id,
       override: ctx.override,
       agoraIso: agora.toISO(),
-      ultimoEnvioIso: ultimo?.enviado_em || null,
+      ultimoEnvioIso: ultimoEnvioConhecido(item.instancia_id, ultimoDb?.enviado_em || null),
       enviadosUltimaHora: enviadosHora,
       enviadosHoje: enviadosDia,
     })
@@ -412,6 +433,7 @@ async function processarItem(item) {
         erro_classificacao: null,
         atualizado_em: new Date().toISOString(),
       }).eq('id', item.id).eq('company_id', item.company_id)
+      rememberEnvioInstancia(item.instancia_id, new Date().toISOString())
 
       emitDisparo(io, item.company_id, EVENTS.ITEM_ATUALIZADO, {
         campanha_id: item.campanha_id,
@@ -694,5 +716,8 @@ module.exports = {
   heartbeatStatus,
   startDisparoWorker,
   stopDisparoWorker,
+  rememberEnvioInstancia,
+  ultimoEnvioConhecido,
+  _resetUltimoEnvioLocal,
   _setIo: (socketIo) => { io = socketIo },
 }

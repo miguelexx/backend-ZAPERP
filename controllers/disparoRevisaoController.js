@@ -25,6 +25,10 @@ const {
 } = require('../helpers/disparoLimitesHelper')
 const { _substituirVariaveis: substituirVariaveis } = require('./disparoVariacoesController')
 const { revalidarInstanciasConectadas } = require('./disparoLimitesController')
+const {
+  encerrarExecucaoAtivaParaReedicao,
+  DisparoFilaError,
+} = require('../services/disparoFilaService')
 
 // ─── Constantes de seleção ───────────────────────────────────────────────────
 
@@ -1275,7 +1279,9 @@ exports.voltarEdicao = async (req, res) => {
 
     if (!statusPermiteVoltarEdicao(campanha.status)) {
       return res.status(422).json({
-        error: 'Não é possível voltar para edição nesta fase da campanha.',
+        error: campanha.status === 'em_execucao'
+          ? 'Pause a campanha antes de voltar para edição.'
+          : 'Não é possível voltar para edição nesta fase da campanha.',
         status: campanha.status,
       })
     }
@@ -1288,6 +1294,21 @@ exports.voltarEdicao = async (req, res) => {
     const motivo =
       String(req.body?.motivo ?? '').trim().slice(0, 500) ||
       'Administrador solicitou retorno à edição.'
+
+    let execucaoEncerrada = null
+    try {
+      execucaoEncerrada = await encerrarExecucaoAtivaParaReedicao({
+        companyId,
+        campanhaId,
+        userId,
+        motivo,
+      })
+    } catch (encErr) {
+      if (encErr instanceof DisparoFilaError && encErr.code === 'EM_EXECUCAO') {
+        return res.status(422).json({ error: encErr.message, status: campanha.status })
+      }
+      throw encErr
+    }
 
     await supabase
       .from('disparo_campanha_revisoes')
@@ -1309,8 +1330,6 @@ exports.voltarEdicao = async (req, res) => {
         confirmada_por: null,
         autorizacao_aceita_em: null,
         autorizacao_texto: null,
-        distribuicao_revisao: true,
-        variacao_revisao: true,
         limites_revisao: true,
         atualizado_em: agora,
       })
@@ -1322,10 +1341,14 @@ exports.voltarEdicao = async (req, res) => {
       ok: true,
       status: 'configurando',
       mensagem:
-        'Confirmação invalidada. As etapas de instâncias, mensagens e limites precisam ser revisadas antes de uma nova confirmação.',
+        execucaoEncerrada?.encerrada
+          ? 'Execução encerrada. Ajuste os limites, confirme essa etapa e publique de novo para gerar uma fila no ritmo configurado.'
+          : 'Confirmação invalidada. Ajuste e confirme os limites de novo antes de publicar a campanha.',
       versao_historico: campanha.versao_atual ?? 0,
       config_hash_historico: campanha.config_hash ?? null,
       motivo,
+      execucao_encerrada: execucaoEncerrada?.encerrada === true,
+      itens_cancelados: execucaoEncerrada?.itens_cancelados ?? 0,
     })
   } catch (err) {
     console.error('[disparo:revisao] voltarEdicao', err)

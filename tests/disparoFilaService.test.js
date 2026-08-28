@@ -12,8 +12,10 @@ const {
   chaveIdempotencia,
   gerarFilaParaCampanha,
   recalcularContadores,
+  montarHorariosFila,
   DisparoFilaError,
 } = require('../services/disparoFilaService')
+const { PERFIS } = require('../helpers/disparoLimitesHelper')
 
 function mockChain(result = { data: null, error: null, count: 0 }) {
   const chain = {}
@@ -62,6 +64,64 @@ const destinatarios = [
     cliente_id: null,
   },
 ]
+
+describe('disparoFilaService — montarHorariosFila', () => {
+  const limites = {
+    ...PERFIS.moderado,
+    intervalo_min_sec: 8,
+    intervalo_max_sec: 8,
+    lote_tamanho: 100,
+    pausa_lote_min_sec: 0,
+    pausa_lote_max_sec: 0,
+    limite_por_hora: 200,
+    limite_por_dia: 2000,
+    fuso_horario: 'America/Sao_Paulo',
+    inicio_modo: 'imediato',
+  }
+
+  it('espaça dois pendentes da mesma instância', () => {
+    const map = montarHorariosFila({
+      campanha: { status: 'pronta' },
+      destinatarios,
+      exclusoes: new Set(),
+      limites,
+      janelas: [],
+      overrides: [],
+    })
+    const t0 = Date.parse(map.get(10))
+    const t1 = Date.parse(map.get(11))
+    expect(Number.isFinite(t0)).toBe(true)
+    expect(Number.isFinite(t1)).toBe(true)
+    expect(t0).not.toBe(t1)
+    expect(Math.abs(t1 - t0)).toBeGreaterThanOrEqual(8000)
+  })
+
+  it('respeita o intervalo mínimo configurado na fila (15s)', () => {
+    const map = montarHorariosFila({
+      campanha: { status: 'pronta' },
+      destinatarios,
+      exclusoes: new Set(),
+      limites: { ...limites, intervalo_min_sec: 15, intervalo_max_sec: 15 },
+      janelas: [],
+      overrides: [],
+    })
+    const gap = Math.abs(Date.parse(map.get(11)) - Date.parse(map.get(10))) / 1000
+    expect(gap).toBeGreaterThanOrEqual(15)
+  })
+
+  it('excluído não consome o ritmo da instância', () => {
+    const map = montarHorariosFila({
+      campanha: { status: 'pronta' },
+      destinatarios,
+      exclusoes: new Set(['5511888776655']),
+      limites,
+      janelas: [],
+      overrides: [],
+    })
+    expect(map.get(10)).toBeTruthy()
+    expect(map.get(11)).toBe(map.get(10))
+  })
+})
 
 describe('disparoFilaService — chaveIdempotencia', () => {
   it('gera chave determinística campanha+versão+destinatário', () => {

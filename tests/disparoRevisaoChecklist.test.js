@@ -62,6 +62,7 @@ describe('disparoStatusHelper', () => {
     expect(statusPermiteEdicao('pronta')).toBe(false)
     expect(statusEstaCongelado('pronta')).toBe(true)
     expect(statusPermiteVoltarEdicao('pronta')).toBe(true)
+    expect(statusPermiteVoltarEdicao('pausada')).toBe(true)
     expect(statusPermiteVoltarEdicao('em_execucao')).toBe(false)
   })
 })

@@ -23,9 +23,11 @@ describe('disparoStatusHelper smoke', () => {
     expect(statusEstaCongelado('configurando')).toBe(false)
   })
 
-  it('voltar edição só pronta/agendada', () => {
+  it('voltar edição: pronta, agendada e pausada', () => {
     expect(statusPermiteVoltarEdicao('pronta')).toBe(true)
     expect(statusPermiteVoltarEdicao('agendada')).toBe(true)
+    expect(statusPermiteVoltarEdicao('pausada')).toBe(true)
+    expect(statusPermiteVoltarEdicao('em_execucao')).toBe(false)
     expect(statusPermiteVoltarEdicao('configurando')).toBe(false)
   })
 })

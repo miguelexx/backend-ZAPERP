@@ -391,9 +391,18 @@ function estaNaJanela(dt, janelas) {
 /**
  * Efetiva config de uma instância (merge com global).
  */
+function sanitizarIntervalosConfig(cfg) {
+  const floor = Math.max(1, Number(LIMITES_TECNICOS.INTERVALO_MIN_PROVEDOR) || 3)
+  const minRaw = Number(cfg.intervalo_min_sec)
+  const maxRaw = Number(cfg.intervalo_max_sec)
+  const min = Math.max(floor, Number.isFinite(minRaw) && minRaw > 0 ? minRaw : floor)
+  const max = Math.max(min, Number.isFinite(maxRaw) && maxRaw > 0 ? maxRaw : min)
+  return { ...cfg, intervalo_min_sec: min, intervalo_max_sec: max }
+}
+
 function efetivarConfigInstancia(globalCfg, instOverride) {
   if (!instOverride || instOverride.herdar_global !== false) {
-    return {
+    return sanitizarIntervalosConfig({
       herdar_global: true,
       limite_por_hora: globalCfg.limite_por_hora,
       limite_por_dia: globalCfg.limite_por_dia,
@@ -403,9 +412,9 @@ function efetivarConfigInstancia(globalCfg, instOverride) {
       pausa_lote_min_sec: globalCfg.pausa_lote_min_sec,
       pausa_lote_max_sec: globalCfg.pausa_lote_max_sec,
       janelas_proprias: false,
-    }
+    })
   }
-  return {
+  return sanitizarIntervalosConfig({
     herdar_global: false,
     limite_por_hora: instOverride.limite_por_hora ?? globalCfg.limite_por_hora,
     limite_por_dia: instOverride.limite_por_dia ?? globalCfg.limite_por_dia,
@@ -415,7 +424,114 @@ function efetivarConfigInstancia(globalCfg, instOverride) {
     pausa_lote_min_sec: instOverride.pausa_lote_min_sec ?? globalCfg.pausa_lote_min_sec,
     pausa_lote_max_sec: instOverride.pausa_lote_max_sec ?? globalCfg.pausa_lote_max_sec,
     janelas_proprias: instOverride.janelas_proprias === true,
+  })
+}
+
+function intervaloEnvioSec(cfg, random = Math.random) {
+  const min = Number(cfg.intervalo_min_sec)
+  const max = Number(cfg.intervalo_max_sec)
+  if (!Number.isFinite(min) || min <= 0) return LIMITES_TECNICOS.INTERVALO_MIN_PROVEDOR
+  if (!Number.isFinite(max) || max <= min) return min
+  const u = typeof random === 'function' ? Number(random()) : 0
+  const ratio = Number.isFinite(u) ? Math.min(1, Math.max(0, u)) : 0
+  return min + (max - min) * ratio
+}
+
+/**
+ * Gera timestamps UTC (ISO) para N envios de uma instância, respeitando
+ * intervalo min/max, pausa de lote, limite hora/dia e janelas semanais.
+ */
+function gerarHorariosDisparo({
+  quantidade,
+  globalCfg,
+  override = null,
+  janelas = [],
+  inicioDt,
+  random = Math.random,
+} = {}) {
+  const cfg = efetivarConfigInstancia(globalCfg || PERFIS.moderado, override)
+  const qty = Math.max(0, Math.floor(Number(quantidade) || 0))
+  const horarios = []
+  if (!qty || !inicioDt || !inicioDt.isValid) return horarios
+
+  const janelasAtivas = (janelas || []).filter((j) => j.ativo !== false)
+  const lote = Math.max(1, Number(cfg.lote_tamanho) || 1)
+  const pausaLoteMin = Number(cfg.pausa_lote_min_sec) || 0
+  const pausaLoteMax = Math.max(pausaLoteMin, Number(cfg.pausa_lote_max_sec) || pausaLoteMin)
+  const pausaLoteMedia = (pausaLoteMin + pausaLoteMax) / 2
+
+  let cursor = inicioDt
+  if (janelasAtivas.length && !estaNaJanela(cursor, janelasAtivas)) {
+    const p = proximoHorarioPermitido(cursor, janelasAtivas)
+    if (p) cursor = p
   }
+
+  let enviados = 0
+  let enviadosNoDia = 0
+  let enviadosNaHora = 0
+  let horaJanelaInicio = cursor
+  let diaAtual = cursor.toISODate()
+  const maxSteps = qty * 50 + 10000
+  let steps = 0
+
+  while (enviados < qty && steps < maxSteps) {
+    steps += 1
+
+    if (cursor.toISODate() !== diaAtual) {
+      diaAtual = cursor.toISODate()
+      enviadosNoDia = 0
+    }
+    if (cursor.diff(horaJanelaInicio, 'minutes').minutes >= 60) {
+      horaJanelaInicio = cursor
+      enviadosNaHora = 0
+    }
+
+    if (janelasAtivas.length && !estaNaJanela(cursor, janelasAtivas)) {
+      const p = proximoHorarioPermitido(cursor, janelasAtivas)
+      if (!p) break
+      cursor = p
+      enviadosNaHora = 0
+      horaJanelaInicio = cursor
+      if (cursor.toISODate() !== diaAtual) {
+        diaAtual = cursor.toISODate()
+        enviadosNoDia = 0
+      }
+      continue
+    }
+
+    if (enviadosNoDia >= cfg.limite_por_dia) {
+      const amanha = cursor.plus({ days: 1 }).startOf('day')
+      cursor = proximoHorarioPermitido(amanha, janelasAtivas) || amanha
+      enviadosNoDia = 0
+      enviadosNaHora = 0
+      horaJanelaInicio = cursor
+      diaAtual = cursor.toISODate()
+      continue
+    }
+
+    if (enviadosNaHora >= cfg.limite_por_hora) {
+      cursor = horaJanelaInicio.plus({ hours: 1 })
+      if (janelasAtivas.length && !estaNaJanela(cursor, janelasAtivas)) {
+        const p = proximoHorarioPermitido(cursor, janelasAtivas)
+        if (p) cursor = p
+      }
+      enviadosNaHora = 0
+      horaJanelaInicio = cursor
+      continue
+    }
+
+    horarios.push(cursor.toUTC().toISO())
+    enviados += 1
+    enviadosNoDia += 1
+    enviadosNaHora += 1
+
+    cursor = cursor.plus({ seconds: intervaloEnvioSec(cfg, random) })
+    if (enviados % lote === 0 && enviados < qty) {
+      cursor = cursor.plus({ seconds: pausaLoteMedia })
+    }
+  }
+
+  return horarios
 }
 
 /**
@@ -678,6 +794,9 @@ module.exports = {
   proximoHorarioPermitido,
   estaNaJanela,
   efetivarConfigInstancia,
+  sanitizarIntervalosConfig,
+  intervaloEnvioSec,
+  gerarHorariosDisparo,
   simularDuracao,
   REGRA_RETENTATIVA,
   DateTime,

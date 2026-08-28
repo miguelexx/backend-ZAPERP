@@ -6,6 +6,12 @@
 const supabase = require('../config/supabase')
 const { getDisparoFlags } = require('../helpers/disparoWorkerConfig')
 const { revalidarInstanciasConectadas } = require('../controllers/disparoLimitesController')
+const {
+  DateTime,
+  PERFIS,
+  FUSO_PADRAO,
+  gerarHorariosDisparo,
+} = require('../helpers/disparoLimitesHelper')
 
 const BATCH_SIZE = 500
 const EXECUCAO_ATIVA = ['aguardando', 'em_execucao', 'pausada']
@@ -80,12 +86,104 @@ async function carregarRevisaoAtiva(campanhaId, companyId, versao) {
 async function carregarLimites(campanhaId, companyId) {
   const { data, error } = await supabase
     .from('disparo_campanha_limites')
-    .select('inicio_modo, agendado_para, fuso_horario')
+    .select('*')
     .eq('campanha_id', campanhaId)
     .eq('company_id', companyId)
     .maybeSingle()
   if (error) throw error
   return data
+}
+
+async function carregarJanelas(campanhaId, companyId) {
+  const { data, error } = await supabase
+    .from('disparo_campanha_janelas')
+    .select('*')
+    .eq('campanha_id', campanhaId)
+    .eq('company_id', companyId)
+  if (error) throw error
+  return data ?? []
+}
+
+async function carregarOverridesInstancia(campanhaId, companyId) {
+  const { data, error } = await supabase
+    .from('disparo_campanha_instancia_limites')
+    .select('*')
+    .eq('campanha_id', campanhaId)
+    .eq('company_id', companyId)
+  if (error) throw error
+  return data ?? []
+}
+
+function limitesEfetivos(row) {
+  return {
+    ...PERFIS.moderado,
+    fuso_horario: FUSO_PADRAO,
+    inicio_modo: 'imediato',
+    ...(row || {}),
+  }
+}
+
+function resolverInicioDisparo(campanha, limites) {
+  const fuso = limites?.fuso_horario || FUSO_PADRAO
+  if (campanha.status === 'agendada' || limites?.inicio_modo === 'agendado') {
+    if (limites?.agendado_para) {
+      const ag = DateTime.fromISO(limites.agendado_para, { zone: 'utc' }).setZone(fuso)
+      if (ag.isValid) return ag
+    }
+  }
+  return DateTime.utc().setZone(fuso)
+}
+
+function janelasDaInstancia(janelas, instanciaId, override) {
+  const lista = janelas || []
+  if (override?.janelas_proprias) {
+    const proprias = lista.filter((j) => Number(j.instancia_id) === Number(instanciaId))
+    if (proprias.length) return proprias
+  }
+  return lista.filter((j) => j.instancia_id == null)
+}
+
+/**
+ * Espaça planejado_para por instância conforme limites da campanha.
+ * Destinatários excluídos ficam no horário base (não entram no ritmo de envio).
+ */
+function montarHorariosFila({ campanha, destinatarios, exclusoes, limites, janelas, overrides }) {
+  const inicio = resolverInicioDisparo(campanha, limites)
+  const overridesByInst = {}
+  for (const o of overrides || []) {
+    if (o?.instancia_id != null) overridesByInst[Number(o.instancia_id)] = o
+  }
+
+  const grupos = new Map()
+  for (const dest of destinatarios || []) {
+    const excluido = exclusoes.has(String(dest.telefone_normalizado))
+    if (excluido) continue
+    const instId = Number(dest.instancia_id)
+    if (!grupos.has(instId)) grupos.set(instId, [])
+    grupos.get(instId).push(dest)
+  }
+
+  const porDestino = new Map()
+  const baseIso = inicio.toUTC().toISO()
+  for (const dest of destinatarios || []) {
+    porDestino.set(dest.id, baseIso)
+  }
+
+  for (const [instId, dests] of grupos) {
+    dests.sort((a, b) => Number(a.id) - Number(b.id))
+    const override = overridesByInst[instId] || null
+    const horarios = gerarHorariosDisparo({
+      quantidade: dests.length,
+      globalCfg: limites,
+      override,
+      janelas: janelasDaInstancia(janelas, instId, override),
+      inicioDt: inicio,
+    })
+    dests.forEach((dest, idx) => {
+      porDestino.set(dest.id, horarios[idx] || baseIso)
+    })
+  }
+  return porDestino
 }
 
 async function carregarDestinatarios(campanhaId, companyId) {
@@ -127,11 +225,7 @@ async function buscarExecucaoAtiva(campanhaId, companyId, versao) {
 }
 
 function resolverPlanejadoPara(campanha, limites) {
-  const agora = new Date().toISOString()
-  if (campanha.status === 'agendada' || limites?.inicio_modo === 'agendado') {
-    if (limites?.agendado_para) return limites.agendado_para
-  }
-  return agora
+  return resolverInicioDisparo(campanha, limites).toUTC().toISO()
 }
 
 async function contarItensPorChaves(chaves) {
@@ -204,15 +298,24 @@ async function gerarFilaParaCampanha({ companyId, campanhaId, userId, dryRun }) 
     }
   }
 
-  const limites = await carregarLimites(campId, cid)
-  const planejadoPara = resolverPlanejadoPara(campanha, limites)
-
+  const limitesRow = await carregarLimites(campId, cid)
+  const limites = limitesEfetivos(limitesRow)
+  const janelas = await carregarJanelas(campId, cid)
+  const overrides = await carregarOverridesInstancia(campId, cid)
   const destinatarios = await carregarDestinatarios(campId, cid)
   if (!destinatarios.length) {
     throw new DisparoFilaError('Nenhum destinatário válido com instância e variação atribuídas.')
   }
 
   const exclusoes = await carregarExclusoesAtivas(cid)
+  const horariosPorDestino = montarHorariosFila({
+    campanha,
+    destinatarios,
+    exclusoes,
+    limites,
+    janelas,
+    overrides,
+  })
 
   const { data: execucao, error: execErr } = await supabase
     .from('disparo_execucoes')
@@ -241,6 +344,7 @@ async function gerarFilaParaCampanha({ companyId, campanhaId, userId, dryRun }) 
   for (const dest of destinatarios) {
     const chave = chaveIdempotencia(campId, versao, dest.id)
     const excluido = exclusoes.has(String(dest.telefone_normalizado))
+    const planejadoPara = horariosPorDestino.get(dest.id) || resolverPlanejadoPara(campanha, limites)
 
     if (excluido) {
       rows.push({
@@ -439,10 +543,98 @@ async function recalcularContadores(execucaoId, companyId) {
   return counts
 }
 
+const ITENS_CANCELAVEIS_REEDICAO = ['pendente', 'reservada']
+
+/**
+ * Encerra execução aguardando/pausada para a campanha voltar ao wizard.
+ * Não cancela a campanha. Itens já enviados permanecem.
+ * Recusa se a execução ainda estiver em_execucao.
+ */
+async function encerrarExecucaoAtivaParaReedicao({ companyId, campanhaId, userId, motivo }) {
+  const cid = Number(companyId)
+  const campId = Number(campanhaId)
+  const { data: exec, error } = await supabase
+    .from('disparo_execucoes')
+    .select('id, status')
+    .eq('campanha_id', campId)
+    .eq('company_id', cid)
+    .in('status', EXECUCAO_ATIVA)
+    .order('id', { ascending: false })
+    .limit(1)
+    .maybeSingle()
+  if (error) throw error
+  if (!exec) return { encerrada: false, execucaoId: null, itens_cancelados: 0 }
+
+  if (exec.status === 'em_execucao') {
+    throw new DisparoFilaError(
+      'Pause a campanha antes de voltar para edição.',
+      'EM_EXECUCAO',
+    )
+  }
+
+  const agora = new Date().toISOString()
+  const { data: itens, error: itensErr } = await supabase
+    .from('disparo_fila_itens')
+    .select('id')
+    .eq('execucao_id', exec.id)
+    .eq('company_id', cid)
+    .in('status', ITENS_CANCELAVEIS_REEDICAO)
+  if (itensErr) throw itensErr
+
+  const ids = (itens ?? []).map((i) => i.id)
+  if (ids.length) {
+    const { error: updItensErr } = await supabase
+      .from('disparo_fila_itens')
+      .update({
+        status: 'cancelada',
+        cancelado_em: agora,
+        worker_id: null,
+        lease_inicio: null,
+        lease_ate: null,
+        atualizado_em: agora,
+      })
+      .eq('execucao_id', exec.id)
+      .eq('company_id', cid)
+      .in('status', ITENS_CANCELAVEIS_REEDICAO)
+    if (updItensErr) throw updItensErr
+  }
+
+  await recalcularContadores(exec.id, cid)
+
+  const { error: updExecErr } = await supabase
+    .from('disparo_execucoes')
+    .update({
+      status: 'cancelada',
+      cancelado_por: userId ?? null,
+      finalizado_em: agora,
+      atualizado_em: agora,
+    })
+    .eq('id', exec.id)
+    .eq('company_id', cid)
+  if (updExecErr) throw updExecErr
+
+  await registrarEvento({
+    companyId: cid,
+    execucaoId: exec.id,
+    campanhaId: campId,
+    tipo: 'cancelada',
+    payload: {
+      motivo: motivo || 'reedicao',
+      itens_cancelados: ids.length,
+      origem: 'voltar_edicao',
+    },
+    usuarioId: userId ?? null,
+  })
+
+  return { encerrada: true, execucaoId: exec.id, itens_cancelados: ids.length }
+}
+
 module.exports = {
   chaveIdempotencia,
   gerarFilaParaCampanha,
   registrarEvento,
   recalcularContadores,
+  montarHorariosFila,
+  encerrarExecucaoAtivaParaReedicao,
   DisparoFilaError,
 }

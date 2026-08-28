@@ -254,4 +254,38 @@ describe('Etapa 6 — Voltar para edição', () => {
 
     expect(res.status).toBe(422)
   })
+
+  it('aceita voltar edição em campanha pausada e encerra a execução', async () => {
+    supabase.from.mockImplementation((table) => {
+      if (table === 'disparo_campanhas') {
+        return mockChain({
+          data: { ...campanhaEditavel, status: 'pausada' },
+          error: null,
+        })
+      }
+      if (table === 'disparo_execucoes') {
+        return mockChain({
+          data: { id: 88, status: 'pausada' },
+          error: null,
+        })
+      }
+      if (table === 'disparo_fila_itens') {
+        return mockChain({
+          data: [{ id: 1 }, { id: 2 }],
+          error: null,
+        })
+      }
+      return mockChain({ data: null, error: null })
+    })
+
+    const res = await request(app)
+      .post('/api/disparo/campanhas/1/revisao/voltar-edicao')
+      .set('Authorization', `Bearer ${token()}`)
+      .send({ confirmacao: true })
+
+    expect(res.status).toBe(200)
+    expect(res.body.status).toBe('configurando')
+    expect(res.body.execucao_encerrada).toBe(true)
+    expect(res.body.itens_cancelados).toBe(2)
+  })
 })

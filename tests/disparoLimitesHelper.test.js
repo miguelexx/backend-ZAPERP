@@ -10,6 +10,7 @@ const {
   proximoHorarioPermitido,
   estaNaJanela,
   simularDuracao,
+  gerarHorariosDisparo,
   PERFIS,
   FUSO_PADRAO,
   DateTime,
@@ -220,5 +221,76 @@ describe('disparoLimitesHelper — simulação', () => {
     const { REGRA_RETENTATIVA } = require('../helpers/disparoLimitesHelper')
     expect(REGRA_RETENTATIVA.contabiliza_no_limite).toBe(true)
     expect(REGRA_RETENTATIVA.implementada).toBe(false)
+  })
+})
+
+describe('disparoLimitesHelper — gerarHorariosDisparo', () => {
+  const inicio = DateTime.fromObject(
+    { year: 2026, month: 8, day: 24, hour: 9, minute: 0 },
+    { zone: 'America/Sao_Paulo' },
+  )
+  const janelas = [
+    { dia_semana: 1, hora_inicio: '08:00:00', hora_fim: '18:00:00', ativo: true },
+  ]
+  const cfg = {
+    ...PERFIS.moderado,
+    intervalo_min_sec: 8,
+    intervalo_max_sec: 20,
+    lote_tamanho: 100,
+    pausa_lote_min_sec: 0,
+    pausa_lote_max_sec: 0,
+    limite_por_hora: 200,
+    limite_por_dia: 2000,
+    fuso_horario: 'America/Sao_Paulo',
+  }
+
+  it('espaça N envios pelo intervalo mínimo (random=0)', () => {
+    const horarios = gerarHorariosDisparo({
+      quantidade: 10,
+      globalCfg: cfg,
+      janelas,
+      inicioDt: inicio,
+      random: () => 0,
+    })
+    expect(horarios).toHaveLength(10)
+    const unicos = new Set(horarios)
+    expect(unicos.size).toBe(10)
+    for (let i = 1; i < horarios.length; i++) {
+      const gapSec = (Date.parse(horarios[i]) - Date.parse(horarios[i - 1])) / 1000
+      expect(gapSec).toBeGreaterThanOrEqual(cfg.intervalo_min_sec)
+    }
+  })
+
+  it('usa o intervalo mínimo gravado na configuração (15s)', () => {
+    const horarios = gerarHorariosDisparo({
+      quantidade: 4,
+      globalCfg: { ...cfg, intervalo_min_sec: 15, intervalo_max_sec: 15 },
+      janelas,
+      inicioDt: inicio,
+      random: () => 0,
+    })
+    expect(horarios).toHaveLength(4)
+    for (let i = 1; i < horarios.length; i++) {
+      const gapSec = (Date.parse(horarios[i]) - Date.parse(horarios[i - 1])) / 1000
+      expect(gapSec).toBeGreaterThanOrEqual(15)
+    }
+  })
+
+  it('aplica pausa de lote além do intervalo', () => {
+    const horarios = gerarHorariosDisparo({
+      quantidade: 4,
+      globalCfg: {
+        ...cfg,
+        lote_tamanho: 2,
+        pausa_lote_min_sec: 30,
+        pausa_lote_max_sec: 30,
+      },
+      janelas,
+      inicioDt: inicio,
+      random: () => 0,
+    })
+    expect(horarios).toHaveLength(4)
+    const gapLote = (Date.parse(horarios[2]) - Date.parse(horarios[1])) / 1000
+    expect(gapLote).toBeGreaterThanOrEqual(cfg.intervalo_min_sec + 30)
   })
 })

@@ -376,12 +376,10 @@ async function executarValidacaoConfigLimites(campanhaId, companyId, campanha, b
   checks.distribuicao_confirmada = !!campanha.distribuicao_confirmada
   if (!checks.distribuicao_confirmada) erros.push('Confirme a distribuição por instância (Etapa 3).')
   checks.distribuicao_revisao = !campanha.distribuicao_revisao
-  if (campanha.distribuicao_revisao) erros.push('A distribuição foi alterada e precisa ser revisada.')
 
   checks.variacao_confirmada = !!campanha.variacao_confirmada
   if (!checks.variacao_confirmada) erros.push('Confirme as variações de mensagem (Etapa 4).')
   checks.variacao_revisao = !campanha.variacao_revisao
-  if (campanha.variacao_revisao) erros.push('As variações foram alteradas e precisam ser revisadas.')
 
   const instCheck = await revalidarInstanciasConectadas(campanhaId, companyId)
   checks.instancias_conectadas = instCheck.ok
