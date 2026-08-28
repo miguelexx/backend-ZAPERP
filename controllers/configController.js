@@ -4,6 +4,11 @@ const { getProvider } = require('../services/providers')
 const fs = require('fs')
 const path = require('path')
 const { getUploadsRoot } = require('../config/uploadsRoot')
+const {
+  senhaModuloCampanhasValida,
+  invalidateModuloCampanhasCache,
+  primeModuloCampanhasCache,
+} = require('../helpers/moduloCampanhas')
 
 /** GET /config/empresa — dados da empresa */
 exports.getEmpresa = async (req, res) => {
@@ -41,7 +46,9 @@ exports.putEmpresa = async (req, res) => {
       timeout_inatividade_min,
       zapi_auto_sync_contatos,
       separar_mensagens_disparadas,
-      atendimento_modo_simples
+      atendimento_modo_simples,
+      modulo_campanhas_ativo,
+      senha_modulo_campanhas,
     } = req.body
 
     const FONTES_VALIDAS = new Set(['inter','plus-jakarta-sans','poppins','montserrat','orbitron','nunito','raleway','playfair-display'])
@@ -62,6 +69,39 @@ exports.putEmpresa = async (req, res) => {
     if (separar_mensagens_disparadas !== undefined) update.separar_mensagens_disparadas = !!separar_mensagens_disparadas
     if (atendimento_modo_simples !== undefined) update.atendimento_modo_simples = !!atendimento_modo_simples
 
+    if (modulo_campanhas_ativo !== undefined) {
+      const desejado = !!modulo_campanhas_ativo
+      const { data: atualRow, error: atualErr } = await supabase
+        .from('empresas')
+        .select('modulo_campanhas_ativo')
+        .eq('id', company_id)
+        .maybeSingle()
+      if (atualErr) {
+        const msgAtual = String(atualErr.message || '')
+        if (msgAtual.includes('modulo_campanhas_ativo') || msgAtual.includes('does not exist')) {
+          return res.status(400).json({ error: 'Banco desatualizado: aplique a migration modulo_campanhas_ativo (coluna modulo_campanhas_ativo).' })
+        }
+        console.error('[configController] modulo_campanhas_ativo read', atualErr?.message)
+        return res.status(500).json({ error: 'Erro interno' })
+      }
+      const atual = !!atualRow?.modulo_campanhas_ativo
+      if (desejado !== atual) {
+        const perfil = String(req.user?.perfil || '').toLowerCase()
+        if (perfil !== 'admin') {
+          return res.status(403).json({ error: 'Apenas o administrador pode ativar ou desativar o módulo Campanhas.' })
+        }
+        if (desejado) {
+          if (senha_modulo_campanhas == null || String(senha_modulo_campanhas).trim() === '') {
+            return res.status(400).json({ error: 'Informe a senha de ativação do módulo Campanhas.' })
+          }
+          if (!senhaModuloCampanhasValida(senha_modulo_campanhas)) {
+            return res.status(403).json({ error: 'Senha de ativação inválida.' })
+          }
+        }
+        update.modulo_campanhas_ativo = desejado
+      }
+    }
+
     const { data, error } = await supabase.from('empresas').update(update).eq('id', company_id).select().single()
     if (error) {
       const msg = String(error.message || '')
@@ -73,6 +113,9 @@ exports.putEmpresa = async (req, res) => {
       }
       if (msg.includes('atendimento_modo_simples')) {
         return res.status(400).json({ error: 'Banco desatualizado: aplique a migration atendimento_modo_simples (coluna atendimento_modo_simples).' })
+      }
+      if (msg.includes('modulo_campanhas_ativo')) {
+        return res.status(400).json({ error: 'Banco desatualizado: aplique a migration modulo_campanhas_ativo (coluna modulo_campanhas_ativo).' })
       }
       if (msg.includes('nome_fonte')) {
         return res.status(400).json({ error: 'Banco desatualizado: aplique a migration 20260618000000_empresa_nome_fonte.sql (coluna nome_fonte).' })
@@ -86,6 +129,11 @@ exports.putEmpresa = async (req, res) => {
     // o serviço envia só o que existe (campos vazios são podados).
     if (update.nome !== undefined) {
       crmSync.syncEmpresa({ empresaId: company_id, nome: data.nome })
+    }
+
+    if (update.modulo_campanhas_ativo !== undefined) {
+      invalidateModuloCampanhasCache(company_id)
+      primeModuloCampanhasCache(company_id, !!data?.modulo_campanhas_ativo)
     }
 
     return res.json(data)

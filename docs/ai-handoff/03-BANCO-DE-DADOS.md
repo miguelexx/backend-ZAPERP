@@ -10,7 +10,7 @@ O banco principal é PostgreSQL via Supabase JS e `SUPABASE_SERVICE_ROLE_KEY` (`
 
 | Grupo | Tabelas e campos importantes |
 |---|---|
-| Tenant/acesso | `empresas(id, ativo, configs...)`; `usuarios(id, company_id, perfil, ativo, senha_hash)`; `departamentos`; `usuario_departamentos`; `usuario_permissoes` |
+| Tenant/acesso | `empresas(id, ativo, modulo_campanhas_ativo, configs...)`; `usuarios(id, company_id, perfil, ativo, senha_hash)`; `departamentos`; `usuario_departamentos`; `usuario_permissoes` |
 | Contato | `clientes(company_id, telefone, nome, pushname, foto_perfil, nome_origem, nome_protegido)`; `cliente_nomes_vinculados` (irmãos no mesmo telefone; só importação por planilha); `tags`; `cliente_tags` |
 | Atendimento | `conversas(company_id, cliente_id, telefone, whatsapp_instance_id, departamento_id, atendente_id, status_atendimento, ultima_atividade...)`; `mensagens(company_id, conversa_id, whatsapp_instance_id, whatsapp_id, client_temp_id, direcao, tipo, status, status_mensagem, url...)`; `atendimentos`; `historico_atendimentos`; `conversa_tags`; `conversa_unreads`; `conversa_usuario_prefs`; `conversa_atendentes`; `mensagens_ocultas` |
 | Chatbot/SLA | `ia_config`; `regras_automaticas`; `bot_logs`; `respostas_salvas`; `avaliacoes_atendimento`; tabelas de alerta sem resposta e alerta admin |

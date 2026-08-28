@@ -11,7 +11,7 @@ const {
 } = require('../helpers/disparoConversaOrigem')
 
 const STATUS_FILA_ELEGIVEL = ['enviada', 'entregue', 'lida', 'respondida']
-const STATUS_REABRIR_PARA_FILA = new Set(['fechada', 'finalizada', 'encerrada', 'mensagem_disparada', 'aberta', 'ociosa'])
+const STATUS_FILA_AGUARDANDO_RESPOSTA = ['enviada', 'entregue', 'lida']
 
 function listaRealtimeCampanha(motivo) {
   return { minha_fila: true, campanhas: true, motivo }
@@ -85,19 +85,27 @@ async function marcarAguardandoRespostaCampanha({
   }
 
   const agora = new Date().toISOString()
-  const { error } = await supabase
+  const { data: updated, error } = await supabase
     .from('conversas')
     .update({
       aguardando_resposta_campanha: true,
+      status_atendimento: 'aberta',
+      atendente_id: null,
+      atendente_atribuido_em: null,
       ultima_atividade: agora,
     })
     .eq('id', convId)
     .eq('company_id', cid)
+    .select('id, status_atendimento, aguardando_resposta_campanha')
+    .maybeSingle()
 
   if (error && isMissingAguardandoCampanhaColumn(error)) {
     return { ok: false, ignored: 'coluna_ausente' }
   }
   if (error) throw error
+  if (!updated) {
+    return { ok: true, marked: false, ignored: 'nao_elegivel', conversa_id: convId }
+  }
 
   emitirListaCampanha(io, cid, convId, {
     motivo: 'campanha_enviada',
@@ -105,10 +113,64 @@ async function marcarAguardandoRespostaCampanha({
     patch: {
       ultima_atividade: agora,
       aguardando_resposta_campanha: true,
+      status_atendimento: 'aberta',
+      status_atendimento_real: 'aberta',
+      atendente_id: null,
+      exibir_badge_aberta: false,
     },
   })
 
   return { ok: true, marked: true, conversa_id: convId }
+}
+
+/**
+ * Eco fromMe / persistência tardia: só marca se esta mensagem (whatsapp_id ou
+ * mensagens.id) estiver na fila de disparo da mesma empresa.
+ */
+async function marcarOrigemCampanhaSeMensagemFila({
+  companyId,
+  conversaId,
+  providerMessageId = null,
+  mensagemId = null,
+  io = null,
+} = {}) {
+  const cid = Number(companyId)
+  const convId = Number(conversaId)
+  if (!cid || !convId) return { ok: false, ignored: 'params_invalidos' }
+
+  const wamid = providerMessageId != null ? String(providerMessageId).trim() : ''
+  const mid = mensagemId != null ? Number(mensagemId) : null
+  if (!wamid && !(Number.isFinite(mid) && mid > 0)) {
+    return { ok: true, marked: false, ignored: 'sem_id_mensagem' }
+  }
+
+  let q = supabase
+    .from('disparo_fila_itens')
+    .select('id')
+    .eq('company_id', cid)
+    .in('status', STATUS_FILA_AGUARDANDO_RESPOSTA)
+    .limit(1)
+
+  if (wamid && Number.isFinite(mid) && mid > 0) {
+    const wamidSafe = wamid.replace(/[,()]/g, '')
+    q = q.or(`provider_message_id.eq.${wamidSafe},mensagem_id.eq.${mid}`)
+  } else if (wamid) {
+    q = q.eq('provider_message_id', wamid)
+  } else {
+    q = q.eq('mensagem_id', mid)
+  }
+
+  const { data: itens, error } = await q
+  if (error) throw error
+  if (!itens?.length) {
+    return { ok: true, marked: false, ignored: 'sem_fila' }
+  }
+
+  return marcarAguardandoRespostaCampanha({
+    companyId: cid,
+    conversaId: convId,
+    io,
+  })
 }
 
 async function resolverResponsavelCampanha({ companyId, conversaId, instanciaId = null }) {
@@ -201,36 +263,13 @@ async function consumirPrimeiraRespostaCampanha({
     return { ok: true, consumed: false, idempotent: true, conversa_id: convId }
   }
 
-  const { usuarioId } = await resolverResponsavelCampanha({
-    companyId: cid,
-    conversaId: convId,
-    instanciaId,
-  })
-
   const agora = new Date().toISOString()
-  const statusAtual = String(conversa.status_atendimento || '').trim().toLowerCase()
-  const atendenteAtual =
-    conversa.atendente_id != null && Number.isFinite(Number(conversa.atendente_id))
-      ? Number(conversa.atendente_id)
-      : null
-
   const patch = {
     aguardando_resposta_campanha: false,
+    status_atendimento: 'aberta',
+    atendente_id: null,
+    atendente_atribuido_em: null,
     ultima_atividade: agora,
-  }
-
-  if (atendenteAtual) {
-    if (STATUS_REABRIR_PARA_FILA.has(statusAtual) && statusAtual !== 'aberta') {
-      patch.status_atendimento = 'em_atendimento'
-    } else if (statusAtual === 'aberta') {
-      patch.status_atendimento = 'em_atendimento'
-    }
-  } else if (usuarioId) {
-    patch.atendente_id = usuarioId
-    patch.atendente_atribuido_em = agora
-    patch.status_atendimento = 'em_atendimento'
-  } else if (STATUS_REABRIR_PARA_FILA.has(statusAtual) || !statusAtual) {
-    patch.status_atendimento = 'aberta'
   }
 
   const { data: updated, error } = await supabase
@@ -255,11 +294,11 @@ async function consumirPrimeiraRespostaCampanha({
     aguardando_resposta_campanha: false,
     patch: {
       aguardando_resposta_campanha: false,
-      atendente_id: updated.atendente_id ?? patch.atendente_id ?? atendenteAtual,
-      status_atendimento: updated.status_atendimento ?? patch.status_atendimento ?? statusAtual,
-      status_atendimento_real: updated.status_atendimento ?? patch.status_atendimento ?? statusAtual,
+      atendente_id: null,
+      status_atendimento: 'aberta',
+      status_atendimento_real: 'aberta',
       ultima_atividade: agora,
-      exibir_badge_aberta: !updated.atendente_id && (updated.status_atendimento || '') === 'aberta',
+      exibir_badge_aberta: true,
     },
   })
 
@@ -274,6 +313,7 @@ async function consumirPrimeiraRespostaCampanha({
 
 module.exports = {
   marcarAguardandoRespostaCampanha,
+  marcarOrigemCampanhaSeMensagemFila,
   consumirPrimeiraRespostaCampanha,
   resolverResponsavelCampanha,
   listaRealtimeCampanha,

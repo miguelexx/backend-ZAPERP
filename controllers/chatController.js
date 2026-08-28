@@ -1689,7 +1689,7 @@ exports.listarConversas = async (req, res) => {
     // 5 queries independentes executadas em paralelo — elimina latência serial (~200-400ms economizados por request)
     const transferLimit = getChatFilterIdLimit()
     const [
-      separarMensagensDisparadasEmpresa,
+      empListaFlags,
       atendimentoModoSimplesEmpresa,
       unreadMap,
       [conversaIdsTransferidas, conversaIdsParticipanteAtivo],
@@ -1698,11 +1698,17 @@ exports.listarConversas = async (req, res) => {
     ] = await Promise.all([
       supabase
         .from('empresas')
-        .select('separar_mensagens_disparadas')
+        .select('separar_mensagens_disparadas, modulo_campanhas_ativo')
         .eq('id', company_id)
         .maybeSingle()
-        .then(({ data }) => !!data?.separar_mensagens_disparadas)
-        .catch(() => false),
+        .then(({ data, error }) => {
+          if (error) return { separar: false, campanhasModulo: false }
+          return {
+            separar: !!data?.separar_mensagens_disparadas,
+            campanhasModulo: !!data?.modulo_campanhas_ativo,
+          }
+        })
+        .catch(() => ({ separar: false, campanhasModulo: false })),
       empresaModoSimplesAtivo(company_id).catch(() => false),
       obterUnreadMap({ company_id, usuario_id: user_id }),
       !isAdmin
@@ -1726,6 +1732,11 @@ exports.listarConversas = async (req, res) => {
           : Promise.resolve([]),
       incluirGruposSemDepartamentoNoTodos ? getGrupoIdsSemDepartamento(company_id) : Promise.resolve([]),
     ])
+    const separarMensagensDisparadasEmpresa = !!empListaFlags?.separar
+    const moduloCampanhasAtivo = !!empListaFlags?.campanhasModulo
+    if (campanhasAtiva && !moduloCampanhasAtivo) {
+      return sendEmptyChatListResponse(false)
+    }
     const conversaIdsParticipanteAtivoSet = new Set(conversaIdsParticipanteAtivo.map(Number))
 
     let grupoUnreadIdsAguardando = []

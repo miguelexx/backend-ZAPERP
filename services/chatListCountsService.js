@@ -166,14 +166,16 @@ async function resolveChatListCountsContext(req) {
 
   let separarMensagensDisparadasEmpresa = false
   let atendimentoModoSimplesEmpresa = false
+  let moduloCampanhasAtivo = false
   try {
     const { data: empSep } = await supabase
       .from('empresas')
-      .select('separar_mensagens_disparadas, atendimento_modo_simples')
+      .select('separar_mensagens_disparadas, atendimento_modo_simples, modulo_campanhas_ativo')
       .eq('id', company_id)
       .maybeSingle()
     separarMensagensDisparadasEmpresa = !!empSep?.separar_mensagens_disparadas
     atendimentoModoSimplesEmpresa = !!empSep?.atendimento_modo_simples
+    moduloCampanhasAtivo = !!empSep?.modulo_campanhas_ativo
   } catch (_) {}
 
   const isFinanceiro = await usuarioPertenceSetorFinanceiro(departamento_ids, company_id)
@@ -304,6 +306,7 @@ async function resolveChatListCountsContext(req) {
     data_fim,
     separarMensagensDisparadasEmpresa,
     atendimentoModoSimplesEmpresa,
+    moduloCampanhasAtivo,
     isFinanceiro,
     grupoUnreadIdsAguardando,
     unreadMap,
@@ -335,7 +338,7 @@ function applyChatListSqlFilters(query, ctx, overrides = {}) {
   } = ctx
 
   const minhaFilaAtiva = overrides.minha_fila === true
-  const campanhasAtiva = overrides.campanhas === true
+  const campanhasAtiva = overrides.campanhas === true && ctx.moduloCampanhasAtivo === true
   const hojeAtivo = overrides.hoje === true
   const aguardandoClienteAtivo = overrides.aguardando_cliente === true
   const aguardandoAtendenteAtivo = overrides.aguardando_atendente === true
@@ -612,6 +615,7 @@ async function countConversasWithPostListRules(ctx, overrides = {}) {
 
 async function countConversasWithFilter(ctx, overrides = {}) {
   if (ctx.forceEmptyConversas) return 0
+  if (overrides.campanhas === true && ctx.moduloCampanhasAtivo !== true) return 0
   if (overrides.status_atendimento === 'mensagem_disparada' && !ctx.separarMensagensDisparadasEmpresa) {
     return 0
   }
@@ -751,7 +755,9 @@ async function getChatFilterCounts(req) {
       ctx.separarMensagensDisparadasEmpresa
         ? countConversasWithFilter(ctx, { status_atendimento: 'mensagem_disparada' })
         : Promise.resolve(0),
-      countConversasWithFilter(ctx, { campanhas: true }),
+      ctx.moduloCampanhasAtivo
+        ? countConversasWithFilter(ctx, { campanhas: true })
+        : Promise.resolve(0),
     ])
 
     return {

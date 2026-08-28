@@ -33,3 +33,12 @@ jest.mock('../config/supabase', () => {
     from: jest.fn(() => chain),
   }
 })
+
+beforeEach(() => {
+  const moduloCampanhas = require('../helpers/moduloCampanhas')
+  if (jest.isMockFunction(moduloCampanhas.empresaModuloCampanhasAtivo)) {
+    moduloCampanhas.empresaModuloCampanhasAtivo.mockResolvedValue(true)
+  } else {
+    jest.spyOn(moduloCampanhas, 'empresaModuloCampanhasAtivo').mockResolvedValue(true)
+  }
+})

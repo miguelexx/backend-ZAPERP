@@ -6,7 +6,7 @@
 
 Login valida senha bcrypt e `ativo`, emite JWT com usuário, empresa, perfil e departamentos; expiração vem de `JWT_EXPIRES_IN`. `middleware/auth.js` valida token e exige `company_id`, mas **não relê o usuário nem seu estado ativo a cada requisição**. Desativação/alteração de perfil não revoga imediatamente token já emitido.
 
-Autorização predominante: `adminOnly` e `supervisorOrAdmin`. Existe catálogo e overrides por usuário (`usuario_permissoes`), porém só alguns fluxos consultam permissão granular; não assumir que o catálogo protege todas as rotas. Socket repete autenticação JWT e checa acesso ao ingressar em conversa.
+Autorização predominante: `adminOnly` e `supervisorOrAdmin`. O módulo Disparo também exige `requireModuloCampanhas` (`empresas.modulo_campanhas_ativo`). Existe catálogo e overrides por usuário (`usuario_permissoes`), porém só alguns fluxos consultam permissão granular; não assumir que o catálogo protege todas as rotas. Socket repete autenticação JWT e checa acesso ao ingressar em conversa.
 
 ## Isolamento por empresa
 

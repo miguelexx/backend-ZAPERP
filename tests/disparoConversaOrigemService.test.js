@@ -9,13 +9,14 @@ jest.mock('../config/supabase', () => ({
 const supabase = require('../config/supabase')
 const {
   marcarAguardandoRespostaCampanha,
+  marcarOrigemCampanhaSeMensagemFila,
   consumirPrimeiraRespostaCampanha,
 } = require('../services/disparoConversaOrigemService')
 
 function mockChain(result = { data: null, error: null }) {
   const chain = {}
   const methods = [
-    'select', 'eq', 'neq', 'is', 'in', 'not', 'order', 'limit',
+    'select', 'eq', 'neq', 'is', 'in', 'not', 'or', 'order', 'limit',
     'insert', 'update',
   ]
   for (const m of methods) chain[m] = jest.fn(() => chain)
@@ -74,7 +75,11 @@ describe('disparoConversaOrigemService', () => {
 
     expect(result).toMatchObject({ ok: true, marked: true, conversa_id: 55 })
     expect(updateChain.update).toHaveBeenCalledWith(
-      expect.objectContaining({ aguardando_resposta_campanha: true }),
+      expect.objectContaining({
+        aguardando_resposta_campanha: true,
+        status_atendimento: 'aberta',
+        atendente_id: null,
+      }),
     )
     expect(updateChain.eq).toHaveBeenCalledWith('id', 55)
     expect(updateChain.eq).toHaveBeenCalledWith('company_id', 10)
@@ -96,30 +101,15 @@ describe('disparoConversaOrigemService', () => {
     expect(supabase.from).toHaveBeenCalledTimes(1)
   })
 
-  test('consumir: webhook duplicado não reatribui (update atômico 0 linhas)', async () => {
+  test('consumir: webhook duplicado não reabre (update atômico 0 linhas)', async () => {
     const selectChain = mockChain({
       data: { ...CONV_LIVRE, aguardando_resposta_campanha: true },
       error: null,
     })
-    const filaChain = mockChain({
-      data: [{
-        id: 100,
-        execucao_id: 50,
-        campanha_id: 1,
-        instancia_id: 3,
-        destinatario_id: 200,
-      }],
-      error: null,
-    })
-    const execChain = mockChain({ data: { iniciado_por: 84, campanha_id: 1 }, error: null })
-    const userChain = mockChain({ data: { id: 84, ativo: true, company_id: 10 }, error: null })
     const updateChain = mockChain({ data: null, error: null })
 
     supabase.from
       .mockReturnValueOnce(selectChain)
-      .mockReturnValueOnce(filaChain)
-      .mockReturnValueOnce(execChain)
-      .mockReturnValueOnce(userChain)
       .mockReturnValueOnce(updateChain)
 
     const result = await consumirPrimeiraRespostaCampanha({
@@ -132,28 +122,16 @@ describe('disparoConversaOrigemService', () => {
     expect(updateChain.eq).toHaveBeenCalledWith('aguardando_resposta_campanha', true)
   })
 
-  test('consumir: não cruza empresa e atribui o iniciador da execução', async () => {
+  test('consumir: abre a conversa sem atendente para a fila assumir', async () => {
     const selectChain = mockChain({
       data: { ...CONV_LIVRE, aguardando_resposta_campanha: true },
       error: null,
     })
-    const filaChain = mockChain({
-      data: [{
-        id: 100,
-        execucao_id: 50,
-        campanha_id: 1,
-        instancia_id: 3,
-        destinatario_id: 200,
-      }],
-      error: null,
-    })
-    const execChain = mockChain({ data: { iniciado_por: 84, campanha_id: 1 }, error: null })
-    const userChain = mockChain({ data: { id: 84, ativo: true, company_id: 10 }, error: null })
     const updateChain = mockChain({
       data: {
         id: 55,
-        atendente_id: 84,
-        status_atendimento: 'em_atendimento',
+        atendente_id: null,
+        status_atendimento: 'aberta',
         aguardando_resposta_campanha: false,
       },
       error: null,
@@ -161,9 +139,6 @@ describe('disparoConversaOrigemService', () => {
 
     supabase.from
       .mockReturnValueOnce(selectChain)
-      .mockReturnValueOnce(filaChain)
-      .mockReturnValueOnce(execChain)
-      .mockReturnValueOnce(userChain)
       .mockReturnValueOnce(updateChain)
 
     const result = await consumirPrimeiraRespostaCampanha({
@@ -175,23 +150,21 @@ describe('disparoConversaOrigemService', () => {
     expect(result).toMatchObject({
       ok: true,
       consumed: true,
-      atendente_id: 84,
-      status_atendimento: 'em_atendimento',
+      atendente_id: null,
+      status_atendimento: 'aberta',
     })
-    expect(filaChain.eq).toHaveBeenCalledWith('company_id', 10)
-    expect(filaChain.eq).toHaveBeenCalledWith('conversa_id', 55)
     expect(updateChain.update).toHaveBeenCalledWith(
       expect.objectContaining({
         aguardando_resposta_campanha: false,
-        atendente_id: 84,
-        status_atendimento: 'em_atendimento',
+        atendente_id: null,
+        status_atendimento: 'aberta',
       }),
     )
     expect(updateChain.eq).toHaveBeenCalledWith('aguardando_resposta_campanha', true)
-    expect(userChain.eq).toHaveBeenCalledWith('company_id', 10)
+    expect(updateChain.eq).toHaveBeenCalledWith('company_id', 10)
   })
 
-  test('consumir: preserve atendente já atribuído', async () => {
+  test('consumir: limpa atendente leftover e deixa aberta', async () => {
     const selectChain = mockChain({
       data: {
         ...CONV_LIVRE,
@@ -201,12 +174,11 @@ describe('disparoConversaOrigemService', () => {
       },
       error: null,
     })
-    const filaChain = mockChain({ data: [], error: null })
     const updateChain = mockChain({
       data: {
         id: 55,
-        atendente_id: 22,
-        status_atendimento: 'em_atendimento',
+        atendente_id: null,
+        status_atendimento: 'aberta',
         aguardando_resposta_campanha: false,
       },
       error: null,
@@ -214,7 +186,6 @@ describe('disparoConversaOrigemService', () => {
 
     supabase.from
       .mockReturnValueOnce(selectChain)
-      .mockReturnValueOnce(filaChain)
       .mockReturnValueOnce(updateChain)
 
     const result = await consumirPrimeiraRespostaCampanha({
@@ -226,9 +197,53 @@ describe('disparoConversaOrigemService', () => {
     expect(updateChain.update).toHaveBeenCalledWith(
       expect.objectContaining({
         aguardando_resposta_campanha: false,
-        status_atendimento: 'em_atendimento',
+        status_atendimento: 'aberta',
+        atendente_id: null,
       }),
     )
-    expect(updateChain.update.mock.calls[0][0].atendente_id).toBeUndefined()
+  })
+
+  test('marcar: conversa aberta com atendente leftover vai para Campanhas', async () => {
+    const selectChain = mockChain({
+      data: { ...CONV_LIVRE, atendente_id: 22, status_atendimento: 'aberta' },
+      error: null,
+    })
+    const updateChain = mockChain({
+      data: { id: 55, aguardando_resposta_campanha: true, status_atendimento: 'aberta' },
+      error: null,
+    })
+    supabase.from
+      .mockReturnValueOnce(selectChain)
+      .mockReturnValueOnce(updateChain)
+
+    const result = await marcarAguardandoRespostaCampanha({
+      companyId: 10,
+      conversaId: 55,
+    })
+
+    expect(result).toMatchObject({ ok: true, marked: true })
+    expect(updateChain.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        aguardando_resposta_campanha: true,
+        atendente_id: null,
+        status_atendimento: 'aberta',
+      }),
+    )
+  })
+
+  test('marcarOrigemCampanhaSeMensagemFila: ignora fromMe sem item na fila', async () => {
+    const filaChain = mockChain({ data: [], error: null })
+    supabase.from.mockReturnValueOnce(filaChain)
+
+    const result = await marcarOrigemCampanhaSeMensagemFila({
+      companyId: 10,
+      conversaId: 55,
+      providerMessageId: 'wamid-outro',
+      mensagemId: 999,
+    })
+
+    expect(result).toMatchObject({ ok: true, marked: false, ignored: 'sem_fila' })
+    expect(filaChain.eq).toHaveBeenCalledWith('company_id', 10)
+    expect(supabase.from).toHaveBeenCalledTimes(1)
   })
 })

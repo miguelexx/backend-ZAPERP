@@ -38,7 +38,7 @@ Todas as operações autenticadas devem limitar consultas por `req.user.company_
 | `GET /usuarios/me/permissoes`, `GET/PUT /usuarios/:id/permissoes` | `permissoesController` | A; PUT também AD; lê/grava overrides de permissões. |
 | `GET /usuarios/push/vapid-public-key`, `POST/DELETE /usuarios/me/push/subscribe`, `POST /usuarios/me/push/test` | `pushController` | Chave pública sem A; demais A. Subscription JSON, grava/remove e pode enviar push de teste. |
 | `GET /config/empresa` | `configController.getEmpresa` | A, inclusive atendente; retorna marca/config sanitizada. |
-| `PUT /config/empresa`, `POST/DELETE /config/empresa/logo` | `configController` | A+SA; logo exige AD, upload `logo`, delete D; grava empresa/arquivo. |
+| `PUT /config/empresa`, `POST/DELETE /config/empresa/logo` | `configController` | A+SA; logo exige AD, upload `logo`, delete D; grava empresa/arquivo. Ligar `modulo_campanhas_ativo` exige perfil admin + `senha_modulo_campanhas` (env `MODULO_CAMPANHAS_SENHA`). Desligar não pede senha. |
 | `GET /config/webhook-logs`, `GET /config/webhook-logs/:id`, `GET /config/auditoria` | `configController` | A+SA; filtros em query; leitura tenant-scoped. |
 | `GET/POST /config/empresas-whatsapp`, `DELETE /config/empresas-whatsapp/:id` | `configController` | A+SA; legado, delete D; tabela/fallback legado pode já ter sido removido por migration. |
 | `PUT /config/whatsapp/profile-picture`, `/profile-name`, `/profile-description` | `configController` | A+SA+AD+D; chama UltraMSG para perfil da instância. |
@@ -135,7 +135,7 @@ O mesmo router também expõe fila operacional com A+SA: `GET /jobs/` (lista por
 
 ## Disparo
 
-Todas as rotas são A+AD e tenant-scoped. Uploads usam `uploadDisparoFile` ou `uploadDisparoMidia`. Controllers respondem com entidade/resumo/export ou erro de validação/estado. Mutações afetam tabelas `disparo_*`, auditoria e, durante execução, sockets/UltraMSG. A lista abaixo é completa para `routes/disparoRoutes.js` no commit/working tree analisado.
+Todas as rotas são A+AD+`requireModuloCampanhas` e tenant-scoped. Sem `empresas.modulo_campanhas_ativo` respondem 403 `MODULO_CAMPANHAS_OFF`. Uploads usam `uploadDisparoFile` ou `uploadDisparoMidia`. Controllers respondem com entidade/resumo/export ou erro de validação/estado. Mutações afetam tabelas `disparo_*`, auditoria e, durante execução, sockets/UltraMSG. A lista abaixo é completa para `routes/disparoRoutes.js` no commit/working tree analisado.
 
 | Grupo | Rotas e controllers |
 |---|---|

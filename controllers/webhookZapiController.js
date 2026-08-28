@@ -3646,14 +3646,16 @@ exports.receberZapi = async (req, res) => {
             } else {
             const { data: convSt } = await supabase
               .from('conversas')
-              .select('status_atendimento, atendente_id')
+              .select('status_atendimento, atendente_id, aguardando_resposta_campanha')
               .eq('id', convIdForUpdate)
               .eq('company_id', company_id)
               .maybeSingle()
             const st = String(convSt?.status_atendimento || '')
             const aid = convSt?.atendente_id
             const semAtendente = aid == null || aid === ''
-            if (!semAtendente) {
+            if (convSt?.aguardando_resposta_campanha === true) {
+              // Campanha do módulo Disparo: permanece no filtro Campanhas, não vira mensagem_disparada.
+            } else if (!semAtendente) {
               // assumida — não reclassificar
             } else if (st === 'em_atendimento' || st === 'aguardando_cliente') {
               // já em atendimento humano / aguardando cliente
@@ -3680,6 +3682,21 @@ exports.receberZapi = async (req, res) => {
 
       console.log('✅ Mensagem salva no sistema:', { conversa_id, mensagem_id: mensagemSalva.id, phone: phone?.slice(-6), direcao: fromMe ? 'out' : 'in' })
       if (fromMe) console.log('📤 Espelhamento: mensagem enviada pelo celular registrada no sistema')
+
+      if (fromMe && !isGroup && company_id && convIdForUpdate && (mensagemSalva.whatsapp_id || mensagemSalva.id)) {
+        try {
+          const { marcarOrigemCampanhaSeMensagemFila } = require('../services/disparoConversaOrigemService')
+          await marcarOrigemCampanhaSeMensagemFila({
+            companyId: company_id,
+            conversaId: convIdForUpdate,
+            providerMessageId: mensagemSalva.whatsapp_id || null,
+            mensagemId: mensagemSalva.id || null,
+            io: req.app?.get?.('io') || null,
+          })
+        } catch (e) {
+          console.warn('[disparo:campanha] marcar origem fromMe:', e?.message || e)
+        }
+      }
 
       // Etapa 8 Disparo: opt-out exact match + vínculo de resposta (best-effort; não bloqueia webhook)
       if (!fromMe && !isGroup && mensagemFoiInseridaPeloWebhook && mensagemSalva?.id && company_id) {

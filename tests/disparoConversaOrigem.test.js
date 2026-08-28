@@ -40,7 +40,7 @@ describe('disparoConversaOrigem — regras', () => {
     expect(deveMarcarAguardandoCampanha({
       status_atendimento: 'aberta',
       atendente_id: 7,
-    })).toBe(false)
+    })).toBe(true)
   })
 
   test('grupo e envio manual não entram no filtro Campanhas', () => {
@@ -68,12 +68,12 @@ describe('disparoConversaOrigem — regras', () => {
     })).toBe(false)
   })
 
-  test('após responder, some de Campanhas e pode entrar na Minha fila', () => {
+  test('após responder, some de Campanhas e fica aberta na fila', () => {
     const aguardando = { aguardando_resposta_campanha: true, status_atendimento: 'aberta' }
     expect(visivelNoFiltroCampanhas(aguardando)).toBe(true)
     expect(visivelNaMinhaFilaQuantoACampanha(aguardando)).toBe(false)
 
-    const respondeu = { aguardando_resposta_campanha: false, status_atendimento: 'em_atendimento', atendente_id: 3 }
+    const respondeu = { aguardando_resposta_campanha: false, status_atendimento: 'aberta', atendente_id: null }
     expect(visivelNoFiltroCampanhas(respondeu)).toBe(false)
     expect(visivelNaMinhaFilaQuantoACampanha(respondeu)).toBe(true)
   })

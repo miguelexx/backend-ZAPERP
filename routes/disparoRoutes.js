@@ -1,6 +1,7 @@
 const express = require('express')
 const auth = require('../middleware/auth')
 const adminOnly = require('../middleware/adminOnly')
+const requireModuloCampanhas = require('../middleware/requireModuloCampanhas')
 const campanhasController = require('../controllers/disparoController')
 const destController = require('../controllers/disparoDestinatariosController')
 const instController = require('../controllers/disparoInstanciasController')
@@ -18,6 +19,7 @@ const router = express.Router()
 
 router.use(auth)
 router.use(adminOnly)
+router.use(requireModuloCampanhas)
 
 // ── Saúde operacional (Etapa 9) ─────────────────────────────────────────────
 router.get('/saude', saudeController.obterSaude)

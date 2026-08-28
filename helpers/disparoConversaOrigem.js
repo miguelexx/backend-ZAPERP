@@ -11,8 +11,6 @@ const STATUS_ATENDIMENTO_HUMANO_ATIVO = new Set([
   'em_atraso',
 ])
 
-const STATUS_ENCERRADO = new Set(['fechada', 'finalizada', 'encerrada'])
-
 function isMissingAguardandoCampanhaColumn(err) {
   if (!err) return false
   const code = String(err.code || '')
@@ -37,16 +35,13 @@ function statusAtendimentoNorm(conversa) {
 }
 
 /**
- * Atendimento humano já em curso: não reclassificar para o filtro Campanhas
- * nem retirar da Minha fila.
+ * Atendimento humano já em curso: não reclassificar para o filtro Campanhas.
+ * Atendente leftover em conversa aberta/fechada NÃO conta — o disparo deve
+ * ir para Campanhas até o contato responder.
  */
 function atendimentoHumanoAtivo(conversa) {
   if (!conversa || isGrupoConversa(conversa)) return false
-  const status = statusAtendimentoNorm(conversa)
-  if (STATUS_ATENDIMENTO_HUMANO_ATIVO.has(status)) return true
-  if (conversa.atendente_id == null) return false
-  if (STATUS_ENCERRADO.has(status) || status === 'mensagem_disparada') return false
-  return true
+  return STATUS_ATENDIMENTO_HUMANO_ATIVO.has(statusAtendimentoNorm(conversa))
 }
 
 function deveMarcarAguardandoCampanha(conversa) {
