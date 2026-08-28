@@ -4,7 +4,7 @@
 
 ## Processo identificado
 
-Não há build: é CommonJS executado por `node index.js`. `ecosystem.config.js` confirma PM2, modo `fork`, uma instância, autorestart e ambiente de produção. Docker/Compose e CI/CD não existem no backend. Forma exata de transferência para VPS, diretório, proxy TLS e comando PM2 usado são **NÃO CONFIRMADOS**.
+Não há build: é CommonJS executado por `node index.js`. `ecosystem.config.js` confirma PM2, modo `fork`, **dois** apps: API HTTP (`whatsapp-plataforma-backend`, 1 instância) e worker de Disparo (`whatsapp-plataforma-disparo-worker`, 1 instância, `autorestart`, `kill_timeout` 35s). Docker/Compose e CI/CD não existem no backend. Forma exata de transferência para VPS, diretório, proxy TLS e comando PM2 usado no servidor são **NÃO CONFIRMADOS** — o repositório passa a declarar os dois processos; o deploy precisa `pm2 startOrReload ecosystem.config.js` (ou equivalente) **e** `DISPARO_WORKER_ENABLED=true` no `.env` da VPS.
 
 ## Sequência segura proposta (não executada)
 
@@ -37,9 +37,9 @@ Health, auth inválida, login de conta de homologação, listagem tenant-scoped,
 
 ## Cuidados operacionais
 
-- manter PM2 `instances: 1`; não clusterizar sem Redis/pub-sub e locks distribuídos;
+- manter PM2 HTTP `instances: 1`; não clusterizar sem Redis/pub-sub e locks distribuídos;
+- worker de Disparo é o segundo app do `ecosystem.config.js` (`instances: 1`); não subir duas cópias do mesmo `DISPARO_WORKER_ID` sem necessidade — o claim é atômico, mas o heartbeat fica ambíguo;
 - não executar schedulers internos e cron externo duplicados;
-- worker de Disparo é processo separado e deve iniciar off/dry-run antes de live;
 - disco `/uploads` deve persistir entre releases; em múltiplos hosts não é compartilhado;
 - preservar env/cofre fora do repositório; rotacionar exemplos com aparência de credencial;
 - antes de restart, entender leases e mensagens externas aceitas ainda sem ACK.

@@ -1,9 +1,11 @@
 /**
  * Worker do Disparo de Mensagens (Etapa 7).
- * Processo separado do HTTP. Defaults seguros: não inicia se WORKER_ENABLED=false.
+ * Processo separado do HTTP. Mantém-se vivo mesmo com WORKER_ENABLED=false
+ * (heartbeat "desabilitado") para o PM2 não entrar em loop de restart.
  *
- * Uso: npm run worker:disparo
+ * Uso: npm run worker:disparo  |  PM2 app whatsapp-plataforma-disparo-worker
  * Envio real somente com WORKER_ENABLED=true + LIVE_ENABLED=true + DRY_RUN=false.
+ * Fila só é claimada com WORKER_ENABLED=true.
  */
 
 require('dotenv').config({ path: require('path').join(__dirname, '..', '.env') })
@@ -19,24 +21,83 @@ const { emitDisparo, EVENTS } = require('../services/disparoSocketService')
 const { DateTime } = require('luxon')
 
 const cfg = getDisparoWorkerConfig()
+const startedAt = new Date().toISOString()
 let shuttingDown = false
 let io = null // worker standalone: sem Socket.IO a menos que conecte depois
 let loopTimer = null
+let heartbeatTimer = null
 let processing = false
+
+function heartbeatStatus(extra = {}) {
+  if (extra.status) return extra.status
+  if (shuttingDown || extra.shutdown === true) return 'offline'
+  if (!cfg.workerEnabled) return 'disabled'
+  if (extra.boot === true) return 'starting'
+  return 'running'
+}
 
 async function heartbeat(extra = {}) {
   try {
-    await supabase.from('disparo_worker_heartbeat').upsert({
+    const status = heartbeatStatus(extra)
+    const { error } = await supabase.from('disparo_worker_heartbeat').upsert({
       worker_id: cfg.workerId,
       hostname: os.hostname(),
       pid: process.pid,
       dry_run: cfg.dryRun,
       live_enabled: cfg.liveEnabled,
       ultima_atividade_em: new Date().toISOString(),
-      meta: { ...extra, canSendLive: cfg.canSendLive },
+      iniciado_em: startedAt,
+      meta: {
+        status,
+        workerEnabled: cfg.workerEnabled,
+        canSendLive: cfg.canSendLive,
+        pollMs: cfg.pollMs,
+        ...extra,
+      },
     }, { onConflict: 'worker_id' })
+    if (error) {
+      console.warn('[disparoWorker] heartbeat falhou:', error.message)
+      return false
+    }
+    return true
   } catch (e) {
     console.warn('[disparoWorker] heartbeat falhou:', e?.message)
+    return false
+  }
+}
+
+/**
+ * Devolve à fila itens ainda só reservados (não chamou o provedor).
+ * Não toca em `enviando` — pode ter ido ao UltraMSG.
+ */
+async function liberarReservas(itens) {
+  const ids = (itens || [])
+    .filter((i) => i && i.id && i.status !== 'enviando')
+    .map((i) => i.id)
+  if (!ids.length) return 0
+  try {
+    const { error, count } = await supabase
+      .from('disparo_fila_itens')
+      .update({
+        status: 'pendente',
+        worker_id: null,
+        lease_inicio: null,
+        lease_ate: null,
+        atualizado_em: new Date().toISOString(),
+      })
+      .in('id', ids)
+      .eq('worker_id', cfg.workerId)
+      .eq('status', 'reservada')
+    if (error) {
+      console.warn('[disparoWorker] liberar reservas:', error.message)
+      return 0
+    }
+    const n = count ?? ids.length
+    if (n) console.log(`[disparoWorker] ${n} reserva(s) devolvida(s) à fila no desligamento`)
+    return n
+  } catch (e) {
+    console.warn('[disparoWorker] liberar reservas exceção:', e?.message)
+    return 0
   }
 }
 
@@ -492,16 +553,30 @@ async function talvezConcluir(execucaoId, companyId, campanhaId) {
 
 async function tick() {
   if (shuttingDown || processing) return
+  if (!cfg.workerEnabled) return
   processing = true
+  let pendentesLiberar = []
   try {
     await recuperarLeases()
     const itens = await claimItens()
-    // Processa sequencialmente por instância no mesmo batch (uma msg por vez na prática via lock)
-    for (const item of itens) {
-      if (shuttingDown) break
-      await processarItem(item)
+    for (let i = 0; i < itens.length; i++) {
+      if (shuttingDown) {
+        pendentesLiberar = itens.slice(i)
+        break
+      }
+      try {
+        await processarItem(itens[i])
+      } catch (itemErr) {
+        console.error(
+          `[disparoWorker] item ${itens[i]?.id} erro (lote continua):`,
+          itemErr?.message || itemErr,
+        )
+      }
     }
-    await heartbeat({ claimed: itens.length })
+    if (pendentesLiberar.length) {
+      await liberarReservas(pendentesLiberar)
+    }
+    await heartbeat({ claimed: itens.length - pendentesLiberar.length })
   } catch (e) {
     console.error('[disparoWorker] tick erro:', e?.message)
   } finally {
@@ -516,39 +591,57 @@ async function main() {
     liveEnabled: cfg.liveEnabled,
     dryRun: cfg.dryRun,
     canSendLive: cfg.canSendLive,
+    pollMs: cfg.pollMs,
+    heartbeatMs: cfg.heartbeatMs,
   })
 
   if (!cfg.workerEnabled) {
-    console.log('[disparoWorker] DISPARO_WORKER_ENABLED=false — worker não inicia.')
-    process.exit(0)
-  }
-
-  if (!cfg.canSendLive) {
+    console.warn(
+      '[disparoWorker] DISPARO_WORKER_ENABLED=false — processo permanece vivo sem processar a fila. Defina true no .env e reinicie o worker (PM2: whatsapp-plataforma-disparo-worker).',
+    )
+  } else if (!cfg.canSendLive) {
     console.log('[disparoWorker] Modo seguro: dry-run ou live desligado — UltraMSG NÃO será chamado.')
   } else {
     console.warn('[disparoWorker] ATENÇÃO: envio REAL habilitado (WORKER+LIVE+DRY_RUN=false).')
   }
 
-  await heartbeat({ boot: true })
+  const bootOk = await heartbeat({ boot: true })
+  if (!bootOk) {
+    console.error('[disparoWorker] heartbeat inicial falhou — verifique SUPABASE_URL/SERVICE_ROLE e a tabela disparo_worker_heartbeat.')
+  }
 
-  const shutdown = async (signal) => {
+  const shutdown = async (signal, exitCode = 0) => {
     if (shuttingDown) return
     shuttingDown = true
     console.log(`[disparoWorker] desligamento gracioso (${signal})…`)
     if (loopTimer) clearInterval(loopTimer)
-    // Aguarda processamento atual
+    if (heartbeatTimer) clearInterval(heartbeatTimer)
     const start = Date.now()
     while (processing && Date.now() - start < 30000) {
       await new Promise((r) => setTimeout(r, 200))
     }
-    await heartbeat({ shutdown: true })
-    process.exit(0)
+    await heartbeat({ shutdown: true, status: 'offline' })
+    console.log('[disparoWorker] encerrado.')
+    process.exit(exitCode)
   }
-  process.on('SIGINT', () => shutdown('SIGINT'))
-  process.on('SIGTERM', () => shutdown('SIGTERM'))
+  process.on('SIGINT', () => { shutdown('SIGINT').catch(() => process.exit(0)) })
+  process.on('SIGTERM', () => { shutdown('SIGTERM').catch(() => process.exit(0)) })
+  process.on('uncaughtException', (err) => {
+    console.error('[disparoWorker] uncaughtException:', err)
+    shutdown('uncaughtException', 1).catch(() => process.exit(1))
+  })
+  process.on('unhandledRejection', (reason) => {
+    console.error('[disparoWorker] unhandledRejection:', reason)
+  })
 
-  loopTimer = setInterval(() => { tick().catch(() => {}) }, cfg.pollMs)
-  tick().catch(() => {})
+  heartbeatTimer = setInterval(() => {
+    heartbeat().catch(() => {})
+  }, cfg.heartbeatMs)
+
+  if (cfg.workerEnabled) {
+    loopTimer = setInterval(() => { tick().catch(() => {}) }, cfg.pollMs)
+    tick().catch(() => {})
+  }
 }
 
 if (require.main === module) {
@@ -563,5 +656,8 @@ module.exports = {
   processarItem,
   recuperarLeases,
   claimItens,
+  heartbeat,
+  liberarReservas,
+  heartbeatStatus,
   _setIo: (socketIo) => { io = socketIo },
 }

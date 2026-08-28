@@ -20,6 +20,7 @@ const ENV_KEYS = [
   'DISPARO_WORKER_LEASE_SECONDS',
   'DISPARO_WORKER_BATCH_SIZE',
   'DISPARO_WORKER_ID',
+  'DISPARO_WORKER_HEARTBEAT_MS',
   'DISPARO_SEND_TIMEOUT_MS',
   'DISPARO_MAX_TENTATIVAS',
   'DISPARO_BACKOFF_BASE_SEC',
@@ -143,6 +144,7 @@ describe('disparoWorkerConfig — allowlist e config completa', () => {
     const cfg = getDisparoWorkerConfig()
     expect(cfg.pollMs).toBe(3000)
     expect(cfg.batchSize).toBe(10)
+    expect(cfg.heartbeatMs).toBe(10000)
     expect(cfg.workerEnabled).toBe(false)
     expect(cfg.dryRun).toBe(true)
     expect(typeof cfg.workerId).toBe('string')

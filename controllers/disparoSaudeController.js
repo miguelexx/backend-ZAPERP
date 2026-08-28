@@ -16,7 +16,7 @@ exports.obterSaude = async (req, res) => {
       return res.status(400).json({ error: 'company_id inválido no token.' })
     }
 
-    const snapshot = await snapshotSaudeDisparo(companyId, { janelaMinutos: 15 })
+    const snapshot = await snapshotSaudeDisparo(companyId)
 
     res.json({
       ok: true,

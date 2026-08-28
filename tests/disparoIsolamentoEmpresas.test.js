@@ -188,6 +188,22 @@ describe('Etapa 9 — Isolamento empresas (10 vs 20)', () => {
       if (table === 'disparo_execucao_eventos') {
         return mockChain({ data: null, error: null })
       }
+      if (table === 'disparo_worker_heartbeat') {
+        const agora = new Date().toISOString()
+        return mockChain({
+          data: [{
+            worker_id: 'w1',
+            hostname: 'host',
+            pid: 1,
+            dry_run: true,
+            live_enabled: false,
+            ultima_atividade_em: agora,
+            iniciado_em: new Date(Date.now() - 120000).toISOString(),
+            meta: { status: 'running', workerEnabled: true, canSendLive: false },
+          }],
+          error: null,
+        })
+      }
       return mockChain({ data: null, error: null })
     })
 
@@ -272,10 +288,11 @@ describe('Etapa 9 — GET /disparo/saude', () => {
       dryRun: expect.any(Boolean),
       canSendLive: expect.any(Boolean),
     })
-    expect(res.body.janela_minutos).toBe(15)
+    expect(res.body.janela_minutos).toBe(10)
     expect(typeof res.body.fila_pendente).toBe('number')
     expect(typeof res.body.incertos).toBe('number')
     expect(res.body.workers_ativos).toBeGreaterThanOrEqual(0)
+    expect(['ativo', 'iniciando', 'sem_heartbeat', 'desabilitado', 'offline']).toContain(res.body.worker_status)
     expect(JSON.stringify(res.body)).not.toMatch(/WHATSAPP_WEBHOOK_TOKEN|JWT_SECRET|token/i)
   })
 })

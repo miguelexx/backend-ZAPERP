@@ -26,7 +26,7 @@ Somente nomes/finalidades; valores devem vir do cofre/ambiente.
 | OpenAI | `OPENAI_API_KEY`, modelo, limites/cota/cache/timeout referenciados pelo módulo AI |
 | Produtos | flags do sync, intervalos, credenciais/host/porta/database PostgreSQL de produtos e SQL Server WM |
 | CRM/help desk | `CRM_AVANCADO_URL`, `ZAP_SSO_SECRET`, token/CNPJ/company do help desk e URLs de integração |
-| Disparo | `DISPARO_WORKER_ENABLED`, `DISPARO_LIVE_ENABLED`, `DISPARO_DRY_RUN`, `DISPARO_TEST_ALLOWLIST`, `DISPARO_WORKER_POLL_MS`, `DISPARO_WORKER_LEASE_SECONDS`, `DISPARO_WORKER_BATCH_SIZE`, heartbeat/backoff/limites referenciados |
+| Disparo | `DISPARO_WORKER_ENABLED`, `DISPARO_LIVE_ENABLED`, `DISPARO_DRY_RUN`, `DISPARO_TEST_ALLOWLIST`, `DISPARO_WORKER_POLL_MS`, `DISPARO_WORKER_HEARTBEAT_MS`, `DISPARO_WORKER_LEASE_SECONDS`, `DISPARO_WORKER_BATCH_SIZE`, `DISPARO_WORKER_ID`, heartbeat/backoff/limites referenciados |
 | Jobs/chatbot | intervalos/flags dos schedulers, timeouts de inatividade, alertas, triagem e regras automáticas |
 
 Para o nome exato antes de configurar, cruzar `.env.example` com `rg "process\.env"`; nem toda variável no exemplo está ativa e algumas referências possuem default. O `.env.example` existente contém exemplo com aparência de credencial e não é considerado padrão seguro; não foi criado outro nem copiado valor.
@@ -35,7 +35,7 @@ Para o nome exato antes de configurar, cruzar `.env.example` com `rg "process\.e
 
 ## Desenvolvimento e produção
 
-Desenvolvimento usa nodemon e normalmente `.env` local ignorado. Produção confirmada no repositório: PM2 via `ecosystem.config.js`, modo `fork`, `instances: 1`, autorestart e `NODE_ENV=production`. Não há Dockerfile, Compose ou workflow CI/CD no backend. TLS/reverse proxy, diretório da VPS, usuário do processo, agendador externo, backup e sequência real de deploy são **NÃO CONFIRMADOS**.
+Desenvolvimento usa nodemon e normalmente `.env` local ignorado. Produção confirmada no repositório: PM2 via `ecosystem.config.js`, modo `fork`, dois apps (API HTTP + worker de Disparo), `instances: 1` em cada, autorestart e `NODE_ENV=production`. Não há Dockerfile, Compose ou workflow CI/CD no backend. TLS/reverse proxy, diretório da VPS, usuário do processo, agendador externo, backup e sequência real de deploy são **NÃO CONFIRMADOS**.
 
 Supabase/PostgreSQL é o banco de domínio; service role deve ficar apenas no servidor. Produtos também podem usar PostgreSQL separado e SQL Server. UltraMSG, R2, OpenAI, FCM/Web Push, CRM e help desk são condicionais à configuração.
 

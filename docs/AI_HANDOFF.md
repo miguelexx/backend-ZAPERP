@@ -195,9 +195,10 @@ POST /chats/:id/mensagens (ou /arquivo, /pix, etc.)
 ### Disparo (worker separado)
 
 1. API cria campanha → configura destinatários → instâncias → variações → limites → revisão → confirma
-2. `POST /disparo/campanhas/:id/execucao/iniciar` muda status para `em_execucao`
-3. `disparoWorker.js` (`npm run worker:disparo`) faz poll e processa fila
-4. **Gates de segurança:** `DISPARO_WORKER_ENABLED=true` + `DISPARO_LIVE_ENABLED=true` + `DISPARO_DRY_RUN=false`
+2. `POST /disparo/campanhas/:id/execucao/iniciar` exige worker saudável e muda status para `em_execucao`
+3. `disparoWorker.js` (PM2 `whatsapp-plataforma-disparo-worker` ou `npm run worker:disparo`) faz poll e processa fila
+4. **Gates de envio real:** `DISPARO_WORKER_ENABLED=true` + `DISPARO_LIVE_ENABLED=true` + `DISPARO_DRY_RUN=false`
+5. Heartbeat em `disparo_worker_heartbeat`; painel: ativo / iniciando / sem_heartbeat / desabilitado / offline
 
 ---
 
@@ -245,10 +246,13 @@ npm ci
 # Desenvolvimento
 npm run dev
 
-# Produção (PM2)
-npm start
+# Produção (PM2) — API + worker de Disparo
+pm2 start ecosystem.config.js
+# ou, após git pull:
+pm2 startOrReload ecosystem.config.js --update-env
+pm2 save
 
-# Worker de disparo (processo separado)
+# Worker de disparo (manual, se não usar o ecosystem)
 npm run worker:disparo
 
 # Testes

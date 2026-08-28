@@ -4,6 +4,7 @@
 
 const supabase = require('../config/supabase')
 const { getDisparoFlags } = require('./disparoWorkerConfig')
+const { avaliarSaudeWorker, HEARTBEAT_SELECT } = require('./disparoWorkerHealth')
 
 /** Status relevantes para snapshot de fila por empresa. */
 const FILA_STATUS_SNAPSHOT = [
@@ -21,35 +22,23 @@ const FILA_STATUS_SNAPSHOT = [
   'cancelada',
 ]
 
-const HEARTBEAT_SELECT =
-  'worker_id, hostname, pid, dry_run, live_enabled, ultima_atividade_em, iniciado_em, meta'
-
 /**
  * Snapshot de saúde do Disparo para uma empresa.
  * @param {number} companyId
  * @param {{ client?: object, janelaMinutos?: number }} [opts]
  */
-async function snapshotSaudeDisparo(companyId, { client = supabase, janelaMinutos = 15 } = {}) {
+async function snapshotSaudeDisparo(companyId, { client = supabase } = {}) {
   const cid = Number(companyId)
   if (!Number.isInteger(cid) || cid <= 0) {
     throw new Error('companyId inválido')
   }
 
   const flags = getDisparoFlags()
-  const limiteIso = new Date(Date.now() - janelaMinutos * 60 * 1000).toISOString()
-
-  const [statusCounts, heartbeatResult] = await Promise.all([
+  const [statusCounts, workerSaude] = await Promise.all([
     contarFilaPorStatus(client, cid),
-    client
-      .from('disparo_worker_heartbeat')
-      .select(HEARTBEAT_SELECT)
-      .gte('ultima_atividade_em', limiteIso)
-      .order('ultima_atividade_em', { ascending: false }),
+    avaliarSaudeWorker({ client }),
   ])
 
-  if (heartbeatResult.error) throw heartbeatResult.error
-
-  const heartbeats = heartbeatResult.data ?? []
   const pendente = statusCounts.pendente ?? 0
   const reservada = statusCounts.reservada ?? 0
   const enviando = statusCounts.enviando ?? 0
@@ -58,13 +47,17 @@ async function snapshotSaudeDisparo(companyId, { client = supabase, janelaMinuto
   return {
     company_id: cid,
     flags,
-    janela_minutos: janelaMinutos,
+    janela_minutos: workerSaude.janela_minutos,
+    janela_ativo_segundos: workerSaude.janela_ativo_segundos,
     fila_por_status: statusCounts,
     fila_pendente: pendente + reservada + enviando,
     incertos: incerta,
-    heartbeats,
-    workers_ativos: heartbeats.length,
-    ultimo_heartbeat_em: heartbeats[0]?.ultima_atividade_em ?? null,
+    heartbeats: workerSaude.heartbeats,
+    workers_ativos: workerSaude.workers_ativos,
+    ultimo_heartbeat_em: workerSaude.ultimo_heartbeat_em,
+    worker_status: workerSaude.status,
+    worker_saudavel: workerSaude.saudavel,
+    worker_motivo: workerSaude.motivo,
   }
 }
 

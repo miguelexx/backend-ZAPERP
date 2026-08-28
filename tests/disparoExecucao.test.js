@@ -51,6 +51,22 @@ function mockChain(result = { data: null, error: null, count: 0 }) {
   return chain
 }
 
+function mockHeartbeatSaudavel() {
+  return mockChain({
+    data: [{
+      worker_id: 'zaperp-disparo-1',
+      hostname: 'test-host',
+      pid: 42,
+      dry_run: true,
+      live_enabled: false,
+      ultima_atividade_em: new Date().toISOString(),
+      iniciado_em: new Date(Date.now() - 120000).toISOString(),
+      meta: { status: 'running', workerEnabled: true, canSendLive: false },
+    }],
+    error: null,
+  })
+}
+
 const campanhaPronta = {
   id: 1,
   company_id: COMPANY_ID,
@@ -150,6 +166,9 @@ describe('Etapa 7 Execução — iniciar campanha', () => {
       if (table === 'disparo_execucao_eventos') {
         return mockChain({ data: null, error: null })
       }
+      if (table === 'disparo_worker_heartbeat') {
+        return mockHeartbeatSaudavel()
+      }
       return mockChain({ data: null, error: null })
     })
 
@@ -166,6 +185,30 @@ describe('Etapa 7 Execução — iniciar campanha', () => {
     expect(gerarFilaParaCampanha).toHaveBeenCalledWith(
       expect.objectContaining({ companyId: COMPANY_ID, campanhaId: 1 }),
     )
+  })
+
+  it('recusa iniciar quando nenhum worker saudável (heartbeat ausente)', async () => {
+    supabase.from.mockImplementation((table) => {
+      if (table === 'disparo_campanhas') {
+        return mockChain({ data: campanhaPronta, error: null })
+      }
+      if (table === 'disparo_campanha_limites') {
+        return mockChain({ data: { inicio_modo: 'imediato', agendado_para: null }, error: null })
+      }
+      if (table === 'disparo_worker_heartbeat') {
+        return mockChain({ data: [], error: null })
+      }
+      return mockChain({ data: null, error: null })
+    })
+
+    const res = await request(app)
+      .post('/api/disparo/campanhas/1/execucao/iniciar')
+      .set('Authorization', `Bearer ${token()}`)
+
+    expect(res.status).toBe(422)
+    expect(res.body.code).toBe('WORKER_OFFLINE')
+    expect(res.body.error).toMatch(/Nenhum worker ativo detectado/i)
+    expect(gerarFilaParaCampanha).not.toHaveBeenCalled()
   })
 
   it('idempotente quando campanha já em_execucao', async () => {
@@ -321,5 +364,75 @@ describe('Etapa 7 Execução — emergência (isolada por company)', () => {
     expect(res.body.ok).toBe(true)
     expect(res.body.execucoes_afetadas).toBe(2)
     expect(res.body.campanhas_afetadas).toBe(2)
+  })
+})
+
+describe('Etapa 7 Execução — GET /worker/saude', () => {
+  beforeEach(() => jest.clearAllMocks())
+
+  it('403 atendente', async () => {
+    const res = await request(app)
+      .get('/api/disparo/worker/saude')
+      .set('Authorization', `Bearer ${token({ perfil: 'atendente' })}`)
+    expect(res.status).toBe(403)
+  })
+
+  it('classifica worker ativo com heartbeat recente running', async () => {
+    supabase.from.mockImplementation((table) => {
+      if (table === 'disparo_worker_heartbeat') return mockHeartbeatSaudavel()
+      return mockChain({ data: null, error: null })
+    })
+
+    const res = await request(app)
+      .get('/api/disparo/worker/saude')
+      .set('Authorization', `Bearer ${token()}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.status).toBe('ativo')
+    expect(res.body.saudavel).toBe(true)
+    expect(res.body.workers_ativos).toBeGreaterThanOrEqual(1)
+  })
+
+  it('classifica offline quando não há heartbeat', async () => {
+    supabase.from.mockImplementation(() => mockChain({ data: [], error: null }))
+
+    const res = await request(app)
+      .get('/api/disparo/worker/saude')
+      .set('Authorization', `Bearer ${token()}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.status).toBe('offline')
+    expect(res.body.saudavel).toBe(false)
+    expect(res.body.motivo).toMatch(/Nenhum worker ativo detectado/i)
+    expect(res.body.workers_ativos).toBe(0)
+  })
+
+  it('não marca ativo um heartbeat de shutdown recente', async () => {
+    supabase.from.mockImplementation((table) => {
+      if (table === 'disparo_worker_heartbeat') {
+        return mockChain({
+          data: [{
+            worker_id: 'zaperp-disparo-1',
+            hostname: 'test-host',
+            pid: 42,
+            dry_run: true,
+            live_enabled: false,
+            ultima_atividade_em: new Date().toISOString(),
+            iniciado_em: new Date(Date.now() - 120000).toISOString(),
+            meta: { status: 'offline', shutdown: true },
+          }],
+          error: null,
+        })
+      }
+      return mockChain({ data: [], error: null })
+    })
+
+    const res = await request(app)
+      .get('/api/disparo/worker/saude')
+      .set('Authorization', `Bearer ${token()}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.saudavel).toBe(false)
+    expect(res.body.status).toBe('offline')
   })
 })

@@ -6,6 +6,7 @@
 
 const supabase = require('../config/supabase')
 const { getDisparoFlags } = require('../helpers/disparoWorkerConfig')
+const { avaliarSaudeWorker } = require('../helpers/disparoWorkerHealth')
 const { mascararTelefone } = require('../helpers/disparoRevisaoChecklist')
 const {
   gerarFilaParaCampanha,
@@ -129,6 +130,18 @@ function assertCampanhaIniciavel(campanha) {
     }
   }
   return { ok: true, idempotente: false }
+}
+
+async function recusarSeWorkerNaoSaudavel(res) {
+  const saude = await avaliarSaudeWorker()
+  if (saude.saudavel) return saude
+  res.status(422).json({
+    error: saude.motivo || 'Nenhum worker ativo detectado',
+    code: 'WORKER_OFFLINE',
+    worker_status: saude.status,
+    saudavel: false,
+  })
+  return null
 }
 
 async function validarAgendamento(campanha, limites) {
@@ -270,6 +283,9 @@ exports.iniciarCampanha = async (req, res) => {
         agendado_para: agendCheck.agendado_para ?? null,
       })
     }
+
+    const workerSaude = await recusarSeWorkerNaoSaudavel(res)
+    if (!workerSaude) return
 
     let filaResult
     try {
@@ -640,6 +656,9 @@ exports.continuar = async (req, res) => {
         desconectadas: instCheck.desconectadas,
       })
     }
+
+    const workerSaude = await recusarSeWorkerNaoSaudavel(res)
+    if (!workerSaude) return
 
     const execucao = await buscarExecucaoAtiva(campanhaId, companyId)
     if (!execucao || execucao.status !== 'pausada') {
@@ -1097,21 +1116,18 @@ exports.saudeWorker = async (req, res) => {
   try {
     if (!requireAdmin(req, res)) return
 
-    const limite = new Date(Date.now() - 10 * 60 * 1000).toISOString()
-    const flags = getDisparoFlags()
-
-    const { data, error } = await supabase
-      .from('disparo_worker_heartbeat')
-      .select('worker_id, hostname, pid, dry_run, live_enabled, ultima_atividade_em, iniciado_em, meta')
-      .gte('ultima_atividade_em', limite)
-      .order('ultima_atividade_em', { ascending: false })
-    if (error) throw error
+    const saude = await avaliarSaudeWorker()
 
     res.json({
-      flags,
-      janela_minutos: 10,
-      workers: data ?? [],
-      workers_ativos: (data ?? []).length,
+      flags: saude.flags,
+      janela_minutos: saude.janela_minutos,
+      janela_ativo_segundos: saude.janela_ativo_segundos,
+      status: saude.status,
+      saudavel: saude.saudavel,
+      motivo: saude.motivo,
+      workers: saude.workers,
+      workers_ativos: saude.workers_ativos,
+      ultimo_heartbeat_em: saude.ultimo_heartbeat_em,
     })
   } catch (err) {
     console.error('[disparo:execucao] saudeWorker', err)

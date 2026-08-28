@@ -22,6 +22,7 @@ jest.mock('../helpers/disparoWorkerConfig', () => ({
     dryRun: true,
     canSendLive: false,
     pollMs: 2000,
+    heartbeatMs: 10000,
     leaseSeconds: 120,
     batchSize: 1,
     workerId: 'test-worker',

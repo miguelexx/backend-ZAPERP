@@ -41,6 +41,7 @@ function getDisparoWorkerConfig() {
   return {
     ...flags,
     pollMs: getIntEnv('DISPARO_WORKER_POLL_MS', 2000, 500, 60000),
+    heartbeatMs: getIntEnv('DISPARO_WORKER_HEARTBEAT_MS', 10000, 2000, 60000),
     leaseSeconds: getIntEnv('DISPARO_WORKER_LEASE_SECONDS', 120, 30, 900),
     batchSize: getIntEnv('DISPARO_WORKER_BATCH_SIZE', 5, 1, 50),
     workerId: String(process.env.DISPARO_WORKER_ID || `worker-${process.pid}`).slice(0, 120),

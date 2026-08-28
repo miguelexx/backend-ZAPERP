@@ -29,9 +29,11 @@ Há ainda a fila operacional autenticada (JWT + supervisor/admin) no mesmo prefi
 
 ## Worker de Disparo
 
-Executa separadamente com `npm run worker:disparo`. Defaults seguros: worker desligado, live desligado e dry-run ligado. Envio real só ocorre quando `DISPARO_WORKER_ENABLED=true`, `DISPARO_LIVE_ENABLED=true` e `DISPARO_DRY_RUN=false`. Poll default 2 s, lease 120 s, lote 5. Allowlist vazia permite qualquer empresa, mas os três gates continuam necessários.
+Processo **separado** do HTTP: `npm run worker:disparo` ou, em produção, o app PM2 `whatsapp-plataforma-disparo-worker` em `ecosystem.config.js` (fork, 1 instância, `autorestart`, `kill_timeout` 35s). A API **não** processa a fila.
 
-A fila é persistente; claim usa RPC PostgreSQL com `SKIP LOCKED`/advisory lock. Backoff e leases recuperam crash. Na Etapa 9 do working tree, lease expirado em `reservada` volta a pendente; `enviando` vira `incerta`. Item com provider id/data de envio não é reenviado automaticamente. Heartbeat/auditoria registram saúde; a migration correspondente ainda não foi confirmada como aplicada.
+Com `DISPARO_WORKER_ENABLED=false` o processo **permanece vivo** e grava heartbeat `disabled` (para o PM2 não entrar em loop de restart). A fila só é claimada com `DISPARO_WORKER_ENABLED=true`. Envio real só ocorre quando `DISPARO_WORKER_ENABLED=true`, `DISPARO_LIVE_ENABLED=true` e `DISPARO_DRY_RUN=false`. Poll default 2 s, heartbeat 10 s, lease 120 s, lote 5.
+
+A fila é persistente; claim usa RPC PostgreSQL com `SKIP LOCKED`/advisory lock. Backoff e leases recuperam crash. Lease expirado em `reservada` volta a pendente; `enviando` vira `incerta`. Item com provider id/data de envio não é reenviado automaticamente. Heartbeat em `disparo_worker_heartbeat`; o painel classifica `ativo` / `iniciando` / `sem_heartbeat` / `desabilitado` / `offline` (ativo = heartbeat running nos últimos 45s, sem flag de shutdown).
 
 ## Concorrência e escala
 

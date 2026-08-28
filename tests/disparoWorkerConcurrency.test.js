@@ -14,6 +14,7 @@ jest.mock('../helpers/disparoWorkerConfig', () => ({
     dryRun: true,
     canSendLive: false,
     pollMs: 2000,
+    heartbeatMs: 10000,
     leaseSeconds: 120,
     batchSize: 1,
     workerId: 'test-worker',
@@ -210,6 +211,8 @@ describe('disparoWorker — exports para testes', () => {
     expect(typeof worker.processarItem).toBe('function')
     expect(typeof worker.recuperarLeases).toBe('function')
     expect(typeof worker.claimItens).toBe('function')
+    expect(typeof worker.heartbeat).toBe('function')
+    expect(typeof worker.liberarReservas).toBe('function')
     expect(typeof worker._setIo).toBe('function')
   })
 })
