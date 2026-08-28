@@ -38,7 +38,7 @@ function timestampsParaStatus(novoStatus, agora) {
   return patch
 }
 
-const FILA_ITEM_SELECT = 'id, company_id, campanha_id, execucao_id, status, reference_id, provider_message_id, mensagem_id'
+const FILA_ITEM_SELECT = 'id, company_id, campanha_id, execucao_id, status, reference_id, provider_message_id, mensagem_id, entregue_em'
 
 async function carregarItemFila({ filaItemId, referenceId, providerMessageId, mensagemId, companyId }) {
   const cid = Number(companyId)
@@ -156,6 +156,9 @@ async function aplicarStatusDisparoFromWebhook({
     ...timestampsParaStatus(novoStatus, agora),
   }
 
+  if (novoStatus === 'lida' && !item.entregue_em) {
+    updates.entregue_em = agora
+  }
   if (providerMessageId && !item.provider_message_id) {
     updates.provider_message_id = String(providerMessageId)
   }
@@ -191,7 +194,88 @@ async function aplicarStatusDisparoFromWebhook({
   }
 }
 
+function ackDaMensagem(msg) {
+  if (!msg) return null
+  return msg.status_mensagem || msg.status || null
+}
+
+/**
+ * Alinha itens `enviada` da fila com o ACK já gravado em `mensagens` (ticks do chat).
+ * Cobre recibos que chegaram antes do hook da campanha passar a olhar o id do provedor.
+ */
+async function sincronizarFilaComAckDoChat({ execucaoId, companyId, io = null, limit = 40 } = {}) {
+  const cid = Number(companyId)
+  const eid = Number(execucaoId)
+  if (!cid || !eid) return { ok: false, ignored: 'params' }
+
+  const cap = Math.min(80, Math.max(1, Number(limit) || 40))
+  const { data: itens, error } = await supabase
+    .from('disparo_fila_itens')
+    .select('id, company_id, campanha_id, execucao_id, status, provider_message_id, mensagem_id')
+    .eq('execucao_id', eid)
+    .eq('company_id', cid)
+    .eq('status', 'enviada')
+    .limit(cap)
+  if (error) throw error
+  if (!Array.isArray(itens) || !itens.length) return { ok: true, atualizados: 0 }
+
+  const mensagemIds = [...new Set(itens.map((i) => i.mensagem_id).filter(Boolean))]
+  const pids = [...new Set(
+    itens
+      .map((i) => String(i.provider_message_id || '').trim())
+      .filter((p) => p && !p.startsWith('dry-')),
+  )]
+
+  const porMensagemId = new Map()
+  const porWhatsappId = new Map()
+
+  if (mensagemIds.length) {
+    const { data: msgs, error: e1 } = await supabase
+      .from('mensagens')
+      .select('id, status, status_mensagem, whatsapp_id')
+      .eq('company_id', cid)
+      .in('id', mensagemIds)
+    if (e1) throw e1
+    for (const m of msgs || []) porMensagemId.set(m.id, m)
+  }
+
+  if (pids.length) {
+    const { data: msgs, error: e2 } = await supabase
+      .from('mensagens')
+      .select('id, status, status_mensagem, whatsapp_id')
+      .eq('company_id', cid)
+      .in('whatsapp_id', pids)
+    if (e2) throw e2
+    for (const m of msgs || []) {
+      if (m.whatsapp_id) porWhatsappId.set(String(m.whatsapp_id), m)
+    }
+  }
+
+  let atualizados = 0
+  for (const item of itens) {
+    const msg = (item.mensagem_id && porMensagemId.get(item.mensagem_id))
+      || (item.provider_message_id && porWhatsappId.get(String(item.provider_message_id)))
+    const ack = ackDaMensagem(msg)
+    const novo = mapAckToFilaStatus(ack)
+    if (!novo || novo === 'enviada') continue
+
+    const r = await aplicarStatusDisparoFromWebhook({
+      providerMessageId: item.provider_message_id || msg?.whatsapp_id || null,
+      mensagemId: item.mensagem_id || msg?.id || null,
+      status: ack,
+      companyId: cid,
+      io,
+    })
+    if (r.ok && r.status && r.status !== 'enviada' && r.ignored !== 'status_no_upgrade') {
+      atualizados += 1
+    }
+  }
+
+  return { ok: true, atualizados }
+}
+
 module.exports = {
   aplicarStatusDisparoFromWebhook,
+  sincronizarFilaComAckDoChat,
   mapAckToFilaStatus,
 }

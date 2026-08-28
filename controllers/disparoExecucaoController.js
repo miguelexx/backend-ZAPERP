@@ -66,6 +66,24 @@ function getIo(req) {
   }
 }
 
+async function alinharFilaComAckDoChat(execucao, companyId, req) {
+  if (!execucao?.id) return execucao
+  try {
+    const { sincronizarFilaComAckDoChat } = require('../services/disparoWebhookHook')
+    await sincronizarFilaComAckDoChat({
+      execucaoId: execucao.id,
+      companyId,
+      io: getIo(req),
+      limit: 50,
+    })
+    const atualizada = await buscarExecucaoMaisRecente(execucao.campanha_id, companyId)
+    return atualizada || execucao
+  } catch (e) {
+    console.warn('[disparo:execucao] sync ack chat:', e?.message || e)
+    return execucao
+  }
+}
+
 async function carregarCampanha(campanhaId, companyId, res) {
   const { data, error } = await supabase
     .from('disparo_campanhas')
@@ -393,7 +411,8 @@ exports.obterExecucao = async (req, res) => {
     const campanha = await carregarCampanha(campanhaId, companyId, res)
     if (!campanha) return
 
-    const execucao = await buscarExecucaoMaisRecente(campanhaId, companyId)
+    let execucao = await buscarExecucaoMaisRecente(campanhaId, companyId)
+    execucao = await alinharFilaComAckDoChat(execucao, companyId, req)
 
     res.json({
       campanha: {
@@ -485,7 +504,7 @@ exports.resumoExecucao = async (req, res) => {
     const campanha = await carregarCampanha(campanhaId, companyId, res)
     if (!campanha) return
 
-    const execucao = await buscarExecucaoMaisRecente(campanhaId, companyId)
+    let execucao = await buscarExecucaoMaisRecente(campanhaId, companyId)
     if (!execucao) {
       return res.json({
         campanha_id: campanhaId,
@@ -494,6 +513,8 @@ exports.resumoExecucao = async (req, res) => {
         por_instancia: [],
       })
     }
+
+    execucao = await alinharFilaComAckDoChat(execucao, companyId, req)
 
     const detalhes = await montarContadoresPorStatus(execucao.id, companyId)
     const instanciaIds = detalhes.por_instancia.map((i) => i.instancia_id).filter(Boolean)

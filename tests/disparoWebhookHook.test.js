@@ -10,12 +10,13 @@ const supabase = require('../config/supabase')
 const { recalcularContadores } = require('../services/disparoFilaService')
 const {
   aplicarStatusDisparoFromWebhook,
+  sincronizarFilaComAckDoChat,
   mapAckToFilaStatus,
 } = require('../services/disparoWebhookHook')
 
 function mockChain(result = { data: null, error: null }) {
   const chain = {}
-  const methods = ['select', 'eq', 'update']
+  const methods = ['select', 'eq', 'update', 'in', 'limit', 'order']
   for (const m of methods) chain[m] = jest.fn(() => chain)
   chain.single = jest.fn().mockResolvedValue(result)
   chain.maybeSingle = jest.fn().mockResolvedValue(result)
@@ -278,5 +279,90 @@ describe('disparoWebhookHook — aplicarStatusDisparoFromWebhook', () => {
     expect(r.ok).toBe(true)
     expect(r.status).toBe('entregue')
     expect(updatePayload?.status).toBe('entregue')
+  })
+})
+
+describe('disparoWebhookHook — sincronizarFilaComAckDoChat', () => {
+  beforeEach(() => {
+    jest.clearAllMocks()
+  })
+
+  it('promove enviada → entregue quando o chat já está delivered', async () => {
+    const item = { ...itemEnviada, mensagem_id: 888 }
+    let updatePayload = null
+    let filaFromCount = 0
+
+    supabase.from.mockImplementation((table) => {
+      if (table === 'mensagens') {
+        return mockChain({
+          data: [{
+            id: 888,
+            status: 'delivered',
+            status_mensagem: 'delivered',
+            whatsapp_id: 'wamid-1',
+          }],
+          error: null,
+        })
+      }
+      if (table === 'disparo_fila_itens') {
+        filaFromCount += 1
+        if (filaFromCount === 1) {
+          return mockChain({ data: [item], error: null })
+        }
+        const selectChain = mockChain({ data: item, error: null })
+        const updateChain = mockChain({
+          data: { ...item, status: 'entregue' },
+          error: null,
+        })
+        updateChain.update = jest.fn((payload) => {
+          updatePayload = payload
+          return updateChain
+        })
+        let callCount = 0
+        return {
+          select: jest.fn(() => selectChain),
+          update: updateChain.update,
+          eq: jest.fn(function eq() {
+            callCount += 1
+            if (callCount > 2) return updateChain
+            return this || updateChain
+          }),
+        }
+      }
+      return mockChain()
+    })
+
+    const r = await sincronizarFilaComAckDoChat({
+      execucaoId: 50,
+      companyId: 10,
+    })
+
+    expect(r.ok).toBe(true)
+    expect(r.atualizados).toBe(1)
+    expect(updatePayload?.status).toBe('entregue')
+  })
+
+  it('não altera item cujo chat ainda está só sent', async () => {
+    const item = { ...itemEnviada, mensagem_id: 888 }
+    supabase.from.mockImplementation((table) => {
+      if (table === 'mensagens') {
+        return mockChain({
+          data: [{ id: 888, status: 'sent', status_mensagem: 'sent', whatsapp_id: 'wamid-1' }],
+          error: null,
+        })
+      }
+      if (table === 'disparo_fila_itens') {
+        return mockChain({ data: [item], error: null })
+      }
+      return mockChain()
+    })
+
+    const r = await sincronizarFilaComAckDoChat({
+      execucaoId: 50,
+      companyId: 10,
+    })
+
+    expect(r.ok).toBe(true)
+    expect(r.atualizados).toBe(0)
   })
 })

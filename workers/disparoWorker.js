@@ -576,6 +576,32 @@ async function talvezConcluir(execucaoId, companyId, campanhaId) {
   emitDisparo(io, companyId, EVENTS.CAMPANHA_CONCLUIDA, { campanha_id: campanhaId, execucao_id: execucaoId })
 }
 
+async function sincronizarAcksDasExecucoesAtivas() {
+  try {
+    const { sincronizarFilaComAckDoChat } = require('../services/disparoWebhookHook')
+    const { data: execs, error } = await supabase
+      .from('disparo_execucoes')
+      .select('id, company_id')
+      .eq('status', 'em_execucao')
+      .limit(15)
+    if (error || !Array.isArray(execs) || !execs.length) return
+    for (const e of execs) {
+      try {
+        await sincronizarFilaComAckDoChat({
+          execucaoId: e.id,
+          companyId: e.company_id,
+          io,
+          limit: 40,
+        })
+      } catch (err) {
+        console.warn('[disparoWorker] sync ack chat exec=', e.id, err?.message || err)
+      }
+    }
+  } catch (err) {
+    console.warn('[disparoWorker] sync ack chat:', err?.message || err)
+  }
+}
+
 async function tick() {
   if (shuttingDown || processing) return
   if (!cfg.workerEnabled) return
@@ -602,6 +628,7 @@ async function tick() {
       await liberarReservas(pendentesLiberar)
     }
     await heartbeat({ claimed: itens.length - pendentesLiberar.length })
+    await sincronizarAcksDasExecucoesAtivas()
   } catch (e) {
     console.error('[disparoWorker] tick erro:', e?.message)
   } finally {
