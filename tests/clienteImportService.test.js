@@ -14,8 +14,10 @@ const { executarImportacao } = require('../services/clienteImportService')
 // ---- Fake Supabase stateful (somente tags e cliente_tags) ----
 function makeFakeSupabase() {
   const db = {
-    tags: [], // { id, nome, cor, company_id }
-    cliente_tags: [], // { id, company_id, cliente_id, tag_id }
+    tags: [],
+    cliente_tags: [],
+    clientes: [],
+    conversas: [],
   }
   let tagSeq = 1
   let linkSeq = 1
@@ -28,13 +30,15 @@ function makeFakeSupabase() {
       _table: table,
       select() { return builder },
       insert(data) { payload = data; op = 'insert'; return builder },
+      update(data) { payload = data; op = 'update'; return builder },
       delete() { op = 'delete'; return builder },
       eq(col, val) { preds.push((row) => row[col] === val); return builder },
       in(col, arr) { const set = new Set(arr); preds.push((row) => set.has(row[col])); return builder },
       match(obj) { Object.entries(obj).forEach(([k, v]) => preds.push((row) => row[k] === v)); return builder },
       _matches(row) { return preds.every((p) => p(row)) },
+      _rows() { return Array.isArray(db[table]) ? db[table] : [] },
       async maybeSingle() {
-        const row = db[table].find((r) => builder._matches(r))
+        const row = builder._rows().find((r) => builder._matches(r))
         return { data: row ? { ...row } : null, error: null }
       },
       async single() {
@@ -46,13 +50,11 @@ function makeFakeSupabase() {
             return { data: { id: novo.id }, error: null }
           }
         }
-        const row = db[table].find((r) => builder._matches(r))
+        const row = builder._rows().find((r) => builder._matches(r))
         return { data: row ? { ...row } : null, error: row ? null : { message: 'not found' } }
       },
-      // Await direto no builder: insert (cliente_tags), delete, ou select em lista.
       then(resolve) {
         if (op === 'insert' && payload && table === 'cliente_tags') {
-          // simula UNIQUE(company_id, cliente_id, tag_id)
           const dup = db.cliente_tags.find(
             (r) => r.company_id === payload.company_id && r.cliente_id === payload.cliente_id && r.tag_id === payload.tag_id
           )
@@ -61,13 +63,18 @@ function makeFakeSupabase() {
           db.cliente_tags.push(novo)
           return resolve({ data: novo, error: null })
         }
+        if (op === 'update') {
+          const rows = builder._rows()
+          db[table] = rows.map((r) => (builder._matches(r) ? { ...r, ...payload } : r))
+          return resolve({ data: null, error: null })
+        }
         if (op === 'delete') {
-          const antes = db[table].length
-          db[table] = db[table].filter((r) => !builder._matches(r))
+          const rows = builder._rows()
+          const antes = rows.length
+          db[table] = rows.filter((r) => !builder._matches(r))
           return resolve({ data: null, error: null, count: antes - db[table].length })
         }
-        // select em lista: devolve todas as linhas que casam
-        return resolve({ data: db[table].filter((r) => builder._matches(r)).map((r) => ({ ...r })), error: null })
+        return resolve({ data: builder._rows().filter((r) => builder._matches(r)).map((r) => ({ ...r })), error: null })
       },
     }
     return builder
@@ -220,7 +227,7 @@ describe('clienteImportService — execução', () => {
     ]))
 
     // getOrCreateCliente recebeu o cid da empresa (7), não 999
-    expect(getOrCreateCliente).toHaveBeenCalledWith(sb, 7, '5534999991234', expect.objectContaining({ nomeSource: 'import' }))
+    expect(getOrCreateCliente).toHaveBeenCalledWith(sb, 7, '5534999991234', expect.objectContaining({ nomeSource: 'import_planilha' }))
     expect(sb.__db.tags[0].company_id).toBe(7)
     expect(sb.__db.cliente_tags[0].company_id).toBe(7)
   })

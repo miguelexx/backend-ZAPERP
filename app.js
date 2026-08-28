@@ -13,28 +13,15 @@ const tagsRoutes = require('./routes/tagRoutes')
 ensureUploadsRootExists()
 
 const isProd = isProduction()
+const {
+  getAllowedOrigins,
+  isOriginAllowed,
+  applyCorsHeaders,
+} = require('./helpers/corsOrigins')
 
 // Origens CORS (definidas antes do Helmet: também alimentam CSP frame-ancestors
 // para o SPA em outro host poder exibir PDFs/arquivos de GET /uploads em <iframe>.)
-const allowedOrigins = [
-  'https://zaperp.wmsistemas.inf.br',
-  'https://www.zaperp.wmsistemas.inf.br',
-  'http://zaperp.wmsistemas.inf.br',
-  'http://www.zaperp.wmsistemas.inf.br',
-  ...(process.env.NODE_ENV !== 'production'
-    ? ['http://localhost:3000', 'http://localhost:5173', 'http://127.0.0.1:5173', 'http://127.0.0.1:3000']
-    : [])
-]
-const extraOrigins = [
-  ...String(process.env.CORS_ORIGINS || '').split(','),
-  ...String(process.env.ZAPERP_CORS_EXTRA_ORIGINS || '').split(','),
-].map((s) => s.trim()).filter(Boolean)
-extraOrigins.forEach((o) => { if (o && !allowedOrigins.includes(o)) allowedOrigins.push(o) })
-
-const allowedOriginPatterns = [
-  /^https?:\/\/[a-z0-9-]+\.wmsistemas\.inf\.br$/i,
-  /^https?:\/\/[a-z0-9-]+\.wmsistemas\.ats$/i,
-]
+const allowedOrigins = getAllowedOrigins()
 
 function buildFrameAncestorsDirective() {
   const s = new Set(["'self'"])
@@ -143,15 +130,13 @@ app.use('/webhooks/whatsapp', webhookLimiter, webhookUltramsgRoutes)
 // =====================================================
 // CORS — aplicado APÓS os webhooks.
 // Só as rotas da API/frontend passam por aqui.
-// (allowedOrigins / allowedOriginPatterns definidos no topo do arquivo.)
+// (allowedOrigins definidos no topo do arquivo; ver helpers/corsOrigins.js.)
 // =====================================================
 
 const corsOptions = {
   origin(origin, callback) {
     // Requisições sem origin (Postman, apps mobile) → sempre permitir
-    if (!origin) return callback(null, true)
-    if (allowedOrigins.includes(origin)) return callback(null, true)
-    if (allowedOriginPatterns.some((re) => re.test(origin))) return callback(null, true)
+    if (isOriginAllowed(origin)) return callback(null, true)
     return callback(new Error('CORS não permitido para esta origem: ' + origin))
   },
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
@@ -444,6 +429,8 @@ if (hasFrontendDist) {
 // =====================================================
 // eslint-disable-next-line no-unused-vars
 app.use((err, req, res, next) => {
+  // Erros Express (500/403) sem ACAO viram "CORS" no browser em SPA cross-origin.
+  applyCorsHeaders(req, res)
   // Multer: tipo não permitido, tamanho excedido ou campo inesperado
   if (err && (err.code === 'LIMIT_FILE_SIZE' || err.code === 'LIMIT_UNEXPECTED_FILE' || (err.message && err.message.includes('não permitido')))) {
     const msg = err.code === 'LIMIT_FILE_SIZE'

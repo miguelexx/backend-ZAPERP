@@ -6,6 +6,7 @@ const { executarAssumirConversa } = require('../services/conversaAssumirInternoS
 const { buildClienteListagemSearchOr, buildPhoneSearchTerms } = require('../helpers/chatSearchHelper');
 const crmSync = require('../services/crmSyncService');
 const { syncUltraMsgContact } = require('../services/ultramsgSyncContact');
+const { marcarSchemaNomeProtecaoIndisponivel, sanitizarPatchNomeSchema } = require('../helpers/clienteNomeColunas');
 
 // Espera máxima (ms) para o enriquecimento via UltraMSG (nome real + foto) no cadastro
 // manual de contato. O WhatsApp não envia foto por webhook; buscamos aqui. Se a instância
@@ -459,21 +460,39 @@ exports.atualizarCliente = async (req, res) => {
   }
 
   try {
-    let q = supabase
-      .from('clientes')
-      .update({
-        ...(nome !== undefined && { nome }),
+    let payloadUpdate = {
+        ...(nome !== undefined && {
+          nome,
+          nome_origem: 'manual',
+          nome_protegido: true,
+          nome_override: true,
+        }),
         ...(observacoes !== undefined && { observacoes }),
         ...(email !== undefined && { email: email ? String(email).trim() : null }),
         ...(empresa !== undefined && { empresa: empresa ? String(empresa).trim() : null }),
         ...(foto_perfil !== undefined && { foto_perfil: foto_perfil ? String(foto_perfil).trim() : null }),
         ...(telefone !== undefined && { telefone: String(telefone).trim() }),
         atualizado_em: new Date().toISOString(),
-      })
+      }
+    let q = supabase
+      .from('clientes')
+      .update(payloadUpdate)
       .eq('id', Number(id))
       .eq('company_id', cid)
       .select()
-    const { data, error } = await q.maybeSingle();
+    let { data, error } = await q.maybeSingle();
+    if (error && marcarSchemaNomeProtecaoIndisponivel(error)) {
+      payloadUpdate = sanitizarPatchNomeSchema(payloadUpdate)
+      const retry = await supabase
+        .from('clientes')
+        .update(payloadUpdate)
+        .eq('id', Number(id))
+        .eq('company_id', cid)
+        .select()
+        .maybeSingle()
+      data = retry.data
+      error = retry.error
+    }
 
     if (error) {
       if (error.code === '23505') {

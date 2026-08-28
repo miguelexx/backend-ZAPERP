@@ -15,6 +15,8 @@ const {
 } = require('../helpers/phoneHelper')
 const { getOrCreateCliente, shouldUpdateFotoPerfil } = require('../helpers/conversationSync')
 const { chooseBestName, isBadName, getDisplayName } = require('../helpers/contactEnrichment')
+const { decidirPatchNomeCliente, clienteTemNomeProtegido } = require('../helpers/clienteNomeProtecao')
+const { marcarSchemaNomeProtecaoIndisponivel, updateClienteResiliente } = require('../helpers/clienteNomeColunas')
 
 const CACHE_TTL_MS = 5 * 60 * 1000
 const cache = new Map()
@@ -298,14 +300,26 @@ async function syncConversationContactOnJoin(supabase, conversaId, companyId, io
     if (needsFotoRefresh) _lastFotoRefreshByConv.set(key, Date.now())
 
     const variants = possiblePhonesBR(conv.telefone).length > 0 ? possiblePhonesBR(conv.telefone) : [conv.telefone]
-    const { data: cliente } = conv.cliente_id
-      ? await supabase.from('clientes').select('id, nome, pushname, telefone, foto_perfil').eq('id', conv.cliente_id).eq('company_id', companyId).maybeSingle()
-      : await supabase.from('clientes').select('id, nome, pushname, telefone, foto_perfil').eq('company_id', companyId).in('telefone', variants).limit(1).maybeSingle()
+    const cols = 'id, nome, pushname, telefone, foto_perfil, nome_protegido, nome_origem'
+    const colsBase = 'id, nome, pushname, telefone, foto_perfil'
+    async function loadCliente() {
+      const first = conv.cliente_id
+        ? await supabase.from('clientes').select(cols).eq('id', conv.cliente_id).eq('company_id', companyId).maybeSingle()
+        : await supabase.from('clientes').select(cols).eq('company_id', companyId).in('telefone', variants).limit(1).maybeSingle()
+      if (first.error && marcarSchemaNomeProtecaoIndisponivel(first.error)) {
+        return conv.cliente_id
+          ? supabase.from('clientes').select(colsBase).eq('id', conv.cliente_id).eq('company_id', companyId).maybeSingle()
+          : supabase.from('clientes').select(colsBase).eq('company_id', companyId).in('telefone', variants).limit(1).maybeSingle()
+      }
+      return first
+    }
+    const { data: cliente } = await loadCliente()
 
     const upCliente = {}
     const syncNomeValido = synced.nome && String(synced.nome).trim() && !isBadName(synced.nome)
-    if (syncNomeValido && (!cliente?.nome || String(cliente.nome).trim() !== String(synced.nome).trim())) {
-      upCliente.nome = String(synced.nome).trim()
+    if (syncNomeValido) {
+      const decided = decidirPatchNomeCliente(cliente, synced.nome, 'syncUltramsg', { company_id: companyId })
+      if (decided.patch) Object.assign(upCliente, decided.patch)
     }
     if (synced.pushname && (!cliente?.pushname || !String(cliente.pushname).trim())) upCliente.pushname = synced.pushname
     if (
@@ -317,11 +331,20 @@ async function syncConversationContactOnJoin(supabase, conversaId, companyId, io
     }
     const clienteIdToUpdate = conv.cliente_id || cliente?.id
     if (Object.keys(upCliente).length > 0 && clienteIdToUpdate) {
-      await supabase.from('clientes').update(upCliente).eq('id', clienteIdToUpdate).eq('company_id', companyId)
+      await updateClienteResiliente(supabase, {
+        id: clienteIdToUpdate,
+        companyId,
+        updates: upCliente,
+      })
     }
 
     const upConv = {}
-    if (syncNomeValido && (!conv.nome_contato_cache || !String(conv.nome_contato_cache).trim())) {
+    if (clienteTemNomeProtegido(cliente)) {
+      const nomeProt = cliente?.nome && String(cliente.nome).trim()
+      if (nomeProt && nomeProt !== (conv.nome_contato_cache || '')) {
+        upConv.nome_contato_cache = nomeProt
+      }
+    } else if (syncNomeValido && (!conv.nome_contato_cache || !String(conv.nome_contato_cache).trim())) {
       upConv.nome_contato_cache = String(synced.nome).trim()
     }
     if (
@@ -339,7 +362,9 @@ async function syncConversationContactOnJoin(supabase, conversaId, companyId, io
       ? await supabase.from('clientes').select('nome, pushname, telefone, foto_perfil').eq('id', conv.cliente_id).eq('company_id', companyId).maybeSingle()
       : await supabase.from('clientes').select('nome, pushname, telefone, foto_perfil').eq('company_id', companyId).in('telefone', variants).limit(1).maybeSingle()
     const { data: convAtual } = await supabase.from('conversas').select('nome_contato_cache, foto_perfil_contato_cache').eq('id', conversaId).eq('company_id', companyId).maybeSingle()
-    const nomeParaEmit = upConv.nome_contato_cache ?? convAtual?.nome_contato_cache ?? getDisplayName(cliAtual) ?? synced.nome ?? null
+    const nomeParaEmit = clienteTemNomeProtegido(cliente)
+      ? (String(cliente.nome || '').trim() || getDisplayName(cliAtual) || null)
+      : (upConv.nome_contato_cache ?? convAtual?.nome_contato_cache ?? getDisplayName(cliAtual) ?? synced.nome ?? null)
     const fotoParaEmit = upConv.foto_perfil_contato_cache ?? convAtual?.foto_perfil_contato_cache ?? cliAtual?.foto_perfil ?? synced.foto_perfil ?? null
 
     if (nomeParaEmit || fotoParaEmit) {

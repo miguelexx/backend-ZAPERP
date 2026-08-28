@@ -23,6 +23,7 @@
 | **PROVÁVEL · médio** | Migrations mostram unique completa de conversa por empresa/instância/telefone e depois unique parcial para conversa aberta. | Pode impedir múltiplos históricos onde a intenção seria só uma aberta. Confirmar constraints no banco e regra de histórico antes de mudar. |
 | **CONFIRMADO · segurança** | `.env.example` contém string com aparência de credencial; há `.env` e backup ignorados em artefato local. Valores não foram lidos/copied. | Risco de segredo reutilizado/vazamento local. Revisar histórico, remover exemplo realista e rotacionar por canal seguro. |
 | **CONFIRMADO · baixo** | Default do webhook limiter no código é 3.000/min, comentário do `.env.example` indica outro valor. | Operador pode dimensionar errado. Alinhar documento/exemplo ao código após decisão. |
+| **CONFIRMADO · médio** | `GET /chats/counts` faz várias contagens em paralelo; se estourar o timeout do proxy a resposta chega sem `Access-Control-Allow-Origin` e o Chrome reporta CORS (`zaperp` → `zapapi`). | **Corrigido (2026-08-27):** timeout interno (`CHAT_COUNTS_TIMEOUT_MS`, default 20s) devolve JSON 504 com CORS; Express/Socket.IO compartilham `helpers/corsOrigins.js`; handler de erro reaplica ACAO em origens permitidas. |
 
 ## "Buscar histórico no WhatsApp" — causa e limitação (2026-08-25)
 

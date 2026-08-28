@@ -1,17 +1,13 @@
 /**
  * Importação de clientes por planilha (.xlsx).
  *
- * Endpoints (ver routes/clienteRoutes.js):
  *  - POST /clientes/importar/preview  → analisa o arquivo e devolve a prévia (não grava nada)
  *  - POST /clientes/importar          → executa a importação (grava clientes + tags)
  *
- * Segurança:
- *  - Restrito a administradores (adminOnly na rota).
- *  - Isolamento por empresa: SEMPRE usa req.user.company_id; nunca aceita company_id do body.
- *  - Arquivo em memória (multer memoryStorage), com limite de tamanho e tipo .xlsx.
+ * company_id vem SEMPRE de req.user. Leitura via SheetJS (ExcelJS falha em alguns .xlsx reais).
  */
 
-const ExcelJS = require('exceljs')
+const XLSX = require('xlsx')
 const supabase = require('../config/supabase')
 const {
   detectColumns,
@@ -19,66 +15,79 @@ const {
   cellToString,
   MAX_DATA_ROWS,
 } = require('../helpers/clienteImportPlanner')
-const { executarImportacao } = require('../services/clienteImportService')
+const {
+  executarImportacao,
+  enriquecerPlanoComExistentes,
+} = require('../services/clienteImportService')
 
 const PREVIEW_SAMPLE_SIZE = 50
+const importLocks = new Map()
 
-/**
- * Lê o arquivo enviado (buffer) e devolve { headers, dataRows } da primeira planilha.
- * @param {Buffer} buffer
- * @returns {Promise<{ headers: string[], dataRows: Array<Array<string>> }>}
- */
-async function lerPlanilha(buffer) {
-  const wb = new ExcelJS.Workbook()
-  await wb.xlsx.load(buffer)
-  const ws = wb.worksheets[0]
-  if (!ws) {
-    const err = new Error('A planilha está vazia ou não pôde ser lida.')
-    err.status = 400
-    err.code = 'PLANILHA_VAZIA'
-    throw err
+function badRequest(message, code) {
+  const err = new Error(message)
+  err.status = 400
+  err.code = code
+  return err
+}
+
+function lerPlanilha(buffer) {
+  if (!buffer || !Buffer.isBuffer(buffer) || buffer.length < 4) {
+    throw badRequest('Arquivo vazio ou corrompido. Envie um .xlsx válido.', 'ARQUIVO_CORROMPIDO')
+  }
+  const isZip = buffer[0] === 0x50 && buffer[1] === 0x4B
+  if (!isZip) {
+    throw badRequest('Arquivo vazio ou corrompido. Envie um .xlsx válido.', 'ARQUIVO_CORROMPIDO')
   }
 
-  // exceljs: row.values é 1-indexed (posição 0 vazia). Convertemos para 0-indexed.
-  const toArray = (row) => {
-    const values = Array.isArray(row?.values) ? row.values : []
-    const out = []
-    for (let c = 1; c < values.length; c++) out.push(cellToString(values[c]))
-    return out
+  let wb
+  try {
+    wb = XLSX.read(buffer, {
+      type: 'buffer',
+      cellFormula: false,
+      cellHTML: false,
+      raw: true,
+    })
+  } catch {
+    throw badRequest('Arquivo vazio ou corrompido. Envie um .xlsx válido.', 'ARQUIVO_CORROMPIDO')
   }
 
-  const headerRow = ws.getRow(1)
-  const headers = toArray(headerRow)
+  const sheetName = Array.isArray(wb.SheetNames) ? wb.SheetNames[0] : null
+  if (!sheetName || !wb.Sheets?.[sheetName]) {
+    throw badRequest('A planilha está vazia ou não pôde ser lida.', 'PLANILHA_VAZIA')
+  }
 
+  const ws = wb.Sheets[sheetName]
+  const raw = XLSX.utils.sheet_to_json(ws, {
+    header: 1,
+    raw: true,
+    defval: null,
+    blankrows: true,
+  })
+
+  if (!Array.isArray(raw) || raw.length === 0) {
+    throw badRequest('A planilha está vazia ou não pôde ser lida.', 'PLANILHA_VAZIA')
+  }
+
+  const headerRow = Array.isArray(raw[0]) ? raw[0] : []
+  const headers = headerRow.map((h) => cellToString(h))
   const dataRows = []
-  const lastRow = ws.actualRowCount || ws.rowCount || 0
-  for (let r = 2; r <= lastRow; r++) {
-    const row = ws.getRow(r)
-    if (!row || !row.hasValues) continue
-    dataRows.push(toArray(row))
-    if (dataRows.length > MAX_DATA_ROWS) {
-      const err = new Error(
-        `A planilha excede o limite de ${MAX_DATA_ROWS.toLocaleString('pt-BR')} linhas. Divida o arquivo e importe em partes.`
+
+  for (let i = 1; i < raw.length; i++) {
+    const row = Array.isArray(raw[i]) ? raw[i] : []
+    if (dataRows.length >= MAX_DATA_ROWS) {
+      throw badRequest(
+        `A planilha excede o limite de ${MAX_DATA_ROWS.toLocaleString('pt-BR')} linhas. Divida o arquivo e importe em partes.`,
+        'PLANILHA_MUITO_GRANDE'
       )
-      err.status = 400
-      err.code = 'PLANILHA_MUITO_GRANDE'
-      throw err
     }
+    dataRows.push(row)
   }
 
   return { headers, dataRows }
 }
 
-/**
- * Resolve o mapeamento de colunas: usa o override do body (se enviado e válido) ou a
- * detecção automática pelos cabeçalhos.
- * @param {string[]} headers
- * @param {object} bodyMapping - { nome, telefone, serie } índices (0-indexed) opcionais
- * @returns {{ nome:number|null, telefone:number|null, serie:number|null, auto:object }}
- */
 function resolverMapeamento(headers, bodyMapping) {
   const auto = detectColumns(headers)
-  // Índice válido → número; null/vazio/ inválido → null ("não usar esta coluna")
   const parseIdx = (v) => {
     if (v == null || v === '') return null
     const n = Number(v)
@@ -87,37 +96,51 @@ function resolverMapeamento(headers, bodyMapping) {
   }
   const override = bodyMapping || {}
   const has = (k) => Object.prototype.hasOwnProperty.call(override, k)
-  // Se o campo veio no override (mesmo que null), respeita a escolha do usuário.
-  // Se não veio, usa a detecção automática pelos cabeçalhos.
   const resolve = (field) => (has(field) ? parseIdx(override[field]) : auto[field])
+
+  const serieOverride = has('serie')
+    ? override.serie
+    : (has('tag') ? override.tag : (has('tags') ? override.tags : undefined))
 
   return {
     nome: resolve('nome'),
     telefone: resolve('telefone'),
-    serie: resolve('serie'),
+    serie: serieOverride !== undefined ? parseIdx(serieOverride) : auto.serie,
     auto: { nome: auto.nome, telefone: auto.telefone, serie: auto.serie },
   }
 }
 
-/** Interpreta o mapeamento enviado no body (pode vir como JSON string no multipart). */
+function parseJsonField(raw) {
+  if (!raw) return {}
+  if (typeof raw === 'object') return raw
+  try {
+    const parsed = JSON.parse(raw)
+    return parsed && typeof parsed === 'object' ? parsed : {}
+  } catch {
+    return {}
+  }
+}
+
 function parseBodyMapping(req) {
   const raw = req.body?.mapping ?? req.body?.mapeamento
   if (!raw) {
-    // Também aceita campos soltos: mapping_nome, mapping_telefone, mapping_serie
     const solto = {
       nome: req.body?.mapping_nome,
       telefone: req.body?.mapping_telefone,
-      serie: req.body?.mapping_serie,
+      serie: req.body?.mapping_serie ?? req.body?.mapping_tag,
     }
     if (solto.nome != null || solto.telefone != null || solto.serie != null) return solto
     return {}
   }
-  if (typeof raw === 'object') return raw
-  try {
-    return JSON.parse(raw)
-  } catch {
-    return {}
-  }
+  return parseJsonField(raw)
+}
+
+function parseNomesPrincipais(req) {
+  return parseJsonField(req.body?.nomes_principais ?? req.body?.nomesPrincipais)
+}
+
+function parseFlagTrue(v) {
+  return v === true || v === 1 || String(v || '').toLowerCase() === 'true'
 }
 
 function requireFile(req, res) {
@@ -128,58 +151,78 @@ function requireFile(req, res) {
   return true
 }
 
-/**
- * POST /clientes/importar/preview
- * Analisa o arquivo e devolve a prévia SEM gravar nada.
- */
+function serializarPlanoPreview(plano, mapping) {
+  return {
+    headers: mapping.headers,
+    mapping: { nome: mapping.nome, telefone: mapping.telefone, serie: mapping.serie },
+    auto: mapping.auto,
+    colunas_faltando: mapping.faltando,
+    stats: plano.stats,
+    amostra: (plano.entries || []).slice(0, PREVIEW_SAMPLE_SIZE).map((e) => ({
+      nome: e.nome,
+      telefone: e.telefoneNormalizado,
+      tags: e.tags,
+      conflito: e.nomesConflitantes.length > 0,
+      nomes_conflitantes: e.nomesConflitantes,
+      alunos: e.alunos || [],
+      existente: e.existente || null,
+    })),
+    ignored: (plano.ignored || []).slice(0, 500),
+    conflicts: (plano.conflicts || []).slice(0, 500),
+    nome_sera_alterado: (plano.nomeSeraAlterado || []).slice(0, 500),
+    nomes_manuais_protegidos: (plano.nomesManuaisProtegidos || []).slice(0, 500),
+    ja_existentes: (plano.jaExistentesIguais || []).slice(0, 500),
+  }
+}
+
 exports.previewImportacao = async (req, res) => {
   if (!requireFile(req, res)) return
   try {
-    const { headers, dataRows } = await lerPlanilha(req.file.buffer)
+    const companyId = Number(req.user?.company_id)
+    const { headers, dataRows } = lerPlanilha(req.file.buffer)
     const mapping = resolverMapeamento(headers, parseBodyMapping(req))
+    const nomesPrincipais = parseNomesPrincipais(req)
 
     const faltando = []
-    if (mapping.nome == null) faltando.push('Nome do(a) Aluno(a)')
-    if (mapping.telefone == null) faltando.push('Celular do(a) Responsável Pedagógico')
-    // série é opcional (sem ela, importa sem tag) — não bloqueia
+    if (mapping.nome == null) faltando.push('Nome')
+    if (mapping.telefone == null) faltando.push('Telefone')
 
-    const plano = planImport(dataRows, mapping)
+    let plano = planImport(dataRows, mapping, { nomesPrincipais })
+    if (Number.isFinite(companyId) && companyId > 0) {
+      plano = await enriquecerPlanoComExistentes(supabase, companyId, plano)
+    }
 
-    return res.status(200).json({
+    return res.status(200).json(serializarPlanoPreview(plano, {
       headers,
-      mapping: { nome: mapping.nome, telefone: mapping.telefone, serie: mapping.serie },
+      nome: mapping.nome,
+      telefone: mapping.telefone,
+      serie: mapping.serie,
       auto: mapping.auto,
-      colunas_faltando: faltando,
-      stats: plano.stats,
-      // Amostra para a prévia (nome, telefone normalizado, tags)
-      amostra: plano.entries.slice(0, PREVIEW_SAMPLE_SIZE).map((e) => ({
-        nome: e.nome,
-        telefone: e.telefoneNormalizado,
-        tags: e.tags,
-        conflito: e.nomesConflitantes.length > 0,
-        nomes_conflitantes: e.nomesConflitantes,
-      })),
-      ignored: plano.ignored.slice(0, 500),
-      conflicts: plano.conflicts.slice(0, 500),
-    })
+      faltando,
+    }))
   } catch (err) {
     return responderErro(res, err, 'Erro ao analisar a planilha.')
   }
 }
 
-/**
- * POST /clientes/importar
- * Executa a importação: cria/reutiliza clientes e vincula as tags das séries.
- */
 exports.confirmarImportacao = async (req, res) => {
   if (!requireFile(req, res)) return
-  try {
-    const companyId = Number(req.user?.company_id)
-    if (!Number.isFinite(companyId) || companyId <= 0) {
-      return res.status(401).json({ erro: 'Não autorizado' })
-    }
+  const companyId = Number(req.user?.company_id)
+  if (!Number.isFinite(companyId) || companyId <= 0) {
+    return res.status(401).json({ erro: 'Não autorizado' })
+  }
 
-    const { headers, dataRows } = await lerPlanilha(req.file.buffer)
+  const lock = importLocks.get(companyId)
+  if (lock && Date.now() - lock < 120000) {
+    return res.status(409).json({
+      erro: 'Já existe uma importação em andamento para esta empresa. Aguarde terminar.',
+      codigo: 'IMPORTACAO_EM_ANDAMENTO',
+    })
+  }
+  importLocks.set(companyId, Date.now())
+
+  try {
+    const { headers, dataRows } = lerPlanilha(req.file.buffer)
     const mapping = resolverMapeamento(headers, parseBodyMapping(req))
 
     if (mapping.nome == null || mapping.telefone == null) {
@@ -189,7 +232,10 @@ exports.confirmarImportacao = async (req, res) => {
       })
     }
 
-    const plano = planImport(dataRows, mapping)
+    const nomesPrincipais = parseNomesPrincipais(req)
+    const confirmarNomeManual = parseFlagTrue(req.body?.confirmar_nomes_manuais ?? req.body?.confirmarNomesManuais)
+
+    let plano = planImport(dataRows, mapping, { nomesPrincipais })
     if (plano.entries.length === 0) {
       return res.status(400).json({
         erro: 'Nenhuma linha válida para importar (todas sem nome ou telefone válido).',
@@ -199,10 +245,13 @@ exports.confirmarImportacao = async (req, res) => {
       })
     }
 
-    const resultado = await executarImportacao(supabase, companyId, plano)
+    plano = await enriquecerPlanoComExistentes(supabase, companyId, plano)
+    const resultado = await executarImportacao(supabase, companyId, plano, { confirmarNomeManual })
     return res.status(200).json(resultado)
   } catch (err) {
     return responderErro(res, err, 'Erro ao importar clientes.')
+  } finally {
+    importLocks.delete(companyId)
   }
 }
 
@@ -214,3 +263,5 @@ function responderErro(res, err, fallbackMsg) {
     ...(err?.code ? { codigo: err.code } : {}),
   })
 }
+
+exports._test = { lerPlanilha, resolverMapeamento, importLocks }

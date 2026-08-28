@@ -12,6 +12,8 @@ const { getEmpresaWhatsappConfig } = require('./whatsappConfigService')
 const { getOrCreateCliente } = require('../helpers/conversationSync')
 const { normalizePhoneBR, possiblePhonesBR, phoneKeyBR } = require('../helpers/phoneHelper')
 const { isBadName, chooseBestName } = require('../helpers/contactEnrichment')
+const { clienteTemNomeProtegido } = require('../helpers/clienteNomeProtecao')
+const { marcarSchemaNomeProtecaoIndisponivel } = require('../helpers/clienteNomeColunas')
 const { getConfig, isProcessamentoPausado } = require('./configOperacionalService')
 const { registrarEvento, TIPOS } = require('./operationalAuditService')
 
@@ -115,21 +117,34 @@ async function findClienteCandidates(companyId, phoneNorm, rawJid, opts = {}) {
     : possiblePhonesBR(phoneNorm)
   const waList = waIdSearchVariants(phoneNorm, rawJid)
 
+  const CONTACT_SELECT =
+    'id, nome, telefone, wa_id, pushname, foto_perfil, email, empresa, company_id, nome_protegido, nome_origem'
+  const CONTACT_SELECT_BASE =
+    'id, nome, telefone, wa_id, pushname, foto_perfil, email, empresa, company_id'
+
+  async function selectBy(col, values) {
+    const first = await supabase
+      .from('clientes')
+      .select(CONTACT_SELECT)
+      .eq('company_id', company_id)
+      .in(col, values)
+    if (first.error && marcarSchemaNomeProtecaoIndisponivel(first.error)) {
+      return supabase
+        .from('clientes')
+        .select(CONTACT_SELECT_BASE)
+        .eq('company_id', company_id)
+        .in(col, values)
+    }
+    return first
+  }
+
   const byId = new Map()
   if (waList.length) {
-    const { data: a } = await supabase
-      .from('clientes')
-      .select('id, nome, telefone, wa_id, pushname, foto_perfil, email, empresa, company_id')
-      .eq('company_id', company_id)
-      .in('wa_id', waList)
+    const { data: a } = await selectBy('wa_id', waList)
     for (const r of a || []) byId.set(r.id, r)
   }
   if (phones.length) {
-    const { data: b } = await supabase
-      .from('clientes')
-      .select('id, nome, telefone, wa_id, pushname, foto_perfil, email, empresa, company_id')
-      .eq('company_id', company_id)
-      .in('telefone', phones)
+    const { data: b } = await selectBy('telefone', phones)
     for (const r of b || []) byId.set(r.id, r)
   }
 
@@ -170,7 +185,7 @@ async function syncOneAgendaContact(companyId, parsed) {
     const existente = rows[0]
     const updates = {}
     const telefoneTail = String(parsed.phone).replace(/\D/g, '').slice(-6) || null
-    if (fieldsBase.nome && String(fieldsBase.nome).trim()) {
+    if (fieldsBase.nome && String(fieldsBase.nome).trim() && !clienteTemNomeProtegido(existente)) {
       const { name: bestNome, decision } = chooseBestName(
         existente.nome,
         String(fieldsBase.nome).trim(),

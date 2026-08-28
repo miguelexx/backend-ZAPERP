@@ -2,6 +2,7 @@ const {
   detectColumns,
   planImport,
   normalizeHeader,
+  cellToPhoneString,
 } = require('../helpers/clienteImportPlanner')
 
 // Cabeçalhos reais do modelo (secretaria), com colunas irrelevantes ao redor.
@@ -31,8 +32,22 @@ describe('clienteImportPlanner — detecção de colunas', () => {
     expect(m.telefone).toBe(2)
   })
 
-  it('retorna null quando a coluna não existe', () => {
-    const m = detectColumns(['Coluna A', 'Coluna B'])
+  it('detecta Nome, Telefone e Tags da planilha de alunos', () => {
+    const m = detectColumns(['Nome', 'Telefone', 'Tags'])
+    expect(m.nome).toBe(0)
+    expect(m.telefone).toBe(1)
+    expect(m.serie).toBe(2)
+  })
+
+  it('detecta variações seguras (caixa, acento, Tag/Tags, Celular/WhatsApp/Fone, Nome completo)', () => {
+    const m = detectColumns(['NOME COMPLETO', 'WhatsApp', 'Tag'])
+    expect(m.nome).toBe(0)
+    expect(m.telefone).toBe(1)
+    expect(m.serie).toBe(2)
+  })
+
+  it('não escolhe coluna incorreta por casamento parcial curto', () => {
+    const m = detectColumns(['Objetivo da Contratação', 'E-mail do (a) Responsável Pedagógico', 'Turno'])
     expect(m.nome).toBeNull()
     expect(m.telefone).toBeNull()
     expect(m.serie).toBeNull()
@@ -131,8 +146,43 @@ describe('clienteImportPlanner — planejamento', () => {
     expect(plano.entries[0].nome).toBe('Maria Ana') // mantém o primeiro
     expect(plano.conflicts).toHaveLength(1)
     expect(plano.conflicts[0].nomesConflitantes).toEqual(['Maria Ana', 'Pedro Ana'])
-    // Ambas as séries (irmãos com o mesmo responsável) são preservadas
+    expect(plano.conflicts[0].alunos).toHaveLength(2)
+    expect(plano.conflicts[0].alunos.map((a) => a.serie)).toEqual([
+      'Maternal 3 (03 anos)',
+      '5º Ano do Ensino Fundamental I',
+    ])
     expect(plano.entries[0].tags).toEqual(['Maternal 3 (03 anos)', '5º Ano do Ensino Fundamental I'])
+  })
+
+  it('permite escolher o nome principal do telefone compartilhado', () => {
+    const rows = [
+      ['Maria Ana', '34999991234', 'Maternal 3 (03 anos)'],
+      ['Pedro Ana', '34999991234', '5º Ano do Ensino Fundamental I'],
+    ]
+    const primeiro = planImport(rows, mapping)
+    const key = primeiro.entries[0].phoneKey
+    const plano = planImport(rows, mapping, { nomesPrincipais: { [key]: 'Pedro Ana' } })
+    expect(plano.entries[0].nome).toBe('Pedro Ana')
+    expect(plano.conflicts[0].nome).toBe('Pedro Ana')
+  })
+
+  it('preserva acentos e símbolos da tag integralmente (não divide a série)', () => {
+    const plano = planImport(
+      [['Alexia', '5534999514579', '3ª Série do Ensino Médio']],
+      mapping
+    )
+    expect(plano.entries[0].tags).toEqual(['3ª Série do Ensino Médio'])
+  })
+
+  it('não perde dígitos nem o 55; não converte telefone com Number()', () => {
+    const plano = planImport([['Alexia', '5534999514579', 'X']], mapping)
+    expect(plano.entries[0].telefoneNormalizado).toBe('5534999514579')
+    expect(String(plano.entries[0].telefoneNormalizado).includes('e')).toBe(false)
+  })
+
+  it('expande notação científica de telefone sem Number()', () => {
+    expect(cellToPhoneString('5.534999514579E+12')).toBe('5534999514579')
+    expect(cellToPhoneString(5534999514579)).toBe('5534999514579')
   })
 
   it('linha sem série é importada sem tag (série é opcional)', () => {

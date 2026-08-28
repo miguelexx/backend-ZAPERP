@@ -11,7 +11,7 @@ O banco principal é PostgreSQL via Supabase JS e `SUPABASE_SERVICE_ROLE_KEY` (`
 | Grupo | Tabelas e campos importantes |
 |---|---|
 | Tenant/acesso | `empresas(id, ativo, configs...)`; `usuarios(id, company_id, perfil, ativo, senha_hash)`; `departamentos`; `usuario_departamentos`; `usuario_permissoes` |
-| Contato | `clientes(company_id, telefone, nome, pushname, foto_perfil)`; `tags`; `cliente_tags` |
+| Contato | `clientes(company_id, telefone, nome, pushname, foto_perfil, nome_origem, nome_protegido)`; `tags`; `cliente_tags` |
 | Atendimento | `conversas(company_id, cliente_id, telefone, whatsapp_instance_id, departamento_id, atendente_id, status_atendimento, ultima_atividade...)`; `mensagens(company_id, conversa_id, whatsapp_instance_id, whatsapp_id, client_temp_id, direcao, tipo, status, status_mensagem, url...)`; `atendimentos`; `historico_atendimentos`; `conversa_tags`; `conversa_unreads`; `conversa_usuario_prefs`; `conversa_atendentes`; `mensagens_ocultas` |
 | Chatbot/SLA | `ia_config`; `regras_automaticas`; `bot_logs`; `respostas_salvas`; `avaliacoes_atendimento`; tabelas de alerta sem resposta e alerta admin |
 | WhatsApp/operação | `whatsapp_instances`; legado `empresa_zapi`; `webhook_logs`; `whatsapp_envio_guard_logs`; `jobs`; `checkpoints_sync`; `sync_locks`; `configuracoes_operacionais`; `auditoria_log`; `auditoria_eventos` |
@@ -59,7 +59,10 @@ Como o backend usa service role, RLS é ignorado: toda leitura/update/delete pre
 
 Aplicar migrations por nome, depois de backup e prechecks. Para índices grandes, comparar a migration normal com `supabase/production/*_concurrently.sql`; não aplicar ambas cegamente. Migrations destrutivas de agosto removem CRM/campanhas legadas/planos/tabelas auxiliares e exigem confirmação do estado. Nunca executar `supabase/scripts_manuais/perigosos/` automaticamente.
 
-### Migration mais recente (2026-08-23)
+### Migration mais recente (2026-08-27)
+
+`20260827130000_clientes_nome_protegido.sql` — adiciona `clientes.nome_origem`, `clientes.nome_protegido` e `clientes.nome_override`, com trigger que impede webhooks/sync de alterar nome protegido. **Não aplicar automaticamente**; exigir autorização antes do deploy.
+
 
 `20260823230000_chat_search_word_prefix.sql` — **sem novas tabelas**. Adiciona:
 - Extensões `unaccent` e `pg_trgm` (se não existirem)

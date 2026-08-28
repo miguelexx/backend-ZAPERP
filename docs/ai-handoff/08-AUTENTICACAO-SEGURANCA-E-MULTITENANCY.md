@@ -17,7 +17,7 @@ Pontos de atenção confirmados: broadcasts na sala da empresa são mais amplos 
 ## Proteções HTTP
 
 - Helmet habilita headers e CSP; HSTS é aplicado em produção. `trust proxy` é configurado para o proxy esperado.
-- CORS usa allowlist e padrões de origem. Webhooks são montados antes de CORS, intencionalmente server-to-server.
+- CORS usa allowlist e padrões de origem em `helpers/corsOrigins.js` (Express e Socket.IO). Webhooks são montados antes de CORS, intencionalmente server-to-server. O handler global de erro reaplica `Access-Control-Allow-Origin` para origens permitidas, para o browser não mascarar 4xx/5xx como falha de CORS.
 - JSON tem limite e captura de raw body; URL encoded limita 1 MB. Handler central sanitiza erro em produção.
 - Rate limit em memória: login 20/min, webhook 3.000/min, API 30.000/min, destrutivas 300/min, IA 120/min pelos defaults do código. A descrição de webhook em `.env.example` diverge do default implementado.
 - O bucket da API pode extrair claims do JWT sem verificar assinatura apenas para compor a chave; autenticação posterior continua obrigatória. Não usar isso como autorização.

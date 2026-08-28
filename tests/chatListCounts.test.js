@@ -4,6 +4,8 @@ const {
   rowVisibleInPostFilteredList,
   getStartOfTodayIso,
   getEndOfTodayIso,
+  withTimeout,
+  getChatCountsTimeoutMs,
 } = require('../services/chatListCountsService')
 
 describe('chatListCountsService', () => {
@@ -95,5 +97,30 @@ describe('chatListCountsService', () => {
         { status_atendimento: 'em_atendimento' }
       )
     ).toBe(false)
+  })
+
+  test('withTimeout resolve rápido e rejeita com CHAT_COUNTS_TIMEOUT', async () => {
+    await expect(withTimeout(Promise.resolve(7), 200)).resolves.toBe(7)
+    let resolveHang
+    const hang = new Promise((resolve) => { resolveHang = resolve })
+    await expect(withTimeout(hang, 20)).rejects.toMatchObject({
+      code: 'CHAT_COUNTS_TIMEOUT',
+    })
+    resolveHang()
+  })
+
+  test('getChatCountsTimeoutMs usa default e clampa', () => {
+    const prev = process.env.CHAT_COUNTS_TIMEOUT_MS
+    try {
+      delete process.env.CHAT_COUNTS_TIMEOUT_MS
+      expect(getChatCountsTimeoutMs()).toBe(20000)
+      process.env.CHAT_COUNTS_TIMEOUT_MS = '1000'
+      expect(getChatCountsTimeoutMs()).toBe(3000)
+      process.env.CHAT_COUNTS_TIMEOUT_MS = '999999'
+      expect(getChatCountsTimeoutMs()).toBe(50000)
+    } finally {
+      if (prev == null) delete process.env.CHAT_COUNTS_TIMEOUT_MS
+      else process.env.CHAT_COUNTS_TIMEOUT_MS = prev
+    }
   })
 })

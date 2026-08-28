@@ -14,6 +14,7 @@ const { syncUltraMsgContact } = require('../services/ultramsgSyncContact')
 const { chooseBestName, isBadName } = require('./contactEnrichment')
 const { isGroupConversation } = require('../helpers/conversaHelper')
 const { phoneKeyBR } = require('../helpers/phoneHelper')
+const { clienteTemNomeProtegido } = require('./clienteNomeProtecao')
 
 function isValidPhotoUrl(url) {
   return url && typeof url === 'string' && url.trim().startsWith('http')
@@ -92,7 +93,7 @@ async function enrichConversationsWithContactData(conversas, company_id, opts = 
     for (const [id, data] of results) {
       const { data: convRow } = await supabase
         .from('conversas')
-        .select('nome_contato_cache, foto_perfil_contato_cache')
+        .select('nome_contato_cache, foto_perfil_contato_cache, cliente_id')
         .eq('id', Number(id))
         .eq('company_id', company_id)
         .maybeSingle()
@@ -100,8 +101,22 @@ async function enrichConversationsWithContactData(conversas, company_id, opts = 
       const nomeAtual = convRow?.nome_contato_cache ? String(convRow.nome_contato_cache).trim() : null
       const fotoAtual = convRow?.foto_perfil_contato_cache ? String(convRow.foto_perfil_contato_cache).trim() : null
 
+      let clienteRow = null
+      if (convRow?.cliente_id) {
+        const { data: cli } = await supabase
+          .from('clientes')
+          .select('nome, nome_protegido')
+          .eq('id', convRow.cliente_id)
+          .eq('company_id', company_id)
+          .maybeSingle()
+        clienteRow = cli
+      }
+
       const fields = {}
-      if (data.nome && !isBadName(data.nome)) {
+      if (clienteTemNomeProtegido(clienteRow)) {
+        const nomeFixo = clienteRow?.nome ? String(clienteRow.nome).trim() : null
+        if (nomeFixo && nomeFixo !== nomeAtual) fields.nome_contato_cache = nomeFixo
+      } else if (data.nome && !isBadName(data.nome)) {
         const { name: bestNome, decision } = chooseBestName(nomeAtual, data.nome, 'syncUltramsg', { fromMe: false, company_id })
         if (bestNome && decision === 'updated') fields.nome_contato_cache = bestNome
       }
@@ -109,7 +124,12 @@ async function enrichConversationsWithContactData(conversas, company_id, opts = 
 
       if (Object.keys(fields).length > 0) {
         await supabase.from('conversas').update(fields).eq('id', Number(id)).eq('company_id', company_id)
-        updates.push({ id: Number(id), nome: fields.nome_contato_cache || data.nome, foto: fields.foto_perfil_contato_cache || data.foto })
+        updates.push({
+          id: Number(id),
+          nome: fields.nome_contato_cache
+            || (clienteTemNomeProtegido(clienteRow) ? (clienteRow?.nome || nomeAtual) : data.nome),
+          foto: fields.foto_perfil_contato_cache || data.foto,
+        })
       } else {
         updates.push({ id: Number(id), nome: data.nome, foto: data.foto })
       }

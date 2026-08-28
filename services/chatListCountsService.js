@@ -675,49 +675,85 @@ function overridesFromListQuery(query = {}) {
   return {}
 }
 
-async function getChatFilterCounts(req) {
-  const ctx = await resolveChatListCountsContext(req)
-  const counts = await Promise.all([
-    countConversasWithFilter(ctx, {}),
-    countConversasWithFilter(ctx, { minha_fila: true }),
-    countConversasWithFilter(ctx, { hoje: true }),
-    countConversasWithFilter(ctx, { status_atendimento: 'aberta' }),
-    countConversasWithFilter(ctx, { status_atendimento: 'em_atendimento' }),
-    countConversasWithFilter(ctx, { status_atendimento: 'fechada' }),
-    countConversasWithFilter(ctx, {
-      status_atendimento: 'fechada',
-      finalizacao_motivo: 'ausencia_cliente',
-    }),
-    countConversasWithFilter(ctx, { aguardando_cliente: true }),
-    ctx.atendimentoModoSimplesEmpresa
-      ? countConversasWithFilter(ctx, { aguardando_atendente: true })
-      : Promise.resolve(0),
-    countConversasWithFilter(ctx, { pagamento_pendente: true }),
-    countConversasWithFilter(ctx, { em_atraso: true }),
-    countConversasTransferidas(ctx),
-    ctx.separarMensagensDisparadasEmpresa
-      ? countConversasWithFilter(ctx, { status_atendimento: 'mensagem_disparada' })
-      : Promise.resolve(0),
-  ])
+function getChatCountsTimeoutMs() {
+  const raw = Number(process.env.CHAT_COUNTS_TIMEOUT_MS)
+  if (!Number.isFinite(raw) || raw <= 0) return 20000
+  return Math.min(Math.max(Math.floor(raw), 3000), 50000)
+}
 
-  return {
-    total: counts[0],
-    minha_fila: counts[1],
-    hoje: counts[2],
-    abertas: counts[3],
-    em_atendimento: counts[4],
-    finalizadas: counts[5],
-    por_ausencia: counts[6],
-    aguardando_cliente: counts[7],
-    aguardando_atendente: counts[8],
-    pagamentos_pendentes: counts[9],
-    em_atraso: counts[10],
-    transferidos: counts[11],
-    mensagens_disparadas: counts[12],
-    // aguardando_funcionario vem de GET /supervisao/resumo no frontend
-    aguardando: counts[7],
-    atraso: counts[10],
-  }
+function withTimeout(promise, timeoutMs) {
+  if (!timeoutMs || timeoutMs <= 0) return promise
+  let settled = false
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      if (settled) return
+      settled = true
+      const err = new Error('Timeout ao contar conversas')
+      err.code = 'CHAT_COUNTS_TIMEOUT'
+      reject(err)
+    }, timeoutMs)
+    promise.then(
+      (value) => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        resolve(value)
+      },
+      (err) => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        reject(err)
+      }
+    )
+  })
+}
+async function getChatFilterCounts(req) {
+  const timeoutMs = getChatCountsTimeoutMs()
+  return withTimeout((async () => {
+    const ctx = await resolveChatListCountsContext(req)
+    const counts = await Promise.all([
+      countConversasWithFilter(ctx, {}),
+      countConversasWithFilter(ctx, { minha_fila: true }),
+      countConversasWithFilter(ctx, { hoje: true }),
+      countConversasWithFilter(ctx, { status_atendimento: 'aberta' }),
+      countConversasWithFilter(ctx, { status_atendimento: 'em_atendimento' }),
+      countConversasWithFilter(ctx, { status_atendimento: 'fechada' }),
+      countConversasWithFilter(ctx, {
+        status_atendimento: 'fechada',
+        finalizacao_motivo: 'ausencia_cliente',
+      }),
+      countConversasWithFilter(ctx, { aguardando_cliente: true }),
+      ctx.atendimentoModoSimplesEmpresa
+        ? countConversasWithFilter(ctx, { aguardando_atendente: true })
+        : Promise.resolve(0),
+      countConversasWithFilter(ctx, { pagamento_pendente: true }),
+      countConversasWithFilter(ctx, { em_atraso: true }),
+      countConversasTransferidas(ctx),
+      ctx.separarMensagensDisparadasEmpresa
+        ? countConversasWithFilter(ctx, { status_atendimento: 'mensagem_disparada' })
+        : Promise.resolve(0),
+    ])
+
+    return {
+      total: counts[0],
+      minha_fila: counts[1],
+      hoje: counts[2],
+      abertas: counts[3],
+      em_atendimento: counts[4],
+      finalizadas: counts[5],
+      por_ausencia: counts[6],
+      aguardando_cliente: counts[7],
+      aguardando_atendente: counts[8],
+      pagamentos_pendentes: counts[9],
+      em_atraso: counts[10],
+      transferidos: counts[11],
+      mensagens_disparadas: counts[12],
+      // aguardando_funcionario vem de GET /supervisao/resumo no frontend
+      aguardando: counts[7],
+      atraso: counts[10],
+    }
+  })(), timeoutMs)
 }
 
 module.exports = {
@@ -728,6 +764,8 @@ module.exports = {
   rowVisibleInPostFilteredList,
   parseConversaIdsQuery,
   getChatFilterCounts,
+  getChatCountsTimeoutMs,
+  withTimeout,
   getStartOfTodayIso,
   getEndOfTodayIso,
 }

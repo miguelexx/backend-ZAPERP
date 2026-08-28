@@ -207,3 +207,9 @@ if (io) emitirConversaAtualizada(io, company_id, conversa_id, payload, { skipAtu
 ```
 
 Falha de emit **não** pode virar 500 depois que o nome já foi persistido.
+
+---
+
+## 17. Nome importado não se protege com score de `nomeSource`
+
+**Armadilha:** subir `SOURCE_SCORE.import` para “ganhar” do WhatsApp. O nome atual é comparado como `nome_existente` (70); `syncUltramsg`/`name` (110) continuam a sobrescrever. A defesa é persistente: `clientes.nome_protegido` + `nome_origem` (`import_planilha` | `manual`) e o trigger `trg_proteger_nome_cliente`. Fontes automáticas não enviam `nome_override`.

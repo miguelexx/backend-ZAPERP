@@ -31,9 +31,10 @@ const SOURCE_SCORE = {
   chatName: 80,
   pushname: 60,
   nome_existente: 70,
-  // import: nome vindo de planilha (.xlsx). Baixo (abaixo de nome_existente=70) para
-  // preencher contato sem nome, mas NUNCA sobrescrever um nome bom já cadastrado.
+  // import legado: não usar para sobrescrever. A importação por planilha usa
+  // origem persistente import_planilha + nome_protegido (helpers/clienteNomeProtecao).
   import: 50,
+  import_planilha: 200,
   unknown: 0
 }
 
@@ -99,6 +100,22 @@ function chooseBestName(currentName, candidateName, source, opts = {}) {
   const { fromMe = false, company_id, telefoneTail } = opts
   const curr = normalizeName(currentName)
   const cand = normalizeName(candidateName)
+  const src = String(source || '')
+
+  // Proteção persistente: fontes automáticas nunca substituem nome travado.
+  if (opts.nomeProtegido === true && src !== 'manual' && src !== 'import_planilha') {
+    return { name: curr || null, decision: 'kept' }
+  }
+
+  // Importação confirmada: o nome da coluna escolhida prevalece sobre WhatsApp/push/sync.
+  // Edição manual protegida só é substituída com confirmarNomeManual.
+  if (src === 'import_planilha' && cand && !isBadName(cand)) {
+    if (opts.nomeProtegido === true && opts.nomeOrigem === 'manual' && opts.confirmarNomeManual !== true) {
+      return { name: curr, decision: 'kept' }
+    }
+    if (curr && curr === cand) return { name: curr, decision: 'unchanged' }
+    return { name: cand, decision: 'updated' }
+  }
 
   // Candidato ruim → mantém atual
   if (isBadName(cand)) {

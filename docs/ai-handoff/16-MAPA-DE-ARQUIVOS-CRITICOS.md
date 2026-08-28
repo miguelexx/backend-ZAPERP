@@ -5,7 +5,7 @@
 | Arquivo/caminho | Responsabilidade / módulos | Risco | Testes e cuidado obrigatório |
 |---|---|---|---|
 | `index.js` | boot HTTP, Socket.IO, env e schedulers | crítico | `auth`, socket, schedulers; manter fail-fast e uma instalação de handlers/jobs. |
-| `app.js` | pipeline Express, mounts, segurança, static/health | crítico | `auth`, `health`, CSP/uploads; preservar ordem webhook→CORS/logger e aliases `/api`. |
+| `app.js` | pipeline Express, mounts, segurança, static/health | crítico | `auth`, `health`, CSP/uploads; preservar ordem webhook→CORS/logger e aliases `/api`. CORS HTTP em `helpers/corsOrigins.js` (mesmo allowlist do Socket.IO em `index.js`). |
 | `middleware/auth.js` | JWT/tenant | crítico | `auth`, `productionAuthorization`, CRM; nunca aceitar tenant externo. |
 | `middleware/requireWebhookToken.js` + resolvers | autenticação/resolução webhook | crítico | webhook/auth/multi-instância; timing-safe, fail closed, sem token em log. |
 | `middleware/rateLimit.js` | buckets/limites em memória | alto | `rateLimitBucket`; mudanças afetam disponibilidade e proxy/IP. |

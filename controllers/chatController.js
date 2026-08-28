@@ -28,6 +28,7 @@ const {
   clearReabertaFaltaInteracao,
 } = require('../helpers/reabertaFaltaInteracaoHelper')
 const { getDisplayName, normalizeName, isBadName } = require('../helpers/contactEnrichment')
+const { updateClienteResiliente } = require('../helpers/clienteNomeColunas')
 const { tryMarkWaitingAfterHumanOutbound } = require('../services/absenceFinalizationService')
 const {
   aplicarModoSimplesNoPayload,
@@ -3672,27 +3673,36 @@ exports.atualizarNomeContato = async (req, res) => {
 
     if (clienteId) {
       try {
-        const first = await supabase
-          .from('clientes')
-          .update({ nome, atualizado_em: new Date().toISOString() })
-          .eq('id', clienteId)
-          .eq('company_id', company_id)
-          .select('id, nome, telefone, email, empresa, observacoes, foto_perfil')
-          .maybeSingle()
-
-        let cli = first.data
+        const first = await updateClienteResiliente(supabase, {
+          id: clienteId,
+          companyId: company_id,
+          updates: {
+            nome,
+            nome_origem: 'manual',
+            nome_protegido: true,
+            nome_override: true,
+            atualizado_em: new Date().toISOString(),
+          },
+        })
+        let cli = null
         let errCli = first.error
-
-        if (errCli) {
-          const retry = await supabase
+        if (!errCli) {
+          let after = await supabase
             .from('clientes')
-            .update({ nome })
+            .select('id, nome, telefone, email, empresa, observacoes, foto_perfil, nome_protegido, nome_origem')
             .eq('id', clienteId)
             .eq('company_id', company_id)
-            .select('id, nome, telefone, email, empresa, observacoes, foto_perfil')
             .maybeSingle()
-          cli = retry.data
-          errCli = retry.error
+          if (after.error) {
+            after = await supabase
+              .from('clientes')
+              .select('id, nome, telefone, email, empresa, observacoes, foto_perfil')
+              .eq('id', clienteId)
+              .eq('company_id', company_id)
+              .maybeSingle()
+          }
+          cli = after.data
+          errCli = after.error
         }
 
         if (errCli) {
@@ -9568,6 +9578,10 @@ exports.contarConversasPorFiltros = async (req, res) => {
     const counts = await getChatFilterCounts(req)
     return res.json(counts)
   } catch (err) {
+    if (err && err.code === 'CHAT_COUNTS_TIMEOUT') {
+      console.warn('[contarConversasPorFiltros] timeout')
+      return res.status(504).json({ error: 'Timeout ao contar conversas' })
+    }
     console.error('[contarConversasPorFiltros]', err)
     return res.status(500).json({ error: 'Erro ao contar conversas' })
   }

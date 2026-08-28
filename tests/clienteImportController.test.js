@@ -7,6 +7,12 @@
 // config/supabase é mockado pelo tests/setup.js. Mockamos o service para inspecionar args.
 jest.mock('../services/clienteImportService', () => ({
   executarImportacao: jest.fn(),
+  enriquecerPlanoComExistentes: jest.fn(async (_sb, _cid, plano) => ({
+    ...plano,
+    nomeSeraAlterado: [],
+    nomesManuaisProtegidos: [],
+    jaExistentesIguais: [],
+  })),
 }))
 
 const ExcelJS = require('exceljs')
@@ -94,6 +100,42 @@ describe('clienteImportController — preview', () => {
     expect(res.body.amostra[0].tags).toEqual([])
   })
 
+  it('detecta as 3 colunas Nome/Telefone/Tags', async () => {
+    const buffer = await montarXlsx(
+      [['ALEXIA CRISTINA MARCHEZAN DOS SANTOS', '5534999514579', '6º Ano do Ensino Fundamental II']],
+      ['Nome', 'Telefone', 'Tags']
+    )
+    const res = makeRes()
+    await controller.previewImportacao({ file: { buffer, size: buffer.length }, body: {}, user: { company_id: 7 } }, res)
+    expect(res.statusCode).toBe(200)
+    expect(res.body.mapping).toEqual({ nome: 0, telefone: 1, serie: 2 })
+    expect(res.body.amostra[0]).toMatchObject({
+      nome: 'ALEXIA CRISTINA MARCHEZAN DOS SANTOS',
+      telefone: '5534999514579',
+      tags: ['6º Ano do Ensino Fundamental II'],
+    })
+  })
+
+  it('arquivo vazio retorna erro controlado', async () => {
+    const res = makeRes()
+    await controller.previewImportacao(
+      { file: { buffer: Buffer.alloc(0), size: 0 }, body: {}, user: { company_id: 7 } },
+      res
+    )
+    expect(res.statusCode).toBe(400)
+    expect(['ARQUIVO_OBRIGATORIO', 'ARQUIVO_CORROMPIDO']).toContain(res.body.codigo)
+  })
+
+  it('arquivo corrompido retorna erro controlado', async () => {
+    const res = makeRes()
+    await controller.previewImportacao(
+      { file: { buffer: Buffer.from('isto nao e xlsx'), size: 16 }, body: {}, user: { company_id: 7 } },
+      res
+    )
+    expect(res.statusCode).toBe(400)
+    expect(res.body.codigo).toBe('ARQUIVO_CORROMPIDO')
+  })
+
   it('respeita override de mapeamento vindo do body', async () => {
     // Cabeçalhos genéricos que a detecção automática não reconhece.
     const buffer = await montarXlsx(
@@ -147,5 +189,25 @@ describe('clienteImportController — confirmar', () => {
     expect(res.statusCode).toBe(400)
     expect(res.body.codigo).toBe('NENHUMA_LINHA_VALIDA')
     expect(executarImportacao).not.toHaveBeenCalled()
+  })
+
+  it('bloqueia importação simultânea da mesma empresa', async () => {
+    controller._test.importLocks.set(7, Date.now())
+    try {
+      const buffer = await montarXlsx(
+        [linha({ nome: 'João Silva', serie: '6º Ano', cel: '34999991234' })],
+        HEADERS
+      )
+      const res = makeRes()
+      await controller.confirmarImportacao(
+        { file: { buffer, size: buffer.length }, body: {}, user: { company_id: 7, perfil: 'admin' } },
+        res
+      )
+      expect(res.statusCode).toBe(409)
+      expect(res.body.codigo).toBe('IMPORTACAO_EM_ANDAMENTO')
+      expect(executarImportacao).not.toHaveBeenCalled()
+    } finally {
+      controller._test.importLocks.delete(7)
+    }
   })
 })

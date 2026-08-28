@@ -22,6 +22,8 @@ const { normalizePhoneBR, possiblePhonesBR, normalizeGroupIdForStorage } = requi
 const { getCanonicalPhone, getOrCreateCliente, findOrCreateConversation, mergeConversasIntoCanonico, mergeConversationLidToPhone } = require('../helpers/conversationSync')
 const crmSync = require('../services/crmSyncService')
 const { chooseBestName, isBadName, getDisplayName } = require('../helpers/contactEnrichment')
+const { clienteTemNomeProtegido } = require('../helpers/clienteNomeProtecao')
+const { selectClienteNomeFoto } = require('../helpers/clienteNomeColunas')
 const { parseVcardForContact } = require('../helpers/vcardHelper')
 const { resolvePeerPhone } = require('../helpers/conversationKeyHelper')
 const { incrementarUnreadParaConversa, emitirParaUsuariosQuePodemVerConversa } = require('./chatController')
@@ -2010,6 +2012,8 @@ exports.receberZapi = async (req, res) => {
     let pendingContactSync = null
     let nomeParaCache = null // Nome resolvido (syncUltramsg ou payload) para atualizar cache da conversa
     let nomeSourceParaCache = null
+    let clienteNomeProtegido = false
+    let clienteNomeAtual = null
 
     if (!isGroup) {
       // LID sintético (@lid): mensagem espelhada enviada pelo celular sem número real conhecido.
@@ -2063,14 +2067,19 @@ exports.receberZapi = async (req, res) => {
 
         const pushnameRaw = payload.notifyName ?? payload.pushName ?? payload.notify ?? nomePayloadRaw
         const pushnamePayload = pushnameRaw ? String(pushnameRaw).trim() : null
-        const { cliente_id: cid } = await getOrCreateCliente(supabase, company_id, phone, {
+        const createdCli = await getOrCreateCliente(supabase, company_id, phone, {
           nome: nomePayload,
           nomeSource,
           fromMe,
           pushname: pushnamePayload || undefined,
           foto_perfil: senderPhoto || undefined
         })
-        cliente_id = cid
+        cliente_id = createdCli?.cliente_id || null
+        clienteNomeProtegido = createdCli?.nome_protegido === true
+        clienteNomeAtual = createdCli?.nome || null
+        if (clienteNomeProtegido && clienteNomeAtual) {
+          nomeParaCache = clienteNomeAtual
+        }
         if (cliente_id) {
           const chatIdForSync = !isGroup && payload.chatId && String(payload.chatId).trim().endsWith('@c.us')
             ? String(payload.chatId).trim()
@@ -2241,7 +2250,11 @@ exports.receberZapi = async (req, res) => {
         const cacheUpdates = {}
         const nomeCandidato = (nomeParaCache && String(nomeParaCache).trim()) || (senderName && String(senderName).trim())
         const sourceCache = nomeSourceParaCache || ((payload.name && String(payload.name).trim()) ? 'name' : (fromMe ? 'chatName' : 'senderName'))
-        if (nomeCandidato) {
+        if (clienteNomeProtegido) {
+          if (clienteNomeAtual && clienteNomeAtual !== (convAtual?.nome_contato_cache || '')) {
+            cacheUpdates.nome_contato_cache = clienteNomeAtual
+          }
+        } else if (nomeCandidato) {
           const { name: bestNome, decision } = chooseBestName(
             convAtual?.nome_contato_cache || null,
             String(nomeCandidato).trim(),
@@ -2291,7 +2304,7 @@ exports.receberZapi = async (req, res) => {
             tipo: isGroup ? 'grupo' : 'cliente',
             nome_grupo: isGroup ? (nomeGrupo || null) : null,
             foto_grupo: isGroup ? (chatPhoto || null) : null,
-            contato_nome: isGroup ? (nomeGrupo || phone || 'Grupo') : (nomeParaCache || senderName || payload?.chatName || phone || null),
+            contato_nome: isGroup ? (nomeGrupo || phone || 'Grupo') : (clienteNomeProtegido && clienteNomeAtual ? clienteNomeAtual : (nomeParaCache || senderName || payload?.chatName || phone || null)),
             foto_perfil: isGroup ? null : (senderPhoto || payload?.photo || null),
             unread_count: unreadInicial,
             tags: [],
@@ -3280,13 +3293,15 @@ exports.receberZapi = async (req, res) => {
                   // sync em background (nome/foto reais) — chooseBestName evita regressão
                   setImmediate(async () => {
                     try {
-                      const { data: current } = await supabase.from('clientes').select('nome, pushname, foto_perfil').eq('id', cidGrupo).maybeSingle()
+                      const { data: current } = await selectClienteNomeFoto(supabase, { id: cidGrupo, companyId: company_id })
                       const sync = await syncUltraMsgContact(pNorm, company_id, { skipPersistence: true }).catch(() => null)
                       if (!sync) return
                       const up = {}
                       const telefoneTail = String(pNorm).replace(/\D/g, '').slice(-6) || null
-                      const { name: bestNome } = chooseBestName(current?.nome, sync.nome, 'syncUltramsg', { fromMe: false, company_id, telefoneTail })
-                      if (bestNome && bestNome !== (current?.nome || '')) up.nome = bestNome
+                      if (!clienteTemNomeProtegido(current)) {
+                        const { name: bestNome } = chooseBestName(current?.nome, sync.nome, 'syncUltramsg', { fromMe: false, company_id, telefoneTail })
+                        if (bestNome && bestNome !== (current?.nome || '')) up.nome = bestNome
+                      }
                       if (!current?.pushname && sync.pushname) up.pushname = sync.pushname
                       if (!current?.foto_perfil && sync.foto_perfil) up.foto_perfil = sync.foto_perfil
                       if (Object.keys(up).length > 0) await supabase.from('clientes').update(up).eq('id', cidGrupo)
@@ -3894,7 +3909,9 @@ exports.receberZapi = async (req, res) => {
         .eq('id', convIdForEmit)
         .eq('company_id', company_id)
         .maybeSingle()
-      let contatoNome = (nomeParaCache && String(nomeParaCache).trim()) || (convRow?.nome_contato_cache ? String(convRow.nome_contato_cache).trim() : null)
+      let contatoNome = (clienteNomeProtegido && clienteNomeAtual)
+        ? String(clienteNomeAtual).trim()
+        : ((nomeParaCache && String(nomeParaCache).trim()) || (convRow?.nome_contato_cache ? String(convRow.nome_contato_cache).trim() : null))
       let fotoPerfil = convRow?.foto_perfil_contato_cache ? String(convRow.foto_perfil_contato_cache).trim() : null
       
       // Foto: fallback cliente só se cache vazio
@@ -3998,16 +4015,18 @@ exports.receberZapi = async (req, res) => {
       // Sync em background: atualiza cliente E conversa (nome/foto) quando o sync inicial falhou ou retornou vazio
       Promise.resolve().then(async () => {
         try {
-          const { data: current } = await supabase.from('clientes').select('nome, pushname, foto_perfil').eq('id', syncClienteId).eq('company_id', company_id).maybeSingle()
+          const { data: current } = await selectClienteNomeFoto(supabase, { id: syncClienteId, companyId: company_id })
           const { data: convRow } = await supabase.from('conversas').select('nome_contato_cache, foto_perfil_contato_cache').eq('id', convId).eq('company_id', company_id).maybeSingle()
           const synced = await syncUltraMsgContact(syncInput, company_id, { skipPersistence: true, skipCache: fromMe }).catch(() => null)
           if (!synced) return null
           const up = {}
           const telefoneTail = String(syncPhone).replace(/\D/g, '').slice(-6) || null
-          const { name: bestNome } = chooseBestName(current?.nome, synced?.nome, 'syncUltramsg', { fromMe: false, company_id, telefoneTail })
-          if (bestNome && bestNome !== (current?.nome || '')) up.nome = bestNome
-          else if ((!current?.nome || !String(current.nome).trim()) && synced.nome && String(synced.nome).trim() && !isBadName(synced.nome)) {
-            up.nome = String(synced.nome).trim()
+          if (!clienteTemNomeProtegido(current)) {
+            const { name: bestNome } = chooseBestName(current?.nome, synced?.nome, 'syncUltramsg', { fromMe: false, company_id, telefoneTail })
+            if (bestNome && bestNome !== (current?.nome || '')) up.nome = bestNome
+            else if ((!current?.nome || !String(current.nome).trim()) && synced.nome && String(synced.nome).trim() && !isBadName(synced.nome)) {
+              up.nome = String(synced.nome).trim()
+            }
           }
           // Sem nome válido do sync e cliente sem nome → NÃO gravar (nome permanece NULL).
           // Nunca usar o telefone como nome; getDisplayName() já faz o fallback só na exibição.
@@ -4021,18 +4040,26 @@ exports.receberZapi = async (req, res) => {
           // Atualizar conversa (nome_contato_cache, foto_perfil_contato_cache) quando vazios e sync trouxe dados
           const nomeConvVazio = !convRow?.nome_contato_cache || !String(convRow.nome_contato_cache).trim()
           const fotoConvVazia = !convRow?.foto_perfil_contato_cache || !String(convRow.foto_perfil_contato_cache).trim()
-          // Priorizar name (nome salvo no celular) sobre pushname — nunca sobrescrever com pushname quando name existir
           const syncNomeValido = synced?.nome && String(synced.nome).trim() && !isBadName(synced.nome)
           const syncFotoValida = synced?.foto_perfil && String(synced.foto_perfil).trim().startsWith('http')
           const cacheConv = {}
-          if (nomeConvVazio && syncNomeValido) cacheConv.nome_contato_cache = String(synced.nome).trim()
+          if (clienteTemNomeProtegido(current)) {
+            const nomeProt = current?.nome && String(current.nome).trim()
+            if (nomeProt && nomeProt !== (convRow?.nome_contato_cache || '')) {
+              cacheConv.nome_contato_cache = nomeProt
+            }
+          } else if (nomeConvVazio && syncNomeValido) {
+            cacheConv.nome_contato_cache = String(synced.nome).trim()
+          }
           if (fotoConvVazia && syncFotoValida) cacheConv.foto_perfil_contato_cache = String(synced.foto_perfil).trim()
           if (Object.keys(cacheConv).length > 0) {
             await supabase.from('conversas').update(cacheConv).eq('id', convId).eq('company_id', company_id)
           }
           const r = await supabase.from('clientes').select('nome, pushname, telefone, foto_perfil').eq('id', syncClienteId).single()
           const data = r?.data
-          const nomeParaEmit = cacheConv.nome_contato_cache ?? convRow?.nome_contato_cache ?? getDisplayName(data) ?? null
+          const nomeParaEmit = (clienteTemNomeProtegido(current) && current?.nome)
+            ? String(current.nome).trim()
+            : (cacheConv.nome_contato_cache ?? convRow?.nome_contato_cache ?? getDisplayName(data) ?? null)
           const fotoParaEmit = cacheConv.foto_perfil_contato_cache ?? convRow?.foto_perfil_contato_cache ?? data?.foto_perfil ?? null
           if (data && io && (nomeParaEmit || fotoParaEmit)) {
             console.log('✅ Contato sincronizado Z-API:', syncPhone?.slice(-6), nomeParaEmit || '(sem nome)')

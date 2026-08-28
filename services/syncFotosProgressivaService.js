@@ -8,6 +8,8 @@ const { getProvider } = require('./providers')
 const { getStatus } = require('./ultramsgIntegrationService')
 const { getConfig, isProcessamentoPausado } = require('./configOperacionalService')
 const { chooseBestName } = require('../helpers/contactEnrichment')
+const { clienteTemNomeProtegido } = require('../helpers/clienteNomeProtecao')
+const { marcarSchemaNomeProtecaoIndisponivel } = require('../helpers/clienteNomeColunas')
 
 const BATCH_SIZE = 50
 const DELAY_MS = 250
@@ -52,19 +54,27 @@ async function syncFotosProgressiva(company_id, opts = {}) {
   // onlySemFoto: false = puxar TODAS as fotos (clientes com e sem foto). true = só quem não tem foto.
   const onlySemFoto = opts.onlySemFoto === true
 
-  let query = supabase
-    .from('clientes')
-    .select('id, telefone, nome, pushname, foto_perfil')
-    .eq('company_id', company_id)
-    .not('telefone', 'is', null)
-    .order('id', { ascending: true })
+  const cols = 'id, telefone, nome, pushname, foto_perfil, nome_protegido'
+  const colsBase = 'id, telefone, nome, pushname, foto_perfil'
 
-  if (onlySemFoto) {
-    // Prioriza clientes sem foto ou com valor inválido ('null', vazio)
-    query = query.or('foto_perfil.is.null,foto_perfil.eq.,foto_perfil.eq.null')
+  function buildQuery(selectCols) {
+    let q = supabase
+      .from('clientes')
+      .select(selectCols)
+      .eq('company_id', company_id)
+      .not('telefone', 'is', null)
+      .order('id', { ascending: true })
+    if (onlySemFoto) {
+      q = q.or('foto_perfil.is.null,foto_perfil.eq.,foto_perfil.eq.null')
+    }
+    return q
   }
 
-  const { data: clientes } = await query.range(offset, offset + limit - 1)
+  let { data: clientes, error: errClientes } = await buildQuery(cols).range(offset, offset + limit - 1)
+  if (errClientes && marcarSchemaNomeProtecaoIndisponivel(errClientes)) {
+    const retry = await buildQuery(colsBase).range(offset, offset + limit - 1)
+    clientes = retry.data
+  }
 
   if (!clientes?.length) return { total: 0, atualizados: 0, processados: 0 }
 
@@ -95,10 +105,10 @@ async function syncFotosProgressiva(company_id, opts = {}) {
 
       const updates = {}
       // Só grava nome quando a API trouxe um nome real; NUNCA usar o telefone como nome.
-      if (metaNome) {
+      if (metaNome && !clienteTemNomeProtegido(cl)) {
         const { name: bestNome } = chooseBestName(nomeDb || null, metaNome, 'syncUltramsg', { fromMe: false, company_id: cid, telefoneTail: phone.slice(-6) })
         if (bestNome && bestNome !== nomeDb) updates.nome = bestNome
-      } else if (nomeDb && nomeDb === phone) {
+      } else if (!clienteTemNomeProtegido(cl) && nomeDb && nomeDb === phone) {
         // Limpa legado: contatos que nasceram com o telefone gravado no campo nome.
         updates.nome = null
       }

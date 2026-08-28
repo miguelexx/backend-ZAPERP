@@ -19,10 +19,20 @@ function token(payload = {}) {
 }
 
 describe('Autorizacoes criticas de producao', () => {
-  it('bloqueia atendente ao apagar todos os clientes', async () => {
+  it('bloqueia atendente ao importar clientes por planilha', async () => {
     const res = await request(app)
-      .delete('/api/clientes/todos')
+      .post('/api/clientes/importar')
       .set('Authorization', `Bearer ${token({ perfil: 'atendente' })}`)
+      .attach('arquivo', Buffer.from('PK'), 'contatos.xlsx')
+
+    expect(res.status).toBe(403)
+  })
+
+  it('bloqueia atendente ao analisar prévia de importação', async () => {
+    const res = await request(app)
+      .post('/api/clientes/importar/preview')
+      .set('Authorization', `Bearer ${token({ perfil: 'atendente' })}`)
+      .attach('arquivo', Buffer.from('PK'), 'contatos.xlsx')
 
     expect(res.status).toBe(403)
   })

@@ -6,6 +6,17 @@
 const supabase = require('../config/supabase')
 const { normalizePhoneBR, possiblePhonesBR, phoneKeyBR } = require('./phoneHelper')
 const { chooseBestName, isBadName } = require('./contactEnrichment')
+const {
+  decidirPatchNomeCliente,
+  patchNomeInsert,
+  clienteTemNomeProtegido,
+} = require('./clienteNomeProtecao')
+const {
+  clienteSelectCols,
+  sanitizarPatchNomeSchema,
+  marcarSchemaNomeProtecaoIndisponivel,
+  updateClienteResiliente,
+} = require('./clienteNomeColunas')
 
 /**
  * Retorna telefone canônico para armazenamento (sempre o mesmo formato por número).
@@ -198,7 +209,7 @@ async function mergeConversationLidToPhone(supabaseClient, company_id, chatLid, 
 
   let convByPhoneQuery = supabaseClient
     .from('conversas')
-    .select('id, telefone, nome_contato_cache, foto_perfil_contato_cache, whatsapp_instance_id')
+    .select('id, telefone, cliente_id, nome_contato_cache, foto_perfil_contato_cache, whatsapp_instance_id')
     .eq('company_id', company_id)
     .in('telefone', variants)
     .neq('status_atendimento', 'fechada')
@@ -224,7 +235,23 @@ async function mergeConversationLidToPhone(supabaseClient, company_id, chatLid, 
     await supabaseClient.from('conversas').update({ chat_lid: lidPart }).eq('id', convByPhone.id).eq('company_id', company_id)
 
     const cacheUpdates = {}
-    if (opts.nomeCache && String(opts.nomeCache).trim()) {
+    let nomeProtegido = false
+    if (convByPhone.cliente_id) {
+      const { data: cliProt } = await supabaseClient
+        .from('clientes')
+        .select(clienteSelectCols())
+        .eq('id', convByPhone.cliente_id)
+        .eq('company_id', company_id)
+        .maybeSingle()
+      if (clienteTemNomeProtegido(cliProt)) {
+        nomeProtegido = true
+        const nomeFixo = cliProt?.nome && String(cliProt.nome).trim()
+        if (nomeFixo && nomeFixo !== (convByPhone.nome_contato_cache || '')) {
+          cacheUpdates.nome_contato_cache = nomeFixo
+        }
+      }
+    }
+    if (!nomeProtegido && opts.nomeCache && String(opts.nomeCache).trim()) {
       const { name: bestNome } = chooseBestName(
         convByPhone.nome_contato_cache,
         String(opts.nomeCache).trim(),
@@ -284,17 +311,35 @@ function shouldUpdateFotoPerfil(existenteUrl, novoUrl, { refresh = false } = {})
  * Aplica campos no cliente existente (sem anular com vazio) e retorna o id.
  * foto_perfil: sticky — só preenche se ainda vazia/inválida; refresh explícito atualiza URL.
  */
+function clienteResult(row, extra = {}) {
+  return {
+    cliente_id: row?.id ?? extra.cliente_id ?? null,
+    created: extra.created === true,
+    changed: extra.changed === true,
+    nome: extra.nome !== undefined ? extra.nome : (row?.nome ?? null),
+    nome_protegido: extra.nome_protegido !== undefined
+      ? extra.nome_protegido
+      : (row?.nome_protegido === true),
+    nome_origem: extra.nome_origem !== undefined ? extra.nome_origem : (row?.nome_origem || null),
+  }
+}
+
 async function mergeAndReturnCliente(supabaseClient, company_id, existente, phone, fields) {
   const updates = {}
   const telefoneTail = String(phone).replace(/\D/g, '').slice(-6) || null
   if (fields.nome != null && String(fields.nome).trim()) {
-    const { name: bestNome } = chooseBestName(
-      existente.nome,
+    const decided = decidirPatchNomeCliente(
+      existente,
       String(fields.nome).trim(),
       fields.nomeSource || 'unknown',
-      { fromMe: fields.fromMe, company_id, telefoneTail }
+      {
+        fromMe: fields.fromMe,
+        company_id,
+        telefoneTail,
+        confirmarNomeManual: fields.confirmarNomeManual === true,
+      }
     )
-    if (bestNome && bestNome !== (existente.nome || '')) updates.nome = bestNome
+    if (decided.patch) Object.assign(updates, decided.patch)
   }
   // (Removido) NÃO preencher nome com o telefone quando o contato está sem nome.
   // O campo nome deve permanecer NULL; a exibição cai para pushname/telefone via
@@ -320,13 +365,27 @@ async function mergeAndReturnCliente(supabaseClient, company_id, existente, phon
     if (!existente.empresa || !String(existente.empresa).trim()) updates.empresa = String(fields.empresa).trim()
   }
   if (Object.keys(updates).length > 0) {
-    await supabaseClient.from('clientes').update(updates).eq('id', existente.id).eq('company_id', company_id)
+    await updateClienteResiliente(supabaseClient, {
+      id: existente.id,
+      companyId: company_id,
+      updates,
+    })
   }
-  return { cliente_id: existente.id, created: false, changed: Object.keys(updates).length > 0 }
+  const nomeFinal = updates.nome != null ? updates.nome : existente.nome
+  const protegidoFinal = updates.nome_protegido != null ? updates.nome_protegido : existente.nome_protegido
+  const origemFinal = updates.nome_origem != null ? updates.nome_origem : existente.nome_origem
+  return clienteResult(existente, {
+    created: false,
+    changed: Object.keys(updates).length > 0,
+    nome: nomeFinal || null,
+    nome_protegido: protegidoFinal === true,
+    nome_origem: origemFinal || null,
+  })
 }
 
-const CLIENTE_SELECT_COLS =
-  'id, nome, pushname, foto_perfil, company_id, telefone, wa_id, email, empresa'
+function CLIENTE_SELECT_COLS() {
+  return clienteSelectCols()
+}
 
 function digitsOnlyPhone(v) {
   return String(v || '').replace(/\D/g, '')
@@ -466,13 +525,26 @@ async function findClienteRowForPhone(supabaseClient, company_id, phone, telefon
   )
 
   if (phonesToSearch.length > 0) {
-    const { data: exactRows, error: errExact } = await supabaseClient
+    const firstExact = await supabaseClient
       .from('clientes')
-      .select(CLIENTE_SELECT_COLS)
+      .select(CLIENTE_SELECT_COLS())
       .eq('company_id', company_id)
       .in('telefone', phonesToSearch)
       .order('id', { ascending: true })
       .limit(5)
+    let exactRows = firstExact.data
+    let errExact = firstExact.error
+    if (errExact && marcarSchemaNomeProtecaoIndisponivel(errExact)) {
+      const retryExact = await supabaseClient
+        .from('clientes')
+        .select(CLIENTE_SELECT_COLS())
+        .eq('company_id', company_id)
+        .in('telefone', phonesToSearch)
+        .order('id', { ascending: true })
+        .limit(5)
+      exactRows = retryExact.data
+      errExact = retryExact.error
+    }
     if (!errExact) {
       const exact = Array.isArray(exactRows) && exactRows[0] ? exactRows[0] : null
       if (exact?.id) return exact
@@ -494,7 +566,7 @@ async function findClienteRowForPhone(supabaseClient, company_id, phone, telefon
   for (const suf of Array.from(new Set(likeSuffixes.filter(Boolean)))) {
     const { data: legacyRows } = await supabaseClient
       .from('clientes')
-      .select(CLIENTE_SELECT_COLS)
+      .select(CLIENTE_SELECT_COLS())
       .eq('company_id', company_id)
       .like('telefone', `%${suf}`)
       .order('id', { ascending: true })
@@ -530,7 +602,7 @@ async function findClienteRowViaConversa(supabaseClient, company_id, phone, tele
     if (conv.telefone && !phonesMatchDigitally(refPhone, conv.telefone)) continue
     const { data: cli } = await supabaseClient
       .from('clientes')
-      .select(CLIENTE_SELECT_COLS)
+      .select(CLIENTE_SELECT_COLS())
       .eq('id', conv.cliente_id)
       .eq('company_id', company_id)
       .maybeSingle()
@@ -558,7 +630,7 @@ async function getOrCreateCliente(supabaseClient, company_id, phone, fields = {}
     ).filter(Boolean)
     const { data: waRows, error: errWa } = await supabaseClient
       .from('clientes')
-      .select('id, nome, pushname, foto_perfil, company_id, telefone, wa_id, email, empresa')
+      .select(CLIENTE_SELECT_COLS())
       .eq('company_id', company_id)
       .in('wa_id', wVars)
       .order('id', { ascending: true })
@@ -649,23 +721,35 @@ async function getOrCreateCliente(supabaseClient, company_id, phone, fields = {}
   const pushname = (fields.pushname !== undefined && fields.pushname != null && String(fields.pushname).trim()) ? String(fields.pushname).trim() : null
   const insertData = {
     telefone: telefoneCanonico,
-    nome,
     observacoes: null,
     company_id,
+    ...patchNomeInsert(nome, fields.nomeSource),
+    ...(nome ? { nome } : {}),
     ...(pushname ? { pushname } : {}),
     ...(fields.foto_perfil && hasValidFotoPerfil(fields.foto_perfil) ? { foto_perfil: String(fields.foto_perfil).trim() } : {}),
     ...(fields.wa_id && String(fields.wa_id).trim() ? { wa_id: String(fields.wa_id).trim() } : {}),
     ...(fields.email && String(fields.email).trim() ? { email: String(fields.email).trim() } : {}),
     ...(fields.empresa && String(fields.empresa).trim() ? { empresa: String(fields.empresa).trim() } : {})
   }
-  const { data: upserted, error: errUpsert } = await supabaseClient
+  let insertPayload = sanitizarPatchNomeSchema(insertData)
+  let { data: upserted, error: errUpsert } = await supabaseClient
     .from('clientes')
-    .upsert(insertData, { onConflict: 'company_id,telefone', ignoreDuplicates: true })
+    .upsert(insertPayload, { onConflict: 'company_id,telefone', ignoreDuplicates: true })
     .select('id')
     .maybeSingle()
+  if (errUpsert && marcarSchemaNomeProtecaoIndisponivel(errUpsert)) {
+    insertPayload = sanitizarPatchNomeSchema(insertData)
+    const retryUpsert = await supabaseClient
+      .from('clientes')
+      .upsert(insertPayload, { onConflict: 'company_id,telefone', ignoreDuplicates: true })
+      .select('id')
+      .maybeSingle()
+    upserted = retryUpsert.data
+    errUpsert = retryUpsert.error
+  }
 
   if (!errUpsert && upserted?.id) {
-    return { cliente_id: upserted.id, created: true, changed: true }
+    return clienteResult({ id: upserted.id, ...insertData }, { created: true, changed: true })
   }
 
   let foundRow = await findClienteRowForPhone(supabaseClient, company_id, phone, telefoneCanonico, searchPhones)
@@ -682,7 +766,7 @@ async function getOrCreateCliente(supabaseClient, company_id, phone, fields = {}
   if (telefoneCanonico) {
     const { data: preInsertCheck } = await supabaseClient
       .from('clientes')
-      .select(CLIENTE_SELECT_COLS)
+      .select(CLIENTE_SELECT_COLS())
       .eq('company_id', company_id)
       .eq('telefone', telefoneCanonico)
       .maybeSingle()
@@ -691,14 +775,24 @@ async function getOrCreateCliente(supabaseClient, company_id, phone, fields = {}
     }
   }
 
-  const { data: novoCliente, error: errInsert } = await supabaseClient
+  let { data: novoCliente, error: errInsert } = await supabaseClient
     .from('clientes')
-    .insert(insertData)
+    .insert(insertPayload)
     .select('id')
     .single()
+  if (errInsert && marcarSchemaNomeProtecaoIndisponivel(errInsert)) {
+    insertPayload = sanitizarPatchNomeSchema(insertData)
+    const retryInsert = await supabaseClient
+      .from('clientes')
+      .insert(insertPayload)
+      .select('id')
+      .single()
+    novoCliente = retryInsert.data
+    errInsert = retryInsert.error
+  }
 
   if (!errInsert && novoCliente?.id) {
-    return { cliente_id: novoCliente.id, created: true, changed: true }
+    return clienteResult({ id: novoCliente.id, ...insertData }, { created: true, changed: true })
   }
 
   const isDuplicate = String(errInsert?.code || '') === '23505' ||
@@ -714,7 +808,7 @@ async function getOrCreateCliente(supabaseClient, company_id, phone, fields = {}
     if (!foundRow?.id && telefoneCanonico) {
       const { data: directRow } = await supabaseClient
         .from('clientes')
-        .select(CLIENTE_SELECT_COLS)
+        .select(CLIENTE_SELECT_COLS())
         .eq('company_id', company_id)
         .eq('telefone', telefoneCanonico)
         .maybeSingle()
@@ -734,7 +828,7 @@ async function getOrCreateCliente(supabaseClient, company_id, phone, fields = {}
 
   const errFinal = errInsert || errUpsert
   console.warn('[getOrCreateCliente] Insert falhou, continuando sem cliente:', errFinal?.code || errFinal?.message || 'unknown', 'company_id:', company_id, 'telefone:', telefoneCanonico)
-  return { cliente_id: null, created: false, changed: false }
+  return { cliente_id: null, created: false, changed: false, nome: null, nome_protegido: false, nome_origem: null }
 }
 
 /**
@@ -1116,4 +1210,5 @@ module.exports = {
   phonesMatchDigitally,
   hasValidFotoPerfil,
   shouldUpdateFotoPerfil,
+  mergeAndReturnCliente,
 }
