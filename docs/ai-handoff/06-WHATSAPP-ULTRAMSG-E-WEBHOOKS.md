@@ -76,4 +76,5 @@ O worker monta `referenceId disp-*`, registra provider id e datas na fila. Webho
 3. Nunca regredir status por ACK atrasado.
 4. Não emitir mensagem para outro tenant; incluir instância na identidade.
 5. Não testar envio/restart/configuração de webhook contra instância real sem autorização explícita.
+6. Foto de perfil: consultar com o JID real (`profilePictureChatIdCandidates`), nunca `phoneToChatId`/`toZapiSendFormat`. Não gravar `payload.photo` de mensagem como avatar.
 

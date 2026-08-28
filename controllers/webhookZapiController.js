@@ -2043,6 +2043,7 @@ exports.receberZapi = async (req, res) => {
           const syncTimeoutMs = fromMe ? 6000 : 5000
           const syncOpts = { skipCache: true }
           if (fromMe) syncOpts.skipCache = true
+          senderPhoto = null
           try {
             const syncResult = await Promise.race([
               syncUltraMsgContact(syncChatId, company_id, syncOpts),
@@ -2056,7 +2057,7 @@ exports.receberZapi = async (req, res) => {
               nomeParaCache = nomePayload
               nomeSourceParaCache = 'syncUltramsg'
             }
-            // Foto: sempre usar da API quando disponível (payload só traz quando contato envia; when fromMe precisamos da API)
+            // Foto de perfil só vem de GET /contacts/image — o webhook UltraMSG não traz.
             const syncFoto = syncResult?.foto_perfil && String(syncResult.foto_perfil).trim()
             if (syncFoto && syncFoto.startsWith('http')) senderPhoto = syncFoto
           } catch (_) {
@@ -2310,7 +2311,7 @@ exports.receberZapi = async (req, res) => {
             nome_grupo: isGroup ? (nomeGrupo || null) : null,
             foto_grupo: isGroup ? (chatPhoto || null) : null,
             contato_nome: isGroup ? (nomeGrupo || phone || 'Grupo') : (clienteNomeProtegido && clienteNomeAtual ? clienteNomeAtual : (nomeParaCache || senderName || payload?.chatName || phone || null)),
-            foto_perfil: isGroup ? null : (senderPhoto || payload?.photo || null),
+            foto_perfil: isGroup ? null : (senderPhoto || null),
             unread_count: unreadInicial,
             tags: [],
           }

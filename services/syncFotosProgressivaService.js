@@ -10,6 +10,7 @@ const { getConfig, isProcessamentoPausado } = require('./configOperacionalServic
 const { chooseBestName } = require('../helpers/contactEnrichment')
 const { clienteTemNomeProtegido } = require('../helpers/clienteNomeProtecao')
 const { marcarSchemaNomeProtecaoIndisponivel } = require('../helpers/clienteNomeColunas')
+const { shouldUpdateFotoPerfil } = require('../helpers/conversationSync')
 
 const BATCH_SIZE = 50
 const DELAY_MS = 250
@@ -113,7 +114,9 @@ async function syncFotosProgressiva(company_id, opts = {}) {
         updates.nome = null
       }
       if (!pushDb && metaPush) updates.pushname = metaPush
-      if (fotoFinal) updates.foto_perfil = fotoFinal
+      if (fotoFinal && shouldUpdateFotoPerfil(cl.foto_perfil, fotoFinal, { refresh: !onlySemFoto })) {
+        updates.foto_perfil = fotoFinal
+      }
 
       if (Object.keys(updates).length > 0) {
         let upd = await supabase.from('clientes').update(updates).eq('id', cl.id).eq('company_id', cid)
@@ -121,7 +124,16 @@ async function syncFotosProgressiva(company_id, opts = {}) {
           delete updates.pushname
           if (Object.keys(updates).length > 0) upd = await supabase.from('clientes').update(updates).eq('id', cl.id).eq('company_id', cid)
         }
-        if (!upd.error) atualizados++
+        if (!upd.error) {
+          atualizados++
+          if (updates.foto_perfil) {
+            await supabase
+              .from('conversas')
+              .update({ foto_perfil_contato_cache: updates.foto_perfil })
+              .eq('company_id', cid)
+              .eq('cliente_id', cl.id)
+          }
+        }
       }
 
       await sleep(DELAY_MS)

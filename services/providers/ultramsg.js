@@ -8,7 +8,7 @@
  * Formato telefone: +5534999999999 (individual) ou 120363...@g.us (grupo).
  */
 
-const { normalizePhoneBR, toZapiSendFormat, preferredBrSendDigits, possiblePhonesBR, phoneKeyBR } = require('../../helpers/phoneHelper')
+const { normalizePhoneBR, toZapiSendFormat, preferredBrSendDigits, possiblePhonesBR, possiblePhonesForWhatsappIdentity, isSameWhatsappIdentity, extractPhoneFromChatId } = require('../../helpers/phoneHelper')
 const { invalidateEmpresaWhatsappConfigCache } = require('../whatsappConfigService')
 const {
   getDefaultWhatsappInstance,
@@ -1630,8 +1630,73 @@ async function getGroup(groupId, opts = {}) {
 }
 
 /**
+ * chatId para CONSULTA (foto/metadados) — NÃO usa toZapiSendFormat.
+ * Forçar o 9º dígito busca outro JID e grava a foto no contato errado.
+ */
+function toLookupChatId(phoneOrChatId) {
+  const s = String(phoneOrChatId || '').trim()
+  if (!s) return null
+  if (s.endsWith('@g.us')) return s
+  if (s.endsWith('@c.us')) return s
+  if (s.includes('-group')) return `${s.replace(/-group$/, '')}@g.us`
+  const digits = s.replace(/\D/g, '')
+  if (!digits) return null
+  if (digits.startsWith('120') && digits.length >= 15) return `${digits}@g.us`
+  return `${digits}@c.us`
+}
+
+/**
+ * Candidatos de chatId para GET /contacts/image.
+ * JID explícito (webhook): só ele.
+ * Telefone armazenado: dígitos reais + variante celular 12↔13 (nunca fixo+9).
+ */
+function profilePictureChatIdCandidates(phoneOrChatId, opts = {}) {
+  const candidates = []
+  const push = (value) => {
+    const chatId = toLookupChatId(value)
+    if (chatId && !candidates.includes(chatId)) candidates.push(chatId)
+  }
+
+  const explicit = opts.chatId != null ? String(opts.chatId).trim() : ''
+  if (explicit) {
+    push(explicit)
+    return candidates
+  }
+
+  const raw = String(phoneOrChatId || '').trim()
+  if (!raw) return candidates
+  if (raw.endsWith('@g.us') || raw.includes('-group')) {
+    push(raw)
+    return candidates
+  }
+
+  push(raw)
+  for (const variant of possiblePhonesForWhatsappIdentity(raw)) {
+    push(variant)
+  }
+  return candidates
+}
+
+function contactRecordMatchesChatId(data, chatId) {
+  if (!data || typeof data !== 'object') return { hasIdentity: false, matched: false }
+  const requested = extractPhoneFromChatId(chatId) || String(chatId || '').replace(/\D/g, '')
+  const ids = [data.id, data.phone, data.wa_id, data.jid, data.chatId, data.from]
+    .map((v) => (v == null ? '' : String(v).trim()))
+    .filter(Boolean)
+  if (!requested || ids.length === 0) return { hasIdentity: false, matched: false }
+  for (const id of ids) {
+    const digits = extractPhoneFromChatId(id) || String(id).replace(/\D/g, '')
+    if (isSameWhatsappIdentity(digits || id, requested)) {
+      return { hasIdentity: true, matched: true }
+    }
+  }
+  return { hasIdentity: true, matched: false }
+}
+
+/**
  * Converte phone para chatId no formato WhatsApp: 5511986459364@c.us (13 dígitos BR) ou 120xxx@g.us.
  * UltraMsg exige chatId sem + e sem espaços.
+ * ATENÇÃO: insere o 9º dígito (formato de ENVIO). Não usar para foto/metadados.
  */
 function phoneToChatId(phone) {
   const s = String(phone || '').trim()
@@ -1662,11 +1727,11 @@ const PROFILE_PICTURE_RATE_LIMIT_MS = 2000 // 2 segundos entre requisições por
 function invalidateNoProfilePictureCache(chatIdOrPhone) {
   const raw = String(chatIdOrPhone || '').trim()
   if (!raw) return false
-  const chatId = raw.includes('@') ? raw : phoneToChatId(raw)
-  if (!chatId) return false
+  const chatIds = profilePictureChatIdCandidates(raw, raw.includes('@') ? { chatId: raw } : {})
+  if (chatIds.length === 0) return false
   let removed = false
   for (const key of [...noProfilePictureCache.keys()]) {
-    if (key === chatId || key.endsWith(`:${chatId}`)) {
+    if (chatIds.some((chatId) => key === chatId || key.endsWith(`:${chatId}`))) {
       noProfilePictureCache.delete(key)
       removed = true
     }
@@ -1703,42 +1768,22 @@ if (cacheCleanupInterval && typeof cacheCleanupInterval.unref === 'function') {
   cacheCleanupInterval.unref()
 }
 
-/**
- * Busca URL da foto de perfil.
- * Doc oficial: GET /{instance_id}/contacts/image?token={TOKEN}&chatId={chatId}
- * Parâmetros obrigatórios: token, chatId (ex.: 5511999999999@c.us)
- * Aceita opts.chatId (qualquer formato) ou phone (será convertido para chatId).
- */
-async function getProfilePicture(phoneOrChatId, opts = {}) {
-  const cfg = await resolveConfig(opts)
-  if (!cfg) return null
-
-  // Usa opts.chatId diretamente se fornecido (qualquer formato válido: @c.us, @g.us, numérico)
-  // Caso contrário converte o primeiro argumento para chatId via phoneToChatId
-  const rawOpts = opts.chatId ? String(opts.chatId).trim() : null
-  const chatId = rawOpts || phoneToChatId(phoneOrChatId)
-  if (!chatId) return null
-
-  // Verificar cache de contatos sem foto (por instância e chatId — multi-tenant)
-  const cacheKey = `${cfg.instanceId || cfg.companyId || 'default'}:${chatId}`
-  const cachedNoPhoto = noProfilePictureCache.get(cacheKey)
-  if (cachedNoPhoto && cachedNoPhoto.expiry > Date.now()) {
-    // Contato já conhecido por não ter foto, retorna null silenciosamente
-    return null
-  }
-
-  // Rate limiting por instância para evitar spam de requisições
+async function awaitProfilePictureRateLimit(cfg) {
   const rateLimitKey = `rate_limit:${cfg.instanceId || cfg.companyId || 'default'}`
   const lastRequest = profilePictureRateLimit.get(rateLimitKey)
   const now = Date.now()
-  
   if (lastRequest && (now - lastRequest) < PROFILE_PICTURE_RATE_LIMIT_MS) {
-    // Muito cedo para nova requisição, aguardar
-    const waitTime = PROFILE_PICTURE_RATE_LIMIT_MS - (now - lastRequest)
-    await new Promise(resolve => setTimeout(resolve, waitTime))
+    await new Promise((resolve) => setTimeout(resolve, PROFILE_PICTURE_RATE_LIMIT_MS - (now - lastRequest)))
   }
-  
   profilePictureRateLimit.set(rateLimitKey, Date.now())
+}
+
+async function fetchProfilePictureForChatId(cfg, chatId) {
+  const cacheKey = `${cfg.instanceId || cfg.companyId || 'default'}:${chatId}`
+  const cachedNoPhoto = noProfilePictureCache.get(cacheKey)
+  if (cachedNoPhoto && cachedNoPhoto.expiry > Date.now()) return null
+
+  await awaitProfilePictureRateLimit(cfg)
 
   try {
     const { ok, data, text } = await get({
@@ -1746,31 +1791,25 @@ async function getProfilePicture(phoneOrChatId, opts = {}) {
       endpoint: '/contacts/image',
       extraParams: { chatId }
     })
-    
-    // Verificar se é erro conhecido de "sem foto"
+
     const isNoPhotoError = data?.error && (
       data.error.includes("don't have picture") ||
       data.error.includes("not in your chat list") ||
       data.error.includes("user not found")
     )
-    
+
     if (isNoPhotoError) {
-      // Cachear que este contato não tem foto
       noProfilePictureCache.set(cacheKey, { expiry: Date.now() + NO_PICTURE_CACHE_TTL })
-      
-      // Log mais silencioso apenas em debug
       if (WHATSAPP_DEBUG) {
         console.log('[ULTRAMSG] No profile picture:', chatId.slice(-12))
       }
       return null
     }
-    
+
     if (WHATSAPP_DEBUG) {
       console.log('[ULTRAMSG] getProfilePicture', { chatId: chatId.slice(-12), ok, status: data?.error ?? 'ok' })
     }
     if (!ok) return null
-    // Resposta pode ser objeto JSON com URL ou string direta com a URL.
-    // UltraMsg retorna: { "success": "https://..." }
     let url = null
     if (data && typeof data === 'object') {
       url = data.success ?? data.url ?? data.image ?? data.img ?? data.profilePicture ?? data.profilePic ?? data.link ?? null
@@ -1780,6 +1819,25 @@ async function getProfilePicture(phoneOrChatId, opts = {}) {
   } catch {
     return null
   }
+}
+
+/**
+ * Busca URL da foto de perfil.
+ * Doc oficial: GET /{instance_id}/contacts/image?token={TOKEN}&chatId={chatId}
+ * NÃO usa phoneToChatId (formato de envio com 9º dígito) — isso buscava outro JID.
+ */
+async function getProfilePicture(phoneOrChatId, opts = {}) {
+  const cfg = await resolveConfig(opts)
+  if (!cfg) return null
+
+  const candidates = profilePictureChatIdCandidates(phoneOrChatId, opts)
+  if (candidates.length === 0) return null
+
+  for (const chatId of candidates) {
+    const url = await fetchProfilePictureForChatId(cfg, chatId)
+    if (url) return url
+  }
+  return null
 }
 
 /**
@@ -1803,13 +1861,28 @@ function extractContactFromResponse(rawData) {
  * Metadados do contato. UltraMsg: GET /contacts/contact?chatId=... ou busca em GET /contacts.
  * Retorna: { name, short, notify, vname, imgUrl } para ultramsgSyncContact.
  * Prioridade: name (nome salvo no celular) > pushname (nome de perfil WhatsApp).
+ * imgUrl só é usado se o contato retornado bater com o chatId pedido.
  */
+function buildContactMetadataResult(data, { includeImgUrl = true } = {}) {
+  if (!data) return null
+  const name = data.name ?? data.formattedName ?? null
+  const pushname = data.pushname ?? data.pushName ?? data.notify ?? null
+  const imgRaw = includeImgUrl ? (data.imgUrl ?? data.photo ?? data.profilePicture ?? null) : null
+  return {
+    name: name ? String(name).trim() : null,
+    pushname: pushname ? String(pushname).trim() : null,
+    short: data.short ? String(data.short).trim() : null,
+    notify: pushname ? String(pushname).trim() : null,
+    vname: data.vname ? String(data.vname).trim() : null,
+    imgUrl: imgRaw && String(imgRaw).trim().startsWith('http') ? String(imgRaw).trim() : null
+  }
+}
+
 async function getContactMetadata(phone, opts = {}) {
   const cfg = await resolveConfig(opts)
   if (!cfg) return null
-  const chatId = (opts.chatId && String(opts.chatId).trim().endsWith('@c.us'))
-    ? String(opts.chatId).trim()
-    : phoneToChatId(phone)
+  const candidates = profilePictureChatIdCandidates(phone, opts)
+  const chatId = candidates[0]
   if (!chatId) return null
   const paramNames = ['chatId', 'chatID']
   for (const paramName of paramNames) {
@@ -1824,29 +1897,26 @@ async function getContactMetadata(phone, opts = {}) {
       }
       const data = extractContactFromResponse(rawData)
       if (ok && data) {
-        const name = data.name ?? data.formattedName ?? null
-        const pushname = data.pushname ?? data.pushName ?? data.notify ?? null
-        if (WHATSAPP_DEBUG && (name || pushname)) {
-          console.log('[ULTRAMSG] getContactMetadata resultado:', { name: name || '(vazio)', pushname: pushname || '(vazio)' })
+        const identity = contactRecordMatchesChatId(data, chatId)
+        if (identity.hasIdentity && !identity.matched) {
+          if (WHATSAPP_DEBUG) {
+            console.warn('[ULTRAMSG] getContactMetadata ignorado: contato retornado não bate com o chatId pedido')
+          }
+          continue
         }
-        return {
-          name: name ? String(name).trim() : null,
-          pushname: pushname ? String(pushname).trim() : null,
-          short: data.short ? String(data.short).trim() : null,
-          notify: pushname ? String(pushname).trim() : null,
-          vname: data.vname ? String(data.vname).trim() : null,
-          imgUrl: data.imgUrl ?? data.photo ?? data.profilePicture ?? null
+        const result = buildContactMetadataResult(data, { includeImgUrl: identity.matched || !identity.hasIdentity })
+        if (!identity.matched) result.imgUrl = null
+        if (WHATSAPP_DEBUG && (result.name || result.pushname)) {
+          console.log('[ULTRAMSG] getContactMetadata resultado:', { name: result.name || '(vazio)', pushname: result.pushname || '(vazio)' })
         }
+        return result
       }
     } catch (e) {
       if (WHATSAPP_DEBUG) console.warn('[ULTRAMSG] getContactMetadata erro:', paramName, e?.message)
     }
   }
   try {
-    // Fallback: busca em getContacts (lista paginada).
-    // Match canônico (exato / phoneKeyBR) — sem endsWith(8) (colide entre DDDs → foto errada).
     const digits = String(phone || '').replace(/\D/g, '')
-    const key = phoneKeyBR(digits) || ''
     for (let page = 1; page <= 3; page++) {
       const { ok: okList, data: listData } = await getJson({
         ...cfg,
@@ -1858,20 +1928,10 @@ async function getContactMetadata(phone, opts = {}) {
       const found = arr.find((c) => {
         const cPhone = String(c.id ?? c.phone ?? c.wa_id ?? '').replace(/\D/g, '')
         if (!cPhone) return false
-        if (cPhone === digits) return true
-        const cKey = phoneKeyBR(cPhone) || ''
-        return Boolean(key && cKey && key === cKey)
+        return isSameWhatsappIdentity(cPhone, digits)
       })
       if (found) {
-        const pushname = found.pushname ?? found.pushName ?? found.notify ?? null
-        return {
-          name: found.name ?? null,
-          pushname,
-          short: found.short ?? null,
-          notify: pushname,
-          vname: found.vname ?? null,
-          imgUrl: found.imgUrl ?? found.photo ?? null
-        }
+        return buildContactMetadataResult(found)
       }
       if (arr.length < 100) break
     }
@@ -2344,6 +2404,9 @@ module.exports = {
   getGroup,
   classifyChatMessagesPage,
   chatMessageCandidatesForLookup,
+  profilePictureChatIdCandidates,
+  contactRecordMatchesChatId,
+  toLookupChatId,
   uploadMedia,
   getProfilePicture,
   invalidateNoProfilePictureCache,

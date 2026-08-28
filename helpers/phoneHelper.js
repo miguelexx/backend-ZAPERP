@@ -180,6 +180,83 @@ function preferredBrSendDigits(phone) {
 }
 
 /**
+ * Primeiro dígito do número local BR (após 55+DDD), para distinguir celular (6–9) de fixo (2–5).
+ */
+function brLocalFirstDigit(digits) {
+  const d = String(digits || '').replace(/\D/g, '')
+  if (!d.startsWith('55')) return ''
+  if (d.length === 13 && d.charAt(4) === '9') return d.charAt(5)
+  if (d.length === 12) return d.charAt(4)
+  return ''
+}
+
+function isLikelyBrMobileDigits(digits) {
+  const d = String(digits || '').replace(/\D/g, '')
+  if (!d.startsWith('55')) return false
+  if (d.length === 13 && d.charAt(4) === '9') return '6789'.includes(d.charAt(5))
+  if (d.length === 12) return '6789'.includes(d.charAt(4))
+  return false
+}
+
+/**
+ * Variantes do mesmo JID WhatsApp para foto/metadados.
+ * Celular: 12↔13 (com/sem 9) quando o local começa com 6–9.
+ * Fixo: NÃO inventa o 9 — 5534 3xxxxxxx e 5534 93xxxxxxx são pessoas diferentes
+ * (possiblePhonesBR misturava os dois e gravava a foto no contato errado).
+ */
+function possiblePhonesForWhatsappIdentity(phone) {
+  const s = String(phone || '').trim()
+  if (!s) return []
+  if (s.endsWith('@g.us')) return [s]
+  if (s.startsWith('lid:')) return []
+
+  const norm = normalizePhoneBR(s)
+  const digits = String(norm || '').replace(/\D/g, '') || String(s).replace(/\D/g, '')
+  if (!digits || digits.startsWith('120')) return digits && !digits.startsWith('120') ? [digits] : []
+
+  const list = [digits]
+  if (!digits.startsWith('55')) return Array.from(new Set(list.filter(Boolean)))
+
+  if (digits.length === 13 && digits.charAt(4) === '9') {
+    const without9 = digits.slice(0, 4) + digits.slice(5)
+    if (isLikelyBrMobileDigits(without9) || isLikelyBrMobileDigits(digits)) {
+      if ('6789'.includes(without9.charAt(4))) list.push(without9)
+    }
+  }
+  if (digits.length === 12 && isLikelyBrMobileDigits(digits)) {
+    list.push(digits.slice(0, 4) + '9' + digits.slice(4))
+  }
+  return Array.from(new Set(list.filter(Boolean)))
+}
+
+/**
+ * Chave estável da identidade WhatsApp (foto/perfil).
+ * Celular com/sem 9 casa; fixo NÃO casa com um celular que só difere pelo 9 após o DDD.
+ */
+function whatsappIdentityKey(phone) {
+  const s = String(phone || '').trim()
+  if (!s || s.startsWith('lid:')) return ''
+  if (s.endsWith('@g.us')) return s
+  const digits = String(normalizePhoneBR(s) || '').replace(/\D/g, '') || String(s).replace(/\D/g, '')
+  if (!digits) return ''
+  if (digits.startsWith('55') && digits.length === 13 && digits.charAt(4) === '9') {
+    const without9 = digits.slice(0, 4) + digits.slice(5)
+    if ('6789'.includes(without9.charAt(4))) return without9
+    return digits
+  }
+  return digits
+}
+
+function isSameWhatsappIdentity(a, b) {
+  const ka = whatsappIdentityKey(a)
+  const kb = whatsappIdentityKey(b)
+  if (ka && kb && ka === kb) return true
+  const da = String(a || '').replace(/\D/g, '')
+  const db = String(b || '').replace(/\D/g, '')
+  return Boolean(da && db && da === db)
+}
+
+/**
  * Verifica se o chatId é de um grupo WhatsApp (@g.us ou ID 120...).
  *
  * @param {string} chatId - JID ou identificador (ex: 5511999999999@c.us, 120363...@g.us)
@@ -260,6 +337,11 @@ module.exports = {
   toZapiSendFormat,
   preferredBrSendDigits,
   possiblePhonesBR,
+  possiblePhonesForWhatsappIdentity,
+  whatsappIdentityKey,
+  isSameWhatsappIdentity,
+  isLikelyBrMobileDigits,
+  brLocalFirstDigit,
   phoneKeyBR,
   normalizeGroupIdForStorage,
   isGroupChat,

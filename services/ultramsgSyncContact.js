@@ -11,7 +11,8 @@ const {
   normalizePhoneBR,
   isGroupChat,
   extractPhoneFromChatId,
-  possiblePhonesBR
+  possiblePhonesForWhatsappIdentity,
+  whatsappIdentityKey,
 } = require('../helpers/phoneHelper')
 const { getOrCreateCliente, shouldUpdateFotoPerfil } = require('../helpers/conversationSync')
 const { chooseBestName, isBadName, getDisplayName } = require('../helpers/contactEnrichment')
@@ -22,7 +23,7 @@ const CACHE_TTL_MS = 5 * 60 * 1000
 const cache = new Map()
 
 function cacheKey(phone, companyId) {
-  const p = String(phone || '').replace(/\D/g, '').slice(-11)
+  const p = whatsappIdentityKey(phone) || String(phone || '').replace(/\D/g, '')
   return `${companyId ?? 0}:${p}`
 }
 
@@ -168,7 +169,8 @@ async function syncUltraMsgContact(chatIdOrPhone, companyId, opts = {}) {
     if (opts.skipPersistence) return result
   }
 
-  const variants = possiblePhonesBR(telefone).length > 0 ? possiblePhonesBR(telefone) : [telefone]
+  const variants = possiblePhonesForWhatsappIdentity(telefone)
+  const identityVariants = variants.length > 0 ? variants : [telefone]
   const telefoneTail = String(telefone).replace(/\D/g, '').slice(-6) || null
   const nomeFromResult = result.nome || null
   const pushnameFromResult = result.pushname || null
@@ -179,7 +181,7 @@ async function syncUltraMsgContact(chatIdOrPhone, companyId, opts = {}) {
       .from('conversas')
       .select('id, nome_contato_cache, foto_perfil_contato_cache, cliente_id')
       .eq('company_id', companyId)
-      .in('telefone', variants)
+      .in('telefone', identityVariants)
 
     const convRows = Array.isArray(conversas) ? conversas : []
 
@@ -213,6 +215,7 @@ async function syncUltraMsgContact(chatIdOrPhone, companyId, opts = {}) {
       pushname: pushnameFromResult || undefined,
       foto_perfil: fotoFromResult || undefined,
       foto_perfil_refresh: refreshFoto,
+      identitySafePhoneMatch: true,
     })
     if (clienteId) {
       for (const conv of convRows) {
@@ -299,17 +302,18 @@ async function syncConversationContactOnJoin(supabase, conversaId, companyId, io
     _lastSyncByConv.set(key, Date.now())
     if (needsFotoRefresh) _lastFotoRefreshByConv.set(key, Date.now())
 
-    const variants = possiblePhonesBR(conv.telefone).length > 0 ? possiblePhonesBR(conv.telefone) : [conv.telefone]
+    const variants = possiblePhonesForWhatsappIdentity(conv.telefone)
+    const identityVariants = variants.length > 0 ? variants : [conv.telefone]
     const cols = 'id, nome, pushname, telefone, foto_perfil, nome_protegido, nome_origem'
     const colsBase = 'id, nome, pushname, telefone, foto_perfil'
     async function loadCliente() {
       const first = conv.cliente_id
         ? await supabase.from('clientes').select(cols).eq('id', conv.cliente_id).eq('company_id', companyId).maybeSingle()
-        : await supabase.from('clientes').select(cols).eq('company_id', companyId).in('telefone', variants).limit(1).maybeSingle()
+        : await supabase.from('clientes').select(cols).eq('company_id', companyId).in('telefone', identityVariants).limit(1).maybeSingle()
       if (first.error && marcarSchemaNomeProtecaoIndisponivel(first.error)) {
         return conv.cliente_id
           ? supabase.from('clientes').select(colsBase).eq('id', conv.cliente_id).eq('company_id', companyId).maybeSingle()
-          : supabase.from('clientes').select(colsBase).eq('company_id', companyId).in('telefone', variants).limit(1).maybeSingle()
+          : supabase.from('clientes').select(colsBase).eq('company_id', companyId).in('telefone', identityVariants).limit(1).maybeSingle()
       }
       return first
     }
@@ -360,7 +364,7 @@ async function syncConversationContactOnJoin(supabase, conversaId, companyId, io
 
     const { data: cliAtual } = conv.cliente_id
       ? await supabase.from('clientes').select('nome, pushname, telefone, foto_perfil').eq('id', conv.cliente_id).eq('company_id', companyId).maybeSingle()
-      : await supabase.from('clientes').select('nome, pushname, telefone, foto_perfil').eq('company_id', companyId).in('telefone', variants).limit(1).maybeSingle()
+      : await supabase.from('clientes').select('nome, pushname, telefone, foto_perfil').eq('company_id', companyId).in('telefone', identityVariants).limit(1).maybeSingle()
     const { data: convAtual } = await supabase.from('conversas').select('nome_contato_cache, foto_perfil_contato_cache').eq('id', conversaId).eq('company_id', companyId).maybeSingle()
     const nomeParaEmit = clienteTemNomeProtegido(cliente)
       ? (String(cliente.nome || '').trim() || getDisplayName(cliAtual) || null)

@@ -213,3 +213,21 @@ Falha de emit **não** pode virar 500 depois que o nome já foi persistido.
 ## 17. Nome importado não se protege com score de `nomeSource`
 
 **Armadilha:** subir `SOURCE_SCORE.import` para “ganhar” do WhatsApp. O nome atual é comparado como `nome_existente` (70); `syncUltramsg`/`name` (110) continuam a sobrescrever. A defesa é persistente: `clientes.nome_protegido` + `nome_origem` (`import_planilha` | `manual`) e o trigger `trg_proteger_nome_cliente`. Fontes automáticas não enviam `nome_override`.
+
+---
+
+## 18. Foto de perfil — nunca usar formato de ENVIO nem `payload.photo`
+
+**CONFIRMADO (2026-08-28):** `toZapiSendFormat` / `phoneToChatId` inserem o 9º dígito em qualquer 12 dígitos. Isso é certo para **enviar** mensagem a celular; para **consultar** foto (`GET /contacts/image`) busca outro JID. `possiblePhonesBR` também inventa o 9 em fixo (2–5) e gravava a foto no contato errado.
+
+```js
+// ❌ ERRADO — formato de envio na foto
+getProfilePicture(phone) // internamente phoneToChatId → sempre +9
+possiblePhonesBR(fixo).forEach((p) => gravarFoto(p))
+
+// ✅ CORRETO
+profilePictureChatIdCandidates(phone) // JID real; celular 12↔13 só se o local for 6–9
+possiblePhonesForWhatsappIdentity(phone) // não mistura fixo e celular
+```
+
+O webhook UltraMSG **não** traz foto de perfil. `payload.photo` numa mensagem de imagem é a mídia enviada. Só persistir URL vinda de `GET /contacts/image`.
