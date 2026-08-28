@@ -260,7 +260,7 @@ describe('disparoSendService — live (mock ultramsg)', () => {
     })
     supabase.from.mockImplementation((table) => {
       if (table === 'mensagens') {
-        return mockChain({ data: { id: 888 }, error: null })
+        return mockChain({ data: { id: 888, conversa_id: 999 }, error: null })
       }
       if (table === 'disparo_fila_itens') {
         return mockChain({ data: null, error: null })
@@ -316,6 +316,8 @@ describe('disparoSendService — live (mock ultramsg)', () => {
     expect(result.ok).toBe(true)
     expect(result.dryRun).toBe(false)
     expect(result.messageId).toBe('wamid-abc')
+    expect(result.mensagemId).toBe(888)
+    expect(result.conversaId).toBe(999)
     expect(ultramsg.sendText).toHaveBeenCalledWith(
       '5511999887766',
       expect.any(String),

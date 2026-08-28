@@ -4475,19 +4475,19 @@ exports.statusZapi = async (req, res) => {
         console.log('[ULTRAMSG] Status', statusNorm, 'para id', idStr.slice(0, 20) + '… — mensagem não encontrada no banco (ignorado)')
       }
 
-      const ref = body?.ultramsgReferenceId ?? body?.referenceId ?? null
-      if (String(ref || '').startsWith('disp-')) {
-        try {
-          await require('../services/disparoWebhookHook').aplicarStatusDisparoFromWebhook({
-            referenceId: ref,
-            providerMessageId: idStr,
-            status: statusNorm,
-            companyId: company_id,
-            io,
-          })
-        } catch (e) {
-          console.warn('[disparo] webhook status hook:', e?.message || e)
-        }
+      // UltraMSG muitas vezes não ecoa referenceId no ACK. A fila do disparo
+      // precisa casar também pelo id do provedor e pela mensagem do chat.
+      try {
+        await require('../services/disparoWebhookHook').aplicarStatusDisparoFromWebhook({
+          referenceId: body?.ultramsgReferenceId ?? body?.referenceId ?? null,
+          providerMessageId: idStr,
+          mensagemId: msg?.id ?? null,
+          status: effectiveStatus,
+          companyId: company_id,
+          io,
+        })
+      } catch (e) {
+        console.warn('[disparo] webhook status hook:', e?.message || e)
       }
     }
 

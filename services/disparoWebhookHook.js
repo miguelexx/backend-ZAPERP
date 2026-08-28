@@ -1,5 +1,6 @@
 /**
- * Hook de status UltraMSG → fila do Disparo (referenceId disp-{filaItemId}).
+ * Hook de status UltraMSG → fila do Disparo.
+ * Casa por disp-{filaItemId}, provider_message_id ou mensagem_id do chat.
  */
 
 const supabase = require('../config/supabase')
@@ -37,9 +38,9 @@ function timestampsParaStatus(novoStatus, agora) {
   return patch
 }
 
-const FILA_ITEM_SELECT = 'id, company_id, campanha_id, execucao_id, status, reference_id, provider_message_id'
+const FILA_ITEM_SELECT = 'id, company_id, campanha_id, execucao_id, status, reference_id, provider_message_id, mensagem_id'
 
-async function carregarItemFila({ filaItemId, referenceId, providerMessageId, companyId }) {
+async function carregarItemFila({ filaItemId, referenceId, providerMessageId, mensagemId, companyId }) {
   const cid = Number(companyId)
   if (!cid) return null
 
@@ -79,15 +80,31 @@ async function carregarItemFila({ filaItemId, referenceId, providerMessageId, co
     }
   }
 
+  if (mensagemId) {
+    const mid = Number(mensagemId)
+    if (Number.isInteger(mid) && mid > 0) {
+      const { data, error } = await supabase
+        .from('disparo_fila_itens')
+        .select(FILA_ITEM_SELECT)
+        .eq('mensagem_id', mid)
+        .eq('company_id', cid)
+        .maybeSingle()
+      if (error) throw error
+      return data
+    }
+  }
+
   return null
 }
 
 /**
  * Aplica ACK de webhook UltraMSG a um item da fila de disparo.
+ * Casa por disp-{id}, id do provedor ou mensagem do chat — o ACK quase nunca ecoa referenceId.
  */
 async function aplicarStatusDisparoFromWebhook({
   referenceId,
   providerMessageId,
+  mensagemId,
   status,
   companyId,
   io = null,
@@ -95,8 +112,9 @@ async function aplicarStatusDisparoFromWebhook({
   const ref = String(referenceId ?? '').trim()
   const refDisp = ref.startsWith('disp-')
   const pid = providerMessageId ? String(providerMessageId).trim() : ''
+  const mid = mensagemId != null && Number(mensagemId) > 0 ? Number(mensagemId) : null
 
-  if (!refDisp && !pid) {
+  if (!refDisp && !pid && !mid) {
     return { ok: false, ignored: 'not_disp_reference' }
   }
 
@@ -114,6 +132,9 @@ async function aplicarStatusDisparoFromWebhook({
   }
   if (!item && pid) {
     item = await carregarItemFila({ providerMessageId: pid, companyId })
+  }
+  if (!item && mid) {
+    item = await carregarItemFila({ mensagemId: mid, companyId })
   }
   if (!item) {
     return { ok: false, ignored: 'item_not_found', filaItemId: filaItemIdFromRef ?? null }

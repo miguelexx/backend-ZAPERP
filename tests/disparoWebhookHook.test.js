@@ -201,4 +201,82 @@ describe('disparoWebhookHook — aplicarStatusDisparoFromWebhook', () => {
     expect(r.status).toBe('entregue')
     expect(updatePayload?.status).toBe('entregue')
   })
+
+  it('ACK de chat (crm-*) ainda avança a fila pelo provider_message_id', async () => {
+    let updatePayload = null
+    supabase.from.mockImplementation((table) => {
+      if (table === 'disparo_fila_itens') {
+        const selectChain = mockChain({ data: itemEnviada, error: null })
+        const updateChain = mockChain({
+          data: { ...itemEnviada, status: 'entregue' },
+          error: null,
+        })
+        updateChain.update = jest.fn((payload) => {
+          updatePayload = payload
+          return updateChain
+        })
+        let callCount = 0
+        return {
+          select: jest.fn(() => selectChain),
+          update: updateChain.update,
+          eq: jest.fn(function eq() {
+            callCount += 1
+            if (callCount > 2) return updateChain
+            return this || updateChain
+          }),
+        }
+      }
+      return mockChain()
+    })
+
+    const r = await aplicarStatusDisparoFromWebhook({
+      referenceId: 'crm-888',
+      providerMessageId: 'wamid-1',
+      status: 'delivered',
+      companyId: 10,
+    })
+
+    expect(r.ok).toBe(true)
+    expect(r.status).toBe('entregue')
+    expect(updatePayload?.status).toBe('entregue')
+  })
+
+  it('fallback por mensagem_id do chat quando reference e provider ausentes', async () => {
+    const itemComMensagem = { ...itemEnviada, mensagem_id: 888 }
+    let updatePayload = null
+    supabase.from.mockImplementation((table) => {
+      if (table === 'disparo_fila_itens') {
+        const selectChain = mockChain({ data: itemComMensagem, error: null })
+        const updateChain = mockChain({
+          data: { ...itemComMensagem, status: 'entregue' },
+          error: null,
+        })
+        updateChain.update = jest.fn((payload) => {
+          updatePayload = payload
+          return updateChain
+        })
+        let callCount = 0
+        return {
+          select: jest.fn(() => selectChain),
+          update: updateChain.update,
+          eq: jest.fn(function eq() {
+            callCount += 1
+            if (callCount > 2) return updateChain
+            return this || updateChain
+          }),
+        }
+      }
+      return mockChain()
+    })
+
+    const r = await aplicarStatusDisparoFromWebhook({
+      mensagemId: 888,
+      status: 'delivered',
+      companyId: 10,
+    })
+
+    expect(r.ok).toBe(true)
+    expect(r.status).toBe('entregue')
+    expect(updatePayload?.status).toBe('entregue')
+  })
 })

@@ -435,8 +435,9 @@ async function enviarItemFila(item, { dryRun, liveEnabled, allowlist, timeoutMs,
     }
   }
 
+  let persisted = null
   try {
-    await persistirMensagem({
+    persisted = await persistirMensagem({
       item,
       destinatario,
       variacao,
@@ -453,6 +454,8 @@ async function enviarItemFila(item, { dryRun, liveEnabled, allowlist, timeoutMs,
     ok: true,
     dryRun: false,
     messageId: sendResult.messageId,
+    mensagemId: persisted?.id || null,
+    conversaId: persisted?.conversa_id || null,
     beforeSend: false,
     referenceId: buildDispReferenceId(itemId),
   }

@@ -231,3 +231,19 @@ possiblePhonesForWhatsappIdentity(phone) // não mistura fixo e celular
 ```
 
 O webhook UltraMSG **não** traz foto de perfil. `payload.photo` numa mensagem de imagem é a mídia enviada. Só persistir URL vinda de `GET /contacts/image`.
+
+---
+
+## 19. ACK de campanha não pode exigir `disp-*` no body
+
+**Armadilha:** só chamar `aplicarStatusDisparoFromWebhook` se `referenceId` começar com `disp-`.
+
+A UltraMSG **quase nunca ecoa** o `referenceId` no `message_ack` (o mesmo vale para `crm-*` no chat). O ACK traz o id da mensagem. A fila precisa casar por `provider_message_id` e, se existir, `mensagem_id`. Sem isso o painel fica em **enviada** com ENTREGUES=0 mesmo quando o WhatsApp já entregou.
+
+```js
+// ❌ ERRADO
+if (String(ref || '').startsWith('disp-')) aplicarStatusDisparoFromWebhook(...)
+
+// ✅ CORRETO — todo ACK, com id do provedor + mensagem do chat
+aplicarStatusDisparoFromWebhook({ referenceId: ref, providerMessageId: idStr, mensagemId: msg?.id, ... })
+```

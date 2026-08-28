@@ -418,12 +418,10 @@ async function processarItem(item) {
     })
 
     if (result.ok) {
-      await supabase.from('disparo_fila_itens').update({
+      const enviadoPatch = {
         status: 'enviada',
         provider_message_id: result.messageId || null,
         reference_id: result.referenceId || `disp-${item.id}`,
-        mensagem_id: result.mensagemId || null,
-        conversa_id: result.conversaId || null,
         enviado_em: new Date().toISOString(),
         worker_id: cfg.workerId,
         lease_inicio: null,
@@ -432,7 +430,12 @@ async function processarItem(item) {
         erro_mensagem: null,
         erro_classificacao: null,
         atualizado_em: new Date().toISOString(),
-      }).eq('id', item.id).eq('company_id', item.company_id)
+      }
+      // persistirMensagem já grava mensagem_id/conversa_id; não apagar com null.
+      if (result.mensagemId) enviadoPatch.mensagem_id = result.mensagemId
+      if (result.conversaId) enviadoPatch.conversa_id = result.conversaId
+      await supabase.from('disparo_fila_itens').update(enviadoPatch)
+        .eq('id', item.id).eq('company_id', item.company_id)
       rememberEnvioInstancia(item.instancia_id, new Date().toISOString())
 
       emitDisparo(io, item.company_id, EVENTS.ITEM_ATUALIZADO, {
