@@ -335,6 +335,7 @@ function applyChatListSqlFilters(query, ctx, overrides = {}) {
   } = ctx
 
   const minhaFilaAtiva = overrides.minha_fila === true
+  const campanhasAtiva = overrides.campanhas === true
   const hojeAtivo = overrides.hoje === true
   const aguardandoClienteAtivo = overrides.aguardando_cliente === true
   const aguardandoAtendenteAtivo = overrides.aguardando_atendente === true
@@ -345,6 +346,7 @@ function applyChatListSqlFilters(query, ctx, overrides = {}) {
 
   const statusNorm =
     !minhaFilaAtiva &&
+    !campanhasAtiva &&
     !pagamentoPendenteAtivo &&
     !emAtrasoAtivo &&
     !hojeAtivo &&
@@ -404,6 +406,7 @@ function applyChatListSqlFilters(query, ctx, overrides = {}) {
 
   if (
     !minhaFilaAtiva &&
+    !campanhasAtiva &&
     !aguardandoClienteAtivo &&
     !aguardandoAtendenteAtivo &&
     !pagamentoPendenteAtivo &&
@@ -414,7 +417,10 @@ function applyChatListSqlFilters(query, ctx, overrides = {}) {
     q = q.or('tipo.eq.grupo,status_atendimento.neq.mensagem_disparada,status_atendimento.is.null')
   }
 
-  if (minhaFilaAtiva) {
+  if (campanhasAtiva) {
+    q = q.or('tipo.is.null,tipo.neq.grupo')
+    q = q.eq('aguardando_resposta_campanha', true)
+  } else if (minhaFilaAtiva) {
     q = q.or('tipo.is.null,tipo.neq.grupo')
     q = q.or(
       `status_atendimento.eq.aberta,and(status_atendimento.eq.em_atendimento,atendente_id.eq.${user_id}),and(status_atendimento.eq.aguardando_cliente,atendente_id.eq.${user_id}),and(status_atendimento.eq.pagamento_pendente,atendente_id.eq.${user_id}),and(status_atendimento.eq.em_atraso,atendente_id.eq.${user_id})${conversaIdsParticipanteAtivo.length > 0 ? `,and(status_atendimento.in.(em_atendimento,aguardando_cliente,pagamento_pendente,em_atraso),id.in.(${conversaIdsParticipanteAtivo.join(',')}))` : ''}`
@@ -448,7 +454,11 @@ function applyChatListSqlFilters(query, ctx, overrides = {}) {
     }
   }
 
-  if (!minhaFilaAtiva && !isAtendente && filtroAtendenteInformado != null) {
+  if (!campanhasAtiva && (minhaFilaAtiva || statusNorm === 'aberta')) {
+    q = q.eq('aguardando_resposta_campanha', false)
+  }
+
+  if (!minhaFilaAtiva && !campanhasAtiva && !isAtendente && filtroAtendenteInformado != null) {
     q = q.eq('atendente_id', filtroAtendenteInformado)
     q = q.or('tipo.is.null,tipo.neq.grupo')
   }
@@ -524,6 +534,7 @@ function rowVisibleInPostFilteredList(row, ctx, overrides = {}) {
 
   if (overrides.minha_fila === true) {
     if (isGroup) return false
+    if (row.aguardando_resposta_campanha === true) return false
     if (['em_atendimento', 'aguardando_cliente', 'pagamento_pendente', 'em_atraso'].includes(status)) {
       return vinculadaAoUsuario
     }
@@ -546,6 +557,7 @@ function rowVisibleInPostFilteredList(row, ctx, overrides = {}) {
 
   if (overrides.status_atendimento === 'aberta') {
     if (isGroup) return rowHasMessage(row)
+    if (row.aguardando_resposta_campanha === true) return false
     return status === 'aberta' && (rowHasMessage(row) || atendenteId != null)
   }
 
@@ -579,7 +591,7 @@ async function countConversasWithPostListRules(ctx, overrides = {}) {
     const to = Math.min(from + pageSize - 1, maxRows - 1)
     let q = supabase
       .from('conversas')
-      .select('id, tipo, status_atendimento, atendente_id, mensagens ( id )')
+      .select('id, tipo, status_atendimento, atendente_id, aguardando_resposta_campanha, mensagens ( id )')
 
     q = applyChatListSqlFilters(q, ctx, overrides)
       .order('ultima_atividade', { ascending: false, nullsFirst: false })
@@ -664,6 +676,7 @@ function overridesFromListQuery(query = {}) {
     String(query.finalizacao_motivo || '').trim().toLowerCase() === 'ausencia_cliente'
 
   if (minhaFilaAtiva) return { minha_fila: true }
+  if (parseBooleanQuery(query.campanhas)) return { campanhas: true }
   if (aguardandoAtendenteAtivo) return { aguardando_atendente: true }
   if (hojeAtivo) return { hoje: true }
   if (aguardandoClienteAtivo) return { aguardando_cliente: true }
@@ -738,6 +751,7 @@ async function getChatFilterCounts(req) {
       ctx.separarMensagensDisparadasEmpresa
         ? countConversasWithFilter(ctx, { status_atendimento: 'mensagem_disparada' })
         : Promise.resolve(0),
+      countConversasWithFilter(ctx, { campanhas: true }),
     ])
 
     return {
@@ -754,6 +768,7 @@ async function getChatFilterCounts(req) {
       em_atraso: counts[10],
       transferidos: counts[11],
       mensagens_disparadas: counts[12],
+      campanhas: counts[13],
       // aguardando_funcionario vem de GET /supervisao/resumo no frontend
       aguardando: counts[7],
       atraso: counts[10],

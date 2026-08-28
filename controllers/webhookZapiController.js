@@ -57,6 +57,11 @@ const {
   recalcularStatusPorUltimaMensagem,
 } = require('../services/atendimentoModoSimplesService')
 const { isEnabled, FLAGS } = require('../helpers/featureFlags')
+const {
+  isMissingAguardandoCampanhaColumn,
+  devePularChatbotPorCampanha,
+} = require('../helpers/disparoConversaOrigem')
+const { consumirPrimeiraRespostaCampanha } = require('../services/disparoConversaOrigemService')
 const { parseNota, tentarRegistrarAvaliacao } = require('../services/avaliacaoService')
 const {
   isUltramsgNumericQueueId,
@@ -2593,17 +2598,31 @@ exports.receberZapi = async (req, res) => {
     // Human takeover: não processar chatbot se atendente já assumiu a conversa
     // Revalida departamento/atendente no banco (snapshot inicial pode estar stale em webhooks paralelos).
     let atendente_id = null
+    let skipChatbotPorCampanha = false
     if (!fromMe && !isGroup && phoneParaChatbot) {
-      const { data: convEstado } = await supabase
+      let convEstado = null
+      const convEstadoRes = await supabase
         .from('conversas')
-        .select('atendente_id, departamento_id')
+        .select('atendente_id, departamento_id, aguardando_resposta_campanha, status_atendimento')
         .eq('id', conversa_id)
         .eq('company_id', company_id)
         .maybeSingle()
+      if (convEstadoRes.error && isMissingAguardandoCampanhaColumn(convEstadoRes.error)) {
+        const retryEstado = await supabase
+          .from('conversas')
+          .select('atendente_id, departamento_id, status_atendimento')
+          .eq('id', conversa_id)
+          .eq('company_id', company_id)
+          .maybeSingle()
+        convEstado = retryEstado.data
+      } else {
+        convEstado = convEstadoRes.data
+      }
       atendente_id = convEstado?.atendente_id ?? null
       if (convEstado?.departamento_id != null) {
         departamento_id = Number(convEstado.departamento_id)
       }
+      skipChatbotPorCampanha = devePularChatbotPorCampanha(convEstado)
     }
     if (!fromMe && !isGroup && !inboundReentregue && departamento_id == null && atendente_id == null && phoneParaChatbot) {
       try {
@@ -2618,6 +2637,9 @@ exports.receberZapi = async (req, res) => {
           return { ok: !!r?.ok, messageId: r?.messageId || null }
         }
         let skipChatbot = false
+        if (skipChatbotPorCampanha) {
+          skipChatbot = true
+        }
         const chatbotHints = {}
         const ioAutomacao = req.app.get('io')
         const emitAutomacaoRealtime =
@@ -2692,6 +2714,14 @@ exports.receberZapi = async (req, res) => {
           await logBotAction(company_id, conversa_id, 'chatbot_bypass_retorno_ausencia', {
             reason: 'reopened_from_absence',
           })
+        }
+        if (skipChatbotPorCampanha && !skipChatbot) {
+          skipChatbot = true
+        }
+        if (skipChatbotPorCampanha) {
+          await logBotAction(company_id, conversa_id, 'chatbot_bypass_resposta_campanha', {
+            reason: 'aguardando_resposta_campanha',
+          }).catch(() => {})
         }
         if (!skipChatbot && !conversaReabertaAposFinalizacao) {
           // Prioridade: verificar se o chatbot já estava ativo para esta conversa via bot_logs.
@@ -2802,6 +2832,19 @@ exports.receberZapi = async (req, res) => {
         }
       } catch (errChatbot) {
         console.warn('[Z-API] Chatbot triagem:', errChatbot?.message || errChatbot)
+      }
+    }
+
+    if (!fromMe && !isGroup && skipChatbotPorCampanha && conversa_id && company_id) {
+      try {
+        await consumirPrimeiraRespostaCampanha({
+          companyId: company_id,
+          conversaId: conversa_id,
+          instanciaId: whatsapp_instance_id || null,
+          io: req.app?.get?.('io') || null,
+        })
+      } catch (e) {
+        console.warn('[disparo:campanha] consumir primeira resposta:', e?.message || e)
       }
     }
 
@@ -3903,12 +3946,26 @@ exports.receberZapi = async (req, res) => {
           io: null,
         }).catch(() => null)
       }
-      const { data: convRow } = await supabase
-        .from('conversas')
-        .select('id, ultima_atividade, nome_contato_cache, foto_perfil_contato_cache, telefone, cliente_id, departamento_id, status_atendimento, atendente_id, aguardando_cliente_desde, modo_simples_aguardando, whatsapp_instance_id')
-        .eq('id', convIdForEmit)
-        .eq('company_id', company_id)
-        .maybeSingle()
+      let convRow = null
+      {
+        const convRowRes = await supabase
+          .from('conversas')
+          .select('id, ultima_atividade, nome_contato_cache, foto_perfil_contato_cache, telefone, cliente_id, departamento_id, status_atendimento, atendente_id, aguardando_cliente_desde, modo_simples_aguardando, whatsapp_instance_id, aguardando_resposta_campanha')
+          .eq('id', convIdForEmit)
+          .eq('company_id', company_id)
+          .maybeSingle()
+        if (convRowRes.error && isMissingAguardandoCampanhaColumn(convRowRes.error)) {
+          const retryConvRow = await supabase
+            .from('conversas')
+            .select('id, ultima_atividade, nome_contato_cache, foto_perfil_contato_cache, telefone, cliente_id, departamento_id, status_atendimento, atendente_id, aguardando_cliente_desde, modo_simples_aguardando, whatsapp_instance_id')
+            .eq('id', convIdForEmit)
+            .eq('company_id', company_id)
+            .maybeSingle()
+          convRow = retryConvRow.data
+        } else {
+          convRow = convRowRes.data
+        }
+      }
       let contatoNome = (clienteNomeProtegido && clienteNomeAtual)
         ? String(clienteNomeAtual).trim()
         : ((nomeParaCache && String(nomeParaCache).trim()) || (convRow?.nome_contato_cache ? String(convRow.nome_contato_cache).trim() : null))
@@ -3942,6 +3999,10 @@ exports.receberZapi = async (req, res) => {
           ultima_atividade: convRow?.ultima_atividade ?? new Date().toISOString(),
           telefone: convRow?.telefone ?? null,
           atendente_id: convRow?.atendente_id ?? null,
+          aguardando_resposta_campanha: convRow?.aguardando_resposta_campanha === true,
+          ...(skipChatbotPorCampanha
+            ? { lista_realtime: { minha_fila: true, campanhas: true, motivo: 'campanha_respondida' } }
+            : {}),
           // Grupos nunca mostram badge "aberta" — não precisam ser assumidos
           exibir_badge_aberta: !isGroup && convRow?.status_atendimento !== 'mensagem_disparada',
           ...(isGroup

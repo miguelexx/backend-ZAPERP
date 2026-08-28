@@ -1496,6 +1496,7 @@ exports.listarConversas = async (req, res) => {
       tempo_parado: tempoParadoRaw,
       finalizacao_motivo: finalizacaoMotivoRaw,
       hoje: hojeRaw,
+      campanhas: campanhasRaw,
     } = req.query
 
     const filtroAusenciaListaRaw =
@@ -1555,6 +1556,12 @@ exports.listarConversas = async (req, res) => {
       minhaFilaRaw === 1 ||
       minhaFilaRaw === true
 
+    const campanhasRawAtiva =
+      campanhasRaw === '1' ||
+      campanhasRaw === 'true' ||
+      campanhasRaw === 1 ||
+      campanhasRaw === true
+
     const tagFilterAtivo =
       tag_id != null &&
       String(tag_id).trim() !== '' &&
@@ -1611,6 +1618,7 @@ exports.listarConversas = async (req, res) => {
     const emAtrasoAtivo = searchBypassesStateFilters ? false : emAtrasoRawAtivo
     const hojeAtivo = searchBypassesStateFilters ? false : hojeRawAtivo
     const minhaFilaAtiva = searchBypassesStateFilters ? false : minhaFilaRawAtiva
+    const campanhasAtiva = searchBypassesStateFilters ? false : campanhasRawAtiva
     const tempoParadoHoras = searchBypassesStateFilters ? null : tempoParadoHorasRaw
     const filtroAusenciaLista = searchBypassesStateFilters ? false : filtroAusenciaListaRaw
 
@@ -1624,6 +1632,7 @@ exports.listarConversas = async (req, res) => {
       searchBypassesStateFilters
         ? null
         : !minhaFilaAtiva &&
+            !campanhasAtiva &&
             !pagamentoPendenteAtivo &&
             !emAtrasoAtivo &&
             !hojeAtivo &&
@@ -1860,6 +1869,7 @@ exports.listarConversas = async (req, res) => {
       cliente_id,
       usuario_id,
       status_atendimento,
+      aguardando_resposta_campanha,
       atendente_id,
       aguardando_cliente_desde,
       modo_simples_aguardando,
@@ -1895,6 +1905,7 @@ exports.listarConversas = async (req, res) => {
       cliente_id,
       usuario_id,
       status_atendimento,
+      aguardando_resposta_campanha,
       atendente_id,
       aguardando_cliente_desde,
       modo_simples_aguardando,
@@ -1934,6 +1945,7 @@ exports.listarConversas = async (req, res) => {
       cliente_id,
       usuario_id,
       status_atendimento,
+      aguardando_resposta_campanha,
       atendente_id,
       aguardando_cliente_desde,
       modo_simples_aguardando,
@@ -1996,6 +2008,7 @@ exports.listarConversas = async (req, res) => {
       // Mensagens disparadas: fora da listagem geral quando sem filtro de status; se a empresa desligou a opção, nunca misturar esse status nas demais queries.
       if (
         !minhaFilaAtiva &&
+        !campanhasAtiva &&
         !aguardandoClienteAtivo &&
         !aguardandoAtendenteAtivo &&
         !pagamentoPendenteAtivo &&
@@ -2004,6 +2017,11 @@ exports.listarConversas = async (req, res) => {
         (!statusNorm || !separarMensagensDisparadasEmpresa)
       ) {
         q = q.or('tipo.eq.grupo,status_atendimento.neq.mensagem_disparada,status_atendimento.is.null')
+      }
+      // Filtro "Campanhas": disparos do módulo aguardando primeira resposta do contato.
+      if (campanhasAtiva) {
+        q = q.or('tipo.is.null,tipo.neq.grupo')
+        q = q.eq('aguardando_resposta_campanha', true)
       }
       // Filtro personalizado "Minha fila": abertas (fila) + em atendimento só comigo + grupos do setor; sem finalizadas
       if (minhaFilaAtiva) {
@@ -2049,9 +2067,12 @@ exports.listarConversas = async (req, res) => {
           q = q.or(`tipo.eq.grupo,status_atendimento.eq.${statusNorm}`)
         }
       }
+      if (!campanhasAtiva && (minhaFilaAtiva || statusNorm === 'aberta')) {
+        q = q.eq('aguardando_resposta_campanha', false)
+      }
       // Atendente: vê TODAS as conversas (pode assumir, transferir, responder qualquer uma)
       // Admin/supervisor: filtro opcional por atendente_id — sem filtro implícito de status; exclui grupos (conversas "assumidas" são individuais)
-      if (!minhaFilaAtiva && !isAtendente && filtroAtendenteInformado != null) {
+      if (!minhaFilaAtiva && !campanhasAtiva && !isAtendente && filtroAtendenteInformado != null) {
         q = q.eq('atendente_id', filtroAtendenteInformado)
         q = q.or('tipo.is.null,tipo.neq.grupo')
       }
@@ -2371,6 +2392,7 @@ exports.listarConversas = async (req, res) => {
         telefone_exibivel: telefoneExibivel,
         status_atendimento_real: isGroup ? null : c.status_atendimento,
         status_atendimento: statusAtendimentoParaLista(isGroup, c.status_atendimento, exibir_badge_aberta),
+        aguardando_resposta_campanha: c.aguardando_resposta_campanha === true,
         exibir_badge_aberta,
         atendente_id: c.atendente_id,
         aguardando_cliente_desde: c.aguardando_cliente_desde ?? null,
@@ -2496,6 +2518,7 @@ exports.listarConversas = async (req, res) => {
     if (statusNorm === 'aberta') {
       conversasFormatadas = conversasFormatadas.filter((c) => {
         if (c.sem_conversa) return false
+        if (c.aguardando_resposta_campanha === true) return false
         if (c.is_group) return c.ultima_mensagem != null // grupo precisa ter ao menos 1 mensagem
         return c.exibir_badge_aberta // individual: tem mensagem ou atendente assumiu
       })
@@ -2523,6 +2546,7 @@ exports.listarConversas = async (req, res) => {
     if (minhaFilaAtiva) {
       conversasFormatadas = conversasFormatadas.filter((c) => {
         if (c.sem_conversa) return false
+        if (c.aguardando_resposta_campanha === true) return false
         // Grupos do setor do atendente: visíveis na Minha fila e ordenados por atividade como os demais.
         if (c.is_group) return true
         if (c.status_atendimento === 'ociosa') return false
@@ -2535,10 +2559,18 @@ exports.listarConversas = async (req, res) => {
           return Number(c.atendente_id) === Number(user_id) || conversaIdsParticipanteAtivoSet.has(Number(c.id))
         }
         if (c.status_atendimento === 'aberta') {
+          if (c.aguardando_resposta_campanha === true) return false
           const livreOuMeu = c.atendente_id == null || Number(c.atendente_id) === Number(user_id)
           return c.exibir_badge_aberta && livreOuMeu
         }
         return false
+      })
+    }
+
+    if (campanhasAtiva) {
+      conversasFormatadas = conversasFormatadas.filter((c) => {
+        if (c.sem_conversa || c.is_group) return false
+        return c.aguardando_resposta_campanha === true
       })
     }
 

@@ -8,6 +8,7 @@ const ultramsg = require('./providers/ultramsg')
 const { findOrCreateConversation } = require('../helpers/conversationSync')
 const { telefoneNaAllowlist, getDisparoFlags } = require('../helpers/disparoWorkerConfig')
 const { buildDispReferenceId } = require('../helpers/disparoReferenceHelper')
+const { marcarAguardandoRespostaCampanha } = require('./disparoConversaOrigemService')
 const {
   _substituirVariaveis: substituirVariaveis,
   _conteudoEditorial: conteudoEditorial,
@@ -185,7 +186,7 @@ async function persistirMensagem({
       whatsapp_id: messageId || null,
       criado_em: new Date().toISOString(),
     })
-    .select('id')
+    .select('id, conversa_id, texto, tipo, url, nome_arquivo, direcao, company_id, status, whatsapp_id, criado_em, whatsapp_instance_id')
     .single()
 
   if (error) {
@@ -204,6 +205,33 @@ async function persistirMensagem({
     })
     .eq('id', item.id)
     .eq('company_id', companyId)
+
+  try {
+    await marcarAguardandoRespostaCampanha({
+      companyId,
+      conversaId: convResult.conversa.id,
+      io,
+    })
+  } catch (e) {
+    console.warn('[disparo:send] marcar origem campanha item=', item.id, e?.message || e)
+  }
+
+  if (io && mensagem?.id) {
+    try {
+      const convId = convResult.conversa.id
+      const emitPayload = {
+        ...mensagem,
+        conversa_id: convId,
+        fromMe: true,
+        direcao: 'out',
+        company_id: companyId,
+      }
+      io.to(`empresa_${companyId}`).emit('nova_mensagem', emitPayload)
+      io.to(`conversa_${convId}`).emit('nova_mensagem', emitPayload)
+    } catch (e) {
+      console.warn('[disparo:send] emit nova_mensagem item=', item.id, e?.message || e)
+    }
+  }
 
   return mensagem
 }

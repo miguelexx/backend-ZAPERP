@@ -19,6 +19,7 @@ describe('chatListCountsService', () => {
     expect(overridesFromListQuery({ conversa_ids: '10,11' })).toEqual({ conversa_ids: [10, 11] })
     expect(overridesFromListQuery({ conversa_ids: '0' })).toEqual({ conversa_ids: [0] })
     expect(overridesFromListQuery({ minha_fila: '1' })).toEqual({ minha_fila: true })
+    expect(overridesFromListQuery({ campanhas: '1' })).toEqual({ campanhas: true })
     expect(overridesFromListQuery({ hoje: '1' })).toEqual({ hoje: true })
     expect(overridesFromListQuery({ aguardando_cliente: '1' })).toEqual({ aguardando_cliente: true })
     expect(overridesFromListQuery({ aguardando_atendente: '1' })).toEqual({ aguardando_atendente: true })
@@ -73,6 +74,34 @@ describe('chatListCountsService', () => {
         { minha_fila: true }
       )
     ).toBe(true)
+
+    expect(
+      rowVisibleInPostFilteredList(
+        {
+          tipo: null,
+          status_atendimento: 'aberta',
+          atendente_id: null,
+          aguardando_resposta_campanha: true,
+          mensagens: [{ id: 1 }],
+        },
+        ctx,
+        { minha_fila: true }
+      )
+    ).toBe(false)
+
+    expect(
+      rowVisibleInPostFilteredList(
+        {
+          tipo: null,
+          status_atendimento: 'aberta',
+          atendente_id: null,
+          aguardando_resposta_campanha: true,
+          mensagens: [{ id: 1 }],
+        },
+        ctx,
+        { status_atendimento: 'aberta' }
+      )
+    ).toBe(false)
 
     expect(
       rowVisibleInPostFilteredList(
