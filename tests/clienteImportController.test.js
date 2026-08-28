@@ -136,6 +136,26 @@ describe('clienteImportController — preview', () => {
     expect(res.body.codigo).toBe('ARQUIVO_CORROMPIDO')
   })
 
+  it('prévia lista os alunos a vincular sem gravar e sem segundo contato', async () => {
+    const buffer = await montarXlsx(
+      [
+        ['Arthur Miguel de Oliveira', '5534999962367', '6º Ano'],
+        ['Isabela Maria de Oliveira', '5534999962367', '1ª Série do Ensino Médio'],
+      ],
+      ['Nome', 'Telefone', 'Tags']
+    )
+    const res = makeRes()
+    await controller.previewImportacao(
+      { file: { buffer, size: buffer.length }, body: {}, user: { company_id: 7 } },
+      res
+    )
+    expect(res.statusCode).toBe(200)
+    expect(res.body.stats.telefonesUnicos).toBe(1)
+    expect(res.body.conflicts).toHaveLength(1)
+    expect(res.body.amostra[0].alunos_a_vincular.map((a) => a.nome)).toEqual(['Isabela Maria de Oliveira'])
+    expect(executarImportacao).not.toHaveBeenCalled()
+  })
+
   it('respeita override de mapeamento vindo do body', async () => {
     // Cabeçalhos genéricos que a detecção automática não reconhece.
     const buffer = await montarXlsx(
@@ -170,10 +190,37 @@ describe('clienteImportController — confirmar', () => {
 
     expect(res.statusCode).toBe(200)
     expect(executarImportacao).toHaveBeenCalledTimes(1)
-    const [, companyIdArg, planoArg] = executarImportacao.mock.calls[0]
+    const [, companyIdArg, planoArg, optsArg] = executarImportacao.mock.calls[0]
     expect(companyIdArg).toBe(7) // NUNCA 999
     expect(planoArg.entries).toHaveLength(1)
     expect(planoArg.entries[0].telefoneNormalizado).toBe('5534999991234')
+    expect(optsArg.vincularAlunosMesmoTelefone).toBe(false)
+  })
+
+  it('campo vincular omitido assume false; true explícito chega no service', async () => {
+    executarImportacao.mockResolvedValue({ ok: true, resumo: { clientesImportados: 1 } })
+    const buffer = await montarXlsx(
+      [linha({ nome: 'João Silva', serie: '6º Ano', cel: '34999991234' })],
+      HEADERS
+    )
+    const resOff = makeRes()
+    await controller.confirmarImportacao(
+      { file: { buffer, size: buffer.length }, body: {}, user: { company_id: 7, perfil: 'admin' } },
+      resOff
+    )
+    expect(executarImportacao.mock.calls[0][3].vincularAlunosMesmoTelefone).toBe(false)
+
+    executarImportacao.mockClear()
+    const resOn = makeRes()
+    await controller.confirmarImportacao(
+      {
+        file: { buffer, size: buffer.length },
+        body: { vincular_alunos_mesmo_telefone: 'true' },
+        user: { company_id: 7, perfil: 'admin' },
+      },
+      resOn
+    )
+    expect(executarImportacao.mock.calls[0][3].vincularAlunosMesmoTelefone).toBe(true)
   })
 
   it('rejeita quando não há nenhuma linha válida', async () => {

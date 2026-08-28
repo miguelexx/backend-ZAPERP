@@ -31,4 +31,16 @@ describe('busca de clientes por prefixo de palavra', () => {
   test('mantém busca numérica por trecho de telefone', () => {
     expect(chatIdentityMatchesSearch({ contato_nome: 'Outro nome', telefone: '+55 34 99991-1246' }, '11246')).toBe(true)
   })
+
+  test('aceita nome vinculado e encontrado_por no filtro defensivo', () => {
+    const row = {
+      contato_nome: 'Arthur Miguel de Oliveira',
+      encontrado_por: 'Isabela Maria de Oliveira',
+      nomes_vinculados: [{ nome: 'Isabela Maria de Oliveira', serie: '1ª Série' }],
+    }
+    expect(chatIdentityMatchesSearch(row, 'Isabela')).toBe(true)
+    expect(chatIdentityMatchesSearch(row, 'isabela maria')).toBe(true)
+    expect(chatIdentityMatchesSearch(row, 'ISA')).toBe(true)
+    expect(chatIdentityMatchesSearch({ contato_nome: 'Arthur Miguel de Oliveira' }, 'Isabela')).toBe(false)
+  })
 })

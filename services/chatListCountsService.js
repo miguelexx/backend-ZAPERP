@@ -9,6 +9,9 @@ const {
   getChatSearchIdLimit,
 } = require('../helpers/chatSearchHelper')
 const {
+  buscarConversaIdsPorNomesVinculados,
+} = require('../helpers/clienteNomesVinculados')
+const {
   getGrupoIdsPorDepartamentos,
   getGrupoIdsSemDepartamento,
   pushNonGroupVisibilityParts,
@@ -242,7 +245,7 @@ async function resolveChatListCountsContext(req) {
     const phoneVariacoes = buildPhoneSearchTerms(palavraTrim)
 
     // Idêntico ao chatController: 3 branches paralelas, RPC unaccent para nomes
-    const [convByNomeIds, convByTelefone, idsFromMsg] = await Promise.all([
+    const [convByNomeIds, convByTelefone, idsFromMsg, idsPorVinculo] = await Promise.all([
       supabase
         .rpc('buscar_conversas_por_nome_ids', {
           p_company_id: Number(company_id),
@@ -264,12 +267,14 @@ async function resolveChatListCountsContext(req) {
       String(process.env.CHAT_SEARCH_INCLUDE_MESSAGE_TEXT ?? '').trim() === '1'
         ? buscarConversaIdsPorTextoMensagens({ company_id, term: palavraTrim })
         : Promise.resolve([]),
+      buscarConversaIdsPorNomesVinculados(supabase, company_id, palavraTrim, searchIdLimit),
     ])
 
     const mergedSet = new Set([
       ...convByNomeIds,
       ...(convByTelefone.data || []).map((c) => c.id),
       ...idsFromMsg,
+      ...(idsPorVinculo || []),
     ])
     if (mergedSet.size === 0) {
       forceEmptyConversas = true

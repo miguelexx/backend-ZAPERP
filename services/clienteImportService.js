@@ -13,6 +13,7 @@ const {
   ORIGEM_MANUAL,
   clienteTemNomeProtegido,
 } = require('../helpers/clienteNomeProtecao')
+const { upsertVinculosDoLote } = require('../helpers/clienteNomesVinculados')
 
 async function getOrCreateTag(supabase, companyId, nomeTag, cache) {
   const nome = String(nomeTag || '').replace(/\s+/g, ' ').trim()
@@ -259,6 +260,7 @@ async function executarImportacao(supabase, companyId, plano, opts = {}) {
 
   const entries = Array.isArray(plano?.entries) ? plano.entries : []
   const confirmarNomeManual = opts.confirmarNomeManual === true
+  const vincularAlunosMesmoTelefone = opts.vincularAlunosMesmoTelefone === true
   const tagCache = new Map()
 
   let clientesCriados = 0
@@ -267,10 +269,13 @@ async function executarImportacao(supabase, companyId, plano, opts = {}) {
   let nomesAlterados = 0
   let nomesProtegidos = 0
   let nomesManuaisPreservados = 0
+  let nomesVinculados = 0
+  let nomesVinculadosAtualizados = 0
   let tagsVinculadas = 0
   let tagsCriadas = 0
   let tagsRemovidas = 0
   const falhas = []
+  const pendentesVinculo = []
 
   let existentesMap = new Map()
   try {
@@ -354,12 +359,44 @@ async function executarImportacao(supabase, companyId, plano, opts = {}) {
           motivo: `Erro ao sincronizar etiquetas: ${syncErr.message || syncErr}`,
         })
       }
+
+      if (vincularAlunosMesmoTelefone && Array.isArray(entry.alunos) && entry.alunos.length > 1) {
+        pendentesVinculo.push({
+          clienteId,
+          alunos: entry.alunos,
+          nomePrincipal: entry.nome,
+          telefone: entry.telefone,
+          nome: entry.nome,
+        })
+      }
     } catch (err) {
       falhas.push({
         telefone: entry.telefone,
         nome: entry.nome,
         motivo: `Erro ao importar: ${err.message || err}`,
       })
+    }
+  }
+
+  if (vincularAlunosMesmoTelefone && pendentesVinculo.length > 0) {
+    try {
+      const r = await upsertVinculosDoLote(supabase, cid, pendentesVinculo)
+      nomesVinculados += r.criados
+      nomesVinculadosAtualizados += r.atualizados
+    } catch (loteErr) {
+      for (const item of pendentesVinculo) {
+        try {
+          const r = await upsertVinculosDoLote(supabase, cid, [item])
+          nomesVinculados += r.criados
+          nomesVinculadosAtualizados += r.atualizados
+        } catch (vinculoErr) {
+          falhas.push({
+            telefone: item.telefone,
+            nome: item.nome,
+            motivo: `Erro ao vincular alunos: ${vinculoErr.message || vinculoErr || loteErr.message || loteErr}`,
+          })
+        }
+      }
     }
   }
 
@@ -376,6 +413,8 @@ async function executarImportacao(supabase, companyId, plano, opts = {}) {
       nomesAlterados,
       nomesProtegidos,
       nomesManuaisPreservados,
+      nomesVinculados,
+      nomesVinculadosAtualizados,
       tagsCriadas,
       tagsVinculadas,
       tagsRemovidas,

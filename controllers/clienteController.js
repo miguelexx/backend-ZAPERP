@@ -4,6 +4,11 @@ const { getCanonicalPhone, getCanonicalPhoneAnyIntl, getOrCreateCliente } = requ
 const { ensureConversaForCliente } = require('../services/conversaAbrirClienteService');
 const { executarAssumirConversa } = require('../services/conversaAssumirInternoService');
 const { buildClienteListagemSearchOr, buildPhoneSearchTerms } = require('../helpers/chatSearchHelper');
+const {
+  anexarVinculosEmBusca,
+  buscarClienteIdsPorNomeVinculado,
+  listarVinculosDoCliente,
+} = require('../helpers/clienteNomesVinculados');
 const crmSync = require('../services/crmSyncService');
 const { syncUltraMsgContact } = require('../services/ultramsgSyncContact');
 const { marcarSchemaNomeProtecaoIndisponivel, sanitizarPatchNomeSchema } = require('../helpers/clienteNomeColunas');
@@ -90,6 +95,7 @@ exports.listarClientes = async (req, res) => {
           ultimo_contato: c.ultimo_contato || null,
           criado_em: c.criado_em,
         }))
+        await anexarVinculosEmBusca(supabase, cid, clientes, termoBusca, 'contains')
         res.setHeader('X-Total-Count', String(totalReal))
         res.setHeader('Access-Control-Expose-Headers', 'X-Total-Count')
         return res.status(200).json(clientes)
@@ -172,6 +178,38 @@ exports.listarClientes = async (req, res) => {
       criado_em: c.criado_em
     }))
 
+    if (termoBusca) {
+      await anexarVinculosEmBusca(supabase, cid, clientes, termoBusca, 'contains')
+      const extraIds = await buscarClienteIdsPorNomeVinculado(supabase, cid, termoBusca, {
+        mode: 'contains',
+        limit: 1000,
+      })
+      const jaTem = new Set(clientes.map((c) => Number(c.id)))
+      const faltando = extraIds.filter((id) => !jaTem.has(id))
+      if (faltando.length > 0) {
+        const { data: extraRows } = await supabase
+          .from('clientes')
+          .select('id, telefone, wa_id, nome, pushname, observacoes, foto_perfil, email, empresa, ultimo_contato, criado_em')
+          .eq('company_id', cid)
+          .in('id', faltando)
+        const extras = (extraRows || []).map((c) => ({
+          id: c.id,
+          telefone: c.telefone,
+          wa_id: c.wa_id,
+          nome: getDisplayName(c) || null,
+          pushname: c.pushname || null,
+          observacoes: c.observacoes,
+          foto_perfil: c.foto_perfil || null,
+          email: c.email || null,
+          empresa: c.empresa || null,
+          ultimo_contato: c.ultimo_contato || null,
+          criado_em: c.criado_em,
+        }))
+        await anexarVinculosEmBusca(supabase, cid, extras, termoBusca, 'contains')
+        clientes.push(...extras)
+      }
+    }
+
     // X-Total-Count permite o frontend exibir o total real sem depender do tamanho da página
     res.setHeader('X-Total-Count', String(totalReal))
     res.setHeader('Access-Control-Expose-Headers', 'X-Total-Count')
@@ -213,7 +251,8 @@ exports.buscarClientePorId = async (req, res) => {
       email: data.email || null,
       empresa: data.empresa || null,
       ultimo_contato: data.ultimo_contato || null,
-      criado_em: data.criado_em
+      criado_em: data.criado_em,
+      nomes_vinculados: await listarVinculosDoCliente(supabase, cid, data.id, data.nome),
     };
 
     return res.status(200).json(cliente);
@@ -537,7 +576,7 @@ exports.apagarTodosClientes = async (req, res) => {
     await supabase.from('conversas').update({ cliente_id: null }).eq('company_id', cid).neq('cliente_id', null);
 
     // 2) Remove tabelas filhas com FK para clientes (empresa isolada por company_id)
-    const tabelasFilhas = ['cliente_tags', 'contato_opt_in', 'contato_opt_out'];
+    const tabelasFilhas = ['cliente_nomes_vinculados', 'cliente_tags', 'contato_opt_in', 'contato_opt_out'];
     for (const tabela of tabelasFilhas) {
       const { error: errFilha } = await supabase.from(tabela).delete().eq('company_id', cid);
       if (errFilha && !String(errFilha.message || '').includes('does not exist')) {
@@ -583,7 +622,7 @@ exports.excluirCliente = async (req, res) => {
     await supabase.from('conversas').update({ cliente_id: null }).eq('company_id', cid).eq('cliente_id', clienteId);
 
     // 2) Remove tabelas filhas com FK para clientes
-    const tabelasFilhasComEmpresa = ['cliente_tags', 'contato_opt_in', 'contato_opt_out'];
+    const tabelasFilhasComEmpresa = ['cliente_nomes_vinculados', 'cliente_tags', 'contato_opt_in', 'contato_opt_out'];
     for (const tabela of tabelasFilhasComEmpresa) {
       const { error: errFilha } = await supabase.from(tabela).delete().eq('company_id', cid).eq('cliente_id', clienteId);
       if (errFilha && !String(errFilha.message || '').includes('does not exist')) {

@@ -61,6 +61,11 @@ const {
   escapeIlikePattern,
 } = require('../helpers/chatSearchHelper')
 const {
+  buscarConversaIdsPorNomesVinculados,
+  buscarClienteIdsPorNomeVinculado,
+  anexarVinculosEmBusca,
+} = require('../helpers/clienteNomesVinculados')
+const {
   getGrupoDepartamentoIds,
   getGrupoIdsPorDepartamentos,
   getGrupoIdsSemDepartamento,
@@ -1769,7 +1774,7 @@ exports.listarConversas = async (req, res) => {
       //       + nome_grupo — tudo com suporte a acentos via unaccent (L1 fix)
       //   (2) Telefone direto em conversas (com variantes BR)
       //   (3) Texto de mensagens (paginado) — apenas quando explicitamente habilitado
-      const [convByNomeIds, { data: convByTelefone }, idsFromMsg] = await Promise.all([
+      const [convByNomeIds, { data: convByTelefone }, idsFromMsg, idsPorVinculo] = await Promise.all([
         supabase
           .rpc('buscar_conversas_por_nome_ids', {
             p_company_id: Number(company_id),
@@ -1791,6 +1796,7 @@ exports.listarConversas = async (req, res) => {
         incluirTextoMensagens
           ? buscarConversaIdsPorTextoMensagens({ company_id, term: palavraTrim })
           : Promise.resolve([]),
+        buscarConversaIdsPorNomesVinculados(supabase, company_id, palavraTrim, searchIdLimit),
       ])
 
       isTextSearch = true
@@ -1799,6 +1805,7 @@ exports.listarConversas = async (req, res) => {
         [
           ...convByNomeIds,
           ...(convByTelefone || []).map((c) => c.id),
+          ...(idsPorVinculo || []),
         ]
           .map((v) => Number(v))
           .filter((n) => Number.isFinite(n) && n > 0)
@@ -2665,6 +2672,22 @@ exports.listarConversas = async (req, res) => {
             todosClientes.push(...(chunkRows || []))
           }
         }
+        const extraVinculoIds = await buscarClienteIdsPorNomeVinculado(supabase, cid, palavraTrim, {
+          mode: 'prefix',
+          limit: searchFetchLimit,
+        })
+        if (extraVinculoIds.length > 0) {
+          const jaTem = new Set(todosClientes.map((cl) => Number(cl.id)))
+          const faltando = extraVinculoIds.filter((id) => !jaTem.has(id))
+          if (faltando.length > 0) {
+            const { data: extraCli } = await supabase
+              .from('clientes')
+              .select('id, nome, pushname, telefone, foto_perfil')
+              .eq('company_id', cid)
+              .in('id', faltando)
+            todosClientes.push(...(extraCli || []))
+          }
+        }
       }
       const { instances: companyInstances } = await listWhatsappInstances(cid)
       const activeInstances = (companyInstances || []).filter((i) => i && i.ativo !== false)
@@ -2828,6 +2851,7 @@ exports.listarConversas = async (req, res) => {
     // Resultados que vieram exclusivamente do texto de mensagens continuam
     // válidos somente quando esse recurso foi explicitamente habilitado.
     if (isTextSearch && palavraTrim) {
+      await anexarVinculosEmBusca(supabase, company_id, conversasFormatadas, palavraTrim, 'prefix')
       const realConversationCountBefore = conversasFormatadas.filter((c) => c?.id != null && !c?.sem_conversa).length
       conversasFormatadas = conversasFormatadas.filter((c) => {
         const id = Number(c?.id)

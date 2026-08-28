@@ -40,6 +40,20 @@ describe('planilha real Contatos_Alunos_ZapERP.xlsx', () => {
     const tagsAlexia = alexia.tags || []
     expect(tagsAlexia.some((t) => t.includes('6º Ano'))).toBe(true)
 
+    const compartilhado = plano.entries.find((e) => (e.alunos || []).length > 1)
+    expect(compartilhado).toBeTruthy()
+    expect(plano.conflicts.length).toBeGreaterThan(0)
+    expect(plano.stats.telefonesUnicos).toBeLessThan(plano.stats.validas)
+
+    const irmaos = plano.entries.find((e) =>
+      (e.alunos || []).some((a) => /ISABELA/i.test(a.nome)) &&
+      (e.alunos || []).some((a) => /ARTHUR/i.test(a.nome))
+    )
+    if (irmaos) {
+      expect(irmaos.alunos.length).toBeGreaterThanOrEqual(2)
+      expect(String(irmaos.telefoneNormalizado || irmaos.telefone)).toMatch(/^\d+$/)
+    }
+
     const segunda = planImport(dataRows, mapping)
     expect(segunda.stats.telefonesUnicos).toBe(plano.stats.telefonesUnicos)
     expect(segunda.conflicts.length).toBe(plano.conflicts.length)

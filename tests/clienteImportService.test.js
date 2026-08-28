@@ -16,11 +16,13 @@ function makeFakeSupabase() {
   const db = {
     tags: [],
     cliente_tags: [],
+    cliente_nomes_vinculados: [],
     clientes: [],
     conversas: [],
   }
   let tagSeq = 1
   let linkSeq = 1
+  let vinculoSeq = 1
 
   function from(table) {
     const preds = []
@@ -62,6 +64,22 @@ function makeFakeSupabase() {
           const novo = { id: linkSeq++, ...payload }
           db.cliente_tags.push(novo)
           return resolve({ data: novo, error: null })
+        }
+        if (op === 'insert' && payload && table === 'cliente_nomes_vinculados') {
+          const rows = Array.isArray(payload) ? payload : [payload]
+          for (const row of rows) {
+            const dup = db.cliente_nomes_vinculados.find(
+              (r) =>
+                r.company_id === row.company_id &&
+                r.cliente_id === row.cliente_id &&
+                r.nome_normalizado === row.nome_normalizado
+            )
+            if (dup) return resolve({ data: null, error: { code: '23505' } })
+          }
+          for (const row of rows) {
+            db.cliente_nomes_vinculados.push({ id: vinculoSeq++, ...row })
+          }
+          return resolve({ data: null, error: null })
         }
         if (op === 'update') {
           const rows = builder._rows()
@@ -250,5 +268,140 @@ describe('clienteImportService — execução', () => {
 
   it('rejeita company_id inválido', async () => {
     await expect(executarImportacao(makeFakeSupabase(), 0, plano([]))).rejects.toThrow('company_id inválido')
+  })
+
+  it('switch desativado não grava nomes vinculados', async () => {
+    getOrCreateCliente.mockResolvedValue({ cliente_id: 10, created: true, nome_protegido: true })
+    const sb = makeFakeSupabase()
+    const res = await executarImportacao(sb, 7, plano([
+      {
+        telefone: '5534999962367',
+        nome: 'Arthur Miguel de Oliveira',
+        tags: ['6º Ano'],
+        alunos: [
+          { nome: 'Arthur Miguel de Oliveira', serie: '6º Ano' },
+          { nome: 'Isabela Maria de Oliveira', serie: '1ª Série do Ensino Médio' },
+        ],
+      },
+    ]), { vincularAlunosMesmoTelefone: false })
+
+    expect(res.resumo.clientesImportados).toBe(1)
+    expect(res.resumo.nomesVinculados).toBe(0)
+    expect(sb.__db.cliente_nomes_vinculados).toHaveLength(0)
+  })
+
+  it('campo omitido assume switch desativado', async () => {
+    getOrCreateCliente.mockResolvedValue({ cliente_id: 10, created: true, nome_protegido: true })
+    const sb = makeFakeSupabase()
+    await executarImportacao(sb, 7, plano([
+      {
+        telefone: '5534999962367',
+        nome: 'Arthur Miguel de Oliveira',
+        tags: ['6º Ano'],
+        alunos: [
+          { nome: 'Arthur Miguel de Oliveira', serie: '6º Ano' },
+          { nome: 'Isabela Maria de Oliveira', serie: '1ª Série' },
+        ],
+      },
+    ]))
+    expect(sb.__db.cliente_nomes_vinculados).toHaveLength(0)
+  })
+
+  it('switch ativado grava os demais alunos e preserva o nome principal', async () => {
+    getOrCreateCliente.mockResolvedValue({ cliente_id: 10, created: true, nome_protegido: true })
+    const sb = makeFakeSupabase()
+    const res = await executarImportacao(sb, 7, plano([
+      {
+        telefone: '5534999962367',
+        nome: 'Arthur Miguel de Oliveira',
+        tags: ['6º Ano', '1ª Série do Ensino Médio'],
+        alunos: [
+          { nome: 'Arthur Miguel de Oliveira', serie: '6º Ano' },
+          { nome: 'Isabela Maria de Oliveira', serie: '1ª Série do Ensino Médio' },
+        ],
+      },
+    ]), { vincularAlunosMesmoTelefone: true })
+
+    expect(getOrCreateCliente).toHaveBeenCalledTimes(1)
+    expect(res.resumo.clientesImportados).toBe(1)
+    expect(res.resumo.nomesVinculados).toBe(1)
+    expect(res.resumo.nomesProtegidos).toBe(1)
+    expect(sb.__db.cliente_nomes_vinculados).toHaveLength(1)
+    expect(sb.__db.cliente_nomes_vinculados[0]).toMatchObject({
+      company_id: 7,
+      cliente_id: 10,
+      nome: 'Isabela Maria de Oliveira',
+      serie: '1ª Série do Ensino Médio',
+      origem: 'planilha',
+    })
+  })
+
+  it('segunda importação não duplica vínculo e atualiza a série', async () => {
+    getOrCreateCliente.mockResolvedValue({ cliente_id: 10, created: false, nome_protegido: true })
+    const sb = makeFakeSupabase()
+    const base = {
+      telefone: '5534999962367',
+      nome: 'Arthur Miguel de Oliveira',
+      tags: ['7º Ano'],
+    }
+    await executarImportacao(sb, 7, plano([{
+      ...base,
+      alunos: [
+        { nome: 'Arthur Miguel de Oliveira', serie: '7º Ano' },
+        { nome: 'Isabela Maria de Oliveira', serie: '1ª Série do Ensino Médio' },
+      ],
+    }]), { vincularAlunosMesmoTelefone: true })
+    const segunda = await executarImportacao(sb, 7, plano([{
+      ...base,
+      alunos: [
+        { nome: 'Arthur Miguel de Oliveira', serie: '7º Ano' },
+        { nome: 'Isabela Maria de Oliveira', serie: '2ª Série do Ensino Médio' },
+      ],
+    }]), { vincularAlunosMesmoTelefone: true })
+    expect(sb.__db.cliente_nomes_vinculados).toHaveLength(1)
+    expect(sb.__db.cliente_nomes_vinculados[0].serie).toBe('2ª Série do Ensino Médio')
+    expect(segunda.resumo.nomesVinculadosAtualizados).toBe(1)
+    expect(segunda.resumo.nomesVinculados).toBe(0)
+  })
+
+  it('desativar o switch numa importação futura não apaga vínculos existentes', async () => {
+    getOrCreateCliente.mockResolvedValue({ cliente_id: 10, created: false, nome_protegido: true })
+    const sb = makeFakeSupabase()
+    const entry = {
+      telefone: '5534999962367',
+      nome: 'Arthur Miguel de Oliveira',
+      tags: ['6º Ano'],
+      alunos: [
+        { nome: 'Arthur Miguel de Oliveira', serie: '6º Ano' },
+        { nome: 'Isabela Maria de Oliveira', serie: '1ª Série' },
+      ],
+    }
+    await executarImportacao(sb, 7, plano([entry]), { vincularAlunosMesmoTelefone: true })
+    expect(sb.__db.cliente_nomes_vinculados).toHaveLength(1)
+    await executarImportacao(sb, 7, plano([entry]), { vincularAlunosMesmoTelefone: false })
+    expect(sb.__db.cliente_nomes_vinculados).toHaveLength(1)
+    expect(sb.__db.cliente_nomes_vinculados[0].nome).toBe('Isabela Maria de Oliveira')
+  })
+
+  it('cinco alunos no mesmo telefone geram um cliente e quatro vínculos', async () => {
+    getOrCreateCliente.mockResolvedValue({ cliente_id: 22, created: true, nome_protegido: true })
+    const sb = makeFakeSupabase()
+    const alunos = [
+      { nome: 'N1', serie: 'A' },
+      { nome: 'N2', serie: 'B' },
+      { nome: 'N3', serie: 'C' },
+      { nome: 'N4', serie: 'D' },
+      { nome: 'N5', serie: 'E' },
+    ]
+    const res = await executarImportacao(sb, 7, plano([{
+      telefone: '5534999900000',
+      nome: 'N1',
+      tags: ['A', 'B', 'C', 'D', 'E'],
+      alunos,
+    }]), { vincularAlunosMesmoTelefone: true })
+    expect(getOrCreateCliente).toHaveBeenCalledTimes(1)
+    expect(res.resumo.clientesImportados).toBe(1)
+    expect(res.resumo.nomesVinculados).toBe(4)
+    expect(sb.__db.cliente_nomes_vinculados.map((r) => r.nome).sort()).toEqual(['N2', 'N3', 'N4', 'N5'])
   })
 })

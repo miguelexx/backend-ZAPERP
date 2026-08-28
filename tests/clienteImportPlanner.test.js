@@ -203,4 +203,28 @@ describe('clienteImportPlanner — planejamento', () => {
     expect(plano.stats.telefonesUnicos).toBe(2)
     expect(plano.stats.ignoradas).toBe(2)
   })
+
+  it('agrupa 3 e 5 alunos no mesmo telefone em um único contato', () => {
+    const tres = [
+      ['A1', '34999996236', '6º Ano'],
+      ['A2', '34999996236', '1ª Série'],
+      ['A3', '34999996236', '2ª Série'],
+    ]
+    const p3 = planImport(tres, mapping)
+    expect(p3.entries).toHaveLength(1)
+    expect(p3.entries[0].alunos).toHaveLength(3)
+    expect(p3.conflicts[0].quantidade).toBe(3)
+
+    const cinco = [
+      ['N1', '34999990000', 'A'],
+      ['N2', '34999990000', 'B'],
+      ['N3', '34999990000', 'C'],
+      ['N4', '34999990000', 'D'],
+      ['N5', '34999990000', 'E'],
+    ]
+    const p5 = planImport(cinco, mapping)
+    expect(p5.entries).toHaveLength(1)
+    expect(p5.entries[0].alunos.map((a) => a.nome)).toEqual(['N1', 'N2', 'N3', 'N4', 'N5'])
+    expect(p5.conflicts[0].nomesConflitantes).toHaveLength(5)
+  })
 })

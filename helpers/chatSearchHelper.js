@@ -38,6 +38,10 @@ function chatIdentityMatchesSearch(row, rawTerm) {
     row?.cliente_nome,
     row?.pushname,
     row?.nome,
+    row?.encontrado_por,
+    ...(Array.isArray(row?.nomes_vinculados)
+      ? row.nomes_vinculados.map((v) => (v && typeof v === 'object' ? v.nome : v))
+      : []),
   ]
   if (names.some((name) => nameMatchesWordPrefix(name, rawTerm))) return true
 

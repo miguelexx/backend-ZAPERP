@@ -19,6 +19,7 @@ const {
   executarImportacao,
   enriquecerPlanoComExistentes,
 } = require('../services/clienteImportService')
+const { alunosParaVincular } = require('../helpers/clienteNomesVinculados')
 
 const PREVIEW_SAMPLE_SIZE = 50
 const importLocks = new Map()
@@ -143,6 +144,19 @@ function parseFlagTrue(v) {
   return v === true || v === 1 || String(v || '').toLowerCase() === 'true'
 }
 
+function parseVincularAlunos(req) {
+  const raw = req.body?.vincular_alunos_mesmo_telefone
+    ?? req.body?.vincularAlunosMesmoTelefone
+    ?? req.body?.vincular_alunos
+    ?? req.body?.vincularAlunos
+  if (raw == null || raw === '') return false
+  return parseFlagTrue(raw)
+}
+
+function serializarAlunosAVincular(entry) {
+  return alunosParaVincular(entry?.alunos, entry?.nome)
+}
+
 function requireFile(req, res) {
   if (!req.file || !req.file.buffer || !req.file.size) {
     res.status(400).json({ erro: 'Envie um arquivo .xlsx no campo "arquivo".', codigo: 'ARQUIVO_OBRIGATORIO' })
@@ -165,10 +179,14 @@ function serializarPlanoPreview(plano, mapping) {
       conflito: e.nomesConflitantes.length > 0,
       nomes_conflitantes: e.nomesConflitantes,
       alunos: e.alunos || [],
+      alunos_a_vincular: serializarAlunosAVincular(e),
       existente: e.existente || null,
     })),
     ignored: (plano.ignored || []).slice(0, 500),
-    conflicts: (plano.conflicts || []).slice(0, 500),
+    conflicts: (plano.conflicts || []).slice(0, 500).map((c) => ({
+      ...c,
+      alunos_a_vincular: alunosParaVincular(c.alunos, c.nome),
+    })),
     nome_sera_alterado: (plano.nomeSeraAlterado || []).slice(0, 500),
     nomes_manuais_protegidos: (plano.nomesManuaisProtegidos || []).slice(0, 500),
     ja_existentes: (plano.jaExistentesIguais || []).slice(0, 500),
@@ -234,6 +252,7 @@ exports.confirmarImportacao = async (req, res) => {
 
     const nomesPrincipais = parseNomesPrincipais(req)
     const confirmarNomeManual = parseFlagTrue(req.body?.confirmar_nomes_manuais ?? req.body?.confirmarNomesManuais)
+    const vincularAlunosMesmoTelefone = parseVincularAlunos(req)
 
     let plano = planImport(dataRows, mapping, { nomesPrincipais })
     if (plano.entries.length === 0) {
@@ -246,7 +265,10 @@ exports.confirmarImportacao = async (req, res) => {
     }
 
     plano = await enriquecerPlanoComExistentes(supabase, companyId, plano)
-    const resultado = await executarImportacao(supabase, companyId, plano, { confirmarNomeManual })
+    const resultado = await executarImportacao(supabase, companyId, plano, {
+      confirmarNomeManual,
+      vincularAlunosMesmoTelefone,
+    })
     return res.status(200).json(resultado)
   } catch (err) {
     return responderErro(res, err, 'Erro ao importar clientes.')
@@ -264,4 +286,4 @@ function responderErro(res, err, fallbackMsg) {
   })
 }
 
-exports._test = { lerPlanilha, resolverMapeamento, importLocks }
+exports._test = { lerPlanilha, resolverMapeamento, importLocks, parseVincularAlunos, parseFlagTrue }

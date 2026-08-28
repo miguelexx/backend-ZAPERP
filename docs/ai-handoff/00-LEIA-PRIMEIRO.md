@@ -19,6 +19,7 @@ As seguintes mudanças ocorreram no working tree e/ou foram commitadas após a a
 | `scheduler_locks` users removido | `20260812130000_drop_scheduler_locks_users.sql` | Tabela dropada |
 | Disparo etapas 5–9 adicionadas | `20260821*` a `20260823*` | Tabelas `disparo_*` para limites, revisão, fila, opt-out, respostas, auditoria |
 | Busca por prefixo de palavra | `20260823230000_chat_search_word_prefix.sql` | Nova RPC de busca |
+| Nomes vinculados (irmãos no mesmo telefone) | `20260827220000_cliente_nomes_vinculados.sql` | Tabela + EXISTS nas RPCs de busca; só importação com switch. Não aplicada automaticamente. |
 | R2 storage para mensagens | `20260813120000_mensagens_storage_r2.sql` | Campo `r2_key` em mensagens |
 
 ## Objetivo e estado
