@@ -57,9 +57,9 @@ describe('disparoWorkerConfig — defaults seguros', () => {
     restoreEnv()
   })
 
-  it('defaults: worker false, live false, dryRun true, canSendLive false', () => {
+  it('defaults: worker true, live false, dryRun true, canSendLive false', () => {
     const flags = getDisparoFlags()
-    expect(flags.workerEnabled).toBe(false)
+    expect(flags.workerEnabled).toBe(true)
     expect(flags.liveEnabled).toBe(false)
     expect(flags.dryRun).toBe(true)
     expect(flags.canSendLive).toBe(false)
@@ -145,7 +145,7 @@ describe('disparoWorkerConfig — allowlist e config completa', () => {
     expect(cfg.pollMs).toBe(3000)
     expect(cfg.batchSize).toBe(10)
     expect(cfg.heartbeatMs).toBe(10000)
-    expect(cfg.workerEnabled).toBe(false)
+    expect(cfg.workerEnabled).toBe(true)
     expect(cfg.dryRun).toBe(true)
     expect(typeof cfg.workerId).toBe('string')
     expect(cfg.workerId.length).toBeGreaterThan(0)

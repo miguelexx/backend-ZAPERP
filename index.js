@@ -368,6 +368,9 @@ server.listen(PORT, '0.0.0.0', () => {
     startProdutosSyncScheduler()
     startPendingOutboundReconciliationScheduler(io)
     startTriageRedirectScheduler(io)
+    const { startDisparoWorker } = require('./workers/disparoWorker')
+    startDisparoWorker(io)
+    console.log('[WORKER] Disparo worker embutido na API (heartbeat + fila)')
     const {
       startInboundMediaRetryScheduler,
       startInboundMediaDueRetryScheduler,
@@ -420,6 +423,14 @@ function shutdown(signal) {
     io.close()
   } catch (e) {
     console.error('[SHUTDOWN] Erro ao fechar Socket.IO:', e?.message || e)
+  }
+  try {
+    const { stopDisparoWorker } = require('./workers/disparoWorker')
+    Promise.resolve(stopDisparoWorker()).catch((e) => {
+      console.error('[SHUTDOWN] disparo worker:', e?.message || e)
+    })
+  } catch (e) {
+    console.error('[SHUTDOWN] disparo worker:', e?.message || e)
   }
   server.close((err) => {
     if (err) {

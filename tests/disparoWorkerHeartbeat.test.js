@@ -72,6 +72,28 @@ describe('disparoWorker — heartbeat', () => {
     expect(worker.heartbeatStatus({ shutdown: true })).toBe('offline')
     expect(worker.heartbeatStatus({ status: 'disabled' })).toBe('disabled')
   })
+
+  it('startDisparoWorker é idempotente e stop limpa o loop', async () => {
+    const log = jest.spyOn(console, 'log').mockImplementation(() => {})
+    const err = jest.spyOn(console, 'error').mockImplementation(() => {})
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {})
+    supabase.from.mockImplementation(() => mockChain())
+    installRpcMock({
+      disparo_recuperar_leases_expirados: () => ({ data: 0, error: null }),
+      disparo_claim_fila_itens: () => ({ data: [], error: null }),
+    })
+    try {
+      const stop = worker.startDisparoWorker()
+      const stop2 = worker.startDisparoWorker()
+      expect(stop).toBe(stop2)
+      await worker.stopDisparoWorker()
+    } finally {
+      await worker.stopDisparoWorker().catch(() => {})
+      log.mockRestore()
+      err.mockRestore()
+      warn.mockRestore()
+    }
+  })
 })
 
 describe('disparoWorker — liberarReservas e erro por item', () => {

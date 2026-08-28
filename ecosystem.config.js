@@ -15,9 +15,9 @@ module.exports = {
       },
     },
     {
-      // Processo independente da API HTTP. Claim atômico via SKIP LOCKED.
-      // Manter instances: 1. DISPARO_WORKER_ENABLED=true no .env para processar a fila.
-      // Envio real continua exigindo também LIVE_ENABLED=true e DRY_RUN=false.
+      // Processo opcional extra (a API já embute o worker no index.js).
+      // Manter instances: 1. Claim atômico via SKIP LOCKED se os dois rodarem.
+      // Envio real continua exigindo LIVE_ENABLED=true e DRY_RUN=false.
       name: 'whatsapp-plataforma-disparo-worker',
       script: 'workers/disparoWorker.js',
       cwd: __dirname,

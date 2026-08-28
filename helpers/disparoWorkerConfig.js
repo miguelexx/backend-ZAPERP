@@ -1,6 +1,7 @@
 /**
  * Feature flags e configuração do worker/envio do Disparo (Etapa 7).
- * Defaults seguros: worker off, live off, dry-run on.
+ * Worker on por padrão (a API sobe o loop junto com o HTTP).
+ * Envio real continua gated: live off e dry-run on até ops ligar.
  */
 
 function getBooleanEnv(name, defaultValue = false) {
@@ -19,7 +20,7 @@ function getIntEnv(name, defaultValue, min = 1, max = 3600000) {
 }
 
 function getDisparoFlags() {
-  const workerEnabled = getBooleanEnv('DISPARO_WORKER_ENABLED', false)
+  const workerEnabled = getBooleanEnv('DISPARO_WORKER_ENABLED', true)
   const liveEnabled = getBooleanEnv('DISPARO_LIVE_ENABLED', false)
   const dryRun = getBooleanEnv('DISPARO_DRY_RUN', true)
   return {

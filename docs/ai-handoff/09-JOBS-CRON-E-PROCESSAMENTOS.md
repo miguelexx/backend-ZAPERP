@@ -9,6 +9,7 @@ O processo HTTP inicia schedulers após subir Socket.IO, exceto em `NODE_ENV=tes
 | Processo | Frequência/primeira execução confirmada | Efeito |
 |---|---|---|
 | fila genérica de tarefas | poll 5 s, concorrência 2 | claim, execução, backoff e recuperação de stale timeout. |
+| **Disparo (embutido)** | poll 2 s / heartbeat 10 s | claim da fila de campanhas + heartbeat. Kill switch `DISPARO_WORKER_ENABLED=false`. |
 | finalização por ausência | 5 min / 20 s | encerra/atualiza conversas elegíveis. |
 | alerta admin atendimento | 2 min / 25 s | detecta e notifica alertas. |
 | atendimento sem resposta | 1 min / 35 s | gera/atualiza alertas e sockets. |
@@ -29,9 +30,9 @@ Há ainda a fila operacional autenticada (JWT + supervisor/admin) no mesmo prefi
 
 ## Worker de Disparo
 
-Processo **separado** do HTTP: `npm run worker:disparo` ou, em produção, o app PM2 `whatsapp-plataforma-disparo-worker` em `ecosystem.config.js` (fork, 1 instância, `autorestart`, `kill_timeout` 35s). A API **não** processa a fila.
+Sobe **embutido no processo HTTP** (`index.js`, junto com os outros schedulers), salvo `NODE_ENV=test` ou `ZAPERP_DISABLE_BACKGROUND_JOBS`. O app PM2 `whatsapp-plataforma-disparo-worker` e `npm run worker:disparo` continuam válidos como processo extra; o claim da fila é atômico (`SKIP LOCKED`).
 
-Com `DISPARO_WORKER_ENABLED=false` o processo **permanece vivo** e grava heartbeat `disabled` (para o PM2 não entrar em loop de restart). A fila só é claimada com `DISPARO_WORKER_ENABLED=true`. Envio real só ocorre quando `DISPARO_WORKER_ENABLED=true`, `DISPARO_LIVE_ENABLED=true` e `DISPARO_DRY_RUN=false`. Poll default 2 s, heartbeat 10 s, lease 120 s, lote 5.
+`DISPARO_WORKER_ENABLED` default **true** (a fila é claimada). `false` é kill switch: o loop de heartbeat fica `disabled` e a fila não processa. Envio real só ocorre quando `DISPARO_WORKER_ENABLED=true`, `DISPARO_LIVE_ENABLED=true` e `DISPARO_DRY_RUN=false`. Poll default 2 s, heartbeat 10 s, lease 120 s, lote 5.
 
 A fila é persistente; claim usa RPC PostgreSQL com `SKIP LOCKED`/advisory lock. Backoff e leases recuperam crash. Lease expirado em `reservada` volta a pendente; `enviando` vira `incerta`. Item com provider id/data de envio não é reenviado automaticamente. Heartbeat em `disparo_worker_heartbeat`; o painel classifica `ativo` / `iniciando` / `sem_heartbeat` / `desabilitado` / `offline` (ativo = heartbeat running nos últimos 45s, sem flag de shutdown).
 

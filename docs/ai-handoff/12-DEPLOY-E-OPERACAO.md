@@ -4,7 +4,7 @@
 
 ## Processo identificado
 
-Não há build: é CommonJS executado por `node index.js`. `ecosystem.config.js` confirma PM2, modo `fork`, **dois** apps: API HTTP (`whatsapp-plataforma-backend`, 1 instância) e worker de Disparo (`whatsapp-plataforma-disparo-worker`, 1 instância, `autorestart`, `kill_timeout` 35s). Docker/Compose e CI/CD não existem no backend. Forma exata de transferência para VPS, diretório, proxy TLS e comando PM2 usado no servidor são **NÃO CONFIRMADOS** — o repositório passa a declarar os dois processos; o deploy precisa `pm2 startOrReload ecosystem.config.js` (ou equivalente) **e** `DISPARO_WORKER_ENABLED=true` no `.env` da VPS.
+Não há build: é CommonJS executado por `node index.js`. `ecosystem.config.js` confirma PM2, modo `fork`, **dois** apps: API HTTP (`whatsapp-plataforma-backend`, 1 instância) e worker de Disparo opcional (`whatsapp-plataforma-disparo-worker`, 1 instância, `autorestart`, `kill_timeout` 35s). Docker/Compose e CI/CD não existem no backend. Forma exata de transferência para VPS, diretório, proxy TLS e comando PM2 usado no servidor são **NÃO CONFIRMADOS** — o repositório passa a declarar os dois processos; o deploy precisa `pm2 startOrReload ecosystem.config.js` (ou equivalente). O worker de Disparo também sobe **dentro da API**; o segundo app PM2 é extra.
 
 ## Sequência segura proposta (não executada)
 

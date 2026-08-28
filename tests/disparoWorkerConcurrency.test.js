@@ -213,6 +213,8 @@ describe('disparoWorker — exports para testes', () => {
     expect(typeof worker.claimItens).toBe('function')
     expect(typeof worker.heartbeat).toBe('function')
     expect(typeof worker.liberarReservas).toBe('function')
+    expect(typeof worker.startDisparoWorker).toBe('function')
+    expect(typeof worker.stopDisparoWorker).toBe('function')
     expect(typeof worker._setIo).toBe('function')
   })
 })

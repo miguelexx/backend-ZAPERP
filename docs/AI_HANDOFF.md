@@ -192,12 +192,12 @@ POST /chats/:id/mensagens (ou /arquivo, /pix, etc.)
 | `conversa_{id}` | Após `join_conversa` autorizado |
 | `internal_user_{id}` | Chat interno |
 
-### Disparo (worker separado)
+### Disparo (worker na API)
 
 1. API cria campanha → configura destinatários → instâncias → variações → limites → revisão → confirma
 2. `POST /disparo/campanhas/:id/execucao/iniciar` exige worker saudável e muda status para `em_execucao`
-3. `disparoWorker.js` (PM2 `whatsapp-plataforma-disparo-worker` ou `npm run worker:disparo`) faz poll e processa fila
-4. **Gates de envio real:** `DISPARO_WORKER_ENABLED=true` + `DISPARO_LIVE_ENABLED=true` + `DISPARO_DRY_RUN=false`
+3. `disparoWorker.js` sobe com o HTTP (`index.js`). PM2 `whatsapp-plataforma-disparo-worker` / `npm run worker:disparo` são extras opcionais
+4. **Gates de envio real:** `DISPARO_WORKER_ENABLED=true` (default) + `DISPARO_LIVE_ENABLED=true` + `DISPARO_DRY_RUN=false`
 5. Heartbeat em `disparo_worker_heartbeat`; painel: ativo / iniciando / sem_heartbeat / desabilitado / offline
 
 ---
@@ -207,6 +207,7 @@ POST /chats/:id/mensagens (ou /arquivo, /pix, etc.)
 | Job | Frequência | Efeito |
 |-----|-----------|--------|
 | fila genérica | poll 5s | sync_contatos, sync_fotos, etc. |
+| disparo (embutido) | poll 2s / heartbeat 10s | fila de campanhas |
 | finalização ausência | 5 min | encerra conversas sem resposta |
 | alerta admin | 2 min | detecta atendimentos sem resposta |
 | atendimento sem resposta | 1 min | alertas e sockets |

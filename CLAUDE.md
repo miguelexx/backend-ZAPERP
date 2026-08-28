@@ -32,7 +32,7 @@ Stack: Node.js/Express · Supabase SERVICE_ROLE (bypassa RLS) · UltraMSG (únic
 - **Não commitar / não pushar / não executar migrations** sem autorização explícita do Miguel
 - `git status` antes de qualquer edição — nunca descartar trabalho existente
 - `webhookZapiController.js` é o handler **ATIVO** de inbound/ACK — nome é legado, não é Z-API
-- `PROTECAO_DESATIVADA=true` · `DISPARO_WORKER_ENABLED=false` · `DISPARO_LIVE_ENABLED=false` por padrão
+- `PROTECAO_DESATIVADA=true` · `DISPARO_WORKER_ENABLED` default **true** (loop embutido na API) · `DISPARO_LIVE_ENABLED=false` por padrão
 - **Migrations antes do deploy** — nunca inverter a ordem; código novo + migration não aplicada = crash em produção
 
 ## Vulnerabilidades ativas (não ampliar)

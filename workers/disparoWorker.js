@@ -1,9 +1,9 @@
 /**
  * Worker do Disparo de Mensagens (Etapa 7).
- * Processo separado do HTTP. Mantém-se vivo mesmo com WORKER_ENABLED=false
- * (heartbeat "desabilitado") para o PM2 não entrar em loop de restart.
+ * Processo HTTP (embutido no index.js) ou standalone (npm run worker:disparo / PM2).
+ * Mantém-se vivo mesmo com WORKER_ENABLED=false (heartbeat "desabilitado").
  *
- * Uso: npm run worker:disparo  |  PM2 app whatsapp-plataforma-disparo-worker
+ * Uso: sobe com a API, ou `npm run worker:disparo`, ou PM2 app whatsapp-plataforma-disparo-worker
  * Envio real somente com WORKER_ENABLED=true + LIVE_ENABLED=true + DRY_RUN=false.
  * Fila só é claimada com WORKER_ENABLED=true.
  */
@@ -584,8 +584,10 @@ async function tick() {
   }
 }
 
-async function main() {
-  console.log('[disparoWorker] iniciando', {
+let started = false
+
+function logBoot(mode) {
+  console.log(`[disparoWorker] iniciando (${mode})`, {
     workerId: cfg.workerId,
     workerEnabled: cfg.workerEnabled,
     liveEnabled: cfg.liveEnabled,
@@ -594,45 +596,34 @@ async function main() {
     pollMs: cfg.pollMs,
     heartbeatMs: cfg.heartbeatMs,
   })
-
   if (!cfg.workerEnabled) {
     console.warn(
-      '[disparoWorker] DISPARO_WORKER_ENABLED=false — processo permanece vivo sem processar a fila. Defina true no .env e reinicie o worker (PM2: whatsapp-plataforma-disparo-worker).',
+      '[disparoWorker] DISPARO_WORKER_ENABLED=false — heartbeat desabilitado; a fila não será processada.',
     )
   } else if (!cfg.canSendLive) {
     console.log('[disparoWorker] Modo seguro: dry-run ou live desligado — UltraMSG NÃO será chamado.')
   } else {
     console.warn('[disparoWorker] ATENÇÃO: envio REAL habilitado (WORKER+LIVE+DRY_RUN=false).')
   }
+}
 
-  const bootOk = await heartbeat({ boot: true })
-  if (!bootOk) {
-    console.error('[disparoWorker] heartbeat inicial falhou — verifique SUPABASE_URL/SERVICE_ROLE e a tabela disparo_worker_heartbeat.')
-  }
+/**
+ * Sobe heartbeat + loop da fila. Usado pelo processo HTTP (sempre que o backend sobe)
+ * e pelo processo PM2 standalone. Idempotente.
+ */
+function startDisparoWorker(socketIo = null) {
+  if (started) return stopDisparoWorker
+  started = true
+  shuttingDown = false
+  if (socketIo) io = socketIo
 
-  const shutdown = async (signal, exitCode = 0) => {
-    if (shuttingDown) return
-    shuttingDown = true
-    console.log(`[disparoWorker] desligamento gracioso (${signal})…`)
-    if (loopTimer) clearInterval(loopTimer)
-    if (heartbeatTimer) clearInterval(heartbeatTimer)
-    const start = Date.now()
-    while (processing && Date.now() - start < 30000) {
-      await new Promise((r) => setTimeout(r, 200))
+  logBoot(require.main === module ? 'standalone' : 'api')
+
+  heartbeat({ boot: true }).then((bootOk) => {
+    if (!bootOk) {
+      console.error('[disparoWorker] heartbeat inicial falhou — verifique SUPABASE_URL/SERVICE_ROLE e a tabela disparo_worker_heartbeat.')
     }
-    await heartbeat({ shutdown: true, status: 'offline' })
-    console.log('[disparoWorker] encerrado.')
-    process.exit(exitCode)
-  }
-  process.on('SIGINT', () => { shutdown('SIGINT').catch(() => process.exit(0)) })
-  process.on('SIGTERM', () => { shutdown('SIGTERM').catch(() => process.exit(0)) })
-  process.on('uncaughtException', (err) => {
-    console.error('[disparoWorker] uncaughtException:', err)
-    shutdown('uncaughtException', 1).catch(() => process.exit(1))
-  })
-  process.on('unhandledRejection', (reason) => {
-    console.error('[disparoWorker] unhandledRejection:', reason)
-  })
+  }).catch(() => {})
 
   heartbeatTimer = setInterval(() => {
     heartbeat().catch(() => {})
@@ -642,6 +633,48 @@ async function main() {
     loopTimer = setInterval(() => { tick().catch(() => {}) }, cfg.pollMs)
     tick().catch(() => {})
   }
+
+  return stopDisparoWorker
+}
+
+async function stopDisparoWorker() {
+  if (!started && !heartbeatTimer && !loopTimer) return
+  shuttingDown = true
+  if (loopTimer) {
+    clearInterval(loopTimer)
+    loopTimer = null
+  }
+  if (heartbeatTimer) {
+    clearInterval(heartbeatTimer)
+    heartbeatTimer = null
+  }
+  const start = Date.now()
+  while (processing && Date.now() - start < 8000) {
+    await new Promise((r) => setTimeout(r, 200))
+  }
+  await heartbeat({ shutdown: true, status: 'offline' })
+  started = false
+  shuttingDown = false
+  console.log('[disparoWorker] encerrado.')
+}
+
+async function main() {
+  startDisparoWorker()
+
+  const shutdownStandalone = async (signal, exitCode = 0) => {
+    console.log(`[disparoWorker] desligamento gracioso (${signal})…`)
+    await stopDisparoWorker()
+    process.exit(exitCode)
+  }
+  process.on('SIGINT', () => { shutdownStandalone('SIGINT').catch(() => process.exit(0)) })
+  process.on('SIGTERM', () => { shutdownStandalone('SIGTERM').catch(() => process.exit(0)) })
+  process.on('uncaughtException', (err) => {
+    console.error('[disparoWorker] uncaughtException:', err)
+    shutdownStandalone('uncaughtException', 1).catch(() => process.exit(1))
+  })
+  process.on('unhandledRejection', (reason) => {
+    console.error('[disparoWorker] unhandledRejection:', reason)
+  })
 }
 
 if (require.main === module) {
@@ -659,5 +692,7 @@ module.exports = {
   heartbeat,
   liberarReservas,
   heartbeatStatus,
+  startDisparoWorker,
+  stopDisparoWorker,
   _setIo: (socketIo) => { io = socketIo },
 }
