@@ -92,7 +92,7 @@ Todas as operações autenticadas devem limitar consultas por `req.user.company_
 | `GET /supervisao/resumo`, `/clientes-pendentes`, `/funcionarios/:usuarioId/movimentacao`, `/relatorio-diario` | `supervisaoController`; A+SA | Relatórios/monitoramento. |
 | `GET/PUT /ia/config`, `GET/POST /ia/regras`, `PUT/DELETE /ia/regras/:id`, `GET /ia/logs` | `iaController`; A+SA | Config/regras automáticas e logs. |
 | `POST /ia/admin-atendimento-alerta/testar` | `iaController.testarAdminAtendimentoAlerta`; A+SA | Teste lógico/alerta; conferir ambiente antes de usar. |
-| `POST /ai/ask` | `aiController.ask`; A+SA+`aiLimiter` | Pergunta JSON, cota/cache/log e OpenAI se configurado. |
+| `POST /ai/ask` | `aiController.ask`; A+SA+`aiLimiter` | Pergunta JSON, cota/cache/log e OpenAI se configurado. Execução: `aiDashboardService.answerDashboardQuestion`. Mapa: [22](22-AI-DASHBOARD-MODULARIZACAO.md). |
 | `GET /chatbot/status`, `/health`, `/config/:companyId`; `POST /chatbot/configure-all`, `/configure/:companyId`, `/reconfigure/:companyId`, `/test/:companyId`; `PUT /chatbot/toggle/:companyId`, `/config/:companyId` | handlers de `chatbotManagementRoutes`; A+AD | Lê/gera/grava configuração por empresa; rotas com `companyId` validam acesso admin. |
 | `GET /chatbot/debug/logs/:companyId`, `/conversation/:conversaId`, `/metrics/:companyId`, `/validate/:companyId`; `POST /chatbot/debug/simulate/:companyId`, `/reset/:companyId` | handlers de `chatbotDebugRoutes`; A+AD | Diagnóstico; simulate/reset podem gravar/apagar dados de teste da empresa. |
 | `GET /produtos/consulta`, `/sync/status`; `POST /produtos/sync/wm` | `produtosController`; A no router, sync AD | PostgreSQL de produtos; sync pode ler SQL Server e transacionar no banco externo. |

@@ -8,7 +8,8 @@
 | `config/` | ambiente e clientes externos |
 | `routes/`, `controllers/` | endpoints e orquestração |
 | `services/` | negócio, integrações, schedulers e storage |
-| `services/providers/ultramsg.js` | adapter efetivamente ativo do WhatsApp |
+| `services/providers/ultramsg.js` | adapter efetivamente ativo do WhatsApp (fachada; pasta `services/providers/ultramsg/`; [21](21-ULTRAMSG-PROVIDER-MODULARIZACAO.md)) |
+| `services/aiDashboardService.js` | assistente IA (`POST /ai/ask`); Sessão A: pasta `services/aiDashboard/` (puros); queries/classify ainda no service. Mapa: [22](22-AI-DASHBOARD-MODULARIZACAO.md) |
 | `middleware/` | JWT/perfis, webhooks, rate limit e uploads |
 | `helpers/`, `validators/` | regras pequenas e validação Zod/manual |
 | `repositories/`, `socket/` | chat interno e presença/socket |

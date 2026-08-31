@@ -26,6 +26,8 @@ Não prosseguir sem esta declaração. Se o escopo for maior do que esperado, re
 - [ ] Executar `git status --short` e distinguir mudanças preexistentes. Nunca descartar trabalho do usuário.
 - [ ] Declarar escopo e não analisar/alterar frontend.
 - [ ] Localizar route → controller → service/helper/repository → migration → teste. Buscar também aliases e chamadas legadas; nome “Zapi” não significa inativo.
+- [ ] Tarefa no adapter UltraMSG (`services/providers/ultramsg.js`): ler [21](21-ULTRAMSG-PROVIDER-MODULARIZACAO.md) antes de fatiar ou unificar JID.
+- [ ] Tarefa no assistente IA (`services/aiDashboardService.js` / `POST /ai/ask`): ler [22](22-AI-DASHBOARD-MODULARIZACAO.md). Não confundir com dashboard HTTP nem com alerta sem resposta. Sem testes hoje — extrair funções puras primeiro.
 - [ ] Para qualquer item marcado **PENDENTE DE VALIDAÇÃO** relevante à tarefa: validar no código antes de assumir como verdade.
 
 ## Banco e multitenancy

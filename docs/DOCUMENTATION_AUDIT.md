@@ -5,6 +5,42 @@
 
 ---
 
+## Atualização 2026-08-31 (IA dashboard — Sessão A)
+
+| Arquivo | Ação | Motivo |
+|---------|------|--------|
+| `services/aiDashboard/` | Criado | constants, schema, léxicos, busca, tempo SP, 1ª resposta, heurísticas, saneadores, resolve. Corpos iguais ao HEAD. |
+| `services/aiDashboardService.js` | Editado | Passa a importar os módulos; queries/OpenAI/switch permanecem. |
+| `tests/aiDashboardSessionA.test.js` | Criado | 35 testes puros. |
+| `docs/ai-handoff/22-AI-DASHBOARD-MODULARIZACAO.md` | Atualizado | Sessão A registrada; Sessão B = queries + classify/format + shim. |
+
+## Atualização 2026-08-31 (IA dashboard — plano, código intocado)
+
+| Arquivo | Ação | Motivo |
+|---------|------|--------|
+| `docs/ai-handoff/22-AI-DASHBOARD-MODULARIZACAO.md` | Criado | Mapa e plano de quebra de `services/aiDashboardService.js`. Código **não** alterado. |
+| `docs/README.md`, `docs/AI_HANDOFF.md` | Atualizados | Índice e módulo IA apontam para o doc 22. |
+| `docs/ai-handoff/00-LEIA-PRIMEIRO.md` | Atualizado | Item 10 da ordem de leitura (só para essa tarefa). |
+| `docs/ai-handoff/02-ESTRUTURA-DO-BACKEND.md`, `04-MODULOS-E-REGRAS-DE-NEGOCIO.md`, `11-TESTES-E-VALIDACAO.md`, `13-PROBLEMAS-CONHECIDOS-E-DIVIDA-TECNICA.md`, `16-MAPA-DE-ARQUIVOS-CRITICOS.md`, `17-CHECKLIST-PARA-PROXIMA-IA.md`, `18-ANTI-PADROES-E-ARMADILHAS.md` | Atualizados | Monolito da IA, zero testes, invariantes (sem SQL livre, dois fusos, não fundir com dashboard HTTP). |
+
+## Atualização 2026-08-31 (UltraMSG quebra executada)
+
+| Arquivo | Ação | Motivo |
+|---------|------|--------|
+| `docs/ai-handoff/21-ULTRAMSG-PROVIDER-MODULARIZACAO.md` | Atualizado | Quebra em duas sessões; pastas reais; shim `./ultramsg/index.js`. |
+| `docs/ai-handoff/00-LEIA-PRIMEIRO.md`, `02-ESTRUTURA-DO-BACKEND.md`, `13-PROBLEMAS-CONHECIDOS-E-DIVIDA-TECNICA.md`, `16-MAPA-DE-ARQUIVOS-CRITICOS.md` | Atualizados | Monolito do adapter marcado como fatiado. |
+
+## Atualização 2026-08-31 (UltraMSG provider)
+
+| Arquivo | Ação | Motivo |
+|---------|------|--------|
+| `docs/ai-handoff/21-ULTRAMSG-PROVIDER-MODULARIZACAO.md` | Criado | Mapa e plano de quebra de `services/providers/ultramsg.js` (código ainda monolito). |
+| `docs/README.md` | Atualizado | Índice e guia de leitura apontam para o doc 21. |
+| `docs/ai-handoff/00-LEIA-PRIMEIRO.md` | Atualizado | Item 9 da ordem de leitura (só para essa tarefa). |
+| `docs/ai-handoff/06-WHATSAPP-ULTRAMSG-E-WEBHOOKS.md` | Corrigido | Path real `services/providers/ultramsg.js` (não `ultramsgProvider.js`); ponteiro para o 21. |
+| `docs/ai-handoff/02-ESTRUTURA-DO-BACKEND.md`, `04-MODULOS-E-REGRAS-DE-NEGOCIO.md`, `13-PROBLEMAS-CONHECIDOS-E-DIVIDA-TECNICA.md`, `16-MAPA-DE-ARQUIVOS-CRITICOS.md`, `17-CHECKLIST-PARA-PROXIMA-IA.md`, `18-ANTI-PADROES-E-ARMADILHAS.md` | Atualizados | Monolito do adapter, quatro APIs de JID, risco de unificar envio/foto/histórico. |
+| `docs/AI_HANDOFF.md`, `docs/ai-handoff/11-TESTES-E-VALIDACAO.md` | Atualizados | Ponteiro para o doc 21 e suites do provider. |
+
 ## Atualização 2026-08-31
 
 | Arquivo | Ação | Motivo |

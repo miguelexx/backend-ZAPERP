@@ -38,9 +38,11 @@ docs/
 │   ├── 15-GLOSSARIO.md
 │   ├── 16-MAPA-DE-ARQUIVOS-CRITICOS.md  qual arquivo ler para cada tarefa
 │   ├── 17-CHECKLIST-PARA-PROXIMA-IA.md
-│   ├── 18-ANTI-PADROES-E-ARMADILHAS.md  15 armadilhas específicas desta codebase
+│   ├── 18-ANTI-PADROES-E-ARMADILHAS.md  armadilhas específicas desta codebase
 │   ├── 19-ATENDIMENTO-SEM-RESPOSTA-MODULARIZACAO.md  plano/mapa do alerta sem resposta
-│   └── 20-DASHBOARD-MODULARIZACAO.md  quebra do dashboardController
+│   ├── 20-DASHBOARD-MODULARIZACAO.md  quebra do dashboardController
+│   ├── 21-ULTRAMSG-PROVIDER-MODULARIZACAO.md  adapter UltraMSG (pasta + shim)
+│   └── 22-AI-DASHBOARD-MODULARIZACAO.md  assistente IA `/ai/ask` (Sessão A: puros extraídos)
 │
 └── reference/                  ← referência suplementar por domínio
     ├── PROJECT_RULES.md        regras do projeto (multi-tenant, segurança, padrões)
@@ -69,6 +71,7 @@ docs/
 | Adicionar/alterar uma rota | `ai-handoff/05-API-ENDPOINTS.md` → controller relevante |
 | Alterar banco (migration) | `ai-handoff/03-BANCO-DE-DADOS.md` |
 | Trabalhar com webhooks UltraMSG | `ai-handoff/06-WHATSAPP-ULTRAMSG-E-WEBHOOKS.md` |
+| Modularizar o adapter UltraMSG (`services/providers/ultramsg.js`) | `ai-handoff/21-ULTRAMSG-PROVIDER-MODULARIZACAO.md` |
 | Eventos Socket.IO | `ai-handoff/07-SOCKET-IO-E-TEMPO-REAL.md` |
 | Schedulers / jobs / worker | `ai-handoff/09-JOBS-CRON-E-PROCESSAMENTOS.md` |
 | Variáveis de ambiente | `ai-handoff/10-CONFIGURACAO-E-AMBIENTES.md` |
@@ -81,7 +84,8 @@ docs/
 | Qualquer mudança nova | `ai-handoff/17-CHECKLIST-PARA-PROXIMA-IA.md` |
 | Evitar erros comuns de IAs | `ai-handoff/18-ANTI-PADROES-E-ARMADILHAS.md` |
 | Modularizar alerta sem resposta | `ai-handoff/19-ATENDIMENTO-SEM-RESPOSTA-MODULARIZACAO.md` |
-| Modularizar dashboard | `ai-handoff/20-DASHBOARD-MODULARIZACAO.md` |
+| Modularizar dashboard HTTP (`dashboardController`) | `ai-handoff/20-DASHBOARD-MODULARIZACAO.md` |
+| Modularizar assistente IA (`aiDashboardService.js`) | `ai-handoff/22-AI-DASHBOARD-MODULARIZACAO.md` |
 | Proteção de envio / rate limit / opt-in | `reference/PROTECAO-ENVIO.md` |
 | Scripts de manutenção / diagnóstico / R2 | `reference/SCRIPTS-CATALOG.md` |
 

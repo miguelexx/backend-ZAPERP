@@ -12,7 +12,7 @@
 | `controllers/chatController.js` | conversas, atendimento, envio/mídia | crítico | muitas suites `chat*`, mensagem, mídia; controller monolítico, mapear service/socket/provider antes de editar. |
 | `controllers/webhookUltramsgController.js` | normalização UltraMSG | crítico | `disparoUltramsgReferenceId`, webhooks; manter formatos e contexto resolvido. |
 | `controllers/webhookZapiController.js` | domínio inbound/ACK legado | crítico | ACK/inbound/fromMe; nome legado, mas caminho ativo. Não remover por nome. |
-| `services/providers/ultramsg.js` | chamadas externas, normalização de resposta | crítico | `ultramsgProviderInstanceResolution`; sempre mock, mascarar token, preservar `referenceId`. |
+| `services/providers/ultramsg.js` + `services/providers/ultramsg/` | único adapter WhatsApp: HTTP, JID, envio, upload, histórico, foto | crítico | `ultramsgProviderInstanceResolution`, `whatsappIdentityFoto`, `oldMessagesAndSearch`. Sempre mock; mascarar token; preservar `referenceId`. **Não unificar** JID de envio vs foto vs histórico. Mapa: [21](21-ULTRAMSG-PROVIDER-MODULARIZACAO.md). Shim **deve** usar `require('./ultramsg/index.js')`. |
 | `services/whatsappInstanceService.js` | instâncias/default/duplicidade | crítico | `whatsappInstanceService`, multi-instância; filtrar empresa e bloquear duplicidade normalizada. |
 | `helpers/conversationSync.js` | localizar/criar/mesclar conversa | crítico | `conversasOpenUniqueMultiInstance`, operational phase; telefone+instância+tenant. |
 | `helpers/phoneHelper.js` | normalização de telefone (inbound, busca, criação de contato) | crítico | qualquer alteração pode quebrar matching de tenant; usado no webhook inbound antes de associar ao company. |
@@ -33,6 +33,7 @@
 | `services/disparoOptOutService.js`, reconciliação | exclusão, resposta, incerto | crítico | opt-out/reconciliação; comando exato, tenant, terminalidade. |
 | `controllers/disparoSaudeController.js`, `helpers/disparoObservabilidade.js` | health Etapa 9 | crítico | novos testes de isolamento; heartbeat global hoje expõe metadado cross-tenant. |
 | `controllers/dashboardController.js` + `controllers/dashboard/` | overview, métricas, SLA, relatórios, setores, respostas salvas | alto | `auth.test.js` (401). Quebra: [20](20-DASHBOARD-MODULARIZACAO.md). `company_id` só do JWT. |
+| `services/aiDashboardService.js` + `services/aiDashboard/` | assistente NL `POST /ai/ask`: classifica intent + queries SELECT + formata resposta | crítico | Sessão A: puros em `aiDashboard/` + `aiDashboardSessionA.test.js`. Queries/OpenAI ainda no service. Só leitura; sem SQL livre; heurística **duas vezes**; `UNKNOWN` → `GENERAL_CHAT`. Não unificar “hoje” local vs SP. Mapa: [22](22-AI-DASHBOARD-MODULARIZACAO.md). |
 | `services/atendimentoSemRespostaService.js` + `services/atendimentoSemResposta/` | alerta sem resposta (fachada + módulos) | alto | `atendimentoSemRespostaService.test.js`. SLA importa `helpers/businessSchedule.js`. Invariantes e pastas: [19](19-ATENDIMENTO-SEM-RESPOSTA-MODULARIZACAO.md). Não mudar ordem do claim do gestor. |
 | `services/*Scheduler.js`, `jobs/`, `controllers/jobsController.js` | tarefas em processo/cron | alto | suites de scheduler/cron; desligar em teste, evitar execução duplicada. |
 | `ecosystem.config.js` | topologia PM2 | crítico operacional | manter `instances: 1` até coordenação distribuída. |

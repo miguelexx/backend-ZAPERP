@@ -94,7 +94,7 @@ backend/
 |--------|--------|----------------|
 | Conversas/atendimentos | Estável | `chatController`, `atendimentosRegistroService` |
 | Mensagens/mídia | Estável | `chatController`, `inboundMediaPersistenceService`, `mediaR2MirrorService` |
-| UltraMSG/webhooks | Estável | `webhookUltramsgController`, `webhookZapiController`, `services/providers/ultramsg.js` |
+| UltraMSG/webhooks | Estável | `webhookUltramsgController`, `webhookZapiController`, `services/providers/ultramsg.js` (mapa interno: [21](ai-handoff/21-ULTRAMSG-PROVIDER-MODULARIZACAO.md)) |
 | Chatbot/triagem | Estável | `chatbotTriageService`, `regrasAutomaticasService` |
 | Clientes/contatos/tags | Estável | `clienteController`, `clienteImportController`, `tagController` |
 | Usuários/config | Estável | `userController`, `configController`, `permissoesController` |
@@ -104,7 +104,7 @@ backend/
 | Help desk | Estável | `helpDeskController`, `helpDeskNotificationController` |
 | Push (Web + FCM) | Estável | `pushController`, `fcmPushTokenController`, `webPushService`, `pushNotificationService` |
 | Produtos | Estável (integração externa) | `produtosController`, `produtosSyncService` |
-| IA analítica | Estável (opcional) | `aiController`, `openaiClient` |
+| IA analítica | Estável (opcional) | `aiController`, `aiDashboardService.js` + `services/aiDashboard/` (Sessão A: puros; mapa: [22](ai-handoff/22-AI-DASHBOARD-MODULARIZACAO.md)), `openaiClient` |
 | CRM SSO | Estável (CRM interno removido) | `crmSsoController` |
 | Mídia R2 | Estável (rollout gated) | `mediaR2MirrorService`, `mediaRetentionService`, `config/r2.js` |
 | Proteção de envio | **DESATIVADO** (`PROTECAO_DESATIVADA=true`) | `services/protecao/protecaoOrchestrator.js` + `frequenciaService`, `volumeService`, `optInService` |
@@ -285,7 +285,7 @@ npm test
 2. `app.js` — Express, middlewares, rotas montadas
 3. `middleware/auth.js` — autenticação JWT
 4. `config/supabase.js` — cliente Supabase (service role)
-5. `services/providers/ultramsg.js` — provider WhatsApp
+5. `services/providers/ultramsg.js` — provider WhatsApp (pasta `services/providers/ultramsg/`; [`21`](ai-handoff/21-ULTRAMSG-PROVIDER-MODULARIZACAO.md))
 6. Migration mais recente em `supabase/migrations/` para o domínio afetado
 7. Testes existentes do módulo (pasta `tests/`)
 8. [`ai-handoff/13-PROBLEMAS-CONHECIDOS-E-DIVIDA-TECNICA.md`](ai-handoff/13-PROBLEMAS-CONHECIDOS-E-DIVIDA-TECNICA.md) — riscos conhecidos

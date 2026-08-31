@@ -1,6 +1,8 @@
 # WhatsApp, UltraMSG e webhooks
 
-> Análise estática: 2026-08-23 · `master` · `66e0771d9f61f840524cd4b0645e742df374a77a` · fontes principais: `providers/ultramsgProvider.js`, `services/whatsappInstanceService.js`, `controllers/webhookUltramsgController.js`, `controllers/webhookZapiController.js`, `controllers/chatController.js`, `middleware/requireWebhookToken.js`, `middleware/resolveWebhookInstance.js` e testes `*Ultramsg*`, `*Webhook*`, `*Ack*`.
+> Análise estática: 2026-08-23 · `master` · `66e0771d9f61f840524cd4b0645e742df374a77a` · fontes principais: **`services/providers/ultramsg.js`** (não existe `ultramsgProvider.js`), `services/whatsappInstanceService.js`, `controllers/webhookUltramsgController.js`, `controllers/webhookZapiController.js`, `controllers/chatController.js`, `middleware/requireWebhookToken.js`, `middleware/resolveWebhookInstance.js` e testes `*Ultramsg*`, `*Webhook*`, `*Ack*`.
+>
+> Mapa interno do adapter (envio, JID, HTTP, pastas): [21](21-ULTRAMSG-PROVIDER-MODULARIZACAO.md). Este doc 06 cobre o fluxo ponta a ponta (chat → provider → webhook).
 
 ## Modelo da integração
 
@@ -77,4 +79,5 @@ O worker monta `referenceId disp-*`, registra provider id e datas na fila. **Env
 4. Não emitir mensagem para outro tenant; incluir instância na identidade.
 5. Não testar envio/restart/configuração de webhook contra instância real sem autorização explícita.
 6. Foto de perfil: consultar com o JID real (`profilePictureChatIdCandidates`), nunca `phoneToChatId`/`toZapiSendFormat`. Não gravar `payload.photo` de mensagem como avatar.
+7. HTTP 200 com `{ error }` ou `sent=false` não é sucesso (`normalizeUltraMsgSendResult`). Retry de POST de mensagem só em falha de conexão; upload de mídia pode retentar.
 

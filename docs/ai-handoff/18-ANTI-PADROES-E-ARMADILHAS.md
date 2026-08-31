@@ -232,6 +232,8 @@ possiblePhonesForWhatsappIdentity(phone) // não mistura fixo e celular
 
 O webhook UltraMSG **não** traz foto de perfil. `payload.photo` numa mensagem de imagem é a mídia enviada. Só persistir URL vinda de `GET /contacts/image`.
 
+Há **quatro** APIs de JID no mesmo arquivo (`phoneCandidatesForSend` / `phoneToChatId` / `profilePictureChatIdCandidates` / `chatMessageCandidatesForLookup`). Não unificar. Mapa: [21](21-ULTRAMSG-PROVIDER-MODULARIZACAO.md).
+
 ---
 
 ## 19. ACK de campanha não pode exigir `disp-*` no body
@@ -286,3 +288,22 @@ update({ status: 'invalidada' }).eq('status', 'ativa').neq('versao', proximaVers
 insert({ versao: proximaVersao, status: 'ativa' })
 // se 23505: maybeSingle da versão e seguir o update da campanha
 ```
+
+---
+
+## 23. Assistente IA do dashboard — sem SQL livre e sem “corrigir” fuso
+
+**Armadilha:** tratar `aiDashboardService.js` como KPI HTTP (`dashboardController`) ou como o job de alerta sem resposta; ou “melhorar” o modelo gerando SQL / unificando o “hoje” do overview com `America/Sao_Paulo`.
+
+O service só **lê**. O modelo classifica um intent da allowlist Zod; as queries são funções pré-definidas. `UNKNOWN` vira `GENERAL_CHAT` (KPIs), não “não entendi”. Heurística determinística roda **duas vezes** (antes e depois dos enrichers) — não apagar uma.
+
+```js
+// ❌ ERRADO
+const sql = await openai.complete(`gere um SELECT para: ${question}`)
+hojeSP === overviewHoje // overview usa setHours(0,0,0,0) do processo
+
+// ✅ CORRETO
+classifyQuestion → IntentSchema → switch → q*()  // só SELECT + company_id
+```
+
+Não fundir `taxaConversao` deste payload com `kpis.taxa_conversao_percent` do dashboard (CRM legado, `null`). Não reintroduzir sync de nome de contato pela IA. Mapa: [22](22-AI-DASHBOARD-MODULARIZACAO.md).

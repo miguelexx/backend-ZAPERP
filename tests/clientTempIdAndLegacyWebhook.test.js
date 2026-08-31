@@ -47,7 +47,8 @@ describe('client_temp_id durable idempotency contract', () => {
   test('detalharChat paginated select includes client_temp_id', () => {
     const fs = require('fs')
     const path = require('path')
-    const src = fs.readFileSync(path.join(__dirname, '../controllers/chatController.js'), 'utf8')
+    // detalharChat foi modularizado para controllers/chat/conversationDetailController.js.
+    const src = fs.readFileSync(path.join(__dirname, '../controllers/chat/conversationDetailController.js'), 'utf8')
 
     // O select paginado do detalharChat termina em audio_duracao_sec, client_temp_id.
     expect(src).toContain('apagada_em, audio_duracao_sec, client_temp_id')

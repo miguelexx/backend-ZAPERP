@@ -42,6 +42,8 @@ Estados de certeza usados:
 6. [decisões](14-DECISOES-TECNICAS.md), [glossário](15-GLOSSARIO.md), [checklist](17-CHECKLIST-PARA-PROXIMA-IA.md) e [anti-padrões](18-ANTI-PADROES-E-ARMADILHAS.md).
 7. Tarefa de quebrar `atendimentoSemRespostaService.js`: [19](19-ATENDIMENTO-SEM-RESPOSTA-MODULARIZACAO.md) (não está no caminho obrigatório geral).
 8. Tarefa de quebrar `dashboardController.js`: [20](20-DASHBOARD-MODULARIZACAO.md).
+9. Tarefa no adapter UltraMSG (`services/providers/ultramsg.js` + pasta): [21](21-ULTRAMSG-PROVIDER-MODULARIZACAO.md).
+10. Tarefa de quebrar `aiDashboardService.js` (`POST /ai/ask`): [22](22-AI-DASHBOARD-MODULARIZACAO.md). Não confundir com o dashboard HTTP ([20](20-DASHBOARD-MODULARIZACAO.md)).
 
 ## Pontos que exigem análise antes de alteração
 

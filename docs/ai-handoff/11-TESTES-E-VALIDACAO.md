@@ -6,7 +6,7 @@
 
 Jest 29, Supertest e mocks manuais. Há 100 arquivos `tests/*.test.js`; `tests/setup.js` substitui globalmente o cliente Supabase por chain mock. Suites também mockam `fetch`, provider UltraMSG, R2, OpenAI/push e filesystem conforme o caso. Predominam testes unitários e de controller com app em memória; não são integração com PostgreSQL/RLS/UltraMSG real.
 
-Cobertura observada: autenticação/autorização, tenants, conversas, mensagens/status/ACK, multi-instância, webhooks, mídia/conversão/proxy/R2, chatbot/triagem, ausência/SLA/supervisão, clientes/importação, help desk, produtos e todas as etapas do Disparo. Lacunas: banco real e ordem de migrations, RLS com role não privilegiada, topologia multi-processo/Redis ausente, VPS/proxy, latência/retry reais do provider e carga sustentada.
+Cobertura observada: autenticação/autorização, tenants, conversas, mensagens/status/ACK, multi-instância, webhooks, mídia/conversão/proxy/R2, chatbot/triagem, ausência/SLA/supervisão, clientes/importação, help desk, produtos e todas as etapas do Disparo. Adapter UltraMSG: `ultramsgProviderInstanceResolution`, `whatsappIdentityFoto`, `oldMessagesAndSearch` (ver [21](21-ULTRAMSG-PROVIDER-MODULARIZACAO.md)). Assistente IA: `aiDashboardSessionA` cobre funções puras extraídas (ver [22](22-AI-DASHBOARD-MODULARIZACAO.md)); `POST /ai/ask` e as `q*` ainda sem teste. Outras lacunas: banco real e ordem de migrations, RLS com role não privilegiada, topologia multi-processo/Redis ausente, VPS/proxy, latência/retry reais do provider e carga sustentada.
 
 ## Resultado real desta auditoria
 
