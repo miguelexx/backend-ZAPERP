@@ -120,6 +120,11 @@ function classifyWorkerHealth(rows, { now = Date.now(), flags } = {}) {
 
   const saudaveis = workers.filter((w) => w.saudavel)
   const saudavel = saudaveis.length > 0
+  const workersLive = saudaveis.filter((w) => {
+    const meta = parseMeta(w.meta)
+    return w.live_enabled === true && w.dry_run === false && meta.canSendLive === true
+  })
+  const workersDry = saudaveis.filter((w) => !workersLive.includes(w))
   const ultimo = list
     .map((r) => r.ultima_atividade_em)
     .filter(Boolean)
@@ -131,6 +136,10 @@ function classifyWorkerHealth(rows, { now = Date.now(), flags } = {}) {
     saudavel,
     motivo: MOTIVO[status] || MOTIVO[STATUS_OFFLINE],
     workers_ativos: saudaveis.length,
+    workers_live_ativos: workersLive.length,
+    workers_dry_ativos: workersDry.length,
+    saudavel_live: workersLive.length > 0,
+    modos_divergentes: workersLive.length > 0 && workersDry.length > 0,
     workers,
     heartbeats: workers,
     ultimo_heartbeat_em: ultimo,

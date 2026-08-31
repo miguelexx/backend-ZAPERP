@@ -90,6 +90,10 @@ describe('disparoWorker — claim SKIP LOCKED (dois workers)', () => {
     expect(w2.length).toBeGreaterThan(0)
     expect(overlap).toHaveLength(0)
     expect([...ids1, ...ids2].sort()).toEqual([1, 2])
+    expect(supabase.rpc).toHaveBeenCalledWith(
+      'disparo_claim_fila_itens',
+      expect.objectContaining({ p_execucao_dry_run: true }),
+    )
   })
 })
 
@@ -217,8 +221,21 @@ describe('disparoWorker — exports para testes', () => {
     expect(typeof worker.stopDisparoWorker).toBe('function')
     expect(typeof worker.rememberEnvioInstancia).toBe('function')
     expect(typeof worker.ultimoEnvioConhecido).toBe('function')
+    expect(typeof worker.workerPodeProcessarExecucao).toBe('function')
     expect(typeof worker._resetUltimoEnvioLocal).toBe('function')
     expect(typeof worker._setIo).toBe('function')
+  })
+})
+
+describe('disparoWorker — isolamento de modo live/dry', () => {
+  it('worker dry pode processar somente execução dry-run', () => {
+    expect(worker.workerPodeProcessarExecucao(true, { canSendLive: false })).toBe(true)
+    expect(worker.workerPodeProcessarExecucao(false, { canSendLive: false })).toBe(false)
+  })
+
+  it('worker live pode processar execução live ou dry-run', () => {
+    expect(worker.workerPodeProcessarExecucao(false, { canSendLive: true })).toBe(true)
+    expect(worker.workerPodeProcessarExecucao(true, { canSendLive: true })).toBe(true)
   })
 })
 

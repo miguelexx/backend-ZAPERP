@@ -211,6 +211,34 @@ describe('Etapa 7 Execução — iniciar campanha', () => {
     expect(gerarFilaParaCampanha).not.toHaveBeenCalled()
   })
 
+  it('recusa execução live quando só existe worker dry-run ativo', async () => {
+    process.env.DISPARO_WORKER_ENABLED = 'true'
+    process.env.DISPARO_LIVE_ENABLED = 'true'
+    process.env.DISPARO_DRY_RUN = 'false'
+
+    supabase.from.mockImplementation((table) => {
+      if (table === 'disparo_campanhas') {
+        return mockChain({ data: campanhaPronta, error: null })
+      }
+      if (table === 'disparo_campanha_limites') {
+        return mockChain({ data: { inicio_modo: 'imediato', agendado_para: null }, error: null })
+      }
+      if (table === 'disparo_worker_heartbeat') {
+        return mockHeartbeatSaudavel()
+      }
+      return mockChain({ data: null, error: null })
+    })
+
+    const res = await request(app)
+      .post('/api/disparo/campanhas/1/execucao/iniciar')
+      .set('Authorization', `Bearer ${token()}`)
+
+    expect(res.status).toBe(422)
+    expect(res.body.code).toBe('WORKER_LIVE_OFFLINE')
+    expect(res.body.error).toMatch(/envio live habilitado/i)
+    expect(gerarFilaParaCampanha).not.toHaveBeenCalled()
+  })
+
   it('idempotente quando campanha já em_execucao', async () => {
     supabase.from.mockImplementation((table) => {
       if (table === 'disparo_campanhas') {

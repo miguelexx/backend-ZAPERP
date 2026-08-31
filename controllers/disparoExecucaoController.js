@@ -150,12 +150,15 @@ function assertCampanhaIniciavel(campanha) {
   return { ok: true, idempotente: false }
 }
 
-async function recusarSeWorkerNaoSaudavel(res) {
+async function recusarSeWorkerNaoSaudavel(res, { requireLive = false } = {}) {
   const saude = await avaliarSaudeWorker()
-  if (saude.saudavel) return saude
+  const compativel = requireLive ? saude.saudavel_live === true : saude.saudavel
+  if (compativel) return saude
   res.status(422).json({
-    error: saude.motivo || 'Nenhum worker ativo detectado',
-    code: 'WORKER_OFFLINE',
+    error: requireLive
+      ? 'Nenhum worker com envio live habilitado está ativo.'
+      : (saude.motivo || 'Nenhum worker ativo detectado'),
+    code: requireLive ? 'WORKER_LIVE_OFFLINE' : 'WORKER_OFFLINE',
     worker_status: saude.status,
     saudavel: false,
   })
@@ -302,7 +305,9 @@ exports.iniciarCampanha = async (req, res) => {
       })
     }
 
-    const workerSaude = await recusarSeWorkerNaoSaudavel(res)
+    const workerSaude = await recusarSeWorkerNaoSaudavel(res, {
+      requireLive: getDisparoFlags().dryRun === false,
+    })
     if (!workerSaude) return
 
     let filaResult
@@ -678,13 +683,15 @@ exports.continuar = async (req, res) => {
       })
     }
 
-    const workerSaude = await recusarSeWorkerNaoSaudavel(res)
-    if (!workerSaude) return
-
     const execucao = await buscarExecucaoAtiva(campanhaId, companyId)
     if (!execucao || execucao.status !== 'pausada') {
       return res.status(422).json({ error: 'Nenhuma execução pausada encontrada.' })
     }
+
+    const workerSaude = await recusarSeWorkerNaoSaudavel(res, {
+      requireLive: execucao.dry_run === false,
+    })
+    if (!workerSaude) return
 
     const agora = new Date().toISOString()
 
@@ -1148,6 +1155,10 @@ exports.saudeWorker = async (req, res) => {
       motivo: saude.motivo,
       workers: saude.workers,
       workers_ativos: saude.workers_ativos,
+      workers_live_ativos: saude.workers_live_ativos,
+      workers_dry_ativos: saude.workers_dry_ativos,
+      saudavel_live: saude.saudavel_live,
+      modos_divergentes: saude.modos_divergentes,
       ultimo_heartbeat_em: saude.ultimo_heartbeat_em,
     })
   } catch (err) {

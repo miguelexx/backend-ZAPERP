@@ -123,4 +123,28 @@ describe('classifyWorkerHealth — agregação e anti-falso-ativo', () => {
     expect(saude.saudavel).toBe(true)
     expect(saude.workers_ativos).toBe(1)
   })
+
+  it('detecta workers live e dry ativos ao mesmo tempo', () => {
+    const saude = classifyWorkerHealth([
+      row({
+        _now: now,
+        worker_id: 'live',
+        dry_run: false,
+        live_enabled: true,
+        meta: { status: 'running', workerEnabled: true, canSendLive: true },
+      }),
+      row({
+        _now: now,
+        worker_id: 'dry',
+        dry_run: true,
+        live_enabled: false,
+        meta: { status: 'running', workerEnabled: true, canSendLive: false },
+      }),
+    ], { now, flags })
+
+    expect(saude.workers_live_ativos).toBe(1)
+    expect(saude.workers_dry_ativos).toBe(1)
+    expect(saude.saudavel_live).toBe(true)
+    expect(saude.modos_divergentes).toBe(true)
+  })
 })

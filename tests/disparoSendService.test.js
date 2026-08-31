@@ -145,6 +145,20 @@ describe('disparoSendService — dry-run e segurança', () => {
     expect(ultramsg.sendText).not.toHaveBeenCalled()
   })
 
+  it('execução que exige live falha fechada em vez de virar dry-run', async () => {
+    const result = await enviarItemFila(itemBase, {
+      dryRun: false,
+      liveEnabled: false,
+      requireLive: true,
+      allowlist: [],
+    })
+
+    expect(result.ok).toBe(false)
+    expect(result.errorCodigo).toBe('WORKER_MODO_INCOMPATIVEL')
+    expect(result.beforeSend).toBe(true)
+    expect(ultramsg.sendText).not.toHaveBeenCalled()
+  })
+
   it('allowlist bloqueia telefone fora da lista', async () => {
     const result = await enviarItemFila(itemBase, {
       dryRun: true,

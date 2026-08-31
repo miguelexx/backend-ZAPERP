@@ -141,12 +141,19 @@ async function claimItens() {
     p_limit: cfg.batchSize,
     p_lease_seconds: cfg.leaseSeconds,
     p_instancia_id: null,
+    // Worker sem capacidade live só pode consumir execuções explicitamente dry-run.
+    // Worker live pode consumir ambas; a execução continua sendo a fonte de verdade.
+    p_execucao_dry_run: cfg.canSendLive ? null : true,
   })
   if (error) {
     console.warn('[disparoWorker] claim:', error.message)
     return []
   }
   return Array.isArray(data) ? data : []
+}
+
+function workerPodeProcessarExecucao(execucaoDryRun, workerConfig = cfg) {
+  return execucaoDryRun === true || workerConfig?.canSendLive === true
 }
 
 async function tryLockInstancia(instanciaId) {
@@ -299,6 +306,23 @@ async function processarItem(item) {
       return
     }
 
+    const execucaoDryRun = ctx.execucao.dry_run === true
+    if (!workerPodeProcessarExecucao(execucaoDryRun)) {
+      // Defesa em profundidade caso a migration do claim ainda não tenha sido aplicada
+      // ou o item tenha sido reservado antes de uma troca de configuração.
+      await adiarItem(
+        item,
+        new Date(Date.now() + 3000).toISOString(),
+        'Worker dry-run não pode processar execução live; aguardando worker compatível',
+      )
+      await heartbeat({
+        last_item: item.id,
+        mode_mismatch: true,
+        execucao_dry_run: false,
+      })
+      return
+    }
+
     // Instância: só bloqueia se inativa. Status "disconnected" no banco pode ser falso
     // (payload UltraMSG aninhado). Tenta live; se incerto, segue com o envio.
     const { data: inst } = await supabase.from('whatsapp_instances')
@@ -408,10 +432,13 @@ async function processarItem(item) {
 
     await heartbeat({ last_item: item.id })
 
-    const dryRun = cfg.dryRun || ctx.execucao.dry_run === true || !cfg.canSendLive
+    // O modo é imutável por execução. Configuração local nunca pode rebaixar
+    // silenciosamente uma execução live para simulação bem-sucedida.
+    const dryRun = execucaoDryRun
     const result = await enviarItemFila(item, {
       dryRun,
-      liveEnabled: cfg.liveEnabled && !dryRun,
+      liveEnabled: cfg.canSendLive && !dryRun,
+      requireLive: !dryRun,
       allowlist: cfg.allowlist,
       timeoutMs: cfg.sendTimeoutMs,
       io,
@@ -748,6 +775,7 @@ module.exports = {
   stopDisparoWorker,
   rememberEnvioInstancia,
   ultimoEnvioConhecido,
+  workerPodeProcessarExecucao,
   _resetUltimoEnvioLocal,
   _setIo: (socketIo) => { io = socketIo },
 }

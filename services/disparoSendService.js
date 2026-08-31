@@ -312,7 +312,14 @@ async function enviarViaUltramsg({
 /**
  * Processa o envio de um item da fila.
  */
-async function enviarItemFila(item, { dryRun, liveEnabled, allowlist, timeoutMs, io } = {}) {
+async function enviarItemFila(item, {
+  dryRun,
+  liveEnabled,
+  requireLive = false,
+  allowlist,
+  timeoutMs,
+  io,
+} = {}) {
   const itemId = item?.id
   const companyId = Number(item?.company_id)
 
@@ -401,6 +408,16 @@ async function enviarItemFila(item, { dryRun, liveEnabled, allowlist, timeoutMs,
 
   const flags = getDisparoFlags()
   const effectiveDryRun = dryRun !== false || !liveEnabled || !flags.canSendLive
+
+  if (requireLive === true && effectiveDryRun) {
+    return {
+      ok: false,
+      error: 'Execução live recebida por processo sem envio live habilitado',
+      httpStatus: 503,
+      beforeSend: true,
+      errorCodigo: 'WORKER_MODO_INCOMPATIVEL',
+    }
+  }
 
   if (effectiveDryRun) {
     await sleep(DRY_RUN_DELAY_MS)

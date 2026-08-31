@@ -1,7 +1,6 @@
 const supabase = require('../config/supabase')
 const {
   registrarAtendimento,
-  buildMensagemInternaMovimentacao,
   listarMensagensInternasMovimentacao,
   perfilPodeVerMovimentacaoInterna,
   isMensagemLegadaMovimentacaoInterna,
@@ -140,15 +139,10 @@ const {
   captionUsuarioDeMidiaPersistida,
 } = require('../services/chat/outbound/retryEligibility')
 const {
-  ULTRAMSG_VIDEO_MAX_BYTES,
-  ULTRAMSG_VIDEO_TARGET_BYTES,
   parseAudioDuracaoSecFromBody,
-  mimeBase,
-  extBaseArquivo,
   isForcedVoiceAudioish,
   aplicarTipoForcadoSticker,
   inferirTipoArquivo,
-  getAudioFileExtension,
   shouldAbortAudioAfterNormalize,
   shouldNormalizeVideoForUltraMsg,
   shouldForceProviderUploadForMedia,
@@ -172,6 +166,33 @@ const {
   obterUsuarioIdsQuePodemVerConversa,
   incrementarUnreadParaConversa,
 } = require('../services/chat/access/conversationVisibilityService')
+const {
+  emitirConversaAtualizada,
+  emitirParaUsuariosQuePodemVerConversa,
+  emitirEventoEmpresaConversa,
+  emitirSincronizacaoListaConversas,
+  emitirLock,
+  emitirRealtimeAposAssumir,
+  emitirParaUsuario,
+  emitirMovimentacaoInternaAtendimento,
+  emitirDepartamento,
+} = require('../services/chat/realtime/chatRealtimeGateway')
+const {
+  normalizeAudioForUltraMsg,
+  probeAudioDurationSec,
+  normalizeVideoForUltraMsg,
+  normalizeImageForWhatsapp,
+} = require('../services/chat/media/mediaNormalizers')
+const {
+  getForwardMediaUrlCandidate,
+  resolveForwardMediaForProvider,
+} = require('../services/chat/outbound/forwardMediaResolver')
+const {
+  assertPermissaoConversa,
+  podeAssumirConversaPorPerfil,
+  assertPodeEnviarMensagem,
+} = require('../services/chat/access/conversationPolicy')
+const { deriveListarConversasFilters } = require('../services/chat/read/listarConversasFilters')
 
 /**
  * Deduplicação in-memory para double-send de texto.
@@ -286,98 +307,6 @@ async function resolveUltraMsgReplyMessageId(supabaseClient, company_id, convers
 // =====================================================
 // 1) HELPERS (TOPO DO ARQUIVO)
 // =====================================================
-function emitirConversaAtualizada(io, company_id, conversa_id, payload = null, opts = {}) {
-  if (!io) return
-  const { skipAtualizarConversa = false } = opts
-
-  const cid = Number(conversa_id)
-  let data = payload || { id: cid }
-  if (payloadAlteraVisibilidadeConversa(data)) {
-    invalidateConversaVisibilityCache(company_id, cid)
-  }
-
-  // Se payload é mínimo (só id), buscar nome/foto para não sobrescrever com vazio no frontend (Bug 3)
-  const keys = Object.keys(data)
-  if (keys.length <= 1 && (keys.length === 0 || (keys[0] === 'id' && data.id))) {
-    supabase
-      .from('conversas')
-      .select('id, nome_contato_cache, foto_perfil_contato_cache, ultima_atividade, status_atendimento, atendente_id, tipo')
-      .eq('company_id', company_id)
-      .eq('id', cid)
-      .maybeSingle()
-      .then(async ({ data: conv }) => {
-        if (conv) {
-          const enriched = { id: cid }
-          if (conv.nome_contato_cache) {
-            enriched.nome_contato_cache = conv.nome_contato_cache
-            enriched.contato_nome = conv.nome_contato_cache
-          }
-          if (conv.foto_perfil_contato_cache) {
-            enriched.foto_perfil_contato_cache = conv.foto_perfil_contato_cache
-            enriched.foto_perfil = conv.foto_perfil_contato_cache
-          }
-          if (conv.ultima_atividade) enriched.ultima_atividade = conv.ultima_atividade
-          const isGroup = isGroupConversation(conv)
-          let statusParaUi = conv.status_atendimento
-          if (!isGroup && conv.status_atendimento === 'aberta') {
-            const temAtendente = conv.atendente_id != null
-            let temMsg = false
-            try {
-              const { data: um } = await supabase
-                .from('mensagens')
-                .select('id')
-                .eq('company_id', company_id)
-                .eq('conversa_id', cid)
-                .limit(1)
-                .maybeSingle()
-              temMsg = !!um
-            } catch (_) {
-              temMsg = false
-            }
-            const exibirBadge = temMsg || temAtendente
-            statusParaUi = statusAtendimentoParaLista(false, conv.status_atendimento, exibirBadge)
-          } else if (isGroup) {
-            statusParaUi = null
-          }
-          if (statusParaUi) enriched.status_atendimento = statusParaUi
-          const eventName = io.EVENTS?.CONVERSA_ATUALIZADA || 'conversa_atualizada'
-          emitirEventoConversaVisivel(io, company_id, cid, eventName, enriched)
-            .catch(() => io.to(`conversa_${cid}`).emit(eventName, enriched))
-        } else {
-          const eventName = io.EVENTS?.CONVERSA_ATUALIZADA || 'conversa_atualizada'
-          emitirEventoConversaVisivel(io, company_id, cid, eventName, data)
-            .catch(() => io.to(`conversa_${cid}`).emit(eventName, data))
-        }
-        if (!skipAtualizarConversa) {
-          emitirEventoConversaVisivel(io, company_id, cid, 'atualizar_conversa', { id: cid })
-            .catch(() => io.to(`conversa_${cid}`).emit('atualizar_conversa', { id: cid }))
-        }
-      })
-      .catch(() => {
-        const eventName = io.EVENTS?.CONVERSA_ATUALIZADA || 'conversa_atualizada'
-        emitirEventoConversaVisivel(io, company_id, cid, eventName, data)
-          .catch(() => io.to(`conversa_${cid}`).emit(eventName, data))
-        if (!skipAtualizarConversa) {
-          emitirEventoConversaVisivel(io, company_id, cid, 'atualizar_conversa', { id: cid })
-            .catch(() => io.to(`conversa_${cid}`).emit('atualizar_conversa', { id: cid }))
-        }
-      })
-    return
-  }
-
-  // Emite para empresa + conversa em UMA única operação (evita duplicidade
-  // quando o mesmo socket está nas duas rooms).
-  const eventName = io.EVENTS?.CONVERSA_ATUALIZADA || 'conversa_atualizada'
-  emitirEventoConversaVisivel(io, company_id, conversa_id, eventName, data)
-    .catch(() => io.to(`conversa_${conversa_id}`).emit(eventName, data))
-
-  // skipAtualizarConversa: evita refetch que causa duplicata/glitch (payload já tem tudo)
-  if (!skipAtualizarConversa) {
-    emitirEventoConversaVisivel(io, company_id, cid, 'atualizar_conversa', { id: cid })
-      .catch(() => io.to(`conversa_${cid}`).emit('atualizar_conversa', { id: cid }))
-  }
-}
-
 function aplicarAguardandoClienteNoPayload(payload, waitingResult, modoSimplesOpt) {
   if (!payload || !waitingResult?.marked) {
     return aplicarModoSimplesNoPayload(payload, modoSimplesOpt, modoSimplesOpt?.atendimento_modo_simples)
@@ -415,90 +344,9 @@ async function recalcularEMesclarModoSimples({
   return result
 }
 
-async function emitirParaUsuariosQuePodemVerConversa(io, company_id, conversa_id, eventName, payload) {
-  if (!io || !conversa_id) return false
-  const usuarioIds = await obterUsuarioIdsQuePodemVerConversa(company_id, conversa_id)
-  if (!Array.isArray(usuarioIds) || usuarioIds.length === 0) return false
-  const idsUnicos = [...new Set(usuarioIds.map(Number).filter((id) => Number.isFinite(id) && id > 0))]
-  if (idsUnicos.length === 0) return false
-  idsUnicos.forEach((uid) => io.to(`usuario_${uid}`).emit(eventName, payload))
-  return true
-}
-
-async function emitirEventoConversaVisivel(io, company_id, conversa_id, eventName, payload) {
-  if (!io || !conversa_id) return false
-  const usuarioIds = await obterUsuarioIdsQuePodemVerConversa(company_id, conversa_id)
-  const idsUnicos = [...new Set((usuarioIds || []).map(Number).filter((id) => Number.isFinite(id) && id > 0))]
-  let target = io.to(`conversa_${Number(conversa_id)}`)
-  idsUnicos.forEach((uid) => {
-    target = target.to(`usuario_${uid}`)
-  })
-  target.emit(eventName, payload)
-  return idsUnicos.length > 0
-}
-
-function emitirEventoEmpresaConversa(io, company_id, conversa_id, eventName, payload) {
-  if (!io) return
-
-  if (conversa_id) {
-    if (payloadAlteraVisibilidadeConversa(payload)) {
-      invalidateConversaVisibilityCache(company_id, conversa_id)
-    }
-    const { scheduleInboundWebPush } = require('../services/webPushDispatchService')
-    // Evita "vazamento" cross-setor (ex.: financeiro recebendo vendas).
-    // Fallback para room ampla apenas se não conseguirmos resolver os destinatários.
-    emitirEventoConversaVisivel(io, company_id, conversa_id, eventName, payload)
-      .then(() => {
-        scheduleInboundWebPush(company_id, conversa_id, eventName, payload)
-      })
-      .catch(() => {
-        io.to(`conversa_${conversa_id}`).emit(eventName, payload)
-        scheduleInboundWebPush(company_id, conversa_id, eventName, payload)
-      })
-    return
-  }
-  io.to(`empresa_${company_id}`).emit(eventName, payload)
-}
-
 exports.emitirEventoEmpresaConversa = emitirEventoEmpresaConversa
 
-/** Quando `emitirConversaAtualizada` usa skipAtualizarConversa (evita flicker), ainda força sync da lista lateral / “Minha fila”. */
-function emitirSincronizacaoListaConversas(io, company_id, conversa_id) {
-  if (!io || company_id == null || conversa_id == null) return
-  const ev = io.EVENTS?.ATUALIZAR_CONVERSA || 'atualizar_conversa'
-  io.to(`empresa_${Number(company_id)}`).emit(ev, { id: Number(conversa_id) })
-}
-
-// =====================================================
-// ⭐ LOCK REALTIME (SEMANA 3)
-// =====================================================
-function emitirLock(io, conversa_id, usuario_id = null) {
-  if (!io) return;
-
-  io.emitConversa(
-    conversa_id,
-    io.EVENTS?.CONVERSA_LOCK || "conversa_lock",
-    {
-      conversa_id: Number(conversa_id),
-      locked_by: usuario_id ? Number(usuario_id) : null
-    }
-  );
-}
-
-function emitirRealtimeAposAssumir(io, company_id, conversa_id, user_id, conversaRow) {
-  if (!io) return
-  emitirConversaAtualizada(io, company_id, conversa_id, { ...conversaRow, exibir_badge_aberta: true }, { skipAtualizarConversa: true })
-  emitirSincronizacaoListaConversas(io, company_id, conversa_id)
-  emitirLock(io, conversa_id, user_id)
-}
-
 exports.emitirRealtimeAposAssumir = emitirRealtimeAposAssumir
-
-function emitirParaUsuario(io, usuario_id, eventName, payload) {
-  if (!io) return
-  if (io.emitUsuario) io.emitUsuario(usuario_id, eventName, payload)
-  else io.to(`usuario_${usuario_id}`).emit(eventName, payload)
-}
 
 function ordenarMensagensHistoricoAsc(a, b) {
   const ta = new Date(a?.criado_em || 0).getTime()
@@ -510,68 +358,7 @@ function ordenarMensagensHistoricoAsc(a, b) {
   return String(a?.id ?? '').localeCompare(String(b?.id ?? ''))
 }
 
-async function emitirMovimentacaoInternaAtendimento(io, {
-  company_id,
-  conversa,
-  atendimento,
-}) {
-  if (!io || !atendimento || !['assumiu', 'transferiu'].includes(String(atendimento.acao || '').toLowerCase())) return
-
-  try {
-    const idsParaNome = [
-      atendimento.de_usuario_id,
-      atendimento.para_usuario_id,
-    ].map(Number).filter((id) => Number.isFinite(id) && id > 0)
-
-    const userMap = {}
-    if (idsParaNome.length > 0) {
-      const { data: nomes } = await supabase
-        .from('usuarios')
-        .select('id, nome')
-        .eq('company_id', Number(company_id))
-        .in('id', [...new Set(idsParaNome)])
-      ;(nomes || []).forEach((u) => { userMap[Number(u.id)] = u.nome || '' })
-    }
-
-    const payload = buildMensagemInternaMovimentacao(atendimento, userMap)
-    if (!payload) return
-
-    const { data: candidatos, error } = await supabase
-      .from('usuarios')
-      .select('id, perfil')
-      .eq('company_id', Number(company_id))
-      .eq('ativo', true)
-      .in('perfil', ['admin', 'administrador'])
-
-    if (error) {
-      console.warn('[movimentacaoInterna] usuarios:', error?.message || error)
-      return
-    }
-
-    const recipients = new Set()
-    for (const usuario of candidatos || []) {
-      if (perfilPodeVerMovimentacaoInterna(usuario?.perfil)) {
-        recipients.add(Number(usuario.id))
-      }
-    }
-
-    recipients.forEach((usuarioId) => {
-      if (Number.isFinite(usuarioId) && usuarioId > 0) {
-        emitirParaUsuario(io, usuarioId, io.EVENTS?.MENSAGEM_INTERNA_ATENDIMENTO || 'mensagem_interna_atendimento', payload)
-      }
-    })
-  } catch (err) {
-    console.warn('[movimentacaoInterna] emitir:', err?.message || err)
-  }
-}
-
 exports.emitirMovimentacaoInternaAtendimento = emitirMovimentacaoInternaAtendimento
-
-/** Emite para a room do departamento (realtime por setor) */
-function emitirDepartamento(io, departamento_id, eventName, payload) {
-  if (!io || !departamento_id) return
-  io.to(`departamento_${departamento_id}`).emit(eventName, payload)
-}
 
 /** Enriquece mensagens com usuario_id, usuario_nome e enviado_por_usuario (apenas direcao out) */
 function textoRevogadoApagadaParaTodos(m, viewerUserId) {
@@ -663,187 +450,6 @@ async function enrichMensagemComAutorUsuario(supabase, company_id, msg) {
     enviado_por_usuario: true,
     fromMe: true,
     apagada_para_todos: msg?.apagada_para_todos === true,
-  }
-}
-
-async function assertPermissaoConversa({ company_id, conversa_id, user_id, role, user_dep_ids }) {
-  const { data: conv, error } = await supabase
-    .from('conversas')
-    .select('id, atendente_id, departamento_id, tipo, telefone, status_atendimento')
-    .eq('company_id', Number(company_id))
-    .eq('id', Number(conversa_id))
-    .maybeSingle()
-  if (error) return { ok: false, status: 500, error: error.message }
-  if (!conv) return { ok: false, status: 404, error: 'Conversa não encontrada' }
-
-  const isGroup = isGroupConversation(conv)
-  const r = String(role || '').toLowerCase()
-  const isAssignedToUser = conv.atendente_id && Number(conv.atendente_id) === Number(user_id)
-  const depIds = Array.isArray(user_dep_ids) ? user_dep_ids : []
-
-  // REGRA PRINCIPAL: Se a conversa está assumida pelo usuário, SEMPRE permitir acesso total
-  if (!isGroup && isAssignedToUser) return { ok: true, conv, reason: 'conversa_assumida_pelo_usuario' }
-  if (!isGroup && conv.atendente_id && await usuarioParticipaAtivamenteDaConversa(company_id, conversa_id, user_id)) {
-    return { ok: true, conv, reason: 'usuario_participante_conversa' }
-  }
-  if (r === 'admin') return { ok: true, conv }
-
-  // EXCEÇÃO: usuário transferiu a conversa para outro — vê independente do setor
-  const { data: transferRow } = await supabase
-    .from('atendimentos')
-    .select('id')
-    .eq('company_id', Number(company_id))
-    .eq('conversa_id', Number(conversa_id))
-    .eq('de_usuario_id', Number(user_id))
-    .eq('acao', 'transferiu')
-    .limit(1)
-    .maybeSingle()
-  if (!isGroup && transferRow) return { ok: true, conv, reason: 'usuario_transferiu_conversa' }
-
-  // Encerrada: qualquer atendente/supervisor pode reabrir (ex.: quem finalizou em outro setor).
-  if (!isGroup && (r === 'supervisor' || r === 'atendente') && isClosedAttendanceStatus(conv.status_atendimento)) {
-    return { ok: true, conv, reason: 'conversa_encerrada_reabertura' }
-  }
-
-  // supervisor e atendente: conversas sem setor visíveis para TODOS; com setor só se usuário pertence
-  if (r === 'supervisor' || r === 'atendente') {
-    if (isGroup) {
-      const podeVerGrupo = await usuarioPodeVerGrupo({
-        company_id,
-        conversa_id,
-        role,
-        departamento_ids: depIds,
-      })
-      if (!podeVerGrupo) {
-        return { ok: false, status: 403, error: 'Grupo nao vinculado ao seu setor' }
-      }
-    } else {
-      const convDep = conv.departamento_id ?? null
-      const userSemSetor = depIds.length === 0
-      if (userSemSetor && convDep != null) return { ok: false, status: 403, error: 'Conversa de outro setor' }
-      if (convDep != null && !depIds.some((id) => Number(id) === Number(convDep))) return { ok: false, status: 403, error: 'Conversa de outro setor' }
-    }
-    return { ok: true, conv }
-  }
-
-  return { ok: true, conv }
-}
-
-/**
- * Verifica se o usuário pode ENVIAR mensagens na conversa.
- * - Grupos: qualquer usuário pode enviar sem assumir.
- * - Demais conversas: só quem assumiu (atendente_id === user_id), inclusive admin.
- * - Quando habilitado pelo caller, conversa sem atendente pode ser assumida
- *   automaticamente no primeiro envio manual, respeitando setor/perfil/limite.
- */
-function podeAssumirConversaPorPerfil(role) {
-  const r = String(role || '').toLowerCase()
-  return r === 'admin' || r === 'supervisor' || r === 'atendente'
-}
-
-async function assertPodeEnviarMensagem({
-  company_id,
-  conversa_id,
-  user_id,
-  role = null,
-  user_dep_ids = [],
-  autoAssumirUra = false,
-  autoAssumirAoEnviar = false,
-  io = null,
-}) {
-  const { data: conv, error } = await supabase
-    .from('conversas')
-    .select('id, atendente_id, departamento_id, tipo, telefone, status_atendimento, whatsapp_instance_id')
-    .eq('company_id', Number(company_id))
-    .eq('id', Number(conversa_id))
-    .maybeSingle()
-  if (error) return { ok: false, status: 500, error: error.message }
-  if (!conv) return { ok: false, status: 404, error: 'Conversa não encontrada' }
-
-  if (isGroupConversation(conv)) {
-    const podeVerGrupo = await usuarioPodeVerGrupo({
-      company_id,
-      conversa_id,
-      role,
-      departamento_ids: user_dep_ids,
-    })
-    if (!podeVerGrupo) {
-      return { ok: false, status: 403, error: 'Grupo nao vinculado ao seu setor' }
-    }
-    return { ok: true, reason: 'grupo_sem_exigir_assumir' }
-  }
-
-  if (isClosedAttendanceStatus(conv.status_atendimento)) {
-    return {
-      ok: false,
-      status: 409,
-      error: 'Reabra a conversa antes de enviar mensagens.',
-    }
-  }
-
-  const isAssignedToUser = conv.atendente_id && Number(conv.atendente_id) === Number(user_id)
-  if (isAssignedToUser) {
-    return { ok: true, reason: 'conversa_assumida_pelo_usuario' }
-  }
-
-  if (conv.atendente_id && await usuarioParticipaAtivamenteDaConversa(company_id, conversa_id, user_id)) {
-    return { ok: true, reason: 'usuario_participante_conversa' }
-  }
-
-  if (!conv.atendente_id) {
-    const modoSimplesAtivo = await empresaModoSimplesAtivo(company_id)
-    if (modoSimplesAtivo) {
-      const permVer = await assertPermissaoConversa({
-        company_id,
-        conversa_id,
-        user_id,
-        role,
-        user_dep_ids,
-      })
-      if (permVer.ok) {
-        return { ok: true, reason: 'modo_simples_sem_assumir', conversa: permVer.conv, modo_simples: true }
-      }
-      return { ok: false, status: permVer.status || 403, error: permVer.error || 'Sem permissão para esta conversa' }
-    }
-    const deveAutoAssumir = autoAssumirAoEnviar || autoAssumirUra
-    if (deveAutoAssumir) {
-      if (!podeAssumirConversaPorPerfil(role)) {
-        return { ok: false, status: 403, error: 'Seu perfil não permite assumir conversas' }
-      }
-      const result = await executarAssumirConversa({
-        company_id,
-        conversa_id,
-        user_id,
-        perfil: role,
-        departamento_ids: user_dep_ids,
-        observacao: 'Conversa assumida automaticamente no primeiro envio manual.'
-      })
-      if (!result.ok) return { ok: false, status: result.status, error: result.error }
-
-      if (io) {
-        emitirRealtimeAposAssumir(io, company_id, conversa_id, user_id, result.conversa)
-        if (result.atendimento) {
-          await emitirMovimentacaoInternaAtendimento(io, {
-            company_id,
-            conversa: result.conversa,
-            atendimento: result.atendimento,
-          })
-        }
-      }
-
-      return {
-        ok: true,
-        reason: result.already_assigned ? 'auto_assumida_ja_estava_com_usuario' : 'auto_assumida_envio_manual',
-        conversa: result.conversa,
-      }
-    }
-    return { ok: false, status: 403, error: 'Assuma a conversa antes de enviar mensagens' }
-  }
-
-  return {
-    ok: false,
-    status: 403,
-    error: 'Esta conversa está com outro atendente. Assuma a conversa para enviar mensagens.',
   }
 }
 
@@ -940,100 +546,38 @@ exports.listarConversas = async (req, res) => {
     const role = String(perfil || '').toLowerCase()
     const isAdmin = role === 'admin'
     const isAtendente = role === 'atendente'
+    // Campos crus de req.query usados diretamente nas queries SQL abaixo. As flags derivadas
+    // (busca, chips de estado, tempo parado, atendente_id validado) vêm de deriveListarConversasFilters.
     const {
       tag_id,
       data_inicio,
       data_fim,
       status_atendimento,
       atendente_id,
-      palavra,
       departamento_id: filter_dep_id,
-      incluir_todos_clientes: incluirTodosClientes,
-      minha_fila: minhaFilaRaw,
-      incluir_colaboradores_encaminhar: incluirColabEncRaw,
-      aguardando_cliente: aguardandoClienteRaw,
-      aguardando_atendente: aguardandoAtendenteRaw,
-      pagamento_pendente: pagamentoPendenteRaw,
-      em_atraso: emAtrasoRaw,
-      tempo_parado: tempoParadoRaw,
-      finalizacao_motivo: finalizacaoMotivoRaw,
-      hoje: hojeRaw,
-      campanhas: campanhasRaw,
     } = req.query
 
-    const filtroAusenciaListaRaw =
-      String(finalizacaoMotivoRaw ?? '')
-        .trim()
-        .toLowerCase() === 'ausencia_cliente'
-
-    const TEMPO_PARADO_HORAS = {
-      '2h': 2,
-      '12h': 12,
-      '24h': 24,
-      '7d': 24 * 7,
-      '30d': 24 * 30,
-    }
-    const tempoParadoKey =
-      tempoParadoRaw != null && String(tempoParadoRaw).trim() !== ''
-        ? String(tempoParadoRaw).trim().toLowerCase()
-        : null
-    const tempoParadoHorasRaw =
-      tempoParadoKey && Object.prototype.hasOwnProperty.call(TEMPO_PARADO_HORAS, tempoParadoKey)
-        ? TEMPO_PARADO_HORAS[tempoParadoKey]
-        : null
-
-    const aguardandoClienteRawAtivo =
-      aguardandoClienteRaw === '1' ||
-      aguardandoClienteRaw === 'true' ||
-      aguardandoClienteRaw === 1 ||
-      aguardandoClienteRaw === true
-
-    const aguardandoAtendenteRawAtivo =
-      aguardandoAtendenteRaw === '1' ||
-      aguardandoAtendenteRaw === 'true' ||
-      aguardandoAtendenteRaw === 1 ||
-      aguardandoAtendenteRaw === true
-
-    const pagamentoPendenteRawAtivo =
-      pagamentoPendenteRaw === '1' ||
-      pagamentoPendenteRaw === 'true' ||
-      pagamentoPendenteRaw === 1 ||
-      pagamentoPendenteRaw === true
-
-    const emAtrasoRawAtivo =
-      emAtrasoRaw === '1' ||
-      emAtrasoRaw === 'true' ||
-      emAtrasoRaw === 1 ||
-      emAtrasoRaw === true
-
-    const hojeRawAtivo =
-      hojeRaw === '1' ||
-      hojeRaw === 'true' ||
-      hojeRaw === 1 ||
-      hojeRaw === true
-
-    const minhaFilaRawAtiva =
-      minhaFilaRaw === '1' ||
-      minhaFilaRaw === 'true' ||
-      minhaFilaRaw === 1 ||
-      minhaFilaRaw === true
-
-    const campanhasRawAtiva =
-      campanhasRaw === '1' ||
-      campanhasRaw === 'true' ||
-      campanhasRaw === 1 ||
-      campanhasRaw === true
-
-    const tagFilterAtivo =
-      tag_id != null &&
-      String(tag_id).trim() !== '' &&
-      String(tag_id).trim().toLowerCase() !== 'todas'
-
-    const incluirColaboradoresEncaminhar =
-      incluirColabEncRaw === '1' ||
-      incluirColabEncRaw === 'true' ||
-      incluirColabEncRaw === 1 ||
-      incluirColabEncRaw === true
+    // Derivação pura de filtros/flags de req.query (services/chat/read/listarConversasFilters).
+    // A validação de atendente_id (HTTP 400) é aplicada mais abaixo, preservando a ordem original
+    // (após o early-return do usuário financeiro).
+    const {
+      tagFilterAtivo,
+      incluirColaboradoresEncaminhar,
+      incluirTodosClientesAtivo,
+      palavraTrim,
+      aguardandoClienteAtivo,
+      aguardandoAtendenteAtivo,
+      pagamentoPendenteAtivo,
+      emAtrasoAtivo,
+      hojeAtivo,
+      minhaFilaAtiva,
+      campanhasAtiva,
+      tempoParadoHoras,
+      filtroAusenciaLista,
+      statusNorm,
+      filtroAtendenteInformado,
+      atendenteIdInvalido,
+    } = deriveListarConversasFilters(req.query)
 
     const chatListPagination = parseChatListPagination(req.query)
 
@@ -1060,29 +604,9 @@ exports.listarConversas = async (req, res) => {
       return res.json({ conversas: [], colaboradores_encaminhar, pagination: emptyPagination })
     }
 
-    const incluirTodosClientesAtivo =
-      incluirTodosClientes === '1' ||
-      incluirTodosClientes === 'true' ||
-      incluirTodosClientes === 1 ||
-      incluirTodosClientes === true
-
     // Em producao, GET /chats nunca anexa a base inteira de clientes por padrao.
     // Clientes sem conversa entram apenas em busca explicita e paginada.
     const incluirTodosClientesDefault = false
-    const palavraTrim = palavra && String(palavra).trim() ? String(palavra).trim() : ''
-    // B01: com termo de busca, não restringir por aba/chip de estado (comportamento tipo WhatsApp).
-    // Mantém filtros avançados explícitos (tag, setor, datas, atendente_id).
-    const searchBypassesStateFilters = Boolean(palavraTrim)
-
-    const aguardandoClienteAtivo = searchBypassesStateFilters ? false : aguardandoClienteRawAtivo
-    const aguardandoAtendenteAtivo = searchBypassesStateFilters ? false : aguardandoAtendenteRawAtivo
-    const pagamentoPendenteAtivo = searchBypassesStateFilters ? false : pagamentoPendenteRawAtivo
-    const emAtrasoAtivo = searchBypassesStateFilters ? false : emAtrasoRawAtivo
-    const hojeAtivo = searchBypassesStateFilters ? false : hojeRawAtivo
-    const minhaFilaAtiva = searchBypassesStateFilters ? false : minhaFilaRawAtiva
-    const campanhasAtiva = searchBypassesStateFilters ? false : campanhasRawAtiva
-    const tempoParadoHoras = searchBypassesStateFilters ? null : tempoParadoHorasRaw
-    const filtroAusenciaLista = searchBypassesStateFilters ? false : filtroAusenciaListaRaw
 
     const isFinanceiroUser = await usuarioPertenceSetorFinanceiro(departamento_ids, company_id)
 
@@ -1090,31 +614,13 @@ exports.listarConversas = async (req, res) => {
       return sendEmptyChatListResponse(false)
     }
 
-    const statusNorm =
-      searchBypassesStateFilters
-        ? null
-        : !minhaFilaAtiva &&
-            !campanhasAtiva &&
-            !pagamentoPendenteAtivo &&
-            !emAtrasoAtivo &&
-            !hojeAtivo &&
-            status_atendimento != null &&
-            String(status_atendimento).trim() !== ''
-          ? String(status_atendimento).toLowerCase().trim()
-          : null
-
-    /** Inteiro positivo (usuarios.id). UUID não é coluna de atendente_id na conversa — rejeitar valores não inteiros. */
-    let filtroAtendenteInformado = null
-    if (atendente_id != null && String(atendente_id).trim() !== '') {
-      const trimmed = String(atendente_id).trim()
-      const num = Number(trimmed)
-      if (!Number.isInteger(num) || num <= 0) {
-        return res.status(400).json({
-          error:
-            'atendente_id deve ser o id inteiro positivo referente a usuarios.id. Este parâmetro não aceita UUID nem texto arbitrário.',
-        })
-      }
-      filtroAtendenteInformado = num
+    // atendente_id inválido (UUID/texto/não-inteiro) — mesma posição/ordem original: só após o
+    // early-return do usuário financeiro acima.
+    if (atendenteIdInvalido) {
+      return res.status(400).json({
+        error:
+          'atendente_id deve ser o id inteiro positivo referente a usuarios.id. Este parâmetro não aceita UUID nem texto arbitrário.',
+      })
     }
 
     async function loadColaboradoresEncaminhar() {
@@ -7237,381 +6743,6 @@ exports.removerTagConversa = async (req, res) => {
   }
 }
 /** MIME base sem parâmetros (ex.: codecs) */
-function resolveFfmpegPath() {
-  try {
-    const p = require('ffmpeg-static')
-    if (p) return p
-  } catch {}
-  return null
-}
-
-async function convertAudioWithFfmpeg(inputPath, outputPath, profile = 'audio_mp3') {
-  const { spawn } = require('child_process')
-  const ffmpegPath = resolveFfmpegPath()
-  if (!ffmpegPath) throw new Error('ffmpeg-static não disponível')
-
-  let args
-  // Voice (PTT): asetpts=N/SR/TB reescreve os timestamps de saída com base na contagem de
-  // amostras decodificadas, ignorando completamente os timestamps irregulares do WebM do
-  // MediaRecorder (dispositivos Android podem ter lacunas ou saltos que inflam a duração).
-  // aresample=async=0 impede que o resampler ajuste o áudio com base nos timestamps de entrada.
-  if (profile === 'voice_ogg_opus') {
-    args = [
-      '-y',
-      '-i', inputPath,
-      '-vn',
-      '-af', 'aresample=async=0,asetpts=N/SR/TB',
-      '-ac', '1',
-      '-ar', '48000',
-      '-c:a', 'libopus',
-      '-b:a', '48k',
-      '-compression_level', '10',
-      '-application', 'voip',
-      '-fflags', '+bitexact',
-      '-flags', '+bitexact',
-      '-map_metadata', '-1',
-      '-map_chapters', '-1',
-      outputPath,
-    ]
-  } else {
-    args = [
-      '-y',
-      '-i', inputPath,
-      '-vn',
-      '-ac', '1',
-      '-ar', '44100',
-      '-c:a', 'libmp3lame',
-      '-b:a', '128k',
-      '-write_xing', '0',
-      '-id3v2_version', '0',
-      '-map_metadata', '-1',
-      '-map_chapters', '-1',
-      outputPath,
-    ]
-  }
-  return new Promise((resolve, reject) => {
-    const proc = spawn(ffmpegPath, args, { windowsHide: true })
-    let stderr = ''
-    proc.stderr.on('data', (d) => { stderr += String(d || '') })
-    const tid = setTimeout(() => {
-      try { proc.kill('SIGKILL') } catch {}
-      reject(new Error('ffmpeg timeout (60s)'))
-    }, 60000)
-    proc.on('error', (err) => { clearTimeout(tid); reject(err) })
-    proc.on('close', (code) => {
-      clearTimeout(tid)
-      if (code === 0) resolve()
-      else reject(new Error(`ffmpeg exit=${code} ${stderr.slice(-240)}`.trim()))
-    })
-  })
-}
-
-/** Mede duração real de um arquivo de áudio via ffmpeg -i (parse do stderr). */
-async function probeAudioDurationSec(filePath) {
-  const { spawn } = require('child_process')
-  const ffmpegPath = resolveFfmpegPath()
-  if (!ffmpegPath) return null
-  return new Promise((resolve) => {
-    const proc = spawn(ffmpegPath, ['-i', filePath], { windowsHide: true })
-    let stderr = ''
-    proc.stderr.on('data', (d) => { stderr += String(d || '') })
-    const tid = setTimeout(() => { try { proc.kill('SIGKILL') } catch {}; resolve(null) }, 8000)
-    proc.on('error', () => { clearTimeout(tid); resolve(null) })
-    proc.on('close', () => {
-      clearTimeout(tid)
-      const m = stderr.match(/Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/)
-      if (!m) { resolve(null); return }
-      resolve(parseInt(m[1], 10) * 3600 + parseInt(m[2], 10) * 60 + parseFloat(m[3]))
-    })
-  })
-}
-
-async function normalizeAudioForUltraMsg(file, tipo) {
-  if (!file || !file.path || (tipo !== 'audio' && tipo !== 'voice')) {
-    return { file, converted: false, error: null, required: false }
-  }
-  const ext = getAudioFileExtension(file)
-  const isVoice = tipo === 'voice'
-  const isAudio = tipo === 'audio'
-  const allowedAudioExt = ['mp3', 'ogg', 'aac']
-  const mime = mimeBase(file)
-  // Voice: se já for OGG/Opus (ex.: Firefox MediaRecorder), pula ffmpeg — reduz latência até o CDN.
-  // WebM/outros containers continuam obrigatórios a transcodificar (compatibilidade iPhone/WhatsApp).
-  if (isVoice) {
-    const alreadyOggOpus =
-      ext === 'ogg' &&
-      (mime === 'audio/ogg' || mime === 'audio/opus' || mime.includes('opus'))
-    if (alreadyOggOpus) {
-      return {
-        file: { ...file, mimetype: file.mimetype || 'audio/ogg' },
-        converted: false,
-        error: null,
-        required: false,
-      }
-    }
-  }
-  // Para audio comum, mp3/ogg/aac já são aceitos no endpoint /messages/audio.
-  if (isAudio && allowedAudioExt.includes(ext)) {
-    return { file, converted: false, error: null, required: false }
-  }
-
-  const path = require('path')
-  const fs = require('fs')
-  const dir = path.dirname(file.path)
-  const currentStoredName = String(file.filename || path.basename(file.path))
-  const baseStoredName = currentStoredName.replace(/\.[a-z0-9]{2,5}$/i, '')
-  const originalName = String(file.originalname || currentStoredName)
-  // Voice: ogg/opus | Audio: mp3 (mais compatível no endpoint /messages/audio).
-  const targetExt = isVoice ? 'ogg' : 'mp3'
-  const targetStoredName = `${baseStoredName}.${targetExt}`
-  const targetPath = path.join(dir, targetStoredName)
-  const targetOriginalName = originalName.replace(/\.[a-z0-9]{2,5}$/i, `.${targetExt}`)
-  const ffmpegProfile = isVoice ? 'voice_ogg_opus' : 'audio_mp3'
-
-  try {
-    await convertAudioWithFfmpeg(file.path, targetPath, ffmpegProfile)
-    fs.unlink(file.path, () => {})
-
-    return {
-      converted: true,
-      error: null,
-      required: true,
-      file: {
-        ...file,
-        path: targetPath,
-        filename: targetStoredName,
-        originalname: targetOriginalName,
-        mimetype: isVoice ? 'audio/ogg' : 'audio/mpeg',
-      },
-    }
-  } catch (e) {
-    // Não apaga o original: o caller decide se aborta (voice) ou reporta falha.
-    return {
-      file,
-      converted: false,
-      required: true,
-      error: e?.message || 'Falha ao converter áudio com ffmpeg',
-    }
-  }
-}
-
-/** Voice (e áudio que precisa transcodificar) não pode seguir com o arquivo cru — UltraMSG/iPhone falham. */
-async function probeVideoDurationSec(filePath) {
-  return probeAudioDurationSec(filePath)
-}
-
-async function convertVideoToUltraMsgMp4(inputPath, outputPath, opts = {}) {
-  const { spawn } = require('child_process')
-  const ffmpegPath = resolveFfmpegPath()
-  if (!ffmpegPath) throw new Error('ffmpeg-static nao disponivel')
-
-  const profile = opts.profile || null
-  const maxWidth = Number(profile?.maxWidth) || 1280
-  const videoCodecArgs = profile
-    ? [
-        '-b:v', `${profile.videoKbps}k`,
-        '-maxrate', `${Math.max(profile.videoKbps, Math.ceil(profile.videoKbps * 1.08))}k`,
-        '-bufsize', `${Math.max(96, profile.videoKbps * 2)}k`,
-      ]
-    : ['-crf', '28']
-  const audioKbps = Number(profile?.audioKbps) || 96
-
-  const args = [
-    '-y',
-    '-i', inputPath,
-    '-map', '0:v:0',
-    '-map', '0:a?',
-    '-c:v', 'libx264',
-    '-preset', 'veryfast',
-    ...videoCodecArgs,
-    '-profile:v', 'main',
-    '-level:v', '4.0',
-    '-tag:v', 'avc1',
-    '-vf', `scale=${maxWidth}:${maxWidth}:force_original_aspect_ratio=decrease:force_divisible_by=2,format=yuv420p`,
-    '-c:a', 'aac',
-    '-b:a', `${audioKbps}k`,
-    '-ac', '2',
-    '-ar', '44100',
-    '-sn',
-    '-dn',
-    '-movflags', '+faststart',
-    '-map_metadata', '-1',
-    '-map_chapters', '-1',
-    outputPath,
-  ]
-
-  return new Promise((resolve, reject) => {
-    const proc = spawn(ffmpegPath, args, { windowsHide: true })
-    let stderr = ''
-    let settled = false
-    const finish = (fn, value) => {
-      if (settled) return
-      settled = true
-      clearTimeout(tid)
-      fn(value)
-    }
-    proc.stderr.on('data', (d) => { stderr += String(d || '') })
-    const timeoutMs = Math.max(5 * 60 * 1000, Math.min(15 * 60 * 1000, Number(opts.timeoutMs) || 10 * 60 * 1000))
-    const tid = setTimeout(() => {
-      try { proc.kill('SIGKILL') } catch {}
-      finish(reject, new Error(`ffmpeg video timeout (${Math.round(timeoutMs / 60000)} min)`))
-    }, timeoutMs)
-    proc.on('error', (error) => finish(reject, error))
-    proc.on('close', (code) => {
-      if (code === 0) finish(resolve)
-      else finish(reject, new Error(`ffmpeg video exit=${code} ${stderr.slice(-300)}`.trim()))
-    })
-  })
-}
-
-async function normalizeVideoForUltraMsg(file, tipo, opts = {}) {
-  if (!file || tipo !== 'video') {
-    return { file, converted: false, required: false, error: null }
-  }
-
-  const fs = require('fs')
-  const path = require('path')
-  const currentSize = Number(file.size) || (() => {
-    try { return fs.statSync(file.path).size } catch { return 0 }
-  })()
-  if (!shouldNormalizeVideoForUltraMsg(file, tipo)) {
-    if (currentSize > ULTRAMSG_VIDEO_MAX_BYTES) {
-      return {
-        file,
-        converted: false,
-        required: true,
-        error: 'Video maior que o limite de 32 MB da UltraMSG.',
-      }
-    }
-    return { file, converted: false, required: false, error: null }
-  }
-
-  const sourcePath = file.path
-  const parsedStored = path.parse(file.filename || path.basename(sourcePath))
-  const parsedOriginal = path.parse(file.originalname || parsedStored.base || 'video')
-  const targetFilename = `${parsedStored.name || `video-${Date.now()}`}-wa.mp4`
-  const targetPath = path.join(path.dirname(sourcePath), targetFilename)
-
-  try {
-    const durationSec = await probeVideoDurationSec(sourcePath)
-    let profile = buildVideoTranscodeProfile(durationSec)
-    await convertVideoToUltraMsgMp4(sourcePath, targetPath, { profile })
-    let stat = fs.statSync(targetPath)
-    if (!stat.size) throw new Error('MP4 convertido ficou vazio')
-
-    // Bitrate médio pode variar em encode de uma passagem. Se ultrapassar o teto,
-    // recalcula com margem adicional e tenta uma única vez a partir do original.
-    if (stat.size > ULTRAMSG_VIDEO_MAX_BYTES) {
-      const measuredDuration = durationSec || await probeVideoDurationSec(targetPath)
-      profile = buildVideoTranscodeProfile(measuredDuration, {
-        targetBytes: Math.floor(ULTRAMSG_VIDEO_TARGET_BYTES * 0.88),
-      })
-      if (!profile) throw new Error('Nao foi possivel medir a duracao para compactar o video')
-      await convertVideoToUltraMsgMp4(sourcePath, targetPath, { profile })
-      stat = fs.statSync(targetPath)
-      if (!stat.size || stat.size > ULTRAMSG_VIDEO_MAX_BYTES) {
-        throw new Error('Video muito longo para compactacao abaixo de 32 MB')
-      }
-    }
-    // O arquivo recebido por upload e temporario. Remova-o antes de retornar
-    // para que o contrato seja deterministico e nao deixe WebM/MOV orfao.
-    // Encaminhamentos passam removeSource=false porque reutilizam midia salva.
-    if (opts.removeSource !== false && sourcePath !== targetPath) {
-      try { fs.unlinkSync(sourcePath) } catch (_) {}
-    }
-    return {
-      file: {
-        ...file,
-        path: targetPath,
-        filename: targetFilename,
-        originalname: `${parsedOriginal.name || 'video'}.mp4`,
-        mimetype: 'video/mp4',
-        size: stat.size,
-      },
-      converted: true,
-      required: true,
-      error: null,
-    }
-  } catch (error) {
-    try {
-      if (fs.existsSync(targetPath)) fs.unlinkSync(targetPath)
-    } catch (_) {}
-    return {
-      file,
-      converted: false,
-      required: true,
-      error: error?.message || 'Falha ao converter video para MP4',
-    }
-  }
-}
-
-async function convertImageToWhatsappJpeg(inputPath, outputPath) {
-  const { spawn } = require('child_process')
-  return new Promise((resolve, reject) => {
-    let ffmpegPath
-    try {
-      ffmpegPath = require('ffmpeg-static')
-    } catch {
-      ffmpegPath = null
-    }
-    if (!ffmpegPath) {
-      reject(new Error('ffmpeg-static não disponível'))
-      return
-    }
-    const args = [
-      '-y',
-      '-i', inputPath,
-      '-frames:v', '1',
-      '-map_metadata', '-1',
-      '-pix_fmt', 'yuvj420p',
-      '-q:v', '3',
-      outputPath,
-    ]
-    const proc = spawn(ffmpegPath, args, { windowsHide: true })
-    let stderr = ''
-    proc.stderr.on('data', (d) => { stderr += String(d || '') })
-    proc.on('error', (err) => reject(err))
-    proc.on('close', (code) => {
-      if (code === 0) resolve()
-      else reject(new Error(`ffmpeg image exit=${code} ${stderr.slice(-240)}`.trim()))
-    })
-  })
-}
-
-async function normalizeImageForWhatsapp(file, tipo) {
-  if (!shouldNormalizeImageForWhatsapp(file, tipo)) return { file, converted: false, error: null }
-  const fs = require('fs')
-  const path = require('path')
-  const sourcePath = file.path
-  const parsedStored = path.parse(file.filename || path.basename(sourcePath))
-  const parsedOriginal = path.parse(file.originalname || parsedStored.base || 'imagem')
-  const targetFilename = `${parsedStored.name || `img-${Date.now()}`}-wa.jpg`
-  const targetPath = path.join(path.dirname(sourcePath), targetFilename)
-
-  try {
-    await convertImageToWhatsappJpeg(sourcePath, targetPath)
-    const stat = fs.statSync(targetPath)
-    if (!stat.size) throw new Error('JPEG normalizado ficou vazio')
-    return {
-      file: {
-        ...file,
-        path: targetPath,
-        filename: targetFilename,
-        originalname: `${parsedOriginal.name || 'imagem'}.jpg`,
-        mimetype: 'image/jpeg',
-        size: stat.size,
-      },
-      converted: true,
-      error: null,
-    }
-  } catch (error) {
-    try {
-      if (fs.existsSync(targetPath)) fs.unlinkSync(targetPath)
-    } catch (_) {}
-    return { file, converted: false, error: error?.message || 'Falha ao normalizar imagem para JPEG' }
-  }
-}
-
 /** Lote de fotos/arquivos (galeria): mesmo contrato do WhatsApp Web. */
 const MAX_ARQUIVOS_LOTE_ENVIO = 30
 
@@ -8302,185 +7433,6 @@ function collectOrderedMessageIds(body) {
     ordered.push(n)
   }
   return ordered
-}
-
-function getForwardMediaUrlCandidate(mensagem) {
-  return String(
-    mensagem?.url ||
-    mensagem?.url_absoluta ||
-    mensagem?.media_url ||
-    mensagem?.mediaUrl ||
-    ''
-  ).trim()
-}
-
-function safeDecodeURIComponent(value) {
-  try {
-    return decodeURIComponent(value)
-  } catch {
-    return value
-  }
-}
-
-function resolveLocalUploadPathFromMediaUrl(mediaUrl) {
-  const raw = String(mediaUrl || '').trim()
-  if (!raw) return null
-  let pathname = raw
-  if (/^https?:\/\//i.test(raw)) {
-    try {
-      pathname = new URL(raw).pathname
-    } catch {
-      return null
-    }
-  }
-  pathname = safeDecodeURIComponent(String(pathname || '').split('?')[0])
-  if (!pathname.startsWith('/uploads/')) return null
-
-  const path = require('path')
-  const fs = require('fs')
-  const { getUploadsRoot } = require('../config/uploadsRoot')
-  const uploadsRoot = path.resolve(getUploadsRoot())
-  const rel = pathname.replace(/^\/uploads\//, '').replace(/^[\\/]+/, '')
-  const full = path.resolve(uploadsRoot, rel)
-  if (full !== uploadsRoot && !full.startsWith(`${uploadsRoot}${path.sep}`)) return null
-  if (!fs.existsSync(full)) return null
-  return full
-}
-
-/**
- * Baixa mídia armazenada no R2 (url "/media/r2/<key>") para um arquivo temporário efêmero em
- * os.tmpdir(). Usado no encaminhamento quando a empresa usa R2 como armazenamento único (sem
- * cópia local). Retorna o caminho do temporário, ou null se o R2 não estiver configurado / chave
- * inválida. O chamador é responsável por remover o temporário (try/finally).
- */
-async function downloadR2MediaToTemp(mediaUrl) {
-  const os = require('os')
-  const path = require('path')
-  const fs = require('fs')
-  const { isR2Configured, getPresignExpiresSeconds } = require('../config/r2')
-  if (!isR2Configured()) return null
-
-  const key = String(mediaUrl || '').replace(/^\/media\/r2\//, '').split('?')[0]
-  if (!key || key.includes('..') || !key.startsWith('media/')) return null
-
-  const { presignGetUrl } = require('../services/storage/r2Client')
-  const signed = presignGetUrl(key, Math.min(120, getPresignExpiresSeconds()))
-  const res = await fetch(signed)
-  if (!res.ok) throw new Error(`R2 GET ${res.status}`)
-  const buf = Buffer.from(await res.arrayBuffer())
-  if (!buf.length) throw new Error('R2 corpo vazio')
-
-  const base = path.basename(key).replace(/[^A-Za-z0-9._-]/g, '_') || 'midia'
-  const tmp = path.join(os.tmpdir(), `zaperp-fwd-${Date.now()}-${Math.random().toString(36).slice(2, 8)}-${base}`)
-  await fs.promises.writeFile(tmp, buf)
-  return tmp
-}
-
-async function resolveForwardMediaForProvider({ provider, mensagemOriginal, company_id, whatsappInstanceId, baseUrl }) {
-  const rawUrl = getForwardMediaUrlCandidate(mensagemOriginal)
-  if (!rawUrl) return { ok: false, error: 'Mensagem sem URL de mídia para encaminhamento.' }
-
-  const isLocalBase = !baseUrl || /localhost|127\.0\.0\.1/i.test(baseUrl)
-  let publicUrl = rawUrl.startsWith('http')
-    ? rawUrl
-    : baseUrl
-      ? `${baseUrl}${rawUrl.startsWith('/') ? rawUrl : `/${rawUrl}`}`
-      : null
-
-  const tipo = normalizeForwardTipo(mensagemOriginal.tipo)
-  let localPath = resolveLocalUploadPathFromMediaUrl(rawUrl)
-  let uploadName = mensagemOriginal.nome_arquivo || 'arquivo'
-
-  // R2 como armazenamento único (empresa 1): quando não há arquivo local mas a mídia está no R2,
-  // baixa os bytes para um temporário efêmero. Assim uploadMedia/normalização funcionam sem
-  // depender de o provedor seguir o redirect 302. Removido no finally.
-  let tempR2Path = null
-  if (!localPath && rawUrl.startsWith('/media/r2/')) {
-    tempR2Path = await downloadR2MediaToTemp(rawUrl).catch((e) => {
-      console.warn('[ULTRAMSG][FORWARD] download do R2 para encaminhamento falhou:', e?.message || e)
-      return null
-    })
-    if (tempR2Path) localPath = tempR2Path
-  }
-
-  try {
-  if (tipo === 'video' && localPath) {
-    const path = require('path')
-    const normalizedVideo = await normalizeVideoForUltraMsg({
-      path: localPath,
-      filename: path.basename(localPath),
-      originalname: uploadName,
-      mimetype: '',
-    }, 'video', { removeSource: false })
-    if (normalizedVideo?.converted && normalizedVideo?.file) {
-      localPath = normalizedVideo.file.path
-      uploadName = normalizedVideo.file.originalname
-      if (baseUrl && !isLocalBase) {
-        publicUrl = `${baseUrl}/uploads/${encodeURIComponent(normalizedVideo.file.filename)}`
-      }
-    } else if (normalizedVideo?.required && normalizedVideo?.error) {
-      return { ok: false, error: 'Não foi possível preparar o vídeo para encaminhamento.' }
-    }
-
-    // O MP4 preparado segue primeiro para o CDN da UltraMSG com MIME video/mp4.
-    // A URL própria permanece abaixo apenas como fallback se o upload falhar.
-  }
-
-  if (provider?.uploadMedia && localPath) {
-    try {
-      let uploadPath = localPath
-      if (tipo === 'imagem') {
-        const path = require('path')
-        const normalizedImage = await normalizeImageForWhatsapp({
-          path: localPath,
-          filename: path.basename(localPath),
-          originalname: uploadName,
-          mimetype: '',
-        }, 'imagem')
-        if (normalizedImage?.converted && normalizedImage?.file) {
-          uploadPath = normalizedImage.file.path
-          uploadName = normalizedImage.file.originalname
-          console.log('[ULTRAMSG][FORWARD_IMAGE] Imagem encaminhada normalizada para JPEG:', {
-            from: mensagemOriginal.nome_arquivo || path.basename(localPath),
-            to: uploadName,
-          })
-        } else if (normalizedImage?.error) {
-          console.warn('[ULTRAMSG][FORWARD_IMAGE] Normalização JPEG indisponível:', normalizedImage.error)
-        }
-      }
-      const providerUploadName = tipo === 'video'
-        ? require('path').basename(uploadPath)
-        : uploadName
-      const upload = await provider.uploadMedia(
-        uploadPath,
-        providerUploadName,
-        { companyId: company_id, whatsappInstanceId: whatsappInstanceId || undefined }
-      )
-      if (upload?.ok && upload?.url) return { ok: true, url: upload.url, source: 'provider_upload' }
-      if (tipo === 'video' || !publicUrl || isLocalBase) {
-        return { ok: false, error: upload?.error || 'Falha ao preparar mídia para encaminhamento.' }
-      }
-    } catch (error) {
-      if (tipo === 'video' || !publicUrl || isLocalBase) {
-        return { ok: false, error: error?.message || 'Falha ao preparar mídia para encaminhamento.' }
-      }
-    }
-  }
-
-  if (publicUrl && !isLocalBase) return { ok: true, url: publicUrl, source: 'public_url' }
-  if (publicUrl && rawUrl.startsWith('http')) return { ok: true, url: publicUrl, source: 'remote_url' }
-  return {
-    ok: false,
-    error: provider?.uploadMedia
-      ? 'URL local da mídia indisponível para encaminhamento.'
-      : 'Provider não suporta uploadMedia e a URL pública da mídia não está configurada.',
-  }
-  } finally {
-    // Remove o temporário baixado do R2 (se houver). Só chega aqui após uploadMedia ter lido o arquivo.
-    if (tempR2Path) {
-      try { require('fs').unlinkSync(tempR2Path) } catch (_) { /* já removido */ }
-    }
-  }
 }
 
 /**

@@ -4,6 +4,8 @@
  * Envio real continua gated: live off e dry-run on até ops ligar.
  */
 
+const os = require('os')
+
 function getBooleanEnv(name, defaultValue = false) {
   const raw = process.env[name]
   if (raw == null || String(raw).trim() === '') return defaultValue
@@ -45,7 +47,10 @@ function getDisparoWorkerConfig() {
     heartbeatMs: getIntEnv('DISPARO_WORKER_HEARTBEAT_MS', 10000, 2000, 60000),
     leaseSeconds: getIntEnv('DISPARO_WORKER_LEASE_SECONDS', 120, 30, 900),
     batchSize: getIntEnv('DISPARO_WORKER_BATCH_SIZE', 5, 1, 50),
-    workerId: String(process.env.DISPARO_WORKER_ID || `worker-${process.pid}`).slice(0, 120),
+    // PID isolado colide entre containers (frequentemente todos usam pid 19/20).
+    workerId: String(
+      process.env.DISPARO_WORKER_ID || `worker-${os.hostname()}-${process.pid}`,
+    ).slice(0, 120),
     sendTimeoutMs: getIntEnv('DISPARO_SEND_TIMEOUT_MS', 45000, 5000, 180000),
     maxTentativas: getIntEnv('DISPARO_MAX_TENTATIVAS', 5, 1, 20),
     backoffBaseSec: getIntEnv('DISPARO_BACKOFF_BASE_SEC', 30, 5, 3600),
