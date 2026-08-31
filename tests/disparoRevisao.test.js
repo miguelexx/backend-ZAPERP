@@ -161,6 +161,20 @@ describe('Etapa 6 — Confirmação', () => {
   })
 })
 
+describe('Etapa 6 — unique de revisão', () => {
+  const { _isUniqueViolation } = require('../controllers/disparoRevisaoController')
+
+  it('detecta 23505 e mensagem de duplicate key', () => {
+    expect(_isUniqueViolation({ code: '23505' })).toBe(true)
+    expect(_isUniqueViolation({
+      message: 'duplicate key value violates unique constraint "disparo_revisoes_campanha_versao_unique"',
+    })).toBe(true)
+    expect(_isUniqueViolation({ cause: { code: '23505' } })).toBe(true)
+    expect(_isUniqueViolation({ code: '23503', message: 'foreign key' })).toBe(false)
+    expect(_isUniqueViolation(null)).toBe(false)
+  })
+})
+
 describe('Etapa 6 — Estado de bloqueio e histórico', () => {
   beforeEach(() => jest.clearAllMocks())
 

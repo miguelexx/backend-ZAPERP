@@ -265,3 +265,24 @@ provider_queue_id: queueId numérico
 whatsapp_id: só wamid real
 // ACK: casar pendente na conversa cujo telefone está no wamid
 ```
+
+---
+
+## 22. Confirmar campanha — unique de versão não pode virar 500
+
+**Armadilha:** inserir a revisão `ativa` e só depois invalidar as outras. `UNIQUE (campanha_id, versao)` no duplo clique / retry após o insert vira HTTP 500 opaco. Invalidar **todas** as ativas antes do insert também é errado: o clique paralelo apaga a versão que o outro request acabou de gravar.
+
+```js
+// ❌ ERRADO — insert primeiro; segundo clique 23505 → 500
+insert({ versao, status: 'ativa' })
+update({ status: 'invalidada' }).eq('status', 'ativa').neq('id', nova.id)
+
+// ❌ ERRADO — invalida inclusive a versão que o retry vai reaproveitar
+update({ status: 'invalidada' }).eq('status', 'ativa')
+insert({ versao })
+
+// ✅ CORRETO — libera só versões anteriores; unique reaproveita a linha
+update({ status: 'invalidada' }).eq('status', 'ativa').neq('versao', proximaVersao)
+insert({ versao: proximaVersao, status: 'ativa' })
+// se 23505: maybeSingle da versão e seguir o update da campanha
+```

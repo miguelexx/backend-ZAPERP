@@ -11,7 +11,7 @@ const { executarAssumirConversa } = require('../services/conversaAssumirInternoS
 const { resetAlertaSemRespostaAoAssumirReaberta } = require('../services/atendimentoSemRespostaService')
 const { getProvider } = require('../services/providers')
 const { getStatus } = require('../services/ultramsgIntegrationService')
-const { getDefaultWhatsappInstance, listWhatsappInstances, resolveWhatsappInstanceForManualAction, sanitizeWhatsappInstance } = require('../services/whatsappInstanceService')
+const { listWhatsappInstances, resolveWhatsappInstanceForManualAction, sanitizeWhatsappInstance } = require('../services/whatsappInstanceService')
 const { isGroupConversation, isClosedAttendanceStatus } = require('../helpers/conversaHelper')
 const {
   normalizePhoneBR,
@@ -156,6 +156,11 @@ const {
   buildVideoTranscodeProfile,
   shouldNormalizeImageForWhatsapp,
 } = require('../services/chat/media/mediaType')
+const {
+  resolveTelefoneFromLidSiblingConversation,
+  resolveConversationWhatsappInstance,
+  resolverTelefoneEnvioDaConversa,
+} = require('../services/chat/identity/conversationAddressService')
 
 /**
  * Deduplicação in-memory para double-send de texto.
@@ -202,43 +207,6 @@ async function findMensagemByClientTempId(company_id, conversa_id, clientTempId,
     console.warn('[client_temp_id] excecao ao consultar dedupe persistente:', error?.message || error)
     return null
   }
-}
-
-async function resolveTelefoneFromLidSiblingConversation(company_id, conversa, whatsappInstanceId) {
-  if (!conversa?.chat_lid) return null
-  let query = supabase
-    .from('conversas')
-    .select('telefone')
-    .eq('company_id', company_id)
-    .eq('chat_lid', conversa.chat_lid)
-    .not('telefone', 'like', 'lid:%')
-  if (whatsappInstanceId) {
-    query = query.eq('whatsapp_instance_id', whatsappInstanceId)
-  } else {
-    query = query.is('whatsapp_instance_id', null)
-  }
-  const { data: outra } = await query.limit(1).maybeSingle()
-  return outra?.telefone || null
-}
-
-async function resolveConversationWhatsappInstance(company_id, conversa) {
-  const current = Number(conversa?.whatsapp_instance_id)
-  if (Number.isFinite(current) && current > 0) return current
-  const { instance } = await getDefaultWhatsappInstance(company_id)
-  const defaultId = Number(instance?.id)
-  if (!Number.isFinite(defaultId) || defaultId <= 0) return null
-  if (conversa?.id) {
-    try {
-      await supabase
-        .from('conversas')
-        .update({ whatsapp_instance_id: defaultId })
-        .eq('company_id', Number(company_id))
-        .eq('id', Number(conversa.id))
-        .is('whatsapp_instance_id', null)
-      conversa.whatsapp_instance_id = defaultId
-    } catch (_) {}
-  }
-  return defaultId
 }
 
 async function loadWhatsappInstanceMetaMap(company_id, instanceIds) {
@@ -9280,34 +9248,6 @@ exports.finalizacaoAusenciaLoteAuth = async (req, res) => {
 
 /** Reenvios em voo por mensagem — impede que clique duplo gere dois envios ao provedor. */
 const _reenviosEmAndamento = new Set()
-
-/** Telefone real de envio da conversa (resolve LID). */
-async function resolverTelefoneEnvioDaConversa(company_id, conversa, whatsappInstanceId) {
-  let telefone = String(conversa?.telefone || '').trim()
-  if (telefone && telefone.toLowerCase().startsWith('lid:')) {
-    if (conversa?.cliente_id) {
-      const { data: cli } = await supabase
-        .from('clientes')
-        .select('telefone')
-        .eq('id', conversa.cliente_id)
-        .eq('company_id', company_id)
-        .maybeSingle()
-      if (cli?.telefone && !String(cli.telefone).startsWith('lid:')) telefone = String(cli.telefone).trim()
-    }
-    if (telefone.startsWith('lid:') && conversa?.chat_lid) {
-      const telSibling = await resolveTelefoneFromLidSiblingConversation(company_id, conversa, whatsappInstanceId)
-      if (telSibling) telefone = String(telSibling).trim()
-    }
-    if (telefone.startsWith('lid:')) {
-      return {
-        telefone: null,
-        erro: 'Número do contato indisponível (conversa por LID). Aguarde o contato enviar uma mensagem ou sincronize os contatos.',
-      }
-    }
-  }
-  if (!telefone) return { telefone: null, erro: 'Conversa sem telefone para envio.' }
-  return { telefone, erro: null }
-}
 
 /** Persiste o resultado do reenvio na própria mensagem e propaga por socket. */
 async function aplicarResultadoReenvio({ req, company_id, conversa_id, mensagem, result, tipoReenvio }) {

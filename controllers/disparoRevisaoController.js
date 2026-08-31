@@ -106,6 +106,12 @@ function getClientIp(req) {
     .slice(0, 80)
 }
 
+function isUniqueViolation(err) {
+  const code = String(err?.code || err?.cause?.code || '')
+  const msg = String(err?.message || err?.details || err?.hint || '')
+  return code === '23505' || /duplicate key|unique constraint|already exists/i.test(msg)
+}
+
 async function carregarCampanha(campanhaId, companyId, res) {
   const { data, error } = await supabase
     .from('disparo_campanhas')
@@ -1164,34 +1170,14 @@ exports.confirmarCampanha = async (req, res) => {
 
     const resumo = montarResumoAuditoria(ctx)
     const quantidades = montarStatsDestinatarios(ctx.destinatarios)
+    const checklistResumo = {
+      ok: checklist.ok,
+      totais: checklist.totais,
+      bloqueios: (checklist.bloqueios || []).map((b) => b.codigo),
+      avisos: (checklist.avisos || []).map((a) => a.codigo),
+    }
 
-    const { data: revisao, error: revErr } = await supabase
-      .from('disparo_campanha_revisoes')
-      .insert({
-        company_id: companyId,
-        campanha_id: campanhaId,
-        versao: proximaVersao,
-        hash,
-        status: 'ativa',
-        resumo,
-        quantidades,
-        checklist_resumo: {
-          ok: checklist.ok,
-          totais: checklist.totais,
-          bloqueios: checklist.bloqueios.map((b) => b.codigo),
-          avisos: checklist.avisos.map((a) => a.codigo),
-        },
-        avisos_aceitos: avisosAceitos,
-        declaracao_texto: DECLARACAO_AUTORIZACAO,
-        confirmado_por: userId,
-        confirmado_em: agora,
-        confirmado_ip: ip,
-      })
-      .select('id, versao, hash, status')
-      .single()
-    if (revErr) throw revErr
-
-    await supabase
+    const { error: invAntesErr } = await supabase
       .from('disparo_campanha_revisoes')
       .update({
         status: 'invalidada',
@@ -1202,7 +1188,60 @@ exports.confirmarCampanha = async (req, res) => {
       .eq('campanha_id', campanhaId)
       .eq('company_id', companyId)
       .eq('status', 'ativa')
-      .neq('id', revisao.id)
+      .neq('versao', proximaVersao)
+    if (invAntesErr) throw invAntesErr
+
+    let revisao = null
+    const { data: revisaoNova, error: revErr } = await supabase
+      .from('disparo_campanha_revisoes')
+      .insert({
+        company_id: companyId,
+        campanha_id: campanhaId,
+        versao: proximaVersao,
+        hash,
+        status: 'ativa',
+        resumo,
+        quantidades,
+        checklist_resumo: checklistResumo,
+        avisos_aceitos: avisosAceitos,
+        declaracao_texto: DECLARACAO_AUTORIZACAO,
+        confirmado_por: userId,
+        confirmado_em: agora,
+        confirmado_ip: ip,
+      })
+      .select('id, versao, hash, status')
+      .single()
+
+    if (revErr && isUniqueViolation(revErr)) {
+      const { data: existente, error: exErr } = await supabase
+        .from('disparo_campanha_revisoes')
+        .select('id, versao, hash, status')
+        .eq('campanha_id', campanhaId)
+        .eq('company_id', companyId)
+        .eq('versao', proximaVersao)
+        .maybeSingle()
+      if (exErr) throw exErr
+      if (!existente) throw revErr
+      revisao = existente
+      if (existente.status !== 'ativa') {
+        const { error: reatErr } = await supabase
+          .from('disparo_campanha_revisoes')
+          .update({
+            status: 'ativa',
+            invalidada_em: null,
+            invalidada_por: null,
+            motivo_invalidacao: null,
+          })
+          .eq('id', existente.id)
+          .eq('company_id', companyId)
+        if (reatErr) throw reatErr
+        revisao = { ...existente, status: 'ativa' }
+      }
+    } else if (revErr) {
+      throw revErr
+    } else {
+      revisao = revisaoNova
+    }
 
     const { error: updErr } = await supabase
       .from('disparo_campanhas')
@@ -1225,10 +1264,17 @@ exports.confirmarCampanha = async (req, res) => {
       status: novoStatus,
       versao: proximaVersao,
       hash,
-      revisao_id: revisao.id,
+      revisao_id: revisao?.id ?? null,
+      idempotente: !revisaoNova,
     })
   } catch (err) {
     console.error('[disparo:revisao] confirmarCampanha', err)
+    if (isUniqueViolation(err)) {
+      return res.status(409).json({
+        error: 'Esta versão da campanha já foi confirmada. Atualize a página. Se o status já for pronta, use Iniciar.',
+        code: 'REVISAO_DUPLICADA',
+      })
+    }
     res.status(500).json({ error: 'Erro ao confirmar campanha.' })
   }
 }
@@ -1462,3 +1508,4 @@ exports._montarChecklist = montarChecklist
 exports.DECLARACAO_AUTORIZACAO = DECLARACAO_AUTORIZACAO
 exports._carregarContextoRevisao = carregarContextoRevisao
 exports._construirHashConfig = construirHashConfig
+exports._isUniqueViolation = isUniqueViolation
