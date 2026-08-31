@@ -245,7 +245,7 @@ services/atendimentoSemRespostaService.js  ← shim: module.exports = require('.
 services/atendimentoSemRespostaScheduler.js  ← permanece onde está
 ```
 
-**CONFIRMADO (2026-08-31):** essa árvore está no working tree. `require('../services/atendimentoSemRespostaService')` continua válido. SLA importa `helpers/businessSchedule.js` direto. `revalidateConversaElegivel` ficou em `stateStore.js` (precisa de I/O), não em `cycle.js`.
+**CONFIRMADO (2026-08-31):** essa árvore está no Git (`require('../services/atendimentoSemRespostaService')` continua válido). SLA importa `helpers/businessSchedule.js` direto. `revalidateConversaElegivel` ficou em `stateStore.js` (precisa de I/O), não em `cycle.js`.
 
 CommonJS, um `module.exports` por arquivo, sem circular require: `processor` → os outros; `config` não importa `processor`; `businessSchedule` não importa o service.
 

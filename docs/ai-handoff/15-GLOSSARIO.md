@@ -36,6 +36,6 @@
 | webhook | Callback server-to-server da UltraMSG para inbound/ACK; protegido por token e instância. |
 | fromMe | Eco de mensagem originada pela própria conta WhatsApp; deve reconciliar outbound, não duplicar inbound. |
 | stale | Trabalho/lock sem heartbeat dentro do prazo, candidato a recuperação. |
-| Etapa 8/9 | Evoluções do módulo Disparo: opt-out/respostas/reconciliação/relatórios e, no working tree, auditoria/lease/health. |
+| Etapa 8/9 | Evoluções do módulo Disparo: opt-out/respostas/reconciliação/relatórios e, no repositório, auditoria/lease/health (Etapa 9 commitada; aplicação no banco = `PENDENTE DE VALIDAÇÃO`). |
 | legado Z-API/CRM | Nomes, aliases ou fallbacks preservados após migração para UltraMSG/CRM externo; existência no banco real não é garantida. |
 

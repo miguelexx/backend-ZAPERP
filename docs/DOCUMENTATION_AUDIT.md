@@ -5,6 +5,81 @@
 
 ---
 
+## Auditoria 2026-08-31 — docs obsoletos, fantasma e desatualizados
+
+Cruzado contra o **código atual**, `git ls-files` e o working tree. Código prevalece.  
+Pastas `docs/_OFICIAL/` e `docs/_ANTIGOS/` **não existem mais** neste tree.  
+Nada foi apagado nesta auditoria — só inventário + correção dos fatos perigosos nos docs canônicos.
+
+### A. Não existem mais (citações fantasma)
+
+| Item | Ainda citado em | Realidade |
+|------|-----------------|-----------|
+| `docs/_OFICIAL/` (ARCHITECTURE, DATABASE, FLOWS, ULTRAMSG, README…) | Este arquivo (seções de 24/08), comentários JS (`@see ../docs/_OFICIAL/ADR-LEGACY-NAMING.md`) | Pasta **ausente**. ADR vive em `docs/reference/ADR-LEGACY-NAMING.md`. |
+| `docs/_ANTIGOS/` (~70 relatórios) | `02-ESTRUTURA`, `PROJECT_RULES.md` | Pasta **ausente**. Não procurar. |
+| `docs/PATCH-MULTI-TENANT-ENV.md` | Este arquivo (“Preservado”) | Arquivo **ausente**. |
+
+### B. Históricos — ler só com banner (não são o mapa atual)
+
+| Arquivo | Uso correto |
+|---------|-------------|
+| `docs/CHAT_CONTROLLER_MODULARIZACAO.md` | Plano do monolito ~10.062 linhas **antes** da quebra. Linhas/contagens **não** valem. Entrada atual: [23](ai-handoff/23-CHAT-CONTROLLER-MODULARIZACAO.md) + `CHAT_ARQUITETURA_MODULAR.md`. |
+| `docs/ai-handoff/22` §2 “mapa por linhas” | Linhas do `aiDashboardService.js` **pré-Sessão A**. |
+| Changelog deste `DOCUMENTATION_AUDIT.md` (linhas “código ainda monolito”, “Preservado — correto” de 24/08) | Histórico da reorganização. **Não** tratar a tabela “Preservado” como status 31/08. |
+| `supabase/schema.sql` | Fotografia contextual. Fonte = `supabase/migrations/`. |
+| Nomes Z-API / `webhookZapiController` / `empresa_zapi` | Legado **ativo**, não “módulo Z-API”. Ver `reference/ADR-LEGACY-NAMING.md`. |
+| Campanhas/CRM interno/planos | **Removidos**. Substituídos por Disparo + SSO CRM. Não procurar `campanhaController` / `crmService`. |
+
+### C. Canônicos com fato errado (corrigidos nesta mesma data)
+
+| Fato antigo | Correção |
+|-------------|----------|
+| Etapa 9 “não commitada” / “não rastreada no working tree” | Código + `20260823120000_disparo_etapa9_auditoria.sql` estão no Git (`4d182b9`). **Aplicação no banco/VPS** continua `PENDENTE DE VALIDAÇÃO`. |
+| Jest “100 suites / 1015 testes” como número atual | Snapshot **2026-08-23**. Em 31/08 há **~122** arquivos `tests/*.test.js` (inclui untracked `idempotencyService`). Não reler 1015 como baseline. |
+| “Zero testes” do assistente IA | Sessão A: `tests/aiDashboardSessionA.test.js` (35). `POST /ai/ask` e `q*` ainda sem teste. |
+| `_ANTIGOS` / `_OFICIAL` como pastas existentes | Removidas do tree. |
+| Alerta sem resposta “está no working tree” (doc 19) | Pasta commitada (`3f71410`). |
+| `statusAtendimentoParaLista` em `chatController.js` | Função em `services/chat/presentation/chatDto.js`. |
+
+### D. Snapshot 2026-08-23 — ainda úteis, mas datados
+
+Cabeçalho `commit-base 66e0771…` em 01, 03, 05, 07, 08, 09, 10, 12, 14, 15. Conteúdo de **domínio** (webhooks, sockets, jobs, env, segurança) continua a valer na maior parte; **não** usar como mapa de pastas do chat/IA/UltraMSG (já fatiados — docs 19–23).
+
+`05-API-ENDPOINTS.md` lista handlers como `chatController` — **correto no contrato HTTP** (`chatRoutes` aponta para a fachada). A implementação de quase tudo está em `controllers/chat/*`.
+
+`FEATURE-FLAGS.md` está certo sobre `FEATURE_CAMPANHAS` removida; o gate de produto do Disparo é `empresas.modulo_campanhas_ativo` + env `DISPARO_*`, não só as flags da tabela.
+
+### E. Atuais (usar estes)
+
+| Tarefa | Doc |
+|--------|-----|
+| Índice | `docs/README.md` |
+| Handoff | `docs/AI_HANDOFF.md` + `00-LEIA-PRIMEIRO.md` |
+| Chat HTTP | [23](ai-handoff/23-CHAT-CONTROLLER-MODULARIZACAO.md) + `CHAT_ARQUITETURA_MODULAR.md` |
+| IA `/ai/ask` | [22](ai-handoff/22-AI-DASHBOARD-MODULARIZACAO.md) (Sessão A feita) |
+| UltraMSG adapter | [21](ai-handoff/21-ULTRAMSG-PROVIDER-MODULARIZACAO.md) |
+| Dashboard HTTP | [20](ai-handoff/20-DASHBOARD-MODULARIZACAO.md) |
+| Alerta sem resposta | [19](ai-handoff/19-ATENDIMENTO-SEM-RESPOSTA-MODULARIZACAO.md) |
+| Nomes zapi | `reference/ADR-LEGACY-NAMING.md` |
+
+`CHAT_ARQUITETURA_MODULAR.md` e o doc 23 podem estar **só no working tree** — `git status` antes de editar.
+
+### F. Não reauditado linha a linha nesta passagem
+
+`reference/CHATBOT-SETUP-GUIDE.md`, `API-MESSAGES-ULTRAMSG.md`, `API-HELPDESK-ICTHUS.md`, `API-ENCAMINHAMENTO-MENSAGENS.md`, `API-SUPERVISAO-RELATORIO-DIARIO.md`, `HELPDESK-NOTIFICACOES.md`, `TABELA-CONFIGS-OPERACIONAIS.md`, `SCRIPTS-CATALOG.md`, `PROTECAO-ENVIO.md`, `10-CONFIGURACAO-E-AMBIENTES.md`. Confrontar código se a tarefa cair nesses módulos.
+
+---
+
+## Atualização 2026-08-31 (documentação alinhada ao código)
+
+| Arquivo | Ação | Motivo |
+|---------|------|--------|
+| `docs/ai-handoff/23-CHAT-CONTROLLER-MODULARIZACAO.md` | Criado | Estado real do chat HTTP (fachada + `controllers/chat/` + `services/chat/`). |
+| `docs/CHAT_CONTROLLER_MODULARIZACAO.md` | Banner | Plano histórico do monolito ~10k linhas; não usar como mapa atual. |
+| `docs/ai-handoff/00-LEIA-PRIMEIRO.md` | Atualizado | Tabela “estado das modularizações” 19–23. |
+| `docs/README.md`, `docs/AI_HANDOFF.md`, `backend/CLAUDE.md` | Atualizados | Índice, pastas, ordem de leitura. |
+| `02`, `04`, `13`, `16`, `17`, `22` | Atualizados | Chat não é mais “monolito”; Sessão A da IA não deve ser refeita; mapa de linhas 22 marcado como pré-extração. |
+
 ## Atualização 2026-08-31 (IA dashboard — Sessão A)
 
 | Arquivo | Ação | Motivo |
@@ -99,6 +174,8 @@
 
 ## Documentos preservados sem alteração
 
+> **Snapshot 2026-08-24.** Vários desses arquivos foram atualizados depois (19–23, chat, IA, UltraMSG). A tabela “Preservado — correto” **não** é o estado de 31/08. Ver a auditoria de obsoletos no topo deste arquivo.
+
 ### `docs/ai-handoff/` (17 arquivos — criados em 2026-08-23)
 
 Série completa e muito detalhada criada um dia antes desta auditoria. Preservada integralmente, com exceção dos arquivos `00` e `04` acima. Conteúdo verificado contra o código: preciso e baseado em evidência.
@@ -122,7 +199,7 @@ Série completa e muito detalhada criada um dia antes desta auditoria. Preservad
 | `16-MAPA-DE-ARQUIVOS-CRITICOS.md` | Preservado — correto |
 | `17-CHECKLIST-PARA-PROXIMA-IA.md` | Preservado — correto |
 
-### `docs/_OFICIAL/` (8 arquivos)
+### `docs/_OFICIAL/` (8 arquivos) — pasta **removida** do tree (não procurar)
 
 | Arquivo | Status |
 |---------|--------|
@@ -146,15 +223,15 @@ Série completa e muito detalhada criada um dia antes desta auditoria. Preservad
 | `CHATBOT-SETUP-GUIDE.md` | Preservado |
 | `FEATURE-FLAGS.md` | Preservado |
 | `TABELA-CONFIGS-OPERACIONAIS.md` | Preservado |
-| `PATCH-MULTI-TENANT-ENV.md` | Preservado |
+| `PATCH-MULTI-TENANT-ENV.md` | **Ausente** no tree em 2026-08-31; não procurar |
 
 ---
 
 ## Pasta `_ANTIGOS/` — status
 
-A pasta contém ~70 documentos históricos: relatórios de certificação, prompts para frontend, análises de bugs, checklists temporários. **Nenhum foi deletado** — toda informação válida já está incorporada nos documentos oficiais e na série `ai-handoff/`.
+**2026-08-31:** a pasta **não existe** neste working tree (`git ls-files` vazio). A nota abaixo é do 24/08, quando ainda existia.
 
-**Recomendação:** esses arquivos podem ser deletados com segurança a qualquer momento. Nenhum contém informação que não esteja documentada em outro lugar da pasta `docs/` atual. O risco de apagar é zero — o histórico está no git.
+A pasta continha ~70 documentos históricos: relatórios de certificação, prompts para frontend, análises de bugs, checklists temporários. Informação válida já está na série `ai-handoff/` e em `reference/`.
 
 ---
 

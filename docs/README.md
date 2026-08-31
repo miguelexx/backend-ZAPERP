@@ -7,7 +7,7 @@
 ## Começo rápido para IAs
 
 **Leia primeiro:** [`AI_HANDOFF.md`](AI_HANDOFF.md) — contexto completo em uma página.  
-**Análise técnica profunda:** [`ai-handoff/00-LEIA-PRIMEIRO.md`](ai-handoff/00-LEIA-PRIMEIRO.md) — série de documentos especializados.
+**Análise técnica profunda:** [`ai-handoff/00-LEIA-PRIMEIRO.md`](ai-handoff/00-LEIA-PRIMEIRO.md) — inclusive a tabela **Estado das modularizações** (docs 19–23).
 
 ---
 
@@ -17,7 +17,9 @@
 docs/
 ├── AI_HANDOFF.md               ← começa aqui: stack, módulos, fluxos, regras, riscos
 ├── README.md                   ← este arquivo (índice)
-├── DOCUMENTATION_AUDIT.md     ← histórico de mudanças na documentação
+├── DOCUMENTATION_AUDIT.md     ← histórico + inventário de docs obsoletos (topo, 2026-08-31)
+├── CHAT_ARQUITETURA_MODULAR.md ← estado **atual** do chat (arquivo/função); pode estar só no working tree
+├── CHAT_CONTROLLER_MODULARIZACAO.md  ← **histórico** do monolito ~10k linhas; não usar como mapa
 │
 ├── ai-handoff/                 ← referência técnica completa
 │   ├── 00-LEIA-PRIMEIRO.md    estado, limitações, ordem de leitura
@@ -42,7 +44,8 @@ docs/
 │   ├── 19-ATENDIMENTO-SEM-RESPOSTA-MODULARIZACAO.md  plano/mapa do alerta sem resposta
 │   ├── 20-DASHBOARD-MODULARIZACAO.md  quebra do dashboardController
 │   ├── 21-ULTRAMSG-PROVIDER-MODULARIZACAO.md  adapter UltraMSG (pasta + shim)
-│   └── 22-AI-DASHBOARD-MODULARIZACAO.md  assistente IA `/ai/ask` (Sessão A: puros extraídos)
+│   ├── 22-AI-DASHBOARD-MODULARIZACAO.md  assistente IA `/ai/ask` (Sessão A feita; B pendente)
+│   └── 23-CHAT-CONTROLLER-MODULARIZACAO.md  chat HTTP (fachada + controllers/chat + services/chat)
 │
 └── reference/                  ← referência suplementar por domínio
     ├── PROJECT_RULES.md        regras do projeto (multi-tenant, segurança, padrões)
@@ -67,7 +70,7 @@ docs/
 
 | Tarefa | Leia |
 |--------|------|
-| Entender o sistema do zero | `AI_HANDOFF.md` |
+| Inventário de docs obsoletos / desatualizados | `DOCUMENTATION_AUDIT.md` (seção do topo, 2026-08-31) |
 | Adicionar/alterar uma rota | `ai-handoff/05-API-ENDPOINTS.md` → controller relevante |
 | Alterar banco (migration) | `ai-handoff/03-BANCO-DE-DADOS.md` |
 | Trabalhar com webhooks UltraMSG | `ai-handoff/06-WHATSAPP-ULTRAMSG-E-WEBHOOKS.md` |
@@ -86,6 +89,7 @@ docs/
 | Modularizar alerta sem resposta | `ai-handoff/19-ATENDIMENTO-SEM-RESPOSTA-MODULARIZACAO.md` |
 | Modularizar dashboard HTTP (`dashboardController`) | `ai-handoff/20-DASHBOARD-MODULARIZACAO.md` |
 | Modularizar assistente IA (`aiDashboardService.js`) | `ai-handoff/22-AI-DASHBOARD-MODULARIZACAO.md` |
+| Modularizar / editar chat HTTP (`chatController`) | `ai-handoff/23-CHAT-CONTROLLER-MODULARIZACAO.md` (entrada) + **`CHAT_ARQUITETURA_MODULAR.md`** (detalhe por arquivo/função + padrão de extração); não o plano histórico em `CHAT_CONTROLLER_MODULARIZACAO.md` |
 | Proteção de envio / rate limit / opt-in | `reference/PROTECAO-ENVIO.md` |
 | Scripts de manutenção / diagnóstico / R2 | `reference/SCRIPTS-CATALOG.md` |
 

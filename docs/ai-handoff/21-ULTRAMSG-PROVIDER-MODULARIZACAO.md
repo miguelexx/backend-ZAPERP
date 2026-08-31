@@ -231,7 +231,7 @@ Não “unificar” JID de envio e de foto. Não implementar retry de mensagem. 
 | Comentário `empresa_zapi` no header | legado; tabela de credenciais ativas é `whatsapp_instances` (**PENDENTE** se algum fallback ainda lê `empresa_zapi` via `whatsappConfigService`) |
 | Retorno boolean vs objeto nos sends de mídia | dívida de API; preservar |
 | `CONTACTS_API_CHUNK_MAX = 10000` | GET pesado; não mudar no split |
-| Doc 06 path `ultramsgProvider.js` | errado; este doc 21 é a fonte para o adapter |
+| Doc 06 path `ultramsgProvider.js` | **já corrigido** no doc 06 (2026-08-31); o adapter é `services/providers/ultramsg.js` + pasta |
 
 ---
 

@@ -1,6 +1,6 @@
 # Anti-padrões e armadilhas — ZapERP Backend
 
-> Criado: 2026-08-24. Baseado em falhas reais observadas em sessões anteriores e riscos documentados.  
+> Criado: 2026-08-24. Itens numerados 1–23 (há saltos na numeração histórica). Baseado em falhas reais e riscos documentados.  
 > Leia antes de qualquer alteração. Cada item descreve um erro que parece razoável mas quebra o sistema.
 
 ---

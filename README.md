@@ -26,7 +26,7 @@ API HTTP, webhooks **UltraMSG** e **Socket.IO** para o sistema de atendimento Wh
 ## Testes
 
 ```bash
-npm test                     # Jest em série (todos os ~100 arquivos)
+npm test                     # Jest em série (~122 arquivos em 2026-08-31)
 npm run test:watch           # Modo watch
 ```
 

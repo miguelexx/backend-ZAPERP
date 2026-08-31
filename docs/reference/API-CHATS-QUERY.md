@@ -20,7 +20,7 @@ Além dos valores do BD, a API pode devolver na lista:
 
 | Valor | Origem |
 |--------|--------|
-| `ociosa` | Derivado quando o BD está `aberta` mas não há movimentação que justifique badge “Aberta” (sem mensagens e sem atendente). Ver `statusAtendimentoParaLista` em `chatController.js`. |
+| `ociosa` | Derivado quando o BD está `aberta` mas não há movimentação que justifique badge “Aberta” (sem mensagens e sem atendente). Ver `statusAtendimentoParaLista` em `services/chat/presentation/chatDto.js`. |
 | `null` | Grupos (`is_group`): sem estado de atendimento na UI. |
 
 Sempre que precisar do valor **gravado no BD**, usar o campo **`status_atendimento_real`** na resposta (quando existir no payload).

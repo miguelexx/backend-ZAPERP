@@ -33,7 +33,7 @@ Este ADR **não** autoriza alterações destrutivas; define **verdade arquitetur
 ## O que pode ser melhorado agora (baixo risco)
 
 - Comentários em código e SQL orientativos (`RUN_IN_SUPABASE.sql`).
-- READMEs apontando para `docs/_OFICIAL/`.
+- READMEs/comentários JS ainda apontando para `docs/_OFICIAL/` (pasta **inexistente**; ADR em `docs/reference/ADR-LEGACY-NAMING.md`).
 - Este ADR e referências cruzadas na doc oficial.
 
 ## O que deve permanecer só documentado até decisão explícita

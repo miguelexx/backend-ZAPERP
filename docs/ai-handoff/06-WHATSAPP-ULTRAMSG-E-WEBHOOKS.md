@@ -1,6 +1,6 @@
 # WhatsApp, UltraMSG e webhooks
 
-> Análise estática: 2026-08-23 · `master` · `66e0771d9f61f840524cd4b0645e742df374a77a` · fontes principais: **`services/providers/ultramsg.js`** (não existe `ultramsgProvider.js`), `services/whatsappInstanceService.js`, `controllers/webhookUltramsgController.js`, `controllers/webhookZapiController.js`, `controllers/chatController.js`, `middleware/requireWebhookToken.js`, `middleware/resolveWebhookInstance.js` e testes `*Ultramsg*`, `*Webhook*`, `*Ack*`.
+> Análise estática: 2026-08-23 · `master` · `66e0771d9f61f840524cd4b0645e742df374a77a` · fontes principais: **`services/providers/ultramsg.js`** (shim; pasta `ultramsg/`; **não** existe `ultramsgProvider.js`), `services/whatsappInstanceService.js`, `controllers/webhookUltramsgController.js`, `controllers/webhookZapiController.js`, `controllers/chatController.js` + `controllers/chat/` ([23](23-CHAT-CONTROLLER-MODULARIZACAO.md)), `middleware/requireWebhookToken.js`, `middleware/resolveWebhookInstance.js` e testes `*Ultramsg*`, `*Webhook*`, `*Ack*`.
 >
 > Mapa interno do adapter (envio, JID, HTTP, pastas): [21](21-ULTRAMSG-PROVIDER-MODULARIZACAO.md). Este doc 06 cobre o fluxo ponta a ponta (chat → provider → webhook).
 
@@ -28,7 +28,7 @@ sequenceDiagram
 
 ## Envio
 
-- Texto, arquivo, contato, localização, reação, ligação, encaminhamento e PIX saem de ações em `chatController.js`; o provider escolhe o endpoint UltraMSG conforme o tipo.
+- Texto, arquivo, contato, localização, reação, ligação, encaminhamento e PIX saem de `chatController.js` e de `controllers/chat/` (mapa: [23](23-CHAT-CONTROLLER-MODULARIZACAO.md)); o provider escolhe o endpoint UltraMSG conforme o tipo.
 - A mensagem local guarda direção, conteúdo/tipo, conversa, tenant, instância, identificadores externos e status. Mídia pode passar por disco/R2 antes ou depois da chamada conforme o fluxo.
 - Envios manuais usam `referenceId` no formato `crm-<id da mensagem>`; itens do worker de campanha usam `disp-<id do item da fila>`. O prefixo identifica a origem na reconciliação.
 - `client_temp_id` tem dedupe local de 30 segundos e índice único no banco. O cache em memória só reduz duplo clique no mesmo processo; o índice é a garantia persistente.
@@ -61,7 +61,7 @@ Inbound usa `inboundMediaPersistenceService`: URL somente HTTPS, host/caminho pe
 
 ## Campanhas, resposta e opt-out
 
-O worker monta `referenceId disp-*`, registra provider id e datas na fila. **Enviada** = o provedor aceitou (ou dry-run). **Entregue/lida** só avançam com ACK (`device`/`read`). O ACK da UltraMSG quase nunca ecoa `referenceId` e em geral traz o **wamid** (`true_5534…@c.us_SID`), enquanto o `POST /messages/chat` devolve id **numérico de fila**. O disparo grava esse número em `provider_queue_id` (como o chat), não em `whatsapp_id`. O fallback global de ACK só aplicava se existisse **1** outbound pendente na empresa — na campanha o 1º contato ia a entregue e os demais ficavam em enviada. Há fallback por **telefone extraído do wamid** (uma conversa). Recibos já no chat são copiados para a fila em `sincronizarFilaComAckDoChat`. Mensagem inbound pode ser classificada como resposta à campanha; palavras normalizadas de descadastro geram opt-out e impedem futuros envios. Itens com lease vencido em `enviando` passam a `incerta` na Etapa 9 do working tree; se já têm `provider_message_id` ou `enviado_em`, o worker não reenvia. Decisão manual e reconciliação ficam nas rotas da Etapa 8. Dry-run (`DISPARO_DRY_RUN` default true / live off) nunca chama UltraMSG — a fila fica em enviada e **não chega no WhatsApp**.
+O worker monta `referenceId disp-*`, registra provider id e datas na fila. **Enviada** = o provedor aceitou (ou dry-run). **Entregue/lida** só avançam com ACK (`device`/`read`). O ACK da UltraMSG quase nunca ecoa `referenceId` e em geral traz o **wamid** (`true_5534…@c.us_SID`), enquanto o `POST /messages/chat` devolve id **numérico de fila**. O disparo grava esse número em `provider_queue_id` (como o chat), não em `whatsapp_id`. O fallback global de ACK só aplicava se existisse **1** outbound pendente na empresa — na campanha o 1º contato ia a entregue e os demais ficavam em enviada. Há fallback por **telefone extraído do wamid** (uma conversa). Recibos já no chat são copiados para a fila em `sincronizarFilaComAckDoChat`. Mensagem inbound pode ser classificada como resposta à campanha; palavras normalizadas de descadastro geram opt-out e impedem futuros envios. Itens com lease vencido em `enviando` passam a `incerta` na Etapa 9 (código **no Git**; aplicação no banco = `PENDENTE DE VALIDAÇÃO`); se já têm `provider_message_id` ou `enviado_em`, o worker não reenvia. Decisão manual e reconciliação ficam nas rotas da Etapa 8. Dry-run (`DISPARO_DRY_RUN` default true / live off) nunca chama UltraMSG — a fila fica em enviada e **não chega no WhatsApp**.
 
 ## Falhas, reenvio e observabilidade
 

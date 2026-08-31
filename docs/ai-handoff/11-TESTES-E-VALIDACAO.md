@@ -4,13 +4,13 @@
 
 ## Ferramentas e organização
 
-Jest 29, Supertest e mocks manuais. Há 100 arquivos `tests/*.test.js`; `tests/setup.js` substitui globalmente o cliente Supabase por chain mock. Suites também mockam `fetch`, provider UltraMSG, R2, OpenAI/push e filesystem conforme o caso. Predominam testes unitários e de controller com app em memória; não são integração com PostgreSQL/RLS/UltraMSG real.
+Jest 29, Supertest e mocks manuais. Em **2026-08-31** há **~122** arquivos `tests/*.test.js` (contagem no disco; inclui untracked `idempotencyService` se existir). O número **100** abaixo é snapshot de 2026-08-23. `tests/setup.js` substitui globalmente o cliente Supabase por chain mock. Suites também mockam `fetch`, provider UltraMSG, R2, OpenAI/push e filesystem conforme o caso. Predominam testes unitários e de controller com app em memória; não são integração com PostgreSQL/RLS/UltraMSG real.
 
-Cobertura observada: autenticação/autorização, tenants, conversas, mensagens/status/ACK, multi-instância, webhooks, mídia/conversão/proxy/R2, chatbot/triagem, ausência/SLA/supervisão, clientes/importação, help desk, produtos e todas as etapas do Disparo. Adapter UltraMSG: `ultramsgProviderInstanceResolution`, `whatsappIdentityFoto`, `oldMessagesAndSearch` (ver [21](21-ULTRAMSG-PROVIDER-MODULARIZACAO.md)). Assistente IA: `aiDashboardSessionA` cobre funções puras extraídas (ver [22](22-AI-DASHBOARD-MODULARIZACAO.md)); `POST /ai/ask` e as `q*` ainda sem teste. Outras lacunas: banco real e ordem de migrations, RLS com role não privilegiada, topologia multi-processo/Redis ausente, VPS/proxy, latência/retry reais do provider e carga sustentada.
+Cobertura observada: autenticação/autorização, tenants, conversas, mensagens/status/ACK, multi-instância, webhooks, mídia/conversão/proxy/R2, chatbot/triagem, ausência/SLA/supervisão, clientes/importação, help desk, produtos e todas as etapas do Disparo. Adapter UltraMSG: `ultramsgProviderInstanceResolution`, `whatsappIdentityFoto`, `oldMessagesAndSearch` (ver [21](21-ULTRAMSG-PROVIDER-MODULARIZACAO.md)). Assistente IA: `aiDashboardSessionA` cobre funções puras extraídas (ver [22](22-AI-DASHBOARD-MODULARIZACAO.md)); `POST /ai/ask` e as `q*` ainda sem teste. Chat HTTP: suites `chat*` ainda importam a fachada `chatController.js` (ver [23](23-CHAT-CONTROLLER-MODULARIZACAO.md)). Outras lacunas: banco real e ordem de migrations, RLS com role não privilegiada, topologia multi-processo/Redis ausente, VPS/proxy, latência/retry reais do provider e carga sustentada.
 
-## Resultado real desta auditoria
+## Resultado real desta auditoria (snapshot 2026-08-23)
 
-O working tree mudou durante a análise e os testes afetados de Disparo foram corrigidos pelo trabalho já existente. Resultado final, executado com as três flags de Disparo removidas do ambiente, `NODE_ENV=test` e `ZAPERP_DISABLE_BACKGROUND_JOBS=1`:
+Não reler 100/1015 como baseline atual. Resultado naquela data, com as três flags de Disparo removidas do ambiente, `NODE_ENV=test` e `ZAPERP_DISABLE_BACKGROUND_JOBS=1`:
 
 ```text
 npm test

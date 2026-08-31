@@ -10,6 +10,7 @@
 | `services/` | negócio, integrações, schedulers e storage |
 | `services/providers/ultramsg.js` | adapter efetivamente ativo do WhatsApp (fachada; pasta `services/providers/ultramsg/`; [21](21-ULTRAMSG-PROVIDER-MODULARIZACAO.md)) |
 | `services/aiDashboardService.js` | assistente IA (`POST /ai/ask`); Sessão A: pasta `services/aiDashboard/` (puros); queries/classify ainda no service. Mapa: [22](22-AI-DASHBOARD-MODULARIZACAO.md) |
+| `controllers/chatController.js` + `controllers/chat/` + `services/chat/` | chat HTTP (fachada ainda com lista/texto/PIX). Mapa: [23](23-CHAT-CONTROLLER-MODULARIZACAO.md) |
 | `middleware/` | JWT/perfis, webhooks, rate limit e uploads |
 | `helpers/`, `validators/` | regras pequenas e validação Zod/manual |
 | `repositories/`, `socket/` | chat interno e presença/socket |
@@ -34,5 +35,5 @@ Novas funcionalidades devem manter rota fina, controller HTTP, regra em service/
 - `empresa_zapi` foi fonte legada de credenciais; `whatsapp_instances` é o modelo multi-instância. A migration de remoção da tabela legada existe, mas serviços ainda têm fallback/referências; estado real é pendente.
 - CRM interno foi criado em migrations e removido por `20260812120000_drop_crm_legacy_module.sql`; backend atual expõe apenas handoff SSO.
 - `campanhas`/`campanha_envios`, `planos`, `users`, `grupos`, `comunidades` foram removidos por migrations posteriores; `schema.sql` ainda os lista.
-- `docs/_ANTIGOS`, pacotes ZIP, caches Python, logs e coverage não são fonte canônica.
+- `docs/_ANTIGOS` e `docs/_OFICIAL` **não existem** neste tree (histórico no git). Pacotes ZIP, caches Python, logs e coverage não são fonte canônica.
 - Não foram encontrados Dockerfile, compose ou configuração CI no backend.

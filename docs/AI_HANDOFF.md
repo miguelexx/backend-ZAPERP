@@ -1,8 +1,8 @@
 # AI_HANDOFF — Backend ZapERP
 
 > Contexto compacto para IAs começarem sem redescobrir o sistema.  
-> Atualizado: **2026-08-24** · branch `master`.  
-> Para análise completa, use [`ai-handoff/00-LEIA-PRIMEIRO.md`](ai-handoff/00-LEIA-PRIMEIRO.md).
+> Atualizado: **2026-08-31** · branch `master`.  
+> Para análise completa, use [`ai-handoff/00-LEIA-PRIMEIRO.md`](ai-handoff/00-LEIA-PRIMEIRO.md). Modularizações: docs [19](ai-handoff/19-ATENDIMENTO-SEM-RESPOSTA-MODULARIZACAO.md)–[23](ai-handoff/23-CHAT-CONTROLLER-MODULARIZACAO.md).
 
 ---
 
@@ -52,9 +52,14 @@ backend/
 ├── app.js                  # Express: segurança, rotas, estáticos, erro global
 ├── index.js                # HTTP+Socket.IO, schedulers, boot
 ├── config/                 # env.js, supabase.js, r2.js, uploadsRoot.js, produtosDb.js, wmSqlServer.js
-├── controllers/            # Camada HTTP — orquestração, validação, resposta
+├── controllers/            # HTTP; fachadas + pastas chat/ e dashboard/
+│   ├── chat/               # handlers extraídos; lista/texto/PIX ainda na fachada
+│   └── dashboard/          # KPIs HTTP (não confundir com IA /ai/ask)
 ├── services/               # Regras de negócio reutilizáveis, integrações, schedulers
-│   ├── providers/          # ultramsg.js (único provider ativo)
+│   ├── providers/          # ultramsg.js (shim) + ultramsg/
+│   ├── aiDashboard/        # puros do assistente IA (Sessão A); service ainda tem q*
+│   ├── atendimentoSemResposta/
+│   ├── chat/               # access, identity, media, outbound, read, realtime…
 │   ├── protecao/           # frequência, volume, opt-in para Disparo
 │   └── storage/            # r2Client.js
 ├── helpers/                # Normalização, status, payloads, permissões, telefone
@@ -67,7 +72,7 @@ backend/
 ├── supabase/
 │   ├── migrations/         # Fonte normativa do schema (ordem importa)
 │   └── schema.sql          # Contextual apenas — pode divergir das migrations
-├── tests/                  # Jest + supertest (~100 suites)
+├── tests/                  # Jest + supertest (~122 arquivos em 2026-08-31; snapshot 23/08 era ~100)
 ├── docs/                   # Esta pasta
 └── scripts/                # Admin, certificação, carga
 ```
@@ -88,17 +93,17 @@ backend/
 
 ---
 
-## Módulos principais (estado atual — 2026-08-24)
+## Módulos principais (estado atual — 2026-08-31)
 
 | Módulo | Status | Arquivos-chave |
 |--------|--------|----------------|
-| Conversas/atendimentos | Estável | `chatController`, `atendimentosRegistroService` |
-| Mensagens/mídia | Estável | `chatController`, `inboundMediaPersistenceService`, `mediaR2MirrorService` |
-| UltraMSG/webhooks | Estável | `webhookUltramsgController`, `webhookZapiController`, `services/providers/ultramsg.js` (mapa interno: [21](ai-handoff/21-ULTRAMSG-PROVIDER-MODULARIZACAO.md)) |
+| Conversas/atendimentos | Estável (modularização parcial) | `chatController` + `controllers/chat/` + `services/chat/` ([23](ai-handoff/23-CHAT-CONTROLLER-MODULARIZACAO.md)) |
+| Mensagens/mídia | Estável | fachada texto/arquivo + `outboundController`, `inboundMediaPersistenceService`, `mediaR2MirrorService` |
+| UltraMSG/webhooks | Estável | `webhookUltramsgController`, `webhookZapiController`, `services/providers/ultramsg.js` (pasta; [21](ai-handoff/21-ULTRAMSG-PROVIDER-MODULARIZACAO.md)) |
 | Chatbot/triagem | Estável | `chatbotTriageService`, `regrasAutomaticasService` |
 | Clientes/contatos/tags | Estável | `clienteController`, `clienteImportController`, `tagController` |
 | Usuários/config | Estável | `userController`, `configController`, `permissoesController` |
-| Dashboard/SLA/supervisão | Estável | `dashboardController`, `supervisaoController`, `slaCalculationService` |
+| Dashboard/SLA/supervisão | Estável | `dashboardController` → `controllers/dashboard/` ([20](ai-handoff/20-DASHBOARD-MODULARIZACAO.md)), `supervisaoController`, `slaCalculationService` |
 | Disparo (campanhas) | **Em evolução** | `controllers/disparo*`, `services/disparo*`, `workers/disparoWorker.js` |
 | Chat interno | Estável | `internalChatController`, `repositories/`, `socket/internalChatSocket.js` |
 | Help desk | Estável | `helpDeskController`, `helpDeskNotificationController` |
@@ -286,9 +291,11 @@ npm test
 3. `middleware/auth.js` — autenticação JWT
 4. `config/supabase.js` — cliente Supabase (service role)
 5. `services/providers/ultramsg.js` — provider WhatsApp (pasta `services/providers/ultramsg/`; [`21`](ai-handoff/21-ULTRAMSG-PROVIDER-MODULARIZACAO.md))
-6. Migration mais recente em `supabase/migrations/` para o domínio afetado
-7. Testes existentes do módulo (pasta `tests/`)
-8. [`ai-handoff/13-PROBLEMAS-CONHECIDOS-E-DIVIDA-TECNICA.md`](ai-handoff/13-PROBLEMAS-CONHECIDOS-E-DIVIDA-TECNICA.md) — riscos conhecidos
+6. Tarefa de chat/lista/envio: [`23`](ai-handoff/23-CHAT-CONTROLLER-MODULARIZACAO.md)
+7. Tarefa de IA analítica: [`22`](ai-handoff/22-AI-DASHBOARD-MODULARIZACAO.md)
+8. Migration mais recente em `supabase/migrations/` para o domínio afetado
+9. Testes existentes do módulo (pasta `tests/`)
+10. [`ai-handoff/13-PROBLEMAS-CONHECIDOS-E-DIVIDA-TECNICA.md`](ai-handoff/13-PROBLEMAS-CONHECIDOS-E-DIVIDA-TECNICA.md) — riscos conhecidos
 
 ---
 
@@ -311,7 +318,7 @@ npm test
 2. **Estado em memória** — schedulers, rate limit, presença e dedupe perdem estado no restart; não escala horizontalmente
 3. **Sem transação distribuída** — mensagem outbound pode ficar em estado incerto entre banco e UltraMSG
 4. **JWT não revogável** — usuário desativado mantém acesso até expirar
-5. **Etapa 9 de Disparo** — código no working tree espera migration `20260823120000` aplicada no banco real
+5. **Etapa 9 de Disparo** — código **no Git** espera a migration `20260823120000` **aplicada no banco real** (VPS = `PENDENTE DE VALIDAÇÃO`)
 
 Detalhes: [`ai-handoff/13-PROBLEMAS-CONHECIDOS-E-DIVIDA-TECNICA.md`](ai-handoff/13-PROBLEMAS-CONHECIDOS-E-DIVIDA-TECNICA.md)
 

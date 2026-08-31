@@ -1,7 +1,7 @@
 # Feature Flags (ENV)
 
 > Atualizado: 2026-08-24. Flags lidas em `helpers/featureFlags.js`.  
-> **`FEATURE_CAMPANHAS` foi removida** junto com o módulo de campanhas legado (migration `20260812140000_drop_campanhas_module.sql`). O módulo atual de campanhas chama-se **Disparo** e é controlado por `DISPARO_WORKER_ENABLED` / `DISPARO_LIVE_ENABLED`.
+> **`FEATURE_CAMPANHAS` foi removida** junto com o módulo de campanhas legado (migration `20260812140000_drop_campanhas_module.sql`). O módulo atual chama-se **Disparo**: gate de produto `empresas.modulo_campanhas_ativo` + env `DISPARO_WORKER_ENABLED` / `DISPARO_LIVE_ENABLED` / `DISPARO_DRY_RUN`.
 
 Flags para ativar funcionalidades sem alterar código. Quando não definida ou com valor diferente de `1` / `true` / `yes`, a feature fica **desativada**.
 

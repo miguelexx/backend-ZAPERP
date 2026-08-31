@@ -10,7 +10,7 @@ Consolida **obrigações** para humanos e agentes (Cursor).
 - **Nome:** ZapERP / repositório `whatsapp-plataforma`.
 - **Idioma:** comunicação com a equipa em **português** (quando aplicável).
 - **WhatsApp:** provider **UltraMSG** apenas; **não** implementar, migrar ou assumir **Z-API** sem pedido explícito.
-- **Documentação antiga** (`backend/docs/_ANTIGOS/`): só **contexto histórico** — nunca verdade absoluta.
+- **Documentação:** índice em `backend/docs/README.md`. Pastas `docs/_ANTIGOS/` e `docs/_OFICIAL/` **não existem** neste tree; não procurar. Código sempre prevalece sobre markdown.
 
 ---
 
@@ -151,6 +151,6 @@ Ver **[ADR-LEGACY-NAMING.md](./ADR-LEGACY-NAMING.md)** antes de renomear ficheir
 1. Quebrar multi-tenant.  
 2. Remover segurança ou rate limits “por conveniência”.  
 3. Assumir Z-API/Meta como arquitetura atual.  
-4. Confiar em docs em `_ANTIGOS/` sem validar no código.  
+4. Confiar em markdown antigo (planos de monolito, snapshots Jest, pastas `_ANTIGOS`/`_OFICIAL`) sem validar no código.  
 5. Introduzir `SELECT *` ou listeners duplicados.  
 6. Alterar contratos Socket sem coordenação com o frontend.

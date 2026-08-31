@@ -18,7 +18,7 @@ Não há build: é CommonJS executado por `node index.js`. `ecosystem.config.js`
 8. verificar health/log de boot/auth e fluxos somente com tenant/número de homologação;
 9. observar erros, fila, webhooks/ACK e storage antes de liberar jobs/live.
 
-A ordem exata de cada migration depende do estado real e é **PENDENTE DE VALIDAÇÃO**. Há migration Etapa 9 não rastreada no working tree; não aplicá-la automaticamente.
+A ordem exata de cada migration depende do estado real e é **PENDENTE DE VALIDAÇÃO**. A migration Etapa 9 (`20260823120000_disparo_etapa9_auditoria.sql`) **está no Git**; não aplicá-la automaticamente sem inventário do banco.
 
 ## Checks e logs
 

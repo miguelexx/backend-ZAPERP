@@ -46,7 +46,7 @@ erDiagram
 - Conversas: unicidades por empresa/instância/telefone e `chat_lid`, mais índices parciais de abertas. A coexistência do índice global e do parcial torna o parcial aparentemente redundante; intenção de múltiplas conversas históricas é `NÃO CONFIRMADO`.
 - Instância ativa do provider não pode pertencer a duas empresas; apenas uma default ativa por empresa; troca default ocorre em RPC com `FOR UPDATE`.
 - Chatbot usa advisory lock transacional para limite de opção inválida. Chat interno usa RPCs para criação/listagem atômica.
-- Disparo: idempotência por `chave_idempotencia`; claim via `FOR UPDATE SKIP LOCKED`; advisory lock por instância; revisão única por campanha/versão. A Etapa 9 adiciona execução ativa única e recuperação segura de lease, mas não está commitada/aplicação não confirmada.
+- Disparo: idempotência por `chave_idempotencia`; claim via `FOR UPDATE SKIP LOCKED`; advisory lock por instância; revisão única por campanha/versão. A Etapa 9 (migration `20260823120000` **no Git**) adiciona execução ativa única e recuperação segura de lease; **aplicação no banco real** não está confirmada.
 - Constraints de `status_atendimento` evoluem até incluir `aberta`, `em_atendimento`, `fechada`, `aguardando_cliente`, `mensagem_disparada`, `pagamento_pendente`, `em_atraso`; confirmar migration aplicada antes de gravar estados novos.
 
 ## RLS e multitenancy

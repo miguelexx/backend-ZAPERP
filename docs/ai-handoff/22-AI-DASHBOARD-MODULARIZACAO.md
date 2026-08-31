@@ -33,7 +33,9 @@ Controller (fora deste arquivo): flag `ia_config.config.ia.usar_ia`, cota `ai_lo
 
 ---
 
-## 2. Mapa por linhas (CONFIRMADO)
+## 2. Mapa por linhas (monolito **original**, pré-Sessão A)
+
+Os números abaixo descrevem o arquivo **antes** de extrair `services/aiDashboard/`. No service atual, `classifyQuestion` começa por volta da linha 69; as `q*` e o `switch` continuam neste arquivo. Para o que já saiu, use a §8.
 
 | Bloco | Linhas | Assunto | Candidato |
 |-------|--------|---------|-----------|
@@ -177,7 +179,7 @@ services/aiDashboard/
   index.js              só no shim final
 ```
 
-Corpos das 54 funções extraídas foram conferidos contra `git show HEAD:services/aiDashboardService.js` (0 diffs). Heurística **duas vezes** e `UNKNOWN` → `GENERAL_CHAT` permanecem no orquestrador do service.
+Na extração, 54 funções foram conferidas contra o monolito então versionado (0 diffs de corpo). Heurística **duas vezes** e `UNKNOWN` → `GENERAL_CHAT` permanecem no orquestrador do service.
 
 Shim **explícito** no final: `require('./aiDashboard/index.js')`.
 

@@ -9,7 +9,7 @@
 | `middleware/auth.js` | JWT/tenant | crítico | `auth`, `productionAuthorization`, CRM; nunca aceitar tenant externo. |
 | `middleware/requireWebhookToken.js` + resolvers | autenticação/resolução webhook | crítico | webhook/auth/multi-instância; timing-safe, fail closed, sem token em log. |
 | `middleware/rateLimit.js` | buckets/limites em memória | alto | `rateLimitBucket`; mudanças afetam disponibilidade e proxy/IP. |
-| `controllers/chatController.js` | conversas, atendimento, envio/mídia | crítico | muitas suites `chat*`, mensagem, mídia; controller monolítico, mapear service/socket/provider antes de editar. |
+| `controllers/chatController.js` + `controllers/chat/` + `services/chat/` | conversas, atendimento, envio/mídia | crítico | suites `chat*`, mensagem, mídia. Fachada **não** é shim: lista/texto/PIX ainda aqui. `enviarArquivo` pode estar em `chat/mediaMessageController.js` (working tree). Mapa: [23](23-CHAT-CONTROLLER-MODULARIZACAO.md). `io` via `req.app.get('io')`. |
 | `controllers/webhookUltramsgController.js` | normalização UltraMSG | crítico | `disparoUltramsgReferenceId`, webhooks; manter formatos e contexto resolvido. |
 | `controllers/webhookZapiController.js` | domínio inbound/ACK legado | crítico | ACK/inbound/fromMe; nome legado, mas caminho ativo. Não remover por nome. |
 | `services/providers/ultramsg.js` + `services/providers/ultramsg/` | único adapter WhatsApp: HTTP, JID, envio, upload, histórico, foto | crítico | `ultramsgProviderInstanceResolution`, `whatsappIdentityFoto`, `oldMessagesAndSearch`. Sempre mock; mascarar token; preservar `referenceId`. **Não unificar** JID de envio vs foto vs histórico. Mapa: [21](21-ULTRAMSG-PROVIDER-MODULARIZACAO.md). Shim **deve** usar `require('./ultramsg/index.js')`. |

@@ -1,8 +1,12 @@
 # Auditoria e plano de modularização do `chatController.js`
 
+> **Histórico.** Snapshot do monolito (~10.062 linhas) **antes** da quebra.  
+> Estado real no código e próximos passos: [`ai-handoff/23-CHAT-CONTROLLER-MODULARIZACAO.md`](ai-handoff/23-CHAT-CONTROLLER-MODULARIZACAO.md).  
+> Não usar as contagens/linhas deste arquivo como mapa do `chatController.js` atual.
+
 ## 1. Objetivo e limite da auditoria
 
-Este documento descreve o estado atual de [`controllers/chatController.js`](../controllers/chatController.js) e propõe uma modularização incremental, sem alterar seu comportamento público.
+Este documento **descrevia** o estado do monolito na data da auditoria e propunha uma modularização incremental. A quebra **já ocorreu**; não usar as seções abaixo como mapa do arquivo atual.
 
 O escopo da análise foi deliberadamente limitado ao conteúdo desse arquivo. Rotas, middlewares, migrations, testes e implementações dos serviços importados não foram auditados. Quando uma garantia parece depender dessas camadas — por exemplo, “admin only” — ela é registrada como dependência externa não verificada, e não como garantia confirmada.
 

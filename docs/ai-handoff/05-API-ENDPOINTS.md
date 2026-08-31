@@ -12,6 +12,8 @@ Com exceção de health, arquivos estáticos e webhooks, cada rota abaixo é mon
 
 Todas as operações autenticadas devem limitar consultas por `req.user.company_id`. Escritas alteram as tabelas do módulo; operações de atendimento/mensagem também podem emitir eventos de [Socket.IO](07-SOCKET-IO-E-TEMPO-REAL.md), enviar push e chamar UltraMSG. Para os contratos de mensagem e estados, ver [06](06-WHATSAPP-ULTRAMSG-E-WEBHOOKS.md). Não se deve inferir um schema de body além das validações do controller indicado.
 
+Nas linhas de **chats**, a coluna `chatController` é a **fachada** (`routes/chatRoutes.js` não mudou). A implementação está em `controllers/chat/` + `services/chat/` — mapa: [23](23-CHAT-CONTROLLER-MODULARIZACAO.md). Dashboard HTTP: fachada `dashboardController.js` → `controllers/dashboard/` ([20](20-DASHBOARD-MODULARIZACAO.md)).
+
 ## Infraestrutura e webhooks
 
 | Método e caminho | Controller/middleware | Contrato e efeitos |
