@@ -247,25 +247,3 @@ if (String(ref || '').startsWith('disp-')) aplicarStatusDisparoFromWebhook(...)
 // ✅ CORRETO — todo ACK, com id do provedor + mensagem do chat
 aplicarStatusDisparoFromWebhook({ referenceId: ref, providerMessageId: idStr, mensagemId: msg?.id, ... })
 ```
-
----
-
-## 20. Fila de disparo — nunca silenciar destinatário nem reusar chave de outra execução
-
-**Armadilha:** `chave_idempotencia` só com campanha+versão+destinatário + `ignoreDuplicates: true`. Depois de cancelar pendentes (voltar à edição), a chave antiga continua na tabela. A próxima execução na mesma versão **não insere ninguém**.
-
-Outra armadilha: filtrar `instancia_id`/`variacao_id` not null na hora de montar a fila. A lista da campanha mostra 40; a execução manda 6.
-
-```js
-// ❌ ERRADO
-chave = `campanha:${id}:v${versao}:dest:${destId}`
-upsert(rows, { onConflict: 'chave_idempotencia', ignoreDuplicates: true })
-.from('...destinatarios').not('instancia_id', 'is', null)
-
-// ✅ CORRETO
-chave = `campanha:${id}:v${versao}:exec:${execucaoId}:dest:${destId}`
-// recusar gerar se algum destinatário ativo estiver sem instância/variação
-// se a execução ativa tiver menos itens que destinatários, completar — não retornar idempotente
-```
-
-**Consequência real:** “disparou só para alguns”. O worker está certo; a fila nasceu incompleta. Campanha já `em_execucao` com fila curta: pausar → voltar à edição → publicar → iniciar (Iniciar de novo sozinho é no-op).

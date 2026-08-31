@@ -1,6 +1,6 @@
 /**
  * Geração da fila persistente e contadores — Etapa 7 Disparo.
- * Idempotente por execução (campanha+versão+execucao_id+destinatário). Nunca envia mensagens.
+ * Idempotente por campanha+versão. Nunca envia mensagens.
  */
 
 const supabase = require('../config/supabase')
@@ -35,11 +35,7 @@ class DisparoFilaError extends Error {
   }
 }
 
-function chaveIdempotencia(campanhaId, versao, destinatarioId, execucaoId) {
-  const exec = Number(execucaoId)
-  if (Number.isInteger(exec) && exec > 0) {
-    return `campanha:${campanhaId}:v${versao}:exec:${exec}:dest:${destinatarioId}`
-  }
+function chaveIdempotencia(campanhaId, versao, destinatarioId) {
   return `campanha:${campanhaId}:v${versao}:dest:${destinatarioId}`
 }
 
@@ -197,19 +193,10 @@ async function carregarDestinatarios(campanhaId, companyId) {
     .eq('campanha_id', campanhaId)
     .eq('company_id', companyId)
     .neq('status', 'excluido')
+    .not('instancia_id', 'is', null)
+    .not('variacao_id', 'is', null)
   if (error) throw error
-  const todos = data ?? []
-  const semAtribuicao = todos.filter((d) => d.instancia_id == null || d.variacao_id == null)
-  if (semAtribuicao.length) {
-    throw new DisparoFilaError(
-      `${semAtribuicao.length} destinatário(s) sem instância ou variação. A fila não seria gerada para todos. Confirme a distribuição nas etapas Instâncias e Mensagens.`,
-      'DESTINATARIOS_INCOMPLETOS',
-    )
-  }
-  if (!todos.length) {
-    throw new DisparoFilaError('Nenhum destinatário válido com instância e variação atribuídas.')
-  }
-  return todos
+  return data ?? []
 }
 
 async function carregarExclusoesAtivas(companyId) {
@@ -295,35 +282,30 @@ async function gerarFilaParaCampanha({ companyId, campanhaId, userId, dryRun }) 
     )
   }
 
-  const destinatarios = await carregarDestinatarios(campId, cid)
-
-  let execucao = await buscarExecucaoAtiva(campId, cid, versao)
-  if (execucao) {
-    const { count: totalItens, error: countErr } = await supabase
+  const existente = await buscarExecucaoAtiva(campId, cid, versao)
+  if (existente) {
+    const { count: totalItens } = await supabase
       .from('disparo_fila_itens')
       .select('id', { count: 'exact', head: true })
-      .eq('execucao_id', execucao.id)
-    if (countErr) throw countErr
-    const n = totalItens ?? 0
-    if (n >= destinatarios.length) {
-      return {
-        execucao,
-        gerados: 0,
-        ignorados: execucao.total_ignorados ?? 0,
-        ja_existentes: n,
-        idempotente: true,
-      }
+      .eq('execucao_id', existente.id)
+
+    return {
+      execucao: existente,
+      gerados: 0,
+      ignorados: existente.total_ignorados ?? 0,
+      ja_existentes: totalItens ?? 0,
+      idempotente: true,
     }
-    console.warn(
-      '[disparo:fila] execução ativa incompleta — completando fila',
-      { execucao_id: execucao.id, itens: n, destinatarios: destinatarios.length },
-    )
   }
 
   const limitesRow = await carregarLimites(campId, cid)
   const limites = limitesEfetivos(limitesRow)
   const janelas = await carregarJanelas(campId, cid)
   const overrides = await carregarOverridesInstancia(campId, cid)
+  const destinatarios = await carregarDestinatarios(campId, cid)
+  if (!destinatarios.length) {
+    throw new DisparoFilaError('Nenhum destinatário válido com instância e variação atribuídas.')
+  }
 
   const exclusoes = await carregarExclusoesAtivas(cid)
   const horariosPorDestino = montarHorariosFila({
@@ -335,27 +317,24 @@ async function gerarFilaParaCampanha({ companyId, campanhaId, userId, dryRun }) 
     overrides,
   })
 
-  if (!execucao) {
-    const { data: execNova, error: execErr } = await supabase
-      .from('disparo_execucoes')
-      .insert({
-        company_id: cid,
-        campanha_id: campId,
-        revisao_id: revisao.id,
-        versao,
-        config_hash: campanha.config_hash,
-        status: 'aguardando',
-        iniciado_por: userId ?? null,
-        dry_run: effectiveDryRun,
-        total_itens: 0,
-      })
-      .select('*')
-      .single()
-    if (execErr) throw execErr
-    execucao = execNova
-  }
+  const { data: execucao, error: execErr } = await supabase
+    .from('disparo_execucoes')
+    .insert({
+      company_id: cid,
+      campanha_id: campId,
+      revisao_id: revisao.id,
+      versao,
+      config_hash: campanha.config_hash,
+      status: 'aguardando',
+      iniciado_por: userId ?? null,
+      dry_run: effectiveDryRun,
+      total_itens: 0,
+    })
+    .select('*')
+    .single()
+  if (execErr) throw execErr
 
-  const todasChaves = destinatarios.map((d) => chaveIdempotencia(campId, versao, d.id, execucao.id))
+  const todasChaves = destinatarios.map((d) => chaveIdempotencia(campId, versao, d.id))
   const jaExistentesAntes = await contarItensPorChaves(todasChaves)
 
   let gerados = 0
@@ -363,7 +342,7 @@ async function gerarFilaParaCampanha({ companyId, campanhaId, userId, dryRun }) 
   const rows = []
 
   for (const dest of destinatarios) {
-    const chave = chaveIdempotencia(campId, versao, dest.id, execucao.id)
+    const chave = chaveIdempotencia(campId, versao, dest.id)
     const excluido = exclusoes.has(String(dest.telefone_normalizado))
     const planejadoPara = horariosPorDestino.get(dest.id) || resolverPlanejadoPara(campanha, limites)
 
@@ -424,14 +403,6 @@ async function gerarFilaParaCampanha({ companyId, campanhaId, userId, dryRun }) 
 
   gerados = (itensExec ?? []).filter((i) => i.status === 'pendente').length
   ignorados = (itensExec ?? []).filter((i) => i.status === 'ignorada').length
-
-  if ((jaExistentesDepois ?? 0) < destinatarios.length) {
-    throw new DisparoFilaError(
-      `Fila incompleta: ${jaExistentesDepois ?? 0} de ${destinatarios.length} destinatários na execução ${execucao.id}. ` +
-        'Chaves de uma execução anterior podem ter bloqueado a inserção. Publique a campanha de novo (nova versão) e inicie outra vez.',
-      'FILA_INCOMPLETA',
-    )
-  }
 
   const { data: execAtualizada } = await supabase
     .from('disparo_execucoes')
