@@ -94,30 +94,68 @@ const {
 } = require('../helpers/internalNote')
 const { usuarioTemPermissao } = require('../helpers/permissoesService')
 
-/**
- * Junta as etiquetas da conversa com as do cliente removendo duplicadas. A mesma etiqueta pode
- * vir pelas duas fontes (ou como linhas repetidas na join), às vezes com id diferente mas o mesmo
- * nome — visualmente é a mesma e a escola reclamava de aparecer duas. Deduplica pelo nome
- * normalizado (etiqueta igual = duplicada mesmo com id diferente), caindo para o id quando não
- * houver nome, e também dedup dentro de cada fonte. Preserva a ordem (conversa antes do cliente).
- */
-function mergeConversaClienteTags(c) {
-  const conversaTags = (c.conversa_tags || []).map((ct) => ct?.tags).filter(Boolean)
-  const clienteTags = (c.clientes?.cliente_tags || []).map((ct) => ct?.tags).filter(Boolean)
-  const seen = new Set()
-  const merged = []
-  const tagKey = (t) => {
-    const nome = String(t?.nome ?? '').trim().toLowerCase()
-    return nome ? `n:${nome}` : t?.id != null ? `i:${String(t.id)}` : ''
-  }
-  for (const t of [...conversaTags, ...clienteTags]) {
-    const key = tagKey(t)
-    if (key && seen.has(key)) continue
-    if (key) seen.add(key)
-    merged.push(t)
-  }
-  return merged
-}
+// =====================================================
+// Módulos extraídos do chatController (Fase 1 da modularização).
+// Funções puras movidas para services/chat/**; reimportadas aqui com o mesmo nome
+// para preservar todos os call sites internos, exports e o export `_test`.
+// =====================================================
+const {
+  parsePositiveInt,
+  parseBooleanQuery,
+  parseChatListPagination,
+  applyChatListCursor,
+  splitChatListPage,
+  parseMessageHistoryPagination,
+  splitMessageHistoryPage,
+  shouldIncludeClientesSemConversa,
+  setChatListPaginationHeaders,
+  applyDetalharChatMensagensCursor,
+} = require('../services/chat/read/pagination')
+const {
+  getSearchMessagesPageSize,
+  getChatSearchScanLimit,
+  getChatSearchIdLimit,
+  getChatFilterIdLimit,
+  getConversaMessagesSearchLimit,
+} = require('../services/chat/read/searchLimits')
+const {
+  mergeConversaClienteTags,
+  statusAtendimentoParaLista,
+  safeWhatsappInstanceMeta,
+} = require('../services/chat/presentation/chatDto')
+const {
+  normalizeClientTempId,
+  clientTempIdDedupeKey,
+  isMissingMensagemColumnError,
+  isGenericMissingColumnError,
+  isClientTempIdUniqueViolation,
+  buildClientTempIdDedupResponse,
+} = require('../services/chat/outbound/idempotencyHelpers')
+const {
+  normalizeLinkPayload,
+  normalizeForwardTipo,
+} = require('../services/chat/outbound/messageNormalizers')
+const {
+  statusReenvioNormalizado,
+  avaliarElegibilidadeReenvio,
+  captionUsuarioDeMidiaPersistida,
+} = require('../services/chat/outbound/retryEligibility')
+const {
+  ULTRAMSG_VIDEO_MAX_BYTES,
+  ULTRAMSG_VIDEO_TARGET_BYTES,
+  parseAudioDuracaoSecFromBody,
+  mimeBase,
+  extBaseArquivo,
+  isForcedVoiceAudioish,
+  aplicarTipoForcadoSticker,
+  inferirTipoArquivo,
+  getAudioFileExtension,
+  shouldAbortAudioAfterNormalize,
+  shouldNormalizeVideoForUltraMsg,
+  shouldForceProviderUploadForMedia,
+  buildVideoTranscodeProfile,
+  shouldNormalizeImageForWhatsapp,
+} = require('../services/chat/media/mediaType')
 
 /**
  * Deduplicação in-memory para double-send de texto.
@@ -134,90 +172,6 @@ setInterval(() => {
 
 let _clientTempIdDbDedupeUnavailable = false
 let _audioDuracaoSecColumnUnavailable = false
-
-/**
- * Duração em segundos a partir do FormData do upload de áudio/voice.
- * Usa o MENOR entre elapsed e duration: elapsed (relógio de parede) é confiável;
- * duration vem do <audio> lendo o WebM cru e pode ser inflado no container sem Duration.
- */
-function parseAudioDuracaoSecFromBody(body) {
-  if (!body || typeof body !== 'object') return null
-  const fromMs = (raw) => {
-    const n = Number(raw)
-    if (!Number.isFinite(n) || n <= 0) return null
-    return Math.max(1, Math.min(600, Math.round(n / 1000)))
-  }
-  const fromSec = (raw) => {
-    const n = Number(raw)
-    if (!Number.isFinite(n) || n <= 0) return null
-    return Math.max(1, Math.min(600, Math.round(n)))
-  }
-  const elapsed = fromMs(body.audio_elapsed_ms)
-  const duration = fromMs(body.audio_duration_ms)
-  if (elapsed && duration) return Math.min(elapsed, duration)
-  return (
-    elapsed ||
-    duration ||
-    fromSec(body.audio_duracao_sec) ||
-    fromSec(body.audio_duration_sec) ||
-    null
-  )
-}
-
-function normalizeClientTempId(value) {
-  const normalized = value != null ? String(value).trim().slice(0, 64) : ''
-  return normalized || null
-}
-
-function clientTempIdDedupeKey(company_id, conversa_id, clientTempId) {
-  return `${company_id}:${conversa_id}:${clientTempId}`
-}
-
-function isMissingMensagemColumnError(error, columnName) {
-  const text = [
-    error?.message,
-    error?.details,
-    error?.hint,
-    error?.code,
-  ].filter(Boolean).join(' ').toLowerCase()
-  return text.includes(String(columnName).toLowerCase())
-}
-
-function isGenericMissingColumnError(error) {
-  const text = [
-    error?.message,
-    error?.details,
-    error?.hint,
-    error?.code,
-  ].filter(Boolean).join(' ').toLowerCase()
-  return text.includes('does not exist') || text.includes('schema cache') || text.includes('could not find')
-}
-
-function isClientTempIdUniqueViolation(error) {
-  const text = [
-    error?.message,
-    error?.details,
-    error?.hint,
-    error?.code,
-  ].filter(Boolean).join(' ').toLowerCase()
-  return String(error?.code || '') === '23505' && (
-    text.includes('client_temp_id') ||
-    text.includes('idx_mensagens_client_temp_id_unique')
-  )
-}
-
-function buildClientTempIdDedupResponse(row, conversa_id, clientTempId) {
-  if (!row?.id) return null
-  return {
-    ok: true,
-    id: row.id,
-    conversa_id: Number(row.conversa_id ?? conversa_id),
-    client_temp_id: clientTempId,
-    status: row.status || row.status_mensagem || 'pending',
-    ...(row.whatsapp_id ? { whatsapp_id: row.whatsapp_id } : {}),
-    deduplicated: true,
-  }
-}
 
 async function findMensagemByClientTempId(company_id, conversa_id, clientTempId, select = 'id, conversa_id, status, status_mensagem, whatsapp_id, client_temp_id') {
   if (!clientTempId || _clientTempIdDbDedupeUnavailable) return null
@@ -247,19 +201,6 @@ async function findMensagemByClientTempId(company_id, conversa_id, clientTempId,
     }
     console.warn('[client_temp_id] excecao ao consultar dedupe persistente:', error?.message || error)
     return null
-  }
-}
-
-function normalizeLinkPayload(link) {
-  if (!link || typeof link !== 'object') return null
-  const linkUrl = String(link.linkUrl ?? link.url ?? '').trim()
-  if (!linkUrl) return null
-  return {
-    ...link,
-    linkUrl,
-    title: String(link.title || '').trim(),
-    image: link.image || '',
-    linkDescription: String(link.linkDescription || link.description || '').trim(),
   }
 }
 
@@ -298,16 +239,6 @@ async function resolveConversationWhatsappInstance(company_id, conversa) {
     } catch (_) {}
   }
   return defaultId
-}
-
-function safeWhatsappInstanceMeta(instance) {
-  if (!instance) return {}
-  return {
-    whatsapp_instance_id: instance.id ?? null,
-    whatsapp_instance_nome: instance.nome ?? null,
-    whatsapp_instance_provider: instance.provider ?? null,
-    whatsapp_instance_display_phone: instance.display_phone ?? null,
-  }
 }
 
 async function loadWhatsappInstanceMetaMap(company_id, instanceIds) {
@@ -371,153 +302,6 @@ async function resolveUltraMsgReplyMessageId(supabaseClient, company_id, convers
   const looksLikeWhatsAppId = rid.includes('@') || rid.includes('_')
   if (!isUuid && looksLikeWhatsAppId) return rid
   return null
-}
-
-/**
- * Na listagem, conversas com status "aberta" no BD mas sem mensagem e sem atendente não são tratadas
- * como abertas nas abas (contagem / filtro). Expõe `ociosa` no JSON; o BD permanece `aberta` para constraints e fluxos internos.
- */
-function statusAtendimentoParaLista(isGroup, dbStatus, exibirBadgeAberta) {
-  if (isGroup) return null
-  const s = dbStatus != null ? String(dbStatus) : null
-  if (s === 'aberta' && !exibirBadgeAberta) return 'ociosa'
-  return s
-}
-
-/**
- * Paginação de mensagens em GET /chats/:id (detalharChat).
- * Com `cursor_id`: desempate quando várias mensagens compartilham o mesmo `criado_em` (ordem id DESC).
- * Sem `cursor_id`: compatível com clientes antigos — apenas `criado_em.lt`.
- */
-function applyDetalharChatMensagensCursor(query, cursorEm, cursorIdRaw) {
-  const em = cursorEm != null && String(cursorEm).trim() !== '' ? String(cursorEm).trim() : null
-  if (!em) return query
-  const idNum =
-    cursorIdRaw !== undefined && cursorIdRaw !== null && String(cursorIdRaw).trim() !== ''
-      ? Number(cursorIdRaw)
-      : NaN
-  if (Number.isFinite(idNum)) {
-    const quoted = `"${em.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`
-    return query.or(`criado_em.lt.${quoted},and(criado_em.eq.${quoted},id.lt.${idNum})`)
-  }
-  return query.lt('criado_em', em)
-}
-
-function parsePositiveInt(value, fallback) {
-  const n = Number(value)
-  if (!Number.isFinite(n) || n <= 0) return fallback
-  return Math.floor(n)
-}
-
-function parseBooleanQuery(value) {
-  return value === true || value === 1 || value === '1' || String(value || '').toLowerCase() === 'true'
-}
-
-function parseChatListPagination(query = {}, env = process.env) {
-  const maxLimit = Math.max(1, parsePositiveInt(env.CHAT_LIST_MAX_LIMIT, 250))
-  const defaultLimit = Math.min(maxLimit, Math.max(1, parsePositiveInt(env.CHAT_LIST_DEFAULT_LIMIT, 100)))
-  const requestedLimit = query.limit ?? query.per_page ?? query.page_size
-  const limit = Math.min(maxLimit, Math.max(1, parsePositiveInt(requestedLimit, defaultLimit)))
-  const cursor =
-    query.cursor != null && String(query.cursor).trim() !== ''
-      ? String(query.cursor).trim()
-      : query.cursor_ultima_atividade != null && String(query.cursor_ultima_atividade).trim() !== ''
-        ? String(query.cursor_ultima_atividade).trim()
-        : null
-  const cursorIdRaw = query.cursor_id ?? query.next_cursor_id
-  const cursorId =
-    cursorIdRaw != null && String(cursorIdRaw).trim() !== '' && Number.isFinite(Number(cursorIdRaw))
-      ? Math.floor(Number(cursorIdRaw))
-      : null
-  const responseMode = String(query.response_mode || '').trim().toLowerCase()
-  const paginatedResponse =
-    parseBooleanQuery(query.paginated) ||
-    responseMode === 'paginated' ||
-    responseMode === 'pagination' ||
-    responseMode === 'object'
-  return { limit, cursor, cursor_id: cursorId, paginatedResponse, maxLimit, defaultLimit }
-}
-
-function applyChatListCursor(query, cursorUltimaAtividade, cursorIdRaw) {
-  const cursor = cursorUltimaAtividade != null && String(cursorUltimaAtividade).trim() !== ''
-    ? String(cursorUltimaAtividade).trim()
-    : null
-  if (!cursor) return query
-  const idNum =
-    cursorIdRaw !== undefined && cursorIdRaw !== null && String(cursorIdRaw).trim() !== ''
-      ? Number(cursorIdRaw)
-      : NaN
-  if (Number.isFinite(idNum)) {
-    const quoted = `"${cursor.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`
-    return query.or(`ultima_atividade.lt.${quoted},and(ultima_atividade.eq.${quoted},id.lt.${Math.floor(idNum)})`)
-  }
-  return query.lt('ultima_atividade', cursor)
-}
-
-function splitChatListPage(rows = [], limit = 100) {
-  const safeRows = Array.isArray(rows) ? rows : []
-  const safeLimit = Math.max(1, Math.floor(Number(limit) || 100))
-  const hasMore = safeRows.length > safeLimit
-  const pageRows = safeRows.slice(0, safeLimit)
-  const last = pageRows.length > 0 ? pageRows[pageRows.length - 1] : null
-  const nextCursor = hasMore && last ? (last.ultima_atividade || last.criado_em || null) : null
-  const nextCursorId = hasMore && last && last.id != null ? Number(last.id) : null
-  return {
-    rows: pageRows,
-    pagination: {
-      limit: safeLimit,
-      has_more: hasMore,
-      next_cursor: nextCursor,
-      next_cursor_id: Number.isFinite(nextCursorId) ? nextCursorId : null,
-    },
-  }
-}
-
-function parseMessageHistoryPagination(query = {}, env = process.env) {
-  const maxLimit = Math.max(1, parsePositiveInt(env.MESSAGE_HISTORY_MAX_LIMIT, 250))
-  const defaultLimit = Math.min(maxLimit, Math.max(1, parsePositiveInt(env.MESSAGE_HISTORY_DEFAULT_LIMIT, 100)))
-  const requestedLimit = query.limit ?? query.per_page ?? query.page_size
-  const limit = Math.min(maxLimit, Math.max(1, parsePositiveInt(requestedLimit, defaultLimit)))
-  const cursor = query.cursor != null && String(query.cursor).trim() !== '' ? String(query.cursor).trim() : null
-  const cursorIdRaw = query.cursor_id ?? query.next_cursor_id
-  const cursorId =
-    cursorIdRaw != null && String(cursorIdRaw).trim() !== '' && Number.isFinite(Number(cursorIdRaw))
-      ? Math.floor(Number(cursorIdRaw))
-      : null
-  return { limit, cursor, cursor_id: cursorId, maxLimit, defaultLimit }
-}
-
-function splitMessageHistoryPage(rows = [], limit = 100) {
-  const safeRows = Array.isArray(rows) ? rows : []
-  const safeLimit = Math.max(1, Math.floor(Number(limit) || 100))
-  const hasMore = safeRows.length > safeLimit
-  const pageRows = safeRows.slice(0, safeLimit)
-  const oldestRow = pageRows.length > 0 ? pageRows[pageRows.length - 1] : null
-  return {
-    rows: pageRows,
-    has_more: hasMore,
-    cursor_row: oldestRow,
-  }
-}
-
-function shouldIncludeClientesSemConversa({ incluirTodosClientesAtivo, palavraTrim }) {
-  return Boolean(incluirTodosClientesAtivo && palavraTrim && String(palavraTrim).trim())
-}
-
-function setChatListPaginationHeaders(res, pagination, extra = {}) {
-  if (!res || typeof res.set !== 'function') return
-  res.set('X-Chat-List-Limit', String(pagination.limit))
-  res.set('X-Chat-List-Has-More', pagination.has_more ? '1' : '0')
-  if (pagination.next_cursor) res.set('X-Chat-List-Next-Cursor', String(pagination.next_cursor))
-  if (pagination.next_cursor_id != null) res.set('X-Chat-List-Next-Cursor-Id', String(pagination.next_cursor_id))
-  if (extra.totalCount != null && Number.isFinite(Number(extra.totalCount))) {
-    res.set('X-Chat-List-Total-Count', String(Math.max(0, Math.floor(Number(extra.totalCount)))))
-  }
-  if (extra.semConversaIncluded != null) {
-    res.set('X-Chat-List-Sem-Conversa-Included', extra.semConversaIncluded ? '1' : '0')
-  }
-  const expose = ['X-Chat-List-Limit', 'X-Chat-List-Has-More', 'X-Chat-List-Next-Cursor', 'X-Chat-List-Next-Cursor-Id', 'X-Chat-List-Total-Count', 'X-Chat-List-Sem-Conversa-Included']
-  res.set('Access-Control-Expose-Headers', expose.join(', '))
 }
 
 // =====================================================
@@ -1120,36 +904,6 @@ async function obterUnreadMap({ company_id, usuario_id }) {
     map[Number(row.conversa_id)] = Number(row.unread_count || 0)
   }
   return map
-}
-
-function getSearchMessagesPageSize() {
-  const raw = Number(process.env.CHAT_SEARCH_MESSAGES_PAGE_SIZE)
-  if (!Number.isFinite(raw) || raw <= 0) return 1000
-  return Math.min(Math.max(Math.floor(raw), 100), 5000)
-}
-
-function getChatSearchScanLimit() {
-  const raw = Number(process.env.CHAT_SEARCH_SCAN_LIMIT)
-  if (!Number.isFinite(raw) || raw <= 0) return 2000
-  return Math.min(Math.max(Math.floor(raw), 100), 2000)
-}
-
-function getChatSearchIdLimit() {
-  const raw = Number(process.env.CHAT_SEARCH_ID_LIMIT)
-  if (!Number.isFinite(raw) || raw <= 0) return 1000
-  return Math.min(Math.max(Math.floor(raw), 100), 3000)
-}
-
-function getChatFilterIdLimit() {
-  const raw = Number(process.env.CHAT_FILTER_ID_LIMIT)
-  if (!Number.isFinite(raw) || raw <= 0) return 2000
-  return Math.min(Math.max(Math.floor(raw), 100), 5000)
-}
-
-function getConversaMessagesSearchLimit(rawLimit) {
-  const raw = Number(rawLimit)
-  if (!Number.isFinite(raw) || raw <= 0) return 30
-  return Math.min(Math.max(Math.floor(raw), 1), 100)
 }
 
 async function buscarConversaIdsPorTextoMensagens({ company_id, term }) {
@@ -7775,106 +7529,6 @@ exports.removerTagConversa = async (req, res) => {
   }
 }
 /** MIME base sem parâmetros (ex.: codecs) */
-function mimeBase(file) {
-  const m = String(file?.mimetype || '').toLowerCase().trim()
-  return m.split(';')[0].trim()
-}
-
-/**
- * Permite forçar envio como figurinha (endpoint /messages/sticker) quando o front envia
- * PNG/JPEG recortado na área "Criar" — sem depender só de .webp no nome/MIME.
- */
-const IMAGE_FILE_EXTENSIONS = new Set(['jpg', 'jpeg', 'png', 'webp', 'gif', 'bmp', 'heic', 'heif'])
-const VIDEO_FILE_EXTENSIONS = new Set(['mp4', 'mov', 'm4v', 'webm', 'avi', 'mkv', '3gp', 'mpeg', 'mpg', 'ogv'])
-// Contrato oficial do endpoint UltraMSG /messages/video.
-const ULTRAMSG_VIDEO_FILE_EXTENSIONS = new Set(['mp4', '3gp', 'mov'])
-const ULTRAMSG_VIDEO_MAX_BYTES = 32 * 1024 * 1024
-// Margem para overhead do container/CDN e diferenças entre MB decimal e MiB.
-const ULTRAMSG_VIDEO_TARGET_BYTES = 29 * 1024 * 1024
-const AUDIO_FILE_EXTENSIONS = new Set(['ogg', 'mp3', 'wav', 'm4a', 'aac', 'opus', 'amr'])
-const DOCUMENT_FILE_EXTENSIONS = new Set([
-  'pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx',
-  'txt', 'csv', 'md', 'html', 'htm', 'rtf',
-  'json', 'xml', 'sql', 'zip', 'rar', '7z',
-])
-
-function extBaseArquivo(file) {
-  const candidates = [file?.originalname, file?.filename, file?.path]
-  for (const candidate of candidates) {
-    const match = String(candidate || '').toLowerCase().match(/\.([a-z0-9]{2,8})$/i)
-    if (match?.[1]) return match[1].toLowerCase()
-  }
-  return ''
-}
-
-/**
- * Nota de voz gravada no browser: MIME costuma ser audio/webm, mas em alguns clients
- * chega vazio, application/octet-stream ou até video/webm com extensão .webm.
- * Sem este aceite, tipo=voice era ignorado e o arquivo caía como vídeo.
- */
-function isForcedVoiceAudioish(file) {
-  const base = mimeBase(file)
-  const ext = extBaseArquivo(file)
-  if (base.startsWith('audio/')) return true
-  if (AUDIO_FILE_EXTENSIONS.has(ext)) return true
-  if (ext === 'webm') return true
-  if (base === 'video/webm') return true
-  return false
-}
-
-function aplicarTipoForcadoSticker(file, tipoInferido) {
-  const forced = String(file?.__tipoForcado || '').toLowerCase().trim()
-  if (forced === 'video' || forced === 'vídeo') {
-    const base = mimeBase(file)
-    const ext = extBaseArquivo(file)
-    // Aceita MIME video/* e extensões de vídeo conhecidas.
-    // Também aceita application/octet-stream e MIME ausente: browsers Android/iOS
-    // frequentemente enviam MIME genérico para vídeos de câmera — o frontend
-    // já validou via isVideoFile (extensão/tipo) antes de forçar tipo=video.
-    // Rejeita apenas tipos que são claramente não-vídeo (ex.: application/pdf).
-    const videoish =
-      base.startsWith('video/') ||
-      VIDEO_FILE_EXTENSIONS.has(ext) ||
-      base === 'application/octet-stream' ||
-      !base
-    return videoish ? 'video' : tipoInferido
-  }
-  if (forced === 'voice' || forced === 'ptt') {
-    return isForcedVoiceAudioish(file) ? 'voice' : tipoInferido
-  }
-  if (forced !== 'sticker') return tipoInferido
-  const base = mimeBase(file)
-  const ext = extBaseArquivo(file)
-  const stickerish =
-    ['image/webp', 'image/png', 'image/jpeg', 'image/jpg', 'image/gif'].includes(base) ||
-    ['webp', 'png', 'jpg', 'jpeg', 'gif'].includes(ext)
-  return stickerish ? 'sticker' : tipoInferido
-}
-
-function inferirTipoArquivo(file) {
-  const m = mimeBase(file)
-  const ext = extBaseArquivo(file)
-
-  if (m.startsWith('image/')) return 'imagem'
-  if (m.startsWith('video/')) return 'video'
-  if (m.startsWith('audio/')) return 'audio'
-
-  if (IMAGE_FILE_EXTENSIONS.has(ext)) return 'imagem'
-  if (VIDEO_FILE_EXTENSIONS.has(ext)) return 'video'
-  if (AUDIO_FILE_EXTENSIONS.has(ext)) return 'audio'
-  if (DOCUMENT_FILE_EXTENSIONS.has(ext)) return 'arquivo'
-
-  return 'arquivo'
-}
-
-function getAudioFileExtension(file) {
-  const byOriginal = String(file?.originalname || '').toLowerCase().match(/\.([a-z0-9]{2,5})$/i)
-  if (byOriginal?.[1]) return byOriginal[1].toLowerCase()
-  const byStored = String(file?.filename || '').toLowerCase().match(/\.([a-z0-9]{2,5})$/i)
-  if (byStored?.[1]) return byStored[1].toLowerCase()
-  return ''
-}
-
 function resolveFfmpegPath() {
   try {
     const p = require('ffmpeg-static')
@@ -8034,47 +7688,6 @@ async function normalizeAudioForUltraMsg(file, tipo) {
 }
 
 /** Voice (e áudio que precisa transcodificar) não pode seguir com o arquivo cru — UltraMSG/iPhone falham. */
-function shouldAbortAudioAfterNormalize(tipo, normalized) {
-  if (tipo !== 'voice' && tipo !== 'audio') return false
-  if (normalized?.converted) return false
-  if (!normalized?.required) return false
-  return !!normalized?.error
-}
-
-function shouldNormalizeVideoForUltraMsg(file, tipo) {
-  if (tipo !== 'video' || !file?.path) return false
-  // Todo vídeo enviado pelo painel passa pela preparação determinística:
-  // garante H.264/AAC dentro de um MP4 compatível com WhatsApp independente do
-  // MIME ou extensão original (inclusive application/octet-stream de alguns browsers).
-  return true
-}
-
-function shouldForceProviderUploadForMedia(tipo) {
-  const normalized = String(tipo || '').toLowerCase().trim()
-  return normalized === 'audio' || normalized === 'voice' || normalized === 'video'
-}
-
-function buildVideoTranscodeProfile(durationSec, opts = {}) {
-  const duration = Number(durationSec)
-  if (!Number.isFinite(duration) || duration <= 0) return null
-
-  const targetBytes = Math.max(4 * 1024 * 1024, Number(opts.targetBytes) || ULTRAMSG_VIDEO_TARGET_BYTES)
-  // Reserva 6% para índices/metadata do MP4. O áudio reduz dinamicamente em vídeos longos.
-  const totalKbps = Math.max(48, Math.floor((targetBytes * 8 * 0.94) / duration / 1000))
-  const audioKbps = totalKbps >= 500 ? 64 : totalKbps >= 260 ? 48 : totalKbps >= 120 ? 32 : 24
-  const videoKbps = Math.max(24, Math.min(4000, totalKbps - audioKbps))
-  const maxWidth = videoKbps >= 1800 ? 1280 : videoKbps >= 900 ? 960 : videoKbps >= 450 ? 720 : videoKbps >= 240 ? 540 : 360
-
-  return {
-    durationSec: duration,
-    targetBytes,
-    totalKbps,
-    videoKbps,
-    audioKbps,
-    maxWidth,
-  }
-}
-
 async function probeVideoDurationSec(filePath) {
   return probeAudioDurationSec(filePath)
 }
@@ -8222,14 +7835,6 @@ async function normalizeVideoForUltraMsg(file, tipo, opts = {}) {
       error: error?.message || 'Falha ao converter video para MP4',
     }
   }
-}
-
-function shouldNormalizeImageForWhatsapp(file, tipo) {
-  if (tipo !== 'imagem' || !file?.path) return false
-  const base = mimeBase(file)
-  const ext = extBaseArquivo(file)
-  if (base === 'image/gif' || ext === 'gif') return false
-  return base.startsWith('image/') || IMAGE_FILE_EXTENSIONS.has(ext)
 }
 
 async function convertImageToWhatsappJpeg(inputPath, outputPath) {
@@ -8991,15 +8596,6 @@ function collectOrderedMessageIds(body) {
   return ordered
 }
 
-function normalizeForwardTipo(tipo) {
-  const t = String(tipo || '').toLowerCase().trim()
-  if (t === 'image' || t === 'foto' || t === 'photo') return 'imagem'
-  if (t === 'vídeo') return 'video'
-  if (t === 'document' || t === 'documento' || t === 'file' || t === 'pdf') return 'arquivo'
-  if (t === 'ptt') return 'voice'
-  return t || 'texto'
-}
-
 function getForwardMediaUrlCandidate(mensagem) {
   return String(
     mensagem?.url ||
@@ -9685,44 +9281,6 @@ exports.finalizacaoAusenciaLoteAuth = async (req, res) => {
 /** Reenvios em voo por mensagem — impede que clique duplo gere dois envios ao provedor. */
 const _reenviosEmAndamento = new Set()
 
-const _STATUS_REENVIO_PERMITIDO = new Set(['erro', 'error', 'failed', 'falhou'])
-const _STATUS_JA_RESOLVIDO = new Set(['sent', 'delivered', 'read', 'played', 'enviada', 'entregue', 'lida'])
-
-function statusReenvioNormalizado(mensagem) {
-  return String(mensagem?.status_mensagem || mensagem?.status || '').toLowerCase().trim()
-}
-
-/**
- * Reenvio só é seguro quando o provedor comprovadamente não aceitou a mensagem.
- * Com whatsapp_id real ou provider_queue_id o WhatsApp já a recebeu: reenviar duplicaria para o cliente.
- */
-function avaliarElegibilidadeReenvio(mensagem) {
-  if (String(mensagem?.direcao || '').toLowerCase() !== 'out') {
-    return { permitido: false, httpStatus: 400, motivo: 'Só é possível reenviar mensagens enviadas pelo atendimento.' }
-  }
-  if (isRealWhatsAppId(mensagem?.whatsapp_id)) {
-    return { permitido: false, jaResolvida: true, motivo: 'Mensagem já confirmada pelo WhatsApp.' }
-  }
-  if (_STATUS_JA_RESOLVIDO.has(statusReenvioNormalizado(mensagem))) {
-    return { permitido: false, jaResolvida: true, motivo: 'Mensagem já enviada.' }
-  }
-  if (_STATUS_REENVIO_PERMITIDO.has(statusReenvioNormalizado(mensagem))) return { permitido: true }
-  // Linhas legadas podem ter o ID de fila gravado em whatsapp_id: também significa provedor que já aceitou.
-  const idFilaProvedor =
-    String(mensagem?.provider_queue_id || '').trim() ||
-    (isUltramsgNumericQueueId(String(mensagem?.whatsapp_id || '').trim())
-      ? String(mensagem.whatsapp_id).trim()
-      : '')
-  if (idFilaProvedor) {
-    return {
-      permitido: false,
-      httpStatus: 409,
-      motivo: 'O WhatsApp já recebeu esta mensagem e ainda não confirmou. Aguarde antes de reenviar.',
-    }
-  }
-  return { permitido: true }
-}
-
 /** Telefone real de envio da conversa (resolve LID). */
 async function resolverTelefoneEnvioDaConversa(company_id, conversa, whatsappInstanceId) {
   let telefone = String(conversa?.telefone || '').trim()
@@ -9749,16 +9307,6 @@ async function resolverTelefoneEnvioDaConversa(company_id, conversa, whatsappIns
   }
   if (!telefone) return { telefone: null, erro: 'Conversa sem telefone para envio.' }
   return { telefone, erro: null }
-}
-
-/** Legenda original do atendente a partir do texto persistido (inverte os placeholders de mídia). */
-function captionUsuarioDeMidiaPersistida(mensagem) {
-  const texto = String(mensagem?.texto || '').trim()
-  if (!texto) return ''
-  const placeholders = new Set(['(áudio)', '(áudio de voz)', '(figurinha)', '(imagem)', '(vídeo)', '(arquivo)'])
-  if (placeholders.has(texto.toLowerCase())) return ''
-  if (texto === String(mensagem?.nome_arquivo || '').trim()) return ''
-  return texto
 }
 
 /** Persiste o resultado do reenvio na própria mensagem e propaga por socket. */
