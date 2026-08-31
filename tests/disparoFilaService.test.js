@@ -124,9 +124,13 @@ describe('disparoFilaService — montarHorariosFila', () => {
 })
 
 describe('disparoFilaService — chaveIdempotencia', () => {
-  it('gera chave determinística campanha+versão+destinatário', () => {
+  it('gera chave determinística campanha+versão+execução+destinatário', () => {
+    expect(chaveIdempotencia(1, 2, 10, 60)).toBe('campanha:1:v2:exec:60:dest:10')
+    expect(chaveIdempotencia(99, 1, 500, 8)).toBe('campanha:99:v1:exec:8:dest:500')
+  })
+
+  it('sem execução mantém chave legado', () => {
     expect(chaveIdempotencia(1, 2, 10)).toBe('campanha:1:v2:dest:10')
-    expect(chaveIdempotencia(99, 1, 500)).toBe('campanha:99:v1:dest:500')
   })
 })
 
@@ -191,6 +195,30 @@ describe('disparoFilaService — DisparoFilaError', () => {
       gerarFilaParaCampanha({ companyId: 10, campanhaId: 1 }),
     ).rejects.toThrow(/desconectada/i)
   })
+
+  it('destinatário sem instância ou variação bloqueia a fila inteira', async () => {
+    revalidarInstanciasConectadas.mockResolvedValue({ ok: true, desconectadas: [] })
+
+    supabase.from.mockImplementation((table) => {
+      if (table === 'disparo_campanhas') {
+        return mockChain({ data: campanhaPronta, error: null })
+      }
+      if (table === 'disparo_campanha_revisoes') {
+        return mockChain({ data: { id: 7, versao: 2, hash: 'abc', status: 'ativa' }, error: null })
+      }
+      if (table === 'disparo_campanha_destinatarios') {
+        return mockChain({
+          data: [{ ...destinatarios[0], instancia_id: null }],
+          error: null,
+        })
+      }
+      return mockChain({ data: null, error: null })
+    })
+
+    await expect(
+      gerarFilaParaCampanha({ companyId: 10, campanhaId: 1 }),
+    ).rejects.toMatchObject({ code: 'DESTINATARIOS_INCOMPLETOS' })
+  })
 })
 
 describe('disparoFilaService — idempotência', () => {
@@ -219,6 +247,9 @@ describe('disparoFilaService — idempotência', () => {
       if (table === 'disparo_execucoes') {
         return mockChain({ data: execExistente, error: null })
       }
+      if (table === 'disparo_campanha_destinatarios') {
+        return mockChain({ data: destinatarios, error: null })
+      }
       if (table === 'disparo_fila_itens') {
         return mockChain({ data: null, error: null, count: 3 })
       }
@@ -236,6 +267,7 @@ describe('disparoFilaService — idempotência', () => {
   it('gera fila nova com dry_run=true por default', async () => {
     let insertExecucao = null
     let upsertRows = null
+    let chaveCountCalls = 0
 
     supabase.from.mockImplementation((table) => {
       if (table === 'disparo_campanhas') {
@@ -293,7 +325,9 @@ describe('disparoFilaService — idempotência', () => {
               error: null,
             }).then(resolve)
           }
-          return Promise.resolve({ data: null, error: null, count: 0 }).then(resolve)
+          chaveCountCalls += 1
+          const count = chaveCountCalls === 1 ? 0 : 2
+          return Promise.resolve({ data: null, error: null, count }).then(resolve)
         }
         chain._mode = 'count'
         const origSelect = chain.select
@@ -320,8 +354,8 @@ describe('disparoFilaService — idempotência', () => {
     expect(upsertRows).toBeTruthy()
     expect(upsertRows.length).toBe(2)
     const chaves = upsertRows.map((r) => r.chave_idempotencia)
-    expect(chaves).toContain('campanha:1:v2:dest:10')
-    expect(chaves).toContain('campanha:1:v2:dest:11')
+    expect(chaves).toContain('campanha:1:v2:exec:60:dest:10')
+    expect(chaves).toContain('campanha:1:v2:exec:60:dest:11')
     const ignorada = upsertRows.find((r) => r.status === 'ignorada')
     expect(ignorada?.erro_codigo).toBe('EXCLUIDO')
   })

@@ -184,6 +184,7 @@ async function persistirMensagem({
       whatsapp_instance_id: item.instancia_id,
       status: messageId ? 'sent' : 'pending',
       whatsapp_id: messageId || null,
+      client_temp_id: referenceId,
       criado_em: new Date().toISOString(),
     })
     .select('id, conversa_id, texto, tipo, url, nome_arquivo, direcao, company_id, status, whatsapp_id, criado_em, whatsapp_instance_id')
