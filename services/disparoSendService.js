@@ -9,6 +9,8 @@ const { findOrCreateConversation } = require('../helpers/conversationSync')
 const { telefoneNaAllowlist, getDisparoFlags } = require('../helpers/disparoWorkerConfig')
 const { buildDispReferenceId } = require('../helpers/disparoReferenceHelper')
 const { marcarAguardandoRespostaCampanha } = require('./disparoConversaOrigemService')
+const { isUltramsgNumericQueueId, isRealWhatsAppId } = require('../helpers/whatsappMessageIdHelper')
+const { schedulePendingOutboundReconciliation } = require('./pendingOutboundReconciliationService')
 const {
   _substituirVariaveis: substituirVariaveis,
   _conteudoEditorial: conteudoEditorial,
@@ -171,6 +173,9 @@ async function persistirMensagem({
     ? textoFinal.texto
     : (textoFinal.legenda || variacao.midia_nome_original || `(${tipo})`)
 
+  const hasRealId = isRealWhatsAppId(messageId)
+  const hasQueueId = Boolean(messageId) && isUltramsgNumericQueueId(messageId)
+
   const { data: mensagem, error } = await supabase
     .from('mensagens')
     .insert({
@@ -182,8 +187,10 @@ async function persistirMensagem({
       direcao: 'out',
       company_id: companyId,
       whatsapp_instance_id: item.instancia_id,
-      status: messageId ? 'sent' : 'pending',
-      whatsapp_id: messageId || null,
+      status: hasRealId ? 'sent' : 'pending',
+      whatsapp_id: hasRealId ? String(messageId) : null,
+      provider_queue_id: hasQueueId ? String(messageId) : null,
+      client_temp_id: referenceId,
       criado_em: new Date().toISOString(),
     })
     .select('id, conversa_id, texto, tipo, url, nome_arquivo, direcao, company_id, status, whatsapp_id, criado_em, whatsapp_instance_id')
@@ -231,6 +238,14 @@ async function persistirMensagem({
     } catch (e) {
       console.warn('[disparo:send] emit nova_mensagem item=', item.id, e?.message || e)
     }
+  }
+
+  if (hasQueueId && !hasRealId && mensagem?.id) {
+    schedulePendingOutboundReconciliation({
+      companyId,
+      mensagemId: mensagem.id,
+      io,
+    })
   }
 
   return mensagem

@@ -247,3 +247,21 @@ if (String(ref || '').startsWith('disp-')) aplicarStatusDisparoFromWebhook(...)
 // ✅ CORRETO — todo ACK, com id do provedor + mensagem do chat
 aplicarStatusDisparoFromWebhook({ referenceId: ref, providerMessageId: idStr, mensagemId: msg?.id, ... })
 ```
+
+---
+
+## 21. ACK de campanha — um pendente na empresa não serve para disparo
+
+**Armadilha:** o fallback de `message_ack` com wamid só aplica se existir **exatamente 1** outbound pendente na empresa (últimos 5 min). No atendimento isso vale. Na campanha o 2º envio (outro contato, ~2 min depois) já vê 2 pendentes e o recibo é **ignorado**. A fila fica em **enviada** (provedor aceitou) sem virar **entregue**.
+
+O send devolve id numérico; o ACK traz `true_5534…@c.us_SID`. Gravar o número em `whatsapp_id` impede o match exato.
+
+```js
+// ❌ ERRADO — whatsapp_id = "35096"; fallback global length === 1
+whatsapp_id: messageId
+
+// ✅ CORRETO
+provider_queue_id: queueId numérico
+whatsapp_id: só wamid real
+// ACK: casar pendente na conversa cujo telefone está no wamid
+```

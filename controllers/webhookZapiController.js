@@ -68,6 +68,7 @@ const {
   parseCrmReferenceMensagemId,
   isReconcilablePendingWhatsappId,
   areEquivalentWhatsAppIds,
+  extractPhoneDigitsFromWhatsappMessageId,
 } = require('../helpers/whatsappMessageIdHelper')
 const {
   STATUS_RANK,
@@ -283,6 +284,56 @@ function whatsappIdCompativelParaReconcile(row, whatsappId) {
 
 function filterRowsForFromMeReconcile(rows) {
   return (Array.isArray(rows) ? rows : []).filter((r) => isReconcilablePendingWhatsappId(r?.whatsapp_id))
+}
+
+/**
+ * ACK wamid (`true_5534…@c.us_…`) quando há vários outbound pendentes na empresa
+ * (campanha). Casa só a conversa daquele telefone — um pendente por contato é seguro.
+ */
+async function findPendingOutboundByAckPhone({
+  company_id,
+  whatsapp_instance_id,
+  ackId,
+  fromIso,
+  select,
+}) {
+  const digits = extractPhoneDigitsFromWhatsappMessageId(ackId)
+  if (!digits || !company_id || !fromIso) return null
+  const phones = Array.from(new Set(
+    [digits, ...(possiblePhonesBR(digits) || [])]
+      .map((p) => String(p || '').replace(/\D/g, ''))
+      .filter((p) => p.length >= 10),
+  ))
+  if (!phones.length) return null
+
+  let convQuery = supabase
+    .from('conversas')
+    .select('id')
+    .eq('company_id', company_id)
+    .in('telefone', phones)
+    .limit(8)
+  convQuery = applyWhatsappInstanceFilterOrLegacy(convQuery, whatsapp_instance_id)
+  const { data: convs, error: convErr } = await convQuery
+  if (convErr) throw convErr
+  const convIds = [...new Set((convs || []).map((c) => c.id).filter(Boolean))]
+  if (!convIds.length) return null
+
+  let msgQuery = supabase
+    .from('mensagens')
+    .select(select)
+    .eq('company_id', company_id)
+    .eq('direcao', 'out')
+    .in('conversa_id', convIds)
+    .gte('criado_em', fromIso)
+    .order('criado_em', { ascending: false })
+    .order('id', { ascending: false })
+    .limit(5)
+  msgQuery = applyWhatsappInstanceFilterOrLegacy(msgQuery, whatsapp_instance_id)
+  const { data: rows, error: msgErr } = await msgQuery
+  if (msgErr) throw msgErr
+  const pending = filterRowsForFromMeReconcile(rows)
+  if (pending.length !== 1) return null
+  return pending[0]
 }
 
 function getCrmReferenceIdFromPayload(payload) {
@@ -4398,6 +4449,36 @@ exports.statusZapi = async (req, res) => {
         }
       }
 
+      // 3b) Campanha: vários pendentes na empresa (fallback 3 exige exatamente 1).
+      //     O id do ACK traz o JID (`true_5534…@c.us_SID`) — casa a conversa daquele telefone.
+      if (!msg && isWhatsAppFormatId && company_id) {
+        const fromIsoPhone = new Date(Date.now() - 30 * 60 * 1000).toISOString()
+        try {
+          const candPhone = await findPendingOutboundByAckPhone({
+            company_id,
+            whatsapp_instance_id,
+            ackId: idStr,
+            fromIso: fromIsoPhone,
+            select: 'id, conversa_id, company_id, autor_usuario_id, whatsapp_instance_id, whatsapp_id, status',
+          })
+          if (candPhone?.id) {
+            const patched = await patchMensagemStatusById(supabase, {
+              company_id,
+              mensagem_id: candPhone.id,
+              effectiveStatus,
+              whatsapp_id: idStr,
+              select: statusSelect,
+            })
+            msg = patched.data || null
+            if (msg && logDebug) {
+              console.log('[DEBUG] status reconciliação: ACK casado pelo telefone da conversa', { mensagem_id: msg.id })
+            }
+          }
+        } catch (ackPhoneErr) {
+          console.warn('[ULTRAMSG] ACK por telefone da conversa:', ackPhoneErr?.message || ackPhoneErr)
+        }
+      }
+
       // 4) Fallback UltraMsg: id numérico de fila — match exato em whatsapp_id (várias mensagens seguidas OK)
       const isUltramsgNumericId = isUltramsgNumericQueueId(idStr)
       if (!msg && isUltramsgNumericId && company_id) {
@@ -4510,6 +4591,7 @@ exports._test = {
   extractMessage,
   whatsappIdCompativelParaReconcile,
   filterRowsForFromMeReconcile,
+  findPendingOutboundByAckPhone,
   findFromMeOutboundMediaCandidate,
   tryReconcileFromMeByCrmReferenceId,
   preserveMediaFieldsOnWebhookFallback,

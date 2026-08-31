@@ -20,8 +20,8 @@ jest.mock('../config/r2', () => ({
   getPresignExpiresSeconds: jest.fn(() => 3600),
 }))
 
-jest.mock('../services/storage/r2Client', () => ({
-  presignGetUrl: jest.fn(),
+jest.mock('../services/pendingOutboundReconciliationService', () => ({
+  schedulePendingOutboundReconciliation: jest.fn(),
 }))
 
 jest.mock('../helpers/disparoWorkerConfig', () => {
@@ -325,6 +325,45 @@ describe('disparoSendService — live (mock ultramsg)', () => {
         companyId: 10,
         referenceId: 'disp-100',
       }),
+    )
+  })
+
+  it('id numérico da UltraMSG grava provider_queue_id e agenda reconciliação', async () => {
+    const { schedulePendingOutboundReconciliation } = require('../services/pendingOutboundReconciliationService')
+    let inserted = null
+    ultramsg.sendText.mockResolvedValue({ ok: true, messageId: '35096' })
+    supabase.from.mockImplementation((table) => {
+      if (table === 'mensagens') {
+        const chain = mockChain({ data: { id: 888, conversa_id: 999 }, error: null })
+        chain.insert = jest.fn((row) => {
+          inserted = row
+          return chain
+        })
+        return chain
+      }
+      if (table === 'disparo_fila_itens') return mockChain({ data: null, error: null })
+      if (table === 'disparo_campanha_destinatarios') return mockChain({ data: destinatario, error: null })
+      if (table === 'disparo_campanha_variacoes') return mockChain({ data: variacao, error: null })
+      if (table === 'whatsapp_instances') return mockChain({ data: instancia, error: null })
+      if (table === 'disparo_campanhas') return mockChain({ data: { variacao_padrao_valores: {} }, error: null })
+      if (table === 'disparo_exclusoes') return mockChain({ data: null, error: null })
+      return mockChain({ data: null, error: null })
+    })
+
+    const result = await enviarItemFila(itemBase, {
+      dryRun: false,
+      liveEnabled: true,
+      allowlist: [],
+      timeoutMs: 5000,
+    })
+
+    expect(result.ok).toBe(true)
+    expect(inserted.provider_queue_id).toBe('35096')
+    expect(inserted.whatsapp_id).toBe(null)
+    expect(inserted.client_temp_id).toBe('disp-100')
+    expect(inserted.status).toBe('pending')
+    expect(schedulePendingOutboundReconciliation).toHaveBeenCalledWith(
+      expect.objectContaining({ companyId: 10, mensagemId: 888 }),
     )
   })
 

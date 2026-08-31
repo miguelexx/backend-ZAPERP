@@ -70,6 +70,24 @@ function isReconcilablePendingWhatsappId(whatsappId) {
  * Extrai o SID UltraMSG quando o id vem completo (false_jid@c.us_SID) ou como hex puro.
  * Usado para equivalência sid ↔ false_…_sid (mesmo envio, formatos diferentes).
  */
+/**
+ * Telefone no id de ACK UltraMSG/WhatsApp: `true_5534…@c.us_SID` / `false_…@c.us_SID`.
+ * Serve para casar o recibo com a conversa certa quando há vários envios na mesma janela
+ * (campanha): o fallback global só aplica se existir exatamente 1 pendente na empresa.
+ */
+function extractPhoneDigitsFromWhatsappMessageId(waId) {
+  const s = String(waId || '').trim()
+  if (!s) return null
+  const composed = s.match(/^(?:true|false)_([^@]+)@c\.us(?:_|$)/i)
+  if (composed) {
+    const digits = String(composed[1] || '').replace(/\D/g, '')
+    return digits.length >= 10 ? digits : null
+  }
+  const plain = s.match(/^(\d{10,15})@c\.us$/i)
+  if (plain) return plain[1]
+  return null
+}
+
 function extractUltramsgSid(waId) {
   const s = String(waId || '').trim()
   if (!s) return null
@@ -104,5 +122,6 @@ module.exports = {
   parseCrmReferenceMensagemId,
   isReconcilablePendingWhatsappId,
   extractUltramsgSid,
+  extractPhoneDigitsFromWhatsappMessageId,
   areEquivalentWhatsAppIds,
 }

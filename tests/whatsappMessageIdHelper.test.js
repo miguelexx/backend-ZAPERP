@@ -24,9 +24,11 @@ describe('whatsappMessageIdHelper', () => {
     expect(parseCrmReferenceMensagemId(buildCrmReferenceId(42))).toBe(42)
   })
 
-  test('isReconcilablePendingWhatsappId aceita null e fila numérica', () => {
-    expect(isReconcilablePendingWhatsappId(null)).toBe(true)
-    expect(isReconcilablePendingWhatsappId('35096')).toBe(true)
-    expect(isReconcilablePendingWhatsappId('false_5511@c.us_X')).toBe(false)
+  test('extractPhoneDigitsFromWhatsappMessageId lê o JID do ACK UltraMSG', () => {
+    const { extractPhoneDigitsFromWhatsappMessageId } = require('../helpers/whatsappMessageIdHelper')
+    expect(extractPhoneDigitsFromWhatsappMessageId('true_55349841246@c.us_3EB0ABC')).toBe('55349841246')
+    expect(extractPhoneDigitsFromWhatsappMessageId('false_5534999741@c.us_SID')).toBe('5534999741')
+    expect(extractPhoneDigitsFromWhatsappMessageId('35096')).toBe(null)
+    expect(extractPhoneDigitsFromWhatsappMessageId('5534999999999@c.us')).toBe('5534999999999')
   })
 })
