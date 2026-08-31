@@ -193,6 +193,22 @@ const {
   assertPodeEnviarMensagem,
 } = require('../services/chat/access/conversationPolicy')
 const { deriveListarConversasFilters } = require('../services/chat/read/listarConversasFilters')
+const {
+  textoRevogadoApagadaParaTodos,
+  aplicarApagadaParaTodosNaMensagem,
+  enrichMensagensComAutorUsuario,
+  textoParaEnvioWhatsapp,
+  prefixarParaCliente,
+  getUsuarioParaEnvioCliente,
+  enrichMensagemComAutorUsuario,
+} = require('../services/chat/presentation/messageAuthorEnrichment')
+const { marcarComoLidaPorUsuario, obterUnreadMap } = require('../services/chat/unread/conversationUnreadService')
+const {
+  loadWhatsappInstanceMetaMap,
+  resolveUltraMsgReplyMessageId,
+  buscarConversaIdsPorTextoMensagens,
+} = require('../services/chat/read/conversationLookups')
+const { sanitizePixConfigPayload, formatPixTipoLabel, buildPixMessageFromConfig } = require('../services/chat/outbound/pixConfig')
 
 /**
  * Deduplicação in-memory para double-send de texto.
@@ -239,69 +255,6 @@ async function findMensagemByClientTempId(company_id, conversa_id, clientTempId,
     console.warn('[client_temp_id] excecao ao consultar dedupe persistente:', error?.message || error)
     return null
   }
-}
-
-async function loadWhatsappInstanceMetaMap(company_id, instanceIds) {
-  const ids = [...new Set((instanceIds || []).map((id) => Number(id)).filter((id) => Number.isFinite(id) && id > 0))]
-  if (ids.length === 0) return new Map()
-  try {
-    const { data, error } = await supabase
-      .from('whatsapp_instances')
-      .select('id, company_id, nome, provider, display_phone')
-      .eq('company_id', Number(company_id))
-      .in('id', ids)
-    if (error) {
-      console.warn('[whatsapp_instances] metadados indisponiveis para conversas:', error.message || error)
-      return new Map()
-    }
-    return new Map((data || []).map((row) => [Number(row.id), row]))
-  } catch (err) {
-    console.warn('[whatsapp_instances] falha ao enriquecer conversas:', err?.message || err)
-    return new Map()
-  }
-}
-
-/**
- * Para POST /messages/chat com reply: `msgId` deve ser o id da mensagem no WhatsApp (webhook),
- * não o id interno da tabela `mensagens`. Aceita já no formato UltraMsg/WA ou resolve por `mensagens.id`.
- */
-async function resolveUltraMsgReplyMessageId(supabaseClient, company_id, conversa_id, replyToIdRaw) {
-  const rid = String(replyToIdRaw ?? '').trim()
-  if (!rid) return null
-
-  // 1) Se já existir mensagem com whatsapp_id igual ao rid, ele já é o id canônico do WhatsApp.
-  try {
-    const { data: byWhatsappId } = await supabaseClient
-      .from('mensagens')
-      .select('id')
-      .eq('company_id', company_id)
-      .eq('conversa_id', Number(conversa_id))
-      .eq('whatsapp_id', rid)
-      .maybeSingle()
-    if (byWhatsappId) return rid
-  } catch (_) {}
-
-  // 2) Se o frontend enviou mensagens.id (UUID/bigint), resolver para whatsapp_id real.
-  // Nunca enviar id interno para UltraMsg `msgId`, pois não cria citação no WhatsApp.
-  try {
-    const { data: refMsg } = await supabaseClient
-      .from('mensagens')
-      .select('whatsapp_id')
-      .eq('company_id', company_id)
-      .eq('conversa_id', Number(conversa_id))
-      .eq('id', rid)
-      .maybeSingle()
-    const wa = refMsg?.whatsapp_id != null ? String(refMsg.whatsapp_id).trim() : ''
-    if (wa) return wa
-  } catch (_) {}
-
-  // 3) Fallback seguro: aceitar apenas formatos que parecem id real de mensagem WA/UltraMsg.
-  // Evita enviar UUID/ID interno como msgId (causa mensagem avulsa no WhatsApp do cliente).
-  const isUuid =
-    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(rid)
-  const looksLikeWhatsAppId = rid.includes('@') || rid.includes('_')
-  if (!isUuid && looksLikeWhatsAppId) return rid
-  return null
 }
 
 // =====================================================
@@ -359,173 +312,6 @@ function ordenarMensagensHistoricoAsc(a, b) {
 }
 
 exports.emitirMovimentacaoInternaAtendimento = emitirMovimentacaoInternaAtendimento
-
-/** Enriquece mensagens com usuario_id, usuario_nome e enviado_por_usuario (apenas direcao out) */
-function textoRevogadoApagadaParaTodos(m, viewerUserId) {
-  const souAutor =
-    m?.autor_usuario_id != null &&
-    viewerUserId != null &&
-    Number(m.autor_usuario_id) === Number(viewerUserId)
-  return souAutor ? 'Você apagou esta mensagem para todos.' : 'Esta mensagem foi apagada para todos.'
-}
-
-function aplicarApagadaParaTodosNaMensagem(m, viewerUserId) {
-  if (!m?.apagada_para_todos) return m
-  return {
-    ...m,
-    apagada_para_todos: true,
-    texto: textoRevogadoApagadaParaTodos(m, viewerUserId),
-    reply_meta: null,
-    mensagem_respondida_id: null,
-  }
-}
-
-async function enrichMensagensComAutorUsuario(supabase, company_id, mensagens, viewerUserId = null) {
-  if (!Array.isArray(mensagens) || mensagens.length === 0) return mensagens
-  const autorIds = [...new Set(mensagens.map((m) => m.autor_usuario_id).filter(Boolean))]
-  const decorate = (m, usuarioNome) => {
-    let row = {
-      ...m,
-      criado_em: normalizarTimestampSemFusoAmbiguoParaApi(m.criado_em),
-      usuario_id: m.autor_usuario_id ?? null,
-      usuario_nome: usuarioNome,
-      enviado_por_usuario: m.direcao === 'out' && m.autor_usuario_id != null,
-    }
-    if (viewerUserId != null) row = aplicarApagadaParaTodosNaMensagem(row, viewerUserId)
-    return row
-  }
-  if (autorIds.length === 0) return mensagens.map((m) => decorate(m, null))
-  const { data: us } = await supabase.from('usuarios').select('id, nome').eq('company_id', company_id).in('id', autorIds)
-  const usuarioMap = new Map((us || []).map((u) => [u.id, u.nome]))
-  return mensagens.map((m) =>
-    decorate(
-      m,
-      m.direcao === 'out' && m.autor_usuario_id ? (usuarioMap.get(m.autor_usuario_id) ?? null) : null
-    )
-  )
-}
-
-const { formatTextoWhatsappComNomeAtendente } = require('../helpers/mensagemAtendenteNomeHelper')
-
-/** Texto ao WhatsApp com *nome* na primeira linha (respeita getUsuarioParaEnvioCliente). CRM grava sem prefixo. */
-function textoParaEnvioWhatsapp(texto, usuarioNome) {
-  return formatTextoWhatsappComNomeAtendente(texto, usuarioNome)
-}
-
-function prefixarParaCliente(texto, usuarioNome) {
-  return formatTextoWhatsappComNomeAtendente(texto, usuarioNome)
-}
-
-/** Busca nome e preferência do usuário para exibir ao cliente no WhatsApp. Retorna { nome, mostrar } */
-async function getUsuarioParaEnvioCliente(supabase, company_id, user_id) {
-  if (!user_id) return { nome: null, mostrar: false }
-  const { data, error } = await supabase.from('usuarios').select('nome, mostrar_nome_ao_cliente').eq('company_id', company_id).eq('id', user_id).maybeSingle()
-  if (error) return { nome: null, mostrar: true }
-  const mostrar = data?.mostrar_nome_ao_cliente !== false
-  const nome = (data?.nome && String(data.nome).trim()) || null
-  return { nome: mostrar ? nome : null, mostrar }
-}
-
-/** Enriquece uma mensagem única com usuario_nome (para evento nova_mensagem) */
-async function enrichMensagemComAutorUsuario(supabase, company_id, msg) {
-  const isOut = msg?.direcao === 'out'
-  if (!msg || !isOut || !msg.autor_usuario_id) {
-    return {
-      ...msg,
-      criado_em: normalizarTimestampSemFusoAmbiguoParaApi(msg?.criado_em),
-      usuario_id: msg?.autor_usuario_id ?? null,
-      usuario_nome: null,
-      enviado_por_usuario: !!(isOut && msg?.autor_usuario_id),
-      // fromMe: mensagens enviadas pelo CRM (direcao 'out') são sempre fromMe=true para fins de notificação.
-      // O frontend NÃO deve exibir notificação/som para estas mensagens.
-      fromMe: isOut,
-    }
-  }
-  const { data: u } = await supabase.from('usuarios').select('id, nome').eq('company_id', company_id).eq('id', msg.autor_usuario_id).maybeSingle()
-  return {
-    ...msg,
-    criado_em: normalizarTimestampSemFusoAmbiguoParaApi(msg?.criado_em),
-    usuario_id: msg.autor_usuario_id,
-    usuario_nome: u?.nome ?? null,
-    enviado_por_usuario: true,
-    fromMe: true,
-    apagada_para_todos: msg?.apagada_para_todos === true,
-  }
-}
-
-// =====================================================
-// 2) UNREAD (TotalChat-like)
-// =====================================================
-async function marcarComoLidaPorUsuario({ company_id, conversa_id, usuario_id }) {
-  await Promise.all([
-    supabase
-      .from('conversa_unreads')
-      .update({
-        unread_count: 0,
-        updated_at: new Date().toISOString()
-      })
-      .eq('company_id', Number(company_id))
-      .eq('conversa_id', Number(conversa_id))
-      .eq('usuario_id', Number(usuario_id)),
-    supabase
-      .from('conversas')
-      .update({ lida: true })
-      .eq('company_id', Number(company_id))
-      .eq('id', Number(conversa_id))
-  ])
-}
-
-async function obterUnreadMap({ company_id, usuario_id }) {
-  const { data, error } = await supabase
-    .from('conversa_unreads')
-    .select('conversa_id, unread_count')
-    .eq('company_id', Number(company_id))
-    .eq('usuario_id', Number(usuario_id))
-
-  if (error) return {}
-
-  const map = {}
-  for (const row of data || []) {
-    map[Number(row.conversa_id)] = Number(row.unread_count || 0)
-  }
-  return map
-}
-
-async function buscarConversaIdsPorTextoMensagens({ company_id, term }) {
-  const pageSize = getSearchMessagesPageSize()
-  const scanLimit = getChatSearchScanLimit()
-  const idLimit = getChatSearchIdLimit()
-  const ids = new Set()
-  // term chega sem wildcards; construímos aqui para manter contrato uniforme com o service
-  const likePattern = `%${escapeIlikePattern(term)}%`
-
-  for (let start = 0; start < scanLimit && ids.size < idLimit; start += pageSize) {
-    const end = Math.min(start + pageSize - 1, scanLimit - 1)
-    const { data, error } = await supabase
-      .from('mensagens')
-      .select('conversa_id')
-      .eq('company_id', Number(company_id))
-      .ilike('texto', likePattern)
-      .order('criado_em', { ascending: false })
-      .order('id', { ascending: false })
-      .range(start, end)
-
-    if (error) {
-      console.warn('[busca-msg] erro na varredura de mensagens:', error.message)
-      break
-    }
-
-    const rows = Array.isArray(data) ? data : []
-    for (const row of rows) {
-      if (row?.conversa_id != null) ids.add(row.conversa_id)
-      if (ids.size >= idLimit) break
-    }
-
-    if (rows.length < (end - start + 1)) break
-  }
-
-  return [...ids]
-}
 
 exports.incrementarUnreadParaConversa = incrementarUnreadParaConversa
 exports.emitirParaUsuariosQuePodemVerConversa = emitirParaUsuariosQuePodemVerConversa
@@ -4975,59 +4761,6 @@ exports.transferirSetor = async (req, res) => {
     console.error(err)
     return res.status(500).json({ error: 'Erro ao transferir setor' })
   }
-}
-
-function sanitizePixConfigPayload(body = {}) {
-  const allowedTipos = new Set(['cpf', 'cnpj', 'email', 'telefone', 'aleatoria'])
-  const tipo_chave = String(body?.tipo_chave || '').trim().toLowerCase()
-  const chave_pix = String(body?.chave_pix || '').trim()
-  const nome_recebedor = String(body?.nome_recebedor || '').trim()
-  const mensagem_padrao = String(body?.mensagem_padrao || '').trim()
-
-  if (!allowedTipos.has(tipo_chave)) {
-    return { ok: false, status: 400, error: 'tipo_chave inválido. Use: cpf, cnpj, email, telefone ou aleatoria.' }
-  }
-  if (!chave_pix) {
-    return { ok: false, status: 400, error: 'chave_pix é obrigatória.' }
-  }
-  if (!nome_recebedor) {
-    return { ok: false, status: 400, error: 'nome_recebedor é obrigatório.' }
-  }
-
-  return {
-    ok: true,
-    data: {
-      tipo_chave,
-      chave_pix: chave_pix.slice(0, 200),
-      nome_recebedor: nome_recebedor.slice(0, 120),
-      mensagem_padrao: mensagem_padrao ? mensagem_padrao.slice(0, 500) : null,
-    }
-  }
-}
-
-function formatPixTipoLabel(tipo) {
-  const t = String(tipo || '').trim().toLowerCase()
-  if (t === 'cpf') return 'CPF'
-  if (t === 'cnpj') return 'CNPJ'
-  if (t === 'email') return 'E-mail'
-  if (t === 'telefone') return 'Telefone'
-  if (t === 'aleatoria') return 'Chave aleatória'
-  return t || 'Chave Pix'
-}
-
-function buildPixMessageFromConfig(cfg) {
-  const tipoLabel = formatPixTipoLabel(cfg?.tipo_chave)
-  const extra = cfg?.mensagem_padrao ? `\n\n${String(cfg.mensagem_padrao).trim()}` : ''
-  return [
-    'Segue a chave Pix para pagamento:',
-    '',
-    `Nome: ${String(cfg?.nome_recebedor || '').trim()}`,
-    `Tipo da chave: ${tipoLabel}`,
-    `Chave Pix: ${String(cfg?.chave_pix || '').trim()}`,
-    extra,
-    '',
-    'Após o pagamento, por favor envie o comprovante por aqui.'
-  ].join('\n').trim()
 }
 
 /** GET /chats/pix-config */

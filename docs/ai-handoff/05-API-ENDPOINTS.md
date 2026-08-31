@@ -44,7 +44,7 @@ Todas as operações autenticadas devem limitar consultas por `req.user.company_
 | `PUT /config/whatsapp/profile-picture`, `/profile-name`, `/profile-description` | `configController` | A+SA+AD+D; chama UltraMSG para perfil da instância. |
 | `GET /config/permissoes/catalogo` | `permissoesController.getCatalogo` | A+SA; catálogo estático/DB. |
 | `GET/PUT /config/operacional`, `GET /config/auditoria-eventos` | `configOperacionalController` | A+SA; PUT exige AD; configura/loga eventos operacionais. |
-| `GET/PUT /config/alerta-sem-resposta`, `GET /config/alerta-sem-resposta/eventos`, `POST /config/alerta-sem-resposta/processar` | `atendimentoSemRespostaController` | A+SA; PUT/processar AD; processar altera alertas e pode emitir socket. |
+| `GET/PUT /config/alerta-sem-resposta`, `GET /config/alerta-sem-resposta/eventos`, `POST /config/alerta-sem-resposta/processar` | `atendimentoSemRespostaController` | A+SA em todas (`configOperacionalRoutes` usa `supervisorOrAdmin`, sem `adminOnly`). Processar altera alertas e pode emitir socket; `company_id` só do JWT. |
 
 ## Clientes, tags, conversas e mensagens
 
@@ -83,6 +83,7 @@ Todas as operações autenticadas devem limitar consultas por `req.user.company_
 | Rotas | Controller e acesso | Efeito |
 |---|---|---|
 | `GET /dashboard/overview`, `/metrics`, `/metrics-avancadas` | `dashboardController`; A+SA | Agregações tenant-scoped. |
+| `GET /dashboard/crm-resumo` | mesmo; A+SA | CRM Avançado externo (`crmSyncService`); `company_id` do JWT; `enabled:false` se integração off. |
 | `GET/POST /dashboard/departamentos`, `PUT/DELETE /dashboard/departamentos/:id` | mesmo; A; mutações AD, delete D | CRUD de setores. |
 | `GET/PUT /dashboard/departamentos/:id/grupos` | mesmo; A+SA | Associação setor–grupos. |
 | `GET/POST /dashboard/respostas-salvas`, `PUT/DELETE .../:id` | mesmo; A; delete D | CRUD de respostas rápidas. |
@@ -193,7 +194,7 @@ Esta lista foi derivada das declarações `Router` em 2026-08-23 e serve à comp
 
 ### `dashboardRoutes.js`
 
-`GET /dashboard/overview` · `GET /dashboard/metrics` · `GET /dashboard/metrics-avancadas` · `GET /dashboard/departamentos` · `POST /dashboard/departamentos` · `GET /dashboard/departamentos/:id/grupos` · `PUT /dashboard/departamentos/:id/grupos` · `PUT /dashboard/departamentos/:id` · `DELETE /dashboard/departamentos/:id` · `GET /dashboard/respostas-salvas` · `POST /dashboard/respostas-salvas` · `PUT /dashboard/respostas-salvas/:id` · `DELETE /dashboard/respostas-salvas/:id` · `GET /dashboard/relatorios/conversas` · `GET /dashboard/relatorios/mensagens` · `GET /dashboard/relatorios/export` · `GET /dashboard/sla/config` · `PUT /dashboard/sla/config` · `GET /dashboard/sla/alertas` · `GET /dashboard/sla/resumo` · `GET /dashboard/sla/diaria` · `GET /dashboard/sla/export` · `GET /dashboard/sla/validacao/:conversa_id`
+`GET /dashboard/overview` · `GET /dashboard/metrics` · `GET /dashboard/metrics-avancadas` · `GET /dashboard/crm-resumo` · `GET /dashboard/departamentos` · `POST /dashboard/departamentos` · `GET /dashboard/departamentos/:id/grupos` · `PUT /dashboard/departamentos/:id/grupos` · `PUT /dashboard/departamentos/:id` · `DELETE /dashboard/departamentos/:id` · `GET /dashboard/respostas-salvas` · `POST /dashboard/respostas-salvas` · `PUT /dashboard/respostas-salvas/:id` · `DELETE /dashboard/respostas-salvas/:id` · `GET /dashboard/relatorios/conversas` · `GET /dashboard/relatorios/mensagens` · `GET /dashboard/relatorios/export` · `GET /dashboard/sla/config` · `PUT /dashboard/sla/config` · `GET /dashboard/sla/alertas` · `GET /dashboard/sla/resumo` · `GET /dashboard/sla/diaria` · `GET /dashboard/sla/export` · `GET /dashboard/sla/validacao/:conversa_id`
 
 ### `disparoRoutes.js`
 

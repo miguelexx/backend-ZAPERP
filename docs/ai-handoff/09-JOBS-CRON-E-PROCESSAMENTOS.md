@@ -12,7 +12,7 @@ O processo HTTP inicia schedulers após subir Socket.IO, exceto em `NODE_ENV=tes
 | **Disparo (embutido)** | poll 2 s / heartbeat 10 s | claim da fila de campanhas + heartbeat. Kill switch `DISPARO_WORKER_ENABLED=false`. |
 | finalização por ausência | 5 min / 20 s | encerra/atualiza conversas elegíveis. |
 | alerta admin atendimento | 2 min / 25 s | detecta e notifica alertas. |
-| atendimento sem resposta | 1 min / 35 s | gera/atualiza alertas e sockets. |
+| atendimento sem resposta | 1 min / 35 s | gera/atualiza alertas e sockets. Lógica em `atendimentoSemRespostaService.js`; plano de quebra em [19](19-ATENDIMENTO-SEM-RESPOSTA-MODULARIZACAO.md). |
 | sync de produtos | 30 min / 30 s, somente com duas flags | SQL Server → PostgreSQL externo. |
 | reconciliação outbound pendente | 5 min / 45 s | consulta/reclassifica mensagens pendentes. |
 | redirecionamento de triagem | 1 min / 30 s | move conversas sem escolha/tempo. |

@@ -1,13 +1,13 @@
 # Backend ZapERP — Documentação
 
-> Atualizado: **2026-08-24** · branch `master` · fonte normativa = código + migrations.
+> Atualizado: **2026-08-31** · branch `master` · fonte normativa = código + migrations.
 
 ---
 
 ## Começo rápido para IAs
 
 **Leia primeiro:** [`AI_HANDOFF.md`](AI_HANDOFF.md) — contexto completo em uma página.  
-**Análise técnica profunda:** [`ai-handoff/00-LEIA-PRIMEIRO.md`](ai-handoff/00-LEIA-PRIMEIRO.md) — série de 17 documentos especializados.
+**Análise técnica profunda:** [`ai-handoff/00-LEIA-PRIMEIRO.md`](ai-handoff/00-LEIA-PRIMEIRO.md) — série de documentos especializados.
 
 ---
 
@@ -19,7 +19,7 @@ docs/
 ├── README.md                   ← este arquivo (índice)
 ├── DOCUMENTATION_AUDIT.md     ← histórico de mudanças na documentação
 │
-├── ai-handoff/                 ← referência técnica completa (17 docs)
+├── ai-handoff/                 ← referência técnica completa
 │   ├── 00-LEIA-PRIMEIRO.md    estado, limitações, ordem de leitura
 │   ├── 01-ARQUITETURA.md      diagrama, camadas, HTTP, async
 │   ├── 02-ESTRUTURA-DO-BACKEND.md  pastas, responsabilidades
@@ -38,7 +38,9 @@ docs/
 │   ├── 15-GLOSSARIO.md
 │   ├── 16-MAPA-DE-ARQUIVOS-CRITICOS.md  qual arquivo ler para cada tarefa
 │   ├── 17-CHECKLIST-PARA-PROXIMA-IA.md
-│   └── 18-ANTI-PADROES-E-ARMADILHAS.md  15 armadilhas específicas desta codebase
+│   ├── 18-ANTI-PADROES-E-ARMADILHAS.md  15 armadilhas específicas desta codebase
+│   ├── 19-ATENDIMENTO-SEM-RESPOSTA-MODULARIZACAO.md  plano/mapa do alerta sem resposta
+│   └── 20-DASHBOARD-MODULARIZACAO.md  quebra do dashboardController
 │
 └── reference/                  ← referência suplementar por domínio
     ├── PROJECT_RULES.md        regras do projeto (multi-tenant, segurança, padrões)
@@ -78,6 +80,8 @@ docs/
 | Autenticação / permissões | `ai-handoff/08-AUTENTICACAO-SEGURANCA-E-MULTITENANCY.md` |
 | Qualquer mudança nova | `ai-handoff/17-CHECKLIST-PARA-PROXIMA-IA.md` |
 | Evitar erros comuns de IAs | `ai-handoff/18-ANTI-PADROES-E-ARMADILHAS.md` |
+| Modularizar alerta sem resposta | `ai-handoff/19-ATENDIMENTO-SEM-RESPOSTA-MODULARIZACAO.md` |
+| Modularizar dashboard | `ai-handoff/20-DASHBOARD-MODULARIZACAO.md` |
 | Proteção de envio / rate limit / opt-in | `reference/PROTECAO-ENVIO.md` |
 | Scripts de manutenção / diagnóstico / R2 | `reference/SCRIPTS-CATALOG.md` |
 

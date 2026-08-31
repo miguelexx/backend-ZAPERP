@@ -40,6 +40,8 @@ Estados de certeza usados:
 4. [UltraMSG](06-WHATSAPP-ULTRAMSG-E-WEBHOOKS.md), [Socket.IO](07-SOCKET-IO-E-TEMPO-REAL.md) e [jobs](09-JOBS-CRON-E-PROCESSAMENTOS.md).
 5. [configuração](10-CONFIGURACAO-E-AMBIENTES.md), [testes](11-TESTES-E-VALIDACAO.md), [operação](12-DEPLOY-E-OPERACAO.md) e [riscos](13-PROBLEMAS-CONHECIDOS-E-DIVIDA-TECNICA.md).
 6. [decisões](14-DECISOES-TECNICAS.md), [glossário](15-GLOSSARIO.md), [checklist](17-CHECKLIST-PARA-PROXIMA-IA.md) e [anti-padrões](18-ANTI-PADROES-E-ARMADILHAS.md).
+7. Tarefa de quebrar `atendimentoSemRespostaService.js`: [19](19-ATENDIMENTO-SEM-RESPOSTA-MODULARIZACAO.md) (não está no caminho obrigatório geral).
+8. Tarefa de quebrar `dashboardController.js`: [20](20-DASHBOARD-MODULARIZACAO.md).
 
 ## Pontos que exigem análise antes de alteração
 

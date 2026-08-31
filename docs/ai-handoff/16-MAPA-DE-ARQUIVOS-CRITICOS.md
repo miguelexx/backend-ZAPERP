@@ -32,6 +32,8 @@
 | `services/disparoFilaService.js`, `disparoSendService.js` | fila/idempotência/envio | crítico | `disparoFilaService`, `disparoSendService`; teste live mock atualmente divergente. |
 | `services/disparoOptOutService.js`, reconciliação | exclusão, resposta, incerto | crítico | opt-out/reconciliação; comando exato, tenant, terminalidade. |
 | `controllers/disparoSaudeController.js`, `helpers/disparoObservabilidade.js` | health Etapa 9 | crítico | novos testes de isolamento; heartbeat global hoje expõe metadado cross-tenant. |
+| `controllers/dashboardController.js` + `controllers/dashboard/` | overview, métricas, SLA, relatórios, setores, respostas salvas | alto | `auth.test.js` (401). Quebra: [20](20-DASHBOARD-MODULARIZACAO.md). `company_id` só do JWT. |
+| `services/atendimentoSemRespostaService.js` + `services/atendimentoSemResposta/` | alerta sem resposta (fachada + módulos) | alto | `atendimentoSemRespostaService.test.js`. SLA importa `helpers/businessSchedule.js`. Invariantes e pastas: [19](19-ATENDIMENTO-SEM-RESPOSTA-MODULARIZACAO.md). Não mudar ordem do claim do gestor. |
 | `services/*Scheduler.js`, `jobs/`, `controllers/jobsController.js` | tarefas em processo/cron | alto | suites de scheduler/cron; desligar em teste, evitar execução duplicada. |
 | `ecosystem.config.js` | topologia PM2 | crítico operacional | manter `instances: 1` até coordenação distribuída. |
 | `.env.example` | catálogo operacional | alto segurança | nunca copiar valor; contém exemplo credential-shaped a revisar. |

@@ -14,7 +14,7 @@ const {
   normalizeBusinessSchedule,
   describeBusinessSchedule,
   mergeScheduleSource,
-} = require('./atendimentoSemRespostaService')
+} = require('../helpers/businessSchedule')
 const { empresaModoSimplesAtivo } = require('../helpers/empresaModoSimplesFlag')
 
 const SAO_PAULO_TZ = 'America/Sao_Paulo'

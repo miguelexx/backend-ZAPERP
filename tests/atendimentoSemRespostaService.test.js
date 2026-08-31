@@ -393,4 +393,21 @@ describe('atendimentoSemRespostaService', () => {
       expect(businessMinutesBetween(anchor, new Date('2026-06-16T12:05:00.000Z'), schedule)).toBe(5)
     })
   })
+
+  describe('processor via fachada', () => {
+    it('retorna skipped inativo quando o alerta está desligado', async () => {
+      const { processCompanyAtendimentoSemResposta } = require('../services/atendimentoSemRespostaService')
+      const result = await processCompanyAtendimentoSemResposta(1)
+      expect(result.ok).toBe(true)
+      expect(result.skipped).toBe('inativo')
+      expect(result.processadas).toBe(0)
+    })
+  })
+
+  it('reexporta o horario comercial do helper compartilhado', () => {
+    const fromHelper = require('../helpers/businessSchedule')
+    const fromFacade = require('../services/atendimentoSemRespostaService')
+    expect(fromFacade.businessMinutesBetween).toBe(fromHelper.businessMinutesBetween)
+    expect(fromFacade.mergeScheduleSource).toBe(fromHelper.mergeScheduleSource)
+  })
 })

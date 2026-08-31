@@ -5,6 +5,23 @@
 
 ---
 
+## Atualização 2026-08-31
+
+| Arquivo | Ação | Motivo |
+|---------|------|--------|
+| `docs/ai-handoff/19-ATENDIMENTO-SEM-RESPOSTA-MODULARIZACAO.md` | Criado + atualizado | Mapa e, em 2026-08-31, registro da quebra executada (pastas reais). |
+| `docs/README.md` | Atualizado | Índice e guia de leitura apontam para o doc 19. |
+| `docs/ai-handoff/00-LEIA-PRIMEIRO.md` | Atualizado | Item 7 da ordem de leitura (só para essa tarefa). |
+| `docs/ai-handoff/04-MODULOS-E-REGRAS-DE-NEGOCIO.md` | Atualizado | Linha do módulo de alerta sem resposta. |
+| `docs/ai-handoff/05-API-ENDPOINTS.md` | Corrigido | PUT/processar de alerta-sem-resposta são A+SA no código, não AD. |
+| `docs/ai-handoff/13-PROBLEMAS-CONHECIDOS-E-DIVIDA-TECNICA.md` | Atualizado | Dívida do monolito + lacuna de testes do processor. |
+| `docs/ai-handoff/16-MAPA-DE-ARQUIVOS-CRITICOS.md` | Atualizado | Arquivo do service marcado como alto risco. |
+| `docs/ai-handoff/09-JOBS-CRON-E-PROCESSAMENTOS.md` | Atualizado | Ponteiro do scheduler de alerta sem resposta para o doc 19. |
+| `docs/ai-handoff/20-DASHBOARD-MODULARIZACAO.md` | Criado | Mapa da quebra de `dashboardController.js`. |
+| `docs/ai-handoff/05-API-ENDPOINTS.md` | Atualizado | Rota `GET /dashboard/crm-resumo` documentada. |
+
+---
+
 ## Atualização 2026-08-24 (segunda rodada)
 
 | Arquivo | Ação | Motivo |
