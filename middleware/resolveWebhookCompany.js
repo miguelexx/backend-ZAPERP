@@ -3,7 +3,7 @@
 /**
  * Resolve instanceId (UltraMSG) → company_id para webhooks.
  * Injeta `req.webhookContext` e mantém alias legado `req.zapiContext` (compatibilidade).
- * @see ../docs/_OFICIAL/ADR-LEGACY-NAMING.md
+ * @see ../docs/reference/ADR-LEGACY-NAMING.md
  */
 
 const { getWhatsappInstanceByProviderInstanceId } = require('../services/whatsappInstanceService')

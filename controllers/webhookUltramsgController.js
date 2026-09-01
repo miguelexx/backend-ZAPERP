@@ -1,6 +1,6 @@
 /**
  * Webhook UltraMSG: recebe eventos e normaliza para um formato interno unificado
- * consumido pelo pipeline de mensagens (`webhookZapiController` — nome de ficheiro legado; ver ../docs/_OFICIAL/ADR-LEGACY-NAMING.md).
+ * consumido pelo pipeline de mensagens (`webhookZapiController` — nome de ficheiro legado; ver ../docs/reference/ADR-LEGACY-NAMING.md).
  *
  * Formato UltraMsg (como chega do site):
  * {

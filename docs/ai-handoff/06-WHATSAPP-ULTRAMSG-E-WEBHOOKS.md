@@ -2,7 +2,7 @@
 
 > Análise estática: 2026-08-23 · `master` · `66e0771d9f61f840524cd4b0645e742df374a77a` · fontes principais: **`services/providers/ultramsg.js`** (shim; pasta `ultramsg/`; **não** existe `ultramsgProvider.js`), `services/whatsappInstanceService.js`, `controllers/webhookUltramsgController.js`, `controllers/webhookZapiController.js`, `controllers/chatController.js` + `controllers/chat/` ([23](23-CHAT-CONTROLLER-MODULARIZACAO.md)), `middleware/requireWebhookToken.js`, `middleware/resolveWebhookInstance.js` e testes `*Ultramsg*`, `*Webhook*`, `*Ack*`.
 >
-> Mapa interno do adapter (envio, JID, HTTP, pastas): [21](21-ULTRAMSG-PROVIDER-MODULARIZACAO.md). Este doc 06 cobre o fluxo ponta a ponta (chat → provider → webhook).
+> Mapa interno do adapter (envio, JID, HTTP, pastas): [21](21-ULTRAMSG-PROVIDER-MODULARIZACAO.md). Mapa interno do **inbound/ACK** (`webhookZapiController`, ainda monolito): [24](24-WEBHOOK-INBOUND-MODULARIZACAO.md). Este doc 06 cobre o fluxo ponta a ponta (chat → provider → webhook).
 
 ## Modelo da integração
 

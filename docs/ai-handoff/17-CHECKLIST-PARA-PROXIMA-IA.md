@@ -28,7 +28,8 @@ Não prosseguir sem esta declaração. Se o escopo for maior do que esperado, re
 - [ ] Localizar route → controller → service/helper/repository → migration → teste. Buscar também aliases e chamadas legadas; nome “Zapi” não significa inativo.
 - [ ] Tarefa no adapter UltraMSG (`services/providers/ultramsg.js`): ler [21](21-ULTRAMSG-PROVIDER-MODULARIZACAO.md) antes de fatiar ou unificar JID.
 - [ ] Tarefa no assistente IA (`services/aiDashboardService.js` / `POST /ai/ask`): ler [22](22-AI-DASHBOARD-MODULARIZACAO.md). Sessão A **já feita** (35 testes puros). Não repetir extração de clamp/tempo/heurística. Sessão B = queries + classify/format. Não confundir com dashboard HTTP nem com alerta sem resposta.
-- [ ] Tarefa no chat HTTP: ler [23](23-CHAT-CONTROLLER-MODULARIZACAO.md) + [`CHAT_ARQUITETURA_MODULAR.md`](../CHAT_ARQUITETURA_MODULAR.md). `docs/CHAT_CONTROLLER_MODULARIZACAO.md` é histórico. Não descartar `idempotencyService` / `mediaMessageController` se estiverem untracked.
+- [ ] Tarefa no chat HTTP: ler [23](23-CHAT-CONTROLLER-MODULARIZACAO.md) + [`CHAT_ARQUITETURA_MODULAR.md`](../CHAT_ARQUITETURA_MODULAR.md). Fachada **já é shim**. **Não reextrair** lista/texto/PIX. Não descartar `conversationListController.js` / `textMessageController.js` / `pixController.js` se estiverem untracked.
+- [ ] Tarefa no webhook inbound/ACK: ler [24](24-WEBHOOK-INBOUND-MODULARIZACAO.md). Fases 1–2 já em `controllers/webhookInbound/` (podem estar untracked). **Não** mover `receberZapi`/`statusZapi`. Não renomear o arquivo. Preservar untracked do chat.
 - [ ] Para qualquer item marcado **PENDENTE DE VALIDAÇÃO** relevante à tarefa: validar no código antes de assumir como verdade.
 
 ## Banco e multitenancy

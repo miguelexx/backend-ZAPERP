@@ -1,8 +1,8 @@
 # AI_HANDOFF — Backend ZapERP
 
 > Contexto compacto para IAs começarem sem redescobrir o sistema.  
-> Atualizado: **2026-08-31** · branch `master`.  
-> Para análise completa, use [`ai-handoff/00-LEIA-PRIMEIRO.md`](ai-handoff/00-LEIA-PRIMEIRO.md). Modularizações: docs [19](ai-handoff/19-ATENDIMENTO-SEM-RESPOSTA-MODULARIZACAO.md)–[23](ai-handoff/23-CHAT-CONTROLLER-MODULARIZACAO.md).
+> Atualizado: **2026-09-01** · branch `master`.  
+> Para análise completa, use [`ai-handoff/00-LEIA-PRIMEIRO.md`](ai-handoff/00-LEIA-PRIMEIRO.md). Modularizações: docs [19](ai-handoff/19-ATENDIMENTO-SEM-RESPOSTA-MODULARIZACAO.md)–[24](ai-handoff/24-WEBHOOK-INBOUND-MODULARIZACAO.md).
 
 ---
 
@@ -53,7 +53,7 @@ backend/
 ├── index.js                # HTTP+Socket.IO, schedulers, boot
 ├── config/                 # env.js, supabase.js, r2.js, uploadsRoot.js, produtosDb.js, wmSqlServer.js
 ├── controllers/            # HTTP; fachadas + pastas chat/ e dashboard/
-│   ├── chat/               # handlers extraídos; lista/texto/PIX ainda na fachada
+│   ├── chat/               # handlers HTTP (lista/texto/PIX/mídia já aqui; fachada é shim)
 │   └── dashboard/          # KPIs HTTP (não confundir com IA /ai/ask)
 ├── services/               # Regras de negócio reutilizáveis, integrações, schedulers
 │   ├── providers/          # ultramsg.js (shim) + ultramsg/

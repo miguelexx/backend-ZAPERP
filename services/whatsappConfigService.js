@@ -2,7 +2,7 @@
  * Configuração WhatsApp (UltraMSG).
  * Credenciais por empresa: tabela `empresa_zapi` (nome histórico da migração; armazena instance_id/instance_token UltraMSG).
  * Fallback ENV: ULTRAMSG_INSTANCE_ID, ULTRAMSG_TOKEN.
- * @see ../docs/_OFICIAL/ADR-LEGACY-NAMING.md
+ * @see ../docs/reference/ADR-LEGACY-NAMING.md
  */
 
 const supabase = require('../config/supabase')

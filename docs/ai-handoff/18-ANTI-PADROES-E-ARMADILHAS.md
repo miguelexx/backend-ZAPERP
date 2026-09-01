@@ -9,7 +9,7 @@
 
 | Nome que você vê | O que parece | O que é de verdade |
 |---|---|---|
-| `webhookZapiController.js` | Handler do provider Z-API (antigo) | **Handler ATIVO** de inbound/ACK do UltraMSG. Nunca remover por nome. |
+| `webhookZapiController.js` | Handler do provider Z-API (antigo) | **Handler ATIVO** de inbound/ACK do UltraMSG. Nunca remover por nome. Não fatiar `receberZapi` sem [24](24-WEBHOOK-INBOUND-MODULARIZACAO.md). |
 | Tabela `empresa_zapi` | Credenciais de Z-API (antigo) | **Credenciais UltraMSG ativas** por empresa. Nome é legado. |
 | `supabase/schema.sql` | Source of truth do banco | **Fotografia desatualizada**. Fonte real = migrations ordenadas por timestamp. |
 | `controllers/webhookController.js` | Handler de webhook | **Shim 410**. Não está montado em `app.js`. Retorna `410 Gone` se chamado. Não editar. |

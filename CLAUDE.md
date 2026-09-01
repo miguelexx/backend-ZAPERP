@@ -13,7 +13,7 @@ Stack: Node.js/Express · Supabase SERVICE_ROLE (bypassa RLS) · UltraMSG (únic
 - [`docs/ai-handoff/17-CHECKLIST-PARA-PROXIMA-IA.md`](docs/ai-handoff/17-CHECKLIST-PARA-PROXIMA-IA.md) — checklist de análise antes de alterar qualquer coisa
 - [`docs/ai-handoff/18-ANTI-PADROES-E-ARMADILHAS.md`](docs/ai-handoff/18-ANTI-PADROES-E-ARMADILHAS.md) — armadilhas desta codebase
 
-**2. Tarefa específica?** Consulte [`docs/README.md`](docs/README.md). Modularizações: [19](docs/ai-handoff/19-ATENDIMENTO-SEM-RESPOSTA-MODULARIZACAO.md) alerta sem resposta · [20](docs/ai-handoff/20-DASHBOARD-MODULARIZACAO.md) dashboard HTTP · [21](docs/ai-handoff/21-ULTRAMSG-PROVIDER-MODULARIZACAO.md) UltraMSG · [22](docs/ai-handoff/22-AI-DASHBOARD-MODULARIZACAO.md) IA `/ai/ask` (Sessão A feita) · [23](docs/ai-handoff/23-CHAT-CONTROLLER-MODULARIZACAO.md) chat HTTP.
+**2. Tarefa específica?** Consulte [`docs/README.md`](docs/README.md). Modularizações: [19](docs/ai-handoff/19-ATENDIMENTO-SEM-RESPOSTA-MODULARIZACAO.md) alerta sem resposta · [20](docs/ai-handoff/20-DASHBOARD-MODULARIZACAO.md) dashboard HTTP · [21](docs/ai-handoff/21-ULTRAMSG-PROVIDER-MODULARIZACAO.md) UltraMSG · [22](docs/ai-handoff/22-AI-DASHBOARD-MODULARIZACAO.md) IA `/ai/ask` (Sessão A feita) · [23](docs/ai-handoff/23-CHAT-CONTROLLER-MODULARIZACAO.md) chat HTTP · [24](docs/ai-handoff/24-WEBHOOK-INBOUND-MODULARIZACAO.md) webhook inbound (**plano; não fatiar ainda**).
 
 **3. Antes de escrever qualquer código, declare:**
 - Arquivos e módulos que serão alterados

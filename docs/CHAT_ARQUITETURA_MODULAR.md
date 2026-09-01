@@ -1,19 +1,18 @@
 # Arquitetura modular do chat (`chatController`)
 
-> Estado **alcançado** da modularização. O documento de plano/auditoria é
-> [`docs/CHAT_CONTROLLER_MODULARIZACAO.md`](CHAT_CONTROLLER_MODULARIZACAO.md); **este** descreve o que
-> já existe: cada arquivo, cada função e como tudo se conecta. Leitura obrigatória antes de mexer no chat.
+> Estado **alcançado** da modularização. Mapa de extração: [`ai-handoff/23-CHAT-CONTROLLER-MODULARIZACAO.md`](ai-handoff/23-CHAT-CONTROLLER-MODULARIZACAO.md).
+> Este arquivo descreve o que já existe: cada arquivo, cada função e como tudo se conecta. Leitura obrigatória antes de mexer no chat.
 
 ## 1. Visão geral
 
-`controllers/chatController.js` deixou de ser um monolito (~10.062 linhas) e virou uma **fachada fina**
-(~2.500 linhas) que:
+`controllers/chatController.js` deixou de ser um monolito (~10.062 linhas) e virou um **shim fino**
+(~442 linhas) que:
 
 1. importa serviços de `services/chat/**` e sub-controllers de `controllers/chat/**`;
-2. **reexporta** os handlers HTTP para que `routes/chatRoutes.js` continue idêntico
+2. **reexporta** todos os handlers HTTP para que `routes/chatRoutes.js` continue idêntico
    (`chatController.assumirChat`, `chatController.enviarArquivo`, …);
-3. ainda hospeda inline apenas os 2 handlers P0 grandes que faltam fatiar: `listarConversas` e
-   `enviarMensagemChat` (+ o trio Pix, que depende de `enviarMensagemChat`).
+3. reexporta 6 helpers de realtime/visibilidade (contrato legado) e mantém `exports._test`;
+4. **não hospeda mais nenhum handler nem helper inline** — todos foram para `controllers/chat/**` ou `services/chat/**`.
 
 **Regra de ouro:** rotas e contratos HTTP/realtime NÃO mudaram. Toda extração foi *verbatim* (mesmo
 código), só reorganizada. Se um comportamento parece “errado”, ele provavelmente é intencional —
@@ -32,8 +31,9 @@ config/supabase · helpers/** · services/** (não-chat)
 ```
 
 - Um **serviço** (`services/chat/**`) nunca importa um controller nem a fachada.
-- Um **sub-controller** importa serviços; nunca importa a fachada (evita ciclo). Exceção conhecida:
-  `enviarMensagemPix` fica na fachada porque **delega** a `exports.enviarMensagemChat`.
+- Um **sub-controller** importa serviços; nunca importa a fachada (evita ciclo). Um sub-controller pode
+  importar **outro sub-controller sibling** quando delega (ex.: `pixController` → `textMessageController`
+  para `enviarMensagemPix`), desde que a direção seja acíclica.
 - `realtime` depende de `access` (visibilidade) — nunca o contrário.
 
 ## 2. `services/chat/**` — módulos e funções
@@ -128,14 +128,22 @@ Cada arquivo abaixo é reexportado pela fachada. Rota exata: ver `routes/chatRou
 | `tagsController.js` | adicionarTagConversa, removerTagConversa |
 | `preferencesController.js` | patchConversaPrefs |
 | `batchOpsController.js` | contarConversasPorFiltros, finalizacaoAusenciaLoteAuth |
+| `conversationListController.js` | **listarConversas** (GET /chats — o maior handler, ~1.412 linhas) |
+| `textMessageController.js` | **enviarMensagemChat** (texto/link — fluxo P0 de envio) |
+| `pixController.js` | getPixConfig, putPixConfig, enviarMensagemPix (delega a `textMessageController.enviarMensagemChat`) |
 
-## 4. Ainda na fachada (inline) e por quê
+## 4. Trabalho restante (agora é decomposição INTERNA, não mais extração da fachada)
 
-- **`listarConversas`** (~1.500 linhas) — subsistema de leitura (normaliza → resolve visibilidade → query
-  paginada → DTO → filtros defensivos/ordenação/prefs). Já foi extraída a derivação de filtros
-  (`listarConversasFilters.js`). Próximas etapas encostam nas **queries SQL**; o doc de plano avisa que
-  filtros SQL e filtros defensivos em memória formam **pares de compatibilidade — não mover separados**.
-- **`enviarMensagemChat`** (~518 linhas) — P0 (ordem persistir→emitir→provider→status→reconciliar).
+A fachada já é shim. O que resta é **fatiar por dentro** os 2 handlers grandes, que hoje moram em arquivos
+próprios (`conversationListController.js` e `textMessageController.js`). Isso é opcional e mais arriscado
+que as realocações verbatim feitas até aqui — exige testes de caracterização antes.
+
+- **`conversationListController.js` / `listarConversas`** (~1.412 linhas) — subsistema de leitura
+  (normaliza → resolve visibilidade → query paginada → DTO → filtros defensivos/ordenação/prefs). Já foi
+  extraída a derivação de filtros (`listarConversasFilters.js`). As próximas etapas encostam nas **queries
+  SQL**; o doc de plano avisa que filtros SQL e filtros defensivos em memória formam **pares de
+  compatibilidade — não mover separados**. Próxima parte pura segura: transformação linha→DTO.
+- **`textMessageController.js` / `enviarMensagemChat`** (~518 linhas) — P0 (ordem persistir→emitir→provider→status→reconciliar).
   Caracterizado em [`tests/enviarMensagemChat.test.js`](../tests/enviarMensagemChat.test.js) (7 testes):
   **entradas** (validação, dedup em memória, dedup persistente, permissão negada) + **respostas de envio**
   (provider ok+ID rastreável → `status:sent`+whatsapp_id; ok sem ID → `pending`; recusa → `erro`+motivo).
@@ -143,30 +151,31 @@ Cada arquivo abaixo é reexportado pela fachada. Rota exata: ver `routes/chatRou
   refactor:** a *ordem* dos efeitos colaterais — em especial que a emissão otimista `nova_mensagem` é
   disparada (fire-and-forget) ANTES de `provider.sendText`; o doc de plano diz que essa ordem é intencional
   e não deve ser “corrigida” na extração. Os testes atuais usam `io=null` e não travam essa ordem.
-- **Pix trio** (`getPixConfig`, `putPixConfig`, `enviarMensagemPix`) — `enviarMensagemPix` delega a
-  `exports.enviarMensagemChat`; mover criaria ciclo. Fica na fachada por design.
-- `_test` (export) e `findMensagemByClientTempId`/map agora vêm de `idempotencyService` (aliasado).
+- **Pix** (`pixController.js`) — `enviarMensagemPix` monta o texto e chama
+  `require('./textMessageController').enviarMensagemChat(req,res)` (import direto de sibling, sem ciclo:
+  `pixController → textMessageController`, nunca o inverso).
+- `exports._test` continua na fachada (contrato dos testes de funções puras); `findMensagemByClientTempId`
+  e o Map de dedup vêm de `idempotencyService` (import **aliasado** `deduplicationMap: _clientTempIdDeduplicationMap`).
 
-## 5. Como extrair o próximo handler (padrão comprovado)
+## 5. Extração da fachada — **concluída**
+
+Não há handler HTTP restante em `chatController.js`. O padrão abaixo vale só se surgir um bloco **ainda inline** (não é o caso de lista/texto/PIX).
 
 1. **Localizar** o bloco e o `}` final por balanceamento de chaves (não por regex frágil).
-2. **Checar acoplamento** a helpers inline e se o bloco **delega** a outro export da fachada (risco de ciclo).
-3. **Computar imports** por análise estática dos requires do topo da fachada (destructures multi-linha).
-   Atenção a: (a) `config/supabase` é **default export** (`const supabase = require(...)`, sem chaves);
-   (b) imports **aliasados** (ex.: `deduplicationMap: _clientTempIdDeduplicationMap`); (c) imports que ficam
-   **fora** da região do topo (ex.: `modoSimplesOutbound`).
-4. **Ajustar require dinâmicos internos** de `../` para `../../` (o arquivo desce um nível para `controllers/chat/`).
-5. Escrever o módulo com header + imports + bloco *verbatim*; na fachada, `const _x=require('./chat/x'); exports.h=_x.h`.
-6. **Verificar:** `node --check`; carregar a **fachada completa** com env dummy (pega import faltante no load);
-   rodar a suíte. Um handler não-testado pode ter identificador faltante que só quebra em runtime — revise a lista de imports.
+2. **Checar acoplamento** a helpers inline e se o bloco **delega** a outro export (risco de ciclo).
+3. **Computar imports** por análise estática. Atenção a: (a) `config/supabase` é **default export**;
+   (b) imports **aliasados** (ex.: `deduplicationMap: _clientTempIdDeduplicationMap`); (c) imports fora do topo.
+4. **Ajustar require** de `../` para `../../` ao descer para `controllers/chat/`.
+5. Módulo com header + imports + bloco *verbatim*; na fachada, `const _x=require('./chat/x'); exports.h=_x.h`.
+6. **Verificar:** `node --check`; carregar a fachada com env dummy; suíte `chat*`.
 
 ### Armadilhas já encontradas (não repetir)
 - **CommonJS não propaga reatribuição de import** → estado mutável compartilhado (flags) via getter/setter.
-- **Ciclo** se um sub-controller importar a fachada (Pix). Se precisar, `require` **lazy dentro do handler**.
+- **Ciclo** se um sub-controller importar a fachada. Pix **não** faz isso: `pixController` importa `./textMessageController` (sibling), nunca o inverso.
 - **Teste que lê o código-fonte** da fachada (`fs.readFileSync('.../chatController.js')`) quebra quando o
-  handler muda de arquivo — atualize o path do teste (ex.: `clientTempIdAndLegacyWebhook.test.js` aponta
-  para `conversationDetailController.js`).
+  handler muda de arquivo — atualize o path (ex.: `clientTempIdAndLegacyWebhook.test.js` → `conversationDetailController.js`).
 - Arquivos usam **CRLF**; scripts de splice devem preservar.
+- **Não reextrair** lista/texto/PIX: em 2026-09-01 podem estar só no working tree (`conversationListController.js`, `textMessageController.js`, `pixController.js`).
 
 ## 6. Cobertura de testes relevante
 
@@ -175,4 +184,4 @@ Cada arquivo abaixo é reexportado pela fachada. Rota exata: ver `routes/chatRou
 (executa transferirChat/reabrirChat — valida imports do attendance), `productionAuthorization`,
 `envioManualMensagem`, `clientTempIdAndLegacyWebhook`, `atendimentoModoSimplesService`,
 `whatsappOperationalPhase2_1`, `webPushDispatchService`, `chatbotTriageAntiReplay`.
-Baseline atual: **178/178 verdes**. O export `_test` da fachada segue exposto para os testes de funções puras.
+Baseline na extração lista/texto/PIX: **185/185** (não reler 178). Inclui `enviarMensagemChat.test.js`. O export `_test` da fachada segue exposto para testes de funções puras.

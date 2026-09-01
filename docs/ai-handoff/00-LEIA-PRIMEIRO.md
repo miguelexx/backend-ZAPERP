@@ -1,10 +1,10 @@
 # Leia primeiro — handoff do backend ZapERP
 
-> Análise estática em 2026-08-23, branch `master`, commit-base `66e0771d9f61f840524cd4b0645e742df374a77a`. **Atualizado 2026-08-31:** Etapa 9 de Disparo está **no Git** (não é mais “só working tree”); aplicação no banco/VPS continua `PENDENTE DE VALIDAÇÃO`. Inventário de docs mortos/desatualizados: [`docs/DOCUMENTATION_AUDIT.md`](../DOCUMENTATION_AUDIT.md) (seção do topo).
+> Análise estática em 2026-08-23, branch `master`, commit-base `66e0771d9f61f840524cd4b0645e742df374a77a`. **Atualizado 2026-08-31:** Etapa 9 de Disparo está **no Git** (não é mais “só working tree”); aplicação no banco/VPS continua `PENDENTE DE VALIDAÇÃO`. Inventário de docs: [`docs/DOCUMENTATION_AUDIT.md`](../DOCUMENTATION_AUDIT.md).
 
 > **Atualização 2026-08-24:** Documentação reorganizada. Ver [`docs/README.md`](../README.md) e [`docs/AI_HANDOFF.md`](../AI_HANDOFF.md). Mudanças pós commit-base registradas na seção abaixo.
 
-> **Atualização 2026-08-31:** Código fatiado em vários módulos. Tabela **Estado das modularizações** abaixo; docs [19](19-ATENDIMENTO-SEM-RESPOSTA-MODULARIZACAO.md)–[23](23-CHAT-CONTROLLER-MODULARIZACAO.md). Não tratar `docs/CHAT_CONTROLLER_MODULARIZACAO.md` como mapa atual.
+> **Atualização 2026-09-01:** Webhook inbound: [24](24-WEBHOOK-INBOUND-MODULARIZACAO.md) (fases 1–2 feitas). **Não** mover `receberZapi`. Chat = shim (19–23).
 
 Frontend (UI React): não está nesta série. Use [`frontend/docs/ai-handoff/00-LEIA-PRIMEIRO.md`](../../../frontend/docs/ai-handoff/00-LEIA-PRIMEIRO.md) e o [índice-mestre por sessão](../../../docs/ai-handoff/00-LEIA-PRIMEIRO.md).
 
@@ -38,17 +38,17 @@ Não redescobrir pastas: o código já foi fatiado em vários módulos. Fachada 
 | Dashboard HTTP | Shim `dashboardController.js` → `controllers/dashboard/` | [20](20-DASHBOARD-MODULARIZACAO.md) |
 | Adapter UltraMSG | Shim `providers/ultramsg.js` → `require('./ultramsg/index.js')` (**não** `./ultramsg`) | [21](21-ULTRAMSG-PROVIDER-MODULARIZACAO.md) |
 | Assistente IA `/ai/ask` | **Sessão A feita:** puros em `services/aiDashboard/`. Queries, classify, format e `switch` ainda no service. Próximo = Sessão B | [22](22-AI-DASHBOARD-MODULARIZACAO.md) |
-| Chat HTTP | **Parcial:** `controllers/chat/` + `services/chat/`. Fachada ainda tem lista, texto, PIX. Mídia (`enviarArquivo`) pode estar extraída só no working tree. Plano antigo em `docs/CHAT_CONTROLLER_MODULARIZACAO.md` é histórico | [23](23-CHAT-CONTROLLER-MODULARIZACAO.md) |
+| Chat HTTP | **Shim:** `controllers/chat/` + `services/chat/`. Lista/texto/PIX **já saíram** (`conversationListController`, `textMessageController`, `pixController` — podem estar untracked). Não reextrair | [23](23-CHAT-CONTROLLER-MODULARIZACAO.md) |
+| Webhook inbound/ACK | **Parcial.** Helpers em `controllers/webhookInbound/` (fases 1–2). `receberZapi`/`statusZapi` ainda no `webhookZapiController.js`. Não mover esses dois sem o mapa | [24](24-WEBHOOK-INBOUND-MODULARIZACAO.md) |
 
 Não confundir [20](20-DASHBOARD-MODULARIZACAO.md) (KPIs HTTP) com [22](22-AI-DASHBOARD-MODULARIZACAO.md) (linguagem natural). Não unificar as quatro APIs de JID do UltraMSG. Não fundir “sem resposta” da IA com o job [19](19-ATENDIMENTO-SEM-RESPOSTA-MODULARIZACAO.md).
 
-`git status` no início da sessão: preservar trabalho não commitado (ex.: idempotência de outbound do chat).
+`git status` no início da sessão: preservar untracked do chat (`conversationListController`, `textMessageController`, `pixController`) e qualquer outro trabalho não commitado.
 
 ## Documentos que **não** mapeiam o código atual
 
-Inventário completo: [`DOCUMENTATION_AUDIT.md`](../DOCUMENTATION_AUDIT.md) (topo). Em resumo:
+Inventário completo: [`DOCUMENTATION_AUDIT.md`](../DOCUMENTATION_AUDIT.md). Em resumo:
 
-- `CHAT_CONTROLLER_MODULARIZACAO.md` — plano do monolito; usar [23](23-CHAT-CONTROLLER-MODULARIZACAO.md) + `CHAT_ARQUITETURA_MODULAR.md`.
 - `docs/_OFICIAL/`, `docs/_ANTIGOS/`, `PATCH-MULTI-TENANT-ENV.md` — **não existem** neste tree.
 - `supabase/schema.sql` — fotografia; fonte = migrations.
 - Cabeçalhos `2026-08-23` / 100 suites / “Etapa 9 não commitada” — snapshot; confrontar código.
@@ -71,7 +71,8 @@ Estados de certeza usados:
 8. Dashboard HTTP **já fatiado**: [20](20-DASHBOARD-MODULARIZACAO.md).
 9. Adapter UltraMSG **já fatiado** (shim `./ultramsg/index.js`): [21](21-ULTRAMSG-PROVIDER-MODULARIZACAO.md).
 10. Assistente IA `/ai/ask`: [22](22-AI-DASHBOARD-MODULARIZACAO.md) — Sessão A feita; Sessão B = queries + classify/format. Não confundir com [20](20-DASHBOARD-MODULARIZACAO.md).
-11. Chat HTTP **parcialmente** fatiado: [23](23-CHAT-CONTROLLER-MODULARIZACAO.md). O arquivo [`docs/CHAT_CONTROLLER_MODULARIZACAO.md`](../CHAT_CONTROLLER_MODULARIZACAO.md) é o plano **antigo** do monolito.
+11. Chat HTTP **já é shim**: [23](23-CHAT-CONTROLLER-MODULARIZACAO.md) + [`CHAT_ARQUITETURA_MODULAR.md`](../CHAT_ARQUITETURA_MODULAR.md). Não reextrair lista/texto/PIX.
+12. Webhook inbound/ACK: [24](24-WEBHOOK-INBOUND-MODULARIZACAO.md). Fases 1–2 feitas. **Não** mover `receberZapi`/`statusZapi`. Não renomear o arquivo.
 
 ## Pontos que exigem análise antes de alteração
 
@@ -91,7 +92,7 @@ Estados de certeza usados:
 - Não há Docker/CI no backend. O processo confirmado é PM2; referências a outros métodos são `NÃO CONFIRMADO`.
 - Redis/adapter Socket.IO não existe. Estado de presença, locks JS, rate limit e dedupe local não é compartilhado.
 - Etapa 9 de Disparo está **no repositório** (migration `20260823120000_disparo_etapa9_auditoria.sql`, commit `4d182b9`): health, lease `enviando -> incerta`, contadores. **Aplicação no banco/VPS** é `PENDENTE DE VALIDAÇÃO`.
-- `docs/_OFICIAL/` e `docs/_ANTIGOS/` **não existem** neste tree. ADR de nomes: [`reference/ADR-LEGACY-NAMING.md`](../reference/ADR-LEGACY-NAMING.md). Plano antigo do chat: [`CHAT_CONTROLLER_MODULARIZACAO.md`](../CHAT_CONTROLLER_MODULARIZACAO.md) é histórico.
+- `docs/_OFICIAL/` e `docs/_ANTIGOS/` **não existem** neste tree. ADR de nomes: [`reference/ADR-LEGACY-NAMING.md`](../reference/ADR-LEGACY-NAMING.md).
 - O estado real das migrations, índices, RLS, webhooks e código na VPS é `PENDENTE DE VALIDAÇÃO`.
 
 ## Checklist antes de modificar
