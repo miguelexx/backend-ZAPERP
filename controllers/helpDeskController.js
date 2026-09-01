@@ -446,6 +446,23 @@ exports.updateTicket = async (req, res) => {
 
     if (error) return databaseError(res, error, 'Erro ao atualizar chamado')
     if (!data) return res.status(409).json({ error: 'Chamado foi alterado por outro usuário' })
+    if (patch.status === 'resolvido' && existingTicket.status !== 'resolvido') {
+      const currentDepartment = await findTenantDepartmentByName(existingTicket.departamento, companyId)
+      const historyResult = await supabase.from('helpdesk_transferencias').insert({
+        company_id: companyId,
+        ticket_id: ticketId,
+        tipo: 'encerrado',
+        de_departamento_id: currentDepartment?.id || null,
+        para_departamento_id: currentDepartment?.id || null,
+        de_responsavel_id: existingTicket.responsavel_id || null,
+        para_responsavel_id: existingTicket.responsavel_id || null,
+        transferido_por: userId,
+        motivo: 'Chamado encerrado',
+      })
+      if (historyResult.error) {
+        return databaseError(res, historyResult.error, 'Chamado encerrado, mas o histórico não pôde ser registrado')
+      }
+    }
     if (patch.status === 'resolvido') {
       await helpDeskNotifications.settleAllTicketNotifications(req, data, 'ticket_resolved')
     } else if (patch.status === 'em_atendimento') {
@@ -521,6 +538,7 @@ exports.addMessage = async (req, res) => {
         const transferResult = await supabase.from('helpdesk_transferencias').insert({
           company_id: companyId,
           ticket_id: ticketId,
+          tipo: 'assumido',
           de_departamento_id: previousDepartment?.id || null,
           para_departamento_id: departmentId,
           de_responsavel_id: ticket.responsavel_id,
@@ -652,6 +670,7 @@ exports.assumeTicket = async (req, res) => {
     const transferResult = await supabase.from('helpdesk_transferencias').insert({
       company_id: companyId,
       ticket_id: ticketId,
+      tipo: 'assumido',
       de_departamento_id: previousDepartment?.id || null,
       para_departamento_id: departmentId,
       de_responsavel_id: ticket.responsavel_id,
@@ -731,6 +750,7 @@ exports.transferTicket = async (req, res) => {
     const transferResult = await supabase.from('helpdesk_transferencias').insert({
       company_id: companyId,
       ticket_id: ticketId,
+      tipo: 'transferencia',
       de_departamento_id: currentDepartment?.id || null,
       para_departamento_id: nextDepartment?.id || null,
       de_responsavel_id: ticket.responsavel_id,
