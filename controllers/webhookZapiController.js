@@ -134,10 +134,14 @@ const { scheduleInboundLeadCapture } = require('./webhookInbound/crmLeadInbound'
 const { resolveGroupSenderFields } = require('./webhookInbound/groupSender')
 // Construção pura dos payloads de realtime (conversa_atualizada + nova_mensagem) → webhookInbound/realtimePayload.js.
 const { buildConversaAtualizadaPayload, buildNovaMensagemPayload } = require('./webhookInbound/realtimePayload')
-// Mapeamento puro tipo/mídia → campos do insert → controllers/webhookInbound/persistMensagem.js.
-const { applyInboundMediaFields } = require('./webhookInbound/persistMensagem')
-// Resolução pura de status ACK (não-regressão) → controllers/webhookInbound/statusApply.js.
-const { resolveEffectiveStatus } = require('./webhookInbound/statusApply')
+// Persistência da mensagem inbound (mapeamento puro + insert/retries/23505) → webhookInbound/persistMensagem.js.
+const { applyInboundMediaFields, persistInboundMensagemRow, resolveEditedMensagemRow } = require('./webhookInbound/persistMensagem')
+// Reconciliação de eco fromMe no fluxo received → controllers/webhookInbound/fromMeReceivedReconcile.js.
+const { reconcileFromMeInReceived } = require('./webhookInbound/fromMeReceivedReconcile')
+// Reply/citação (reply_meta) do payload → controllers/webhookInbound/replyMeta.js.
+const { buildWebhookReplyMeta } = require('./webhookInbound/replyMeta')
+// Status ACK (resolução pura + update por whatsapp_id) → controllers/webhookInbound/statusApply.js.
+const { resolveEffectiveStatus, applyAckStatusByWaId } = require('./webhookInbound/statusApply')
 // Resolução de tenant (empresa/instância) do topo do receberZapi → controllers/webhookInbound/instanceResolve.js.
 const { resolveInboundTenant } = require('./webhookInbound/instanceResolve')
 // Callback de foto de grupo (payload só { groupId, groupPhoto }) → controllers/webhookInbound/groupPhoto.js.
@@ -225,40 +229,10 @@ exports.receberZapi = async (req, res) => {
         }
       }
 
-      // resolveEffectiveStatus (não-regressão de ACK) → controllers/webhookInbound/statusApply.js.
-      // Helper: atualiza status no banco por whatsapp_id sem permitir regressao de ACK atrasado.
-      const updateStatusByWaId = async (waId, statusNorm, opts = {}) => {
-        const returnResult = opts?.returnResult === true
-        const emptyResult = { data: null, error: null, ambiguous: false, effectiveStatus: statusNorm || null }
-        if (!waId || !statusNorm) return returnResult ? emptyResult : null
-        const waIdStr = String(waId)
-        const statusSelect = 'id, conversa_id, company_id, whatsapp_instance_id, whatsapp_id, autor_usuario_id, status, status_mensagem'
-        const found = await selectSingleMensagemByWhatsappId(supabase, {
-          company_id,
-          whatsapp_id: waIdStr,
-          whatsapp_instance_id,
-          select: statusSelect,
-          context: opts?.context || 'receberZapi.status',
-        })
-        if (found.error || !found.data?.id) {
-          const result = { ...emptyResult, error: found.error || null, ambiguous: Boolean(found.ambiguous) }
-          return returnResult ? result : null
-        }
-
-        const currentStatus = found.data.status || found.data.status_mensagem || 'pending'
-        const effectiveStatus = resolveEffectiveStatus(currentStatus, statusNorm)
-        const { data: msg, error } = await patchMensagemStatusById(supabase, {
-          company_id,
-          mensagem_id: found.data.id,
-          effectiveStatus,
-          whatsapp_id: waIdStr,
-          select: statusSelect,
-        })
-        if (msg) msg.whatsapp_id = msg.whatsapp_id || waIdStr
-        if (msg) msg._effective_status = effectiveStatus
-        const result = { data: msg || null, error: error || null, ambiguous: false, effectiveStatus }
-        return returnResult ? result : msg || null
-      }
+      // Atualiza status por whatsapp_id sem regressão de ACK → controllers/webhookInbound/statusApply.js.
+      // Binding fino: fixa supabase + tenant do payload; call-sites continuam (waId, statusNorm, opts).
+      const updateStatusByWaId = (waId, statusNorm, opts = {}) =>
+        applyAckStatusByWaId(supabase, { company_id, whatsapp_instance_id }, waId, statusNorm, opts)
 
       // payloadType: usa type > event como fonte primária de classificação.
       // payloadTypeOrStatus: fallback inclui o campo "status" para Z-API que envia tipo no campo status.
@@ -1914,248 +1888,28 @@ exports.receberZapi = async (req, res) => {
     }
 
     // ─── Reply/citação: extraído ANTES da reconciliação para que ambos os caminhos usem ───
-    // Z-API usa "referencedMessage.messageId" como campo principal; outros formatos são fallbacks.
-    let webhookReplyMeta = null
-    {
-      const refMsg = payload?.referencedMessage ?? payload?.quotedMsg ?? payload?.quoted ?? null
-      const quotedIdRaw =
-        payload?.referenceMessageId ??          // campo oficial Z-API ReceivedCallback
-        payload?.referencedMessage?.messageId ??
-        payload?.referencedMessage?.id ??
-        payload?.quotedMsgId ??
-        payload?.quotedMessageId ??
-        payload?.quotedStanzaId ??
-        payload?.context?.messageId ??          // Z-API context (algumas versões)
-        payload?.context?.id ??
-        payload?.contextInfo?.stanzaId ??
-        payload?.contextInfo?.quotedStanzaId ??
-        payload?.contextInfo?.quotedMessageId ??
-        refMsg?.id ??
-        refMsg?.messageId ??
-        payload?.message?.contextInfo?.stanzaId ??
-        payload?.message?.contextInfo?.quotedStanzaId ??
-        payload?.message?.context?.messageId ??
-        payload?.message?.context?.id ??
-        null
-      const quotedId = quotedIdRaw ? String(quotedIdRaw).trim() : null
-
-      const refBodyFallback =
-        String(
-          payload?.referencedMessage?.body ??
-          payload?.referencedMessage?.text?.message ??
-          payload?.referencedMessage?.caption ??
-          refMsg?.message ??
-          refMsg?.body ??
-          refMsg?.text?.message ??
-          ''
-        ).trim().slice(0, 180) || null
-
-      const refFromMe = payload?.referencedMessage?.fromMe ?? refMsg?.fromMe ?? null
-
-      if (quotedId) {
-        const replyTs = Date.now()
-        try {
-          let quotedQuery = supabase
-            .from('mensagens')
-            .select('texto, direcao, remetente_nome')
-            .eq('company_id', company_id)
-            .eq('conversa_id', conversa_id)
-            .eq('whatsapp_id', quotedId)
-          quotedQuery = applyWhatsappInstanceFilterOrLegacy(quotedQuery, whatsapp_instance_id)
-          const { data: quoted } = await quotedQuery.maybeSingle()
-
-          const snippet =
-            String(quoted?.texto || '').trim().slice(0, 180) ||
-            refBodyFallback ||
-            'Mensagem'
-
-          let name
-          if (quoted) {
-            name = quoted.direcao === 'out' ? 'Você' : (String(quoted.remetente_nome || '').trim() || 'Contato')
-          } else {
-            name = (refFromMe === true) ? 'Você' : 'Contato'
-          }
-          webhookReplyMeta = { name, snippet, ts: replyTs, replyToId: quotedId }
-        } catch (_) {
-          webhookReplyMeta = { name: (refFromMe === true ? 'Você' : 'Mensagem'), snippet: refBodyFallback || 'Mensagem', ts: replyTs, replyToId: quotedId }
-        }
-      }
-    }
+    // → controllers/webhookInbound/replyMeta.js. Resolve o reply_meta (resposta a X) do payload.
+    const webhookReplyMeta = await buildWebhookReplyMeta(supabase, { payload, company_id, conversa_id, whatsapp_instance_id })
 
     // ✅ Anti-duplicação profissional (envio pelo sistema + eco do webhook fromMe):
     // Quando enviamos pelo CRM, a mensagem é inserida com whatsapp_id = null.
     // Em seguida o Z-API pode disparar webhook fromMe com whatsapp_id real.
     // Para não duplicar, tentamos "reconciliar" atualizando a mensagem recente do CRM com o whatsapp_id.
+    // Reconciliação de eco fromMe (crm-* / candidato por mídia+texto) → webhookInbound/fromMeReceivedReconcile.js.
     if (!mensagemSalva && fromMe && whatsappIdStr) {
-      try {
-        const statusPayload = (payload.status && String(payload.status).toLowerCase()) || null
-
-        // referenceId crm-{id} enviado no POST UltraMSG — reconciliação mais confiável que texto
-        if (!mensagemSalva) {
-          mensagemSalva = await tryReconcileFromMeByCrmReferenceId(supabase, {
-            company_id,
-            conversa_id,
-            whatsapp_instance_id,
-            payload,
-            whatsappIdStr,
-          })
-        }
-
-        if (!mensagemSalva) {
-        // assinatura da mídia para bater com a mensagem enviada pelo sistema
-        const urlSig =
-          (type === 'image' && imageUrl) ? imageUrl :
-          ((type === 'document' || type === 'file') && documentUrl) ? documentUrl :
-          (type === 'audio' && audioUrl) ? audioUrl :
-          (type === 'video' && videoUrl) ? videoUrl :
-          (type === 'sticker' && stickerUrl) ? stickerUrl :
-          (type === 'location' && locationUrl) ? locationUrl :
-          null
-
-        const tsMs = Date.parse(criado_em)
-        // Janela ampliada para 15 min: cobre delay de envio UltraMsg e diferenças de relógio entre servidores
-        const windowMs = 15 * 60 * 1000
-        const fromIso = Number.isFinite(tsMs) ? new Date(tsMs - windowMs).toISOString() : null
-        const toIso = Number.isFinite(tsMs) ? new Date(tsMs + windowMs).toISOString() : null
-
-        const buildQuery = (filterConversa) => {
-          let q = supabase
-            .from('mensagens')
-            .select('id, criado_em, texto, url, nome_arquivo, tipo, whatsapp_id, reply_meta, conversa_id, autor_usuario_id')
-            .eq('company_id', company_id)
-            .eq('direcao', 'out')
-            .order('criado_em', { ascending: false })
-            .order('id', { ascending: false })
-            .limit(15)
-          if (filterConversa) q = q.eq('conversa_id', conversa_id)
-          q = applyWhatsappInstanceFilterOrLegacy(q, whatsapp_instance_id)
-          if (fromIso && toIso) q = q.gte('criado_em', fromIso).lte('criado_em', toIso)
-          // URL do webhook (CDN) ≠ /uploads/ do CRM — não filtrar por url remota
-          if (urlSig && !isRemoteMediaUrl(urlSig)) q = q.eq('url', urlSig)
-          return q
-        }
-
-        const nomeAtendenteReconcile = extrairNomePrefixoTexto(texto)
-        const findCand = (rows) =>
-          findFromMeOutboundMediaCandidate(filterRowsForFromMeReconcile(rows), {
-            fileName,
-            texto,
-            tipo: mapWebhookTypeToStorageTipo(type),
-            nomeAtendente: nomeAtendenteReconcile,
-            whatsappId: whatsappIdStr,
-          })
-
-        // Busca 1: na conversa específica resolvida pelo webhook
-        const { data: candidates } = await buildQuery(true)
-        let cand = findCand(candidates)
-
-        // Busca 2 (fallback): na empresa inteira — cobre divergência de conversa_id entre
-        // chatController (URL param) e webhook (findOrCreateConversation pode resolver diferente)
-        if (!cand) {
-          const { data: fallbackCandidates } = await buildQuery(false)
-          cand = findCand(fallbackCandidates)
-          if (cand && WHATSAPP_DEBUG) {
-            console.log('[Z-API] fromMe reconcile fallback: encontrado fora da conversa', {
-              cand_conversa: cand.conversa_id, webhook_conversa: conversa_id
-            })
-          }
-        }
-
-        if (!cand && WHATSAPP_DEBUG) {
-          console.warn('[Z-API] fromMe reconcile: nenhum candidato encontrado', {
-            conversa_id, texto: String(texto || '').slice(0, 30), fromIso, toIso
-          })
-        }
-
-        if (cand?.id) {
-          const updates = {}
-          if (whatsappIdCompativelParaReconcile(cand, whatsappIdStr)) {
-            updates.whatsapp_id = whatsappIdStr
-          }
-          const ackStatus = normalizeRawAckStatus(statusPayload ?? payload?.status ?? payload?.ack)
-          if (ackStatus && statusRank(ackStatus) >= statusRank(cand.status || 'pending')) {
-            updates.status = ackStatus
-            updates.status_mensagem = ackStatus
-          }
-          if (webhookReplyMeta && !cand.reply_meta) updates.reply_meta = webhookReplyMeta
-
-          if (Object.keys(updates).length === 0) {
-            mensagemSalva = cand
-          } else {
-            const { data: patched, error: patchErr } = await supabase
-              .from('mensagens')
-              .update(updates)
-              .eq('company_id', company_id)
-              .eq('id', cand.id)
-              .select(WEBHOOK_MSG_SELECT)
-              .single()
-
-            if (!patchErr && patched) {
-              mensagemSalva = patched
-            } else if (patchErr) {
-              console.warn('⚠️ fromMe reconcile: falha ao atualizar candidato:', patchErr?.message)
-            } else {
-              mensagemSalva = cand
-            }
-          }
-        }
-        }
-
-        if (mensagemSalva?.id && statusPayload) {
-          const ackStatus = normalizeRawAckStatus(statusPayload)
-          const cur = mensagemSalva.status || mensagemSalva.status_mensagem || 'pending'
-          if (ackStatus && statusRank(ackStatus) >= statusRank(cur)) {
-            const { data: statusPatched } = await supabase
-              .from('mensagens')
-              .update({ status: ackStatus, status_mensagem: ackStatus })
-              .eq('company_id', company_id)
-              .eq('id', mensagemSalva.id)
-              .select(WEBHOOK_MSG_SELECT)
-              .maybeSingle()
-            if (statusPatched) mensagemSalva = statusPatched
-          }
-        }
-
-        // Rollout R2 (empresa 1): mensagem outbound confirmada pelo webhook → espelha para o R2
-        // agora (mesmo gatilho inline do inbound). Cobre envios que ficaram pending por ID de fila
-        // e só chegam a status final aqui. No-op para outras empresas / R2 desligado / tipo não-mídia.
-        if (mensagemSalva?.id && String(mensagemSalva.direcao || '') === 'out') {
-          try {
-            const { scheduleR2MirrorIfNeeded } = require('../services/mediaR2MirrorService')
-            scheduleR2MirrorIfNeeded({ supabase, io: req.app.get('io'), company_id, mensagem_id: mensagemSalva.id })
-          } catch (_) { /* best-effort; nunca afeta o webhook */ }
-        }
-      } catch (e) {
-        console.warn('⚠️ fromMe reconcile: erro ao reconciliar:', e?.message || e)
-      }
+      mensagemSalva = await reconcileFromMeInReceived(supabase, {
+        company_id, conversa_id, whatsapp_instance_id, payload, whatsappIdStr,
+        type, imageUrl, documentUrl, audioUrl, videoUrl, stickerUrl, locationUrl,
+        criado_em, fileName, texto, webhookReplyMeta, io: req.app.get('io'),
+      })
     }
 
     // isEdit: mensagem editada → atualizar texto da mensagem existente, não inserir nova
+    // isEdit: mensagem editada → atualiza a linha existente → controllers/webhookInbound/persistMensagem.js.
     if (!mensagemSalva && isEdit && whatsappIdStr) {
-      try {
-        const { data: editTarget } = await updateSingleMensagemByWhatsappId(supabase, {
-          company_id,
-          whatsapp_id: whatsappIdStr,
-          whatsapp_instance_id,
-          updates: { texto },
-          select: WEBHOOK_MSG_SELECT,
-          context: 'received.isEdit',
-        })
-        if (editTarget) {
-          mensagemSalva = editTarget
-          console.log(`✏️ Z-API isEdit: mensagem ${editTarget.id} atualizada (conversa ${conversa_id})`)
-          const io = req.app.get('io')
-          if (io) {
-            io.to(`conversa_${conversa_id}`).to(`empresa_${company_id}`).emit('mensagem_editada', {
-              id: editTarget.id,
-              conversa_id,
-              texto,
-            })
-          }
-        }
-      } catch (editErr) {
-        console.warn('[Z-API] isEdit: erro ao atualizar mensagem:', editErr?.message)
-      }
+      mensagemSalva = await resolveEditedMensagemRow(supabase, {
+        company_id, whatsapp_instance_id, whatsappIdStr, conversa_id, texto, io: req.app.get('io'),
+      })
     }
 
     if (!mensagemSalva) {
@@ -2190,134 +1944,19 @@ exports.receberZapi = async (req, res) => {
       })
       // Demais tipos: já têm texto preenchido; tipo padrão é texto
 
-      let { data: inserted, error: errMsg } = await supabase
-        .from('mensagens')
-        .insert(insertMsg)
-        .select(WEBHOOK_MSG_SELECT)
-        .single()
-
-      // Compatibilidade: se a coluna reply_meta não existir ainda, remove e tenta de novo
-      if (errMsg && (String(errMsg.message || '').includes('reply_meta') || String(errMsg.message || '').includes('does not exist'))) {
-        delete insertMsg.reply_meta
-        const retryReply = await supabase.from('mensagens').insert(insertMsg).select(WEBHOOK_MSG_SELECT).single()
-        inserted = retryReply.data
-        errMsg = retryReply.error
+      // Insert + retries de esquema + 23505/merge + fallback → controllers/webhookInbound/persistMensagem.js.
+      const _persist = await persistInboundMensagemRow(
+        supabase,
+        { company_id, whatsapp_instance_id, whatsappIdStr, conversa_id, fromMe, isGroup, senderName, participantPhone, texto, criado_em, io: req.app?.get('io') },
+        insertMsg
+      )
+      if (_persist.failed) {
+        // payload é 1 de N num lote — pula só este item e segue para o próximo.
+        lastResult = { ok: false, error: 'Erro ao salvar mensagem' }
+        continue
       }
-
-      if (errMsg && (String(errMsg.message || '').includes('remetente_nome') || String(errMsg.message || '').includes('remetente_telefone') || String(errMsg.message || '').includes('does not exist'))) {
-        delete insertMsg.remetente_nome
-        delete insertMsg.remetente_telefone
-        const retry = await supabase.from('mensagens').insert(insertMsg).select(WEBHOOK_MSG_SELECT).single()
-        inserted = retry.data
-        errMsg = retry.error
-      }
-      if (errMsg && (String(errMsg.message || '').includes('contact_meta') || String(errMsg.message || '').includes('location_meta') || String(errMsg.message || '').includes('does not exist'))) {
-        delete insertMsg.contact_meta
-        delete insertMsg.location_meta
-        const retryMeta = await supabase.from('mensagens').insert(insertMsg).select(WEBHOOK_MSG_SELECT).single()
-        inserted = retryMeta.data
-        errMsg = retryMeta.error
-      }
-      if (errMsg) {
-        if (String(errMsg.code || '') === '23505' || String(errMsg.message || '').includes('duplicate') || String(errMsg.message || '').includes('unique')) {
-          const { data: existente } = await selectSingleMensagemByWhatsappId(supabase, {
-            company_id,
-            whatsapp_id: whatsappIdStr,
-            whatsapp_instance_id,
-            select: WEBHOOK_MSG_SELECT,
-            context: 'received.insert.duplicate',
-          })
-          // Corrida: outro processo inseriu primeiro (sem URL) e este webhook traz mídia https —
-          // sem merge, a linha fica sem url até expirar o link remoto. Mescla só mídia persistível.
-          let mergedDup = existente
-          const insUrl = String(insertMsg.url || '').trim()
-          const exUrl = String(existente?.url || '').trim()
-          if (
-            existente?.id &&
-            insUrl.startsWith('https://') &&
-            !exUrl &&
-            insertMsg.tipo &&
-            tipoQualificaPersistencia(insertMsg.tipo)
-          ) {
-            try {
-              const upDup = {
-                url: insUrl,
-                tipo: insertMsg.tipo || existente.tipo,
-              }
-              if (insertMsg.nome_arquivo) upDup.nome_arquivo = insertMsg.nome_arquivo
-              if (insertMsg.location_meta && typeof insertMsg.location_meta === 'object') {
-                upDup.location_meta = insertMsg.location_meta
-              }
-              if (insertMsg.contact_meta && typeof insertMsg.contact_meta === 'object') {
-                upDup.contact_meta = insertMsg.contact_meta
-              }
-              const { data: patchedDup, error: patchDupErr } = await supabase
-                .from('mensagens')
-                .update(upDup)
-                .eq('id', existente.id)
-                .eq('company_id', company_id)
-                .select(WEBHOOK_MSG_SELECT)
-                .single()
-              if (!patchDupErr && patchedDup) {
-                mergedDup = patchedDup
-                if (req.app?.get('io')) {
-                  const io2 = req.app.get('io')
-                  const rooms = [`conversa_${conversa_id}`, `empresa_${company_id}`]
-                  const emitPayload = {
-                    ...patchedDup,
-                    criado_em: normalizarTimestampSemFusoAmbiguoParaApi(patchedDup.criado_em),
-                    conversa_id: patchedDup.conversa_id ?? conversa_id,
-                    status: patchedDup.status || 'delivered',
-                    status_mensagem: patchedDup.status_mensagem || patchedDup.status || 'delivered',
-                    fromMe,
-                    direcao: patchedDup.direcao ?? (fromMe ? 'out' : 'in'),
-                  }
-                  io2.to(rooms).emit(io2.EVENTS?.NOVA_MENSAGEM || 'nova_mensagem', emitPayload)
-                  scheduleInboundWebPush(company_id, conversa_id, 'nova_mensagem', emitPayload)
-                }
-              }
-            } catch (e) {
-              console.warn('[webhook] duplicate+media merge:', e?.message || e)
-            }
-          }
-          mensagemSalva = mergedDup
-        } else {
-          // Fallback: qualquer mensagem que chega TEM que ficar no sistema — tenta inserir com payload mínimo
-          console.warn('⚠️ ULTRAMSG fallback insert após erro:', errMsg.message)
-          let fallbackPayload = {
-            conversa_id,
-            texto: texto || '(mensagem)',
-            direcao: fromMe ? 'out' : 'in',
-            company_id,
-            whatsapp_id: whatsappIdStr || null,
-            criado_em,
-          }
-          // Nunca remover tipo/url/caminho da mídia já resolvidos no insertMsg.
-          preserveMediaFieldsOnWebhookFallback(fallbackPayload, insertMsg)
-          if (isGroup && senderName) fallbackPayload.remetente_nome = senderName
-          if (isGroup && participantPhone) fallbackPayload.remetente_telefone = participantPhone
-          let fallback = await supabase.from('mensagens').insert(fallbackPayload).select(WEBHOOK_MSG_SELECT).single()
-          if (fallback.error && (String(fallback.error.message || '').includes('remetente_nome') || String(fallback.error.message || '').includes('remetente_telefone'))) {
-            delete fallbackPayload.remetente_nome
-            delete fallbackPayload.remetente_telefone
-            fallback = await supabase.from('mensagens').insert(fallbackPayload).select(WEBHOOK_MSG_SELECT).single()
-          }
-          if (!fallback.error) {
-            mensagemSalva = fallback.data
-            mensagemFoiInseridaPeloWebhook = true
-            console.log('✅ Mensagem salva (fallback):', mensagemSalva.id)
-          } else {
-            console.error('❌ ULTRAMSG Erro ao salvar mensagem:', errMsg?.code, errMsg?.message, errMsg?.details)
-            // IMPORTANTE: payload é 1 de N num lote (ver getPayloads) — abortar a requisição aqui
-            // descartaria as demais mensagens do lote. Pula só esta e segue para a próxima.
-            lastResult = { ok: false, error: 'Erro ao salvar mensagem' }
-            continue
-          }
-        }
-      } else {
-        mensagemSalva = inserted
-        mensagemFoiInseridaPeloWebhook = true
-      }
+      mensagemSalva = _persist.mensagemSalva
+      if (_persist.mensagemFoiInseridaPeloWebhook) mensagemFoiInseridaPeloWebhook = true
     }
 
     if (mensagemSalva) {
@@ -2522,7 +2161,7 @@ exports.receberZapi = async (req, res) => {
 
     // Mensagem de entrada: incrementa unread no banco para todos os usuários (igual WhatsApp; refetch da lista já vem com contador certo)
     const convIdForEmit = mensagemSalva?.conversa_id ?? conversa_id
-    if (!fromMe) {
+    if (!fromMe && mensagemFoiInseridaPeloWebhook) {
       await incrementarUnreadParaConversa(company_id, convIdForEmit)
     }
 

@@ -21,7 +21,7 @@ const { assertPodeEnviarMensagem } = require('../../services/chat/access/convers
 const { textoParaEnvioWhatsapp, getUsuarioParaEnvioCliente, enrichMensagemComAutorUsuario } = require('../../services/chat/presentation/messageAuthorEnrichment')
 const { loadWhatsappInstanceMetaMap, resolveUltraMsgReplyMessageId } = require('../../services/chat/read/conversationLookups')
 const { deduplicationMap: _clientTempIdDeduplicationMap, findMensagemByClientTempId, isDbDedupeUnavailable, markDbDedupeUnavailable } = require('../../services/chat/outbound/idempotencyService')
-const { aplicarAguardandoClienteNoPayload, recalcularEMesclarModoSimples } = require('../../services/chat/outbound/modoSimplesOutbound')
+const { aplicarAguardandoClienteNoPayload, anexarAssumirNoPayloadLista, recalcularEMesclarModoSimples } = require('../../services/chat/outbound/modoSimplesOutbound')
 
 exports.enviarMensagemChat = async (req, res) => {
   try {
@@ -69,7 +69,7 @@ exports.enviarMensagemChat = async (req, res) => {
       user_id,
       role: req.user?.perfil,
       user_dep_ids: req.user?.departamento_ids,
-      autoAssumirAoEnviar: !modoSimplesEnvio,
+      autoAssumirAoEnviar: true,
       io,
     })
     if (!permEnvio.ok) return res.status(permEnvio.status).json({ error: permEnvio.error })
@@ -272,7 +272,7 @@ exports.enviarMensagemChat = async (req, res) => {
       const telefoneParaPayload = conversa?.telefone && !String(conversa.telefone).startsWith('lid:') ? String(conversa.telefone).trim() : null
       const whatsappInstanceMetaMap = await loadWhatsappInstanceMetaMap(company_id, [whatsappInstanceId])
       const whatsappInstanceMeta = safeWhatsappInstanceMeta(whatsappInstanceMetaMap.get(Number(whatsappInstanceId)))
-      const convPayload = aplicarAguardandoClienteNoPayload({
+      const convPayload = anexarAssumirNoPayloadLista(aplicarAguardandoClienteNoPayload({
         id: Number(conversa_id),
         ultima_atividade: novaMsgPayload.criado_em,
         exibir_badge_aberta: true,
@@ -294,7 +294,7 @@ exports.enviarMensagemChat = async (req, res) => {
         ...(modoSimplesResult?.conversa || {}),
         atendimento_modo_simples: modoSimplesEnvio,
         modo_simples_aguardando: modoSimplesResult?.modo_simples_aguardando ?? null,
-      })
+      }), permEnvio)
       emitirConversaAtualizada(io, company_id, conversa_id, convPayload, { skipAtualizarConversa: true })
     }
 

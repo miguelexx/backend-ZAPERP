@@ -119,6 +119,25 @@ describe('receberZapi — miolo inbound (caracterização)', () => {
     expect(tryReconcileFromMeByCrmReferenceId).not.toHaveBeenCalled()
   })
 
+
+  test('C) inbound reentregue atualiza a linha existente sem incrementar unread novamente', async () => {
+    const { selectSingleMensagemByWhatsappId } = require('../controllers/webhookInbound/whatsappIdLookup')
+    selectSingleMensagemByWhatsappId.mockResolvedValue({
+      data: { id: 77, conversa_id: 10, company_id: 1, direcao: 'in', tipo: 'texto', texto: 'ola', whatsapp_id: 'WAMID-REPLAY-1' },
+      error: null, ambiguous: false,
+    })
+    try {
+      const res = buildRes()
+      await receberZapi(buildReq({
+        body: { instanceId: 'inst-1', phone: '5534999999999', messageId: 'WAMID-REPLAY-1', text: { message: 'ola' }, fromMe: false },
+        zapiContext: { company_id: 1, whatsapp_instance_id: 5 },
+      }), res)
+      expect(res.status).toHaveBeenCalledWith(200)
+      expect(incrementarUnreadParaConversa).not.toHaveBeenCalled()
+    } finally {
+      selectSingleMensagemByWhatsappId.mockResolvedValue({ data: null, error: null, ambiguous: false })
+    }
+  })
   test('B) eco fromMe reconciliado por crm-* → sem unread e sem nova_mensagem (não duplica no front)', async () => {
     // O reconcile "encontra" a outbound do CRM → mensagemSalva vem do reconcile, não de um insert novo.
     tryReconcileFromMeByCrmReferenceId.mockResolvedValue({

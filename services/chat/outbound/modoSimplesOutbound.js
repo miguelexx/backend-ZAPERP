@@ -22,6 +22,25 @@ function aplicarAguardandoClienteNoPayload(payload, waitingResult, modoSimplesOp
   return aplicarModoSimplesNoPayload(payload, modoSimplesOpt, modoSimplesOpt?.atendimento_modo_simples)
 }
 
+/** Inclui status/atendente no payload da lista após auto-assumir no envio. */
+function anexarAssumirNoPayloadLista(payload, permEnvio) {
+  if (!payload) return payload
+  const conv = permEnvio?.conversa
+  if (!conv || typeof conv !== 'object') return payload
+  const status = conv.status_atendimento != null ? String(conv.status_atendimento) : ''
+  if (status) {
+    payload.status_atendimento = status
+    payload.status_atendimento_real = conv.status_atendimento_real || status
+  }
+  if (Object.prototype.hasOwnProperty.call(conv, 'atendente_id')) {
+    payload.atendente_id = conv.atendente_id
+  }
+  if (status === 'em_atendimento' || status === 'aguardando_cliente') {
+    payload.exibir_badge_aberta = false
+  }
+  return payload
+}
+
 async function recalcularEMesclarModoSimples({
   company_id,
   conversa_id,
@@ -47,4 +66,4 @@ async function recalcularEMesclarModoSimples({
   return result
 }
 
-module.exports = { aplicarAguardandoClienteNoPayload, recalcularEMesclarModoSimples }
+module.exports = { aplicarAguardandoClienteNoPayload, anexarAssumirNoPayloadLista, recalcularEMesclarModoSimples }

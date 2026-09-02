@@ -128,6 +128,49 @@ describe('chatListCountsService', () => {
     ).toBe(false)
   })
 
+  test('chip em_atendimento is exclusive of waiting-for-client rows', () => {
+    const ctx = { user_id: 84, isAtendente: false, filtroAtendenteInformado: null }
+    const chip = { status_atendimento: 'em_atendimento', exclude_aguardando_cliente: true }
+    const list = { status_atendimento: 'em_atendimento' }
+    const active = {
+      tipo: null,
+      status_atendimento: 'em_atendimento',
+      atendente_id: 84,
+      aguardando_cliente_desde: null,
+      mensagens: [{ id: 1 }],
+    }
+    const waitingAuto = {
+      ...active,
+      aguardando_cliente_desde: '2026-09-01T12:00:00.000Z',
+    }
+    const waitingManual = {
+      tipo: null,
+      status_atendimento: 'aguardando_cliente',
+      atendente_id: 84,
+      aguardando_cliente_desde: null,
+      mensagens: [{ id: 1 }],
+    }
+
+    expect(rowVisibleInPostFilteredList(active, ctx, chip)).toBe(true)
+    expect(rowVisibleInPostFilteredList(waitingAuto, ctx, chip)).toBe(false)
+    expect(rowVisibleInPostFilteredList(waitingManual, ctx, chip)).toBe(false)
+    expect(rowVisibleInPostFilteredList(waitingAuto, ctx, list)).toBe(true)
+    expect(rowVisibleInPostFilteredList(waitingManual, ctx, list)).toBe(true)
+
+    const attendantCtx = { user_id: 84, isAtendente: true, filtroAtendenteInformado: null }
+    expect(rowVisibleInPostFilteredList(waitingAuto, attendantCtx, chip)).toBe(false)
+    expect(rowVisibleInPostFilteredList(active, attendantCtx, chip)).toBe(true)
+
+    const modoSimplesCtx = { ...ctx, atendimentoModoSimplesEmpresa: true }
+    expect(
+      rowVisibleInPostFilteredList(
+        { ...active, modo_simples_aguardando: 'cliente' },
+        modoSimplesCtx,
+        chip
+      )
+    ).toBe(false)
+  })
+
   test('withTimeout resolve rápido e rejeita com CHAT_COUNTS_TIMEOUT', async () => {
     await expect(withTimeout(Promise.resolve(7), 200)).resolves.toBe(7)
     let resolveHang

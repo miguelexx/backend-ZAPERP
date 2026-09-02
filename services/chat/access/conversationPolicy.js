@@ -136,7 +136,35 @@ async function assertPodeEnviarMensagem({
 
   const isAssignedToUser = conv.atendente_id && Number(conv.atendente_id) === Number(user_id)
   if (isAssignedToUser) {
-    return { ok: true, reason: 'conversa_assumida_pelo_usuario' }
+    const statusAtual = String(conv.status_atendimento || '').toLowerCase()
+    if (autoAssumirAoEnviar && statusAtual === 'aberta') {
+      const result = await executarAssumirConversa({
+        company_id,
+        conversa_id,
+        user_id,
+        perfil: role,
+        departamento_ids: user_dep_ids,
+        observacao: 'Conversa assumida automaticamente no primeiro envio manual.'
+      })
+      if (result.ok && result.conversa) {
+        if (io) {
+          emitirRealtimeAposAssumir(io, company_id, conversa_id, user_id, result.conversa)
+          if (result.atendimento) {
+            await emitirMovimentacaoInternaAtendimento(io, {
+              company_id,
+              conversa: result.conversa,
+              atendimento: result.atendimento,
+            })
+          }
+        }
+        return {
+          ok: true,
+          reason: 'promovida_aberta_ao_enviar',
+          conversa: result.conversa,
+        }
+      }
+    }
+    return { ok: true, reason: 'conversa_assumida_pelo_usuario', conversa: conv }
   }
 
   if (conv.atendente_id && await usuarioParticipaAtivamenteDaConversa(company_id, conversa_id, user_id)) {
@@ -145,7 +173,8 @@ async function assertPodeEnviarMensagem({
 
   if (!conv.atendente_id) {
     const modoSimplesAtivo = await empresaModoSimplesAtivo(company_id)
-    if (modoSimplesAtivo) {
+    const deveAutoAssumir = autoAssumirAoEnviar || autoAssumirUra
+    if (modoSimplesAtivo && !deveAutoAssumir) {
       const permVer = await assertPermissaoConversa({
         company_id,
         conversa_id,
@@ -158,7 +187,6 @@ async function assertPodeEnviarMensagem({
       }
       return { ok: false, status: permVer.status || 403, error: permVer.error || 'Sem permissão para esta conversa' }
     }
-    const deveAutoAssumir = autoAssumirAoEnviar || autoAssumirUra
     if (deveAutoAssumir) {
       if (!podeAssumirConversaPorPerfil(role)) {
         return { ok: false, status: 403, error: 'Seu perfil não permite assumir conversas' }

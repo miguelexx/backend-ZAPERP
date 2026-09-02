@@ -51,7 +51,7 @@ function installRpcMock(handlers = {}) {
 
 function mockChain(result = { data: null, error: null, count: 0 }) {
   const chain = {}
-  const methods = ['select', 'eq', 'in', 'order', 'limit', 'update', 'upsert', 'gte']
+  const methods = ['select', 'eq', 'in', 'order', 'limit', 'update', 'upsert', 'gte', 'not']
   for (const m of methods) chain[m] = jest.fn(() => chain)
   chain.single = jest.fn().mockResolvedValue(result)
   chain.maybeSingle = jest.fn().mockResolvedValue(result)

@@ -412,6 +412,9 @@ function applyChatListSqlFilters(query, ctx, overrides = {}) {
     q = parts.length > 0 ? q.or(parts.join(',')) : q.eq('departamento_id', Number(filter_dep_id))
   }
 
+  // Snapshot global reaproveita apenas as regras de acesso, sem excluir status/abas.
+  if (overrides.visibilityOnly === true) return q
+
   if (forceEmptyConversas) {
     q = q.in('id', [0])
   } else if (overrides.conversa_ids && overrides.conversa_ids.length > 0) {
@@ -534,6 +537,18 @@ function rowHasMessage(row) {
   return Array.isArray(row?.mensagens) && row.mensagens.length > 0
 }
 
+/** Mesma regra de `isConversaAguardandoCliente` no frontend (chip exclusivo). */
+function rowCountsAsAguardandoCliente(row, ctx) {
+  if (!row) return false
+  if (ctx?.atendimentoModoSimplesEmpresa) {
+    return String(row.modo_simples_aguardando || '').toLowerCase() === 'cliente'
+  }
+  const status = String(row.status_atendimento || '').trim().toLowerCase()
+  if (row.atendente_id == null) return false
+  if (status === 'aguardando_cliente') return true
+  return status === 'em_atendimento' && row.aguardando_cliente_desde != null
+}
+
 function rowVisibleInPostFilteredList(row, ctx, overrides = {}) {
   if (!row) return false
   const isGroup = isGroupConversationRow(row)
@@ -579,6 +594,9 @@ function rowVisibleInPostFilteredList(row, ctx, overrides = {}) {
 
   if (overrides.status_atendimento === 'em_atendimento' && !overrides.aguardando_cliente) {
     if (isGroup) return false
+    if (overrides.exclude_aguardando_cliente === true && rowCountsAsAguardandoCliente(row, ctx)) {
+      return false
+    }
     if (ctx?.isAtendente) return status === 'em_atendimento' && vinculadaAoUsuario
     if (filtroAtendente != null && atendenteId !== filtroAtendente) return false
     return status === 'em_atendimento' || status === 'aguardando_cliente'
@@ -607,7 +625,7 @@ async function countConversasWithPostListRules(ctx, overrides = {}) {
     const to = Math.min(from + pageSize - 1, maxRows - 1)
     let q = supabase
       .from('conversas')
-      .select('id, tipo, status_atendimento, atendente_id, aguardando_resposta_campanha, mensagens ( id )')
+      .select('id, tipo, status_atendimento, atendente_id, aguardando_resposta_campanha, aguardando_cliente_desde, modo_simples_aguardando, mensagens ( id )')
 
     q = applyChatListSqlFilters(q, ctx, overrides)
       .order('ultima_atividade', { ascending: false, nullsFirst: false })
@@ -752,7 +770,11 @@ async function getChatFilterCounts(req) {
       countConversasWithFilter(ctx, { minha_fila: true }),
       countConversasWithFilter(ctx, { hoje: true }),
       countConversasWithFilter(ctx, { status_atendimento: 'aberta' }),
-      countConversasWithFilter(ctx, { status_atendimento: 'em_atendimento' }),
+      // Chip exclusivo: espera do cliente não entra em em_atendimento (a listagem da aba ainda inclui).
+      countConversasWithFilter(ctx, {
+        status_atendimento: 'em_atendimento',
+        exclude_aguardando_cliente: true,
+      }),
       countConversasWithFilter(ctx, { status_atendimento: 'fechada' }),
       countConversasWithFilter(ctx, {
         status_atendimento: 'fechada',

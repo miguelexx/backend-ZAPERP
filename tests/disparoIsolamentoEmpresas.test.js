@@ -209,17 +209,27 @@ describe('Etapa 9 — Isolamento empresas (10 vs 20)', () => {
 
     const { gerarFilaParaCampanha } = require('../services/disparoFilaService')
 
-    const res = await request(app)
-      .post('/api/disparo/campanhas/1/execucao/iniciar')
-      .set('Authorization', `Bearer ${token({ company_id: COMPANY_A })}`)
+    // O heartbeat mockado é DRY-RUN (canSendLive:false); em modo dry-run o iniciar não exige worker
+    // live. O `.env` (dotenv override:true) pode forçar DISPARO_DRY_RUN=false → requireLive → 422.
+    // Fixamos dry-run só neste teste (getDisparoFlags lê o env em call-time) e restauramos depois.
+    const _prevDryRun = process.env.DISPARO_DRY_RUN
+    process.env.DISPARO_DRY_RUN = 'true'
+    try {
+      const res = await request(app)
+        .post('/api/disparo/campanhas/1/execucao/iniciar')
+        .set('Authorization', `Bearer ${token({ company_id: COMPANY_A })}`)
 
-    expect(res.status).toBe(200)
-    expect(gerarFilaParaCampanha).toHaveBeenCalledWith(
-      expect.objectContaining({ companyId: COMPANY_A }),
-    )
-    expect(gerarFilaParaCampanha).not.toHaveBeenCalledWith(
-      expect.objectContaining({ companyId: COMPANY_B }),
-    )
+      expect(res.status).toBe(200)
+      expect(gerarFilaParaCampanha).toHaveBeenCalledWith(
+        expect.objectContaining({ companyId: COMPANY_A }),
+      )
+      expect(gerarFilaParaCampanha).not.toHaveBeenCalledWith(
+        expect.objectContaining({ companyId: COMPANY_B }),
+      )
+    } finally {
+      if (_prevDryRun === undefined) delete process.env.DISPARO_DRY_RUN
+      else process.env.DISPARO_DRY_RUN = _prevDryRun
+    }
   })
 
   it('GET relatorio repassa company_id do token ao serviço', async () => {

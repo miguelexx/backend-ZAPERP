@@ -24,10 +24,6 @@ function loadHelperWithResponses(responsesByTable) {
 }
 
 describe('departamentoGruposHelper', () => {
-  afterEach(() => {
-    jest.dontMock('../config/supabase')
-  })
-
   test('falls back to no linked departments when departamento_grupos table is unavailable', async () => {
     const { helper } = loadHelperWithResponses({
       departamento_grupos: [

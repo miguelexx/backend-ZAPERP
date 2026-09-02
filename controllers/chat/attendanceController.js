@@ -1180,7 +1180,9 @@ exports.transferirSetor = async (req, res) => {
       if (departamentoIdFinal != null) {
         emitirDepartamento(io, departamentoIdFinal, io.EVENTS?.CONVERSA_ATUALIZADA || 'conversa_atualizada', payload)
       }
-      // `emitirConversaAtualizada` já emite `atualizar_conversa` na empresa (skip padrão false).
+      // Room da empresa: quem perdeu o setor precisa receber o payload para dropar o card.
+      // `emitirConversaAtualizada` só entrega a quem ainda pode ver.
+      io.to(`empresa_${company_id}`).emit(io.EVENTS?.CONVERSA_ATUALIZADA || 'conversa_atualizada', payload)
     }
 
     return res.json({

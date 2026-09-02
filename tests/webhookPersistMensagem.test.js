@@ -4,7 +4,23 @@
  * de tipo, que antes não tinha teste direto.
  */
 
-const { applyInboundMediaFields } = require('../controllers/webhookInbound/persistMensagem')
+// Para os testes de persistInboundMensagemRow: controla o lookup do 23505 sem Supabase real.
+jest.mock('../controllers/webhookInbound/whatsappIdLookup', () => ({
+  ...jest.requireActual('../controllers/webhookInbound/whatsappIdLookup'),
+  selectSingleMensagemByWhatsappId: jest.fn(),
+}))
+
+const { applyInboundMediaFields, persistInboundMensagemRow } = require('../controllers/webhookInbound/persistMensagem')
+const { selectSingleMensagemByWhatsappId } = require('../controllers/webhookInbound/whatsappIdLookup')
+
+// Fake do supabase-client: cada `.single()` consome o próximo resultado da fila.
+function fakeSupabase(results) {
+  let i = 0
+  const single = () => Promise.resolve(results[i++] ?? { data: null, error: null })
+  const chain = { insert: () => chain, select: () => chain, update: () => chain, eq: () => chain, single }
+  return { from: () => chain }
+}
+const ctx = { company_id: 1, whatsapp_instance_id: 5, whatsappIdStr: 'WAMID-1', conversa_id: 10, fromMe: false, isGroup: false, texto: 'oi', criado_em: '2026-09-01T00:00:00Z', io: null }
 
 const base = () => ({ conversa_id: 10, texto: 'x', direcao: 'in', company_id: 1 })
 
@@ -55,5 +71,39 @@ describe('applyInboundMediaFields — tipo/mídia → campos do insert (caracter
   test('reaction → tipo reaction; texto/desconhecido → não seta tipo', () => {
     expect(applyInboundMediaFields(base(), { type: 'reaction' }).tipo).toBe('reaction')
     expect(applyInboundMediaFields(base(), { type: 'text' }).tipo).toBeUndefined()
+  })
+})
+
+describe('persistInboundMensagemRow — insert/23505/fallback (I/O com fake supabase)', () => {
+  beforeEach(() => jest.clearAllMocks())
+
+  test('insert ok → mensagemSalva + mensagemFoiInseridaPeloWebhook=true, failed=false', async () => {
+    const sb = fakeSupabase([{ data: { id: 1, texto: 'oi' }, error: null }])
+    const out = await persistInboundMensagemRow(sb, ctx, { conversa_id: 10, texto: 'oi' })
+    expect(out).toEqual({ mensagemSalva: { id: 1, texto: 'oi' }, mensagemFoiInseridaPeloWebhook: true, failed: false })
+  })
+
+  test('23505 (duplicata) sem mídia nova → usa a linha existente, NÃO marca inserida', async () => {
+    const sb = fakeSupabase([{ data: null, error: { code: '23505' } }])
+    selectSingleMensagemByWhatsappId.mockResolvedValue({ data: { id: 99, url: '' }, error: null, ambiguous: false })
+    const out = await persistInboundMensagemRow(sb, ctx, { conversa_id: 10, texto: 'oi' })
+    expect(out.mensagemSalva).toEqual({ id: 99, url: '' })
+    expect(out.mensagemFoiInseridaPeloWebhook).toBe(false)
+    expect(out.failed).toBe(false)
+  })
+
+  test('erro não-23505 + fallback também falha → failed=true (item pulado no lote)', async () => {
+    // 1º insert falha ('boom' não casa retries de esquema) → fallback insert também falha.
+    const sb = fakeSupabase([{ data: null, error: { message: 'boom' } }, { data: null, error: { message: 'boom2' } }])
+    const out = await persistInboundMensagemRow(sb, ctx, { conversa_id: 10, texto: 'oi' })
+    expect(out).toEqual({ mensagemSalva: null, mensagemFoiInseridaPeloWebhook: false, failed: true })
+  })
+
+  test('erro não-23505 + fallback OK → salva pelo fallback, inserida=true', async () => {
+    const sb = fakeSupabase([{ data: null, error: { message: 'boom' } }, { data: { id: 7, texto: 'oi' }, error: null }])
+    const out = await persistInboundMensagemRow(sb, ctx, { conversa_id: 10, texto: 'oi' })
+    expect(out.mensagemSalva).toEqual({ id: 7, texto: 'oi' })
+    expect(out.mensagemFoiInseridaPeloWebhook).toBe(true)
+    expect(out.failed).toBe(false)
   })
 })

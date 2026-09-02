@@ -990,20 +990,16 @@ exports.listarConversas = async (req, res) => {
       })
     }
 
-    // Filtro "Em atendimento":
-    // - Atendente comum: apenas status real "em_atendimento" (escopo padrão da sessão)
-    // - Admin/supervisor: inclui "em_atendimento" + "aguardando_cliente" (manual), com opcional atendente_id.
+    // Filtro "Em atendimento": todos os atendimentos da empresa no recorte de visibilidade
+    // (setor). Não restringir ao próprio atendente — isso é a Minha fila.
+    // Admin/supervisor: inclui também "aguardando_cliente" (manual), com opcional atendente_id.
     if (!aguardandoClienteAtivo && statusNorm === 'em_atendimento') {
       conversasFormatadas = conversasFormatadas.filter((c) => {
         if (c.sem_conversa || c.is_group) return false
         const st = String(c.status_atendimento_real || '')
-        if (isAtendente) {
-          const vinculadaAoUsuario =
-            Number(c.atendente_id) === Number(user_id) ||
-            conversaIdsParticipanteAtivoSet.has(Number(c.id))
-          return st === 'em_atendimento' && vinculadaAoUsuario
-        }
+        if (c.atendente_id == null) return false
         if (filtroAtendenteInformado != null && Number(c.atendente_id) !== Number(filtroAtendenteInformado)) return false
+        if (isAtendente) return st === 'em_atendimento'
         return st === 'em_atendimento' || st === 'aguardando_cliente'
       })
     }

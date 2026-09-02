@@ -19,7 +19,7 @@ const { normalizeAudioForUltraMsg, probeAudioDurationSec, normalizeVideoForUltra
 const { assertPodeEnviarMensagem } = require('../../services/chat/access/conversationPolicy')
 const { getUsuarioParaEnvioCliente, enrichMensagemComAutorUsuario } = require('../../services/chat/presentation/messageAuthorEnrichment')
 const { findMensagemByClientTempId, isDbDedupeUnavailable, markDbDedupeUnavailable, isAudioDuracaoSecColumnUnavailable, markAudioDuracaoSecColumnUnavailable } = require('../../services/chat/outbound/idempotencyService')
-const { aplicarAguardandoClienteNoPayload, recalcularEMesclarModoSimples } = require('../../services/chat/outbound/modoSimplesOutbound')
+const { aplicarAguardandoClienteNoPayload, anexarAssumirNoPayloadLista, recalcularEMesclarModoSimples } = require('../../services/chat/outbound/modoSimplesOutbound')
 
 const MAX_ARQUIVOS_LOTE_ENVIO = 30
 
@@ -309,7 +309,7 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
       const novaMsgPayload = await enrichMensagemComAutorUsuario(supabase, company_id, basePayload)
       emitirEventoEmpresaConversa(io, company_id, conversa_id, io.EVENTS?.NOVA_MENSAGEM || 'nova_mensagem', novaMsgPayload)
       
-      const convPayload = aplicarAguardandoClienteNoPayload({
+      const convPayload = anexarAssumirNoPayloadLista(aplicarAguardandoClienteNoPayload({
         id: Number(conversa_id),
         ultima_atividade: timestampAtividade,
         reordenar_suave: true,
@@ -317,7 +317,7 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
         ...(modoSimplesResult?.conversa || {}),
         atendimento_modo_simples: modoSimplesEnvio,
         modo_simples_aguardando: modoSimplesResult?.modo_simples_aguardando ?? null,
-      })
+      }), permEnvio)
       
       // Adicionar preview da última mensagem baseado no tipo
       if (msg.tipo === 'contact' && msg.contact_meta) {

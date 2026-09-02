@@ -8,6 +8,11 @@ const { getChatFilterCounts } = require('../../services/chatListCountsService')
 
 exports.contarConversasPorFiltros = async (req, res) => {
   try {
+    if (String(req.query?.unread || '') === '1') {
+      const { getUnreadSnapshot } = require('../../services/chatUnreadSnapshotService')
+      res.set('Cache-Control', 'no-store')
+      return res.json(await getUnreadSnapshot(req))
+    }
     const counts = await getChatFilterCounts(req)
     return res.json(counts)
   } catch (err) {

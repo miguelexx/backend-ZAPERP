@@ -13,7 +13,7 @@ const { resolveTelefoneFromLidSiblingConversation, resolveConversationWhatsappIn
 const { emitirConversaAtualizada, emitirEventoEmpresaConversa } = require('../../services/chat/realtime/chatRealtimeGateway')
 const { assertPodeEnviarMensagem } = require('../../services/chat/access/conversationPolicy')
 const { getUsuarioParaEnvioCliente, enrichMensagemComAutorUsuario } = require('../../services/chat/presentation/messageAuthorEnrichment')
-const { aplicarAguardandoClienteNoPayload } = require('../../services/chat/outbound/modoSimplesOutbound')
+const { aplicarAguardandoClienteNoPayload, anexarAssumirNoPayloadLista } = require('../../services/chat/outbound/modoSimplesOutbound')
 
 exports.enviarReacaoMensagem = async (req, res) => {
   try {
@@ -291,7 +291,7 @@ exports.enviarContatoWhatsapp = async (req, res) => {
     if (io) {
       const payload = await enrichMensagemComAutorUsuario(supabase, company_id, { ...msg, status: nextStatus, status_mensagem: nextStatusMensagem, whatsapp_id: hasTraceableContactId ? waMessageId : null })
       emitirEventoEmpresaConversa(io, company_id, conversa_id, io.EVENTS?.NOVA_MENSAGEM || 'nova_mensagem', payload)
-      const convPayload = aplicarAguardandoClienteNoPayload({
+      const convPayload = anexarAssumirNoPayloadLista(aplicarAguardandoClienteNoPayload({
         id: Number(conversa_id),
         ultima_atividade: payload.criado_em || criadoEm,
         ultima_mensagem_preview: {
@@ -302,7 +302,7 @@ exports.enviarContatoWhatsapp = async (req, res) => {
           contact_meta,
         },
         reordenar_suave: true,
-      }, waitingAfterOutbound)
+      }, waitingAfterOutbound), permEnvio)
       emitirConversaAtualizada(io, company_id, conversa_id, convPayload, { skipAtualizarConversa: true })
     }
 
@@ -495,7 +495,7 @@ exports.enviarLocalizacao = async (req, res) => {
     if (io) {
       const payload = await enrichMensagemComAutorUsuario(supabase, company_id, { ...msg, status: nextStatus, status_mensagem: nextStatusMensagem, whatsapp_id: hasTraceableLocationId ? waMessageId : null, location_meta: msg.location_meta || location_meta })
       emitirEventoEmpresaConversa(io, company_id, conversa_id, io.EVENTS?.NOVA_MENSAGEM || 'nova_mensagem', payload)
-      const convPayload = aplicarAguardandoClienteNoPayload({
+      const convPayload = anexarAssumirNoPayloadLista(aplicarAguardandoClienteNoPayload({
         id: Number(conversa_id),
         ultima_mensagem_preview: {
           texto: msg.texto,
@@ -506,7 +506,7 @@ exports.enviarLocalizacao = async (req, res) => {
           url: locationUrl
         },
         reordenar_suave: true
-      }, waitingAfterOutbound)
+      }, waitingAfterOutbound), permEnvio)
       emitirConversaAtualizada(io, company_id, conversa_id, convPayload, { skipAtualizarConversa: true })
     }
 

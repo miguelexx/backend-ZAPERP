@@ -180,7 +180,9 @@ function emitirLock(io, conversa_id, usuario_id = null) {
 
 function emitirRealtimeAposAssumir(io, company_id, conversa_id, user_id, conversaRow) {
   if (!io) return
-  emitirConversaAtualizada(io, company_id, conversa_id, { ...conversaRow, exibir_badge_aberta: true }, { skipAtualizarConversa: true })
+  const status = String(conversaRow?.status_atendimento || '').toLowerCase()
+  const exibirBadgeAberta = !(status === 'em_atendimento' || status === 'aguardando_cliente')
+  emitirConversaAtualizada(io, company_id, conversa_id, { ...conversaRow, exibir_badge_aberta: exibirBadgeAberta }, { skipAtualizarConversa: true })
   emitirSincronizacaoListaConversas(io, company_id, conversa_id)
   emitirLock(io, conversa_id, user_id)
 }
