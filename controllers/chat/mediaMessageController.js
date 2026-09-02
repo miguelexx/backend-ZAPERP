@@ -50,7 +50,7 @@ const MAX_MEDIA_CAPTION_CHARS = 1024
  * Uma unidade de upload após multer; conversa e telefone já validados.
  * @returns {Promise<{ ok: true, msg: object } | { ok: false, status: number, error: string }>}
  */
-async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conversa_id, telefoneParaEnvio, whatsappInstanceId = null, io, captionUsuario = '', clientTempId = null }) {
+async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conversa_id, telefoneParaEnvio, whatsappInstanceId = null, io, captionUsuario = '', clientTempId = null, permEnvio = null }) {
   const { extFromOriginalName, isBlockedRiskExtension, blockedUploadErrorMessage } = require('../../middleware/upload')
   clientTempId = normalizeClientTempId(clientTempId)
   if (clientTempId) {
@@ -625,6 +625,7 @@ exports.enviarArquivo = async (req, res) => {
         io,
         captionUsuario: perFileCaption,
         clientTempId,
+        permEnvio,
       })
       if (!r.ok) {
         hadFailure = true
