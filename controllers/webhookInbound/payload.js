@@ -7,6 +7,7 @@
 const { normalizePhoneBR, normalizeGroupIdForStorage } = require('../../helpers/phoneHelper')
 const { parseVcardForContact } = require('../../helpers/vcardHelper')
 const { resolvePeerPhone } = require('../../helpers/conversationKeyHelper')
+const { inspectInboundOrigin } = require('./chatbotInboundGuard')
 
 const WHATSAPP_DEBUG = String(process.env.WHATSAPP_DEBUG || '').toLowerCase() === 'true'
 
@@ -145,6 +146,26 @@ function resolveConversationKeyFromZapi(payload) {
       isGroup: true,
       participantPhone,
       debugReason: key ? `group via pickGroupChatId (${groupKey})` : 'group but no groupChatId found — drop'
+    }
+  }
+
+  // Origem real do chat (Status / grupo em reação) — NUNCA o telefone do participant.
+  const inboundOrigin = inspectInboundOrigin(payload)
+  if (inboundOrigin.isStatusBroadcast) {
+    return {
+      key: '',
+      isGroup: false,
+      participantPhone: '',
+      debugReason: 'status_broadcast — not a private chat',
+    }
+  }
+  if (inboundOrigin.isGroup && inboundOrigin.groupChatId) {
+    const participantPhone = digits(payload.participantPhone ?? payload.participant ?? payload.author ?? payload.key?.participant ?? payload.from ?? payload.data?.from ?? '')
+    return {
+      key: inboundOrigin.groupChatId,
+      isGroup: true,
+      participantPhone,
+      debugReason: `group via chat origin (${inboundOrigin.groupJid}) — not participant phone`,
     }
   }
 

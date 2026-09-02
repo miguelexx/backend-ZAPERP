@@ -59,16 +59,36 @@ function normalizeUltramsgToZapi(body) {
   const fromJid = String(data.from || '').trim()
   const toJid = String(data.to || '').trim()
   const chatIdRaw = String(data.chatId || data.chat?.id || '').trim()
+  const msgTypeEarly = String(data.type || 'chat').toLowerCase()
+  const isReactionEventEarly = eventType.includes('reaction') || msgTypeEarly === 'reaction' || msgTypeEarly === 'reactionmessage'
+  // Reação: o chat reagido (quotedMsg) é a origem real; `from` é quem reagiu (participant).
+  const quotedChatJid = isReactionEventEarly
+    ? String(data.quotedMsg?.from || data.quotedMsg?.chatId || data.quotedMsg?.remoteJid || data.reaction?.chatId || '').trim()
+    : ''
+  const originJids = [toJid, fromJid, chatIdRaw, quotedChatJid].filter(Boolean)
+  const isStatusBroadcast = originJids.some((j) => {
+    const s = String(j).toLowerCase()
+    return s.includes('status@broadcast') || s.endsWith('@broadcast') || s.includes('@newsletter')
+  })
   // UltraMsg: to=grupo para mensagem recebida em grupo; às vezes from=grupo. Aceita chatId também.
-  const isGroup = toJid.endsWith('@g.us') || fromJid.endsWith('@g.us') || chatIdRaw.endsWith('@g.us')
+  // Reação em grupo pode chegar com from=participant @c.us e to=nosso número — o @g.us está no quotedMsg.
+  const isGroup = originJids.some((j) => String(j).endsWith('@g.us'))
 
   let phone = ''
   let participantPhone = ''
   let remoteJid = ''
 
-  if (isGroup) {
-    // Grupo: remoteJid = JID do grupo (to, from ou chatId — quem tem @g.us)
-    remoteJid = toJid.endsWith('@g.us') ? toJid : (fromJid.endsWith('@g.us') ? fromJid : (chatIdRaw.endsWith('@g.us') ? chatIdRaw : toJid))
+  if (isStatusBroadcast) {
+    // Status/broadcast NÃO é conversa privada. Não usar o telefone de quem reagiu como chave de chat.
+    remoteJid = originJids.find((j) => {
+      const s = String(j).toLowerCase()
+      return s.includes('status@broadcast') || s.endsWith('@broadcast') || s.includes('@newsletter')
+    }) || 'status@broadcast'
+    phone = remoteJid
+    participantPhone = ''
+  } else if (isGroup) {
+    // Grupo: remoteJid = JID do grupo (to, from, chatId ou quotedMsg em reação — quem tem @g.us)
+    remoteJid = originJids.find((j) => String(j).endsWith('@g.us')) || toJid
     // UltraMsg usa formato {GroupNumber}-{OwnerNumber}@g.us (ex: 3618420-5534984080098@g.us).
     // Preservar o JID completo — não usar normalizeGroupIdForStorage (perde o hífen e quebra envio).
     phone = remoteJid || (jidToDigits(remoteJid) ? `${jidToDigits(remoteJid)}@g.us` : '')
@@ -152,7 +172,7 @@ function normalizeUltramsgToZapi(body) {
   // O emoji costuma vir no body; o alvo (mensagem reagida) no quotedMsg/reactionMessage.
   // Guarda forte: só trata como reação em evento comprovadamente de reação — nunca reclassifica texto/mídia.
   // Sem emoji detectável, degrada para o comportamento atual (pipeline gera "Reação").
-  const isReactionEvent = eventType.includes('reaction') || msgType === 'reaction' || msgType === 'reactionmessage'
+  const isReactionEvent = isReactionEventEarly
   const reactionEmojiRaw = isReactionEvent
     ? (data.reaction?.emoji ?? data.reaction?.text ?? data.reaction?.value ?? data.emoji
         ?? (bodyText && String(bodyText).trim().length > 0 && String(bodyText).trim().length <= 16 ? String(bodyText).trim() : ''))
@@ -195,10 +215,12 @@ function normalizeUltramsgToZapi(body) {
   const zapiLike = {
     instanceId: body.instanceId ?? body.instance_id,
     instance_id: body.instanceId ?? body.instance_id,
+    event_type: eventType || undefined,
     fromMe,
     phone,
     remoteJid,
     isGroup,
+    isStatusBroadcast: isStatusBroadcast || undefined,
     chatName: chatName || undefined,
     groupName: chatName || undefined,
     subject: chatName || undefined,

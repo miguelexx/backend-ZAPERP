@@ -57,7 +57,7 @@ UltraMSG POST
 | Mídia inbound | `inboundMediaPersistenceService` | HTTPS, SSRF, disco/R2 | Não mudar política de download no split. |
 | ACK | `statusZapi` + `messageStatusHelper` | rank; grupos `read`→`delivered` | Não regredir status. |
 | Realtime | `chatController` reexports (`emitirParaUsuariosQuePodemVerConversa`, unread) | Salas tenant | Não instalar listener no webhook. `io` via `req.app.get('io')`. |
-| Chatbot | `chatbotTriageService.processIncomingMessage` | URA; anti-replay de idade + `inboundReentregue` | Não mover a URA para esta pasta. |
+| Chatbot | `chatbotTriageService.processIncomingMessage` + guarda `webhookInbound/chatbotInboundGuard.js` | URA; anti-replay de idade + `inboundReentregue`; **só mensagem privada real** (não reação/Status/grupo/`fromMe`/ACK; origem = JID do chat, não `participant`) | Não mover a URA para esta pasta. |
 | Disparo | `disparoWebhookHook`, `consumirPrimeiraRespostaCampanha`, opt-out | Fila/`disp-*`/wamid | Não unificar `crm-*` com `disp-*`. |
 
 ---
@@ -184,6 +184,7 @@ reexporta `statusZapi` + `_test`. Módulos já extraídos (todos verbatim, gate 
 | `crmLeadInbound.js` | captura de lead CRM (fire-and-forget) | 5 |
 | `groupSender.js` | resolve remetente/membro em grupos (contrato→saída; `tests/webhookGroupSender.test.js`) | 5 |
 | `realtimePayload.js` | **puro**: monta os payloads `conversa_atualizada` e `nova_mensagem` do emit-tail (`tests/webhookRealtimePayload.test.js`, 11 testes) | 5 |
+| `chatbotInboundGuard.js` | **puro**: URA/boas-vindas só para mensagem privada real; origem = JID do chat, não `participant` (`tests/chatbotInboundGuard.test.js`) | correção 2026-09-01 |
 | `persistMensagem.js` | **puro**: `applyInboundMediaFields` mapeia `type/mídia → campos do insert` (`tests/webhookPersistMensagem.test.js`, 8 testes). Insert+retries+23505 ainda no orquestrador | 5 |
 | `statusApply.js` | **puro**: `resolveEffectiveStatus` — ACK sem regressão (invariante §4; `tests/webhookStatusApply.test.js`, 6 testes) | 5 |
 

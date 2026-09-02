@@ -47,6 +47,9 @@ jest.mock('../controllers/webhookInbound/fromMeReconcile', () => ({
   ...jest.requireActual('../controllers/webhookInbound/fromMeReconcile'),
   tryReconcileFromMeByCrmReferenceId: jest.fn().mockResolvedValue(null),
 }))
+jest.mock('../services/ultramsgGroupsSyncService', () => ({
+  syncConversationGroupOnJoin: jest.fn().mockResolvedValue(undefined),
+}))
 // Idempotência (inboundReentregue): aqui NÃO é replay — o pré-processo não encontra a linha.
 jest.mock('../controllers/webhookInbound/whatsappIdLookup', () => {
   const actual = jest.requireActual('../controllers/webhookInbound/whatsappIdLookup')
@@ -134,5 +137,152 @@ describe('receberZapi — miolo inbound (caracterização)', () => {
     // Reconciliação: NÃO emite nova_mensagem (o CRM já emitiu ao enviar).
     const eventos = emitirParaUsuariosQuePodemVerConversa.mock.calls.map((c) => c[3])
     expect(eventos).not.toContain('nova_mensagem')
+  })
+})
+
+describe('receberZapi — chatbot só em mensagem privada real', () => {
+  beforeEach(() => {
+    jest.clearAllMocks()
+    getOrCreateCliente.mockResolvedValue({ cliente_id: 7 })
+    findOrCreateConversation.mockResolvedValue({
+      conversa: { id: 10, departamento_id: null, atendente_id: null, telefone: '5534999999999' },
+      created: false,
+    })
+    tryReconcileFromMeByCrmReferenceId.mockResolvedValue(null)
+    processIncomingMessage.mockResolvedValue({ handled: false })
+  })
+
+  test('mensagem privada de texto → aciona chatbot', async () => {
+    const res = buildRes()
+    await receberZapi(buildReq({
+      body: { instanceId: 'inst-1', phone: '5534999999999', messageId: 'WAMID-CHATBOT-TXT', text: { message: 'oi' }, fromMe: false },
+      zapiContext: { company_id: 1, whatsapp_instance_id: 5 },
+    }), res)
+    expect(res.status).toHaveBeenCalledWith(200)
+    expect(processIncomingMessage).toHaveBeenCalled()
+  })
+
+  test('áudio privado → aciona chatbot', async () => {
+    const res = buildRes()
+    await receberZapi(buildReq({
+      body: {
+        instanceId: 'inst-1',
+        phone: '5534999999999',
+        messageId: 'WAMID-CHATBOT-AUD',
+        type: 'audio',
+        audioUrl: 'https://example.com/a.ogg',
+        fromMe: false,
+      },
+      zapiContext: { company_id: 1, whatsapp_instance_id: 5 },
+    }), res)
+    expect(processIncomingMessage).toHaveBeenCalled()
+  })
+
+  test('imagem privada → aciona chatbot', async () => {
+    const res = buildRes()
+    await receberZapi(buildReq({
+      body: {
+        instanceId: 'inst-1',
+        phone: '5534999999999',
+        messageId: 'WAMID-CHATBOT-IMG',
+        type: 'image',
+        imageUrl: 'https://example.com/a.jpg',
+        fromMe: false,
+      },
+      zapiContext: { company_id: 1, whatsapp_instance_id: 5 },
+    }), res)
+    expect(processIncomingMessage).toHaveBeenCalled()
+  })
+
+  test('vídeo e documento privados → acionam chatbot', async () => {
+    for (const [type, extra] of [
+      ['video', { videoUrl: 'https://example.com/a.mp4' }],
+      ['document', { documentUrl: 'https://example.com/a.pdf' }],
+    ]) {
+      processIncomingMessage.mockClear()
+      const res = buildRes()
+      await receberZapi(buildReq({
+        body: {
+          instanceId: 'inst-1',
+          phone: '5534999999999',
+          messageId: `WAMID-CHATBOT-${type}`,
+          type,
+          fromMe: false,
+          ...extra,
+        },
+        zapiContext: { company_id: 1, whatsapp_instance_id: 5 },
+      }), res)
+      expect(processIncomingMessage).toHaveBeenCalled()
+    }
+  })
+
+  test('reação em grupo (participant no phone, quotedMsg @g.us) → NÃO aciona chatbot', async () => {
+    const res = buildRes()
+    await receberZapi(buildReq({
+      body: {
+        instanceId: 'inst-1',
+        phone: '5534999999999',
+        messageId: 'WAMID-REACT-GRP',
+        fromMe: false,
+        reaction: { value: '👍' },
+        quotedMsg: { from: '120363411111111111-5534984080098@g.us' },
+      },
+      zapiContext: { company_id: 1, whatsapp_instance_id: 5 },
+      app: { get: () => undefined },
+    }), res)
+    expect(res.status).toHaveBeenCalledWith(200)
+    expect(processIncomingMessage).not.toHaveBeenCalled()
+  })
+
+  test('reação em Status → NÃO aciona chatbot', async () => {
+    const res = buildRes()
+    await receberZapi(buildReq({
+      body: {
+        instanceId: 'inst-1',
+        phone: '5534999999999',
+        to: 'status@broadcast',
+        messageId: 'WAMID-REACT-ST',
+        fromMe: false,
+        reaction: { value: '❤️' },
+      },
+      zapiContext: { company_id: 1, whatsapp_instance_id: 5 },
+    }), res)
+    expect(res.status).toHaveBeenCalledWith(200)
+    expect(processIncomingMessage).not.toHaveBeenCalled()
+  })
+
+  test('reação com emoji em conversa privada → NÃO aciona chatbot', async () => {
+    const res = buildRes()
+    await receberZapi(buildReq({
+      body: {
+        instanceId: 'inst-1',
+        phone: '5534999999999',
+        messageId: 'WAMID-REACT-PVT',
+        fromMe: false,
+        reaction: { value: '👍' },
+      },
+      zapiContext: { company_id: 1, whatsapp_instance_id: 5 },
+    }), res)
+    expect(res.status).toHaveBeenCalledWith(200)
+    expect(processIncomingMessage).not.toHaveBeenCalled()
+  })
+
+  test('mensagem em grupo → NÃO aciona chatbot', async () => {
+    const res = buildRes()
+    await receberZapi(buildReq({
+      body: {
+        instanceId: 'inst-1',
+        isGroup: true,
+        phone: '120363411111111111-5534984080098@g.us',
+        messageId: 'WAMID-GRP-TXT',
+        text: { message: 'oi grupo' },
+        fromMe: false,
+        participantPhone: '5534999999999',
+      },
+      zapiContext: { company_id: 1, whatsapp_instance_id: 5 },
+      app: { get: () => undefined },
+    }), res)
+    expect(res.status).toHaveBeenCalledWith(200)
+    expect(processIncomingMessage).not.toHaveBeenCalled()
   })
 })

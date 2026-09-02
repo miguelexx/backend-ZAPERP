@@ -145,6 +145,7 @@ const { handleGroupPhotoOnlyPayload } = require('./webhookInbound/groupPhoto')
 
 // Funções puras de payload movidas para controllers/webhookInbound/payload.js (Fase 1/4 — doc 24).
 const { isGroupPayload, pickGroupChatId, looksLikeBRPhoneDigits, resolveConversationKeyFromZapi, extractMessage, getPayloads, hasDestFields } = require('./webhookInbound/payload')
+const { shouldTriggerChatbotForInbound, inspectInboundOrigin } = require('./webhookInbound/chatbotInboundGuard')
 
 
 exports.receberZapi = async (req, res) => {
@@ -796,9 +797,19 @@ exports.receberZapi = async (req, res) => {
         locationMeta
       } = extracted
 
-      // Newsletters (canais) não são conversas de atendimento — ignorar silenciosamente
+      // Newsletters (canais) e Status/broadcast não são conversas de atendimento — ignorar silenciosamente
       if (isNewsletter) {
         console.log('[Z-API] ⏭️ isNewsletter=true — newsletter ignorada:', phone || '(sem phone)')
+        continue
+      }
+      const inboundOrigin = inspectInboundOrigin(payload)
+      if (inboundOrigin.isStatusBroadcast) {
+        console.log('[ULTRAMSG] ⏭️ status/broadcast — não é conversa privada (chatbot não dispara)', {
+          fromMe,
+          type,
+          phoneTail: phone ? String(phone).slice(-8) : null,
+        })
+        lastResult = { ok: true, ignored: 'status_broadcast' }
         continue
       }
 
@@ -1469,7 +1480,22 @@ exports.receberZapi = async (req, res) => {
       skipChatbotPorCampanha = devePularChatbotPorCampanha(convEstado)
     }
     if (!fromMe && !isGroup && !inboundReentregue && departamento_id == null && atendente_id == null && phoneParaChatbot) {
-      try {
+      const chatbotEligibility = shouldTriggerChatbotForInbound({
+        fromMe,
+        isGroup,
+        type,
+        phone: phoneParaChatbot,
+        payload,
+      })
+      if (!chatbotEligibility.ok) {
+        console.log('[Z-API] 🤖 Chatbot: ignorado — origem não é mensagem privada real do contato', {
+          conversa_id,
+          company_id,
+          reason: chatbotEligibility.reason,
+          type,
+        })
+      } else {
+        try {
         const sendMessage = async (ph, msg, o = {}) => {
           const r = await getProvider().sendText(ph, msg, {
             companyId: company_id,
@@ -1674,8 +1700,9 @@ exports.receberZapi = async (req, res) => {
             console.log('[Z-API] 🤖 Chatbot: conversa direcionada para departamento', departamento_id)
           }
         }
-      } catch (errChatbot) {
-        console.warn('[Z-API] Chatbot triagem:', errChatbot?.message || errChatbot)
+        } catch (errChatbot) {
+          console.warn('[Z-API] Chatbot triagem:', errChatbot?.message || errChatbot)
+        }
       }
     }
 

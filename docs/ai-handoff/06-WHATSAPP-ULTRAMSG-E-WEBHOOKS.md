@@ -80,4 +80,5 @@ O worker monta `referenceId disp-*`, registra provider id e datas na fila. **Env
 5. Não testar envio/restart/configuração de webhook contra instância real sem autorização explícita.
 6. Foto de perfil: consultar com o JID real (`profilePictureChatIdCandidates`), nunca `phoneToChatId`/`toZapiSendFormat`. Não gravar `payload.photo` de mensagem como avatar.
 7. HTTP 200 com `{ error }` ou `sent=false` não é sucesso (`normalizeUltraMsgSendResult`). Retry de POST de mensagem só em falha de conexão; upload de mídia pode retentar.
+8. Chatbot/URA de boas-vindas: só mensagem **real** do contato na conversa **privada** (texto, áudio, imagem, vídeo, documento, etc.). **CONFIRMADO:** reação (emoji), Status/`status@broadcast`, grupo, ACK/sistema e `fromMe` não disparam. A origem do chat é o JID do chat (`to`/`from`/`chatId`/`quotedMsg` em reação), **não** o telefone do `participant`. Helper: `controllers/webhookInbound/chatbotInboundGuard.js`. Testes: `tests/chatbotInboundGuard.test.js` + casos em `receberZapiInbound.test.js`.
 
