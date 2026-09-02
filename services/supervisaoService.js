@@ -1,3 +1,15 @@
+/**
+ * supervisaoService.js — métricas de SUPERVISÃO/gestão do atendimento (leitura).
+ *
+ * Fornece os números do painel do gestor: `getResumo`, `getClientesPendentes`,
+ * `getMovimentacaoFuncionario`, `getRelatorioDiarioGestor`, `getFilaModoSimplesCounts` e os
+ * contadores/listas de "aguardando funcionário" que alimentam o alerta ao admin
+ * (`adminAtendimentoAlertaService`). Consumido por `dashboard/overview` e `supervisaoController`.
+ *
+ * ⚠️ Regra de tempo de resposta (igual ao `slaCalculationService`): só resposta de ATENDENTE HUMANO
+ * fecha o ciclo — bot/menu de triagem/mensagem de ausência NÃO contam (`outboundEhRespostaHumana`).
+ * `aggregateResponseStats`/`outboundEhRespostaHumana` são exportados para teste. `company_id` do JWT.
+ */
 const supabase = require('../config/supabase')
 const { getDisplayName } = require('../helpers/contactEnrichment')
 const { isGroupConversation } = require('../helpers/conversaHelper')

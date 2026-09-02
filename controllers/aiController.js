@@ -1,7 +1,10 @@
 'use strict'
 
 /**
- * aiController.js — POST /api/ai/ask
+ * aiController.js — POST /api/ai/ask (assistente de linguagem natural do dashboard).
+ *
+ * ⚠️ NÃO confundir com `iaController.js` (rotas `/ia/*`): aquele administra o CHATBOT/URA de triagem.
+ * Aqui = pergunta em linguagem natural → `aiDashboardService` (OpenAI + queries SELECT). "ai" = assistente NL.
  *
  * Pipeline de segurança + performance:
  *   1) Validação do body

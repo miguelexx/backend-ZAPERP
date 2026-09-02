@@ -15,12 +15,14 @@
 const supabase = require('../config/supabase')
 const { getProvider } = require('../services/providers')
 const { syncUltraMsgContact } = require('../services/ultramsgSyncContact')
-const { getCompanyIdByInstanceId } = require('../services/whatsappConfigService')
-const { getWhatsappInstanceByProviderInstanceId } = require('../services/whatsappInstanceService')
+// getCompanyIdByInstanceId / getWhatsappInstanceByProviderInstanceId: agora só em webhookInbound/instanceResolve.js.
 const { getStatus } = require('../services/ultramsgIntegrationService')
-const { normalizePhoneBR, possiblePhonesBR, normalizeGroupIdForStorage } = require('../helpers/phoneHelper')
+const { normalizePhoneBR, possiblePhonesBR } = require('../helpers/phoneHelper')
+// extrairNomePrefixoTexto: usado no caminho fromMe self-echo (linhas ~1758/2010). O import se perdeu
+// na modularização fase 1-4 (commit c9cf02d) — sem ele o eco fromMe estourava 500 (ReferenceError).
+const { extrairNomePrefixoTexto } = require('../helpers/mensagemAtendenteNomeHelper')
 const { getCanonicalPhone, getOrCreateCliente, findOrCreateConversation, mergeConversasIntoCanonico, mergeConversationLidToPhone } = require('../helpers/conversationSync')
-const crmSync = require('../services/crmSyncService')
+// crmSync.syncLead: movido para controllers/webhookInbound/crmLeadInbound.js.
 const { chooseBestName, isBadName, getDisplayName } = require('../helpers/contactEnrichment')
 const { clienteTemNomeProtegido } = require('../helpers/clienteNomeProtecao')
 const { selectClienteNomeFoto } = require('../helpers/clienteNomeColunas')
@@ -52,8 +54,8 @@ const {
   fetchLastAbsenceEncerramentoSnap,
   resolveReopenAssignmentAfterAbsence,
 } = require('../services/absenceFinalizationService')
+// aplicarModoSimplesNoPayload: movido para controllers/webhookInbound/realtimePayload.js.
 const {
-  aplicarModoSimplesNoPayload,
   recalcularStatusPorUltimaMensagem,
 } = require('../services/atendimentoModoSimplesService')
 const { isEnabled, FLAGS } = require('../helpers/featureFlags')
@@ -123,53 +125,38 @@ const { normalizeReopenText, shouldReopenFinishedConversation } = require('./web
 // Log helpers movidos para controllers/webhookInbound/log.js (Fase 4 — doc 24).
 const { logZapiCert, _logWebhook, _logWebhookSafe } = require('./webhookInbound/log')
 // Helpers de origem "disparo" a partir do inbound → controllers/webhookInbound/disparoInbound.js.
-const { mensagemInseridaEhPrimeiraDisparoWhatsappExterno, conversaTemAlgumaMensagemInbound } = require('./webhookInbound/disparoInbound')
+const { mensagemInseridaEhPrimeiraDisparoWhatsappExterno, conversaTemAlgumaMensagemInbound, scheduleInboundDisparoHooks } = require('./webhookInbound/disparoInbound')
+// Import de histórico do celular ao abrir conversa nova → controllers/webhookInbound/historyImport.js.
+const { scheduleNewConversationHistoryImport } = require('./webhookInbound/historyImport')
+// Captura de lead no CRM a partir do inbound → controllers/webhookInbound/crmLeadInbound.js.
+const { scheduleInboundLeadCapture } = require('./webhookInbound/crmLeadInbound')
+// Resolução do remetente (membro) em grupos → controllers/webhookInbound/groupSender.js.
+const { resolveGroupSenderFields } = require('./webhookInbound/groupSender')
+// Construção pura dos payloads de realtime (conversa_atualizada + nova_mensagem) → webhookInbound/realtimePayload.js.
+const { buildConversaAtualizadaPayload, buildNovaMensagemPayload } = require('./webhookInbound/realtimePayload')
+// Mapeamento puro tipo/mídia → campos do insert → controllers/webhookInbound/persistMensagem.js.
+const { applyInboundMediaFields } = require('./webhookInbound/persistMensagem')
+// Resolução pura de status ACK (não-regressão) → controllers/webhookInbound/statusApply.js.
+const { resolveEffectiveStatus } = require('./webhookInbound/statusApply')
+// Resolução de tenant (empresa/instância) do topo do receberZapi → controllers/webhookInbound/instanceResolve.js.
+const { resolveInboundTenant } = require('./webhookInbound/instanceResolve')
+// Callback de foto de grupo (payload só { groupId, groupPhoto }) → controllers/webhookInbound/groupPhoto.js.
+const { handleGroupPhotoOnlyPayload } = require('./webhookInbound/groupPhoto')
 
 // Funções puras de payload movidas para controllers/webhookInbound/payload.js (Fase 1/4 — doc 24).
-const { isGroupPayload, pickGroupChatId, looksLikeBRPhoneDigits, resolveConversationKeyFromZapi, extractMessage, getPayloads, _extractInstanceIdFromBody, hasDestFields } = require('./webhookInbound/payload')
+const { isGroupPayload, pickGroupChatId, looksLikeBRPhoneDigits, resolveConversationKeyFromZapi, extractMessage, getPayloads, hasDestFields } = require('./webhookInbound/payload')
 
 
 exports.receberZapi = async (req, res) => {
   try {
     const body = req.body || {}
-    // 1) Resolver instanceId e company_id — SEMPRE explícito, NUNCA depender do DEFAULT do banco
-    const instanceIdRaw = _extractInstanceIdFromBody(body) || req.zapiContext?.instanceId || ''
-    const instanceId = instanceIdRaw ? String(instanceIdRaw).trim() : ''
-    let company_id = req.zapiContext?.company_id
-    let whatsapp_instance_id = req.zapiContext?.whatsapp_instance_id ?? null
-    let whatsapp_instance_is_default = req.zapiContext?.whatsapp_instance_is_default === true
-    if (company_id == null && instanceId) {
-      const resolved = await getWhatsappInstanceByProviderInstanceId('ultramsg', instanceId)
-      if (resolved?.code === 'DUPLICATE_PROVIDER_INSTANCE') {
-        _logWebhookSafe({
-          instanceId: instanceId.slice(0, 24) + (instanceId.length > 24 ? '…' : ''),
-          companyId: 'duplicate_blocked',
-          type: body.type || body.event || 'unknown',
-          ignored: 'duplicate_provider_instance',
-        })
-        return res.status(200).json({ ok: true, ignored: 'duplicate_provider_instance' })
-      }
-      if (resolved?.instance) {
-        company_id = resolved.instance.company_id
-        whatsapp_instance_id = resolved.instance.id ?? null
-        whatsapp_instance_is_default = resolved.instance.is_default === true
-      } else {
-        company_id = await getCompanyIdByInstanceId(instanceId)
-      }
-    }
-    if (!instanceId || company_id == null) {
-      const logData = { instanceId: instanceId ? instanceId.slice(0, 24) + (instanceId.length > 24 ? '…' : '') : '(empty)', companyId: 'not_mapped', type: body.type || body.event || 'unknown', ignored: 'instance_not_mapped' }
-      _logWebhookSafe(logData)
-      console.warn('[WEBHOOK_CORE_RESOLVE] ignored_not_mapped no pipeline legado', {
-        has_zapi_context: Boolean(req.zapiContext),
-        context_company_id: req.zapiContext?.company_id ?? null,
-        context_whatsapp_instance_id: req.zapiContext?.whatsapp_instance_id ?? null,
-        instance_id_raw: instanceId || null,
-        provider: 'ultramsg',
-      })
-      
-      return res.status(200).json({ ok: true, ignored: 'instance_not_mapped' })
-    }
+    // 1) Resolver instanceId e company_id — SEMPRE explícito, NUNCA do body (instanceResolve.js).
+    const _tenant = await resolveInboundTenant(req)
+    if (_tenant.ignored) return res.status(_tenant.ignored.status).json(_tenant.ignored.body)
+    const { instanceId } = _tenant
+    let company_id = _tenant.company_id
+    let whatsapp_instance_id = _tenant.whatsapp_instance_id
+    let whatsapp_instance_is_default = _tenant.whatsapp_instance_is_default
 
     // 2) Log DEV uma linha — diagnóstico sem vazar tokens
     const firstPayload = getPayloads(body)[0] || body
@@ -196,69 +183,9 @@ exports.receberZapi = async (req, res) => {
       rawBody: WHATSAPP_DEBUG ? JSON.stringify(body).slice(0, 600) : undefined
     })
 
-    // Callback específico de atualização de foto de grupo:
-    // docs: { "groupId": "...", "groupPhoto": "https://..." }
-    // Quando vier sem campos de mensagem/phone, tratamos direto aqui.
-    const rawGroupId = body.groupId != null ? String(body.groupId).trim() : ''
-    const rawGroupPhoto = body.groupPhoto != null ? String(body.groupPhoto).trim() : ''
-    const hasOnlyGroupPhotoPayload =
-      rawGroupId &&
-      rawGroupPhoto &&
-      !body.phone &&
-      !body.text &&
-      !body.message &&
-      !body.body &&
-      !body.image &&
-      !body.audio &&
-      !body.video &&
-      !body.document &&
-      !body.sticker
-
-    if (hasOnlyGroupPhotoPayload) {
-      const groupIdForStorage = normalizeGroupIdForStorage(rawGroupId) || rawGroupId
-      try {
-        const { data, error } = await supabase
-          .from('conversas')
-          .update({ foto_grupo: rawGroupPhoto })
-          .eq('company_id', company_id)
-          .in('telefone', [groupIdForStorage, rawGroupId])
-          .select('id')
-
-        if (error) {
-          console.error('[Z-API] ❌ Erro ao atualizar foto de grupo via callback groupPhoto:', error)
-          // Webhook: sempre 200 para o UltraMsg não reentregar um callback puramente cosmético.
-          req.webhookLogData = { ...(req.webhookLogData || {}), status: 'error', error_message: 'group_photo_update_failed' }
-          return res.status(200).json({ ok: false, error: 'Erro ao atualizar foto de grupo' })
-        }
-
-        const updatedCount = Array.isArray(data) ? data.length : 0
-        console.log('[Z-API] ✅ Foto de grupo atualizada via callback groupPhoto:', {
-          groupId: rawGroupId,
-          storedId: groupIdForStorage,
-          updated: updatedCount
-        })
-
-        // Emite atualização de conversa para atualizar avatar no front
-        if (updatedCount > 0) {
-          const io = req.app.get('io')
-          if (io) {
-            for (const row of data) {
-              await emitirParaUsuariosQuePodemVerConversa(io, company_id, row.id, 'conversa_atualizada', {
-                id: row.id,
-                foto_grupo: rawGroupPhoto
-              })
-            }
-          }
-        }
-
-        return res.status(200).json({ ok: true, updated: updatedCount })
-      } catch (e) {
-        console.error('[Z-API] ❌ Exceção ao processar callback groupPhoto:', e?.message || e)
-        // Webhook: sempre 200 para o UltraMsg não reentregar um callback puramente cosmético.
-        req.webhookLogData = { ...(req.webhookLogData || {}), status: 'error', error_message: e?.message || 'group_photo_exception' }
-        return res.status(200).json({ ok: false, error: 'Erro ao processar callback de foto de grupo' })
-      }
-    }
+    // Callback específico de atualização de foto de grupo (payload só { groupId, groupPhoto })
+    // → controllers/webhookInbound/groupPhoto.js. Responde a HTTP e encerra quando trata o caso.
+    if (await handleGroupPhotoOnlyPayload(req, res, company_id)) return
 
     const payloads = getPayloads(body)
     let lastResult = { ok: true }
@@ -297,14 +224,7 @@ exports.receberZapi = async (req, res) => {
         }
       }
 
-      const resolveEffectiveStatus = (current, next) => {
-        const currentStatus = current || 'pending'
-        if (next === 'erro' || next === 'failed') {
-          return statusRank(currentStatus) >= statusRank('delivered') ? currentStatus : next
-        }
-        return statusRank(currentStatus) > statusRank(next) ? currentStatus : next
-      }
-
+      // resolveEffectiveStatus (não-regressão de ACK) → controllers/webhookInbound/statusApply.js.
       // Helper: atualiza status no banco por whatsapp_id sem permitir regressao de ACK atrasado.
       const updateStatusByWaId = async (waId, statusNorm, opts = {}) => {
         const returnResult = opts?.returnResult === true
@@ -1258,22 +1178,15 @@ exports.receberZapi = async (req, res) => {
 
         // Captura de lead: nova conversa individual iniciada pelo cliente (inbound).
         // Só quando é contato real (!isGroup), o cliente falou (!fromMe) e temos cliente_id.
-        // Espelha no CRM Avançado fora do caminho quente (setImmediate) e fire-and-forget.
+        // → controllers/webhookInbound/crmLeadInbound.js (setImmediate, fire-and-forget).
         if (!isGroup && !fromMe && cliente_id) {
-          const leadNome = (nomeParaCache && String(nomeParaCache).trim())
-            || (senderName && String(senderName).trim())
-            || (payload?.chatName && String(payload.chatName).trim())
-            || null
-          const leadTelefone = getCanonicalPhone(phone) || null
-          const convParaLead = conversa_id
-          setImmediate(() => {
-            crmSync.syncLead({
-              empresaId: company_id,
-              leadId: convParaLead,
-              nome: leadNome || leadTelefone || String(convParaLead),
-              telefone: leadTelefone,
-              origemNome: 'WhatsApp',
-            })
+          scheduleInboundLeadCapture({
+            companyId: company_id,
+            conversaId: conversa_id,
+            nomeParaCache,
+            senderName,
+            chatName: payload?.chatName,
+            phone,
           })
         }
       }
@@ -1529,7 +1442,8 @@ exports.receberZapi = async (req, res) => {
     // Revalida departamento/atendente no banco (snapshot inicial pode estar stale em webhooks paralelos).
     let atendente_id = null
     let skipChatbotPorCampanha = false
-    if (!fromMe && !isGroup && phoneParaChatbot) {
+    // Flag de campanha e consume da 1ª resposta não dependem de telefone enviável (LID sem número).
+    if (!fromMe && !isGroup && conversa_id && company_id) {
       let convEstado = null
       const convEstadoRes = await supabase
         .from('conversas')
@@ -2237,107 +2151,16 @@ exports.receberZapi = async (req, res) => {
       if (reply_meta) insertMsg.reply_meta = reply_meta
       if (isGroup && !fromMe) {
         // Grupo: salvar SEMPRE no grupo, e armazenar remetente (membro) na mensagem.
-        const pNorm = participantPhone ? (normalizePhoneBR(participantPhone) || String(participantPhone).replace(/\D/g, '')) : ''
-        if (pNorm) insertMsg.remetente_telefone = pNorm
-
-        // Tenta resolver nome do membro pelo cadastro de clientes (contatos já sincronizados).
-        let remetenteNomeFinal = senderName || pNorm || null
-        if (pNorm) {
-          try {
-            const pPhones = possiblePhonesBR(pNorm)
-            let qM = supabase.from('clientes').select('id, nome, pushname, telefone').order('id', { ascending: true }).limit(3)
-            if (pPhones.length > 0) qM = qM.in('telefone', pPhones)
-            else qM = qM.eq('telefone', pNorm)
-            qM = qM.eq('company_id', company_id)
-            const { data: rowsM } = await qM
-            const ex = Array.isArray(rowsM) && rowsM.length > 0 ? rowsM[0] : null
-            if (ex) {
-              remetenteNomeFinal = getDisplayName(ex) || remetenteNomeFinal
-            } else {
-              // se não existe no banco, usa getOrCreateCliente para evitar duplicata (mesmo contato 12 vs 13 dígitos)
-              if (pNorm) {
-                const nomeMin = senderName ? String(senderName).trim() : pNorm
-                const { cliente_id: cidGrupo } = await getOrCreateCliente(supabase, company_id, pNorm, {
-                  nome: nomeMin,
-                  nomeSource: 'grupo_sender',
-                  pushname: senderName ? String(senderName).trim() : undefined,
-                })
-                if (cidGrupo) {
-                  // sync em background (nome/foto reais) — chooseBestName evita regressão
-                  setImmediate(async () => {
-                    try {
-                      const { data: current } = await selectClienteNomeFoto(supabase, { id: cidGrupo, companyId: company_id })
-                      const sync = await syncUltraMsgContact(pNorm, company_id, { skipPersistence: true }).catch(() => null)
-                      if (!sync) return
-                      const up = {}
-                      const telefoneTail = String(pNorm).replace(/\D/g, '').slice(-6) || null
-                      if (!clienteTemNomeProtegido(current)) {
-                        const { name: bestNome } = chooseBestName(current?.nome, sync.nome, 'syncUltramsg', { fromMe: false, company_id, telefoneTail })
-                        if (bestNome && bestNome !== (current?.nome || '')) up.nome = bestNome
-                      }
-                      if (!current?.pushname && sync.pushname) up.pushname = sync.pushname
-                      if (!current?.foto_perfil && sync.foto_perfil) up.foto_perfil = sync.foto_perfil
-                      if (Object.keys(up).length > 0) await supabase.from('clientes').update(up).eq('id', cidGrupo)
-                    } catch (_) {}
-                  })
-                }
-              }
-            }
-          } catch (_) {}
-        }
-        if (remetenteNomeFinal) insertMsg.remetente_nome = String(remetenteNomeFinal).trim()
+        // → controllers/webhookInbound/groupSender.js (resolve nome/telefone do membro + sync bg).
+        const gf = await resolveGroupSenderFields({ companyId: company_id, participantPhone, senderName })
+        if (gf.remetente_telefone) insertMsg.remetente_telefone = gf.remetente_telefone
+        if (gf.remetente_nome) insertMsg.remetente_nome = gf.remetente_nome
       }
-      if (type === 'image' && imageUrl) {
-        insertMsg.tipo = 'imagem'
-        insertMsg.url = imageUrl
-        insertMsg.nome_arquivo = fileName || 'imagem.jpg'
-      } else if ((type === 'document' || type === 'file') && documentUrl) {
-        insertMsg.tipo = 'arquivo'
-        insertMsg.url = documentUrl
-        insertMsg.nome_arquivo = fileName || 'arquivo'
-      } else if (type === 'audio' || type === 'ptt') {
-        insertMsg.tipo = type === 'ptt' ? 'voice' : 'audio'
-        if (audioUrl) {
-          insertMsg.url = audioUrl
-          insertMsg.nome_arquivo = fileName || (type === 'ptt' ? 'voice.ogg' : 'audio')
-        } else {
-          console.warn('[webhook] áudio inbound sem URL de mídia:', {
-            company_id,
-            conversa_id,
-            whatsapp_id: whatsappIdStr || null,
-            whatsapp_instance_id: whatsapp_instance_id || null,
-            type,
-            fromMe,
-            fileName: fileName || null,
-            hasImageUrl: !!imageUrl,
-            hasDocumentUrl: !!documentUrl,
-            hasVideoUrl: !!videoUrl,
-            hasStickerUrl: !!stickerUrl,
-          })
-        }
-      } else if (type === 'video' && videoUrl) {
-        insertMsg.tipo = 'video'
-        insertMsg.url = videoUrl
-        insertMsg.nome_arquivo = fileName || 'video'
-      } else if (type === 'sticker' && stickerUrl) {
-        insertMsg.tipo = 'sticker'
-        insertMsg.url = stickerUrl
-        insertMsg.nome_arquivo = fileName || 'sticker.webp'
-      } else if (type === 'location') {
-        insertMsg.tipo = 'location'
-        if (locationUrl) insertMsg.url = locationUrl
-        insertMsg.nome_arquivo = 'localização'
-        if (locationMeta && (locationMeta.latitude != null || locationMeta.longitude != null)) {
-          insertMsg.location_meta = locationMeta
-        }
-      } else if (type === 'contact') {
-        insertMsg.tipo = 'contact'
-        if (contactMeta && (contactMeta.nome || contactMeta.telefone)) {
-          insertMsg.contact_meta = contactMeta
-        }
-      } else if (type === 'reaction') {
-        insertMsg.tipo = 'reaction'
-      }
+      // Mapeamento tipo/mídia → campos do row (puro) → controllers/webhookInbound/persistMensagem.js.
+      applyInboundMediaFields(insertMsg, {
+        type, imageUrl, documentUrl, audioUrl, videoUrl, stickerUrl, locationUrl, locationMeta, contactMeta, fileName,
+        diag: { company_id, conversa_id, whatsapp_id: whatsappIdStr || null, whatsapp_instance_id: whatsapp_instance_id || null, fromMe },
+      })
       // Demais tipos: já têm texto preenchido; tipo padrão é texto
 
       let { data: inserted, error: errMsg } = await supabase
@@ -2629,45 +2452,16 @@ exports.receberZapi = async (req, res) => {
       }
 
       // Etapa 8 Disparo: opt-out exact match + vínculo de resposta (best-effort; não bloqueia webhook)
+      // → controllers/webhookInbound/disparoInbound.js (fire-and-forget via setImmediate).
       if (!fromMe && !isGroup && mensagemFoiInseridaPeloWebhook && mensagemSalva?.id && company_id) {
-        const phoneForDisparo = phone
-        const textoForDisparo = mensagemSalva.texto || texto || ''
-        const msgIdDisparo = mensagemSalva.id
-        const convIdDisparo = conversa_id || mensagemSalva.conversa_id
-        const instanciaDisparo = whatsapp_instance_id || null
-        const ioDisparo = req.app?.get?.('io') || null
-        setImmediate(() => {
-          Promise.resolve()
-            .then(async () => {
-              try {
-                const { processInboundOptOut } = require('../services/disparoOptOutService')
-                await processInboundOptOut({
-                  companyId: company_id,
-                  telefone: phoneForDisparo,
-                  texto: textoForDisparo,
-                  mensagemId: msgIdDisparo,
-                  conversaId: convIdDisparo,
-                  instanciaId: instanciaDisparo,
-                  io: ioDisparo,
-                })
-              } catch (e) {
-                console.warn('[disparo:optout] hook:', e?.message || e)
-              }
-              try {
-                const { vincularRespostaInbound } = require('../services/disparoRespostaService')
-                await vincularRespostaInbound({
-                  companyId: company_id,
-                  telefone: phoneForDisparo,
-                  mensagemId: msgIdDisparo,
-                  conversaId: convIdDisparo,
-                  instanciaId: instanciaDisparo,
-                  io: ioDisparo,
-                })
-              } catch (e) {
-                console.warn('[disparo:resposta] hook:', e?.message || e)
-              }
-            })
-            .catch(() => {})
+        scheduleInboundDisparoHooks({
+          companyId: company_id,
+          telefone: phone,
+          texto: mensagemSalva.texto || texto || '',
+          mensagemId: mensagemSalva.id,
+          conversaId: conversa_id || mensagemSalva.conversa_id,
+          instanciaId: whatsapp_instance_id || null,
+          io: req.app?.get?.('io') || null,
         })
       }
 
@@ -2685,121 +2479,17 @@ exports.receberZapi = async (req, res) => {
         action: 'inserted_message'
       })
 
-      // Histórico do celular: nova conversa — importar após a mensagem atual (evita quebrar "primeira mensagem" / mensagem_disparada).
+      // Histórico do celular: nova conversa — importar após a mensagem atual (evita quebrar "primeira
+      // mensagem" / mensagem_disparada). → controllers/webhookInbound/historyImport.js (fire-and-forget).
       if (isNewConversation) {
-        const provider = getProvider()
-        if (provider && provider.getChatMessages && provider.isConfigured) {
-          const convIdForHistory = conversa_id
-          const phoneForHistory = phone
-          const isGroupForHistory = isGroup
-          setImmediate(async () => {
-            try {
-              const history = await provider.getChatMessages(phoneForHistory, 25, null, { companyId: company_id, whatsappInstanceId: whatsapp_instance_id || undefined }).catch(() => [])
-              if (!Array.isArray(history) || history.length === 0) return
-
-              const ordered = history
-                .map((m) => m)
-                .sort((a, b) => Number(a?.momment || a?.timestamp || 0) - Number(b?.momment || b?.timestamp || 0))
-
-              for (const m of ordered) {
-                const p = { ...(m || {}), isGroup: isGroupForHistory, phone: phoneForHistory }
-                const ex = extractMessage(p)
-                const wId = ex.messageId ? String(ex.messageId).trim() : null
-                if (!ex.texto) continue
-                const placeholder = ex.texto === '(mídia)' && !ex.imageUrl && !ex.documentUrl && !ex.audioUrl && !ex.videoUrl && !ex.stickerUrl && !ex.locationUrl
-                if (placeholder) continue
-                if (!wId) continue
-
-                const direcaoHistory = ex.fromMe ? 'out' : 'in'
-                const insertMsg = {
-                  conversa_id: convIdForHistory,
-                  texto: ex.texto,
-                  direcao: direcaoHistory,
-                  company_id,
-                  ...(whatsapp_instance_id ? { whatsapp_instance_id } : {}),
-                  whatsapp_id: wId,
-                  criado_em: ex.criado_em
-                }
-
-                if (ex.fromMe) {
-                  let existOutQuery = supabase
-                    .from('mensagens')
-                    .select('id, criado_em, whatsapp_id')
-                    .eq('company_id', company_id)
-                    .eq('conversa_id', convIdForHistory)
-                    .eq('direcao', 'out')
-                    .eq('texto', ex.texto)
-                    .order('id', { ascending: false })
-                    .limit(1)
-                  existOutQuery = applyWhatsappInstanceFilterOrLegacy(existOutQuery, whatsapp_instance_id)
-                  const { data: existOut } = await existOutQuery.maybeSingle()
-                  if (existOut && !existOut.whatsapp_id) {
-                    const updatePayload = { whatsapp_id: wId }
-                    const yearExist = existOut.criado_em ? new Date(existOut.criado_em).getFullYear() : 0
-                    const yearNew = ex.criado_em ? new Date(ex.criado_em).getFullYear() : 0
-                    if (yearExist < 2020 && yearNew >= 2020) updatePayload.criado_em = ex.criado_em
-                    await supabase.from('mensagens').update(updatePayload).eq('company_id', company_id).eq('id', existOut.id)
-                    continue
-                  }
-                }
-
-                if (isGroupForHistory && !ex.fromMe) {
-                  if (ex.senderName) insertMsg.remetente_nome = ex.senderName
-                  if (ex.participantPhone) insertMsg.remetente_telefone = ex.participantPhone
-                }
-
-                if (ex.type === 'image' && ex.imageUrl) {
-                  insertMsg.tipo = 'imagem'
-                  insertMsg.url = ex.imageUrl
-                  insertMsg.nome_arquivo = ex.fileName || 'imagem.jpg'
-                } else if ((ex.type === 'document' || ex.type === 'file') && ex.documentUrl) {
-                  insertMsg.tipo = 'arquivo'
-                  insertMsg.url = ex.documentUrl
-                  insertMsg.nome_arquivo = ex.fileName || 'arquivo'
-                } else if (ex.type === 'audio' && ex.audioUrl) {
-                  insertMsg.tipo = 'audio'
-                  insertMsg.url = ex.audioUrl
-                  insertMsg.nome_arquivo = ex.fileName || 'audio'
-                } else if (ex.type === 'video' && ex.videoUrl) {
-                  insertMsg.tipo = 'video'
-                  insertMsg.url = ex.videoUrl
-                  insertMsg.nome_arquivo = ex.fileName || 'video'
-                } else if (ex.type === 'sticker' && ex.stickerUrl) {
-                  insertMsg.tipo = 'sticker'
-                  insertMsg.url = ex.stickerUrl
-                  insertMsg.nome_arquivo = ex.fileName || 'sticker.webp'
-                } else if (ex.type === 'location') {
-                  insertMsg.tipo = 'location'
-                  if (ex.locationUrl) insertMsg.url = ex.locationUrl
-                  insertMsg.nome_arquivo = 'localização'
-                  if (ex.locationMeta && (ex.locationMeta.latitude != null || ex.locationMeta.longitude != null)) {
-                    insertMsg.location_meta = ex.locationMeta
-                  }
-                }
-
-                const { data: histRow, error: histErr } = await supabase
-                  .from('mensagens')
-                  .insert(insertMsg)
-                  .select(WEBHOOK_MSG_SELECT)
-                  .single()
-                if (histErr && String(histErr.code || '') !== '23505') {
-                  console.warn('⚠️ Histórico Z-API: falha ao inserir msg:', String(histErr.message || '').slice(0, 120))
-                } else if (!histErr && histRow?.id && histRow.url && String(histRow.url).startsWith('https://') && tipoQualificaPersistencia(histRow.tipo)) {
-                  schedulePersistInboundMediaIfNeeded({
-                    supabase,
-                    io: req.app.get('io'),
-                    company_id,
-                    mensagem_id: histRow.id,
-                    fromMe: !!ex.fromMe,
-                    departamento_id: null,
-                  })
-                }
-              }
-            } catch (e) {
-              console.warn('⚠️ Histórico Z-API: erro ao importar:', e?.message || e)
-            }
-          })
-        }
+        scheduleNewConversationHistoryImport({
+          conversaId: conversa_id,
+          phone,
+          isGroup,
+          companyId: company_id,
+          whatsappInstanceId: whatsapp_instance_id,
+          io: req.app.get('io'),
+        })
       }
     }
 
@@ -2816,28 +2506,8 @@ exports.receberZapi = async (req, res) => {
     if (io && mensagemSalva) {
       // Status canônico para os ticks no frontend (sent, delivered, read, pending, erro, played)
       const canon = canonStatusForEmit(mensagemSalva.status_mensagem ?? mensagemSalva.status ?? (fromMe ? 'sent' : 'delivered'))
-      const emitPayload = {
-        ...mensagemSalva,
-        criado_em: normalizarTimestampSemFusoAmbiguoParaApi(mensagemSalva.criado_em),
-        conversa_id: mensagemSalva.conversa_id ?? convIdForEmit,
-        status: canon,
-        status_mensagem: canon,
-        // fromMe e direcao EXPLÍCITOS: garantem que o frontend saiba se deve ou não
-        // exibir notificação/som — NUNCA notificar para mensagens enviadas por nós (fromMe=true).
-        fromMe,
-        direcao: mensagemSalva.direcao ?? (fromMe ? 'out' : 'in'),
-      }
-      // Incluir nome e foto para o frontend exibir ao adicionar/atualizar conversa na lista
-      const nomeContato = (nomeParaCache || senderName || '').toString().trim()
-      const fotoContato = (senderPhoto && String(senderPhoto).trim().startsWith('http')) ? String(senderPhoto).trim() : null
-      if (nomeContato && !nomeContato.replace(/\D/g, '').match(/^\d{10,15}$/)) {
-        emitPayload.senderName = nomeContato
-        emitPayload.chatName = nomeContato
-      }
-      if (fotoContato) {
-        emitPayload.senderPhoto = fotoContato
-        emitPayload.photo = fotoContato
-      }
+      // Payload de nova_mensagem (construção pura) → controllers/webhookInbound/realtimePayload.js.
+      const emitPayload = buildNovaMensagemPayload({ mensagemSalva, canon, convIdForEmit, fromMe, nomeParaCache, senderName, senderPhoto })
       if (mensagemFoiInseridaPeloWebhook) {
         // Emitir nova_mensagem para todas as mensagens inseridas pelo webhook:
         // - fromMe=false (recebida do cliente) → frontend DEVE notificar
@@ -2933,71 +2603,21 @@ exports.receberZapi = async (req, res) => {
         }
       }
       const depId = departamento_id ?? convRow?.departamento_id ?? null
-      const temNotificacaoDiscretaEmAtendimento =
-        !fromMe &&
-        !isGroup &&
-        (convRow?.status_atendimento === 'em_atendimento' ||
-          convRow?.status_atendimento === 'aguardando_cliente') &&
-        convRow?.atendente_id != null
-      const convPayload = aplicarModoSimplesNoPayload(
-        {
-          id: convIdForEmit,
-          whatsapp_instance_id: convRow?.whatsapp_instance_id ?? whatsapp_instance_id ?? null,
-          ultima_atividade: convRow?.ultima_atividade ?? new Date().toISOString(),
-          telefone: convRow?.telefone ?? null,
-          atendente_id: convRow?.atendente_id ?? null,
-          aguardando_resposta_campanha: convRow?.aguardando_resposta_campanha === true,
-          ...(skipChatbotPorCampanha
-            ? { lista_realtime: { minha_fila: true, campanhas: true, motivo: 'campanha_respondida' } }
-            : {}),
-          // Grupos nunca mostram badge "aberta" — não precisam ser assumidos
-          exibir_badge_aberta: !isGroup && convRow?.status_atendimento !== 'mensagem_disparada',
-          ...(isGroup
-            ? { status_atendimento: null, status_atendimento_real: null }
-            : {
-                status_atendimento: convRow?.status_atendimento ?? null,
-                status_atendimento_real: convRow?.status_atendimento ?? null,
-                aguardando_cliente_desde: convRow?.aguardando_cliente_desde ?? null,
-              }),
-          ...(depId != null ? { departamento_id: depId } : {}),
-          ...(contatoNome ? { nome_contato_cache: contatoNome, contato_nome: contatoNome } : {}),
-          ...(fotoPerfil ? { foto_perfil_contato_cache: fotoPerfil, foto_perfil: fotoPerfil } : {}),
-          ...(mensagemFoiInseridaPeloWebhook && !fromMe
-            ? {
-                tem_novas_mensagens: true,
-                tem_novas_mensagens_em_atendimento: temNotificacaoDiscretaEmAtendimento,
-                lida: false,
-              }
-            : {}),
-        },
-        {
-          modo_simples_aguardando:
-            modoSimplesRecalc?.modo_simples_aguardando ?? convRow?.modo_simples_aguardando ?? null,
-          atendimento_modo_simples: modoSimplesRecalc?.atendimento_modo_simples === true,
-        },
-        modoSimplesRecalc?.atendimento_modo_simples === true
-      )
-      // ultima_mensagem_preview: preview na lista lateral — direcao correta ('in'/'out') para exibir seta/ícone certo.
-      // Para mensagem de contato, incluir tipo e contact_meta para o frontend exibir card em vez do vCard bruto.
-      if (mensagemFoiInseridaPeloWebhook && emitPayload) {
-        const preview = {
-          texto: emitPayload.texto ?? '(mensagem)',
-          criado_em: emitPayload.criado_em,
-          direcao: emitPayload.direcao ?? (fromMe ? 'out' : 'in'),
-          fromMe,
-        }
-        if (emitPayload.tipo === 'contact' && emitPayload.contact_meta) {
-          preview.tipo = 'contact'
-          preview.contact_meta = emitPayload.contact_meta
-        }
-        if (emitPayload.tipo === 'location' && emitPayload.location_meta) {
-          preview.tipo = 'location'
-          preview.location_meta = emitPayload.location_meta
-        }
-        convPayload.ultima_mensagem_preview = preview
-      }
-      // reordenar_suave: true — frontend deve animar o item para o topo em vez de refetch (evita "desce e sobe")
-      convPayload.reordenar_suave = true
+      // Payload de conversa_atualizada (construção pura) → controllers/webhookInbound/realtimePayload.js.
+      const convPayload = buildConversaAtualizadaPayload({
+        convIdForEmit,
+        convRow,
+        whatsappInstanceId: whatsapp_instance_id,
+        skipChatbotPorCampanha,
+        isGroup,
+        depId,
+        contatoNome,
+        fotoPerfil,
+        mensagemFoiInseridaPeloWebhook,
+        fromMe,
+        modoSimplesRecalc,
+        emitPayload,
+      })
       const emittedConversaAtualizadaScoped = await emitirParaUsuariosQuePodemVerConversa(
         io,
         company_id,

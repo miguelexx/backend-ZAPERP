@@ -1,3 +1,18 @@
+/**
+ * helpDeskController.js — mesa de suporte (tickets) interna, isolada por empresa.
+ * Rotas: `/helpdesk/*` — ver `routes/helpDeskRoutes.js`. Tabelas: `helpdesk_tickets`, `helpdesk_mensagens`.
+ *
+ * Ciclo do ticket: `createTicket` → `listTickets`/`getTicket` → `addMessage` (thread) →
+ * `assumeTicket`/`transferTicket`/`updateTicket` (status: aberto→em_atendimento→resolvido) →
+ * `rateTicket` (avaliação). Notificações ficam no `helpDeskNotificationController`/`Service`.
+ *
+ * AUTENTICAÇÃO DUPLA (atenção): parte dos endpoints usa `helpDeskIntegrationAuth` (token M2M da app
+ * cliente — `integrationOnly`/`integrationOrUser`), outra parte usa `auth` (JWT de usuário). Quando a
+ * chamada vem por integração, `req.helpDeskIntegration` está setado e a visibilidade por departamento
+ * (`allowedDepartmentNames`) é IGNORADA. Isolamento por empresa é sempre `.eq('company_id', req.user.company_id)`.
+ *
+ * Detalhes da integração: `docs/reference/API-HELPDESK-ICTHUS.md` e `HELPDESK-NOTIFICACOES.md`.
+ */
 const supabase = require('../config/supabase')
 const helpDeskNotifications = require('../services/helpDeskNotificationService')
 

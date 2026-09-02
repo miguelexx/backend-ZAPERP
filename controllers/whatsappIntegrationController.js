@@ -1,3 +1,19 @@
+/**
+ * whatsappIntegrationController.js — administração HTTP da CONEXÃO WhatsApp (UltraMSG) por empresa/instância.
+ * Rotas: `/integrations/whatsapp` (+ alias legado `/integrations/zapi`) — ver `routes/whatsappIntegrationRoutes.js`.
+ *
+ * Papel: CRUD de instâncias (`listInstances`/`create`/`update`/`activate`/`setDefault`), conexão
+ * (`getQrCode`/`getConnectStatus`/`restart`/`phoneCode`), configuração de webhooks no provider, e
+ * jobs de sincronização (contatos, mensagens antigas, grupos) enfileirados via `queueManager`.
+ * Leitura de mensagens/estatísticas para a tela de integração.
+ *
+ * Delega para: `ultramsgIntegrationService` (status/QR/restart/me), `whatsappInstanceService`
+ * (instâncias/default/duplicidade), `whatsappConfigService` (config+cache), `whatsappConnectGuardService`
+ * (throttle de QR por empresa), `providers` (adapter ativo). `company_id` SEMPRE de `req.user.company_id`.
+ *
+ * NÃO confundir com: `webhookUltramsgController`/`webhookZapiController` (RECEBEM do provider) nem com
+ * o adapter de ENVIO em `services/providers/ultramsg/` (mapa: doc 21). Este é o painel de administração.
+ */
 const supabase = require('../config/supabase')
 const ultramsgIntegrationService = require('../services/ultramsgIntegrationService')
 const whatsappConfigService = require('../services/whatsappConfigService')

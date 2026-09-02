@@ -4,6 +4,7 @@
  */
 
 const supabase = require('../config/supabase')
+const { registrarAtendimento } = require('./atendimentosRegistroService')
 const {
   atendimentoHumanoAtivo,
   deveMarcarAguardandoCampanha,
@@ -29,8 +30,10 @@ function emitirListaCampanha(io, companyId, conversaId, extra = {}) {
     ...extra.patch,
   }
   try {
-    io.to(`empresa_${company}`).emit('conversa_atualizada', payload)
-    io.to(`conversa_${cid}`).emit('conversa_atualizada', payload)
+    let chain = io.to(`empresa_${company}`).to(`conversa_${cid}`)
+    const uid = extra.atendente_id != null ? Number(extra.atendente_id) : Number(extra.patch?.atendente_id)
+    if (Number.isFinite(uid) && uid > 0) chain = chain.to(`usuario_${uid}`)
+    chain.emit('conversa_atualizada', payload)
   } catch (e) {
     console.warn('[disparo:campanha] emit conversa_atualizada:', e?.message || e)
   }
@@ -239,6 +242,8 @@ async function resolverResponsavelCampanha({ companyId, conversaId, instanciaId 
 /**
  * Primeira resposta válida do contato a uma campanha aguardando.
  * Idempotente: só altera se aguardando_resposta_campanha ainda for true.
+ * Com responsável da campanha (iniciado_por / criado_por ativo na mesma empresa):
+ * assume em_atendimento para a Minha fila dele. Sem responsável: aberta na fila geral.
  */
 async function consumirPrimeiraRespostaCampanha({
   companyId,
@@ -263,13 +268,27 @@ async function consumirPrimeiraRespostaCampanha({
     return { ok: true, consumed: false, idempotent: true, conversa_id: convId }
   }
 
+  let usuarioId = null
+  try {
+    const resolved = await resolverResponsavelCampanha({
+      companyId: cid,
+      conversaId: convId,
+      instanciaId,
+    })
+    usuarioId = resolved?.usuarioId ?? null
+  } catch (e) {
+    console.warn('[disparo:campanha] resolver responsável:', e?.message || e)
+  }
+
+  const assumir = Number.isFinite(Number(usuarioId)) && Number(usuarioId) > 0
   const agora = new Date().toISOString()
   const patch = {
     aguardando_resposta_campanha: false,
-    status_atendimento: 'aberta',
-    atendente_id: null,
-    atendente_atribuido_em: null,
+    status_atendimento: assumir ? 'em_atendimento' : 'aberta',
+    atendente_id: assumir ? Number(usuarioId) : null,
+    atendente_atribuido_em: assumir ? agora : null,
     ultima_atividade: agora,
+    aguardando_cliente_desde: null,
   }
 
   const { data: updated, error } = await supabase
@@ -289,16 +308,34 @@ async function consumirPrimeiraRespostaCampanha({
     return { ok: true, consumed: false, idempotent: true, conversa_id: convId }
   }
 
+  if (assumir) {
+    try {
+      await registrarAtendimento({
+        conversa_id: convId,
+        company_id: cid,
+        acao: 'assumiu',
+        de_usuario_id: null,
+        para_usuario_id: Number(usuarioId),
+        observacao: 'campanha_respondida',
+      })
+    } catch (e) {
+      console.warn('[disparo:campanha] registrar atendimento:', e?.message || e)
+    }
+  }
+
+  const status = updated.status_atendimento ?? patch.status_atendimento
+  const atendenteId = updated.atendente_id ?? patch.atendente_id
   emitirListaCampanha(io, cid, convId, {
     motivo: 'campanha_respondida',
     aguardando_resposta_campanha: false,
+    atendente_id: atendenteId,
     patch: {
       aguardando_resposta_campanha: false,
-      atendente_id: null,
-      status_atendimento: 'aberta',
-      status_atendimento_real: 'aberta',
+      atendente_id: atendenteId,
+      status_atendimento: status,
+      status_atendimento_real: status,
       ultima_atividade: agora,
-      exibir_badge_aberta: true,
+      exibir_badge_aberta: !assumir,
     },
   })
 
@@ -306,8 +343,8 @@ async function consumirPrimeiraRespostaCampanha({
     ok: true,
     consumed: true,
     conversa_id: convId,
-    atendente_id: updated.atendente_id ?? null,
-    status_atendimento: updated.status_atendimento ?? null,
+    atendente_id: atendenteId ?? null,
+    status_atendimento: status ?? null,
   }
 }
 

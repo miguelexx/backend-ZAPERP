@@ -1,3 +1,16 @@
+/**
+ * chatListCountsService.js — contadores/badges dos filtros da lista de conversas (chat).
+ * Calcula os números de "minha fila", "aguardando cliente", "aguardando atendente", "pagamento
+ * pendente", "em atraso" e "hoje", aplicando os MESMOS filtros SQL + visibilidade (departamento,
+ * grupo, setor financeiro) da listagem em si.
+ *
+ * Usado por `controllers/chat/conversationListController` e `batchOpsController`.
+ *
+ * ⚠️ INVARIANTE: os filtros aqui (`applyChatListSqlFilters`) devem espelhar exatamente os da
+ * LISTAGEM — se divergirem, o contador do badge não bate com as linhas exibidas. `withTimeout`
+ * protege contra contagem lenta (retorna parcial em vez de travar a tela). `company_id` do JWT.
+ * Principais exports: `getChatFilterCounts`, `resolveChatListCountsContext`, `countConversasWithFilter`.
+ */
 const supabase = require('../config/supabase')
 const { usuarioPertenceSetorFinanceiro } = require('../helpers/financeiroSetorHelper')
 const {

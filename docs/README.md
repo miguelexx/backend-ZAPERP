@@ -45,8 +45,10 @@ docs/
 │   ├── 21-ULTRAMSG-PROVIDER-MODULARIZACAO.md  adapter UltraMSG (pasta + shim)
 │   ├── 22-AI-DASHBOARD-MODULARIZACAO.md  assistente IA `/ai/ask` (Sessão A feita; B pendente)
 │   ├── 23-CHAT-CONTROLLER-MODULARIZACAO.md  chat HTTP (shim; lista/texto/PIX em controllers/chat)
-│   ├── 24-WEBHOOK-INBOUND-MODULARIZACAO.md  inbound/ACK — fases 1–2 feitas; `receberZapi` ainda no arquivo
-│   └── 25-AUDITORIA-PROXIMOS-ALVOS.md      ranking (webhook P0 já tem o 24; disparo mapa pendente)
+│   ├── 24-WEBHOOK-INBOUND-MODULARIZACAO.md  inbound/ACK — fases 1–4 feitas; fase 5 em andamento (miolo do `receberZapi` no arquivo)
+│   ├── 25-AUDITORIA-PROXIMOS-ALVOS.md      ranking (webhook P0 já tem o 24; disparo mapa = 27)
+│   ├── 26-AUDITORIA-LEGIBILIDADE-CODIGO.md  o que é difícil p/ IA entender (JSDoc/headers); cluster DISPARO, ai×ia
+│   └── 27-DISPARO-MAPA.md                   mapa de código do DISPARO: fluxo worker→fila→send→hook, gates, tabelas, Etapas
 │
 └── reference/                  ← referência suplementar por domínio
     ├── PROJECT_RULES.md        regras do projeto (multi-tenant, segurança, padrões)
@@ -83,7 +85,8 @@ docs/
 | Riscos e dívida técnica | `ai-handoff/13-PROBLEMAS-CONHECIDOS-E-DIVIDA-TECNICA.md` |
 | Nomes "zapi" no código | `reference/ADR-LEGACY-NAMING.md` |
 | Regras obrigatórias do projeto | `reference/PROJECT_RULES.md` |
-| Módulo de Disparo (campanhas) | `ai-handoff/04-MODULOS-E-REGRAS-DE-NEGOCIO.md` |
+| Módulo de Disparo (campanhas) — regras | `ai-handoff/04-MODULOS-E-REGRAS-DE-NEGOCIO.md` |
+| Módulo de Disparo — **mapa de código** (worker/fila/send/gates/tabelas) | `ai-handoff/27-DISPARO-MAPA.md` |
 | Autenticação / permissões | `ai-handoff/08-AUTENTICACAO-SEGURANCA-E-MULTITENANCY.md` |
 | Qualquer mudança nova | `ai-handoff/17-CHECKLIST-PARA-PROXIMA-IA.md` |
 | Evitar erros comuns de IAs | `ai-handoff/18-ANTI-PADROES-E-ARMADILHAS.md` |
@@ -93,6 +96,7 @@ docs/
 | Modularizar / editar chat HTTP (`chatController`) | `ai-handoff/23-CHAT-CONTROLLER-MODULARIZACAO.md` (entrada) + **`CHAT_ARQUITETURA_MODULAR.md`**. Fachada **já é shim** — não reextrair lista/texto/PIX |
 | Modularizar webhook inbound/ACK (`webhookZapiController`) | `ai-handoff/24-WEBHOOK-INBOUND-MODULARIZACAO.md`. Helpers já em `controllers/webhookInbound/`. **Não** mover `receberZapi`/`statusZapi` sem ler. Não renomear o arquivo |
 | Ranking de próximos alvos | `ai-handoff/25-AUDITORIA-PROXIMOS-ALVOS.md` |
+| O que é difícil de a IA entender (JSDoc/headers, nomes) | `ai-handoff/26-AUDITORIA-LEGIBILIDADE-CODIGO.md` |
 | Proteção de envio / rate limit / opt-in | `reference/PROTECAO-ENVIO.md` |
 | Scripts de manutenção / diagnóstico / R2 | `reference/SCRIPTS-CATALOG.md` |
 

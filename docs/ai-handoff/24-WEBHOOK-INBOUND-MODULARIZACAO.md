@@ -1,10 +1,10 @@
 # 24 — Webhook inbound/ACK: mapa para modularização
 
 > Criado: **2026-09-01**. Fonte: código atual.  
-> **Fases 1–2 feitas** (`controllers/webhookInbound/` — payload, reopen, lookup, fromMe). **`receberZapi` / `statusZapi` ainda no monolito.** Não mover esses dois sem este mapa.  
+> **Fases 1–4 feitas** (`controllers/webhookInbound/` — payload, reopen, lookup, fromMe, statusZapi, log, disparoInbound). **Fase 5 em andamento:** saídas antecipadas extraídas (`instanceResolve`, `groupPhoto`); o **miolo** de `receberZapi` ainda no arquivo (com caracterização em `tests/receberZapiInbound.test.js`). Não mover `receberZapi`/`statusZapi` sem este mapa.  
 > Estados: **CONFIRMADO** = código/teste; **INFERÊNCIA**; **PENDENTE** = UltraMSG real / VPS.
 
-Arquivo-alvo: [`controllers/webhookZapiController.js`](../../controllers/webhookZapiController.js) (~3.5k linhas após fases 1–2; `receberZapi`/`statusZapi` ainda aqui).  
+Arquivo-alvo: [`controllers/webhookZapiController.js`](../../controllers/webhookZapiController.js) (~3.0k linhas após fases 1–4; miolo de `receberZapi` ainda aqui).  
 Nome **legado**. Handler **ativo** de inbound e ACK do UltraMSG. Não existe rota pública Z-API.
 
 Camada UltraMSG (já separada): [`controllers/webhookUltramsgController.js`](../../controllers/webhookUltramsgController.js) (~369 linhas) normaliza o envelope e **delega**.  
@@ -62,9 +62,12 @@ UltraMSG POST
 
 ---
 
-## 3. Mapa por linhas (**CONFIRMADO** neste arquivo, 2026-09-01)
+## 3. Mapa por linhas (⚠️ OBSOLETO após a Fase 5 — usar só como referência conceitual)
 
-Números do `webhookZapiController.js` atual. Qualquer extração posterior **invalida** esta tabela.
+> **Os números de linha abaixo NÃO valem mais** (6 blocos extraídos na Fase 5 encolheram o arquivo de
+> ~4.216 → 2.860 linhas). A **sequência conceitual** dos blocos continua correta; para localizar algo,
+> use `grep` pelos marcos (ex. `exports.receberZapi`, `inboundReentregue`, `processIncomingMessage`,
+> `incrementarUnread`, `// 4) Realtime`). Estrutura real dos módulos já extraídos: §7.
 
 | Bloco | Linhas | Assunto | I/O | Candidato |
 |-------|--------|---------|-----|-----------|
@@ -126,8 +129,9 @@ Números do `webhookZapiController.js` atual. Qualquer extração posterior **in
 | Comentários `@see` ADR | apontam para `docs/reference/ADR-LEGACY-NAMING.md` |
 | `handleWebhookUltramsg` catch → 200 vs `receberZapi` catch → 500 | assimetria **CONFIRMADA**; não unificar no split |
 | Fallback `statusZapi` `company_id` via `whatsapp_id` sem instância | ambíguo se >1 linha; já loga e pode ignorar |
-| Sem teste e2e de `receberZapi` HTTP | **PARCIAL** — `tests/receberZapiContract.test.js` (2026-09-01, 5 testes) cobre o **contrato HTTP §4.7 completo**: not-mapped/duplicate → 200; foto de grupo → 200; **erro interno (getOrCreateCliente falha) → 500** (provider reentrega). **Achado:** erro de **um item** (mock `Once`) é absorvido/skipado (200); só erro **estrutural/persistente** vira 500. **Falta** o miolo: inbound novo → 1 linha+socket+unread; replay (`inboundReentregue`) → sem 2º insert/sem URA; eco `fromMe` → 1 msg via `crm-*` — exigem harness stateful (o mock global trata todo inbound como replay) com conversationSync/chatbot/mídia mockados, **antes** da Fase 5 |
+| Sem teste e2e de `receberZapi` HTTP | **PARCIAL** — `tests/receberZapiContract.test.js` (2026-09-01, **6 testes**) cobre: **contrato HTTP §4.7** (not-mapped/duplicate/foto-grupo → 200; erro interno persistente → 500) + **anti-replay §4.3** (replay via `inboundReentregue` → chatbot/URA NÃO acionado). **Como forçar o replay no teste:** mockar `webhookInbound/whatsappIdLookup.selectSingleMensagemByWhatsappId` condicionalmente (só `context:'received.preprocess.idempotency'` retorna linha) — o mock global de supabase sozinho retorna null aí. **Achado:** erro de 1 item é absorvido (200); só estrutural/persistente → 500. **COMPLEMENTADO** por `tests/receberZapiInbound.test.js` (2026-09-01, **2 testes**, via SPIES pois o mock global de supabase é chain singleton): **(A)** inbound novo (texto,!fromMe,não-replay) → `incrementarUnreadParaConversa(company_id,conv)` + emite `nova_mensagem` **e** `atualizar_conversa`; **(B)** eco `fromMe` reconciliado por `crm-*` (mock de `fromMeReconcile.tryReconcileFromMeByCrmReferenceId`) → **sem** unread e **sem** `nova_mensagem`. Truque p/ isolar o insert: conversa com `departamento_id!=null` (pula o chatbot) e idempotência mockada → null (não-replay). |
 | `receberZapi` define `normalizeZapiStatus` / `emitStatusMsg` **dentro do loop** | extração verbatim; não “otimizar” hoist no 1º PR |
+| **REGRESSÃO da fase 1-4 (commit c9cf02d) — CORRIGIDA 2026-09-01** | Ao extrair `fromMeReconcile.js`, o import `const { extrairNomePrefixoTexto } = require('../helpers/mensagemAtendenteNomeHelper')` **saiu do controller**, mas 2 usos ficaram no `receberZapi` (caminho **fromMe self-echo**, ~1758/2010) → `ReferenceError: extrairNomePrefixoTexto is not defined` → **500 em todo eco fromMe** (UltraMSG reentregaria em loop). Estava presente no HEAD~5, sumiu no HEAD. Import **restaurado** (fix mínimo, restaura comportamento pré-modularização). Pego pelo `receberZapiInbound.test.js` (B). **Lição p/ a Fase 5:** ao mover um bloco, rodar o diff `imports(HEAD_pré) − imports(atual)` e conferir se cada nome removido ainda é referenciado no corpo — não confiar só no `node --check` (ReferenceError de função não-declarada só estoura em runtime). |
 
 ---
 
@@ -160,29 +164,33 @@ Não apontar fetch a instância UltraMSG real. Não `WHATSAPP_WEBHOOK_TOKEN` de 
 
 ---
 
-## 7. Estrutura proposta (só depois do Miguel pedir código)
+## 7. Estrutura REAL (2026-09-01) — `controllers/webhookInbound/` (12 módulos)
 
-Fachada estável: `controllers/webhookZapiController.js` → `require('./webhookInbound')` (ou `./webhookInbound/index.js` se houver `webhookInbound.js` no mesmo diretório — **mesmo cuidado do UltraMSG**: não `require('./webhookInbound')` se o shim se chamar `webhookInbound.js`).
+`controllers/webhookZapiController.js` continua sendo a fachada: mantém `receberZapi` (miolo) inline e
+reexporta `statusZapi` + `_test`. Módulos já extraídos (todos verbatim, gate verde):
 
-Sugestão de pastas (nomes podem variar; contratos `receberZapi` / `statusZapi` / `_test` **iguais**):
+| Módulo | Papel | Fase |
+|--------|-------|------|
+| `payload.js` | puros: tipo, grupo, `extractMessage`, `getPayloads`, `resolveConversationKeyFromZapi` | 1 |
+| `reopenPolicy.js` | `shouldReopenFinishedConversation` (puro) | 1 |
+| `whatsappIdLookup.js` | select/update/patch por `whatsapp_id` + filtro de instância (DB) | 2 |
+| `fromMeReconcile.js` | reconciliação `fromMe` + mediaMatch (DB) | 2 |
+| `statusZapi.js` | handler de ACK completo (reexportado pela fachada) | 3 |
+| `log.js` | `logZapiCert` / `_logWebhook` / `_logWebhookSafe` (buffer debug) | 4 |
+| `disparoInbound.js` | origem disparo + `scheduleInboundDisparoHooks` (Etapa 8, fire-and-forget) | 4/5 |
+| `instanceResolve.js` | resolução de tenant (empresa/instância) — saída antecipada | 5 |
+| `groupPhoto.js` | callback `{groupId,groupPhoto}` — saída antecipada | 5 |
+| `historyImport.js` | import de histórico ao abrir conversa nova (fire-and-forget) | 5 |
+| `crmLeadInbound.js` | captura de lead CRM (fire-and-forget) | 5 |
+| `groupSender.js` | resolve remetente/membro em grupos (contrato→saída; `tests/webhookGroupSender.test.js`) | 5 |
+| `realtimePayload.js` | **puro**: monta os payloads `conversa_atualizada` e `nova_mensagem` do emit-tail (`tests/webhookRealtimePayload.test.js`, 11 testes) | 5 |
+| `persistMensagem.js` | **puro**: `applyInboundMediaFields` mapeia `type/mídia → campos do insert` (`tests/webhookPersistMensagem.test.js`, 8 testes). Insert+retries+23505 ainda no orquestrador | 5 |
+| `statusApply.js` | **puro**: `resolveEffectiveStatus` — ACK sem regressão (invariante §4; `tests/webhookStatusApply.test.js`, 6 testes) | 5 |
 
-```
-controllers/webhookZapiController.js     ← shim
-controllers/webhookInbound/
-  payload.js           ← puros: tipo, grupo, extract, getPayloads, resolveKey
-  whatsappIdLookup.js
-  fromMeReconcile.js
-  mediaMatch.js
-  reopenPolicy.js
-  instanceResolve.js
-  persistMensagem.js   ← insert / 23505 / placeholder (ainda I/O)
-  statusApply.js       ← update ACK compartilhado received-embutido + statusZapi
-  statusZapi.js
-  receberZapi.js       ← orquestrador por último
-  index.js
-```
-
-`webhookUltramsgController.js` **não** entra nesta pasta na 1ª quebra.
+**Ainda inline no `receberZapi` (núcleo acoplado, sem módulo):** montagem do insert + persistência
+(`persistMensagem` planejado), reconcile `fromMe` no fluxo received, reabertura/avaliação, chatbot, e o
+**realtime/emit tail**. `statusApply` compartilhado (ACK embutido no received) segue dentro do loop.
+`webhookUltramsgController.js` **não** entra nesta pasta. Um `index.js` agregador só se/quando a fachada virar shim fino.
 
 ---
 
@@ -197,7 +205,7 @@ Cada fase: **sem** mudar rota, evento Socket, migration, env. Verbatim. Suites d
 | **2** | `whatsappIdLookup.js` + `fromMeReconcile.js` (inclui mediaMatch) | médio | `webhookReconcileReferenceId` + pure | ✅ **FEITO** |
 | **3** | `statusZapi.js` (ACK) | **alto** | `messageStatusHelper` + `disparoWebhookHook` | ✅ **FEITO** (2026-09-01). `statusApply` compartilhado adiado p/ a Fase 5 (está dentro do loop do `receberZapi`) |
 | **4** | Standalone restantes: `log.js`, `disparoInbound.js`, payload-leftovers | baixo | gate completo | ✅ **FEITO** (2026-09-01). **A persistência/mídia REAL está DENTRO do `receberZapi`** → só sai na Fase 5 (não é bloco standalone) |
-| **5** | Orquestrador `receberZapi` + shim | **muito alto** | todas as suites da §6 + `node --check` + load da fachada | pendente |
+| **5** | Orquestrador `receberZapi` + shim | **muito alto** | todas as suites da §6 + `node --check` + load da fachada | **EM ANDAMENTO** (2026-09-01). Extraídos (verbatim, todos cobertos por testes): `instanceResolve.js` (tenant), `groupPhoto.js` (callback foto), **`disparoInbound.scheduleInboundDisparoHooks`** (Etapa 8 opt-out+resposta, fire-and-forget), **`historyImport.js`** (import de histórico ao abrir conversa nova), **`crmLeadInbound.js`** (captura de lead CRM) e **`groupSender.js`** (resolve remetente/membro em grupos — contrato→saída, com `tests/webhookGroupSender.test.js`). Controller **3.123 → 2.743** (15 módulos em `webhookInbound/`). Miolo caracterizado em `tests/receberZapiInbound.test.js`. **Ataque ao núcleo (abordagem A) iniciado:** a parte PURA do emit-tail (construção dos payloads `conversa_atualizada` + `nova_mensagem`) foi extraída para `realtimePayload.js` e travada com 11 testes (`webhookRealtimePayload.test.js`) — o emit-tail agora é só I/O + chamada aos builders testados. **Ainda inline (I/O acoplado):** carga da `convRow`, fallback de foto (query clientes), os `io.emit`/`emitirParaUsuariosQuePodemVerConversa`, e o insert/persistência (`persistMensagem` planejado) + reconcile `fromMe`. |
 
 ### Progresso (2026-09-01) — Fases 1 e 2 executadas
 
@@ -228,6 +236,6 @@ Além do gate da §6, smoke **homologação** (autorização explícita, número
 2. Replay do mesmo `whatsapp_id` → sem segundo insert, **sem** novo menu URA.
 3. Envio pelo CRM + eco `fromMe` → **uma** mensagem, `whatsapp_id` preenchido via `crm-*`.
 4. ACK `device`/`read` → ticks; grupo não vira `read` global.
-5. Campanha: inbound consome `aguardando_resposta_campanha`; ACK atualiza fila sem `referenceId`.
+5. Campanha: inbound consome `aguardando_resposta_campanha` (some a tag); se houver `iniciado_por`/`criado_por` ativo na empresa, assume `em_atendimento` na Minha fila dele; senão `aberta` na fila geral. ACK atualiza fila sem `referenceId`.
 
 Manual contra produção: **proibido** neste trabalho.

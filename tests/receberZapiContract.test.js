@@ -24,11 +24,28 @@ jest.mock('../services/whatsappConfigService', () => ({
 jest.mock('../helpers/conversationSync', () => ({
   ...jest.requireActual('../helpers/conversationSync'),
   getOrCreateCliente: jest.fn(),
+  findOrCreateConversation: jest.fn(),
 }))
+jest.mock('../services/chatbotTriageService', () => ({
+  ...jest.requireActual('../services/chatbotTriageService'),
+  processIncomingMessage: jest.fn(),
+}))
+// Controla a checagem de idempotência (inboundReentregue): só o contexto de pré-processo "encontra" a linha.
+jest.mock('../controllers/webhookInbound/whatsappIdLookup', () => {
+  const actual = jest.requireActual('../controllers/webhookInbound/whatsappIdLookup')
+  return {
+    ...actual,
+    selectSingleMensagemByWhatsappId: jest.fn((client, opts) =>
+      Promise.resolve(opts?.context === 'received.preprocess.idempotency'
+        ? { data: { id: 99, direcao: 'in' }, error: null, ambiguous: false }
+        : { data: null, error: null, ambiguous: false })),
+  }
+})
 
 const { getWhatsappInstanceByProviderInstanceId } = require('../services/whatsappInstanceService')
 const { getCompanyIdByInstanceId } = require('../services/whatsappConfigService')
-const { getOrCreateCliente } = require('../helpers/conversationSync')
+const { getOrCreateCliente, findOrCreateConversation } = require('../helpers/conversationSync')
+const { processIncomingMessage } = require('../services/chatbotTriageService')
 const { receberZapi } = require('../controllers/webhookZapiController')
 
 function buildRes() {
@@ -104,5 +121,21 @@ describe('receberZapi — contrato HTTP de saída antecipada (caracterização)'
     expect(getOrCreateCliente).toHaveBeenCalled() // caminho de processamento exercido
     expect(res.status).toHaveBeenCalledWith(500)
     expect(res.json).toHaveBeenCalledWith({ error: 'Erro ao processar webhook' })
+  })
+
+  test('replay (whatsapp_id já conhecido) NÃO aciona o chatbot/URA — anti-replay (§4.3)', async () => {
+    // Com o mock global de supabase, a consulta de inboundReentregue "encontra" a mensagem ({id:1}),
+    // então o inbound é tratado como reentrega: o guard `!inboundReentregue` pula o chatbot.
+    // Se a Fase 5 mover o inboundReentregue para DEPOIS do chatbot, um replay de campanha antiga
+    // reabriria o menu de URA — este teste trava isso.
+    getOrCreateCliente.mockResolvedValue({ cliente_id: 7 })
+    findOrCreateConversation.mockResolvedValue({ conversa: { id: 10, departamento_id: null, atendente_id: null, telefone: '5534999999999' }, created: false })
+    const res = buildRes()
+    await receberZapi(buildReq({
+      body: { instanceId: 'inst-1', phone: '5534999999999', messageId: 'WAMID-REPLAY', text: { message: 'oi' }, fromMe: false },
+      zapiContext: { company_id: 1, whatsapp_instance_id: 5 },
+    }), res)
+    expect(processIncomingMessage).not.toHaveBeenCalled()
+    expect(res.status).toHaveBeenCalledWith(200)
   })
 })

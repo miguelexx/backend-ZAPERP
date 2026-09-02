@@ -1,51 +1,50 @@
-# 25 — Auditoria: próximos alvos de modularização / documentação
+# 25 — Próximos alvos: MODULARIZAÇÃO (ranking)
 
-> Gerado em 2026-09-01 a partir de métricas do código atual. Objetivo: apontar, fora do chat (já
-> modularizado — ver [23](23-CHAT-CONTROLLER-MODULARIZACAO.md)), **o que é difícil de uma IA entender/analisar**,
-> o que está **mal documentado** e o que vale **modularizar/migrar/organizar** — em ordem de prioridade.
->
-> Numeração: a série **19–24** são mapas de modularização. Este arquivo é ranking. O plano P0 do webhook
-> é o [24](24-WEBHOOK-INBOUND-MODULARIZACAO.md) (fases 1–2 feitas; `receberZapi`/`statusZapi` ainda no arquivo).
+> Atualizado **2026-09-01** com métricas do código atual. Este é o **ranking do que vale fatiar**.
+> Legibilidade/documentação (headers, JSDoc, nomes) tem doc próprio: [26](26-AUDITORIA-LEGIBILIDADE-CODIGO.md).
+> Mapa de código do DISPARO: [27](27-DISPARO-MAPA.md). Chat já modularizado: [23](23-CHAT-CONTROLLER-MODULARIZACAO.md).
 
 ## Como foi medido
+Por arquivo (fora de `node_modules`/`tests`/`scripts`): linhas, nº de `exports`/funções, densidade de JSDoc.
+Sinal de "vale modularizar" = **tamanho grande + múltiplas responsabilidades distintas no mesmo arquivo**
+(não é só linha: um arquivo grande e coeso — ex. fórmulas de SLA — se documenta, não se fatia).
 
-Por arquivo (fora de `node_modules`, `tests/`, `scripts/`): linhas, nº de `exports`, nº de `catch`,
-`catch` vazios (observabilidade), densidade de JSDoc (`/**`), nº de `require`. O sinal "difícil de analisar"
-combina **tamanho + poucas fronteiras (poucos exports p/ muitas linhas) + baixa densidade de doc + catch vazios**.
+---
 
-## Ranking — MODULARIZAÇÃO (maior valor/risco primeiro)
+## A) RECOMENDO MODULARIZAR (ranking)
 
-### P0 — `controllers/webhookZapiController.js` (~3.5k linhas + helpers) ⚠️ TOP
+| # | Arquivo | LOC | Por quê | Plano / estado |
+|---|---------|-----|---------|----------------|
+| **1** | `controllers/webhookZapiController.js` | 3.040 | Handler ATIVO inbound/ACK; o miolo de `receberZapi` (~2.800 L) mistura persistência+socket+unread+fromMe | **EM ANDAMENTO** — [24](24-WEBHOOK-INBOUND-MODULARIZACAO.md) fases 1–4 feitas, fase 5 começada (saídas antecipadas extraídas + miolo caracterizado). **Não** mover `receberZapi`/`statusZapi` sem o 24. Não renomear o arquivo. |
+| **2** | `services/aiDashboardService.js` | 3.902 | Maior arquivo do repo; classificação de intent + queries + formatação + OpenAI no mesmo service | Plano [22](22-AI-DASHBOARD-MODULARIZACAO.md): Sessão A feita (puros em `aiDashboard/`); **Sessão B pendente** (queries/OpenAI ainda no service). |
+| **3** | `controllers/chat/conversationListController.js` | 1.490 | Sub-controller do chat que cresceu demais (lista + filtros + visibilidade); só 2 JSDoc | Sem plano. Fatiar dentro de `controllers/chat/` seguindo o padrão do [23](23-CHAT-CONTROLLER-MODULARIZACAO.md). Untracked — não descartar. |
+| **4** | `controllers/disparoRevisaoController.js` | 1.512 | Maior controller do DISPARO (Etapa 6); 46 funções, 1 JSDoc; checklist + revisão + export num só arquivo | Sem plano. Extrair o checklist (já há `helpers/disparoRevisaoChecklist.js`) e handlers de export. Ver mapa [27](27-DISPARO-MAPA.md). |
+| **5** | `controllers/chat/attendanceController.js` | 1.197 | Sub-controller do chat grande (atribuição/assumir/transferir/finalizar) | Sem plano. Fatiar dentro de `controllers/chat/`. |
 
-- Handler **ATIVO** de inbound/ACK (nome "zapi" é legado; UltraMSG). Ver [06](06-WHATSAPP-ULTRAMSG-E-WEBHOOKS.md).
-- Fases 1–2 em `controllers/webhookInbound/` (`payload`, `reopenPolicy`, `whatsappIdLookup`, `fromMeReconcile`).
-- `receberZapi` / `statusZapi` ainda no arquivo. **Não** movê-los sem [24](24-WEBHOOK-INBOUND-MODULARIZACAO.md). Não renomear o arquivo.
+**Próximo passo natural:** terminar o **1** (fase 5 do webhook — miolo do `receberZapi`, já com rede de
+caracterização em `tests/receberZapiInbound.test.js`), depois a **Sessão B do 2** (já tem plano).
 
-### P1 — Cluster **DISPARO** (~15k linhas em ~19 arquivos)
+---
 
-Já espalhado (não é um god object). Falta mapa de entrada. Próximo doc sugerido: `26-DISPARO-MAPA.md` (ainda não existe).
+## B) NÃO fatiar — só documentar/JSDoc (grande, mas coeso)
 
-### P2 — `services/aiDashboardService.js`
+| Arquivo | LOC | Ação |
+|---------|-----|------|
+| `services/slaCalculationService.js` | 1.147 | Fórmulas de SLA coesas — só JSDoc nas fns exportadas |
+| `services/supervisaoService.js` | 1.122 | Métricas de gestão — header já adicionado (2026-09-01); falta JSDoc por-fn |
+| `helpers/conversationSync.js` | 1.233 | Helper CRÍTICO (chat+webhook) — documentar exports; fatiar só com testes de identidade e depois do 24 |
+| `controllers/disparoLimitesController.js` / `disparoExecucaoController.js` | 1.201 / 1.175 | Coesos por Etapa (5/7) — JSDoc; usar o mapa [27](27-DISPARO-MAPA.md) |
+| `services/chatbotTriageService.js` | 1.880 | Grande mas **bem documentado** (47 JSDoc) — deixar |
 
-Plano em [22](22-AI-DASHBOARD-MODULARIZACAO.md) (Sessão A feita, B pendente). Não reauditar.
+---
 
-### P2 — `helpers/conversationSync.js`
+## C) Já resolvido nesta rodada (2026-09-01)
+- Headers de arquivo: `whatsappIntegrationController`, `helpDeskController`, `oldMessagesSyncService`,
+  `chatListCountsService`, `absenceFinalizationService`, `supervisaoService`, `clienteController`, `disparoController`.
+- Desambiguação `aiController` (/ai/ask) × `iaController` (/ia chatbot).
+- Mapa de código do DISPARO: [27](27-DISPARO-MAPA.md).
 
-Usado por chat **e** webhook. Documentar exports; fatiar só depois do 24 e com testes de identidade.
-
-## Ranking — DOCUMENTAÇÃO (baixa densidade)
-
-| Arquivo | Observação |
-|---------|------------|
-| `controllers/disparoRevisaoController.js` | handlers grandes, quase sem JSDoc |
-| `controllers/helpDeskController.js` | API externa em `reference/API-HELPDESK-ICTHUS.md`; controller sem mapa |
-| `services/slaCalculationService.js` | fórmulas densas |
-| `controllers/disparoLimitesController.js` | limites, denso |
-
-## Recomendação priorizada
-
-1. Webhook: seguir o [24](24-WEBHOOK-INBOUND-MODULARIZACAO.md) **fases 3–5** (`statusZapi` → persistência → `receberZapi` + shim). Não reextrair payload/fromMe. Não “corrigir” fromMe/ACK/HTTP no split.
-2. Mapa do Disparo (`26-…`) quando o Miguel pedir.
-3. JSDoc em helpDesk / disparoRevisao / SLA.
-
-> Extração verbatim. Untracked do chat (`conversationListController` / `textMessageController` / `pixController`) não descartar.
+## Regras do split (sempre)
+Extração **verbatim** — não “corrigir” fuso/fromMe/ACK/HTTP durante o fatiamento. Suites-gate verdes a
+cada fase. Ao mover um bloco, rodar o diff `imports(antes) − imports(depois)` vs corpo (um import perdido
+= `ReferenceError` em runtime que o `node --check` NÃO pega — ver a regressão registrada no [24](24-WEBHOOK-INBOUND-MODULARIZACAO.md) §5).

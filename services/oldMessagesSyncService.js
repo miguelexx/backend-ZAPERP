@@ -1,3 +1,17 @@
+/**
+ * oldMessagesSyncService.js — importação de HISTÓRICO (mensagens antigas) do provider WhatsApp
+ * (UltraMSG) para as tabelas `conversas`/`mensagens`. NÃO é o caminho de inbound ao vivo — esse é o
+ * `webhookZapiController` (webhook). Aqui é backfill sob demanda / job.
+ *
+ * Entradas:
+ *   - `syncOldMessagesForCompany(company_id, ...)` — varre as instâncias da empresa (enfileirado via
+ *     `queueManager`; disparado pela tela de integração / `whatsappIntegrationController.syncOldMessages`).
+ *   - `syncOldMessagesForConversation(...)` — histórico de uma conversa específica (chat controllers).
+ *
+ * Invariantes: idempotência por `whatsapp_id` (não duplica linha já existente); usa `conversationSync`
+ * para localizar/criar cliente+conversa com a instância certa; agenda download de mídia via
+ * `inboundMediaPersistenceService` (não baixa síncrono). `company_id` sempre explícito.
+ */
 const supabase = require('../config/supabase')
 const {
   normalizePhoneBR,

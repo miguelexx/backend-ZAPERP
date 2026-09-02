@@ -10,10 +10,11 @@
 |-------|------|
 | Índice | [`docs/README.md`](README.md) |
 | Handoff compacto | [`docs/AI_HANDOFF.md`](AI_HANDOFF.md) + [`ai-handoff/00-LEIA-PRIMEIRO.md`](ai-handoff/00-LEIA-PRIMEIRO.md) |
-| Série técnica | `docs/ai-handoff/01`–`18` (domínio); **19–24** = mapas de modularização; **25** = ranking |
+| Série técnica | `docs/ai-handoff/01`–`18` (domínio); **19–24** = mapas de modularização; **25** = ranking de alvos; **26** = auditoria de legibilidade de código; **27** = mapa de código do DISPARO |
 | Chat HTTP | [23](ai-handoff/23-CHAT-CONTROLLER-MODULARIZACAO.md) + [`CHAT_ARQUITETURA_MODULAR.md`](CHAT_ARQUITETURA_MODULAR.md) |
-| Webhook inbound/ACK | [24](ai-handoff/24-WEBHOOK-INBOUND-MODULARIZACAO.md) (fases 1–2 em `webhookInbound/`; `receberZapi` ainda no arquivo) |
+| Webhook inbound/ACK | [24](ai-handoff/24-WEBHOOK-INBOUND-MODULARIZACAO.md) (fases 1–4 em `webhookInbound/`; fase 5 em andamento — saídas antecipadas extraídas, miolo do `receberZapi` ainda no arquivo) |
 | Nomes `zapi` | [`reference/ADR-LEGACY-NAMING.md`](reference/ADR-LEGACY-NAMING.md) |
+| Disparo — **código** (worker/fila/send/gates/tabelas) | [27](ai-handoff/27-DISPARO-MAPA.md) |
 | Disparo (produto/runbook) | `../docs/DISPARO_MENSAGENS.md`, `DISPARO_GO_LIVE_RUNBOOK.md`, `DISPARO_MIGRATIONS_RUNBOOK.md`, `DISPARO_PILOTO_PLAN.md`, `DISPARO_CARGA_E_FALHAS.md`, `ATUALIZAR-NA-VPS.md` |
 | Índice-mestre front+back | `../docs/ai-handoff/00-LEIA-PRIMEIRO.md` |
 

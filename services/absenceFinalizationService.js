@@ -1,3 +1,20 @@
+/**
+ * absenceFinalizationService.js — máquina de estado de "ausência" do cliente no atendimento.
+ *
+ * Dois papéis acoplados:
+ *   1) "Aguardando cliente": após uma saída de ATENDENTE HUMANO, marca a conversa como aguardando
+ *      resposta do cliente (`markWaitingForClient` / `tryMarkWaitingAfterHumanOutbound`).
+ *   2) Finalização por ausência: encerra conversas sem interação do cliente por X tempo
+ *      (`finalizeConversationsByAbsence` / `finalizeAbsenceForConversaIds`), envia mensagem de
+ *      fallback e grava um snapshot do encerramento em `conversas.observacao` (prefixo `|ausencia_snap:`)
+ *      para permitir reabertura/atribuição corretas depois (`resolveReopenAssignmentAfterAbsence`).
+ *
+ * Consumidores: chat controllers (envio), `absenceFinalizationScheduler` (job periódico),
+ * `jobsController`, `webhookZapiController` (inbound reabre), `atendimentoModoSimplesService`.
+ *
+ * ⚠️ `isAbsenceFinalizationEmergencyDisabled()` é um kill-switch — respeitar antes de finalizar.
+ * Interage com `chatbotTriageService` (`looksLikeBotMessage` distingue msg de bot de msg humana).
+ */
 const supabase = require('../config/supabase')
 const { getProvider } = require('./providers')
 const {

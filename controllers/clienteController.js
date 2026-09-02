@@ -1,3 +1,14 @@
+/**
+ * clienteController.js — CRUD de clientes/contatos e vínculos de tag. Rotas: `/clientes/*`.
+ *
+ * Handlers: `listarClientes` (busca por nome/telefone + nomes vinculados), `buscarClientePorId`,
+ * `criarCliente` (cria contato e, se preciso, abre conversa via `conversaAbrirClienteService`),
+ * `atualizarCliente`, `excluirCliente`, `apagarTodosClientes` (destrutivo — DELETE /clientes/todos),
+ * e `vincular/desvincular/listarTagsCliente`.
+ *
+ * Busca usa `chatSearchHelper` (telefone canônico + termos) e `clienteNomesVinculados`. Telefone
+ * canônico via `conversationSync` (mesmo matching do inbound). `company_id` SEMPRE de `req.user.company_id`.
+ */
 const supabase = require('../config/supabase');
 const { getDisplayName } = require('../helpers/contactEnrichment');
 const { getCanonicalPhone, getCanonicalPhoneAnyIntl, getOrCreateCliente } = require('../helpers/conversationSync');

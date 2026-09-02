@@ -4,7 +4,7 @@
 
 > **Atualização 2026-08-24:** Documentação reorganizada. Ver [`docs/README.md`](../README.md) e [`docs/AI_HANDOFF.md`](../AI_HANDOFF.md). Mudanças pós commit-base registradas na seção abaixo.
 
-> **Atualização 2026-09-01:** Webhook inbound: [24](24-WEBHOOK-INBOUND-MODULARIZACAO.md) (fases 1–2 feitas). **Não** mover `receberZapi`. Chat = shim (19–23).
+> **Atualização 2026-09-01:** Webhook inbound: [24](24-WEBHOOK-INBOUND-MODULARIZACAO.md) (fases 1–4 feitas; fase 5 em andamento). **Não** mover `receberZapi` sem o mapa. Chat = shim (19–23). Mapa DISPARO: [27](27-DISPARO-MAPA.md).
 
 Frontend (UI React): não está nesta série. Use [`frontend/docs/ai-handoff/00-LEIA-PRIMEIRO.md`](../../../frontend/docs/ai-handoff/00-LEIA-PRIMEIRO.md) e o [índice-mestre por sessão](../../../docs/ai-handoff/00-LEIA-PRIMEIRO.md).
 
@@ -39,7 +39,7 @@ Não redescobrir pastas: o código já foi fatiado em vários módulos. Fachada 
 | Adapter UltraMSG | Shim `providers/ultramsg.js` → `require('./ultramsg/index.js')` (**não** `./ultramsg`) | [21](21-ULTRAMSG-PROVIDER-MODULARIZACAO.md) |
 | Assistente IA `/ai/ask` | **Sessão A feita:** puros em `services/aiDashboard/`. Queries, classify, format e `switch` ainda no service. Próximo = Sessão B | [22](22-AI-DASHBOARD-MODULARIZACAO.md) |
 | Chat HTTP | **Shim:** `controllers/chat/` + `services/chat/`. Lista/texto/PIX **já saíram** (`conversationListController`, `textMessageController`, `pixController` — podem estar untracked). Não reextrair | [23](23-CHAT-CONTROLLER-MODULARIZACAO.md) |
-| Webhook inbound/ACK | **Parcial.** Helpers em `controllers/webhookInbound/` (fases 1–2). `receberZapi`/`statusZapi` ainda no `webhookZapiController.js`. Não mover esses dois sem o mapa | [24](24-WEBHOOK-INBOUND-MODULARIZACAO.md) |
+| Webhook inbound/ACK | **Parcial.** Helpers + `statusZapi` + saídas antecipadas em `controllers/webhookInbound/` (fases 1–4; fase 5 fatiando o miolo de `receberZapi`). Não mover `receberZapi` sem o mapa | [24](24-WEBHOOK-INBOUND-MODULARIZACAO.md) |
 
 Não confundir [20](20-DASHBOARD-MODULARIZACAO.md) (KPIs HTTP) com [22](22-AI-DASHBOARD-MODULARIZACAO.md) (linguagem natural). Não unificar as quatro APIs de JID do UltraMSG. Não fundir “sem resposta” da IA com o job [19](19-ATENDIMENTO-SEM-RESPOSTA-MODULARIZACAO.md).
 
@@ -72,7 +72,7 @@ Estados de certeza usados:
 9. Adapter UltraMSG **já fatiado** (shim `./ultramsg/index.js`): [21](21-ULTRAMSG-PROVIDER-MODULARIZACAO.md).
 10. Assistente IA `/ai/ask`: [22](22-AI-DASHBOARD-MODULARIZACAO.md) — Sessão A feita; Sessão B = queries + classify/format. Não confundir com [20](20-DASHBOARD-MODULARIZACAO.md).
 11. Chat HTTP **já é shim**: [23](23-CHAT-CONTROLLER-MODULARIZACAO.md) + [`CHAT_ARQUITETURA_MODULAR.md`](../CHAT_ARQUITETURA_MODULAR.md). Não reextrair lista/texto/PIX.
-12. Webhook inbound/ACK: [24](24-WEBHOOK-INBOUND-MODULARIZACAO.md). Fases 1–2 feitas. **Não** mover `receberZapi`/`statusZapi`. Não renomear o arquivo.
+12. Webhook inbound/ACK: [24](24-WEBHOOK-INBOUND-MODULARIZACAO.md). Fases 1–4 feitas; fase 5 em andamento. **Não** mover `receberZapi`/`statusZapi` sem o mapa. Não renomear o arquivo.
 
 ## Pontos que exigem análise antes de alteração
 

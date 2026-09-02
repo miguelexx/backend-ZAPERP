@@ -1,3 +1,19 @@
+/**
+ * iaController.js — configuração do CHATBOT/URA de triagem (rotas `/ia/*`).
+ *
+ * ⚠️ NÃO confundir com `aiController.js` (rota `/ai/ask`): aquele é o assistente de linguagem
+ * natural do dashboard (serviço `aiDashboardService`). Este aqui NÃO fala com OpenAI para responder
+ * o usuário — ele só administra o menu/URA de triagem e as regras de alerta. "ia" = triagem; "ai" = assistente NL.
+ *
+ * Endpoints (todos `auth` + `supervisorOrAdmin`, em `routes/iaRoutes.js`):
+ *   - GET/PUT `/ia/config`  → lê/grava a config de triagem (`empresas.ia_config.chatbot_triage`);
+ *                              PUT invalida o cache do `chatbotTriageService`.
+ *   - GET/POST/PUT/DELETE `/ia/regras[/:id]` → CRUD das regras de triagem.
+ *   - POST `/ia/regras/testar-admin-atendimento-alerta` → dispara `processCompanyAdminAlert` (teste).
+ *   - GET `/ia/logs` → logs de execução do chatbot.
+ *
+ * Isolamento: `company_id` SEMPRE de `req.user.company_id` (nunca do body).
+ */
 const supabase = require('../config/supabase')
 const {
   DEFAULT_CHATBOT_CONFIG,

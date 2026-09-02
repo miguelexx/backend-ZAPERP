@@ -52,4 +52,46 @@ async function conversaTemAlgumaMensagemInbound(supabaseClient, company_id, conv
   }
 }
 
-module.exports = { mensagemInseridaEhPrimeiraDisparoWhatsappExterno, conversaTemAlgumaMensagemInbound }
+/**
+ * Etapa 8 Disparo (best-effort, NÃO bloqueia o webhook): agenda opt-out por match exato e o vínculo
+ * da resposta inbound ao item de fila. Extraído verbatim de receberZapi (Fase 5 — doc 24). Fire-and-forget
+ * via setImmediate; o chamador só invoca quando `!fromMe && !isGroup && mensagem inserida pelo webhook`.
+ * Requires dinâmicos mantidos (quebram um ciclo potencial e adiam o custo para fora do caminho quente).
+ */
+function scheduleInboundDisparoHooks({ companyId, telefone, texto, mensagemId, conversaId, instanciaId, io }) {
+  setImmediate(() => {
+    Promise.resolve()
+      .then(async () => {
+        try {
+          const { processInboundOptOut } = require('../../services/disparoOptOutService')
+          await processInboundOptOut({
+            companyId,
+            telefone,
+            texto,
+            mensagemId,
+            conversaId,
+            instanciaId,
+            io,
+          })
+        } catch (e) {
+          console.warn('[disparo:optout] hook:', e?.message || e)
+        }
+        try {
+          const { vincularRespostaInbound } = require('../../services/disparoRespostaService')
+          await vincularRespostaInbound({
+            companyId,
+            telefone,
+            mensagemId,
+            conversaId,
+            instanciaId,
+            io,
+          })
+        } catch (e) {
+          console.warn('[disparo:resposta] hook:', e?.message || e)
+        }
+      })
+      .catch(() => {})
+  })
+}
+
+module.exports = { mensagemInseridaEhPrimeiraDisparoWhatsappExterno, conversaTemAlgumaMensagemInbound, scheduleInboundDisparoHooks }

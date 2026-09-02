@@ -1,3 +1,13 @@
+/**
+ * disparoController.js — CRUD das CAMPANHAS de disparo (entrada do módulo). Rotas: `/disparo/*`.
+ * Tabela: `disparo_campanhas`. Handlers: `listarCampanhas`, `obterCampanha`, `criarCampanha`,
+ * `editarCampanha`, `arquivarCampanha`, `restaurarCampanha`, `resumoCampanhas`.
+ *
+ * Edição respeita o estado da campanha (`disparoStatusHelper.statusPermiteEdicao`) — campanha em
+ * execução/finalizada bloqueia alterações. As demais etapas (destinatários, variações, limites,
+ * revisão, execução, opt-out) ficam em controllers `disparo*` próprios — ver o mapa de código: doc 27.
+ * `company_id` SEMPRE de `req.user.company_id`.
+ */
 const supabase = require('../config/supabase')
 const { statusPermiteEdicao, mensagemBloqueioEdicao, STATUS_TODOS } = require('../helpers/disparoStatusHelper')
 

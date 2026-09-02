@@ -68,14 +68,22 @@ describe('disparoConversaOrigem — regras', () => {
     })).toBe(false)
   })
 
-  test('após responder, some de Campanhas e fica aberta na fila', () => {
+  test('após responder, some de Campanhas; com atendente entra na Minha fila', () => {
     const aguardando = { aguardando_resposta_campanha: true, status_atendimento: 'aberta' }
     expect(visivelNoFiltroCampanhas(aguardando)).toBe(true)
     expect(visivelNaMinhaFilaQuantoACampanha(aguardando)).toBe(false)
 
-    const respondeu = { aguardando_resposta_campanha: false, status_atendimento: 'aberta', atendente_id: null }
-    expect(visivelNoFiltroCampanhas(respondeu)).toBe(false)
-    expect(visivelNaMinhaFilaQuantoACampanha(respondeu)).toBe(true)
+    const assumida = {
+      aguardando_resposta_campanha: false,
+      status_atendimento: 'em_atendimento',
+      atendente_id: 84,
+    }
+    expect(visivelNoFiltroCampanhas(assumida)).toBe(false)
+    expect(visivelNaMinhaFilaQuantoACampanha(assumida)).toBe(true)
+
+    const filaGeral = { aguardando_resposta_campanha: false, status_atendimento: 'aberta', atendente_id: null }
+    expect(visivelNoFiltroCampanhas(filaGeral)).toBe(false)
+    expect(visivelNaMinhaFilaQuantoACampanha(filaGeral)).toBe(true)
   })
 
   test('empresas/instâncias diferentes não compartilham a flag', () => {
