@@ -4,105 +4,42 @@ const { profilePictureChatIdCandidates, contactRecordMatchesChatId } = require('
 const { resolveConfig } = require('./config')
 const { getJson } = require('./http')
 
-/**
- * Extrai array de contatos da resposta UltraMsg (suporta múltiplos formatos).
- */
+const { agendaContactFields } = require('../../../helpers/agendaContact')
+
 function parseContactsResponse(data) {
-  if (!data) return []
   if (Array.isArray(data)) return data
-  if (Array.isArray(data.contacts)) return data.contacts
-  if (Array.isArray(data.data)) return data.data
-  if (Array.isArray(data.list)) return data.list
-  if (Array.isArray(data.contact)) return data.contact
-  return []
+  if (!data || typeof data !== 'object') return null
+  for (const key of ['contacts', 'data', 'list', 'contact']) {
+    if (Array.isArray(data[key])) return data[key]
+    if (data[key] && typeof data[key] === 'object') {
+      const nested = parseContactsResponse(data[key])
+      if (nested) return nested
+    }
+  }
+  return null
 }
 
-/**
- * Chunk alto para pedir toda a agenda em uma única chamada.
- * A UltraMsg retorna a lista inteira da instância de uma só vez (sem paginação real).
- * Usar um valor grande garante que o limit da API nunca corte a lista.
- */
-
-/**
- * Lista contatos salvos na agenda do celular conectado via QR.
- * UltraMsg: GET /{instance_id}/contacts — retorna APENAS da instância conectada.
- *
- * Estratégia: página 1 sem parâmetros (API retorna tudo de uma vez).
- * Páginas seguintes com limit+offset caso a API suporte e o chunk anterior tenha chegado ao limite.
- *
- * @returns {{ data: object[], hasMore: boolean, rawCount: number }}
- */
+// GET /contacts é uma lista completa: a documentação não oferece limit/offset.
+// A paginação é feita no banco, depois da leitura integral da agenda.
 async function getContacts(page = 1, pageSize = CONTACTS_API_CHUNK_MAX, opts = {}) {
+  if (Number(page) > 1) return { data: [], hasMore: false, rawCount: 0 }
   const cfg = await resolveConfig(opts)
-  if (!cfg) {
-    return { data: [], hasMore: false, rawCount: 0 }
-  }
-  const limit = Math.min(CONTACTS_API_CHUNK_MAX, Math.max(100, Number(pageSize) || CONTACTS_API_CHUNK_MAX))
-  const offset = (Math.max(1, Number(page)) - 1) * limit
-
-  const tryFetch = async (extraParams) => {
-    const { ok, data } = await getJson({
-      ...cfg,
-      endpoint: '/contacts',
-      extraParams: { ...extraParams }
-    })
-    if (!ok) return []
-    return parseContactsResponse(data)
-  }
-
+  if (!cfg) throw new Error('Instância WhatsApp não configurada para esta empresa.')
+  let response
   try {
-    // Sempre envia limit para garantir que o UltraMsg não aplique um teto padrão interno.
-    // Offset 0 na página 1; offset calculado nas páginas seguintes (caso a API pagine).
-    let raw
-    if (page === 1) {
-      raw = await tryFetch({ limit: String(limit), offset: '0' })
-      // Alguns servidores UltraMsg ignoram params e devolvem tudo; outros respeitam o limit.
-      // Se recebemos 0, tenta sem params como último recurso.
-      if (raw.length === 0) {
-        raw = await tryFetch({})
-      }
-    } else {
-      raw = await tryFetch({ limit: String(limit), offset: String(offset) })
-    }
-
-    if (WHATSAPP_DEBUG) {
-      console.log('[ULTRAMSG] getContacts', { page, limit, offset, rawTotal: raw.length })
-    }
-
-    const contacts = []
-    for (const c of raw) {
-      const phoneRaw = String(c.id || c.phone || c.wa_id || '').trim()
-      // Ignorar grupos, broadcasts e IDs inválidos
-      if (!phoneRaw || phoneRaw.endsWith('@g.us') || phoneRaw.endsWith('@broadcast')) continue
-      // Exigir name: apenas contatos salvos na agenda têm este campo preenchido
-      if (!c.name || !String(c.name).trim()) continue
-
-      const digits = phoneRaw.replace(/\D/g, '')
-      if (!digits || digits.length < 10) continue
-
-      contacts.push({
-        phone: phoneRaw,
-        name: String(c.name).trim(),
-        short: c.short ? String(c.short).trim() : null,
-        notify: c.notify ? String(c.notify).trim() : null,
-        vname: c.vname ? String(c.vname).trim() : null,
-        imgUrl: c.imgUrl || c.photo || null
-      })
-    }
-
-    if (WHATSAPP_DEBUG) {
-      console.log('[ULTRAMSG] getContacts filtrado:', { total_api: raw.length, com_name: contacts.length })
-    }
-    // hasMore se a API devolveu exatamente `limit` itens (pode haver mais na próxima página)
-    const hasMore = raw.length > 0 && raw.length >= limit
-    return { data: contacts, hasMore, rawCount: raw.length }
-  } catch (e) {
-    if (WHATSAPP_DEBUG) console.warn('[ULTRAMSG] getContacts erro:', e?.message)
-    return { data: [], hasMore: false, rawCount: 0 }
+    response = await getJson({ ...cfg, endpoint: '/contacts' })
+  } catch {
+    throw new Error('Não foi possível consultar a agenda na UltraMSG. Verifique a conexão e tente novamente.')
   }
+  const { ok, status, data } = response
+  if (!ok || data?.error || data?.success === false) {
+    throw new Error('A UltraMSG recusou a consulta de contatos' + (status ? ' (HTTP ' + status + ')' : '') + '. Verifique a conexão e as credenciais da instância.')
+  }
+  const raw = parseContactsResponse(data)
+  if (!raw) throw new Error('A UltraMSG retornou um formato de agenda inválido. Tente novamente.')
+  const contacts = raw.map(agendaContactFields).filter(Boolean)
+  return { data: contacts, hasMore: false, rawCount: raw.length }
 }
-
-/**
 
 function extractContactFromResponse(rawData) {
   if (!rawData || typeof rawData !== 'object') return null

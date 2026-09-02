@@ -21,6 +21,8 @@ const MAX_CONCURRENT = parseInt(process.env.QUEUE_MAX_CONCURRENT_JOBS, 10) || 2
 const BACKOFF_BASE_MS = parseInt(process.env.QUEUE_BACKOFF_BASE_MS, 10) || 5000
 
 let runningCount = 0
+const activeLocalJobs = new Set()
+const enqueueInFlight = new Map()
 
 /**
  * Verifica se já existe job igual (tipo+company_id) em pending ou running.
@@ -44,6 +46,14 @@ async function jobDuplicado(company_id, tipo) {
  * @returns {Promise<{ ok: boolean, job_id?: number, error?: string }>}
  */
 async function enqueue(company_id, tipo, payload = {}) {
+  const key = `${company_id}:${tipo}`
+  if (enqueueInFlight.has(key)) return enqueueInFlight.get(key)
+  const pending = enqueueOnce(company_id, tipo, payload)
+  enqueueInFlight.set(key, pending)
+  try { return await pending } finally { enqueueInFlight.delete(key) }
+}
+
+async function enqueueOnce(company_id, tipo, payload = {}) {
   if (!company_id || !tipo) return { ok: false, error: 'company_id e tipo obrigatórios' }
 
   const dup = await jobDuplicado(company_id, tipo)
@@ -124,13 +134,20 @@ async function getNextPendingJob() {
     .eq('status', 'pending')
     .or('next_run_at.is.null,next_run_at.lte.' + nowIso)
     .order('criado_em', { ascending: true })
-    .limit(1)
-    .maybeSingle()
+    .limit(100)
 
-  if (!data?.id) return null
+  let candidate = null
+  for (const job of data || []) {
+    if (job.tipo === JOB_TIPOS.SYNC_CONTATOS && job.payload?.manual === true || !(await isProcessamentoPausado(job.company_id))) {
+      candidate = job
+      break
+    }
+  }
+  if (!candidate) return null
+  return claimPendingJob(candidate)
+}
 
-  const pausado = await isProcessamentoPausado(data.company_id)
-  if (pausado) return null
+async function claimPendingJob(data) {
 
   const nextTentativas = Number(data.tentativas || 0) + 1
   const update = {
@@ -155,16 +172,22 @@ async function getNextPendingJob() {
 /**
  * Handler por tipo de job.
  */
-async function executeJob(job) {
+async function executeJob(job, io = null) {
   const { id, company_id, tipo, payload } = job
 
   try {
     if (tipo === JOB_TIPOS.SYNC_CONTATOS) {
       const result = await syncContactsFullProgressiva(company_id, {
         ...payload,
+        jobId: id,
+        onProgress: async (progress) => {
+          if (!io) return
+          const { contactSyncStatus } = require('../helpers/contactSyncStatus')
+          io.to(`empresa_${company_id}`).emit('zapi_sync_contatos', contactSyncStatus(job, { ...progress, job_id: id }))
+        },
         includeConversationCache: payload?.includeConversationCache !== false
       })
-      return { ok: true, resultado: result }
+      return { ok: result.ok === true, resultado: result, erro: result.error }
     }
 
     if (tipo === JOB_TIPOS.SYNC_FOTOS) {
@@ -218,7 +241,7 @@ async function finalizeJob(jobId, success, job, resultado, erro) {
 
   const update = {
     status,
-    resultado_json: success ? (resultado?.resultado || resultado) : null,
+    resultado_json: resultado?.resultado || (success ? resultado : null),
     erro: cancelled ? 'Cancelado pelo usuario' : (success ? null : (erro || 'Erro desconhecido')),
     next_run_at: nextRunAt,
     atualizado_em: new Date().toISOString()
@@ -234,29 +257,28 @@ async function finalizeJob(jobId, success, job, resultado, erro) {
  */
 async function processJob(job, io = null) {
   runningCount++
+  activeLocalJobs.add(job.id)
+  const heartbeat = setInterval(() => {
+    Promise.resolve(supabase.from('jobs').update({ atualizado_em: new Date().toISOString() })
+      .eq('id', job.id).eq('company_id', job.company_id).eq('status', 'running')).catch(() => {})
+  }, 30000)
+  heartbeat.unref?.()
   recordJobStart(job.company_id)
   try {
-    const result = await executeJob(job)
+    const result = await executeJob(job, io)
     if (result.ok) {
       await finalizeJob(job.id, true, job, result)
       await registrarEvento(job.company_id, TIPOS.JOB_CONCLUIDO, `Job ${job.tipo} concluído`, { job_id: job.id })
       if (io && job.tipo === JOB_TIPOS.SYNC_CONTATOS && result.resultado) {
-        const r = result.resultado
+        const { contactSyncStatus } = require('../helpers/contactSyncStatus')
         // Nome do evento é legado ("zapi_*"); payload é sync WhatsApp/UltraMSG. Não renomear sem dual-emit + rollout frontend (../docs/reference/ADR-LEGACY-NAMING.md).
-        io.to(`empresa_${job.company_id}`).emit('zapi_sync_contatos', {
-          ok: true,
-          total_contatos: r.totalProcessados || 0,
-          criados: r.totalCriados || 0,
-          atualizados: r.totalAtualizados || 0,
-          fotos_atualizadas: 0,
-          truncado: r.truncado === true,
-          aviso: r.aviso || null
-        })
+        io.to(`empresa_${job.company_id}`).emit('zapi_sync_contatos', contactSyncStatus({ ...job, status: 'completed', resultado_json: result.resultado }))
       }
       if (io && job.tipo === JOB_TIPOS.SYNC_FOTOS && result.resultado) {
         // Mesmo evento legado que SYNC_CONTATOS (ver comentário acima).
         io.to(`empresa_${job.company_id}`).emit('zapi_sync_contatos', {
           ok: true,
+          tipo: JOB_TIPOS.SYNC_FOTOS,
           total_contatos: 0,
           criados: 0,
           atualizados: result.resultado.totalAtualizados || 0,
@@ -285,13 +307,22 @@ async function processJob(job, io = null) {
 
     await finalizeJob(job.id, false, job, result, result.erro)
     await registrarEvento(job.company_id, TIPOS.JOB_FALHOU, `Job ${job.tipo} falhou`, { job_id: job.id, erro: result.erro })
+    if (io && job.tipo === JOB_TIPOS.SYNC_CONTATOS) {
+      const { contactSyncStatus } = require('../helpers/contactSyncStatus')
+      io.to(`empresa_${job.company_id}`).emit('zapi_sync_contatos', contactSyncStatus({
+        ...job, status: job.tentativas >= job.max_tentativas ? 'dead_letter' : 'pending',
+        erro: result.erro, resultado_json: result.resultado,
+      }))
+    }
 
-    if (job.tentativas >= job.max_tentativas) {
+    if (job.tentativas >= job.max_tentativas && job.tipo !== JOB_TIPOS.SYNC_CONTATOS) {
       const { updateConfig } = require('./configOperacionalService')
       await updateConfig(job.company_id, { processamento_pausado: true })
       await registrarEvento(job.company_id, TIPOS.PAUSA, 'Pausa automática após falhas repetidas', { job_id: job.id })
     }
   } finally {
+    clearInterval(heartbeat)
+    activeLocalJobs.delete(job.id)
     recordJobEnd(job.company_id)
     runningCount--
   }
@@ -301,18 +332,24 @@ async function processJob(job, io = null) {
  * Recupera jobs travados em 'running' (processo anterior encerrou abruptamente).
  * Reseta para 'pending' jobs com mais de STALE_JOB_TIMEOUT_MS sem atualização.
  */
-async function recoverStaleRunningJobs() {
+async function recoverStaleRunningJobs(companyId = null) {
   const STALE_JOB_TIMEOUT_MS = parseInt(process.env.QUEUE_STALE_JOB_TIMEOUT_MS, 10) || 10 * 60 * 1000
   const staleBefore = new Date(Date.now() - STALE_JOB_TIMEOUT_MS).toISOString()
   try {
-    const { data: staleJobs } = await supabase
+    let query = supabase
       .from('jobs')
       .select('id, company_id, tipo, status, tentativas')
       .in('status', ['running', 'cancel_requested'])
       .lt('atualizado_em', staleBefore)
+    if (companyId != null) query = query.eq('company_id', Number(companyId))
+    const { data: staleJobs } = await query
     if (!staleJobs || staleJobs.length === 0) return
     console.warn(`[queueManager] Recuperando ${staleJobs.length} job(s) travados`)
     for (const job of staleJobs) {
+      if (activeLocalJobs.has(job.id)) continue
+      if (job.tipo === JOB_TIPOS.SYNC_CONTATOS) {
+        await supabase.from('sync_locks').delete().eq('company_id', job.company_id).eq('tipo', 'contact_sync')
+      }
       const nextStatus = job.status === 'cancel_requested' ? 'cancelled' : 'pending'
       await supabase
         .from('jobs')
@@ -340,9 +377,14 @@ async function recoverStaleRunningJobs() {
 function startWorker(intervalMs = 5000, io = null) {
   // Recupera jobs travados de crashes anteriores antes de iniciar o polling
   recoverStaleRunningJobs().catch(() => {})
+  let lastRecovery = Date.now()
 
   const poll = async () => {
     try {
+      if (Date.now() - lastRecovery >= 60000) {
+        lastRecovery = Date.now()
+        await recoverStaleRunningJobs()
+      }
       const job = await getNextPendingJob()
       if (job) {
         const rateOk = await canRunJob(job.company_id)

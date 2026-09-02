@@ -80,68 +80,57 @@ exports.zapiStatus = exports.whatsappStatus
 // Executa sync inline — compatível sem fila de jobs.
 // =====================================================
 exports.sincronizarContatosZapi = async (req, res) => {
+  const company_id = req.user?.company_id
+  if (!company_id) return res.status(401).json({ ok: false, error: 'Não autenticado' })
   try {
-    const { company_id } = req.user
-    if (!company_id) return res.status(401).json({ error: 'Não autenticado' })
-
-    // Quantidade atual no banco ANTES da sync (resposta imediata ao frontend).
-    const { count: totalBanco } = await supabase
-      .from('clientes')
-      .select('*', { count: 'exact', head: true })
-      .eq('company_id', Number(company_id))
-
-    const totalClientesBanco = Number(totalBanco || 0)
-
-    // Enfileira job que o worker (iniciado no index.js) vai processar em background.
-    // Continua mesmo se o usuário sair da tela.
-    const { enqueue, JOB_TIPOS, resumeAll, recoverStaleRunningJobs } = require('../../services/queueManager')
-
-    // Clique manual = intenção explícita de sincronizar. Dois estados silenciosos
-    // impediam o botão de "puxar nada":
-    //  1) processamento_pausado=true — o worker auto-pausa a empresa após falhas
-    //     repetidas de job; enquanto pausado, getNextPendingJob ignora a fila e o
-    //     job novo fica pendente para sempre. Retomamos aqui.
-    //  2) job anterior travado em 'running' (crash/deploy) — bloqueia novo enqueue
-    //     por jobDuplicado até a varredura de stale (10 min). Recuperamos agora.
-    try { await resumeAll(company_id) } catch (e) { console.warn('[SYNC-CONTATOS] resumeAll:', e?.message || e) }
-    try { await recoverStaleRunningJobs() } catch (e) { console.warn('[SYNC-CONTATOS] recoverStale:', e?.message || e) }
-
+    const { getEmpresaWhatsappConfig } = require('../../services/whatsappConfigService')
+    const { config, error } = await getEmpresaWhatsappConfig(company_id)
+    if (error || !config) return res.status(400).json({ ok: false, error: 'Configure a instância WhatsApp em Integrações antes de sincronizar.' })
+    const { enqueue, JOB_TIPOS, getActiveJob, recoverStaleRunningJobs } = require('../../services/queueManager')
+    await recoverStaleRunningJobs(company_id)
     const result = await enqueue(company_id, JOB_TIPOS.SYNC_CONTATOS, {
-      reset: true,
-      includeConversationCache: false
+      reset: true, manual: true, includePhotos: true, includeConversationCache: false,
     })
-
     if (!result.ok) {
-      const jaRodando = /enfileirado|execu/i.test(result.error || '')
-      return res.json({
-        ok: true,
-        queued: false,
-        running: jaRodando,
-        message: jaRodando
-          ? 'Sincronização já em andamento. Os contatos serão atualizados em breve.'
-          : (result.error || 'Não foi possível iniciar sincronização'),
-        total_contatos: totalClientesBanco,
-        criados: 0,
-        atualizados: 0,
-        fotos_atualizadas: 0
-      })
+      const active = await getActiveJob(company_id, JOB_TIPOS.SYNC_CONTATOS)
+      if (active) {
+        // Jobs criados antes deste fluxo podiam ficar pendentes sob pausa operacional.
+        // O clique autoriza somente este job; não retoma a fila inteira da empresa.
+        const { error: updateError } = await supabase.from('jobs').update({
+          payload: { ...active.payload, manual: true, includePhotos: true, reset: true, includeConversationCache: false },
+        }).eq('company_id', Number(company_id)).eq('id', active.id).eq('tipo', JOB_TIPOS.SYNC_CONTATOS)
+        if (updateError) throw updateError
+        return res.json({ ok: true, running: true, queued: active.status === 'pending',
+          job_id: active.id, message: 'Sincronização já em andamento.' })
+      }
+      return res.status(500).json({ ok: false, error: 'Não foi possível iniciar a sincronização. Verifique a fila de processamento.' })
     }
+    return res.status(202).json({ ok: true, queued: true, running: true, job_id: result.job_id,
+      message: 'Sincronização iniciada. Importando nomes e fotos disponíveis; a lista será atualizada automaticamente.' })
+  } catch {
+    return res.status(500).json({ ok: false, error: 'Erro ao iniciar sincronização de contatos.' })
+  }
+}
 
-    console.log(`[SYNC-CONTATOS] empresa=${company_id} job_id=${result.job_id} enfileirado — banco atual: ${totalClientesBanco}`)
-    return res.json({
-      ok: true,
-      queued: true,
-      running: true,
-      job_id: result.job_id,
-      message: 'Sincronização iniciada. Os contatos serão importados em lotes e a tela atualizará ao terminar.',
-      total_contatos: totalClientesBanco,
-      criados: 0,
-      atualizados: 0,
-      fotos_atualizadas: 0
-    })
-  } catch (err) {
-    console.error('sincronizarContatosZapi:', err)
-    return res.json({ ok: false, message: 'Erro ao iniciar sincronização de contatos', total_contatos: 0, criados: 0, atualizados: 0 })
+// Leitura autenticada: acompanha o job mesmo após sair da página/perder o Socket.
+exports.statusSincronizacaoContatos = async (req, res) => {
+  const company_id = req.user?.company_id
+  if (!company_id) return res.status(401).json({ ok: false, error: 'Não autenticado' })
+  const jobId = req.query?.job_id
+  if (jobId != null && !/^[1-9]\d*$/.test(String(jobId))) return res.status(400).json({ error: 'Job inválido.' })
+  try {
+    let query = supabase.from('jobs').select('id, status, resultado_json, erro, atualizado_em')
+      .eq('company_id', Number(company_id)).eq('tipo', 'sync_contatos')
+    if (jobId) query = query.eq('id', Number(jobId))
+    const { data: job, error } = await query.order('criado_em', { ascending: false }).limit(1).maybeSingle()
+    if (error) throw error
+    if (!job) return res.json({ ok: true, running: false, status: 'idle' })
+    const { data: checkpoint } = await supabase.from('checkpoints_sync').select('detalhes_json')
+      .eq('company_id', Number(company_id)).eq('tipo', 'contact_sync').maybeSingle()
+    const { contactSyncStatus } = require('../../helpers/contactSyncStatus')
+    return res.json(contactSyncStatus(job, checkpoint?.detalhes_json))
+  } catch {
+    return res.status(500).json({ ok: false, error: 'Não foi possível consultar o progresso da sincronização.' })
   }
 }
 

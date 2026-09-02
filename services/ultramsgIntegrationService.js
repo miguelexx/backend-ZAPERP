@@ -135,29 +135,13 @@ async function getStatus(companyId, opts = {}) {
       })
     }
 
-    // Auto-sync de contatos ao conectar QR: detecta transição disconnected → connected
-    // Respeita zapi_auto_sync_contatos (default true para puxar agenda do celular)
+    // A agenda só é importada por ação manual; conexão apenas sincroniza grupos/chats.
     const wasConnected = lastConnectedState.get(companyId) ?? false
     if (!wasConnected && connected) {
       lastConnectedState.set(companyId, true)
       pruneMap(lastConnectedState, MAP_MAX_ENTRIES)
       setImmediate(async () => {
         try {
-          const { data: empresa } = await supabase
-            .from('empresas')
-            .select('zapi_auto_sync_contatos')
-            .eq('id', companyId)
-            .maybeSingle()
-          const autoSync = empresa?.zapi_auto_sync_contatos !== false
-          if (autoSync) {
-            const { enqueue, JOB_TIPOS } = require('./queueManager')
-            const { ok, error } = await enqueue(companyId, JOB_TIPOS.SYNC_CONTATOS, { reset: true })
-            if (ok) {
-              console.log(`[ULTRAMSG] Auto-sync de contatos enfileirado para empresa ${companyId} (QR conectado)`)
-            } else if (error && !error.includes('já enfileirado')) {
-              console.warn('[ULTRAMSG] Auto-sync não enfileirado:', error)
-            }
-          }
           // Auto-sync de grupos e chats ao conectar: traz todos os grupos e conversas do celular
           const { syncGroups, syncFromChats } = require('./ultramsgGroupsSyncService')
           const groupsResult = await syncGroups(companyId).catch((e) => ({ ok: false, errors: [e?.message || 'Erro'] }))

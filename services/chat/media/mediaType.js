@@ -148,7 +148,19 @@ function shouldNormalizeVideoForUltraMsg(file, tipo) {
 
 function shouldForceProviderUploadForMedia(tipo) {
   const normalized = String(tipo || '').toLowerCase().trim()
-  return normalized === 'audio' || normalized === 'voice' || normalized === 'video'
+  // imagem/arquivo também sobem para o CDN do UltraMsg em vez de serem enviados como URL
+  // pública do backend. Enviar por URL faz o UltraMsg ter que baixar o arquivo do nosso
+  // servidor antes de entregar — round-trip lento/instável que deixa foto/PDF muito tempo
+  // no relógio (pending) até o ACK. Com uploadMedia o provedor já recebe os bytes na hora.
+  // Áudio/vídeo já faziam isso. Há fallback para URL pública se o uploadMedia falhar
+  // (ver mediaMessageController), então não há regressão quando o CDN estiver indisponível.
+  return (
+    normalized === 'audio' ||
+    normalized === 'voice' ||
+    normalized === 'video' ||
+    normalized === 'imagem' ||
+    normalized === 'arquivo'
+  )
 }
 
 function buildVideoTranscodeProfile(durationSec, opts = {}) {

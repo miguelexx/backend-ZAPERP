@@ -88,12 +88,19 @@ test('reprocessa ate MP4 real e produz MP4 H.264 identificado com sufixo -wa', a
   }
 })
 
-test('video usa CDN da UltraMSG para nao depender da URL publica do backend', () => {
+test('midia sobe para o CDN da UltraMSG para nao depender da URL publica do backend', () => {
+  // imagem/arquivo tambem sobem ao CDN: enviar por URL fazia o UltraMsg baixar o arquivo
+  // do nosso servidor antes de entregar, deixando foto/PDF muito tempo no relogio (pending).
   assert.equal(_test.shouldForceProviderUploadForMedia('video'), true)
-  assert.equal(_test.shouldForceProviderUploadForMedia('vídeo'), false)
-  assert.equal(_test.shouldForceProviderUploadForMedia('imagem'), false)
+  assert.equal(_test.shouldForceProviderUploadForMedia('imagem'), true)
+  assert.equal(_test.shouldForceProviderUploadForMedia('arquivo'), true)
   assert.equal(_test.shouldForceProviderUploadForMedia('audio'), true)
   assert.equal(_test.shouldForceProviderUploadForMedia('voice'), true)
+  // 'vídeo' acentuado nao e o tipo canonico (inferirTipoArquivo retorna 'video'): fica de fora.
+  assert.equal(_test.shouldForceProviderUploadForMedia('vídeo'), false)
+  // texto/sticker continuam sem upload forcado.
+  assert.equal(_test.shouldForceProviderUploadForMedia('texto'), false)
+  assert.equal(_test.shouldForceProviderUploadForMedia('sticker'), false)
 })
 
 test('calcula bitrate adaptativo para manter o MP4 final abaixo de 32 MB', () => {

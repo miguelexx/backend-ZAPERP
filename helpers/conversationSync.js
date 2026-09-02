@@ -369,11 +369,12 @@ async function mergeAndReturnCliente(supabaseClient, company_id, existente, phon
     if (!existente.empresa || !String(existente.empresa).trim()) updates.empresa = String(fields.empresa).trim()
   }
   if (Object.keys(updates).length > 0) {
-    await updateClienteResiliente(supabaseClient, {
+    const result = await updateClienteResiliente(supabaseClient, {
       id: existente.id,
       companyId: company_id,
       updates,
     })
+    if (result?.error && fields.strictAgendaImport === true) throw new Error('Falha ao atualizar contato no banco.')
   }
   const nomeFinal = updates.nome != null ? updates.nome : existente.nome
   const protegidoFinal = updates.nome_protegido != null ? updates.nome_protegido : existente.nome_protegido
@@ -525,7 +526,7 @@ function selectConversationsByPhoneVariants(supabaseClient, company_id, variants
 
 async function findClienteRowForPhone(supabaseClient, company_id, phone, telefoneCanonico, searchPhones, opts = {}) {
   const identitySafe = opts.identitySafe === true
-  const variantFn = identitySafe ? possiblePhonesForWhatsappIdentity : possiblePhonesBR
+  const variantFn = opts.strictAgendaImport ? () => [] : (identitySafe ? possiblePhonesForWhatsappIdentity : possiblePhonesBR)
   const phonesToSearch = Array.from(
     new Set([telefoneCanonico, ...(Array.isArray(searchPhones) ? searchPhones : []), ...variantFn(phone), ...variantFn(telefoneCanonico)].filter(Boolean))
   )
@@ -558,7 +559,7 @@ async function findClienteRowForPhone(supabaseClient, company_id, phone, telefon
   }
 
   const refPhone = telefoneCanonico || phone
-  if (identitySafe) {
+  if (identitySafe || opts.strictAgendaImport) {
     return null
   }
   // Fallback LIKE: sufixos nacionais com DDD completo (10 = DDD+8, 11 = DDD+9+8).
@@ -659,6 +660,10 @@ async function getOrCreateCliente(supabaseClient, company_id, phone, fields = {}
   let telefoneCanonico = getCanonicalPhone(phone)
   const allowNonBR = fields?.allowNonBR === true
   const strictAgendaImport = fields?.strictAgendaImport === true
+  // Agenda fornece JID explícito com DDI; números internacionais curtos não são DDD brasileiro.
+  if (strictAgendaImport && /^\d{10,15}@(c\.us|s\.whatsapp\.net)$/.test(waFromFields)) {
+    telefoneCanonico = waFromFields.split('@')[0]
+  }
   const identitySafePhoneMatch = fields?.identitySafePhoneMatch === true
   const phones = identitySafePhoneMatch ? possiblePhonesForWhatsappIdentity(phone) : possiblePhonesBR(phone)
   let searchPhones = phones.length > 0 ? phones : (telefoneCanonico ? [telefoneCanonico] : [])
@@ -705,7 +710,7 @@ async function getOrCreateCliente(supabaseClient, company_id, phone, fields = {}
   // 1) SELECT por variantes + phoneKeyBR (12/13 dígitos, com/sem DDI no banco)
   let existente = null
   try {
-    existente = await findClienteRowForPhone(supabaseClient, company_id, phone, telefoneCanonico, searchPhones, { identitySafe: identitySafePhoneMatch })
+    existente = await findClienteRowForPhone(supabaseClient, company_id, phone, telefoneCanonico, searchPhones, { identitySafe: identitySafePhoneMatch, strictAgendaImport })
   } catch (e) {
     console.warn('[getOrCreateCliente] Erro ao buscar:', e?.message || e)
     return { cliente_id: null }
@@ -770,9 +775,9 @@ async function getOrCreateCliente(supabaseClient, company_id, phone, fields = {}
     return clienteResult({ id: upserted.id, ...insertData }, { created: true, changed: true })
   }
 
-  let foundRow = await findClienteRowForPhone(supabaseClient, company_id, phone, telefoneCanonico, searchPhones, { identitySafe: identitySafePhoneMatch })
-  if (!foundRow?.id) {
-    foundRow = await findClienteRowViaConversa(supabaseClient, company_id, phone, telefoneCanonico, searchPhones, { identitySafe: identitySafePhoneMatch })
+  let foundRow = await findClienteRowForPhone(supabaseClient, company_id, phone, telefoneCanonico, searchPhones, { identitySafe: identitySafePhoneMatch, strictAgendaImport })
+  if (!foundRow?.id && !strictAgendaImport) {
+    foundRow = await findClienteRowViaConversa(supabaseClient, company_id, phone, telefoneCanonico, searchPhones, { identitySafe: identitySafePhoneMatch, strictAgendaImport })
   }
   if (foundRow?.id) {
     return mergeAndReturnCliente(supabaseClient, company_id, foundRow, phone, fields)
@@ -819,9 +824,9 @@ async function getOrCreateCliente(supabaseClient, company_id, phone, fields = {}
     String(errInsert?.message || '').includes('duplicate')
 
   if (isDuplicate) {
-    foundRow = await findClienteRowForPhone(supabaseClient, company_id, phone, telefoneCanonico, searchPhones, { identitySafe: identitySafePhoneMatch })
-    if (!foundRow?.id) {
-      foundRow = await findClienteRowViaConversa(supabaseClient, company_id, phone, telefoneCanonico, searchPhones, { identitySafe: identitySafePhoneMatch })
+    foundRow = await findClienteRowForPhone(supabaseClient, company_id, phone, telefoneCanonico, searchPhones, { identitySafe: identitySafePhoneMatch, strictAgendaImport })
+    if (!foundRow?.id && !strictAgendaImport) {
+      foundRow = await findClienteRowViaConversa(supabaseClient, company_id, phone, telefoneCanonico, searchPhones, { identitySafe: identitySafePhoneMatch, strictAgendaImport })
     }
     if (!foundRow?.id && telefoneCanonico) {
       const { data: directRow } = await supabaseClient
@@ -834,10 +839,10 @@ async function getOrCreateCliente(supabaseClient, company_id, phone, fields = {}
     }
     if (!foundRow?.id) {
       await new Promise((r) => setTimeout(r, 80))
-      foundRow = await findClienteRowForPhone(supabaseClient, company_id, phone, telefoneCanonico, searchPhones, { identitySafe: identitySafePhoneMatch })
+      foundRow = await findClienteRowForPhone(supabaseClient, company_id, phone, telefoneCanonico, searchPhones, { identitySafe: identitySafePhoneMatch, strictAgendaImport })
     }
-    if (!foundRow?.id) {
-      foundRow = await findClienteRowViaConversa(supabaseClient, company_id, phone, telefoneCanonico, searchPhones, { identitySafe: identitySafePhoneMatch })
+    if (!foundRow?.id && !strictAgendaImport) {
+      foundRow = await findClienteRowViaConversa(supabaseClient, company_id, phone, telefoneCanonico, searchPhones, { identitySafe: identitySafePhoneMatch, strictAgendaImport })
     }
     if (foundRow?.id) {
       return mergeAndReturnCliente(supabaseClient, company_id, foundRow, phone, fields)

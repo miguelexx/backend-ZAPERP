@@ -16,6 +16,7 @@ const { clienteTemNomeProtegido } = require('../helpers/clienteNomeProtecao')
 const { marcarSchemaNomeProtecaoIndisponivel } = require('../helpers/clienteNomeColunas')
 const { getConfig, isProcessamentoPausado } = require('./configOperacionalService')
 const { registrarEvento, TIPOS } = require('./operationalAuditService')
+const { agendaContactFields } = require('../helpers/agendaContact')
 
 const LOCK_TIPO = 'contact_sync'
 const CHECKPOINT_TIPO = 'contact_sync'
@@ -59,17 +60,15 @@ function canonicalWaId(phoneNorm, rawJid) {
     }
     return `${phoneNorm}@c.us`
   }
-  if (rawJid && String(rawJid).trim() && /^\d{10,}@/.test(String(rawJid).trim())) {
-    return String(rawJid).trim()
-  }
-  return null
+  return /^\d{10,15}$/.test(phoneNorm || '') ? `${phoneNorm}@c.us` : null
 }
 
 /**
  * Extrai e valida contato do payload do provider (regras alinhadas ao sync legado: agenda = name preenchido).
  */
 function parseAgendaContact(raw) {
-  if (!raw || typeof raw !== 'object') return null
+  raw = agendaContactFields(raw)
+  if (!raw) return null
 
   const name = String(raw.name ?? '').trim()
   if (!name) return null
@@ -81,7 +80,8 @@ function parseAgendaContact(raw) {
   const digits = phoneStr.replace(/\D/g, '')
   if (!digits || digits.length < MIN_PHONE_DIGITS) return null
 
-  const normBR = normalizePhoneBR(digits)
+  const explicitIntl = phoneStr.startsWith('+') || phoneStr.includes('@')
+  const normBR = explicitIntl && !digits.startsWith('55') ? '' : normalizePhoneBR(digits)
   let phoneNorm = normBR
   let isBR = true
   if (!phoneNorm) {
@@ -140,11 +140,13 @@ async function findClienteCandidates(companyId, phoneNorm, rawJid, opts = {}) {
 
   const byId = new Map()
   if (waList.length) {
-    const { data: a } = await selectBy('wa_id', waList)
+    const { data: a, error } = await selectBy('wa_id', waList)
+    if (error) throw new Error('Falha ao consultar clientes no banco.')
     for (const r of a || []) byId.set(r.id, r)
   }
   if (phones.length) {
-    const { data: b } = await selectBy('telefone', phones)
+    const { data: b, error } = await selectBy('telefone', phones)
+    if (error) throw new Error('Falha ao consultar clientes no banco.')
     for (const r of b || []) byId.set(r.id, r)
   }
 
@@ -165,7 +167,7 @@ function shouldApplyFoto(existente, novoUrl) {
 /**
  * Sincroniza um contato da agenda: insert ou update conservador.
  */
-async function syncOneAgendaContact(companyId, parsed) {
+async function syncOneAgendaContact(companyId, parsed, opts = {}) {
   const { rows, hadConflict } = await findClienteCandidates(companyId, parsed.phone, parsed.rawJid, { strictAgendaImport: true })
 
   if (hadConflict) {
@@ -177,6 +179,13 @@ async function syncOneAgendaContact(companyId, parsed) {
   }
 
   const fieldsBase = { nomeSource: NOME_FONTE, allowNonBR: true, strictAgendaImport: true }
+  let fotoIndisponivel = false
+  if (opts.includePhotos && !parsed.foto) {
+    parsed.foto = await maybeEnrichFoto(companyId, parsed.rawJid || parsed.phone, null)
+    fotoIndisponivel = !parsed.foto
+  }
+  const fotoAtualizada = !!parsed.foto && rows[0]?.foto_perfil !== parsed.foto
+  if (opts.includePhotos) fieldsBase.foto_perfil_refresh = true
   if (parsed.nome) fieldsBase.nome = parsed.nome
   if (parsed.foto) fieldsBase.foto_perfil = parsed.foto
   if (parsed.waId) fieldsBase.wa_id = parsed.waId
@@ -194,7 +203,7 @@ async function syncOneAgendaContact(companyId, parsed) {
       )
       if (bestNome && decision === 'updated' && !isBadName(bestNome)) updates.nome = bestNome
     }
-    if (shouldApplyFoto(existente, fieldsBase.foto_perfil)) {
+    if (fieldsBase.foto_perfil && (opts.includePhotos || shouldApplyFoto(existente, fieldsBase.foto_perfil))) {
       updates.foto_perfil = String(fieldsBase.foto_perfil).trim()
     }
     if (fieldsBase.wa_id && (!existente.wa_id || !String(existente.wa_id).trim())) {
@@ -206,28 +215,28 @@ async function syncOneAgendaContact(companyId, parsed) {
         .update(updates)
         .eq('id', existente.id)
         .eq('company_id', Number(companyId))
-      if (error) console.warn('[CONTACT-SYNC] update cliente (conflito):', error.message || error)
+      if (error) throw new Error('Falha ao gravar contato no banco.')
     }
     const changed = Object.keys(updates).length > 0
     return {
       inserted: 0,
       updated: changed ? 1 : 0,
       skipped: changed ? 0 : 1,
-      conflict: true
+      conflict: true, fotoAtualizada, fotoIndisponivel
     }
   }
 
   const r = await getOrCreateCliente(supabase, companyId, parsed.phone, fieldsBase)
   if (r.cliente_id) {
     if (r.created === true) {
-      return { inserted: 1, updated: 0, skipped: 0, conflict: false }
+      return { inserted: 1, updated: 0, skipped: 0, conflict: false, fotoAtualizada, fotoIndisponivel }
     }
     if (r.changed === true) {
-      return { inserted: 0, updated: 1, skipped: 0, conflict: false }
+      return { inserted: 0, updated: 1, skipped: 0, conflict: false, fotoAtualizada, fotoIndisponivel }
     }
-    return { inserted: 0, updated: 0, skipped: 1, conflict: false }
+    return { inserted: 0, updated: 0, skipped: 1, conflict: false, fotoAtualizada: false, fotoIndisponivel }
   }
-  return { inserted: 0, updated: 0, skipped: 1, conflict: false }
+  throw new Error('Não foi possível gravar o contato no banco.')
 }
 
 /**
@@ -342,9 +351,15 @@ async function tryAcquireLock(company_id) {
   })
   if (error) {
     const dup = String(error.code || '') === '23505' || String(error.message || '').includes('duplicate')
-    if (dup) return false
-    console.warn('[CONTACT-SYNC] lock insert:', error.message || error)
-    return false
+    if (dup) {
+      const staleBefore = new Date(Date.now() - 10 * 60 * 1000).toISOString()
+      const { data: removed, error: deleteError } = await supabase.from('sync_locks').delete()
+        .eq('company_id', company_id).eq('tipo', LOCK_TIPO).lt('locked_at', staleBefore).select('id')
+      if (deleteError || !removed?.length) return false
+      const retry = await supabase.from('sync_locks').insert({ company_id, tipo: LOCK_TIPO, locked_by: 'contact_sync' })
+      return !retry.error
+    }
+    throw new Error('Não foi possível obter o bloqueio de sincronização no banco.')
   }
   return true
 }
@@ -526,219 +541,99 @@ async function runContactSyncBatch(company_id, opts = {}) {
 }
 
 /**
- * Sincronização completa para jobs/worker.
- *
- * Estratégia gradual:
- *  1. Busca TODA a lista da API UltraMsg uma única vez (ela não pagina de verdade).
- *  2. Divide os contatos em lotes de CHUNK_SIZE e processa cada lote com uma pausa
- *     entre eles — evita sobrecarregar o banco e dá feedback progressivo via logs/eventos.
- *  3. O lock é mantido durante toda a sessão; o checkpoint registra qual lote foi
- *     concluído, permitindo retomada segura.
+ * Importa a agenda completa e consulta as fotos disponíveis, respeitando o rate limit do provider.
+ * Mantém lock com heartbeat; publica progresso a cada 10 contatos.
+ * Repetições relêem a agenda e fazem upsert idempotente, sem offsets sobre uma lista mutável.
  */
 async function runContactSyncFull(company_id, opts = {}) {
-  if (!company_id) return { ok: false, error: 'company_id ausente', totalProcessados: 0, totalCriados: 0, totalAtualizados: 0 }
-
-  const config = await getConfig(company_id)
-  // Tamanho de cada lote de inserção no banco. Padrão 200; configurável via lote_max.
-  const CHUNK_SIZE = Math.min(500, Math.max(50, config.lote_max || 200))
-  // Pausa entre lotes em ms (padrão 2 s). Suficiente para não saturar o banco.
-  const PAUSA_MS = Math.max(500, (config.intervalo_lotes_seg || 2) * 1000)
-
-  await registrarEvento(company_id, TIPOS.SYNC_INICIO, 'Contact sync iniciada (gradual)', { chunkSize: CHUNK_SIZE })
-
-  // Adquirir lock para toda a sessão.
-  const acquired = await tryAcquireLock(company_id)
-  if (!acquired) {
-    return { ok: false, error: 'Sincronização já em andamento', totalProcessados: 0, totalCriados: 0, totalAtualizados: 0 }
+  const stats = { totalProcessados: 0, totalCriados: 0, totalAtualizados: 0,
+    totalIgnorados: 0, totalInvalidos: 0, totalDuplicadosNoLote: 0, totalConflitados: 0,
+    totalFotosAtualizadas: 0, totalFotosIndisponiveis: 0, totalErros: 0,
+    totalAgendaRaw: 0, totalAgendaValidos: 0, totalVerificados: 0 }
+  if (!company_id) return { ...stats, ok: false, error: 'company_id ausente' }
+  let acquired = false
+  let heartbeat
+  const progress = async (fase, offset = 0) => {
+    await updateCheckpoint(company_id, 1, { ...stats, fase, offset, job_id: opts.jobId || null })
+    if (opts.onProgress) await opts.onProgress({ ...stats, fase })
   }
-
   try {
-    // 1. Verificar provider e config da empresa.
+    acquired = await tryAcquireLock(company_id)
+    if (!acquired) throw new Error('Sincronização já em andamento ou bloqueada. Aguarde a recuperação da fila.')
+    heartbeat = setInterval(() => {
+      Promise.resolve(supabase.from('sync_locks').update({ locked_at: new Date().toISOString() })
+        .eq('company_id', company_id).eq('tipo', LOCK_TIPO)).catch(() => {})
+    }, 30000)
+    heartbeat.unref?.()
     const provider = getProvider()
-    if (!provider?.getContacts) {
-      await registrarEvento(company_id, TIPOS.FALHA, 'provider.getContacts não disponível')
-      return { ok: false, error: 'getContacts não disponível', totalProcessados: 0, totalCriados: 0, totalAtualizados: 0 }
-    }
-
+    if (!provider?.getContacts) throw new Error('Consulta de contatos indisponível.')
     const { config: waCfg, error: cfgErr } = await getEmpresaWhatsappConfig(company_id)
-    if (cfgErr || !waCfg) {
-      await registrarEvento(company_id, TIPOS.FALHA, 'Empresa sem instância configurada')
-      return { ok: false, error: 'Empresa sem instância configurada', totalProcessados: 0, totalCriados: 0, totalAtualizados: 0 }
+    if (cfgErr || !waCfg) throw new Error('Empresa sem instância WhatsApp configurada.')
+    // A agenda pode mudar de ordem entre execuções. Recomeçar é idempotente e evita pular contatos.
+    await resetCheckpoint(company_id)
+    await progress('buscando')
+    const allContacts = []
+    const fingerprints = new Set()
+    const maxPages = Math.max(1, parseInt(process.env.SYNC_MAX_FETCH_PAGES, 10) || 50)
+    for (let page = 1; ; page++) {
+      if (page > maxPages) throw new Error('A leitura da agenda ficou incompleta: limite de páginas atingido.')
+      const response = await provider.getContacts(page, 10000, { companyId: company_id })
+      if (response?.ok === false || response?.error) throw new Error('Falha ao consultar a agenda na UltraMSG.')
+      const data = Array.isArray(response) ? response : response?.data
+      if (!Array.isArray(data)) throw new Error('Resposta de contatos inválida.')
+      const fingerprint = JSON.stringify(data)
+      if (data.length && fingerprints.has(fingerprint)) throw new Error('A UltraMSG repetiu a página da agenda; sincronização incompleta.')
+      fingerprints.add(fingerprint)
+      stats.totalAgendaRaw += Number(response?.rawCount ?? data.length)
+      for (const contact of data) allContacts.push(contact)
+      if (!response?.hasMore) break
     }
-
-    // 2. Buscar TODOS os contatos da API, percorrendo páginas até hasMore=false.
-    //    UltraMsg tipicamente devolve tudo na página 1, mas o loop garante que
-    //    nenhum contato seja perdido caso a API tenha limite interno e retorne hasMore.
-    // Teto de segurança configurável (padrão 50 × 10000 = 500 mil contatos).
-    const MAX_FETCH_PAGES = Math.max(1, parseInt(process.env.SYNC_MAX_FETCH_PAGES, 10) || 50)
-    let allContacts = []
-    let fetchPage = 1
-    let keepFetching = true
-    let totalAgendaRaw = 0
-    let fetchTruncado = false
-
-    while (keepFetching) {
-      if (fetchPage > MAX_FETCH_PAGES) {
-        // A agenda ainda tinha mais páginas (hasMore=true) mas batemos no teto.
-        fetchTruncado = true
-        console.warn(`[CONTACT-SYNC] empresa=${company_id} atingiu MAX_FETCH_PAGES=${MAX_FETCH_PAGES}; a agenda pode não ter sido lida por completo. Ajuste SYNC_MAX_FETCH_PAGES e rode novamente.`)
-        break
-      }
-
-      const gcr = await provider.getContacts(fetchPage, 10000, { companyId: company_id })
-      const pageData = Array.isArray(gcr?.data) ? gcr.data : []
-      allContacts = allContacts.concat(pageData)
-      totalAgendaRaw += Number(gcr?.rawCount || pageData.length || 0)
-
-      console.log(`[CONTACT-SYNC] empresa=${company_id} fetch p${fetchPage}: ${pageData.length} contatos (hasMore=${gcr?.hasMore})`)
-
-      if (!gcr?.hasMore || pageData.length === 0) {
-        keepFetching = false
-      } else {
-        fetchPage++
-      }
+    const unique = new Map()
+    for (const raw of allContacts) {
+      const parsed = parseAgendaContact(raw)
+      if (!parsed) { stats.totalInvalidos++; continue }
+      // Identidade exata: não unir telefones diferentes apenas por remover o nono dígito.
+      if (unique.has(parsed.phone)) { stats.totalDuplicadosNoLote++; continue }
+      unique.set(parsed.phone, parsed)
     }
-
-    if (allContacts.length === 0) {
-      await registrarEvento(company_id, TIPOS.SYNC_FIM, 'Nenhum contato retornado pela API')
-      return { ok: true, totalProcessados: 0, totalCriados: 0, totalAtualizados: 0, paginas: 0 }
+    stats.totalAgendaValidos = unique.size
+    if (!unique.size) {
+      throw new Error('A UltraMSG não disponibilizou contatos salvos com nome e telefone. Verifique a agenda e a conexão do celular e tente novamente.')
     }
-
-    console.log(`[CONTACT-SYNC] empresa=${company_id} total da API: ${allContacts.length} contatos (${fetchPage} página(s))`)
-
-    // 3. Checkpoint: suporte a retomada (offset dentro da lista).
-    let startOffset = 0
-    if (!opts.reset) {
-      const savedPage = await getCheckpoint(company_id)
-      // Checkpoint armazena índice de lote (base 1); offset = (lote - 1) * CHUNK_SIZE
-      startOffset = Math.max(0, (Number(savedPage) - 1)) * CHUNK_SIZE
-      if (startOffset >= allContacts.length) {
-        // Checkpoint ultrapassou o total: reiniciar.
-        startOffset = 0
+    await progress('importando')
+    for (const parsed of unique.values()) {
+      if (opts.manual !== true && await isProcessamentoPausado(company_id)) {
+        throw new Error('Sincronização interrompida: processamento pausado.')
       }
-    } else {
-      await resetCheckpoint(company_id)
-    }
-
-    const seen = new Set()
-    let totalProcessados = 0
-    let totalCriados = 0
-    let totalAtualizados = 0
-    let totalConflitados = 0
-    let totalIgnorados = 0
-    let totalInvalidos = 0
-    let totalDuplicadosNoLote = 0
-    let loteNum = Math.floor(startOffset / CHUNK_SIZE) + 1
-
-    // 4. Processar em lotes com pausa entre eles.
-    for (let offset = startOffset; offset < allContacts.length; offset += CHUNK_SIZE) {
-      const pausado = await isProcessamentoPausado(company_id)
-      if (pausado) {
-        await registrarEvento(company_id, TIPOS.PAUSA, 'Contact sync pausada (processamento_pausado)')
-        break
+      try {
+        const result = await syncOneAgendaContact(company_id, parsed, { includePhotos: opts.includePhotos !== false })
+        stats.totalProcessados++
+        stats.totalCriados += result.inserted || 0
+        stats.totalAtualizados += result.updated || 0
+        stats.totalIgnorados += result.skipped || 0
+        stats.totalConflitados += result.conflict ? 1 : 0
+        stats.totalFotosAtualizadas += result.fotoAtualizada ? 1 : 0
+        stats.totalFotosIndisponiveis += result.fotoIndisponivel ? 1 : 0
+      } catch {
+        stats.totalErros++
       }
-
-      const chunk = allContacts.slice(offset, offset + CHUNK_SIZE)
-      let lCriados = 0, lAtualizados = 0, lProcessados = 0, lConflitados = 0, lIgnorados = 0, lInvalidos = 0, lDuplicados = 0
-
-      for (const c of chunk) {
-        const parsed = parseAgendaContact(c)
-        if (!parsed || !parsed.phone) {
-          lInvalidos++
-          continue
-        }
-        const key = phoneKeyBR(parsed.phone)
-        if (seen.has(key)) {
-          lDuplicados++
-          continue
-        }
-        seen.add(key)
-
-        try {
-          const r = await syncOneAgendaContact(company_id, parsed)
-          lProcessados++
-          lCriados += r.inserted ? 1 : 0
-          lAtualizados += r.updated ? 1 : 0
-          lIgnorados += r.skipped ? 1 : 0
-          if (r.conflict) lConflitados++
-        } catch (e) {
-          console.warn(`[CONTACT-SYNC] lote ${loteNum} contato erro:`, e?.message || e)
-        }
-      }
-
-      totalProcessados += lProcessados
-      totalCriados += lCriados
-      totalAtualizados += lAtualizados
-      totalConflitados += lConflitados
-      totalIgnorados += lIgnorados
-      totalInvalidos += lInvalidos
-      totalDuplicadosNoLote += lDuplicados
-
-      // Salvar checkpoint após cada lote concluído.
-      await updateCheckpoint(company_id, loteNum + 1, {
-        loteNum, offset, totalContatos: allContacts.length,
-        totalProcessados, totalCriados, totalAtualizados, totalIgnorados, totalInvalidos, totalDuplicadosNoLote
-      })
-      await registrarEvento(company_id, TIPOS.SYNC_LOTE, `Lote ${loteNum} de contatos concluído`, {
-        loteNum, offset, tamanho: chunk.length,
-        criados: lCriados, atualizados: lAtualizados, processados: lProcessados, ignorados: lIgnorados,
-        invalidos: lInvalidos, duplicados: lDuplicados,
-        restantes: Math.max(0, allContacts.length - offset - CHUNK_SIZE)
-      })
-
-      loteNum++
-
-      // Pausa entre lotes (exceto no último).
-      if (offset + CHUNK_SIZE < allContacts.length) {
-        await new Promise((r) => setTimeout(r, PAUSA_MS))
+      stats.totalVerificados++
+      if (stats.totalVerificados % 10 === 0 || stats.totalVerificados === unique.size) {
+        await progress('importando', stats.totalVerificados)
       }
     }
-
-    const { count: totalClientesBanco } = await supabase
-      .from('clientes')
-      .select('*', { count: 'exact', head: true })
-      .eq('company_id', Number(company_id))
-
-    await registrarEvento(company_id, TIPOS.SYNC_FIM, 'Contact sync gradual finalizada', {
-      totalAgendaRaw,
-      totalAgendaValidos: allContacts.length,
-      totalProcessados,
-      totalCriados,
-      totalAtualizados,
-      totalIgnorados,
-      totalInvalidos,
-      totalDuplicadosNoLote,
-      totalConflitados,
-      totalClientesBanco: Number(totalClientesBanco || 0),
-      lotes: loteNum - 1,
-      truncado: fetchTruncado
-    })
-
-    return {
-      ok: true,
-      totalAgendaRaw,
-      totalAgendaValidos: allContacts.length,
-      totalProcessados,
-      totalCriados,
-      totalAtualizados,
-      totalIgnorados,
-      totalInvalidos,
-      totalDuplicadosNoLote,
-      totalConflitados,
-      totalClientesBanco: Number(totalClientesBanco || 0),
-      paginas: loteNum - 1,
-      // true = batemos no teto de páginas e a agenda pode não ter vindo inteira.
-      truncado: fetchTruncado,
-      aviso: fetchTruncado
-        ? 'A agenda é muito grande e não foi lida por completo nesta execução. Clique em "Sincronizar" novamente para continuar.'
-        : null
-    }
+    if (stats.totalErros) throw new Error(stats.totalErros + ' contato(s) não puderam ser gravados. Os demais foram preservados; a fila tentará novamente.')
+    await progress('concluido', stats.totalVerificados)
+    await registrarEvento(company_id, TIPOS.SYNC_FIM, 'Agenda sincronizada por solicitação manual', stats)
+    return { ...stats, ok: true, aviso: stats.totalFotosIndisponiveis
+      ? stats.totalFotosIndisponiveis + ' contato(s) sem foto disponível na UltraMSG. Fotos existentes foram preservadas.' : null }
   } catch (e) {
-    const msg = e?.message || String(e)
-    await registrarEvento(company_id, TIPOS.FALHA, 'Contact sync falhou', { error: msg.slice(0, 200) })
-    return { ok: false, error: msg, totalProcessados: 0, totalCriados: 0, totalAtualizados: 0 }
+    const error = e?.message || 'Falha ao sincronizar contatos.'
+    await registrarEvento(company_id, TIPOS.FALHA, 'Sincronização da agenda falhou', { error })
+    return { ...stats, ok: false, error }
   } finally {
-    await releaseLock(company_id)
+    clearInterval(heartbeat)
+    if (acquired) await releaseLock(company_id)
   }
 }
 
