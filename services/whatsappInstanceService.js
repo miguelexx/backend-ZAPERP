@@ -266,30 +266,39 @@ async function getDefaultWhatsappInstance(companyId, opts = {}) {
     return { instance: responseInstance(defaultQuery.data, opts), error: null }
   }
 
-  if (!shouldAllowImplicitDefaultFallback(opts)) {
-    return {
-      instance: null,
-      error: NO_DEFAULT_INSTANCE_ERROR,
-      code: 'NO_DEFAULT_INSTANCE',
-    }
-  }
-
+  // Sem instancia marcada is_default. Resolver sem ambiguidade e sem depender de is_default:
+  //  - exatamente 1 instancia ATIVA  -> adota-a (seguro: nao ha o que escolher, inclusive em producao).
+  //    Isto conserta o "Sincronizar contatos do celular" (400) quando a empresa migrou de empresa_zapi
+  //    para whatsapp_instances sem marcar um default: o envio ja funciona porque a conversa carrega
+  //    whatsapp_instance_id explicito, mas a resolucao default (sync/fotos/nova conversa) falhava.
+  //  - 2+ instancias ativas            -> exige escolha explicita em producao (NO_DEFAULT_INSTANCE);
+  //                                       em dev mantem o comportamento antigo (usa a primeira).
+  //  - tabela ausente / 0 ativas       -> cai para o legado empresa_zapi (linha unica via maybeSingle).
+  // Isolamento preservado: toda consulta filtra company_id; single-instance nunca cruza empresas.
   if (!defaultQuery.error) {
-    const firstActive = await supabase
+    const actives = await supabase
       .from('whatsapp_instances')
       .select(select)
       .eq('company_id', cid)
       .eq('provider', provider)
       .eq('ativo', true)
+      .order('is_default', { ascending: false })
       .order('id', { ascending: true })
-      .limit(1)
-      .maybeSingle()
-    if (firstActive.error && !isMissingTableError(firstActive.error)) {
+      .limit(2)
+    if (actives.error && !isMissingTableError(actives.error)) {
       return { instance: null, error: 'Erro ao buscar instancia WhatsApp ativa' }
     }
-    if (firstActive.data) {
-      return { instance: responseInstance(firstActive.data, opts), error: null }
+    const rows = Array.isArray(actives.data) ? actives.data : []
+    if (rows.length === 1) {
+      return { instance: responseInstance(rows[0], opts), error: null }
     }
+    if (rows.length > 1) {
+      if (!shouldAllowImplicitDefaultFallback(opts)) {
+        return { instance: null, error: NO_DEFAULT_INSTANCE_ERROR, code: 'NO_DEFAULT_INSTANCE' }
+      }
+      return { instance: responseInstance(rows[0], opts), error: null }
+    }
+    // rows.length === 0 -> tenta o legado abaixo
   }
 
   return getLegacyEmpresaZapiDefault(cid, opts)
@@ -478,16 +487,8 @@ async function resolveWhatsappInstanceForManualAction(companyId, requestedInstan
 
   if (active.length === 1) {
     const only = active[0]
-    if (isProductionEnv() && only.is_default !== true) {
-      return {
-        error: NO_DEFAULT_INSTANCE_ERROR,
-        code: 'NO_DEFAULT_INSTANCE',
-        instanceId: null,
-        isDefault: false,
-        instance: null,
-        instances: safeActive,
-      }
-    }
+    // Instancia unica ativa = sem ambiguidade: adota-a mesmo sem is_default (inclusive em producao).
+    // Coerente com getDefaultWhatsappInstance; so exige escolha explicita quando ha 2+ ativas.
     const safe = sanitizeWhatsappInstance(only)
     return {
       error: null,

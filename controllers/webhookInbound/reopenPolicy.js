@@ -3,6 +3,8 @@
  * Extraído de controllers/webhookZapiController.js (Fase 1 — doc 24) sem alteração de comportamento.
  */
 
+const { parseNota } = require('../../services/avaliacaoService')
+
 function normalizeReopenText(texto) {
   return String(texto || '')
     .toLowerCase()

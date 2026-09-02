@@ -11,6 +11,7 @@ const { assertPermissaoConversa } = require('../../services/chat/access/conversa
 exports.patchConversaPrefs = async (req, res) => {
   try {
     const { company_id, id: user_id, perfil, departamento_ids } = req.user
+    const io = req.app.get('io')
     const conversa_id = Number(req.params.id)
     if (!Number.isFinite(conversa_id) || conversa_id <= 0) {
       return res.status(400).json({ error: 'ID da conversa inválido' })

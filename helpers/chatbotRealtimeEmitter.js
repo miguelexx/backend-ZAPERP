@@ -63,12 +63,16 @@ async function emitBotMensagemRealtime({ io, supabase, company_id, conversa_id, 
 
   const convPayload = {
     id: cid,
+    company_id: Number(company_id),
     ultima_atividade: convRow?.ultima_atividade ?? new Date().toISOString(),
     telefone: convRow?.telefone ?? null,
     exibir_badge_aberta: !isGroup,
-    ...(isGroup ? { status_atendimento: null } : {}),
-    // Sempre enviar (null = sem setor) para o painel atualizar badge/lista sem recarregar
+    ...(isGroup ? { status_atendimento: null } : {
+      status_atendimento: convRow?.status_atendimento ?? null,
+    }),
+    // Sempre enviar (null = sem setor / sem atendente) para o painel dropar card stale
     departamento_id: depId,
+    atendente_id: convRow?.atendente_id != null ? Number(convRow.atendente_id) : null,
     ...(contatoNome ? { nome_contato_cache: contatoNome, contato_nome: contatoNome } : {}),
     ...(fotoPerfil ? { foto_perfil_contato_cache: fotoPerfil, foto_perfil: fotoPerfil } : {}),
     ultima_mensagem_preview: {

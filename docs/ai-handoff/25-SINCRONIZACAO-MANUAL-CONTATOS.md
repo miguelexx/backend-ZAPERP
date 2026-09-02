@@ -42,6 +42,20 @@ Esses defeitos foram reproduzidos/analisados localmente. Não foi identificado q
 
 Suites novas: `manualContactSync.test.js`, `manualContactSyncQueue.test.js`, `ultramsgAgenda.test.js`; navegador: `frontend/e2e/manual-contact-sync.spec.js`.
 
+## Causa-raiz do "não puxa NENHUM contato" (400 em produção) — corrigido 2026-09-02
+
+Sintoma: clicar em **Sincronizar contatos do celular** mostrava *"Configure a instância WhatsApp em Integrações antes de sincronizar."* e o console registrava `POST /chats/sincronizar-contatos → 400`. Mensagens (enviar/receber) funcionavam normalmente.
+
+Diagnóstico: a mensagem 400 vem de `sincronizarContatosZapi` (`controllers/chat/integrationController.js`) quando `getEmpresaWhatsappConfig` falha. Essa função — e todo o worker (`runContactSyncFull`) — resolve credenciais por `getDefaultWhatsappInstance(company_id)`. Em produção (`NODE_ENV=production`, ver `ecosystem.config.js`), essa resolução **exigia uma linha `whatsapp_instances` com `is_default=true`** e **não** caía para "primeira ativa" nem para o legado `empresa_zapi`. O envio de mensagens continuava funcionando porque usa a instância **explícita** da conversa (`conversas.whatsapp_instance_id` → `getWhatsappInstanceById`), que ignora `is_default`. Resultado: empresa migrada para `whatsapp_instances` sem um default marcado → envio OK, mas sync/fotos/nova-conversa quebravam com 400.
+
+Correção (`services/whatsappInstanceService.js`, sem migration): quando não há linha `is_default`, a resolução default agora:
+- **exatamente 1 instância ativa** → adota-a (inclusive em produção); single-instance não tem ambiguidade e filtra por `company_id`, sem risco cross-tenant;
+- **2+ ativas sem default** → mantém a exigência de escolha explícita em produção (`NO_DEFAULT_INSTANCE`) — invariante multi-tenant preservada;
+- **0 ativas / tabela ausente** → cai para o legado `empresa_zapi` (linha única via `maybeSingle`), inclusive em produção.
+Mesma relaxação aplicada a `resolveWhatsappInstanceForManualAction` (Novo cliente / abrir conversa) para o caso de instância única. Testes atualizados em `tests/whatsappInstanceService.test.js` (single→adota, multi→recusa, 0→legado).
+
+Alternativa sem código (se preferir manter a rigidez): marcar a instância única como default via RPC `set_default_whatsapp_instance` / `setDefaultWhatsappInstance`. A correção de código evita depender disso e torna o single-instance robusto.
+
 ## Infraestrutura e limites de certificação
 
 Não exige migration nem nova variável. Reutiliza `jobs`, `checkpoints_sync` e `sync_locks`. Backend e frontend precisam ser publicados juntos para o endpoint de progresso existir. Nenhum commit, push, deploy ou sincronização de agenda real foi executado nesta tarefa.

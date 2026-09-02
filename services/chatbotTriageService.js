@@ -1099,7 +1099,13 @@ async function transferToDepartment(supabaseClient, company_id, conversa_id, dep
     company_id,
   })
 
-  return { ok: true, departamento_nome: dep.nome }
+  return {
+    ok: true,
+    departamento_nome: dep.nome,
+    departamento_id: depId,
+    atendente_id: updatePayload.atendente_id ?? null,
+    status_atendimento: updatePayload.status_atendimento,
+  }
 }
 
 /**
@@ -1480,6 +1486,8 @@ async function processIncomingMessageLocked(ctx, conversaEstadoInicial) {
       }
 
       let depNome = option.label || 'setor'
+      let atendenteApos = result.atendente_id ?? null
+      let statusApos = result.status_atendimento || 'aberta'
 
       if (!result.ok) {
         // Fallback só se ainda estiver sem setor (não sobrescrever claim alheio).
@@ -1510,6 +1518,8 @@ async function processIncomingMessageLocked(ctx, conversaEstadoInicial) {
             return { handled: true }
           }
           console.log('[chatbotTriage] ✅ Departamento atribuído via fallback direto', { depId, conversa_id })
+          atendenteApos = null
+          statusApos = 'aberta'
         } catch (e) {
           console.error('[chatbotTriage] ❌ Exceção no fallback direto de departamento:', e?.message || e)
           return { handled: true }
@@ -1558,7 +1568,12 @@ async function processIncomingMessageLocked(ctx, conversaEstadoInicial) {
         console.error('[chatbotTriage] ❌ Erro ao enviar mensagem de confirmação:', sendErr?.message || sendErr)
       }
 
-      return { handled: true, departamento_id: depId }
+      return {
+        handled: true,
+        departamento_id: depId,
+        atendente_id: atendenteApos,
+        status_atendimento: statusApos,
+      }
     } finally {
       optionSelectInFlight.delete(lockCid)
     }

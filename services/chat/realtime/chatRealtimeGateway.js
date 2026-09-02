@@ -19,6 +19,10 @@ const {
   invalidateConversaVisibilityCache,
   obterUsuarioIdsQuePodemVerConversa,
 } = require('../access/conversationVisibilityService')
+const {
+  setorRealtimeMudou,
+  emitirMudancaSetorRealtime: emitirMudancaSetorRealtimeBase,
+} = require('./setorVisibilidadeRealtime')
 
 function emitirConversaAtualizada(io, company_id, conversa_id, payload = null, opts = {}) {
   if (!io) return
@@ -254,6 +258,17 @@ function emitirDepartamento(io, departamento_id, eventName, payload) {
   io.to(`departamento_${departamento_id}`).emit(eventName, payload)
 }
 
+/**
+ * Quem perdeu o setor precisa receber `conversa_atualizada` na room da empresa.
+ * Invalida o cache de visibilidade antes do emit.
+ */
+function emitirMudancaSetorRealtime(io, company_id, conversa_id, opts = {}) {
+  if (setorRealtimeMudou(opts.departamentoIdAnterior, opts.departamento_id)) {
+    invalidateConversaVisibilityCache(company_id, conversa_id)
+  }
+  return emitirMudancaSetorRealtimeBase(io, company_id, conversa_id, opts)
+}
+
 module.exports = {
   emitirConversaAtualizada,
   emitirParaUsuariosQuePodemVerConversa,
@@ -265,4 +280,6 @@ module.exports = {
   emitirParaUsuario,
   emitirMovimentacaoInternaAtendimento,
   emitirDepartamento,
+  emitirMudancaSetorRealtime,
+  setorRealtimeMudou,
 }

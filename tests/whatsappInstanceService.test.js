@@ -175,7 +175,7 @@ describe('whatsappInstanceService', () => {
     expect(service.sanitizeWhatsappInstance(instance).instance_token).toBeUndefined()
   })
 
-  test('em production nao usa primeira instancia ativa nem legado sem default explicita', async () => {
+  test('em production adota a unica instancia ativa mesmo sem is_default (single-instance = sem ambiguidade)', async () => {
     process.env.NODE_ENV = 'production'
     const supabase = createSupabaseMock({
       whatsapp_instances: [
@@ -190,11 +190,49 @@ describe('whatsappInstanceService', () => {
     const service = require('../services/whatsappInstanceService')
     const result = await service.getDefaultWhatsappInstance(21, { includeCredentials: true })
 
+    // Sem is_default mas ha exatamente 1 ativa: usa-a (destrava sync de contatos/fotos em producao).
+    expect(result.error).toBeNull()
+    expect(result.instance?.id).toBe(1)
+    expect(result.instance?.instance_token).toBe('secret-1')
+    // Encontrou na whatsapp_instances; nao precisa cair no legado empresa_zapi.
+    expect(supabase.calls.some((c) => c.table === 'empresa_zapi')).toBe(false)
+  })
+
+  test('em production exige escolha explicita quando ha 2+ instancias ativas sem default (ambiguidade preservada)', async () => {
+    process.env.NODE_ENV = 'production'
+    const supabase = createSupabaseMock({
+      whatsapp_instances: [
+        { id: 1, company_id: 22, provider: 'ultramsg', nome: 'A', instance_id: '2201', instance_token: 'secret-a', ativo: true, is_default: false },
+        { id: 2, company_id: 22, provider: 'ultramsg', nome: 'B', instance_id: '2202', instance_token: 'secret-b', ativo: true, is_default: false },
+      ],
+    })
+    jest.doMock('../config/supabase', () => supabase)
+
+    const service = require('../services/whatsappInstanceService')
+    const result = await service.getDefaultWhatsappInstance(22, { includeCredentials: true })
+
     expect(result.instance).toBeNull()
     expect(result.code).toBe('NO_DEFAULT_INSTANCE')
     expect(result.error).toMatch(/default ativa configurada/i)
-    expect(supabase.calls.filter((c) => c.table === 'whatsapp_instances')).toHaveLength(1)
-    expect(supabase.calls.some((c) => c.table === 'empresa_zapi')).toBe(false)
+  })
+
+  test('em production cai para o legado empresa_zapi quando nao ha instancia ativa em whatsapp_instances', async () => {
+    process.env.NODE_ENV = 'production'
+    const supabase = createSupabaseMock({
+      whatsapp_instances: [],
+      empresa_zapi: [
+        { id: 5, company_id: 23, instance_id: 'legacy2301', instance_token: 'legacy-secret', client_token: 'legacy-client', ativo: true },
+      ],
+    })
+    jest.doMock('../config/supabase', () => supabase)
+
+    const service = require('../services/whatsappInstanceService')
+    const result = await service.getDefaultWhatsappInstance(23, { includeCredentials: true })
+
+    expect(result.error).toBeNull()
+    expect(result.instance?.instance_id).toBe('legacy2301')
+    expect(result.instance?.instance_token).toBe('legacy-secret')
+    expect(result.instance?.source).toBe('empresa_zapi')
   })
 
   test('valida company_id ao buscar instancia por id', async () => {
@@ -530,7 +568,7 @@ describe('whatsappInstanceService', () => {
     expect(result.instance?.instance_token).toBeUndefined()
   })
 
-  test('resolveWhatsappInstanceForManualAction em production exige default para uso implicito', async () => {
+  test('resolveWhatsappInstanceForManualAction em production adota a unica instancia ativa mesmo sem default', async () => {
     process.env.NODE_ENV = 'production'
     const supabase = createSupabaseMock({
       whatsapp_instances: [
@@ -542,10 +580,11 @@ describe('whatsappInstanceService', () => {
     const service = require('../services/whatsappInstanceService')
     const result = await service.resolveWhatsappInstanceForManualAction(1, null)
 
-    expect(result.instanceId).toBeNull()
-    expect(result.instance).toBeNull()
-    expect(result.code).toBe('NO_DEFAULT_INSTANCE')
-    expect(result.error).toMatch(/default ativa configurada/i)
+    // Instancia unica = sem ambiguidade: usa-a (coerente com getDefaultWhatsappInstance).
+    expect(result.error).toBeNull()
+    expect(result.instanceId).toBe(1)
+    expect(result.isDefault).toBe(false)
+    expect(result.instance?.instance_token).toBeUndefined()
   })
 
   test('resolveWhatsappInstanceForManualAction exige escolha com multiplas instancias', async () => {

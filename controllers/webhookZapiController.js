@@ -29,6 +29,7 @@ const { selectClienteNomeFoto } = require('../helpers/clienteNomeColunas')
 const { parseVcardForContact } = require('../helpers/vcardHelper')
 const { resolvePeerPhone } = require('../helpers/conversationKeyHelper')
 const { incrementarUnreadParaConversa, emitirParaUsuariosQuePodemVerConversa } = require('./chatController')
+const { emitirMudancaSetorRealtime, setorRealtimeMudou } = require('../services/chat/realtime/chatRealtimeGateway')
 const { normalizarTimestampSemFusoAmbiguoParaApi } = require('../helpers/timestampApiCompat')
 const { scheduleInboundWebPush } = require('../services/webPushDispatchService')
 const {
@@ -935,6 +936,8 @@ exports.receberZapi = async (req, res) => {
     //    Sempre priorizar número real (phone) do payload; LID só para vincular/atualizar.
     let conversa_id = null
     let departamento_id = null
+    let departamentoIdAntesRealtime = null
+    let setorRealtimeJaEmitido = false
     let isNewConversation = false
 
     const lidFromPhone = String(payload?.chatLid ?? payload?.phone ?? payload?.chat?.id ?? payload?.key?.remoteJid ?? '').trim()
@@ -1453,6 +1456,7 @@ exports.receberZapi = async (req, res) => {
       }
       skipChatbotPorCampanha = devePularChatbotPorCampanha(convEstado)
     }
+    departamentoIdAntesRealtime = departamento_id
     if (!fromMe && !isGroup && !inboundReentregue && departamento_id == null && atendente_id == null && phoneParaChatbot) {
       const chatbotEligibility = shouldTriggerChatbotForInbound({
         fromMe,
@@ -1672,6 +1676,21 @@ exports.receberZapi = async (req, res) => {
           if (result?.handled && result?.departamento_id != null) {
             departamento_id = result.departamento_id
             console.log('[Z-API] 🤖 Chatbot: conversa direcionada para departamento', departamento_id)
+            const ioSetor = req.app.get('io')
+            if (
+              ioSetor &&
+              !setorRealtimeJaEmitido &&
+              setorRealtimeMudou(departamentoIdAntesRealtime, departamento_id)
+            ) {
+              emitirMudancaSetorRealtime(ioSetor, company_id, conversa_id, {
+                departamento_id,
+                departamentoIdAnterior: departamentoIdAntesRealtime,
+                atendente_id: result.atendente_id ?? null,
+                status_atendimento: result.status_atendimento || 'aberta',
+                motivo: 'setor_direcionado',
+              })
+              setorRealtimeJaEmitido = true
+            }
           }
         }
         } catch (errChatbot) {
@@ -2298,6 +2317,20 @@ exports.receberZapi = async (req, res) => {
           if (mensagemFoiInseridaPeloWebhook) io.to(`departamento_${depId}`).emit('atualizar_conversa', { id: convIdForEmit })
           io.to(`departamento_${depId}`).emit('conversa_atualizada', convPayload)
         }
+      }
+      const depNovoRealtime = convRow?.departamento_id ?? depId ?? null
+      if (
+        !setorRealtimeJaEmitido &&
+        setorRealtimeMudou(departamentoIdAntesRealtime, depNovoRealtime)
+      ) {
+        emitirMudancaSetorRealtime(io, company_id, convIdForEmit, {
+          departamento_id: depNovoRealtime,
+          departamentoIdAnterior: departamentoIdAntesRealtime,
+          atendente_id: convRow?.atendente_id ?? null,
+          status_atendimento: convRow?.status_atendimento || 'aberta',
+          motivo: 'setor_direcionado',
+        })
+        setorRealtimeJaEmitido = true
       }
     }
 
