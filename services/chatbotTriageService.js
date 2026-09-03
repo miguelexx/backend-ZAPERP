@@ -127,6 +127,56 @@ function isInboundTooOldForWelcome(mensagemClienteCriadoEm, nowMs = Date.now()) 
 }
 
 /**
+ * Chatbot só com mensagem de boas-vindas (menu de setores desligado ou sem opções ativas).
+ */
+function isWelcomeOnlyConfig(config) {
+  if (!config) return false
+  if (config.usarMenuSetores === false) return true
+  const active = (config.options || []).filter((o) => o && o.active !== false && o.departamento_id != null)
+  return active.length === 0
+}
+
+/**
+ * Trecho estável da mensagem de boas-vindas para achar se ela já foi enviada nesta conversa.
+ */
+function welcomeTextNeedle(config) {
+  const welcome = String(config?.welcomeMessage || '').trim()
+  if (!welcome) return ''
+  const firstLine = welcome
+    .split('\n')
+    .map((l) => l.trim())
+    .find((l) => l.length >= 8)
+  const raw = firstLine || welcome
+  return raw.slice(0, Math.min(80, raw.length))
+}
+
+function outboundContainsNeedle(rows, needle) {
+  const n = String(needle || '').trim()
+  if (!n || n.length < 4) return false
+  return (rows || []).some((r) => String(r?.texto || '').includes(n))
+}
+
+/**
+ * Decide se deve disparar boas-vindas nesta inbound.
+ * sendOnlyFirstTime = única: envia uma vez por conversa, se o texto atual ainda não foi enviado
+ * e o cliente que iniciou (sem outbound humano no meio).
+ */
+function decideShouldSendTriageWelcome({
+  inboundAntigoParaWelcome = false,
+  conversaReabertaAposFinalizacao = false,
+  welcomeAlreadySent = false,
+  clientStartedConversation = true,
+  hasHumanOutbound = false,
+} = {}) {
+  if (inboundAntigoParaWelcome) return false
+  if (conversaReabertaAposFinalizacao) return true
+  if (welcomeAlreadySent) return false
+  if (!clientStartedConversation) return false
+  if (hasHumanOutbound) return false
+  return true
+}
+
+/**
  * Aguarda o intervalo configurado desde o último envio do chatbot (por empresa).
  * @param {number} company_id
  * @param {number} intervaloSegundos - Configurado pelo usuário (0 = sem delay)
@@ -382,7 +432,12 @@ function validateChatbotConfig(raw) {
   const src = normalizeChatbotTriageStrings(raw)
   const opts = Array.isArray(src.options) ? src.options : []
   const activeOptions = opts.filter((o) => o && o.active !== false && o.departamento_id != null)
-  if (activeOptions.length === 0 && src.enabled) return null
+  // Menu de setores: false explícito = só boas-vindas; true = menu ligado; ausente = inferir pelas opções.
+  const usarMenuSetores = src.usarMenuSetores === false
+    ? false
+    : src.usarMenuSetores === true
+      ? true
+      : activeOptions.length > 0
   const tipoDist = String(src.tipo_distribuicao || 'fila').trim().toLowerCase()
   const tipoDistribuicao = tipoDist === 'menor_carga' ? 'menor_carga' : (tipoDist === 'round_robin' ? 'round_robin' : 'fila')
 
@@ -470,13 +525,16 @@ function validateChatbotConfig(raw) {
       const n = Number(v)
       return Number.isFinite(n) ? Math.max(0, Math.min(60, Math.round(n))) : 3
     })(),
-    options: opts.map((o) => ({
-      key: String(o.key || '').trim(),
-      label: String(o.label || '').trim() || 'Setor',
-      departamento_id: o.departamento_id != null ? Number(o.departamento_id) : null,
-      active: o.active !== false,
-      tag_id: o.tag_id != null ? Number(o.tag_id) : null,
-    })),
+    usarMenuSetores: usarMenuSetores,
+    options: usarMenuSetores
+      ? opts.map((o) => ({
+        key: String(o.key || '').trim(),
+        label: String(o.label || '').trim() || 'Setor',
+        departamento_id: o.departamento_id != null ? Number(o.departamento_id) : null,
+        active: o.active !== false,
+        tag_id: o.tag_id != null ? Number(o.tag_id) : null,
+      }))
+      : [],
   }
 }
 
@@ -659,9 +717,32 @@ async function wasMenuLikelySentViaOutboundMensagens(supabaseClient, company_id,
       .eq('direcao', 'out')
       .order('criado_em', { ascending: false })
       .limit(40)
-    return (rows || []).some((r) => String(r.texto || '').includes(needle))
+    return outboundContainsNeedle(rows, needle)
   } catch (e) {
     console.warn('[chatbotTriage] wasMenuLikelySentViaOutboundMensagens:', e?.message || e)
+    return false
+  }
+}
+
+/**
+ * Modo "só boas-vindas": já enviamos ESTA mensagem (não um menu antigo de setores).
+ * bot_logs menu_enviado de uma config anterior não conta — senão a única nunca chega.
+ */
+async function wasWelcomeLikelySentViaOutboundMensagens(supabaseClient, company_id, conversa_id, config) {
+  const needle = welcomeTextNeedle(config)
+  if (!needle) return false
+  try {
+    const { data: rows } = await supabaseClient
+      .from('mensagens')
+      .select('texto')
+      .eq('conversa_id', conversa_id)
+      .eq('company_id', company_id)
+      .eq('direcao', 'out')
+      .order('criado_em', { ascending: false })
+      .limit(40)
+    return outboundContainsNeedle(rows, needle)
+  } catch (e) {
+    console.warn('[chatbotTriage] wasWelcomeLikelySentViaOutboundMensagens:', e?.message || e)
     return false
   }
 }
@@ -1320,8 +1401,9 @@ async function processIncomingMessageLocked(ctx, conversaEstadoInicial) {
     console.log('[chatbotTriage] ❌ skip: chatbot desativado para company_id', company_id)
     return { handled: false }
   }
-  if (!config.options?.length) {
-    console.log('[chatbotTriage] ❌ skip: nenhuma opção configurada para company_id', company_id)
+  // Sem opções E sem mensagem de boas-vindas: nada para o chatbot fazer
+  if (!config.options?.length && !config.welcomeMessage) {
+    console.log('[chatbotTriage] ❌ skip: nenhuma opção nem mensagem de boas-vindas para company_id', company_id)
     return { handled: false }
   }
   
@@ -1610,12 +1692,15 @@ async function processIncomingMessageLocked(ctx, conversaEstadoInicial) {
     return { handled: true }
   }
 
+  const isWelcomeOnly = isWelcomeOnlyConfig(config)
   const menuAlreadySentHint = hints && typeof hints.menuAlreadySent === 'boolean' ? hints.menuAlreadySent : null
   const primeiraMensagemHint = hints && typeof hints.isPrimeiraMensagemCliente === 'boolean' ? hints.isPrimeiraMensagemCliente : null
-  // hints.menuAlreadySent=false do webhook não é confiável (ex.: menu gravado em mensagens mas bot_logs atrasado).
-  // Só confiamos em false após checar o banco; assim "opção inválida" não fica bloqueada.
+  // hints.menuAlreadySent=true do webhook NÃO é confiável no modo só-boas-vindas:
+  // qualquer outbound antigo (ou menu_enviado de config com setores) bloqueava a mensagem única.
   let menuAlreadySent = false
-  if (menuAlreadySentHint === true) {
+  if (isWelcomeOnly) {
+    menuAlreadySent = await wasWelcomeLikelySentViaOutboundMensagens(sb, company_id, conversa_id, config)
+  } else if (menuAlreadySentHint === true) {
     menuAlreadySent = true
   } else {
     menuAlreadySent = await wasMenuSentForConversa(sb, company_id, conversa_id)
@@ -1624,32 +1709,37 @@ async function processIncomingMessageLocked(ctx, conversaEstadoInicial) {
     }
   }
 
-  // Verificar se esta é a primeira mensagem do cliente na conversa.
-  // Usa bot_logs como fonte primária: se o menu foi enviado, não é mais a "primeira" mensagem.
-  // Fallback: verificar mensagens (limit 10 para maior precisão).
   let isPrimeiraMensagemCliente = false
+  let clientStartedConversation = true
+  let hasHumanOutbound = false
   if (!menuAlreadySent) {
-    if (primeiraMensagemHint != null) {
-      isPrimeiraMensagemCliente = primeiraMensagemHint
-    } else {
-      try {
-        const { data: mensagensAnteriores } = await sb
-          .from('mensagens')
-          .select('id, direcao')
-          .eq('conversa_id', conversa_id)
-          .eq('company_id', company_id)
-          .order('criado_em', { ascending: true })
-          .limit(10)
+    try {
+      const { data: mensagensAnteriores } = await sb
+        .from('mensagens')
+        .select('id, direcao, texto')
+        .eq('conversa_id', conversa_id)
+        .eq('company_id', company_id)
+        .order('criado_em', { ascending: true })
+        .limit(25)
 
-        // É primeira mensagem se: sem histórico OU todas as mensagens são do cliente (nenhuma resposta do bot ainda)
-        isPrimeiraMensagemCliente =
-          !mensagensAnteriores ||
-          mensagensAnteriores.length === 0 ||
-          mensagensAnteriores.every((m) => m.direcao === 'in')
-      } catch (e) {
-        console.warn('[chatbotTriage] Erro ao verificar mensagens anteriores:', e?.message)
-        isPrimeiraMensagemCliente = true // Assume primeira mensagem em caso de erro — melhor enviar menu do que ignorar
+      const rows = mensagensAnteriores || []
+      if (rows.length === 0) {
+        clientStartedConversation = true
+        isPrimeiraMensagemCliente = true
+      } else {
+        clientStartedConversation = rows[0]?.direcao !== 'out'
+        isPrimeiraMensagemCliente = rows.every((m) => m.direcao === 'in')
+        hasHumanOutbound = rows.some((m) => m.direcao === 'out' && !looksLikeBotMessage(m.texto, config))
       }
+      // Hint true do webhook (zero histórico / só inbound) é útil; hint false por "tem outbound"
+      // não deve anular o modo única sem setores.
+      if (!isWelcomeOnly && primeiraMensagemHint === true) {
+        isPrimeiraMensagemCliente = true
+      }
+    } catch (e) {
+      console.warn('[chatbotTriage] Erro ao verificar mensagens anteriores:', e?.message)
+      isPrimeiraMensagemCliente = true
+      clientStartedConversation = true
     }
   }
 
@@ -1659,6 +1749,9 @@ async function processIncomingMessageLocked(ctx, conversaEstadoInicial) {
     menuAlreadySent,
     conversaReabertaAposFinalizacao,
     isPrimeiraMensagemCliente,
+    isWelcomeOnly,
+    sendOnlyFirstTime: config.sendOnlyFirstTime,
+    hasHumanOutbound,
   })
 
   // Anti-replay: só iniciar o menu para inbound recente. Uma reentrega/re-sync de mensagem antiga
@@ -1674,14 +1767,15 @@ async function processIncomingMessageLocked(ctx, conversaEstadoInicial) {
     })
   }
 
-  // Determinar se deve enviar boas-vindas (menu de triagem):
-  // 1. Conversa reaberta após finalização — enviar (estado do bot já foi resetado)
-  // 2. Primeira mensagem do cliente E menu ainda não enviado
-  // Nunca reenviar se menuAlreadySent (mesmo com sendOnlyFirstTime=false).
-  const shouldSendWelcome =
-    !inboundAntigoParaWelcome &&
-    (conversaReabertaAposFinalizacao ||
-      (isPrimeiraMensagemCliente && !menuAlreadySent))
+  // Única (sendOnlyFirstTime): envia se esta boas-vindas ainda não está na conversa.
+  // Não exige "todas as msgs inbound" — conversa reaproveitada com menu antigo travava o envio.
+  const shouldSendWelcome = decideShouldSendTriageWelcome({
+    inboundAntigoParaWelcome,
+    conversaReabertaAposFinalizacao,
+    welcomeAlreadySent: menuAlreadySent,
+    clientStartedConversation: isWelcomeOnly ? clientStartedConversation : isPrimeiraMensagemCliente,
+    hasHumanOutbound: isWelcomeOnly ? hasHumanOutbound : false,
+  })
 
   if (shouldSendWelcome) {
     // Debounce em memória para evitar menu duplicado em requisições paralelas da mesma conversa.
@@ -1725,6 +1819,14 @@ async function processIncomingMessageLocked(ctx, conversaEstadoInicial) {
       console.warn('[chatbotTriage] ⚠️ menu vazio — welcomeMessage e opções estão vazios. Verifique a configuração.')
     }
     return { handled: true }
+  }
+
+  // Modo "só boas-vindas" (sem opções de setor): após enviar a mensagem, não processar respostas.
+  if (!config.options?.length) {
+    console.log('[chatbotTriage] ✅ modo só boas-vindas (sem setores) — não processar resposta do cliente', {
+      conversa_id, company_id,
+    })
+    return { handled: false }
   }
 
   // Segurança: se o menu NUNCA foi enviado para esta conversa, não enviar "opção inválida".

@@ -20,6 +20,8 @@ const TEMPO_PARADO_HORAS = {
   '30d': 24 * 30,
 }
 
+const { isBackendChatSearchTerm } = require('../../../helpers/chatSearchHelper')
+
 const isTruthyFlag = (v) => v === '1' || v === 'true' || v === 1 || v === true
 
 function deriveListarConversasFilters(query = {}) {
@@ -72,7 +74,8 @@ function deriveListarConversasFilters(query = {}) {
 
   const incluirTodosClientesAtivo = isTruthyFlag(incluirTodosClientes)
 
-  const palavraTrim = palavra && String(palavra).trim() ? String(palavra).trim() : ''
+  const palavraRaw = palavra && String(palavra).trim() ? String(palavra).trim() : ''
+  const palavraTrim = isBackendChatSearchTerm(palavraRaw) ? palavraRaw : ''
   // B01: com termo de busca, não restringir por aba/chip de estado (comportamento tipo WhatsApp).
   // Mantém filtros avançados explícitos (tag, setor, datas, atendente_id).
   const searchBypassesStateFilters = Boolean(palavraTrim)

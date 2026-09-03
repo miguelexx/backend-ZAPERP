@@ -10,8 +10,10 @@ function getSearchMessagesPageSize() {
 }
 
 function getChatSearchScanLimit() {
+  // Só entra no caminho de CHAT_SEARCH_INCLUDE_MESSAGE_TEXT=1 (off por padrão).
+  // Nome/telefone usam RPC + índices trgm; não varrem esta janela.
   const raw = Number(process.env.CHAT_SEARCH_SCAN_LIMIT)
-  if (!Number.isFinite(raw) || raw <= 0) return 2000
+  if (!Number.isFinite(raw) || raw <= 0) return 800
   return Math.min(Math.max(Math.floor(raw), 100), 2000)
 }
 

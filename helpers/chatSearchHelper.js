@@ -4,6 +4,14 @@ function digitsOnly(value) {
   return String(value || '').replace(/\D/g, '')
 }
 
+/** GET /chats busca global: 2+ caracteres, ou 2+ dígitos de telefone. */
+function isBackendChatSearchTerm(raw) {
+  const t = String(raw || '').trim()
+  if (!t) return false
+  if (t.length >= 2) return true
+  return digitsOnly(t).length >= 2
+}
+
 /**
  * Chave de nome equivalente ao search_name_key(text) do Postgres.
  * A pontuação vira separador de palavra para que "Shuarts/Marcela" possa ser
@@ -129,7 +137,7 @@ function getSearchMessagesPageSize() {
 
 function getChatSearchScanLimit() {
   const raw = Number(process.env.CHAT_SEARCH_SCAN_LIMIT)
-  if (!Number.isFinite(raw) || raw <= 0) return 2000
+  if (!Number.isFinite(raw) || raw <= 0) return 800
   return Math.min(Math.max(Math.floor(raw), 100), 2000)
 }
 
@@ -145,6 +153,7 @@ module.exports = {
   buildTelefoneSearchOr,
   buildPhoneSearchTerms,
   digitsOnly,
+  isBackendChatSearchTerm,
   normalizeNameSearchKey,
   nameMatchesWordPrefix,
   chatIdentityMatchesSearch,

@@ -100,8 +100,15 @@ describe('deriveListarConversasFilters', () => {
       expect(f.tempoParadoHoras).toBeNull()
       expect(f.filtroAusenciaLista).toBe(false)
     })
+    test('palavra de 1 caractere não dispara busca global; 2+ sim', () => {
+      expect(deriveListarConversasFilters({ palavra: 'a', minha_fila: '1' }).palavraTrim).toBe('')
+      expect(deriveListarConversasFilters({ palavra: 'a', minha_fila: '1' }).searchBypassesStateFilters).toBe(false)
+      expect(deriveListarConversasFilters({ palavra: 'a', minha_fila: '1' }).minhaFilaAtiva).toBe(true)
+      expect(deriveListarConversasFilters({ palavra: 'al' }).palavraTrim).toBe('al')
+      expect(deriveListarConversasFilters({ palavra: 'al' }).searchBypassesStateFilters).toBe(true)
+    })
     test('tag e atendente_id continuam valendo mesmo com busca', () => {
-      const f = deriveListarConversasFilters({ palavra: 'x', tag_id: '9', atendente_id: '42' })
+      const f = deriveListarConversasFilters({ palavra: 'jo', tag_id: '9', atendente_id: '42' })
       expect(f.tagFilterAtivo).toBe(true)
       expect(f.filtroAtendenteInformado).toBe(42)
     })

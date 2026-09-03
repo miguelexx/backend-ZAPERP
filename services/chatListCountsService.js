@@ -17,6 +17,7 @@ const {
   buildTelefoneSearchOr,
   buildPhoneSearchTerms,
   escapeIlikePattern,
+  isBackendChatSearchTerm,
   getSearchMessagesPageSize,
   getChatSearchScanLimit,
   getChatSearchIdLimit,
@@ -254,7 +255,8 @@ async function resolveChatListCountsContext(req) {
     else conversaIdsFilter = ids
   }
 
-  const palavraTrim = palavra && String(palavra).trim() ? String(palavra).trim() : ''
+  const palavraRaw = palavra && String(palavra).trim() ? String(palavra).trim() : ''
+  const palavraTrim = isBackendChatSearchTerm(palavraRaw) ? palavraRaw : ''
   if (palavraTrim) {
     const searchIdLimit = getChatSearchIdLimit()
     const phoneVariacoes = buildPhoneSearchTerms(palavraTrim)
@@ -761,9 +763,68 @@ function withTimeout(promise, timeoutMs) {
     )
   })
 }
+/**
+ * Cache em memória para contadores de filtro.
+ * Chave: `company_id:user_id:filtros_hash` — TTL curto (10 s).
+ * Evita 14 queries paralelas a cada troca de aba quando os filtros base não mudaram.
+ */
+const _countsCache = new Map()
+const _COUNTS_CACHE_TTL = 10_000
+const _COUNTS_CACHE_MAX = 200
+
+function buildCountsCacheKey(req) {
+  const q = req.query || {}
+  const user = req.user || {}
+  const parts = [
+    user.company_id,
+    user.id,
+    q.tag_id || '',
+    q.departamento_id || '',
+    q.data_inicio || '',
+    q.data_fim || '',
+    q.palavra || '',
+    q.atendente_id || '',
+  ]
+  return parts.join(':')
+}
+
+function getCachedCounts(key) {
+  const entry = _countsCache.get(key)
+  if (!entry) return null
+  if (Date.now() - entry.ts > _COUNTS_CACHE_TTL) {
+    _countsCache.delete(key)
+    return null
+  }
+  return entry.data
+}
+
+function setCachedCounts(key, data) {
+  _countsCache.set(key, { ts: Date.now(), data })
+  // Evitar crescimento ilimitado
+  if (_countsCache.size > _COUNTS_CACHE_MAX) {
+    const oldest = _countsCache.keys().next().value
+    if (oldest != null) _countsCache.delete(oldest)
+  }
+}
+
+function invalidateCountsCache(company_id) {
+  if (company_id == null) {
+    _countsCache.clear()
+    return
+  }
+  const prefix = `${company_id}:`
+  for (const key of [..._countsCache.keys()]) {
+    if (key.startsWith(prefix)) _countsCache.delete(key)
+  }
+}
+
 async function getChatFilterCounts(req) {
+  const cacheKey = buildCountsCacheKey(req)
+  const cached = getCachedCounts(cacheKey)
+  if (cached) return cached
+
   const timeoutMs = getChatCountsTimeoutMs()
-  return withTimeout((async () => {
+  const result = await withTimeout((async () => {
     const ctx = await resolveChatListCountsContext(req)
     const counts = await Promise.all([
       countConversasWithFilter(ctx, {}),
@@ -815,6 +876,8 @@ async function getChatFilterCounts(req) {
       atraso: counts[10],
     }
   })(), timeoutMs)
+  setCachedCounts(cacheKey, result)
+  return result
 }
 
 module.exports = {
@@ -826,6 +889,7 @@ module.exports = {
   parseConversaIdsQuery,
   getChatFilterCounts,
   getChatCountsTimeoutMs,
+  invalidateCountsCache,
   withTimeout,
   getStartOfTodayIso,
   getEndOfTodayIso,
