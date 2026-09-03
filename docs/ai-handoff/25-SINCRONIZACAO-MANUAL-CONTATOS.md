@@ -56,6 +56,23 @@ Mesma relaxação aplicada a `resolveWhatsappInstanceForManualAction` (Novo clie
 
 Alternativa sem código (se preferir manter a rigidez): marcar a instância única como default via RPC `set_default_whatsapp_instance` / `setDefaultWhatsappInstance`. A correção de código evita depender disso e torna o single-instance robusto.
 
+## Parar a importação no meio (cancelamento) — 2026-09-02
+
+Com agendas grandes (ex.: 5021 contatos) o usuário precisa poder abortar. Reusa a infra de cancelamento existente (`requestCancelJob` / `isJobCancelRequested` — mesma usada por `sync_mensagens_antigas`).
+
+- Endpoint: `POST /chats/sincronizar-contatos/cancelar` → `cancelarSincronizacaoContatos` → `requestCancelJob(company_id, SYNC_CONTATOS)`. Job `pending` cancela na hora; `running` vira `cancel_requested`.
+- Worker (`runContactSyncFull`): recebe `opts.shouldCancel` (via `executeJob`) e checa antes de cada página da agenda e a cada ~10 contatos no laço de importação. Ao cancelar, retorna `{ ok: true, cancelled: true, aviso: 'Importação interrompida…' }` — **os contatos já gravados são mantidos**, o lock é liberado no `finally`, e `finalizeJob` marca o job como `cancelled` (não falha, não re-tenta).
+- Progresso/estado: `contactSyncStatus` agora expõe `cancelado`/`cancelando`; a emissão de conclusão usa status `cancelled` quando aplicável.
+- Frontend: hook `useContactSync` expõe `cancelar()` + estado `cancelling`; `ClientesSection` mostra o botão **Parar importação** (vermelho) enquanto sincroniza e o texto "Interrompendo…/Importação interrompida".
+- Testes: `tests/manualContactSync.test.js` cobre cancelar-antes-de-buscar (0 importados, lock liberado) e parar-no-meio (parcial preservado).
+
+## Teto de 2500 contatos + nome e foto — 2026-09-02
+
+- `runContactSyncFull` aplica teto de **2500 contatos** por sincronização (`MAX_CONTATOS_DEFAULT`, override via env `SYNC_MAX_CONTATOS` ou `opts.maxContatos`). Ao atingir, para de acumular na deduplicação (`truncadoPorLimite=true`) e o `aviso` orienta rodar de novo para o restante. O resultado expõe `truncadoPorLimite` e `limiteContatos`.
+- **Nome:** `parseAgendaContact` exige `name` não vazio — só entra contato salvo com nome.
+- **Foto:** `syncOneAgendaContact({ includePhotos: true })` usa a foto da lista (`imgUrl/photo/profilePicture`) e, quando ausente, busca por contato via `provider.getProfilePicture(jid)`. O endpoint enfileira com `includePhotos: true`. Contato sem foto no provedor entra só com nome (`totalFotosIndisponiveis`), sem sobrescrever foto existente.
+- Testes: teto (importa N=limite, avisa truncamento, nome+foto preservados) e os 1005-com-foto cobrindo o caminho de foto.
+
 ## Infraestrutura e limites de certificação
 
 Não exige migration nem nova variável. Reutiliza `jobs`, `checkpoints_sync` e `sync_locks`. Backend e frontend precisam ser publicados juntos para o endpoint de progresso existir. Nenhum commit, push, deploy ou sincronização de agenda real foi executado nesta tarefa.

@@ -22,6 +22,9 @@ const { textoParaEnvioWhatsapp, getUsuarioParaEnvioCliente, enrichMensagemComAut
 const { loadWhatsappInstanceMetaMap, resolveUltraMsgReplyMessageId } = require('../../services/chat/read/conversationLookups')
 const { deduplicationMap: _clientTempIdDeduplicationMap, findMensagemByClientTempId, isDbDedupeUnavailable, markDbDedupeUnavailable } = require('../../services/chat/outbound/idempotencyService')
 const { aplicarAguardandoClienteNoPayload, anexarAssumirNoPayloadLista, recalcularEMesclarModoSimples } = require('../../services/chat/outbound/modoSimplesOutbound')
+const { textoExcedeLimiteDisparo } = require('../../helpers/mensagemDisparadaClassificacao')
+const { empresaSeparaMensagensDisparadas } = require('../../helpers/empresaSepararDisparadasFlag')
+const { classificarSaidaComoMensagemDisparada, capturarEstadoConversaAntesDisparo } = require('../../services/mensagemDisparadaService')
 
 exports.enviarMensagemChat = async (req, res) => {
   try {
@@ -62,6 +65,21 @@ exports.enviarMensagemChat = async (req, res) => {
     }
 
     const io = req.app.get('io')
+
+    // Módulo "Separar mensagens disparadas": captura o estado ANTES do auto-assumir da política de
+    // envio (que pode promover a conversa a em_atendimento e mascarar a regra). Gate barato: só para
+    // textos > 600 chars. A classificação em si roda depois do envio (fire-and-forget, não bloqueia).
+    let disparoPreEstado = null
+    if (textoExcedeLimiteDisparo(texto)) {
+      const [separarAtivoDisparo, estadoAntes] = await Promise.all([
+        empresaSeparaMensagensDisparadas(company_id).catch(() => false),
+        capturarEstadoConversaAntesDisparo(company_id, conversa_id).catch(() => null),
+      ])
+      if (separarAtivoDisparo && estadoAntes) {
+        disparoPreEstado = { ...estadoAntes, separarAtivo: true }
+      }
+    }
+
     const modoSimplesEnvio = await empresaModoSimplesAtivo(company_id).catch(() => false)
     const permEnvio = await assertPodeEnviarMensagem({
       company_id,
@@ -519,6 +537,27 @@ exports.enviarMensagemChat = async (req, res) => {
             })
         }
       }
+    }
+
+    // Módulo "Separar mensagens disparadas": outbound manual > 600 chars vira "mensagem_disparada"
+    // (fora de grupo/campanha e sem atendimento humano genuíno ANTERIOR ao envio). Fire-and-forget:
+    // não bloqueia a resposta; emite conversa_atualizada que move o card para a aba certa em tempo real.
+    if (disparoPreEstado) {
+      const ioDisparo = req.app.get('io')
+      setImmediate(() => {
+        classificarSaidaComoMensagemDisparada({
+          companyId: company_id,
+          conversaId: Number(conversa_id),
+          texto,
+          separarAtivo: true,
+          isGroup: disparoPreEstado.isGroup,
+          aguardandoRespostaCampanha: disparoPreEstado.aguardandoRespostaCampanha,
+          statusAtendimentoAntes: disparoPreEstado.statusAntes,
+          atendenteIdAntes: disparoPreEstado.atendenteAntes,
+          temInbound: disparoPreEstado.temInbound,
+          io: ioDisparo,
+        }).catch((e) => console.warn('[mensagem_disparada] envio manual:', e?.message || e))
+      })
     }
 
     // Não retornar mensagem completa — evita duplicação no frontend (API + socket).

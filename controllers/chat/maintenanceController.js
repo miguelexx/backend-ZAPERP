@@ -7,6 +7,7 @@
 const supabase = require('../../config/supabase')
 const { phoneKeyBR } = require('../../helpers/phoneHelper')
 const { mergeConversasIntoCanonico } = require('../../helpers/conversationSync')
+const { dedupeClientesForCompany } = require('../../services/clienteDedupeService')
 
 const MERGE_DUPLICATAS_HTML = `
 <!DOCTYPE html>
@@ -95,40 +96,18 @@ exports.mergeConversasDuplicadas = async (req, res) => {
 
     let clientesRemovidos = 0
 
-    // 1) Remover contatos duplicados (mesmo número em formatos diferentes)
-    const { data: clientes, error: errCli } = await supabase
-      .from('clientes')
-      .select('id, telefone, nome')
-      .eq('company_id', cid)
-      .not('telefone', 'like', 'lid:%')
-
-    if (!errCli && Array.isArray(clientes)) {
-      const byPhoneKey = new Map()
-      for (const cl of clientes) {
-        const key = phoneKeyBR(cl.telefone) || String(cl.telefone || '').replace(/\D/g, '')
-        if (!key) continue
-        if (!byPhoneKey.has(key)) byPhoneKey.set(key, [])
-        byPhoneKey.get(key).push(cl)
+    // 1) Remover contatos duplicados (mesmo número em formatos diferentes).
+    // Delegado ao serviço seguro: reaponta TODAS as tabelas com FK cliente_id (CRM, opt-in/
+    // opt-out, disparo, helpdesk, avaliações, nomes vinculados) antes de excluir, evitando
+    // perda de dados via ON DELETE CASCADE/SET NULL. Agrupa por identidade WhatsApp (±9º dígito).
+    try {
+      const dedupeReport = await dedupeClientesForCompany(cid, { apply: true })
+      clientesRemovidos = dedupeReport.clientesRemovidos || 0
+      if (dedupeReport.errors && dedupeReport.errors.length) {
+        console.warn('mergeConversasDuplicadas clientes:', dedupeReport.errors.slice(0, 5))
       }
-      for (const [, list] of byPhoneKey) {
-        if (list.length <= 1) continue
-        list.sort((a, b) => {
-          const na = (a.nome || '').trim().length
-          const nb = (b.nome || '').trim().length
-          if (nb !== na) return nb - na
-          return (a.id || 0) - (b.id || 0)
-        })
-        const canonical = list[0]
-        const dupIds = list.slice(1).map((c) => c.id).filter(Boolean)
-        if (dupIds.length === 0) continue
-        try {
-          await supabase.from('conversas').update({ cliente_id: canonical.id }).eq('company_id', cid).in('cliente_id', dupIds)
-          const { error: delErr } = await supabase.from('clientes').delete().eq('company_id', cid).in('id', dupIds)
-          if (!delErr) clientesRemovidos += dupIds.length
-        } catch (e) {
-          console.warn('mergeConversasDuplicadas clientes:', e?.message || e)
-        }
-      }
+    } catch (e) {
+      console.warn('mergeConversasDuplicadas clientes:', e?.message || e)
     }
 
     // 2) Mesclar conversas duplicadas
@@ -219,5 +198,22 @@ exports.mergeConversasDuplicadas = async (req, res) => {
   } catch (err) {
     console.error(err)
     return res.status(500).json({ error: 'Erro ao mesclar duplicatas' })
+  }
+}
+
+// =====================================================
+// Pré-visualização (DRY-RUN) dos contatos duplicados — não altera nada.
+// GET /chats/merge-duplicatas/preview — admin only
+// Retorna os grupos por identidade WhatsApp, o canônico escolhido e quais tabelas
+// seriam reapontadas, para conferir antes de rodar o merge de verdade.
+// =====================================================
+exports.previewDuplicatasContatos = async (req, res) => {
+  try {
+    const cid = Number(req.user.company_id)
+    const report = await dedupeClientesForCompany(cid, { apply: false })
+    return res.json({ ok: true, ...report })
+  } catch (err) {
+    console.error(err)
+    return res.status(500).json({ error: 'Erro ao pré-visualizar duplicatas' })
   }
 }

@@ -73,6 +73,8 @@ const {
   areEquivalentWhatsAppIds,
   extractPhoneDigitsFromWhatsappMessageId,
 } = require('../helpers/whatsappMessageIdHelper')
+const { textoExcedeLimiteDisparo } = require('../helpers/mensagemDisparadaClassificacao')
+const { classificarSaidaComoMensagemDisparada } = require('../services/mensagemDisparadaService')
 const {
   STATUS_RANK,
   normalizeRawAckStatus,
@@ -2115,6 +2117,31 @@ exports.receberZapi = async (req, res) => {
           }
         } catch (e) {
           console.warn('[webhook] separar_mensagens_disparadas:', e?.message || e)
+        }
+      }
+
+      // Módulo "Separar mensagens disparadas" — regra de TAMANHO para envios externos (celular).
+      // Complementa o bloco de "primeira mensagem" acima: classifica QUALQUER outbound externo
+      // com texto > 600 chars, desde que não haja atendimento humano genuíno (verificado pelo service).
+      if (
+        separarMensagensDisparadasEmpresa &&
+        fromMe &&
+        !isGroup &&
+        mensagemSalva.autor_usuario_id == null
+      ) {
+        const textoMsgDisparo = mensagemSalva.texto || texto || ''
+        if (textoExcedeLimiteDisparo(textoMsgDisparo)) {
+          const ioDisparo = req.app?.get?.('io') || null
+          setImmediate(() => {
+            classificarSaidaComoMensagemDisparada({
+              companyId: company_id,
+              conversaId: convIdForUpdate,
+              texto: textoMsgDisparo,
+              separarAtivo: true,
+              carregarEstadoAtual: true,
+              io: ioDisparo,
+            }).catch((e) => console.warn('[mensagem_disparada] webhook externo:', e?.message || e))
+          })
         }
       }
 

@@ -12,6 +12,7 @@ const {
   transferToDepartment,
   logBotAction,
 } = require('./chatbotTriageService')
+const { emitirMudancaSetorRealtime } = require('./chat/realtime/chatRealtimeGateway')
 
 function isTriageRedirectEmergencyDisabled() {
   const raw = String(process.env.TRIAGE_REDIRECT_EMERGENCY_DISABLED || '').trim().toLowerCase()
@@ -192,20 +193,13 @@ async function redirectConversasByNoResponse(io) {
 
         processadas++
 
-        // Emite realtime para o painel atualizar
         if (io) {
-          io.to(`empresa_${company_id}`).emit('atualizar_conversa', { id: conversa_id })
-          io.to(`conversa_${conversa_id}`).emit('conversa_atualizada', {
-            id: conversa_id,
+          emitirMudancaSetorRealtime(io, company_id, conversa_id, {
             departamento_id,
-            status_atendimento: 'aberta',
-            reordenar_suave: true,
-          })
-          io.to(`empresa_${company_id}`).emit('conversa_atualizada', {
-            id: conversa_id,
-            departamento_id,
-            status_atendimento: 'aberta',
-            reordenar_suave: true,
+            departamentoIdAnterior: null,
+            atendente_id: result.atendente_id ?? null,
+            status_atendimento: result.status_atendimento || 'aberta',
+            motivo: 'setor_direcionado',
           })
         }
       } catch (e) {

@@ -112,6 +112,35 @@ exports.sincronizarContatosZapi = async (req, res) => {
   }
 }
 
+// Para a importação de contatos em andamento (pending → cancela; running → cancel_requested).
+// O worker checa a flag a cada lote e encerra preservando os contatos já importados.
+exports.cancelarSincronizacaoContatos = async (req, res) => {
+  const company_id = req.user?.company_id
+  if (!company_id) return res.status(401).json({ ok: false, error: 'Não autenticado' })
+  try {
+    const { requestCancelJob, JOB_TIPOS } = require('../../services/queueManager')
+    const result = await requestCancelJob(company_id, JOB_TIPOS.SYNC_CONTATOS)
+    if (!result.ok) {
+      if (result.notFound) {
+        return res.status(404).json({ ok: false, error: 'Nenhuma importação de contatos em andamento.' })
+      }
+      return res.status(500).json({ ok: false, error: result.error || 'Não foi possível cancelar a importação.' })
+    }
+    return res.json({
+      ok: true,
+      job_id: result.job_id,
+      status: result.status,
+      cancelado: result.cancelled === true,
+      cancelando: result.cancel_requested === true,
+      message: result.cancelled === true
+        ? 'Importação cancelada.'
+        : 'Cancelamento solicitado. A importação será interrompida em instantes.',
+    })
+  } catch {
+    return res.status(500).json({ ok: false, error: 'Erro ao cancelar a importação de contatos.' })
+  }
+}
+
 // Leitura autenticada: acompanha o job mesmo após sair da página/perder o Socket.
 exports.statusSincronizacaoContatos = async (req, res) => {
   const company_id = req.user?.company_id

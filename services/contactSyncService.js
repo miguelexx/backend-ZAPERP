@@ -10,7 +10,7 @@ const supabase = require('../config/supabase')
 const { getProvider } = require('./providers')
 const { getEmpresaWhatsappConfig } = require('./whatsappConfigService')
 const { getOrCreateCliente } = require('../helpers/conversationSync')
-const { normalizePhoneBR, possiblePhonesBR, phoneKeyBR } = require('../helpers/phoneHelper')
+const { normalizePhoneBR, possiblePhonesBR, possiblePhonesForWhatsappIdentity, phoneKeyBR } = require('../helpers/phoneHelper')
 const { isBadName, chooseBestName } = require('../helpers/contactEnrichment')
 const { clienteTemNomeProtegido } = require('../helpers/clienteNomeProtecao')
 const { marcarSchemaNomeProtecaoIndisponivel } = require('../helpers/clienteNomeColunas')
@@ -31,6 +31,8 @@ const MIN_INTL_PHONE_LENGTH = 10
 const MAX_INTL_PHONE_LENGTH = 15
 const ERROR_MESSAGE_MAX_LENGTH = 80
 const MAX_PAGES_DEFAULT = parseInt(process.env.SYNC_MAX_PAGES_PER_RUN, 10) || 20
+// Teto de contatos importados por sincronização (nome + foto). Padrão 2500; override via env ou opts.
+const MAX_CONTATOS_DEFAULT = Math.max(1, parseInt(process.env.SYNC_MAX_CONTATOS, 10) || 2500)
 
 /**
  * Gera formas de wa_id / JID possíveis para busca (sem expor lógica global).
@@ -112,8 +114,12 @@ function parseAgendaContact(raw) {
 async function findClienteCandidates(companyId, phoneNorm, rawJid, opts = {}) {
   const company_id = Number(companyId)
   const strictAgendaImport = opts?.strictAgendaImport === true
+  // Identidade WhatsApp (celular ±9º dígito) para achar o contato já salvo no outro
+  // formato e ATUALIZAR em vez de duplicar. Fixo/internacional caem no telefone exato.
   const phones = strictAgendaImport
-    ? [String(phoneNorm || '').trim()].filter(Boolean)
+    ? (possiblePhonesForWhatsappIdentity(phoneNorm).length > 0
+        ? possiblePhonesForWhatsappIdentity(phoneNorm)
+        : [String(phoneNorm || '').trim()].filter(Boolean))
     : possiblePhonesBR(phoneNorm)
   const waList = waIdSearchVariants(phoneNorm, rawJid)
 
@@ -572,10 +578,21 @@ async function runContactSyncFull(company_id, opts = {}) {
     // A agenda pode mudar de ordem entre execuções. Recomeçar é idempotente e evita pular contatos.
     await resetCheckpoint(company_id)
     await progress('buscando')
+    const shouldCancel = typeof opts.shouldCancel === 'function' ? opts.shouldCancel : null
+    const cancelResult = () => ({
+      ...stats,
+      ok: true,
+      cancelled: true,
+      aviso: 'Importação interrompida pelo usuário. Os contatos já importados foram mantidos.',
+    })
     const allContacts = []
     const fingerprints = new Set()
     const maxPages = Math.max(1, parseInt(process.env.SYNC_MAX_FETCH_PAGES, 10) || 50)
     for (let page = 1; ; page++) {
+      if (shouldCancel && (await shouldCancel())) {
+        await progress('cancelado', stats.totalVerificados)
+        return cancelResult()
+      }
       if (page > maxPages) throw new Error('A leitura da agenda ficou incompleta: limite de páginas atingido.')
       const response = await provider.getContacts(page, 10000, { companyId: company_id })
       if (response?.ok === false || response?.error) throw new Error('Falha ao consultar a agenda na UltraMSG.')
@@ -588,20 +605,37 @@ async function runContactSyncFull(company_id, opts = {}) {
       for (const contact of data) allContacts.push(contact)
       if (!response?.hasMore) break
     }
+    const maxContatos = Math.max(1, Number(opts.maxContatos) || MAX_CONTATOS_DEFAULT)
     const unique = new Map()
+    let truncadoPorLimite = false
     for (const raw of allContacts) {
       const parsed = parseAgendaContact(raw)
       if (!parsed) { stats.totalInvalidos++; continue }
       // Identidade exata: não unir telefones diferentes apenas por remover o nono dígito.
       if (unique.has(parsed.phone)) { stats.totalDuplicadosNoLote++; continue }
+      // Teto de 2500 contatos: para de acumular quando atinge o limite (o restante fica para a próxima sync).
+      if (unique.size >= maxContatos) { truncadoPorLimite = true; break }
       unique.set(parsed.phone, parsed)
     }
     stats.totalAgendaValidos = unique.size
+    stats.truncadoPorLimite = truncadoPorLimite
+    stats.limiteContatos = maxContatos
     if (!unique.size) {
       throw new Error('A UltraMSG não disponibilizou contatos salvos com nome e telefone. Verifique a agenda e a conexão do celular e tente novamente.')
     }
     await progress('importando')
+    let desdeUltimoCancelCheck = 0
     for (const parsed of unique.values()) {
+      // Checa cancelamento a cada 10 contatos (evita 1 query por contato numa agenda grande)
+      // e sempre no 1o item, para parar rapido logo apos o clique.
+      if (shouldCancel && (desdeUltimoCancelCheck === 0 || desdeUltimoCancelCheck >= 10)) {
+        desdeUltimoCancelCheck = 0
+        if (await shouldCancel()) {
+          await progress('cancelado', stats.totalVerificados)
+          return cancelResult()
+        }
+      }
+      desdeUltimoCancelCheck++
       if (opts.manual !== true && await isProcessamentoPausado(company_id)) {
         throw new Error('Sincronização interrompida: processamento pausado.')
       }
@@ -625,8 +659,14 @@ async function runContactSyncFull(company_id, opts = {}) {
     if (stats.totalErros) throw new Error(stats.totalErros + ' contato(s) não puderam ser gravados. Os demais foram preservados; a fila tentará novamente.')
     await progress('concluido', stats.totalVerificados)
     await registrarEvento(company_id, TIPOS.SYNC_FIM, 'Agenda sincronizada por solicitação manual', stats)
-    return { ...stats, ok: true, aviso: stats.totalFotosIndisponiveis
-      ? stats.totalFotosIndisponiveis + ' contato(s) sem foto disponível na UltraMSG. Fotos existentes foram preservadas.' : null }
+    const avisos = []
+    if (truncadoPorLimite) {
+      avisos.push(`Limite de ${maxContatos} contatos por sincronização atingido. Os ${maxContatos} primeiros foram importados com nome e foto; rode novamente para trazer o restante.`)
+    }
+    if (stats.totalFotosIndisponiveis) {
+      avisos.push(`${stats.totalFotosIndisponiveis} contato(s) sem foto disponível na UltraMSG. Fotos existentes foram preservadas.`)
+    }
+    return { ...stats, ok: true, aviso: avisos.length ? avisos.join(' ') : null }
   } catch (e) {
     const error = e?.message || 'Falha ao sincronizar contatos.'
     await registrarEvento(company_id, TIPOS.FALHA, 'Sincronização da agenda falhou', { error })

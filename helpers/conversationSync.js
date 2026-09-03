@@ -526,7 +526,10 @@ function selectConversationsByPhoneVariants(supabaseClient, company_id, variants
 
 async function findClienteRowForPhone(supabaseClient, company_id, phone, telefoneCanonico, searchPhones, opts = {}) {
   const identitySafe = opts.identitySafe === true
-  const variantFn = opts.strictAgendaImport ? () => [] : (identitySafe ? possiblePhonesForWhatsappIdentity : possiblePhonesBR)
+  // strictAgendaImport casa a MESMA identidade WhatsApp (celular com/sem o 9º dígito),
+  // sem nunca fundir fixo↔celular nem usar o LIKE amplo. Evita duplicar um contato já
+  // salvo no outro formato de telefone, sem reabrir o risco que o modo estrito guardava.
+  const variantFn = (opts.strictAgendaImport || identitySafe) ? possiblePhonesForWhatsappIdentity : possiblePhonesBR
   const phonesToSearch = Array.from(
     new Set([telefoneCanonico, ...(Array.isArray(searchPhones) ? searchPhones : []), ...variantFn(phone), ...variantFn(telefoneCanonico)].filter(Boolean))
   )
@@ -668,7 +671,12 @@ async function getOrCreateCliente(supabaseClient, company_id, phone, fields = {}
   const phones = identitySafePhoneMatch ? possiblePhonesForWhatsappIdentity(phone) : possiblePhonesBR(phone)
   let searchPhones = phones.length > 0 ? phones : (telefoneCanonico ? [telefoneCanonico] : [])
   if (strictAgendaImport) {
-    searchPhones = telefoneCanonico ? [telefoneCanonico] : []
+    // Casa a mesma identidade WhatsApp (celular ±9º dígito) para não criar um segundo
+    // cliente quando o contato já existe no outro formato. Fixo/internacional ficam exatos.
+    const idVariants = possiblePhonesForWhatsappIdentity(telefoneCanonico || phone)
+    searchPhones = idVariants.length > 0
+      ? idVariants
+      : (telefoneCanonico ? [telefoneCanonico] : [])
   }
 
   // Fallback: extrair dígitos (10 ou 11 = DDD+num BR) e tentar normalizar quando getCanonicalPhone falha

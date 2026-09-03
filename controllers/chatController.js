@@ -254,6 +254,7 @@ exports.listarConversas = _conversationListController.listarConversas
 const _maintenanceController = require('./chat/maintenanceController')
 exports.paginaMergeDuplicatas = _maintenanceController.paginaMergeDuplicatas
 exports.mergeConversasDuplicadas = _maintenanceController.mergeConversasDuplicadas
+exports.previewDuplicatasContatos = _maintenanceController.previewDuplicatasContatos
 
 // =====================================================
 // 3a) Instâncias WhatsApp ativas (atendimento — sem tokens)

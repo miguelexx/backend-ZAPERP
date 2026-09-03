@@ -180,6 +180,9 @@ async function executeJob(job, io = null) {
       const result = await syncContactsFullProgressiva(company_id, {
         ...payload,
         jobId: id,
+        // Permite ao usuario PARAR a importacao no meio: o worker checa esta flag
+        // a cada contato e encerra preservando o que ja foi importado.
+        shouldCancel: () => isJobCancelRequested(company_id, id),
         onProgress: async (progress) => {
           if (!io) return
           const { contactSyncStatus } = require('../helpers/contactSyncStatus')
@@ -187,7 +190,8 @@ async function executeJob(job, io = null) {
         },
         includeConversationCache: payload?.includeConversationCache !== false
       })
-      return { ok: result.ok === true, resultado: result, erro: result.error }
+      // Cancelamento e sucesso (parada limpa), nao falha: mantem os contatos ja gravados.
+      return { ok: result.ok === true || result.cancelled === true, resultado: result, erro: result.error }
     }
 
     if (tipo === JOB_TIPOS.SYNC_FOTOS) {
@@ -272,7 +276,8 @@ async function processJob(job, io = null) {
       if (io && job.tipo === JOB_TIPOS.SYNC_CONTATOS && result.resultado) {
         const { contactSyncStatus } = require('../helpers/contactSyncStatus')
         // Nome do evento é legado ("zapi_*"); payload é sync WhatsApp/UltraMSG. Não renomear sem dual-emit + rollout frontend (../docs/reference/ADR-LEGACY-NAMING.md).
-        io.to(`empresa_${job.company_id}`).emit('zapi_sync_contatos', contactSyncStatus({ ...job, status: 'completed', resultado_json: result.resultado }))
+        const finalStatus = result.resultado.cancelled === true ? 'cancelled' : 'completed'
+        io.to(`empresa_${job.company_id}`).emit('zapi_sync_contatos', contactSyncStatus({ ...job, status: finalStatus, resultado_json: result.resultado }))
       }
       if (io && job.tipo === JOB_TIPOS.SYNC_FOTOS && result.resultado) {
         // Mesmo evento legado que SYNC_CONTATOS (ver comentário acima).
