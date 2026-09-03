@@ -1822,7 +1822,7 @@ async function processIncomingMessageLocked(ctx, conversaEstadoInicial) {
   }
 
   // Modo "só boas-vindas" (sem opções de setor): após enviar a mensagem, não processar respostas.
-  if (!config.options?.length) {
+  if (isWelcomeOnly) {
     console.log('[chatbotTriage] ✅ modo só boas-vindas (sem setores) — não processar resposta do cliente', {
       conversa_id, company_id,
     })
@@ -1993,4 +1993,8 @@ module.exports = {
   wasOptionSelectedForConversa,
   getWelcomeMaxInboundAgeMs,
   isInboundTooOldForWelcome,
+  isWelcomeOnlyConfig,
+  welcomeTextNeedle,
+  outboundContainsNeedle,
+  decideShouldSendTriageWelcome,
 }
