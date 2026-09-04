@@ -15,6 +15,12 @@ const {
 } = require('../helpers/disparoLimitesHelper')
 
 const BATCH_SIZE = 500
+// Filtros `.in(...)` do PostgREST viajam na URL (GET/PATCH). Lotes grandes de
+// chaves/IDs estouram o limite de tamanho de URI do Supabase/Kong (~8-16KB) e
+// retornam "414 URI too long", abortando a geração da fila. BATCH_SIZE (500)
+// só é seguro para INSERT (vai no corpo). Para filtros na URL, usar lotes menores.
+const IN_URL_ID_BATCH_SIZE = 150       // IDs inteiros (~8 bytes cada codificados)
+const IN_URL_KEY_BATCH_SIZE = 40       // chaves string "campanha:X:vY:dest:Z" (~90 bytes codificados)
 const EXECUCAO_ATIVA = ['aguardando', 'em_execucao', 'pausada']
 const STATUS_PERMITE_FILA = new Set(['pronta', 'agendada', 'em_execucao', 'pausada'])
 const STATUS_PERMITE_NOVA_EXECUCAO = new Set(['pronta', 'agendada'])
@@ -301,8 +307,8 @@ async function contarItensDaExecucao(execucaoId, companyId) {
 async function buscarItensPorChaves(chaves, campanhaId, companyId) {
   const found = []
   if (!chaves.length) return found
-  for (let i = 0; i < chaves.length; i += BATCH_SIZE) {
-    const slice = chaves.slice(i, i + BATCH_SIZE)
+  for (let i = 0; i < chaves.length; i += IN_URL_KEY_BATCH_SIZE) {
+    const slice = chaves.slice(i, i + IN_URL_KEY_BATCH_SIZE)
     const { data, error } = await supabase
       .from('disparo_fila_itens')
       .select('id, chave_idempotencia, execucao_id, status')
@@ -317,11 +323,11 @@ async function buscarItensPorChaves(chaves, campanhaId, companyId) {
 
 async function atualizarFilaPorIds(ids, companyId, payload) {
   if (!ids.length) return
-  for (let i = 0; i < ids.length; i += BATCH_SIZE) {
+  for (let i = 0; i < ids.length; i += IN_URL_ID_BATCH_SIZE) {
     const { error } = await supabase
       .from('disparo_fila_itens')
       .update(payload)
-      .in('id', ids.slice(i, i + BATCH_SIZE))
+      .in('id', ids.slice(i, i + IN_URL_ID_BATCH_SIZE))
       .eq('company_id', companyId)
     if (error) throw error
   }
@@ -610,13 +616,14 @@ async function gerarFilaParaCampanhaInner({ companyId, campanhaId, userId, dryRu
 
   await recalcularContadores(execucao.id, cid)
 
-  const { data: itensExec } = await supabase
+  const { count: ignoradosCount } = await supabase
     .from('disparo_fila_itens')
-    .select('status')
+    .select('id', { count: 'exact', head: true })
     .eq('execucao_id', execucao.id)
     .eq('company_id', cid)
+    .eq('status', 'ignorada')
 
-  const ignorados = (itensExec ?? []).filter((i) => i.status === 'ignorada').length
+  const ignorados = ignoradosCount ?? 0
 
   const { data: execAtualizada } = await supabase
     .from('disparo_execucoes')
@@ -670,12 +677,24 @@ async function registrarEvento({ companyId, execucaoId, campanhaId, tipo, payloa
 }
 
 async function recalcularContadores(execucaoId, companyId) {
-  const { data: itens, error } = await supabase
-    .from('disparo_fila_itens')
-    .select('status')
-    .eq('execucao_id', execucaoId)
-    .eq('company_id', companyId)
-  if (error) throw error
+  // PostgREST limita o retorno a `max-rows` (1000 por padrão). Sem paginar, uma
+  // campanha com mais de 1000 destinatários teria contadores travados em 1000.
+  // Paginamos em faixas até esgotar a fila da execução.
+  const PAGE = 1000
+  const itens = []
+  for (let offset = 0; ; offset += PAGE) {
+    const { data, error } = await supabase
+      .from('disparo_fila_itens')
+      .select('status')
+      .eq('execucao_id', execucaoId)
+      .eq('company_id', companyId)
+      .order('id', { ascending: true })
+      .range(offset, offset + PAGE - 1)
+    if (error) throw error
+    if (!data?.length) break
+    itens.push(...data)
+    if (data.length < PAGE) break
+  }
 
   const counts = {
     total_itens: 0,

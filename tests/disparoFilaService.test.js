@@ -20,7 +20,7 @@ const { PERFIS } = require('../helpers/disparoLimitesHelper')
 function mockChain(result = { data: null, error: null, count: 0 }) {
   const chain = {}
   const methods = [
-    'select', 'eq', 'neq', 'is', 'not', 'in', 'order', 'limit',
+    'select', 'eq', 'neq', 'is', 'not', 'in', 'order', 'limit', 'range',
     'insert', 'update', 'upsert',
   ]
   for (const m of methods) chain[m] = jest.fn(() => chain)

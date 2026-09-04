@@ -215,17 +215,28 @@ async function cancelarItensPendentes(execucaoId, companyId, agora) {
 }
 
 async function montarContadoresPorStatus(execucaoId, companyId) {
-  const { data, error } = await supabase
-    .from('disparo_fila_itens')
-    .select('status, instancia_id')
-    .eq('execucao_id', execucaoId)
-    .eq('company_id', companyId)
-  if (error) throw error
+  // PostgREST limita o retorno a `max-rows` (1000). Sem paginar, campanhas com
+  // mais de 1000 itens teriam por_status/por_instancia subestimados. Paginamos.
+  const PAGE = 1000
+  const rows = []
+  for (let offset = 0; ; offset += PAGE) {
+    const { data, error } = await supabase
+      .from('disparo_fila_itens')
+      .select('status, instancia_id')
+      .eq('execucao_id', execucaoId)
+      .eq('company_id', companyId)
+      .order('id', { ascending: true })
+      .range(offset, offset + PAGE - 1)
+    if (error) throw error
+    if (!data?.length) break
+    rows.push(...data)
+    if (data.length < PAGE) break
+  }
 
   const porStatus = {}
   const porInstancia = {}
 
-  for (const row of data ?? []) {
+  for (const row of rows) {
     porStatus[row.status] = (porStatus[row.status] ?? 0) + 1
     if (row.instancia_id) {
       const key = String(row.instancia_id)
