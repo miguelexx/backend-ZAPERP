@@ -234,8 +234,7 @@ describe('disparoFilaService — idempotência', () => {
   })
 
   it('gera fila nova com dry_run=true por default', async () => {
-    let insertExecucao = null
-    let upsertRows = null
+    let insertRows = null
 
     supabase.from.mockImplementation((table) => {
       if (table === 'disparo_campanhas') {
@@ -270,13 +269,19 @@ describe('disparoFilaService — idempotência', () => {
       if (table === 'disparo_campanha_destinatarios') {
         return mockChain({ data: destinatarios, error: null })
       }
+      if (table === 'whatsapp_instances') {
+        return mockChain({ data: [{ id: 5 }], error: null })
+      }
+      if (table === 'disparo_campanha_variacoes') {
+        return mockChain({ data: [{ id: 30 }], error: null })
+      }
       if (table === 'disparo_exclusoes') {
         return mockChain({ data: [{ telefone_normalizado: '5511888776655' }], error: null })
       }
       if (table === 'disparo_fila_itens') {
         const chain = mockChain({ data: null, error: null, count: 0 })
-        chain.upsert = jest.fn((rows) => {
-          upsertRows = rows
+        chain.insert = jest.fn((rows) => {
+          insertRows = rows
           return chain
         })
         chain.in = jest.fn(() => chain)
@@ -293,13 +298,14 @@ describe('disparoFilaService — idempotência', () => {
               error: null,
             }).then(resolve)
           }
-          return Promise.resolve({ data: null, error: null, count: 0 }).then(resolve)
+          return Promise.resolve({ data: [], error: null, count: 0 }).then(resolve)
         }
         chain._mode = 'count'
-        const origSelect = chain.select
         chain.select = jest.fn((cols, opts) => {
           if (opts?.count === 'exact') {
             chain._mode = 'count'
+          } else if (cols === 'chave_idempotencia') {
+            chain._mode = 'keys'
           } else {
             chain._mode = 'status'
           }
@@ -317,13 +323,92 @@ describe('disparoFilaService — idempotência', () => {
 
     expect(result.idempotente).toBe(false)
     expect(result.execucao).toBeTruthy()
-    expect(upsertRows).toBeTruthy()
-    expect(upsertRows.length).toBe(2)
-    const chaves = upsertRows.map((r) => r.chave_idempotencia)
+    expect(insertRows).toBeTruthy()
+    expect(insertRows.length).toBe(2)
+    const chaves = insertRows.map((r) => r.chave_idempotencia)
     expect(chaves).toContain('campanha:1:v2:dest:10')
     expect(chaves).toContain('campanha:1:v2:dest:11')
-    const ignorada = upsertRows.find((r) => r.status === 'ignorada')
+    const ignorada = insertRows.find((r) => r.status === 'ignorada')
     expect(ignorada?.erro_codigo).toBe('EXCLUIDO')
+    expect(ignorada?.proxima_tentativa_em).toBeTruthy()
+  })
+
+  it('reaproveita execução se insert colidir no unique ativo', async () => {
+    const execExistente = {
+      id: 50,
+      company_id: 10,
+      campanha_id: 1,
+      versao: 2,
+      status: 'aguardando',
+      total_ignorados: 0,
+    }
+    let execFromCount = 0
+
+    supabase.from.mockImplementation((table) => {
+      if (table === 'disparo_campanhas') {
+        return mockChain({ data: campanhaPronta, error: null })
+      }
+      if (table === 'disparo_campanha_revisoes') {
+        return mockChain({ data: { id: 7, versao: 2, hash: 'abc', status: 'ativa' }, error: null })
+      }
+      if (table === 'disparo_execucoes') {
+        execFromCount += 1
+        if (execFromCount === 1) {
+          return mockChain({ data: null, error: null })
+        }
+        if (execFromCount === 2) {
+          const chain = mockChain({
+            data: null,
+            error: { code: '23505', message: 'duplicate key value violates unique constraint' },
+          })
+          chain.insert = jest.fn(() => chain)
+          chain.select = jest.fn(() => chain)
+          chain.single = jest.fn().mockResolvedValue({
+            data: null,
+            error: { code: '23505', message: 'duplicate key value violates unique constraint' },
+          })
+          return chain
+        }
+        return mockChain({ data: execExistente, error: null })
+      }
+      if (table === 'disparo_campanha_limites') {
+        return mockChain({ data: { inicio_modo: 'imediato', agendado_para: null, fuso_horario: 'America/Sao_Paulo' }, error: null })
+      }
+      if (table === 'disparo_campanha_janelas') {
+        return mockChain({ data: [], error: null })
+      }
+      if (table === 'disparo_campanha_instancia_limites') {
+        return mockChain({ data: [], error: null })
+      }
+      if (table === 'disparo_campanha_destinatarios') {
+        return mockChain({ data: destinatarios, error: null })
+      }
+      if (table === 'whatsapp_instances') {
+        return mockChain({ data: [{ id: 5 }], error: null })
+      }
+      if (table === 'disparo_campanha_variacoes') {
+        return mockChain({ data: [{ id: 30 }], error: null })
+      }
+      if (table === 'disparo_exclusoes') {
+        return mockChain({ data: [], error: null })
+      }
+      if (table === 'disparo_fila_itens') {
+        return mockChain({ data: null, error: null, count: 2 })
+      }
+      return mockChain({ data: null, error: null })
+    })
+
+    const result = await gerarFilaParaCampanha({ companyId: 10, campanhaId: 1, userId: 5 })
+    expect(result.idempotente).toBe(true)
+    expect(result.execucao.id).toBe(50)
+  })
+
+  it('converte erro de ON CONFLICT em DisparoFilaError', () => {
+    const { mensagemErroFila, isUniqueViolation } = require('../services/disparoFilaService')
+    expect(isUniqueViolation({ code: '23505' })).toBe(true)
+    expect(mensagemErroFila({
+      message: 'there is no unique or exclusion constraint matching the ON CONFLICT specification',
+    })).toMatch(/idempotência da fila/i)
   })
 })
 

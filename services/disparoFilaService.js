@@ -11,6 +11,7 @@ const {
   PERFIS,
   FUSO_PADRAO,
   gerarHorariosDisparo,
+  fusoValido,
 } = require('../helpers/disparoLimitesHelper')
 
 const BATCH_SIZE = 500
@@ -33,6 +34,60 @@ class DisparoFilaError extends Error {
     this.name = 'DisparoFilaError'
     this.code = code
   }
+}
+
+function erroTexto(err) {
+  return [
+    err?.message,
+    err?.details,
+    err?.hint,
+    err?.code,
+    err?.cause?.message,
+    err?.cause?.code,
+  ].filter(Boolean).join(' ')
+}
+
+function isUniqueViolation(err) {
+  const code = err?.code || err?.cause?.code
+  return code === '23505' || /duplicate key|unique constraint|already exists/i.test(erroTexto(err))
+}
+
+function isFkViolation(err) {
+  const code = err?.code || err?.cause?.code
+  return code === '23503' || /foreign key|violates foreign key/i.test(erroTexto(err))
+}
+
+function mensagemErroFila(err) {
+  if (err instanceof DisparoFilaError) return err.message
+  const msg = erroTexto(err)
+  if (isFkViolation(err)) {
+    if (/variacao/i.test(msg)) {
+      return 'Há destinatários com variação de mensagem inválida. Volte à etapa de mensagens e redistribua.'
+    }
+    if (/whatsapp_instances|instancia_id/i.test(msg)) {
+      return 'Há destinatários com instância WhatsApp inválida ou removida. Volte à etapa de instâncias.'
+    }
+    if (/usuarios|iniciado_por|usuario_id/i.test(msg)) {
+      return 'Não foi possível registrar quem iniciou o disparo. Faça login novamente.'
+    }
+    return 'Referência inválida ao gravar a fila. Verifique instâncias, mensagens e destinatários.'
+  }
+  if (/no unique or exclusion constraint matching the ON CONFLICT/i.test(msg)) {
+    return 'Constraint de idempotência da fila ausente no schema cache. Tente novamente; se persistir, recarregue o schema do PostgREST.'
+  }
+  if (isUniqueViolation(err)) {
+    return 'Esta versão da campanha já possui uma execução. Atualize a página.'
+  }
+  if (/proxima_tentativa_em|null value/i.test(msg)) {
+    return 'Não foi possível calcular o horário da fila. Revise fuso e janelas de envio.'
+  }
+  const raw = String(err?.message || '').slice(0, 280)
+  return raw || 'Erro ao gerar a fila de disparo.'
+}
+
+function isoValidoOuAgora(valor) {
+  if (valor && Date.parse(valor)) return valor
+  return new Date().toISOString()
 }
 
 function chaveIdempotencia(campanhaId, versao, destinatarioId) {
@@ -124,14 +179,16 @@ function limitesEfetivos(row) {
 }
 
 function resolverInicioDisparo(campanha, limites) {
-  const fuso = limites?.fuso_horario || FUSO_PADRAO
+  const fusoRaw = limites?.fuso_horario || FUSO_PADRAO
+  const fuso = fusoValido(fusoRaw) ? fusoRaw : FUSO_PADRAO
   if (campanha.status === 'agendada' || limites?.inicio_modo === 'agendado') {
     if (limites?.agendado_para) {
       const ag = DateTime.fromISO(limites.agendado_para, { zone: 'utc' }).setZone(fuso)
       if (ag.isValid) return ag
     }
   }
-  return DateTime.utc().setZone(fuso)
+  const agora = DateTime.utc().setZone(fuso)
+  return agora.isValid ? agora : DateTime.utc()
 }
 
 function janelasDaInstancia(janelas, instanciaId, override) {
@@ -228,28 +285,105 @@ function resolverPlanejadoPara(campanha, limites) {
   return resolverInicioDisparo(campanha, limites).toUTC().toISO()
 }
 
-async function contarItensPorChaves(chaves) {
-  if (!chaves.length) return 0
-  const { count, error } = await supabase
-    .from('disparo_fila_itens')
-    .select('id', { count: 'exact', head: true })
-    .in('chave_idempotencia', chaves)
-  if (error) throw error
-  return count ?? 0
+async function buscarChavesExistentes(chaves) {
+  const found = new Set()
+  if (!chaves.length) return found
+  for (let i = 0; i < chaves.length; i += BATCH_SIZE) {
+    const slice = chaves.slice(i, i + BATCH_SIZE)
+    const { data, error } = await supabase
+      .from('disparo_fila_itens')
+      .select('chave_idempotencia')
+      .in('chave_idempotencia', slice)
+    if (error) throw error
+    for (const row of data ?? []) {
+      if (row?.chave_idempotencia) found.add(row.chave_idempotencia)
+    }
+  }
+  return found
 }
 
-async function upsertFilaChunk(rows) {
+async function inserirFilaChunk(rows) {
   if (!rows.length) return
   const { error } = await supabase
     .from('disparo_fila_itens')
-    .upsert(rows, { onConflict: 'chave_idempotencia', ignoreDuplicates: true })
-  if (error) throw error
+    .insert(rows)
+  if (!error) return
+  if (isUniqueViolation(error)) return
+  throw error
+}
+
+function asUserId(v) {
+  const n = Number(v)
+  return Number.isInteger(n) && n > 0 ? n : null
+}
+
+async function validarReferenciasDestinatarios(destinatarios, campId, cid) {
+  const instIds = [...new Set(destinatarios.map((d) => d.instancia_id).filter(Boolean))]
+  const varIds = [...new Set(destinatarios.map((d) => d.variacao_id).filter(Boolean))]
+
+  if (instIds.length) {
+    const { data: inst, error } = await supabase
+      .from('whatsapp_instances')
+      .select('id')
+      .in('id', instIds)
+      .eq('company_id', cid)
+    if (error) throw error
+    const ok = new Set((inst ?? []).map((i) => i.id))
+    const faltando = instIds.filter((id) => !ok.has(id))
+    if (faltando.length) {
+      throw new DisparoFilaError(
+        `Instância WhatsApp ausente ou de outro tenant (id ${faltando[0]}). Volte à etapa de instâncias e redistribua.`,
+      )
+    }
+  }
+
+  if (varIds.length) {
+    const { data: vars, error } = await supabase
+      .from('disparo_campanha_variacoes')
+      .select('id')
+      .in('id', varIds)
+      .eq('campanha_id', campId)
+      .eq('company_id', cid)
+    if (error) throw error
+    const ok = new Set((vars ?? []).map((v) => v.id))
+    const faltando = varIds.filter((id) => !ok.has(id))
+    if (faltando.length) {
+      throw new DisparoFilaError(
+        'Há destinatários com variação de mensagem inválida. Volte à etapa de mensagens e redistribua.',
+      )
+    }
+  }
+}
+
+async function retornoExecucaoExistente(existente) {
+  const { count: totalItens } = await supabase
+    .from('disparo_fila_itens')
+    .select('id', { count: 'exact', head: true })
+    .eq('execucao_id', existente.id)
+
+  return {
+    execucao: existente,
+    gerados: 0,
+    ignorados: existente.total_ignorados ?? 0,
+    ja_existentes: totalItens ?? 0,
+    idempotente: true,
+  }
 }
 
 /**
  * Gera execução e itens da fila para uma campanha confirmada.
  */
-async function gerarFilaParaCampanha({ companyId, campanhaId, userId, dryRun }) {
+async function gerarFilaParaCampanha(opts) {
+  try {
+    return await gerarFilaParaCampanhaInner(opts)
+  } catch (err) {
+    if (err instanceof DisparoFilaError) throw err
+    console.error('[disparo:fila] gerarFilaParaCampanha', err)
+    throw new DisparoFilaError(mensagemErroFila(err), err?.code || 'DB')
+  }
+}
+
+async function gerarFilaParaCampanhaInner({ companyId, campanhaId, userId, dryRun }) {
   const cid = Number(companyId)
   const campId = Number(campanhaId)
   if (!cid || !campId) {
@@ -258,6 +392,7 @@ async function gerarFilaParaCampanha({ companyId, campanhaId, userId, dryRun }) 
 
   const flags = getDisparoFlags()
   const effectiveDryRun = dryRun !== undefined ? Boolean(dryRun) : flags.dryRun
+  const uid = asUserId(userId)
 
   const { data: campanha, error: campErr } = await supabase
     .from('disparo_campanhas')
@@ -283,20 +418,7 @@ async function gerarFilaParaCampanha({ companyId, campanhaId, userId, dryRun }) 
   }
 
   const existente = await buscarExecucaoAtiva(campId, cid, versao)
-  if (existente) {
-    const { count: totalItens } = await supabase
-      .from('disparo_fila_itens')
-      .select('id', { count: 'exact', head: true })
-      .eq('execucao_id', existente.id)
-
-    return {
-      execucao: existente,
-      gerados: 0,
-      ignorados: existente.total_ignorados ?? 0,
-      ja_existentes: totalItens ?? 0,
-      idempotente: true,
-    }
-  }
+  if (existente) return retornoExecucaoExistente(existente)
 
   const limitesRow = await carregarLimites(campId, cid)
   const limites = limitesEfetivos(limitesRow)
@@ -306,6 +428,8 @@ async function gerarFilaParaCampanha({ companyId, campanhaId, userId, dryRun }) 
   if (!destinatarios.length) {
     throw new DisparoFilaError('Nenhum destinatário válido com instância e variação atribuídas.')
   }
+
+  await validarReferenciasDestinatarios(destinatarios, campId, cid)
 
   const exclusoes = await carregarExclusoesAtivas(cid)
   const horariosPorDestino = montarHorariosFila({
@@ -317,7 +441,7 @@ async function gerarFilaParaCampanha({ companyId, campanhaId, userId, dryRun }) 
     overrides,
   })
 
-  const { data: execucao, error: execErr } = await supabase
+  const { data: execucaoInserida, error: execErr } = await supabase
     .from('disparo_execucoes')
     .insert({
       company_id: cid,
@@ -326,16 +450,24 @@ async function gerarFilaParaCampanha({ companyId, campanhaId, userId, dryRun }) 
       versao,
       config_hash: campanha.config_hash,
       status: 'aguardando',
-      iniciado_por: userId ?? null,
+      iniciado_por: uid,
       dry_run: effectiveDryRun,
       total_itens: 0,
     })
     .select('*')
     .single()
-  if (execErr) throw execErr
+  if (execErr) {
+    if (isUniqueViolation(execErr)) {
+      const race = await buscarExecucaoAtiva(campId, cid, versao)
+      if (race) return retornoExecucaoExistente(race)
+    }
+    throw execErr
+  }
+  const execucao = execucaoInserida
 
   const todasChaves = destinatarios.map((d) => chaveIdempotencia(campId, versao, d.id))
-  const jaExistentesAntes = await contarItensPorChaves(todasChaves)
+  const jaExistentesSet = await buscarChavesExistentes(todasChaves)
+  const jaExistentes = jaExistentesSet.size
 
   let gerados = 0
   let ignorados = 0
@@ -344,7 +476,9 @@ async function gerarFilaParaCampanha({ companyId, campanhaId, userId, dryRun }) 
   for (const dest of destinatarios) {
     const chave = chaveIdempotencia(campId, versao, dest.id)
     const excluido = exclusoes.has(String(dest.telefone_normalizado))
-    const planejadoPara = horariosPorDestino.get(dest.id) || resolverPlanejadoPara(campanha, limites)
+    const planejadoPara = isoValidoOuAgora(
+      horariosPorDestino.get(dest.id) || resolverPlanejadoPara(campanha, limites),
+    )
 
     if (excluido) {
       rows.push({
@@ -385,13 +519,12 @@ async function gerarFilaParaCampanha({ companyId, campanhaId, userId, dryRun }) 
     }
   }
 
-  for (let i = 0; i < rows.length; i += BATCH_SIZE) {
-    await upsertFilaChunk(rows.slice(i, i + BATCH_SIZE))
+  const rowsNovas = rows.filter((r) => !jaExistentesSet.has(r.chave_idempotencia))
+  for (let i = 0; i < rowsNovas.length; i += BATCH_SIZE) {
+    await inserirFilaChunk(rowsNovas.slice(i, i + BATCH_SIZE))
   }
 
-  const jaExistentesDepois = await contarItensPorChaves(todasChaves)
-  const inseridosNovos = Math.max(0, jaExistentesDepois - jaExistentesAntes)
-  const jaExistentes = jaExistentesAntes
+  const inseridosNovos = rowsNovas.length
 
   await recalcularContadores(execucao.id, cid)
 
@@ -409,22 +542,26 @@ async function gerarFilaParaCampanha({ companyId, campanhaId, userId, dryRun }) 
     .select('*')
     .eq('id', execucao.id)
     .eq('company_id', cid)
-    .single()
+    .maybeSingle()
 
-  await registrarEvento({
-    companyId: cid,
-    execucaoId: execucao.id,
-    campanhaId: campId,
-    tipo: 'fila_gerada',
-    payload: {
-      versao,
-      gerados: inseridosNovos,
-      ignorados,
-      ja_existentes: jaExistentes,
-      dry_run: effectiveDryRun,
-    },
-    usuarioId: userId ?? null,
-  })
+  try {
+    await registrarEvento({
+      companyId: cid,
+      execucaoId: execucao.id,
+      campanhaId: campId,
+      tipo: 'fila_gerada',
+      payload: {
+        versao,
+        gerados: inseridosNovos,
+        ignorados,
+        ja_existentes: jaExistentes,
+        dry_run: effectiveDryRun,
+      },
+      usuarioId: uid,
+    })
+  } catch (evErr) {
+    console.warn('[disparo:fila] evento fila_gerada:', evErr?.message || evErr)
+  }
 
   return {
     execucao: execAtualizada || execucao,
@@ -637,4 +774,6 @@ module.exports = {
   montarHorariosFila,
   encerrarExecucaoAtivaParaReedicao,
   DisparoFilaError,
+  isUniqueViolation,
+  mensagemErroFila,
 }

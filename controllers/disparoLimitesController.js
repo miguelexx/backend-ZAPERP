@@ -268,9 +268,14 @@ async function revalidarInstanciasConectadas(campanhaId, companyId) {
     .eq('company_id', companyId)
   if (iErr) throw iErr
 
-  const desconectadas = (instancias ?? [])
+  const found = new Map((instancias ?? []).map((i) => [i.id, i]))
+  const ausentes = ids
+    .filter((id) => !found.has(id))
+    .map((id) => ({ id, nome: `#${id}`, status: 'ausente' }))
+  const inativas = (instancias ?? [])
     .filter((i) => i.ativo === false)
     .map((i) => ({ id: i.id, nome: i.nome, status: i.status }))
+  const desconectadas = [...ausentes, ...inativas]
 
   // Tenta corrigir status stale via UltraMSG (parser aninhado)
   try {
@@ -293,8 +298,14 @@ async function revalidarInstanciasConectadas(campanhaId, companyId) {
     }))
   } catch (_) { /* getStatus indisponível */ }
 
-  // ok=true se todas ativas (status de conexão não bloqueia mais o wizard/revisão)
-  return { ok: desconectadas.length === 0, desconectadas }
+  // ok=true se todas as instâncias da campanha existem e estão ativas
+  return {
+    ok: desconectadas.length === 0,
+    desconectadas,
+    mensagem: ausentes.length
+      ? 'Instância da campanha não encontrada. Volte à etapa de instâncias e selecione um WhatsApp ativo.'
+      : undefined,
+  }
 }
 
 async function contarDestinatarios(campanhaId, companyId) {

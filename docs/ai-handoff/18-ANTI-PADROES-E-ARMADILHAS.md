@@ -307,3 +307,21 @@ classifyQuestion → IntentSchema → switch → q*()  // só SELECT + company_i
 ```
 
 Não fundir `taxaConversao` deste payload com `kpis.taxa_conversao_percent` do dashboard (CRM legado, `null`). Não reintroduzir sync de nome de contato pela IA. Mapa: [22](22-AI-DASHBOARD-MODULARIZACAO.md).
+
+---
+
+## 24. Iniciar disparo — fila não usa UPSERT com ON CONFLICT
+
+**Armadilha:** `upsert(..., { onConflict: 'chave_idempotencia' })` exige unique visível no schema cache do PostgREST. Se a tabela foi criada sem a constraint (CREATE TABLE IF NOT EXISTS de rascunho antigo) ou o cache não recarregou, o `POST /execucao/iniciar` vira **500** opaco mesmo na primeira geração da fila.
+
+```js
+// ❌ ERRADO — ON CONFLICT falha o statement inteiro se a unique não está no cache
+.upsert(rows, { onConflict: 'chave_idempotencia', ignoreDuplicates: true })
+
+// ✅ CORRETO — insert das chaves novas; 23505 de corrida é ignorado; unique de execução ativa é reaproveitada
+buscarChavesExistentes(chaves)
+.insert(rowsNovas)
+// insert disparo_execucoes: se 23505, maybeSingle da execução ativa e seguir
+```
+
+Erros de FK (instância/variação ausente) e unique viram `DisparoFilaError` → HTTP **422** com mensagem, não 500. Wizard de limites **não** dá POST `/limites` se a campanha já está `pronta`/`agendada` (isso gerava 422 no console ao navegar).

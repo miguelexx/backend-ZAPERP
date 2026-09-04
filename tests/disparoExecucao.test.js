@@ -261,6 +261,33 @@ describe('Etapa 7 Execução — iniciar campanha', () => {
     expect(res.body.idempotente).toBe(true)
     expect(gerarFilaParaCampanha).not.toHaveBeenCalled()
   })
+
+  it('devolve 422 (não 500) quando a geração da fila falha com DisparoFilaError', async () => {
+    const { DisparoFilaError } = require('../services/disparoFilaService')
+    gerarFilaParaCampanha.mockRejectedValue(
+      new DisparoFilaError('Instância WhatsApp ausente ou de outro tenant. Volte à etapa de instâncias.', 'DB'),
+    )
+
+    supabase.from.mockImplementation((table) => {
+      if (table === 'disparo_campanhas') {
+        return mockChain({ data: campanhaPronta, error: null })
+      }
+      if (table === 'disparo_campanha_limites') {
+        return mockChain({ data: { inicio_modo: 'imediato', agendado_para: null }, error: null })
+      }
+      if (table === 'disparo_worker_heartbeat') {
+        return mockHeartbeatSaudavel()
+      }
+      return mockChain({ data: null, error: null })
+    })
+
+    const res = await request(app)
+      .post('/api/disparo/campanhas/1/execucao/iniciar')
+      .set('Authorization', `Bearer ${token()}`)
+
+    expect(res.status).toBe(422)
+    expect(res.body.error).toMatch(/instância/i)
+  })
 })
 
 describe('Etapa 7 Execução — pausar e cancelar', () => {

@@ -359,6 +359,62 @@ describe('Etapa 5 — Instância status / ativa', () => {
     expect(res.status).toBe(200)
     expect(res.body.ok).toBe(false)
   })
+
+  it('validarConfigLimites falha se instância da campanha não existe mais', async () => {
+    supabase.from.mockImplementation((table) => {
+      if (table === 'disparo_campanhas') return mockChain({ data: campanhaBase, error: null })
+      if (table === 'disparo_campanha_limites') {
+        return mockChain({
+          data: {
+            campanha_id: 1,
+            company_id: COMPANY_ID,
+            limite_por_hora: 60,
+            limite_por_dia: 500,
+            intervalo_min_sec: 8,
+            intervalo_max_sec: 20,
+            lote_tamanho: 20,
+            pausa_lote_min_sec: 60,
+            pausa_lote_max_sec: 180,
+            fuso_horario: 'America/Sao_Paulo',
+            inicio_modo: 'imediato',
+            perfil: 'moderado',
+            pausa_auto_desconexao: true,
+            pausa_auto_erros_consecutivos: 5,
+            pausa_auto_taxa_falha_pct: 25,
+            confirmada: false,
+          },
+          error: null,
+        })
+      }
+      if (table === 'disparo_campanha_janelas') {
+        return mockChain({
+          data: [
+            { dia_semana: 1, hora_inicio: '08:00:00', hora_fim: '18:00:00', ativo: true, instancia_id: null },
+          ],
+          error: null,
+        })
+      }
+      if (table === 'disparo_campanha_instancias') {
+        return mockChain({ data: [{ instancia_id: 7 }], error: null })
+      }
+      if (table === 'whatsapp_instances') {
+        return mockChain({ data: [], error: null })
+      }
+      if (table === 'disparo_campanha_destinatarios') {
+        return mockChain({ data: [{ id: 1 }], error: null, count: 10 })
+      }
+      return mockChain({ data: [], error: null, count: 0 })
+    })
+
+    const res = await request(app)
+      .post('/api/disparo/campanhas/1/limites/validar')
+      .set('Authorization', `Bearer ${token()}`)
+      .send({})
+
+    expect(res.status).toBe(200)
+    expect(res.body.ok).toBe(false)
+    expect(String(res.body.erros || res.body.error || '')).toMatch(/não encontrada|inativa|Instância/i)
+  })
 })
 
 describe('Etapa 5 — Conflitos entre campanhas', () => {

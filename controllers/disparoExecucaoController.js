@@ -273,7 +273,7 @@ exports.iniciarCampanha = async (req, res) => {
   try {
     if (!requireAdmin(req, res)) return
     const companyId = Number(req.user.company_id)
-    const userId = req.user?.id ?? null
+    const userId = positiveInt(req.user?.id)
     const campanhaId = positiveInt(req.params.id)
     if (!campanhaId) return res.status(400).json({ error: 'ID de campanha inválido.' })
 
@@ -326,6 +326,9 @@ exports.iniciarCampanha = async (req, res) => {
 
     const agora = new Date().toISOString()
     let execucao = filaResult.execucao
+    if (!execucao?.id) {
+      return res.status(422).json({ error: 'Não foi possível criar a execução da campanha.' })
+    }
 
     if (execucao.status === 'em_execucao' && campanha.status === 'em_execucao') {
       return res.json({
@@ -353,9 +356,12 @@ exports.iniciarCampanha = async (req, res) => {
       .eq('id', execucao.id)
       .eq('company_id', companyId)
       .select(EXECUCAO_SELECT)
-      .single()
+      .maybeSingle()
     if (execErr) throw execErr
-    execucao = execAtualizada
+    if (execAtualizada) execucao = execAtualizada
+    else {
+      execucao = { ...execucao, status: 'em_execucao', iniciado_em: agora, iniciado_por: userId }
+    }
 
     const { error: campErr } = await supabase
       .from('disparo_campanhas')
@@ -364,20 +370,24 @@ exports.iniciarCampanha = async (req, res) => {
       .eq('company_id', companyId)
     if (campErr) throw campErr
 
-    await registrarEvento({
-      companyId,
-      execucaoId: execucao.id,
-      campanhaId,
-      tipo: 'iniciada',
-      payload: {
-        versao: execucao.versao,
-        dry_run: execucao.dry_run,
-        fila_gerada: !filaResult.idempotente,
-        gerados: filaResult.gerados,
-        ignorados: filaResult.ignorados,
-      },
-      usuarioId: userId,
-    })
+    try {
+      await registrarEvento({
+        companyId,
+        execucaoId: execucao.id,
+        campanhaId,
+        tipo: 'iniciada',
+        payload: {
+          versao: execucao.versao,
+          dry_run: execucao.dry_run,
+          fila_gerada: !filaResult.idempotente,
+          gerados: filaResult.gerados,
+          ignorados: filaResult.ignorados,
+        },
+        usuarioId: userId,
+      })
+    } catch (evErr) {
+      console.warn('[disparo:execucao] evento iniciada:', evErr?.message || evErr)
+    }
 
     const io = getIo(req)
     emitDisparo(io, companyId, EVENTS.CAMPANHA_INICIADA, {
@@ -400,7 +410,14 @@ exports.iniciarCampanha = async (req, res) => {
     })
   } catch (err) {
     console.error('[disparo:execucao] iniciarCampanha', err)
-    res.status(500).json({ error: 'Erro ao iniciar execução da campanha.' })
+    if (err instanceof DisparoFilaError) {
+      return res.status(422).json({ error: err.message, code: err.code })
+    }
+    const detail = String(err?.message || err?.details || '').slice(0, 300)
+    res.status(500).json({
+      error: detail || 'Erro ao iniciar execução da campanha.',
+      code: err?.code || 'INICIAR_FALHOU',
+    })
   }
 }
 
