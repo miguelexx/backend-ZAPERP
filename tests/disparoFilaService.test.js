@@ -216,6 +216,9 @@ describe('disparoFilaService — idempotência', () => {
       if (table === 'disparo_campanha_revisoes') {
         return mockChain({ data: { id: 7, versao: 2, hash: 'abc', status: 'ativa' }, error: null })
       }
+      if (table === 'disparo_campanha_destinatarios') {
+        return mockChain({ data: destinatarios, error: null })
+      }
       if (table === 'disparo_execucoes') {
         return mockChain({ data: execExistente, error: null })
       }
@@ -304,7 +307,7 @@ describe('disparoFilaService — idempotência', () => {
         chain.select = jest.fn((cols, opts) => {
           if (opts?.count === 'exact') {
             chain._mode = 'count'
-          } else if (cols === 'chave_idempotencia') {
+          } else if (String(cols || '').includes('chave_idempotencia')) {
             chain._mode = 'keys'
           } else {
             chain._mode = 'status'
@@ -401,6 +404,87 @@ describe('disparoFilaService — idempotência', () => {
     const result = await gerarFilaParaCampanha({ companyId: 10, campanhaId: 1, userId: 5 })
     expect(result.idempotente).toBe(true)
     expect(result.execucao.id).toBe(50)
+  })
+
+  it('preenche execução existente quando a fila está vazia', async () => {
+    const execExistente = {
+      id: 50,
+      company_id: 10,
+      campanha_id: 1,
+      versao: 2,
+      status: 'em_execucao',
+      total_ignorados: 0,
+    }
+    let insertRows = null
+    let execInsert = jest.fn()
+
+    supabase.from.mockImplementation((table) => {
+      if (table === 'disparo_campanhas') {
+        return mockChain({ data: { ...campanhaPronta, status: 'em_execucao' }, error: null })
+      }
+      if (table === 'disparo_campanha_revisoes') {
+        return mockChain({ data: { id: 7, versao: 2, hash: 'abc', status: 'ativa' }, error: null })
+      }
+      if (table === 'disparo_execucoes') {
+        const chain = mockChain({ data: execExistente, error: null })
+        chain.insert = execInsert.mockImplementation(() => chain)
+        return chain
+      }
+      if (table === 'disparo_campanha_limites') {
+        return mockChain({ data: { inicio_modo: 'imediato', agendado_para: null, fuso_horario: 'America/Sao_Paulo' }, error: null })
+      }
+      if (table === 'disparo_campanha_destinatarios') {
+        return mockChain({ data: destinatarios, error: null })
+      }
+      if (table === 'whatsapp_instances') {
+        return mockChain({ data: [{ id: 5 }], error: null })
+      }
+      if (table === 'disparo_campanha_variacoes') {
+        return mockChain({ data: [{ id: 30 }], error: null })
+      }
+      if (table === 'disparo_exclusoes') {
+        return mockChain({ data: [], error: null })
+      }
+      if (table === 'disparo_fila_itens') {
+        const chain = mockChain({ data: [], error: null, count: 0 })
+        chain.insert = jest.fn((rows) => {
+          insertRows = rows
+          return chain
+        })
+        chain.update = jest.fn(() => chain)
+        chain.in = jest.fn(() => chain)
+        chain.select = jest.fn((cols, opts) => {
+          if (opts?.count === 'exact') chain._mode = 'count'
+          else if (String(cols || '').includes('chave_idempotencia')) chain._mode = 'keys'
+          else chain._mode = 'status'
+          return chain
+        })
+        chain.then = (resolve) => {
+          if (chain._mode === 'status') {
+            return Promise.resolve({
+              data: [{ status: 'pendente' }, { status: 'pendente' }],
+              error: null,
+            }).then(resolve)
+          }
+          return Promise.resolve({ data: [], error: null, count: 0 }).then(resolve)
+        }
+        return chain
+      }
+      if (table === 'disparo_execucao_eventos') {
+        return mockChain({ data: null, error: null })
+      }
+      return mockChain({ data: null, error: null })
+    })
+
+    const result = await gerarFilaParaCampanha({ companyId: 10, campanhaId: 1, userId: 5 })
+
+    expect(execInsert).not.toHaveBeenCalled()
+    expect(result.idempotente).toBe(false)
+    expect(result.execucao.id).toBe(50)
+    expect(insertRows).toBeTruthy()
+    expect(insertRows.length).toBe(2)
+    expect(insertRows.map((r) => r.execucao_id)).toEqual([50, 50])
+    expect(insertRows.every((r) => r.status === 'pendente')).toBe(true)
   })
 
   it('converte erro de ON CONFLICT em DisparoFilaError', () => {

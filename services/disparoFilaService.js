@@ -16,6 +16,9 @@ const {
 
 const BATCH_SIZE = 500
 const EXECUCAO_ATIVA = ['aguardando', 'em_execucao', 'pausada']
+const STATUS_PERMITE_FILA = new Set(['pronta', 'agendada', 'em_execucao', 'pausada'])
+const STATUS_PERMITE_NOVA_EXECUCAO = new Set(['pronta', 'agendada'])
+const STATUS_REATRIBUIVEL = new Set(['pendente', 'reservada', 'cancelada', 'ignorada'])
 
 const CAMPANHA_SELECT = [
   'id', 'company_id', 'status', 'versao_atual', 'config_hash',
@@ -96,7 +99,7 @@ function chaveIdempotencia(campanhaId, versao, destinatarioId) {
 
 function assertCampanhaPronta(campanha) {
   const status = String(campanha?.status || '')
-  if (status !== 'pronta' && status !== 'agendada') {
+  if (!STATUS_PERMITE_FILA.has(status)) {
     throw new DisparoFilaError(
       `Campanha deve estar com status "pronta" ou "agendada" (atual: ${status || 'desconhecido'}).`,
     )
@@ -285,21 +288,67 @@ function resolverPlanejadoPara(campanha, limites) {
   return resolverInicioDisparo(campanha, limites).toUTC().toISO()
 }
 
-async function buscarChavesExistentes(chaves) {
-  const found = new Set()
+async function contarItensDaExecucao(execucaoId, companyId) {
+  const { count, error } = await supabase
+    .from('disparo_fila_itens')
+    .select('id', { count: 'exact', head: true })
+    .eq('execucao_id', execucaoId)
+    .eq('company_id', companyId)
+  if (error) throw error
+  return count ?? 0
+}
+
+async function buscarItensPorChaves(chaves, campanhaId, companyId) {
+  const found = []
   if (!chaves.length) return found
   for (let i = 0; i < chaves.length; i += BATCH_SIZE) {
     const slice = chaves.slice(i, i + BATCH_SIZE)
     const { data, error } = await supabase
       .from('disparo_fila_itens')
-      .select('chave_idempotencia')
+      .select('id, chave_idempotencia, execucao_id, status')
       .in('chave_idempotencia', slice)
+      .eq('campanha_id', campanhaId)
+      .eq('company_id', companyId)
     if (error) throw error
-    for (const row of data ?? []) {
-      if (row?.chave_idempotencia) found.add(row.chave_idempotencia)
-    }
+    found.push(...(data ?? []))
   }
   return found
+}
+
+async function atualizarFilaPorIds(ids, companyId, payload) {
+  if (!ids.length) return
+  for (let i = 0; i < ids.length; i += BATCH_SIZE) {
+    const { error } = await supabase
+      .from('disparo_fila_itens')
+      .update(payload)
+      .in('id', ids.slice(i, i + BATCH_SIZE))
+      .eq('company_id', companyId)
+    if (error) throw error
+  }
+}
+
+async function reatribuirItensParaExecucao(itens, execucaoId, companyId, agora) {
+  if (!itens.length) return
+  const base = {
+    execucao_id: execucaoId,
+    worker_id: null,
+    lease_inicio: null,
+    lease_ate: null,
+    atualizado_em: agora,
+  }
+  const canceladas = itens.filter((i) => i.status === 'cancelada').map((i) => i.id)
+  const reservadas = itens.filter((i) => i.status === 'reservada').map((i) => i.id)
+  const demais = itens
+    .filter((i) => i.status !== 'cancelada' && i.status !== 'reservada')
+    .map((i) => i.id)
+
+  await atualizarFilaPorIds(canceladas, companyId, {
+    ...base,
+    status: 'pendente',
+    cancelado_em: null,
+  })
+  await atualizarFilaPorIds(reservadas, companyId, { ...base, status: 'pendente' })
+  await atualizarFilaPorIds(demais, companyId, base)
 }
 
 async function inserirFilaChunk(rows) {
@@ -355,17 +404,14 @@ async function validarReferenciasDestinatarios(destinatarios, campId, cid) {
   }
 }
 
-async function retornoExecucaoExistente(existente) {
-  const { count: totalItens } = await supabase
-    .from('disparo_fila_itens')
-    .select('id', { count: 'exact', head: true })
-    .eq('execucao_id', existente.id)
+async function retornoExecucaoExistente(existente, companyId) {
+  const totalItens = await contarItensDaExecucao(existente.id, companyId ?? existente.company_id)
 
   return {
     execucao: existente,
     gerados: 0,
     ignorados: existente.total_ignorados ?? 0,
-    ja_existentes: totalItens ?? 0,
+    ja_existentes: totalItens,
     idempotente: true,
   }
 }
@@ -417,20 +463,23 @@ async function gerarFilaParaCampanhaInner({ companyId, campanhaId, userId, dryRu
     )
   }
 
-  const existente = await buscarExecucaoAtiva(campId, cid, versao)
-  if (existente) return retornoExecucaoExistente(existente)
-
-  const limitesRow = await carregarLimites(campId, cid)
-  const limites = limitesEfetivos(limitesRow)
-  const janelas = await carregarJanelas(campId, cid)
-  const overrides = await carregarOverridesInstancia(campId, cid)
   const destinatarios = await carregarDestinatarios(campId, cid)
   if (!destinatarios.length) {
     throw new DisparoFilaError('Nenhum destinatário válido com instância e variação atribuídas.')
   }
 
+  const existente = await buscarExecucaoAtiva(campId, cid, versao)
+  if (existente) {
+    const n = await contarItensDaExecucao(existente.id, cid)
+    if (n >= destinatarios.length) return retornoExecucaoExistente(existente, cid)
+  }
+
   await validarReferenciasDestinatarios(destinatarios, campId, cid)
 
+  const limitesRow = await carregarLimites(campId, cid)
+  const limites = limitesEfetivos(limitesRow)
+  const janelas = await carregarJanelas(campId, cid)
+  const overrides = await carregarOverridesInstancia(campId, cid)
   const exclusoes = await carregarExclusoesAtivas(cid)
   const horariosPorDestino = montarHorariosFila({
     campanha,
@@ -441,38 +490,44 @@ async function gerarFilaParaCampanhaInner({ companyId, campanhaId, userId, dryRu
     overrides,
   })
 
-  const { data: execucaoInserida, error: execErr } = await supabase
-    .from('disparo_execucoes')
-    .insert({
-      company_id: cid,
-      campanha_id: campId,
-      revisao_id: revisao.id,
-      versao,
-      config_hash: campanha.config_hash,
-      status: 'aguardando',
-      iniciado_por: uid,
-      dry_run: effectiveDryRun,
-      total_itens: 0,
-    })
-    .select('*')
-    .single()
-  if (execErr) {
-    if (isUniqueViolation(execErr)) {
-      const race = await buscarExecucaoAtiva(campId, cid, versao)
-      if (race) return retornoExecucaoExistente(race)
+  let execucao = existente || null
+  if (!execucao) {
+    if (!STATUS_PERMITE_NOVA_EXECUCAO.has(String(campanha.status))) {
+      throw new DisparoFilaError(
+        'Não há execução ativa para completar a fila. Cancele e publique a campanha novamente.',
+      )
     }
-    throw execErr
+    const { data: execucaoInserida, error: execErr } = await supabase
+      .from('disparo_execucoes')
+      .insert({
+        company_id: cid,
+        campanha_id: campId,
+        revisao_id: revisao.id,
+        versao,
+        config_hash: campanha.config_hash,
+        status: 'aguardando',
+        iniciado_por: uid,
+        dry_run: effectiveDryRun,
+        total_itens: 0,
+      })
+      .select('*')
+      .single()
+    if (execErr) {
+      if (isUniqueViolation(execErr)) {
+        const race = await buscarExecucaoAtiva(campId, cid, versao)
+        if (race) {
+          const n = await contarItensDaExecucao(race.id, cid)
+          if (n >= destinatarios.length) return retornoExecucaoExistente(race, cid)
+          execucao = race
+        }
+      }
+      if (!execucao) throw execErr
+    } else {
+      execucao = execucaoInserida
+    }
   }
-  const execucao = execucaoInserida
 
-  const todasChaves = destinatarios.map((d) => chaveIdempotencia(campId, versao, d.id))
-  const jaExistentesSet = await buscarChavesExistentes(todasChaves)
-  const jaExistentes = jaExistentesSet.size
-
-  let gerados = 0
-  let ignorados = 0
   const rows = []
-
   for (const dest of destinatarios) {
     const chave = chaveIdempotencia(campId, versao, dest.id)
     const excluido = exclusoes.has(String(dest.telefone_normalizado))
@@ -498,7 +553,6 @@ async function gerarFilaParaCampanhaInner({ companyId, campanhaId, userId, dryRu
         erro_mensagem: 'Telefone na lista de exclusão da empresa.',
         erro_classificacao: 'permanente',
       })
-      ignorados += 1
     } else {
       rows.push({
         company_id: cid,
@@ -515,14 +569,42 @@ async function gerarFilaParaCampanhaInner({ companyId, campanhaId, userId, dryRu
         proxima_tentativa_em: planejadoPara,
         reference_id: null,
       })
-      gerados += 1
     }
   }
 
-  const rowsNovas = rows.filter((r) => !jaExistentesSet.has(r.chave_idempotencia))
+  const todasChaves = rows.map((r) => r.chave_idempotencia)
+  const existentes = await buscarItensPorChaves(todasChaves, campId, cid)
+  const porChave = new Map()
+  for (const row of existentes) {
+    if (row?.chave_idempotencia) porChave.set(row.chave_idempotencia, row)
+  }
+
+  const rowsNovas = []
+  const paraReatribuir = []
+  let jaExistentes = 0
+  for (const row of rows) {
+    const prev = porChave.get(row.chave_idempotencia)
+    if (!prev) {
+      rowsNovas.push(row)
+      continue
+    }
+    if (Number(prev.execucao_id) === Number(execucao.id)) {
+      jaExistentes += 1
+      continue
+    }
+    if (STATUS_REATRIBUIVEL.has(String(prev.status || ''))) {
+      paraReatribuir.push(prev)
+      continue
+    }
+    jaExistentes += 1
+  }
+
   for (let i = 0; i < rowsNovas.length; i += BATCH_SIZE) {
     await inserirFilaChunk(rowsNovas.slice(i, i + BATCH_SIZE))
   }
+
+  const agora = new Date().toISOString()
+  await reatribuirItensParaExecucao(paraReatribuir, execucao.id, cid, agora)
 
   const inseridosNovos = rowsNovas.length
 
@@ -534,8 +616,7 @@ async function gerarFilaParaCampanhaInner({ companyId, campanhaId, userId, dryRu
     .eq('execucao_id', execucao.id)
     .eq('company_id', cid)
 
-  gerados = (itensExec ?? []).filter((i) => i.status === 'pendente').length
-  ignorados = (itensExec ?? []).filter((i) => i.status === 'ignorada').length
+  const ignorados = (itensExec ?? []).filter((i) => i.status === 'ignorada').length
 
   const { data: execAtualizada } = await supabase
     .from('disparo_execucoes')
@@ -555,6 +636,7 @@ async function gerarFilaParaCampanhaInner({ companyId, campanhaId, userId, dryRu
         gerados: inseridosNovos,
         ignorados,
         ja_existentes: jaExistentes,
+        reatribuido: paraReatribuir.length,
         dry_run: effectiveDryRun,
       },
       usuarioId: uid,
@@ -568,7 +650,8 @@ async function gerarFilaParaCampanhaInner({ companyId, campanhaId, userId, dryRu
     gerados: inseridosNovos,
     ignorados,
     ja_existentes: jaExistentes,
-    idempotente: false,
+    reatribuido: paraReatribuir.length,
+    idempotente: inseridosNovos === 0 && paraReatribuir.length === 0,
   }
 }
 

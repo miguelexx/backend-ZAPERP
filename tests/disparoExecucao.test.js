@@ -239,7 +239,22 @@ describe('Etapa 7 Execução — iniciar campanha', () => {
     expect(gerarFilaParaCampanha).not.toHaveBeenCalled()
   })
 
-  it('idempotente quando campanha já em_execucao', async () => {
+  it('completa fila vazia quando campanha já em_execucao', async () => {
+    gerarFilaParaCampanha.mockResolvedValue({
+      execucao: {
+        id: 50,
+        company_id: COMPANY_ID,
+        campanha_id: 1,
+        versao: 1,
+        status: 'em_execucao',
+        dry_run: true,
+      },
+      gerados: 2,
+      ignorados: 0,
+      ja_existentes: 0,
+      idempotente: false,
+    })
+
     supabase.from.mockImplementation((table) => {
       if (table === 'disparo_campanhas') {
         return mockChain({ data: { ...campanhaPronta, status: 'em_execucao' }, error: null })
@@ -259,7 +274,10 @@ describe('Etapa 7 Execução — iniciar campanha', () => {
 
     expect(res.status).toBe(200)
     expect(res.body.idempotente).toBe(true)
-    expect(gerarFilaParaCampanha).not.toHaveBeenCalled()
+    expect(res.body.fila.gerados).toBe(2)
+    expect(gerarFilaParaCampanha).toHaveBeenCalledWith(
+      expect.objectContaining({ companyId: COMPANY_ID, campanhaId: 1 }),
+    )
   })
 
   it('devolve 422 (não 500) quando a geração da fila falha com DisparoFilaError', async () => {

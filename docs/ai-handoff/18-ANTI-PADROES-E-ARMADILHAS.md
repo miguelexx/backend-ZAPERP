@@ -319,9 +319,23 @@ Não fundir `taxaConversao` deste payload com `kpis.taxa_conversao_percent` do d
 .upsert(rows, { onConflict: 'chave_idempotencia', ignoreDuplicates: true })
 
 // ✅ CORRETO — insert das chaves novas; 23505 de corrida é ignorado; unique de execução ativa é reaproveitada
-buscarChavesExistentes(chaves)
+buscarItensPorChaves(chaves, campanhaId, companyId)
 .insert(rowsNovas)
-// insert disparo_execucoes: se 23505, maybeSingle da execução ativa e seguir
+// itens órfãos reatribuíveis da mesma versão: update execucao_id
+// insert disparo_execucoes: se 23505, maybeSingle da execução ativa; se a fila estiver incompleta, preenche
 ```
 
 Erros de FK (instância/variação ausente) e unique viram `DisparoFilaError` → HTTP **422** com mensagem, não 500. Wizard de limites **não** dá POST `/limites` se a campanha já está `pronta`/`agendada` (isso gerava 422 no console ao navegar).
+
+**Armadilha 2:** se o insert da fila falhar depois de criar `disparo_execucoes`, o retry antigo via `buscarExecucaoAtiva` + `return` deixava a campanha **em_execucao com 0 itens**. Pausar/continuar não gerava fila. `POST /iniciar` em `em_execucao` saía cedo sem `gerarFilaParaCampanha`.
+
+```js
+// ❌ ERRADO — execução existente = sucesso mesmo com fila vazia
+if (existente) return retornoExecucaoExistente(existente)
+
+// ✅ CORRETO — só é idempotente se a execução já tem ≥ destinatários na fila
+if (existente && count >= destinatarios.length) return retornoExecucaoExistente(existente, companyId)
+// senão grava/reatribui itens na MESMA execução (pronta|agendada|em_execucao|pausada)
+```
+
+`iniciar` em `em_execucao`/`pausada` e `continuar` chamam `gerarFilaParaCampanha` de novo. Itens `enviada`/`entregue`/`lida` não são reenviados; `cancelada`/`pendente` órfãs da mesma versão podem ser reatribuídas.

@@ -139,7 +139,7 @@ async function buscarExecucaoAtiva(campanhaId, companyId) {
 
 function assertCampanhaIniciavel(campanha) {
   const status = String(campanha?.status || '')
-  if (status === 'em_execucao') return { ok: true, idempotente: true }
+  if (status === 'em_execucao' || status === 'pausada') return { ok: true, idempotente: true }
   if (status !== 'pronta' && status !== 'agendada') {
     return {
       ok: false,
@@ -285,30 +285,21 @@ exports.iniciarCampanha = async (req, res) => {
       return res.status(iniciavel.status).json({ error: iniciavel.error, status: campanha.status })
     }
 
-    if (iniciavel.idempotente) {
-      const exec = await buscarExecucaoAtiva(campanhaId, companyId)
-      return res.json({
-        ok: true,
-        idempotente: true,
-        campanha_status: campanha.status,
-        execucao: exec,
-        flags: getDisparoFlags(),
-      })
-    }
+    if (!iniciavel.idempotente) {
+      const limites = await carregarLimitesAgendamento(campanhaId, companyId)
+      const agendCheck = await validarAgendamento(campanha, limites)
+      if (!agendCheck.ok) {
+        return res.status(422).json({
+          error: agendCheck.error,
+          agendado_para: agendCheck.agendado_para ?? null,
+        })
+      }
 
-    const limites = await carregarLimitesAgendamento(campanhaId, companyId)
-    const agendCheck = await validarAgendamento(campanha, limites)
-    if (!agendCheck.ok) {
-      return res.status(422).json({
-        error: agendCheck.error,
-        agendado_para: agendCheck.agendado_para ?? null,
+      const workerSaude = await recusarSeWorkerNaoSaudavel(res, {
+        requireLive: getDisparoFlags().dryRun === false,
       })
+      if (!workerSaude) return
     }
-
-    const workerSaude = await recusarSeWorkerNaoSaudavel(res, {
-      requireLive: getDisparoFlags().dryRun === false,
-    })
-    if (!workerSaude) return
 
     let filaResult
     try {
@@ -328,6 +319,21 @@ exports.iniciarCampanha = async (req, res) => {
     let execucao = filaResult.execucao
     if (!execucao?.id) {
       return res.status(422).json({ error: 'Não foi possível criar a execução da campanha.' })
+    }
+
+    if (iniciavel.idempotente) {
+      return res.json({
+        ok: true,
+        idempotente: true,
+        campanha_status: campanha.status,
+        execucao,
+        fila: {
+          gerados: filaResult.gerados,
+          ignorados: filaResult.ignorados,
+          ja_existentes: filaResult.ja_existentes,
+        },
+        flags: getDisparoFlags(),
+      })
     }
 
     if (execucao.status === 'em_execucao' && campanha.status === 'em_execucao') {
@@ -703,6 +709,19 @@ exports.continuar = async (req, res) => {
     const execucao = await buscarExecucaoAtiva(campanhaId, companyId)
     if (!execucao || execucao.status !== 'pausada') {
       return res.status(422).json({ error: 'Nenhuma execução pausada encontrada.' })
+    }
+
+    try {
+      await gerarFilaParaCampanha({
+        companyId,
+        campanhaId,
+        userId,
+      })
+    } catch (err) {
+      if (err instanceof DisparoFilaError) {
+        return res.status(422).json({ error: err.message, code: err.code })
+      }
+      throw err
     }
 
     const workerSaude = await recusarSeWorkerNaoSaudavel(res, {
