@@ -21,7 +21,7 @@ function mockChain(result) {
   const methods = [
     'select', 'eq', 'neq', 'is', 'in', 'ilike', 'or',
     'gte', 'lte', 'limit', 'order', 'range',
-    'insert', 'update',
+    'insert', 'update', 'delete',
   ]
   for (const m of methods) chain[m] = jest.fn(() => chain)
   chain.single = jest.fn().mockResolvedValue(result)
@@ -77,6 +77,13 @@ describe('Disparo de Mensagens — segurança e isolamento', () => {
     const res = await request(app)
       .post('/api/disparo/campanhas/1/arquivar')
       .set('Authorization', `Bearer ${token({ perfil: 'supervisor' })}`)
+    expect(res.status).toBe(403)
+  })
+
+  it('bloqueia atendente em DELETE /disparo/campanhas/:id (403)', async () => {
+    const res = await request(app)
+      .delete('/api/disparo/campanhas/1')
+      .set('Authorization', `Bearer ${token({ perfil: 'atendente' })}`)
     expect(res.status).toBe(403)
   })
 
@@ -183,6 +190,54 @@ describe('Disparo de Mensagens — segurança e isolamento', () => {
 
     expect(res.status).toBe(422)
     expect(res.body.error).toMatch(/arquivada/i)
+  })
+
+  // ── Excluir ─────────────────────────────────────────────────────────────────
+
+  it('bloqueia excluir campanha em execução (422)', async () => {
+    const fetchQuery = mockChain({ data: { id: 7, status: 'em_execucao', nome: 'Live' }, error: null })
+    supabase.from.mockReturnValueOnce(fetchQuery)
+
+    const res = await request(app)
+      .delete('/api/disparo/campanhas/7')
+      .set('Authorization', `Bearer ${token()}`)
+
+    expect(res.status).toBe(422)
+    expect(res.body.error).toMatch(/execu/i)
+  })
+
+  it('exclui campanha filtrando pelo company_id do token', async () => {
+    const fetchQuery = mockChain({ data: { id: 4, status: 'cancelada', nome: 'Velha' }, error: null })
+    const filaQuery = mockChain({ data: null, error: null })
+    const deleteQuery = mockChain({ data: { id: 4 }, error: null })
+    supabase.from
+      .mockReturnValueOnce(fetchQuery)
+      .mockReturnValueOnce(filaQuery)
+      .mockReturnValueOnce(deleteQuery)
+
+    const res = await request(app)
+      .delete('/api/disparo/campanhas/4')
+      .set('Authorization', `Bearer ${token({ company_id: 10 })}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body).toMatchObject({ ok: true, id: 4 })
+    expect(fetchQuery.eq).toHaveBeenCalledWith('company_id', 10)
+    expect(filaQuery.delete).toHaveBeenCalled()
+    expect(filaQuery.eq).toHaveBeenCalledWith('company_id', 10)
+    expect(deleteQuery.delete).toHaveBeenCalled()
+    expect(deleteQuery.eq).toHaveBeenCalledWith('company_id', 10)
+  })
+
+  it('retorna 404 ao excluir campanha de outra empresa', async () => {
+    const fetchQuery = mockChain({ data: null, error: null })
+    supabase.from.mockReturnValueOnce(fetchQuery)
+
+    const res = await request(app)
+      .delete('/api/disparo/campanhas/99')
+      .set('Authorization', `Bearer ${token({ company_id: 10 })}`)
+
+    expect(res.status).toBe(404)
+    expect(fetchQuery.eq).toHaveBeenCalledWith('company_id', 10)
   })
 
   // ── Restaurar ───────────────────────────────────────────────────────────────

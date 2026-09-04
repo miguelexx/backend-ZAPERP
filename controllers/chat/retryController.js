@@ -15,6 +15,7 @@ const {
 const {
   resolveConversationWhatsappInstance,
   resolverTelefoneEnvioDaConversa,
+  resolveConversationProvider,
 } = require('../../services/chat/identity/conversationAddressService')
 const {
   getUsuarioParaEnvioCliente,
@@ -171,7 +172,8 @@ exports.reenviarTextoMensagem = async (req, res) => {
     _reenviosEmAndamento.add(lockKey)
 
     const { nome: usuarioNome } = await getUsuarioParaEnvioCliente(supabase, company_id, req.user?.id)
-    const provider = getProvider()
+    const instanceProvider = await resolveConversationProvider(company_id, whatsappInstanceId)
+    const provider = getProvider({ provider: instanceProvider })
     if (!provider?.sendText) {
       return res.status(503).json({ error: 'Envio de texto indisponível no provedor.', mensagem })
     }
@@ -220,7 +222,8 @@ exports.reenviarMidiaMensagem = async (req, res) => {
     }
     _reenviosEmAndamento.add(lockKey)
 
-    const provider = getProvider()
+    const instanceProvider = await resolveConversationProvider(company_id, whatsappInstanceId)
+    const provider = getProvider({ provider: instanceProvider })
     const baseUrl = (process.env.APP_URL || process.env.BASE_URL || '').replace(/\/$/, '')
     const midia = await resolveForwardMediaForProvider({
       provider,

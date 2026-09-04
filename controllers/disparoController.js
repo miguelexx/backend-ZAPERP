@@ -1,7 +1,7 @@
 /**
  * disparoController.js — CRUD das CAMPANHAS de disparo (entrada do módulo). Rotas: `/disparo/*`.
  * Tabela: `disparo_campanhas`. Handlers: `listarCampanhas`, `obterCampanha`, `criarCampanha`,
- * `editarCampanha`, `arquivarCampanha`, `restaurarCampanha`, `resumoCampanhas`.
+ * `editarCampanha`, `arquivarCampanha`, `restaurarCampanha`, `excluirCampanha`, `resumoCampanhas`.
  *
  * Edição respeita o estado da campanha (`disparoStatusHelper.statusPermiteEdicao`) — campanha em
  * execução/finalizada bloqueia alterações. As demais etapas (destinatários, variações, limites,
@@ -290,6 +290,60 @@ exports.restaurarCampanha = async (req, res) => {
   } catch (err) {
     console.error('[disparo] restaurarCampanha', err)
     res.status(500).json({ error: 'Erro ao restaurar campanha.' })
+  }
+}
+
+// DELETE /disparo/campanhas/:id
+exports.excluirCampanha = async (req, res) => {
+  try {
+    if (!requireAdmin(req, res)) return
+    const companyId = Number(req.user.company_id)
+    const id = positiveInt(req.params.id)
+    if (!id) return res.status(400).json({ error: 'ID de campanha inválido.' })
+
+    const { data: existente, error: fetchErr } = await supabase
+      .from('disparo_campanhas')
+      .select('id, status, nome')
+      .eq('id', id)
+      .eq('company_id', companyId)
+      .maybeSingle()
+
+    if (fetchErr) throw fetchErr
+    if (!existente) return res.status(404).json({ error: 'Campanha não encontrada.' })
+    if (existente.status === 'em_execucao') {
+      return res.status(422).json({
+        error: 'Não é possível excluir uma campanha em execução. Pause ou cancele antes.',
+      })
+    }
+
+    // Fila referencia variações com ON DELETE RESTRICT — apagar itens antes da campanha.
+    const { error: filaErr } = await supabase
+      .from('disparo_fila_itens')
+      .delete()
+      .eq('campanha_id', id)
+      .eq('company_id', companyId)
+    if (filaErr) throw filaErr
+
+    const { data, error } = await supabase
+      .from('disparo_campanhas')
+      .delete()
+      .eq('id', id)
+      .eq('company_id', companyId)
+      .select('id')
+      .maybeSingle()
+    if (error) throw error
+    if (!data) return res.status(404).json({ error: 'Campanha não encontrada.' })
+
+    res.json({ ok: true, id: data.id })
+  } catch (err) {
+    console.error('[disparo] excluirCampanha', err)
+    const code = err?.code || err?.cause?.code
+    if (code === '23503') {
+      return res.status(422).json({
+        error: 'Não foi possível excluir: há registros vinculados. Cancele a execução e tente de novo.',
+      })
+    }
+    res.status(500).json({ error: 'Erro ao excluir campanha.' })
   }
 }
 

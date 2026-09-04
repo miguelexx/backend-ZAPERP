@@ -58,7 +58,7 @@ resposta ao item), `disparoReconciliacaoService` (decidir itens **incertos** man
 **Controllers (`/disparo/*`, HTTP CRUD):**
 | Arquivo | LOC | Etapa / papel |
 |---|--:|---|
-| `disparoController.js` | 319 | entrada geral do módulo |
+| `disparoController.js` | — | entrada geral do módulo (CRUD campanha, **DELETE** exclui com `company_id`; bloqueia `em_execucao`) |
 | `disparoInstanciasController.js` | 940 | **3** — instâncias da campanha |
 | `disparoVariacoesController.js` | 985 | **4** — variações de mensagem (spintax/anti-spam) |
 | `disparoLimitesController.js` | 1.200 | **5** — limites por empresa/instância/janela |

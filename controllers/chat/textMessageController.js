@@ -15,7 +15,7 @@ const { schedulePendingOutboundReconciliation } = require('../../services/pendin
 const { safeWhatsappInstanceMeta } = require('../../services/chat/presentation/chatDto')
 const { normalizeClientTempId, clientTempIdDedupeKey, isMissingMensagemColumnError, isGenericMissingColumnError, isClientTempIdUniqueViolation, buildClientTempIdDedupResponse } = require('../../services/chat/outbound/idempotencyHelpers')
 const { normalizeLinkPayload } = require('../../services/chat/outbound/messageNormalizers')
-const { resolveTelefoneFromLidSiblingConversation, resolveConversationWhatsappInstance } = require('../../services/chat/identity/conversationAddressService')
+const { resolveTelefoneFromLidSiblingConversation, resolveConversationWhatsappInstance, resolveConversationProvider } = require('../../services/chat/identity/conversationAddressService')
 const { emitirConversaAtualizada, emitirEventoEmpresaConversa } = require('../../services/chat/realtime/chatRealtimeGateway')
 const { assertPodeEnviarMensagem } = require('../../services/chat/access/conversationPolicy')
 const { textoParaEnvioWhatsapp, getUsuarioParaEnvioCliente, enrichMensagemComAutorUsuario } = require('../../services/chat/presentation/messageAuthorEnrichment')
@@ -366,7 +366,9 @@ exports.enviarMensagemChat = async (req, res) => {
       }
 
       const { nome: usuarioNome } = await getUsuarioParaEnvioCliente(supabase, company_id, user_id)
-      const provider = getProvider()
+      // Roteamento por instância: default/UltraMSG a menos que a instância seja provider='whapi'.
+      const instanceProvider = await resolveConversationProvider(company_id, whatsappInstanceId)
+      const provider = getProvider({ provider: instanceProvider })
 
       // Log de início de envio manual (auditoria e diagnóstico)
       console.log('[ENVIO_MANUAL] Iniciando envio', {
@@ -375,7 +377,7 @@ exports.enviarMensagemChat = async (req, res) => {
         mensagem_id: msg.id,
         telefone_destino: String(telefoneParaEnvio || '').slice(-12),
         whatsapp_instance_id: whatsappInstanceId,
-        provedor: 'ultramsg',
+        provedor: instanceProvider,
         tipo: hasLinkPayload ? 'link' : 'texto',
       })
 

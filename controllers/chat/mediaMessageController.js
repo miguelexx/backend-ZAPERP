@@ -13,7 +13,7 @@ const { isRealWhatsAppId, isUltramsgNumericQueueId } = require('../../helpers/wh
 const { schedulePendingOutboundReconciliation } = require('../../services/pendingOutboundReconciliationService')
 const { normalizeClientTempId, isMissingMensagemColumnError, isGenericMissingColumnError, isClientTempIdUniqueViolation } = require('../../services/chat/outbound/idempotencyHelpers')
 const { parseAudioDuracaoSecFromBody, aplicarTipoForcadoSticker, inferirTipoArquivo, shouldAbortAudioAfterNormalize, shouldForceProviderUploadForMedia } = require('../../services/chat/media/mediaType')
-const { resolveTelefoneFromLidSiblingConversation, resolveConversationWhatsappInstance } = require('../../services/chat/identity/conversationAddressService')
+const { resolveTelefoneFromLidSiblingConversation, resolveConversationWhatsappInstance, resolveConversationProvider } = require('../../services/chat/identity/conversationAddressService')
 const { emitirConversaAtualizada, emitirEventoEmpresaConversa } = require('../../services/chat/realtime/chatRealtimeGateway')
 const { normalizeAudioForUltraMsg, probeAudioDurationSec, normalizeVideoForUltraMsg, normalizeImageForWhatsapp } = require('../../services/chat/media/mediaNormalizers')
 const { assertPodeEnviarMensagem } = require('../../services/chat/access/conversationPolicy')
@@ -353,6 +353,8 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
     }
 
     const { nome: usuarioNome } = await getUsuarioParaEnvioCliente(supabase, company_id, user_id)
+    const instanceProvider = await resolveConversationProvider(company_id, whatsappInstanceId)
+    const provider = getProvider({ provider: instanceProvider })
     const waCaption = captionWhatsappParaMidia({
       tipo,
       captionUsuarioTrim,
@@ -369,7 +371,6 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
     const forceUploadMedia = shouldForceProviderUploadForMedia(tipo)
 
     const sendMediaWithUrl = (mediaUrl) => {
-      const provider = getProvider()
       const phone = telefoneParaEnvio
       const isAudioTipo = tipo === 'voice' || tipo === 'audio'
       const opts = {
@@ -480,7 +481,6 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
       if (fullUrl && !isLocalhost && !forceUploadMedia) {
         setImmediate(() => sendMediaWithUrl(fullUrl))
       } else if ((!baseUrl || isLocalhost || forceUploadMedia) && fileWork.path) {
-        const provider = getProvider()
         if (provider?.uploadMedia) {
           setImmediate(async () => {
             try {

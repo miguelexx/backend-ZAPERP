@@ -9,7 +9,7 @@ const { getProvider } = require('../../services/providers')
 const { getDisplayName } = require('../../helpers/contactEnrichment')
 const { tryMarkWaitingAfterHumanOutbound } = require('../../services/absenceFinalizationService')
 const { isRealWhatsAppId, isUltramsgNumericQueueId } = require('../../helpers/whatsappMessageIdHelper')
-const { resolveTelefoneFromLidSiblingConversation, resolveConversationWhatsappInstance } = require('../../services/chat/identity/conversationAddressService')
+const { resolveTelefoneFromLidSiblingConversation, resolveConversationWhatsappInstance, resolveConversationProvider } = require('../../services/chat/identity/conversationAddressService')
 const { emitirConversaAtualizada, emitirEventoEmpresaConversa } = require('../../services/chat/realtime/chatRealtimeGateway')
 const { assertPodeEnviarMensagem } = require('../../services/chat/access/conversationPolicy')
 const { getUsuarioParaEnvioCliente, enrichMensagemComAutorUsuario } = require('../../services/chat/presentation/messageAuthorEnrichment')
@@ -62,7 +62,8 @@ exports.enviarReacaoMensagem = async (req, res) => {
       return res.status(400).json({ error: 'Número do contato indisponível (conversa por LID). Aguarde o contato enviar uma mensagem.' })
     }
 
-    const provider = getProvider()
+    const instanceProvider = await resolveConversationProvider(company_id, whatsappInstanceId)
+    const provider = getProvider({ provider: instanceProvider })
     if (!provider || !provider.sendReaction) {
       return res.status(500).json({ error: 'Provider WhatsApp não suporta reações' })
     }
@@ -124,7 +125,8 @@ exports.removerReacaoMensagem = async (req, res) => {
       return res.status(400).json({ error: 'Número do contato indisponível (conversa por LID). Aguarde o contato enviar uma mensagem.' })
     }
 
-    const provider = getProvider()
+    const instanceProvider = await resolveConversationProvider(company_id, whatsappInstanceId)
+    const provider = getProvider({ provider: instanceProvider })
     if (!provider || !provider.removeReaction) {
       return res.status(500).json({ error: 'Provider WhatsApp não suporta remoção de reação' })
     }
@@ -218,7 +220,8 @@ exports.enviarContatoWhatsapp = async (req, res) => {
       return res.status(400).json({ error: 'Contato não possui telefone válido para compartilhar' })
     }
 
-    const provider = getProvider()
+    const instanceProvider = await resolveConversationProvider(company_id, whatsappInstanceId)
+    const provider = getProvider({ provider: instanceProvider })
     if (!provider || !provider.sendContact) {
       return res.status(500).json({ error: 'Provider WhatsApp não suporta compartilhamento de contato' })
     }
@@ -397,7 +400,8 @@ exports.enviarLocalizacao = async (req, res) => {
       ...(endereco ? { endereco } : {})
     }
 
-    const provider = getProvider()
+    const instanceProvider = await resolveConversationProvider(company_id, whatsappInstanceId)
+    const provider = getProvider({ provider: instanceProvider })
     if (!provider || !provider.sendLocation) {
       return res.status(500).json({ error: 'Provider WhatsApp não suporta envio de localização' })
     }
@@ -585,7 +589,8 @@ exports.enviarLigacaoWhatsapp = async (req, res) => {
       return res.status(500).json({ error: errMsg.message })
     }
 
-    const provider = getProvider()
+    const instanceProvider = await resolveConversationProvider(company_id, whatsappInstanceId)
+    const provider = getProvider({ provider: instanceProvider })
     if (!provider || !provider.sendCall) {
       return res.status(500).json({ error: 'Provider WhatsApp não suporta ligações' })
     }

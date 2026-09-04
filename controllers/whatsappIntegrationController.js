@@ -24,6 +24,63 @@ const { checkGuard, recordQrServed, resetOnConnected, getAttempts, THROTTLE_SECO
 const { getConfig } = require('../services/configOperacionalService')
 const { getProvider } = require('../services/providers')
 
+function publicWebhookUrl(appUrl, providerName) {
+  const base = String(appUrl || '').replace(/\/$/, '')
+  if (String(providerName || '').toLowerCase() === 'whapi') return `${base}/webhooks/whapi`
+  return `${base}/webhooks/ultramsg?token=***`
+}
+
+async function persistWhapiHealth(companyId, instanceId, conn) {
+  if (!conn || !instanceId) return
+  const patch = {
+    status: conn.connected ? 'connected' : String(conn.status || 'unknown').slice(0, 40),
+    status_at: new Date().toISOString(),
+    ultimo_erro: conn.ok ? null : String(conn.error || conn.status || 'health_fail').slice(0, 300),
+  }
+  if (conn.phone) {
+    patch.telefone_conectado = conn.phone
+    patch.display_phone = conn.phone
+  }
+  await whatsappInstanceService.updateWhatsappInstance(companyId, instanceId, patch)
+}
+
+async function hydrateWhapiInstance(companyId, instance) {
+  const id = Number(instance?.id)
+  if (!id) return instance
+  try {
+    const conn = await getProvider({ provider: 'whapi' }).getConnectionStatus({
+      companyId,
+      whatsappInstanceId: id,
+    })
+    await persistWhapiHealth(companyId, id, conn)
+    const fresh = await whatsappInstanceService.getWhatsappInstanceById(companyId, id, { requireActive: false })
+    return fresh.instance || instance
+  } catch (e) {
+    console.warn('[hydrateWhapiInstance]', e?.message || e)
+    return instance
+  }
+}
+
+async function resolveInstanceProviderName(companyId, instanceId) {
+  const { instance, error } = await whatsappInstanceService.getWhatsappInstanceById(companyId, instanceId)
+  if (!instance) return { providerName: null, instance: null, error: error || 'Instância não encontrada' }
+  const providerName = String(instance.provider || '').trim().toLowerCase() === 'whapi' ? 'whapi' : 'ultramsg'
+  return { providerName, instance, error: null }
+}
+
+/** Company-level: UltraMSG primeiro (produção). Whapi só se a empresa não tiver default UltraMSG. */
+async function resolveCompanyWebhookTarget(companyId) {
+  const ultra = await whatsappInstanceService.getDefaultWhatsappInstance(companyId, { provider: 'ultramsg' })
+  if (ultra.instance) {
+    return { providerName: 'ultramsg', whatsappInstanceId: ultra.instance.id }
+  }
+  const whapi = await whatsappInstanceService.getDefaultWhatsappInstance(companyId, { provider: 'whapi' })
+  if (whapi.instance) {
+    return { providerName: 'whapi', whatsappInstanceId: whapi.instance.id }
+  }
+  return { providerName: 'ultramsg', whatsappInstanceId: null }
+}
+
 const { getStatus, getQrCodeImage, restartInstance, getMe, getPhoneCode, buildMeSummary } = ultramsgIntegrationService
 const { getEmpresaWhatsappConfig, invalidateEmpresaWhatsappConfigCache } = whatsappConfigService
 
@@ -67,7 +124,11 @@ exports.createInstance = async (req, res) => {
   const result = await whatsappInstanceService.createWhatsappInstance(company_id, req.body || {})
   if (result.error) return res.status(400).json({ error: result.error })
   invalidateEmpresaWhatsappConfigCache(company_id)
-  return res.status(201).json({ instance: result.instance })
+  let instance = result.instance
+  if (String(instance?.provider || '').toLowerCase() === 'whapi') {
+    instance = await hydrateWhapiInstance(company_id, instance)
+  }
+  return res.status(201).json({ instance })
 }
 
 exports.updateInstance = async (req, res) => {
@@ -110,6 +171,25 @@ exports.getInstanceStatus = async (req, res) => {
   if (!checkCompanyRate(company_id, `instance-status:${id}`, 60_000, 30)) {
     return res.status(429).json({ error: 'Muitas consultas de status, tente novamente em instantes.', retryAfterSeconds: 60 })
   }
+  const resolved = await resolveInstanceProviderName(company_id, id)
+  if (!resolved.instance) return res.status(instanceErrorStatus(resolved.error)).json({ error: resolved.error })
+  if (resolved.providerName === 'whapi') {
+    const conn = await getProvider({ provider: 'whapi' }).getConnectionStatus({
+      companyId: company_id,
+      whatsappInstanceId: id,
+    })
+    persistWhapiHealth(company_id, id, conn).catch((e) => {
+      console.warn('[getInstanceStatus] persist Whapi health:', e?.message || e)
+    })
+    return res.json({
+      connected: !!conn.connected,
+      smartphoneConnected: !!conn.connected,
+      needsRestore: false,
+      provider: 'whapi',
+      status: conn.status || null,
+      phone: conn.phone || null,
+    })
+  }
   const result = await getStatus(company_id, { whatsappInstanceId: id })
   if (result.error) return res.status(instanceErrorStatus(result.error)).json({ error: result.error })
   return res.json({
@@ -127,6 +207,14 @@ exports.getInstanceQrCode = async (req, res) => {
   if (!checkCompanyRate(company_id, `instance-qrcode:${id}`, 60_000, 10)) {
     return res.status(429).json({ error: 'Muitas solicitações de QR Code, tente novamente em instantes.', retryAfterSeconds: 60 })
   }
+  const resolved = await resolveInstanceProviderName(company_id, id)
+  if (!resolved.instance) return res.status(instanceErrorStatus(resolved.error)).json({ error: resolved.error })
+  if (resolved.providerName === 'whapi') {
+    return res.status(501).json({
+      error: 'Canal Whapi não usa QR UltraMSG. Autentique a sessão no painel Whapi Cloud.',
+      provider: 'whapi',
+    })
+  }
   const result = await getQrCodeImage(company_id, { whatsappInstanceId: id })
   if (result.error) return res.status(instanceErrorStatus(result.error)).json({ error: result.error })
   if (result.alreadyConnected) return res.json({ alreadyConnected: true, connected: true })
@@ -138,6 +226,14 @@ exports.restartInstance = async (req, res) => {
   if (!company_id) return res.status(401).json({ error: 'Não autenticado' })
   const id = getInstanceParam(req)
   if (!id) return res.status(400).json({ error: 'whatsapp_instance_id inválido' })
+  const resolved = await resolveInstanceProviderName(company_id, id)
+  if (!resolved.instance) return res.status(instanceErrorStatus(resolved.error)).json({ error: resolved.error })
+  if (resolved.providerName === 'whapi') {
+    return res.status(501).json({
+      error: 'Restart UltraMSG não se aplica a canal Whapi. Use o painel Whapi Cloud para a sessão.',
+      provider: 'whapi',
+    })
+  }
   const result = await restartInstance(company_id, { whatsappInstanceId: id })
   if (result.error) return res.status(instanceErrorStatus(result.error)).json({ error: result.error })
   return res.json({ value: !!result.value })
@@ -150,14 +246,17 @@ exports.configureInstanceWebhooks = async (req, res) => {
   if (!id) return res.status(400).json({ error: 'whatsapp_instance_id inválido' })
   const appUrl = String(process.env.APP_URL || '').trim()
   if (!appUrl) return res.status(500).json({ error: 'APP_URL não configurado no servidor' })
-  const provider = getProvider()
+  const resolved = await resolveInstanceProviderName(company_id, id)
+  if (!resolved.instance) return res.status(instanceErrorStatus(resolved.error)).json({ error: resolved.error })
+  const provider = getProvider({ provider: resolved.providerName })
   if (!provider?.configureWebhooks) return res.status(501).json({ error: 'Provider não suporta configureWebhooks' })
   try {
     const results = await provider.configureWebhooks(appUrl, { companyId: company_id, whatsappInstanceId: id })
     const ok = Array.isArray(results) && results.some((r) => r.ok)
     return res.json({
       ok: !!ok,
-      webhook_url: `${appUrl}/webhooks/ultramsg?token=***`,
+      provider: resolved.providerName,
+      webhook_url: publicWebhookUrl(appUrl, resolved.providerName),
       results,
     })
   } catch (e) {
@@ -431,16 +530,21 @@ exports.configureWebhooks = async (req, res) => {
   if (!company_id) return res.status(401).json({ error: 'Não autenticado' })
   const appUrl = String(process.env.APP_URL || '').trim()
   if (!appUrl) return res.status(500).json({ error: 'APP_URL não configurado no servidor' })
-  const provider = getProvider()
+  const target = await resolveCompanyWebhookTarget(company_id)
+  const provider = getProvider({ provider: target.providerName })
   if (!provider?.configureWebhooks) {
     return res.status(501).json({ error: 'Provider não suporta configureWebhooks' })
   }
   try {
-    const results = await provider.configureWebhooks(appUrl, { companyId: company_id })
+    const results = await provider.configureWebhooks(appUrl, {
+      companyId: company_id,
+      whatsappInstanceId: target.whatsappInstanceId,
+    })
     const ok = Array.isArray(results) && results.some((r) => r.ok)
     return res.json({
       ok: !!ok,
-      webhook_url: `${appUrl}/webhooks/ultramsg?token=***`,
+      provider: target.providerName,
+      webhook_url: publicWebhookUrl(appUrl, target.providerName),
       results
     })
   } catch (e) {

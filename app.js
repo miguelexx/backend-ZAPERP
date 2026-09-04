@@ -127,6 +127,11 @@ const { webhookLimiter } = require('./middleware/rateLimit')
 app.use('/webhooks/ultramsg', webhookLimiter, webhookUltramsgRoutes)
 app.use('/webhooks/whatsapp', webhookLimiter, webhookUltramsgRoutes)
 
+// Whapi Cloud: 2º provider WhatsApp (opcional por instância, provider='whapi'). Rota NOVA e
+// isolada — NÃO toca /webhooks/ultramsg nem o alias /webhooks/whatsapp. Ver docs/ai-handoff/25.
+const webhookWhapiRoutes = require('./routes/webhookWhapiRoutes')
+app.use('/webhooks/whapi', webhookLimiter, webhookWhapiRoutes)
+
 // =====================================================
 // CORS — aplicado APÓS os webhooks.
 // Só as rotas da API/frontend passam por aqui.

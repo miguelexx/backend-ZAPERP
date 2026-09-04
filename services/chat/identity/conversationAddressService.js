@@ -9,7 +9,24 @@
  */
 
 const supabase = require('../../../config/supabase')
-const { getDefaultWhatsappInstance } = require('../../whatsappInstanceService')
+const { getDefaultWhatsappInstance, getWhatsappInstanceById } = require('../../whatsappInstanceService')
+
+/**
+ * Provider WhatsApp da instância resolvida da conversa. Default 'ultramsg' — sem instância,
+ * instância desconhecida ou erro → 'ultramsg' (comportamento idêntico ao histórico).
+ * Usado para rotear getProvider({ provider }) por instância. Ver docs/ai-handoff/25.
+ */
+async function resolveConversationProvider(company_id, whatsappInstanceId) {
+  const id = Number(whatsappInstanceId)
+  if (!Number.isFinite(id) || id <= 0) return 'ultramsg'
+  try {
+    const { instance } = await getWhatsappInstanceById(company_id, id)
+    const p = String(instance?.provider || '').trim().toLowerCase()
+    return p === 'whapi' ? 'whapi' : 'ultramsg'
+  } catch (_) {
+    return 'ultramsg'
+  }
+}
 
 /**
  * Quando a conversa é por LID, procura uma conversa irmã (mesmo chat_lid) que já tenha telefone real.
@@ -87,5 +104,6 @@ async function resolverTelefoneEnvioDaConversa(company_id, conversa, whatsappIns
 module.exports = {
   resolveTelefoneFromLidSiblingConversation,
   resolveConversationWhatsappInstance,
+  resolveConversationProvider,
   resolverTelefoneEnvioDaConversa,
 }

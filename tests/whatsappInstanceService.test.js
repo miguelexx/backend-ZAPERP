@@ -616,4 +616,93 @@ describe('whatsappInstanceService', () => {
     expect(result.instanceId).toBe(8)
     expect(result.instance?.nome).toBe('WhatsApp Teste')
   })
+
+  test('create Whapi reusa instance_id/instance_token e NÃO vira default se a empresa já tem UltraMSG default', async () => {
+    const supabase = createSupabaseMock({
+      whatsapp_instances: [
+        { id: 1, company_id: 1, provider: 'ultramsg', nome: 'WM Sistemas', instance_id: 'instance51534', instance_token: 'secret-1', ativo: true, is_default: true },
+      ],
+    })
+    jest.doMock('../config/supabase', () => supabase)
+    const service = require('../services/whatsappInstanceService')
+    const result = await service.createWhatsappInstance(1, {
+      provider: 'whapi',
+      nome: 'Whapi teste',
+      channel_id: 'NEBULA-AER3B',
+      instance_token: 'whapi-bearer',
+    })
+    expect(result.error).toBeNull()
+    expect(result.instance.provider).toBe('whapi')
+    expect(result.instance.instance_id).toBe('NEBULA-AER3B')
+    expect(result.instance.is_default).toBe(false)
+    expect(result.instance.instance_token).toBeUndefined()
+    expect(supabase.state.whatsapp_instances.find((r) => r.id === 1).is_default).toBe(true)
+    const created = supabase.state.whatsapp_instances.find((r) => r.provider === 'whapi')
+    expect(created.instance_token).toBe('whapi-bearer')
+    expect(created.client_token).toBeNull()
+  })
+
+  test('create Whapi com is_default true recusa se já existe default UltraMSG', async () => {
+    const supabase = createSupabaseMock({
+      whatsapp_instances: [
+        { id: 1, company_id: 1, provider: 'ultramsg', nome: 'WM', instance_id: '51534', instance_token: 'secret', ativo: true, is_default: true },
+      ],
+    })
+    jest.doMock('../config/supabase', () => supabase)
+    const service = require('../services/whatsappInstanceService')
+    const result = await service.createWhatsappInstance(1, {
+      provider: 'whapi',
+      instance_id: 'NEBULA-AER3B',
+      instance_token: 'whapi-bearer',
+      is_default: true,
+    })
+    expect(result.instance).toBeNull()
+    expect(result.error).toMatch(/default de outro provider/i)
+    expect(supabase.state.whatsapp_instances).toHaveLength(1)
+  })
+
+  test('setDefault Whapi recusa quando UltraMSG já é default da empresa', async () => {
+    const supabase = createSupabaseMock({
+      whatsapp_instances: [
+        { id: 1, company_id: 1, provider: 'ultramsg', nome: 'WM', instance_id: '51534', instance_token: 'secret', ativo: true, is_default: true },
+        { id: 2, company_id: 1, provider: 'whapi', nome: 'Whapi', instance_id: 'NEBULA-AER3B', instance_token: 'whapi-bearer', ativo: true, is_default: false },
+      ],
+    })
+    jest.doMock('../config/supabase', () => supabase)
+    const service = require('../services/whatsappInstanceService')
+    const result = await service.setDefaultWhatsappInstance(1, 2)
+    expect(result.instance).toBeNull()
+    expect(result.error).toMatch(/promover esta instancia a default/i)
+    expect(supabase.state.whatsapp_instances.find((r) => r.id === 1).is_default).toBe(true)
+    expect(supabase.state.whatsapp_instances.find((r) => r.id === 2).is_default).toBe(false)
+  })
+
+  test('update aceita instance_token e recusa trocar provider', async () => {
+    const supabase = createSupabaseMock({
+      whatsapp_instances: [
+        { id: 2, company_id: 1, provider: 'whapi', nome: 'Whapi', instance_id: 'NEBULA-AER3B', instance_token: 'old', ativo: true, is_default: false },
+      ],
+    })
+    jest.doMock('../config/supabase', () => supabase)
+    const service = require('../services/whatsappInstanceService')
+    const ok = await service.updateWhatsappInstance(1, 2, { instance_token: 'new-bearer' })
+    expect(ok.error).toBeNull()
+    expect(supabase.state.whatsapp_instances[0].instance_token).toBe('new-bearer')
+    const bad = await service.updateWhatsappInstance(1, 2, { provider: 'ultramsg' })
+    expect(bad.error).toMatch(/provider nao pode ser alterado/i)
+  })
+
+  test('create recusa provider desconhecido em vez de gravar ultramsg por engano', async () => {
+    const supabase = createSupabaseMock({ whatsapp_instances: [] })
+    jest.doMock('../config/supabase', () => supabase)
+    const service = require('../services/whatsappInstanceService')
+    const result = await service.createWhatsappInstance(1, {
+      provider: 'zapi',
+      instance_id: 'x',
+      instance_token: 'y',
+    })
+    expect(result.instance).toBeNull()
+    expect(result.error).toMatch(/provider invalido/i)
+    expect(supabase.state.whatsapp_instances).toHaveLength(0)
+  })
 })

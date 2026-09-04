@@ -6,6 +6,9 @@
 const supabase = require('../config/supabase')
 
 const DEFAULT_PROVIDER = 'ultramsg'
+// Providers WhatsApp suportados. Desconhecido → DEFAULT_PROVIDER (nunca lança; não quebra caller atual).
+// 'whapi' = 2ª integração (opcional, por instância). Ver docs/ai-handoff/25-WHAPI-SEGUNDA-INTEGRACAO.md
+const ALLOWED_PROVIDERS = new Set(['ultramsg', 'whapi'])
 
 const PUBLIC_SELECT = [
   'id',
@@ -35,7 +38,8 @@ const NO_DEFAULT_INSTANCE_ERROR = 'Nenhuma instancia WhatsApp default ativa conf
 
 function normalizeProvider(provider) {
   const p = String(provider || DEFAULT_PROVIDER).trim().toLowerCase()
-  return p || DEFAULT_PROVIDER
+  if (!p) return DEFAULT_PROVIDER
+  return ALLOWED_PROVIDERS.has(p) ? p : DEFAULT_PROVIDER
 }
 
 function normalizeCompanyId(companyId) {
@@ -556,6 +560,48 @@ async function listWhatsappInstances(companyId) {
   return { instances: legacy.instance ? [legacy.instance] : [], error: null }
 }
 
+function pickInstanceIdInput(input = {}) {
+  return String(
+    input.instance_id
+    ?? input.instanceId
+    ?? input.channel_id
+    ?? input.channelId
+    ?? ''
+  ).trim()
+}
+
+function pickInstanceTokenInput(input = {}) {
+  return String(
+    input.instance_token
+    ?? input.instanceToken
+    ?? input.channel_token
+    ?? input.channelToken
+    ?? ''
+  ).trim()
+}
+
+async function getActiveCompanyDefault(companyId) {
+  const cid = normalizeCompanyId(companyId)
+  if (!cid) return null
+  const { data, error } = await supabase
+    .from('whatsapp_instances')
+    .select('id, provider')
+    .eq('company_id', cid)
+    .eq('ativo', true)
+    .eq('is_default', true)
+    .order('id', { ascending: true })
+    .limit(1)
+    .maybeSingle()
+  if (error || !data) return null
+  return data
+}
+
+const CROSS_PROVIDER_DEFAULT_ERROR =
+  'Ja existe uma instancia default de outro provider nesta empresa. Crie a instancia Whapi sem is_default (ela fica como extra). O default UltraMSG nao e alterado.'
+
+const CROSS_PROVIDER_SET_DEFAULT_ERROR =
+  'Nao e possivel promover esta instancia a default: a empresa ja tem default de outro provider. O default da empresa e unico.'
+
 async function hasActiveDefault(companyId, provider = DEFAULT_PROVIDER) {
   const cid = normalizeCompanyId(companyId)
   if (!cid) return false
@@ -584,6 +630,16 @@ async function setDefaultWhatsappInstance(companyId, whatsappInstanceId) {
   const existing = await getWhatsappInstanceById(cid, id, { requireActive: true })
   if (existing.error || !existing.instance) return { instance: null, error: existing.error || 'Instancia WhatsApp nao encontrada' }
 
+  const companyDefault = await getActiveCompanyDefault(cid)
+  const existingProvider = normalizeProvider(existing.instance.provider)
+  if (
+    companyDefault
+    && Number(companyDefault.id) !== id
+    && normalizeProvider(companyDefault.provider) !== existingProvider
+  ) {
+    return { instance: null, error: CROSS_PROVIDER_SET_DEFAULT_ERROR }
+  }
+
   const { data, error } = await supabase.rpc('set_default_whatsapp_instance', {
     p_company_id: cid,
     p_whatsapp_instance_id: id,
@@ -598,11 +654,20 @@ async function createWhatsappInstance(companyId, input = {}) {
   const cid = normalizeCompanyId(companyId)
   if (!cid) return { instance: null, error: 'company_id invalido' }
 
+  if (input.provider != null && String(input.provider).trim() !== '') {
+    const raw = String(input.provider).trim().toLowerCase()
+    if (!ALLOWED_PROVIDERS.has(raw)) {
+      return { instance: null, error: `provider invalido: ${raw}. Use ultramsg ou whapi.` }
+    }
+  }
+
   const provider = normalizeProvider(input.provider)
   const nome = String(input.nome || input.name || 'WhatsApp').trim().slice(0, 120)
-  const instanceId = String(input.instance_id || input.instanceId || '').trim()
-  const instanceToken = String(input.instance_token || input.instanceToken || '').trim()
-  const clientToken = input.client_token ?? input.clientToken ?? null
+  const instanceId = pickInstanceIdInput(input)
+  const instanceToken = pickInstanceTokenInput(input)
+  const clientToken = provider === 'whapi'
+    ? null
+    : (input.client_token ?? input.clientToken ?? null)
   const makeDefault = input.is_default === true || input.default === true
 
   if (!instanceId) return { instance: null, error: 'instance_id e obrigatorio' }
@@ -619,8 +684,14 @@ async function createWhatsappInstance(companyId, input = {}) {
     }
   }
 
-  const hasDefault = await hasActiveDefault(cid, provider)
-  const shouldBeDefault = makeDefault || !hasDefault
+  const hasDefaultSameProvider = await hasActiveDefault(cid, provider)
+  const companyDefault = await getActiveCompanyDefault(cid)
+  if (makeDefault && companyDefault && normalizeProvider(companyDefault.provider) !== provider) {
+    return { instance: null, error: CROSS_PROVIDER_DEFAULT_ERROR }
+  }
+  // Índice uq_whatsapp_instances_default_active = 1 default por empresa (todos os providers).
+  // Primeira Whapi numa empresa que já tem UltraMSG default NÃO vira default.
+  const shouldBeDefault = makeDefault || (!hasDefaultSameProvider && !companyDefault)
 
   const { data, error } = await supabase
     .from('whatsapp_instances')
@@ -659,11 +730,46 @@ async function updateWhatsappInstance(companyId, whatsappInstanceId, input = {})
   if (existing.error || !existing.instance) return { instance: null, error: existing.error || 'Instancia WhatsApp nao encontrada' }
 
   const patch = {}
+  if (input.provider != null && String(input.provider).trim() !== '') {
+    const nextProvider = String(input.provider).trim().toLowerCase()
+    if (!ALLOWED_PROVIDERS.has(nextProvider)) {
+      return { instance: null, error: `provider invalido: ${nextProvider}. Use ultramsg ou whapi.` }
+    }
+    if (normalizeProvider(existing.instance.provider) !== nextProvider) {
+      return { instance: null, error: 'provider nao pode ser alterado. Crie outra instancia.' }
+    }
+  }
   if (input.nome != null || input.name != null) patch.nome = String(input.nome ?? input.name).trim().slice(0, 120)
   if (input.descricao !== undefined || input.description !== undefined) patch.descricao = input.descricao ?? input.description ?? null
   if (input.telefone_conectado !== undefined || input.phone !== undefined) patch.telefone_conectado = input.telefone_conectado ?? input.phone ?? null
   if (input.display_phone !== undefined || input.displayPhone !== undefined) patch.display_phone = input.display_phone ?? input.displayPhone ?? null
   if (input.status != null) patch.status = String(input.status).trim().slice(0, 40) || 'unknown'
+  if (input.status_at !== undefined) patch.status_at = input.status_at
+  if (input.ultimo_erro !== undefined) patch.ultimo_erro = input.ultimo_erro == null ? null : String(input.ultimo_erro).slice(0, 500)
+  if (input.instance_id != null || input.instanceId != null || input.channel_id != null || input.channelId != null) {
+    const nextId = pickInstanceIdInput(input)
+    if (!nextId) return { instance: null, error: 'instance_id e obrigatorio' }
+    if (existing.instance.ativo !== false) {
+      const duplicate = await findActiveProviderInstanceRows(existing.instance.provider || DEFAULT_PROVIDER, nextId)
+      if (duplicate.error && !isMissingTableError(duplicate.error)) {
+        return { instance: null, error: 'Erro ao validar duplicidade da instancia WhatsApp' }
+      }
+      const otherRows = (duplicate.rows || []).filter((row) => Number(row.id) !== id)
+      if (otherRows.length > 0) {
+        return duplicateProviderInstanceResult(existing.instance.provider || DEFAULT_PROVIDER, nextId, otherRows, 'whatsapp_instances')
+      }
+    }
+    patch.instance_id = nextId
+  }
+  if (input.instance_token != null || input.instanceToken != null || input.channel_token != null || input.channelToken != null) {
+    const nextToken = pickInstanceTokenInput(input)
+    if (!nextToken) return { instance: null, error: 'instance_token e obrigatorio' }
+    patch.instance_token = nextToken
+  }
+  if (normalizeProvider(existing.instance.provider) !== 'whapi' && (input.client_token !== undefined || input.clientToken !== undefined)) {
+    const v = input.client_token ?? input.clientToken
+    patch.client_token = v ? String(v).trim() : null
+  }
   if (input.ativo !== undefined) {
     if (existing.instance.is_default && input.ativo === false) {
       return { instance: null, error: 'Defina outra instancia default antes de desativar a atual' }

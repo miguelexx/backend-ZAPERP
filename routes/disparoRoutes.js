@@ -32,6 +32,7 @@ router.post('/campanhas', campanhasController.criarCampanha)
 router.patch('/campanhas/:id', campanhasController.editarCampanha)
 router.post('/campanhas/:id/arquivar', campanhasController.arquivarCampanha)
 router.post('/campanhas/:id/restaurar', campanhasController.restaurarCampanha)
+router.delete('/campanhas/:id', campanhasController.excluirCampanha)
 
 // ── Destinatários — busca de contatos ZapERP ─────────────────────────────────
 router.get('/campanhas/:id/contatos', destController.buscarContatos)

@@ -25,6 +25,7 @@ const { assertPodeEnviarMensagem } = require('../../services/chat/access/convers
 const {
   resolveConversationWhatsappInstance,
   resolveTelefoneFromLidSiblingConversation,
+  resolveConversationProvider,
 } = require('../../services/chat/identity/conversationAddressService')
 
 const MAX_ENC_AMINHAR_LOTE = 30
@@ -448,7 +449,8 @@ exports.encaminharMensagem = async (req, res) => {
       }
     }
 
-    const provider = getProvider()
+    const instanceProvider = await resolveConversationProvider(company_id, whatsappInstanceId)
+    const provider = getProvider({ provider: instanceProvider })
     if (!provider) {
       return res.status(500).json({ error: 'Provider WhatsApp não configurado' })
     }
