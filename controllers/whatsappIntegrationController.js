@@ -211,15 +211,88 @@ exports.getInstanceQrCode = async (req, res) => {
   const resolved = await resolveInstanceProviderName(company_id, id)
   if (!resolved.instance) return res.status(instanceErrorStatus(resolved.error)).json({ error: resolved.error })
   if (resolved.providerName === 'whapi') {
-    return res.status(501).json({
-      error: 'Canal Whapi não usa QR UltraMSG. Autentique a sessão no painel Whapi Cloud.',
-      provider: 'whapi',
-    })
+    const whapi = getProvider({ provider: 'whapi' })
+    const qr = await whapi.getLoginQr({ companyId: company_id, whatsappInstanceId: id })
+    if (qr?.ok && qr.image) {
+      // UltraMSG devolve base64 cru; espelhamos o formato (o front prefixa data:).
+      const base64 = String(qr.image).replace(/^data:image\/[^;]+;base64,/, '')
+      return res.json({ imageBase64: base64, qrBase64: base64, dataUri: qr.image, provider: 'whapi' })
+    }
+    // Sem QR: normalmente o canal já está conectado (estado AUTH não gera QR).
+    const conn = await whapi.getConnectionStatus({ companyId: company_id, whatsappInstanceId: id }).catch(() => null)
+    if (conn?.connected) return res.json({ alreadyConnected: true, connected: true, provider: 'whapi' })
+    return res.status(502).json({ error: qr?.error || 'Não foi possível obter o QR da Whapi.', provider: 'whapi', connected: false })
   }
   const result = await getQrCodeImage(company_id, { whatsappInstanceId: id })
   if (result.error) return res.status(instanceErrorStatus(result.error)).json({ error: result.error })
   if (result.alreadyConnected) return res.json({ alreadyConnected: true, connected: true })
   return res.json({ imageBase64: result.imageBase64, qrBase64: result.imageBase64 })
+}
+
+/**
+ * Verifica quais números têm WhatsApp ANTES do disparo. Aditivo — NÃO toca o loop de envio.
+ * POST /integrations/whatsapp/instances/:id/check-phones  body { phones: string[], forceCheck? }
+ * Só providers com `checkPhones` (hoje Whapi); outros → 501 claro. company_id SEMPRE de req.user.
+ */
+exports.checkInstancePhones = async (req, res) => {
+  const company_id = req.user?.company_id
+  if (!company_id) return res.status(401).json({ error: 'Não autenticado' })
+  const id = getInstanceParam(req)
+  if (!id) return res.status(400).json({ error: 'whatsapp_instance_id inválido' })
+  const phones = Array.isArray(req.body?.phones) ? req.body.phones
+    : (Array.isArray(req.body?.numeros) ? req.body.numeros : null)
+  if (!phones || !phones.length) return res.status(400).json({ error: 'Informe phones: string[]' })
+  if (phones.length > 500) return res.status(400).json({ error: 'Máximo de 500 números por verificação.' })
+  if (!checkCompanyRate(company_id, `check-phones:${id}`, 60_000, 20)) {
+    return res.status(429).json({ error: 'Muitas verificações, tente novamente em instantes.', retryAfterSeconds: 60 })
+  }
+  const resolved = await resolveInstanceProviderName(company_id, id)
+  if (!resolved.instance) return res.status(instanceErrorStatus(resolved.error)).json({ error: resolved.error })
+  const provider = getProvider({ provider: resolved.providerName })
+  if (!provider?.checkPhones) {
+    return res.status(501).json({ error: `Provider ${resolved.providerName} não suporta verificação de números.`, provider: resolved.providerName })
+  }
+  try {
+    const results = await provider.checkPhones(phones, {
+      companyId: company_id, whatsappInstanceId: id, forceCheck: req.body?.forceCheck === true,
+    })
+    const validCount = results.filter((r) => r.exists).length
+    return res.json({
+      provider: resolved.providerName,
+      total: results.length,
+      validCount,
+      invalidCount: results.length - validCount,
+      results,
+    })
+  } catch (e) {
+    return res.status(502).json({ error: e?.message || 'Falha ao verificar números.', provider: resolved.providerName })
+  }
+}
+
+/**
+ * Código de pareamento por instância (Whapi). Aditivo — não toca o /connect/phone-code (UltraMSG).
+ * POST /integrations/whatsapp/instances/:id/phone-code  body { phone }
+ */
+exports.getInstancePhoneCode = async (req, res) => {
+  const company_id = req.user?.company_id
+  if (!company_id) return res.status(401).json({ error: 'Não autenticado' })
+  const id = getInstanceParam(req)
+  if (!id) return res.status(400).json({ error: 'whatsapp_instance_id inválido' })
+  const phone = req.body?.phone ?? req.body?.numero
+  if (!phone) return res.status(400).json({ error: 'Campo phone é obrigatório.' })
+  if (!checkCompanyRate(company_id, `phone-code:${id}`, 60_000, 10)) {
+    return res.status(429).json({ error: 'Muitas solicitações de código, tente novamente em instantes.', retryAfterSeconds: 60 })
+  }
+  const resolved = await resolveInstanceProviderName(company_id, id)
+  if (!resolved.instance) return res.status(instanceErrorStatus(resolved.error)).json({ error: resolved.error })
+  if (resolved.providerName !== 'whapi') {
+    return res.status(501).json({ error: 'Pareamento por código por instância só para Whapi. Use /connect/phone-code (UltraMSG).', provider: resolved.providerName })
+  }
+  const result = await getProvider({ provider: 'whapi' }).getLoginCode(phone, { companyId: company_id, whatsappInstanceId: id })
+  if (!result?.ok) {
+    return res.status(result?.httpStatus === 409 ? 409 : 502).json({ error: result?.error || 'Não foi possível gerar o código.', provider: 'whapi' })
+  }
+  return res.json({ code: result.code, provider: 'whapi' })
 }
 
 exports.restartInstance = async (req, res) => {

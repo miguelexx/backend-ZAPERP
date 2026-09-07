@@ -84,7 +84,53 @@ async function encaminharUmaMensagemParaConversa(ctx) {
   const mediaUrlOriginal = getForwardMediaUrlCandidate(mensagemOriginal)
   const temUrl = !!mediaUrlOriginal
 
-  if (tipo_encaminhamento === 'texto' || (!temUrl && tipoOriginal === 'texto')) {
+  // Fast-path: encaminhamento NATIVO (preserva o selo "Encaminhada", não recopia).
+  // Só quando o provider suporta forwardMessage (Whapi), a origem tem whatsapp_id real
+  // e é da MESMA instância (o id existe nesse canal). Qualquer falha → fallback cópia abaixo.
+  let nativeForward = null
+  if (typeof provider?.forwardMessage === 'function' && telefoneParaEnvio) {
+    const sourceWaId = String(mensagemOriginal.whatsapp_id || '').trim()
+    const mesmaInstancia = whatsappInstanceId != null
+      && mensagemOriginal.whatsapp_instance_id != null
+      && Number(mensagemOriginal.whatsapp_instance_id) === Number(whatsappInstanceId)
+    if (isRealWhatsAppId(sourceWaId) && mesmaInstancia) {
+      try {
+        const r = await provider.forwardMessage(telefoneParaEnvio, sourceWaId, {
+          companyId: company_id,
+          conversaId: conversa_id,
+          whatsappInstanceId: whatsappInstanceId || undefined,
+          sendOrigin: 'encaminhamento_atendimento',
+        })
+        if (r && r.ok) nativeForward = r
+      } catch (e) {
+        console.warn('⚠️ forward nativo falhou, fallback cópia:', e?.message || e)
+      }
+    }
+  }
+
+  if (nativeForward) {
+    // Registra no CRM a representação da mensagem original (envio já feito nativamente).
+    const tiposConhecidos = ['texto', 'imagem', 'video', 'audio', 'voice', 'sticker', 'arquivo', 'contact', 'location']
+    const rowTipo = tiposConhecidos.includes(tipoOriginal) ? tipoOriginal : 'texto'
+    const { data: msg, error } = await supabase.from('mensagens').insert({
+      conversa_id: Number(conversa_id),
+      texto: mensagemOriginal.texto || `${prefixoEncaminhado}`,
+      tipo: rowTipo,
+      ...(mediaUrlOriginal ? { url: mediaUrlOriginal } : {}),
+      ...(mensagemOriginal.nome_arquivo ? { nome_arquivo: mensagemOriginal.nome_arquivo } : {}),
+      ...(mensagemOriginal.contact_meta ? { contact_meta: mensagemOriginal.contact_meta } : {}),
+      ...(mensagemOriginal.location_meta ? { location_meta: mensagemOriginal.location_meta } : {}),
+      direcao: 'out',
+      autor_usuario_id: user_id,
+      company_id,
+      ...(whatsappInstanceId ? { whatsapp_instance_id: whatsappInstanceId } : {}),
+      status: 'pending',
+      criado_em: timestamp,
+    }).select().single()
+    if (error) return fail(500, error.message)
+    novaMensagem = msg
+    resultadoEnvio = nativeForward
+  } else if (tipo_encaminhamento === 'texto' || (!temUrl && tipoOriginal === 'texto')) {
     const textoOriginal = mensagemOriginal.texto && !mensagemOriginal.texto.startsWith('[Encaminhado]')
       ? mensagemOriginal.texto
       : (mensagemOriginal.texto || '(mídia)')
@@ -511,3 +557,6 @@ exports.encaminharMensagem = async (req, res) => {
     return res.status(500).json({ error: 'Erro ao encaminhar mensagem' })
   }
 }
+
+// Exposto só para testes (não usar em produção).
+exports._test = { encaminharUmaMensagemParaConversa }

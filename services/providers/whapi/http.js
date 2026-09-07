@@ -164,6 +164,27 @@ async function get({ token, endpoint, extraParams = {} }) {
   return { ok: res.ok, status: res.status, data, text }
 }
 
+/**
+ * GET que devolve bytes (ex. QR-code image). Sem send guard (é leitura).
+ * Header accept curinga — o endpoint responde image/png, não JSON. Retorna { ok, status, buffer, contentType }.
+ */
+async function getBinary({ token, endpoint, extraParams = {} }) {
+  const sep = String(endpoint || '').includes('?') ? '&' : '?'
+  const qs = new URLSearchParams(extraParams).toString()
+  const url = `${buildBaseUrl()}${endpoint}${qs ? sep + qs : ''}`
+  const fetchOpts = createFetchOptions('GET')
+  fetchOpts.headers = withAuth({ ...fetchOpts.headers, accept: '*/*' }, token)
+  const res = await fetchWithRetry(url, fetchOpts)
+  const contentType = res.headers?.get?.('content-type') || ''
+  let buffer = null
+  try {
+    const ab = await res.arrayBuffer()
+    buffer = Buffer.from(ab)
+  } catch { buffer = null }
+  logWhapiRequest({ method: 'GET', endpoint, token, responseStatus: res.status, responseData: null, responseText: contentType })
+  return { ok: res.ok, status: res.status, buffer, contentType }
+}
+
 module.exports = {
   buildBaseUrl,
   maskToken,
@@ -176,4 +197,5 @@ module.exports = {
   patch,
   del,
   get,
+  getBinary,
 }

@@ -143,8 +143,9 @@ Nas fases iniciais, o que não for implementado é **stub 501 explícito** (`{ o
 | Grupo | Métodos | Whapi |
 |---|---|---|
 | Chat admin | `deleteMessage` DELETE `/messages/{id}`; `editMessage` POST `/messages/text` `{edit}`; `readChat` PATCH `/chats/{id}` `{mark_unread:false}`; `archiveChat`/`unarchiveChat` POST `{archive}`; `deleteChat` DELETE `/chats/{id}` | **real** |
-| Consultas | `getContacts` GET `/contacts`; `getChats` GET `/chats`; `getGroups`/`getGroup`; `getChatMessages` GET `/messages/list/{ChatID}`; `getProfilePicture` GET `/contacts/{id}/profile`; `getContactMetadata` | **real** |
-| Instância | `getConnectionStatus`, `configureWebhooks`, `updateProfile*` (`PATCH /users/profile`); `getLoginQr` | A/C + perfil; QR **501** |
+| Consultas | `getContacts` GET `/contacts`; `getChats` GET `/chats`; `getGroups`/`getGroup`; `getChatMessages` GET `/messages/list/{ChatID}`; `getProfilePicture` GET `/contacts/{id}/profile`; `getContactMetadata`; `checkPhones` POST `/contacts` `{contacts}` | **real** |
+| Opcionais (2026-09-07) | `forwardMessage` POST `/messages/{MessageID}` `{to,force?}`; `checkPhones` POST `/contacts` `{contacts,force_check?}` → `[{input,exists,waId}]`; `getLoginQr` GET `/users/login/image` (PNG→dataURI) | **real (código; live PENDENTE)** |
+| Instância | `getConnectionStatus`, `configureWebhooks`, `updateProfile*` (`PATCH /users/profile`); `getLoginQr` (QR real) | A/C + perfil + QR |
 | UltraMSG-only | `sendCall`, `clearChatMessages`, `resendByStatus/Id`, `getMessagesStatistics`, `clearMessages` | stub 501 |
 
 ### 2.3 Regras de erro / rede (iguais em espírito ao UltraMSG)
@@ -286,7 +287,16 @@ Ver §0.1. Papéis-chave:
 - HTTP ganhou `PUT` (reação: `PUT /messages/{id}/reaction`).
 - Normalizador: `*.link` → `imageUrl`/`audioUrl`/… (pipeline já baixa via `inboundMediaPersistenceService`); reação oficial `type=action`; `link_preview`/`live_location`/`contact`; ACK `code`+`status`.
 - Chat: `mediaMessageController`, `outboundController`, `retryController`, `forwardController` passam `getProvider({ provider })` (default ultramsg).
-- **Ainda stub 501:** `sendCall`, `clearChatMessages`, `resendByStatus`/`resendById`, `getMessagesStatistics`, `getLoginQr`.
+- **Ainda stub 501:** `sendCall`, `clearChatMessages`, `resendByStatus`/`resendById`, `getMessagesStatistics`, `clearMessages`.
+- **Opcionais implementados (2026-09-07, código; live PENDENTE):** `forwardMessage` (POST `/messages/{MessageID}`), `checkPhones` (POST `/contacts`), `getLoginQr` (GET `/users/login/image` → dataURI). Testes em `tests/whapiOptionalEndpoints.test.js`.
+  - **Fiação HTTP (aditiva, provider-aware):** `getLoginQr` → `GET /integrations/whatsapp/instances/:id/qrcode` (substituiu o 501; formato UltraMSG). `checkPhones` → **novo** `POST /integrations/whatsapp/instances/:id/check-phones` `{ phones:[], forceCheck? }` → `{ total, validCount, invalidCount, results:[{input,exists,waId}] }`; provider sem `checkPhones` → 501; **não** toca o loop de disparo. `forwardMessage` → **fiado (2026-09-07)** no `forwardController` como fast-path com fallback: só encaminha nativo quando `provider.forwardMessage` existe (Whapi), a origem tem `whatsapp_id` real E é da MESMA instância; caso contrário (UltraMSG, id ausente, instância diferente, ou falha do nativo) mantém a cópia atual. Preserva o selo "Encaminhada" e evita duplicar. Testes em `tests/whapiForwardNative.test.js` (função exposta via `_test`).
+- **Lote de endpoints extras (2026-09-07, código+testes; live PENDENTE):** adapter Whapi ganhou (paths confirmados no OpenAPI):
+  - `pinMessage` POST `/messages/{id}/pin` `{time:day|week|month}`; `starMessage` PUT `/messages/{id}/star` `{starred}`; `markMessageAsPlayed` PUT `/messages/{id}/played`.
+  - `patchChat` PATCH `/chats/{id}` `{pin?,mute_until?,mark_unread?,ephemeral?}` (+ atalhos `pinChat`/`muteChat`).
+  - `getContactAbout` GET `/contacts/{id}/about`; `addContact` PUT `/contacts` `{phone,name}`; `getIdByLid` GET `/contacts/ids/{lid}`; `getLidById` GET `/contacts/lids/{id}`.
+  - `getLoginCode` GET `/users/login/{phone}` → `{code}` (pareamento sem QR) → fiado em **novo** `POST /integrations/whatsapp/instances/:id/phone-code` (só Whapi; UltraMSG segue em `/connect/phone-code`).
+  - `sendLink` melhorado: usa POST `/messages/link_preview` (card com título/mídia) quando há título; senão texto simples (que já previa a URL); fallback resiliente a texto.
+  - Testes: `tests/whapiExtraEndpoints.test.js` (14). Todos exportados via `getProvider({provider}).*`. **Adapter-only** (exceto phone-code fiado); pin/star/patchChat/about/addContact aguardam UI/menu-bolha para consumo.
 - **Homologação live texto (CONFIRMADO 2026-09-04):** empresa `30`, instância `30`, canal `NEBULA-AER3B`. Atendimento enviou/recebeu texto (conversa Otavio, ACK/ticks). Mídia/delete/edit/sync/disparo Whapi: código real, homologação live **PENDENTE**. Rotacionar JWT/Bearer/webhook token (vazaram na sessão).
 - **Pronto de código quando:** testes Whapi + gate UltraMSG verdes. Live só com autorização.
 
@@ -296,10 +306,10 @@ Ver §0.1. Papéis-chave:
 - `configureWebhooks` Whapi: `PATCH https://gate.whapi.cloud/settings` com `{ webhooks: [{ url: APP_URL/webhooks/whapi, mode: 'body', events: messages post/put/patch/delete + statuses post/put, headers: { X-Webhook-Token: WHATSAPP_WEBHOOK_TOKEN } }] }`. Recusa se o token de webhook estiver ausente. Não dispara send-guard.
 - `POST /integrations/whatsapp/instances/:id/configure-webhooks` e o company-level `POST .../configure-webhooks` roteiam pelo provider da instância. Company-level: **UltraMSG primeiro**; Whapi só se a empresa não tiver default UltraMSG.
 - `GET /instances/:id/status` em instância Whapi chama `GET /health` do adapter (não o QR/status UltraMSG).
-- `GET/POST .../qrcode` e `POST .../restart` em instância Whapi → **501** (não empurram credencial Whapi no UltraMSG).
-- HTTP Whapi ganhou `PATCH` (`skipSendGuard` em settings).
+- `GET /instances/:id/qrcode` em instância Whapi (2026-09-07): chama `getLoginQr` (`GET /users/login/image`) e devolve `{ imageBase64, qrBase64, dataUri }` no **mesmo formato do UltraMSG** (base64 cru; front prefixa `data:`). Se não houver QR, consulta `getConnectionStatus`: canal em AUTH → `{ alreadyConnected:true }`; senão 502 com erro claro. `POST .../restart` Whapi segue **501** (sessão gerida pelo canal). Caminho UltraMSG intocado.
+- HTTP Whapi ganhou `PATCH` (`skipSendGuard` em settings) e `getBinary` (leitura de bytes p/ o QR).
 
-**Ainda falta (C restante):** UI `ConnectWhatsApp.jsx` (seletor UltraMSG | Whapi + Channel ID/Token); QR/pairing Whapi (`getLoginQr`).
+**Ainda falta (C restante):** UI `ConnectWhatsApp.jsx` (seletor UltraMSG | Whapi + Channel ID/Token). QR backend **pronto** (`getInstanceQrCode` já roteia Whapi); falta só a UI consumir e homologar ao vivo.
 
 **Pronto de C quando:** criar instância Whapi pela UI, ver health, configurar webhook, sem quebrar fluxo UltraMSG.
 
@@ -435,13 +445,14 @@ Webhook inbound: texto, from_me, ACK, mídia `link`, reação `action`, edit, lo
 
 | Adapter | MCP equivalente | Precisa no ZapERP? |
 |---|---|---|
-| `getLoginQr` | `loginUser` / `loginUserImage` / passkey | Sim, se quiser QR no painel (hoje sessão no painel Whapi) |
 | `sendCall` | `makeCall` `createGroupCallLink` | Não (UltraMSG também é limitado) |
 | `clearChatMessages` `clearMessages` `resendBy*` `getMessagesStatistics` | não há equivalente 1:1 | Não — UltraMSG-only |
 
+**Implementados 2026-09-07 (saíram do 501):** `getLoginQr` (`loginUserImage`), `forwardMessage`, `checkPhones` — ver §Fase D e `tests/whapiOptionalEndpoints.test.js`. Código pronto; falta ligar a controller/UI e homologar ao vivo.
+
 ### Existe no MCP, **não** implantado — só se o produto pedir
 
-**Atendimento (gap vs canal, não vs UltraMSG):** `forwardMessage` nativo (hoje o CRM reenvia copiando mídia/texto); `patchChat` pin/mute/ephemeral; `starMessage` `pinMessage` `commentMessage`; `markMessageAsPlayed`; `checkPhones`/`checkExist`; `getLidById`/`getIdByLid`; `sendMePresence`/`getPresence`; `addContact`/`editContact`.
+**Atendimento (gap vs canal, não vs UltraMSG):** `patchChat` pin/mute/ephemeral; `starMessage` `pinMessage` `commentMessage`; `markMessageAsPlayed`; `checkExist` (variação de `checkPhones`); `getLidById`/`getIdByLid`; `sendMePresence`/`getPresence`; `addContact`/`editContact`. (`forwardMessage`/`checkPhones` já implementados — ver acima.)
 
 **Envio extra (WhatsApp tem, CRM não usa):** `sendMessagePoll` `sendMessageQuiz` `sendMessageQuestion` `sendMessageInteractive` (botões — MCP avisa instável) `sendMessageCarousel` `sendMessageGif` `sendMessageShort` `sendMessageLiveLocation` `sendMessageContactList` `sendMediaMessage` (multipart).
 

@@ -27,6 +27,8 @@ router.get('/instances/:id/status', whatsappIntegrationController.getInstanceSta
 router.get('/instances/:id/qrcode', whatsappIntegrationController.getInstanceQrCode)
 router.post('/instances/:id/qrcode', whatsappIntegrationController.getInstanceQrCode)
 router.post('/instances/:id/restart', whatsappIntegrationController.restartInstance)
+router.post('/instances/:id/check-phones', whatsappIntegrationController.checkInstancePhones)
+router.post('/instances/:id/phone-code', whatsappIntegrationController.getInstancePhoneCode)
 router.post('/instances/:id/configure-webhooks', whatsappIntegrationController.configureInstanceWebhooks)
 
 const connectRouter = express.Router()

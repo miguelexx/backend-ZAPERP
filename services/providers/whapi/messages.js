@@ -154,9 +154,87 @@ async function getMessages(opts = {}) {
   }
 }
 
+/**
+ * Fixa uma mensagem no chat. POST /messages/{MessageID}/pin { time: day|week|month }.
+ * Boolean. Não envia mensagem → skipSendGuard.
+ */
+async function pinMessage(messageId, opts = {}) {
+  const cfg = await resolveConfig(opts)
+  if (!cfg) return false
+  const mid = String(messageId || '').trim()
+  if (!mid) return false
+  const time = ['day', 'week', 'month'].includes(String(opts?.time)) ? String(opts.time) : 'day'
+  try {
+    const { ok, data } = await post({
+      token: cfg.token,
+      endpoint: `/messages/${encodeURIComponent(mid)}/pin`,
+      body: { time },
+      companyId: cfg.companyId,
+      whatsappInstanceId: cfg.whatsappInstanceId,
+      skipSendGuard: true,
+    })
+    return isWhapiSuccessBody(ok, data)
+  } catch (e) {
+    console.warn('❌ Whapi pinMessage falhou:', e?.message || e)
+    return false
+  }
+}
+
+/**
+ * Marca/desmarca uma mensagem como favorita. PUT /messages/{MessageID}/star { starred }.
+ * Boolean. Não envia mensagem → skipSendGuard.
+ */
+async function starMessage(messageId, starred = true, opts = {}) {
+  const cfg = await resolveConfig(opts)
+  if (!cfg) return false
+  const mid = String(messageId || '').trim()
+  if (!mid) return false
+  try {
+    const { ok, data } = await put({
+      token: cfg.token,
+      endpoint: `/messages/${encodeURIComponent(mid)}/star`,
+      body: { starred: starred !== false },
+      companyId: cfg.companyId,
+      whatsappInstanceId: cfg.whatsappInstanceId,
+      skipSendGuard: true,
+    })
+    return isWhapiSuccessBody(ok, data)
+  } catch (e) {
+    console.warn('❌ Whapi starMessage falhou:', e?.message || e)
+    return false
+  }
+}
+
+/**
+ * Envia recibo de "reproduzido" de um áudio/voz. PUT /messages/{MessageID}/played (sem corpo).
+ * Boolean. Recibo (não envia conteúdo) → skipSendGuard.
+ */
+async function markMessageAsPlayed(messageId, opts = {}) {
+  const cfg = await resolveConfig(opts)
+  if (!cfg) return false
+  const mid = String(messageId || '').trim()
+  if (!mid) return false
+  try {
+    const { ok, data } = await put({
+      token: cfg.token,
+      endpoint: `/messages/${encodeURIComponent(mid)}/played`,
+      companyId: cfg.companyId,
+      whatsappInstanceId: cfg.whatsappInstanceId,
+      skipSendGuard: true,
+    })
+    return isWhapiSuccessBody(ok, data)
+  } catch (e) {
+    console.warn('❌ Whapi markMessageAsPlayed falhou:', e?.message || e)
+    return false
+  }
+}
+
 module.exports = {
   deleteMessage,
   editMessage,
   markMessageAsRead,
   getMessages,
+  pinMessage,
+  starMessage,
+  markMessageAsPlayed,
 }

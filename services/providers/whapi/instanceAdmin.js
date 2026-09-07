@@ -5,7 +5,7 @@
  * QR/pairing (getLoginQr) continua 501 — sessão Whapi autentica no painel Whapi Cloud.
  */
 
-const { get, patch } = require('./http')
+const { get, patch, getBinary } = require('./http')
 const { resolveConfig } = require('./config')
 
 const WHAPI_WEBHOOK_EVENTS = [
@@ -126,15 +126,65 @@ async function getConnectionStatus(opts = {}) {
   }
 }
 
-/** Fase C — QR/pairing (sessão WhatsApp Web do canal Whapi). */
-async function getLoginQr() {
-  return { ok: false, notImplemented: true, httpStatus: 501, error: 'whapi.getLoginQr só na Fase C (QR/pairing)' }
+/**
+ * QR-code de login do canal Whapi (conectar pelo painel do ZapERP).
+ * GET /users/login/image → PNG. `wakeup=true` para o canal subir e gerar o QR.
+ * Só produz QR se o canal NÃO estiver conectado (estado AUTH não tem QR).
+ * Retorna { ok, image: dataUri, mimeType } — sem send guard (leitura).
+ */
+async function getLoginQr(opts = {}) {
+  const cfg = await resolveConfig(opts)
+  if (!cfg) return { ok: false, error: 'Instância Whapi não configurada' }
+  const extraParams = { wakeup: 'true' }
+  if (opts?.size) extraParams.size = String(opts.size)
+  if (opts?.width) extraParams.width = String(opts.width)
+  if (opts?.height) extraParams.height = String(opts.height)
+  try {
+    const { ok, status, buffer, contentType } = await getBinary({
+      token: cfg.token,
+      endpoint: '/users/login/image',
+      extraParams,
+    })
+    if (!ok || !buffer || !buffer.length) {
+      return { ok: false, httpStatus: status, error: `Whapi não retornou QR (HTTP ${status}). O canal pode já estar conectado (AUTH).` }
+    }
+    const mimeType = contentType && contentType.startsWith('image/') ? contentType.split(';')[0] : 'image/png'
+    return { ok: true, image: `data:${mimeType};base64,${buffer.toString('base64')}`, mimeType, httpStatus: status }
+  } catch (e) {
+    return { ok: false, error: `Falha de conexão ao obter QR (Whapi): ${e?.message || e}` }
+  }
+}
+
+/**
+ * Código de pareamento (login sem QR). GET /users/login/{PhoneNumber} → { code }.
+ * O usuário digita o código no WhatsApp do celular. Só se o canal NÃO estiver conectado.
+ * Retorna { ok, code, error }.
+ */
+async function getLoginCode(phone, opts = {}) {
+  const cfg = await resolveConfig(opts)
+  if (!cfg) return { ok: false, error: 'Instância Whapi não configurada' }
+  const digits = String(phone || '').replace(/\D/g, '')
+  if (!digits) return { ok: false, error: 'Telefone inválido para pareamento' }
+  try {
+    const { ok, status, data } = await get({
+      token: cfg.token,
+      endpoint: `/users/login/${encodeURIComponent(digits)}`,
+    })
+    const code = data?.code != null ? String(data.code) : null
+    if (!ok || !code) {
+      return { ok: false, httpStatus: status, error: String(data?.error?.message || data?.error || `HTTP ${status}`) + (status === 409 ? ' (canal já autenticado)' : '') }
+    }
+    return { ok: true, code, httpStatus: status }
+  } catch (e) {
+    return { ok: false, error: `Falha de conexão ao obter código (Whapi): ${e?.message || e}` }
+  }
 }
 
 module.exports = {
   getConnectionStatus,
   configureWebhooks,
   getLoginQr,
+  getLoginCode,
   updateProfilePicture,
   updateProfileName,
   updateProfileDescription,

@@ -129,6 +129,53 @@ async function getGroup(groupId, opts = {}) {
   }
 }
 
+/**
+ * Ajustes de chat no WhatsApp do celular. PATCH /chats/{ChatID}.
+ * Campos: pin (bool), mute_until (unix ms; 0 = desmutar), mark_unread (bool),
+ * ephemeral ('none'|'day'|'week'|'quarter'). Só envia o que vier em `patch`. Boolean.
+ */
+async function patchChat(phone, changes = {}, opts = {}) {
+  const cfg = await resolveConfig(opts)
+  if (!cfg) return false
+  const chatId = toWhapiChatId(phone)
+  if (!chatId) return false
+  const body = {}
+  if (typeof changes.pin === 'boolean') body.pin = changes.pin
+  if (changes.mute_until != null) body.mute_until = Number(changes.mute_until)
+  if (typeof changes.mark_unread === 'boolean') body.mark_unread = changes.mark_unread
+  if (changes.ephemeral != null && ['none', 'day', 'week', 'quarter'].includes(String(changes.ephemeral))) {
+    body.ephemeral = String(changes.ephemeral)
+  }
+  if (!Object.keys(body).length) return false
+  try {
+    const { ok, data } = await patch({
+      token: cfg.token,
+      endpoint: `/chats/${encodeURIComponent(chatId)}`,
+      body,
+      companyId: cfg.companyId,
+      whatsappInstanceId: cfg.whatsappInstanceId,
+      skipSendGuard: true,
+    })
+    return isWhapiSuccessBody(ok, data)
+  } catch (e) {
+    console.warn('❌ Whapi patchChat falhou:', e?.message || e)
+    return false
+  }
+}
+
+/** Fixa/desafixa o chat. Atalho de patchChat({ pin }). */
+async function pinChat(phone, pin = true, opts = {}) {
+  return patchChat(phone, { pin: pin !== false }, opts)
+}
+
+/** Silencia/desmuta o chat. mute=true silencia por ~8h (default) ou opts.muteUntil (unix ms); false desmuta. */
+async function muteChat(phone, mute = true, opts = {}) {
+  const muteUntil = mute === false
+    ? 0
+    : (opts?.muteUntil != null ? Number(opts.muteUntil) : Date.now() + 8 * 60 * 60 * 1000)
+  return patchChat(phone, { mute_until: muteUntil }, opts)
+}
+
 module.exports = {
   archiveChat,
   unarchiveChat,
@@ -138,4 +185,7 @@ module.exports = {
   getChats,
   getGroups,
   getGroup,
+  patchChat,
+  pinChat,
+  muteChat,
 }

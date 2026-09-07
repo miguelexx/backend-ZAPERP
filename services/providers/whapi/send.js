@@ -75,12 +75,48 @@ async function sendText(phone, message, opts = {}) {
   return normalized
 }
 
+/**
+ * Link com preview. Texto simples com URL já gera preview automático no WhatsApp;
+ * o endpoint /messages/link_preview serve para CARD CUSTOMIZADO (título/mídia próprios).
+ * Usa link_preview quando há título; senão manda texto (que já previa). Fallback resiliente a texto.
+ */
 async function sendLink(phone, payload, opts = {}) {
   const linkUrl = String(payload?.linkUrl || '').trim()
   const title = String(payload?.title || '').trim()
   const desc = String(payload?.linkDescription || '').trim()
-  const msg = String(payload?.message || '').trim() || [title, desc, linkUrl].filter(Boolean).join('\n')
-  return sendText(phone, msg, opts)
+  const baseMsg = String(payload?.message || '').trim()
+  let body = baseMsg || [title, desc].filter(Boolean).join('\n')
+  // O corpo do link_preview PRECISA conter a URL para o WhatsApp montar o card.
+  if (linkUrl && !body.includes(linkUrl)) body = [body, linkUrl].filter(Boolean).join('\n').trim()
+
+  // Sem URL ou sem título customizado: texto simples (já gera preview automático).
+  if (!linkUrl || !title) {
+    return sendText(phone, body || linkUrl, opts)
+  }
+
+  const cfg = await resolveConfig(opts)
+  if (!cfg) return { ok: false, messageId: null, error: 'Instância Whapi não configurada. Conecte o canal no painel de integrações.' }
+  const to = toWhapiRecipient(phone)
+  if (!to || !body) return { ok: false, messageId: null, error: 'Número inválido ou mensagem vazia.' }
+  const linkBody = applyQuoted({
+    to, body, title,
+    ...(payload?.media ? { media: String(payload.media) } : {}),
+  }, opts)
+  try {
+    const normalized = await postMessage({
+      cfg, endpoint: '/messages/link_preview', body: linkBody, to, kind: 'link', opts, extraMeta: { textLength: body.length },
+    })
+    if (!normalized.ok) {
+      // Não perde a mensagem: se o provider recusar o card, envia como texto (que ainda previa a URL).
+      console.warn('⚠️ Whapi link_preview falhou, fallback texto:', String(normalized.error).slice(0, 160))
+      return sendText(phone, body, opts)
+    }
+    console.log('✅ Whapi link enviado:', String(to).slice(-13))
+    return normalized
+  } catch (e) {
+    console.warn('⚠️ Whapi link_preview erro, fallback texto:', e?.message || e)
+    return sendText(phone, body, opts)
+  }
 }
 
 async function sendMediaByEndpoint(endpoint, kind, phone, media, extra = {}, opts = {}) {
@@ -259,6 +295,37 @@ async function sendCall() {
   return notImplemented('sendCall')
 }
 
+/**
+ * Encaminha uma mensagem existente para outro chat.
+ * POST /messages/{MessageID} { to, force? } → { sent, message.id } (contrato de envio).
+ * Retorna { ok, messageId, error } como sendText (é um novo envio no destino).
+ */
+async function forwardMessage(phone, messageId, opts = {}) {
+  const cfg = await resolveConfig(opts)
+  if (!cfg) {
+    return { ok: false, messageId: null, error: 'Instância Whapi não configurada. Conecte o canal no painel de integrações.' }
+  }
+  const to = toWhapiRecipient(phone)
+  const mid = String(messageId || '').trim()
+  if (!to || !mid) {
+    return { ok: false, messageId: null, error: 'Destino ou id da mensagem inválido.' }
+  }
+  const body = { to, ...(opts?.force === true ? { force: true } : {}) }
+  try {
+    const normalized = await postMessage({
+      cfg, endpoint: `/messages/${encodeURIComponent(mid)}`, body, to, kind: 'forward', opts, extraMeta: { forwardId: mid },
+    })
+    if (!normalized.ok) {
+      console.warn('❌ Whapi forwardMessage falhou:', String(to).slice(-13), String(normalized.error).slice(0, 200), '| token:', maskToken(cfg.token))
+      return normalized
+    }
+    console.log('✅ Whapi mensagem encaminhada:', String(to).slice(-13), normalized.messageId ? `id=${String(normalized.messageId).slice(0, 16)}...` : '')
+    return normalized
+  } catch (e) {
+    return { ok: false, messageId: null, error: `Falha de conexão ao encaminhar (Whapi): ${e?.message || e}` }
+  }
+}
+
 module.exports = {
   sendText,
   sendLink,
@@ -273,5 +340,6 @@ module.exports = {
   sendReaction,
   removeReaction,
   sendCall,
+  forwardMessage,
   notImplemented,
 }
