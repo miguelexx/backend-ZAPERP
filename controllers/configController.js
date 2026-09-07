@@ -1,6 +1,7 @@
 const supabase = require('../config/supabase')
 const crmSync = require('../services/crmSyncService')
 const { getProvider } = require('../services/providers')
+const { resolveCompanyWhatsappProvider } = require('../services/chat/identity/conversationAddressService')
 const fs = require('fs')
 const path = require('path')
 const { getUploadsRoot } = require('../config/uploadsRoot')
@@ -402,7 +403,8 @@ exports.updateWhatsappProfilePicture = async (req, res) => {
     if (!value || typeof value !== 'string' || !value.trim().startsWith('http')) {
       return res.status(400).json({ error: 'Forneça uma URL válida em "value".' })
     }
-    const provider = getProvider()
+    const instanceProvider = await resolveCompanyWhatsappProvider(company_id)
+    const provider = getProvider({ provider: instanceProvider })
     if (!provider?.updateProfilePicture) {
       return res.status(503).json({ error: 'Provedor não suporta atualização de foto de perfil.' })
     }
@@ -426,7 +428,8 @@ exports.updateWhatsappProfileName = async (req, res) => {
     if (value.trim().length > 25) {
       return res.status(400).json({ error: 'Nome de perfil deve ter no máximo 25 caracteres.' })
     }
-    const provider = getProvider()
+    const instanceProvider = await resolveCompanyWhatsappProvider(company_id)
+    const provider = getProvider({ provider: instanceProvider })
     if (!provider?.updateProfileName) {
       return res.status(503).json({ error: 'Provedor não suporta atualização de nome de perfil.' })
     }
@@ -451,7 +454,8 @@ exports.updateWhatsappProfileDescription = async (req, res) => {
     if (desc.length > 139) {
       return res.status(400).json({ error: 'Descrição deve ter no máximo 139 caracteres.' })
     }
-    const provider = getProvider()
+    const instanceProvider = await resolveCompanyWhatsappProvider(company_id)
+    const provider = getProvider({ provider: instanceProvider })
     if (!provider?.updateProfileDescription) {
       return res.status(503).json({ error: 'Provedor não suporta atualização de descrição de perfil.' })
     }

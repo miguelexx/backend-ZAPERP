@@ -122,6 +122,7 @@ Cada arquivo abaixo é reexportado pela fachada. Rota exata: ver `routes/chatRou
 | `conversationDetailController.js` | detalharChat (+ ordenarMensagensHistoricoAsc) |
 | `messageReadController.js` | carregarMensagensAntigasContato, buscarMensagensConversa |
 | `messageDeletionController.js` | excluirMensagem |
+| `messageEditController.js` | editarMensagem (PATCH `/chats/:id/mensagens/:mensagem_id`) |
 | `conversationCleanupController.js` | limparMensagensConversa, apagarConversa |
 | `maintenanceController.js` | paginaMergeDuplicatas, mergeConversasDuplicadas (+ HTML embutido) |
 | `integrationController.js` | listWhatsappInstancesAtendimento, whatsappStatus, **zapiStatus (alias legado = whatsappStatus)**, sincronizarContatosZapi, debugSyncContatos, sincronizarFotosPerfilZapi |

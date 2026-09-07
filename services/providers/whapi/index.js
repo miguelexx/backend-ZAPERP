@@ -1,18 +1,19 @@
 /**
  * Adapter Whapi Cloud — API pública estável (mesmos NOMES do contrato interno da UltraMSG).
  * Callers usam getProvider({ provider: 'whapi' }). NÃO importa nada da pasta ultramsg.
- * Fase B: sendText/mídia/reação/contato/localização + uploadMedia + getConnectionStatus.
- * Fase C (parcial): configureWebhooks real (PATCH /settings); getLoginQr ainda 501.
- * Consultas/sync (getContacts/…) continuam stub 501 até a Fase D.
  * Ver docs/ai-handoff/25-WHAPI-SEGUNDA-INTEGRACAO.md
  */
 
 const send = require('./send')
+const messages = require('./messages')
+const chatsAdmin = require('./chatsAdmin')
+const contacts = require('./contacts')
+const chatMessages = require('./chatMessages')
 const instanceAdmin = require('./instanceAdmin')
 const queries = require('./queries')
 const { uploadMedia } = require('./upload')
 const { buildBaseUrl, maskTokenInLogs, validateRequiredFields } = require('./http')
-const { toWhapiRecipient, recipientCandidates } = require('./phones')
+const { toWhapiRecipient, toWhapiChatId, recipientCandidates } = require('./phones')
 
 module.exports = {
   sendText: send.sendText,
@@ -28,32 +29,42 @@ module.exports = {
   sendReaction: send.sendReaction,
   removeReaction: send.removeReaction,
   sendCall: send.sendCall,
-  deleteMessage: send.deleteMessage,
 
-  // Chat admin (Fase B/D)
-  archiveChat: queries.archiveChat,
-  unarchiveChat: queries.unarchiveChat,
-  readChat: queries.readChat,
-  clearChatMessages: queries.clearChatMessages,
-  deleteChat: queries.deleteChat,
+  deleteMessage: messages.deleteMessage,
+  editMessage: messages.editMessage,
+  markMessageAsRead: messages.markMessageAsRead,
+  getMessages: messages.getMessages,
 
-  // Consultas/sync (Fase D — 501 claro, nunca cair no UltraMSG)
-  getContacts: queries.getContacts,
-  getContactMetadata: queries.getContactMetadata,
-  getChats: queries.getChats,
-  getGroups: queries.getGroups,
-  getGroup: queries.getGroup,
-  getChatMessages: queries.getChatMessages,
-  getProfilePicture: queries.getProfilePicture,
+  archiveChat: chatsAdmin.archiveChat,
+  unarchiveChat: chatsAdmin.unarchiveChat,
+  readChat: chatsAdmin.readChat,
+  clearChatMessages: chatsAdmin.clearChatMessages,
+  deleteChat: chatsAdmin.deleteChat,
+  getChats: chatsAdmin.getChats,
+  getGroups: chatsAdmin.getGroups,
+  getGroup: chatsAdmin.getGroup,
+
+  getContacts: contacts.getContacts,
+  getContactMetadata: contacts.getContactMetadata,
+  getProfilePicture: contacts.getProfilePicture,
+  invalidateNoProfilePictureCache: contacts.invalidateNoProfilePictureCache,
+  getChatMessages: chatMessages.getChatMessages,
   uploadMedia,
 
-  // Admin instância/canal (Fase A: status; Fase C: QR/webhooks)
   getConnectionStatus: instanceAdmin.getConnectionStatus,
   configureWebhooks: instanceAdmin.configureWebhooks,
   getLoginQr: instanceAdmin.getLoginQr,
+  updateProfilePicture: instanceAdmin.updateProfilePicture,
+  updateProfileName: instanceAdmin.updateProfileName,
+  updateProfileDescription: instanceAdmin.updateProfileDescription,
 
-  // Utilitários
+  resendByStatus: queries.resendByStatus,
+  resendById: queries.resendById,
+  clearMessages: queries.clearMessages,
+  getMessagesStatistics: queries.getMessagesStatistics,
+
   toWhapiRecipient,
+  toWhapiChatId,
   recipientCandidates,
   buildBaseUrl,
   maskTokenInLogs,

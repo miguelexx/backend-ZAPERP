@@ -1,8 +1,8 @@
 /**
  * HTTP Whapi: JSON + Authorization: Bearer <token>, token mascarado em log,
- * retry SÓ de erro de conexão no POST/PUT/PATCH (timeout/resposta ambígua NÃO repete — duplicaria).
+ * retry SÓ de erro de conexão no POST/PUT/PATCH/DELETE (timeout/resposta ambígua NÃO repete — duplicaria).
  * Reusa whatsappSendGuardService (espaça por whatsappInstanceId) e helpers/retryWithBackoff.
- * PATCH /settings e POST /media usam skipSendGuard: true (não disparam WhatsApp).
+ * PATCH /settings, POST /media, leitura de chat e perfil usam skipSendGuard: true (não disparam WhatsApp).
  */
 
 const { fetchWithRetry } = require('../../../helpers/retryWithBackoff')
@@ -76,7 +76,7 @@ function createFetchOptions(method, body) {
     ...(signal && { signal }),
   }
   const m = String(method || 'GET').toUpperCase()
-  if (body != null && m !== 'GET' && m !== 'HEAD') {
+  if (body != null && m !== 'GET' && m !== 'HEAD' && m !== 'DELETE') {
     opts.headers = { ...opts.headers, 'Content-Type': 'application/json' }
     opts.body = typeof body === 'string' ? body : JSON.stringify(body)
   }
@@ -89,8 +89,8 @@ function withAuth(headers, token) {
 }
 
 /**
- * POST/PUT/PATCH JSON. Mensagens usam send guard + retry só-conexão.
- * `skipSendGuard: true` para upload de arquivo e PATCH /settings (não dispara WhatsApp).
+ * POST/PUT/PATCH/DELETE JSON. Mensagens usam send guard + retry só-conexão.
+ * `skipSendGuard: true` para upload, settings, leitura/arquivo de chat e perfil.
  */
 async function sendJson({
   method = 'POST',
@@ -146,6 +146,10 @@ async function patch(opts) {
   return sendJson({ ...opts, method: 'PATCH' })
 }
 
+async function del(opts) {
+  return sendJson({ ...opts, method: 'DELETE' })
+}
+
 async function get({ token, endpoint, extraParams = {} }) {
   const sep = String(endpoint || '').includes('?') ? '&' : '?'
   const qs = new URLSearchParams(extraParams).toString()
@@ -170,5 +174,6 @@ module.exports = {
   post,
   put,
   patch,
+  del,
   get,
 }

@@ -8,6 +8,7 @@
 
 const supabase = require('../config/supabase')
 const { getProvider } = require('./providers')
+const { resolveCompanyWhatsappProvider } = require('./chat/identity/conversationAddressService')
 const { getEmpresaWhatsappConfig } = require('./whatsappConfigService')
 const { getOrCreateCliente } = require('../helpers/conversationSync')
 const { normalizePhoneBR, possiblePhonesBR, possiblePhonesForWhatsappIdentity, phoneKeyBR } = require('../helpers/phoneHelper')
@@ -252,7 +253,9 @@ async function maybeEnrichFoto(companyId, phoneNorm, existente) {
   let fotoUrl = null
   const needsFoto = !existente?.foto_perfil || existente.foto_perfil === 'null' || existente.foto_perfil === ''
   if (!needsFoto) return null
-  const provider = getProvider()
+  const { resolveCompanyWhatsappProvider } = require('./chat/identity/conversationAddressService')
+  const instanceProvider = await resolveCompanyWhatsappProvider(companyId)
+  const provider = getProvider({ provider: instanceProvider })
   if (provider?.getProfilePicture) {
     try {
       fotoUrl = await provider.getProfilePicture(phoneNorm, { companyId })
@@ -271,7 +274,9 @@ async function processContactsPage(companyId, opts = {}) {
   const page = Math.max(1, Number(opts.page) || 1)
   // Até 1000 por requisição (teto da API); alinhado ao getContacts/UltraMsg
   const pageSize = Math.min(1000, Math.max(10, Number(opts.pageSize) || PAGE_SIZE_DEFAULT))
-  const provider = getProvider()
+  const { resolveCompanyWhatsappProvider } = require('./chat/identity/conversationAddressService')
+  const instanceProvider = await resolveCompanyWhatsappProvider(companyId)
+  const provider = getProvider({ provider: instanceProvider })
 
   if (!provider?.getContacts) {
     return {
@@ -286,17 +291,19 @@ async function processContactsPage(companyId, opts = {}) {
     }
   }
 
-  const { config, error } = await getEmpresaWhatsappConfig(companyId)
-  if (error || !config) {
-    return {
-      processados: 0,
-      inserted: 0,
-      updated: 0,
-      skipped: 0,
-      conflicted: 0,
-      errors: ['Empresa sem instância configurada em empresa_zapi'],
-      hasMore: false,
-      advanceCheckpoint: false
+  if (instanceProvider !== 'whapi') {
+    const { config, error } = await getEmpresaWhatsappConfig(companyId)
+    if (error || !config) {
+      return {
+        processados: 0,
+        inserted: 0,
+        updated: 0,
+        skipped: 0,
+        conflicted: 0,
+        errors: ['Empresa sem instância configurada em empresa_zapi'],
+        hasMore: false,
+        advanceCheckpoint: false
+      }
     }
   }
 
@@ -571,10 +578,14 @@ async function runContactSyncFull(company_id, opts = {}) {
         .eq('company_id', company_id).eq('tipo', LOCK_TIPO)).catch(() => {})
     }, 30000)
     heartbeat.unref?.()
-    const provider = getProvider()
+    const { resolveCompanyWhatsappProvider } = require('./chat/identity/conversationAddressService')
+    const instanceProvider = await resolveCompanyWhatsappProvider(company_id)
+    const provider = getProvider({ provider: instanceProvider })
     if (!provider?.getContacts) throw new Error('Consulta de contatos indisponível.')
-    const { config: waCfg, error: cfgErr } = await getEmpresaWhatsappConfig(company_id)
-    if (cfgErr || !waCfg) throw new Error('Empresa sem instância WhatsApp configurada.')
+    if (instanceProvider !== 'whapi') {
+      const { config: waCfg, error: cfgErr } = await getEmpresaWhatsappConfig(company_id)
+      if (cfgErr || !waCfg) throw new Error('Empresa sem instância WhatsApp configurada.')
+    }
     // A agenda pode mudar de ordem entre execuções. Recomeçar é idempotente e evita pular contatos.
     await resetCheckpoint(company_id)
     await progress('buscando')

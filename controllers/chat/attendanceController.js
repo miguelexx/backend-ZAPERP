@@ -21,7 +21,7 @@ const { normalizarTimestampSemFusoAmbiguoParaApi } = require('../../helpers/time
 const { isRealWhatsAppId } = require('../../helpers/whatsappMessageIdHelper')
 const { INTERNAL_NOTE_PERMISSAO, INTERNAL_NOTE_STATUS, sanitizeInternalNoteTexto, buildInternalNoteInsert } = require('../../helpers/internalNote')
 const { usuarioTemPermissao } = require('../../helpers/permissoesService')
-const { resolveConversationWhatsappInstance } = require('../../services/chat/identity/conversationAddressService')
+const { resolveConversationWhatsappInstance, resolveConversationProvider } = require('../../services/chat/identity/conversationAddressService')
 const { invalidateConversaVisibilityCache, isConversaAtendentesMissingTable, getConversaParticipanteIdsAtivos, usuarioParticipaAtivamenteDaConversa } = require('../../services/chat/access/conversationVisibilityService')
 const { emitirConversaAtualizada, emitirParaUsuariosQuePodemVerConversa, emitirEventoEmpresaConversa, emitirSincronizacaoListaConversas, emitirLock, emitirRealtimeAposAssumir, emitirParaUsuario, emitirMovimentacaoInternaAtendimento, emitirDepartamento } = require('../../services/chat/realtime/chatRealtimeGateway')
 const { assertPermissaoConversa } = require('../../services/chat/access/conversationPolicy')
@@ -147,7 +147,8 @@ exports.encerrarChat = async (req, res) => {
             if (!isGroup && telefoneParaEnvio && !String(telefoneParaEnvio).trim().toLowerCase().startsWith('lid:')) {
               const whatsappInstanceId = await resolveConversationWhatsappInstance(company_id, data)
               const { getProvider } = require('../../services/providers')
-              const provider = getProvider()
+              const instanceProvider = await resolveConversationProvider(company_id, whatsappInstanceId)
+              const provider = getProvider({ provider: instanceProvider })
               if (provider?.sendText) {
                 const resultSend = await provider.sendText(telefoneParaEnvio, msg, {
                   companyId: company_id,

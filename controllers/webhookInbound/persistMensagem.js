@@ -12,6 +12,11 @@ const { selectSingleMensagemByWhatsappId, updateSingleMensagemByWhatsappId, pres
 const { tipoQualificaPersistencia } = require('../../services/inboundMediaPersistenceService')
 const { normalizarTimestampSemFusoAmbiguoParaApi } = require('../../helpers/timestampApiCompat')
 const { scheduleInboundWebPush } = require('../../services/webPushDispatchService')
+const {
+  buildEditadaDbUpdates,
+  isMissingEditadaColumnError,
+  buildMensagemEditadaSocketPayload,
+} = require('../../helpers/mensagemEditHelper')
 
 const WEBHOOK_MSG_SELECT = 'id, conversa_id, company_id, whatsapp_instance_id, whatsapp_id, texto, url, tipo, direcao, criado_em, status, autor_usuario_id, reply_meta, nome_arquivo, contact_meta, location_meta, remetente_nome, remetente_telefone'
 
@@ -171,22 +176,40 @@ async function persistInboundMensagemRow(supabaseClient, ctx, insertMsg) {
 async function resolveEditedMensagemRow(supabaseClient, { company_id, whatsapp_instance_id, whatsappIdStr, conversa_id, texto, io }) {
   const supabase = supabaseClient || supabaseDefault
   try {
-    const { data: editTarget } = await updateSingleMensagemByWhatsappId(supabase, {
+    const updates = buildEditadaDbUpdates(texto)
+    let { data: editTarget, error } = await updateSingleMensagemByWhatsappId(supabase, {
       company_id,
       whatsapp_id: whatsappIdStr,
       whatsapp_instance_id,
-      updates: { texto },
+      updates,
       select: WEBHOOK_MSG_SELECT,
       context: 'received.isEdit',
     })
+    if (error && isMissingEditadaColumnError(error)) {
+      const retry = await updateSingleMensagemByWhatsappId(supabase, {
+        company_id,
+        whatsapp_id: whatsappIdStr,
+        whatsapp_instance_id,
+        updates: { texto },
+        select: WEBHOOK_MSG_SELECT,
+        context: 'received.isEdit',
+      })
+      editTarget = retry.data
+    }
     if (editTarget) {
       console.log(`✏️ Z-API isEdit: mensagem ${editTarget.id} atualizada (conversa ${conversa_id})`)
       if (io) {
-        io.to(`conversa_${conversa_id}`).to(`empresa_${company_id}`).emit('mensagem_editada', {
-          id: editTarget.id,
-          conversa_id,
-          texto,
-        })
+        io.to(`conversa_${conversa_id}`).emit(
+          io.EVENTS?.MENSAGEM_EDITADA || 'mensagem_editada',
+          buildMensagemEditadaSocketPayload({
+            id: editTarget.id,
+            conversa_id,
+            company_id,
+            texto,
+            editada_em: updates.editada_em,
+            tipo: editTarget.tipo || null,
+          })
+        )
       }
       return editTarget
     }

@@ -12,6 +12,7 @@
 
 const supabase = require('../config/supabase')
 const { getProvider } = require('./providers')
+const { resolveCompanyWhatsappProvider } = require('./chat/identity/conversationAddressService')
 const { getEmpresaWhatsappConfig } = require('./whatsappConfigService')
 const { findOrCreateConversation, getOrCreateCliente } = require('../helpers/conversationSync')
 const { normalizePhoneBR } = require('../helpers/phoneHelper')
@@ -53,7 +54,8 @@ function extractGroupFields(raw) {
  * Usa GET /groups/group?groupId= para obter o nome do grupo.
  */
 async function getGroupMetadata(groupId, company_id) {
-  const provider = getProvider()
+  const instanceProvider = await resolveCompanyWhatsappProvider(company_id)
+  const provider = getProvider({ provider: instanceProvider })
   if (!provider) return { nome: null, foto: null }
   
   try {
@@ -97,12 +99,14 @@ async function syncGroups(company_id) {
     return { ok: false, totalFetched: 0, inserted: 0, updated: 0, skipped: 0, errors: ['company_id ausente'] }
   }
 
-  const { config, error } = await getEmpresaWhatsappConfig(company_id)
-  if (error || !config) {
-    return { ok: false, totalFetched: 0, inserted: 0, updated: 0, skipped: 0, errors: ['Empresa sem instância configurada'] }
+  const instanceProvider = await resolveCompanyWhatsappProvider(company_id)
+  if (instanceProvider !== 'whapi') {
+    const { config, error } = await getEmpresaWhatsappConfig(company_id)
+    if (error || !config) {
+      return { ok: false, totalFetched: 0, inserted: 0, updated: 0, skipped: 0, errors: ['Empresa sem instância configurada'] }
+    }
   }
-
-  const provider = getProvider()
+  const provider = getProvider({ provider: instanceProvider })
   if (!provider?.getGroups) {
     return { ok: false, totalFetched: 0, inserted: 0, updated: 0, skipped: 0, errors: ['getGroups não disponível'] }
   }
@@ -287,12 +291,14 @@ async function syncFromChats(company_id) {
     return { ok: false, totalFetched: 0, inserted: 0, updated: 0, skipped: 0, errors: ['company_id ausente'] }
   }
 
-  const { config, error } = await getEmpresaWhatsappConfig(company_id)
-  if (error || !config) {
-    return { ok: false, totalFetched: 0, inserted: 0, updated: 0, skipped: 0, errors: ['Empresa sem instância configurada'] }
+  const instanceProvider = await resolveCompanyWhatsappProvider(company_id)
+  if (instanceProvider !== 'whapi') {
+    const { config, error } = await getEmpresaWhatsappConfig(company_id)
+    if (error || !config) {
+      return { ok: false, totalFetched: 0, inserted: 0, updated: 0, skipped: 0, errors: ['Empresa sem instância configurada'] }
+    }
   }
-
-  const provider = getProvider()
+  const provider = getProvider({ provider: instanceProvider })
   if (!provider?.getChats) {
     return { ok: true, totalFetched: 0, inserted: 0, updated: 0, skipped: 0, errors: [] }
   }

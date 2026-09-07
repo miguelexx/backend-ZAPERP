@@ -144,12 +144,119 @@ describe('Whapi provider — sendText', () => {
     expect(JSON.parse(opts.body)).toEqual({ emoji: '👍' })
   })
 
-  test('getContacts continua stub 501 (Fase D); sendCall também', async () => {
+  test('deleteMessage é DELETE /messages/{id} e retorna boolean', async () => {
+    const { fetchWithRetry } = mockDeps({
+      instancesById: { '1:10': whapiInstance() },
+      fetchImpl: async () => ({ ok: true, status: 200, text: async () => JSON.stringify({ success: true }) }),
+    })
+    const whapi = require('../services/providers/whapi')
+    const ok = await whapi.deleteMessage('5534988887777', 'AbCd-EfGh', { companyId: 1, whatsappInstanceId: 10 })
+    expect(ok).toBe(true)
+    const [url, opts] = fetchWithRetry.mock.calls[0]
+    expect(opts.method).toBe('DELETE')
+    expect(url).toBe('https://gate.whapi.test/messages/AbCd-EfGh')
+  })
+
+  test('editMessage POST /messages/text com campo edit', async () => {
+    const { fetchWithRetry } = mockDeps({ instancesById: { '1:10': whapiInstance() } })
+    const whapi = require('../services/providers/whapi')
+    const r = await whapi.editMessage('5534988887777', 'AbCd-EfGh', 'texto novo', {
+      companyId: 1, whatsappInstanceId: 10,
+    })
+    expect(r.ok).toBe(true)
+    const [url, opts] = fetchWithRetry.mock.calls[0]
+    expect(url).toBe('https://gate.whapi.test/messages/text')
+    expect(opts.method).toBe('POST')
+    expect(JSON.parse(opts.body)).toEqual({ to: '5534988887777', body: 'texto novo', edit: 'AbCd-EfGh' })
+  })
+
+  test('editMessage com allowEmpty envia body vazio (legenda de mídia)', async () => {
+    const { fetchWithRetry } = mockDeps({ instancesById: { '1:10': whapiInstance() } })
+    const whapi = require('../services/providers/whapi')
+    const r = await whapi.editMessage('5534988887777', 'AbCd-EfGh', '', {
+      companyId: 1, whatsappInstanceId: 10, allowEmpty: true,
+    })
+    expect(r.ok).toBe(true)
+    expect(JSON.parse(fetchWithRetry.mock.calls[0][1].body)).toEqual({
+      to: '5534988887777', body: '', edit: 'AbCd-EfGh',
+    })
+  })
+
+  test('readChat PATCH /chats/{ChatID} mark_unread false', async () => {
+    const { fetchWithRetry } = mockDeps({
+      instancesById: { '1:10': whapiInstance() },
+      fetchImpl: async () => ({ ok: true, status: 200, text: async () => JSON.stringify({ success: true }) }),
+    })
+    const whapi = require('../services/providers/whapi')
+    const ok = await whapi.readChat('5534988887777', { companyId: 1, whatsappInstanceId: 10 })
+    expect(ok).toBe(true)
+    const [url, opts] = fetchWithRetry.mock.calls[0]
+    expect(opts.method).toBe('PATCH')
+    expect(url).toBe('https://gate.whapi.test/chats/5534988887777%40s.whatsapp.net')
+    expect(JSON.parse(opts.body)).toEqual({ mark_unread: false })
+  })
+
+  test('archiveChat POST /chats/{ChatID} archive true', async () => {
+    const { fetchWithRetry } = mockDeps({
+      instancesById: { '1:10': whapiInstance() },
+      fetchImpl: async () => ({ ok: true, status: 200, text: async () => JSON.stringify({ success: true }) }),
+    })
+    const whapi = require('../services/providers/whapi')
+    const ok = await whapi.archiveChat('5534988887777', { companyId: 1, whatsappInstanceId: 10 })
+    expect(ok).toBe(true)
+    const [url, opts] = fetchWithRetry.mock.calls[0]
+    expect(opts.method).toBe('POST')
+    expect(url).toBe('https://gate.whapi.test/chats/5534988887777%40s.whatsapp.net')
+    expect(JSON.parse(opts.body)).toEqual({ archive: true })
+  })
+
+  test('getContacts GET /contacts devolve { data, hasMore, rawCount }', async () => {
+    const { fetchWithRetry } = mockDeps({
+      instancesById: { '1:10': whapiInstance() },
+      fetchImpl: async () => ({
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({
+          contacts: [{ id: '5534988887777@s.whatsapp.net', name: 'Maria', saved: true }],
+        }),
+      }),
+    })
+    const whapi = require('../services/providers/whapi')
+    const q = await whapi.getContacts(1, 10, { companyId: 1, whatsappInstanceId: 10 })
+    expect(q.data).toHaveLength(1)
+    expect(q.data[0].name).toBe('Maria')
+    expect(fetchWithRetry.mock.calls[0][0]).toContain('/contacts')
+    expect(fetchWithRetry.mock.calls[0][1].method).toBe('GET')
+  })
+
+  test('getChatMessages GET /messages/list/{ChatID} mapeia from_me e link', async () => {
+    mockDeps({
+      instancesById: { '1:10': whapiInstance() },
+      fetchImpl: async () => ({
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({
+          messages: [{
+            id: 'AbCd-EfGh',
+            from_me: false,
+            type: 'image',
+            timestamp: 1700000000,
+            image: { link: 'https://cdn.example/a.jpg', caption: 'foto' },
+          }],
+        }),
+      }),
+    })
+    const whapi = require('../services/providers/whapi')
+    const list = await whapi.getChatMessages('5534988887777', 10, null, { companyId: 1, whatsappInstanceId: 10 })
+    expect(list).toHaveLength(1)
+    expect(list[0].id).toBe('AbCd-EfGh')
+    expect(list[0].fromMe).toBe(false)
+    expect(list[0].imageUrl).toBe('https://cdn.example/a.jpg')
+  })
+
+  test('sendCall continua stub 501', async () => {
     mockDeps({ instancesById: { '1:10': whapiInstance() } })
     const whapi = require('../services/providers/whapi')
-    const q = await whapi.getContacts({ companyId: 1 })
-    expect(q.notImplemented).toBe(true)
-    expect(q.httpStatus).toBe(501)
     const call = await whapi.sendCall()
     expect(call.ok).toBe(false)
     expect(call.notImplemented).toBe(true)

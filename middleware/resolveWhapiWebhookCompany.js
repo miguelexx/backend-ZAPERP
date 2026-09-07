@@ -37,7 +37,9 @@ async function resolveWhapiWebhookCompany(req, res, next) {
       return res.status(200).json({ ok: true, ignored: 'missing_channel_id' })
     }
 
-    const resolved = await getWhatsappInstanceByProviderInstanceId(PROVIDER, channelIdRaw)
+    const resolved = await getWhatsappInstanceByProviderInstanceId(PROVIDER, channelIdRaw, {
+      allowLegacyFallback: false,
+    })
 
     if (resolved?.code === 'DUPLICATE_PROVIDER_INSTANCE') {
       req.webhookLogData = { status: 'blocked_duplicate_instance', instance_id: channelIdRaw, provider: PROVIDER }

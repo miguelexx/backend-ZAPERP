@@ -60,6 +60,7 @@ router.post('/:id/mensagens', auth, chatController.enviarMensagemChat)
 router.post('/:id/pix', auth, chatController.enviarMensagemPix)
 router.post('/:id/encaminhar', auth, chatController.encaminharMensagem)
 router.delete('/:id/mensagens/:mensagem_id', auth, chatController.excluirMensagem)
+router.patch('/:id/mensagens/:mensagem_id', auth, chatController.editarMensagem)
 router.post('/:id/mensagens/:mensagem_id/reacao', auth, chatController.enviarReacaoMensagem)
 router.delete('/:id/mensagens/:mensagem_id/reacao', auth, chatController.removerReacaoMensagem)
 // Reenvio manual de mensagem com falha: reutiliza a mesma linha, sem criar registro novo

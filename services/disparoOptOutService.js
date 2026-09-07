@@ -4,7 +4,8 @@
  */
 
 const supabase = require('../config/supabase')
-const ultramsg = require('./providers/ultramsg')
+const { getProvider } = require('./providers')
+const { resolveConversationProvider } = require('./chat/identity/conversationAddressService')
 const { validarTelefoneDisparo } = require('../helpers/disparoPhoneHelper')
 const { getDisparoFlags } = require('../helpers/disparoWorkerConfig')
 const { DEFAULT_PALAVRAS, isExactOptOutCommand, normalizeOptOutCommand } = require('../helpers/disparoOptOutHelper')
@@ -206,7 +207,8 @@ async function enviarConfirmacaoOptOut({ companyId, telefone, instanciaId, texto
   }
 
   try {
-    const result = await ultramsg.sendText(telefone, texto, {
+    const instanceProvider = await resolveConversationProvider(companyId, instanciaId)
+    const result = await getProvider({ provider: instanceProvider }).sendText(telefone, texto, {
       companyId,
       whatsappInstanceId: instanciaId,
     })

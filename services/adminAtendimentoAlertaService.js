@@ -617,7 +617,7 @@ async function runAdminAtendimentoAlertaForAllCompanies(opts = {}) {
   }
 
   const { getProvider } = require('./providers')
-  const provider = getProvider()
+  const { resolveCompanyWhatsappProvider } = require('./chat/identity/conversationAddressService')
 
   let processadas = 0
   let enviadas = 0
@@ -630,6 +630,8 @@ async function runAdminAtendimentoAlertaForAllCompanies(opts = {}) {
     if (!alertNorm.ativo) continue
 
     processadas++
+    const instanceProvider = await resolveCompanyWhatsappProvider(company_id)
+    const provider = getProvider({ provider: instanceProvider })
     const r = await processCompanyAdminAlert({
       company_id,
       fullConfig: cfg,

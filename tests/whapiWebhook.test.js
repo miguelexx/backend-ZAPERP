@@ -105,6 +105,40 @@ describe('Whapi webhook — normalização e dispatch', () => {
     expect(m).toBeNull()
   })
 
+  test('mensagem edited marca isEdit e preserva o texto novo', () => {
+    const m = controller._test.normalizeWhapiMessageToInternal(
+      {
+        id: 'wamid.1',
+        from_me: false,
+        type: 'text',
+        edited: true,
+        chat_id: '5534988887777@s.whatsapp.net',
+        text: { body: 'texto novo' },
+        timestamp: 1700000000,
+      },
+      { channelId: 'NEBULA-AER3B' }
+    )
+    expect(m.isEdit).toBe(true)
+    expect(m.body).toBe('texto novo')
+    expect(controller._test.isWhapiEditedMessage({ edited: true, id: 'wamid.1' })).toBe(true)
+  })
+
+  test('extractWhapiEditedTexto lê caption de mídia', () => {
+    expect(controller._test.extractWhapiEditedTexto({
+      type: 'image',
+      image: { caption: 'nova legenda', link: 'https://x/i.jpg' },
+    })).toBe('nova legenda')
+    expect(controller._test.extractWhapiEditedTexto({ text: { body: 'oi' } })).toBe('oi')
+  })
+
+  test('deleted inbound é ignorado', () => {
+    const m = controller._test.normalizeWhapiMessageToInternal(
+      { id: 'wamid.1', type: 'deleted', chat_id: '5534988887777@s.whatsapp.net', timestamp: 1700000000 },
+      { channelId: 'NEBULA-AER3B' }
+    )
+    expect(m).toBeNull()
+  })
+
   test('handle despacha messages→receberZapi e statuses→statusZapi, responde 200 uma vez', async () => {
     const req = {
       method: 'POST',

@@ -347,7 +347,9 @@ exports.testarAdminAtendimentoAlerta = async (req, res) => {
     }
 
     const { getProvider } = require('../services/providers')
-    const provider = getProvider()
+    const { resolveCompanyWhatsappProvider } = require('../services/chat/identity/conversationAddressService')
+    const instanceProvider = await resolveCompanyWhatsappProvider(company_id)
+    const provider = getProvider({ provider: instanceProvider })
     const result = await processCompanyAdminAlert({
       company_id,
       fullConfig: cfg,

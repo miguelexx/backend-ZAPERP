@@ -11,6 +11,7 @@
 
 const supabase = require('../config/supabase')
 const { getProvider } = require('./providers')
+const { resolveCompanyWhatsappProvider } = require('./chat/identity/conversationAddressService')
 const { getEmpresaWhatsappConfig } = require('./whatsappConfigService')
 const { getOrCreateCliente } = require('../helpers/conversationSync')
 const { syncUltraMsgContact } = require('./ultramsgSyncContact')
@@ -38,7 +39,8 @@ function extractContactFields(raw) {
  * @returns {Promise<{ mode: string, totalFetched: number, inserted: number, updated: number, skipped: number, errors: string[] }>}
  */
 async function syncViaContactsApi(company_id) {
-  const provider = getProvider()
+  const instanceProvider = await resolveCompanyWhatsappProvider(company_id)
+  const provider = getProvider({ provider: instanceProvider })
   if (!provider?.getContacts) {
     return { mode: 'contacts_api', totalFetched: 0, inserted: 0, updated: 0, skipped: 0, errors: ['getContacts não disponível'] }
   }
@@ -198,9 +200,12 @@ async function syncMissingConversationContacts(company_id, opts = {}) {
   const batchSize = Math.min(50, Math.max(5, opts.batchSize ?? 20))
   const delayMs = Math.max(200, opts.delayMs ?? 500)
 
-  const { config, error } = await getEmpresaWhatsappConfig(company_id)
-  if (error || !config) {
-    return { processadas: 0, atualizadas: 0, errors: ['Empresa sem instância configurada'] }
+  const instanceProvider = await resolveCompanyWhatsappProvider(company_id)
+  if (instanceProvider !== 'whapi') {
+    const { config, error } = await getEmpresaWhatsappConfig(company_id)
+    if (error || !config) {
+      return { processadas: 0, atualizadas: 0, errors: ['Empresa sem instância configurada'] }
+    }
   }
 
   const { data: conversas } = await supabase
@@ -257,13 +262,17 @@ async function syncContacts(company_id) {
     return { ok: false, mode: 'none', totalFetched: 0, inserted: 0, updated: 0, skipped: 0, errors: ['company_id ausente'] }
   }
 
-  const { config, error } = await getEmpresaWhatsappConfig(company_id)
-  if (error || !config) {
-    console.warn(`[ULTRAMSG-SYNC] empresa=${company_id} sem instância: ${error || 'sem config'}`)
-    return { ok: false, mode: 'none', totalFetched: 0, inserted: 0, updated: 0, skipped: 0, errors: ['Empresa sem instância WhatsApp configurada. Conecte o WhatsApp em Integrações.'] }
+  const instanceProvider = await resolveCompanyWhatsappProvider(company_id)
+  if (instanceProvider !== 'whapi') {
+    const { config, error } = await getEmpresaWhatsappConfig(company_id)
+    if (error || !config) {
+      console.warn(`[ULTRAMSG-SYNC] empresa=${company_id} sem instância: ${error || 'sem config'}`)
+      return { ok: false, mode: 'none', totalFetched: 0, inserted: 0, updated: 0, skipped: 0, errors: ['Empresa sem instância WhatsApp configurada. Conecte o WhatsApp em Integrações.'] }
+    }
+    console.log(`[ULTRAMSG-SYNC] empresa=${company_id} instance=${config.instance_id} — iniciando busca de contatos (UltraMSG)...`)
+  } else {
+    console.log(`[ULTRAMSG-SYNC] empresa=${company_id} provider=whapi — iniciando busca de contatos`)
   }
-
-  console.log(`[ULTRAMSG-SYNC] empresa=${company_id} instance=${config.instance_id} — iniciando busca de contatos (UltraMSG)...`)
   let result = await syncViaContactsApi(company_id)
 
   if (result.mode === 'contacts_api' && result.totalFetched === 0 && result.errors.length === 0) {

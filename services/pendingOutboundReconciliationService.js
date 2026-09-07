@@ -8,6 +8,7 @@
 
 const supabase = require('../config/supabase')
 const { getProvider } = require('./providers')
+const { resolveConversationProvider } = require('./chat/identity/conversationAddressService')
 const {
   isRealWhatsAppId,
   extractUltraMsgMessageId,
@@ -117,7 +118,8 @@ function buildProviderOpts(row) {
 }
 
 async function fetchProviderMessages(opts, filters = {}) {
-  const provider = getProvider()
+  const instanceProvider = await resolveConversationProvider(opts.companyId, opts.whatsappInstanceId)
+  const provider = getProvider({ provider: instanceProvider })
   if (!provider?.getMessages) return { ok: false, data: [], error: 'provider_indisponivel' }
   try {
     return await provider.getMessages({
@@ -291,7 +293,8 @@ function captionUsuarioDeMidia(row) {
 }
 
 async function despacharReenvioAoProvedor(row, telefone, usuarioNome) {
-  const provider = getProvider()
+  const instanceProvider = await resolveConversationProvider(row.company_id, row.whatsapp_instance_id)
+  const provider = getProvider({ provider: instanceProvider })
   const tipo = String(row?.tipo || '').toLowerCase().trim()
   const opts = {
     companyId: row.company_id,
@@ -420,7 +423,8 @@ async function reconcilePendingOutboundMessage(row, { io = null, force = false }
     return patchMessage(row, { status: 'sent', status_mensagem: 'sent' }, io)
   }
 
-  const provider = getProvider()
+  const instanceProvider = await resolveConversationProvider(row.company_id, row.whatsapp_instance_id)
+  const provider = getProvider({ provider: instanceProvider })
   if (!provider?.getMessages) {
     return { ok: false, action: 'provider_indisponivel' }
   }

@@ -18,7 +18,7 @@ const { selectClienteNomeFoto } = require('../../helpers/clienteNomeColunas')
 const { syncUltraMsgContact } = require('../../services/ultramsgSyncContact')
 const { clienteTemNomeProtegido } = require('../../helpers/clienteNomeProtecao')
 
-async function resolveGroupSenderFields({ companyId, participantPhone, senderName }) {
+async function resolveGroupSenderFields({ companyId, participantPhone, senderName, whatsappInstanceId = null }) {
   const out = {}
   const pNorm = participantPhone ? (normalizePhoneBR(participantPhone) || String(participantPhone).replace(/\D/g, '')) : ''
   if (pNorm) out.remetente_telefone = pNorm
@@ -50,7 +50,10 @@ async function resolveGroupSenderFields({ companyId, participantPhone, senderNam
             setImmediate(async () => {
               try {
                 const { data: current } = await selectClienteNomeFoto(supabase, { id: cidGrupo, companyId })
-                const sync = await syncUltraMsgContact(pNorm, companyId, { skipPersistence: true }).catch(() => null)
+                const sync = await syncUltraMsgContact(pNorm, companyId, {
+                  skipPersistence: true,
+                  ...(whatsappInstanceId ? { whatsappInstanceId } : {}),
+                }).catch(() => null)
                 if (!sync) return
                 const up = {}
                 const telefoneTail = String(pNorm).replace(/\D/g, '').slice(-6) || null

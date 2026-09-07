@@ -17,6 +17,7 @@
  */
 const supabase = require('../config/supabase')
 const { getProvider } = require('./providers')
+const { resolveConversationProvider } = require('./chat/identity/conversationAddressService')
 const {
   DEFAULT_CHATBOT_CONFIG,
   looksLikeBotMessage,
@@ -343,7 +344,12 @@ async function sendAbsenceClosingMessage({ provider, company_id, conversa_id, te
   if (row?.ausencia_mensagem_enviada_em) {
     return { ok: true, skippedDuplicate: true }
   }
-  const result = await provider.sendText(telefone, texto, {
+  const instanceProvider = await resolveConversationProvider(company_id, row?.whatsapp_instance_id)
+  const adapter = getProvider({ provider: instanceProvider })
+  if (!adapter?.sendText) {
+    return { ok: false, error: 'Provider de envio não disponível' }
+  }
+  const result = await adapter.sendText(telefone, texto, {
     companyId: company_id,
     conversaId: conversa_id,
     whatsappInstanceId: row?.whatsapp_instance_id || undefined,

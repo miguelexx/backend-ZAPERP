@@ -61,6 +61,41 @@ async function configureWebhooks(appUrl, opts = {}) {
   }
 }
 
+async function patchProfile(opts, body) {
+  const cfg = await resolveConfig(opts)
+  if (!cfg) return false
+  try {
+    const { ok, data } = await patch({
+      token: cfg.token,
+      endpoint: '/users/profile',
+      body,
+      companyId: cfg.companyId,
+      whatsappInstanceId: cfg.whatsappInstanceId,
+      skipSendGuard: true,
+    })
+    return !!(ok && (!data || data.success !== false) && !data?.error)
+  } catch (e) {
+    console.warn('❌ Whapi patchProfile falhou:', e?.message || e)
+    return false
+  }
+}
+
+async function updateProfilePicture(url, opts = {}) {
+  const value = String(url || '').trim()
+  if (!value || !/^https?:\/\//i.test(value)) return false
+  return patchProfile(opts, { icon: value })
+}
+
+async function updateProfileName(name, opts = {}) {
+  const value = String(name || '').trim()
+  if (!value) return false
+  return patchProfile(opts, { name: value })
+}
+
+async function updateProfileDescription(about, opts = {}) {
+  return patchProfile(opts, { about: String(about ?? '') })
+}
+
 /**
  * Saúde/estado da sessão do canal Whapi.
  * GET /health — o `wakeup` do MCP não se aplica ao nosso HTTP.
@@ -100,5 +135,8 @@ module.exports = {
   getConnectionStatus,
   configureWebhooks,
   getLoginQr,
+  updateProfilePicture,
+  updateProfileName,
+  updateProfileDescription,
   WHAPI_WEBHOOK_EVENTS,
 }

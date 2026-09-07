@@ -8,7 +8,7 @@ const supabase = require('../../config/supabase')
 const { getProvider } = require('../../services/providers')
 const { normalizarTimestampSemFusoAmbiguoParaApi } = require('../../helpers/timestampApiCompat')
 const { isInternalNoteRow } = require('../../helpers/internalNote')
-const { resolveConversationWhatsappInstance } = require('../../services/chat/identity/conversationAddressService')
+const { resolveConversationWhatsappInstance, resolveConversationProvider } = require('../../services/chat/identity/conversationAddressService')
 const { emitirConversaAtualizada, emitirEventoEmpresaConversa, emitirParaUsuario } = require('../../services/chat/realtime/chatRealtimeGateway')
 const { textoRevogadoApagadaParaTodos, aplicarApagadaParaTodosNaMensagem, enrichMensagemComAutorUsuario } = require('../../services/chat/presentation/messageAuthorEnrichment')
 
@@ -98,7 +98,11 @@ exports.excluirMensagem = async (req, res) => {
 
     // Apagar no WhatsApp (UltraMsg) antes de alterar o histórico local.
     // Se o provedor não confirmar a remoção, não marcamos como "apagada para todos" no sistema.
-    const provider = getProvider()
+    const delInstanceId = conversa.whatsapp_instance_id
+      ? await resolveConversationWhatsappInstance(company_id, conversa)
+      : null
+    const instanceProvider = await resolveConversationProvider(company_id, delInstanceId)
+    const provider = getProvider({ provider: instanceProvider })
     const isLidTelefone = String(conversa?.telefone || '').trim().toLowerCase().startsWith('lid:')
     if (!provider?.deleteMessage) {
       return res.status(502).json({ error: 'O provedor WhatsApp atual não suporta apagar mensagem para todos.' })
@@ -111,9 +115,6 @@ exports.excluirMensagem = async (req, res) => {
     }
 
     try {
-      const delInstanceId = conversa.whatsapp_instance_id
-        ? await resolveConversationWhatsappInstance(company_id, conversa)
-        : null
       const deleteResult = await provider.deleteMessage(conversa.telefone, msg.whatsapp_id, {
         companyId: company_id,
         ...(delInstanceId ? { whatsappInstanceId: delInstanceId } : {}),

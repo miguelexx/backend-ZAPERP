@@ -49,8 +49,41 @@ function toWhapiRecipient(phone) {
   return c.length ? c[0] : ''
 }
 
+/**
+ * Chat ID Whapi (OpenAPI: `^[\d-]{10,31}@[\w\.]+$`).
+ * Grupo: JID `@g.us` preservado. Privado: dígitos + `@s.whatsapp.net`.
+ */
+function toWhapiChatId(phone) {
+  if (phone == null) return ''
+  const raw = String(phone).trim()
+  if (!raw) return ''
+  if (isGroupJid(raw)) return raw
+  const lower = raw.toLowerCase()
+  // OpenAPI/MCP: privado é dígitos ou dígitos@(s.whatsapp.net|lid). @c.us é JID UltraMSG — não enviar cru.
+  if (lower.includes('@lid')) return raw
+  const to = toWhapiRecipient(raw)
+  if (!to) return ''
+  if (isGroupJid(to) || to.includes('@')) return to
+  return `${to}@s.whatsapp.net`
+}
+
+/**
+ * Contact ID Whapi (OpenAPI: só dígitos `^[\d]{7,15}$`).
+ * Grupo: devolve o JID (perfil de grupo não usa este endpoint).
+ */
+function toWhapiContactId(phone) {
+  if (phone == null) return ''
+  const raw = String(phone).trim()
+  if (!raw) return ''
+  if (isGroupJid(raw)) return raw
+  const digits = raw.replace(/@[^@]+$/, '').replace(/\D/g, '')
+  return digits
+}
+
 module.exports = {
   isGroupJid,
   recipientCandidates,
   toWhapiRecipient,
+  toWhapiChatId,
+  toWhapiContactId,
 }

@@ -369,6 +369,8 @@ exports.enviarLigacaoWhatsapp = _outboundController.enviarLigacaoWhatsapp
 // excluirMensagem — controllers/chat/messageDeletionController.js (reexportado).
 const _messageDeletionController = require('./chat/messageDeletionController')
 exports.excluirMensagem = _messageDeletionController.excluirMensagem
+const _messageEditController = require('./chat/messageEditController')
+exports.editarMensagem = _messageEditController.editarMensagem
 
 // =====================================================
 // listarAtendimentos — atendimentos + historico (transferiu_setor) com nomes

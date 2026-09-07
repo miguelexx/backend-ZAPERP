@@ -1,24 +1,17 @@
 /**
- * Consultas Whapi (contatos/chats/grupos/histórico/foto/upload) — STUBS 501 até a Fase D.
- * IMPORTANTE: quando alguém apertar "sincronizar" numa instância Whapi, tem que cair AQUI
- * (501 claro), NUNCA no serviço UltraMSG por engano. Ver doc 25 §6 (Fase D).
+ * Stubs Whapi restantes (métodos UltraMSG-only sem equivalente estável).
+ * Consultas reais estão em contacts.js / chatsAdmin.js / chatMessages.js / messages.js.
  */
 
+const { notImplemented } = require('./parse')
+
 function stub(method) {
-  return async () => ({ ok: false, notImplemented: true, httpStatus: 501, error: `whapi.${method} não implementado (Fase D)` })
+  return async () => notImplemented(method)
 }
 
 module.exports = {
-  getContacts: stub('getContacts'),
-  getContactMetadata: stub('getContactMetadata'),
-  getChats: stub('getChats'),
-  getGroups: stub('getGroups'),
-  getGroup: stub('getGroup'),
-  getChatMessages: stub('getChatMessages'),
-  getProfilePicture: stub('getProfilePicture'),
-  archiveChat: stub('archiveChat'),
-  unarchiveChat: stub('unarchiveChat'),
-  readChat: stub('readChat'),
-  clearChatMessages: stub('clearChatMessages'),
-  deleteChat: stub('deleteChat'),
+  resendByStatus: stub('resendByStatus'),
+  resendById: stub('resendById'),
+  clearMessages: stub('clearMessages'),
+  getMessagesStatistics: stub('getMessagesStatistics'),
 }

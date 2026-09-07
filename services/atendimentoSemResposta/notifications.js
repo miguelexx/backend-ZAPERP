@@ -161,7 +161,9 @@ async function sendGestorWhatsapp(company_id, telefone, texto) {
   if (!digits || digits.length < 10) return { ok: false, error: 'telefone_invalido' }
   try {
     const { getProvider } = require('../providers')
-    const provider = getProvider()
+    const { resolveCompanyWhatsappProvider } = require('../chat/identity/conversationAddressService')
+    const instanceProvider = await resolveCompanyWhatsappProvider(company_id)
+    const provider = getProvider({ provider: instanceProvider })
     const send = provider?.sendText
     if (typeof send !== 'function') return { ok: false, error: 'sendText_indisponivel' }
     const result = await send(tel, texto, {

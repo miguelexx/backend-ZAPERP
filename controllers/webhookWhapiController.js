@@ -12,6 +12,68 @@
 
 const { normalizePhoneBR } = require('../helpers/phoneHelper')
 const webhookCoreController = require('./webhookZapiController')
+const supabase = require('../config/supabase')
+const {
+  buildEditadaDbUpdates,
+  isMissingEditadaColumnError,
+  buildMensagemEditadaSocketPayload,
+} = require('../helpers/mensagemEditHelper')
+
+function isWhapiEditedMessage(m) {
+  if (!m || typeof m !== 'object') return false
+  if (m.edited === true || m.is_edited === true || m.isEdit === true) return true
+  return String(m.action?.type || '').toLowerCase() === 'edit'
+}
+
+function extractWhapiEditedTexto(m) {
+  if (!m || typeof m !== 'object') return ''
+  const type = String(m.type ?? 'text').toLowerCase()
+  const typed = m[type]
+  return String(
+    (m.text && (m.text.body ?? m.text))
+    || m.body
+    || m.caption
+    || (typed && typeof typed === 'object' ? typed.caption : '')
+    || ''
+  )
+}
+
+async function applyWhapiEditedMessage(ctxSrc, m, io) {
+  const id = String(m?.id || '').trim()
+  if (!id || ctxSrc?.company_id == null) return false
+  const texto = extractWhapiEditedTexto(m)
+  const updates = buildEditadaDbUpdates(texto)
+  const runUpdate = async (payload, select) => {
+    let query = supabase
+      .from('mensagens')
+      .update(payload)
+      .eq('company_id', ctxSrc.company_id)
+      .eq('whatsapp_id', id)
+    if (ctxSrc.whatsapp_instance_id) {
+      query = query.eq('whatsapp_instance_id', ctxSrc.whatsapp_instance_id)
+    }
+    return query.select(select).maybeSingle()
+  }
+  let { data, error } = await runUpdate(updates, 'id, conversa_id, texto, tipo, editada_em')
+  if (error && isMissingEditadaColumnError(error)) {
+    ;({ data, error } = await runUpdate({ texto }, 'id, conversa_id, texto, tipo'))
+  }
+  if (error || !data?.id) return false
+  if (io) {
+    io.to(`conversa_${data.conversa_id}`).emit(
+      io.EVENTS?.MENSAGEM_EDITADA || 'mensagem_editada',
+      buildMensagemEditadaSocketPayload({
+        id: data.id,
+        conversa_id: data.conversa_id,
+        company_id: ctxSrc.company_id,
+        texto,
+        editada_em: data.editada_em || updates.editada_em,
+        tipo: data.tipo || null,
+      })
+    )
+  }
+  return true
+}
 
 /** Extrai dígitos de um JID (5534999@s.whatsapp.net → 5534999; 120363@g.us → 120363). */
 function jidToDigits(jid) {
@@ -75,6 +137,9 @@ function normalizeWhapiMessageToInternal(m, ctx = {}) {
   const isReaction = type === 'reaction' || (type === 'action' && actionType === 'reaction')
   // Outros `action` (ex. media_notify) não são mensagem de atendimento.
   if (type === 'action' && !isReaction) return null
+  if (type === 'deleted' || type === 'revoke' || type === 'revoked' || m.deleted === true) return null
+
+  const isEdit = Boolean(m.edited || m.is_edited || m.isEdit || String(m.action?.type || '').toLowerCase() === 'edit')
 
   let phone = ''
   let remoteJid = ''
@@ -205,6 +270,7 @@ function normalizeWhapiMessageToInternal(m, ctx = {}) {
     ...(locationPayload ? { location: locationPayload } : {}),
     ...(reactionPayload ? { reaction: reactionPayload } : {}),
     ...(contactPayload ? { contact: contactPayload } : {}),
+    isEdit,
   }
 }
 
@@ -295,6 +361,10 @@ async function handleWebhookWhapi(req, res) {
     let anyServerError = false
 
     for (const m of messages) {
+      if (isWhapiEditedMessage(m)) {
+        const applied = await applyWhapiEditedMessage(ctxSrc, m, req.app?.get?.('io'))
+        if (applied) continue
+      }
       const normalized = normalizeWhapiMessageToInternal(m, ctx)
       if (!normalized) continue
       normalized.type = 'ReceivedCallback'
@@ -340,4 +410,6 @@ exports._test = {
   mapWhapiAckToStatus,
   extractEvents,
   jidToDigits,
+  isWhapiEditedMessage,
+  extractWhapiEditedTexto,
 }

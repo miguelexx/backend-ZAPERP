@@ -137,7 +137,9 @@ exports.enviarMensagemChat = async (req, res) => {
         const { syncUltraMsgContact } = require('../../services/ultramsgSyncContact')
         setImmediate(async () => {
           try {
-            const synced = await syncUltraMsgContact(conversa.telefone, company_id)
+            const synced = await syncUltraMsgContact(conversa.telefone, company_id, {
+              ...(whatsappInstanceId ? { whatsappInstanceId } : {}),
+            })
             if (synced && req.app?.get('io')) {
               const io = req.app.get('io')
               const { data: cli } = await supabase.from('clientes').select('nome, pushname, telefone, foto_perfil').eq('id', novoClienteId).eq('company_id', company_id).maybeSingle()

@@ -6,6 +6,7 @@
 
 const { normalizarTimestampSemFusoAmbiguoParaApi } = require('../../../helpers/timestampApiCompat')
 const { formatTextoWhatsappComNomeAtendente } = require('../../../helpers/mensagemAtendenteNomeHelper')
+const { aplicarCamposEdicaoNaMensagem } = require('../../../helpers/mensagemEditHelper')
 
 function textoRevogadoApagadaParaTodos(m, viewerUserId) {
   const souAutor =
@@ -38,7 +39,7 @@ async function enrichMensagensComAutorUsuario(supabase, company_id, mensagens, v
       enviado_por_usuario: m.direcao === 'out' && m.autor_usuario_id != null,
     }
     if (viewerUserId != null) row = aplicarApagadaParaTodosNaMensagem(row, viewerUserId)
-    return row
+    return aplicarCamposEdicaoNaMensagem(row)
   }
   if (autorIds.length === 0) return mensagens.map((m) => decorate(m, null))
   const { data: us } = await supabase.from('usuarios').select('id, nome').eq('company_id', company_id).in('id', autorIds)
@@ -74,7 +75,7 @@ async function getUsuarioParaEnvioCliente(supabase, company_id, user_id) {
 async function enrichMensagemComAutorUsuario(supabase, company_id, msg) {
   const isOut = msg?.direcao === 'out'
   if (!msg || !isOut || !msg.autor_usuario_id) {
-    return {
+    return aplicarCamposEdicaoNaMensagem({
       ...msg,
       criado_em: normalizarTimestampSemFusoAmbiguoParaApi(msg?.criado_em),
       usuario_id: msg?.autor_usuario_id ?? null,
@@ -83,10 +84,10 @@ async function enrichMensagemComAutorUsuario(supabase, company_id, msg) {
       // fromMe: mensagens enviadas pelo CRM (direcao 'out') são sempre fromMe=true para fins de notificação.
       // O frontend NÃO deve exibir notificação/som para estas mensagens.
       fromMe: isOut,
-    }
+    })
   }
   const { data: u } = await supabase.from('usuarios').select('id, nome').eq('company_id', company_id).eq('id', msg.autor_usuario_id).maybeSingle()
-  return {
+  return aplicarCamposEdicaoNaMensagem({
     ...msg,
     criado_em: normalizarTimestampSemFusoAmbiguoParaApi(msg?.criado_em),
     usuario_id: msg.autor_usuario_id,
@@ -94,7 +95,7 @@ async function enrichMensagemComAutorUsuario(supabase, company_id, msg) {
     enviado_por_usuario: true,
     fromMe: true,
     apagada_para_todos: msg?.apagada_para_todos === true,
-  }
+  })
 }
 
 module.exports = {

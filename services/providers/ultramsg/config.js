@@ -28,6 +28,12 @@ async function resolveConfig(opts = {}) {
     console.warn(`[ULTRAMSG] Empresa ${companyId} sem instancia WhatsApp configurada.`, error || 'config vazio')
     return null
   }
+  // Guarda simétrica à do adapter Whapi: nunca mandar channel id/token Whapi para api.ultramsg.com.
+  const instanceProvider = String(instance.provider || '').trim().toLowerCase()
+  if (instanceProvider === 'whapi') {
+    console.warn(`[ULTRAMSG] Instancia ${instance.id} da empresa ${cid} e provider=whapi. Recusado.`)
+    return null
+  }
   const instanceId = String(config.instance_id || '').trim()
   const token = String(config.instance_token || '').trim()
   if (!instanceId || !token) return null

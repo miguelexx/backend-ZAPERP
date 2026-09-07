@@ -5,6 +5,7 @@
 
 const supabase = require('../config/supabase')
 const { getProvider } = require('./providers')
+const { resolveCompanyWhatsappProvider } = require('./chat/identity/conversationAddressService')
 const { getStatus } = require('./ultramsgIntegrationService')
 const { getConfig, isProcessamentoPausado } = require('./configOperacionalService')
 const { chooseBestName } = require('../helpers/contactEnrichment')
@@ -27,7 +28,8 @@ function sleep(ms) {
 async function syncFotosProgressiva(company_id, opts = {}) {
   if (!company_id) return { total: 0, atualizados: 0, processados: 0 }
 
-  const provider = getProvider()
+  const instanceProvider = await resolveCompanyWhatsappProvider(company_id)
+  const provider = getProvider({ provider: instanceProvider })
   if (!provider?.getProfilePicture && !provider?.getContactMetadata) {
     return { total: 0, atualizados: 0, processados: 0, error: 'Z-API não disponível' }
   }
@@ -36,7 +38,6 @@ async function syncFotosProgressiva(company_id, opts = {}) {
   const statusResult = await getStatus(company_id)
   let connected = !!statusResult?.connected
   if (!connected) {
-    const provider = getProvider()
     if (provider?.getConnectionStatus) {
       const conn = await provider.getConnectionStatus({ companyId: company_id })
       connected = !!conn?.connected

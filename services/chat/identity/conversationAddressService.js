@@ -9,7 +9,11 @@
  */
 
 const supabase = require('../../../config/supabase')
-const { getDefaultWhatsappInstance, getWhatsappInstanceById } = require('../../whatsappInstanceService')
+const {
+  getDefaultWhatsappInstance,
+  getWhatsappInstanceById,
+  listWhatsappInstances,
+} = require('../../whatsappInstanceService')
 
 /**
  * Provider WhatsApp da instância resolvida da conversa. Default 'ultramsg' — sem instância,
@@ -26,6 +30,48 @@ async function resolveConversationProvider(company_id, whatsappInstanceId) {
   } catch (_) {
     return 'ultramsg'
   }
+}
+
+/**
+ * Provider da instância default/única da empresa (alertas, sync company-level, perfil).
+ * Sem instância, várias sem default, ou erro → 'ultramsg'.
+ */
+async function resolveCompanyWhatsappProvider(company_id) {
+  const cid = Number(company_id)
+  if (!Number.isFinite(cid) || cid <= 0) return 'ultramsg'
+  try {
+    const { instances } = await listWhatsappInstances(cid)
+    const chosen = pickCompanyWhatsappInstance(instances)
+    const p = String(chosen?.provider || '').trim().toLowerCase()
+    return p === 'whapi' ? 'whapi' : 'ultramsg'
+  } catch (_) {
+    return 'ultramsg'
+  }
+}
+
+/**
+ * Instância inequívoca para amarrar conversa ainda sem whatsapp_instance_id.
+ * is_default (qualquer provider) ou exatamente 1 ativa. 2+ sem default → null (não adivinhar).
+ */
+function pickInstanceForUnboundConversation(instances) {
+  const active = (instances || []).filter((i) => i && i.ativo !== false)
+  if (!active.length) return null
+  const def = active.find((i) => i.is_default === true)
+  if (def) return def
+  if (active.length === 1) return active[0]
+  return null
+}
+
+/**
+ * Instância da empresa para sync/alertas company-level.
+ * Igual à conversa unbound, mas com 2+ sem default prefere UltraMSG (histórico) em vez de Whapi.
+ */
+function pickCompanyWhatsappInstance(instances) {
+  const unambiguous = pickInstanceForUnboundConversation(instances)
+  if (unambiguous) return unambiguous
+  const active = (instances || []).filter((i) => i && i.ativo !== false)
+  if (!active.length) return null
+  return active.find((i) => String(i.provider || '').toLowerCase() !== 'whapi') || active[0]
 }
 
 /**
@@ -56,8 +102,17 @@ async function resolveTelefoneFromLidSiblingConversation(company_id, conversa, w
 async function resolveConversationWhatsappInstance(company_id, conversa) {
   const current = Number(conversa?.whatsapp_instance_id)
   if (Number.isFinite(current) && current > 0) return current
-  const { instance } = await getDefaultWhatsappInstance(company_id)
-  const defaultId = Number(instance?.id)
+  const { instances } = await listWhatsappInstances(company_id)
+  const active = (instances || []).filter((i) => i && i.ativo !== false)
+  let chosen = pickInstanceForUnboundConversation(instances)
+  // Só o legado empresa_zapi quando a empresa NÃO tem linha ativa em whatsapp_instances.
+  // getDefaultWhatsappInstance filtra provider=ultramsg e, se vazio, cai no legado mesmo
+  // com Whapi cadastrada — isso roteava empresa só-Whapi para UltraMSG.
+  if (!chosen && active.length === 0) {
+    const { instance } = await getDefaultWhatsappInstance(company_id)
+    chosen = instance
+  }
+  const defaultId = Number(chosen?.id)
   if (!Number.isFinite(defaultId) || defaultId <= 0) return null
   if (conversa?.id) {
     try {
@@ -105,5 +160,8 @@ module.exports = {
   resolveTelefoneFromLidSiblingConversation,
   resolveConversationWhatsappInstance,
   resolveConversationProvider,
+  resolveCompanyWhatsappProvider,
   resolverTelefoneEnvioDaConversa,
+  pickInstanceForUnboundConversation,
+  pickCompanyWhatsappInstance,
 }

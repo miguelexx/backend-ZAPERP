@@ -4,7 +4,8 @@
  */
 
 const supabase = require('../config/supabase')
-const ultramsg = require('./providers/ultramsg')
+const { getProvider } = require('./providers')
+const { resolveConversationProvider } = require('./chat/identity/conversationAddressService')
 const { findOrCreateConversation } = require('../helpers/conversationSync')
 const { telefoneNaAllowlist, getDisparoFlags } = require('../helpers/disparoWorkerConfig')
 const { buildDispReferenceId } = require('../helpers/disparoReferenceHelper')
@@ -260,6 +261,8 @@ async function enviarViaUltramsg({
   item,
   timeoutMs,
 }) {
+  const instanceProvider = await resolveConversationProvider(item.company_id, item.instancia_id)
+  const adapter = getProvider({ provider: instanceProvider })
   const opts = {
     companyId: item.company_id,
     whatsappInstanceId: item.instancia_id,
@@ -271,19 +274,19 @@ async function enviarViaUltramsg({
 
   switch (tipo) {
     case 'texto':
-      sendPromise = ultramsg.sendText(telefone, textoFinal.texto, opts)
+      sendPromise = adapter.sendText(telefone, textoFinal.texto, opts)
       break
     case 'imagem':
-      sendPromise = ultramsg.sendImage(telefone, mediaUrl, textoFinal.legenda || '', opts)
+      sendPromise = adapter.sendImage(telefone, mediaUrl, textoFinal.legenda || '', opts)
       break
     case 'video':
-      sendPromise = ultramsg.sendVideo(telefone, mediaUrl, textoFinal.legenda || '', opts)
+      sendPromise = adapter.sendVideo(telefone, mediaUrl, textoFinal.legenda || '', opts)
       break
     case 'audio':
-      sendPromise = ultramsg.sendAudio(telefone, mediaUrl, opts)
+      sendPromise = adapter.sendAudio(telefone, mediaUrl, opts)
       break
     case 'documento':
-      sendPromise = ultramsg.sendFile(
+      sendPromise = adapter.sendFile(
         telefone,
         mediaUrl,
         variacao.midia_nome_original || 'documento',

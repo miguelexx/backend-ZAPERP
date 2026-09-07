@@ -39,6 +39,7 @@ Não misturar com Sessão B da IA nem com UltraMSG.
 | `chat/attendanceQueueController.js` | `listarAtendimentos`, `puxarChatFila` |
 | `chat/outboundController.js` | reação, contato WhatsApp, localização, ligação |
 | `chat/messageDeletionController.js` | `excluirMensagem` |
+| `chat/messageEditController.js` | `editarMensagem` (PATCH texto/legenda; Whapi only) |
 | `chat/tagsController.js` | tags da conversa |
 | `chat/forwardController.js` | `encaminharMensagem` |
 | `chat/batchOpsController.js` | contagem por filtro, finalização ausência em lote |

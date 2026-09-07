@@ -10,6 +10,7 @@
 
 const supabase = require('../../config/supabase')
 const { getProvider } = require('../../services/providers')
+const { resolveConversationProvider } = require('../../services/chat/identity/conversationAddressService')
 const { extractMessage } = require('./payload')
 const { applyWhatsappInstanceFilterOrLegacy } = require('./whatsappIdLookup')
 const {
@@ -20,10 +21,11 @@ const {
 const WEBHOOK_MSG_SELECT = 'id, conversa_id, company_id, whatsapp_instance_id, whatsapp_id, texto, url, tipo, direcao, criado_em, status, autor_usuario_id, reply_meta, nome_arquivo, contact_meta, location_meta, remetente_nome, remetente_telefone'
 
 function scheduleNewConversationHistoryImport({ conversaId, phone, isGroup, companyId, whatsappInstanceId, io }) {
-  const provider = getProvider()
-  if (!provider || !provider.getChatMessages || !provider.isConfigured) return
   setImmediate(async () => {
     try {
+      const instanceProvider = await resolveConversationProvider(companyId, whatsappInstanceId)
+      const provider = getProvider({ provider: instanceProvider })
+      if (!provider || !provider.getChatMessages || !provider.isConfigured) return
       const history = await provider.getChatMessages(phone, 25, null, { companyId, whatsappInstanceId: whatsappInstanceId || undefined }).catch(() => [])
       if (!Array.isArray(history) || history.length === 0) return
 

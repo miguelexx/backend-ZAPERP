@@ -883,7 +883,10 @@ exports.receberZapi = async (req, res) => {
           senderPhoto = null
           try {
             const syncResult = await Promise.race([
-              syncUltraMsgContact(syncChatId, company_id, syncOpts),
+              syncUltraMsgContact(syncChatId, company_id, {
+                ...syncOpts,
+                ...(whatsapp_instance_id ? { whatsappInstanceId: whatsapp_instance_id } : {}),
+              }),
               new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), syncTimeoutMs))
             ])
             // syncUltraMsgContact pode retornar telefone como fallback quando API não tem nome — ignorar e usar pushname do payload
@@ -1477,7 +1480,10 @@ exports.receberZapi = async (req, res) => {
       } else {
         try {
         const sendMessage = async (ph, msg, o = {}) => {
-          const r = await getProvider().sendText(ph, msg, {
+          const inboundProvider = String(req.zapiContext?.provider || req.webhookContext?.provider || '').trim().toLowerCase()
+          const r = await getProvider({
+            provider: inboundProvider === 'whapi' ? 'whapi' : 'ultramsg',
+          }).sendText(ph, msg, {
             companyId: company_id,
             conversaId: conversa_id,
             whatsappInstanceId: whatsapp_instance_id || undefined,
@@ -1954,7 +1960,12 @@ exports.receberZapi = async (req, res) => {
       if (isGroup && !fromMe) {
         // Grupo: salvar SEMPRE no grupo, e armazenar remetente (membro) na mensagem.
         // → controllers/webhookInbound/groupSender.js (resolve nome/telefone do membro + sync bg).
-        const gf = await resolveGroupSenderFields({ companyId: company_id, participantPhone, senderName })
+        const gf = await resolveGroupSenderFields({
+          companyId: company_id,
+          participantPhone,
+          senderName,
+          whatsappInstanceId: whatsapp_instance_id,
+        })
         if (gf.remetente_telefone) insertMsg.remetente_telefone = gf.remetente_telefone
         if (gf.remetente_nome) insertMsg.remetente_nome = gf.remetente_nome
       }
@@ -2371,7 +2382,11 @@ exports.receberZapi = async (req, res) => {
         try {
           const { data: current } = await selectClienteNomeFoto(supabase, { id: syncClienteId, companyId: company_id })
           const { data: convRow } = await supabase.from('conversas').select('nome_contato_cache, foto_perfil_contato_cache').eq('id', convId).eq('company_id', company_id).maybeSingle()
-          const synced = await syncUltraMsgContact(syncInput, company_id, { skipPersistence: true, skipCache: fromMe }).catch(() => null)
+          const synced = await syncUltraMsgContact(syncInput, company_id, {
+            skipPersistence: true,
+            skipCache: fromMe,
+            ...(whatsapp_instance_id ? { whatsappInstanceId: whatsapp_instance_id } : {}),
+          }).catch(() => null)
           if (!synced) return null
           const up = {}
           const telefoneTail = String(syncPhone).replace(/\D/g, '').slice(-6) || null

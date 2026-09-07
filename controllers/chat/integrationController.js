@@ -8,6 +8,7 @@
 const supabase = require('../../config/supabase')
 const { getStatus } = require('../../services/ultramsgIntegrationService')
 const { getProvider } = require('../../services/providers')
+const { resolveCompanyWhatsappProvider } = require('../../services/chat/identity/conversationAddressService')
 const { listWhatsappInstances, sanitizeWhatsappInstance } = require('../../services/whatsappInstanceService')
 
 exports.listWhatsappInstancesAtendimento = async (req, res) => {
@@ -42,13 +43,31 @@ exports.whatsappStatus = async (req, res) => {
     const company_id = req.user?.company_id
     // Z-API removida; banner "WhatsApp desconectado" oculto por padrão. Use HIDE_WHATSAPP_DISCONNECT_BANNER=0 para exibir.
     const hideBanner = process.env.HIDE_WHATSAPP_DISCONNECT_BANNER !== '0'
-    // Usa UltraMsg como único provider WhatsApp; empresa_zapi armazena instance_id/token
     if (!company_id) {
       return res.json({ ok: true, hasInstance: false, connected: hideBanner, configured: false })
     }
 
     const { getStatus } = require('../../services/ultramsgIntegrationService')
     const { getEmpresaWhatsappConfig } = require('../../services/whatsappConfigService')
+    const { getProvider } = require('../../services/providers')
+    const { resolveCompanyWhatsappProvider } = require('../../services/chat/identity/conversationAddressService')
+    const instanceProvider = await resolveCompanyWhatsappProvider(company_id)
+
+    if (instanceProvider === 'whapi') {
+      const statusResult = await getProvider({ provider: 'whapi' }).getConnectionStatus({ companyId: company_id })
+      let connected = !!statusResult?.connected
+      if (hideBanner) connected = true
+      return res.json({
+        ok: true,
+        hasInstance: true,
+        connected,
+        smartphoneConnected: connected,
+        configured: true,
+        provider: 'whapi',
+        ...(statusResult?.error && { error: statusResult.error }),
+      })
+    }
+
     const configResult = await getEmpresaWhatsappConfig(company_id)
     if (configResult.error || !configResult.config) {
       return res.json({ ok: true, hasInstance: false, connected: hideBanner, configured: false })
@@ -84,8 +103,12 @@ exports.sincronizarContatosZapi = async (req, res) => {
   if (!company_id) return res.status(401).json({ ok: false, error: 'Não autenticado' })
   try {
     const { getEmpresaWhatsappConfig } = require('../../services/whatsappConfigService')
-    const { config, error } = await getEmpresaWhatsappConfig(company_id)
-    if (error || !config) return res.status(400).json({ ok: false, error: 'Configure a instância WhatsApp em Integrações antes de sincronizar.' })
+    const { resolveCompanyWhatsappProvider } = require('../../services/chat/identity/conversationAddressService')
+    const instanceProvider = await resolveCompanyWhatsappProvider(company_id)
+    if (instanceProvider !== 'whapi') {
+      const { config, error } = await getEmpresaWhatsappConfig(company_id)
+      if (error || !config) return res.status(400).json({ ok: false, error: 'Configure a instância WhatsApp em Integrações antes de sincronizar.' })
+    }
     const { enqueue, JOB_TIPOS, getActiveJob, recoverStaleRunningJobs } = require('../../services/queueManager')
     await recoverStaleRunningJobs(company_id)
     const result = await enqueue(company_id, JOB_TIPOS.SYNC_CONTATOS, {
@@ -175,34 +198,49 @@ exports.debugSyncContatos = async (req, res) => {
     const { getEmpresaWhatsappConfig } = require('../../services/whatsappConfigService')
     const ultramsgSvc = require('../../services/ultramsgIntegrationService')
     const { getProvider } = require('../../services/providers')
+    const { resolveCompanyWhatsappProvider } = require('../../services/chat/identity/conversationAddressService')
 
     const diag = { company_id, steps: [] }
+    const instanceProvider = await resolveCompanyWhatsappProvider(company_id)
 
-    // Passo 1: Verificar credenciais na tabela empresa_zapi
-    const { config, error: cfgError } = await getEmpresaWhatsappConfig(company_id)
-    if (cfgError || !config) {
-      diag.steps.push({ step: 'credenciais', ok: false, detail: cfgError || 'sem registro em empresa_zapi com ativo=true' })
-      return res.json({ ok: false, diagnostico: diag })
+    if (instanceProvider !== 'whapi') {
+      const { config, error: cfgError } = await getEmpresaWhatsappConfig(company_id)
+      if (cfgError || !config) {
+        diag.steps.push({ step: 'credenciais', ok: false, detail: cfgError || 'sem registro em empresa_zapi com ativo=true' })
+        return res.json({ ok: false, diagnostico: diag })
+      }
+      diag.steps.push({
+        step: 'credenciais',
+        ok: true,
+        detail: `instance_id=${config.instance_id} token=${config.instance_token ? config.instance_token.slice(0, 6) + '...' : 'VAZIO'} ativo=${config.ativo}`
+      })
+
+      const status = await ultramsgSvc.getStatus(company_id)
+      diag.steps.push({
+        step: 'conexao',
+        ok: !!status.connected,
+        detail: status.error ? `erro: ${status.error}` : `connected=${status.connected} smartphoneConnected=${status.smartphoneConnected}`
+      })
+      if (!status.connected) {
+        return res.json({ ok: false, diagnostico: diag, mensagem: 'WhatsApp não está conectado. Escaneie o QR code em Integrações.' })
+      }
+    } else {
+      const status = await getProvider({ provider: 'whapi' }).getConnectionStatus({ companyId: company_id })
+      diag.steps.push({
+        step: 'credenciais',
+        ok: !!status?.ok || !!status?.connected,
+        detail: 'provider=whapi (token não exibido)',
+      })
+      diag.steps.push({
+        step: 'conexao',
+        ok: !!status?.connected,
+        detail: status?.error ? `erro: ${status.error}` : `connected=${!!status?.connected} status=${status?.status || ''}`,
+      })
+      if (!status?.connected) {
+        return res.json({ ok: false, diagnostico: diag, mensagem: 'Canal Whapi não está AUTH. Conecte a sessão no painel Whapi.' })
+      }
     }
-    diag.steps.push({
-      step: 'credenciais',
-      ok: true,
-      detail: `instance_id=${config.instance_id} token=${config.instance_token ? config.instance_token.slice(0, 6) + '...' : 'VAZIO'} ativo=${config.ativo}`
-    })
-
-    // Passo 2: Verificar status da conexão
-    const status = await ultramsgSvc.getStatus(company_id)
-    diag.steps.push({
-      step: 'conexao',
-      ok: !!status.connected,
-      detail: status.error ? `erro: ${status.error}` : `connected=${status.connected} smartphoneConnected=${status.smartphoneConnected}`
-    })
-    if (!status.connected) {
-      return res.json({ ok: false, diagnostico: diag, mensagem: 'WhatsApp não está conectado. Escaneie o QR code em Integrações.' })
-    }
-
-    // Passo 3: Tentar buscar os primeiros 10 contatos da API UltraMSG
-    const provider = getProvider()
+    const provider = getProvider({ provider: instanceProvider })
     const gcr = await provider.getContacts(1, 10, { companyId: company_id })
     const primeiraLeva = gcr?.data != null ? gcr.data : (Array.isArray(gcr) ? gcr : [])
     diag.steps.push({
@@ -218,7 +256,7 @@ exports.debugSyncContatos = async (req, res) => {
       return res.json({
         ok: false,
         diagnostico: diag,
-        mensagem: 'UltraMSG retornou lista vazia. Verifique se o celular tem contatos salvos na agenda.'
+        mensagem: 'A API retornou lista vazia. Verifique se o celular tem contatos salvos na agenda.'
       })
     }
 
@@ -253,7 +291,8 @@ exports.sincronizarFotosPerfilZapi = async (req, res) => {
     const { company_id } = req.user
     if (!company_id) return res.status(401).json({ error: 'Não autenticado' })
 
-    const provider = getProvider()
+    const instanceProvider = await resolveCompanyWhatsappProvider(company_id)
+    const provider = getProvider({ provider: instanceProvider })
     if (!provider?.getProfilePicture && !provider?.getContactMetadata) {
       return res.status(501).json({ error: 'Sincronização de fotos disponível apenas com WhatsApp conectado.' })
     }

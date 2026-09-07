@@ -6,6 +6,7 @@
 
 const supabase = require('../config/supabase')
 const { getProvider } = require('./providers')
+const { resolveCompanyWhatsappProvider, resolveConversationProvider } = require('./chat/identity/conversationAddressService')
 const { getEmpresaWhatsappConfig } = require('./whatsappConfigService')
 const {
   normalizePhoneBR,
@@ -31,9 +32,9 @@ function isValidPhotoUrl(url) {
   return url && typeof url === 'string' && url.trim().startsWith('http')
 }
 
-function tryInvalidateNoProfilePictureCache(chatId) {
+function tryInvalidateNoProfilePictureCache(chatId, instanceProvider) {
   try {
-    const provider = getProvider()
+    const provider = getProvider({ provider: instanceProvider })
     if (typeof provider?.invalidateNoProfilePictureCache === 'function') {
       provider.invalidateNoProfilePictureCache(chatId)
     }
@@ -107,25 +108,37 @@ async function syncUltraMsgContact(chatIdOrPhone, companyId, opts = {}) {
   }
 
   if (!result) {
-    const provider = getProvider()
+    const whatsappInstanceId = opts.whatsappInstanceId ?? opts.whatsapp_instance_id ?? null
+    const instanceProvider = whatsappInstanceId
+      ? await resolveConversationProvider(companyId, whatsappInstanceId)
+      : await resolveCompanyWhatsappProvider(companyId)
+    const provider = getProvider({ provider: instanceProvider })
     if (!provider?.getContactMetadata && !provider?.getProfilePicture) return null
 
-    const { config, error } = await getEmpresaWhatsappConfig(companyId)
-    if (error || !config) return null
+    // getEmpresaWhatsappConfig só resolve default UltraMSG. Empresa só-Whapi não tem essa linha
+    // — o adapter Whapi já valida token em resolveConfig.
+    if (instanceProvider !== 'whapi') {
+      const { config, error } = await getEmpresaWhatsappConfig(companyId)
+      if (error || !config) return null
+    }
 
     let metadata = null
     let profilePicUrl = null
-    const picOpts = { companyId, chatId }
+    const apiOpts = {
+      companyId,
+      chatId,
+      ...(whatsappInstanceId ? { whatsappInstanceId } : {}),
+    }
 
     try {
       // Buscar metadados primeiro
-      const meta = await provider.getContactMetadata?.(telefone, { companyId, chatId }).catch(() => null) ?? null
+      const meta = await provider.getContactMetadata?.(telefone, apiOpts).catch(() => null) ?? null
       
       // Só buscar foto se os metadados indicarem que o contato existe e está na lista
       let pic = null
       if (meta && !meta.error) {
-        if (refreshFoto) tryInvalidateNoProfilePictureCache(chatId)
-        pic = await provider.getProfilePicture?.(chatId, picOpts).catch(() => null) ?? null
+        if (refreshFoto) tryInvalidateNoProfilePictureCache(chatId, instanceProvider)
+        pic = await provider.getProfilePicture?.(chatId, apiOpts).catch(() => null) ?? null
       }
       
       metadata = meta

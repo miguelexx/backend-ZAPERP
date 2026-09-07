@@ -1,8 +1,8 @@
 /**
- * Envio Whapi. Fase B: texto + mídia + reação + contato + localização.
+ * Envio Whapi. Texto + mídia + reação + contato + localização.
  * Whapi: JSON + Bearer. Mídia: campo `media` (URL HTTP(S), media id ou data URI).
  * Resposta síncrona CONFIRMADA: { sent: true, message?: { id } }.
- * sendCall e deleteMessage continuam stub 501 (não fingem sucesso).
+ * sendCall continua stub 501. delete/edit/read estão em ./messages.js.
  */
 
 const { buildSendMeta } = require('../../whatsappSendGuardService')
@@ -259,10 +259,6 @@ async function sendCall() {
   return notImplemented('sendCall')
 }
 
-async function deleteMessage() {
-  return notImplemented('deleteMessage')
-}
-
 module.exports = {
   sendText,
   sendLink,
@@ -277,6 +273,5 @@ module.exports = {
   sendReaction,
   removeReaction,
   sendCall,
-  deleteMessage,
   notImplemented,
 }

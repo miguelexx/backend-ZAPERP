@@ -61,7 +61,10 @@ async function enrichConversationsWithContactData(conversas, company_id, opts = 
 
   async function processOne(conv) {
     try {
-      const data = await syncUltraMsgContact(conv.telefone, company_id, { skipPersistence: true })
+      const data = await syncUltraMsgContact(conv.telefone, company_id, {
+        skipPersistence: true,
+        ...(conv.whatsapp_instance_id ? { whatsappInstanceId: conv.whatsapp_instance_id } : {}),
+      })
       if (!data) return null
       const nome = data.nome || null
       const foto = data.foto_perfil && isValidPhotoUrl(data.foto_perfil) ? data.foto_perfil : null

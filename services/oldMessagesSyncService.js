@@ -20,6 +20,7 @@ const {
 } = require('../helpers/phoneHelper')
 const { getOrCreateCliente, findOrCreateConversation } = require('../helpers/conversationSync')
 const { getProvider } = require('./providers')
+const { resolveConversationProvider, pickInstanceForUnboundConversation } = require('./chat/identity/conversationAddressService')
 const { listWhatsappInstances } = require('./whatsappInstanceService')
 const {
   schedulePersistInboundMediaIfNeeded,
@@ -644,12 +645,8 @@ async function importMessagesForChat(ctx) {
 }
 
 async function syncOldMessagesForCompany(company_id, opts = {}) {
-  const provider = getProvider()
   const shouldCancel = typeof opts.shouldCancel === 'function' ? opts.shouldCancel : null
   const isCancelled = async () => shouldCancel ? await shouldCancel() : false
-  if (!provider?.getChats || !provider?.getChatMessages) {
-    return { ok: false, error: 'Provider nao suporta leitura de chats/mensagens.' }
-  }
 
   const instancesResult = await listWhatsappInstances(company_id)
   if (instancesResult.error) return { ok: false, error: instancesResult.error }
@@ -686,6 +683,12 @@ async function syncOldMessagesForCompany(company_id, opts = {}) {
     if (await isCancelled()) return markCancelled()
 
     const whatsappInstanceId = instance.id || null
+    const instanceProvider = String(instance.provider || '').trim().toLowerCase() === 'whapi' ? 'whapi' : 'ultramsg'
+    const provider = getProvider({ provider: instanceProvider })
+    if (!provider?.getChats || !provider?.getChatMessages) {
+      stats.errors.push(`Provider ${instanceProvider} nao suporta leitura de chats/mensagens.`)
+      continue
+    }
     const chats = await provider.getChats({
       companyId: company_id,
       whatsappInstanceId: whatsappInstanceId || undefined,
@@ -734,7 +737,7 @@ async function resolveOldMessagesWhatsappInstanceId(company_id, conversa) {
   const instancesResult = await listWhatsappInstances(company_id)
   if (instancesResult.error) return null
   const instances = (instancesResult.instances || []).filter((instance) => instance && instance.ativo !== false)
-  const preferred = instances.find((instance) => instance.is_default === true) || instances[0] || null
+  const preferred = pickInstanceForUnboundConversation(instances)
   const id = Number(preferred?.id)
   return Number.isFinite(id) && id > 0 ? id : null
 }
@@ -801,11 +804,6 @@ async function resolveChatIdsForConversation(company_id, conversa) {
 }
 
 async function syncOldMessagesForConversation(company_id, conversa_id, opts = {}) {
-  const provider = getProvider()
-  if (!provider?.getChatMessages) {
-    return { ok: false, error: 'Provider nao suporta leitura de mensagens do chat.' }
-  }
-
   const { data: conversa, error } = await supabase
     .from('conversas')
     .select(`
@@ -848,6 +846,11 @@ async function syncOldMessagesForConversation(company_id, conversa_id, opts = {}
   }
 
   const whatsappInstanceId = await resolveOldMessagesWhatsappInstanceId(company_id, conversa)
+  const instanceProvider = await resolveConversationProvider(company_id, whatsappInstanceId)
+  const provider = getProvider({ provider: instanceProvider })
+  if (!provider?.getChatMessages) {
+    return { ok: false, error: 'Provider nao suporta leitura de mensagens do chat.' }
+  }
   const providerResult = await provider.getChatMessages(chatCandidates[0], MESSAGES_PER_CHAT, null, {
     companyId: company_id,
     whatsappInstanceId: whatsappInstanceId || undefined,

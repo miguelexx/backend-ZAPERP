@@ -1,6 +1,6 @@
 # 25 — Whapi Cloud: segunda integração WhatsApp (aditiva, UltraMSG intocável)
 
-> Criado: **2026-09-03**. **Fase A EXECUTADA em 2026-09-04**. **Fase B EXECUTADA em 2026-09-04** (mídia + contrato MCP fechado). **Fase C parcial EXECUTADA em 2026-09-04** (`configureWebhooks` real + roteamento de status/QR/restart por instância). QR/pairing e UI de cadastro ainda plano. Fases D–E ainda plano.
+> Criado: **2026-09-03**. **Fase A EXECUTADA em 2026-09-04**. **Fase B EXECUTADA em 2026-09-04** (mídia + contrato MCP fechado). **Fase C parcial EXECUTADA em 2026-09-04** (`configureWebhooks` real + roteamento de status/QR/restart por instância). **Fases D+E parciais EXECUTADAS em 2026-09-04** (delete/edit/read/sync reais + roteamento `getProvider({ provider })` em chatbot/encerrar/alertas/disparo; pasta `ultramsg/` intocada). **Auditoria de instâncias 2026-09-05:** `resolveConversationWhatsappInstance` + gates `getEmpresaWhatsappConfig` corrigidos para empresa só-Whapi. QR/pairing e UI de cadastro ainda plano.
 > Fonte: código atual (providers/index, ultramsg shim, webhookUltramsgController, resolveWebhookCompany,
 > whatsappInstanceService, outboundController) + docs 06/14/18/21/24.
 > Estados: **CONFIRMADO** = li no código / MCP / OpenAPI Whapi; **INFERÊNCIA**; **PENDENTE** = homologação live.
@@ -29,8 +29,13 @@ services/providers/whapi/
   phones.js           ← regras de JID Whapi (internacional s/ +, grupos @g.us) — NÃO importa phones da ultramsg
   result.js           ← normalizeWhapiSendResult ({ ok, messageId, error })
   send.js             ← sendText + mídia/reação/contato/localização (Fase B)
+  messages.js         ← delete/edit/mark-read/getMessages (DELETE/POST edit/PUT read)
+  chatsAdmin.js       ← archive/read/deleteChat + getChats/getGroups/getGroup
+  contacts.js         ← getContacts/getContactMetadata/getProfilePicture
+  chatMessages.js     ← getChatMessages (GET /messages/list/{ChatID})
+  parse.js            ← extractArray / sucesso HTTP
   upload.js           ← POST /media (Fase B)
-  instanceAdmin.js    ← getConnectionStatus/health/QR-pairing/configureWebhooks
+  instanceAdmin.js    ← getConnectionStatus/health/QR-pairing/configureWebhooks/perfil
 controllers/webhookWhapiController.js               ← normalizeWhapiToInternal + delega a receberZapi/statusZapi
 middleware/resolveWhapiWebhookCompany.js            ← channel id → company_id (provider='whapi')
 routes/webhookWhapiRoutes.js                        ← POST /webhooks/whapi
@@ -87,7 +92,7 @@ Não criar `whapi_token` / `whapi_id`. Uma linha nova, mesmos campos:
                                         ─► webhookUltramsgController.normalizeUltramsgToZapi
                                         ─────────────────────────────────────────────────┐
                                                                                           ▼
- Whapi POST     ─► /webhooks/whapi     ─► requireWebhookToken ─► resolveWhapiWebhookCompany('whapi')   NÚCLEO ATIVO
+ Whapi POST     ─► /webhooks/whapi     ─► requireWhapiWebhookToken ─► resolveWhapiWebhookCompany('whapi')   NÚCLEO ATIVO
                                         ─► webhookWhapiController.normalizeWhapiToInternal ─► receberZapi / statusZapi
                                                                                           ▲   (webhookZapiController —
                                         ─────────────────────────────────────────────────┘    nome legado, intocado)
@@ -133,13 +138,14 @@ Nas fases iniciais, o que não for implementado é **stub 501 explícito** (`{ o
 `opts` sempre carrega `{ companyId, whatsappInstanceId, referenceId?, returnDetails? }`.
 **HTTP 401/403 / `sent=false` NÃO é sucesso** → `normalizeWhapiSendResult` exige id de mensagem ou flag de sucesso.
 
-### 2.2 Chat admin / consultas / instância (mapa completo, stub até a fase)
+### 2.2 Chat admin / consultas / instância
 
-| Grupo | Métodos | Whapi Fase |
+| Grupo | Métodos | Whapi |
 |---|---|---|
-| Chat admin | `deleteMessage, archiveChat, unarchiveChat, readChat, clearChatMessages, deleteChat` | B/D (stub antes) |
-| Consultas | `getContacts, getChats, getGroups, getGroup, getChatMessages, getProfilePicture, getContactMetadata, uploadMedia` | D (stub antes) |
-| Instância | `getConnectionStatus, configureWebhooks` + **health** + **QR/pairing** (equivalente Whapi de sessão WhatsApp Web) | A(health) / **C parcial (configureWebhooks real; QR 501)** |
+| Chat admin | `deleteMessage` DELETE `/messages/{id}`; `editMessage` POST `/messages/text` `{edit}`; `readChat` PATCH `/chats/{id}` `{mark_unread:false}`; `archiveChat`/`unarchiveChat` POST `{archive}`; `deleteChat` DELETE `/chats/{id}` | **real** |
+| Consultas | `getContacts` GET `/contacts`; `getChats` GET `/chats`; `getGroups`/`getGroup`; `getChatMessages` GET `/messages/list/{ChatID}`; `getProfilePicture` GET `/contacts/{id}/profile`; `getContactMetadata` | **real** |
+| Instância | `getConnectionStatus`, `configureWebhooks`, `updateProfile*` (`PATCH /users/profile`); `getLoginQr` | A/C + perfil; QR **501** |
+| UltraMSG-only | `sendCall`, `clearChatMessages`, `resendByStatus/Id`, `getMessagesStatistics`, `clearMessages` | stub 501 |
 
 ### 2.3 Regras de erro / rede (iguais em espírito ao UltraMSG)
 
@@ -219,7 +225,7 @@ Invariantes preservados (todos já garantidos pelo núcleo — o normalizador **
 5. **Mídia inbound** só por `inboundMediaPersistenceService` (HTTPS, SSRF, R2/local) — o normalizador entrega `imageUrl`/`audioUrl`/… a partir de `*.link`.
 6. **HTTP:** inbound com erro interno persistente → 500 (retry provider); instância não mapeada / duplicada / ACK → 200 (igual ao UltraMSG).
 
-**Auth webhook:** reusar `requireWebhookToken` (timing-safe, `WHATSAPP_WEBHOOK_TOKEN`) via **header** `X-Webhook-Token` ou `Authorization: Bearer` — **nunca `?token=` na query** (vuln de log já conhecida). Se a Whapi mandar header próprio de assinatura, validar adicionalmente. Tenant **sempre** pela instância resolvida, nunca do payload.
+**Auth webhook:** middleware **dedicado** `requireWhapiWebhookToken` (timing-safe, `WHATSAPP_WEBHOOK_TOKEN`) — aceita **só** header `X-Webhook-Token` ou `Authorization: Bearer`; **nunca `?token=` na query** (vuln de log conhecida) e **sem** o fallback por `instanceId`→`empresa_zapi` do `requireWebhookToken` (UltraMSG). Não reusa o middleware compartilhado justamente para não herdar `?token=`/fallback cross-provider. Fail-closed: env ausente → 500; token ausente/inválido → 401. Se a Whapi mandar header próprio de assinatura, validar adicionalmente. Tenant **sempre** pela instância resolvida, nunca do payload.
 
 ---
 
@@ -255,7 +261,8 @@ Ver §0.1. Papéis-chave:
 - **`services/providers/whapi/instanceAdmin.js`** — `getConnectionStatus` (`GET /health`); `configureWebhooks` real (`PATCH /settings` só `webhooks`, header `X-Webhook-Token`, URL `/webhooks/whapi` **sem** query token, `skipSendGuard`); `getLoginQr` ainda 501. Nunca no boot, nunca na instância UltraMSG.
 - **`controllers/webhookWhapiController.js`** — `normalizeWhapiToInternal(message)` + `normalizeWhapiStatus(status)` + `handleWebhookWhapi` (itera `messages[]`/`statuses[]`, delega a `receberZapi`/`statusZapi`). Espelha `handleWebhookUltramsg`, **sem** importar o controller UltraMSG.
 - **`middleware/resolveWhapiWebhookCompany.js`** — extrai `channel_id`, `getWhatsappInstanceByProviderInstanceId('whapi', channelId)`, injeta `req.webhookContext`/`req.zapiContext` com `provider:'whapi'`. (Cópia enxuta do resolver UltraMSG parametrizada — não reescrever o de UltraMSG.)
-- **`routes/webhookWhapiRoutes.js`** — stack `webhookLogger('whapi') → webhookBodyResolver → requireWebhookToken → resolveWhapiWebhookCompany → handleWebhookWhapi`.
+- **`routes/webhookWhapiRoutes.js`** — stack `webhookLogger('whapi') → webhookBodyResolver → requireWhapiWebhookToken → resolveWhapiWebhookCompany → handleWebhookWhapi`.
+- **`middleware/requireWhapiWebhookToken.js`** — auth dedicada do webhook Whapi: timing-safe, só header `X-Webhook-Token`/`Authorization: Bearer`, **sem `?token=`** e **sem** fallback por `instanceId` (não herda a vuln/cross-provider do `requireWebhookToken` UltraMSG). Fail-closed (env ausente → 500; token ruim → 401). Testes em `tests/whapiWebhookToken.test.js`.
 - **migration** — `ALTER TABLE public.whatsapp_instances DROP CONSTRAINT whatsapp_instances_provider_chk; ADD CONSTRAINT whatsapp_instances_provider_chk CHECK (provider IN ('ultramsg','whapi'));` **NÃO aplicar.**
 
 ---
@@ -279,9 +286,8 @@ Ver §0.1. Papéis-chave:
 - HTTP ganhou `PUT` (reação: `PUT /messages/{id}/reaction`).
 - Normalizador: `*.link` → `imageUrl`/`audioUrl`/… (pipeline já baixa via `inboundMediaPersistenceService`); reação oficial `type=action`; `link_preview`/`live_location`/`contact`; ACK `code`+`status`.
 - Chat: `mediaMessageController`, `outboundController`, `retryController`, `forwardController` passam `getProvider({ provider })` (default ultramsg).
-- Residual (não Fase B): `integrationController` (sync), `attendanceController` e `messageDeletionController` ainda chamam `getProvider()` sem provider → UltraMSG. Sync Whapi continua 501 via adapter se o caller passar `{ provider:'whapi' }`; até a Fase D o botão sincronizar de uma instância Whapi **não** deve ser usado.
-- **Ainda stub 501:** `sendCall`, `deleteMessage`, sync Fase D (`getContacts`/…).
-- **Homologação live (PENDENTE):** enviar/receber no número de teste **depois** de: (1) aplicar a migration; (2) criar instância `provider=whapi`; (3) deploy do código com `/webhooks/whapi`; (4) apontar webhook do canal (configure-webhooks ou painel) **sem** query token; (5) conversa com `whatsapp_instance_id` dessa instância. Rotacionar token depois.
+- **Ainda stub 501:** `sendCall`, `clearChatMessages`, `resendByStatus`/`resendById`, `getMessagesStatistics`, `getLoginQr`.
+- **Homologação live texto (CONFIRMADO 2026-09-04):** empresa `30`, instância `30`, canal `NEBULA-AER3B`. Atendimento enviou/recebeu texto (conversa Otavio, ACK/ticks). Mídia/delete/edit/sync/disparo Whapi: código real, homologação live **PENDENTE**. Rotacionar JWT/Bearer/webhook token (vazaram na sessão).
 - **Pronto de código quando:** testes Whapi + gate UltraMSG verdes. Live só com autorização.
 
 ### Fase C — painel conexão Whapi (health/QR pairing) + UI mínima cadastro — **parcial 2026-09-04**
@@ -311,15 +317,19 @@ Ordem obrigatória (não inverter):
 
 **Não feito nesta sessão (precisa autorização explícita):** aplicar migration, PATCH live no canal, deploy, commit/push, enviar WhatsApp real.
 
-### Fase D — sync contatos/grupos/histórico
-- `getContacts/getChats/getGroups/getChatMessages/getProfilePicture/getContactMetadata` reais (endpoints Whapi próprios).
-- **Até lá:** apertar "sincronizar" numa instância Whapi deve **501 claro**, nunca cair no serviço UltraMSG por engano.
-- **Pronto quando:** sync não chama UltraMSG para instância whapi; retorna 501/no-op controlado antes de implementado.
+### Fase D — sync contatos/grupos/histórico — **EXECUTADA 2026-09-04 (código; live PENDENTE)**
+- `getContacts` GET `/contacts` (paginação count/offset) → `{ data, hasMore, rawCount }` via `agendaContactFields`.
+- `getChats` GET `/chats`; `getGroups` GET `/groups`; `getGroup` GET `/groups/{id}`.
+- `getChatMessages` GET `/messages/list/{ChatID}` mapeado para o formato que `oldMessagesSyncService` já lê (`from_me`, `text.body`, `image.link`).
+- `getProfilePicture` GET `/contacts/{digits}/profile` (`icon_full`); grupo via GET `/groups/{id}`.
+- Callers de sync (`oldMessagesSyncService`, `contactSyncService`, `ultramsgContactsSyncService`, `ultramsgGroupsSyncService`, `syncFotosProgressivaService`) passam `getProvider({ provider })` por instância/empresa. Default continua ultramsg.
+- `getEmpresaWhatsappConfig` (legado UltraMSG / default `provider=ultramsg`) é ignorado quando o provider da empresa/instância é Whapi — **CONFIRMADO 2026-09-05**: o gate existia em grupos/chats e **faltava** em `syncUltraMsgContact`, `contactSyncService`, `ultramsgContactsSyncService` e `POST /chats` sync de agenda. Sem isso, empresa só-Whapi (ex. instância 30) falhava com "sem instância" mesmo com o adapter Whapi roteado.
+- `resolveConversationWhatsappInstance` **não** chama mais `getDefaultWhatsappInstance` primeiro. Essa função filtra `provider=ultramsg` e, se vazio, cai em `empresa_zapi` **mesmo com linha Whapi na mesma empresa**. Agora: lista `whatsapp_instances` da empresa → `is_default` ou única ativa (qualquer provider) → só então legado se **zero** ativas. Teste: `tests/conversationAddressInstance.test.js`.
 
-### Fase E — disparo/campanha na instância Whapi
-- Worker de disparo passa a `getProvider({ provider })` pela instância da campanha.
-- **NÃO** nesta estrutura/MVP. `disparoSendService` e flags dry-run/live **não mudam** agora.
-- **Pronto quando:** campanha numa instância whapi roteia whapi; produção UltraMSG inalterada.
+### Fase E — disparo/campanha na instância Whapi — **roteamento EXECUTADO 2026-09-04**
+- `disparoSendService` e `disparoOptOutService` usam `getProvider({ provider })` da instância da campanha (`item.instancia_id`). Flags dry-run/live **não mudam**. Pasta `ultramsg/` intocada.
+- Chatbot inbound, encerrar atendimento, alertas, jobs de inatividade, reconciliação pending e apagar mensagem também roteiam por instância.
+- `editMessage` no adapter Whapi (POST `/messages/text` + `edit`) e **rota HTTP** `PATCH /chats/:id/mensagens/:mensagem_id` (`messageEditController.js`). Texto e **legenda** de imagem/vídeo/arquivo (não troca o arquivo; áudio/sticker/contato/localização recusados). Janela 15 min; só `direcao=out` do autor (admin pode editar outbound de outro). UltraMSG → 422 `EDIT_NOT_SUPPORTED` (adapter sem `editMessage`; pasta `ultramsg/` intocada). Nota interna edita só no CRM. Campos `mensagens.editada` / `editada_em` (migration `20260907220000_mensagens_editada.sql`, **não aplicada**). GET `/chats/:id` devolve `editada` + alias `editado`. Socket `mensagem_editada` inclui `texto`, `editado`, `editada_em`, `company_id`, `ultima_mensagem`. Webhook Whapi `edited:true` (texto ou caption de mídia) atualiza a linha e emite o mesmo evento.
 
 ---
 
@@ -333,7 +343,7 @@ Ordem obrigatória (não inverter):
 | Webhook UltraMSG afetado | rota, controller, resolver e alias `/webhooks/whatsapp` **não** tocados; whapi é rota nova |
 | `normalizeProvider` rejeitar ultramsg | allowlist inclui ultramsg; desconhecido→ultramsg (não lança) |
 | Migration inverter ordem | migration aplicada **antes** do deploy; sem ela, criar instância whapi falha na CHECK (não afeta ultramsg) |
-| Disparo de produção | Fase E; worker não muda no MVP |
+| Disparo de produção | roteamento aditivo por `instancia_id`; `getProvider()` no-arg continua ultramsg; flags dry-run/live iguais |
 
 ---
 
@@ -348,27 +358,95 @@ Ordem obrigatória (não inverter):
 
 ## 9. O que NÃO fazer (anti-padrões desta tarefa)
 
-- ❌ Editar/refatorar qualquer arquivo da UltraMSG (`providers/ultramsg*`, `webhookUltramsgController`, `ultramsgIntegrationController`/`Service`, rotas ultramsg, alias `/webhooks/whatsapp`, `disparoSendService`).
+- ❌ Editar/refatorar qualquer arquivo da UltraMSG (`providers/ultramsg*`, `webhookUltramsgController`, `ultramsgIntegrationController`/`Service`, rotas ultramsg, alias `/webhooks/whatsapp`).
 - ❌ Apontar `/webhooks/whatsapp` para Whapi (é UltraMSG).
 - ❌ Unificar adapter, JID, ou normalizador num "provider genérico".
 - ❌ Inventar `referenceId` na Whapi; misturar id de fila numérico com wamid.
 - ❌ MCP no runtime do adapter; send/settings via MCP.
 - ❌ Fatiar/renomear/mover `receberZapi`/`statusZapi` (sem o mapa do doc 24).
 - ❌ `company_id` de body/query; auth de webhook por `?token=`.
-- ❌ Chamar UltraMSG por engano em sync de instância whapi (deve 501).
-- ❌ Implementar Disparo (Fase E) ou paridade total agora.
+- ❌ Chamar UltraMSG por engano em sync/envio de instância whapi.
 - ❌ Aplicar migration, commitar, pushar, deploy, mexer em `.env` de produção, enviar mensagem real, QR/restart/settings em canal de cliente.
 
 ---
 
 ## 10. Achados do código (CONFIRMADO nesta sessão)
 
+### Auditoria de instâncias (2026-09-05) — o que estava certo vs o que quebrava
+
+**Certo (código, não docs):**
+- `getProvider({ provider })` no-arg → UltraMSG. Só `'whapi'` vai ao adapter Whapi.
+- Envio texto/mídia/delete/retry/forward/disparo: `resolveConversationProvider(company_id, whatsappInstanceId)` → adapter. Conversa **com** `whatsapp_instance_id` Whapi usa Whapi (homologação texto 1:1 da empresa 30).
+- Webhook `POST /webhooks/whapi` → `resolveWhapiWebhookCompany` injeta `provider='whapi'` + `whatsapp_instance_id` pelo `channel_id` (`getWhatsappInstanceByProviderInstanceId('whapi', …)`). `receberZapi` **não** re-resolve como ultramsg se o contexto já tem `company_id`.
+- Adapter Whapi `resolveConfig` recusa instância que não seja `provider='whapi'`.
+- Abrir conversa manual (`resolveWhatsappInstanceForManualAction`) já listava **todas** as instâncias ativas (não filtrava ultramsg) — 1 Whapi ativa é adotada.
+
+**Bug real corrigido nesta sessão:**
+- Conversa **sem** `whatsapp_instance_id` numa empresa só-Whapi: `getDefaultWhatsappInstance(company_id)` (default ultramsg) → vazio → `empresa_zapi` ou `null` → `resolveConversationProvider` caía em UltraMSG. Envio/delete/encerrar iam para o adapter errado. Inbound homologado mascarava isso porque o webhook já grava a instância 30.
+- Enrichment de nome/foto (`syncUltraMsgContact`) exigia `getEmpresaWhatsappConfig` (só default UltraMSG) **depois** de já ter roteado o adapter Whapi → return null em empresa só-Whapi.
+
+**Auditoria 2026-09-07 (código):**
+- Adapter UltraMSG `resolveConfig` agora recusa `provider=whapi` (simétrico à guarda Whapi). Teste: `tests/ultramsgConfigGuard.test.js`.
+- `toWhapiChatId` converte `@c.us` (UltraMSG) para `@s.whatsapp.net`. Teste: `tests/whapiPhones.test.js`.
+- Webhook Whapi: `getWhatsappInstanceByProviderInstanceId(..., { allowLegacyFallback: false })` — não casa `empresa_zapi`.
+- `GET /chats` status e debug-sync: empresa só-Whapi não cai mais no gate UltraMSG/`empresa_zapi`.
+- Histórico (`resolveOldMessagesWhatsappInstanceId`) usa `pickInstanceForUnboundConversation` (não pega a primeira instância em empresa mista sem default).
+
+---
+
 - `services/providers/index.js` (14 linhas): `getProvider()` devolve sempre ultramsg. **Único ponto** a tornar consciente de `opts.provider`.
 - **Todos os `getProvider()` são sem-argumento** (chat/config/ia/jobs/whatsappIntegration/webhookInbound). Trocar para `{ provider }` é aditivo e local — cada caller **já tem `whatsappInstanceId`/instância em escopo** (ex. `outboundController` linha 59/70).
 - `whatsappInstanceService.getWhatsappInstanceByProviderInstanceId(provider, id)` **já filtra `.eq('provider', p)`** e trata `DUPLICATE_PROVIDER_INSTANCE`. Um resolver whapi só chama com `'whapi'`.
 - `resolveWebhookCompany.js` está **hardcoded `'ultramsg'`** (não agnóstico) → resolver whapi **novo** (não editar o de ultramsg).
-- `requireWebhookToken`/`webhookBodyResolver`/`webhookLogger` são **agnósticos** → reusáveis na stack whapi.
+- `webhookBodyResolver`/`webhookLogger` são **agnósticos** → reusados na stack whapi. `requireWebhookToken` **não** é reusado: a Whapi tem `requireWhapiWebhookToken` dedicado (sem `?token=`, sem fallback por instanceId) — o compartilhado ficou intacto para o UltraMSG.
 - CHECK atual: `whatsapp_instances_provider_chk CHECK (provider IN ('ultramsg'))` em `supabase/migrations/20260615000000_whatsapp_instances_phase1.sql`. Unique `(company_id, provider, instance_id)` já existe. Migration Whapi **escrita, não aplicada**.
 - `webhookUltramsgController.handleWebhookUltramsg` é o **template exato** a espelhar: normaliza envelope → `webhookCoreController.statusZapi`/`receberZapi`.
-- **MCP 2026-09-04 (2ª leitura):** canal AUTH; webhook ainda em `/webhooks/ultramsg?token=`. `configureWebhooks` do adapter **não** foi chamado no canal.
-- Painel: `whatsappIntegrationController` roteia status/QR/restart/configure-webhooks **por instância**. QR/restart Whapi = 501. Company-level configure-webhooks = UltraMSG primeiro.
+- **MCP 2026-09-05:** canal `NEBULA-AER3B` status AUTH. Webhook do canal aponta para `POST /webhooks/whapi` (eventos `messages` post/put/patch/delete + `statuses` post/put). **Não** repetir token de header em logs/docs.
+- Painel: `whatsappIntegrationController` roteia status/QR/restart/configure-webhooks **por instância**. QR/restart Whapi = 501 (`loginUserImage` existe no MCP, não no adapter). Company-level configure-webhooks = UltraMSG primeiro.
+
+---
+
+## 11. Inventário MCP Whapi × adapter ZapERP (2026-09-05)
+
+MCP `user-whapi-mcp`: **187 tools**. O CRM **não** precisa de todos. Critério: paridade com o que o ZapERP já faz via UltraMSG (`services/providers/ultramsg/index.js`).
+
+### Implantado no adapter (HTTP real, não stub)
+
+| ZapERP | MCP / HTTP Whapi |
+|---|---|
+| `sendText` (+ `edit` / `quoted`) | `sendMessageText` POST `/messages/text` |
+| `sendImage` `sendVideo` `sendFile` `sendAudio` `sendVoice` `sendSticker` | `sendMessageImage/Video/Document/Audio/Voice/Sticker` |
+| `sendLink` | `sendMessageLinkPreview` (via texto/link) |
+| `sendContact` `sendLocation` | `sendMessageContact` `sendMessageLocation` |
+| `sendReaction` `removeReaction` | `reactToMessage` `removeReactFromMessage` |
+| `deleteMessage` `markMessageAsRead` `getMessages` | `deleteMessage` `markMessageAsRead` `getMessages`/`getMessage` |
+| `getChatMessages` | `getMessagesByChatID` GET `/messages/list/{ChatID}` |
+| `archiveChat` `readChat` `deleteChat` `getChats` | `archiveChat` `patchChat` `deleteChat` `getChats` |
+| `getContacts` `getContactMetadata` `getProfilePicture` | `getContacts` `getContact` `getContactProfile` |
+| `getGroups` `getGroup` | `getGroups` `getGroup` |
+| `uploadMedia` | `uploadMedia` POST `/media` |
+| `getConnectionStatus` | `checkHealth` GET `/health` |
+| `configureWebhooks` | `updateChannelSettings` PATCH `/settings` |
+| `updateProfileName/Picture/Description` | `updateUserProfile` PATCH `/users/profile` |
+
+Webhook inbound: texto, from_me, ACK, mídia `link`, reação `action`, edit, location, contact. Deleted inbound é ignorado (igual UltraMSG).
+
+### Stub 501 / não existe no CRM
+
+| Adapter | MCP equivalente | Precisa no ZapERP? |
+|---|---|---|
+| `getLoginQr` | `loginUser` / `loginUserImage` / passkey | Sim, se quiser QR no painel (hoje sessão no painel Whapi) |
+| `sendCall` | `makeCall` `createGroupCallLink` | Não (UltraMSG também é limitado) |
+| `clearChatMessages` `clearMessages` `resendBy*` `getMessagesStatistics` | não há equivalente 1:1 | Não — UltraMSG-only |
+
+### Existe no MCP, **não** implantado — só se o produto pedir
+
+**Atendimento (gap vs canal, não vs UltraMSG):** `forwardMessage` nativo (hoje o CRM reenvia copiando mídia/texto); `patchChat` pin/mute/ephemeral; `starMessage` `pinMessage` `commentMessage`; `markMessageAsPlayed`; `checkPhones`/`checkExist`; `getLidById`/`getIdByLid`; `sendMePresence`/`getPresence`; `addContact`/`editContact`.
+
+**Envio extra (WhatsApp tem, CRM não usa):** `sendMessagePoll` `sendMessageQuiz` `sendMessageQuestion` `sendMessageInteractive` (botões — MCP avisa instável) `sendMessageCarousel` `sendMessageGif` `sendMessageShort` `sendMessageLiveLocation` `sendMessageContactList` `sendMediaMessage` (multipart).
+
+**Fora de escopo CRM (não implantar sem pedido):** stories, newsletters/canais, comunidades, catálogo/produtos/coleções, labels Business, blacklist, bots, eventos/calls, agrupamento admin (criar grupo, promover, convite), login/logout/reset settings.
+
+Webhook: canal **não** assina chats/contacts/groups/presences/calls. Só messages+statuses. Não tratar o resto até assinar.
+
+Homologação live ainda pendente além de texto 1:1: mídia, delete, edit, sync, disparo.

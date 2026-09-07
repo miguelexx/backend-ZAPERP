@@ -61,8 +61,8 @@ exports.timeoutInatividadeChatbot = async (req, res) => {
     }
 
     const { getProvider } = require('../services/providers')
-    const provider = getProvider()
-    if (!provider?.sendText) {
+    const { resolveConversationProvider } = require('../services/chat/identity/conversationAddressService')
+    if (!getProvider()?.sendText) {
       return res.status(503).json({ error: 'Provider de envio não disponível' })
     }
 
@@ -135,6 +135,8 @@ exports.timeoutInatividadeChatbot = async (req, res) => {
         if (!telefone || String(telefone).includes('@g.us') || String(telefone).toLowerCase().startsWith('lid:')) continue
 
         try {
+          const instanceProvider = await resolveConversationProvider(company_id, conv.whatsapp_instance_id)
+          const provider = getProvider({ provider: instanceProvider })
           const resultSend = await provider.sendText(telefone, mensagemEncerramento, {
             companyId: company_id,
             conversaId: conv.id,

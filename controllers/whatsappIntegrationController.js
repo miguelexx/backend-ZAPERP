@@ -23,6 +23,7 @@ const { syncGroups, syncAll } = require('../services/ultramsgGroupsSyncService')
 const { checkGuard, recordQrServed, resetOnConnected, getAttempts, THROTTLE_SECONDS } = require('../services/whatsappConnectGuardService')
 const { getConfig } = require('../services/configOperacionalService')
 const { getProvider } = require('../services/providers')
+const { resolveCompanyWhatsappProvider } = require('../services/chat/identity/conversationAddressService')
 
 function publicWebhookUrl(appUrl, providerName) {
   const base = String(appUrl || '').replace(/\/$/, '')
@@ -789,13 +790,12 @@ exports.getMessages = async (req, res) => {
   }
 
   try {
-    // Obter provider UltraMsg
-    const provider = getProvider()
+    const instanceProvider = await resolveCompanyWhatsappProvider(company_id)
+    const provider = getProvider({ provider: instanceProvider })
     if (!provider || !provider.getMessages) {
       return res.status(404).json({ error: 'Empresa sem instância configurada' })
     }
 
-    // Buscar mensagens via UltraMsg
     const result = await provider.getMessages({ 
       companyId: company_id,
       page, 
@@ -844,8 +844,8 @@ exports.getMessagesStatistics = async (req, res) => {
   }
 
   try {
-    // Obter provider UltraMsg
-    const provider = getProvider()
+    const instanceProvider = await resolveCompanyWhatsappProvider(company_id)
+    const provider = getProvider({ provider: instanceProvider })
     if (!provider || !provider.getMessagesStatistics) {
       return res.status(404).json({ error: 'Empresa sem instância configurada' })
     }
@@ -853,9 +853,9 @@ exports.getMessagesStatistics = async (req, res) => {
     // Buscar estatísticas via UltraMsg
     const result = await provider.getMessagesStatistics({ companyId: company_id })
     
-    if (!result) {
-      return res.status(502).json({ 
-        error: 'Erro ao buscar estatísticas de mensagens' 
+    if (!result || result.notImplemented) {
+      return res.status(501).json({
+        error: 'Estatísticas de fila não disponíveis neste provedor.',
       })
     }
 

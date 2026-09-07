@@ -110,7 +110,7 @@ exports.buscarMensagensConversa = async (req, res) => {
       }
     }
 
-    const selectComRemetente = 'id, conversa_id, texto, direcao, criado_em, autor_usuario_id, status, whatsapp_id, whatsapp_instance_id, tipo, url, nome_arquivo, reply_meta, remetente_nome, remetente_telefone, contact_meta, location_meta, apagada_para_todos, apagada_em, audio_duracao_sec'
+    const selectComRemetente = 'id, conversa_id, texto, direcao, criado_em, autor_usuario_id, status, whatsapp_id, whatsapp_instance_id, tipo, url, nome_arquivo, reply_meta, remetente_nome, remetente_telefone, contact_meta, location_meta, apagada_para_todos, apagada_em, audio_duracao_sec, editada, editada_em'
     const selectFallback = 'id, conversa_id, texto, direcao, criado_em, autor_usuario_id, status, whatsapp_id, whatsapp_instance_id, tipo, url, nome_arquivo'
     const term = `%${escapeIlikePattern(q)}%`
 
@@ -126,7 +126,7 @@ exports.buscarMensagensConversa = async (req, res) => {
     query = applyDetalharChatMensagensCursor(query, cursor, cursor_id).limit(limit + 1)
     let { data: rows, error } = await query
 
-    if (error && (String(error.message || '').includes('reply_meta') || String(error.message || '').includes('remetente_nome') || String(error.message || '').includes('remetente_telefone') || String(error.message || '').includes('contact_meta') || String(error.message || '').includes('location_meta') || String(error.message || '').includes('apagada_para_todos') || String(error.message || '').includes('audio_duracao_sec') || String(error.message || '').includes('does not exist'))) {
+    if (error && (String(error.message || '').includes('reply_meta') || String(error.message || '').includes('remetente_nome') || String(error.message || '').includes('remetente_telefone') || String(error.message || '').includes('contact_meta') || String(error.message || '').includes('location_meta') || String(error.message || '').includes('apagada_para_todos') || String(error.message || '').includes('audio_duracao_sec') || String(error.message || '').includes('editada') || String(error.message || '').includes('does not exist'))) {
       let fallbackQuery = supabase
         .from('mensagens')
         .select(selectFallback)

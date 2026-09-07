@@ -33,7 +33,7 @@ Handlers adicionais do chat interno mantêm presença/last-seen em `socket/inter
 
 | Domínio | Eventos confirmados |
 |---|---|
-| Conversas/mensagens | `nova_mensagem`, `status_mensagem`, `nova_conversa`, `conversa_atualizada`, `atualizar_conversa`, `conversa_apagada`, `contato_atualizado`, `mensagens_lidas`, `tag_adicionada`, `tag_removida`, `conversa_transferida`, `mensagem_interna_atendimento`, `conversa_encerrada`, `conversa_reaberta`, `conversa_atribuida`, `conversa_lock`, `mensagem_editada`, `typing_start` e `typing_stop`. |
+| Conversas/mensagens | `nova_mensagem`, `status_mensagem`, `nova_conversa`, `conversa_atualizada`, `atualizar_conversa`, `conversa_apagada`, `contato_atualizado`, `mensagens_lidas`, `tag_adicionada`, `tag_removida`, `conversa_transferida`, `mensagem_interna_atendimento`, `conversa_encerrada`, `conversa_reaberta`, `conversa_atribuida`, `conversa_lock`, `mensagem_editada` (`id`, `conversa_id`, `texto`/`conteudo`, `editada`/`editado`, `editada_em`, `company_id`, `ultima_mensagem` opcional), `typing_start` e `typing_stop`. |
 | Alertas/sync/legado | `alerta_sem_resposta`, `alerta_sem_resposta_evento`, `zapi_sync_contatos`, `whatsapp_sync_mensagens_antigas`, `crm:lead_updated` e `crm:kanban_refresh`. |
 | Help desk | `helpdesk:notification`, `helpdesk:notifications_changed`, `helpdesk:queue_changed`, `helpdesk:ticket_changed`. |
 | Chat interno | `internal_chat:conversation_created`, `internal_chat:message_created`, `internal_chat:conversation_read`. |
