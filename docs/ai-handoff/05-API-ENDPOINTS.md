@@ -108,7 +108,10 @@ Todas usam A+SA+`apiLimiter` em `whatsappIntegrationRoutes.js`; controllers rece
 | `GET /integrations/whatsapp/me`, `/debug-config`, `/debug-status`, `/status`, `/operational-status`, `/qrcode`; `POST /restart` | Diagnóstico legado, estado/QR e reinício da instância default. |
 | `GET/POST /instances`, `PATCH /instances/:id` | Listar/criar/editar instância em `whatsapp_instances`. |
 | `POST /instances/:id/activate`, `/deactivate`, `/default`, `/restart`, `/configure-webhooks` | Alterar estado/default, chamar UltraMSG/reconfigurar callbacks. |
-| `GET /instances/:id/status`, `GET/POST /instances/:id/qrcode` | Consulta UltraMSG; sem escrita de negócio, salvo metadados de status. |
+| `GET /instances/:id/status`, `GET/POST /instances/:id/qrcode` | Health/QR por instância. Whapi: `GET /health` e `GET /users/login/image` (fallback `GET /users/login`). |
+| `POST /instances/:id/phone-code` | Código de pareamento Whapi (`GET /users/login/{phone}`). UltraMSG continua em `/connect/phone-code`. |
+| `POST /instances/:id/logout` | Só Whapi (`POST /users/logout`). Não apaga o cadastro. UltraMSG → 501. |
+| `POST /instances/:id/check-phones` | Só providers com `checkPhones` (Whapi). |
 | `POST /connect/phone-code`, `GET /connect/status`, `GET/POST /connect/qrcode`, `POST /connect/restart` | Sub-router inline `connectRouter`; conexão por telefone/QR e reinício. |
 | `POST /configure-webhooks`, `/contacts/sync`, `/messages/sync-old`, `/messages/sync-old/cancel`, `/groups/sync`, `/sync-all`; `GET /messages/sync-old/status` | Configuração e sincronizações; escritas locais e chamadas externas. |
 | `GET /messages`, `/messages/statistics` | Consulta de mensagens/estatísticas do provider. |

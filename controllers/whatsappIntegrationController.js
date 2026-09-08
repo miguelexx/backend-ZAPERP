@@ -295,6 +295,34 @@ exports.getInstancePhoneCode = async (req, res) => {
   return res.json({ code: result.code, provider: 'whapi' })
 }
 
+/**
+ * Encerra a sessão WhatsApp do canal Whapi (POST /users/logout).
+ * Não apaga o cadastro no ZapERP. Aditivo — UltraMSG continua em /connect/restart.
+ * POST /integrations/whatsapp/instances/:id/logout
+ */
+exports.logoutInstance = async (req, res) => {
+  const company_id = req.user?.company_id
+  if (!company_id) return res.status(401).json({ error: 'Não autenticado' })
+  const id = getInstanceParam(req)
+  if (!id) return res.status(400).json({ error: 'whatsapp_instance_id inválido' })
+  if (!checkCompanyRate(company_id, `logout:${id}`, 60_000, 8)) {
+    return res.status(429).json({ error: 'Muitas solicitações de desconexão, tente novamente em instantes.', retryAfterSeconds: 60 })
+  }
+  const resolved = await resolveInstanceProviderName(company_id, id)
+  if (!resolved.instance) return res.status(instanceErrorStatus(resolved.error)).json({ error: resolved.error })
+  if (resolved.providerName !== 'whapi') {
+    return res.status(501).json({ error: 'Logout por instância só para Whapi. Use Reiniciar instância (UltraMSG).', provider: resolved.providerName })
+  }
+  const result = await getProvider({ provider: 'whapi' }).logoutUser({ companyId: company_id, whatsappInstanceId: id })
+  if (!result?.ok) {
+    return res.status(502).json({ error: result?.error || 'Não foi possível desconectar o canal.', provider: 'whapi' })
+  }
+  persistWhapiHealth(company_id, id, { ok: true, connected: false, status: 'LOGOUT' }).catch((e) => {
+    console.warn('[logoutInstance] persist Whapi health:', e?.message || e)
+  })
+  return res.json({ ok: true, alreadyLoggedOut: !!result.alreadyLoggedOut, provider: 'whapi' })
+}
+
 exports.restartInstance = async (req, res) => {
   const company_id = req.user?.company_id
   if (!company_id) return res.status(401).json({ error: 'Não autenticado' })

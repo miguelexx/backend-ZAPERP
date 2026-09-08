@@ -79,6 +79,7 @@ module.exports = {
   configureWebhooks: instanceAdmin.configureWebhooks,
   getLoginQr: instanceAdmin.getLoginQr,
   getLoginCode: instanceAdmin.getLoginCode,
+  logoutUser: instanceAdmin.logoutUser,
   updateProfilePicture: instanceAdmin.updateProfilePicture,
   updateProfileName: instanceAdmin.updateProfileName,
   updateProfileDescription: instanceAdmin.updateProfileDescription,

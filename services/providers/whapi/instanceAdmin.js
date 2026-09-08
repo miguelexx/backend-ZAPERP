@@ -1,11 +1,12 @@
 /**
  * Admin da instância/canal Whapi. Whapi é WhatsApp Web / canal — NÃO copiar restart UltraMSG.
  * getConnectionStatus: GET /health. configureWebhooks: PATCH /settings (só o campo webhooks).
+ * QR: GET /users/login/image (PNG) com fallback GET /users/login (base64).
+ * Pareamento: GET /users/login/{phone}. Logout: POST /users/logout.
  * NUNCA no boot da API, NUNCA em instância UltraMSG, NUNCA token na query.
- * QR/pairing (getLoginQr) continua 501 — sessão Whapi autentica no painel Whapi Cloud.
  */
 
-const { get, patch, getBinary } = require('./http')
+const { get, patch, post, getBinary } = require('./http')
 const { resolveConfig } = require('./config')
 
 const WHAPI_WEBHOOK_EVENTS = [
@@ -126,32 +127,103 @@ async function getConnectionStatus(opts = {}) {
   }
 }
 
+function toQrDataUri(raw, mimeType = 'image/png') {
+  const value = String(raw || '').trim()
+  if (!value) return null
+  if (value.startsWith('data:image/')) return value
+  const mime = mimeType && mimeType.startsWith('image/') ? mimeType.split(';')[0] : 'image/png'
+  return `data:${mime};base64,${value.replace(/^data:[^;]+;base64,/, '')}`
+}
+
+function extractQrDataUri(data) {
+  if (!data || typeof data !== 'object') return null
+  return toQrDataUri(data.base64 ?? data.image ?? data.qr ?? data.qrBase64 ?? data.dataUri)
+}
+
+function loginQueryParams(opts = {}) {
+  const extraParams = { wakeup: 'true' }
+  if (opts?.size) extraParams.size = String(opts.size)
+  if (opts?.width) extraParams.width = String(opts.width)
+  if (opts?.height) extraParams.height = String(opts.height)
+  if (opts?.color_light) extraParams.color_light = String(opts.color_light)
+  if (opts?.color_dark) extraParams.color_dark = String(opts.color_dark)
+  return extraParams
+}
+
+function alreadyAuthenticatedResult(status) {
+  return {
+    ok: false,
+    httpStatus: status,
+    alreadyAuthenticated: true,
+    error: `Whapi não retornou QR (HTTP ${status}). O canal pode já estar conectado (AUTH).`,
+  }
+}
+
+async function getLoginQrFromJson(cfg, extraParams) {
+  const { ok, status, data } = await get({
+    token: cfg.token,
+    endpoint: '/users/login',
+    extraParams,
+  })
+  if (status === 409) return alreadyAuthenticatedResult(status)
+  const image = extractQrDataUri(data)
+  if (!ok || !image) {
+    return {
+      ok: false,
+      httpStatus: status,
+      error: String(data?.error?.message || data?.error || `Whapi não retornou QR (HTTP ${status}). O canal pode já estar conectado (AUTH).`),
+    }
+  }
+  return { ok: true, image, mimeType: 'image/png', httpStatus: status, source: 'json' }
+}
+
+function parseJsonBuffer(buffer, contentType) {
+  const ct = String(contentType || '')
+  if (!buffer || !buffer.length) return null
+  if (!ct.includes('json') && buffer[0] !== 0x7b) return null
+  try {
+    return JSON.parse(buffer.toString('utf8'))
+  } catch {
+    return null
+  }
+}
+
 /**
  * QR-code de login do canal Whapi (conectar pelo painel do ZapERP).
- * GET /users/login/image → PNG. `wakeup=true` para o canal subir e gerar o QR.
- * Só produz QR se o canal NÃO estiver conectado (estado AUTH não tem QR).
+ * 1) GET /users/login/image → PNG (loginUserImage)
+ * 2) Fallback GET /users/login → JSON base64 (loginUser)
+ * `wakeup=true` para o canal subir e gerar o QR.
+ * Só produz QR se o canal NÃO estiver conectado (estado AUTH / HTTP 409).
  * Retorna { ok, image: dataUri, mimeType } — sem send guard (leitura).
  */
 async function getLoginQr(opts = {}) {
   const cfg = await resolveConfig(opts)
   if (!cfg) return { ok: false, error: 'Instância Whapi não configurada' }
-  const extraParams = { wakeup: 'true' }
-  if (opts?.size) extraParams.size = String(opts.size)
-  if (opts?.width) extraParams.width = String(opts.width)
-  if (opts?.height) extraParams.height = String(opts.height)
+  const extraParams = loginQueryParams(opts)
   try {
     const { ok, status, buffer, contentType } = await getBinary({
       token: cfg.token,
       endpoint: '/users/login/image',
       extraParams,
     })
-    if (!ok || !buffer || !buffer.length) {
-      return { ok: false, httpStatus: status, error: `Whapi não retornou QR (HTTP ${status}). O canal pode já estar conectado (AUTH).` }
+    if (status === 409) return alreadyAuthenticatedResult(status)
+    if (ok && buffer && buffer.length) {
+      const fromJson = extractQrDataUri(parseJsonBuffer(buffer, contentType))
+      if (fromJson) return { ok: true, image: fromJson, mimeType: 'image/png', httpStatus: status, source: 'image-json' }
+      const looksPng = buffer[0] === 0x89 && buffer[1] === 0x50
+      const looksJpeg = buffer[0] === 0xff && buffer[1] === 0xd8
+      if (looksPng || looksJpeg || String(contentType || '').startsWith('image/')) {
+        const mimeType = contentType && contentType.startsWith('image/') ? contentType.split(';')[0] : (looksJpeg ? 'image/jpeg' : 'image/png')
+        return { ok: true, image: `data:${mimeType};base64,${buffer.toString('base64')}`, mimeType, httpStatus: status, source: 'image' }
+      }
     }
-    const mimeType = contentType && contentType.startsWith('image/') ? contentType.split(';')[0] : 'image/png'
-    return { ok: true, image: `data:${mimeType};base64,${buffer.toString('base64')}`, mimeType, httpStatus: status }
+    return getLoginQrFromJson(cfg, extraParams)
   } catch (e) {
-    return { ok: false, error: `Falha de conexão ao obter QR (Whapi): ${e?.message || e}` }
+    try {
+      return getLoginQrFromJson(cfg, extraParams)
+    } catch (inner) {
+      return { ok: false, error: `Falha de conexão ao obter QR (Whapi): ${inner?.message || e?.message || e}` }
+    }
   }
 }
 
@@ -180,11 +252,41 @@ async function getLoginCode(phone, opts = {}) {
   }
 }
 
+/**
+ * Encerra a sessão WhatsApp do canal (POST /users/logout).
+ * Não apaga o cadastro da instância no ZapERP — só desconecta o número.
+ * skipSendGuard: não é envio. 409 = já estava desconectado (tratado como ok).
+ */
+async function logoutUser(opts = {}) {
+  const cfg = await resolveConfig(opts)
+  if (!cfg) return { ok: false, error: 'Instância Whapi não configurada' }
+  try {
+    const { ok, status, data } = await post({
+      token: cfg.token,
+      endpoint: '/users/logout',
+      companyId: cfg.companyId,
+      whatsappInstanceId: cfg.whatsappInstanceId,
+      skipSendGuard: true,
+    })
+    if (ok || status === 409) {
+      return { ok: true, alreadyLoggedOut: status === 409, httpStatus: status }
+    }
+    return {
+      ok: false,
+      httpStatus: status,
+      error: String(data?.error?.message || data?.error || `HTTP ${status}`),
+    }
+  } catch (e) {
+    return { ok: false, error: `Falha de conexão ao desconectar (Whapi): ${e?.message || e}` }
+  }
+}
+
 module.exports = {
   getConnectionStatus,
   configureWebhooks,
   getLoginQr,
   getLoginCode,
+  logoutUser,
   updateProfilePicture,
   updateProfileName,
   updateProfileDescription,

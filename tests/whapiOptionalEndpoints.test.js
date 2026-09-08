@@ -141,4 +141,44 @@ describe('Whapi — endpoints opcionais', () => {
     expect(r.ok).toBe(false)
     expect(r.httpStatus).toBe(409)
   })
+
+  test('getLoginQr fallback GET /users/login JSON base64 se a imagem falhar', async () => {
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47])
+    const { fetchWithRetry } = mockDeps({
+      fetchImpl: async (url) => {
+        if (String(url).includes('/users/login/image')) {
+          return binRes(Buffer.alloc(0), { ok: false, status: 500 })
+        }
+        return jsonRes({ status: 'OK', base64: png.toString('base64') })
+      },
+    })
+    const whapi = require('../services/providers/whapi')
+    const r = await whapi.getLoginQr(CTX)
+    expect(r.ok).toBe(true)
+    expect(r.image).toMatch(/^data:image\/png;base64,/)
+    const urls = fetchWithRetry.mock.calls.map((c) => c[0])
+    expect(urls[0]).toContain('/users/login/image')
+    expect(urls[1]).toBe('https://gate.whapi.test/users/login?wakeup=true')
+  })
+
+  test('logoutUser POST /users/logout sem send guard', async () => {
+    const { fetchWithRetry, beforeWhatsAppSend } = mockDeps({
+      fetchImpl: async () => jsonRes({ success: true }),
+    })
+    const whapi = require('../services/providers/whapi')
+    const r = await whapi.logoutUser(CTX)
+    expect(r.ok).toBe(true)
+    const [url, opts] = fetchWithRetry.mock.calls[0]
+    expect(url).toBe('https://gate.whapi.test/users/logout')
+    expect(opts.method).toBe('POST')
+    expect(beforeWhatsAppSend).not.toHaveBeenCalled()
+  })
+
+  test('logoutUser 409 (já desconectado) → ok:true alreadyLoggedOut', async () => {
+    mockDeps({ fetchImpl: async () => jsonRes({ error: 'logged out' }, { ok: false, status: 409 }) })
+    const whapi = require('../services/providers/whapi')
+    const r = await whapi.logoutUser(CTX)
+    expect(r.ok).toBe(true)
+    expect(r.alreadyLoggedOut).toBe(true)
+  })
 })

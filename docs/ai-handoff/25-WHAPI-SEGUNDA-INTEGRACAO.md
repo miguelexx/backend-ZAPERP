@@ -259,7 +259,7 @@ Ver §0.1. Papéis-chave:
 - **`services/providers/whapi/http.js`** — `buildBaseUrl` (`https://gate.whapi.cloud`), `Authorization: Bearer <token>`, `Content-Type: application/json`, timeout via AbortSignal, retry só-conexão, `maskTokenInLogs`.
 - **`services/providers/whapi/config.js`** — `resolveConfig({companyId, whatsappInstanceId})` → busca instância (`getWhatsappInstanceById`, `includeCredentials:true, requireActive:true`), **recusa instância de outra empresa**, extrai `channel_id`=`instance_id` e `token`=`instance_token`. Sem prefixo `instance` (UltraMSG-only).
 - **`services/providers/whapi/send.js`** — `sendText` real (Fase A); demais sends stub 501.
-- **`services/providers/whapi/instanceAdmin.js`** — `getConnectionStatus` (`GET /health`); `configureWebhooks` real (`PATCH /settings` só `webhooks`, header `X-Webhook-Token`, URL `/webhooks/whapi` **sem** query token, `skipSendGuard`); `getLoginQr` ainda 501. Nunca no boot, nunca na instância UltraMSG.
+- **`services/providers/whapi/instanceAdmin.js`** — `getConnectionStatus` (`GET /health`); `configureWebhooks` real (`PATCH /settings` só `webhooks`, header `X-Webhook-Token`, URL `/webhooks/whapi` **sem** query token, `skipSendGuard`); `getLoginQr` (`GET /users/login/image` + fallback `GET /users/login`); `getLoginCode`; `logoutUser` (`POST /users/logout`). Nunca no boot, nunca na instância UltraMSG.
 - **`controllers/webhookWhapiController.js`** — `normalizeWhapiToInternal(message)` + `normalizeWhapiStatus(status)` + `handleWebhookWhapi` (itera `messages[]`/`statuses[]`, delega a `receberZapi`/`statusZapi`). Espelha `handleWebhookUltramsg`, **sem** importar o controller UltraMSG.
 - **`middleware/resolveWhapiWebhookCompany.js`** — extrai `channel_id`, `getWhatsappInstanceByProviderInstanceId('whapi', channelId)`, injeta `req.webhookContext`/`req.zapiContext` com `provider:'whapi'`. (Cópia enxuta do resolver UltraMSG parametrizada — não reescrever o de UltraMSG.)
 - **`routes/webhookWhapiRoutes.js`** — stack `webhookLogger('whapi') → webhookBodyResolver → requireWhapiWebhookToken → resolveWhapiWebhookCompany → handleWebhookWhapi`.
@@ -309,7 +309,7 @@ Ver §0.1. Papéis-chave:
 - `GET /instances/:id/qrcode` em instância Whapi (2026-09-07): chama `getLoginQr` (`GET /users/login/image`) e devolve `{ imageBase64, qrBase64, dataUri }` no **mesmo formato do UltraMSG** (base64 cru; front prefixa `data:`). Se não houver QR, consulta `getConnectionStatus`: canal em AUTH → `{ alreadyConnected:true }`; senão 502 com erro claro. `POST .../restart` Whapi segue **501** (sessão gerida pelo canal). Caminho UltraMSG intocado.
 - HTTP Whapi ganhou `PATCH` (`skipSendGuard` em settings) e `getBinary` (leitura de bytes p/ o QR).
 
-**Ainda falta (C restante):** UI `ConnectWhatsApp.jsx` (seletor UltraMSG | Whapi + Channel ID/Token). QR backend **pronto** (`getInstanceQrCode` já roteia Whapi); falta só a UI consumir e homologar ao vivo.
+**Ainda falta (C restante):** homologação live do QR/pairing (PENDENTE). UI de cadastro+QR: **feita 2026-09-07** — aba Configurações `?tab=whapi` (`WhapiSection` + `WhapiConnectPanel`) consome `GET/POST /instances`, `GET :id/qrcode`, `GET :id/status`, `POST :id/phone-code`, `POST :id/configure-webhooks`, `POST :id/logout`. Passkeys Chrome/NID **fora** (cerimônia de browser; não é o fluxo WhatsApp Web do produto).
 
 **Pronto de C quando:** criar instância Whapi pela UI, ver health, configurar webhook, sem quebrar fluxo UltraMSG.
 
@@ -412,7 +412,7 @@ Ordem obrigatória (não inverter):
 - CHECK atual: `whatsapp_instances_provider_chk CHECK (provider IN ('ultramsg'))` em `supabase/migrations/20260615000000_whatsapp_instances_phase1.sql`. Unique `(company_id, provider, instance_id)` já existe. Migration Whapi **escrita, não aplicada**.
 - `webhookUltramsgController.handleWebhookUltramsg` é o **template exato** a espelhar: normaliza envelope → `webhookCoreController.statusZapi`/`receberZapi`.
 - **MCP 2026-09-05:** canal `NEBULA-AER3B` status AUTH. Webhook do canal aponta para `POST /webhooks/whapi` (eventos `messages` post/put/patch/delete + `statuses` post/put). **Não** repetir token de header em logs/docs.
-- Painel: `whatsappIntegrationController` roteia status/QR/restart/configure-webhooks **por instância**. QR/restart Whapi = 501 (`loginUserImage` existe no MCP, não no adapter). Company-level configure-webhooks = UltraMSG primeiro.
+- Painel: `whatsappIntegrationController` roteia status/QR/restart/configure-webhooks **por instância**. QR Whapi = `getLoginQr` (PNG + fallback JSON). Restart Whapi = 501. Logout Whapi = `POST /instances/:id/logout`. Company-level configure-webhooks = UltraMSG primeiro.
 
 ---
 
