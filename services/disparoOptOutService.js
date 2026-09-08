@@ -224,6 +224,36 @@ async function enviarConfirmacaoOptOut({ companyId, telefone, instanciaId, texto
   }
 }
 
+/** Flag opt-in (default OFF): bloquear o contato no WhatsApp ao registrar opt-out. */
+function optOutBlockEnabled() {
+  return String(process.env.WHAPI_OPTOUT_BLOCK_ENABLED ?? 'false').toLowerCase() === 'true'
+}
+
+/**
+ * Bloqueia o contato no WhatsApp (blacklist) ao registrar opt-out — efeito real, não só CRM.
+ * Opt-in por env (default OFF) e SÓ quando canSendLive (dry-run nunca bloqueia).
+ * Provider-aware: só executa em providers que suportam blockContact (Whapi). UltraMSG → no-op.
+ * Nunca lança para fora do opt-out. Retorna { attempted, ok, reason }.
+ */
+async function bloquearContatoNoWhatsapp({ companyId, telefone, instanciaId }) {
+  if (!optOutBlockEnabled()) return { attempted: false, reason: 'disabled' }
+  if (!getDisparoFlags().canSendLive) return { attempted: false, reason: 'dry_run' }
+  try {
+    const instanceProvider = await resolveConversationProvider(companyId, instanciaId)
+    const provider = getProvider({ provider: instanceProvider })
+    if (typeof provider.blockContact !== 'function') return { attempted: false, reason: 'unsupported_provider' }
+    const r = await provider.blockContact(telefone, { companyId, whatsappInstanceId: instanciaId })
+    if (!r?.ok) {
+      console.warn('[disparo:optout] block WhatsApp falhou:', { company_id: companyId, telefone: String(telefone).slice(-4), error: r?.error })
+      return { attempted: true, ok: false, reason: r?.error || 'block_failed' }
+    }
+    return { attempted: true, ok: true }
+  } catch (e) {
+    console.warn('[disparo:optout] block WhatsApp erro:', e?.message || e)
+    return { attempted: true, ok: false, reason: e?.message || String(e) }
+  }
+}
+
 /**
  * Processa mensagem inbound que pode ser comando de opt-out.
  */
@@ -315,6 +345,13 @@ async function processInboundOptOut({
     }
   }
 
+  // Efeito real no WhatsApp (opt-in por env, dry-run seguro, provider-aware).
+  const blockResult = await bloquearContatoNoWhatsapp({
+    companyId,
+    telefone: validacao.normalizado,
+    instanciaId,
+  })
+
   return {
     matched: true,
     ok: true,
@@ -323,6 +360,8 @@ async function processInboundOptOut({
     itens_ignorados,
     palavra: palavraDetectada,
     ...confirmationResult,
+    blocked: blockResult?.ok === true,
+    blockReason: blockResult?.reason ?? null,
   }
 }
 
@@ -401,6 +440,8 @@ module.exports = {
   getEmpresaConfig,
   upsertEmpresaConfig,
   processInboundOptOut,
+  bloquearContatoNoWhatsapp,
+  optOutBlockEnabled,
   reativar,
   DEFAULT_CONFIRMATION,
 }

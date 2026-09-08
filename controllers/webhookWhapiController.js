@@ -125,6 +125,27 @@ function mediaLink(obj) {
  * @param {object} m item de messages[]
  * @param {object} ctx { channelId, connectedPhone }
  */
+/**
+ * Extrai a resposta de uma mensagem interativa inbound (toque em botão / item de lista).
+ * Whapi entrega em `m.reply` (buttons_reply|list_reply) ou `m.interactive` (button_reply|list_reply).
+ * Retorna { id, title, description } ou null. CONFIRMAR shape exato em homologação live (doc 25).
+ */
+function extractInteractiveReply(m) {
+  if (!m || typeof m !== 'object') return null
+  const src = m.reply || m.interactive || null
+  if (!src || typeof src !== 'object') return null
+  const r = src.buttons_reply || src.button_reply || src.list_reply || src.selected_button || src
+  const id = r?.id ?? r?.selected_id ?? r?.selectedRowId ?? src.id ?? null
+  const title = r?.title ?? r?.selected_display_text ?? r?.text ?? null
+  const description = r?.description ?? null
+  if (id == null && title == null) return null
+  return {
+    id: id != null ? String(id) : null,
+    title: title != null ? String(title) : null,
+    description: description != null ? String(description) : null,
+  }
+}
+
 function normalizeWhapiMessageToInternal(m, ctx = {}) {
   if (!m || typeof m !== 'object') return null
   const channelId = ctx.channelId
@@ -156,10 +177,17 @@ function normalizeWhapiMessageToInternal(m, ctx = {}) {
 
   const messageId = (m.id && String(m.id).trim()) ? String(m.id).trim() : null
 
-  // Texto: { text: { body } }; link_preview; caption em mídia.
+  // Resposta interativa (toque em botão/lista): o título vira o texto do inbound para a URA
+  // tratar como uma resposta digitada; o id fica disponível p/ casamento exato futuro.
+  const interactiveReply = (type === 'reply' || type === 'interactive')
+    ? extractInteractiveReply(m)
+    : null
+
+  // Texto: { text: { body } }; link_preview; resposta interativa; caption em mídia.
   const textBody = String(
     (m.text && (m.text.body ?? m.text))
     || (type === 'link_preview' && (m.link_preview?.body || m.link_preview?.title))
+    || (interactiveReply && (interactiveReply.title || interactiveReply.id))
     || m.body
     || m.caption
     || m[type]?.caption
@@ -220,6 +248,7 @@ function normalizeWhapiMessageToInternal(m, ctx = {}) {
   const internalType = isReaction ? 'reaction'
     : (type === 'ptt' || type === 'voice') ? 'audio'
     : (type === 'text' || type === 'link_preview') ? 'chat'
+    : (type === 'reply' || type === 'interactive') ? 'chat'
     : (type === 'live_location') ? 'location'
     : type
 
@@ -259,6 +288,8 @@ function normalizeWhapiMessageToInternal(m, ctx = {}) {
     stickerUrl: stickerUrl || null,
     fileName: fileName || undefined,
     caption: captionText || undefined,
+    interactiveReplyId: interactiveReply?.id || undefined,
+    interactiveReplyTitle: interactiveReply?.title || undefined,
     senderName,
     name: senderName,
     notifyName: senderName,
@@ -412,4 +443,5 @@ exports._test = {
   jidToDigits,
   isWhapiEditedMessage,
   extractWhapiEditedTexto,
+  extractInteractiveReply,
 }

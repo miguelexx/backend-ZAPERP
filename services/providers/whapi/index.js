@@ -10,6 +10,8 @@ const chatsAdmin = require('./chatsAdmin')
 const contacts = require('./contacts')
 const chatMessages = require('./chatMessages')
 const instanceAdmin = require('./instanceAdmin')
+const presence = require('./presence')
+const blacklist = require('./blacklist')
 const queries = require('./queries')
 const { uploadMedia } = require('./upload')
 const { buildBaseUrl, maskTokenInLogs, validateRequiredFields } = require('./http')
@@ -18,6 +20,7 @@ const { toWhapiRecipient, toWhapiChatId, recipientCandidates } = require('./phon
 module.exports = {
   sendText: send.sendText,
   sendLink: send.sendLink,
+  sendInteractive: send.sendInteractive,
   sendImage: send.sendImage,
   sendFile: send.sendFile,
   sendVideo: send.sendVideo,
@@ -62,6 +65,15 @@ module.exports = {
   getLidById: contacts.getLidById,
   getChatMessages: chatMessages.getChatMessages,
   uploadMedia,
+
+  // Presença (digitando…/gravando…) e presença da própria conta
+  sendPresence: presence.sendPresence,
+  setMePresence: presence.setMePresence,
+
+  // Blacklist (bloquear/desbloquear contato — opt-out com efeito real)
+  blockContact: blacklist.blockContact,
+  unblockContact: blacklist.unblockContact,
+  getBlacklist: blacklist.getBlacklist,
 
   getConnectionStatus: instanceAdmin.getConnectionStatus,
   configureWebhooks: instanceAdmin.configureWebhooks,

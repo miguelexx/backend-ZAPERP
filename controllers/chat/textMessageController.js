@@ -383,6 +383,18 @@ exports.enviarMensagemChat = async (req, res) => {
         tipo: hasLinkPayload ? 'link' : 'texto',
       })
 
+      // Gancho de UX: indicador "digitando…" antes do envio. Fire-and-forget e guardado —
+      // só dispara em providers que suportam presença (Whapi). UltraMSG não tem sendPresence → no-op.
+      // Nunca bloqueia nem faz throw no envio real. Desligável por WHAPI_TYPING_INDICATOR_ENABLED=false.
+      if (typeof provider.sendPresence === 'function'
+        && String(process.env.WHAPI_TYPING_INDICATOR_ENABLED ?? 'true').toLowerCase() !== 'false') {
+        Promise.resolve(provider.sendPresence(telefoneParaEnvio, 'typing', {
+          companyId: company_id,
+          whatsappInstanceId,
+          delay: Number(process.env.WHAPI_TYPING_INDICATOR_DELAY_S) || 3,
+        })).catch(() => {})
+      }
+
       try {
         let result = null
 

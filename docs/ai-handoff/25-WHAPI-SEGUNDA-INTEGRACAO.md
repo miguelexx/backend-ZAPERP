@@ -461,3 +461,63 @@ Webhook inbound: texto, from_me, ACK, mídia `link`, reação `action`, edit, lo
 Webhook: canal **não** assina chats/contacts/groups/presences/calls. Só messages+statuses. Não tratar o resto até assinar.
 
 Homologação live ainda pendente além de texto 1:1: mídia, delete, edit, sync, disparo.
+
+---
+
+## 26. Recursos de valor (além de paridade) — presença + block no opt-out (2026-09-07)
+
+Implementados (adapter + gancho, **sem frontend**, UltraMSG intocável). Contrato confirmado via MCP.
+
+### 26.1 Presença "digitando…" — UX humana no atendimento
+- Adapter `services/providers/whapi/presence.js`:
+  - `sendPresence(phone, presence, { companyId, whatsappInstanceId, delay })` → `PUT /presences/{EntryID}` `{ presence, delay? }`. Presenças de chat: `typing | recording | paused` (validado; inválido = no-op). `delay` clampado 0–25s. `skipSendGuard` (sinal leve, não consome rate de envio).
+  - `setMePresence('online'|'offline', opts)` → `PUT /presences/me`.
+- Gancho: `controllers/chat/textMessageController.js` dispara `provider.sendPresence(..., 'typing')` **fire-and-forget e guardado** (`typeof provider.sendPresence === 'function'`) logo antes do envio de texto/link. UltraMSG não tem `sendPresence` → no-op. Nunca bloqueia nem faz throw no envio real.
+- Envs: `WHAPI_TYPING_INDICATOR_ENABLED` (default `true`), `WHAPI_TYPING_INDICATOR_DELAY_S` (default `3`).
+
+### 26.2 Blacklist / bloquear no opt-out — efeito real do opt-out
+- Adapter `services/providers/whapi/blacklist.js`: `blockContact` (`PUT /blacklist/{id}`), `unblockContact` (`DELETE /blacklist/{id}`), `getBlacklist` (`GET /blacklist`). Retorno `{ ok, error? }` / array.
+- Gancho: `services/disparoOptOutService.js` → `bloquearContatoNoWhatsapp()` chamado em `processInboundOptOut` (fluxo vivo via `webhookInbound/disparoInbound.js`). Gate triplo, **opt-in e seguro**:
+  1. env `WHAPI_OPTOUT_BLOCK_ENABLED` (**default `false`** — sem ele, comportamento idêntico ao de hoje: opt-out só registra exclusão no CRM);
+  2. `getDisparoFlags().canSendLive` (dry-run **nunca** bloqueia);
+  3. provider suporta `blockContact` (Whapi sim; UltraMSG não → no-op).
+  - `processInboundOptOut` agora retorna também `{ blocked, blockReason }`.
+- **Ressalva de produto:** bloquear impede TODA comunicação (não só marketing) — por isso é opt-in por env. Um flag por empresa em `disparo_empresa_config` (coluna nova + migration) é o refino futuro se quiser granularidade por tenant.
+
+### 26.3 Não implementado (planejar à parte)
+- **Mensagens interativas** (`POST /messages/interactive` — botões/listas): maior valor, mas é feature completa (backend + frontend + normalização de resposta no webhook). Planejar em doc próprio.
+- **Labels** Business (`/labels` + associação a chat): integrar com o sistema de tags/kanban existente. Depois.
+
+### 26.4 Testes / gate
+`tests/whapiPresenceBlacklist.test.js` (10) + `tests/disparoOptOutBlock.test.js` (5). Suite completa **152 suites / 1568 testes verdes**. Regressão zero.
+Homologação live pendente (presença e block ainda não exercidos contra canal real).
+
+---
+
+## 27. Mensagens interativas — BACKEND executado + plano do frontend (2026-09-07)
+
+Feature classificada como "completa (backend+frontend)". **Backend feito**; frontend do compositor = plano à parte (abaixo).
+
+### 27.1 Envio (feito)
+- `services/providers/whapi/send.js` → `sendInteractive(phone, payload, opts)` → `POST /messages/interactive`.
+  - `payload`: `{ type:'button'|'list'|'product', body, header?, footer?, action }`. `body/header/footer` aceitam string ou `{text}`. Valida type/body/action antes de chamar a API (não finge sucesso). Retorna `{ ok, messageId, error }` (objeto, como sendText). `applyQuoted` suportado.
+  - Exportado no `whapi/index.js` como `sendInteractive`. UltraMSG **não** ganhou o método → chamadas só fazem sentido via `getProvider({ provider:'whapi' })`.
+  - Contrato MCP `sendMessageInteractive`: `button` → `action.buttons[{type:quick_reply|url|call|copy, title, id}]`; `list` → `action.list.sections[].rows[]` + `action.label`. **Ressalva do provedor:** botões no WhatsApp são instáveis (aviso oficial Whapi). Polls (`/messages/poll`) são a alternativa recomendada por eles — não implementado (fora do pedido).
+
+### 27.2 Resposta inbound (feito — o pedaço que automatiza triagem)
+- `controllers/webhookWhapiController.js` → `extractInteractiveReply(m)` lê `m.reply`/`m.interactive` (`buttons_reply`/`list_reply`/`button_reply`) → `{ id, title, description }`.
+- `normalizeWhapiMessageToInternal`: `type` `reply`/`interactive` → **internalType `chat`**, `body`/`text.message` = título escolhido (a URA/chatbot trata como resposta digitada), e carrega `interactiveReplyId`/`interactiveReplyTitle` para casamento exato futuro.
+- **PENDENTE (homologação live):** confirmar o shape exato do inbound de resposta (buttons_reply vs button_reply, campo do id). O extractor tolera as variações conhecidas; ajustar se o canal real divergir.
+
+### 27.3 Frontend — PLANO À PARTE (não implementado)
+Zona sensível (composer/scroll/teclado — não tocar às cegas). Escopo mínimo sugerido, isolado do fluxo de texto atual:
+1. **Autoria (opcional, fase 2):** um botão "Enviar menu" no composer que abre um modal para montar botões/lista (título + até 3 botões, ou seções/linhas). Enviar via novo endpoint backend `POST /chats/:id/interactive` (a criar) que chama `getProvider({provider}).sendInteractive`. NÃO alterar o envio de texto.
+2. **Exibição:** a mensagem interativa enviada aparece como bolha de texto normal (o `body.text` já vira o texto persistido) — no MVP não precisa render especial. A **resposta** do cliente já chega como texto normal (internalType chat) → aparece sem mudança de UI.
+3. **Guarda:** feature só visível/possível quando a instância da conversa é `provider='whapi'` (checar via dado já existente `whatsapp_instance_id`/provider). UltraMSG não expõe o botão.
+Ordem recomendada: exibição já funciona de graça; só a **autoria** (modal + endpoint) é trabalho real. Sizing: ~1 endpoint backend + 1 modal frontend, sem tocar lista/thread/scroll.
+
+### 27.4 Testes / gate
+`tests/whapiInteractive.test.js` (7): envio botão/lista, validação sem chamar API, `extractInteractiveReply` (buttons_reply/list_reply), resposta→inbound chat, mensagem normal sem campos interativos. Suite completa **1575 testes verdes**. Regressão zero.
+
+### 27.5 Labels (ainda não implementado — próximo da lista de valor)
+`GET/POST /labels` + associação a chat (`addLabelAssociation`/`deleteLabelAssociation`/`getLabelAssociations` no MCP). Casar com o sistema de tags/kanban existente do CRM. Fica para a próxima rodada de valor.

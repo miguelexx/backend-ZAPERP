@@ -326,9 +326,66 @@ async function forwardMessage(phone, messageId, opts = {}) {
   }
 }
 
+const INTERACTIVE_TYPES = new Set(['button', 'list', 'product'])
+
+/** Normaliza header/body/footer que podem vir como string ou { text }. */
+function asTextObj(v) {
+  if (v == null) return undefined
+  if (typeof v === 'string') return v.trim() ? { text: v.trim() } : undefined
+  if (typeof v === 'object' && v.text != null) return { text: String(v.text) }
+  return undefined
+}
+
+/**
+ * Envia mensagem interativa (botões / lista / produto). POST /messages/interactive.
+ * payload: { type:'button'|'list'|'product', body, header?, footer?, action }
+ *   - body/header/footer: string ou { text }
+ *   - action: estrutura conforme o type (button → { buttons:[...] }; list → { list:{ sections, label } })
+ * Retorna { ok, messageId, error } — objeto (como sendText). Contrato: doc 25 §26.3.
+ * ATENÇÃO: a funcionalidade de botões no WhatsApp é instável do lado do provedor.
+ */
+async function sendInteractive(phone, payload = {}, opts = {}) {
+  const cfg = await resolveConfig(opts)
+  if (!cfg) return { ok: false, messageId: null, error: 'Instância Whapi não configurada. Conecte o canal no painel de integrações.' }
+  const to = toWhapiRecipient(phone)
+  if (!to) return { ok: false, messageId: null, error: 'Número inválido.' }
+
+  const type = String(payload?.type || '').trim().toLowerCase()
+  if (!INTERACTIVE_TYPES.has(type)) {
+    return { ok: false, messageId: null, error: `type interativo inválido: use ${[...INTERACTIVE_TYPES].join('|')}` }
+  }
+  const bodyText = asTextObj(payload?.body)
+  if (!bodyText) return { ok: false, messageId: null, error: 'body.text é obrigatório na mensagem interativa.' }
+  const action = payload?.action
+  if (!action || typeof action !== 'object') return { ok: false, messageId: null, error: 'action é obrigatório na mensagem interativa.' }
+
+  const reqBody = applyQuoted({
+    to,
+    type,
+    body: bodyText,
+    ...(asTextObj(payload?.header) ? { header: asTextObj(payload.header) } : {}),
+    ...(asTextObj(payload?.footer) ? { footer: asTextObj(payload.footer) } : {}),
+    action,
+  }, opts)
+
+  let normalized
+  try {
+    normalized = await postMessage({
+      cfg, endpoint: '/messages/interactive', body: reqBody, to, kind: 'interactive', opts, extraMeta: { interactiveType: type },
+    })
+  } catch (e) {
+    return { ok: false, messageId: null, error: `Falha de conexão ao enviar interativa (Whapi): ${e?.message || e}` }
+  }
+  if (!normalized.ok) {
+    console.warn('❌ Whapi sendInteractive falhou:', String(to).slice(-13), String(normalized.error).slice(0, 200), '| token:', maskToken(cfg.token))
+  }
+  return normalized
+}
+
 module.exports = {
   sendText,
   sendLink,
+  sendInteractive,
   sendImage,
   sendFile,
   sendVideo,
