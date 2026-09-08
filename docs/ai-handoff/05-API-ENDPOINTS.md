@@ -59,7 +59,8 @@ Nas linhas de **chats**, a coluna `chatController` é a **fachada** (`routes/cha
 | `DELETE /clientes/todos` | `clienteController.apagarTodosClientes`; AD+D | Exclusão em massa da empresa. |
 | `GET/POST /clientes/:id/tags`, `DELETE /clientes/:id/tags/:tagId` | controllers cliente | Vínculo cliente–tag. |
 | `GET/POST /tags`, `PUT/DELETE /tags/:id` | `tagController` | A; mutações AD; delete D. |
-| `POST /chats/contato`, `/abrir-conversa`, `/grupos`, `/comunidades` | `chatController` | A; JSON com telefone/identidade e dados específicos; cria contato/conversa/grupo via provider quando aplicável. |
+| `POST /chats/contato`, `/abrir-conversa`, `/grupos`, `/comunidades` | `chatController` | A; JSON com telefone/identidade e dados específicos; cria contato/conversa/grupo via provider quando aplicável. Whapi: `POST /grupos` exige `participantes[]` e cria o grupo real no WhatsApp. |
+| `GET/PUT /chats/:id/grupo`, `PATCH .../grupo/settings`, `POST .../grupo/sair`, convite/foto/solicitações/admins, `GET/POST/DELETE /chats/:id/participantes` | `groupAdminController` | A; metadados e ações de grupo WhatsApp (Whapi). UltraMSG sem o método → 501. `GET /chats/grupos/convite` e `POST /chats/grupos/entrar` **antes** de `/:id`. |
 | `GET /chats`, `/counts`, `/whatsapp-instances`, `/whatsapp-status`, `/zapi-status`, `/pix-config`; `PUT /chats/pix-config` | `chatController` | A; filtros/paginação; leitura/config tenant-scoped. |
 | `GET/POST /chats/merge-duplicatas` | `paginaMergeDuplicatas/mergeConversasDuplicadas`; A+AD, POST D | Preview e consolidação destrutiva de conversas. |
 | `POST /chats/sincronizar-contatos`, `GET /chats/debug-sync-contatos`, `POST /chats/sincronizar-fotos-perfil` | `chatController`; A | Chama UltraMSG e atualiza contatos/fotos. |

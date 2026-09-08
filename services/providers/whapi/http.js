@@ -76,7 +76,7 @@ function createFetchOptions(method, body) {
     ...(signal && { signal }),
   }
   const m = String(method || 'GET').toUpperCase()
-  if (body != null && m !== 'GET' && m !== 'HEAD' && m !== 'DELETE') {
+  if (body != null && m !== 'GET' && m !== 'HEAD') {
     opts.headers = { ...opts.headers, 'Content-Type': 'application/json' }
     opts.body = typeof body === 'string' ? body : JSON.stringify(body)
   }

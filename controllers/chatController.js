@@ -280,6 +280,27 @@ exports.vincularClienteConversa = _contactController.vincularClienteConversa
 exports.atualizarNomeContato = _contactController.atualizarNomeContato
 exports.atualizarObservacao = _contactController.atualizarObservacao
 
+const _groupAdminController = require('./chat/groupAdminController')
+exports.obterGrupo = _groupAdminController.obterGrupo
+exports.atualizarGrupo = _groupAdminController.atualizarGrupo
+exports.atualizarConfigGrupo = _groupAdminController.atualizarConfigGrupo
+exports.sairGrupo = _groupAdminController.sairGrupo
+exports.obterConviteGrupo = _groupAdminController.obterConviteGrupo
+exports.revogarConviteGrupo = _groupAdminController.revogarConviteGrupo
+exports.enviarConviteGrupo = _groupAdminController.enviarConviteGrupo
+exports.listarParticipantesGrupo = _groupAdminController.listarParticipantesGrupo
+exports.adicionarParticipantesGrupo = _groupAdminController.adicionarParticipantesGrupo
+exports.removerParticipantesGrupo = _groupAdminController.removerParticipantesGrupo
+exports.promoverAdminGrupo = _groupAdminController.promoverAdminGrupo
+exports.rebaixarAdminGrupo = _groupAdminController.rebaixarAdminGrupo
+exports.definirFotoGrupo = _groupAdminController.definirFotoGrupo
+exports.removerFotoGrupo = _groupAdminController.removerFotoGrupo
+exports.listarSolicitacoesGrupo = _groupAdminController.listarSolicitacoesGrupo
+exports.aprovarSolicitacaoGrupo = _groupAdminController.aprovarSolicitacaoGrupo
+exports.rejeitarSolicitacaoGrupo = _groupAdminController.rejeitarSolicitacaoGrupo
+exports.entrarPorConviteGrupo = _groupAdminController.entrarPorConvite
+exports.consultarConviteGrupo = _groupAdminController.consultarConvite
+
 // =====================================================
 // Preferências da lista (silenciar / fixar / favoritar) — PATCH /chats/:id/prefs
 // =====================================================

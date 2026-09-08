@@ -11,6 +11,7 @@ const { normalizeName, isBadName } = require('../../helpers/contactEnrichment')
 const { updateClienteResiliente } = require('../../helpers/clienteNomeColunas')
 const { ensureConversaForCliente } = require('../../services/conversaAbrirClienteService')
 const { resolveWhatsappInstanceForManualAction } = require('../../services/whatsappInstanceService')
+const { getProvider } = require('../../services/providers')
 const { getCanonicalPhone, getCanonicalPhoneAnyIntl, getOrCreateCliente, findOrCreateConversation } = require('../../helpers/conversationSync')
 const { emitirEventoEmpresaConversa, emitirConversaAtualizada } = require('../../services/chat/realtime/chatRealtimeGateway')
 const { assertPermissaoConversa, assertPodeEnviarMensagem } = require('../../services/chat/access/conversationPolicy')
@@ -21,7 +22,47 @@ exports.criarGrupo = async (req, res) => {
   try {
     const io = req.app.get('io')
     const { company_id, id: usuario_id } = req.user
-    const { nome } = req.body
+    const nome = String(req.body?.nome || req.body?.subject || '').trim()
+    const participantes = req.body?.participantes || req.body?.participants || []
+    if (!nome) return res.status(400).json({ error: 'Informe o nome do grupo.' })
+
+    const instanceRes = await resolveWhatsappInstanceForManualAction(company_id, req.body?.whatsapp_instance_id)
+    const instance = instanceRes?.instance
+    const provider = instance ? getProvider({ provider: instance.provider }) : null
+
+    if (provider && typeof provider.createGroup === 'function') {
+      const phones = Array.isArray(participantes) ? participantes : []
+      if (!phones.length) {
+        return res.status(400).json({ error: 'Informe ao menos um participante para criar o grupo no WhatsApp.' })
+      }
+      if (instanceRes.error || !instanceRes.instanceId) {
+        return res.status(400).json({ error: instanceRes.error || 'Instância WhatsApp indisponível' })
+      }
+      const created = await provider.createGroup(nome, phones, {
+        companyId: company_id,
+        whatsappInstanceId: instance.id,
+      })
+      if (!created?.ok) {
+        const status = [400, 401, 404, 429].includes(Number(created?.httpStatus)) ? Number(created.httpStatus) : 422
+        return res.status(status).json({ error: created?.error || 'Não foi possível criar o grupo no WhatsApp.' })
+      }
+      const gid = String(created.data?.id || created.data?.group_id || created.data?.chat_id || '').trim()
+      const phone = gid
+        ? (gid.toLowerCase().endsWith('@g.us') ? gid : `${gid.replace(/@g\.us$/i, '')}@g.us`)
+        : `grupo_${Date.now()}`
+      const conv = await findOrCreateConversation(supabase, {
+        company_id,
+        phone,
+        isGroup: true,
+        nomeGrupo: created.data?.name || nome,
+        whatsapp_instance_id: instance.id,
+        io,
+      })
+      if (conv?.id) {
+        emitirEventoEmpresaConversa(io, company_id, conv.id, 'nova_conversa', conv)
+        return res.json(conv)
+      }
+    }
 
     const { data, error } = await supabase
       .from('conversas')
@@ -31,7 +72,7 @@ exports.criarGrupo = async (req, res) => {
         nome_grupo: nome,
         telefone: `grupo_${Date.now()}`,
         status_atendimento: 'aberta',
-        usuario_id
+        usuario_id,
       })
       .select()
       .single()

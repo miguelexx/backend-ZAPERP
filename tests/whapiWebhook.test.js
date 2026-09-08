@@ -69,6 +69,26 @@ describe('Whapi webhook — normalização e dispatch', () => {
     expect(m.participantPhone).toBe('5534988887777')
   })
 
+  test('inbound de grupo não usa from=@g.us como participante', () => {
+    const m = controller._test.normalizeWhapiMessageToInternal(
+      {
+        id: 'wamid.g2',
+        from_me: false,
+        type: 'text',
+        chat_id: '120363999@g.us',
+        from: '120363999@g.us',
+        from_name: 'miguel leonel',
+        author: '553484308030',
+        text: { body: 'oi' },
+        timestamp: 1700000000,
+      },
+      { channelId: 'NEBULA-AER3B' }
+    )
+    expect(m.isGroup).toBe(true)
+    expect(m.participantPhone).toBe('553484308030')
+    expect(m.senderName).toBe('miguel leonel')
+  })
+
   test('fromMe (eco do CRM/celular) marcado corretamente e sem senderName', () => {
     const m = controller._test.normalizeWhapiMessageToInternal(
       { id: 'wamid.me', from_me: true, type: 'text', chat_id: '5534988887777@s.whatsapp.net', from_name: 'Nosso', text: { body: 'resposta' }, timestamp: 1700000000 },

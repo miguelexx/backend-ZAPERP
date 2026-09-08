@@ -14,9 +14,10 @@ const presence = require('./presence')
 const blacklist = require('./blacklist')
 const queries = require('./queries')
 const channel = require('./channel')
+const groups = require('./groups')
 const { uploadMedia, getMediaFiles, getMedia, deleteMedia } = require('./upload')
 const { buildBaseUrl, maskTokenInLogs, validateRequiredFields } = require('./http')
-const { toWhapiRecipient, toWhapiChatId, recipientCandidates } = require('./phones')
+const { toWhapiRecipient, toWhapiChatId, toWhapiGroupId, recipientCandidates } = require('./phones')
 
 module.exports = {
   sendText: send.sendText,
@@ -55,6 +56,25 @@ module.exports = {
   getChats: chatsAdmin.getChats,
   getGroups: chatsAdmin.getGroups,
   getGroup: chatsAdmin.getGroup,
+  createGroup: groups.createGroup,
+  acceptGroupInvite: groups.acceptGroupInvite,
+  updateGroupInfo: groups.updateGroupInfo,
+  leaveGroup: groups.leaveGroup,
+  updateGroupSetting: groups.updateGroupSetting,
+  getGroupInvite: groups.getGroupInvite,
+  revokeGroupInvite: groups.revokeGroupInvite,
+  addGroupParticipant: groups.addGroupParticipant,
+  removeGroupParticipant: groups.removeGroupParticipant,
+  promoteToGroupAdmin: groups.promoteToGroupAdmin,
+  demoteGroupAdmin: groups.demoteGroupAdmin,
+  getGroupIcon: groups.getGroupIcon,
+  setGroupIcon: groups.setGroupIcon,
+  deleteGroupIcon: groups.deleteGroupIcon,
+  sendGroupInvite: groups.sendGroupInvite,
+  getGroupMetadataByInviteCode: groups.getGroupMetadataByInviteCode,
+  getGroupApplicationsList: groups.getGroupApplicationsList,
+  approveGroupApplication: groups.approveGroupApplication,
+  rejectGroupApplication: groups.rejectGroupApplication,
   patchChat: chatsAdmin.patchChat,
   pinChat: chatsAdmin.pinChat,
   muteChat: chatsAdmin.muteChat,
@@ -118,6 +138,7 @@ module.exports = {
 
   toWhapiRecipient,
   toWhapiChatId,
+  toWhapiGroupId,
   recipientCandidates,
   buildBaseUrl,
   maskTokenInLogs,

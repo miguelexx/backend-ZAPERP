@@ -267,10 +267,13 @@ describe('Whapi provider — sendText', () => {
     const r = await whapi.sendCall('5534988887777', 5, { companyId: 1, whatsappInstanceId: 10 })
     expect(r.ok).toBe(true)
     expect(r.messageId).toBe('call-ABC123')
-    const [url, opts] = fetchWithRetry.mock.calls[0]
+    const outgoing = fetchWithRetry.mock.calls.filter(([url]) => String(url).includes('/calls/outgoing'))
+    expect(outgoing.length).toBeGreaterThanOrEqual(1)
+    const [url, opts] = outgoing[0]
     expect(url).toBe('https://gate.whapi.test/calls/outgoing')
     expect(opts.method).toBe('POST')
-    expect(JSON.parse(opts.body)).toEqual({ to: '5534988887777@s.whatsapp.net', duration: 5 })
+    expect(JSON.parse(opts.body)).toEqual({ to: '5534988887777', duration: 5 })
+    expect(fetchWithRetry.mock.calls.some(([u]) => String(u).includes('/settings'))).toBe(true)
   })
 
   test('sendCall preserva JID @lid e no 503 liga outgoing_calls_enabled e retenta', async () => {
@@ -295,10 +298,61 @@ describe('Whapi provider — sendText', () => {
     const urls = fetchWithRetry.mock.calls.map((c) => c[0])
     expect(urls.filter((u) => String(u).includes('/calls/outgoing'))).toHaveLength(2)
     expect(urls.some((u) => String(u).endsWith('/settings'))).toBe(true)
-    expect(JSON.parse(fetchWithRetry.mock.calls[0][1].body)).toEqual({
+    const firstOutgoing = fetchWithRetry.mock.calls.find(([u]) => String(u).includes('/calls/outgoing'))
+    expect(JSON.parse(firstOutgoing[1].body)).toEqual({
       to: '123456789012345@lid',
       duration: 4,
     })
+  })
+
+  test('sendCall tenta JID depois de 400 nos dígitos e aceita call_id sem status initiated', async () => {
+    const { fetchWithRetry } = mockDeps({
+      instancesById: { '1:10': whapiInstance() },
+      fetchImpl: async (url, opts) => {
+        if (String(url).includes('/settings')) {
+          return { ok: true, status: 200, text: async () => JSON.stringify({ outgoing_calls_enabled: true }) }
+        }
+        const body = JSON.parse(opts.body || '{}')
+        if (body.to === '5534988887777') {
+          return { ok: false, status: 400, text: async () => JSON.stringify({ error: 'Invalid to' }) }
+        }
+        if (body.to === '5534988887777@s.whatsapp.net') {
+          return { ok: true, status: 200, text: async () => JSON.stringify({ call_id: 'call-jid-1' }) }
+        }
+        return { ok: false, status: 500, text: async () => 'unexpected' }
+      },
+    })
+    const whapi = require('../services/providers/whapi')
+    const r = await whapi.sendCall('5534988887777', 15, { companyId: 1, whatsappInstanceId: 10 })
+    expect(r.ok).toBe(true)
+    expect(r.messageId).toBe('call-jid-1')
+    const tos = fetchWithRetry.mock.calls
+      .filter(([url]) => String(url).includes('/calls/outgoing'))
+      .map(([, opts]) => JSON.parse(opts.body).to)
+    expect(tos).toEqual(['5534988887777', '5534988887777@s.whatsapp.net'])
+  })
+
+  test('sendCall completa o 9º dígito BR antes do número de 12 dígitos', async () => {
+    const seen = []
+    const { fetchWithRetry } = mockDeps({
+      instancesById: { '1:10': whapiInstance() },
+      fetchImpl: async (url, opts) => {
+        if (String(url).includes('/settings')) {
+          return { ok: true, status: 200, text: async () => JSON.stringify({ outgoing_calls_enabled: true }) }
+        }
+        const body = JSON.parse(opts.body || '{}')
+        seen.push(body.to)
+        if (body.to === '5534984080098') {
+          return { ok: true, status: 200, text: async () => JSON.stringify({ call_id: 'call-br9' }) }
+        }
+        return { ok: false, status: 400, text: async () => JSON.stringify({ error: 'Invalid to' }) }
+      },
+    })
+    const whapi = require('../services/providers/whapi')
+    const r = await whapi.sendCall('553484080098', 8, { companyId: 1, whatsappInstanceId: 10 })
+    expect(r.ok).toBe(true)
+    expect(r.messageId).toBe('call-br9')
+    expect(seen[0]).toBe('5534984080098')
   })
 
   test('uploadMedia POST /media sem send guard e devolve link', async () => {

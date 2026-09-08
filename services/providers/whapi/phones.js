@@ -18,6 +18,23 @@ function isGroupJid(v) {
 }
 
 /**
+ * Group ID Whapi (`^[\\d-]{10,31}@g\\.us$`).
+ * Aceita JID completo ou dígitos gravados em `conversas.telefone`.
+ */
+function toWhapiGroupId(groupId) {
+  const raw = String(groupId || '').trim()
+  if (!raw) return ''
+  const lower = raw.toLowerCase()
+  if (lower.startsWith('grupo_') || lower.startsWith('comunidade_') || lower.startsWith('lid:')) return ''
+  if (isGroupJid(raw)) return raw
+  const core = raw.replace(/@[^@]+$/, '').trim()
+  if (/^[\d-]{10,40}$/.test(core)) return `${core}@g.us`
+  const digits = core.replace(/\D/g, '')
+  if (digits.length >= 10 && digits.length <= 40) return `${digits}@g.us`
+  return ''
+}
+
+/**
  * Candidatos de destino para envio, na ordem de preferência.
  * Grupo: devolve o JID cru. Privado BR: preferredBrSendDigits (ciente de celular vs fixo).
  * Fallback: dígitos crus.
@@ -82,6 +99,7 @@ function toWhapiContactId(phone) {
 
 module.exports = {
   isGroupJid,
+  toWhapiGroupId,
   recipientCandidates,
   toWhapiRecipient,
   toWhapiChatId,

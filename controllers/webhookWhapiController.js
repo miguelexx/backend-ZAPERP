@@ -175,7 +175,10 @@ function normalizeWhapiMessageToInternal(m, ctx = {}) {
   if (isGroup) {
     remoteJid = isGroupJid(chatJid) ? chatJid : (isGroupJid(fromJid) ? fromJid : chatJid)
     phone = remoteJid
-    participantPhone = jidToDigits(m.from ?? m.author ?? '')
+    const fromCandidate = [m.from, m.author, m.participant]
+      .map((v) => String(v || '').trim())
+      .find((s) => s && !isGroupJid(s))
+    participantPhone = jidToDigits(fromCandidate || '')
   } else {
     remoteJid = chatJid || fromJid
     const digits = jidToDigits(remoteJid) || jidToDigits(chatJid) || jidToDigits(fromJid)

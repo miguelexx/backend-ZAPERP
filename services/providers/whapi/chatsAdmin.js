@@ -7,7 +7,7 @@
  */
 
 const { resolveConfig } = require('./config')
-const { toWhapiChatId, isGroupJid } = require('./phones')
+const { toWhapiChatId, toWhapiGroupId } = require('./phones')
 const { post, patch, del, get } = require('./http')
 const { extractArray, isWhapiSuccessBody, notImplemented } = require('./parse')
 
@@ -103,7 +103,10 @@ async function getGroups(opts = {}) {
   const cfg = await resolveConfig(opts)
   if (!cfg) return []
   try {
-    const { ok, data } = await get({ token: cfg.token, endpoint: '/groups' })
+    const extraParams = {}
+    if (opts.count != null) extraParams.count = String(opts.count)
+    if (opts.offset != null) extraParams.offset = String(opts.offset)
+    const { ok, data } = await get({ token: cfg.token, endpoint: '/groups', extraParams })
     if (!ok) return []
     return extractArray(data, ['groups', 'data', 'chats', 'list'])
   } catch {
@@ -114,12 +117,15 @@ async function getGroups(opts = {}) {
 async function getGroup(groupId, opts = {}) {
   const cfg = await resolveConfig(opts)
   if (!cfg || !groupId) return null
-  const gid = String(groupId).trim()
-  if (!gid || !isGroupJid(gid)) return null
+  const gid = toWhapiGroupId(groupId)
+  if (!gid) return null
   try {
+    const extraParams = {}
+    if (opts.resync === true) extraParams.resync = 'true'
     const { ok, data } = await get({
       token: cfg.token,
       endpoint: `/groups/${encodeURIComponent(gid)}`,
+      extraParams,
     })
     if (!ok || !data || typeof data !== 'object') return null
     const group = data.group && typeof data.group === 'object' ? data.group : data

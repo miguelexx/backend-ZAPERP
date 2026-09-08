@@ -12,6 +12,8 @@ const { destructiveLimiter } = require('../middleware/rateLimit')
 router.post('/contato', auth, chatController.criarContato);
 router.post('/abrir-conversa', auth, chatController.abrirConversaCliente);
 router.post("/grupos", auth, chatController.criarGrupo);
+router.get("/grupos/convite", auth, chatController.consultarConviteGrupo);
+router.post("/grupos/entrar", auth, chatController.entrarPorConviteGrupo);
 router.post("/comunidades", auth, chatController.criarComunidade);
 router.post('/finalizacao-ausencia-lote', auth, supervisorOrAdmin, chatController.finalizacaoAusenciaLoteAuth)
 router.get('/whatsapp-instances', auth, chatController.listWhatsappInstancesAtendimento);
@@ -69,6 +71,23 @@ router.post('/:id/mensagens/:mensagem_id/retry-media', auth, chatController.reen
 router.post('/:id/contatos', auth, chatController.enviarContatoWhatsapp)
 router.post('/:id/localizacao', auth, chatController.enviarLocalizacao)
 router.post('/:id/ligacao', auth, chatController.enviarLigacaoWhatsapp)
+router.get('/:id/grupo', auth, chatController.obterGrupo)
+router.put('/:id/grupo', auth, chatController.atualizarGrupo)
+router.patch('/:id/grupo/settings', auth, chatController.atualizarConfigGrupo)
+router.post('/:id/grupo/sair', auth, chatController.sairGrupo)
+router.get('/:id/grupo/convite', auth, chatController.obterConviteGrupo)
+router.delete('/:id/grupo/convite', auth, chatController.revogarConviteGrupo)
+router.post('/:id/grupo/convite/enviar', auth, chatController.enviarConviteGrupo)
+router.put('/:id/grupo/foto', auth, chatController.definirFotoGrupo)
+router.delete('/:id/grupo/foto', auth, chatController.removerFotoGrupo)
+router.get('/:id/grupo/solicitacoes', auth, chatController.listarSolicitacoesGrupo)
+router.post('/:id/grupo/solicitacoes', auth, chatController.aprovarSolicitacaoGrupo)
+router.delete('/:id/grupo/solicitacoes', auth, chatController.rejeitarSolicitacaoGrupo)
+router.get('/:id/participantes', auth, chatController.listarParticipantesGrupo)
+router.post('/:id/participantes', auth, chatController.adicionarParticipantesGrupo)
+router.delete('/:id/participantes', auth, chatController.removerParticipantesGrupo)
+router.post('/:id/grupo/admins', auth, chatController.promoverAdminGrupo)
+router.delete('/:id/grupo/admins', auth, chatController.rebaixarAdminGrupo)
 router.put('/:id/cliente', auth, chatController.vincularClienteConversa)
 router.put('/:id/vincular-cliente', auth, chatController.vincularClienteConversa)
 router.put('/:id/observacao', auth, chatController.atualizarObservacao)

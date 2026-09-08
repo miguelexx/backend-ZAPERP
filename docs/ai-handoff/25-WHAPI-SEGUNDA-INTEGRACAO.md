@@ -31,6 +31,7 @@ services/providers/whapi/
   send.js             ← sendText + mídia/reação/contato/localização (Fase B)
   messages.js         ← delete/edit/mark-read/getMessages (DELETE/POST edit/PUT read)
   chatsAdmin.js       ← archive/read/deleteChat + getChats/getGroups/getGroup
+  groups.js           ← create/update/leave/settings/invite/participants/admins/icon/applications
   contacts.js         ← getContacts/getContactMetadata/getProfilePicture
   chatMessages.js     ← getChatMessages (GET /messages/list/{ChatID})
   parse.js            ← extractArray / sucesso HTTP
@@ -133,7 +134,7 @@ Nas fases iniciais, o que não for implementado é **stub 501 explícito** (`{ o
 | `sendAudio/sendVoice` | idem; 200 sem aceite = falha | **B (real)** |
 | `sendReaction/removeReaction` | boolean (`PUT /messages/{id}/reaction`) | **B (real)** |
 | `sendContact/sendLocation` | boolean/objeto | **B (real)** |
-| `sendCall` | `{ ok, messageId }` — POST `/calls/outgoing` `{ to, duration }` (chamada de atenção; 503 liga `outgoing_calls_enabled` e retenta) | **real (2026-09-07)** |
+| `sendCall` | `{ ok, messageId }` — POST `/calls/outgoing` `{ to, duration }` (chamada de atenção; PATCH `outgoing_calls_enabled` antes; dígitos depois JID; 503 retenta) | **real (2026-09-07/08)** |
 
 `opts` sempre carrega `{ companyId, whatsappInstanceId, referenceId?, returnDetails? }`.
 **HTTP 401/403 / `sent=false` NÃO é sucesso** → `normalizeWhapiSendResult` exige id de mensagem ou flag de sucesso.
@@ -144,6 +145,7 @@ Nas fases iniciais, o que não for implementado é **stub 501 explícito** (`{ o
 |---|---|---|
 | Chat admin | `deleteMessage` DELETE `/messages/{id}`; `editMessage` POST `/messages/text` `{edit}`; `readChat` PATCH `/chats/{id}` `{mark_unread:false}`; `archiveChat`/`unarchiveChat` POST `{archive}`; `deleteChat` DELETE `/chats/{id}` | **real** |
 | Consultas | `getContacts` GET `/contacts`; `getChats` GET `/chats`; `getGroups`/`getGroup`; `getChatMessages` GET `/messages/list/{ChatID}`; `getProfilePicture` GET `/contacts/{id}/profile`; `getContactMetadata`; `checkPhones` POST `/contacts` `{contacts}` | **real** |
+| Grupos (admin WhatsApp) | `createGroup`, `updateGroupInfo`, `leaveGroup`, `updateGroupSetting`, convite, participantes, admins, ícone, applications; CRM: `/chats/:id/grupo*` | **real (2026-09-08)** |
 | Opcionais (2026-09-07) | `forwardMessage` POST `/messages/{MessageID}` `{to,force?}`; `checkPhones` POST `/contacts` `{contacts,force_check?}` → `[{input,exists,waId}]`; `getLoginQr` GET `/users/login/image` (PNG→dataURI) | **real (código; live PENDENTE)** |
 | Instância | `getConnectionStatus`, `configureWebhooks`, `updateProfile*` (`PATCH /users/profile`); `getLoginQr` (QR real) | A/C + perfil + QR |
 | UltraMSG-only | `clearChatMessages`, `resendByStatus/Id`, `getMessagesStatistics`, `clearMessages` | stub 501 |
@@ -290,7 +292,7 @@ Ver §0.1. Papéis-chave:
 - **Mídia Whapi no visualizador (2026-09-07):** allowlist de inbound/proxy passa a aceitar `*.wasabisys.com` (auto-download Whapi) e `*.whapi.cloud`. Sem isso o `/media/proxy` devolvia 403, a bolha caía na URL direta e o lightbox (só a 1ª URL) mostrava o ícone quebrado “Imagem”. UltraMSG intocado.
 - Chat: `mediaMessageController`, `outboundController`, `retryController`, `forwardController` passam `getProvider({ provider })` (default ultramsg).
 - **Ainda stub 501:** `clearChatMessages`, `resendByStatus`/`resendById`, `getMessagesStatistics`, `clearMessages`.
-- **sendCall (2026-09-07):** POST `/calls/outgoing` `{to,duration}` (makeCall). Botão Ligar do perfil dispara `POST /chats/:id/ligacao`. 503 ativa `outgoing_calls_enabled` e retenta uma vez. UltraMSG continua sem chamada WhatsApp (`tel:` no perfil).
+- **sendCall (2026-09-07/08):** POST `/calls/outgoing` `{to,duration}` (makeCall). Não é VoIP no CRM. Ligar no perfil abre `tel:` para conversar e, no Whapi, também `POST /chats/:id/ligacao`. PATCH `outgoing_calls_enabled` antes; tenta dígitos e depois `@s.whatsapp.net`; 400/404/502 → próximo candidato; 503 retenta. Falha de negócio em `/ligacao` não usa HTTP 502 (422 ou status da Whapi). UltraMSG: só `tel:`.
 - **Opcionais implementados (2026-09-07, código; live PENDENTE):** `forwardMessage` (POST `/messages/{MessageID}`), `checkPhones` (POST `/contacts`), `getLoginQr` (GET `/users/login/image` → dataURI). Testes em `tests/whapiOptionalEndpoints.test.js`.
   - **Fiação HTTP (aditiva, provider-aware):** `getLoginQr` → `GET /integrations/whatsapp/instances/:id/qrcode` (substituiu o 501; formato UltraMSG). `checkPhones` → **novo** `POST /integrations/whatsapp/instances/:id/check-phones` `{ phones:[], forceCheck? }` → `{ total, validCount, invalidCount, results:[{input,exists,waId}] }`; provider sem `checkPhones` → 501; **não** toca o loop de disparo. `forwardMessage` → **fiado (2026-09-07)** no `forwardController` como fast-path com fallback: só encaminha nativo quando `provider.forwardMessage` existe (Whapi), a origem tem `whatsapp_id` real E é da MESMA instância; caso contrário (UltraMSG, id ausente, instância diferente, ou falha do nativo) mantém a cópia atual. Preserva o selo "Encaminhada" e evita duplicar. Testes em `tests/whapiForwardNative.test.js` (função exposta via `_test`).
 - **Lote de endpoints extras (2026-09-07, código+testes; live PENDENTE):** adapter Whapi ganhou (paths confirmados no OpenAPI):
@@ -443,6 +445,11 @@ MCP `user-whapi-mcp`: **187 tools**. O CRM **não** precisa de todos. Critério:
 | `archiveChat` `readChat` `deleteChat` `getChats` | `archiveChat` `patchChat` `deleteChat` `getChats` |
 | `getContacts` `getContactMetadata` `getProfilePicture` | `getContacts` `getContact` `getContactProfile` |
 | `getGroups` `getGroup` | `getGroups` `getGroup` |
+| `createGroup` `updateGroupInfo` `leaveGroup` `updateGroupSetting` | `createGroup` `updateGroupInfo` `leaveGroup` `updateGroupSetting` |
+| `getGroupInvite` `revokeGroupInvite` `sendGroupInvite` `acceptGroupInvite` | `getGroupInvite` `revokeGroupInvite` `sendGroupInvite` `acceptGroupInvite` |
+| `addGroupParticipant` `removeGroupParticipant` `promoteToGroupAdmin` `demoteGroupAdmin` | mesmos nomes MCP |
+| `getGroupIcon` `setGroupIcon` `deleteGroupIcon` | `getGroupIcon` `setGroupIcon` `deleteGroupIcon` |
+| `getGroupApplicationsList` `approveGroupApplication` `rejectGroupApplication` | `getGroupApplicationsList` / approve / reject |
 | `uploadMedia` | `uploadMedia` POST `/media` |
 | `getConnectionStatus` | `checkHealth` GET `/health` |
 | `configureWebhooks` | `updateChannelSettings` PATCH `/settings` |
@@ -454,7 +461,7 @@ Webhook inbound: texto, from_me, ACK, mídia `link`, reação `action`, edit, lo
 
 | Adapter | MCP equivalente | Precisa no ZapERP? |
 |---|---|---|
-| `sendCall` | `makeCall` POST `/calls/outgoing` | Sim — botão Ligar no perfil (Whapi); UltraMSG não tem endpoint equivalente |
+| `sendCall` | `makeCall` POST `/calls/outgoing` | Sim — toque de atenção no Ligar (Whapi); conversa de voz é `tel:` no telefone; UltraMSG não tem makeCall |
 | `clearChatMessages` `clearMessages` `resendBy*` `getMessagesStatistics` | não há equivalente 1:1 | Não — UltraMSG-only |
 
 **Implementados 2026-09-07 (saíram do 501):** `getLoginQr` (`loginUserImage`), `forwardMessage`, `checkPhones` — ver §Fase D e `tests/whapiOptionalEndpoints.test.js`. Código pronto; falta ligar a controller/UI e homologar ao vivo.
@@ -465,7 +472,7 @@ Webhook inbound: texto, from_me, ACK, mídia `link`, reação `action`, edit, lo
 
 **Envio extra (WhatsApp tem, CRM não usa):** `sendMessagePoll` `sendMessageQuiz` `sendMessageQuestion` `sendMessageCarousel` `sendMessageContactList` `sendMediaMessage` (multipart). `sendGif`/`sendShortVideo`/`sendLiveLocation` e `sendInteractive` estão no adapter; composer do atendimento **não** os dispara ainda.
 
-**Fora de escopo CRM (não implantar sem pedido):** stories, newsletters/canais, comunidades, catálogo/produtos/coleções, labels Business, bots, `createCallEvent`/`createGroupCallLink`, agrupamento admin (criar grupo, promover, convite), login/logout/reset settings. Blacklist **já no adapter** (`blockContact`/`unblockContact`/`getBlacklist`) — ver §26.2. `makeCall` **está** fiado no botão Ligar.
+**Fora de escopo CRM (não implantar sem pedido):** stories, newsletters/canais, comunidades, catálogo/produtos/coleções, labels Business, bots, `createCallEvent`/`createGroupCallLink`, login/logout/reset settings. **Agrupamento admin (criar/editar grupo, participantes, convite, foto, solicitações) está no CRM** — adapter `whapi/groups.js` + rotas `GET/PUT /chats/:id/grupo*` e `POST /chats/grupos`. Blacklist **já no adapter** (`blockContact`/`unblockContact`/`getBlacklist`) — ver §26.2. `makeCall` **está** fiado no botão Ligar.
 
 Webhook: canal **não** assina chats/contacts/groups/presences/calls. Só messages+statuses. Não tratar o resto até assinar.
 

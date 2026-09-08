@@ -8,10 +8,11 @@
 const { buildSendMeta } = require('../../whatsappSendGuardService')
 const { BODY_MAX_LEN, CAPTION_MAX_LEN, FILENAME_MAX_LEN } = require('./constants')
 const { normalizeWhapiSendResult } = require('./result')
-const { toWhapiRecipient, toWhapiChatId } = require('./phones')
+const { toWhapiRecipient, toWhapiChatId, recipientCandidates } = require('./phones')
 const { resolveConfig } = require('./config')
 const { post, put, maskToken } = require('./http')
 const { updateChannelSettings } = require('./channel')
+const { preferredBrSendDigits } = require('../../../helpers/phoneHelper')
 
 function notImplemented(method) {
   return { ok: false, messageId: null, notImplemented: true, httpStatus: 501, error: `whapi.${method} não implementado` }
@@ -359,13 +360,44 @@ function toCallRecipient(phone) {
   return toWhapiChatId(raw)
 }
 
+/** Dígitos primeiro (9º dígito BR se faltar, igual intenção do sendText); depois JID. LID/grupo: só o JID. */
+function callRecipientCandidates(phone) {
+  const out = []
+  const push = (v) => {
+    const s = String(v || '').trim()
+    if (s && !out.includes(s)) out.push(s)
+  }
+  const raw = String(phone || '').trim()
+  if (!raw) return out
+  const lower = raw.toLowerCase()
+  if (lower.startsWith('lid:') || lower.includes('@lid') || lower.endsWith('@g.us')) {
+    push(toCallRecipient(raw))
+    return out
+  }
+  const digits = []
+  const pushDigit = (v) => {
+    const d = String(v || '').replace(/\D/g, '')
+    if (d && !digits.includes(d)) digits.push(d)
+  }
+  try {
+    const pref = preferredBrSendDigits(raw)
+    if (pref) pushDigit(pref)
+  } catch { /* ignore */ }
+  for (const d of recipientCandidates(raw)) pushDigit(d)
+  for (const d of digits) {
+    push(d)
+    push(`${d}@s.whatsapp.net`)
+  }
+  if (!out.length) push(toCallRecipient(raw))
+  return out
+}
+
 function normalizeCallResult({ ok, httpOk, status, data, text }) {
   const accepted = httpOk === true || ok === true
   const callId = data && typeof data === 'object' && data.call_id != null
     ? String(data.call_id).trim()
     : ''
-  const initiated = String(data?.status || '').trim().toLowerCase() === 'initiated'
-  if (accepted && callId && initiated) {
+  if (accepted && callId) {
     return {
       ok: true,
       messageId: callId,
@@ -388,22 +420,23 @@ function normalizeCallResult({ ok, httpOk, status, data, text }) {
 
 /**
  * Chamada de atenção Whapi (POST /calls/outgoing).
- * Toca o WhatsApp do cliente por `duration` segundos (0–30, padrão 5).
- * Não abre VoIP. 503 = chamadas de saída desligadas → liga `outgoing_calls_enabled` e tenta de novo uma vez.
+ * Toca o WhatsApp do cliente por `duration` segundos (0–30, padrão 15).
+ * Não abre VoIP no CRM — a conversa de voz é no telefone (`tel:`).
+ * Liga `outgoing_calls_enabled` e tenta dígitos + JID se 400/404/502/503.
  */
 async function sendCall(phone, callDuration, opts = {}) {
   const cfg = await resolveConfig(opts)
   if (!cfg) {
     return { ok: false, messageId: null, error: 'Instância Whapi não configurada. Conecte o canal no painel de integrações.' }
   }
-  const to = toCallRecipient(phone)
-  if (!to) {
+  const candidates = callRecipientCandidates(phone)
+  if (!candidates.length) {
     return { ok: false, messageId: null, error: 'Destino inválido para ligação.' }
   }
   const dur = Number(callDuration)
-  const duration = Number.isFinite(dur) ? Math.max(0, Math.min(30, Math.round(dur))) : 5
+  const duration = Number.isFinite(dur) ? Math.max(0, Math.min(30, Math.round(dur))) : 15
 
-  const postCall = () => post({
+  const postCall = (to) => post({
     token: cfg.token,
     endpoint: '/calls/outgoing',
     body: { to, duration },
@@ -413,20 +446,30 @@ async function sendCall(phone, callDuration, opts = {}) {
   })
 
   try {
-    let res = await postCall()
-    if (res.status === 503) {
-      const enabled = await updateChannelSettings({ outgoing_calls_enabled: true }, opts)
-      if (enabled?.ok) {
-        res = await postCall()
+    await updateChannelSettings({ outgoing_calls_enabled: true }, opts)
+  } catch (_) { /* segue mesmo se o PATCH falhar */ }
+
+  let last = { ok: false, messageId: null, error: 'Não foi possível ligar.' }
+  try {
+    for (const to of candidates) {
+      let res = await postCall(to)
+      if (res.status === 503) {
+        const enabled = await updateChannelSettings({ outgoing_calls_enabled: true }, opts)
+        if (enabled?.ok) res = await postCall(to)
+      }
+      last = normalizeCallResult(res)
+      if (last.ok) {
+        console.log('✅ Whapi chamada enviada:', String(to).slice(-18), last.callId ? `id=${String(last.callId).slice(0, 16)}` : '')
+        return last
+      }
+      const st = Number(res.status)
+      if (st === 401 || st === 402 || st === 409) {
+        console.warn('❌ Whapi sendCall falhou:', String(to).slice(-18), String(last.error).slice(0, 200), '| token:', maskToken(cfg.token))
+        return last
       }
     }
-    const normalized = normalizeCallResult(res)
-    if (!normalized.ok) {
-      console.warn('❌ Whapi sendCall falhou:', String(to).slice(-18), String(normalized.error).slice(0, 200), '| token:', maskToken(cfg.token))
-      return normalized
-    }
-    console.log('✅ Whapi chamada enviada:', String(to).slice(-18), normalized.callId ? `id=${String(normalized.callId).slice(0, 16)}` : '')
-    return normalized
+    console.warn('❌ Whapi sendCall falhou:', String(candidates[0]).slice(-18), String(last.error).slice(0, 200), '| token:', maskToken(cfg.token))
+    return last
   } catch (e) {
     return { ok: false, messageId: null, error: `Falha de conexão ao ligar (Whapi): ${e?.message || e}` }
   }

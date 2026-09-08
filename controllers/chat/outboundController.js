@@ -529,6 +529,23 @@ exports.enviarLocalizacao = async (req, res) => {
   }
 }
 
+function friendlyLigacaoError(result) {
+  const status = Number(result?.httpStatus)
+  const raw = String(result?.error || '').trim()
+  if (status === 409) return 'Já existe uma chamada em andamento neste WhatsApp.'
+  if (status === 404) return 'O WhatsApp não encontrou este contato para ligar.'
+  if (status === 401) return 'O canal WhatsApp precisa estar conectado para ligar.'
+  if (status === 402) return 'Limite de chamadas deste canal foi atingido.'
+  if (status === 503) return 'Chamadas de saída estão desativadas neste canal.'
+  if (/not implemented|não implementado/i.test(raw)) {
+    return 'Este WhatsApp ainda não envia chamada pelo servidor. Use a ligação no telefone para conversar.'
+  }
+  if (/não suportado|nao suportado|ultra.?msg/i.test(raw)) {
+    return 'Esta instância não faz chamada pelo WhatsApp. Use a ligação no telefone para conversar.'
+  }
+  return raw || 'Não foi possível tocar o WhatsApp do cliente.'
+}
+
 // =====================================================
 // Registro de ligações via WhatsApp (Z-API /send-call)
 // =====================================================
@@ -570,7 +587,7 @@ exports.enviarLigacaoWhatsapp = async (req, res) => {
     }
 
     const dur = Number(callDuration)
-    const safeDur = Number.isFinite(dur) ? Math.max(1, Math.min(15, dur)) : 5
+    const safeDur = Number.isFinite(dur) ? Math.max(1, Math.min(30, dur)) : 15
     const whatsappInstanceId = await resolveConversationWhatsappInstance(company_id, conversa)
 
     const criadoEm = new Date().toISOString()
@@ -628,9 +645,11 @@ exports.enviarLigacaoWhatsapp = async (req, res) => {
     }
 
     if (!ok) {
-      return res.status(502).json({
+      const status = Number(result?.httpStatus)
+      const httpOut = [400, 401, 402, 403, 404, 409, 422, 503].includes(status) ? status : 422
+      return res.status(httpOut).json({
         ok: false,
-        error: result?.error || 'Não foi possível ligar para o cliente pelo WhatsApp.',
+        error: friendlyLigacaoError(result),
       })
     }
 

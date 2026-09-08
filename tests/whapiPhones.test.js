@@ -7,6 +7,7 @@ const {
   toWhapiRecipient,
   toWhapiChatId,
   toWhapiContactId,
+  toWhapiGroupId,
   isGroupJid,
 } = require('../services/providers/whapi/phones')
 
@@ -33,5 +34,11 @@ describe('whapi/phones — JID Whapi vs UltraMSG', () => {
 
   test('@lid privado é preservado', () => {
     expect(toWhapiChatId('123456789012345@lid')).toBe('123456789012345@lid')
+  })
+
+  test('toWhapiGroupId: dígitos, hífen legado e rejeita grupo_ fake', () => {
+    expect(toWhapiGroupId('120363426760868023')).toBe('120363426760868023@g.us')
+    expect(toWhapiGroupId('553484080098-1406738663')).toBe('553484080098-1406738663@g.us')
+    expect(toWhapiGroupId('grupo_1')).toBe('')
   })
 })
