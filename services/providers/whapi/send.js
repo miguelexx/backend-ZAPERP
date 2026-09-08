@@ -2,15 +2,16 @@
  * Envio Whapi. Texto + mídia (incl. gif/PTV) + reação + contato + localização (fixa e ao vivo).
  * Whapi: JSON + Bearer. Mídia: campo `media` (URL HTTP(S), media id ou data URI).
  * Resposta síncrona CONFIRMADA: { sent: true, message?: { id } }.
- * sendCall continua stub 501. delete/edit/read estão em ./messages.js.
+ * sendCall: POST /calls/outgoing (chamada de atenção). delete/edit/read estão em ./messages.js.
  */
 
 const { buildSendMeta } = require('../../whatsappSendGuardService')
 const { BODY_MAX_LEN, CAPTION_MAX_LEN, FILENAME_MAX_LEN } = require('./constants')
 const { normalizeWhapiSendResult } = require('./result')
-const { toWhapiRecipient } = require('./phones')
+const { toWhapiRecipient, toWhapiChatId } = require('./phones')
 const { resolveConfig } = require('./config')
 const { post, put, maskToken } = require('./http')
+const { updateChannelSettings } = require('./channel')
 
 function notImplemented(method) {
   return { ok: false, messageId: null, notImplemented: true, httpStatus: 501, error: `whapi.${method} não implementado` }
@@ -341,8 +342,94 @@ async function sendContact(phone, contactName, contactPhone, opts = {}) {
   }
 }
 
-async function sendCall() {
-  return notImplemented('sendCall')
+/**
+ * Destino de ligação: Chat ID privado (`…@s.whatsapp.net` / `@lid`) ou JID de grupo.
+ * OpenAPI makeCall: `to` é telefone ou chat ID privado.
+ */
+function toCallRecipient(phone) {
+  const raw = String(phone || '').trim()
+  if (!raw) return ''
+  const lower = raw.toLowerCase()
+  if (lower.startsWith('lid:')) {
+    const id = raw.slice(4).trim()
+    if (!id) return ''
+    return id.includes('@') ? id : `${id}@lid`
+  }
+  if (lower.includes('@lid') || lower.endsWith('@g.us')) return raw
+  return toWhapiChatId(raw)
+}
+
+function normalizeCallResult({ ok, httpOk, status, data, text }) {
+  const accepted = httpOk === true || ok === true
+  const callId = data && typeof data === 'object' && data.call_id != null
+    ? String(data.call_id).trim()
+    : ''
+  const initiated = String(data?.status || '').trim().toLowerCase() === 'initiated'
+  if (accepted && callId && initiated) {
+    return {
+      ok: true,
+      messageId: callId,
+      callId,
+      duration: data.duration ?? null,
+      httpStatus: status ?? null,
+      error: null,
+    }
+  }
+  const err = data && typeof data === 'object'
+    ? (data.error?.message || data.error || data.message || null)
+    : null
+  return {
+    ok: false,
+    messageId: callId || null,
+    httpStatus: status ?? null,
+    error: String(err || text || `HTTP ${status || 'erro'} ao ligar`).slice(0, 500),
+  }
+}
+
+/**
+ * Chamada de atenção Whapi (POST /calls/outgoing).
+ * Toca o WhatsApp do cliente por `duration` segundos (0–30, padrão 5).
+ * Não abre VoIP. 503 = chamadas de saída desligadas → liga `outgoing_calls_enabled` e tenta de novo uma vez.
+ */
+async function sendCall(phone, callDuration, opts = {}) {
+  const cfg = await resolveConfig(opts)
+  if (!cfg) {
+    return { ok: false, messageId: null, error: 'Instância Whapi não configurada. Conecte o canal no painel de integrações.' }
+  }
+  const to = toCallRecipient(phone)
+  if (!to) {
+    return { ok: false, messageId: null, error: 'Destino inválido para ligação.' }
+  }
+  const dur = Number(callDuration)
+  const duration = Number.isFinite(dur) ? Math.max(0, Math.min(30, Math.round(dur))) : 5
+
+  const postCall = () => post({
+    token: cfg.token,
+    endpoint: '/calls/outgoing',
+    body: { to, duration },
+    companyId: cfg.companyId,
+    whatsappInstanceId: cfg.whatsappInstanceId,
+    meta: buildSendMeta('call', to, opts, { duration }),
+  })
+
+  try {
+    let res = await postCall()
+    if (res.status === 503) {
+      const enabled = await updateChannelSettings({ outgoing_calls_enabled: true }, opts)
+      if (enabled?.ok) {
+        res = await postCall()
+      }
+    }
+    const normalized = normalizeCallResult(res)
+    if (!normalized.ok) {
+      console.warn('❌ Whapi sendCall falhou:', String(to).slice(-18), String(normalized.error).slice(0, 200), '| token:', maskToken(cfg.token))
+      return normalized
+    }
+    console.log('✅ Whapi chamada enviada:', String(to).slice(-18), normalized.callId ? `id=${String(normalized.callId).slice(0, 16)}` : '')
+    return normalized
+  } catch (e) {
+    return { ok: false, messageId: null, error: `Falha de conexão ao ligar (Whapi): ${e?.message || e}` }
+  }
 }
 
 /**

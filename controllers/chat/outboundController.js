@@ -553,13 +553,20 @@ exports.enviarLigacaoWhatsapp = async (req, res) => {
 
     const { data: conversa, error: errConv } = await supabase
       .from('conversas')
-      .select('id, telefone, company_id, whatsapp_instance_id')
+      .select('id, telefone, chat_lid, company_id, whatsapp_instance_id')
       .eq('company_id', company_id)
       .eq('id', conversa_id)
       .maybeSingle()
 
     if (errConv || !conversa) {
       return res.status(404).json({ error: 'Conversa não encontrada' })
+    }
+
+    const destTel = String(conversa.telefone || '').trim()
+    const destLid = String(conversa.chat_lid || '').trim()
+    const dest = destTel || (destLid ? (destLid.includes('@') ? destLid : `${destLid}@lid`) : '')
+    if (!dest) {
+      return res.status(400).json({ error: 'Conversa sem telefone ou chat para ligar' })
     }
 
     const dur = Number(callDuration)
@@ -595,7 +602,7 @@ exports.enviarLigacaoWhatsapp = async (req, res) => {
       return res.status(500).json({ error: 'Provider WhatsApp não suporta ligações' })
     }
 
-    const result = await provider.sendCall(conversa.telefone, safeDur, {
+    const result = await provider.sendCall(dest, safeDur, {
       companyId: company_id,
       conversaId: conversa_id,
       whatsappInstanceId: whatsappInstanceId || undefined,
@@ -620,7 +627,14 @@ exports.enviarLigacaoWhatsapp = async (req, res) => {
       emitirConversaAtualizada(io, company_id, conversa_id, { id: Number(conversa_id) })
     }
 
-    return res.json({ ok: true })
+    if (!ok) {
+      return res.status(502).json({
+        ok: false,
+        error: result?.error || 'Não foi possível ligar para o cliente pelo WhatsApp.',
+      })
+    }
+
+    return res.json({ ok: true, call_id: hasTraceableCallId ? waMessageId : null })
   } catch (err) {
     console.error('Erro ao registrar ligação:', err)
     return res.status(500).json({ error: 'Erro ao registrar ligação' })

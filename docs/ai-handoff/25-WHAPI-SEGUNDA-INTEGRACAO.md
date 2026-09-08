@@ -133,7 +133,7 @@ Nas fases iniciais, o que não for implementado é **stub 501 explícito** (`{ o
 | `sendAudio/sendVoice` | idem; 200 sem aceite = falha | **B (real)** |
 | `sendReaction/removeReaction` | boolean (`PUT /messages/{id}/reaction`) | **B (real)** |
 | `sendContact/sendLocation` | boolean/objeto | **B (real)** |
-| `sendCall` | só se o produto usar (INFERÊNCIA: não usado no chat) | stub |
+| `sendCall` | `{ ok, messageId }` — POST `/calls/outgoing` `{ to, duration }` (chamada de atenção; 503 liga `outgoing_calls_enabled` e retenta) | **real (2026-09-07)** |
 
 `opts` sempre carrega `{ companyId, whatsappInstanceId, referenceId?, returnDetails? }`.
 **HTTP 401/403 / `sent=false` NÃO é sucesso** → `normalizeWhapiSendResult` exige id de mensagem ou flag de sucesso.
@@ -146,7 +146,7 @@ Nas fases iniciais, o que não for implementado é **stub 501 explícito** (`{ o
 | Consultas | `getContacts` GET `/contacts`; `getChats` GET `/chats`; `getGroups`/`getGroup`; `getChatMessages` GET `/messages/list/{ChatID}`; `getProfilePicture` GET `/contacts/{id}/profile`; `getContactMetadata`; `checkPhones` POST `/contacts` `{contacts}` | **real** |
 | Opcionais (2026-09-07) | `forwardMessage` POST `/messages/{MessageID}` `{to,force?}`; `checkPhones` POST `/contacts` `{contacts,force_check?}` → `[{input,exists,waId}]`; `getLoginQr` GET `/users/login/image` (PNG→dataURI) | **real (código; live PENDENTE)** |
 | Instância | `getConnectionStatus`, `configureWebhooks`, `updateProfile*` (`PATCH /users/profile`); `getLoginQr` (QR real) | A/C + perfil + QR |
-| UltraMSG-only | `sendCall`, `clearChatMessages`, `resendByStatus/Id`, `getMessagesStatistics`, `clearMessages` | stub 501 |
+| UltraMSG-only | `clearChatMessages`, `resendByStatus/Id`, `getMessagesStatistics`, `clearMessages` | stub 501 |
 
 ### 2.3 Regras de erro / rede (iguais em espírito ao UltraMSG)
 
@@ -289,7 +289,8 @@ Ver §0.1. Papéis-chave:
 - Normalizador: `*.link` → `imageUrl`/`audioUrl`/… (pipeline já baixa via `inboundMediaPersistenceService`); reação oficial `type=action`; `link_preview`/`live_location`/`contact`; ACK `code`+`status`.
 - **Mídia Whapi no visualizador (2026-09-07):** allowlist de inbound/proxy passa a aceitar `*.wasabisys.com` (auto-download Whapi) e `*.whapi.cloud`. Sem isso o `/media/proxy` devolvia 403, a bolha caía na URL direta e o lightbox (só a 1ª URL) mostrava o ícone quebrado “Imagem”. UltraMSG intocado.
 - Chat: `mediaMessageController`, `outboundController`, `retryController`, `forwardController` passam `getProvider({ provider })` (default ultramsg).
-- **Ainda stub 501:** `sendCall`, `clearChatMessages`, `resendByStatus`/`resendById`, `getMessagesStatistics`, `clearMessages`.
+- **Ainda stub 501:** `clearChatMessages`, `resendByStatus`/`resendById`, `getMessagesStatistics`, `clearMessages`.
+- **sendCall (2026-09-07):** POST `/calls/outgoing` `{to,duration}` (makeCall). Botão Ligar do perfil dispara `POST /chats/:id/ligacao`. 503 ativa `outgoing_calls_enabled` e retenta uma vez. UltraMSG continua sem chamada WhatsApp (`tel:` no perfil).
 - **Opcionais implementados (2026-09-07, código; live PENDENTE):** `forwardMessage` (POST `/messages/{MessageID}`), `checkPhones` (POST `/contacts`), `getLoginQr` (GET `/users/login/image` → dataURI). Testes em `tests/whapiOptionalEndpoints.test.js`.
   - **Fiação HTTP (aditiva, provider-aware):** `getLoginQr` → `GET /integrations/whatsapp/instances/:id/qrcode` (substituiu o 501; formato UltraMSG). `checkPhones` → **novo** `POST /integrations/whatsapp/instances/:id/check-phones` `{ phones:[], forceCheck? }` → `{ total, validCount, invalidCount, results:[{input,exists,waId}] }`; provider sem `checkPhones` → 501; **não** toca o loop de disparo. `forwardMessage` → **fiado (2026-09-07)** no `forwardController` como fast-path com fallback: só encaminha nativo quando `provider.forwardMessage` existe (Whapi), a origem tem `whatsapp_id` real E é da MESMA instância; caso contrário (UltraMSG, id ausente, instância diferente, ou falha do nativo) mantém a cópia atual. Preserva o selo "Encaminhada" e evita duplicar. Testes em `tests/whapiForwardNative.test.js` (função exposta via `_test`).
 - **Lote de endpoints extras (2026-09-07, código+testes; live PENDENTE):** adapter Whapi ganhou (paths confirmados no OpenAPI):
@@ -453,7 +454,7 @@ Webhook inbound: texto, from_me, ACK, mídia `link`, reação `action`, edit, lo
 
 | Adapter | MCP equivalente | Precisa no ZapERP? |
 |---|---|---|
-| `sendCall` | `makeCall` `createGroupCallLink` | Não (UltraMSG também é limitado) |
+| `sendCall` | `makeCall` POST `/calls/outgoing` | Sim — botão Ligar no perfil (Whapi); UltraMSG não tem endpoint equivalente |
 | `clearChatMessages` `clearMessages` `resendBy*` `getMessagesStatistics` | não há equivalente 1:1 | Não — UltraMSG-only |
 
 **Implementados 2026-09-07 (saíram do 501):** `getLoginQr` (`loginUserImage`), `forwardMessage`, `checkPhones` — ver §Fase D e `tests/whapiOptionalEndpoints.test.js`. Código pronto; falta ligar a controller/UI e homologar ao vivo.
@@ -464,7 +465,7 @@ Webhook inbound: texto, from_me, ACK, mídia `link`, reação `action`, edit, lo
 
 **Envio extra (WhatsApp tem, CRM não usa):** `sendMessagePoll` `sendMessageQuiz` `sendMessageQuestion` `sendMessageCarousel` `sendMessageContactList` `sendMediaMessage` (multipart). `sendGif`/`sendShortVideo`/`sendLiveLocation` e `sendInteractive` estão no adapter; composer do atendimento **não** os dispara ainda.
 
-**Fora de escopo CRM (não implantar sem pedido):** stories, newsletters/canais, comunidades, catálogo/produtos/coleções, labels Business, bots, eventos/calls, agrupamento admin (criar grupo, promover, convite), login/logout/reset settings. Blacklist **já no adapter** (`blockContact`/`unblockContact`/`getBlacklist`) — ver §26.2.
+**Fora de escopo CRM (não implantar sem pedido):** stories, newsletters/canais, comunidades, catálogo/produtos/coleções, labels Business, bots, `createCallEvent`/`createGroupCallLink`, agrupamento admin (criar grupo, promover, convite), login/logout/reset settings. Blacklist **já no adapter** (`blockContact`/`unblockContact`/`getBlacklist`) — ver §26.2. `makeCall` **está** fiado no botão Ligar.
 
 Webhook: canal **não** assina chats/contacts/groups/presences/calls. Só messages+statuses. Não tratar o resto até assinar.
 

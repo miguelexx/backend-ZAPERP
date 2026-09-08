@@ -254,12 +254,51 @@ describe('Whapi provider — sendText', () => {
     expect(list[0].imageUrl).toBe('https://cdn.example/a.jpg')
   })
 
-  test('sendCall continua stub 501', async () => {
-    mockDeps({ instancesById: { '1:10': whapiInstance() } })
+  test('sendCall POST /calls/outgoing com duration e call_id', async () => {
+    const { fetchWithRetry } = mockDeps({
+      instancesById: { '1:10': whapiInstance() },
+      fetchImpl: async () => ({
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({ call_id: 'call-ABC123', status: 'initiated', duration: 5 }),
+      }),
+    })
     const whapi = require('../services/providers/whapi')
-    const call = await whapi.sendCall()
-    expect(call.ok).toBe(false)
-    expect(call.notImplemented).toBe(true)
+    const r = await whapi.sendCall('5534988887777', 5, { companyId: 1, whatsappInstanceId: 10 })
+    expect(r.ok).toBe(true)
+    expect(r.messageId).toBe('call-ABC123')
+    const [url, opts] = fetchWithRetry.mock.calls[0]
+    expect(url).toBe('https://gate.whapi.test/calls/outgoing')
+    expect(opts.method).toBe('POST')
+    expect(JSON.parse(opts.body)).toEqual({ to: '5534988887777@s.whatsapp.net', duration: 5 })
+  })
+
+  test('sendCall preserva JID @lid e no 503 liga outgoing_calls_enabled e retenta', async () => {
+    let outgoingPosts = 0
+    const { fetchWithRetry } = mockDeps({
+      instancesById: { '1:10': whapiInstance() },
+      fetchImpl: async (url) => {
+        if (String(url).includes('/settings')) {
+          return { ok: true, status: 200, text: async () => JSON.stringify({ outgoing_calls_enabled: true }) }
+        }
+        outgoingPosts += 1
+        if (outgoingPosts === 1) {
+          return { ok: false, status: 503, text: async () => JSON.stringify({ error: 'Outgoing calls are disabled' }) }
+        }
+        return { ok: true, status: 200, text: async () => JSON.stringify({ call_id: 'call-2', status: 'initiated', duration: 4 }) }
+      },
+    })
+    const whapi = require('../services/providers/whapi')
+    const r = await whapi.sendCall('123456789012345@lid', 4, { companyId: 1, whatsappInstanceId: 10 })
+    expect(r.ok).toBe(true)
+    expect(r.messageId).toBe('call-2')
+    const urls = fetchWithRetry.mock.calls.map((c) => c[0])
+    expect(urls.filter((u) => String(u).includes('/calls/outgoing'))).toHaveLength(2)
+    expect(urls.some((u) => String(u).endsWith('/settings'))).toBe(true)
+    expect(JSON.parse(fetchWithRetry.mock.calls[0][1].body)).toEqual({
+      to: '123456789012345@lid',
+      duration: 4,
+    })
   })
 
   test('uploadMedia POST /media sem send guard e devolve link', async () => {
