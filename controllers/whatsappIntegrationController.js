@@ -1222,8 +1222,17 @@ exports.getInstancePresence = async (req, res) => {
       await ctx.provider.subscribePresence(entry, opts)
     }
     const r = await ctx.provider.getPresence(entry, opts)
-    if (!r.ok) return res.status(502).json({ error: r.error || 'Erro ao ler presença', provider: 'whapi' })
-    return res.json({ provider: 'whapi', status: r.status, last_seen: r.lastSeen, entry_id: r.entryId })
+    if (!r.ok) {
+      return res.json({
+        provider: 'whapi',
+        status: null,
+        last_seen: null,
+        entry_id: null,
+        pending: true,
+        warning: r.error || 'Presença indisponível no momento',
+      })
+    }
+    return res.json({ provider: 'whapi', status: r.status, last_seen: r.lastSeen, entry_id: r.entryId, pending: false })
   } catch (e) {
     return res.status(500).json({ error: e?.message || 'Erro interno ao ler presença' })
   }
@@ -1237,7 +1246,14 @@ exports.subscribeInstancePresence = async (req, res) => {
   if (!entry) return res.status(400).json({ error: 'Informe entry (telefone ou chat id).' })
   try {
     const r = await ctx.provider.subscribePresence(entry, { companyId: ctx.company_id, whatsappInstanceId: ctx.id })
-    if (!r.ok) return res.status(502).json({ error: r.error || 'Erro ao assinar presença', provider: 'whapi' })
+    if (!r.ok) {
+      return res.json({
+        sucesso: false,
+        provider: 'whapi',
+        pending: true,
+        warning: r.error || 'Não foi possível assinar presença no momento',
+      })
+    }
     return res.json({ sucesso: true, provider: 'whapi' })
   } catch (e) {
     return res.status(500).json({ error: e?.message || 'Erro interno ao assinar presença' })

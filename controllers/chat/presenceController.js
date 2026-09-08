@@ -2,6 +2,9 @@
  * Presença do contato (online / visto por último) — Whapi.
  * GET /chats/:id/presenca — atendente autenticado com permissão de ver a conversa.
  * Assina (subscribePresence) e lê (getPresence). UltraMSG → 501.
+ *
+ * Falha do provedor Whapi NÃO vira 502 (isso polui o console do browser e parece
+ * queda do CRM). Devolve 200 com status null + pending/warning.
  */
 
 const supabase = require('../../config/supabase')
@@ -27,6 +30,18 @@ function checkCompanyRate(companyId, key, windowMs, max) {
   if (bucket.count >= max) return false
   bucket.count += 1
   return true
+}
+
+function emptyPresencePayload(conversa_id, extra = {}) {
+  return {
+    provider: 'whapi',
+    conversa_id,
+    status: null,
+    last_seen: null,
+    entry_id: null,
+    pending: true,
+    ...extra,
+  }
 }
 
 exports.obterPresencaConversa = async (req, res) => {
@@ -90,12 +105,32 @@ exports.obterPresencaConversa = async (req, res) => {
     }
 
     const opts = { companyId: company_id, whatsappInstanceId }
+    let subscribed = false
     if (req.query?.subscribe !== 'false') {
-      await provider.subscribePresence(entry, opts)
+      try {
+        const sub = await provider.subscribePresence(entry, opts)
+        subscribed = sub?.ok === true
+      } catch (e) {
+        console.warn('[presenca] subscribe falhou:', e?.message || e)
+      }
     }
-    const r = await provider.getPresence(entry, opts)
-    if (!r.ok) {
-      return res.status(502).json({ error: r.error || 'Erro ao ler presença', provider: 'whapi' })
+
+    let r
+    try {
+      r = await provider.getPresence(entry, opts)
+    } catch (e) {
+      console.warn('[presenca] getPresence falhou:', e?.message || e)
+      return res.json(emptyPresencePayload(conversa_id, {
+        subscribed,
+        warning: e?.message || 'Falha ao ler presença',
+      }))
+    }
+
+    if (!r?.ok) {
+      return res.json(emptyPresencePayload(conversa_id, {
+        subscribed,
+        warning: r?.error || 'Presença indisponível no momento',
+      }))
     }
 
     return res.json({
@@ -104,6 +139,8 @@ exports.obterPresencaConversa = async (req, res) => {
       status: r.status || null,
       last_seen: r.lastSeen ?? null,
       entry_id: r.entryId || null,
+      pending: false,
+      subscribed,
     })
   } catch (e) {
     return res.status(500).json({ error: e?.message || 'Erro interno ao ler presença' })
