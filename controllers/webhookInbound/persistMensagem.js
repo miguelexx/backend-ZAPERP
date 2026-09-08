@@ -222,7 +222,7 @@ async function resolveEditedMensagemRow(supabaseClient, { company_id, whatsapp_i
 function applyInboundMediaFields(insertMsg, media) {
   const {
     type, imageUrl, documentUrl, audioUrl, videoUrl, stickerUrl,
-    locationUrl, locationMeta, contactMeta, fileName, diag = {},
+    locationUrl, locationMeta, contactMeta, pollMeta, fileName, diag = {},
   } = media || {}
 
   if (type === 'image' && imageUrl) {
@@ -272,6 +272,11 @@ function applyInboundMediaFields(insertMsg, media) {
     insertMsg.tipo = 'contact'
     if (contactMeta && (contactMeta.nome || contactMeta.telefone)) {
       insertMsg.contact_meta = contactMeta
+    }
+  } else if (type === 'poll') {
+    insertMsg.tipo = 'poll'
+    if (pollMeta && (pollMeta.title || (Array.isArray(pollMeta.options) && pollMeta.options.length))) {
+      insertMsg.reply_meta = { ...(insertMsg.reply_meta && typeof insertMsg.reply_meta === 'object' ? insertMsg.reply_meta : {}), poll: pollMeta }
     }
   } else if (type === 'reaction') {
     insertMsg.tipo = 'reaction'

@@ -493,6 +493,13 @@ function extractMessage(payload) {
   } else if (type === 'contact') {
     const c = payload.contact || {}
     texto = (c.displayName && String(c.displayName).trim()) || (c.formattedName && String(c.formattedName).trim()) || (c.vCard && String(c.vCard).slice(0, 120)) || '(contato)'
+  } else if (type === 'poll') {
+    const p = payload.pollMeta || payload.poll || {}
+    const title = String(p.title || '').trim() || 'Enquete'
+    const opts = Array.isArray(p.options) ? p.options.map((o) => String(o || '').trim()).filter(Boolean) : []
+    if (!texto || texto === '(mídia)') {
+      texto = [`📊 ${title}`, ...opts.map((o) => `• ${o}`)].join('\n')
+    }
   }
 
   // contactMeta: { nome, telefone, foto_perfil?, descricao_negocio? } para cartão de contato no frontend
@@ -526,6 +533,16 @@ function extractMessage(payload) {
         endereco: (loc.address && String(loc.address).trim()) || null
       }
     }
+  }
+
+  let pollMeta = null
+  if (type === 'poll') {
+    const p = payload.pollMeta || payload.poll || {}
+    const title = String(p.title || '').trim() || 'Enquete'
+    const options = Array.isArray(p.options)
+      ? [...new Set(p.options.map((o) => String(o || '').trim()).filter(Boolean))].slice(0, 12)
+      : []
+    pollMeta = { title, options, count: p.count === 0 || p.count === '0' ? 0 : 1 }
   }
 
   if (type === 'image' && imageUrl) {
@@ -577,7 +594,8 @@ function extractMessage(payload) {
     senderPhoto: senderPhoto && String(senderPhoto).trim() ? String(senderPhoto).trim() : null,
     chatPhoto: chatPhoto && String(chatPhoto).trim() ? String(chatPhoto).trim() : null,
     contactMeta,
-    locationMeta
+    locationMeta,
+    pollMeta
   }
 }
 

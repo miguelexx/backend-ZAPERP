@@ -71,6 +71,7 @@ router.post('/:id/mensagens/:mensagem_id/retry-media', auth, chatController.reen
 router.post('/:id/contatos', auth, chatController.enviarContatoWhatsapp)
 router.post('/:id/localizacao', auth, chatController.enviarLocalizacao)
 router.post('/:id/ligacao', auth, chatController.enviarLigacaoWhatsapp)
+router.post('/:id/enquete', auth, chatController.enviarEnquete)
 router.get('/:id/grupo', auth, chatController.obterGrupo)
 router.put('/:id/grupo', auth, chatController.atualizarGrupo)
 router.patch('/:id/grupo/settings', auth, chatController.atualizarConfigGrupo)

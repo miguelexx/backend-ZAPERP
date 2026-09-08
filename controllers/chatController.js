@@ -383,6 +383,7 @@ exports.removerReacaoMensagem = _outboundController.removerReacaoMensagem
 exports.enviarContatoWhatsapp = _outboundController.enviarContatoWhatsapp
 exports.enviarLocalizacao = _outboundController.enviarLocalizacao
 exports.enviarLigacaoWhatsapp = _outboundController.enviarLigacaoWhatsapp
+exports.enviarEnquete = _outboundController.enviarEnquete
 
 // =====================================================
 // excluirMensagem — remove do sistema (DB) + realtime

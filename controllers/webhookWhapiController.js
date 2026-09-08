@@ -175,6 +175,31 @@ function extractPollVote(m) {
   return { target: target != null ? String(target) : null, options }
 }
 
+/** Metadados da mensagem de enquete (type=poll). */
+function extractPollMessage(m) {
+  if (!m || typeof m !== 'object') return null
+  const p = (m.poll && typeof m.poll === 'object') ? m.poll : m
+  const title = String(p.title ?? p.name ?? m.title ?? '').trim()
+  let raw = p.options ?? m.options ?? []
+  if (!Array.isArray(raw)) raw = []
+  const options = [...new Set(raw.map((v) => {
+    if (v == null) return ''
+    if (typeof v === 'string') return v.trim()
+    if (typeof v === 'object') return String(v.name ?? v.title ?? v.text ?? '').trim()
+    return String(v).trim()
+  }).filter(Boolean))].slice(0, 12)
+  if (!title && !options.length) return null
+  const count = p.count === 0 || p.count === '0' ? 0 : 1
+  return { title: title || 'Enquete', options, count }
+}
+
+function pollPreviewText(poll) {
+  if (!poll) return ''
+  const lines = [`📊 ${poll.title || 'Enquete'}`]
+  for (const opt of poll.options || []) lines.push(`• ${opt}`)
+  return lines.join('\n')
+}
+
 function normalizeWhapiMessageToInternal(m, ctx = {}) {
   if (!m || typeof m !== 'object') return null
   const channelId = ctx.channelId
@@ -224,6 +249,7 @@ function normalizeWhapiMessageToInternal(m, ctx = {}) {
     ? extractInteractiveReply(m)
     : null
   const pollVote = isPollVote ? extractPollVote(m) : null
+  const pollMsg = (type === 'poll' && !isPollVote) ? extractPollMessage(m) : null
 
   // Texto: { text: { body } }; link_preview; resposta interativa; voto de enquete; caption em mídia.
   const textBody = String(
@@ -231,6 +257,7 @@ function normalizeWhapiMessageToInternal(m, ctx = {}) {
     || (type === 'link_preview' && (m.link_preview?.body || m.link_preview?.title))
     || (interactiveReply && (interactiveReply.title || interactiveReply.id))
     || (pollVote && (pollVote.options.join(', ') || '(voto na enquete)'))
+    || (pollMsg && pollPreviewText(pollMsg))
     || m.body
     || m.caption
     || m[type]?.caption
@@ -293,6 +320,7 @@ function normalizeWhapiMessageToInternal(m, ctx = {}) {
     : (type === 'text' || type === 'link_preview') ? 'chat'
     : (type === 'reply' || type === 'interactive') ? 'chat'
     : isPollVote ? 'chat'
+    : (type === 'poll') ? 'poll'
     : (type === 'live_location') ? 'location'
     : type
 
@@ -336,6 +364,7 @@ function normalizeWhapiMessageToInternal(m, ctx = {}) {
     interactiveReplyTitle: interactiveReply?.title || undefined,
     pollVoteTarget: pollVote?.target || undefined,
     pollVoteOptions: pollVote?.options?.length ? pollVote.options : undefined,
+    pollMeta: pollMsg || undefined,
     senderName,
     name: senderName,
     notifyName: senderName,

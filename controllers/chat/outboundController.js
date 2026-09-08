@@ -659,3 +659,187 @@ exports.enviarLigacaoWhatsapp = async (req, res) => {
     return res.status(500).json({ error: 'Erro ao registrar ligação' })
   }
 }
+
+// =====================================================
+// enviarEnquete — Whapi POST /messages/poll (alternativa estável a botões)
+// =====================================================
+
+const POLL_OPTIONS_MAX = 12
+
+function buildPollPreview(title, options) {
+  const lines = [`📊 ${title}`]
+  for (const opt of options) lines.push(`• ${opt}`)
+  return lines.join('\n').slice(0, 2000)
+}
+
+exports.enviarEnquete = async (req, res) => {
+  try {
+    const { company_id, id: user_id } = req.user
+    const { id: conversa_id } = req.params
+    const body = req.body || {}
+    const title = String(body.title || body.titulo || body.pergunta || '').trim()
+    const rawOptions = Array.isArray(body.options) ? body.options
+      : (Array.isArray(body.opcoes) ? body.opcoes : [])
+    const options = [...new Set(rawOptions.map((o) => String(o ?? '').trim()).filter(Boolean))].slice(0, POLL_OPTIONS_MAX)
+    const count = body.count === 0 || body.count === '0' || body.multipla === true ? 0 : 1
+
+    if (!title) return res.status(400).json({ error: 'Informe a pergunta da enquete.' })
+    if (options.length < 2) return res.status(400).json({ error: 'Informe ao menos 2 opções distintas.' })
+
+    const io = req.app.get('io')
+    const permEnvio = await assertPodeEnviarMensagem({
+      company_id,
+      conversa_id,
+      user_id,
+      role: req.user?.perfil,
+      user_dep_ids: req.user?.departamento_ids,
+      autoAssumirAoEnviar: true,
+      io,
+    })
+    if (!permEnvio.ok) return res.status(permEnvio.status).json({ error: permEnvio.error })
+
+    const { data: conversa, error: errConv } = await supabase
+      .from('conversas')
+      .select('id, telefone, cliente_id, chat_lid, whatsapp_instance_id')
+      .eq('company_id', company_id)
+      .eq('id', conversa_id)
+      .maybeSingle()
+
+    if (errConv || !conversa) return res.status(404).json({ error: 'Conversa não encontrada' })
+
+    const whatsappInstanceId = await resolveConversationWhatsappInstance(company_id, conversa)
+    let telefoneParaEnvio = conversa.telefone || ''
+    if (telefoneParaEnvio && String(telefoneParaEnvio).trim().toLowerCase().startsWith('lid:')) {
+      if (conversa.cliente_id) {
+        const { data: cli } = await supabase.from('clientes').select('telefone').eq('id', conversa.cliente_id).eq('company_id', company_id).maybeSingle()
+        if (cli?.telefone && !String(cli.telefone).startsWith('lid:')) telefoneParaEnvio = cli.telefone
+      }
+      if (telefoneParaEnvio.startsWith('lid:') && conversa.chat_lid) {
+        const telSibling = await resolveTelefoneFromLidSiblingConversation(company_id, conversa, whatsappInstanceId)
+        if (telSibling) telefoneParaEnvio = telSibling
+      }
+      if (telefoneParaEnvio.startsWith('lid:')) {
+        return res.status(400).json({ error: 'Número do contato indisponível (conversa por LID). Aguarde o contato enviar uma mensagem ou sincronize os contatos.' })
+      }
+    }
+
+    const instanceProvider = await resolveConversationProvider(company_id, whatsappInstanceId)
+    const provider = getProvider({ provider: instanceProvider })
+    if (!provider || typeof provider.sendPoll !== 'function') {
+      return res.status(501).json({ error: 'Este WhatsApp não envia enquetes por aqui. Use o aplicativo do celular ou um canal Whapi.' })
+    }
+
+    const poll_meta = { title, options, count }
+    const textoDisplay = buildPollPreview(title, options)
+    const criadoEm = new Date().toISOString()
+    const insertRow = {
+      company_id,
+      conversa_id: Number(conversa_id),
+      texto: textoDisplay,
+      direcao: 'out',
+      tipo: 'poll',
+      status: 'pending',
+      autor_usuario_id: Number(user_id),
+      criado_em: criadoEm,
+      reply_meta: { poll: poll_meta },
+      ...(whatsappInstanceId ? { whatsapp_instance_id: whatsappInstanceId } : {}),
+    }
+
+    let { data: msg, error: errMsg } = await supabase
+      .from('mensagens')
+      .insert(insertRow)
+      .select()
+      .single()
+
+    if (errMsg && String(errMsg.message || '').includes('reply_meta')) {
+      delete insertRow.reply_meta
+      ;({ data: msg, error: errMsg } = await supabase.from('mensagens').insert(insertRow).select().single())
+    }
+    if (errMsg) return res.status(500).json({ error: errMsg.message })
+
+    let waitingAfterOutbound = null
+    try {
+      waitingAfterOutbound = await tryMarkWaitingAfterHumanOutbound({
+        company_id,
+        conversa_id: Number(conversa_id),
+        texto: textoDisplay,
+        criado_em: msg.criado_em || criadoEm,
+        autor_usuario_id: Number(user_id),
+      })
+    } catch (_) {}
+
+    const result = await provider.sendPoll(telefoneParaEnvio, { title, options, count }, {
+      companyId: company_id,
+      conversaId: Number(conversa_id),
+      whatsappInstanceId: whatsappInstanceId || undefined,
+      sendOrigin: 'atendimento_humano_enquete',
+      referenceId: `crm-${msg.id}`,
+    })
+    const ok = typeof result === 'boolean' ? result : result?.ok === true
+    const waMessageId =
+      typeof result === 'object' && result?.messageId ? String(result.messageId).trim() : null
+    const providerErro = typeof result === 'object' && result?.error ? String(result.error) : null
+    const hasTraceableId = isRealWhatsAppId(waMessageId)
+    const hasQueueId = !!waMessageId && isUltramsgNumericQueueId(waMessageId)
+    const nextStatus = ok ? (hasTraceableId ? 'sent' : 'pending') : 'erro'
+    const nextStatusMensagem = ok ? (hasTraceableId ? 'sent' : 'sending') : 'erro'
+
+    await supabase
+      .from('mensagens')
+      .update({
+        status: nextStatus,
+        status_mensagem: nextStatusMensagem,
+        ...(hasTraceableId ? { whatsapp_id: waMessageId } : {}),
+        ...(hasQueueId ? { provider_queue_id: waMessageId } : {}),
+      })
+      .eq('company_id', company_id)
+      .eq('id', msg.id)
+
+    if (io) {
+      const payload = await enrichMensagemComAutorUsuario(supabase, company_id, {
+        ...msg,
+        status: nextStatus,
+        status_mensagem: nextStatusMensagem,
+        whatsapp_id: hasTraceableId ? waMessageId : null,
+        reply_meta: msg.reply_meta || { poll: poll_meta },
+      })
+      emitirEventoEmpresaConversa(io, company_id, conversa_id, io.EVENTS?.NOVA_MENSAGEM || 'nova_mensagem', payload)
+      const convPayload = anexarAssumirNoPayloadLista(aplicarAguardandoClienteNoPayload({
+        id: Number(conversa_id),
+        ultima_atividade: payload.criado_em || criadoEm,
+        ultima_mensagem_preview: {
+          texto: `📊 ${title}`,
+          criado_em: payload.criado_em || criadoEm,
+          direcao: 'out',
+          tipo: 'poll',
+        },
+        reordenar_suave: true,
+      }, waitingAfterOutbound), permEnvio)
+      emitirConversaAtualizada(io, company_id, conversa_id, convPayload, { skipAtualizarConversa: true })
+    }
+
+    if (!ok) {
+      const status = Number(result?.httpStatus)
+      const httpOut = [400, 401, 403, 404, 409, 422, 429, 503].includes(status) ? status : 422
+      return res.status(httpOut).json({
+        ok: false,
+        id: msg.id,
+        error: providerErro || 'Não foi possível enviar a enquete ao WhatsApp.',
+      })
+    }
+
+    return res.json({
+      ok: true,
+      id: msg.id,
+      conversa_id: Number(conversa_id),
+      tipo: 'poll',
+      poll_meta,
+      status: nextStatus,
+      status_mensagem: nextStatusMensagem,
+      ...(hasTraceableId ? { whatsapp_id: waMessageId } : {}),
+    })
+  } catch (err) {
+    console.error('Erro ao enviar enquete:', err)
+    return res.status(500).json({ error: 'Erro ao enviar enquete' })
+  }
+}
