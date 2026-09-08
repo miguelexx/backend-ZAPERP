@@ -10,7 +10,7 @@
 
 const { resolveConfig } = require('./config')
 const { toWhapiChatId, isGroupJid } = require('./phones')
-const { put } = require('./http')
+const { put, get, post } = require('./http')
 
 const CHAT_PRESENCES = new Set(['typing', 'recording', 'paused'])
 const ME_PRESENCES = new Set(['online', 'offline'])
@@ -79,9 +79,68 @@ async function setMePresence(presence, opts = {}) {
   }
 }
 
+/**
+ * Assina as atualizações de presença de um contato/grupo — precondição para getPresence
+ * retornar algo. POST /presences/{EntryID}. Retorna { ok, error? }.
+ * O canal só passa a emitir eventos `presences` (webhook) após assinar (e assinar o evento).
+ */
+async function subscribePresence(entry, opts = {}) {
+  const cfg = await resolveConfig(opts)
+  if (!cfg) return { ok: false, error: 'Instância Whapi não configurada' }
+  const entryId = toWhapiChatId(entry)
+  if (!entryId) return { ok: false, error: 'Contato/grupo inválido.' }
+  try {
+    const { ok, status, data } = await post({
+      token: cfg.token,
+      endpoint: `/presences/${encodeURIComponent(entryId)}`,
+      companyId: cfg.companyId,
+      whatsappInstanceId: cfg.whatsappInstanceId,
+      skipSendGuard: true,
+    })
+    if (!ok || data?.error) {
+      return { ok: false, httpStatus: status, error: String(data?.error?.message || data?.error || `HTTP ${status}`) }
+    }
+    return { ok: true }
+  } catch (e) {
+    return { ok: false, error: `Falha de conexão ao assinar presença (Whapi): ${e?.message || e}` }
+  }
+}
+
+/**
+ * Última presença conhecida de um contato/grupo (online/offline + visto por último).
+ * GET /presences/{EntryID}. Só retorna dado real APÓS subscribePresence.
+ * Retorna { ok, status: 'online'|'offline'|'typing'|'recording'|'pending', lastSeen, data }.
+ */
+async function getPresence(entry, opts = {}) {
+  const cfg = await resolveConfig(opts)
+  if (!cfg) return { ok: false, error: 'Instância Whapi não configurada' }
+  const entryId = toWhapiChatId(entry)
+  if (!entryId) return { ok: false, error: 'Contato/grupo inválido.' }
+  try {
+    const { ok, status, data } = await get({ token: cfg.token, endpoint: `/presences/${encodeURIComponent(entryId)}` })
+    if (!ok || data?.error) {
+      return { ok: false, httpStatus: status, error: String(data?.error?.message || data?.error || `HTTP ${status}`) }
+    }
+    const lastSeenRaw = data?.last_seen ?? data?.lastSeen
+    const lastSeen = Number.isFinite(Number(lastSeenRaw)) ? Number(lastSeenRaw) : null
+    return {
+      ok: true,
+      entryId,
+      status: data?.status || data?.presence || null,
+      lastSeen,
+      data,
+      httpStatus: status,
+    }
+  } catch (e) {
+    return { ok: false, error: `Falha de conexão ao ler presença (Whapi): ${e?.message || e}` }
+  }
+}
+
 module.exports = {
   sendPresence,
   setMePresence,
+  subscribePresence,
+  getPresence,
   CHAT_PRESENCES,
   ME_PRESENCES,
   isGroupJid,

@@ -599,3 +599,116 @@ Ordem recomendada: exibição já funciona de graça; só a **autoria** (modal +
 
 ### 27.5 Labels (ainda não implementado — próximo da lista de valor)
 `GET/POST /labels` + associação a chat (`addLabelAssociation`/`deleteLabelAssociation`/`getLabelAssociations` no MCP). Casar com o sistema de tags/kanban existente do CRM. Fica para a próxima rodada de valor.
+
+---
+
+## 28. Auditoria pesada de certificação (2026-09-08)
+
+Varredura completa da integração Whapi. **Resultado: correta e funcional.** Suite **158 suites / 1628 testes verdes**.
+
+### 28.1 Verificado (sem achados)
+- **Integridade de contrato:** `whapi/index.js` exporta 114 chaves; **nenhum export aponta para função inexistente** (script de integridade) — sem risco de `undefined` no contrato do provider (o tipo de bug de modularização já visto nesta base).
+- **`node --check`** em toda a pasta `whapi/` + controllers/middleware/rotas: OK.
+- **Segurança:** nenhum endpoint Whapi embute token na URL/query (tudo via `Authorization: Bearer` no header — `withAuth`); token mascarado em log; `getBinary` idem. `configureWebhooks`/`updateChannelSettings`/`resetChannelSettings` só são chamados por handlers HTTP explícitos (nunca no boot); `resetChannelSettings` exige `confirm:true`.
+- **Roteamento:** `getProvider()` sem args continua UltraMSG (invariante); disparo não usa `getProvider()` sem args; ganchos provider-aware (`typeof provider.X === 'function'`) tornam UltraMSG no-op para presença/block.
+- **Sem chamadas http sem `await`** na pasta whapi; `partner.js` sem efeito colateral no load.
+- **Ganchos intactos** após merges: presença no `textMessageController` (fire-and-forget guardado) e block no `disparoOptOutService` (gate triplo).
+- **Dispatch inbound:** resposta interativa (`type:reply|interactive`) normaliza para `chat` e chega ao `receberZapi` (teste e2e no controller) — não é descartada.
+
+### 28.2 Melhoria aplicada (aditiva, não muda entrada válida)
+- `send.sendInteractive`: `asTextObj` agora faz **trim consistente** (string e `{text}`) e rejeita vazio; validação nova `interactiveActionMatchesType` — `button`→`buttons[]` não-vazio, `list`→`list`, `product`→`product`. Erro claro **antes** de gastar chamada de API. Testes: `whapiInteractive.test.js` (12 no total).
+
+### 28.3 A confirmar em homologação live (não é bug — falta de tráfego real)
+- Shape exato do inbound de resposta interativa (`buttons_reply` vs `button_reply`, campo do id) — o extractor tolera as variações conhecidas.
+- Eco `fromMe` de uma mensagem interativa **enviada** (o menu em si): normaliza como texto (body do menu) e reconcilia por `whatsapp_id` — verificar cosmético do balão no canal real.
+
+---
+
+## 29. Enquetes (Polls) + voto inbound — EXECUTADO (2026-09-08)
+
+Alternativa ESTÁVEL aos botões interativos (a própria Whapi recomenda polls; interactive é instável).
+
+### 29.1 Envio (feito)
+- `services/providers/whapi/send.js` → `sendPoll(phone, { title, options[], count }, opts)` → `POST /messages/poll` `{ to, title, options, count }`.
+  - `count`: 1 = escolha única (**default**, ideal p/ triagem), 0 = múltipla.
+  - Valida `title` e ≥2 opções distintas; dedup + trim; cap 12 opções. Retorna `{ ok, messageId, error }` (objeto). Exportado no `index.js` como `sendPoll`.
+  - Contrato via MCP `sendMessagePoll` (to, title, options, count) — confirmado 2026-09-04.
+
+### 29.2 Voto inbound (feito — automatiza triagem)
+- `controllers/webhookWhapiController.js`: `extractPollVote(m)` lê `m.action` (type `vote`) → `{ target, options[] }`. O guard `type==='action'` agora **não descarta** votos (`isPollVote`).
+- Voto → **internalType `chat`**, `body` = opção(ões) escolhida(s) (a URA trata como resposta digitada); campos `pollVoteTarget`/`pollVoteOptions` p/ uso futuro. Sem opção legível → placeholder `(voto na enquete)` (nunca inbound vazio).
+- **PENDENTE (homologação live):** shape exato do voto (`action.votes` texto vs hash/índice; se vier hash, mapear p/ texto exige guardar a enquete enviada). O extractor tolera texto/objeto; se o canal real mandar índices, ajustar.
+
+### 29.3 Testes / gate
+`tests/whapiPoll.test.js` (7): envio (count 1/0, dedup, validação), `extractPollVote`, voto→inbound chat, placeholder, action não-voto ignorada. Suite completa **1635 testes verdes**. Regressão zero.
+
+---
+
+## 30. Backlog de endpoints de valor — PENDENTE de reconfirmação de contrato (MCP)
+
+O `whapi-mcp` caiu (CONNECT_TIMEOUT) em 2026-09-08 e **voltou em 2026-09-08** — os 🥇 foram confirmados via OpenAPI + MCP e **implementados** (ver §31). Os demais seguem pendentes de reconfirmação de contrato antes de codar (disciplina: confirmar path/body no OpenAPI/MCP antes de escrever).
+
+| Prioridade | Item | Escopo | A confirmar via MCP |
+|---|---|---|---|
+| ✅ 🥇 | **Limites anti-ban** `getNewChatLimit` / `getReachoutTimelock` | **FEITO (§31)** — adapter read-only + gate opt-in no worker | — |
+| ✅ 🥇 | **Labels** `getLabels`/`createLabel`/`renameLabel`/`deleteLabel` + associações (`/labels/{id}/{chatId}`) | **FEITO (§31)** — adapter + rotas `/labels/whatsapp` | — |
+| ✅ 🥈 | **Presença do contato** `getPresence`/`subscribePresence` | **FEITO (§32)** — adapter + evento `presences` no webhook + socket `presenca_contato` | — |
+| ✅ 🥈 | **Perfil Business** `getBusinessProfile`/`editBusinessProfile` | **FEITO (§32)** — adapter + rotas instance-scoped | — |
+| ✅ 🥈 | Quiz/Pergunta `sendMessageQuiz`/`sendMessageQuestion`; `getChat` (1 chat) | **FEITO (§32)** — adapter (quiz/question adapter-only; getChat + rota) | — |
+| 🥉 | Comércio (catalog/products/orders), Stories/Status, Comunidades, Newsletters, Eventos | condicional ao roadmap | — |
+
+⛔ Pular: `makeCall`/`createCallEvent` (instável), variantes extras de login/passkey (já há QR+pairing+code), `getAccountRegistrationDate` (cosmético).
+
+---
+
+## 31. Limites anti-ban + Labels Business — EXECUTADO (2026-09-08)
+
+Os dois 🥇 do §30. Paths/shapes confirmados no OpenAPI Whapi + MCP. **Adapter + wiring; homologação live PENDENTE.** UltraMSG intocável (não tem esses métodos → no-op / 501). Enquetes (§29) já estavam prontas.
+
+### 31.1 Limites anti-ban (read-only) — freia antes de queimar o número
+- **Adapter** `services/providers/whapi/limits.js`:
+  - `getNewChatLimit(opts)` → `GET /business/limits/new_chat`. Mapeia `is_capped`/`cap_status` (`none|first_warning|second_warning|capped`), `quota_limit/used/remaining`, `cycle_end_at`. Retorna `{ ok, capped, capStatus, quotaRemaining, cycleEndAt, data }`. HTTP 204 = sem cap (não é erro).
+  - `getReachoutTimelock(opts)` → `GET /business/limits/reachout_timelock`. `{ ok, restricted, restrictedUntil, restrictionType }`.
+  - Diferentes de `channel.getLimits` (`GET /limits`, limite genérico do canal — já existia).
+- **Gate no worker de campanha** `services/disparoAntibanGuardService.js` + `workers/disparoWorker.js`:
+  - `avaliarAntiban({ companyId, instanciaId })` roda no worker **só em envio live**, logo após o gate de `podeEnviarAgora` e antes do send. Se restrito/capado → `adiarItem(proxima_tentativa_em = restricted_until|cycle_end_at)` + emite `LIMITE_ATINGIDO` `{ antiban:true }` (mesmo caminho do rate-limit; **não** falha o item).
+  - **Opt-in**: env `WHAPI_ANTIBAN_GATE_ENABLED` (**default false** — sem ele, comportamento idêntico ao de hoje). Cache por instância `WHAPI_ANTIBAN_CACHE_TTL_MS` (default 60s) p/ não martelar a API.
+  - **Provider-aware**: só age se o adapter tem os métodos (Whapi). UltraMSG → no-op. **Fail-open**: erro de leitura libera o envio (a guarda existe p/ frear em risco reportado, não p/ travar por instabilidade).
+
+### 31.2 Labels do WhatsApp Business — casam com tags/kanban
+- **Adapter** `services/providers/whapi/labels.js`: `getLabels` (`GET /labels`), `createLabel` (`POST /labels {id,name,color}`; valida as 20 cores oficiais + id 1-2 díg opcional), `renameLabel` (`PATCH /labels/{id}`), `deleteLabel` (`DELETE /labels/{id}`), `getLabelAssociations` (`GET /labels/{id}` → `{chats,messages}`), `addLabelAssociation`/`deleteLabelAssociation` (`POST`/`DELETE /labels/{id}/{ChatID}`; telefone → ChatID via `toWhapiChatId`). Tudo `skipSendGuard` (não dispara WhatsApp).
+- **Superfície HTTP** `controllers/labelsController.js` + `routes/labelsRoutes.js`, montada em `/labels` (`app.js`): `GET/POST /labels/whatsapp`, `PATCH/DELETE /labels/whatsapp/:labelId`, `GET /labels/whatsapp/:labelId/chats`, `POST/DELETE /labels/whatsapp/:labelId/associacoes {chat}`. Resolve a instância Whapi da empresa (ou `whatsapp_instance_id` explícito); empresa sem Whapi → **501** claro. Criar/editar/apagar exige admin (espelha `/tags`). **Aditivo**: não toca o sistema `tags` interno — o casamento tag↔label bidirecional persistente fica p/ próxima rodada (exigiria migration de mapeamento).
+
+### 31.3 Testes / gate
+`tests/whapiLimits.test.js` (6) + `tests/whapiLabels.test.js` (9) + `tests/disparoAntibanGuard.test.js` (7). Suítes de disparo (38/487) e Whapi adjacentes verdes; adapter exporta 124 chaves, nenhuma `undefined`. Regressão zero. Homologação live (canal real) **PENDENTE**.
+
+### 31.4 O que falta (não feito nesta sessão — precisa autorização)
+- Homologação live: ligar `WHAPI_ANTIBAN_GATE_ENABLED=true` e exercer contra o canal real (confirmar 204 vs shape do cap; `restriction_type`).
+- UI: consumir `/labels/whatsapp` no kanban/tags; sync bidirecional tag↔label (migration de mapeamento).
+- **Não** aplicado/deployado/commitado. Sem migration (features não exigem schema novo).
+
+---
+
+## 32. Presença + Perfil Business + Quiz/Pergunta + getChat — EXECUTADO (2026-09-08)
+
+Os 🥈 do §30. Paths/shapes confirmados no OpenAPI Whapi + MCP. **Adapter + wiring; homologação live PENDENTE.** UltraMSG intocável (métodos só no adapter Whapi; endpoints instance-scoped respondem 501 p/ UltraMSG).
+
+### 32.1 Presença do contato (online / visto por último)
+- **Adapter** `services/providers/whapi/presence.js`: `subscribePresence(entry, opts)` → `POST /presences/{EntryID}` (precondição); `getPresence(entry, opts)` → `GET /presences/{EntryID}` → `{ ok, status: online|offline|typing|recording|pending, lastSeen, data }`. `entry` telefone ou chat id (via `toWhapiChatId`). `skipSendGuard`.
+- **Webhook** `instanceAdmin.WHAPI_WEBHOOK_EVENTS` ganhou `{ type:'presences', method:'post' }` (o canal só emite após reconfigurar webhooks E `subscribePresence` de cada contato). `webhookWhapiController`: `extractEvents` agora devolve `presences[]`; `normalizeWhapiPresence` → emite socket **`presenca_contato`** `{ company_id, chat_id, telefone, status, last_seen }` na sala `empresa_{id}`. **Efêmero**: não persiste, não toca inbound/ACK, não afeta `anyServerError`. Sem `io` → no-op.
+- **HTTP** (instance-scoped, Whapi-only): `GET /integrations/whatsapp/instances/:id/presence?entry=…` (assina antes de ler, salvo `subscribe=false`); `POST .../presence/subscribe { entry }`.
+- **Falta (frontend)**: consumir `presenca_contato` no header da conversa + assinar ao abrir a conversa. Backend pronto.
+
+### 32.2 Perfil WhatsApp Business (cartão da empresa)
+- **Adapter** `services/providers/whapi/business.js`: `getBusinessProfile(opts)` → `GET /business`; `editBusinessProfile(fields, opts)` → `POST /business` (só chaves conhecidas `address|description|email|websites|hours`; valida limites 256/256/128, ≤2 websites). `skipSendGuard`.
+- **HTTP** (instance-scoped, Whapi-only): `GET`/`POST /integrations/whatsapp/instances/:id/business-profile`.
+
+### 32.3 Quiz / Pergunta (pesquisas mais ricas)
+- **Adapter** `services/providers/whapi/send.js`: `sendQuiz(phone, { title, options[], correctOptionIndex, hideParticipantName?, allowAddOption? }, opts)` → `POST /messages/quiz` (valida ≥2 opções + índice no range); `sendQuestion(phone, body, opts)` → `POST /messages/question`. Retornam `{ ok, messageId, error }` (como `sendPoll`). **Adapter-only** (composer/disparo ainda não os dispara — igual `sendPoll`; wiring no wizard de disparo é a próxima etapa).
+
+### 32.4 getChat (metadados de 1 chat)
+- **Adapter** `services/providers/whapi/chatsAdmin.js`: `getChat(chat, opts)` → `GET /chats/{ChatID}` → `{ ok, chat }` (id, name, type, unread, labels, last_message…). Complementa o `getChats` (lista).
+- **HTTP** (instance-scoped, Whapi-only): `GET /integrations/whatsapp/instances/:id/chats/:chatId`.
+
+### 32.5 Testes / gate
+`tests/whapiQuizQuestionChat.test.js` (6) + `tests/whapiPresenceProfile.test.js` (7, inclui normalizador do webhook). Suítes de webhook Whapi + adapter adjacentes verdes (103). Adapter exporta 131 chaves, nenhuma `undefined`. Regressão zero. **Homologação live PENDENTE** (presença, perfil, quiz/pergunta, getChat contra canal real). Sem migration. Nada commitado/deployado.

@@ -1127,6 +1127,105 @@ exports.getMessages = async (req, res) => {
   }
 }
 
+/**
+ * Helper: exige instância Whapi resolvida para endpoints exclusivos do provider (business/presence/getChat).
+ * Responde direto (401/404/501) e retorna null em falha; senão { id, provider }.
+ */
+async function requireWhapiInstance(req, res, rateKey, rateMax = 30) {
+  const company_id = req.user?.company_id
+  if (!company_id) { res.status(401).json({ error: 'Não autenticado' }); return null }
+  const id = getInstanceParam(req)
+  if (!id) { res.status(400).json({ error: 'whatsapp_instance_id inválido' }); return null }
+  if (rateKey && !checkCompanyRate(company_id, `${rateKey}:${id}`, 60_000, rateMax)) {
+    res.status(429).json({ error: 'Muitas solicitações, tente novamente em instantes.', retryAfterSeconds: 60 }); return null
+  }
+  const resolved = await resolveInstanceProviderName(company_id, id)
+  if (!resolved.instance) { res.status(instanceErrorStatus(resolved.error)).json({ error: resolved.error }); return null }
+  if (resolved.providerName !== 'whapi') {
+    res.status(501).json({ error: `Recurso disponível apenas para instâncias Whapi.`, provider: resolved.providerName }); return null
+  }
+  return { company_id, id, provider: getProvider({ provider: 'whapi' }) }
+}
+
+/** GET /integrations/whatsapp/instances/:id/business-profile — lê o cartão Business (Whapi). */
+exports.getInstanceBusinessProfile = async (req, res) => {
+  const ctx = await requireWhapiInstance(req, res, 'business-get', 30)
+  if (!ctx) return
+  try {
+    const r = await ctx.provider.getBusinessProfile({ companyId: ctx.company_id, whatsappInstanceId: ctx.id })
+    if (!r.ok) return res.status(502).json({ error: r.error || 'Erro ao ler perfil Business', provider: 'whapi' })
+    return res.json({ provider: 'whapi', profile: r.profile || {} })
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || 'Erro interno ao ler perfil Business' })
+  }
+}
+
+/** POST /integrations/whatsapp/instances/:id/business-profile — edita o cartão Business (Whapi). */
+exports.updateInstanceBusinessProfile = async (req, res) => {
+  const ctx = await requireWhapiInstance(req, res, 'business-set', 15)
+  if (!ctx) return
+  const { address, description, email, websites, hours } = req.body || {}
+  try {
+    const r = await ctx.provider.editBusinessProfile({ address, description, email, websites, hours }, { companyId: ctx.company_id, whatsappInstanceId: ctx.id })
+    if (!r.ok) return res.status(400).json({ error: r.error || 'Erro ao editar perfil Business', provider: 'whapi' })
+    return res.json({ sucesso: true, provider: 'whapi', profile: r.profile || undefined })
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || 'Erro interno ao editar perfil Business' })
+  }
+}
+
+/** GET /integrations/whatsapp/instances/:id/chats/:chatId — metadados de um chat (Whapi). */
+exports.getInstanceChat = async (req, res) => {
+  const ctx = await requireWhapiInstance(req, res, 'get-chat', 60)
+  if (!ctx) return
+  const chatId = String(req.params?.chatId || '').trim()
+  if (!chatId) return res.status(400).json({ error: 'chatId é obrigatório.' })
+  try {
+    const r = await ctx.provider.getChat(chatId, { companyId: ctx.company_id, whatsappInstanceId: ctx.id })
+    if (!r.ok) return res.status(r.httpStatus === 404 ? 404 : 502).json({ error: r.error || 'Erro ao ler chat', provider: 'whapi' })
+    return res.json({ provider: 'whapi', chat: r.chat || null })
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || 'Erro interno ao ler chat' })
+  }
+}
+
+/**
+ * GET /integrations/whatsapp/instances/:id/presence?entry=... — última presença conhecida (Whapi).
+ * Assina automaticamente antes de ler (subscribePresence é precondição p/ o canal reportar).
+ */
+exports.getInstancePresence = async (req, res) => {
+  const ctx = await requireWhapiInstance(req, res, 'presence-get', 60)
+  if (!ctx) return
+  const entry = String(req.query?.entry || req.query?.chat || req.query?.telefone || '').trim()
+  if (!entry) return res.status(400).json({ error: 'Informe entry (telefone ou chat id).' })
+  const opts = { companyId: ctx.company_id, whatsappInstanceId: ctx.id }
+  try {
+    if (req.query?.subscribe !== 'false') {
+      await ctx.provider.subscribePresence(entry, opts)
+    }
+    const r = await ctx.provider.getPresence(entry, opts)
+    if (!r.ok) return res.status(502).json({ error: r.error || 'Erro ao ler presença', provider: 'whapi' })
+    return res.json({ provider: 'whapi', status: r.status, last_seen: r.lastSeen, entry_id: r.entryId })
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || 'Erro interno ao ler presença' })
+  }
+}
+
+/** POST /integrations/whatsapp/instances/:id/presence/subscribe body { entry } — assina presença (Whapi). */
+exports.subscribeInstancePresence = async (req, res) => {
+  const ctx = await requireWhapiInstance(req, res, 'presence-sub', 60)
+  if (!ctx) return
+  const entry = String(req.body?.entry || req.body?.chat || req.body?.telefone || '').trim()
+  if (!entry) return res.status(400).json({ error: 'Informe entry (telefone ou chat id).' })
+  try {
+    const r = await ctx.provider.subscribePresence(entry, { companyId: ctx.company_id, whatsappInstanceId: ctx.id })
+    if (!r.ok) return res.status(502).json({ error: r.error || 'Erro ao assinar presença', provider: 'whapi' })
+    return res.json({ sucesso: true, provider: 'whapi' })
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || 'Erro interno ao assinar presença' })
+  }
+}
+
 exports.getMessagesStatistics = async (req, res) => {
   const company_id = req.user?.company_id
   if (!company_id) {

@@ -73,9 +73,28 @@ describe('Whapi interativas — envio', () => {
   test('valida type/body/action sem chamar a API', async () => {
     const { fetchWithRetry } = mockDeps({ instancesById: { '1:10': inst() } })
     const whapi = require('../services/providers/whapi')
-    expect((await whapi.sendInteractive('553', { type: 'x', body: 'a', action: {} }, OPTS)).ok).toBe(false)
-    expect((await whapi.sendInteractive('553', { type: 'button', action: {} }, OPTS)).ok).toBe(false)
+    expect((await whapi.sendInteractive('553', { type: 'x', body: 'a', action: { buttons: [{ id: 'a', title: 'A' }] } }, OPTS)).ok).toBe(false)
+    expect((await whapi.sendInteractive('553', { type: 'button', action: { buttons: [{ id: 'a', title: 'A' }] } }, OPTS)).ok).toBe(false)
     expect((await whapi.sendInteractive('553', { type: 'button', body: 'a' }, OPTS)).ok).toBe(false)
+    expect(fetchWithRetry).not.toHaveBeenCalled()
+  })
+
+  test('action tem que bater com o type (button sem buttons[] → erro, sem API)', async () => {
+    const { fetchWithRetry } = mockDeps({ instancesById: { '1:10': inst() } })
+    const whapi = require('../services/providers/whapi')
+    const r1 = await whapi.sendInteractive('553', { type: 'button', body: 'a', action: { list: {} } }, OPTS)
+    expect(r1.ok).toBe(false)
+    expect(String(r1.error)).toContain("type='button'")
+    const r2 = await whapi.sendInteractive('553', { type: 'list', body: 'a', action: { buttons: [] } }, OPTS)
+    expect(r2.ok).toBe(false)
+    expect(fetchWithRetry).not.toHaveBeenCalled()
+  })
+
+  test('corpo vazio {text:""} ou só espaços → rejeitado sem API', async () => {
+    const { fetchWithRetry } = mockDeps({ instancesById: { '1:10': inst() } })
+    const whapi = require('../services/providers/whapi')
+    expect((await whapi.sendInteractive('553', { type: 'button', body: { text: '' }, action: { buttons: [{ id: 'a', title: 'A' }] } }, OPTS)).ok).toBe(false)
+    expect((await whapi.sendInteractive('553', { type: 'button', body: '   ', action: { buttons: [{ id: 'a', title: 'A' }] } }, OPTS)).ok).toBe(false)
     expect(fetchWithRetry).not.toHaveBeenCalled()
   })
 })
@@ -111,6 +130,28 @@ describe('Whapi interativas — resposta inbound (normalização)', () => {
     expect(m.interactiveReplyId).toBe('menu_suporte')
     expect(m.interactiveReplyTitle).toBe('Suporte')
     expect(m.fromMe).toBe(false)
+  })
+
+  test('handleWebhookWhapi despacha resposta de botão ao pipeline como chat', async () => {
+    const receberZapi = jest.fn(async (req, res) => res.status(200).json({ ok: true }))
+    jest.resetModules()
+    jest.doMock('../controllers/webhookZapiController', () => ({ receberZapi, statusZapi: jest.fn() }))
+    const ctrl = require('../controllers/webhookWhapiController')
+    let snap = null
+    receberZapi.mockImplementation(async (rq, rs) => { snap = { type: rq.body.type, body: rq.body.body, replyId: rq.body.interactiveReplyId }; return rs.status(200).json({ ok: true }) })
+    const req = {
+      method: 'POST',
+      webhookContext: { company_id: 1, provider_instance_id: 'NEBULA-AER3B' },
+      body: {
+        channel_id: 'NEBULA-AER3B',
+        messages: [{ id: 'wamid.r', from_me: false, type: 'reply', chat_id: '5534988887777@s.whatsapp.net',
+          reply: { type: 'list_reply', list_reply: { id: 'fin', title: 'Financeiro' } }, timestamp: 1 }],
+      },
+    }
+    const res = { statusCode: 200, status(c) { this.statusCode = c; return this }, json() { return this } }
+    await ctrl.handleWebhookWhapi(req, res)
+    expect(receberZapi).toHaveBeenCalledTimes(1)
+    expect(snap).toEqual({ type: 'ReceivedCallback', body: 'Financeiro', replyId: 'fin' })
   })
 
   test('mensagem normal não ganha campos interativos', () => {

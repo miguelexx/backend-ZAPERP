@@ -4,7 +4,22 @@
  */
 
 const supabase = require('../config/supabase')
-const { normalizePhoneBR, possiblePhonesBR, possiblePhonesForWhatsappIdentity, isSameWhatsappIdentity, phoneKeyBR } = require('./phoneHelper')
+const { normalizePhoneBR, possiblePhonesBR, possiblePhonesForWhatsappIdentity, isSameWhatsappIdentity, phoneKeyBR, preferredBrSendDigits } = require('./phoneHelper')
+
+/**
+ * Identidade WhatsApp canônica BR para ARMAZENAR o contato:
+ * celular legado de 12 díg (55+DDD+8, sem o 9º) vira 13 díg (com o 9º); fixo permanece 12.
+ * Não-BR / grupo / LID / vazio → inalterado. Assim o cliente nasce já no número REAL do WhatsApp
+ * (evita cadastro "34 9826-5514" que só o envio/inbound consertavam depois). Dedup segue por
+ * phoneKeyBR (que remove o 9), então isto NÃO cria duplicata com registros antigos sem o 9.
+ */
+function canonicalBrWhatsappForStorage(canonical) {
+  const c = String(canonical || '')
+  if (c.startsWith('55') && c.length === 12) {
+    return preferredBrSendDigits(c) || c
+  }
+  return c
+}
 const { chooseBestName, isBadName } = require('./contactEnrichment')
 const {
   decidirPatchNomeCliente,
@@ -727,6 +742,12 @@ async function getOrCreateCliente(supabaseClient, company_id, phone, fields = {}
   if (existente?.id) {
     return mergeAndReturnCliente(supabaseClient, company_id, existente, phone, fields)
   }
+
+  // 2.5) Só para NOVO cliente: grava o telefone na identidade WhatsApp canônica
+  // (celular BR legado sem o 9 → com o 9). A busca acima já usou as variantes 12/13,
+  // então registros antigos sem o 9 foram reaproveitados; aqui só o INSERT ganha o número
+  // correto do WhatsApp. Fixo e não-BR ficam intactos.
+  telefoneCanonico = canonicalBrWhatsappForStorage(telefoneCanonico)
 
   // 3) Telefone válido para INSERT?
   const isTelefoneValido = telefoneCanonico &&

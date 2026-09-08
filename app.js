@@ -10,6 +10,7 @@ loadEnv()
 const { getUploadsRoot, ensureUploadsRootExists } = require('./config/uploadsRoot')
 const { contentTypeForAudioPath } = require('./helpers/audioFormatSniffer')
 const tagsRoutes = require('./routes/tagRoutes')
+const labelsRoutes = require('./routes/labelsRoutes')
 ensureUploadsRootExists()
 
 const isProd = isProduction()
@@ -297,6 +298,7 @@ app.use('/clientes', apiLimiter, clienteRoutes)
 app.use('/usuarios', apiLimiter, userRoutes)
 app.use('/chats', apiLimiter, chatRoutes)
 app.use('/tags', apiLimiter, tagsRoutes)
+app.use('/labels', apiLimiter, labelsRoutes)
 app.use('/ai', apiLimiter, aiRoutes)
 app.use('/opt-in', apiLimiter, optInRouter)
 app.use('/opt-out', apiLimiter, optOutRouter)
@@ -327,6 +329,7 @@ api.use('/clientes', clienteRoutes)
 api.use('/usuarios', userRoutes)
 api.use('/chats', chatRoutes)
 api.use('/tags', tagsRoutes)
+api.use('/labels', labelsRoutes)
 api.use('/opt-in', optInRouter)
 api.use('/opt-out', optOutRouter)
 api.use('/chatbot/debug', chatbotDebugRoutes)
@@ -402,6 +405,7 @@ if (hasFrontendDist) {
     '/usuarios',
     '/chats',
     '/tags',
+    '/labels',
     '/opt-in',
     '/opt-out',
     '/chatbot',

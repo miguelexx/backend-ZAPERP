@@ -14,6 +14,9 @@ const presence = require('./presence')
 const blacklist = require('./blacklist')
 const queries = require('./queries')
 const channel = require('./channel')
+const limits = require('./limits')
+const labels = require('./labels')
+const business = require('./business')
 const groups = require('./groups')
 const { uploadMedia, getMediaFiles, getMedia, deleteMedia } = require('./upload')
 const { buildBaseUrl, maskTokenInLogs, validateRequiredFields } = require('./http')
@@ -23,6 +26,9 @@ module.exports = {
   sendText: send.sendText,
   sendLink: send.sendLink,
   sendInteractive: send.sendInteractive,
+  sendPoll: send.sendPoll,
+  sendQuiz: send.sendQuiz,
+  sendQuestion: send.sendQuestion,
   sendImage: send.sendImage,
   sendFile: send.sendFile,
   sendVideo: send.sendVideo,
@@ -54,6 +60,7 @@ module.exports = {
   clearChatMessages: chatsAdmin.clearChatMessages,
   deleteChat: chatsAdmin.deleteChat,
   getChats: chatsAdmin.getChats,
+  getChat: chatsAdmin.getChat,
   getGroups: chatsAdmin.getGroups,
   getGroup: chatsAdmin.getGroup,
   createGroup: groups.createGroup,
@@ -102,6 +109,9 @@ module.exports = {
   // Presença (digitando…/gravando…) e presença da própria conta
   sendPresence: presence.sendPresence,
   setMePresence: presence.setMePresence,
+  // Presença do contato (online/visto por último) — exige subscribePresence antes
+  subscribePresence: presence.subscribePresence,
+  getPresence: presence.getPresence,
 
   // Blacklist (bloquear/desbloquear contato — opt-out com efeito real)
   blockContact: blacklist.blockContact,
@@ -130,6 +140,23 @@ module.exports = {
   getAllowedEvents: channel.getAllowedEvents,
   testWebhook: channel.testWebhook,
   getLimits: channel.getLimits,
+
+  // Limites anti-ban (read-only) — freia o disparo antes de queimar o número
+  getNewChatLimit: limits.getNewChatLimit,
+  getReachoutTimelock: limits.getReachoutTimelock,
+
+  // Labels do WhatsApp Business — casam com tags/kanban do CRM
+  getLabels: labels.getLabels,
+  createLabel: labels.createLabel,
+  renameLabel: labels.renameLabel,
+  deleteLabel: labels.deleteLabel,
+  getLabelAssociations: labels.getLabelAssociations,
+  addLabelAssociation: labels.addLabelAssociation,
+  deleteLabelAssociation: labels.deleteLabelAssociation,
+
+  // Perfil WhatsApp Business — cartão da empresa (endereço, horário, sites…)
+  getBusinessProfile: business.getBusinessProfile,
+  editBusinessProfile: business.editBusinessProfile,
 
   resendByStatus: queries.resendByStatus,
   resendById: queries.resendById,

@@ -508,12 +508,21 @@ async function forwardMessage(phone, messageId, opts = {}) {
 
 const INTERACTIVE_TYPES = new Set(['button', 'list', 'product'])
 
-/** Normaliza header/body/footer que podem vir como string ou { text }. */
+/** Normaliza header/body/footer que podem vir como string ou { text }. Trim consistente; vazio → undefined. */
 function asTextObj(v) {
   if (v == null) return undefined
-  if (typeof v === 'string') return v.trim() ? { text: v.trim() } : undefined
-  if (typeof v === 'object' && v.text != null) return { text: String(v.text) }
-  return undefined
+  const s = typeof v === 'object' ? (v.text != null ? String(v.text) : '') : String(v)
+  const t = s.trim()
+  return t ? { text: t } : undefined
+}
+
+/** Valida que o `action` bate com o `type` (evita chamada de API confusa). */
+function interactiveActionMatchesType(type, action) {
+  if (!action || typeof action !== 'object') return false
+  if (type === 'button') return Array.isArray(action.buttons) && action.buttons.length > 0
+  if (type === 'list') return !!action.list && typeof action.list === 'object'
+  if (type === 'product') return !!action.product && typeof action.product === 'object'
+  return false
 }
 
 /**
@@ -538,6 +547,9 @@ async function sendInteractive(phone, payload = {}, opts = {}) {
   if (!bodyText) return { ok: false, messageId: null, error: 'body.text é obrigatório na mensagem interativa.' }
   const action = payload?.action
   if (!action || typeof action !== 'object') return { ok: false, messageId: null, error: 'action é obrigatório na mensagem interativa.' }
+  if (!interactiveActionMatchesType(type, action)) {
+    return { ok: false, messageId: null, error: `action inválido para type='${type}' (button→buttons[]; list→list; product→product).` }
+  }
 
   const reqBody = applyQuoted({
     to,
@@ -562,10 +574,128 @@ async function sendInteractive(phone, payload = {}, opts = {}) {
   return normalized
 }
 
+const POLL_OPTIONS_MAX = 12
+
+/**
+ * Envia enquete (poll). POST /messages/poll { to, title, options[], count }.
+ * A Whapi recomenda polls como alternativa ESTÁVEL aos botões (interactive é instável).
+ * payload: { title, options: string[], count? }  — count 1 = escolha única (default), 0 = múltipla.
+ * Retorna { ok, messageId, error } (objeto, como sendText). Ver doc 25 §29.
+ */
+async function sendPoll(phone, payload = {}, opts = {}) {
+  const cfg = await resolveConfig(opts)
+  if (!cfg) return { ok: false, messageId: null, error: 'Instância Whapi não configurada. Conecte o canal no painel de integrações.' }
+  const to = toWhapiRecipient(phone)
+  if (!to) return { ok: false, messageId: null, error: 'Número inválido.' }
+
+  const title = String(payload?.title ?? '').trim()
+  if (!title) return { ok: false, messageId: null, error: 'title da enquete é obrigatório.' }
+
+  const options = Array.isArray(payload?.options)
+    ? payload.options.map((o) => String(o ?? '').trim()).filter(Boolean)
+    : []
+  const uniqueOptions = [...new Set(options)].slice(0, POLL_OPTIONS_MAX)
+  if (uniqueOptions.length < 2) {
+    return { ok: false, messageId: null, error: 'enquete exige ao menos 2 opções distintas.' }
+  }
+
+  // count: 1 = escolha única (default p/ triagem), 0 = múltipla escolha.
+  const count = payload?.count === 0 || payload?.count === '0' ? 0 : 1
+
+  const reqBody = applyQuoted({ to, title, options: uniqueOptions, count }, opts)
+  let normalized
+  try {
+    normalized = await postMessage({
+      cfg, endpoint: '/messages/poll', body: reqBody, to, kind: 'poll', opts, extraMeta: { options: uniqueOptions.length },
+    })
+  } catch (e) {
+    return { ok: false, messageId: null, error: `Falha de conexão ao enviar enquete (Whapi): ${e?.message || e}` }
+  }
+  if (!normalized.ok) {
+    console.warn('❌ Whapi sendPoll falhou:', String(to).slice(-13), String(normalized.error).slice(0, 200), '| token:', maskToken(cfg.token))
+  }
+  return normalized
+}
+
+/**
+ * Envia um quiz (enquete com resposta correta). POST /messages/quiz
+ * { to, title, options[], correct_option_index }. Pesquisa "gamificada" p/ triagem/disparo.
+ * payload: { title, options: string[], correctOptionIndex, hideParticipantName?, allowAddOption? }.
+ * Retorna { ok, messageId, error }. Contrato via MCP sendMessageQuiz + OpenAPI. Ver doc 25 §32.
+ */
+async function sendQuiz(phone, payload = {}, opts = {}) {
+  const cfg = await resolveConfig(opts)
+  if (!cfg) return { ok: false, messageId: null, error: 'Instância Whapi não configurada. Conecte o canal no painel de integrações.' }
+  const to = toWhapiRecipient(phone)
+  if (!to) return { ok: false, messageId: null, error: 'Número inválido.' }
+
+  const title = String(payload?.title ?? '').trim()
+  if (!title) return { ok: false, messageId: null, error: 'title do quiz é obrigatório.' }
+
+  const options = Array.isArray(payload?.options)
+    ? payload.options.map((o) => String(o ?? '').trim()).filter(Boolean)
+    : []
+  const uniqueOptions = [...new Set(options)].slice(0, POLL_OPTIONS_MAX)
+  if (uniqueOptions.length < 2) {
+    return { ok: false, messageId: null, error: 'quiz exige ao menos 2 opções distintas.' }
+  }
+
+  const idx = Number(payload?.correctOptionIndex ?? payload?.correct_option_index)
+  if (!Number.isInteger(idx) || idx < 0 || idx >= uniqueOptions.length) {
+    return { ok: false, messageId: null, error: 'correctOptionIndex deve apontar para uma das opções (0-based).' }
+  }
+
+  const reqBody = applyQuoted({ to, title, options: uniqueOptions, correct_option_index: idx }, opts)
+  if (payload?.hideParticipantName === true) reqBody.hide_participant_name = true
+  if (payload?.allowAddOption === true) reqBody.allow_add_option = true
+
+  try {
+    const normalized = await postMessage({
+      cfg, endpoint: '/messages/quiz', body: reqBody, to, kind: 'quiz', opts, extraMeta: { options: uniqueOptions.length },
+    })
+    if (!normalized.ok) {
+      console.warn('❌ Whapi sendQuiz falhou:', String(to).slice(-13), String(normalized.error).slice(0, 200), '| token:', maskToken(cfg.token))
+    }
+    return normalized
+  } catch (e) {
+    return { ok: false, messageId: null, error: `Falha de conexão ao enviar quiz (Whapi): ${e?.message || e}` }
+  }
+}
+
+/**
+ * Envia uma pergunta aberta (resposta livre). POST /messages/question { to, body }.
+ * Retorna { ok, messageId, error }. Contrato via MCP sendMessageQuestion + OpenAPI. Ver doc 25 §32.
+ */
+async function sendQuestion(phone, question, opts = {}) {
+  const cfg = await resolveConfig(opts)
+  if (!cfg) return { ok: false, messageId: null, error: 'Instância Whapi não configurada. Conecte o canal no painel de integrações.' }
+  const to = toWhapiRecipient(phone)
+  if (!to) return { ok: false, messageId: null, error: 'Número inválido.' }
+  const bodyText = String(question ?? '').trim()
+  if (!bodyText) return { ok: false, messageId: null, error: 'body da pergunta é obrigatório.' }
+  if (bodyText.length > BODY_MAX_LEN) return { ok: false, messageId: null, error: `body excede ${BODY_MAX_LEN} caracteres` }
+
+  const reqBody = applyQuoted({ to, body: bodyText }, opts)
+  try {
+    const normalized = await postMessage({
+      cfg, endpoint: '/messages/question', body: reqBody, to, kind: 'question', opts, extraMeta: { textLength: bodyText.length },
+    })
+    if (!normalized.ok) {
+      console.warn('❌ Whapi sendQuestion falhou:', String(to).slice(-13), String(normalized.error).slice(0, 200), '| token:', maskToken(cfg.token))
+    }
+    return normalized
+  } catch (e) {
+    return { ok: false, messageId: null, error: `Falha de conexão ao enviar pergunta (Whapi): ${e?.message || e}` }
+  }
+}
+
 module.exports = {
   sendText,
   sendLink,
   sendInteractive,
+  sendPoll,
+  sendQuiz,
+  sendQuestion,
   sendImage,
   sendFile,
   sendVideo,

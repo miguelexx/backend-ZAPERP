@@ -99,6 +99,26 @@ async function getChats(opts = {}) {
   }
 }
 
+/**
+ * Metadados de UM chat específico. GET /chats/{ChatID}.
+ * `chat` aceita telefone ou chat id (…@s.whatsapp.net / …@g.us). Retorna { ok, chat } ou { ok:false }.
+ */
+async function getChat(chat, opts = {}) {
+  const cfg = await resolveConfig(opts)
+  if (!cfg) return { ok: false, error: 'Instância Whapi não configurada' }
+  const chatId = toWhapiChatId(chat)
+  if (!chatId) return { ok: false, error: 'Chat inválido.' }
+  try {
+    const { ok, status, data } = await get({ token: cfg.token, endpoint: `/chats/${encodeURIComponent(chatId)}` })
+    if (!ok || data?.error) {
+      return { ok: false, httpStatus: status, error: String(data?.error?.message || data?.error || `HTTP ${status}`) }
+    }
+    return { ok: true, chat: data || null, httpStatus: status }
+  } catch (e) {
+    return { ok: false, error: `Falha de conexão ao ler chat (Whapi): ${e?.message || e}` }
+  }
+}
+
 async function getGroups(opts = {}) {
   const cfg = await resolveConfig(opts)
   if (!cfg) return []
@@ -189,6 +209,7 @@ module.exports = {
   clearChatMessages,
   deleteChat,
   getChats,
+  getChat,
   getGroups,
   getGroup,
   patchChat,

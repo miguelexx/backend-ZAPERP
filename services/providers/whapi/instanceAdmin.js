@@ -16,6 +16,9 @@ const WHAPI_WEBHOOK_EVENTS = [
   { type: 'messages', method: 'delete' },
   { type: 'statuses', method: 'post' },
   { type: 'statuses', method: 'put' },
+  // Presença do contato (online/visto por último). O canal só emite após subscribePresence
+  // de cada contato; o webhook processa presences[] e emite socket (webhookWhapiController).
+  { type: 'presences', method: 'post' },
 ]
 
 /**

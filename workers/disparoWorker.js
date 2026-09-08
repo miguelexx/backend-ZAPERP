@@ -17,6 +17,7 @@ const { classificarErro, calcularProximaTentativa } = require('../helpers/dispar
 const { enviarItemFila } = require('../services/disparoSendService')
 const { recalcularContadores, registrarEvento } = require('../services/disparoFilaService')
 const { podeEnviarAgora, contarEnviosJanela } = require('../services/disparoLimitesRuntime')
+const { avaliarAntiban } = require('../services/disparoAntibanGuardService')
 const { emitDisparo, EVENTS } = require('../services/disparoSocketService')
 const { DateTime } = require('luxon')
 
@@ -406,6 +407,23 @@ async function processarItem(item) {
         })
       }
       return
+    }
+
+    // Guarda anti-ban (Whapi): só em envio live. Freia a instância se o WhatsApp reportou
+    // limite de novos chats ou timelock de reachout. Opt-in (WHAPI_ANTIBAN_GATE_ENABLED);
+    // provider sem os métodos (UltraMSG) → no-op. Nunca trava por instabilidade de leitura.
+    if (!execucaoDryRun) {
+      const antiban = await avaliarAntiban({ companyId: item.company_id, instanciaId: item.instancia_id })
+      if (!antiban.ok) {
+        await adiarItem(item, antiban.proxima_tentativa_em || new Date(Date.now() + 3600000).toISOString(), antiban.motivo)
+        emitDisparo(io, item.company_id, EVENTS.LIMITE_ATINGIDO, {
+          campanha_id: item.campanha_id,
+          instancia_id: item.instancia_id,
+          motivo: antiban.motivo,
+          antiban: true,
+        })
+        return
+      }
     }
 
     // Anti-duplicidade: se já houve envio aceito, não chamar o provedor de novo

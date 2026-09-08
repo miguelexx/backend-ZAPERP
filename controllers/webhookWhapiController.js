@@ -153,6 +153,28 @@ function extractInteractiveReply(m) {
   }
 }
 
+/**
+ * Extrai o voto de uma enquete inbound. Whapi (INFERÊNCIA — confirmar live): `m.action`
+ * (type 'vote') com `votes`/`selected_options` e `target` = id da mensagem da enquete.
+ * As opções podem vir como texto (ideal) ou hash/índice. Retorna { target, options: string[] }.
+ */
+function extractPollVote(m) {
+  if (!m || typeof m !== 'object') return { target: null, options: [] }
+  const a = m.action || m.poll || m
+  const target = a.target ?? a.poll_id ?? a.message_id ?? m.context?.quoted_id ?? null
+  let raw = a.votes ?? a.selected_options ?? a.options ?? m.votes ?? []
+  if (!Array.isArray(raw)) raw = raw != null ? [raw] : []
+  const options = raw
+    .map((v) => {
+      if (v == null) return ''
+      if (typeof v === 'string') return v.trim()
+      if (typeof v === 'object') return String(v.name ?? v.title ?? v.text ?? v.option ?? '').trim()
+      return String(v).trim()
+    })
+    .filter(Boolean)
+  return { target: target != null ? String(target) : null, options }
+}
+
 function normalizeWhapiMessageToInternal(m, ctx = {}) {
   if (!m || typeof m !== 'object') return null
   const channelId = ctx.channelId
@@ -163,8 +185,11 @@ function normalizeWhapiMessageToInternal(m, ctx = {}) {
   const type = String(m.type ?? 'text').toLowerCase()
   const actionType = String(m.action?.type || '').toLowerCase()
   const isReaction = type === 'reaction' || (type === 'action' && actionType === 'reaction')
+  // Voto em enquete: type 'action' + action.type 'vote' (ou type poll_vote/vote).
+  // Vira inbound de texto (opção escolhida) p/ a URA tratar como resposta. CONFIRMAR shape live (doc 25 §29).
+  const isPollVote = (type === 'action' && actionType === 'vote') || type === 'poll_vote' || type === 'vote'
   // Outros `action` (ex. media_notify) não são mensagem de atendimento.
-  if (type === 'action' && !isReaction) return null
+  if (type === 'action' && !isReaction && !isPollVote) return null
   if (type === 'deleted' || type === 'revoke' || type === 'revoked' || m.deleted === true) return null
 
   const isEdit = Boolean(m.edited || m.is_edited || m.isEdit || String(m.action?.type || '').toLowerCase() === 'edit')
@@ -198,12 +223,14 @@ function normalizeWhapiMessageToInternal(m, ctx = {}) {
   const interactiveReply = (type === 'reply' || type === 'interactive')
     ? extractInteractiveReply(m)
     : null
+  const pollVote = isPollVote ? extractPollVote(m) : null
 
-  // Texto: { text: { body } }; link_preview; resposta interativa; caption em mídia.
+  // Texto: { text: { body } }; link_preview; resposta interativa; voto de enquete; caption em mídia.
   const textBody = String(
     (m.text && (m.text.body ?? m.text))
     || (type === 'link_preview' && (m.link_preview?.body || m.link_preview?.title))
     || (interactiveReply && (interactiveReply.title || interactiveReply.id))
+    || (pollVote && (pollVote.options.join(', ') || '(voto na enquete)'))
     || m.body
     || m.caption
     || m[type]?.caption
@@ -265,6 +292,7 @@ function normalizeWhapiMessageToInternal(m, ctx = {}) {
     : (type === 'ptt' || type === 'voice') ? 'audio'
     : (type === 'text' || type === 'link_preview') ? 'chat'
     : (type === 'reply' || type === 'interactive') ? 'chat'
+    : isPollVote ? 'chat'
     : (type === 'live_location') ? 'location'
     : type
 
@@ -306,6 +334,8 @@ function normalizeWhapiMessageToInternal(m, ctx = {}) {
     caption: captionText || undefined,
     interactiveReplyId: interactiveReply?.id || undefined,
     interactiveReplyTitle: interactiveReply?.title || undefined,
+    pollVoteTarget: pollVote?.target || undefined,
+    pollVoteOptions: pollVote?.options?.length ? pollVote.options : undefined,
     senderName,
     name: senderName,
     notifyName: senderName,
@@ -377,7 +407,28 @@ function extractEvents(body) {
     : (body?.message ? [body.message] : [])
   const statuses = Array.isArray(body?.statuses) ? body.statuses
     : (body?.status && typeof body.status === 'object' ? [body.status] : [])
-  return { messages, statuses }
+  const presences = Array.isArray(body?.presences) ? body.presences
+    : (body?.presence && typeof body.presence === 'object' ? [body.presence] : [])
+  return { messages, statuses, presences }
+}
+
+/**
+ * Normaliza um item de `presences[]` do Whapi → payload de socket para o header da conversa.
+ * Não toca o pipeline de mensagens; presença é efêmera (não persiste). Emite `presenca_contato`.
+ */
+function normalizeWhapiPresence(p, ctx = {}) {
+  if (!p || typeof p !== 'object') return null
+  const entry = p.contact_id ?? p.chat_id ?? p.id ?? p.entry_id ?? null
+  if (!entry) return null
+  const lastSeenRaw = p.last_seen ?? p.lastSeen
+  const lastSeen = Number.isFinite(Number(lastSeenRaw)) ? Number(lastSeenRaw) : null
+  return {
+    channel_id: ctx.channelId,
+    chat_id: String(entry),
+    telefone: jidToDigits(String(entry)) || null,
+    status: p.status ?? p.presence ?? null,
+    last_seen: lastSeen,
+  }
 }
 
 async function handleWebhookWhapi(req, res) {
@@ -396,13 +447,13 @@ async function handleWebhookWhapi(req, res) {
       connectedPhone: ctxSrc.connected_phone || ctxSrc.telefone_conectado || null,
     }
 
-    const { messages, statuses } = extractEvents(body)
+    const { messages, statuses, presences } = extractEvents(body)
     req.webhookLogData = {
       status: 'processed',
       company_id: ctxSrc.company_id,
       instance_id: ctx.channelId,
       event_type: 'whapi',
-      counts: { messages: messages.length, statuses: statuses.length },
+      counts: { messages: messages.length, statuses: statuses.length, presences: presences.length },
     }
 
     let anyServerError = false
@@ -426,6 +477,22 @@ async function handleWebhookWhapi(req, res) {
       if (!normalized) continue
       // statusZapi sempre responde 200 (mesmo em catch) — não altera anyServerError.
       await dispatchOne(webhookCoreController.statusZapi, req, normalized)
+    }
+
+    // Presença do contato — efêmera, só emite socket (nunca persiste, nunca afeta ACK/inbound).
+    if (presences.length) {
+      const io = req.app?.get?.('io')
+      if (io) {
+        for (const p of presences) {
+          const payload = normalizeWhapiPresence(p, ctx)
+          if (!payload) continue
+          try {
+            io.to(`empresa_${ctxSrc.company_id}`).emit('presenca_contato', { ...payload, company_id: ctxSrc.company_id })
+          } catch (e) {
+            console.warn('[WEBHOOK_WHAPI] emit presenca_contato falhou:', e?.message || e)
+          }
+        }
+      }
     }
 
     // Erro interno persistente no inbound → 500 para o provider reentregar (idempotência protege duplicata).
@@ -461,4 +528,6 @@ exports._test = {
   isWhapiEditedMessage,
   extractWhapiEditedTexto,
   extractInteractiveReply,
+  extractPollVote,
+  normalizeWhapiPresence,
 }

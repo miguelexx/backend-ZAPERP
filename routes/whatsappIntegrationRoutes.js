@@ -31,6 +31,12 @@ router.post('/instances/:id/restart', whatsappIntegrationController.restartInsta
 router.post('/instances/:id/check-phones', whatsappIntegrationController.checkInstancePhones)
 router.post('/instances/:id/phone-code', whatsappIntegrationController.getInstancePhoneCode)
 router.post('/instances/:id/logout', whatsappIntegrationController.logoutInstance)
+// Whapi-only: perfil Business, metadados de chat e presença do contato
+router.get('/instances/:id/business-profile', whatsappIntegrationController.getInstanceBusinessProfile)
+router.post('/instances/:id/business-profile', whatsappIntegrationController.updateInstanceBusinessProfile)
+router.get('/instances/:id/chats/:chatId', whatsappIntegrationController.getInstanceChat)
+router.get('/instances/:id/presence', whatsappIntegrationController.getInstancePresence)
+router.post('/instances/:id/presence/subscribe', whatsappIntegrationController.subscribeInstancePresence)
 router.post('/instances/:id/configure-webhooks', whatsappIntegrationController.configureInstanceWebhooks)
 
 const connectRouter = express.Router()
