@@ -296,6 +296,8 @@ exports.listTickets = async (req, res) => {
     const orderField = TICKET_ORDER_FIELDS[requestedOrder] || TICKET_ORDER_FIELDS.atualizado
     const orderDirection = cleanText(req.query.ordem, 4).toLowerCase()
     const ascending = orderDirection === 'asc'
+    const myQueue = ['true', '1'].includes(String(req.query.minha_fila || '').toLowerCase())
+    const userId = positiveInt(req.user.id)
 
     if (status && !STATUSES.has(status)) return res.status(400).json({ error: 'status inválido' })
     if (priority && !PRIORITIES.has(priority)) return res.status(400).json({ error: 'prioridade inválida' })
@@ -320,7 +322,11 @@ exports.listTickets = async (req, res) => {
     if (status) query = query.eq('status', status)
     if (priority) query = query.eq('prioridade', priority)
     if (cleanText(req.query.departamento, 120)) query = query.ilike('departamento', cleanText(req.query.departamento, 120))
-    if (positiveInt(req.query.responsavel_id)) query = query.eq('responsavel_id', positiveInt(req.query.responsavel_id))
+    if (myQueue && userId) {
+      query = query.or(`and(status.eq.aberto,responsavel_id.is.null),and(status.eq.em_atendimento,responsavel_id.eq.${userId})`)
+    } else if (positiveInt(req.query.responsavel_id)) {
+      query = query.eq('responsavel_id', positiveInt(req.query.responsavel_id))
+    }
     if (search) {
       const safeSearch = search.replace(/[,%()]/g, ' ')
       const filters = [

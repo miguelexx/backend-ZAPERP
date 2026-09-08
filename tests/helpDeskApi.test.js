@@ -82,6 +82,24 @@ describe('HelpDesk API', () => {
     expect(listQuery.in).toHaveBeenCalledWith('departamento', ['Suporte'])
   })
 
+  it('lista na minha fila chamados abertos sem responsável e os atendidos pelo usuário', async () => {
+    const departmentsQuery = query({ data: [{ nome: 'Suporte' }], error: null })
+    const listQuery = query({ data: [], error: null, count: 0 })
+    supabase.from
+      .mockReturnValueOnce(departmentsQuery)
+      .mockReturnValueOnce(listQuery)
+
+    const response = await request(app)
+      .get('/api/helpdesk/tickets?minha_fila=true')
+      .set('Authorization', `Bearer ${token({ perfil: 'atendente', departamento_id: 44, departamento_ids: [44] })}`)
+
+    expect(response.status).toBe(200)
+    expect(listQuery.in).toHaveBeenCalledWith('departamento', ['Suporte'])
+    expect(listQuery.or).toHaveBeenCalledWith(
+      'and(status.eq.aberto,responsavel_id.is.null),and(status.eq.em_atendimento,responsavel_id.eq.7)'
+    )
+  })
+
   it('permite ao supervisor visualizar chamados de todos os departamentos', async () => {
     const listQuery = query({
       data: [
