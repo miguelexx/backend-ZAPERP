@@ -350,7 +350,7 @@ Ordem obrigatória (não inverter):
 ### Fase E — disparo/campanha na instância Whapi — **roteamento EXECUTADO 2026-09-04**
 - `disparoSendService` e `disparoOptOutService` usam `getProvider({ provider })` da instância da campanha (`item.instancia_id`). Flags dry-run/live **não mudam**. Pasta `ultramsg/` intocada.
 - Chatbot inbound, encerrar atendimento, alertas, jobs de inatividade, reconciliação pending e apagar mensagem também roteiam por instância.
-- `editMessage` no adapter Whapi (POST `/messages/text` + `edit`) e **rota HTTP** `PATCH /chats/:id/mensagens/:mensagem_id` (`messageEditController.js`). Texto e **legenda** de imagem/vídeo/arquivo (não troca o arquivo; áudio/sticker/contato/localização recusados). Janela 15 min; só `direcao=out` do autor (admin pode editar outbound de outro). UltraMSG → 422 `EDIT_NOT_SUPPORTED` (adapter sem `editMessage`; pasta `ultramsg/` intocada). Nota interna edita só no CRM. Campos `mensagens.editada` / `editada_em` (migration `20260907220000_mensagens_editada.sql`, **não aplicada**). GET `/chats/:id` devolve `editada` + alias `editado`. Socket `mensagem_editada` inclui `texto`, `editado`, `editada_em`, `company_id`, `ultima_mensagem`. Webhook Whapi `edited:true` (texto ou caption de mídia) atualiza a linha e emite o mesmo evento.
+- `editMessage` no adapter Whapi (POST `/messages/text` + `edit`) e **rota HTTP** `PATCH /chats/:id/mensagens/:mensagem_id` (`messageEditController.js`). Texto e **legenda** de imagem/vídeo/arquivo (não troca o arquivo; áudio/sticker/contato/localização recusados). Janela 15 min; só `direcao=out` do autor (admin pode editar outbound de outro). UltraMSG → 422 `EDIT_NOT_SUPPORTED` (adapter sem `editMessage`; pasta `ultramsg/` intocada). Nota interna edita só no CRM. Campos `mensagens.editada` / `editada_em` (migration `20260907220000_mensagens_editada.sql`, **não aplicada**). GET `/chats/:id` devolve `editada` + alias `editado`. Socket `mensagem_editada` inclui `texto`, `editado`, `editada_em`, `company_id`, `ultima_mensagem`. Webhook Whapi de edição inbound (cliente ou eco): `edited:true`, **`type:edit` (mobile)** ou **`action.type:edit`** (+ `messages_updates` com diff de texto) → `applyWhapiEditedMessage` atualiza a linha por `whatsapp_id` e emite o mesmo evento em tempo real.
 
 ---
 
@@ -637,7 +637,7 @@ Alternativa ESTÁVEL aos botões interativos (a própria Whapi recomenda polls; 
 ### 29.2 Voto inbound (feito — automatiza triagem)
 - `controllers/webhookWhapiController.js`: `extractPollVote(m)` lê `m.action` (type `vote`) → `{ target, options[] }`. O guard `type==='action'` agora **não descarta** votos (`isPollVote`).
 - Voto → **internalType `chat`**, `body` = opção(ões) escolhida(s) (a URA trata como resposta digitada); campos `pollVoteTarget`/`pollVoteOptions` p/ uso futuro. Sem opção legível → placeholder `(voto na enquete)` (nunca inbound vazio).
-- **PENDENTE (homologação live):** shape exato do voto (`action.votes` texto vs hash/índice; se vier hash, mapear p/ texto exige guardar a enquete enviada). O extractor tolera texto/objeto; se o canal real mandar índices, ajustar.
+- **CONFIRMADO live 2026-09-08:** Whapi manda `action.votes` como **SHA-256 base64** do texto da opção (não o texto). `helpers/pollVoteResolve.js` mapeia hash→label via `reply_meta.poll.options` / `option_ids` / `results`. `enrichNormalizedPollVote` + `messages_updates` (poll patch) atualizam a bolha (`last_vote`, `results`) e emitem `mensagem_editada` (`editada:false` + `reply_meta`) em tempo real.
 
 ### 29.3 Testes / gate
 `tests/whapiPoll.test.js` (7): envio (count 1/0, dedup, validação), `extractPollVote`, voto→inbound chat, placeholder, action não-voto ignorada. Suite completa **1635 testes verdes**. Regressão zero.
@@ -685,6 +685,7 @@ Os dois 🥇 do §30. Paths/shapes confirmados no OpenAPI Whapi + MCP. **Adapter
 ### 31.4 O que falta (não feito nesta sessão — precisa autorização)
 - Homologação live: ligar `WHAPI_ANTIBAN_GATE_ENABLED=true` e exercer contra o canal real (confirmar 204 vs shape do cap; `restriction_type`).
 - UI: consumir `/labels/whatsapp` no kanban/tags; sync bidirecional tag↔label (migration de mapeamento).
+- **HTTP UI anti-ban (feito na sessão seguinte):** `GET /integrations/whatsapp/instances/:id/limits/antiban` + card no `WhapiConnectPanel`.
 - **Não** aplicado/deployado/commitado. Sem migration (features não exigem schema novo).
 
 ---
@@ -697,7 +698,8 @@ Os 🥈 do §30. Paths/shapes confirmados no OpenAPI Whapi + MCP. **Adapter + wi
 - **Adapter** `services/providers/whapi/presence.js`: `subscribePresence(entry, opts)` → `POST /presences/{EntryID}` (precondição); `getPresence(entry, opts)` → `GET /presences/{EntryID}` → `{ ok, status: online|offline|typing|recording|pending, lastSeen, data }`. `entry` telefone ou chat id (via `toWhapiChatId`). `skipSendGuard`.
 - **Webhook** `instanceAdmin.WHAPI_WEBHOOK_EVENTS` ganhou `{ type:'presences', method:'post' }` (o canal só emite após reconfigurar webhooks E `subscribePresence` de cada contato). `webhookWhapiController`: `extractEvents` agora devolve `presences[]`; `normalizeWhapiPresence` → emite socket **`presenca_contato`** `{ company_id, chat_id, telefone, status, last_seen }` na sala `empresa_{id}`. **Efêmero**: não persiste, não toca inbound/ACK, não afeta `anyServerError`. Sem `io` → no-op.
 - **HTTP** (instance-scoped, Whapi-only): `GET /integrations/whatsapp/instances/:id/presence?entry=…` (assina antes de ler, salvo `subscribe=false`); `POST .../presence/subscribe { entry }`.
-- **Falta (frontend)**: consumir `presenca_contato` no header da conversa + assinar ao abrir a conversa. Backend pronto.
+- **HTTP atendimento** (qualquer perfil com permissão de ver a conversa): `GET /chats/:id/presenca` — resolve instância Whapi da conversa, assina + lê. UltraMSG/grupo/LID → 400/501.
+- **Frontend**: ao abrir conversa 1:1 Whapi, `useContactPresence` chama `GET /chats/:id/presenca`; socket `presenca_contato` atualiza o header (“online” / “digitando” / “gravando áudio” / “visto por último…”). Prioridade: typing de atendente CRM > presença do contato.
 
 ### 32.2 Perfil WhatsApp Business (cartão da empresa)
 - **Adapter** `services/providers/whapi/business.js`: `getBusinessProfile(opts)` → `GET /business`; `editBusinessProfile(fields, opts)` → `POST /business` (só chaves conhecidas `address|description|email|websites|hours`; valida limites 256/256/128, ≤2 websites). `skipSendGuard`.

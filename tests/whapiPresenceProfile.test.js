@@ -67,6 +67,59 @@ describe('Whapi presence + business profile (adapter)', () => {
     expect(fetchWithRetry.mock.calls[0][0]).toBe('https://gate.whapi.test/business')
   })
 
+  test('health expõe is_business sem vazar o payload bruto para o controller', async () => {
+    mockDeps({
+      instancesById: { '1:10': inst() },
+      fetchImpl: jsonRes(200, {
+        status: { code: 4, text: 'AUTH' },
+        user: { id: '5534999998888', is_business: false },
+      }),
+    })
+    const r = await require('../services/providers/whapi').getConnectionStatus(OPTS)
+    expect(r.connected).toBe(true)
+    expect(r.isBusiness).toBe(false)
+  })
+
+  test('GET /business 500 em conta comum vira erro acionável, não Internal Error', async () => {
+    const { fetchWithRetry } = mockDeps({
+      instancesById: { '1:10': inst() },
+      fetchImpl: async (url) => {
+        if (url.endsWith('/business')) {
+          return { ok: false, status: 500, text: async () => JSON.stringify({ error: { code: 500, message: 'Internal Error' } }) }
+        }
+        if (url.includes('/health')) {
+          return {
+            ok: true,
+            status: 200,
+            text: async () => JSON.stringify({ status: { code: 4, text: 'AUTH' }, user: { id: '5534999998888', is_business: false } }),
+          }
+        }
+        throw new Error(`URL inesperada: ${url}`)
+      },
+    })
+    const r = await require('../services/providers/whapi').getBusinessProfile(OPTS)
+    expect(r.ok).toBe(false)
+    expect(r.httpStatus).toBe(422)
+    expect(r.code).toBe('WHAPI_BUSINESS_ACCOUNT_REQUIRED')
+    expect(r.error).toMatch(/conta WhatsApp comum/i)
+    expect(fetchWithRetry).toHaveBeenCalledTimes(2)
+  })
+
+  test('erro estruturado da Whapi preserva status, código e detalhes', async () => {
+    mockDeps({
+      instancesById: { '1:10': inst() },
+      fetchImpl: jsonRes(400, { error: { code: 1001, message: 'Invalid profile', details: 'address' } }),
+    })
+    const r = await require('../services/providers/whapi').getBusinessProfile(OPTS)
+    expect(r).toMatchObject({
+      ok: false,
+      httpStatus: 400,
+      providerCode: 1001,
+      providerDetails: 'address',
+      error: 'Invalid profile',
+    })
+  })
+
   test('editBusinessProfile POST /business só envia campos conhecidos; valida limites', async () => {
     const { fetchWithRetry } = mockDeps({ instancesById: { '1:10': inst() }, fetchImpl: jsonRes(200, { success: true }) })
     const whapi = require('../services/providers/whapi')

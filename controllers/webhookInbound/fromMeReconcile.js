@@ -39,6 +39,7 @@ function mediaFamilyForStorageTipo(tipo) {
   if (t === 'image' || t === 'imagem' || t === 'sticker') return 'imagem'
   if (t === 'video' || t === 'vídeo') return 'video'
   if (t === 'document' || t === 'file' || t === 'arquivo' || t === 'documento') return 'arquivo'
+  if (t === 'poll' || t === 'enquete') return 'poll'
   return t || ''
 }
 
@@ -200,7 +201,13 @@ function mapWebhookTypeToStorageTipo(type) {
   if (t === 'video') return 'video'
   if (t === 'audio') return 'audio'
   if (t === 'sticker') return 'sticker'
+  if (t === 'poll' || t === 'enquete') return 'poll'
   return t || null
+}
+
+function pollTitleFromPreview(texto) {
+  const first = String(texto || '').trim().split('\n')[0] || ''
+  return first.replace(/^📊\s*/u, '').trim().toLowerCase()
 }
 
 /**
@@ -239,6 +246,12 @@ function findFromMeOutboundMediaCandidate(rows, { fileName, texto, tipo, nomeAte
       if (!t) return false
       if (familiaW && mediaFamilyForStorageTipo(c.tipo) !== familiaW) return false
       if (textosOutboundFromMeEquivalentes(textoNorm, t, nomeAtendente)) return true
+      // Enquete: preview CRM/webhook pode divergir em bullets; casa pelo título.
+      if (familiaW === 'poll') {
+        const a = pollTitleFromPreview(textoNorm)
+        const b = pollTitleFromPreview(t)
+        if (a && b && a === b) return true
+      }
       return false
     })
     if (byTexto) return byTexto
@@ -248,12 +261,31 @@ function findFromMeOutboundMediaCandidate(rows, { fileName, texto, tipo, nomeAte
     const byTipoCrm = candidates.find(
       (c) =>
         mediaFamilyForStorageTipo(c.tipo) === familiaW &&
-        (c.autor_usuario_id != null || isLocalUploadMediaUrl(c.url))
+        (c.autor_usuario_id != null || isLocalUploadMediaUrl(c.url) || familiaW === 'poll')
     )
     if (byTipoCrm) return byTipoCrm
   }
 
   return null
+}
+
+/**
+ * Candidato fromMe com fallback para enquete já persistida com whatsapp_id
+ * (sendPoll grava id síncrono antes do eco do webhook).
+ */
+function findFromMeOutboundCandidateWithPollFallback(rows, opts = {}) {
+  const pending = filterRowsForFromMeReconcile(rows)
+  let cand = findFromMeOutboundMediaCandidate(pending, opts)
+  if (cand) return cand
+  const familia = mediaFamilyForStorageTipo(opts.tipo)
+  if (familia !== 'poll') return null
+  const pollRows = (Array.isArray(rows) ? rows : []).filter(
+    (r) => mediaFamilyForStorageTipo(r?.tipo) === 'poll'
+  )
+  // Sem filtrar por whatsapp_id: o id síncrono do send e o id do eco podem divergir;
+  // o título da enquete é a assinatura. Absorve o eco (sem INSERT) mesmo se não
+  // sobrescrever o whatsapp_id canônico.
+  return findFromMeOutboundMediaCandidate(pollRows, { ...opts, whatsappId: null })
 }
 
 module.exports = {
@@ -267,4 +299,6 @@ module.exports = {
   tryReconcileFromMeByCrmReferenceId,
   mapWebhookTypeToStorageTipo,
   findFromMeOutboundMediaCandidate,
+  findFromMeOutboundCandidateWithPollFallback,
+  pollTitleFromPreview,
 }

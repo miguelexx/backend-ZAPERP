@@ -18,49 +18,115 @@ const {
   isMissingEditadaColumnError,
   buildMensagemEditadaSocketPayload,
 } = require('../helpers/mensagemEditHelper')
+const {
+  looksLikePollOptionHash,
+  resolvePollVoteLabels,
+  buildPollOptionIdMap,
+} = require('../helpers/pollVoteResolve')
+const { emitirEventoEmpresaConversa } = require('../services/chat/realtime/chatRealtimeGateway')
 
 function isWhapiEditedMessage(m) {
   if (!m || typeof m !== 'object') return false
   if (m.edited === true || m.is_edited === true || m.isEdit === true) return true
+  const type = String(m.type || '').toLowerCase()
+  // Whapi mobile: type "edit"; ou action.type "edit" (changelog Whapi).
+  if (type === 'edit') return true
   return String(m.action?.type || '').toLowerCase() === 'edit'
+}
+
+/** Id da mensagem original editada (Whapi pode mandar action.target / edit.id). */
+function resolveWhapiEditTargetId(m) {
+  if (!m || typeof m !== 'object') return ''
+  const type = String(m.type || '').toLowerCase()
+  const actionType = String(m.action?.type || '').toLowerCase()
+  if (type === 'edit' || actionType === 'edit') {
+    const target =
+      m.action?.target
+      ?? m.action?.message_id
+      ?? m.edit?.id
+      ?? m.edit?.message_id
+      ?? m.context?.quoted_id
+      ?? m.id
+    if (target != null && String(target).trim()) return String(target).trim()
+  }
+  return String(m.id || '').trim()
 }
 
 function extractWhapiEditedTexto(m) {
   if (!m || typeof m !== 'object') return ''
   const type = String(m.type ?? 'text').toLowerCase()
   const typed = m[type]
+  const editObj = (m.edit && typeof m.edit === 'object') ? m.edit : null
+  const actionObj = (m.action && typeof m.action === 'object') ? m.action : null
   return String(
     (m.text && (m.text.body ?? m.text))
+    || (editObj && (editObj.body ?? editObj.text ?? editObj.caption))
+    || (actionObj && ((actionObj.body ?? actionObj.text ?? actionObj.caption)
+      || (actionObj.text && (actionObj.text.body ?? actionObj.text))))
     || m.body
     || m.caption
-    || (typed && typeof typed === 'object' ? typed.caption : '')
+    || (typed && typeof typed === 'object' ? (typed.caption ?? typed.body ?? typed.text) : '')
     || ''
-  )
+  ).trim()
 }
 
 async function applyWhapiEditedMessage(ctxSrc, m, io) {
-  const id = String(m?.id || '').trim()
+  const id = resolveWhapiEditTargetId(m)
   if (!id || ctxSrc?.company_id == null) return false
   const texto = extractWhapiEditedTexto(m)
+  // Sem texto novo não atualiza (evita apagar bolha com webhook incompleto).
+  if (!texto) return false
   const updates = buildEditadaDbUpdates(texto)
-  const runUpdate = async (payload, select) => {
+  const runUpdate = async (payload, select, { withInstance } = { withInstance: true }) => {
     let query = supabase
       .from('mensagens')
       .update(payload)
       .eq('company_id', ctxSrc.company_id)
       .eq('whatsapp_id', id)
-    if (ctxSrc.whatsapp_instance_id) {
+    if (withInstance && ctxSrc.whatsapp_instance_id) {
       query = query.eq('whatsapp_instance_id', ctxSrc.whatsapp_instance_id)
     }
     return query.select(select).maybeSingle()
   }
-  let { data, error } = await runUpdate(updates, 'id, conversa_id, texto, tipo, editada_em')
+  let { data, error } = await runUpdate(updates, 'id, conversa_id, texto, tipo, editada_em', { withInstance: true })
   if (error && isMissingEditadaColumnError(error)) {
-    ;({ data, error } = await runUpdate({ texto }, 'id, conversa_id, texto, tipo'))
+    ;({ data, error } = await runUpdate({ texto }, 'id, conversa_id, texto, tipo', { withInstance: true }))
+  }
+  // Fallback: linha legada sem whatsapp_instance_id / divergência de instância
+  if ((!data?.id || error) && ctxSrc.whatsapp_instance_id) {
+    ;({ data, error } = await runUpdate(updates, 'id, conversa_id, texto, tipo, editada_em', { withInstance: false }))
+    if (error && isMissingEditadaColumnError(error)) {
+      ;({ data, error } = await runUpdate({ texto }, 'id, conversa_id, texto, tipo', { withInstance: false }))
+    }
   }
   if (error || !data?.id) return false
   if (io) {
-    io.to(`conversa_${data.conversa_id}`).emit(
+    let ultima_mensagem = null
+    try {
+      const { data: ultima } = await supabase
+        .from('mensagens')
+        .select('id, texto, tipo, criado_em, direcao')
+        .eq('company_id', ctxSrc.company_id)
+        .eq('conversa_id', data.conversa_id)
+        .order('criado_em', { ascending: false })
+        .limit(1)
+        .maybeSingle()
+      if (ultima && String(ultima.id) === String(data.id)) {
+        ultima_mensagem = {
+          id: ultima.id,
+          texto,
+          tipo: data.tipo || ultima.tipo,
+          criado_em: ultima.criado_em,
+          direcao: ultima.direcao,
+          editada: true,
+          editado: true,
+        }
+      }
+    } catch (_) {}
+    emitirEventoEmpresaConversa(
+      io,
+      ctxSrc.company_id,
+      data.conversa_id,
       io.EVENTS?.MENSAGEM_EDITADA || 'mensagem_editada',
       buildMensagemEditadaSocketPayload({
         id: data.id,
@@ -69,6 +135,7 @@ async function applyWhapiEditedMessage(ctxSrc, m, io) {
         texto,
         editada_em: data.editada_em || updates.editada_em,
         tipo: data.tipo || null,
+        ultima_mensagem,
       })
     )
   }
@@ -168,7 +235,10 @@ function extractPollVote(m) {
     .map((v) => {
       if (v == null) return ''
       if (typeof v === 'string') return v.trim()
-      if (typeof v === 'object') return String(v.name ?? v.title ?? v.text ?? v.option ?? '').trim()
+      if (typeof v === 'object') {
+        // Whapi manda { id: '<sha256-base64>' } — o id É o voto a resolver.
+        return String(v.name ?? v.title ?? v.text ?? v.option ?? v.id ?? '').trim()
+      }
       return String(v).trim()
     })
     .filter(Boolean)
@@ -200,6 +270,267 @@ function pollPreviewText(poll) {
   return lines.join('\n')
 }
 
+/**
+ * Busca a enquete original no banco e resolve hashes de voto → texto da opção.
+ * Atualiza reply_meta.poll (last_vote + results) e emite patch em tempo real.
+ */
+async function enrichNormalizedPollVote(normalized, ctxSrc, io) {
+  if (!normalized?.pollVoteTarget || ctxSrc?.company_id == null) return normalized
+  const target = String(normalized.pollVoteTarget).trim()
+  if (!target) return normalized
+
+  async function findPollRow() {
+    let query = supabase
+      .from('mensagens')
+      .select('id, conversa_id, texto, tipo, reply_meta, whatsapp_id')
+      .eq('company_id', ctxSrc.company_id)
+      .eq('whatsapp_id', target)
+      .eq('tipo', 'poll')
+    if (ctxSrc.whatsapp_instance_id) {
+      query = query.eq('whatsapp_instance_id', ctxSrc.whatsapp_instance_id)
+    }
+    const { data } = await query.maybeSingle()
+    if (data) return data
+
+    // Sem filtro de instância (legado / divergência null vs id)
+    const { data: loose } = await supabase
+      .from('mensagens')
+      .select('id, conversa_id, texto, tipo, reply_meta, whatsapp_id')
+      .eq('company_id', ctxSrc.company_id)
+      .eq('whatsapp_id', target)
+      .eq('tipo', 'poll')
+      .order('id', { ascending: false })
+      .limit(1)
+      .maybeSingle()
+    if (loose) return loose
+
+    // Fallback: última enquete da conversa (quando o target não bate o whatsapp_id gravado)
+    const conversaId = normalized.conversa_id || normalized.chatId || null
+    if (conversaId) {
+      const { data: byConv } = await supabase
+        .from('mensagens')
+        .select('id, conversa_id, texto, tipo, reply_meta, whatsapp_id')
+        .eq('company_id', ctxSrc.company_id)
+        .eq('conversa_id', Number(conversaId))
+        .eq('tipo', 'poll')
+        .order('criado_em', { ascending: false })
+        .limit(1)
+        .maybeSingle()
+      if (byConv) return byConv
+    }
+    return null
+  }
+
+  const pollRow = await findPollRow()
+  if (!pollRow) {
+    // Nunca persistir hash cru
+    const rawVotes = Array.isArray(normalized.pollVoteOptions) ? normalized.pollVoteOptions : []
+    if (rawVotes.some((v) => looksLikePollOptionHash(v))) {
+      normalized.body = '(voto na enquete)'
+      normalized.texto = normalized.body
+      normalized.message = normalized.body
+    }
+    return normalized
+  }
+
+  const pollMeta = (pollRow.reply_meta && typeof pollRow.reply_meta === 'object' && pollRow.reply_meta.poll)
+    ? { ...pollRow.reply_meta.poll }
+    : {}
+  let options = Array.isArray(pollMeta.options) ? pollMeta.options : []
+  // Enquete antiga/sem reply_meta: recupera opções do preview "📊 Título\n• A\n• B"
+  if (!options.length && pollRow.texto) {
+    const lines = String(pollRow.texto).split('\n').map((l) => l.trim()).filter(Boolean)
+    options = lines
+      .filter((l) => l.startsWith('•') || l.startsWith('-'))
+      .map((l) => l.replace(/^[•\-]\s*/, '').trim())
+      .filter(Boolean)
+  }
+  const optionIds = Array.isArray(pollMeta.option_ids) && pollMeta.option_ids.length
+    ? pollMeta.option_ids
+    : buildPollOptionIdMap(options)
+  const resultsForMap = Array.isArray(pollMeta.results) && pollMeta.results.length
+    ? pollMeta.results
+    : optionIds
+
+  const rawVotes = Array.isArray(normalized.pollVoteOptions) ? normalized.pollVoteOptions : []
+  // Tenta results/option_ids e, se vazio, as opções em texto puro
+  let labels = resolvePollVoteLabels(rawVotes, resultsForMap.length ? resultsForMap : options)
+  if (!labels.length && options.length) {
+    labels = resolvePollVoteLabels(rawVotes, options)
+  }
+  const resolved = labels.length
+    ? labels
+    : rawVotes.filter((v) => v && !looksLikePollOptionHash(v))
+
+  if (resolved.length) {
+    normalized.pollVoteOptions = resolved
+    normalized.body = resolved.join(', ')
+    normalized.texto = normalized.body
+    normalized.message = normalized.body
+    if (normalized.text && typeof normalized.text === 'object') {
+      normalized.text = { ...normalized.text, message: normalized.body }
+    }
+  } else if (rawVotes.some((v) => looksLikePollOptionHash(v))) {
+    normalized.body = '(voto na enquete)'
+    normalized.texto = normalized.body
+    normalized.message = normalized.body
+  }
+
+  const nextPoll = {
+    ...pollMeta,
+    options: options.length ? options : pollMeta.options,
+    option_ids: optionIds,
+    last_vote: {
+      options: resolved.length ? resolved : (rawVotes.filter((v) => !looksLikePollOptionHash(v))),
+      at: new Date().toISOString(),
+      voter_whatsapp_id: normalized.id || null,
+    },
+  }
+  if (!nextPoll.last_vote.options.length && resolved.length) {
+    nextPoll.last_vote.options = resolved
+  }
+  const nextReplyMeta = {
+    ...(pollRow.reply_meta && typeof pollRow.reply_meta === 'object' ? pollRow.reply_meta : {}),
+    poll: nextPoll,
+  }
+
+  try {
+    const { data: updated } = await supabase
+      .from('mensagens')
+      .update({ reply_meta: nextReplyMeta })
+      .eq('company_id', ctxSrc.company_id)
+      .eq('id', pollRow.id)
+      .select('id, conversa_id, tipo, reply_meta, texto')
+      .maybeSingle()
+
+    if (updated && io) {
+      emitirEventoEmpresaConversa(
+        io,
+        ctxSrc.company_id,
+        updated.conversa_id,
+        io.EVENTS?.MENSAGEM_EDITADA || 'mensagem_editada',
+        {
+          id: Number(updated.id),
+          conversa_id: Number(updated.conversa_id),
+          company_id: Number(ctxSrc.company_id),
+          texto: updated.texto,
+          conteudo: updated.texto,
+          tipo: updated.tipo || 'poll',
+          reply_meta: updated.reply_meta || nextReplyMeta,
+          editada: false,
+          editado: false,
+          poll_vote: true,
+        }
+      )
+    }
+  } catch (e) {
+    console.warn('[WHAPI] falha ao atualizar reply_meta da enquete:', e?.message || e)
+  }
+
+  return normalized
+}
+
+/**
+ * messages.patch (messages_updates): atualiza contagem/resultados da enquete e
+ * resolve o voto do trigger quando vier com hashes.
+ */
+async function applyWhapiPollMessageUpdate(ctxSrc, update, io) {
+  if (!update || typeof update !== 'object' || ctxSrc?.company_id == null) return null
+  const after = update.after_update || update.after || null
+  if (!after || String(after.type || '').toLowerCase() !== 'poll') return null
+  const pollId = String(update.id || after.id || '').trim()
+  if (!pollId) return null
+
+  const poll = after.poll && typeof after.poll === 'object' ? after.poll : null
+  if (!poll) return null
+
+  const title = String(poll.title || '').trim()
+  const options = Array.isArray(poll.options)
+    ? poll.options.map((o) => String(o ?? '').trim()).filter(Boolean)
+    : []
+  const results = Array.isArray(poll.results)
+    ? poll.results.map((r) => ({
+      name: String(r?.name ?? '').trim(),
+      id: r?.id != null ? String(r.id) : undefined,
+      count: Number(r?.count) || 0,
+      voters: Array.isArray(r?.voters) ? r.voters : [],
+    })).filter((r) => r.name || r.id)
+    : []
+
+  let query = supabase
+    .from('mensagens')
+    .select('id, conversa_id, texto, tipo, reply_meta')
+    .eq('company_id', ctxSrc.company_id)
+    .eq('whatsapp_id', pollId)
+  if (ctxSrc.whatsapp_instance_id) {
+    query = query.eq('whatsapp_instance_id', ctxSrc.whatsapp_instance_id)
+  }
+  const { data: pollRow } = await query.maybeSingle()
+  if (!pollRow) return null
+
+  const prev = (pollRow.reply_meta && typeof pollRow.reply_meta === 'object' && pollRow.reply_meta.poll)
+    ? pollRow.reply_meta.poll
+    : {}
+
+  const trigger = update.trigger || null
+  const triggerVote = (trigger && String(trigger.action?.type || '').toLowerCase() === 'vote')
+    ? extractPollVote(trigger)
+    : null
+  let lastVoteOptions = null
+  if (triggerVote?.options?.length) {
+    lastVoteOptions = resolvePollVoteLabels(triggerVote.options, results.length ? results : (prev.options || options))
+    if (!lastVoteOptions.length) lastVoteOptions = triggerVote.options.filter((v) => !looksLikePollOptionHash(v))
+  }
+
+  const nextPoll = {
+    ...prev,
+    title: title || prev.title,
+    options: options.length ? options : prev.options,
+    option_ids: buildPollOptionIdMap(options.length ? options : prev.options),
+    count: poll.vote_limit === 0 || poll.count === 0 ? 0 : (prev.count ?? 1),
+    total: poll.total != null ? Number(poll.total) : prev.total,
+    results,
+    ...(lastVoteOptions?.length
+      ? { last_vote: { options: lastVoteOptions, at: new Date().toISOString() } }
+      : {}),
+  }
+  const nextReplyMeta = {
+    ...(pollRow.reply_meta && typeof pollRow.reply_meta === 'object' ? pollRow.reply_meta : {}),
+    poll: nextPoll,
+  }
+
+  const { data: updated } = await supabase
+    .from('mensagens')
+    .update({ reply_meta: nextReplyMeta })
+    .eq('company_id', ctxSrc.company_id)
+    .eq('id', pollRow.id)
+    .select('id, conversa_id, tipo, reply_meta, texto')
+    .maybeSingle()
+
+  if (updated && io) {
+    emitirEventoEmpresaConversa(
+      io,
+      ctxSrc.company_id,
+      updated.conversa_id,
+      io.EVENTS?.MENSAGEM_EDITADA || 'mensagem_editada',
+      {
+        id: Number(updated.id),
+        conversa_id: Number(updated.conversa_id),
+        company_id: Number(ctxSrc.company_id),
+        texto: updated.texto,
+        conteudo: updated.texto,
+        tipo: updated.tipo || 'poll',
+        reply_meta: updated.reply_meta || nextReplyMeta,
+        editada: false,
+        editado: false,
+        poll_vote: true,
+      }
+    )
+  }
+
+  return { pollRow: updated, lastVoteOptions, trigger }
+}
+
 function normalizeWhapiMessageToInternal(m, ctx = {}) {
   if (!m || typeof m !== 'object') return null
   const channelId = ctx.channelId
@@ -213,11 +544,14 @@ function normalizeWhapiMessageToInternal(m, ctx = {}) {
   // Voto em enquete: type 'action' + action.type 'vote' (ou type poll_vote/vote).
   // Vira inbound de texto (opção escolhida) p/ a URA tratar como resposta. CONFIRMAR shape live (doc 25 §29).
   const isPollVote = (type === 'action' && actionType === 'vote') || type === 'poll_vote' || type === 'vote'
-  // Outros `action` (ex. media_notify) não são mensagem de atendimento.
-  if (type === 'action' && !isReaction && !isPollVote) return null
+  const isEdit = Boolean(
+    m.edited || m.is_edited || m.isEdit
+    || type === 'edit'
+    || actionType === 'edit'
+  )
+  // Outros `action` (ex. media_notify) não são mensagem de atendimento — edit/vote/reaction passam.
+  if (type === 'action' && !isReaction && !isPollVote && !isEdit) return null
   if (type === 'deleted' || type === 'revoke' || type === 'revoked' || m.deleted === true) return null
-
-  const isEdit = Boolean(m.edited || m.is_edited || m.isEdit || String(m.action?.type || '').toLowerCase() === 'edit')
 
   let phone = ''
   let remoteJid = ''
@@ -241,7 +575,7 @@ function normalizeWhapiMessageToInternal(m, ctx = {}) {
     }
   }
 
-  const messageId = (m.id && String(m.id).trim()) ? String(m.id).trim() : null
+  const messageId = resolveWhapiEditTargetId(m) || ((m.id && String(m.id).trim()) ? String(m.id).trim() : null)
 
   // Resposta interativa (toque em botão/lista): o título vira o texto do inbound para a URA
   // tratar como uma resposta digitada; o id fica disponível p/ casamento exato futuro.
@@ -251,12 +585,22 @@ function normalizeWhapiMessageToInternal(m, ctx = {}) {
   const pollVote = isPollVote ? extractPollVote(m) : null
   const pollMsg = (type === 'poll' && !isPollVote) ? extractPollMessage(m) : null
 
+  // Voto: nunca colocar hash SHA-256 no body — enrich resolve para o texto da opção.
+  // Até lá usamos placeholder (evita bolha com "a4ayc/80/…=" no chat).
+  const pollVotePreview = pollVote
+    ? (pollVote.options.some((o) => !looksLikePollOptionHash(o))
+      ? pollVote.options.filter((o) => !looksLikePollOptionHash(o)).join(', ')
+      : '') || '(voto na enquete)'
+    : null
+
   // Texto: { text: { body } }; link_preview; resposta interativa; voto de enquete; caption em mídia.
+  // Edição: prioriza extractWhapiEditedTexto (type=edit / action.edit / edited:true).
   const textBody = String(
-    (m.text && (m.text.body ?? m.text))
+    (isEdit && extractWhapiEditedTexto(m))
+    || (m.text && (m.text.body ?? m.text))
     || (type === 'link_preview' && (m.link_preview?.body || m.link_preview?.title))
     || (interactiveReply && (interactiveReply.title || interactiveReply.id))
-    || (pollVote && (pollVote.options.join(', ') || '(voto na enquete)'))
+    || pollVotePreview
     || (pollMsg && pollPreviewText(pollMsg))
     || m.body
     || m.caption
@@ -317,7 +661,7 @@ function normalizeWhapiMessageToInternal(m, ctx = {}) {
   // type interno: ptt→audio; reaction; senão o tipo Whapi (text vira 'chat' p/ compat com o pipeline).
   const internalType = isReaction ? 'reaction'
     : (type === 'ptt' || type === 'voice') ? 'audio'
-    : (type === 'text' || type === 'link_preview') ? 'chat'
+    : (type === 'text' || type === 'link_preview' || type === 'edit' || isEdit) ? 'chat'
     : (type === 'reply' || type === 'interactive') ? 'chat'
     : isPollVote ? 'chat'
     : (type === 'poll') ? 'poll'
@@ -438,7 +782,9 @@ function extractEvents(body) {
     : (body?.status && typeof body.status === 'object' ? [body.status] : [])
   const presences = Array.isArray(body?.presences) ? body.presences
     : (body?.presence && typeof body.presence === 'object' ? [body.presence] : [])
-  return { messages, statuses, presences }
+  const messagesUpdates = Array.isArray(body?.messages_updates) ? body.messages_updates
+    : (body?.message_update ? [body.message_update] : [])
+  return { messages, statuses, presences, messagesUpdates }
 }
 
 /**
@@ -476,24 +822,62 @@ async function handleWebhookWhapi(req, res) {
       connectedPhone: ctxSrc.connected_phone || ctxSrc.telefone_conectado || null,
     }
 
-    const { messages, statuses, presences } = extractEvents(body)
+    const { messages, statuses, presences, messagesUpdates } = extractEvents(body)
     req.webhookLogData = {
       status: 'processed',
       company_id: ctxSrc.company_id,
       instance_id: ctx.channelId,
       event_type: 'whapi',
-      counts: { messages: messages.length, statuses: statuses.length, presences: presences.length },
+      counts: {
+        messages: messages.length,
+        statuses: statuses.length,
+        presences: presences.length,
+        messages_updates: messagesUpdates.length,
+      },
     }
 
     let anyServerError = false
+    const io = req.app?.get?.('io')
+
+    for (const upd of messagesUpdates) {
+      try {
+        await applyWhapiPollMessageUpdate(ctxSrc, upd, io)
+        const trigger = upd?.trigger
+        if (trigger && isWhapiEditedMessage(trigger)) {
+          await applyWhapiEditedMessage(ctxSrc, trigger, io)
+        }
+        // messages.patch com after_update editado (texto/legenda do cliente)
+        const after = upd?.after_update || upd?.after || null
+        if (after && isWhapiEditedMessage(after)) {
+          await applyWhapiEditedMessage(ctxSrc, after, io)
+        } else if (after && (upd?.before_update || upd?.before) && String(after.type || '').toLowerCase() !== 'poll') {
+          // Diff de texto/caption sem flag edited explícita — trata como edição se o id existir.
+          const before = upd.before_update || upd.before
+          const afterText = extractWhapiEditedTexto(after)
+          const beforeText = extractWhapiEditedTexto(before)
+          if (afterText && afterText !== beforeText && after.id) {
+            await applyWhapiEditedMessage(ctxSrc, { ...after, edited: true }, io)
+          }
+        }
+      } catch (e) {
+        console.warn('[WHAPI] messages_updates falhou:', e?.message || e)
+      }
+    }
 
     for (const m of messages) {
       if (isWhapiEditedMessage(m)) {
-        const applied = await applyWhapiEditedMessage(ctxSrc, m, req.app?.get?.('io'))
+        const applied = await applyWhapiEditedMessage(ctxSrc, m, io)
         if (applied) continue
       }
-      const normalized = normalizeWhapiMessageToInternal(m, ctx)
+      let normalized = normalizeWhapiMessageToInternal(m, ctx)
       if (!normalized) continue
+      if (normalized.pollVoteTarget) {
+        try {
+          normalized = await enrichNormalizedPollVote(normalized, ctxSrc, io)
+        } catch (e) {
+          console.warn('[WHAPI] enrich poll vote falhou:', e?.message || e)
+        }
+      }
       normalized.type = 'ReceivedCallback'
       normalized.instanceId = ctx.channelId
       normalized.instance_id = ctx.channelId
@@ -504,22 +888,17 @@ async function handleWebhookWhapi(req, res) {
     for (const s of statuses) {
       const normalized = normalizeWhapiStatusToInternal(s, ctx)
       if (!normalized) continue
-      // statusZapi sempre responde 200 (mesmo em catch) — não altera anyServerError.
       await dispatchOne(webhookCoreController.statusZapi, req, normalized)
     }
 
-    // Presença do contato — efêmera, só emite socket (nunca persiste, nunca afeta ACK/inbound).
-    if (presences.length) {
-      const io = req.app?.get?.('io')
-      if (io) {
-        for (const p of presences) {
-          const payload = normalizeWhapiPresence(p, ctx)
-          if (!payload) continue
-          try {
-            io.to(`empresa_${ctxSrc.company_id}`).emit('presenca_contato', { ...payload, company_id: ctxSrc.company_id })
-          } catch (e) {
-            console.warn('[WEBHOOK_WHAPI] emit presenca_contato falhou:', e?.message || e)
-          }
+    if (presences.length && io) {
+      for (const p of presences) {
+        const payload = normalizeWhapiPresence(p, ctx)
+        if (!payload) continue
+        try {
+          io.to(`empresa_${ctxSrc.company_id}`).emit('presenca_contato', { ...payload, company_id: ctxSrc.company_id })
+        } catch (e) {
+          console.warn('[WEBHOOK_WHAPI] emit presenca_contato falhou:', e?.message || e)
         }
       }
     }
@@ -555,8 +934,11 @@ exports._test = {
   jidToDigits,
   isLidJid,
   isWhapiEditedMessage,
+  resolveWhapiEditTargetId,
   extractWhapiEditedTexto,
   extractInteractiveReply,
   extractPollVote,
   normalizeWhapiPresence,
+  resolvePollVoteLabels,
+  enrichNormalizedPollVote,
 }

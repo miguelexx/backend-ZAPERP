@@ -729,7 +729,13 @@ exports.enviarEnquete = async (req, res) => {
       return res.status(501).json({ error: 'Este WhatsApp não envia enquetes por aqui. Use o aplicativo do celular ou um canal Whapi.' })
     }
 
-    const poll_meta = { title, options, count }
+    const { buildPollOptionIdMap } = require('../../helpers/pollVoteResolve')
+    const poll_meta = {
+      title,
+      options,
+      count,
+      option_ids: buildPollOptionIdMap(options),
+    }
     const textoDisplay = buildPollPreview(title, options)
     const criadoEm = new Date().toISOString()
     const insertRow = {

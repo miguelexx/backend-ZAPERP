@@ -1,5 +1,5 @@
 /**
- * Rotas de Labels do WhatsApp Business (Whapi). Montadas em /labels/whatsapp.
+ * Rotas de Labels do WhatsApp Business (Whapi). Montadas em /labels e /api/labels.
  * Só empresas com instância Whapi (o controller responde 501 caso contrário).
  * Gestão (criar/editar/apagar) exige admin — espelha a política de /tags.
  */

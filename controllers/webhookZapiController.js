@@ -120,6 +120,7 @@ const {
   tryReconcileFromMeByCrmReferenceId,
   mapWebhookTypeToStorageTipo,
   findFromMeOutboundMediaCandidate,
+  findFromMeOutboundCandidateWithPollFallback,
 } = require('./webhookInbound/fromMeReconcile')
 
 // reopenPolicy movido para controllers/webhookInbound/reopenPolicy.js (Fase 1 — doc 24).
@@ -1788,7 +1789,7 @@ exports.receberZapi = async (req, res) => {
         const nomeAtendenteFromMe = extrairNomePrefixoTexto(texto)
         if (!tempExistente) {
           tempExistente =
-            findFromMeOutboundMediaCandidate(filterRowsForFromMeReconcile(tempExistenteRecentOut), {
+            findFromMeOutboundCandidateWithPollFallback(tempExistenteRecentOut, {
               fileName,
               texto,
               tipo: mapWebhookTypeToStorageTipo(type),
@@ -1812,7 +1813,7 @@ exports.receberZapi = async (req, res) => {
           recentOutQuery = applyWhatsappInstanceFilterOrLegacy(recentOutQuery, whatsapp_instance_id)
           const { data: recentOut } = await recentOutQuery
           tempExistente =
-            findFromMeOutboundMediaCandidate(filterRowsForFromMeReconcile(recentOut), {
+            findFromMeOutboundCandidateWithPollFallback(recentOut, {
               fileName,
               texto,
               tipo: mapWebhookTypeToStorageTipo(type),

@@ -162,6 +162,33 @@ describe('Whapi webhook — normalização e dispatch', () => {
     expect(controller._test.isWhapiEditedMessage({ edited: true, id: 'wamid.1' })).toBe(true)
   })
 
+  test('type:edit (mobile Whapi) e action.edit são reconhecidos', () => {
+    expect(controller._test.isWhapiEditedMessage({
+      type: 'edit', id: 'wamid.orig', from_me: false, text: { body: 'novo' },
+    })).toBe(true)
+    expect(controller._test.isWhapiEditedMessage({
+      type: 'action', id: 'wamid.evt', action: { type: 'edit', target: 'wamid.orig', body: 'novo' },
+    })).toBe(true)
+    expect(controller._test.resolveWhapiEditTargetId({
+      type: 'action', action: { type: 'edit', target: 'wamid.orig', body: 'novo' },
+    })).toBe('wamid.orig')
+    const m = controller._test.normalizeWhapiMessageToInternal(
+      {
+        id: 'wamid.evt',
+        from_me: false,
+        type: 'action',
+        chat_id: '5534988887777@s.whatsapp.net',
+        action: { type: 'edit', target: 'wamid.orig', body: 'texto editado pelo cliente' },
+        timestamp: 1700000000,
+      },
+      { channelId: 'NEBULA-AER3B' }
+    )
+    expect(m).not.toBeNull()
+    expect(m.isEdit).toBe(true)
+    expect(m.body).toBe('texto editado pelo cliente')
+    expect(m.id).toBe('wamid.orig')
+  })
+
   test('extractWhapiEditedTexto lê caption de mídia', () => {
     expect(controller._test.extractWhapiEditedTexto({
       type: 'image',

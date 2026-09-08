@@ -727,7 +727,7 @@ async function getOrCreateCliente(supabaseClient, company_id, phone, fields = {}
   }
 
   if (searchPhones.length === 0) {
-    return { cliente_id: null }
+    return { cliente_id: null, error: 'Telefone sem dígitos suficientes para cadastro.' }
   }
 
   // 1) SELECT por variantes + phoneKeyBR (12/13 dígitos, com/sem DDI no banco)
@@ -736,7 +736,7 @@ async function getOrCreateCliente(supabaseClient, company_id, phone, fields = {}
     existente = await findClienteRowForPhone(supabaseClient, company_id, phone, telefoneCanonico, searchPhones, { identitySafe: identitySafePhoneMatch, strictAgendaImport })
   } catch (e) {
     console.warn('[getOrCreateCliente] Erro ao buscar:', e?.message || e)
-    return { cliente_id: null }
+    return { cliente_id: null, error: 'Falha ao consultar contato existente.' }
   }
 
   if (existente?.id) {
@@ -760,7 +760,7 @@ async function getOrCreateCliente(supabaseClient, company_id, phone, fields = {}
     )
 
   if (!isTelefoneValido) {
-    return { cliente_id: null }
+    return { cliente_id: null, error: 'Telefone normalizado inválido para gravação.' }
   }
 
   // 4) INSERT — cada empresa tem seus próprios clientes (UNIQUE company_id + telefone).
@@ -879,8 +879,19 @@ async function getOrCreateCliente(supabaseClient, company_id, phone, fields = {}
   }
 
   const errFinal = errInsert || errUpsert
-  console.warn('[getOrCreateCliente] Insert falhou, continuando sem cliente:', errFinal?.code || errFinal?.message || 'unknown', 'company_id:', company_id, 'telefone:', telefoneCanonico)
-  return { cliente_id: null, created: false, changed: false, nome: null, nome_protegido: false, nome_origem: null }
+  const errMsg = String(errFinal?.message || errFinal?.code || 'unknown')
+  console.warn('[getOrCreateCliente] Insert falhou, continuando sem cliente:', errMsg, 'company_id:', company_id, 'telefone:', telefoneCanonico)
+  return {
+    cliente_id: null,
+    created: false,
+    changed: false,
+    nome: null,
+    nome_protegido: false,
+    nome_origem: null,
+    error: errFinal
+      ? `Falha ao gravar contato (${errFinal.code || 'db'}).`
+      : 'Não foi possível cadastrar ou localizar o cliente para este número.',
+  }
 }
 
 /**

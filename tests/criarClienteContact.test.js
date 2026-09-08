@@ -18,6 +18,8 @@ describe('cadastro manual de contato — nome e telefone', () => {
     expect(getCanonicalPhone('(11) 98765-4321')).toBe('5511987654321')
     expect(getCanonicalPhone('+55 11 98765-4321')).toBe('5511987654321')
     expect(getCanonicalPhone('11987654321')).toBe('5511987654321')
+    expect(getCanonicalPhone('(34) 99973-3959')).toBe('5534999733959')
+    expect(getCanonicalPhone('34999733959')).toBe('5534999733959')
   })
 
   it('rejeita telefone inválido no cadastro manual', () => {

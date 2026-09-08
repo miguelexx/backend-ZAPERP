@@ -64,6 +64,7 @@ function withWhapiLiveFields(instance, conn = null) {
     ...instance,
     connected,
     live_status: conn?.status || instance.live_status || instance.status || null,
+    is_business: typeof conn?.isBusiness === 'boolean' ? conn.isBusiness : (instance.is_business ?? null),
   }
 }
 
@@ -125,6 +126,7 @@ async function hydrateWhapiInstanceList(companyId, instances, { force = false } 
       status: hydrated?.status || inst.status || null,
       display_phone: hydrated?.display_phone || inst.display_phone || null,
       telefone_conectado: hydrated?.telefone_conectado || inst.telefone_conectado || null,
+      is_business: typeof hydrated?.is_business === 'boolean' ? hydrated.is_business : null,
     })
   })
   whapiListHydrateCache.set(cacheKey, { at: Date.now(), byId })
@@ -140,6 +142,7 @@ function rememberWhapiLive(companyId, instance) {
     status: instance.status || null,
     display_phone: instance.display_phone || null,
     telefone_conectado: instance.telefone_conectado || null,
+    is_business: typeof instance.is_business === 'boolean' ? instance.is_business : null,
   })
   cached.at = Date.now()
   whapiListHydrateCache.set(String(companyId), cached)
@@ -386,6 +389,7 @@ exports.getInstanceStatus = async (req, res) => {
       provider: 'whapi',
       status: conn.status || null,
       phone: conn.phone || null,
+      is_business: typeof conn.isBusiness === 'boolean' ? conn.isBusiness : null,
     })
   }
   const result = await getStatus(company_id, { whatsappInstanceId: id })
@@ -1153,7 +1157,14 @@ exports.getInstanceBusinessProfile = async (req, res) => {
   if (!ctx) return
   try {
     const r = await ctx.provider.getBusinessProfile({ companyId: ctx.company_id, whatsappInstanceId: ctx.id })
-    if (!r.ok) return res.status(502).json({ error: r.error || 'Erro ao ler perfil Business', provider: 'whapi' })
+    if (!r.ok) {
+      const status = r.httpStatus === 422 ? 422 : (r.httpStatus === 429 ? 429 : 502)
+      return res.status(status).json({
+        error: r.error || 'Erro ao ler perfil Business',
+        code: r.code || r.providerCode || undefined,
+        provider: 'whapi',
+      })
+    }
     return res.json({ provider: 'whapi', profile: r.profile || {} })
   } catch (e) {
     return res.status(500).json({ error: e?.message || 'Erro interno ao ler perfil Business' })
@@ -1167,7 +1178,14 @@ exports.updateInstanceBusinessProfile = async (req, res) => {
   const { address, description, email, websites, hours } = req.body || {}
   try {
     const r = await ctx.provider.editBusinessProfile({ address, description, email, websites, hours }, { companyId: ctx.company_id, whatsappInstanceId: ctx.id })
-    if (!r.ok) return res.status(400).json({ error: r.error || 'Erro ao editar perfil Business', provider: 'whapi' })
+    if (!r.ok) {
+      const status = r.httpStatus === 422 ? 422 : (r.httpStatus === 429 ? 429 : (r.httpStatus === 400 ? 400 : 502))
+      return res.status(status).json({
+        error: r.error || 'Erro ao editar perfil Business',
+        code: r.code || r.providerCode || undefined,
+        provider: 'whapi',
+      })
+    }
     return res.json({ sucesso: true, provider: 'whapi', profile: r.profile || undefined })
   } catch (e) {
     return res.status(500).json({ error: e?.message || 'Erro interno ao editar perfil Business' })
@@ -1223,6 +1241,53 @@ exports.subscribeInstancePresence = async (req, res) => {
     return res.json({ sucesso: true, provider: 'whapi' })
   } catch (e) {
     return res.status(500).json({ error: e?.message || 'Erro interno ao assinar presença' })
+  }
+}
+
+/**
+ * GET /integrations/whatsapp/instances/:id/limits/antiban — limites anti-ban (Whapi, read-only).
+ * Combina getNewChatLimit + getReachoutTimelock para a UI de conexão/disparo.
+ */
+exports.getInstanceAntibanLimits = async (req, res) => {
+  const ctx = await requireWhapiInstance(req, res, 'antiban-limits', 30)
+  if (!ctx) return
+  const opts = { companyId: ctx.company_id, whatsappInstanceId: ctx.id }
+  try {
+    const [newChat, reachout] = await Promise.all([
+      ctx.provider.getNewChatLimit(opts),
+      ctx.provider.getReachoutTimelock(opts),
+    ])
+    if (!newChat?.ok && !reachout?.ok) {
+      return res.status(502).json({
+        error: newChat?.error || reachout?.error || 'Erro ao ler limites anti-ban',
+        provider: 'whapi',
+      })
+    }
+    return res.json({
+      provider: 'whapi',
+      new_chat: newChat?.ok
+        ? {
+            capped: newChat.capped === true,
+            cap_status: newChat.capStatus || null,
+            quota_limit: newChat.quotaLimit ?? null,
+            quota_used: newChat.quotaUsed ?? null,
+            quota_remaining: newChat.quotaRemaining ?? null,
+            cycle_start_at: newChat.cycleStartAt ?? null,
+            cycle_end_at: newChat.cycleEndAt ?? null,
+            http_status: newChat.httpStatus ?? null,
+          }
+        : { error: newChat?.error || 'falha', capped: false },
+      reachout: reachout?.ok
+        ? {
+            restricted: reachout.restricted === true,
+            restricted_until: reachout.restrictedUntil ?? null,
+            restriction_type: reachout.restrictionType || null,
+            http_status: reachout.httpStatus ?? null,
+          }
+        : { error: reachout?.error || 'falha', restricted: false },
+    })
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || 'Erro interno ao ler limites anti-ban' })
   }
 }
 

@@ -43,12 +43,19 @@ function trimOrNull(v) {
 }
 
 function erroTelefoneCliente(codigo, extra = {}) {
+  const isObrigatorio = codigo === 'TELEFONE_OBRIGATORIO'
+  const isCadastro = codigo === 'CADASTRO_CLIENTE_FALHOU'
   return {
-    erro: codigo === 'TELEFONE_OBRIGATORIO' ? 'Informe telefone ou wa_id' : 'Telefone inválido',
+    erro: isObrigatorio
+      ? 'Informe telefone ou wa_id'
+      : isCadastro
+        ? 'Não foi possível salvar o contato'
+        : 'Telefone inválido',
     codigo,
-    detalhe:
-      codigo === 'TELEFONE_OBRIGATORIO'
-        ? 'Informe o número do contato para continuar.'
+    detalhe: isObrigatorio
+      ? 'Informe o número do contato para continuar.'
+      : isCadastro
+        ? 'O número parece válido, mas o cadastro não concluiu. Tente de novo em alguns segundos.'
         : 'Informe um número brasileiro válido: DDD + número (10 ou 11 dígitos), com ou sem o código 55. Espaços, parênteses e hífens são aceitos.',
     formato_esperado:
       'Somente números do Brasil. Celular com 9 após o DDD: ex. (11) 98765-4321 → armazenado como 5511987654321.',
@@ -329,17 +336,26 @@ exports.criarCliente = async (req, res) => {
     }
 
     const phoneForLookup = telefoneRaw || waIdRaw
-    const { cliente_id: clienteId, created: clienteCriado } = await getOrCreateCliente(
+    const created = await getOrCreateCliente(
       supabase,
       cid,
       phoneForLookup,
       fields
     )
+    const clienteId = created?.cliente_id
+    const clienteCriado = created?.created
 
     if (!clienteId) {
+      const telefoneCanonico = telefoneRaw ? getCanonicalPhone(telefoneRaw) : ''
+      const telefoneIntl = telefoneRaw ? getCanonicalPhoneAnyIntl(telefoneRaw) : ''
+      const formatoOk = !!(telefoneCanonico || telefoneIntl || waIdRaw)
       return res.status(400).json(
-        erroTelefoneCliente('TELEFONE_INVALIDO', {
-          detalhe: 'Não foi possível cadastrar ou localizar o cliente para este número.',
+        erroTelefoneCliente(formatoOk ? 'CADASTRO_CLIENTE_FALHOU' : 'TELEFONE_INVALIDO', {
+          detalhe: formatoOk
+            ? (created?.error
+              || 'O número foi aceito, mas não foi possível gravar o contato. Tente novamente.')
+            : 'Informe um número com DDD (Brasil) ou o número completo com código do país.',
+          telefone_recebido: String(phoneForLookup || '').replace(/\D/g, '').slice(0, 20) || null,
         })
       )
     }

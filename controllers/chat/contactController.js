@@ -428,12 +428,19 @@ exports.abrirConversaCliente = async (req, res) => {
 
 // Resposta 400 padronizada — frontend pode exibir formato ao usuário (novo contato manual)
 function erroTelefoneNovoContato (codigo, extra = {}) {
+  const isObrigatorio = codigo === 'TELEFONE_OBRIGATORIO'
+  const isCadastro = codigo === 'CADASTRO_CLIENTE_FALHOU'
   const base = {
-    error: codigo === 'TELEFONE_OBRIGATORIO' ? 'Telefone obrigatório' : 'Telefone inválido',
+    error: isObrigatorio
+      ? 'Telefone obrigatório'
+      : isCadastro
+        ? 'Não foi possível salvar o contato'
+        : 'Telefone inválido',
     codigo,
-    detalhe:
-      codigo === 'TELEFONE_OBRIGATORIO'
-        ? 'Informe o número do contato para continuar.'
+    detalhe: isObrigatorio
+      ? 'Informe o número do contato para continuar.'
+      : isCadastro
+        ? 'O número parece válido, mas o cadastro não concluiu. Tente de novo em alguns segundos.'
         : 'Informe um número brasileiro válido: DDD + número (10 ou 11 dígitos), com ou sem o código do país 55 (12 ou 13 dígitos no total). Espaços, parênteses e hífens podem ser usados e serão ignorados.',
     formato_esperado:
       'Somente números do Brasil. Celular com 9 após o DDD: ex. (11) 98765-4321 → armazenado como 5511987654321. Fixo sem o 9: ex. (11) 3456-7890.',
@@ -497,14 +504,16 @@ exports.criarContato = async (req, res) => {
     const nomeTrim = nome != null ? String(nome).trim() : ''
 
     // Cliente: getOrCreateCliente evita 23505 e unifica variantes (55… vs DDD…).
-    const { cliente_id: clienteId } = await getOrCreateCliente(supabase, company_id, telefoneRaw, {
+    const { cliente_id: clienteId, error: clienteErro } = await getOrCreateCliente(supabase, company_id, telefoneRaw, {
       ...(nomeTrim ? { nome: nomeTrim } : {}),
       allowNonBR,
     })
     if (!clienteId) {
       return res.status(400).json(
-        erroTelefoneNovoContato('TELEFONE_INVALIDO', {
-          detalhe: 'Não foi possível cadastrar ou localizar o cliente para este número.'
+        erroTelefoneNovoContato(telefoneCanonico ? 'CADASTRO_CLIENTE_FALHOU' : 'TELEFONE_INVALIDO', {
+          detalhe: telefoneCanonico
+            ? (clienteErro || 'O número foi aceito, mas não foi possível gravar o contato. Tente novamente.')
+            : 'Não foi possível interpretar um telefone válido. Verifique DDD e quantidade de dígitos.',
         })
       )
     }

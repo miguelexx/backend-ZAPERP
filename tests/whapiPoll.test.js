@@ -81,6 +81,32 @@ describe('Whapi poll — voto inbound (normalização)', () => {
     expect(v).toEqual({ target: 'wamid.poll', options: ['Financeiro'] })
   })
 
+  test('extractPollVote lê votes como { id: hash } (Whapi live)', () => {
+    const hash = require('crypto').createHash('sha256').update('2', 'utf8').digest('base64')
+    const v = controller._test.extractPollVote({
+      action: { type: 'vote', target: 'wamid.poll', votes: [{ id: hash }] },
+    })
+    expect(v).toEqual({ target: 'wamid.poll', options: [hash] })
+  })
+
+  test('voto com hash no body vira placeholder até enrich', () => {
+    const hash = require('crypto').createHash('sha256').update('2', 'utf8').digest('base64')
+    const m = controller._test.normalizeWhapiMessageToInternal(
+      {
+        id: 'wamid.vote-hash',
+        from_me: false,
+        type: 'action',
+        chat_id: '5534988887777@s.whatsapp.net',
+        action: { type: 'vote', target: 'wamid.poll', votes: [{ id: hash }] },
+        timestamp: 1,
+      },
+      { channelId: 'NEBULA-AER3B' }
+    )
+    expect(m).not.toBeNull()
+    expect(m.body).toBe('(voto na enquete)')
+    expect(m.pollVoteOptions).toEqual([hash])
+  })
+
   test('voto vira inbound de texto (chat) = opção escolhida', () => {
     const m = controller._test.normalizeWhapiMessageToInternal(
       { id: 'wamid.vote', from_me: false, type: 'action', chat_id: '5534988887777@s.whatsapp.net',
@@ -102,6 +128,12 @@ describe('Whapi poll — voto inbound (normalização)', () => {
     )
     expect(m.type).toBe('chat')
     expect(m.body).toBe('(voto na enquete)')
+  })
+
+  test('resolvePollVoteLabels (hash SHA-256) → texto da opção', () => {
+    const { resolvePollVoteLabels } = controller._test
+    const hash1 = require('crypto').createHash('sha256').update('1', 'utf8').digest('base64')
+    expect(resolvePollVoteLabels([hash1], ['1', '2'])).toEqual(['1'])
   })
 
   test('action que não é reação nem voto continua ignorada', () => {

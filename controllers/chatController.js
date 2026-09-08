@@ -385,6 +385,9 @@ exports.enviarLocalizacao = _outboundController.enviarLocalizacao
 exports.enviarLigacaoWhatsapp = _outboundController.enviarLigacaoWhatsapp
 exports.enviarEnquete = _outboundController.enviarEnquete
 
+const _presenceController = require('./chat/presenceController')
+exports.obterPresencaConversa = _presenceController.obterPresencaConversa
+
 // =====================================================
 // excluirMensagem — remove do sistema (DB) + realtime
 // =====================================================

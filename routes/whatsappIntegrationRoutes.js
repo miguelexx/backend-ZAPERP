@@ -37,6 +37,7 @@ router.post('/instances/:id/business-profile', whatsappIntegrationController.upd
 router.get('/instances/:id/chats/:chatId', whatsappIntegrationController.getInstanceChat)
 router.get('/instances/:id/presence', whatsappIntegrationController.getInstancePresence)
 router.post('/instances/:id/presence/subscribe', whatsappIntegrationController.subscribeInstancePresence)
+router.get('/instances/:id/limits/antiban', whatsappIntegrationController.getInstanceAntibanLimits)
 router.post('/instances/:id/configure-webhooks', whatsappIntegrationController.configureInstanceWebhooks)
 
 const connectRouter = express.Router()

@@ -12,7 +12,7 @@
 const supabaseDefault = require('../../config/supabase')
 const {
   tryReconcileFromMeByCrmReferenceId,
-  findFromMeOutboundMediaCandidate,
+  findFromMeOutboundCandidateWithPollFallback,
   filterRowsForFromMeReconcile,
   whatsappIdCompativelParaReconcile,
   mapWebhookTypeToStorageTipo,
@@ -82,7 +82,7 @@ async function reconcileFromMeInReceived(supabaseClient, ctx) {
 
     const nomeAtendenteReconcile = extrairNomePrefixoTexto(texto)
     const findCand = (rows) =>
-      findFromMeOutboundMediaCandidate(filterRowsForFromMeReconcile(rows), {
+      findFromMeOutboundCandidateWithPollFallback(rows, {
         fileName,
         texto,
         tipo: mapWebhookTypeToStorageTipo(type),

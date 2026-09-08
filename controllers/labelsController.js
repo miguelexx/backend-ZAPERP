@@ -13,6 +13,22 @@ const {
 
 const NOT_WHAPI = 'Labels do WhatsApp Business exigem uma instância Whapi. A empresa não possui uma configurada.'
 
+function whapiFailureStatus(result) {
+  const status = Number(result?.httpStatus)
+  if ([400, 404, 409, 422, 429].includes(status)) return status
+  // 401 aqui pertence ao canal Whapi, não ao JWT do usuário; não o propagamos
+  // para evitar que o interceptor do frontend encerre uma sessão válida.
+  return 502
+}
+
+function whapiFailureBody(result, fallback) {
+  return {
+    error: result?.error || fallback,
+    code: result?.code || result?.providerCode || undefined,
+    provider: 'whapi',
+  }
+}
+
 /**
  * Resolve a instância Whapi da empresa (explícita por query/body ou a default Whapi).
  * @returns {{ instance, error }}
@@ -56,20 +72,20 @@ async function withWhapi(req, res) {
   }
 }
 
-/** GET /labels/whatsapp — lista os labels do WhatsApp Business. */
+/** GET /labels (também /api/labels) — lista os labels do WhatsApp Business. */
 exports.listarLabels = async (req, res) => {
   const ctx = await withWhapi(req, res)
   if (!ctx) return
   try {
     const r = await ctx.provider.getLabels(ctx.opts)
-    if (!r.ok) return res.status(502).json({ error: r.error || 'Erro ao listar labels' })
+    if (!r.ok) return res.status(whapiFailureStatus(r)).json(whapiFailureBody(r, 'Erro ao listar labels'))
     return res.json({ labels: r.labels || [] })
   } catch (e) {
     return res.status(500).json({ error: e?.message || 'Erro interno ao listar labels' })
   }
 }
 
-/** POST /labels/whatsapp  body { name, color, id? } — cria um label. */
+/** POST /labels (também /api/labels) body { name, color, id? } — cria um label. */
 exports.criarLabel = async (req, res) => {
   const ctx = await withWhapi(req, res)
   if (!ctx) return
@@ -78,53 +94,53 @@ exports.criarLabel = async (req, res) => {
       { name: req.body?.name, color: req.body?.color, id: req.body?.id },
       ctx.opts,
     )
-    if (!r.ok) return res.status(400).json({ error: r.error || 'Erro ao criar label' })
+    if (!r.ok) return res.status(whapiFailureStatus(r)).json(whapiFailureBody(r, 'Erro ao criar label'))
     return res.status(201).json({ sucesso: true, label: r.label || null })
   } catch (e) {
     return res.status(500).json({ error: e?.message || 'Erro interno ao criar label' })
   }
 }
 
-/** PATCH /labels/whatsapp/:labelId  body { name } — renomeia. */
+/** PATCH /labels/:labelId body { name } — renomeia. */
 exports.renomearLabel = async (req, res) => {
   const ctx = await withWhapi(req, res)
   if (!ctx) return
   try {
     const r = await ctx.provider.renameLabel(req.params?.labelId, req.body?.name, ctx.opts)
-    if (!r.ok) return res.status(400).json({ error: r.error || 'Erro ao renomear label' })
+    if (!r.ok) return res.status(whapiFailureStatus(r)).json(whapiFailureBody(r, 'Erro ao renomear label'))
     return res.json({ sucesso: true })
   } catch (e) {
     return res.status(500).json({ error: e?.message || 'Erro interno ao renomear label' })
   }
 }
 
-/** DELETE /labels/whatsapp/:labelId — apaga. */
+/** DELETE /labels/:labelId — apaga. */
 exports.excluirLabel = async (req, res) => {
   const ctx = await withWhapi(req, res)
   if (!ctx) return
   try {
     const r = await ctx.provider.deleteLabel(req.params?.labelId, ctx.opts)
-    if (!r.ok) return res.status(400).json({ error: r.error || 'Erro ao apagar label' })
+    if (!r.ok) return res.status(whapiFailureStatus(r)).json(whapiFailureBody(r, 'Erro ao apagar label'))
     return res.json({ sucesso: true })
   } catch (e) {
     return res.status(500).json({ error: e?.message || 'Erro interno ao apagar label' })
   }
 }
 
-/** GET /labels/whatsapp/:labelId/chats — chats/mensagens associados ao label. */
+/** GET /labels/:labelId/chats — chats/mensagens associados ao label. */
 exports.listarAssociacoes = async (req, res) => {
   const ctx = await withWhapi(req, res)
   if (!ctx) return
   try {
     const r = await ctx.provider.getLabelAssociations(req.params?.labelId, ctx.opts)
-    if (!r.ok) return res.status(502).json({ error: r.error || 'Erro ao listar associações' })
+    if (!r.ok) return res.status(whapiFailureStatus(r)).json(whapiFailureBody(r, 'Erro ao listar associações'))
     return res.json({ chats: r.chats || [], messages: r.messages || [] })
   } catch (e) {
     return res.status(500).json({ error: e?.message || 'Erro interno ao listar associações' })
   }
 }
 
-/** POST /labels/whatsapp/:labelId/associacoes  body { chat } — associa label a um chat. */
+/** POST /labels/:labelId/associacoes body { chat } — associa label a um chat. */
 exports.associarChat = async (req, res) => {
   const ctx = await withWhapi(req, res)
   if (!ctx) return
@@ -132,14 +148,14 @@ exports.associarChat = async (req, res) => {
   if (!chat) return res.status(400).json({ error: 'Informe chat (telefone ou chat id).' })
   try {
     const r = await ctx.provider.addLabelAssociation(req.params?.labelId, chat, ctx.opts)
-    if (!r.ok) return res.status(400).json({ error: r.error || 'Erro ao associar label' })
+    if (!r.ok) return res.status(whapiFailureStatus(r)).json(whapiFailureBody(r, 'Erro ao associar label'))
     return res.json({ sucesso: true })
   } catch (e) {
     return res.status(500).json({ error: e?.message || 'Erro interno ao associar label' })
   }
 }
 
-/** DELETE /labels/whatsapp/:labelId/associacoes  body { chat } — remove associação. */
+/** DELETE /labels/:labelId/associacoes body { chat } — remove associação. */
 exports.desassociarChat = async (req, res) => {
   const ctx = await withWhapi(req, res)
   if (!ctx) return
@@ -147,7 +163,7 @@ exports.desassociarChat = async (req, res) => {
   if (!chat) return res.status(400).json({ error: 'Informe chat (telefone ou chat id).' })
   try {
     const r = await ctx.provider.deleteLabelAssociation(req.params?.labelId, chat, ctx.opts)
-    if (!r.ok) return res.status(400).json({ error: r.error || 'Erro ao remover associação' })
+    if (!r.ok) return res.status(whapiFailureStatus(r)).json(whapiFailureBody(r, 'Erro ao remover associação'))
     return res.json({ sucesso: true })
   } catch (e) {
     return res.status(500).json({ error: e?.message || 'Erro interno ao remover associação' })

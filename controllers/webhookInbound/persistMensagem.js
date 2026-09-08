@@ -199,17 +199,35 @@ async function resolveEditedMensagemRow(supabaseClient, { company_id, whatsapp_i
     if (editTarget) {
       console.log(`✏️ Z-API isEdit: mensagem ${editTarget.id} atualizada (conversa ${conversa_id})`)
       if (io) {
-        io.to(`conversa_${conversa_id}`).emit(
-          io.EVENTS?.MENSAGEM_EDITADA || 'mensagem_editada',
-          buildMensagemEditadaSocketPayload({
-            id: editTarget.id,
-            conversa_id,
+        try {
+          const { emitirEventoEmpresaConversa } = require('../../services/chat/realtime/chatRealtimeGateway')
+          emitirEventoEmpresaConversa(
+            io,
             company_id,
-            texto,
-            editada_em: updates.editada_em,
-            tipo: editTarget.tipo || null,
-          })
-        )
+            conversa_id,
+            io.EVENTS?.MENSAGEM_EDITADA || 'mensagem_editada',
+            buildMensagemEditadaSocketPayload({
+              id: editTarget.id,
+              conversa_id,
+              company_id,
+              texto,
+              editada_em: updates.editada_em,
+              tipo: editTarget.tipo || null,
+            })
+          )
+        } catch (_) {
+          io.to(`conversa_${conversa_id}`).emit(
+            io.EVENTS?.MENSAGEM_EDITADA || 'mensagem_editada',
+            buildMensagemEditadaSocketPayload({
+              id: editTarget.id,
+              conversa_id,
+              company_id,
+              texto,
+              editada_em: updates.editada_em,
+              tipo: editTarget.tipo || null,
+            })
+          )
+        }
       }
       return editTarget
     }

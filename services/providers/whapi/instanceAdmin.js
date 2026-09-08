@@ -115,7 +115,8 @@ function parseHealthPayload(data, httpOk) {
     || stateText === 'READY'
     || code === 4
   const phone = data?.user?.id != null ? String(data.user.id).replace(/\D/g, '') : null
-  return { stateText, connected, phone, code: Number.isFinite(code) ? code : null }
+  const isBusiness = typeof data?.user?.is_business === 'boolean' ? data.user.is_business : null
+  return { stateText, connected, phone, isBusiness, code: Number.isFinite(code) ? code : null }
 }
 
 /**
@@ -140,6 +141,7 @@ async function getConnectionStatus(opts = {}) {
       httpStatus: status,
       channelId: data?.channel_id || cfg.channelId || null,
       phone: parsed.phone || null,
+      isBusiness: parsed.isBusiness,
       raw: data,
     }
   } catch (e) {
