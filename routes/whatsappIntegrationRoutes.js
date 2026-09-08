@@ -18,6 +18,7 @@ router.get('/qrcode', whatsappIntegrationController.getQrCodeLegacy)
 router.post('/restart', whatsappIntegrationController.restart)
 
 router.get('/instances', whatsappIntegrationController.listInstances)
+router.post('/instances/provision-whapi', whatsappIntegrationController.provisionWhapiInstance)
 router.post('/instances', whatsappIntegrationController.createInstance)
 router.patch('/instances/:id', whatsappIntegrationController.updateInstance)
 router.post('/instances/:id/activate', whatsappIntegrationController.activateInstance)

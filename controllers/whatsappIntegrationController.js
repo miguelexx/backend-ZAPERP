@@ -24,6 +24,7 @@ const { checkGuard, recordQrServed, resetOnConnected, getAttempts, THROTTLE_SECO
 const { getConfig } = require('../services/configOperacionalService')
 const { getProvider } = require('../services/providers')
 const { resolveCompanyWhatsappProvider } = require('../services/chat/identity/conversationAddressService')
+const whapiPartner = require('../services/providers/whapi/partner')
 
 function publicWebhookUrl(appUrl, providerName) {
   const base = String(appUrl || '').replace(/\/$/, '')
@@ -45,9 +46,45 @@ async function persistWhapiHealth(companyId, instanceId, conn) {
   await whatsappInstanceService.updateWhatsappInstance(companyId, instanceId, patch)
 }
 
+function isWhapiProvider(value) {
+  return String(value || '').trim().toLowerCase() === 'whapi'
+}
+
+function liveConnectedFromStatus(status) {
+  const s = String(status || '').trim().toUpperCase()
+  return s === 'CONNECTED' || s === 'AUTH' || s === 'READY'
+}
+
+function withWhapiLiveFields(instance, conn = null) {
+  if (!instance) return instance
+  const connected = conn
+    ? !!conn.connected
+    : (instance.connected === true || liveConnectedFromStatus(instance.status) || liveConnectedFromStatus(instance.live_status))
+  return {
+    ...instance,
+    connected,
+    live_status: conn?.status || instance.live_status || instance.status || null,
+  }
+}
+
+const WHAPI_LIST_HYDRATE_TTL_MS = 8_000
+const WHAPI_LIST_HYDRATE_CONCURRENCY = 3
+const WHAPI_LIST_HYDRATE_MAX = 8
+const whapiListHydrateCache = new Map()
+
+async function mapInBatches(items, size, fn) {
+  const out = []
+  for (let i = 0; i < items.length; i += size) {
+    const chunk = items.slice(i, i + size)
+    const part = await Promise.all(chunk.map((item) => fn(item)))
+    out.push(...part)
+  }
+  return out
+}
+
 async function hydrateWhapiInstance(companyId, instance) {
   const id = Number(instance?.id)
-  if (!id) return instance
+  if (!id) return withWhapiLiveFields(instance)
   try {
     const conn = await getProvider({ provider: 'whapi' }).getConnectionStatus({
       companyId,
@@ -55,11 +92,69 @@ async function hydrateWhapiInstance(companyId, instance) {
     })
     await persistWhapiHealth(companyId, id, conn)
     const fresh = await whatsappInstanceService.getWhatsappInstanceById(companyId, id, { requireActive: false })
-    return fresh.instance || instance
+    return withWhapiLiveFields(fresh.instance || instance, conn)
   } catch (e) {
     console.warn('[hydrateWhapiInstance]', e?.message || e)
-    return instance
+    return withWhapiLiveFields(instance)
   }
+}
+
+function applyWhapiHydrateCache(instances, byId) {
+  return (instances || []).map((inst) => {
+    if (!isWhapiProvider(inst?.provider)) return inst
+    const live = byId.get(String(inst.id))
+    return live ? { ...inst, ...live } : withWhapiLiveFields(inst)
+  })
+}
+
+async function hydrateWhapiInstanceList(companyId, instances, { force = false } = {}) {
+  const list = Array.isArray(instances) ? instances : []
+  const cacheKey = String(companyId)
+  const cached = whapiListHydrateCache.get(cacheKey)
+  if (!force && cached && (Date.now() - cached.at) < WHAPI_LIST_HYDRATE_TTL_MS) {
+    return applyWhapiHydrateCache(list, cached.byId)
+  }
+
+  const whapiRows = list.filter((inst) => isWhapiProvider(inst?.provider)).slice(0, WHAPI_LIST_HYDRATE_MAX)
+  const byId = new Map()
+  await mapInBatches(whapiRows, WHAPI_LIST_HYDRATE_CONCURRENCY, async (inst) => {
+    const hydrated = await hydrateWhapiInstance(companyId, inst)
+    byId.set(String(inst.id), {
+      connected: !!hydrated?.connected,
+      live_status: hydrated?.live_status || hydrated?.status || null,
+      status: hydrated?.status || inst.status || null,
+      display_phone: hydrated?.display_phone || inst.display_phone || null,
+      telefone_conectado: hydrated?.telefone_conectado || inst.telefone_conectado || null,
+    })
+  })
+  whapiListHydrateCache.set(cacheKey, { at: Date.now(), byId })
+  return applyWhapiHydrateCache(list, byId)
+}
+
+function rememberWhapiLive(companyId, instance) {
+  if (!companyId || !instance?.id) return
+  const cached = whapiListHydrateCache.get(String(companyId)) || { at: 0, byId: new Map() }
+  cached.byId.set(String(instance.id), {
+    connected: !!instance.connected,
+    live_status: instance.live_status || instance.status || null,
+    status: instance.status || null,
+    display_phone: instance.display_phone || null,
+    telefone_conectado: instance.telefone_conectado || null,
+  })
+  cached.at = Date.now()
+  whapiListHydrateCache.set(String(companyId), cached)
+}
+
+function pickExistingWhapiInstance(instances) {
+  const rows = (instances || []).filter((inst) => isWhapiProvider(inst?.provider))
+  if (!rows.length) return null
+  return rows.find((inst) => inst.ativo !== false && inst.is_default)
+    || rows.find((inst) => inst.ativo !== false)
+    || rows[0]
+}
+
+function whapiMeta() {
+  return { partnerEnabled: whapiPartner.isPartnerConfigured() }
 }
 
 async function resolveInstanceProviderName(companyId, instanceId) {
@@ -116,7 +211,108 @@ exports.listInstances = async (req, res) => {
   if (!company_id) return res.status(401).json({ error: 'Não autenticado' })
   const result = await whatsappInstanceService.listWhatsappInstances(company_id)
   if (result.error) return res.status(500).json({ error: result.error })
-  return res.json({ instances: result.instances || [] })
+  const force = String(req.query?.refresh || '') === '1'
+  const canHydrate = checkCompanyRate(company_id, 'list-whapi-hydrate', 60_000, 20)
+  let instances = result.instances || []
+  if (canHydrate) {
+    instances = await hydrateWhapiInstanceList(company_id, instances, { force })
+  } else {
+    const cached = whapiListHydrateCache.get(String(company_id))
+    instances = cached ? applyWhapiHydrateCache(instances, cached.byId) : instances.map((inst) => (
+      isWhapiProvider(inst?.provider) ? withWhapiLiveFields(inst) : inst
+    ))
+  }
+  return res.json({ instances, whapi: whapiMeta() })
+}
+
+/**
+ * Provisiona um canal Whapi via Partner API e grava em whatsapp_instances.
+ * O usuário SaaS não cola Channel ID/token. company_id só do JWT.
+ * POST /integrations/whatsapp/instances/provision-whapi
+ */
+exports.provisionWhapiInstance = async (req, res) => {
+  const company_id = req.user?.company_id
+  if (!company_id) return res.status(401).json({ error: 'Não autenticado' })
+  if (!checkCompanyRate(company_id, 'provision-whapi', 10 * 60_000, 3)) {
+    return res.status(429).json({
+      error: 'Muitas criações de canal. Aguarde alguns minutos.',
+      retryAfterSeconds: 600,
+      whapi: whapiMeta(),
+    })
+  }
+
+  const listed = await whatsappInstanceService.listWhatsappInstances(company_id)
+  if (listed.error) return res.status(500).json({ error: listed.error, whapi: whapiMeta() })
+  const existing = pickExistingWhapiInstance(listed.instances)
+  if (existing) {
+    const instance = await hydrateWhapiInstance(company_id, existing)
+    rememberWhapiLive(company_id, instance)
+    return res.json({ instance, created: false, whapi: whapiMeta() })
+  }
+
+  if (!whapiPartner.isPartnerConfigured()) {
+    return res.status(503).json({
+      error: 'Provisionamento automático indisponível: WHAPI_PARTNER_TOKEN não está configurado no servidor.',
+      code: 'WHAPI_PARTNER_OFF',
+      whapi: whapiMeta(),
+    })
+  }
+
+  const requestedName = String(req.body?.nome || req.body?.name || '').trim()
+  let channel
+  try {
+    channel = await whapiPartner.createChannel({
+      companyId: company_id,
+      name: requestedName || `ZapERP empresa ${company_id}`,
+    })
+  } catch (e) {
+    const status = Number(e?.httpStatus) || 502
+    const safeStatus = status >= 400 && status < 600 ? status : 502
+    console.warn('[provisionWhapiInstance] partner:', e?.code || e?.message || e)
+    return res.status(safeStatus).json({
+      error: e?.message || 'Não foi possível criar o canal Whapi.',
+      code: e?.code || 'WHAPI_PARTNER',
+      whapi: whapiMeta(),
+    })
+  }
+
+  const result = await whatsappInstanceService.createWhatsappInstance(company_id, {
+    provider: 'whapi',
+    instance_id: channel.id,
+    instance_token: channel.token,
+    nome: requestedName || channel.name,
+    metadata: { provisioned_by: 'whapi_partner', project_id: channel.projectId || null },
+  })
+  if (result.error) {
+    console.warn('[provisionWhapiInstance] persist:', result.error, 'channel=', String(channel.id).slice(0, 24))
+    return res.status(instanceErrorStatus(result.error)).json({
+      error: result.error,
+      code: result.code || 'WHAPI_PROVISION_PERSIST',
+      channel_id: channel.id,
+      whapi: whapiMeta(),
+    })
+  }
+
+  invalidateEmpresaWhatsappConfigCache(company_id)
+  let instance = result.instance
+  if (isWhapiProvider(instance?.provider)) {
+    instance = await hydrateWhapiInstance(company_id, instance)
+    rememberWhapiLive(company_id, instance)
+  }
+
+  const appUrl = String(process.env.APP_URL || '').trim()
+  if (appUrl && instance?.id) {
+    try {
+      await getProvider({ provider: 'whapi' }).configureWebhooks(appUrl, {
+        companyId: company_id,
+        whatsappInstanceId: instance.id,
+      })
+    } catch (e) {
+      console.warn('[provisionWhapiInstance] webhook:', e?.message || e)
+    }
+  }
+
+  return res.status(201).json({ instance, created: true, whapi: whapiMeta() })
 }
 
 exports.createInstance = async (req, res) => {
@@ -128,6 +324,7 @@ exports.createInstance = async (req, res) => {
   let instance = result.instance
   if (String(instance?.provider || '').toLowerCase() === 'whapi') {
     instance = await hydrateWhapiInstance(company_id, instance)
+    rememberWhapiLive(company_id, instance)
   }
   return res.status(201).json({ instance })
 }

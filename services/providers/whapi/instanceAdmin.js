@@ -97,29 +97,46 @@ async function updateProfileDescription(about, opts = {}) {
   return patchProfile(opts, { about: String(about ?? '') })
 }
 
+function parseHealthPayload(data, httpOk) {
+  const code = Number(data?.status?.code)
+  const rawText = data?.status?.text
+    ?? (typeof data?.status === 'string' ? data.status : null)
+    ?? data?.state
+  let stateText = String(rawText || '').trim().toUpperCase()
+  if (!stateText || stateText === '[OBJECT OBJECT]') {
+    if (code === 4) stateText = 'AUTH'
+    else stateText = httpOk ? 'UNKNOWN' : 'ERROR'
+  }
+  const connected = stateText === 'AUTH'
+    || stateText === 'CONNECTED'
+    || stateText === 'READY'
+    || code === 4
+  const phone = data?.user?.id != null ? String(data.user.id).replace(/\D/g, '') : null
+  return { stateText, connected, phone, code: Number.isFinite(code) ? code : null }
+}
+
 /**
  * Saúde/estado da sessão do canal Whapi.
- * GET /health — o `wakeup` do MCP não se aplica ao nosso HTTP.
+ * GET /health?wakeup=true (default) — canal adormecido responde AUTH de verdade.
+ * Passe wakeup:false só em checagens de fundo que não devem acordar o canal.
  * Retorna { ok, connected, status, raw } — sem lançar (para o painel poder exibir estado).
  */
 async function getConnectionStatus(opts = {}) {
   const cfg = await resolveConfig(opts)
   if (!cfg) return { ok: false, connected: false, status: 'not_configured', error: 'Instância Whapi não configurada' }
   try {
-    const { ok, status, data } = await get({ token: cfg.token, endpoint: '/health' })
-    // GET /health CONFIRMADO (MCP 2026-09-04): { status: { code, text: 'AUTH' }, user: { id: '55…' }, channel_id }.
-    const stateText = String(
-      data?.status?.text ?? data?.status ?? data?.state ?? (ok ? 'unknown' : 'error')
-    ).toUpperCase()
-    const connected = stateText === 'AUTH' || stateText === 'CONNECTED' || stateText === 'READY'
-    const phone = data?.user?.id != null ? String(data.user.id).replace(/\D/g, '') : null
+    const extraParams = {}
+    if (opts.wakeup !== false) extraParams.wakeup = 'true'
+    const { ok, status, data } = await get({ token: cfg.token, endpoint: '/health', extraParams })
+    // GET /health CONFIRMADO (MCP 2026-09-04): { status: { code: 4, text: 'AUTH' }, user: { id: '55…' }, channel_id }.
+    const parsed = parseHealthPayload(data, ok)
     return {
       ok,
-      connected,
-      status: stateText,
+      connected: parsed.connected,
+      status: parsed.stateText,
       httpStatus: status,
       channelId: data?.channel_id || cfg.channelId || null,
-      phone: phone || null,
+      phone: parsed.phone || null,
       raw: data,
     }
   } catch (e) {

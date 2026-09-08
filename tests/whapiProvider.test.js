@@ -290,7 +290,7 @@ describe('Whapi provider — sendText', () => {
   })
 
   test('GET /health AUTH marca connected e lê user.id', async () => {
-    mockDeps({
+    const { fetchWithRetry } = mockDeps({
       instancesById: { '1:10': whapiInstance() },
       fetchImpl: async () => ({
         ok: true,
@@ -309,6 +309,26 @@ describe('Whapi provider — sendText', () => {
     expect(r.status).toBe('AUTH')
     expect(r.phone).toBe('553499911246')
     expect(r.channelId).toBe('NEBULA-AER3B')
+    expect(fetchWithRetry.mock.calls[0][0]).toBe('https://gate.whapi.test/health?wakeup=true')
+  })
+
+  test('GET /health code 4 sem text ainda marca connected', async () => {
+    const { fetchWithRetry } = mockDeps({
+      instancesById: { '1:10': whapiInstance() },
+      fetchImpl: async () => ({
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({
+          status: { code: 4 },
+          user: { id: '553499911246' },
+        }),
+      }),
+    })
+    const whapi = require('../services/providers/whapi')
+    const r = await whapi.getConnectionStatus({ companyId: 1, whatsappInstanceId: 10, wakeup: false })
+    expect(r.connected).toBe(true)
+    expect(r.status).toBe('AUTH')
+    expect(fetchWithRetry.mock.calls[0][0]).toBe('https://gate.whapi.test/health')
   })
 
   test('configureWebhooks faz PATCH /settings sem token na query e com header X-Webhook-Token', async () => {

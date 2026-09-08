@@ -259,7 +259,8 @@ Ver §0.1. Papéis-chave:
 - **`services/providers/whapi/http.js`** — `buildBaseUrl` (`https://gate.whapi.cloud`), `Authorization: Bearer <token>`, `Content-Type: application/json`, timeout via AbortSignal, retry só-conexão, `maskTokenInLogs`.
 - **`services/providers/whapi/config.js`** — `resolveConfig({companyId, whatsappInstanceId})` → busca instância (`getWhatsappInstanceById`, `includeCredentials:true, requireActive:true`), **recusa instância de outra empresa**, extrai `channel_id`=`instance_id` e `token`=`instance_token`. Sem prefixo `instance` (UltraMSG-only).
 - **`services/providers/whapi/send.js`** — `sendText` real (Fase A); demais sends stub 501.
-- **`services/providers/whapi/instanceAdmin.js`** — `getConnectionStatus` (`GET /health`); `configureWebhooks` real (`PATCH /settings` só `webhooks`, header `X-Webhook-Token`, URL `/webhooks/whapi` **sem** query token, `skipSendGuard`); `getLoginQr` (`GET /users/login/image` + fallback `GET /users/login`); `getLoginCode`; `logoutUser` (`POST /users/logout`). Nunca no boot, nunca na instância UltraMSG.
+- **`services/providers/whapi/instanceAdmin.js`** — `getConnectionStatus` (`GET /health?wakeup=true`; `AUTH`/`CONNECTED`/`READY` ou `status.code === 4`); `configureWebhooks` real (`PATCH /settings` só `webhooks`, header `X-Webhook-Token`, URL `/webhooks/whapi` **sem** query token, `skipSendGuard`); `getLoginQr` (`GET /users/login/image` + fallback `GET /users/login`); `getLoginCode`; `logoutUser` (`POST /users/logout`). Nunca no boot, nunca na instância UltraMSG.
+- **`services/providers/whapi/partner.js`** — Partner API (`manager.whapi.cloud`). `PUT /channels` com Bearer `WHAPI_PARTNER_TOKEN`. Não mistura com o token do canal / `gate.whapi.cloud`.
 - **`controllers/webhookWhapiController.js`** — `normalizeWhapiToInternal(message)` + `normalizeWhapiStatus(status)` + `handleWebhookWhapi` (itera `messages[]`/`statuses[]`, delega a `receberZapi`/`statusZapi`). Espelha `handleWebhookUltramsg`, **sem** importar o controller UltraMSG.
 - **`middleware/resolveWhapiWebhookCompany.js`** — extrai `channel_id`, `getWhatsappInstanceByProviderInstanceId('whapi', channelId)`, injeta `req.webhookContext`/`req.zapiContext` com `provider:'whapi'`. (Cópia enxuta do resolver UltraMSG parametrizada — não reescrever o de UltraMSG.)
 - **`routes/webhookWhapiRoutes.js`** — stack `webhookLogger('whapi') → webhookBodyResolver → requireWhapiWebhookToken → resolveWhapiWebhookCompany → handleWebhookWhapi`.
@@ -309,7 +310,11 @@ Ver §0.1. Papéis-chave:
 - `GET /instances/:id/qrcode` em instância Whapi (2026-09-07): chama `getLoginQr` (`GET /users/login/image`) e devolve `{ imageBase64, qrBase64, dataUri }` no **mesmo formato do UltraMSG** (base64 cru; front prefixa `data:`). Se não houver QR, consulta `getConnectionStatus`: canal em AUTH → `{ alreadyConnected:true }`; senão 502 com erro claro. `POST .../restart` Whapi segue **501** (sessão gerida pelo canal). Caminho UltraMSG intocado.
 - HTTP Whapi ganhou `PATCH` (`skipSendGuard` em settings) e `getBinary` (leitura de bytes p/ o QR).
 
-**Ainda falta (C restante):** homologação live do QR/pairing (PENDENTE). UI de cadastro+QR: **feita 2026-09-07** — aba Configurações `?tab=whapi` (`WhapiSection` + `WhapiConnectPanel`) consome `GET/POST /instances`, `GET :id/qrcode`, `GET :id/status`, `POST :id/phone-code`, `POST :id/configure-webhooks`, `POST :id/logout`. Passkeys Chrome/NID **fora** (cerimônia de browser; não é o fluxo WhatsApp Web do produto).
+**Ainda falta (C restante):** homologação live do QR/pairing (PENDENTE). UI SaaS **2026-09-07:** aba Configurações `?tab=whapi` consulta health na lista (`GET /health?wakeup=true`, `AUTH`/`code 4` = conectado), auto-seleciona a instância e gera QR se precisar. `POST /instances/provision-whapi` cria o canal via Partner (`PUT manager.whapi.cloud/channels`) — o usuário **não** cola Channel ID/token. Cadastro manual ficou em “avançado”. Passkeys Chrome/NID **fora**.
+
+Health: `getConnectionStatus` manda `wakeup=true` por padrão (canal adormecido deixava o painel em “Desconectado”). `wakeup:false` só em checagens que não devem acordar o canal.
+
+Partner (CONFIRMADO na doc oficial): Bearer `WHAPI_PARTNER_TOKEN`; body `{ name, projectId }`; resposta `{ id, token, apiUrl }`. Token do canal **não** volta no JSON da API ZapERP. Sem Partner configurado → `503` `WHAPI_PARTNER_OFF`. Idempotente se a empresa já tem instância Whapi.
 
 **Pronto de C quando:** criar instância Whapi pela UI, ver health, configurar webhook, sem quebrar fluxo UltraMSG.
 

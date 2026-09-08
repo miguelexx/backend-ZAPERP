@@ -16,6 +16,7 @@ Somente nomes/finalidades; valores devem vir do cofre/ambiente.
 |---|---|
 | Processo/URLs | `NODE_ENV`, `PORT`, `APP_URL`, `CORS_ORIGINS`, `TRUST_PROXY`, `ZAPERP_DISABLE_BACKGROUND_JOBS` |
 | JWT/cron/webhook | `JWT_SECRET`, `JWT_EXPIRES_IN`, `CRON_SECRET`, `WHATSAPP_WEBHOOK_TOKEN`, `ALLOW_INSTANCEID_WEBHOOK_FALLBACK`, `WEBHOOK_LOG_FULL_PAYLOAD` |
+| WhatsApp Whapi (2º provider) | `WHAPI_BASE_URL`, `WHAPI_TIMEOUT_MS`, `WHAPI_PARTNER_TOKEN`, `WHAPI_PARTNER_PROJECT_ID`, `WHAPI_MANAGER_URL`, `WHAPI_PARTNER_TIMEOUT_MS` |
 | Supabase | `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_TIMEOUT_MS` |
 | UltraMSG/default legado | `ULTRAMSG_INSTANCE_ID`, `ULTRAMSG_TOKEN`, `ULTRAMSG_BASE_URL` e opções de timeout/retry referenciadas pelo provider |
 | Limites | `LOGIN_RATE_LIMIT_MAX`, `WEBHOOK_RATE_LIMIT_MAX`, `API_RATE_LIMIT_MAX`, `DESTRUCTIVE_RATE_LIMIT_MAX`, `AI_RATE_LIMIT_MAX` |
@@ -31,7 +32,9 @@ Somente nomes/finalidades; valores devem vir do cofre/ambiente.
 
 Para o nome exato antes de configurar, cruzar `.env.example` com `rg "process\.env"`; nem toda variável no exemplo está ativa e algumas referências possuem default. O `.env.example` existente contém exemplo com aparência de credencial e não é considerado padrão seguro; não foi criado outro nem copiado valor.
 
-> **Nota sobre vars `META_*` / `WHATSAPP_TOKEN` no `.env.example`:** As variáveis `WHATSAPP_TOKEN`, `META_ACCESS_TOKEN`, `META_APP_SECRET`, `PHONE_NUMBER_ID`, `WHATSAPP_PHONE_ID` e `WEBHOOK_VERIFY_TOKEN` aparecem comentadas no `.env.example`. Pertencem à **Meta Cloud API (provider removido)**. O sistema **não usa Meta Cloud API** — o único provider ativo é UltraMSG. Essas vars estão no exemplo por legado histórico e podem ser ignoradas completamente. Não implementar nenhuma lógica com base nelas.
+> **Nota sobre vars `META_*` / `WHATSAPP_TOKEN` no `.env.example`:** As variáveis `WHATSAPP_TOKEN`, `META_ACCESS_TOKEN`, `META_APP_SECRET`, `PHONE_NUMBER_ID`, `WHATSAPP_PHONE_ID` e `WEBHOOK_VERIFY_TOKEN` aparecem comentadas no `.env.example`. Pertencem à **Meta Cloud API (provider removido)**. O sistema **não usa Meta Cloud API**. Providers ativos: **UltraMSG** (principal) e **Whapi** (opcional por instância). Essas vars Meta estão no exemplo por legado e podem ser ignoradas. Não implementar lógica com base nelas.
+
+SaaS Whapi: `WHAPI_PARTNER_TOKEN` (e de preferência `WHAPI_PARTNER_PROJECT_ID`) no servidor. Sem o token de parceiro, `POST /instances/provision-whapi` responde `503 WHAPI_PARTNER_OFF`; o cadastro manual avançado continua disponível. Nunca colocar o Bearer do canal no frontend.
 
 ## Desenvolvimento e produção
 
