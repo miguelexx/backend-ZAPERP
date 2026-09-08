@@ -89,4 +89,13 @@ describe('media proxy target resolution', () => {
     expect(response.status).toBe(403)
     expect(global.fetch).not.toHaveBeenCalled()
   })
+
+  test('allows Whapi Wasabi storage and *.whapi.cloud media hosts', () => {
+    expect(
+      _test.isAllowedProxyTarget(new URL('https://s3.eu-central-1.wasabisys.com/in-files/1371989950/a.jpg'))
+    ).toBe(true)
+    expect(_test.isAllowedProxyTarget(new URL('https://gate.whapi.cloud/media/file-abc'))).toBe(true)
+    expect(_test.isAllowedProxyTarget(new URL('https://media.whapi.cloud/x.jpg'))).toBe(true)
+    expect(_test.isAllowedProxyTarget(new URL('https://example.com/private/a.jpg'))).toBe(false)
+  })
 })

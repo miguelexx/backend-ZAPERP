@@ -75,9 +75,16 @@ async function applyWhapiEditedMessage(ctxSrc, m, io) {
   return true
 }
 
-/** Extrai dígitos de um JID (5534999@s.whatsapp.net → 5534999; 120363@g.us → 120363). */
+/** Extrai dígitos de um JID (5534999@s.whatsapp.net → 5534999; 120363@g.us → 120363).
+ * @lid NÃO é telefone — devolve vazio para o caller usar a chave lid:… */
+function isLidJid(jid) {
+  const s = String(jid || '').trim().toLowerCase()
+  return s.endsWith('@lid') || s.endsWith('@broadcast')
+}
+
 function jidToDigits(jid) {
   if (!jid || typeof jid !== 'string') return ''
+  if (isLidJid(jid)) return ''
   return String(jid).replace(/@[^@]+$/, '').replace(/\D/g, '')
 }
 
@@ -171,8 +178,14 @@ function normalizeWhapiMessageToInternal(m, ctx = {}) {
     participantPhone = jidToDigits(m.from ?? m.author ?? '')
   } else {
     remoteJid = chatJid || fromJid
-    const digits = jidToDigits(remoteJid)
-    phone = normalizePhoneBR(digits) || digits || remoteJid
+    const digits = jidToDigits(remoteJid) || jidToDigits(chatJid) || jidToDigits(fromJid)
+    if (digits) {
+      phone = normalizePhoneBR(digits) || digits
+    } else {
+      const lidJid = [chatJid, fromJid, remoteJid].find(isLidJid) || ''
+      // Preserva o JID @lid para o pipeline (resolveConversationKeyFromZapi → lid:…).
+      phone = lidJid || remoteJid
+    }
   }
 
   const messageId = (m.id && String(m.id).trim()) ? String(m.id).trim() : null
@@ -441,6 +454,7 @@ exports._test = {
   mapWhapiAckToStatus,
   extractEvents,
   jidToDigits,
+  isLidJid,
   isWhapiEditedMessage,
   extractWhapiEditedTexto,
   extractInteractiveReply,

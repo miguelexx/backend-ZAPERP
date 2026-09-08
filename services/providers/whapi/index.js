@@ -13,7 +13,8 @@ const instanceAdmin = require('./instanceAdmin')
 const presence = require('./presence')
 const blacklist = require('./blacklist')
 const queries = require('./queries')
-const { uploadMedia } = require('./upload')
+const channel = require('./channel')
+const { uploadMedia, getMediaFiles, getMedia, deleteMedia } = require('./upload')
 const { buildBaseUrl, maskTokenInLogs, validateRequiredFields } = require('./http')
 const { toWhapiRecipient, toWhapiChatId, recipientCandidates } = require('./phones')
 
@@ -27,8 +28,12 @@ module.exports = {
   sendSticker: send.sendSticker,
   sendAudio: send.sendAudio,
   sendVoice: send.sendVoice,
+  sendGif: send.sendGif,
+  sendShortVideo: send.sendShortVideo,
+  sendPtv: send.sendPtv,
   sendContact: send.sendContact,
   sendLocation: send.sendLocation,
+  sendLiveLocation: send.sendLiveLocation,
   sendReaction: send.sendReaction,
   removeReaction: send.removeReaction,
   sendCall: send.sendCall,
@@ -57,14 +62,22 @@ module.exports = {
   getContacts: contacts.getContacts,
   getContactMetadata: contacts.getContactMetadata,
   getProfilePicture: contacts.getProfilePicture,
+  getContactProfile: contacts.getContactProfile,
   invalidateNoProfilePictureCache: contacts.invalidateNoProfilePictureCache,
   checkPhones: contacts.checkPhones,
   getContactAbout: contacts.getContactAbout,
   addContact: contacts.addContact,
   getIdByLid: contacts.getIdByLid,
   getLidById: contacts.getLidById,
+  getLidByIds: contacts.getLidByIds,
+  checkExist: contacts.checkExist,
+  editContact: contacts.editContact,
+  deleteContact: contacts.deleteContact,
   getChatMessages: chatMessages.getChatMessages,
   uploadMedia,
+  getMediaFiles,
+  getMedia,
+  deleteMedia,
 
   // Presença (digitando…/gravando…) e presença da própria conta
   sendPresence: presence.sendPresence,
@@ -78,11 +91,25 @@ module.exports = {
   getConnectionStatus: instanceAdmin.getConnectionStatus,
   configureWebhooks: instanceAdmin.configureWebhooks,
   getLoginQr: instanceAdmin.getLoginQr,
+  getLoginQrBase64: instanceAdmin.getLoginQrBase64,
+  getLoginQrRowData: instanceAdmin.getLoginQrRowData,
   getLoginCode: instanceAdmin.getLoginCode,
   logoutUser: instanceAdmin.logoutUser,
+  getUserProfile: instanceAdmin.getUserProfile,
+  updateUserProfile: instanceAdmin.updateUserProfile,
   updateProfilePicture: instanceAdmin.updateProfilePicture,
   updateProfileName: instanceAdmin.updateProfileName,
   updateProfileDescription: instanceAdmin.updateProfileDescription,
+  getAccountRegistrationDate: instanceAdmin.getAccountRegistrationDate,
+  getUsername: instanceAdmin.getUsername,
+  setUsername: instanceAdmin.setUsername,
+
+  getChannelSettings: channel.getChannelSettings,
+  updateChannelSettings: channel.updateChannelSettings,
+  resetChannelSettings: channel.resetChannelSettings,
+  getAllowedEvents: channel.getAllowedEvents,
+  testWebhook: channel.testWebhook,
+  getLimits: channel.getLimits,
 
   resendByStatus: queries.resendByStatus,
   resendById: queries.resendById,

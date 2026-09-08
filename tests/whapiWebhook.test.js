@@ -40,6 +40,25 @@ describe('Whapi webhook — normalização e dispatch', () => {
     expect(m.instanceId).toBe('NEBULA-AER3B')
   })
 
+  test('inbound privado @lid NÃO vira telefone falso — preserva o JID lid', () => {
+    const m = controller._test.normalizeWhapiMessageToInternal(
+      {
+        id: 'wamid.lid',
+        from_me: false,
+        type: 'text',
+        chat_id: '280396956696801@lid',
+        from: '280396956696801@lid',
+        from_name: 'Sem número',
+        text: { body: 'oi' },
+        timestamp: 1700000000,
+      },
+      { channelId: 'NEBULA-AER3B' }
+    )
+    expect(m.isGroup).toBe(false)
+    expect(m.phone).toBe('280396956696801@lid')
+    expect(controller._test.jidToDigits('280396956696801@lid')).toBe('')
+  })
+
   test('inbound de grupo preserva JID @g.us e participante', () => {
     const m = controller._test.normalizeWhapiMessageToInternal(
       { id: 'wamid.g', from_me: false, type: 'text', chat_id: '120363999@g.us', from: '5534988887777@s.whatsapp.net', text: { body: 'grupo' }, timestamp: 1700000000 },

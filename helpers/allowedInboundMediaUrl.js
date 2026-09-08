@@ -81,6 +81,11 @@ function isAllowedInboundMediaUrl(u) {
   // Domínios UltraMsg diretos (não-S3): files.ultramsg.com, media.ultramsg.com, etc.
   if (host === 'ultramsg.com' || host.endsWith('.ultramsg.com')) return true
 
+  // Whapi Cloud: auto-download grava em Wasabi (`s3.*.wasabisys.com/in-files/…`);
+  // GET /media/{id} e CDNs próprios usam *.whapi.cloud.
+  if (host === 'wasabisys.com' || host.endsWith('.wasabisys.com')) return true
+  if (host === 'whapi.cloud' || host.endsWith('.whapi.cloud')) return true
+
   // MEDIA_PROXY_EXTRA_HOSTS: suporta wildcards no formato "*.dominio.tld" além de match exato.
   const extra = String(process.env.MEDIA_PROXY_EXTRA_HOSTS || '')
     .split(',')

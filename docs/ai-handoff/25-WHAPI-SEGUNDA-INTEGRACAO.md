@@ -287,6 +287,7 @@ Ver §0.1. Papéis-chave:
 - `sendImage/File/Audio/Voice/Video/Sticker/Reaction/Location/Contact` reais; `uploadMedia` (`POST /media`, data URI, `skipSendGuard`).
 - HTTP ganhou `PUT` (reação: `PUT /messages/{id}/reaction`).
 - Normalizador: `*.link` → `imageUrl`/`audioUrl`/… (pipeline já baixa via `inboundMediaPersistenceService`); reação oficial `type=action`; `link_preview`/`live_location`/`contact`; ACK `code`+`status`.
+- **Mídia Whapi no visualizador (2026-09-07):** allowlist de inbound/proxy passa a aceitar `*.wasabisys.com` (auto-download Whapi) e `*.whapi.cloud`. Sem isso o `/media/proxy` devolvia 403, a bolha caía na URL direta e o lightbox (só a 1ª URL) mostrava o ícone quebrado “Imagem”. UltraMSG intocado.
 - Chat: `mediaMessageController`, `outboundController`, `retryController`, `forwardController` passam `getProvider({ provider })` (default ultramsg).
 - **Ainda stub 501:** `sendCall`, `clearChatMessages`, `resendByStatus`/`resendById`, `getMessagesStatistics`, `clearMessages`.
 - **Opcionais implementados (2026-09-07, código; live PENDENTE):** `forwardMessage` (POST `/messages/{MessageID}`), `checkPhones` (POST `/contacts`), `getLoginQr` (GET `/users/login/image` → dataURI). Testes em `tests/whapiOptionalEndpoints.test.js`.
@@ -295,6 +296,7 @@ Ver §0.1. Papéis-chave:
   - `pinMessage` POST `/messages/{id}/pin` `{time:day|week|month}`; `starMessage` PUT `/messages/{id}/star` `{starred}`; `markMessageAsPlayed` PUT `/messages/{id}/played`.
   - `patchChat` PATCH `/chats/{id}` `{pin?,mute_until?,mark_unread?,ephemeral?}` (+ atalhos `pinChat`/`muteChat`).
   - `getContactAbout` GET `/contacts/{id}/about`; `addContact` PUT `/contacts` `{phone,name}`; `getIdByLid` GET `/contacts/ids/{lid}`; `getLidById` GET `/contacts/lids/{id}`.
+  - **Lote doc Contacts/Messages (2026-09-07, adapter-only):** `checkExist` HEAD `/contacts/{id}`; `editContact` PATCH `/contacts/{id}` `{name}`; `deleteContact` DELETE `/contacts/{id}`; `getLidByIds` GET `/contacts/lids?ContactIDList=`; `sendGif` POST `/messages/gif`; `sendShortVideo`/`sendPtv` POST `/messages/short`; `sendLiveLocation` POST `/messages/live_location`. Testes: `tests/whapiDocEndpoints.test.js`. **Não** fiados em lista/thread/composer.
   - `getLoginCode` GET `/users/login/{phone}` → `{code}` (pareamento sem QR) → fiado em **novo** `POST /integrations/whatsapp/instances/:id/phone-code` (só Whapi; UltraMSG segue em `/connect/phone-code`).
   - `sendLink` melhorado: usa POST `/messages/link_preview` (card com título/mídia) quando há título; senão texto simples (que já previa a URL); fallback resiliente a texto.
   - Testes: `tests/whapiExtraEndpoints.test.js` (14). Todos exportados via `getProvider({provider}).*`. **Adapter-only** (exceto phone-code fiado); pin/star/patchChat/about/addContact aguardam UI/menu-bolha para consumo.
@@ -336,6 +338,7 @@ Ordem obrigatória (não inverter):
 - `getContacts` GET `/contacts` (paginação count/offset) → `{ data, hasMore, rawCount }` via `agendaContactFields`.
 - `getChats` GET `/chats`; `getGroups` GET `/groups`; `getGroup` GET `/groups/{id}`.
 - `getChatMessages` GET `/messages/list/{ChatID}` mapeado para o formato que `oldMessagesSyncService` já lê (`from_me`, `text.body`, `image.link`).
+- Foto no atendimento: `syncUltraMsgContact` em provider Whapi chama `GET /contacts/{id}/profile` **mesmo sem** o contato na agenda (`getContactMetadata` nulo). UltraMSG segue exigindo metadata antes da imagem. Novo contato e abrir conversa passam `whatsapp_instance_id`. Inbound `@lid` não é mais convertido em dígitos de telefone.
 - `getProfilePicture` GET `/contacts/{digits}/profile` (`icon_full`); grupo via GET `/groups/{id}`.
 - Callers de sync (`oldMessagesSyncService`, `contactSyncService`, `ultramsgContactsSyncService`, `ultramsgGroupsSyncService`, `syncFotosProgressivaService`) passam `getProvider({ provider })` por instância/empresa. Default continua ultramsg.
 - `getEmpresaWhatsappConfig` (legado UltraMSG / default `provider=ultramsg`) é ignorado quando o provider da empresa/instância é Whapi — **CONFIRMADO 2026-09-05**: o gate existia em grupos/chats e **faltava** em `syncUltraMsgContact`, `contactSyncService`, `ultramsgContactsSyncService` e `POST /chats` sync de agenda. Sem isso, empresa só-Whapi (ex. instância 30) falhava com "sem instância" mesmo com o adapter Whapi roteado.
@@ -457,11 +460,11 @@ Webhook inbound: texto, from_me, ACK, mídia `link`, reação `action`, edit, lo
 
 ### Existe no MCP, **não** implantado — só se o produto pedir
 
-**Atendimento (gap vs canal, não vs UltraMSG):** `patchChat` pin/mute/ephemeral; `starMessage` `pinMessage` `commentMessage`; `markMessageAsPlayed`; `checkExist` (variação de `checkPhones`); `getLidById`/`getIdByLid`; `sendMePresence`/`getPresence`; `addContact`/`editContact`. (`forwardMessage`/`checkPhones` já implementados — ver acima.)
+**Atendimento (gap vs canal, não vs UltraMSG):** `commentMessage`; `getPresence`. (`patchChat`/`starMessage`/`pinMessage`/`markMessageAsPlayed`/`checkExist`/`getLidById`/`getIdByLid`/`getLidByIds`/`addContact`/`editContact`/`deleteContact` já no adapter — UI/menu ainda PENDENTE salvo o que já está fiado.)
 
-**Envio extra (WhatsApp tem, CRM não usa):** `sendMessagePoll` `sendMessageQuiz` `sendMessageQuestion` `sendMessageInteractive` (botões — MCP avisa instável) `sendMessageCarousel` `sendMessageGif` `sendMessageShort` `sendMessageLiveLocation` `sendMessageContactList` `sendMediaMessage` (multipart).
+**Envio extra (WhatsApp tem, CRM não usa):** `sendMessagePoll` `sendMessageQuiz` `sendMessageQuestion` `sendMessageCarousel` `sendMessageContactList` `sendMediaMessage` (multipart). `sendGif`/`sendShortVideo`/`sendLiveLocation` e `sendInteractive` estão no adapter; composer do atendimento **não** os dispara ainda.
 
-**Fora de escopo CRM (não implantar sem pedido):** stories, newsletters/canais, comunidades, catálogo/produtos/coleções, labels Business, blacklist, bots, eventos/calls, agrupamento admin (criar grupo, promover, convite), login/logout/reset settings.
+**Fora de escopo CRM (não implantar sem pedido):** stories, newsletters/canais, comunidades, catálogo/produtos/coleções, labels Business, bots, eventos/calls, agrupamento admin (criar grupo, promover, convite), login/logout/reset settings. Blacklist **já no adapter** (`blockContact`/`unblockContact`/`getBlacklist`) — ver §26.2.
 
 Webhook: canal **não** assina chats/contacts/groups/presences/calls. Só messages+statuses. Não tratar o resto até assinar.
 
@@ -496,6 +499,68 @@ Implementados (adapter + gancho, **sem frontend**, UltraMSG intocável). Contrat
 ### 26.4 Testes / gate
 `tests/whapiPresenceBlacklist.test.js` (10) + `tests/disparoOptOutBlock.test.js` (5). Suite completa **152 suites / 1568 testes verdes**. Regressão zero.
 Homologação live pendente (presença e block ainda não exercidos contra canal real).
+
+### 26.5 Certificação das telas da doc Whapi (Contacts / Messages / Blacklist) — 2026-09-07
+
+Todos no adapter `getProvider({ provider: 'whapi' })`. Homologação live **PENDENTE**. Composer/lista **não** ganhos de UI neste lote.
+
+| Doc | Método HTTP | Path Whapi | Adapter |
+|---|---|---|---|
+| Get contacts | GET | `/contacts` | `getContacts` |
+| Check phones | POST | `/contacts` `{contacts}` | `checkPhones` |
+| Get contact | GET | `/contacts/{id}` | `getContactMetadata` |
+| Add contact | PUT | `/contacts` | `addContact` |
+| Send contact | POST | `/messages/contact` | `sendContact` |
+| Check exist | HEAD | `/contacts/{id}` | `checkExist` |
+| Get LIDs by IDs | GET | `/contacts/lids?ContactIDList=` | `getLidByIds` |
+| Edit contact | PATCH | `/contacts/{id}` `{name}` | `editContact` |
+| Get LID by ID | GET | `/contacts/lids/{id}` | `getLidById` |
+| Delete contact | DELETE | `/contacts/{id}` | `deleteContact` |
+| Get contact about | GET | `/contacts/{id}/about` | `getContactAbout` |
+| Get ID by LID | GET | `/contacts/ids/{lid}` | `getIdByLid` |
+| Get messages by chat ID | GET | `/messages/list/{ChatID}` | `getChatMessages` |
+| Send text | POST | `/messages/text` | `sendText` |
+| Send image/video/audio/voice/document | POST | `/messages/{image\|video\|audio\|voice\|document}` | `sendImage`/`sendVideo`/`sendAudio`/`sendVoice`/`sendFile` |
+| Send GIF | POST | `/messages/gif` | `sendGif` |
+| Send short/PTV | POST | `/messages/short` | `sendShortVideo` (`sendPtv`) |
+| Send link preview | POST | `/messages/link_preview` | `sendLink` (com título) |
+| Send location | POST | `/messages/location` | `sendLocation` |
+| Send live location | POST | `/messages/live_location` | `sendLiveLocation` |
+| Send contact | POST | `/messages/contact` | `sendContact` |
+| Add/remove/get blacklist | PUT/DELETE/GET | `/blacklist` `/blacklist/{id}` | `blockContact` `unblockContact` `getBlacklist` |
+
+Testes: `tests/whapiDocEndpoints.test.js`. `HEAD` em `http.js` (sem corpo, sem send-guard). HEAD/PATCH/DELETE de contato usam `skipSendGuard` (não enviam WhatsApp).
+
+### 26.6 Certificação Media / Users / Channel (doc Whapi) — 2026-09-07
+
+Adapter-only (`getProvider({ provider: 'whapi' })`). Homologação live **PENDENTE**. `DELETE /settings` exige `confirm:true` (apaga webhooks). UltraMSG / lista / thread / composer **intocados**.
+
+| Doc | Método HTTP | Path Whapi | Adapter |
+|---|---|---|---|
+| Upload media | POST | `/media` | `uploadMedia` |
+| Get media files | GET | `/media` | `getMediaFiles` |
+| Get media | GET | `/media/{MediaID}` | `getMedia` |
+| Delete media | DELETE | `/media/{MediaID}` | `deleteMedia` |
+| Login QR-base64 | GET | `/users/login` | `getLoginQrBase64` (o painel usa `getLoginQr` = PNG + fallback) |
+| Login QR-image | GET | `/users/login/image` | `getLoginQr` |
+| Login QR-rowdata | GET | `/users/login/rowdata` | `getLoginQrRowData` |
+| Auth code | GET | `/users/login/{phone}` | `getLoginCode` |
+| Logout | POST | `/users/logout` | `logoutUser` |
+| User info | GET | `/users/profile` | `getUserProfile` |
+| Get profile | GET | `/contacts/{id}/profile` | `getContactProfile` (`getProfilePicture` já usava este path) |
+| Update user info | PATCH | `/users/profile` | `updateUserProfile` (+ atalhos name/icon/about) |
+| Registration date | GET | `/users/account/registration_date` | `getAccountRegistrationDate` |
+| Get username | GET | `/users/username` | `getUsername` |
+| Set username | PATCH | `/users/username` | `setUsername` |
+| Health & launch | GET | `/health?wakeup=true` | `getConnectionStatus` |
+| Get settings | GET | `/settings` | `getChannelSettings` |
+| Reset settings | DELETE | `/settings` | `resetChannelSettings` (`confirm:true`) |
+| Update settings | PATCH | `/settings` | `updateChannelSettings` (campos omitidos inalterados; `configureWebhooks` continua o caminho do produto) |
+| Allowed events | GET | `/settings/events` | `getAllowedEvents` |
+| Test webhook | POST | `/settings/webhook_test` | `testWebhook` |
+| Get limits | GET | `/limits` | `getLimits` (HTTP 204 = sem limite) |
+
+Testes: `tests/whapiMediaUsersChannel.test.js`.
 
 ---
 

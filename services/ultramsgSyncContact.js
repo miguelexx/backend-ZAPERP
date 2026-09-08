@@ -131,16 +131,20 @@ async function syncUltraMsgContact(chatIdOrPhone, companyId, opts = {}) {
     }
 
     try {
-      // Buscar metadados primeiro
+      // Metadados (nome/pushname/img) e foto de perfil são fontes independentes.
+      // UltraMSG: só pede imagem se o contato existir na agenda (evita flood no /contacts/image).
+      // Whapi: GET /contacts/{id}/profile funciona mesmo fora da agenda — senão a foto
+      // nunca entra no atendimento para quem só conversou, sem estar salvo no celular.
       const meta = await provider.getContactMetadata?.(telefone, apiOpts).catch(() => null) ?? null
-      
-      // Só buscar foto se os metadados indicarem que o contato existe e está na lista
+
       let pic = null
-      if (meta && !meta.error) {
+      const metaOk = !!(meta && !meta.error)
+      const shouldFetchPhoto = instanceProvider === 'whapi' || metaOk
+      if (shouldFetchPhoto) {
         if (refreshFoto) tryInvalidateNoProfilePictureCache(chatId, instanceProvider)
         pic = await provider.getProfilePicture?.(chatId, apiOpts).catch(() => null) ?? null
       }
-      
+
       metadata = meta
       profilePicUrl = pic
     } catch (e) {
@@ -286,7 +290,7 @@ async function syncConversationContactOnJoin(supabase, conversaId, companyId, io
   try {
     const { data: conv } = await supabase
       .from('conversas')
-      .select('id, telefone, cliente_id, nome_contato_cache, foto_perfil_contato_cache')
+      .select('id, telefone, cliente_id, nome_contato_cache, foto_perfil_contato_cache, whatsapp_instance_id')
       .eq('id', conversaId)
       .eq('company_id', companyId)
       .maybeSingle()
@@ -309,6 +313,7 @@ async function syncConversationContactOnJoin(supabase, conversaId, companyId, io
     const synced = await syncUltraMsgContact(chatId, companyId, {
       skipCache: !conv.cliente_id || needsFotoRefresh,
       refreshFoto: needsFotoRefresh,
+      ...(conv.whatsapp_instance_id ? { whatsappInstanceId: conv.whatsapp_instance_id } : {}),
     })
     if (!synced) return
 

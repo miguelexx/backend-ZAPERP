@@ -383,7 +383,9 @@ exports.criarCliente = async (req, res) => {
     if (enriquecivel) {
       try {
         const enriched = await Promise.race([
-          syncUltraMsgContact(enrichPhone, cid).catch(() => null),
+          syncUltraMsgContact(enrichPhone, cid, {
+            ...(whatsapp_instance_id ? { whatsappInstanceId: Number(whatsapp_instance_id) } : {}),
+          }).catch(() => null),
           new Promise((resolve) => setTimeout(() => resolve(null), CONTACT_ENRICH_TIMEOUT_MS)),
         ])
         if (enriched) {

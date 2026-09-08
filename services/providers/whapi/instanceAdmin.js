@@ -298,14 +298,183 @@ async function logoutUser(opts = {}) {
   }
 }
 
+/**
+ * GET /users/login — QR em JSON/base64 (loginUser). Distinto do PNG em /users/login/image.
+ */
+async function getLoginQrBase64(opts = {}) {
+  const cfg = await resolveConfig(opts)
+  if (!cfg) return { ok: false, error: 'Instância Whapi não configurada' }
+  try {
+    return await getLoginQrFromJson(cfg, loginQueryParams(opts))
+  } catch (e) {
+    return { ok: false, error: `Falha de conexão ao obter QR base64 (Whapi): ${e?.message || e}` }
+  }
+}
+
+/**
+ * GET /users/login/rowdata — payload cru do QR (loginUserRowData).
+ */
+async function getLoginQrRowData(opts = {}) {
+  const cfg = await resolveConfig(opts)
+  if (!cfg) return { ok: false, error: 'Instância Whapi não configurada' }
+  const extraParams = { wakeup: opts.wakeup === false ? 'false' : 'true' }
+  try {
+    const { ok, status, data } = await get({
+      token: cfg.token,
+      endpoint: '/users/login/rowdata',
+      extraParams,
+    })
+    if (status === 409) return alreadyAuthenticatedResult(status)
+    if (!ok) {
+      return {
+        ok: false,
+        httpStatus: status,
+        error: String(data?.error?.message || data?.error || `HTTP ${status}`),
+      }
+    }
+    return { ok: true, rowdata: data, httpStatus: status }
+  } catch (e) {
+    return { ok: false, error: `Falha de conexão ao obter QR rowdata (Whapi): ${e?.message || e}` }
+  }
+}
+
+function profileFromData(data) {
+  if (!data || typeof data !== 'object') return null
+  const src = data.profile && typeof data.profile === 'object' ? data.profile : data
+  return {
+    name: src.name != null ? String(src.name) : null,
+    push_name: src.push_name != null ? String(src.push_name) : (src.pushname != null ? String(src.pushname) : null),
+    verified_name: src.verified_name != null ? String(src.verified_name) : null,
+    about: src.about != null ? String(src.about) : null,
+    icon: src.icon != null ? String(src.icon) : null,
+    icon_full: src.icon_full != null ? String(src.icon_full) : null,
+  }
+}
+
+/**
+ * GET /users/profile — perfil do número conectado (User info / getUserProfile).
+ */
+async function getUserProfile(opts = {}) {
+  const cfg = await resolveConfig(opts)
+  if (!cfg) return { ok: false, error: 'Instância Whapi não configurada' }
+  try {
+    const { ok, status, data } = await get({ token: cfg.token, endpoint: '/users/profile' })
+    if (!ok || data?.error) {
+      return { ok: false, httpStatus: status, error: String(data?.error?.message || data?.error || `HTTP ${status}`) }
+    }
+    return { ok: true, profile: profileFromData(data), httpStatus: status, raw: data }
+  } catch (e) {
+    return { ok: false, error: `Falha de conexão ao ler perfil (Whapi): ${e?.message || e}` }
+  }
+}
+
+/**
+ * PATCH /users/profile { name?, about?, icon? } — Update user info.
+ * Os atalhos updateProfileName/Picture/Description continuam booleanos (contrato antigo).
+ */
+async function updateUserProfile(fields = {}, opts = {}) {
+  const body = {}
+  if (fields.name != null) body.name = String(fields.name)
+  if (fields.about != null) body.about = String(fields.about)
+  if (fields.icon != null) body.icon = String(fields.icon)
+  if (!Object.keys(body).length) return { ok: false, error: 'Nenhum campo de perfil para atualizar' }
+  const patched = await patchProfile(opts, body)
+  return patched ? { ok: true } : { ok: false, error: 'Whapi recusou a atualização do perfil' }
+}
+
+/**
+ * GET /users/account/registration_date → { creation, last_registration } (ms).
+ */
+async function getAccountRegistrationDate(opts = {}) {
+  const cfg = await resolveConfig(opts)
+  if (!cfg) return { ok: false, error: 'Instância Whapi não configurada' }
+  try {
+    const { ok, status, data } = await get({ token: cfg.token, endpoint: '/users/account/registration_date' })
+    if (!ok || data?.error) {
+      return { ok: false, httpStatus: status, error: String(data?.error?.message || data?.error || `HTTP ${status}`) }
+    }
+    return {
+      ok: true,
+      creation: data?.creation ?? null,
+      last_registration: data?.last_registration ?? null,
+      httpStatus: status,
+      raw: data,
+    }
+  } catch (e) {
+    return { ok: false, error: `Falha de conexão ao ler data de registro (Whapi): ${e?.message || e}` }
+  }
+}
+
+/**
+ * GET /users/username → { username, state, pin }.
+ */
+async function getUsername(opts = {}) {
+  const cfg = await resolveConfig(opts)
+  if (!cfg) return { ok: false, error: 'Instância Whapi não configurada' }
+  try {
+    const { ok, status, data } = await get({ token: cfg.token, endpoint: '/users/username' })
+    if (!ok || data?.error) {
+      return { ok: false, httpStatus: status, error: String(data?.error?.message || data?.error || `HTTP ${status}`) }
+    }
+    return {
+      ok: true,
+      username: data?.username ?? null,
+      state: data?.state ?? null,
+      pin: data?.pin ?? null,
+      httpStatus: status,
+      raw: data,
+    }
+  } catch (e) {
+    return { ok: false, error: `Falha de conexão ao ler username (Whapi): ${e?.message || e}` }
+  }
+}
+
+/**
+ * PATCH /users/username { username, reserve?, source?, session_id? }.
+ * username null remove o @ atual.
+ */
+async function setUsername(username, opts = {}) {
+  const cfg = await resolveConfig(opts)
+  if (!cfg) return { ok: false, error: 'Instância Whapi não configurada' }
+  const body = {
+    username: username == null ? null : String(username),
+    ...(opts.reserve === true ? { reserve: true } : {}),
+    ...(opts.source ? { source: String(opts.source) } : {}),
+    ...(opts.session_id ? { session_id: String(opts.session_id) } : {}),
+  }
+  try {
+    const { ok, status, data } = await patch({
+      token: cfg.token,
+      endpoint: '/users/username',
+      body,
+      companyId: cfg.companyId,
+      whatsappInstanceId: cfg.whatsappInstanceId,
+      skipSendGuard: true,
+    })
+    if (!ok || data?.error) {
+      return { ok: false, httpStatus: status, error: String(data?.error?.message || data?.error || `HTTP ${status}`) }
+    }
+    return { ok: true, httpStatus: status }
+  } catch (e) {
+    return { ok: false, error: `Falha de conexão ao definir username (Whapi): ${e?.message || e}` }
+  }
+}
+
 module.exports = {
   getConnectionStatus,
   configureWebhooks,
   getLoginQr,
+  getLoginQrBase64,
+  getLoginQrRowData,
   getLoginCode,
   logoutUser,
+  getUserProfile,
+  updateUserProfile,
   updateProfilePicture,
   updateProfileName,
   updateProfileDescription,
+  getAccountRegistrationDate,
+  getUsername,
+  setUsername,
   WHAPI_WEBHOOK_EVENTS,
 }

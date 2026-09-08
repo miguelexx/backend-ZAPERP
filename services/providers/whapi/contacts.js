@@ -1,13 +1,14 @@
 /**
  * Contatos e foto de perfil Whapi — arquivos próprios (não misturar com UltraMSG).
- * GET /contacts (count/offset) · GET /contacts/{ContactID} · GET /contacts/{ContactID}/profile
+ * GET /contacts · GET/HEAD/PATCH/DELETE /contacts/{ContactID} · PUT /contacts · POST /contacts (check)
+ * GET /contacts/{id}/profile · /about · LID: /contacts/lids e /contacts/ids/{lid}
  * Contrato getContacts: { data, hasMore, rawCount } — o sync da agenda espera isso.
  */
 
 const { agendaContactFields } = require('../../../helpers/agendaContact')
 const { resolveConfig } = require('./config')
 const { toWhapiContactId, isGroupJid } = require('./phones')
-const { get, post, put } = require('./http')
+const { get, post, put, patch, del, head } = require('./http')
 const { extractArray, firstHttpUrl } = require('./parse')
 
 const CONTACTS_PAGE_MAX = 500
@@ -121,6 +122,29 @@ async function getProfilePicture(phone, opts = {}) {
     return firstHttpUrl(data.icon_full, data.icon, data.profile_pic_full, data.profile_pic)
   } catch {
     return null
+  }
+}
+
+/**
+ * GET /contacts/{ContactID}/profile — Get profile (doc Users/Contacts).
+ * Devolve o objeto (about, icon, icon_full), não só a URL.
+ */
+async function getContactProfile(phone, opts = {}) {
+  const cfg = await resolveConfig(opts)
+  if (!cfg) return { ok: false, error: 'Instância Whapi não configurada' }
+  const contactId = toWhapiContactId(phone)
+  if (!contactId || isGroupJid(contactId)) return { ok: false, error: 'Número inválido' }
+  try {
+    const { ok, status, data } = await get({
+      token: cfg.token,
+      endpoint: `/contacts/${encodeURIComponent(contactId)}/profile`,
+    })
+    if (!ok || data?.error) {
+      return { ok: false, httpStatus: status, error: String(data?.error?.message || data?.error || `HTTP ${status}`) }
+    }
+    return { ok: true, profile: data, httpStatus: status }
+  } catch (e) {
+    return { ok: false, error: `Falha de conexão ao ler perfil do contato (Whapi): ${e?.message || e}` }
   }
 }
 
@@ -263,14 +287,136 @@ async function getLidById(phone, opts = {}) {
   }
 }
 
+/**
+ * HEAD /contacts/{ContactID} — o número tem WhatsApp? 200 sim, 404 não.
+ * Não envia mensagem. Retorna { exists, httpStatus }.
+ */
+async function checkExist(phone, opts = {}) {
+  const cfg = await resolveConfig(opts)
+  if (!cfg) return { exists: false, httpStatus: 0, error: 'Instância Whapi não configurada' }
+  const contactId = toWhapiContactId(phone)
+  if (!contactId || isGroupJid(contactId)) return { exists: false, httpStatus: 0, error: 'Número inválido' }
+  try {
+    const { ok, status } = await head({
+      token: cfg.token,
+      endpoint: `/contacts/${encodeURIComponent(contactId)}`,
+    })
+    return { exists: !!ok && status === 200, httpStatus: status }
+  } catch (e) {
+    return { exists: false, httpStatus: 0, error: e?.message || String(e) }
+  }
+}
+
+/**
+ * PATCH /contacts/{ContactID} { name } — edita o nome na agenda do WhatsApp.
+ */
+async function editContact(phone, name, opts = {}) {
+  const cfg = await resolveConfig(opts)
+  if (!cfg) return { ok: false, error: 'Instância Whapi não configurada' }
+  const contactId = toWhapiContactId(phone)
+  const nome = String(name || '').trim()
+  if (!contactId || isGroupJid(contactId)) return { ok: false, error: 'Número inválido' }
+  if (!nome) return { ok: false, error: 'Nome obrigatório' }
+  try {
+    const { ok, status, data } = await patch({
+      token: cfg.token,
+      endpoint: `/contacts/${encodeURIComponent(contactId)}`,
+      body: { name: nome },
+      companyId: cfg.companyId,
+      whatsappInstanceId: cfg.whatsappInstanceId,
+      skipSendGuard: true,
+    })
+    if (!ok || data?.error) {
+      return { ok: false, httpStatus: status, error: String(data?.error?.message || data?.error || `HTTP ${status}`) }
+    }
+    const contact = data?.contact && typeof data.contact === 'object' ? data.contact : data
+    return { ok: true, contact }
+  } catch (e) {
+    return { ok: false, error: `Falha de conexão ao editar contato (Whapi): ${e?.message || e}` }
+  }
+}
+
+/**
+ * DELETE /contacts/{ContactID} — remove da agenda do WhatsApp (não apaga o cliente no ZapERP).
+ */
+async function deleteContact(phone, opts = {}) {
+  const cfg = await resolveConfig(opts)
+  if (!cfg) return { ok: false, error: 'Instância Whapi não configurada' }
+  const contactId = toWhapiContactId(phone)
+  if (!contactId || isGroupJid(contactId)) return { ok: false, error: 'Número inválido' }
+  try {
+    const { ok, status, data } = await del({
+      token: cfg.token,
+      endpoint: `/contacts/${encodeURIComponent(contactId)}`,
+      companyId: cfg.companyId,
+      whatsappInstanceId: cfg.whatsappInstanceId,
+      skipSendGuard: true,
+    })
+    if (!ok || data?.error) {
+      return { ok: false, httpStatus: status, error: String(data?.error?.message || data?.error || `HTTP ${status}`) }
+    }
+    return { ok: true }
+  } catch (e) {
+    return { ok: false, error: `Falha de conexão ao excluir contato (Whapi): ${e?.message || e}` }
+  }
+}
+
+/**
+ * GET /contacts/lids?ContactIDList=a,b — LIDs em lote.
+ * Retorna mapa { [contactId]: lid } (vazio em erro).
+ */
+async function getLidByIds(phones, opts = {}) {
+  const cfg = await resolveConfig(opts)
+  if (!cfg) return {}
+  const ids = (Array.isArray(phones) ? phones : [phones])
+    .map((p) => toWhapiContactId(p))
+    .filter(Boolean)
+  if (!ids.length) return {}
+  try {
+    const { ok, data } = await get({
+      token: cfg.token,
+      endpoint: '/contacts/lids',
+      extraParams: { ContactIDList: ids.join(',') },
+    })
+    if (!ok || data == null) return {}
+    const out = {}
+    const rows = Array.isArray(data)
+      ? data
+      : (Array.isArray(data.lids) ? data.lids : Array.isArray(data.data) ? data.data : null)
+    if (rows) {
+      for (const item of rows) {
+        if (!item || typeof item !== 'object') continue
+        const key = item.id ?? item.phone ?? item.contact_id
+        const lid = item.lid
+        if (key != null && lid != null) out[String(key)] = String(lid)
+      }
+      return out
+    }
+    const source = (data.lids && typeof data.lids === 'object') ? data.lids : data
+    for (const [key, value] of Object.entries(source)) {
+      if (key === 'error' || key === 'success') continue
+      const lid = value && typeof value === 'object' ? value.lid : value
+      if (lid != null) out[key] = String(lid)
+    }
+    return out
+  } catch {
+    return {}
+  }
+}
+
 module.exports = {
   getContacts,
   getContactMetadata,
   getProfilePicture,
+  getContactProfile,
   invalidateNoProfilePictureCache,
   checkPhones,
   getContactAbout,
   addContact,
   getIdByLid,
   getLidById,
+  checkExist,
+  editContact,
+  deleteContact,
+  getLidByIds,
 }

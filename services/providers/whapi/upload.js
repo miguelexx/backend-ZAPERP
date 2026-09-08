@@ -1,14 +1,13 @@
 /**
- * Upload de mídia para a CDN Whapi (POST /media). Não dispara mensagem WhatsApp —
- * retry de conexão/HTTP é seguro. Retorno { ok, url } para usar em sendImage/sendFile/etc.
- * Campo `media`: data URI (MCP/OpenAPI: string). O id/link da resposta vira o `media` do send.
+ * Mídia Whapi: POST /media (upload) · GET /media · GET/DELETE /media/{id}.
+ * Não dispara mensagem WhatsApp — skipSendGuard. Upload: data URI; o id/link vira o `media` do send.
  */
 
 const fs = require('fs')
 const path = require('path')
 const { FILENAME_MAX_LEN } = require('./constants')
 const { resolveConfig } = require('./config')
-const { post, maskToken } = require('./http')
+const { get, post, del, getBinary, maskToken } = require('./http')
 
 function contentTypeForUploadFilename(filename) {
   const ext = String(filename || '').toLowerCase().split('?')[0].split('.').pop()
@@ -75,8 +74,114 @@ async function uploadMedia(filePath, filename, opts = {}) {
   }
 }
 
+/**
+ * GET /media — lista arquivos no cloud do canal.
+ * Query: count, offset, time_from, time_to, sort (asc|desc).
+ */
+async function getMediaFiles(opts = {}) {
+  const cfg = await resolveConfig(opts)
+  if (!cfg) return { ok: false, files: [], error: 'Instância Whapi não configurada' }
+  const extraParams = {}
+  const count = Number(opts.count)
+  const offset = Number(opts.offset)
+  if (Number.isFinite(count) && count > 0) extraParams.count = String(Math.min(500, Math.max(1, Math.trunc(count))))
+  if (Number.isFinite(offset) && offset >= 0) extraParams.offset = String(Math.trunc(offset))
+  if (opts.time_from != null) extraParams.time_from = String(opts.time_from)
+  if (opts.time_to != null) extraParams.time_to = String(opts.time_to)
+  const sort = String(opts.sort || '').toLowerCase()
+  if (sort === 'asc' || sort === 'desc') extraParams.sort = sort
+  try {
+    const { ok, status, data } = await get({
+      token: cfg.token,
+      endpoint: '/media',
+      extraParams,
+    })
+    if (!ok || data?.error) {
+      return {
+        ok: false,
+        files: [],
+        httpStatus: status,
+        error: String(data?.error?.message || data?.error || `HTTP ${status}`),
+      }
+    }
+    const files = Array.isArray(data?.files) ? data.files : (Array.isArray(data) ? data : [])
+    return {
+      ok: true,
+      files,
+      total: Number.isFinite(Number(data?.total)) ? Number(data.total) : files.length,
+      count: Number.isFinite(Number(data?.count)) ? Number(data.count) : files.length,
+      offset: Number.isFinite(Number(data?.offset)) ? Number(data.offset) : 0,
+    }
+  } catch (e) {
+    return { ok: false, files: [], error: `Falha de conexão ao listar mídia (Whapi): ${e?.message || e}` }
+  }
+}
+
+/**
+ * GET /media/{MediaID} — baixa o arquivo (bytes) ou devolve { link } se a origem responder JSON.
+ */
+async function getMedia(mediaId, opts = {}) {
+  const cfg = await resolveConfig(opts)
+  if (!cfg) return { ok: false, error: 'Instância Whapi não configurada' }
+  const id = String(mediaId || '').trim()
+  if (!id) return { ok: false, error: 'MediaID obrigatório' }
+  try {
+    const { ok, status, buffer, contentType } = await getBinary({
+      token: cfg.token,
+      endpoint: `/media/${encodeURIComponent(id)}`,
+    })
+    if (!ok) {
+      let data = null
+      try { data = buffer && buffer.length ? JSON.parse(buffer.toString('utf8')) : null } catch { data = null }
+      return {
+        ok: false,
+        httpStatus: status,
+        error: String(data?.error?.message || data?.error || `HTTP ${status}`),
+      }
+    }
+    const ct = String(contentType || '')
+    if (buffer && (ct.includes('json') || buffer[0] === 0x7b)) {
+      let data = null
+      try { data = JSON.parse(buffer.toString('utf8')) } catch { data = null }
+      const link = data?.link || data?.url || data?.media?.link || null
+      return { ok: true, httpStatus: status, data, link, buffer: null, contentType: ct || 'application/json' }
+    }
+    return { ok: true, httpStatus: status, buffer, contentType: ct || 'application/octet-stream', data: null, link: null }
+  } catch (e) {
+    return { ok: false, error: `Falha de conexão ao obter mídia (Whapi): ${e?.message || e}` }
+  }
+}
+
+/**
+ * DELETE /media/{MediaID} — remove do cloud Whapi (não apaga a cópia no ZapERP).
+ */
+async function deleteMedia(mediaId, opts = {}) {
+  const cfg = await resolveConfig(opts)
+  if (!cfg) return { ok: false, error: 'Instância Whapi não configurada' }
+  const id = String(mediaId || '').trim()
+  if (!id) return { ok: false, error: 'MediaID obrigatório' }
+  try {
+    const { ok, status, data } = await del({
+      token: cfg.token,
+      endpoint: `/media/${encodeURIComponent(id)}`,
+      companyId: cfg.companyId,
+      whatsappInstanceId: cfg.whatsappInstanceId,
+      skipSendGuard: true,
+    })
+    if (!ok || data?.error) {
+      return { ok: false, httpStatus: status, error: String(data?.error?.message || data?.error || `HTTP ${status}`) }
+    }
+    return { ok: true, httpStatus: status }
+  } catch (e) {
+    return { ok: false, error: `Falha de conexão ao excluir mídia (Whapi): ${e?.message || e}` }
+  }
+}
+
 module.exports = {
   uploadMedia,
+  getMediaFiles,
+  getMedia,
+  deleteMedia,
   extractUploadedMediaRef,
   contentTypeForUploadFilename,
 }

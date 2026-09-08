@@ -165,6 +165,18 @@ async function get({ token, endpoint, extraParams = {} }) {
 }
 
 /**
+ * HEAD (ex. Check exist). Sem corpo. 200 = existe no WhatsApp, 404 = não registrado.
+ */
+async function head({ token, endpoint }) {
+  const url = `${buildBaseUrl()}${endpoint}`
+  const fetchOpts = createFetchOptions('HEAD')
+  fetchOpts.headers = withAuth(fetchOpts.headers, token)
+  const res = await fetchWithRetry(url, fetchOpts)
+  logWhapiRequest({ method: 'HEAD', endpoint, token, responseStatus: res.status, responseData: null, responseText: null })
+  return { ok: res.ok, status: res.status }
+}
+
+/**
  * GET que devolve bytes (ex. QR-code image). Sem send guard (é leitura).
  * Header accept curinga — o endpoint responde image/png, não JSON. Retorna { ok, status, buffer, contentType }.
  */
@@ -198,4 +210,5 @@ module.exports = {
   del,
   get,
   getBinary,
+  head,
 }

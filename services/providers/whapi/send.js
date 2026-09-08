@@ -1,5 +1,5 @@
 /**
- * Envio Whapi. Texto + mídia + reação + contato + localização.
+ * Envio Whapi. Texto + mídia (incl. gif/PTV) + reação + contato + localização (fixa e ao vivo).
  * Whapi: JSON + Bearer. Mídia: campo `media` (URL HTTP(S), media id ou data URI).
  * Resposta síncrona CONFIRMADA: { sent: true, message?: { id } }.
  * sendCall continua stub 501. delete/edit/read estão em ./messages.js.
@@ -189,6 +189,23 @@ async function sendVoice(phone, audioUrl, opts = {}) {
   return sendMediaByEndpoint('/messages/voice', 'voice', phone, audioUrl, extra, opts)
 }
 
+async function sendGif(phone, media, caption = '', opts = {}) {
+  const captionTrim = String(caption || '').trim().slice(0, CAPTION_MAX_LEN)
+  const extra = {}
+  if (captionTrim) extra.caption = captionTrim
+  if (opts?.mime_type) extra.mime_type = String(opts.mime_type)
+  if (opts?.autoplay === true) extra.autoplay = true
+  return sendMediaByEndpoint('/messages/gif', 'gif', phone, media, extra, opts)
+}
+
+async function sendShortVideo(phone, media, caption = '', opts = {}) {
+  const captionTrim = String(caption || '').trim().slice(0, CAPTION_MAX_LEN)
+  const extra = {}
+  if (captionTrim) extra.caption = captionTrim
+  if (opts?.mime_type) extra.mime_type = String(opts.mime_type)
+  return sendMediaByEndpoint('/messages/short', 'short', phone, media, extra, opts)
+}
+
 /**
  * Reação: PUT /messages/{MessageID}/reaction { emoji }.
  * Contrato do chat UltraMSG: retorno boolean (objeto truthy quebraria `if (!ok)`).
@@ -263,6 +280,39 @@ async function sendLocation(phone, loc = {}, opts = {}) {
     })
     if (!normalized.ok) return { ...normalized, ok: false }
     console.log('✅ Whapi localização enviada:', String(to).slice(-13))
+    return normalized
+  } catch (e) {
+    return { ok: false, messageId: null, error: `Falha de conexão ao enviar (Whapi): ${e?.message || e}` }
+  }
+}
+
+async function sendLiveLocation(phone, loc = {}, opts = {}) {
+  const cfg = await resolveConfig(opts)
+  if (!cfg) return { ok: false, messageId: null }
+  const to = toWhapiRecipient(phone)
+  const latitude = Number(loc.latitude ?? loc.lat)
+  const longitude = Number(loc.longitude ?? loc.lng)
+  if (!to || !Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+    return { ok: false, messageId: null, error: 'Destino ou coordenadas inválidos' }
+  }
+  const body = applyQuoted({
+    to,
+    latitude,
+    longitude,
+    ...(loc.address ? { address: String(loc.address).slice(0, 300) } : {}),
+    ...(loc.name ? { name: String(loc.name).slice(0, 120) } : {}),
+    ...(loc.url ? { url: String(loc.url).slice(0, 500) } : {}),
+    ...(Number.isFinite(Number(loc.accuracy)) ? { accuracy: Number(loc.accuracy) } : {}),
+    ...(Number.isFinite(Number(loc.speed)) ? { speed: Number(loc.speed) } : {}),
+    ...(Number.isFinite(Number(loc.degrees)) ? { degrees: Number(loc.degrees) } : {}),
+    ...(loc.comment ? { comment: String(loc.comment).slice(0, 300) } : {}),
+  }, opts)
+  try {
+    const normalized = await postMessage({
+      cfg, endpoint: '/messages/live_location', body, to, kind: 'live_location', opts,
+    })
+    if (!normalized.ok) return { ...normalized, ok: false }
+    console.log('✅ Whapi live location enviada:', String(to).slice(-13))
     return normalized
   } catch (e) {
     return { ok: false, messageId: null, error: `Falha de conexão ao enviar (Whapi): ${e?.message || e}` }
@@ -392,8 +442,12 @@ module.exports = {
   sendSticker,
   sendAudio,
   sendVoice,
+  sendGif,
+  sendShortVideo,
+  sendPtv: sendShortVideo,
   sendContact,
   sendLocation,
+  sendLiveLocation,
   sendReaction,
   removeReaction,
   sendCall,
