@@ -5,7 +5,17 @@
  */
 
 const supabase = require('../../config/supabase')
+const { assertPermissaoConversa } = require('../../services/chat/access/conversationPolicy')
 const { emitirConversaAtualizada, emitirEventoEmpresaConversa } = require('../../services/chat/realtime/chatRealtimeGateway')
+
+async function validarConversa(req, res) {
+  const { company_id, id: user_id, perfil, departamento_ids = [] } = req.user
+  const perm = await assertPermissaoConversa({
+    company_id, conversa_id: req.params.id, user_id, role: perfil, user_dep_ids: departamento_ids,
+  })
+  if (!perm.ok) res.status(perm.status).json({ error: perm.error })
+  return perm.ok
+}
 
 exports.adicionarTagConversa = async (req, res) => {
   try {
@@ -14,6 +24,13 @@ exports.adicionarTagConversa = async (req, res) => {
     const { company_id } = req.user
 
     if (!tag_id) return res.status(400).json({ error: 'tag_id é obrigatório' })
+    if (!await validarConversa(req, res)) return
+
+    // FKs simples não garantem que conversa, etiqueta e vínculo pertencem à mesma empresa.
+    const { data: tag, error: tagError } = await supabase
+      .from('tags').select('id').eq('id', tag_id).eq('company_id', company_id).maybeSingle()
+    if (tagError) return res.status(500).json({ error: 'Erro ao validar tag' })
+    if (!tag) return res.status(404).json({ error: 'Tag não encontrada' })
 
     const { data: existente } = await supabase
       .from('conversa_tags')
@@ -38,6 +55,7 @@ exports.adicionarTagConversa = async (req, res) => {
       `)
       .single()
 
+    if (error?.code === '23505') return res.status(409).json({ error: 'Tag já vinculada' })
     if (error) { console.error('[chatController]', error?.message); return res.status(500).json({ error: 'Erro interno' }) }
 
     const io = req.app.get('io')
@@ -65,6 +83,8 @@ exports.removerTagConversa = async (req, res) => {
   try {
     const { id, tag_id } = req.params
     const { company_id } = req.user
+
+    if (!await validarConversa(req, res)) return
 
     const { error } = await supabase
       .from('conversa_tags')

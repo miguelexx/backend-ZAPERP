@@ -50,6 +50,9 @@ const { startProdutosSyncScheduler } = require('./services/produtosSyncScheduler
 const { startPendingOutboundReconciliationScheduler } = require('./services/pendingOutboundReconciliationScheduler')
 const { startTriageRedirectScheduler } = require('./services/triageRedirectScheduler')
 const { usuarioPodeVerGrupo } = require('./helpers/departamentoGruposHelper')
+const { usuarioParticipaAtivamenteDaConversa } = require('./services/chat/access/conversationVisibilityService')
+const { marcarComoLidaPorUsuario } = require('./services/chat/unread/conversationUnreadService')
+const { registerConversationRooms } = require('./socket/conversationRooms')
 
 async function canUserJoinConversationRoom({ company_id, user_id, role, departamento_ids, conversa_id }) {
   const cid = Number(conversa_id)
@@ -83,6 +86,7 @@ async function canUserJoinConversationRoom({ company_id, user_id, role, departam
   }
 
   if (conv.atendente_id != null && Number(conv.atendente_id) === userId) return true
+  if (conv.atendente_id != null && await usuarioParticipaAtivamenteDaConversa(companyId, cid, userId)) return true
 
   const { data: transferRow } = await supabase
     .from('atendimentos')
@@ -118,22 +122,7 @@ async function marcarConversaLidaSocket({ company_id, user_id, role, departament
   })
   if (!allowed) return false
 
-  await Promise.all([
-    supabase
-      .from('conversa_unreads')
-      .update({
-        unread_count: 0,
-        updated_at: new Date().toISOString(),
-      })
-      .eq('company_id', companyId)
-      .eq('conversa_id', cid)
-      .eq('usuario_id', userId),
-    supabase
-      .from('conversas')
-      .update({ lida: true })
-      .eq('company_id', companyId)
-      .eq('id', cid),
-  ])
+  await marcarComoLidaPorUsuario({ company_id: companyId, conversa_id: cid, usuario_id: userId })
   return true
 }
 
@@ -246,49 +235,11 @@ io.on('connection', (socket) => {
     }
   })
 
-  // entrar na conversa (idempotente: evita join duplicado e log repetido)
-  socket.on('join_conversa', async (conversaId) => {
-    try {
-      if (!conversaId) return
-
-      const convId = Number(conversaId)
-      if (!Number.isFinite(convId) || convId <= 0) return
-
-      const allowed = await canUserJoinConversationRoom({
-        company_id,
-        user_id: id,
-        role: perfil,
-        departamento_ids,
-        conversa_id: convId
-      })
-      if (!allowed) {
-        console.warn(`[SOCKET_JOIN_DENIED] Usuario ${id} | Empresa ${company_id} | Conversa ${convId}`)
-        return
-      }
-
-      const room = `conversa_${convId}`
-      if (!socket.rooms.has(room)) {
-        socket.join(room)
-        if (SOCKET_DEBUG) console.log(`[SOCKET_JOIN_CONVERSA] Usuario ${id} entrou na conversa ${convId}`)
-      }
-    } catch (err) {
-      console.error('[SOCKET_JOIN_CONVERSA]', {
-        user_id: id,
-        company_id,
-        conversa_id: conversaId,
-        message: err?.message || String(err || ''),
-      })
-    }
+  registerConversationRooms(socket, {
+    canJoin: (conversa_id) => canUserJoinConversationRoom({
+      company_id, user_id: id, role: perfil, departamento_ids, conversa_id,
+    }),
   })
-
-  // sair da conversa (escala / limpeza de rooms)
-  socket.on('leave_conversa', (conversaId) => {
-    if (!conversaId) return
-
-    socket.leave(`conversa_${conversaId}`)
-    if (SOCKET_DEBUG) console.log(`💬 Socket saiu da conversa ${conversaId}`)
-  })
-
   // =====================================================
   // Indicador de digitação (typing) — re-broadcast na room da conversa
   // =====================================================

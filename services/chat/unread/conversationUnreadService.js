@@ -6,7 +6,7 @@
 const supabase = require('../../../config/supabase')
 
 async function marcarComoLidaPorUsuario({ company_id, conversa_id, usuario_id }) {
-  await Promise.all([
+  const results = await Promise.all([
     supabase
       .from('conversa_unreads')
       .update({
@@ -22,6 +22,8 @@ async function marcarComoLidaPorUsuario({ company_id, conversa_id, usuario_id })
       .eq('company_id', Number(company_id))
       .eq('id', Number(conversa_id))
   ])
+  const failed = results.find((result) => result?.error)
+  if (failed) throw failed.error
 }
 
 async function obterUnreadMap({ company_id, usuario_id }) {

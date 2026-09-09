@@ -84,7 +84,7 @@ exports.detalharChat = async (req, res) => {
       `)
       .eq('id', Number(id))
       .eq('company_id', Number(company_id))
-      .single()
+      .maybeSingle()
 
     if (errConv) return res.status(500).json({ error: errConv.message })
     if (!conversa) return res.status(404).json({ error: 'Conversa não encontrada' })
@@ -96,6 +96,10 @@ exports.detalharChat = async (req, res) => {
     // REGRA PRINCIPAL: Se a conversa está assumida pelo usuário, SEMPRE permitir acesso total
     let podeAcessar = !isGroup && isAssignedToUser
     const conversaEncerrada = isClosedAttendanceStatus(conversa.status_atendimento)
+    const isParticipanteAtivo = !isGroup && !conversaEncerrada && !isAssignedToUser && conversa.atendente_id != null
+      ? await usuarioParticipaAtivamenteDaConversa(company_id, id, user_id)
+      : false
+    if (isParticipanteAtivo) podeAcessar = true
     if (!podeAcessar && !isAdmin && isGroup) {
       podeAcessar = await usuarioPodeVerGrupo({
         company_id,
@@ -131,10 +135,6 @@ exports.detalharChat = async (req, res) => {
     // Exceções: admin, supervisor, conversa encerrada, participante ativo (alinha com assertPermissaoConversa/envio).
     const isSupervisor = role === 'supervisor'
     const conversaAssumidaPorOutro = conversa.atendente_id != null && Number(conversa.atendente_id) !== Number(user_id)
-    let isParticipanteAtivo = false
-    if (!isGroup && !conversaEncerrada && conversaAssumidaPorOutro && !isAdmin && !isSupervisor) {
-      isParticipanteAtivo = await usuarioParticipaAtivamenteDaConversa(company_id, id, user_id)
-    }
     const deveBloquearMensagens =
       !isGroup &&
       !conversaEncerrada &&
@@ -188,15 +188,14 @@ exports.detalharChat = async (req, res) => {
       errMsgs = result.error
     }
     if (errMsgs) return res.status(500).json({ error: errMsgs.message })
-    if (Array.isArray(mensagens) && mensagens.length > 0) {
-      mensagens = mensagens.filter((m) => !isMensagemLegadaMovimentacaoInterna(m))
-    }
-
+    // O cursor segue as linhas SQL, inclusive as ocultadas da UI. Filtrar antes
+    // de paginar pode declarar fim do histórico com mensagens antigas restantes.
     const messageHistoryPage = splitMessageHistoryPage(mensagens, limit)
-    mensagens = messageHistoryPage.rows
+    mensagens = messageHistoryPage.rows.filter((m) => !isMensagemLegadaMovimentacaoInterna(m))
     const oldestDbRow = messageHistoryPage.cursor_row
     const hasMoreFromDb = messageHistoryPage.has_more
 
+    let leituraConfirmada = false
     // ✅ "Apagar pra mim" + marcar como lida em paralelo (reduz latência percebida ao abrir o chat)
     try {
       const ocultasQuery = supabase
@@ -209,7 +208,9 @@ exports.detalharChat = async (req, res) => {
       const [, { data: ocultas, error: errOcultas }] = await Promise.all([
         detalheModoSimplesAtivo
           ? Promise.resolve()
-          : marcarComoLidaPorUsuario({ company_id, conversa_id: id, usuario_id: user_id }).catch((e) => {
+          : marcarComoLidaPorUsuario({ company_id, conversa_id: id, usuario_id: user_id }).then(() => {
+              leituraConfirmada = true
+            }).catch((e) => {
               console.warn('detalharChat: marcarComoLidaPorUsuario', e?.message || e)
             }),
         ocultasQuery,
@@ -375,7 +376,7 @@ exports.detalharChat = async (req, res) => {
 
     // ✅ emite SOMENTE mensagens_lidas (não dispara atualizar lista ao abrir)
     const io = req.app.get('io')
-    if (io && !detalheModoSimplesAtivo) {
+    if (io && !detalheModoSimplesAtivo && leituraConfirmada) {
       const payload = { conversa_id: Number(id), usuario_id: Number(user_id) }
       emitirParaUsuario(io, user_id, io.EVENTS?.MENSAGENS_LIDAS || 'mensagens_lidas', payload)
     }
