@@ -25,6 +25,44 @@ const {
 } = require('../helpers/pollVoteResolve')
 const { emitirEventoEmpresaConversa } = require('../services/chat/realtime/chatRealtimeGateway')
 
+/**
+ * Guarda anti-histórico do Whapi.
+ *
+ * No (re)connect e, sobretudo, com o "webhook persistente" ligado, o Whapi RE-ENTREGA
+ * mensagens antigas (backlog de atendimentos já feitos) com o timestamp ORIGINAL. Sem
+ * filtro, cada uma vira uma conversa/contato novo ("Contato" sem nome) — e como o webhook
+ * persistente reenvia, elas voltam a aparecer mesmo depois de apagadas no banco.
+ *
+ * Ignoramos qualquer item de `messages[]` (inbound ou from_me) mais velho que o teto.
+ * Mensagem ao vivo do Whapi chega em segundos; só o backlog é antigo, então o corte separa
+ * um do outro sem depender de um flag de "history" (que o Whapi não envia por item).
+ *
+ * Tunável por env `WHAPI_INBOUND_MAX_AGE_MINUTES`. DESATIVADO por padrão (`0`/ausente) para
+ * não mudar o comportamento de quem não optou nem descartar mensagem em outage. Ligue com, ex.,
+ * `WHAPI_INBOUND_MAX_AGE_MINUTES=10`. Resolvido em runtime (não em load) para ser testável.
+ */
+function getWhapiInboundMaxAgeMs() {
+  const min = Number(process.env.WHAPI_INBOUND_MAX_AGE_MINUTES)
+  if (!Number.isFinite(min) || min <= 0) return 0
+  return min * 60 * 1000
+}
+
+/** Epoch ms da mensagem Whapi (timestamp em segundos; aceita ms se vier com 13 dígitos). */
+function whapiMessageEpochMs(m) {
+  const raw = Number(m?.timestamp)
+  if (!Number.isFinite(raw) || raw <= 0) return null
+  return raw > 1e12 ? raw : raw * 1000
+}
+
+/** true se o item é backlog antigo (mais velho que o teto) e deve ser ignorado. */
+function whapiInboundIsHistorical(m, nowMs) {
+  const maxAgeMs = getWhapiInboundMaxAgeMs()
+  if (maxAgeMs <= 0) return false
+  const epochMs = whapiMessageEpochMs(m)
+  if (epochMs == null) return false // sem timestamp confiável → trata como ao vivo (não descarta)
+  return (nowMs - epochMs) > maxAgeMs
+}
+
 function isWhapiEditedMessage(m) {
   if (!m || typeof m !== 'object') return false
   if (m.edited === true || m.is_edited === true || m.isEdit === true) return true
@@ -837,6 +875,8 @@ async function handleWebhookWhapi(req, res) {
     }
 
     let anyServerError = false
+    let skippedHistorical = 0
+    const nowMs = Date.now()
     const io = req.app?.get?.('io')
 
     for (const upd of messagesUpdates) {
@@ -865,6 +905,12 @@ async function handleWebhookWhapi(req, res) {
     }
 
     for (const m of messages) {
+      // Guarda anti-histórico: no (re)connect / webhook persistente o Whapi reentrega backlog
+      // antigo com o timestamp original. Descartamos antes de criar conversa/contato/mensagem.
+      if (whapiInboundIsHistorical(m, nowMs)) {
+        skippedHistorical++
+        continue
+      }
       if (isWhapiEditedMessage(m)) {
         const applied = await applyWhapiEditedMessage(ctxSrc, m, io)
         if (applied) continue
@@ -883,6 +929,10 @@ async function handleWebhookWhapi(req, res) {
       normalized.instance_id = ctx.channelId
       const code = await dispatchOne(webhookCoreController.receberZapi, req, normalized)
       if (Number(code) >= 500) anyServerError = true
+    }
+
+    if (skippedHistorical > 0 && req.webhookLogData?.counts) {
+      req.webhookLogData.counts.skipped_historical = skippedHistorical
     }
 
     for (const s of statuses) {
@@ -941,4 +991,7 @@ exports._test = {
   normalizeWhapiPresence,
   resolvePollVoteLabels,
   enrichNormalizedPollVote,
+  whapiMessageEpochMs,
+  whapiInboundIsHistorical,
+  getWhapiInboundMaxAgeMs,
 }

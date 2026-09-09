@@ -123,7 +123,7 @@ Cada arquivo abaixo é reexportado pela fachada. Rota exata: ver `routes/chatRou
 | `messageReadController.js` | carregarMensagensAntigasContato, buscarMensagensConversa |
 | `messageDeletionController.js` | excluirMensagem |
 | `messageEditController.js` | editarMensagem (PATCH `/chats/:id/mensagens/:mensagem_id`) |
-| `conversationCleanupController.js` | limparMensagensConversa, apagarConversa |
+| `conversationCleanupController.js` | limparMensagensConversa, apagarConversa (`?apagar_cliente=1` também remove o cadastro do cliente) |
 | `maintenanceController.js` | paginaMergeDuplicatas, mergeConversasDuplicadas (+ HTML embutido) |
 | `integrationController.js` | listWhatsappInstancesAtendimento, whatsappStatus, **zapiStatus (alias legado = whatsappStatus)**, sincronizarContatosZapi, debugSyncContatos, sincronizarFotosPerfilZapi |
 | `tagsController.js` | adicionarTagConversa, removerTagConversa |

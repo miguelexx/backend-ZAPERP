@@ -85,7 +85,8 @@ async function assertPermissaoConversa({ company_id, conversa_id, user_id, role,
 /**
  * Verifica se o usuário pode ENVIAR mensagens na conversa.
  * - Grupos: qualquer usuário pode enviar sem assumir.
- * - Demais conversas: só quem assumiu (atendente_id === user_id), inclusive admin.
+ * - Demais conversas: quem assumiu (atendente_id === user_id), participante ativo, ou admin
+ *   (admin envia sem roubar a conversa de outro atendente).
  * - Quando habilitado pelo caller, conversa sem atendente pode ser assumida
  *   automaticamente no primeiro envio manual, respeitando setor/perfil/limite.
  */
@@ -219,6 +220,11 @@ async function assertPodeEnviarMensagem({
       }
     }
     return { ok: false, status: 403, error: 'Assuma a conversa antes de enviar mensagens' }
+  }
+
+  // Admin: pode enviar com outro atendente responsável (não troca o dono da conversa).
+  if (String(role || '').toLowerCase() === 'admin') {
+    return { ok: true, reason: 'admin_envio_sem_assumir', conversa: conv }
   }
 
   return {

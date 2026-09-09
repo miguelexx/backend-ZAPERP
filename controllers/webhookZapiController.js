@@ -1652,6 +1652,58 @@ exports.receberZapi = async (req, res) => {
           }
         }
 
+        // === Triagem Interativa Whapi (Seam A/B) — SÓ provider whapi + módulo ligado por instância.
+        // Quando ativo, o módulo Whapi ASSUME a triagem desta conversa (o chatbot de texto é pulado).
+        // getActiveWhapiTriageConfig retorna null para UltraMSG / módulo desligado / migration pendente
+        // → nada muda (comportamento idêntico ao atual). Ver doc 26.
+        if (!skipChatbot) {
+          const inboundProviderTriage = String(req.zapiContext?.provider || req.webhookContext?.provider || '').trim().toLowerCase()
+          if (inboundProviderTriage === 'whapi' && whatsapp_instance_id) {
+            try {
+              const { getActiveWhapiTriageConfig } = require('../services/whapiTriage/whapiTriageConfigService')
+              const whapiTriageCfg = await getActiveWhapiTriageConfig(company_id, whatsapp_instance_id)
+              if (whapiTriageCfg) {
+                const { handleWhapiTriageInbound } = require('../services/whapiTriage/whapiTriageService')
+                const wr = await handleWhapiTriageInbound({
+                  company_id,
+                  conversa_id,
+                  telefone: phoneParaChatbot,
+                  whatsapp_instance_id,
+                  texto: texto || '',
+                  payload,
+                  config: whapiTriageCfg,
+                  supabaseClient: supabase,
+                  sendMessage,
+                  emitRealtime: emitAutomacaoRealtime || null,
+                  mensagemClienteCriadoEm: criado_em || null,
+                })
+                // fallbackToText → deixa o chatbot de texto assumir; senão o módulo Whapi é o dono.
+                if (!wr?.fallbackToText) skipChatbot = true
+                if (wr?.handled && wr?.departamento_id != null) {
+                  departamento_id = wr.departamento_id
+                  const ioSetorWhapi = req.app.get('io')
+                  if (
+                    ioSetorWhapi &&
+                    !setorRealtimeJaEmitido &&
+                    setorRealtimeMudou(departamentoIdAntesRealtime, departamento_id)
+                  ) {
+                    emitirMudancaSetorRealtime(ioSetorWhapi, company_id, conversa_id, {
+                      departamento_id,
+                      departamentoIdAnterior: departamentoIdAntesRealtime,
+                      atendente_id: wr.atendente_id ?? null,
+                      status_atendimento: wr.status_atendimento || 'aberta',
+                      motivo: 'setor_direcionado',
+                    })
+                    setorRealtimeJaEmitido = true
+                  }
+                }
+              }
+            } catch (errWhapiTriage) {
+              console.warn('[Z-API] Triagem Whapi:', errWhapiTriage?.message || errWhapiTriage)
+            }
+          }
+        }
+
         if (!skipChatbot) {
           console.log('[Z-API] 🤖 Chatbot: processando mensagem', { company_id, conversa_id, phoneTail: String(phoneParaChatbot).slice(-8) })
           const ioChatbot = req.app.get('io')

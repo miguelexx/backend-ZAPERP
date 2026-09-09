@@ -183,4 +183,66 @@ describe('Permissao de envio de mensagens', () => {
     expect(result.status).toBe(403)
     expect(result.error).toBe('Conversa de outro setor')
   })
+
+  it('permite admin enviar em conversa assumida por outro atendente sem assumir', async () => {
+    const { _test } = require('../controllers/chatController')
+    const chain = supabase.from()
+
+    chain.maybeSingle
+      .mockResolvedValueOnce({
+        data: {
+          id: 10,
+          atendente_id: 99,
+          departamento_id: 1,
+          tipo: null,
+          telefone: '5534999999999',
+          status_atendimento: 'aguardando_cliente',
+        },
+        error: null,
+      })
+      // usuarioParticipaAtivamenteDaConversa → maybeSingle vazio
+      .mockResolvedValueOnce({ data: null, error: null })
+
+    const result = await _test.assertPodeEnviarMensagem({
+      company_id: 1,
+      conversa_id: 10,
+      user_id: 2,
+      role: 'admin',
+      user_dep_ids: [1],
+    })
+
+    expect(result.ok).toBe(true)
+    expect(result.reason).toBe('admin_envio_sem_assumir')
+    expect(result.conversa?.atendente_id).toBe(99)
+  })
+
+  it('bloqueia atendente ao enviar em conversa de outro', async () => {
+    const { _test } = require('../controllers/chatController')
+    const chain = supabase.from()
+
+    chain.maybeSingle
+      .mockResolvedValueOnce({
+        data: {
+          id: 10,
+          atendente_id: 99,
+          departamento_id: 1,
+          tipo: null,
+          telefone: '5534999999999',
+          status_atendimento: 'em_atendimento',
+        },
+        error: null,
+      })
+      .mockResolvedValueOnce({ data: null, error: null })
+
+    const result = await _test.assertPodeEnviarMensagem({
+      company_id: 1,
+      conversa_id: 10,
+      user_id: 2,
+      role: 'atendente',
+      user_dep_ids: [1],
+    })
+
+    expect(result.ok).toBe(false)
+    expect(result.status).toBe(403)
+  })
 })
