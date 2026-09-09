@@ -20,7 +20,7 @@ const {
   wasMenuSentForConversa,
   wasOptionSelectedForConversa,
 } = require('../chatbotTriageService')
-const { sendWhapiTriageMenu, buildPollPayload, activeSorted } = require('./whapiTriageRenderer')
+const { sendWhapiTriageMenu, buildPollPayload, buildTriageReplyMeta, activeSorted } = require('./whapiTriageRenderer')
 const { isRealWhatsAppId } = require('../../helpers/whatsappMessageIdHelper')
 
 const DEFAULT_CONFIRM = 'Perfeito! Seu atendimento foi direcionado para o setor {{departamento}}. Em instantes nossa equipe dará continuidade.'
@@ -100,7 +100,7 @@ function outboundStatus(sendResult) {
 }
 
 /** Persiste a bolha outbound do bot (menu/confirmação) e emite realtime. */
-async function insertBotBubble({ sb, company_id, conversa_id, whatsapp_instance_id, texto, sendResult, emitRealtime }) {
+async function insertBotBubble({ sb, company_id, conversa_id, whatsapp_instance_id, texto, sendResult, emitRealtime, tipo = 'texto', reply_meta = null }) {
   const st = outboundStatus(sendResult)
   const row = {
     conversa_id,
@@ -109,6 +109,8 @@ async function insertBotBubble({ sb, company_id, conversa_id, whatsapp_instance_
     direcao: 'out',
     status: st.status,
     status_mensagem: st.status_mensagem,
+    tipo,
+    ...(reply_meta && typeof reply_meta === 'object' ? { reply_meta } : {}),
     ...(st.traceable ? { whatsapp_id: st.messageId } : {}),
     ...(whatsapp_instance_id ? { whatsapp_instance_id } : {}),
   }
@@ -269,6 +271,8 @@ async function handleWhapiTriageInbound(ctx) {
     await insertBotBubble({
       sb, company_id, conversa_id, whatsapp_instance_id,
       texto: config.body_text,
+      tipo: menuResult.mode === 'poll' ? 'poll' : 'interactive',
+      reply_meta: buildTriageReplyMeta(config),
       sendResult: { ok: menuResult.ok, messageId: menuResult.messageId },
       emitRealtime,
     })

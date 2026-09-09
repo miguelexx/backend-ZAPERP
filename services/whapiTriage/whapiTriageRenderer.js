@@ -86,6 +86,32 @@ function buildInteractivePayload(config) {
   }
 }
 
+/** Metadados persistidos no ZapERP para o atendente enxergar o mesmo menu enviado. */
+function buildTriageReplyMeta(config) {
+  const mode = config?.mode || 'poll'
+  if (mode === 'poll') {
+    const poll = buildPollPayload(config)
+    return {
+      poll,
+      whapi_triage: { mode, title: poll.title, options: poll.options, count: poll.count },
+    }
+  }
+  const payload = buildInteractivePayload(config)
+  const choices = mode === 'button'
+    ? (payload.action?.buttons || []).map((b) => ({ id: String(b.id), title: b.title }))
+    : (payload.action?.list?.sections || []).flatMap((s) => (s.rows || []).map((r) => ({ id: String(r.id), title: r.title })))
+  return {
+    whapi_triage: {
+      mode,
+      body: payload.body,
+      header: payload.header || null,
+      footer: payload.footer || null,
+      button_label: mode === 'list' ? (payload.action?.label || null) : null,
+      options: choices,
+    },
+  }
+}
+
 /**
  * Envia o menu de triagem interativa pela Whapi.
  * @param {object} args
@@ -121,6 +147,7 @@ async function sendWhapiTriageMenu({ provider, telefone, config, opts = {} }) {
 module.exports = {
   buildPollPayload,
   buildInteractivePayload,
+  buildTriageReplyMeta,
   sendWhapiTriageMenu,
   activeSorted,
   MAX_BUTTONS,

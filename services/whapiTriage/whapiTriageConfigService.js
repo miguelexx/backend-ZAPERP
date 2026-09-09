@@ -12,6 +12,7 @@
 const supabase = require('../../config/supabase')
 
 const MODES = new Set(['poll', 'list', 'button'])
+const MODE_LIMITS = { poll: 12, list: 10, button: 3 }
 
 const DEFAULT_CONFIG = {
   enabled: false,
@@ -193,6 +194,17 @@ async function saveWhapiTriageConfig(company_id, whatsapp_instance_id, payload =
     footer_text: sanitizeText(payload.footer_text),
     confirm_message: sanitizeText(payload.confirm_message),
     fallback_to_text: payload.fallback_to_text !== false,
+  }
+
+  const activeOptions = (Array.isArray(payload.options) ? payload.options : []).filter(
+    (o) => o && o.active !== false && o.departamento_id != null && String(o.label || '').trim()
+  )
+  const limit = MODE_LIMITS[configFields.mode]
+  if (configFields.enabled && activeOptions.length < (configFields.mode === 'poll' ? 2 : 1)) {
+    return { ok: false, error: configFields.mode === 'poll' ? 'Enquete exige ao menos 2 opções ativas com setor.' : 'Adicione ao menos uma opção ativa com setor.' }
+  }
+  if (activeOptions.length > limit) {
+    return { ok: false, error: `O modo ${configFields.mode} aceita no máximo ${limit} opções ativas.` }
   }
 
   // 1) upsert do cabeçalho (unique company_id + whatsapp_instance_id)

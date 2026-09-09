@@ -36,6 +36,16 @@ describe('whapiTriageRenderer', () => {
     expect(rows.map((r) => r.id)).not.toContain('uuid-off')
   })
 
+  test('buildTriageReplyMeta espelha lista e botões no ZapERP', () => {
+    expect(renderer.buildTriageReplyMeta(cfg({ mode: 'list' })).whapi_triage.options)
+      .toEqual([{ id: 'uuid-fin', title: 'Financeiro' }, { id: 'uuid-sup', title: 'Suporte' }])
+    expect(renderer.buildTriageReplyMeta(cfg({ mode: 'button' })).whapi_triage.options)
+      .toEqual([{ id: 'uuid-fin', title: 'Financeiro' }, { id: 'uuid-sup', title: 'Suporte' }])
+    const pollMeta = renderer.buildTriageReplyMeta(cfg({ mode: 'poll' }))
+    expect(pollMeta.poll).toMatchObject({ title: 'Selecione o setor desejado.', count: 1 })
+    expect(pollMeta.whapi_triage.options).toHaveLength(2)
+  })
+
   test('buildInteractivePayload (button) limita a 3 e usa quick_reply', () => {
     const p = renderer.buildInteractivePayload(cfg({
       mode: 'button',
