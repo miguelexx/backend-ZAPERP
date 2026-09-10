@@ -276,7 +276,7 @@ async function handleWhapiTriageInbound(ctx) {
       sendResult: { ok: menuResult.ok, messageId: menuResult.messageId },
       emitRealtime,
     })
-    await logBotAction(company_id, conversa_id, 'menu_enviado', {
+    await logBotAction(company_id, conversa_id, menuResult.ok ? 'menu_enviado' : 'menu_falhou', {
       origem: 'whapi_triage',
       mode: menuResult.mode,
       opcoes: (config.options || []).map((o) => o.id),

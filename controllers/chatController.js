@@ -265,6 +265,7 @@ const _integrationController = require('./chat/integrationController')
 exports.listWhatsappInstancesAtendimento = _integrationController.listWhatsappInstancesAtendimento
 exports.whatsappStatus = _integrationController.whatsappStatus
 exports.zapiStatus = _integrationController.zapiStatus
+exports.whapiChannelStatus = _integrationController.whapiChannelStatus
 exports.sincronizarContatosZapi = _integrationController.sincronizarContatosZapi
 exports.debugSyncContatos = _integrationController.debugSyncContatos
 exports.sincronizarFotosPerfilZapi = _integrationController.sincronizarFotosPerfilZapi

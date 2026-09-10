@@ -545,10 +545,18 @@ async function sendInteractive(phone, payload = {}, opts = {}) {
   }
   const bodyText = asTextObj(payload?.body)
   if (!bodyText) return { ok: false, messageId: null, error: 'body.text é obrigatório na mensagem interativa.' }
-  const action = payload?.action
+  let action = payload?.action
   if (!action || typeof action !== 'object') return { ok: false, messageId: null, error: 'action é obrigatório na mensagem interativa.' }
   if (!interactiveActionMatchesType(type, action)) {
     return { ok: false, messageId: null, error: `action inválido para type='${type}' (button→buttons[]; list→list; product→product).` }
+  }
+
+  if (type === 'list') {
+    const label = String(action.list.label ?? action.label ?? '').trim()
+    if (!label) return { ok: false, messageId: null, error: 'action.list.label é obrigatório na lista.' }
+    // Compatibilidade com chamadores antigos; a API exige o label dentro de list.
+    const { label: legacyLabel, ...rest } = action
+    action = { ...rest, list: { ...action.list, label } }
   }
 
   const reqBody = applyQuoted({

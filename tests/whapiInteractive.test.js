@@ -68,6 +68,30 @@ describe('Whapi interativas — envio', () => {
     expect(body.header).toEqual({ text: 'Menu' })
     expect(body.footer).toEqual({ text: 'Atendimento' })
     expect(body.action.list.sections).toHaveLength(1)
+    expect(body.action.list.label).toBe('Abrir')
+    expect(body.action).not.toHaveProperty('label')
+  })
+
+  test('lista da triagem chega ao HTTP com label e opções no contrato Whapi', async () => {
+    const { fetchWithRetry } = mockDeps({ instancesById: { '1:10': inst() } })
+    const { buildInteractivePayload } = require('../services/whapiTriage/whapiTriageRenderer')
+    const payload = buildInteractivePayload({ mode: 'list', body_text: 'Escolha', button_label: 'Setores', options: [
+      { id: 'suporte', label: 'Suporte', departamento_id: 7, active: true },
+    ] })
+    const result = await require('../services/providers/whapi').sendInteractive('5534988887777', payload, OPTS)
+    expect(result.ok).toBe(true)
+    const body = JSON.parse(fetchWithRetry.mock.calls[0][1].body)
+    expect(body.action.list).toEqual({ label: 'Setores', sections: [{ title: 'Setores', rows: [{ id: 'suporte', title: 'Suporte' }] }] })
+    expect(body.action).not.toHaveProperty('label')
+  })
+
+  test('lista sem label é rejeitada antes da requisição', async () => {
+    const { fetchWithRetry } = mockDeps({ instancesById: { '1:10': inst() } })
+    const result = await require('../services/providers/whapi').sendInteractive('5534988887777', {
+      type: 'list', body: 'Escolha', action: { list: { sections: [] } },
+    }, OPTS)
+    expect(result.ok).toBe(false)
+    expect(fetchWithRetry).not.toHaveBeenCalled()
   })
 
   test('valida type/body/action sem chamar a API', async () => {

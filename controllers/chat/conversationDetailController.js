@@ -41,6 +41,16 @@ exports.detalharChat = async (req, res) => {
     const { company_id, id: user_id, perfil, departamento_ids = [] } = req.user
     const role = String(perfil || '').toLowerCase()
     const isAdmin = role === 'admin'
+    const conversaId = Number(id)
+    const companyIdNum = Number(company_id)
+    // Guarda contra rotas literais (ex.: "whapi-status") ou IDs quebrados → evita
+    // Postgres: invalid input syntax for type integer: "NaN"
+    if (!Number.isFinite(conversaId) || conversaId <= 0) {
+      return res.status(400).json({ error: 'ID de conversa inválido' })
+    }
+    if (!Number.isFinite(companyIdNum) || companyIdNum <= 0) {
+      return res.status(401).json({ error: 'Tenant inválido' })
+    }
 
     const messageHistoryPagination = parseMessageHistoryPagination(req.query)
     const { limit, cursor, cursor_id } = messageHistoryPagination
@@ -82,8 +92,8 @@ exports.detalharChat = async (req, res) => {
           )
         )
       `)
-      .eq('id', Number(id))
-      .eq('company_id', Number(company_id))
+      .eq('id', conversaId)
+      .eq('company_id', companyIdNum)
       .maybeSingle()
 
     if (errConv) return res.status(500).json({ error: errConv.message })

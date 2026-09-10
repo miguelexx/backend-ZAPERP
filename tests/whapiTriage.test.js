@@ -29,6 +29,8 @@ describe('whapiTriageRenderer', () => {
   test('buildInteractivePayload (list) usa id UUID estável nas rows e ignora inativas', () => {
     const p = renderer.buildInteractivePayload(cfg({ mode: 'list' }))
     expect(p.type).toBe('list')
+    expect(p.action.list.label).toBe('Selecionar setor')
+    expect(p.action).not.toHaveProperty('label')
     expect(p.body).toBe('Selecione o setor desejado.') // string; provider.sendInteractive normaliza p/ {text}
     const rows = p.action.list.sections[0].rows
     expect(rows).toHaveLength(2)
@@ -37,6 +39,7 @@ describe('whapiTriageRenderer', () => {
   })
 
   test('buildTriageReplyMeta espelha lista e botões no ZapERP', () => {
+    expect(renderer.buildTriageReplyMeta(cfg()).whapi_triage.button_label).toBe('Selecionar setor')
     expect(renderer.buildTriageReplyMeta(cfg({ mode: 'list' })).whapi_triage.options)
       .toEqual([{ id: 'uuid-fin', title: 'Financeiro' }, { id: 'uuid-sup', title: 'Suporte' }])
     expect(renderer.buildTriageReplyMeta(cfg({ mode: 'button' })).whapi_triage.options)

@@ -19,6 +19,8 @@ async function resolveConfig(opts = {}) {
   const companyId = opts?.companyId ?? opts?.company_id
   if (companyId == null || companyId === '') return null
   const cid = Number(companyId)
+  // Evita PostgREST/Postgres: invalid input syntax for type integer: "NaN"
+  if (!Number.isFinite(cid) || cid <= 0) return null
   const whatsappInstanceId = opts?.whatsappInstanceId ?? opts?.whatsapp_instance_id
   const resolved = whatsappInstanceId
     ? await getWhatsappInstanceById(cid, whatsappInstanceId, { includeCredentials: true, requireActive: true })

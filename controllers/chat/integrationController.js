@@ -95,6 +95,54 @@ exports.whatsappStatus = async (req, res) => {
 exports.zapiStatus = exports.whatsappStatus
 
 // =====================================================
+// 3a.1) Status dedicado do canal Whapi (tela vermelha de desconexão)
+// GET /chats/whapi-status — disponível a QUALQUER usuário autenticado.
+//
+// Diferente de whatsappStatus, este endpoint NÃO é afetado por
+// HIDE_WHATSAPP_DISCONNECT_BANNER: ele existe justamente para alimentar o
+// overlay vermelho de "canal desconectado" do frontend.
+//
+// Regra à prova de falso-positivo (pintar o sistema inteiro de vermelho é
+// disruptivo): só devolve `connected:false` quando o provider da empresa é
+// Whapi E o canal comprovadamente NÃO está AUTH. Em QUALQUER outra situação
+// (provider diferente, sem empresa, erro de rede/consulta) devolve
+// `connected:true` + `isWhapi:false`, de modo que o overlay jamais aparece
+// por engano.
+// =====================================================
+exports.whapiChannelStatus = async (req, res) => {
+  const safe = { ok: true, isWhapi: false, connected: true, status: null }
+  try {
+    const company_id = Number(req.user?.company_id)
+    // company_id inválido (NaN, 0, negativo) → fail-safe; nunca consultar o banco com NaN.
+    if (!Number.isFinite(company_id) || company_id <= 0) return res.json(safe)
+
+    const { resolveCompanyWhatsappProvider } = require('../../services/chat/identity/conversationAddressService')
+    const instanceProvider = await resolveCompanyWhatsappProvider(company_id)
+    if (instanceProvider !== 'whapi') {
+      return res.json({ ...safe, provider: instanceProvider || null })
+    }
+
+    const { getProvider } = require('../../services/providers')
+    // wakeup (default) de propósito: um canal apenas adormecido responde AUTH
+    // de verdade; sem isso um canal ocioso poderia ser lido como desconectado
+    // e disparar a tela vermelha falsamente.
+    const statusResult = await getProvider({ provider: 'whapi' }).getConnectionStatus({ companyId: company_id })
+    const connected = !!statusResult?.connected
+    return res.json({
+      ok: true,
+      isWhapi: true,
+      connected,
+      status: statusResult?.status || null,
+      provider: 'whapi',
+    })
+  } catch (err) {
+    console.error('whapiChannelStatus:', err?.message || err)
+    // Erro ⇒ nunca acusa desconexão (evita overlay vermelho por falha transitória).
+    return res.json(safe)
+  }
+}
+
+// =====================================================
 // 3b) Sincronizar contatos do celular (UltraMsg)
 // Executa sync inline — compatível sem fila de jobs.
 // =====================================================

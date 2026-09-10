@@ -70,8 +70,8 @@ function buildInteractivePayload(config) {
     ...base,
     type: 'list',
     action: {
-      label: config.button_label || 'Selecionar setor',
       list: {
+        label: config.button_label || 'Selecionar setor',
         sections: [
           {
             title: config.button_label || 'Setores',
@@ -106,7 +106,7 @@ function buildTriageReplyMeta(config) {
       body: payload.body,
       header: payload.header || null,
       footer: payload.footer || null,
-      button_label: mode === 'list' ? (payload.action?.label || null) : null,
+      button_label: mode === 'list' ? (payload.action?.list?.label || null) : null,
       options: choices,
     },
   }
