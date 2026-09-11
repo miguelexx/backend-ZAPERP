@@ -189,6 +189,7 @@ POST /chats/:id/mensagens (ou /arquivo, /pix, etc.)
       ← ACK via webhook → statusZapi → atualiza status
 ```
 
+Com `mostrar_nome_ao_cliente` ativo, o texto enviado ao WhatsApp (não o CRM) é prefixado por `formatTextoWhatsappComNomeAtendente`: `*Nome:*\n\ncorpo` (negrito + `:` + linha em branco). Helper: `helpers/mensagemAtendenteNomeHelper.js`.
 ### Socket.IO — salas
 
 | Sala | Membros |

@@ -44,7 +44,7 @@ test('captionWhatsappParaMidia: imagem sem legenda envia nome do atendente', () 
       captionUsuarioTrim: '',
       usuarioNome: 'Pollyana',
     }),
-    '*Pollyana*'
+    '*Pollyana:*'
   )
   assert.equal(
     captionWhatsappParaMidia({
