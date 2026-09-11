@@ -9,6 +9,9 @@ const { FILENAME_MAX_LEN } = require('./constants')
 const { resolveConfig } = require('./config')
 const { get, post, del, getBinary, maskToken } = require('./http')
 
+/** Base64 de vídeo de até ~32 MB (~43 MB de JSON): 30s do timeout padrão não bastam. */
+const UPLOAD_TIMEOUT_MS = Math.max(30_000, Number(process.env.WHAPI_UPLOAD_TIMEOUT_MS) || 120_000)
+
 function contentTypeForUploadFilename(filename) {
   const ext = String(filename || '').toLowerCase().split('?')[0].split('.').pop()
   const byExt = {
@@ -26,15 +29,45 @@ function contentTypeForUploadFilename(filename) {
     opus: 'audio/ogg',
     aac: 'audio/aac',
     m4a: 'audio/mp4',
+    wav: 'audio/wav',
+    amr: 'audio/amr',
     pdf: 'application/pdf',
+    // Documentos: sem o MIME real o destinatário recebe octet-stream (ícone genérico).
+    doc: 'application/msword',
+    docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    xls: 'application/vnd.ms-excel',
+    xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    ppt: 'application/vnd.ms-powerpoint',
+    pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+    txt: 'text/plain',
+    csv: 'text/csv',
+    rtf: 'application/rtf',
+    json: 'application/json',
+    xml: 'application/xml',
+    zip: 'application/zip',
+    rar: 'application/vnd.rar',
+    '7z': 'application/x-7z-compressed',
   }
   return byExt[ext] || 'application/octet-stream'
 }
 
+/** MIME explícito do upload (multer) quando a extensão não resolve; ignora genéricos/malformados. */
+function explicitUploadMime(value) {
+  const m = String(value || '').split(';')[0].trim().toLowerCase()
+  if (!m || m === 'application/octet-stream') return null
+  return /^[a-z0-9.+-]+\/[a-z0-9.+-]+$/.test(m) ? m : null
+}
+
+/**
+ * Referência da mídia enviada ao POST /media. Contrato oficial Whapi (OpenAPI uploadMedia):
+ * `{ media: [{ id }] }` — array. Formatos em objeto ({ id } / { link } / { media: { id } }) mantidos.
+ */
 function extractUploadedMediaRef(data) {
   if (!data || typeof data !== 'object') return null
+  const firstMedia = Array.isArray(data.media) ? data.media[0] : null
   const v = data.link || data.url || data.id
-    || data.media?.link || data.media?.url || data.media?.id
+    || (firstMedia && typeof firstMedia === 'object' ? (firstMedia.link || firstMedia.url || firstMedia.id) : null)
+    || (!Array.isArray(data.media) ? (data.media?.link || data.media?.url || data.media?.id) : null)
     || (Array.isArray(data.files) ? (data.files[0]?.link || data.files[0]?.id) : null)
   const s = v != null ? String(v).trim() : ''
   return s || null
@@ -45,7 +78,8 @@ async function uploadMedia(filePath, filename, opts = {}) {
   if (!cfg || !filePath) return { ok: false, url: null, error: 'Config ou arquivo indisponível' }
   if (!fs.existsSync(filePath)) return { ok: false, url: null, error: 'Arquivo não encontrado' }
   const safeFilename = String(filename || path.basename(filePath) || 'file').slice(0, FILENAME_MAX_LEN)
-  const mime = contentTypeForUploadFilename(safeFilename)
+  const byName = contentTypeForUploadFilename(safeFilename)
+  const mime = byName !== 'application/octet-stream' ? byName : (explicitUploadMime(opts?.mimeType) || byName)
   let dataUri
   try {
     const buf = await fs.promises.readFile(filePath)
@@ -61,6 +95,7 @@ async function uploadMedia(filePath, filename, opts = {}) {
       companyId: cfg.companyId,
       whatsappInstanceId: cfg.whatsappInstanceId,
       skipSendGuard: true,
+      timeoutMs: UPLOAD_TIMEOUT_MS,
     })
     const ref = extractUploadedMediaRef(data)
     if (!ok || !ref) {

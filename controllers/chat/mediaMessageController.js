@@ -171,8 +171,14 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
       const normalizedImage = await normalizeImageForWhatsapp(fileWork, tipo)
       if (normalizedImage?.converted && normalizedImage?.file) {
         const beforeName = fileWork.originalname
+        const originalPath = fileWork.path
         fileWork = normalizedImage.file
         req.file = fileWork
+        // O upload original (PNG/HEIC/...) não é referenciado por nada depois da conversão
+        // (banco e envio usam o JPEG). Áudio e vídeo já removem a fonte; a imagem ficava órfã no disco.
+        if (originalPath && originalPath !== fileWork.path) {
+          require('fs').unlink(originalPath, () => {})
+        }
         console.log('[ULTRAMSG][IMAGE] Imagem normalizada para JPEG compatível antes do envio:', {
           from: beforeName,
           to: fileWork.originalname,
@@ -352,6 +358,27 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
       emitirConversaAtualizada(io, company_id, conversa_id, convPayload, { skipAtualizarConversa: true })
     }
 
+    // Mídia que não vai sair para o WhatsApp não pode ficar no relógio (pending) para sempre:
+    // a reconciliação só confirma o que o provedor aceitou. Mesmo tratamento do texto sem telefone.
+    const marcarMidiaNaoEnviada = async (motivo) => {
+      console.warn('[ENVIO_MIDIA] ❌ mídia não enviada ao WhatsApp', {
+        company_id,
+        conversa_id: Number(conversa_id),
+        mensagem_id: msg.id,
+        tipo,
+        motivo,
+      })
+      try {
+        await supabase.from('mensagens').update({ status: 'erro', status_mensagem: 'erro' }).eq('company_id', company_id).eq('id', msg.id)
+        const io2 = req.app?.get('io')
+        if (io2) {
+          io2.to(`empresa_${company_id}`).to(`conversa_${conversa_id}`).to(`usuario_${user_id}`).emit(io2.EVENTS?.STATUS_MENSAGEM || 'status_mensagem', { mensagem_id: msg.id, conversa_id: Number(conversa_id), status: 'erro', status_mensagem: 'erro' })
+        }
+      } catch (e) {
+        console.warn('[ENVIO_MIDIA] falha ao marcar erro:', e?.message || e)
+      }
+    }
+
     const { nome: usuarioNome } = await getUsuarioParaEnvioCliente(supabase, company_id, user_id)
     const instanceProvider = await resolveConversationProvider(company_id, whatsappInstanceId)
     const provider = getProvider({ provider: instanceProvider })
@@ -487,7 +514,12 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
               const providerUploadFilename = tipo === 'video'
                 ? (fileWork.filename || fileWork.originalname || 'video.mp4')
                 : (fileWork.originalname || 'file')
-              const result = await provider.uploadMedia(fileWork.path, providerUploadFilename, { companyId: company_id, whatsappInstanceId: whatsappInstanceId || undefined })
+              const result = await provider.uploadMedia(fileWork.path, providerUploadFilename, {
+                companyId: company_id,
+                whatsappInstanceId: whatsappInstanceId || undefined,
+                // Whapi usa quando a extensão não resolve o MIME; UltraMSG ignora.
+                mimeType: fileWork.mimetype || undefined,
+              })
               if (result?.ok && result?.url) {
                 console.log('[ULTRAMSG] Upload bem-sucedido, enviando mídia via CDN:', result.url.slice(0, 50) + '...')
                 sendMediaWithUrl(result.url)
@@ -523,12 +555,17 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
           })
         } else if (!baseUrl && !forceUploadMedia) {
           console.warn('⚠️ APP_URL/BASE_URL não configurado; mídia não enviada ao WhatsApp.')
+          await marcarMidiaNaoEnviada('app_url_ausente')
         } else {
           console.warn('⚠️ APP_URL é localhost e provider sem uploadMedia; mídia não enviada ao WhatsApp.')
+          await marcarMidiaNaoEnviada('provider_sem_upload')
         }
-      } else if (!baseUrl) {
-        console.warn('⚠️ APP_URL/BASE_URL não configurado; mídia não enviada ao WhatsApp.')
+      } else {
+        console.warn('⚠️ Sem URL pública nem arquivo local para upload; mídia não enviada ao WhatsApp.')
+        await marcarMidiaNaoEnviada(!baseUrl ? 'app_url_ausente' : 'arquivo_local_ausente')
       }
+    } else {
+      await marcarMidiaNaoEnviada('conversa_sem_telefone')
     }
 
   // Não retornar mensagem completa no HTTP — evita duplicação (API + socket). Mensagem chega via nova_mensagem.

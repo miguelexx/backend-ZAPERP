@@ -237,6 +237,20 @@ async function resolveEditedMensagemRow(supabaseClient, { company_id, whatsapp_i
   return null
 }
 
+/**
+ * UltraMSG não manda `fileName` no documento recebido; quando o texto da mensagem É o próprio nome
+ * do arquivo ("Contrato 2026.pdf"), ele vira o `nome_arquivo` — senão o card mostrava/salvava
+ * "arquivo" e, depois da cópia local, "inbound-c…-m….pdf". Legenda comum não casa (exige extensão
+ * de documento no fim, uma linha, sem URL).
+ */
+const NOME_ARQUIVO_NO_TEXTO_RE = /^[^\n\r\\/:*?"<>|]{1,176}\.(pdf|docx?|xlsx?|xlsm|pptx?|odt|ods|odp|csv|txt|rtf|xml|json|zip|rar|7z|ofx|rem|ret|eml|msg|epub|vcf|ics)$/i
+
+function nomeArquivoDoTexto(texto) {
+  const s = String(texto || '').trim()
+  if (!s || /^https?:\/\//i.test(s) || /\s(https?:\/\/|www\.)/i.test(s)) return null
+  return NOME_ARQUIVO_NO_TEXTO_RE.test(s) ? s : null
+}
+
 function applyInboundMediaFields(insertMsg, media) {
   const {
     type, imageUrl, documentUrl, audioUrl, videoUrl, stickerUrl,
@@ -250,7 +264,7 @@ function applyInboundMediaFields(insertMsg, media) {
   } else if ((type === 'document' || type === 'file') && documentUrl) {
     insertMsg.tipo = 'arquivo'
     insertMsg.url = documentUrl
-    insertMsg.nome_arquivo = fileName || 'arquivo'
+    insertMsg.nome_arquivo = fileName || nomeArquivoDoTexto(insertMsg.texto) || 'arquivo'
   } else if (type === 'audio' || type === 'ptt') {
     insertMsg.tipo = type === 'ptt' ? 'voice' : 'audio'
     if (audioUrl) {
@@ -303,4 +317,4 @@ function applyInboundMediaFields(insertMsg, media) {
   return insertMsg
 }
 
-module.exports = { applyInboundMediaFields, persistInboundMensagemRow, resolveEditedMensagemRow }
+module.exports = { applyInboundMediaFields, persistInboundMensagemRow, resolveEditedMensagemRow, nomeArquivoDoTexto }

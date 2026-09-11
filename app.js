@@ -9,6 +9,7 @@ const { loadEnv, isProduction } = require('./config/env')
 loadEnv()
 const { getUploadsRoot, ensureUploadsRootExists } = require('./config/uploadsRoot')
 const { contentTypeForAudioPath } = require('./helpers/audioFormatSniffer')
+const { sanitizeDownloadFilename, buildContentDisposition, storedFileExt } = require('./helpers/contentDisposition')
 const tagsRoutes = require('./routes/tagRoutes')
 const labelsRoutes = require('./routes/labelsRoutes')
 ensureUploadsRootExists()
@@ -194,14 +195,29 @@ app.use(
       const isVideo = p.endsWith('.mp4') || p.endsWith('.mov') || p.endsWith('.avi') || p.endsWith('.3gp')
       const isPdf = p.endsWith('.pdf')
       const isMedia = isImage || isAudio || isVideo || isPdf
+      // "Salvar como…" do painel: o arquivo em disco tem nome técnico (hex). `?filename=` traz o nome
+      // real (nome_arquivo) e `?disposition=attachment` força download. Sem os parâmetros = idêntico.
+      const q = res.req?.query || {}
+      const requestedName = typeof q.filename === 'string'
+        ? sanitizeDownloadFilename(q.filename, { fallbackExt: storedFileExt(p) })
+        : null
+      const wantsAttachment = String(q.disposition || '').toLowerCase() === 'attachment'
       // Para mídia (imagem/áudio/vídeo/PDF), manter Content-Type adequado para provedores
       // e para o painel exibir PDF em iframe. Demais arquivos: download + octet-stream.
       if (!isMedia) {
         const name = p.split(/[\\/]/).pop() || 'download'
-        res.setHeader('Content-Disposition', `attachment; filename="${name.replace(/"/g, '')}"`)
+        res.setHeader(
+          'Content-Disposition',
+          requestedName
+            ? buildContentDisposition('attachment', requestedName)
+            : `attachment; filename="${name.replace(/"/g, '')}"`
+        )
         // força um tipo genérico para não permitir renderização ativa
         res.setHeader('Content-Type', 'application/octet-stream')
         return
+      }
+      if (requestedName) {
+        res.setHeader('Content-Disposition', buildContentDisposition(wantsAttachment ? 'attachment' : 'inline', requestedName))
       }
       // O mime padrão do express.static devolve octet-stream para .opus/.amr e audio/x-aac para .aac.
       // Com nosniff, tipo genérico deixa o <audio> sem dica alguma do formato. Só extensões que não

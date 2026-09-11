@@ -5,6 +5,7 @@
 
 const { isAllowedInboundMediaUrl: isAllowedMediaUrl } = require('../helpers/allowedInboundMediaUrl')
 const { contentTypeFromAudioMagicBytes } = require('../helpers/audioFormatSniffer')
+const { sanitizeDownloadFilename, buildContentDisposition } = require('../helpers/contentDisposition')
 
 const MAX_BYTES = 80 * 1024 * 1024 // 80 MB (impressão / preview)
 const FETCH_TIMEOUT_MS = Math.max(1000, Number(process.env.MEDIA_PROXY_TIMEOUT_MS) || 30000)
@@ -325,13 +326,11 @@ exports.proxyMedia = async (req, res) => {
     res.setHeader('Cache-Control', 'private, max-age=86400, immutable')
     res.setHeader('Accept-Ranges', 'bytes')
 
-    if (effectiveFilename) {
-      // RFC 5987 (UTF-8 encoded filename* para suporte a acentos/unicode)
-      const encoded = encodeURIComponent(effectiveFilename).replace(/'/g, '%27')
-      res.setHeader(
-        'Content-Disposition',
-        `${dispositionType}; filename="${effectiveFilename.replace(/"/g, '\\"')}"; filename*=UTF-8''${encoded}`
-      )
+    // RFC 5987: nome real em filename*; `filename=` só ASCII. Antes o nome cru ia no header e
+    // "Relatório — final.pdf" / emoji (> U+00FF) lançava ERR_INVALID_CHAR → 502 ao abrir/salvar.
+    const safeFilename = effectiveFilename ? sanitizeDownloadFilename(effectiveFilename) : null
+    if (safeFilename) {
+      res.setHeader('Content-Disposition', buildContentDisposition(dispositionType, safeFilename))
     }
 
     const total = body.length

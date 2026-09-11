@@ -714,3 +714,38 @@ Os 🥈 do §30. Paths/shapes confirmados no OpenAPI Whapi + MCP. **Adapter + wi
 
 ### 32.5 Testes / gate
 `tests/whapiQuizQuestionChat.test.js` (6) + `tests/whapiPresenceProfile.test.js` (7, inclui normalizador do webhook). Suítes de webhook Whapi + adapter adjacentes verdes (103). Adapter exporta 131 chaves, nenhuma `undefined`. Regressão zero. **Homologação live PENDENTE** (presença, perfil, quiz/pergunta, getChat contra canal real). Sem migration. Nada commitado/deployado.
+
+---
+
+## 33. Auditoria de mídia envio/recebimento — CORRIGIDO (2026-09-11)
+
+Auditoria do fluxo de áudio/voz/foto/vídeo/documento/figurinha nos dois providers. **UltraMSG: nenhum bug encontrado no envio nem no recebimento (pasta `ultramsg/` intocada).** Bugs reais eram todos no caminho Whapi e em estados sem saída do controller.
+
+| # | Bug (CONFIRMADO) | Efeito real | Correção |
+|---|---|---|---|
+| 1 | `uploadMedia` Whapi só lia `{ id }`/`{ link }`/`{ media: { id } }`. **Contrato oficial (OpenAPI `uploadMedia`) = `{ media: [{ id }] }` (array).** O teste antigo mockava o formato errado. | Todo upload Whapi "falhava": **vídeo nunca saía** (sem fallback → `erro`); foto/áudio/PDF caíam no fallback por URL pública (lento, depende de `APP_URL`). Mesmo efeito no encaminhar/reenviar. | `extractUploadedMediaRef` lê `media[0].link\|url\|id`. |
+| 2 | Upload Whapi = base64 em JSON com o timeout padrão de 30s. | Vídeo de ~30 MB (~40 MB de JSON) estourava em uplink lento. | `sendJson({ timeoutMs })`; upload usa `WHAPI_UPLOAD_TIMEOUT_MS` (padrão 120s). Upload pode retentar (não dispara mensagem). |
+| 3 | MIME do upload Whapi só conhecia mídia + PDF. | DOCX/XLSX/ZIP… chegavam ao cliente como `application/octet-stream`. | Mapa com documentos + `opts.mimeType` do multer quando a extensão não resolve (UltraMSG ignora a opção). |
+| 4 | Inbound `type: gif` e `type: short` (vídeo-recado circular/PTV) não eram mapeados. | GIF e vídeo-recado do cliente viravam "(mídia)" sem arquivo. | Normalizador: `gif`/`short` → `video` com `m[type].link`. |
+| 5 | `configureWebhooks` só mandava `webhooks`. Sem `media.auto_download`, o webhook traz só `{ id, mime_type }` (sem `link`) e nem o backfill (`/messages/list`) recupera. | Canal novo (Partner) sem Auto Download = foto/áudio do cliente nunca aparece. | PATCH inclui `media.auto_download` = `image,audio,voice,video,document,sticker` (enum oficial). Se o canal recusar `media` (400/422) → 2º PATCH só com `webhooks`. Reaplicar em canais existentes: `POST /integrations/whatsapp/instances/:id/configure-webhooks`. |
+| 6 | `POST /chats/:id/arquivo` sem telefone (ou sem URL/arquivo para upload) só logava. | Mídia no **relógio para sempre** (a reconciliação só confirma o que o provider aceitou). | `marcarMidiaNaoEnviada` → `status=erro` + socket `status_mensagem` (igual ao texto sem telefone). |
+| 7 | ffmpeg de imagem sem timeout. | Arquivo corrompido podia prender o request. | Timeout 60s (segue com a imagem original, como "normalização indisponível"). |
+| 8 | Imagem convertida para JPEG deixava o upload original (PNG/HEIC) órfão em `/uploads`. | Vazamento de disco a cada foto. | Controller remove a fonte após conversão (só no upload; o encaminhamento reusa arquivo salvo e não remove). |
+
+Testes: `tests/mediaSendReceiveAudit.test.js` (14; 11 falham no código antigo). Suíte completa 174/1742 verde. **Homologação live Whapi de mídia continua PENDENTE** — o contrato do upload vem do OpenAPI oficial, não de chamada real.
+
+### 33.1 Documentos: enviar e salvar (2026-09-11, 2ª rodada — vale para os dois providers)
+
+| Bug (CONFIRMADO) | Efeito | Correção |
+|---|---|---|
+| "Salvar como…" de arquivo em `/uploads`: frontend e API em hosts diferentes → navegador **ignora** `<a download>`; o `/uploads` mandava o nome do disco. | Arquivo salvo como `1726…-k3j2.docx` / `inbound-c1-m2-a1b2.pdf`; arquivo recebido gravado como `.bin` salvava `.bin` (não abria). | `/uploads?filename=&disposition=` (backend) + `withUploadDownloadHints` em `frontend/src/conversa/utils/conversaViewHelpers.js` (só links de arquivo; playback intocado). |
+| `/media/proxy` montava `filename="<nome cru>"`. Node lança `ERR_INVALID_CHAR` para caractere > U+00FF. | Abrir/salvar arquivo com "—", aspas curvas ou emoji no nome (comuns em Word/WhatsApp) → **502**. | `helpers/contentDisposition.js`: `filename=` ASCII + `filename*=UTF-8''`. |
+| Upload só aceitava pdf/office/txt/csv/zip… | ODT/ODS/ODP, OFX, CNAB (.rem/.ret), .eml/.msg, iWork, .epub, .vcf, .ics, .log, .gz/.tar recusados ("Tipo de arquivo não permitido"). | Adicionados em `middleware/upload.js` (+ `accept` do seletor de documentos no frontend). Executáveis/scripts continuam bloqueados; macro (.docm) não foi liberada. |
+| Cópia local de documento recebido: extensão fora da allowlist virava `.bin`. | Card mostrava/baixava `.bin`. | `ALLOW_EXT_FROM_NAME` com os mesmos formatos de documento. Imagens exóticas (heic/bmp/tif) **de fora de propósito**: `/uploads` as serve como download e a miniatura quebraria. |
+| UltraMSG não manda `fileName` no documento recebido. | Card "arquivo" → depois "inbound-c…-m….pdf". | `nomeArquivoDoTexto` (persistMensagem): se o texto É um nome de arquivo com extensão de documento, vira `nome_arquivo`. Legenda comum não casa. **Formato real do body UltraMSG para documento: NÃO CONFIRMADO** (sem payload real no repo); a heurística é inofensiva se o body for legenda. |
+
+Testes: `tests/documentDownloadAudit.test.js` (33) + cenários 12–14 em `frontend/scripts/test-audio-playback-candidates.mjs`. `npm run test:node` do frontend: 32/34 — `test-unread-and-minha-fila.mjs` e `test-cache-reconnect.mjs` falham **igual sem a mudança** (erro do shim `import.meta.env` com o Vite; preexistente).
+
+Risco residual conhecido (não alterado): Whapi que responda `sent:true` **sem** `message.id` deixa a linha `pending`; se o eco `from_me` não reconciliar em 3 min, o reconciliador (sem `referenceId` na Whapi) pode reenviar. O eco normalmente chega em segundos.
+
+Não alterado (observações para decidir depois): PNG transparente vira fundo preto no JPEG; HEIC depende do ffmpeg-static (se falhar, segue HEIC cru); documento inbound UltraMSG cujo texto é legenda (não o nome) segue com nome `inbound-c…-m….ext` (ver §33.1); voz Whapi/UltraMSG é gravada como `tipo=audio` (não `voice`) — comportamento histórico.

@@ -22,10 +22,17 @@ const WHAPI_WEBHOOK_EVENTS = [
 ]
 
 /**
- * Configura o webhook do canal Whapi (PATCH /settings, só o campo `webhooks`).
+ * Mídia inbound só traz `link` (baixável) com Auto Download ligado por tipo; sem ele o webhook
+ * chega só com `{ id, mime_type }` e a foto/áudio do cliente vira "(mídia)" sem arquivo.
+ * Valores = enum oficial `media.auto_download` (OpenAPI updateChannelSettings).
+ */
+const WHAPI_MEDIA_AUTO_DOWNLOAD = ['image', 'audio', 'voice', 'video', 'document', 'sticker']
+
+/**
+ * Configura o webhook do canal Whapi (PATCH /settings: `webhooks` + `media.auto_download`).
  * NUNCA token na query. Header `X-Webhook-Token` = WHATSAPP_WEBHOOK_TOKEN.
- * Não chama sozinho no boot — só via POST /integrations/whatsapp/instances/:id/configure-webhooks.
- * Preserva o restante das settings (MCP: campo omitido = inalterado).
+ * Não chama sozinho no boot — só via POST /integrations/whatsapp/instances/:id/configure-webhooks
+ * (e no provisionamento do canal). Demais settings preservadas (MCP: campo omitido = inalterado).
  */
 async function configureWebhooks(appUrl, opts = {}) {
   const cfg = await resolveConfig(opts)
@@ -36,7 +43,7 @@ async function configureWebhooks(appUrl, opts = {}) {
     return [{ label: 'webhook', ok: false, error: 'WHATSAPP_WEBHOOK_TOKEN ausente' }]
   }
   const webhookUrl = `${String(appUrl).replace(/\/$/, '')}/webhooks/whapi`
-  const body = {
+  const webhooksOnly = {
     webhooks: [{
       url: webhookUrl,
       mode: 'body',
@@ -44,15 +51,24 @@ async function configureWebhooks(appUrl, opts = {}) {
       headers: { 'X-Webhook-Token': webhookToken },
     }],
   }
+  const patchSettings = (body) => patch({
+    token: cfg.token,
+    endpoint: '/settings',
+    body,
+    companyId: cfg.companyId,
+    whatsappInstanceId: cfg.whatsappInstanceId,
+    skipSendGuard: true,
+  })
   try {
-    const { ok, status, data, text } = await patch({
-      token: cfg.token,
-      endpoint: '/settings',
-      body,
-      companyId: cfg.companyId,
-      whatsappInstanceId: cfg.whatsappInstanceId,
-      skipSendGuard: true,
+    let { ok, status, data, text } = await patchSettings({
+      ...webhooksOnly,
+      media: { auto_download: WHAPI_MEDIA_AUTO_DOWNLOAD },
     })
+    // Canal/plano que recuse o campo `media`: o webhook continua sendo o essencial.
+    if (!ok && (Number(status) === 400 || Number(status) === 422)) {
+      console.warn('⚠️ Whapi recusou media.auto_download; reconfigurando só o webhook:', String(text || data?.error || `HTTP ${status}`).slice(0, 200))
+      ;({ ok, status, data, text } = await patchSettings(webhooksOnly))
+    }
     if (ok) {
       console.log('✅ Whapi webhooks configurados:', webhookUrl)
       return [{ label: 'webhook', ok: true, webhook_url: webhookUrl }]

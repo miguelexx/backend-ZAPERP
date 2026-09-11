@@ -23,7 +23,7 @@ Nas linhas de **chats**, a coluna `chatController` é a **fachada** (`routes/cha
 | `GET /webhooks/ultramsg/health` e alias `/webhooks/whatsapp/health` | `webhookLimiter`; `healthUltramsg` | Diagnóstico público sanitizado. |
 | `GET /webhooks/ultramsg/` e alias | `webhookLimiter`; `testarUltramsg` | Verificação básica do endpoint. |
 | `POST /webhooks/ultramsg/` e alias | limiter, `requireWebhookToken`, `resolveWebhookInstance`; `webhookUltramsgController` | Body UltraMSG. Resolve instância/tenant, normaliza inbound ou ACK, persiste e emite eventos. `401/403/404/429/500`; detalhes em [06](06-WHATSAPP-ULTRAMSG-E-WEBHOOKS.md). |
-| `GET /uploads/*` | middleware inline/static | Arquivo local por nome não previsível; `nosniff`, sem JWT. |
+| `GET /uploads/*` | middleware inline/static | Arquivo local por nome não previsível; `nosniff`, sem JWT. Opcional `?filename=<nome real>&disposition=attachment\|inline` (2026-09-11): Content-Disposition com o nome real em `filename*=UTF-8''` (helper `helpers/contentDisposition.js`). Não-mídia continua **sempre** `attachment` + `octet-stream`. Sem os parâmetros, resposta idêntica à anterior. |
 | `GET /permissoes` | inline em `app.js`; serve `public/permissoes.html` | Sem auth HTTP; página HTML estática de referência do catálogo de permissões. Uso interno/admin pelo navegador. |
 | `GET /painel-supervisao` | inline em `app.js`; serve `public/supervisao.html` | Sem auth HTTP; painel HTML de supervisão autônomo. Uso interno/admin pelo navegador. |
 | `GET /media/r2/*` | inline em `app.js` | Redireciona para URL R2 assinada quando objeto está autorizado. |

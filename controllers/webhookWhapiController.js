@@ -647,9 +647,12 @@ function normalizeWhapiMessageToInternal(m, ctx = {}) {
   )
 
   // Mídia por tipo (Fase B faz o download; aqui já mapeamos a URL para não perder o link).
+  // GIF (`type: gif`) e vídeo-recado circular (`type: short`, PTV) são MP4 no Whapi: sem este
+  // mapeamento chegavam como "(mídia)" sem arquivo. Entram no pipeline como vídeo.
+  const isVideoLike = type === 'video' || type === 'gif' || type === 'short'
   const imageUrl = type === 'image' ? mediaLink(m.image) : null
   const audioUrl = (type === 'audio' || type === 'voice' || type === 'ptt') ? mediaLink(m.audio ?? m.voice) : null
-  const videoUrl = type === 'video' ? mediaLink(m.video) : null
+  const videoUrl = isVideoLike ? mediaLink(m[type] ?? m.video) : null
   const documentUrl = (type === 'document' || type === 'file') ? mediaLink(m.document ?? m.file) : null
   const stickerUrl = type === 'sticker' ? mediaLink(m.sticker) : null
   const captionText = m[type]?.caption ?? m.caption ?? null
@@ -704,6 +707,7 @@ function normalizeWhapiMessageToInternal(m, ctx = {}) {
     : isPollVote ? 'chat'
     : (type === 'poll') ? 'poll'
     : (type === 'live_location') ? 'location'
+    : (type === 'gif' || type === 'short') ? 'video'
     : type
 
   return {

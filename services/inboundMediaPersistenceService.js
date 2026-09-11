@@ -159,6 +159,30 @@ const ALLOW_EXT_FROM_NAME = new Set([
   '.apk',
   '.json',
   '.xml',
+  // Documentos que clientes mandam no dia a dia: sem estes o arquivo ia para o disco como `.bin`
+  // (o /uploads serve não-mídia sempre como download octet-stream, então a extensão não executa nada).
+  '.rtf',
+  '.odt',
+  '.ods',
+  '.odp',
+  '.xlsm',
+  '.xlsb',
+  '.ofx',
+  '.rem',
+  '.ret',
+  '.eml',
+  '.msg',
+  '.key',
+  '.pages',
+  '.numbers',
+  '.epub',
+  '.vcf',
+  '.ics',
+  '.log',
+  '.gz',
+  '.tar',
+  // Imagens fora de jpg/png/webp/gif ficam de fora de propósito: /uploads serve essas extensões
+  // como download (não imagem), e a miniatura da bolha quebraria.
 ])
 
 function safeExtFromNomeArquivo(nome) {

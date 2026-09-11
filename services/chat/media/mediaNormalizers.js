@@ -349,9 +349,16 @@ async function convertImageToWhatsappJpeg(inputPath, outputPath) {
     ]
     const proc = spawn(ffmpegPath, args, { windowsHide: true })
     let stderr = ''
+    // Sem teto, um ffmpeg travado (arquivo corrompido/HEIC exótico) prendia o POST /arquivo para sempre.
+    // Ao estourar, o caller segue com a imagem original (mesmo caminho de "normalização indisponível").
+    const tid = setTimeout(() => {
+      try { proc.kill('SIGKILL') } catch {}
+      reject(new Error('ffmpeg image timeout (60s)'))
+    }, 60000)
     proc.stderr.on('data', (d) => { stderr += String(d || '') })
-    proc.on('error', (err) => reject(err))
+    proc.on('error', (err) => { clearTimeout(tid); reject(err) })
     proc.on('close', (code) => {
+      clearTimeout(tid)
       if (code === 0) resolve()
       else reject(new Error(`ffmpeg image exit=${code} ${stderr.slice(-240)}`.trim()))
     })

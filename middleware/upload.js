@@ -80,6 +80,15 @@ const ALLOWED_EXTENSIONS = new Set([
   'txt', 'csv', 'md', 'html', 'htm', 'rtf',
   'json', 'xml', 'sql',
   'zip', 'rar', '7z',
+  // Documentos de escritório/negócio que o WhatsApp entrega como documento comum.
+  // LibreOffice, extrato bancário (OFX) e remessa/retorno CNAB, e-mail salvo, iWork, e-book,
+  // contato/agenda, log e compactados Unix. Sem executável nem macro (ver bloqueio abaixo).
+  'odt', 'ods', 'odp',
+  'ofx', 'rem', 'ret',
+  'eml', 'msg',
+  'key', 'pages', 'numbers',
+  'epub', 'vcf', 'ics', 'log',
+  'gz', 'tar',
 ])
 
 /**

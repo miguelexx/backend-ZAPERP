@@ -339,3 +339,19 @@ if (existente && count >= destinatarios.length) return retornoExecucaoExistente(
 ```
 
 `iniciar` em `em_execucao`/`pausada` e `continuar` chamam `gerarFilaParaCampanha` de novo. Itens `enviada`/`entregue`/`lida` não são reenviados; `cancelada`/`pendente` órfãs da mesma versão podem ser reatribuídas.
+
+---
+
+## 25. Mock de provider com o formato que você imagina (Whapi `POST /media`)
+
+**Armadilha:** escrever o teste do adapter com a resposta que "parece certa" (`{ id, link }`). O teste passa, o upload real falha e ninguém vê: o controller cai no fallback por URL pública (foto/PDF "funcionam", só mais lentos) e o vídeo — sem fallback — nunca sai.
+
+```js
+// ❌ ERRADO — shape inventado no mock
+text: async () => JSON.stringify({ id: 'media-1', link: 'https://cdn/x.jpg' })
+
+// ✅ CORRETO — contrato oficial (OpenAPI uploadMedia)
+text: async () => JSON.stringify({ media: [{ id: 'mp4-5f1c…' }] })
+```
+
+Mock de provider = copiar o schema do OpenAPI/MCP, não deduzir. Detalhes: [25 §33](25-WHAPI-SEGUNDA-INTEGRACAO.md).

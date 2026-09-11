@@ -63,11 +63,11 @@ function isFalse(v) {
   return v === false || v === 'false'
 }
 
-function createFetchOptions(method, body) {
+function createFetchOptions(method, body, timeoutMs = WHAPI_TIMEOUT_MS) {
   let signal
   try {
     if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function') {
-      signal = AbortSignal.timeout(WHAPI_TIMEOUT_MS)
+      signal = AbortSignal.timeout(Number(timeoutMs) > 0 ? Number(timeoutMs) : WHAPI_TIMEOUT_MS)
     }
   } catch { /* Node < 17.3 */ }
   const opts = {
@@ -101,10 +101,12 @@ async function sendJson({
   meta = null,
   whatsappInstanceId = null,
   skipSendGuard = false,
+  // Upload de mídia (base64 de até ~32 MB) não cabe no timeout padrão de 30s em uplink lento.
+  timeoutMs = null,
 }) {
   const verb = String(method || 'POST').toUpperCase()
   const url = `${buildBaseUrl()}${endpoint}`
-  const fetchOpts = createFetchOptions(verb, body)
+  const fetchOpts = createFetchOptions(verb, body, timeoutMs || WHAPI_TIMEOUT_MS)
   fetchOpts.headers = withAuth(fetchOpts.headers, token)
   const guard = skipSendGuard
     ? null
