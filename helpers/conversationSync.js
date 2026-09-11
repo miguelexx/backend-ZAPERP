@@ -644,6 +644,71 @@ async function findClienteRowViaConversa(supabaseClient, company_id, phone, tele
 }
 
 /**
+ * Extrai as colunas/valores da chave única violada a partir da mensagem de erro do Postgres.
+ * O PostgREST devolve algo como: `Key (company_id, telefone)=(1, 5534996621011) already exists.`
+ * (às vezes só em `message`, às vezes em `details`). Telefone e wa_id nunca contêm vírgula,
+ * então o split simples por vírgula é seguro para as colunas de identidade que nos interessam.
+ *
+ * @param {object} err
+ * @returns {{ col: string, val: string }[]}
+ */
+function parseUniqueConflictKey(err) {
+  const src = `${err?.details || ''} ${err?.message || ''}`
+  const m = src.match(/Key \(([^)]+)\)=\(([^)]+)\)/i)
+  if (!m) return []
+  const cols = m[1].split(',').map((s) => s.trim())
+  const vals = m[2].split(',').map((s) => s.trim())
+  if (cols.length === 0 || cols.length !== vals.length) return []
+  return cols.map((col, i) => ({ col, val: vals[i] }))
+}
+
+/**
+ * Recuperação determinística de 23505: localiza o cliente que causou o conflito de chave
+ * única usando exatamente o valor que o Postgres reportou no erro. Isso dribla qualquer
+ * diferença de formatação entre o telefone gerado para o INSERT e o gravado no banco
+ * (±9º dígito, com/sem DDI). SEMPRE escopado por `company_id` — se a constraint violada
+ * pertencer a outra empresa (unique global), nada é retornado e o isolamento é preservado.
+ *
+ * @returns {Promise<object|null>} linha do cliente (colunas de CLIENTE_SELECT_COLS) ou null
+ */
+async function findClienteRowByUniqueConflict(supabaseClient, company_id, err) {
+  const pairs = parseUniqueConflictKey(err)
+  if (pairs.length === 0) return null
+  // Só colunas de identidade do contato podem ser reutilizadas com segurança.
+  const idPairs = pairs.filter(
+    (p) => (p.col === 'telefone' || p.col === 'wa_id') && p.val && p.val.toLowerCase() !== 'null'
+  )
+  for (const { col, val } of idPairs) {
+    const run = () =>
+      supabaseClient
+        .from('clientes')
+        .select(CLIENTE_SELECT_COLS())
+        .eq('company_id', company_id)
+        .eq(col, val)
+        .order('id', { ascending: true })
+        .limit(1)
+    let { data, error } = await run()
+    if (error && marcarSchemaNomeProtecaoIndisponivel(error)) {
+      const retry = await run()
+      data = retry.data
+      error = retry.error
+    }
+    const row = Array.isArray(data) && data[0] ? data[0] : null
+    if (row?.id) return row
+  }
+  // Índice único funcional/normalizado (ex.: unique sobre a chave sem o 9º dígito): a coluna
+  // reportada não é `telefone`, mas o VALOR é um telefone/uma chave. Reprocessa esse valor pela
+  // busca por variantes (±9, com/sem 55), sempre escopada por company_id.
+  for (const { val } of pairs) {
+    const digits = String(val || '').replace(/\D/g, '')
+    if (digits.length < 8 || digits.length > 15) continue
+    const byPhone = await findClienteRowForPhone(supabaseClient, company_id, digits, getCanonicalPhone(digits) || digits, possiblePhonesBR(digits))
+    if (byPhone?.id) return byPhone
+  }
+  return null
+}
+
+/**
  * getOrCreateCliente — SELECT-then-UPDATE/INSERT. Nunca insert puro.
  * Evita 23505 (duplicate key) em clientes_company_telefone_unique.
  * Cada empresa tem seus próprios clientes; nunca retorna cliente de outra company.
@@ -847,28 +912,46 @@ async function getOrCreateCliente(supabaseClient, company_id, phone, fields = {}
     return clienteResult({ id: novoCliente.id, ...insertData }, { created: true, changed: true })
   }
 
-  const isDuplicate = String(errInsert?.code || '') === '23505' ||
+  // 23505 = chave duplicada: o contato JÁ existe. Este é o caso do botão "Conversar" com
+  // um cliente já cadastrado — nunca deve virar erro 400. Recuperamos e reutilizamos o
+  // registro que causou o conflito em vez de falhar.
+  const errFinal = errInsert || errUpsert
+  const isDuplicate =
+    String(errInsert?.code || '') === '23505' ||
     String(errUpsert?.code || '') === '23505' ||
-    String(errInsert?.message || '').includes('unique') ||
-    String(errInsert?.message || '').includes('duplicate')
+    /duplicate key|already exists|unique constrain/i.test(String(errInsert?.message || '')) ||
+    /duplicate key|already exists|unique constrain/i.test(String(errUpsert?.message || ''))
 
   if (isDuplicate) {
-    foundRow = await findClienteRowForPhone(supabaseClient, company_id, phone, telefoneCanonico, searchPhones, { identitySafe: identitySafePhoneMatch, strictAgendaImport })
+    // 1) Caminho determinístico: a linha exata apontada pela constraint violada (usa o valor
+    //    que o Postgres reportou, imune a diferenças de formatação telefone/wa_id).
+    foundRow = await findClienteRowByUniqueConflict(supabaseClient, company_id, errFinal)
+    // 2) Fallbacks por variantes de telefone (±9º dígito, com/sem 55) e via conversa vinculada.
+    if (!foundRow?.id) {
+      foundRow = await findClienteRowForPhone(supabaseClient, company_id, phone, telefoneCanonico, searchPhones, { identitySafe: identitySafePhoneMatch, strictAgendaImport })
+    }
     if (!foundRow?.id && !strictAgendaImport) {
       foundRow = await findClienteRowViaConversa(supabaseClient, company_id, phone, telefoneCanonico, searchPhones, { identitySafe: identitySafePhoneMatch, strictAgendaImport })
     }
     if (!foundRow?.id && telefoneCanonico) {
-      const { data: directRow } = await supabaseClient
+      // .limit(1) em vez de .maybeSingle(): tolera linhas duplicadas legadas sem lançar erro.
+      const { data: directRows } = await supabaseClient
         .from('clientes')
         .select(CLIENTE_SELECT_COLS())
         .eq('company_id', company_id)
         .eq('telefone', telefoneCanonico)
-        .maybeSingle()
+        .order('id', { ascending: true })
+        .limit(1)
+      const directRow = Array.isArray(directRows) && directRows[0] ? directRows[0] : null
       if (directRow?.id) foundRow = directRow
     }
     if (!foundRow?.id) {
+      // Última tentativa após pequena espera (cobre corrida de escrita concorrente).
       await new Promise((r) => setTimeout(r, 80))
-      foundRow = await findClienteRowForPhone(supabaseClient, company_id, phone, telefoneCanonico, searchPhones, { identitySafe: identitySafePhoneMatch, strictAgendaImport })
+      foundRow = await findClienteRowByUniqueConflict(supabaseClient, company_id, errFinal)
+      if (!foundRow?.id) {
+        foundRow = await findClienteRowForPhone(supabaseClient, company_id, phone, telefoneCanonico, searchPhones, { identitySafe: identitySafePhoneMatch, strictAgendaImport })
+      }
     }
     if (!foundRow?.id && !strictAgendaImport) {
       foundRow = await findClienteRowViaConversa(supabaseClient, company_id, phone, telefoneCanonico, searchPhones, { identitySafe: identitySafePhoneMatch, strictAgendaImport })
@@ -878,7 +961,6 @@ async function getOrCreateCliente(supabaseClient, company_id, phone, fields = {}
     }
   }
 
-  const errFinal = errInsert || errUpsert
   const errMsg = String(errFinal?.message || errFinal?.code || 'unknown')
   console.warn('[getOrCreateCliente] Insert falhou, continuando sem cliente:', errMsg, 'company_id:', company_id, 'telefone:', telefoneCanonico)
   return {
