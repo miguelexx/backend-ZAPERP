@@ -116,7 +116,17 @@ function deriveListarConversasFilters(query = {}) {
     }
   }
 
+  // Filtro por número WhatsApp (multi-instância). Escopo, como tag/setor: vale mesmo com busca.
+  // Inteiro positivo (whatsapp_instances.id); valor inválido/ausente → null (sem filtro = todos os números).
+  let filtroWhatsappInstanceId = null
+  const whatsappInstanceIdRaw = query.whatsapp_instance_id
+  if (whatsappInstanceIdRaw != null && String(whatsappInstanceIdRaw).trim() !== '') {
+    const n = Number(String(whatsappInstanceIdRaw).trim())
+    if (Number.isInteger(n) && n > 0) filtroWhatsappInstanceId = n
+  }
+
   return {
+    filtroWhatsappInstanceId,
     tagFilterAtivo,
     incluirColaboradoresEncaminhar,
     incluirTodosClientesAtivo,

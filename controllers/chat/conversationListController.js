@@ -64,6 +64,7 @@ exports.listarConversas = async (req, res) => {
       statusNorm,
       filtroAtendenteInformado,
       atendenteIdInvalido,
+      filtroWhatsappInstanceId,
     } = deriveListarConversasFilters(req.query)
 
     const chatListPagination = parseChatListPagination(req.query)
@@ -441,6 +442,9 @@ exports.listarConversas = async (req, res) => {
         .from('conversas')
         .select(select)
         .eq('company_id', company_id)
+      // Filtro por número WhatsApp (multi-instância): escopo puro, aplicado igual em todas as abas
+      // e nos contadores (chatListCountsService). Sem o filtro = todos os números (comportamento atual).
+      if (filtroWhatsappInstanceId) q = q.eq('whatsapp_instance_id', filtroWhatsappInstanceId)
       // Filtro por setor: conversas sem setor visíveis para TODOS; com setor só mesmo setor.
       // EXCEÇÃO: conversas que o usuário transferiu — aparecem independente do setor.
       if (!isAdmin) {

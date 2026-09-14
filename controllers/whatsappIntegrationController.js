@@ -246,11 +246,30 @@ exports.provisionWhapiInstance = async (req, res) => {
 
   const listed = await whatsappInstanceService.listWhatsappInstances(company_id)
   if (listed.error) return res.status(500).json({ error: listed.error, whapi: whapiMeta() })
-  const existing = pickExistingWhapiInstance(listed.instances)
+
+  // Multi-canal (vários números WHAPI por empresa — ver docs/ai-handoff/28-MULTIPLOS-NUMEROS-WHAPI.md):
+  // com a flag explícita `novo` o caller pede um canal ADICIONAL e não reaproveita o existente.
+  // SEM a flag o comportamento é o de sempre (idempotente por empresa) — nada muda para quem usa 1 número.
+  const wantNew = req.body?.novo === true || req.body?.forceNew === true || req.body?.adicionar === true
+  const whapiRows = (listed.instances || []).filter((inst) => isWhapiProvider(inst?.provider))
+  const whapiAtivas = whapiRows.filter((inst) => inst?.ativo !== false).length
+  const existing = wantNew ? null : pickExistingWhapiInstance(listed.instances)
   if (existing) {
     const instance = await hydrateWhapiInstance(company_id, existing)
     rememberWhapiLive(company_id, instance)
     return res.json({ instance, created: false, whapi: whapiMeta() })
+  }
+
+  // Teto de canais ATIVOS por empresa (rede de segurança contra criação em excesso via Partner — cada canal custa).
+  // Conta só ativas (consistente com has_multiple do atendimento). Configurável por
+  // WHAPI_MAX_CHANNELS_PER_COMPANY (default 5). Só barra quando o caller pede um canal novo.
+  const maxChannels = Number(process.env.WHAPI_MAX_CHANNELS_PER_COMPANY || 5)
+  if (wantNew && Number.isFinite(maxChannels) && maxChannels > 0 && whapiAtivas >= maxChannels) {
+    return res.status(409).json({
+      error: `Limite de ${maxChannels} números WhatsApp (Whapi) ativos por empresa atingido. Desative um número antes de adicionar outro.`,
+      code: 'WHAPI_MAX_CHANNELS',
+      whapi: whapiMeta(),
+    })
   }
 
   if (!whapiPartner.isPartnerConfigured()) {
@@ -262,11 +281,15 @@ exports.provisionWhapiInstance = async (req, res) => {
   }
 
   const requestedName = String(req.body?.nome || req.body?.name || '').trim()
+  // Nome distinto por canal quando a empresa já tem outros (evita "ZapERP empresa X" repetido no Partner).
+  const defaultName = whapiRows.length > 0
+    ? `ZapERP empresa ${company_id} #${whapiRows.length + 1}`
+    : `ZapERP empresa ${company_id}`
   let channel
   try {
     channel = await whapiPartner.createChannel({
       companyId: company_id,
-      name: requestedName || `ZapERP empresa ${company_id}`,
+      name: requestedName || defaultName,
     })
   } catch (e) {
     const status = Number(e?.httpStatus) || 502

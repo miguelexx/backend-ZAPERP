@@ -48,7 +48,9 @@ docs/
 │   ├── 24-WEBHOOK-INBOUND-MODULARIZACAO.md  inbound/ACK — fases 1–4 feitas; fase 5 em andamento (miolo do `receberZapi` no arquivo)
 │   ├── 25-AUDITORIA-PROXIMOS-ALVOS.md      ranking (webhook P0 já tem o 24; disparo mapa = 27)
 │   ├── 26-AUDITORIA-LEGIBILIDADE-CODIGO.md  o que é difícil p/ IA entender (JSDoc/headers); cluster DISPARO, ai×ia
-│   └── 27-DISPARO-MAPA.md                   mapa de código do DISPARO: fluxo worker→fila→send→hook, gates, tabelas, Etapas
+│   ├── 26-WHAPI-TRIAGEM-INTERATIVA.md       triagem interativa Whapi (menu nativo; coexiste com chatbot texto)
+│   ├── 27-DISPARO-MAPA.md                   mapa de código do DISPARO: fluxo worker→fila→send→hook, gates, tabelas, Etapas
+│   └── 28-MULTIPLOS-NUMEROS-WHAPI.md        vários números WHAPI por empresa, feed unificado: estado atual, limitações, plano por etapas
 │
 └── reference/                  ← referência suplementar por domínio
     ├── PROJECT_RULES.md        regras do projeto (multi-tenant, segurança, padrões)
@@ -96,6 +98,8 @@ docs/
 | Modularizar / editar chat HTTP (`chatController`) | `ai-handoff/23-CHAT-CONTROLLER-MODULARIZACAO.md` (entrada) + **`CHAT_ARQUITETURA_MODULAR.md`**. Fachada **já é shim** — não reextrair lista/texto/PIX |
 | Modularizar webhook inbound/ACK (`webhookZapiController`) | `ai-handoff/24-WEBHOOK-INBOUND-MODULARIZACAO.md`. Helpers já em `controllers/webhookInbound/`. **Não** mover `receberZapi`/`statusZapi` sem ler. Não renomear o arquivo |
 | Ranking de próximos alvos | `ai-handoff/25-AUDITORIA-PROXIMOS-ALVOS.md` |
+| 2ª integração WhatsApp (Whapi Cloud) | `ai-handoff/25-WHAPI-SEGUNDA-INTEGRACAO.md` |
+| **Vários números WHAPI por empresa (feed unificado)** | `ai-handoff/28-MULTIPLOS-NUMEROS-WHAPI.md` (estado atual, limitações, riscos, plano por etapas) |
 | O que é difícil de a IA entender (JSDoc/headers, nomes) | `ai-handoff/26-AUDITORIA-LEGIBILIDADE-CODIGO.md` |
 | Proteção de envio / rate limit / opt-in | `reference/PROTECAO-ENVIO.md` |
 | Scripts de manutenção / diagnóstico / R2 | `reference/SCRIPTS-CATALOG.md` |

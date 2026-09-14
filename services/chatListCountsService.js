@@ -178,6 +178,13 @@ async function resolveChatListCountsContext(req) {
     if (Number.isInteger(num) && num > 0) filtroAtendenteInformado = num
   }
 
+  // Filtro por número WhatsApp (multi-instância) — espelha o da listagem (buildQuery).
+  let filtroWhatsappInstanceId = null
+  if (q.whatsapp_instance_id != null && String(q.whatsapp_instance_id).trim() !== '') {
+    const n = Number(String(q.whatsapp_instance_id).trim())
+    if (Number.isInteger(n) && n > 0) filtroWhatsappInstanceId = n
+  }
+
   let separarMensagensDisparadasEmpresa = false
   let atendimentoModoSimplesEmpresa = false
   let moduloCampanhasAtivo = false
@@ -311,6 +318,7 @@ async function resolveChatListCountsContext(req) {
     departamento_ids,
     filter_dep_id,
     filtroAtendenteInformado,
+    filtroWhatsappInstanceId,
     conversaIdsTransferidas,
     conversaIdsParticipanteAtivo: Array.isArray(conversaIdsParticipanteAtivo) ? conversaIdsParticipanteAtivo : [],
     grupoIdsPermitidosPorDepartamento,
@@ -341,6 +349,7 @@ function applyChatListSqlFilters(query, ctx, overrides = {}) {
     departamento_ids,
     filter_dep_id,
     filtroAtendenteInformado,
+    filtroWhatsappInstanceId,
     conversaIdsTransferidas,
     conversaIdsParticipanteAtivo,
     grupoIdsPermitidosPorDepartamento,
@@ -374,6 +383,8 @@ function applyChatListSqlFilters(query, ctx, overrides = {}) {
       : null
 
   let q = query.eq('company_id', company_id)
+  // Filtro por número WhatsApp (multi-instância): mesmo escopo aplicado no buildQuery da listagem.
+  if (filtroWhatsappInstanceId) q = q.eq('whatsapp_instance_id', filtroWhatsappInstanceId)
 
   if (!isAdmin) {
     const depIds = Array.isArray(departamento_ids)
@@ -784,6 +795,7 @@ function buildCountsCacheKey(req) {
     q.data_fim || '',
     q.palavra || '',
     q.atendente_id || '',
+    q.whatsapp_instance_id || '',
   ]
   return parts.join(':')
 }
