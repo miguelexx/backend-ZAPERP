@@ -169,7 +169,9 @@ deveria rodar **por instância** para cobrir todos. Envio/recebimento não depen
 Em produção, 2+ Whapi **sem** `is_default` devolve `NO_DEFAULT_INSTANCE` → `connected:false` → tela vermelha
 mesmo com todos AUTH (o painel Configurações hidrata por `whatsappInstanceId` e mostrava Conectado).
 Agora o endpoint lista os canais Whapi ativos e consulta cada um; overlay só se **todos** estiverem
-comprovadamente fora do AUTH. Um AUTH (ou erro de consulta) → `connected:true`.
+comprovadamente fora do AUTH (`UNAUTHORIZED` / `LOGOUT` etc.). `not_configured` e `error` (o caso de
+2+ canais sem `is_default` em produção) devolvem `connected:true`. O frontend ignora o mesmo conjunto
+ambíguo, então o overlay some mesmo antes do backend novo se o payload antigo vier com `not_configured`.
 
 ---
 

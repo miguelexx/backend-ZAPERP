@@ -12,6 +12,8 @@ const { resolveCompanyWhatsappProvider } = require('../../services/chat/identity
 const { listWhatsappInstances, sanitizeWhatsappInstance } = require('../../services/whatsappInstanceService')
 
 const WHAPI_STATUS_MAX_INSTANCES = 8
+const WHAPI_LIVE_UP = new Set(['AUTH', 'CONNECTED', 'READY'])
+const WHAPI_AMBIGUOUS_HEALTH = new Set(['', 'NOT_CONFIGURED', 'ERROR', 'UNKNOWN'])
 
 function isActiveWhapiInstance(inst) {
   return Boolean(
@@ -19,6 +21,23 @@ function isActiveWhapiInstance(inst) {
     && inst.ativo !== false
     && String(inst.provider || '').trim().toLowerCase() === 'whapi'
   )
+}
+
+function healthStatus(result) {
+  return String(result?.status || '').trim().toUpperCase()
+}
+
+function isLiveWhapiUp(result) {
+  if (!result) return false
+  if (result.connected === true) return true
+  return WHAPI_LIVE_UP.has(healthStatus(result))
+}
+
+/** Só AUTH perdido de verdade — não “sem default” / timeout / health vazio. */
+function isProvenWhapiSessionDown(result) {
+  if (!result || isLiveWhapiUp(result)) return false
+  if (WHAPI_AMBIGUOUS_HEALTH.has(healthStatus(result))) return false
+  return result.connected === false
 }
 
 exports.listWhatsappInstancesAtendimento = async (req, res) => {
@@ -160,7 +179,7 @@ exports.whapiChannelStatus = async (req, res) => {
       }).catch(() => null)
     ))
 
-    const firstUp = results.find((r) => r && r.connected === true)
+    const firstUp = results.find((r) => isLiveWhapiUp(r))
     if (firstUp) {
       return res.json({
         ok: true,
@@ -172,7 +191,7 @@ exports.whapiChannelStatus = async (req, res) => {
     }
 
     const allProvenDown = results.length === whapiActive.length
-      && results.every((r) => r && r.connected === false)
+      && results.every((r) => isProvenWhapiSessionDown(r))
     if (allProvenDown) {
       return res.json({
         ok: true,
@@ -183,8 +202,8 @@ exports.whapiChannelStatus = async (req, res) => {
       })
     }
 
-    // Consulta incompleta (erro/timeout) → fail-safe, overlay não acende.
-    return res.json(safe)
+    // not_configured / error / timeout / health vazio → fail-safe, overlay não acende.
+    return res.json({ ok: true, isWhapi: true, connected: true, status: null, provider: 'whapi' })
   } catch (err) {
     console.error('whapiChannelStatus:', err?.message || err)
     // Erro ⇒ nunca acusa desconexão (evita overlay vermelho por falha transitória).

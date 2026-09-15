@@ -147,7 +147,7 @@ test('dois canais Whapi ambos UNAUTHORIZED → connected:false (acende o overlay
   expect(res.body).toMatchObject({ isWhapi: true, connected: false })
 })
 
-test('erro ao consultar o provider → fail-safe connected:true (não acende por engano)', async () => {
+test('erro ao consultar o provider (throw) → fail-safe connected:true (não acende por engano)', async () => {
   resolveCompanyWhatsappProvider.mockResolvedValue('whapi')
   listWhatsappInstances.mockResolvedValue({ instances: [whapiRow(10)], error: null })
   mockHealthByInstance({
@@ -155,5 +155,32 @@ test('erro ao consultar o provider → fail-safe connected:true (não acende por
   })
   const res = mockRes()
   await whapiChannelStatus({ user: { company_id: 7 } }, res)
-  expect(res.body).toMatchObject({ isWhapi: false, connected: true })
+  expect(res.body).toMatchObject({ connected: true })
+  expect(res.body.connected).toBe(true)
+})
+
+test('dois canais sem default → not_configured NÃO acende overlay', async () => {
+  resolveCompanyWhatsappProvider.mockResolvedValue('whapi')
+  listWhatsappInstances.mockResolvedValue({
+    instances: [whapiRow(10), whapiRow(11)],
+    error: null,
+  })
+  mockHealthByInstance({
+    10: { connected: false, status: 'not_configured' },
+    11: { connected: false, status: 'not_configured' },
+  })
+  const res = mockRes()
+  await whapiChannelStatus({ user: { company_id: 7 } }, res)
+  expect(res.body).toMatchObject({ connected: true })
+})
+
+test('health error (sem throw) NÃO acende overlay', async () => {
+  resolveCompanyWhatsappProvider.mockResolvedValue('whapi')
+  listWhatsappInstances.mockResolvedValue({ instances: [whapiRow(10)], error: null })
+  mockHealthByInstance({
+    10: { connected: false, status: 'error' },
+  })
+  const res = mockRes()
+  await whapiChannelStatus({ user: { company_id: 7 } }, res)
+  expect(res.body).toMatchObject({ isWhapi: true, connected: true })
 })
