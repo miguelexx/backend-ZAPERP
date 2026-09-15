@@ -75,6 +75,15 @@ test.each([true, false])('co-atendente de outro setor: participante=%s', async (
   } else expect(res.status).toHaveBeenCalledWith(403)
 })
 
+test('atendente nao detalha conversa do mesmo setor assumida por outro', async () => {
+  usuarioParticipaAtivamenteDaConversa.mockResolvedValue(false)
+  results.conversas = [{ data: { id: 10, atendente_id: 9, departamento_id: 3, status_atendimento: 'em_atendimento', telefone: '5511999999999' } }]
+  results.atendimentos = [{ data: null }]
+  const res = response(); await detalharChat(request(), res)
+  expect(res.status).toHaveBeenCalledWith(403)
+  expect(res.json).toHaveBeenCalledWith({ error: 'Conversa assumida por outro atendente' })
+})
+
 test('página de movimentações legadas mantém cursor para mensagens anteriores', async () => {
   results.conversas = [{ data: { id: 10, atendente_id: 2, status_atendimento: 'em_atendimento', telefone: '5511999999999' } }]
   results.mensagens = [{ data: [3, 2, 1].map(id => ({ id, conversa_id: 10, criado_em: `2026-09-08T12:00:0${id}Z`, texto: 'Movimentação interna' })) }]

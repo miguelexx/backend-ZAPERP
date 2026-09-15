@@ -29,6 +29,7 @@ const {
   getGrupoIdsPorDepartamentos,
   getGrupoIdsSemDepartamento,
   pushNonGroupVisibilityParts,
+  pushAtendenteFilaLivreVisibilityParts,
   pushAllowedGroupIdsPart,
 } = require('../helpers/departamentoGruposHelper')
 
@@ -391,10 +392,17 @@ function applyChatListSqlFilters(query, ctx, overrides = {}) {
       ? departamento_ids.filter((id) => id != null && Number.isFinite(Number(id)))
       : []
     const parts = []
-    if (depIds.length > 0) {
-      pushNonGroupVisibilityParts(parts, 'departamento_id', depIds)
+    if (isAtendente) {
+      pushAtendenteFilaLivreVisibilityParts(parts, {
+        depIds,
+        includeNullDepartamento: true,
+      })
+    } else {
+      if (depIds.length > 0) {
+        pushNonGroupVisibilityParts(parts, 'departamento_id', depIds)
+      }
+      parts.push('and(departamento_id.is.null,tipo.is.null)', 'and(departamento_id.is.null,tipo.neq.grupo)')
     }
-    parts.push('and(departamento_id.is.null,tipo.is.null)', 'and(departamento_id.is.null,tipo.neq.grupo)')
     pushNonGroupVisibilityParts(parts, 'atendente_id', [user_id])
     pushAllowedGroupIdsPart(parts, grupoIdsPermitidosPorDepartamento)
     if (deveIncluirGruposSemDepartamentoNoFiltroTodos({

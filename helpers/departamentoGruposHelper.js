@@ -135,6 +135,26 @@ function pushNonGroupVisibilityParts(parts, field, values) {
   })
 }
 
+const CLOSED_ATTENDANCE_STATUSES_IN =
+  'status_atendimento.in.(fechada,encerrada,finalizada,finalizado)'
+
+/**
+ * Visibilidade de individuais para perfil atendente: fila livre (sem dono) ou encerrada.
+ * Conversas assumidas por outro entram só pelos atalhos `atendente_id` / participante / transferência.
+ */
+function pushAtendenteFilaLivreVisibilityParts(parts, { depIds = [], includeNullDepartamento = false } = {}) {
+  const extras = ['atendente_id.is.null', CLOSED_ATTENDANCE_STATUSES_IN]
+  const fieldEqs = []
+  if (includeNullDepartamento) fieldEqs.push('departamento_id.is.null')
+  normalizePositiveIds(depIds).forEach((id) => fieldEqs.push(`departamento_id.eq.${id}`))
+  fieldEqs.forEach((fieldEq) => {
+    extras.forEach((extra) => {
+      parts.push(`and(${fieldEq},tipo.is.null,${extra})`)
+      parts.push(`and(${fieldEq},tipo.neq.grupo,${extra})`)
+    })
+  })
+}
+
 function pushAllowedGroupIdsPart(parts, grupoIds) {
   const ids = normalizePositiveIds(grupoIds)
   if (ids.length > 0) {
@@ -150,6 +170,7 @@ module.exports = {
   getGrupoIdsSemDepartamento,
   usuarioPodeVerGrupo,
   pushNonGroupVisibilityParts,
+  pushAtendenteFilaLivreVisibilityParts,
   pushAllowedGroupIdsPart,
   isDepartamentoGruposUnavailable,
 }

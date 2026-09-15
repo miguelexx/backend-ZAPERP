@@ -176,7 +176,7 @@ async function post({ basePath, token, endpoint, body, companyId = null, meta = 
   try {
     // Retry apenas quando a conexao nunca foi estabelecida (DNS/rota/recusa):
     // resposta ou timeout podem significar mensagem ja aceita, e repetir duplicaria no cliente.
-    res = await fetchWithRetry(url, fetchOpts, { maxAttempts: 3, retryConnectionErrors: true })
+    res = await fetchWithRetry(url, fetchOpts, { maxAttempts: 3, retryConnectionErrors: true, beforeRequest: meta?.beforeRequest })
     text = await res.text().catch(() => '')
     try { data = text ? JSON.parse(text) : null } catch { data = null }
     maybeInvalidateCacheOnBadToken(companyId, data, text)

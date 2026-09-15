@@ -12,6 +12,7 @@
  */
 
 const supabase = require('../config/supabase')
+const { blocksTriage, createTriageSendGuard } = require('./triageConversationGuard')
 const { isUltramsgNumericQueueId, isRealWhatsAppId } = require('../helpers/whatsappMessageIdHelper')
 const { REAL_MESSAGE_DIRECOES, isInternalNoteRow } = require('../helpers/internalNote')
 
@@ -150,10 +151,18 @@ function welcomeTextNeedle(config) {
   return raw.slice(0, Math.min(80, raw.length))
 }
 
+function isFailedOutbound(row) {
+  return [row?.status, row?.status_mensagem].some((s) => ['erro', 'error', 'failed'].includes(String(s || '').toLowerCase()))
+}
+
+function botSendAccepted(result) {
+  return result === true || result?.ok === true
+}
+
 function outboundContainsNeedle(rows, needle) {
   const n = String(needle || '').trim()
   if (!n || n.length < 4) return false
-  return (rows || []).some((r) => String(r?.texto || '').includes(n))
+  return (rows || []).some((r) => !isFailedOutbound(r) && String(r?.texto || '').includes(n))
 }
 
 /**
@@ -618,6 +627,8 @@ async function resetChatbotStateForConversa(supabaseClient, company_id, conversa
       lastOpcaoInvalidaSentAt.delete(cid)
       lastForaHorarioSentAt.delete(cid)
     }
+    // Lazy require evita ciclo de importação com a triagem Whapi.
+    require('./whapiTriage/whapiTriageService').resetWhapiTriageStateForConversa(conversa_id)
   } catch (e) {
     console.warn('[chatbotTriage] resetChatbotStateForConversa:', e?.message || e)
   }
@@ -711,7 +722,7 @@ async function wasMenuLikelySentViaOutboundMensagens(supabaseClient, company_id,
   try {
     const { data: rows } = await supabaseClient
       .from('mensagens')
-      .select('texto')
+      .select('texto, status, status_mensagem')
       .eq('conversa_id', conversa_id)
       .eq('company_id', company_id)
       .eq('direcao', 'out')
@@ -734,7 +745,7 @@ async function wasWelcomeLikelySentViaOutboundMensagens(supabaseClient, company_
   try {
     const { data: rows } = await supabaseClient
       .from('mensagens')
-      .select('texto')
+      .select('texto, status, status_mensagem')
       .eq('conversa_id', conversa_id)
       .eq('company_id', company_id)
       .eq('direcao', 'out')
@@ -1155,6 +1166,8 @@ async function transferToDepartment(supabaseClient, company_id, conversa_id, dep
     .eq('id', conversa_id)
     .eq('company_id', company_id)
     .is('departamento_id', null) // claim atômico: não sobrescreve setor já escolhido (race de webhooks)
+    .is('atendente_id', null)
+    .eq('status_atendimento', 'aberta')
     .select('id, departamento_id')
     .maybeSingle()
 
@@ -1186,6 +1199,7 @@ async function transferToDepartment(supabaseClient, company_id, conversa_id, dep
     departamento_id: depId,
     atendente_id: updatePayload.atendente_id ?? null,
     status_atendimento: updatePayload.status_atendimento,
+    atendente_atribuido_em: updatePayload.atendente_atribuido_em ?? null,
   }
 }
 
@@ -1240,7 +1254,7 @@ async function shouldSendForaHorarioMessage(supabaseClient, company_id, conversa
     const sinceIso = new Date(nowMs - Math.max(cooldownMs, 5 * 60_000)).toISOString()
     const { data: rows } = await supabaseClient
       .from('mensagens')
-      .select('texto, criado_em')
+      .select('texto, criado_em, status, status_mensagem')
       .eq('company_id', company_id)
       .eq('conversa_id', conversa_id)
       .eq('direcao', 'out')
@@ -1248,7 +1262,7 @@ async function shouldSendForaHorarioMessage(supabaseClient, company_id, conversa
       .gte('criado_em', sinceIso)
       .limit(20)
 
-    const ultimaIgual = (rows || []).find((r) => String(r?.texto || '').trim() === texto)
+    const ultimaIgual = (rows || []).find((r) => !isFailedOutbound(r) && String(r?.texto || '').trim() === texto)
     if (ultimaIgual?.criado_em) {
       const ms = Date.parse(String(ultimaIgual.criado_em))
       if (Number.isFinite(ms) && nowMs - ms < Math.max(cooldownMs, 5 * 60_000)) {
@@ -1257,7 +1271,7 @@ async function shouldSendForaHorarioMessage(supabaseClient, company_id, conversa
     }
 
     if (cooldownMs > 0) {
-      const ultimoBotForaHorario = (rows || []).find((r) => String(r?.texto || '').trim() === texto)
+      const ultimoBotForaHorario = (rows || []).find((r) => !isFailedOutbound(r) && String(r?.texto || '').trim() === texto)
       if (ultimoBotForaHorario?.criado_em) {
         const ms = Date.parse(String(ultimoBotForaHorario.criado_em))
         if (Number.isFinite(ms) && nowMs - ms < cooldownMs) {
@@ -1332,19 +1346,20 @@ async function processIncomingMessage(ctx) {
     console.log('[chatbotTriage] ❌ skip: telefone é LID (não é possível enviar via Z-API)')
     return { handled: false }
   }
+  if (isInboundTooOldForWelcome(ctx.mensagemClienteCriadoEm)) return { handled: true }
 
   // Human takeover / setor já escolhido: não processar se atendente ou departamento já definidos
   let conversaEstado = null
   try {
-    const { data: conv } = await (ctx.supabase || supabase)
+    const { data: conv, error } = await (ctx.supabase || supabase)
       .from('conversas')
-      .select('atendente_id, departamento_id')
+      .select('atendente_id, departamento_id, status_atendimento')
       .eq('id', conversa_id)
       .eq('company_id', company_id)
       .maybeSingle()
     conversaEstado = conv || null
-    if (conv?.atendente_id != null) {
-      console.log('[chatbotTriage] ❌ skip: atendente assumiu a conversa — chatbot desativado', { conversa_id, atendente_id: conv.atendente_id })
+    if (error || blocksTriage(conv)) {
+      console.log('[chatbotTriage] skip: conversa indisponível para triagem', { conversa_id })
       return { handled: false }
     }
     if (conv?.departamento_id != null && !conversaReabertaAposFinalizacao) {
@@ -1373,13 +1388,28 @@ async function processIncomingMessageLocked(ctx, conversaEstadoInicial) {
     telefone,
     texto,
     supabase: supabaseClient,
-    sendMessage,
+    sendMessage: sendMessageOriginal,
     opts = {},
     conversaReabertaAposFinalizacao = false,
     hints = null,
     emitChatbotRealtime,
     mensagemClienteCriadoEm = null,
   } = ctx
+
+  // Executada após o throttle e novamente pelo transporte, após os delays do provedor.
+  let automaticAssignment = null
+  let selectedDepartmentId = null
+  const sendMessage = async (phone, message, sendOpts = {}) => {
+    const beforeRequest = createTriageSendGuard(supabaseClient || supabase, company_id, conversa_id, {
+      allowDepartment: sendOpts.triageSelectionConfirmation === true,
+      automaticAssignment,
+      expectedDepartmentId: sendOpts.triageSelectionConfirmation === true ? selectedDepartmentId : null,
+    })
+    await beforeRequest()
+    const result = await sendMessageOriginal(phone, message, { ...sendOpts, beforeRequest })
+    if (beforeRequest.cancelled) throw Object.assign(new Error('Triagem cancelada'), { code: 'TRIAGE_CANCELLED' })
+    return result
+  }
 
   const emitRt = typeof emitChatbotRealtime === 'function' ? emitChatbotRealtime : null
   const emitAfterBotMsg = async (row) => {
@@ -1470,7 +1500,7 @@ async function processIncomingMessageLocked(ctx, conversaEstadoInicial) {
           opts,
         }))
         await emitAfterBotMsg(rowFora)
-        await logBotAction(company_id, conversa_id, 'fora_horario', {
+        await logBotAction(company_id, conversa_id, botSendAccepted(sendResultFora) ? 'fora_horario' : 'fora_horario_falhou', {
           horario_inicio: config.horarioInicio,
           horario_fim: config.horarioFim,
           dias_semana_desativados: config.diasSemanaDesativados,
@@ -1533,13 +1563,13 @@ async function processIncomingMessageLocked(ctx, conversaEstadoInicial) {
     optionSelectInFlight.add(lockCid)
     try {
       // Revalida estado fresco imediatamente antes do claim (webhooks paralelos).
-      const { data: convFresh } = await sb
+      const { data: convFresh, error: stateError } = await sb
         .from('conversas')
-        .select('departamento_id, atendente_id')
+        .select('departamento_id, atendente_id, status_atendimento')
         .eq('id', conversa_id)
         .eq('company_id', company_id)
         .maybeSingle()
-      if (convFresh?.atendente_id != null) {
+      if (stateError || blocksTriage(convFresh)) {
         console.log('[chatbotTriage] ❌ skip opção: atendente assumiu durante o processamento', { conversa_id })
         return { handled: true }
       }
@@ -1557,7 +1587,11 @@ async function processIncomingMessageLocked(ctx, conversaEstadoInicial) {
       }
 
       const depId = option.departamento_id
+      selectedDepartmentId = depId
       const result = await transferToDepartment(sb, company_id, conversa_id, depId, config)
+      if (result.ok && result.atendente_id != null) automaticAssignment = result
+      // Não atribuir diretamente um setor que não foi validado na empresa.
+      if (!result.ok && result.reason !== 'db_error' && result.reason !== 'already_assigned') return { handled: true }
 
       // Outro webhook ganhou o claim — não enviar confirmação do setor "errado"/atrasado.
       if (!result.ok && result.reason === 'already_assigned') {
@@ -1588,6 +1622,8 @@ async function processIncomingMessageLocked(ctx, conversaEstadoInicial) {
             .eq('id', conversa_id)
             .eq('company_id', company_id)
             .is('departamento_id', null)
+            .is('atendente_id', null)
+            .eq('status_atendimento', 'aberta')
             .select('id')
             .maybeSingle()
 
@@ -1635,7 +1671,7 @@ async function processIncomingMessageLocked(ctx, conversaEstadoInicial) {
           opts,
           company_id,
           config.intervaloEnvioSegundos,
-          { bypassChatbotInterval: true, sendOptions: { skipProviderDelay: true } }
+          { bypassChatbotInterval: true, sendOptions: { skipProviderDelay: true, triageSelectionConfirmation: true } }
         )
         logBotSendResult({ company_id, conversa_id, tipo: 'opcao_valida' }, sendResultConf, opts)
         const rowConf = await insertBotOutboundMensagem(sb, buildBotOutboundPayload({
@@ -1683,8 +1719,8 @@ async function processIncomingMessageLocked(ctx, conversaEstadoInicial) {
           opts,
         }))
         await emitAfterBotMsg(rowReab)
-        lastMenuEnviadoServerAt.set(lockCid, Date.now())
-        await logBotAction(company_id, conversa_id, 'menu_reenviado', { comando: textoNorm })
+        if (botSendAccepted(sendResultReab)) lastMenuEnviadoServerAt.set(lockCid, Date.now())
+        await logBotAction(company_id, conversa_id, botSendAccepted(sendResultReab) ? 'menu_reenviado' : 'menu_falhou', { comando: textoNorm })
       } catch (e) {
         console.error('[chatbotTriage] ❌ Erro ao reenviar menu:', e?.message || e)
       }
@@ -1693,15 +1729,12 @@ async function processIncomingMessageLocked(ctx, conversaEstadoInicial) {
   }
 
   const isWelcomeOnly = isWelcomeOnlyConfig(config)
-  const menuAlreadySentHint = hints && typeof hints.menuAlreadySent === 'boolean' ? hints.menuAlreadySent : null
   const primeiraMensagemHint = hints && typeof hints.isPrimeiraMensagemCliente === 'boolean' ? hints.isPrimeiraMensagemCliente : null
-  // hints.menuAlreadySent=true do webhook NÃO é confiável no modo só-boas-vindas:
-  // qualquer outbound antigo (ou menu_enviado de config com setores) bloqueava a mensagem única.
+  // O hint do webhook pode considerar uma bolha com erro como menu enviado.
+  // Confirma nos logs/histórico antes de tratar a entrada como resposta ao menu.
   let menuAlreadySent = false
   if (isWelcomeOnly) {
     menuAlreadySent = await wasWelcomeLikelySentViaOutboundMensagens(sb, company_id, conversa_id, config)
-  } else if (menuAlreadySentHint === true) {
-    menuAlreadySent = true
   } else {
     menuAlreadySent = await wasMenuSentForConversa(sb, company_id, conversa_id)
     if (!menuAlreadySent) {
@@ -1716,13 +1749,14 @@ async function processIncomingMessageLocked(ctx, conversaEstadoInicial) {
     try {
       const { data: mensagensAnteriores } = await sb
         .from('mensagens')
-        .select('id, direcao, texto')
+        .select('id, direcao, texto, status, status_mensagem')
         .eq('conversa_id', conversa_id)
         .eq('company_id', company_id)
         .order('criado_em', { ascending: true })
         .limit(25)
 
-      const rows = mensagensAnteriores || []
+      const rows = (mensagensAnteriores || []).filter((m) =>
+        !(m.direcao === 'out' && isFailedOutbound(m) && looksLikeBotMessage(m.texto, config)))
       if (rows.length === 0) {
         clientStartedConversation = true
         isPrimeiraMensagemCliente = true
@@ -1807,8 +1841,8 @@ async function processIncomingMessageLocked(ctx, conversaEstadoInicial) {
           opts,
         }))
         await emitAfterBotMsg(rowMenu)
-        lastMenuEnviadoServerAt.set(lockCid, Date.now())
-        await logBotAction(company_id, conversa_id, 'menu_enviado', {
+        if (botSendAccepted(sendResultMenu)) lastMenuEnviadoServerAt.set(lockCid, Date.now())
+        await logBotAction(company_id, conversa_id, botSendAccepted(sendResultMenu) ? 'menu_enviado' : 'menu_falhou', {
           opcoes: config.options.map((o) => o.key),
           motivo,
         })

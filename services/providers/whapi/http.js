@@ -113,7 +113,7 @@ async function sendJson({
     : await beforeWhatsAppSend({ companyId, endpoint, body, meta, whatsappInstanceId })
   const startedAt = Date.now()
   try {
-    const res = await fetchWithRetry(url, fetchOpts, { maxAttempts: 3, retryConnectionErrors: true })
+    const res = await fetchWithRetry(url, fetchOpts, { maxAttempts: 3, retryConnectionErrors: true, beforeRequest: meta?.beforeRequest })
     const text = await res.text().catch(() => '')
     let data = null
     try { data = text ? JSON.parse(text) : null } catch { data = null }

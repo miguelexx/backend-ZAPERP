@@ -63,6 +63,8 @@ async function fetchWithRetry(url, options = {}, retryOpts = null) {
   let lastErr = null
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    // Uma validação cancelada não é erro de rede e nunca deve gerar retry.
+    if (typeof opts.beforeRequest === 'function') await opts.beforeRequest()
     try {
       const res = await fetch(url, options)
       const shouldRetry =

@@ -5,6 +5,7 @@
  * Extraído de controllers/chatController.js (Fase 3 da modularização) sem alteração de comportamento.
  * Regras especiais preservadas: admin/supervisor/atendente, responsável, participante ativo, quem
  * transferiu, grupos por departamento, conversa encerrada (exige reabertura para enviar) e modo simples.
+ * Perfil atendente não vê individual assumida por outro (exceto participante, transferência e encerrada).
  * Todas as consultas continuam limitadas por `company_id`.
  */
 
@@ -14,6 +15,7 @@ const { usuarioPodeVerGrupo } = require('../../../helpers/departamentoGruposHelp
 const { empresaModoSimplesAtivo } = require('../../../helpers/empresaModoSimplesFlag')
 const { executarAssumirConversa } = require('../../conversaAssumirInternoService')
 const { usuarioParticipaAtivamenteDaConversa } = require('./conversationVisibilityService')
+const { atendenteNaoPodeVerAssumidaPorOutro } = require('./conversationAccessRules')
 const {
   emitirRealtimeAposAssumir,
   emitirMovimentacaoInternaAtendimento,
@@ -75,6 +77,9 @@ async function assertPermissaoConversa({ company_id, conversa_id, user_id, role,
       const userSemSetor = depIds.length === 0
       if (userSemSetor && convDep != null) return { ok: false, status: 403, error: 'Conversa de outro setor' }
       if (convDep != null && !depIds.some((id) => Number(id) === Number(convDep))) return { ok: false, status: 403, error: 'Conversa de outro setor' }
+    }
+    if (atendenteNaoPodeVerAssumidaPorOutro({ role: r, userId: user_id, conv })) {
+      return { ok: false, status: 403, error: 'Conversa assumida por outro atendente' }
     }
     return { ok: true, conv }
   }

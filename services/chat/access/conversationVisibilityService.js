@@ -6,15 +6,17 @@
  * O cache (`conversaVisibilityCache`) é estado local ao processo, encapsulado neste módulo — a mesma
  * semântica não-distribuída do controller original.
  *
- * Regras: admin vê tudo; conversa assumida → sempre; setor → só usuários do setor; sem setor → todos.
- * EXCEÇÃO: usuários que transferiram a conversa veem independente do setor. Grupos seguem a política
- * de departamentos própria.
+ * Regras: admin vê tudo; conversa assumida pelo próprio usuário → sempre; setor → só usuários
+ * do setor; sem setor → todos. Perfil atendente não vê individual assumida por outro (exceto
+ * participante ativo, quem transferiu e encerrada). EXCEÇÃO: quem transferiu vê independente
+ * do setor. Grupos seguem a política de departamentos própria.
  */
 
 const supabase = require('../../../config/supabase')
 const { isGroupConversation } = require('../../../helpers/conversaHelper')
 const { getGrupoDepartamentoIds } = require('../../../helpers/departamentoGruposHelper')
 const { getChatFilterIdLimit } = require('../read/searchLimits')
+const { atendenteNaoPodeVerAssumidaPorOutro } = require('./conversationAccessRules')
 
 const conversaVisibilityCache = new Map()
 const CONVERSA_VISIBILITY_CACHE_TTL_MS = 15_000
@@ -134,7 +136,7 @@ function deveIncluirGruposSemDepartamentoNoFiltroTodos({
 async function carregarUsuarioIdsQuePodemVerConversaSemCache(company_id, conversa_id) {
   const { data: conv } = await supabase
     .from('conversas')
-    .select('departamento_id, atendente_id, tipo, telefone')
+    .select('departamento_id, atendente_id, tipo, telefone, status_atendimento')
     .eq('company_id', Number(company_id))
     .eq('id', Number(conversa_id))
     .maybeSingle()
@@ -188,6 +190,7 @@ async function carregarUsuarioIdsQuePodemVerConversaSemCache(company_id, convers
     if (atendenteId && uid === atendenteId) { ids.push(uid); continue }
     if (participanteIds.has(uid)) { ids.push(uid); continue }
     if (transferiuIds.has(uid)) { ids.push(uid); continue }
+    if (atendenteNaoPodeVerAssumidaPorOutro({ role: u.perfil, userId: uid, conv })) continue
     if (convDep == null) ids.push(uid)
     else if (userDepIds.some((d) => Number(d) === Number(convDep))) ids.push(uid)
   }

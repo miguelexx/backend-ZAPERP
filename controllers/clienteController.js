@@ -69,6 +69,43 @@ function erroTelefoneCliente(codigo, extra = {}) {
  * Query params: palavra (busca), limit (máx 5000, default 500), page (default 1)
  * Headers de resposta: X-Total-Count (total real no banco, sem limite de paginação)
  */
+/**
+ * Anexa os números WhatsApp (instâncias) por onde cada contato conversa — para o selo por número
+ * na página de Contatos. O contato continua ÚNICO (por empresa); isto só informa os canais dele,
+ * derivado das conversas (o contato não tem instância própria). Aditivo: nunca remove/duplica contato.
+ * Batches por 150 (evita 414 na URL) e cap defensivo para não pesar em listagens gigantes ("todos").
+ */
+async function anexarNumerosDoContato(supabaseClient, company_id, clientes) {
+  const lista = Array.isArray(clientes) ? clientes : []
+  if (!lista.length) return
+  const ENRICH_CAP = 800
+  const BATCH = 150
+  const ids = lista.map((c) => Number(c?.id)).filter((n) => Number.isFinite(n) && n > 0)
+  if (ids.length === 0 || ids.length > ENRICH_CAP) return // página normal cabe; listagem gigante pula (selo some, lista intacta)
+  const byCliente = new Map()
+  for (let i = 0; i < ids.length; i += BATCH) {
+    const slice = ids.slice(i, i + BATCH)
+    const { data, error } = await supabaseClient
+      .from('conversas')
+      .select('cliente_id, whatsapp_instance_id')
+      .eq('company_id', Number(company_id))
+      .in('cliente_id', slice)
+      .not('whatsapp_instance_id', 'is', null)
+    if (error) continue
+    for (const row of data || []) {
+      const cli = Number(row.cliente_id)
+      const inst = Number(row.whatsapp_instance_id)
+      if (!Number.isFinite(cli) || !Number.isFinite(inst)) continue
+      if (!byCliente.has(cli)) byCliente.set(cli, new Set())
+      byCliente.get(cli).add(inst)
+    }
+  }
+  for (const c of lista) {
+    const set = byCliente.get(Number(c?.id))
+    c.whatsapp_instance_ids = set ? Array.from(set) : []
+  }
+}
+
 exports.listarClientes = async (req, res) => {
   try {
     const { company_id } = req.user
@@ -114,6 +151,7 @@ exports.listarClientes = async (req, res) => {
           criado_em: c.criado_em,
         }))
         await anexarVinculosEmBusca(supabase, cid, clientes, termoBusca, 'contains')
+        await anexarNumerosDoContato(supabase, cid, clientes)
         res.setHeader('X-Total-Count', String(totalReal))
         res.setHeader('Access-Control-Expose-Headers', 'X-Total-Count')
         return res.status(200).json(clientes)
@@ -228,6 +266,7 @@ exports.listarClientes = async (req, res) => {
       }
     }
 
+    await anexarNumerosDoContato(supabase, cid, clientes)
     // X-Total-Count permite o frontend exibir o total real sem depender do tamanho da página
     res.setHeader('X-Total-Count', String(totalReal))
     res.setHeader('Access-Control-Expose-Headers', 'X-Total-Count')

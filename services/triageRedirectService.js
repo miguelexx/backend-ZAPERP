@@ -78,7 +78,7 @@ async function findEligibleConversas(company_id, prazo_minutos, maxConversas) {
     .from('bot_logs')
     .select('conversa_id, criado_em')
     .eq('company_id', company_id)
-    .eq('tipo', 'menu_enviado')
+    .in('tipo', ['menu_enviado', 'menu_reenviado'])
     .lt('criado_em', corteIso)
     .order('criado_em', { ascending: true })
     .limit(maxConversas * 4) // busca extra para compensar filtros seguintes
@@ -100,6 +100,20 @@ async function findEligibleConversas(company_id, prazo_minutos, maxConversas) {
   const conversaIds = [...byConversa.keys()]
   if (conversaIds.length === 0) return []
 
+  // O filtro de expirados acima não enxerga menus novos. Um reenvio reinicia o prazo.
+  const { data: recentMenus, error: recentErr } = await supabase
+    .from('bot_logs')
+    .select('conversa_id')
+    .eq('company_id', company_id)
+    .in('conversa_id', conversaIds)
+    .in('tipo', ['menu_enviado', 'menu_reenviado'])
+    .gte('criado_em', corteIso)
+  if (recentErr) {
+    console.warn('[triageRedirect] erro ao verificar menus recentes:', recentErr.message)
+    return []
+  }
+  const aguardandoPrazo = new Set((recentMenus || []).map((r) => Number(r.conversa_id)))
+
   // Filtra conversas que já têm opcao_valida (cliente já escolheu setor)
   const { data: withValid } = await supabase
     .from('bot_logs')
@@ -120,7 +134,7 @@ async function findEligibleConversas(company_id, prazo_minutos, maxConversas) {
 
   const jaRedirecionado = new Set((withRedirect || []).map((r) => Number(r.conversa_id)))
 
-  const candidatos = conversaIds.filter((cid) => !jaRespondeu.has(cid) && !jaRedirecionado.has(cid))
+  const candidatos = conversaIds.filter((cid) => !aguardandoPrazo.has(cid) && !jaRespondeu.has(cid) && !jaRedirecionado.has(cid))
   if (candidatos.length === 0) return []
 
   // Verifica no banco quais conversas ainda estão sem setor e sem atendente (atômico)

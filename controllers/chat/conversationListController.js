@@ -16,12 +16,13 @@ const { resolveGrupoIdsComUnreadParaUsuario, applyAguardandoAtendenteModoSimples
 const { usuarioPertenceSetorFinanceiro } = require('../../helpers/financeiroSetorHelper')
 const { buildClienteSearchOr, buildTelefoneSearchOr, buildPhoneSearchTerms, chatIdentityMatchesSearch } = require('../../helpers/chatSearchHelper')
 const { buscarConversaIdsPorNomesVinculados, buscarClienteIdsPorNomeVinculado, anexarVinculosEmBusca } = require('../../helpers/clienteNomesVinculados')
-const { getGrupoIdsPorDepartamentos, getGrupoIdsSemDepartamento, pushNonGroupVisibilityParts, pushAllowedGroupIdsPart } = require('../../helpers/departamentoGruposHelper')
+const { getGrupoIdsPorDepartamentos, getGrupoIdsSemDepartamento, pushNonGroupVisibilityParts, pushAtendenteFilaLivreVisibilityParts, pushAllowedGroupIdsPart } = require('../../helpers/departamentoGruposHelper')
 const { countConversasWithFilter, overridesFromListQuery, parseConversaIdsQuery, getStartOfTodayIso, getEndOfTodayIso } = require('../../services/chatListCountsService')
 const { parsePositiveInt, parseChatListPagination, applyChatListCursor, splitChatListPage, shouldIncludeClientesSemConversa, setChatListPaginationHeaders } = require('../../services/chat/read/pagination')
 const { getChatSearchIdLimit, getChatFilterIdLimit } = require('../../services/chat/read/searchLimits')
 const { mergeConversaClienteTags, statusAtendimentoParaLista, safeWhatsappInstanceMeta } = require('../../services/chat/presentation/chatDto')
 const { getConversaIdsParticipanteAtivo, deveIncluirGruposSemDepartamentoNoFiltroTodos } = require('../../services/chat/access/conversationVisibilityService')
+const { atendenteNaoPodeVerAssumidaPorOutro } = require('../../services/chat/access/conversationAccessRules')
 const { deriveListarConversasFilters } = require('../../services/chat/read/listarConversasFilters')
 const { enrichMensagensComAutorUsuario } = require('../../services/chat/presentation/messageAuthorEnrichment')
 const { obterUnreadMap } = require('../../services/chat/unread/conversationUnreadService')
@@ -194,6 +195,7 @@ exports.listarConversas = async (req, res) => {
       return sendEmptyChatListResponse(false)
     }
     const conversaIdsParticipanteAtivoSet = new Set(conversaIdsParticipanteAtivo.map(Number))
+    const conversaIdsTransferidasSet = new Set(conversaIdsTransferidas.map(Number))
 
     let grupoUnreadIdsAguardando = []
     if (aguardandoAtendenteAtivo && atendimentoModoSimplesEmpresa) {
@@ -450,10 +452,17 @@ exports.listarConversas = async (req, res) => {
       if (!isAdmin) {
         const depIds = Array.isArray(departamento_ids) ? departamento_ids.filter((id) => id != null && Number.isFinite(Number(id))) : []
         const parts = []
-        if (depIds.length > 0) {
-          pushNonGroupVisibilityParts(parts, 'departamento_id', depIds)
+        if (isAtendente) {
+          pushAtendenteFilaLivreVisibilityParts(parts, {
+            depIds,
+            includeNullDepartamento: true,
+          })
+        } else {
+          if (depIds.length > 0) {
+            pushNonGroupVisibilityParts(parts, 'departamento_id', depIds)
+          }
+          parts.push('and(departamento_id.is.null,tipo.is.null)', 'and(departamento_id.is.null,tipo.neq.grupo)')
         }
-        parts.push('and(departamento_id.is.null,tipo.is.null)', 'and(departamento_id.is.null,tipo.neq.grupo)')
         pushNonGroupVisibilityParts(parts, 'atendente_id', [user_id])
         pushAllowedGroupIdsPart(parts, grupoIdsPermitidosPorDepartamento)
         pushAllowedGroupIdsPart(parts, grupoIdsSemDepartamento)
@@ -540,7 +549,7 @@ exports.listarConversas = async (req, res) => {
       if (!campanhasAtiva && (minhaFilaAtiva || statusNorm === 'aberta')) {
         q = q.eq('aguardando_resposta_campanha', false)
       }
-      // Atendente: vê TODAS as conversas (pode assumir, transferir, responder qualquer uma)
+      // Atendente: vê fila livre + as próprias; conversas assumidas por outro só se participante/transferiu.
       // Admin/supervisor: filtro opcional por atendente_id — sem filtro implícito de status; exclui grupos (conversas "assumidas" são individuais)
       if (!minhaFilaAtiva && !campanhasAtiva && !isAtendente && filtroAtendenteInformado != null) {
         q = q.eq('atendente_id', filtroAtendenteInformado)
@@ -894,6 +903,8 @@ exports.listarConversas = async (req, res) => {
         unread_count: unreadCount,
         sem_mensagens: !temMensagem,
         exibir_cta_assumir_sem_mensagens,
+        participante_ativo: conversaIdsParticipanteAtivoSet.has(Number(c.id)),
+        usuario_transferiu: conversaIdsTransferidasSet.has(Number(c.id)),
         finalizacao_motivo: c.finalizacao_motivo ?? null,
         finalizada_automaticamente: Boolean(c.finalizada_automaticamente),
         finalizada_automaticamente_em: c.finalizada_automaticamente_em ?? null,
@@ -903,6 +914,22 @@ exports.listarConversas = async (req, res) => {
     })
 
     conversasFormatadas = await enrichConversasReabertaFaltaInteracao(company_id, conversasFormatadas)
+
+    if (isAtendente) {
+      conversasFormatadas = conversasFormatadas.filter((c) => {
+        if (c?.sem_conversa || c?.is_group) return true
+        if (c.participante_ativo === true || c.usuario_transferiu === true) return true
+        return !atendenteNaoPodeVerAssumidaPorOutro({
+          role: 'atendente',
+          userId: user_id,
+          conv: {
+            tipo: c.tipo,
+            atendente_id: c.atendente_id,
+            status_atendimento: c.status_atendimento_real || c.status_atendimento,
+          },
+        })
+      })
+    }
 
     const encerradasVaziasIds = conversasFormatadas
       .filter((c) =>
@@ -994,9 +1021,9 @@ exports.listarConversas = async (req, res) => {
       })
     }
 
-    // Filtro "Em atendimento": todos os atendimentos da empresa no recorte de visibilidade
-    // (setor). Não restringir ao próprio atendente — isso é a Minha fila.
-    // Admin/supervisor: inclui também "aguardando_cliente" (manual), com opcional atendente_id.
+    // Filtro "Em atendimento": no recorte de visibilidade (setor). Admin/supervisor veem
+    // todos os atendimentos do recorte; o perfil atendente já não recebe assumidas por outro
+    // no SQL. Não restringir supervisor ao próprio usuário — isso é a Minha fila.
     if (!aguardandoClienteAtivo && statusNorm === 'em_atendimento') {
       conversasFormatadas = conversasFormatadas.filter((c) => {
         if (c.sem_conversa || c.is_group) return false

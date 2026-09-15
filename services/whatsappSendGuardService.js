@@ -281,6 +281,7 @@ function buildSendMeta(type, phone, opts = {}, extra = {}) {
     conversaId: opts?.conversaId ?? opts?.conversa_id,
     whatsappInstanceId: opts?.whatsappInstanceId ?? opts?.whatsapp_instance_id,
     origin: opts?.sendOrigin || opts?.origin || opts?.source || 'nao_informado',
+    ...(typeof opts?.beforeRequest === 'function' ? { beforeRequest: opts.beforeRequest } : {}),
     ...extra,
   }
 }

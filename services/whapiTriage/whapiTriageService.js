@@ -14,11 +14,13 @@
  */
 
 const supabase = require('../../config/supabase')
+const { blocksTriage, createTriageSendGuard } = require('../triageConversationGuard')
 const {
   transferToDepartment,
   logBotAction,
   wasMenuSentForConversa,
   wasOptionSelectedForConversa,
+  isInboundTooOldForWelcome,
 } = require('../chatbotTriageService')
 const { sendWhapiTriageMenu, buildPollPayload, buildTriageReplyMeta, activeSorted } = require('./whapiTriageRenderer')
 const { isRealWhatsAppId } = require('../../helpers/whatsappMessageIdHelper')
@@ -34,6 +36,11 @@ const MENU_DEBOUNCE_MS = 15_000
 function convKey(conversa_id) {
   const n = Number(conversa_id)
   return Number.isFinite(n) && n > 0 ? n : String(conversa_id || '')
+}
+
+function resetWhapiTriageStateForConversa(conversa_id) {
+  // Não libera locks de requisições em andamento; apenas o debounce do ciclo anterior.
+  lastMenuSentAt.delete(convKey(conversa_id))
 }
 
 /** Normaliza texto para comparação de label (case/acentos-insensível leve). */
@@ -150,6 +157,7 @@ async function handleWhapiTriageInbound(ctx) {
 
   if (!company_id || !conversa_id || !telefone || !sendMessage || !config) return { handled: false }
   if (String(telefone).startsWith('lid:')) return { handled: false }
+  if (isInboundTooOldForWelcome(ctx.mensagemClienteCriadoEm)) return { handled: true }
 
   const sb = supabaseClient || supabase
   const lockCid = convKey(conversa_id)
@@ -157,22 +165,25 @@ async function handleWhapiTriageInbound(ctx) {
   // Estado atual: atendente humano ou setor já definido → triagem encerrada.
   let conv = null
   try {
-    const { data } = await sb
+    const { data, error } = await sb
       .from('conversas')
-      .select('atendente_id, departamento_id')
+      .select('atendente_id, departamento_id, status_atendimento')
       .eq('id', conversa_id)
       .eq('company_id', company_id)
       .maybeSingle()
+    if (error) return { handled: true }
     conv = data || null
   } catch (e) {
     console.warn('[whapiTriage] erro ao ler estado da conversa:', e?.message || e)
     return { handled: false }
   }
-  if (conv?.atendente_id != null) return { handled: false }
+  if (blocksTriage(conv)) return { handled: true }
   if (conv?.departamento_id != null) return { handled: true, departamento_id: Number(conv.departamento_id) }
 
   const opts = {
     companyId: company_id,
+    conversaId: conversa_id,
+    sendOrigin: 'whapi_triage',
     ...(whatsapp_instance_id ? { whatsappInstanceId: whatsapp_instance_id, whatsapp_instance_id } : {}),
   }
 
@@ -183,13 +194,13 @@ async function handleWhapiTriageInbound(ctx) {
     selectInFlight.add(lockCid)
     try {
       // revalida estado fresco antes do claim (webhooks paralelos)
-      const { data: fresh } = await sb
+      const { data: fresh, error: stateError } = await sb
         .from('conversas')
-        .select('departamento_id, atendente_id')
+        .select('departamento_id, atendente_id, status_atendimento')
         .eq('id', conversa_id)
         .eq('company_id', company_id)
         .maybeSingle()
-      if (fresh?.atendente_id != null) return { handled: true }
+      if (stateError || blocksTriage(fresh)) return { handled: true }
       if (fresh?.departamento_id != null) return { handled: true, departamento_id: Number(fresh.departamento_id) }
       if (await wasOptionSelectedForConversa(sb, company_id, conversa_id)) return { handled: true }
 
@@ -197,7 +208,7 @@ async function handleWhapiTriageInbound(ctx) {
         transferMode: 'departamento',
         tipo_distribuicao: 'fila',
       })
-      if (!result.ok && result.reason === 'already_assigned') {
+      if (!result.ok) {
         return { handled: true }
       }
       const depNome = result.departamento_nome || option.label || 'setor'
@@ -222,11 +233,16 @@ async function handleWhapiTriageInbound(ctx) {
       const confirmTpl = config.confirm_message || DEFAULT_CONFIRM
       const confirmMsg = confirmTpl.replace(/\{\{departamento\}\}/gi, depNome)
       let confSend = { ok: false, messageId: null }
+      const beforeRequest = createTriageSendGuard(sb, company_id, conversa_id, {
+        allowDepartment: true, expectedDepartmentId: option.departamento_id,
+      })
       try {
-        confSend = await sendMessage(telefone, confirmMsg, { sendOrigin: 'whapi_triage', skipProviderDelay: true })
+        await beforeRequest()
+        confSend = await sendMessage(telefone, confirmMsg, { ...opts, skipProviderDelay: true, beforeRequest })
       } catch (e) {
         console.warn('[whapiTriage] erro ao enviar confirmação:', e?.message || e)
       }
+      if (beforeRequest.cancelled) return { handled: true }
       await insertBotBubble({
         sb, company_id, conversa_id, whatsapp_instance_id, texto: confirmMsg, sendResult: confSend, emitRealtime,
       })
@@ -257,9 +273,12 @@ async function handleWhapiTriageInbound(ctx) {
   if (nowMs - lastMs < MENU_DEBOUNCE_MS) return { handled: true }
   menuInFlight.add(lockCid)
   lastMenuSentAt.set(lockCid, nowMs)
+  const beforeRequest = createTriageSendGuard(sb, company_id, conversa_id)
   try {
+    await beforeRequest()
     const provider = require('../providers').getProvider({ provider: 'whapi' })
-    const menuResult = await sendWhapiTriageMenu({ provider, telefone, config, opts })
+    const menuResult = await sendWhapiTriageMenu({ provider, telefone, config, opts: { ...opts, beforeRequest } })
+    if (beforeRequest.cancelled) return { handled: true }
 
     if (!menuResult.ok && config.fallback_to_text) {
       // Fallback: deixa o chatbot de texto assumir (não marca menu_enviado aqui).
@@ -283,6 +302,7 @@ async function handleWhapiTriageInbound(ctx) {
     })
     return { handled: true }
   } catch (e) {
+    if (beforeRequest.cancelled) return { handled: true }
     console.warn('[whapiTriage] erro ao enviar menu:', e?.message || e)
     return { handled: config.fallback_to_text ? false : true, fallbackToText: !!config.fallback_to_text }
   } finally {
@@ -291,6 +311,7 @@ async function handleWhapiTriageInbound(ctx) {
 }
 
 module.exports = {
+  resetWhapiTriageStateForConversa,
   handleWhapiTriageInbound,
   resolveSelectedOption,
   _internal: { normLabel, outboundStatus },

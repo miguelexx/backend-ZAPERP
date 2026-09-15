@@ -1285,8 +1285,9 @@ exports.receberZapi = async (req, res) => {
               })
               .eq('id', conversa_id)
               .eq('company_id', company_id)
+              .eq('status_atendimento', st)
               .select()
-              .single()
+              .maybeSingle()
             if (reabertaAusencia) {
               departamento_id = reabertaAusencia.departamento_id != null ? Number(reabertaAusencia.departamento_id) : null
               conversaReabertaAposFinalizacao = true
@@ -1357,8 +1358,9 @@ exports.receberZapi = async (req, res) => {
               })
               .eq('id', conversa_id)
               .eq('company_id', company_id)
+              .eq('status_atendimento', st)
               .select()
-              .single()
+              .maybeSingle()
             if (reaberta) {
               departamento_id = null
               conversaReabertaAposFinalizacao = true
@@ -1590,7 +1592,7 @@ exports.receberZapi = async (req, res) => {
             .select('id, tipo')
             .eq('conversa_id', conversa_id)
             .eq('company_id', company_id)
-            .in('tipo', ['menu_enviado', 'menu_reenviado', 'opcao_invalida', 'opcao_valida'])
+            .in('tipo', ['menu_enviado', 'menu_reenviado', 'opcao_invalida', 'opcao_valida', 'menu_falhou', 'fora_horario_falhou'])
             .limit(1)
             .maybeSingle()
 

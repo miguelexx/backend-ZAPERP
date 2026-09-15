@@ -153,6 +153,21 @@ exports.detalharChat = async (req, res) => {
       !isSupervisor &&
       !isParticipanteAtivo
 
+    if (deveBloquearMensagens && role === 'atendente') {
+      const { data: transferRowAssumida } = await supabase
+        .from('atendimentos')
+        .select('id')
+        .eq('company_id', Number(company_id))
+        .eq('conversa_id', Number(id))
+        .eq('de_usuario_id', Number(user_id))
+        .eq('acao', 'transferiu')
+        .limit(1)
+        .maybeSingle()
+      if (!transferRowAssumida) {
+        return res.status(403).json({ error: 'Conversa assumida por outro atendente' })
+      }
+    }
+
     // mensagens paginadas (remetente_nome/remetente_telefone para grupos; fallback se colunas não existirem)
     // `client_temp_id` é obrigatório aqui: sem ele, a linha trazida por este GET (refresh de
     // consistência pós-envio, "carregar mais" e F5) não correlaciona com a bolha otimista pendente
