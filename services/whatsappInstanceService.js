@@ -786,6 +786,20 @@ async function updateWhatsappInstance(companyId, whatsappInstanceId, input = {})
       }
     }
   }
+  // Merge de metadata (jsonb): preserva chaves existentes e sobrescreve só as enviadas.
+  // Usado, entre outros, pela config de sincronização de histórico por canal (sync_historico*).
+  if (
+    input.metadata !== undefined &&
+    input.metadata !== null &&
+    typeof input.metadata === 'object' &&
+    !Array.isArray(input.metadata)
+  ) {
+    const currentMeta =
+      existing.instance.metadata && typeof existing.instance.metadata === 'object' && !Array.isArray(existing.instance.metadata)
+        ? existing.instance.metadata
+        : {}
+    patch.metadata = { ...currentMeta, ...input.metadata }
+  }
 
   if (!Object.keys(patch).length) return { instance: existing.instance, error: null }
 

@@ -54,10 +54,25 @@ function whapiMessageEpochMs(m) {
   return raw > 1e12 ? raw : raw * 1000
 }
 
+/**
+ * Máximo de idade efetivo POR CANAL, vindo da config de sincronização (metadata jsonb da instância):
+ *  - sync_historico = 'off' → 2 min (só ao vivo; NÃO puxa histórico ao (re)conectar)
+ *  - sync_historico = 'on'  → min(sync_historico_dias || 30, 30) dias (puxa no máx. ~1 mês)
+ *  - sem config             → env global WHAPI_INBOUND_MAX_AGE_MINUTES (compatibilidade)
+ */
+function effectiveWhapiMaxAgeMs(ctx) {
+  const mode = String(ctx?.sync_historico || '').trim().toLowerCase()
+  if (mode === 'off') return 2 * 60 * 1000
+  if (mode === 'on') {
+    const dias = Math.min(Math.max(Number(ctx?.sync_historico_dias) || 30, 1), 30)
+    return dias * 24 * 60 * 60 * 1000
+  }
+  return getWhapiInboundMaxAgeMs()
+}
+
 /** true se o item é backlog antigo (mais velho que o teto) e deve ser ignorado. */
-function whapiInboundIsHistorical(m, nowMs) {
-  const maxAgeMs = getWhapiInboundMaxAgeMs()
-  if (maxAgeMs <= 0) return false
+function whapiInboundIsHistorical(m, nowMs, maxAgeMs = getWhapiInboundMaxAgeMs()) {
+  if (!(Number(maxAgeMs) > 0)) return false
   const epochMs = whapiMessageEpochMs(m)
   if (epochMs == null) return false // sem timestamp confiável → trata como ao vivo (não descarta)
   return (nowMs - epochMs) > maxAgeMs
@@ -881,6 +896,7 @@ async function handleWebhookWhapi(req, res) {
     let anyServerError = false
     let skippedHistorical = 0
     const nowMs = Date.now()
+    const whapiMaxAgeMs = effectiveWhapiMaxAgeMs(ctxSrc) // teto de idade por canal (config de sync)
     const io = req.app?.get?.('io')
 
     for (const upd of messagesUpdates) {
@@ -911,7 +927,7 @@ async function handleWebhookWhapi(req, res) {
     for (const m of messages) {
       // Guarda anti-histórico: no (re)connect / webhook persistente o Whapi reentrega backlog
       // antigo com o timestamp original. Descartamos antes de criar conversa/contato/mensagem.
-      if (whapiInboundIsHistorical(m, nowMs)) {
+      if (whapiInboundIsHistorical(m, nowMs, whapiMaxAgeMs)) {
         skippedHistorical++
         continue
       }

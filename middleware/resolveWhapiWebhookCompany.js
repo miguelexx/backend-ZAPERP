@@ -71,6 +71,9 @@ async function resolveWhapiWebhookCompany(req, res, next) {
       telefone_conectado: instance?.telefone_conectado || null,
       whatsapp_instance_is_default: instance?.is_default === true,
       whatsapp_instance_source: instance?.source || 'whatsapp_instances',
+      // Config de sincronização de histórico por canal (metadata jsonb) — usada pela guarda anti-histórico.
+      sync_historico: instance?.metadata?.sync_historico ?? null,
+      sync_historico_dias: instance?.metadata?.sync_historico_dias ?? null,
       eventType: 'whapi',
     }
     req.zapiContext = req.webhookContext
