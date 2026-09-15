@@ -38,6 +38,10 @@ async function abrirCrmAvancado(req, res) {
   }
 
   const nome = req.user?.nome || req.user?.name || email
+  // Papel do usuário no ZapERP (admin | supervisor | atendente). O CRM
+  // Avançado usa isso para liberar o acesso APENAS ao administrador da
+  // empresa — os demais perfis são bloqueados no /auth/sso do CRM.
+  const papel = String(req.user?.perfil || 'atendente')
 
   const token = jwt.sign(
     {
@@ -45,6 +49,7 @@ async function abrirCrmAvancado(req, res) {
       idUsuarioZap: String(idUsuarioZap),
       email: String(email),
       nome: String(nome),
+      papel,
     },
     segredo,
     { algorithm: 'HS256', expiresIn: '2m' },
