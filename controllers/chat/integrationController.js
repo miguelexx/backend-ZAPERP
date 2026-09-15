@@ -11,6 +11,16 @@ const { getProvider } = require('../../services/providers')
 const { resolveCompanyWhatsappProvider } = require('../../services/chat/identity/conversationAddressService')
 const { listWhatsappInstances, sanitizeWhatsappInstance } = require('../../services/whatsappInstanceService')
 
+const WHAPI_STATUS_MAX_INSTANCES = 8
+
+function isActiveWhapiInstance(inst) {
+  return Boolean(
+    inst
+    && inst.ativo !== false
+    && String(inst.provider || '').trim().toLowerCase() === 'whapi'
+  )
+}
+
 exports.listWhatsappInstancesAtendimento = async (req, res) => {
   try {
     const company_id = req.user?.company_id
@@ -104,10 +114,13 @@ exports.zapiStatus = exports.whatsappStatus
 //
 // Regra à prova de falso-positivo (pintar o sistema inteiro de vermelho é
 // disruptivo): só devolve `connected:false` quando o provider da empresa é
-// Whapi E o canal comprovadamente NÃO está AUTH. Em QUALQUER outra situação
-// (provider diferente, sem empresa, erro de rede/consulta) devolve
-// `connected:true` + `isWhapi:false`, de modo que o overlay jamais aparece
-// por engano.
+// Whapi E TODOS os canais Whapi ativos estão comprovadamente fora do AUTH.
+// Com 2+ números, consulta cada instância (não a default da empresa): em
+// produção, 2 canais sem is_default faziam getConnectionStatus({companyId})
+// falhar e o overlay acendia mesmo com os dois AUTH. Em QUALQUER outra
+// situação (provider diferente, sem empresa, pelo menos 1 AUTH, erro de
+// rede/consulta) devolve `connected:true`, de modo que o overlay jamais
+// aparece por engano.
 // =====================================================
 exports.whapiChannelStatus = async (req, res) => {
   const safe = { ok: true, isWhapi: false, connected: true, status: null }
@@ -122,19 +135,56 @@ exports.whapiChannelStatus = async (req, res) => {
       return res.json({ ...safe, provider: instanceProvider || null })
     }
 
+    const listed = await listWhatsappInstances(company_id)
+    if (listed?.error) return res.json(safe)
+
+    const whapiActive = (listed.instances || [])
+      .filter(isActiveWhapiInstance)
+      .slice(0, WHAPI_STATUS_MAX_INSTANCES)
+
+    if (!whapiActive.length) {
+      // Classificada como Whapi, mas sem linha ativa para checar → não pintar vermelho.
+      return res.json({ ok: true, isWhapi: true, connected: true, status: null, provider: 'whapi' })
+    }
+
     const { getProvider } = require('../../services/providers')
-    // wakeup (default) de propósito: um canal apenas adormecido responde AUTH
-    // de verdade; sem isso um canal ocioso poderia ser lido como desconectado
-    // e disparar a tela vermelha falsamente.
-    const statusResult = await getProvider({ provider: 'whapi' }).getConnectionStatus({ companyId: company_id })
-    const connected = !!statusResult?.connected
-    return res.json({
-      ok: true,
-      isWhapi: true,
-      connected,
-      status: statusResult?.status || null,
-      provider: 'whapi',
-    })
+    const whapi = getProvider({ provider: 'whapi' })
+    // Checa CADA canal ativo com whatsappInstanceId. Em produção, 2+ Whapi sem
+    // is_default faz getConnectionStatus({ companyId }) falhar (NO_DEFAULT_INSTANCE)
+    // e o overlay vermelho acendia mesmo com todos AUTH.
+    // wakeup (default): canal ocioso responde AUTH de verdade.
+    const results = await Promise.all(whapiActive.map((inst) =>
+      whapi.getConnectionStatus({
+        companyId: company_id,
+        whatsappInstanceId: inst.id,
+      }).catch(() => null)
+    ))
+
+    const firstUp = results.find((r) => r && r.connected === true)
+    if (firstUp) {
+      return res.json({
+        ok: true,
+        isWhapi: true,
+        connected: true,
+        status: firstUp.status || 'AUTH',
+        provider: 'whapi',
+      })
+    }
+
+    const allProvenDown = results.length === whapiActive.length
+      && results.every((r) => r && r.connected === false)
+    if (allProvenDown) {
+      return res.json({
+        ok: true,
+        isWhapi: true,
+        connected: false,
+        status: results[0]?.status || null,
+        provider: 'whapi',
+      })
+    }
+
+    // Consulta incompleta (erro/timeout) → fail-safe, overlay não acende.
+    return res.json(safe)
   } catch (err) {
     console.error('whapiChannelStatus:', err?.message || err)
     // Erro ⇒ nunca acusa desconexão (evita overlay vermelho por falha transitória).

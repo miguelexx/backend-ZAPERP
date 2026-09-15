@@ -164,6 +164,13 @@ ao **iniciar** conversa nova já existia (`SELECIONE_WHATSAPP_INSTANCE` + `NovoC
 Sync de contatos/fotos/grupos usa `pickCompanyWhatsappInstance` (uma instância). Com vários números, o sync
 deveria rodar **por instância** para cobrir todos. Envio/recebimento não dependem disso.
 
+### 4.4 Overlay vermelho “WhatsApp DESCONECTADO” com 2+ canais — ✅ CORRIGIDO (2026-09-15)
+`GET /chats/whapi-status` (`whapiChannelStatus`) consultava só `getConnectionStatus({ companyId })`.
+Em produção, 2+ Whapi **sem** `is_default` devolve `NO_DEFAULT_INSTANCE` → `connected:false` → tela vermelha
+mesmo com todos AUTH (o painel Configurações hidrata por `whatsappInstanceId` e mostrava Conectado).
+Agora o endpoint lista os canais Whapi ativos e consulta cada um; overlay só se **todos** estiverem
+comprovadamente fora do AUTH. Um AUTH (ou erro de consulta) → `connected:true`.
+
 ---
 
 ## 5. Riscos
