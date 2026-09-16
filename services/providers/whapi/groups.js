@@ -5,6 +5,7 @@
 
 const { resolveConfig } = require('./config')
 const { toWhapiGroupId, toWhapiRecipient, toWhapiChatId } = require('./phones')
+const { resolveWhapiSendRecipient } = require('../../whapiRecipientResolverService')
 const { post, put, patch, del, get, getBinary } = require('./http')
 const { isWhapiSuccessBody } = require('./parse')
 
@@ -210,7 +211,8 @@ async function deleteGroupIcon(groupId, opts = {}) {
 async function sendGroupInvite(inviteCode, to, extra = {}, opts = {}) {
   const code = String(inviteCode || '').trim()
   if (!code) return { ok: false, error: 'Informe o código do convite.' }
-  const dest = toWhapiRecipient(to) || toWhapiChatId(to)
+  const initialDest = toWhapiRecipient(to) || toWhapiChatId(to)
+  const dest = initialDest ? await resolveWhapiSendRecipient(initialDest, opts) : ''
   if (!dest) return { ok: false, error: 'Destino inválido.' }
   const body = { to: dest }
   if (extra.title != null) body.title = String(extra.title)

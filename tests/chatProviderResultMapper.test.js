@@ -33,6 +33,33 @@ describe('providerResultMapper.mapProviderSendResult', () => {
   })
 
   describe('ok=true sem ID rastreável → pending/sending', () => {
+    test('Whapi com ID permanece pending ate ACK sent', () => {
+      const r = mapProviderSendResult({
+        ok: true,
+        messageId: 'PspVgQ5Hj3WhapiMessageId123',
+        provider: 'whapi',
+        ackConfirmed: false,
+      })
+      expect(r.hasValidId).toBe(true)
+      expect(r.awaitingAck).toBe(true)
+      expect(r.acceptedWithoutTrace).toBe(false)
+      expect(r.needsReconciliation).toBe(true)
+      expect(r.confirmedSent).toBe(false)
+      expect(r.nextStatus).toBe('pending')
+      expect(r.nextStatusMensagem).toBe('sending')
+    })
+
+    test('Whapi so avanca para sent quando resultado informa ACK confirmado', () => {
+      const r = mapProviderSendResult({
+        ok: true,
+        messageId: 'PspVgQ5Hj3WhapiMessageId123',
+        provider: 'whapi',
+        ackConfirmed: true,
+      })
+      expect(r.confirmedSent).toBe(true)
+      expect(r.nextStatus).toBe('sent')
+    })
+
     test('ID numérico curto de fila ("35096") → pending + hasQueueId', () => {
       const r = mapProviderSendResult({ ok: true, messageId: '35096' })
       expect(r.nextStatus).toBe('pending')

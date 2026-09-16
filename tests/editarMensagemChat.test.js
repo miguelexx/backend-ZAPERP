@@ -160,7 +160,7 @@ describe('editarMensagem', () => {
       '5534988887777',
       'AbCd-EfGh',
       'texto novo',
-      expect.objectContaining({ companyId: 1, whatsappInstanceId: 10 })
+      expect.objectContaining({ companyId: 1, conversaId: 10, whatsappInstanceId: 10 })
     )
     expect(res.json).toHaveBeenCalledWith(expect.objectContaining({
       ok: true,

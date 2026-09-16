@@ -73,6 +73,7 @@ const {
   areEquivalentWhatsAppIds,
   extractPhoneDigitsFromWhatsappMessageId,
 } = require('../helpers/whatsappMessageIdHelper')
+const { mapProviderSendResult } = require('../services/chat/outbound/providerResultMapper')
 const { textoExcedeLimiteDisparo } = require('../helpers/mensagemDisparadaClassificacao')
 const { classificarSaidaComoMensagemDisparada } = require('../services/mensagemDisparadaService')
 const {
@@ -1511,7 +1512,14 @@ exports.receberZapi = async (req, res) => {
             ...o,
             sendOrigin: o?.sendOrigin || o?.origin || 'chatbot_triage',
           })
-          return { ok: !!r?.ok, messageId: r?.messageId || null }
+          if (typeof r === 'boolean') return { ok: r, messageId: null }
+          return {
+            ok: !!r?.ok,
+            messageId: r?.messageId || null,
+            provider: r?.provider || null,
+            ackConfirmed: r?.ackConfirmed,
+            error: r?.error || null,
+          }
         }
         let skipChatbot = false
         if (skipChatbotPorCampanha) {
@@ -1541,18 +1549,16 @@ exports.receberZapi = async (req, res) => {
           })
           if (optResult.isOptOut && optResult.mensagemConfirmacao) {
             const optSendResult = await sendMessage(phoneParaChatbot, optResult.mensagemConfirmacao, { sendOrigin: 'opt_out_confirmacao' })
-            const optMessageId = optSendResult?.messageId ? String(optSendResult.messageId).trim() : null
-            const optTraceable = isTraceableWhatsappMessageId(optMessageId)
-            const optQueueId = !!optMessageId && isUltramsgNumericQueueId(optMessageId)
+            const mappedOpt = mapProviderSendResult(optSendResult, { failedStatusMensagem: 'failed' })
             const { data: optMensagemRow, error: optMensagemError } = await supabase.from('mensagens').insert({
               conversa_id,
               texto: optResult.mensagemConfirmacao,
               direcao: 'out',
               company_id,
-              status: optSendResult?.ok ? (optTraceable ? 'sent' : 'pending') : 'erro',
-              status_mensagem: optSendResult?.ok ? (optTraceable ? 'sent' : 'sending') : 'failed',
-              ...(optTraceable ? { whatsapp_id: optMessageId } : {}),
-              ...(optQueueId ? { provider_queue_id: optMessageId } : {}),
+              status: mappedOpt.nextStatus,
+              status_mensagem: mappedOpt.nextStatusMensagem,
+              ...(mappedOpt.hasValidId ? { whatsapp_id: mappedOpt.waMessageId } : {}),
+              ...(mappedOpt.hasQueueId ? { provider_queue_id: mappedOpt.waMessageId } : {}),
               ...(whatsapp_instance_id ? { whatsapp_instance_id } : {}),
             }).select('*').single()
             if (optMensagemError) {

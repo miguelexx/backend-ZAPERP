@@ -16,6 +16,7 @@
  * Interage com `chatbotTriageService` (`looksLikeBotMessage` distingue msg de bot de msg humana).
  */
 const supabase = require('../config/supabase')
+const { mapProviderSendResult } = require('./chat/outbound/providerResultMapper')
 const { getProvider } = require('./providers')
 const { resolveConversationProvider } = require('./chat/identity/conversationAddressService')
 const {
@@ -355,9 +356,8 @@ async function sendAbsenceClosingMessage({ provider, company_id, conversa_id, te
     whatsappInstanceId: row?.whatsapp_instance_id || undefined,
     sendOrigin: 'finalizacao_ausencia_cliente',
   })
-  const ok = !!result?.ok
-  const messageId = result?.messageId ? String(result.messageId).trim() : null
-  const hasTraceableId = !!messageId && (messageId.includes('@') || /^[A-F0-9]{12,}$/i.test(messageId) || messageId.length > 20)
+  const mappedResult = mapProviderSendResult(result, { failedStatusMensagem: 'failed' })
+  const { ok, waMessageId: messageId, hasValidId: hasTraceableId } = mappedResult
   if (!ok) {
     console.warn('[absenceFinalization] envio de mensagem de ausencia falhou', {
       company_id,
@@ -378,8 +378,8 @@ async function sendAbsenceClosingMessage({ provider, company_id, conversa_id, te
     texto,
     direcao: 'out',
     company_id,
-    status: ok ? (hasTraceableId ? 'sent' : 'pending') : 'erro',
-    status_mensagem: ok ? (hasTraceableId ? 'sent' : 'sending') : 'failed',
+    status: mappedResult.nextStatus,
+    status_mensagem: mappedResult.nextStatusMensagem,
     ...(hasTraceableId ? { whatsapp_id: messageId } : {}),
     ...(row?.whatsapp_instance_id ? { whatsapp_instance_id: row.whatsapp_instance_id } : {}),
   })

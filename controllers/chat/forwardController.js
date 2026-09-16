@@ -6,7 +6,9 @@
 
 const supabase = require('../../config/supabase')
 const { getProvider } = require('../../services/providers')
-const { isRealWhatsAppId, isUltramsgNumericQueueId } = require('../../helpers/whatsappMessageIdHelper')
+const { isRealWhatsAppId } = require('../../helpers/whatsappMessageIdHelper')
+const { mapProviderSendResult } = require('../../services/chat/outbound/providerResultMapper')
+const { schedulePendingOutboundReconciliation } = require('../../services/pendingOutboundReconciliationService')
 const { isInternalNoteRow } = require('../../helpers/internalNote')
 const { normalizeForwardTipo } = require('../../services/chat/outbound/messageNormalizers')
 const {
@@ -361,13 +363,11 @@ async function encaminharUmaMensagemParaConversa(ctx) {
     }
   }
 
-  const ok = resultadoEnvio === true || resultadoEnvio?.ok === true
-  const waMessageId = (typeof resultadoEnvio === 'object' && resultadoEnvio?.messageId)
-    ? String(resultadoEnvio.messageId).trim() : null
-  const hasTraceableForwardId = isRealWhatsAppId(waMessageId)
-  const hasQueueForwardId = !!waMessageId && isUltramsgNumericQueueId(waMessageId)
-  const nextStatus = ok ? (hasTraceableForwardId ? 'sent' : 'pending') : 'erro'
-  const nextStatusMensagem = ok ? (hasTraceableForwardId ? 'sent' : 'sending') : 'erro'
+  const mappedResult = mapProviderSendResult(resultadoEnvio)
+  const {
+    ok, waMessageId, hasValidId: hasTraceableForwardId,
+    hasQueueId: hasQueueForwardId, nextStatus, nextStatusMensagem,
+  } = mappedResult
 
   await supabase
     .from('mensagens')
@@ -399,6 +399,10 @@ async function encaminharUmaMensagemParaConversa(ctx) {
 
     const convPayload = { id: Number(conversa_id) }
     emitirConversaAtualizada(io, company_id, conversa_id, convPayload)
+  }
+
+  if (mappedResult.needsReconciliation) {
+    schedulePendingOutboundReconciliation({ companyId: company_id, mensagemId: novaMensagem.id, io })
   }
 
   return {

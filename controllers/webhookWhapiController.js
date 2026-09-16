@@ -944,6 +944,9 @@ async function handleWebhookWhapi(req, res) {
           console.warn('[WHAPI] enrich poll vote falhou:', e?.message || e)
         }
       }
+      // Evento Z-API = ReceivedCallback; o tipo de conteúdo (chat/image/poll/…) fica em msgType
+      // para extractMessage não achatar enquete/mídia em texto.
+      normalized.msgType = normalized.type
       normalized.type = 'ReceivedCallback'
       normalized.instanceId = ctx.channelId
       normalized.instance_id = ctx.channelId

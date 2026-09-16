@@ -5,8 +5,8 @@
  */
 
 const supabase = require('../../config/supabase')
-const { isRealWhatsAppId, isUltramsgNumericQueueId } = require('../../helpers/whatsappMessageIdHelper')
 const { schedulePendingOutboundReconciliation } = require('../../services/pendingOutboundReconciliationService')
+const { mapProviderSendResult } = require('../../services/chat/outbound/providerResultMapper')
 const { getProvider } = require('../../services/providers')
 const {
   avaliarElegibilidadeReenvio,
@@ -27,17 +27,15 @@ const { resolveForwardMediaForProvider } = require('../../services/chat/outbound
 const _reenviosEmAndamento = new Set()
 
 async function aplicarResultadoReenvio({ req, company_id, conversa_id, mensagem, result, tipoReenvio }) {
-  const ok = typeof result === 'boolean' ? result : result?.ok === true
-  const waMessageId =
-    typeof result === 'object' && result?.messageId ? String(result.messageId).trim() : null
-  const hasValidId = isRealWhatsAppId(waMessageId)
-  const hasQueueId = !!waMessageId && isUltramsgNumericQueueId(waMessageId)
-  const providerError =
-    typeof result === 'object' ? result?.error || result?.blockedBy || null : null
+  const mappedResult = mapProviderSendResult(result, { failedStatusMensagem: 'failed' })
+  const {
+    ok, waMessageId, hasValidId, hasQueueId, providerError,
+    nextStatus, nextStatusMensagem,
+  } = mappedResult
 
   const patch = {
-    status: ok ? (hasValidId ? 'sent' : 'pending') : 'erro',
-    status_mensagem: ok ? (hasValidId ? 'sent' : 'sending') : 'failed',
+    status: nextStatus,
+    status_mensagem: nextStatusMensagem,
     ...(hasValidId ? { whatsapp_id: waMessageId } : {}),
     ...(hasQueueId ? { provider_queue_id: waMessageId } : {}),
   }
@@ -61,7 +59,7 @@ async function aplicarResultadoReenvio({ req, company_id, conversa_id, mensagem,
       })
   }
 
-  if (ok && !hasValidId) {
+  if (mappedResult.needsReconciliation) {
     schedulePendingOutboundReconciliation({ companyId: company_id, mensagemId: mensagem.id, io })
   }
 

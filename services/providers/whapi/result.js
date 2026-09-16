@@ -79,6 +79,11 @@ function normalizeWhapiSendResult({ httpOk, status, data, text, fallbackError })
   return {
     ok: true,
     messageId: messageId || null,
+    // O POST confirma apenas que a Whapi aceitou a requisicao. Mesmo quando ja
+    // existe message.id, o estado final so pode avancar apos message_ack ou
+    // consulta GET /messages/{id} retornar um ACK/status de envio.
+    provider: 'whapi',
+    ackConfirmed: false,
     httpStatus: status ?? null,
     error: null,
     rawResponse: data ?? text ?? null,

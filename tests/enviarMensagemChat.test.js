@@ -169,6 +169,26 @@ describe('enviarMensagemChat — caminho de envio (caracterização)', () => {
     expect(res.json).toHaveBeenCalledWith({ ok: true, id: 42, conversa_id: 10, status: 'pending' })
   })
 
+  test('Whapi aceita com message.id, mas permanece pending ate ACK sent', async () => {
+    primeSupabaseSingles(chain)
+    mockProvider.sendText.mockResolvedValueOnce({
+      ok: true,
+      messageId: 'PspVgQ5Hj3WhapiMessageId123',
+      provider: 'whapi',
+      ackConfirmed: false,
+    })
+
+    const res = buildRes()
+    await enviarMensagemChat(buildReq({ body: { texto: 'oi' } }), res)
+
+    expect(chain.update).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'pending',
+      status_mensagem: 'sending',
+      whatsapp_id: 'PspVgQ5Hj3WhapiMessageId123',
+    }))
+    expect(res.json).toHaveBeenCalledWith({ ok: true, id: 42, conversa_id: 10, status: 'pending' })
+  })
+
   test('provider recusa → status=erro + motivo, mensagem persistida id=42', async () => {
     primeSupabaseSingles(chain)
     mockProvider.sendText.mockResolvedValueOnce({ ok: false, error: 'Instância desconectada' })

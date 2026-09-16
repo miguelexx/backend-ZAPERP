@@ -10,8 +10,8 @@ const { getOrCreateCliente } = require('../../helpers/conversationSync')
 const { getDisplayName } = require('../../helpers/contactEnrichment')
 const { tryMarkWaitingAfterHumanOutbound } = require('../../services/absenceFinalizationService')
 const { empresaModoSimplesAtivo } = require('../../helpers/empresaModoSimplesFlag')
-const { isRealWhatsAppId, isUltramsgNumericQueueId } = require('../../helpers/whatsappMessageIdHelper')
 const { schedulePendingOutboundReconciliation } = require('../../services/pendingOutboundReconciliationService')
+const { mapProviderSendResult } = require('../../services/chat/outbound/providerResultMapper')
 const { safeWhatsappInstanceMeta } = require('../../services/chat/presentation/chatDto')
 const { normalizeClientTempId, clientTempIdDedupeKey, isMissingMensagemColumnError, isGenericMissingColumnError, isClientTempIdUniqueViolation, buildClientTempIdDedupResponse } = require('../../services/chat/outbound/idempotencyHelpers')
 const { normalizeLinkPayload } = require('../../services/chat/outbound/messageNormalizers')
@@ -431,21 +431,10 @@ exports.enviarMensagemChat = async (req, res) => {
           })
         }
 
-        const ok = typeof result === 'boolean' ? result : result?.ok === true
-        const waMessageId = typeof result === 'object' && result?.messageId ? String(result.messageId).trim() : null
-        // hasValidId: ID reconhecível como WhatsApp real (hex 12+ chars ou contém @).
-        // Usado apenas para salvar whatsapp_id e habilitar rastreamento de ACK.
-        // NÃO determina se o envio foi bem-sucedido — isso depende apenas de ok.
-        const hasValidId = isRealWhatsAppId(waMessageId)
-        const hasQueueId = !!waMessageId && isUltramsgNumericQueueId(waMessageId)
-        const providerError = (typeof result === 'object') ? (result?.error || result?.blockedBy || null) : null
-        const acceptedWithoutTrace = ok && !hasValidId
-
-        // Regra: sent exige aceite do provider e ID rastreavel.
-        // Aceite sem ID rastreavel permanece pending/sending para evitar mensagem fantasma.
-        // O whatsapp_id só é salvo quando o ID retornado é um WhatsApp ID rastreável.
-        const nextStatus = ok ? (hasValidId ? 'sent' : 'pending') : 'erro'
-        const nextStatusMensagem = ok ? (hasValidId ? 'sent' : 'sending') : 'failed'
+        const {
+          ok, waMessageId, hasValidId, hasQueueId, providerError,
+          needsReconciliation, awaitingAck, nextStatus, nextStatusMensagem,
+        } = mapProviderSendResult(result, { failedStatusMensagem: 'failed' })
 
         if (ok) {
           console.log('[ENVIO_MANUAL] ✅ Sucesso', {
@@ -454,15 +443,13 @@ exports.enviarMensagemChat = async (req, res) => {
             mensagem_id: msg.id,
             telefone_destino: String(telefoneParaEnvio || '').slice(-12),
             whatsapp_instance_id: whatsappInstanceId,
-            provedor: 'ultramsg',
+            provedor: instanceProvider,
             provider_message_id: waMessageId || null,
             whatsapp_id_salvo: hasValidId ? waMessageId : null,
           })
-          if (acceptedWithoutTrace) {
-            // Provider aceitou a mensagem, mas o ID retornado não é rastreável como WhatsApp ID.
-            // Isso é normal quando UltraMsg retorna ID interno de fila (ex: "35096").
-            // Não marcar como sent sem ID rastreável; o ACK pode chegar depois via webhook/reconciliação.
-            console.warn('[ENVIO_MANUAL] ℹ️ Provider aceitou envio sem WhatsApp ID rastreável', {
+          if (needsReconciliation) {
+            // UltraMSG pode retornar fila interna; Whapi pode retornar message.id antes do ACK.
+            console.warn(`[ENVIO_MANUAL] ℹ️ Provider aceitou envio ${awaitingAck ? 'aguardando ACK' : 'sem WhatsApp ID rastreável'}`, {
               company_id,
               conversa_id,
               mensagem_id: msg.id,
@@ -479,7 +466,7 @@ exports.enviarMensagemChat = async (req, res) => {
             mensagem_id: msg.id,
             telefone_destino: String(telefoneParaEnvio || '').slice(-12),
             whatsapp_instance_id: whatsappInstanceId,
-            provedor: 'ultramsg',
+            provedor: instanceProvider,
             erro: String(providerError || '').slice(0, 200) || 'desconhecido',
           })
         }
@@ -518,7 +505,7 @@ exports.enviarMensagemChat = async (req, res) => {
             })
         }
 
-        if (acceptedWithoutTrace) {
+        if (needsReconciliation) {
           schedulePendingOutboundReconciliation({
             companyId: company_id,
             mensagemId: msg.id,
@@ -578,9 +565,10 @@ exports.enviarMensagemChat = async (req, res) => {
 
     // Não retornar mensagem completa — evita duplicação no frontend (API + socket).
     // A mensagem chega via socket nova_mensagem (única fonte de verdade para exibição).
-    const sendOk = !!telefoneParaEnvio && (typeof sendResult === 'boolean' ? sendResult : sendResult?.ok === true)
-    const sendWaMessageId = typeof sendResult === 'object' && sendResult?.messageId ? String(sendResult.messageId).trim() : null
-    const sendTraceable = sendOk && isRealWhatsAppId(sendWaMessageId)
+    const mappedSendResult = mapProviderSendResult(sendResult, { failedStatusMensagem: 'failed' })
+    const sendOk = !!telefoneParaEnvio && mappedSendResult.ok
+    const sendWaMessageId = mappedSendResult.waMessageId
+    const sendTraceable = sendOk && mappedSendResult.confirmedSent
     const motivoErro = sendResult?.error || sendResult?.blockedBy
     return res.json({
       ok: true,

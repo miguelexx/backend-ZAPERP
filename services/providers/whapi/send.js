@@ -8,11 +8,12 @@
 const { buildSendMeta } = require('../../whatsappSendGuardService')
 const { BODY_MAX_LEN, CAPTION_MAX_LEN, FILENAME_MAX_LEN } = require('./constants')
 const { normalizeWhapiSendResult } = require('./result')
-const { toWhapiRecipient, toWhapiChatId, recipientCandidates } = require('./phones')
+const { toWhapiRecipient, toWhapiChatId, recipientCandidates, explicitPrivateJidDigits } = require('./phones')
 const { resolveConfig } = require('./config')
 const { post, put, maskToken } = require('./http')
 const { updateChannelSettings } = require('./channel')
 const { preferredBrSendDigits } = require('../../../helpers/phoneHelper')
+const { resolveWhapiSendRecipient } = require('../../whapiRecipientResolverService')
 
 function notImplemented(method) {
   return { ok: false, messageId: null, notImplemented: true, httpStatus: 501, error: `whapi.${method} não implementado` }
@@ -30,13 +31,17 @@ function asMediaResult(normalized, returnDetails) {
 }
 
 async function postMessage({ cfg, endpoint, body, to, kind, opts, extraMeta }) {
+  const canonicalTo = await resolveWhapiSendRecipient(to, opts)
+  const requestBody = canonicalTo && canonicalTo !== body?.to
+    ? { ...body, to: canonicalTo }
+    : body
   const { ok, status, data, text } = await post({
     token: cfg.token,
     endpoint,
-    body,
+    body: requestBody,
     companyId: cfg.companyId,
     whatsappInstanceId: cfg.whatsappInstanceId,
-    meta: buildSendMeta(kind, to, opts, extraMeta),
+    meta: buildSendMeta(kind, canonicalTo || to, opts, extraMeta),
   })
   return normalizeWhapiSendResult({ httpOk: ok, status, data, text, fallbackError: data?.message })
 }
@@ -374,6 +379,12 @@ function callRecipientCandidates(phone) {
     push(toCallRecipient(raw))
     return out
   }
+  const explicitDigits = explicitPrivateJidDigits(raw)
+  if (explicitDigits) {
+    push(explicitDigits)
+    push(`${explicitDigits}@s.whatsapp.net`)
+    return out
+  }
   const digits = []
   const pushDigit = (v) => {
     const d = String(v || '').replace(/\D/g, '')
@@ -429,7 +440,12 @@ async function sendCall(phone, callDuration, opts = {}) {
   if (!cfg) {
     return { ok: false, messageId: null, error: 'Instância Whapi não configurada. Conecte o canal no painel de integrações.' }
   }
-  const candidates = callRecipientCandidates(phone)
+  const canonicalPhone = await resolveWhapiSendRecipient(phone, opts)
+  const initialRecipient = toWhapiRecipient(phone)
+  const callInput = canonicalPhone && /^\d+$/.test(canonicalPhone) && canonicalPhone !== initialRecipient
+    ? `${canonicalPhone}@s.whatsapp.net`
+    : (canonicalPhone || phone)
+  const candidates = callRecipientCandidates(callInput)
   if (!candidates.length) {
     return { ok: false, messageId: null, error: 'Destino inválido para ligação.' }
   }

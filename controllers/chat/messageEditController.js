@@ -263,6 +263,7 @@ exports.editarMensagem = async (req, res) => {
     try {
       editResult = await provider.editMessage(conversa.telefone, msg.whatsapp_id, textoWhatsapp, {
         companyId: company_id,
+        conversaId: cid,
         ...(editInstanceId ? { whatsappInstanceId: editInstanceId } : {}),
         allowEmpty: isMediaCaptionTipo(msg.tipo) && !String(textoWhatsapp || '').trim(),
       })

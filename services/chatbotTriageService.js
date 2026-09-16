@@ -14,6 +14,7 @@
 const supabase = require('../config/supabase')
 const { blocksTriage, createTriageSendGuard } = require('./triageConversationGuard')
 const { isUltramsgNumericQueueId, isRealWhatsAppId } = require('../helpers/whatsappMessageIdHelper')
+const { mapProviderSendResult } = require('./chat/outbound/providerResultMapper')
 const { REAL_MESSAGE_DIRECOES, isInternalNoteRow } = require('../helpers/internalNote')
 
 /**
@@ -308,15 +309,13 @@ function isTraceableWhatsappMessageId(value) {
 }
 
 function buildBotOutboundPayload({ conversa_id, texto, company_id, sendResult, opts = {} }) {
-  const ok = typeof sendResult === 'boolean' ? sendResult : sendResult?.ok === true
-  const messageId = typeof sendResult === 'object' && sendResult?.messageId ? String(sendResult.messageId).trim() : null
-  const hasTraceableId = isTraceableWhatsappMessageId(messageId)
-  const hasQueueId = !!messageId && isUltramsgNumericQueueId(messageId)
+  const mapped = mapProviderSendResult(sendResult, { failedStatusMensagem: 'failed' })
+  const { waMessageId: messageId, hasValidId: hasTraceableId, hasQueueId } = mapped
   const whatsappInstanceId = opts?.whatsappInstanceId ?? opts?.whatsapp_instance_id ?? null
   // Aceito pelo UltraMSG (ok) com queue id: pending/sending + provider_queue_id (igual chatController).
   // Sem isso o reconciliador de 5 min reenvia menu/confirmação e o cliente recebe duplicata.
-  const status = ok ? (hasTraceableId ? 'sent' : 'pending') : 'erro'
-  const statusMensagem = ok ? (hasTraceableId ? 'sent' : 'sending') : 'failed'
+  const status = mapped.nextStatus
+  const statusMensagem = mapped.nextStatusMensagem
   const payload = {
     conversa_id,
     texto,

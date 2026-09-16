@@ -207,6 +207,38 @@ describe('extractMessage', () => {
     expect(r.phone).toBe('5511999999999')
   })
 
+  test('ReceivedCallback sem msgType continua texto (contrato UltraMSG)', () => {
+    const r = extractMessage({ ...BASE, type: 'ReceivedCallback', message: 'Olá!' })
+    expect(r.type).toBe('text')
+    expect(r.texto).toBe('Olá!')
+  })
+
+  test('ReceivedCallback + msgType=poll preserva enquete (Whapi)', () => {
+    const r = extractMessage({
+      ...BASE,
+      type: 'ReceivedCallback',
+      msgType: 'poll',
+      message: '📊 Setor?\n• A\n• B',
+      pollMeta: { title: 'Setor?', options: ['A', 'B'], count: 1 },
+    })
+    expect(r.type).toBe('poll')
+    expect(r.pollMeta).toMatchObject({ title: 'Setor?', options: ['A', 'B'] })
+    expect(r.texto).toContain('Setor?')
+  })
+
+  test('ReceivedCallback + msgType=chat (Whapi texto) vira text; URL continua link', () => {
+    const plain = extractMessage({ ...BASE, type: 'ReceivedCallback', msgType: 'chat', message: 'Olá!' })
+    expect(plain.type).toBe('text')
+    expect(plain.texto).toBe('Olá!')
+    const withUrl = extractMessage({
+      ...BASE,
+      type: 'ReceivedCallback',
+      msgType: 'chat',
+      message: 'Veja https://example.com aqui',
+    })
+    expect(withUrl.type).toBe('link')
+  })
+
   test('texto com URL → tipo link', () => {
     const r = extractMessage({ ...BASE, message: 'Veja https://example.com aqui', type: 'text' })
     expect(r.type).toBe('link')

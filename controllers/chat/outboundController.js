@@ -8,12 +8,13 @@ const supabase = require('../../config/supabase')
 const { getProvider } = require('../../services/providers')
 const { getDisplayName } = require('../../helpers/contactEnrichment')
 const { tryMarkWaitingAfterHumanOutbound } = require('../../services/absenceFinalizationService')
-const { isRealWhatsAppId, isUltramsgNumericQueueId } = require('../../helpers/whatsappMessageIdHelper')
 const { resolveTelefoneFromLidSiblingConversation, resolveConversationWhatsappInstance, resolveConversationProvider } = require('../../services/chat/identity/conversationAddressService')
 const { emitirConversaAtualizada, emitirEventoEmpresaConversa } = require('../../services/chat/realtime/chatRealtimeGateway')
 const { assertPodeEnviarMensagem } = require('../../services/chat/access/conversationPolicy')
 const { getUsuarioParaEnvioCliente, enrichMensagemComAutorUsuario } = require('../../services/chat/presentation/messageAuthorEnrichment')
 const { aplicarAguardandoClienteNoPayload, anexarAssumirNoPayloadLista } = require('../../services/chat/outbound/modoSimplesOutbound')
+const { mapProviderSendResult } = require('../../services/chat/outbound/providerResultMapper')
+const { schedulePendingOutboundReconciliation } = require('../../services/pendingOutboundReconciliationService')
 
 exports.enviarReacaoMensagem = async (req, res) => {
   try {
@@ -275,16 +276,12 @@ exports.enviarContatoWhatsapp = async (req, res) => {
       messageId: messageId || undefined,
       referenceId: `crm-${msg.id}`,
     })
-    const ok = typeof result === 'boolean' ? result : result?.ok === true
-    const waMessageId =
-      typeof result === 'object' && result?.messageId ? String(result.messageId).trim() : null
-
-    const providerErroContato =
-      typeof result === 'object' && result?.error ? String(result.error) : null
-    const hasTraceableContactId = isRealWhatsAppId(waMessageId)
-    const hasQueueContactId = !!waMessageId && isUltramsgNumericQueueId(waMessageId)
-    const nextStatus = ok ? (hasTraceableContactId ? 'sent' : 'pending') : 'erro'
-    const nextStatusMensagem = ok ? (hasTraceableContactId ? 'sent' : 'sending') : 'erro'
+    const mappedResult = mapProviderSendResult(result)
+    const {
+      ok, waMessageId, providerError: providerErroContato,
+      hasValidId: hasTraceableContactId, hasQueueId: hasQueueContactId,
+      nextStatus, nextStatusMensagem,
+    } = mappedResult
     await supabase
       .from('mensagens')
       .update({ status: nextStatus, status_mensagem: nextStatusMensagem, ...(hasTraceableContactId ? { whatsapp_id: waMessageId } : {}), ...(hasQueueContactId ? { provider_queue_id: waMessageId } : {}) })
@@ -315,6 +312,10 @@ exports.enviarContatoWhatsapp = async (req, res) => {
         phone: String(telefoneParaEnvio || '').slice(-12),
         erro: providerErroContato || 'sem detalhes',
       })
+    }
+
+    if (mappedResult.needsReconciliation) {
+      schedulePendingOutboundReconciliation({ companyId: company_id, mensagemId: msg.id, io })
     }
 
     return res.json({
@@ -483,12 +484,11 @@ exports.enviarLocalizacao = async (req, res) => {
       console.warn(`[WhatsApp] Conversa ${conversa_id} sem telefone — localização salva, não enviada ao WhatsApp`)
     }
 
-    const ok = result?.ok === true
-    const waMessageId = result?.messageId ? String(result.messageId).trim() : null
-    const hasTraceableLocationId = isRealWhatsAppId(waMessageId)
-    const hasQueueLocationId = !!waMessageId && isUltramsgNumericQueueId(waMessageId)
-    const nextStatus = ok ? (hasTraceableLocationId ? 'sent' : 'pending') : 'erro'
-    const nextStatusMensagem = ok ? (hasTraceableLocationId ? 'sent' : 'sending') : 'erro'
+    const mappedResult = mapProviderSendResult(result)
+    const {
+      ok, waMessageId, hasValidId: hasTraceableLocationId,
+      hasQueueId: hasQueueLocationId, nextStatus, nextStatusMensagem,
+    } = mappedResult
 
     await supabase
       .from('mensagens')
@@ -514,6 +514,11 @@ exports.enviarLocalizacao = async (req, res) => {
       emitirConversaAtualizada(io, company_id, conversa_id, convPayload, { skipAtualizarConversa: true })
     }
 
+
+    if (mappedResult.needsReconciliation) {
+      schedulePendingOutboundReconciliation({ companyId: company_id, mensagemId: msg.id, io })
+    }
+
     const sendOk = !!telefoneParaEnvio && ok
 
     return res.json({
@@ -521,7 +526,7 @@ exports.enviarLocalizacao = async (req, res) => {
       id: msg.id,
       conversa_id: Number(conversa_id),
       location_meta: msg.location_meta || location_meta,
-      ...(sendOk && hasTraceableLocationId ? { status: 'sent', whatsapp_id: waMessageId } : sendOk ? { status: 'pending' } : { status: telefoneParaEnvio ? 'erro' : 'pending' })
+      ...(sendOk && mappedResult.confirmedSent ? { status: 'sent', whatsapp_id: waMessageId } : sendOk ? { status: 'pending', ...(hasTraceableLocationId ? { whatsapp_id: waMessageId } : {}) } : { status: telefoneParaEnvio ? 'erro' : 'pending' })
     })
   } catch (err) {
     console.error('Erro ao enviar localização:', err)
@@ -624,14 +629,11 @@ exports.enviarLigacaoWhatsapp = async (req, res) => {
       conversaId: conversa_id,
       whatsappInstanceId: whatsappInstanceId || undefined,
     })
-    const ok = typeof result === 'boolean' ? result : result?.ok === true
-    const waMessageId =
-      typeof result === 'object' && result?.messageId ? String(result.messageId).trim() : null
-
-    const hasTraceableCallId = isRealWhatsAppId(waMessageId)
-    const hasQueueCallId = !!waMessageId && isUltramsgNumericQueueId(waMessageId)
-    const nextStatus = ok ? (hasTraceableCallId ? 'sent' : 'pending') : 'erro'
-    const nextStatusMensagem = ok ? (hasTraceableCallId ? 'sent' : 'sending') : 'erro'
+    const mappedResult = mapProviderSendResult(result)
+    const {
+      ok, waMessageId, hasValidId: hasTraceableCallId,
+      hasQueueId: hasQueueCallId, nextStatus, nextStatusMensagem,
+    } = mappedResult
     await supabase
       .from('mensagens')
       .update({ status: nextStatus, status_mensagem: nextStatusMensagem, ...(hasTraceableCallId ? { whatsapp_id: waMessageId } : {}), ...(hasQueueCallId ? { provider_queue_id: waMessageId } : {}) })
@@ -781,14 +783,12 @@ exports.enviarEnquete = async (req, res) => {
       sendOrigin: 'atendimento_humano_enquete',
       referenceId: `crm-${msg.id}`,
     })
-    const ok = typeof result === 'boolean' ? result : result?.ok === true
-    const waMessageId =
-      typeof result === 'object' && result?.messageId ? String(result.messageId).trim() : null
-    const providerErro = typeof result === 'object' && result?.error ? String(result.error) : null
-    const hasTraceableId = isRealWhatsAppId(waMessageId)
-    const hasQueueId = !!waMessageId && isUltramsgNumericQueueId(waMessageId)
-    const nextStatus = ok ? (hasTraceableId ? 'sent' : 'pending') : 'erro'
-    const nextStatusMensagem = ok ? (hasTraceableId ? 'sent' : 'sending') : 'erro'
+    const mappedResult = mapProviderSendResult(result)
+    const {
+      ok, waMessageId, providerError: providerErro,
+      hasValidId: hasTraceableId, hasQueueId,
+      nextStatus, nextStatusMensagem,
+    } = mappedResult
 
     await supabase
       .from('mensagens')
@@ -832,6 +832,11 @@ exports.enviarEnquete = async (req, res) => {
         id: msg.id,
         error: providerErro || 'Não foi possível enviar a enquete ao WhatsApp.',
       })
+    }
+
+
+    if (mappedResult.needsReconciliation) {
+      schedulePendingOutboundReconciliation({ companyId: company_id, mensagemId: msg.id, io })
     }
 
     return res.json({

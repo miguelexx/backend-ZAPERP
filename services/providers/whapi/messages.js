@@ -13,6 +13,7 @@ const { toWhapiRecipient } = require('./phones')
 const { resolveConfig } = require('./config')
 const { post, put, del, get, maskToken } = require('./http')
 const { isWhapiSuccessBody } = require('./parse')
+const { resolveWhapiSendRecipient } = require('../../whapiRecipientResolverService')
 
 function applyQuoted(body, opts) {
   const replyMessageId = opts?.replyMessageId ? String(opts.replyMessageId).trim() : null
@@ -65,7 +66,8 @@ async function editMessage(phone, msgId, newText, opts = {}) {
   if (msg.length > BODY_MAX_LEN) {
     return { ok: false, messageId: null, error: `body excede ${BODY_MAX_LEN} caracteres` }
   }
-  const body = applyQuoted({ to, body: msg, edit: mid }, opts)
+  const canonicalTo = await resolveWhapiSendRecipient(to, opts)
+  const body = applyQuoted({ to: canonicalTo || to, body: msg, edit: mid }, opts)
   try {
     const { ok, status, data, text } = await post({
       token: cfg.token,
@@ -73,7 +75,7 @@ async function editMessage(phone, msgId, newText, opts = {}) {
       body,
       companyId: cfg.companyId,
       whatsappInstanceId: cfg.whatsappInstanceId,
-      meta: buildSendMeta('edit', to, opts, { edit: mid, textLength: msg.length }),
+      meta: buildSendMeta('edit', canonicalTo || to, opts, { edit: mid, textLength: msg.length }),
     })
     const normalized = normalizeWhapiSendResult({
       httpOk: ok, status, data, text, fallbackError: data?.message,

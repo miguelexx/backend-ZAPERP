@@ -82,32 +82,32 @@ describe('Whapi — grupos', () => {
 
   test('addGroupParticipant POST /groups/{id}/participants', async () => {
     const { fetchWithRetry } = mockDeps({ fetchImpl: async () => jsonRes({ success: true }) })
-    const r = await load().addGroupParticipant('120363426760868023@g.us', '553499911246', CTX)
+    const r = await load().addGroupParticipant('120363426760868023@g.us', '5534988887777', CTX)
     expect(r.ok).toBe(true)
     const c = callOf(fetchWithRetry)
     expect(c.url).toBe('https://gate.whapi.test/groups/120363426760868023%40g.us/participants')
     expect(c.opts.method).toBe('POST')
-    expect(c.body).toEqual({ participants: ['553499911246'] })
+    expect(c.body).toEqual({ participants: ['5534988887777'] })
   })
 
   test('removeGroupParticipant DELETE envia body JSON', async () => {
     const { fetchWithRetry } = mockDeps({ fetchImpl: async () => jsonRes({ success: true }) })
-    const r = await load().removeGroupParticipant('120363426760868023@g.us', ['553499911246'], CTX)
+    const r = await load().removeGroupParticipant('120363426760868023@g.us', ['5534988887777'], CTX)
     expect(r.ok).toBe(true)
     const c = callOf(fetchWithRetry)
     expect(c.opts.method).toBe('DELETE')
-    expect(c.body).toEqual({ participants: ['553499911246'] })
+    expect(c.body).toEqual({ participants: ['5534988887777'] })
   })
 
   test('promote PATCH /admins e demote DELETE /admins com body', async () => {
     const { fetchWithRetry } = mockDeps({ fetchImpl: async () => jsonRes({ success: true }) })
     const whapi = load()
-    await whapi.promoteToGroupAdmin('120363426760868023@g.us', '553499911246', CTX)
+    await whapi.promoteToGroupAdmin('120363426760868023@g.us', '5534988887777', CTX)
     expect(callOf(fetchWithRetry, 0).opts.method).toBe('PATCH')
     expect(callOf(fetchWithRetry, 0).url).toMatch(/\/admins$/)
-    await whapi.demoteGroupAdmin('120363426760868023@g.us', '553499911246', CTX)
+    await whapi.demoteGroupAdmin('120363426760868023@g.us', '5534988887777', CTX)
     expect(callOf(fetchWithRetry, 1).opts.method).toBe('DELETE')
-    expect(callOf(fetchWithRetry, 1).body).toEqual({ participants: ['553499911246'] })
+    expect(callOf(fetchWithRetry, 1).body).toEqual({ participants: ['5534988887777'] })
   })
 
   test('getGroupInvite GET /invite e sendGroupInvite POST /groups/link/{code}', async () => {
@@ -122,11 +122,11 @@ describe('Whapi — grupos', () => {
     expect(inv.ok).toBe(true)
     expect(inv.inviteCode).toBe('AbC123')
     expect(inv.inviteLink).toBe('https://chat.whatsapp.com/AbC123')
-    await whapi.sendGroupInvite('AbC123', '553499911246', { title: 'Entre' }, CTX)
+    await whapi.sendGroupInvite('AbC123', '5534988887777', { title: 'Entre' }, CTX)
     const send = callOf(fetchWithRetry, 1)
     expect(send.url).toBe('https://gate.whapi.test/groups/link/AbC123')
     expect(send.opts.method).toBe('POST')
-    expect(send.body.to).toBe('553499911246')
+    expect(send.body.to).toBe('5534988887777')
   })
 
   test('applications GET/POST/DELETE', async () => {

@@ -18,6 +18,7 @@ const {
 const { runAdminAtendimentoAlertaForAllCompanies } = require('../services/adminAtendimentoAlertaService')
 const { runAtendimentoSemRespostaForAllCompanies } = require('../services/atendimentoSemRespostaService')
 const { processarVencimentosPagamentoFinanceiro } = require('../services/conversaPagamentoFinanceiroService')
+const { mapProviderSendResult } = require('../services/chat/outbound/providerResultMapper')
 
 function timingSafeEqualStr(a, b) {
   const sa = String(a ?? '')
@@ -144,10 +145,9 @@ exports.timeoutInatividadeChatbot = async (req, res) => {
             sendOrigin: 'timeout_inatividade_chatbot',
           })
 
-          const ok = resultSend?.ok === true
-          const messageId = resultSend?.messageId ? String(resultSend.messageId).trim() : null
-          const hasTraceableId = !!messageId && (messageId.includes('@') || /^[A-F0-9]{12,}$/i.test(messageId) || messageId.length > 20)
-          const statusMsg = ok ? (hasTraceableId ? 'sent' : 'pending') : 'erro'
+          const mappedResult = mapProviderSendResult(resultSend, { failedStatusMensagem: 'failed' })
+          const { ok, waMessageId: messageId, hasValidId: hasTraceableId } = mappedResult
+          const statusMsg = mappedResult.nextStatus
           if (!ok || !hasTraceableId) {
             console.warn('[timeoutInatividadeChatbot] envio sem confirmacao rastreavel', {
               company_id,
@@ -164,7 +164,7 @@ exports.timeoutInatividadeChatbot = async (req, res) => {
             direcao: 'out',
             company_id,
             status: statusMsg,
-            status_mensagem: ok ? (hasTraceableId ? 'sent' : 'sending') : 'failed',
+            status_mensagem: mappedResult.nextStatusMensagem,
             ...(hasTraceableId ? { whatsapp_id: messageId } : {}),
             ...(conv.whatsapp_instance_id ? { whatsapp_instance_id: conv.whatsapp_instance_id } : {}),
           })

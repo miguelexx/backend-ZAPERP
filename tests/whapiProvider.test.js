@@ -58,6 +58,8 @@ describe('Whapi provider — sendText', () => {
 
     expect(r.ok).toBe(true)
     expect(r.messageId).toBe('wamid.OK')
+    expect(r.provider).toBe('whapi')
+    expect(r.ackConfirmed).toBe(false)
     expect(fetchWithRetry).toHaveBeenCalledTimes(1)
     const [url, opts] = fetchWithRetry.mock.calls[0]
     expect(url).toBe('https://gate.whapi.test/messages/text')

@@ -23,7 +23,7 @@ const {
   isInboundTooOldForWelcome,
 } = require('../chatbotTriageService')
 const { sendWhapiTriageMenu, buildPollPayload, buildTriageReplyMeta, activeSorted } = require('./whapiTriageRenderer')
-const { isRealWhatsAppId } = require('../../helpers/whatsappMessageIdHelper')
+const { mapProviderSendResult } = require('../chat/outbound/providerResultMapper')
 
 const DEFAULT_CONFIRM = 'Perfeito! Seu atendimento foi direcionado para o setor {{departamento}}. Em instantes nossa equipe dará continuidade.'
 
@@ -95,14 +95,12 @@ function resolveSelectedOption(payload, config) {
 
 /** Deriva status da linha outbound do bot a partir do resultado de envio. */
 function outboundStatus(sendResult) {
-  const ok = sendResult?.ok === true
-  const messageId = sendResult?.messageId ? String(sendResult.messageId).trim() : null
-  const traceable = !!messageId && isRealWhatsAppId(messageId)
+  const mapped = mapProviderSendResult(sendResult, { failedStatusMensagem: 'failed' })
   return {
-    messageId,
-    traceable,
-    status: ok ? (traceable ? 'sent' : 'pending') : 'erro',
-    status_mensagem: ok ? (traceable ? 'sent' : 'sending') : 'failed',
+    messageId: mapped.waMessageId,
+    traceable: mapped.hasValidId,
+    status: mapped.nextStatus,
+    status_mensagem: mapped.nextStatusMensagem,
   }
 }
 

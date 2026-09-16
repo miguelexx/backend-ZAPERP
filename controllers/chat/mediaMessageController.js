@@ -9,8 +9,8 @@ const supabase = require('../../config/supabase')
 const { getProvider } = require('../../services/providers')
 const { tryMarkWaitingAfterHumanOutbound } = require('../../services/absenceFinalizationService')
 const { empresaModoSimplesAtivo } = require('../../helpers/empresaModoSimplesFlag')
-const { isRealWhatsAppId, isUltramsgNumericQueueId } = require('../../helpers/whatsappMessageIdHelper')
 const { schedulePendingOutboundReconciliation } = require('../../services/pendingOutboundReconciliationService')
+const { mapProviderSendResult } = require('../../services/chat/outbound/providerResultMapper')
 const { normalizeClientTempId, isMissingMensagemColumnError, isGenericMissingColumnError, isClientTempIdUniqueViolation } = require('../../services/chat/outbound/idempotencyHelpers')
 const { parseAudioDuracaoSecFromBody, aplicarTipoForcadoSticker, inferirTipoArquivo, shouldAbortAudioAfterNormalize, shouldForceProviderUploadForMedia } = require('../../services/chat/media/mediaType')
 const { resolveTelefoneFromLidSiblingConversation, resolveConversationWhatsappInstance, resolveConversationProvider } = require('../../services/chat/identity/conversationAddressService')
@@ -432,12 +432,11 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
           const normalizedResult = typeof result === 'boolean'
             ? { ok: result, error: null, messageId: null }
             : (result || { ok: false, error: 'resultado_provider_vazio', messageId: null })
-          const ok = normalizedResult.ok === true
-          const waMessageId = normalizedResult?.messageId ? String(normalizedResult.messageId).trim() : null
-          const hasTraceableMediaId = isRealWhatsAppId(waMessageId)
-          const hasQueueMediaId = !!waMessageId && isUltramsgNumericQueueId(waMessageId)
-          const nextStatus = ok ? (hasTraceableMediaId ? 'sent' : 'pending') : 'erro'
-          const nextStatusMensagem = ok ? (hasTraceableMediaId ? 'sent' : 'sending') : 'erro'
+          const mappedResult = mapProviderSendResult(normalizedResult)
+          const {
+            ok, waMessageId, hasValidId: hasTraceableMediaId,
+            hasQueueId: hasQueueMediaId, nextStatus, nextStatusMensagem,
+          } = mappedResult
           
           if (!ok) {
             console.warn('WhatsApp: falha ao enviar mídia', {
@@ -474,7 +473,7 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
             io2.to(`empresa_${company_id}`).to(`conversa_${conversa_id}`).to(`usuario_${user_id}`).emit(io2.EVENTS?.STATUS_MENSAGEM || 'status_mensagem', payload)
           }
 
-          if (ok && !hasTraceableMediaId) {
+          if (mappedResult.needsReconciliation) {
             schedulePendingOutboundReconciliation({
               companyId: company_id,
               mensagemId: msg.id,
@@ -486,7 +485,7 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
           // espelha para o Cloudflare R2 na hora, sem esperar a varredura periódica.
           // No-op para outras empresas / R2 desligado. Mídia sem ID rastreável fica pending
           // e será espelhada pela varredura quando a reconciliação confirmar o envio.
-          if (ok && hasTraceableMediaId) {
+          if (ok && mappedResult.confirmedSent) {
             try {
               const { scheduleR2MirrorIfNeeded } = require('../../services/mediaR2MirrorService')
               scheduleR2MirrorIfNeeded({ supabase, io: io2, company_id, mensagem_id: msg.id })

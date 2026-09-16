@@ -1,5 +1,5 @@
 /**
- * Mapeamento canônico do resultado do provider WhatsApp (UltraMSG) para o estado da mensagem.
+ * Mapeamento canônico do resultado do provider WhatsApp para o estado da mensagem.
  *
  * Extraído de controllers/chatController.js (Fase 2 da modularização). Hoje essa mesma máquina de
  * estados aparece inline e DUPLICADA em vários endpoints de saída (texto, contato, localização,
@@ -12,8 +12,8 @@
  * parametrizável (`failedStatusMensagem`), com default `'erro'` (a maioria). Unificar esse valor é
  * uma decisão de comportamento para a Fase 6, não parte desta extração estrutural.
  *
- * Regra invariante (idêntica em todos os caminhos):
- *   status  = 'sent'     ← provider aceitou (ok) e retornou ID rastreável (whatsapp_id real)
+ * Regra invariante:
+ *   status  = 'sent'     ← provider confirmou envio; na Whapi isso exige ACK `sent` ou superior
  *   status  = 'pending'  ← provider aceitou sem ID rastreável (ex.: ID de fila numérico)
  *   status  = 'erro'     ← provider recusou/falhou (ok=false)
  */
@@ -31,6 +31,7 @@ const { isRealWhatsAppId, isUltramsgNumericQueueId } = require('../../../helpers
  *   hasQueueId: boolean,
  *   providerError: any,
  *   acceptedWithoutTrace: boolean,
+ *   needsReconciliation: boolean,
  *   nextStatus: 'sent'|'pending'|'erro',
  *   nextStatusMensagem: string,
  * }}
@@ -44,18 +45,30 @@ function mapProviderSendResult(result, opts = {}) {
   const hasValidId = isRealWhatsAppId(waMessageId)
   const hasQueueId = !!waMessageId && isUltramsgNumericQueueId(waMessageId)
   const providerError = (typeof result === 'object') ? (result?.error || result?.blockedBy || null) : null
+  const requiresAck = typeof result === 'object' && (
+    String(result?.provider || '').toLowerCase() === 'whapi' || result?.ackConfirmed === false
+  )
+  const ackConfirmed = !requiresAck || result?.ackConfirmed === true
+  const confirmedSent = hasValidId && ackConfirmed
+  const awaitingAck = ok && hasValidId && !ackConfirmed
   const acceptedWithoutTrace = ok && !hasValidId
-  // Regra: sent exige aceite do provider E ID rastreável. Aceite sem ID rastreável permanece
-  // pending/sending para evitar mensagem fantasma; o ACK pode chegar depois via webhook/reconciliação.
-  const nextStatus = ok ? (hasValidId ? 'sent' : 'pending') : 'erro'
-  const nextStatusMensagem = ok ? (hasValidId ? 'sent' : 'sending') : failedStatusMensagem
+  const needsReconciliation = ok && !confirmedSent
+  // O ID Whapi e persistido para reconciliacao, mas nao prova envio. Enquanto
+  // nao houver ACK, a mensagem continua pending/sending.
+  const nextStatus = ok ? (confirmedSent ? 'sent' : 'pending') : 'erro'
+  const nextStatusMensagem = ok ? (confirmedSent ? 'sent' : 'sending') : failedStatusMensagem
   return {
     ok,
     waMessageId,
     hasValidId,
     hasQueueId,
     providerError,
+    requiresAck,
+    ackConfirmed,
+    awaitingAck,
+    confirmedSent,
     acceptedWithoutTrace,
+    needsReconciliation,
     nextStatus,
     nextStatusMensagem,
   }

@@ -10,8 +10,8 @@ const { findOrCreateConversation } = require('../helpers/conversationSync')
 const { telefoneNaAllowlist, getDisparoFlags } = require('../helpers/disparoWorkerConfig')
 const { buildDispReferenceId } = require('../helpers/disparoReferenceHelper')
 const { marcarAguardandoRespostaCampanha } = require('./disparoConversaOrigemService')
-const { isUltramsgNumericQueueId, isRealWhatsAppId } = require('../helpers/whatsappMessageIdHelper')
 const { schedulePendingOutboundReconciliation } = require('./pendingOutboundReconciliationService')
+const { mapProviderSendResult } = require('./chat/outbound/providerResultMapper')
 const {
   _substituirVariaveis: substituirVariaveis,
   _conteudoEditorial: conteudoEditorial,
@@ -149,7 +149,7 @@ async function persistirMensagem({
   variacao,
   textoFinal,
   mediaUrlRelativa,
-  messageId,
+  sendResult,
   io,
 }) {
   const companyId = Number(item.company_id)
@@ -174,8 +174,8 @@ async function persistirMensagem({
     ? textoFinal.texto
     : (textoFinal.legenda || variacao.midia_nome_original || `(${tipo})`)
 
-  const hasRealId = isRealWhatsAppId(messageId)
-  const hasQueueId = Boolean(messageId) && isUltramsgNumericQueueId(messageId)
+  const mappedResult = mapProviderSendResult(sendResult)
+  const { waMessageId: messageId, hasValidId: hasRealId, hasQueueId } = mappedResult
 
   const { data: mensagem, error } = await supabase
     .from('mensagens')
@@ -188,7 +188,8 @@ async function persistirMensagem({
       direcao: 'out',
       company_id: companyId,
       whatsapp_instance_id: item.instancia_id,
-      status: hasRealId ? 'sent' : 'pending',
+      status: mappedResult.nextStatus,
+      status_mensagem: mappedResult.nextStatusMensagem,
       whatsapp_id: hasRealId ? String(messageId) : null,
       provider_queue_id: hasQueueId ? String(messageId) : null,
       client_temp_id: referenceId,
@@ -241,7 +242,7 @@ async function persistirMensagem({
     }
   }
 
-  if (hasQueueId && !hasRealId && mensagem?.id) {
+  if (mappedResult.needsReconciliation && mensagem?.id) {
     schedulePendingOutboundReconciliation({
       companyId,
       mensagemId: mensagem.id,
@@ -259,6 +260,7 @@ async function enviarViaUltramsg({
   mediaUrl,
   variacao,
   item,
+  clienteId,
   timeoutMs,
 }) {
   const instanceProvider = await resolveConversationProvider(item.company_id, item.instancia_id)
@@ -266,6 +268,7 @@ async function enviarViaUltramsg({
   const opts = {
     companyId: item.company_id,
     whatsappInstanceId: item.instancia_id,
+    clienteId: clienteId || undefined,
     referenceId: buildDispReferenceId(item.id),
     returnDetails: true,
   }
@@ -307,6 +310,8 @@ async function enviarViaUltramsg({
       messageId: result.messageId || result.id || null,
       error: result.error || null,
       httpStatus: result.httpStatus || (result.ok === false ? 502 : 200),
+      provider: result.provider || null,
+      ackConfirmed: result.ackConfirmed,
     }
   }
   return { ok: true, messageId: null, error: null, httpStatus: 200 }
@@ -444,6 +449,7 @@ async function enviarItemFila(item, {
       mediaUrl,
       variacao,
       item,
+      clienteId: destinatario.cliente_id,
       timeoutMs: timeoutMs || 45000,
     })
   } catch (err) {
@@ -478,7 +484,7 @@ async function enviarItemFila(item, {
       variacao,
       textoFinal,
       mediaUrlRelativa,
-      messageId: sendResult.messageId,
+      sendResult,
       io,
     })
   } catch (err) {

@@ -217,14 +217,47 @@ describe('Whapi webhook — normalização e dispatch', () => {
     }
     // snapshot do body no momento da chamada (o handler reusa o mesmo req e muta body entre itens)
     let recSnap = null
-    receberZapi.mockImplementation(async (rq, rs) => { recSnap = { type: rq.body.type, id: rq.body.id }; return rs.status(200).json({ ok: true }) })
+    receberZapi.mockImplementation(async (rq, rs) => {
+      recSnap = { type: rq.body.type, msgType: rq.body.msgType, id: rq.body.id }
+      return rs.status(200).json({ ok: true })
+    })
     const res = fakeRes()
     await controller.handleWebhookWhapi(req, res)
     expect(receberZapi).toHaveBeenCalledTimes(1)
     expect(statusZapi).toHaveBeenCalledTimes(1)
     expect(res.statusCode).toBe(200)
     expect(recSnap.type).toBe('ReceivedCallback')
+    expect(recSnap.msgType).toBe('chat')
     expect(recSnap.id).toBe('wamid.1')
+  })
+
+  test('enquete inbound preserva msgType=poll (ReceivedCallback não achata o conteúdo)', async () => {
+    const req = {
+      method: 'POST',
+      webhookContext: { company_id: 1, provider_instance_id: 'NEBULA-AER3B' },
+      body: {
+        channel_id: 'NEBULA-AER3B',
+        messages: [{
+          id: 'wamid.poll1',
+          from_me: false,
+          type: 'poll',
+          chat_id: '5534988887777@s.whatsapp.net',
+          poll: { title: 'Setor?', options: ['A', 'B'] },
+          timestamp: 1700000000,
+        }],
+      },
+    }
+    let snap = null
+    receberZapi.mockImplementation(async (rq, rs) => {
+      snap = { type: rq.body.type, msgType: rq.body.msgType, pollMeta: rq.body.pollMeta }
+      return rs.status(200).json({ ok: true })
+    })
+    const res = fakeRes()
+    await controller.handleWebhookWhapi(req, res)
+    expect(res.statusCode).toBe(200)
+    expect(snap.type).toBe('ReceivedCallback')
+    expect(snap.msgType).toBe('poll')
+    expect(snap.pollMeta).toMatchObject({ title: 'Setor?', options: ['A', 'B'] })
   })
 
   test('from_me (eco de mensagem enviada) também despacha para receberZapi', async () => {

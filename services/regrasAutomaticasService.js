@@ -5,7 +5,7 @@
  */
 
 const supabase = require('../config/supabase')
-const { isUltramsgNumericQueueId, isRealWhatsAppId } = require('../helpers/whatsappMessageIdHelper')
+const { mapProviderSendResult } = require('./chat/outbound/providerResultMapper')
 
 function isWithinBusinessHours(empresa, now = new Date()) {
   if (!empresa?.horario_inicio || !empresa?.horario_fim) return true
@@ -19,17 +19,15 @@ function isWithinBusinessHours(empresa, now = new Date()) {
 }
 
 function buildOutboundPayload({ conversa_id, texto, company_id, sendResult, whatsappInstanceId }) {
-  const ok = typeof sendResult === 'boolean' ? sendResult : sendResult?.ok === true
-  const messageId = typeof sendResult === 'object' && sendResult?.messageId ? String(sendResult.messageId).trim() : null
-  const hasTraceableId = isRealWhatsAppId(messageId)
-  const hasQueueId = !!messageId && isUltramsgNumericQueueId(messageId)
+  const mapped = mapProviderSendResult(sendResult, { failedStatusMensagem: 'failed' })
+  const { waMessageId: messageId, hasValidId: hasTraceableId, hasQueueId } = mapped
   return {
     conversa_id,
     texto,
     direcao: 'out',
     company_id,
-    status: ok ? (hasTraceableId ? 'sent' : 'pending') : 'erro',
-    status_mensagem: ok ? (hasTraceableId ? 'sent' : 'sending') : 'failed',
+    status: mapped.nextStatus,
+    status_mensagem: mapped.nextStatusMensagem,
     ...(hasTraceableId ? { whatsapp_id: messageId } : {}),
     ...(hasQueueId ? { provider_queue_id: messageId } : {}),
     ...(whatsappInstanceId ? { whatsapp_instance_id: whatsappInstanceId } : {}),

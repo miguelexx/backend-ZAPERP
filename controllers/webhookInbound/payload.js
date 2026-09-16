@@ -365,7 +365,14 @@ function extractMessage(payload) {
     payload.listResponseMessage?.message ??
     ''
   let type = String(payload.type || payload.msgType || 'text').toLowerCase()
-  if (type === 'receivedcallback' || type === 'receivedcall') type = 'text'
+  // Webhook UltraMSG/Whapi despacha com type=ReceivedCallback (evento Z-API).
+  // O tipo de CONTEÚDO vai em msgType (Whapi); sem isso enquete/quiz viram texto e o voto não acha a poll.
+  if (type === 'receivedcallback' || type === 'receivedcall') {
+    const inner = String(payload.msgType || '').toLowerCase()
+    type = (inner && inner !== 'receivedcallback' && inner !== 'receivedcall') ? inner : 'text'
+  }
+  // Whapi mapeia texto para type interno "chat". O pipeline (vCard, link, mídia) só conhece "text".
+  if (type === 'chat') type = 'text'
 
   // Reação (Z-API: reaction.value)
   if (payload.reaction && typeof payload.reaction === 'object') {
@@ -387,7 +394,10 @@ function extractMessage(payload) {
     }
   }
   if (!type || type === 'text') {
-    if (payload.image || payload.imageUrl) type = 'image'
+    if (payload.pollMeta && typeof payload.pollMeta === 'object'
+      && (payload.pollMeta.title || (Array.isArray(payload.pollMeta.options) && payload.pollMeta.options.length))) {
+      type = 'poll'
+    } else if (payload.image || payload.imageUrl) type = 'image'
     else if (payload.audio || payload.audioUrl) type = 'audio'
     else if (payload.video || payload.videoUrl || payload.ptv) type = 'video'
     else if (payload.document || payload.documentUrl) type = 'document'

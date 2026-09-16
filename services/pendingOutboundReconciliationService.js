@@ -1,5 +1,5 @@
 /**
- * Reconcilia mensagens outbound presas em pending/sending.
+ * Reconcilia mensagens outbound pending/sending e revalida `sent` da Whapi.
  *
  * Cenário: UltraMSG aceita o envio (ok=true) mas retorna ID de fila interno ou
  * o webhook message_create/message_ack demora/falha. Este serviço consulta a API
@@ -94,6 +94,7 @@ function providerRowInQueue(row) {
 
 function mapProviderAckToStatus(row) {
   const ack = providerRowAck(row)
+  const status = providerRowStatus(row)
   if (/^\d+$/.test(ack)) {
     const n = Number(ack)
     if (n <= 0) return 'pending'
@@ -106,6 +107,10 @@ function mapProviderAckToStatus(row) {
   if (['delivered', 'device', 'received'].includes(ack)) return 'delivered'
   if (['sent', 'server'].includes(ack)) return 'sent'
   if (['pending', 'queue'].includes(ack)) return 'pending'
+  if (['read', 'played', 'seen'].includes(status)) return status === 'played' ? 'played' : 'read'
+  if (['delivered', 'device', 'received'].includes(status)) return 'delivered'
+  if (['sent', 'server'].includes(status)) return 'sent'
+  if (['pending', 'queue'].includes(status)) return 'pending'
   if (providerRowIndicatesSuccess(row)) return 'sent'
   return 'sent'
 }
@@ -198,6 +203,12 @@ async function resolveFromProviderRow(row, providerRow, io) {
     // whatsapp_id só recebe ID real do WhatsApp; queue ID numérico vai para provider_queue_id.
     if (isRealWhatsAppId(waId)) updates.whatsapp_id = String(waId).trim()
     else if (isUltramsgNumericQueueId(waId) && !row.provider_queue_id) updates.provider_queue_id = String(waId).trim()
+    const sameStatus = String(row.status || '').toLowerCase() === nextStatus &&
+      String(row.status_mensagem || row.status || '').toLowerCase() === nextStatus
+    const sameId = !updates.whatsapp_id || String(row.whatsapp_id || '').trim() === updates.whatsapp_id
+    if (sameStatus && sameId && !updates.provider_queue_id) {
+      return { ok: true, action: 'confirmed_unchanged', status: nextStatus, mensagem_id: row.id }
+    }
     return patchMessage(row, updates, io)
   }
 
@@ -206,6 +217,28 @@ async function resolveFromProviderRow(row, providerRow, io) {
 
 async function queryProviderForMessage(row) {
   const opts = buildProviderOpts(row)
+  const instanceProvider = await resolveConversationProvider(opts.companyId, opts.whatsappInstanceId)
+  const isWhapi = String(instanceProvider || '').trim().toLowerCase() === 'whapi'
+  const idCandidates = [...new Set([
+    row.whatsapp_id != null ? String(row.whatsapp_id).trim() : '',
+    row.provider_queue_id != null ? String(row.provider_queue_id).trim() : '',
+  ].filter(Boolean))]
+
+  // Whapi nao tem referenceId e ignora o filtro de status: um GET /messages/{id}
+  // basta. Repetir a consulta 6x no 404 so estressa rate-limit e nao muda o resultado.
+  if (isWhapi) {
+    if (!idCandidates.length) return { source: null, row: null, list: [], consultaOk: true }
+    let consultaOk = false
+    for (const idCandidate of idCandidates) {
+      const result = await fetchProviderMessages(opts, { id: idCandidate, limit: 1 })
+      if (result.ok) consultaOk = true
+      if (result.ok && Array.isArray(result.data) && result.data.length > 0) {
+        return { source: 'id:whapi', row: result.data[0], list: result.data, consultaOk: true }
+      }
+    }
+    return { source: null, row: null, list: [], consultaOk }
+  }
+
   const referenceId = buildCrmReferenceId(row.id)
   // consultaOk distingue "provedor respondeu e nao tem a mensagem" de "nao consegui perguntar".
   // Sem essa distincao um reenvio automatico duplicaria mensagem ja entregue quando a API falha.
@@ -223,10 +256,6 @@ async function queryProviderForMessage(row) {
 
   // Busca por ID: usa whatsapp_id (linhas antigas com queue id) ou provider_queue_id (linhas novas).
   // O parâmetro `id` da UltraMsg espera o ID interno numérico deles — exatamente o queue id.
-  const idCandidates = [
-    row.whatsapp_id != null ? String(row.whatsapp_id).trim() : '',
-    row.provider_queue_id != null ? String(row.provider_queue_id).trim() : '',
-  ].filter(Boolean)
   for (const idCandidate of idCandidates) {
     for (const status of ['all', 'sent', 'queue', 'unsent', 'invalid', 'expired']) {
       const result = await fetchProviderMessages(opts, { id: idCandidate, status, limit: 3 })
@@ -415,15 +444,24 @@ async function reconcilePendingOutboundMessage(row, { io = null, force = false }
   }
 
   const currentStatus = String(row.status_mensagem || row.status || '').toLowerCase()
-  if (!['pending', 'sending'].includes(currentStatus)) {
+  if (!['pending', 'sending', 'sent'].includes(currentStatus)) {
     return { ok: true, action: 'skip_not_pending' }
   }
 
-  if (isRealWhatsAppId(row.whatsapp_id)) {
+  const instanceProvider = await resolveConversationProvider(row.company_id, row.whatsapp_instance_id)
+  const isWhapi = String(instanceProvider || '').trim().toLowerCase() === 'whapi'
+  if (currentStatus === 'sent' && !isWhapi) {
+    return { ok: true, action: 'skip_sent_non_whapi' }
+  }
+  if (currentStatus === 'sent' && !isRealWhatsAppId(row.whatsapp_id)) {
+    return { ok: true, action: 'skip_sent_without_id' }
+  }
+  // UltraMSG preserva o comportamento historico. Na Whapi, o ID do POST nao
+  // prova envio: sempre consultamos GET /messages/{id} ou aguardamos webhook ACK.
+  if (!isWhapi && isRealWhatsAppId(row.whatsapp_id)) {
     return patchMessage(row, { status: 'sent', status_mensagem: 'sent' }, io)
   }
 
-  const instanceProvider = await resolveConversationProvider(row.company_id, row.whatsapp_instance_id)
   const provider = getProvider({ provider: instanceProvider })
   if (!provider?.getMessages) {
     return { ok: false, action: 'provider_indisponivel' }
@@ -463,6 +501,11 @@ async function reconcilePendingOutboundMessage(row, { io = null, force = false }
   // Provedor respondeu que nao tem registro da mensagem e nunca a aceitou: o envio se perdeu.
   // Reenviar aqui e seguro justamente porque a ausencia foi confirmada, nao presumida.
   const provedorSemRegistro = providerHit?.consultaOk === true && !providerHit?.row
+  // Whapi: 404/ausencia pode ser consistencia eventual, retencao da API ou ID
+  // ainda nao indexado. Nunca reenviar nem promover para sent sem ACK explicito.
+  if (isWhapi && provedorSemRegistro) {
+    return { ok: true, action: currentStatus === 'sent' ? 'keep_whapi_sent_unconfirmed' : 'keep_whapi_unconfirmed' }
+  }
   if (provedorSemRegistro && provedorNuncaAceitou(row)) {
     // Chatbot / automações (sem autor humano): o envio original NÃO usa referenceId crm-{id}
     // (insert depois do sendText). A consulta UltraMSG por referenceId sempre falha →
@@ -510,18 +553,21 @@ async function fetchPendingOutboundRows({ companyId = null, limit = null, mensag
 
   const BASE_COLS = 'id, company_id, conversa_id, whatsapp_instance_id, whatsapp_id, provider_queue_id, status, status_mensagem, direcao, criado_em, autor_usuario_id, tipo, texto, url, nome_arquivo'
   // storage_* só existem após a migration de R2; sem elas, refazemos a consulta sem as colunas.
-  const buildQuery = (cols) => {
+  const buildQuery = (cols, statuses, whatsappInstanceIds = null) => {
     let q = supabase
       .from('mensagens')
       .select(cols)
       .eq('direcao', 'out')
-      .in('status', ['pending', 'sending'])
+      .in('status', statuses)
       .gte('criado_em', oldestIso)
       .lte('criado_em', graceIso)
       .order('criado_em', { ascending: true })
       .limit(batch)
     if (companyId != null) q = q.eq('company_id', Number(companyId))
     if (mensagemId != null) q = q.eq('id', Number(mensagemId))
+    if (Array.isArray(whatsappInstanceIds) && whatsappInstanceIds.length) {
+      q = q.in('whatsapp_instance_id', whatsappInstanceIds)
+    }
     return q
   }
 
@@ -531,15 +577,37 @@ async function fetchPendingOutboundRows({ companyId = null, limit = null, mensag
       t.includes('does not exist') || t.includes('42703') || t.includes('pgrst204') || t.includes('schema cache')
   }
 
-  let { data, error } = await buildQuery(`${BASE_COLS}, storage_backend, storage_key`)
-  if (error && isMissingStorageColumn(error)) {
-    ;({ data, error } = await buildQuery(BASE_COLS))
+  const runQuery = async (statuses, whatsappInstanceIds = null) => {
+    let result = await buildQuery(`${BASE_COLS}, storage_backend, storage_key`, statuses, whatsappInstanceIds)
+    if (result.error && isMissingStorageColumn(result.error)) {
+      result = await buildQuery(BASE_COLS, statuses, whatsappInstanceIds)
+    }
+    return result
   }
-  if (error) return { ok: false, rows: [], error: error.message }
-  const rows = (data || []).filter((row) => {
+
+  let whapiInstancesQuery = supabase
+    .from('whatsapp_instances')
+    .select('id')
+    .eq('provider', 'whapi')
+  if (companyId != null) whapiInstancesQuery = whapiInstancesQuery.eq('company_id', Number(companyId))
+  const { data: whapiInstances, error: whapiInstancesError } = await whapiInstancesQuery
+  const whapiInstanceIds = whapiInstancesError
+    ? []
+    : (whapiInstances || []).map((row) => Number(row.id)).filter((id) => Number.isFinite(id) && id > 0)
+
+  // Lotes independentes evitam que o volume de `sent` ocupe as vagas das
+  // mensagens realmente pendentes. A filtragem por provider ocorre no reconcile.
+  const pendingResult = await runQuery(['pending', 'sending'])
+  if (pendingResult.error) return { ok: false, rows: [], error: pendingResult.error.message }
+  const sentResult = whapiInstanceIds.length
+    ? await runQuery(['sent'], whapiInstanceIds)
+    : { data: [], error: null }
+  if (sentResult.error) return { ok: false, rows: [], error: sentResult.error.message }
+
+  const rows = [...(pendingResult.data || []), ...(sentResult.data || [])].filter((row) => {
     if (isInternalNoteRow(row)) return false
     const st = String(row.status_mensagem || row.status || '').toLowerCase()
-    return ['pending', 'sending'].includes(st)
+    return ['pending', 'sending', 'sent'].includes(st)
   })
   return { ok: true, rows }
 }

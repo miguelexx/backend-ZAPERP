@@ -746,6 +746,85 @@ Testes: `tests/mediaSendReceiveAudit.test.js` (14; 11 falham no código antigo).
 
 Testes: `tests/documentDownloadAudit.test.js` (33) + cenários 12–14 em `frontend/scripts/test-audio-playback-candidates.mjs`. `npm run test:node` do frontend: 32/34 — `test-unread-and-minha-fila.mjs` e `test-cache-reconnect.mjs` falham **igual sem a mudança** (erro do shim `import.meta.env` com o Vite; preexistente).
 
-Risco residual conhecido (não alterado): Whapi que responda `sent:true` **sem** `message.id` deixa a linha `pending`; se o eco `from_me` não reconciliar em 3 min, o reconciliador (sem `referenceId` na Whapi) pode reenviar. O eco normalmente chega em segundos.
+Risco residual tratado em 2026-09-16 (§34.5): Whapi sem ACK permanece `pending`, mas o reconciliador não faz reenvio automático cego.
 
 Não alterado (observações para decidir depois): PNG transparente vira fundo preto no JPEG; HEIC depende do ffmpeg-static (se falhar, segue HEIC cru); documento inbound UltraMSG cujo texto é legenda (não o nome) segue com nome `inbound-c…-m….ext` (ver §33.1); voz Whapi/UltraMSG é gravada como `tipo=audio` (não `voice`) — comportamento histórico.
+
+---
+
+## 34. Auditoria do fluxo mensagens/conversas (2026-09-16)
+
+Releitura do caminho completo Whapi (adapter → HTTP chat → webhook → `receberZapi`/`statusZapi` → conversa/mensagem). UltraMSG intocada. Diff local `chatListCounts*` **não** foi misturado.
+
+### 34.1 O que está CORRETO (CONFIRMADO no código)
+
+- Roteamento `getProvider({ provider })`: default/no-arg = UltraMSG; só `'whapi'` usa o adapter.
+- Tenant do webhook: `channel_id` → `whatsapp_instances` (`provider='whapi'`), nunca body/query. Auth só header (`X-Webhook-Token` / Bearer), fail-closed.
+- Inbound/ACK convergem no núcleo legado `receberZapi`/`statusZapi`. Conversa e mensagem filtradas por `whatsapp_instance_id`. Idempotência `(company, instance, whatsapp_id)`.
+- Eco `from_me`: reconcilia por `whatsapp_id` síncrono (Whapi não tem `referenceId`). ACK sem regressão.
+- Texto/mídia/reação/contato/localização/enquete/interativa: adapter real. `fromMe` unread 0. Chatbot não dispara em reação/grupo/`fromMe`.
+- Mesmo cliente em dois números da empresa = duas conversas (índice por instância). Resposta sai pelo canal da conversa.
+
+### 34.2 Bugs corrigidos nesta sessão (CONFIRMADO)
+
+| # | Bug | Efeito | Correção |
+|---|---|---|---|
+| 1 | `recipientCandidates` fazia `Array.isArray(preferredBrSendDigits)` — a função devolve **string**. | Celular BR gravado com 12 dígitos (sem 9º) ia para a Whapi sem o 9. | Usa a string; insere o 9º como a UltraMSG. |
+| 2 | Destino `lid:…` / `@lid` era strippado a dígitos. | Risco de enviar a um “telefone” falso se o LID vazasse até o adapter. | `to` = `<id>@lid`. O chat HTTP **ainda** recusa LID sem número real (`resolverTelefoneEnvioDaConversa`) — decisão de produto, não alterada. |
+| 3 | Grupo no CRM grava `conversas.telefone` **só com dígitos 120…** (`normalizeGroupIdForStorage`). `toWhapiRecipient` mandava isso cru. | Envio a grupo Whapi sem `@g.us` (OpenAPI exige o JID). | Heurística 120… / Group-Owner → `@g.us`. Telefone 55… **não** vira grupo. |
+| 4 | Webhook sobrescrevia `type` com `ReceivedCallback`. `extractMessage` achatava em `text`. | Enquete inbound do cliente gravava `tipo=texto`; voto não achava `tipo=poll`. Mídia já se salvava via URL. | `msgType` = tipo de conteúdo; `extractMessage` lê `msgType` no ReceivedCallback. `chat` Whapi é alias de `text` (URL continua `link`). UltraMSG sem `msgType` = igual. |
+
+### 34.3 Lacunas conhecidas (não são regressão desta sessão)
+
+- **Apagar no WhatsApp:** o canal assina `messages.delete`, mas o normalizador ignora `deleted`/`revoke`. A bolha permanece no CRM. (UltraMSG: mesmo espírito.)
+- **Guarda anti-histórico** desligada por padrão (`WHAPI_INBOUND_MAX_AGE_MINUTES` / `metadata.sync_historico`). Reconnect com webhook persistente pode recriar conversas antigas se a config do canal não cortar.
+- **Conversa só-LID:** atendente não responde até existir telefone real (irmão/cliente). A Whapi aceitaria `@lid`; o CRM bloqueia de propósito.
+- **Homologação live** de mídia/grupo/edit/delete/disparo: código coberto por Jest; tráfego real continua PENDENTE onde o doc 25 já marcava.
+- Endpoints MCP de stories/newsletter/comunidade/catálogo/bots: **fora** do atendimento; adapter não precisa cobrir para o fluxo de mensagens/conversas.
+
+Testes: `tests/whapiPhones.test.js`, `tests/whapiWebhook.test.js`, `tests/webhookZapiPure.test.js`. Sem migration. Sem evento Socket novo.
+
+### 34.4 Destino canonico outbound Whapi (2026-09-16)
+
+Incidente real confirmou que `conversas.telefone` pode conter a forma brasileira com nono digito enquanto
+`clientes.wa_id`/Whapi identifica a conta pela forma legada sem esse digito. A Whapi aceitava o POST e devolvia
+`message.id`, mas a mensagem permanecia `pending` e nunca recebia ACK de entrega.
+
+Correcao restrita ao adapter Whapi:
+
+- mensagens associadas a uma conversa preferem `clientes.wa_id` quando presente;
+- JID privado explicito (`@c.us`/`@s.whatsapp.net`) perde apenas o sufixo — seus digitos canonicos nao sao reescritos;
+- sem `wa_id`, o primeiro envio consulta `checkPhones`, usa o `wa_id` devolvido e o persiste sem sobrescrever
+  valor preenchido concorrentemente;
+- falha na validacao nao bloqueia o envio: preserva o fallback historico;
+- grupos/LID e todo o provider UltraMSG permanecem inalterados.
+
+Implementacao: `services/whapiRecipientResolverService.js`, aplicada no chokepoint `postMessage` de
+`services/providers/whapi/send.js`. Testes: `tests/whapiRecipientResolver.test.js` + `tests/whapiPhones.test.js`.
+Sem migration e sem evento Socket novo.
+
+### 34.5 ACK real e monitoramento seguro outbound Whapi (2026-09-16)
+
+- O resolver canônico passou a cobrir todos os endpoints que criam conteúdo/destino: texto, link, mídias,
+  contato, localização, encaminhamento, interativa, enquete, quiz, pergunta, edição, convite de grupo e chamada.
+  Disparos sem conversa resolvem por `cliente_id`.
+- A resposta síncrona do POST Whapi agora carrega `provider='whapi'` e `ackConfirmed=false`. O `message.id`
+  é persistido para rastreamento, mas a linha continua `pending/sending`; somente webhook ACK ou
+  `GET /messages/{id}` com `sent|delivered|read|played` promove o status.
+- O mapeamento inicial foi centralizado em `providerResultMapper` e aplicado aos fluxos manuais,
+  mídia, contato, localização, encaminhamento, enquete, retry, chatbot, regras, ausência e disparos.
+  UltraMSG preserva a regra histórica.
+- O reconciliador busca lotes independentes: `pending|sending` de todos os providers (UltraMSG
+  continua precisando disso) e `sent` só de instâncias `provider='whapi'`. A consulta Whapi é
+  um único `GET /messages/{id}` — sem `referenceId` e sem repetir filtro de status.
+- Para Whapi, resposta 404/lista vazia/inconclusiva mantém o estado atual. Não promove para `sent`,
+  não marca falha por presunção e nunca chama o reenvio automático. Falha explícita e ACK explícito
+  continuam sendo aplicados.
+- Chatbot/regras/opt-out no webhook precisam devolver `provider` + `ackConfirmed` no wrapper de
+  `sendText`; sem isso o mapper via `{ok, messageId}` promovia Whapi para `sent` no `message.id`.
+- Edição HTTP agora passa `conversaId` ao resolver. Convite de grupo chama o resolver, mas o
+  admin de grupo só envia `companyId` — sem `cliente_id` o lookup de `wa_id` não dispara.
+- Chamada (`sendCall`) usa `call_id`, não passa por `normalizeWhapiSendResult` e não recebe ACK
+  de mensagem. Não misturar com o tick pending→sent das bolhas.
+
+Sem migration, sem endpoint novo e sem evento Socket novo.

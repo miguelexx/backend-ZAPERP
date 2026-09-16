@@ -72,17 +72,20 @@ describe('reenvio automatico de pendentes', () => {
   const IDADE_DENTRO_JANELA = () => new Date(Date.now() - 10 * 60_000).toISOString()
   const IDADE_FORA_JANELA = () => new Date(Date.now() - 45 * 60_000).toISOString()
 
-  function montarAmbiente({ getMessagesResult, conversa = { id: 2, telefone: '5511999999999' } }) {
+  function montarAmbiente({ getMessagesResult, getMessagesImpl, providerName = 'ultramsg', conversa = { id: 2, telefone: '5511999999999' } }) {
     jest.resetModules()
 
     const sendText = jest.fn(async () => ({ ok: true, messageId: '35097' }))
-    const getMessages = jest.fn(async () => getMessagesResult)
+    const getMessages = jest.fn(getMessagesImpl || (async () => getMessagesResult))
     jest.doMock('../services/providers', () => ({
       getProvider: () => ({
         getMessages,
         sendText,
         getConnectionStatus: async () => ({ configured: true, connected: true }),
       }),
+    }))
+    jest.doMock('../services/chat/identity/conversationAddressService', () => ({
+      resolveConversationProvider: jest.fn(async () => providerName),
     }))
 
     const updates = []
@@ -212,5 +215,46 @@ describe('reenvio automatico de pendentes', () => {
 
     expect(sendText).not.toHaveBeenCalled()
     expect(res.action).toBe('skip_reenvio_sem_telefone')
+  })
+
+  test('Whapi com ID permanece pending quando GET nao encontra registro e nunca e reenviada', async () => {
+    const { svc, sendText, getMessages } = montarAmbiente({
+      providerName: 'whapi',
+      getMessagesResult: { ok: true, data: [] },
+    })
+
+    const res = await svc.reconcilePendingOutboundMessage(
+      linhaPendente({ whatsapp_id: 'PspVgQ5Hj3WhapiMessageId123' }),
+      { io: null }
+    )
+
+    expect(sendText).not.toHaveBeenCalled()
+    expect(getMessages).toHaveBeenCalledTimes(1)
+    expect(getMessages).toHaveBeenCalledWith(expect.objectContaining({ id: 'PspVgQ5Hj3WhapiMessageId123' }))
+    expect(getMessages).not.toHaveBeenCalledWith(expect.objectContaining({ referenceId: expect.anything() }))
+    expect(res.action).toBe('keep_whapi_unconfirmed')
+  })
+
+  test('Whapi revalida mensagem sent pelo ID e promove somente pelo ACK consultado', async () => {
+    const messageId = 'PspVgQ5Hj3WhapiMessageId123'
+    const getMessagesImpl = async (opts) => {
+      if (opts.id === messageId) return { ok: true, data: [{ id: messageId, status: 'delivered' }] }
+      return { ok: true, data: [] }
+    }
+    const { svc, sendText, getMessages, updates } = montarAmbiente({
+      providerName: 'whapi',
+      getMessagesImpl,
+    })
+
+    const res = await svc.reconcilePendingOutboundMessage(
+      linhaPendente({ status: 'sent', status_mensagem: 'sent', whatsapp_id: messageId }),
+      { io: null }
+    )
+
+    expect(sendText).not.toHaveBeenCalled()
+    expect(getMessages).toHaveBeenCalledTimes(1)
+    expect(getMessages).toHaveBeenCalledWith(expect.objectContaining({ id: messageId }))
+    expect(updates[0]).toMatchObject({ status: 'delivered', status_mensagem: 'delivered' })
+    expect(res.status).toBe('delivered')
   })
 })

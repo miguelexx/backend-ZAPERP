@@ -18,7 +18,7 @@ const { rowAguardandoAtendenteModoSimples } = require('../../helpers/modoSimples
 const { marcarAguardandoClienteManual, retomarEmAtendimentoManual } = require('../../services/conversaStatusManualService')
 const { marcarAguardandoPagamento, retomarDeCobrancaFinanceira } = require('../../services/conversaPagamentoFinanceiroService')
 const { normalizarTimestampSemFusoAmbiguoParaApi } = require('../../helpers/timestampApiCompat')
-const { isRealWhatsAppId } = require('../../helpers/whatsappMessageIdHelper')
+const { mapProviderSendResult } = require('../../services/chat/outbound/providerResultMapper')
 const { INTERNAL_NOTE_PERMISSAO, INTERNAL_NOTE_STATUS, sanitizeInternalNoteTexto, buildInternalNoteInsert } = require('../../helpers/internalNote')
 const { usuarioTemPermissao } = require('../../helpers/permissoesService')
 const { resolveConversationWhatsappInstance, resolveConversationProvider } = require('../../services/chat/identity/conversationAddressService')
@@ -159,10 +159,11 @@ exports.encerrarChat = async (req, res) => {
                   whatsappInstanceId: whatsappInstanceId || undefined,
                   sendOrigin: 'mensagem_finalizacao_atendimento',
                 })
-                const finalizacaoMessageId = resultSend?.messageId ? String(resultSend.messageId).trim() : null
-                const finalizacaoTraceable = isRealWhatsAppId(finalizacaoMessageId)
-                const statusMsg = resultSend?.ok ? (finalizacaoTraceable ? 'sent' : 'pending') : 'erro'
-                const statusMensagem = resultSend?.ok ? (finalizacaoTraceable ? 'sent' : 'sending') : 'failed'
+                const mappedResult = mapProviderSendResult(resultSend, { failedStatusMensagem: 'failed' })
+                const finalizacaoMessageId = mappedResult.waMessageId
+                const finalizacaoTraceable = mappedResult.hasValidId
+                const statusMsg = mappedResult.nextStatus
+                const statusMensagem = mappedResult.nextStatusMensagem
                 const { data: msgInsert, error: errInsert } = await supabase
                   .from('mensagens')
                   .insert({
