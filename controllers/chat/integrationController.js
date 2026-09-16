@@ -220,8 +220,8 @@ exports.sincronizarContatosZapi = async (req, res) => {
   if (!company_id) return res.status(401).json({ ok: false, error: 'Não autenticado' })
   try {
     const { getEmpresaWhatsappConfig } = require('../../services/whatsappConfigService')
-    const { resolveCompanyWhatsappProvider } = require('../../services/chat/identity/conversationAddressService')
-    const instanceProvider = await resolveCompanyWhatsappProvider(company_id)
+    const { resolveContactSyncInstance } = require('../../services/chat/identity/conversationAddressService')
+    const { provider: instanceProvider } = await resolveContactSyncInstance(company_id)
     if (instanceProvider !== 'whapi') {
       const { config, error } = await getEmpresaWhatsappConfig(company_id)
       if (error || !config) return res.status(400).json({ ok: false, error: 'Configure a instância WhatsApp em Integrações antes de sincronizar.' })

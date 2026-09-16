@@ -58,7 +58,10 @@ describe('sincronização manual da agenda — persistência e recuperação', (
     provider.getContacts.mockRejectedValueOnce(new Error('API indisponível'))
     expect(await service.runContactSyncFull(7, { manual: true })).toMatchObject({ ok: false, error: 'API indisponível' })
     provider.getContacts.mockResolvedValueOnce(agenda([]))
-    expect(await service.runContactSyncFull(7, { manual: true })).toMatchObject({ ok: false })
+    expect(await service.runContactSyncFull(7, { manual: true })).toMatchObject({
+      ok: false,
+      error: expect.stringMatching(/não disponibilizou contatos/i),
+    })
     provider.getContacts.mockResolvedValue(agenda([contact()]))
     db.failures['clientes:upsert'] = { message: 'banco indisponível' }
     db.failures['clientes:insert'] = { message: 'banco indisponível' }
@@ -92,6 +95,21 @@ describe('sincronização manual da agenda — persistência e recuperação', (
     expect(db.tables.sync_locks).toHaveLength(2)
   })
 
+  test('empresa com UltraMSG default e Whapi lê a agenda na instância Whapi (página 500)', async () => {
+    db.tables.whatsapp_instances = [
+      { id: 1, company_id: 7, provider: 'ultramsg', ativo: true, is_default: true },
+      { id: 30, company_id: 7, provider: 'whapi', ativo: true, is_default: false },
+    ]
+    provider.getContacts.mockResolvedValue(agenda([contact()]))
+    const result = await service.runContactSyncFull(7, { manual: true })
+    expect(result).toMatchObject({ ok: true, totalCriados: 1 })
+    expect(provider.getContacts).toHaveBeenCalledWith(1, 500, { companyId: 7, whatsappInstanceId: 30 })
+    expect(provider.getProfilePicture).toHaveBeenCalledWith('5511987654321@c.us', {
+      companyId: 7,
+      whatsappInstanceId: 30,
+    })
+  })
+
   test('respeita o teto de contatos e avisa o truncamento (mantém nome e foto dos importados)', async () => {
     const contacts = Array.from({ length: 8 }, (_, i) => contact(String(5511987600000 + i), `Pessoa ${i}`))
     provider.getContacts.mockResolvedValue(agenda(contacts))
@@ -100,6 +118,16 @@ describe('sincronização manual da agenda — persistência e recuperação', (
     expect(result.aviso).toMatch(/Limite de 5 contatos/i)
     expect(db.tables.clientes).toHaveLength(5)
     expect(db.tables.clientes.every((c) => c.nome && c.foto_perfil)).toBe(true)
+  })
+
+  test('para de paginar ao atingir o teto mesmo com hasMore', async () => {
+    const page = (start, n) => Array.from({ length: n }, (_, i) => contact(String(5511987600000 + start + i), `Pessoa ${start + i}`))
+    provider.getContacts
+      .mockResolvedValueOnce({ data: page(0, 5), rawCount: 5, hasMore: true })
+      .mockResolvedValueOnce({ data: page(5, 5), rawCount: 5, hasMore: true })
+    const result = await service.runContactSyncFull(7, { manual: true, maxContatos: 5 })
+    expect(result).toMatchObject({ ok: true, totalCriados: 5, truncadoPorLimite: true })
+    expect(provider.getContacts).toHaveBeenCalledTimes(1)
   })
 
   test('cancelar antes de buscar a agenda não importa nada e libera o lock', async () => {

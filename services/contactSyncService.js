@@ -8,7 +8,7 @@
 
 const supabase = require('../config/supabase')
 const { getProvider } = require('./providers')
-const { resolveCompanyWhatsappProvider } = require('./chat/identity/conversationAddressService')
+const { resolveContactSyncInstance } = require('./chat/identity/conversationAddressService')
 const { getEmpresaWhatsappConfig } = require('./whatsappConfigService')
 const { getOrCreateCliente } = require('../helpers/conversationSync')
 const { normalizePhoneBR, possiblePhonesBR, possiblePhonesForWhatsappIdentity, phoneKeyBR } = require('../helpers/phoneHelper')
@@ -24,6 +24,7 @@ const CHECKPOINT_TIPO = 'contact_sync'
 const NOME_FONTE = 'syncUltramsg'
 
 const PAGE_SIZE_DEFAULT = 1000
+const WHAPI_CONTACTS_PAGE_SIZE = 500
 const MIN_PHONE_DIGITS = 10
 const BR_COUNTRY_CODE = '55'
 const MIN_BR_PHONE_LENGTH = 12
@@ -34,6 +35,16 @@ const ERROR_MESSAGE_MAX_LENGTH = 80
 const MAX_PAGES_DEFAULT = parseInt(process.env.SYNC_MAX_PAGES_PER_RUN, 10) || 20
 // Teto de contatos importados por sincronização (nome + foto). Padrão 2500; override via env ou opts.
 const MAX_CONTATOS_DEFAULT = Math.max(1, parseInt(process.env.SYNC_MAX_CONTATOS, 10) || 2500)
+
+function contactSyncProviderOpts(companyId, syncTarget) {
+  const opts = { companyId }
+  if (syncTarget?.whatsappInstanceId) opts.whatsappInstanceId = Number(syncTarget.whatsappInstanceId)
+  return opts
+}
+
+function emptyAgendaError() {
+  return new Error('O WhatsApp não disponibilizou contatos com nome e telefone. Verifique a agenda e a conexão do celular e tente novamente.')
+}
 
 /**
  * Gera formas de wa_id / JID possíveis para busca (sem expor lógica global).
@@ -188,7 +199,7 @@ async function syncOneAgendaContact(companyId, parsed, opts = {}) {
   const fieldsBase = { nomeSource: NOME_FONTE, allowNonBR: true, strictAgendaImport: true }
   let fotoIndisponivel = false
   if (opts.includePhotos && !parsed.foto) {
-    parsed.foto = await maybeEnrichFoto(companyId, parsed.rawJid || parsed.phone, null)
+    parsed.foto = await maybeEnrichFoto(companyId, parsed.rawJid || parsed.phone, null, opts.syncTarget)
     fotoIndisponivel = !parsed.foto
   }
   const fotoAtualizada = !!parsed.foto && rows[0]?.foto_perfil !== parsed.foto
@@ -249,16 +260,15 @@ async function syncOneAgendaContact(companyId, parsed, opts = {}) {
 /**
  * Enriquece foto via API (opcional) — mesmo critério do serviço legado.
  */
-async function maybeEnrichFoto(companyId, phoneNorm, existente) {
+async function maybeEnrichFoto(companyId, phoneNorm, existente, syncTarget = {}) {
   let fotoUrl = null
   const needsFoto = !existente?.foto_perfil || existente.foto_perfil === 'null' || existente.foto_perfil === ''
   if (!needsFoto) return null
-  const { resolveCompanyWhatsappProvider } = require('./chat/identity/conversationAddressService')
-  const instanceProvider = await resolveCompanyWhatsappProvider(companyId)
+  const instanceProvider = syncTarget.provider || (await resolveContactSyncInstance(companyId)).provider
   const provider = getProvider({ provider: instanceProvider })
   if (provider?.getProfilePicture) {
     try {
-      fotoUrl = await provider.getProfilePicture(phoneNorm, { companyId })
+      fotoUrl = await provider.getProfilePicture(phoneNorm, contactSyncProviderOpts(companyId, syncTarget))
       if (fotoUrl && typeof fotoUrl === 'string' && fotoUrl.startsWith('http')) return fotoUrl
     } catch (e) {
       console.warn(`[CONTACT-SYNC] getProfilePicture tail ${String(phoneNorm).slice(-6)}:`, e?.message || e)
@@ -274,8 +284,8 @@ async function processContactsPage(companyId, opts = {}) {
   const page = Math.max(1, Number(opts.page) || 1)
   // Até 1000 por requisição (teto da API); alinhado ao getContacts/UltraMsg
   const pageSize = Math.min(1000, Math.max(10, Number(opts.pageSize) || PAGE_SIZE_DEFAULT))
-  const { resolveCompanyWhatsappProvider } = require('./chat/identity/conversationAddressService')
-  const instanceProvider = await resolveCompanyWhatsappProvider(companyId)
+  const syncTarget = await resolveContactSyncInstance(companyId)
+  const instanceProvider = syncTarget.provider
   const provider = getProvider({ provider: instanceProvider })
 
   if (!provider?.getContacts) {
@@ -307,7 +317,7 @@ async function processContactsPage(companyId, opts = {}) {
     }
   }
 
-  const gcr = await provider.getContacts(page, pageSize, { companyId })
+  const gcr = await provider.getContacts(page, pageSize, contactSyncProviderOpts(companyId, syncTarget))
   const contacts = gcr?.data != null ? gcr.data : (Array.isArray(gcr) ? gcr : [])
   const apiHasMore = gcr?.hasMore === true
   if (!Array.isArray(contacts) || contacts.length === 0) {
@@ -578,8 +588,8 @@ async function runContactSyncFull(company_id, opts = {}) {
         .eq('company_id', company_id).eq('tipo', LOCK_TIPO)).catch(() => {})
     }, 30000)
     heartbeat.unref?.()
-    const { resolveCompanyWhatsappProvider } = require('./chat/identity/conversationAddressService')
-    const instanceProvider = await resolveCompanyWhatsappProvider(company_id)
+    const syncTarget = await resolveContactSyncInstance(company_id)
+    const instanceProvider = syncTarget.provider
     const provider = getProvider({ provider: instanceProvider })
     if (!provider?.getContacts) throw new Error('Consulta de contatos indisponível.')
     if (instanceProvider !== 'whapi') {
@@ -596,44 +606,45 @@ async function runContactSyncFull(company_id, opts = {}) {
       cancelled: true,
       aviso: 'Importação interrompida pelo usuário. Os contatos já importados foram mantidos.',
     })
-    const allContacts = []
     const fingerprints = new Set()
     const maxPages = Math.max(1, parseInt(process.env.SYNC_MAX_FETCH_PAGES, 10) || 50)
+    const maxContatos = Math.max(1, Number(opts.maxContatos) || MAX_CONTATOS_DEFAULT)
+    const unique = new Map()
+    let truncadoPorLimite = false
+    const fetchPageSize = instanceProvider === 'whapi' ? WHAPI_CONTACTS_PAGE_SIZE : 10000
+    const providerOpts = contactSyncProviderOpts(company_id, syncTarget)
     for (let page = 1; ; page++) {
       if (shouldCancel && (await shouldCancel())) {
         await progress('cancelado', stats.totalVerificados)
         return cancelResult()
       }
+      if (unique.size >= maxContatos) { truncadoPorLimite = true; break }
       if (page > maxPages) throw new Error('A leitura da agenda ficou incompleta: limite de páginas atingido.')
-      const response = await provider.getContacts(page, 10000, { companyId: company_id })
-      if (response?.ok === false || response?.error) throw new Error('Falha ao consultar a agenda na UltraMSG.')
+      const response = await provider.getContacts(page, fetchPageSize, providerOpts)
+      if (response?.ok === false || response?.error) throw new Error('Falha ao consultar a agenda no WhatsApp.')
       const data = Array.isArray(response) ? response : response?.data
       if (!Array.isArray(data)) throw new Error('Resposta de contatos inválida.')
-      const fingerprint = JSON.stringify(data)
-      if (data.length && fingerprints.has(fingerprint)) throw new Error('A UltraMSG repetiu a página da agenda; sincronização incompleta.')
+      const fingerprint = data.length
+        ? JSON.stringify(data)
+        : `empty:${page}:${response?.rawCount ?? 0}`
+      if (data.length && fingerprints.has(fingerprint)) throw new Error('O WhatsApp repetiu a página da agenda; sincronização incompleta.')
       fingerprints.add(fingerprint)
       stats.totalAgendaRaw += Number(response?.rawCount ?? data.length)
-      for (const contact of data) allContacts.push(contact)
-      if (!response?.hasMore) break
-    }
-    const maxContatos = Math.max(1, Number(opts.maxContatos) || MAX_CONTATOS_DEFAULT)
-    const unique = new Map()
-    let truncadoPorLimite = false
-    for (const raw of allContacts) {
-      const parsed = parseAgendaContact(raw)
-      if (!parsed) { stats.totalInvalidos++; continue }
-      // Identidade exata: não unir telefones diferentes apenas por remover o nono dígito.
-      if (unique.has(parsed.phone)) { stats.totalDuplicadosNoLote++; continue }
-      // Teto de 2500 contatos: para de acumular quando atinge o limite (o restante fica para a próxima sync).
-      if (unique.size >= maxContatos) { truncadoPorLimite = true; break }
-      unique.set(parsed.phone, parsed)
+      for (const contact of data) {
+        const parsed = parseAgendaContact(contact)
+        if (!parsed) { stats.totalInvalidos++; continue }
+        // Identidade exata: não unir telefones diferentes apenas por remover o nono dígito.
+        if (unique.has(parsed.phone)) { stats.totalDuplicadosNoLote++; continue }
+        // Teto de 2500 contatos: para de acumular quando atinge o limite (o restante fica para a próxima sync).
+        if (unique.size >= maxContatos) { truncadoPorLimite = true; break }
+        unique.set(parsed.phone, parsed)
+      }
+      if (truncadoPorLimite || !response?.hasMore) break
     }
     stats.totalAgendaValidos = unique.size
     stats.truncadoPorLimite = truncadoPorLimite
     stats.limiteContatos = maxContatos
-    if (!unique.size) {
-      throw new Error('A UltraMSG não disponibilizou contatos salvos com nome e telefone. Verifique a agenda e a conexão do celular e tente novamente.')
-    }
+    if (!unique.size) throw emptyAgendaError()
     await progress('importando')
     let desdeUltimoCancelCheck = 0
     for (const parsed of unique.values()) {
@@ -651,7 +662,10 @@ async function runContactSyncFull(company_id, opts = {}) {
         throw new Error('Sincronização interrompida: processamento pausado.')
       }
       try {
-        const result = await syncOneAgendaContact(company_id, parsed, { includePhotos: opts.includePhotos !== false })
+        const result = await syncOneAgendaContact(company_id, parsed, {
+          includePhotos: opts.includePhotos !== false,
+          syncTarget,
+        })
         stats.totalProcessados++
         stats.totalCriados += result.inserted || 0
         stats.totalAtualizados += result.updated || 0
@@ -675,7 +689,7 @@ async function runContactSyncFull(company_id, opts = {}) {
       avisos.push(`Limite de ${maxContatos} contatos por sincronização atingido. Os ${maxContatos} primeiros foram importados com nome e foto; rode novamente para trazer o restante.`)
     }
     if (stats.totalFotosIndisponiveis) {
-      avisos.push(`${stats.totalFotosIndisponiveis} contato(s) sem foto disponível na UltraMSG. Fotos existentes foram preservadas.`)
+      avisos.push(`${stats.totalFotosIndisponiveis} contato(s) sem foto disponível no WhatsApp. Fotos existentes foram preservadas.`)
     }
     return { ...stats, ok: true, aviso: avisos.length ? avisos.join(' ') : null }
   } catch (e) {

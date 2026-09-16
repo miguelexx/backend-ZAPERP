@@ -372,3 +372,20 @@ to: preferredBrSendDigits('553496750002') // 5534996750002
 ```
 
 Não reenviar bolhas antigas. UltraMSG continua com a regra histórica do 9º. Ver [25 §34.4](25-WHAPI-SEGUNDA-INTEGRACAO.md).
+
+---
+
+## 27. Sincronizar agenda do celular ≠ provider company-level
+
+**Armadilha:** usar `pickCompanyWhatsappInstance` / `resolveCompanyWhatsappProvider` no botão **Sincronizar contatos do celular**. Com UltraMSG + Whapi na mesma empresa, o company-level prefere UltraMSG (histórico de alertas). A agenda do telefone vive no canal Whapi. Resultado: `GET /contacts` da UltraMSG volta vazio e a UI mostra *"A UltraMSG não disponibilizou contatos salvos…"* mesmo com milhares de contatos na Whapi.
+
+```js
+// ❌ ERRADO — sync de agenda no default company-level
+const provider = await resolveCompanyWhatsappProvider(company_id)
+
+// ✅ CORRETO — agenda do celular
+const { provider, whatsappInstanceId } = await resolveContactSyncInstance(company_id)
+await getProvider({ provider }).getContacts(page, size, { companyId, whatsappInstanceId })
+```
+
+Na Whapi, `GET /contacts` mistura `saved:true`+`name` e `saved:false`+`pushname`. Filtrar `isMyContact===false` esvazia a lista. Mapper Whapi aceita nome salvo ou pushname; UltraMSG permanece no contrato de contato salvo. Teto 2500. Ver [25-SINCRONIZACAO](25-SINCRONIZACAO-MANUAL-CONTATOS.md).

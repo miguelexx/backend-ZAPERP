@@ -74,6 +74,51 @@ function pickCompanyWhatsappInstance(instances) {
   return active.find((i) => String(i.provider || '').toLowerCase() !== 'whapi') || active[0]
 }
 
+function isWhapiInstance(instance) {
+  return String(instance?.provider || '').trim().toLowerCase() === 'whapi'
+}
+
+/**
+ * Instância cuja agenda do celular deve ser importada.
+ * pickCompanyWhatsappInstance prefere UltraMSG no company-level (alertas/legado).
+ * A agenda do telefone vive no canal conectado — se existir Whapi, usar Whapi
+ * mesmo quando UltraMSG ainda é default. 2+ Whapi: default Whapi, senão menor id.
+ */
+function pickContactSyncInstance(instances) {
+  const active = (instances || []).filter((i) => i && i.ativo !== false)
+  if (!active.length) return null
+  const whapiList = active.filter(isWhapiInstance)
+  if (whapiList.length === 1) return whapiList[0]
+  if (whapiList.length > 1) {
+    return whapiList.find((i) => i.is_default === true)
+      || [...whapiList].sort((a, b) => Number(a.id) - Number(b.id))[0]
+  }
+  return pickCompanyWhatsappInstance(instances)
+}
+
+/**
+ * Provider + id da instância para GET /contacts (sync de agenda).
+ * Sem instância/erro → ultramsg (mesmo default histórico).
+ */
+async function resolveContactSyncInstance(company_id) {
+  const cid = Number(company_id)
+  if (!Number.isFinite(cid) || cid <= 0) {
+    return { provider: 'ultramsg', whatsappInstanceId: null }
+  }
+  try {
+    const { instances } = await listWhatsappInstances(cid)
+    const chosen = pickContactSyncInstance(instances)
+    const provider = isWhapiInstance(chosen) ? 'whapi' : 'ultramsg'
+    const id = chosen?.id != null ? Number(chosen.id) : null
+    return {
+      provider,
+      whatsappInstanceId: Number.isFinite(id) && id > 0 ? id : null,
+    }
+  } catch (_) {
+    return { provider: 'ultramsg', whatsappInstanceId: null }
+  }
+}
+
 /**
  * Quando a conversa é por LID, procura uma conversa irmã (mesmo chat_lid) que já tenha telefone real.
  * Respeita a instância WhatsApp (ou a ausência dela) para não misturar números entre instâncias.
@@ -161,7 +206,9 @@ module.exports = {
   resolveConversationWhatsappInstance,
   resolveConversationProvider,
   resolveCompanyWhatsappProvider,
+  resolveContactSyncInstance,
   resolverTelefoneEnvioDaConversa,
   pickInstanceForUnboundConversation,
   pickCompanyWhatsappInstance,
+  pickContactSyncInstance,
 }

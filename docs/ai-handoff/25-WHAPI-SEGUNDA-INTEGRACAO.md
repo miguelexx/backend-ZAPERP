@@ -339,6 +339,7 @@ Ordem obrigatória (não inverter):
 
 ### Fase D — sync contatos/grupos/histórico — **EXECUTADA 2026-09-04 (código; live PENDENTE)**
 - `getContacts` GET `/contacts` (paginação count/offset) → `{ data, hasMore, rawCount }` via `agendaContactFields`.
+- **2026-09-16:** o sync de agenda **não** usa mais `resolveCompanyWhatsappProvider` (prefere UltraMSG no company-level). `resolveContactSyncInstance` escolhe a Whapi quando ela existe, passa `whatsappInstanceId`, aceita `pushname`/`saved:false` no mapper Whapi e para em 2500 únicos. Ver [25-SINCRONIZACAO](25-SINCRONIZACAO-MANUAL-CONTATOS.md) e [18 §27](18-ANTI-PADROES-E-ARMADILHAS.md).
 - `getChats` GET `/chats`; `getGroups` GET `/groups`; `getGroup` GET `/groups/{id}`.
 - `getChatMessages` GET `/messages/list/{ChatID}` mapeado para o formato que `oldMessagesSyncService` já lê (`from_me`, `text.body`, `image.link`).
 - Foto no atendimento: `syncUltraMsgContact` em provider Whapi chama `GET /contacts/{id}/profile` **mesmo sem** o contato na agenda (`getContactMetadata` nulo). UltraMSG segue exigindo metadata antes da imagem. Novo contato e abrir conversa passam `whatsapp_instance_id`. Inbound `@lid` não é mais convertido em dígitos de telefone.

@@ -13,18 +13,29 @@ const { extractArray, firstHttpUrl } = require('./parse')
 
 const CONTACTS_PAGE_MAX = 500
 
+function firstWhapiContactName(raw) {
+  return [raw.name, raw.pushname, raw.pushName, raw.formattedName, raw.notify, raw.short]
+    .find((v) => typeof v === 'string' && v.trim())
+}
+
 function mapWhapiContactForAgenda(raw) {
   if (!raw || typeof raw !== 'object') return null
   const id = raw.id != null ? String(raw.id).trim() : ''
+  if (!id) return null
+  if (isGroupJid(id) || raw.type === 'group') return null
+  const name = firstWhapiContactName(raw)
+  if (!name) return null
   return {
     ...raw,
     id,
     phone: id || raw.phone || raw.number || '',
-    name: raw.name || raw.pushname || raw.formattedName || null,
+    name: String(name).trim(),
     pushname: raw.pushname || raw.pushName || null,
     imgUrl: firstHttpUrl(raw.profile_pic_full, raw.profile_pic, raw.icon_full, raw.icon, raw.imgUrl),
-    isMyContact: raw.saved !== false && raw.isMyContact !== false,
-    isGroup: isGroupJid(id) || raw.type === 'group',
+    // GET /contacts mistura agenda salva (saved/phonebook) e chats com só pushname.
+    // Exigir saved=true esvaziava a importação. Nome (salvo ou pushname) + telefone bastam.
+    isMyContact: true,
+    isGroup: false,
   }
 }
 
@@ -54,12 +65,12 @@ async function getContacts(page = 1, pageSize = 100, opts = {}) {
     throw new Error('A Whapi recusou a consulta de contatos' + (status ? ' (HTTP ' + status + ')' : '') + '. Verifique a conexão e as credenciais da instância.')
   }
   const raw = extractArray(data, ['contacts', 'data', 'list'])
-  const contacts = raw.map(mapWhapiContactForAgenda).map(agendaContactFields).filter(Boolean)
+  const contacts = raw.map(mapWhapiContactForAgenda).filter(Boolean).map(agendaContactFields).filter(Boolean)
   const iteratorTotal = Number(data?.total)
   const hasMore = Number.isFinite(iteratorTotal)
     ? (offset + raw.length) < iteratorTotal
     : raw.length >= size
-  return { data: contacts, hasMore, rawCount: raw.length }
+  return { data: contacts, hasMore, rawCount: raw.length, total: Number.isFinite(iteratorTotal) ? iteratorTotal : null }
 }
 
 function buildContactMetadataResult(data) {

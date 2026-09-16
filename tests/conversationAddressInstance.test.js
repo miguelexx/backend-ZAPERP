@@ -6,6 +6,7 @@
 const {
   pickInstanceForUnboundConversation,
   pickCompanyWhatsappInstance,
+  pickContactSyncInstance,
 } = require('../services/chat/identity/conversationAddressService')
 
 describe('pickInstanceForUnboundConversation', () => {
@@ -52,6 +53,25 @@ describe('pickCompanyWhatsappInstance', () => {
   test('só Whapi (1 ativa) continua Whapi', () => {
     const whapi = { id: 30, provider: 'whapi', ativo: true }
     expect(pickCompanyWhatsappInstance([whapi])).toEqual(whapi)
+  })
+})
+
+describe('pickContactSyncInstance', () => {
+  const ultra = { id: 1, provider: 'ultramsg', ativo: true, is_default: true }
+  const whapi = { id: 30, provider: 'whapi', ativo: true, is_default: false }
+
+  test('empresa com UltraMSG default e 1 Whapi sincroniza a agenda pela Whapi', () => {
+    expect(pickContactSyncInstance([ultra, whapi])).toEqual(whapi)
+  })
+
+  test('2+ Whapi usa a marcada is_default', () => {
+    const a = { id: 31, provider: 'whapi', ativo: true, is_default: false }
+    const b = { id: 32, provider: 'whapi', ativo: true, is_default: true }
+    expect(pickContactSyncInstance([ultra, a, b])).toEqual(b)
+  })
+
+  test('só UltraMSG continua UltraMSG', () => {
+    expect(pickContactSyncInstance([{ ...ultra, is_default: false }])).toEqual({ ...ultra, is_default: false })
   })
 })
 

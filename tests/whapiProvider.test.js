@@ -269,6 +269,40 @@ describe('Whapi provider — sendText', () => {
     expect(fetchWithRetry.mock.calls[0][1].method).toBe('GET')
   })
 
+  test('getContacts aceita payload real Whapi (id dígitos, pushname, saved:false) e pagina por total', async () => {
+    const { fetchWithRetry } = mockDeps({
+      instancesById: { '1:10': whapiInstance() },
+      fetchImpl: async (url) => {
+        const parsed = new URL(url)
+        const offset = Number(parsed.searchParams.get('offset') || 0)
+        const contacts = offset === 0
+          ? [
+              { id: '553499536331', name: 'Jefferson Fernandes', phonebook: true, saved: true },
+              { id: '553497071470', pushname: 'Loja Centro', phonebook: false, saved: false },
+              { id: '120363012345678901@g.us', name: 'Grupo interno' },
+            ]
+          : [{ id: '5534988880000', name: 'Maria', saved: true }]
+        return {
+          ok: true,
+          status: 200,
+          text: async () => JSON.stringify({ contacts, count: contacts.length, total: 1746, offset }),
+        }
+      },
+    })
+    const whapi = require('../services/providers/whapi')
+    const page1 = await whapi.getContacts(1, 500, { companyId: 1, whatsappInstanceId: 10 })
+    expect(page1.data.map((c) => c.name).sort()).toEqual(['Jefferson Fernandes', 'Loja Centro'])
+    expect(page1.hasMore).toBe(true)
+    expect(page1.rawCount).toBe(3)
+    expect(page1.total).toBe(1746)
+    expect(fetchWithRetry.mock.calls[0][0]).toContain('count=500')
+    expect(fetchWithRetry.mock.calls[0][0]).toContain('offset=0')
+    const page2 = await whapi.getContacts(2, 500, { companyId: 1, whatsappInstanceId: 10 })
+    expect(page2.data).toHaveLength(1)
+    expect(page2.data[0].name).toBe('Maria')
+    expect(fetchWithRetry.mock.calls[1][0]).toContain('offset=500')
+  })
+
   test('getChatMessages GET /messages/list/{ChatID} mapeia from_me e link', async () => {
     mockDeps({
       instancesById: { '1:10': whapiInstance() },

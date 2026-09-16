@@ -82,3 +82,24 @@ O sistema importa a agenda disponibilizada pelo WhatsApp/UltraMSG. Ele não tem 
 Após publicação, a verificação real depende do clique do usuário, conforme solicitado: conferir contador, amostras de nomes/fotos e o resultado final. Eventual divergência deve ser diagnosticada pela resposta de `/contacts` da instância correta e estado do job, sem registrar token ou agenda completa em logs.
 
 Referências oficiais consultadas: [lista de contatos](https://docs.ultramsg.com/api/get/contacts), [informações do contato](https://docs.ultramsg.com/api/get/contacts/contact), [foto do contato](https://docs.ultramsg.com/api/get/contacts/image).
+
+## Whapi — roteamento da agenda e teto 2500 (2026-09-16)
+
+Sintoma: clique em **Sincronizar contatos do celular** falhava com *"A UltraMSG não disponibilizou contatos salvos com nome e telefone…"* mesmo com o celular conectado na Whapi e `GET /contacts` devolvendo milhares de itens (`total` + `offset`/`count`).
+
+Causa (CONFIRMADO no código):
+
+1. `runContactSyncFull` usava `resolveCompanyWhatsappProvider` → `pickCompanyWhatsappInstance`. Com UltraMSG + Whapi, o company-level prefere UltraMSG. A UltraMSG devolve agenda vazia/sem salvos; a mensagem de erro era exatamente essa.
+2. Mesmo no adapter Whapi, `mapWhapiContactForAgenda` marcava `isMyContact: saved !== false`. `agendaContactFields` descarta `isMyContact === false`. `GET /contacts` da Whapi mistura `saved:true`+`name` e `saved:false`+`pushname` (id em dígitos, sem `@c.us`). Só pushname era filtrado.
+3. `getContacts` era chamado só com `{ companyId }`. Sem `whatsappInstanceId`, o `resolveConfig` da Whapi pedia default `provider=whapi` e falhava se o default da empresa era UltraMSG.
+4. Paginação pedia `pageSize` 10000; a Whapi capava em 500, mas o sync não parava de buscar ao atingir 2500 únicos.
+
+Correção (sem migration, sem evento Socket novo):
+
+- `pickContactSyncInstance` / `resolveContactSyncInstance`: se a empresa tem Whapi, a agenda é lida nessa instância (1 Whapi, ou default Whapi / menor id se houver várias), mesmo com UltraMSG default. Sem Whapi, permanece UltraMSG.
+- `POST /chats/sincronizar-contatos` usa o mesmo resolver para o gate de `empresa_zapi` (não exige UltraMSG quando o alvo é Whapi).
+- Mapper Whapi: nome = `name` ou `pushname`; grupos/`@g.us` fora; `isMyContact: true` após ter nome+telefone. Contrato UltraMSG (`ultramsgAgenda.test.js`: não salvo / só pushname) **intacto**.
+- Sync passa `{ companyId, whatsappInstanceId }` em `getContacts` e `getProfilePicture`. Página Whapi 500 até `offset >= total` ou 2500 únicos. Teto default 2500.
+- Erros de agenda vazia/página repetida/foto ausente falam "WhatsApp", não UltraMSG.
+
+Testes: `tests/conversationAddressInstance.test.js`, `tests/manualContactSync.test.js`, `tests/whapiProvider.test.js`.
