@@ -85,4 +85,77 @@ function shouldReopenFinishedConversation(message, context = {}) {
   return { shouldReopen: true, reason: 'default_reopen_after_close', normalized }
 }
 
-module.exports = { normalizeReopenText, shouldReopenFinishedConversation }
+/**
+ * Texto estável para comparar eco de outbound (markdown/asteriscos do WhatsApp).
+ */
+function normalizeEchoText(texto) {
+  return String(texto || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[*_`~]/g, ' ')
+    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+function inboundLooksLikeRecentOutbound(inboundText, outboundTexts = []) {
+  const inbound = normalizeEchoText(inboundText)
+  if (!inbound || inbound.length < 8) return false
+  for (const out of outboundTexts) {
+    const outbound = normalizeEchoText(out)
+    if (!outbound || outbound.length < 8) continue
+    if (inbound === outbound) return true
+    if (inbound.length >= 24 && outbound.length >= 24) {
+      if (inbound.includes(outbound) || outbound.includes(inbound)) return true
+      const n = Math.min(48, inbound.length, outbound.length)
+      if (n >= 24 && inbound.slice(0, n) === outbound.slice(0, n)) return true
+    }
+  }
+  return false
+}
+
+function looksLikeAtendimentoFinalizacao(texto) {
+  const t = normalizeEchoText(texto)
+  if (!t) return false
+  if (t.includes('atendimento finalizado')) return true
+  if (t.includes('segue seu protocolo')) return true
+  if (/\bprotocolo\b/.test(t) && /\b(finalizado|finalizacao|encerrado|encerrada)\b/.test(t)) return true
+  return false
+}
+
+function looksLikeWelcomeMenuEcho(texto) {
+  const t = normalizeEchoText(texto)
+  if (!t) return false
+  if (t.includes('seja bem vindo') || t.includes('seja bemvindo')) return true
+  if (t.includes('escolha o setor')) return true
+  if (t.includes('setor com o qual deseja')) return true
+  return false
+}
+
+/**
+ * Eco da nossa mensagem de encerramento/boas-vindas não deve reabrir nem disparar o menu.
+ * Demanda real do cliente continua reabrindo via shouldReopenFinishedConversation.
+ */
+function shouldSkipReopenAsOwnOutboundEcho({ inboundText, recentOutboundTexts = [] } = {}) {
+  if (looksLikeAtendimentoFinalizacao(inboundText)) {
+    return { skip: true, reason: 'finalizacao_template' }
+  }
+  if (looksLikeWelcomeMenuEcho(inboundText)) {
+    return { skip: true, reason: 'welcome_menu_echo' }
+  }
+  if (inboundLooksLikeRecentOutbound(inboundText, recentOutboundTexts)) {
+    return { skip: true, reason: 'echo_recent_outbound' }
+  }
+  return { skip: false, reason: null }
+}
+
+module.exports = {
+  normalizeReopenText,
+  shouldReopenFinishedConversation,
+  normalizeEchoText,
+  inboundLooksLikeRecentOutbound,
+  looksLikeAtendimentoFinalizacao,
+  looksLikeWelcomeMenuEcho,
+  shouldSkipReopenAsOwnOutboundEcho,
+}

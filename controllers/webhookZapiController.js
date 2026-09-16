@@ -125,6 +125,7 @@ const {
 
 // reopenPolicy movido para controllers/webhookInbound/reopenPolicy.js (Fase 1 — doc 24).
 const { normalizeReopenText, shouldReopenFinishedConversation } = require('./webhookInbound/reopenPolicy')
+const { detectOwnOutboundEcho } = require('./webhookInbound/closedConversationEcho')
 
 // Log helpers movidos para controllers/webhookInbound/log.js (Fase 4 — doc 24).
 const { logZapiCert, _logWebhook, _logWebhookSafe } = require('./webhookInbound/log')
@@ -1260,6 +1261,22 @@ exports.receberZapi = async (req, res) => {
 
       const conversaEncerrada = st === 'fechada' || st === 'finalizada'
       if (conversaEncerrada) {
+        const outboundEcho = await detectOwnOutboundEcho({
+          supabase,
+          company_id,
+          conversa_id,
+          texto,
+          messageId,
+        })
+        if (outboundEcho.isEcho) {
+          console.log('[Z-API] 🔒 Conversa mantida fechada — eco da nossa mensagem (não reabre, não dispara boas-vindas)', {
+            conversa_id,
+            reason: outboundEcho.reason,
+            texto: String(texto || '').slice(0, 80),
+          })
+          lastResult = { ok: true, conversa_id, skip: 'own_outbound_echo_closed' }
+          continue
+        }
         if (motivoFinalizacao === 'ausencia_cliente') {
           const { absence: cfg } = await loadChatbotTriageMergeAndAbsence(company_id)
           if (cfg.reabrirAutomaticamente) {

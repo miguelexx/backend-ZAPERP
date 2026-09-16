@@ -99,6 +99,8 @@ exports.encerrarChat = async (req, res) => {
     if (error) { console.error('[chatController]', error?.message); return res.status(500).json({ error: 'Erro interno' }) }
 
     const { resetOpcaoInvalidaLimitForConversa } = require('../../services/chatbotTriageService')
+    const { rememberClosedConversation } = require('../webhookInbound/recentClosedConversationGuard')
+    rememberClosedConversation({ companyId: company_id, conversaId: conversa_id })
     // Paralelo: resetOpcaoInvalidaLimit não tem dependência do resultado de registrarAtendimento
     const [, resultAt] = await Promise.all([
       resetOpcaoInvalidaLimitForConversa(supabase, company_id, conversa_id),
@@ -142,6 +144,7 @@ exports.encerrarChat = async (req, res) => {
             nome_atendente: usu?.nome || ''
           })
           if (msg) {
+            rememberClosedConversation({ companyId: company_id, conversaId: conversa_id, texto: msg })
             let telefoneParaEnvio = data.telefone || ''
             const isGroup = String(data?.tipo || '').toLowerCase() === 'grupo' || String(data?.telefone || '').includes('@g.us')
             if (!isGroup && telefoneParaEnvio && !String(telefoneParaEnvio).trim().toLowerCase().startsWith('lid:')) {

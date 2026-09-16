@@ -108,6 +108,8 @@ app.get('/rota', (req, res) => {
 
 **Regra:** ao processar webhooks inbound, a deduplicação por `whatsapp_id` (constraint único) deve acontecer **antes** de qualquer side effect (chatbot, reabertura, socket). Não inverter esta ordem.
 
+**Eco após encerrar (2026-09-16):** `POST /chats/:id/encerrar` envia a mensagem de finalização via UltraMSG. O webhook `message_create` pode chegar **antes** do INSERT e/ou sem `fromMe` (só `self=1`). O pipeline tratava isso como inbound do cliente → reabria (`status=aberta`) e disparava o menu de boas-vindas sozinho. A conversa deve permanecer `fechada`. Guarda: `detectOwnOutboundEcho` + `rememberClosedConversation` em `controllers/webhookInbound/`. Demanda nova do cliente continua reabrindo.
+
 ---
 
 ## 8. Protecão de envio está desativada — não ativar sozinho

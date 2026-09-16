@@ -241,4 +241,39 @@ describe('pipeline UltraMSG → extract → chatbot: origem real do chat', () =>
     expect(eligibility.ok).toBe(false)
     expect(eligibility.reason).toBe('from_me')
   })
+
+  test('message_create sem fromMe mas self=1 → tratado como nosso eco (não dispara chatbot)', () => {
+    const { extracted, eligibility } = pipeline({
+      event_type: 'message_create',
+      instanceId: '51534',
+      data: {
+        from: OUR,
+        to: CONTACT,
+        self: 1,
+        type: 'chat',
+        body: 'Atendimento finalizado com sucesso. Segue seu protocolo: *63902*.',
+        id: 'true_5534999999999@c.us_FIN',
+      },
+    })
+    expect(extracted.fromMe).toBe(true)
+    expect(eligibility.ok).toBe(false)
+    expect(eligibility.reason).toBe('from_me')
+  })
+
+  test('fromMe string "false" não vira true', () => {
+    const { extracted, eligibility } = pipeline({
+      event_type: 'message_received',
+      instanceId: '51534',
+      data: {
+        from: CONTACT,
+        to: OUR,
+        fromMe: 'false',
+        type: 'chat',
+        body: 'oi',
+        id: 'false_5534999999999@c.us_IN',
+      },
+    })
+    expect(extracted.fromMe).toBe(false)
+    expect(eligibility.ok).toBe(true)
+  })
 })

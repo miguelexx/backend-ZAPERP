@@ -18,6 +18,31 @@
 const { normalizePhoneBR } = require('../helpers/phoneHelper')
 const webhookCoreController = require('./webhookZapiController')
 
+/** true/false explícito; strings "false"/"0" não podem virar true via Boolean(). */
+function coerceUltramsgBool(v) {
+  if (v === true || v === 1) return true
+  if (v === false || v === 0) return false
+  if (typeof v === 'string') {
+    const s = v.trim().toLowerCase()
+    if (s === 'true' || s === '1' || s === 'yes') return true
+    if (s === 'false' || s === '0' || s === 'no' || s === '') return false
+  }
+  return null
+}
+
+/**
+ * UltraMSG: fromMe pode faltar no eco de mensagem enviada pela API; `self` indica que fomos nós.
+ * Sem isso, o eco da finalização entra como inbound, reabre a conversa e dispara boas-vindas.
+ */
+function resolveUltramsgFromMe(data) {
+  if (!data || typeof data !== 'object') return false
+  const explicit = coerceUltramsgBool(data.fromMe)
+  if (explicit != null) return explicit
+  const self = coerceUltramsgBool(data.self)
+  if (self === true) return true
+  return false
+}
+
 /** Extrai dígitos de JID (55349999@c.us → 55349999, 120363@g.us → 120363) */
 function jidToDigits(jid) {
   if (!jid || typeof jid !== 'string') return ''
@@ -55,7 +80,7 @@ function normalizeUltramsgToZapi(body) {
 
   if (!data || typeof data !== 'object') return body
 
-  const fromMe = Boolean(data.fromMe)
+  const fromMe = resolveUltramsgFromMe(data)
   const fromJid = String(data.from || '').trim()
   const toJid = String(data.to || '').trim()
   const chatIdRaw = String(data.chatId || data.chat?.id || '').trim()
@@ -387,4 +412,4 @@ async function handleWebhookUltramsg(req, res) {
 }
 
 exports.handleWebhookUltramsg = handleWebhookUltramsg
-exports._test = { normalizeUltramsgToZapi }
+exports._test = { normalizeUltramsgToZapi, resolveUltramsgFromMe, coerceUltramsgBool }
