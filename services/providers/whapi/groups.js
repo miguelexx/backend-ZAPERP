@@ -211,8 +211,7 @@ async function deleteGroupIcon(groupId, opts = {}) {
 async function sendGroupInvite(inviteCode, to, extra = {}, opts = {}) {
   const code = String(inviteCode || '').trim()
   if (!code) return { ok: false, error: 'Informe o código do convite.' }
-  const initialDest = toWhapiRecipient(to) || toWhapiChatId(to)
-  const dest = initialDest ? await resolveWhapiSendRecipient(initialDest, opts) : ''
+  const dest = (await resolveWhapiSendRecipient(to, opts)) || toWhapiRecipient(to) || toWhapiChatId(to)
   if (!dest) return { ok: false, error: 'Destino inválido.' }
   const body = { to: dest }
   if (extra.title != null) body.title = String(extra.title)

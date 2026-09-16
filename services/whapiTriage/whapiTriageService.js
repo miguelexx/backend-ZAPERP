@@ -290,7 +290,7 @@ async function handleWhapiTriageInbound(ctx) {
       texto: config.body_text,
       tipo: menuResult.mode === 'poll' ? 'poll' : 'interactive',
       reply_meta: buildTriageReplyMeta(config),
-      sendResult: { ok: menuResult.ok, messageId: menuResult.messageId },
+      sendResult: menuResult,
       emitRealtime,
     })
     await logBotAction(company_id, conversa_id, menuResult.ok ? 'menu_enviado' : 'menu_falhou', {

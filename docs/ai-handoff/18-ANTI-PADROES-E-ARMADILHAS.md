@@ -357,3 +357,18 @@ text: async () => JSON.stringify({ media: [{ id: 'mp4-5f1c…' }] })
 ```
 
 Mock de provider = copiar o schema do OpenAPI/MCP, não deduzir. Detalhes: [25 §33](25-WHAPI-SEGUNDA-INTEGRACAO.md).
+
+---
+
+## 26. Whapi — inserir o 9º dígito BR não prova entrega
+
+**Armadilha:** tratar `preferredBrSendDigits` (12→13) como destino WhatsApp. Na Whapi o JID real do celular muitas vezes é o de **12 dígitos**. O POST para o 13 inventado pode devolver `sent:true` + `message.id` **sem nunca gerar ACK** — a bolha fica no CRM e o cliente não recebe. Contato novo, sem histórico e sem sync, é o caso típico: `clientes.telefone` nasce com 13 (`canonicalBrWhatsappForStorage`) e `wa_id` vem vazio.
+
+```js
+// ❌ ERRADO — mandar só o 13 e achar que sent=true = entregue
+to: preferredBrSendDigits('553496750002') // 5534996750002
+
+// ✅ CORRETO — checkPhones nas duas formas; usar o wa_id válido; 12 antes do 9º inventado
+```
+
+Não reenviar bolhas antigas. UltraMSG continua com a regra histórica do 9º. Ver [25 §34.4](25-WHAPI-SEGUNDA-INTEGRACAO.md).

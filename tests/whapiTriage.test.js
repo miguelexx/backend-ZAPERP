@@ -5,6 +5,7 @@
  */
 
 const renderer = require('../services/whapiTriage/whapiTriageRenderer')
+const { mapProviderSendResult } = require('../services/chat/outbound/providerResultMapper')
 
 function cfg(overrides = {}) {
   return {
@@ -73,6 +74,28 @@ describe('whapiTriageRenderer', () => {
     }))
     expect(p.count).toBe(1)
     expect(p.options).toEqual(['Vendas', 'Vendas (2)'])
+  })
+
+  test('sendWhapiTriageMenu preserva provider/ackConfirmed para o mapper nao promover sent', async () => {
+    const provider = {
+      sendPoll: jest.fn().mockResolvedValue({
+        ok: true,
+        messageId: 'PspVgQ5Hj3WhapiPollId12345',
+        provider: 'whapi',
+        ackConfirmed: false,
+      }),
+    }
+    const result = await renderer.sendWhapiTriageMenu({
+      provider,
+      telefone: '5534988887777',
+      config: cfg({ mode: 'poll' }),
+    })
+    const mapped = mapProviderSendResult(result, { failedStatusMensagem: 'failed' })
+    expect(result.provider).toBe('whapi')
+    expect(result.ackConfirmed).toBe(false)
+    expect(mapped.hasValidId).toBe(true)
+    expect(mapped.nextStatus).toBe('pending')
+    expect(mapped.nextStatusMensagem).toBe('sending')
   })
 })
 

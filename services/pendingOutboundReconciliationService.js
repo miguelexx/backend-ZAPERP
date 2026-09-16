@@ -92,6 +92,12 @@ function providerRowInQueue(row) {
   return providerRowStatus(row) === 'queue'
 }
 
+function providerRowIndicatesPending(row) {
+  const status = providerRowStatus(row)
+  const ack = providerRowAck(row)
+  return status === 'pending' || ack === 'pending' || ack === '0'
+}
+
 function mapProviderAckToStatus(row) {
   const ack = providerRowAck(row)
   const status = providerRowStatus(row)
@@ -187,6 +193,17 @@ async function resolveFromProviderRow(row, providerRow, io) {
 
   if (providerRowIndicatesFailure(providerRow)) {
     return patchMessage(row, { status: 'erro', status_mensagem: 'failed' }, io)
+  }
+
+  // A Whapi pode ter retornado apenas o ID no POST e o ZapERP legado ter
+  // promovido a linha para `sent`. Se o GET do proprio ID ainda informa
+  // `pending`, revertemos somente o estado local; nunca reenviamos a mensagem.
+  if (providerRowIndicatesPending(providerRow)) {
+    const currentStatus = String(row.status_mensagem || row.status || '').toLowerCase()
+    if (currentStatus === 'sent') {
+      return patchMessage(row, { status: 'pending', status_mensagem: 'sending' }, io)
+    }
+    return { ok: true, action: 'keep_provider_pending' }
   }
 
   if (providerRowInQueue(providerRow)) {
@@ -690,6 +707,7 @@ module.exports = {
   _test: {
     providerRowIndicatesSuccess,
     providerRowIndicatesFailure,
+    providerRowIndicatesPending,
     providerRowInQueue,
     mapProviderAckToStatus,
     buildCrmReferenceId,

@@ -71,6 +71,44 @@ describe('Whapi provider — sendText', () => {
     expect(sent.body).toBe('olá')
   })
 
+  test('sendText tenta a forma 12 dígitos se o 9o inserido for Invalid to', async () => {
+    const seen = []
+    const { fetchWithRetry } = mockDeps({
+      instancesById: { '1:10': whapiInstance() },
+      fetchImpl: async (_url, opts) => {
+        const body = JSON.parse(opts.body || '{}')
+        seen.push(body.to)
+        if (body.to === '5534996750002') {
+          return { ok: false, status: 400, text: async () => JSON.stringify({ error: 'Invalid to' }) }
+        }
+        if (body.to === '553496750002') {
+          return { ok: true, status: 200, text: async () => JSON.stringify({ sent: true, message: { id: 'wamid.12' } }) }
+        }
+        return { ok: false, status: 500, text: async () => 'unexpected' }
+      },
+    })
+    const whapi = require('../services/providers/whapi')
+    const r = await whapi.sendText('553496750002', 'oi', { companyId: 1, whatsappInstanceId: 10 })
+    expect(r.ok).toBe(true)
+    expect(r.messageId).toBe('wamid.12')
+    expect(seen).toEqual(['5534996750002', '553496750002'])
+  })
+
+  test('sendText nao tenta outro numero quando o 400 nao e destino invalido', async () => {
+    const { fetchWithRetry } = mockDeps({
+      instancesById: { '1:10': whapiInstance() },
+      fetchImpl: async () => ({
+        ok: false,
+        status: 400,
+        text: async () => JSON.stringify({ error: { message: 'body too long' } }),
+      }),
+    })
+    const whapi = require('../services/providers/whapi')
+    const r = await whapi.sendText('553496750002', 'oi', { companyId: 1, whatsappInstanceId: 10 })
+    expect(r.ok).toBe(false)
+    expect(fetchWithRetry).toHaveBeenCalledTimes(1)
+  })
+
   test('HTTP 401 / sent=false NÃO é sucesso', async () => {
     const { fetchWithRetry } = mockDeps({
       instancesById: { '1:10': whapiInstance() },

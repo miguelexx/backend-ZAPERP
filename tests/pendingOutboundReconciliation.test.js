@@ -55,6 +55,13 @@ describe('pendingOutboundReconciliationService helpers', () => {
     expect(_test.providerRowIndicatesFailure({ status: 'sent' })).toBe(false)
   })
 
+  test('providerRowIndicatesPending exige estado explicito do provider', () => {
+    expect(_test.providerRowIndicatesPending({ status: 'pending' })).toBe(true)
+    expect(_test.providerRowIndicatesPending({ ack: '0' })).toBe(true)
+    expect(_test.providerRowIndicatesPending({ status: 'sent' })).toBe(false)
+    expect(_test.providerRowIndicatesPending({})).toBe(false)
+  })
+
   test('mapProviderAckToStatus', () => {
     expect(_test.mapProviderAckToStatus({ ack: '3' })).toBe('read')
     expect(_test.mapProviderAckToStatus({ status: 'sent' })).toBe('sent')
@@ -256,5 +263,23 @@ describe('reenvio automatico de pendentes', () => {
     expect(getMessages).toHaveBeenCalledWith(expect.objectContaining({ id: messageId }))
     expect(updates[0]).toMatchObject({ status: 'delivered', status_mensagem: 'delivered' })
     expect(res.status).toBe('delivered')
+  })
+
+  test('Whapi corrige sent legado para pending quando GET do ID confirma pending, sem reenviar', async () => {
+    const messageId = 'PspVgQ5Hj3WhapiMessageId123'
+    const { svc, sendText, getMessages, updates } = montarAmbiente({
+      providerName: 'whapi',
+      getMessagesResult: { ok: true, data: [{ id: messageId, status: 'pending' }] },
+    })
+
+    const res = await svc.reconcilePendingOutboundMessage(
+      linhaPendente({ status: 'sent', status_mensagem: 'sent', whatsapp_id: messageId }),
+      { io: null }
+    )
+
+    expect(sendText).not.toHaveBeenCalled()
+    expect(getMessages).toHaveBeenCalledTimes(1)
+    expect(updates[0]).toMatchObject({ status: 'pending', status_mensagem: 'sending' })
+    expect(res.status).toBe('pending')
   })
 })

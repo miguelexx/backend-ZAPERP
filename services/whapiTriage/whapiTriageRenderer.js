@@ -119,8 +119,20 @@ function buildTriageReplyMeta(config) {
  * @param {string} args.telefone
  * @param {object} args.config   - config ativa (whapiTriageConfigService)
  * @param {object} [args.opts]   - { companyId, whatsappInstanceId, ... } repassado ao adapter
- * @returns {Promise<{ ok:boolean, messageId:(string|null), mode:string, error?:string }>}
+ * @returns {Promise<{ ok:boolean, messageId:(string|null), mode:string, error?:string, provider?:string|null, ackConfirmed?:boolean }>}
  */
+function summarizeMenuSendResult(r, mode) {
+  if (typeof r === 'boolean') return { ok: r, messageId: null, mode }
+  return {
+    ok: !!r?.ok,
+    messageId: r?.messageId || null,
+    mode,
+    error: r?.error || null,
+    provider: r?.provider || null,
+    ackConfirmed: r?.ackConfirmed,
+  }
+}
+
 async function sendWhapiTriageMenu({ provider, telefone, config, opts = {} }) {
   if (!provider || !telefone || !config) {
     return { ok: false, messageId: null, mode: config?.mode || 'poll', error: 'parâmetros ausentes' }
@@ -132,13 +144,13 @@ async function sendWhapiTriageMenu({ provider, telefone, config, opts = {} }) {
         return { ok: false, messageId: null, mode, error: 'provider sem sendPoll' }
       }
       const r = await provider.sendPoll(telefone, buildPollPayload(config), opts)
-      return { ok: !!r?.ok, messageId: r?.messageId || null, mode, error: r?.error || null }
+      return summarizeMenuSendResult(r, mode)
     }
     if (typeof provider.sendInteractive !== 'function') {
       return { ok: false, messageId: null, mode, error: 'provider sem sendInteractive' }
     }
     const r = await provider.sendInteractive(telefone, buildInteractivePayload(config), opts)
-    return { ok: !!r?.ok, messageId: r?.messageId || null, mode, error: r?.error || null }
+    return summarizeMenuSendResult(r, mode)
   } catch (e) {
     return { ok: false, messageId: null, mode, error: e?.message || String(e) }
   }

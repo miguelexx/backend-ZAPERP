@@ -66,7 +66,7 @@ async function editMessage(phone, msgId, newText, opts = {}) {
   if (msg.length > BODY_MAX_LEN) {
     return { ok: false, messageId: null, error: `body excede ${BODY_MAX_LEN} caracteres` }
   }
-  const canonicalTo = await resolveWhapiSendRecipient(to, opts)
+  const canonicalTo = await resolveWhapiSendRecipient(phone, opts)
   const body = applyQuoted({ to: canonicalTo || to, body: msg, edit: mid }, opts)
   try {
     const { ok, status, data, text } = await post({

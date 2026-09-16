@@ -5,9 +5,9 @@
  *
  * Ordem:
  * 1. grupos/LID seguem o normalizador do adapter;
- * 2. conversa com cliente e wa_id usa esse JID canonico;
- * 3. cliente sem wa_id consulta POST /contacts (checkPhones), usa o wa_id
- *    devolvido pela Whapi e o persiste sem sobrescrever valor concorrente;
+ * 2. conversa com cliente e wa_id de 12 dígitos (JID real) usa esse destino;
+ * 3. sem wa_id, ou wa_id de celular BR com 13 dígitos (agenda/9º), consulta
+ *    POST /contacts (checkPhones), usa o wa_id da Whapi e persiste;
  * 4. qualquer falha de leitura/validacao cai no telefone original normalizado.
  *
  * Este servico e exclusivo da Whapi. UltraMSG permanece intocada.
@@ -15,7 +15,8 @@
 
 const supabase = require('../config/supabase')
 const whapiContacts = require('./providers/whapi/contacts')
-const { toWhapiRecipient } = require('./providers/whapi/phones')
+const { possiblePhonesForWhatsappIdentity } = require('../helpers/phoneHelper')
+const { toWhapiRecipient, explicitPrivateJidDigits } = require('./providers/whapi/phones')
 
 function normalizeCanonicalWaId(waId) {
   const raw = String(waId || '').trim()
@@ -24,6 +25,77 @@ function normalizeCanonicalWaId(waId) {
   if (match) return `${match[1]}@s.whatsapp.net`
   const digits = raw.replace(/\D/g, '')
   return digits.length >= 7 && digits.length <= 15 ? `${digits}@s.whatsapp.net` : ''
+}
+
+/** Agenda/CRM costuma gravar celular BR com 9º dígito; o JID real do WhatsApp pode ser o de 12. */
+function isThirteenDigitBrMobileWaId(canonical) {
+  const digits = String(canonical || '').replace(/\D/g, '')
+  if (!digits.startsWith('55') || digits.length !== 13) return false
+  return '6789'.includes(digits.charAt(4))
+}
+
+function storedPrivateDigits(phone) {
+  const explicit = explicitPrivateJidDigits(phone)
+  if (explicit) return explicit
+  const digits = String(phone || '').replace(/@[^@]+$/, '').replace(/\D/g, '')
+  return digits.length >= 7 && digits.length <= 15 ? digits : ''
+}
+
+/** 12 e 13 dígitos do mesmo celular BR, sem reescrever o valor pelo preferredBrSendDigits. */
+function listWhapiIdentityDigits(phone) {
+  const stored = storedPrivateDigits(phone)
+  if (!stored) return []
+  const out = [stored]
+  for (const variant of possiblePhonesForWhatsappIdentity(stored)) {
+    const digits = storedPrivateDigits(variant) || String(variant || '').replace(/\D/g, '')
+    if (digits) out.push(digits)
+  }
+  return [...new Set(out)]
+}
+
+function collectWhapiCheckCandidates({ phone, fallback, cliente, conversa } = {}) {
+  const seeds = [
+    storedPrivateDigits(conversa?.telefone),
+    storedPrivateDigits(phone),
+    storedPrivateDigits(cliente?.telefone),
+    fallback,
+  ].filter(Boolean)
+  const expanded = []
+  for (const seed of seeds) {
+    for (const digits of listWhapiIdentityDigits(seed)) expanded.push(digits)
+  }
+  const unique = [...new Set([...seeds, ...expanded].filter(Boolean))]
+  const twelve = unique.filter((d) => d.startsWith('55') && d.length === 12)
+  const others = unique.filter((d) => !twelve.includes(d))
+  return { seeds: [...new Set(seeds)], candidates: [...twelve, ...others] }
+}
+
+/** Se o checkPhones falhar, não inventar o 9º quando a conversa/cliente já tem a forma 12. */
+function preferredUnresolvedFallback(seeds, fallback) {
+  const twelveSeed = (seeds || []).find((d) => String(d).startsWith('55') && String(d).length === 12)
+  if (twelveSeed) return twelveSeed
+  return fallback
+}
+
+function checkPhonesDigits(value) {
+  return String(value || '').replace(/@[^@]+$/, '').replace(/\D/g, '')
+}
+
+/** Prefere o primeiro candidato da nossa lista que a Whapi marcou como válido. */
+function pickCanonicalFromCheckPhones(checked, candidates) {
+  const list = Array.isArray(checked) ? checked : []
+  const byInput = new Map()
+  for (const item of list) {
+    if (!item?.exists || !item?.waId) continue
+    const inputDigits = checkPhonesDigits(item.input)
+    if (inputDigits) byInput.set(inputDigits, item)
+  }
+  for (const cand of candidates) {
+    const hit = byInput.get(checkPhonesDigits(cand))
+    if (hit) return normalizeCanonicalWaId(hit.waId)
+  }
+  const any = list.find((item) => item?.exists && item?.waId)
+  return normalizeCanonicalWaId(any?.waId)
 }
 
 async function loadConversationContact(companyId, conversaId) {
@@ -61,14 +133,21 @@ async function loadClientById(companyId, clienteId) {
   return error ? null : data
 }
 
-async function persistCanonicalWaId(companyId, cliente, canonicalWaId) {
-  if (!cliente?.id || String(cliente.wa_id || '').trim() || !canonicalWaId) return false
+async function persistCanonicalWaId(companyId, cliente, canonicalWaId, opts = {}) {
+  const replaceExisting = opts.replaceExisting === true
+  if (!cliente?.id || !canonicalWaId) return false
+  const current = String(cliente.wa_id || '').trim()
+  if (!replaceExisting && current) return false
   let query = supabase
     .from('clientes')
     .update({ wa_id: canonicalWaId, atualizado_em: new Date().toISOString() })
     .eq('company_id', Number(companyId))
     .eq('id', cliente.id)
-  query = cliente.wa_id == null ? query.is('wa_id', null) : query.eq('wa_id', '')
+  if (replaceExisting && current) {
+    query = query.eq('wa_id', current)
+  } else {
+    query = cliente.wa_id == null ? query.is('wa_id', null) : query.eq('wa_id', '')
+  }
   const { error } = await query
   if (error) {
     console.warn('[WHAPI_DESTINO] Nao foi possivel persistir wa_id canonico', {
@@ -94,39 +173,62 @@ async function resolveWhapiSendRecipient(phone, opts = {}, deps = {}) {
   const loadClient = deps.loadClientById || loadClientById
   const checkPhones = deps.checkPhones || whapiContacts.checkPhones
   const persist = deps.persistCanonicalWaId || persistCanonicalWaId
+  let lastSeeds = collectWhapiCheckCandidates({ phone, fallback }).seeds
 
   try {
     const context = conversaId != null ? await load(companyId, conversaId) : null
     const cliente = context?.cliente || (clienteId != null ? await loadClient(companyId, clienteId) : null)
     const existingCanonical = normalizeCanonicalWaId(cliente?.wa_id)
-    if (existingCanonical) return toWhapiRecipient(existingCanonical)
+    const waIdLooksLikeAgendaMobile = isThirteenDigitBrMobileWaId(existingCanonical)
+    if (existingCanonical && !waIdLooksLikeAgendaMobile) return toWhapiRecipient(existingCanonical)
 
-    if (!cliente?.id) return fallback
-    const checked = await checkPhones([fallback], {
+    const { seeds, candidates } = collectWhapiCheckCandidates({
+      phone,
+      fallback,
+      cliente,
+      conversa: context?.conversa,
+    })
+    lastSeeds = seeds
+    if (!candidates.length) return existingCanonical ? toWhapiRecipient(existingCanonical) : fallback
+
+    const checked = await checkPhones(candidates, {
       companyId: Number(companyId),
       whatsappInstanceId: opts.whatsappInstanceId ?? opts.whatsapp_instance_id,
       forceCheck: true,
     })
-    const valid = Array.isArray(checked) ? checked.find((item) => item?.exists && item?.waId) : null
-    const canonical = normalizeCanonicalWaId(valid?.waId)
-    if (!canonical) return fallback
+    const canonical = pickCanonicalFromCheckPhones(checked, candidates)
+    if (!canonical) {
+      return existingCanonical
+        ? toWhapiRecipient(existingCanonical)
+        : preferredUnresolvedFallback(seeds, fallback)
+    }
 
-    await persist(companyId, cliente, canonical)
+    if (cliente?.id) {
+      if (waIdLooksLikeAgendaMobile) {
+        await persist(companyId, cliente, canonical, { replaceExisting: true })
+      } else {
+        await persist(companyId, cliente, canonical)
+      }
+    }
     return toWhapiRecipient(canonical)
   } catch (e) {
-    console.warn('[WHAPI_DESTINO] Falha ao resolver wa_id canonico; usando telefone da conversa', {
+    const safeFallback = preferredUnresolvedFallback(lastSeeds, fallback)
+    console.warn('[WHAPI_DESTINO] Falha ao resolver wa_id canonico; usando destino conservador', {
       company_id: Number(companyId) || null,
       conversa_id: Number(conversaId) || null,
       cliente_id: Number(clienteId) || null,
       error: e?.message || String(e),
+      destino: safeFallback,
     })
-    return fallback
+    return safeFallback
   }
 }
 
 module.exports = {
   resolveWhapiSendRecipient,
   normalizeCanonicalWaId,
+  isThirteenDigitBrMobileWaId,
+  listWhapiIdentityDigits,
   loadConversationContact,
   loadClientById,
   persistCanonicalWaId,

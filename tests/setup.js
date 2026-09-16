@@ -42,3 +42,8 @@ beforeEach(() => {
     jest.spyOn(moduloCampanhas, 'empresaModuloCampanhasAtivo').mockResolvedValue(true)
   }
 })
+
+afterEach(async () => {
+  const { waitForInboundDisparoHooks } = require('../controllers/webhookInbound/disparoInbound')
+  await waitForInboundDisparoHooks()
+})

@@ -58,10 +58,11 @@ async function conversaTemAlgumaMensagemInbound(supabaseClient, company_id, conv
  * via setImmediate; o chamador só invoca quando `!fromMe && !isGroup && mensagem inserida pelo webhook`.
  * Requires dinâmicos mantidos (quebram um ciclo potencial e adiam o custo para fora do caminho quente).
  */
+const pendingInboundDisparoHooks = new Set()
+
 function scheduleInboundDisparoHooks({ companyId, telefone, texto, mensagemId, conversaId, instanciaId, io }) {
-  setImmediate(() => {
-    Promise.resolve()
-      .then(async () => {
+  const task = new Promise((resolve) => setImmediate(resolve))
+    .then(async () => {
         try {
           const { processInboundOptOut } = require('../../services/disparoOptOutService')
           await processInboundOptOut({
@@ -89,9 +90,24 @@ function scheduleInboundDisparoHooks({ companyId, telefone, texto, mensagemId, c
         } catch (e) {
           console.warn('[disparo:resposta] hook:', e?.message || e)
         }
-      })
-      .catch(() => {})
-  })
+    })
+    .catch(() => {})
+
+  pendingInboundDisparoHooks.add(task)
+  task.finally(() => pendingInboundDisparoHooks.delete(task))
+  return task
 }
 
-module.exports = { mensagemInseridaEhPrimeiraDisparoWhatsappExterno, conversaTemAlgumaMensagemInbound, scheduleInboundDisparoHooks }
+/** Aguarda apenas hooks já agendados; usado no shutdown e na desmontagem dos testes. */
+async function waitForInboundDisparoHooks() {
+  while (pendingInboundDisparoHooks.size > 0) {
+    await Promise.allSettled([...pendingInboundDisparoHooks])
+  }
+}
+
+module.exports = {
+  mensagemInseridaEhPrimeiraDisparoWhatsappExterno,
+  conversaTemAlgumaMensagemInbound,
+  scheduleInboundDisparoHooks,
+  waitForInboundDisparoHooks,
+}

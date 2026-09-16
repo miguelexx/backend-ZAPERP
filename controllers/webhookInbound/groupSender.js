@@ -63,7 +63,9 @@ async function resolveGroupSenderFields({ companyId, participantPhone, senderNam
                 }
                 if (!current?.pushname && sync.pushname) up.pushname = sync.pushname
                 if (!current?.foto_perfil && sync.foto_perfil) up.foto_perfil = sync.foto_perfil
-                if (Object.keys(up).length > 0) await supabase.from('clientes').update(up).eq('id', cidGrupo)
+                if (Object.keys(up).length > 0) {
+                  await supabase.from('clientes').update(up).eq('id', cidGrupo).eq('company_id', companyId)
+                }
               } catch (_) {}
             })
           }

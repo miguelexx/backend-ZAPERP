@@ -13,7 +13,7 @@ const { resolveConfig } = require('./config')
 const { post, put, maskToken } = require('./http')
 const { updateChannelSettings } = require('./channel')
 const { preferredBrSendDigits } = require('../../../helpers/phoneHelper')
-const { resolveWhapiSendRecipient } = require('../../whapiRecipientResolverService')
+const { resolveWhapiSendRecipient, listWhapiIdentityDigits } = require('../../whapiRecipientResolverService')
 
 function notImplemented(method) {
   return { ok: false, messageId: null, notImplemented: true, httpStatus: 501, error: `whapi.${method} não implementado` }
@@ -30,20 +30,62 @@ function asMediaResult(normalized, returnDetails) {
   return returnDetails ? normalized : true
 }
 
-async function postMessage({ cfg, endpoint, body, to, kind, opts, extraMeta }) {
-  const canonicalTo = await resolveWhapiSendRecipient(to, opts)
-  const requestBody = canonicalTo && canonicalTo !== body?.to
-    ? { ...body, to: canonicalTo }
-    : body
-  const { ok, status, data, text } = await post({
-    token: cfg.token,
-    endpoint,
-    body: requestBody,
-    companyId: cfg.companyId,
-    whatsappInstanceId: cfg.whatsappInstanceId,
-    meta: buildSendMeta(kind, canonicalTo || to, opts, extraMeta),
-  })
-  return normalizeWhapiSendResult({ httpOk: ok, status, data, text, fallbackError: data?.message })
+function isInvalidRecipientSend(normalized) {
+  if (!normalized || normalized.ok || normalized.messageId) return false
+  const status = Number(normalized.httpStatus)
+  if (status === 401 || status === 403 || status === 402 || status === 409 || status === 429) return false
+  const err = String(normalized.error || '').toLowerCase()
+  // Só a outra forma 12/13 se o provedor recusou o DESTINO. Qualquer 400
+  // (quoted, body, mídia) não pode virar segundo POST para outro número.
+  return /invalid to|invalid phone|unknown contact|not a whatsapp|no such user|invalid recipient|chat not found/i.test(err)
+}
+
+function recipientAttemptList(canonicalTo, resolveInput, bodyTo) {
+  const attempts = []
+  const push = (dest) => {
+    const value = String(dest || '').trim()
+    if (value && !attempts.includes(value)) attempts.push(value)
+  }
+  push(canonicalTo || bodyTo)
+  const dest = canonicalTo || bodyTo || ''
+  if (dest && !dest.includes('@g.us') && !dest.includes('@lid')) {
+    for (const alt of listWhapiIdentityDigits(resolveInput || dest)) push(alt)
+  }
+  return attempts.slice(0, 2)
+}
+
+async function postMessage({ cfg, endpoint, body, to, kind, opts, extraMeta, rawRecipient }) {
+  const resolveInput = rawRecipient != null ? rawRecipient : to
+  const canonicalTo = await resolveWhapiSendRecipient(resolveInput, opts)
+  const destList = recipientAttemptList(canonicalTo, resolveInput, body?.to || to)
+  let last = { ok: false, messageId: null, error: 'Destino inválido' }
+  for (let i = 0; i < destList.length; i++) {
+    const dest = destList[i]
+    const requestBody = { ...(body || {}), to: dest }
+    const { ok, status, data, text } = await post({
+      token: cfg.token,
+      endpoint,
+      body: requestBody,
+      companyId: cfg.companyId,
+      whatsappInstanceId: cfg.whatsappInstanceId,
+      meta: buildSendMeta(kind, dest, opts, extraMeta),
+    })
+    last = normalizeWhapiSendResult({ httpOk: ok, status, data, text, fallbackError: data?.message })
+    if (last.ok) return last
+    const nextDest = destList[i + 1]
+    if (nextDest && isInvalidRecipientSend(last)) {
+      console.warn('[WHAPI_DESTINO] Destino recusado, tentando variante 12/13', {
+        company_id: cfg.companyId || null,
+        whatsapp_instance_id: cfg.whatsappInstanceId || null,
+        recusado: dest,
+        proximo: nextDest,
+        error: String(last.error || '').slice(0, 160),
+      })
+      continue
+    }
+    return last
+  }
+  return last
 }
 
 /**
@@ -68,7 +110,7 @@ async function sendText(phone, message, opts = {}) {
   let normalized
   try {
     normalized = await postMessage({
-      cfg, endpoint: '/messages/text', body, to, kind: 'text', opts, extraMeta: { textLength: msg.length },
+      cfg, endpoint: '/messages/text', body, to, rawRecipient: phone, kind: 'text', opts, extraMeta: { textLength: msg.length },
     })
   } catch (e) {
     return { ok: false, messageId: null, error: `Falha de conexão ao enviar (Whapi): ${e?.message || e}` }
@@ -111,7 +153,7 @@ async function sendLink(phone, payload, opts = {}) {
   }, opts)
   try {
     const normalized = await postMessage({
-      cfg, endpoint: '/messages/link_preview', body: linkBody, to, kind: 'link', opts, extraMeta: { textLength: body.length },
+      cfg, endpoint: '/messages/link_preview', body: linkBody, to, rawRecipient: phone, kind: 'link', opts, extraMeta: { textLength: body.length },
     })
     if (!normalized.ok) {
       // Não perde a mensagem: se o provider recusar o card, envia como texto (que ainda previa a URL).
@@ -139,7 +181,7 @@ async function sendMediaByEndpoint(endpoint, kind, phone, media, extra = {}, opt
   let normalized
   try {
     normalized = await postMessage({
-      cfg, endpoint, body, to, kind, opts, extraMeta: { textLength: String(extra?.caption || '').length },
+      cfg, endpoint, body, to, rawRecipient: phone, kind, opts, extraMeta: { textLength: String(extra?.caption || '').length },
     })
   } catch (e) {
     return returnDetails ? { ok: false, messageId: null, error: `Falha de conexão ao enviar (Whapi): ${e?.message || e}` } : false
@@ -283,7 +325,7 @@ async function sendLocation(phone, loc = {}, opts = {}) {
   }, opts)
   try {
     const normalized = await postMessage({
-      cfg, endpoint: '/messages/location', body, to, kind: 'location', opts,
+      cfg, endpoint: '/messages/location', body, to, rawRecipient: phone, kind: 'location', opts,
     })
     if (!normalized.ok) return { ...normalized, ok: false }
     console.log('✅ Whapi localização enviada:', String(to).slice(-13))
@@ -316,7 +358,7 @@ async function sendLiveLocation(phone, loc = {}, opts = {}) {
   }, opts)
   try {
     const normalized = await postMessage({
-      cfg, endpoint: '/messages/live_location', body, to, kind: 'live_location', opts,
+      cfg, endpoint: '/messages/live_location', body, to, rawRecipient: phone, kind: 'live_location', opts,
     })
     if (!normalized.ok) return { ...normalized, ok: false }
     console.log('✅ Whapi live location enviada:', String(to).slice(-13))
@@ -338,7 +380,7 @@ async function sendContact(phone, contactName, contactPhone, opts = {}) {
   const body = applyQuoted({ to, name, vcard }, opts)
   try {
     const normalized = await postMessage({
-      cfg, endpoint: '/messages/contact', body, to, kind: 'contact', opts,
+      cfg, endpoint: '/messages/contact', body, to, rawRecipient: phone, kind: 'contact', opts,
     })
     if (!normalized.ok) return { ...normalized, ok: false }
     console.log('✅ Whapi contato enviado:', String(to).slice(-13))
@@ -509,7 +551,7 @@ async function forwardMessage(phone, messageId, opts = {}) {
   const body = { to, ...(opts?.force === true ? { force: true } : {}) }
   try {
     const normalized = await postMessage({
-      cfg, endpoint: `/messages/${encodeURIComponent(mid)}`, body, to, kind: 'forward', opts, extraMeta: { forwardId: mid },
+      cfg, endpoint: `/messages/${encodeURIComponent(mid)}`, body, to, rawRecipient: phone, kind: 'forward', opts, extraMeta: { forwardId: mid },
     })
     if (!normalized.ok) {
       console.warn('❌ Whapi forwardMessage falhou:', String(to).slice(-13), String(normalized.error).slice(0, 200), '| token:', maskToken(cfg.token))
@@ -587,7 +629,7 @@ async function sendInteractive(phone, payload = {}, opts = {}) {
   let normalized
   try {
     normalized = await postMessage({
-      cfg, endpoint: '/messages/interactive', body: reqBody, to, kind: 'interactive', opts, extraMeta: { interactiveType: type },
+      cfg, endpoint: '/messages/interactive', body: reqBody, to, rawRecipient: phone, kind: 'interactive', opts, extraMeta: { interactiveType: type },
     })
   } catch (e) {
     return { ok: false, messageId: null, error: `Falha de conexão ao enviar interativa (Whapi): ${e?.message || e}` }
@@ -630,7 +672,7 @@ async function sendPoll(phone, payload = {}, opts = {}) {
   let normalized
   try {
     normalized = await postMessage({
-      cfg, endpoint: '/messages/poll', body: reqBody, to, kind: 'poll', opts, extraMeta: { options: uniqueOptions.length },
+      cfg, endpoint: '/messages/poll', body: reqBody, to, rawRecipient: phone, kind: 'poll', opts, extraMeta: { options: uniqueOptions.length },
     })
   } catch (e) {
     return { ok: false, messageId: null, error: `Falha de conexão ao enviar enquete (Whapi): ${e?.message || e}` }
@@ -675,7 +717,7 @@ async function sendQuiz(phone, payload = {}, opts = {}) {
 
   try {
     const normalized = await postMessage({
-      cfg, endpoint: '/messages/quiz', body: reqBody, to, kind: 'quiz', opts, extraMeta: { options: uniqueOptions.length },
+      cfg, endpoint: '/messages/quiz', body: reqBody, to, rawRecipient: phone, kind: 'quiz', opts, extraMeta: { options: uniqueOptions.length },
     })
     if (!normalized.ok) {
       console.warn('❌ Whapi sendQuiz falhou:', String(to).slice(-13), String(normalized.error).slice(0, 200), '| token:', maskToken(cfg.token))
@@ -702,7 +744,7 @@ async function sendQuestion(phone, question, opts = {}) {
   const reqBody = applyQuoted({ to, body: bodyText }, opts)
   try {
     const normalized = await postMessage({
-      cfg, endpoint: '/messages/question', body: reqBody, to, kind: 'question', opts, extraMeta: { textLength: bodyText.length },
+      cfg, endpoint: '/messages/question', body: reqBody, to, rawRecipient: phone, kind: 'question', opts, extraMeta: { textLength: bodyText.length },
     })
     if (!normalized.ok) {
       console.warn('❌ Whapi sendQuestion falhou:', String(to).slice(-13), String(normalized.error).slice(0, 200), '| token:', maskToken(cfg.token))

@@ -794,9 +794,10 @@ Correcao restrita ao adapter Whapi:
 
 - mensagens associadas a uma conversa preferem `clientes.wa_id` quando presente;
 - JID privado explicito (`@c.us`/`@s.whatsapp.net`) perde apenas o sufixo — seus digitos canonicos nao sao reescritos;
-- sem `wa_id`, o primeiro envio consulta `checkPhones`, usa o `wa_id` devolvido e o persiste sem sobrescrever
-  valor preenchido concorrentemente;
-- falha na validacao nao bloqueia o envio: preserva o fallback historico;
+- sem `wa_id`, o primeiro envio consulta `checkPhones` com as duas formas do celular BR (12 e 13 dígitos), mesmo se o CRM gravou só a forma com 9º; `wa_id` de 13 dígitos também é revalidado;
+- conversa sem `cliente_id` ainda consulta `checkPhones` (não exige sync/histórico);
+- se o `checkPhones` falhar e a conversa já tiver a forma 12, o fallback **não** inventa o 9º;
+- `postMessage` tenta no máximo a outra variante 12/13 **somente** se a Whapi recusar o destino (`Invalid to` e equivalentes). 400 de body/quoted/mídia **não** dispara segundo POST;
 - grupos/LID e todo o provider UltraMSG permanecem inalterados.
 
 Implementacao: `services/whapiRecipientResolverService.js`, aplicada no chokepoint `postMessage` de
@@ -826,5 +827,7 @@ Sem migration e sem evento Socket novo.
   admin de grupo só envia `companyId` — sem `cliente_id` o lookup de `wa_id` não dispara.
 - Chamada (`sendCall`) usa `call_id`, não passa por `normalizeWhapiSendResult` e não recebe ACK
   de mensagem. Não misturar com o tick pending→sent das bolhas.
+- Menu da triagem Whapi (`sendWhapiTriageMenu` + `insertBotBubble`) também precisa preservar
+  `provider`/`ackConfirmed`. Strip `{ok, messageId}` promovia o poll/lista para `sent` no POST.
 
 Sem migration, sem endpoint novo e sem evento Socket novo.
