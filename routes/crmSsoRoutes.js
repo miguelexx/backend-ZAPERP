@@ -9,10 +9,15 @@ const express = require('express')
 const auth = require('../middleware/auth')
 const crmSso = require('../controllers/crmSsoController')
 const crmLead = require('../controllers/crmLeadController')
+const crmEnvio = require('../controllers/crmEnvioController')
 
 const router = express.Router()
 
 router.get('/abrir-avancado', auth, crmSso.abrirCrmAvancado)
+
+// Envio de mensagem solicitado pelo CRM Avançado (automação por etapa).
+// Autenticado por x-zaperp-secret dentro do controller (server-to-server).
+router.post('/enviar-mensagem', crmEnvio.enviarMensagem)
 
 // Etapas do funil do CRM Avançado → botões de "para qual etapa enviar".
 router.get('/etapas', auth, crmLead.listarEtapasCrm)

@@ -486,6 +486,11 @@ function applyChatListSqlFilters(query, ctx, overrides = {}) {
   } else if (statusNorm === 'mensagem_disparada') {
     q = q.eq('status_atendimento', 'mensagem_disparada')
     q = q.neq('tipo', 'grupo')
+  } else if (statusNorm === 'fechada') {
+    // Finalizadas: grupo NÃO entra só por ser grupo. O front só mostra conversas de fato
+    // fechadas (chatRowIsStaleForTab: em "finalizadas" remove tudo que não está closed),
+    // então o contador tem que espelhar isso — senão grupos abertos inflam "Finalizadas".
+    q = q.eq('status_atendimento', 'fechada')
   } else if (statusNorm) {
     if (statusNorm === 'em_atendimento' && !isAtendente) {
       q = q.or('tipo.eq.grupo,status_atendimento.eq.em_atendimento,status_atendimento.eq.aguardando_cliente')

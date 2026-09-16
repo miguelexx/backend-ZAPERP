@@ -35,7 +35,8 @@ function shouldReopenFinishedConversation(message, context = {}) {
   }
 
   const stayClosedPatterns = [
-    /^(ok|okay|blz|beleza|certo|entendi|entendido|perfeito|show|sim|nao|não|ta|t[áa])$/,
+    /^(ok|okay|blz|blza|beleza|certo|certinho|certim|entendi|entendido|perfeito|show|sim|nao|não|ta|t[áa]|combinado|fechado|otim[oa]|isso|joia|jóia)$/,
+    /^(isso mesmo|show de bola|tudo certinho|ta certinho|t[áa] certinho|ok certinho|era isso mesmo)$/,
     /^(obrigad[oa]|muito obrigad[oa]|valeu|vlw|obg|brigad[oa]|obgd|agrade[cç]o|grat[oa]|thanks|thank you|ty|thx)$/,
     /^(obrigad[oa] pela ajuda|muito obrigad[oa] pela ajuda)$/,
     // Agradecimento + vocativo / reforço curto (ex.: "obrigada vc", "valeu voce", "brigada tbm") — não reabrir menu
@@ -64,7 +65,8 @@ function shouldReopenFinishedConversation(message, context = {}) {
 
   // Frase curta só de cortesia: poucas palavras conhecidas, sem sinais de nova demanda
   const palavrasCortesia = new Set([
-    'ok', 'okay', 'blz', 'beleza', 'certo', 'entendi', 'entendido', 'perfeito', 'show', 'sim', 'nao', 'ta', 'obrigada', 'obrigado',
+    'ok', 'okay', 'blz', 'blza', 'beleza', 'certo', 'certinho', 'certim', 'entendi', 'entendido', 'perfeito', 'show', 'sim', 'nao', 'ta', 'obrigada', 'obrigado',
+    'combinado', 'fechado', 'otimo', 'otima', 'isso', 'mesmo', 'joia',
     'muito', 'valeu', 'vlw', 'obg', 'brigada', 'brigado', 'obgd', 'agradeco', 'grato', 'grata', 'thanks', 'thank', 'you', 'ty', 'thx',
     'tchau', 'xau', 'ate', 'mais', 'logo', 'breve', 'flw', 'falou', 'vc', 'voce', 'tbm', 'tb', 'tambem', 'demais',
     'tbem', 'pra', 'para', 'a', 'igualmente', 'disponha', 'imagina', 'de', 'nada', 'por', 'tudo', 'pela', 'pelo',
