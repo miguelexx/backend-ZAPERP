@@ -89,6 +89,8 @@ const ALLOWED_EXTENSIONS = new Set([
   'key', 'pages', 'numbers',
   'epub', 'vcf', 'ics', 'log',
   'gz', 'tar',
+  // Arte vetorial Adobe (application/postscript). Entregue como documento comum.
+  'ai', 'eps',
 ])
 
 /**
