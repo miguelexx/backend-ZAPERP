@@ -1330,6 +1330,109 @@ exports.getInstanceCatalogCollectionProducts = async (req, res) => {
   }
 }
 
+/** POST /integrations/whatsapp/instances/:id/catalog/products — cria produto (Whapi). */
+exports.createInstanceCatalogProduct = async (req, res) => {
+  const ctx = await requireWhapiInstance(req, res, 'catalog-create-product', 20)
+  if (!ctx) return
+  try {
+    const r = await ctx.provider.createCatalogProduct(req.body || {}, { companyId: ctx.company_id, whatsappInstanceId: ctx.id })
+    if (!r.ok) {
+      const status = r.httpStatus === 422 ? 422 : (r.error && !r.httpStatus ? 400 : catalogErrorStatus(r))
+      return res.status(status).json({ error: r.error || 'Erro ao criar produto', code: r.code || r.providerCode || undefined, provider: 'whapi' })
+    }
+    return res.status(201).json({ provider: 'whapi', product: r.product || null })
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || 'Erro interno ao criar produto' })
+  }
+}
+
+/** PATCH /integrations/whatsapp/instances/:id/catalog/products/:productId — atualiza produto (Whapi). */
+exports.updateInstanceCatalogProduct = async (req, res) => {
+  const ctx = await requireWhapiInstance(req, res, 'catalog-update-product', 30)
+  if (!ctx) return
+  const productId = String(req.params?.productId || '').trim()
+  if (!productId) return res.status(400).json({ error: 'productId é obrigatório.' })
+  try {
+    const r = await ctx.provider.updateCatalogProduct(productId, req.body || {}, { companyId: ctx.company_id, whatsappInstanceId: ctx.id })
+    if (!r.ok) {
+      const status = r.httpStatus === 422 ? 422 : (r.error && !r.httpStatus ? 400 : catalogErrorStatus(r))
+      return res.status(status).json({ error: r.error || 'Erro ao atualizar produto', code: r.code || r.providerCode || undefined, provider: 'whapi' })
+    }
+    return res.json({ provider: 'whapi', product: r.product || null })
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || 'Erro interno ao atualizar produto' })
+  }
+}
+
+/** DELETE /integrations/whatsapp/instances/:id/catalog/products/:productId — exclui produto (Whapi). */
+exports.deleteInstanceCatalogProduct = async (req, res) => {
+  const ctx = await requireWhapiInstance(req, res, 'catalog-delete-product', 30)
+  if (!ctx) return
+  const productId = String(req.params?.productId || '').trim()
+  if (!productId) return res.status(400).json({ error: 'productId é obrigatório.' })
+  try {
+    const r = await ctx.provider.deleteCatalogProduct(productId, { companyId: ctx.company_id, whatsappInstanceId: ctx.id })
+    if (!r.ok) {
+      return res.status(catalogErrorStatus(r)).json({ error: r.error || 'Erro ao excluir produto', code: r.code || r.providerCode || undefined, provider: 'whapi' })
+    }
+    return res.json({ sucesso: true, provider: 'whapi' })
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || 'Erro interno ao excluir produto' })
+  }
+}
+
+/** POST /integrations/whatsapp/instances/:id/catalog/collections — cria coleção (Whapi). */
+exports.createInstanceCatalogCollection = async (req, res) => {
+  const ctx = await requireWhapiInstance(req, res, 'catalog-create-collection', 20)
+  if (!ctx) return
+  try {
+    const r = await ctx.provider.createCatalogCollection(req.body || {}, { companyId: ctx.company_id, whatsappInstanceId: ctx.id })
+    if (!r.ok) {
+      const status = r.httpStatus === 422 ? 422 : (r.error && !r.httpStatus ? 400 : catalogErrorStatus(r))
+      return res.status(status).json({ error: r.error || 'Erro ao criar coleção', code: r.code || r.providerCode || undefined, provider: 'whapi' })
+    }
+    return res.status(201).json({ provider: 'whapi', collection: r.collection || null })
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || 'Erro interno ao criar coleção' })
+  }
+}
+
+/** PATCH /integrations/whatsapp/instances/:id/catalog/collections/:collectionId — edita coleção (Whapi). */
+exports.editInstanceCatalogCollection = async (req, res) => {
+  const ctx = await requireWhapiInstance(req, res, 'catalog-edit-collection', 30)
+  if (!ctx) return
+  const collectionId = String(req.params?.collectionId || '').trim()
+  if (!collectionId) return res.status(400).json({ error: 'collectionId é obrigatório.' })
+  const { name, add_products, remove_products } = req.body || {}
+  try {
+    const r = await ctx.provider.editCatalogCollection(collectionId, { name, add_products, remove_products }, { companyId: ctx.company_id, whatsappInstanceId: ctx.id })
+    if (!r.ok) {
+      const status = r.httpStatus === 422 ? 422 : (r.error && !r.httpStatus ? 400 : catalogErrorStatus(r))
+      return res.status(status).json({ error: r.error || 'Erro ao editar coleção', code: r.code || r.providerCode || undefined, provider: 'whapi' })
+    }
+    return res.json({ provider: 'whapi', collection: r.collection || null })
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || 'Erro interno ao editar coleção' })
+  }
+}
+
+/** DELETE /integrations/whatsapp/instances/:id/catalog/collections/:collectionId — exclui coleção (Whapi). */
+exports.deleteInstanceCatalogCollection = async (req, res) => {
+  const ctx = await requireWhapiInstance(req, res, 'catalog-delete-collection', 30)
+  if (!ctx) return
+  const collectionId = String(req.params?.collectionId || '').trim()
+  if (!collectionId) return res.status(400).json({ error: 'collectionId é obrigatório.' })
+  try {
+    const r = await ctx.provider.deleteCatalogCollection(collectionId, { companyId: ctx.company_id, whatsappInstanceId: ctx.id })
+    if (!r.ok) {
+      return res.status(catalogErrorStatus(r)).json({ error: r.error || 'Erro ao excluir coleção', code: r.code || r.providerCode || undefined, provider: 'whapi' })
+    }
+    return res.json({ sucesso: true, provider: 'whapi' })
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || 'Erro interno ao excluir coleção' })
+  }
+}
+
 /** GET /integrations/whatsapp/instances/:id/chats/:chatId — metadados de um chat (Whapi). */
 exports.getInstanceChat = async (req, res) => {
   const ctx = await requireWhapiInstance(req, res, 'get-chat', 60)

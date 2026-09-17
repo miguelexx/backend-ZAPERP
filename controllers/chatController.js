@@ -385,6 +385,8 @@ exports.enviarContatoWhatsapp = _outboundController.enviarContatoWhatsapp
 exports.enviarLocalizacao = _outboundController.enviarLocalizacao
 exports.enviarLigacaoWhatsapp = _outboundController.enviarLigacaoWhatsapp
 exports.enviarEnquete = _outboundController.enviarEnquete
+exports.enviarProdutoCatalogo = _outboundController.enviarProdutoCatalogo
+exports.listarCatalogoConversa = _outboundController.listarCatalogoConversa
 
 const _presenceController = require('./chat/presenceController')
 exports.obterPresencaConversa = _presenceController.obterPresencaConversa

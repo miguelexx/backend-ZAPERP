@@ -755,11 +755,79 @@ async function sendQuestion(phone, question, opts = {}) {
   }
 }
 
+/**
+ * Envia um item do catálogo (cartão de produto rico). POST /messages/send/product.
+ * payload: { productId, catalogId? }. `catalog_id` omitido = catálogo do próprio canal.
+ * Retorna { ok, messageId, error } no mesmo formato dos demais sends. Contrato via MCP sendProduct.
+ */
+async function sendProduct(phone, payload = {}, opts = {}) {
+  const cfg = await resolveConfig(opts)
+  if (!cfg) return { ok: false, messageId: null, error: 'Instância Whapi não configurada. Conecte o canal no painel de integrações.' }
+  const to = toWhapiRecipient(phone)
+  if (!to) return { ok: false, messageId: null, error: 'Número inválido.' }
+  const productId = String(payload?.productId ?? payload?.product_id ?? '').trim()
+  if (!productId) return { ok: false, messageId: null, error: 'productId é obrigatório.' }
+
+  const body = applyQuoted({ to, product_id: productId }, opts)
+  const catalogId = String(payload?.catalogId ?? payload?.catalog_id ?? '').trim()
+  if (catalogId) body.catalog_id = catalogId
+
+  try {
+    const normalized = await postMessage({
+      cfg, endpoint: '/messages/send/product', body, to, rawRecipient: phone, kind: 'product', opts, extraMeta: { productId },
+    })
+    if (!normalized.ok) {
+      console.warn('❌ Whapi sendProduct falhou:', String(to).slice(-13), String(normalized.error).slice(0, 200), '| token:', maskToken(cfg.token))
+    }
+    return normalized
+  } catch (e) {
+    return { ok: false, messageId: null, error: `Falha de conexão ao enviar produto (Whapi): ${e?.message || e}` }
+  }
+}
+
+/**
+ * Envia o link/prévia do catálogo do próprio negócio. POST /messages/send/catalog.
+ * payload: { contactId (número do próprio canal), title?, description?, body?, previewType? }.
+ * Retorna { ok, messageId, error }. Contrato via MCP sendCatalog.
+ */
+async function sendCatalog(phone, payload = {}, opts = {}) {
+  const cfg = await resolveConfig(opts)
+  if (!cfg) return { ok: false, messageId: null, error: 'Instância Whapi não configurada. Conecte o canal no painel de integrações.' }
+  const to = toWhapiRecipient(phone)
+  if (!to) return { ok: false, messageId: null, error: 'Número inválido.' }
+  const contactId = String(payload?.contactId ?? payload?.contact_id ?? '').replace(/\D/g, '')
+  if (!contactId) return { ok: false, messageId: null, error: 'contactId (número do catálogo) é obrigatório.' }
+
+  const body = applyQuoted({ to, contact_id: contactId }, opts)
+  const title = String(payload?.title ?? '').trim()
+  const description = String(payload?.description ?? '').trim()
+  const bodyText = String(payload?.body ?? '').trim()
+  const previewType = String(payload?.previewType ?? payload?.preview_type ?? '').trim()
+  if (title) body.title = title
+  if (description) body.description = description
+  if (bodyText) body.body = bodyText
+  if (previewType) body.preview_type = previewType
+
+  try {
+    const normalized = await postMessage({
+      cfg, endpoint: '/messages/send/catalog', body, to, rawRecipient: phone, kind: 'catalog', opts, extraMeta: { contactId },
+    })
+    if (!normalized.ok) {
+      console.warn('❌ Whapi sendCatalog falhou:', String(to).slice(-13), String(normalized.error).slice(0, 200), '| token:', maskToken(cfg.token))
+    }
+    return normalized
+  } catch (e) {
+    return { ok: false, messageId: null, error: `Falha de conexão ao enviar catálogo (Whapi): ${e?.message || e}` }
+  }
+}
+
 module.exports = {
   sendText,
   sendLink,
   sendInteractive,
   sendPoll,
+  sendProduct,
+  sendCatalog,
   sendQuiz,
   sendQuestion,
   sendImage,

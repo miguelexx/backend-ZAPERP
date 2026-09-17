@@ -147,4 +147,137 @@ describe('Whapi catálogo', () => {
     expect(r.products).toEqual([])
     expect(fetchWithRetry).not.toHaveBeenCalled()
   })
+
+  // ----------------------- Escrita (gestão do catálogo) -----------------------
+
+  test('createCatalogProduct POST /business/products valida obrigatórios', async () => {
+    const { fetchWithRetry } = mockDeps({ instancesById: { '1:10': inst() }, fetchImpl: jsonRes(200, { product: rawProduct }) })
+    const whapi = require('../services/providers/whapi')
+    // falta imagem
+    const bad = await whapi.createCatalogProduct({ name: 'X', description: 'Y', currency: 'BRL', price: 10 }, OPTS)
+    expect(bad.ok).toBe(false)
+    expect(fetchWithRetry).not.toHaveBeenCalled()
+    const r = await whapi.createCatalogProduct(
+      { name: 'Camiseta', description: 'Algodão', currency: 'brl', price: 49.9, images: ['https://cdn/x.jpg'], availability: 'in stock' },
+      OPTS,
+    )
+    expect(r.ok).toBe(true)
+    const [url, opts] = fetchWithRetry.mock.calls[0]
+    expect(url).toBe('https://gate.whapi.test/business/products')
+    expect(opts.method).toBe('POST')
+    expect(JSON.parse(opts.body)).toMatchObject({ name: 'Camiseta', currency: 'BRL', price: 49.9, images: ['https://cdn/x.jpg'] })
+  })
+
+  test('updateCatalogProduct PATCH exige array de imagens completo', async () => {
+    const { fetchWithRetry } = mockDeps({ instancesById: { '1:10': inst() }, fetchImpl: jsonRes(200, { success: true }) })
+    const whapi = require('../services/providers/whapi')
+    const missing = await whapi.updateCatalogProduct('prod_1', { price: 20 }, OPTS)
+    expect(missing.ok).toBe(false)
+    expect(fetchWithRetry).not.toHaveBeenCalled()
+    const r = await whapi.updateCatalogProduct('prod_1', { price: 20, images: ['https://cdn/x.jpg'] }, OPTS)
+    expect(r.ok).toBe(true)
+    const [url, opts] = fetchWithRetry.mock.calls[0]
+    expect(url).toBe('https://gate.whapi.test/business/products/prod_1')
+    expect(opts.method).toBe('PATCH')
+  })
+
+  test('deleteCatalogProduct DELETE /business/products/{id}', async () => {
+    const { fetchWithRetry } = mockDeps({ instancesById: { '1:10': inst() }, fetchImpl: jsonRes(200, { success: true }) })
+    const whapi = require('../services/providers/whapi')
+    const r = await whapi.deleteCatalogProduct('prod_1', OPTS)
+    expect(r.ok).toBe(true)
+    expect(fetchWithRetry.mock.calls[0][1].method).toBe('DELETE')
+    expect(fetchWithRetry.mock.calls[0][0]).toBe('https://gate.whapi.test/business/products/prod_1')
+  })
+
+  test('createCatalogCollection POST /business/collections { name, products }', async () => {
+    const { fetchWithRetry } = mockDeps({ instancesById: { '1:10': inst() }, fetchImpl: jsonRes(200, { collection: { id: 'c1', name: 'Verão', products: [] } }) })
+    const whapi = require('../services/providers/whapi')
+    const r = await whapi.createCatalogCollection({ name: 'Verão', products: ['prod_1'] }, OPTS)
+    expect(r.ok).toBe(true)
+    expect(JSON.parse(fetchWithRetry.mock.calls[0][1].body)).toEqual({ name: 'Verão', products: ['prod_1'] })
+  })
+
+  test('editCatalogCollection PATCH add/remove products', async () => {
+    const { fetchWithRetry } = mockDeps({ instancesById: { '1:10': inst() }, fetchImpl: jsonRes(200, { success: true }) })
+    const whapi = require('../services/providers/whapi')
+    const r = await whapi.editCatalogCollection('c1', { add_products: ['p2'], remove_products: ['p3'] }, OPTS)
+    expect(r.ok).toBe(true)
+    const [url, opts] = fetchWithRetry.mock.calls[0]
+    expect(url).toBe('https://gate.whapi.test/business/collections/c1')
+    expect(opts.method).toBe('PATCH')
+    expect(JSON.parse(opts.body)).toEqual({ add_products: ['p2'], remove_products: ['p3'] })
+  })
+
+  test('deleteCatalogCollection DELETE /business/collections/{id}', async () => {
+    const { fetchWithRetry } = mockDeps({ instancesById: { '1:10': inst() }, fetchImpl: jsonRes(200, { success: true }) })
+    const whapi = require('../services/providers/whapi')
+    const r = await whapi.deleteCatalogCollection('c1', OPTS)
+    expect(r.ok).toBe(true)
+    expect(fetchWithRetry.mock.calls[0][1].method).toBe('DELETE')
+  })
+})
+
+describe('Whapi catálogo — envio', () => {
+  beforeEach(() => {
+    jest.resetModules()
+    process.env.WHAPI_BASE_URL = 'https://gate.whapi.test'
+  })
+  afterEach(() => {
+    delete process.env.WHAPI_BASE_URL
+    jest.resetModules()
+  })
+
+  function mockDeps({ instancesById = {}, fetchImpl = null } = {}) {
+    const fetchWithRetry = jest.fn(fetchImpl || (async () => ({
+      ok: true, status: 200, text: async () => JSON.stringify({ sent: true, message: { id: 'wamid.PROD' } }),
+    })))
+    jest.doMock('../services/whatsappSendGuardService', () => ({
+      beforeWhatsAppSend: jest.fn(async () => ({ allow: true })),
+      afterWhatsAppSend: jest.fn(),
+      buildSendMeta: jest.fn((type, to, opts, extra) => ({ type, to, opts, extra })),
+    }))
+    jest.doMock('../helpers/retryWithBackoff', () => ({
+      fetchWithRetry, sleep: jest.fn(async () => {}), isConnectionLevelError: jest.fn(() => false),
+    }))
+    jest.doMock('../services/whatsappInstanceService', () => ({
+      getWhatsappInstanceById: jest.fn(async (companyId, id) => ({
+        instance: instancesById[`${companyId}:${id}`] || null,
+        error: instancesById[`${companyId}:${id}`] ? null : 'not found',
+      })),
+      getDefaultWhatsappInstance: jest.fn(async () => ({ instance: null, error: 'not found' })),
+    }))
+    return { fetchWithRetry }
+  }
+  const inst = () => ({ id: 10, company_id: 1, provider: 'whapi', instance_id: 'NEBULA-AER3B', instance_token: 'TESTTOKEN', ativo: true })
+  const OPTS = { companyId: 1, whatsappInstanceId: 10 }
+
+  test('sendProduct POST /messages/send/product { to, product_id }', async () => {
+    const { fetchWithRetry } = mockDeps({ instancesById: { '1:10': inst() } })
+    const whapi = require('../services/providers/whapi')
+    const r = await whapi.sendProduct('5534988887777', { productId: 'prod_1' }, OPTS)
+    expect(r.ok).toBe(true)
+    expect(r.messageId).toBe('wamid.PROD')
+    const [url, opts] = fetchWithRetry.mock.calls[0]
+    expect(url).toBe('https://gate.whapi.test/messages/send/product')
+    expect(JSON.parse(opts.body)).toMatchObject({ to: '5534988887777', product_id: 'prod_1' })
+  })
+
+  test('sendProduct rejeita sem productId sem chamar API', async () => {
+    const { fetchWithRetry } = mockDeps({ instancesById: { '1:10': inst() } })
+    const whapi = require('../services/providers/whapi')
+    const r = await whapi.sendProduct('5534988887777', {}, OPTS)
+    expect(r.ok).toBe(false)
+    expect(fetchWithRetry).not.toHaveBeenCalled()
+  })
+
+  test('sendCatalog POST /messages/send/catalog { to, contact_id }', async () => {
+    const { fetchWithRetry } = mockDeps({ instancesById: { '1:10': inst() } })
+    const whapi = require('../services/providers/whapi')
+    const r = await whapi.sendCatalog('5534988887777', { contactId: '5534999990000', title: 'Nossa loja' }, OPTS)
+    expect(r.ok).toBe(true)
+    const [url, opts] = fetchWithRetry.mock.calls[0]
+    expect(url).toBe('https://gate.whapi.test/messages/send/catalog')
+    expect(JSON.parse(opts.body)).toMatchObject({ to: '5534988887777', contact_id: '5534999990000', title: 'Nossa loja' })
+  })
 })

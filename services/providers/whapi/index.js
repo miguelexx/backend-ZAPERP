@@ -46,6 +46,8 @@ module.exports = {
   removeReaction: send.removeReaction,
   sendCall: send.sendCall,
   forwardMessage: send.forwardMessage,
+  sendProduct: send.sendProduct,
+  sendCatalog: send.sendCatalog,
 
   deleteMessage: messages.deleteMessage,
   editMessage: messages.editMessage,
@@ -166,6 +168,12 @@ module.exports = {
   getCatalogCollection: catalog.getCollection,
   getCatalogCollectionProducts: catalog.getCollectionProducts,
   getContactCatalogProducts: catalog.getContactProducts,
+  createCatalogProduct: catalog.createProduct,
+  updateCatalogProduct: catalog.updateProduct,
+  deleteCatalogProduct: catalog.deleteProduct,
+  createCatalogCollection: catalog.createCollection,
+  editCatalogCollection: catalog.editCollection,
+  deleteCatalogCollection: catalog.deleteCollection,
 
   resendByStatus: queries.resendByStatus,
   resendById: queries.resendById,

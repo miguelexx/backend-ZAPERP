@@ -13,7 +13,7 @@
  * UltraMSG não tem catálogo (não implementa).
  */
 
-const { get } = require('./http')
+const { get, post, patch, del } = require('./http')
 const { resolveConfig } = require('./config')
 const { getConnectionStatus } = require('./instanceAdmin')
 const { toWhapiChatId } = require('./phones')
@@ -246,6 +246,198 @@ async function getContactProducts(contact, params = {}, opts = {}) {
   }
 }
 
+// ------------------------------- Escrita (gestão do catálogo) -------------------------------
+
+const AVAILABILITY = new Set(['in stock', 'out of stock'])
+
+/** Monta o corpo de um produto validando os campos que o WhatsApp exige. */
+function buildProductBody(payload = {}, { requireCore = true } = {}) {
+  const body = {}
+  const name = payload.name != null ? String(payload.name).trim() : undefined
+  const description = payload.description != null ? String(payload.description).trim() : undefined
+  const currency = payload.currency != null ? String(payload.currency).trim().toUpperCase() : undefined
+  const price = payload.price != null && payload.price !== '' ? Number(payload.price) : undefined
+  const images = Array.isArray(payload.images)
+    ? payload.images.map((v) => String(v || '').trim()).filter(Boolean)
+    : undefined
+
+  if (name !== undefined) body.name = name
+  if (description !== undefined) body.description = description
+  if (currency !== undefined) body.currency = currency
+  if (price !== undefined) {
+    if (!Number.isFinite(price) || price < 0) return { error: 'price deve ser um número ≥ 0.' }
+    body.price = price
+  }
+  if (images !== undefined) body.images = images
+  if (payload.availability != null && payload.availability !== '') {
+    const av = String(payload.availability).trim().toLowerCase()
+    if (!AVAILABILITY.has(av)) return { error: "availability deve ser 'in stock' ou 'out of stock'." }
+    body.availability = av
+  }
+  if (payload.product_retailer_id != null) body.product_retailer_id = String(payload.product_retailer_id).trim()
+  if (payload.url != null) body.url = String(payload.url).trim()
+  if (typeof payload.is_hidden === 'boolean') body.is_hidden = payload.is_hidden
+
+  if (requireCore) {
+    const missing = ['name', 'description', 'currency'].filter((k) => !body[k])
+    if (missing.length) return { error: `Campos obrigatórios: ${missing.join(', ')}.` }
+    if (body.price == null) return { error: 'price é obrigatório.' }
+    if (!Array.isArray(body.images) || body.images.length < 1) return { error: 'Envie ao menos 1 imagem (URL).' }
+  }
+  return { body }
+}
+
+/** Cria um produto no catálogo. POST /business/products → { ok, product }. */
+async function createProduct(payload = {}, opts = {}) {
+  const cfg = await resolveConfig(opts)
+  if (!cfg) return cfgMissing()
+  const built = buildProductBody(payload, { requireCore: true })
+  if (built.error) return { ok: false, error: built.error }
+  try {
+    const { ok, status, data, text } = await post({
+      token: cfg.token,
+      endpoint: '/business/products',
+      body: built.body,
+      companyId: cfg.companyId,
+      whatsappInstanceId: cfg.whatsappInstanceId,
+      skipSendGuard: true,
+    })
+    if (!ok || data?.error || data?.success === false) return diagnoseCatalogFailure(apiError(status, data, text), opts)
+    return { ok: true, product: normalizeProduct(data?.product || data), httpStatus: status }
+  } catch (e) {
+    return { ok: false, error: `Falha de conexão ao criar produto (Whapi): ${e?.message || e}` }
+  }
+}
+
+/**
+ * Atualiza um produto. PATCH /business/products/{ProductID}.
+ * A Whapi exige o array `images` completo em toda atualização (substitui todas).
+ */
+async function updateProduct(productId, payload = {}, opts = {}) {
+  const cfg = await resolveConfig(opts)
+  if (!cfg) return cfgMissing()
+  const id = String(productId ?? '').trim()
+  if (!id) return { ok: false, error: 'ProductID é obrigatório.' }
+  const built = buildProductBody(payload, { requireCore: false })
+  if (built.error) return { ok: false, error: built.error }
+  if (!Array.isArray(built.body.images) || built.body.images.length < 1) {
+    return { ok: false, error: 'A Whapi exige o array completo de imagens na atualização (ao menos 1 URL).' }
+  }
+  try {
+    const { ok, status, data, text } = await patch({
+      token: cfg.token,
+      endpoint: `/business/products/${encodeURIComponent(id)}`,
+      body: built.body,
+      companyId: cfg.companyId,
+      whatsappInstanceId: cfg.whatsappInstanceId,
+      skipSendGuard: true,
+    })
+    if (!ok || data?.error || data?.success === false) return diagnoseCatalogFailure(apiError(status, data, text), opts)
+    return { ok: true, product: normalizeProduct(data?.product || data) || undefined, httpStatus: status }
+  } catch (e) {
+    return { ok: false, error: `Falha de conexão ao atualizar produto (Whapi): ${e?.message || e}` }
+  }
+}
+
+/** Exclui um produto. DELETE /business/products/{ProductID}. */
+async function deleteProduct(productId, opts = {}) {
+  const cfg = await resolveConfig(opts)
+  if (!cfg) return cfgMissing()
+  const id = String(productId ?? '').trim()
+  if (!id) return { ok: false, error: 'ProductID é obrigatório.' }
+  try {
+    const { ok, status, data, text } = await del({
+      token: cfg.token,
+      endpoint: `/business/products/${encodeURIComponent(id)}`,
+      companyId: cfg.companyId,
+      whatsappInstanceId: cfg.whatsappInstanceId,
+      skipSendGuard: true,
+    })
+    if (!ok || data?.error || data?.success === false) return diagnoseCatalogFailure(apiError(status, data, text), opts)
+    return { ok: true, httpStatus: status }
+  } catch (e) {
+    return { ok: false, error: `Falha de conexão ao excluir produto (Whapi): ${e?.message || e}` }
+  }
+}
+
+/** Cria uma coleção. POST /business/collections { name, products: [ids] } → { ok, collection }. */
+async function createCollection(payload = {}, opts = {}) {
+  const cfg = await resolveConfig(opts)
+  if (!cfg) return cfgMissing()
+  const name = String(payload?.name ?? '').trim()
+  if (!name) return { ok: false, error: 'name da coleção é obrigatório.' }
+  const products = Array.isArray(payload?.products)
+    ? payload.products.map((v) => String(v || '').trim()).filter(Boolean)
+    : []
+  try {
+    const { ok, status, data, text } = await post({
+      token: cfg.token,
+      endpoint: '/business/collections',
+      body: { name, products },
+      companyId: cfg.companyId,
+      whatsappInstanceId: cfg.whatsappInstanceId,
+      skipSendGuard: true,
+    })
+    if (!ok || data?.error || data?.success === false) return diagnoseCatalogFailure(apiError(status, data, text), opts)
+    return { ok: true, collection: normalizeCollection(data?.collection || data) || undefined, httpStatus: status }
+  } catch (e) {
+    return { ok: false, error: `Falha de conexão ao criar coleção (Whapi): ${e?.message || e}` }
+  }
+}
+
+/**
+ * Edita uma coleção. PATCH /business/collections/{CollectionID}.
+ * fields: { name?, add_products?: string[], remove_products?: string[] }.
+ */
+async function editCollection(collectionId, fields = {}, opts = {}) {
+  const cfg = await resolveConfig(opts)
+  if (!cfg) return cfgMissing()
+  const id = String(collectionId ?? '').trim()
+  if (!id) return { ok: false, error: 'CollectionID é obrigatório.' }
+  const body = {}
+  if (fields?.name != null && String(fields.name).trim()) body.name = String(fields.name).trim()
+  const addP = Array.isArray(fields?.add_products) ? fields.add_products.map((v) => String(v || '').trim()).filter(Boolean) : []
+  const remP = Array.isArray(fields?.remove_products) ? fields.remove_products.map((v) => String(v || '').trim()).filter(Boolean) : []
+  if (addP.length) body.add_products = addP
+  if (remP.length) body.remove_products = remP
+  if (!Object.keys(body).length) return { ok: false, error: 'Nenhuma alteração informada (name, add_products ou remove_products).' }
+  try {
+    const { ok, status, data, text } = await patch({
+      token: cfg.token,
+      endpoint: `/business/collections/${encodeURIComponent(id)}`,
+      body,
+      companyId: cfg.companyId,
+      whatsappInstanceId: cfg.whatsappInstanceId,
+      skipSendGuard: true,
+    })
+    if (!ok || data?.error || data?.success === false) return diagnoseCatalogFailure(apiError(status, data, text), opts)
+    return { ok: true, collection: normalizeCollection(data?.collection || data) || undefined, httpStatus: status }
+  } catch (e) {
+    return { ok: false, error: `Falha de conexão ao editar coleção (Whapi): ${e?.message || e}` }
+  }
+}
+
+/** Exclui uma coleção. DELETE /business/collections/{CollectionID}. */
+async function deleteCollection(collectionId, opts = {}) {
+  const cfg = await resolveConfig(opts)
+  if (!cfg) return cfgMissing()
+  const id = String(collectionId ?? '').trim()
+  if (!id) return { ok: false, error: 'CollectionID é obrigatório.' }
+  try {
+    const { ok, status, data, text } = await del({
+      token: cfg.token,
+      endpoint: `/business/collections/${encodeURIComponent(id)}`,
+      companyId: cfg.companyId,
+      whatsappInstanceId: cfg.whatsappInstanceId,
+      skipSendGuard: true,
+    })
+    if (!ok || data?.error || data?.success === false) return diagnoseCatalogFailure(apiError(status, data, text), opts)
+    return { ok: true, httpStatus: status }
+  } catch (e) {
+    return { ok: false, error: `Falha de conexão ao excluir coleção (Whapi): ${e?.message || e}` }
+  }
+}
+
 module.exports = {
   getProducts,
   getProduct,
@@ -253,7 +445,14 @@ module.exports = {
   getCollection,
   getCollectionProducts,
   getContactProducts,
+  createProduct,
+  updateProduct,
+  deleteProduct,
+  createCollection,
+  editCollection,
+  deleteCollection,
   // exportados para teste unitário
   normalizeProduct,
   normalizeCollection,
+  buildProductBody,
 }

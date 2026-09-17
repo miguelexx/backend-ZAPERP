@@ -854,3 +854,278 @@ exports.enviarEnquete = async (req, res) => {
     return res.status(500).json({ error: 'Erro ao enviar enquete' })
   }
 }
+
+// =====================================================
+// listarCatalogoConversa — lê os produtos do catálogo da instância da conversa (para o seletor de envio)
+// =====================================================
+
+exports.listarCatalogoConversa = async (req, res) => {
+  try {
+    const { company_id } = req.user
+    const { id: conversa_id } = req.params
+
+    const { data: conversa, error: errConv } = await supabase
+      .from('conversas')
+      .select('id, whatsapp_instance_id')
+      .eq('company_id', company_id)
+      .eq('id', conversa_id)
+      .maybeSingle()
+    if (errConv || !conversa) return res.status(404).json({ error: 'Conversa não encontrada' })
+
+    const whatsappInstanceId = await resolveConversationWhatsappInstance(company_id, conversa)
+    const instanceProvider = await resolveConversationProvider(company_id, whatsappInstanceId)
+    if (instanceProvider !== 'whapi') {
+      return res.status(501).json({ error: 'O catálogo está disponível apenas em canais Whapi (WhatsApp Business).', provider: instanceProvider })
+    }
+    const provider = getProvider({ provider: instanceProvider })
+    if (!provider || typeof provider.getCatalogProducts !== 'function') {
+      return res.status(501).json({ error: 'Este canal não expõe catálogo.' })
+    }
+
+    const opts = { companyId: company_id, whatsappInstanceId: whatsappInstanceId || undefined }
+    const count = Math.min(Math.max(Number(req.query?.count) || 200, 1), 500)
+    const r = await provider.getCatalogProducts({ count, offset: Number(req.query?.offset) || 0 }, opts)
+    if (!r.ok) {
+      const status = r.httpStatus === 422 ? 422 : (r.httpStatus === 429 ? 429 : 502)
+      return res.status(status).json({ error: r.error || 'Erro ao ler catálogo', code: r.code || r.providerCode || undefined })
+    }
+    return res.json({ provider: 'whapi', products: r.products || [], total: r.total, count: r.count, offset: r.offset })
+  } catch (err) {
+    console.error('Erro ao listar catálogo da conversa:', err)
+    return res.status(500).json({ error: 'Erro ao listar catálogo' })
+  }
+}
+
+// =====================================================
+// enviarProdutoCatalogo — envia um produto do catálogo (cartão rico) ou o link do catálogo (Whapi)
+// =====================================================
+
+function formatCatalogPrice(price, currency) {
+  const value = Number(price)
+  if (!Number.isFinite(value)) return ''
+  const code = String(currency || '').trim().toUpperCase()
+  try {
+    return new Intl.NumberFormat('pt-BR', { style: 'currency', currency: code || 'BRL' }).format(value)
+  } catch {
+    return `${value.toFixed(2)}${code ? ` ${code}` : ''}`
+  }
+}
+
+exports.enviarProdutoCatalogo = async (req, res) => {
+  try {
+    const { company_id, id: user_id } = req.user
+    const { id: conversa_id } = req.params
+    const body = req.body || {}
+    const modo = String(body.tipo || body.mode || 'product').trim().toLowerCase() === 'catalog' ? 'catalog' : 'product'
+
+    const productId = String(body.product_id ?? body.productId ?? '').trim()
+    if (modo === 'product' && !productId) {
+      return res.status(400).json({ error: 'product_id é obrigatório para enviar um produto.' })
+    }
+
+    const io = req.app.get('io')
+    const permEnvio = await assertPodeEnviarMensagem({
+      company_id,
+      conversa_id,
+      user_id,
+      role: req.user?.perfil,
+      user_dep_ids: req.user?.departamento_ids,
+      autoAssumirAoEnviar: true,
+      io,
+    })
+    if (!permEnvio.ok) return res.status(permEnvio.status).json({ error: permEnvio.error })
+
+    const { data: conversa, error: errConv } = await supabase
+      .from('conversas')
+      .select('id, telefone, cliente_id, chat_lid, whatsapp_instance_id')
+      .eq('company_id', company_id)
+      .eq('id', conversa_id)
+      .maybeSingle()
+
+    if (errConv || !conversa) return res.status(404).json({ error: 'Conversa não encontrada' })
+
+    const whatsappInstanceId = await resolveConversationWhatsappInstance(company_id, conversa)
+    let telefoneParaEnvio = conversa.telefone || ''
+    if (telefoneParaEnvio && String(telefoneParaEnvio).trim().toLowerCase().startsWith('lid:')) {
+      if (conversa.cliente_id) {
+        const { data: cli } = await supabase.from('clientes').select('telefone').eq('id', conversa.cliente_id).eq('company_id', company_id).maybeSingle()
+        if (cli?.telefone && !String(cli.telefone).startsWith('lid:')) telefoneParaEnvio = cli.telefone
+      }
+      if (telefoneParaEnvio.startsWith('lid:') && conversa.chat_lid) {
+        const telSibling = await resolveTelefoneFromLidSiblingConversation(company_id, conversa, whatsappInstanceId)
+        if (telSibling) telefoneParaEnvio = telSibling
+      }
+      if (telefoneParaEnvio.startsWith('lid:')) {
+        return res.status(400).json({ error: 'Número do contato indisponível (conversa por LID). Aguarde o contato enviar uma mensagem ou sincronize os contatos.' })
+      }
+    }
+
+    const instanceProvider = await resolveConversationProvider(company_id, whatsappInstanceId)
+    if (instanceProvider !== 'whapi') {
+      return res.status(501).json({ error: 'O envio de catálogo está disponível apenas em canais Whapi (WhatsApp Business).' })
+    }
+    const provider = getProvider({ provider: instanceProvider })
+    const providerOpts = {
+      companyId: company_id,
+      conversaId: Number(conversa_id),
+      whatsappInstanceId: whatsappInstanceId || undefined,
+    }
+
+    // Prévia + metadados guardados na nossa linha (o cartão rico é entregue pela Whapi ao cliente).
+    let textoDisplay = ''
+    let tipoMensagem = 'product'
+    let replyMetaExtra = null
+
+    if (modo === 'product') {
+      const nome = String(body.product_name ?? body.name ?? '').trim()
+      const precoFmt = formatCatalogPrice(body.product_price ?? body.price, body.product_currency ?? body.currency)
+      textoDisplay = ['🛍️ ' + (nome || 'Produto'), precoFmt].filter(Boolean).join('\n').slice(0, 2000)
+      replyMetaExtra = {
+        product: {
+          id: productId,
+          name: nome || null,
+          price: body.product_price ?? body.price ?? null,
+          currency: (body.product_currency ?? body.currency) || null,
+          image: String(body.product_image ?? body.image ?? '').trim() || null,
+        },
+      }
+    } else {
+      tipoMensagem = 'catalog'
+      textoDisplay = '🛍️ Catálogo de produtos'
+      replyMetaExtra = { catalog: { title: String(body.title || '').trim() || null } }
+    }
+
+    const criadoEm = new Date().toISOString()
+    const insertRow = {
+      company_id,
+      conversa_id: Number(conversa_id),
+      texto: textoDisplay,
+      direcao: 'out',
+      tipo: tipoMensagem,
+      status: 'pending',
+      autor_usuario_id: Number(user_id),
+      criado_em: criadoEm,
+      reply_meta: replyMetaExtra,
+      ...(whatsappInstanceId ? { whatsapp_instance_id: whatsappInstanceId } : {}),
+    }
+
+    let { data: msg, error: errMsg } = await supabase
+      .from('mensagens')
+      .insert(insertRow)
+      .select()
+      .single()
+
+    if (errMsg && String(errMsg.message || '').includes('reply_meta')) {
+      delete insertRow.reply_meta
+      ;({ data: msg, error: errMsg } = await supabase.from('mensagens').insert(insertRow).select().single())
+    }
+    if (errMsg) return res.status(500).json({ error: errMsg.message })
+
+    let waitingAfterOutbound = null
+    try {
+      waitingAfterOutbound = await tryMarkWaitingAfterHumanOutbound({
+        company_id,
+        conversa_id: Number(conversa_id),
+        texto: textoDisplay,
+        criado_em: msg.criado_em || criadoEm,
+        autor_usuario_id: Number(user_id),
+      })
+    } catch (_) {}
+
+    let result
+    if (modo === 'product') {
+      result = await provider.sendProduct(telefoneParaEnvio, {
+        productId,
+        catalogId: String(body.catalog_id ?? body.catalogId ?? '').trim() || undefined,
+      }, { ...providerOpts, sendOrigin: 'atendimento_humano_produto', referenceId: `crm-${msg.id}` })
+    } else {
+      // Catálogo do próprio canal → contactId = número do próprio WhatsApp conectado.
+      let contactId = String(body.contact_id ?? body.contactId ?? '').replace(/\D/g, '')
+      if (!contactId && typeof provider.getConnectionStatus === 'function') {
+        try {
+          const health = await provider.getConnectionStatus({ ...providerOpts, wakeup: false })
+          if (health?.phone) contactId = String(health.phone).replace(/\D/g, '')
+        } catch (_) {}
+      }
+      if (!contactId) {
+        await supabase.from('mensagens').update({ status: 'erro', status_mensagem: 'sem_numero_catalogo' }).eq('company_id', company_id).eq('id', msg.id)
+        return res.status(422).json({ ok: false, id: msg.id, error: 'Não foi possível identificar o número do catálogo deste canal.' })
+      }
+      result = await provider.sendCatalog(telefoneParaEnvio, {
+        contactId,
+        title: body.title,
+        description: body.description,
+        body: body.body,
+        previewType: body.preview_type ?? body.previewType,
+      }, { ...providerOpts, sendOrigin: 'atendimento_humano_catalogo', referenceId: `crm-${msg.id}` })
+    }
+
+    const mappedResult = mapProviderSendResult(result)
+    const {
+      ok, waMessageId, providerError: providerErro,
+      hasValidId: hasTraceableId, hasQueueId,
+      nextStatus, nextStatusMensagem,
+    } = mappedResult
+
+    await supabase
+      .from('mensagens')
+      .update({
+        status: nextStatus,
+        status_mensagem: nextStatusMensagem,
+        ...(hasTraceableId ? { whatsapp_id: waMessageId } : {}),
+        ...(hasQueueId ? { provider_queue_id: waMessageId } : {}),
+      })
+      .eq('company_id', company_id)
+      .eq('id', msg.id)
+
+    if (io) {
+      const payload = await enrichMensagemComAutorUsuario(supabase, company_id, {
+        ...msg,
+        status: nextStatus,
+        status_mensagem: nextStatusMensagem,
+        whatsapp_id: hasTraceableId ? waMessageId : null,
+        reply_meta: msg.reply_meta || replyMetaExtra,
+      })
+      emitirEventoEmpresaConversa(io, company_id, conversa_id, io.EVENTS?.NOVA_MENSAGEM || 'nova_mensagem', payload)
+      const convPayload = anexarAssumirNoPayloadLista(aplicarAguardandoClienteNoPayload({
+        id: Number(conversa_id),
+        ultima_atividade: payload.criado_em || criadoEm,
+        ultima_mensagem_preview: {
+          texto: textoDisplay,
+          criado_em: payload.criado_em || criadoEm,
+          direcao: 'out',
+          tipo: tipoMensagem,
+        },
+        reordenar_suave: true,
+      }, waitingAfterOutbound), permEnvio)
+      emitirConversaAtualizada(io, company_id, conversa_id, convPayload, { skipAtualizarConversa: true })
+    }
+
+    if (!ok) {
+      const status = Number(result?.httpStatus)
+      const httpOut = [400, 401, 403, 404, 409, 422, 429, 503].includes(status) ? status : 422
+      return res.status(httpOut).json({
+        ok: false,
+        id: msg.id,
+        error: providerErro || 'Não foi possível enviar ao WhatsApp.',
+      })
+    }
+
+    if (mappedResult.needsReconciliation) {
+      schedulePendingOutboundReconciliation({ companyId: company_id, mensagemId: msg.id, io })
+    }
+
+    return res.json({
+      ok: true,
+      id: msg.id,
+      conversa_id: Number(conversa_id),
+      tipo: tipoMensagem,
+      status: nextStatus,
+      status_mensagem: nextStatusMensagem,
+      ...(hasTraceableId ? { whatsapp_id: waMessageId } : {}),
+    })
+  } catch (err) {
+    console.error('Erro ao enviar produto/catálogo:', err)
+    return res.status(500).json({ error: 'Erro ao enviar produto/catálogo' })
+  }
+}
