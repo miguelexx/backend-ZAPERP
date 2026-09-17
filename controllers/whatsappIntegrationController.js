@@ -1215,6 +1215,121 @@ exports.updateInstanceBusinessProfile = async (req, res) => {
   }
 }
 
+/** Mapeia o httpStatus do provider para o status HTTP do endpoint de catálogo. */
+function catalogErrorStatus(r) {
+  if (r?.httpStatus === 422) return 422
+  if (r?.httpStatus === 429) return 429
+  if (r?.httpStatus === 404) return 404
+  return 502
+}
+
+/** GET /integrations/whatsapp/instances/:id/catalog/products?count=&offset= — lista o catálogo (Whapi). */
+exports.getInstanceCatalogProducts = async (req, res) => {
+  const ctx = await requireWhapiInstance(req, res, 'catalog-products', 30)
+  if (!ctx) return
+  const params = { count: req.query?.count, offset: req.query?.offset }
+  try {
+    const r = await ctx.provider.getCatalogProducts(params, { companyId: ctx.company_id, whatsappInstanceId: ctx.id })
+    if (!r.ok) {
+      return res.status(catalogErrorStatus(r)).json({
+        error: r.error || 'Erro ao ler catálogo',
+        code: r.code || r.providerCode || undefined,
+        provider: 'whapi',
+      })
+    }
+    return res.json({ provider: 'whapi', products: r.products || [], total: r.total, count: r.count, offset: r.offset })
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || 'Erro interno ao ler catálogo' })
+  }
+}
+
+/** GET /integrations/whatsapp/instances/:id/catalog/products/:productId — um produto (Whapi). */
+exports.getInstanceCatalogProduct = async (req, res) => {
+  const ctx = await requireWhapiInstance(req, res, 'catalog-product', 60)
+  if (!ctx) return
+  const productId = String(req.params?.productId || '').trim()
+  if (!productId) return res.status(400).json({ error: 'productId é obrigatório.' })
+  try {
+    const r = await ctx.provider.getCatalogProduct(productId, { companyId: ctx.company_id, whatsappInstanceId: ctx.id })
+    if (!r.ok) {
+      return res.status(catalogErrorStatus(r)).json({
+        error: r.error || 'Erro ao ler produto',
+        code: r.code || r.providerCode || undefined,
+        provider: 'whapi',
+      })
+    }
+    return res.json({ provider: 'whapi', product: r.product || null })
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || 'Erro interno ao ler produto' })
+  }
+}
+
+/** GET /integrations/whatsapp/instances/:id/catalog/collections?count=&offset= — coleções (Whapi). */
+exports.getInstanceCatalogCollections = async (req, res) => {
+  const ctx = await requireWhapiInstance(req, res, 'catalog-collections', 30)
+  if (!ctx) return
+  const params = { count: req.query?.count, offset: req.query?.offset }
+  try {
+    const r = await ctx.provider.getCatalogCollections(params, { companyId: ctx.company_id, whatsappInstanceId: ctx.id })
+    if (!r.ok) {
+      return res.status(catalogErrorStatus(r)).json({
+        error: r.error || 'Erro ao ler coleções',
+        code: r.code || r.providerCode || undefined,
+        provider: 'whapi',
+      })
+    }
+    return res.json({ provider: 'whapi', collections: r.collections || [], total: r.total, count: r.count, offset: r.offset })
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || 'Erro interno ao ler coleções' })
+  }
+}
+
+/** GET /integrations/whatsapp/instances/:id/catalog/collections/:collectionId — uma coleção (Whapi). */
+exports.getInstanceCatalogCollection = async (req, res) => {
+  const ctx = await requireWhapiInstance(req, res, 'catalog-collection', 60)
+  if (!ctx) return
+  const collectionId = String(req.params?.collectionId || '').trim()
+  if (!collectionId) return res.status(400).json({ error: 'collectionId é obrigatório.' })
+  try {
+    const r = await ctx.provider.getCatalogCollection(collectionId, { companyId: ctx.company_id, whatsappInstanceId: ctx.id })
+    if (!r.ok) {
+      return res.status(catalogErrorStatus(r)).json({
+        error: r.error || 'Erro ao ler coleção',
+        code: r.code || r.providerCode || undefined,
+        provider: 'whapi',
+      })
+    }
+    return res.json({ provider: 'whapi', collection: r.collection || null })
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || 'Erro interno ao ler coleção' })
+  }
+}
+
+/** GET /integrations/whatsapp/instances/:id/catalog/collections/:collectionId/products — produtos da coleção (Whapi). */
+exports.getInstanceCatalogCollectionProducts = async (req, res) => {
+  const ctx = await requireWhapiInstance(req, res, 'catalog-collection-products', 60)
+  if (!ctx) return
+  const collectionId = String(req.params?.collectionId || '').trim()
+  if (!collectionId) return res.status(400).json({ error: 'collectionId é obrigatório.' })
+  try {
+    const r = await ctx.provider.getCatalogCollectionProducts(
+      collectionId,
+      { products_count: req.query?.products_count },
+      { companyId: ctx.company_id, whatsappInstanceId: ctx.id },
+    )
+    if (!r.ok) {
+      return res.status(catalogErrorStatus(r)).json({
+        error: r.error || 'Erro ao ler produtos da coleção',
+        code: r.code || r.providerCode || undefined,
+        provider: 'whapi',
+      })
+    }
+    return res.json({ provider: 'whapi', products: r.products || [], total: r.total, count: r.count, offset: r.offset })
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || 'Erro interno ao ler produtos da coleção' })
+  }
+}
+
 /** GET /integrations/whatsapp/instances/:id/chats/:chatId — metadados de um chat (Whapi). */
 exports.getInstanceChat = async (req, res) => {
   const ctx = await requireWhapiInstance(req, res, 'get-chat', 60)

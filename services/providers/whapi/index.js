@@ -17,6 +17,7 @@ const channel = require('./channel')
 const limits = require('./limits')
 const labels = require('./labels')
 const business = require('./business')
+const catalog = require('./catalog')
 const groups = require('./groups')
 const { uploadMedia, getMediaFiles, getMedia, deleteMedia } = require('./upload')
 const { buildBaseUrl, maskTokenInLogs, validateRequiredFields } = require('./http')
@@ -157,6 +158,14 @@ module.exports = {
   // Perfil WhatsApp Business — cartão da empresa (endereço, horário, sites…)
   getBusinessProfile: business.getBusinessProfile,
   editBusinessProfile: business.editBusinessProfile,
+
+  // Catálogo WhatsApp Business — vitrine da empresa (produtos + coleções), só leitura
+  getCatalogProducts: catalog.getProducts,
+  getCatalogProduct: catalog.getProduct,
+  getCatalogCollections: catalog.getCollections,
+  getCatalogCollection: catalog.getCollection,
+  getCatalogCollectionProducts: catalog.getCollectionProducts,
+  getContactCatalogProducts: catalog.getContactProducts,
 
   resendByStatus: queries.resendByStatus,
   resendById: queries.resendById,

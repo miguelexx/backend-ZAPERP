@@ -34,6 +34,12 @@ router.post('/instances/:id/logout', whatsappIntegrationController.logoutInstanc
 // Whapi-only: perfil Business, metadados de chat e presença do contato
 router.get('/instances/:id/business-profile', whatsappIntegrationController.getInstanceBusinessProfile)
 router.post('/instances/:id/business-profile', whatsappIntegrationController.updateInstanceBusinessProfile)
+// Whapi-only: catálogo WhatsApp Business (vitrine da empresa — produtos + coleções), só leitura
+router.get('/instances/:id/catalog/products', whatsappIntegrationController.getInstanceCatalogProducts)
+router.get('/instances/:id/catalog/products/:productId', whatsappIntegrationController.getInstanceCatalogProduct)
+router.get('/instances/:id/catalog/collections', whatsappIntegrationController.getInstanceCatalogCollections)
+router.get('/instances/:id/catalog/collections/:collectionId', whatsappIntegrationController.getInstanceCatalogCollection)
+router.get('/instances/:id/catalog/collections/:collectionId/products', whatsappIntegrationController.getInstanceCatalogCollectionProducts)
 router.get('/instances/:id/chats/:chatId', whatsappIntegrationController.getInstanceChat)
 router.get('/instances/:id/presence', whatsappIntegrationController.getInstancePresence)
 router.post('/instances/:id/presence/subscribe', whatsappIntegrationController.subscribeInstancePresence)

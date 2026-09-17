@@ -17,6 +17,11 @@ describe('contrato HTTP frontend → backend para Perfil Business e Labels Whapi
       getLabelAssociations: jest.fn(async () => ({ ok: true, chats: [{ id: '5534999998888@s.whatsapp.net' }], messages: [] })),
       addLabelAssociation: jest.fn(async () => ({ ok: true })),
       deleteLabelAssociation: jest.fn(async () => ({ ok: true })),
+      getCatalogProducts: jest.fn(async () => ({ ok: true, products: [{ id: 'p1', name: 'Camiseta' }], total: 1, count: 1, offset: 0 })),
+      getCatalogProduct: jest.fn(async () => ({ ok: true, product: { id: 'p1', name: 'Camiseta' } })),
+      getCatalogCollections: jest.fn(async () => ({ ok: true, collections: [{ id: 'c1', name: 'Verão', products: [] }], total: 1 })),
+      getCatalogCollection: jest.fn(async () => ({ ok: true, collection: { id: 'c1', name: 'Verão', products: [] } })),
+      getCatalogCollectionProducts: jest.fn(async () => ({ ok: true, products: [{ id: 'p1', name: 'Camiseta' }] })),
     }
 
     jest.doMock('../middleware/auth', () => (req, _res, next) => {
@@ -88,6 +93,35 @@ describe('contrato HTTP frontend → backend para Perfil Business e Labels Whapi
     expect(provider.addLabelAssociation).toHaveBeenCalledWith('2', '5534999998888', { companyId: 12, whatsappInstanceId: 41 })
     expect(provider.deleteLabelAssociation).toHaveBeenCalledWith('2', '5534999998888', { companyId: 12, whatsappInstanceId: 41 })
     expect(provider.deleteLabel).toHaveBeenCalledWith('2', { companyId: 12, whatsappInstanceId: 41 })
+  })
+
+  test('Catálogo lista produtos e coleções sob /instances/:id/catalog/*', async () => {
+    await request(app)
+      .get('/api/integrations/whatsapp/instances/41/catalog/products?count=50')
+      .expect(200, { provider: 'whapi', products: [{ id: 'p1', name: 'Camiseta' }], total: 1, count: 1, offset: 0 })
+    await request(app).get('/api/integrations/whatsapp/instances/41/catalog/products/p1').expect(200)
+    await request(app).get('/api/integrations/whatsapp/instances/41/catalog/collections').expect(200)
+    await request(app).get('/api/integrations/whatsapp/instances/41/catalog/collections/c1').expect(200)
+    await request(app).get('/api/integrations/whatsapp/instances/41/catalog/collections/c1/products').expect(200)
+
+    expect(provider.getCatalogProducts).toHaveBeenCalledWith(
+      { count: '50', offset: undefined },
+      { companyId: 12, whatsappInstanceId: 41 },
+    )
+    expect(provider.getCatalogProduct).toHaveBeenCalledWith('p1', { companyId: 12, whatsappInstanceId: 41 })
+    expect(provider.getCatalogCollection).toHaveBeenCalledWith('c1', { companyId: 12, whatsappInstanceId: 41 })
+    expect(provider.getCatalogCollectionProducts).toHaveBeenCalledWith(
+      'c1', { products_count: undefined }, { companyId: 12, whatsappInstanceId: 41 },
+    )
+  })
+
+  test('Catálogo em conta comum → 422 com código acionável', async () => {
+    provider.getCatalogProducts.mockResolvedValueOnce({
+      ok: false, httpStatus: 422, error: 'Conta WhatsApp Business necessária', code: 'WHAPI_BUSINESS_ACCOUNT_REQUIRED', products: [],
+    })
+    await request(app)
+      .get('/api/integrations/whatsapp/instances/41/catalog/products')
+      .expect(422, { error: 'Conta WhatsApp Business necessária', code: 'WHAPI_BUSINESS_ACCOUNT_REQUIRED', provider: 'whapi' })
   })
 
   test('erro Whapi 500 permanece 502; conta comum usa 422 com código acionável', async () => {
