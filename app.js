@@ -385,14 +385,8 @@ if (hasFrontendDist) {
         '</head>',
         `  <link rel="stylesheet" href="${uiOverridesHref}" />\n  </head>`
       )
-  // Refresh automático a cada N minutos (AUTO_REFRESH_MINUTES=0 por padrão; defina >0 para ativar)
-  const autoRefreshMinutes = parseInt(process.env.AUTO_REFRESH_MINUTES || '0', 10)
-  if (autoRefreshMinutes > 0 && !indexHtmlInjected.includes('auto-refresh-interval')) {
-    const refreshScript = `<script id="auto-refresh-interval">(function(){var m=${autoRefreshMinutes}*60*1000;setInterval(function(){location.reload()},m)})();</script>`
-    indexHtmlInjected = indexHtmlInjected.includes('</body>')
-      ? indexHtmlInjected.replace('</body>', `${refreshScript}\n</body>`)
-      : indexHtmlInjected.replace('</html>', `${refreshScript}\n</html>`)
-  }
+  // Nunca injetar location.reload() no SPA. AUTO_REFRESH_MINUTES (se existir no .env)
+  // é ignorado de propósito: o timer apagava o texto que o atendente ainda digitava.
 
   app.get(uiOverridesHref, (req, res) => {
     try {

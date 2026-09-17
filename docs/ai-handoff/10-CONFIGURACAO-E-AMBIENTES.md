@@ -36,6 +36,8 @@ Para o nome exato antes de configurar, cruzar `.env.example` com `rg "process\.e
 
 SaaS Whapi: `WHAPI_PARTNER_TOKEN` (e de preferência `WHAPI_PARTNER_PROJECT_ID`) no servidor. Sem o token de parceiro, `POST /instances/provision-whapi` responde `503 WHAPI_PARTNER_OFF`; o cadastro manual avançado continua disponível. Nunca colocar o Bearer do canal no frontend.
 
+`AUTO_REFRESH_MINUTES` existia para injetar `location.reload()` no HTML do SPA. **Removido em 2026-09-17**: apagava o texto do composer. A variável no `.env` da VPS, se ainda estiver definida, é ignorada. Ver [18 §28](18-ANTI-PADROES-E-ARMADILHAS.md).
+
 ## Desenvolvimento e produção
 
 Desenvolvimento usa nodemon e normalmente `.env` local ignorado. Produção confirmada no repositório: PM2 via `ecosystem.config.js`, modo `fork`, dois apps (API HTTP + worker de Disparo), `instances: 1` em cada, autorestart e `NODE_ENV=production`. Não há Dockerfile, Compose ou workflow CI/CD no backend. TLS/reverse proxy, diretório da VPS, usuário do processo, agendador externo, backup e sequência real de deploy são **NÃO CONFIRMADOS**.
@@ -56,7 +58,7 @@ Inventário mecânico das referências `process.env` em JavaScript do backend (e
 
 | Finalidade | Nomes |
 |---|---|
-| Processo, HTTP, CORS e socket | `APP_URL`, `AUTO_REFRESH_MINUTES`, `BASE_URL`, `CHAT_COUNTS_TIMEOUT_MS`, `CORS_ORIGINS`, `HIDE_WHATSAPP_DISCONNECT_BANNER`, `NODE_ENV`, `PORT`, `SHUTDOWN_TIMEOUT_MS`, `SOCKET_DEBUG`, `TRUST_PROXY`, `ZAPERP_CORS_EXTRA_ORIGINS` |
+| Processo, HTTP, CORS e socket | `APP_URL`, `BASE_URL`, `CHAT_COUNTS_TIMEOUT_MS`, `CORS_ORIGINS`, `HIDE_WHATSAPP_DISCONNECT_BANNER`, `NODE_ENV`, `PORT`, `SHUTDOWN_TIMEOUT_MS`, `SOCKET_DEBUG`, `TRUST_PROXY`, `ZAPERP_CORS_EXTRA_ORIGINS` |
 | Segurança, identidade, webhook, cron e e-mail | `ADMIN_ATENDIMENTO_ALERTA_DEBUG`, `ADMIN_ATENDIMENTO_ALERTA_INTERVAL_MINUTES`, `ADMIN_EMAIL`, `ADMIN_NOME`, `ADMIN_SENHA`, `CRON_SECRET`, `JWT_EXPIRES_IN`, `JWT_SECRET`, `MODULO_CAMPANHAS_SENHA`, `SMTP_HOST`, `SMTP_URL`, `WEBHOOK_INSTANCE_DUPLICATE_STRATEGY`, `WEBHOOK_LOG_FULL_PAYLOAD`, `WEBHOOK_TOKEN` |
 | Supabase | `SUPABASE_KEY`, `SUPABASE_SERVICE_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_TIMEOUT_MS`, `SUPABASE_URL` |
 | WhatsApp/UltraMSG e sincronização | `OLD_MESSAGES_SYNC_DEBUG`, `OLD_MESSAGES_SYNC_DELAY_MS`, `OLD_MESSAGES_SYNC_MAX_CHATS`, `OLD_MESSAGES_SYNC_MAX_PAGES`, `OLD_MESSAGES_SYNC_MESSAGES_PER_CHAT`, `SYNC_BATCH_SIZE`, `SYNC_INTERVAL_BETWEEN_BATCHES_MS`, `SYNC_MAX_PAGES_PER_RUN`, `ULTRAMSG_BASE_URL`, `ULTRAMSG_INSTANCE_ID`, `ULTRAMSG_SEND_DELAY`, `ULTRAMSG_SEND_DELAY_MAX`, `ULTRAMSG_SEND_DELAY_MS`, `ULTRAMSG_TIMEOUT_MS`, `ULTRAMSG_TOKEN`, `ULTRAMSG_WEBHOOK_DOWNLOAD_MEDIA`, `ULTRAMSG_WEBHOOK_RETRIES`, `WHATSAPP_DEBUG`, `WHATSAPP_SEND_GUARD_DEBUG`, `WHATSAPP_SEND_GUARD_HASH_SALT`, `WHATSAPP_SEND_GUARD_MODE`, `WHATSAPP_WEBHOOK_TOKEN`, `ZAPI_CONNECTED_PHONE`, `ZAPI_INSTANCE_ID` |

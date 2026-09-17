@@ -389,3 +389,23 @@ await getProvider({ provider }).getContacts(page, size, { companyId, whatsappIns
 ```
 
 Na Whapi, `GET /contacts` mistura `saved:true`+`name` e `saved:false`+`pushname`. Filtrar `isMyContact===false` esvazia a lista. Mapper Whapi aceita nome salvo ou pushname; UltraMSG permanece no contrato de contato salvo. Teto 2500. Ver [25-SINCRONIZACAO](25-SINCRONIZACAO-MANUAL-CONTATOS.md).
+
+---
+
+## 28. Nunca recarregar o SPA automaticamente
+
+**Armadilha:** injetar `setInterval(() => location.reload(), N)` no `index.html` (`AUTO_REFRESH_MINUTES`) ou chamar `location.replace` em falha de chunk Vite (`vitePreloadRecovery`) “para recuperar a aba”.
+
+**Consequência real:** o atendente está digitando uma resposta, o timer/chunk dispara, a página inteira recarrega e o texto some (o rascunho do composer só ia para o `sessionStorage` depois de 220 ms parado).
+
+```js
+// ❌ ERRADO
+setInterval(() => location.reload(), 5 * 60 * 1000)
+runtime.location.replace(urlComQueryDeReload)
+
+// ✅ CORRETO
+// Não injetar auto-refresh no HTML. Falha de chunk: preventDefault, sem navegação.
+// Rascunho do composer persiste na digitação; Recarregar só por clique do usuário.
+```
+
+`AUTO_REFRESH_MINUTES` no `.env` é **ignorado**. O botão Recarregar do `ErrorBoundary` permanece manual.
