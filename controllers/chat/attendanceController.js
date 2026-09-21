@@ -800,7 +800,13 @@ exports.criarNotaInterna = async (req, res) => {
 
     const io = req.app.get('io')
     if (io) {
-      await emitirParaUsuariosQuePodemVerConversa(io, company_id, conversa_id, 'mensagem_interna_atendimento', notaEnriquecida)
+      try {
+        await emitirParaUsuariosQuePodemVerConversa(io, company_id, conversa_id, 'mensagem_interna_atendimento', notaEnriquecida)
+      } catch (emitErr) {
+        // A nota já foi confirmada no banco. Falha de realtime não pode virar
+        // HTTP 500 (o cliente repetiria o envio e criaria uma nota duplicada).
+        console.warn('[criarNotaInterna] realtime:', emitErr?.message || emitErr)
+      }
     }
 
     return res.status(201).json({ ok: true, nota: notaEnriquecida })

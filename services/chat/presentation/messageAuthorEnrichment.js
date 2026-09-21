@@ -7,6 +7,7 @@
 const { normalizarTimestampSemFusoAmbiguoParaApi } = require('../../../helpers/timestampApiCompat')
 const { formatTextoWhatsappComNomeAtendente } = require('../../../helpers/mensagemAtendenteNomeHelper')
 const { aplicarCamposEdicaoNaMensagem } = require('../../../helpers/mensagemEditHelper')
+const { isInternalNoteRow } = require('../../../helpers/internalNote')
 
 function textoRevogadoApagadaParaTodos(m, viewerUserId) {
   const souAutor =
@@ -47,7 +48,9 @@ async function enrichMensagensComAutorUsuario(supabase, company_id, mensagens, v
   return mensagens.map((m) =>
     decorate(
       m,
-      m.direcao === 'out' && m.autor_usuario_id ? (usuarioMap.get(m.autor_usuario_id) ?? null) : null
+      (m.direcao === 'out' || isInternalNoteRow(m)) && m.autor_usuario_id
+        ? (usuarioMap.get(m.autor_usuario_id) ?? usuarioMap.get(Number(m.autor_usuario_id)) ?? null)
+        : null
     )
   )
 }
@@ -74,7 +77,8 @@ async function getUsuarioParaEnvioCliente(supabase, company_id, user_id) {
 /** Enriquece uma mensagem única com usuario_nome (para evento nova_mensagem) */
 async function enrichMensagemComAutorUsuario(supabase, company_id, msg) {
   const isOut = msg?.direcao === 'out'
-  if (!msg || !isOut || !msg.autor_usuario_id) {
+  const isNote = isInternalNoteRow(msg)
+  if (!msg || (!isOut && !isNote) || !msg.autor_usuario_id) {
     return aplicarCamposEdicaoNaMensagem({
       ...msg,
       criado_em: normalizarTimestampSemFusoAmbiguoParaApi(msg?.criado_em),
@@ -92,8 +96,8 @@ async function enrichMensagemComAutorUsuario(supabase, company_id, msg) {
     criado_em: normalizarTimestampSemFusoAmbiguoParaApi(msg?.criado_em),
     usuario_id: msg.autor_usuario_id,
     usuario_nome: u?.nome ?? null,
-    enviado_por_usuario: true,
-    fromMe: true,
+    enviado_por_usuario: isOut,
+    fromMe: isOut,
     apagada_para_todos: msg?.apagada_para_todos === true,
   })
 }
