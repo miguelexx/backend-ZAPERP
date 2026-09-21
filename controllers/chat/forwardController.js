@@ -8,6 +8,7 @@ const supabase = require('../../config/supabase')
 const { getProvider } = require('../../services/providers')
 const { isRealWhatsAppId } = require('../../helpers/whatsappMessageIdHelper')
 const { mapProviderSendResult } = require('../../services/chat/outbound/providerResultMapper')
+const { isTransientOutboundFailure } = require('../../services/chat/outbound/outboundFailureClassifier')
 const { schedulePendingOutboundReconciliation } = require('../../services/pendingOutboundReconciliationService')
 const { isInternalNoteRow } = require('../../helpers/internalNote')
 const { normalizeForwardTipo } = require('../../services/chat/outbound/messageNormalizers')
@@ -366,8 +367,18 @@ async function encaminharUmaMensagemParaConversa(ctx) {
   const mappedResult = mapProviderSendResult(resultadoEnvio)
   const {
     ok, waMessageId, hasValidId: hasTraceableForwardId,
-    hasQueueId: hasQueueForwardId, nextStatus, nextStatusMensagem,
+    hasQueueId: hasQueueForwardId,
   } = mappedResult
+  let { nextStatus, nextStatusMensagem, needsReconciliation } = mappedResult
+  // Falha transitória (timeout/429/5xx): mantém pending + reconciliação em vez de 'erro'
+  // terminal (fora do sweep). Sem telefone/sem método (resultadoEnvio=false) não tem httpStatus
+  // → segue como falha definitiva, igual ao comportamento atual.
+  const falhaTransitoriaForward = !ok && isTransientOutboundFailure({ httpStatus: resultadoEnvio?.httpStatus })
+  if (falhaTransitoriaForward) {
+    nextStatus = 'pending'
+    nextStatusMensagem = 'sending'
+    needsReconciliation = true
+  }
 
   await supabase
     .from('mensagens')
@@ -401,7 +412,7 @@ async function encaminharUmaMensagemParaConversa(ctx) {
     emitirConversaAtualizada(io, company_id, conversa_id, convPayload)
   }
 
-  if (mappedResult.needsReconciliation) {
+  if (needsReconciliation) {
     schedulePendingOutboundReconciliation({ companyId: company_id, mensagemId: novaMensagem.id, io })
   }
 
@@ -414,7 +425,9 @@ async function encaminharUmaMensagemParaConversa(ctx) {
       whatsapp_id: hasTraceableForwardId ? waMessageId : null,
       encaminhado: true,
     },
-    enviado_whatsapp: ok,
+    // Falha transitória NÃO é "não entregue": a mensagem fica pending e o retry automático
+    // reconcilia — não disparar o alerta de "reenvie o arquivo original" no frontend.
+    enviado_whatsapp: ok || falhaTransitoriaForward,
   }
 }
 

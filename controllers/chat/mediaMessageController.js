@@ -11,6 +11,7 @@ const { tryMarkWaitingAfterHumanOutbound } = require('../../services/absenceFina
 const { empresaModoSimplesAtivo } = require('../../helpers/empresaModoSimplesFlag')
 const { schedulePendingOutboundReconciliation } = require('../../services/pendingOutboundReconciliationService')
 const { mapProviderSendResult } = require('../../services/chat/outbound/providerResultMapper')
+const { isTransientOutboundFailure } = require('../../services/chat/outbound/outboundFailureClassifier')
 const { normalizeClientTempId, isMissingMensagemColumnError, isGenericMissingColumnError, isClientTempIdUniqueViolation } = require('../../services/chat/outbound/idempotencyHelpers')
 const { parseAudioDuracaoSecFromBody, aplicarTipoForcadoSticker, inferirTipoArquivo, shouldAbortAudioAfterNormalize, shouldForceProviderUploadForMedia } = require('../../services/chat/media/mediaType')
 const { resolveTelefoneFromLidSiblingConversation, resolveConversationWhatsappInstance, resolveConversationProvider } = require('../../services/chat/identity/conversationAddressService')
@@ -435,10 +436,28 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
           const mappedResult = mapProviderSendResult(normalizedResult)
           const {
             ok, waMessageId, hasValidId: hasTraceableMediaId,
-            hasQueueId: hasQueueMediaId, nextStatus, nextStatusMensagem,
+            hasQueueId: hasQueueMediaId,
           } = mappedResult
-          
-          if (!ok) {
+          let { nextStatus, nextStatusMensagem, needsReconciliation } = mappedResult
+
+          // Falha transitória (timeout/429/5xx) não pode virar 'erro': o sweep de reconciliação
+          // só varre pending/sending. Mantém pending/sending e agenda reconciliação, que consulta
+          // o provedor (referenceId crm-{id}) antes de reenviar — sem duplicar mídia no cliente.
+          const falhaTransitoriaMidia = !ok && isTransientOutboundFailure({ httpStatus: normalizedResult?.httpStatus })
+          if (falhaTransitoriaMidia) {
+            nextStatus = 'pending'
+            nextStatusMensagem = 'sending'
+            needsReconciliation = true
+          }
+
+          if (!ok && falhaTransitoriaMidia) {
+            console.warn('WhatsApp: falha transitória ao enviar mídia — mantendo pending para retry automático', {
+              phone: String(phone || '').slice(-12),
+              tipo,
+              http_status: normalizedResult?.httpStatus ?? null,
+              erro: normalizedResult?.error || 'sem detalhes',
+            })
+          } else if (!ok) {
             console.warn('WhatsApp: falha ao enviar mídia', {
               phone: String(phone || '').slice(-12),
               tipo,
@@ -473,7 +492,7 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
             io2.to(`empresa_${company_id}`).to(`conversa_${conversa_id}`).to(`usuario_${user_id}`).emit(io2.EVENTS?.STATUS_MENSAGEM || 'status_mensagem', payload)
           }
 
-          if (mappedResult.needsReconciliation) {
+          if (needsReconciliation) {
             schedulePendingOutboundReconciliation({
               companyId: company_id,
               mensagemId: msg.id,
@@ -493,13 +512,17 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
           }
         })
         .catch(async (e) => {
-          console.error('WhatsApp enviar mídia (erro de rede/provider):', e?.message || e)
-          await supabase.from('mensagens').update({ status: 'erro', status_mensagem: 'erro' }).eq('company_id', company_id).eq('id', msg.id)
+          // Exceção de transporte (timeout/rede): o provedor PODE ter recebido a mídia. Marcar
+          // 'erro' a tiraria do sweep e exigiria clique manual, além de arriscar duplicação num
+          // reenvio cego. Mantém pending + reconciliação (consulta crm-{id} antes de reenviar).
+          console.error('WhatsApp enviar mídia — exceção no envio, mantendo pending para retry automático:', e?.message || e)
+          await supabase.from('mensagens').update({ status: 'pending', status_mensagem: 'sending' }).eq('company_id', company_id).eq('id', msg.id)
           const io2 = req.app?.get('io')
           if (io2) {
-            const payload = { mensagem_id: msg.id, conversa_id: Number(conversa_id), status: 'erro', status_mensagem: 'erro' }
+            const payload = { mensagem_id: msg.id, conversa_id: Number(conversa_id), status: 'pending', status_mensagem: 'sending' }
             io2.to(`empresa_${company_id}`).to(`conversa_${conversa_id}`).to(`usuario_${user_id}`).emit(io2.EVENTS?.STATUS_MENSAGEM || 'status_mensagem', payload)
           }
+          schedulePendingOutboundReconciliation({ companyId: company_id, mensagemId: msg.id, io: io2 })
         })
     }
 

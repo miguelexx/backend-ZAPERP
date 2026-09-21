@@ -1,13 +1,19 @@
 /**
- * Catálogo WhatsApp Business (Whapi) — leitura da vitrine da empresa (produtos + coleções).
- * GET /business/products                       → lista os produtos do catálogo
- * GET /business/products/{ProductID}           → um produto
- * GET /business/collections                    → lista as coleções (categorias)
- * GET /business/collections/{CollectionID}     → uma coleção (com até 10 produtos)
- * GET /business/collections/{CollectionID}/products → produtos de uma coleção
- * GET /business/contacts/{ChatID}/products      → catálogo/produtos de um contato qualquer
+ * Catálogo WhatsApp Business (Whapi) — leitura + gestão (CRUD) da vitrine da empresa (produtos + coleções).
+ * GET    /business/products                     → lista os produtos do catálogo
+ * GET    /business/products/{ProductID}         → um produto
+ * POST   /business/products                     → cria produto
+ * PATCH  /business/products/{ProductID}         → atualiza produto (exige array images completo)
+ * DELETE /business/products/{ProductID}         → exclui produto
+ * GET    /business/collections                  → lista as coleções (categorias)
+ * GET    /business/collections/{CollectionID}   → uma coleção (com até 10 produtos)
+ * GET    /business/collections/{CollectionID}/products → produtos de uma coleção
+ * POST   /business/collections                  → cria coleção
+ * PATCH  /business/collections/{CollectionID}   → edita coleção (name / add_products / remove_products)
+ * DELETE /business/collections/{CollectionID}   → exclui coleção
+ * GET    /business/contacts/{ChatID}/products   → catálogo/produtos de um contato qualquer
  *
- * Só leitura: não dispara WhatsApp (skipSendGuard). Contrato confirmado via OpenAPI Whapi
+ * Nenhuma operação dispara mensagem no WhatsApp (skipSendGuard). Contrato confirmado via OpenAPI Whapi
  * + MCP (2026-09-17). Catálogo é recurso exclusivo de conta WhatsApp Business — 500 opaco em
  * conta comum é traduzido para 422 acionável (mesmo padrão de business.js). Ver doc 25.
  * UltraMSG não tem catálogo (não implementa).

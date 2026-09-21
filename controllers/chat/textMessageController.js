@@ -12,6 +12,7 @@ const { tryMarkWaitingAfterHumanOutbound } = require('../../services/absenceFina
 const { empresaModoSimplesAtivo } = require('../../helpers/empresaModoSimplesFlag')
 const { schedulePendingOutboundReconciliation } = require('../../services/pendingOutboundReconciliationService')
 const { mapProviderSendResult } = require('../../services/chat/outbound/providerResultMapper')
+const { isTransientOutboundFailure } = require('../../services/chat/outbound/outboundFailureClassifier')
 const { safeWhatsappInstanceMeta } = require('../../services/chat/presentation/chatDto')
 const { normalizeClientTempId, clientTempIdDedupeKey, isMissingMensagemColumnError, isGenericMissingColumnError, isClientTempIdUniqueViolation, buildClientTempIdDedupResponse } = require('../../services/chat/outbound/idempotencyHelpers')
 const { normalizeLinkPayload } = require('../../services/chat/outbound/messageNormalizers')
@@ -431,10 +432,22 @@ exports.enviarMensagemChat = async (req, res) => {
           })
         }
 
+        const mappedSend = mapProviderSendResult(result, { failedStatusMensagem: 'failed' })
         const {
-          ok, waMessageId, hasValidId, hasQueueId, providerError,
-          needsReconciliation, awaitingAck, nextStatus, nextStatusMensagem,
-        } = mapProviderSendResult(result, { failedStatusMensagem: 'failed' })
+          ok, waMessageId, hasValidId, hasQueueId, providerError, awaitingAck,
+        } = mappedSend
+        let { needsReconciliation, nextStatus, nextStatusMensagem } = mappedSend
+
+        // Falha SEM recusa definitiva do provedor (timeout/429/5xx) não pode virar 'erro'
+        // terminal: 'erro' sai do alcance do sweep de reconciliação (só varre pending/sending)
+        // e a mensagem só voltaria por clique manual. Mantém pending + reconciliação, que
+        // consulta o provedor (referenceId crm-{id}) antes de reenviar — sem duplicar.
+        const falhaTransitoria = !ok && isTransientOutboundFailure({ httpStatus: result?.httpStatus })
+        if (falhaTransitoria) {
+          nextStatus = 'pending'
+          nextStatusMensagem = 'sending'
+          needsReconciliation = true
+        }
 
         if (ok) {
           console.log('[ENVIO_MANUAL] ✅ Sucesso', {
@@ -459,6 +472,17 @@ exports.enviarMensagemChat = async (req, res) => {
               nota: 'Mensagem mantida como pending/sending ate chegar ACK rastreavel ou retry confirmar falha.',
             })
           }
+        } else if (falhaTransitoria) {
+          console.warn('[ENVIO_MANUAL] ⏳ Falha transitória — mantendo pending para retry automático', {
+            company_id,
+            conversa_id,
+            mensagem_id: msg.id,
+            telefone_destino: String(telefoneParaEnvio || '').slice(-12),
+            whatsapp_instance_id: whatsappInstanceId,
+            provedor: instanceProvider,
+            http_status: result?.httpStatus ?? null,
+            erro: String(providerError || '').slice(0, 200) || 'desconhecido',
+          })
         } else {
           console.warn('[ENVIO_MANUAL] ❌ Falha no envio', {
             company_id,
@@ -513,9 +537,15 @@ exports.enviarMensagemChat = async (req, res) => {
           })
         }
 
-        sendResult = result
+        sendResult = falhaTransitoria
+          ? { ...(result && typeof result === 'object' ? result : {}), ok: false, transient: true }
+          : result
       } catch (e) {
-        console.error('[ENVIO_MANUAL] ❌ Exceção ao enviar mensagem', {
+        // Exceção de transporte (timeout/rede): o provedor PODE ter recebido a mensagem.
+        // Marcar 'erro' aqui a tiraria do sweep de reconciliação e exigiria clique manual —
+        // além de arriscar duplicação num reenvio cego. Mantém pending + reconciliação, que
+        // consulta o provedor (referenceId crm-{id}) antes de qualquer reenvio.
+        console.error('[ENVIO_MANUAL] ⏳ Exceção no envio — mantendo pending para retry automático', {
           company_id,
           conversa_id,
           mensagem_id: msg.id,
@@ -523,10 +553,10 @@ exports.enviarMensagemChat = async (req, res) => {
           whatsapp_instance_id: whatsappInstanceId,
           erro: e?.message || String(e),
         })
-        sendResult = { ok: false, error: e?.message || 'Erro ao enviar mensagem' }
+        sendResult = { ok: false, error: e?.message || 'Erro ao enviar mensagem', transient: true }
         await supabase
           .from('mensagens')
-          .update({ status: 'erro', status_mensagem: 'failed' })
+          .update({ status: 'pending', status_mensagem: 'sending' })
           .eq('company_id', company_id)
           .eq('id', msg.id)
         const io2 = req.app.get('io')
@@ -535,10 +565,11 @@ exports.enviarMensagemChat = async (req, res) => {
             .emit('status_mensagem', {
               mensagem_id: msg.id,
               conversa_id: Number(conversa_id),
-              status: 'erro',
-              status_mensagem: 'failed',
+              status: 'pending',
+              status_mensagem: 'sending',
             })
         }
+        schedulePendingOutboundReconciliation({ companyId: company_id, mensagemId: msg.id, io: io2 })
       }
     }
 
@@ -569,16 +600,23 @@ exports.enviarMensagemChat = async (req, res) => {
     const sendOk = !!telefoneParaEnvio && mappedSendResult.ok
     const sendWaMessageId = mappedSendResult.waMessageId
     const sendTraceable = sendOk && mappedSendResult.confirmedSent
+    // Falha transitória: a mensagem fica pending (relógio) e é recuperada pelo retry
+    // automático — o frontend NÃO deve exibir "Não foi possível enviar"/botão Reenviar.
+    const envioTransitorio = sendResult?.transient === true
     const motivoErro = sendResult?.error || sendResult?.blockedBy
     return res.json({
       ok: true,
       id: msg.id,
       conversa_id: Number(conversa_id),
       ...(clientTempId ? { client_temp_id: clientTempId } : {}),
-      ...(sendTraceable ? { status: 'sent', whatsapp_id: sendWaMessageId } : sendOk ? { status: 'pending' } : {
-        status: sendResult?.blockedBy ? 'blocked' : 'erro',
-        ...(motivoErro ? { motivo: motivoErro } : {})
-      })
+      ...(sendTraceable
+        ? { status: 'sent', whatsapp_id: sendWaMessageId }
+        : sendOk || envioTransitorio
+          ? { status: 'pending' }
+          : {
+              status: sendResult?.blockedBy ? 'blocked' : 'erro',
+              ...(motivoErro ? { motivo: motivoErro } : {}),
+            }),
     })
   } catch (err) {
     console.error(err)

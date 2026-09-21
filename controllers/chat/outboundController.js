@@ -14,6 +14,7 @@ const { assertPodeEnviarMensagem } = require('../../services/chat/access/convers
 const { getUsuarioParaEnvioCliente, enrichMensagemComAutorUsuario } = require('../../services/chat/presentation/messageAuthorEnrichment')
 const { aplicarAguardandoClienteNoPayload, anexarAssumirNoPayloadLista } = require('../../services/chat/outbound/modoSimplesOutbound')
 const { mapProviderSendResult } = require('../../services/chat/outbound/providerResultMapper')
+const { isTransientOutboundFailure } = require('../../services/chat/outbound/outboundFailureClassifier')
 const { schedulePendingOutboundReconciliation } = require('../../services/pendingOutboundReconciliationService')
 
 exports.enviarReacaoMensagem = async (req, res) => {
@@ -280,8 +281,16 @@ exports.enviarContatoWhatsapp = async (req, res) => {
     const {
       ok, waMessageId, providerError: providerErroContato,
       hasValidId: hasTraceableContactId, hasQueueId: hasQueueContactId,
-      nextStatus, nextStatusMensagem,
     } = mappedResult
+    let { nextStatus, nextStatusMensagem, needsReconciliation } = mappedResult
+    // Falha transitória (timeout/429/5xx): mantém pending + reconciliação (sweep só varre
+    // pending/sending). Recusa definitiva permanece erro.
+    const falhaTransitoriaContato = !ok && isTransientOutboundFailure({ httpStatus: result?.httpStatus })
+    if (falhaTransitoriaContato) {
+      nextStatus = 'pending'
+      nextStatusMensagem = 'sending'
+      needsReconciliation = true
+    }
     await supabase
       .from('mensagens')
       .update({ status: nextStatus, status_mensagem: nextStatusMensagem, ...(hasTraceableContactId ? { whatsapp_id: waMessageId } : {}), ...(hasQueueContactId ? { provider_queue_id: waMessageId } : {}) })
@@ -314,7 +323,7 @@ exports.enviarContatoWhatsapp = async (req, res) => {
       })
     }
 
-    if (mappedResult.needsReconciliation) {
+    if (needsReconciliation) {
       schedulePendingOutboundReconciliation({ companyId: company_id, mensagemId: msg.id, io })
     }
 
@@ -326,7 +335,7 @@ exports.enviarContatoWhatsapp = async (req, res) => {
       status: nextStatus,
       status_mensagem: nextStatusMensagem,
       ...(hasTraceableContactId ? { whatsapp_id: waMessageId } : {}),
-      ...(ok ? {} : { error: providerErroContato || 'Não foi possível enviar o contato ao WhatsApp.' }),
+      ...(ok || falhaTransitoriaContato ? {} : { error: providerErroContato || 'Não foi possível enviar o contato ao WhatsApp.' }),
     })
   } catch (err) {
     console.error('Erro ao enviar contato:', err)
@@ -487,8 +496,16 @@ exports.enviarLocalizacao = async (req, res) => {
     const mappedResult = mapProviderSendResult(result)
     const {
       ok, waMessageId, hasValidId: hasTraceableLocationId,
-      hasQueueId: hasQueueLocationId, nextStatus, nextStatusMensagem,
+      hasQueueId: hasQueueLocationId,
     } = mappedResult
+    let { nextStatus, nextStatusMensagem, needsReconciliation } = mappedResult
+    // Falha transitória (timeout/429/5xx): mantém pending + reconciliação. Recusa definitiva = erro.
+    const falhaTransitoriaLoc = !ok && isTransientOutboundFailure({ httpStatus: result?.httpStatus })
+    if (falhaTransitoriaLoc) {
+      nextStatus = 'pending'
+      nextStatusMensagem = 'sending'
+      needsReconciliation = true
+    }
 
     await supabase
       .from('mensagens')
@@ -515,7 +532,7 @@ exports.enviarLocalizacao = async (req, res) => {
     }
 
 
-    if (mappedResult.needsReconciliation) {
+    if (needsReconciliation) {
       schedulePendingOutboundReconciliation({ companyId: company_id, mensagemId: msg.id, io })
     }
 
@@ -526,7 +543,7 @@ exports.enviarLocalizacao = async (req, res) => {
       id: msg.id,
       conversa_id: Number(conversa_id),
       location_meta: msg.location_meta || location_meta,
-      ...(sendOk && mappedResult.confirmedSent ? { status: 'sent', whatsapp_id: waMessageId } : sendOk ? { status: 'pending', ...(hasTraceableLocationId ? { whatsapp_id: waMessageId } : {}) } : { status: telefoneParaEnvio ? 'erro' : 'pending' })
+      ...(sendOk && mappedResult.confirmedSent ? { status: 'sent', whatsapp_id: waMessageId } : sendOk ? { status: 'pending', ...(hasTraceableLocationId ? { whatsapp_id: waMessageId } : {}) } : { status: (telefoneParaEnvio && !falhaTransitoriaLoc) ? 'erro' : 'pending' })
     })
   } catch (err) {
     console.error('Erro ao enviar localização:', err)

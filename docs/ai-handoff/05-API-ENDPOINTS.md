@@ -34,7 +34,7 @@ Nas linhas de **chats**, a coluna `chatController` é a **fachada** (`routes/cha
 | Rotas | Controller | Segurança, entrada e efeito |
 |---|---|---|
 | `POST /usuarios/login` | `userController.login` | `loginLimiter`; email/senha e contexto de empresa; verifica bcrypt/ativo, retorna JWT. |
-| `GET /usuarios`, `POST /usuarios`, `PUT /usuarios/:id`, `DELETE /usuarios/:id` | `userController` (`listar/criar/atualizar/excluir`) | A; mutações AD, delete AD+D. JSON de usuário/perfil/departamentos; tabela `usuarios`. |
+| `GET /usuarios`, `POST /usuarios`, `PUT /usuarios/:id`, `DELETE /usuarios/:id` | `userController` (`listar/criar/atualizar/excluir`) | A; mutações AD, delete AD+D. JSON de usuário/perfil/departamentos; tabela `usuarios`. `GET /usuarios?ativo=true` (ou `1`) lista só ativos mesmo para admin (modal Transferir). Sem o query, admin continua vendo inativos na tela de usuários. |
 | `POST /usuarios/resetar-senha-email`, `POST /usuarios/:id/redefinir-senha` | `userController` | A+AD; redefine credencial, sem expor hash. |
 | `GET /usuarios/me`, `PATCH /usuarios/me` | `getMe/patchMe` | A; lê/edita campos próprios permitidos. |
 | `GET /usuarios/me/permissoes`, `GET/PUT /usuarios/:id/permissoes` | `permissoesController` | A; PUT também AD; lê/grava overrides de permissões. |

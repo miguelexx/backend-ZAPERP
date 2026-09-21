@@ -90,12 +90,14 @@ exports.patchMe = async (req, res) => {
 exports.listar = async (req, res) => {
   try {
     const { company_id, perfil } = req.user
+    const ativoQuery = String(req.query?.ativo ?? '').trim().toLowerCase()
+    const somenteAtivos = ativoQuery === 'true' || ativoQuery === '1'
     let query = supabase
       .from('usuarios')
       .select('id, nome, email, perfil, ativo, departamento_id, criado_em')
       .eq('company_id', company_id)
       .order('nome')
-    if (perfil !== 'admin') {
+    if (perfil !== 'admin' || somenteAtivos) {
       query = query.eq('ativo', true)
     }
     const { data, error } = await query
