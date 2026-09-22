@@ -252,15 +252,26 @@ describe('Whapi catálogo — envio', () => {
   const inst = () => ({ id: 10, company_id: 1, provider: 'whapi', instance_id: 'NEBULA-AER3B', instance_token: 'TESTTOKEN', ativo: true })
   const OPTS = { companyId: 1, whatsappInstanceId: 10 }
 
-  test('sendProduct POST /messages/send/product { to, product_id }', async () => {
+  test('sendProduct POST /business/products/{ProductID} { to } (product_id vai na URL)', async () => {
     const { fetchWithRetry } = mockDeps({ instancesById: { '1:10': inst() } })
     const whapi = require('../services/providers/whapi')
     const r = await whapi.sendProduct('5534988887777', { productId: 'prod_1' }, OPTS)
     expect(r.ok).toBe(true)
     expect(r.messageId).toBe('wamid.PROD')
     const [url, opts] = fetchWithRetry.mock.calls[0]
-    expect(url).toBe('https://gate.whapi.test/messages/send/product')
-    expect(JSON.parse(opts.body)).toMatchObject({ to: '5534988887777', product_id: 'prod_1' })
+    expect(url).toBe('https://gate.whapi.test/business/products/prod_1')
+    const sent = JSON.parse(opts.body)
+    expect(sent).toMatchObject({ to: '5534988887777' })
+    expect(sent.product_id).toBeUndefined()
+  })
+
+  test('sendProduct inclui catalog_id no corpo quando informado', async () => {
+    const { fetchWithRetry } = mockDeps({ instancesById: { '1:10': inst() } })
+    const whapi = require('../services/providers/whapi')
+    const r = await whapi.sendProduct('5534988887777', { productId: 'prod_1', catalogId: 'cat_9' }, OPTS)
+    expect(r.ok).toBe(true)
+    const [, opts] = fetchWithRetry.mock.calls[0]
+    expect(JSON.parse(opts.body)).toMatchObject({ to: '5534988887777', catalog_id: 'cat_9' })
   })
 
   test('sendProduct rejeita sem productId sem chamar API', async () => {
@@ -271,13 +282,15 @@ describe('Whapi catálogo — envio', () => {
     expect(fetchWithRetry).not.toHaveBeenCalled()
   })
 
-  test('sendCatalog POST /messages/send/catalog { to, contact_id }', async () => {
+  test('sendCatalog POST /business/catalogs/{ContactID} { to, title } (contact_id vai na URL)', async () => {
     const { fetchWithRetry } = mockDeps({ instancesById: { '1:10': inst() } })
     const whapi = require('../services/providers/whapi')
     const r = await whapi.sendCatalog('5534988887777', { contactId: '5534999990000', title: 'Nossa loja' }, OPTS)
     expect(r.ok).toBe(true)
     const [url, opts] = fetchWithRetry.mock.calls[0]
-    expect(url).toBe('https://gate.whapi.test/messages/send/catalog')
-    expect(JSON.parse(opts.body)).toMatchObject({ to: '5534988887777', contact_id: '5534999990000', title: 'Nossa loja' })
+    expect(url).toBe('https://gate.whapi.test/business/catalogs/5534999990000')
+    const sent = JSON.parse(opts.body)
+    expect(sent).toMatchObject({ to: '5534988887777', title: 'Nossa loja' })
+    expect(sent.contact_id).toBeUndefined()
   })
 })
