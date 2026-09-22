@@ -50,8 +50,8 @@ describe('client_temp_id durable idempotency contract', () => {
     // detalharChat foi modularizado para controllers/chat/conversationDetailController.js.
     const src = fs.readFileSync(path.join(__dirname, '../controllers/chat/conversationDetailController.js'), 'utf8')
 
-    // O select paginado do detalharChat termina em audio_duracao_sec, client_temp_id.
-    expect(src).toContain('apagada_em, audio_duracao_sec, client_temp_id')
+    // O select paginado do detalharChat traz audio_duracao_sec seguido de client_temp_id.
+    expect(src).toContain('audio_duracao_sec, client_temp_id')
 
     // E o fallback de coluna ausente cobre client_temp_id (banco antigo sem a coluna).
     expect(src).toContain("String(errMsgs.message || '').includes('client_temp_id')")

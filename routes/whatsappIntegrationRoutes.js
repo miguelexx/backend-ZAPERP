@@ -6,6 +6,23 @@ const { apiLimiter } = require('../middleware/rateLimit')
 const whatsappIntegrationController = require('../controllers/whatsappIntegrationController')
 
 router.use(auth)
+
+// Catálogo WhatsApp Business (Whapi) — acessível a qualquer usuário autenticado da
+// empresa (inclusive atendentes). O isolamento por empresa é garantido no controller
+// via requireWhapiInstance (company_id sempre do JWT). Registrado ANTES do gate
+// supervisorOrAdmin para que atendentes possam ler e gerenciar produtos/coleções.
+router.get('/instances/:id/catalog/products', apiLimiter, whatsappIntegrationController.getInstanceCatalogProducts)
+router.post('/instances/:id/catalog/products', apiLimiter, whatsappIntegrationController.createInstanceCatalogProduct)
+router.get('/instances/:id/catalog/products/:productId', apiLimiter, whatsappIntegrationController.getInstanceCatalogProduct)
+router.patch('/instances/:id/catalog/products/:productId', apiLimiter, whatsappIntegrationController.updateInstanceCatalogProduct)
+router.delete('/instances/:id/catalog/products/:productId', apiLimiter, whatsappIntegrationController.deleteInstanceCatalogProduct)
+router.get('/instances/:id/catalog/collections', apiLimiter, whatsappIntegrationController.getInstanceCatalogCollections)
+router.post('/instances/:id/catalog/collections', apiLimiter, whatsappIntegrationController.createInstanceCatalogCollection)
+router.get('/instances/:id/catalog/collections/:collectionId', apiLimiter, whatsappIntegrationController.getInstanceCatalogCollection)
+router.patch('/instances/:id/catalog/collections/:collectionId', apiLimiter, whatsappIntegrationController.editInstanceCatalogCollection)
+router.delete('/instances/:id/catalog/collections/:collectionId', apiLimiter, whatsappIntegrationController.deleteInstanceCatalogCollection)
+router.get('/instances/:id/catalog/collections/:collectionId/products', apiLimiter, whatsappIntegrationController.getInstanceCatalogCollectionProducts)
+
 router.use(supervisorOrAdmin)
 router.use(apiLimiter)
 
@@ -34,18 +51,6 @@ router.post('/instances/:id/logout', whatsappIntegrationController.logoutInstanc
 // Whapi-only: perfil Business, metadados de chat e presença do contato
 router.get('/instances/:id/business-profile', whatsappIntegrationController.getInstanceBusinessProfile)
 router.post('/instances/:id/business-profile', whatsappIntegrationController.updateInstanceBusinessProfile)
-// Whapi-only: catálogo WhatsApp Business (vitrine da empresa — produtos + coleções): leitura + CRUD
-router.get('/instances/:id/catalog/products', whatsappIntegrationController.getInstanceCatalogProducts)
-router.post('/instances/:id/catalog/products', whatsappIntegrationController.createInstanceCatalogProduct)
-router.get('/instances/:id/catalog/products/:productId', whatsappIntegrationController.getInstanceCatalogProduct)
-router.patch('/instances/:id/catalog/products/:productId', whatsappIntegrationController.updateInstanceCatalogProduct)
-router.delete('/instances/:id/catalog/products/:productId', whatsappIntegrationController.deleteInstanceCatalogProduct)
-router.get('/instances/:id/catalog/collections', whatsappIntegrationController.getInstanceCatalogCollections)
-router.post('/instances/:id/catalog/collections', whatsappIntegrationController.createInstanceCatalogCollection)
-router.get('/instances/:id/catalog/collections/:collectionId', whatsappIntegrationController.getInstanceCatalogCollection)
-router.patch('/instances/:id/catalog/collections/:collectionId', whatsappIntegrationController.editInstanceCatalogCollection)
-router.delete('/instances/:id/catalog/collections/:collectionId', whatsappIntegrationController.deleteInstanceCatalogCollection)
-router.get('/instances/:id/catalog/collections/:collectionId/products', whatsappIntegrationController.getInstanceCatalogCollectionProducts)
 router.get('/instances/:id/chats/:chatId', whatsappIntegrationController.getInstanceChat)
 router.get('/instances/:id/presence', whatsappIntegrationController.getInstancePresence)
 router.post('/instances/:id/presence/subscribe', whatsappIntegrationController.subscribeInstancePresence)

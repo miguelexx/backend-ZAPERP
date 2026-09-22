@@ -195,6 +195,105 @@ async function applyWhapiEditedMessage(ctxSrc, m, io) {
   return true
 }
 
+/**
+ * Detecta o evento de revogação ("apagar para todos") vindo do Whapi. Chega em formatos
+ * variados: type 'deleted'/'revoke'/'revoked'/'trash', flag `m.deleted`, ou action.type 'delete'.
+ */
+function isWhapiDeletedMessage(m) {
+  if (!m || typeof m !== 'object') return false
+  if (m.deleted === true) return true
+  const type = String(m.type || '').toLowerCase()
+  if (type === 'deleted' || type === 'revoke' || type === 'revoked' || type === 'trash') return true
+  const actionType = String(m.action?.type || '').toLowerCase()
+  if (actionType === 'delete' || actionType === 'revoke' || actionType === 'revoked' || actionType === 'deleted') return true
+  return false
+}
+
+/** Id da mensagem-alvo da revogação. Em action.type=delete o alvo vem em action.target. */
+function extractWhapiDeletedTargetId(m) {
+  const cands = [
+    m?.action?.target,
+    m?.action?.target_id,
+    m?.action?.message_id,
+    m?.referenced_message?.id,
+    m?.context?.quoted_id,
+    m?.context?.quotedId,
+    m?.target,
+    m?.id,
+  ]
+  for (const c of cands) {
+    const s = c != null ? String(c).trim() : ''
+    if (s) return s
+  }
+  return null
+}
+
+/**
+ * Cliente apagou "para todos": NÃO removemos nem escondemos o conteúdo. Marcamos
+ * `apagada_pelo_cliente` para o painel exibir um aviso discreto mantendo a mensagem original.
+ * Só trata revogação do contato (from_me=false) — revogação nossa passa pelo endpoint próprio.
+ */
+async function applyWhapiDeletedMessage(ctxSrc, m, io) {
+  if (ctxSrc?.company_id == null) return false
+  const fromMe = Boolean(m.from_me ?? m.fromMe)
+  if (fromMe) return false // apagada do nosso número: fluxo próprio (excluirMensagem), não é "cliente apagou"
+  const targetId = extractWhapiDeletedTargetId(m)
+  if (!targetId) return false
+
+  const findRow = async ({ withInstance }) => {
+    let query = supabase
+      .from('mensagens')
+      .select('id, conversa_id, apagada_pelo_cliente, apagada_para_todos')
+      .eq('company_id', ctxSrc.company_id)
+      .eq('whatsapp_id', targetId)
+    if (withInstance && ctxSrc.whatsapp_instance_id) {
+      query = query.eq('whatsapp_instance_id', ctxSrc.whatsapp_instance_id)
+    }
+    return query.order('id', { ascending: false }).limit(1).maybeSingle()
+  }
+
+  let { data: row, error } = await findRow({ withInstance: true })
+  if ((!row?.id || error) && ctxSrc.whatsapp_instance_id) {
+    // Fallback: linha legada sem whatsapp_instance_id / divergência de instância.
+    ;({ data: row, error } = await findRow({ withInstance: false }))
+  }
+  if (error || !row?.id) return false
+  // Já revogada por nós (apagada_para_todos oculta o texto) ou já marcada: não sobrescreve.
+  if (row.apagada_para_todos === true || row.apagada_pelo_cliente === true) return true
+
+  const apagadaEm = new Date().toISOString()
+  const { error: errUpd } = await supabase
+    .from('mensagens')
+    .update({ apagada_pelo_cliente: true, apagada_pelo_cliente_em: apagadaEm })
+    .eq('company_id', ctxSrc.company_id)
+    .eq('id', row.id)
+  if (errUpd) {
+    const msg = String(errUpd.message || '')
+    if (msg.includes('apagada_pelo_cliente') || msg.includes('does not exist')) {
+      console.warn('[WHAPI] coluna apagada_pelo_cliente ausente — rode a migration 20260921120000.')
+    } else {
+      console.warn('[WHAPI] marcar apagada_pelo_cliente falhou:', errUpd.message)
+    }
+    return false
+  }
+
+  if (io) {
+    emitirEventoEmpresaConversa(
+      io,
+      ctxSrc.company_id,
+      row.conversa_id,
+      'mensagem_apagada_cliente',
+      {
+        conversa_id: row.conversa_id,
+        mensagem_id: row.id,
+        company_id: ctxSrc.company_id,
+        apagada_pelo_cliente_em: apagadaEm,
+      }
+    )
+  }
+  return true
+}
+
 /** Extrai dígitos de um JID (5534999@s.whatsapp.net → 5534999; 120363@g.us → 120363).
  * @lid NÃO é telefone — devolve vazio para o caller usar a chave lid:… */
 function isLidJid(jid) {
@@ -925,6 +1024,15 @@ async function handleWebhookWhapi(req, res) {
     }
 
     for (const m of messages) {
+      // Cliente apagou "para todos": marca a linha existente (aviso discreto) sem recriar
+      // conversa/contato. Roda ANTES da guarda de histórico — a revogação deve refletir
+      // mesmo em mensagem antiga — e antes do normalize, que descartaria o evento.
+      if (isWhapiDeletedMessage(m)) {
+        try { await applyWhapiDeletedMessage(ctxSrc, m, io) } catch (e) {
+          console.warn('[WHAPI] applyWhapiDeletedMessage falhou:', e?.message || e)
+        }
+        continue
+      }
       // Guarda anti-histórico: no (re)connect / webhook persistente o Whapi reentrega backlog
       // antigo com o timestamp original. Descartamos antes de criar conversa/contato/mensagem.
       if (whapiInboundIsHistorical(m, nowMs, whapiMaxAgeMs)) {
@@ -1017,4 +1125,7 @@ exports._test = {
   whapiMessageEpochMs,
   whapiInboundIsHistorical,
   getWhapiInboundMaxAgeMs,
+  isWhapiDeletedMessage,
+  extractWhapiDeletedTargetId,
+  applyWhapiDeletedMessage,
 }
