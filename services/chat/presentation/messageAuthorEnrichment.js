@@ -17,42 +17,49 @@ function textoRevogadoApagadaParaTodos(m, viewerUserId) {
   return souAutor ? 'Você apagou esta mensagem para todos.' : 'Esta mensagem foi apagada para todos.'
 }
 
-function aplicarApagadaParaTodosNaMensagem(m, viewerUserId) {
-  if (!m?.apagada_para_todos) return m
-  return {
-    ...m,
-    apagada_para_todos: true,
-    texto: textoRevogadoApagadaParaTodos(m, viewerUserId),
-    reply_meta: null,
-    mensagem_respondida_id: null,
-  }
+// Exclusão "para todos" agora é AUDITÁVEL: mantemos o conteúdo original (texto/mídia/reply)
+// visível no painel e só exibimos um aviso de quem apagou e quando. Esta função virou
+// passthrough (mantida por compatibilidade com quem ainda a importa) — não altera o conteúdo.
+function aplicarApagadaParaTodosNaMensagem(m /*, viewerUserId */) {
+  return m
 }
 
-async function enrichMensagensComAutorUsuario(supabase, company_id, mensagens, viewerUserId = null) {
+function nomeDoUsuario(usuarioMap, id) {
+  if (id == null) return null
+  return usuarioMap.get(id) ?? usuarioMap.get(Number(id)) ?? null
+}
+
+async function enrichMensagensComAutorUsuario(supabase, company_id, mensagens /*, viewerUserId */) {
   if (!Array.isArray(mensagens) || mensagens.length === 0) return mensagens
-  const autorIds = [...new Set(mensagens.map((m) => m.autor_usuario_id).filter(Boolean))]
-  const decorate = (m, usuarioNome) => {
-    let row = {
+  // Além do autor, resolvemos o nome de QUEM apagou (pode ser um admin diferente do autor).
+  const idsRelevantes = [
+    ...new Set(
+      mensagens
+        .flatMap((m) => [m.autor_usuario_id, m.apagada_por_usuario_id])
+        .filter(Boolean)
+    ),
+  ]
+  const decorate = (m, usuarioMap) => {
+    const usuarioNome =
+      (m.direcao === 'out' || isInternalNoteRow(m)) && m.autor_usuario_id
+        ? nomeDoUsuario(usuarioMap, m.autor_usuario_id)
+        : null
+    const row = {
       ...m,
       criado_em: normalizarTimestampSemFusoAmbiguoParaApi(m.criado_em),
       usuario_id: m.autor_usuario_id ?? null,
       usuario_nome: usuarioNome,
       enviado_por_usuario: m.direcao === 'out' && m.autor_usuario_id != null,
+      apagada_por_nome: m.apagada_para_todos && m.apagada_por_usuario_id != null
+        ? nomeDoUsuario(usuarioMap, m.apagada_por_usuario_id)
+        : (m.apagada_por_nome ?? null),
     }
-    if (viewerUserId != null) row = aplicarApagadaParaTodosNaMensagem(row, viewerUserId)
     return aplicarCamposEdicaoNaMensagem(row)
   }
-  if (autorIds.length === 0) return mensagens.map((m) => decorate(m, null))
-  const { data: us } = await supabase.from('usuarios').select('id, nome').eq('company_id', company_id).in('id', autorIds)
+  if (idsRelevantes.length === 0) return mensagens.map((m) => decorate(m, new Map()))
+  const { data: us } = await supabase.from('usuarios').select('id, nome').eq('company_id', company_id).in('id', idsRelevantes)
   const usuarioMap = new Map((us || []).map((u) => [u.id, u.nome]))
-  return mensagens.map((m) =>
-    decorate(
-      m,
-      (m.direcao === 'out' || isInternalNoteRow(m)) && m.autor_usuario_id
-        ? (usuarioMap.get(m.autor_usuario_id) ?? usuarioMap.get(Number(m.autor_usuario_id)) ?? null)
-        : null
-    )
-  )
+  return mensagens.map((m) => decorate(m, usuarioMap))
 }
 
 /** Texto ao WhatsApp com *nome* na primeira linha (respeita getUsuarioParaEnvioCliente). CRM grava sem prefixo. */

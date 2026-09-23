@@ -10,7 +10,7 @@ const { normalizarTimestampSemFusoAmbiguoParaApi } = require('../../helpers/time
 const { isInternalNoteRow } = require('../../helpers/internalNote')
 const { resolveConversationWhatsappInstance, resolveConversationProvider } = require('../../services/chat/identity/conversationAddressService')
 const { emitirConversaAtualizada, emitirEventoEmpresaConversa, emitirParaUsuario } = require('../../services/chat/realtime/chatRealtimeGateway')
-const { textoRevogadoApagadaParaTodos, aplicarApagadaParaTodosNaMensagem, enrichMensagemComAutorUsuario } = require('../../services/chat/presentation/messageAuthorEnrichment')
+const { aplicarApagadaParaTodosNaMensagem, enrichMensagemComAutorUsuario } = require('../../services/chat/presentation/messageAuthorEnrichment')
 
 exports.excluirMensagem = async (req, res) => {
   try {
@@ -128,27 +128,29 @@ exports.excluirMensagem = async (req, res) => {
       return res.status(502).json({ error: 'Falha ao apagar a mensagem no WhatsApp. Tente novamente.' })
     }
 
-    const textoRevogado = textoRevogadoApagadaParaTodos(msg, user_id)
+    // Auditoria: NÃO apagamos o registro nem escondemos o conteúdo — a mensagem já foi
+    // removida no WhatsApp do cliente acima. No painel interno mantemos o balão original
+    // (texto/mídia/reply intactos) e só registramos que foi apagada, por quem e quando.
+    const apagadaEm = new Date().toISOString()
     const { data: msgRevogada, error: errUpd } = await supabase
       .from('mensagens')
       .update({
         apagada_para_todos: true,
-        apagada_em: new Date().toISOString(),
-        texto: textoRevogado,
-        reply_meta: null,
+        apagada_em: apagadaEm,
+        apagada_por_usuario_id: Number(user_id),
       })
       .eq('company_id', company_id)
       .eq('conversa_id', cid)
       .eq('id', mid)
-      .select('id, texto, direcao, criado_em, autor_usuario_id, status, whatsapp_id, tipo, url, nome_arquivo, apagada_para_todos, apagada_em')
+      .select('id, texto, direcao, criado_em, autor_usuario_id, status, whatsapp_id, tipo, url, nome_arquivo, reply_meta, apagada_para_todos, apagada_em, apagada_por_usuario_id, apagada_pelo_cliente, apagada_pelo_cliente_em')
       .maybeSingle()
 
     if (errUpd) {
       const errMsg = String(errUpd.message || '')
-      if (errMsg.includes('apagada_para_todos') || errMsg.includes('does not exist')) {
+      if (errMsg.includes('apagada_para_todos') || errMsg.includes('apagada_por_usuario_id') || errMsg.includes('does not exist')) {
         return res.status(400).json({
           error:
-            'Banco desatualizado: execute a migration 20260525120000_mensagens_apagada_para_todos.sql no Supabase.',
+            'Banco desatualizado: execute as migrations 20260525120000_mensagens_apagada_para_todos.sql e 20260923120000_mensagens_apagada_por_usuario.sql no Supabase.',
         })
       }
       return res.status(500).json({ error: errUpd.message })
@@ -179,6 +181,18 @@ exports.excluirMensagem = async (req, res) => {
       .eq('company_id', company_id)
       .eq('id', cid)
 
+    // Nome de quem apagou (para o aviso de auditoria). Pode ser o próprio autor ou um admin.
+    let apagadaPorNome = null
+    try {
+      const { data: quemApagou } = await supabase
+        .from('usuarios')
+        .select('nome')
+        .eq('company_id', company_id)
+        .eq('id', Number(user_id))
+        .maybeSingle()
+      apagadaPorNome = (quemApagou?.nome && String(quemApagou.nome).trim()) || null
+    } catch { /* nome é best-effort; o frontend cai em "Você"/"Um atendente" */ }
+
     const io = req.app.get('io')
     if (io) {
       emitirEventoEmpresaConversa(
@@ -189,16 +203,26 @@ exports.excluirMensagem = async (req, res) => {
         {
           conversa_id: cid,
           mensagem_id: mid,
-          ultima_mensagem: ultima
+          ultima_mensagem: ultima,
+          apagada_em: apagadaEm,
+          apagada_por_usuario_id: Number(user_id),
+          apagada_por_nome: apagadaPorNome,
         }
       )
       emitirConversaAtualizada(io, company_id, cid, { id: cid })
     }
 
-    const msgApi = aplicarApagadaParaTodosNaMensagem(
-      await enrichMensagemComAutorUsuario(supabase, company_id, msgRevogada),
-      user_id
-    )
+    // aplicarApagadaParaTodosNaMensagem virou passthrough (mantém conteúdo); só anexamos
+    // os metadados de auditoria para o painel exibir "quem apagou e quando".
+    const msgApi = {
+      ...aplicarApagadaParaTodosNaMensagem(
+        await enrichMensagemComAutorUsuario(supabase, company_id, msgRevogada),
+        user_id
+      ),
+      apagada_em: apagadaEm,
+      apagada_por_usuario_id: Number(user_id),
+      apagada_por_nome: apagadaPorNome,
+    }
     return res.json({
       ok: true,
       conversa_id: cid,

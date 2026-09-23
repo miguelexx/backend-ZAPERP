@@ -179,7 +179,7 @@ exports.detalharChat = async (req, res) => {
     // fallback por conteúdo é fraco — o eco costuma chegar sem tamanho/last_modified e com URL
     // /uploads vs blob: — então a mídia duplicava (uma bolha pendente + uma entregue). O
     // `selectFallback` abaixo já cobre bancos sem a coluna via "does not exist".
-    const selectComRemetente = 'id, conversa_id, texto, direcao, criado_em, autor_usuario_id, status, whatsapp_id, whatsapp_instance_id, tipo, url, nome_arquivo, reply_meta, remetente_nome, remetente_telefone, contact_meta, location_meta, apagada_para_todos, apagada_em, apagada_pelo_cliente, apagada_pelo_cliente_em, audio_duracao_sec, client_temp_id, editada, editada_em'
+    const selectComRemetente = 'id, conversa_id, texto, direcao, criado_em, autor_usuario_id, status, whatsapp_id, whatsapp_instance_id, tipo, url, nome_arquivo, reply_meta, remetente_nome, remetente_telefone, contact_meta, location_meta, apagada_para_todos, apagada_em, apagada_por_usuario_id, apagada_pelo_cliente, apagada_pelo_cliente_em, audio_duracao_sec, client_temp_id, editada, editada_em'
     let mensagens = []
     let errMsgs = null
     let query
