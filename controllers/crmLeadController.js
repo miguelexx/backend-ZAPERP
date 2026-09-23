@@ -15,6 +15,34 @@ async function crmDisponivelParaEmpresa(companyId) {
 }
 
 /**
+ * Normaliza uma etapa (coluna do funil) vinda do CRM Avançado para o formato que
+ * o front consome nos botões de "Enviar ao CRM". Aceita variações de nomenclatura
+ * (nome/name/label, cor/color, ordem/order, id/etapaId/stage_id...).
+ * Retorna null quando a etapa não tem nome (linha inútil).
+ */
+function normalizeEtapa(e, i) {
+  if (!e || typeof e !== 'object') return null
+  const id = e.id ?? e.etapaId ?? e.stage_id ?? e.stageId ?? null
+  const nome = (e.nome ?? e.name ?? e.label ?? '').toString().trim()
+  if (!nome) return null
+  return {
+    id: id != null ? String(id) : null,
+    nome,
+    ordem: Number.isFinite(Number(e.ordem ?? e.order)) ? Number(e.ordem ?? e.order) : i,
+    tipo: (e.tipo ?? e.type ?? '').toString().trim() || null,
+    cor: (e.cor ?? e.color ?? '').toString().trim() || null,
+  }
+}
+
+/** Normaliza e ordena uma lista de etapas por `ordem`. */
+function normalizeEtapasList(list) {
+  return (Array.isArray(list) ? list : [])
+    .map((e, i) => normalizeEtapa(e, i))
+    .filter(Boolean)
+    .sort((a, b) => a.ordem - b.ordem)
+}
+
+/**
  * POST /api/crm/leads/from-conversa/:conversaId
  *
  * "Enviar ao CRM": transforma o contato de uma conversa em lead no CRM Avançado
@@ -118,6 +146,23 @@ async function enviarLeadDaConversa(req, res) {
         ? req.body.etapa_nome.trim()
         : null
 
+    // Funil escolhido pelo usuário (opcional). O front manda o id e/ou o nome do
+    // funil; o CRM Avançado cria/move o lead direto para o funil + etapa dados.
+    const funilIdRaw = req.body?.funil_id
+    const funilId =
+      funilIdRaw === null || funilIdRaw === undefined || String(funilIdRaw).trim() === ''
+        ? null
+        : String(funilIdRaw).trim()
+    const funilNome =
+      typeof req.body?.funil_nome === 'string' && req.body.funil_nome.trim()
+        ? req.body.funil_nome.trim()
+        : null
+
+    // Ação manual: quando o usuário clica "Enviar ao CRM" (vs. captura automática
+    // via webhook de inbound). O CRM usa isso para permitir entrar em qualquer
+    // etapa em andamento do funil escolhido.
+    const usuarioId = req.user?.id != null ? String(req.user.id) : null
+
     // 4. Sincroniza contato + lead no CRM Avançado.
     //    contatoId = cliente.id (quando há cliente cadastrado).
     if (cliente?.id) {
@@ -140,8 +185,12 @@ async function enviarLeadDaConversa(req, res) {
       origemNome: 'WhatsApp',
       responsavelEmail: (req.user?.email && String(req.user.email).trim()) || null,
       observacoes,
+      funilId,
+      funilNome,
       etapaId,
       etapaNome,
+      acaoManual: true,
+      usuarioId,
     }
 
     let leadRes = await crmSync.syncLead(leadPayload)
@@ -211,40 +260,49 @@ async function listarEtapasCrm(req, res) {
     const raw = await crmSync.listEtapas(companyId)
 
     if (crmSync.isCrmError(raw)) {
-      return res.status(200).json({ etapas: [], disponivel: false, pipeline_nome: null })
+      return res.status(200).json({ etapas: [], funis: [], disponivel: false, pipeline_nome: null })
     }
 
-    // Aceita { etapas: [...] } ou um array direto; normaliza cada etapa.
-    const lista = Array.isArray(raw) ? raw : Array.isArray(raw?.etapas) ? raw.etapas : []
-    const etapas = lista
-      .map((e, i) => {
-        if (!e || typeof e !== 'object') return null
-        const id = e.id ?? e.etapaId ?? e.stage_id ?? e.stageId ?? null
-        const nome = (e.nome ?? e.name ?? e.label ?? '').toString().trim()
-        if (!nome) return null
+    // Formato novo do CRM: `funis[]`, cada um com suas próprias `etapas`. Cada
+    // funil pode ser marcado como `padrao:true`. Aceitamos também o formato
+    // antigo (funil único: `{ funil, etapas }` ou um array direto de etapas).
+    const funisRaw = Array.isArray(raw?.funis) ? raw.funis : []
+    const funis = funisRaw
+      .map((f, i) => {
+        if (!f || typeof f !== 'object') return null
+        const id = f.id ?? f.funilId ?? f.pipeline_id ?? f.pipelineId ?? null
+        const nome = (f.nome ?? f.name ?? f.label ?? '').toString().trim() || `Funil ${i + 1}`
         return {
           id: id != null ? String(id) : null,
           nome,
-          ordem: Number.isFinite(Number(e.ordem ?? e.order)) ? Number(e.ordem ?? e.order) : i,
-          tipo: (e.tipo ?? e.type ?? '').toString().trim() || null,
-          cor: (e.cor ?? e.color ?? '').toString().trim() || null,
+          padrao: f.padrao === true || f.default === true || f.isDefault === true,
+          etapas: normalizeEtapasList(f.etapas ?? f.stages),
         }
       })
-      .filter(Boolean)
-      .sort((a, b) => a.ordem - b.ordem)
+      .filter((f) => f && f.etapas.length > 0)
+
+    // Etapas do funil padrão/legado — mantém o campo `etapas` para
+    // compatibilidade com builds antigos do front (funil único).
+    const funilPadrao = funis.find((f) => f.padrao) || funis[0] || null
+    const etapasLegado = Array.isArray(raw)
+      ? normalizeEtapasList(raw)
+      : Array.isArray(raw?.etapas)
+        ? normalizeEtapasList(raw.etapas)
+        : (funilPadrao ? funilPadrao.etapas : [])
 
     return res.status(200).json({
-      etapas,
+      etapas: etapasLegado,
+      funis,
       disponivel: raw != null,
       // O CRM Avançado devolve o funil em `funil.nome`; aceitamos também
       // pipelineNome/pipeline_nome caso o contrato evolua.
       pipeline_nome:
-        (raw?.funil?.nome ?? raw?.pipelineNome ?? raw?.pipeline_nome ?? null) || null,
+        (raw?.funil?.nome ?? raw?.pipelineNome ?? raw?.pipeline_nome ?? funilPadrao?.nome ?? null) || null,
     })
   } catch (err) {
     console.error('[crmLead] Falha ao listar etapas do CRM', err?.message || err)
     // Não quebra a UI: devolve vazio para o front cair no envio simples.
-    return res.status(200).json({ etapas: [], disponivel: false })
+    return res.status(200).json({ etapas: [], funis: [], disponivel: false })
   }
 }
 

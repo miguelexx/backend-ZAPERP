@@ -182,16 +182,23 @@ function syncContato(p = {}) {
  * lead direto para essa etapa (upsert por leadId). Ambos são opcionais — sem
  * eles, o CRM usa a etapa padrão do funil (comportamento atual).
  *
+ * FUNIL: no "Enviar ao CRM" o usuário escolhe o funil + a etapa; o ZapERP envia
+ * `funilId`/`funilNome` além de `etapaId`/`etapaNome`, com `acaoManual:true`. O
+ * CRM cria/move o lead para o funil + etapa escolhidos. A captura automática de
+ * inbound não manda nenhum desses (CRM usa o funil e a etapa padrão).
+ *
  * @param {{ empresaId:number|string, leadId:number|string, nome:string,
  *           email?:string, telefone?:string, origemNome?:string,
  *           responsavelEmail?:string, observacoes?:string,
- *           etapaId?:number|string, etapaNome?:string }} p
+ *           funilId?:number|string, funilNome?:string,
+ *           etapaId?:number|string, etapaNome?:string,
+ *           acaoManual?:boolean, usuarioId?:number|string }} p
  */
 function syncLead(p = {}) {
   const empresaId = idToString(p.empresaId)
   const leadId = idToString(p.leadId)
   if (!empresaId || !leadId || !p.nome) return Promise.resolve(null)
-  return post('/lead', pruneEmpty({
+  const body = pruneEmpty({
     empresaId,
     leadId,
     nome: p.nome,
@@ -200,9 +207,16 @@ function syncLead(p = {}) {
     origemNome: p.origemNome,
     responsavelEmail: p.responsavelEmail,
     observacoes: p.observacoes,
+    funilId: idToString(p.funilId),
+    funilNome: p.funilNome,
     etapaId: idToString(p.etapaId),
     etapaNome: p.etapaNome,
-  }))
+    usuarioId: idToString(p.usuarioId),
+  })
+  // acaoManual é booleano — pruneEmpty removeria `false`, então só o setamos
+  // explicitamente quando true (envio manual pelo botão "Enviar ao CRM").
+  if (p.acaoManual === true) body.acaoManual = true
+  return post('/lead', body)
 }
 
 /**

@@ -101,6 +101,54 @@ describe('GET /api/crm/etapas', () => {
     )
   })
 
+  it('expõe funis[] (multi-funil) com etapas normalizadas e ordenadas por funil', async () => {
+    mockListEtapas.mockResolvedValue({
+      pipelineNome: 'ZapERP',
+      funil: { id: 'f1', nome: 'ZapERP' },
+      etapas: [{ id: 'e1', nome: 'Leads', ordem: 0, tipo: 'EM_ANDAMENTO', cor: '#2563eb' }],
+      funis: [
+        {
+          id: 'f1',
+          nome: 'ZapERP',
+          padrao: true,
+          etapas: [
+            { id: 'e2', nome: 'Contato Realizado', ordem: 1, tipo: 'EM_ANDAMENTO', cor: '#7c3aed' },
+            { id: 'e1', nome: 'Leads', ordem: 0, tipo: 'EM_ANDAMENTO', cor: '#2563eb' },
+          ],
+        },
+        {
+          id: 'f2',
+          nome: 'WM Sistemas',
+          padrao: false,
+          etapas: [{ id: 'x1', nome: 'Prospecção', ordem: 0, tipo: 'EM_ANDAMENTO', cor: '#059669' }],
+        },
+      ],
+    })
+    const res = await request(app).get('/api/crm/etapas').set('Authorization', `Bearer ${authToken}`)
+    expect(res.status).toBe(200)
+    expect(res.body.funis).toHaveLength(2)
+    expect(res.body.funis[0]).toEqual(
+      expect.objectContaining({ id: 'f1', nome: 'ZapERP', padrao: true })
+    )
+    // Etapas do funil padrão ordenadas por `ordem`.
+    expect(res.body.funis[0].etapas.map((e) => e.nome)).toEqual(['Leads', 'Contato Realizado'])
+    expect(res.body.funis[1]).toEqual(expect.objectContaining({ id: 'f2', nome: 'WM Sistemas', padrao: false }))
+    // `etapas` (legado) continua vindo — as do funil padrão/topo.
+    expect(res.body.etapas.map((e) => e.nome)).toEqual(['Leads'])
+    expect(res.body.pipeline_nome).toBe('ZapERP')
+  })
+
+  it('funis[] vem vazio quando o CRM só devolve o formato antigo (funil único)', async () => {
+    mockListEtapas.mockResolvedValue({
+      funil: { id: 'f1', nome: 'Comercial' },
+      etapas: [{ id: 'e1', nome: 'Leads', ordem: 0 }],
+    })
+    const res = await request(app).get('/api/crm/etapas').set('Authorization', `Bearer ${authToken}`)
+    expect(res.status).toBe(200)
+    expect(res.body.funis).toEqual([])
+    expect(res.body.etapas.map((e) => e.nome)).toEqual(['Leads'])
+  })
+
   it('aceita array direto do CRM', async () => {
     mockListEtapas.mockResolvedValue([{ id: 9, name: 'Negociação' }])
     const res = await request(app).get('/api/crm/etapas').set('Authorization', `Bearer ${authToken}`)
@@ -131,6 +179,26 @@ describe('POST /leads/from-conversa — etapa escolhida', () => {
     expect(res.status).toBe(201)
     expect(mockSyncLead).toHaveBeenCalledWith(
       expect.objectContaining({ leadId: 10, etapaId: '3', etapaNome: 'Perdido' })
+    )
+  })
+
+  it('encaminha funil_id/funil_nome escolhidos + acaoManual/usuarioId', async () => {
+    mockConversaRow = { id: 10, tipo: 'individual', telefone: '5511999', cliente_id: null }
+    const res = await request(app)
+      .post('/api/crm/leads/from-conversa/10')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ funil_id: 'f2', funil_nome: 'WM Sistemas', etapa_id: 'x1', etapa_nome: 'Prospecção' })
+    expect(res.status).toBe(201)
+    expect(mockSyncLead).toHaveBeenCalledWith(
+      expect.objectContaining({
+        leadId: 10,
+        funilId: 'f2',
+        funilNome: 'WM Sistemas',
+        etapaId: 'x1',
+        etapaNome: 'Prospecção',
+        acaoManual: true,
+        usuarioId: '7',
+      })
     )
   })
 
