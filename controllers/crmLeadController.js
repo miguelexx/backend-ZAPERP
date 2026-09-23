@@ -3,6 +3,16 @@
 const supabase = require('../config/supabase')
 const crmSync = require('../services/crmSyncService')
 const { isGroupConversation } = require('../helpers/conversaHelper')
+const { empresaModuloCrmHabilitado } = require('../helpers/moduloCrmEmpresa')
+
+/**
+ * CRM disponível para a empresa = interruptor de ambiente E flag por empresa.
+ * Espelha exatamente a condição que o frontend usa para exibir o botão.
+ */
+async function crmDisponivelParaEmpresa(companyId) {
+  if (!crmSync.isEnabled()) return false
+  return empresaModuloCrmHabilitado(companyId)
+}
 
 /**
  * POST /api/crm/leads/from-conversa/:conversaId
@@ -37,10 +47,10 @@ async function enviarLeadDaConversa(req, res) {
     return res.status(400).json({ error: 'Conversa inválida.' })
   }
 
-  // Interruptor mestre: sem CRM_AVANCADO_URL/ZAP_SSO_SECRET não há para onde enviar.
-  if (!crmSync.isEnabled()) {
+  // Interruptor mestre (ambiente) + módulo CRM ligado para esta empresa.
+  if (!(await crmDisponivelParaEmpresa(companyId))) {
     return res.status(403).json({
-      error: 'O CRM Avançado não está configurado neste ambiente.',
+      error: 'O CRM não está disponível para esta empresa.',
       code: 'CRM_DISABLED',
     })
   }
@@ -190,9 +200,9 @@ async function listarEtapasCrm(req, res) {
   const companyId = Number(req.user?.company_id)
   if (!companyId) return res.status(401).json({ error: 'Sessão inválida.' })
 
-  if (!crmSync.isEnabled()) {
+  if (!(await crmDisponivelParaEmpresa(companyId))) {
     return res.status(403).json({
-      error: 'O CRM Avançado não está configurado neste ambiente.',
+      error: 'O CRM não está disponível para esta empresa.',
       code: 'CRM_DISABLED',
     })
   }

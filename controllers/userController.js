@@ -2,10 +2,13 @@ const supabase = require('../config/supabase')
 const jwt = require('jsonwebtoken')
 const bcrypt = require('bcryptjs')
 const crmSync = require('../services/crmSyncService')
+const { empresaModuloCrmHabilitado } = require('../helpers/moduloCrmEmpresa')
 // O CRM interno foi removido; hoje a flag crm_habilitado reflete a integração
 // com o CRM Avançado (env CRM_AVANCADO_URL + ZAP_SSO_SECRET). Quando ativa, o
 // frontend mostra o botão «Enviar ao CRM» no chat. Avaliado no carregamento do
 // módulo — reinicie o processo (pm2 restart --update-env) após alterar as vars.
+// Este é o interruptor MESTRE (por ambiente); o valor devolvido ao frontend é
+// combinado com a flag POR EMPRESA (empresas.crm_habilitado) em getMe.
 const crm_habilitado = crmSync.isEnabled()
 
 /** GET /usuarios/me — perfil do usuário logado (inclui preferências) */
@@ -28,6 +31,12 @@ exports.getMe = async (req, res) => {
       ? !!empFlagsResult.value?.data?.modulo_campanhas_ativo
       : false
 
+    // CRM efetivo = interruptor de ambiente E flag da empresa (default true se a
+    // coluna ainda não existir — não derruba o CRM por leitura indisponível).
+    const crm_habilitado_efetivo = crm_habilitado
+      ? await empresaModuloCrmHabilitado(company_id)
+      : false
+
     let { data, error } = userResult.status === 'fulfilled'
       ? userResult.value
       : { data: null, error: new Error('Falha ao buscar usuário') }
@@ -37,7 +46,7 @@ exports.getMe = async (req, res) => {
       error = res2.error
       if (error) { console.error('[userController]', error?.message); return res.status(500).json({ error: 'Erro interno' }) }
       if (!data) return res.status(404).json({ error: 'Usuário não encontrado' })
-      return res.json({ ...data, mostrar_nome_ao_cliente: true, crm_habilitado, separar_mensagens_disparadas, atendimento_modo_simples, modulo_campanhas_ativo })
+      return res.json({ ...data, mostrar_nome_ao_cliente: true, crm_habilitado: crm_habilitado_efetivo, separar_mensagens_disparadas, atendimento_modo_simples, modulo_campanhas_ativo })
     }
     if (error) { console.error('[userController]', error?.message); return res.status(500).json({ error: 'Erro interno' }) }
     if (!data) return res.status(404).json({ error: 'Usuário não encontrado' })
@@ -47,7 +56,7 @@ exports.getMe = async (req, res) => {
       ...data,
       departamento_ids,
       mostrar_nome_ao_cliente: data.mostrar_nome_ao_cliente !== false,
-      crm_habilitado,
+      crm_habilitado: crm_habilitado_efetivo,
       separar_mensagens_disparadas,
       atendimento_modo_simples,
       modulo_campanhas_ativo,
@@ -453,6 +462,10 @@ exports.login = async (req, res) => {
     const modulo_campanhas_ativo = empFlagsResult.status === 'fulfilled'
       ? !!empFlagsResult.value?.data?.modulo_campanhas_ativo
       : false
+    // CRM efetivo = interruptor de ambiente E flag da empresa (default true).
+    const crm_habilitado_efetivo = crm_habilitado
+      ? await empresaModuloCrmHabilitado(usuario.company_id)
+      : false
 
     // Gera JWT com dados essenciais (user_id/company_id obrigatórios p/ multi-tenant)
     const jwtExpiresIn = String(process.env.JWT_EXPIRES_IN || '30d').trim() || '30d'
@@ -481,7 +494,7 @@ exports.login = async (req, res) => {
         perfil: usuario.perfil || 'atendente',
         departamento_id,
         departamento_ids: depIds,
-        crm_habilitado,
+        crm_habilitado: crm_habilitado_efetivo,
         separar_mensagens_disparadas,
         atendimento_modo_simples,
         modulo_campanhas_ativo,

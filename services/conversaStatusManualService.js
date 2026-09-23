@@ -1,4 +1,5 @@
 const supabase = require('../config/supabase')
+const { PRAZOS_VALIDOS, calcularAguardarClientePrazoAte } = require('../helpers/aguardarClientePrazo')
 
 const ACAO_MANUAL_AGUARDANDO = 'manual_aguardando_cliente'
 const ACAO_MANUAL_RETOMAR = 'manual_retomar_em_atendimento'
@@ -11,12 +12,27 @@ async function marcarAguardandoClienteManual({
   company_id,
   conversa_id,
   usuario_id,
+  prazo,
+  data,
 }) {
   const cid = Number(company_id)
   const convId = Number(conversa_id)
   const uid = Number(usuario_id)
   if (!Number.isFinite(cid) || cid <= 0 || !Number.isFinite(convId) || convId <= 0) {
     return { ok: false, status: 400, error: 'Parâmetros inválidos', conversa: null }
+  }
+
+  // Prazo do alarme (opcional). Quando informado, valida e calcula o vencimento.
+  const prazoNorm = prazo != null ? String(prazo).trim().toLowerCase() : null
+  let prazoAte = null
+  if (prazoNorm) {
+    if (!PRAZOS_VALIDOS.has(prazoNorm)) {
+      return { ok: false, status: 400, error: 'Prazo inválido', conversa: null }
+    }
+    prazoAte = calcularAguardarClientePrazoAte(prazoNorm, data)
+    if (!prazoAte || Number.isNaN(prazoAte.getTime())) {
+      return { ok: false, status: 400, error: 'Data do prazo inválida', conversa: null }
+    }
   }
 
   const { data: row, error: fetchErr } = await supabase
@@ -63,6 +79,12 @@ async function marcarAguardandoClienteManual({
       status_atendimento: 'aguardando_cliente',
       aguardando_cliente_desde: null,
       ausencia_mensagem_enviada_em: null,
+      // Alarme "Aguardar cliente": relógio próprio + prazo escolhido (nível zerado
+      // para o monitor reavaliar as etiquetas do zero).
+      aguardando_cliente_prazo_desde: prazoNorm ? new Date().toISOString() : null,
+      aguardando_cliente_prazo_ate: prazoAte ? prazoAte.toISOString() : null,
+      aguardando_cliente_prazo_origem: prazoNorm,
+      aguardando_cliente_nivel: null,
     })
     .eq('company_id', cid)
     .eq('id', convId)
@@ -84,8 +106,9 @@ async function marcarAguardandoClienteManual({
     conversa_id: convId,
     usuario_id: Number.isFinite(uid) && uid > 0 ? uid : null,
     acao: ACAO_MANUAL_AGUARDANDO,
-    observacao:
-      'Conversa marcada manualmente como aguardando cliente (excluída do encerramento automático por ausência)',
+    observacao: prazoAte
+      ? `Aguardando cliente — alarme ${prazoNorm} até ${prazoAte.toISOString()} (excluída do encerramento automático por ausência)`
+      : 'Conversa marcada manualmente como aguardando cliente (excluída do encerramento automático por ausência)',
   })
 
   return { ok: true, status: 200, error: null, conversa: updated, idempotent: false }

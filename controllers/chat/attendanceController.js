@@ -396,12 +396,13 @@ exports.marcarAguardandoClienteManualChat = async (req, res) => {
   try {
     const { company_id, id: user_id, perfil, departamento_ids = [] } = req.user
     const { id: conversa_id } = req.params
+    const { prazo, data } = req.body || {}
     const perm = await assertPermissaoConversa({ company_id, conversa_id, user_id, role: perfil, user_dep_ids: departamento_ids })
     if (!perm.ok) return res.status(perm.status).json({ error: perm.error })
     if (perm.conv && isGroupConversation(perm.conv)) {
       return res.status(400).json({ error: 'Indisponível para conversas de grupo' })
     }
-    const result = await marcarAguardandoClienteManual({ company_id, conversa_id, usuario_id: user_id })
+    const result = await marcarAguardandoClienteManual({ company_id, conversa_id, usuario_id: user_id, prazo, data })
     if (!result.ok) return res.status(result.status).json({ error: result.error })
     const io = req.app.get('io')
     if (io && result.conversa) {
@@ -409,6 +410,10 @@ exports.marcarAguardandoClienteManualChat = async (req, res) => {
         ...result.conversa,
         status_atendimento_real: result.conversa.status_atendimento ?? null,
         aguardando_cliente_desde: result.conversa.aguardando_cliente_desde ?? null,
+        aguardando_cliente_prazo_ate: result.conversa.aguardando_cliente_prazo_ate ?? null,
+        aguardando_cliente_prazo_desde: result.conversa.aguardando_cliente_prazo_desde ?? null,
+        aguardando_cliente_prazo_origem: result.conversa.aguardando_cliente_prazo_origem ?? null,
+        aguardando_cliente_nivel: result.conversa.aguardando_cliente_nivel ?? null,
         lista_realtime: { minha_fila: true, motivo: 'manual_aguardando_cliente' },
       }
       emitirEventoEmpresaConversa(io, company_id, conversa_id, io.EVENTS?.CONVERSA_ATUALIZADA || 'conversa_atualizada', {

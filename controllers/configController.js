@@ -50,6 +50,7 @@ exports.putEmpresa = async (req, res) => {
       atendimento_modo_simples,
       modulo_campanhas_ativo,
       senha_modulo_campanhas,
+      crm_habilitado,
     } = req.body
 
     const FONTES_VALIDAS = new Set(['inter','plus-jakarta-sans','poppins','montserrat','orbitron','nunito','raleway','playfair-display'])
@@ -69,6 +70,7 @@ exports.putEmpresa = async (req, res) => {
     if (zapi_auto_sync_contatos !== undefined) update.zapi_auto_sync_contatos = !!zapi_auto_sync_contatos
     if (separar_mensagens_disparadas !== undefined) update.separar_mensagens_disparadas = !!separar_mensagens_disparadas
     if (atendimento_modo_simples !== undefined) update.atendimento_modo_simples = !!atendimento_modo_simples
+    if (crm_habilitado !== undefined) update.crm_habilitado = !!crm_habilitado
 
     if (modulo_campanhas_ativo !== undefined) {
       const desejado = !!modulo_campanhas_ativo
@@ -115,6 +117,9 @@ exports.putEmpresa = async (req, res) => {
       if (msg.includes('atendimento_modo_simples')) {
         return res.status(400).json({ error: 'Banco desatualizado: aplique a migration atendimento_modo_simples (coluna atendimento_modo_simples).' })
       }
+      if (msg.includes('crm_habilitado')) {
+        return res.status(400).json({ error: 'Banco desatualizado: aplique a migration 20260922120000_reintro_empresas_crm_habilitado.sql (coluna crm_habilitado).' })
+      }
       if (msg.includes('modulo_campanhas_ativo')) {
         return res.status(400).json({ error: 'Banco desatualizado: aplique a migration modulo_campanhas_ativo (coluna modulo_campanhas_ativo).' })
       }
@@ -135,6 +140,14 @@ exports.putEmpresa = async (req, res) => {
     if (update.modulo_campanhas_ativo !== undefined) {
       invalidateModuloCampanhasCache(company_id)
       primeModuloCampanhasCache(company_id, !!data?.modulo_campanhas_ativo)
+    }
+
+    if (update.crm_habilitado !== undefined) {
+      try {
+        const { invalidateModuloCrmCache, primeModuloCrmCache } = require('../helpers/moduloCrmEmpresa')
+        invalidateModuloCrmCache(company_id)
+        primeModuloCrmCache(company_id, data?.crm_habilitado !== false)
+      } catch (_) {}
     }
 
     return res.json(data)
