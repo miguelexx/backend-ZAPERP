@@ -157,6 +157,50 @@ const { handleGroupPhotoOnlyPayload } = require('./webhookInbound/groupPhoto')
 const { isGroupPayload, pickGroupChatId, looksLikeBRPhoneDigits, resolveConversationKeyFromZapi, extractMessage, getPayloads, hasDestFields } = require('./webhookInbound/payload')
 const { shouldTriggerChatbotForInbound, inspectInboundOrigin } = require('./webhookInbound/chatbotInboundGuard')
 
+// Revogação "apagar para todos" feita pelo CONTATO (mantém conteúdo + aviso) — mesma regra do
+// webhook Whapi, via helper compartilhado. Espelha applyWhapiDeletedMessage para o inbound UltraMSG.
+const { markClientDeletedMessage } = require('../services/chat/deletion/markClientDeletedMessage')
+
+/**
+ * Detecta, de forma CONSERVADORA, um evento de revogação do contato no payload UltraMSG/Z-API.
+ * Só dispara com sinal explícito de exclusão — nunca em mensagem/reação/voto normal (o caller
+ * ainda exige !hasMessageContent). Evita falso-positivo que apagaria uma mensagem legítima.
+ */
+function isUltramsgClientDeletion(payload) {
+  if (!payload || typeof payload !== 'object') return false
+  if (payload.deleted === true) return true
+  const type = String(payload.type ?? payload.event ?? '').toLowerCase()
+  if (['revoke', 'revoked', 'message_revoke', 'message_revoke_everyone', 'deleted', 'delete', 'trash'].includes(type)) return true
+  const sub = String(payload.subtype ?? payload.subType ?? '').toLowerCase()
+  if (['revoke', 'revoked', 'delete', 'deleted'].includes(sub)) return true
+  const ackRaw = String(payload.ack ?? '').toLowerCase()
+  if (ackRaw === 'deleted' || ackRaw === 'revoked') return true
+  return false
+}
+
+/** Id (whatsapp_id) da mensagem-alvo da revogação. Cobre os shapes conhecidos de referência. */
+function extractUltramsgDeletedTargetId(payload) {
+  const cands = [
+    payload?.referenced_message?.id,
+    payload?.quotedMsgId,
+    payload?.quotedMsg?.id,
+    payload?.context?.quoted_id,
+    payload?.context?.quotedId,
+    payload?.context?.id,
+    payload?.target,
+    payload?.target_id,
+    payload?.messageId,
+    payload?.zaapId,
+    payload?.id,
+    payload?.key?.id,
+  ]
+  for (const c of cands) {
+    const s = c != null ? String(c).trim() : ''
+    if (s) return s
+  }
+  return null
+}
+
 
 exports.receberZapi = async (req, res) => {
   try {
@@ -308,6 +352,23 @@ exports.receberZapi = async (req, res) => {
 
       // Log de pipeline — sempre visível, para rastrear o que chega e como é classificado
       console.log(`[ULTRAMSG] 🔍 pipeline: type="${payloadType || '(vazio)'}" status="${payloadStatusRaw || '(vazio)'}" fromMe=${payloadFromMe} hasContent=${hasMessageContent} isStatus=${isStatusCallback} phone=${String(payload?.phone || '').slice(-10) || '(vazio)'}`)
+
+      // ─── Cliente apagou "para todos" (revogação do contato) ───
+      // Só o contato (fromMe=false) e nunca quando há conteúdo real (para não apagar mensagem
+      // legítima). Mantém o balão + conteúdo e liga o aviso via helper compartilhado. Idempotente.
+      if (!payloadFromMe && !hasMessageContent && isUltramsgClientDeletion(payload)) {
+        try {
+          const targetId = extractUltramsgDeletedTargetId(payload)
+          if (targetId) {
+            const io = req.app.get('io')
+            await markClientDeletedMessage({ company_id, whatsapp_instance_id }, targetId, io)
+          }
+        } catch (e) {
+          console.warn('[ULTRAMSG] revogação do cliente falhou:', e?.message || e)
+        }
+        lastResult = { ok: true, clientDeleted: true }
+        continue
+      }
 
       if (isStatusCallback) {
         const msgId = payload?.messageId ?? payload?.zaapId ?? null
@@ -2559,5 +2620,7 @@ exports._test = {
   findFromMeOutboundMediaCandidate,
   tryReconcileFromMeByCrmReferenceId,
   preserveMediaFieldsOnWebhookFallback,
+  isUltramsgClientDeletion,
+  extractUltramsgDeletedTargetId,
 }
 

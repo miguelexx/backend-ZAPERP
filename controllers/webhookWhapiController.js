@@ -805,6 +805,16 @@ function normalizeWhapiMessageToInternal(m, ctx = {}) {
         vCard: m.contact.vcard || m.contact.vCard || null,
       }
     : undefined
+  // Vários contatos de uma vez: Whapi envia type "contacts" com array m.contacts [{ name, vcard }].
+  const contactsArraySrc = (Array.isArray(m.contacts) && m.contacts.length) ? m.contacts
+    : ((type === 'contact' && Array.isArray(m.contact?.contacts)) ? m.contact.contacts : null)
+  const contactsArray = contactsArraySrc
+    ? contactsArraySrc
+        .map((cc) => (cc && typeof cc === 'object')
+          ? { displayName: cc.name || cc.displayName || null, formattedName: cc.name || null, vCard: cc.vcard || cc.vCard || null }
+          : null)
+        .filter((cc) => cc && (cc.vCard || cc.displayName))
+    : null
 
   const senderNameRaw = fromMe ? null : (m.from_name ?? m.notify ?? m.pushname ?? null)
   const senderName = senderNameRaw ? String(senderNameRaw).trim() : null
@@ -822,6 +832,7 @@ function normalizeWhapiMessageToInternal(m, ctx = {}) {
     : (type === 'poll') ? 'poll'
     : (type === 'live_location') ? 'location'
     : (type === 'gif' || type === 'short') ? 'video'
+    : (type === 'contacts') ? 'contact'
     : type
 
   return {
@@ -876,6 +887,7 @@ function normalizeWhapiMessageToInternal(m, ctx = {}) {
     ...(locationPayload ? { location: locationPayload } : {}),
     ...(reactionPayload ? { reaction: reactionPayload } : {}),
     ...(contactPayload ? { contact: contactPayload } : {}),
+    ...(contactsArray && contactsArray.length ? { contacts: contactsArray } : {}),
     isEdit,
   }
 }

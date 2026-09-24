@@ -386,6 +386,11 @@ function extractMessage(payload) {
   if (payload.contact && typeof payload.contact === 'object') {
     type = 'contact'
   }
+  // Múltiplos contatos compartilhados de uma vez (array). Provedores variam: payload.contacts,
+  // payload.contact.contacts, ou vários blocos BEGIN:VCARD no corpo. Todos viram type=contact.
+  if (Array.isArray(payload.contacts) && payload.contacts.length) {
+    type = 'contact'
+  }
   // Fallback: texto bruto com vCard (ex: UltraMsg envia type=chat com body=vCard)
   if ((!type || type === 'text') && typeof rawMessage === 'string' && String(rawMessage).trim().includes('BEGIN:VCARD') && String(rawMessage).trim().includes('END:VCARD')) {
     type = 'contact'
@@ -512,21 +517,70 @@ function extractMessage(payload) {
     }
   }
 
-  // contactMeta: { nome, telefone, foto_perfil?, descricao_negocio? } para cartão de contato no frontend
+  // contactMeta: { nome, telefone, foto_perfil?, descricao_negocio?, contatos?[] } para cartão de contato no frontend.
+  // Suporta 1 contato (comportamento original) e vários contatos compartilhados de uma vez (WhatsApp "N contatos").
   let contactMeta = null
   if (type === 'contact') {
     const c = payload.contact || {}
-    const displayName = (c.displayName && String(c.displayName).trim()) || (c.formattedName && String(c.formattedName).trim()) || null
-    const vcard = c.vCard || c.vcard || (typeof rawMessage === 'string' && rawMessage.includes('BEGIN:VCARD') ? rawMessage : null)
-    const parsed = vcard ? parseVcardForContact(vcard) : { nome: null, telefone: null }
-    const contactPhone = c.phone || c.telefone || parsed.telefone || (Array.isArray(c.fullContactData?.phoneNumbers) && c.fullContactData.phoneNumbers[0] ? String(c.fullContactData.phoneNumbers[0]).replace(/\D/g, '') : null)
-    contactMeta = {
-      nome: displayName || parsed.nome || texto || null,
-      telefone: contactPhone || null,
-      foto_perfil: (c.profilePicture || c.profilePictureUrl || c.photo) && String(c.profilePicture || c.profilePictureUrl || c.photo).startsWith('http') ? String(c.profilePicture || c.profilePictureUrl || c.photo).trim() : null
+    // 1) Fontes possíveis de múltiplos contatos: array estruturado do provedor OU vários blocos BEGIN:VCARD no corpo.
+    const structured = Array.isArray(payload.contacts) ? payload.contacts
+      : (Array.isArray(c.contacts) ? c.contacts : [])
+    const bodyBlocks = (typeof rawMessage === 'string' && rawMessage.includes('BEGIN:VCARD'))
+      ? (String(rawMessage).match(/BEGIN:VCARD[\s\S]*?END:VCARD/gi) || [])
+      : []
+    const singleVcard = c.vCard || c.vcard || null
+
+    // 2) Normaliza para uma lista de "entradas cruas" (vcard + metadados soltos do provedor).
+    const rawEntries = []
+    if (structured.length) {
+      for (const it of structured) {
+        const entry = (it && typeof it === 'object') ? it : {}
+        rawEntries.push({
+          vcard: entry.vCard || entry.vcard || null,
+          displayName: (entry.displayName && String(entry.displayName).trim()) || (entry.formattedName && String(entry.formattedName).trim()) || (entry.name && String(entry.name).trim()) || null,
+          phone: entry.phone || entry.telefone || (Array.isArray(entry.fullContactData?.phoneNumbers) && entry.fullContactData.phoneNumbers[0] ? String(entry.fullContactData.phoneNumbers[0]) : null),
+          photo: entry.profilePicture || entry.profilePictureUrl || entry.photo || null,
+        })
+      }
+    } else if (bodyBlocks.length > 1) {
+      for (const b of bodyBlocks) rawEntries.push({ vcard: b, displayName: null, phone: null, photo: null })
+    } else {
+      rawEntries.push({
+        vcard: singleVcard || bodyBlocks[0] || (typeof rawMessage === 'string' && rawMessage.includes('BEGIN:VCARD') ? rawMessage : null),
+        displayName: (c.displayName && String(c.displayName).trim()) || (c.formattedName && String(c.formattedName).trim()) || null,
+        phone: c.phone || c.telefone || (Array.isArray(c.fullContactData?.phoneNumbers) && c.fullContactData.phoneNumbers[0] ? String(c.fullContactData.phoneNumbers[0]) : null),
+        photo: c.profilePicture || c.profilePictureUrl || c.photo || null,
+      })
     }
-    if (parsed.descricao_negocio) contactMeta.descricao_negocio = parsed.descricao_negocio
-    if (!contactMeta.nome && !contactMeta.telefone) contactMeta = null
+
+    // 3) Parseia cada entrada para { nome, telefone, foto_perfil, descricao_negocio? }.
+    const contatos = []
+    for (const e of rawEntries) {
+      const parsed = e.vcard ? parseVcardForContact(e.vcard) : { nome: null, telefone: null }
+      const nome = e.displayName || parsed.nome || null
+      const telefone = (e.phone ? String(e.phone).replace(/\D/g, '') : null) || parsed.telefone || null
+      const foto = e.photo && String(e.photo).startsWith('http') ? String(e.photo).trim() : null
+      if (!nome && !telefone) continue
+      const item = { nome: nome || null, telefone: telefone || null, foto_perfil: foto }
+      if (parsed.descricao_negocio) item.descricao_negocio = parsed.descricao_negocio
+      contatos.push(item)
+    }
+
+    // 4) Monta contactMeta. 1 contato = formato original; 2+ = inclui array `contatos` e resumo no texto.
+    if (contatos.length) {
+      const first = contatos[0]
+      contactMeta = {
+        nome: first.nome || texto || null,
+        telefone: first.telefone || null,
+        foto_perfil: first.foto_perfil || null,
+      }
+      if (first.descricao_negocio) contactMeta.descricao_negocio = first.descricao_negocio
+      if (contatos.length > 1) {
+        contactMeta.contatos = contatos
+        const outros = contatos.length - 1
+        texto = `${first.nome || 'Contato'} e ${outros} outro${outros > 1 ? 's' : ''} contato${outros > 1 ? 's' : ''}`
+      }
+    }
   }
 
   // locationMeta: { latitude, longitude, nome, endereco } — paridade com contact_meta

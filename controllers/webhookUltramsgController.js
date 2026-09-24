@@ -296,6 +296,8 @@ function normalizeUltramsgToZapi(body) {
     ultramsgHash: body.hash || undefined,
     ultramsgReferenceId: body.referenceId || undefined,
     ...(contactPayload ? { contact: { ...contactPayload, vCard: contactPayload.vCard || bodyText } } : {}),
+    // Vários contatos estruturados em array (defensivo; o caso comum vem como vários vCards no body e é tratado no pipeline).
+    ...(Array.isArray(data.contacts) && data.contacts.length ? { contacts: data.contacts } : {}),
     ...(locationPayload ? { location: locationPayload } : {}),
     ...(reactionPayload ? { reaction: reactionPayload } : {})
   }

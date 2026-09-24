@@ -56,4 +56,56 @@ function buildPixMessageFromConfig(cfg) {
   ].join('\n').trim()
 }
 
-module.exports = { sanitizePixConfigPayload, formatPixTipoLabel, buildPixMessageFromConfig }
+// Título do botão de copiar — o WhatsApp limita o texto do botão (~20 chars).
+const PIX_COPY_BUTTON_LABEL = 'Copiar chave Pix'
+
+/**
+ * Metadados do cartão Pix persistidos em mensagens.reply_meta.pix — usados pela bolha do CRM
+ * para renderizar o mesmo cartão que o cliente recebe (com botão "Copiar chave Pix").
+ */
+function buildPixReplyMeta(cfg) {
+  return {
+    pix: {
+      nome_recebedor: String(cfg?.nome_recebedor || '').trim(),
+      tipo_chave: String(cfg?.tipo_chave || '').trim().toLowerCase(),
+      tipo_label: formatPixTipoLabel(cfg?.tipo_chave),
+      chave_pix: String(cfg?.chave_pix || '').trim(),
+      mensagem_padrao: cfg?.mensagem_padrao ? String(cfg.mensagem_padrao).trim() : null,
+      copy_label: PIX_COPY_BUTTON_LABEL,
+    },
+  }
+}
+
+/**
+ * Payload da mensagem interativa Whapi (botão de copiar) → provider.sendInteractive.
+ * O corpo já contém a chave por extenso: mesmo que o botão de copiar não funcione no
+ * aparelho do cliente, a chave continua visível/copiável no texto (robusto).
+ * Contrato Whapi: action.buttons[{ type:'copy', title, id, copy_code }]. Ver doc 25 §26.
+ */
+function buildPixInteractivePayload(cfg) {
+  const chave = String(cfg?.chave_pix || '').trim()
+  return {
+    type: 'button',
+    header: 'Pagamento via Pix',
+    body: buildPixMessageFromConfig(cfg),
+    action: {
+      buttons: [
+        {
+          type: 'copy',
+          id: 'pix_copy',
+          title: PIX_COPY_BUTTON_LABEL,
+          copy_code: chave,
+        },
+      ],
+    },
+  }
+}
+
+module.exports = {
+  sanitizePixConfigPayload,
+  formatPixTipoLabel,
+  buildPixMessageFromConfig,
+  buildPixReplyMeta,
+  buildPixInteractivePayload,
+  PIX_COPY_BUTTON_LABEL,
+}
