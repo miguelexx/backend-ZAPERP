@@ -180,13 +180,40 @@ describe('POST /api/crm/leads/from-conversa/:conversaId', () => {
     expect(res.status).toBe(502)
   })
 
-  it('502 quando o CRM retorna _crmError (com retry)', async () => {
+  it('502 quando o CRM retorna 5xx (retenta uma vez e expõe o motivo)', async () => {
     mockConversaRow = { id: 10, tipo: 'individual', telefone: '5511999', cliente_id: null }
     mockSyncLead.mockResolvedValue({ _crmError: true, status: 500, detail: 'Internal Server Error' })
     const res = await request(app)
       .post('/api/crm/leads/from-conversa/10')
       .set('Authorization', `Bearer ${authToken}`)
     expect(res.status).toBe(502)
-    expect(mockSyncLead).toHaveBeenCalledTimes(2) // retry automático
+    expect(mockSyncLead).toHaveBeenCalledTimes(2) // retry automático só em 5xx
+    expect(res.body.code).toBe('CRM_UNREACHABLE')
+    expect(res.body.crm_status).toBe(500)
+    expect(res.body.detalhe).toBe('Internal Server Error') // motivo real, não engolido
+  })
+
+  it('422 quando o CRM recusa por contrato (4xx) — sem retry', async () => {
+    mockConversaRow = { id: 10, tipo: 'individual', telefone: '5511999', cliente_id: null }
+    mockSyncLead.mockResolvedValue({ _crmError: true, status: 400, detail: 'funilId inexistente' })
+    const res = await request(app)
+      .post('/api/crm/leads/from-conversa/10')
+      .set('Authorization', `Bearer ${authToken}`)
+    expect(res.status).toBe(422)
+    expect(mockSyncLead).toHaveBeenCalledTimes(1) // 4xx não retenta (recusa definitiva)
+    expect(res.body.code).toBe('CRM_REJECTED')
+    expect(res.body.crm_status).toBe(400)
+    expect(res.body.detalhe).toBe('funilId inexistente')
+  })
+
+  it('502 em timeout/rede (status 0) — sem retry, evita gateway 502', async () => {
+    mockConversaRow = { id: 10, tipo: 'individual', telefone: '5511999', cliente_id: null }
+    mockSyncLead.mockResolvedValue({ _crmError: true, status: 0, detail: 'timeout após 12000ms' })
+    const res = await request(app)
+      .post('/api/crm/leads/from-conversa/10')
+      .set('Authorization', `Bearer ${authToken}`)
+    expect(res.status).toBe(502)
+    expect(mockSyncLead).toHaveBeenCalledTimes(1) // status 0 não retenta
+    expect(res.body.code).toBe('CRM_UNREACHABLE')
   })
 })

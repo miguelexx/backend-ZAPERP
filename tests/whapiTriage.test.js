@@ -142,4 +142,35 @@ describe('whapiTriageService.resolveSelectedOption (Seam B)', () => {
     expect(resolveSelectedOption({ interactiveReplyId: 'uuid-off' }, cfg())).toBeNull()
     expect(resolveSelectedOption({ interactiveReplyTitle: 'qualquer coisa' }, cfg())).toBeNull()
   })
+
+  // Cliente DIGITA a resposta em vez de tocar no menu nativo (enquete/lista/botão).
+  // activeSorted(cfg()) = [Financeiro(dep 5, pos 1), Suporte(dep 7, pos 2)] — Desativado fica de fora.
+  test('casa número digitado pela posição no menu (1-based)', () => {
+    expect(resolveSelectedOption({}, cfg(), '1')?.departamento_id).toBe(5)
+    expect(resolveSelectedOption({}, cfg(), '2')?.departamento_id).toBe(7)
+  })
+
+  test('aceita variações do número digitado (keycap, "n - Label", "n.", "n)")', () => {
+    expect(resolveSelectedOption({}, cfg(), '1️⃣')?.departamento_id).toBe(5)
+    expect(resolveSelectedOption({}, cfg(), '2 - Suporte')?.departamento_id).toBe(7)
+    expect(resolveSelectedOption({}, cfg(), '1.')?.departamento_id).toBe(5)
+    expect(resolveSelectedOption({}, cfg(), '2)')?.departamento_id).toBe(7)
+  })
+
+  test('casa nome do setor digitado por extenso (sem acento/caixa)', () => {
+    expect(resolveSelectedOption({}, cfg(), 'suporte')?.departamento_id).toBe(7)
+    expect(resolveSelectedOption({}, cfg(), 'FINANCEIRO')?.departamento_id).toBe(5)
+  })
+
+  test('número fora do intervalo, inativo ou texto qualquer digitado → null', () => {
+    expect(resolveSelectedOption({}, cfg(), '3')).toBeNull() // só 2 opções ativas
+    expect(resolveSelectedOption({}, cfg(), '9')).toBeNull()
+    expect(resolveSelectedOption({}, cfg(), 'Desativado')).toBeNull()
+    expect(resolveSelectedOption({}, cfg(), 'oi')).toBeNull()
+    expect(resolveSelectedOption({}, cfg(), '')).toBeNull()
+  })
+
+  test('interação nativa tem prioridade sobre o texto digitado', () => {
+    expect(resolveSelectedOption({ interactiveReplyId: 'uuid-sup' }, cfg(), '1')?.departamento_id).toBe(7)
+  })
 })

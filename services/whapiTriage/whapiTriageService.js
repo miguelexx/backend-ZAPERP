@@ -54,10 +54,16 @@ function normLabel(v) {
 
 /**
  * Resolve a opção escolhida a partir do inbound normalizado (Seam B).
- * Prioridade: id estável (interactiveReplyId) → título → voto de enquete (label).
+ * Prioridade: id estável (interactiveReplyId) → título → voto de enquete (label)
+ *   → resposta DIGITADA pelo cliente (número da posição no menu ou nome do setor).
+ * O critério digitado cobre o caso comum de o cliente escrever "1" em vez de tocar
+ * na enquete/lista/botão nativo — sem ele, a triagem Whapi ficava presa no menu.
+ * @param {object} payload - inbound normalizado (ids/votos de interação nativa)
+ * @param {object} config - config ativa da triagem Whapi
+ * @param {string} [texto] - texto livre digitado pelo cliente (fallback não-nativo)
  * @returns {object|null} opção da config (id, label, departamento_id, tag_id) ou null
  */
-function resolveSelectedOption(payload, config) {
+function resolveSelectedOption(payload, config, texto = '') {
   const options = (config?.options || []).filter((o) => o && o.departamento_id != null && o.active !== false)
   if (!options.length) return null
 
@@ -87,6 +93,25 @@ function resolveSelectedOption(payload, config) {
       let idx = pollLabels.findIndex((lbl) => normLabel(lbl) === v)
       if (idx < 0) idx = sorted.findIndex((o) => normLabel(o.label) === v)
       if (idx >= 0 && sorted[idx]) return sorted[idx]
+    }
+  }
+
+  // 4) Resposta DIGITADA (cliente escreveu em vez de tocar no menu nativo).
+  //    Aceita o número da posição no menu (1-based, na MESMA ordem exibida) — "1",
+  //    "1️⃣", "1.", "1)", "1 - Suporte" — ou o nome do setor por extenso.
+  const typed = String(texto || '').trim()
+  if (typed) {
+    const sorted = activeSorted(config).filter((o) => o.departamento_id != null)
+    if (sorted.length) {
+      const semKeycap = typed.replace(/[️⃣]/g, '').trim()
+      const num = semKeycap.match(/^(\d{1,2})(?:\s*[-.)].*)?$/)
+      if (num) {
+        const idx = parseInt(num[1], 10) - 1
+        if (idx >= 0 && idx < sorted.length) return sorted[idx]
+      }
+      const alvo = normLabel(typed)
+      const byLabel = sorted.find((o) => normLabel(o.label) === alvo)
+      if (byLabel) return byLabel
     }
   }
 
@@ -185,8 +210,8 @@ async function handleWhapiTriageInbound(ctx) {
     ...(whatsapp_instance_id ? { whatsappInstanceId: whatsapp_instance_id, whatsapp_instance_id } : {}),
   }
 
-  // ---- Seam B: cliente escolheu uma opção? ----
-  const option = resolveSelectedOption(payload, config)
+  // ---- Seam B: cliente escolheu uma opção? (toque nativo OU número/nome digitado) ----
+  const option = resolveSelectedOption(payload, config, texto)
   if (option) {
     if (selectInFlight.has(lockCid)) return { handled: true }
     selectInFlight.add(lockCid)

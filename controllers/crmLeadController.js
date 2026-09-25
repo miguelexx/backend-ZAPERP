@@ -43,6 +43,42 @@ function normalizeEtapasList(list) {
 }
 
 /**
+ * Traduz uma falha do CRM (objeto `_crmError` do crmSyncService, ou `null`) para
+ * uma resposta HTTP clara e diagnosticável — o motivo real NUNCA fica engolido.
+ *
+ *   - CRM 4xx  → 422 (CRM_REJECTED): a requisição foi recusada por CONTEÚDO
+ *     (contrato/validação — ex.: funil/etapa inexistente, acaoManual ausente).
+ *     Não é "bad gateway"; devolver 502 aqui esconderia a causa real.
+ *   - CRM 5xx / timeout / rede (status 0) → 502 (CRM_UNREACHABLE): o CRM está
+ *     indisponível ou não respondeu.
+ *
+ * O `detalhe` (corpo/erro devolvido pelo CRM, truncado) vai no JSON para aparecer
+ * no log do front e na aba Network — é exatamente o texto que antes só existia no
+ * console do backend.
+ */
+function mapCrmError(leadRes) {
+  const crmStatus = Number(leadRes?.status) || 0
+  const detalhe = (leadRes?.detail ? String(leadRes.detail) : '').slice(0, 500) || null
+  const isContractError = crmStatus >= 400 && crmStatus < 500
+  const httpStatus = isContractError ? 422 : 502
+  let msgUsuario
+  if (crmStatus === 0) {
+    msgUsuario = 'Não foi possível conectar ao CRM Avançado. Verifique a conexão e tente novamente.'
+  } else if (isContractError) {
+    msgUsuario = `O CRM Avançado recusou os dados do lead (${crmStatus}). Verifique o funil/etapa selecionados.`
+  } else {
+    msgUsuario = `O CRM Avançado retornou erro (${crmStatus}). Tente novamente em instantes.`
+  }
+  return {
+    httpStatus,
+    code: isContractError ? 'CRM_REJECTED' : 'CRM_UNREACHABLE',
+    crm_status: crmStatus,
+    detalhe,
+    error: msgUsuario,
+  }
+}
+
+/**
  * POST /api/crm/leads/from-conversa/:conversaId
  *
  * "Enviar ao CRM": transforma o contato de uma conversa em lead no CRM Avançado
@@ -75,15 +111,18 @@ async function enviarLeadDaConversa(req, res) {
     return res.status(400).json({ error: 'Conversa inválida.' })
   }
 
-  // Interruptor mestre (ambiente) + módulo CRM ligado para esta empresa.
-  if (!(await crmDisponivelParaEmpresa(companyId))) {
-    return res.status(403).json({
-      error: 'O CRM não está disponível para esta empresa.',
-      code: 'CRM_DISABLED',
-    })
-  }
-
+  // TODO o corpo do handler roda dentro deste try/catch — inclusive o gate de
+  // disponibilidade (que lê o banco). Assim NENHUMA exceção sobe sem tratamento
+  // e derruba o worker (gateway 502); tudo vira JSON de erro com motivo.
   try {
+    // Interruptor mestre (ambiente) + módulo CRM ligado para esta empresa.
+    if (!(await crmDisponivelParaEmpresa(companyId))) {
+      return res.status(403).json({
+        error: 'O CRM não está disponível para esta empresa.',
+        code: 'CRM_DISABLED',
+      })
+    }
+
     // 1. Conversa — escopada por empresa.
     const { data: conversa, error: convErr } = await supabase
       .from('conversas')
@@ -195,24 +234,42 @@ async function enviarLeadDaConversa(req, res) {
 
     let leadRes = await crmSync.syncLead(leadPayload)
 
-    // Retry automático: se a primeira tentativa falhou, tenta mais uma vez.
-    if (crmSync.isCrmError(leadRes)) {
-      console.warn('[crmLead] Primeira tentativa falhou, retentando syncLead…')
+    // Retry único APENAS em erro 5xx do CRM (cold start / falha transitória do
+    // servidor, que responde rápido). NÃO retentamos:
+    //   - status 0 (timeout/rede): retentar só empilha mais TIMEOUT_MS e pode
+    //     estourar o timeout do proxy reverso → 502 de GATEWAY (crash aparente).
+    //   - 4xx (recusa definitiva por contrato): a 2ª tentativa daria o mesmo erro
+    //     e ainda arriscaria criar lead duplicado.
+    if (crmSync.isCrmError(leadRes) && Number(leadRes.status) >= 500) {
+      console.warn(`[crmLead] CRM ${leadRes.status} na 1ª tentativa, retentando syncLead…`)
       leadRes = await crmSync.syncLead(leadPayload)
     }
 
     if (crmSync.isCrmError(leadRes)) {
-      const detail = leadRes.detail || ''
-      const status = leadRes.status || 0
-      console.error(`[crmLead] CRM rejeitou lead: status=${status} detail=${detail}`)
-      const msgUsuario = status === 0
-        ? 'Não foi possível conectar ao CRM Avançado. Verifique sua conexão e tente novamente.'
-        : `O CRM Avançado retornou erro (${status}). Tente novamente.`
-      return res.status(502).json({ error: msgUsuario })
+      const m = mapCrmError(leadRes)
+      console.error(
+        `[crmLead] CRM rejeitou lead (respondendo HTTP ${m.httpStatus}): ` +
+        `crm_status=${m.crm_status} detalhe=${m.detalhe || '-'}`
+      )
+      return res.status(m.httpStatus).json({
+        error: m.error,
+        code: m.code,
+        crm_status: m.crm_status,
+        detalhe: m.detalhe,
+      })
     }
 
     if (leadRes === null) {
-      return res.status(502).json({ error: 'O CRM Avançado não respondeu. Tente novamente.' })
+      // syncLead devolve null quando o CRM não está configurado (URL/segredo
+      // ausentes) ou o payload não tem os campos mínimos. Tratamos como CRM
+      // indisponível — com motivo explícito no log.
+      console.error('[crmLead] syncLead devolveu null (CRM não configurado ou payload mínimo ausente)')
+      return res.status(502).json({
+        error: 'O CRM Avançado não respondeu. Tente novamente.',
+        code: 'CRM_UNREACHABLE',
+        crm_status: 0,
+        detalhe: null,
+      })
     }
 
     const leadId =
@@ -227,8 +284,12 @@ async function enviarLeadDaConversa(req, res) {
       },
     })
   } catch (err) {
-    console.error('[crmLead] Falha ao enviar lead da conversa', err?.message || err)
-    return res.status(500).json({ error: 'Erro ao enviar ao CRM.' })
+    // Exceção inesperada (banco, bug, etc.) — logamos message + stack e
+    // devolvemos 500 JSON. NUNCA deixamos a exceção subir (evita o 502 de
+    // gateway por promise rejeitada num handler async do Express).
+    console.error('[crmLead] Falha ao enviar lead da conversa:', err?.message || err)
+    if (err?.stack) console.error(err.stack)
+    return res.status(500).json({ error: 'Erro ao enviar ao CRM.', code: 'INTERNAL' })
   }
 }
 

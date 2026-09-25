@@ -13,20 +13,21 @@
  *   status='sent'  ← provider aceitou (ok=true) e retornou ID rastreável
  *   status='pending' ← provider aceitou sem ID rastreável
  *   status='erro'  ← provider recusou/falhou (ok=false), exceção ou sem telefone
+ *
+ * Estes testes exercitam a implementação REAL de produção — `isRealWhatsAppId`
+ * (helpers/whatsappMessageIdHelper.js) e `mapProviderSendResult`
+ * (services/chat/outbound/providerResultMapper.js, a mesma máquina de estados que o
+ * textMessageController consome) — em vez de cópias locais, para que uma regressão
+ * na fonte seja capturada aqui.
  */
+
+const { isRealWhatsAppId } = require('../helpers/whatsappMessageIdHelper')
+const { mapProviderSendResult } = require('../services/chat/outbound/providerResultMapper')
 
 // ─── isRealWhatsAppId ────────────────────────────────────────────────────────
 
 describe('isRealWhatsAppId', () => {
-  const impl = (waId) => {
-    if (!waId) return false
-    const s = String(waId).trim()
-    if (!s || s === 'null' || s === 'undefined' || s === 'false' || s === '0') return false
-    if (s.includes('@')) return true
-    if (/^[A-F0-9]{12,}$/i.test(s)) return true
-    if (s.length > 20) return true
-    return false
-  }
+  const impl = isRealWhatsAppId
 
   test('aceita ID UltraMsg hex de 16 chars (BAE543FE1CE17AFA)', () => {
     expect(impl('BAE543FE1CE17AFA')).toBe(true)
@@ -108,30 +109,11 @@ describe('Contrato de envio estruturado de link', () => {
 // ─── Lógica de nextStatus ────────────────────────────────────────────────────
 
 describe('Lógica de nextStatus no envio manual', () => {
-  const isRealWhatsAppId = (waId) => {
-    if (!waId) return false
-    const s = String(waId).trim()
-    if (!s || s === 'null' || s === 'undefined' || s === 'false' || s === '0') return false
-    if (s.includes('@')) return true
-    if (/^[A-F0-9]{12,}$/i.test(s)) return true
-    if (s.length > 20) return true
-    return false
-  }
-
-  function resolveNextStatus(providerResult) {
-    const ok = typeof providerResult === 'boolean' ? providerResult : providerResult?.ok === true
-    const waMessageId = (typeof providerResult === 'object' && providerResult?.messageId)
-      ? String(providerResult.messageId).trim()
-      : null
-    const hasValidId = isRealWhatsAppId(waMessageId)
-    // Regra: sent exige aceite do provider e ID rastreável; aceite sem rastreio fica pending.
-    return {
-      nextStatus: ok ? (hasValidId ? 'sent' : 'pending') : 'erro',
-      nextStatusMensagem: ok ? (hasValidId ? 'sent' : 'sending') : 'failed',
-      waMessageId,
-      hasValidId,
-    }
-  }
+  // Implementação REAL: o textMessageController chama mapProviderSendResult com
+  // failedStatusMensagem: 'failed' (o texto grava 'failed' em falha; ver P0 #1 da
+  // divergência documentada no providerResultMapper).
+  const resolveNextStatus = (providerResult) =>
+    mapProviderSendResult(providerResult, { failedStatusMensagem: 'failed' })
 
   // ── Cenário 1: Contato comum ──────────────────────────────────────────────
   describe('Cenário 1: Contato comum', () => {
@@ -269,6 +251,48 @@ describe('Lógica de nextStatus no envio manual', () => {
         expect(r.nextStatusMensagem).toBe('failed')
       })
     })
+  })
+})
+
+// ─── Whapi: exige ACK, o ID do POST não prova envio ──────────────────────────
+
+describe('Provider Whapi: ID de POST não vira sent sem ACK', () => {
+  const mapWhapi = (result) => mapProviderSendResult(result, { failedStatusMensagem: 'failed' })
+
+  test('provider=whapi + ID hex sem ackConfirmed → pending (aguardando ACK), needsReconciliation', () => {
+    const r = mapWhapi({ ok: true, provider: 'whapi', messageId: 'BAE543FE1CE17AFA' })
+    expect(r.nextStatus).toBe('pending')
+    expect(r.nextStatusMensagem).toBe('sending')
+    expect(r.hasValidId).toBe(true)
+    expect(r.awaitingAck).toBe(true)
+    expect(r.needsReconciliation).toBe(true)
+  })
+
+  test('provider=whapi + ackConfirmed=false → pending mesmo com ID rastreável', () => {
+    const r = mapWhapi({ ok: true, provider: 'whapi', messageId: 'BAE543FE1CE17AFA', ackConfirmed: false })
+    expect(r.nextStatus).toBe('pending')
+    expect(r.awaitingAck).toBe(true)
+  })
+
+  test('provider=whapi + ackConfirmed=true → sent', () => {
+    const r = mapWhapi({ ok: true, provider: 'whapi', messageId: 'BAE543FE1CE17AFA', ackConfirmed: true })
+    expect(r.nextStatus).toBe('sent')
+    expect(r.nextStatusMensagem).toBe('sent')
+    expect(r.confirmedSent).toBe(true)
+    expect(r.awaitingAck).toBe(false)
+  })
+
+  test('ackConfirmed=false força pending mesmo sem provider explícito', () => {
+    const r = mapWhapi({ ok: true, messageId: 'BAE543FE1CE17AFA', ackConfirmed: false })
+    expect(r.nextStatus).toBe('pending')
+    expect(r.needsReconciliation).toBe(true)
+  })
+
+  test('UltraMSG (sem provider/ack) com ID hex confirma sent sincronamente', () => {
+    // Contraste: sem exigência de ACK, o ID hex rastreável já basta para sent.
+    const r = mapWhapi({ ok: true, messageId: 'BAE543FE1CE17AFA' })
+    expect(r.nextStatus).toBe('sent')
+    expect(r.confirmedSent).toBe(true)
   })
 })
 

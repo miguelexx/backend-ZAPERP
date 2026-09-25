@@ -21,6 +21,7 @@ const { usuarioParticipaAtivamenteDaConversa } = require('../../services/chat/ac
 const { emitirParaUsuario } = require('../../services/chat/realtime/chatRealtimeGateway')
 const { assertPermissaoConversa } = require('../../services/chat/access/conversationPolicy')
 const { enrichMensagensComAutorUsuario } = require('../../services/chat/presentation/messageAuthorEnrichment')
+const { enrichReplyMetaSnippets } = require('../../services/chat/presentation/replyMetaSnippetEnrichment')
 const { marcarComoLidaPorUsuario } = require('../../services/chat/unread/conversationUnreadService')
 const { loadWhatsappInstanceMetaMap } = require('../../services/chat/read/conversationLookups')
 
@@ -356,6 +357,17 @@ exports.detalharChat = async (req, res) => {
       }),
     ])
     mensagensFormatadas = enrichedMensagens
+    // Resolve o trecho real da mensagem citada (reply_meta) quando ficou gravado como "Mensagem"/vazio
+    // no webhook (corrida com o ACK / id que só casa depois). Best-effort, nunca derruba o detalhe.
+    try {
+      mensagensFormatadas = await enrichReplyMetaSnippets(
+        supabase,
+        { company_id, conversa_id: conversaId, whatsapp_instance_id: conversa.whatsapp_instance_id ?? null },
+        mensagensFormatadas
+      )
+    } catch (replyErr) {
+      console.warn('[detalharChat] enriquecer citações:', replyErr?.message || replyErr)
+    }
     const whatsappInstanceMeta = safeWhatsappInstanceMeta(whatsappInstanceMetaMap.get(Number(conversa.whatsapp_instance_id)))
 
     const conversaFormatada = aplicarModoSimplesNoPayload(

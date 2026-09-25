@@ -39,10 +39,13 @@ async function buildWebhookReplyMeta(supabaseClient, { payload, company_id, conv
     String(
       payload?.referencedMessage?.body ??
       payload?.referencedMessage?.text?.message ??
+      payload?.referencedMessage?.text?.body ??       // Whapi: text.body
       payload?.referencedMessage?.caption ??
       refMsg?.message ??
-      refMsg?.body ??
+      refMsg?.body ??                                  // Whapi: context.quoted_content.body
       refMsg?.text?.message ??
+      refMsg?.text?.body ??                            // Whapi: quoted_content.text.body
+      refMsg?.caption ??
       ''
     ).trim().slice(0, 180) || null
 
