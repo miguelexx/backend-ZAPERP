@@ -273,7 +273,13 @@ exports.atualizar = async (req, res) => {
       .eq('company_id', company_id)
       .select('id, nome, email, perfil, ativo, departamento_id, mostrar_nome_ao_cliente')
       .single()
-    if (error) { console.error('[userController]', error?.message); return res.status(500).json({ error: 'Erro interno' }) }
+    if (error) {
+      console.error('[userController]', error?.message)
+      if (String(error?.code) === '23505' || /duplicate|unique/i.test(String(error?.message))) {
+        return res.status(422).json({ error: 'Já existe um usuário com este email.' })
+      }
+      return res.status(500).json({ error: 'Erro interno' })
+    }
     if (!data) return res.status(404).json({ error: 'Usuário não encontrado' })
     if (depIds !== undefined) {
       await supabase.from('usuario_departamentos').delete().eq('usuario_id', id).eq('company_id', company_id)
