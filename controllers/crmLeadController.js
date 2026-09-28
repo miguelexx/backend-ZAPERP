@@ -59,21 +59,41 @@ function normalizeEtapasList(list) {
 function mapCrmError(leadRes) {
   const crmStatus = Number(leadRes?.status) || 0
   const detalhe = (leadRes?.detail ? String(leadRes.detail) : '').slice(0, 500) || null
+  // Mensagem REAL devolvida pelo CRM (crmSyncService a parseia do corpo JSON).
+  const crmMessage = (leadRes?.message ? String(leadRes.message).trim() : '') || null
   const isContractError = crmStatus >= 400 && crmStatus < 500
   const httpStatus = isContractError ? 422 : 502
-  let msgUsuario
-  if (crmStatus === 0) {
-    msgUsuario = 'Não foi possível conectar ao CRM Avançado. Verifique a conexão e tente novamente.'
-  } else if (isContractError) {
-    msgUsuario = `O CRM Avançado recusou os dados do lead (${crmStatus}). Verifique o funil/etapa selecionados.`
-  } else {
-    msgUsuario = `O CRM Avançado retornou erro (${crmStatus}). Tente novamente em instantes.`
+
+  // A mensagem ao atendente SEMPRE prioriza o texto real do CRM — ele já manda
+  // o motivo exato (segredo divergente, usuário sem SSO, etapa terminal, etc.).
+  // O genérico só entra quando o CRM não mandou mensagem alguma. NUNCA mais
+  // dizemos "verifique o funil/etapa" para um 401 (que é segredo/usuário).
+  let msgUsuario = crmMessage
+  if (!msgUsuario) {
+    if (crmStatus === 0) {
+      msgUsuario = 'Não foi possível conectar ao CRM Avançado. Verifique a conexão e tente novamente.'
+    } else if (crmStatus === 401) {
+      msgUsuario = 'O CRM recusou a autenticação (401): segredo compartilhado ausente/divergente, ou o atendente ainda não acessou o CRM via SSO.'
+    } else if (crmStatus === 403) {
+      msgUsuario = 'Acesso negado pelo CRM (403): o atendente não tem permissão, ou a empresa informada não confere.'
+    } else if (crmStatus === 404) {
+      msgUsuario = 'Funil ou etapa não encontrados no CRM (404). Recarregue as etapas e tente de novo.'
+    } else if (crmStatus === 409) {
+      msgUsuario = 'Conflito no CRM (409): já existe um lead/oportunidade em conflito para este contato.'
+    } else if (isContractError) {
+      msgUsuario = `O CRM Avançado recusou os dados do lead (${crmStatus}).`
+    } else {
+      msgUsuario = `O CRM Avançado retornou erro (${crmStatus}). Tente novamente em instantes.`
+    }
   }
   return {
     httpStatus,
     code: isContractError ? 'CRM_REJECTED' : 'CRM_UNREACHABLE',
     crm_status: crmStatus,
     detalhe,
+    // `message` = texto exato do CRM (o front lê err.response.data.message);
+    // `error` = mensagem final exibida (real quando existe, senão o genérico).
+    message: crmMessage,
     error: msgUsuario,
   }
 }
@@ -218,6 +238,7 @@ async function enviarLeadDaConversa(req, res) {
     const leadPayload = {
       empresaId: companyId,
       leadId: conversaId,
+      contatoId: cliente?.id ?? null,
       nome,
       email,
       telefone,
@@ -249,10 +270,11 @@ async function enviarLeadDaConversa(req, res) {
       const m = mapCrmError(leadRes)
       console.error(
         `[crmLead] CRM rejeitou lead (respondendo HTTP ${m.httpStatus}): ` +
-        `crm_status=${m.crm_status} detalhe=${m.detalhe || '-'}`
+        `crm_status=${m.crm_status} message=${m.message || '-'} detalhe=${m.detalhe || '-'}`
       )
       return res.status(m.httpStatus).json({
         error: m.error,
+        message: m.message,
         code: m.code,
         crm_status: m.crm_status,
         detalhe: m.detalhe,

@@ -97,6 +97,30 @@ function reasonFromErr(err) {
   return err?.message || String(err)
 }
 
+/**
+ * Constrói o objeto de erro do CRM a partir de uma resposta HTTP não-OK,
+ * extraindo a MENSAGEM REAL que o CRM Avançado mandou no corpo (ele já devolve
+ * mensagens específicas por status — ex.: "Segredo ZapERP inválido ou ausente",
+ * "Usuário ZapERP inválido ou inativo", "A etapa selecionada não foi encontrada
+ * neste funil"). Sem isso, o caller só via o status numérico e mascarava a causa.
+ *
+ * `detail` = corpo cru (para log/Network); `message` = campo legível parseado do
+ * JSON (message | error | mensagem), quando o corpo for JSON.
+ */
+async function crmErrorFromResponse(res) {
+  let detalhe = ''
+  try { detalhe = await res.text() } catch (_) {}
+  let mensagem = null
+  try {
+    const parsed = JSON.parse(detalhe)
+    const m = parsed && (parsed.message ?? parsed.error ?? parsed.mensagem)
+    if (m != null && String(m).trim()) mensagem = String(m).trim().slice(0, 300)
+  } catch (_) {
+    // corpo não é JSON — deixa `message` null e mantém só o `detail` cru.
+  }
+  return { _crmError: true, status: res.status, detail: detalhe.slice(0, 500), message: mensagem }
+}
+
 async function post(path, body) {
   if (!isEnabled()) return null // CRM não configurado — ignora silenciosamente
   const url = `${baseUrl()}/api/webhooks/zaperp${path}`
@@ -107,10 +131,9 @@ async function post(path, body) {
       body: JSON.stringify(body || {}),
     })
     if (!res.ok) {
-      let detalhe = ''
-      try { detalhe = await res.text() } catch (_) {}
-      console.error(`[CRM Sync] POST ${url} respondeu ${res.status}:`, detalhe.slice(0, 500))
-      return { _crmError: true, status: res.status, detail: detalhe.slice(0, 500) }
+      const errObj = await crmErrorFromResponse(res)
+      console.error(`[CRM Sync] POST ${url} respondeu ${res.status}:`, errObj.message || errObj.detail)
+      return errObj
     }
     try { return await res.json() } catch (_) { return { ok: true } }
   } catch (err) {
@@ -128,10 +151,9 @@ async function get(path) {
       headers: headers(),
     })
     if (!res.ok) {
-      let detalhe = ''
-      try { detalhe = await res.text() } catch (_) {}
-      console.error(`[CRM Sync] GET ${url} respondeu ${res.status}:`, detalhe.slice(0, 500))
-      return { _crmError: true, status: res.status, detail: detalhe.slice(0, 500) }
+      const errObj = await crmErrorFromResponse(res)
+      console.error(`[CRM Sync] GET ${url} respondeu ${res.status}:`, errObj.message || errObj.detail)
+      return errObj
     }
     return await res.json()
   } catch (err) {
@@ -201,6 +223,7 @@ function syncLead(p = {}) {
   const body = pruneEmpty({
     empresaId,
     leadId,
+    contatoId: idToString(p.contatoId),
     nome: p.nome,
     email: p.email,
     telefone: p.telefone,

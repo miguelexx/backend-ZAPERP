@@ -38,10 +38,15 @@ async function abrirCrmAvancado(req, res) {
   }
 
   const nome = req.user?.nome || req.user?.name || email
-  // Papel do usuário no ZapERP (admin | supervisor | atendente). O CRM
-  // Avançado usa isso para liberar o acesso APENAS ao administrador da
-  // empresa — os demais perfis são bloqueados no /auth/sso do CRM.
-  const papel = String(req.user?.perfil || 'atendente')
+  // Papel do usuário no ZapERP. O CRM Avançado libera o acesso APENAS ao
+  // administrador da empresa — os demais perfis são bloqueados no /auth/sso
+  // do CRM. Normalizamos o perfil bruto (admin | supervisor | atendente, e o
+  // legado "administrador") para o par "admin" | "usuario" que o CRM espera, e
+  // enviamos redundância (papel / role / perfil / isAdmin) porque o CRM aceita
+  // qualquer um deles — assim o gate funciona sem depender do formato exato.
+  const perfilBruto = String(req.user?.perfil || 'atendente').toLowerCase()
+  const ehAdmin = perfilBruto === 'admin' || perfilBruto === 'administrador'
+  const papel = ehAdmin ? 'admin' : 'usuario'
 
   const token = jwt.sign(
     {
@@ -50,6 +55,9 @@ async function abrirCrmAvancado(req, res) {
       email: String(email),
       nome: String(nome),
       papel,
+      role: papel,
+      perfil: perfilBruto,
+      isAdmin: ehAdmin,
     },
     segredo,
     { algorithm: 'HS256', expiresIn: '2m' },
