@@ -855,6 +855,7 @@ function limparRetentativasAgendadas() {
 
 module.exports = {
   tipoQualificaPersistencia,
+  persistInboundMediaToUploads,
   schedulePersistInboundMediaIfNeeded,
   runInboundMediaPersistenceRetryBatch,
   runInboundMediaDueRetryBatch,

@@ -70,6 +70,8 @@ router.delete('/:id/mensagens/:mensagem_id/reacao', auth, chatController.remover
 // Reenvio manual de mensagem com falha: reutiliza a mesma linha, sem criar registro novo
 router.post('/:id/mensagens/:mensagem_id/retry-text', auth, chatController.reenviarTextoMensagem)
 router.post('/:id/mensagens/:mensagem_id/retry-media', auth, chatController.reenviarMidiaMensagem)
+// Recópia manual de mídia RECEBIDA ainda sem /uploads (botão "tentar de novo" da bolha de áudio/mídia)
+router.post('/:id/mensagens/:mensagem_id/reprocessar-midia', auth, chatController.reprocessarMidiaInbound)
 router.post('/:id/contatos', auth, chatController.enviarContatoWhatsapp)
 router.post('/:id/localizacao', auth, chatController.enviarLocalizacao)
 router.post('/:id/ligacao', auth, chatController.enviarLigacaoWhatsapp)

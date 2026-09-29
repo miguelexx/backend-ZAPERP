@@ -440,6 +440,10 @@ const _retryController = require('./chat/retryController')
 exports.reenviarTextoMensagem = _retryController.reenviarTextoMensagem
 exports.reenviarMidiaMensagem = _retryController.reenviarMidiaMensagem
 
+// Recópia de mídia inbound (força cópia -> /uploads) — controllers/chat/inboundMediaReprocessController.js
+const _inboundMediaReprocessController = require('./chat/inboundMediaReprocessController')
+exports.reprocessarMidiaInbound = _inboundMediaReprocessController.reprocessarMidiaInbound
+
 exports._test = {
   assertPodeEnviarMensagem,
   avaliarElegibilidadeReenvio,
