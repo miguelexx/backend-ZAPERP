@@ -5,8 +5,51 @@
  */
 
 const supabase = require('../../config/supabase')
+const { getProvider } = require('../../services/providers')
+const {
+  resolveConversationWhatsappInstance,
+  resolveConversationProvider,
+} = require('../../services/chat/identity/conversationAddressService')
 const { emitirParaUsuario } = require('../../services/chat/realtime/chatRealtimeGateway')
 const { assertPermissaoConversa } = require('../../services/chat/access/conversationPolicy')
+
+const MUTE_ESPELHO_MS = 365 * 24 * 60 * 60 * 1000 // ~1 ano: "silenciado" no app até desmutar
+
+/**
+ * Espelha fixar/silenciar no WhatsApp do número conectado (best-effort, só Whapi tem patchChat).
+ * Atenção: as prefs do ZapERP são POR-ATENDENTE, mas o WhatsApp é COMPARTILHADO — o app reflete
+ * a última ação de qualquer atendente. Nunca lança: não pode quebrar o salvamento da preferência.
+ */
+async function espelharPrefsNoWhatsapp(company_id, conversa_id, { changedPin, fixada, changedMute, silenciada }) {
+  try {
+    if (!changedPin && !changedMute) return
+    const { data: conv } = await supabase
+      .from('conversas')
+      .select('id, tipo, telefone, whatsapp_instance_id')
+      .eq('company_id', company_id)
+      .eq('id', conversa_id)
+      .maybeSingle()
+    const telefone = String(conv?.telefone || '').trim()
+    if (!conv || !telefone || telefone.toLowerCase().startsWith('lid:')) return
+
+    const instanceId = conv.whatsapp_instance_id
+      ? await resolveConversationWhatsappInstance(company_id, conv)
+      : null
+    const instanceProvider = await resolveConversationProvider(company_id, instanceId)
+    const provider = getProvider({ provider: instanceProvider })
+    if (typeof provider?.patchChat !== 'function') return
+
+    const changes = {}
+    if (changedPin) changes.pin = !!fixada
+    if (changedMute) changes.mute_until = silenciada ? Date.now() + MUTE_ESPELHO_MS : 0
+    await provider.patchChat(telefone, changes, {
+      companyId: company_id,
+      ...(instanceId ? { whatsappInstanceId: instanceId } : {}),
+    })
+  } catch (e) {
+    console.warn('[patchConversaPrefs] espelhar pin/mute no WhatsApp falhou:', e?.message || e)
+  }
+}
 
 exports.patchConversaPrefs = async (req, res) => {
   try {
@@ -77,6 +120,14 @@ exports.patchConversaPrefs = async (req, res) => {
       console.error('[chatController] conversa_prefs', error?.message)
       return res.status(500).json({ error: 'Erro interno' })
     }
+
+    // Espelha fixar/silenciar no WhatsApp do número (best-effort; não bloqueia a resposta).
+    await espelharPrefsNoWhatsapp(company_id, conversa_id, {
+      changedPin: body.fixada !== undefined,
+      fixada,
+      changedMute: body.silenciada !== undefined,
+      silenciada,
+    })
 
     if (io) {
       emitirParaUsuario(io, user_id, 'conversa_prefs_atualizada', {

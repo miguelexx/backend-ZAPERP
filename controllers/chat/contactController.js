@@ -11,6 +11,7 @@ const { normalizeName, isBadName } = require('../../helpers/contactEnrichment')
 const { updateClienteResiliente } = require('../../helpers/clienteNomeColunas')
 const { ensureConversaForCliente } = require('../../services/conversaAbrirClienteService')
 const { resolveWhatsappInstanceForManualAction } = require('../../services/whatsappInstanceService')
+const { resolveConversationWhatsappInstance, resolveConversationProvider } = require('../../services/chat/identity/conversationAddressService')
 const { getProvider } = require('../../services/providers')
 const { getCanonicalPhone, getCanonicalPhoneAnyIntl, getOrCreateCliente, findOrCreateConversation } = require('../../helpers/conversationSync')
 const { emitirEventoEmpresaConversa, emitirConversaAtualizada } = require('../../services/chat/realtime/chatRealtimeGateway')
@@ -584,5 +585,78 @@ exports.criarContato = async (req, res) => {
   } catch (err) {
     console.error(err)
     return res.status(500).json({ error: 'Erro ao criar contato' })
+  }
+}
+
+/**
+ * Bloquear / desbloquear contato no WhatsApp (opt-out real). POST /chats/:id/bloquear
+ * Body: { bloquear: boolean } (default true). Só Whapi suporta blacklist; UltraMSG → 501 claro.
+ * Não persiste estado local (a blacklist do WhatsApp é a fonte de verdade); o menu oferece
+ * as duas ações. Bloquear impede TODA a comunicação, não só marketing.
+ */
+exports.bloquearContato = async (req, res) => {
+  try {
+    const { company_id, id: user_id, perfil, departamento_ids } = req.user
+    const conversa_id = Number(req.params.id)
+    if (!Number.isFinite(conversa_id) || conversa_id <= 0) {
+      return res.status(400).json({ error: 'ID da conversa inválido' })
+    }
+    const raw = req.body?.bloquear ?? req.query?.bloquear ?? true
+    const s = String(raw).trim().toLowerCase()
+    const bloquear = !(s === 'false' || s === '0' || s === 'nao' || s === 'não' || s === 'no')
+
+    const perm = await assertPermissaoConversa({
+      company_id,
+      conversa_id,
+      user_id,
+      role: perfil,
+      user_dep_ids: departamento_ids,
+    })
+    if (!perm.ok) return res.status(perm.status).json({ error: perm.error })
+
+    const { data: conv, error: errC } = await supabase
+      .from('conversas')
+      .select('id, tipo, telefone, whatsapp_instance_id')
+      .eq('company_id', company_id)
+      .eq('id', conversa_id)
+      .maybeSingle()
+    if (errC) return res.status(500).json({ error: errC.message })
+    if (!conv) return res.status(404).json({ error: 'Conversa não encontrada' })
+    if (isGroupConversation(conv)) {
+      return res.status(400).json({ error: 'Não é possível bloquear um grupo.' })
+    }
+    const telefone = String(conv.telefone || '').trim()
+    if (!telefone || telefone.toLowerCase().startsWith('lid:')) {
+      return res.status(409).json({ error: 'Contato sem telefone válido para bloquear no WhatsApp.' })
+    }
+
+    const instanceId = conv.whatsapp_instance_id
+      ? await resolveConversationWhatsappInstance(company_id, conv)
+      : null
+    const instanceProvider = await resolveConversationProvider(company_id, instanceId)
+    const provider = getProvider({ provider: instanceProvider })
+    const fn = bloquear ? provider?.blockContact : provider?.unblockContact
+    if (typeof fn !== 'function') {
+      return res.status(501).json({
+        error: 'O provedor WhatsApp atual não suporta bloquear contato (disponível no Whapi).',
+      })
+    }
+
+    const result = await fn(telefone, {
+      companyId: company_id,
+      ...(instanceId ? { whatsappInstanceId: instanceId } : {}),
+    })
+    if (!result?.ok) {
+      const httpStatus = Number(result?.httpStatus)
+      const status = [400, 401, 404, 429].includes(httpStatus) ? httpStatus : 502
+      return res.status(status).json({
+        error: result?.error || 'Não foi possível atualizar o bloqueio no WhatsApp.',
+      })
+    }
+
+    return res.json({ ok: true, conversa_id, bloqueado: bloquear })
+  } catch (err) {
+    console.error('[bloquearContato]', err)
+    return res.status(500).json({ error: 'Erro ao bloquear/desbloquear contato' })
   }
 }

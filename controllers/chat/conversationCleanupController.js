@@ -6,9 +6,75 @@
 
 const supabase = require('../../config/supabase')
 const { isGroupConversation } = require('../../helpers/conversaHelper')
+const { getProvider } = require('../../services/providers')
+const {
+  resolveConversationWhatsappInstance,
+  resolveConversationProvider,
+} = require('../../services/chat/identity/conversationAddressService')
 const { emitirConversaAtualizada, emitirEventoEmpresaConversa } = require('../../services/chat/realtime/chatRealtimeGateway')
 const { assertPermissaoConversa } = require('../../services/chat/access/conversationPolicy')
 const { marcarComoLidaPorUsuario } = require('../../services/chat/unread/conversationUnreadService')
+
+/**
+ * Apaga a conversa também no WhatsApp do próprio número conectado (UltraMSG/Whapi),
+ * best-effort. Remove o chat só da conta de atendimento — o WhatsApp não expõe API para
+ * apagar a conversa no aparelho do cliente. Nunca lança: falha aqui não pode impedir a
+ * exclusão no sistema. Retorna true só quando o provedor confirmou a remoção.
+ */
+async function apagarChatNoWhatsapp(company_id, conv) {
+  try {
+    if (!conv || isGroupConversation(conv)) return false
+    const telefone = String(conv?.telefone || '').trim()
+    if (!telefone) return false
+    // Endereço LID (sem telefone canônico) não é apagável pelos endpoints de chat.
+    if (telefone.toLowerCase().startsWith('lid:')) return false
+
+    const instanceId = conv.whatsapp_instance_id
+      ? await resolveConversationWhatsappInstance(company_id, conv)
+      : null
+    const instanceProvider = await resolveConversationProvider(company_id, instanceId)
+    const provider = getProvider({ provider: instanceProvider })
+    if (typeof provider?.deleteChat !== 'function') return false
+
+    const result = await provider.deleteChat(telefone, {
+      companyId: company_id,
+      ...(instanceId ? { whatsappInstanceId: instanceId } : {}),
+    })
+    return result === true || result?.ok === true
+  } catch (e) {
+    console.warn('[apagarConversa] deleteChat no WhatsApp falhou:', e?.message || e)
+    return false
+  }
+}
+
+/**
+ * Limpa as mensagens do chat também no WhatsApp do número conectado, best-effort.
+ * UltraMSG: POST /chats/clearMessages. Whapi não tem equivalente → no-op (retorna false).
+ * Nunca lança: falha aqui não pode impedir a limpeza no sistema.
+ */
+async function limparChatNoWhatsapp(company_id, conv) {
+  try {
+    if (!conv || isGroupConversation(conv)) return false
+    const telefone = String(conv?.telefone || '').trim()
+    if (!telefone || telefone.toLowerCase().startsWith('lid:')) return false
+
+    const instanceId = conv.whatsapp_instance_id
+      ? await resolveConversationWhatsappInstance(company_id, conv)
+      : null
+    const instanceProvider = await resolveConversationProvider(company_id, instanceId)
+    const provider = getProvider({ provider: instanceProvider })
+    if (typeof provider?.clearChatMessages !== 'function') return false
+
+    const result = await provider.clearChatMessages(telefone, {
+      companyId: company_id,
+      ...(instanceId ? { whatsappInstanceId: instanceId } : {}),
+    })
+    return result === true || result?.ok === true
+  } catch (e) {
+    console.warn('[limparMensagensConversa] clearChatMessages no WhatsApp falhou:', e?.message || e)
+    return false
+  }
+}
 
 exports.limparMensagensConversa = async (req, res) => {
   try {
@@ -25,6 +91,15 @@ exports.limparMensagensConversa = async (req, res) => {
       user_dep_ids: departamento_ids,
     })
     if (!perm.ok) return res.status(perm.status).json({ error: perm.error })
+
+    // Limpa também no WhatsApp do número conectado (best-effort, antes de perder as mensagens).
+    const { data: convLimpar } = await supabase
+      .from('conversas')
+      .select('id, tipo, telefone, whatsapp_instance_id')
+      .eq('company_id', company_id)
+      .eq('id', conversa_id)
+      .maybeSingle()
+    const whatsappLimpo = convLimpar ? await limparChatNoWhatsapp(company_id, convLimpar) : false
 
     const { error: errMsg } = await supabase
       .from('mensagens')
@@ -61,7 +136,7 @@ exports.limparMensagensConversa = async (req, res) => {
       })
     }
 
-    return res.json({ ok: true, conversa_id, ultima_atividade: now })
+    return res.json({ ok: true, conversa_id, ultima_atividade: now, whatsapp_limpo: whatsappLimpo })
   } catch (err) {
     console.error('[limparMensagensConversa]', err)
     return res.status(500).json({ error: 'Erro ao limpar mensagens da conversa' })
@@ -106,7 +181,7 @@ exports.apagarConversa = async (req, res) => {
 
     const { data: conv, error: errC } = await supabase
       .from('conversas')
-      .select('id, tipo, cliente_id')
+      .select('id, tipo, cliente_id, telefone, whatsapp_instance_id')
       .eq('company_id', company_id)
       .eq('id', conversa_id)
       .maybeSingle()
@@ -115,6 +190,10 @@ exports.apagarConversa = async (req, res) => {
     if (isGroupConversation(conv)) {
       return res.status(400).json({ error: 'Exclusão de conversa de grupo não suportada neste endpoint.' })
     }
+
+    // Apaga também no WhatsApp do número conectado (best-effort, antes de perder telefone/instância).
+    // Só remove do nosso atendimento — não apaga no aparelho do cliente (limitação do WhatsApp).
+    const whatsappApagado = await apagarChatNoWhatsapp(company_id, conv)
 
     const cid = company_id
     const convId = conversa_id
@@ -196,6 +275,7 @@ exports.apagarConversa = async (req, res) => {
         id: convId,
         cliente_id: clienteId,
         cliente_apagado: clienteApagado,
+        whatsapp_apagado: whatsappApagado,
       })
       io.to(`empresa_${cid}`).emit('atualizar_conversa', {
         id: convId,
@@ -234,6 +314,7 @@ exports.apagarConversa = async (req, res) => {
       cliente_apagado: clienteApagado,
       cliente_id: clienteId,
       cliente_id_preservado: contatoPreservado ? clienteId : null,
+      whatsapp_apagado: whatsappApagado,
     })
   } catch (err) {
     console.error('[apagarConversa]', err)

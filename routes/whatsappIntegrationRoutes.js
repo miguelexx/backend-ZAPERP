@@ -3,6 +3,7 @@ const router = express.Router()
 const auth = require('../middleware/auth')
 const supervisorOrAdmin = require('../middleware/supervisorOrAdmin')
 const { apiLimiter } = require('../middleware/rateLimit')
+const { uploadArquivo } = require('../middleware/upload')
 const whatsappIntegrationController = require('../controllers/whatsappIntegrationController')
 
 router.use(auth)
@@ -51,6 +52,10 @@ router.post('/instances/:id/logout', whatsappIntegrationController.logoutInstanc
 // Whapi-only: perfil Business, metadados de chat e presença do contato
 router.get('/instances/:id/business-profile', whatsappIntegrationController.getInstanceBusinessProfile)
 router.post('/instances/:id/business-profile', whatsappIntegrationController.updateInstanceBusinessProfile)
+router.get('/instances/:id/stories', apiLimiter, whatsappIntegrationController.getInstanceStories)
+router.post('/instances/:id/stories/media', apiLimiter, uploadArquivo, whatsappIntegrationController.uploadInstanceStoryMedia)
+router.post('/instances/:id/stories', apiLimiter, whatsappIntegrationController.createInstanceStory)
+router.delete('/instances/:id/stories/:storyId', apiLimiter, whatsappIntegrationController.deleteInstanceStory)
 router.get('/instances/:id/chats/:chatId', whatsappIntegrationController.getInstanceChat)
 router.get('/instances/:id/presence', whatsappIntegrationController.getInstancePresence)
 router.post('/instances/:id/presence/subscribe', whatsappIntegrationController.subscribeInstancePresence)

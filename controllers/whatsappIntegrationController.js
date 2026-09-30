@@ -1215,6 +1215,109 @@ exports.updateInstanceBusinessProfile = async (req, res) => {
   }
 }
 
+/** GET /integrations/whatsapp/instances/:id/stories — lista os status publicados pela conta (Whapi). */
+exports.getInstanceStories = async (req, res) => {
+  const ctx = await requireWhapiInstance(req, res, 'stories-list', 30)
+  if (!ctx) return
+  try {
+    const r = await ctx.provider.getStories({
+      companyId: ctx.company_id,
+      whatsappInstanceId: ctx.id,
+      count: req.query?.count,
+      offset: req.query?.offset,
+    })
+    if (!r.ok) {
+      const status = r.httpStatus === 429 ? 429 : (r.httpStatus === 422 ? 422 : 502)
+      return res.status(status).json({
+        error: r.error || 'Erro ao listar status',
+        code: r.code || r.providerCode || undefined,
+        provider: 'whapi',
+      })
+    }
+    return res.json({ provider: 'whapi', stories: r.stories || [], total: r.total })
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || 'Erro interno ao listar status' })
+  }
+}
+
+/** POST /integrations/whatsapp/instances/:id/stories — publica um status (texto ou mídia por URL). */
+exports.createInstanceStory = async (req, res) => {
+  const ctx = await requireWhapiInstance(req, res, 'stories-create', 20)
+  if (!ctx) return
+  try {
+    const r = await ctx.provider.createStory(req.body || {}, { companyId: ctx.company_id, whatsappInstanceId: ctx.id })
+    if (!r.ok) {
+      const status = r.httpStatus === 400
+        ? 400
+        : (r.httpStatus === 422 ? 422 : (r.httpStatus === 429 ? 429 : 502))
+      return res.status(status).json({
+        error: r.error || 'Erro ao publicar status',
+        code: r.code || r.providerCode || undefined,
+        provider: 'whapi',
+      })
+    }
+    return res.status(201).json({ provider: 'whapi', story: r.story || null, id: r.id || null })
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || 'Erro interno ao publicar status' })
+  }
+}
+
+/**
+ * POST /integrations/whatsapp/instances/:id/stories/media — sobe uma imagem/vídeo (multipart)
+ * para a Whapi e devolve a referência (`media`) usada em POST /stories. O arquivo local é temporário.
+ */
+exports.uploadInstanceStoryMedia = async (req, res) => {
+  const fs = require('fs')
+  const file = req.file || (Array.isArray(req.files) && req.files[0]) || null
+  const cleanup = () => {
+    try { if (file?.path && fs.existsSync(file.path)) fs.unlinkSync(file.path) } catch (_) {}
+  }
+  const ctx = await requireWhapiInstance(req, res, 'stories-upload', 20)
+  if (!ctx) { cleanup(); return }
+  if (!file?.path) return res.status(400).json({ error: 'Envie um arquivo de imagem ou vídeo.' })
+  const mime = String(file.mimetype || '').toLowerCase()
+  if (!mime.startsWith('image/') && !mime.startsWith('video/')) {
+    cleanup()
+    return res.status(400).json({ error: 'O status aceita apenas imagem ou vídeo.' })
+  }
+  try {
+    const r = await ctx.provider.uploadMedia(file.path, file.originalname, {
+      companyId: ctx.company_id,
+      whatsappInstanceId: ctx.id,
+    })
+    cleanup()
+    if (!r?.ok || !r.url) {
+      return res.status(502).json({ error: r?.error || 'Falha ao enviar a mídia para o WhatsApp.', provider: 'whapi' })
+    }
+    return res.json({ provider: 'whapi', media: r.url, mime_type: file.mimetype || undefined })
+  } catch (e) {
+    cleanup()
+    return res.status(500).json({ error: e?.message || 'Erro interno ao enviar a mídia.' })
+  }
+}
+
+/** DELETE /integrations/whatsapp/instances/:id/stories/:storyId — remove um status (Whapi). */
+exports.deleteInstanceStory = async (req, res) => {
+  const ctx = await requireWhapiInstance(req, res, 'stories-delete', 30)
+  if (!ctx) return
+  const storyId = String(req.params?.storyId || '').trim()
+  if (!storyId) return res.status(400).json({ error: 'storyId é obrigatório.' })
+  try {
+    const r = await ctx.provider.deleteStory(storyId, { companyId: ctx.company_id, whatsappInstanceId: ctx.id })
+    if (!r.ok) {
+      const status = r.httpStatus === 404 ? 404 : (r.httpStatus === 429 ? 429 : 502)
+      return res.status(status).json({
+        error: r.error || 'Erro ao remover status',
+        code: r.code || r.providerCode || undefined,
+        provider: 'whapi',
+      })
+    }
+    return res.json({ sucesso: true, provider: 'whapi' })
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || 'Erro interno ao remover status' })
+  }
+}
+
 /** Mapeia o httpStatus do provider para o status HTTP do endpoint de catálogo. */
 function catalogErrorStatus(r) {
   if (r?.httpStatus === 422) return 422

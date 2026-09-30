@@ -18,6 +18,7 @@ const limits = require('./limits')
 const labels = require('./labels')
 const business = require('./business')
 const catalog = require('./catalog')
+const stories = require('./stories')
 const groups = require('./groups')
 const { uploadMedia, getMediaFiles, getMedia, deleteMedia } = require('./upload')
 const { buildBaseUrl, maskTokenInLogs, validateRequiredFields } = require('./http')
@@ -174,6 +175,11 @@ module.exports = {
   createCatalogCollection: catalog.createCollection,
   editCatalogCollection: catalog.editCollection,
   deleteCatalogCollection: catalog.deleteCollection,
+
+  // Status / Stories WhatsApp — publicar/listar/remover status (somem em 24h)
+  getStories: stories.getStories,
+  createStory: stories.createStory,
+  deleteStory: stories.deleteStory,
 
   resendByStatus: queries.resendByStatus,
   resendById: queries.resendById,

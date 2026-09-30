@@ -278,6 +278,7 @@ const _contactController = require('./chat/contactController')
 exports.criarGrupo = _contactController.criarGrupo
 exports.criarComunidade = _contactController.criarComunidade
 exports.vincularClienteConversa = _contactController.vincularClienteConversa
+exports.bloquearContato = _contactController.bloquearContato
 exports.atualizarNomeContato = _contactController.atualizarNomeContato
 exports.atualizarObservacao = _contactController.atualizarObservacao
 

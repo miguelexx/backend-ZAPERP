@@ -103,6 +103,7 @@ router.put('/:id/nome-contato', auth, chatController.atualizarNomeContato)
 // Menu da lista (silenciar / fixar / favoritar / limpar / apagar) — ver migration conversa_usuario_prefs
 router.patch('/:id/prefs', auth, chatController.patchConversaPrefs)
 router.post('/:id/limpar-mensagens', auth, adminOnly, destructiveLimiter, chatController.limparMensagensConversa)
+router.post('/:id/bloquear', auth, destructiveLimiter, chatController.bloquearContato)
 router.delete('/:id', auth, adminOnly, destructiveLimiter, chatController.apagarConversa)
 
 // auditoria
