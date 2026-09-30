@@ -182,6 +182,7 @@ reexporta `statusZapi` + `_test`. Módulos já extraídos (todos verbatim, gate 
 | `groupPhoto.js` | callback `{groupId,groupPhoto}` — saída antecipada | 5 |
 | `historyImport.js` | import de histórico ao abrir conversa nova (fire-and-forget) | 5 |
 | `crmLeadInbound.js` | captura de lead CRM (fire-and-forget) | 5 |
+| `crmInboxInbound.js` | encaminha TODA mensagem recebida (`!fromMe && !isGroup`) ao inbox do CRM Avançado via `crmSyncService.forwardInboundMessage` (fire-and-forget; no-op sem `CRM_INBOUND_URL`); par OUTBOUND = `POST /crm/enviar-mensagem` (`crmEnvioController`). Testes: `tests/crmInboundBridge.test.js`, `tests/crmEnvioController.test.js` | 2026-09-30 |
 | `groupSender.js` | resolve remetente/membro em grupos (contrato→saída; `tests/webhookGroupSender.test.js`) | 5 |
 | `realtimePayload.js` | **puro**: monta os payloads `conversa_atualizada` e `nova_mensagem` do emit-tail (`tests/webhookRealtimePayload.test.js`, 11 testes) | 5 |
 | `chatbotInboundGuard.js` | **puro**: URA/boas-vindas só para mensagem privada real; origem = JID do chat, não `participant` (`tests/chatbotInboundGuard.test.js`) | correção 2026-09-01 |

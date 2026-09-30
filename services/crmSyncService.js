@@ -279,6 +279,68 @@ function isCrmError(v) {
   return v != null && typeof v === 'object' && v._crmError === true
 }
 
+// ─── Inbound → CRM (inbox) ───────────────────────────────────────────────────
+// Encaminha ao CRM Avançado TODA mensagem RECEBIDA (fromMe=false) para alimentar o
+// inbox dele. Diferente do resto do sync (que usa CRM_API_URL + path fixo), o destino
+// é uma URL COMPLETA e independente: CRM_INBOUND_URL (ex.: https://.../api/webhooks/
+// zaperp/mensagem). Assim o inbox pode viver em outro host/rota que o sync de lead.
+//
+// GATE PRÓPRIO: exige CRM_INBOUND_URL + ZAP_SSO_SECRET. Sem a URL, no-op silencioso
+// (não quebra o fluxo do webhook). O segredo é o MESMO do SSO (header x-zaperp-secret).
+//
+// Timeout 15s + 1 retry APENAS em falha de rede/timeout (uma resposta HTTP, mesmo 5xx,
+// não é retentada — repetir arriscaria duplicar no inbox). Fire-and-forget: nunca lança.
+
+const INBOUND_TIMEOUT_MS = 15000
+
+function inboundUrl() {
+  return String(process.env.CRM_INBOUND_URL || '').trim().replace(/\s+$/, '')
+}
+
+/**
+ * Encaminha uma mensagem recebida ao inbox do CRM Avançado.
+ * @param {{ companyId:number|string, telefone:string, nome?:string, mensagem?:string,
+ *          tipo?:string, midiaUrl?:string|null, messageId?:string|null, fromMe?:boolean }} payload
+ * @returns {Promise<object|null>} resultado (ou null quando CRM_INBOUND_URL não configurada).
+ */
+async function forwardInboundMessage(payload = {}) {
+  const url = inboundUrl()
+  const seg = secret()
+  // Sem URL de inbound configurada → pula o encaminhamento sem erro (spec).
+  if (!url || !seg) return null
+
+  const body = JSON.stringify({ ...payload, fromMe: false })
+  const opts = {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-zaperp-secret': seg,
+    },
+    body,
+  }
+
+  // 2 tentativas: a 2ª só acontece em exceção de rede/timeout (não em resposta HTTP).
+  for (let tentativa = 1; tentativa <= 2; tentativa++) {
+    try {
+      const res = await fetchWithTimeout(url, opts, INBOUND_TIMEOUT_MS)
+      if (res.ok) return { ok: true }
+      // Resposta HTTP não-OK: loga o motivo real e NÃO retenta (resposta chegou).
+      const errObj = await crmErrorFromResponse(res)
+      console.error(`[CRM Inbound] POST ${url} respondeu ${res.status}:`, errObj.message || errObj.detail)
+      return errObj
+    } catch (err) {
+      const ultima = tentativa === 2
+      console.error(
+        `[CRM Inbound] Falha de rede ao encaminhar inbound (tentativa ${tentativa}/2):`,
+        reasonFromErr(err),
+      )
+      if (ultima) return { _crmError: true, status: 0, detail: reasonFromErr(err) }
+      // senão: cai no laço e tenta mais uma vez
+    }
+  }
+  return null
+}
+
 module.exports = {
   isEnabled,
   isCrmError,
@@ -287,4 +349,5 @@ module.exports = {
   syncLead,
   resumoEmpresa,
   listEtapas,
+  forwardInboundMessage,
 }

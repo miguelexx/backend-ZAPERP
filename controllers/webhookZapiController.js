@@ -136,6 +136,8 @@ const { mensagemInseridaEhPrimeiraDisparoWhatsappExterno, conversaTemAlgumaMensa
 const { scheduleNewConversationHistoryImport } = require('./webhookInbound/historyImport')
 // Captura de lead no CRM a partir do inbound → controllers/webhookInbound/crmLeadInbound.js.
 const { scheduleInboundLeadCapture } = require('./webhookInbound/crmLeadInbound')
+// Encaminhamento de TODA mensagem recebida para o inbox do CRM Avançado → webhookInbound/crmInboxInbound.js.
+const { scheduleInboundCrmForward } = require('./webhookInbound/crmInboxInbound')
 // Resolução do remetente (membro) em grupos → controllers/webhookInbound/groupSender.js.
 const { resolveGroupSenderFields } = require('./webhookInbound/groupSender')
 // Construção pura dos payloads de realtime (conversa_atualizada + nova_mensagem) → webhookInbound/realtimePayload.js.
@@ -2392,6 +2394,18 @@ exports.receberZapi = async (req, res) => {
           io.to(rooms).emit('nova_mensagem', emitPayload)
         }
         scheduleInboundWebPush(company_id, convIdForEmit, 'nova_mensagem', emitPayload)
+
+        // Espelha a mensagem RECEBIDA no inbox do CRM Avançado (fire-and-forget).
+        // Só inbound real de contato individual — nunca ecos (fromMe) nem grupos.
+        // → controllers/webhookInbound/crmInboxInbound.js (setImmediate; no-op sem CRM_INBOUND_URL).
+        if (!fromMe && !isGroup) {
+          scheduleInboundCrmForward({
+            companyId: company_id,
+            mensagemSalva,
+            nome: nomeParaCache || senderName || payload?.chatName || null,
+            phone,
+          })
+        }
       } else {
         // Mensagem já existe (enviada pelo usuário): apenas atualizar status, não duplicar mensagem
         const statusPayload = {
