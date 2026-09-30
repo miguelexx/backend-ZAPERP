@@ -21,28 +21,12 @@
 // IDEMPOTÊNCIA: o CRM pode enviar `referencia`. Se a MESMA referência (por empresa) já foi
 // processada — ou está em andamento — não reenviamos: devolvemos o resultado anterior.
 
-const crypto = require('crypto')
 const supabase = require('../config/supabase')
 const { getProvider } = require('../services/providers')
 const { resolveConversationProvider } = require('../services/chat/identity/conversationAddressService')
 const { getDefaultWhatsappInstance } = require('../services/whatsappInstanceService')
 const { normalizePhoneBR } = require('../helpers/phoneHelper')
-
-// ─── Segredo compartilhado (comparação segura) ───────────────────────────────
-// timingSafeEqual exige buffers de mesmo tamanho; comparamos o tamanho antes (isso
-// não vaza o segredo, só o comprimento do header recebido) e usamos a comparação
-// constante para o conteúdo.
-function segredoConfere(recebido, esperado) {
-  if (!esperado) return false
-  const a = Buffer.from(String(recebido == null ? '' : recebido), 'utf8')
-  const b = Buffer.from(String(esperado), 'utf8')
-  if (a.length !== b.length) return false
-  try {
-    return crypto.timingSafeEqual(a, b)
-  } catch (_err) {
-    return false
-  }
-}
+const { segredoConfere } = require('../helpers/zaperpSecret')
 
 // ─── Idempotência em memória por (companyId:referencia) ──────────────────────
 // Vive pelo processo (produção roda PM2 em fork único). Cobre o caso real: o CRM

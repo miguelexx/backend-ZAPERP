@@ -10,6 +10,7 @@ const auth = require('../middleware/auth')
 const crmSso = require('../controllers/crmSsoController')
 const crmLead = require('../controllers/crmLeadController')
 const crmEnvio = require('../controllers/crmEnvioController')
+const crmInstancia = require('../controllers/crmInstanciaController')
 
 const router = express.Router()
 
@@ -18,6 +19,10 @@ router.get('/abrir-avancado', auth, crmSso.abrirCrmAvancado)
 // Envio de mensagem solicitado pelo CRM Avançado (automação por etapa).
 // Autenticado por x-zaperp-secret dentro do controller (server-to-server).
 router.post('/enviar-mensagem', crmEnvio.enviarMensagem)
+
+// Status da instância WhatsApp da empresa (CRM confirma número conectado).
+// Autenticado por x-zaperp-secret dentro do controller (server-to-server).
+router.get('/instancia-status', crmInstancia.instanciaStatus)
 
 // Etapas do funil do CRM Avançado → botões de "para qual etapa enviar".
 router.get('/etapas', auth, crmLead.listarEtapasCrm)
