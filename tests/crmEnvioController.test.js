@@ -17,18 +17,15 @@ const mockSendText = jest.fn()
 const mockSendImage = jest.fn()
 const mockSendFile = jest.fn()
 const mockSendVideo = jest.fn()
-
-jest.mock('../services/providers', () => ({
-  getProvider: () => ({
-    sendText: mockSendText,
-    sendImage: mockSendImage,
-    sendFile: mockSendFile,
-    sendVideo: mockSendVideo,
-  }),
+const mockGetProvider = jest.fn(() => ({
+  sendText: mockSendText,
+  sendImage: mockSendImage,
+  sendFile: mockSendFile,
+  sendVideo: mockSendVideo,
 }))
 
-jest.mock('../services/chat/identity/conversationAddressService', () => ({
-  resolveConversationProvider: jest.fn().mockResolvedValue('ultramsg'),
+jest.mock('../services/providers', () => ({
+  getProvider: (...a) => mockGetProvider(...a),
 }))
 
 const mockGetDefaultInstance = jest.fn()
@@ -64,7 +61,7 @@ function req(body, secret = 'segredo-teste') {
 beforeEach(() => {
   jest.clearAllMocks()
   process.env = { ...OLD_ENV, ZAP_SSO_SECRET: 'segredo-teste' }
-  mockGetDefaultInstance.mockResolvedValue({ instance: { id: 99 } })
+  mockGetDefaultInstance.mockResolvedValue({ instance: { id: 99, instance_token: 'tok-whapi' } })
   mockSendText.mockResolvedValue({ ok: true, messageId: 'BAE543FE1CE17AFA' })
   mockSendImage.mockResolvedValue({ ok: true, messageId: 'IMG12345678ABCD' })
   mockSendFile.mockResolvedValue({ ok: true, messageId: 'DOC12345678ABCD' })
@@ -131,15 +128,30 @@ describe('envio de texto', () => {
       expect.objectContaining({ companyId: 1, whatsappInstanceId: 99, returnDetails: true }),
     )
   })
+
+  test('provider é FORÇADO a whapi (nunca cai em ultramsg)', async () => {
+    const res = mockRes()
+    await enviarMensagem(req({ companyId: 1, telefone: '5511988887777', mensagem: 'olá' }), res)
+    expect(mockGetProvider).toHaveBeenCalledWith({ provider: 'whapi' })
+  })
 })
 
 describe('erro de negócio → 200 {ok:false}', () => {
-  test('instância ausente/desconectada → 200 ok:false (não 409)', async () => {
-    mockGetDefaultInstance.mockResolvedValue({ instance: null, error: 'Sem instância WhatsApp ativa.' })
+  test('sem instância Whapi → 200 ok:false (não 409)', async () => {
+    mockGetDefaultInstance.mockResolvedValue({ instance: null, error: 'x' })
     const res = mockRes()
     await enviarMensagem(req({ companyId: 1, telefone: '55119', mensagem: 'x' }), res)
     expect(res.statusCode).toBe(200)
-    expect(res.body).toEqual({ ok: false, error: 'Sem instância WhatsApp ativa.' })
+    expect(res.body).toEqual({ ok: false, error: 'Empresa sem instância Whapi conectada.' })
+  })
+
+  test('instância Whapi sem token → 200 ok:false', async () => {
+    mockGetDefaultInstance.mockResolvedValue({ instance: { id: 5, instance_token: '' } })
+    const res = mockRes()
+    await enviarMensagem(req({ companyId: 1, telefone: '55119', mensagem: 'x' }), res)
+    expect(res.statusCode).toBe(200)
+    expect(res.body).toEqual({ ok: false, error: 'Empresa sem instância Whapi conectada.' })
+    expect(mockSendText).not.toHaveBeenCalled()
   })
 
   test('provider recusa (ok:false) → 200 ok:false com o erro do provedor', async () => {

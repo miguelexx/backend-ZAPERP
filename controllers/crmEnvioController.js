@@ -1,32 +1,59 @@
 'use strict'
 
 // Recebe pedidos de envio do CRM Avançado (automação por etapa / inbox bidirecional) e
-// os despacha REUTILIZANDO a infraestrutura de envio do ZapERP: instância padrão da
-// empresa, provider correto (UltraMSG/Whapi), antiban e checagem de opt-out. Não cria
-// rotina paralela de WhatsApp.
+// os despacha REUTILIZANDO a infraestrutura de envio Whapi do ZapERP: resolve a instância
+// Whapi da empresa (token Bearer), o adapter Whapi (POST gate.whapi.cloud/messages/*),
+// antiban e checagem de opt-out. Não cria rotina paralela de WhatsApp.
+//
+// IMPORTANTE (bug corrigido): as instâncias da plataforma são Whapi. Antes o endpoint
+// resolvia a instância/provider default (que cai em UltraMSG/legado empresa_zapi quando
+// a empresa é só-Whapi) — a UltraMSG responde HTTP 200 com id de fila mesmo sem entregar,
+// então o CRM recebia ok:true e a mensagem NÃO chegava. Agora forçamos provider='whapi'
+// e só retornamos ok:true quando o Whapi confirma o envio (sent:true / message.id).
 //
 // Autenticação: header x-zaperp-secret === ZAP_SSO_SECRET (mesmo segredo do SSO),
-// comparado em tempo constante (crypto.timingSafeEqual). É server-to-server; não usa
-// o auth (JWT de usuário).
+// comparado em tempo constante. É server-to-server; não usa o auth (JWT de usuário).
 //
 // CONTRATO (o CRM Avançado consome server-to-server):
-//   - Sucesso:            200 { ok:true, messageId:<id do provedor|null> }
-//   - Erro de negócio:    200 { ok:false, error:"<motivo claro>" }   (ex.: instância desconectada,
-//                          opt-out, provedor recusou) — o CRM só precisa checar `ok`.
-//   - Entrada inválida:   400 { ok:false, error }                    (companyId/telefone ausentes)
-//   - Config ausente:     503 { ok:false, error }                    (ZAP_SSO_SECRET não setado)
-//   - Segredo divergente: 401 { ok:false, error }
-//   - Exceção inesperada: 500 { ok:false, error }
+//   - Sucesso (Whapi confirmou): 200 { ok:true, messageId:<id do Whapi|null> }
+//   - Falha do Whapi / sem instância / opt-out / timeout: 200 { ok:false, error:"<motivo>" }
+//     (o CRM usa `ok` para marcar Enviado × Erro). NUNCA ok:true sem confirmação do Whapi.
+//   - Entrada inválida:   400 { ok:false, error }   · Config ausente: 503 · Segredo: 401.
+//   - O token Whapi NUNCA aparece na resposta (só messageId/erro do provedor).
 //
 // IDEMPOTÊNCIA: o CRM pode enviar `referencia`. Se a MESMA referência (por empresa) já foi
 // processada — ou está em andamento — não reenviamos: devolvemos o resultado anterior.
 
 const supabase = require('../config/supabase')
 const { getProvider } = require('../services/providers')
-const { resolveConversationProvider } = require('../services/chat/identity/conversationAddressService')
 const { getDefaultWhatsappInstance } = require('../services/whatsappInstanceService')
 const { normalizePhoneBR } = require('../helpers/phoneHelper')
 const { segredoConfere } = require('../helpers/zaperpSecret')
+
+// Timeout curto na chamada ao Whapi (o adapter tem timeout interno ~30s; aqui impomos
+// ~15s para o CRM não travar esperando um canal lento).
+const WHAPI_SEND_TIMEOUT_MS = 15000
+
+// Telefone mascarado para log (nunca logar o número inteiro).
+function mascararTelefone(t) {
+  const d = String(t || '').replace(/\D/g, '')
+  if (d.length <= 4) return '****'
+  return `${d.slice(0, 2)}***${d.slice(-4)}`
+}
+
+// Corre `promise` contra um timer; se estourar, resolve com `fallback` (não rejeita).
+function comTimeout(promise, ms, fallback) {
+  let timer
+  const limite = new Promise((resolve) => {
+    timer = setTimeout(() => resolve(fallback), ms)
+  })
+  return Promise.race([
+    Promise.resolve(promise)
+      .catch((e) => ({ ok: false, error: `Falha ao enviar (Whapi): ${e?.message || e}`, httpStatus: null }))
+      .finally(() => clearTimeout(timer)),
+    limite,
+  ])
+}
 
 // ─── Idempotência em memória por (companyId:referencia) ──────────────────────
 // Vive pelo processo (produção roda PM2 em fork único). Cobre o caso real: o CRM
@@ -100,17 +127,18 @@ function nomeArquivoDaUrl(url) {
 }
 
 // Normaliza o retorno heterogêneo dos adapters (boolean | { ok, messageId, error })
-// para o contrato { ok, messageId?, error? } deste endpoint.
+// para o contrato { ok, messageId?, error?, httpStatus? } deste endpoint. httpStatus é
+// preservado só para o LOG de diagnóstico (nunca vai para a resposta ao CRM).
 function normalizarResultadoEnvio(resultado) {
-  if (resultado === false) return { ok: false, error: 'Envio rejeitado pelo provedor.' }
+  if (resultado === false) return { ok: false, error: 'Envio rejeitado pelo provedor.', httpStatus: null }
   if (resultado && typeof resultado === 'object') {
     if (resultado.ok === false) {
-      return { ok: false, error: resultado.error || 'Falha no envio pelo provedor.' }
+      return { ok: false, error: resultado.error || 'Falha no envio pelo provedor.', httpStatus: resultado.httpStatus ?? null }
     }
-    return { ok: true, messageId: resultado.messageId || resultado.id || null }
+    return { ok: true, messageId: resultado.messageId || resultado.id || null, httpStatus: resultado.httpStatus ?? null }
   }
   // resultado === true (sucesso booleano sem detalhes)
-  return { ok: true, messageId: null }
+  return { ok: true, messageId: null, httpStatus: null }
 }
 
 async function estaOptOut(companyId, telefone) {
@@ -131,10 +159,11 @@ async function estaOptOut(companyId, telefone) {
   }
 }
 
-// Despacha o envio pelo provedor certo (texto ou mídia), devolvendo { ok, messageId?, error? }.
+// Despacha o envio pelo Whapi (texto ou mídia), devolvendo { ok, messageId?, error?, httpStatus? }.
+// Provider FORÇADO a 'whapi' + whatsappInstanceId da instância Whapi resolvida — nunca deixa
+// o roteamento cair em UltraMSG/legado (causa do "ok:true sem entregar").
 async function despacharEnvio({ companyId, instance, telefone, mensagem, midiaUrl }) {
-  const provider = await resolveConversationProvider(companyId, instance.id)
-  const adapter = getProvider({ provider })
+  const adapter = getProvider({ provider: 'whapi' })
   const sendOpts = {
     companyId,
     whatsappInstanceId: instance.id,
@@ -207,22 +236,45 @@ async function enviarMensagem(req, res) {
       return res.status(200).json({ ok: false, error: 'Destinatário em opt-out.', optOut: true })
     }
 
-    // Instância padrão ativa da empresa (desconectada/ausente → erro de negócio → 200 ok:false).
-    const { instance, error: errInst } = await getDefaultWhatsappInstance(companyId)
-    if (errInst || !instance) {
+    // Instância WHAPI da empresa (com credenciais). Sem instância/token → ok:false 200.
+    const { instance, error: errInst } = await getDefaultWhatsappInstance(companyId, {
+      provider: 'whapi',
+      includeCredentials: true,
+    })
+    const token = instance && String(instance.instance_token || '').trim()
+    if (errInst || !instance || !token) {
       idempClear(companyId, referencia)
-      return res.status(200).json({ ok: false, error: errInst || 'Sem instância WhatsApp ativa.' })
+      return res.status(200).json({ ok: false, error: 'Empresa sem instância Whapi conectada.' })
     }
 
-    const resultado = await despacharEnvio({ companyId, instance, telefone, mensagem, midiaUrl })
+    // Envio pelo Whapi, com teto de ~15s (o adapter confirma sent:true / message.id).
+    const resultado = await comTimeout(
+      despacharEnvio({ companyId, instance, telefone, mensagem, midiaUrl }),
+      WHAPI_SEND_TIMEOUT_MS,
+      { ok: false, error: 'Tempo esgotado ao enviar (Whapi).', httpStatus: null },
+    )
 
     if (!resultado.ok) {
       idempClear(companyId, referencia)
+      // Log de diagnóstico: telefone mascarado + status HTTP do Whapi + motivo (token nunca é logado).
+      console.warn(
+        '[crm:enviar-mensagem] FALHA company=%s to=%s httpStatus=%s erro=%s',
+        companyId,
+        mascararTelefone(telefone),
+        resultado.httpStatus ?? '-',
+        String(resultado.error || '').slice(0, 200),
+      )
       return res.status(200).json({ ok: false, error: resultado.error || 'Falha no envio.' })
     }
 
-    // Sucesso → marca a referência como concluída (com o messageId para respostas idempotentes).
+    // Sucesso confirmado pelo Whapi → grava a referência (com messageId p/ respostas idempotentes).
     idempSet(companyId, referencia, { status: 'done', messageId: resultado.messageId ?? null })
+    console.log(
+      '[crm:enviar-mensagem] OK company=%s to=%s id=%s',
+      companyId,
+      mascararTelefone(telefone),
+      resultado.messageId ? String(resultado.messageId).slice(0, 16) : '-',
+    )
     return res.status(200).json({ ok: true, messageId: resultado.messageId ?? null })
   } catch (err) {
     idempClear(companyId, referencia)
