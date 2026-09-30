@@ -20,6 +20,29 @@ const { atendenteNaoPodeVerAssumidaPorOutro } = require('./conversationAccessRul
 
 const conversaVisibilityCache = new Map()
 const CONVERSA_VISIBILITY_CACHE_TTL_MS = 15_000
+const CONVERSA_VISIBILITY_CACHE_MAX = 2000
+
+// Entradas vencidas só eram removidas ao reconsultar a MESMA conversa; o Map ganhava uma
+// chave por conversa que já emitiu evento desde o boot (leak lento em processo que fica
+// semanas no ar). Varredura periódica + teto com despejo dos mais antigos.
+function pruneConversaVisibilityCache() {
+  const now = Date.now()
+  for (const [k, v] of conversaVisibilityCache.entries()) {
+    if (v?.expiresAt != null && v.expiresAt <= now && !v.promise) conversaVisibilityCache.delete(k)
+  }
+  if (conversaVisibilityCache.size > CONVERSA_VISIBILITY_CACHE_MAX) {
+    const excess = conversaVisibilityCache.size - CONVERSA_VISIBILITY_CACHE_MAX
+    let removed = 0
+    for (const k of conversaVisibilityCache.keys()) {
+      if (removed >= excess) break
+      conversaVisibilityCache.delete(k)
+      removed++
+    }
+  }
+}
+
+const _visibilityPruneTimer = setInterval(pruneConversaVisibilityCache, 60_000)
+if (typeof _visibilityPruneTimer.unref === 'function') _visibilityPruneTimer.unref()
 
 function conversaVisibilityCacheKey(company_id, conversa_id) {
   return `${Number(company_id)}:${Number(conversa_id)}`

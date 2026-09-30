@@ -122,7 +122,9 @@ async function emitirParaUsuariosQuePodemVerConversa(io, company_id, conversa_id
   if (!Array.isArray(usuarioIds) || usuarioIds.length === 0) return false
   const idsUnicos = [...new Set(usuarioIds.map(Number).filter((id) => Number.isFinite(id) && id > 0))]
   if (idsUnicos.length === 0) return false
-  idsUnicos.forEach((uid) => io.to(`usuario_${uid}`).emit(eventName, payload))
+  // Emit único com todas as rooms: 1 serialização do payload em vez de N (caminho de TODO
+  // nova_mensagem inbound). Mesmos destinatários; Socket.IO deduplica sockets.
+  io.to(idsUnicos.map((uid) => `usuario_${uid}`)).emit(eventName, payload)
   return true
 }
 

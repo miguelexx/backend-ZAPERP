@@ -105,7 +105,8 @@ async function resolveWebhookCompany(req, res, next) {
     const provider_instance_id = instance?.instance_id || instanceIdRaw
     const companyIdResolved = company_id != null ? company_id : 'not_mapped'
 
-    _logSafe({ eventType, instanceId, companyIdResolved })
+    // (sem _logSafe aqui: [WEBHOOK_RESOLVE] acima já registra o mesmo resolve com mais
+    // detalhe — eram 2 linhas por webhook no caminho de sucesso)
 
     req.webhookContext = {
       company_id,

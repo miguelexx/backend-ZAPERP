@@ -55,7 +55,9 @@ exports.detalharChat = async (req, res) => {
 
     const messageHistoryPagination = parseMessageHistoryPagination(req.query)
     const { limit, cursor, cursor_id } = messageHistoryPagination
-    const messageHistoryFetchLimit = Math.min(300, Math.max(limit + 1, limit + 75))
+    // limit+1 basta para has_more: splitMessageHistoryPage corta em `limit` ANTES dos filtros
+    // de ocultas/movimentação, então buffer extra era buscado (com todas as colunas) e descartado.
+    const messageHistoryFetchLimit = limit + 1
 
     // conversa (com cliente, atendente, departamento/setor; tipo, nome_grupo, fotos; nome_contato_cache para header quando cliente ainda não tem nome)
     const { data: conversa, error: errConv } = await supabase

@@ -943,8 +943,11 @@ exports.receberZapi = async (req, res) => {
             ? String(payload.chatId).trim()
             : phone
           const syncTimeoutMs = fromMe ? 6000 : 5000
-          const syncOpts = { skipCache: true }
-          if (fromMe) syncOpts.skipCache = true
+          // Cache de 5 min do syncUltraMsgContact: evita HTTP ao provider (contato + foto com
+          // rate-limit de 2s/instância) em TODA mensagem de conversa ativa. Primeira mensagem
+          // do contato continua fazendo sync completo; o sync em background (pendingContactSync)
+          // segue refrescando depois do 200.
+          const syncOpts = {}
           senderPhoto = null
           try {
             const syncResult = await Promise.race([

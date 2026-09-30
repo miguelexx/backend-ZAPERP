@@ -2,11 +2,14 @@ const supabase = require('../config/supabase')
 const { isGroupConversation } = require('./conversaHelper')
 
 async function obterUnreadMap({ company_id, usuario_id }) {
+  // .gt(0): sem o filtro, linhas zeradas acumulam e o PostgREST corta em 1000 linhas sem
+  // ordem — não lidas sumiam do mapa. Consumidores já filtram count > 0.
   const { data, error } = await supabase
     .from('conversa_unreads')
     .select('conversa_id, unread_count')
     .eq('company_id', Number(company_id))
     .eq('usuario_id', Number(usuario_id))
+    .gt('unread_count', 0)
 
   if (error) return {}
 

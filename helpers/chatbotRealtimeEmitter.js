@@ -55,7 +55,6 @@ async function emitBotMensagemRealtime({ io, supabase, company_id, conversa_id, 
   if (depId != null) rooms.push(`departamento_${depId}`)
 
   io.to(rooms).emit('nova_mensagem', emitPayload)
-  io.to(`empresa_${company_id}`).emit('atualizar_conversa', { id: cid })
 
   const isGroup = String(convRow?.tipo || '').toLowerCase() === 'grupo' || String(convRow?.telefone || '').includes('@g.us')
   const contatoNome = convRow?.nome_contato_cache ? String(convRow.nome_contato_cache).trim() : null
@@ -84,12 +83,13 @@ async function emitBotMensagemRealtime({ io, supabase, company_id, conversa_id, 
     reordenar_suave: true,
   }
 
-  io.to(`empresa_${company_id}`).emit('conversa_atualizada', convPayload)
-  io.to(`conversa_${cid}`).emit('conversa_atualizada', convPayload)
-  if (depId != null) {
-    io.to(`departamento_${depId}`).emit('atualizar_conversa', { id: cid })
-    io.to(`departamento_${depId}`).emit('conversa_atualizada', convPayload)
-  }
+  // Emits únicos por evento (mesmas rooms de antes): todo socket de departamento_/conversa_
+  // também está em empresa_, então emits separados entregavam o mesmo evento 2-3x por
+  // mensagem do bot. Socket.IO deduplica sockets num emit multi-room.
+  const atualizarRooms = [`empresa_${company_id}`]
+  if (depId != null) atualizarRooms.push(`departamento_${depId}`)
+  io.to(atualizarRooms).emit('atualizar_conversa', { id: cid })
+  io.to(rooms).emit('conversa_atualizada', convPayload)
 }
 
 /**
@@ -119,21 +119,24 @@ function emitReaberturaSemSetorRealtime({ io, company_id, conversa_id, reabertaR
     reaberta_falta_interacao_em: reabertaRow?.reaberta_falta_interacao_em ?? null,
     reordenar_suave: true,
   }
-  io.to(`empresa_${company_id}`).emit('atualizar_conversa', { id: cid })
-  io.to(`empresa_${company_id}`).emit('conversa_atualizada', convPayload)
-  io.to(`conversa_${cid}`).emit('conversa_atualizada', convPayload)
   const antigo =
     departamentoIdAntigo != null && Number.isFinite(Number(departamentoIdAntigo))
       ? Number(departamentoIdAntigo)
       : null
+  // Emits únicos por evento (mesmas rooms de antes) — evita entrega 2-4x do mesmo evento
+  // a sockets presentes em empresa_ + conversa_ + departamento_.
+  const atualizarRooms = [`empresa_${company_id}`]
+  const convRooms = [`empresa_${company_id}`, `conversa_${cid}`]
   if (antigo != null && antigo !== depNovo) {
-    io.to(`departamento_${antigo}`).emit('atualizar_conversa', { id: cid })
-    io.to(`departamento_${antigo}`).emit('conversa_atualizada', convPayload)
+    atualizarRooms.push(`departamento_${antigo}`)
+    convRooms.push(`departamento_${antigo}`)
   }
   if (depNovo != null) {
-    io.to(`departamento_${depNovo}`).emit('atualizar_conversa', { id: cid })
-    io.to(`departamento_${depNovo}`).emit('conversa_atualizada', convPayload)
+    atualizarRooms.push(`departamento_${depNovo}`)
+    convRooms.push(`departamento_${depNovo}`)
   }
+  io.to(atualizarRooms).emit('atualizar_conversa', { id: cid })
+  io.to(convRooms).emit('conversa_atualizada', convPayload)
 }
 
 module.exports = { emitBotMensagemRealtime, emitReaberturaSemSetorRealtime }

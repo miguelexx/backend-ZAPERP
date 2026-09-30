@@ -360,7 +360,10 @@ async function mergeAndReturnCliente(supabaseClient, company_id, existente, phon
   // O campo nome deve permanecer NULL; a exibição cai para pushname/telefone via
   // getDisplayName(). Antes, isso gravava o número no nome (contato "556692307008").
   if (fields.pushname !== undefined && fields.pushname != null && String(fields.pushname).trim()) {
-    updates.pushname = String(fields.pushname).trim()
+    const pushnameNovo = String(fields.pushname).trim()
+    // Só grava se mudou: sem a comparação, TODA mensagem inbound gerava UPDATE em clientes
+    // (2x por mensagem: sync + webhook), com WAL/trigger à toa.
+    if (pushnameNovo !== (existente.pushname || null)) updates.pushname = pushnameNovo
   }
   // Sticky padrão; sync UltraMSG do mesmo contato pode passar foto_perfil_refresh.
   // identitySafePhoneMatch: não copiar foto para fixo/celular que só coincidem pelo 9 após o DDD.

@@ -22,7 +22,9 @@ async function runCycle() {
       console.warn('[absenceScheduler] ciclo concluído com erro', { result, elapsedMs })
       return
     }
-    if (result.processadas > 0 || result.analisadas > 0) {
+    // Só loga quando finalizou algo: `analisadas > 0` é verdadeiro em praticamente todo tick
+    // com atendimento em andamento (~288 linhas/dia sem informação).
+    if (result.processadas > 0) {
       console.log('[absenceScheduler] ciclo concluído', {
         processadas: result.processadas,
         analisadas: result.analisadas,

@@ -50,8 +50,7 @@ const { startProdutosSyncScheduler } = require('./services/produtosSyncScheduler
 const { startPendingOutboundReconciliationScheduler } = require('./services/pendingOutboundReconciliationScheduler')
 const { startTriageRedirectScheduler } = require('./services/triageRedirectScheduler')
 const { startAguardandoClienteMonitorScheduler } = require('./services/aguardandoClienteMonitorScheduler')
-const { usuarioPodeVerGrupo } = require('./helpers/departamentoGruposHelper')
-const { usuarioParticipaAtivamenteDaConversa } = require('./services/chat/access/conversationVisibilityService')
+const { assertPermissaoConversa } = require('./services/chat/access/conversationPolicy')
 const { marcarComoLidaPorUsuario } = require('./services/chat/unread/conversationUnreadService')
 const { registerConversationRooms } = require('./socket/conversationRooms')
 
@@ -63,47 +62,24 @@ async function canUserJoinConversationRoom({ company_id, user_id, role, departam
   if (!Number.isFinite(companyId) || companyId <= 0) return false
   if (!Number.isFinite(userId) || userId <= 0) return false
 
-  const { data: conv, error: convErr } = await supabase
-    .from('conversas')
-    .select('id, atendente_id, departamento_id, tipo, telefone')
-    .eq('company_id', companyId)
-    .eq('id', cid)
-    .maybeSingle()
-  if (convErr || !conv) return false
-
-  const profile = String(role || '').toLowerCase()
-  if (profile === 'admin') return true
-
-  const isGroup =
-    ['grupo', 'group'].includes(String(conv.tipo || '').toLowerCase()) ||
-    String(conv.telefone || '').toLowerCase().endsWith('@g.us')
-  if (isGroup) {
-    return usuarioPodeVerGrupo({
+  // Delega à política HTTP canônica (assertPermissaoConversa). A duplicata local divergia
+  // nos dois sentidos: não aplicava atendenteNaoPodeVerAssumidaPorOutro (atendente do mesmo
+  // setor entrava na room de conversa assumida por outro e lia tudo em tempo real, enquanto
+  // o GET /chats/:id devolvia 403) e negava conversa encerrada de outro setor (que o HTTP
+  // libera para reabertura, ficando sem realtime).
+  try {
+    const perm = await assertPermissaoConversa({
       company_id: companyId,
       conversa_id: cid,
+      user_id: userId,
       role,
-      departamento_ids,
+      user_dep_ids: Array.isArray(departamento_ids) ? departamento_ids : [],
     })
+    return perm?.ok === true
+  } catch (e) {
+    console.warn('[socket] canUserJoinConversationRoom:', e?.message || e)
+    return false
   }
-
-  if (conv.atendente_id != null && Number(conv.atendente_id) === userId) return true
-  if (conv.atendente_id != null && await usuarioParticipaAtivamenteDaConversa(companyId, cid, userId)) return true
-
-  const { data: transferRow } = await supabase
-    .from('atendimentos')
-    .select('id')
-    .eq('company_id', companyId)
-    .eq('conversa_id', cid)
-    .eq('de_usuario_id', userId)
-    .eq('acao', 'transferiu')
-    .limit(1)
-    .maybeSingle()
-  if (transferRow) return true
-
-  const depIds = Array.isArray(departamento_ids) ? departamento_ids.map(Number).filter(Number.isFinite) : []
-  const convDep = conv.departamento_id != null ? Number(conv.departamento_id) : null
-  if (convDep == null) return true
-  return depIds.some((d) => d === convDep)
 }
 
 async function marcarConversaLidaSocket({ company_id, user_id, role, departamento_ids, conversa_id }) {

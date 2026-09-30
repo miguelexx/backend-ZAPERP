@@ -31,12 +31,15 @@ async function runCycle() {
       const hasActionable = (result.detalhes || []).some((d) =>
         ['send_failed', 'invalid_phone', 'invalid_contact_phone', 'contact_not_found', 'contact_lookup_failed', 'reserve_failed', 'no_provider', 'no_metrics_enabled'].includes(d.reason)
       )
-      const logFn = hasActionable ? console.warn : console.log
-      logFn('[adminAlertaScheduler] ciclo (alerta ativo; sem envio neste tick)', {
-        empresas_com_alerta_ativo: result.processadas,
-        elapsedMs,
-        detalhes: resumo || undefined,
-      })
+      // Só loga tick-sem-envio quando há algo acionável (falha de envio, telefone inválido…).
+      // O tick informativo a cada 2 min com alerta ativo gerava ~720 linhas/dia sem valor.
+      if (hasActionable) {
+        console.warn('[adminAlertaScheduler] ciclo (alerta ativo; sem envio neste tick)', {
+          empresas_com_alerta_ativo: result.processadas,
+          elapsedMs,
+          detalhes: resumo || undefined,
+        })
+      }
     }
   } catch (e) {
     console.warn('[adminAlertaScheduler] erro no ciclo:', e?.message || e)

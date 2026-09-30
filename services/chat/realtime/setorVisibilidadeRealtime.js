@@ -81,9 +81,9 @@ function emitirMudancaSetorRealtime(io, company_id, conversa_id, opts = {}) {
     departamento_id: opts.departamento_id,
     departamentoIdAnterior: opts.departamentoIdAnterior,
   })
-  for (const room of rooms) {
-    io.to(room).emit(eventName, payload)
-  }
+  // Emit único: todo socket já está em empresa_; emits separados entregavam o mesmo
+  // evento até 4x para quem estava em conversa_/departamento_. Socket.IO deduplica.
+  io.to(rooms).emit(eventName, payload)
   return true
 }
 

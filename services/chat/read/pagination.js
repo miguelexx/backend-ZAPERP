@@ -49,7 +49,11 @@ function applyChatListCursor(query, cursorUltimaAtividade, cursorIdRaw) {
       : NaN
   if (Number.isFinite(idNum)) {
     const quoted = `"${cursor.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`
-    return query.or(`ultima_atividade.lt.${quoted},and(ultima_atividade.eq.${quoted},id.lt.${Math.floor(idNum)})`)
+    // .lte redundante (o OR já implica <=): o Postgres não deriva range do OR sozinho,
+    // então sem ele cada página re-varre desde o topo do índice (custo tipo OFFSET).
+    return query
+      .lte('ultima_atividade', cursor)
+      .or(`ultima_atividade.lt.${quoted},and(ultima_atividade.eq.${quoted},id.lt.${Math.floor(idNum)})`)
   }
   return query.lt('ultima_atividade', cursor)
 }
@@ -134,7 +138,10 @@ function applyDetalharChatMensagensCursor(query, cursorEm, cursorIdRaw) {
       : NaN
   if (Number.isFinite(idNum)) {
     const quoted = `"${em.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`
-    return query.or(`criado_em.lt.${quoted},and(criado_em.eq.${quoted},id.lt.${idNum})`)
+    // .lte redundante: dá início de range ao índice (ver applyChatListCursor).
+    return query
+      .lte('criado_em', em)
+      .or(`criado_em.lt.${quoted},and(criado_em.eq.${quoted},id.lt.${idNum})`)
   }
   return query.lt('criado_em', em)
 }

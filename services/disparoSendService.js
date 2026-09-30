@@ -235,8 +235,8 @@ async function persistirMensagem({
         direcao: 'out',
         company_id: companyId,
       }
-      io.to(`empresa_${companyId}`).emit('nova_mensagem', emitPayload)
-      io.to(`conversa_${convId}`).emit('nova_mensagem', emitPayload)
+      // Emit único (dedup): quem estava com a conversa aberta recebia o evento 2x por item.
+      io.to([`empresa_${companyId}`, `conversa_${convId}`]).emit('nova_mensagem', emitPayload)
     } catch (e) {
       console.warn('[disparo:send] emit nova_mensagem item=', item.id, e?.message || e)
     }

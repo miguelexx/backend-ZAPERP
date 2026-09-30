@@ -16,6 +16,10 @@ function clientTempIdDedupeKey(company_id, conversa_id, clientTempId) {
 }
 
 function isMissingMensagemColumnError(error, columnName) {
+  // 23505 (unique violation) cita o nome da coluna/índice na mensagem, mas NÃO é coluna
+  // ausente — tratá-lo como tal removia client_temp_id, chamava markDbDedupeUnavailable()
+  // e reinseria a linha: mensagem duplicada + dedupe persistente desligada até restart.
+  if (String(error?.code || '') === '23505') return false
   const text = [
     error?.message,
     error?.details,
