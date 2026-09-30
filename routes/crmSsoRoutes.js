@@ -11,6 +11,7 @@ const crmSso = require('../controllers/crmSsoController')
 const crmLead = require('../controllers/crmLeadController')
 const crmEnvio = require('../controllers/crmEnvioController')
 const crmInstancia = require('../controllers/crmInstanciaController')
+const crmContatos = require('../controllers/crmContatosController')
 
 const router = express.Router()
 
@@ -23,6 +24,10 @@ router.post('/enviar-mensagem', crmEnvio.enviarMensagem)
 // Status da instância WhatsApp da empresa (CRM confirma número conectado).
 // Autenticado por x-zaperp-secret dentro do controller (server-to-server).
 router.get('/instancia-status', crmInstancia.instanciaStatus)
+
+// Busca de contatos (clientes) da empresa por nome/telefone (CRM autocompletar destino).
+// Autenticado por x-zaperp-secret dentro do controller (server-to-server).
+router.get('/contatos', crmContatos.listarContatos)
 
 // Etapas do funil do CRM Avançado → botões de "para qual etapa enviar".
 router.get('/etapas', auth, crmLead.listarEtapasCrm)
