@@ -29,6 +29,8 @@ const { getProvider } = require('../services/providers')
 const { getDefaultWhatsappInstance } = require('../services/whatsappInstanceService')
 const { normalizePhoneBR } = require('../helpers/phoneHelper')
 const { segredoConfere } = require('../helpers/zaperpSecret')
+const whapiContacts = require('../services/providers/whapi/contacts')
+const { listWhapiIdentityDigits, normalizeCanonicalWaId } = require('../services/whapiRecipientResolverService')
 
 // Timeout curto na chamada ao Whapi (o adapter tem timeout interno ~30s; aqui impomos
 // ~15s para o CRM não travar esperando um canal lento).
@@ -193,6 +195,61 @@ async function despacharEnvio({ companyId, instance, telefone, mensagem, midiaUr
   return normalizarResultadoEnvio(await adapter.sendText(telefone, mensagem, sendOpts))
 }
 
+// Resolve o chat id CANÔNICO (wa_id) do número no Whapi ANTES de enviar, com fallback de
+// 9º dígito BR. O adapter só faz essa resolução via /contacts quando há conversa/cliente no
+// opts (resolveWhapiSendRecipient) — o envio do CRM não tem esse contexto, então a mensagem
+// ia para o número cru: a Whapi aceita o formato e marca ✓✓, mas entrega a um chat que NÃO é
+// o WhatsApp real quando o 9º dígito está errado. Aqui consultamos POST /contacts (checkPhones,
+// force_check) com as variantes 12↔13 e usamos o wa_id autoritativo devolvido pela Whapi.
+//
+// Retorno:
+//   { resolvido:true, chatId:'<digits>@s.whatsapp.net', waIdDigits }  → destino confirmado
+//   { resolvido:false, semWhatsapp:true }                              → número não tem WhatsApp
+//   { resolvido:false, erro }                                          → falha ao verificar (Whapi)
+async function resolverChatIdWhapi({ companyId, whatsappInstanceId, telefone }) {
+  // Candidatos = número + variantes de 9º dígito BR (12 e 13 dígitos do mesmo celular).
+  const candidatos = listWhapiIdentityDigits(telefone)
+  if (!candidatos.length) return { resolvido: false, semWhatsapp: true }
+
+  let checked
+  try {
+    checked = await whapiContacts.checkPhones(candidatos, {
+      companyId,
+      whatsappInstanceId,
+      forceCheck: true,
+    })
+  } catch (e) {
+    return { resolvido: false, erro: `Não foi possível verificar o número no WhatsApp (Whapi): ${e?.message || e}` }
+  }
+
+  const soDigitos = (v) => String(v || '').replace(/@[^@]+$/, '').replace(/\D/g, '')
+  const validosPorInput = new Map()
+  for (const item of (Array.isArray(checked) ? checked : [])) {
+    if (!item?.exists || !item?.waId) continue
+    const d = soDigitos(item.input)
+    if (d) validosPorInput.set(d, item)
+  }
+
+  // Prefere o wa_id do primeiro candidato NA NOSSA ordem que a Whapi validou; senão, qualquer válido.
+  const escolher = (item) => {
+    const chatId = normalizeCanonicalWaId(item.waId)
+    return chatId ? { resolvido: true, chatId, waIdDigits: soDigitos(item.waId) } : null
+  }
+  for (const cand of candidatos) {
+    const hit = validosPorInput.get(soDigitos(cand))
+    if (hit) {
+      const r = escolher(hit)
+      if (r) return r
+    }
+  }
+  const qualquer = (Array.isArray(checked) ? checked : []).find((i) => i?.exists && i?.waId)
+  if (qualquer) {
+    const r = escolher(qualquer)
+    if (r) return r
+  }
+  return { resolvido: false, semWhatsapp: true }
+}
+
 async function enviarMensagem(req, res) {
   const segredo = process.env.ZAP_SSO_SECRET
   if (!segredo) {
@@ -247,20 +304,37 @@ async function enviarMensagem(req, res) {
       return res.status(200).json({ ok: false, error: 'Empresa sem instância Whapi conectada.' })
     }
 
-    // Envio pelo Whapi, com teto de ~15s (o adapter confirma sent:true / message.id).
+    // Resolve o chat id canônico no Whapi (com fallback de 9º dígito) ANTES de enviar.
+    const wa = await resolverChatIdWhapi({ companyId, whatsappInstanceId: instance.id, telefone })
+    if (!wa.resolvido) {
+      idempClear(companyId, referencia)
+      const motivo = wa.semWhatsapp
+        ? `Número não tem WhatsApp: ${telefone}`
+        : (wa.erro || 'Não foi possível resolver o destino no WhatsApp.')
+      console.warn(
+        '[crm:enviar-mensagem] SEM_DESTINO company=%s to=%s motivo=%s',
+        companyId,
+        mascararTelefone(telefone),
+        motivo,
+      )
+      return res.status(200).json({ ok: false, error: motivo })
+    }
+
+    // Envio pelo Whapi para o wa_id RESOLVIDO, com teto de ~15s (o adapter confirma sent:true / message.id).
     const resultado = await comTimeout(
-      despacharEnvio({ companyId, instance, telefone, mensagem, midiaUrl }),
+      despacharEnvio({ companyId, instance, telefone: wa.chatId, mensagem, midiaUrl }),
       WHAPI_SEND_TIMEOUT_MS,
       { ok: false, error: 'Tempo esgotado ao enviar (Whapi).', httpStatus: null },
     )
 
     if (!resultado.ok) {
       idempClear(companyId, referencia)
-      // Log de diagnóstico: telefone mascarado + status HTTP do Whapi + motivo (token nunca é logado).
+      // Log de diagnóstico: telefone original + wa_id resolvido (mascarados) + status HTTP + motivo.
       console.warn(
-        '[crm:enviar-mensagem] FALHA company=%s to=%s httpStatus=%s erro=%s',
+        '[crm:enviar-mensagem] FALHA company=%s to=%s waId=%s httpStatus=%s erro=%s',
         companyId,
         mascararTelefone(telefone),
+        mascararTelefone(wa.waIdDigits),
         resultado.httpStatus ?? '-',
         String(resultado.error || '').slice(0, 200),
       )
@@ -270,9 +344,10 @@ async function enviarMensagem(req, res) {
     // Sucesso confirmado pelo Whapi → grava a referência (com messageId p/ respostas idempotentes).
     idempSet(companyId, referencia, { status: 'done', messageId: resultado.messageId ?? null })
     console.log(
-      '[crm:enviar-mensagem] OK company=%s to=%s id=%s',
+      '[crm:enviar-mensagem] OK company=%s to=%s waId=%s id=%s',
       companyId,
       mascararTelefone(telefone),
+      mascararTelefone(wa.waIdDigits),
       resultado.messageId ? String(resultado.messageId).slice(0, 16) : '-',
     )
     return res.status(200).json({ ok: true, messageId: resultado.messageId ?? null })
