@@ -13,11 +13,28 @@
  * Nada do fluxo automático é tocado: reusa o serviço existente com a flag `force` que já existia.
  */
 
+const fs = require('fs')
+const path = require('path')
 const supabase = require('../../config/supabase')
+const { getUploadsRoot } = require('../../config/uploadsRoot')
 const {
   tipoQualificaPersistencia,
   persistInboundMediaToUploads,
 } = require('../../services/inboundMediaPersistenceService')
+const { recuperarUrlRemotaDaMensagem } = require('../../services/inboundMediaRemoteUrlRecoveryService')
+
+/** O arquivo apontado por uma URL /uploads/... realmente existe (e não está vazio) no disco? */
+function uploadsFileExists(urlUploads) {
+  try {
+    const nome = path.basename(String(urlUploads).split('?')[0])
+    if (!nome || nome === '.' || nome === '..') return false
+    const abs = path.join(getUploadsRoot(), nome)
+    const stat = fs.statSync(abs)
+    return stat.isFile() && stat.size > 0
+  } catch (_) {
+    return false
+  }
+}
 
 /** Motivos de falha que NÃO adianta insistir: a mídia sumiu do provedor ou não é copiável. */
 const MOTIVOS_DEFINITIVOS = new Set([
@@ -46,7 +63,7 @@ exports.reprocessarMidiaInbound = async (req, res) => {
 
   const { data: mensagem, error: errMsg } = await supabase
     .from('mensagens')
-    .select('id, conversa_id, company_id, direcao, tipo, url')
+    .select('id, conversa_id, company_id, direcao, tipo, url, whatsapp_id, whatsapp_instance_id')
     .eq('company_id', company_id)
     .eq('conversa_id', conversa_id)
     .eq('id', mensagem_id)
@@ -68,9 +85,37 @@ exports.reprocessarMidiaInbound = async (req, res) => {
   }
 
   const urlAtual = String(mensagem.url || '').trim()
-  // Já está em /uploads: outra tentativa (ou o scheduler) resolveu. Nada a fazer — devolve a URL boa.
   if (urlAtual.startsWith('/uploads/')) {
-    return res.json({ ok: true, url: urlAtual, status: 'concluida', ja_persistido: true })
+    // Já está em /uploads E o arquivo existe no disco: nada a fazer — devolve a URL boa.
+    if (uploadsFileExists(urlAtual)) {
+      return res.json({ ok: true, url: urlAtual, status: 'concluida', ja_persistido: true })
+    }
+    // Arquivo SUMIU do disco (limpeza/deploy/host): a URL original do provedor foi sobrescrita
+    // pela persistência, então recuperamos uma URL fresca no provedor (por whatsapp_id; fallback
+    // pelo histórico do chat) e devolvemos a linha ao estado "URL remota" para o fluxo force
+    // abaixo re-copiar para /uploads — o mesmo caminho já testado, incluindo o nova_mensagem.
+    const urlRemota = await recuperarUrlRemotaDaMensagem({ supabase, company_id, mensagem })
+    if (!urlRemota) {
+      console.warn('[inboundMediaReprocess] arquivo local perdido e provedor sem mídia:', {
+        mensagem_id, company_id, url: urlAtual.slice(0, 80),
+      })
+      return res.status(200).json({ ok: false, definitivo: true, motivo: 'arquivo_local_perdido' })
+    }
+    // Guarda de corrida: só troca se a linha AINDA apontar para o arquivo morto.
+    const { error: upRecErr } = await supabase
+      .from('mensagens')
+      .update({ url: urlRemota })
+      .eq('id', mensagem_id)
+      .eq('company_id', company_id)
+      .eq('url', urlAtual)
+    if (upRecErr) {
+      console.warn('[inboundMediaReprocess] falha ao restaurar URL remota:', upRecErr.message)
+      return res.status(500).json({ ok: false, error: 'Falha ao preparar a recuperação da mídia' })
+    }
+    console.log('[inboundMediaReprocess] arquivo local perdido; URL remota recuperada do provedor:', {
+      mensagem_id, company_id,
+    })
+    // segue para o reprocesso force abaixo
   }
 
   const lockKey = `${company_id}:${mensagem_id}`
