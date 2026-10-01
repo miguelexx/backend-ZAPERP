@@ -1,5 +1,5 @@
 const supabase = require('../config/supabase')
-const { isGroupConversation } = require('../helpers/conversaHelper')
+const { isGroupConversation, isClosedAttendanceStatus } = require('../helpers/conversaHelper')
 const { registrarAtendimento } = require('./atendimentosRegistroService')
 const { clearReabertaFaltaInteracao } = require('../helpers/reabertaFaltaInteracaoHelper')
 const { resetAlertaSemRespostaAoAssumirReaberta } = require('./atendimentoSemRespostaService')
@@ -14,13 +14,18 @@ async function executarAssumirConversa({
   user_id,
   perfil,
   departamento_ids = [],
-  observacao = null
+  observacao = null,
+  /** true (rota POST /chats/:id/assumir): conversa encerrada responde 409 — reabrir é ação
+   *  explícita (Reabrir / nova mensagem do cliente), não um clique de Assumir em tela defasada.
+   *  false (fluxos internos, ex.: "Conversar" no cartão do cliente): mantém o comportamento
+   *  de retomar a conversa encerrada como em_atendimento. */
+  bloquearEncerrada = false
 }) {
   const isAdmin = perfil === 'admin'
 
   const { data: atual, error: errAtual } = await supabase
     .from('conversas')
-    .select('id, atendente_id, departamento_id, tipo, telefone, reaberta_falta_interacao_em')
+    .select('id, atendente_id, departamento_id, tipo, telefone, status_atendimento, reaberta_falta_interacao_em')
     .eq('company_id', company_id)
     .eq('id', conversa_id)
     .single()
@@ -30,6 +35,10 @@ async function executarAssumirConversa({
 
   if (isGroupConversation(atual)) {
     return { ok: false, status: 400, error: 'Grupos são apenas visuais. Não é possível assumir conversa de grupo.', conversa: null }
+  }
+
+  if (bloquearEncerrada && isClosedAttendanceStatus(atual.status_atendimento)) {
+    return { ok: false, status: 409, error: 'Esta conversa já foi finalizada. Use "Reabrir" para voltar a atendê-la.', conversa: null }
   }
 
   if (!isAdmin) {

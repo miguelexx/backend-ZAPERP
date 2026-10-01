@@ -246,6 +246,11 @@ exports.receberZapi = async (req, res) => {
 
     const payloads = getPayloads(body)
     let lastResult = { ok: true }
+    // Falhas de persistência/conversa no lote: a resposta final vira 500 para o provedor
+    // REENTREGAR (idempotência por whatsapp_id + guarda inboundReentregue protegem a reentrega).
+    // Antes: continue + 200 = mensagem perdida para sempre sem retry do provedor.
+    let persistFailures = 0
+    let persistFailureLastError = ''
 
     let separarMensagensDisparadasEmpresa = false
     try {
@@ -1108,9 +1113,14 @@ exports.receberZapi = async (req, res) => {
         })
 
         if (!syncResult) {
+          // null = telefone NÃO normalizável (falha permanente de payload — retry não resolve;
+          // erro transitório de banco cai no catch abaixo e vira 500/reentrega).
           console.error('[Z-API] findOrCreateConversation retornou null para phone:', phone)
-          // IMPORTANTE: payload é 1 de N num lote (ver getPayloads) — abortar a requisição aqui
-          // descartaria as demais mensagens do lote. Pula só esta e segue para a próxima.
+          req.webhookLogData = {
+            ...(req.webhookLogData || {}),
+            status: 'dropped_unresolved_destination',
+            error_message: `destino não resolvido: "${String(phone).slice(0, 48)}"`,
+          }
           lastResult = { ok: false, error: 'Não foi possível identificar conversa para o número' }
           continue
         }
@@ -1256,7 +1266,10 @@ exports.receberZapi = async (req, res) => {
     } catch (errConv) {
       console.error('[Z-API] ❌ Erro ao obter/criar conversa:', errConv?.message || errConv)
       // IMPORTANTE: payload é 1 de N num lote (ver getPayloads) — abortar a requisição aqui
-      // descartaria as demais mensagens do lote. Pula só esta e segue para a próxima.
+      // descartaria as demais mensagens do lote. Pula só esta, segue para a próxima e marca a
+      // falha: a resposta final será 500 para o provedor reentregar (erro transitório de banco).
+      persistFailures++
+      persistFailureLastError = `conversa: ${errConv?.message || errConv}`
       lastResult = { ok: false, error: 'Erro ao obter conversa' }
       continue
     }
@@ -1293,6 +1306,9 @@ exports.receberZapi = async (req, res) => {
     let conversaReabertaAposFinalizacao = false
     let reopenedFromAbsence = false
     let absenceReopenExplicitlyDisabled = false
+    // Eco FRACO (padrão de texto sem corroboração recente): a mensagem É persistida (pode ser
+    // genuína do cliente), mas não reabre a conversa nem dispara chatbot/boas-vindas.
+    let skipReopenPorEcoFraco = false
     if (!fromMe && !isGroup && conversa_id && !inboundReentregue) {
       const { data: convStatus } = await supabase
         .from('conversas')
@@ -1335,7 +1351,7 @@ exports.receberZapi = async (req, res) => {
           texto,
           messageId,
         })
-        if (outboundEcho.isEcho) {
+        if (outboundEcho.isEcho && outboundEcho.confidence !== 'weak') {
           console.log('[Z-API] 🔒 Conversa mantida fechada — eco da nossa mensagem (não reabre, não dispara boas-vindas)', {
             conversa_id,
             reason: outboundEcho.reason,
@@ -1344,7 +1360,19 @@ exports.receberZapi = async (req, res) => {
           lastResult = { ok: true, conversa_id, skip: 'own_outbound_echo_closed' }
           continue
         }
-        if (motivoFinalizacao === 'ausencia_cliente') {
+        if (outboundEcho.isEcho) {
+          // Eco FRACO (só padrão de texto, sem sinal recente): antes era descartado ANTES do
+          // insert — mensagem genuína do cliente com essas palavras sumia com HTTP 200.
+          // Agora persiste (dedup por whatsapp_id ainda protege eco real já gravado) e apenas
+          // não reabre/não dispara menu.
+          skipReopenPorEcoFraco = true
+          console.log('[Z-API] ⚠️ Padrão de eco SEM corroboração — mensagem será persistida; conversa permanece fechada', {
+            conversa_id,
+            reason: outboundEcho.reason,
+            texto: String(texto || '').slice(0, 80),
+          })
+        }
+        if (!skipReopenPorEcoFraco && motivoFinalizacao === 'ausencia_cliente') {
           const { absence: cfg } = await loadChatbotTriageMergeAndAbsence(company_id)
           if (cfg.reabrirAutomaticamente) {
             const depAntesReabrir =
@@ -1423,7 +1451,7 @@ exports.receberZapi = async (req, res) => {
         }
         // Reabrir por defeito após encerramento; não reabrir se for avaliação registrada,
         // nota 0-10 isolada, agradecimento/ACK de encerramento ou mensagem claramente sem nova demanda.
-        if (!avalResult.registered && !reopenedFromAbsence && !absenceReopenExplicitlyDisabled) {
+        if (!avalResult.registered && !reopenedFromAbsence && !absenceReopenExplicitlyDisabled && !skipReopenPorEcoFraco) {
           const reopenDecision = shouldReopenFinishedConversation(textoNorm, {
             company_id,
             conversa_id,
@@ -1550,7 +1578,7 @@ exports.receberZapi = async (req, res) => {
       skipChatbotPorCampanha = devePularChatbotPorCampanha(convEstado)
     }
     departamentoIdAntesRealtime = departamento_id
-    if (!fromMe && !isGroup && !inboundReentregue && departamento_id == null && atendente_id == null && phoneParaChatbot) {
+    if (!fromMe && !isGroup && !inboundReentregue && !skipReopenPorEcoFraco && departamento_id == null && atendente_id == null && phoneParaChatbot) {
       const chatbotEligibility = shouldTriggerChatbotForInbound({
         fromMe,
         isGroup,
@@ -1852,7 +1880,9 @@ exports.receberZapi = async (req, res) => {
       }
     }
 
-    if (!fromMe && !isGroup && skipChatbotPorCampanha && conversa_id && company_id) {
+    // !inboundReentregue: replay/reentrega de inbound antigo não é "resposta do cliente" —
+    // sem a guarda, uma reentrega reabria conversa finalizada via consumo de campanha.
+    if (!fromMe && !isGroup && skipChatbotPorCampanha && conversa_id && company_id && !inboundReentregue) {
       try {
         await consumirPrimeiraRespostaCampanha({
           companyId: company_id,
@@ -2128,7 +2158,10 @@ exports.receberZapi = async (req, res) => {
         insertMsg
       )
       if (_persist.failed) {
-        // payload é 1 de N num lote — pula só este item e segue para o próximo.
+        // payload é 1 de N num lote — pula só este item, segue para o próximo e marca a falha:
+        // a resposta final será 500 para o provedor reentregar (antes: 200 = perda definitiva).
+        persistFailures++
+        persistFailureLastError = 'insert mensagem falhou (ver log ULTRAMSG Erro ao salvar mensagem)'
         lastResult = { ok: false, error: 'Erro ao salvar mensagem' }
         continue
       }
@@ -2603,6 +2636,18 @@ exports.receberZapi = async (req, res) => {
     }
 
     lastResult = { ok: true, conversa_id: convIdForEmit, mensagem_id: mensagemSalva?.id }
+    }
+
+    if (persistFailures > 0) {
+      // Pelo menos 1 mensagem do lote NÃO foi persistida por erro transitório: 500 para o
+      // provedor reentregar. Itens já salvos na reentrega caem na idempotência (whatsapp_id
+      // único → merge) e os efeitos colaterais ficam bloqueados pela guarda inboundReentregue.
+      req.webhookLogData = {
+        ...(req.webhookLogData || {}),
+        status: 'persist_failed',
+        error_message: persistFailureLastError || 'falha ao persistir mensagem do lote',
+      }
+      return res.status(500).json({ ok: false, error: 'persist_failed', failures: persistFailures })
     }
 
     return res.status(200).json(lastResult)

@@ -345,7 +345,9 @@ async function getWhatsappInstanceByProviderInstanceId(provider, instanceId, opt
       variants: values,
       error: activeRows.error?.message || activeRows.error,
     })
-    return { instance: null, error: 'Erro ao buscar instancia por provider instance_id' }
+    // DB_ERROR ≠ "instância não existe": o webhook precisa responder 500 (provedor reentrega),
+    // nunca ignored_not_mapped 200 — senão a mensagem se perde num erro transitório do banco.
+    return { instance: null, error: 'Erro ao buscar instancia por provider instance_id', code: 'DB_ERROR' }
   }
   if (activeRows.error && isMissingTableError(activeRows.error)) {
     logProviderInstanceLookup('warn', '[WHATSAPP-INSTANCES] Tabela whatsapp_instances indisponivel no schema REST; tentando fallback legado', {
@@ -391,7 +393,7 @@ async function getWhatsappInstanceByProviderInstanceId(provider, instanceId, opt
       whatsapp_instances_rows: 0,
       error: legacyRows.error?.message || legacyRows.error,
     })
-    return { instance: null, error: 'Erro ao buscar empresa_zapi por instance_id' }
+    return { instance: null, error: 'Erro ao buscar empresa_zapi por instance_id', code: 'DB_ERROR' }
   }
   if (legacyRows.rows.length > 1) {
     return duplicateProviderInstanceResult(p, instanceId, legacyRows.rows, 'empresa_zapi')

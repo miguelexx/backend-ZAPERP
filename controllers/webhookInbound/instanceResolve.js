@@ -31,6 +31,22 @@ async function resolveInboundTenant(req) {
       })
       return { ignored: { status: 200, body: { ok: true, ignored: 'duplicate_provider_instance' } } }
     }
+    // Erro de BANCO ≠ instância inexistente: 500 (provedor reentrega). Antes caía em
+    // not_mapped 200 e a mensagem se perdia num erro transitório do Supabase.
+    if (resolved?.code === 'DB_ERROR') {
+      _logWebhookSafe({
+        instanceId: instanceId.slice(0, 24) + (instanceId.length > 24 ? '…' : ''),
+        companyId: 'db_error',
+        type: body.type || body.event || 'unknown',
+        ignored: 'instance_resolve_db_error',
+      })
+      req.webhookLogData = {
+        ...(req.webhookLogData || {}),
+        status: 'resolve_db_error',
+        error_message: resolved?.error || 'Erro de banco ao resolver instancia',
+      }
+      return { ignored: { status: 500, body: { ok: false, error: 'instance_resolve_db_error' } } }
+    }
     if (resolved?.instance) {
       company_id = resolved.instance.company_id
       whatsapp_instance_id = resolved.instance.id ?? null

@@ -106,6 +106,30 @@ describe('disparoConversaOrigemService', () => {
     expect(supabase.from).toHaveBeenCalledTimes(1)
   })
 
+  test('consumir: conversa encerrada NÃO reabre — só limpa a flag de campanha', async () => {
+    const selectChain = mockChain({
+      data: { ...CONV_LIVRE, status_atendimento: 'fechada', aguardando_resposta_campanha: true },
+      error: null,
+    })
+    const flagChain = mockChain({ data: null, error: null })
+    supabase.from
+      .mockReturnValueOnce(selectChain)
+      .mockReturnValueOnce(flagChain)
+
+    const result = await consumirPrimeiraRespostaCampanha({
+      companyId: 10,
+      conversaId: 55,
+      instanciaId: 3,
+    })
+
+    expect(result).toMatchObject({ ok: true, consumed: false, ignored: 'conversa_encerrada', conversa_id: 55 })
+    // Limpa apenas a flag — nunca status_atendimento/atendente_id de conversa finalizada.
+    expect(flagChain.update).toHaveBeenCalledWith({ aguardando_resposta_campanha: false })
+    expect(flagChain.eq).toHaveBeenCalledWith('aguardando_resposta_campanha', true)
+    expect(registrarAtendimento).not.toHaveBeenCalled()
+    expect(supabase.from).toHaveBeenCalledTimes(2)
+  })
+
   test('consumir: webhook duplicado não reabre (update atômico 0 linhas)', async () => {
     const selectChain = mockChain({
       data: { ...CONV_LIVRE, aguardando_resposta_campanha: true },

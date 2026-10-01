@@ -3,7 +3,11 @@
  * Usado antes de reabrir + disparar boas-vindas (bug: finalizar reabria o menu sozinho).
  */
 
-const { shouldSkipReopenAsOwnOutboundEcho } = require('./reopenPolicy')
+const {
+  shouldSkipReopenAsOwnOutboundEcho,
+  looksLikeAtendimentoFinalizacao,
+  looksLikeWelcomeMenuEcho,
+} = require('./reopenPolicy')
 const { getRecentClosedConversation } = require('./recentClosedConversationGuard')
 
 const RECENT_OUTBOUND_WINDOW_MS = 3 * 60 * 1000
@@ -43,7 +47,7 @@ async function detectOwnOutboundEcho({ supabase, company_id, conversa_id, texto,
           .eq('direcao', 'out')
           .maybeSingle()
         if (existing?.id) {
-          return { isEcho: true, reason: 'whatsapp_id_outbound' }
+          return { isEcho: true, reason: 'whatsapp_id_outbound', confidence: 'strong' }
         }
       }
     } catch (_) { /* lookup best-effort */ }
@@ -56,7 +60,23 @@ async function detectOwnOutboundEcho({ supabase, company_id, conversa_id, texto,
     inboundText,
     recentOutboundTexts: texts,
   })
-  return { isEcho: decision.skip, reason: decision.reason }
+  if (!decision.skip) return { isEcho: false, reason: decision.reason }
+
+  // Confiança do veredicto de eco:
+  // - 'whatsapp_id_outbound' / 'echo_recent_outbound' têm sinal REAL (linha out no banco /
+  //   igualdade com outbound dos últimos 3 min) → strong.
+  // - Padrões de TEXTO sem janela ('finalizacao_template' / 'welcome_menu_echo') só são strong
+  //   quando corroborados por sinal recente (conversa fechada há <2 min na memória, ou outbound
+  //   recente com o mesmo template). Sem corroboração = weak: pode ser mensagem GENUÍNA do
+  //   cliente — o orquestrador deve PERSISTIR a mensagem e apenas não reabrir/disparar menu.
+  let confidence = 'strong'
+  if (decision.reason === 'finalizacao_template' || decision.reason === 'welcome_menu_echo') {
+    const corroborado =
+      !!mem ||
+      texts.some((t) => looksLikeAtendimentoFinalizacao(t) || looksLikeWelcomeMenuEcho(t))
+    if (!corroborado) confidence = 'weak'
+  }
+  return { isEcho: true, reason: decision.reason, confidence }
 }
 
 module.exports = {

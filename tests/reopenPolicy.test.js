@@ -87,4 +87,23 @@ describe('eco da nossa mensagem após finalizar — não reabre', () => {
   test('inboundLooksLikeRecentOutbound ignora texto curto', () => {
     expect(inboundLooksLikeRecentOutbound('ok', ['ok pronto'])).toBe(false)
   })
+
+  // Template real de cliente: "Protocolo deste atendimento: NNN" sem as palavras
+  // "finalizado/encerrado" — eco tardio (fora da janela de 2-3 min) reabria a conversa.
+  test('template com "Protocolo deste atendimento" não reabre mesmo sem janela de tempo', () => {
+    const template =
+      'Agradecemos pelo seu contato.\n\nEsperamos que esteja tudo bem por aí.\n\n' +
+      'Protocolo deste atendimento: 80213.\n\nCaso precise de mais alguma coisa, estamos à disposição. Tenha um ótimo dia!'
+    const r = shouldSkipReopenAsOwnOutboundEcho({ inboundText: template, recentOutboundTexts: [] })
+    expect(r.skip).toBe(true)
+    expect(r.reason).toBe('finalizacao_template')
+  })
+
+  test('cliente citando a palavra protocolo em demanda real continua reabrindo', () => {
+    const r = shouldSkipReopenAsOwnOutboundEcho({
+      inboundText: 'Perdi o número do protocolo, podem me ajudar com o pedido?',
+      recentOutboundTexts: [],
+    })
+    expect(r.skip).toBe(false)
+  })
 })

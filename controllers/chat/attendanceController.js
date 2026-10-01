@@ -38,7 +38,8 @@ exports.assumirChat = async (req, res) => {
       conversa_id,
       user_id,
       perfil,
-      departamento_ids
+      departamento_ids,
+      bloquearEncerrada: true
     })
     if (!result.ok) {
       return res.status(result.status).json({ error: result.error })
@@ -97,6 +98,22 @@ exports.encerrarChat = async (req, res) => {
       .single()
 
     if (error) { console.error('[chatController]', error?.message); return res.status(500).json({ error: 'Erro interno' }) }
+
+    // Campanha (Disparo): conversa encerrada não pode continuar "aguardando resposta de
+    // campanha" — senão o próximo inbound reabre via consumirPrimeiraRespostaCampanha,
+    // ignorando a política de reabertura. Best-effort em UPDATE separado: a coluna pode não
+    // existir em instalações sem o módulo, e isso não pode falhar o encerramento.
+    try {
+      const { error: errCamp } = await supabase
+        .from('conversas')
+        .update({ aguardando_resposta_campanha: false })
+        .eq('company_id', company_id)
+        .eq('id', conversa_id)
+        .eq('aguardando_resposta_campanha', true)
+      if (errCamp && !/column|schema cache/i.test(String(errCamp.message || ''))) {
+        console.warn('[encerrarChat] limpar aguardando_resposta_campanha:', errCamp.message)
+      }
+    } catch (_) {}
 
     const { resetOpcaoInvalidaLimitForConversa } = require('../../services/chatbotTriageService')
     const { rememberClosedConversation } = require('../webhookInbound/recentClosedConversationGuard')

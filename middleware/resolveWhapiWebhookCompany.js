@@ -47,6 +47,18 @@ async function resolveWhapiWebhookCompany(req, res, next) {
       return res.status(200).json({ ok: true, ignored: 'duplicate_provider_instance' })
     }
 
+    // Erro de BANCO ≠ canal não mapeado: 500 para o Whapi reentregar (antes virava 200 e perdia).
+    if (resolved?.code === 'DB_ERROR') {
+      req.webhookLogData = {
+        status: 'resolve_db_error',
+        instance_id: channelIdRaw,
+        provider: PROVIDER,
+        error_message: resolved?.error || 'Erro de banco ao resolver canal Whapi',
+      }
+      _logSafe({ channelId: channelIdRaw.slice(0, 32), companyIdResolved: 'db_error' })
+      return res.status(500).json({ ok: false, error: 'instance_resolve_db_error' })
+    }
+
     const instance = resolved?.instance || null
     const company_id = instance?.company_id ?? null
 
@@ -82,7 +94,8 @@ async function resolveWhapiWebhookCompany(req, res, next) {
     next()
   } catch (e) {
     console.error('[resolveWhapiWebhookCompany]', e?.message || e)
-    return res.status(200).json({ ok: true })
+    req.webhookLogData = { status: 'resolve_error', provider: PROVIDER, error_message: e?.message || String(e) }
+    return res.status(500).json({ ok: false, error: 'instance_resolve_error' })
   }
 }
 

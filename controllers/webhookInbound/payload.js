@@ -346,8 +346,11 @@ function extractMessage(payload) {
   // - isGroup: true → grupo (key = id normalizado do grupo)
   // - isGroup: false → individual (key = telefone BR canônico do CONTATO, nunca do connectedPhone)
   const { key: phone, isGroup, participantPhone: partPhoneResolved, debugReason } = resolveConversationKeyFromZapi(payload)
-  // Doc Z-API: messageId e zaapId = identificador da mensagem (ReceivedCallback e DeliveryCallback)
-  const messageId = payload.messageId ?? payload.zaapId ?? payload.id ?? payload.instanceId ?? payload.key?.id ?? null
+  // Doc Z-API: messageId e zaapId = identificador da mensagem (ReceivedCallback e DeliveryCallback).
+  // NUNCA usar payload.instanceId como fallback: id da INSTÂNCIA não identifica mensagem — virava
+  // whatsapp_id igual para toda mensagem sem id, e a 2ª "deduplicava" contra a 1ª (mensagem perdida).
+  // Sem id real → null (grava sem dedup, que é o comportamento correto).
+  const messageId = payload.messageId ?? payload.zaapId ?? payload.id ?? payload.key?.id ?? null
   let ts = payload.timestamp ?? payload.momment ?? payload.t ?? payload.reaction?.time ?? Date.now()
   // Timestamp pode vir em segundos (ex: API histórico) ou ms. Valores antigos/inválidos geram data 1970.
   const tsNum = Number(ts)

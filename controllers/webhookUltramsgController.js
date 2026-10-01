@@ -120,7 +120,15 @@ function normalizeUltramsgToZapi(body) {
     participantPhone = jidToDigits(data.author || data.sender || fromJid) || jidToDigits(fromJid) || ''
   } else {
     const contactJid = fromMe ? toJid : fromJid
-    phone = normalizePhoneBR(jidToDigits(contactJid)) || jidToDigits(contactJid) || contactJid
+    // @lid é ID interno do WhatsApp, não telefone. Tirar o sufixo gerava dígitos não-BR que o
+    // resolver descartava ("last resort non-BR" → conversa null → mensagem PERDIDA com 200).
+    // Preservando o JID @lid, o pipeline usa a chave sintética "lid:XXX" (conversa espelhada,
+    // com merge posterior para o telefone real via chat_lid).
+    if (/@lid$/i.test(contactJid)) {
+      phone = contactJid
+    } else {
+      phone = normalizePhoneBR(jidToDigits(contactJid)) || jidToDigits(contactJid) || contactJid
+    }
     remoteJid = contactJid
   }
 
@@ -214,7 +222,8 @@ function normalizeUltramsgToZapi(body) {
   const connectedPhoneNorm = connectedPhone ? (normalizePhoneBR(connectedPhone) || connectedPhone) : null
 
   // to/toPhone/recipientPhone: toJid = destinatário (nosso número quando recebemos, contato quando enviamos). Necessário para resolveConversationKeyFromZapi quando fromMe.
-  const toPhoneDest = jidToDigits(toJid)
+  // @lid não vira dígitos de telefone (mesma razão do bloco do contactJid acima).
+  const toPhoneDest = /@lid$/i.test(toJid) ? '' : jidToDigits(toJid)
   const toPhoneNorm = toPhoneDest ? (normalizePhoneBR(toPhoneDest) || toPhoneDest) : null
 
   // Contato (vCard): UltraMSG envia type=vcard/contact e body com vCard; o pipeline interno espera payload.contact
@@ -409,7 +418,9 @@ async function handleWebhookUltramsg(req, res) {
     const errMsg = e?.message || String(e)
     console.error('[handleWebhookUltramsg]', errMsg)
     req.webhookLogData = { status: 'error', error_message: errMsg }
-    return res.status(200).json({ ok: true })
+    // 500: exceção no processamento = mensagem NÃO persistida; o provedor reentrega e a
+    // idempotência por whatsapp_id evita duplicata. 200 aqui descartava a mensagem para sempre.
+    return res.status(500).json({ ok: false, error: 'webhook_processing_error' })
   }
 }
 

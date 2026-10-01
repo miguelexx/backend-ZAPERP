@@ -99,6 +99,25 @@ async function resolveWebhookCompany(req, res, next) {
       return res.status(200).json({ ok: true, ignored: 'duplicate_provider_instance' })
     }
 
+    // Erro de BANCO no resolve ≠ instância não mapeada: responder 500 para o provedor
+    // reentregar (antes virava ignored_not_mapped 200 e a mensagem se perdia em erro transitório).
+    if (resolved?.code === 'DB_ERROR') {
+      req.webhookLogData = {
+        status: 'resolve_db_error',
+        instance_id: instanceIdRaw,
+        event_type: eventType,
+        provider: 'ultramsg',
+        error_message: resolved?.error || 'Erro de banco ao resolver instancia',
+      }
+      _logResolveDecision({
+        eventType,
+        instance_id_raw: instanceIdRaw,
+        final_status: 'resolve_db_error',
+        reason: resolved?.error || 'db_error',
+      })
+      return res.status(500).json({ ok: false, error: 'instance_resolve_db_error' })
+    }
+
     const instance = resolved?.instance || null
     const company_id = instance?.company_id ?? null
     const whatsapp_instance_id = instance?.id ?? null
@@ -140,7 +159,9 @@ async function resolveWebhookCompany(req, res, next) {
     next()
   } catch (e) {
     console.error('[resolveWebhookCompany]', e?.message || e)
-    return res.status(200).json({ ok: true })
+    // Exceção inesperada: 500 para o provedor reentregar (200 aqui descartava a mensagem).
+    req.webhookLogData = { status: 'resolve_error', error_message: e?.message || String(e) }
+    return res.status(500).json({ ok: false, error: 'instance_resolve_error' })
   }
 }
 

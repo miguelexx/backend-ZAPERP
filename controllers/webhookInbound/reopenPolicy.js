@@ -120,6 +120,10 @@ function looksLikeAtendimentoFinalizacao(texto) {
   if (!t) return false
   if (t.includes('atendimento finalizado')) return true
   if (t.includes('segue seu protocolo')) return true
+  // Frase de template (1ª pessoa, "deste/do atendimento") — cliente real não fala assim.
+  // Cobre mensagens de finalização configuradas sem as palavras "finalizado/encerrado"
+  // (ex.: "Agradecemos pelo seu contato. ... Protocolo deste atendimento: 80213.").
+  if (/\bprotocolo\s+(deste|desse|do|de)\s+atendimento\b/.test(t)) return true
   if (/\bprotocolo\b/.test(t) && /\b(finalizado|finalizacao|encerrado|encerrada)\b/.test(t)) return true
   return false
 }

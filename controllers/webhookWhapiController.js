@@ -78,6 +78,52 @@ function whapiInboundIsHistorical(m, nowMs, maxAgeMs = getWhapiInboundMaxAgeMs()
   return (nowMs - epochMs) > maxAgeMs
 }
 
+/**
+ * Janela de RECUPERAÇÃO dentro da guarda anti-histórico (anti-perda).
+ * Problema real: com `sync_historico='off'` o teto é 2 min — a reentrega pós-500 ou após
+ * queda/restart do backend chega com o timestamp ORIGINAL (>2 min) e era descartada EM
+ * SILÊNCIO: mensagem do cliente perdida. Agora, item "histórico" mas recente (≤ janela) e
+ * INBOUND cuja whatsapp_id ainda NÃO existe no banco é processado normalmente (idempotência
+ * cobre o resto). Backlog verdadeiro (reconexão reentregando atendimentos antigos) continua
+ * descartado — agora com log. Tunável por WHAPI_HISTORICAL_RECOVERY_MAX_AGE_MINUTES (default 60).
+ */
+function getWhapiHistoricalRecoveryMaxAgeMs() {
+  const min = Number(process.env.WHAPI_HISTORICAL_RECOVERY_MAX_AGE_MINUTES)
+  if (Number.isFinite(min) && min >= 0) return min * 60 * 1000
+  return 60 * 60 * 1000
+}
+
+async function shouldRecoverHistoricalInbound(ctxSrc, m, nowMs) {
+  try {
+    if (m?.from_me === true || m?.fromMe === true) return false // só mensagem DO CLIENTE
+    const recoveryMs = getWhapiHistoricalRecoveryMaxAgeMs()
+    if (!(recoveryMs > 0)) return false
+    const epochMs = whapiMessageEpochMs(m)
+    if (epochMs == null || (nowMs - epochMs) > recoveryMs) return false
+    const waId = String(m?.id || '').trim()
+    if (!waId) return false
+    const { selectSingleMensagemByWhatsappId } = require('./webhookInbound/whatsappIdLookup')
+    const { data: existente } = await selectSingleMensagemByWhatsappId(supabase, {
+      company_id: ctxSrc.company_id,
+      whatsapp_id: waId,
+      whatsapp_instance_id: ctxSrc.whatsapp_instance_id || null,
+      select: 'id',
+      context: 'whapi.historical.recovery',
+    })
+    if (existente?.id) return false // já persistida — reentrega legítima, pode descartar
+    console.warn('[WHAPI] 🛟 Recuperando inbound marcado como histórico (não estava no banco):', {
+      company_id: ctxSrc.company_id,
+      whatsapp_id_tail: waId.slice(-12),
+      idade_min: Math.round((nowMs - epochMs) / 60000),
+    })
+    return true
+  } catch (e) {
+    // Dúvida (erro ao consultar) → NÃO descartar: priorizar não perder mensagem do cliente.
+    console.warn('[WHAPI] recovery histórica: erro ao checar banco — processando por segurança:', e?.message || e)
+    return true
+  }
+}
+
 function isWhapiEditedMessage(m) {
   if (!m || typeof m !== 'object') return false
   if (m.edited === true || m.is_edited === true || m.isEdit === true) return true
@@ -1047,9 +1093,20 @@ async function handleWebhookWhapi(req, res) {
       }
       // Guarda anti-histórico: no (re)connect / webhook persistente o Whapi reentrega backlog
       // antigo com o timestamp original. Descartamos antes de criar conversa/contato/mensagem.
+      // EXCEÇÃO anti-perda: inbound recente (≤ janela de recuperação) ainda não persistido —
+      // típico de reentrega pós-500 ou pós-queda — segue o fluxo normal em vez de sumir.
       if (whapiInboundIsHistorical(m, nowMs, whapiMaxAgeMs)) {
-        skippedHistorical++
-        continue
+        const recover = await shouldRecoverHistoricalInbound(ctxSrc, m, nowMs)
+        if (!recover) {
+          skippedHistorical++
+          const epochMs = whapiMessageEpochMs(m)
+          console.log('[WHAPI] ⏭️ Descartando item histórico:', {
+            whatsapp_id_tail: String(m?.id || '').slice(-12) || null,
+            from_me: m?.from_me === true,
+            idade_min: epochMs != null ? Math.round((nowMs - epochMs) / 60000) : null,
+          })
+          continue
+        }
       }
       if (isWhapiEditedMessage(m)) {
         const applied = await applyWhapiEditedMessage(ctxSrc, m, io)
@@ -1102,7 +1159,9 @@ async function handleWebhookWhapi(req, res) {
   } catch (e) {
     console.error('[handleWebhookWhapi]', e?.message || e)
     req.webhookLogData = { status: 'error', error_message: e?.message || String(e) }
-    return res.status(200).json({ ok: true })
+    // 500: exceção = mensagens possivelmente NÃO persistidas; Whapi reentrega e a idempotência
+    // por whatsapp_id protege duplicata. 200 aqui descartava o lote inteiro para sempre.
+    return res.status(500).json({ ok: false, error: 'webhook_processing_error' })
   }
 }
 
@@ -1137,6 +1196,8 @@ exports._test = {
   whapiMessageEpochMs,
   whapiInboundIsHistorical,
   getWhapiInboundMaxAgeMs,
+  getWhapiHistoricalRecoveryMaxAgeMs,
+  shouldRecoverHistoricalInbound,
   isWhapiDeletedMessage,
   extractWhapiDeletedTargetId,
   applyWhapiDeletedMessage,

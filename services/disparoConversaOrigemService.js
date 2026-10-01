@@ -5,6 +5,7 @@
 
 const supabase = require('../config/supabase')
 const { registrarAtendimento } = require('./atendimentosRegistroService')
+const { isClosedAttendanceStatus } = require('../helpers/conversaHelper')
 const {
   atendimentoHumanoAtivo,
   deveMarcarAguardandoCampanha,
@@ -266,6 +267,20 @@ async function consumirPrimeiraRespostaCampanha({
   }
   if (conversa.aguardando_resposta_campanha !== true) {
     return { ok: true, consumed: false, idempotent: true, conversa_id: convId }
+  }
+
+  // Conversa encerrada pelo atendente: NÃO reabrir por aqui — quem decide reabertura de
+  // conversa encerrada é a política de inbound (reopenPolicy). Só solta a flag de campanha,
+  // senão qualquer inbound (inclusive replay/reentrega) ressuscitava a conversa finalizada.
+  if (isClosedAttendanceStatus(conversa.status_atendimento)) {
+    const { error: errFlag } = await supabase
+      .from('conversas')
+      .update({ aguardando_resposta_campanha: false })
+      .eq('id', convId)
+      .eq('company_id', cid)
+      .eq('aguardando_resposta_campanha', true)
+    if (errFlag && !isMissingAguardandoCampanhaColumn(errFlag)) throw errFlag
+    return { ok: true, consumed: false, ignored: 'conversa_encerrada', conversa_id: convId }
   }
 
   let usuarioId = null

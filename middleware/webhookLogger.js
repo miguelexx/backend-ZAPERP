@@ -35,6 +35,11 @@ function compactWebhookPayload(body = {}, ctx = {}) {
  */
 function webhookLogger(provider) {
   return (req, res, next) => {
+    // Só POST é webhook de verdade (GET /health e GET / de diagnóstico não poluem webhook_logs).
+    if (req.method !== 'POST') return next()
+    // Idempotente: registrado no app.js ANTES do rate limiter (para 429 deixar rastro) e pode
+    // ainda constar em stacks de rota legadas — não duplicar o listener de finish.
+    if (req._webhookLogCtx) return next()
     const startedAt = Date.now()
     const path = req.path || req.url || '/'
     const method = req.method || 'POST'
@@ -50,6 +55,9 @@ function webhookLogger(provider) {
       const logData = req.webhookLogData || {}
 
       let status = logData.status || 'received'
+      // 429 do rate limiter / 4xx antes do pipeline: sem webhookLogData, registrar o motivo real.
+      if (!logData.status && res.statusCode === 429) status = 'rate_limited'
+      else if (!logData.status && res.statusCode >= 400) status = 'rejected'
       const instanceId = logData.instance_id ?? zapi.instanceId ?? (body?.instanceId ?? body?.instance_id)
       const companyId = logData.company_id ?? zapi.company_id
       const eventType = logData.event_type ?? zapi.eventType ?? body?.event_type ?? body?.eventType ?? body?.type

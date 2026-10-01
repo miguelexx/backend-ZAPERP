@@ -250,7 +250,7 @@ exports.timeoutInatividade = async (req, res) => {
         if (ultima.direcao !== 'in') continue
         if (new Date(ultima.criado_em) > limite) continue
 
-        const { error } = await supabase
+        const { data: reabertaTimeout, error } = await supabase
           .from('conversas')
           .update({
             status_atendimento: 'aberta',
@@ -259,8 +259,13 @@ exports.timeoutInatividade = async (req, res) => {
           })
           .eq('id', conv.id)
           .eq('company_id', emp.id)
+          // LOCK REAL: o SELECT acima filtrou em_atendimento; se o atendente finalizou a
+          // conversa entre o SELECT e este UPDATE, não reabrir uma conversa fechada.
+          .eq('status_atendimento', 'em_atendimento')
+          .select('id')
+          .maybeSingle()
 
-        if (!error) {
+        if (!error && reabertaTimeout?.id) {
           totalProcessadas++
           await supabase.from('historico_atendimentos').insert({
             conversa_id: conv.id,

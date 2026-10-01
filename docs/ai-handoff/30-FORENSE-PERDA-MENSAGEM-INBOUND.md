@@ -3,6 +3,9 @@
 > 2026-09-29 · investigação SOMENTE LEITURA (nada alterado). Caso: mensagem de contato
 > visível no WhatsApp Web da empresa Teacher Rafaela não aparece no ZapERP.
 > Veredicto por evidência: rodar §3. Este doc lista TODOS os caminhos de perda encontrados.
+>
+> **2026-10-01 — CORRIGIDO (não deployado): §5 abaixo registra as correções aplicadas aos
+> caminhos #1–#7 e #10. Ler §5 antes de mexer de novo no inbound.**
 
 ## 1. Caminhos onde inbound legítimo se perde COM HTTP 200 (provedor não retenta)
 
@@ -34,7 +37,7 @@ Efeito colateral achado de passagem: `atualizar_conversa` de fundo faz cada nave
 3. PM2 na janela: `eco da nossa mensagem` (#4), `last resort non-BR` (#5), `Erro ao salvar mensagem` (#1), `Erro ao obter/criar conversa` (#2), `DROPPED`, `skipped_historical` (#6).
 4. `historico_atendimentos`/`atendimentos` da conversa: estava finalizada entre 10:23 e 11:18?
 
-## 4. Correções candidatas (NENHUMA aplicada — aguardando decisão)
+## 4. Correções candidatas (histórico — ver §5, todas aplicadas em 2026-10-01)
 
 a) #1/#2: responder **500** quando persist/conversa falhar (idempotência já protege a reentrega; alinha com doc 06:50 e com o Whapi).
 b) #3: distinguir erro de banco de "instância inexistente" → 500 no erro.
@@ -42,3 +45,23 @@ c) #4: exigir sinal real de eco (whatsapp_id out OU janela de tempo nos padrões
 d) #6: aplicar a guarda histórica só a payloads sem retry (ou marcar reentrega); logar o descarte.
 e) #10: mover webhookLogger para antes do limiter (rastro de 429).
 f) Observabilidade: `webhookLogData.status='persist_failed'`+`error_message` nos continues; hoje tudo vira `processed` 200.
+
+## 5. Correções APLICADAS (2026-10-01 — não deployado)
+
+Princípio: banco = fonte de verdade; falha transitória responde **500** (provedor reentrega) e a
+reentrega é segura (unique de `whatsapp_id` → merge; efeitos colaterais bloqueados por
+`inboundReentregue`). Testes: `tests/webhookInboundLossHardening.test.js` (18 casos).
+
+| # | Correção | Onde |
+|---|----------|------|
+| 1/2 | `continue` de persist/conversa agora acumula `persistFailures` e a resposta final vira **500** `persist_failed` (+ `webhookLogData.status/error_message`). `findOrCreateConversation` null (telefone impossível, permanente) continua 200, mas com status `dropped_unresolved_destination`. | `webhookZapiController.js` |
+| 3 | Service devolve `code:'DB_ERROR'` em erro de SELECT; middlewares (ultramsg + whapi) e `instanceResolve` respondem **500** `resolve_db_error` em vez de `ignored_not_mapped` 200. Catch dos middlewares também virou 500. | `whatsappInstanceService.js`, `resolveWebhookCompany.js`, `resolveWhapiWebhookCompany.js`, `webhookInbound/instanceResolve.js` |
+| 4 | `detectOwnOutboundEcho` devolve `confidence`: padrões de texto (`finalizacao_template`/`welcome_menu_echo`) SEM corroboração (memória de fechamento <2 min OU outbound recente com o mesmo template) = **weak** → a mensagem É persistida; só pula reabertura + chatbot (`skipReopenPorEcoFraco`). Eco com sinal real (whatsapp_id out / igualdade 3 min / corroborado) = strong → `continue` como antes. A decisão PURA de reabertura (reopenPolicy) não mudou. | `closedConversationEcho.js`, `webhookZapiController.js` |
+| 5 | UltraMSG `data.from`/`data.to` com `@lid` deixa de virar dígitos não-BR (que eram descartados): o JID `@lid` é preservado e o pipeline cai na chave sintética `lid:XXX` (conversa espelhada + merge posterior por `chat_lid`). | `webhookUltramsgController.js` |
+| 6 | Guarda anti-histórico Whapi ganhou RECUPERAÇÃO: item inbound "histórico" mais novo que `WHAPI_HISTORICAL_RECOVERY_MAX_AGE_MINUTES` (default 60; `0` desliga) e ainda sem `whatsapp_id` no banco é processado (cobre reentrega pós-500 e queda do backend). Já persistido / from_me / mais velho → descartado COM log. Exceções no handler agora respondem 500 (idem UltraMSG). | `webhookWhapiController.js`, `.env.example` |
+| 7 | `payload.instanceId` removido do fallback de `messageId` (instância ≠ id de mensagem; a 2ª mensagem sem id "deduplicava" contra a 1ª). Sem id real → `whatsapp_id` null (sem dedup, correto). | `webhookInbound/payload.js` |
+| 10 | `webhookLogger` registrado no `app.js` ANTES do `webhookLimiter` (idempotente; POST-only): 429 agora vira `rate_limited` e 4xx pré-pipeline vira `rejected` em `webhook_logs`. | `app.js`, `middleware/webhookLogger.js` |
+
+NÃO alterados (deliberado): #8 (fallbacks de ACK — delicado, ver anti-padrões 19/21), #9 (merge
+LID→telefone), descarte de `(mídia)` sem URL e !fromMe (design do master, doc memória), reopenPolicy
+(testes exigem eco tardio de template mantendo fechada — por isso o caminho weak persiste sem reabrir).
