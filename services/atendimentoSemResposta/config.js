@@ -67,7 +67,8 @@ function normalizeAlertaSemResposta(raw) {
     responsaveis_notificacao_ids: responsaveis,
     telefone_gestor: String(r.telefone_gestor || '').trim().slice(0, 40),
     horario_comercial_ativo: alertaAtivo ? true : r.horario_comercial_ativo !== false,
-    timezone: String(r.timezone || DEFAULT_ALERTA_SEM_RESPOSTA.timezone).trim().slice(0, 80) || 'America/Sao_Paulo',
+    // '' = herda o fuso da empresa (chatbot_triage.timezone) via businessSchedule. Não força SP.
+    timezone: String(r.timezone || DEFAULT_ALERTA_SEM_RESPOSTA.timezone || '').trim().slice(0, 80),
   }
   if (!hasScheduleInput) return base
   return {

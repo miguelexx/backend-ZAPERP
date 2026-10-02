@@ -52,6 +52,8 @@ const DEFAULT_CONFIG = {
     almocoInicio: '12:00',
     almocoFim: '14:00',
     mensagemAlmoco: '',
+    estado: '',
+    timezone: 'America/Sao_Paulo',
     diasSemanaDesativados: [0, 6],
     datasEspecificasFechadas: [],
     finalizar_por_ausencia_ativo: false,

@@ -16,6 +16,7 @@ const { blocksTriage, createTriageSendGuard } = require('./triageConversationGua
 const { isUltramsgNumericQueueId, isRealWhatsAppId } = require('../helpers/whatsappMessageIdHelper')
 const { mapProviderSendResult } = require('./chat/outbound/providerResultMapper')
 const { REAL_MESSAGE_DIRECOES, isInternalNoteRow } = require('../helpers/internalNote')
+const { resolveTimezone, resolveTimezoneForUf, normalizeUf, DEFAULT_TIMEZONE } = require('../helpers/brazilTimezones')
 
 /**
  * Corrige mojibake típico: texto UTF-8 foi gravado/lido como Latin-1 (ex.: "OpÃ§Ã£o" → "Opção").
@@ -417,7 +418,10 @@ const DEFAULT_CHATBOT_CONFIG = {
   diasSemanaDesativados: [0, 6],
   // Datas específicas fechadas (YYYY-MM-DD) — feriados, recesso etc.
   datasEspecificasFechadas: [],
-  // Timezone IANA para horário comercial (VPS em UTC, empresa em BRT → usar America/Sao_Paulo)
+  // UF da empresa (ex.: 'MT'). Define o timezone IANA abaixo; '' = não configurado (usa fallback).
+  estado: '',
+  // Timezone IANA para horário comercial — SEMPRE o horário local da empresa (UF acima).
+  // VPS em UTC ou outra empresa em Brasília não afeta: a conversão usa esta zona IANA.
   timezone: 'America/Sao_Paulo',
   // Janelas múltiplas (ex: manhã 07:40-11:00 e tarde 12:30-18:00). Se vazio, usa horarioInicio/horarioFim.
   horariosJanelas: [],
@@ -529,7 +533,11 @@ function validateChatbotConfig(raw) {
       if (!Array.isArray(arr)) return []
       return arr.filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(String(d).trim())).map((d) => String(d).trim())
     })(),
-    timezone: String(src.timezone || DEFAULT_CHATBOT_CONFIG.timezone || 'America/Sao_Paulo').trim() || 'America/Sao_Paulo',
+    // UF da empresa + timezone IANA derivado (fonte única do fuso de atendimento).
+    // UF válida manda no fuso (respeitando escolha em estados multi-fuso); sem UF, usa o
+    // timezone informado se válido; por fim America/Sao_Paulo. Nunca grava zona inválida.
+    estado: normalizeUf(src.estado) || '',
+    timezone: resolveTimezoneForUf(src.estado, src.timezone, resolveTimezone(src.timezone, DEFAULT_TIMEZONE)),
     horariosJanelas: (() => {
       const arr = src.horariosJanelas || src.janelasHorario
       if (!Array.isArray(arr)) return []

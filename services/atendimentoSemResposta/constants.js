@@ -15,7 +15,9 @@ const DEFAULT_ALERTA_SEM_RESPOSTA = {
   responsaveis_notificacao_ids: [],
   telefone_gestor: '',
   horario_comercial_ativo: true,
-  timezone: 'America/Sao_Paulo',
+  // '' = herdar o fuso da empresa (chatbot_triage.timezone / UF). Só preenche se quiser
+  // um fuso específico diferente do fuso de atendimento. businessSchedule resolve o efetivo.
+  timezone: '',
 }
 
 const TAG_REABERTA_FALTA_RESPOSTA_COR = '#2563eb'
