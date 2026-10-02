@@ -24,6 +24,11 @@ router.patch('/instances/:id/catalog/collections/:collectionId', apiLimiter, wha
 router.delete('/instances/:id/catalog/collections/:collectionId', apiLimiter, whatsappIntegrationController.deleteInstanceCatalogCollection)
 router.get('/instances/:id/catalog/collections/:collectionId/products', apiLimiter, whatsappIntegrationController.getInstanceCatalogCollectionProducts)
 
+// Perfil Business (Whapi) — LEITURA liberada para qualquer usuário autenticado da
+// empresa (atendentes veem a página em modo somente leitura). A edição (POST)
+// continua restrita a supervisor/admin, registrada após o gate abaixo.
+router.get('/instances/:id/business-profile', apiLimiter, whatsappIntegrationController.getInstanceBusinessProfile)
+
 router.use(supervisorOrAdmin)
 router.use(apiLimiter)
 
@@ -49,8 +54,8 @@ router.post('/instances/:id/restart', whatsappIntegrationController.restartInsta
 router.post('/instances/:id/check-phones', whatsappIntegrationController.checkInstancePhones)
 router.post('/instances/:id/phone-code', whatsappIntegrationController.getInstancePhoneCode)
 router.post('/instances/:id/logout', whatsappIntegrationController.logoutInstance)
-// Whapi-only: perfil Business, metadados de chat e presença do contato
-router.get('/instances/:id/business-profile', whatsappIntegrationController.getInstanceBusinessProfile)
+// Whapi-only: perfil Business (edição), metadados de chat e presença do contato.
+// O GET de business-profile está registrado antes do gate supervisorOrAdmin.
 router.post('/instances/:id/business-profile', whatsappIntegrationController.updateInstanceBusinessProfile)
 router.get('/instances/:id/stories', apiLimiter, whatsappIntegrationController.getInstanceStories)
 router.post('/instances/:id/stories/media', apiLimiter, uploadArquivo, whatsappIntegrationController.uploadInstanceStoryMedia)

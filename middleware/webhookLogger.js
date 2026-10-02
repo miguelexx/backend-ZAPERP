@@ -30,6 +30,34 @@ function compactWebhookPayload(body = {}, ctx = {}) {
   }
 }
 
+// Teto de linhas 'rate_limited' gravadas por minuto (anti-amplificação): o logger roda ANTES do
+// limiter para dar rastro ao 429, mas um flood não pode virar milhares de INSERTs em webhook_logs.
+// Amostra suficiente para forense; o excedente é contado e resumido no console.
+const RATE_LIMITED_LOG_MAX_PER_MIN = (() => {
+  const n = Number(process.env.WEBHOOK_RATE_LIMITED_LOG_MAX_PER_MIN)
+  return Number.isFinite(n) && n >= 0 ? n : 30
+})()
+let _rlWindowStart = 0
+let _rlLogged = 0
+let _rlSuppressed = 0
+
+function shouldLogRateLimited(now = Date.now()) {
+  if (now - _rlWindowStart >= 60_000) {
+    if (_rlSuppressed > 0) {
+      console.warn(`[webhookLogger] ${_rlSuppressed} respostas 429 não gravadas em webhook_logs no último minuto (teto ${RATE_LIMITED_LOG_MAX_PER_MIN}/min)`)
+    }
+    _rlWindowStart = now
+    _rlLogged = 0
+    _rlSuppressed = 0
+  }
+  if (_rlLogged < RATE_LIMITED_LOG_MAX_PER_MIN) {
+    _rlLogged++
+    return true
+  }
+  _rlSuppressed++
+  return false
+}
+
 /**
  * @param {string} provider - 'ultramsg' | 'meta'
  */
@@ -56,8 +84,12 @@ function webhookLogger(provider) {
 
       let status = logData.status || 'received'
       // 429 do rate limiter / 4xx antes do pipeline: sem webhookLogData, registrar o motivo real.
-      if (!logData.status && res.statusCode === 429) status = 'rate_limited'
-      else if (!logData.status && res.statusCode >= 400) status = 'rejected'
+      if (!logData.status && res.statusCode === 429) {
+        status = 'rate_limited'
+        if (!shouldLogRateLimited()) return
+      } else if (!logData.status && res.statusCode >= 400) {
+        status = 'rejected'
+      }
       const instanceId = logData.instance_id ?? zapi.instanceId ?? (body?.instanceId ?? body?.instance_id)
       const companyId = logData.company_id ?? zapi.company_id
       const eventType = logData.event_type ?? zapi.eventType ?? body?.event_type ?? body?.eventType ?? body?.type
