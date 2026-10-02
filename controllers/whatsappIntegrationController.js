@@ -1215,6 +1215,64 @@ exports.updateInstanceBusinessProfile = async (req, res) => {
   }
 }
 
+/**
+ * GET /integrations/whatsapp/instances/:id/user-profile — perfil do número conectado (Whapi):
+ * nome, recado e foto (icon/icon_full). Usado pela tela Perfil Business para exibir o avatar.
+ */
+exports.getInstanceUserProfile = async (req, res) => {
+  const ctx = await requireWhapiInstance(req, res, 'user-profile-get', 30)
+  if (!ctx) return
+  try {
+    const r = await ctx.provider.getUserProfile({ companyId: ctx.company_id, whatsappInstanceId: ctx.id })
+    if (!r.ok) {
+      const status = r.httpStatus === 429 ? 429 : 502
+      return res.status(status).json({ error: r.error || 'Erro ao ler perfil do número', provider: 'whapi' })
+    }
+    return res.json({ provider: 'whapi', profile: r.profile || {} })
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || 'Erro interno ao ler perfil do número' })
+  }
+}
+
+const PROFILE_PICTURE_MAX_BYTES = 5 * 1024 * 1024
+
+/**
+ * POST /integrations/whatsapp/instances/:id/profile-picture — troca a foto de perfil do
+ * número conectado (Whapi, PATCH /users/profile { icon: base64 }). Multipart campo `arquivo`.
+ */
+exports.updateInstanceProfilePicture = async (req, res) => {
+  const fs = require('fs')
+  const file = req.file || (Array.isArray(req.files) && req.files[0]) || null
+  const cleanup = () => {
+    try { if (file?.path && fs.existsSync(file.path)) fs.unlinkSync(file.path) } catch (_) {}
+  }
+  const ctx = await requireWhapiInstance(req, res, 'profile-picture-set', 10)
+  if (!ctx) { cleanup(); return }
+  if (!file?.path) return res.status(400).json({ error: 'Envie um arquivo de imagem.' })
+  const mime = String(file.mimetype || '').toLowerCase()
+  if (!mime.startsWith('image/')) {
+    cleanup()
+    return res.status(400).json({ error: 'A foto de perfil aceita apenas imagem (JPG ou PNG).' })
+  }
+  if (Number(file.size) > PROFILE_PICTURE_MAX_BYTES) {
+    cleanup()
+    return res.status(400).json({ error: 'A imagem pode ter no máximo 5MB.' })
+  }
+  try {
+    const buf = await fs.promises.readFile(file.path)
+    cleanup()
+    const icon = `data:${mime};base64,${buf.toString('base64')}`
+    const r = await ctx.provider.updateUserProfile({ icon }, { companyId: ctx.company_id, whatsappInstanceId: ctx.id })
+    if (!r.ok) {
+      return res.status(502).json({ error: r.error || 'O WhatsApp recusou a nova foto de perfil.', provider: 'whapi' })
+    }
+    return res.json({ sucesso: true, provider: 'whapi' })
+  } catch (e) {
+    cleanup()
+    return res.status(500).json({ error: e?.message || 'Erro interno ao atualizar a foto de perfil.' })
+  }
+}
+
 /** GET /integrations/whatsapp/instances/:id/stories — lista os status publicados pela conta (Whapi). */
 exports.getInstanceStories = async (req, res) => {
   const ctx = await requireWhapiInstance(req, res, 'stories-list', 30)

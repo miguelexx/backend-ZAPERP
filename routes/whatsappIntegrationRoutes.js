@@ -28,6 +28,8 @@ router.get('/instances/:id/catalog/collections/:collectionId/products', apiLimit
 // empresa (atendentes veem a página em modo somente leitura). A edição (POST)
 // continua restrita a supervisor/admin, registrada após o gate abaixo.
 router.get('/instances/:id/business-profile', apiLimiter, whatsappIntegrationController.getInstanceBusinessProfile)
+// Perfil do número conectado (nome/foto) — leitura também liberada; a tela usa para o avatar.
+router.get('/instances/:id/user-profile', apiLimiter, whatsappIntegrationController.getInstanceUserProfile)
 
 router.use(supervisorOrAdmin)
 router.use(apiLimiter)
@@ -57,6 +59,7 @@ router.post('/instances/:id/logout', whatsappIntegrationController.logoutInstanc
 // Whapi-only: perfil Business (edição), metadados de chat e presença do contato.
 // O GET de business-profile está registrado antes do gate supervisorOrAdmin.
 router.post('/instances/:id/business-profile', whatsappIntegrationController.updateInstanceBusinessProfile)
+router.post('/instances/:id/profile-picture', uploadArquivo, whatsappIntegrationController.updateInstanceProfilePicture)
 router.get('/instances/:id/stories', apiLimiter, whatsappIntegrationController.getInstanceStories)
 router.post('/instances/:id/stories/media', apiLimiter, uploadArquivo, whatsappIntegrationController.uploadInstanceStoryMedia)
 router.post('/instances/:id/stories', apiLimiter, whatsappIntegrationController.createInstanceStory)

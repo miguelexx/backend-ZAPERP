@@ -284,6 +284,35 @@ function isOutsideBusinessDays(diasSemanaDesativados, datasEspecificasFechadas, 
 }
 
 /**
+ * Verifica se o horário atual está dentro da pausa de almoço configurada.
+ * Durante a pausa, o cliente é tratado como fora do expediente e recebe a mensagem de almoço
+ * (ou, se não houver mensagem específica, a mensagem padrão de fora do horário).
+ * Usa timezone da empresa (VPS em UTC, empresa em BRT → America/Sao_Paulo).
+ * Início inclusivo, fim exclusivo: às 14:00 o atendimento já voltou.
+ * Suporta pausa que atravessa meia-noite (consistente com as janelas do expediente).
+ * @param {string} almocoInicio - "HH:mm" (ex: "12:00")
+ * @param {string} almocoFim - "HH:mm" (ex: "14:00")
+ * @param {Date} [now] - Data/hora a verificar
+ * @param {string} [timezone] - IANA timezone (default: America/Sao_Paulo)
+ * @returns {boolean} true se agora está dentro de [almocoInicio, almocoFim)
+ */
+function isWithinLunchBreak(almocoInicio, almocoFim, now = new Date(), timezone = 'America/Sao_Paulo') {
+  const ini = String(almocoInicio || '').trim()
+  const fim = String(almocoFim || '').trim()
+  if (!/^\d{1,2}:\d{2}$/.test(ini) || !/^\d{1,2}:\d{2}$/.test(fim)) return false
+  const [hIni, mIni] = ini.split(':').map(Number)
+  const [hFim, mFim] = fim.split(':').map(Number)
+  const minutosIni = (hIni || 0) * 60 + (mIni || 0)
+  const minutosFim = (hFim || 0) * 60 + (mFim || 0)
+  if (minutosIni === minutosFim) return false // pausa de duração zero = desligada
+  const local = getLocalTimeInTimezone(now, timezone)
+  const minutosAgora = local.getHours() * 60 + local.getMinutes()
+  if (minutosIni < minutosFim) return minutosAgora >= minutosIni && minutosAgora < minutosFim
+  // Pausa atravessa meia-noite (ex.: 23:30–00:30)
+  return minutosAgora >= minutosIni || minutosAgora < minutosFim
+}
+
+/**
  * Envia mensagem pelo chatbot com throttle (intervalo configurável por empresa).
  */
 async function sendWithThrottle(sendMessage, telefone, msg, opts, company_id, intervaloSegundos, behavior = {}) {
@@ -378,6 +407,12 @@ const DEFAULT_CHATBOT_CONFIG = {
   horarioInicio: '09:00',
   horarioFim: '18:00',
   mensagemForaHorario: 'Olá! Nosso horário de atendimento é de segunda a sexta, das 09h às 18h. Sua mensagem foi recebida e retornaremos no próximo dia útil. Obrigado!',
+  // Pausa de almoço: durante [almocoInicio, almocoFim) o cliente é tratado como fora do expediente.
+  // Depende de foraHorarioEnabled estar ligado. Mensagem própria opcional (cai na de fora do horário se vazia).
+  almocoAtivo: false,
+  almocoInicio: '12:00',
+  almocoFim: '14:00',
+  mensagemAlmoco: '',
   // Dias da semana em que NÃO trabalha (0=domingo, 1=segunda, ..., 6=sábado). Ex: [0,6] = fim de semana
   diasSemanaDesativados: [0, 6],
   // Datas específicas fechadas (YYYY-MM-DD) — feriados, recesso etc.
@@ -421,6 +456,7 @@ function normalizeChatbotTriageStrings(raw) {
     reopenMenuCommand: repairChatbotTriageUtf8(String(raw.reopenMenuCommand ?? '').trim()),
     mensagemFinalizacao: repairChatbotTriageUtf8(String(raw.mensagemFinalizacao ?? '').trim()),
     mensagemForaHorario: repairChatbotTriageUtf8(String(raw.mensagemForaHorario ?? '').trim()),
+    mensagemAlmoco: repairChatbotTriageUtf8(String(raw.mensagemAlmoco ?? '').trim()),
     finalizar_por_ausencia_mensagem: repairChatbotTriageUtf8(String(raw.finalizar_por_ausencia_mensagem ?? '').trim()),
     options: opts.map((o) => ({
       ...o,
@@ -472,6 +508,17 @@ function validateChatbotConfig(raw) {
       return /^\d{1,2}:\d{2}$/.test(v) ? v : '18:00'
     })(),
     mensagemForaHorario: String(src.mensagemForaHorario || DEFAULT_CHATBOT_CONFIG.mensagemForaHorario || '').trim() || DEFAULT_CHATBOT_CONFIG.mensagemForaHorario,
+    almocoAtivo: !!src.almocoAtivo,
+    almocoInicio: (() => {
+      const v = String(src.almocoInicio || DEFAULT_CHATBOT_CONFIG.almocoInicio || '12:00').trim()
+      return /^\d{1,2}:\d{2}$/.test(v) ? v : '12:00'
+    })(),
+    almocoFim: (() => {
+      const v = String(src.almocoFim || DEFAULT_CHATBOT_CONFIG.almocoFim || '14:00').trim()
+      return /^\d{1,2}:\d{2}$/.test(v) ? v : '14:00'
+    })(),
+    // Vazio = usa mensagemForaHorario como fallback em tempo de execução.
+    mensagemAlmoco: String(src.mensagemAlmoco || '').trim(),
     diasSemanaDesativados: (() => {
       const arr = src.diasSemanaDesativados
       if (!Array.isArray(arr)) return DEFAULT_CHATBOT_CONFIG.diasSemanaDesativados || [0, 6]
@@ -832,6 +879,7 @@ function looksLikeBotMessage(texto, config) {
     lower.includes('bem vindo')
   if (linhaMenuNumerada && pareceSetorNoTexto) return true
   if (config?.mensagemForaHorario && t.includes(String(config.mensagemForaHorario || '').slice(0, 30))) return true
+  if (config?.mensagemAlmoco && t.includes(String(config.mensagemAlmoco || '').slice(0, 30))) return true
   return false
 }
 
@@ -1426,46 +1474,41 @@ async function processIncomingMessageLocked(ctx, conversaEstadoInicial) {
     console.log('[chatbotTriage] ❌ skip: config não encontrada ou inválida para company_id', company_id)
     return { handled: false }
   }
-  if (!config.enabled) {
-    console.log('[chatbotTriage] ❌ skip: chatbot desativado para company_id', company_id)
-    return { handled: false }
-  }
-  // Sem opções E sem mensagem de boas-vindas: nada para o chatbot fazer
-  if (!config.options?.length && !config.welcomeMessage) {
-    console.log('[chatbotTriage] ❌ skip: nenhuma opção nem mensagem de boas-vindas para company_id', company_id)
-    return { handled: false }
-  }
-  
-  console.log('[chatbotTriage] ✅ configuração válida encontrada', {
-    company_id,
-    enabled: config.enabled,
-    totalOpcoes: config.options.length,
-    sendOnlyFirstTime: config.sendOnlyFirstTime,
-    foraHorarioEnabled: config.foraHorarioEnabled
-  })
-
-  // Mensagem fora do horário: se ativado e fora do horário ou dia desativado, envia mensagem e não processa o menu
-  // Usa timezone da empresa (evita VPS UTC considerar 15:05 BRT como 18:05 = fora)
+  // ── Mensagem fora do horário / pausa de almoço ───────────────────────────────
+  // INDEPENDENTE do chatbot de triagem: deve chegar ao cliente mesmo com o menu de setores
+  // desligado (config.enabled=false) ou sem opções/boas-vindas. Avaliada ANTES dos gates do menu.
+  // Usa timezone da empresa (evita VPS UTC considerar 15:05 BRT como 18:05 = fora).
   if (config.foraHorarioEnabled && config.mensagemForaHorario) {
     let deveEnviarForaHorario = false
     let foraDia = false
+    let motivoForaHorario = 'fora_horario'
+    let mensagemParaEnviar = config.mensagemForaHorario
     try {
       const now = new Date()
       const timezone = config.timezone || 'America/Sao_Paulo'
       foraDia = isOutsideBusinessDays(config.diasSemanaDesativados, config.datasEspecificasFechadas, now, timezone)
       const janelas = config.horariosJanelas?.length > 0 ? config.horariosJanelas : null
       const dentroHorario = isWithinBusinessHours(config.horarioInicio, config.horarioFim, now, timezone, janelas)
-      deveEnviarForaHorario = foraDia || !dentroHorario
+      const foraExpediente = foraDia || !dentroHorario
+      const dentroAlmoco = !!config.almocoAtivo && isWithinLunchBreak(config.almocoInicio, config.almocoFim, now, timezone)
+      deveEnviarForaHorario = foraExpediente || dentroAlmoco
+      // Só é "almoço" quando o cliente escreveu dentro do expediente, mas na janela de almoço.
+      if (dentroAlmoco && !foraExpediente) {
+        motivoForaHorario = 'almoco'
+        mensagemParaEnviar = String(config.mensagemAlmoco || '').trim() || config.mensagemForaHorario
+      }
       if (deveEnviarForaHorario) {
         console.log('[chatbotTriage] fora do horário comercial — enviando mensagem', {
-          conversa_id, company_id, timezone, horario: janelas ? `janelas:${janelas.length}` : `${config.horarioInicio}-${config.horarioFim}`, foraDia
+          conversa_id, company_id, timezone, motivo: motivoForaHorario,
+          horario: janelas ? `janelas:${janelas.length}` : `${config.horarioInicio}-${config.horarioFim}`,
+          almoco: config.almocoAtivo ? `${config.almocoInicio}-${config.almocoFim}` : 'off', foraDia
         })
       }
     } catch (errTz) {
       console.warn('[chatbotTriage] Erro ao avaliar horário comercial (timezone/janelas) — fallback: NÃO enviar fora-horário', errTz?.message || errTz)
       deveEnviarForaHorario = false
     }
-    if (deveEnviarForaHorario) {
+    if (deveEnviarForaHorario && mensagemParaEnviar) {
       const sb = supabaseClient || supabase
       const fhLockKey = `${company_id}:${conversaLockKey(conversa_id)}`
       if (foraHorarioInFlight.has(fhLockKey)) {
@@ -1480,28 +1523,33 @@ async function processIncomingMessageLocked(ctx, conversaEstadoInicial) {
           console.log('[chatbotTriage] ❌ skip fora_horario: operador humano já interveio', { conversa_id, company_id })
           return { handled: true }
         }
-        const canSend = await shouldSendForaHorarioMessage(sb, company_id, conversa_id, config.mensagemForaHorario, config)
+        const canSend = await shouldSendForaHorarioMessage(sb, company_id, conversa_id, mensagemParaEnviar, config)
         if (!canSend.ok) {
           console.log('[chatbotTriage] ❌ skip fora_horario: regra anti-duplicação', {
             conversa_id,
             company_id,
+            motivo: motivoForaHorario,
             reason: canSend.reason,
           })
           return { handled: true }
         }
-        const sendResultFora = await sendWithThrottle(sendMessage, telefone, config.mensagemForaHorario, opts, company_id, config.intervaloEnvioSegundos)
+        const sendResultFora = await sendWithThrottle(sendMessage, telefone, mensagemParaEnviar, opts, company_id, config.intervaloEnvioSegundos)
         logBotSendResult({ company_id, conversa_id, tipo: 'fora_horario' }, sendResultFora, opts)
         const rowFora = await insertBotOutboundMensagem(sb, buildBotOutboundPayload({
           conversa_id,
-          texto: config.mensagemForaHorario,
+          texto: mensagemParaEnviar,
           company_id,
           sendResult: sendResultFora,
           opts,
         }))
         await emitAfterBotMsg(rowFora)
         await logBotAction(company_id, conversa_id, botSendAccepted(sendResultFora) ? 'fora_horario' : 'fora_horario_falhou', {
+          motivo: motivoForaHorario,
           horario_inicio: config.horarioInicio,
           horario_fim: config.horarioFim,
+          almoco_ativo: !!config.almocoAtivo,
+          almoco_inicio: config.almocoInicio,
+          almoco_fim: config.almocoFim,
           dias_semana_desativados: config.diasSemanaDesativados,
           data_fechada: foraDia,
           debounce_segundos: config.foraHorarioDebounceSegundos,
@@ -1517,6 +1565,25 @@ async function processIncomingMessageLocked(ctx, conversaEstadoInicial) {
       return { handled: true }
     }
   }
+
+  // Gates do MENU de triagem (não afetam a mensagem fora do horário acima).
+  if (!config.enabled) {
+    console.log('[chatbotTriage] ❌ skip: chatbot desativado para company_id', company_id)
+    return { handled: false }
+  }
+  // Sem opções E sem mensagem de boas-vindas: nada para o chatbot fazer
+  if (!config.options?.length && !config.welcomeMessage) {
+    console.log('[chatbotTriage] ❌ skip: nenhuma opção nem mensagem de boas-vindas para company_id', company_id)
+    return { handled: false }
+  }
+
+  console.log('[chatbotTriage] ✅ configuração válida encontrada', {
+    company_id,
+    enabled: config.enabled,
+    totalOpcoes: config.options.length,
+    sendOnlyFirstTime: config.sendOnlyFirstTime,
+    foraHorarioEnabled: config.foraHorarioEnabled
+  })
 
   const sb = supabaseClient || supabase
   const textoNorm = String(texto || '').trim().toLowerCase()
@@ -2013,6 +2080,9 @@ module.exports = {
   invalidateChatbotConfigCache,
   getChatbotConfig,
   looksLikeBotMessage,
+  isWithinBusinessHours,
+  isOutsideBusinessDays,
+  isWithinLunchBreak,
   processIncomingMessage,
   logBotAction,
   buildWelcomeMessage,
