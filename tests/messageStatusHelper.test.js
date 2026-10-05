@@ -59,5 +59,14 @@ describe('messageStatusHelper', () => {
       expect(resolveAckEffectiveStatus('delivered', 'failed')).toBe('delivered')
       expect(resolveAckEffectiveStatus('read', 'erro')).toBe('read')
     })
+
+    test('ACKs fora de ordem: sucesso tardio recupera erro; played não regride', () => {
+      // Linha marcada erro (ex.: failed engolido cedo demais) + ACK sent/delivered real depois:
+      // o provedor confirmou o envio — a recuperação vence o erro.
+      expect(resolveAckEffectiveStatus('erro', 'sent')).toBe('sent')
+      expect(resolveAckEffectiveStatus('erro', 'delivered')).toBe('delivered')
+      expect(resolveAckEffectiveStatus('played', 'read')).toBe('played')
+      expect(resolveAckEffectiveStatus('played', 'delivered')).toBe('played')
+    })
   })
 })

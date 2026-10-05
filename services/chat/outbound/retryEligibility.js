@@ -20,13 +20,18 @@ function avaliarElegibilidadeReenvio(mensagem) {
   if (String(mensagem?.direcao || '').toLowerCase() !== 'out') {
     return { permitido: false, httpStatus: 400, motivo: 'Só é possível reenviar mensagens enviadas pelo atendimento.' }
   }
+  // FALHA EXPLÍCITA primeiro: na Whapi o `message.id` vem no POST e é salvo em whatsapp_id
+  // ANTES de qualquer confirmação — um ACK `failed` posterior marca a linha como erro MESMO
+  // com id real. O id não prova entrega; a falha foi confirmada pelo provedor, então o
+  // reenvio manual é seguro (e era a única saída da bolha de erro). Sem esta ordem, o guard
+  // de whatsapp_id respondia "já confirmada" e o botão Reenviar virava um no-op eterno.
+  if (_STATUS_REENVIO_PERMITIDO.has(statusReenvioNormalizado(mensagem))) return { permitido: true }
   if (isRealWhatsAppId(mensagem?.whatsapp_id)) {
     return { permitido: false, jaResolvida: true, motivo: 'Mensagem já confirmada pelo WhatsApp.' }
   }
   if (_STATUS_JA_RESOLVIDO.has(statusReenvioNormalizado(mensagem))) {
     return { permitido: false, jaResolvida: true, motivo: 'Mensagem já enviada.' }
   }
-  if (_STATUS_REENVIO_PERMITIDO.has(statusReenvioNormalizado(mensagem))) return { permitido: true }
   // Linhas legadas podem ter o ID de fila gravado em whatsapp_id: também significa provedor que já aceitou.
   const idFilaProvedor =
     String(mensagem?.provider_queue_id || '').trim() ||

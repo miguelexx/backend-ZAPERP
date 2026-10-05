@@ -868,3 +868,26 @@ Sem migration, sem endpoint novo e sem evento Socket novo.
 Testes novos: `whapiSendTransportError.test.js`, casos extras em `outboundFailureClassifier`,
 `messageStatusHelper` (resolveAckEffectiveStatus) e `pendingOutboundReconciliation` (whapi sem id).
 Sem migration, sem endpoint novo e sem evento Socket novo.
+
+### 2ª auditoria do envio (2026-10-05, mesma data) — validação + 1 correção
+
+Auditoria independente das mudanças acima (diff completo + testes direcionados). Confirmadas
+seguras: transportError, sendLink sem fallback na exceção, resolveAckEffectiveStatus, teto de
+60min p/ pendente Whapi sem id, retryUnsafe/signal-por-tentativa no upload, status_mensagem no
+GET, e os fixes do frontend (blocked, rank 0,5, forceStatus).
+
+**Correção desta rodada:** `avaliarElegibilidadeReenvio` (retryEligibility.js) checava
+`isRealWhatsAppId(whatsapp_id)` ANTES do status — mas na Whapi o id vem do POST sem provar
+entrega, e a linha marcada `erro` pelo ACK `failed` tem id real: o Reenviar respondia "já
+confirmada" (no-op eterno na bolha de erro). Agora FALHA EXPLÍCITA (status erro/failed) permite
+reenvio primeiro; pending/sent com id continuam bloqueados (anti-duplicação intacta).
+
+Testes novos: `statusZapiWhapiFailedAck.test.js` (failed aplica em pending/sending, não regride
+sent+, delivered atrasado não regride read, sent tardio recupera erro), `retryEligibility.test.js`,
+casos 429/5xx + upload retryUnsafe/signal em `whapiSendTransportError.test.js`, ACKs fora de ordem
+em `messageStatusHelper.test.js`. Suíte completa: 2130/2130.
+
+Riscos residuais aceitos (documentados): ACK `pending` tardio pode reverter `erro`→`pending`
+(pré-existente; a reconciliação reconverge); race ms entre resposta do retry (pending forçado) e
+ACK sent concorrente (o delivered seguinte corrige); webhook fora do ar >60min + resposta de POST
+perdida pode marcar erro em mensagem entregue (mesma janela do comportamento UltraMSG).

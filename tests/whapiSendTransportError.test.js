@@ -119,4 +119,53 @@ describe('Whapi provider — transport error nos envios', () => {
     expect(r.transportError).toBeUndefined()
     expect(r.httpStatus).toBe(400)
   })
+
+  test('429/5xx da Whapi preservam httpStatus e são classificados transitórios (mantêm pending)', async () => {
+    const { isTransientOutboundFailure } = require('../services/chat/outbound/outboundFailureClassifier')
+    for (const status of [429, 503]) {
+      jest.resetModules()
+      mockDeps({
+        fetchImpl: async () => ({ ok: false, status, text: async () => JSON.stringify({ error: { message: 'instável' } }) }),
+      })
+      const whapi = require('../services/providers/whapi')
+      const r = await whapi.sendText('5534988887777', 'olá', opts)
+      expect(r.ok).toBe(false)
+      expect(r.httpStatus).toBe(status)
+      // Resposta RECEBIDA (não é exceção de transporte) — o flag fica de fora…
+      expect(r.transportError).toBeUndefined()
+      // …mas o classificador trata 429/5xx como transitório: pending + reconciliação.
+      expect(isTransientOutboundFailure({ httpStatus: r.httpStatus, transportError: r.transportError === true })).toBe(true)
+    }
+  })
+
+  test('uploadMedia usa retryUnsafe (repetir upload é seguro) e signal NOVO por tentativa', async () => {
+    const fs = require('node:fs')
+    const os = require('node:os')
+    const path = require('node:path')
+    const tmp = path.join(os.tmpdir(), `zap-test-upload-${Date.now()}.ogg`)
+    fs.writeFileSync(tmp, Buffer.from('OggS-fake'))
+    try {
+      const { fetchWithRetry } = mockDeps({
+        fetchImpl: async () => ({ ok: true, status: 200, text: async () => JSON.stringify({ media: [{ id: 'MEDIA-1' }] }) }),
+      })
+      const whapi = require('../services/providers/whapi')
+      const r = await whapi.uploadMedia(tmp, 'voz.ogg', opts)
+
+      expect(r.ok).toBe(true)
+      expect(r.url).toBe('MEDIA-1')
+      const [, fetchOpts, retryOpts] = fetchWithRetry.mock.calls[0]
+      expect(retryOpts.retryUnsafe).toBe(true)
+      // Cada LEITURA de signal cria um AbortSignal.timeout novo: a retentativa não herda um
+      // signal já abortado (antes, após o 1º timeout, todas as retentativas morriam na hora).
+      if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function') {
+        const s1 = fetchOpts.signal
+        const s2 = fetchOpts.signal
+        expect(s1).toBeDefined()
+        expect(s2).toBeDefined()
+        expect(s1).not.toBe(s2)
+      }
+    } finally {
+      try { fs.unlinkSync(tmp) } catch { /* ignore */ }
+    }
+  })
 })
