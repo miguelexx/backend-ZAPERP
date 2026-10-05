@@ -285,7 +285,7 @@ exports.enviarContatoWhatsapp = async (req, res) => {
     let { nextStatus, nextStatusMensagem, needsReconciliation } = mappedResult
     // Falha transitória (timeout/429/5xx): mantém pending + reconciliação (sweep só varre
     // pending/sending). Recusa definitiva permanece erro.
-    const falhaTransitoriaContato = !ok && isTransientOutboundFailure({ httpStatus: result?.httpStatus })
+    const falhaTransitoriaContato = !ok && isTransientOutboundFailure({ httpStatus: result?.httpStatus, transportError: result?.transportError === true })
     if (falhaTransitoriaContato) {
       nextStatus = 'pending'
       nextStatusMensagem = 'sending'
@@ -500,7 +500,7 @@ exports.enviarLocalizacao = async (req, res) => {
     } = mappedResult
     let { nextStatus, nextStatusMensagem, needsReconciliation } = mappedResult
     // Falha transitória (timeout/429/5xx): mantém pending + reconciliação. Recusa definitiva = erro.
-    const falhaTransitoriaLoc = !ok && isTransientOutboundFailure({ httpStatus: result?.httpStatus })
+    const falhaTransitoriaLoc = !ok && isTransientOutboundFailure({ httpStatus: result?.httpStatus, transportError: result?.transportError === true })
     if (falhaTransitoriaLoc) {
       nextStatus = 'pending'
       nextStatusMensagem = 'sending'

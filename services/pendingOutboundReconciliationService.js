@@ -521,6 +521,19 @@ async function reconcilePendingOutboundMessage(row, { io = null, force = false }
   // Whapi: 404/ausencia pode ser consistencia eventual, retencao da API ou ID
   // ainda nao indexado. Nunca reenviar nem promover para sent sem ACK explicito.
   if (isWhapi && provedorSemRegistro) {
+    // Linha SEM nenhum id do provedor (POST falhou/exceção de transporte): não há o que
+    // consultar nem indexar — a única salvação seria o eco from_me do webhook, que já teria
+    // chegado. Após a janela de falha, vira erro em vez de relógio eterno (espelha o
+    // comportamento UltraMSG "sem registro no provedor → falha definitiva"). Nunca reenvia.
+    if (provedorNuncaAceitou(row) && currentStatus !== 'sent' && ageMs >= getFailAfterMs()) {
+      console.warn('[pendingOutboundReconciliation] whapi sem id e sem eco após janela de falha — marcando erro', {
+        mensagem_id: row.id,
+        company_id: row.company_id,
+        conversa_id: row.conversa_id,
+        idade_min: Math.round(ageMs / 60_000),
+      })
+      return patchMessage(row, { status: 'erro', status_mensagem: 'failed' }, io)
+    }
     return { ok: true, action: currentStatus === 'sent' ? 'keep_whapi_sent_unconfirmed' : 'keep_whapi_unconfirmed' }
   }
   if (provedorSemRegistro && provedorNuncaAceitou(row)) {

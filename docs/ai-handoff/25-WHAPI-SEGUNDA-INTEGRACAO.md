@@ -832,3 +832,39 @@ Sem migration e sem evento Socket novo.
   `provider`/`ackConfirmed`. Strip `{ok, messageId}` promovia o poll/lista para `sent` no POST.
 
 Sem migration, sem endpoint novo e sem evento Socket novo.
+
+## Auditoria de envio Whapi (2026-10-05) — exceção de transporte, ACK failed e relógio eterno
+
+1. **`transportError: true` no adapter.** Todo `catch` de envio em `services/providers/whapi/send.js`
+   ("Falha de conexão ao … (Whapi)") agora devolve `{ ok:false, transportError:true }`. Motivo: a
+   UltraMSG PROPAGA a exceção (o controller cai no catch → mantém pending + reconciliação), mas o
+   adapter Whapi a engolia e devolvia objeto sem `httpStatus` — o `isTransientOutboundFailure`
+   classificava como recusa definitiva e a mensagem virava `erro` terminal, mesmo quando o timeout
+   aconteceu DEPOIS de a Whapi processar (reenvio manual duplicaria no cliente). O classificador
+   (`outboundFailureClassifier`) aceita `transportError` e os 5 call sites (texto, mídia, contato,
+   localização, forward) o repassam.
+2. **`sendLink` não faz mais fallback a texto na EXCEÇÃO.** O card pode ter sido aceito (timeout
+   pós-processamento); o fallback duplicava conteúdo. Fallback a texto continua na recusa explícita.
+3. **ACK `failed` deixou de ser engolido.** O guard de rank em `statusZapi` usava
+   `statusRank('erro') = -1 < pending = 0` → o `failed` da Whapi nunca aplicava e a bolha ficava no
+   relógio. Novo helper `resolveAckEffectiveStatus` (messageStatusHelper): falha explícita APLICA
+   sobre pending/sending; nunca regride sent/delivered/read.
+4. **Teto p/ pendente Whapi SEM id** (`pendingOutboundReconciliationService`): linha sem
+   `whatsapp_id`/`provider_queue_id` (POST falhou) não tem o que consultar; se o eco from_me não
+   chegou até `PENDING_OUTBOUND_RECONCILE_FAIL_AFTER_MINUTES` (60), vira `erro/failed` — sem
+   reenviar. Linha COM id segue mantida (retenção/indexação do provedor).
+5. **Upload `/media` retryável** (`retryUnsafe: true` em upload.js→http.js): repete timeout/5xx/429
+   — upload não envia mensagem, repetir não duplica. E `createFetchOptions` agora cria o
+   `AbortSignal.timeout` por TENTATIVA (getter); antes o signal único abortava as retentativas.
+6. **GET /chats/:id devolve `status_mensagem`** (conversationDetailController): o frontend lê
+   `status_mensagem` primeiro e o merge do refresh preservava o valor local — bolha presa em
+   "verificando…"/erro mesmo com a linha `sent` no banco.
+7. **Frontend** (repo frontend): `blocked` vira ícone de erro + toast com `motivo` (antes aparecia
+   como enviado); rank de erro no `pickHigherStatus` caiu de 200 → 0,5 (sent/delivered/read
+   confirmados sobrescrevem erro recuperado pelo backend); ciclo do "Reenviar" usa
+   `patchMensagem(..., { forceStatus: true })` e sempre patcheia por id (linha vinda do GET não tem
+   `tempId` — ficava presa em "Reenviando…").
+
+Testes novos: `whapiSendTransportError.test.js`, casos extras em `outboundFailureClassifier`,
+`messageStatusHelper` (resolveAckEffectiveStatus) e `pendingOutboundReconciliation` (whapi sem id).
+Sem migration, sem endpoint novo e sem evento Socket novo.

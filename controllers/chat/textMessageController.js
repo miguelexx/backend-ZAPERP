@@ -442,7 +442,7 @@ exports.enviarMensagemChat = async (req, res) => {
         // terminal: 'erro' sai do alcance do sweep de reconciliação (só varre pending/sending)
         // e a mensagem só voltaria por clique manual. Mantém pending + reconciliação, que
         // consulta o provedor (referenceId crm-{id}) antes de reenviar — sem duplicar.
-        const falhaTransitoria = !ok && isTransientOutboundFailure({ httpStatus: result?.httpStatus })
+        const falhaTransitoria = !ok && isTransientOutboundFailure({ httpStatus: result?.httpStatus, transportError: result?.transportError === true })
         if (falhaTransitoria) {
           nextStatus = 'pending'
           nextStatusMensagem = 'sending'

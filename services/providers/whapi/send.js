@@ -19,6 +19,22 @@ function notImplemented(method) {
   return { ok: false, messageId: null, notImplemented: true, httpStatus: 501, error: `whapi.${method} não implementado` }
 }
 
+/**
+ * Exceção de transporte (timeout/rede) durante o envio: a Whapi PODE ter processado a
+ * mensagem (timeout após aceite), então isto NÃO é recusa definitiva. `transportError: true`
+ * permite aos controllers manter a mensagem pending + reconciliação (como já fazem com a
+ * exceção da UltraMSG, que propaga) em vez de marcar 'erro' terminal — que arriscaria
+ * duplicar no cliente num reenvio manual de algo já entregue.
+ */
+function transportFailure(action, e) {
+  return {
+    ok: false,
+    messageId: null,
+    transportError: true,
+    error: `Falha de conexão ao ${action} (Whapi): ${e?.message || e}`,
+  }
+}
+
 function applyQuoted(body, opts) {
   const replyMessageId = opts?.replyMessageId ? String(opts.replyMessageId).trim() : null
   if (replyMessageId) body.quoted = replyMessageId
@@ -113,7 +129,7 @@ async function sendText(phone, message, opts = {}) {
       cfg, endpoint: '/messages/text', body, to, rawRecipient: phone, kind: 'text', opts, extraMeta: { textLength: msg.length },
     })
   } catch (e) {
-    return { ok: false, messageId: null, error: `Falha de conexão ao enviar (Whapi): ${e?.message || e}` }
+    return transportFailure('enviar', e)
   }
 
   if (!normalized.ok) {
@@ -163,8 +179,12 @@ async function sendLink(phone, payload, opts = {}) {
     console.log('✅ Whapi link enviado:', String(to).slice(-13))
     return normalized
   } catch (e) {
-    console.warn('⚠️ Whapi link_preview erro, fallback texto:', e?.message || e)
-    return sendText(phone, body, opts)
+    // Exceção de transporte: o card PODE ter sido aceito (timeout após processamento).
+    // Mandar texto aqui duplicaria o conteúdo no cliente — devolve falha transitória e
+    // deixa o caller manter pending + reconciliação. O fallback a texto fica só para
+    // RECUSA explícita do provedor (acima), que comprova que nada foi enviado.
+    console.warn('⚠️ Whapi link_preview exceção de transporte (sem fallback p/ não duplicar):', e?.message || e)
+    return transportFailure('enviar link', e)
   }
 }
 
@@ -184,7 +204,7 @@ async function sendMediaByEndpoint(endpoint, kind, phone, media, extra = {}, opt
       cfg, endpoint, body, to, rawRecipient: phone, kind, opts, extraMeta: { textLength: String(extra?.caption || '').length },
     })
   } catch (e) {
-    return returnDetails ? { ok: false, messageId: null, error: `Falha de conexão ao enviar (Whapi): ${e?.message || e}` } : false
+    return returnDetails ? transportFailure('enviar', e) : false
   }
   if (!normalized.ok) {
     console.warn(`❌ Whapi ${kind} falhou:`, String(to).slice(-13), String(normalized.error).slice(0, 200), '| token:', maskToken(cfg.token))
@@ -331,7 +351,7 @@ async function sendLocation(phone, loc = {}, opts = {}) {
     console.log('✅ Whapi localização enviada:', String(to).slice(-13))
     return normalized
   } catch (e) {
-    return { ok: false, messageId: null, error: `Falha de conexão ao enviar (Whapi): ${e?.message || e}` }
+    return transportFailure('enviar', e)
   }
 }
 
@@ -364,7 +384,7 @@ async function sendLiveLocation(phone, loc = {}, opts = {}) {
     console.log('✅ Whapi live location enviada:', String(to).slice(-13))
     return normalized
   } catch (e) {
-    return { ok: false, messageId: null, error: `Falha de conexão ao enviar (Whapi): ${e?.message || e}` }
+    return transportFailure('enviar', e)
   }
 }
 
@@ -386,7 +406,7 @@ async function sendContact(phone, contactName, contactPhone, opts = {}) {
     console.log('✅ Whapi contato enviado:', String(to).slice(-13))
     return normalized
   } catch (e) {
-    return { ok: false, messageId: null, error: `Falha de conexão ao enviar (Whapi): ${e?.message || e}` }
+    return transportFailure('enviar', e)
   }
 }
 
@@ -529,7 +549,7 @@ async function sendCall(phone, callDuration, opts = {}) {
     console.warn('❌ Whapi sendCall falhou:', String(candidates[0]).slice(-18), String(last.error).slice(0, 200), '| token:', maskToken(cfg.token))
     return last
   } catch (e) {
-    return { ok: false, messageId: null, error: `Falha de conexão ao ligar (Whapi): ${e?.message || e}` }
+    return transportFailure('ligar', e)
   }
 }
 
@@ -560,7 +580,7 @@ async function forwardMessage(phone, messageId, opts = {}) {
     console.log('✅ Whapi mensagem encaminhada:', String(to).slice(-13), normalized.messageId ? `id=${String(normalized.messageId).slice(0, 16)}...` : '')
     return normalized
   } catch (e) {
-    return { ok: false, messageId: null, error: `Falha de conexão ao encaminhar (Whapi): ${e?.message || e}` }
+    return transportFailure('encaminhar', e)
   }
 }
 
@@ -632,7 +652,7 @@ async function sendInteractive(phone, payload = {}, opts = {}) {
       cfg, endpoint: '/messages/interactive', body: reqBody, to, rawRecipient: phone, kind: 'interactive', opts, extraMeta: { interactiveType: type },
     })
   } catch (e) {
-    return { ok: false, messageId: null, error: `Falha de conexão ao enviar interativa (Whapi): ${e?.message || e}` }
+    return transportFailure('enviar interativa', e)
   }
   if (!normalized.ok) {
     console.warn('❌ Whapi sendInteractive falhou:', String(to).slice(-13), String(normalized.error).slice(0, 200), '| token:', maskToken(cfg.token))
@@ -675,7 +695,7 @@ async function sendPoll(phone, payload = {}, opts = {}) {
       cfg, endpoint: '/messages/poll', body: reqBody, to, rawRecipient: phone, kind: 'poll', opts, extraMeta: { options: uniqueOptions.length },
     })
   } catch (e) {
-    return { ok: false, messageId: null, error: `Falha de conexão ao enviar enquete (Whapi): ${e?.message || e}` }
+    return transportFailure('enviar enquete', e)
   }
   if (!normalized.ok) {
     console.warn('❌ Whapi sendPoll falhou:', String(to).slice(-13), String(normalized.error).slice(0, 200), '| token:', maskToken(cfg.token))
@@ -724,7 +744,7 @@ async function sendQuiz(phone, payload = {}, opts = {}) {
     }
     return normalized
   } catch (e) {
-    return { ok: false, messageId: null, error: `Falha de conexão ao enviar quiz (Whapi): ${e?.message || e}` }
+    return transportFailure('enviar quiz', e)
   }
 }
 
@@ -751,7 +771,7 @@ async function sendQuestion(phone, question, opts = {}) {
     }
     return normalized
   } catch (e) {
-    return { ok: false, messageId: null, error: `Falha de conexão ao enviar pergunta (Whapi): ${e?.message || e}` }
+    return transportFailure('enviar pergunta', e)
   }
 }
 
@@ -781,7 +801,7 @@ async function sendProduct(phone, payload = {}, opts = {}) {
     }
     return normalized
   } catch (e) {
-    return { ok: false, messageId: null, error: `Falha de conexão ao enviar produto (Whapi): ${e?.message || e}` }
+    return transportFailure('enviar produto', e)
   }
 }
 
@@ -817,7 +837,7 @@ async function sendCatalog(phone, payload = {}, opts = {}) {
     }
     return normalized
   } catch (e) {
-    return { ok: false, messageId: null, error: `Falha de conexão ao enviar catálogo (Whapi): ${e?.message || e}` }
+    return transportFailure('enviar catálogo', e)
   }
 }
 

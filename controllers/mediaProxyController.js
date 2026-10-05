@@ -12,6 +12,68 @@ const FETCH_TIMEOUT_MS = Math.max(1000, Number(process.env.MEDIA_PROXY_TIMEOUT_M
 const MAX_REDIRECTS = 3
 const MAX_PROXY_UNWRAPS = 3
 
+/**
+ * Cache em memória do corpo proxiado + deduplicação de downloads em voo.
+ *
+ * O <audio>/<video> gera VÁRIAS requisições para a MESMA URL em segundos (duplo load do
+ * mount, sonda de duração via Range, recarga dos vigias de 4s/6s do player) e cada uma
+ * baixava o arquivo INTEIRO do provedor de novo — em upstream lento, o primeiro byte só
+ * saía após o download completo e o player declarava o áudio indisponível. Com o cache,
+ * só o primeiro pedido baixa; os demais (e todos os Range) servem da memória.
+ *
+ * A resposta já era imutável por contrato (Cache-Control immutable): conteúdo por URL
+ * nunca muda, então servir do cache é seguro. Desligável com MEDIA_PROXY_CACHE_DISABLED=1.
+ */
+const CACHE_TTL_MS = Math.max(10_000, Number(process.env.MEDIA_PROXY_CACHE_TTL_MS) || 10 * 60 * 1000)
+const CACHE_MAX_TOTAL_BYTES = Math.max(1024 * 1024, Number(process.env.MEDIA_PROXY_CACHE_MAX_BYTES) || 64 * 1024 * 1024)
+const CACHE_MAX_ITEM_BYTES = Math.max(64 * 1024, Number(process.env.MEDIA_PROXY_CACHE_MAX_ITEM_BYTES) || 12 * 1024 * 1024)
+
+function cacheDisabled() {
+  return String(process.env.MEDIA_PROXY_CACHE_DISABLED || '').trim() === '1'
+}
+
+const _bodyCache = new Map() // key → { body: Buffer, ct: string, ts: number } (inserção = LRU)
+let _cacheBytes = 0
+const _inflight = new Map() // key → Promise<{ ok, body?, upstreamCt?, status? }>
+
+function cacheGet(key) {
+  const e = _bodyCache.get(key)
+  if (!e) return null
+  if (Date.now() - e.ts > CACHE_TTL_MS) {
+    _bodyCache.delete(key)
+    _cacheBytes -= e.body.length
+    return null
+  }
+  // bump LRU
+  _bodyCache.delete(key)
+  _bodyCache.set(key, e)
+  return e
+}
+
+function cachePut(key, body, ct) {
+  if (cacheDisabled() || !key || !body || body.length > CACHE_MAX_ITEM_BYTES) return
+  const prev = _bodyCache.get(key)
+  if (prev) {
+    _bodyCache.delete(key)
+    _cacheBytes -= prev.body.length
+  }
+  while (_cacheBytes + body.length > CACHE_MAX_TOTAL_BYTES && _bodyCache.size > 0) {
+    const oldestKey = _bodyCache.keys().next().value
+    const oldest = _bodyCache.get(oldestKey)
+    _bodyCache.delete(oldestKey)
+    _cacheBytes -= oldest.body.length
+  }
+  _bodyCache.set(key, { body, ct, ts: Date.now() })
+  _cacheBytes += body.length
+}
+
+/** Limpa cache e downloads em voo (testes). */
+function resetMediaProxyCache() {
+  _bodyCache.clear()
+  _cacheBytes = 0
+  _inflight.clear()
+}
+
 /** Mapa extensão → MIME type. Cobre os formatos mais comuns do ZapERP. */
 const MIME_BY_EXT = {
   // Imagens
@@ -223,6 +285,56 @@ async function fetchAllowedMedia(target, signal) {
   throw err
 }
 
+/** Download do upstream com timeout; nunca lança (retorna { ok:false } com status/erro). */
+async function baixarCorpoUpstream(target) {
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS)
+  try {
+    const upstream = await fetchAllowedMedia(target, controller.signal)
+    if (!upstream.ok) {
+      return { ok: false, httpStatus: 502, error: 'Mídia indisponível na origem' }
+    }
+    const cl = Number(upstream.headers.get('content-length') || 0)
+    if (Number.isFinite(cl) && cl > MAX_BYTES) {
+      return { ok: false, httpStatus: 413, error: 'Arquivo muito grande' }
+    }
+    const arrayBuffer = await upstream.arrayBuffer()
+    if (arrayBuffer.byteLength > MAX_BYTES) {
+      return { ok: false, httpStatus: 413, error: 'Arquivo muito grande' }
+    }
+    return { ok: true, body: Buffer.from(arrayBuffer), upstreamCt: upstream.headers.get('content-type') || '' }
+  } catch (e) {
+    const timedOut = e?.name === 'AbortError'
+    console.error('[mediaProxy] fetch:', timedOut ? 'timeout' : (e?.message || e))
+    return { ok: false, httpStatus: 502, error: 'Não foi possível obter a mídia' }
+  } finally {
+    clearTimeout(timeout)
+  }
+}
+
+/**
+ * Corpo proxiado com cache + dedupe de voo: pedidos concorrentes da mesma URL (duplo load,
+ * Range da sonda de duração, recarga do vigia) compartilham UM download do provedor.
+ * Falha não é cacheada — a próxima tentativa volta ao upstream.
+ */
+async function obterCorpoProxiado(target, cacheKey) {
+  if (cacheDisabled() || !cacheKey) return baixarCorpoUpstream(target)
+  const hit = cacheGet(cacheKey)
+  if (hit) return { ok: true, body: hit.body, upstreamCt: hit.ct, fromCache: true }
+  const emVoo = _inflight.get(cacheKey)
+  if (emVoo) return emVoo
+  const p = baixarCorpoUpstream(target)
+    .then((r) => {
+      if (r.ok) cachePut(cacheKey, r.body, r.upstreamCt)
+      return r
+    })
+    .finally(() => {
+      _inflight.delete(cacheKey)
+    })
+  _inflight.set(cacheKey, p)
+  return p
+}
+
 /**
  * GET /media/proxy?url=<https...>[&filename=<nome>[&disposition=attachment|inline]]
  * Requer JWT (middleware auth na rota).
@@ -247,6 +359,10 @@ exports.proxyMedia = async (req, res) => {
   } catch {
     return res.status(400).json({ error: 'URL inválida' })
   }
+
+  // Chave do cache SEMPRE pela URL canônica pedida (antes do presign do R2, cuja assinatura
+  // muda a cada requisição — senão cada pedido R2 seria um "miss" e um novo download).
+  let cacheKey = target.href
 
   // Mídia própria migrada ao R2 (APP_URL/media/r2/<key>): gera a URL assinada do R2 e serve dela
   // direto — assim áudio/mídia que o frontend pede via proxy funciona igual funcionava com /uploads.
@@ -275,30 +391,16 @@ exports.proxyMedia = async (req, res) => {
     return res.status(403).json({ error: 'Origem não permitida' })
   }
 
-  const controller = new AbortController()
-  const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS)
+  const resultado = await obterCorpoProxiado(target, cacheKey)
+  if (!resultado.ok) {
+    return res.status(resultado.httpStatus || 502).json({ error: resultado.error || 'Não foi possível obter a mídia' })
+  }
 
-  try {
-    const upstream = await fetchAllowedMedia(target, controller.signal)
-
-    if (!upstream.ok) {
-      return res.status(502).json({ error: 'Mídia indisponível na origem' })
-    }
-
-    const cl = Number(upstream.headers.get('content-length') || 0)
-    if (Number.isFinite(cl) && cl > MAX_BYTES) {
-      return res.status(413).json({ error: 'Arquivo muito grande' })
-    }
-
-    const arrayBuffer = await upstream.arrayBuffer()
-    if (arrayBuffer.byteLength > MAX_BYTES) {
-      return res.status(413).json({ error: 'Arquivo muito grande' })
-    }
-
-    const body = Buffer.from(arrayBuffer)
+  {
+    const body = resultado.body
     // Resolve Content-Type: upstream específico, senão magic bytes (áudio), senão filename/URL.
     const ct = resolveContentType(
-      upstream.headers.get('content-type'),
+      resultado.upstreamCt,
       target.href,
       filenameParam,
       body
@@ -350,12 +452,6 @@ exports.proxyMedia = async (req, res) => {
 
     res.setHeader('Content-Length', String(total))
     return res.status(200).end(body)
-  } catch (e) {
-    const timedOut = e?.name === 'AbortError'
-    console.error('[mediaProxy] fetch:', timedOut ? 'timeout' : (e?.message || e))
-    return res.status(502).json({ error: 'Não foi possível obter a mídia' })
-  } finally {
-    clearTimeout(timeout)
   }
 }
 
@@ -398,4 +494,8 @@ exports._test = {
   isOwnPublicUploadUrl,
   isOwnR2DeliveryUrl,
   isAllowedProxyTarget,
+  cacheGet,
+  cachePut,
+  resetMediaProxyCache,
+  obterCorpoProxiado,
 }

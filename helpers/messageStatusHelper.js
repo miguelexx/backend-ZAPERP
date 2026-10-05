@@ -75,6 +75,21 @@ function shouldUpgradeStatus(current, next) {
   return statusRank(next) >= statusRank(current)
 }
 
+/**
+ * Status efetivo ao aplicar um ACK sobre o status atual, sem regressão de ticks.
+ * Regra geral: vale o de maior rank (ack atrasado "delivered" não regride "read").
+ * Exceção: ACK de FALHA explícita do provedor (erro, rank -1) APLICA quando a mensagem
+ * ainda não foi confirmada (pending/sending, rank 0) — sem isso o guard de rank engolia
+ * o `failed` da Whapi e a bolha ficava no relógio para sempre. Mensagem já sent/delivered/
+ * read não regride para erro (falha tardia é ambígua; a reconciliação decide).
+ */
+function resolveAckEffectiveStatus(current, next) {
+  const nextCanon = canonStatusForEmit(next)
+  const currentCanon = canonStatusForEmit(current)
+  if (nextCanon === 'erro' && statusRank(currentCanon) <= 0) return 'erro'
+  return statusRank(currentCanon) > statusRank(nextCanon) ? currentCanon : nextCanon
+}
+
 module.exports = {
   STATUS_RANK,
   normalizeRawAckStatus,
@@ -82,4 +97,5 @@ module.exports = {
   canonStatusForEmit,
   statusRank,
   shouldUpgradeStatus,
+  resolveAckEffectiveStatus,
 }

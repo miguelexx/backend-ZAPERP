@@ -64,17 +64,25 @@ function isFalse(v) {
 }
 
 function createFetchOptions(method, body, timeoutMs = WHAPI_TIMEOUT_MS) {
-  let signal
-  try {
-    if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function') {
-      signal = AbortSignal.timeout(Number(timeoutMs) > 0 ? Number(timeoutMs) : WHAPI_TIMEOUT_MS)
-    }
-  } catch { /* Node < 17.3 */ }
   const opts = {
     method,
     headers: { accept: 'application/json' },
-    ...(signal && { signal }),
   }
+  try {
+    if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function') {
+      const ms = Number(timeoutMs) > 0 ? Number(timeoutMs) : WHAPI_TIMEOUT_MS
+      // Getter: cada leitura (= cada tentativa do fetchWithRetry) ganha um timeout NOVO.
+      // Um AbortSignal.timeout fixo dispara na 1ª tentativa e deixa as retentativas
+      // abortando na hora (signal já abortado) — o retry de upload virava no-op.
+      Object.defineProperty(opts, 'signal', {
+        enumerable: true,
+        configurable: true,
+        get() {
+          try { return AbortSignal.timeout(ms) } catch { return undefined }
+        },
+      })
+    }
+  } catch { /* Node < 17.3 */ }
   const m = String(method || 'GET').toUpperCase()
   if (body != null && m !== 'GET' && m !== 'HEAD') {
     opts.headers = { ...opts.headers, 'Content-Type': 'application/json' }
@@ -103,6 +111,9 @@ async function sendJson({
   skipSendGuard = false,
   // Upload de mídia (base64 de até ~32 MB) não cabe no timeout padrão de 30s em uplink lento.
   timeoutMs = null,
+  // Só para chamadas que NÃO disparam mensagem (ex.: POST /media): retenta também
+  // timeout/5xx/429, porque repetir não pode duplicar nada no WhatsApp do cliente.
+  retryUnsafe = false,
 }) {
   const verb = String(method || 'POST').toUpperCase()
   const url = `${buildBaseUrl()}${endpoint}`
@@ -113,7 +124,7 @@ async function sendJson({
     : await beforeWhatsAppSend({ companyId, endpoint, body, meta, whatsappInstanceId })
   const startedAt = Date.now()
   try {
-    const res = await fetchWithRetry(url, fetchOpts, { maxAttempts: 3, retryConnectionErrors: true, beforeRequest: meta?.beforeRequest })
+    const res = await fetchWithRetry(url, fetchOpts, { maxAttempts: 3, retryConnectionErrors: true, retryUnsafe: retryUnsafe === true, beforeRequest: meta?.beforeRequest })
     const text = await res.text().catch(() => '')
     let data = null
     try { data = text ? JSON.parse(text) : null } catch { data = null }

@@ -11,6 +11,8 @@
  * Conservador de propósito: só classifica como transitória quando há forte indício de
  * problema momentâneo:
  *   - exceção de transporte (timeout/rede) — `isException = true`;
+ *   - resultado de provider com `transportError = true` (adapter Whapi captura a exceção
+ *     internamente e devolve objeto; sem este flag a falha pareceria recusa definitiva);
  *   - HTTP 408 (Request Timeout), 425 (Too Early), 429 (Too Many Requests);
  *   - HTTP 5xx (erro no lado do provedor).
  *
@@ -24,11 +26,11 @@
 const TRANSIENT_HTTP_STATUSES = new Set([408, 425, 429])
 
 /**
- * @param {{ httpStatus?: number|null, isException?: boolean }} [params]
+ * @param {{ httpStatus?: number|null, isException?: boolean, transportError?: boolean }} [params]
  * @returns {boolean} true quando a falha é transitória/retryável.
  */
-function isTransientOutboundFailure({ httpStatus = null, isException = false } = {}) {
-  if (isException) return true
+function isTransientOutboundFailure({ httpStatus = null, isException = false, transportError = false } = {}) {
+  if (isException || transportError === true) return true
   const status = Number(httpStatus)
   if (!Number.isFinite(status)) return false
   if (TRANSIENT_HTTP_STATUSES.has(status)) return true

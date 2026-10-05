@@ -373,7 +373,7 @@ async function encaminharUmaMensagemParaConversa(ctx) {
   // Falha transitória (timeout/429/5xx): mantém pending + reconciliação em vez de 'erro'
   // terminal (fora do sweep). Sem telefone/sem método (resultadoEnvio=false) não tem httpStatus
   // → segue como falha definitiva, igual ao comportamento atual.
-  const falhaTransitoriaForward = !ok && isTransientOutboundFailure({ httpStatus: resultadoEnvio?.httpStatus })
+  const falhaTransitoriaForward = !ok && isTransientOutboundFailure({ httpStatus: resultadoEnvio?.httpStatus, transportError: resultadoEnvio?.transportError === true })
   if (falhaTransitoriaForward) {
     nextStatus = 'pending'
     nextStatusMensagem = 'sending'

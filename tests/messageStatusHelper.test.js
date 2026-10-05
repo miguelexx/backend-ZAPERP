@@ -32,4 +32,32 @@ describe('messageStatusHelper', () => {
     expect(statusRank('delivered')).toBeGreaterThan(statusRank('sent'))
     expect(statusRank('read')).toBeGreaterThan(statusRank('delivered'))
   })
+
+  describe('resolveAckEffectiveStatus', () => {
+    const { resolveAckEffectiveStatus } = require('../helpers/messageStatusHelper')
+
+    test('ack atrasado não regride status mais avançado', () => {
+      expect(resolveAckEffectiveStatus('read', 'delivered')).toBe('read')
+      expect(resolveAckEffectiveStatus('delivered', 'sent')).toBe('delivered')
+    })
+
+    test('ack mais avançado aplica normalmente', () => {
+      expect(resolveAckEffectiveStatus('sent', 'delivered')).toBe('delivered')
+      expect(resolveAckEffectiveStatus('pending', 'sent')).toBe('sent')
+    })
+
+    test('ACK de falha explícita (failed/erro) APLICA sobre pending/sending', () => {
+      // Antes o rank -1 do erro era engolido pelo guard e a bolha ficava no relógio para sempre.
+      expect(resolveAckEffectiveStatus('pending', 'erro')).toBe('erro')
+      expect(resolveAckEffectiveStatus('sending', 'erro')).toBe('erro')
+      expect(resolveAckEffectiveStatus('pending', 'failed')).toBe('erro')
+      expect(resolveAckEffectiveStatus(null, 'erro')).toBe('erro')
+    })
+
+    test('ACK de falha NÃO regride mensagem já confirmada (sent/delivered/read)', () => {
+      expect(resolveAckEffectiveStatus('sent', 'erro')).toBe('sent')
+      expect(resolveAckEffectiveStatus('delivered', 'failed')).toBe('delivered')
+      expect(resolveAckEffectiveStatus('read', 'erro')).toBe('read')
+    })
+  })
 })

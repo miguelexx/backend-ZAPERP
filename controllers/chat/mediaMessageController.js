@@ -443,7 +443,7 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
           // Falha transitória (timeout/429/5xx) não pode virar 'erro': o sweep de reconciliação
           // só varre pending/sending. Mantém pending/sending e agenda reconciliação, que consulta
           // o provedor (referenceId crm-{id}) antes de reenviar — sem duplicar mídia no cliente.
-          const falhaTransitoriaMidia = !ok && isTransientOutboundFailure({ httpStatus: normalizedResult?.httpStatus })
+          const falhaTransitoriaMidia = !ok && isTransientOutboundFailure({ httpStatus: normalizedResult?.httpStatus, transportError: normalizedResult?.transportError === true })
           if (falhaTransitoriaMidia) {
             nextStatus = 'pending'
             nextStatusMensagem = 'sending'

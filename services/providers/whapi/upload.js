@@ -96,6 +96,9 @@ async function uploadMedia(filePath, filename, opts = {}) {
       whatsappInstanceId: cfg.whatsappInstanceId,
       skipSendGuard: true,
       timeoutMs: UPLOAD_TIMEOUT_MS,
+      // Upload não envia mensagem: retry de timeout/5xx é seguro (pior caso, arquivo órfão
+      // no cloud Whapi) e evita marcar a mídia como erro por instabilidade momentânea.
+      retryUnsafe: true,
     })
     const ref = extractUploadedMediaRef(data)
     if (!ok || !ref) {

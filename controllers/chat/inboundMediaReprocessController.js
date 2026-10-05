@@ -85,6 +85,13 @@ exports.reprocessarMidiaInbound = async (req, res) => {
   }
 
   const urlAtual = String(mensagem.url || '').trim()
+  // Mídia já migrada ao Cloudflare R2: a entrega é /media/r2/<key> (302 → URL assinada) e NÃO
+  // depende do arquivo local (purgado após o espelhamento). Sem este ramo, o fluxo abaixo via
+  // "sem_url_remota" e respondia definitivo:true — o frontend mostrava "expirou no WhatsApp"
+  // para uma mídia perfeitamente viva no R2.
+  if (urlAtual.startsWith('/media/r2/')) {
+    return res.json({ ok: true, url: urlAtual, status: 'concluida', ja_persistido: true })
+  }
   if (urlAtual.startsWith('/uploads/')) {
     // Já está em /uploads E o arquivo existe no disco: nada a fazer — devolve a URL boa.
     if (uploadsFileExists(urlAtual)) {

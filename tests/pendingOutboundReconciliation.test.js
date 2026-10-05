@@ -282,4 +282,52 @@ describe('reenvio automatico de pendentes', () => {
     expect(updates[0]).toMatchObject({ status: 'pending', status_mensagem: 'sending' })
     expect(res.status).toBe('pending')
   })
+
+  test('Whapi SEM nenhum id dentro da janela de falha mantém pending (eco from_me ainda pode chegar)', async () => {
+    const { svc, sendText, getMessages } = montarAmbiente({
+      providerName: 'whapi',
+      getMessagesResult: { ok: true, data: [] },
+    })
+
+    const res = await svc.reconcilePendingOutboundMessage(linhaPendente(), { io: null })
+
+    expect(sendText).not.toHaveBeenCalled()
+    // Sem whatsapp_id/provider_queue_id não há GET /messages/{id} a fazer.
+    expect(getMessages).not.toHaveBeenCalled()
+    expect(res.action).toBe('keep_whapi_unconfirmed')
+  })
+
+  test('Whapi SEM nenhum id após a janela de falha vira erro (fim do relógio eterno), sem reenviar', async () => {
+    const { svc, sendText, updates } = montarAmbiente({
+      providerName: 'whapi',
+      getMessagesResult: { ok: true, data: [] },
+    })
+
+    const res = await svc.reconcilePendingOutboundMessage(
+      linhaPendente({ criado_em: new Date(Date.now() - 70 * 60_000).toISOString() }),
+      { io: null }
+    )
+
+    expect(sendText).not.toHaveBeenCalled()
+    expect(updates[0]).toMatchObject({ status: 'erro', status_mensagem: 'failed' })
+    expect(res.action).toBe('patched')
+  })
+
+  test('Whapi COM id após a janela de falha continua kept (retenção/indexação do provedor)', async () => {
+    const { svc, sendText } = montarAmbiente({
+      providerName: 'whapi',
+      getMessagesResult: { ok: true, data: [] },
+    })
+
+    const res = await svc.reconcilePendingOutboundMessage(
+      linhaPendente({
+        whatsapp_id: 'PspVgQ5Hj3WhapiMessageId123',
+        criado_em: new Date(Date.now() - 70 * 60_000).toISOString(),
+      }),
+      { io: null }
+    )
+
+    expect(sendText).not.toHaveBeenCalled()
+    expect(res.action).toBe('keep_whapi_unconfirmed')
+  })
 })

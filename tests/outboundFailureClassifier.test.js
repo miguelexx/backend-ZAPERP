@@ -36,4 +36,12 @@ describe('isTransientOutboundFailure', () => {
     expect(isTransientOutboundFailure({ httpStatus: undefined })).toBe(false)
     expect(isTransientOutboundFailure()).toBe(false)
   })
+
+  test('transportError do provider (Whapi captura exceção internamente) é transitório', () => {
+    // O adapter Whapi NÃO propaga a exceção de timeout/rede: devolve objeto sem httpStatus.
+    // Sem o flag, essa falha parecia recusa definitiva e virava erro terminal (duplicável).
+    expect(isTransientOutboundFailure({ transportError: true })).toBe(true)
+    expect(isTransientOutboundFailure({ transportError: true, httpStatus: null })).toBe(true)
+    expect(isTransientOutboundFailure({ transportError: false })).toBe(false)
+  })
 })

@@ -7,7 +7,7 @@
 const supabase = require('../../config/supabase')
 const { getCompanyIdByInstanceId } = require('../../services/whatsappConfigService')
 const { getWhatsappInstanceByProviderInstanceId } = require('../../services/whatsappInstanceService')
-const { normalizeMessageAckStatus, canonStatusForEmit, statusRank } = require('../../helpers/messageStatusHelper')
+const { normalizeMessageAckStatus, canonStatusForEmit, resolveAckEffectiveStatus } = require('../../helpers/messageStatusHelper')
 const { isUltramsgNumericQueueId } = require('../../helpers/whatsappMessageIdHelper')
 const {
   selectSingleMensagemByWhatsappId,
@@ -139,7 +139,9 @@ exports.statusZapi = async (req, res) => {
         }
       }
 
-      // Evita que um ack atrasado (ex.: "delivered") regrida uma mensagem já em status mais avançado (ex.: "read").
+      // Evita que um ack atrasado (ex.: "delivered") regrida uma mensagem já em status mais
+      // avançado (ex.: "read"). ACK de falha explícita (erro) APLICA sobre pending/sending —
+      // ver resolveAckEffectiveStatus (sem isso o `failed` da Whapi era engolido pelo rank).
       const { data: currentForRank } = await selectSingleMensagemByWhatsappId(supabase, {
         company_id,
         whatsapp_id: idStr,
@@ -147,8 +149,8 @@ exports.statusZapi = async (req, res) => {
         select: 'status',
         context: 'status.rank_check',
       })
-      if (currentForRank?.status && statusRank(currentForRank.status) > statusRank(effectiveStatus)) {
-        effectiveStatus = currentForRank.status
+      if (currentForRank?.status) {
+        effectiveStatus = resolveAckEffectiveStatus(currentForRank.status, effectiveStatus)
       }
 
       const statusUpdates = { status: effectiveStatus, status_mensagem: effectiveStatus }
@@ -174,7 +176,7 @@ exports.statusZapi = async (req, res) => {
         })
         if (relaxed.data?.id) {
           const cur = relaxed.data.status || 'pending'
-          if (statusRank(cur) > statusRank(effectiveStatus)) effectiveStatus = cur
+          effectiveStatus = resolveAckEffectiveStatus(cur, effectiveStatus)
           const patched = await patchMensagemStatusById(supabase, {
             company_id,
             mensagem_id: relaxed.data.id,
@@ -209,8 +211,8 @@ exports.statusZapi = async (req, res) => {
         }
         const candidate = Array.isArray(prefixRows) && prefixRows.length === 1 ? prefixRows[0] : null
         if (candidate?.id) {
-          if (candidate.status && statusRank(candidate.status) > statusRank(effectiveStatus)) {
-            effectiveStatus = candidate.status
+          if (candidate.status) {
+            effectiveStatus = resolveAckEffectiveStatus(candidate.status, effectiveStatus)
           }
           const patched = await patchMensagemStatusById(supabase, {
             company_id,
@@ -294,7 +296,7 @@ exports.statusZapi = async (req, res) => {
         })
         if (relaxed.data?.id) {
           const cur = relaxed.data.status || 'pending'
-          if (statusRank(cur) > statusRank(effectiveStatus)) effectiveStatus = cur
+          effectiveStatus = resolveAckEffectiveStatus(cur, effectiveStatus)
           const patched = await patchMensagemStatusById(supabase, {
             company_id,
             mensagem_id: relaxed.data.id,
@@ -320,7 +322,7 @@ exports.statusZapi = async (req, res) => {
         const queueRow = Array.isArray(queueRows) ? queueRows[0] : queueRows
         if (queueRow?.id) {
           const cur = queueRow.status || 'pending'
-          if (statusRank(cur) > statusRank(effectiveStatus)) effectiveStatus = cur
+          effectiveStatus = resolveAckEffectiveStatus(cur, effectiveStatus)
           const patched = await patchMensagemStatusById(supabase, {
             company_id,
             mensagem_id: queueRow.id,
