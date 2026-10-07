@@ -390,8 +390,11 @@ function extractMessage(payload) {
     type = 'contact'
   }
   // Múltiplos contatos compartilhados de uma vez (array). Provedores variam: payload.contacts,
-  // payload.contact.contacts, ou vários blocos BEGIN:VCARD no corpo. Todos viram type=contact.
-  if (Array.isArray(payload.contacts) && payload.contacts.length) {
+  // payload.contact_list.list (Whapi type=contact_list), payload.contact.contacts,
+  // ou vários blocos BEGIN:VCARD no corpo. Todos viram type=contact.
+  const contactListEntries = Array.isArray(payload.contact_list?.list) ? payload.contact_list.list
+    : (Array.isArray(payload.contact_list) ? payload.contact_list : [])
+  if ((Array.isArray(payload.contacts) && payload.contacts.length) || contactListEntries.length || type === 'contact_list' || type === 'contacts' || type === 'multi_vcard') {
     type = 'contact'
   }
   // Fallback: texto bruto com vCard (ex: UltraMsg envia type=chat com body=vCard)
@@ -526,8 +529,9 @@ function extractMessage(payload) {
   if (type === 'contact') {
     const c = payload.contact || {}
     // 1) Fontes possíveis de múltiplos contatos: array estruturado do provedor OU vários blocos BEGIN:VCARD no corpo.
-    const structured = Array.isArray(payload.contacts) ? payload.contacts
-      : (Array.isArray(c.contacts) ? c.contacts : [])
+    const structured = (Array.isArray(payload.contacts) && payload.contacts.length) ? payload.contacts
+      : (contactListEntries.length ? contactListEntries
+        : (Array.isArray(c.contacts) ? c.contacts : []))
     const bodyBlocks = (typeof rawMessage === 'string' && rawMessage.includes('BEGIN:VCARD'))
       ? (String(rawMessage).match(/BEGIN:VCARD[\s\S]*?END:VCARD/gi) || [])
       : []

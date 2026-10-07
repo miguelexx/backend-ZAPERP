@@ -458,6 +458,8 @@ MCP `user-whapi-mcp`: **187 tools**. O CRM **não** precisa de todos. Critério:
 
 Webhook inbound: texto, from_me, ACK, mídia `link`, reação `action`, edit, location, contact. Deleted inbound é ignorado (igual UltraMSG).
 
+Vários contatos de uma vez chegam como `type: contact_list` com `contact_list.list[{ name, vcard }]`. O normalizador transforma isso em `type: contact` + `contacts[]`; o pipeline grava `contact_meta.contatos` para o cartão “Nome e N outro contato” / “Ver todos”. Contato único continua `type: contact`.
+
 ### Stub 501 / não existe no CRM
 
 | Adapter | MCP equivalente | Precisa no ZapERP? |
@@ -891,3 +893,48 @@ Riscos residuais aceitos (documentados): ACK `pending` tardio pode reverter `err
 (pré-existente; a reconciliação reconverge); race ms entre resposta do retry (pending forçado) e
 ACK sent concorrente (o delivered seguinte corrige); webhook fora do ar >60min + resposta de POST
 perdida pode marcar erro em mensagem entregue (mesma janela do comportamento UltraMSG).
+
+## Reenvio automático confiável (2026-10-06) — Whapi por confirmação no histórico
+
+A Whapi NÃO tem idempotência nem referenceId no envio (confirmado no MCP/OpenAPI: schemas de
+sendMessage* só têm to/body|media/quoted/edit/no_*). Para TEXTO humano pendente SEM nenhum id
+(POST falhou/timeout), a reconciliação agora usa `GET /messages/list/{ChatID}` como o
+equivalente funcional do referenceId da UltraMSG (`consultarHistoricoWhapiPorTexto`):
+ - match EXATO do corpo (texto puro OU com o prefixo do atendente reconstruído via
+   formatTextoWhatsappComNomeAtendente; nunca endsWith — um match frouxo "curaria" apontando
+   para outra mensagem e esconderia uma perda real) numa janela desde criado_em−2min;
+ - ENCONTRADO → cura: adota o id e marca sent (`whapi_curada_pelo_historico`);
+ - AUSÊNCIA confirmada (consulta ok) dentro de PENDING_OUTBOUND_RESEND_WINDOW_MINUTES →
+   RELEITURA da linha (eco pode chegar na corrida; `rowAindaSemAceiteNoBanco`) e reenvio único
+   via reenviarMensagemNaoAceita com `{ aguardarAck: true }` — o novo message.id vai para
+   whatsapp_id mas a linha fica pending/sending até ACK (id de POST não prova envio);
+ - consulta FALHOU/inconclusiva → mantém o conservador (keep; erro só no teto de 60min).
+Só texto+link, só autor humano (chatbot nunca reenvia), mídia continua manual. Desligável por
+WHAPI_HISTORY_RESEND_ENABLED=false (e respeita PENDING_OUTBOUND_RESEND_ENABLED).
+Risco residual aceito: eco atrasado chegando entre a consulta e o POST do reenvio (janela ~1s,
+mitigada pela releitura) pode duplicar; o sweep roda a cada 5min, bounded pela janela de 30min.
+Testes: 7 casos novos em pendingOutboundReconciliation.test.js (cura, reenvio+pending, eco na
+corrida, consulta falhou, mídia, chatbot, id real fica pending). Suíte 2145/2145.
+
+### 2ª auditoria do reenvio automático (2026-10-06) — 1 corrida real corrigida + otimizações
+
+Validado por revisão adversarial + testes: idempotência (client_temp_id reusado em todas as
+tentativas), claim multi-aba, backoff/jitter, hydrate pós-F5, ciclo de imports
+conversaStore↔mediaOutbox (uso deferido — mesmo padrão de conversaOptimisticMessage/api-http),
+patchMensagem(null,{tempId}) aceito pelo guard do store.
+
+**Corrida corrigida (afetava TAMBÉM o reenvio UltraMSG pré-existente):** o timer diferido
+(90s pós-envio) e o sweep (5min) podiam reconciliar a MESMA linha em paralelo — ambos
+confirmavam a ausência no provedor e ambos reenviavam (janela = duração do sendText).
+Fix: lock em processo por mensagem em `reenviarMensagemNaoAceita` (`_reenviosEmAndamento`;
+PM2 = 1 instância fork, cobre o processo). Teste: dois reconciles concorrentes → 1 sendText
+(`keep_reenvio_em_andamento` no perdedor).
+
+Otimizações: cache de 45s do histórico Whapi por chat (rajada de N textos pendentes da mesma
+conversa = 1 GET, não N); backoff do auto-flush não infla em parada por concorrência
+(em_andamento/lock_outra_aba); `initMediaOutbox()` ansioso no load do módulo (bolha de mídia
+pendente aparece já na 1ª carga pós-F5, antes do hook montar).
+
+Limitação documentada: falha DEFINITIVA (4xx) de item da outbox marca a bolha como erro SEM
+id de banco → sem botão Reenviar (o conteúdo precisa ser reenviado pelo composer) — igual ao
+comportamento histórico do texto offline. Suíte 2146/2146.

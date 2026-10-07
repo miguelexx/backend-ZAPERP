@@ -388,11 +388,128 @@ async function despacharReenvioAoProvedor(row, telefone, usuarioNome) {
   return { skip: 'provider_sem_envio_midia' }
 }
 
+/** Tipos que o reenvio de TEXTO cobre (mesma lista do despacho). */
+function isTipoTextoReenviavel(tipo) {
+  const t = String(tipo || '').toLowerCase().trim()
+  return !t || ['texto', 'text', 'chat', 'link'].includes(t)
+}
+
+/** Liga/desliga a confirmacao+reenvio Whapi pelo historico do chat (default ligado). */
+function whapiHistoryResendEnabled() {
+  const raw = String(process.env.WHAPI_HISTORY_RESEND_ENABLED ?? 'true').trim().toLowerCase()
+  return !['0', 'false', 'no', 'off'].includes(raw)
+}
+
+/** Normaliza texto para comparacao exata (CRLF/espacos multiplos nao podem quebrar o match). */
+function normalizarTextoParaComparacao(s) {
+  return String(s ?? '').replace(/\r\n/g, '\n').replace(/\s+/g, ' ').trim()
+}
+
+/**
+ * Confirmacao de AUSENCIA/PRESENCA na Whapi pelo historico do chat (GET /messages/list/{ChatID}).
+ * A Whapi nao tem idempotencia nem referenceId no envio (confirmado no MCP/OpenAPI): para uma
+ * linha SEM nenhum id, o historico do chat e a unica fonte capaz de dizer se o texto saiu —
+ * o equivalente funcional da consulta por referenceId da UltraMSG.
+ *
+ * Match EXATO apenas (texto puro ou com o prefixo do atendente reconstruido): um endsWith
+ * frouxo poderia "curar" apontando para OUTRA mensagem nossa e esconder uma perda real.
+ */
+async function consultarHistoricoWhapiPorTexto({ row, provider, telefone, usuarioNome }) {
+  if (!provider?.getChatMessages) return { consultaOk: false }
+  const cacheKey = `${row.company_id}:${row.whatsapp_instance_id || 'default'}:${telefone}`
+  let res
+  const cached = _historicoWhapiCache.get(cacheKey)
+  if (cached && Date.now() - cached.ts < HISTORICO_CACHE_TTL_MS) {
+    res = cached.res
+  } else {
+    try {
+      res = await provider.getChatMessages(telefone, 30, null, {
+        companyId: row.company_id,
+        whatsappInstanceId: row.whatsapp_instance_id || undefined,
+        returnDetails: true,
+      })
+    } catch (_) {
+      return { consultaOk: false }
+    }
+    if (res?.ok === true && Array.isArray(res.data)) {
+      if (_historicoWhapiCache.size > 200) _historicoWhapiCache.clear()
+      _historicoWhapiCache.set(cacheKey, { ts: Date.now(), res })
+    }
+  }
+  if (res?.ok !== true || !Array.isArray(res.data)) return { consultaOk: false }
+
+  const textoPuro = normalizarTextoParaComparacao(row.texto)
+  if (!textoPuro) return { consultaOk: true, encontrado: false }
+  const alvos = new Set([textoPuro])
+  try {
+    const comNome = normalizarTextoParaComparacao(
+      formatTextoWhatsappComNomeAtendente(String(row.texto || '').trim(), usuarioNome)
+    )
+    if (comNome) alvos.add(comNome)
+  } catch (_) { /* sem nome: compara so o texto puro */ }
+
+  const criadoMs = Date.parse(String(row.criado_em || ''))
+  const desdeSeg = Number.isFinite(criadoMs) ? Math.floor((criadoMs - 2 * 60_000) / 1000) : 0
+
+  for (const m of res.data) {
+    const fromMe = m?.from_me === true || m?.fromMe === true
+    if (!fromMe) continue
+    const tsRaw = Number(m?.timestamp) || 0
+    const tsSeg = tsRaw > 1e12 ? Math.floor(tsRaw / 1000) : tsRaw
+    if (desdeSeg && tsSeg && tsSeg < desdeSeg) continue
+    const corpo = normalizarTextoParaComparacao(m?.body ?? m?.text?.body ?? '')
+    if (corpo && alvos.has(corpo)) {
+      return { consultaOk: true, encontrado: true, mensagem: m }
+    }
+  }
+  return { consultaOk: true, encontrado: false }
+}
+
+/**
+ * Lock em processo por mensagem durante o REENVIO: o timer diferido (90s pós-envio) e o
+ * sweep (5min) podem processar a MESMA linha em paralelo — ambos confirmavam a ausência,
+ * ambos passavam na releitura (janela = duração do sendText) e o cliente recebia em dobro.
+ * PM2 roda 1 instância (fork), então o Set cobre o processo inteiro.
+ */
+const _reenviosEmAndamento = new Set()
+
+/** Cache curto do histórico Whapi por chat: N textos pendentes da MESMA conversa num ciclo
+ * (rajada durante outage) viravam N GETs idênticos — 1 basta. */
+const _historicoWhapiCache = new Map()
+const HISTORICO_CACHE_TTL_MS = 45_000
+
+/** Releitura minima da linha antes de reenviar: o eco from_me pode ter chegado na corrida. */
+async function rowAindaSemAceiteNoBanco(row) {
+  const { data, error } = await supabase
+    .from('mensagens')
+    .select('id, status, status_mensagem, whatsapp_id, provider_queue_id')
+    .eq('company_id', row.company_id)
+    .eq('id', row.id)
+    .maybeSingle()
+  if (error || !data) return false
+  const st = String(data.status_mensagem || data.status || '').toLowerCase()
+  if (!['pending', 'sending'].includes(st)) return false
+  return provedorNuncaAceitou(data)
+}
+
 /**
  * Reenvia mensagem que o provedor nunca aceitou. Chamado somente apos confirmar,
  * consultando a API, que o UltraMSG nao tem registro dela.
  */
-async function reenviarMensagemNaoAceita(row, io) {
+async function reenviarMensagemNaoAceita(row, io, { aguardarAck = false } = {}) {
+  const lockKey = `${row.company_id}:${row.id}`
+  if (_reenviosEmAndamento.has(lockKey)) {
+    return { ok: true, action: 'keep_reenvio_em_andamento' }
+  }
+  _reenviosEmAndamento.add(lockKey)
+  try {
+    return await _reenviarMensagemNaoAceitaInterno(row, io, { aguardarAck })
+  } finally {
+    _reenviosEmAndamento.delete(lockKey)
+  }
+}
+
+async function _reenviarMensagemNaoAceitaInterno(row, io, { aguardarAck = false } = {}) {
   const { data: conversa } = await supabase
     .from('conversas')
     .select('id, telefone')
@@ -442,9 +559,12 @@ async function reenviarMensagemNaoAceita(row, io) {
     return patchMessage(row, { status: 'erro', status_mensagem: 'failed' }, io)
   }
 
+  // Whapi (aguardarAck): o message.id do POST NÃO prova envio — guarda o id para o ACK/GET
+  // reconciliar, mas a linha permanece pending/sending até confirmação (contrato do doc 25).
+  const confirmaEnvio = hasValidId && !aguardarAck
   const updates = {
-    status: hasValidId ? 'sent' : 'pending',
-    status_mensagem: hasValidId ? 'sent' : 'sending',
+    status: confirmaEnvio ? 'sent' : 'pending',
+    status_mensagem: confirmaEnvio ? 'sent' : 'sending',
     ...(hasValidId ? { whatsapp_id: waMessageId } : {}),
     ...(hasQueueId ? { provider_queue_id: waMessageId } : {}),
   }
@@ -521,6 +641,61 @@ async function reconcilePendingOutboundMessage(row, { io = null, force = false }
   // Whapi: 404/ausencia pode ser consistencia eventual, retencao da API ou ID
   // ainda nao indexado. Nunca reenviar nem promover para sent sem ACK explicito.
   if (isWhapi && provedorSemRegistro) {
+    // TEXTO humano SEM nenhum id (POST falhou/timeout): a Whapi nao tem referenceId, mas o
+    // HISTORICO do chat confirma presenca/ausencia. Presenca → cura (adota id, marca sent).
+    // Ausencia CONFIRMADA dentro da janela → reenvio automatico pelo caminho ja existente
+    // (reenviarMensagemNaoAceita), com releitura da linha antes (eco pode chegar na corrida).
+    // Consulta falhada/inconclusiva → mantem o comportamento conservador abaixo.
+    if (
+      provedorNuncaAceitou(row) &&
+      currentStatus !== 'sent' &&
+      row.autor_usuario_id != null &&
+      isTipoTextoReenviavel(row.tipo) &&
+      whapiHistoryResendEnabled() &&
+      isResendEnabled()
+    ) {
+      const { data: convReenvio } = await supabase
+        .from('conversas')
+        .select('id, telefone')
+        .eq('company_id', row.company_id)
+        .eq('id', row.conversa_id)
+        .maybeSingle()
+      const telefoneReenvio = String(convReenvio?.telefone || '').trim()
+      if (telefoneReenvio && !telefoneReenvio.toLowerCase().startsWith('lid:')) {
+        const provider = getProvider({ provider: instanceProvider })
+        const usuarioNome = await nomeAtendenteParaEnvio(row.company_id, row.autor_usuario_id)
+        const hist = await consultarHistoricoWhapiPorTexto({
+          row, provider, telefone: telefoneReenvio, usuarioNome,
+        })
+        if (hist.consultaOk && hist.encontrado) {
+          const waId = String(hist.mensagem?.id || '').trim()
+          console.log('[pendingOutboundReconciliation] whapi: texto encontrado no historico do chat — curando sem reenviar', {
+            mensagem_id: row.id,
+            company_id: row.company_id,
+            conversa_id: row.conversa_id,
+            whatsapp_id_tail: waId.slice(-12) || null,
+          })
+          const patched = await patchMessage(row, {
+            status: 'sent',
+            status_mensagem: 'sent',
+            ...(isRealWhatsAppId(waId) ? { whatsapp_id: waId } : {}),
+          }, io)
+          return { ...patched, action: patched.ok ? 'whapi_curada_pelo_historico' : patched.action }
+        }
+        if (hist.consultaOk && !hist.encontrado && ageMs <= getResendWindowMs()) {
+          // Ausencia confirmada pelo provedor + releitura fresca da linha = reenvio seguro.
+          if (await rowAindaSemAceiteNoBanco(row)) {
+            const r = await reenviarMensagemNaoAceita(row, io, { aguardarAck: true })
+            return {
+              ...r,
+              action: r.action === 'reenviada' ? 'whapi_reenviada_apos_confirmacao_historico' : r.action,
+            }
+          }
+          return { ok: true, action: 'keep_whapi_eco_na_corrida' }
+        }
+        // consulta falhou ou fora da janela de reenvio → segue o fluxo conservador abaixo
+      }
+    }
     // Linha SEM nenhum id do provedor (POST falhou/exceção de transporte): não há o que
     // consultar nem indexar — a única salvação seria o eco from_me do webhook, que já teria
     // chegado. Após a janela de falha, vira erro em vez de relógio eterno (espelha o
@@ -730,5 +905,9 @@ module.exports = {
     provedorNuncaAceitou,
     urlPublicaDeMidia,
     captionUsuarioDeMidia,
+    isTipoTextoReenviavel,
+    normalizarTextoParaComparacao,
+    consultarHistoricoWhapiPorTexto,
+    whapiHistoryResendEnabled,
   },
 }

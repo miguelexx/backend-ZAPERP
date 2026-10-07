@@ -851,9 +851,13 @@ function normalizeWhapiMessageToInternal(m, ctx = {}) {
         vCard: m.contact.vcard || m.contact.vCard || null,
       }
     : undefined
-  // Vários contatos de uma vez: Whapi envia type "contacts" com array m.contacts [{ name, vcard }].
-  const contactsArraySrc = (Array.isArray(m.contacts) && m.contacts.length) ? m.contacts
-    : ((type === 'contact' && Array.isArray(m.contact?.contacts)) ? m.contact.contacts : null)
+  // Vários contatos de uma vez: Whapi envia type "contact_list" com contact_list.list [{ name, vcard }].
+  // Fallbacks: type "contacts" / m.contacts / contact.contacts (formatos antigos ou de outros provedores).
+  const contactListRaw = Array.isArray(m.contact_list?.list) ? m.contact_list.list
+    : (Array.isArray(m.contact_list) ? m.contact_list : null)
+  const contactsArraySrc = (contactListRaw && contactListRaw.length) ? contactListRaw
+    : ((Array.isArray(m.contacts) && m.contacts.length) ? m.contacts
+      : ((type === 'contact' && Array.isArray(m.contact?.contacts)) ? m.contact.contacts : null))
   const contactsArray = contactsArraySrc
     ? contactsArraySrc
         .map((cc) => (cc && typeof cc === 'object')
@@ -878,7 +882,7 @@ function normalizeWhapiMessageToInternal(m, ctx = {}) {
     : (type === 'poll') ? 'poll'
     : (type === 'live_location') ? 'location'
     : (type === 'gif' || type === 'short') ? 'video'
-    : (type === 'contacts') ? 'contact'
+    : (type === 'contacts' || type === 'contact_list' || (contactsArray && contactsArray.length > 1)) ? 'contact'
     : type
 
   return {

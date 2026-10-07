@@ -358,6 +358,31 @@ describe('extractMessage', () => {
     expect(r.type).toBe('contact')
     expect(r.texto).toBe('João Silva')
     expect(r.contactMeta).toMatchObject({ nome: 'João Silva', telefone: '5511888888888' })
+    expect(r.contactMeta.contatos).toBeUndefined()
+  })
+
+  test('contact_list (2+ contatos) → um cartão com contatos[]', () => {
+    const r = extractMessage({
+      ...BASE,
+      type: 'contact_list',
+      contact_list: {
+        list: [
+          {
+            name: 'Mixd Eduardo',
+            vcard: 'BEGIN:VCARD\nVERSION:3.0\nFN:Mixd Eduardo\nTEL;type=CELL;waid=5534991112222:+55 34 99111-2222\nEND:VCARD',
+          },
+          {
+            name: 'Ana Souza',
+            vcard: 'BEGIN:VCARD\nVERSION:3.0\nFN:Ana Souza\nTEL;type=CELL;waid=5534993334444:+55 34 99333-4444\nEND:VCARD',
+          },
+        ],
+      },
+    })
+    expect(r.type).toBe('contact')
+    expect(r.texto).toBe('Mixd Eduardo e 1 outro contato')
+    expect(r.contactMeta.contatos).toHaveLength(2)
+    expect(r.contactMeta.contatos[0]).toMatchObject({ nome: 'Mixd Eduardo', telefone: '5534991112222' })
+    expect(r.contactMeta.contatos[1]).toMatchObject({ nome: 'Ana Souza', telefone: '5534993334444' })
   })
 
   test('mensagem de grupo — isGroup, participantPhone, nomeGrupo', () => {

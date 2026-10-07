@@ -79,14 +79,23 @@ describe('reenvio automatico de pendentes', () => {
   const IDADE_DENTRO_JANELA = () => new Date(Date.now() - 10 * 60_000).toISOString()
   const IDADE_FORA_JANELA = () => new Date(Date.now() - 45 * 60_000).toISOString()
 
-  function montarAmbiente({ getMessagesResult, getMessagesImpl, providerName = 'ultramsg', conversa = { id: 2, telefone: '5511999999999' } }) {
+  function montarAmbiente({
+    getMessagesResult,
+    getMessagesImpl,
+    providerName = 'ultramsg',
+    conversa = { id: 2, telefone: '5511999999999' },
+    chatHistory = null, // { ok, data } de getChatMessages (confirmação Whapi pelo histórico)
+    mensagemNoBanco = null, // linha devolvida na releitura pré-reenvio (rowAindaSemAceiteNoBanco)
+  }) {
     jest.resetModules()
 
     const sendText = jest.fn(async () => ({ ok: true, messageId: '35097' }))
     const getMessages = jest.fn(getMessagesImpl || (async () => getMessagesResult))
+    const getChatMessages = jest.fn(async () => chatHistory ?? { ok: false, data: [] })
     jest.doMock('../services/providers', () => ({
       getProvider: () => ({
         getMessages,
+        getChatMessages,
         sendText,
         getConnectionStatus: async () => ({ configured: true, connected: true }),
       }),
@@ -117,6 +126,7 @@ describe('reenvio automatico de pendentes', () => {
             }
             if (table === 'conversas') return { data: conversa, error: null }
             if (table === 'usuarios') return { data: { nome: 'Miguel', mostrar_nome_ao_cliente: true }, error: null }
+            if (table === 'mensagens') return { data: mensagemNoBanco, error: null }
             return { data: null, error: null }
           },
         }
@@ -125,7 +135,7 @@ describe('reenvio automatico de pendentes', () => {
     }))
 
     const svc = require('../services/pendingOutboundReconciliationService')
-    return { svc, sendText, getMessages, updates }
+    return { svc, sendText, getMessages, getChatMessages, updates }
   }
 
   function linhaPendente(extra = {}) {
@@ -311,6 +321,148 @@ describe('reenvio automatico de pendentes', () => {
     expect(sendText).not.toHaveBeenCalled()
     expect(updates[0]).toMatchObject({ status: 'erro', status_mensagem: 'failed' })
     expect(res.action).toBe('patched')
+  })
+
+  test('Whapi TEXTO sem id: encontrado no HISTÓRICO do chat → cura (sent + id) sem reenviar', async () => {
+    const { svc, sendText, getChatMessages, updates } = montarAmbiente({
+      providerName: 'whapi',
+      getMessagesResult: { ok: true, data: [] },
+      chatHistory: {
+        ok: true,
+        data: [
+          { id: 'OUTRA123', from_me: true, body: 'outra coisa', timestamp: Math.floor(Date.now() / 1000) },
+          { id: 'WhapiHistMsgId4567890123', from_me: true, body: 'Bom dia, segue o retorno', timestamp: Math.floor(Date.now() / 1000) },
+          { id: 'INBOUND1', from_me: false, body: 'Bom dia, segue o retorno', timestamp: Math.floor(Date.now() / 1000) },
+        ],
+      },
+    })
+
+    const res = await svc.reconcilePendingOutboundMessage(linhaPendente(), { io: null })
+
+    expect(getChatMessages).toHaveBeenCalledTimes(1)
+    expect(sendText).not.toHaveBeenCalled()
+    expect(res.action).toBe('whapi_curada_pelo_historico')
+    expect(updates[0]).toMatchObject({ status: 'sent', status_mensagem: 'sent', whatsapp_id: 'WhapiHistMsgId4567890123' })
+  })
+
+  test('Whapi TEXTO sem id: AUSÊNCIA confirmada no histórico → reenvia 1x (releitura antes)', async () => {
+    const { svc, sendText, updates } = montarAmbiente({
+      providerName: 'whapi',
+      getMessagesResult: { ok: true, data: [] },
+      chatHistory: { ok: true, data: [{ id: 'X', from_me: true, body: 'outro texto', timestamp: Math.floor(Date.now() / 1000) }] },
+      mensagemNoBanco: { id: 1, status: 'pending', status_mensagem: 'sending', whatsapp_id: null, provider_queue_id: null },
+    })
+
+    const res = await svc.reconcilePendingOutboundMessage(linhaPendente(), { io: null })
+
+    expect(sendText).toHaveBeenCalledTimes(1)
+    expect(res.action).toBe('whapi_reenviada_apos_confirmacao_historico')
+    expect(updates[0]).toMatchObject({ status: 'pending', provider_queue_id: '35097' })
+  })
+
+  test('reconciles CONCORRENTES da mesma linha (deferred × sweep) reenviam UMA vez só', async () => {
+    const { svc, sendText } = montarAmbiente({
+      providerName: 'whapi',
+      getMessagesResult: { ok: true, data: [] },
+      chatHistory: { ok: true, data: [] },
+      mensagemNoBanco: { id: 1, status: 'pending', status_mensagem: 'sending', whatsapp_id: null, provider_queue_id: null },
+    })
+    // sendText lento: abre a janela em que a 2ª reconciliação chegava antes do patch da 1ª.
+    sendText.mockImplementation(
+      () => new Promise((resolve) => setTimeout(() => resolve({ ok: true, messageId: '35097' }), 120))
+    )
+
+    const [a, b] = await Promise.all([
+      svc.reconcilePendingOutboundMessage(linhaPendente(), { io: null }),
+      svc.reconcilePendingOutboundMessage(linhaPendente(), { io: null }),
+    ])
+
+    expect(sendText).toHaveBeenCalledTimes(1)
+    const acoes = [a.action, b.action].sort()
+    expect(acoes).toContain('whapi_reenviada_apos_confirmacao_historico')
+    expect(acoes).toContain('keep_reenvio_em_andamento')
+  })
+
+  test('Whapi TEXTO reenviado com message.id REAL fica pending (id do POST não prova envio)', async () => {
+    const { svc, sendText, updates } = montarAmbiente({
+      providerName: 'whapi',
+      getMessagesResult: { ok: true, data: [] },
+      chatHistory: { ok: true, data: [] },
+      mensagemNoBanco: { id: 1, status: 'pending', status_mensagem: 'sending', whatsapp_id: null, provider_queue_id: null },
+    })
+    sendText.mockResolvedValueOnce({ ok: true, messageId: 'WhapiNovoMsgId4567890123', provider: 'whapi', ackConfirmed: false })
+
+    const res = await svc.reconcilePendingOutboundMessage(linhaPendente(), { io: null })
+
+    expect(res.action).toBe('whapi_reenviada_apos_confirmacao_historico')
+    expect(updates[0]).toMatchObject({
+      status: 'pending',
+      status_mensagem: 'sending',
+      whatsapp_id: 'WhapiNovoMsgId4567890123',
+    })
+  })
+
+  test('Whapi TEXTO sem id: eco chegou na CORRIDA (releitura já tem id) → não reenvia', async () => {
+    const { svc, sendText } = montarAmbiente({
+      providerName: 'whapi',
+      getMessagesResult: { ok: true, data: [] },
+      chatHistory: { ok: true, data: [] },
+      mensagemNoBanco: { id: 1, status: 'pending', status_mensagem: 'sending', whatsapp_id: 'WhapiEcoMsgId45678901234', provider_queue_id: null },
+    })
+
+    const res = await svc.reconcilePendingOutboundMessage(linhaPendente(), { io: null })
+
+    expect(sendText).not.toHaveBeenCalled()
+    expect(res.action).toBe('keep_whapi_eco_na_corrida')
+  })
+
+  test('Whapi TEXTO sem id: consulta ao histórico FALHOU → mantém conservador, sem reenviar', async () => {
+    const { svc, sendText } = montarAmbiente({
+      providerName: 'whapi',
+      getMessagesResult: { ok: true, data: [] },
+      chatHistory: { ok: false, data: [] },
+      mensagemNoBanco: { id: 1, status: 'pending', status_mensagem: 'sending', whatsapp_id: null, provider_queue_id: null },
+    })
+
+    const res = await svc.reconcilePendingOutboundMessage(linhaPendente(), { io: null })
+
+    expect(sendText).not.toHaveBeenCalled()
+    expect(res.action).toBe('keep_whapi_unconfirmed')
+  })
+
+  test('Whapi MÍDIA sem id: nunca consulta histórico nem reenvia (match por texto não se aplica)', async () => {
+    const { svc, sendText, getChatMessages } = montarAmbiente({
+      providerName: 'whapi',
+      getMessagesResult: { ok: true, data: [] },
+      chatHistory: { ok: true, data: [] },
+      mensagemNoBanco: { id: 1, status: 'pending', status_mensagem: 'sending', whatsapp_id: null, provider_queue_id: null },
+    })
+
+    const res = await svc.reconcilePendingOutboundMessage(
+      linhaPendente({ tipo: 'voice', texto: '(áudio de voz)', url: '/uploads/a.ogg' }),
+      { io: null }
+    )
+
+    expect(getChatMessages).not.toHaveBeenCalled()
+    expect(sendText).not.toHaveBeenCalled()
+    expect(res.action).toBe('keep_whapi_unconfirmed')
+  })
+
+  test('Whapi chatbot (autor null) sem id: não consulta histórico nem reenvia', async () => {
+    const { svc, sendText, getChatMessages } = montarAmbiente({
+      providerName: 'whapi',
+      getMessagesResult: { ok: true, data: [] },
+      chatHistory: { ok: true, data: [] },
+    })
+
+    const res = await svc.reconcilePendingOutboundMessage(
+      linhaPendente({ autor_usuario_id: null }),
+      { io: null }
+    )
+
+    expect(getChatMessages).not.toHaveBeenCalled()
+    expect(sendText).not.toHaveBeenCalled()
+    expect(res.action).toBe('keep_whapi_unconfirmed')
   })
 
   test('Whapi COM id após a janela de falha continua kept (retenção/indexação do provedor)', async () => {

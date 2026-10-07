@@ -25,6 +25,30 @@ describe('Whapi webhook — normalização e dispatch', () => {
     return r
   }
 
+  test('contact_list vira um contato com a lista inteira', () => {
+    const m = controller._test.normalizeWhapiMessageToInternal(
+      {
+        id: 'wamid.clist',
+        from_me: false,
+        type: 'contact_list',
+        chat_id: '5534988887777@s.whatsapp.net',
+        from_name: 'Cliente',
+        timestamp: 1700000000,
+        contact_list: {
+          list: [
+            { name: 'Mixd Eduardo', vcard: 'BEGIN:VCARD\nFN:Mixd Eduardo\nTEL;waid=5534991112222:+5534991112222\nEND:VCARD' },
+            { name: 'Ana Souza', vcard: 'BEGIN:VCARD\nFN:Ana Souza\nTEL;waid=5534993334444:+5534993334444\nEND:VCARD' },
+          ],
+        },
+      },
+      { channelId: 'NEBULA-AER3B', connectedPhone: '553433334444' }
+    )
+    expect(m.type).toBe('contact')
+    expect(m.contacts).toHaveLength(2)
+    expect(m.contacts[0].displayName).toBe('Mixd Eduardo')
+    expect(m.contacts[1].vCard).toContain('Ana Souza')
+  })
+
   test('normaliza inbound texto privado', () => {
     const m = controller._test.normalizeWhapiMessageToInternal(
       { id: 'wamid.1', from_me: false, type: 'text', chat_id: '5534988887777@s.whatsapp.net', from_name: 'Cliente', text: { body: 'oi' }, timestamp: 1700000000 },
