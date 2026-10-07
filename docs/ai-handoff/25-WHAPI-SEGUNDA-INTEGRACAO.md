@@ -1012,3 +1012,33 @@ Recomendações anotadas (NÃO aplicadas — exigem validação em produção):
   Whapi); um limite de concorrência seria prudente se surgirem picos de memória.
 - `enrichMensagemComAutorUsuario` consulta o autor por arquivo (lookup por PK, barato);
   hoistear exigiria mexer em helper compartilhado — não vale o risco hoje.
+
+### 2026-10-07 (parte 4) — Auditoria avançada estabilidade/velocidade (prioridade Whapi)
+
+Varredura dos caminhos quentes; veredito: arquitetura sólida. Verificados LIMPOS:
+- Webhook /webhooks/whapi: design forense intencional (responde após processar; 500 → Whapi
+  reentrega + idempotência por whatsapp_id; guarda anti-histórico com janela de recuperação
+  ≤60min consultando o banco só para itens recentes). Custo por item limitado (mídia = backfill).
+- Sweep de reconciliação: batch 50 (env PENDING_OUTBOUND_RECONCILE_BATCH_LIMIT, máx 200),
+  ordenado por criado_em, caches TTL, lock por linha.
+- whatsappSendGuardService: pacing por instância (automation 1500ms default), Maps de
+  cardinalidade pequena (inst/company) — sem vazamento.
+- Índices quentes de `mensagens` JÁ existem em migrations (idx_mensagens_company_whatsapp_id
+  p/ ACK, idx_mensagens_out_sem_whatsapp p/ sweep, conversa+criado, trgm) — exigem migrations aplicadas.
+- Frontend: poll whapi-status 60s (pausa aba oculta, 2 confirmações), presença HTTP off por default.
+
+MELHORIA APLICADA: `middleware/resolveWhapiWebhookCompany.js` ganhou cache TTL 30s (máx 300
+entradas) das resoluções channel_id→instância BEM-SUCEDIDAS — o Whapi posta um webhook por
+mensagem/ACK/presença e cada POST fazia o mesmo SELECT. Erro de banco/não-mapeado/duplicado
+nunca entram no cache; chave exata por canal (sem risco cross-tenant); rotação de token/metadata
+propaga em ≤30s. Testes: tests/resolveWhapiWebhookCompanyCache.test.js (5 casos).
+
+RECOMENDAÇÕES OPERACIONAIS (nada de código):
+1. Deploy (pull + restart PM2) — ativa todas as blindagens das partes 1–3.
+2. Rodar o SQL de índices do doc 29 no Supabase Editor (atendimentos×2, conversas, unreads).
+3. Env `WHAPI_INBOUND_MAX_AGE_MINUTES=10` (anti-backlog fantasma — ainda não setada).
+4. NUNCA ativar cluster no PM2: dedupe/locks/caches são em memória de processo único (incl.
+   este cache novo e o _reenviosEmAndamento) — 2 forks quebrariam as garantias anti-duplicata.
+5. Gzip/brotli para application/json no nginx à frente do zapapi (payloads de /chats em mobile);
+   preferível a adicionar dependência `compression` no Express.
+6. Futuro: mesmo padrão de cache no resolveWebhookCompany do UltraMSG (não mexido — prioridade Whapi).

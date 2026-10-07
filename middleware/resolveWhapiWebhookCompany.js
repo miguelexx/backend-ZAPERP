@@ -12,6 +12,35 @@ const { getWhatsappInstanceByProviderInstanceId } = require('../services/whatsap
 
 const PROVIDER = 'whapi'
 
+/**
+ * Cache TTL curto de resoluções BEM-SUCEDIDAS channel_id→instância. O Whapi posta um
+ * webhook a cada mensagem/ACK/presença — sem cache, cada POST fazia o mesmo SELECT.
+ * 30s equilibra frescor (rotação de token/metadata propaga em até 30s) e alívio no banco.
+ * Erro de banco / canal não mapeado / duplicado NUNCA entram no cache (retry imediato),
+ * e a chave é o channel_id exato — impossível cruzar tenant.
+ */
+const _resolveOkCache = new Map()
+const RESOLVE_CACHE_TTL_MS = 30_000
+const RESOLVE_CACHE_MAX = 300
+
+function cacheGetInstance(channelId) {
+  const hit = _resolveOkCache.get(channelId)
+  if (!hit) return null
+  if (Date.now() > hit.exp) {
+    _resolveOkCache.delete(channelId)
+    return null
+  }
+  return hit.instance
+}
+
+function cachePutInstance(channelId, instance) {
+  if (_resolveOkCache.size >= RESOLVE_CACHE_MAX) {
+    const oldest = _resolveOkCache.keys().next().value
+    if (oldest !== undefined) _resolveOkCache.delete(oldest)
+  }
+  _resolveOkCache.set(channelId, { instance, exp: Date.now() + RESOLVE_CACHE_TTL_MS })
+}
+
 function _logSafe(entry) {
   console.log('[WEBHOOK_WHAPI]', JSON.stringify({ ts: new Date().toISOString(), ...entry }))
 }
@@ -37,9 +66,12 @@ async function resolveWhapiWebhookCompany(req, res, next) {
       return res.status(200).json({ ok: true, ignored: 'missing_channel_id' })
     }
 
-    const resolved = await getWhatsappInstanceByProviderInstanceId(PROVIDER, channelIdRaw, {
-      allowLegacyFallback: false,
-    })
+    const cachedInstance = cacheGetInstance(channelIdRaw)
+    const resolved = cachedInstance
+      ? { instance: cachedInstance }
+      : await getWhatsappInstanceByProviderInstanceId(PROVIDER, channelIdRaw, {
+          allowLegacyFallback: false,
+        })
 
     if (resolved?.code === 'DUPLICATE_PROVIDER_INSTANCE') {
       req.webhookLogData = { status: 'blocked_duplicate_instance', instance_id: channelIdRaw, provider: PROVIDER }
@@ -61,6 +93,9 @@ async function resolveWhapiWebhookCompany(req, res, next) {
 
     const instance = resolved?.instance || null
     const company_id = instance?.company_id ?? null
+    if (!cachedInstance && instance && company_id != null) {
+      cachePutInstance(channelIdRaw, instance)
+    }
 
     if (company_id == null) {
       req.webhookLogData = {
@@ -100,3 +135,7 @@ async function resolveWhapiWebhookCompany(req, res, next) {
 }
 
 module.exports = resolveWhapiWebhookCompany
+module.exports._test = {
+  clearResolveCache: () => _resolveOkCache.clear(),
+  cacheSize: () => _resolveOkCache.size,
+}

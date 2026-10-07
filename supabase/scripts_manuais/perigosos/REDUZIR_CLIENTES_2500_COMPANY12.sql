@@ -125,6 +125,7 @@ BEGIN
   SELECT cliente_id FROM ranked WHERE rn > v_manter;
 
   CREATE INDEX ON _cli_del (cliente_id);
+  GET DIAGNOSTICS v_qtd_cli = ROW_COUNT;  -- nota: ROW_COUNT do CREATE..AS
   SELECT COUNT(*) INTO v_qtd_cli FROM _cli_del;
 
   -- -------------------------------------------------------------------------
