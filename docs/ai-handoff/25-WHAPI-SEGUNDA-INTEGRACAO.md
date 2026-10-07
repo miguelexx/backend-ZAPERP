@@ -992,3 +992,23 @@ Auditoria do envio em LOTE (fototeca N fotos num único POST /chats/:id/arquivo)
 Residual observado (não alterado): os despachos ao provedor são `setImmediate` por arquivo —
 uploads podem rodar concorrentes (base64 em memória por upload Whapi). Escalonados pelos
 inserts +250ms; sem evidência de problema real. Suíte 206/2175 OK.
+
+### 2026-10-07 (parte 3) — 2ª auditoria do lote + otimização batchCtx
+
+2ª auditoria da parte 2 não encontrou bug novo. Otimização aplicada (velocidade do lote):
+`enviarArquivo` agora resolve UMA vez por lote os valores constantes — `empresaModoSimplesAtivo`,
+`getUsuarioParaEnvioCliente` (nome do atendente) e `resolveConversationProvider` — em
+`Promise.all`, passando `batchCtx` a `enviarArquivoProcessarUm` (fallback interno preserva o
+comportamento quando chamado sem contexto). Num lote de 30 fotos isso elimina ~90 consultas
+idênticas ao Supabase dentro do loop (fork único PM2), acelerando o despacho das fotos finais.
+`tryMarkWaitingAfterHumanOutbound`/`recalcularEMesclarModoSimples` continuam POR ARQUIVO
+(semântica por mensagem). Suíte 206/2175 OK.
+
+Recomendações anotadas (NÃO aplicadas — exigem validação em produção):
+- `normalizeImageForWhatsapp` reconverte até JPEG já compatível (ffmpeg por foto). Pular
+  re-encode para `image/jpeg` economizaria CPU/latência, mas arrisca regressão de
+  compatibilidade/orientação EXIF — só mudar com teste em aparelhos reais.
+- Uploads do lote ao provedor rodam concorrentes via setImmediate (base64 em RAM no caso
+  Whapi); um limite de concorrência seria prudente se surgirem picos de memória.
+- `enrichMensagemComAutorUsuario` consulta o autor por arquivo (lookup por PK, barato);
+  hoistear exigiria mexer em helper compartilhado — não vale o risco hoje.

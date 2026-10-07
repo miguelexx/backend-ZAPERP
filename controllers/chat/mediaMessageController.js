@@ -51,7 +51,7 @@ const MAX_MEDIA_CAPTION_CHARS = 1024
  * Uma unidade de upload após multer; conversa e telefone já validados.
  * @returns {Promise<{ ok: true, msg: object } | { ok: false, status: number, error: string }>}
  */
-async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conversa_id, telefoneParaEnvio, whatsappInstanceId = null, io, captionUsuario = '', clientTempId = null, permEnvio = null }) {
+async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conversa_id, telefoneParaEnvio, whatsappInstanceId = null, io, captionUsuario = '', clientTempId = null, permEnvio = null, batchCtx = null }) {
   const { extFromOriginalName, isBlockedRiskExtension, blockedUploadErrorMessage } = require('../../middleware/upload')
   clientTempId = normalizeClientTempId(clientTempId)
   if (clientTempId) {
@@ -272,7 +272,13 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
       scheduleR2MirrorIfNeeded({ supabase, io, company_id, mensagem_id: msg.id })
     } catch (_) { /* espelhamento é best-effort; nunca afeta o envio */ }
 
-    const modoSimplesEnvio = await empresaModoSimplesAtivo(company_id).catch(() => false)
+    // Valores constantes por lote (mesma empresa/usuário/instância): o chamador calcula uma
+    // vez e passa em batchCtx — sem isto, um lote de 30 fotos refazia ~3 consultas idênticas
+    // por arquivo. O fallback mantém o comportamento para chamadas sem contexto.
+    const modoSimplesEnvio =
+      typeof batchCtx?.modoSimplesEnvio === 'boolean'
+        ? batchCtx.modoSimplesEnvio
+        : await empresaModoSimplesAtivo(company_id).catch(() => false)
     const timestampAtividade = new Date().toISOString()
 
     const [waitingAfterOutbound, modoSimplesResult] = await Promise.all([
@@ -380,8 +386,14 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
       }
     }
 
-    const { nome: usuarioNome } = await getUsuarioParaEnvioCliente(supabase, company_id, user_id)
-    const instanceProvider = await resolveConversationProvider(company_id, whatsappInstanceId)
+    const usuarioNome =
+      batchCtx && 'usuarioNome' in batchCtx
+        ? batchCtx.usuarioNome
+        : (await getUsuarioParaEnvioCliente(supabase, company_id, user_id)).nome
+    const instanceProvider =
+      batchCtx && 'instanceProvider' in batchCtx
+        ? batchCtx.instanceProvider
+        : await resolveConversationProvider(company_id, whatsappInstanceId)
     const provider = getProvider({ provider: instanceProvider })
     const waCaption = captionWhatsappParaMidia({
       tipo,
@@ -668,6 +680,19 @@ exports.enviarArquivo = async (req, res) => {
       .trim()
       .slice(0, MAX_MEDIA_CAPTION_CHARS)
     const clientTempIds = parseClientTempIdsFromBody(req.body, files.length)
+
+    // Constantes do lote (mesma empresa/usuário/instância para todos os arquivos):
+    // resolve uma vez em vez de uma consulta por arquivo dentro do loop.
+    const [modoSimplesEnvio, usuarioEnvio, instanceProvider] = await Promise.all([
+      empresaModoSimplesAtivo(company_id).catch(() => false),
+      getUsuarioParaEnvioCliente(supabase, company_id, user_id),
+      resolveConversationProvider(company_id, whatsappInstanceId),
+    ])
+    const batchCtx = {
+      modoSimplesEnvio: modoSimplesEnvio === true,
+      usuarioNome: usuarioEnvio?.nome,
+      instanceProvider,
+    }
     const ids = []
     const results = []
     let avisoWhatsapp = null
@@ -697,6 +722,7 @@ exports.enviarArquivo = async (req, res) => {
           captionUsuario: perFileCaption,
           clientTempId,
           permEnvio,
+          batchCtx,
         })
       } catch (e) {
         console.error('[ENVIO_MIDIA] exceção ao processar arquivo do lote:', {
