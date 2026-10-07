@@ -568,10 +568,18 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
               }
             } catch (e) {
               console.error('WhatsApp uploadMedia:', e)
-              await supabase.from('mensagens').update({ status: 'erro', status_mensagem: 'erro' }).eq('company_id', company_id).eq('id', msg.id)
-              const io2 = req.app?.get('io')
-              if (io2) {
-                io2.to(`empresa_${company_id}`).to(`conversa_${conversa_id}`).to(`usuario_${user_id}`).emit(io2.EVENTS?.STATUS_MENSAGEM || 'status_mensagem', { mensagem_id: msg.id, conversa_id: Number(conversa_id), status: 'erro', status_mensagem: 'erro' })
+              // Upload não dispara mensagem: exceção aqui significa que NADA foi enviado ainda.
+              // Mesmo fallback do ramo de falha "limpa" — tenta a URL pública antes de desistir,
+              // evitando erro definitivo por instabilidade momentânea no upload ao CDN.
+              if (tipo !== 'video' && fullUrl && !isLocalhost) {
+                console.warn('[ULTRAMSG] Exceção no upload; tentando fallback com URL pública do backend.')
+                sendMediaWithUrl(fullUrl)
+              } else {
+                await supabase.from('mensagens').update({ status: 'erro', status_mensagem: 'erro' }).eq('company_id', company_id).eq('id', msg.id)
+                const io2 = req.app?.get('io')
+                if (io2) {
+                  io2.to(`empresa_${company_id}`).to(`conversa_${conversa_id}`).to(`usuario_${user_id}`).emit(io2.EVENTS?.STATUS_MENSAGEM || 'status_mensagem', { mensagem_id: msg.id, conversa_id: Number(conversa_id), status: 'erro', status_mensagem: 'erro' })
+                }
               }
             }
           })
@@ -675,17 +683,29 @@ exports.enviarArquivo = async (req, res) => {
       const perFileCaption = i === 0 ? captionFromBody : ''
       const clientTempId = clientTempIds[i] || null
 
-      const r = await enviarArquivoProcessarUm(req, raw, {
-        company_id,
-        user_id,
-        conversa_id,
-        telefoneParaEnvio,
-        whatsappInstanceId,
-        io,
-        captionUsuario: perFileCaption,
-        clientTempId,
-        permEnvio,
-      })
+      // Exceção inesperada num arquivo não pode derrubar o LOTE: sem este catch, os
+      // arquivos seguintes nunca seriam processados e o frontend marcaria tudo como falha.
+      let r
+      try {
+        r = await enviarArquivoProcessarUm(req, raw, {
+          company_id,
+          user_id,
+          conversa_id,
+          telefoneParaEnvio,
+          whatsappInstanceId,
+          io,
+          captionUsuario: perFileCaption,
+          clientTempId,
+          permEnvio,
+        })
+      } catch (e) {
+        console.error('[ENVIO_MIDIA] exceção ao processar arquivo do lote:', {
+          index: i,
+          arquivo: String(raw?.originalname || '').slice(0, 80),
+          erro: e?.message || e,
+        })
+        r = { ok: false, status: 500, error: 'Erro interno ao processar este arquivo.' }
+      }
       if (!r.ok) {
         hadFailure = true
         results.push({

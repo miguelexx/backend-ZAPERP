@@ -7,6 +7,7 @@
 const supabase = require('../../config/supabase')
 const { schedulePendingOutboundReconciliation } = require('../../services/pendingOutboundReconciliationService')
 const { mapProviderSendResult } = require('../../services/chat/outbound/providerResultMapper')
+const { isTransientOutboundFailure } = require('../../services/chat/outbound/outboundFailureClassifier')
 const { getProvider } = require('../../services/providers')
 const {
   avaliarElegibilidadeReenvio,
@@ -27,11 +28,26 @@ const { resolveForwardMediaForProvider } = require('../../services/chat/outbound
 const _reenviosEmAndamento = new Set()
 
 async function aplicarResultadoReenvio({ req, company_id, conversa_id, mensagem, result, tipoReenvio }) {
+  const normalizedResult = result && typeof result === 'object' ? result : { ok: result === true }
   const mappedResult = mapProviderSendResult(result, { failedStatusMensagem: 'failed' })
   const {
     ok, waMessageId, hasValidId, hasQueueId, providerError,
-    nextStatus, nextStatusMensagem,
   } = mappedResult
+  let { nextStatus, nextStatusMensagem, needsReconciliation } = mappedResult
+
+  // Falha transitória (timeout/rede/429/5xx) no reenvio manual não pode virar 'failed':
+  // o provedor PODE ter aceitado (timeout pós-aceite) e um novo clique duplicaria a
+  // mensagem no cliente. Mantém pending/sending + reconciliação (que consulta o provedor
+  // por crm-{id} antes de reenviar), igual aos caminhos de envio original.
+  const falhaTransitoria = !ok && isTransientOutboundFailure({
+    httpStatus: normalizedResult?.httpStatus,
+    transportError: normalizedResult?.transportError === true,
+  })
+  if (falhaTransitoria) {
+    nextStatus = 'pending'
+    nextStatusMensagem = 'sending'
+    needsReconciliation = true
+  }
 
   const patch = {
     status: nextStatus,
@@ -59,11 +75,11 @@ async function aplicarResultadoReenvio({ req, company_id, conversa_id, mensagem,
       })
   }
 
-  if (mappedResult.needsReconciliation) {
+  if (needsReconciliation) {
     schedulePendingOutboundReconciliation({ companyId: company_id, mensagemId: mensagem.id, io })
   }
 
-  console.log(`[REENVIO_MANUAL] ${ok ? '✅ aceito' : '❌ recusado'}`, {
+  console.log(`[REENVIO_MANUAL] ${ok ? '✅ aceito' : falhaTransitoria ? '⏳ não confirmado (reconciliação agendada)' : '❌ recusado'}`, {
     company_id,
     conversa_id: Number(conversa_id),
     mensagem_id: mensagem.id,
@@ -73,10 +89,13 @@ async function aplicarResultadoReenvio({ req, company_id, conversa_id, mensagem,
     ...(ok ? {} : { erro: String(providerError || '').slice(0, 200) || 'desconhecido' }),
   })
 
+  // Transitória responde ok:true com status pending: a bolha volta ao relógio (sem toast
+  // de falha) e a reconciliação resolve — mesmo contrato do envio original aceito sem ACK.
   return {
-    ok,
+    ok: ok || falhaTransitoria,
+    ...(falhaTransitoria ? { transient: true } : {}),
     mensagem: { ...mensagem, ...patch, conversa_id: Number(conversa_id) },
-    error: ok ? null : String(providerError || '').slice(0, 300) || 'O WhatsApp não confirmou o envio.',
+    error: ok || falhaTransitoria ? null : String(providerError || '').slice(0, 300) || 'O WhatsApp não confirmou o envio.',
   }
 }
 
@@ -176,13 +195,20 @@ exports.reenviarTextoMensagem = async (req, res) => {
       return res.status(503).json({ error: 'Envio de texto indisponível no provedor.', mensagem })
     }
 
-    const result = await provider.sendText(telefone, textoParaEnvioWhatsapp(texto, usuarioNome), {
-      companyId: company_id,
-      conversaId: conversa_id,
-      whatsappInstanceId: whatsappInstanceId || undefined,
-      referenceId: `crm-${mensagem.id}`,
-      sendOrigin: 'atendimento_humano_reenvio',
-    })
+    let result
+    try {
+      result = await provider.sendText(telefone, textoParaEnvioWhatsapp(texto, usuarioNome), {
+        companyId: company_id,
+        conversaId: conversa_id,
+        whatsappInstanceId: whatsappInstanceId || undefined,
+        referenceId: `crm-${mensagem.id}`,
+        sendOrigin: 'atendimento_humano_reenvio',
+      })
+    } catch (e) {
+      // UltraMSG propaga exceção de transporte: resultado ambíguo (pode ter enviado).
+      // Flui como transitória — pending + reconciliação, nunca 500 sem atualizar o estado.
+      result = { ok: false, messageId: null, transportError: true, error: `Falha de conexão ao reenviar: ${e?.message || e}` }
+    }
 
     const aplicado = await aplicarResultadoReenvio({
       req,
@@ -260,20 +286,26 @@ exports.reenviarMidiaMensagem = async (req, res) => {
     }
 
     const nomeArquivo = mensagem.nome_arquivo || 'arquivo'
-    const result =
-      tipo === 'voice' && provider.sendVoice
-        ? await provider.sendVoice(telefone, midia.url, opts)
-        : tipo === 'audio' && provider.sendAudio
-          ? await provider.sendAudio(telefone, midia.url, opts)
-          : tipo === 'sticker' && provider.sendSticker
-            ? await provider.sendSticker(telefone, midia.url, { ...opts, stickerAuthor: 'ZapERP' })
-            : tipo === 'imagem' && provider.sendImage
-              ? await provider.sendImage(telefone, midia.url, waCaption, opts)
-              : (tipo === 'video' || tipo === 'vídeo') && provider.sendVideo
-                ? await provider.sendVideo(telefone, midia.url, waCaption, opts)
-                : provider.sendFile
-                  ? await provider.sendFile(telefone, midia.url, nomeArquivo, { ...opts, caption: waCaption })
-                  : { ok: false, error: 'Envio de mídia indisponível no provedor.' }
+    let result
+    try {
+      result =
+        tipo === 'voice' && provider.sendVoice
+          ? await provider.sendVoice(telefone, midia.url, opts)
+          : tipo === 'audio' && provider.sendAudio
+            ? await provider.sendAudio(telefone, midia.url, opts)
+            : tipo === 'sticker' && provider.sendSticker
+              ? await provider.sendSticker(telefone, midia.url, { ...opts, stickerAuthor: 'ZapERP' })
+              : tipo === 'imagem' && provider.sendImage
+                ? await provider.sendImage(telefone, midia.url, waCaption, opts)
+                : (tipo === 'video' || tipo === 'vídeo') && provider.sendVideo
+                  ? await provider.sendVideo(telefone, midia.url, waCaption, opts)
+                  : provider.sendFile
+                    ? await provider.sendFile(telefone, midia.url, nomeArquivo, { ...opts, caption: waCaption })
+                    : { ok: false, error: 'Envio de mídia indisponível no provedor.' }
+    } catch (e) {
+      // Exceção de transporte do provedor: ambígua (pode ter enviado) — transitória.
+      result = { ok: false, messageId: null, transportError: true, error: `Falha de conexão ao reenviar mídia: ${e?.message || e}` }
+    }
 
     const aplicado = await aplicarResultadoReenvio({
       req,

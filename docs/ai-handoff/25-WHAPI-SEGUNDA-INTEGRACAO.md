@@ -938,3 +938,57 @@ pendente aparece já na 1ª carga pós-F5, antes do hook montar).
 Limitação documentada: falha DEFINITIVA (4xx) de item da outbox marca a bolha como erro SEM
 id de banco → sem botão Reenviar (o conteúdo precisa ser reenviado pelo composer) — igual ao
 comportamento histórico do texto offline. Suíte 2146/2146.
+
+---
+
+## 2026-10-07 — Auditoria do envio de mídia (foto "Não foi possível enviar") + reenvio manual
+
+Sintoma (print do Miguel): fotos enviadas pelo mobile caíam em "Não foi possível enviar" com
+"Tentar novamente". Auditoria do caminho completo upload→provedor confirmou que o fluxo original
+já era resiliente (uploadMedia com retry interno nos dois provedores, fallback para URL pública,
+falha transitória do send vira pending+reconciliação). Dois gaps reais corrigidos:
+
+1. **`controllers/chat/retryController.js` — falha transitória no reenvio manual virava `failed`.**
+   `aplicarResultadoReenvio` não consultava `isTransientOutboundFailure`: timeout/rede/429/5xx no
+   "Tentar novamente" gravava `erro/failed` — e um novo clique podia DUPLICAR no WhatsApp
+   (timeout pós-aceite). Agora: transitória → `pending/sending` + `schedulePendingOutboundReconciliation`
+   + resposta `{ok:true, transient:true}` (a bolha volta ao relógio, sem toast de falha; a
+   reconciliação confirma/reenvia consultando `crm-{id}`). Recusa definitiva (4xx/corpo de erro)
+   continua `failed` com erro na resposta. Exceções do provedor nos dois handlers (UltraMSG
+   propaga) agora viram `{ok:false, transportError:true}` e fluem como transitórias — antes caíam
+   no catch 500 sem atualizar estado.
+
+2. **`controllers/chat/mediaMessageController.js` — exceção no uploadMedia ignorava o fallback.**
+   O catch marcava `erro` direto; o ramo de falha "limpa" (`result.ok===false`) já tentava a URL
+   pública. Upload não dispara mensagem (nada foi enviado), então o catch agora usa o MESMO
+   fallback (não-vídeo + APP_URL não-localhost) antes de desistir. Rede de segurança: os dois
+   uploadMedia retornam `{ok:false}` em vez de lançar, então o catch raramente executa.
+
+Testes: `tests/retryControllerTransient.test.js` (5 casos: 5xx→transient, exceção→transient,
+400→failed, aceite whapi sem ACK→pending+reconciliação, texto exceção→transient).
+Suíte completa: 206 suites / 2175 testes OK. Não deployado.
+
+Residual já documentado: mídia Whapi sem id em pending não tem reenvio automático (sem equivalente
+de histórico confiável para mídia) — cap de 60 min → erro → reenvio manual (agora transitório-safe).
+
+### 2026-10-07 (parte 2) — Lote de fotos: nada pode derrubar o lote inteiro
+
+Auditoria do envio em LOTE (fototeca N fotos num único POST /chats/:id/arquivo):
+
+- **Alinhamento garantido**: `parseClientTempIdsFromBody` alinha por índice; `dedupeMulterFiles`
+  usa `originalname|size|path` (path é único por upload — nunca colapsa dois arquivos distintos).
+- **Falha parcial correta**: cada arquivo com erro vira linha `ok:false` em `results` com
+  `client_temp_id`; o frontend marca só aquela bolha. HTTP 5xx no meio do lote → frontend
+  classifica `uncertain` → mediaOutbox reenvia POR ITEM com o mesmo client_temp_id → dedupe
+  cura os já inseridos e envia os faltantes (self-healing já existente).
+- **Fix: exceção por arquivo não derruba mais o lote** (`mediaMessageController.enviarArquivo`):
+  o loop ganhou try/catch por item — exceção inesperada vira linha `ok:false` (500) daquele
+  arquivo e o loop CONTINUA. Antes, um throw no arquivo i mandava 500 geral e os arquivos
+  i+1..N nunca eram processados.
+- **All-or-nothing restantes ficaram no frontend** (ver doc 08 do frontend): >30 arquivos →
+  controller rejeitava o lote com 400; 1 não-vídeo >32 MB → `uploadArquivo` middleware apaga
+  e rejeita o LOTE todo (comportamento mantido no backend; o frontend agora filtra antes).
+
+Residual observado (não alterado): os despachos ao provedor são `setImmediate` por arquivo —
+uploads podem rodar concorrentes (base64 em memória por upload Whapi). Escalonados pelos
+inserts +250ms; sem evidência de problema real. Suíte 206/2175 OK.
