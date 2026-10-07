@@ -46,6 +46,38 @@ const CONV_FECHADA = {
 describe('executarAssumirConversa — conversa encerrada', () => {
   beforeEach(() => jest.clearAllMocks())
 
+  test.each(['fechada', 'encerrada', 'finalizada', 'finalizado'])('encaminhamento reabre %s e substitui o antigo responsável', async (status) => {
+    const atual = { ...CONV_FECHADA, status_atendimento: status, atendente_id: 8, departamento_id: 99 }
+    const update = mockChain({ data: { ...atual, atendente_id: 4, status_atendimento: 'em_atendimento' }, error: null })
+    supabase.from
+      .mockReturnValueOnce(mockChain({ data: atual, error: null }))
+      .mockReturnValueOnce(mockChain({ data: { limite_chats_por_atendente: 0 }, error: null }))
+      .mockReturnValueOnce(update)
+    const result = await executarAssumirConversa({ company_id: 10, conversa_id: 77, user_id: 4, perfil: 'atendente', reabrirAoEncaminhar: true })
+    expect(result.ok).toBe(true)
+    expect(update.update).toHaveBeenCalledWith(expect.objectContaining({ atendente_id: 4, status_atendimento: 'em_atendimento', departamento_id: null, finalizacao_motivo: null, finalizada_automaticamente: false }))
+    expect(update.eq).toHaveBeenCalledWith('status_atendimento', status)
+    expect(require('../services/atendimentosRegistroService').registrarAtendimento).toHaveBeenCalledWith(expect.objectContaining({ acao: 'reabriu', de_usuario_id: 4 }))
+  })
+
+  test('encaminhamento não toma atendimento ativo de outro usuário', async () => {
+    supabase.from.mockReturnValueOnce(mockChain({ data: { ...CONV_FECHADA, status_atendimento: 'em_atendimento', atendente_id: 8 }, error: null }))
+    const result = await executarAssumirConversa({ company_id: 10, conversa_id: 77, user_id: 4, perfil: 'admin', reabrirAoEncaminhar: true })
+    expect(result).toMatchObject({ ok: false, status: 409 })
+    expect(supabase.from).toHaveBeenCalledTimes(1)
+  })
+
+  test('reabertura concorrente por outro usuário impede envio pelo perdedor', async () => {
+    supabase.from
+      .mockReturnValueOnce(mockChain({ data: CONV_FECHADA, error: null }))
+      .mockReturnValueOnce(mockChain({ data: { limite_chats_por_atendente: 0 }, error: null }))
+      .mockReturnValueOnce(mockChain())
+      .mockReturnValueOnce(mockChain({ data: { ...CONV_FECHADA, atendente_id: 8, status_atendimento: 'em_atendimento' }, error: null }))
+    const result = await executarAssumirConversa({ company_id: 10, conversa_id: 77, user_id: 4, perfil: 'admin', reabrirAoEncaminhar: true })
+    expect(result).toMatchObject({ ok: false, status: 409 })
+    expect(require('../services/atendimentosRegistroService').registrarAtendimento).not.toHaveBeenCalled()
+  })
+
   test('bloquearEncerrada: conversa fechada responde 409 e nada é atualizado', async () => {
     const selectChain = mockChain({ data: CONV_FECHADA, error: null })
     supabase.from.mockReturnValueOnce(selectChain)

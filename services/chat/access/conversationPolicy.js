@@ -19,6 +19,7 @@ const { atendenteNaoPodeVerAssumidaPorOutro } = require('./conversationAccessRul
 const {
   emitirRealtimeAposAssumir,
   emitirMovimentacaoInternaAtendimento,
+  emitirEventoEmpresaConversa,
 } = require('../realtime/chatRealtimeGateway')
 
 async function assertPermissaoConversa({ company_id, conversa_id, user_id, role, user_dep_ids }) {
@@ -108,6 +109,7 @@ async function assertPodeEnviarMensagem({
   user_dep_ids = [],
   autoAssumirUra = false,
   autoAssumirAoEnviar = false,
+  reabrirAoEncaminhar = false,
   io = null,
 }) {
   const { data: conv, error } = await supabase
@@ -133,6 +135,26 @@ async function assertPodeEnviarMensagem({
   }
 
   if (isClosedAttendanceStatus(conv.status_atendimento)) {
+    if (reabrirAoEncaminhar && podeAssumirConversaPorPerfil(role)) {
+      const result = await executarAssumirConversa({
+        company_id, conversa_id, user_id, perfil: role,
+        departamento_ids: user_dep_ids,
+        reabrirAoEncaminhar: true,
+        observacao: 'Atendimento reaberto automaticamente ao encaminhar mensagem.',
+      })
+      if (!result.ok) return { ok: false, status: result.status, error: result.error }
+      if (io) {
+        emitirEventoEmpresaConversa(io, company_id, conversa_id, io.EVENTS?.CONVERSA_REABERTA || 'conversa_reaberta', {
+          ...result.conversa,
+          lista_realtime: { minha_fila: true, motivo: 'reaberta_assumida_automaticamente' },
+        })
+        emitirRealtimeAposAssumir(io, company_id, conversa_id, user_id, result.conversa)
+        if (result.atendimento) await emitirMovimentacaoInternaAtendimento(io, {
+          company_id, conversa: result.conversa, atendimento: result.atendimento,
+        })
+      }
+      return { ok: true, conversa: result.conversa, reason: 'reaberta_ao_encaminhar' }
+    }
     return {
       ok: false,
       status: 409,

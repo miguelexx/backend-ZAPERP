@@ -450,16 +450,7 @@ exports.encaminharMensagem = async (req, res) => {
     }
 
     const io = req.app.get('io')
-    const permEnvio = await assertPodeEnviarMensagem({
-      company_id,
-      conversa_id,
-      user_id,
-      role: req.user?.perfil,
-      user_dep_ids: req.user?.departamento_ids,
-      autoAssumirAoEnviar: true,
-      io,
-    })
-    if (!permEnvio.ok) return res.status(permEnvio.status).json({ error: permEnvio.error })
+
 
     const { data: mensagensRows, error: errMsg } = await supabase
       .from('mensagens')
@@ -517,6 +508,18 @@ exports.encaminharMensagem = async (req, res) => {
     if (!provider) {
       return res.status(500).json({ error: 'Provider WhatsApp não configurado' })
     }
+
+    const permEnvio = await assertPodeEnviarMensagem({
+      company_id,
+      conversa_id,
+      user_id,
+      role: req.user?.perfil,
+      user_dep_ids: req.user?.departamento_ids,
+      autoAssumirAoEnviar: true,
+      reabrirAoEncaminhar: true,
+      io,
+    })
+    if (!permEnvio.ok) return res.status(permEnvio.status).json({ error: permEnvio.error })
 
     const { nome: usuarioNome } = await getUsuarioParaEnvioCliente(supabase, company_id, user_id)
 

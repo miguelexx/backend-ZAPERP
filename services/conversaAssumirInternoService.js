@@ -19,7 +19,8 @@ async function executarAssumirConversa({
    *  explícita (Reabrir / nova mensagem do cliente), não um clique de Assumir em tela defasada.
    *  false (fluxos internos, ex.: "Conversar" no cartão do cliente): mantém o comportamento
    *  de retomar a conversa encerrada como em_atendimento. */
-  bloquearEncerrada = false
+  bloquearEncerrada = false,
+  reabrirAoEncaminhar = false
 }) {
   const isAdmin = perfil === 'admin'
 
@@ -41,7 +42,8 @@ async function executarAssumirConversa({
     return { ok: false, status: 409, error: 'Esta conversa já foi finalizada. Use "Reabrir" para voltar a atendê-la.', conversa: null }
   }
 
-  if (!isAdmin) {
+  const reabrindo = reabrirAoEncaminhar && isClosedAttendanceStatus(atual.status_atendimento)
+  if (!isAdmin && !reabrindo) {
     const convDep = atual.departamento_id ?? null
     const depIds = Array.isArray(departamento_ids) ? departamento_ids : []
     if (depIds.length === 0 && convDep != null) {
@@ -52,7 +54,7 @@ async function executarAssumirConversa({
     }
   }
 
-  if (atual.atendente_id && Number(atual.atendente_id) !== Number(user_id)) {
+  if (!reabrindo && atual.atendente_id && Number(atual.atendente_id) !== Number(user_id)) {
     return { ok: false, status: 409, error: 'Conversa já está em atendimento por outro usuário', conversa: null }
   }
 
@@ -89,11 +91,24 @@ async function executarAssumirConversa({
       lida: true,
       atendente_atribuido_em: assumidaEm,
       reaberta_falta_interacao_em: null,
+      ...(reabrindo ? {
+        departamento_id: null,
+        finalizacao_motivo: null,
+        finalizada_automaticamente: false,
+        finalizada_automaticamente_em: null,
+        aguardando_cliente_desde: null,
+        ausencia_mensagem_enviada_em: null,
+        pagamento_prazo_ate: null,
+        pagamento_prazo_origem: null,
+        pagamento_concluido_em: null,
+      } : {}),
     })
     .eq('company_id', company_id)
     .eq('id', conversa_id)
 
-  if (atual.atendente_id == null) {
+  if (reabrindo) {
+    updateQuery = updateQuery.eq('status_atendimento', atual.status_atendimento)
+  } else if (atual.atendente_id == null) {
     updateQuery = updateQuery.is('atendente_id', null)
   } else {
     updateQuery = updateQuery.eq('atendente_id', user_id)
@@ -113,7 +128,7 @@ async function executarAssumirConversa({
       .maybeSingle()
 
     if (errDepois) return { ok: false, status: 500, error: errDepois.message, conversa: null }
-    if (depois?.atendente_id && Number(depois.atendente_id) === Number(user_id)) {
+    if (depois?.atendente_id && Number(depois.atendente_id) === Number(user_id) && !isClosedAttendanceStatus(depois.status_atendimento)) {
       return { ok: true, status: 200, error: null, conversa: depois, already_assigned: true }
     }
     if (depois?.atendente_id) {
@@ -127,7 +142,7 @@ async function executarAssumirConversa({
   const resultAt = await registrarAtendimento({
     conversa_id,
     company_id,
-    acao: 'assumiu',
+    acao: reabrindo ? 'reabriu' : 'assumiu',
     de_usuario_id: user_id,
     para_usuario_id: user_id,
     observacao

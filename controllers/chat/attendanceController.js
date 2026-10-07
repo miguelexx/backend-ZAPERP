@@ -1022,8 +1022,19 @@ exports.adicionarAtendenteConversa = async (req, res) => {
     if (isClosedAttendanceStatus(perm.conv?.status_atendimento)) {
       return res.status(409).json({ error: 'Reabra a conversa antes de adicionar atendente.' })
     }
+    if (!perm.conv?.atendente_id) {
+      return res.status(409).json({ error: 'Assuma a conversa antes de adicionar co-atendente.' })
+    }
+    const podeAdicionarOutro = ['admin', 'supervisor'].includes(String(perfil || '').toLowerCase())
+      || Number(perm.conv.atendente_id) === Number(user_id)
+      || await usuarioParticipaAtivamenteDaConversa(company_id, conversa_id, user_id)
+    // Quem transferiu mantém acesso à conversa para voltar a participar,
+    // mas essa exceção não autoriza incluir terceiros no atendimento.
+    if (!podeAdicionarOutro && usuario_id !== Number(user_id)) {
+      return res.status(403).json({ error: 'Você só pode puxar esta conversa para o próprio atendimento.' })
+    }
     if (perm.conv?.atendente_id && Number(perm.conv.atendente_id) === usuario_id) {
-      return res.status(409).json({ error: 'Este atendente ja e o responsavel principal da conversa.' })
+      return res.json({ ok: true, already_assigned: true })
     }
 
     const { data: targetUser, error: userError } = await supabase
@@ -1043,7 +1054,7 @@ exports.adicionarAtendenteConversa = async (req, res) => {
     }
 
     if (await usuarioParticipaAtivamenteDaConversa(company_id, conversa_id, usuario_id)) {
-      return res.status(409).json({ error: 'Este atendente ja participa da conversa.' })
+      return res.json({ ok: true, already_participant: true })
     }
 
     const participantesAtivos = await getConversaParticipanteIdsAtivos(company_id, conversa_id)
@@ -1065,7 +1076,15 @@ exports.adicionarAtendenteConversa = async (req, res) => {
 
     if (insertError) {
       if (String(insertError?.code || '') === '23505') {
-        return res.status(409).json({ error: 'Este atendente ja participa da conversa.' })
+        // Só confirma sucesso se a participação ativa realmente existe.
+        if (await usuarioParticipaAtivamenteDaConversa(company_id, conversa_id, usuario_id)) {
+          invalidateConversaVisibilityCache(company_id, conversa_id)
+          return res.json({ ok: true, already_participant: true })
+        }
+        return res.status(409).json({ error: 'A participação mudou durante a operação. Tente novamente.' })
+      }
+      if (String(insertError?.code || '') === 'P0001') {
+        return res.status(409).json({ error: insertError.message })
       }
       return res.status(500).json({ error: insertError.message })
     }
