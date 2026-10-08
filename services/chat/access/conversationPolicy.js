@@ -16,6 +16,7 @@ const { empresaModoSimplesAtivo } = require('../../../helpers/empresaModoSimples
 const { executarAssumirConversa } = require('../../conversaAssumirInternoService')
 const { usuarioParticipaAtivamenteDaConversa } = require('./conversationVisibilityService')
 const { atendenteNaoPodeVerAssumidaPorOutro } = require('./conversationAccessRules')
+const { usuarioPodeVerNumero } = require('./whatsappInstanceVisibilityService')
 const {
   emitirRealtimeAposAssumir,
   emitirMovimentacaoInternaAtendimento,
@@ -25,12 +26,19 @@ const {
 async function assertPermissaoConversa({ company_id, conversa_id, user_id, role, user_dep_ids }) {
   const { data: conv, error } = await supabase
     .from('conversas')
-    .select('id, atendente_id, departamento_id, tipo, telefone, status_atendimento')
+    .select('id, atendente_id, departamento_id, tipo, telefone, status_atendimento, whatsapp_instance_id')
     .eq('company_id', Number(company_id))
     .eq('id', Number(conversa_id))
     .maybeSingle()
   if (error) return { ok: false, status: 500, error: error.message }
   if (!conv) return { ok: false, status: 404, error: 'Conversa não encontrada' }
+
+  // Gate por NUMERO (gate mais externo): se a conversa pertence a um numero com
+  // lista salva e o usuario nao esta nela, bloqueia — independente de perfil,
+  // atendente_id, participante, transferencia ou setor.
+  if (!(await usuarioPodeVerNumero(company_id, user_id, conv.whatsapp_instance_id))) {
+    return { ok: false, status: 403, error: 'Sem acesso às conversas deste número' }
+  }
 
   const isGroup = isGroupConversation(conv)
   const r = String(role || '').toLowerCase()
@@ -120,6 +128,12 @@ async function assertPodeEnviarMensagem({
     .maybeSingle()
   if (error) return { ok: false, status: 500, error: error.message }
   if (!conv) return { ok: false, status: 404, error: 'Conversa não encontrada' }
+
+  // Gate por NUMERO (mesmo gate externo do assertPermissaoConversa): sem acesso
+  // ao numero = nao envia, nao encaminha, nao edita, nao apaga, nao transfere.
+  if (!(await usuarioPodeVerNumero(company_id, user_id, conv.whatsapp_instance_id))) {
+    return { ok: false, status: 403, error: 'Sem acesso às conversas deste número' }
+  }
 
   if (isGroupConversation(conv)) {
     const podeVerGrupo = await usuarioPodeVerGrupo({

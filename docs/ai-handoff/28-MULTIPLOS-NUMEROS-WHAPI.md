@@ -402,6 +402,51 @@ UltraMSG intocado; mudanças 100% aditivas; nenhuma quebra em fluxos de 1 númer
 
 ---
 
+## 15. Controle de visibilidade POR NÚMERO (quem vê as conversas de cada número) — 2026-10-08
+
+> **Não deployado.** Aditivo; empresa de 1 número ou número sem lista = idêntico a hoje.
+
+**O que é:** o admin marca, por número (`whatsapp_instances.id`), **quais usuários veem as conversas
+daquele número** (individual e grupo). Perfil não libera (admin/supervisor/atendente obedecem a mesma lista).
+Regra = **gate mais externo**: não é furado por `atendente_id`, participante, transferência nem setor.
+
+**Semântica:** número **sem linha salva** → todos veem (= hoje) · número **com lista** → só os listados ·
+`whatsapp_instance_id NULL` (legado) → sempre visível · **lista vazia = "sem restrição"** (nunca "ninguém vê").
+
+**Dados:** tabela nova `whatsapp_instance_visibilidade (company_id, whatsapp_instance_id, usuario_id)` +
+`uq (company_id, whatsapp_instance_id, usuario_id)` + índices `(company,usuario)` e `(company,instance)` +
+RPC `set_whatsapp_instance_visibilidade(company, instance, int[])` (DELETE+INSERT atômico; só instância/usuário
+ativos da empresa). Migration `20261008120000_whatsapp_instance_visibilidade.sql` — **escrita, não aplicada**.
+
+**Helper central** `services/chat/access/whatsappInstanceVisibilityService.js` (cache por empresa, TTL 15 s;
+tabela ausente ⇒ mapa vazio ⇒ sistema igual a hoje). Funções: `usuarioPodeVerNumero`,
+`getBlockedInstanceIdsParaUsuario`, `filtrarUsuarioIdsPorNumero`, `invalidateCompanyVisibilityCache`.
+
+**Choke points gateados (um helper, usado por todos):**
+- **Lista**: `conversationListController.buildQuery` → `or(whatsapp_instance_id.is.null, …not.in.(blocked))` para TODOS (inclusive admin).
+- **Contadores**: `chatListCountsService.applyChatListSqlFilters` (mesmo filtro — badge = linhas).
+- **Ação/envio/sala socket**: `conversationPolicy.assertPermissaoConversa` + `assertPodeEnviarMensagem` (gate no topo → 403), usados por TODOS os controllers de ação (assumir/enviar/encaminhar/editar/apagar/transferir/tags/presença) + `buscarMensagensConversa`. O `join_conversa` (index.js) delega a essa política.
+- **Socket/unread/push**: `conversationVisibilityService.carregarUsuarioIdsQuePodemVerConversaSemCache` filtra os ids finais pelo número → `emitirEventoConversaVisivel`/`incrementarUnread` já respeitam.
+- **Endpoints com lógica PRÓPRIA de permissão (não passam pela política — gate adicionado caso a caso):** `conversationDetailController.detalharChat` (abrir por id), `printController` (imprimir), `attendanceQueueController.listarAtendimentos` (histórico por id) e `attendanceQueueController.puxarChatFila` (não puxa da fila número bloqueado).
+- **Nova conversa**: `resolveWhatsappInstanceForManualAction(company, id?, usuarioId)` só oferece/aceita número permitido.
+- **Fora do escopo (igual a dashboard/disparo):** `finalizacaoAusenciaLoteAuth` (manutenção supervisor, sem conteúdo de mensagem) e supervisão/relatórios agregados — não gateados por número.
+
+**API** (sob `supervisorOrAdmin`, base `/integrations/whatsapp`): `GET /visibilidade` (números+usuários+marcados) ·
+`PUT /instances/:id/visibilidade {usuario_ids}` (conjunto exato; `[]` = "Todos veem"). Ao salvar: invalida os 3 caches
+(visibilidade por número, visibilidade por conversa por empresa, contadores) e emite `whatsapp_instance_visibilidade_atualizada`
+na sala `empresa_{id}`.
+
+**Frontend:** `WhapiConnectPanel.jsx` → `WhapiNumberVisibilityCard.jsx` (checkbox por usuário + Salvar + "Todos veem",
+só com 2+ números ativos). `socket.js` ouve o evento: quem perdeu acesso dropa as conversas do número (`removeChat`);
+todos `requestChatListResync({force:true})`. Serviço: `api/whapiInstancesService.js` (`obterVisibilidadeNumeros`,
+`salvarVisibilidadeNumero`).
+
+**Testes:** `tests/whatsappInstanceVisibilidade.test.js` (13; cobre os 12 cenários do spec). Suíte total: **2211 verdes**.
+
+**Para ativar:** aplicar a migration no Supabase (SQL Editor) **antes** do deploy; depois deploy backend `master` + frontend `main`.
+
+---
+
 ## 10. Histórico
 
 - **2026-09-12** — Documento criado a partir de análise profunda do código (schema, inbound, outbound, disparo,

@@ -246,6 +246,7 @@ exports.imprimirConversa = async (req, res) => {
         nome_grupo,
         nome_contato_cache,
         cliente_id,
+        whatsapp_instance_id,
         clientes!conversas_cliente_fk ( id, nome, pushname, telefone, observacoes, foto_perfil, company_id ),
         usuarios!conversas_atendente_fk ( id, nome ),
         departamentos ( id, nome )
@@ -256,6 +257,12 @@ exports.imprimirConversa = async (req, res) => {
 
     if (errConv) return res.status(500).send('Erro ao carregar conversa')
     if (!conversa) return res.status(404).send('Conversa não encontrada')
+
+    // Gate por NUMERO: sem acesso ao numero, nao imprime (mesmo gate do atendimento).
+    const { usuarioPodeVerNumero } = require('../services/chat/access/whatsappInstanceVisibilityService')
+    if (!(await usuarioPodeVerNumero(cid, user_id, conversa.whatsapp_instance_id))) {
+      return res.status(403).send('Sem permissão para imprimir esta conversa')
+    }
 
     const isGroup = isGroupConversation(conversa)
     const isAssignedToUser = conversa.atendente_id && Number(conversa.atendente_id) === Number(user_id)

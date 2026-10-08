@@ -532,10 +532,10 @@ exports.rejeitarSolicitacaoGrupo = async (req, res) => {
 
 exports.entrarPorConvite = async (req, res) => {
   try {
-    const { company_id } = req.user
+    const { company_id, id: usuario_id } = req.user
     const code = String(req.body?.invite_code || req.body?.inviteCode || '').trim()
     if (!code) return res.status(400).json({ error: 'Informe o código do convite.' })
-    const instanceRes = await resolveWhatsappInstanceForManualAction(company_id, req.body?.whatsapp_instance_id)
+    const instanceRes = await resolveWhatsappInstanceForManualAction(company_id, req.body?.whatsapp_instance_id, usuario_id)
     if (instanceRes.error || !instanceRes.instanceId) {
       return res.status(400).json({ error: instanceRes.error || 'Instância WhatsApp não encontrada.' })
     }
@@ -565,10 +565,10 @@ exports.entrarPorConvite = async (req, res) => {
 
 exports.consultarConvite = async (req, res) => {
   try {
-    const { company_id } = req.user
+    const { company_id, id: usuario_id } = req.user
     const code = String(req.query?.code || req.body?.invite_code || '').trim()
     if (!code) return res.status(400).json({ error: 'Informe o código do convite.' })
-    const instanceRes = await resolveWhatsappInstanceForManualAction(company_id, req.query?.whatsapp_instance_id || req.body?.whatsapp_instance_id)
+    const instanceRes = await resolveWhatsappInstanceForManualAction(company_id, req.query?.whatsapp_instance_id || req.body?.whatsapp_instance_id, usuario_id)
     if (instanceRes.error || !instanceRes.instanceId) {
       return res.status(400).json({ error: instanceRes.error || 'Instância WhatsApp não encontrada.' })
     }

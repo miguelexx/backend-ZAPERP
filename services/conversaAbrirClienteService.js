@@ -32,7 +32,7 @@ async function ensureConversaForCliente({
     return { ok: false, error: 'Cliente sem telefone cadastrado', conversa: null, criada: false }
   }
 
-  const instanceRes = await resolveWhatsappInstanceForManualAction(company_id, whatsapp_instance_id)
+  const instanceRes = await resolveWhatsappInstanceForManualAction(company_id, whatsapp_instance_id, usuario_id)
   if (instanceRes.code === 'SELECIONE_WHATSAPP_INSTANCE') {
     return {
       ok: false,

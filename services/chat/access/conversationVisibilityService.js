@@ -17,6 +17,7 @@ const { isGroupConversation } = require('../../../helpers/conversaHelper')
 const { getGrupoDepartamentoIds } = require('../../../helpers/departamentoGruposHelper')
 const { getChatFilterIdLimit } = require('../read/searchLimits')
 const { atendenteNaoPodeVerAssumidaPorOutro } = require('./conversationAccessRules')
+const { filtrarUsuarioIdsPorNumero } = require('./whatsappInstanceVisibilityService')
 
 const conversaVisibilityCache = new Map()
 const CONVERSA_VISIBILITY_CACHE_TTL_MS = 15_000
@@ -51,6 +52,16 @@ function conversaVisibilityCacheKey(company_id, conversa_id) {
 function invalidateConversaVisibilityCache(company_id, conversa_id) {
   if (company_id == null || conversa_id == null) return
   conversaVisibilityCache.delete(conversaVisibilityCacheKey(company_id, conversa_id))
+}
+
+// Usado quando a visibilidade por NUMERO muda (admin salva a lista de um numero):
+// toda conversa da empresa precisa recalcular quem pode ve-la.
+function invalidateConversaVisibilityCacheByCompany(company_id) {
+  if (company_id == null) return
+  const prefix = `${Number(company_id)}:`
+  for (const k of conversaVisibilityCache.keys()) {
+    if (k.startsWith(prefix)) conversaVisibilityCache.delete(k)
+  }
 }
 
 function isConversaAtendentesMissingTable(error) {
@@ -159,7 +170,7 @@ function deveIncluirGruposSemDepartamentoNoFiltroTodos({
 async function carregarUsuarioIdsQuePodemVerConversaSemCache(company_id, conversa_id) {
   const { data: conv } = await supabase
     .from('conversas')
-    .select('departamento_id, atendente_id, tipo, telefone, status_atendimento')
+    .select('departamento_id, atendente_id, tipo, telefone, status_atendimento, whatsapp_instance_id')
     .eq('company_id', Number(company_id))
     .eq('id', Number(conversa_id))
     .maybeSingle()
@@ -217,7 +228,10 @@ async function carregarUsuarioIdsQuePodemVerConversaSemCache(company_id, convers
     if (convDep == null) ids.push(uid)
     else if (userDepIds.some((d) => Number(d) === Number(convDep))) ids.push(uid)
   }
-  return ids
+  // Gate por NUMERO: se a conversa pertence a um numero com lista salva, so quem
+  // esta na lista daquele numero permanece. Vale para admin e para as excecoes
+  // acima (atendente_id/participante/transferencia) — o numero e o gate externo.
+  return filtrarUsuarioIdsPorNumero(company_id, conv.whatsapp_instance_id, ids)
 }
 
 async function obterUsuarioIdsQuePodemVerConversa(company_id, conversa_id) {
@@ -310,6 +324,7 @@ async function incrementarUnreadParaConversa(company_id, conversa_id) {
 
 module.exports = {
   invalidateConversaVisibilityCache,
+  invalidateConversaVisibilityCacheByCompany,
   isConversaAtendentesMissingTable,
   getConversaParticipanteIdsAtivos,
   getConversaIdsParticipanteAtivo,
