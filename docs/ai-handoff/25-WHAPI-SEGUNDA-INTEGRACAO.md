@@ -1116,3 +1116,16 @@ Só o clique em `POST /chats/:id/mensagens/sync-old` (`syncOldMessagesForConvers
 Não usa essa janela: import automático de ~25 mensagens ao abrir conversa nova (`historyImport.js`), sync da empresa e reconciliação de envio. UltraMSG ignora `timeFrom`.
 
 Resposta do botão inclui `janela_dias: 45`. Vazio legítimo: canal sem essas mensagens (pré-conexão / só no celular).
+
+### 2026-10-08 — Arquivos de arte (.cdr/.psd) liberados no envio (caso real do print)
+
+Cliente de silk mandou `sublimacao.cdr` (chegou e abre normal), mas ENVIAR .cdr era barrado
+pelo filtro de tipos ("tipo de arquivo não permitido"). `.ai`/`.eps` já eram aceitos; faltavam
+`.cdr` e `.psd` — mesmo perfil (arte, não-executável; WhatsApp entrega como documento comum).
+Mudanças: `middleware/upload.js` (ALLOWED_EXTENSIONS + MIMEs corel/photoshop/postscript no
+ALLOWED_MIME); `inboundMediaPersistenceService.ALLOW_EXT_FROM_NAME` (+.ai/.eps/.cdr/.psd — o
+.cdr recebido agora guarda a extensão no disco em vez de .bin; nome exibido já era preservado);
+`whapi/upload.js` contentTypeForUploadFilename (+4 MIMEs); frontend `AttachmentInputs.jsx`
+(accept dos inputs de anexo e documentos). Bloqueio de risco (exe/apk/ps1/...) INTACTO.
+Testes: uploadMiddleware 11/11 (novos casos .cdr por MIME e por extensão com octet-stream);
+suíte completa verde. Encaminhar o .cdr recebido já funcionava (forward não passa pelo multer).

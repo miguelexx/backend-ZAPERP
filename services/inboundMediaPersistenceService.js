@@ -181,6 +181,12 @@ const ALLOW_EXT_FROM_NAME = new Set([
   '.log',
   '.gz',
   '.tar',
+  // Arquivos de arte (gráficas/silk): .cdr/.psd/.ai/.eps chegam de clientes e precisam manter
+  // a extensão no disco (sem isto viravam .bin; o nome exibido já era preservado).
+  '.ai',
+  '.eps',
+  '.cdr',
+  '.psd',
   // Imagens fora de jpg/png/webp/gif ficam de fora de propósito: /uploads serve essas extensões
   // como download (não imagem), e a miniatura da bolha quebraria.
 ])

@@ -47,6 +47,11 @@ function contentTypeForUploadFilename(filename) {
     zip: 'application/zip',
     rar: 'application/vnd.rar',
     '7z': 'application/x-7z-compressed',
+    // Arquivos de arte (gráficas/silk) — documento comum no WhatsApp.
+    cdr: 'application/vnd.corel-draw',
+    psd: 'image/vnd.adobe.photoshop',
+    ai: 'application/postscript',
+    eps: 'application/postscript',
   }
   return byExt[ext] || 'application/octet-stream'
 }

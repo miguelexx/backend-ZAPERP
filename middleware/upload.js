@@ -68,6 +68,13 @@ const ALLOWED_MIME = new Map([
   ['application/x-rar-compressed', '.rar'],
   ['application/x-7z-compressed', '.7z'],
   ['application/sql', '.sql'],
+  // Arquivos de arte (gráficas/silk — caso real: cliente manda .cdr de sublimação).
+  // Não-executáveis; o WhatsApp entrega como documento comum, igual PDF/ZIP.
+  ['application/vnd.corel-draw', '.cdr'],
+  ['application/x-coreldraw', '.cdr'],
+  ['image/vnd.adobe.photoshop', '.psd'],
+  ['application/x-photoshop', '.psd'],
+  ['application/postscript', '.ai'],
   ['application/octet-stream', '.bin'],
 ])
 
@@ -89,8 +96,10 @@ const ALLOWED_EXTENSIONS = new Set([
   'key', 'pages', 'numbers',
   'epub', 'vcf', 'ics', 'log',
   'gz', 'tar',
-  // Arte vetorial Adobe (application/postscript). Entregue como documento comum.
-  'ai', 'eps',
+  // Arquivos de arte (Adobe/Corel) — gráficas e silk trabalham com estes no dia a dia
+  // (caso real: cliente manda .cdr de sublimação e o atendente precisa devolver a arte).
+  // Não-executáveis; o WhatsApp entrega como documento comum.
+  'ai', 'eps', 'cdr', 'psd',
 ])
 
 /**

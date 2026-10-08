@@ -97,3 +97,29 @@ test('erro de upload inválido carrega status 400', () => {
 test('extFromOriginalName', () => {
   assert.equal(extFromOriginalName('Firebird-3.0.14.33856-0-x64.exe'), 'exe')
 })
+
+test('aceita arquivos de arte de gráfica (.cdr/.psd/.ai/.eps) como documento', () => {
+  // Caso real (print do Miguel): cliente de silk manda sublimacao.cdr e o atendente
+  // precisa devolver a arte — o filtro barrava com "tipo de arquivo não permitido".
+  assert.equal(
+    isAllowedUploadFile({ mimetype: 'application/vnd.corel-draw', originalname: 'sublimacao.cdr', fieldname: 'file' }),
+    true
+  )
+  // Navegador que não conhece o MIME manda octet-stream: a extensão decide.
+  assert.equal(
+    isAllowedUploadFile({ mimetype: 'application/octet-stream', originalname: 'arte-final.CDR', fieldname: 'file' }),
+    true
+  )
+  assert.equal(
+    isAllowedUploadFile({ mimetype: 'image/vnd.adobe.photoshop', originalname: 'camiseta.psd', fieldname: 'file' }),
+    true
+  )
+  assert.equal(
+    isAllowedUploadFile({ mimetype: 'application/postscript', originalname: 'logo.ai', fieldname: 'file' }),
+    true
+  )
+  assert.equal(
+    isAllowedUploadFile({ mimetype: '', originalname: 'vetor.eps', fieldname: 'file' }),
+    true
+  )
+})
