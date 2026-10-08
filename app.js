@@ -107,6 +107,29 @@ if (process.env.TRUST_PROXY === '1' || process.env.NODE_ENV === 'production') {
 }
 
 // =====================================================
+// Compressão gzip das respostas (JSON das rotas é o grande beneficiado — /chats em
+// mobile cai ~80-90% no ar). Proxy da frente (Traefik/Coolify) não comprime por padrão.
+// FORA do gzip, de propósito:
+//  - /media/* e /uploads: áudio/imagem/vídeo já são comprimidos; o /media/proxy serve
+//    Range 206 e streaming — comprimir quebraria byte-range e bufferizaria o corpo;
+//  - text/event-stream (SSE): compressão segura o flush dos eventos.
+// Desligável sem deploy via COMPRESSION_DISABLED=1.
+// =====================================================
+if (process.env.COMPRESSION_DISABLED !== '1') {
+  const compression = require('compression')
+  app.use(compression({
+    level: 5,
+    threshold: 1024,
+    filter: (req, res) => {
+      const p = String(req.path || '')
+      if (p.startsWith('/media/') || p.startsWith('/uploads')) return false
+      if (String(res.getHeader('Content-Type') || '').includes('text/event-stream')) return false
+      return compression.filter(req, res)
+    },
+  }))
+}
+
+// =====================================================
 // JSON + urlencoded parsers — UltraMSG pode enviar application/json ou form-urlencoded
 // verify: mantém rawBody em Buffer (útil para verificação HMAC de webhooks, se aplicável)
 // limit: webhook payload bound — evita bodies JSON excessivamente grandes

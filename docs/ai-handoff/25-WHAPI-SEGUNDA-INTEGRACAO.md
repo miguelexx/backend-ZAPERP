@@ -1055,3 +1055,54 @@ RECOMENDAÇÕES OPERACIONAIS (nada de código):
    falta apenas descomentar/setar no `.env` do SERVIDOR.
 4. **SQL doc 29** e **gzip nginx**: ações do servidor — blocos prontos entregues ao Miguel no
    chat (SQL idempotente do §2 deste doc 29; snippet gzip para o server block do zapapi).
+
+### 2026-10-07 (parte 6) — Compressão gzip no Express (autorizada pelo Miguel)
+
+Dependência `compression@1.8.2` adicionada (package.json/package-lock). `app.js` aplica
+`compression({ level: 5, threshold: 1024 })` logo após o trust proxy, com filtro que EXCLUI
+`/media/*` e `/uploads` (Range 206/streaming de áudio e imagem — comprimir bufferizaria e
+quebraria byte-range) e `text/event-stream`. Socket.IO não passa pelo middleware (listener
+próprio no server). Motivo: o proxy da frente é o Traefik do Coolify, que NÃO comprime por
+padrão — gzip no app é proxy-agnóstico. Kill-switch sem deploy: `COMPRESSION_DISABLED=1`
+(documentado no .env.example). Suíte 208/2184 OK. Validar pós-deploy:
+`curl -s -o /dev/null -D - -H "Accept-Encoding: gzip" https://zapapi.wmsistemas.inf.br/ | grep -i content-encoding`.
+
+### 2026-10-07 (parte 7) — "Arquivo expirou" em PDF recém-recebido: CAUSA-RAIZ corrigida
+
+Sintoma: PDF aparece na conversa e horas depois vira "Arquivo expirou — não pôde ser recuperado".
+Auditoria do fluxo inbound confirmou que a arquitetura JÁ cumpre o desenho correto (cópia
+imediata em background no webhook p/ /uploads + R2, gravação atômica .part→rename, update
+idempotente guardado por `ilike url https%`, lock entre instâncias, backoff com estado em
+colunas midia_persist_*, due-scheduler 60s + varredura ampla 3h/7 dias, schedulers ligados no
+index.js, allowlist nativa cobrindo whatsapp.net/fbcdn/UltraMSG/Wasabi/whapi.cloud, e o
+pipeline agenda a cópia p/ TODO tipo qualificado — documento incluído — nos dois provedores).
+
+CAUSA-RAIZ (`helpers/inboundMediaRetryPolicy.js`): HTTP **401/403/404 na 1ª tentativa era
+FALHA DEFINITIVA** → a linha saía de TODAS as varreduras para sempre. Só que o provedor posta
+o webhook ANTES de o objeto terminar de subir (Whapi→Wasabi, UltraMSG→S3): a 1ª leitura pode
+levar 403/404 transitório. O PDF nunca era copiado e o link expirava. Áudio escapava por
+acaso (ouvido logo + cache offline). FIX: 401/403/404 agora são TEMPORÁRIAS — o teto de
+tentativas (6, janela ~2h) encerra link morto de verdade em falha_definitiva; 400/410 seguem
+definitivos. Testes atualizados (inboundMediaPersistence 24/24; caso novo: 404 na 1ª leitura
+permanece PENDENTE com proximaEm agendada).
+
+Checklist do pedido verificado SEM mudanças: download nunca depende de clique (setImmediate no
+webhook); reinício não perde fila (estado no banco — EXIGE migration 20260804153000 aplicada;
+sem ela degrade documentado p/ memória+varredura 3h); limpeza local só após espelho R2
+confirmado; auth de download é a própria URL assinada; frontend troca a URL ao vivo via
+nova_mensagem re-emitida pela persistência. NÃO implementado (exigiria migration não
+autorizada): colunas hash/mime/tamanho — url permanente + nome já cumprem o critério de aceite.
+
+#### Parte 7 — REFINAMENTO pela 2ª auditoria (janela de corrida por idade)
+
+A 2ª auditoria pegou regressão no próprio fix: o reprocesso manual (inboundMediaReprocess)
+depende de `tipo==='definitiva'` para responder `definitivo:true` e a bolha mostrar
+"expirou"; com 404 SEMPRE temporário, mídia realmente expirada ganharia botão "tentar de
+novo" eterno. Correção final: `classificarStatusHttp(status, { idadeMs })` — 401/403/404 são
+TEMPORÁRIAS só dentro de `JANELA_CORRIDA_UPLOAD_MS` (6h desde criado_em da mensagem; o
+service passa `criadoEm` ao classificarFalha); fora da janela, ou sem criadoEm, voltam a ser
+DEFINITIVAS (semântica clássica preservada p/ reprocesso e varredura de linhas antigas —
+bônus: 404 em linha velha não gasta mais 6 tentativas). 400/410 definitivos sempre.
+Testes: matriz recém/antiga/sem-criadoEm por status + caso integração 404-antiga →
+falha_definitiva na 1ª. 24/24; suíte 208/2184. SQL de destravamento recomendado ao Miguel
+ajustado para INTERVAL '6 hours' (coerente com a janela).

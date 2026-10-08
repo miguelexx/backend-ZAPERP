@@ -363,7 +363,10 @@ function agendarRetentativaEmProcesso(ctx, quando) {
 async function registrarFalha(ctx, row, { motivo, status }) {
   const { supabase, company_id, mensagem_id } = ctx
   const agora = new Date()
-  const classificada = classificarFalha({ motivo, status })
+  // criado_em habilita a janela de corrida: 401/403/404 em mensagem RECENTE é objeto ainda
+  // subindo no provedor (temporária); em mensagem antiga é link morto (definitiva — mantém o
+  // "expirou" honesto do reprocesso manual).
+  const classificada = classificarFalha({ motivo, status, criadoEm: row?.criado_em, agora })
   const tentativas = (Number(row?.midia_persist_tentativas) || 0) + 1
   const plano = planejarProximaTentativa({
     tentativas,

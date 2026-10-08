@@ -208,8 +208,18 @@ test('classifica falhas temporárias e definitivas', () => {
   for (const status of [500, 502, 503, 429, 408]) {
     assert.equal(classificarFalha({ motivo: 'http', status }).tipo, FALHA.TEMPORARIA, String(status))
   }
-  for (const status of [400, 403, 404, 410]) {
-    assert.equal(classificarFalha({ motivo: 'http', status }).tipo, FALHA.DEFINITIVA, String(status))
+  // 401/403/404 dependem da IDADE da mensagem: dentro da janela de corrida com o upload do
+  // provedor (Whapi/Wasabi, UltraMSG/S3) são temporárias; em mensagem antiga (ou sem
+  // criadoEm) voltam a ser definitivas — é o que mantém o "expirou" do reprocesso manual.
+  const recem = new Date(Date.now() - 60 * 1000).toISOString()
+  const antiga = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
+  for (const status of [401, 403, 404]) {
+    assert.equal(classificarFalha({ motivo: 'http', status, criadoEm: recem }).tipo, FALHA.TEMPORARIA, `recem_${status}`)
+    assert.equal(classificarFalha({ motivo: 'http', status, criadoEm: antiga }).tipo, FALHA.DEFINITIVA, `antiga_${status}`)
+    assert.equal(classificarFalha({ motivo: 'http', status }).tipo, FALHA.DEFINITIVA, `sem_criado_em_${status}`)
+  }
+  for (const status of [400, 410]) {
+    assert.equal(classificarFalha({ motivo: 'http', status, criadoEm: recem }).tipo, FALHA.DEFINITIVA, String(status))
   }
 })
 
@@ -277,7 +287,7 @@ test('timeout no download é falha temporária e reagenda em 1 minuto', async ()
   assert.ok(estado.midia_persist_proxima_em)
 })
 
-test('erro HTTP 5xx do provedor é temporário e 404 é definitivo', async () => {
+test('erro HTTP 5xx e 404 (corrida com upload do provedor) são temporários; 410 é definitivo', async () => {
   const resposta = (status) => async () => ({
     ok: false,
     status,
@@ -293,14 +303,39 @@ test('erro HTTP 5xx do provedor é temporário e 404 é definitivo', async () =>
   assert.equal(r1.status, STATUS.PENDENTE)
   assert.equal(temporario.linha.url, URL_REMOTA)
 
+  // PDF recém-recebido com 404 na 1ª leitura (objeto ainda subindo no S3/Wasabi): a mídia
+  // CONTINUA elegível a retentativa — era aqui que o "Arquivo expirou" nascia.
   resetEstadoPersistenciaFlag()
-  const definitivo = criarSupabase(linhaPadrao())
+  const corrida = criarSupabase(linhaPadrao({ criado_em: new Date().toISOString() }))
   global.fetch = resposta(404)
-  const r2 = await persistir(definitivo.supabase)
+  const r2 = await persistir(corrida.supabase)
   assert.equal(r2.motivo, 'http_404')
-  assert.equal(r2.tipo, FALHA.DEFINITIVA)
-  assert.equal(r2.status, STATUS.FALHA_DEFINITIVA)
-  assert.equal(r2.proximaEm, null)
+  assert.equal(r2.tipo, FALHA.TEMPORARIA)
+  assert.equal(r2.status, STATUS.PENDENTE)
+  assert.ok(r2.proximaEm instanceof Date)
+  assert.equal(corrida.linha.url, URL_REMOTA)
+
+  // Mensagem ANTIGA com 404 = link realmente expirado: definitiva já na 1ª tentativa —
+  // é o que faz o reprocesso manual responder definitivo:true ("expirou no WhatsApp").
+  resetEstadoPersistenciaFlag()
+  const expirada = criarSupabase(
+    linhaPadrao({ criado_em: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString() })
+  )
+  global.fetch = resposta(404)
+  const r2b = await persistir(expirada.supabase)
+  assert.equal(r2b.motivo, 'http_404')
+  assert.equal(r2b.tipo, FALHA.DEFINITIVA)
+  assert.equal(r2b.status, STATUS.FALHA_DEFINITIVA)
+  assert.equal(r2b.proximaEm, null)
+
+  resetEstadoPersistenciaFlag()
+  const definitivo = criarSupabase(linhaPadrao({ criado_em: new Date().toISOString() }))
+  global.fetch = resposta(410)
+  const r3 = await persistir(definitivo.supabase)
+  assert.equal(r3.motivo, 'http_410')
+  assert.equal(r3.tipo, FALHA.DEFINITIVA)
+  assert.equal(r3.status, STATUS.FALHA_DEFINITIVA)
+  assert.equal(r3.proximaEm, null)
   assert.equal(definitivo.linha.url, URL_REMOTA)
 })
 
