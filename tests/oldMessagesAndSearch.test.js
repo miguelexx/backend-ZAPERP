@@ -2,6 +2,7 @@ const {
   normalizeOldMessage,
   isUsableHistoryIdentifier,
   resolveChatIdsForConversation,
+  resolveGroupChatIdsForConversation,
   contactHistoryTimeFromUnix,
   CONTACT_HISTORY_WINDOW_DAYS,
 } = require('../services/oldMessagesSyncService')
@@ -45,6 +46,38 @@ describe('old messages contact sync', () => {
     expect(candidates.some((c) => String(c).includes('3499911246') || String(c).includes('553499911246'))).toBe(true)
     expect(candidates.every((c) => !String(c).toLowerCase().startsWith('lid:'))).toBe(true)
     expect(candidates).not.toContain('999888777')
+  })
+
+  test('grupo resolve chatId pelo JID @g.us (dígitos 120…, JID completo e owner-group)', () => {
+    // Dígitos 120… → acrescenta a forma @g.us; o provider normaliza as duas.
+    const porDigitos = resolveGroupChatIdsForConversation({ tipo: 'grupo', telefone: '120363426760868023' })
+    expect(porDigitos).toContain('120363426760868023@g.us')
+    expect(porDigitos.every((c) => !String(c).includes('@s.whatsapp.net') && !String(c).includes('@c.us'))).toBe(true)
+    // JID @g.us já completo: não duplica sufixo.
+    expect(resolveGroupChatIdsForConversation({ telefone: '120363426760868023@g.us' })).toEqual(['120363426760868023@g.us'])
+    // Owner-group legado.
+    expect(resolveGroupChatIdsForConversation({ telefone: '553484080098-1406738663' })).toContain('553484080098-1406738663@g.us')
+    // Sem telefone → vazio.
+    expect(resolveGroupChatIdsForConversation({ telefone: '' })).toEqual([])
+  })
+
+  test('normalizeOldMessage captura participante (remetente) em mensagem de grupo recebida', () => {
+    const normalized = normalizeOldMessage(
+      {
+        id: 'wamid-grp-1',
+        fromMe: false,
+        timestamp: 1760000000,
+        type: 'text',
+        text: { body: 'Boa noite mamães!' },
+        participant: '553498962962',
+        senderName: 'Ana Caroline',
+      },
+      { isGroup: true }
+    )
+    expect(normalized?.insert?.texto).toBe('Boa noite mamães!')
+    expect(normalized?.insert?.direcao).toBe('in')
+    expect(String(normalized?.insert?.remetente_telefone || '')).toContain('3498962962')
+    expect(normalized?.insert?.remetente_nome).toBe('Ana Caroline')
   })
 
   test('pickRealPhoneCandidate ignora LID e aceita telefone BR do cliente', () => {

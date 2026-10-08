@@ -376,6 +376,39 @@ describe('Whapi provider — sendText', () => {
     expect(urls.every((url) => url.includes(`time_from=${timeFrom}`))).toBe(true)
   })
 
+  test('getChatMessages de GRUPO usa o JID @g.us com time_from/sort=desc e recorta a janela', async () => {
+    const timeFrom = 1700000000
+    const { fetchWithRetry } = mockDeps({
+      instancesById: { '1:10': whapiInstance() },
+      fetchImpl: async () => ({
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({
+          messages: [
+            { id: 'g-new', from_me: false, from: '553498962962', type: 'text', timestamp: timeFrom + 300, text: { body: 'Bom dia!' } },
+            { id: 'g-old', from_me: false, from: '553499999999', type: 'text', timestamp: timeFrom - 200, text: { body: 'antiga demais' } },
+          ],
+        }),
+      }),
+    })
+    const whapi = require('../services/providers/whapi')
+    const result = await whapi.getChatMessages('120363426760868023', 10, null, {
+      companyId: 1,
+      whatsappInstanceId: 10,
+      returnDetails: true,
+      timeFrom,
+      fetchAllPages: true,
+    })
+    expect(result.ok).toBe(true)
+    // Mensagem anterior ao timeFrom é descartada mesmo em grupo.
+    expect(result.data.map((m) => m.id)).toEqual(['g-new'])
+    const urls = fetchWithRetry.mock.calls.map(([url]) => decodeURIComponent(String(url)))
+    expect(urls[0]).toContain('/messages/list/120363426760868023@g.us')
+    expect(urls[0]).not.toContain('@s.whatsapp.net')
+    expect(urls[0]).toContain(`time_from=${timeFrom}`)
+    expect(urls[0]).toContain('sort=desc')
+  })
+
   test('sendCall POST /calls/outgoing com duration e call_id', async () => {
     const { fetchWithRetry } = mockDeps({
       instancesById: { '1:10': whapiInstance() },

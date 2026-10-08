@@ -76,4 +76,15 @@ describe('whapi/phones — JID Whapi vs UltraMSG', () => {
     expect(ids).toContain('5534999911246@s.whatsapp.net')
     expect(ids.every((id) => !id.includes('@c.us'))).toBe(true)
   })
+
+  test('histórico de GRUPO resolve o JID @g.us (dígitos 120… ou JID completo), nunca telefone', () => {
+    // Grupo gravado só com dígitos 120… em conversas.telefone.
+    const porDigitos = historyChatIdCandidates('120363426760868023')
+    expect(porDigitos).toContain('120363426760868023@g.us')
+    expect(porDigitos.every((id) => !id.includes('@s.whatsapp.net') && !id.includes('@c.us'))).toBe(true)
+    // JID @g.us completo é preservado.
+    expect(historyChatIdCandidates('120363426760868023@g.us')).toContain('120363426760868023@g.us')
+    // Owner-group legado (xxx-yyy) também vira @g.us.
+    expect(historyChatIdCandidates('553484080098-1406738663')).toContain('553484080098-1406738663@g.us')
+  })
 })

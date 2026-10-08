@@ -31,10 +31,8 @@ exports.carregarMensagensAntigasContato = async (req, res) => {
     })
     if (!perm.ok) return res.status(perm.status).json({ error: perm.error })
 
-    if (isGroupConversation(perm.conv)) {
-      return res.status(400).json({ error: 'Use esta acao apenas em conversas individuais.' })
-    }
-
+    // Grupos também buscam histórico (Whapi: janela de 45 dias por JID @g.us).
+    // A resolução de chatId de grupo e a captura de participante ficam no service.
     const result = await syncOldMessagesForConversation(company_id, Number(id), {
       io: req.app?.get?.('io') || null,
     })

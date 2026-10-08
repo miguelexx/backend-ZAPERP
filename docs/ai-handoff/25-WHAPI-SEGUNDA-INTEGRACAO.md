@@ -1117,6 +1117,12 @@ Não usa essa janela: import automático de ~25 mensagens ao abrir conversa nova
 
 Resposta do botão inclui `janela_dias: 45`. Vazio legítimo: canal sem essas mensagens (pré-conexão / só no celular).
 
+### Grupos também buscam histórico (2026-10-08)
+
+O botão passou a valer para **grupos**, com a **mesma janela de 45 dias** (Whapi). O chatId de grupo é o JID `@g.us` (não é telefone), então tem caminho próprio: `resolveGroupChatIdsForConversation(conversa)` monta os candidatos a partir de `conversas.telefone` (dígitos `120…`, JID `@g.us` completo ou owner-group legado `xxx-yyy`) **sem** passar por `pickRealPhoneCandidate` (que descarta `@g.us` de propósito). `historyChatIdCandidates`/`getChatMessages` da Whapi já normalizavam `@g.us`, e `chatMessageCandidatesForLookup` da UltraMSG também — então o provider não mudou.
+
+Mudanças: removidos os gates de grupo em `messageReadController.carregarMensagensAntigasContato` e em `syncOldMessagesForConversation`; `prepareRawMessages` recebe `isGroup` (captura `remetente_telefone`/`remetente_nome` do participante); front `showContactOldSyncCta` passou a exibir o botão em grupo (`frontend/.../useConversationThreadActions.js`). Importação segue idempotente por `whatsapp_id`, não reabre atendimento nem dispara chatbot. Mensagens de retorno dizem "neste grupo". Testes: grupo em `whapiPhones`, `whapiProvider` e `oldMessagesAndSearch` (suíte 2192/2192).
+
 ### 2026-10-08 — Arquivos de arte (.cdr/.psd) liberados no envio (caso real do print)
 
 Cliente de silk mandou `sublimacao.cdr` (chegou e abre normal), mas ENVIAR .cdr era barrado

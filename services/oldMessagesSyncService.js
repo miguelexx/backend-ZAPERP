@@ -811,6 +811,29 @@ async function resolveChatIdsForConversation(company_id, conversa) {
   return candidates
 }
 
+/**
+ * Candidatos de chatId para o botão de histórico em GRUPO.
+ * O grupo não tem telefone — o identificador é o JID `@g.us` (ou os dígitos 120… / owner-group
+ * legado gravados em `conversas.telefone`). Os providers (Whapi `historyChatIdCandidates` e
+ * UltraMSG `chatMessageCandidatesForLookup`) normalizam ambas as formas para `@g.us`.
+ * Nunca passa por `pickRealPhoneCandidate`, que descarta `@g.us` de propósito.
+ */
+function resolveGroupChatIdsForConversation(conversa) {
+  const raw = String(conversa?.telefone || '').trim()
+  if (!raw) return []
+  const candidates = []
+  const push = (value) => {
+    const v = String(value || '').trim()
+    if (v && !candidates.includes(v)) candidates.push(v)
+  }
+  push(raw)
+  if (!/@g\.us$/i.test(raw)) {
+    const core = raw.replace(/@[^@]+$/, '').trim()
+    if (/^[\d-]{8,40}$/.test(core)) push(`${core}@g.us`)
+  }
+  return candidates
+}
+
 async function syncOldMessagesForConversation(company_id, conversa_id, opts = {}) {
   const { data: conversa, error } = await supabase
     .from('conversas')
@@ -833,11 +856,14 @@ async function syncOldMessagesForConversation(company_id, conversa_id, opts = {}
 
   if (error) return { ok: false, error: error.message }
   if (!conversa?.id) return { ok: false, error: 'Conversa nao encontrada.' }
-  if (conversa.tipo === 'grupo' || isGroupChatId(conversa.telefone)) {
-    return { ok: false, error: 'Use esta acao apenas em conversas individuais.' }
-  }
 
-  const chatCandidates = await resolveChatIdsForConversation(company_id, conversa)
+  // Grupos também buscam histórico. O chatId de grupo é o JID @g.us (não é telefone),
+  // então é resolvido por um caminho próprio — `resolveChatIdsForConversation` descarta @g.us.
+  const isGroup = conversa.tipo === 'grupo' || isGroupChatId(conversa.telefone)
+
+  const chatCandidates = isGroup
+    ? resolveGroupChatIdsForConversation(conversa)
+    : await resolveChatIdsForConversation(company_id, conversa)
   if (!chatCandidates.length) {
     debugOldMessages('contact-sync-no-identifier', {
       company_id: Number(company_id),
@@ -845,11 +871,13 @@ async function syncOldMessagesForConversation(company_id, conversa_id, opts = {}
       telefoneTail: safeIdTail(conversa.telefone),
       chatLidTail: safeIdTail(conversa.chat_lid),
       cliente_id: conversa.cliente_id || null,
+      isGroup,
     }, opts)
     return {
       ok: false,
-      error:
-        'Conversa sem telefone valido para buscar historico no WhatsApp. Aguarde uma mensagem do contato com numero, vincule um cliente com telefone, ou verifique se nao foi criada apenas com LID interno.',
+      error: isGroup
+        ? 'Grupo sem identificador valido (@g.us) para buscar historico no WhatsApp.'
+        : 'Conversa sem telefone valido para buscar historico no WhatsApp. Aguarde uma mensagem do contato com numero, vincule um cliente com telefone, ou verifique se nao foi criada apenas com LID interno.',
     }
   }
 
@@ -902,7 +930,7 @@ async function syncOldMessagesForConversation(company_id, conversa_id, opts = {}
   }
 
   const rawMessages = Array.isArray(providerResult.data) ? providerResult.data : []
-  const { ordered, prepared, invalidSkipped, placeholderCount, discardReasons } = prepareRawMessages(rawMessages, { isGroup: false })
+  const { ordered, prepared, invalidSkipped, placeholderCount, discardReasons } = prepareRawMessages(rawMessages, { isGroup })
   debugOldMessages('contact-sync-normalized', {
     company_id: Number(company_id),
     conversa_id: Number(conversa_id),
@@ -924,9 +952,9 @@ async function syncOldMessagesForConversation(company_id, conversa_id, opts = {}
       empty: true,
       message: ordered.length === 0
         ? (instanceProvider === 'whapi'
-          ? `Nenhuma mensagem antiga encontrada para este contato nos ultimos ${CONTACT_HISTORY_WINDOW_DAYS} dias. A Whapi so devolve o que o canal armazenou desde a conexao; conversas que existem apenas no celular nao podem ser importadas.`
-          : 'Nenhuma mensagem antiga encontrada para este contato. A UltraMSG so disponibiliza mensagens que passaram pela instancia desde que o WhatsApp foi conectado; conversas antigas que existem apenas no celular nao podem ser importadas.')
-        : 'Nenhuma mensagem valida encontrada para importar neste contato.',
+          ? `Nenhuma mensagem antiga encontrada ${isGroup ? 'neste grupo' : 'para este contato'} nos ultimos ${CONTACT_HISTORY_WINDOW_DAYS} dias. A Whapi so devolve o que o canal armazenou desde a conexao; conversas que existem apenas no celular nao podem ser importadas.`
+          : `Nenhuma mensagem antiga encontrada ${isGroup ? 'neste grupo' : 'para este contato'}. A UltraMSG so disponibiliza mensagens que passaram pela instancia desde que o WhatsApp foi conectado; conversas antigas que existem apenas no celular nao podem ser importadas.`)
+        : `Nenhuma mensagem valida encontrada para importar ${isGroup ? 'neste grupo' : 'neste contato'}.`,
       ...(instanceProvider === 'whapi' ? { historyWindowDays: CONTACT_HISTORY_WINDOW_DAYS } : {}),
     }
   }
@@ -968,9 +996,9 @@ async function syncOldMessagesForConversation(company_id, conversa_id, opts = {}
     ...(instanceProvider === 'whapi' ? { historyWindowDays: CONTACT_HISTORY_WINDOW_DAYS } : {}),
     message: changedMessages > 0
       ? (instanceProvider === 'whapi'
-        ? `Mensagens antigas dos ultimos ${CONTACT_HISTORY_WINDOW_DAYS} dias carregadas para este contato.`
-        : 'Mensagens antigas carregadas para este contato.')
-      : 'Historico ja estava atualizado para este contato.',
+        ? `Mensagens antigas dos ultimos ${CONTACT_HISTORY_WINDOW_DAYS} dias carregadas ${isGroup ? 'neste grupo' : 'para este contato'}.`
+        : `Mensagens antigas carregadas ${isGroup ? 'neste grupo' : 'para este contato'}.`)
+      : `Historico ja estava atualizado ${isGroup ? 'neste grupo' : 'para este contato'}.`,
   }
 }
 
@@ -980,6 +1008,7 @@ module.exports = {
   normalizeOldMessage,
   isUsableHistoryIdentifier,
   resolveChatIdsForConversation,
+  resolveGroupChatIdsForConversation,
   contactHistoryTimeFromUnix,
   CONTACT_HISTORY_WINDOW_DAYS,
 }
