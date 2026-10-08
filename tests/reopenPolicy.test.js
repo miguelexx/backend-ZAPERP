@@ -45,6 +45,35 @@ describe('reopenPolicy - conversa finalizada permanece finalizada em fechos casu
     const r = shouldReopenFinishedConversation(texto, { status_atendimento: 'fechada' })
     expect(r.shouldReopen).toBe(true)
   })
+
+  // Reação (emoji) do cliente à mensagem de finalização NÃO deve reabrir a conversa.
+  describe('reação do cliente não reabre conversa finalizada', () => {
+    const reacoes = [
+      'Reação: 👍',
+      'Reação: ❤️',
+      'Reação: 😂',
+      'Reação', // reação sem valor
+    ]
+    it.each(reacoes)('mantém finalizada para reação "%s" (type=reaction)', (texto) => {
+      const r = shouldReopenFinishedConversation(texto, { status_atendimento: 'finalizada', type: 'reaction' })
+      expect(r.shouldReopen).toBe(false)
+      expect(r.reason).toBe('reaction_no_reopen')
+    })
+
+    test('o guard é pelo tipo, não pelo texto: mesmo texto longo com type=reaction não reabre', () => {
+      const r = shouldReopenFinishedConversation('quero cancelar minha compra', {
+        status_atendimento: 'finalizada',
+        type: 'reaction',
+      })
+      expect(r.shouldReopen).toBe(false)
+      expect(r.reason).toBe('reaction_no_reopen')
+    })
+
+    test('mensagem de texto normal (type ausente) com demanda real continua reabrindo', () => {
+      const r = shouldReopenFinishedConversation('quero cancelar minha compra', { status_atendimento: 'finalizada' })
+      expect(r.shouldReopen).toBe(true)
+    })
+  })
 })
 
 const {

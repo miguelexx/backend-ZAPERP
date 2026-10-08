@@ -25,6 +25,12 @@ function shouldReopenFinishedConversation(message, context = {}) {
   const normalized = normalizeReopenText(message)
   const compact = normalized.replace(/[!?.,]/g, '').trim()
 
+  // Reação (emoji) do cliente NÃO é nova demanda: é só um ACK à mensagem de finalização.
+  // Mantém a conversa finalizada — a bolha de reação ainda é persistida pelo fluxo normal.
+  if (String(context.type || '').toLowerCase() === 'reaction') {
+    return { shouldReopen: false, reason: 'reaction_no_reopen', normalized }
+  }
+
   if (!compact) {
     return { shouldReopen: false, reason: 'empty_or_symbols_only', normalized }
   }

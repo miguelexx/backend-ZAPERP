@@ -1309,6 +1309,8 @@ exports.receberZapi = async (req, res) => {
     // Eco FRACO (padrão de texto sem corroboração recente): a mensagem É persistida (pode ser
     // genuína do cliente), mas não reabre a conversa nem dispara chatbot/boas-vindas.
     let skipReopenPorEcoFraco = false
+    // Reação (emoji) a uma conversa finalizada é só um ACK — não reabre o atendimento.
+    const inboundEhReacao = String(type || '').toLowerCase() === 'reaction'
     if (!fromMe && !isGroup && conversa_id && !inboundReentregue) {
       const { data: convStatus } = await supabase
         .from('conversas')
@@ -1372,7 +1374,7 @@ exports.receberZapi = async (req, res) => {
             texto: String(texto || '').slice(0, 80),
           })
         }
-        if (!skipReopenPorEcoFraco && motivoFinalizacao === 'ausencia_cliente') {
+        if (!skipReopenPorEcoFraco && !inboundEhReacao && motivoFinalizacao === 'ausencia_cliente') {
           const { absence: cfg } = await loadChatbotTriageMergeAndAbsence(company_id)
           if (cfg.reabrirAutomaticamente) {
             const depAntesReabrir =
@@ -1455,7 +1457,8 @@ exports.receberZapi = async (req, res) => {
           const reopenDecision = shouldReopenFinishedConversation(textoNorm, {
             company_id,
             conversa_id,
-            status_atendimento: st
+            status_atendimento: st,
+            type
           })
           if (reopenDecision.shouldReopen) {
             const depAntesReabrir =
