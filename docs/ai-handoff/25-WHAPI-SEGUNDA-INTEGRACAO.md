@@ -1042,3 +1042,16 @@ RECOMENDAÇÕES OPERACIONAIS (nada de código):
 5. Gzip/brotli para application/json no nginx à frente do zapapi (payloads de /chats em mobile);
    preferível a adicionar dependência `compression` no Express.
 6. Futuro: mesmo padrão de cache no resolveWebhookCompany do UltraMSG (não mexido — prioridade Whapi).
+
+### 2026-10-07 (parte 5) — Implementação das recomendações da auditoria avançada
+
+1. **Cache TTL no resolvedor UltraMSG** (`middleware/resolveWebhookCompany.js`): mesmo padrão
+   do Whapi — resoluções bem-sucedidas instanceId→instância cacheadas 30s (máx 300); erro de
+   banco/não-mapeada/duplicada nunca entram; log ganha `from_cache`. Testes:
+   `tests/resolveWebhookCompanyUltramsgCache.test.js` (4 casos). Suíte: 208/2184 OK.
+2. **Invariante PM2 gravado no `ecosystem.config.js`**: comentário no app principal proibindo
+   cluster/instances>1 (dedupe, locks, caches e Socket.IO são de processo único).
+3. **Env `WHAPI_INBOUND_MAX_AGE_MINUTES`**: já documentada no `.env.example` (recomendado 10);
+   falta apenas descomentar/setar no `.env` do SERVIDOR.
+4. **SQL doc 29** e **gzip nginx**: ações do servidor — blocos prontos entregues ao Miguel no
+   chat (SQL idempotente do §2 deste doc 29; snippet gzip para o server block do zapapi).

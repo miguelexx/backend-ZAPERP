@@ -4,6 +4,11 @@ module.exports = {
       name: 'whatsapp-plataforma-backend',
       script: 'index.js',
       cwd: __dirname,
+      // INVARIANTE: NUNCA mudar para cluster/instances>1. As garantias anti-duplicata
+      // vivem na memória de UM processo: dedupe de client_temp_id (Map 30s), locks de
+      // reenvio (_reenviosEmAndamento), caches TTL (webhook resolver, histórico Whapi,
+      // media proxy) e o Socket.IO sem adapter externo. Dois forks = mensagem duplicada
+      // no WhatsApp do cliente. Ver docs/ai-handoff/25 (parte 4).
       instances: 1,
       exec_mode: 'fork',
       autorestart: true,

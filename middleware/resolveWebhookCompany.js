@@ -8,6 +8,34 @@
 
 const { getWhatsappInstanceByProviderInstanceId } = require('../services/whatsappInstanceService')
 
+/**
+ * Cache TTL curto de resoluções BEM-SUCEDIDAS instanceId→instância (mesmo padrão do
+ * resolveWhapiWebhookCompany): o UltraMSG posta um webhook por mensagem/ACK e cada POST
+ * fazia o mesmo SELECT. Erro de banco / não mapeada / duplicada NUNCA entram no cache
+ * (retry imediato); chave exata por instanceId — sem risco cross-tenant.
+ */
+const _resolveOkCache = new Map()
+const RESOLVE_CACHE_TTL_MS = 30_000
+const RESOLVE_CACHE_MAX = 300
+
+function cacheGetInstance(instanceId) {
+  const hit = _resolveOkCache.get(instanceId)
+  if (!hit) return null
+  if (Date.now() > hit.exp) {
+    _resolveOkCache.delete(instanceId)
+    return null
+  }
+  return hit.instance
+}
+
+function cachePutInstance(instanceId, instance) {
+  if (_resolveOkCache.size >= RESOLVE_CACHE_MAX) {
+    const oldest = _resolveOkCache.keys().next().value
+    if (oldest !== undefined) _resolveOkCache.delete(oldest)
+  }
+  _resolveOkCache.set(instanceId, { instance, exp: Date.now() + RESOLVE_CACHE_TTL_MS })
+}
+
 function _logSafe(entry) {
   console.log('[WEBHOOK]', JSON.stringify({ ts: new Date().toISOString(), ...entry }))
 }
@@ -74,10 +102,14 @@ async function resolveWebhookCompany(req, res, next) {
     }
 
     const eventType = inferEventType(body, path)
-    const resolved = await getWhatsappInstanceByProviderInstanceId('ultramsg', instanceIdRaw)
+    const cachedInstance = cacheGetInstance(instanceIdRaw)
+    const resolved = cachedInstance
+      ? { instance: cachedInstance }
+      : await getWhatsappInstanceByProviderInstanceId('ultramsg', instanceIdRaw)
     _logResolveDecision({
       eventType,
       instance_id_raw: instanceIdRaw,
+      from_cache: Boolean(cachedInstance),
       service_return_shape: {
         has_instance: Boolean(resolved?.instance),
         has_error: Boolean(resolved?.error),
@@ -120,6 +152,9 @@ async function resolveWebhookCompany(req, res, next) {
 
     const instance = resolved?.instance || null
     const company_id = instance?.company_id ?? null
+    if (!cachedInstance && instance && company_id != null) {
+      cachePutInstance(instanceIdRaw, instance)
+    }
     const whatsapp_instance_id = instance?.id ?? null
     const provider_instance_id = instance?.instance_id || instanceIdRaw
     const companyIdResolved = company_id != null ? company_id : 'not_mapped'
@@ -166,3 +201,7 @@ async function resolveWebhookCompany(req, res, next) {
 }
 
 module.exports = resolveWebhookCompany
+module.exports._test = {
+  clearResolveCache: () => _resolveOkCache.clear(),
+  cacheSize: () => _resolveOkCache.size,
+}
