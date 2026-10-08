@@ -86,6 +86,7 @@ describe('reenvio automatico de pendentes', () => {
     conversa = { id: 2, telefone: '5511999999999' },
     chatHistory = null, // { ok, data } de getChatMessages (confirmação Whapi pelo histórico)
     mensagemNoBanco = null, // linha devolvida na releitura pré-reenvio (rowAindaSemAceiteNoBanco)
+    donosWhatsappIds = null, // linhas já donas dos ids do histórico (guarda anti-roubo na cura)
   }) {
     jest.resetModules()
 
@@ -113,7 +114,15 @@ describe('reenvio automatico de pendentes', () => {
           select() { return chain },
           eq() { return chain },
           is() { return chain },
-          in() { return chain },
+          in() {
+            // Consulta de reivindicação da cura (await direto no .in): devolve quem já é
+            // dono dos whatsapp_ids encontrados no histórico.
+            return {
+              then(resolve) {
+                resolve({ data: donosWhatsappIds || [], error: null })
+              },
+            }
+          },
           gte() { return chain },
           lte() { return chain },
           not() { return chain },
@@ -343,6 +352,51 @@ describe('reenvio automatico de pendentes', () => {
     expect(sendText).not.toHaveBeenCalled()
     expect(res.action).toBe('whapi_curada_pelo_historico')
     expect(updates[0]).toMatchObject({ status: 'sent', status_mensagem: 'sent', whatsapp_id: 'WhapiHistMsgId4567890123' })
+  })
+
+  test('Whapi RAJADA de textos idênticos: id do histórico já é do IRMÃO → NÃO rouba a cura; reenvia', async () => {
+    // Cenário do print do Miguel: "ok" duas vezes no mesmo minuto; a 1ª entregou (dona do id
+    // no histórico), a 2ª falhou no POST. Sem a guarda, a 2ª se "curava" com o id da 1ª e o
+    // cliente nunca recebia a 2ª mensagem.
+    const { svc, sendText, updates } = montarAmbiente({
+      providerName: 'whapi',
+      getMessagesResult: { ok: true, data: [] },
+      chatHistory: {
+        ok: true,
+        data: [
+          { id: 'WhapiIrmaoEntregue12345678', from_me: true, body: 'Bom dia, segue o retorno', timestamp: Math.floor(Date.now() / 1000) },
+        ],
+      },
+      donosWhatsappIds: [{ id: 99, whatsapp_id: 'WhapiIrmaoEntregue12345678' }],
+      mensagemNoBanco: { id: 1, status: 'pending', status_mensagem: 'sending', whatsapp_id: null, provider_queue_id: null },
+    })
+
+    const res = await svc.reconcilePendingOutboundMessage(linhaPendente(), { io: null })
+
+    expect(sendText).toHaveBeenCalledTimes(1)
+    expect(res.action).toBe('whapi_reenviada_apos_confirmacao_historico')
+    expect(updates.some((u) => u.whatsapp_id === 'WhapiIrmaoEntregue12345678')).toBe(false)
+  })
+
+  test('Whapi RAJADA de textos idênticos: duas cópias no histórico, uma livre → cura com a LIVRE', async () => {
+    const { svc, sendText, updates } = montarAmbiente({
+      providerName: 'whapi',
+      getMessagesResult: { ok: true, data: [] },
+      chatHistory: {
+        ok: true,
+        data: [
+          { id: 'WhapiIrmaoEntregue12345678', from_me: true, body: 'Bom dia, segue o retorno', timestamp: Math.floor(Date.now() / 1000) },
+          { id: 'WhapiEcoDestaLinha12345678', from_me: true, body: 'Bom dia, segue o retorno', timestamp: Math.floor(Date.now() / 1000) },
+        ],
+      },
+      donosWhatsappIds: [{ id: 99, whatsapp_id: 'WhapiIrmaoEntregue12345678' }],
+    })
+
+    const res = await svc.reconcilePendingOutboundMessage(linhaPendente(), { io: null })
+
+    expect(sendText).not.toHaveBeenCalled()
+    expect(res.action).toBe('whapi_curada_pelo_historico')
+    expect(updates[0]).toMatchObject({ status: 'sent', whatsapp_id: 'WhapiEcoDestaLinha12345678' })
   })
 
   test('Whapi TEXTO sem id: AUSÊNCIA confirmada no histórico → reenvia 1x (releitura antes)', async () => {

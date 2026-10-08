@@ -16,6 +16,7 @@ const { empresaModoSimplesAtivo } = require('../../../helpers/empresaModoSimples
 const { executarAssumirConversa } = require('../../conversaAssumirInternoService')
 const { usuarioParticipaAtivamenteDaConversa } = require('./conversationVisibilityService')
 const { atendenteNaoPodeVerAssumidaPorOutro } = require('./conversationAccessRules')
+const { instanciasPermitidasDoUsuario, atendentePodeVerNumero } = require('./usuarioWhatsappInstanceAccess')
 const {
   emitirRealtimeAposAssumir,
   emitirMovimentacaoInternaAtendimento,
@@ -25,15 +26,22 @@ const {
 async function assertPermissaoConversa({ company_id, conversa_id, user_id, role, user_dep_ids }) {
   const { data: conv, error } = await supabase
     .from('conversas')
-    .select('id, atendente_id, departamento_id, tipo, telefone, status_atendimento')
+    .select('id, atendente_id, departamento_id, tipo, telefone, status_atendimento, whatsapp_instance_id')
     .eq('company_id', Number(company_id))
     .eq('id', Number(conversa_id))
     .maybeSingle()
   if (error) return { ok: false, status: 500, error: error.message }
   if (!conv) return { ok: false, status: 404, error: 'Conversa não encontrada' }
 
-  const isGroup = isGroupConversation(conv)
   const r = String(role || '').toLowerCase()
+  if (r === 'atendente') {
+    const permitidas = await instanciasPermitidasDoUsuario(company_id, user_id)
+    if (!atendentePodeVerNumero(permitidas, conv.whatsapp_instance_id)) {
+      return { ok: false, status: 403, error: 'Conversa de um número que você não pode ver' }
+    }
+  }
+
+  const isGroup = isGroupConversation(conv)
   const isAssignedToUser = conv.atendente_id && Number(conv.atendente_id) === Number(user_id)
   const depIds = Array.isArray(user_dep_ids) ? user_dep_ids : []
 
@@ -120,6 +128,13 @@ async function assertPodeEnviarMensagem({
     .maybeSingle()
   if (error) return { ok: false, status: 500, error: error.message }
   if (!conv) return { ok: false, status: 404, error: 'Conversa não encontrada' }
+
+  if (String(role || '').toLowerCase() === 'atendente') {
+    const permitidas = await instanciasPermitidasDoUsuario(company_id, user_id)
+    if (!atendentePodeVerNumero(permitidas, conv.whatsapp_instance_id)) {
+      return { ok: false, status: 403, error: 'Conversa de um número que você não pode ver' }
+    }
+  }
 
   if (isGroupConversation(conv)) {
     const podeVerGrupo = await usuarioPodeVerGrupo({

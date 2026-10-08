@@ -18,6 +18,7 @@ const { parseMessageHistoryPagination, splitMessageHistoryPage, applyDetalharCha
 const { mergeConversaClienteTags, statusAtendimentoParaLista, safeWhatsappInstanceMeta } = require('../../services/chat/presentation/chatDto')
 const { resolveTelefoneFromLidSiblingConversation } = require('../../services/chat/identity/conversationAddressService')
 const { usuarioParticipaAtivamenteDaConversa } = require('../../services/chat/access/conversationVisibilityService')
+const { instanciasPermitidasDoUsuario, atendentePodeVerNumero } = require('../../services/chat/access/usuarioWhatsappInstanceAccess')
 const { emitirParaUsuario } = require('../../services/chat/realtime/chatRealtimeGateway')
 const { assertPermissaoConversa } = require('../../services/chat/access/conversationPolicy')
 const { enrichMensagensComAutorUsuario } = require('../../services/chat/presentation/messageAuthorEnrichment')
@@ -105,6 +106,13 @@ exports.detalharChat = async (req, res) => {
 
     if (errConv) return res.status(500).json({ error: errConv.message })
     if (!conversa) return res.status(404).json({ error: 'Conversa não encontrada' })
+
+    if (String(role || '').toLowerCase() === 'atendente') {
+      const permitidas = await instanciasPermitidasDoUsuario(company_id, user_id)
+      if (!atendentePodeVerNumero(permitidas, conversa.whatsapp_instance_id)) {
+        return res.status(403).json({ error: 'Conversa de um número que você não pode ver' })
+      }
+    }
 
     const isGroup = isGroupConversation(conversa)
     const isAssignedToUser = conversa.atendente_id && Number(conversa.atendente_id) === Number(user_id)

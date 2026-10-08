@@ -1135,3 +1135,21 @@ ALLOWED_MIME); `inboundMediaPersistenceService.ALLOW_EXT_FROM_NAME` (+.ai/.eps/.
 (accept dos inputs de anexo e documentos). Bloqueio de risco (exe/apk/ps1/...) INTACTO.
 Testes: uploadMiddleware 11/11 (novos casos .cdr por MIME e por extensão com octet-stream);
 suíte completa verde. Encaminhar o .cdr recebido já funcionava (forward não passa pelo multer).
+
+### 2026-10-08 (parte 2) — Rajada de textos: análise do print "Não foi possível enviar" intercalado
+
+Print do Miguel (4 textos no mesmo minuto: ✓✓ / FALHOU / ✓✓ / relógio) = assinatura de
+429/instabilidade em rajada no backend ANTIGO em produção (lá 429 era erro terminal; no código
+atual 429/5xx/transporte → pending+reconciliação — partes 1–3 de 2026-10-05/07). Nenhum bug
+novo no caminho principal.
+
+HARDENING aplicado no único edge que rajada expõe: cura pelo histórico Whapi com TEXTOS
+IDÊNTICOS ("ok" 2x na janela). `consultarHistoricoWhapiPorTexto` agora coleta TODOS os matches
+da janela e consulta quem já é DONO de cada id (`in('whatsapp_id', ids)`, excluindo a própria
+linha): só cura com id LIVRE; todas as cópias reivindicadas = ausência real → reenvio seguro
+(com releitura). Consulta de reivindicação falhou → inconclusivo (não cura às cegas). Antes, a
+linha falhada podia "roubar" o id do irmão entregue (UNIQUE estouraria / sent sem entrega).
+Testes: +2 casos (irmão-dono → reenvia; cópia livre → cura com a livre) — 33/33 no arquivo.
+
+Recomendação de env (produção): WHATSAPP_SEND_GUARD_HUMAN_INTERVAL_MS=300 — espaça rajadas
+humanas em 0,3s por instância (hoje 0ms), reduzindo 429 do provedor sem latência perceptível.

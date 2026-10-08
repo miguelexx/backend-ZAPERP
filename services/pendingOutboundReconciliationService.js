@@ -451,6 +451,14 @@ async function consultarHistoricoWhapiPorTexto({ row, provider, telefone, usuari
   const criadoMs = Date.parse(String(row.criado_em || ''))
   const desdeSeg = Number.isFinite(criadoMs) ? Math.floor((criadoMs - 2 * 60_000) / 1000) : 0
 
+  // RAJADA COM TEXTOS IDÊNTICOS ("ok" duas vezes no mesmo minuto): o histórico pode conter
+  // a cópia do IRMÃO que foi entregue — curar esta linha com aquele id gravaria um
+  // whatsapp_id já reivindicado (UNIQUE) e marcaria sent uma mensagem que o cliente nunca
+  // recebeu. Coleta TODOS os matches da janela e só cura com um id ainda livre; se todas as
+  // cópias pertencem a outras linhas, é ausência real → o chamador segue para o reenvio
+  // seguro (com releitura da linha antes).
+  const candidatosComId = []
+  let candidatoSemId = null
   for (const m of res.data) {
     const fromMe = m?.from_me === true || m?.fromMe === true
     if (!fromMe) continue
@@ -458,10 +466,40 @@ async function consultarHistoricoWhapiPorTexto({ row, provider, telefone, usuari
     const tsSeg = tsRaw > 1e12 ? Math.floor(tsRaw / 1000) : tsRaw
     if (desdeSeg && tsSeg && tsSeg < desdeSeg) continue
     const corpo = normalizarTextoParaComparacao(m?.body ?? m?.text?.body ?? '')
-    if (corpo && alvos.has(corpo)) {
-      return { consultaOk: true, encontrado: true, mensagem: m }
+    if (!corpo || !alvos.has(corpo)) continue
+    const idItem = String(m?.id || '').trim()
+    if (idItem) candidatosComId.push(m)
+    else if (!candidatoSemId) candidatoSemId = m
+  }
+
+  if (candidatosComId.length) {
+    let reivindicados = new Set()
+    try {
+      const ids = candidatosComId.map((m) => String(m.id).trim())
+      const { data: donos } = await supabase
+        .from('mensagens')
+        .select('id, whatsapp_id')
+        .eq('company_id', row.company_id)
+        .in('whatsapp_id', ids)
+      reivindicados = new Set(
+        (donos || [])
+          .filter((d) => Number(d.id) !== Number(row.id))
+          .map((d) => String(d.whatsapp_id || '').trim())
+      )
+    } catch (_) {
+      // Consulta de reivindicação falhou: NÃO curar às cegas (poderia roubar o id do irmão);
+      // devolve inconclusivo e o fluxo conservador mantém pending até o próximo ciclo.
+      return { consultaOk: false }
+    }
+    const livre = candidatosComId.find((m) => !reivindicados.has(String(m.id).trim()))
+    if (livre) return { consultaOk: true, encontrado: true, mensagem: livre }
+    if (candidatosComId.length && !candidatoSemId) {
+      // Todas as cópias do texto já pertencem a outras linhas: ESTA mensagem não chegou.
+      return { consultaOk: true, encontrado: false }
     }
   }
+
+  if (candidatoSemId) return { consultaOk: true, encontrado: true, mensagem: candidatoSemId }
   return { consultaOk: true, encontrado: false }
 }
 

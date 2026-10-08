@@ -22,6 +22,8 @@ const { parsePositiveInt, parseChatListPagination, applyChatListCursor, splitCha
 const { getChatSearchIdLimit, getChatFilterIdLimit } = require('../../services/chat/read/searchLimits')
 const { mergeConversaClienteTags, statusAtendimentoParaLista, safeWhatsappInstanceMeta } = require('../../services/chat/presentation/chatDto')
 const { getConversaIdsParticipanteAtivo, deveIncluirGruposSemDepartamentoNoFiltroTodos } = require('../../services/chat/access/conversationVisibilityService')
+const { instanciasPermitidasDoUsuario } = require('../../services/chat/access/usuarioWhatsappInstanceAccess')
+const { aplicarFiltroNumerosPermitidos } = require('../../services/chat/access/usuarioWhatsappInstanceAccessRules')
 const { atendenteNaoPodeVerAssumidaPorOutro } = require('../../services/chat/access/conversationAccessRules')
 const { deriveListarConversasFilters } = require('../../services/chat/read/listarConversasFilters')
 const { enrichMensagensComAutorUsuario } = require('../../services/chat/presentation/messageAuthorEnrichment')
@@ -439,6 +441,10 @@ exports.listarConversas = async (req, res) => {
       mensagens ( conversa_id, texto, criado_em, direcao, tipo, url, nome_arquivo, whatsapp_id, status, autor_usuario_id, contact_meta, location_meta )
     `
 
+    const instanciasPermitidasAtendente = isAtendente
+      ? await instanciasPermitidasDoUsuario(company_id, user_id)
+      : null
+
     function buildQuery(select) {
       let q = supabase
         .from('conversas')
@@ -447,6 +453,8 @@ exports.listarConversas = async (req, res) => {
       // Filtro por número WhatsApp (multi-instância): escopo puro, aplicado igual em todas as abas
       // e nos contadores (chatListCountsService). Sem o filtro = todos os números (comportamento atual).
       if (filtroWhatsappInstanceId) q = q.eq('whatsapp_instance_id', filtroWhatsappInstanceId)
+      // Trava atendente ↔ número. null = sem marcação, lista igual à de hoje.
+      q = aplicarFiltroNumerosPermitidos(q, instanciasPermitidasAtendente, filtroWhatsappInstanceId)
       // Filtro por setor: conversas sem setor visíveis para TODOS; com setor só mesmo setor.
       // EXCEÇÃO: conversas que o usuário transferiu — aparecem independente do setor.
       if (!isAdmin) {
@@ -625,6 +633,7 @@ exports.listarConversas = async (req, res) => {
       departamento_ids,
       filter_dep_id,
       filtroAtendenteInformado,
+      instanciasPermitidasAtendente,
       conversaIdsTransferidas,
       conversaIdsParticipanteAtivo,
       grupoIdsPermitidosPorDepartamento,
@@ -1290,13 +1299,17 @@ exports.listarConversas = async (req, res) => {
         return true
       }
 
-      const instanceScopes = multiInstanceMode
-        ? activeInstances.map((inst) => sanitizeWhatsappInstance(inst)).filter(Boolean)
+      const instanciasVisiveis = instanciasPermitidasAtendente
+        ? activeInstances.filter((inst) => instanciasPermitidasAtendente.has(Number(inst.id)))
+        : activeInstances
+      const semConversaPorInstancia = instanciasPermitidasAtendente != null || multiInstanceMode
+      const instanceScopes = semConversaPorInstancia
+        ? instanciasVisiveis.map((inst) => sanitizeWhatsappInstance(inst)).filter(Boolean)
         : [null]
 
       const itensSemConversa = []
       for (const cl of todosClientes || []) {
-        if (!multiInstanceMode) {
+        if (!semConversaPorInstancia) {
           if (clienteHasAnyConversa(cl)) continue
           itensSemConversa.push({
             id: null,

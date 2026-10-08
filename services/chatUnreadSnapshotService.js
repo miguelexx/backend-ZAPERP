@@ -1,5 +1,6 @@
 const supabase = require('../config/supabase')
 const { applyChatListSqlFilters } = require('./chatListCountsService')
+const { instanciasPermitidasDoUsuario } = require('./chat/access/usuarioWhatsappInstanceAccess')
 
 const PAGE_SIZE = 200
 
@@ -18,12 +19,17 @@ async function readAll(buildQuery) {
 async function getAuthorizedIds(user, ids) {
   const company_id = Number(user.company_id)
   const user_id = Number(user.id)
-  const isAdmin = String(user.perfil || '').toLowerCase() === 'admin'
+  const role = String(user.perfil || '').toLowerCase()
+  const isAdmin = role === 'admin'
+  const isAtendente = role === 'atendente'
   const ctx = {
-    company_id, user_id, isAdmin,
+    company_id, user_id, isAdmin, isAtendente,
     departamento_ids: user.departamento_ids || [],
     conversaIdsTransferidas: [], conversaIdsParticipanteAtivo: [],
     grupoIdsPermitidosPorDepartamento: [], grupoIdsSemDepartamento: [],
+    instanciasPermitidasAtendente: isAtendente
+      ? await instanciasPermitidasDoUsuario(company_id, user_id)
+      : null,
   }
   if (!isAdmin) {
     const [transfers, participants, groupDepartments, groups] = await Promise.all([

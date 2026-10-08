@@ -12,6 +12,8 @@
  * Principais exports: `getChatFilterCounts`, `resolveChatListCountsContext`, `countConversasWithFilter`.
  */
 const supabase = require('../config/supabase')
+const { instanciasPermitidasDoUsuario } = require('./chat/access/usuarioWhatsappInstanceAccess')
+const { aplicarFiltroNumerosPermitidos } = require('./chat/access/usuarioWhatsappInstanceAccessRules')
 const { usuarioPertenceSetorFinanceiro } = require('../helpers/financeiroSetorHelper')
 const {
   buildTelefoneSearchOr,
@@ -320,6 +322,9 @@ async function resolveChatListCountsContext(req) {
     filter_dep_id,
     filtroAtendenteInformado,
     filtroWhatsappInstanceId,
+    instanciasPermitidasAtendente: isAtendente
+      ? await instanciasPermitidasDoUsuario(company_id, user_id)
+      : null,
     conversaIdsTransferidas,
     conversaIdsParticipanteAtivo: Array.isArray(conversaIdsParticipanteAtivo) ? conversaIdsParticipanteAtivo : [],
     grupoIdsPermitidosPorDepartamento,
@@ -386,6 +391,7 @@ function applyChatListSqlFilters(query, ctx, overrides = {}) {
   let q = query.eq('company_id', company_id)
   // Filtro por número WhatsApp (multi-instância): mesmo escopo aplicado no buildQuery da listagem.
   if (filtroWhatsappInstanceId) q = q.eq('whatsapp_instance_id', filtroWhatsappInstanceId)
+  q = aplicarFiltroNumerosPermitidos(q, ctx.instanciasPermitidasAtendente, filtroWhatsappInstanceId)
 
   if (!isAdmin) {
     const depIds = Array.isArray(departamento_ids)

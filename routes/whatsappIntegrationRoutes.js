@@ -5,6 +5,8 @@ const supervisorOrAdmin = require('../middleware/supervisorOrAdmin')
 const { apiLimiter } = require('../middleware/rateLimit')
 const { uploadArquivo } = require('../middleware/upload')
 const whatsappIntegrationController = require('../controllers/whatsappIntegrationController')
+const usuarioWhatsappInstanceAccessController = require('../controllers/chat/usuarioWhatsappInstanceAccessController')
+const adminOnly = require('../middleware/adminOnly')
 
 router.use(auth)
 
@@ -43,6 +45,8 @@ router.get('/qrcode', whatsappIntegrationController.getQrCodeLegacy)
 router.post('/restart', whatsappIntegrationController.restart)
 
 router.get('/instances', whatsappIntegrationController.listInstances)
+router.get('/instance-access', adminOnly, usuarioWhatsappInstanceAccessController.listar)
+router.put('/instances/:id/atendentes', adminOnly, usuarioWhatsappInstanceAccessController.salvar)
 router.post('/instances/provision-whapi', whatsappIntegrationController.provisionWhapiInstance)
 router.post('/instances', whatsappIntegrationController.createInstance)
 router.patch('/instances/:id', whatsappIntegrationController.updateInstance)

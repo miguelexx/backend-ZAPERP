@@ -1,4 +1,5 @@
 const supabase = require('../config/supabase')
+const { instanciasPermitidasDoUsuario, atendentePodeVerNumero } = require('./chat/access/usuarioWhatsappInstanceAccess')
 
 async function loadWhatsappInstanceMetaMap(companyId, instanceIds) {
   const ids = [...new Set((instanceIds || []).map((id) => Number(id)).filter((id) => Number.isFinite(id) && id > 0))]
@@ -305,7 +306,10 @@ async function computeMinhasPendencias(companyId, usuarioId) {
   if (!Number.isFinite(uid) || uid <= 0) throw Object.assign(new Error('usuario_id inválido'), { statusCode: 400 })
 
   const conversasRaw = await listConversasDoAtendente(cid, uid)
-  const conversas = conversasRaw.filter((c) => isConversaElegivelBase(c, uid))
+  const permitidas = await instanciasPermitidasDoUsuario(cid, uid)
+  const conversas = conversasRaw.filter(
+    (c) => isConversaElegivelBase(c, uid) && atendentePodeVerNumero(permitidas, c.whatsapp_instance_id)
+  )
   const conversaIds = conversas.map((c) => c.id)
 
   const [lastMessagesMap, transferRows] = await Promise.all([
