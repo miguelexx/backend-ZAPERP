@@ -428,7 +428,7 @@ async function getWhatsappInstanceByProviderInstanceId(provider, instanceId, opt
  * - Com uma instância ativa: usa automaticamente.
  * - Com várias ativas sem escolha: retorna code SELECIONE_WHATSAPP_INSTANCE.
  */
-async function resolveWhatsappInstanceForManualAction(companyId, requestedInstanceId, usuarioId = null) {
+async function resolveWhatsappInstanceForManualAction(companyId, requestedInstanceId) {
   const cid = normalizeCompanyId(companyId)
   if (!cid) {
     return {
@@ -453,21 +453,7 @@ async function resolveWhatsappInstanceForManualAction(companyId, requestedInstan
     }
   }
 
-  let active = (instances || []).filter((i) => i && i.ativo !== false)
-
-  // Controle de visibilidade por NUMERO: ao iniciar conversa, so oferecer/aceitar
-  // numeros que este usuario pode ver. Numero sem lista salva continua disponivel.
-  const uid = Number(usuarioId)
-  if (Number.isFinite(uid) && uid > 0) {
-    try {
-      const { getBlockedInstanceIdsParaUsuario } = require('./chat/access/whatsappInstanceVisibilityService')
-      const blocked = new Set((await getBlockedInstanceIdsParaUsuario(cid, uid)).map(Number))
-      if (blocked.size > 0) active = active.filter((i) => !blocked.has(Number(i.id)))
-    } catch (_) {
-      // falha ao resolver visibilidade nao deve quebrar a abertura (fail-open para o caminho legado)
-    }
-  }
-
+  const active = (instances || []).filter((i) => i && i.ativo !== false)
   const safeActive = active.map(sanitizeWhatsappInstance).filter(Boolean)
 
   const requestedRaw = requestedInstanceId

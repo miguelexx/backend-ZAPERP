@@ -12,25 +12,19 @@ const { emitirConversaAtualizada, emitirLock, emitirMovimentacaoInternaAtendimen
 
 exports.listarAtendimentos = async (req, res) => {
   try {
-    const { company_id, id: user_id } = req.user
+    const { company_id } = req.user
     const { id: conversa_id } = req.params
     const cid = Number(conversa_id)
 
     // 🔒 Tenant estrito: não permitir consultar conversa de outra empresa
     const { data: conv, error: errConvCheck } = await supabase
       .from('conversas')
-      .select('id, whatsapp_instance_id')
+      .select('id')
       .eq('company_id', company_id)
       .eq('id', cid)
       .maybeSingle()
     if (errConvCheck) return res.status(500).json({ error: errConvCheck.message })
     if (!conv) return res.status(404).json({ error: 'Conversa não encontrada' })
-
-    // Gate por NUMERO: sem acesso ao número, não vê o histórico de atendimentos.
-    const { usuarioPodeVerNumero } = require('../../services/chat/access/whatsappInstanceVisibilityService')
-    if (!(await usuarioPodeVerNumero(company_id, user_id, conv.whatsapp_instance_id))) {
-      return res.status(403).json({ error: 'Sem acesso às conversas deste número' })
-    }
 
     const { data: rows, error } = await supabase
       .from('atendimentos')
@@ -120,13 +114,6 @@ exports.puxarChatFila = async (req, res) => {
       } else {
         query = query.is('departamento_id', null)
       }
-    }
-
-    // Gate por NUMERO: não puxar da fila conversas de números cuja lista não inclui o usuário.
-    const { getBlockedInstanceIdsParaUsuario } = require('../../services/chat/access/whatsappInstanceVisibilityService')
-    const blockedInst = await getBlockedInstanceIdsParaUsuario(company_id, user_id).catch(() => [])
-    if (blockedInst.length > 0) {
-      query = query.or(`whatsapp_instance_id.is.null,whatsapp_instance_id.not.in.(${blockedInst.join(',')})`)
     }
 
     const { data: conversa, error } = await query.maybeSingle()

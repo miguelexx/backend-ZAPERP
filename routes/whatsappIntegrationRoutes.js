@@ -5,7 +5,6 @@ const supervisorOrAdmin = require('../middleware/supervisorOrAdmin')
 const { apiLimiter } = require('../middleware/rateLimit')
 const { uploadArquivo } = require('../middleware/upload')
 const whatsappIntegrationController = require('../controllers/whatsappIntegrationController')
-const whatsappInstanceVisibilityController = require('../controllers/whatsappInstanceVisibilityController')
 
 router.use(auth)
 
@@ -42,10 +41,6 @@ router.get('/status', whatsappIntegrationController.getStatus)
 router.get('/operational-status', whatsappIntegrationController.getOperationalStatus)
 router.get('/qrcode', whatsappIntegrationController.getQrCodeLegacy)
 router.post('/restart', whatsappIntegrationController.restart)
-
-// Controle de visibilidade por número: quem (atendentes/usuários) vê cada número.
-router.get('/visibilidade', whatsappInstanceVisibilityController.getVisibilidade)
-router.put('/instances/:id/visibilidade', whatsappInstanceVisibilityController.putVisibilidade)
 
 router.get('/instances', whatsappIntegrationController.listInstances)
 router.post('/instances/provision-whapi', whatsappIntegrationController.provisionWhapiInstance)

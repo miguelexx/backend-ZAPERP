@@ -32,7 +32,6 @@ const {
   pushAtendenteFilaLivreVisibilityParts,
   pushAllowedGroupIdsPart,
 } = require('../helpers/departamentoGruposHelper')
-const { getBlockedInstanceIdsParaUsuario } = require('./chat/access/whatsappInstanceVisibilityService')
 
 function parseBooleanQuery(value) {
   return value === true || value === 1 || value === '1' || String(value || '').toLowerCase() === 'true'
@@ -203,9 +202,6 @@ async function resolveChatListCountsContext(req) {
 
   const isFinanceiro = await usuarioPertenceSetorFinanceiro(departamento_ids, company_id)
 
-  // Controle de visibilidade por NUMERO — espelha o buildQuery da listagem.
-  const blockedWhatsappInstanceIds = await getBlockedInstanceIdsParaUsuario(company_id, user_id).catch(() => [])
-
   let conversaIdsTransferidas = []
   let conversaIdsParticipanteAtivo = []
   if (!isAdmin) {
@@ -324,7 +320,6 @@ async function resolveChatListCountsContext(req) {
     filter_dep_id,
     filtroAtendenteInformado,
     filtroWhatsappInstanceId,
-    blockedWhatsappInstanceIds,
     conversaIdsTransferidas,
     conversaIdsParticipanteAtivo: Array.isArray(conversaIdsParticipanteAtivo) ? conversaIdsParticipanteAtivo : [],
     grupoIdsPermitidosPorDepartamento,
@@ -356,7 +351,6 @@ function applyChatListSqlFilters(query, ctx, overrides = {}) {
     filter_dep_id,
     filtroAtendenteInformado,
     filtroWhatsappInstanceId,
-    blockedWhatsappInstanceIds,
     conversaIdsTransferidas,
     conversaIdsParticipanteAtivo,
     grupoIdsPermitidosPorDepartamento,
@@ -392,10 +386,6 @@ function applyChatListSqlFilters(query, ctx, overrides = {}) {
   let q = query.eq('company_id', company_id)
   // Filtro por número WhatsApp (multi-instância): mesmo escopo aplicado no buildQuery da listagem.
   if (filtroWhatsappInstanceId) q = q.eq('whatsapp_instance_id', filtroWhatsappInstanceId)
-  // Controle de visibilidade por NUMERO — espelha o buildQuery da listagem (badge = linhas).
-  if (Array.isArray(blockedWhatsappInstanceIds) && blockedWhatsappInstanceIds.length > 0) {
-    q = q.or(`whatsapp_instance_id.is.null,whatsapp_instance_id.not.in.(${blockedWhatsappInstanceIds.join(',')})`)
-  }
 
   if (!isAdmin) {
     const depIds = Array.isArray(departamento_ids)

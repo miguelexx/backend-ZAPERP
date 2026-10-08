@@ -27,7 +27,7 @@ exports.criarGrupo = async (req, res) => {
     const participantes = req.body?.participantes || req.body?.participants || []
     if (!nome) return res.status(400).json({ error: 'Informe o nome do grupo.' })
 
-    const instanceRes = await resolveWhatsappInstanceForManualAction(company_id, req.body?.whatsapp_instance_id, usuario_id)
+    const instanceRes = await resolveWhatsappInstanceForManualAction(company_id, req.body?.whatsapp_instance_id)
     const instance = instanceRes?.instance
     const provider = instance ? getProvider({ provider: instance.provider }) : null
 
@@ -465,7 +465,7 @@ exports.criarContato = async (req, res) => {
       return res.status(400).json(erroTelefoneNovoContato('TELEFONE_OBRIGATORIO'))
     }
 
-    const instanceRes = await resolveWhatsappInstanceForManualAction(company_id, whatsapp_instance_id, usuario_id)
+    const instanceRes = await resolveWhatsappInstanceForManualAction(company_id, whatsapp_instance_id)
     if (instanceRes.code === 'SELECIONE_WHATSAPP_INSTANCE') {
       return res.status(400).json({
         error: instanceRes.error,

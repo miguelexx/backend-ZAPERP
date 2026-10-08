@@ -106,16 +106,6 @@ exports.detalharChat = async (req, res) => {
     if (errConv) return res.status(500).json({ error: errConv.message })
     if (!conversa) return res.status(404).json({ error: 'Conversa não encontrada' })
 
-    // Gate por NUMERO (gate mais externo): se a conversa pertence a um numero com
-    // lista salva e o usuario nao esta nela, bloqueia — independente de perfil,
-    // atendente_id, participante, transferencia ou setor.
-    {
-      const { usuarioPodeVerNumero } = require('../../services/chat/access/whatsappInstanceVisibilityService')
-      if (!(await usuarioPodeVerNumero(company_id, user_id, conversa.whatsapp_instance_id))) {
-        return res.status(403).json({ error: 'Sem acesso às conversas deste número' })
-      }
-    }
-
     const isGroup = isGroupConversation(conversa)
     const isAssignedToUser = conversa.atendente_id && Number(conversa.atendente_id) === Number(user_id)
     const detalheModoSimplesAtivo = await empresaModoSimplesAtivo(company_id).catch(() => false)
