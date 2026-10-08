@@ -290,7 +290,7 @@ server.listen(PORT, '0.0.0.0', () => {
     const { startWorker } = require('./services/queueManager')
     startWorker(5000, io)
     console.log('[WORKER] Job worker iniciado (polling a cada 5s)')
-    startAbsenceFinalizationScheduler()
+    startAbsenceFinalizationScheduler(io)
     startAdminAtendimentoAlertaScheduler()
     startAtendimentoSemRespostaScheduler(io)
     startProdutosSyncScheduler()

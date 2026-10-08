@@ -11,12 +11,12 @@ function parseIntervalMs() {
   return safeMinutes * 60 * 1000
 }
 
-async function runCycle() {
+async function runCycle(io = null) {
   if (running) return
   running = true
   try {
     const startedAt = Date.now()
-    const result = await finalizeConversationsByAbsence()
+    const result = await finalizeConversationsByAbsence({ io })
     const elapsedMs = Date.now() - startedAt
     if (!result?.ok) {
       console.warn('[absenceScheduler] ciclo concluído com erro', { result, elapsedMs })
@@ -38,19 +38,19 @@ async function runCycle() {
   }
 }
 
-function startAbsenceFinalizationScheduler() {
+function startAbsenceFinalizationScheduler(io = null) {
   if (schedulerStarted) return
   schedulerStarted = true
 
   const intervalMs = parseIntervalMs()
   timer = setInterval(() => {
-    runCycle().catch(() => {})
+    runCycle(io).catch(() => {})
   }, intervalMs)
   if (typeof timer.unref === 'function') timer.unref()
 
   // Executa rapidamente no startup para não depender do primeiro intervalo.
   setTimeout(() => {
-    runCycle().catch(() => {})
+    runCycle(io).catch(() => {})
   }, 20 * 1000)
 
   console.log('[absenceScheduler] iniciado', {

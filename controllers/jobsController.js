@@ -14,6 +14,7 @@ const {
   finalizeConversationsByAbsence,
   finalizeAbsenceForConversaIds,
   CONFIRM_FINALIZE_ABSENCE,
+  emitirRealtimeEncerramentoAutomatico,
 } = require('../services/absenceFinalizationService')
 const { runAdminAtendimentoAlertaForAllCompanies } = require('../services/adminAtendimentoAlertaService')
 const { runAtendimentoSemRespostaForAllCompanies } = require('../services/atendimentoSemRespostaService')
@@ -136,6 +137,19 @@ exports.timeoutInatividadeChatbot = async (req, res) => {
         if (!telefone || String(telefone).includes('@g.us') || String(telefone).toLowerCase().startsWith('lid:')) continue
 
         try {
+          // Revalida o estado IMEDIATAMENTE antes de agir: a varredura acima pode estar
+          // defasada (loop envia mensagens em sequência) e a conversa pode ter sido
+          // encerrada, assumida ou movida nesse meio-tempo — não enviar "encerrada por
+          // inatividade" nem fechar por cima de um estado que mudou.
+          const { data: convAtual } = await supabase
+            .from('conversas')
+            .select('status_atendimento')
+            .eq('id', conv.id)
+            .eq('company_id', company_id)
+            .maybeSingle()
+          const stAtual = String(convAtual?.status_atendimento || '')
+          if (!convAtual || stAtual !== String(conv.status_atendimento || '')) continue
+
           const instanceProvider = await resolveConversationProvider(company_id, conv.whatsapp_instance_id)
           const provider = getProvider({ provider: instanceProvider })
           const resultSend = await provider.sendText(telefone, mensagemEncerramento, {
@@ -158,24 +172,33 @@ exports.timeoutInatividadeChatbot = async (req, res) => {
               erro: ok ? null : String(resultSend?.error || 'desconhecido').slice(0, 200),
             })
           }
-          await supabase.from('mensagens').insert({
-            conversa_id: conv.id,
-            texto: mensagemEncerramento,
-            direcao: 'out',
-            company_id,
-            status: statusMsg,
-            status_mensagem: mappedResult.nextStatusMensagem,
-            ...(hasTraceableId ? { whatsapp_id: messageId } : {}),
-            ...(conv.whatsapp_instance_id ? { whatsapp_instance_id: conv.whatsapp_instance_id } : {}),
-          })
+          const { data: mensagemEncerramentoRow } = await supabase
+            .from('mensagens')
+            .insert({
+              conversa_id: conv.id,
+              texto: mensagemEncerramento,
+              direcao: 'out',
+              company_id,
+              status: statusMsg,
+              status_mensagem: mappedResult.nextStatusMensagem,
+              ...(hasTraceableId ? { whatsapp_id: messageId } : {}),
+              ...(conv.whatsapp_instance_id ? { whatsapp_instance_id: conv.whatsapp_instance_id } : {}),
+            })
+            .select()
+            .maybeSingle()
 
-          const { error: updErr } = await supabase
+          // Lock: só fecha se o status ainda é o mesmo da revalidação (não sobrescrever
+          // um encerramento/assunção concorrente entre o envio e este UPDATE).
+          const { data: fechadaRow, error: updErr } = await supabase
             .from('conversas')
             .update({ status_atendimento: 'fechada' })
             .eq('id', conv.id)
             .eq('company_id', company_id)
+            .eq('status_atendimento', stAtual)
+            .select()
+            .maybeSingle()
 
-          if (!updErr) {
+          if (!updErr && fechadaRow?.id) {
             totalProcessadas++
             const { resetOpcaoInvalidaLimitForConversa } = require('../services/chatbotTriageService')
             await resetOpcaoInvalidaLimitForConversa(supabase, company_id, conv.id)
@@ -185,6 +208,12 @@ exports.timeoutInatividadeChatbot = async (req, res) => {
               acao: 'encerramento_inatividade_chatbot',
               observacao: `Conversa encerrada automaticamente após ${encerrarMin} min sem resposta do cliente ao chatbot`
             })
+            emitirRealtimeEncerramentoAutomatico(
+              req.app?.get?.('io') || null,
+              company_id,
+              fechadaRow,
+              mensagemEncerramentoRow
+            )
           }
         } catch (e) {
           console.warn('[timeoutInatividadeChatbot] Erro ao processar conversa', conv.id, e?.message || e)
@@ -262,7 +291,7 @@ exports.timeoutInatividade = async (req, res) => {
           // LOCK REAL: o SELECT acima filtrou em_atendimento; se o atendente finalizou a
           // conversa entre o SELECT e este UPDATE, não reabrir uma conversa fechada.
           .eq('status_atendimento', 'em_atendimento')
-          .select('id')
+          .select()
           .maybeSingle()
 
         if (!error && reabertaTimeout?.id) {
@@ -273,6 +302,20 @@ exports.timeoutInatividade = async (req, res) => {
             acao: 'timeout_inatividade',
             observacao: `Conversa reaberta automaticamente após ${min} min sem resposta do atendente`
           })
+          // Realtime: sem isso o card continua "Em atendimento" na lista de todos até F5.
+          const io = req.app?.get?.('io') || null
+          if (io) {
+            try {
+              const {
+                emitirConversaAtualizada,
+                emitirSincronizacaoListaConversas,
+              } = require('../services/chat/realtime/chatRealtimeGateway')
+              emitirConversaAtualizada(io, emp.id, conv.id, { ...reabertaTimeout }, { skipAtualizarConversa: true })
+              emitirSincronizacaoListaConversas(io, emp.id, conv.id)
+            } catch (e) {
+              console.warn('[timeoutInatividade] realtime:', e?.message || e)
+            }
+          }
         }
       }
     }
@@ -319,6 +362,7 @@ exports.finalizacaoAusenciaCliente = async (req, res) => {
     const result = await finalizeConversationsByAbsence({
       dryRun: false,
       source: executeConfirmado ? 'http_confirm' : 'cron',
+      io: req.app?.get?.('io') || null,
     })
     if (!result.ok) return res.status(503).json({ error: result.error || 'Falha ao processar finalização por ausência' })
     return res.json({
@@ -348,6 +392,7 @@ exports.finalizacaoAusenciaLote = async (req, res) => {
       dryRun: !!body.dry_run,
       execute: body.execute === true,
       confirm: body.confirm,
+      io: req.app?.get?.('io') || null,
     })
     if (!result.ok) return res.status(400).json({ error: result.error || 'Falha no lote' })
     return res.json(result)

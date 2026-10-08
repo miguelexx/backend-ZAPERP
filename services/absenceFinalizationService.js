@@ -100,6 +100,38 @@ async function getAbsencePolicyForCompany(company_id) {
   return absence
 }
 
+/**
+ * Espelha o realtime do encerramento manual (encerrarChat): sem isso a conversa some do banco
+ * mas continua "Em atendimento"/"Aguardando cliente" na lista de todos até um F5/resync.
+ * `io` é opcional (cron HTTP sem socket, testes) — sem ele, nada é emitido.
+ */
+function emitirRealtimeEncerramentoAutomatico(io, company_id, conversaRow, mensagemRow = null) {
+  if (!io || !conversaRow?.id) return
+  try {
+    const {
+      emitirEventoEmpresaConversa,
+      emitirConversaAtualizada,
+      emitirSincronizacaoListaConversas,
+      emitirLock,
+    } = require('./chat/realtime/chatRealtimeGateway')
+    const conversa_id = conversaRow.id
+    // Mesma ordem do encerrarChat: primeiro o encerramento (fecha o card), depois a
+    // mensagem de encerramento — a bolha nunca chega com a conversa ainda "aberta" na UI.
+    emitirEventoEmpresaConversa(io, company_id, conversa_id, io.EVENTS?.CONVERSA_ENCERRADA || 'conversa_encerrada', {
+      ...conversaRow,
+      lista_realtime: { minha_fila: true, motivo: 'encerrada' },
+    })
+    emitirLock(io, conversa_id, null)
+    if (mensagemRow?.id) {
+      emitirEventoEmpresaConversa(io, company_id, conversa_id, io.EVENTS?.NOVA_MENSAGEM || 'nova_mensagem', mensagemRow)
+    }
+    emitirConversaAtualizada(io, company_id, conversa_id, { ...conversaRow }, { skipAtualizarConversa: true })
+    emitirSincronizacaoListaConversas(io, company_id, conversa_id)
+  } catch (e) {
+    console.warn('[absenceFinalization] realtime encerramento:', e?.message || e)
+  }
+}
+
 function textoEhSoMensagemAusencia(texto, absenceCfg) {
   const t = String(texto || '').trim()
   if (!t) return false
@@ -373,17 +405,21 @@ async function sendAbsenceClosingMessage({ provider, company_id, conversa_id, te
       provider_message_id: messageId || null,
     })
   }
-  await supabase.from('mensagens').insert({
-    conversa_id,
-    texto,
-    direcao: 'out',
-    company_id,
-    status: mappedResult.nextStatus,
-    status_mensagem: mappedResult.nextStatusMensagem,
-    ...(hasTraceableId ? { whatsapp_id: messageId } : {}),
-    ...(row?.whatsapp_instance_id ? { whatsapp_instance_id: row.whatsapp_instance_id } : {}),
-  })
-  return { ok }
+  const { data: mensagemRow } = await supabase
+    .from('mensagens')
+    .insert({
+      conversa_id,
+      texto,
+      direcao: 'out',
+      company_id,
+      status: mappedResult.nextStatus,
+      status_mensagem: mappedResult.nextStatusMensagem,
+      ...(hasTraceableId ? { whatsapp_id: messageId } : {}),
+      ...(row?.whatsapp_instance_id ? { whatsapp_instance_id: row.whatsapp_instance_id } : {}),
+    })
+    .select()
+    .maybeSingle()
+  return { ok, mensagemRow: mensagemRow || null }
 }
 
 async function getLastMessage(conversa_id, company_id) {
@@ -424,9 +460,11 @@ function msIdleFromLastOutbound(lastCriadoEm) {
  * @param {boolean} [opts.dryRun] — só simula (sem UPDATE de encerramento / sem envio)
  * @param {boolean} [opts.execute] — quando false, equivalente a dry-run
  * @param {string} [opts.source] — 'scheduler' | 'http' | 'batch'
+ * @param {object} [opts.io] — Socket.IO para realtime do encerramento (opcional)
  */
 async function finalizeConversationsByAbsence(opts = {}) {
   const dryRun = opts.dryRun === true || opts.execute === false
+  const io = opts.io || null
   if (isAbsenceFinalizationEmergencyDisabled()) {
     return { ok: true, processadas: 0, analisadas: 0, dryRun, emergencyDisabled: true, candidatos: [] }
   }
@@ -599,7 +637,7 @@ async function finalizeConversationsByAbsence(opts = {}) {
         .eq('id', conv.id)
         .eq('status_atendimento', 'em_atendimento')
         .is('finalizada_automaticamente_em', null)
-        .select('id')
+        .select()
         .maybeSingle()
 
       if (!locked?.id) continue
@@ -607,6 +645,7 @@ async function finalizeConversationsByAbsence(opts = {}) {
       let sendOk = false
       let skippedDuplicate = false
       let skippedNoMessage = false
+      let mensagemEncerramentoRow = null
       try {
         const sendRes = await sendAbsenceClosingMessage({
           provider,
@@ -618,6 +657,7 @@ async function finalizeConversationsByAbsence(opts = {}) {
         sendOk = !!sendRes?.ok
         skippedDuplicate = !!sendRes?.skippedDuplicate
         skippedNoMessage = !!sendRes?.skippedNoMessage
+        mensagemEncerramentoRow = sendRes?.mensagemRow || null
       } catch (e) {
         console.warn('[absenceFinalization] erro ao enviar mensagem de encerramento:', e?.message || e)
       }
@@ -676,6 +716,12 @@ async function finalizeConversationsByAbsence(opts = {}) {
         skippedDuplicate,
         skippedNoMessage,
       })
+      emitirRealtimeEncerramentoAutomatico(
+        io,
+        company_id,
+        { ...locked, ...(skippedNoMessage ? {} : { ausencia_mensagem_enviada_em: nowIso }) },
+        mensagemEncerramentoRow
+      )
       processadas++
     }
   }
@@ -691,10 +737,12 @@ async function finalizeConversationsByAbsence(opts = {}) {
  * @param {boolean} p.dryRun
  * @param {boolean} p.execute
  * @param {string} p.confirm
+ * @param {object} [p.io] — Socket.IO para realtime do encerramento (opcional)
  */
 async function finalizeAbsenceForConversaIds(p) {
   const company_id = Number(p.company_id)
   const dryRun = !!p.dryRun
+  const io = p.io || null
   if (isAbsenceFinalizationEmergencyDisabled()) {
     return {
       ok: false,
@@ -807,7 +855,7 @@ async function finalizeAbsenceForConversaIds(p) {
       .eq('id', conv.id)
       .eq('status_atendimento', 'em_atendimento')
       .is('finalizada_automaticamente_em', null)
-      .select('id')
+      .select()
       .maybeSingle()
 
     if (!locked?.id) {
@@ -818,6 +866,7 @@ async function finalizeAbsenceForConversaIds(p) {
     let sendOk = false
     let skippedDuplicate = false
     let skippedNoMessage = false
+    let mensagemEncerramentoRow = null
     try {
       const sendRes = await sendAbsenceClosingMessage({
         provider,
@@ -829,6 +878,7 @@ async function finalizeAbsenceForConversaIds(p) {
       sendOk = !!sendRes?.ok
       skippedDuplicate = !!sendRes?.skippedDuplicate
       skippedNoMessage = !!sendRes?.skippedNoMessage
+      mensagemEncerramentoRow = sendRes?.mensagemRow || null
     } catch (e) {
       console.warn('[absenceFinalization][lote] envio:', e?.message || e)
     }
@@ -879,6 +929,12 @@ async function finalizeAbsenceForConversaIds(p) {
       skippedDuplicate,
       skippedNoMessage,
     })
+    emitirRealtimeEncerramentoAutomatico(
+      io,
+      company_id,
+      { ...locked, ...(skippedNoMessage ? {} : { ausencia_mensagem_enviada_em: nowIso }) },
+      mensagemEncerramentoRow
+    )
     resultados.push({ conversa_id: convId, ok: true })
   }
 
@@ -905,4 +961,5 @@ module.exports = {
   fetchLastAbsenceEncerramentoSnap,
   parseAbsenceSnapFromObservacao,
   resolveReopenAssignmentAfterAbsence,
+  emitirRealtimeEncerramentoAutomatico,
 }
