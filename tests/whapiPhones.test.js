@@ -9,6 +9,7 @@ const {
   toWhapiContactId,
   toWhapiGroupId,
   isGroupJid,
+  historyChatIdCandidates,
 } = require('../services/providers/whapi/phones')
 
 describe('whapi/phones — JID Whapi vs UltraMSG', () => {
@@ -67,5 +68,12 @@ describe('whapi/phones — JID Whapi vs UltraMSG', () => {
     expect(toWhapiGroupId('120363426760868023')).toBe('120363426760868023@g.us')
     expect(toWhapiGroupId('553484080098-1406738663')).toBe('553484080098-1406738663@g.us')
     expect(toWhapiGroupId('grupo_1')).toBe('')
+  })
+
+  test('histórico tenta a forma crua de 12 dígitos e a variante com 9', () => {
+    const ids = historyChatIdCandidates('553499911246')
+    expect(ids[0]).toBe('553499911246@s.whatsapp.net')
+    expect(ids).toContain('5534999911246@s.whatsapp.net')
+    expect(ids.every((id) => !id.includes('@c.us'))).toBe(true)
   })
 })

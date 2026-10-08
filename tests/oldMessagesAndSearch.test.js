@@ -2,6 +2,8 @@ const {
   normalizeOldMessage,
   isUsableHistoryIdentifier,
   resolveChatIdsForConversation,
+  contactHistoryTimeFromUnix,
+  CONTACT_HISTORY_WINDOW_DAYS,
 } = require('../services/oldMessagesSyncService')
 const { pickRealPhoneCandidate, isLidPhoneKey } = require('../helpers/phoneHelper')
 const {
@@ -19,6 +21,12 @@ const {
 } = require('../helpers/chatSearchHelper')
 
 describe('old messages contact sync', () => {
+  test('janela do botao de historico e 45 dias (1 mes e 15 dias)', () => {
+    const now = Date.parse('2026-10-08T12:00:00.000Z')
+    expect(CONTACT_HISTORY_WINDOW_DAYS).toBe(45)
+    expect(contactHistoryTimeFromUnix(now)).toBe(Math.floor(now / 1000) - 45 * 24 * 60 * 60)
+  })
+
   test('rejeita LID e chat_lid numerico como identificador de historico UltraMSG', () => {
     expect(isUsableHistoryIdentifier('lid:123456789012345')).toBe(false)
     expect(isUsableHistoryIdentifier('123456789012345@lid')).toBe(false)

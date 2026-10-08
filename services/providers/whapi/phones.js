@@ -11,7 +11,7 @@
  * a MESMA base da identidade WhatsApp — sem a mangueira de JID UltraMSG.
  */
 
-const { normalizePhoneBR, preferredBrSendDigits, isLidPhoneKey } = require('../../../helpers/phoneHelper')
+const { normalizePhoneBR, preferredBrSendDigits, possiblePhonesBR, isLidPhoneKey } = require('../../../helpers/phoneHelper')
 
 /** true se o valor já é um JID de grupo (@g.us). */
 function isGroupJid(v) {
@@ -133,6 +133,56 @@ function toWhapiChatId(phone) {
 }
 
 /**
+ * Chat IDs para o botão "Buscar histórico".
+ * A Whapi guarda o chat na forma canônica (muitas vezes BR de 12 dígitos, sem o 9).
+ * `toWhapiChatId` sozinho reinsere o 9º e a lista volta vazia. Aqui tentamos a forma
+ * crua e a variante com/sem 9, sem repetir.
+ */
+function historyChatIdCandidates(phone, extraSeeds = []) {
+  const seeds = []
+  const addSeed = (value) => {
+    const raw = String(value || '').trim()
+    if (!raw || seeds.includes(raw)) return
+    seeds.push(raw)
+  }
+  addSeed(phone)
+  if (Array.isArray(extraSeeds)) {
+    for (const seed of extraSeeds) addSeed(seed)
+  }
+
+  const ids = []
+  const addId = (id) => {
+    const raw = String(id || '').trim()
+    if (!raw || ids.includes(raw)) return
+    if (ids.length >= 8) return
+    ids.push(raw)
+  }
+
+  for (const seed of seeds) {
+    if (isGroupJid(seed) || looksLikeStoredGroupId(seed)) {
+      addId(toWhapiGroupId(seed))
+      continue
+    }
+    const lid = toWhapiLidId(seed)
+    if (lid) {
+      addId(lid)
+      continue
+    }
+    const explicit = explicitPrivateJidDigits(seed)
+    if (explicit) addId(`${explicit}@s.whatsapp.net`)
+    const bare = String(seed).replace(/@[^@]+$/, '').replace(/\D/g, '')
+    if (bare && !bare.startsWith('120')) addId(`${bare}@s.whatsapp.net`)
+    for (const variant of possiblePhonesBR(seed)) {
+      const digits = String(variant || '').replace(/\D/g, '')
+      if (digits) addId(`${digits}@s.whatsapp.net`)
+    }
+    addId(toWhapiChatId(seed))
+  }
+
+  return ids
+}
+
+/**
  * Contact ID Whapi (OpenAPI: só dígitos `^[\d]{7,15}$`).
  * Grupo: devolve o JID (perfil de grupo não usa este endpoint). LID: vazio (não é ContactID).
  */
@@ -156,4 +206,5 @@ module.exports = {
   toWhapiRecipient,
   toWhapiChatId,
   toWhapiContactId,
+  historyChatIdCandidates,
 }

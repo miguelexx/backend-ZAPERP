@@ -1,7 +1,8 @@
 /**
  * oldMessagesSyncService.js — importação de HISTÓRICO (mensagens antigas) do provider WhatsApp
- * (UltraMSG) para as tabelas `conversas`/`mensagens`. NÃO é o caminho de inbound ao vivo — esse é o
+ * (UltraMSG ou Whapi) para as tabelas `conversas`/`mensagens`. NÃO é o caminho de inbound ao vivo — esse é o
  * `webhookZapiController` (webhook). Aqui é backfill sob demanda / job.
+ * O botão de uma conversa, em instância Whapi, pede só os últimos 45 dias (1 mês + 15 dias).
  *
  * Entradas:
  *   - `syncOldMessagesForCompany(company_id, ...)` — varre as instâncias da empresa (enfileirado via
@@ -33,6 +34,13 @@ const MSG_SELECT =
 const MESSAGES_PER_CHAT = Math.min(1000, Math.max(1, Number(process.env.OLD_MESSAGES_SYNC_MESSAGES_PER_CHAT) || 1000))
 const MAX_CHATS = Math.max(1, Number(process.env.OLD_MESSAGES_SYNC_MAX_CHATS) || 5000)
 const CHAT_DELAY_MS = Math.max(0, Number(process.env.OLD_MESSAGES_SYNC_DELAY_MS) || 120)
+/** Botão "Buscar histórico": 1 mês + 15 dias. Não vale para import automático nem sync da empresa. */
+const CONTACT_HISTORY_WINDOW_DAYS = 45
+const CONTACT_HISTORY_WINDOW_SEC = CONTACT_HISTORY_WINDOW_DAYS * 24 * 60 * 60
+
+function contactHistoryTimeFromUnix(nowMs = Date.now()) {
+  return Math.floor(Number(nowMs) / 1000) - CONTACT_HISTORY_WINDOW_SEC
+}
 
 function sleep(ms) {
   return ms > 0 ? new Promise((resolve) => setTimeout(resolve, ms)) : Promise.resolve()
@@ -851,6 +859,7 @@ async function syncOldMessagesForConversation(company_id, conversa_id, opts = {}
   if (!provider?.getChatMessages) {
     return { ok: false, error: 'Provider nao suporta leitura de mensagens do chat.' }
   }
+  const historyTimeFrom = instanceProvider === 'whapi' ? contactHistoryTimeFromUnix() : null
   const providerResult = await provider.getChatMessages(chatCandidates[0], MESSAGES_PER_CHAT, null, {
     companyId: company_id,
     whatsappInstanceId: whatsappInstanceId || undefined,
@@ -858,6 +867,7 @@ async function syncOldMessagesForConversation(company_id, conversa_id, opts = {}
     debugOldMessages: oldMessagesDebugEnabled(opts),
     chatIdCandidates: chatCandidates,
     fetchAllPages: true,
+    ...(historyTimeFrom ? { timeFrom: historyTimeFrom } : {}),
   }).catch((e) => ({
     ok: false,
     data: [],
@@ -913,8 +923,11 @@ async function syncOldMessagesForConversation(company_id, conversa_id, opts = {}
       placeholderMessages: placeholderCount,
       empty: true,
       message: ordered.length === 0
-        ? 'Nenhuma mensagem antiga encontrada para este contato. A UltraMSG so disponibiliza mensagens que passaram pela instancia desde que o WhatsApp foi conectado; conversas antigas que existem apenas no celular nao podem ser importadas.'
+        ? (instanceProvider === 'whapi'
+          ? `Nenhuma mensagem antiga encontrada para este contato nos ultimos ${CONTACT_HISTORY_WINDOW_DAYS} dias. A Whapi so devolve o que o canal armazenou desde a conexao; conversas que existem apenas no celular nao podem ser importadas.`
+          : 'Nenhuma mensagem antiga encontrada para este contato. A UltraMSG so disponibiliza mensagens que passaram pela instancia desde que o WhatsApp foi conectado; conversas antigas que existem apenas no celular nao podem ser importadas.')
         : 'Nenhuma mensagem valida encontrada para importar neste contato.',
+      ...(instanceProvider === 'whapi' ? { historyWindowDays: CONTACT_HISTORY_WINDOW_DAYS } : {}),
     }
   }
 
@@ -952,8 +965,11 @@ async function syncOldMessagesForConversation(company_id, conversa_id, opts = {}
     messagesSkipped: insertedStats.messagesSkipped || 0,
     placeholderMessages: placeholderCount,
     empty: changedMessages === 0,
+    ...(instanceProvider === 'whapi' ? { historyWindowDays: CONTACT_HISTORY_WINDOW_DAYS } : {}),
     message: changedMessages > 0
-      ? 'Mensagens antigas carregadas para este contato.'
+      ? (instanceProvider === 'whapi'
+        ? `Mensagens antigas dos ultimos ${CONTACT_HISTORY_WINDOW_DAYS} dias carregadas para este contato.`
+        : 'Mensagens antigas carregadas para este contato.')
       : 'Historico ja estava atualizado para este contato.',
   }
 }
@@ -964,4 +980,6 @@ module.exports = {
   normalizeOldMessage,
   isUsableHistoryIdentifier,
   resolveChatIdsForConversation,
+  contactHistoryTimeFromUnix,
+  CONTACT_HISTORY_WINDOW_DAYS,
 }

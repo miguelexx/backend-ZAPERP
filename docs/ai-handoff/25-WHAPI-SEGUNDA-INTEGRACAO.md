@@ -1106,3 +1106,13 @@ bônus: 404 em linha velha não gasta mais 6 tentativas). 400/410 definitivos se
 Testes: matriz recém/antiga/sem-criadoEm por status + caso integração 404-antiga →
 falha_definitiva na 1ª. 24/24; suíte 208/2184. SQL de destravamento recomendado ao Miguel
 ajustado para INTERVAL '6 hours' (coerente com a janela).
+
+## Botão "Buscar histórico" na Whapi (2026-10-08)
+
+A Whapi permite: `GET /messages/list/{ChatID}` com `count`, `offset`, `time_from`, `time_to` e `sort` (MCP `getMessagesByChatID`). Não existe endpoint que puxe o arquivo do celular se o canal nunca armazenou a mensagem.
+
+Só o clique em `POST /chats/:id/mensagens/sync-old` (`syncOldMessagesForConversation`) passa `timeFrom` = agora − 45 dias (1 mês + 15 dias) quando `provider=whapi`. O adapter pagina (até 40×100), descarta o que for mais antigo e, se o JID com 9º dígito vier vazio, tenta a forma de 12 dígitos. Importação segue idempotente por `whatsapp_id`. Não reabre atendimento nem dispara chatbot.
+
+Não usa essa janela: import automático de ~25 mensagens ao abrir conversa nova (`historyImport.js`), sync da empresa e reconciliação de envio. UltraMSG ignora `timeFrom`.
+
+Resposta do botão inclui `janela_dias: 45`. Vazio legítimo: canal sem essas mensagens (pré-conexão / só no celular).

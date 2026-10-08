@@ -304,7 +304,7 @@ describe('Whapi provider — sendText', () => {
   })
 
   test('getChatMessages GET /messages/list/{ChatID} mapeia from_me e link', async () => {
-    mockDeps({
+    const { fetchWithRetry } = mockDeps({
       instancesById: { '1:10': whapiInstance() },
       fetchImpl: async () => ({
         ok: true,
@@ -326,6 +326,54 @@ describe('Whapi provider — sendText', () => {
     expect(list[0].id).toBe('AbCd-EfGh')
     expect(list[0].fromMe).toBe(false)
     expect(list[0].imageUrl).toBe('https://cdn.example/a.jpg')
+    expect(String(fetchWithRetry.mock.calls[0][0])).not.toContain('time_from=')
+  })
+
+  test('getChatMessages com timeFrom recorta a janela e tenta o chat de 12 digitos se o de 13 vier vazio', async () => {
+    const timeFrom = 1700000000
+    const { fetchWithRetry } = mockDeps({
+      instancesById: { '1:10': whapiInstance() },
+      fetchImpl: async (url) => {
+        const decoded = decodeURIComponent(String(url))
+        if (decoded.includes('5534999911246@s.whatsapp.net') && !decoded.includes('offset=2')) {
+          return {
+            ok: true,
+            status: 200,
+            text: async () => JSON.stringify({ messages: [] }),
+          }
+        }
+        const recent = decoded.includes('offset=0') || !decoded.includes('offset=')
+        return {
+          ok: true,
+          status: 200,
+          text: async () => JSON.stringify({
+            messages: recent
+              ? [
+                  { id: 'new-1', from_me: false, type: 'text', timestamp: timeFrom + 500, text: { body: 'recente' } },
+                  { id: 'mid-1', from_me: true, type: 'text', timestamp: timeFrom + 20, text: { body: 'no limite' } },
+                ]
+              : [
+                  { id: 'old-1', from_me: false, type: 'text', timestamp: timeFrom - 80, text: { body: 'antiga demais' } },
+                ],
+          }),
+        }
+      },
+    })
+    const whapi = require('../services/providers/whapi')
+    const result = await whapi.getChatMessages('5534999911246', 2, null, {
+      companyId: 1,
+      whatsappInstanceId: 10,
+      returnDetails: true,
+      timeFrom,
+      fetchAllPages: true,
+    })
+    expect(result.ok).toBe(true)
+    expect(result.data.map((m) => m.id)).toEqual(['new-1', 'mid-1'])
+    const urls = fetchWithRetry.mock.calls.map(([url]) => decodeURIComponent(String(url)))
+    expect(urls[0]).toContain('5534999911246@s.whatsapp.net')
+    expect(urls[0]).toContain(`time_from=${timeFrom}`)
+    expect(urls.some((url) => url.includes('553499911246@s.whatsapp.net') && url.includes('offset=2'))).toBe(true)
+    expect(urls.every((url) => url.includes(`time_from=${timeFrom}`))).toBe(true)
   })
 
   test('sendCall POST /calls/outgoing com duration e call_id', async () => {

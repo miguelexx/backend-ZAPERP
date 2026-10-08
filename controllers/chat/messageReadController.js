@@ -53,6 +53,7 @@ exports.carregarMensagensAntigasContato = async (req, res) => {
       mensagens_atualizadas: result.messagesUpdated || 0,
       mensagens_ignoradas: result.messagesSkipped || 0,
       empty: result.empty === true,
+      ...(result.historyWindowDays ? { janela_dias: result.historyWindowDays } : {}),
       message: result.message || (
         ((result.messagesInserted || 0) > 0 || (result.messagesUpdated || 0) > 0)
           ? 'Mensagens antigas carregadas para este contato.'
