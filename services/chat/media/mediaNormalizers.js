@@ -341,6 +341,10 @@ async function convertImageToWhatsappJpeg(inputPath, outputPath) {
     const args = [
       '-y',
       '-i', inputPath,
+      // JPEG não tem transparência: sem achatar, as áreas transparentes de um PNG/WebP viravam
+      // PRETO (logo escuro em fundo transparente chegava como um quadrado preto). Compõe a
+      // imagem sobre branco; em imagem opaca o resultado é idêntico.
+      '-filter_complex', 'color=white,format=rgb24[fundo];[fundo][0:v]scale2ref[fundo2][img];[fundo2][img]overlay=shortest=1:format=auto',
       '-frames:v', '1',
       '-map_metadata', '-1',
       '-pix_fmt', 'yuvj420p',

@@ -18,6 +18,10 @@ const {
 const { formatTextoWhatsappComNomeAtendente } = require('../helpers/mensagemAtendenteNomeHelper')
 const { captionWhatsappParaMidia } = require('../helpers/midiaMensagemHelper')
 const { isInternalNoteRow } = require('../helpers/internalNote')
+const { STATUS_RANK, statusRank, canonStatusForEmit } = require('../helpers/messageStatusHelper')
+const { despachoEmAndamento } = require('./chat/outbound/outboundDispatchRegistry')
+const { isTransientOutboundFailure } = require('./chat/outbound/outboundFailureClassifier')
+const { parseTimestampSemFusoComoUtc } = require('../helpers/timestampApiCompat')
 
 const deferredTimers = new Map()
 const companyProviderCache = new Map()
@@ -53,6 +57,22 @@ function getResendWindowMs() {
   return parsePositiveIntEnv('PENDING_OUTBOUND_RESEND_WINDOW_MINUTES', 30, { min: 5, max: 240 }) * 60_000
 }
 
+/** Faixa "recente" da varredura: cobre a janela de reenvio e a de falha, com folga. */
+function getRecentWindowMs() {
+  return Math.max(getFailAfterMs(), getResendWindowMs()) + 30 * 60_000
+}
+
+/** Cursor (por empresa+status) do rodízio sobre o acúmulo antigo de pendentes. */
+const _acumuloCursor = new Map()
+
+/**
+ * Whapi aceitou (há id) mas nunca confirmou: depois deste prazo a linha vira erro em vez de
+ * ficar no relógio por dias. Um ACK tardio ainda recupera a linha (sent vence erro).
+ */
+function getWhapiUnackedFailMs() {
+  return parsePositiveIntEnv('PENDING_OUTBOUND_WHAPI_UNACKED_FAIL_MINUTES', 120, { min: 15, max: 10_080 }) * 60_000
+}
+
 function getBatchLimit() {
   return parsePositiveIntEnv('PENDING_OUTBOUND_RECONCILE_BATCH_LIMIT', 50, { min: 1, max: 200 })
 }
@@ -62,7 +82,9 @@ function getLookbackMs() {
 }
 
 function messageAgeMs(row) {
-  const ts = Date.parse(String(row?.criado_em || ''))
+  // criado_em é `timestamp without time zone` (UTC) e chega sem "Z": Date.parse puro o leria no
+  // fuso do servidor, deslocando carência/janelas em horas fora de UTC.
+  const ts = parseTimestampSemFusoComoUtc(row?.criado_em)
   return Number.isFinite(ts) ? Date.now() - ts : 0
 }
 
@@ -161,7 +183,44 @@ function emitStatusUpdate(io, row, payload) {
   chain.emit('status_mensagem', eventPayload)
 }
 
+/**
+ * `row` é a leitura feita no início do ciclo; entre ela e a gravação há uma consulta ao
+ * provedor (e, na varredura, até 50 mensagens em sequência). Um ACK do webhook que chegue nesse
+ * intervalo (ex.: `read`) seria sobrescrito pelo status mais antigo que a consulta devolveu
+ * (ex.: `delivered`) — o tique regrediria no banco. Relê o status logo antes de gravar e nunca
+ * rebaixa: progresso só sobe; a reversão sent→pending e o erro não se aplicam sobre mensagem
+ * que já consta como entregue/lida. Leitura falhou → segue como antes (não bloqueia).
+ */
+async function statusJaMaisAvancado(row, updates) {
+  if (updates?.status == null) return false
+  let atual = null
+  try {
+    const { data } = await supabase
+      .from('mensagens')
+      .select('status, status_mensagem')
+      .eq('company_id', row.company_id)
+      .eq('id', row.id)
+      .maybeSingle()
+    atual = data || null
+  } catch (_) {
+    return false
+  }
+  if (!atual) return false
+  const ranks = [atual.status, atual.status_mensagem]
+    .filter((v) => v != null && String(v).trim() !== '')
+    .map((v) => statusRank(v))
+  if (!ranks.length) return false
+  const rankAtual = Math.max(...ranks)
+  const proximo = canonStatusForEmit(updates.status)
+  if (proximo === 'erro') return rankAtual >= STATUS_RANK.delivered
+  if (proximo === 'pending') return rankAtual > STATUS_RANK.sent
+  return rankAtual > statusRank(proximo)
+}
+
 async function patchMessage(row, updates, io) {
+  if (await statusJaMaisAvancado(row, updates)) {
+    return { ok: true, action: 'keep_status_mais_avancado', mensagem_id: row.id }
+  }
   const { data, error } = await supabase
     .from('mensagens')
     .update(updates)
@@ -338,6 +397,10 @@ function captionUsuarioDeMidia(row) {
   return texto
 }
 
+const TIPOS_MIDIA_REENVIAVEIS = new Set([
+  'voice', 'audio', 'sticker', 'imagem', 'video', 'vídeo', 'arquivo', 'documento', 'document', 'file',
+])
+
 async function despacharReenvioAoProvedor(row, telefone, usuarioNome) {
   const instanceProvider = await resolveConversationProvider(row.company_id, row.whatsapp_instance_id)
   const provider = getProvider({ provider: instanceProvider })
@@ -360,6 +423,11 @@ async function despacharReenvioAoProvedor(row, telefone, usuarioNome) {
       result: await provider.sendText(telefone, formatTextoWhatsappComNomeAtendente(texto, usuarioNome), opts),
     }
   }
+
+  // Só tipos de MÍDIA têm reenvio automático. Localização guarda o link do mapa em `url`,
+  // e contato/enquete/produto/Pix/interativa não são arquivos: sem esta lista, a linha caía no
+  // sendFile do fim da função e o cliente recebia o link do mapa como um "documento".
+  if (!TIPOS_MIDIA_REENVIAVEIS.has(tipo)) return { skip: 'tipo_sem_reenvio_automatico' }
 
   const mediaUrl = urlPublicaDeMidia(row)
   if (!mediaUrl) return { skip: 'midia_sem_url_publica' }
@@ -418,8 +486,16 @@ async function consultarHistoricoWhapiPorTexto({ row, provider, telefone, usuari
   if (!provider?.getChatMessages) return { consultaOk: false }
   const cacheKey = `${row.company_id}:${row.whatsapp_instance_id || 'default'}:${telefone}`
   let res
+  // timeFrom ativa as variantes de chat id (com/sem o 9º dígito). Sem ele a consulta usava
+  // só a forma com o 9 forçado: para contato cujo JID real tem 12 dígitos a lista voltava
+  // vazia, a ausência era "confirmada" e uma mensagem já entregue era reenviada.
+  const criadoRef = parseTimestampSemFusoComoUtc(row.criado_em)
+  const timeFrom = Number.isFinite(criadoRef) ? Math.floor((criadoRef - 2 * 60_000) / 1000) : null
   const cached = _historicoWhapiCache.get(cacheKey)
-  if (cached && Date.now() - cached.ts < HISTORICO_CACHE_TTL_MS) {
+  // O cache só serve se a consulta guardada começou NO MESMO ponto ou antes do que esta linha
+  // precisa; uma consulta feita para uma mensagem mais nova não enxerga a mais antiga.
+  const cacheCobre = cached && (timeFrom == null ? cached.timeFrom == null : (cached.timeFrom == null || cached.timeFrom <= timeFrom))
+  if (cached && cacheCobre && Date.now() - cached.ts < HISTORICO_CACHE_TTL_MS) {
     res = cached.res
   } else {
     try {
@@ -427,13 +503,14 @@ async function consultarHistoricoWhapiPorTexto({ row, provider, telefone, usuari
         companyId: row.company_id,
         whatsappInstanceId: row.whatsapp_instance_id || undefined,
         returnDetails: true,
+        ...(timeFrom != null ? { timeFrom } : {}),
       })
     } catch (_) {
       return { consultaOk: false }
     }
     if (res?.ok === true && Array.isArray(res.data)) {
       if (_historicoWhapiCache.size > 200) _historicoWhapiCache.clear()
-      _historicoWhapiCache.set(cacheKey, { ts: Date.now(), res })
+      _historicoWhapiCache.set(cacheKey, { ts: Date.now(), res, timeFrom })
     }
   }
   if (res?.ok !== true || !Array.isArray(res.data)) return { consultaOk: false }
@@ -447,8 +524,25 @@ async function consultarHistoricoWhapiPorTexto({ row, provider, telefone, usuari
     )
     if (comNome) alvos.add(comNome)
   } catch (_) { /* sem nome: compara so o texto puro */ }
+  // Encaminhamento: o texto que foi ao WhatsApp é "[Encaminhado] / <texto> / — <Nome>" (em
+  // linhas separadas), diferente do que fica gravado na linha. Sem estes alvos a mensagem
+  // encaminhada entregue nunca casava com o histórico, a ausência era "confirmada" e ela era
+  // reenviada em duplicidade.
+  try {
+    const bruto = String(row.texto || '').trim()
+    const semPrefixo = bruto.replace(/^\[Encaminhado\]\s*/i, '').trim()
+    const nome = String(usuarioNome || '').trim()
+    const NL = String.fromCharCode(10)
+    for (const corpo of [
+      ['[Encaminhado]', semPrefixo].join(NL),
+      ['[Encaminhado]', semPrefixo, `— ${nome}`].join(NL),
+    ]) {
+      const alvo = normalizarTextoParaComparacao(corpo)
+      if (alvo) alvos.add(alvo)
+    }
+  } catch (_) { /* alvos extras são best-effort */ }
 
-  const criadoMs = Date.parse(String(row.criado_em || ''))
+  const criadoMs = parseTimestampSemFusoComoUtc(row.criado_em)
   const desdeSeg = Number.isFinite(criadoMs) ? Math.floor((criadoMs - 2 * 60_000) / 1000) : 0
 
   // RAJADA COM TEXTOS IDÊNTICOS ("ok" duas vezes no mesmo minuto): o histórico pode conter
@@ -594,6 +688,14 @@ async function _reenviarMensagemNaoAceitaInterno(row, io, { aguardarAck = false 
   })
 
   if (!ok) {
+    // Falha TRANSITÓRIA do reenvio (timeout/rede/429/5xx): o provedor pode ter aceitado. Marcar
+    // erro tirava a linha da varredura e liberava o reenvio manual — duplicata no cliente. Fica
+    // pending: o próximo ciclo confere de novo no provedor antes de decidir.
+    const transitoria = isTransientOutboundFailure({
+      httpStatus: typeof result === 'object' ? result?.httpStatus : null,
+      transportError: typeof result === 'object' && result?.transportError === true,
+    })
+    if (transitoria) return { ok: true, action: 'keep_reenvio_falha_transitoria' }
     return patchMessage(row, { status: 'erro', status_mensagem: 'failed' }, io)
   }
 
@@ -617,10 +719,20 @@ async function reconcilePendingOutboundMessage(row, { io = null, force = false }
   if (!force && ageMs < getGraceMs()) {
     return { ok: true, action: 'skip_grace' }
   }
+  // Conferência forçada (diferida, ~90s) pode CONFIRMAR status dentro da carência, mas nunca
+  // REENVIAR: a ausência no provedor tão cedo pode ser só indexação atrasada. O reenvio segue
+  // exclusivo da varredura, depois da carência — mesmo momento de sempre.
+  const dentroDaCarencia = ageMs < getGraceMs()
 
   const currentStatus = String(row.status_mensagem || row.status || '').toLowerCase()
   if (!['pending', 'sending', 'sent'].includes(currentStatus)) {
     return { ok: true, action: 'skip_not_pending' }
+  }
+
+  // O primeiro despacho desta mídia ainda está rodando (upload + envio podem passar da
+  // carência): não consultar nem reenviar agora, senão o cliente recebe em dobro.
+  if (despachoEmAndamento(row.id)) {
+    return { ok: true, action: 'keep_despacho_em_andamento' }
   }
 
   const instanceProvider = await resolveConversationProvider(row.company_id, row.whatsapp_instance_id)
@@ -670,6 +782,18 @@ async function reconcilePendingOutboundMessage(row, { io = null, force = false }
   const providerHit = await queryProviderForMessage(row)
   if (providerHit?.row) {
     const resolved = await resolveFromProviderRow(row, providerHit.row, io)
+    // Whapi aceitou, mas horas depois o próprio provedor ainda informa "pending": a mensagem
+    // não saiu. Sem este desfecho a bolha ficava no relógio por dias e o atendente nunca
+    // sabia; um ACK tardio ainda recupera a linha.
+    if (
+      resolved.action === 'keep_provider_pending' && isWhapi &&
+      currentStatus !== 'sent' && ageMs >= getWhapiUnackedFailMs()
+    ) {
+      console.warn('[pendingOutboundReconciliation] whapi segue pending no provedor após o prazo — marcando erro', {
+        mensagem_id: row.id, company_id: row.company_id, idade_min: Math.round(ageMs / 60_000),
+      })
+      return patchMessage(row, { status: 'erro', status_mensagem: 'failed' }, io)
+    }
     if (resolved.action !== 'noop') return resolved
   }
 
@@ -720,7 +844,7 @@ async function reconcilePendingOutboundMessage(row, { io = null, force = false }
           }, io)
           return { ...patched, action: patched.ok ? 'whapi_curada_pelo_historico' : patched.action }
         }
-        if (hist.consultaOk && !hist.encontrado && ageMs <= getResendWindowMs()) {
+        if (hist.consultaOk && !hist.encontrado && !dentroDaCarencia && ageMs <= getResendWindowMs()) {
           // Ausencia confirmada pelo provedor + releitura fresca da linha = reenvio seguro.
           if (await rowAindaSemAceiteNoBanco(row)) {
             const r = await reenviarMensagemNaoAceita(row, io, { aguardarAck: true })
@@ -747,9 +871,16 @@ async function reconcilePendingOutboundMessage(row, { io = null, force = false }
       })
       return patchMessage(row, { status: 'erro', status_mensagem: 'failed' }, io)
     }
+    // Há id do provedor, mas ele não tem mais registro e nenhum ACK chegou no prazo.
+    if (!provedorNuncaAceitou(row) && currentStatus !== 'sent' && ageMs >= getWhapiUnackedFailMs()) {
+      console.warn('[pendingOutboundReconciliation] whapi com id sem registro nem ACK após o prazo — marcando erro', {
+        mensagem_id: row.id, company_id: row.company_id, idade_min: Math.round(ageMs / 60_000),
+      })
+      return patchMessage(row, { status: 'erro', status_mensagem: 'failed' }, io)
+    }
     return { ok: true, action: currentStatus === 'sent' ? 'keep_whapi_sent_unconfirmed' : 'keep_whapi_unconfirmed' }
   }
-  if (provedorSemRegistro && provedorNuncaAceitou(row)) {
+  if (provedorSemRegistro && provedorNuncaAceitou(row) && !dentroDaCarencia) {
     // Chatbot / automações (sem autor humano): o envio original NÃO usa referenceId crm-{id}
     // (insert depois do sendText). A consulta UltraMSG por referenceId sempre falha →
     // reenviar duplicaria menu/confirmação no WhatsApp do cliente (~5 min depois).
@@ -796,16 +927,22 @@ async function fetchPendingOutboundRows({ companyId = null, limit = null, mensag
 
   const BASE_COLS = 'id, company_id, conversa_id, whatsapp_instance_id, whatsapp_id, provider_queue_id, status, status_mensagem, direcao, criado_em, autor_usuario_id, tipo, texto, url, nome_arquivo'
   // storage_* só existem após a migration de R2; sem elas, refazemos a consulta sem as colunas.
-  const buildQuery = (cols, statuses, whatsappInstanceIds = null) => {
+  const buildQuery = (cols, statuses, whatsappInstanceIds = null, faixa = {}) => {
     let q = supabase
       .from('mensagens')
       .select(cols)
       .eq('direcao', 'out')
       .in('status', statuses)
-      .gte('criado_em', oldestIso)
-      .lte('criado_em', graceIso)
-      .order('criado_em', { ascending: true })
-      .limit(batch)
+      .gte('criado_em', faixa.desdeIso || oldestIso)
+    // A carência só vale para a VARREDURA. A conferência diferida (mensagemId) roda ~90s após
+    // o envio justamente para conferir cedo; com este filtro ela não achava a própria linha
+    // (idade < carência de 3 min) e virava no-op — sem ACK, o tique só andava na varredura
+    // (3 a 8 min). O reenvio continua protegido pela carência em reconcilePendingOutboundMessage.
+    if (mensagemId == null) q = q.lte('criado_em', faixa.ateIso || graceIso)
+    if (faixa.aposId != null) q = q.gt('id', faixa.aposId)
+    q = q
+      .order(faixa.porId ? 'id' : 'criado_em', { ascending: true })
+      .limit(faixa.limite || batch)
     if (companyId != null) q = q.eq('company_id', Number(companyId))
     if (mensagemId != null) q = q.eq('id', Number(mensagemId))
     if (Array.isArray(whatsappInstanceIds) && whatsappInstanceIds.length) {
@@ -820,12 +957,46 @@ async function fetchPendingOutboundRows({ companyId = null, limit = null, mensag
       t.includes('does not exist') || t.includes('42703') || t.includes('pgrst204') || t.includes('schema cache')
   }
 
-  const runQuery = async (statuses, whatsappInstanceIds = null) => {
-    let result = await buildQuery(`${BASE_COLS}, storage_backend, storage_key`, statuses, whatsappInstanceIds)
+  const runQuery = async (statuses, whatsappInstanceIds = null, faixa = {}) => {
+    let result = await buildQuery(`${BASE_COLS}, storage_backend, storage_key`, statuses, whatsappInstanceIds, faixa)
     if (result.error && isMissingStorageColumn(result.error)) {
-      result = await buildQuery(BASE_COLS, statuses, whatsappInstanceIds)
+      result = await buildQuery(BASE_COLS, statuses, whatsappInstanceIds, faixa)
     }
     return result
+  }
+
+  // VARREDURA EM DUAS FAIXAS. Antes era uma consulta só, "as N mais antigas primeiro": bastavam
+  // N linhas travadas (sem desfecho por dias) para ocupar o lote inteiro em TODO ciclo, e as
+  // mensagens novas — as únicas que ainda podem ser reenviadas ou confirmadas — nunca eram
+  // alcançadas, em nenhuma empresa. Agora:
+  //  1) faixa RECENTE (dentro da janela em que reenvio/falha ainda se decidem) tem lote próprio;
+  //  2) o ACÚMULO antigo roda em rodízio por id (cursor em memória), meio lote por ciclo, e
+  //     recomeça do início ao chegar no fim — nenhuma linha fica para sempre sem ser visitada.
+  // A conferência por mensagemId segue como consulta única.
+  const buscarLote = async (statuses, whatsappInstanceIds = null) => {
+    if (mensagemId != null) return runQuery(statuses, whatsappInstanceIds)
+    const corteRecenteIso = new Date(Date.now() - getRecentWindowMs()).toISOString()
+    const recentes = await runQuery(statuses, whatsappInstanceIds, { desdeIso: corteRecenteIso })
+    if (recentes.error) return recentes
+    const limiteAcumulo = Math.max(5, Math.ceil(batch / 2))
+    const chaveCursor = `${companyId ?? 'todas'}:${statuses.join(',')}`
+    const antigas = await runQuery(statuses, whatsappInstanceIds, {
+      ateIso: corteRecenteIso,
+      aposId: _acumuloCursor.get(chaveCursor) ?? null,
+      porId: true,
+      limite: limiteAcumulo,
+    })
+    if (antigas.error) return antigas
+    const listaAntigas = antigas.data || []
+    if (listaAntigas.length < limiteAcumulo) _acumuloCursor.delete(chaveCursor)
+    else _acumuloCursor.set(chaveCursor, listaAntigas[listaAntigas.length - 1].id)
+    const vistos = new Set()
+    const data = [...(recentes.data || []), ...listaAntigas].filter((r) => {
+      if (vistos.has(r.id)) return false
+      vistos.add(r.id)
+      return true
+    })
+    return { data, error: null }
   }
 
   let whapiInstancesQuery = supabase
@@ -840,10 +1011,10 @@ async function fetchPendingOutboundRows({ companyId = null, limit = null, mensag
 
   // Lotes independentes evitam que o volume de `sent` ocupe as vagas das
   // mensagens realmente pendentes. A filtragem por provider ocorre no reconcile.
-  const pendingResult = await runQuery(['pending', 'sending'])
+  const pendingResult = await buscarLote(['pending', 'sending'])
   if (pendingResult.error) return { ok: false, rows: [], error: pendingResult.error.message }
   const sentResult = whapiInstanceIds.length
-    ? await runQuery(['sent'], whapiInstanceIds)
+    ? await buscarLote(['sent'], whapiInstanceIds)
     : { data: [], error: null }
   if (sentResult.error) return { ok: false, rows: [], error: sentResult.error.message }
 

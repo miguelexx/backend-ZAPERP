@@ -12,6 +12,7 @@ const { tryMarkWaitingAfterHumanOutbound } = require('../../services/absenceFina
 const { empresaModoSimplesAtivo } = require('../../helpers/empresaModoSimplesFlag')
 const { schedulePendingOutboundReconciliation } = require('../../services/pendingOutboundReconciliationService')
 const { mapProviderSendResult } = require('../../services/chat/outbound/providerResultMapper')
+const { gravarResultadoDoEnvio } = require('../../services/chat/outbound/outboundResultPersistence')
 const { isTransientOutboundFailure } = require('../../services/chat/outbound/outboundFailureClassifier')
 const { safeWhatsappInstanceMeta } = require('../../services/chat/presentation/chatDto')
 const { normalizeClientTempId, clientTempIdDedupeKey, isMissingMensagemColumnError, isGenericMissingColumnError, isClientTempIdUniqueViolation, buildClientTempIdDedupResponse } = require('../../services/chat/outbound/idempotencyHelpers')
@@ -498,16 +499,23 @@ exports.enviarMensagemChat = async (req, res) => {
         // whatsapp_id só recebe IDs reais do WhatsApp (rastreáveis).
         // IDs de fila numéricos da UltraMsg (ex: "35096") vão para provider_queue_id
         // para permitir reconciliação de ACK sem poluir whatsapp_id com IDs não reais.
-        await supabase
-          .from('mensagens')
-          .update({
-            status: nextStatus,
-            status_mensagem: nextStatusMensagem,
-            ...(hasValidId ? { whatsapp_id: waMessageId } : {}),
-            ...(hasQueueId ? { provider_queue_id: waMessageId } : {}),
+        // Não rebaixa status já avançado por ACK/eco e confere o erro da gravação
+        // (ver services/chat/outbound/outboundResultPersistence.js).
+        const gravacao = await gravarResultadoDoEnvio({
+          company_id,
+          mensagem_id: msg.id,
+          status: nextStatus,
+          status_mensagem: nextStatusMensagem,
+          whatsapp_id: hasValidId ? waMessageId : null,
+          provider_queue_id: hasQueueId ? waMessageId : null,
+        })
+        const gravacaoFalhou = Boolean(gravacao.erro)
+        if (gravacaoFalhou) {
+          console.warn('[ENVIO_TEXTO] resultado do envio não gravado por completo; reconciliação vai conferir', {
+            mensagem_id: msg.id,
+            erro: gravacao.erro,
           })
-          .eq('company_id', company_id)
-          .eq('id', msg.id)
+        }
 
         if (clientTempId && msg?.id) {
           _clientTempIdDeduplicationMap.set(
@@ -529,7 +537,7 @@ exports.enviarMensagemChat = async (req, res) => {
             })
         }
 
-        if (needsReconciliation) {
+        if (needsReconciliation || (gravacaoFalhou && ok)) {
           schedulePendingOutboundReconciliation({
             companyId: company_id,
             mensagemId: msg.id,

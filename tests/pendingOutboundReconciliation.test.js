@@ -124,6 +124,7 @@ describe('reenvio automatico de pendentes', () => {
             }
           },
           gte() { return chain },
+          gt() { return chain },
           lte() { return chain },
           not() { return chain },
           order() { return chain },

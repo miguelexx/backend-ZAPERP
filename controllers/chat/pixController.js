@@ -21,7 +21,8 @@ const { emitirConversaAtualizada, emitirEventoEmpresaConversa } = require('../..
 const { assertPodeEnviarMensagem } = require('../../services/chat/access/conversationPolicy')
 const { enrichMensagemComAutorUsuario } = require('../../services/chat/presentation/messageAuthorEnrichment')
 const { aplicarAguardandoClienteNoPayload, anexarAssumirNoPayloadLista } = require('../../services/chat/outbound/modoSimplesOutbound')
-const { mapProviderSendResult } = require('../../services/chat/outbound/providerResultMapper')
+const { mapProviderSendResultComTransitoria, enviarSemEstourar } = require('../../services/chat/outbound/providerResultMapper')
+const { isTransientOutboundFailure } = require('../../services/chat/outbound/outboundFailureClassifier')
 const { schedulePendingOutboundReconciliation } = require('../../services/pendingOutboundReconciliationService')
 
 exports.getPixConfig = async (req, res) => {
@@ -247,17 +248,26 @@ async function enviarPixCartaoWhapi(req, res, { cfg, pixTexto, whatsappInstanceI
   }
 
   // Tenta o cartão interativo; se recusado, reenvia o MESMO registro como texto.
-  let result = await provider.sendInteractive(telefoneParaEnvio, buildPixInteractivePayload(cfg), sendOpts)
+  let result = await enviarSemEstourar(
+    () => provider.sendInteractive(telefoneParaEnvio, buildPixInteractivePayload(cfg), sendOpts),
+    'enviar a chave Pix'
+  )
   let tipoFinal = 'interactive'
-  if (!result?.ok && typeof provider.sendText === 'function') {
+  // O texto reserva só vale para RECUSA definitiva do cartão. Em timeout/rede/429/5xx o cartão
+  // pode ter sido aceito: mandar o texto junto fazia o cliente receber a chave duas vezes.
+  const cartaoFalhaTransitoria = !result?.ok && isTransientOutboundFailure({
+    httpStatus: result?.httpStatus,
+    transportError: result?.transportError === true,
+  })
+  if (!result?.ok && !cartaoFalhaTransitoria && typeof provider.sendText === 'function') {
     console.warn('[enviarMensagemPix] cartão interativo Whapi falhou; reenviando como texto:', String(result?.error || '').slice(0, 160))
-    result = await provider.sendText(telefoneParaEnvio, pixTexto, sendOpts)
+    result = await enviarSemEstourar(() => provider.sendText(telefoneParaEnvio, pixTexto, sendOpts), 'enviar a chave Pix')
     tipoFinal = 'texto'
     await supabase.from('mensagens').update({ tipo: 'texto' }).eq('company_id', company_id).eq('id', msg.id)
     msg.tipo = 'texto'
   }
 
-  const mappedResult = mapProviderSendResult(result)
+  const mappedResult = mapProviderSendResultComTransitoria(result)
   const {
     ok, waMessageId, providerError: providerErro,
     hasValidId: hasTraceableId, hasQueueId,
@@ -302,7 +312,7 @@ async function enviarPixCartaoWhapi(req, res, { cfg, pixTexto, whatsappInstanceI
     schedulePendingOutboundReconciliation({ companyId: company_id, mensagemId: msg.id, io })
   }
 
-  if (!ok) {
+  if (!ok && !mappedResult.falhaTransitoria) {
     const status = Number(result?.httpStatus)
     const httpOut = [400, 401, 403, 404, 409, 422, 429, 503].includes(status) ? status : 422
     return {

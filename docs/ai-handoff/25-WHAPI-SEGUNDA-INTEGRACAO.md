@@ -1153,3 +1153,101 @@ Testes: +2 casos (irmão-dono → reenvia; cópia livre → cura com a livre) �
 
 Recomendação de env (produção): WHATSAPP_SEND_GUARD_HUMAN_INTERVAL_MS=300 — espaça rajadas
 humanas em 0,3s por instância (hoje 0ms), reduzindo 429 do provedor sem latência perceptível.
+
+### 2026-10-08 (parte 3) — Tique demorando para atualizar: 2 causas-raiz no backend
+
+Sintoma: mensagem entregue no cliente, mas o tique fica no relógio por minutos.
+
+1. **Conferência diferida (~90s) era no-op** (`pendingOutboundReconciliationService`):
+   `schedulePendingOutboundReconciliation` roda `runPendingOutboundReconciliation({ mensagemId })`
+   90s após o envio, mas `fetchPendingOutboundRows` aplicava `criado_em <= agora - carência(3 min)`
+   também nesse caminho → a linha de 90s nunca era retornada. Sem ACK, o status só andava na
+   varredura (5 min, e só com idade ≥ 3 min) = 3 a 8 min de relógio. Fix: a carência do filtro
+   vale só para a varredura (`mensagemId == null`). Para não antecipar reenvio, o reconcile
+   ganhou `dentroDaCarencia`: conferência forçada pode CONFIRMAR status, nunca REENVIAR
+   (ramos Whapi-histórico e UltraMSG sem registro seguem exclusivos da varredura pós-carência).
+2. **ACK antes do id gravado era descartado para o Whapi** (`webhookInbound/statusZapi.js`):
+   os fallbacks 3/3b de corrida exigem id no formato WhatsApp (`@`/`_`); id Whapi não tem →
+   "mensagem não encontrada (ignorado)". Fix: `agendarAckTardio` guarda o ACK não encontrado
+   (só ids fora do formato WhatsApp e fora da fila numérica) e `reaplicarAckTardio` tenta por
+   match EXATO de whatsapp_id em 0,8s / 2,5s / 7s — fire-and-forget (não atrasa o webhook),
+   sem regressão de status, cap de grupo (read→delivered), mapa limitado a 500, guarda o ACK
+   mais avançado se chegarem vários. Desliga com `ACK_LATE_RETRY_DISABLED=1`.
+
+Frontend verificado sem mudança: `nova_mensagem` reconcilia a bolha em microtask e o lote de
+status tem 75 ms, então o status não chega antes de a bolha ter id.
+Testes: `pendingOutboundReconciliationDeferred.test.js` (5) + `statusZapiAckTardio.test.js` (5).
+Suíte 211/2216. Ajuste opcional: `PENDING_OUTBOUND_RECONCILE_DEFER_MS` (padrão 90000, mín. 15000).
+
+Auditado no mesmo passe (commit externo `52f5f9e` "visibilidade de numeros"): o portão
+`assertPodeEnviarMensagem` passou a consultar `usuario_whatsapp_instances`; a leitura falha
+ABERTA (tabela ausente/erro → sem trava, cache 60s), então envio não é bloqueado sem a migration
+`20261008170000`. Observação: atendente COM trava não envia em conversa legada sem
+`whatsapp_instance_id` (regra retorna false para id nulo) — decisão da feature, não alterada.
+
+#### Parte 3 — 2ª auditoria (adversarial sobre a conferência diferida agora ativa)
+
+Achado: `patchMessage` gravava a partir da leitura feita no INÍCIO do ciclo. Entre ela e a
+gravação há a consulta ao provedor (e, na varredura, até 50 linhas em sequência): um ACK do
+webhook nesse intervalo (`read`) era sobrescrito pelo status mais antigo devolvido pela consulta
+(`delivered`) — regressão de tique no banco. A conferência de 90s, agora efetiva, roda bem na
+janela em que os ACKs chegam, então a exposição aumentou. Fix: `statusJaMaisAvancado` relê
+status/status_mensagem logo antes de gravar e nunca rebaixa (progresso só sobe; sent→pending só
+se a linha não passou de sent; erro não se aplica sobre delivered+). Leitura falhou → comporta-se
+como antes. Ação nova: `keep_status_mais_avancado`. `ACK_TARDIO_MAX` reduzido de 500 para 150
+(limita rajada de consultas se o Whapi reentregar statuses de mensagens fora do banco).
+
+Verificações sem mudança: contrato Whapi conferido no schema do MCP (voice: to+media; text:
+to+body; getMessage por MessageID) = corpo enviado por `sendMediaByEndpoint`/`sendText`.
+Smoke real do conversor (`normalizeAudioForUltraMsg`, WebM/Opus → OGG/Opus): 3s/12s/47s →
+3,01/12,01/47,01s, assinatura OggS. Testes: +3 no Deferred (8 no total). Suíte 211/2219.
+
+
+---
+
+## 2026-10-08 (parte 4) — Auditoria do fluxo INTEIRO de envio (6 frentes em paralelo)
+
+Seis leituras completas e independentes (texto backend, mídia backend, reconciliação/ACK, texto
+frontend, voz/mídia frontend, demais pontos de envio). Cada achado foi confirmado no código antes
+de corrigir. Suíte: 212 suítes / 2237 testes. Teste novo: `tests/envioFluxoAuditoria.test.js` (18).
+
+### Corrigido — backend
+
+| # | Onde | Defeito | Correção |
+|---|------|---------|----------|
+| 1 | `pendingOutboundReconciliationService.fetchPendingOutboundRows` | Varredura "50 mais antigas primeiro", sem rodízio: linhas sem desfecho ocupavam o lote em todo ciclo e as novas nunca eram conferidas/reenviadas (todas as empresas) | Duas faixas: RECENTE (janela de reenvio/falha + 30 min) com lote próprio; ACÚMULO antigo em rodízio por id (`_acumuloCursor`), meio lote por ciclo |
+| 2 | idem, `reconcilePendingOutboundMessage` | Whapi com id nunca confirmado não tinha desfecho (relógio por 7 dias) | Vira `erro` após `PENDING_OUTBOUND_WHAPI_UNACKED_FAIL_MINUTES` (padrão 120); ACK tardio ainda recupera |
+| 3 | idem, `consultarHistoricoWhapiPorTexto` | Consulta sem `timeFrom` usava só o chat id com o 9 forçado → lista vazia para JID de 12 dígitos → "ausente" → reenvio de mensagem entregue | Passa `timeFrom` (ativa as variantes de chat id); cache só reaproveitado se cobre o instante da linha |
+| 4 | idem + `whapi/chatMessages.mapWhapiMessageForSync` | Texto com URL volta como `link_preview` (corpo em `link_preview.body`) e nunca casava | Lê `link_preview.body` |
+| 5 | idem | Texto encaminhado ("[Encaminhado] / texto / — Nome") nunca casava com o histórico | Formatos de encaminhamento entram nos alvos |
+| 6 | idem, `_reenviar…` | Reenvio automático Whapi com falha transitória virava `erro` terminal | `keep_reenvio_falha_transitoria` |
+| 7 | idem, `despacharReenvioAoProvedor` | Linha `location` pendente era reenviada via `sendFile` (link do mapa como documento) | `TIPOS_MIDIA_REENVIAVEIS`; demais tipos → `skip_reenvio_tipo_sem_reenvio_automatico` |
+| 8 | idem | Varredura podia reenviar mídia cujo 1º despacho ainda rodava | `outboundDispatchRegistry` (`keep_despacho_em_andamento`) |
+| 9 | `mediaMessageController` | Restart entre INSERT e envio deixava a linha órfã; o re-POST do navegador era "já existe" e ninguém enviava (Whapi: mídia nunca chegava) | `midiaOrfaDeRestart` → redespacha reaproveitando a linha (só Whapi) |
+| 10 | texto + mídia | UPDATE pós-envio incondicional rebaixava status já avançado por ACK/eco e ignorava erro | `outboundResultPersistence.gravarResultadoDoEnvio` (só grava status se ainda pending/sending/erro; confere erro; agenda reconciliação) |
+| 11 | `webhookWhapiController` / `webhookUltramsgController` | Eco de mensagem nossa vinha com status `RECEIVED` → ✓✓ com cliente offline | Eco usa o status do provedor, senão `sent` |
+| 12 | `webhookInbound/fromMeReconcile` | Eco de texto com URL (`link`) não casava com a linha `texto` → bolha duplicada + reenvio | `link` ≡ `texto` |
+| 13 | `webhookInbound/statusZapi` | Heurísticas UltraMSG (fallbacks 3/3b) aplicadas a canal Whapi quando o id tem `_` | Gate por provedor; Whapi usa só o ACK tardio |
+| 14 | `ultramsg/send.getMessages` | HTTP 200 com `{error}` virava lista vazia = "sem registro" → reenvio/erro/sent sem evidência | `ok:false` |
+| 15 | `ultramsg/send.sendFile/sendVideo` | Falha sem `httpStatus` → 429/5xx nunca transitório | Propaga `httpStatus` |
+| 16 | `forwardController` | Sem try/catch (UltraMSG lança → 500, linha órfã, lote abortado) e sem `referenceId` (reenvio às cegas) | `providerDeEncaminhamento` (Proxy: blinda `send*` e injeta `crm-{id}`) |
+| 17 | `outboundController` contato/localização | Idem sem try/catch | `enviarSemEstourar` |
+| 18 | enquete, produto, catálogo, Pix | Falha transitória virava `erro`; Pix mandava o texto reserva junto com o cartão | `mapProviderSendResultComTransitoria`; texto reserva só em recusa definitiva |
+| 19 | `whapiRecipientResolverService` | `wa_id` do cadastro usado sem conferir com o telefone da conversa → envio ao número antigo após edição | Só confia se `isSameWhatsappIdentity`; senão revalida e substitui |
+| 20 | idades (`messageAgeMs`, política de mídia, órfã) | `Date.parse` de `timestamp without time zone` dependia do fuso do servidor | `parseTimestampSemFusoComoUtc` |
+| 21 | `mediaNormalizers.convertImageToWhatsappJpeg` | PNG/WebP transparente virava fundo PRETO (comprovado por execução) | Compõe sobre branco |
+| 22 | `mediaMessageController` | Upload da requisição deduplicada ficava órfão no disco | `removerUploadDescartado` |
+
+### NÃO alterado — decisão do Miguel (automação e bordas)
+
+- Envios de AUTOMAÇÃO (chatbot, triagem, fora do horário, finalização, regras): enviam ANTES de
+  gravar; exceção UltraMSG some sem linha; `sendMessage` do webhook descarta
+  `transportError/httpStatus`; job de inatividade fecha a conversa mesmo se a mensagem falhou;
+  falha na mensagem de ausência desativa a finalização daquela conversa; reconciliação marca
+  `sent` linha de automação sem id. Mexer aqui muda comportamento de bot (risco de duplicar
+  menu) — precisa de desenho próprio.
+- Conversa só-LID no Whapi responde 400 (o adapter aceita `@lid`, mas o fluxo cria cliente a
+  partir do telefone); número internacional de 10/11 dígitos tratado como BR; triagem Whapi cai
+  no menu de texto em falha transitória; worker de campanha reenvia timeout; endpoint CRM
+  (idempotência em memória, texto após áudio descartado); cópias `-wa.*` deixadas por
+  encaminhar/reenviar vídeo e imagem; `kill_timeout` do PM2 (1,6 s) e `server.requestTimeout`.

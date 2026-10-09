@@ -11,6 +11,7 @@ const { tryMarkWaitingAfterHumanOutbound } = require('../../services/absenceFina
 const { empresaModoSimplesAtivo } = require('../../helpers/empresaModoSimplesFlag')
 const { schedulePendingOutboundReconciliation } = require('../../services/pendingOutboundReconciliationService')
 const { mapProviderSendResult } = require('../../services/chat/outbound/providerResultMapper')
+const { gravarResultadoDoEnvio } = require('../../services/chat/outbound/outboundResultPersistence')
 const { isTransientOutboundFailure } = require('../../services/chat/outbound/outboundFailureClassifier')
 const { normalizeClientTempId, isMissingMensagemColumnError, isGenericMissingColumnError, isClientTempIdUniqueViolation } = require('../../services/chat/outbound/idempotencyHelpers')
 const { parseAudioDuracaoSecFromBody, aplicarTipoForcadoSticker, inferirTipoArquivo, shouldAbortAudioAfterNormalize, shouldForceProviderUploadForMedia } = require('../../services/chat/media/mediaType')
@@ -21,6 +22,36 @@ const { assertPodeEnviarMensagem } = require('../../services/chat/access/convers
 const { getUsuarioParaEnvioCliente, enrichMensagemComAutorUsuario } = require('../../services/chat/presentation/messageAuthorEnrichment')
 const { findMensagemByClientTempId, isDbDedupeUnavailable, markDbDedupeUnavailable, isAudioDuracaoSecColumnUnavailable, markAudioDuracaoSecColumnUnavailable } = require('../../services/chat/outbound/idempotencyService')
 const { aplicarAguardandoClienteNoPayload, anexarAssumirNoPayloadLista, recalcularEMesclarModoSimples } = require('../../services/chat/outbound/modoSimplesOutbound')
+const {
+  iniciarDespacho,
+  concluirDespacho,
+  despachoEmAndamento,
+  despachoConhecido,
+} = require('../../services/chat/outbound/outboundDispatchRegistry')
+const { parseTimestampSemFusoComoUtc } = require('../../helpers/timestampApiCompat')
+
+/** Apaga um upload que não será usado (requisição repetida já atendida por outra linha). */
+function removerUploadDescartado(f) {
+  try {
+    if (f?.path) require('fs').unlink(f.path, () => {})
+  } catch (_) { /* best-effort */ }
+}
+
+/**
+ * A linha existe, mas o despacho dela morreu com o processo anterior (restart/deploy entre o
+ * INSERT e o envio ao provedor): pending, sem nenhum id do provedor, e ESTE processo nunca a
+ * despachou. Só vale para Whapi — na UltraMSG a varredura já reenvia linha sem registro
+ * (consultando o provedor antes), e redespachar aqui competiria com ela.
+ */
+function midiaOrfaDeRestart(existing, instanceProvider) {
+  if (String(instanceProvider || '').trim().toLowerCase() !== 'whapi') return false
+  const st = String(existing?.status_mensagem || existing?.status || '').toLowerCase()
+  if (!['pending', 'sending'].includes(st)) return false
+  if (String(existing?.whatsapp_id || '').trim() || String(existing?.provider_queue_id || '').trim()) return false
+  if (despachoConhecido(existing.id) || despachoEmAndamento(existing.id)) return false
+  const criado = parseTimestampSemFusoComoUtc(existing?.criado_em)
+  return Number.isFinite(criado) && Date.now() - criado >= 20_000
+}
 
 const MAX_ARQUIVOS_LOTE_ENVIO = 30
 
@@ -54,15 +85,29 @@ const MAX_MEDIA_CAPTION_CHARS = 1024
 async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conversa_id, telefoneParaEnvio, whatsappInstanceId = null, io, captionUsuario = '', clientTempId = null, permEnvio = null, batchCtx = null }) {
   const { extFromOriginalName, isBlockedRiskExtension, blockedUploadErrorMessage } = require('../../middleware/upload')
   clientTempId = normalizeClientTempId(clientTempId)
+  let linhaOrfa = null
   if (clientTempId) {
     const existing = await findMensagemByClientTempId(
       company_id,
       conversa_id,
       clientTempId,
-      'id, conversa_id, company_id, status, status_mensagem, whatsapp_id, client_temp_id, texto, tipo, url, nome_arquivo, criado_em'
+      'id, conversa_id, company_id, status, status_mensagem, whatsapp_id, provider_queue_id, client_temp_id, texto, tipo, url, nome_arquivo, criado_em, direcao, autor_usuario_id'
     )
     if (existing?.id) {
-      return { ok: true, msg: existing, deduplicated: true }
+      const provedorDaInstancia = batchCtx && 'instanceProvider' in batchCtx
+        ? batchCtx.instanceProvider
+        : await resolveConversationProvider(company_id, whatsappInstanceId)
+      if (!midiaOrfaDeRestart(existing, provedorDaInstancia)) {
+        removerUploadDescartado(file)
+        return { ok: true, msg: existing, deduplicated: true }
+      }
+      // Antes, esta nova tentativa era respondida como "já existe" e ninguém enviava: a mídia
+      // nunca chegava ao cliente. Segue o fluxo reaproveitando a linha (sem novo INSERT) e
+      // despacha com o arquivo que acabou de subir.
+      console.warn('[ENVIO_MIDIA] linha pendente sem despacho (restart no meio do envio) — redespachando', {
+        company_id, conversa_id: Number(conversa_id), mensagem_id: existing.id,
+      })
+      linhaOrfa = existing
     }
   }
 
@@ -229,7 +274,11 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
     ...(audioDuracaoSec != null ? { audio_duracao_sec: audioDuracaoSec } : {}),
   }
 
-  let { data: msg, error } = await supabase.from("mensagens").insert(insertArquivoPayload).select().single()
+  let msg = linhaOrfa
+  let error = null
+  if (!linhaOrfa) {
+    ;({ data: msg, error } = await supabase.from("mensagens").insert(insertArquivoPayload).select().single())
+  }
 
   if (error && clientTempId && isClientTempIdUniqueViolation(error)) {
     const existing = await findMensagemByClientTempId(
@@ -240,6 +289,7 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
         (isAudioDuracaoSecColumnUnavailable() ? '' : ', audio_duracao_sec')
     )
     if (existing?.id) {
+      removerUploadDescartado(fileWork)
       return { ok: true, msg: existing, deduplicated: true }
     }
   }
@@ -384,6 +434,7 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
       } catch (e) {
         console.warn('[ENVIO_MIDIA] falha ao marcar erro:', e?.message || e)
       }
+      concluirDespacho(msg.id)
     }
 
     const usuarioNome =
@@ -481,16 +532,22 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
           }
           
           // whatsapp_id só recebe ID real; queue ID numérico vai para provider_queue_id (reconciliação de ACK)
-          await supabase
-            .from('mensagens')
-            .update({
-              status: nextStatus,
-              status_mensagem: nextStatusMensagem,
-              ...(hasTraceableMediaId ? { whatsapp_id: waMessageId } : {}),
-              ...(hasQueueMediaId ? { provider_queue_id: waMessageId } : {})
+          // Não rebaixa status já avançado por ACK/eco e confere o erro da gravação
+          // (ver services/chat/outbound/outboundResultPersistence.js).
+          const gravacao = await gravarResultadoDoEnvio({
+            company_id,
+            mensagem_id: msg.id,
+            status: nextStatus,
+            status_mensagem: nextStatusMensagem,
+            whatsapp_id: hasTraceableMediaId ? waMessageId : null,
+            provider_queue_id: hasQueueMediaId ? waMessageId : null,
+          })
+          if (gravacao.erro) {
+            console.warn('[ENVIO_MIDIA] resultado do envio não gravado por completo; reconciliação vai conferir', {
+              mensagem_id: msg.id, erro: gravacao.erro,
             })
-            .eq('company_id', company_id)
-            .eq('id', msg.id)
+            if (ok) needsReconciliation = true
+          }
 
           const io2 = req.app?.get('io')
           if (io2) {
@@ -536,14 +593,18 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
           }
           schedulePendingOutboundReconciliation({ companyId: company_id, mensagemId: msg.id, io: io2 })
         })
+        .finally(() => concluirDespacho(msg.id))
     }
 
+    // A partir daqui o despacho roda em segundo plano; a varredura não reenvia enquanto ele durar.
+    iniciarDespacho(msg.id)
     if (telefoneParaEnvio) {
       if (fullUrl && !isLocalhost && !forceUploadMedia) {
         setImmediate(() => sendMediaWithUrl(fullUrl))
       } else if ((!baseUrl || isLocalhost || forceUploadMedia) && fileWork.path) {
         if (provider?.uploadMedia) {
           setImmediate(async () => {
+            let entregueAoEnvio = false
             try {
               const providerUploadFilename = tipo === 'video'
                 ? (fileWork.filename || fileWork.originalname || 'video.mp4')
@@ -556,6 +617,7 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
               })
               if (result?.ok && result?.url) {
                 console.log('[ULTRAMSG] Upload bem-sucedido, enviando mídia via CDN:', result.url.slice(0, 50) + '...')
+                entregueAoEnvio = true
                 sendMediaWithUrl(result.url)
               } else {
                 console.warn('[ULTRAMSG] Upload de mídia falhou:', {
@@ -568,6 +630,7 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
                 // Fallback seguro: se temos URL pública do backend, tenta enviar direto sem upload.
                 if (tipo !== 'video' && fullUrl && !isLocalhost) {
                   console.warn('[ULTRAMSG] Tentando fallback com URL pública do backend após falha no upload.')
+                  entregueAoEnvio = true
                   sendMediaWithUrl(fullUrl)
                 } else {
                   console.warn('⚠️ UltraMsg uploadMedia falhou; mídia não enviada.', result?.error || '')
@@ -585,6 +648,7 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
               // evitando erro definitivo por instabilidade momentânea no upload ao CDN.
               if (tipo !== 'video' && fullUrl && !isLocalhost) {
                 console.warn('[ULTRAMSG] Exceção no upload; tentando fallback com URL pública do backend.')
+                entregueAoEnvio = true
                 sendMediaWithUrl(fullUrl)
               } else {
                 await supabase.from('mensagens').update({ status: 'erro', status_mensagem: 'erro' }).eq('company_id', company_id).eq('id', msg.id)
@@ -593,6 +657,9 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
                   io2.to(`empresa_${company_id}`).to(`conversa_${conversa_id}`).to(`usuario_${user_id}`).emit(io2.EVENTS?.STATUS_MENSAGEM || 'status_mensagem', { mensagem_id: msg.id, conversa_id: Number(conversa_id), status: 'erro', status_mensagem: 'erro' })
                 }
               }
+            } finally {
+              // Sem envio a caminho (upload falhou de vez): o despacho terminou aqui.
+              if (!entregueAoEnvio) concluirDespacho(msg.id)
             }
           })
         } else if (!baseUrl && !forceUploadMedia) {

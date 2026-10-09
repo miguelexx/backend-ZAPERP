@@ -913,7 +913,10 @@ function normalizeWhapiMessageToInternal(m, ctx = {}) {
     timestamp: m.timestamp ? Number(m.timestamp) * 1000 : Date.now(),
     t: m.timestamp,
     ack: 'pending',
-    status: 'RECEIVED',
+    // Eco de mensagem NOSSA (from_me) prova que ela saiu, não que foi entregue. Com 'RECEIVED'
+    // fixo o eco marcava ✓✓ com o cliente offline, e 'delivered' fica fora da varredura — nada
+    // corrigia depois. Usa o status que o próprio Whapi informa, senão 'sent'.
+    status: fromMe ? String(m.status || 'sent') : 'RECEIVED',
     imageUrl: imageUrl || null,
     audioUrl: audioUrl || null,
     videoUrl: videoUrl || null,

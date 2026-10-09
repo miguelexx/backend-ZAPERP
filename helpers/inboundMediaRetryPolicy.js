@@ -6,6 +6,8 @@
  * horas em vez de espalhá-las.
  */
 
+const { parseTimestampSemFusoComoUtc } = require('./timestampApiCompat')
+
 /** Espera até cada nova tentativa, a partir da falha da tentativa imediata pós-webhook. */
 const RETRY_DELAYS_MS = Object.freeze([
   60 * 1000,
@@ -93,7 +95,8 @@ function classificarFalha({ motivo, status, criadoEm, agora } = {}) {
     case 'http': {
       let idadeMs
       if (criadoEm != null) {
-        const t = criadoEm instanceof Date ? criadoEm.getTime() : Date.parse(String(criadoEm))
+        // criado_em chega sem fuso (UTC): parse puro o leria no fuso do servidor.
+        const t = criadoEm instanceof Date ? criadoEm.getTime() : parseTimestampSemFusoComoUtc(criadoEm)
         if (Number.isFinite(t)) idadeMs = (agora instanceof Date ? agora.getTime() : Date.now()) - t
       }
       return { tipo: classificarStatusHttp(status, { idadeMs }), motivo: `http_${Number(status) || 0}` }

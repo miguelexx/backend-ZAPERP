@@ -40,6 +40,8 @@ function mapWhapiMessageForSync(m) {
   const textBody = String(
     (m.text && (m.text.body ?? m.text))
     || m.body
+    // Texto com URL volta como type=link_preview, com o corpo em link_preview.body.
+    || (m.link_preview && (m.link_preview.body ?? ''))
     || m.caption
     || m[type]?.caption
     || ''

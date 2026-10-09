@@ -13,7 +13,7 @@ const { emitirConversaAtualizada, emitirEventoEmpresaConversa } = require('../..
 const { assertPodeEnviarMensagem } = require('../../services/chat/access/conversationPolicy')
 const { getUsuarioParaEnvioCliente, enrichMensagemComAutorUsuario } = require('../../services/chat/presentation/messageAuthorEnrichment')
 const { aplicarAguardandoClienteNoPayload, anexarAssumirNoPayloadLista } = require('../../services/chat/outbound/modoSimplesOutbound')
-const { mapProviderSendResult } = require('../../services/chat/outbound/providerResultMapper')
+const { mapProviderSendResult, mapProviderSendResultComTransitoria, enviarSemEstourar } = require('../../services/chat/outbound/providerResultMapper')
 const { isTransientOutboundFailure } = require('../../services/chat/outbound/outboundFailureClassifier')
 const { schedulePendingOutboundReconciliation } = require('../../services/pendingOutboundReconciliationService')
 
@@ -269,14 +269,14 @@ exports.enviarContatoWhatsapp = async (req, res) => {
       })
     } catch (_) {}
 
-    const result = await provider.sendContact(telefoneParaEnvio, contactName, contactPhone, {
+    const result = await enviarSemEstourar(() => provider.sendContact(telefoneParaEnvio, contactName, contactPhone, {
       companyId: company_id,
       conversaId: Number(conversa_id),
       whatsappInstanceId: whatsappInstanceId || undefined,
       sendOrigin: 'atendimento_humano_contato',
       messageId: messageId || undefined,
       referenceId: `crm-${msg.id}`,
-    })
+    }), 'enviar contato')
     const mappedResult = mapProviderSendResult(result)
     const {
       ok, waMessageId, providerError: providerErroContato,
@@ -482,13 +482,13 @@ exports.enviarLocalizacao = async (req, res) => {
 
     let result = { ok: false, messageId: null }
     if (telefoneParaEnvio) {
-      result = await provider.sendLocation(telefoneParaEnvio, { address: addressParaCliente, lat: latitude, lng: longitude }, {
+      result = await enviarSemEstourar(() => provider.sendLocation(telefoneParaEnvio, { address: addressParaCliente, lat: latitude, lng: longitude }, {
         companyId: company_id,
         conversaId: conversa_id,
         whatsappInstanceId: whatsappInstanceId || undefined,
         sendOrigin: 'atendimento_humano_localizacao',
         referenceId: `crm-${msg.id}`,
-      })
+      }), 'enviar localização')
     } else {
       console.warn(`[WhatsApp] Conversa ${conversa_id} sem telefone — localização salva, não enviada ao WhatsApp`)
     }
@@ -800,7 +800,7 @@ exports.enviarEnquete = async (req, res) => {
       sendOrigin: 'atendimento_humano_enquete',
       referenceId: `crm-${msg.id}`,
     })
-    const mappedResult = mapProviderSendResult(result)
+    const mappedResult = mapProviderSendResultComTransitoria(result)
     const {
       ok, waMessageId, providerError: providerErro,
       hasValidId: hasTraceableId, hasQueueId,
@@ -841,7 +841,7 @@ exports.enviarEnquete = async (req, res) => {
       emitirConversaAtualizada(io, company_id, conversa_id, convPayload, { skipAtualizarConversa: true })
     }
 
-    if (!ok) {
+    if (!ok && !mappedResult.falhaTransitoria) {
       const status = Number(result?.httpStatus)
       const httpOut = [400, 401, 403, 404, 409, 422, 429, 503].includes(status) ? status : 422
       return res.status(httpOut).json({
@@ -1077,7 +1077,7 @@ exports.enviarProdutoCatalogo = async (req, res) => {
       }, { ...providerOpts, sendOrigin: 'atendimento_humano_catalogo', referenceId: `crm-${msg.id}` })
     }
 
-    const mappedResult = mapProviderSendResult(result)
+    const mappedResult = mapProviderSendResultComTransitoria(result)
     const {
       ok, waMessageId, providerError: providerErro,
       hasValidId: hasTraceableId, hasQueueId,
@@ -1118,7 +1118,7 @@ exports.enviarProdutoCatalogo = async (req, res) => {
       emitirConversaAtualizada(io, company_id, conversa_id, convPayload, { skipAtualizarConversa: true })
     }
 
-    if (!ok) {
+    if (!ok && !mappedResult.falhaTransitoria) {
       const status = Number(result?.httpStatus)
       const httpOut = [400, 401, 403, 404, 409, 422, 429, 503].includes(status) ? status : 422
       return res.status(httpOut).json({

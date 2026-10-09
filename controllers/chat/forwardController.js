@@ -6,7 +6,7 @@
 
 const supabase = require('../../config/supabase')
 const { getProvider } = require('../../services/providers')
-const { isRealWhatsAppId } = require('../../helpers/whatsappMessageIdHelper')
+const { isRealWhatsAppId, buildCrmReferenceId } = require('../../helpers/whatsappMessageIdHelper')
 const { mapProviderSendResult } = require('../../services/chat/outbound/providerResultMapper')
 const { isTransientOutboundFailure } = require('../../services/chat/outbound/outboundFailureClassifier')
 const { schedulePendingOutboundReconciliation } = require('../../services/pendingOutboundReconciliationService')
@@ -58,6 +58,46 @@ function collectOrderedMessageIds(body) {
 }
 
 /**
+ * Provider com os envios do encaminhamento blindados, num ponto só:
+ *  - exceção de transporte (a UltraMSG propaga timeout/rede) vira resultado transitório em vez
+ *    de estourar: antes dava HTTP 500, a linha ficava pending órfã (sem nova_mensagem e sem
+ *    reconciliação agendada) e, num lote, as mensagens seguintes nem eram criadas;
+ *  - cada envio leva referenceId crm-{id}: sem ele a varredura nunca achava o envio original no
+ *    provedor, concluía "nunca aceito" e reenviava às cegas (duplicata no cliente).
+ * Só intercepta métodos send*; o restante do provider passa direto.
+ */
+function providerDeEncaminhamento(provider, getMensagemId) {
+  return new Proxy(provider, {
+    get(target, prop) {
+      const original = target[prop]
+      if (typeof original !== 'function' || !/^send[A-Z]/.test(String(prop))) return original
+      return async (...args) => {
+        const mensagemId = getMensagemId()
+        const ultimo = args[args.length - 1]
+        if (
+          mensagemId != null &&
+          ultimo && typeof ultimo === 'object' && !Array.isArray(ultimo) &&
+          ultimo.referenceId == null
+        ) {
+          args[args.length - 1] = { ...ultimo, referenceId: buildCrmReferenceId(mensagemId) }
+        }
+        try {
+          return await original.apply(target, args)
+        } catch (e) {
+          console.warn('⚠️ encaminhamento: exceção de transporte no envio — mantém pending para reconciliação:', e?.message || e)
+          return {
+            ok: false,
+            messageId: null,
+            transportError: true,
+            error: `Falha de conexão ao encaminhar: ${e?.message || e}`,
+          }
+        }
+      }
+    },
+  })
+}
+
+/**
  * Encaminha uma mensagem já carregada para a conversa de destino (persistência + WhatsApp + socket).
  * @returns {Promise<{ ok: true, mensagem: object, enviado_whatsapp: boolean } | { ok: false, status: number, error: string }>}
  */
@@ -70,7 +110,7 @@ async function encaminharUmaMensagemParaConversa(ctx) {
     conversa_id,
     telefoneParaEnvio,
     whatsappInstanceId = null,
-    provider,
+    provider: providerOriginal,
     usuarioNome,
     mensagemOriginal,
     tipo_encaminhamento,
@@ -81,6 +121,7 @@ async function encaminharUmaMensagemParaConversa(ctx) {
   const prefixoEncaminhado = '[Encaminhado]'
 
   let novaMensagem = null
+  const provider = providerDeEncaminhamento(providerOriginal, () => novaMensagem?.id ?? null)
   let resultadoEnvio = false
 
   const tipoOriginal = normalizeForwardTipo(mensagemOriginal.tipo)

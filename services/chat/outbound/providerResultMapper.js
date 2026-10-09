@@ -19,6 +19,7 @@
  */
 
 const { isRealWhatsAppId, isUltramsgNumericQueueId } = require('../../../helpers/whatsappMessageIdHelper')
+const { isTransientOutboundFailure } = require('./outboundFailureClassifier')
 
 /**
  * @param {boolean|object} result Resultado bruto do provider (boolean legado ou objeto {ok, messageId, error, blockedBy}).
@@ -74,4 +75,45 @@ function mapProviderSendResult(result, opts = {}) {
   }
 }
 
-module.exports = { mapProviderSendResult }
+/**
+ * mapProviderSendResult + classificação de falha TRANSITÓRIA num passo só.
+ * Timeout/rede/429/5xx não provam que nada foi enviado: a linha fica pending/sending com
+ * reconciliação, em vez de 'erro' (que tira a linha da varredura e convida a um reenvio manual
+ * capaz de duplicar no cliente). `falhaTransitoria` avisa o chamador para não responder erro.
+ */
+function mapProviderSendResultComTransitoria(result, opts = {}) {
+  const mapped = mapProviderSendResult(result, opts)
+  const falhaTransitoria = !mapped.ok && isTransientOutboundFailure({
+    httpStatus: typeof result === 'object' ? result?.httpStatus : null,
+    transportError: typeof result === 'object' && result?.transportError === true,
+  })
+  if (!falhaTransitoria) return { ...mapped, falhaTransitoria: false }
+  return {
+    ...mapped,
+    falhaTransitoria: true,
+    needsReconciliation: true,
+    nextStatus: 'pending',
+    nextStatusMensagem: 'sending',
+  }
+}
+
+/**
+ * Executa um envio ao provedor sem deixar a exceção escapar. O adapter UltraMSG PROPAGA
+ * timeout/rede; nos endpoints sem try/catch próprio isso virava HTTP 500 com a linha pending
+ * órfã (sem evento na tela e sem reconciliação agendada).
+ */
+async function enviarSemEstourar(fn, acao = 'enviar') {
+  try {
+    return await fn()
+  } catch (e) {
+    console.warn(`[ENVIO] exceção de transporte ao ${acao} — tratada como falha transitória:`, e?.message || e)
+    return {
+      ok: false,
+      messageId: null,
+      transportError: true,
+      error: `Falha de conexão ao ${acao}: ${e?.message || e}`,
+    }
+  }
+}
+
+module.exports = { mapProviderSendResult, mapProviderSendResultComTransitoria, enviarSemEstourar }

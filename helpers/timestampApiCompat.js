@@ -58,4 +58,17 @@ function normalizarTimestampSemFusoAmbiguoParaApi(val) {
   return Number.isNaN(d.getTime()) ? val : d.toISOString()
 }
 
-module.exports = { normalizarTimestampSemFusoAmbiguoParaApi }
+/**
+ * Epoch (ms) de um timestamp do banco, tratando valor sem fuso como UTC — a mesma regra acima.
+ * Para cálculo de IDADE no servidor: `Date.parse` puro leria "2026-10-08T20:23:24" no fuso do
+ * processo e deslocaria carências/janelas em horas quando o servidor não está em UTC.
+ * @returns {number} NaN quando o valor não é uma data.
+ */
+function parseTimestampSemFusoComoUtc(val) {
+  if (val == null || val === '') return NaN
+  const norm = normalizarTimestampSemFusoAmbiguoParaApi(val)
+  const t = norm instanceof Date ? norm.getTime() : Date.parse(String(norm))
+  return Number.isFinite(t) ? t : NaN
+}
+
+module.exports = { normalizarTimestampSemFusoAmbiguoParaApi, parseTimestampSemFusoComoUtc }

@@ -15,7 +15,7 @@
 
 const supabase = require('../config/supabase')
 const whapiContacts = require('./providers/whapi/contacts')
-const { possiblePhonesForWhatsappIdentity } = require('../helpers/phoneHelper')
+const { possiblePhonesForWhatsappIdentity, isSameWhatsappIdentity } = require('../helpers/phoneHelper')
 const { toWhapiRecipient, explicitPrivateJidDigits } = require('./providers/whapi/phones')
 
 function normalizeCanonicalWaId(waId) {
@@ -178,7 +178,19 @@ async function resolveWhapiSendRecipient(phone, opts = {}, deps = {}) {
   try {
     const context = conversaId != null ? await load(companyId, conversaId) : null
     const cliente = context?.cliente || (clienteId != null ? await loadClient(companyId, clienteId) : null)
-    const existingCanonical = normalizeCanonicalWaId(cliente?.wa_id)
+    const waIdGravado = normalizeCanonicalWaId(cliente?.wa_id)
+    // O wa_id gravado só vale se for o MESMO número desta conversa (com/sem o 9º dígito).
+    // Sem esta conferência, um cadastro cujo telefone foi editado (ou uma conversa religada a
+    // outro cliente) continuava enviando para o número antigo, com o CRM mostrando o novo.
+    const waIdBateComTelefone =
+      !waIdGravado || isSameWhatsappIdentity(waIdGravado.replace(/\D/g, ''), storedPrivateDigits(phone) || fallback)
+    if (waIdGravado && !waIdBateComTelefone) {
+      console.warn('[WHAPI_DESTINO] wa_id do cadastro nao corresponde ao telefone da conversa; revalidando', {
+        company_id: Number(companyId),
+        cliente_id: cliente?.id ?? null,
+      })
+    }
+    const existingCanonical = waIdBateComTelefone ? waIdGravado : ''
     const waIdLooksLikeAgendaMobile = isThirteenDigitBrMobileWaId(existingCanonical)
     if (existingCanonical && !waIdLooksLikeAgendaMobile) return toWhapiRecipient(existingCanonical)
 
@@ -204,7 +216,7 @@ async function resolveWhapiSendRecipient(phone, opts = {}, deps = {}) {
     }
 
     if (cliente?.id) {
-      if (waIdLooksLikeAgendaMobile) {
+      if (waIdLooksLikeAgendaMobile || !waIdBateComTelefone) {
         await persist(companyId, cliente, canonical, { replaceExisting: true })
       } else {
         await persist(companyId, cliente, canonical)

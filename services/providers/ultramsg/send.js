@@ -147,7 +147,9 @@ async function sendFile(phone, url, fileName = '', opts = {}) {
       errMsg = `Extensão não suportada pelo WhatsApp (.${safeExt}). Tente ZIP, PDF ou outro formato.`
     }
     console.warn('❌ UltraMsg sendFile falhou:', nums[0]?.slice(-12), filename?.slice(-40), errMsg.slice(0, 200))
-    return returnDetails ? { ok: false, messageId: null, error: errMsg } : false
+    // httpStatus acompanha a falha: sem ele um 429/5xx nunca era classificado como transitório
+    // e o documento virava erro definitivo em vez de ficar pendente para reconciliação.
+    return returnDetails ? { ok: false, messageId: null, httpStatus: normalized.httpStatus ?? status ?? null, error: errMsg } : false
   }
   const msgId = normalized.messageId
   console.log('✅ UltraMsg arquivo enviado:', nums[0]?.slice(-12), filename?.slice(-30))
@@ -185,7 +187,7 @@ async function sendVideo(phone, videoUrl, caption = '', opts = {}) {
   if (!normalized.ok) {
     const errMsg = String(normalized.error || data?.error || data?.message || text?.slice(0, 200) || `HTTP ${status}`)
     console.warn('❌ UltraMsg sendVideo falhou:', nums[0]?.slice(-12), errMsg.slice(0, 200))
-    return returnDetails ? { ok: false, messageId: null, error: errMsg } : false
+    return returnDetails ? { ok: false, messageId: null, httpStatus: normalized.httpStatus ?? status ?? null, error: errMsg } : false
   }
   const msgId = normalized.messageId
   console.log('✅ UltraMsg vídeo enviado:', nums[0]?.slice(-12), msgId ? `id=${String(msgId).slice(0, 14)}...` : '')
@@ -379,6 +381,13 @@ async function getMessages(opts = {}) {
   if (!ok) {
     const err = data?.error || data?.message || text?.slice(0, 200) || `HTTP error`
     return { ok: false, data: [], error: err }
+  }
+  // A UltraMSG responde HTTP 200 com { error } em falhas da API. Tratar isso como lista vazia
+  // fazia a reconciliação concluir "o provedor não tem registro" a partir de um ERRO — e então
+  // reenviar mensagem já entregue, ou marcar como falha/enviada sem evidência.
+  if (data && !Array.isArray(data) && typeof data === 'object' && data.error) {
+    const err = typeof data.error === 'string' ? data.error : JSON.stringify(data.error)
+    return { ok: false, data: [], error: String(err).slice(0, 300) }
   }
   const list = Array.isArray(data) ? data : (data?.messages ?? data?.data ?? [])
   return { ok: true, data: list }

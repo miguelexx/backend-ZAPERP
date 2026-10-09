@@ -33,7 +33,10 @@ function normalizeMediaBaseNameForMatch(name) {
 
 function mediaFamilyForStorageTipo(tipo) {
   const t = String(tipo || '').toLowerCase().trim()
-  if (t === 'text' || t === 'texto' || t === 'chat') return 'texto'
+  // 'link': o webhook reclassifica como link todo texto que contém URL, mas a linha do CRM é
+  // 'texto'. Sem equiparar, o eco de uma mensagem com link não casava com a própria linha:
+  // nascia uma bolha duplicada e a original ficava sem id até ser reenviada em dobro.
+  if (t === 'text' || t === 'texto' || t === 'chat' || t === 'link') return 'texto'
   if (t === 'audio' || t === 'voice' || t === 'ptt') return 'audio'
   // Figurinha e imagem compartilham família na reconciliação fromMe (webp pode vir como image no webhook).
   if (t === 'image' || t === 'imagem' || t === 'sticker') return 'imagem'

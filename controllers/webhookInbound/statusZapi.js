@@ -25,6 +25,121 @@ function _logWebhookSafe(entry) {
   console.log('[Z-API-WEBHOOK]', JSON.stringify(safe))
 }
 
+/**
+ * ACK TARDIO — o ACK chegou ANTES de o whatsapp_id estar gravado na linha.
+ *
+ * No envio, o id só entra no banco depois que o POST ao provedor retorna e o UPDATE conclui.
+ * O Whapi costuma postar o `sent` nesse intervalo. Os fallbacks 3/3b abaixo cobrem essa corrida
+ * só para ids no formato WhatsApp (`@`/`_`, UltraMSG); id do Whapi não tem nenhum dos dois,
+ * então o ACK caía em "mensagem não encontrada (ignorado)" e o tique ficava no relógio até o
+ * próximo ACK ou a varredura. Aqui o ACK não encontrado é guardado e reaplicado por match EXATO
+ * de whatsapp_id em poucos segundos. Fire-and-forget: não atrasa a resposta do webhook.
+ */
+const ACK_TARDIO_DELAYS_MS = [800, 2500, 7000]
+const ACK_TARDIO_MAX = 150
+const _acksTardios = new Map()
+
+function ackTardioDesligado() {
+  return (
+    process.env.NODE_ENV === 'test' ||
+    !!process.env.JEST_WORKER_ID ||
+    String(process.env.ACK_LATE_RETRY_DISABLED || '').trim() === '1'
+  )
+}
+
+/** Uma tentativa de reaplicar o ACK guardado. Retorna true quando a linha foi encontrada. */
+async function reaplicarAckTardio({ company_id, idStr, status, io }) {
+  const { data: row } = await selectSingleMensagemByWhatsappIdRelaxed(supabase, {
+    company_id,
+    whatsapp_id: idStr,
+    select: 'id, conversa_id, company_id, autor_usuario_id, whatsapp_id, status',
+    context: 'status.ack_tardio',
+  })
+  if (!row?.id) return false
+
+  // Mesma regra do fluxo principal: grupo não tem confirmação de leitura confiável.
+  let statusAplicar = status
+  if ((status === 'read' || status === 'played') && row.conversa_id) {
+    const { data: conv } = await supabase
+      .from('conversas')
+      .select('tipo, telefone')
+      .eq('id', row.conversa_id)
+      .eq('company_id', company_id)
+      .maybeSingle()
+    const isGroup = conv?.tipo === 'grupo' || (conv?.telefone && String(conv.telefone).endsWith('@g.us'))
+    if (isGroup) statusAplicar = 'delivered'
+  }
+
+  const atual = String(row.status || 'pending')
+  const efetivo = resolveAckEffectiveStatus(atual, statusAplicar)
+  // A linha já está neste status (ou adiante): nada a gravar nem a emitir.
+  if (efetivo === canonStatusForEmit(atual)) return true
+
+  const { data: patched } = await patchMensagemStatusById(supabase, {
+    company_id,
+    mensagem_id: row.id,
+    effectiveStatus: efetivo,
+    select: 'id, conversa_id, company_id, autor_usuario_id, whatsapp_id',
+  })
+  if (patched?.id && io) {
+    const emitStatus = canonStatusForEmit(efetivo)
+    let chain = io.to(`empresa_${patched.company_id}`).to(`conversa_${patched.conversa_id}`)
+    if (patched.autor_usuario_id != null) chain = chain.to(`usuario_${patched.autor_usuario_id}`)
+    chain.emit('status_mensagem', {
+      mensagem_id: patched.id,
+      conversa_id: patched.conversa_id,
+      status: emitStatus,
+      status_mensagem: emitStatus,
+      whatsapp_id: patched.whatsapp_id || idStr,
+    })
+  }
+  return true
+}
+
+function agendarAckTardio({ company_id, idStr, status, io }) {
+  if (ackTardioDesligado() || !company_id || !idStr || !status) return false
+  const chave = `${company_id}:${idStr}`
+  const existente = _acksTardios.get(chave)
+  if (existente) {
+    // Vários ACKs do mesmo id enquanto aguarda (sent → delivered): guarda o mais avançado.
+    existente.status = resolveAckEffectiveStatus(existente.status, status)
+    return true
+  }
+  if (_acksTardios.size >= ACK_TARDIO_MAX) return false
+  const entrada = { status, tentativa: 0 }
+  _acksTardios.set(chave, entrada)
+
+  const tentar = () => {
+    const delay = ACK_TARDIO_DELAYS_MS[entrada.tentativa]
+    if (delay == null) {
+      _acksTardios.delete(chave)
+      return
+    }
+    const timer = setTimeout(async () => {
+      entrada.tentativa += 1
+      let achou = false
+      try {
+        achou = await reaplicarAckTardio({ company_id, idStr, status: entrada.status, io })
+      } catch (e) {
+        console.warn('[ACK_TARDIO] falha ao reaplicar:', e?.message || e)
+      }
+      if (achou) _acksTardios.delete(chave)
+      else tentar()
+    }, delay)
+    if (typeof timer.unref === 'function') timer.unref()
+  }
+  tentar()
+  return true
+}
+
+exports._ackTardio = {
+  reaplicarAckTardio,
+  agendarAckTardio,
+  pendentes: () => _acksTardios.size,
+  limpar: () => _acksTardios.clear(),
+  ACK_TARDIO_DELAYS_MS,
+}
+
 exports.statusZapi = async (req, res) => {
   try {
     if ((req.path || '').includes('statusht')) {
@@ -226,7 +341,11 @@ exports.statusZapi = async (req, res) => {
 
       // 3) Fallback UltraMsg: message_ack pode chegar ANTES do ReceivedCallback (id formato WhatsApp).
       //    Busca mensagem out recente com whatsapp_id pendente (null ou fila numérica) e atualiza status + whatsapp_id.
-      const isWhatsAppFormatId = idStr.includes('@') || idStr.includes('_')
+      // Os fallbacks 3/3b abaixo são heurísticas da UltraMSG (casam o ACK com "a única linha
+      // pendente recente"). Num canal Whapi o id pode conter '_' sem ter esse formato: lá o
+      // caminho certo para ACK adiantado é o ACK tardio (match exato), nunca a heurística.
+      const ehCanalWhapi = String(req.zapiContext?.provider || req.webhookContext?.provider || '').toLowerCase() === 'whapi'
+      const isWhatsAppFormatId = !ehCanalWhapi && (idStr.includes('@') || idStr.includes('_'))
       if (!msg && isWhatsAppFormatId && company_id) {
         const fromIso = new Date(Date.now() - 5 * 60 * 1000).toISOString()
         let recentOutQuery = supabase
@@ -359,7 +478,15 @@ exports.statusZapi = async (req, res) => {
 
         if (logDebug) console.log('[DEBUG] /webhooks/ultramsg/status resultado:', { status: statusNorm, mensagem_id: msg.id, conversa_id: msg.conversa_id, whatsapp_id: idStr.slice(0, 20) + '…' })
       } else {
-        console.log('[ULTRAMSG] Status', statusNorm, 'para id', idStr.slice(0, 20) + '… — mensagem não encontrada no banco (ignorado)')
+        // Ids fora do formato WhatsApp e fora da fila numérica (caso do Whapi) não têm fallback
+        // de corrida acima: guarda o ACK e reaplica em instantes, quando o id já estiver gravado.
+        const emEspera =
+          !isWhatsAppFormatId && !isUltramsgNumericId &&
+          agendarAckTardio({ company_id, idStr, status: effectiveStatus, io })
+        console.log(
+          '[ULTRAMSG] Status', statusNorm, 'para id', idStr.slice(0, 20) + '… — mensagem não encontrada no banco',
+          emEspera ? '(ACK guardado; reaplica em instantes)' : '(ignorado)'
+        )
       }
 
       // UltraMSG muitas vezes não ecoa referenceId no ACK. A fila do disparo

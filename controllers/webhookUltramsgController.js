@@ -282,7 +282,8 @@ function normalizeUltramsgToZapi(body) {
     timestamp: data.time ? (Number(data.time) * 1000) : Date.now(),
     t: data.time,
     ack: (data.ack && String(data.ack).trim()) ? data.ack : 'pending',
-    status: (data.ack && String(data.ack).trim()) ? data.ack : 'RECEIVED',
+    // Eco de mensagem nossa sem ack informado = saiu (sent), não entregue.
+    status: (data.ack && String(data.ack).trim()) ? data.ack : (fromMe ? 'sent' : 'RECEIVED'),
     imageUrl: imageUrl || null,
     documentUrl: documentUrl || null,
     audioUrl: audioUrl || null,
