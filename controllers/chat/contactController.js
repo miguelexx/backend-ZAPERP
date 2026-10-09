@@ -44,7 +44,12 @@ exports.criarGrupo = async (req, res) => {
         whatsappInstanceId: instance.id,
       })
       if (!created?.ok) {
-        const status = [400, 401, 404, 429].includes(Number(created?.httpStatus)) ? Number(created.httpStatus) : 422
+        const raw = Number(created?.httpStatus)
+        // 401 da Whapi = número desconectado; não devolver 401 (o front deslogaria). Vira 409.
+        if (raw === 401) {
+          return res.status(409).json({ codigo: 'WHATSAPP_DESCONECTADO', error: 'WhatsApp desconectado. Reconecte o número para criar o grupo.' })
+        }
+        const status = [400, 404, 429].includes(raw) ? raw : 422
         return res.status(status).json({ error: created?.error || 'Não foi possível criar o grupo no WhatsApp.' })
       }
       const gid = String(created.data?.id || created.data?.group_id || created.data?.chat_id || '').trim()

@@ -441,9 +441,8 @@ exports.listarConversas = async (req, res) => {
       mensagens ( conversa_id, texto, criado_em, direcao, tipo, url, nome_arquivo, whatsapp_id, status, autor_usuario_id, contact_meta, location_meta )
     `
 
-    const instanciasPermitidasAtendente = isAtendente
-      ? await instanciasPermitidasDoUsuario(company_id, user_id)
-      : null
+    // null = este usuário não marcou número nenhum (qualquer perfil): lista igual à de hoje.
+    const instanciasPermitidasAtendente = await instanciasPermitidasDoUsuario(company_id, user_id)
 
     function buildQuery(select) {
       let q = supabase
@@ -453,7 +452,7 @@ exports.listarConversas = async (req, res) => {
       // Filtro por número WhatsApp (multi-instância): escopo puro, aplicado igual em todas as abas
       // e nos contadores (chatListCountsService). Sem o filtro = todos os números (comportamento atual).
       if (filtroWhatsappInstanceId) q = q.eq('whatsapp_instance_id', filtroWhatsappInstanceId)
-      // Trava atendente ↔ número. null = sem marcação, lista igual à de hoje.
+      // Trava por número. null = sem marcação, lista igual à de hoje.
       q = aplicarFiltroNumerosPermitidos(q, instanciasPermitidasAtendente, filtroWhatsappInstanceId)
       // Filtro por setor: conversas sem setor visíveis para TODOS; com setor só mesmo setor.
       // EXCEÇÃO: conversas que o usuário transferiu — aparecem independente do setor.

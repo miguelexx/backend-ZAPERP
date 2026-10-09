@@ -212,7 +212,14 @@ function needMethod(provider, name) {
 
 function sendProviderResult(res, result, fallback = 'Não foi possível concluir a ação no grupo.') {
   if (result?.ok) return res.json({ ok: true, ...(result.data && typeof result.data === 'object' ? { data: result.data } : {}), inviteCode: result.inviteCode, inviteLink: result.inviteLink, applications: result.applications })
-  const status = [400, 401, 403, 404, 409, 422, 429, 503].includes(Number(result?.httpStatus)) ? Number(result.httpStatus) : 422
+  const raw = Number(result?.httpStatus)
+  // NUNCA devolver 401 daqui: 401 da Whapi = canal do WhatsApp sem autorização (número
+  // desconectado), e o interceptor do front trata qualquer 401 como sessão expirada → desloga
+  // e manda pro /login. Remapeia para 409 (desconectado) com mensagem clara.
+  if (raw === 401) {
+    return res.status(409).json({ ok: false, codigo: 'WHATSAPP_DESCONECTADO', error: 'WhatsApp desconectado. Reconecte o número para gerenciar grupos.' })
+  }
+  const status = [400, 403, 404, 409, 422, 429, 503].includes(raw) ? raw : 422
   return res.status(status).json({ ok: false, error: result?.error || fallback })
 }
 

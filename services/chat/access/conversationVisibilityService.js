@@ -218,12 +218,10 @@ async function carregarUsuarioIdsQuePodemVerConversaSemCache(company_id, convers
     const uid = Number(u.id)
     const perfil = String(u.perfil || '').toLowerCase()
     const isAdmin = perfil === 'admin'
+    const permitidas = mapaNumeros.get(uid)
+    const trava = permitidas && permitidas.size > 0 ? permitidas : null
+    if (!atendentePodeVerNumero(trava, conv.whatsapp_instance_id)) continue
     if (isAdmin) { ids.push(uid); continue }
-    if (perfil === 'atendente') {
-      const permitidas = mapaNumeros.get(uid)
-      const trava = permitidas && permitidas.size > 0 ? permitidas : null
-      if (!atendentePodeVerNumero(trava, conv.whatsapp_instance_id)) continue
-    }
     const userDepIds = userDepMap.get(uid) ?? (u.departamento_id != null ? [Number(u.departamento_id)] : [])
     if (isGroup) {
       if (grupoDepSet.size === 0 || userDepIds.some((d) => grupoDepSet.has(Number(d)))) ids.push(uid)

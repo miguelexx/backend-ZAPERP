@@ -170,14 +170,15 @@ async function substituirAtendentesDoNumero({ company_id, whatsapp_instance_id, 
       .eq('company_id', cid)
       .in('id', ids)
     if (userErr) throw userErr
+    const perfisMarcaveis = new Set(['atendente', 'admin', 'administrador', 'supervisor'])
     const ok = new Set(
       (users || [])
-        .filter((u) => u.ativo !== false && String(u.perfil || '').toLowerCase() === 'atendente')
+        .filter((u) => u.ativo !== false && perfisMarcaveis.has(String(u.perfil || '').toLowerCase()))
         .map((u) => Number(u.id))
     )
     const invalidos = ids.filter((id) => !ok.has(id))
     if (invalidos.length > 0) {
-      const err = new Error('Só atendentes ativos entram nesta trava. Admin e supervisor já veem todos os números.')
+      const err = new Error('Só usuários ativos da empresa entram nesta marcação.')
       err.statusCode = 400
       throw err
     }

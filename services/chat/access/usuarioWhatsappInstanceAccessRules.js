@@ -1,9 +1,9 @@
 /**
  * Regra pura da trava de visão por número WhatsApp.
  *
- * null = atendente sem nenhuma marcação: vê como hoje.
+ * null = usuário sem nenhuma marcação: vê como hoje (atendente, admin ou supervisor).
  * Set com ids = vê só conversas (e grupos) desses números.
- * Admin e supervisor não passam por esta regra.
+ * A trava só existe para quem tem pelo menos um número marcado.
  */
 
 function atendentePodeVerNumero(instanciasPermitidas, whatsappInstanceId) {

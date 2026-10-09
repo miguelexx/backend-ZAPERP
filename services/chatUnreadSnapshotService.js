@@ -27,9 +27,7 @@ async function getAuthorizedIds(user, ids) {
     departamento_ids: user.departamento_ids || [],
     conversaIdsTransferidas: [], conversaIdsParticipanteAtivo: [],
     grupoIdsPermitidosPorDepartamento: [], grupoIdsSemDepartamento: [],
-    instanciasPermitidasAtendente: isAtendente
-      ? await instanciasPermitidasDoUsuario(company_id, user_id)
-      : null,
+    instanciasPermitidasAtendente: await instanciasPermitidasDoUsuario(company_id, user_id),
   }
   if (!isAdmin) {
     const [transfers, participants, groupDepartments, groups] = await Promise.all([

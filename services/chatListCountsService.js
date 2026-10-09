@@ -322,9 +322,7 @@ async function resolveChatListCountsContext(req) {
     filter_dep_id,
     filtroAtendenteInformado,
     filtroWhatsappInstanceId,
-    instanciasPermitidasAtendente: isAtendente
-      ? await instanciasPermitidasDoUsuario(company_id, user_id)
-      : null,
+    instanciasPermitidasAtendente: await instanciasPermitidasDoUsuario(company_id, user_id),
     conversaIdsTransferidas,
     conversaIdsParticipanteAtivo: Array.isArray(conversaIdsParticipanteAtivo) ? conversaIdsParticipanteAtivo : [],
     grupoIdsPermitidosPorDepartamento,

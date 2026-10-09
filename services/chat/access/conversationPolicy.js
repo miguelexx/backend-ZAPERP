@@ -34,11 +34,10 @@ async function assertPermissaoConversa({ company_id, conversa_id, user_id, role,
   if (!conv) return { ok: false, status: 404, error: 'Conversa não encontrada' }
 
   const r = String(role || '').toLowerCase()
-  if (r === 'atendente') {
-    const permitidas = await instanciasPermitidasDoUsuario(company_id, user_id)
-    if (!atendentePodeVerNumero(permitidas, conv.whatsapp_instance_id)) {
-      return { ok: false, status: 403, error: 'Conversa de um número que você não pode ver' }
-    }
+  // Sem marcação, permitidas é null e a visão segue igual. Com marcação, vale para atendente, admin e supervisor.
+  const permitidas = await instanciasPermitidasDoUsuario(company_id, user_id)
+  if (!atendentePodeVerNumero(permitidas, conv.whatsapp_instance_id)) {
+    return { ok: false, status: 403, error: 'Conversa de um número que você não pode ver' }
   }
 
   const isGroup = isGroupConversation(conv)
@@ -129,11 +128,9 @@ async function assertPodeEnviarMensagem({
   if (error) return { ok: false, status: 500, error: error.message }
   if (!conv) return { ok: false, status: 404, error: 'Conversa não encontrada' }
 
-  if (String(role || '').toLowerCase() === 'atendente') {
-    const permitidas = await instanciasPermitidasDoUsuario(company_id, user_id)
-    if (!atendentePodeVerNumero(permitidas, conv.whatsapp_instance_id)) {
-      return { ok: false, status: 403, error: 'Conversa de um número que você não pode ver' }
-    }
+  const permitidasEnvio = await instanciasPermitidasDoUsuario(company_id, user_id)
+  if (!atendentePodeVerNumero(permitidasEnvio, conv.whatsapp_instance_id)) {
+    return { ok: false, status: 403, error: 'Conversa de um número que você não pode ver' }
   }
 
   if (isGroupConversation(conv)) {

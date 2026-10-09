@@ -107,11 +107,9 @@ exports.detalharChat = async (req, res) => {
     if (errConv) return res.status(500).json({ error: errConv.message })
     if (!conversa) return res.status(404).json({ error: 'Conversa não encontrada' })
 
-    if (String(role || '').toLowerCase() === 'atendente') {
-      const permitidas = await instanciasPermitidasDoUsuario(company_id, user_id)
-      if (!atendentePodeVerNumero(permitidas, conversa.whatsapp_instance_id)) {
-        return res.status(403).json({ error: 'Conversa de um número que você não pode ver' })
-      }
+    const permitidas = await instanciasPermitidasDoUsuario(company_id, user_id)
+    if (!atendentePodeVerNumero(permitidas, conversa.whatsapp_instance_id)) {
+      return res.status(403).json({ error: 'Conversa de um número que você não pode ver' })
     }
 
     const isGroup = isGroupConversation(conversa)

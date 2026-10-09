@@ -33,9 +33,8 @@ exports.listar = async (req, res) => {
         .order('nome', { ascending: true }),
       supabase
         .from('usuarios')
-        .select('id, nome')
+        .select('id, nome, perfil')
         .eq('company_id', company_id)
-        .eq('perfil', 'atendente')
         .eq('ativo', true)
         .order('nome', { ascending: true }),
     ])
@@ -79,7 +78,10 @@ exports.listar = async (req, res) => {
         ativo: inst.ativo,
         atendente_ids: porInstancia.get(Number(inst.id)) || [],
       })),
-      atendentes: atendentes || [],
+      atendentes: (atendentes || []).filter((u) => {
+        const perfil = String(u.perfil || '').toLowerCase()
+        return perfil === 'atendente' || perfil === 'admin' || perfil === 'administrador' || perfil === 'supervisor'
+      }),
     })
   } catch (err) {
     console.error('[acesso-numeros] listar', err?.message || err)
