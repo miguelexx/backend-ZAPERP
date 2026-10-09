@@ -56,14 +56,21 @@ describe('Whapi — comunidades', () => {
     expect(c.body).toEqual({ subject: 'VIP', description: 'Clientes especiais' })
   })
 
-  test('getCommunities GET /communities?count&offset e mapeia groups[]', async () => {
-    const { fetchWithRetry } = mockDeps({ fetchImpl: async () => jsonRes({ groups: [{ id: CID, name: 'VIP' }], total: 1 }) })
+  test('getCommunities GET /communities?count&offset mapeia o campo real communities[]', async () => {
+    const { fetchWithRetry } = mockDeps({ fetchImpl: async () => jsonRes({ communities: [{ id: CID, name: 'VIP' }], total: 1 }) })
     const r = await load().getCommunities({ ...CTX, count: 50, offset: 0 })
     expect(r.ok).toBe(true)
     expect(r.communities).toHaveLength(1)
     expect(r.total).toBe(1)
     expect(callOf(fetchWithRetry).url).toContain('https://gate.whapi.test/communities?')
     expect(callOf(fetchWithRetry).url).toContain('count=50')
+  })
+
+  test('getCommunities aceita fallback groups[] (builds antigos)', async () => {
+    mockDeps({ fetchImpl: async () => jsonRes({ groups: [{ id: CID }], total: 1 }) })
+    const r = await load().getCommunities(CTX)
+    expect(r.ok).toBe(true)
+    expect(r.communities).toHaveLength(1)
   })
 
   test('getCommunity GET /communities/{cid} e monta inviteLink', async () => {

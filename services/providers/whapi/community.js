@@ -106,8 +106,15 @@ async function getCommunities(opts = {}) {
     const res = await get({ token: cfg.token, endpoint: '/communities', extraParams })
     const wrapped = wrap(res)
     if (wrapped.ok) {
-      wrapped.communities = Array.isArray(wrapped.data?.groups) ? wrapped.data.groups : []
-      wrapped.total = Number(wrapped.data?.total ?? wrapped.communities.length) || wrapped.communities.length
+      // A Whapi devolve o array em `communities` (confirmado no ambiente real);
+      // alguns builds/doc citam `groups`. Aceita ambos + array cru por robustez.
+      const body = wrapped.data
+      const list = Array.isArray(body?.communities) ? body.communities
+        : Array.isArray(body?.groups) ? body.groups
+        : Array.isArray(body) ? body
+        : []
+      wrapped.communities = list
+      wrapped.total = Number(body?.total ?? list.length) || list.length
     }
     return wrapped
   } catch (e) {
