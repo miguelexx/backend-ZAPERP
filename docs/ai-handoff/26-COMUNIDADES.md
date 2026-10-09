@@ -21,6 +21,15 @@ Migration `20261009120000_comunidades_fila.sql` (em `migrations/` e `supabase/mi
 ## HTTP
 `routes/comunidadeRoutes.js` (montado em `/comunidades` no `app.js`), todas `auth + adminOnly`. `/operacoes*` antes de `/:cid`. Controller `controllers/comunidadeController.js` (padrão de `groupAdminController`: `company_id` de `req.user`, `resolveWhatsappInstanceForManualAction`, `needMethod`→501, `sendProviderResult`). Stub antigo `POST /chats/comunidades` ficou intacto (não usado pela UI nova).
 
+## Apagar comunidade (WhatsApp + sistema)
+`DELETE /comunidades/:cid` → `comunidadeController.apagarComunidade` faz 4 coisas, nesta ordem:
+1. `deactivateCommunity` na Whapi (`DELETE /communities/{cid}`) — desativa no WhatsApp para todos (404 da Whapi = já não existia; segue a limpeza local em vez de falhar);
+2. `deleteChat(cid)` **best-effort** — remove o chat residual da comunidade do aparelho conectado (não bloqueia se falhar);
+3. `fila.cancelarOperacoesDoAlvo` — cancela operações `em_execucao|pausada` daquele `comunidade_id` + itens ativos (emite `comunidade_operacao_atualizada` por operação);
+4. **Tombstone** em `whatsapp_instances.metadata.comunidades_removidas` (array de cids, cap 300) — a Whapi pode continuar listando comunidades desativadas por um tempo; `listarComunidades` filtra esses cids para o card nunca voltar. Sem migration (reusa o jsonb `metadata`, mesmo lugar de `comunidade_limites`).
+
+Resposta: `{ ok, whatsapp, chatRemovido, operacoesCanceladas }`. Front: botão de lixeira no card (confirm) + "Apagar comunidade" na aba Configurações do detalhe; remoção otimista da lista.
+
 ## Frontend
 `pages/Comunidades.jsx` (admin-only, rota `/comunidades` em `AppRoutes.jsx`, nav em `MainLayout`), `comunidades/comunidadesService.js`, `comunidades/comunidadesStore.js`, `comunidades/comunidades.css` (classes `.cm-*`, tokens `--ds-*`). Listeners socket **só em `socket/socket.js`** (bloco `off→on`). Antiga `/atendimento/nova-comunidade` → redirect para `/comunidades`.
 
@@ -28,4 +37,4 @@ Migration `20261009120000_comunidades_fila.sql` (em `migrations/` e `supabase/mi
 A migration ganhou coluna `tipo` (grupo|comunidade); `comunidade_id` guarda o @g.us do ALVO (grupo OU comunidade). `comunidadeFilaService.enfileirarParticipantes({tipo})` e o worker (`metodoDoProvider(p, tipo, operacao)`) despacham `addGroupParticipant`/`addCommunityParticipant`. Endpoints de grupo em `groupAdminController`: `POST /chats/:id/participantes/fila` (enfileira), `GET /chats/:id/participantes/fila` (progresso do grupo), `POST /chats/:id/participantes/fila/:opId/cancelar`. Frontend: `components/ContatosPicker.jsx` (busca `getClientesComTotal` + paginação + colar em massa), `pages/NovoGrupo.jsx` (cria ≤20 imediato; senão semeia 1 + enfileira o resto), `conversa/components/GrupoBulkAddModal.jsx` (grupo existente, com progresso). Limite grupo 1024, comunidade 2000.
 
 ## Testes
-`tests/whapiCommunity.test.js` (provider), `tests/comunidadeWorker.test.js` (resultado add + gate; dispatch grupo/comunidade). Suite completa: 2258 verdes.
+`tests/whapiCommunity.test.js` (provider), `tests/comunidadeWorker.test.js` (resultado add + gate; dispatch grupo/comunidade), `tests/comunidadeFila.test.js` (`cancelarOperacoesDoAlvo`). Suite completa: 2258 verdes.

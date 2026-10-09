@@ -23,7 +23,8 @@ router.post('/', auth, adminOnly, c.criarComunidade)
 router.get('/:cid', auth, adminOnly, c.obterComunidade)
 router.get('/:cid/subgrupos', auth, adminOnly, c.listarSubgrupos)
 router.patch('/:cid/settings', auth, adminOnly, c.configurarComunidade)
-router.delete('/:cid', auth, adminOnly, c.desativarComunidade)
+// Apagar: desativa no WhatsApp + remove do sistema (tombstone, fila cancelada, chat residual)
+router.delete('/:cid', auth, adminOnly, c.apagarComunidade)
 
 // Grupos
 router.post('/:cid/grupos', auth, adminOnly, c.criarGrupoNaComunidade)

@@ -5,6 +5,7 @@
  * Comunidades/grupos/participantes/admins são lidos AO VIVO da Whapi. Adição em massa vai p/ a FILA.
  */
 
+const supabase = require('../config/supabase')
 const { getProvider } = require('../services/providers')
 const { resolveWhatsappInstanceForManualAction } = require('../services/whatsappInstanceService')
 const fila = require('../services/comunidade/comunidadeFilaService')
@@ -68,6 +69,31 @@ function cidFromParams(req) {
   return String(req.params.cid || '').trim()
 }
 
+// Tombstones de comunidades apagadas: a Whapi pode continuar listando uma comunidade
+// desativada por um tempo; o metadata da instância garante que ela some do sistema.
+const COMUNIDADES_REMOVIDAS_MAX = 300
+
+function comunidadesRemovidasDe(instance) {
+  const list = instance?.metadata?.comunidades_removidas
+  return new Set(Array.isArray(list) ? list.map((v) => String(v).trim()) : [])
+}
+
+async function marcarComunidadeRemovida(companyId, instance, cid) {
+  try {
+    const metadata = instance?.metadata && typeof instance.metadata === 'object' ? { ...instance.metadata } : {}
+    const atuais = Array.isArray(metadata.comunidades_removidas) ? metadata.comunidades_removidas.map(String) : []
+    if (atuais.includes(cid)) return
+    metadata.comunidades_removidas = [...atuais, cid].slice(-COMUNIDADES_REMOVIDAS_MAX)
+    await supabase
+      .from('whatsapp_instances')
+      .update({ metadata })
+      .eq('company_id', companyId)
+      .eq('id', instance.id)
+  } catch (e) {
+    console.warn('[apagarComunidade] tombstone falhou:', e?.message || e)
+  }
+}
+
 // ---------------------------------------------------------------- LISTAR / CRIAR
 
 exports.listarComunidades = async (req, res) => {
@@ -82,7 +108,10 @@ exports.listarComunidades = async (req, res) => {
       offset: req.query?.offset,
     })
     if (!result?.ok) return sendProviderResult(res, result, 'Não foi possível listar comunidades.')
-    return res.json({ ok: true, comunidades: result.communities || [], total: result.total || 0, whatsapp_instance_id: ctx.instance.id })
+    // Esconde comunidades já apagadas pelo sistema (a Whapi pode segui-las listando desativadas).
+    const removidas = comunidadesRemovidasDe(ctx.instance)
+    const comunidades = (result.communities || []).filter((c) => !removidas.has(String(c?.id || '').trim()))
+    return res.json({ ok: true, comunidades, total: comunidades.length, whatsapp_instance_id: ctx.instance.id })
   } catch (err) {
     console.error('[listarComunidades]', err)
     return res.status(500).json({ error: 'Erro ao listar comunidades' })
@@ -256,17 +285,45 @@ exports.revogarConvite = async (req, res) => {
   }
 }
 
-exports.desativarComunidade = async (req, res) => {
+/**
+ * Apagar comunidade: desativa no WhatsApp (DELETE /communities/{cid} — ela some para
+ * todos, inclusive no celular conectado), remove o chat residual do aparelho (best-effort),
+ * cancela operações pendentes da fila e grava tombstone no metadata da instância para o
+ * card sumir do sistema mesmo que a Whapi continue listando a comunidade desativada.
+ */
+exports.apagarComunidade = async (req, res) => {
   try {
     const ctx = await resolveCtx(req)
     if (ctx.error) return res.status(ctx.error.status).json({ error: ctx.error.error, code: ctx.error.code })
     const missing = needMethod(ctx.provider, 'deactivateCommunity')
     if (missing) return res.status(missing.status).json({ error: missing.error })
-    const result = await ctx.provider.deactivateCommunity(cidFromParams(req), ctx.opts)
-    return sendProviderResult(res, result, 'Não foi possível desativar a comunidade.')
+    const cid = cidFromParams(req)
+
+    const result = await ctx.provider.deactivateCommunity(cid, ctx.opts)
+    // 404 = já não existe/foi desativada no WhatsApp → só resta limpar o sistema.
+    const jaNaoExistia = !result?.ok && Number(result?.httpStatus) === 404
+    if (!result?.ok && !jaNaoExistia) {
+      return sendProviderResult(res, result, 'Não foi possível apagar a comunidade.')
+    }
+
+    // Chat residual da comunidade no aparelho conectado (best-effort; não bloqueia).
+    let chatRemovido = false
+    if (typeof ctx.provider.deleteChat === 'function') {
+      try { chatRemovido = (await ctx.provider.deleteChat(cid, ctx.opts)) === true } catch { /* best-effort */ }
+    }
+
+    const operacoesCanceladas = await fila.cancelarOperacoesDoAlvo({
+      io: req.app?.get?.('io'),
+      companyId: ctx.company_id,
+      comunidadeId: cid,
+    })
+
+    await marcarComunidadeRemovida(ctx.company_id, ctx.instance, cid)
+
+    return res.json({ ok: true, whatsapp: !jaNaoExistia, chatRemovido, operacoesCanceladas })
   } catch (err) {
-    console.error('[desativarComunidade]', err)
-    return res.status(500).json({ error: 'Erro ao desativar comunidade' })
+    console.error('[apagarComunidade]', err)
+    return res.status(500).json({ error: 'Erro ao apagar comunidade' })
   }
 }
 

@@ -254,6 +254,42 @@ async function alterarStatusOperacao({ io = null, companyId, operacaoId, acao })
   return { error: 'Ação inválida.', status: 400 }
 }
 
+/**
+ * Cancela TODAS as operações não finalizadas de um alvo (ao apagar a comunidade/grupo).
+ * Retorna quantas operações foram canceladas.
+ */
+async function cancelarOperacoesDoAlvo({ io = null, companyId, comunidadeId }) {
+  const cid = String(comunidadeId || '').trim()
+  if (!cid || !Number.isFinite(Number(companyId))) return 0
+  const { data: ops } = await supabase
+    .from('comunidade_operacoes')
+    .select('id')
+    .eq('company_id', companyId)
+    .eq('comunidade_id', cid)
+    .in('status', ['em_execucao', 'pausada'])
+  const ids = (ops || []).map((o) => o.id)
+  if (!ids.length) return 0
+
+  const nowIso = new Date().toISOString()
+  await supabase
+    .from('comunidade_fila_itens')
+    .update({ status: 'cancelada', updated_at: nowIso })
+    .in('operacao_id', ids)
+    .in('status', ATIVOS)
+  const { data: atualizadas } = await supabase
+    .from('comunidade_operacoes')
+    .update({ status: 'cancelada', pausa_motivo: null, updated_at: nowIso })
+    .in('id', ids)
+    .select()
+
+  if (io) {
+    for (const op of atualizadas || []) {
+      emitComunidade(io, companyId, EVENTS.OPERACAO_ATUALIZADA, { operacao: op })
+    }
+  }
+  return ids.length
+}
+
 /** Pausa automática da operação por sinal de limitação (rate limit/limite). */
 async function pausarOperacaoAutomatica({ io = null, companyId, operacaoId, motivo }) {
   const { data } = await supabase.from('comunidade_operacoes')
@@ -309,6 +345,7 @@ module.exports = {
   enfileirarParticipantes,
   recalcularContadores,
   alterarStatusOperacao,
+  cancelarOperacoesDoAlvo,
   pausarOperacaoAutomatica,
   listarOperacoes,
   listarOperacoesDoAlvo,
