@@ -302,6 +302,9 @@ exports.aprovarSolicitacaoGrupo = _groupAdminController.aprovarSolicitacaoGrupo
 exports.rejeitarSolicitacaoGrupo = _groupAdminController.rejeitarSolicitacaoGrupo
 exports.entrarPorConviteGrupo = _groupAdminController.entrarPorConvite
 exports.consultarConviteGrupo = _groupAdminController.consultarConvite
+exports.enfileirarParticipantesGrupo = _groupAdminController.enfileirarParticipantesGrupo
+exports.listarFilaGrupo = _groupAdminController.listarFilaGrupo
+exports.cancelarFilaGrupo = _groupAdminController.cancelarFilaGrupo
 
 // =====================================================
 // Preferências da lista (silenciar / fixar / favoritar) — PATCH /chats/:id/prefs

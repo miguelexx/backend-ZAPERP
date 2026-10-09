@@ -93,6 +93,10 @@ router.delete('/:id/grupo/solicitacoes', auth, chatController.rejeitarSolicitaca
 router.get('/:id/participantes', auth, chatController.listarParticipantesGrupo)
 router.post('/:id/participantes', auth, chatController.adicionarParticipantesGrupo)
 router.delete('/:id/participantes', auth, chatController.removerParticipantesGrupo)
+// Adição em massa (fila protegida / ritmo ultra-conservador) — p/ muitos participantes sem bloquear o número
+router.post('/:id/participantes/fila', auth, chatController.enfileirarParticipantesGrupo)
+router.get('/:id/participantes/fila', auth, chatController.listarFilaGrupo)
+router.post('/:id/participantes/fila/:opId/cancelar', auth, chatController.cancelarFilaGrupo)
 router.post('/:id/grupo/admins', auth, chatController.promoverAdminGrupo)
 router.delete('/:id/grupo/admins', auth, chatController.rebaixarAdminGrupo)
 router.put('/:id/cliente', auth, chatController.vincularClienteConversa)

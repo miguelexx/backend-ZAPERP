@@ -149,7 +149,16 @@ async function finalizarItem(item, patch) {
   }).eq('id', item.id)
 }
 
-function metodoDoProvider(p, operacao) {
+function metodoDoProvider(p, tipo, operacao) {
+  if (tipo === 'grupo') {
+    switch (operacao) {
+      case 'add': return p.addGroupParticipant
+      case 'remove': return p.removeGroupParticipant
+      case 'promote': return p.promoteToGroupAdmin
+      case 'demote': return p.demoteGroupAdmin
+      default: return null
+    }
+  }
   switch (operacao) {
     case 'add': return p.addCommunityParticipant
     case 'remove': return p.removeCommunityParticipant
@@ -203,7 +212,7 @@ async function processarItem(item) {
     }
 
     const p = provider()
-    const metodo = metodoDoProvider(p, operacao)
+    const metodo = metodoDoProvider(p, item.tipo, operacao)
     if (typeof metodo !== 'function') {
       await finalizarItem(item, { status: 'falhou', resultado: 'failed', erro_codigo: 'SEM_SUPORTE', erro_mensagem: 'Provider não suporta a operação.', concluido_em: new Date().toISOString() })
       await recalcularContadores(item.operacao_id, io, companyId)

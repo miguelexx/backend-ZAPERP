@@ -16,21 +16,33 @@ function provider() {
   return getProvider({ provider: 'whapi' })
 }
 
-/** JIDs já participantes da comunidade (para não re-adicionar — evita ruído anti-spam). */
-async function jidsAtuaisDaComunidade(companyId, instanceId, comunidadeId) {
+function jidsFromParticipants(parts) {
+  const set = new Set()
+  for (const raw of Array.isArray(parts) ? parts : []) {
+    const id = String(raw?.id ?? raw ?? '').trim()
+    const digits = id.replace(/@[^@]+$/, '').replace(/\D/g, '')
+    if (digits) set.add(digits)
+  }
+  return set
+}
+
+/**
+ * JIDs já participantes do ALVO (grupo ou comunidade) — para não re-adicionar (evita ruído
+ * anti-spam). getCommunity devolve { ok, data }; getGroup devolve o objeto cru (ou null).
+ */
+async function jidsAtuaisDoDestino(tipo, companyId, instanceId, alvoId) {
   try {
     const p = provider()
-    if (typeof p.getCommunity !== 'function') return new Set()
-    const res = await p.getCommunity(comunidadeId, { companyId, whatsappInstanceId: instanceId })
-    if (!res?.ok) return new Set()
-    const parts = Array.isArray(res.data?.participants) ? res.data.participants : []
-    const set = new Set()
-    for (const raw of parts) {
-      const id = String(raw?.id ?? raw ?? '').trim()
-      const digits = id.replace(/@[^@]+$/, '').replace(/\D/g, '')
-      if (digits) set.add(digits)
+    const opts = { companyId, whatsappInstanceId: instanceId }
+    if (tipo === 'grupo') {
+      if (typeof p.getGroup !== 'function') return new Set()
+      const raw = await p.getGroup(alvoId, opts)
+      return jidsFromParticipants(raw?.participants || raw?.members)
     }
-    return set
+    if (typeof p.getCommunity !== 'function') return new Set()
+    const res = await p.getCommunity(alvoId, opts)
+    if (!res?.ok) return new Set()
+    return jidsFromParticipants(res.data?.participants)
   } catch {
     return new Set()
   }
@@ -48,25 +60,28 @@ async function enfileirarParticipantes({
   comunidadeNome = null,
   participantes = [],
   operacao = 'add',
+  tipo = 'comunidade',
   criadoPor = null,
   maxTentativas = 5,
 }) {
   const cid = String(comunidadeId || '').trim()
-  if (!cid) return { error: 'Comunidade inválida.' }
+  const kind = tipo === 'grupo' ? 'grupo' : 'comunidade'
+  const LIMITE = kind === 'grupo' ? 1024 : 2000 // grupo WhatsApp ~1024 membros; comunidade ~2000
+  if (!cid) return { error: kind === 'grupo' ? 'Grupo inválido.' : 'Comunidade inválida.' }
   if (!Number.isFinite(Number(instanceId))) return { error: 'Instância inválida.' }
 
   // 1) normaliza + dedup dentro do input
   const normalizados = contactIds(participantes).map((s) => String(s).replace(/@[^@]+$/, '').replace(/\D/g, '')).filter(Boolean)
   const unicos = [...new Set(normalizados)]
   if (!unicos.length) return { error: 'Nenhum número válido informado.' }
-  if (unicos.length > 2000) return { error: 'Limite de 2000 participantes por operação.' }
+  if (unicos.length > LIMITE) return { error: `Limite de ${LIMITE} participantes por operação.` }
 
   let alvo = unicos
   let ignorados = 0
 
-  // 2) pré-filtro: quem já está na comunidade (só faz sentido em add)
+  // 2) pré-filtro: quem já está no grupo/comunidade (só faz sentido em add)
   if (operacao === 'add') {
-    const atuais = await jidsAtuaisDaComunidade(companyId, instanceId, cid)
+    const atuais = await jidsAtuaisDoDestino(kind, companyId, instanceId, cid)
     if (atuais.size) {
       const antes = alvo.length
       alvo = alvo.filter((jid) => !atuais.has(jid))
@@ -100,6 +115,7 @@ async function enfileirarParticipantes({
     .insert({
       company_id: companyId,
       whatsapp_instance_id: instanceId,
+      tipo: kind,
       comunidade_id: cid,
       comunidade_nome: comunidadeNome,
       operacao,
@@ -121,6 +137,7 @@ async function enfileirarParticipantes({
     operacao_id: op.id,
     company_id: companyId,
     whatsapp_instance_id: instanceId,
+    tipo: kind,
     comunidade_id: cid,
     operacao,
     participante_jid: jid,
@@ -259,6 +276,18 @@ async function listarOperacoes(companyId, { limit = 50 } = {}) {
   return data || []
 }
 
+/** Operações de um ALVO específico (ex.: um grupo @g.us) — para progresso na UI do grupo. */
+async function listarOperacoesDoAlvo(companyId, comunidadeId, { limit = 10 } = {}) {
+  const { data } = await supabase
+    .from('comunidade_operacoes')
+    .select('*')
+    .eq('company_id', companyId)
+    .eq('comunidade_id', String(comunidadeId || '').trim())
+    .order('created_at', { ascending: false })
+    .limit(Math.min(Math.max(1, Number(limit) || 10), 50))
+  return data || []
+}
+
 async function obterOperacao(companyId, operacaoId) {
   const { data: op } = await supabase
     .from('comunidade_operacoes')
@@ -282,5 +311,6 @@ module.exports = {
   alterarStatusOperacao,
   pausarOperacaoAutomatica,
   listarOperacoes,
+  listarOperacoesDoAlvo,
   obterOperacao,
 }

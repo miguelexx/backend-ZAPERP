@@ -1,8 +1,10 @@
--- Comunidades (WhatsApp Communities via Whapi): fila persistente de adição/remoção/promoção
--- de participantes, com claim atômico (SKIP LOCKED), lease e advisory lock por instância.
--- Espelha o padrão do Disparo (20260822120000_disparo_fila_etapa7.sql), enxuto p/ 2 tabelas.
--- Comunidades/grupos/participantes/admins são lidos AO VIVO da Whapi — sem tabela-espelho.
--- Limite por instância fica em whatsapp_instances.metadata.comunidade_limites (jsonb) — sem tabela nova.
+-- Fila protegida de participantes para GRUPOS e COMUNIDADES (WhatsApp via Whapi):
+-- adição/remoção/promoção em massa com claim atômico (SKIP LOCKED), lease e advisory lock
+-- por instância, ritmo ultra-conservador (anti-bloqueio). Espelha o padrão do Disparo
+-- (20260822120000_disparo_fila_etapa7.sql), enxuto p/ 2 tabelas.
+-- A coluna `tipo` distingue grupo vs comunidade; `comunidade_id` guarda o ID @g.us do ALVO
+-- (grupo OU comunidade — ambos usam o formato @g.us). Participantes/admins são lidos AO VIVO
+-- da Whapi — sem tabela-espelho. Limite por instância em whatsapp_instances.metadata.comunidade_limites.
 
 -- =========================================================
 -- 1. OPERAÇÕES (cabeçalho do lote)
@@ -11,7 +13,9 @@ CREATE TABLE IF NOT EXISTS public.comunidade_operacoes (
   id                    uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   company_id            integer NOT NULL REFERENCES public.empresas(id) ON DELETE CASCADE,
   whatsapp_instance_id  integer NOT NULL REFERENCES public.whatsapp_instances(id) ON DELETE RESTRICT,
-  comunidade_id         varchar(64) NOT NULL,          -- @g.us
+  tipo                  text NOT NULL DEFAULT 'comunidade'
+                          CHECK (tipo IN ('grupo','comunidade')),
+  comunidade_id         varchar(64) NOT NULL,          -- ID @g.us do alvo (grupo ou comunidade)
   comunidade_nome       text,
   operacao              text NOT NULL DEFAULT 'add'
                           CHECK (operacao IN ('add','remove','promote','demote')),
@@ -47,7 +51,9 @@ CREATE TABLE IF NOT EXISTS public.comunidade_fila_itens (
   operacao_id             uuid    NOT NULL REFERENCES public.comunidade_operacoes(id) ON DELETE CASCADE,
   company_id              integer NOT NULL REFERENCES public.empresas(id) ON DELETE CASCADE,
   whatsapp_instance_id    integer NOT NULL REFERENCES public.whatsapp_instances(id) ON DELETE RESTRICT,
-  comunidade_id           varchar(64) NOT NULL,         -- @g.us
+  tipo                    text NOT NULL DEFAULT 'comunidade'
+                            CHECK (tipo IN ('grupo','comunidade')),
+  comunidade_id           varchar(64) NOT NULL,         -- ID @g.us do alvo (grupo ou comunidade)
   operacao                text NOT NULL DEFAULT 'add'
                             CHECK (operacao IN ('add','remove','promote','demote')),
   participante_jid        varchar(40) NOT NULL,         -- dígitos (Contact ID Whapi)

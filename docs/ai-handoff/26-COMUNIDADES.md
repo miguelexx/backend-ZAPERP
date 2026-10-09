@@ -24,5 +24,8 @@ Migration `20261009120000_comunidades_fila.sql` (em `migrations/` e `supabase/mi
 ## Frontend
 `pages/Comunidades.jsx` (admin-only, rota `/comunidades` em `AppRoutes.jsx`, nav em `MainLayout`), `comunidades/comunidadesService.js`, `comunidades/comunidadesStore.js`, `comunidades/comunidades.css` (classes `.cm-*`, tokens `--ds-*`). Listeners socket **só em `socket/socket.js`** (bloco `off→on`). Antiga `/atendimento/nova-comunidade` → redirect para `/comunidades`.
 
+## Grupos reusam a MESMA fila (adição em massa, ex. 500 pessoas)
+A migration ganhou coluna `tipo` (grupo|comunidade); `comunidade_id` guarda o @g.us do ALVO (grupo OU comunidade). `comunidadeFilaService.enfileirarParticipantes({tipo})` e o worker (`metodoDoProvider(p, tipo, operacao)`) despacham `addGroupParticipant`/`addCommunityParticipant`. Endpoints de grupo em `groupAdminController`: `POST /chats/:id/participantes/fila` (enfileira), `GET /chats/:id/participantes/fila` (progresso do grupo), `POST /chats/:id/participantes/fila/:opId/cancelar`. Frontend: `components/ContatosPicker.jsx` (busca `getClientesComTotal` + paginação + colar em massa), `pages/NovoGrupo.jsx` (cria ≤20 imediato; senão semeia 1 + enfileira o resto), `conversa/components/GrupoBulkAddModal.jsx` (grupo existente, com progresso). Limite grupo 1024, comunidade 2000.
+
 ## Testes
-`tests/whapiCommunity.test.js` (provider), `tests/comunidadeWorker.test.js` (resultado add + gate). Suite completa: 2258 verdes.
+`tests/whapiCommunity.test.js` (provider), `tests/comunidadeWorker.test.js` (resultado add + gate; dispatch grupo/comunidade). Suite completa: 2258 verdes.

@@ -12,7 +12,9 @@ const { resolveConversationWhatsappInstance, resolveConversationProvider } = req
 const { assertPermissaoConversa } = require('../../services/chat/access/conversationPolicy')
 const { emitirConversaAtualizada } = require('../../services/chat/realtime/chatRealtimeGateway')
 const { findOrCreateConversation } = require('../../helpers/conversationSync')
-const { resolveWhatsappInstanceForManualAction } = require('../../services/whatsappInstanceService')
+const { resolveWhatsappInstanceForManualAction, getWhatsappInstanceById } = require('../../services/whatsappInstanceService')
+const fila = require('../../services/comunidade/comunidadeFilaService')
+const { getComunidadeWorkerConfig, resolverLimitesInstancia } = require('../../helpers/comunidadeWorkerConfig')
 
 function providerOpts(companyId, whatsappInstanceId) {
   return { companyId, whatsappInstanceId: whatsappInstanceId || undefined }
@@ -411,6 +413,23 @@ exports.adicionarParticipantesGrupo = async (req, res) => {
     if (missing) return res.status(missing.status).json({ error: missing.error })
     const parts = req.body?.participantes || req.body?.participants || req.body?.telefone
     const result = await ctx.provider.addGroupParticipant(ctx.jid, parts, ctx.opts)
+    // A Whapi devolve { success, processed[], failed[] }: a adição pode FALHAR por
+    // privacidade/anti-spam do WhatsApp mesmo com HTTP 200. Não reportar "adicionado"
+    // quando ninguém entrou — senão o usuário acha que deu certo e o contato não está no grupo.
+    if (result?.ok) {
+      const data = result.data || {}
+      const processed = Array.isArray(data.processed) ? data.processed : []
+      const failed = Array.isArray(data.failed) ? data.failed : []
+      if (processed.length === 0 && failed.length > 0) {
+        return res.status(422).json({
+          ok: false,
+          codigo: 'NAO_ADICIONADO',
+          error: 'O WhatsApp não adicionou o contato (privacidade/anti-spam). Envie o link de convite do grupo.',
+          failed,
+        })
+      }
+      return res.json({ ok: true, data, processed, failed })
+    }
     return sendProviderResult(res, result, 'Não foi possível adicionar ao grupo.')
   } catch (err) {
     console.error('[adicionarParticipantesGrupo]', err)
@@ -567,6 +586,81 @@ exports.entrarPorConvite = async (req, res) => {
   } catch (err) {
     console.error('[entrarPorConvite]', err)
     return res.status(500).json({ error: 'Erro ao entrar no grupo' })
+  }
+}
+
+// =====================================================
+// ADIÇÃO EM MASSA (fila protegida) — adicionar muitos participantes sem queimar o número.
+// Reusa a fila/worker de Comunidades (tipo='grupo'). Ritmo ultra-conservador + backoff + pausa.
+// =====================================================
+exports.enfileirarParticipantesGrupo = async (req, res) => {
+  try {
+    const ctx = await loadGroupContext(req)
+    if (ctx.error) return res.status(ctx.error.status).json({ error: ctx.error.error })
+    if (ctx.instanceProvider !== 'whapi') {
+      return res.status(422).json({ error: 'Adição em massa disponível apenas para instâncias Whapi.' })
+    }
+    if (!ctx.jid) return res.status(400).json({ error: 'Este grupo ainda não existe no WhatsApp.' })
+    const io = req.app?.get?.('io')
+    const participantes = req.body?.participantes || req.body?.participants || []
+    const cfg = getComunidadeWorkerConfig()
+    const r = await fila.enfileirarParticipantes({
+      io,
+      companyId: ctx.company_id,
+      instanceId: ctx.whatsappInstanceId,
+      comunidadeId: ctx.jid,
+      comunidadeNome: ctx.conversa?.nome_grupo || null,
+      participantes,
+      operacao: 'add',
+      tipo: 'grupo',
+      criadoPor: req.user?.id || null,
+      maxTentativas: cfg.maxTentativas,
+    })
+    if (r?.error) return res.status(400).json({ error: r.error })
+    let porDia = 100
+    try {
+      const inst = await getWhatsappInstanceById(ctx.company_id, ctx.whatsappInstanceId, { includeCredentials: false, requireActive: false })
+      porDia = Math.max(1, resolverLimitesInstancia(inst?.instance?.metadata).porDia || 100)
+    } catch { /* usa default */ }
+    const diasEstimados = r.total > 0 ? Math.ceil(r.total / porDia) : 0
+    return res.json({
+      ok: true,
+      operacao: r.operacao || null,
+      total: r.total || 0,
+      ignorados: r.ignorados || 0,
+      jaNaFila: r.jaNaFila || 0,
+      vazio: !!r.vazio,
+      eta: { porDia, diasEstimados },
+    })
+  } catch (err) {
+    console.error('[enfileirarParticipantesGrupo]', err)
+    return res.status(500).json({ error: 'Erro ao enfileirar participantes' })
+  }
+}
+
+exports.listarFilaGrupo = async (req, res) => {
+  try {
+    const ctx = await loadGroupContext(req)
+    if (ctx.error) return res.status(ctx.error.status).json({ error: ctx.error.error })
+    const ops = ctx.jid ? await fila.listarOperacoesDoAlvo(ctx.company_id, ctx.jid, { limit: 10 }) : []
+    return res.json({ ok: true, operacoes: ops })
+  } catch (err) {
+    console.error('[listarFilaGrupo]', err)
+    return res.status(500).json({ error: 'Erro ao listar a fila do grupo' })
+  }
+}
+
+exports.cancelarFilaGrupo = async (req, res) => {
+  try {
+    const ctx = await loadGroupContext(req)
+    if (ctx.error) return res.status(ctx.error.status).json({ error: ctx.error.error })
+    const io = req.app?.get?.('io')
+    const r = await fila.alterarStatusOperacao({ io, companyId: ctx.company_id, operacaoId: req.params.opId, acao: 'cancelar' })
+    if (r?.error) return res.status(r.status || 400).json({ error: r.error })
+    return res.json({ ok: true, operacao: r.operacao })
+  } catch (err) {
+    console.error('[cancelarFilaGrupo]', err)
+    return res.status(500).json({ error: 'Erro ao cancelar a fila do grupo' })
   }
 }
 
