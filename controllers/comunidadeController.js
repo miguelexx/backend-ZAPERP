@@ -28,7 +28,18 @@ function sendProviderResult(res, result, fallback = 'Não foi possível concluir
       inviteLink: result.inviteLink,
     })
   }
-  const status = [400, 401, 403, 404, 409, 422, 429, 503].includes(Number(result?.httpStatus)) ? Number(result.httpStatus) : 422
+  const raw = Number(result?.httpStatus)
+  // NUNCA devolver 401 daqui: o 401 da Whapi significa "canal do WhatsApp sem autorização"
+  // (número desconectado), e o interceptor do front trata qualquer 401 como sessão expirada
+  // → desloga e manda pro /login. Remapeamos para 409 (desconectado) com mensagem clara.
+  if (raw === 401) {
+    return res.status(409).json({
+      ok: false,
+      codigo: 'WHATSAPP_DESCONECTADO',
+      error: 'WhatsApp desconectado. Reconecte o número Whapi para gerenciar comunidades.',
+    })
+  }
+  const status = [400, 403, 404, 409, 422, 429, 503].includes(raw) ? raw : 422
   return res.status(status).json({ ok: false, error: result?.error || fallback })
 }
 
