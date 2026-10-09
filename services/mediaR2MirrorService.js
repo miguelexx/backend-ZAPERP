@@ -221,6 +221,7 @@ async function mirrorMensagemParaR2({ supabase, io = null, company_id, mensagem_
       local_purga: keepLocalForever() ? 'nunca (R2_KEEP_LOCAL)' : `em ~${Math.round(getLocalCleanupDelayMs() / 60000)}min`,
     })
 
+    _espelhadasEm.set(Number(mensagem_id), Date.now())
     agendarPurgaLocal({ supabase, company_id, mensagem_id, localPath })
     emitirMidiaAtualizada({ io, company_id, row, updated })
     return { ok: true, url: novaUrl, key }
@@ -237,8 +238,26 @@ function emitirMidiaAtualizada({ io, company_id, row, updated }) {
   try {
     const conversa_id = updated.conversa_id ?? row.conversa_id
     const fromMe = String(updated.direcao ?? row.direcao ?? '').toLowerCase() === 'out'
-    const payload = { ...updated, conversa_id, fromMe }
-    io.to(`conversa_${conversa_id}`).emit(io.EVENTS?.NOVA_MENSAGEM || 'nova_mensagem', payload)
+    const { normalizarTimestampSemFusoAmbiguoParaApi } = require('../helpers/timestampApiCompat')
+    const payload = {
+      ...updated,
+      criado_em: normalizarTimestampSemFusoAmbiguoParaApi(updated.criado_em),
+      conversa_id,
+      fromMe,
+    }
+    const evento = io.EVENTS?.NOVA_MENSAGEM || 'nova_mensagem'
+    const soSala = () => io.to(`conversa_${conversa_id}`).emit(evento, payload)
+    // Mesmo alcance do evento que entregou o /uploads (sala da conversa + salas dos usuários):
+    // quem recebeu a URL antiga e não está com a conversa aberta também precisa da nova, senão
+    // fica apontando para um arquivo que será purgado do disco.
+    let emitirVisivel = null
+    try {
+      emitirVisivel = require('./chat/realtime/chatRealtimeGateway').emitirEventoConversaVisivel
+    } catch (_) { /* cai na sala */ }
+    if (typeof emitirVisivel !== 'function') { soSala(); return }
+    Promise.resolve(emitirVisivel(io, company_id, conversa_id, evento, payload)).catch(() => {
+      try { soSala() } catch (_) { /* best-effort */ }
+    })
   } catch (_) { /* emissão é best-effort */ }
 }
 
@@ -332,6 +351,9 @@ async function purgarLocalDeMensagem(supabase, company_id, mensagem_id, localPat
  * scheduler periódico rodar neste processo. unref: não segura o processo vivo. A varredura
  * runR2LocalCleanup continua como backstop restart-safe (o timer morre se o processo reiniciar).
  */
+/** mensagem_id -> instante da troca para o R2 neste processo (a purga por timer cobre o resto). */
+const _espelhadasEm = new Map()
+
 function agendarPurgaLocal({ supabase, company_id, mensagem_id, localPath }) {
   if (keepLocalForever()) return
   const delay = getLocalCleanupDelayMs()
@@ -371,7 +393,14 @@ async function runR2LocalCleanup(supabase) {
     return out
   }
 
+  const agora = Date.now()
+  const janela = getLocalCleanupDelayMs()
+  for (const [id, ts] of _espelhadasEm) if (agora - ts >= janela) _espelhadasEm.delete(id)
+
   for (const r of rows || []) {
+    // O corte da query é a idade da MENSAGEM; mídia antiga espelhada agora há pouco (varredura)
+    // ainda está sendo lida por clientes com a URL /uploads — respeita a janela desde a troca.
+    if (_espelhadasEm.has(Number(r.id))) continue
     out.checked += 1
     const local = resolveLocalPath(r.url_legado)
     if (await purgarLocalDeMensagem(supabase, r.company_id, r.id, local)) out.purged += 1
@@ -498,6 +527,8 @@ module.exports = {
   runFullHistoryMigration,
   startMediaR2MirrorScheduler,
   _test: {
+    marcarEspelhadaAgora: (id, ts = Date.now()) => _espelhadasEm.set(Number(id), ts),
+    emitirMidiaAtualizada,
     buildStorageKey,
     pastaDoTipo,
     podeEspelharAgora,

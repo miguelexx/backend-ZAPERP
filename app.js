@@ -121,8 +121,11 @@ if (process.env.COMPRESSION_DISABLED !== '1') {
     level: 5,
     threshold: 1024,
     filter: (req, res) => {
-      const p = String(req.path || '')
+      // originalUrl: o filtro roda na hora da resposta, quando req.path já está sem o prefixo
+      // do router montado. Mídia e respostas parciais (Range/206) nunca são comprimidas.
+      const p = String(req.originalUrl || req.url || '')
       if (p.startsWith('/media/') || p.startsWith('/uploads')) return false
+      if (req.headers && req.headers.range) return false
       if (String(res.getHeader('Content-Type') || '').includes('text/event-stream')) return false
       return compression.filter(req, res)
     },
@@ -327,6 +330,7 @@ const helpDeskRoutes = require('./routes/helpDeskRoutes')
 // Hand-off (SSO) para o CRM Avançado — substitui o CRM interno removido.
 const crmSsoRoutes = require('./routes/crmSsoRoutes')
 const disparoRoutes = require('./routes/disparoRoutes')
+const comunidadeRoutes = require('./routes/comunidadeRoutes')
 
 // Webhooks já registrados antes do CORS (evita 403 Origin)
 app.use('/dashboard', apiLimiter, dashboardRoutes)
@@ -358,6 +362,7 @@ app.use('/conversas', apiLimiter, minhasPendenciasRoutes)
 app.use('/helpdesk', apiLimiter, helpDeskRoutes)
 app.use('/crm', apiLimiter, crmSsoRoutes)
 app.use('/disparo', apiLimiter, disparoRoutes)
+app.use('/comunidades', apiLimiter, comunidadeRoutes)
 
 // /api — prefixo opcional para SaaS; mantém compatibilidade com rotas antigas
 // Aplica apiLimiter globalmente para "rotas de API"

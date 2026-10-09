@@ -10,6 +10,9 @@ const { parseTimestampSemFusoComoUtc } = require('./timestampApiCompat')
 
 /** Espera até cada nova tentativa, a partir da falha da tentativa imediata pós-webhook. */
 const RETRY_DELAYS_MS = Object.freeze([
+  // Corrida com o upload do provedor (objeto ainda não legível quando o webhook chega): costuma
+  // resolver em segundos. Sem este degrau o áudio recém-chegado ficava 1 min sem tocar.
+  10 * 1000,
   60 * 1000,
   5 * 60 * 1000,
   15 * 60 * 1000,

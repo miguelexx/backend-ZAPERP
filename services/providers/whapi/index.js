@@ -20,6 +20,7 @@ const business = require('./business')
 const catalog = require('./catalog')
 const stories = require('./stories')
 const groups = require('./groups')
+const community = require('./community')
 const { uploadMedia, getMediaFiles, getMedia, deleteMedia } = require('./upload')
 const { buildBaseUrl, maskTokenInLogs, validateRequiredFields } = require('./http')
 const { toWhapiRecipient, toWhapiChatId, toWhapiGroupId, recipientCandidates } = require('./phones')
@@ -86,6 +87,24 @@ module.exports = {
   getGroupApplicationsList: groups.getGroupApplicationsList,
   approveGroupApplication: groups.approveGroupApplication,
   rejectGroupApplication: groups.rejectGroupApplication,
+
+  // Comunidades WhatsApp (só Whapi) — ver services/comunidade/* e workers/comunidadeWorker.js
+  createCommunity: community.createCommunity,
+  getCommunities: community.getCommunities,
+  getCommunity: community.getCommunity,
+  getCommunitySubGroups: community.getCommunitySubGroups,
+  createGroupInCommunity: community.createGroupInCommunity,
+  linkGroupToCommunity: community.linkGroupToCommunity,
+  unlinkGroupFromCommunity: community.unlinkGroupFromCommunity,
+  addCommunityParticipant: community.addCommunityParticipant,
+  removeCommunityParticipant: community.removeCommunityParticipant,
+  promoteCommunityParticipant: community.promoteCommunityParticipant,
+  demoteCommunityParticipant: community.demoteCommunityParticipant,
+  changeCommunitySettings: community.changeCommunitySettings,
+  deactivateCommunity: community.deactivateCommunity,
+  getCommunityInvite: community.getCommunityInvite,
+  revokeCommunityInvite: community.revokeCommunityInvite,
+
   patchChat: chatsAdmin.patchChat,
   pinChat: chatsAdmin.pinChat,
   muteChat: chatsAdmin.muteChat,

@@ -1251,3 +1251,22 @@ de corrigir. Suíte: 212 suítes / 2237 testes. Teste novo: `tests/envioFluxoAud
   no menu de texto em falha transitória; worker de campanha reenvia timeout; endpoint CRM
   (idempotência em memória, texto após áudio descartado); cópias `-wa.*` deixadas por
   encaminhar/reenviar vídeo e imagem; `kill_timeout` do PM2 (1,6 s) e `server.requestTimeout`.
+
+---
+
+## 2026-10-09 — Auditoria do RECEBIMENTO (áudio recebido que só tocava após F5)
+
+Causa principal estava no frontend (`url_absoluta` presa — ver doc 08 do frontend). No backend:
+
+| Onde | Defeito | Correção |
+|------|---------|----------|
+| `mediaR2MirrorService.emitirMidiaAtualizada` | Troca `/uploads` → `/media/r2` emitida só na sala `conversa_<id>`; quem recebeu o `/uploads` pela sala do usuário ficava com URL de arquivo que seria purgado | Usa `emitirEventoConversaVisivel` (sala + usuários), `criado_em` normalizado; fallback para a sala |
+| `mediaR2MirrorService.runR2LocalCleanup` | Corte pela idade da MENSAGEM: mídia antiga espelhada pela varredura perdia o arquivo local no mesmo tick | `_espelhadasEm` (id → instante da troca): respeita a janela desde a troca |
+| `helpers/inboundMediaRetryPolicy` | 1ª retentativa da cópia só após 60 s (corrida com o upload do provedor deixava o áudio 1 min sem tocar) | Degrau de 10 s antes (10s, 1min, 5min, 15min, 30min, 1h; 7 tentativas) |
+| `app.js` (compression) | Guarda de `/media` e `/uploads` usava `req.path` (já sem o prefixo do router) — código morto | `req.originalUrl` + nunca comprime requisição com `Range` |
+| `webhookZapiController` (idempotência, mídia tardia) | `update` por `id` sem `company_id` | Filtro `company_id` |
+
+Não alterado (decisão): mídia gravada SEM URL nunca é reparada sozinha (placeholder aceito só
+`(mensagem)`, `messages_updates` com link ignorado, reprocesso responde `definitivo` para
+`sem_url_remota`) — é o desenho documentado do master; `/media/proxy` bufferiza o upstream inteiro
+antes do 1º byte.

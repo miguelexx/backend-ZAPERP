@@ -2060,6 +2060,7 @@ exports.receberZapi = async (req, res) => {
                 .from('mensagens')
                 .update(upFields)
                 .eq('id', existente.id)
+                .eq('company_id', company_id)
                 .select(WEBHOOK_MSG_SELECT)
                 .single()
               mensagemSalva = updMsg || existente

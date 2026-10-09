@@ -173,10 +173,10 @@ function ultimoEstado(registro) {
 
 // ---------------------------------------------------------------- política pura
 
-test('backoff progressivo segue 1min, 5min, 15min, 30min e 1h', () => {
-  assert.deepEqual(RETRY_DELAYS_MS, [60000, 300000, 900000, 1800000, 3600000])
+test('backoff progressivo segue 10s, 1min, 5min, 15min, 30min e 1h', () => {
+  assert.deepEqual(RETRY_DELAYS_MS, [10000, 60000, 300000, 900000, 1800000, 3600000])
   const agora = new Date('2026-08-04T12:00:00.000Z')
-  const esperados = [60000, 300000, 900000, 1800000, 3600000]
+  const esperados = [10000, 60000, 300000, 900000, 1800000, 3600000]
 
   esperados.forEach((atraso, i) => {
     const plano = planejarProximaTentativa({ tentativas: i + 1, tipo: FALHA.TEMPORARIA, motivo: 'rede', agora })
@@ -262,7 +262,7 @@ test('não sobra arquivo parcial em /uploads', async () => {
 
 // ---------------------------------------------------------------- falhas
 
-test('timeout no download é falha temporária e reagenda em 1 minuto', async () => {
+test('timeout no download é falha temporária e reagenda em 10 segundos', async () => {
   const { supabase, linha, registro } = criarSupabase(linhaPadrao())
   global.fetch = async () => {
     throw Object.assign(new Error('abortado'), { name: 'AbortError' })
@@ -275,7 +275,8 @@ test('timeout no download é falha temporária e reagenda em 1 minuto', async ()
   assert.equal(r.motivo, 'timeout')
   assert.equal(r.tipo, FALHA.TEMPORARIA)
   assert.equal(r.status, STATUS.PENDENTE)
-  assert.ok(r.proximaEm.getTime() - antes >= 59000)
+  assert.ok(r.proximaEm.getTime() - antes >= 9000)
+  assert.ok(r.proximaEm.getTime() - antes <= 15000)
   assert.equal(linha.url, URL_REMOTA, 'a URL remota tem de continuar servindo a reprodução')
   assert.equal(arquivosSalvos().length, 0)
 
@@ -529,6 +530,7 @@ test('tentativas sucessivas avançam o backoff até esgotar', async () => {
   }
 
   assert.deepEqual(status, [
+    STATUS.PENDENTE,
     STATUS.PENDENTE,
     STATUS.PENDENTE,
     STATUS.PENDENTE,

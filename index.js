@@ -300,6 +300,9 @@ server.listen(PORT, '0.0.0.0', () => {
     const { startDisparoWorker } = require('./workers/disparoWorker')
     startDisparoWorker(io)
     console.log('[WORKER] Disparo worker embutido na API (heartbeat + fila)')
+    const { startComunidadeWorker } = require('./workers/comunidadeWorker')
+    startComunidadeWorker(io)
+    console.log('[WORKER] Comunidade worker embutido na API (fila ultra-conservadora)')
     const {
       startInboundMediaRetryScheduler,
       startInboundMediaDueRetryScheduler,
@@ -357,6 +360,10 @@ function shutdown(signal) {
     const { stopDisparoWorker } = require('./workers/disparoWorker')
     Promise.resolve(stopDisparoWorker()).catch((e) => {
       console.error('[SHUTDOWN] disparo worker:', e?.message || e)
+    })
+    const { stopComunidadeWorker } = require('./workers/comunidadeWorker')
+    Promise.resolve(stopComunidadeWorker()).catch((e) => {
+      console.error('[SHUTDOWN] comunidade worker:', e?.message || e)
     })
   } catch (e) {
     console.error('[SHUTDOWN] disparo worker:', e?.message || e)
