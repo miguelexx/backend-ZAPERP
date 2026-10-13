@@ -4,6 +4,7 @@
 
 const supabase = require('../config/supabase')
 const { TABLES, RPC, MESSAGE_TYPE } = require('./internalChatConstants')
+const { escapeIlikePattern, quoteOrValue } = require('../helpers/chatSearchHelper')
 
 const MESSAGE_SELECT =
   'id, conversation_id, company_id, sender_user_id, message_type, content, media_url, file_name, mime_type, file_size, payload, is_deleted, created_at, updated_at'
@@ -298,9 +299,13 @@ async function listClientContactsForPicker(companyId, opts = {}) {
     .order('nome', { ascending: true, nullsFirst: false })
     .range(off, end)
 
+  // O termo entra na gramática do `.or()`, onde "," e "()" são controle: buscar
+  // "Silva, Maria" (ou um telefone mascarado "+55 (34) 9991-1246") reescrevia o filtro.
+  // Mesmo tratamento já usado na busca de conversas: escapa curinga do ILIKE e cita o
+  // valor, o que mantém o termo literal em vez de mutilá-lo.
   const rawQ = opts.q != null ? String(opts.q).trim() : ''
   if (rawQ.length > 0) {
-    const term = `%${rawQ.slice(0, 80)}%`
+    const term = quoteOrValue(`%${escapeIlikePattern(rawQ.slice(0, 80))}%`)
     q = q.or(`nome.ilike.${term},pushname.ilike.${term},telefone.ilike.${term}`)
   }
 

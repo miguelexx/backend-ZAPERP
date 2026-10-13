@@ -4,7 +4,7 @@
  */
 
 const supabase = require('../config/supabase')
-const { buildClienteListagemSearchOr } = require('../helpers/chatSearchHelper')
+const { buildClienteListagemSearchOr, escapeIlikePattern, quoteOrValue } = require('../helpers/chatSearchHelper')
 const { validarTelefoneDisparo } = require('../helpers/disparoPhoneHelper')
 const {
   parseArquivo,
@@ -201,7 +201,20 @@ exports.listarDestinatarios = async (req, res) => {
       .neq('status', 'excluido')
 
     if (search) {
-      q = q.or(`nome.ilike.%${search.replace(/[%_\\]/g, c => `\\${c}`)}%,telefone_normalizado.ilike.%${search.replace(/\D/g, '')}%`)
+      // O escape anterior cobria só os curingas do ILIKE (% _ \) e deixava passar vírgula e
+      // parênteses, que são sintaxe do próprio `.or()` — "Silva, Maria" reescrevia o filtro.
+      // `quoteOrValue` cita o valor e o mantém literal (mesmo tratamento da busca de conversas).
+      const condicoes = [`nome.ilike.${quoteOrValue(`%${escapeIlikePattern(String(search))}%`)}`]
+
+      // Só compara telefone quando há dígito. Buscar "Maria" produzia o padrão vazio `%%`,
+      // que casa com QUALQUER telefone não nulo — em OR com o nome, a busca devolvia a lista
+      // inteira de destinatários (auditoria 10/10/2026).
+      const digitos = String(search).replace(/\D/g, '')
+      if (digitos) {
+        condicoes.push(`telefone_normalizado.ilike.${quoteOrValue(`%${digitos}%`)}`)
+      }
+
+      q = q.or(condicoes.join(','))
     }
 
     const { data, error, count } = await q

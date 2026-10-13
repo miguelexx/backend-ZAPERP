@@ -613,3 +613,58 @@ describe('Disparo Destinatários — persistência ao sair e retornar', () => {
     expect(res.body.total).toBe(2)
   })
 })
+
+
+// ── Busca de destinatários: filtro .or() do PostgREST ─────────────────────────
+describe('listarDestinatarios — a busca não pode devolver a lista inteira', () => {
+  afterEach(() => { jest.restoreAllMocks() })
+
+  async function capturarFiltroOr(search) {
+    let destChain = null
+    jest.spyOn(supabase, 'from').mockImplementation((table) => {
+      if (table === 'disparo_campanhas') {
+        return mockChain({ data: { id: 1, status: 'rascunho', company_id: 10 }, error: null })
+      }
+      if (table === 'disparo_campanha_destinatarios') {
+        destChain = mockChain({ data: [], error: null, count: 0 })
+        return destChain
+      }
+      return mockChain({ data: [], error: null, count: 0 })
+    })
+
+    const res = await request(app)
+      .get(`/api/disparo/campanhas/1/destinatarios?search=${encodeURIComponent(search)}`)
+      .set('Authorization', `Bearer ${ADMIN_TOKEN}`)
+
+    expect(res.status).toBe(200)
+    return destChain && destChain.or.mock.calls.length ? destChain.or.mock.calls[0][0] : null
+  }
+
+  // Regressão: `search.replace(/\D/g,'')` virava '' para termos sem dígito, gerando
+  // `telefone_normalizado.ilike.%%` — padrão que casa com QUALQUER telefone. Em OR com o
+  // nome, buscar "Maria" devolvia todos os destinatários (auditoria 10/10/2026).
+  it('termo sem dígito não compara telefone (senão o OR casa com todo mundo)', async () => {
+    const expr = await capturarFiltroOr('Maria')
+    expect(expr).toContain('nome.ilike')
+    expect(expr).not.toContain('telefone_normalizado')
+    expect(expr).not.toContain('%%')
+  })
+
+  it('termo com dígitos compara nome e telefone', async () => {
+    const expr = await capturarFiltroOr('9999')
+    expect(expr).toContain('nome.ilike')
+    expect(expr).toContain('telefone_normalizado.ilike')
+  })
+
+  it('vírgula no nome não cria condição extra no filtro', async () => {
+    const expr = await capturarFiltroOr('Silva, Maria')
+    expect(expr.match(/nome\.ilike/g)).toHaveLength(1)
+    expect(expr).toContain('Silva, Maria')
+  })
+
+  it('parênteses de telefone mascarado não quebram o filtro', async () => {
+    const expr = await capturarFiltroOr('(34) 9991-1246')
+    expect(expr.match(/nome\.ilike/g)).toHaveLength(1)
+    expect(expr).toContain('telefone_normalizado.ilike')
+  })
+})

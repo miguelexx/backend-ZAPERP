@@ -453,7 +453,7 @@ async function qTempoMedioRespostaAtendente(company_id, usuarioNome, days, opts 
     return { error: 'Atendente não encontrado. Informe o nome como cadastrado no sistema.', usuario: null, tempo_medio_min: null, conversas_analisadas: 0, periodo_dias: d }
   }
 
-  const usuarioRow = (await supabase.from('usuarios').select('id, nome').eq('id', usuario_id).maybeSingle()).data
+  const usuarioRow = (await supabase.from('usuarios').select('id, nome').eq('company_id', company_id).eq('id', usuario_id).maybeSingle()).data
 
   let convRows = []
   if (fixadoPergunta && fxIn && fxEx) {
@@ -580,7 +580,7 @@ async function qAmostraTextosAtendente(company_id, usuarioNome, days, opts = {})
     return { error: 'Atendente não encontrado. Informe o nome.', usuario: null, amostra: [], periodo_dias: d }
   }
 
-  const usuario = (await supabase.from('usuarios').select('id, nome').eq('id', usuario_id).maybeSingle()).data
+  const usuario = (await supabase.from('usuarios').select('id, nome').eq('company_id', company_id).eq('id', usuario_id).maybeSingle()).data
 
   let convIds = []
   if (fixadoPergunta && fxIn && fxEx) {
@@ -1913,7 +1913,7 @@ async function qMensagensUsuarioCliente(company_id, usuarioNome, clienteNome, cl
       error: null,
       ambiguidade_cliente: ambCliente,
       mensagens: [],
-      usuario: usuario_id ? (await supabase.from('usuarios').select('id, nome').eq('id', usuario_id).maybeSingle()).data : null,
+      usuario: usuario_id ? (await supabase.from('usuarios').select('id, nome').eq('company_id', company_id).eq('id', usuario_id).maybeSingle()).data : null,
       cliente: null,
       periodo_dias: d,
       observacao: 'Há mais de um cliente correspondente; informe telefone ou nome mais completo.',
@@ -1934,8 +1934,8 @@ async function qMensagensUsuarioCliente(company_id, usuarioNome, clienteNome, cl
       return {
         error: 'Nenhuma conversa individual encontrada para este cliente (excluídos grupos / @g.us).',
         mensagens: [],
-        usuario: usuario_id ? (await supabase.from('usuarios').select('id, nome').eq('id', usuario_id).maybeSingle()).data : null,
-        cliente: cliente_id ? (await supabase.from('clientes').select('id, nome, pushname, telefone').eq('id', cliente_id).maybeSingle()).data : null,
+        usuario: usuario_id ? (await supabase.from('usuarios').select('id, nome').eq('company_id', company_id).eq('id', usuario_id).maybeSingle()).data : null,
+        cliente: cliente_id ? (await supabase.from('clientes').select('id, nome, pushname, telefone').eq('company_id', company_id).eq('id', cliente_id).maybeSingle()).data : null,
         periodo_dias: d,
         criterio_resolucao: 'cliente_sem_conversa',
       }
@@ -1978,8 +1978,8 @@ async function qMensagensUsuarioCliente(company_id, usuarioNome, clienteNome, cl
       return {
         error: 'Não foi encontrada conversa deste cliente ligada a este usuário por atendente_id, usuario_id na conversa, mensagens enviadas (autor_usuario_id), tabela atendimentos ou historico_atendimentos.',
         mensagens: [],
-        usuario: usuario_id ? (await supabase.from('usuarios').select('id, nome').eq('id', usuario_id).maybeSingle()).data : null,
-        cliente: cliente_id ? (await supabase.from('clientes').select('id, nome, pushname, telefone').eq('id', cliente_id).maybeSingle()).data : null,
+        usuario: usuario_id ? (await supabase.from('usuarios').select('id, nome').eq('company_id', company_id).eq('id', usuario_id).maybeSingle()).data : null,
+        cliente: cliente_id ? (await supabase.from('clientes').select('id, nome, pushname, telefone').eq('company_id', company_id).eq('id', cliente_id).maybeSingle()).data : null,
         periodo_dias: d,
         meta_diagnostico: { conversas_do_cliente: clientConvIds.length, janela_dias_efetiva: d },
         criterio_resolucao,
@@ -2010,8 +2010,8 @@ async function qMensagensUsuarioCliente(company_id, usuarioNome, clienteNome, cl
       return {
         error: 'Nenhuma conversa encontrada para os critérios informados. Verifique o nome do atendente e do cliente.',
         mensagens: [],
-        usuario: usuario_id ? (await supabase.from('usuarios').select('id, nome').eq('id', usuario_id).maybeSingle()).data : null,
-        cliente: cliente_id ? (await supabase.from('clientes').select('id, nome, pushname, telefone').eq('id', cliente_id).maybeSingle()).data : null,
+        usuario: usuario_id ? (await supabase.from('usuarios').select('id, nome').eq('company_id', company_id).eq('id', usuario_id).maybeSingle()).data : null,
+        cliente: cliente_id ? (await supabase.from('clientes').select('id, nome, pushname, telefone').eq('company_id', company_id).eq('id', cliente_id).maybeSingle()).data : null,
       }
     }
     convIdsFinal = convs.map((c) => c.id)
@@ -2077,8 +2077,8 @@ async function qMensagensUsuarioCliente(company_id, usuarioNome, clienteNome, cl
     rotulo_pedido: opts.periodo_consulta_rotulo || null,
   })
 
-  const usuario = usuario_id ? (await supabase.from('usuarios').select('id, nome').eq('id', usuario_id).maybeSingle()).data : null
-  const cliente = cliente_id ? (await supabase.from('clientes').select('id, nome, pushname, telefone').eq('id', cliente_id).maybeSingle()).data : null
+  const usuario = usuario_id ? (await supabase.from('usuarios').select('id, nome').eq('company_id', company_id).eq('id', usuario_id).maybeSingle()).data : null
+  const cliente = cliente_id ? (await supabase.from('clientes').select('id, nome, pushname, telefone').eq('company_id', company_id).eq('id', cliente_id).maybeSingle()).data : null
 
   const base = {
     mensagens: mensagensFormatadas,
@@ -2211,7 +2211,7 @@ async function qHistoricoCliente(company_id, clienteNome, clienteTelefone, days,
     }
   }
 
-  const cliente = cliente_id ? (await supabase.from('clientes').select('id, nome, pushname, telefone').eq('id', cliente_id).maybeSingle()).data : null
+  const cliente = cliente_id ? (await supabase.from('clientes').select('id, nome, pushname, telefone').eq('company_id', company_id).eq('id', cliente_id).maybeSingle()).data : null
   if (!convs?.length) {
     const emptyOut = { conversas: [], cliente, cliente_id: cliente?.id ?? null, periodo_dias: d, recado_recuperacao }
     if (fxIn && fxEx) {
@@ -2443,7 +2443,7 @@ async function qHistoricoAtendente(company_id, usuarioNome, days, opts = {}) {
   const { data: clientes } = await supabase.from('clientes').select('id, nome, pushname, telefone').eq('company_id', company_id).in('id', clienteIds)
   const clienteMap = new Map((clientes || []).map((c) => [c.id, c]))
 
-  const usuario = (await supabase.from('usuarios').select('id, nome').eq('id', usuario_id).maybeSingle()).data
+  const usuario = (await supabase.from('usuarios').select('id, nome').eq('company_id', company_id).eq('id', usuario_id).maybeSingle()).data
 
   const conversasFormatadas = convs.map((c) => ({
     id: c.id,
@@ -2754,7 +2754,7 @@ async function qClientesMensagemSemRespostaAtendente(company_id, usuarioNome, da
     }
   })
 
-  const usuario = (await supabase.from('usuarios').select('id, nome').eq('id', usuario_id).maybeSingle()).data
+  const usuario = (await supabase.from('usuarios').select('id, nome').eq('company_id', company_id).eq('id', usuario_id).maybeSingle()).data
 
   const out = {
     usuario,
@@ -2825,7 +2825,7 @@ async function qMensagensEnviadasAutorAtendente(company_id, usuarioNome, days, o
   const { data: msgs, error } = await q.limit(LIM_MSG_AUTOR)
   if (error) throw error
 
-  const usuario = (await supabase.from('usuarios').select('id, nome').eq('id', usuario_id).maybeSingle()).data
+  const usuario = (await supabase.from('usuarios').select('id, nome').eq('company_id', company_id).eq('id', usuario_id).maybeSingle()).data
 
   const mensagens = (msgs || []).map((m) => ({
     mensagem_id: m.id,
