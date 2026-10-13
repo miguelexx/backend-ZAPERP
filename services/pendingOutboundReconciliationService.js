@@ -73,6 +73,15 @@ function getWhapiUnackedFailMs() {
   return parsePositiveIntEnv('PENDING_OUTBOUND_WHAPI_UNACKED_FAIL_MINUTES', 120, { min: 15, max: 10_080 }) * 60_000
 }
 
+/**
+ * Teto do lote de REPARO (`erro` com id do provedor) por ciclo. Pequeno de proposito: a
+ * correcao e valiosa mas nao urgente, e cada linha custa uma consulta ao provedor. O rodizio
+ * por cursor garante que todas sejam visitadas ao longo dos ciclos.
+ */
+function getErroRepairLimit() {
+  return parsePositiveIntEnv('PENDING_OUTBOUND_ERRO_REPAIR_LIMIT', 10, { min: 0, max: 100 })
+}
+
 function getBatchLimit() {
   return parsePositiveIntEnv('PENDING_OUTBOUND_RECONCILE_BATCH_LIMIT', 50, { min: 1, max: 200 })
 }
@@ -212,7 +221,14 @@ async function statusJaMaisAvancado(row, updates) {
   if (!ranks.length) return false
   const rankAtual = Math.max(...ranks)
   const proximo = canonStatusForEmit(updates.status)
-  if (proximo === 'erro') return rankAtual >= STATUS_RANK.delivered
+  // Reescrever `erro` sobre linha JA em erro nao muda nada no banco e ainda assim emitiria
+  // `status_mensagem` a cada ciclo da varredura — ruido no socket e piscada na bolha.
+  if (proximo === 'erro') {
+    const jaEmErro = [atual.status, atual.status_mensagem]
+      .some((v) => ['erro', 'failed'].includes(String(v ?? '').trim().toLowerCase()))
+    if (jaEmErro) return true
+    return rankAtual >= STATUS_RANK.delivered
+  }
   if (proximo === 'pending') return rankAtual > STATUS_RANK.sent
   return rankAtual > statusRank(proximo)
 }
@@ -468,6 +484,15 @@ function whapiHistoryResendEnabled() {
   return !['0', 'false', 'no', 'off'].includes(raw)
 }
 
+/**
+ * Consulta do histórico do chat por ID para linhas que JÁ têm whatsapp_id.
+ * Flag própria (e não a de reenvio): este caminho só LÊ e corrige status, nunca reenvia.
+ */
+function whapiHistoryIdLookupEnabled() {
+  const raw = String(process.env.WHAPI_HISTORY_ID_LOOKUP_ENABLED ?? 'true').trim().toLowerCase()
+  return !['0', 'false', 'no', 'off'].includes(raw)
+}
+
 /** Normaliza texto para comparacao exata (CRLF/espacos multiplos nao podem quebrar o match). */
 function normalizarTextoParaComparacao(s) {
   return String(s ?? '').replace(/\r\n/g, '\n').replace(/\s+/g, ' ').trim()
@@ -482,8 +507,14 @@ function normalizarTextoParaComparacao(s) {
  * Match EXATO apenas (texto puro ou com o prefixo do atendente reconstruido): um endsWith
  * frouxo poderia "curar" apontando para OUTRA mensagem nossa e esconder uma perda real.
  */
-async function consultarHistoricoWhapiPorTexto({ row, provider, telefone, usuarioNome }) {
-  if (!provider?.getChatMessages) return { consultaOk: false }
+/**
+ * Leitura (com cache) do histórico do chat na Whapi. Extraída de
+ * `consultarHistoricoWhapiPorTexto` sem mudança de comportamento para que a busca por ID
+ * reaproveite a MESMA consulta e o MESMO cache — duas linhas da mesma conversa no mesmo
+ * ciclo fazem uma chamada HTTP, não duas.
+ */
+async function buscarHistoricoWhapi({ row, provider, telefone }) {
+  if (!provider?.getChatMessages) return { ok: false, data: [] }
   const cacheKey = `${row.company_id}:${row.whatsapp_instance_id || 'default'}:${telefone}`
   let res
   // timeFrom ativa as variantes de chat id (com/sem o 9º dígito). Sem ele a consulta usava
@@ -506,14 +537,66 @@ async function consultarHistoricoWhapiPorTexto({ row, provider, telefone, usuari
         ...(timeFrom != null ? { timeFrom } : {}),
       })
     } catch (_) {
-      return { consultaOk: false }
+      return { ok: false, data: [] }
     }
     if (res?.ok === true && Array.isArray(res.data)) {
       if (_historicoWhapiCache.size > 200) _historicoWhapiCache.clear()
       _historicoWhapiCache.set(cacheKey, { ts: Date.now(), res, timeFrom })
     }
   }
-  if (res?.ok !== true || !Array.isArray(res.data)) return { consultaOk: false }
+  if (res?.ok !== true || !Array.isArray(res.data)) return { ok: false, data: [] }
+  return { ok: true, data: res.data }
+}
+
+/**
+ * Acha no histórico a linha com EXATAMENTE este id (nossa, from_me). Puro e testável.
+ *
+ * Match por id não tem a ambiguidade do match por texto: o id veio do próprio POST desta
+ * linha, então não existe o risco de "curar" apontando para a cópia de um irmão da rajada.
+ */
+function encontrarNoHistoricoPorId(lista, idAlvo) {
+  const alvo = String(idAlvo ?? '').trim()
+  if (!alvo || !Array.isArray(lista)) return null
+  for (const m of lista) {
+    const fromMe = m?.from_me === true || m?.fromMe === true
+    if (!fromMe) continue
+    if (String(m?.id ?? '').trim() === alvo) return m
+  }
+  return null
+}
+
+/**
+ * Confirma pelo HISTÓRICO do chat uma mensagem que JÁ TEM id do provedor.
+ *
+ * Rede de seguranca para quando o `GET /messages/{id}` RESPONDE mas nao devolve a mensagem
+ * (404 "final channel-store lookup did not return a usable message"), ainda que o id tenha
+ * sido dado pelo proprio provedor no POST: id de outro canal da mesma empresa, canal
+ * recriado, inconsistencia do channel-store. Nesses casos a reconciliacao ficava sem NENHUMA
+ * informacao e, vencido `PENDING_OUTBOUND_WHAPI_UNACKED_FAIL_MINUTES`, marcava `erro` as
+ * cegas — o atendente lia "nao foi possivel enviar" e reenviava, duplicando no cliente.
+ *
+ * A lista do chat e a fonte autoritativa que sobra: medido em 13/10/2026 no canal da empresa
+ * 1, 43 de 43 linhas `from_me` vinham com `status` (read/delivered/played/pending), inclusive
+ * midia. Da para conferir antes de desistir, em vez de adivinhar.
+ *
+ * Esta consulta não reenvia nada e não decide status: devolve a linha do provedor para o
+ * mapeamento único (`resolveFromProviderRow`), que já trata sucesso/falha/pending e nunca
+ * rebaixa progresso. Serve para texto E mídia (o match é por id, não por corpo).
+ */
+async function consultarHistoricoWhapiPorId({ row, provider, telefone }) {
+  const idAlvo = String(row?.whatsapp_id ?? '').trim()
+  if (!isRealWhatsAppId(idAlvo)) return { consultaOk: false }
+  const hist = await buscarHistoricoWhapi({ row, provider, telefone })
+  if (!hist.ok) return { consultaOk: false }
+  const mensagem = encontrarNoHistoricoPorId(hist.data, idAlvo)
+  if (!mensagem) return { consultaOk: true, encontrado: false }
+  return { consultaOk: true, encontrado: true, mensagem }
+}
+
+async function consultarHistoricoWhapiPorTexto({ row, provider, telefone, usuarioNome }) {
+  const hist = await buscarHistoricoWhapi({ row, provider, telefone })
+  if (!hist.ok) return { consultaOk: false }
+  const res = { ok: true, data: hist.data }
 
   const textoPuro = normalizarTextoParaComparacao(row.texto)
   if (!textoPuro) return { consultaOk: true, encontrado: false }
@@ -609,6 +692,23 @@ const _reenviosEmAndamento = new Set()
  * (rajada durante outage) viravam N GETs idênticos — 1 basta. */
 const _historicoWhapiCache = new Map()
 const HISTORICO_CACHE_TTL_MS = 45_000
+
+/** Telefone de envio da conversa (null quando ausente ou quando e um lid: nao consultavel). */
+async function telefoneDaConversa(row) {
+  try {
+    const { data } = await supabase
+      .from('conversas')
+      .select('id, telefone')
+      .eq('company_id', row.company_id)
+      .eq('id', row.conversa_id)
+      .maybeSingle()
+    const tel = String(data?.telefone || '').trim()
+    if (!tel || tel.toLowerCase().startsWith('lid:')) return null
+    return tel
+  } catch (_) {
+    return null
+  }
+}
 
 /** Releitura minima da linha antes de reenviar: o eco from_me pode ter chegado na corrida. */
 async function rowAindaSemAceiteNoBanco(row) {
@@ -725,7 +825,18 @@ async function reconcilePendingOutboundMessage(row, { io = null, force = false }
   const dentroDaCarencia = ageMs < getGraceMs()
 
   const currentStatus = String(row.status_mensagem || row.status || '').toLowerCase()
-  if (!['pending', 'sending', 'sent'].includes(currentStatus)) {
+  // `erro` COM id real do provedor e um caso especial e precisa entrar: ele significa "o
+  // WhatsApp aceitou e identificou a mensagem, mas NOS desistimos de esperar a confirmacao"
+  // (o prazo PENDING_OUTBOUND_WHAPI_UNACKED_FAIL_MINUTES venceu). Sem isto a linha ficava
+  // congelada em falha para sempre, mesmo quando o provedor passava a informar `read` no ciclo
+  // seguinte — e o atendente via "nao foi possivel enviar" numa mensagem entregue e lida.
+  //
+  // O reenvio automatico NAO alcanca estas linhas: todo caminho de reenvio exige
+  // `provedorNuncaAceitou(row)`, que e FALSO quando existe whatsapp_id. Este portao so abre
+  // consulta e correcao de status.
+  const erroComIdDoProvedor = ['erro', 'failed'].includes(currentStatus) &&
+    isRealWhatsAppId(row.whatsapp_id)
+  if (!['pending', 'sending', 'sent'].includes(currentStatus) && !erroComIdDoProvedor) {
     return { ok: true, action: 'skip_not_pending' }
   }
 
@@ -739,6 +850,9 @@ async function reconcilePendingOutboundMessage(row, { io = null, force = false }
   const isWhapi = String(instanceProvider || '').trim().toLowerCase() === 'whapi'
   if (currentStatus === 'sent' && !isWhapi) {
     return { ok: true, action: 'skip_sent_non_whapi' }
+  }
+  if (erroComIdDoProvedor && !isWhapi) {
+    return { ok: true, action: 'skip_erro_non_whapi' }
   }
   if (currentStatus === 'sent' && !isRealWhatsAppId(row.whatsapp_id)) {
     return { ok: true, action: 'skip_sent_without_id' }
@@ -858,6 +972,61 @@ async function reconcilePendingOutboundMessage(row, { io = null, force = false }
         // consulta falhou ou fora da janela de reenvio → segue o fluxo conservador abaixo
       }
     }
+    // TEM id do provedor, mas o `GET /messages/{id}` RESPONDEU sem devolver a mensagem (404
+    // "final channel-store lookup did not return a usable message"). Acontece com id de outro
+    // canal da mesma empresa, canal recriado ou inconsistencia do channel-store. Sem este
+    // fallback a reconciliacao ficava sem NENHUMA informacao e, vencido o prazo, marcava
+    // `erro` as cegas — o atendente lia "nao foi possivel enviar" numa mensagem que o cliente
+    // JA recebeu e reenviava. A lista do chat ainda sabe o status de entrega (verificado em
+    // 13/10/2026: 43 de 43 linhas `from_me` traziam `status`).
+    //
+    // Este caminho NUNCA reenvia nem decide status por conta própria: delega ao mapeamento
+    // único (`resolveFromProviderRow`), que trata sucesso/falha/pending e nunca rebaixa
+    // progresso. O match é por ID exato (o id veio do POST desta linha), então não há o risco
+    // de "curar" com a cópia de um irmão de rajada que o match por texto precisa vigiar — e
+    // funciona igual para texto e mídia.
+    if (
+      !provedorNuncaAceitou(row) &&
+      !['delivered', 'read', 'played'].includes(currentStatus) &&
+      whapiHistoryIdLookupEnabled()
+    ) {
+      const telefoneHist = await telefoneDaConversa(row)
+      if (telefoneHist) {
+        const providerHist = getProvider({ provider: instanceProvider })
+        const porId = await consultarHistoricoWhapiPorId({
+          row, provider: providerHist, telefone: telefoneHist,
+        })
+        if (porId.consultaOk && porId.encontrado) {
+          const statusCru = String(porId.mensagem?.whapi_status_raw || '').trim()
+          const linhaProvedor = statusCru ? { status: statusCru } : null
+          if (linhaProvedor && !providerRowIndicatesPending(linhaProvedor)) {
+            const resolvido = await resolveFromProviderRow(row, linhaProvedor, io)
+            if (resolvido.action !== 'noop') {
+              console.log('[pendingOutboundReconciliation] whapi: id encontrado no historico do chat', {
+                mensagem_id: row.id,
+                company_id: row.company_id,
+                conversa_id: row.conversa_id,
+                status_provedor: statusCru,
+                acao: resolvido.action,
+              })
+              return { ...resolvido, action: `whapi_historico_por_id_${resolvido.action}` }
+            }
+          }
+          if (!statusCru) {
+            // Presente no histórico do chat, mas sem status de entrega legível: o WhatsApp TEM
+            // a mensagem. Não inventamos entrega — só paramos de NEGAR o envio (tique único);
+            // o ACK de verdade, quando vier, promove para entregue/lida.
+            const patched = await patchMessage(row, { status: 'sent', status_mensagem: 'sent' }, io)
+            return {
+              ...patched,
+              action: patched.ok ? 'whapi_presente_no_historico_por_id' : patched.action,
+            }
+          }
+          // Histórico informa `pending`: a mensagem não saiu. Segue o fluxo conservador abaixo,
+          // que marca erro apenas depois do prazo — comportamento inalterado.
+        }
+      }
+    }
     // Linha SEM nenhum id do provedor (POST falhou/exceção de transporte): não há o que
     // consultar nem indexar — a única salvação seria o eco from_me do webhook, que já teria
     // chegado. Após a janela de falha, vira erro em vez de relógio eterno (espelha o
@@ -940,6 +1109,9 @@ async function fetchPendingOutboundRows({ companyId = null, limit = null, mensag
     // (3 a 8 min). O reenvio continua protegido pela carência em reconcilePendingOutboundMessage.
     if (mensagemId == null) q = q.lte('criado_em', faixa.ateIso || graceIso)
     if (faixa.aposId != null) q = q.gt('id', faixa.aposId)
+    // Lote de `erro`: so linhas que o provedor ACEITOU (tem id). Sem este filtro entrariam
+    // tambem as recusadas de verdade, que o caminho de reenvio automatico poderia duplicar.
+    if (faixa.somenteComWhatsappId === true) q = q.not('whatsapp_id', 'is', null)
     q = q
       .order(faixa.porId ? 'id' : 'criado_em', { ascending: true })
       .limit(faixa.limite || batch)
@@ -973,14 +1145,20 @@ async function fetchPendingOutboundRows({ companyId = null, limit = null, mensag
   //  2) o ACÚMULO antigo roda em rodízio por id (cursor em memória), meio lote por ciclo, e
   //     recomeça do início ao chegar no fim — nenhuma linha fica para sempre sem ser visitada.
   // A conferência por mensagemId segue como consulta única.
-  const buscarLote = async (statuses, whatsappInstanceIds = null) => {
-    if (mensagemId != null) return runQuery(statuses, whatsappInstanceIds)
+  const buscarLote = async (statuses, whatsappInstanceIds = null, extra = {}) => {
+    if (mensagemId != null) return runQuery(statuses, whatsappInstanceIds, { ...extra })
     const corteRecenteIso = new Date(Date.now() - getRecentWindowMs()).toISOString()
-    const recentes = await runQuery(statuses, whatsappInstanceIds, { desdeIso: corteRecenteIso })
+    // `teto` limita um lote de REPARO (ex.: `erro` com id) para que ele avance em rodizio sem
+    // multiplicar as consultas ao provedor por ciclo; sem ele, 1 lote = 1 lote inteiro extra.
+    const teto = Number.isFinite(Number(extra.teto)) ? Math.max(1, Number(extra.teto)) : null
+    const recentes = await runQuery(statuses, whatsappInstanceIds, {
+      ...extra, desdeIso: corteRecenteIso, ...(teto ? { limite: teto } : {}),
+    })
     if (recentes.error) return recentes
-    const limiteAcumulo = Math.max(5, Math.ceil(batch / 2))
+    const limiteAcumulo = teto || Math.max(5, Math.ceil(batch / 2))
     const chaveCursor = `${companyId ?? 'todas'}:${statuses.join(',')}`
     const antigas = await runQuery(statuses, whatsappInstanceIds, {
+      ...extra,
       ateIso: corteRecenteIso,
       aposId: _acumuloCursor.get(chaveCursor) ?? null,
       porId: true,
@@ -1017,10 +1195,26 @@ async function fetchPendingOutboundRows({ companyId = null, limit = null, mensag
     ? await buscarLote(['sent'], whapiInstanceIds)
     : { data: [], error: null }
   if (sentResult.error) return { ok: false, rows: [], error: sentResult.error.message }
+  // Lote proprio para `erro` COM id do provedor: sem ele a varredura nunca reexaminava uma
+  // linha marcada como falha, e um ACK/`status: read` que aparecesse depois no provedor jamais
+  // corrigia a bolha. Falha de consulta aqui nao derruba o ciclo: o lote fica vazio.
+  const erroResult = whapiInstanceIds.length > 0 && getErroRepairLimit() > 0
+    ? await buscarLote(['erro'], whapiInstanceIds, { somenteComWhatsappId: true, teto: getErroRepairLimit() })
+    : { data: [], error: null }
+  if (erroResult.error) {
+    console.warn('[pendingOutboundReconciliation] lote erro-com-id falhou; ciclo segue sem ele', {
+      error: erroResult.error.message,
+    })
+  }
 
-  const rows = [...(pendingResult.data || []), ...(sentResult.data || [])].filter((row) => {
+  const rows = [
+    ...(pendingResult.data || []),
+    ...(sentResult.data || []),
+    ...(erroResult.error ? [] : (erroResult.data || [])),
+  ].filter((row) => {
     if (isInternalNoteRow(row)) return false
     const st = String(row.status_mensagem || row.status || '').toLowerCase()
+    if (['erro', 'failed'].includes(st)) return isRealWhatsAppId(row.whatsapp_id)
     return ['pending', 'sending', 'sent'].includes(st)
   })
   return { ok: true, rows }
@@ -1116,7 +1310,11 @@ module.exports = {
     captionUsuarioDeMidia,
     isTipoTextoReenviavel,
     normalizarTextoParaComparacao,
+    statusJaMaisAvancado,
     consultarHistoricoWhapiPorTexto,
+    consultarHistoricoWhapiPorId,
+    encontrarNoHistoricoPorId,
+    buscarHistoricoWhapi,
     whapiHistoryResendEnabled,
   },
 }

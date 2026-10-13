@@ -75,6 +75,10 @@ function mapWhapiMessageForSync(m) {
     ...(m.location ? { location: m.location } : {}),
     from: m.from,
     chat_id: m.chat_id,
+    // Status de ENTREGA cru da Whapi (sent/delivered/read/failed...), sob chave própria para
+    // não colidir com `status` de nenhum consumidor. Serve à reconciliação: quando o
+    // `GET /messages/{id}` devolve 404, a lista do chat ainda sabe se a mensagem foi entregue.
+    ...(m.status != null && String(m.status).trim() ? { whapi_status_raw: String(m.status).trim() } : {}),
   }
 }
 
