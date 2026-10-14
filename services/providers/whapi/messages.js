@@ -22,27 +22,42 @@ function applyQuoted(body, opts) {
 }
 
 /**
- * Apaga mensagem no WhatsApp. Contrato interno UltraMSG: boolean.
- * DELETE /messages/{MessageID}
+ * Apaga mensagem no WhatsApp. DELETE /messages/{MessageID}
+ *
+ * Devolve `{ ok, httpStatus, error, permanente }` em vez do boolean antigo. O boolean
+ * escondia POR QUE a remocao falhou: o controller so podia responder "tente novamente", o
+ * atendente tentava de novo e falhava igual (observado em 13/10/2026 no console: a mesma
+ * mensagem 775950 recusada duas vezes seguidas). `permanente` separa a recusa definitiva
+ * (4xx: fora da janela que o WhatsApp permite apagar para todos, id fora do channel-store)
+ * da falha passageira (429/5xx/timeout), em que repetir faz sentido.
+ *
+ * Compativel com o chamador antigo, que aceita `=== true || .ok === true`.
  */
 async function deleteMessage(phone, msgId, opts = {}) {
   const cfg = await resolveConfig(opts)
-  if (!cfg) return false
+  if (!cfg) return { ok: false, error: 'Inst\u00e2ncia Whapi n\u00e3o configurada.', permanente: true }
   const mid = String(msgId || '').trim()
-  if (!mid) return false
+  if (!mid) return { ok: false, error: 'Mensagem sem ID do WhatsApp.', permanente: true }
   const to = toWhapiRecipient(phone)
   try {
-    const { ok, data } = await del({
+    const { ok, status, data, text } = await del({
       token: cfg.token,
       endpoint: `/messages/${encodeURIComponent(mid)}`,
       companyId: cfg.companyId,
       whatsappInstanceId: cfg.whatsappInstanceId,
       meta: buildSendMeta('delete', to || phone, opts),
     })
-    return isWhapiSuccessBody(ok, data)
+    if (isWhapiSuccessBody(ok, data)) return { ok: true, httpStatus: status ?? 200 }
+    return {
+      ok: false,
+      httpStatus: status ?? null,
+      error: motivoDoProvedor(data, text),
+      permanente: recusaDefinitiva(status),
+    }
   } catch (e) {
+    // Excecao de transporte (timeout/rede): nunca e definitiva.
     console.warn('❌ Whapi deleteMessage falhou:', e?.message || e)
-    return false
+    return { ok: false, httpStatus: null, error: e?.message || String(e), permanente: false }
   }
 }
 
@@ -51,6 +66,29 @@ async function deleteMessage(phone, msgId, opts = {}) {
  * POST /messages/text { to, body, edit: MessageID }.
  * Retorno { ok, messageId, error } — mesmo espírito do sendText.
  */
+/** Texto do erro que o provedor devolveu, para o log e para a tela. */
+function motivoDoProvedor(data, text) {
+  const e = data && typeof data === 'object' ? data.error : null
+  if (e && typeof e === 'object') {
+    const m = e.message || e.detail || e.code
+    if (m) return String(m).slice(0, 300)
+  }
+  if (typeof e === 'string' && e.trim()) return e.trim().slice(0, 300)
+  if (data && typeof data === 'object' && data.message) return String(data.message).slice(0, 300)
+  const t = String(text || '').trim()
+  return t ? t.slice(0, 300) : null
+}
+
+/**
+ * 4xx (menos 429) = o provedor recusou e repetir nao muda nada. 429/5xx/sem status = passageiro.
+ */
+function recusaDefinitiva(status) {
+  const s = Number(status)
+  if (!Number.isFinite(s)) return false
+  if (s === 429) return false
+  return s >= 400 && s < 500
+}
+
 async function editMessage(phone, msgId, newText, opts = {}) {
   const cfg = await resolveConfig(opts)
   if (!cfg) {

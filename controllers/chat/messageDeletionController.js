@@ -12,6 +12,46 @@ const { resolveConversationWhatsappInstance, resolveConversationProvider } = req
 const { emitirConversaAtualizada, emitirEventoEmpresaConversa, emitirParaUsuario } = require('../../services/chat/realtime/chatRealtimeGateway')
 const { aplicarApagadaParaTodosNaMensagem, enrichMensagemComAutorUsuario } = require('../../services/chat/presentation/messageAuthorEnrichment')
 
+/** Idade da mensagem em horas (null quando a data nao da para ler). */
+function idadeEmHoras(criadoEm) {
+  const t = Date.parse(String(criadoEm || ''))
+  if (!Number.isFinite(t)) return null
+  return Math.round((Date.now() - t) / 3_600_000)
+}
+
+/**
+ * O WhatsApp so deixa apagar PARA TODOS por pouco mais de 2 dias. Passado isso a recusa e
+ * definitiva, e mandar "tente novamente" faz o atendente repetir uma acao que nunca vai dar
+ * certo (foi o que aconteceu em 13/10/2026: a mesma mensagem recusada duas vezes seguidas).
+ */
+const JANELA_APAGAR_PARA_TODOS_H = 60
+
+function respostaDeRecusa(res, deleteResult, msg) {
+  const idadeH = idadeEmHoras(msg?.criado_em)
+  const motivo = String(deleteResult?.error || '').trim() || null
+  const permanente = deleteResult?.permanente === true
+
+  if (permanente) {
+    const foraDaJanela = idadeH != null && idadeH >= JANELA_APAGAR_PARA_TODOS_H
+    const base = foraDaJanela
+      ? 'O WhatsApp só permite apagar para todos mensagens recentes (pouco mais de 2 dias), e esta já passou desse prazo.'
+      : 'O WhatsApp recusou apagar esta mensagem para todos.'
+    return res.status(409).json({
+      error: `${base} Você ainda pode apagá-la só para você.`,
+      permanente: true,
+      pode_apagar_para_mim: true,
+      ...(motivo ? { motivo_provedor: motivo } : {}),
+    })
+  }
+
+  // Passageiro (429/5xx/timeout): repetir faz sentido.
+  return res.status(502).json({
+    error: 'O WhatsApp não confirmou a remoção da mensagem. Tente novamente.',
+    permanente: false,
+    ...(motivo ? { motivo_provedor: motivo } : {}),
+  })
+}
+
 exports.excluirMensagem = async (req, res) => {
   try {
     const { company_id, id: user_id, perfil } = req.user
@@ -121,7 +161,19 @@ exports.excluirMensagem = async (req, res) => {
       })
       const apagouNoWhatsapp = deleteResult === true || deleteResult?.ok === true
       if (!apagouNoWhatsapp) {
-        return res.status(502).json({ error: 'O WhatsApp não confirmou a remoção da mensagem. Tente novamente.' })
+        // O motivo do provedor PRECISA ser registrado: sem ele, toda recusa virava o mesmo
+        // "tente novamente" e ninguém conseguia diagnosticar (nem o atendente, nem o log).
+        console.warn('[excluirMensagem] provedor recusou apagar para todos', {
+          company_id,
+          conversa_id: cid,
+          mensagem_id: mid,
+          provider: instanceProvider,
+          http_status: deleteResult?.httpStatus ?? null,
+          permanente: deleteResult?.permanente === true,
+          idade_h: idadeEmHoras(msg?.criado_em),
+          motivo: deleteResult?.error || null,
+        })
+        return respostaDeRecusa(res, deleteResult, msg)
       }
     } catch (e) {
       console.warn('[excluirMensagem] deleteMessage no WhatsApp:', e?.message || e)
@@ -236,3 +288,7 @@ exports.excluirMensagem = async (req, res) => {
     return res.status(500).json({ error: 'Erro ao excluir mensagem' })
   }
 }
+
+// Exposto só para teste: a separação entre recusa definitiva e falha passageira é a regra
+// que impede a tela de mandar o atendente repetir uma ação que nunca vai dar certo.
+exports._test = { respostaDeRecusa, idadeEmHoras, JANELA_APAGAR_PARA_TODOS_H }

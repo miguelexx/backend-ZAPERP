@@ -292,12 +292,22 @@ async function sendLocation(phone, { address = '', lat, lng }, opts = {}) {
  */
 async function deleteMessage(phone, msgId, opts = {}) {
   const cfg = await resolveConfig(opts)
-  if (!cfg) return false
+  if (!cfg) return { ok: false, error: 'Inst\u00e2ncia UltraMSG n\u00e3o configurada.', permanente: true }
   const mid = String(msgId || '').trim()
-  if (!mid) return false
+  if (!mid) return { ok: false, error: 'Mensagem sem ID do WhatsApp.', permanente: true }
   const body = { msgId: mid }
-  const { ok } = await postJson({ ...cfg, endpoint: '/messages/delete', body })
-  return ok
+  // Mesmo contrato do provider Whapi: o motivo da recusa precisa chegar ao controller, senao
+  // a tela so consegue dizer "tente novamente" para uma falha que e definitiva.
+  const { ok, status, data, text } = await postJson({ ...cfg, endpoint: '/messages/delete', body })
+  if (ok) return { ok: true, httpStatus: status ?? 200 }
+  const motivo = (data && typeof data === 'object' && (data.error || data.message)) || text || null
+  const s = Number(status)
+  return {
+    ok: false,
+    httpStatus: Number.isFinite(s) ? s : null,
+    error: motivo ? String(motivo).slice(0, 300) : null,
+    permanente: Number.isFinite(s) && s !== 429 && s >= 400 && s < 500,
+  }
 }
 
 /**

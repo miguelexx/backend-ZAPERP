@@ -184,14 +184,14 @@ describe('Whapi provider — sendText', () => {
     expect(JSON.parse(opts.body)).toEqual({ emoji: '👍' })
   })
 
-  test('deleteMessage é DELETE /messages/{id} e retorna boolean', async () => {
+  test('deleteMessage é DELETE /messages/{id} e confirma a remoção', async () => {
     const { fetchWithRetry } = mockDeps({
       instancesById: { '1:10': whapiInstance() },
       fetchImpl: async () => ({ ok: true, status: 200, text: async () => JSON.stringify({ success: true }) }),
     })
     const whapi = require('../services/providers/whapi')
-    const ok = await whapi.deleteMessage('5534988887777', 'AbCd-EfGh', { companyId: 1, whatsappInstanceId: 10 })
-    expect(ok).toBe(true)
+    const r = await whapi.deleteMessage('5534988887777', 'AbCd-EfGh', { companyId: 1, whatsappInstanceId: 10 })
+    expect(r.ok).toBe(true)
     const [url, opts] = fetchWithRetry.mock.calls[0]
     expect(opts.method).toBe('DELETE')
     expect(url).toBe('https://gate.whapi.test/messages/AbCd-EfGh')
