@@ -163,3 +163,31 @@ describe('resposta ao atendente: 409 definitivo vs 502 passageiro', () => {
     expect(_test.idadeEmHoras('xx')).toBeNull()
   })
 })
+
+describe('idade sem fuso (armadilha desta codebase)', () => {
+  const { _test } = require('../controllers/chat/messageDeletionController')
+
+  test('timestamp SEM fuso e lido como UTC, nao como hora local do servidor', () => {
+    // Formato real do banco (o SQL do Miguel devolveu exatamente assim).
+    const agoraUtcSemFuso = new Date().toISOString().replace('T', ' ').replace('Z', '')
+    const idade = _test.idadeEmHoras(agoraUtcSemFuso)
+    expect(idade).not.toBeNull()
+    // Com Date.parse cru, um servidor em UTC-3 acusaria 3 (ou -3) aqui.
+    expect(Math.abs(idade)).toBeLessThanOrEqual(0)
+  })
+
+  test('6 horas atras conta 6, independente do fuso do processo', () => {
+    const seisHoras = new Date(Date.now() - 6 * 3_600_000).toISOString().replace('T', ' ').replace('Z', '')
+    expect(_test.idadeEmHoras(seisHoras)).toBe(6)
+  })
+
+  test('formato ISO com Z continua funcionando', () => {
+    expect(_test.idadeEmHoras(new Date(Date.now() - 2 * 3_600_000).toISOString())).toBe(2)
+  })
+
+  test('data invalida devolve null (e a resposta nao inventa prazo)', () => {
+    expect(_test.idadeEmHoras('nao e data')).toBeNull()
+    expect(_test.idadeEmHoras(null)).toBeNull()
+    expect(_test.idadeEmHoras('')).toBeNull()
+  })
+})

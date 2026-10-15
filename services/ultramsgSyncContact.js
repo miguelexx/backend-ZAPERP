@@ -14,6 +14,7 @@ const {
   extractPhoneFromChatId,
   possiblePhonesForWhatsappIdentity,
   whatsappIdentityKey,
+  isSameWhatsappIdentity,
 } = require('../helpers/phoneHelper')
 const { getOrCreateCliente, shouldUpdateFotoPerfil } = require('../helpers/conversationSync')
 const { chooseBestName, isBadName, getDisplayName } = require('../helpers/contactEnrichment')
@@ -194,13 +195,21 @@ async function syncUltraMsgContact(chatIdOrPhone, companyId, opts = {}) {
   const fotoFromResult = result.foto_perfil || null
 
   try {
-    const { data: conversas } = await supabase
+    let conversasQuery = supabase
       .from('conversas')
-      .select('id, nome_contato_cache, foto_perfil_contato_cache, cliente_id')
+      .select('id, telefone, nome_contato_cache, foto_perfil_contato_cache, cliente_id, whatsapp_instance_id')
       .eq('company_id', companyId)
       .in('telefone', identityVariants)
+    const syncInstanceId = Number(opts.whatsappInstanceId ?? opts.whatsapp_instance_id)
+    if (Number.isFinite(syncInstanceId) && syncInstanceId > 0) {
+      conversasQuery = conversasQuery.eq('whatsapp_instance_id', syncInstanceId)
+    }
+    const { data: conversas } = await conversasQuery
 
-    const convRows = Array.isArray(conversas) ? conversas : []
+    const convRows = (Array.isArray(conversas) ? conversas : []).filter((conv) => {
+      if (!conv?.telefone) return false
+      return isSameWhatsappIdentity(conv.telefone, telefone)
+    })
 
     for (const conv of convRows) {
       const cacheUpdates = {}

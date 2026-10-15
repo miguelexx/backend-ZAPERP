@@ -111,6 +111,21 @@ describe('buildNovaMensagemPayload — payload de nova_mensagem (caracterizaçã
     expect(p.photo).toBe('https://x/a.jpg')
   })
 
+  test('fromMe não copia senderName/senderPhoto da conta que enviou', () => {
+    const p = buildNovaMensagemPayload({
+      mensagemSalva: { id: 9, conversa_id: 10, direcao: 'out' },
+      canon: 'sent',
+      convIdForEmit: 10,
+      fromMe: true,
+      senderName: 'Atendente',
+      senderPhoto: 'https://x/agente.jpg',
+    })
+    expect(p.senderName).toBeUndefined()
+    expect(p.chatName).toBeUndefined()
+    expect(p.senderPhoto).toBeUndefined()
+    expect(p.photo).toBeUndefined()
+  })
+
   test('nome que é telefone cru NÃO vira senderName; foto não-http é ignorada', () => {
     const p = buildNovaMensagemPayload({ mensagemSalva: msg, canon: 'delivered', convIdForEmit: 10, fromMe: false, nomeParaCache: '5534999999999', senderPhoto: 'file://x' })
     expect(p.senderName).toBeUndefined()

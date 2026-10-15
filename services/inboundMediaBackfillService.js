@@ -49,18 +49,33 @@ function hasUsableMediaUrl(url) {
   return u.startsWith('https://') || u.startsWith('http://') || u.startsWith('/uploads/')
 }
 
+/** Tipos de mídia do webhook (nomenclatura do provider) → vale a pena buscar o arquivo. */
+const MEDIA_FAMILY_WEBHOOK_TYPES = new Set([
+  'image', 'imagem', 'audio', 'ptt', 'voice', 'video', 'vídeo', 'gif', 'short',
+  'document', 'file', 'arquivo', 'documento', 'sticker', 'figurinha',
+])
+
 /**
  * Decide se uma mensagem gravada precisa de backfill de mídia.
- * true quando: sem URL renderável E (tipo de mídia OU texto é placeholder de mídia/genérico).
+ * true quando: sem URL renderável E (tipo de mídia OU texto é placeholder de mídia/genérico OU o
+ * webhook disse que era mídia).
+ *
+ * `tipoWebhook` existe porque a mídia COM LEGENDA perde todo o rastro na linha gravada: a legenda
+ * vira o texto (não é placeholder) e, sem URL, nenhum ramo de `applyInboundMediaFields` casa — o
+ * tipo fica no default 'texto'. Sem essa dica, uma foto legendada que chegou sem link nunca seria
+ * buscada de volta e a imagem se perdia em silêncio.
+ *
  * @param {{ tipo?: string, texto?: string, url?: string }} msg
+ * @param {string} [tipoWebhook] tipo cru do webhook (image/audio/video/document/sticker/...)
  */
-function precisaBackfillMidia(msg) {
+function precisaBackfillMidia(msg, tipoWebhook) {
   if (!msg) return false
   if (hasUsableMediaUrl(msg.url)) return false
   const tipo = String(msg.tipo || '').toLowerCase().trim()
   if (MEDIA_FAMILY_TIPOS.has(tipo)) return true
   const texto = String(msg.texto || '').trim().toLowerCase()
-  return MEDIA_PLACEHOLDER_TEXTS.has(texto)
+  if (MEDIA_PLACEHOLDER_TEXTS.has(texto)) return true
+  return MEDIA_FAMILY_WEBHOOK_TYPES.has(String(tipoWebhook || '').toLowerCase().trim())
 }
 
 // chave → { lastTs, trailingTimer }
@@ -106,14 +121,15 @@ async function executarBackfill({ supabase, io, company_id, conversa_id }) {
  * - Se já há maxConcurrent em execução, pula silenciosamente (a mídia será reparada
  *   pelo sweep periódico do inboundMediaPersistenceService se necessário).
  *
- * @param {{ supabase:any, io:any, company_id:number, conversa_id:number, mensagemSalva:object }} ctx
+ * @param {{ supabase:any, io:any, company_id:number, conversa_id:number, mensagemSalva:object,
+ *   tipoWebhook?:string }} ctx
  */
 function scheduleInboundMediaBackfill(ctx) {
-  const { supabase, io, company_id, conversa_id, mensagemSalva } = ctx || {}
+  const { supabase, io, company_id, conversa_id, mensagemSalva, tipoWebhook } = ctx || {}
   if (isBackfillDisabled()) return
   if (process.env.NODE_ENV === 'test' || process.env.JEST_WORKER_ID) return
   if (company_id == null || conversa_id == null) return
-  if (!precisaBackfillMidia(mensagemSalva)) return
+  if (!precisaBackfillMidia(mensagemSalva, tipoWebhook)) return
 
   const key = `${company_id}:${conversa_id}`
   const now = Date.now()

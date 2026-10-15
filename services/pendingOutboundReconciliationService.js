@@ -868,11 +868,16 @@ async function reconcilePendingOutboundMessage(row, { io = null, force = false }
     return { ok: false, action: 'provider_indisponivel' }
   }
 
+  // Instância sumiu da configuração (token trocado, canal recriado, número removido). Isso é um
+  // problema NOSSO, não prova de que a mensagem falhou: se o provedor já a tinha aceitado
+  // (whatsapp_id), ela provavelmente saiu antes de a instância cair. Marcar `erro` aqui gerava o
+  // mesmo alarme falso de 15/10/2026, agora disfarçado de "sem instância". Só a linha que o
+  // provedor NUNCA aceitou vira falha.
   const cacheKey = `${row.company_id}:${row.whatsapp_instance_id || 'default'}`
   const cached = companyProviderCache.get(cacheKey)
   if (cached && Date.now() - cached.ts < COMPANY_CACHE_TTL_MS) {
     if (!cached.configured) {
-      if (ageMs >= getFailAfterMs()) {
+      if (ageMs >= getFailAfterMs() && provedorNuncaAceitou(row)) {
         return patchMessage(row, { status: 'erro', status_mensagem: 'failed' }, io)
       }
       return { ok: true, action: 'skip_sem_instancia' }
@@ -883,7 +888,7 @@ async function reconcilePendingOutboundMessage(row, { io = null, force = false }
       const configured = conn?.configured !== false
       companyProviderCache.set(cacheKey, { ts: Date.now(), configured, connected: conn?.connected === true })
       if (!configured) {
-        if (ageMs >= getFailAfterMs()) {
+        if (ageMs >= getFailAfterMs() && provedorNuncaAceitou(row)) {
           return patchMessage(row, { status: 'erro', status_mensagem: 'failed' }, io)
         }
         return { ok: true, action: 'skip_sem_instancia' }
@@ -896,18 +901,11 @@ async function reconcilePendingOutboundMessage(row, { io = null, force = false }
   const providerHit = await queryProviderForMessage(row)
   if (providerHit?.row) {
     const resolved = await resolveFromProviderRow(row, providerHit.row, io)
-    // Whapi aceitou, mas horas depois o próprio provedor ainda informa "pending": a mensagem
-    // não saiu. Sem este desfecho a bolha ficava no relógio por dias e o atendente nunca
-    // sabia; um ACK tardio ainda recupera a linha.
-    if (
-      resolved.action === 'keep_provider_pending' && isWhapi &&
-      currentStatus !== 'sent' && ageMs >= getWhapiUnackedFailMs()
-    ) {
-      console.warn('[pendingOutboundReconciliation] whapi segue pending no provedor após o prazo — marcando erro', {
-        mensagem_id: row.id, company_id: row.company_id, idade_min: Math.round(ageMs / 60_000),
-      })
-      return patchMessage(row, { status: 'erro', status_mensagem: 'failed' }, io)
-    }
+    // O provedor informar `pending` por horas NÃO autoriza nenhum desfecho inventado.
+    // Até 15/10/2026 isto virava `erro` depois do prazo, e a bolha dizia "não foi possível
+    // enviar" numa mensagem que o cliente tinha recebido — o atendente reenviava e duplicava.
+    // Também não promovemos a `sent`: o provedor está dizendo que ainda não saiu. Fica como
+    // está (relógio) e o ACK, quando vier, resolve. Mentir para os dois lados é pior que esperar.
     if (resolved.action !== 'noop') return resolved
   }
 
@@ -985,6 +983,9 @@ async function reconcilePendingOutboundMessage(row, { io = null, force = false }
     // progresso. O match é por ID exato (o id veio do POST desta linha), então não há o risco
     // de "curar" com a cópia de um irmão de rajada que o match por texto precisa vigiar — e
     // funciona igual para texto e mídia.
+    // O provedor AFIRMOU que a mensagem segue na fila dele? Então não há desfecho a inventar:
+    // nem falha (ele aceitou) nem entrega (ele diz que não saiu). Só o ACK resolve.
+    let provedorInformouPending = false
     if (
       !provedorNuncaAceitou(row) &&
       !['delivered', 'read', 'played'].includes(currentStatus) &&
@@ -1022,8 +1023,9 @@ async function reconcilePendingOutboundMessage(row, { io = null, force = false }
               action: patched.ok ? 'whapi_presente_no_historico_por_id' : patched.action,
             }
           }
-          // Histórico informa `pending`: a mensagem não saiu. Segue o fluxo conservador abaixo,
-          // que marca erro apenas depois do prazo — comportamento inalterado.
+          // Histórico informa `pending`: o provedor está dizendo que ainda não saiu. Não
+          // promovemos a `sent` nem marcamos erro — a linha espera o ACK.
+          provedorInformouPending = true
         }
       }
     }
@@ -1041,11 +1043,18 @@ async function reconcilePendingOutboundMessage(row, { io = null, force = false }
       return patchMessage(row, { status: 'erro', status_mensagem: 'failed' }, io)
     }
     // Há id do provedor, mas ele não tem mais registro e nenhum ACK chegou no prazo.
-    if (!provedorNuncaAceitou(row) && currentStatus !== 'sent' && ageMs >= getWhapiUnackedFailMs()) {
-      console.warn('[pendingOutboundReconciliation] whapi com id sem registro nem ACK após o prazo — marcando erro', {
+    // NÃO é falha: o id só existe porque o provedor aceitou a mensagem. "Sem registro" é
+    // ausência de informação (channel-store recriado, id de outro canal, ACK desligado), e
+    // tratar ausência como recusa foi o que gerou o alarme falso em produção (15/10/2026).
+    // O último fato conhecido é "o WhatsApp aceitou": fica em `sent`.
+    if (
+      !provedorNuncaAceitou(row) && !provedorInformouPending &&
+      currentStatus !== 'sent' && ageMs >= getWhapiUnackedFailMs()
+    ) {
+      console.warn('[pendingOutboundReconciliation] whapi com id sem registro nem ACK após o prazo — mantendo enviada', {
         mensagem_id: row.id, company_id: row.company_id, idade_min: Math.round(ageMs / 60_000),
       })
-      return patchMessage(row, { status: 'erro', status_mensagem: 'failed' }, io)
+      return patchMessage(row, { status: 'sent', status_mensagem: 'sent' }, io)
     }
     return { ok: true, action: currentStatus === 'sent' ? 'keep_whapi_sent_unconfirmed' : 'keep_whapi_unconfirmed' }
   }

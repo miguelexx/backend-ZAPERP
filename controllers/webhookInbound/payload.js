@@ -616,13 +616,20 @@ function extractMessage(payload) {
     pollMeta = { title, options, count: p.count === 0 || p.count === '0' ? 0 : 1 }
   }
 
-  if (type === 'image' && imageUrl) {
+  // Placeholder tipado SEM exigir a URL. O provedor já nos disse o que é (type=image/video/...);
+  // o link pode faltar — Whapi só manda `link` com `media.auto_download` ligado para o tipo, e a
+  // UltraMsg entrega `media:""` em algumas instâncias. Enquanto estes ramos exigiam a URL, foto,
+  // vídeo e documento recebidos caíam em '(mídia)' e eram DESCARTADOS mais adiante
+  // (soPlaceholderMidia em webhookZapiController) — a mensagem do cliente sumia do atendimento e,
+  // sem linha no banco, nenhum backfill tinha o que reparar. Áudio e figurinha já faziam assim.
+  // '(mídia)' agora sobra só para evento sem tipo reconhecível — esse segue descartado.
+  if (type === 'image') {
     texto = texto || (payload.image?.caption && String(payload.image.caption).trim()) || '(imagem)'
-  } else if ((type === 'document' || type === 'file') && documentUrl) {
+  } else if (type === 'document' || type === 'file') {
     texto = texto || fileName || '(arquivo)'
   } else if (type === 'audio') {
     texto = texto || '(áudio)'
-  } else if (type === 'video' && videoUrl) {
+  } else if (type === 'video') {
     texto = texto || (payload.video?.caption && String(payload.video.caption).trim()) || (payload.ptv ? '(vídeo visualização única)' : '(vídeo)')
   } else if (type === 'sticker') {
     texto = texto || '(figurinha)'

@@ -7,7 +7,7 @@
 const supabase = require('../../config/supabase')
 const { listWhatsappInstances, sanitizeWhatsappInstance } = require('../../services/whatsappInstanceService')
 const { isGroupConversation, isClosedAttendanceStatus } = require('../../helpers/conversaHelper')
-const { possiblePhonesBR, phoneKeyBR, isLidPhoneKey, pickRealPhoneCandidate } = require('../../helpers/phoneHelper')
+const { possiblePhonesForWhatsappIdentity, whatsappIdentityKey, isSameWhatsappIdentity, isLidPhoneKey, pickRealPhoneCandidate } = require('../../helpers/phoneHelper')
 const { deduplicateConversationsByContact, sortConversationsByRecent, sortConversationsPinThenRecent, sortConversationsBySearchRelevance } = require('../../helpers/conversationSync')
 const { resolveReabertaPorFaltaInteracao, enrichConversasReabertaFaltaInteracao } = require('../../helpers/reabertaFaltaInteracaoHelper')
 const { getDisplayName } = require('../../helpers/contactEnrichment')
@@ -729,10 +729,12 @@ exports.listarConversas = async (req, res) => {
       }
     }
 
-    // Fallback: quando conversa.cliente_id é null mas existe cliente com o mesmo telefone,
-    // usamos esse cliente para exibir nome/foto na lista.
-    // Usa possiblePhonesBR para matching entre formatos (5511... vs 11..., 12 vs 13 dígitos).
+    // Fallback: conversa sem cliente_id herda nome/foto só da MESMA identidade WhatsApp.
+    // Celular com/sem 9 casa. Fixo não casa com o celular criado só pelo 9 após o DDD
+    // (possiblePhonesBR fazia isso e a foto de um cliente aparecia no card do outro).
+    // Duas pessoas na mesma chave → a chave fica ambígua e ninguém herda o contato.
     const phoneToClientFallback = new Map()
+    const ambiguousIdentityKeys = new Set()
     try {
       const phonesSemCliente = (rawSqlRows || [])
         .filter((c) => !isGroupConversation(c) && !c.cliente_id && c.telefone && !String(c.telefone).startsWith('lid:'))
@@ -741,7 +743,7 @@ exports.listarConversas = async (req, res) => {
       if (uniquePhones.length > 0) {
         const expandedPhones = new Set()
         for (const p of uniquePhones) {
-          const variants = possiblePhonesBR(p)
+          const variants = possiblePhonesForWhatsappIdentity(p)
           if (variants.length > 0) variants.forEach((v) => expandedPhones.add(v))
           else expandedPhones.add(p)
         }
@@ -752,14 +754,16 @@ exports.listarConversas = async (req, res) => {
           .in('telefone', Array.from(expandedPhones))
         for (const cl of clientesFallback || []) {
           if (!cl || !cl.telefone) continue
-          const variants = possiblePhonesBR(cl.telefone)
-          const keys = variants.length > 0 ? variants : [String(cl.telefone).trim()]
-          // Não sobrescrever chave já mapeada — evita foto/nome de outro cliente no mesmo variant.
-          for (const k of keys) {
-            if (k && !phoneToClientFallback.has(k)) phoneToClientFallback.set(k, cl)
+          const key = whatsappIdentityKey(cl.telefone)
+          if (!key) continue
+          if (ambiguousIdentityKeys.has(key)) continue
+          const prev = phoneToClientFallback.get(key)
+          if (prev && Number(prev.id) !== Number(cl.id)) {
+            ambiguousIdentityKeys.add(key)
+            phoneToClientFallback.delete(key)
+            continue
           }
-          const exact = String(cl.telefone).trim()
-          if (exact) phoneToClientFallback.set(exact, cl)
+          phoneToClientFallback.set(key, cl)
         }
       }
     } catch (_) {
@@ -785,16 +789,25 @@ exports.listarConversas = async (req, res) => {
       ) {
         clientesObj = null
       }
+      // Cliente vinculado cujo telefone é outra identidade (fixo × celular do 9)
+      // não pode emprestar nome/foto. A conversa fica com o próprio cache.
+      if (
+        clientesObj &&
+        !isGroupConversation(c) &&
+        c.telefone &&
+        !isLidPhoneKey(c.telefone) &&
+        clientesObj.telefone &&
+        !isSameWhatsappIdentity(c.telefone, clientesObj.telefone)
+      ) {
+        clientesObj = null
+      }
       if (!clientesObj && !isGroupConversation(c) && !c.cliente_id && c.telefone) {
         const convTel = String(c.telefone).trim()
-        let fallbackCli = phoneToClientFallback.get(convTel)
-        if (!fallbackCli && convTel) {
-          const variants = possiblePhonesBR(convTel)
-          for (const v of variants) {
-            if ((fallbackCli = phoneToClientFallback.get(v))) break
-          }
-        }
-        if (fallbackCli) clientesObj = fallbackCli
+        const identityKey = whatsappIdentityKey(convTel)
+        const fallbackCli = identityKey && !ambiguousIdentityKeys.has(identityKey)
+          ? phoneToClientFallback.get(identityKey)
+          : null
+        if (fallbackCli && isSameWhatsappIdentity(convTel, fallbackCli.telefone)) clientesObj = fallbackCli
       }
 
       const nomeCliente = getDisplayName(clientesObj)
@@ -1232,7 +1245,7 @@ exports.listarConversas = async (req, res) => {
         if (!row) return
         const instKey = row.whatsapp_instance_id != null ? String(row.whatsapp_instance_id) : 'legacy'
         if (row.cliente_id != null) conversaScopeKeys.add(`c:${Number(row.cliente_id)}:wi:${instKey}`)
-        const pk = phoneKeyBR(row.telefone || '')
+        const pk = whatsappIdentityKey(row.telefone || '')
         if (pk) conversaScopeKeys.add(`p:${pk}:wi:${instKey}`)
       }
       for (const c of conversasFormatadas || []) {
@@ -1246,7 +1259,7 @@ exports.listarConversas = async (req, res) => {
       const candidatosTelefones = [
         ...new Set(
           (todosClientes || [])
-            .flatMap((cl) => possiblePhonesBR(cl.telefone || ''))
+            .flatMap((cl) => possiblePhonesForWhatsappIdentity(cl.telefone || ''))
             .map((tel) => String(tel || '').trim())
             .filter(Boolean)
         ),
@@ -1280,7 +1293,7 @@ exports.listarConversas = async (req, res) => {
         for (const inst of activeInstances) {
           if (conversaScopeKeys.has(`c:${Number(cl.id)}:wi:${inst.id}`)) return true
         }
-        const pk = phoneKeyBR(cl.telefone || '')
+        const pk = whatsappIdentityKey(cl.telefone || '')
         if (pk) {
           if (conversaScopeKeys.has(`p:${pk}:wi:legacy`)) return true
           for (const inst of activeInstances) {
@@ -1293,7 +1306,7 @@ exports.listarConversas = async (req, res) => {
       const clienteMissingInstance = (cl, inst) => {
         const instKey = inst?.id != null ? String(inst.id) : 'legacy'
         if (conversaScopeKeys.has(`c:${Number(cl.id)}:wi:${instKey}`)) return false
-        const pk = phoneKeyBR(cl.telefone || '')
+        const pk = whatsappIdentityKey(cl.telefone || '')
         if (pk && conversaScopeKeys.has(`p:${pk}:wi:${instKey}`)) return false
         return true
       }

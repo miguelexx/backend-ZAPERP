@@ -130,7 +130,8 @@ exports.enviarMensagemChat = async (req, res) => {
       const { cliente_id: novoClienteId } = await getOrCreateCliente(supabase, company_id, conversa.telefone, {
         nome: nomeCache || undefined,
         nomeSource: 'chatName',
-        foto_perfil: fotoCache || undefined
+        foto_perfil: fotoCache || undefined,
+        identitySafePhoneMatch: true,
       })
       if (novoClienteId) {
         await supabase.from('conversas').update({ cliente_id: novoClienteId }).eq('id', conversa_id).eq('company_id', company_id)

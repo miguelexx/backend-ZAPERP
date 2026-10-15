@@ -28,8 +28,13 @@ function buildNovaMensagemPayload({ mensagemSalva, canon, convIdForEmit, fromMe,
     direcao: mensagemSalva.direcao ?? (fromMe ? 'out' : 'in'),
   }
   // Incluir nome e foto para o frontend exibir ao adicionar/atualizar conversa na lista
-  const nomeContato = (nomeParaCache || senderName || '').toString().trim()
-  const fotoContato = (senderPhoto && String(senderPhoto).trim().startsWith('http')) ? String(senderPhoto).trim() : null
+  // fromMe: senderName/senderPhoto são da conta que enviou (nós), não do cliente.
+  // Só o nome já resolvido do destinatário (nomeParaCache) pode ir para o card.
+  const nomeBruto = fromMe ? nomeParaCache : (nomeParaCache || senderName)
+  const nomeContato = String(nomeBruto || "").trim()
+  const fotoContato = !fromMe && senderPhoto && String(senderPhoto).trim().startsWith('http')
+    ? String(senderPhoto).trim()
+    : null
   if (nomeContato && !nomeContato.replace(/\D/g, '').match(/^\d{10,15}$/)) {
     emitPayload.senderName = nomeContato
     emitPayload.chatName = nomeContato
@@ -108,12 +113,15 @@ function buildConversaAtualizadaPayload({
       direcao: emitPayload.direcao ?? (fromMe ? 'out' : 'in'),
       fromMe,
     }
+    // `tipo` para TODOS os tipos, não só contact/location: a lista lateral monta o preview por
+    // tipo ("Áudio", "Foto", "Documento"). Sem ele o placeholder interno vazava cru e o card
+    // mostrava literalmente "(áudio)" até alguém dar F5 (o GET da lista traz o tipo).
+    if (emitPayload.tipo) preview.tipo = emitPayload.tipo
+    if (emitPayload.nome_arquivo) preview.nome_arquivo = emitPayload.nome_arquivo
     if (emitPayload.tipo === 'contact' && emitPayload.contact_meta) {
-      preview.tipo = 'contact'
       preview.contact_meta = emitPayload.contact_meta
     }
     if (emitPayload.tipo === 'location' && emitPayload.location_meta) {
-      preview.tipo = 'location'
       preview.location_meta = emitPayload.location_meta
     }
     convPayload.ultima_mensagem_preview = preview

@@ -6,15 +6,21 @@
 
 const supabase = require('../../config/supabase')
 const { getProvider } = require('../../services/providers')
-const { normalizarTimestampSemFusoAmbiguoParaApi } = require('../../helpers/timestampApiCompat')
+const { normalizarTimestampSemFusoAmbiguoParaApi, parseTimestampSemFusoComoUtc } = require('../../helpers/timestampApiCompat')
 const { isInternalNoteRow } = require('../../helpers/internalNote')
 const { resolveConversationWhatsappInstance, resolveConversationProvider } = require('../../services/chat/identity/conversationAddressService')
 const { emitirConversaAtualizada, emitirEventoEmpresaConversa, emitirParaUsuario } = require('../../services/chat/realtime/chatRealtimeGateway')
 const { aplicarApagadaParaTodosNaMensagem, enrichMensagemComAutorUsuario } = require('../../services/chat/presentation/messageAuthorEnrichment')
 
-/** Idade da mensagem em horas (null quando a data nao da para ler). */
+/**
+ * Idade da mensagem em horas (null quando a data nao da para ler).
+ *
+ * `criado_em` chega SEM fuso (ex.: "2026-10-14 11:37:56.302"). Com `Date.parse` cru isso e
+ * lido como hora LOCAL do servidor: fora de UTC a idade sai deslocada em horas e podia inverter
+ * a decisao abaixo, anunciando "ja passou do prazo" para uma mensagem que nao passou.
+ */
 function idadeEmHoras(criadoEm) {
-  const t = Date.parse(String(criadoEm || ''))
+  const t = parseTimestampSemFusoComoUtc(criadoEm)
   if (!Number.isFinite(t)) return null
   return Math.round((Date.now() - t) / 3_600_000)
 }

@@ -292,7 +292,7 @@ async function sendLocation(phone, { address = '', lat, lng }, opts = {}) {
  */
 async function deleteMessage(phone, msgId, opts = {}) {
   const cfg = await resolveConfig(opts)
-  if (!cfg) return { ok: false, error: 'Inst\u00e2ncia UltraMSG n\u00e3o configurada.', permanente: true }
+  if (!cfg) return { ok: false, error: 'Instância UltraMSG não configurada.', permanente: true }
   const mid = String(msgId || '').trim()
   if (!mid) return { ok: false, error: 'Mensagem sem ID do WhatsApp.', permanente: true }
   const body = { msgId: mid }

@@ -181,6 +181,18 @@ describe('WhatsApp multi-instance operational phase 2', () => {
     expect(result.map((c) => c.id).sort((a, b) => a - b)).toEqual([1, 9])
   })
 
+  test('dedupe de lista nao funde fixo com celular que so difere pelo 9', () => {
+    const { deduplicateConversationsByContact } = require('../helpers/conversationSync')
+    const rows = [
+      { id: 1, telefone: '553434123456', whatsapp_instance_id: 1, ultima_atividade: '2026-06-15T10:00:00Z' },
+      { id: 2, telefone: '5534934123456', whatsapp_instance_id: 1, ultima_atividade: '2026-06-15T10:05:00Z' },
+    ]
+
+    const result = deduplicateConversationsByContact(rows)
+
+    expect(result.map((c) => c.id).sort((a, b) => a - b)).toEqual([1, 2])
+  })
+
   test('nao reaproveita conversa legada null para instancia nao-default', async () => {
     jest.doMock('../config/supabase', () => createSupabaseConversationMock())
     const { findOrCreateConversation } = require('../helpers/conversationSync')

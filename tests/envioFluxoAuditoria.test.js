@@ -137,7 +137,7 @@ describe('reconciliação — correções da auditoria', () => {
     jest.restoreAllMocks()
   })
 
-  function montar({ providerName, getMessagesResult, chatHistory, sendTextImpl, sendFileImpl, statusNoBanco = { status: 'pending', status_mensagem: 'sending' } }) {
+  function montar({ providerName, getMessagesResult, chatHistory, sendTextImpl, sendFileImpl, statusNoBanco = { status: 'pending', status_mensagem: 'sending' }, connectionStatus = { configured: true, connected: true } }) {
     jest.resetModules()
     jest.spyOn(console, 'warn').mockImplementation(() => {})
     jest.spyOn(console, 'log').mockImplementation(() => {})
@@ -149,7 +149,7 @@ describe('reconciliação — correções da auditoria', () => {
         getChatMessages: jest.fn(async () => chatHistory ?? { ok: false, data: [] }),
         sendText,
         sendFile,
-        getConnectionStatus: async () => ({ configured: true, connected: true }),
+        getConnectionStatus: async () => connectionStatus,
       }),
     }))
     jest.doMock('../services/chat/identity/conversationAddressService', () => ({
@@ -235,7 +235,11 @@ describe('reconciliação — correções da auditoria', () => {
     expect(updates[0]).toMatchObject({ status: 'erro', status_mensagem: 'failed' })
   })
 
-  test('Whapi com id que o provedor ainda informa pending: relógio dentro do prazo, erro depois dele', async () => {
+  // 15/10/2026: este teste travava o comportamento que gerou o alarme falso em produção —
+  // passado o prazo sem ACK, a linha virava `erro` e a bolha dizia "não foi possível enviar"
+  // em PDFs que o cliente já tinha aberto, com um botão que reenviava e duplicava. Ter o id
+  // significa que o WhatsApp ACEITOU a mensagem; ausência de ACK não é prova de recusa.
+  test('Whapi com id que o provedor ainda informa pending: relógio, e nunca vira erro por decurso de prazo', async () => {
     const amb = () => montar({
       providerName: 'whapi',
       getMessagesResult: { ok: true, data: [{ id: 'PsrIhlIPnArSqck-wOuAzLILsg', status: 'pending' }] },
@@ -248,10 +252,12 @@ describe('reconciliação — correções da auditoria', () => {
     expect(dentro.updates).toHaveLength(0)
 
     const fora = amb()
-    await fora.svc.reconcilePendingOutboundMessage(
+    const r2 = await fora.svc.reconcilePendingOutboundMessage(
       linha({ whatsapp_id: 'PsrIhlIPnArSqck-wOuAzLILsg', criado_em: minAtras(150) }), { io: null }
     )
-    expect(fora.updates[0]).toMatchObject({ status: 'erro', status_mensagem: 'failed' })
+    expect(r2.action).toBe('keep_provider_pending')
+    // Nem erro (ele aceitou) nem entrega (ele diz que ainda não saiu): a linha espera o ACK.
+    expect(fora.updates).toHaveLength(0)
   })
 
   test('texto encaminhado já entregue é reconhecido no histórico (não é reenviado em dobro)', async () => {
@@ -265,6 +271,31 @@ describe('reconciliação — correções da auditoria', () => {
     expect(sendText).not.toHaveBeenCalled()
     expect(res.action).toBe('whapi_curada_pelo_historico')
     expect(updates[0]).toMatchObject({ status: 'sent', whatsapp_id: 'WhapiEncaminhada1234567890' })
+  })
+  // 15/10/2026: mesma familia do alarme falso. A instancia sumir da configuracao (token trocado,
+  // canal recriado) e problema NOSSO; se o provedor ja tinha aceitado a mensagem, ela
+  // provavelmente saiu antes da queda. So a linha que ele NUNCA aceitou pode virar falha.
+  test('instancia sem configuracao: linha ACEITA pelo provedor nao vira erro', async () => {
+    const { svc, updates } = montar({
+      providerName: 'whapi',
+      getMessagesResult: { ok: true, data: [] },
+      connectionStatus: { configured: false, connected: false },
+    })
+    const res = await svc.reconcilePendingOutboundMessage(
+      linha({ whatsapp_id: 'PsrIhlIPnArSqck-wOuAzLILsg', criado_em: minAtras(200) }), { io: null }
+    )
+    expect(res.action).toBe('skip_sem_instancia')
+    expect(updates).toHaveLength(0)
+  })
+
+  test('instancia sem configuracao: linha que o provedor NUNCA aceitou vira erro', async () => {
+    const { svc, updates } = montar({
+      providerName: 'whapi',
+      getMessagesResult: { ok: true, data: [] },
+      connectionStatus: { configured: false, connected: false },
+    })
+    await svc.reconcilePendingOutboundMessage(linha({ criado_em: minAtras(200) }), { io: null })
+    expect(updates[0]).toMatchObject({ status: 'erro', status_mensagem: 'failed' })
   })
 })
 

@@ -4,7 +4,7 @@
  */
 
 const supabase = require('../config/supabase')
-const { normalizePhoneBR, possiblePhonesBR, possiblePhonesForWhatsappIdentity, isSameWhatsappIdentity, phoneKeyBR, preferredBrSendDigits } = require('./phoneHelper')
+const { normalizePhoneBR, possiblePhonesBR, possiblePhonesForWhatsappIdentity, isSameWhatsappIdentity, phoneKeyBR, whatsappIdentityKey, preferredBrSendDigits } = require('./phoneHelper')
 
 /**
  * Identidade WhatsApp canônica BR para ARMAZENAR o contato:
@@ -206,7 +206,9 @@ async function mergeConversationLidToPhone(supabaseClient, company_id, chatLid, 
   const canonical = getCanonicalPhone(canonicalPhone)
   if (!canonical || canonical.startsWith('lid:')) return { merged: false }
 
-  const variants = possiblePhonesBR(canonical).length > 0 ? possiblePhonesBR(canonical) : [canonical]
+  const variants = possiblePhonesForWhatsappIdentity(canonical).length > 0
+    ? possiblePhonesForWhatsappIdentity(canonical)
+    : [canonical]
   const whatsappInstanceId = opts.whatsapp_instance_id ?? opts.whatsappInstanceId ?? null
   const applyInstanceScope = (query) => {
     const id = Number(whatsappInstanceId)
@@ -1066,7 +1068,10 @@ async function findOrCreateConversation(supabaseClient, {
       if (groupPart) variants.push(groupPart, `${groupPart}@g.us`)
     }
   } else {
-    variants = possiblePhonesBR(canonical).length > 0 ? possiblePhonesBR(canonical) : [canonical]
+    // Identidade WhatsApp: celular 12↔13 casa; fixo NÃO casa com o celular do 9 inserido.
+    // possiblePhonesBR juntava os dois e gravava nome/foto (e a mensagem) na conversa errada.
+    variants = possiblePhonesForWhatsappIdentity(canonical)
+    if (variants.length === 0) variants = [canonical]
   }
 
   console.log(`[findOrCreateConversation] ${logPrefix} canonical="${canonical}" variants=[${variants.join(',')}] isGroup=${isGroup}`)
@@ -1209,7 +1214,7 @@ function conversationDedupeKey(c) {
   if (!c || c.is_group) return `grupo:${c?.id ?? ''}`
   const instanceId = normalizeWhatsappInstanceId(c.whatsapp_instance_id)
   const instanceScope = instanceId ? `wi:${instanceId}` : 'wi:legacy'
-  const phoneKey = (c.telefone && (phoneKeyBR(c.telefone) || String(c.telefone).replace(/\D/g, ''))) || ''
+  const phoneKey = (c.telefone && (whatsappIdentityKey(c.telefone) || String(c.telefone).replace(/\D/g, ''))) || ''
   const lid = String(c.chat_lid || c.chatLid || '').trim()
   const contactKey = phoneKey || (lid ? `lid:${lid}` : `id:${c.id}`)
   return `${instanceScope}:${contactKey}`

@@ -21,6 +21,29 @@ function applyQuoted(body, opts) {
   return body
 }
 
+/** Texto do erro que o provedor devolveu, para o log e para a tela. */
+function motivoDoProvedor(data, text) {
+  const e = data && typeof data === 'object' ? data.error : null
+  if (e && typeof e === 'object') {
+    const m = e.message || e.detail || e.code
+    if (m) return String(m).slice(0, 300)
+  }
+  if (typeof e === 'string' && e.trim()) return e.trim().slice(0, 300)
+  if (data && typeof data === 'object' && data.message) return String(data.message).slice(0, 300)
+  const t = String(text || '').trim()
+  return t ? t.slice(0, 300) : null
+}
+
+/**
+ * 4xx (menos 429) = o provedor recusou e repetir nao muda nada. 429/5xx/sem status = passageiro.
+ */
+function recusaDefinitiva(status) {
+  const s = Number(status)
+  if (!Number.isFinite(s)) return false
+  if (s === 429) return false
+  return s >= 400 && s < 500
+}
+
 /**
  * Apaga mensagem no WhatsApp. DELETE /messages/{MessageID}
  *
@@ -35,7 +58,7 @@ function applyQuoted(body, opts) {
  */
 async function deleteMessage(phone, msgId, opts = {}) {
   const cfg = await resolveConfig(opts)
-  if (!cfg) return { ok: false, error: 'Inst\u00e2ncia Whapi n\u00e3o configurada.', permanente: true }
+  if (!cfg) return { ok: false, error: 'Instância Whapi não configurada.', permanente: true }
   const mid = String(msgId || '').trim()
   if (!mid) return { ok: false, error: 'Mensagem sem ID do WhatsApp.', permanente: true }
   const to = toWhapiRecipient(phone)
@@ -66,29 +89,6 @@ async function deleteMessage(phone, msgId, opts = {}) {
  * POST /messages/text { to, body, edit: MessageID }.
  * Retorno { ok, messageId, error } — mesmo espírito do sendText.
  */
-/** Texto do erro que o provedor devolveu, para o log e para a tela. */
-function motivoDoProvedor(data, text) {
-  const e = data && typeof data === 'object' ? data.error : null
-  if (e && typeof e === 'object') {
-    const m = e.message || e.detail || e.code
-    if (m) return String(m).slice(0, 300)
-  }
-  if (typeof e === 'string' && e.trim()) return e.trim().slice(0, 300)
-  if (data && typeof data === 'object' && data.message) return String(data.message).slice(0, 300)
-  const t = String(text || '').trim()
-  return t ? t.slice(0, 300) : null
-}
-
-/**
- * 4xx (menos 429) = o provedor recusou e repetir nao muda nada. 429/5xx/sem status = passageiro.
- */
-function recusaDefinitiva(status) {
-  const s = Number(status)
-  if (!Number.isFinite(s)) return false
-  if (s === 429) return false
-  return s >= 400 && s < 500
-}
-
 async function editMessage(phone, msgId, newText, opts = {}) {
   const cfg = await resolveConfig(opts)
   if (!cfg) {

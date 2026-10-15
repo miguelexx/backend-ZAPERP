@@ -1270,3 +1270,47 @@ Não alterado (decisão): mídia gravada SEM URL nunca é reparada sozinha (plac
 `(mensagem)`, `messages_updates` com link ignorado, reprocesso responde `definitivo` para
 `sem_url_remota`) — é o desenho documentado do master; `/media/proxy` bufferiza o upstream inteiro
 antes do 1º byte.
+
+---
+
+## 2026-10-15 — "Não foi possível enviar" numa mensagem ENTREGUE (alarme falso)
+
+Relatado com print: dois PDFs e um texto marcados em vermelho ("Enviada — o WhatsApp não
+confirmou a entrega" + botão "Reenviar mesmo assim") numa conversa em que o cliente já tinha
+recebido tudo.
+
+**Causa:** a regra de 08/10 (doc, parte 4, item 2) marcava `erro` quando o prazo
+`PENDING_OUTBOUND_WHAPI_UNACKED_FAIL_MINUTES` (120 min) vencia sem ACK de entrega. O `whatsapp_id`
+só existe porque o provedor ACEITOU a mensagem; ausência de ACK é ausência de informação, não
+recusa. Quando o canal não entrega ACKs (evento `statuses` desligado, channel-store recriado,
+id de outro canal), TODA mensagem virava falha 2 h depois.
+
+| Onde | Antes | Agora |
+|------|-------|-------|
+| `reconcile…` — id do provedor + sem registro + sem ACK no prazo | `erro`/`failed` | `sent` (último fato conhecido: o WhatsApp aceitou). Cura sozinha as linhas já marcadas, uma vez por linha (o guard `currentStatus !== 'sent'` impede reescrita por ciclo) |
+| `reconcile…` — provedor AFIRMA `pending` após o prazo | `erro`/`failed` | nenhum desfecho inventado: nem erro (ele aceitou) nem entrega (ele diz que não saiu). Espera o ACK |
+| `reconcile…` — SEM id do provedor | `erro` após a janela | inalterado: recusa real continua falha |
+
+`erro` volta a significar "há evidência de falha". Testes: `pendingOutboundErroRepair` (13),
+`envioFluxoAuditoria` (18, um reescrito). Suíte 219/2346.
+
+### Revisão no mesmo dia — o que foi desfeito e o que foi adicionado
+
+A primeira tentativa escondia o vermelho no FRONTEND (`erro` com `whatsapp_id` → tique de
+enviada, sem botão). **Revertida.** `erro` com id também vem de falha que o provedor INFORMA
+(`providerRowIndicatesFailure`: unsent/invalid/expired/failed, e o ACK `failed` do `statusZapi`,
+que aplica enquanto a linha está em pending) — mascarar trocaria alarme falso por falha
+silenciosa. Não há marcador confiável para separar os dois casos no cliente: a reconciliação
+antiga e as falhas confirmadas gravam ambas `status_mensagem: 'failed'`.
+
+Fica valendo: **`erro` só pode ser escrito com evidência de falha.** O backend é o único
+responsável por isso, e a varredura de reparo cura as linhas antigas.
+
+Encontrado na mesma revisão e corrigido (mesma família do alarme falso):
+
+| Onde | Defeito | Correção |
+|------|---------|----------|
+| `reconcile…` — instância sem configuração (`skip_sem_instancia`) após 60 min | Marcava `erro` mesmo em linha que o provedor JÁ tinha aceitado. Token trocado / canal recriado derrubava em falha mensagens que saíram antes da queda | Só marca erro se `provedorNuncaAceitou(row)`; com id, apenas `skip_sem_instancia` |
+
+Testes novos em `envioFluxoAuditoria`: instância sem configuração com id → `skip_sem_instancia`
+sem update; sem id → `erro`.

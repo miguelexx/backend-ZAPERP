@@ -17,7 +17,7 @@ const { getProvider } = require('../services/providers')
 const { syncUltraMsgContact } = require('../services/ultramsgSyncContact')
 // getCompanyIdByInstanceId / getWhatsappInstanceByProviderInstanceId: agora só em webhookInbound/instanceResolve.js.
 const { getStatus } = require('../services/ultramsgIntegrationService')
-const { normalizePhoneBR, possiblePhonesBR } = require('../helpers/phoneHelper')
+const { normalizePhoneBR, possiblePhonesForWhatsappIdentity } = require('../helpers/phoneHelper')
 // extrairNomePrefixoTexto: usado no caminho fromMe self-echo (linhas ~1758/2010). O import se perdeu
 // na modularização fase 1-4 (commit c9cf02d) — sem ele o eco fromMe estourava 500 (ReferenceError).
 const { extrairNomePrefixoTexto } = require('../helpers/mensagemAtendenteNomeHelper')
@@ -591,7 +591,8 @@ exports.receberZapi = async (req, res) => {
                 const { cliente_id: cid } = await getOrCreateCliente(supabase, company_id, canonical, {
                   nome: nomeCache || undefined,
                   nomeSource: 'chatName',
-                  foto_perfil: fotoCache || undefined
+                  foto_perfil: fotoCache || undefined,
+                  identitySafePhoneMatch: true,
                 })
                 await supabase
                   .from('conversas')
@@ -657,7 +658,7 @@ exports.receberZapi = async (req, res) => {
         if (!error && !msg && phoneDest) {
           try {
             const isGroup = String(phoneDest).startsWith('120')
-            const phones = isGroup ? [phoneDest] : possiblePhonesBR(phoneDest)
+            const phones = isGroup ? [phoneDest] : possiblePhonesForWhatsappIdentity(phoneDest)
             let qConv = supabase
               .from('conversas')
               .select('id, whatsapp_instance_id')
@@ -993,7 +994,8 @@ exports.receberZapi = async (req, res) => {
           nomeSource,
           fromMe,
           pushname: pushnamePayload || undefined,
-          foto_perfil: senderPhoto || undefined
+          foto_perfil: senderPhoto || undefined,
+          identitySafePhoneMatch: true,
         })
         cliente_id = createdCli?.cliente_id || null
         clienteNomeProtegido = createdCli?.nome_protegido === true
@@ -1044,7 +1046,7 @@ exports.receberZapi = async (req, res) => {
         let convByPhone = null
         if (hasRealPhone) {
           const canonical = getCanonicalPhone(phone)
-          const variants = canonical ? possiblePhonesBR(canonical) : []
+          const variants = canonical ? possiblePhonesForWhatsappIdentity(canonical) : []
           const list = variants.length > 0 ? variants : [phone]
           const { data: rows } = await supabase
             .from('conversas')
@@ -2200,6 +2202,9 @@ exports.receberZapi = async (req, res) => {
         company_id,
         conversa_id: mPersist?.conversa_id ?? conversa_id,
         mensagemSalva: mPersist,
+        // Mídia COM LEGENDA sem URL não deixa rastro na linha (texto = legenda, tipo = 'texto'):
+        // o tipo do webhook é a única prova de que havia arquivo para buscar.
+        tipoWebhook: type,
       })
 
       // Usar conversa_id da mensagem quando idempotência retornou existente de outra conversa

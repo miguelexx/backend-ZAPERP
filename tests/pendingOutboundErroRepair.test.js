@@ -147,18 +147,32 @@ describe('reparo de erro com id do provedor', () => {
     expect(updates.map((u) => u.status)).not.toContain('delivered')
   })
 
-  test('nada no provedor nem no historico: segue erro e NAO reescreve a linha', async () => {
+  test('nada no provedor nem no historico: cura a linha para enviada (o id prova que foi aceita)', async () => {
     const { svc, sendText, updates } = montar({
       getMessagesResult: { ok: true, data: [] },
       chatHistory: { ok: true, data: [{ id: 'outro', from_me: true, body: 'x', timestamp: 1 }] },
     })
     await svc.reconcilePendingOutboundMessage(linhaErro(), { io: null })
     expect(sendText).not.toHaveBeenCalled()
-    // Reescrever erro sobre erro so geraria emit de socket a cada ciclo.
+    // "Sem registro" e AUSENCIA DE INFORMACAO, nao recusa: o whatsapp_id so existe porque o
+    // provedor aceitou a mensagem. Ate 15/10/2026 a linha ficava em `erro` e a bolha dizia
+    // "nao foi possivel enviar" num PDF que o cliente ja tinha aberto. Volta para `sent`.
+    expect(updates).toEqual([{ table: 'mensagens', status: 'sent', status_mensagem: 'sent' }])
+  })
+
+  test('cura e feita UMA vez: linha ja em sent nao e reescrita a cada ciclo', async () => {
+    const { svc, updates } = montar({
+      getMessagesResult: { ok: true, data: [] },
+      chatHistory: { ok: true, data: [{ id: 'outro', from_me: true, body: 'x', timestamp: 1 }] },
+    })
+    await svc.reconcilePendingOutboundMessage(
+      { ...linhaErro(), status: 'sent', status_mensagem: 'sent' },
+      { io: null }
+    )
     expect(updates).toHaveLength(0)
   })
 
-  test('historico informa pending: nao promove nada', async () => {
+  test('historico informa pending: nao promove nem reprova — espera o ACK', async () => {
     const { svc, updates } = montar({
       getMessagesResult: { ok: true, data: [] },
       chatHistory: {
@@ -168,6 +182,9 @@ describe('reparo de erro com id do provedor', () => {
     })
     await svc.reconcilePendingOutboundMessage(linhaErro(), { io: null })
     expect(updates.filter((u) => ['sent', 'delivered', 'read'].includes(u.status))).toHaveLength(0)
+    // ...e tambem nao marca falha: o provedor ACEITOU a mensagem, so nao a entregou ainda.
+    // Inventar qualquer desfecho aqui mente para um dos lados — a linha espera o ACK.
+    expect(updates.filter((u) => ['erro', 'failed'].includes(u.status))).toHaveLength(0)
   })
 
   test('erro SEM id do provedor nao entra no reparo (nunca pode ser reenviado por ele)', async () => {

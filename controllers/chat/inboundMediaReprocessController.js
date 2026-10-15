@@ -92,6 +92,34 @@ exports.reprocessarMidiaInbound = async (req, res) => {
   if (urlAtual.startsWith('/media/r2/')) {
     return res.json({ ok: true, url: urlAtual, status: 'concluida', ja_persistido: true })
   }
+  // Linha SEM url nenhuma: a mídia chegou pelo webhook sem link (Whapi só manda `link` com
+  // `media.auto_download` ligado; UltraMsg entrega `media:""` em certas instâncias). O arquivo
+  // existe no provedor — `recuperarUrlRemotaDaMensagem` acha pelo whatsapp_id. Sem este ramo a
+  // chamada caía direto no persist, que respondia `sem_url_remota` → o atendente via "expirou no
+  // WhatsApp" para um áudio vivo e recuperável.
+  if (!urlAtual) {
+    const urlRemota = await recuperarUrlRemotaDaMensagem({ supabase, company_id, mensagem })
+    if (!urlRemota) {
+      return res.status(200).json({ ok: false, definitivo: true, motivo: 'sem_url_remota' })
+    }
+    // Guarda de corrida: só grava se a linha AINDA estiver sem url (outro fluxo pode ter reparado).
+    let updateVazio = supabase
+      .from('mensagens')
+      .update({ url: urlRemota })
+      .eq('id', mensagem_id)
+      .eq('company_id', company_id)
+    updateVazio = mensagem.url == null ? updateVazio.is('url', null) : updateVazio.eq('url', '')
+    const { error: upVazioErr } = await updateVazio
+    if (upVazioErr) {
+      console.warn('[inboundMediaReprocess] falha ao gravar URL remota recuperada:', upVazioErr.message)
+      return res.status(500).json({ ok: false, error: 'Falha ao preparar a recuperação da mídia' })
+    }
+    console.log('[inboundMediaReprocess] mídia sem URL no webhook; link recuperado do provedor:', {
+      mensagem_id, company_id,
+    })
+    // segue para o reprocesso force abaixo
+  }
+
   if (urlAtual.startsWith('/uploads/')) {
     // Já está em /uploads E o arquivo existe no disco: nada a fazer — devolve a URL boa.
     if (uploadsFileExists(urlAtual)) {

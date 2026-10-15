@@ -4,7 +4,7 @@
  */
 
 const supabase = require('../../config/supabase')
-const { possiblePhonesBR } = require('../../helpers/phoneHelper')
+const { possiblePhonesForWhatsappIdentity } = require('../../helpers/phoneHelper')
 const {
   isUltramsgNumericQueueId,
   parseCrmReferenceMensagemId,
@@ -76,7 +76,7 @@ async function findPendingOutboundByAckPhone({
   const digits = extractPhoneDigitsFromWhatsappMessageId(ackId)
   if (!digits || !company_id || !fromIso) return null
   const phones = Array.from(new Set(
-    [digits, ...(possiblePhonesBR(digits) || [])]
+    [digits, ...(possiblePhonesForWhatsappIdentity(digits) || [])]
       .map((p) => String(p || '').replace(/\D/g, ''))
       .filter((p) => p.length >= 10),
   ))

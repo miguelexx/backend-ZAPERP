@@ -16,7 +16,7 @@
 const supabase = require('../config/supabase')
 const {
   normalizePhoneBR,
-  possiblePhonesBR,
+  possiblePhonesForWhatsappIdentity,
   pickRealPhoneCandidate,
 } = require('../helpers/phoneHelper')
 const { getOrCreateCliente, findOrCreateConversation } = require('../helpers/conversationSync')
@@ -373,20 +373,71 @@ async function selectExistingMessage(company_id, whatsapp_instance_id, whatsapp_
   return null
 }
 
+/**
+ * Placeholders internos — o texto que gravamos quando a mensagem chegou sem conteúdo utilizável.
+ * Antes aqui só cabia '(mensagem)': uma linha de áudio sem URL (texto '(áudio)') não era
+ * considerada reparável, então o backfill buscava a mídia no provedor, ENCONTRAVA, e jogava fora.
+ * O áudio ficava mudo para sempre. Todo placeholder tipado entra na lista.
+ */
+const PLACEHOLDER_TEXTS = new Set([
+  '(mensagem)', '(mídia)', '(midia)', '(imagem)', '(áudio)', '(audio)', '(áudio de voz)',
+  '(vídeo)', '(video)', '(vídeo visualização única)', '(figurinha)', '(sticker)', '(arquivo)', '(documento)',
+])
+
 function isPlaceholderMessageText(value) {
-  return String(value || '').trim() === '(mensagem)'
+  return PLACEHOLDER_TEXTS.has(String(value || '').trim().toLowerCase())
+}
+
+function isGenericPlaceholderText(value) {
+  return String(value || '').trim().toLowerCase() === '(mensagem)'
+}
+
+/** URL que o frontend consegue renderizar (remota, cópia local ou espelho no R2). */
+function temUrlUtilizavel(url) {
+  const u = String(url || '').trim()
+  return u.startsWith('https://') || u.startsWith('http://') || u.startsWith('/uploads/') || u.startsWith('/media/r2/')
+}
+
+/**
+ * Repara uma linha já existente com o que o histórico do provedor trouxe de novo. Só PROMOVE:
+ *  (a) placeholder → texto real (nunca o contrário: um texto real jamais vira placeholder);
+ *  (b) placeholder genérico '(mensagem)' → placeholder tipado '(áudio)' (rótulo certo na bolha);
+ *  (c) linha sem URL utilizável → URL do provedor, com tipo/nome_arquivo que a acompanham;
+ *  (d) contact_meta / location_meta que a linha ainda não tem.
+ * URL já utilizável (inclusive /uploads e /media/r2) nunca é sobrescrita.
+ * Devolve true quando algo foi gravado — é o que conta como `messagesUpdated`.
+ */
+function buildPlaceholderRepairPatch(existing, nextInsert) {
+  if (!existing?.id || !nextInsert) return null
+
+  const patch = {}
+  const textoNovo = String(nextInsert.texto || '').trim()
+  const existingEhPlaceholder = isPlaceholderMessageText(existing.texto)
+
+  if (textoNovo && existingEhPlaceholder) {
+    if (!isPlaceholderMessageText(textoNovo)) {
+      patch.texto = textoNovo // (a)
+    } else if (isGenericPlaceholderText(existing.texto) && !isGenericPlaceholderText(textoNovo)) {
+      patch.texto = textoNovo // (b)
+    }
+  }
+
+  if (!temUrlUtilizavel(existing.url) && String(nextInsert.url || '').trim()) {
+    patch.url = String(nextInsert.url).trim() // (c)
+    if (nextInsert.tipo) patch.tipo = nextInsert.tipo
+    if (nextInsert.nome_arquivo) patch.nome_arquivo = nextInsert.nome_arquivo
+  }
+
+  for (const field of ['contact_meta', 'location_meta']) {
+    if (existing[field] == null && nextInsert[field] != null) patch[field] = nextInsert[field] // (d)
+  }
+
+  return Object.keys(patch).length ? patch : null
 }
 
 async function updateExistingPlaceholderMessage(company_id, existing, nextInsert) {
-  if (!existing?.id || !isPlaceholderMessageText(existing.texto)) return false
-  if (!nextInsert || isPlaceholderMessageText(nextInsert.texto)) return false
-
-  const patch = {
-    texto: String(nextInsert.texto || '').trim(),
-  }
-  for (const field of ['tipo', 'url', 'nome_arquivo', 'contact_meta', 'location_meta']) {
-    if (nextInsert[field] != null && nextInsert[field] !== '') patch[field] = nextInsert[field]
-  }
+  const patch = buildPlaceholderRepairPatch(existing, nextInsert)
+  if (!patch) return false
 
   const { error } = await supabase
     .from('mensagens')
@@ -536,9 +587,30 @@ async function insertPreparedMessagesForConversation(ctx) {
       whatsapp_instance_is_default === true
     )
     if (exists?.id) {
+      const urlFaltava = !temUrlUtilizavel(exists.url)
+      const urlNova = String(normalized.insert.url || '').trim()
       const updated = await updateExistingPlaceholderMessage(company_id, exists, normalized.insert)
-      if (updated) messagesUpdated += 1
-      else messagesSkipped += 1
+      if (updated) {
+        messagesUpdated += 1
+        // A linha estava sem mídia e acabou de ganhar a URL do provedor: copiar para /uploads.
+        // É esse serviço que emite `nova_mensagem` ao concluir — sem ele a bolha só viraria
+        // player depois de um F5, que é o que o atendente faz quando desiste de esperar.
+        if (urlFaltava && urlNova.startsWith('https://')) {
+          const tipoFinal = normalized.insert.tipo || exists.tipo
+          if (tipoQualificaPersistencia(tipoFinal)) {
+            schedulePersistInboundMediaIfNeeded({
+              supabase,
+              io,
+              company_id,
+              mensagem_id: exists.id,
+              fromMe: !!normalized.fromMe,
+              departamento_id: null,
+            })
+          }
+        }
+      } else {
+        messagesSkipped += 1
+      }
       continue
     }
 
@@ -792,7 +864,7 @@ async function resolveChatIdsForConversation(company_id, conversa) {
     const raw = String(value || '').trim()
     if (!raw || !isUsableHistoryIdentifier(raw)) return
     if (!candidates.includes(raw)) candidates.push(raw)
-    for (const variant of possiblePhonesBR(raw)) {
+    for (const variant of possiblePhonesForWhatsappIdentity(raw)) {
       if (variant && !candidates.includes(variant)) candidates.push(variant)
     }
   }
@@ -1011,4 +1083,9 @@ module.exports = {
   resolveGroupChatIdsForConversation,
   contactHistoryTimeFromUnix,
   CONTACT_HISTORY_WINDOW_DAYS,
+  _test: {
+    buildPlaceholderRepairPatch,
+    isPlaceholderMessageText,
+    temUrlUtilizavel,
+  },
 }
