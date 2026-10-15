@@ -61,6 +61,7 @@ Todos exigem variáveis R2 no `.env` (`R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_S
 | Script | Uso | Efeito |
 |--------|-----|--------|
 | `reprocessar-webhooks-ultramsg-falhos.js` | `node scripts/reprocessar-webhooks-ultramsg-falhos.js --start=ISO --end=ISO [--company=ID] [--limit=N] [--apply]` | Relê `webhook_logs` no intervalo e reenvia payloads falhos para `/webhooks/ultramsg`. **Dry-run por padrão** (sem `--apply`, só lista). Idempotente por `whatsapp_id`. Útil após falha de coluna/migration. |
+| `reparar-midia-sem-link.js` | `node scripts/reparar-midia-sem-link.js --company-id=N [--conversa=ID] [--modo=linhas\|lacunas\|ambos] [--dias=45] [--limite=50] [--pausa-ms=1500] [--apply]` | Reparo retroativo da mídia recebida sem o campo `link` do provedor (áudio mudo, foto/vídeo/documento descartados). Chama `syncOldMessagesForConversation` por conversa afetada — mesmo caminho do botão "Buscar histórico". **Dry-run por padrão.** Idempotente por `whatsapp_id`; sequencial, com pausa e disjuntor para proteger a conta WhatsApp. **Rodar NA VPS** (agenda cópia para `/uploads`). Diagnóstico: `supabase/scripts_manuais/diagnostico/MIDIA_SEM_LINK_PASSIVO.sql`; contexto: `docs/ai-handoff/31-REPARO-RETROATIVO-MIDIA-SEM-LINK.md`. |
 
 ---
 
