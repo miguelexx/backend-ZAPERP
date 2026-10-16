@@ -495,7 +495,7 @@ exports.encaminharMensagem = async (req, res) => {
 
     const { data: mensagensRows, error: errMsg } = await supabase
       .from('mensagens')
-      .select('id, texto, tipo, direcao, url, nome_arquivo, contact_meta, location_meta, conversa_id')
+      .select('id, texto, tipo, direcao, status, url, nome_arquivo, contact_meta, location_meta, conversa_id, whatsapp_id, whatsapp_instance_id')
       .eq('company_id', company_id)
       .in('id', orderedIds)
 

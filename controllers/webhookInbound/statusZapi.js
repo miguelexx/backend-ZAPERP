@@ -11,7 +11,6 @@ const { normalizeMessageAckStatus, canonStatusForEmit, resolveAckEffectiveStatus
 const { isUltramsgNumericQueueId } = require('../../helpers/whatsappMessageIdHelper')
 const {
   selectSingleMensagemByWhatsappId,
-  updateSingleMensagemByWhatsappId,
   selectSingleMensagemByWhatsappIdRelaxed,
   patchMensagemStatusById,
   applyWhatsappInstanceFilterOrLegacy,
@@ -75,14 +74,18 @@ async function reaplicarAckTardio({ company_id, idStr, status, io }) {
   // A linha já está neste status (ou adiante): nada a gravar nem a emitir.
   if (efetivo === canonStatusForEmit(atual)) return true
 
-  const { data: patched } = await patchMensagemStatusById(supabase, {
+  const { data: patched, bloqueadoPorRegressao } = await patchMensagemStatusById(supabase, {
     company_id,
     mensagem_id: row.id,
     effectiveStatus: efetivo,
+    statusAtual: atual,
     select: 'id, conversa_id, company_id, autor_usuario_id, whatsapp_id',
   })
+  // Guarda barrou (outro ACK mais avançado venceu a corrida): a linha foi encontrada, então o
+  // ACK tardio está cumprido — e quem venceu já emitiu o status certo. Não emitir de novo.
+  if (bloqueadoPorRegressao) return true
   if (patched?.id && io) {
-    const emitStatus = canonStatusForEmit(efetivo)
+    const emitStatus = canonStatusForEmit(patched.status || efetivo)
     let chain = io.to(`empresa_${patched.company_id}`).to(`conversa_${patched.conversa_id}`)
     if (patched.autor_usuario_id != null) chain = chain.to(`usuario_${patched.autor_usuario_id}`)
     chain.emit('status_mensagem', {
@@ -228,58 +231,96 @@ exports.statusZapi = async (req, res) => {
     const io = req.app.get('io')
     let updated = 0
 
+    /**
+     * F4 do doc 33 — falha de INFRA no processamento do ACK precisa pedir reentrega.
+     *
+     * Antes todo erro era engolido e a resposta era 200: um erro transitório do banco no
+     * instante do ACK perdia o tique para sempre (o ACK tardio tenta 3x em ~10s e morre no
+     * restart; a varredura só reexamina pending/sent, nunca `delivered`). Agora erro de banco
+     * marca a requisição e ela responde 500 — Whapi e UltraMSG reentregam, e reaplicar o ACK é
+     * idempotente porque a gravação é condicional (guarda de não-regressão).
+     *
+     * `whatsapp_id` ambíguo NÃO é falha de infra: é dado conflitante, cuja decisão é ignorar.
+     * "Mensagem não encontrada" também não — tem tratamento próprio (ACK tardio).
+     */
+    let falhaDeInfra = null
+    const registrarFalhaInfra = (contexto, erro) => {
+      if (!erro) return
+      if (erro.code === 'AMBIGUOUS_WHATSAPP_ID') return
+      falhaDeInfra = { contexto, message: erro.message || String(erro), code: erro.code || null }
+      console.error('[STATUS_ACK] falha de banco ao aplicar ACK — pedindo reentrega', {
+        contexto,
+        code: erro.code || null,
+        message: String(erro.message || erro).slice(0, 200),
+      })
+    }
+
     for (const messageId of idsToProcess) {
       if (!messageId) continue
       const idStr = String(messageId)
 
-      // Grupos: WhatsApp não envia read receipts confiáveis — cap em delivered
       let effectiveStatus = statusNorm
-      if (statusNorm === 'read' || statusNorm === 'played') {
-        const { data: msgForConv } = await selectSingleMensagemByWhatsappId(supabase, {
-          company_id,
-          whatsapp_id: idStr,
-          whatsapp_instance_id,
-          select: 'conversa_id',
-          context: 'status.group_cap',
-        })
-        if (msgForConv?.conversa_id) {
-          const { data: conv } = await supabase
-            .from('conversas')
-            .select('tipo, telefone')
-            .eq('id', msgForConv.conversa_id)
-            .eq('company_id', company_id)
-            .maybeSingle()
-          const isGroup = conv?.tipo === 'grupo' || (conv?.telefone && String(conv.telefone).endsWith('@g.us'))
-          if (isGroup) effectiveStatus = 'delivered'
-        }
+
+      // UMA leitura da linha serve a tudo que vem a seguir (F7 do doc 33): o cap de grupo
+      // precisa de `conversa_id`, a guarda de rank precisa de `status` e a gravação precisa do
+      // `id`. Antes eram TRÊS consultas à mesma linha (`status.group_cap`, `status.rank_check` e
+      // a releitura interna do update), mais a de `conversas` e o próprio UPDATE: 5 idas ao
+      // banco por ACK `read` — ~11 por mensagem somando sent+delivered+read.
+      const alvo = await selectSingleMensagemByWhatsappId(supabase, {
+        company_id,
+        whatsapp_id: idStr,
+        whatsapp_instance_id,
+        select: 'id, conversa_id, status, whatsapp_id',
+        context: 'status.alvo',
+      })
+      registrarFalhaInfra('status.alvo', alvo.error)
+      const linhaAlvo = alvo.data || null
+
+      // Grupos: WhatsApp não envia read receipts confiáveis — cap em delivered
+      if ((statusNorm === 'read' || statusNorm === 'played') && linhaAlvo?.conversa_id) {
+        const { data: conv, error: errConv } = await supabase
+          .from('conversas')
+          .select('tipo, telefone')
+          .eq('id', linhaAlvo.conversa_id)
+          .eq('company_id', company_id)
+          .maybeSingle()
+        registrarFalhaInfra('status.group_cap.conversa', errConv)
+        const isGroup = conv?.tipo === 'grupo' || (conv?.telefone && String(conv.telefone).endsWith('@g.us'))
+        if (isGroup) effectiveStatus = 'delivered'
       }
 
       // Evita que um ack atrasado (ex.: "delivered") regrida uma mensagem já em status mais
       // avançado (ex.: "read"). ACK de falha explícita (erro) APLICA sobre pending/sending —
       // ver resolveAckEffectiveStatus (sem isso o `failed` da Whapi era engolido pelo rank).
-      const { data: currentForRank } = await selectSingleMensagemByWhatsappId(supabase, {
-        company_id,
-        whatsapp_id: idStr,
-        whatsapp_instance_id,
-        select: 'status',
-        context: 'status.rank_check',
-      })
-      if (currentForRank?.status) {
-        effectiveStatus = resolveAckEffectiveStatus(currentForRank.status, effectiveStatus)
+      // A guarda definitiva é no UPDATE condicional; isto só decide o valor a gravar.
+      if (linhaAlvo?.status) {
+        effectiveStatus = resolveAckEffectiveStatus(linhaAlvo.status, effectiveStatus)
       }
 
-      const statusUpdates = { status: effectiveStatus, status_mensagem: effectiveStatus }
       const statusSelect = 'id, conversa_id, company_id, autor_usuario_id, whatsapp_instance_id, whatsapp_id'
 
-      // 1) Atualiza por (company_id, whatsapp_id) — match exato com filtro de instância
-      let { data: msg } = await updateSingleMensagemByWhatsappId(supabase, {
-        company_id,
-        whatsapp_id: idStr,
-        whatsapp_instance_id,
-        updates: statusUpdates,
-        select: statusSelect,
-        context: 'status.exact',
-      })
+      // 1) Grava na linha que a leitura única já localizou (match exato com filtro de
+      //    instância). A gravação é CONDICIONAL, então ACK concorrente não rebaixa o tique
+      //    (F3 do doc 33): bloqueado = a linha já está mais adiante, `msg` vem com o status
+      //    VENCEDOR e é ele que vai para o socket.
+      //    `alvo.ambiguous` (mesmo whatsapp_id em conversas diferentes) deixa `linhaAlvo` nulo
+      //    de propósito — cai nos fallbacks abaixo, como antes.
+      let msg = null
+      // Horários recém-gravados (F9): vão no socket para o modal "Dados da mensagem" já mostrar
+      // "Entregue às…"/"Visualizada às…" sem esperar um refetch da thread.
+      let marcosGravados = null
+      if (linhaAlvo?.id) {
+        const exato = await patchMensagemStatusById(supabase, {
+          company_id,
+          mensagem_id: linhaAlvo.id,
+          effectiveStatus,
+          statusAtual: linhaAlvo.status,
+          select: statusSelect,
+        })
+        msg = exato.data
+        marcosGravados = exato.marcos || null
+        registrarFalhaInfra('status.exact', exato.error)
+      }
 
       // 1b) Fallback: ACK não encontrou por whatsapp_instance_id — tenta match exato na empresa
       if (!msg) {
@@ -289,6 +330,7 @@ exports.statusZapi = async (req, res) => {
           select: statusSelect,
           context: 'status.exact_relaxed',
         })
+        registrarFalhaInfra('status.exact_relaxed', relaxed.error)
         if (relaxed.data?.id) {
           const cur = relaxed.data.status || 'pending'
           effectiveStatus = resolveAckEffectiveStatus(cur, effectiveStatus)
@@ -296,10 +338,13 @@ exports.statusZapi = async (req, res) => {
             company_id,
             mensagem_id: relaxed.data.id,
             effectiveStatus,
+            statusAtual: cur,
             whatsapp_id: idStr,
             select: statusSelect,
           })
           msg = patched.data || null
+          marcosGravados = patched.marcos || marcosGravados
+          registrarFalhaInfra('status.patch', patched.error)
         }
       }
 
@@ -315,7 +360,8 @@ exports.statusZapi = async (req, res) => {
           .order('id', { ascending: false })
           .limit(2)
         prefixQuery = applyWhatsappInstanceFilterOrLegacy(prefixQuery, whatsapp_instance_id)
-        const { data: prefixRows } = await prefixQuery
+        const { data: prefixRows, error: errPrefix } = await prefixQuery
+        registrarFalhaInfra('status.prefix', errPrefix)
         if (Array.isArray(prefixRows) && prefixRows.length > 1) {
           logAmbiguousWhatsappId('status.prefix', {
             company_id,
@@ -333,9 +379,12 @@ exports.statusZapi = async (req, res) => {
             company_id,
             mensagem_id: candidate.id,
             effectiveStatus,
+            statusAtual: candidate.status,
             select: statusSelect,
           })
           msg = patched.data || null
+          marcosGravados = patched.marcos || marcosGravados
+          registrarFalhaInfra('status.patch', patched.error)
         }
       }
 
@@ -350,7 +399,7 @@ exports.statusZapi = async (req, res) => {
         const fromIso = new Date(Date.now() - 5 * 60 * 1000).toISOString()
         let recentOutQuery = supabase
           .from('mensagens')
-          .select('id, conversa_id, company_id, autor_usuario_id, whatsapp_instance_id, whatsapp_id')
+          .select('id, conversa_id, company_id, autor_usuario_id, whatsapp_instance_id, whatsapp_id, status')
           .eq('company_id', company_id)
           .eq('direcao', 'out')
           .gte('criado_em', fromIso)
@@ -358,7 +407,8 @@ exports.statusZapi = async (req, res) => {
           .order('id', { ascending: false })
           .limit(5)
         recentOutQuery = applyWhatsappInstanceFilterOrLegacy(recentOutQuery, whatsapp_instance_id)
-        const { data: recentOutRows } = await recentOutQuery
+        const { data: recentOutRows, error: errRecentOut } = await recentOutQuery
+        registrarFalhaInfra('status.recent_out', errRecentOut)
         const pendingRows = filterRowsForFromMeReconcile(recentOutRows)
         const cand = Array.isArray(pendingRows) && pendingRows.length === 1 ? pendingRows[0] : null
         if (cand?.id) {
@@ -366,10 +416,13 @@ exports.statusZapi = async (req, res) => {
             company_id,
             mensagem_id: cand.id,
             effectiveStatus,
+            statusAtual: cand.status,
             whatsapp_id: idStr,
             select: statusSelect,
           })
           msg = patched.data || null
+          marcosGravados = patched.marcos || marcosGravados
+          registrarFalhaInfra('status.patch', patched.error)
           if (msg && logDebug) console.log('[DEBUG] status reconciliação: message_ack antes do ReceivedCallback', { mensagem_id: msg.id })
         }
       }
@@ -391,10 +444,13 @@ exports.statusZapi = async (req, res) => {
               company_id,
               mensagem_id: candPhone.id,
               effectiveStatus,
+              statusAtual: candPhone.status,
               whatsapp_id: idStr,
               select: statusSelect,
             })
             msg = patched.data || null
+            marcosGravados = patched.marcos || marcosGravados
+            registrarFalhaInfra('status.patch', patched.error)
             if (msg && logDebug) {
               console.log('[DEBUG] status reconciliação: ACK casado pelo telefone da conversa', { mensagem_id: msg.id })
             }
@@ -413,6 +469,7 @@ exports.statusZapi = async (req, res) => {
           select: statusSelect,
           context: 'status.numeric_queue',
         })
+        registrarFalhaInfra('status.numeric_queue', relaxed.error)
         if (relaxed.data?.id) {
           const cur = relaxed.data.status || 'pending'
           effectiveStatus = resolveAckEffectiveStatus(cur, effectiveStatus)
@@ -420,9 +477,12 @@ exports.statusZapi = async (req, res) => {
             company_id,
             mensagem_id: relaxed.data.id,
             effectiveStatus,
+            statusAtual: cur,
             select: statusSelect,
           })
           msg = patched.data || null
+          marcosGravados = patched.marcos || marcosGravados
+          registrarFalhaInfra('status.patch', patched.error)
         }
       }
 
@@ -437,7 +497,8 @@ exports.statusZapi = async (req, res) => {
           .order('id', { ascending: false })
           .limit(1)
         qIdQuery = applyWhatsappInstanceFilterOrLegacy(qIdQuery, whatsapp_instance_id)
-        const { data: queueRows } = await qIdQuery
+        const { data: queueRows, error: errQueue } = await qIdQuery
+        registrarFalhaInfra('status.provider_queue_id', errQueue)
         const queueRow = Array.isArray(queueRows) ? queueRows[0] : queueRows
         if (queueRow?.id) {
           const cur = queueRow.status || 'pending'
@@ -446,22 +507,35 @@ exports.statusZapi = async (req, res) => {
             company_id,
             mensagem_id: queueRow.id,
             effectiveStatus,
+            statusAtual: cur,
             select: statusSelect,
           })
           msg = patched.data || null
+          marcosGravados = patched.marcos || marcosGravados
+          registrarFalhaInfra('status.patch', patched.error)
         }
       }
+
+      // O que FICOU gravado manda no que vai para a tela. Normalmente é o próprio
+      // `effectiveStatus`; quando a guarda de não-regressão barrou a gravação (ACK concorrente
+      // mais avançado venceu), é o status da linha — emitir `effectiveStatus` aqui rebaixaria o
+      // tique no card da lista, que não tem guarda monotônica no front (F3/F6 do doc 33).
+      const statusGravado = msg?.status != null && String(msg.status).trim() !== ''
+        ? msg.status
+        : effectiveStatus
 
       if (msg) {
         updated++
         if (io) {
-          const emitStatus = canonStatusForEmit(effectiveStatus)
+          const emitStatus = canonStatusForEmit(statusGravado)
           const payload = {
             mensagem_id: msg.id,
             conversa_id: msg.conversa_id,
             status: emitStatus,
             status_mensagem: emitStatus,
             whatsapp_id: msg.whatsapp_id || idStr,
+            ...(marcosGravados?.entregue_em ? { entregue_em: marcosGravados.entregue_em } : {}),
+            ...(marcosGravados?.lida_em ? { lida_em: marcosGravados.lida_em } : {}),
           }
           // Emite para empresa, conversa E usuario do autor (garante ticks ✓✓ em tempo real)
           let chain = io.to(`empresa_${msg.company_id}`).to(`conversa_${msg.conversa_id}`)
@@ -496,7 +570,7 @@ exports.statusZapi = async (req, res) => {
           referenceId: body?.ultramsgReferenceId ?? body?.referenceId ?? null,
           providerMessageId: idStr,
           mensagemId: msg?.id ?? null,
-          status: effectiveStatus,
+          status: statusGravado,
           companyId: company_id,
           io,
         })
@@ -505,9 +579,16 @@ exports.statusZapi = async (req, res) => {
       }
     }
 
+    // Houve erro de banco em algum id: 500 para o provedor reentregar (F4 do doc 33).
+    // Os ids que deram certo neste lote serão reaplicados como no-op pela guarda de rank.
+    if (falhaDeInfra) {
+      return res.status(500).json({ ok: false, error: 'status_processing_error', contexto: falhaDeInfra.contexto })
+    }
     return res.status(200).json({ ok: true })
   } catch (e) {
-    if (process.env.WHATSAPP_DEBUG === '1') console.error('[DEBUG] /webhooks/ultramsg/status ERRO:', e?.message || e)
-    return res.status(200).json({ ok: true })
+    // Exceção = não sabemos o que foi gravado: também pede reentrega (antes devolvia 200 e o
+    // ACK morria aqui).
+    console.error('[STATUS_ACK] exceção ao aplicar ACK — pedindo reentrega:', e?.message || e)
+    return res.status(500).json({ ok: false, error: 'status_processing_error' })
   }
 }

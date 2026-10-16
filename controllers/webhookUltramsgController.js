@@ -329,12 +329,19 @@ exports.healthUltramsg = (req, res) => res.status(200).json({ ok: true, provider
 
 exports.testarUltramsg = (req, res) => {
   const base = (process.env.APP_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '')
-  const webhookUrl = `${base}/webhooks/ultramsg?token=<WHATSAPP_WEBHOOK_TOKEN>`
+  // Token na query só é aceito com WEBHOOK_QUERY_TOKEN_ENABLED=true (doc 33 §F1): a instrução
+  // tem de refletir o que a rota aceita AGORA, senão manda o usuário configurar um 401.
+  const { queryTokenNaQueryHabilitado } = require('../middleware/requireWebhookToken')
+  const comQuery = queryTokenNaQueryHabilitado()
+  const webhookUrl = `${base}/webhooks/ultramsg${comQuery ? '?token=<WHATSAPP_WEBHOOK_TOKEN>' : ''}`
   return res.status(200).json({
     ok: true,
     provider: 'ultramsg',
-    message: 'Configure no painel UltraMsg (Instance Settings → Webhook URL)',
-    webhook_url: webhookUrl
+    message: comQuery
+      ? 'Configure no painel UltraMsg (Instance Settings → Webhook URL)'
+      : 'Configure no painel UltraMsg (Instance Settings → Webhook URL). Token na query está DESABILITADO (WEBHOOK_QUERY_TOKEN_ENABLED=false) e o UltraMsg não envia header: ligue a chave ou use ALLOW_INSTANCEID_WEBHOOK_FALLBACK.',
+    webhook_url: webhookUrl,
+    query_token_habilitado: comQuery
   })
 }
 

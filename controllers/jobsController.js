@@ -19,7 +19,7 @@ const {
 const { runAdminAtendimentoAlertaForAllCompanies } = require('../services/adminAtendimentoAlertaService')
 const { runAtendimentoSemRespostaForAllCompanies } = require('../services/atendimentoSemRespostaService')
 const { processarVencimentosPagamentoFinanceiro } = require('../services/conversaPagamentoFinanceiroService')
-const { mapProviderSendResult } = require('../services/chat/outbound/providerResultMapper')
+const { mapProviderSendResultComTransitoria, enviarSemEstourar } = require('../services/chat/outbound/providerResultMapper')
 
 function timingSafeEqualStr(a, b) {
   const sa = String(a ?? '')
@@ -150,16 +150,37 @@ exports.timeoutInatividadeChatbot = async (req, res) => {
           const stAtual = String(convAtual?.status_atendimento || '')
           if (!convAtual || stAtual !== String(conv.status_atendimento || '')) continue
 
+          // Fecha ANTES de enviar (mesma ordem do encerrarChat manual). Na ordem antiga a
+          // mensagem "encerrada por inatividade" era gravada primeiro e, se o UPDATE com lock
+          // não pegasse, a conversa ficava aberta com a mensagem enviada — e o ciclo seguinte
+          // reenviava a mesma mensagem indefinidamente.
+          const { data: fechadaRow, error: updErr } = await supabase
+            .from('conversas')
+            .update({ status_atendimento: 'fechada' })
+            .eq('id', conv.id)
+            .eq('company_id', company_id)
+            .eq('status_atendimento', stAtual)
+            .select()
+            .maybeSingle()
+
+          if (updErr || !fechadaRow?.id) {
+            if (updErr) console.warn('[timeoutInatividadeChatbot] falha ao encerrar', conv.id, updErr.message)
+            continue
+          }
+
           const instanceProvider = await resolveConversationProvider(company_id, conv.whatsapp_instance_id)
           const provider = getProvider({ provider: instanceProvider })
-          const resultSend = await provider.sendText(telefone, mensagemEncerramento, {
-            companyId: company_id,
-            conversaId: conv.id,
-            whatsappInstanceId: conv.whatsapp_instance_id || undefined,
-            sendOrigin: 'timeout_inatividade_chatbot',
-          })
+          const resultSend = await enviarSemEstourar(
+            () => provider.sendText(telefone, mensagemEncerramento, {
+              companyId: company_id,
+              conversaId: conv.id,
+              whatsappInstanceId: conv.whatsapp_instance_id || undefined,
+              sendOrigin: 'timeout_inatividade_chatbot',
+            }),
+            'enviar mensagem de encerramento por inatividade'
+          )
 
-          const mappedResult = mapProviderSendResult(resultSend, { failedStatusMensagem: 'failed' })
+          const mappedResult = mapProviderSendResultComTransitoria(resultSend, { failedStatusMensagem: 'failed' })
           const { ok, waMessageId: messageId, hasValidId: hasTraceableId } = mappedResult
           const statusMsg = mappedResult.nextStatus
           if (!ok || !hasTraceableId) {
@@ -187,18 +208,7 @@ exports.timeoutInatividadeChatbot = async (req, res) => {
             .select()
             .maybeSingle()
 
-          // Lock: só fecha se o status ainda é o mesmo da revalidação (não sobrescrever
-          // um encerramento/assunção concorrente entre o envio e este UPDATE).
-          const { data: fechadaRow, error: updErr } = await supabase
-            .from('conversas')
-            .update({ status_atendimento: 'fechada' })
-            .eq('id', conv.id)
-            .eq('company_id', company_id)
-            .eq('status_atendimento', stAtual)
-            .select()
-            .maybeSingle()
-
-          if (!updErr && fechadaRow?.id) {
+          {
             totalProcessadas++
             const { resetOpcaoInvalidaLimitForConversa } = require('../services/chatbotTriageService')
             await resetOpcaoInvalidaLimitForConversa(supabase, company_id, conv.id)

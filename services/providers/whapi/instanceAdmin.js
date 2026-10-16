@@ -30,17 +30,22 @@ const WHAPI_MEDIA_AUTO_DOWNLOAD = ['image', 'audio', 'voice', 'video', 'document
 
 /**
  * Configura o webhook do canal Whapi (PATCH /settings: `webhooks` + `media.auto_download`).
- * NUNCA token na query. Header `X-Webhook-Token` = WHATSAPP_WEBHOOK_TOKEN.
+ * NUNCA token na query. Header `X-Webhook-Token` = WHAPI_WEBHOOK_TOKEN (segredo próprio da
+ * Whapi; cai no WHATSAPP_WEBHOOK_TOKEN compartilhado só enquanto o dedicado não existir —
+ * doc 33 §F1). Depois de rodar isto com o dedicado, defina
+ * `WHAPI_WEBHOOK_TOKEN_ACCEPT_LEGACY=false` para fechar o segredo antigo.
  * Não chama sozinho no boot — só via POST /integrations/whatsapp/instances/:id/configure-webhooks
  * (e no provisionamento do canal). Demais settings preservadas (MCP: campo omitido = inalterado).
  */
 async function configureWebhooks(appUrl, opts = {}) {
   const cfg = await resolveConfig(opts)
   if (!cfg || !appUrl) return []
-  const webhookToken = String(process.env.WHATSAPP_WEBHOOK_TOKEN || '').trim()
+  const webhookToken = String(
+    process.env.WHAPI_WEBHOOK_TOKEN || process.env.WHATSAPP_WEBHOOK_TOKEN || ''
+  ).trim()
   if (!webhookToken) {
-    console.warn('[WHAPI] configureWebhooks recusado: WHATSAPP_WEBHOOK_TOKEN ausente')
-    return [{ label: 'webhook', ok: false, error: 'WHATSAPP_WEBHOOK_TOKEN ausente' }]
+    console.warn('[WHAPI] configureWebhooks recusado: WHAPI_WEBHOOK_TOKEN / WHATSAPP_WEBHOOK_TOKEN ausentes')
+    return [{ label: 'webhook', ok: false, error: 'WHAPI_WEBHOOK_TOKEN ausente' }]
   }
   const webhookUrl = `${String(appUrl).replace(/\/$/, '')}/webhooks/whapi`
   const webhooksOnly = {

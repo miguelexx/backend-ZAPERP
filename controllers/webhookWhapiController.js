@@ -357,27 +357,89 @@ function isGroupJid(v) {
   return typeof v === 'string' && v.trim().toLowerCase().endsWith('@g.us')
 }
 
-/** Whapi ack/status → status interno (mesma escala do UltraMSG).
- * CONFIRMADO docs: status string failed|pending|sent|delivered|read|played|deleted
- * e `code` numérico (exemplo oficial code 4 = read). */
-function mapWhapiAckToStatus(ack, code) {
+/** Sentinela de revogação: não é status de entrega e NUNCA pode chegar ao banco. */
+const STATUS_REVOGADA = 'revogada'
+
+/** `statuses[].code` → status interno. Escala = índice do enum de `status` da Whapi
+ * (0 failed, 1 pending, 2 sent, 3 delivered, 4 read, 5 played, 6 deleted); o único ponto
+ * confirmado na doc oficial é `code: 4` junto com `status: "read"`. ATENÇÃO: não é a escala
+ * numérica do UltraMSG/WhatsApp (lá 1=sent, 2=delivered, 3=read) — ver `normalizeRawAckStatus`.
+ * Devolve null para code ausente ou fora da escala conhecida. */
+function mapWhapiCodeToStatus(code) {
   const n = code == null || code === '' ? NaN : Number(code)
-  if (Number.isFinite(n)) {
-    if (n === 0) return 'erro'
-    if (n === 1) return 'pending'
-    if (n === 2) return 'sent'
-    if (n === 3) return 'delivered'
-    if (n === 4) return 'read'
-    if (n === 5) return 'played'
-    if (n === 6) return 'erro'
+  if (!Number.isFinite(n)) return null
+  if (n === 0) return 'erro'
+  if (n === 1) return 'pending'
+  if (n === 2) return 'sent'
+  if (n === 3) return 'delivered'
+  if (n === 4) return 'read'
+  if (n === 5) return 'played'
+  if (n === 6) return STATUS_REVOGADA // deleted — revogação, não falha (F5)
+  return null
+}
+
+/** `statuses[].status` → status interno. String oficial: failed|pending|sent|delivered|read|
+ * played|deleted. Devolve null quando não reconhece (o chamador decide o fallback). */
+function mapWhapiStatusStringToStatus(ack) {
+  const s = String(ack ?? '').trim().toLowerCase()
+  if (!s) return null
+  // `deleted` NÃO é falha de envio: a mensagem saiu e depois foi revogada (F5 do doc 33).
+  // Sentinela própria — quem trata é applyWhapiRevokedOutbound, nunca o statusZapi.
+  if (s === 'deleted' || s === 'revoked') return STATUS_REVOGADA
+  if (s === 'failed' || s === 'error') return 'erro'
+  if (s === 'sent' || s === 'server') return 'sent'
+  if (s === 'delivered' || s === 'received' || s === 'device') return 'delivered'
+  if (s === 'read' || s === 'seen') return 'read'
+  if (s === 'played') return 'played'
+  if (s === 'pending') return 'pending'
+  return null
+}
+
+/** Aviso de divergência string×code: 1x por combinação, no máximo a cada 10 min. */
+const DIVERGENCIA_WARN_INTERVAL_MS = 10 * 60_000
+const _divergenciasVistas = new Map()
+function _avisarDivergencia(ack, code, porString, porCode) {
+  const chave = `${String(ack).toLowerCase()}|${code}`
+  const agora = Date.now()
+  const ultimo = _divergenciasVistas.get(chave) || 0
+  if (agora - ultimo < DIVERGENCIA_WARN_INTERVAL_MS) return
+  if (_divergenciasVistas.size > 50) _divergenciasVistas.clear()
+  _divergenciasVistas.set(chave, agora)
+  console.warn('[WHAPI] ACK com status e code DIVERGENTES — valendo a string (contrato pode ter mudado)', {
+    status: String(ack).slice(0, 24),
+    code,
+    por_string: porString,
+    por_code: porCode,
+  })
+}
+
+/**
+ * Whapi ack/status → status interno (mesma escala do UltraMSG).
+ *
+ * A STRING manda; o `code` é só fallback (F2 do doc 33). Antes era o contrário, e o número
+ * descartava em silêncio o campo documentado: `{status:'read', code:3}` virava `delivered`
+ * (perdia o azul) e `{status:'failed', code:4}` virava `read`. `status` é a fonte
+ * autoexplicativa do contrato; `code` é índice de enum, que o provedor pode renumerar numa
+ * versão nova sem avisar. Divergência entre os dois agora vira aviso em log — é o sinal de que
+ * o contrato mudou.
+ */
+function mapWhapiAckToStatus(ack, code) {
+  const porString = mapWhapiStatusStringToStatus(ack)
+  const porCode = mapWhapiCodeToStatus(code)
+  if (porString) {
+    if (porCode && porCode !== porString) _avisarDivergencia(ack, code, porString, porCode)
+    return porString
   }
-  const s = String(ack ?? '').toLowerCase()
-  if (s === 'failed' || s === 'error' || s === 'deleted') return 'erro'
-  if (s === 'sent' || s === 'server' || s === '1') return 'sent'
-  if (s === 'delivered' || s === 'received' || s === 'device' || s === '2') return 'delivered'
-  if (s === 'read' || s === 'seen' || s === '3') return 'read'
-  if (s === 'played' || s === '4') return 'played'
-  if (s === 'pending' || s === '0') return 'pending'
+  if (porCode) return porCode
+  // Número DENTRO do campo `status` é código da Whapi, não ACK do UltraMSG (F10 do doc 33):
+  // lido na escala errada, '3' viraria `read` em vez de `delivered` — azul falso.
+  const s = String(ack ?? '').trim().toLowerCase()
+  if (/^\d+$/.test(s)) {
+    const porNumeroNaString = mapWhapiCodeToStatus(s)
+    if (porNumeroNaString) return porNumeroNaString
+  }
+  // String desconhecida e sem código utilizável: devolve o cru (statusZapi ignora o que não
+  // canoniza, em vez de gravar lixo na coluna).
   return s || 'pending'
 }
 
@@ -945,11 +1007,91 @@ function normalizeWhapiMessageToInternal(m, ctx = {}) {
   }
 }
 
+/** O item de `statuses[]` é uma REVOGAÇÃO (`deleted` / code 6), não um ACK de entrega? */
+function isWhapiRevokedStatus(s) {
+  if (!s || typeof s !== 'object') return false
+  return mapWhapiAckToStatus(s.status ?? s.ack, s.code) === STATUS_REVOGADA
+}
+
+/**
+ * Mensagem NOSSA revogada ("apagar para todos") — inclusive quando quem apagou foi o atendente
+ * pelo celular, caso em que este webhook é o único sinal (F5 do doc 33).
+ *
+ * Antes isto virava `status: 'erro'`: a bolha dizia "não foi possível enviar" + botão Reenviar
+ * numa mensagem que o cliente recebeu e alguém apagou de propósito (só não aparecia quando a
+ * linha já estava em sent+, porque a guarda de rank engolia o erro). Agora grava o MESMO estado
+ * de `excluirMensagem` (`apagada_para_todos` + `apagada_em`) e emite `mensagem_excluida`.
+ * Sem `apagada_por_usuario_id`: não sabemos quem apagou pelo aparelho — o front cai em
+ * "Um atendente". Sem `ultima_mensagem` no payload: a revogação não muda o preview do card
+ * (a linha continua lá, só marcada).
+ */
+async function applyWhapiRevokedOutbound(ctxSrc, s, io) {
+  if (ctxSrc?.company_id == null) return false
+  const targetId = s?.id ?? s?.message_id ?? s?.messageId ?? null
+  const waId = targetId != null ? String(targetId).trim() : ''
+  if (!waId) return false
+
+  const buscar = async ({ comInstancia }) => {
+    let q = supabase
+      .from('mensagens')
+      .select('id, conversa_id, apagada_para_todos, apagada_pelo_cliente')
+      .eq('company_id', ctxSrc.company_id)
+      .eq('whatsapp_id', waId)
+      // SÓ outbound: `statuses[]` fala de mensagem NOSSA. Se um `deleted` chegar com id de
+      // mensagem recebida, marcar `apagada_para_todos` diria "nós apagamos" — revogação do
+      // cliente é outro estado (`apagada_pelo_cliente`) e tem handler próprio em `messages[]`.
+      .eq('direcao', 'out')
+    if (comInstancia && ctxSrc.whatsapp_instance_id) q = q.eq('whatsapp_instance_id', ctxSrc.whatsapp_instance_id)
+    return q.order('id', { ascending: false }).limit(1).maybeSingle()
+  }
+
+  let { data: row, error } = await buscar({ comInstancia: true })
+  if ((!row?.id || error) && ctxSrc.whatsapp_instance_id) {
+    ;({ data: row, error } = await buscar({ comInstancia: false }))
+  }
+  if (error || !row?.id) return false
+  if (row.apagada_para_todos === true || row.apagada_pelo_cliente === true) return true
+
+  const apagadaEm = new Date().toISOString()
+  const { error: errUpd } = await supabase
+    .from('mensagens')
+    .update({ apagada_para_todos: true, apagada_em: apagadaEm })
+    .eq('company_id', ctxSrc.company_id)
+    .eq('id', row.id)
+  if (errUpd) {
+    const msg = String(errUpd.message || '')
+    if (msg.includes('apagada_para_todos') || msg.includes('apagada_em') || msg.includes('does not exist')) {
+      console.warn('[WHAPI] coluna apagada_para_todos ausente — rode a migration 20260525120000.')
+    } else {
+      console.warn('[WHAPI] marcar apagada_para_todos (revogação via statuses) falhou:', errUpd.message)
+    }
+    return false
+  }
+
+  if (io) {
+    emitirEventoEmpresaConversa(
+      io,
+      ctxSrc.company_id,
+      row.conversa_id,
+      io.EVENTS?.MENSAGEM_EXCLUIDA || 'mensagem_excluida',
+      {
+        conversa_id: row.conversa_id,
+        mensagem_id: row.id,
+        company_id: ctxSrc.company_id,
+        apagada_em: apagadaEm,
+      }
+    )
+  }
+  return true
+}
+
 /** Converte um item de `statuses[]` do Whapi para o formato interno de ACK (statusZapi). */
 function normalizeWhapiStatusToInternal(s, ctx = {}) {
   if (!s || typeof s !== 'object') return null
   const msgId = s.id ?? s.message_id ?? s.messageId ?? null
   if (!msgId) return null
+  // Revogação não é ACK: sai do pipeline de status para não gravar nada na coluna (F5).
+  if (isWhapiRevokedStatus(s)) return null
   const ids = [String(msgId).trim()]
   return {
     instanceId: ctx.channelId,
@@ -1142,10 +1284,33 @@ async function handleWebhookWhapi(req, res) {
       req.webhookLogData.counts.skipped_historical = skippedHistorical
     }
 
+    let statusComFalha = 0
+    let revogacoes = 0
     for (const s of statuses) {
+      // Revogação ("deleted"): estado próprio, não ACK de entrega (F5 do doc 33).
+      if (isWhapiRevokedStatus(s)) {
+        revogacoes++
+        try {
+          await applyWhapiRevokedOutbound(ctxSrc, s, io)
+        } catch (e) {
+          console.warn('[WHAPI] applyWhapiRevokedOutbound falhou:', e?.message || e)
+        }
+        continue
+      }
       const normalized = normalizeWhapiStatusToInternal(s, ctx)
       if (!normalized) continue
-      await dispatchOne(webhookCoreController.statusZapi, req, normalized)
+      // 500 do statusZapi = falha de INFRA (banco), não "mensagem não encontrada": pede
+      // reentrega como já fazemos no inbound. Reaplicar ACK é idempotente — a gravação é
+      // condicional pela guarda de não-regressão (F3/F4 do doc 33).
+      const code = await dispatchOne(webhookCoreController.statusZapi, req, normalized)
+      if (Number(code) >= 500) {
+        statusComFalha++
+        anyServerError = true
+      }
+    }
+    if (req.webhookLogData?.counts) {
+      if (statusComFalha > 0) req.webhookLogData.counts.status_com_falha = statusComFalha
+      if (revogacoes > 0) req.webhookLogData.counts.revogacoes = revogacoes
     }
 
     if (presences.length && io) {
@@ -1189,6 +1354,12 @@ exports._test = {
   normalizeWhapiMessageToInternal,
   normalizeWhapiStatusToInternal,
   mapWhapiAckToStatus,
+  mapWhapiCodeToStatus,
+  mapWhapiStatusStringToStatus,
+  resetDivergenciasWhapiAck: () => _divergenciasVistas.clear(),
+  isWhapiRevokedStatus,
+  applyWhapiRevokedOutbound,
+  STATUS_REVOGADA,
   extractEvents,
   jidToDigits,
   isLidJid,

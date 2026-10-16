@@ -9,7 +9,8 @@
  *   - Aceita SOMENTE header `X-Webhook-Token` ou `Authorization: Bearer <token>` — NUNCA na query.
  *   - SEM fallback por instanceId — a Whapi identifica o canal por `channel_id` no corpo,
  *     resolvido depois em resolveWhapiWebhookCompany. Auth é só pelo token compartilhado.
- * Segredo: WHATSAPP_WEBHOOK_TOKEN (o mesmo que configureWebhooks grava no header do canal).
+ * Segredo: WHAPI_WEBHOOK_TOKEN (próprio da Whapi), com fallback ao WHATSAPP_WEBHOOK_TOKEN
+ * compartilhado durante a transição — ver `resolveExpectedTokens` abaixo e doc 33 §F1.
  * Ver docs/ai-handoff/25-WHAPI-SEGUNDA-INTEGRACAO.md
  */
 
@@ -47,28 +48,92 @@ function _reject(req, res, incoming) {
   req.webhookLogData = { status: 'rejected_token', error: motivo }
   const label = motivo === 'token_ausente' ? 'Token ausente' : 'Token inválido'
   console.warn(`[WEBHOOK_WHAPI_REJECTED] ${label} — ${req.method} ${req.path} | IP: ${req.ip || '?'}`)
-  console.warn('[WEBHOOK_WHAPI_REJECTED] 💡 Configure o canal Whapi com header X-Webhook-Token: <WHATSAPP_WEBHOOK_TOKEN>')
+  console.warn('[WEBHOOK_WHAPI_REJECTED] 💡 Configure o canal Whapi com header X-Webhook-Token: <WHAPI_WEBHOOK_TOKEN> (POST /integrations/whatsapp/instances/:id/configure-webhooks faz isso)')
   return res.status(401).json({
     error: motivo === 'token_ausente' ? 'Token do webhook ausente' : 'Token do webhook inválido',
   })
 }
 
-function requireWhapiWebhookToken(req, res, next) {
-  const expected = String(process.env.WHATSAPP_WEBHOOK_TOKEN || '').trim()
+/**
+ * Segredos aceitos, em ordem de preferência.
+ *
+ * Por que a Whapi tem segredo PRÓPRIO (doc 33, F1): o `WHATSAPP_WEBHOOK_TOKEN` compartilhado é
+ * aceito pela rota UltraMSG em `?token=` — a API do UltraMSG (`POST /instance/settings`) só
+ * aceita `webhook_url`, sem campo de header — e, até a redação de log entrar, esse valor foi
+ * escrito em claro no log de acesso. Quem lesse o log forjava `statuses[]`/`messages[]` de
+ * QUALQUER canal. Separar o segredo tira o webhook Whapi desse raio.
+ *
+ * Transição: entre o deploy e o `configure-webhooks` do canal, a Whapi ainda manda o segredo
+ * ANTIGO no header. Enquanto `WHAPI_WEBHOOK_TOKEN_ACCEPT_LEGACY` for true (padrão) o antigo
+ * continua valendo, para o deploy não derrubar o recebimento. Depois de reconfigurar o canal,
+ * defina `WHAPI_WEBHOOK_TOKEN_ACCEPT_LEGACY=false` — enquanto estiver true o segredo exposto
+ * ainda abre o webhook, e é por isso que o aviso abaixo insiste.
+ *
+ * Sem `WHAPI_WEBHOOK_TOKEN` definido o comportamento é exatamente o de antes (só o compartilhado).
+ */
+function resolveExpectedTokens() {
+  const dedicated = String(process.env.WHAPI_WEBHOOK_TOKEN || '').trim()
+  const legacy = String(process.env.WHATSAPP_WEBHOOK_TOKEN || '').trim()
+  if (!dedicated) return { tokens: legacy ? [legacy] : [], usingDedicated: false, legacyAccepted: Boolean(legacy) }
 
-  if (!expected) {
-    console.error('[WEBHOOK_WHAPI_FATAL] WHATSAPP_WEBHOOK_TOKEN ausente')
+  const acceptLegacyRaw = String(process.env.WHAPI_WEBHOOK_TOKEN_ACCEPT_LEGACY ?? 'true').trim().toLowerCase()
+  const acceptLegacy = !['0', 'false', 'no', 'off'].includes(acceptLegacyRaw)
+  // Segredo legado idêntico ao dedicado não é "transição": não duplicar nem avisar.
+  const legacyAccepted = acceptLegacy && Boolean(legacy) && legacy !== dedicated
+  return {
+    tokens: legacyAccepted ? [dedicated, legacy] : [dedicated],
+    usingDedicated: true,
+    legacyAccepted,
+  }
+}
+
+/** Aviso de transição: 1x por processo e, depois, no máximo a cada 10 min. */
+const LEGACY_WARN_INTERVAL_MS = 10 * 60_000
+let _legacyWarnedAt = 0
+function _warnLegacyAceito() {
+  const agora = Date.now()
+  if (_legacyWarnedAt && agora - _legacyWarnedAt < LEGACY_WARN_INTERVAL_MS) return
+  _legacyWarnedAt = agora
+  console.warn(
+    '[WEBHOOK_WHAPI] ⚠️ Segredo LEGADO (WHATSAPP_WEBHOOK_TOKEN) ainda aceito no webhook Whapi. ' +
+    'Ele também vale em ?token= na rota UltraMSG. Rode POST /integrations/whatsapp/instances/:id/configure-webhooks ' +
+    'para o canal passar a mandar WHAPI_WEBHOOK_TOKEN no header e então defina WHAPI_WEBHOOK_TOKEN_ACCEPT_LEGACY=false.'
+  )
+}
+
+function requireWhapiWebhookToken(req, res, next) {
+  const { tokens, legacyAccepted } = resolveExpectedTokens()
+
+  if (!tokens.length) {
+    console.error('[WEBHOOK_WHAPI_FATAL] WHAPI_WEBHOOK_TOKEN / WHATSAPP_WEBHOOK_TOKEN ausentes')
     req.webhookLogData = { status: 'rejected_token', error: 'token_env_ausente' }
     return res.status(500).json({ error: 'Configuração de segurança do webhook inválida' })
   }
 
   const incoming = extractHeaderToken(req)
-  if (incoming && timingSafeEqual(incoming, expected)) {
-    return next()
+  if (incoming) {
+    // Compara contra TODOS os candidatos sempre (sem short-circuit): o tempo de resposta não
+    // revela qual dos segredos casou nem quantos estão configurados.
+    let aceito = false
+    let casouLegado = false
+    tokens.forEach((esperado, idx) => {
+      const igual = timingSafeEqual(incoming, esperado)
+      if (igual) {
+        aceito = true
+        if (idx > 0) casouLegado = true
+      }
+    })
+    if (aceito) {
+      if (casouLegado) _warnLegacyAceito()
+      return next()
+    }
   }
+  if (legacyAccepted) _warnLegacyAceito()
   return _reject(req, res, incoming)
 }
 
 module.exports = requireWhapiWebhookToken
 module.exports.timingSafeEqual = timingSafeEqual
 module.exports.extractHeaderToken = extractHeaderToken
+module.exports.resolveExpectedTokens = resolveExpectedTokens
+module.exports._test = { resetLegacyWarn: () => { _legacyWarnedAt = 0 } }

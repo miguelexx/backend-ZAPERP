@@ -64,16 +64,28 @@ describe('Autorizacoes criticas de producao', () => {
 
   it('nao expoe o token real na rota publica de instrucao do webhook', async () => {
     const oldWebhookToken = process.env.WHATSAPP_WEBHOOK_TOKEN
+    const oldQueryFlag = process.env.WEBHOOK_QUERY_TOKEN_ENABLED
     process.env.WHATSAPP_WEBHOOK_TOKEN = 'segredo-real-nao-vazar'
 
     try {
-      const res = await request(app).get('/webhooks/ultramsg')
+      // Padrão (query desabilitada, doc 33 §F1): a URL instruída NÃO leva token nenhum.
+      process.env.WEBHOOK_QUERY_TOKEN_ENABLED = 'false'
+      const semQuery = await request(app).get('/webhooks/ultramsg')
+      expect(semQuery.status).toBe(200)
+      expect(JSON.stringify(semQuery.body)).not.toContain('segredo-real-nao-vazar')
+      expect(semQuery.body.webhook_url).not.toContain('token=')
+      expect(semQuery.body.query_token_habilitado).toBe(false)
 
-      expect(res.status).toBe(200)
-      expect(JSON.stringify(res.body)).not.toContain('segredo-real-nao-vazar')
-      expect(res.body.webhook_url).toContain('<WHATSAPP_WEBHOOK_TOKEN>')
+      // Query religada: instrui com o PLACEHOLDER, nunca com o valor real.
+      process.env.WEBHOOK_QUERY_TOKEN_ENABLED = 'true'
+      const comQuery = await request(app).get('/webhooks/ultramsg')
+      expect(comQuery.status).toBe(200)
+      expect(JSON.stringify(comQuery.body)).not.toContain('segredo-real-nao-vazar')
+      expect(comQuery.body.webhook_url).toContain('<WHATSAPP_WEBHOOK_TOKEN>')
     } finally {
       process.env.WHATSAPP_WEBHOOK_TOKEN = oldWebhookToken
+      if (oldQueryFlag === undefined) delete process.env.WEBHOOK_QUERY_TOKEN_ENABLED
+      else process.env.WEBHOOK_QUERY_TOKEN_ENABLED = oldQueryFlag
     }
   })
 })

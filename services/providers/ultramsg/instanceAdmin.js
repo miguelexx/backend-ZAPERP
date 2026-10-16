@@ -9,8 +9,17 @@ async function configureWebhooks(appUrl, opts = {}) {
   const cfg = await resolveConfig(opts)
   if (!cfg || !appUrl) return []
   const base = String(appUrl).replace(/\/$/, '')
+  // `?token=` só entra na URL se a rota ainda aceitar token na query — senão gravaríamos no
+  // painel uma URL que o próprio backend recusa com 401 (doc 33 §F1). A API do UltraMSG não
+  // tem campo de header: sem a query, a autenticação depende de
+  // ALLOW_INSTANCEID_WEBHOOK_FALLBACK. O aviso abaixo existe para isso não passar em branco.
+  const { queryTokenNaQueryHabilitado } = require('../../../middleware/requireWebhookToken')
   const webhookToken = String(process.env.WHATSAPP_WEBHOOK_TOKEN || '').trim()
-  const tokenSuffix = webhookToken ? `?token=${encodeURIComponent(webhookToken)}` : ''
+  const podeUsarQuery = queryTokenNaQueryHabilitado()
+  const tokenSuffix = webhookToken && podeUsarQuery ? `?token=${encodeURIComponent(webhookToken)}` : ''
+  if (webhookToken && !podeUsarQuery) {
+    console.warn('[ULTRAMSG] configureWebhooks: WEBHOOK_QUERY_TOKEN_ENABLED desligado — URL gravada SEM token. O UltraMSG não envia header; o webhook só será aceito via ALLOW_INSTANCEID_WEBHOOK_FALLBACK.')
+  }
   const webhookUrl = `${base}/webhooks/ultramsg${tokenSuffix}`
 
   const sendDelay = Math.max(1, Math.min(60, Number(process.env.ULTRAMSG_SEND_DELAY) || 1))

@@ -90,12 +90,58 @@ function resolveAckEffectiveStatus(current, next) {
   return statusRank(currentCanon) > statusRank(nextCanon) ? currentCanon : nextCanon
 }
 
+/**
+ * Todo valor que a coluna `status` pode legitimamente conter e que `normalizeRawAckStatus`
+ * reconhece — canônicos, apelidos de provedor (`server`/`device`), dialeto pt e ACK numérico.
+ * Serve para montar a guarda SQL de não-regressão (`statusesQueBloqueiamGravacao`).
+ * `tests/messageStatusHelper.test.js` prova que cada item aqui ainda canoniza — se alguém
+ * mexer em `normalizeRawAckStatus` e esta lista ficar para trás, o teste quebra.
+ */
+const STATUS_ALIASES = [
+  'pending', 'sending', 'enviando', '0',
+  'sent', 'server', 'enviada', 'enviado', '1',
+  'delivered', 'device', 'received', 'entregue', 'RECEIVED', '2',
+  'read', 'seen', 'lida', 'visualizada', 'read_by_me', '3',
+  'played', '4',
+  'erro', 'error', 'failed',
+]
+
+/**
+ * Gravar `novo` sobre `atual` rebaixaria o tique?
+ *
+ * Definido EM CIMA de `resolveAckEffectiveStatus` de propósito: bloqueio e regra de ACK são a
+ * mesma decisão, então não podem divergir. "Bloqueado" = a regra de não-regressão não escolheria
+ * `novo`. Status atual desconhecido (ou vazio) nunca bloqueia — a dúvida não pode custar um ACK.
+ */
+function gravacaoDeStatusBloqueada(atual, novo) {
+  if (novo == null || String(novo).trim() === '') return false
+  if (atual == null || String(atual).trim() === '') return false
+  const novoCanon = canonStatusForEmit(novo)
+  return canonStatusForEmit(resolveAckEffectiveStatus(atual, novo)) !== novoCanon
+}
+
+/**
+ * Valores de `status` que devem IMPEDIR a gravação de `novo` — a lista vai para o `NOT IN` do
+ * UPDATE, tornando a decisão atômica (F3 do doc 33: dois ACKs concorrentes — `delivered` e
+ * `read` em POSTs paralelos — liam `sent`, e o que gravava por último rebaixava o tique).
+ *
+ * Só entram apelidos CONHECIDOS e estritamente mais avançados. `NULL` e valor fora da lista
+ * ficam de fora, então o `NOT IN` não casa com `NULL` e o chamador precisa do fallback
+ * (reler e, se não houver regressão de verdade, gravar sem guarda).
+ */
+function statusesQueBloqueiamGravacao(novo) {
+  return STATUS_ALIASES.filter((alias) => gravacaoDeStatusBloqueada(alias, novo))
+}
+
 module.exports = {
   STATUS_RANK,
+  STATUS_ALIASES,
   normalizeRawAckStatus,
   normalizeMessageAckStatus,
   canonStatusForEmit,
   statusRank,
   shouldUpgradeStatus,
   resolveAckEffectiveStatus,
+  gravacaoDeStatusBloqueada,
+  statusesQueBloqueiamGravacao,
 }

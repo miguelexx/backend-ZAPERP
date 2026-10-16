@@ -9,6 +9,7 @@ const { loadEnv, isProduction } = require('./config/env')
 loadEnv()
 const { getUploadsRoot, ensureUploadsRootExists } = require('./config/uploadsRoot')
 const { contentTypeForAudioPath } = require('./helpers/audioFormatSniffer')
+const { redactedRequestUrl } = require('./helpers/redactUrlSecrets')
 const { sanitizeDownloadFilename, buildContentDisposition, storedFileExt } = require('./helpers/contentDisposition')
 const tagsRoutes = require('./routes/tagRoutes')
 const labelsRoutes = require('./routes/labelsRoutes')
@@ -506,7 +507,7 @@ app.use((err, req, res, next) => {
   console.error('[APP_ERROR]', {
     requestId: req?.requestId || null,
     method: req?.method || null,
-    path: req?.originalUrl || req?.url || null,
+    path: redactedRequestUrl(req) || null,
     status,
     message: err?.message || String(err || ''),
   })

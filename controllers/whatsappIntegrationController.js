@@ -1174,6 +1174,25 @@ async function requireWhapiInstance(req, res, rateKey, rateMax = 30) {
   return { company_id, id, provider: getProvider({ provider: 'whapi' }) }
 }
 
+/**
+ * GET /integrations/whatsapp/instances/:id/ack-health — o canal ainda confirma entrega?
+ *
+ * F8 do doc 33: quando o canal para de entregar `statuses[]` (evento desligado no painel,
+ * channel-store recriado), o sistema se recupera em silêncio e ninguém fica sabendo. Aqui o
+ * painel do WhapiConnect consegue perguntar. `company_id` SEMPRE do JWT (via requireWhapiInstance).
+ */
+exports.getInstanceAckHealth = async (req, res) => {
+  const ctx = await requireWhapiInstance(req, res, 'ack-health', 20)
+  if (!ctx) return
+  try {
+    const { avaliarCanal } = require('../services/ackHealthService')
+    const saude = await avaliarCanal({ company_id: ctx.company_id, whatsapp_instance_id: ctx.id })
+    return res.json({ provider: 'whapi', whatsapp_instance_id: ctx.id, ...saude })
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || 'Erro ao avaliar a saúde dos ACKs' })
+  }
+}
+
 /** GET /integrations/whatsapp/instances/:id/business-profile — lê o cartão Business (Whapi). */
 exports.getInstanceBusinessProfile = async (req, res) => {
   const ctx = await requireWhapiInstance(req, res, 'business-get', 30)

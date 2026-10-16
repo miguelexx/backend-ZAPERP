@@ -244,6 +244,10 @@ function emitirMidiaAtualizada({ io, company_id, row, updated }) {
       criado_em: normalizarTimestampSemFusoAmbiguoParaApi(updated.criado_em),
       conversa_id,
       fromMe,
+      // A mensagem já está no chat; aqui só trocamos /uploads pelo /media/r2. Sem esta marca o
+      // frontend trataria o evento como mensagem nova e repetiria beep/notificação — o espelho
+      // costuma rodar poucos minutos depois de a mídia chegar, dentro da janela de frescor.
+      midia_atualizada: true,
     }
     const evento = io.EVENTS?.NOVA_MENSAGEM || 'nova_mensagem'
     const soSala = () => io.to(`conversa_${conversa_id}`).emit(evento, payload)

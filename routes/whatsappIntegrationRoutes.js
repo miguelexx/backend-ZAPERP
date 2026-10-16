@@ -29,6 +29,8 @@ router.get('/instances/:id/catalog/collections/:collectionId/products', apiLimit
 // Perfil Business (Whapi) — LEITURA liberada para qualquer usuário autenticado da
 // empresa (atendentes veem a página em modo somente leitura). A edição (POST)
 // continua restrita a supervisor/admin, registrada após o gate abaixo.
+// Saúde do ACK do canal (F8 do doc 33) — leitura, sem tocar o provedor.
+router.get('/instances/:id/ack-health', apiLimiter, whatsappIntegrationController.getInstanceAckHealth)
 router.get('/instances/:id/business-profile', apiLimiter, whatsappIntegrationController.getInstanceBusinessProfile)
 // Perfil do número conectado (nome/foto) — leitura também liberada; a tela usa para o avatar.
 router.get('/instances/:id/user-profile', apiLimiter, whatsappIntegrationController.getInstanceUserProfile)

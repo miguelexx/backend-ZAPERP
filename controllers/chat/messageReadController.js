@@ -7,6 +7,7 @@
 const supabase = require('../../config/supabase')
 const { isMensagemLegadaMovimentacaoInterna } = require('../../services/atendimentosRegistroService')
 const { isGroupConversation, isClosedAttendanceStatus } = require('../../helpers/conversaHelper')
+const { selectComMarcos, erroDeMarcoAusente, desligarMarcos } = require('../../helpers/ackMilestoneColumns')
 const { syncOldMessagesForConversation } = require('../../services/oldMessagesSyncService')
 const { escapeIlikePattern } = require('../../helpers/chatSearchHelper')
 const { normalizarTimestampSemFusoAmbiguoParaApi } = require('../../helpers/timestampApiCompat')
@@ -109,7 +110,10 @@ exports.buscarMensagensConversa = async (req, res) => {
       }
     }
 
-    const selectComRemetente = 'id, conversa_id, texto, direcao, criado_em, autor_usuario_id, status, whatsapp_id, whatsapp_instance_id, tipo, url, nome_arquivo, reply_meta, remetente_nome, remetente_telefone, contact_meta, location_meta, apagada_para_todos, apagada_em, audio_duracao_sec, editada, editada_em'
+    // Marcos (F9 do doc 33) pelo helper — ver conversationDetailController: pedir a coluna com a
+    // migration pendente derrubaria o select inteiro e a busca perderia citação/contato/áudio.
+    const selectMensagensBase = 'id, conversa_id, texto, direcao, criado_em, autor_usuario_id, status, whatsapp_id, whatsapp_instance_id, tipo, url, nome_arquivo, reply_meta, remetente_nome, remetente_telefone, contact_meta, location_meta, apagada_para_todos, apagada_em, audio_duracao_sec, editada, editada_em'
+    const selectComRemetente = selectComMarcos(selectMensagensBase)
     const selectFallback = 'id, conversa_id, texto, direcao, criado_em, autor_usuario_id, status, whatsapp_id, whatsapp_instance_id, tipo, url, nome_arquivo'
     const term = `%${escapeIlikePattern(q)}%`
 
@@ -124,6 +128,23 @@ exports.buscarMensagensConversa = async (req, res) => {
 
     query = applyDetalharChatMensagensCursor(query, cursor, cursor_id).limit(limit + 1)
     let { data: rows, error } = await query
+
+    // Migration dos marcos pendente: refaz com o select completo menos as duas colunas novas.
+    if (error && erroDeMarcoAusente(error)) {
+      desligarMarcos()
+      let retry = supabase
+        .from('mensagens')
+        .select(selectMensagensBase)
+        .eq('company_id', Number(company_id))
+        .eq('conversa_id', Number(id))
+        .ilike('texto', term)
+        .order('criado_em', { ascending: false })
+        .order('id', { ascending: false })
+      retry = applyDetalharChatMensagensCursor(retry, cursor, cursor_id).limit(limit + 1)
+      const r = await retry
+      rows = r.data
+      error = r.error
+    }
 
     if (error && (String(error.message || '').includes('reply_meta') || String(error.message || '').includes('remetente_nome') || String(error.message || '').includes('remetente_telefone') || String(error.message || '').includes('contact_meta') || String(error.message || '').includes('location_meta') || String(error.message || '').includes('apagada_para_todos') || String(error.message || '').includes('audio_duracao_sec') || String(error.message || '').includes('editada') || String(error.message || '').includes('does not exist'))) {
       let fallbackQuery = supabase

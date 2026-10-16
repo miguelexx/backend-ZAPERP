@@ -707,11 +707,14 @@ exports.receberZapi = async (req, res) => {
                   company_id,
                   mensagem_id: picked.id,
                   effectiveStatus,
+                  statusAtual: currentStatus,
                   whatsapp_id: String(messageId),
                   select: 'id, conversa_id, company_id, autor_usuario_id, status, status_mensagem, whatsapp_id',
                 })
                 msg = patched.data || null
-                statusForEmit = effectiveStatus
+                // Vale o que ficou gravado: a guarda de não-regressão pode ter barrado este ACK
+                // em favor de um mais avançado (F3 do doc 33).
+                statusForEmit = msg?.status || effectiveStatus
               }
             }
           } catch (_) {}
@@ -2079,9 +2082,13 @@ exports.receberZapi = async (req, res) => {
                   status_mensagem: mensagemSalva.status_mensagem || mensagemSalva.status || 'delivered',
                   fromMe,
                   direcao: mensagemSalva.direcao ?? (fromMe ? 'out' : 'in'),
+                  // Caminho de idempotência: a mensagem já estava no chat e já foi anunciada
+                  // quando chegou. Este evento só traz a URL da mídia — sem a marca, o frontend
+                  // repetia beep e notificação de desktop para a MESMA mensagem.
+                  midia_atualizada: true,
                 }
                 io2.to(rooms).emit(io2.EVENTS?.NOVA_MENSAGEM || 'nova_mensagem', emitPayload)
-                scheduleInboundWebPush(company_id, conversa_id, 'nova_mensagem', emitPayload)
+                // Sem Web Push: o webhook que criou a linha já notificou o celular.
               }
             } catch (_) {
               mensagemSalva = existente

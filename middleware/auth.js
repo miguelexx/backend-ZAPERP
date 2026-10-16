@@ -1,4 +1,5 @@
 const jwt = require('jsonwebtoken')
+const { redactedRequestUrl } = require('../helpers/redactUrlSecrets')
 
 module.exports = (req, res, next) => {
   const authHeader = req.headers.authorization
@@ -21,7 +22,7 @@ module.exports = (req, res, next) => {
     const cid = Number(decoded?.company_id)
     if (!Number.isFinite(cid) || cid <= 0) {
       console.error('[TENANT_INCONSISTENT] Token sem company_id válido', {
-        path: req.originalUrl,
+        path: redactedRequestUrl(req),
         method: req.method,
         user_id: decoded?.id ?? null,
         company_id: decoded?.company_id ?? null,

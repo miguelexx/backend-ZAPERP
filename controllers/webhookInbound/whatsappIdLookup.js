@@ -4,6 +4,43 @@
  * As funções recebem o supabaseClient por parâmetro (não importam supabase).
  */
 
+const {
+  statusesQueBloqueiamGravacao,
+  gravacaoDeStatusBloqueada,
+  statusRank,
+} = require('../../helpers/messageStatusHelper')
+const { erroDeMarcoAusente, desligarMarcos, marcosDisponiveis } = require('../../helpers/ackMilestoneColumns')
+
+/**
+ * Horário de entrega/leitura (F9 do doc 33) — colunas `entregue_em` / `lida_em`.
+ *
+ * Só grava quando o status REALMENTE avança para aquele nível. Isso dá "escreve uma vez" sem
+ * precisar ler as colunas: ACK reentregue (a Whapi reentrega statuses no reconnect) não avança
+ * nada, então não reescreve o horário — quem chegou primeiro manda. Leitura implica entrega, por
+ * isso um salto pending→read grava os dois.
+ *
+ * `statusAtual` ausente ⇒ nenhum marco. O chamador que não sabe o status atual não pode cravar
+ * horário; nulo significa "sem informação", e isso é mais honesto que um horário chutado.
+ */
+function marcosDeAck(statusAtual, statusNovo, agoraIso) {
+  if (statusAtual == null || String(statusAtual).trim() === '') return {}
+  const de = statusRank(statusAtual)
+  const para = statusRank(statusNovo)
+  if (!(para > de)) return {}
+  const agora = agoraIso || new Date().toISOString()
+  const marcos = {}
+  if (de < statusRank('delivered') && para >= statusRank('delivered')) marcos.entregue_em = agora
+  if (de < statusRank('read') && para >= statusRank('read')) marcos.lida_em = agora
+  return marcos
+}
+
+/**
+ * Migration `20261016120000_mensagens_entregue_lida_em` aplicada? A detecção é COMPARTILHADA com
+ * os selects de mensagens (`helpers/ackMilestoneColumns`) — uma fonte só, para a coluna não ser
+ * considerada ausente num lugar e presente no outro. Código novo com migration pendente NÃO pode
+ * derrubar o ACK (e, com o F4, um erro aqui viraria 500 e rajada de reentrega).
+ */
+
 const WEBHOOK_MSG_SELECT = 'id, conversa_id, company_id, whatsapp_instance_id, whatsapp_id, texto, url, tipo, direcao, criado_em, status, autor_usuario_id, reply_meta, nome_arquivo, contact_meta, location_meta, remetente_nome, remetente_telefone'
 
 /** URL pública remota (CDN UltraMsg) — diferente de /uploads/ gravado pelo CRM no envio. */
@@ -104,9 +141,23 @@ async function selectSingleMensagemByWhatsappId(
   return { data: rows[0] || null, error: null, ambiguous: false }
 }
 
+/**
+ * Com `guardarRegressaoDeStatus: true` (caminho de ACK) a gravação passa por
+ * `patchMensagemStatusById` e herda a guarda atômica de não-regressão — inclusive o
+ * `bloqueadoPorRegressao` no retorno. Sem a flag, grava como sempre (ex.: edição de texto em
+ * `persistMensagem`, que não é status e não pode ganhar guarda nenhuma).
+ */
 async function updateSingleMensagemByWhatsappId(
   supabaseClient,
-  { company_id, whatsapp_id, whatsapp_instance_id = null, updates, select = WEBHOOK_MSG_SELECT, context = 'webhook' }
+  {
+    company_id,
+    whatsapp_id,
+    whatsapp_instance_id = null,
+    updates,
+    select = WEBHOOK_MSG_SELECT,
+    context = 'webhook',
+    guardarRegressaoDeStatus = false,
+  }
 ) {
   const found = await selectSingleMensagemByWhatsappId(supabaseClient, {
     company_id,
@@ -116,6 +167,22 @@ async function updateSingleMensagemByWhatsappId(
     context,
   })
   if (found.error || !found.data?.id) return { data: null, error: found.error || null, ambiguous: Boolean(found.ambiguous) }
+
+  if (guardarRegressaoDeStatus === true && updates?.status != null) {
+    const patched = await patchMensagemStatusById(supabaseClient, {
+      company_id,
+      mensagem_id: found.data.id,
+      effectiveStatus: updates.status,
+      whatsapp_id: updates.whatsapp_id,
+      select,
+    })
+    return {
+      data: patched.data,
+      error: patched.error,
+      ambiguous: false,
+      bloqueadoPorRegressao: Boolean(patched.bloqueadoPorRegressao),
+    }
+  }
 
   const { data, error } = await supabaseClient
     .from('mensagens')
@@ -151,20 +218,115 @@ async function selectSingleMensagemByWhatsappIdRelaxed(
   return { data: rows[0] || null, ambiguous: false }
 }
 
-async function patchMensagemStatusById(supabaseClient, { company_id, mensagem_id, effectiveStatus, whatsapp_id, select }) {
+/** Garante `status` no select: o chamador precisa saber o que FICOU gravado (ver guarda abaixo). */
+function withStatusNoSelect(select) {
+  const base = select || 'id, conversa_id, company_id, autor_usuario_id, whatsapp_id'
+  return /(^|,)\s*status\s*(,|$)/.test(base) ? base : `${base}, status`
+}
+
+/**
+ * Grava o status da mensagem por id, SEM rebaixar o tique por corrida (F3 do doc 33).
+ *
+ * O UPDATE leva a guarda `status NOT IN (<apelidos mais avançados>)`, então a decisão é atômica:
+ * dois ACKs concorrentes (`delivered` e `read` chegando em POSTs paralelos) não conseguem mais
+ * gravar na ordem errada — antes os dois liam `sent` e o último a gravar vencia.
+ *
+ * Quando a guarda não casa nenhuma linha, NÃO assumimos regressão: relemos a linha e só tratamos
+ * como bloqueio se o status gravado for de fato mais avançado. Linha com `status` NULL ou valor
+ * desconhecido (que o `NOT IN` não casa) cai na gravação sem guarda — comportamento de antes.
+ * Assim a guarda pode custar uma consulta extra, mas nunca perder um ACK.
+ *
+ * Retorna `{ data, error, bloqueadoPorRegressao }`. Com `bloqueadoPorRegressao: true`, `data` é a
+ * linha como está no banco (status do ACK vencedor) — o chamador deve emitir ESSE status, não o seu.
+ */
+async function patchMensagemStatusById(
+  supabaseClient,
+  { company_id, mensagem_id, effectiveStatus, whatsapp_id, select, guardarRegressao = true, statusAtual = null }
+) {
   const updates = { status: effectiveStatus, status_mensagem: effectiveStatus }
   if (whatsapp_id) updates.whatsapp_id = whatsapp_id
-  const { data, error } = await supabaseClient
+  const marcos = marcosDeAck(statusAtual, effectiveStatus)
+  const selectComStatus = withStatusNoSelect(select)
+
+  const gravar = (comGuarda, comMarcos = true) => {
+    const corpo = comMarcos && marcosDisponiveis() ? { ...updates, ...marcos } : updates
+    let q = supabaseClient
+      .from('mensagens')
+      .update(corpo)
+      .eq('company_id', company_id)
+      .eq('id', mensagem_id)
+    if (comGuarda) {
+      const bloqueiam = statusesQueBloqueiamGravacao(effectiveStatus)
+      if (bloqueiam.length) q = q.not('status', 'in', `(${bloqueiam.join(',')})`)
+    }
+    return q.select(selectComStatus).maybeSingle()
+  }
+
+  /** Migration pendente: desliga os marcos e regrava só o status (nunca perde o ACK). */
+  const gravarTolerante = async (comGuarda) => {
+    const r = await gravar(comGuarda)
+    if (r.error && erroDeMarcoAusente(r.error)) {
+      desligarMarcos()
+      return gravar(comGuarda, false)
+    }
+    return r
+  }
+
+  const usarGuarda = guardarRegressao === true && Boolean(effectiveStatus) &&
+    statusesQueBloqueiamGravacao(effectiveStatus).length > 0
+  const marcosGravados = () => (marcosDisponiveis() ? marcos : {})
+  if (!usarGuarda) {
+    const { data, error } = await gravarTolerante(false)
+    return { data, error, bloqueadoPorRegressao: false, marcos: error ? {} : marcosGravados() }
+  }
+
+  const primeira = await gravarTolerante(true)
+  if (primeira.error || primeira.data) {
+    return {
+      data: primeira.data,
+      error: primeira.error,
+      bloqueadoPorRegressao: false,
+      marcos: primeira.error ? {} : marcosGravados(),
+    }
+  }
+
+  // Nada casou: ou a linha não existe, ou está num status que a guarda barrou, ou o status é
+  // NULL/desconhecido (fora da lista do NOT IN).
+  const { data: atual, error: erroLeitura } = await supabaseClient
     .from('mensagens')
-    .update(updates)
+    .select(selectComStatus)
     .eq('company_id', company_id)
     .eq('id', mensagem_id)
-    .select(select || 'id, conversa_id, company_id, autor_usuario_id, whatsapp_id')
     .maybeSingle()
-  return { data, error }
+  if (erroLeitura) return { data: null, error: erroLeitura, bloqueadoPorRegressao: false, marcos: {} }
+  if (!atual) return { data: null, error: null, bloqueadoPorRegressao: false, marcos: {} }
+
+  if (gravacaoDeStatusBloqueada(atual.status, effectiveStatus)) {
+    console.log('[webhook] ACK concorrente ignorado para não rebaixar o tique', {
+      company_id,
+      mensagem_id,
+      status_gravado: atual.status,
+      status_do_ack: effectiveStatus,
+    })
+    return { data: atual, error: null, bloqueadoPorRegressao: true, marcos: {} }
+  }
+
+  // Sem regressão de verdade (NULL/valor fora da lista): grava como antes da guarda existir.
+  const segunda = await gravarTolerante(false)
+  return {
+    data: segunda.data,
+    error: segunda.error,
+    bloqueadoPorRegressao: false,
+    marcos: segunda.error ? {} : marcosGravados(),
+  }
 }
 
 module.exports = {
+  marcosDeAck,
+  _marcosDeAck: {
+    desligados: () => !marcosDisponiveis(),
+    religar: () => require('../../helpers/ackMilestoneColumns')._test.religar(),
+  },
   isTraceableWhatsappMessageId,
   isRemoteMediaUrl,
   isLocalUploadMediaUrl,

@@ -11,7 +11,6 @@ const supabaseDefault = require('../../config/supabase')
 const { selectSingleMensagemByWhatsappId, updateSingleMensagemByWhatsappId, preserveMediaFieldsOnWebhookFallback } = require('./whatsappIdLookup')
 const { tipoQualificaPersistencia } = require('../../services/inboundMediaPersistenceService')
 const { normalizarTimestampSemFusoAmbiguoParaApi } = require('../../helpers/timestampApiCompat')
-const { scheduleInboundWebPush } = require('../../services/webPushDispatchService')
 const {
   buildEditadaDbUpdates,
   isMissingEditadaColumnError,
@@ -119,9 +118,13 @@ async function persistInboundMensagemRow(supabaseClient, ctx, insertMsg) {
                 status_mensagem: patchedDup.status_mensagem || patchedDup.status || 'delivered',
                 fromMe,
                 direcao: patchedDup.direcao ?? (fromMe ? 'out' : 'in'),
+                // A linha JÁ existia: o outro processo da corrida inseriu e já avisou o atendente.
+                // Aqui só anexamos a mídia. Sem esta marca o frontend tratava o evento como
+                // mensagem nova e repetia beep e notificação para a MESMA mensagem.
+                midia_atualizada: true,
               }
               io2.to(rooms).emit(io2.EVENTS?.NOVA_MENSAGEM || 'nova_mensagem', emitPayload)
-              scheduleInboundWebPush(company_id, conversa_id, 'nova_mensagem', emitPayload)
+              // Sem Web Push: o insert vencedor da corrida já notificou o celular.
             }
           }
         } catch (e) {

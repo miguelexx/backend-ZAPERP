@@ -78,24 +78,41 @@ exports.encerrarChat = async (req, res) => {
       return res.status(400).json({ error: 'Grupos são apenas visuais. Não é possível encerrar conversa de grupo.' })
     }
 
-    const { data, error } = await supabase
+    // Colunas que podem não existir em instalações sem os módulos de pagamento / falta de
+    // interação. Sem o fallback (que `reabrirChat` já tinha) um "column/schema cache" derrubava
+    // o encerramento INTEIRO — o atendente clicava em Encerrar e a conversa não fechava.
+    const baseEncerrarPatch = {
+      status_atendimento: 'fechada',
+      finalizacao_motivo: null,
+      finalizada_automaticamente: false,
+      finalizada_automaticamente_em: null,
+      aguardando_cliente_desde: null,
+      ausencia_mensagem_enviada_em: null,
+    }
+    const optionalEncerrarPatch = {
+      pagamento_prazo_ate: null,
+      pagamento_prazo_origem: null,
+      pagamento_concluido_em: null,
+      reaberta_falta_interacao_em: null,
+    }
+
+    let { data, error } = await supabase
       .from('conversas')
-      .update({
-        status_atendimento: 'fechada',
-        finalizacao_motivo: null,
-        finalizada_automaticamente: false,
-        finalizada_automaticamente_em: null,
-        aguardando_cliente_desde: null,
-        ausencia_mensagem_enviada_em: null,
-        pagamento_prazo_ate: null,
-        pagamento_prazo_origem: null,
-        pagamento_concluido_em: null,
-        reaberta_falta_interacao_em: null,
-      })
+      .update({ ...baseEncerrarPatch, ...optionalEncerrarPatch })
       .eq('company_id', company_id)
       .eq('id', conversa_id)
       .select()
       .single()
+
+    if (error && /column|schema cache/i.test(String(error.message || ''))) {
+      ;({ data, error } = await supabase
+        .from('conversas')
+        .update(baseEncerrarPatch)
+        .eq('company_id', company_id)
+        .eq('id', conversa_id)
+        .select()
+        .single())
+    }
 
     if (error) { console.error('[chatController]', error?.message); return res.status(500).json({ error: 'Erro interno' }) }
 
@@ -128,7 +145,12 @@ exports.encerrarChat = async (req, res) => {
         de_usuario_id: user_id
       }),
     ])
-    if (resultAt.error) { console.error('[chatController]', resultAt.error?.message); return res.status(500).json({ error: 'Erro interno' }) }
+    // A conversa JÁ está fechada no banco neste ponto. Falhar aqui por causa do registro de
+    // histórico devolvia 500: o frontend revertia o card para "Em atendimento" e ninguém recebia
+    // o realtime — a conversa aparecia como "não finalizada" mesmo tendo sido finalizada.
+    // O protocolo (id do atendimento) é o único recurso perdido; a mensagem de finalização, que
+    // depende dele, é pulada logo abaixo.
+    if (resultAt.error) { console.error('[encerrarChat] registrarAtendimento:', resultAt.error?.message) }
 
     const io = req.app.get('io')
     if (io) {
@@ -288,7 +310,9 @@ exports.reabrirChat = async (req, res) => {
       acao: 'reabriu',
       de_usuario_id: user_id
     })
-    if (resultAt.error) { console.error('[chatController]', resultAt.error?.message); return res.status(500).json({ error: 'Erro interno' }) }
+    // A conversa já foi reaberta no banco: devolver 500 por causa do histórico fazia o frontend
+    // reverter o card para "finalizada" e ninguém recebia o realtime da reabertura.
+    if (resultAt.error) { console.error('[reabrirChat] registrarAtendimento:', resultAt.error?.message) }
 
     const io = req.app.get('io')
     if (io) {
@@ -603,7 +627,9 @@ exports.transferirChat = async (req, res) => {
       para_usuario_id,
       observacao
     })
-    if (resultAt.error) { console.error('[chatController]', resultAt.error?.message); return res.status(500).json({ error: 'Erro interno' }) }
+    // Transferência já efetivada no banco: não virar 500 por causa do histórico (o frontend
+    // revertia a tela e a 2ª tentativa batia em 409 "já foi transferida").
+    if (resultAt.error) { console.error('[transferirChat] registrarAtendimento:', resultAt.error?.message) }
 
     const io = req.app.get('io')
     if (io) {

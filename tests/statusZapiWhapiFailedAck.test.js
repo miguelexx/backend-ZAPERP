@@ -25,13 +25,17 @@ describe('statusZapi — ACK failed Whapi e ordenação de ACKs', () => {
       filterRowsForFromMeReconcile: jest.fn(() => []),
       findPendingOutboundByAckPhone: jest.fn(async () => null),
     }))
+    // F7 (doc 33): o statusZapi faz UMA leitura da linha (id+conversa_id+status) e grava por id
+    // via patchMensagemStatusById — antes eram três consultas e um update por whatsapp_id.
     jest.doMock('../controllers/webhookInbound/whatsappIdLookup', () => ({
-      selectSingleMensagemByWhatsappId: jest.fn(async (_s, { select }) => {
-        if (select === 'conversa_id') return { data: { conversa_id: 2 } }
-        return { data: { status: currentStatus } }
-      }),
-      updateSingleMensagemByWhatsappId: jest.fn(async (_s, { updates: u }) => {
-        updates.push(u)
+      selectSingleMensagemByWhatsappId: jest.fn(async () => ({
+        data: { id: 9, conversa_id: 2, status: currentStatus, whatsapp_id: 'WAMID-WHAPI-1' },
+        error: null,
+      })),
+      updateSingleMensagemByWhatsappId: jest.fn(async () => ({ data: null, error: null })),
+      selectSingleMensagemByWhatsappIdRelaxed: jest.fn(async () => ({ data: null })),
+      patchMensagemStatusById: jest.fn(async (_s, { effectiveStatus }) => {
+        updates.push({ status: effectiveStatus, status_mensagem: effectiveStatus })
         return {
           data: {
             id: 9,
@@ -40,11 +44,12 @@ describe('statusZapi — ACK failed Whapi e ordenação de ACKs', () => {
             autor_usuario_id: 4,
             whatsapp_instance_id: 5,
             whatsapp_id: 'WAMID-WHAPI-1',
+            status: effectiveStatus,
           },
+          error: null,
+          bloqueadoPorRegressao: false,
         }
       }),
-      selectSingleMensagemByWhatsappIdRelaxed: jest.fn(async () => ({ data: null })),
-      patchMensagemStatusById: jest.fn(async () => ({ data: null })),
       applyWhatsappInstanceFilterOrLegacy: jest.fn((q) => q),
       logAmbiguousWhatsappId: jest.fn(),
     }))

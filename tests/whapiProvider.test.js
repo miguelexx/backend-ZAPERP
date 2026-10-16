@@ -612,13 +612,32 @@ describe('Whapi provider — sendText', () => {
     ]))
   })
 
-  test('configureWebhooks recusa sem WHATSAPP_WEBHOOK_TOKEN e não chama a API', async () => {
+  // Segredo do webhook Whapi: WHAPI_WEBHOOK_TOKEN, caindo no WHATSAPP_WEBHOOK_TOKEN
+  // compartilhado enquanto o dedicado não existir (doc 33 §F1).
+  test('configureWebhooks recusa sem NENHUM segredo de webhook e não chama a API', async () => {
     delete process.env.WHATSAPP_WEBHOOK_TOKEN
+    delete process.env.WHAPI_WEBHOOK_TOKEN
     const { fetchWithRetry } = mockDeps({ instancesById: { '1:10': whapiInstance() } })
     const whapi = require('../services/providers/whapi')
     const r = await whapi.configureWebhooks('https://app.example.com', { companyId: 1, whatsappInstanceId: 10 })
     expect(r[0].ok).toBe(false)
-    expect(String(r[0].error || '')).toMatch(/WHATSAPP_WEBHOOK_TOKEN/)
+    expect(String(r[0].error || '')).toMatch(/WEBHOOK_TOKEN/)
     expect(fetchWithRetry).not.toHaveBeenCalled()
+  })
+
+  test('configureWebhooks grava no header o segredo DEDICADO quando ele existe', async () => {
+    process.env.WHATSAPP_WEBHOOK_TOKEN = 'compartilhado-antigo'
+    process.env.WHAPI_WEBHOOK_TOKEN = 'dedicado-whapi'
+    try {
+      const { fetchWithRetry } = mockDeps({ instancesById: { '1:10': whapiInstance() } })
+      const whapi = require('../services/providers/whapi')
+      await whapi.configureWebhooks('https://app.example.com', { companyId: 1, whatsappInstanceId: 10 })
+      const corpos = fetchWithRetry.mock.calls.map((c) => String(c[1]?.body || ''))
+      const comWebhook = corpos.find((b) => b.includes('X-Webhook-Token'))
+      expect(comWebhook).toContain('dedicado-whapi')
+      expect(comWebhook).not.toContain('compartilhado-antigo')
+    } finally {
+      delete process.env.WHAPI_WEBHOOK_TOKEN
+    }
   })
 })

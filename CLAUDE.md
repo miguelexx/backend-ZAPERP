@@ -37,7 +37,8 @@ Stack: Node.js/Express · Supabase SERVICE_ROLE (bypassa RLS) · UltraMSG (únic
 
 ## Vulnerabilidades ativas (não ampliar)
 
-- `middleware/logger.js` loga `req.originalUrl`; `/media/proxy` aceita JWT em query string → **token vai para logs**. Não criar novos endpoints com auth por query param.
+- ~~`middleware/logger.js` loga `req.originalUrl` → token vai para logs~~ **corrigido 2026-10-16 (não deployado):** `helpers/redactUrlSecrets.js` redige o valor de `token`/`jwt`/`secret`/… em `logger.js`, `auth.js` e no handler de erro do `app.js`. **Mantenha a redação** e não logue `req.originalUrl` cru em lugar novo. `/media/proxy` ainda aceita JWT em query (fica no histórico do browser) → não criar novos endpoints com auth por query param.
+- Segredos de webhook: `WHATSAPP_WEBHOOK_TOKEN` (UltraMSG) e `WHAPI_WEBHOOK_TOKEN` (Whapi) são **separados** desde 16/10. `/webhooks/ultramsg` não aceita mais `?token=` por padrão (`WEBHOOK_QUERY_TOKEN_ENABLED=false`) — e a API do UltraMSG **não envia header**, então canal UltraMSG ativo precisa da chave em `true`. Ver [33](docs/ai-handoff/33-AUDITORIA-SETAS-STATUS-WHAPI.md) §7.
 - `disparoSaudeController.js` consulta `disparo_worker_heartbeat` **sem filtro `company_id`** → expõe metadados operacionais cross-tenant. Não expandir sem adicionar isolamento.
 
 ## Não existe mais (não procure)

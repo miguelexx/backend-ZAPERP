@@ -7,6 +7,7 @@
 const supabase = require('../../config/supabase')
 const { listarMensagensInternasMovimentacao, perfilPodeVerMovimentacaoInterna, isMensagemLegadaMovimentacaoInterna } = require('../../services/atendimentosRegistroService')
 const { isGroupConversation, isClosedAttendanceStatus } = require('../../helpers/conversaHelper')
+const { selectComMarcos, erroDeMarcoAusente, desligarMarcos } = require('../../helpers/ackMilestoneColumns')
 const { isLidPhoneKey, pickRealPhoneCandidate } = require('../../helpers/phoneHelper')
 const { resolveReabertaPorFaltaInteracao, enrichConversasReabertaFaltaInteracao } = require('../../helpers/reabertaFaltaInteracaoHelper')
 const { getDisplayName } = require('../../helpers/contactEnrichment')
@@ -192,7 +193,11 @@ exports.detalharChat = async (req, res) => {
     // (resolveOutgoingTick) e o merge do refresh preserva o valor local quando a API não o
     // traz — sem ele, uma bolha marcada localmente como "verificando…"/erro nunca era
     // corrigida pelo refresh mesmo com a linha já 'sent' no banco.
-    const selectComRemetente = 'id, conversa_id, texto, direcao, criado_em, autor_usuario_id, status, status_mensagem, whatsapp_id, whatsapp_instance_id, tipo, url, nome_arquivo, reply_meta, remetente_nome, remetente_telefone, contact_meta, location_meta, apagada_para_todos, apagada_em, apagada_por_usuario_id, apagada_pelo_cliente, apagada_pelo_cliente_em, audio_duracao_sec, client_temp_id, editada, editada_em'
+    // `entregue_em`/`lida_em` (F9 do doc 33) entram pelo helper: com a migration pendente, pedir a
+    // coluna derrubaria o select INTEIRO e a tela cairia no `selectFallback` mínimo (sem citação,
+    // cartão de contato, duração de áudio nem `client_temp_id`). O helper descobre uma vez e para de pedir.
+    const selectMensagensBase = 'id, conversa_id, texto, direcao, criado_em, autor_usuario_id, status, status_mensagem, whatsapp_id, whatsapp_instance_id, tipo, url, nome_arquivo, reply_meta, remetente_nome, remetente_telefone, contact_meta, location_meta, apagada_para_todos, apagada_em, apagada_por_usuario_id, apagada_pelo_cliente, apagada_pelo_cliente_em, audio_duracao_sec, client_temp_id, editada, editada_em'
+    const selectComRemetente = selectComMarcos(selectMensagensBase)
     let mensagens = []
     let errMsgs = null
     let query
@@ -212,6 +217,24 @@ exports.detalharChat = async (req, res) => {
       const result = await query
       mensagens = result.data
       errMsgs = result.error
+
+      // Migration dos marcos pendente: refaz com o select COMPLETO menos as duas colunas novas
+      // (nunca cai no fallback mínimo por causa disso).
+      if (errMsgs && erroDeMarcoAusente(errMsgs)) {
+        desligarMarcos()
+        let retry = supabase
+          .from('mensagens')
+          .select(selectMensagensBase)
+          .eq('company_id', Number(company_id))
+          .eq('conversa_id', Number(id))
+          .order('criado_em', { ascending: false })
+          .order('id', { ascending: false })
+          .limit(messageHistoryFetchLimit)
+        retry = applyDetalharChatMensagensCursor(retry, cursor, cursor_id)
+        const resultRetry = await retry
+        mensagens = resultRetry.data
+        errMsgs = resultRetry.error
+      }
     }
     // Compatibilidade: se reply_meta/remetente_*/contact_meta/location_meta não existirem ainda no banco, refaz select sem essas colunas.
     const selectFallback = 'id, conversa_id, texto, direcao, criado_em, autor_usuario_id, status, whatsapp_id, whatsapp_instance_id, tipo, url, nome_arquivo'

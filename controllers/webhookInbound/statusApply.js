@@ -44,16 +44,27 @@ async function applyAckStatusByWaId(supabaseClient, { company_id, whatsapp_insta
 
   const currentStatus = found.data.status || found.data.status_mensagem || 'pending'
   const effectiveStatus = resolveEffectiveStatus(currentStatus, statusNorm)
-  const { data: msg, error } = await patchMensagemStatusById(supabaseClient, {
+  const { data: msg, error, bloqueadoPorRegressao } = await patchMensagemStatusById(supabaseClient, {
     company_id,
     mensagem_id: found.data.id,
     effectiveStatus,
+    statusAtual: currentStatus,
     whatsapp_id: waIdStr,
     select: statusSelect,
   })
+  // A guarda de não-regressão pode ter barrado a gravação (ACK concorrente mais avançado venceu).
+  // `_effective_status` e `effectiveStatus` passam a valer o que FICOU no banco, porque quem
+  // consome isso emite socket — emitir o status perdedor rebaixaria o tique (F3 do doc 33).
+  const statusGravado = msg?.status != null && String(msg.status).trim() !== '' ? msg.status : effectiveStatus
   if (msg) msg.whatsapp_id = msg.whatsapp_id || waIdStr
-  if (msg) msg._effective_status = effectiveStatus
-  const result = { data: msg || null, error: error || null, ambiguous: false, effectiveStatus }
+  if (msg) msg._effective_status = statusGravado
+  const result = {
+    data: msg || null,
+    error: error || null,
+    ambiguous: false,
+    effectiveStatus: statusGravado,
+    bloqueadoPorRegressao: Boolean(bloqueadoPorRegressao),
+  }
   return returnResult ? result : msg || null
 }
 

@@ -85,6 +85,7 @@ docs/
 | Variáveis de ambiente | `ai-handoff/10-CONFIGURACAO-E-AMBIENTES.md` |
 | Deploy / operação | `ai-handoff/12-DEPLOY-E-OPERACAO.md` |
 | Riscos e dívida técnica | `ai-handoff/13-PROBLEMAS-CONHECIDOS-E-DIVIDA-TECNICA.md` |
+| **Encerrar conversa (manual, ausência, timeout do chatbot) — por que "não finalizava"** | `ai-handoff/32-ENCERRAMENTO-CONVERSA-GARANTIAS.md` |
 | Nomes "zapi" no código | `reference/ADR-LEGACY-NAMING.md` |
 | Regras obrigatórias do projeto | `reference/PROJECT_RULES.md` |
 | Módulo de Disparo (campanhas) — regras | `ai-handoff/04-MODULOS-E-REGRAS-DE-NEGOCIO.md` |

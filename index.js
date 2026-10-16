@@ -40,6 +40,17 @@ if (!String(process.env.NODE_ENV || '').trim()) {
   throw new Error('NODE_ENV não definido no .env')
 }
 
+// Aviso de boot (não fatal), visível na 1ª tela do log do PM2 de propósito — nos dois sentidos:
+// LIGADO  = a rota UltraMSG ainda aceita `?token=` (caminho depreciado, necessário enquanto
+//           houver canal UltraMSG: a API deles não manda header).
+// DESLIGADO = canal UltraMSG para de ser aceito (401 em inbound e ACK); medido em 16/10/2026:
+//           4 instâncias ultramsg com tráfego nos últimos 7 dias. Ver doc 33 §6.3.
+if (require('./config/env').getBooleanEnv('WEBHOOK_QUERY_TOKEN_ENABLED', true)) {
+  console.warn('[BOOT] /webhooks/ultramsg ainda aceita ?token= (WEBHOOK_QUERY_TOKEN_ENABLED). Necessário enquanto houver canal UltraMSG — a API deles não envia header. Desligue com =false quando todos os canais estiverem na Whapi (doc 33 §6.3).')
+} else {
+  console.warn('[BOOT] WEBHOOK_QUERY_TOKEN_ENABLED=false — /webhooks/ultramsg NÃO aceita ?token=. Canal UltraMSG só é aceito via ALLOW_INSTANCEID_WEBHOOK_FALLBACK; se algum ainda estiver ativo, o inbound dele para (doc 33 §6.3).')
+}
+
 const server = http.createServer(app)
 
 const internalChatSocket = require('./socket/internalChatSocket')
@@ -295,6 +306,9 @@ server.listen(PORT, '0.0.0.0', () => {
     startAtendimentoSemRespostaScheduler(io)
     startProdutosSyncScheduler()
     startPendingOutboundReconciliationScheduler(io)
+    // F8 do doc 33: avisa no log quando um canal para de confirmar entrega (evento `statuses`
+    // desligado, channel-store recriado). Só leitura; não toca o provedor.
+    require('./services/ackHealthScheduler').startAckHealthScheduler()
     startTriageRedirectScheduler(io)
     startAguardandoClienteMonitorScheduler(io)
     const { startDisparoWorker } = require('./workers/disparoWorker')
@@ -309,6 +323,11 @@ server.listen(PORT, '0.0.0.0', () => {
     } = require('./services/inboundMediaPersistenceService')
     startInboundMediaRetryScheduler(supabase, io)
     startInboundMediaDueRetryScheduler(supabase, io)
+    // Mídia que chegou SEM URL do provedor: o agendamento do backfill vive só na memória do
+    // processo, então um restart no meio da janela deixava a linha quebrada para sempre — as duas
+    // varreduras acima não a enxergam (exigem status PENDENTE ou url https). Esta cobre `url IS NULL`.
+    const { startInboundMediaNoUrlSweepScheduler } = require('./services/inboundMediaBackfillService')
+    startInboundMediaNoUrlSweepScheduler(supabase, io)
     // Espelhamento de mídia para Cloudflare R2 (rollout por empresa; default só company 1).
     // No-op se o R2 não estiver configurado no .env — o fluxo em disco permanece intacto.
     const { startMediaR2MirrorScheduler } = require('./services/mediaR2MirrorService')

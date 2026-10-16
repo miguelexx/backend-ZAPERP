@@ -640,6 +640,12 @@ async function emitirMidiaAtualizada({ io, company_id, row, updated }) {
     status_mensagem: canon,
     fromMe: fromMeReal,
     direcao: updated.direcao ?? (fromMeReal ? 'out' : 'in'),
+    // Cura da bolha: a mensagem já está no chat há algum tempo (foi anunciada quando chegou) e
+    // este evento só troca a URL remota pela cópia local. O dedupe de notificação do frontend
+    // dura 6s — e a cópia passa disso em vídeo grande, CDN lenta, retry com backoff ou reparo
+    // pelo backfill (trailing de 8s). Sem a marca, o atendente levava um SEGUNDO beep e uma
+    // segunda notificação de desktop pela mesma mensagem, quanto mais lenta a mídia, mais provável.
+    midia_atualizada: true,
   }
   try {
     const { emitirParaUsuariosQuePodemVerConversa } = require('../controllers/chatController')

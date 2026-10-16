@@ -660,3 +660,51 @@ test('a fila de vencidas não roda quando as colunas de estado não existem', as
   const r2 = await servico.runInboundMediaDueRetryBatch(supabase, null)
   assert.equal(r2.due, 0)
 })
+
+// ------------------------------------------------- cura da bolha não repete aviso
+
+/** io falso: captura todo `nova_mensagem` emitido, venha pela sala ou pelo fallback. */
+function criarIoCaptura() {
+  const emitidos = []
+  const alvo = { emit: (evento, payload) => emitidos.push({ evento, payload }) }
+  return {
+    emitidos,
+    io: {
+      EVENTS: { NOVA_MENSAGEM: 'nova_mensagem' },
+      to: () => alvo,
+      emit: (evento, payload) => emitidos.push({ evento, payload }),
+    },
+  }
+}
+
+test('o evento de cura da mídia vem marcado — senão o atendente leva beep e notificação repetidos', async () => {
+  const { supabase } = criarSupabase(linhaPadrao())
+  global.fetch = respostaOk()
+  const { io, emitidos } = criarIoCaptura()
+
+  await persistir(supabase, { io })
+
+  const novas = emitidos.filter((e) => e.evento === 'nova_mensagem')
+  assert.equal(novas.length > 0, true, 'a cura precisa emitir para a bolha virar player sem F5')
+  for (const e of novas) {
+    assert.equal(e.payload.midia_atualizada, true)
+    // A marca não pode mexer no resto: a bolha ainda depende destes campos.
+    assert.equal(e.payload.direcao, 'in')
+    assert.equal(e.payload.fromMe, false)
+    assert.equal(String(e.payload.url || '').startsWith('/uploads/'), true)
+  }
+})
+
+test('mídia NOSSA que se cura não vira notificação de mensagem recebida (fromMe real da linha)', async () => {
+  const { supabase } = criarSupabase(linhaPadrao({ direcao: 'out' }))
+  global.fetch = respostaOk()
+  const { io, emitidos } = criarIoCaptura()
+
+  await persistir(supabase, { io })
+
+  const novas = emitidos.filter((e) => e.evento === 'nova_mensagem')
+  for (const e of novas) {
+    assert.equal(e.payload.fromMe, true)
+    assert.equal(e.payload.midia_atualizada, true)
+  }
+})

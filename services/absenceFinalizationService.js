@@ -16,7 +16,7 @@
  * Interage com `chatbotTriageService` (`looksLikeBotMessage` distingue msg de bot de msg humana).
  */
 const supabase = require('../config/supabase')
-const { mapProviderSendResult } = require('./chat/outbound/providerResultMapper')
+const { mapProviderSendResultComTransitoria, enviarSemEstourar } = require('./chat/outbound/providerResultMapper')
 const { getProvider } = require('./providers')
 const { resolveConversationProvider } = require('./chat/identity/conversationAddressService')
 const {
@@ -173,6 +173,74 @@ function isHumanAttendantLastOutbound(lastMsg, triageMerged, absenceCfg) {
     return true
   }
   return isHumanAttendantOutboundContent(lastMsg.texto, triageMerged, absenceCfg)
+}
+
+/**
+ * Assinatura de um encerramento por ausência que ficou PELA METADE: a mensagem de encerramento
+ * já é a última mensagem da conversa, mas a conversa continua "em atendimento" e sem
+ * `ausencia_mensagem_enviada_em`. Só a reversão por falha de envio produz esse estado.
+ *
+ * Por que precisa de tratamento próprio: a mensagem de ausência NÃO conta como "fala de
+ * atendente humano", então o ciclo seguinte apenas limpava `aguardando_cliente_desde` e seguia —
+ * a conversa ficava presa em "em atendimento" para sempre, sem nenhum caminho automático de volta.
+ */
+function ehEncerramentoAusenciaInterrompido(conv, lastMsg, absenceCfg) {
+  if (!conv || !lastMsg) return false
+  if (String(conv.status_atendimento || '').trim().toLowerCase() !== 'em_atendimento') return false
+  if (conv.ausencia_mensagem_enviada_em) return false
+  if (lastMsg.direcao !== 'out') return false
+  // Mensagem do SISTEMA (sem autor): atendente que digitou o mesmo texto não é encerramento.
+  const uid = lastMsg.autor_usuario_id
+  if (uid != null && Number(uid) > 0) return false
+  return textoEhSoMensagemAusencia(lastMsg.texto, absenceCfg)
+}
+
+/**
+ * Conclui o encerramento interrompido SEM reenviar nada: a mensagem já está na conversa (e pode
+ * até ter sido entregue — timeout depois do aceite). Só falta fechar a conversa de fato.
+ */
+async function concluirEncerramentoAusenciaInterrompido({ company_id, conv, lastMsg, absence, io }) {
+  const prevDepartamentoId = conv.departamento_id != null ? Number(conv.departamento_id) : null
+  const snap = {
+    atendente_id: conv.atendente_id != null ? Number(conv.atendente_id) : null,
+    departamento_id: Number.isFinite(prevDepartamentoId) && prevDepartamentoId > 0 ? prevDepartamentoId : null,
+  }
+  const nowIso = new Date().toISOString()
+  const { data: locked } = await supabase
+    .from('conversas')
+    .update({
+      status_atendimento: 'fechada',
+      finalizacao_motivo: 'ausencia_cliente',
+      finalizada_automaticamente: true,
+      finalizada_automaticamente_em: nowIso,
+      ausencia_mensagem_enviada_em: lastMsg.criado_em || nowIso,
+      atendente_id: null,
+      atendente_atribuido_em: null,
+    })
+    .eq('company_id', company_id)
+    .eq('id', conv.id)
+    .eq('status_atendimento', 'em_atendimento')
+    .is('finalizada_automaticamente_em', null)
+    .select()
+    .maybeSingle()
+
+  if (!locked?.id) return false
+
+  await supabase.from('historico_atendimentos').insert({
+    conversa_id: conv.id,
+    usuario_id: null,
+    acao: 'encerramento_automatico_ausencia',
+    observacao: buildEncerramentoObservacao({ prazo: absence.prazo, unidade: absence.unidade, snap }),
+  })
+  await logBotAction(company_id, conv.id, 'encerramento_ausencia_retomado', {
+    prazo: absence.prazo,
+    unidade: absence.unidade,
+    snap,
+    mensagem_encerramento_id: lastMsg.id ?? null,
+  })
+  // Sem nova bolha: a mensagem de encerramento já existe na conversa.
+  emitirRealtimeEncerramentoAutomatico(io, company_id, locked, null)
+  return true
 }
 
 /**
@@ -382,19 +450,27 @@ async function sendAbsenceClosingMessage({ provider, company_id, conversa_id, te
   if (!adapter?.sendText) {
     return { ok: false, error: 'Provider de envio não disponível' }
   }
-  const result = await adapter.sendText(telefone, texto, {
-    companyId: company_id,
-    conversaId: conversa_id,
-    whatsappInstanceId: row?.whatsapp_instance_id || undefined,
-    sendOrigin: 'finalizacao_ausencia_cliente',
-  })
-  const mappedResult = mapProviderSendResult(result, { failedStatusMensagem: 'failed' })
-  const { ok, waMessageId: messageId, hasValidId: hasTraceableId } = mappedResult
+  // `enviarSemEstourar`: adapters podem PROPAGAR timeout/rede. Sem isso a exceção subia para o
+  // chamador, que revertia o encerramento sem nenhum rastro da tentativa.
+  const result = await enviarSemEstourar(
+    () => adapter.sendText(telefone, texto, {
+      companyId: company_id,
+      conversaId: conversa_id,
+      whatsappInstanceId: row?.whatsapp_instance_id || undefined,
+      sendOrigin: 'finalizacao_ausencia_cliente',
+    }),
+    'enviar mensagem de encerramento por ausência'
+  )
+  // Falha TRANSITÓRIA (timeout/rede/429/5xx) não prova que nada saiu: a linha fica
+  // pending/sending para a varredura de reconciliação confirmar ou reenviar sem duplicar.
+  const mappedResult = mapProviderSendResultComTransitoria(result, { failedStatusMensagem: 'failed' })
+  const { ok, waMessageId: messageId, hasValidId: hasTraceableId, falhaTransitoria } = mappedResult
   if (!ok) {
     console.warn('[absenceFinalization] envio de mensagem de ausencia falhou', {
       company_id,
       conversa_id,
       whatsapp_instance_id: row?.whatsapp_instance_id || null,
+      transitoria: falhaTransitoria,
       erro: String(result?.error || 'desconhecido').slice(0, 200),
     })
   } else if (!hasTraceableId) {
@@ -404,6 +480,13 @@ async function sendAbsenceClosingMessage({ provider, company_id, conversa_id, te
       whatsapp_instance_id: row?.whatsapp_instance_id || null,
       provider_message_id: messageId || null,
     })
+  }
+  // Recusa DEFINITIVA (o provedor rejeitou: 4xx, token inválido, destino inválido): nada foi
+  // entregue. Gravar a bolha aqui deixava a mensagem de ausência como última da conversa — e,
+  // como ela não é "fala de atendente humano", o ciclo seguinte nunca mais reconhecia a conversa
+  // como candidata. Resultado: conversa revertida para "em atendimento" PARA SEMPRE.
+  if (!ok && !falhaTransitoria) {
+    return { ok: false, falhaTransitoria: false, mensagemRow: null }
   }
   const { data: mensagemRow } = await supabase
     .from('mensagens')
@@ -419,7 +502,7 @@ async function sendAbsenceClosingMessage({ provider, company_id, conversa_id, te
     })
     .select()
     .maybeSingle()
-  return { ok, mensagemRow: mensagemRow || null }
+  return { ok, falhaTransitoria: !!falhaTransitoria, mensagemRow: mensagemRow || null }
 }
 
 async function getLastMessage(conversa_id, company_id) {
@@ -497,13 +580,18 @@ async function finalizeConversationsByAbsence(opts = {}) {
     const { data: conversas } = await supabase
       .from('conversas')
       .select(
-        'id, telefone, status_atendimento, atendente_id, atendente_atribuido_em, aguardando_cliente_desde, finalizacao_motivo, tipo, departamento_id, cliente_id'
+        'id, telefone, status_atendimento, atendente_id, atendente_atribuido_em, aguardando_cliente_desde, finalizacao_motivo, ausencia_mensagem_enviada_em, tipo, departamento_id, cliente_id'
       )
       .eq('company_id', company_id)
       .eq('status_atendimento', 'em_atendimento')
       .not('atendente_id', 'is', null)
       .neq('tipo', 'grupo')
-      .or(`finalizacao_motivo.is.null,finalizacao_motivo.neq.ausencia_cliente`)
+      // Sem filtro por `finalizacao_motivo`: uma conversa EM ATENDIMENTO com motivo
+      // 'ausencia_cliente' é resíduo de quem a tirou de "fechada" sem limpar os campos de
+      // encerramento automático (ex.: `marcarAguardandoRespostaCampanha`, que leva fechada →
+      // aberta num novo disparo, e o bloco "separar mensagens disparadas" do webhook). O filtro
+      // antigo excluía essas conversas do scan PARA SEMPRE — elas nunca mais eram finalizadas.
+      // `markWaitingForClient`, logo abaixo, zera o resíduo antes do lock de encerramento.
       .order('ultima_atividade', { ascending: true, nullsFirst: true })
       .limit(scanLimit)
 
@@ -533,6 +621,24 @@ async function finalizeConversationsByAbsence(opts = {}) {
         continue
       }
       if (!isHumanAttendantLastOutbound(lastMsg, triageMerged, absence)) {
+        // Encerramento que ficou pela metade (reversão por falha de envio): concluir o
+        // fechamento em vez de deixar a conversa presa em "em atendimento" para sempre.
+        if (!dryRun && ehEncerramentoAusenciaInterrompido(conv, lastMsg, absence)) {
+          const semRespostaDoCliente = !(await hasInboundAfterTimestamp(company_id, conv.id, lastMsg.criado_em))
+          if (semRespostaDoCliente) {
+            const concluido = await concluirEncerramentoAusenciaInterrompido({
+              company_id,
+              conv,
+              lastMsg,
+              absence,
+              io,
+            })
+            if (concluido) {
+              processadas++
+              continue
+            }
+          }
+        }
         if (!dryRun) await clearWaitingForClient(company_id, conv.id)
         continue
       }
@@ -645,6 +751,7 @@ async function finalizeConversationsByAbsence(opts = {}) {
       let sendOk = false
       let skippedDuplicate = false
       let skippedNoMessage = false
+      let falhaTransitoriaEnvio = false
       let mensagemEncerramentoRow = null
       try {
         const sendRes = await sendAbsenceClosingMessage({
@@ -657,12 +764,25 @@ async function finalizeConversationsByAbsence(opts = {}) {
         sendOk = !!sendRes?.ok
         skippedDuplicate = !!sendRes?.skippedDuplicate
         skippedNoMessage = !!sendRes?.skippedNoMessage
+        falhaTransitoriaEnvio = !!sendRes?.falhaTransitoria
         mensagemEncerramentoRow = sendRes?.mensagemRow || null
       } catch (e) {
         console.warn('[absenceFinalization] erro ao enviar mensagem de encerramento:', e?.message || e)
       }
 
-      if (!sendOk && !skippedDuplicate) {
+      // Transitória: a mensagem PODE ter saído e a linha já está pending para a reconciliação.
+      // Reverter aqui reabriria uma conversa que o cliente vê como encerrada — e, pior, a deixaria
+      // presa em "em atendimento" sem nenhum ciclo futuro capaz de fechá-la.
+      if (falhaTransitoriaEnvio) {
+        await supabase.from('historico_atendimentos').insert({
+          conversa_id: conv.id,
+          usuario_id: null,
+          acao: 'encerramento_ausencia_envio_pendente',
+          observacao: 'Conversa encerrada; mensagem de encerramento ficou pendente de confirmação do provedor (falha transitória)',
+        })
+      }
+
+      if (!sendOk && !skippedDuplicate && !falhaTransitoriaEnvio) {
         await supabase
           .from('conversas')
           .update({
@@ -866,6 +986,7 @@ async function finalizeAbsenceForConversaIds(p) {
     let sendOk = false
     let skippedDuplicate = false
     let skippedNoMessage = false
+    let falhaTransitoriaEnvio = false
     let mensagemEncerramentoRow = null
     try {
       const sendRes = await sendAbsenceClosingMessage({
@@ -878,12 +999,24 @@ async function finalizeAbsenceForConversaIds(p) {
       sendOk = !!sendRes?.ok
       skippedDuplicate = !!sendRes?.skippedDuplicate
       skippedNoMessage = !!sendRes?.skippedNoMessage
+      falhaTransitoriaEnvio = !!sendRes?.falhaTransitoria
       mensagemEncerramentoRow = sendRes?.mensagemRow || null
     } catch (e) {
       console.warn('[absenceFinalization][lote] envio:', e?.message || e)
     }
 
-    if (!sendOk && !skippedDuplicate) {
+    // Mesma regra do ciclo automático: falha transitória mantém a conversa ENCERRADA
+    // (mensagem pending + reconciliação), só recusa definitiva reverte.
+    if (falhaTransitoriaEnvio) {
+      await supabase.from('historico_atendimentos').insert({
+        conversa_id: conv.id,
+        usuario_id: null,
+        acao: 'encerramento_ausencia_envio_pendente',
+        observacao: 'Conversa encerrada; mensagem de encerramento ficou pendente de confirmação do provedor (falha transitória)',
+      })
+    }
+
+    if (!sendOk && !skippedDuplicate && !falhaTransitoriaEnvio) {
       await supabase
         .from('conversas')
         .update({
@@ -952,6 +1085,7 @@ module.exports = {
   isHumanAttendantOutboundContent,
   outboundQualificaParaAguardandoCliente,
   isHumanAttendantLastOutbound,
+  ehEncerramentoAusenciaInterrompido,
   buildWaitingForClientAfterOutboundPatch,
   markWaitingForClient,
   clearWaitingForClient,
