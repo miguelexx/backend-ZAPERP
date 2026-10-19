@@ -1137,6 +1137,25 @@ async function dispatchOne(handler, req, normalizedBody) {
   return captured.statusCode || 200
 }
 
+/**
+ * Chats removidos no WhatsApp (evento `chats` método `delete` — contrato oficial Whapi):
+ *   { chats_removed: ["919984351847@s.whatsapp.net"], event: { type:'chats', event:'delete' }, channel_id }
+ * Só aceita quando o descritor `event`, se vier, é de fato chats/delete — `chats.post` (chat NOVO)
+ * e `chats.patch` (pin/mute/label) jamais podem virar exclusão.
+ */
+function extractChatsRemoved(body) {
+  const ev = body?.event
+  if (ev && typeof ev === 'object') {
+    const tipo = String(ev.type || '').toLowerCase()
+    const acao = String(ev.event || ev.method || '').toLowerCase()
+    if (tipo && tipo !== 'chats') return []
+    if (acao && acao !== 'delete') return []
+  }
+  const bruto = Array.isArray(body?.chats_removed) ? body.chats_removed
+    : (typeof body?.chats_removed === 'string' ? [body.chats_removed] : [])
+  return bruto.filter((v) => v != null && String(v).trim() !== '')
+}
+
 /** Extrai arrays de eventos do corpo Whapi (tolerante a formatos). */
 function extractEvents(body) {
   const messages = Array.isArray(body?.messages) ? body.messages
@@ -1147,7 +1166,28 @@ function extractEvents(body) {
     : (body?.presence && typeof body.presence === 'object' ? [body.presence] : [])
   const messagesUpdates = Array.isArray(body?.messages_updates) ? body.messages_updates
     : (body?.message_update ? [body.message_update] : [])
-  return { messages, statuses, presences, messagesUpdates }
+  const chatsRemoved = extractChatsRemoved(body)
+  return { messages, statuses, presences, messagesUpdates, chatsRemoved }
+}
+
+/**
+ * Conversa apagada no WhatsApp → apaga no ZapERP e avisa todos os atendentes.
+ *
+ * Nunca chama o provedor de volta (o chat já não existe lá) e a guarda de eco do
+ * chatDeletionSyncService ignora o aviso quando a exclusão partiu do próprio ZapERP —
+ * é o que impede o ciclo "ZapERP apaga → WhatsApp avisa → ZapERP apaga de novo".
+ * Tenant e instância vêm SEMPRE do contexto do canal, nunca do corpo do webhook.
+ */
+async function applyWhapiRemovedChats(ctxSrc, chatsRemoved, io) {
+  if (!Array.isArray(chatsRemoved) || !chatsRemoved.length) return { aplicadas: [], ignorados: {} }
+  const { aplicarExclusaoRemotaEmLote } = require('../services/chat/sync/chatDeletionSyncService')
+  return aplicarExclusaoRemotaEmLote({
+    company_id: ctxSrc.company_id,
+    whatsapp_instance_id: ctxSrc.whatsapp_instance_id ?? null,
+    chats: chatsRemoved,
+    io,
+    origem: 'whatsapp',
+  })
 }
 
 /**
@@ -1185,7 +1225,7 @@ async function handleWebhookWhapi(req, res) {
       connectedPhone: ctxSrc.connected_phone || ctxSrc.telefone_conectado || null,
     }
 
-    const { messages, statuses, presences, messagesUpdates } = extractEvents(body)
+    const { messages, statuses, presences, messagesUpdates, chatsRemoved } = extractEvents(body)
     req.webhookLogData = {
       status: 'processed',
       company_id: ctxSrc.company_id,
@@ -1196,6 +1236,7 @@ async function handleWebhookWhapi(req, res) {
         statuses: statuses.length,
         presences: presences.length,
         messages_updates: messagesUpdates.length,
+        chats_removed: chatsRemoved.length,
       },
     }
 
@@ -1325,6 +1366,21 @@ async function handleWebhookWhapi(req, res) {
       }
     }
 
+    // Conversa apagada no WhatsApp (chats.delete) → espelha a exclusão aqui.
+    if (chatsRemoved.length) {
+      try {
+        const r = await applyWhapiRemovedChats(ctxSrc, chatsRemoved, io)
+        if (req.webhookLogData?.counts) {
+          req.webhookLogData.counts.chats_apagados = r.aplicadas?.length || 0
+          if (r.ignorados && Object.keys(r.ignorados).length) {
+            req.webhookLogData.chats_removed_ignorados = r.ignorados
+          }
+        }
+      } catch (e) {
+        console.warn('[WHAPI] applyWhapiRemovedChats falhou:', e?.message || e)
+      }
+    }
+
     // Erro interno persistente no inbound → 500 para o provider reentregar (idempotência protege duplicata).
     if (anyServerError) return res.status(500).json({ ok: false, error: 'inbound_processing_error' })
     return res.status(200).json({ ok: true })
@@ -1379,4 +1435,6 @@ exports._test = {
   isWhapiDeletedMessage,
   extractWhapiDeletedTargetId,
   applyWhapiDeletedMessage,
+  extractChatsRemoved,
+  applyWhapiRemovedChats,
 }

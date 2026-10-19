@@ -19,6 +19,11 @@ const WHAPI_WEBHOOK_EVENTS = [
   // Presença do contato (online/visto por último). O canal só emite após subscribePresence
   // de cada contato; o webhook processa presences[] e emite socket (webhookWhapiController).
   { type: 'presences', method: 'post' },
+  // Conversa APAGADA no WhatsApp → corpo `chats_removed[]`. É o único aviso de exclusão de
+  // chat que existe (o UltraMSG não tem equivalente). Assinamos SÓ o `delete`: `chats.post`
+  // (chat novo) e `chats.patch` (pin/mute/label) não têm consumidor e só gerariam ruído.
+  // Quem aplica: applyWhapiRemovedChats → chatDeletionSyncService (doc 34).
+  { type: 'chats', method: 'delete' },
 ]
 
 /**

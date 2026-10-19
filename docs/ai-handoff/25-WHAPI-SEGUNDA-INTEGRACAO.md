@@ -477,7 +477,7 @@ Vários contatos de uma vez chegam como `type: contact_list` com `contact_list.l
 
 **Fora de escopo CRM (não implantar sem pedido):** stories, newsletters/canais, comunidades, catálogo/produtos/coleções, labels Business, bots, `createCallEvent`/`createGroupCallLink`, login/logout/reset settings. **Agrupamento admin (criar/editar grupo, participantes, convite, foto, solicitações) está no CRM** — adapter `whapi/groups.js` + rotas `GET/PUT /chats/:id/grupo*` e `POST /chats/grupos`. Blacklist **já no adapter** (`blockContact`/`unblockContact`/`getBlacklist`) — ver §26.2. `makeCall` **está** fiado no botão Ligar.
 
-Webhook: canal **não** assina chats/contacts/groups/presences/calls. Só messages+statuses. Não tratar o resto até assinar.
+Webhook (atualizado 2026-10-19): `WHAPI_WEBHOOK_EVENTS` assina **messages** (post/put/patch/delete), **statuses** (post/put), **presences** (post) e **`chats` método `delete`** — este último é o aviso de "conversa apagada no celular", tratado em `applyWhapiRemovedChats` → doc [34](34-SINCRONIZACAO-EXCLUSAO-CONVERSA.md). `chats.post`/`chats.patch`, contacts, groups, calls, labels e service continuam **sem assinatura e sem consumidor** — não tratar antes de assinar. Canal já configurado só passa a receber `chats.delete` depois de rodar `POST /integrations/whatsapp/instances/:id/configure-webhooks`.
 
 Homologação live ainda pendente além de texto 1:1: mídia, delete, edit, sync, disparo.
 

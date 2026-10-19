@@ -70,6 +70,10 @@ router.get('/instances/:id/stories', apiLimiter, whatsappIntegrationController.g
 router.post('/instances/:id/stories/media', apiLimiter, uploadArquivo, whatsappIntegrationController.uploadInstanceStoryMedia)
 router.post('/instances/:id/stories', apiLimiter, whatsappIntegrationController.createInstanceStory)
 router.delete('/instances/:id/stories/:storyId', apiLimiter, whatsappIntegrationController.deleteInstanceStory)
+// Varredura de exclusões feitas no celular (fallback do UltraMSG, que não tem webhook de chat
+// apagado). Destrutiva quando `aplicar=1` → admin only. Registrada ANTES de /chats/:chatId
+// para "reconciliar-exclusoes" não ser capturado como chatId.
+router.post('/instances/:id/chats/reconciliar-exclusoes', adminOnly, whatsappIntegrationController.reconciliarExclusoesChats)
 router.get('/instances/:id/chats/:chatId', whatsappIntegrationController.getInstanceChat)
 router.get('/instances/:id/presence', whatsappIntegrationController.getInstancePresence)
 router.post('/instances/:id/presence/subscribe', whatsappIntegrationController.subscribeInstancePresence)

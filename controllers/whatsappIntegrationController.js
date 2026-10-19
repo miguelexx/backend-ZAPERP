@@ -1629,6 +1629,67 @@ exports.getInstanceChat = async (req, res) => {
 }
 
 /**
+ * POST /integrations/whatsapp/instances/:id/chats/reconciliar-exclusoes
+ *
+ * Fallback para "apaguei a conversa no celular" quando o provedor NÃO avisa pelo webhook.
+ * A Whapi avisa (evento `chats` método `delete`, aplicado no webhook); o UltraMSG **não tem**
+ * evento de chat apagado — suas notificações cobrem só mensagem recebida, mensagem criada e
+ * ACK. Aqui comparamos a lista de chats do provedor (`GET /chats`) com as conversas do ZapERP
+ * e apontamos as que já não existem mais no WhatsApp.
+ *
+ * Conservador de propósito: por padrão é SIMULAÇÃO (só lista). `aplicar=1` executa a exclusão.
+ * Lista vazia do provedor aborta; grupo, LID, conversa `em_atendimento` e conversa com atividade
+ * recente (`horas`, padrão 24) nunca entram. O cadastro do cliente nunca é apagado aqui.
+ * Query: `aplicar=1` · `horas=<n>` · `limite=<n>`. Admin only (rota).
+ */
+exports.reconciliarExclusoesChats = async (req, res) => {
+  const company_id = req.user?.company_id
+  if (!company_id) return res.status(401).json({ error: 'Não autenticado' })
+  const id = getInstanceParam(req)
+  if (!id) return res.status(400).json({ error: 'whatsapp_instance_id inválido' })
+  if (!checkCompanyRate(company_id, `chats-reconciliar:${id}`, 60_000, 4)) {
+    return res.status(429).json({ error: 'Muitas solicitações, tente novamente em instantes.', retryAfterSeconds: 60 })
+  }
+  const resolved = await resolveInstanceProviderName(company_id, id)
+  if (!resolved.instance) return res.status(instanceErrorStatus(resolved.error)).json({ error: resolved.error })
+
+  const aplicarRaw = String(req.query?.aplicar ?? req.body?.aplicar ?? '').trim().toLowerCase()
+  const aplicar = ['1', 'true', 'sim', 'yes'].includes(aplicarRaw)
+  const horas = req.query?.horas ?? req.body?.horas
+  const limite = req.query?.limite ?? req.body?.limite
+
+  try {
+    const { reconciliarExclusoesDeChats, RECONCILIACAO_INATIVIDADE_HORAS_PADRAO, RECONCILIACAO_LIMITE_PADRAO } =
+      require('../services/chat/sync/chatDeletionSyncService')
+    const r = await reconciliarExclusoesDeChats({
+      company_id,
+      whatsapp_instance_id: id,
+      provider: getProvider({ provider: resolved.providerName }),
+      aplicar,
+      io: req.app.get('io'),
+      inatividadeHoras: horas != null && String(horas).trim() !== '' ? Number(horas) : RECONCILIACAO_INATIVIDADE_HORAS_PADRAO,
+      limite: limite != null && String(limite).trim() !== '' ? Number(limite) : RECONCILIACAO_LIMITE_PADRAO,
+    })
+    if (!r.ok) return res.status(502).json({ error: r.error, provider: resolved.providerName })
+    return res.json({
+      provider: resolved.providerName,
+      whatsapp_instance_id: id,
+      simulacao: r.simulacao,
+      provider_chats: r.provider_chats,
+      candidatos: r.candidatos,
+      total_candidatos: r.candidatos.length,
+      aplicadas: r.aplicadas,
+      // A Whapi já espelha a exclusão em tempo real pelo webhook; aqui é só rede de segurança.
+      observacao: resolved.providerName === 'whapi'
+        ? 'A Whapi avisa exclusão de chat pelo webhook (chats.delete); use isto apenas como varredura de segurança.'
+        : 'O UltraMSG não tem webhook de chat apagado — esta varredura é o único caminho para espelhar exclusões feitas no celular.',
+    })
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || 'Erro interno na reconciliação de exclusões' })
+  }
+}
+
+/**
  * GET /integrations/whatsapp/instances/:id/presence?entry=... — última presença conhecida (Whapi).
  * Assina automaticamente antes de ler (subscribePresence é precondição p/ o canal reportar).
  */

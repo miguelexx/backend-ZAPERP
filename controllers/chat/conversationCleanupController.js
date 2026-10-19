@@ -14,6 +14,13 @@ const {
 const { emitirConversaAtualizada, emitirEventoEmpresaConversa } = require('../../services/chat/realtime/chatRealtimeGateway')
 const { assertPermissaoConversa } = require('../../services/chat/access/conversationPolicy')
 const { marcarComoLidaPorUsuario } = require('../../services/chat/unread/conversationUnreadService')
+const {
+  contatoExiste,
+  apagarDependenciasEConversa,
+  apagarCadastroDoCliente,
+  emitirConversaApagada,
+} = require('../../services/chat/deletion/conversationDeletionService')
+const { registrarExclusaoLocal } = require('../../services/chat/sync/chatDeletionSyncService')
 
 /**
  * Apaga a conversa também no WhatsApp do próprio número conectado (UltraMSG/Whapi),
@@ -35,6 +42,11 @@ async function apagarChatNoWhatsapp(company_id, conv) {
     const instanceProvider = await resolveConversationProvider(company_id, instanceId)
     const provider = getProvider({ provider: instanceProvider })
     if (typeof provider?.deleteChat !== 'function') return false
+
+    // Guarda anti-loop ANTES de chamar o provedor: apagar lá faz o canal ecoar "chat removido"
+    // no webhook (Whapi chats.delete). Registrado antes porque a chamada pode aplicar no WhatsApp
+    // e ainda devolver timeout — o eco chegaria sem nós sabermos que a exclusão foi nossa.
+    registrarExclusaoLocal({ company_id, telefone })
 
     const result = await provider.deleteChat(telefone, {
       companyId: company_id,
@@ -149,15 +161,6 @@ function flagApagarCliente(req) {
   return s === '1' || s === 'true' || s === 'sim' || s === 'yes'
 }
 
-async function softDeleteOptional(table, build) {
-  try {
-    const { error } = await build(supabase.from(table))
-    if (error && !String(error.message || '').includes('does not exist')) {
-      console.warn(`[apagarConversa] ${table}:`, error.message)
-    }
-  } catch (_) { /* tabela opcional */ }
-}
-
 // =====================================================
 // Apagar conversa e dependências — DELETE /chats/:id
 // Query/body apagar_cliente=1 também remove o cadastro do cliente.
@@ -200,65 +203,21 @@ exports.apagarConversa = async (req, res) => {
     const clienteId = conv?.cliente_id ? Number(conv.cliente_id) : null
 
     // Sem apagar_cliente: o contato deve permanecer. Com apagar_cliente: remove cadastro depois.
-    let contatoExistiaAntes = false
-    if (clienteId) {
-      const { data: contatoAntes } = await supabase
-        .from('clientes')
-        .select('id')
-        .eq('company_id', cid)
-        .eq('id', clienteId)
-        .maybeSingle()
-      contatoExistiaAntes = !!contatoAntes?.id
-    }
+    const contatoExistiaAntes = clienteId ? await contatoExiste(cid, clienteId) : false
 
-    const { data: atendRows } = await supabase
-      .from('atendimentos')
-      .select('id')
-      .eq('company_id', cid)
-      .eq('conversa_id', convId)
-    const atendIds = (atendRows || []).map((r) => r.id).filter(Boolean)
-    if (atendIds.length > 0) {
-      await supabase.from('avaliacoes_atendimento').delete().in('atendimento_id', atendIds)
-    }
-    await supabase.from('avaliacoes_atendimento').delete().eq('conversa_id', convId).eq('company_id', cid)
-
-    await softDeleteOptional('mensagens_ocultas', (q) => q.delete().eq('company_id', cid).eq('conversa_id', convId))
-    await softDeleteOptional('conversa_unreads', (q) => q.delete().eq('company_id', cid).eq('conversa_id', convId))
-    await softDeleteOptional('conversa_atendentes', (q) => q.delete().eq('conversa_id', convId))
-    await softDeleteOptional('conversa_usuario_prefs', (q) => q.delete().eq('conversa_id', convId))
-    await supabase.from('atendimentos').delete().eq('company_id', cid).eq('conversa_id', convId)
-    await supabase.from('historico_atendimentos').delete().eq('conversa_id', convId)
-    await softDeleteOptional('conversa_tags', (q) => q.delete().eq('company_id', cid).eq('conversa_id', convId))
-    await softDeleteOptional('bot_logs', (q) => q.delete().eq('company_id', cid).eq('conversa_id', convId))
-    await supabase.from('mensagens').delete().eq('company_id', cid).eq('conversa_id', convId)
-
-    await supabase.from('conversas').update({ cliente_id: null }).eq('company_id', cid).eq('id', convId)
-
-    const { error: errDel } = await supabase.from('conversas').delete().eq('company_id', cid).eq('id', convId)
-    if (errDel) return res.status(500).json({ error: errDel.message })
+    // Cascata compartilhada com a exclusão vinda do WhatsApp (mesma ordem de sempre).
+    const cascata = await apagarDependenciasEConversa({ company_id: cid, conversa_id: convId })
+    if (!cascata.ok) return res.status(500).json({ error: cascata.error })
 
     let clienteApagado = false
     if (apagarCliente && clienteId && contatoExistiaAntes) {
-      await supabase.from('conversas').update({ cliente_id: null }).eq('company_id', cid).eq('cliente_id', clienteId)
-      await softDeleteOptional('cliente_nomes_vinculados', (q) => q.delete().eq('company_id', cid).eq('cliente_id', clienteId))
-      await softDeleteOptional('cliente_tags', (q) => q.delete().eq('company_id', cid).eq('cliente_id', clienteId))
-      await softDeleteOptional('contato_opt_in', (q) => q.delete().eq('company_id', cid).eq('cliente_id', clienteId))
-      await softDeleteOptional('contato_opt_out', (q) => q.delete().eq('company_id', cid).eq('cliente_id', clienteId))
-      await softDeleteOptional('campanha_envios', (q) => q.delete().eq('cliente_id', clienteId))
-      await softDeleteOptional('avaliacoes_atendimento', (q) => q.delete().eq('company_id', cid).eq('cliente_id', clienteId))
-      await softDeleteOptional('crm_leads', (q) => q.update({ cliente_id: null }).eq('company_id', cid).eq('cliente_id', clienteId))
-
-      const { error: errCli } = await supabase
-        .from('clientes')
-        .delete()
-        .eq('company_id', cid)
-        .eq('id', clienteId)
-      if (errCli) {
+      const rCli = await apagarCadastroDoCliente({ company_id: cid, cliente_id: clienteId })
+      if (!rCli.ok) {
         console.error('[apagarConversa] falha ao apagar cliente', {
           company_id: cid,
           conversa_id: convId,
           cliente_id: clienteId,
-          error: errCli.message,
+          error: rCli.error,
         })
         return res.status(500).json({
           error: 'Conversa apagada, mas falhou ao apagar o cadastro do cliente',
@@ -269,21 +228,14 @@ exports.apagarConversa = async (req, res) => {
       clienteApagado = true
     }
 
-    const io = req.app.get('io')
-    if (io) {
-      emitirEventoEmpresaConversa(io, cid, convId, 'conversa_apagada', {
-        id: convId,
-        cliente_id: clienteId,
-        cliente_apagado: clienteApagado,
-        whatsapp_apagado: whatsappApagado,
-      })
-      io.to(`empresa_${cid}`).emit('atualizar_conversa', {
-        id: convId,
-        removida: true,
-        cliente_id: clienteId,
-        cliente_apagado: clienteApagado,
-      })
-    }
+    emitirConversaApagada(req.app.get('io'), {
+      company_id: cid,
+      conversa_id: convId,
+      cliente_id: clienteId,
+      cliente_apagado: clienteApagado,
+      whatsapp_apagado: whatsappApagado,
+      origem: 'usuario',
+    })
 
     let contatoPreservado = true
     if (clienteId && contatoExistiaAntes) {
