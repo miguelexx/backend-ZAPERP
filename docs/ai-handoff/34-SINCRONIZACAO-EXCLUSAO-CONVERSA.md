@@ -246,6 +246,11 @@ lista de `candidatos` e compare `provider_chats` com `conversas_examinadas`; só
 
 Duas causas independentes, as duas confirmadas — uma no canal, outra no código.
 
+> **Resolvido em 20/10 no canal de produção:** o evento `{type:'chats',method:'delete'}` foi
+> adicionado ao webhook do canal (via `updateChannelSettings`, só o campo `webhooks`; URL, `mode`,
+> header e os demais eventos preservados — a resposta trouxe `changes: ["webhooks"]`). Canal NOVO
+> ou recriado continua precisando do `configure-webhooks`, que agora já inclui o evento.
+
 **(a) O canal não assinava o evento.** `getChannelSettings` do canal de produção
 (`https://zapapi.wmsistemas.inf.br/webhooks/whapi`) listava só:
 
