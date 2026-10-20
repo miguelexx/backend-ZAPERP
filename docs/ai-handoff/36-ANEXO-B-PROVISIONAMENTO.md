@@ -184,6 +184,40 @@ A flag efetiva do módulo é **esta coluna `ativo` E a env global `WM_ORCAMENTOS
 (decisão D2, `helpers/orcamentoWmFlag.js`). Ativar aqui com a env desligada não abre nada — e é
 assim que o piloto fica contido.
 
+### 2.3.1 ATIVAR em caráter PROVISÓRIO (sem validação na WM)
+
+> Use só enquanto o `ZAPERP_API_TOKEN` não existir. Equivale ao `--sem-validar --ativar` do script.
+> O módulo liga, a tela abre, e **qualquer chamada ao ERP falha** com "integração não configurada",
+> porque sem token não há como falar com a WM. Serve para conferir a interface, não para operar.
+
+O `UPDATE` de 2.3 **não serve aqui**: ele exige `validacao_status = 'autorizado'` de propósito, e
+uma linha provisória está como `nao_validado`. A guarda está certa — não remova a condição dela.
+Use este, que é explícito sobre o que está fazendo:
+
+```sql
+UPDATE public.wm_orcamento_integracoes
+   SET ativo = true,
+       atualizado_em = now()
+ WHERE company_id = 1                        -- <<< empresa
+   AND validacao_status = 'nao_validado'     -- provisório: ciente de que NÃO foi validado
+   AND coalesce(telefone_autorizado, '') <> ''
+RETURNING company_id, ativo, telefone_ultimos4, validacao_status;
+```
+
+Conferir o estado sem expor o telefone inteiro:
+
+```sql
+SELECT company_id, ativo, telefone_ultimos4, validacao_status, validado_em, provisionado_por
+  FROM public.wm_orcamento_integracoes
+ WHERE company_id = 1;
+```
+
+Quando o token chegar, rode o script **sem** `--sem-validar`: ele valida contra a WM e grava
+`validacao_status = 'autorizado'`, e aí o caminho normal de 2.3 passa a valer.
+
+Lembre que a validação da WM prova que existe um contato ativo com aquele telefone — **não** prova
+que ele pertence a esta empresa (pendência 13). Essa conferência é humana.
+
 ### 2.4 DESATIVAR a empresa
 
 ```sql
