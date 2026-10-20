@@ -15,14 +15,20 @@ jest.mock('../services/chat/realtime/chatRealtimeGateway', () => ({
   emitirConversaAtualizada: jest.fn(),
 }))
 jest.mock('../services/chat/identity/conversationAddressService', () => ({
-  resolveConversationWhatsappInstance: jest.fn().mockResolvedValue(7),
-  resolveConversationProvider: jest.fn().mockResolvedValue('whapi'),
+  resolveConversationWhatsappInstance: jest.fn(),
+  resolveConversationProvider: jest.fn(),
+  resolveCompanyWhatsappProvider: jest.fn(),
 }))
 jest.mock('../services/providers', () => ({ getProvider: jest.fn() }))
 
 const supabase = require('../config/supabase')
 const { assertPermissaoConversa } = require('../services/chat/access/conversationPolicy')
 const { getProvider } = require('../services/providers')
+const {
+  resolveConversationWhatsappInstance,
+  resolveConversationProvider,
+  resolveCompanyWhatsappProvider,
+} = require('../services/chat/identity/conversationAddressService')
 const { emitirEventoEmpresaConversa } = require('../services/chat/realtime/chatRealtimeGateway')
 const sync = require('../services/chat/sync/chatDeletionSyncService')
 const { apagarConversa } = require('../controllers/chat/conversationCleanupController')
@@ -83,6 +89,9 @@ beforeEach(() => {
   ordem = []
   conversaRow = { ...CONVERSA }
   clienteRow = { id: 99 }
+  resolveConversationWhatsappInstance.mockResolvedValue(7)
+  resolveConversationProvider.mockResolvedValue('whapi')
+  resolveCompanyWhatsappProvider.mockResolvedValue('whapi')
   deleteChat = jest.fn(async () => { ordem.push('provider'); return true })
   getProvider.mockReturnValue({ deleteChat })
   assertPermissaoConversa.mockResolvedValue({ ok: true })
@@ -181,4 +190,65 @@ test('emite conversa_apagada com origem=usuario', async () => {
     expect.anything(), COMPANY, 10, 'conversa_apagada',
     expect.objectContaining({ id: 10, origem: 'usuario', whatsapp_apagado: true }),
   )
+})
+
+// =====================================================================================
+// Regressão do motivo pelo qual "apaguei no ZapERP e não sumiu do WhatsApp" (20/10)
+// =====================================================================================
+
+describe('conversa sem whatsapp_instance_id', () => {
+  test('resolve a instância mesmo com o campo nulo (antes pulava e caía no UltraMSG)', async () => {
+    conversaRow = { ...CONVERSA, whatsapp_instance_id: null }
+    const r = res()
+    await apagarConversa(req(), r)
+
+    expect(resolveConversationWhatsappInstance).toHaveBeenCalledWith(COMPANY, expect.objectContaining({ id: 10 }))
+    expect(deleteChat).toHaveBeenCalled()
+    expect(r.json).toHaveBeenCalledWith(expect.objectContaining({ whatsapp_apagado: true, whatsapp_motivo: null }))
+  })
+
+  test('empresa só-Whapi sem instância na conversa usa o provider DA EMPRESA, não ultramsg', async () => {
+    conversaRow = { ...CONVERSA, whatsapp_instance_id: null }
+    resolveConversationWhatsappInstance.mockResolvedValue(null)
+    resolveCompanyWhatsappProvider.mockResolvedValue('whapi')
+    await apagarConversa(req(), res())
+
+    expect(resolveCompanyWhatsappProvider).toHaveBeenCalledWith(COMPANY)
+    expect(getProvider).toHaveBeenCalledWith({ provider: 'whapi' })
+    expect(deleteChat).toHaveBeenCalled()
+  })
+})
+
+describe('motivo quando não sai do WhatsApp', () => {
+  test('provedor recusa → whatsapp_motivo=provedor_recusou (antes era silêncio)', async () => {
+    deleteChat = jest.fn(async () => false)
+    getProvider.mockReturnValue({ deleteChat })
+    const r = res()
+    await apagarConversa(req(), r)
+    expect(r.json).toHaveBeenCalledWith(expect.objectContaining({ whatsapp_apagado: false, whatsapp_motivo: 'provedor_recusou' }))
+  })
+
+  test('adapter sem deleteChat → provider_sem_suporte', async () => {
+    getProvider.mockReturnValue({})
+    const r = res()
+    await apagarConversa(req(), r)
+    expect(r.json).toHaveBeenCalledWith(expect.objectContaining({ whatsapp_motivo: 'provider_sem_suporte' }))
+  })
+
+  test('conversa por LID → conversa_por_lid e nada é chamado no provedor', async () => {
+    conversaRow = { ...CONVERSA, telefone: 'lid:280396956696801' }
+    const r = res()
+    await apagarConversa(req(), r)
+    expect(deleteChat).not.toHaveBeenCalled()
+    expect(r.json).toHaveBeenCalledWith(expect.objectContaining({ whatsapp_motivo: 'conversa_por_lid' }))
+  })
+
+  test('erro de conexão → erro_de_conexao e a conversa some do sistema mesmo assim', async () => {
+    deleteChat = jest.fn(async () => { throw new Error('ECONNRESET') })
+    getProvider.mockReturnValue({ deleteChat })
+    const r = res()
+    await apagarConversa(req(), r)
+    expect(deletes).toContain('conversas')
+    expect(r.json).toHaveBeenCalledWith(expect.objectContaining({ ok: true, whatsapp_motivo: 'erro_de_conexao' }))
+  })
 })

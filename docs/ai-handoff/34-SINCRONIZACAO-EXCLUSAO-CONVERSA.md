@@ -242,6 +242,40 @@ lista de `candidatos` e compare `provider_chats` com `conversas_examinadas`; só
 
 ---
 
+## 8.1 Por que "não funcionou" na primeira tentativa (20/10)
+
+Duas causas independentes, as duas confirmadas — uma no canal, outra no código.
+
+**(a) O canal não assinava o evento.** `getChannelSettings` do canal de produção
+(`https://zapapi.wmsistemas.inf.br/webhooks/whapi`) listava só:
+
+```
+messages(post,put,patch,delete) · statuses(post,put) · presences(post)
+```
+
+Sem `chats/delete` o aviso de "conversa apagada no celular" **nunca chega** — não há o que o
+código espelhar. `getAllowedEvents` do mesmo canal confirma que `{type:'chats',method:'delete'}`
+é um evento válido e disponível; é só assinatura. Resolve-se rodando
+`POST /integrations/whatsapp/instances/:id/configure-webhooks` — o painel WhapiConnect já faz isso
+sozinho (`tryAutoWebhook`) ao ser aberto, e tem o botão manual (`handleWebhook`).
+
+**(b) ZapERP → WhatsApp morria em silêncio em conversa sem instância.** `apagarChatNoWhatsapp`
+(e `limparChatNoWhatsapp`) faziam:
+
+```js
+const instanceId = conv.whatsapp_instance_id ? await resolveConversationWhatsappInstance(...) : null
+const instanceProvider = await resolveConversationProvider(company_id, instanceId) // null → 'ultramsg'
+```
+
+Conversa com `whatsapp_instance_id` NULO (legado) pulava a resolução e caía no default
+`'ultramsg'`. Numa empresa só-Whapi o adapter UltraMSG recusa ("sem instância configurada"),
+`deleteChat` devolvia `false` e o `false` era **mudo** — resposta e log não distinguiam "não
+apagou" de "apagou". Agora o canal é resolvido como em `outboundController`/`forwardController`
+(resolve sempre; sem instância, pergunta o provider **da empresa**) e o fracasso tem causa:
+`whatsapp_motivo` na resposta (`conversa_sem_telefone` · `conversa_por_lid` ·
+`provider_sem_suporte` · `provedor_recusou` · `erro_de_conexao` · `grupo`) e um `console.warn`
+com empresa, conversa, provider e instância.
+
 ## 9. Risco residual
 
 - **Exclusão remota é irreversível e leva o histórico do atendimento** (mensagens, `atendimentos`,

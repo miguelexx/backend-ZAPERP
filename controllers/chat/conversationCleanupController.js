@@ -10,6 +10,7 @@ const { getProvider } = require('../../services/providers')
 const {
   resolveConversationWhatsappInstance,
   resolveConversationProvider,
+  resolveCompanyWhatsappProvider,
 } = require('../../services/chat/identity/conversationAddressService')
 const { emitirConversaAtualizada, emitirEventoEmpresaConversa } = require('../../services/chat/realtime/chatRealtimeGateway')
 const { assertPermissaoConversa } = require('../../services/chat/access/conversationPolicy')
@@ -23,25 +24,46 @@ const {
 const { registrarExclusaoLocal } = require('../../services/chat/sync/chatDeletionSyncService')
 
 /**
+ * Resolve o canal de uma conversa para ESPELHAR a ação no WhatsApp.
+ *
+ * Por que não basta ler `conv.whatsapp_instance_id`: conversa antiga pode estar com o campo
+ * NULO. Antes, nesse caso, o código pulava a resolução e caía no default `'ultramsg'` do
+ * `resolveConversationProvider` — numa empresa só-Whapi o adapter UltraMSG recusa ("sem
+ * instância configurada") e a exclusão no WhatsApp virava um `false` SILENCIOSO. É o mesmo
+ * caminho que `outboundController`/`forwardController` já usavam para enviar: resolver a
+ * instância sempre (adota a padrão quando é inequívoca) e, sem instância nenhuma, perguntar
+ * o provider no nível da empresa em vez de presumir UltraMSG.
+ */
+async function resolverCanalDaConversa(company_id, conv) {
+  const instanceId = await resolveConversationWhatsappInstance(company_id, conv)
+  const providerName = instanceId
+    ? await resolveConversationProvider(company_id, instanceId)
+    : await resolveCompanyWhatsappProvider(company_id)
+  return { instanceId, providerName, provider: getProvider({ provider: providerName }) }
+}
+
+/**
  * Apaga a conversa também no WhatsApp do próprio número conectado (UltraMSG/Whapi),
  * best-effort. Remove o chat só da conta de atendimento — o WhatsApp não expõe API para
  * apagar a conversa no aparelho do cliente. Nunca lança: falha aqui não pode impedir a
- * exclusão no sistema. Retorna true só quando o provedor confirmou a remoção.
+ * exclusão no sistema.
+ *
+ * @returns {Promise<{ok: boolean, motivo: string|null}>} `motivo` explica o `false` (ia para o
+ * log e para a resposta HTTP; antes o fracasso era mudo e indistinguível de sucesso).
  */
 async function apagarChatNoWhatsapp(company_id, conv) {
   try {
-    if (!conv || isGroupConversation(conv)) return false
+    if (!conv || isGroupConversation(conv)) return { ok: false, motivo: 'grupo' }
     const telefone = String(conv?.telefone || '').trim()
-    if (!telefone) return false
+    if (!telefone) return { ok: false, motivo: 'conversa_sem_telefone' }
     // Endereço LID (sem telefone canônico) não é apagável pelos endpoints de chat.
-    if (telefone.toLowerCase().startsWith('lid:')) return false
+    if (telefone.toLowerCase().startsWith('lid:')) return { ok: false, motivo: 'conversa_por_lid' }
 
-    const instanceId = conv.whatsapp_instance_id
-      ? await resolveConversationWhatsappInstance(company_id, conv)
-      : null
-    const instanceProvider = await resolveConversationProvider(company_id, instanceId)
-    const provider = getProvider({ provider: instanceProvider })
-    if (typeof provider?.deleteChat !== 'function') return false
+    const { instanceId, providerName, provider } = await resolverCanalDaConversa(company_id, conv)
+    if (typeof provider?.deleteChat !== 'function') {
+      console.warn('[apagarConversa] provider sem deleteChat', { company_id, provider: providerName })
+      return { ok: false, motivo: 'provider_sem_suporte' }
+    }
 
     // Guarda anti-loop ANTES de chamar o provedor: apagar lá faz o canal ecoar "chat removido"
     // no webhook (Whapi chats.delete). Registrado antes porque a chamada pode aplicar no WhatsApp
@@ -52,10 +74,20 @@ async function apagarChatNoWhatsapp(company_id, conv) {
       companyId: company_id,
       ...(instanceId ? { whatsappInstanceId: instanceId } : {}),
     })
-    return result === true || result?.ok === true
+    const ok = result === true || result?.ok === true
+    if (!ok) {
+      console.warn('[apagarConversa] provedor NÃO confirmou a exclusão do chat', {
+        company_id,
+        conversa_id: conv?.id ?? null,
+        provider: providerName,
+        whatsapp_instance_id: instanceId,
+      })
+      return { ok: false, motivo: 'provedor_recusou' }
+    }
+    return { ok: true, motivo: null }
   } catch (e) {
     console.warn('[apagarConversa] deleteChat no WhatsApp falhou:', e?.message || e)
-    return false
+    return { ok: false, motivo: 'erro_de_conexao' }
   }
 }
 
@@ -70,11 +102,9 @@ async function limparChatNoWhatsapp(company_id, conv) {
     const telefone = String(conv?.telefone || '').trim()
     if (!telefone || telefone.toLowerCase().startsWith('lid:')) return false
 
-    const instanceId = conv.whatsapp_instance_id
-      ? await resolveConversationWhatsappInstance(company_id, conv)
-      : null
-    const instanceProvider = await resolveConversationProvider(company_id, instanceId)
-    const provider = getProvider({ provider: instanceProvider })
+    // Mesma correção do apagar: sem isto, conversa com whatsapp_instance_id nulo numa empresa
+    // só-Whapi caía no adapter UltraMSG e a limpeza no WhatsApp falhava em silêncio.
+    const { instanceId, provider } = await resolverCanalDaConversa(company_id, conv)
     if (typeof provider?.clearChatMessages !== 'function') return false
 
     const result = await provider.clearChatMessages(telefone, {
@@ -196,7 +226,8 @@ exports.apagarConversa = async (req, res) => {
 
     // Apaga também no WhatsApp do número conectado (best-effort, antes de perder telefone/instância).
     // Só remove do nosso atendimento — não apaga no aparelho do cliente (limitação do WhatsApp).
-    const whatsappApagado = await apagarChatNoWhatsapp(company_id, conv)
+    const espelho = await apagarChatNoWhatsapp(company_id, conv)
+    const whatsappApagado = espelho.ok
 
     const cid = company_id
     const convId = conversa_id
@@ -267,6 +298,8 @@ exports.apagarConversa = async (req, res) => {
       cliente_id: clienteId,
       cliente_id_preservado: contatoPreservado ? clienteId : null,
       whatsapp_apagado: whatsappApagado,
+      // Por que não saiu do WhatsApp (null quando saiu). Sem isto o fracasso era mudo.
+      whatsapp_motivo: espelho.motivo,
     })
   } catch (err) {
     console.error('[apagarConversa]', err)
