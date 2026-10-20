@@ -1,0 +1,163 @@
+Integração ZapERP × API WM
+Guia geral atualizado + contratos de orçamento
+Versão de referência para implementação – 20/10/2026
+ObjetivoEste documento substitui os trechos desatualizados da documentação anterior enviados para a integração do ZapERP. Ele consolida a arquitetura atual, autenticação, endpoints públicos relevantes e, principalmente, o fluxo definitivo de preparação e criação de orçamento.
+1. Regra arquitetural da integração
+O ZapERP consome somente a API WM. Ele não acessa PostgreSQL, SQL Server/Icthus, WebSocket, sincronizador_id, connection strings ou SQL diretamente. O telefone autorizado é parte do contexto da operação; a API WM resolve internamente a empresa e o sincronizador corretos.
+ZapERP  ↓ HTTPSAPI WM  ├─ valida consumidor + telefone autorizado  ├─ decide origem/estratégia da consulta  └─ quando necessário usa o WebSocket já aberto pelo WM Sincronizador         ↓   WM Sincronizador         ↓   SQL Server / Icthus
+1.1 Isolamento entre clientes
+O ZapERP não deve enviar tenant, empresaId ou sincronizador_id como autoridade. Um Bearer válido identifica o consumidor, mas não permite contornar a autorização do telefone. O backend mantém o isolamento entre clientes.
+2. Base URL e autenticação
+Base de produção atualmente utilizada:
+https://apiwmassistente.wmsistemas.inf.br/api/v1/assistente
+Headers padrão:
+Authorization: Bearer <ZAPERP_API_TOKEN>Content-Type: application/json
+O token real deve ficar em configuração segura do ZapERP. Não usar o token do n8n e não usar o token do WM Sincronizador. Nenhum segredo deve ser versionado ou inserido em documentação compartilhada.
+3. Mudanças importantes em relação à documentação anterior
+Tema
+Atualização
+Produto
+Os endpoints /produtos/buscar e /produtos/consultar-atual foram removidos. Usar somente POST /produtos/consultar.
+Contexto/autorização
+O telefone autorizado determina o contexto. Bearer válido não autoriza escolher empresa ou sincronizador arbitrariamente.
+Candidatos de cliente
+As respostas de clientes/ambiguidades podem preservar documentos cadastrais disponíveis (CPF/CNPJ/IE), além de código e nome.
+Orçamento
+A preparação resolve cliente, vendedor e produtos, pode retornar ambiguidades e somente no status pronto_para_confirmacao existe uma prévia apta à confirmação.
+Preço
+preco_unitario vem da preparação e deve ser reenviado como preco_confirmado na criação. O ZapERP não calcula esse preço.
+Idempotência
+A criação usa comando_id. Repetir o mesmo comando com o mesmo payload devolve o resultado já concluído sem gravar outro orçamento.
+4. Endpoints públicos relevantes para o ZapERP
+Endpoint
+Finalidade
+POST /acesso/validar
+Validar antecipadamente se o telefone pode utilizar o Assistente.
+POST /produtos/consultar
+Consulta por busca textual OU código do produto.
+POST /clientes/consultar
+Consulta/resolução de cliente.
+POST /vendas/consultar
+Resumo de vendas por período.
+POST /vendas/ranking-produtos
+Ranking de produtos.
+POST /vendas/ranking-grupos
+Ranking de grupos.
+POST /vendas/comparar
+Comparação de dois períodos, quando utilizada pela integração.
+POST /recebimentos/consultar
+Consultas financeiras/recebimentos nos modos suportados.
+POST /relatorios/gerar
+Geração de PDF para tipos suportados.
+POST /orcamentos/preparar
+Resolve e calcula a prévia; não grava no ERP.
+POST /orcamentos/criar
+Única escrita atual do fluxo comercial de orçamento.
+Fonte de verdade dos contratos: openapi.yaml atualizado da API WM. Em caso de divergência de nomes, enums ou obrigatoriedade, prevalece o OpenAPI.
+5. Consulta de produto – contrato atualizado
+Por texto:
+{  "telefone": "5534XXXXXXXX",  "busca": "Coca Cola 2L"}
+Por código conhecido:
+{  "telefone": "5534XXXXXXXX",  "codigo_produto_erp": "0000474"}
+Enviar busca OU codigo_produto_erp, nunca os dois. O ZapERP não deve reproduzir a lógica antiga de buscar primeiro e depois consultar o produto atual.
+6. Fluxo obrigatório de orçamento
+O fluxo deve separar preparação e escrita. A preparação não grava orçamento. A criação só deve acontecer depois de o usuário visualizar a prévia e confirmar explicitamente.
+POST /orcamentos/preparar        ↓resolver ambiguidades, se existirem        ↓dados.status = "pronto_para_confirmacao"        ↓mostrar cliente + vendedor + itens + total        ↓confirmação explícita do usuário        ↓gerar comando_id (UUID)        ↓POST /orcamentos/criar
+7. POST /orcamentos/preparar
+7.1 Entrada
+Cliente e vendedor aceitam código ou busca, de forma exclusiva. Cada item aceita código do produto ou busca, também de forma exclusiva. A preparação não aceita preco_confirmado nem preco_negociado.
+{  "telefone": "5534XXXXXXXX",  "cliente_codigo_erp": "0000108",  "vendedor_codigo_erp": "001",  "itens": [    {      "codigo_produto_erp": "0000474",      "quantidade": "2"    }  ],  "bloquear_apos_criar": true}
+Exemplo usando buscas em vez de códigos:
+{  "telefone": "5534XXXXXXXX",  "cliente_busca": "JOSE",  "vendedor_busca": "SUPORTE",  "itens": [    {      "busca": "FILTRO FRAM",      "quantidade": "2"    }  ],  "bloquear_apos_criar": true}
+7.2 Possíveis respostas de resolução
+Antes de ficar pronta, a API pode retornar estados como multiplos_clientes, multiplos_vendedores ou produto_ambiguo. Nesses casos o ZapERP deve apresentar as opções ao usuário e repetir a preparação com os códigos escolhidos. Não escolher candidatos automaticamente.
+8. Schema da prévia pronta – pronto_para_confirmacao
+Shape de referência do retorno 200 quando a preparação está resolvida:
+{  "dados": {    "status": "pronto_para_confirmacao",    "cliente": {      "codigo_cliente_erp": "0000108",      "nome": "JOAO DA SILVA"    },    "vendedor": {      "codigo_vendedor_erp": "001",      "nome": "VENDEDOR TESTE"    },    "itens": [      {        "codigo_produto_erp": "0000474",        "descricao": "PRODUTO TESTE",        "quantidade": "2.000",        "preco_unitario": "28.900",        "estoque_previsto": "10.000",        "valor_total": "57.80"      }    ],    "valor_produtos": "57.80",    "valor_total": "57.80",    "bloquear_apos_criar": true  },  "meta": {    "fonte": "tempo_real"  }}
+8.1 Campo de preço que o ZapERP deve utilizar
+Preço oficial da prévia: dados.itens[].preco_unitarioEsse valor vem do preço unitário do produto consultado no Icthus e deve ser preservado para a criação.
+Na implementação atual, a preparação obtém o preço a partir de Estoque.[Preço Unitário]. O ZapERP não deve recalcular preço por valor_total/quantidade, não deve buscar outra fonte e não deve alterar a escala/representação sem necessidade.
+9. POST /orcamentos/criar
+9.1 Entrada
+A criação recebe somente dados canônicos já resolvidos. Não recebe busca, paginação ou preço negociado. Quantidade e preco_confirmado são enviados como strings no contrato atual.
+{  "telefone": "5534XXXXXXXX",  "comando_id": "550e8400-e29b-41d4-a716-446655440000",  "cliente_codigo_erp": "0000108",  "vendedor_codigo_erp": "001",  "itens": [    {      "codigo_produto_erp": "0000474",      "quantidade": "2.000",      "preco_confirmado": "28.900"    }  ],  "bloquear_apos_criar": true}
+9.2 Mapeamento obrigatório da prévia para a criação
+Prévia
+Criação
+dados.cliente.codigo_cliente_erp
+cliente_codigo_erp
+dados.vendedor.codigo_vendedor_erp
+vendedor_codigo_erp
+dados.itens[i].codigo_produto_erp
+itens[i].codigo_produto_erp
+dados.itens[i].quantidade
+itens[i].quantidade
+dados.itens[i].preco_unitario
+itens[i].preco_confirmado
+dados.bloquear_apos_criar
+bloquear_apos_criar
+10. Schema do HTTP 200 de /orcamentos/criar
+Shape de referência do resultado de sucesso:
+{  "dados": {    "codigo_pedido_erp": "0000045979",    "documento_venda": "2 - Orçamento",    "cliente": {      "codigo_cliente_erp": "0000108",      "nome": "JOAO DA SILVA"    },    "vendedor": {      "codigo_vendedor_erp": "001",      "nome": "VENDEDOR TESTE"    },    "valor_total": "57.80",    "bloqueado": true  },  "meta": {    "fonte": "tempo_real",    "criado_em": "2026-10-20T15:40:00"  }}
+O número do orçamento efetivamente gravado no Icthus é dados.codigo_pedido_erp. documento_venda deve representar o documento de orçamento; bloqueado indica o estado de proteção/edição do orçamento, não o campo técnico Fechado.
+11. Idempotência e significado do comando_id
+Cada confirmação nova de criação deve gerar um UUID novo em comando_id. Se a mesma confirmação precisar ser reenviada por falha de transporte, o ZapERP deve reutilizar exatamente o mesmo comando_id e o mesmo payload.
+Situação
+Comportamento
+UUID novo
+A API tenta executar a criação, após todas as validações.
+Mesmo UUID + mesmo payload já concluído
+A API devolve o resultado armazenado e não cria outro orçamento.
+Mesmo UUID + payload diferente
+Erro COMANDO_ID_REUTILIZADO; não criar.
+Resultado incerto
+Erro RESULTADO_INCERTO; não gerar outro UUID automaticamente.
+Dados alterados entre prévia e criação
+ORCAMENTO_DADOS_ALTERADOS; preparar novamente, mostrar nova prévia e pedir nova confirmação.
+11.1 Como saber se criou agora ou se o resultado já existia?
+Contrato atual: o HTTP 200 não possui hoje um campo explícito que diferencie “criado nesta chamada” de “resultado idempotente já concluído”. Os dois casos podem devolver o mesmo resultado de orçamento.
+Portanto, o ZapERP deve tratar ambos como sucesso da mesma ação de negócio. Não inferir essa diferença por meta.criado_em. Se a interface precisar exibir essa distinção, será necessário evoluir o contrato da API com um metadado explícito.
+Sugestão de evolução futura (não existe hoje):
+{  "meta": {    "resultado_comando": "criado_agora"  }}
+ou
+{  "meta": {    "resultado_comando": "resultado_existente"  }}
+12. Tratamento mínimo de erros no ZapERP
+HTTP
+Orientação
+400
+Payload inválido ou dados obrigatórios inconsistentes.
+401
+Bearer ausente/inválido.
+403
+Telefone não autorizado.
+404
+Recurso não encontrado, conforme endpoint.
+409
+Conflito de comando/idempotência ou resultado incerto, conforme código retornado.
+502
+Falha conhecida antes/durante execução no ERP, conforme erro retornado.
+503
+Sincronizador/ambiente do cliente indisponível para a operação.
+504
+Timeout realtime; em escrita, timeout não deve ser interpretado como prova de que nada foi gravado.
+13. Checklist para o programador do ZapERP
+Configurar uma credencial Bearer exclusiva do ZapERP.
+Nunca enviar tenant, empresaId ou sincronizador_id como autoridade.
+Sempre enviar o telefone do contexto confiável da operação.
+Substituir qualquer uso dos endpoints antigos de produto por /produtos/consultar.
+Tratar ambiguidades sem escolher cliente, vendedor ou produto automaticamente.
+No orçamento, chamar /orcamentos/preparar antes de /orcamentos/criar.
+Ler o preço em dados.itens[].preco_unitario e reenviar exatamente como preco_confirmado.
+Exigir confirmação explícita antes da criação.
+Gerar um comando_id por nova confirmação e reutilizá-lo em retries da mesma confirmação.
+Em ORCAMENTO_DADOS_ALTERADOS, repreparar e pedir nova confirmação.
+Em RESULTADO_INCERTO, não criar novo comando automaticamente.
+Usar dados.codigo_pedido_erp como número do orçamento criado.
+Tratar HTTP 200 idempotente como sucesso da mesma ação; hoje não há flag explícita novo × reaproveitado.
+Usar o openapi.yaml atual como fonte de verdade para schemas e enums.
+14. Texto curto de atualização para acompanhar o documento
+Pode ser enviado junto com este arquivo ao programador:
+Atualizamos alguns pontos da integração ZapERP × API WM. A principal mudança é que produto agora usa somente POST /produtos/consultar; os endpoints antigos /produtos/buscar e /produtos/consultar-atual foram removidos. A autenticação do ZapERP deve usar o Bearer próprio do consumidor e o telefone continua sendo a referência para a API resolver o contexto autorizado; não enviar tenant, empresa ou sincronizador como autoridade.No orçamento, o fluxo definitivo é preparar → resolver ambiguidades → pronto_para_confirmacao → confirmação do usuário → criar. O preço a ser preservado sai de dados.itens[].preco_unitario da preparação e deve ser reenviado em itens[].preco_confirmado na criação. A criação é idempotente por comando_id: em retry da mesma confirmação, reutilize o mesmo UUID e o mesmo payload.O número do orçamento gravado vem em dados.codigo_pedido_erp. Importante: hoje o HTTP 200 não diferencia no body se o orçamento foi criado nesta chamada ou se foi retornado de um resultado idempotente já concluído; ambos devem ser tratados como sucesso da mesma ação. Se precisarmos mostrar essa distinção na interface, faremos uma pequena evolução no contrato da API.
+15. Observações de compatibilidade
+Este documento descreve os contratos atuais conhecidos da integração. Ele não cria novos campos na API. Em especial, resultado_comando/idempotente é apenas uma sugestão de evolução e não deve ser consumido até existir no OpenAPI e na resposta real.
+Para qualquer ponto não detalhado aqui (limites, enums, filtros específicos de relatórios/recebimentos ou campos opcionais), consultar o openapi.yaml da versão implantada.

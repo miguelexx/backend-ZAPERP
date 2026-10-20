@@ -23,6 +23,7 @@ As seguintes mudanças ocorreram no working tree e/ou foram commitadas após a a
 | Busca por prefixo de palavra | `20260823230000_chat_search_word_prefix.sql` | Nova RPC de busca |
 | Nomes vinculados (irmãos no mesmo telefone) | `20260827220000_cliente_nomes_vinculados.sql` | Tabela + EXISTS nas RPCs de busca; só importação com switch. Não aplicada automaticamente. |
 | R2 storage para mensagens | `20260813120000_mensagens_storage_r2.sql` | Campo `r2_key` em mensagens |
+| Orçamento WM — fundação | `20261020120000_wm_orcamentos.sql` | Tabelas `wm_orcamento_integracoes` e `wm_orcamento_operacoes`. **NÃO aplicada.** Módulo desligado (`WM_ORCAMENTOS_ENABLED=false`); as 5 rotas de `/orcamentos` **estão montadas em `app.js` desde a Sessão 3A e respondem 403 a tudo** — `requireOrcamentoWm` é fail-closed e `helpers/orcamentoWmFlag.js` trata tabela ausente como desligado, então o sistema não quebra sem a migration. Criação real no ERP ainda **não existe** (Sessão 6). Plano: [36](36-ORCAMENTO-WM-INTEGRACAO.md) |
 
 ## Objetivo e estado
 

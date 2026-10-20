@@ -1,0 +1,1648 @@
+openapi: 3.0.3
+info:
+  title: API WM
+  version: 0.1.0
+paths:
+  /api/v1/admin/empresas/{empresaId}/resumo-gestor:
+    parameters:
+      - { name: empresaId, in: path, required: true, schema: { type: integer, minimum: 1 } }
+    get:
+      summary: Consulta a configuração do Resumo Diário do Gestor
+      security: [{ adminSession: [] }, { adminLocalSession: [] }]
+      responses:
+        '200':
+          description: Configuração ou null quando ainda não cadastrada; no-store.
+          content:
+            application/json:
+              schema: { type: object, properties: { configuracao: { $ref: '#/components/schemas/ResumoGestorConfiguracao' } } }
+        '401': { description: Sessão inválida }
+        '404': { description: Empresa inexistente }
+    put:
+      summary: Substitui a configuração; exige contatos ativos da própria empresa
+      security: [{ adminSession: [] }, { adminLocalSession: [] }]
+      parameters:
+        - { $ref: '#/components/parameters/AdminCsrf' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ResumoGestorConfiguracaoInput' }
+      responses:
+        '200':
+          description: Configuração salva e revisão incrementada; execuções existentes não mudam.
+          content:
+            application/json:
+              schema: { type: object, properties: { configuracao: { $ref: '#/components/schemas/ResumoGestorConfiguracao' } } }
+        '400': { description: Payload ou contatos inválidos/inativos/de outra empresa }
+        '401': { description: Sessão inválida }
+        '403': { description: CSRF/origem inválidos }
+        '404': { description: Empresa inexistente }
+  /api/v1/assistente/resumo-gestor/execucoes/materializar:
+    post:
+      summary: Materializa agendas devidas nas últimas 24h e mantém expiração/leases
+      description: Apenas n8n. Relógio e identidade são determinados internamente pela API.
+      security: [{ n8nScheduler: [] }]
+      requestBody:
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: false }
+      responses:
+        '200':
+          description: Materialização idempotente, sem consulta ao ERP e sem envio de mensagem.
+          content:
+            application/json:
+              schema: { type: object, required: [criadas], properties: { criadas: { type: integer, minimum: 0 } } }
+        '400': { description: Payload não vazio/autoridade informada pelo cliente }
+        '401': { description: Credencial inválida }
+        '403': { description: Consumidor não é n8n }
+  /api/v1/assistente/resumo-gestor/execucoes/pendentes:
+    get:
+      summary: Lista trabalhos elegíveis, sem conceder lease
+      security: [{ n8nScheduler: [] }]
+      parameters:
+        - { name: limite, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 20 } }
+      responses:
+        '200':
+          description: Metadados sem dados operacionais, empresa_id, sincronizador_id ou lease de geração.
+          content:
+            application/json:
+              schema: { type: object, properties: { execucoes: { type: array, items: { $ref: '#/components/schemas/ResumoGestorExecucao' } } } }
+        '400': { description: Query inválida }
+        '401': { description: Credencial inválida }
+        '403': { description: Consumidor não é n8n }
+  /api/v1/assistente/resumo-gestor/execucoes/{id}/gerar:
+    post:
+      summary: Gera via RESUMO_GESTOR_DIARIO obrigatório, sem cache cloud
+      description: Timeout 30s; lease 60s. Offline/falha retorna estado recuperável sem dados. Após sucesso reutiliza somente o artefato da mesma execução.
+      security: [{ n8nScheduler: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer, minimum: 1 } }
+      requestBody:
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: false }
+      responses:
+        '200':
+          description: Verificar status; dados existem somente em sucesso persistido.
+          content:
+            application/json:
+              schema: { type: object, properties: { execucao: { $ref: '#/components/schemas/ResumoGestorExecucao' } } }
+        '400': { description: Payload inválido }
+        '401': { description: Credencial inválida }
+        '403': { description: Consumidor não é n8n }
+        '404': { description: Execução inexistente }
+        '409': { description: Lease em uso/inválido, aguarde retry ou configuração inativa }
+        '410': { description: Execução expirada }
+  /api/v1/assistente/resumo-gestor/execucoes/{id}/envios:
+    get:
+      summary: Inspeciona resultados individuais; não autoriza novo envio
+      security: [{ n8nScheduler: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer, minimum: 1 } }
+      responses:
+        '200':
+          description: Estado por destinatário. Para enviar usar somente reservas obtidas no POST.
+          content:
+            application/json:
+              schema: { type: object, properties: { envios: { type: array, items: { $ref: '#/components/schemas/ResumoGestorEnvio' } } } }
+        '401': { description: Credencial inválida }
+        '403': { description: Consumidor não é n8n }
+        '404': { description: Execução inexistente }
+  /api/v1/assistente/resumo-gestor/execucoes/{id}/envios/reservar:
+    post:
+      summary: Reserva envios elegíveis por 120s, excluindo enviado/envio_incerto
+      security: [{ n8nScheduler: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer, minimum: 1 } }
+      requestBody:
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: false, properties: { limite: { type: integer, minimum: 1, maximum: 100, default: 20 } } }
+      responses:
+        '200':
+          description: Enviar somente os destinatários reservados nesta resposta, antes de processamento_ate.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  execucao: { $ref: '#/components/schemas/ResumoGestorExecucao' }
+                  envios: { type: array, items: { $ref: '#/components/schemas/ResumoGestorEnvio' } }
+        '400': { description: Payload inválido }
+        '401': { description: Credencial inválida }
+        '403': { description: Consumidor não é n8n }
+        '404': { description: Execução inexistente }
+        '409': { description: Resumo ainda não gerado/configuração inativa }
+        '410': { description: Execução expirada }
+  /api/v1/assistente/resumo-gestor/envios/{id}/resultado:
+    post:
+      summary: Confirma resultado individual vinculado à tentativa, idempotente
+      description: Timeout/aceitação desconhecida deve ser envio_incerto, nunca falha. Não recebe erro livre do provider.
+      security: [{ n8nScheduler: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer, minimum: 1 } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ResumoGestorResultadoEnvio' }
+      responses:
+        '200':
+          description: Confirmação registrada ou duplicata exata sem nova tentativa.
+          content:
+            application/json:
+              schema: { type: object, properties: { envio: { $ref: '#/components/schemas/ResumoGestorEnvio' } } }
+        '400': { description: Payload inválido }
+        '401': { description: Credencial inválida }
+        '403': { description: Consumidor não é n8n }
+        '404': { description: Envio inexistente }
+        '409': { description: Tentativa desatualizada, lease inválido ou confirmação conflitante }
+  /api/v1/admin/usuarios:
+    get:
+      summary: Lista usuários administrativos sem senha/hash
+      security: [{ adminSession: [] }, { adminLocalSession: [] }]
+      responses:
+        '200':
+          description: Resposta sem secrets; Cache-Control no-store.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AdminUsuariosResposta' }
+        '400': { description: Payload inválido }
+        '401': { description: Sessão inválida/expirada ou usuário inativo }
+        '403': { description: CSRF/origem inválidos }
+        '404': { description: Usuário inexistente }
+        '409': { description: Usuário duplicado ou último administrador ativo }
+    post:
+      summary: Cria usuário WM; todos possuem a mesma permissão
+      security: [{ adminSession: [] }, { adminLocalSession: [] }]
+      parameters:
+        - { $ref: '#/components/parameters/AdminCsrf' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AdminUsuarioCadastro' }
+      responses:
+        '201':
+          description: Resposta sem secrets; Cache-Control no-store.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AdminUsuarioResposta' }
+        '400': { description: Payload inválido }
+        '401': { description: Sessão inválida/expirada ou usuário inativo }
+        '403': { description: CSRF/origem inválidos }
+        '404': { description: Usuário inexistente }
+        '409': { description: Usuário duplicado ou último administrador ativo }
+  /api/v1/admin/usuarios/{id}:
+    patch:
+      summary: Altera nome/ativo; protege o último administrador ativo
+      security: [{ adminSession: [] }, { adminLocalSession: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer, minimum: 1 } }
+        - { $ref: '#/components/parameters/AdminCsrf' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AdminUsuarioPatch' }
+      responses:
+        '200':
+          description: Resposta sem secrets; Cache-Control no-store.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AdminUsuarioResposta' }
+        '400': { description: Payload inválido }
+        '401': { description: Sessão inválida/expirada ou usuário inativo }
+        '403': { description: CSRF/origem inválidos }
+        '404': { description: Usuário inexistente }
+        '409': { description: Usuário duplicado ou último administrador ativo }
+  /api/v1/admin/usuarios/{id}/redefinir-senha:
+    post:
+      summary: Redefine senha e revoga todas as sessões daquele usuário
+      security: [{ adminSession: [] }, { adminLocalSession: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer, minimum: 1 } }
+        - { $ref: '#/components/parameters/AdminCsrf' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AdminRedefinirSenha' }
+      responses:
+        '200':
+          description: Resposta sem secrets; Cache-Control no-store.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AdminUsuarioResposta' }
+        '400': { description: Payload inválido }
+        '401': { description: Sessão inválida/expirada ou usuário inativo }
+        '403': { description: CSRF/origem inválidos }
+        '404': { description: Usuário inexistente }
+        '409': { description: Usuário duplicado ou último administrador ativo }
+  /api/v1/admin/auth/login:
+    post:
+      summary: Login administrativo
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AdminLogin' }
+      responses:
+        '200':
+          description: Resposta administrativa; Cache-Control no-store. Tokens somente na emissão.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AdminSessao' }
+        '401': { description: Sessão inválida/expirada ou credenciais inválidas }
+        '403': { description: CSRF ou origem inválida }
+        '400': { description: Payload inválido }
+        '429': { description: Limite de tentativas/derivações atingido }
+        '404': { description: Recurso inexistente ou relação inválida }
+        '409': { description: 'Identidade provisionada, duplicidade ou conflito' }
+        '503': { description: Admin não configurado }
+        default:
+          description: Erro sanitizado
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AdminErro' }
+  /api/v1/admin/auth/me:
+    get:
+      summary: Sessão administrativa atual
+      security: [{ adminSession: [] }, { adminLocalSession: [] }]
+      responses:
+        '200':
+          description: Resposta administrativa; Cache-Control no-store. Tokens somente na emissão.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AdminSessao' }
+        '401': { description: Sessão inválida/expirada ou credenciais inválidas }
+        '403': { description: CSRF ou origem inválida }
+        '400': { description: Payload inválido }
+        '404': { description: Recurso inexistente ou relação inválida }
+        '409': { description: 'Identidade provisionada, duplicidade ou conflito' }
+        '503': { description: Admin não configurado }
+        default:
+          description: Erro sanitizado
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AdminErro' }
+  /api/v1/admin/auth/logout:
+    post:
+      summary: Revoga sessão e remove cookie
+      security: [{ adminSession: [] }, { adminLocalSession: [] }]
+      parameters:
+        - { $ref: '#/components/parameters/AdminCsrf' }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AdminBodyVazio' }
+      responses:
+        '204':
+          description: Sessão encerrada
+        '401': { description: Sessão inválida/expirada ou credenciais inválidas }
+        '403': { description: CSRF ou origem inválida }
+        '400': { description: Payload inválido }
+        '404': { description: Recurso inexistente ou relação inválida }
+        '409': { description: 'Identidade provisionada, duplicidade ou conflito' }
+        '503': { description: Admin não configurado }
+        default:
+          description: Erro sanitizado
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AdminErro' }
+  /api/v1/admin/empresas:
+    get:
+      summary: Lista empresas e resumo do sincronizador sem N+1
+      security: [{ adminSession: [] }, { adminLocalSession: [] }]
+      parameters:
+        - { name: busca, in: query, schema: { type: string, maxLength: 100 }, description: Nome por trecho ou CNPJ completo com/sem pontuação }
+        - { name: limite, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 20 } }
+        - { name: offset, in: query, schema: { type: integer, minimum: 0, maximum: 1000000, default: 0 } }
+      responses:
+        '200':
+          description: Resposta administrativa; Cache-Control no-store. Tokens somente na emissão.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AdminEmpresas' }
+        '401': { description: Sessão inválida/expirada ou credenciais inválidas }
+        '403': { description: CSRF ou origem inválida }
+        '400': { description: Payload inválido }
+        '404': { description: Recurso inexistente ou relação inválida }
+        '409': { description: 'Identidade provisionada, duplicidade ou conflito' }
+        '503': { description: Admin não configurado }
+        default:
+          description: Erro sanitizado
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AdminErro' }
+    post:
+      summary: Cadastra empresa pelo CNPJ normalizado
+      security: [{ adminSession: [] }, { adminLocalSession: [] }]
+      parameters:
+        - { $ref: '#/components/parameters/AdminCsrf' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AdminEmpresaCadastro' }
+      responses:
+        '201':
+          description: Resposta administrativa; Cache-Control no-store. Tokens somente na emissão.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AdminEmpresaResposta' }
+        '401': { description: Sessão inválida/expirada ou credenciais inválidas }
+        '403': { description: CSRF ou origem inválida }
+        '400': { description: Payload inválido }
+        '404': { description: Recurso inexistente ou relação inválida }
+        '409': { description: 'Identidade provisionada, duplicidade ou conflito' }
+        '503': { description: Admin não configurado }
+        default:
+          description: Erro sanitizado
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AdminErro' }
+  /api/v1/admin/empresas/{id}:
+    get:
+      summary: Consulta empresa
+      security: [{ adminSession: [] }, { adminLocalSession: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer, minimum: 1, maximum: 9007199254740991 } }
+      responses:
+        '200':
+          description: Resposta administrativa; Cache-Control no-store. Tokens somente na emissão.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AdminEmpresaResposta' }
+        '401': { description: Sessão inválida/expirada ou credenciais inválidas }
+        '403': { description: CSRF ou origem inválida }
+        '400': { description: Payload inválido }
+        '404': { description: Recurso inexistente ou relação inválida }
+        '409': { description: 'Identidade provisionada, duplicidade ou conflito' }
+        '503': { description: Admin não configurado }
+        default:
+          description: Erro sanitizado
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AdminErro' }
+    patch:
+      summary: Edita nome; identidade só antes do provisionamento
+      security: [{ adminSession: [] }, { adminLocalSession: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer, minimum: 1, maximum: 9007199254740991 } }
+        - { $ref: '#/components/parameters/AdminCsrf' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AdminEmpresaPatch' }
+      responses:
+        '200':
+          description: Resposta administrativa; Cache-Control no-store. Tokens somente na emissão.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AdminEmpresaResposta' }
+        '401': { description: Sessão inválida/expirada ou credenciais inválidas }
+        '403': { description: CSRF ou origem inválida }
+        '400': { description: Payload inválido }
+        '404': { description: Recurso inexistente ou relação inválida }
+        '409': { description: 'Identidade provisionada, duplicidade ou conflito' }
+        '503': { description: Admin não configurado }
+        default:
+          description: Erro sanitizado
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AdminErro' }
+  /api/v1/admin/empresas/{empresaId}/sincronizador:
+    post:
+      summary: Provisiona pelo service da Etapa 3; token emitido uma vez
+      security: [{ adminSession: [] }, { adminLocalSession: [] }]
+      parameters:
+        - { name: empresaId, in: path, required: true, schema: { type: integer, minimum: 1, maximum: 9007199254740991 } }
+        - { $ref: '#/components/parameters/AdminCsrf' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AdminProvisionar' }
+      responses:
+        '201':
+          description: Resposta administrativa; Cache-Control no-store. Tokens somente na emissão.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AdminTokenProvisionado' }
+        '401': { description: Sessão inválida/expirada ou credenciais inválidas }
+        '403': { description: CSRF ou origem inválida }
+        '400': { description: Payload inválido }
+        '404': { description: Recurso inexistente ou relação inválida }
+        '409': { description: 'Identidade provisionada, duplicidade ou conflito' }
+        '503': { description: Admin não configurado }
+        default:
+          description: Erro sanitizado
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AdminErro' }
+  /api/v1/admin/sincronizadores/{id}:
+    get:
+      summary: Consulta sincronizador sem token ou hash
+      security: [{ adminSession: [] }, { adminLocalSession: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer, minimum: 1, maximum: 9007199254740991 } }
+      responses:
+        '200':
+          description: Resposta administrativa; Cache-Control no-store. Tokens somente na emissão.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AdminSincronizadorResposta' }
+        '401': { description: Sessão inválida/expirada ou credenciais inválidas }
+        '403': { description: CSRF ou origem inválida }
+        '400': { description: Payload inválido }
+        '404': { description: Recurso inexistente ou relação inválida }
+        '409': { description: 'Identidade provisionada, duplicidade ou conflito' }
+        '503': { description: Admin não configurado }
+        default:
+          description: Erro sanitizado
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AdminErro' }
+  /api/v1/admin/sincronizadores/{id}/status:
+    get:
+      summary: Status persistido e WSS da instância atual
+      security: [{ adminSession: [] }, { adminLocalSession: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer, minimum: 1, maximum: 9007199254740991 } }
+      responses:
+        '200':
+          description: Resposta administrativa; Cache-Control no-store. Tokens somente na emissão.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AdminStatusResposta' }
+        '401': { description: Sessão inválida/expirada ou credenciais inválidas }
+        '403': { description: CSRF ou origem inválida }
+        '400': { description: Payload inválido }
+        '404': { description: Recurso inexistente ou relação inválida }
+        '409': { description: 'Identidade provisionada, duplicidade ou conflito' }
+        '503': { description: Admin não configurado }
+        default:
+          description: Erro sanitizado
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AdminErro' }
+  /api/v1/admin/sincronizadores/{id}/ativar:
+    post:
+      summary: Ativa sem gerar token
+      security: [{ adminSession: [] }, { adminLocalSession: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer, minimum: 1, maximum: 9007199254740991 } }
+        - { $ref: '#/components/parameters/AdminCsrf' }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AdminBodyVazio' }
+      responses:
+        '200':
+          description: Resposta administrativa; Cache-Control no-store. Tokens somente na emissão.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AdminSincronizadorResposta' }
+        '401': { description: Sessão inválida/expirada ou credenciais inválidas }
+        '403': { description: CSRF ou origem inválida }
+        '400': { description: Payload inválido }
+        '404': { description: Recurso inexistente ou relação inválida }
+        '409': { description: 'Identidade provisionada, duplicidade ou conflito' }
+        '503': { description: Admin não configurado }
+        default:
+          description: Erro sanitizado
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AdminErro' }
+  /api/v1/admin/sincronizadores/{id}/desativar:
+    post:
+      summary: Desativa e encerra WSS da instância atual
+      security: [{ adminSession: [] }, { adminLocalSession: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer, minimum: 1, maximum: 9007199254740991 } }
+        - { $ref: '#/components/parameters/AdminCsrf' }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AdminBodyVazio' }
+      responses:
+        '200':
+          description: Resposta administrativa; Cache-Control no-store. Tokens somente na emissão.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AdminSincronizadorResposta' }
+        '401': { description: Sessão inválida/expirada ou credenciais inválidas }
+        '403': { description: CSRF ou origem inválida }
+        '400': { description: Payload inválido }
+        '404': { description: Recurso inexistente ou relação inválida }
+        '409': { description: 'Identidade provisionada, duplicidade ou conflito' }
+        '503': { description: Admin não configurado }
+        default:
+          description: Erro sanitizado
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AdminErro' }
+  /api/v1/admin/sincronizadores/{id}/rotacionar-token:
+    post:
+      summary: Rotaciona token, preserva ativo e encerra WSS local
+      security: [{ adminSession: [] }, { adminLocalSession: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer, minimum: 1, maximum: 9007199254740991 } }
+        - { $ref: '#/components/parameters/AdminCsrf' }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AdminBodyVazio' }
+      responses:
+        '200':
+          description: Resposta administrativa; Cache-Control no-store. Tokens somente na emissão.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AdminTokenRotacionado' }
+        '401': { description: Sessão inválida/expirada ou credenciais inválidas }
+        '403': { description: CSRF ou origem inválida }
+        '400': { description: Payload inválido }
+        '404': { description: Recurso inexistente ou relação inválida }
+        '409': { description: 'Identidade provisionada, duplicidade ou conflito' }
+        '503': { description: Admin não configurado }
+        default:
+          description: Erro sanitizado
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AdminErro' }
+  /api/v1/admin/sincronizadores/{id}/contatos:
+    get:
+      summary: Lista contatos do sincronizador
+      security: [{ adminSession: [] }, { adminLocalSession: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer, minimum: 1, maximum: 9007199254740991 } }
+      responses:
+        '200':
+          description: Resposta administrativa; Cache-Control no-store. Tokens somente na emissão.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AdminContatos' }
+        '401': { description: Sessão inválida/expirada ou credenciais inválidas }
+        '403': { description: CSRF ou origem inválida }
+        '400': { description: Payload inválido }
+        '404': { description: Recurso inexistente ou relação inválida }
+        '409': { description: 'Identidade provisionada, duplicidade ou conflito' }
+        '503': { description: Admin não configurado }
+        default:
+          description: Erro sanitizado
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AdminErro' }
+    post:
+      summary: Cadastra contato com telefone normalizado
+      security: [{ adminSession: [] }, { adminLocalSession: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer, minimum: 1, maximum: 9007199254740991 } }
+        - { $ref: '#/components/parameters/AdminCsrf' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AdminContatoCadastro' }
+      responses:
+        '201':
+          description: Resposta administrativa; Cache-Control no-store. Tokens somente na emissão.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AdminContatoResposta' }
+        '401': { description: Sessão inválida/expirada ou credenciais inválidas }
+        '403': { description: CSRF ou origem inválida }
+        '400': { description: Payload inválido }
+        '404': { description: Recurso inexistente ou relação inválida }
+        '409': { description: 'Identidade provisionada, duplicidade ou conflito' }
+        '503': { description: Admin não configurado }
+        default:
+          description: Erro sanitizado
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AdminErro' }
+  /api/v1/admin/sincronizadores/{id}/contatos/{contatoId}:
+    patch:
+      summary: Edita/ativa/desativa contato somente no sincronizador da URL
+      security: [{ adminSession: [] }, { adminLocalSession: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer, minimum: 1, maximum: 9007199254740991 } }
+        - { name: contatoId, in: path, required: true, schema: { type: integer, minimum: 1, maximum: 9007199254740991 } }
+        - { $ref: '#/components/parameters/AdminCsrf' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AdminContatoPatch' }
+      responses:
+        '200':
+          description: Resposta administrativa; Cache-Control no-store. Tokens somente na emissão.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AdminContatoResposta' }
+        '401': { description: Sessão inválida/expirada ou credenciais inválidas }
+        '403': { description: CSRF ou origem inválida }
+        '400': { description: Payload inválido }
+        '404': { description: Recurso inexistente ou relação inválida }
+        '409': { description: 'Identidade provisionada, duplicidade ou conflito' }
+        '503': { description: Admin não configurado }
+        default:
+          description: Erro sanitizado
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AdminErro' }
+  /api/v1/sincronizadores/identidade:
+    get:
+      summary: Identidade da instalação resolvida exclusivamente pelo token do Worker
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Sincronizador ativo e empresa vinculada, sem token ou hash
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/IdentidadeSincronizador' }
+        '401':
+          description: Token ausente, inválido ou sincronizador inativo
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [erro]
+                properties:
+                  erro: { type: string, enum: [token_ausente, token_invalido] }
+  /api/v1/sincronizacoes/vendas/checkpoint:
+    get:
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200': { description: Checkpoint atual }
+  /api/v1/sincronizacoes/vendas:
+    post:
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [vendas]
+              properties:
+                vendas:
+                  type: array
+                  items:
+                    $ref: '#/components/schemas/Venda'
+      responses:
+        '200': { description: Lote persistido transacionalmente }
+  /api/v1/sincronizadores/heartbeat:
+    post:
+      security: [{ bearerAuth: [] }]
+      responses:
+        '204': { description: Heartbeat registrado }
+  /api/v1/assistente/relatorios/gerar:
+    post:
+      security: [{ bearerAuth: [] }]
+      summary: Gera relatório PDF realtime de vendas ou estoque
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GerarRelatorio'
+      responses:
+        '200':
+          description: Relatório gerado
+          content:
+            application/pdf:
+              schema: { type: string, format: binary }
+        '400': { description: Tipo, filtros ou período inválido }
+        '403': { description: Contato não autorizado }
+        '503': { description: Sincronizador offline }
+        '504': { description: Timeout da operação realtime }
+  /api/v1/assistente/recebimentos/consultar:
+    post:
+      security: [{ bearerAuth: [] }]
+      summary: Consulta recebimentos realtime
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ConsultarRecebimentos' }
+      responses:
+        '200': { description: Resultado realtime }
+        '400': { description: Payload ou período inválido }
+        '403': { description: Contato não autorizado }
+        '503': { description: Sincronizador offline }
+        '504': { description: Timeout realtime }
+  /api/v1/assistente/acesso/validar:
+    post:
+      security: [{ bearerAuth: [] }]
+      summary: Valida antecipadamente o acesso de um telefone ao Assistente
+      description: Exige credencial Bearer própria do sistema consumidor (n8n ou backend ZapERP) e a autorização existente por telefone em assistente_contatos, sem executar consultas operacionais ou retornar IDs internos.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ValidarAcessoAssistente' }
+      responses:
+        '200':
+          description: Contato ativo autorizado
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [autorizado]
+                properties:
+                  autorizado: { type: boolean, enum: [true] }
+        '400': { description: Payload inválido }
+        '401':
+          description: Bearer de integração ausente ou inválido
+          content:
+            application/json:
+              example: { erro: TOKEN_ASSISTENTE_INVALIDO }
+        '403':
+          description: Contato inexistente/inativo ou telefone normalizado fora de 8–15 dígitos
+          content:
+            application/json:
+              example: { erro: CONTATO_NAO_AUTORIZADO }
+  /api/v1/assistente/clientes/consultar:
+    post:
+      security: [{ bearerAuth: [] }]
+      summary: Consulta clientes realtime
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ConsultarCliente' }
+      responses:
+        '200':
+          description: Cliente único ou candidatos enriquecidos, sem escolha automática
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ConsultarClientesResposta' }
+        '400': { description: Payload inválido ou PAGINA_FORA_DO_INTERVALO }
+        '404': { description: Cliente não encontrado }
+  /api/v1/assistente/produtos/consultar:
+    post:
+      security: [{ bearerAuth: [] }]
+      summary: Consulta produto e estoque por código ou busca textual
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ConsultarProduto' }
+      responses:
+        '200':
+          description: Produto resolvido globalmente ou candidatos paginados de 30; limite legado não limita resultados
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ConsultarProdutoResposta' }
+        '400': { description: Busca/código/página inválidos ou PAGINA_FORA_DO_INTERVALO }
+        '403': { description: Contato não autorizado }
+        '404': { description: Produto não encontrado }
+  /api/v1/assistente/vendas/consultar:
+    post:
+      security: [{ bearerAuth: [] }]
+      summary: Consulta o resumo de vendas no período
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ConsultarResumoVendas' }
+      responses:
+        '200': { description: Resumo de vendas }
+        '400': { description: Período inválido }
+        '403': { description: Contato não autorizado }
+        '503': { description: Sincronizador offline }
+        '504': { description: Timeout realtime }
+  /api/v1/assistente/vendas/ranking-produtos:
+    post:
+      security: [{ bearerAuth: [] }]
+      summary: Consulta ranking de produtos por valor ou quantidade
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ConsultarRankingVendas' }
+      responses:
+        '200': { description: Ranking de produtos }
+        '400': { description: Período ou limite inválido }
+        '403': { description: Contato não autorizado }
+        '503': { description: Sincronizador offline }
+        '504': { description: Timeout realtime }
+  /api/v1/assistente/vendas/ranking-grupos:
+    post:
+      security: [{ bearerAuth: [] }]
+      summary: Consulta ranking de grupos por valor ou quantidade
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ConsultarRankingVendas' }
+      responses:
+        '200': { description: Ranking de grupos }
+        '400': { description: Período ou limite inválido }
+        '403': { description: Contato não autorizado }
+        '503': { description: Sincronizador offline }
+        '504': { description: Timeout realtime }
+  /api/v1/assistente/vendas/comparar:
+    post:
+      security: [{ bearerAuth: [] }]
+      summary: Compara dois períodos de vendas efetivas em tempo real
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CompararVendas' }
+      responses:
+        '200': { description: Comparação de vendas }
+        '400': { description: Período inválido }
+        '403': { description: Contato não autorizado }
+        '503': { description: Sincronizador offline }
+        '504': { description: Timeout realtime }
+  /api/v1/assistente/orcamentos/preparar:
+    post:
+      security: [{ bearerAuth: [] }]
+      summary: Valida e calcula prévia de orçamento sem escrita
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PrepararOrcamento' }
+      responses:
+        '200':
+          description: Prévia realtime ou ambiguidade; documentos do cliente e preço/estoque dos produtos nos candidatos
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PrepararOrcamentoResposta' }
+        '400':
+          description: Payload inválido ou PAGINA_FORA_DO_INTERVALO; não há clamp silencioso
+        '404': { description: Nenhum cliente elegível encontrado na busca }
+        '502':
+          description: ERP recusou a preparação. Erros conhecidos de resolução são recuperáveis; não confundir com indisponibilidade técnica. PRODUTO_NAO_ENCONTRADO e PRODUTO_INATIVO incluem indice_item zero-based.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [erro]
+                properties:
+                  erro: { type: string }
+                  indice_item: { type: integer, minimum: 0, description: 'Somente falhas de resolução de produto; índice zero-based no array itens enviado' }
+        '503': { description: Sincronizador offline }
+        '504': { description: Timeout realtime }
+  /api/v1/assistente/orcamentos/criar:
+    post:
+      security: [{ bearerAuth: [] }]
+      summary: Cria orçamento no ERP após confirmação de preço, com idempotência por comando_id
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CriarOrcamento' }
+      responses:
+        '200': { description: Orçamento criado ou resultado idempotente já concluído }
+        '400': { description: Payload inválido }
+        '409': { description: comando_id reutilizado, em andamento ou com resultado incerto; não é repetido automaticamente }
+        '502': { description: ERP recusou a criação antes da escrita }
+        '503': { description: Sincronizador offline antes do envio }
+        '504': { description: Timeout; o resultado é tratado como incerto }
+components:
+  parameters:
+    AdminCsrf:
+      name: X-WM-CSRF
+      in: header
+      required: true
+      schema: { type: string }
+      description: Token CSRF retornado por login/me; também validar Origin do browser.
+  securitySchemes:
+    n8nScheduler: { type: http, scheme: bearer, description: Exclusivamente N8N_API_TOKEN; não aceita ZapERP, cookie admin ou token Worker }
+    adminSession: { type: apiKey, in: cookie, name: __Host-wm_admin, description: Cookie HttpOnly Secure SameSite=Strict em produção }
+    adminLocalSession: { type: apiKey, in: cookie, name: wm_admin, description: Cookie local sem Secure apenas para desenvolvimento HTTP }
+    bearerAuth: { type: http, scheme: bearer }
+  schemas:
+    ResumoGestorConfiguracaoInput:
+      type: object
+      additionalProperties: false
+      required: [ativo, horario_local, periodo, dias_semana, contato_ids]
+      properties:
+        ativo: { type: boolean }
+        horario_local: { type: string, pattern: '^(?:[01]\d|2[0-3]):[0-5]\d$', example: '18:00' }
+        periodo: { type: string, enum: [dia_atual, dia_anterior] }
+        dias_semana: { type: array, minItems: 1, maxItems: 7, uniqueItems: true, items: { type: integer, minimum: 0, maximum: 6 }, description: 'Dia da agenda; domingo=0, sábado=6.' }
+        timezone: { type: string, enum: [America/Sao_Paulo], default: America/Sao_Paulo }
+        contato_ids: { type: array, minItems: 1, maxItems: 100, uniqueItems: true, items: { type: integer, minimum: 1 } }
+    ResumoGestorConfiguracao:
+      type: object
+      nullable: true
+      properties:
+        id: { $ref: '#/components/schemas/AdminId' }
+        empresa_id: { $ref: '#/components/schemas/AdminId' }
+        ativo: { type: boolean }
+        horario_local: { type: string, example: '18:00' }
+        periodo: { type: string, enum: [dia_atual, dia_anterior] }
+        dias_semana: { type: array, items: { type: integer, minimum: 0, maximum: 6 } }
+        timezone: { type: string, enum: [America/Sao_Paulo] }
+        revisao: { type: integer, minimum: 1 }
+        contato_ids: { type: array, items: { $ref: '#/components/schemas/AdminId' } }
+        criado_em: { type: string, format: date-time }
+        atualizado_em: { type: string, format: date-time }
+    ResumoGestorExecucao:
+      type: object
+      properties:
+        id: { $ref: '#/components/schemas/AdminId' }
+        configuracao_id: { $ref: '#/components/schemas/AdminId' }
+        data_referencia: { type: string, format: date }
+        periodo: { type: string, enum: [dia_atual, dia_anterior] }
+        hora_limite: { type: string, nullable: true, example: '18:00' }
+        horario_previsto: { type: string, format: date-time }
+        expira_em: { type: string, format: date-time }
+        timezone: { type: string, enum: [America/Sao_Paulo] }
+        revisao_configuracao: { type: integer, minimum: 1 }
+        status: { type: string, enum: [pendente, pendente_worker_offline, processando, falha_consulta, aguardando_envios, concluida, concluida_atrasada, expirada] }
+        tentativas_consulta: { type: integer, minimum: 0 }
+        proxima_tentativa_em: { type: string, format: date-time, nullable: true }
+        ultimo_erro: { type: string, nullable: true, description: Código sanitizado; sem mensagem técnica livre }
+        apurado_em: { type: string, format: date-time, nullable: true }
+        concluido_em: { type: string, format: date-time, nullable: true }
+        atrasada:
+          type: boolean
+          description: Houve geração anterior sem sucesso, ou a geração bem-sucedida ocorreu mais de 5 minutos após horario_previsto. Não aumenta apenas com a passagem do tempo após a apuração.
+        apuracao_em_outro_dia: { type: boolean }
+        saldos_estado_atual: { type: boolean, enum: [true] }
+        origem: { type: string, enum: [realtime] }
+        dados: { $ref: '#/components/schemas/ResumoGestorDados' }
+    ResumoGestorDados:
+      type: object
+      required: [data_referencia, periodo, hora_limite, apurado_em, vendas, comparacao, financeiro, produto_mais_vendido, observacoes, metricas]
+      properties:
+        data_referencia: { type: string, format: date }
+        periodo: { type: string, enum: [dia_atual, dia_anterior] }
+        hora_limite: { type: string, nullable: true }
+        apurado_em: { type: string, format: date-time }
+        vendas:
+          type: object
+          required: [quantidade, valor_total, ticket_medio]
+          properties:
+            quantidade: { type: integer, minimum: 0 }
+            valor_total: { type: number }
+            ticket_medio: { type: number }
+        comparacao:
+          type: object
+          required: [data_base, valor_base, percentual]
+          description: Base é referência menos um dia; percentual null quando base zero.
+          properties:
+            data_base: { type: string, format: date }
+            valor_base: { type: number, description: Total vendido no período anterior comparado; campo existente preservado }
+            percentual: { type: number, nullable: true }
+        financeiro:
+          type: object
+          required: [recebido, descontos, estornos, a_receber_referencia, vencido, quantidade_parcelas_vencidas]
+          properties:
+            recebido: { type: number }
+            descontos: { type: number }
+            estornos: { type: number }
+            a_receber_referencia: { type: number, description: Saldo atual com vencimento no dia da referência; não histórico }
+            vencido: { type: number, description: Saldo atual vencido antes da referência; não histórico }
+            quantidade_parcelas_vencidas: { type: integer, minimum: 0 }
+            a_pagar:
+              type: number
+              minimum: 0
+              description: Opcional em respostas legadas. Saldo atualmente aberto de CP Parcelas com vencimento entre o primeiro dia do mês de data_referencia e data_referencia inclusive. Não representa todo o contas a pagar aberto nem uma posição histórica; dia_anterior utiliza a referência congelada da execução. Ausência não significa zero.
+        produto_mais_vendido:
+          type: object
+          nullable: true
+          properties:
+            codigo: { type: string }
+            descricao: { type: string, nullable: true }
+            quantidade: { type: number }
+            valor: { type: number, description: Campo legado preservado; fallback para respostas antigas sem valor_total_vendido }
+            valor_total_vendido:
+              type: number
+              minimum: 0
+              description: Campo canônico preferencial quando presente; valor vendido desse produto na mesma população do ranking. Opcional para compatibilidade com Workers e execuções legados; valor continua preservado.
+        observacoes: { type: array, items: { type: string } }
+        metricas:
+          type: object
+          properties:
+            tempo_vendas_comparacao_ms: { type: integer, minimum: 0 }
+            tempo_financeiro_ms: { type: integer, minimum: 0 }
+            tempo_produto_ms: { type: integer, minimum: 0 }
+            tempo_total_ms: { type: integer, minimum: 0 }
+    ResumoGestorEnvio:
+      type: object
+      properties:
+        id: { $ref: '#/components/schemas/AdminId' }
+        execucao_id: { $ref: '#/components/schemas/AdminId' }
+        contato_id: { $ref: '#/components/schemas/AdminId' }
+        telefone_normalizado: { type: string, description: Congelado pela API; não informado pelo consumidor }
+        status: { type: string, enum: [pendente, processando, enviado, falha, envio_incerto] }
+        tentativas: { type: integer, minimum: 0 }
+        identificador_tentativa: { type: string, format: uuid, nullable: true }
+        identificador_provedor: { type: string, nullable: true }
+        processamento_ate: { type: string, format: date-time, nullable: true }
+        proxima_tentativa_em: { type: string, format: date-time, nullable: true }
+        ultimo_erro: { type: string, nullable: true }
+        criado_em: { type: string, format: date-time }
+        atualizado_em: { type: string, format: date-time }
+        enviado_em: { type: string, format: date-time, nullable: true }
+    ResumoGestorResultadoEnvio:
+      type: object
+      additionalProperties: false
+      required: [identificador_tentativa, status]
+      properties:
+        identificador_tentativa: { type: string, format: uuid }
+        status: { type: string, enum: [enviado, falha, envio_incerto] }
+        identificador_provedor: { type: string, minLength: 1, maxLength: 200, pattern: '^[A-Za-z0-9._:/@+-]+$', description: Somente quando status enviado }
+        erro: { type: string, enum: [PROVEDOR_RECUSOU, DESTINATARIO_INVALIDO, ENVIO_INCERTO, FALHA_ENVIO] }
+    AdminErro:
+      type: object
+      required: [erro]
+      properties:
+        erro: { type: string }
+    AdminId:
+      description: BIGSERIAL do pg pode ser texto decimal; emissões/resumos usam número.
+      oneOf:
+        - { type: integer, format: int64, minimum: 1 }
+        - { type: string, pattern: '^[1-9][0-9]*$' }
+    AdminLogin:
+      type: object
+      additionalProperties: false
+      required: [usuario, senha]
+      properties:
+        usuario: { type: string, minLength: 1, maxLength: 100 }
+        senha: { type: string, minLength: 1, maxLength: 256, writeOnly: true }
+    AdminSessao:
+      type: object
+      additionalProperties: false
+      required: [usuario_id, usuario, nome, expira_em, csrf_token]
+      properties:
+        usuario_id: { $ref: '#/components/schemas/AdminId' }
+        nome: { type: string }
+        usuario: { type: string }
+        expira_em: { type: string, format: date-time }
+        csrf_token: { type: string, description: Enviar em X-WM-CSRF nas alterações }
+    AdminUsuario:
+      type: object
+      additionalProperties: false
+      required: [id, nome, usuario, ativo, criado_em, atualizado_em]
+      properties:
+        id: { $ref: '#/components/schemas/AdminId' }
+        nome: { type: string }
+        usuario: { type: string, description: Login ASCII normalizado em minúsculas; imutável }
+        ativo: { type: boolean }
+        criado_em: { type: string, format: date-time }
+        atualizado_em: { type: string, format: date-time }
+    AdminUsuarioResposta:
+      type: object
+      required: [usuario]
+      properties:
+        usuario: { $ref: '#/components/schemas/AdminUsuario' }
+    AdminUsuariosResposta:
+      type: object
+      required: [usuarios]
+      properties:
+        usuarios: { type: array, items: { $ref: '#/components/schemas/AdminUsuario' } }
+    AdminUsuarioCadastro:
+      type: object
+      additionalProperties: false
+      required: [nome, usuario, senha]
+      properties:
+        nome: { type: string, minLength: 1, maxLength: 100 }
+        usuario: { type: string, minLength: 1, maxLength: 100, description: Trim e minúsculas; letras ASCII/números/ponto/hífen/@/underscore }
+        senha: { type: string, minLength: 10, maxLength: 256, writeOnly: true }
+    AdminUsuarioPatch:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        nome: { type: string, minLength: 1, maxLength: 100 }
+        ativo: { type: boolean }
+    AdminRedefinirSenha:
+      type: object
+      additionalProperties: false
+      required: [senha]
+      properties:
+        senha: { type: string, minLength: 10, maxLength: 256, writeOnly: true }
+    AdminBodyVazio:
+      type: object
+      additionalProperties: false
+    AdminEmpresaCadastro:
+      type: object
+      additionalProperties: false
+      required: [nome, cnpj]
+      properties:
+        nome: { type: string, minLength: 1, maxLength: 100 }
+        cnpj: { type: string, description: 'Normalizador central exige 14 dígitos; aceita pontuação, não valida dígitos verificadores' }
+    AdminEmpresaPatch:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      description: CNPJ não pode mudar após provisionamento, mesmo inativo. codigo_erp não é aceito na entrada.
+      properties:
+        nome: { type: string, minLength: 1, maxLength: 100 }
+        cnpj: { type: string }
+    AdminResumoSincronizador:
+      type: object
+      nullable: true
+      properties:
+        sincronizador_id: { $ref: '#/components/schemas/AdminId' }
+        ativo: { type: boolean }
+        versao: { type: string, nullable: true }
+        ultima_comunicacao_em: { type: string, format: date-time, nullable: true }
+        sql_conectado: { type: boolean }
+    AdminEmpresa:
+      type: object
+      required: [codigo_erp]
+      properties:
+        id: { $ref: '#/components/schemas/AdminId' }
+        codigo_erp: { type: integer }
+        nome: { type: string, nullable: true }
+        cnpj: { type: string, pattern: '^[0-9]{14}$' }
+        criado_em: { type: string, format: date-time }
+        atualizado_em: { type: string, format: date-time }
+        sincronizador: { $ref: '#/components/schemas/AdminResumoSincronizador' }
+    AdminEmpresaResposta:
+      type: object
+      required: [empresa]
+      properties:
+        empresa: { $ref: '#/components/schemas/AdminEmpresa' }
+    AdminEmpresas:
+      type: object
+      required: [empresas, limite, offset]
+      properties:
+        empresas: { type: array, items: { $ref: '#/components/schemas/AdminEmpresa' } }
+        limite: { type: integer }
+        offset: { type: integer }
+    AdminProvisionar:
+      type: object
+      additionalProperties: false
+      required: [nome]
+      properties:
+        nome: { type: string, minLength: 1, maxLength: 100 }
+    AdminTokenProvisionado:
+      type: object
+      additionalProperties: false
+      required: [empresa_id, sincronizador_id, token]
+      properties:
+        empresa_id: { type: integer, format: int64 }
+        sincronizador_id: { type: integer, format: int64 }
+        token: { type: string, description: Emitido uma vez; nunca recuperável }
+    AdminSincronizador:
+      type: object
+      properties:
+        id: { $ref: '#/components/schemas/AdminId' }
+        empresa_id: { $ref: '#/components/schemas/AdminId' }
+        nome: { type: string }
+        ativo: { type: boolean }
+        versao: { type: string, nullable: true }
+        ultima_comunicacao_em: { type: string, format: date-time, nullable: true }
+        ultima_sincronizacao_em: { type: string, format: date-time, nullable: true }
+        sql_conectado: { type: boolean, description: 'Último relato do heartbeat, não prova disponibilidade atual' }
+        criado_em: { type: string, format: date-time }
+        atualizado_em: { type: string, format: date-time }
+    AdminSincronizadorResposta:
+      type: object
+      required: [sincronizador]
+      properties:
+        sincronizador: { $ref: '#/components/schemas/AdminSincronizador' }
+    AdminStatusResposta:
+      type: object
+      required: [sincronizador]
+      properties:
+        sincronizador:
+          allOf:
+            - { $ref: '#/components/schemas/AdminSincronizador' }
+            - type: object
+              required: [realtime_conectado]
+              properties:
+                realtime_conectado: { type: boolean, description: Conexão conhecida apenas pela instância atual da API }
+    AdminTokenRotacionado:
+      type: object
+      required: [sincronizador, token]
+      properties:
+        sincronizador: { $ref: '#/components/schemas/AdminSincronizador' }
+        token: { type: string, description: Substituir manualmente no Worker; ativo preservado }
+    AdminContatoCadastro:
+      type: object
+      additionalProperties: false
+      required: [telefone]
+      properties:
+        telefone: { type: string, maxLength: 40, description: 'Aceita máscara. A API normaliza brasileiros identificáveis para DDI 55 + DDD + número atual, somente dígitos, e reconhece equivalências celulares seguras do WhatsApp. Unicidade global por identidade telefônica; demais formatos mantêm 8 a 15 dígitos.' }
+        nome: { type: string, minLength: 1, maxLength: 100, nullable: true }
+        ativo: { type: boolean, default: true }
+    AdminContatoPatch:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        telefone: { type: string, maxLength: 40, description: 'Mesma normalização e unicidade do cadastro. Omitir preserva o telefone existente.' }
+        nome: { type: string, minLength: 1, maxLength: 100, nullable: true }
+        ativo: { type: boolean, description: Sem default no PATCH }
+        pode_gerenciar_assistente: { type: boolean, description: Permissão administrativa atribuída somente pela sessão administrativa WM }
+    AdminContato:
+      type: object
+      required: [id, sincronizador_id, telefone, ativo, pode_gerenciar_assistente, criado_em, atualizado_em]
+      properties:
+        id: { $ref: '#/components/schemas/AdminId' }
+        sincronizador_id: { $ref: '#/components/schemas/AdminId' }
+        telefone: { type: string, pattern: '^[0-9]{8,15}$', description: 'Somente dígitos. Novas gravações brasileiras identificáveis usam DDI 55; registros legados podem manter formatos anteriores.' }
+        nome: { type: string, nullable: true }
+        ativo: { type: boolean }
+        pode_gerenciar_assistente: { type: boolean, description: Permissão para administrar colaboradores e configuração do Resumo Diário pelo WhatsApp }
+        criado_em: { type: string, format: date-time }
+        atualizado_em: { type: string, format: date-time }
+    AdminContatoResposta:
+      type: object
+      required: [contato]
+      properties:
+        contato: { $ref: '#/components/schemas/AdminContato' }
+    AdminContatos:
+      type: object
+      required: [contatos]
+      properties:
+        contatos: { type: array, items: { $ref: '#/components/schemas/AdminContato' } }
+    IdentidadeSincronizador:
+      type: object
+      additionalProperties: false
+      required: [sincronizador, empresa]
+      properties:
+        sincronizador:
+          type: object
+          additionalProperties: false
+          required: [id, ativo]
+          properties:
+            id: { type: integer, format: int64, minimum: 1 }
+            ativo: { type: boolean, enum: [true] }
+        empresa:
+          type: object
+          additionalProperties: false
+          required: [id, cnpj, nome]
+          properties:
+            id: { type: integer, format: int64, minimum: 1 }
+            cnpj: { type: string, pattern: '^[0-9]{14}$' }
+            nome: { type: string, nullable: true }
+    Venda:
+      type: object
+      required: [empresa_codigo_erp, codigo_pedido_erp, data_atualizacao, valor_total_bruto, valor_desconto, valor_total, fechado, parcelado, entregue, cancelado]
+      properties:
+        empresa_codigo_erp: { type: integer }
+        codigo_pedido_erp: { type: string }
+        data_atualizacao: { type: string, format: date-time }
+        documento_venda: { type: [string, 'null'] }
+        valor_total_bruto: { type: number }
+        valor_desconto: { type: number }
+        valor_total: { type: number }
+        fechado: { type: boolean }
+        parcelado: { type: boolean }
+        entregue: { type: boolean }
+        cancelado: { type: boolean }
+    GerarRelatorio:
+      oneOf:
+        - $ref: '#/components/schemas/GerarRelatorioVendas'
+        - $ref: '#/components/schemas/GerarRelatorioEstoque'
+        - $ref: '#/components/schemas/GerarRelatorioRecebimentos'
+      discriminator:
+        propertyName: tipo
+    GerarRelatorioVendas:
+      type: object
+      additionalProperties: false
+      required: [telefone, tipo, parametros]
+      properties:
+        telefone: { type: string }
+        tipo: { type: string, enum: [vendas] }
+        parametros:
+          type: object
+          additionalProperties: false
+          required: [data_inicio, data_fim]
+          properties:
+            data_inicio: { type: string, format: date }
+            data_fim: { type: string, format: date }
+    GerarRelatorioEstoque:
+      type: object
+      additionalProperties: false
+      required: [telefone, tipo, parametros]
+      properties:
+        telefone: { type: string }
+        tipo: { type: string, enum: [estoque] }
+        parametros:
+          type: object
+          additionalProperties: false
+          required: [situacao]
+          properties:
+            situacao: { type: string, enum: [todos, positivo, zerado, negativo] }
+            status_cadastro: { type: string, enum: [ativos, inativos, todos], default: ativos }
+            codigo_grupo: { type: string, maxLength: 6 }
+            marca: { type: string, maxLength: 30 }
+    GerarRelatorioRecebimentos:
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [telefone, tipo, parametros]
+          properties:
+            telefone: { type: string }
+            tipo: { type: string, enum: [recebimentos] }
+            parametros:
+              type: object
+              additionalProperties: false
+              required: [modo]
+              properties:
+                modo: { type: string, enum: [a_receber] }
+        - type: object
+          additionalProperties: false
+          required: [telefone, tipo, parametros]
+          properties:
+            telefone: { type: string }
+            tipo: { type: string, enum: [recebimentos] }
+            parametros:
+              type: object
+              additionalProperties: false
+              required: [modo, data_inicio, data_fim]
+              properties:
+                modo: { type: string, enum: [a_receber] }
+                data_inicio: { type: string, format: date }
+                data_fim: { type: string, format: date }
+        - type: object
+          additionalProperties: false
+          required: [telefone, tipo, parametros]
+          properties:
+            telefone: { type: string }
+            tipo: { type: string, enum: [recebimentos] }
+            parametros:
+              type: object
+              additionalProperties: false
+              required: [modo, data_inicio, data_fim]
+              properties:
+                modo: { type: string, enum: [recebidos] }
+                data_inicio: { type: string, format: date }
+                data_fim: { type: string, format: date }
+    ConsultarRecebimentos:
+      oneOf:
+        - type: object
+          required: [telefone, tipo, data_inicio, data_fim]
+          properties:
+            telefone: { type: string }
+            tipo: { type: string, enum: [a_receber, recebidos] }
+            data_inicio: { type: string, format: date }
+            data_fim: { type: string, format: date }
+        - type: object
+          required: [telefone, tipo, data_referencia]
+          properties:
+            telefone: { type: string }
+            tipo: { type: string, enum: [vencidos] }
+            data_referencia: { type: string, format: date }
+    ValidarAcessoAssistente:
+      type: object
+      additionalProperties: false
+      required: [telefone]
+      properties:
+        telefone: { type: string, minLength: 8, maxLength: 30, description: 'Aceita o telefone recebido do WhatsApp, inclusive representação brasileira celular equivalente segura. Autoriza somente um contato ativo sem ambiguidade; não aceita IDs de empresa ou Sincronizador no payload.' }
+    CandidatoCliente:
+      type: object
+      additionalProperties: false
+      required: [codigo_cliente_erp, nome, cpf, cnpj, inscricao_estadual]
+      properties:
+        codigo_cliente_erp: { type: string }
+        nome: { type: string }
+        cpf: { type: string, nullable: true, description: 'dbo.Clientes.CPF; sem máscara nova, vazio vira null' }
+        cnpj: { type: string, nullable: true, description: 'dbo.Clientes.CNPJ; sem máscara nova, vazio vira null' }
+        inscricao_estadual: { type: string, nullable: true, description: 'dbo.Clientes.IE, validado no schema SQL Server; valores como ISENTO são preservados' }
+    CandidatoProdutoOrcamento:
+      type: object
+      additionalProperties: false
+      required: [codigo_produto_erp, descricao, unidade, preco_unitario, estoque_previsto]
+      properties:
+        codigo_produto_erp: { type: string }
+        descricao: { type: string, nullable: true }
+        unidade: { type: string, nullable: true }
+        preco_unitario: { type: string, description: 'dbo.Estoque.Preço Unitário; mesma serialização da prévia (0.00##, invariant)', example: '33.038' }
+        estoque_previsto: { type: string, description: 'dbo.Estoque.Estoque Previsto realtime, não Estoque Atual; formato 0.000 invariant', example: '-2.125' }
+    ConsultarClientesResposta:
+      type: object
+      required: [dados, meta]
+      properties:
+        dados:
+          oneOf:
+            - type: object
+              required: [status, cliente]
+              properties:
+                status: { type: string, enum: [cliente] }
+                cliente:
+                  type: object
+                  required: [codigo_cliente_erp, nome]
+                  properties:
+                    codigo_cliente_erp: { type: string }
+                    nome: { type: string }
+            - type: object
+              required: [status, candidatos, paginacao]
+              properties:
+                status: { type: string, enum: [multiplos_clientes] }
+                paginacao: { $ref: '#/components/schemas/PaginacaoConsulta' }
+                candidatos:
+                  type: array
+                  maxItems: 30
+                  items: { $ref: '#/components/schemas/CandidatoCliente' }
+        meta: { type: object }
+    PaginaConsulta:
+      type: integer
+      minimum: 1
+      maximum: 2147483647
+      default: 1
+      description: Página de candidatos da consulta normal; código explícito usa página 1.
+    PaginacaoConsulta:
+      type: object
+      additionalProperties: false
+      required: [pagina, tamanho_pagina, total, tem_mais, tem_anterior]
+      properties:
+        pagina: { type: integer, minimum: 1 }
+        tamanho_pagina: { type: integer, enum: [30] }
+        total: { type: integer, minimum: 0, description: Total global da busca, não a quantidade desta página }
+        tem_mais: { type: boolean }
+        tem_anterior: { type: boolean }
+    ConsultarProdutoResposta:
+      type: object
+      required: [dados, meta]
+      properties:
+        dados:
+          description: Produto resolvido mantém a resposta cache/realtime anterior. Em ambiguidade, retorna status, produtos e paginacao.
+          type: object
+          properties:
+            status: { type: string, enum: [multiplos_produtos] }
+            produtos:
+              type: array
+              maxItems: 30
+              items:
+                type: object
+                additionalProperties: false
+                required: [codigo_produto_erp, descricao, marca, unidade]
+                properties:
+                  codigo_produto_erp: { type: string }
+                  descricao: { type: string, nullable: true }
+                  marca: { type: string, nullable: true }
+                  unidade: { type: string, nullable: true }
+            paginacao: { $ref: '#/components/schemas/PaginacaoConsulta' }
+        meta: { type: object }
+    PaginaOrcamento:
+      type: integer
+      minimum: 1
+      maximum: 2147483647
+      default: 1
+      description: Página solicitada; limite técnico Int32, não limite total de candidatos. Por código, usar página 1.
+    PaginacaoOrcamento:
+      type: object
+      additionalProperties: false
+      required: [pagina, tamanho_pagina, total, tem_mais, tem_anterior]
+      properties:
+        pagina: { type: integer, minimum: 1 }
+        tamanho_pagina: { type: integer, enum: [30] }
+        total: { type: integer, minimum: 0, description: Total global elegível, não a quantidade da página }
+        tem_mais: { type: boolean }
+        tem_anterior: { type: boolean }
+    PrepararOrcamentoResposta:
+      type: object
+      required: [dados, meta]
+      properties:
+        dados:
+          type: object
+          properties:
+            status: { type: string, enum: [pronto_para_confirmacao, multiplos_clientes, multiplos_vendedores, produto_ambiguo] }
+            indice_item: { type: integer, description: 'Índice zero-based do item ambíguo; comportamento preservado' }
+            paginacao:
+              $ref: '#/components/schemas/PaginacaoOrcamento'
+            candidatos:
+              type: array
+              maxItems: 30
+              items:
+                oneOf:
+                  - { $ref: '#/components/schemas/CandidatoCliente' }
+                  - { $ref: '#/components/schemas/CandidatoProdutoOrcamento' }
+                  - type: object
+                    additionalProperties: false
+                    required: [codigo_vendedor_erp, nome]
+                    properties:
+                      codigo_vendedor_erp: { type: string }
+                      nome: { type: string }
+        meta: { type: object }
+    ConsultarCliente:
+      type: object
+      additionalProperties: false
+      required: [telefone]
+      properties:
+        telefone: { type: string }
+        busca: { type: string }
+        codigo_cliente_erp: { type: string }
+        pagina: { $ref: '#/components/schemas/PaginaConsulta' }
+      oneOf:
+        - required: [busca]
+        - required: [codigo_cliente_erp]
+    ConsultarProduto:
+      type: object
+      additionalProperties: false
+      required: [telefone]
+      properties:
+        telefone: { type: string, minLength: 8, maxLength: 30 }
+        busca: { type: string, minLength: 1, maxLength: 100 }
+        codigo_produto_erp: { type: string, minLength: 1, maxLength: 7 }
+        pagina: { $ref: '#/components/schemas/PaginaConsulta' }
+        limite: { type: integer, minimum: 1, maximum: 20, default: 10, deprecated: true, description: 'Aceito temporariamente por compatibilidade; ignorado. Página fixa em 30 e unicidade global.' }
+      oneOf:
+        - required: [busca]
+        - required: [codigo_produto_erp]
+    ConsultarResumoVendas:
+      type: object
+      additionalProperties: false
+      required: [telefone, data_inicio, data_fim]
+      properties:
+        telefone: { type: string, minLength: 8, maxLength: 30 }
+        data_inicio: { type: string, format: date }
+        data_fim: { type: string, format: date }
+    ConsultarRankingVendas:
+      allOf:
+        - $ref: '#/components/schemas/ConsultarResumoVendas'
+        - type: object
+          properties:
+            limite: { type: integer, minimum: 1, maximum: 20, default: 10 }
+            ordenar_por: { type: string, enum: [valor, quantidade], default: valor }
+    CompararVendas:
+      type: object
+      additionalProperties: false
+      required: [telefone, periodo_a, periodo_b]
+      properties:
+        telefone: { type: string, minLength: 8, maxLength: 30 }
+        periodo_a: { $ref: '#/components/schemas/PeriodoComparacao' }
+        periodo_b: { $ref: '#/components/schemas/PeriodoComparacao' }
+    PeriodoComparacao:
+      type: object
+      additionalProperties: false
+      required: [data_inicio, data_fim]
+      properties:
+        data_inicio: { type: string, format: date }
+        data_fim: { type: string, format: date }
+    PrecoNegociadoOrcamento:
+      type: string
+      pattern: '^\d+(?:\.\d{1,4})?$'
+      description: Decimal textual opcional, maior que zero e no máximo 1000000, com até quatro casas e sem normalização/arredondamento. Preço praticado solicitado somente para este item; não substitui preco_confirmado. Worker compatível revalida a referência e aplica a negociação por linha na preparação e criação.
+      example: '400.00'
+    PrepararOrcamento:
+      type: object
+      additionalProperties: false
+      required: [telefone, itens, bloquear_apos_criar]
+      description: Resolve somente candidatos elegíveis, com páginas fixas de 30 e total global. Código de cliente inativo/bloqueado continua retornando CLIENTE_INVALIDO. Ambiguidades incluem paginacao; unicidade não depende do número de registros da página.
+      allOf:
+        - oneOf:
+            - required: [cliente_codigo_erp]
+            - required: [cliente_busca]
+        - oneOf:
+            - required: [vendedor_codigo_erp]
+            - required: [vendedor_busca]
+      properties:
+        telefone: { type: string }
+        cliente_codigo_erp: { type: string }
+        cliente_busca: { type: string }
+        cliente_pagina: { $ref: '#/components/schemas/PaginaOrcamento' }
+        vendedor_codigo_erp: { type: string, minLength: 1, maxLength: 20 }
+        vendedor_busca: { type: string, minLength: 1, maxLength: 100 }
+        vendedor_pagina: { $ref: '#/components/schemas/PaginaOrcamento' }
+        bloquear_apos_criar: { type: boolean }
+        itens:
+          type: array
+          minItems: 1
+          maxItems: 50
+          items:
+            type: object
+            additionalProperties: false
+            required: [quantidade]
+            properties:
+              codigo_produto_erp: { type: string }
+              busca: { type: string }
+              quantidade: { oneOf: [{ type: number }, { type: string }] }
+              produto_pagina: { $ref: '#/components/schemas/PaginaOrcamento' }
+              preco_negociado: { $ref: '#/components/schemas/PrecoNegociadoOrcamento' }
+    CriarOrcamento:
+      type: object
+      additionalProperties: false
+      required: [telefone, comando_id, cliente_codigo_erp, vendedor_codigo_erp, itens]
+      properties:
+        telefone: { type: string }
+        comando_id: { type: string, format: uuid }
+        cliente_codigo_erp: { type: string, maxLength: 20 }
+        vendedor_codigo_erp: { type: string, maxLength: 20 }
+        bloquear_apos_criar: { type: boolean, default: true }
+        itens:
+          type: array
+          minItems: 1
+          maxItems: 50
+          items:
+            type: object
+            additionalProperties: false
+            required: [codigo_produto_erp, quantidade, preco_confirmado]
+            properties:
+              codigo_produto_erp: { type: string, maxLength: 7 }
+              quantidade: { type: string, pattern: '^\\d+(?:\\.\\d+)?$' }
+              preco_confirmado: { type: string, pattern: '^\\d+(?:\\.\\d+)?$' }
+              preco_negociado: { $ref: '#/components/schemas/PrecoNegociadoOrcamento' }

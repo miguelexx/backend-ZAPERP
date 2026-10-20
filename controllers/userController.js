@@ -3,6 +3,9 @@ const jwt = require('jsonwebtoken')
 const bcrypt = require('bcryptjs')
 const crmSync = require('../services/crmSyncService')
 const { empresaModuloCrmHabilitado } = require('../helpers/moduloCrmEmpresa')
+// Orçamento WM: env global WM_ORCAMENTOS_ENABLED E wm_orcamento_integracoes.ativo da empresa.
+// Helper com cache de 20 s; com a env desligada nem consulta o banco. Fail-closed (doc 36, D2).
+const { orcamentoWmHabilitado } = require('../helpers/orcamentoWmFlag')
 // O CRM interno foi removido; hoje a flag crm_habilitado reflete a integração
 // com o CRM Avançado (env CRM_AVANCADO_URL + ZAP_SSO_SECRET). Quando ativa, o
 // frontend mostra o botão «Enviar ao CRM» no chat. Avaliado no carregamento do
@@ -37,6 +40,8 @@ exports.getMe = async (req, res) => {
       ? await empresaModuloCrmHabilitado(company_id)
       : false
 
+    const orcamento_wm_habilitado = await orcamentoWmHabilitado(company_id)
+
     let { data, error } = userResult.status === 'fulfilled'
       ? userResult.value
       : { data: null, error: new Error('Falha ao buscar usuário') }
@@ -46,7 +51,7 @@ exports.getMe = async (req, res) => {
       error = res2.error
       if (error) { console.error('[userController]', error?.message); return res.status(500).json({ error: 'Erro interno' }) }
       if (!data) return res.status(404).json({ error: 'Usuário não encontrado' })
-      return res.json({ ...data, mostrar_nome_ao_cliente: true, crm_habilitado: crm_habilitado_efetivo, separar_mensagens_disparadas, atendimento_modo_simples, modulo_campanhas_ativo })
+      return res.json({ ...data, mostrar_nome_ao_cliente: true, crm_habilitado: crm_habilitado_efetivo, separar_mensagens_disparadas, atendimento_modo_simples, modulo_campanhas_ativo, orcamento_wm_habilitado })
     }
     if (error) { console.error('[userController]', error?.message); return res.status(500).json({ error: 'Erro interno' }) }
     if (!data) return res.status(404).json({ error: 'Usuário não encontrado' })
@@ -60,6 +65,7 @@ exports.getMe = async (req, res) => {
       separar_mensagens_disparadas,
       atendimento_modo_simples,
       modulo_campanhas_ativo,
+      orcamento_wm_habilitado,
     })
   } catch (err) {
     console.error(err)
@@ -472,6 +478,7 @@ exports.login = async (req, res) => {
     const crm_habilitado_efetivo = crm_habilitado
       ? await empresaModuloCrmHabilitado(usuario.company_id)
       : false
+    const orcamento_wm_habilitado = await orcamentoWmHabilitado(usuario.company_id)
 
     // Gera JWT com dados essenciais (user_id/company_id obrigatórios p/ multi-tenant)
     const jwtExpiresIn = String(process.env.JWT_EXPIRES_IN || '30d').trim() || '30d'
@@ -504,6 +511,7 @@ exports.login = async (req, res) => {
         separar_mensagens_disparadas,
         atendimento_modo_simples,
         modulo_campanhas_ativo,
+        orcamento_wm_habilitado,
       },
     })
   } catch (err) {

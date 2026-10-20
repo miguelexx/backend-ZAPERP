@@ -63,7 +63,15 @@ const PERMISSOES_CATALOGO = [
   { codigo: 'disparo.ver', nome: 'Ver campanhas', descricao: 'Acessar o módulo Disparo de Mensagens', categoria: 'Disparo de Mensagens', perfis: ['admin'] },
   { codigo: 'disparo.criar', nome: 'Criar campanha', descricao: 'Criar novas campanhas de disparo', categoria: 'Disparo de Mensagens', perfis: ['admin'] },
   { codigo: 'disparo.editar', nome: 'Editar campanha', descricao: 'Editar campanhas em rascunho', categoria: 'Disparo de Mensagens', perfis: ['admin'] },
-  { codigo: 'disparo.arquivar', nome: 'Arquivar campanha', descricao: 'Arquivar e restaurar campanhas', categoria: 'Disparo de Mensagens', perfis: ['admin'] }
+  { codigo: 'disparo.arquivar', nome: 'Arquivar campanha', descricao: 'Arquivar e restaurar campanhas', categoria: 'Disparo de Mensagens', perfis: ['admin'] },
+
+  // --- ORÇAMENTOS (ERP WM) ---
+  // Códigos PONTILHADOS de propósito: /me/permissoes devolve um mapa chaveado pelo `codigo`
+  // do catálogo, e código com underscore no frontend cai no fallback por role — o gate real
+  // desaparece em silêncio (é o que acontece hoje com dashboard_acessar e similares).
+  { codigo: 'orcamentos.ver', nome: 'Ver orçamentos', descricao: 'Abrir o orçamento na conversa e consultar produtos e clientes do ERP', categoria: 'Orçamentos', perfis: ['admin', 'supervisor', 'atendente'] },
+  { codigo: 'orcamentos.criar', nome: 'Criar orçamento no ERP', descricao: 'Confirmar e gravar o orçamento no ERP', categoria: 'Orçamentos', perfis: ['admin', 'supervisor', 'atendente'] },
+  { codigo: 'orcamentos.ver_historico_empresa', nome: 'Ver histórico da empresa', descricao: 'Ver orçamentos de toda a empresa, não só os das próprias conversas', categoria: 'Orçamentos', perfis: ['admin', 'supervisor'] }
 ]
 
 const PERMISSOES_POR_CODIGO = Object.fromEntries(
