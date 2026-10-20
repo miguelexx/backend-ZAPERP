@@ -307,9 +307,14 @@ exports.apagarComunidade = async (req, res) => {
     }
 
     // Chat residual da comunidade no aparelho conectado (best-effort; não bloqueia).
+    // `deleteChat` da Whapi devolve objeto ({ ok, chatId, … }) desde que passou a tentar as
+    // formas do endereço; o UltraMSG ainda devolve boolean. Aceita os dois.
     let chatRemovido = false
     if (typeof ctx.provider.deleteChat === 'function') {
-      try { chatRemovido = (await ctx.provider.deleteChat(cid, ctx.opts)) === true } catch { /* best-effort */ }
+      try {
+        const r = await ctx.provider.deleteChat(cid, ctx.opts)
+        chatRemovido = r === true || r?.ok === true
+      } catch { /* best-effort */ }
     }
 
     const operacoesCanceladas = await fila.cancelarOperacoesDoAlvo({

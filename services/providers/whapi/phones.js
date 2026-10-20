@@ -183,6 +183,56 @@ function historyChatIdCandidates(phone, extraSeeds = []) {
 }
 
 /**
+ * Chat IDs para AÇÕES de chat (apagar, arquivar, marcar lido…), na ordem de tentativa.
+ *
+ * Mesmo problema do botão "Buscar histórico", agora medido no canal de produção (20/10):
+ * o chat vive na Whapi na forma que o WhatsApp usa — para celular BR quase sempre os
+ * **12 dígitos, sem o 9º**. `toWhapiChatId` passa por `preferredBrSendDigits`, que INSERE o 9º,
+ * e o endereço resultante não existe:
+ *
+ *   GET /chats/553493120506@s.whatsapp.net  → 200 (o chat real)
+ *   GET /chats/5534993120506@s.whatsapp.net → 404 "specified chat not found"
+ *
+ * Como `DELETE /chats/{id}` em id inexistente é 404 e não apaga nada, apagar a conversa no
+ * ZapERP não saía do WhatsApp. Aqui a forma CRUA vem primeiro (é a que o canal costuma ter) e
+ * as variantes de ±9º dígito depois. Quem chama tenta em ordem e para no primeiro que não for 404.
+ * Grupo e LID têm um endereço só — não variam.
+ *
+ * @param {string} phone telefone/JID como está em `conversas.telefone`
+ * @param {number} [max=3] teto de tentativas (uma chamada HTTP por candidato)
+ */
+function chatIdCandidates(phone, max = 3) {
+  const raw = String(phone ?? '').trim()
+  if (!raw) return []
+  if (isGroupJid(raw) || looksLikeStoredGroupId(raw)) {
+    const groupId = toWhapiGroupId(raw)
+    return groupId ? [groupId] : []
+  }
+  const lid = toWhapiLidId(raw)
+  if (lid) return [lid]
+  if (isLidPhoneKey(raw)) return []
+
+  const ids = []
+  const addId = (id) => {
+    const v = String(id || '').trim()
+    if (!v || ids.includes(v) || ids.length >= max) return
+    ids.push(v)
+  }
+  // 1º a forma crua/explícita — é a que o canal tem na maioria dos casos.
+  const explicit = explicitPrivateJidDigits(raw)
+  if (explicit) addId(`${explicit}@s.whatsapp.net`)
+  const bare = raw.replace(/@[^@]+$/, '').replace(/\D/g, '')
+  if (bare && !bare.startsWith('120')) addId(`${bare}@s.whatsapp.net`)
+  // Depois as variantes ±9º dígito e, por último, a forma preferida de envio.
+  for (const variant of possiblePhonesBR(raw)) {
+    const digits = String(variant || '').replace(/\D/g, '')
+    if (digits) addId(`${digits}@s.whatsapp.net`)
+  }
+  addId(toWhapiChatId(raw))
+  return ids
+}
+
+/**
  * Contact ID Whapi (OpenAPI: só dígitos `^[\d]{7,15}$`).
  * Grupo: devolve o JID (perfil de grupo não usa este endpoint). LID: vazio (não é ContactID).
  */
@@ -207,4 +257,5 @@ module.exports = {
   toWhapiChatId,
   toWhapiContactId,
   historyChatIdCandidates,
+  chatIdCandidates,
 }

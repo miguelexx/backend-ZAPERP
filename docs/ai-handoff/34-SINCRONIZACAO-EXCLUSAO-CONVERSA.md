@@ -281,6 +281,40 @@ apagou" de "apagou". Agora o canal é resolvido como em `outboundController`/`fo
 `provider_sem_suporte` · `provedor_recusou` · `erro_de_conexao` · `grupo`) e um `console.warn`
 com empresa, conversa, provider e instância.
 
+## 8.2 Teste ao vivo (20/10): B passou, A falhou — o 9º dígito
+
+Depois do deploy: **apagar no celular sumiu do ZapERP** (sentido B certificado em produção —
+webhook, guarda de eco e cascata funcionando). **Apagar no ZapERP não saía do WhatsApp.**
+
+Causa medida no canal de produção pelo MCP (só leitura):
+
+```
+GET /chats/553493120506@s.whatsapp.net   → 200  (o chat real)
+GET /chats/5534993120506@s.whatsapp.net  → 404  "specified chat not found"
+```
+
+O chat BR vive na Whapi na forma que o WhatsApp usa — quase sempre **12 dígitos, sem o 9º**.
+`toWhapiChatId` passa por `preferredBrSendDigits`, que **insere** o 9º. O `DELETE /chats/{id}`
+ia para um endereço inexistente, levava 404 e não apagava nada. O mesmo problema já estava
+documentado em `historyChatIdCandidates` ("`toWhapiChatId` sozinho reinsere o 9º e a lista
+volta vazia") — só não tinha sido aplicado às ações de chat.
+
+**Correção:** `chatIdCandidates(phone, max=3)` em `whapi/phones.js` (forma crua primeiro, que é
+a que o canal costuma ter; depois as variantes ±9º) e `deleteChat` tentando em ordem — **404
+tenta o próximo, qualquer outro erro para na hora** (não insiste em falha real). Todas as formas
+em 404 devolve `naoExistia`, que o controller traduz em `whatsapp_motivo:
+chat_nao_existe_no_whatsapp` — diferente de `provedor_recusou`.
+
+`deleteChat` da Whapi passou a devolver objeto (`{ ok, chatId, httpStatus, naoExistia, error }`);
+o UltraMSG continua boolean. Os dois consumidores (`conversationCleanupController` e
+`comunidadeController`) aceitam as duas formas.
+
+> **Mesma cegueira, ainda não corrigida:** `archiveChat`, `unarchiveChat`, `readChat`,
+> `patchChat` (pin/mute/ephemeral) e `clearChatMessages` continuam montando **um** endereço com
+> `toWhapiChatId`. Em celular BR gravado com o 9º, essas ações batem em 404 e falham caladas —
+> fixar/silenciar/limpar "não espelham" pelo mesmo motivo. Trocar por `chatIdCandidates` resolve,
+> mas exige rodar e conferir cada uma.
+
 ## 9. Risco residual
 
 - **Exclusão remota é irreversível e leva o histórico do atendimento** (mensagens, `atendimentos`,

@@ -7,7 +7,7 @@
  */
 
 const { resolveConfig } = require('./config')
-const { toWhapiChatId, toWhapiGroupId } = require('./phones')
+const { toWhapiChatId, toWhapiGroupId, chatIdCandidates } = require('./phones')
 const { post, patch, del, get } = require('./http')
 const { extractArray, isWhapiSuccessBody, notImplemented } = require('./parse')
 
@@ -62,24 +62,48 @@ async function readChat(phone, opts = {}) {
   }
 }
 
+/**
+ * Apaga o chat na conta conectada. DELETE /chats/{ChatID}.
+ *
+ * Tenta os endereços de `chatIdCandidates` em ordem porque o chat BR vive na Whapi quase sempre
+ * SEM o 9º dígito, enquanto `toWhapiChatId` o insere — medido no canal de produção em 20/10:
+ * `553493120506@s.whatsapp.net` existe e `5534993120506@s.whatsapp.net` devolve 404. Com um
+ * endereço só, apagar no ZapERP não saía do WhatsApp e o erro era mudo.
+ *
+ * 404 = aquele endereço não existe → tenta o próximo. Qualquer outro erro PARA (não insiste
+ * numa falha real). Todos 404 = o chat não existe sob nenhuma forma conhecida: devolve
+ * `nao_existia`, que não é a mesma coisa que "falhou".
+ *
+ * @returns {Promise<{ok: boolean, chatId?: string, httpStatus?: number, naoExistia?: boolean, error?: string}>}
+ */
 async function deleteChat(phone, opts = {}) {
   const cfg = await resolveConfig(opts)
-  if (!cfg) return false
-  const chatId = toWhapiChatId(phone)
-  if (!chatId) return false
-  try {
-    const { ok, data } = await del({
-      token: cfg.token,
-      endpoint: `/chats/${encodeURIComponent(chatId)}`,
-      companyId: cfg.companyId,
-      whatsappInstanceId: cfg.whatsappInstanceId,
-      skipSendGuard: true,
-    })
-    return isWhapiSuccessBody(ok, data)
-  } catch (e) {
-    console.warn('❌ Whapi deleteChat falhou:', e?.message || e)
-    return false
+  if (!cfg) return { ok: false, error: 'Instância Whapi não configurada' }
+  const candidatos = chatIdCandidates(phone)
+  if (!candidatos.length) return { ok: false, error: 'Chat inválido.' }
+
+  let ultimoStatus = null
+  for (const chatId of candidatos) {
+    try {
+      const { ok, status, data } = await del({
+        token: cfg.token,
+        endpoint: `/chats/${encodeURIComponent(chatId)}`,
+        companyId: cfg.companyId,
+        whatsappInstanceId: cfg.whatsappInstanceId,
+        skipSendGuard: true,
+      })
+      ultimoStatus = status
+      if (isWhapiSuccessBody(ok, data)) return { ok: true, chatId, httpStatus: status }
+      if (Number(status) === 404) continue
+      console.warn('❌ Whapi deleteChat recusado:', chatId, `HTTP ${status}`, String(data?.error?.message || data?.error || '').slice(0, 160))
+      return { ok: false, chatId, httpStatus: status, error: String(data?.error?.message || data?.error || `HTTP ${status}`) }
+    } catch (e) {
+      console.warn('❌ Whapi deleteChat falhou:', chatId, e?.message || e)
+      return { ok: false, chatId, error: e?.message || String(e) }
+    }
   }
+  console.warn('⚠️ Whapi deleteChat: nenhum dos endereços existe no canal', candidatos.join(' · '))
+  return { ok: false, naoExistia: true, httpStatus: ultimoStatus ?? 404 }
 }
 
 /** Whapi não tem equivalente estável de clearMessages — 501 claro. */

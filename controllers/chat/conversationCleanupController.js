@@ -76,13 +76,20 @@ async function apagarChatNoWhatsapp(company_id, conv) {
     })
     const ok = result === true || result?.ok === true
     if (!ok) {
+      // `naoExistia`: o adapter tentou todas as formas do número e nenhuma existe no canal —
+      // o chat já não está no WhatsApp, que é o estado desejado. Não é a mesma falha de um
+      // provedor que recusou a operação.
+      const motivo = result?.naoExistia === true ? 'chat_nao_existe_no_whatsapp' : 'provedor_recusou'
       console.warn('[apagarConversa] provedor NÃO confirmou a exclusão do chat', {
         company_id,
         conversa_id: conv?.id ?? null,
         provider: providerName,
         whatsapp_instance_id: instanceId,
+        motivo,
+        http_status: result?.httpStatus ?? null,
+        erro_provedor: result?.error ? String(result.error).slice(0, 160) : null,
       })
-      return { ok: false, motivo: 'provedor_recusou' }
+      return { ok: false, motivo }
     }
     return { ok: true, motivo: null }
   } catch (e) {
