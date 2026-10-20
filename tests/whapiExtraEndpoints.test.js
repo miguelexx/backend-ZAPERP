@@ -73,7 +73,8 @@ describe('Whapi — endpoints extras', () => {
 
   test('patchChat PATCH /chats/{id} só envia campos válidos', async () => {
     const { fetchWithRetry } = mockDeps({ fetchImpl: async () => jsonRes({ success: true }) })
-    expect(await load().patchChat('5534988887777', { pin: true, ephemeral: 'week', lixo: 1 }, CTX)).toBe(true)
+    // patchChat devolve objeto desde que passou a tentar as formas do endereco (+-9o digito).
+    expect((await load().patchChat('5534988887777', { pin: true, ephemeral: 'week', lixo: 1 }, CTX)).ok).toBe(true)
     const c = callOf(fetchWithRetry)
     expect(c.url).toBe('https://gate.whapi.test/chats/5534988887777%40s.whatsapp.net')
     expect(c.opts.method).toBe('PATCH')
@@ -91,7 +92,7 @@ describe('Whapi — endpoints extras', () => {
 
   test('patchChat sem campos válidos não chama a API', async () => {
     const { fetchWithRetry } = mockDeps({ fetchImpl: async () => jsonRes({ success: true }) })
-    expect(await load().patchChat('5534988887777', { nada: 1 }, CTX)).toBe(false)
+    expect((await load().patchChat('5534988887777', { nada: 1 }, CTX)).ok).toBe(false)
     expect(fetchWithRetry).not.toHaveBeenCalled()
   })
 

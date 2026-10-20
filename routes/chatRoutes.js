@@ -12,6 +12,7 @@ const { destructiveLimiter } = require('../middleware/rateLimit')
 router.post('/contato', auth, chatController.criarContato);
 router.post('/abrir-conversa', auth, chatController.abrirConversaCliente);
 router.post("/grupos", auth, chatController.criarGrupo);
+router.get("/grupos", auth, chatController.listarGruposEncaminhar);
 router.get("/grupos/convite", auth, chatController.consultarConviteGrupo);
 router.post("/grupos/entrar", auth, chatController.entrarPorConviteGrupo);
 router.post("/comunidades", auth, chatController.criarComunidade);

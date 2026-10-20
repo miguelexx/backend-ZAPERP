@@ -5,6 +5,7 @@
 
 const { isAllowedInboundMediaUrl: isAllowedMediaUrl } = require('../helpers/allowedInboundMediaUrl')
 const { contentTypeFromAudioMagicBytes } = require('../helpers/audioFormatSniffer')
+const { contentTypeFromNonAudioMagicBytes } = require('../helpers/binaryMediaSniffer')
 const { sanitizeDownloadFilename, buildContentDisposition } = require('../helpers/contentDisposition')
 
 const MAX_BYTES = 80 * 1024 * 1024 // 80 MB (impressão / preview)
@@ -241,6 +242,11 @@ function resolveContentType(upstreamCt, urlStr, filename, buffer) {
 
   // Bytes reais primeiro — UltraMSG/S3 costuma mandar octet-stream sem extensão no path.
   if (buffer) {
+    // Imagem/vídeo/PDF antes do sniffer de ÁUDIO: ele vê `ftyp` e responde audio/mp4, o que
+    // transformava vídeo recebido sem extensão em "áudio" (Safari não mostrava imagem e o
+    // download salvava .m4a). Só assinaturas que não podem ser áudio entram aqui.
+    const fromNonAudio = contentTypeFromNonAudioMagicBytes(buffer)
+    if (fromNonAudio) return fromNonAudio
     const fromBytes = contentTypeFromAudioMagicBytes(buffer)
     if (fromBytes) return fromBytes
   }
@@ -433,6 +439,11 @@ exports.proxyMedia = async (req, res) => {
     const safeFilename = effectiveFilename ? sanitizeDownloadFilename(effectiveFilename) : null
     if (safeFilename) {
       res.setHeader('Content-Disposition', buildContentDisposition(dispositionType, safeFilename))
+    } else if (dispositionType === 'attachment') {
+      // `disposition=attachment` sem nome (mídia do WhatsApp raramente tem nome) não emitia
+      // header nenhum: o navegador abria o arquivo em vez de baixar. Sem nome o navegador
+      // escolhe um, mas o download é respeitado.
+      res.setHeader('Content-Disposition', 'attachment')
     }
 
     const total = body.length

@@ -248,6 +248,11 @@ app.use(
       }
       if (requestedName) {
         res.setHeader('Content-Disposition', buildContentDisposition(wantsAttachment ? 'attachment' : 'inline', requestedName))
+      } else if (wantsAttachment) {
+        // `?disposition=attachment` sem `?filename=` (mídia do WhatsApp quase nunca tem nome)
+        // não emitia header nenhum e o navegador exibia o arquivo em vez de baixar.
+        const name = p.split(/[\\/]/).pop() || 'download'
+        res.setHeader('Content-Disposition', buildContentDisposition('attachment', name))
       }
       // O mime padrão do express.static devolve octet-stream para .opus/.amr e audio/x-aac para .aac.
       // Com nosniff, tipo genérico deixa o <audio> sem dica alguma do formato. Só extensões que não

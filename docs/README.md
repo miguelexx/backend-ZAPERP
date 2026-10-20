@@ -87,6 +87,7 @@ docs/
 | Riscos e dívida técnica | `ai-handoff/13-PROBLEMAS-CONHECIDOS-E-DIVIDA-TECNICA.md` |
 | **Encerrar conversa (manual, ausência, timeout do chatbot) — por que "não finalizava"** | `ai-handoff/32-ENCERRAMENTO-CONVERSA-GARANTIAS.md` |
 | **Apagar conversa nos dois sentidos (ZapERP ↔ WhatsApp), anti-loop, varredura UltraMSG** | `ai-handoff/34-SINCRONIZACAO-EXCLUSAO-CONVERSA.md` |
+| **Salvar/baixar mídia ("Salvar como…"), Content-Type por bytes, Content-Disposition** | `ai-handoff/35-AUDITORIA-MIDIA-SALVAR-COMO.md` |
 | **Orçamento manual no ERP via API WM (plano de registro, decisões fechadas, o que não tocar)** | `ai-handoff/36-ORCAMENTO-WM-INTEGRACAO.md` |
 | **Contrato da API WM como recebido (openapi.yaml + 5 documentos, não editar)** | `wm/README.md` |
 | Nomes "zapi" no código | `reference/ADR-LEGACY-NAMING.md` |

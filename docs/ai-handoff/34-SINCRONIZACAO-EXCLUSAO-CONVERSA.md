@@ -309,11 +309,39 @@ chat_nao_existe_no_whatsapp` — diferente de `provedor_recusou`.
 o UltraMSG continua boolean. Os dois consumidores (`conversationCleanupController` e
 `comunidadeController`) aceitam as duas formas.
 
-> **Mesma cegueira, ainda não corrigida:** `archiveChat`, `unarchiveChat`, `readChat`,
-> `patchChat` (pin/mute/ephemeral) e `clearChatMessages` continuam montando **um** endereço com
-> `toWhapiChatId`. Em celular BR gravado com o 9º, essas ações batem em 404 e falham caladas —
-> fixar/silenciar/limpar "não espelham" pelo mesmo motivo. Trocar por `chatIdCandidates` resolve,
-> mas exige rodar e conferir cada uma.
+### A mesma cegueira nas outras ações de chat — corrigido (20/10)
+
+`archiveChat`, `unarchiveChat`, `readChat` e `patchChat` (pin/mute/mark_unread/ephemeral, e os
+atalhos `pinChat`/`muteChat`) tinham o mesmo defeito: montavam **um** endereço com
+`toWhapiChatId`, então em celular BR gravado com o 9º batiam em 404 e falhavam caladas —
+fixar/silenciar "não espelhavam" pelo mesmo motivo que apagar não saía.
+
+A política do `deleteChat` virou a função `runOnChatCandidates(label, phone, opts, call)` em
+`whapi/chatsAdmin.js`, e **todas** as ações endereçadas por chat passam por ela, inclusive o
+próprio `deleteChat`: tenta `chatIdCandidates` em ordem, **404 vai para o próximo endereço,
+qualquer outro erro para na primeira tentativa**, e todas em 404 devolve `naoExistia: true`.
+Há um único lugar para mudar essa política.
+
+`clearChatMessages` **não** entra: a Whapi não tem endpoint de limpar as mensagens de um chat
+(reconferido em 20/10 — existe apagar chat, apagar mensagem e apagar mídia, nada equivalente),
+então continua `notImplemented` 501, sem chamada HTTP e sem endereço a tentar. Quando/se a Whapi
+publicar o endpoint, use `runOnChatCandidates`.
+
+**Contrato:** as quatro passaram de boolean para o mesmo objeto do `deleteChat`
+(`{ ok, chatId, httpStatus, naoExistia, error }`) — sem isso não dá para distinguir "o chat não
+existe em forma nenhuma" de "o provedor recusou", que é o ponto da correção. Consumidores
+conferidos um a um: `archiveChat`/`unarchiveChat`/`readChat` **não têm consumidor** fora dos
+testes (são superfície do adapter); `patchChat` tem um só, `controllers/chat/preferencesController.js`
+(espelho de fixar/silenciar), que ignorava o retorno e agora loga `[patchConversaPrefs] WhatsApp
+NÃO espelhou pin/mute` com `motivo`/`http_status` — segue best-effort, nunca quebra o salvamento
+da preferência. `clearChatMessages` e `deleteChat` já eram lidos como `r === true || r?.ok === true`
+em `conversationCleanupController` e `comunidadeController` (que continuam aceitando as duas
+formas, porque o UltraMSG ainda devolve boolean).
+
+Testes: `tests/whapiAcoesChatNonoDigito.test.js` (fetch mockado, sem token nem número real)
+cobre as seis entradas — ordem das tentativas, 404 em cadeia, erro não-404 parando na primeira,
+200 com body de erro, grupo e LID com endereço único, instância ausente sem chamada, e o 501 do
+`clearChatMessages`.
 
 ## 9. Risco residual
 

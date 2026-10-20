@@ -426,6 +426,8 @@ exports.enviarArquivo = _mediaMessageController.enviarArquivo
 // Encaminhamento movido para controllers/chat/forwardController.js (reexportado abaixo).
 const _forwardController = require('./chat/forwardController')
 exports.encaminharMensagem = _forwardController.encaminharMensagem
+const _forwardGroupsController = require('./chat/forwardGroupsController')
+exports.listarGruposEncaminhar = _forwardGroupsController.listarGruposEncaminhar
 
 /**
  * POST /chats/finalizacao-ausencia-lote — supervisor/admin, JWT.

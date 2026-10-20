@@ -42,10 +42,23 @@ async function espelharPrefsNoWhatsapp(company_id, conversa_id, { changedPin, fi
     const changes = {}
     if (changedPin) changes.pin = !!fixada
     if (changedMute) changes.mute_until = silenciada ? Date.now() + MUTE_ESPELHO_MS : 0
-    await provider.patchChat(telefone, changes, {
+    const r = await provider.patchChat(telefone, changes, {
       companyId: company_id,
       ...(instanceId ? { whatsappInstanceId: instanceId } : {}),
     })
+    // Whapi devolve objeto ({ ok, chatId, naoExistia, … }) desde que passou a tentar as formas
+    // do endereço (±9º dígito); UltraMSG não tem patchChat. Aceita os dois e, quando não
+    // espelhou, DIZ — antes o fracasso era mudo e o atendente achava que tinha fixado no celular.
+    if (!(r === true || r?.ok === true)) {
+      console.warn('[patchConversaPrefs] WhatsApp NÃO espelhou pin/mute', {
+        company_id,
+        conversa_id,
+        whatsapp_instance_id: instanceId,
+        motivo: r?.naoExistia === true ? 'chat_nao_existe_no_whatsapp' : 'provedor_recusou',
+        http_status: r?.httpStatus ?? null,
+        erro_provedor: r?.error ? String(r.error).slice(0, 160) : null,
+      })
+    }
   } catch (e) {
     console.warn('[patchConversaPrefs] espelhar pin/mute no WhatsApp falhou:', e?.message || e)
   }

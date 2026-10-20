@@ -228,8 +228,9 @@ describe('Whapi provider — sendText', () => {
       fetchImpl: async () => ({ ok: true, status: 200, text: async () => JSON.stringify({ success: true }) }),
     })
     const whapi = require('../services/providers/whapi')
-    const ok = await whapi.readChat('5534988887777', { companyId: 1, whatsappInstanceId: 10 })
-    expect(ok).toBe(true)
+    // Objeto (nao boolean) desde que readChat passou a tentar as formas do endereco.
+    const r = await whapi.readChat('5534988887777', { companyId: 1, whatsappInstanceId: 10 })
+    expect(r.ok).toBe(true)
     const [url, opts] = fetchWithRetry.mock.calls[0]
     expect(opts.method).toBe('PATCH')
     expect(url).toBe('https://gate.whapi.test/chats/5534988887777%40s.whatsapp.net')
@@ -242,8 +243,8 @@ describe('Whapi provider — sendText', () => {
       fetchImpl: async () => ({ ok: true, status: 200, text: async () => JSON.stringify({ success: true }) }),
     })
     const whapi = require('../services/providers/whapi')
-    const ok = await whapi.archiveChat('5534988887777', { companyId: 1, whatsappInstanceId: 10 })
-    expect(ok).toBe(true)
+    const r = await whapi.archiveChat('5534988887777', { companyId: 1, whatsappInstanceId: 10 })
+    expect(r.ok).toBe(true)
     const [url, opts] = fetchWithRetry.mock.calls[0]
     expect(opts.method).toBe('POST')
     expect(url).toBe('https://gate.whapi.test/chats/5534988887777%40s.whatsapp.net')

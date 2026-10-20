@@ -149,6 +149,67 @@ describe('GET /media/proxy — nome fora do Latin-1', () => {
   })
 })
 
+/**
+ * Auditoria de mídia (2026-10-20): "Salvar como…" passou a existir para foto/vídeo/áudio/
+ * figurinha, e essa mídia quase nunca tem nome. Sem nome, `disposition=attachment` não
+ * emitia Content-Disposition nenhum e o navegador EXIBIA o arquivo em vez de baixar.
+ */
+describe('download de mídia sem nome — attachment ainda é respeitado', () => {
+  const previousFetch = global.fetch
+  afterEach(() => { global.fetch = previousFetch })
+
+  test('/media/proxy: attachment sem filename responde attachment', async () => {
+    global.fetch = jest.fn(async () => new Response(Buffer.from([0xff, 0xd8, 0xff, 0xe0]), {
+      status: 200,
+      headers: { 'Content-Type': 'image/jpeg' },
+    }))
+    const appProxy = express()
+    appProxy.get('/media/proxy', require('../controllers/mediaProxyController').proxyMedia)
+    const r = await rawBuffer(request(appProxy).get('/media/proxy').query({
+      // URL sem extensão e sem nome — exatamente como o WhatsApp entrega a foto.
+      url: 'https://mmg.whatsapp.net/v/t62/abc',
+      disposition: 'attachment',
+    }))
+    expect(r.status).toBe(200)
+    expect(r.headers['content-type']).toMatch(/^image\/jpeg/)
+    expect(r.headers['content-disposition']).toBe('attachment')
+  })
+
+  test('/media/proxy: inline sem filename continua sem header (exibir não muda)', async () => {
+    global.fetch = jest.fn(async () => new Response(Buffer.from([0xff, 0xd8, 0xff, 0xe0]), {
+      status: 200,
+      headers: { 'Content-Type': 'image/jpeg' },
+    }))
+    const appProxy = express()
+    appProxy.get('/media/proxy', require('../controllers/mediaProxyController').proxyMedia)
+    const r = await rawBuffer(request(appProxy).get('/media/proxy').query({
+      url: 'https://mmg.whatsapp.net/v/t62/abc',
+    }))
+    expect(r.status).toBe(200)
+    expect(r.headers['content-disposition']).toBeUndefined()
+  })
+
+  test('/uploads: attachment sem filename baixa com o nome em disco', async () => {
+    const app = require('../app')
+    const { ensureUploadsRootExists } = require('../config/uploadsRoot')
+    const root = ensureUploadsRootExists()
+    const fileName = `dl-audit-noname-${Date.now()}.jpg`
+    const full = path.join(root, fileName)
+    fs.writeFileSync(full, Buffer.from([0xff, 0xd8, 0xff, 0xe0]))
+    try {
+      const semParam = await rawBuffer(request(app).get(`/uploads/${fileName}`))
+      expect(semParam.headers['content-disposition']).toBeUndefined()
+
+      const salvar = await rawBuffer(request(app).get(`/uploads/${fileName}`).query({ disposition: 'attachment' }))
+      expect(salvar.status).toBe(200)
+      expect(salvar.headers['content-type']).toMatch(/^image\/jpeg/)
+      expect(salvar.headers['content-disposition']).toMatch(/^attachment; filename="dl-audit-noname-/)
+    } finally {
+      try { fs.unlinkSync(full) } catch { /* ignore */ }
+    }
+  })
+})
+
 describe('upload — formatos de documento', () => {
   const { isAllowedUploadFile } = require('../middleware/upload')
   const { inferirTipoArquivo } = require('../services/chat/media/mediaType')
