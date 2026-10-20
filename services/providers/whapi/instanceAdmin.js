@@ -53,14 +53,18 @@ async function configureWebhooks(appUrl, opts = {}) {
     return [{ label: 'webhook', ok: false, error: 'WHAPI_WEBHOOK_TOKEN ausente' }]
   }
   const webhookUrl = `${String(appUrl).replace(/\/$/, '')}/webhooks/whapi`
-  const webhooksOnly = {
+  const corpoWebhooks = (events) => ({
     webhooks: [{
       url: webhookUrl,
       mode: 'body',
-      events: WHAPI_WEBHOOK_EVENTS,
+      events,
       headers: { 'X-Webhook-Token': webhookToken },
     }],
-  }
+  })
+  const webhooksOnly = corpoWebhooks(WHAPI_WEBHOOK_EVENTS)
+  // Sem `chats` (exclusão de conversa): usado só como último recurso se o canal/plano recusar
+  // esse evento. Receber mensagem é mais importante do que espelhar exclusão — ver doc 34 §7.1.
+  const webhooksSemChats = corpoWebhooks(WHAPI_WEBHOOK_EVENTS.filter((e) => e.type !== 'chats'))
   const patchSettings = (body) => patch({
     token: cfg.token,
     endpoint: '/settings',
@@ -79,9 +83,19 @@ async function configureWebhooks(appUrl, opts = {}) {
       console.warn('⚠️ Whapi recusou media.auto_download; reconfigurando só o webhook:', String(text || data?.error || `HTTP ${status}`).slice(0, 200))
       ;({ ok, status, data, text } = await patchSettings(webhooksOnly))
     }
+    // Último recurso: canal que recuse o evento `chats` ainda precisa receber messages/statuses.
+    // Sem isto, um 400 por causa da exclusão de conversa deixaria o canal sem webhook nenhum.
+    if (!ok && (Number(status) === 400 || Number(status) === 422)) {
+      console.warn('⚠️ Whapi recusou o evento chats/delete; configurando o webhook SEM ele (exclusão de conversa feita no celular não será espelhada — ver doc 34):', String(text || data?.error || `HTTP ${status}`).slice(0, 200))
+      ;({ ok, status, data, text } = await patchSettings(webhooksSemChats))
+      if (ok) {
+        console.log('✅ Whapi webhooks configurados (sem chats/delete):', webhookUrl)
+        return [{ label: 'webhook', ok: true, webhook_url: webhookUrl, chats_delete: false }]
+      }
+    }
     if (ok) {
       console.log('✅ Whapi webhooks configurados:', webhookUrl)
-      return [{ label: 'webhook', ok: true, webhook_url: webhookUrl }]
+      return [{ label: 'webhook', ok: true, webhook_url: webhookUrl, chats_delete: true }]
     }
     console.warn('⚠️ Whapi configureWebhooks falhou:', String(text || data?.error || `HTTP ${status}`).slice(0, 200))
     return [{ label: 'webhook', ok: false, webhook_url: webhookUrl }]

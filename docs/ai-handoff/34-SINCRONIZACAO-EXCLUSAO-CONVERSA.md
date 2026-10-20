@@ -189,6 +189,11 @@ raciocínio da guarda anti-histórico do inbound (doc 25 §anti-histórico). Lot
 `POST /integrations/whatsapp/instances/:id/configure-webhooks`. Assinamos **só** o `delete`:
 `chats.post` e `chats.patch` não têm consumidor e só gerariam ruído.
 
+`configureWebhooks` tem uma 3ª tentativa: se o canal recusar o PATCH com 400/422 por causa do
+evento `chats`, ele reconfigura **sem** esse evento e devolve `chats_delete: false`. Receber
+mensagem vale mais do que espelhar exclusão — sem esse degrau, um canal que recusasse o evento
+ficaria com o webhook inteiro desconfigurado.
+
 > Isto corrige o que o doc 25 §"Webhook: canal não assina chats/contacts/groups/presences/calls"
 > afirmava — presences já havia sido assinado antes, e agora `chats.delete` também.
 
@@ -197,7 +202,7 @@ raciocínio da guarda anti-histórico do inbound (doc 25 §anti-histórico). Lot
 ## 8. Como testar
 
 ```bash
-cd backend && npx jest tests/exclusaoConversaSincronizacaoWhatsapp.test.js tests/whapiWebhookChatsRemoved.test.js
+cd backend && npx jest tests/exclusaoConversaSincronizacaoWhatsapp.test.js tests/whapiWebhookChatsRemoved.test.js tests/whapiWebhookChatsRemovedIntegracao.test.js tests/apagarConversaHttpRegressao.test.js
 ```
 
 - `tests/exclusaoConversaSincronizacaoWhatsapp.test.js` (28): identidade (LID cru), isolamento por
@@ -207,8 +212,18 @@ cd backend && npx jest tests/exclusaoConversaSincronizacaoWhatsapp.test.js tests
   simulação, `em_atendimento` e atividade recente fora, aplicação + realtime).
 - `tests/whapiWebhookChatsRemoved.test.js` (8): extração do payload oficial, recusa de
   `chats.post`/`chats.patch`/`messages.delete`, tenant e instância sempre do canal.
+- `tests/whapiWebhookChatsRemovedIntegracao.test.js` (10): **fiação ponta a ponta** — corpo cru do
+  provedor → `handleWebhookWhapi` → cascata no banco → socket. Inclui 500 em falha de banco, 200 no
+  eco, lote acima do teto, chave mestra desligada, `chats.post`/`chats.patch` inertes, webhook sem
+  contexto de canal e a garantia de que o pipeline de mensagens/ACK não é acionado.
+- `tests/apagarConversaHttpRegressao.test.js` (11): o `DELETE /chats/:id` não mudou com a extração
+  da cascata — mesmos 200/400/403/404, mesmos campos na resposta, provedor ANTES da cascata, contato
+  preservado sem `apagar_cliente`, `apagar_cliente=1` apagando, falha do provedor não bloqueando a
+  exclusão local e a guarda anti-loop sendo registrada.
 
-Suíte completa em 20/10: **230 suites / 2542 testes passando**. Frontend: **47/47** scripts Node.
+Suíte completa em 20/10: **232 suites / 2563 testes passando**. Frontend: **47/47** scripts Node.
+(O aviso "Jest did not exit" na suíte completa é **anterior** a esta frente — verificado rodando a
+suíte sem estes arquivos.)
 
 ### Teste manual (Whapi)
 
@@ -247,6 +262,9 @@ lista de `candidatos` e compare `provider_chats` com `conversas_examinadas`; só
   do canal faz o eco chegar "órfão" — mas aí a conversa já não existe, então o efeito é nulo
   (`conversa_nao_encontrada`). Só haveria exclusão indevida se a conversa fosse recriada por
   mensagem nova **e** o eco antigo chegasse depois **e** o processo tivesse reiniciado no meio.
+- **A guarda de lista truncada não tem override.** Uma limpeza real e legítima de mais de metade
+  dos chats no celular trava a varredura (`aplicar=1`) e exige conferir a simulação. É de propósito:
+  o cenário oposto — aplicar por cima de uma leitura incompleta — é irreversível.
 - **Multi-instância sem `whatsapp_instance_id`:** conversa legada sem instância em empresa com 2+
   números ativos **não** é apagada pelo webhook (não há como saber de qual número é). Fica para a
   varredura manual.
