@@ -75,7 +75,10 @@ celular apaga a conversa
 Nunca pelo nome do contato. A chave é **`company_id` + instância + identidade do chat**:
 
 - `...@s.whatsapp.net` / `...@c.us` → só os dígitos (`5534999887766`)
-- `...@lid` → `lid:<dígitos>` (casa em `conversas.telefone` ou em `conversas.chat_lid`)
+- `...@lid` → `lid:<parte crua antes de @lid>` (casa em `conversas.telefone` ou em `conversas.chat_lid`).
+  A parte é preservada **sem tirar não-dígitos** porque é exatamente assim que o inbound grava
+  (`payload.js` e `webhookZapiController` usam `replace(/@lid$/i,'')`); normalizar faria a chave
+  divergir da do banco num LID com sufixo de device.
 - `...@g.us` → grupo, **ignorado** (sair de grupo é outro fluxo; o `DELETE /chats/:id` também recusa)
 - `@broadcast` / `@newsletter` → ignorados
 
@@ -83,9 +86,16 @@ O casamento considera as variantes de ±9º dígito (`possiblePhonesForWhatsappI
 pode ecoar o JID de 12 dígitos para uma conversa gravada com 13 (e vice-versa).
 
 **Isolamento:** conversa de outra empresa nunca entra (filtro `company_id` explícito — SERVICE_ROLE
-bypassa RLS). Conversa de outra instância da mesma empresa também não. Conversa legada com
-`whatsapp_instance_id IS NULL` só entra quando a empresa tem **uma única** instância ativa — com
-duas ou mais não há como saber de qual número ela é.
+bypassa RLS). Conversa de outra instância da mesma empresa também não.
+
+**Quando a instância não dá para casar** — linha legada com `whatsapp_instance_id IS NULL`, ou canal
+que chegou sem instância resolvida — a única licença para apagar é a empresa ter **um único número
+ativo**. Com 2+ números não há como saber de qual número é a conversa, e apagar a errada é
+irreversível: nesse caso não apaga (fica para a varredura manual).
+
+**Erro de banco não é "não achei":** falha no SELECT devolve `erro_de_banco` e o webhook responde
+**500** para o Whapi reentregar o evento. Com 200 a exclusão se perderia para sempre. Reaplicar é
+idempotente — na segunda vez a conversa já não existe.
 
 ### 3.2 O que a exclusão remota NÃO faz
 
@@ -118,19 +128,25 @@ Três barreiras independentes:
 `POST /integrations/whatsapp/instances/:id/chats/reconciliar-exclusoes` — **admin only**,
 rate limit 4/min por empresa+instância. Query/body: `aplicar=1`, `horas=<n>`, `limite=<n>`.
 
+**Só para instância UltraMSG.** Instância Whapi recebe **501**: o `GET /chats` da Whapi é paginado
+(devolve a 1ª página) e uma lista parcial classificaria conversa viva como apagada — e não precisa,
+porque a Whapi avisa pelo webhook em tempo real. A varredura existe para o provedor que não avisa.
+
 Compara `provider.getChats()` com as conversas da instância e aponta as que já não existem no
 WhatsApp. **Conservadora de propósito:**
 
 - `aplicar` é opt-in → **por padrão é simulação** (devolve `candidatos`, não apaga);
-- lista vazia do provedor **aborta** (502) — não dá para distinguir "não tem chat" de "a chamada
+- lista **vazia** do provedor aborta (502) — não dá para distinguir "não tem chat" de "a chamada
   falhou", e apagar a base por causa de um 500 do provedor é irreversível;
+- lista **parcial** também aborta na hora de aplicar: com amostra de ≥10 conversas elegíveis, se os
+  candidatos passarem de **metade** delas a leitura é tratada como truncada (sintoma de paginação ou
+  de resposta incompleta), não como exclusão em massa real;
 - nunca considera grupo, conversa por LID, conversa sem telefone;
 - nunca considera conversa `em_atendimento` (alguém está atendendo agora);
 - exige inatividade mínima (`horas`, padrão **24**) — chat novo pode ainda não constar na lista;
-- teto por execução (`limite`, padrão **50**).
-
-Serve também à Whapi como rede de segurança quando o evento `chats` ficou desassinado por um
-período. Resposta inclui `observacao` dizendo qual é o caso do provedor da instância.
+- varre da conversa mais parada para a mais recente (`ultima_atividade` asc, teto de 5000 linhas);
+- `limite` (padrão **50**) limita quantas são APAGADAS; `total_candidatos` conta todas, para a
+  proporção acima ser confiável.
 
 ---
 
@@ -184,14 +200,15 @@ raciocínio da guarda anti-histórico do inbound (doc 25 §anti-histórico). Lot
 cd backend && npx jest tests/exclusaoConversaSincronizacaoWhatsapp.test.js tests/whapiWebhookChatsRemoved.test.js
 ```
 
-- `tests/exclusaoConversaSincronizacaoWhatsapp.test.js` (20): identidade, isolamento por
-  empresa/instância, ±9º dígito, grupo ignorado, contato preservado, anti-eco por tenant, recriação
-  após mensagem nova, teto de lote, reconciliação (aborto com lista vazia, simulação, `em_atendimento`
-  e atividade recente fora, aplicação + realtime).
+- `tests/exclusaoConversaSincronizacaoWhatsapp.test.js` (28): identidade (LID cru), isolamento por
+  empresa/instância, instância indeterminada em empresa multi-número, ±9º dígito, `chat_lid`, grupo
+  ignorado, contato preservado, erro de banco → reentrega, anti-eco por tenant, recriação após
+  mensagem nova, teto de lote, reconciliação (aborto com lista vazia **e com lista parcial**,
+  simulação, `em_atendimento` e atividade recente fora, aplicação + realtime).
 - `tests/whapiWebhookChatsRemoved.test.js` (8): extração do payload oficial, recusa de
   `chats.post`/`chats.patch`/`messages.delete`, tenant e instância sempre do canal.
 
-Suíte completa em 19/10: **230 suites / 2534 testes passando**. Frontend: **47/47** scripts Node.
+Suíte completa em 20/10: **230 suites / 2542 testes passando**. Frontend: **47/47** scripts Node.
 
 ### Teste manual (Whapi)
 
@@ -205,7 +222,8 @@ Suíte completa em 19/10: **230 suites / 2534 testes passando**. Frontend: **47/
 ### Teste manual (UltraMSG)
 
 `POST /integrations/whatsapp/instances/:id/chats/reconciliar-exclusoes` (sem `aplicar`) → confira a
-lista de `candidatos`; só então repita com `?aplicar=1`.
+lista de `candidatos` e compare `provider_chats` com `conversas_examinadas`; só então repita com
+`?aplicar=1`. Instância Whapi responde 501 de propósito (usa o webhook).
 
 ---
 
@@ -218,6 +236,13 @@ lista de `candidatos`; só então repita com `?aplicar=1`.
 - **Conversa `em_atendimento` é apagada** pelo caminho do webhook (a varredura, não). Mantido assim
   porque o pedido é espelhar a exclusão; a proteção de `em_atendimento` existe só na varredura, onde
   a inferência é menos confiável.
+- **Varredura não cobre Whapi** (501 de propósito, §5). Se o canal Whapi ficar sem assinar
+  `chats.delete` por um período, as exclusões dessa janela não são recuperáveis — reassine o evento.
+  Cobrir isso exigiria paginar o `GET /chats` da Whapi, o que mudaria `getChats` (usado por outras
+  telas) e ficou fora desta rodada.
+- **Falha da cascata depois do provedor ter apagado:** `DELETE /chats/:id` chama o provedor antes da
+  cascata (ordem que já existia). Se a cascata falhar (500), o chat já saiu do WhatsApp e a guarda de
+  eco suprime o aviso que, por acidente, repararia o estado. Repetir a exclusão resolve.
 - **Guarda de eco é em memória.** Restart do processo no intervalo entre a exclusão local e o eco
   do canal faz o eco chegar "órfão" — mas aí a conversa já não existe, então o efeito é nulo
   (`conversa_nao_encontrada`). Só haveria exclusão indevida se a conversa fosse recriada por

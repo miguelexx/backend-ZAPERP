@@ -1376,8 +1376,12 @@ async function handleWebhookWhapi(req, res) {
             req.webhookLogData.chats_removed_ignorados = r.ignorados
           }
         }
+        // Falha de INFRA (banco) ao procurar a conversa: 500 para o Whapi reentregar o evento.
+        // Com 200 a exclusão se perderia para sempre. Reaplicar é idempotente (a 2ª vez não acha).
+        if (r.erroDeBanco) anyServerError = true
       } catch (e) {
         console.warn('[WHAPI] applyWhapiRemovedChats falhou:', e?.message || e)
+        anyServerError = true
       }
     }
 

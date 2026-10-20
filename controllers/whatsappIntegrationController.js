@@ -1652,6 +1652,15 @@ exports.reconciliarExclusoesChats = async (req, res) => {
   }
   const resolved = await resolveInstanceProviderName(company_id, id)
   if (!resolved.instance) return res.status(instanceErrorStatus(resolved.error)).json({ error: resolved.error })
+  // Whapi fica FORA: o `GET /chats` dela é paginado (devolve a 1ª página) e uma lista parcial faria
+  // a varredura classificar conversa viva como apagada. E não precisa — a Whapi avisa a exclusão
+  // pelo webhook `chats.delete`, em tempo real. A varredura existe para o provedor que não avisa.
+  if (resolved.providerName === 'whapi') {
+    return res.status(501).json({
+      error: 'Instância Whapi não usa a varredura: a exclusão de conversa chega pelo webhook (evento chats/delete). Rode configure-webhooks se o canal ainda não assina o evento.',
+      provider: 'whapi',
+    })
+  }
 
   const aplicarRaw = String(req.query?.aplicar ?? req.body?.aplicar ?? '').trim().toLowerCase()
   const aplicar = ['1', 'true', 'sim', 'yes'].includes(aplicarRaw)
@@ -1670,19 +1679,26 @@ exports.reconciliarExclusoesChats = async (req, res) => {
       inatividadeHoras: horas != null && String(horas).trim() !== '' ? Number(horas) : RECONCILIACAO_INATIVIDADE_HORAS_PADRAO,
       limite: limite != null && String(limite).trim() !== '' ? Number(limite) : RECONCILIACAO_LIMITE_PADRAO,
     })
-    if (!r.ok) return res.status(502).json({ error: r.error, provider: resolved.providerName })
+    if (!r.ok) {
+      return res.status(502).json({
+        error: r.error,
+        provider: resolved.providerName,
+        provider_chats: r.provider_chats,
+        conversas_examinadas: r.conversas_examinadas,
+        total_candidatos: r.total_candidatos,
+        candidatos: r.candidatos,
+      })
+    }
     return res.json({
       provider: resolved.providerName,
       whatsapp_instance_id: id,
       simulacao: r.simulacao,
       provider_chats: r.provider_chats,
+      conversas_examinadas: r.conversas_examinadas,
       candidatos: r.candidatos,
-      total_candidatos: r.candidatos.length,
+      total_candidatos: r.total_candidatos,
       aplicadas: r.aplicadas,
-      // A Whapi já espelha a exclusão em tempo real pelo webhook; aqui é só rede de segurança.
-      observacao: resolved.providerName === 'whapi'
-        ? 'A Whapi avisa exclusão de chat pelo webhook (chats.delete); use isto apenas como varredura de segurança.'
-        : 'O UltraMSG não tem webhook de chat apagado — esta varredura é o único caminho para espelhar exclusões feitas no celular.',
+      observacao: 'O UltraMSG não tem webhook de chat apagado — esta varredura é o único caminho para espelhar exclusões feitas no celular. Confira a simulação antes de usar aplicar=1.',
     })
   } catch (e) {
     return res.status(500).json({ error: e?.message || 'Erro interno na reconciliação de exclusões' })

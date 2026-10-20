@@ -126,9 +126,14 @@ function foiExclusaoLocalRecente({ company_id, telefone } = {}) {
 /**
  * Normaliza qualquer endereço de chat para a chave de identidade usada aqui:
  * - grupo            → `<id>@g.us` (preservado)
- * - endereço LID     → `lid:<dígitos>`
+ * - endereço LID     → `lid:<parte antes de @lid>`
  * - contato normal   → só os dígitos (`5534999887766`)
  * Nome do contato nunca participa — o casamento é por company_id + instância + identidade.
+ *
+ * A parte do LID é preservada CRUA (sem tirar não-dígitos) de propósito: é exatamente assim que
+ * `conversas.telefone` (`lid:<parte>`) e `conversas.chat_lid` são gravados no inbound
+ * (`webhookInbound/payload.js` e `webhookZapiController`, ambos `replace(/@lid$/i, '')`).
+ * Normalizar aqui faria a chave divergir da do banco num LID com sufixo de device.
  */
 function chaveIdentidadeDeChat(valor) {
   const s = String(valor ?? '').trim()
@@ -136,11 +141,11 @@ function chaveIdentidadeDeChat(valor) {
   const lower = s.toLowerCase()
   if (lower.endsWith('@g.us')) return lower
   if (lower.startsWith('lid:')) {
-    const d = lower.slice(4).replace(/\D/g, '')
+    const d = lower.slice(4).trim()
     return d ? `lid:${d}` : null
   }
   if (lower.endsWith('@lid')) {
-    const d = lower.slice(0, -4).replace(/\D/g, '')
+    const d = lower.slice(0, -4).trim()
     return d ? `lid:${d}` : null
   }
   if (lower.includes('@broadcast') || lower.includes('@newsletter')) return null
@@ -167,7 +172,7 @@ function variantesDeIdentidade(identidade) {
 async function encontrarConversasPorIdentidade({ company_id, whatsapp_instance_id, telefone } = {}) {
   const cid = Number(company_id)
   const identidade = chaveIdentidadeDeChat(telefone)
-  if (!Number.isFinite(cid) || cid <= 0 || !identidade) return []
+  if (!Number.isFinite(cid) || cid <= 0 || !identidade) return { conversas: [], erroDeBanco: null }
 
   const instanceId = Number(whatsapp_instance_id)
   const temInstancia = Number.isFinite(instanceId) && instanceId > 0
@@ -176,43 +181,53 @@ async function encontrarConversasPorIdentidade({ company_id, whatsapp_instance_i
   const colunas = 'id, telefone, tipo, cliente_id, whatsapp_instance_id, status_atendimento, chat_lid, ultima_atividade'
 
   const encontradas = new Map()
-  const { data: porTelefone } = await supabase
+  const { data: porTelefone, error: errTelefone } = await supabase
     .from('conversas')
     .select(colunas)
     .eq('company_id', cid)
     .in('telefone', candidatos)
+  // Erro de banco ≠ "não achei": quem chama devolve 500 para o canal reentregar o evento, senão
+  // uma falha momentânea do banco perdia a exclusão para sempre (o Whapi não reenvia após 200).
+  if (errTelefone) return { conversas: [], erroDeBanco: errTelefone.message || String(errTelefone) }
   for (const row of porTelefone || []) encontradas.set(row.id, row)
 
   // Conversa espelhada por LID guarda o número real em `telefone` e o LID em `chat_lid`.
   if (identidade.startsWith('lid:')) {
-    const lidDigits = identidade.slice(4)
-    const { data: porLid } = await supabase
+    const lidPart = identidade.slice(4)
+    const { data: porLid, error: errLid } = await supabase
       .from('conversas')
       .select(colunas)
       .eq('company_id', cid)
-      .eq('chat_lid', lidDigits)
+      .eq('chat_lid', lidPart)
+    if (errLid) return { conversas: [], erroDeBanco: errLid.message || String(errLid) }
     for (const row of porLid || []) encontradas.set(row.id, row)
   }
 
   const rows = Array.from(encontradas.values())
-  if (!rows.length) return []
+  if (!rows.length) return { conversas: [], erroDeBanco: null }
 
-  let aceitaSemInstancia = !temInstancia
-  if (temInstancia && rows.some((r) => r.whatsapp_instance_id == null)) {
+  // "Número único na empresa" é a ÚNICA licença para apagar uma linha cuja instância não dá para
+  // casar (linha legada sem `whatsapp_instance_id`, ou canal que chegou sem instância resolvida).
+  // Empresa com 2+ números ativos: sem casar a instância não há como saber de qual número é a
+  // conversa, e apagar a errada é irreversível — então não apaga.
+  const precisaSaberSeEmpresaTemUmNumero = !temInstancia || rows.some((r) => r.whatsapp_instance_id == null)
+  let empresaTemUmNumeroSo = false
+  if (precisaSaberSeEmpresaTemUmNumero) {
     try {
       const { instances } = await listWhatsappInstances(cid)
       const ativas = (instances || []).filter((i) => i && i.ativo !== false)
-      aceitaSemInstancia = ativas.length <= 1
+      empresaTemUmNumeroSo = ativas.length <= 1
     } catch (_) {
-      aceitaSemInstancia = false
+      empresaTemUmNumeroSo = false
     }
   }
 
-  return rows.filter((r) => {
-    if (r.whatsapp_instance_id == null) return aceitaSemInstancia
-    if (!temInstancia) return true
+  const conversasDoNumero = rows.filter((r) => {
+    if (r.whatsapp_instance_id == null) return empresaTemUmNumeroSo
+    if (!temInstancia) return empresaTemUmNumeroSo
     return Number(r.whatsapp_instance_id) === instanceId
   })
+  return { conversas: conversasDoNumero, erroDeBanco: null }
 }
 
 // =====================================================================================
@@ -226,7 +241,10 @@ async function encontrarConversasPorIdentidade({ company_id, whatsapp_instance_i
  * NÃO apaga o cadastro do cliente: contato, tags do contato, CRM e campanhas ficam intactos.
  * Conversa de grupo é ignorada (sair de grupo é outro fluxo; o DELETE /chats/:id também recusa).
  *
- * @returns {Promise<{aplicadas:number[], ignorado?:string}>}
+ * `erroDeBanco` sinaliza falha de INFRA (não "não achei"): quem chama responde 500 para o canal
+ * reentregar o evento, senão uma falha momentânea perderia a exclusão para sempre.
+ *
+ * @returns {Promise<{aplicadas:number[], ignorado?:string, erroDeBanco?:string}>}
  */
 async function aplicarExclusaoRemotaDeChat({
   company_id,
@@ -247,11 +265,17 @@ async function aplicarExclusaoRemotaDeChat({
     return { aplicadas: [], ignorado: 'eco_da_propria_exclusao' }
   }
 
-  const conversas = await encontrarConversasPorIdentidade({
+  const { conversas, erroDeBanco } = await encontrarConversasPorIdentidade({
     company_id: cid,
     whatsapp_instance_id,
     telefone: identidade,
   })
+  if (erroDeBanco) {
+    console.warn('[chatDeletionSync] erro de banco ao procurar a conversa do chat removido', {
+      company_id: cid, whatsapp_instance_id, error: erroDeBanco,
+    })
+    return { aplicadas: [], ignorado: 'erro_de_banco', erroDeBanco }
+  }
   if (!conversas.length) return { aplicadas: [], ignorado: 'conversa_nao_encontrada' }
 
   const aplicadas = []
@@ -291,7 +315,7 @@ async function aplicarExclusaoRemotaDeChat({
 /**
  * Lote de chats removidos num único webhook. Acima do teto nada é apagado (proteção contra
  * resync/backlog do canal apagar a base inteira).
- * @returns {Promise<{aplicadas:number[], ignorados:Record<string,number>, recusadoPorLote?:boolean}>}
+ * @returns {Promise<{aplicadas:number[], ignorados:Record<string,number>, recusadoPorLote?:boolean, erroDeBanco?:boolean}>}
  */
 async function aplicarExclusaoRemotaEmLote({
   company_id,
@@ -320,6 +344,7 @@ async function aplicarExclusaoRemotaEmLote({
   }
 
   const aplicadas = []
+  let erroDeBanco = false
   for (const identidade of unicos) {
     const r = await aplicarExclusaoRemotaDeChat({
       company_id,
@@ -329,9 +354,10 @@ async function aplicarExclusaoRemotaEmLote({
       origem,
     })
     if (r.ignorado) ignorados[r.ignorado] = (ignorados[r.ignorado] || 0) + 1
+    if (r.erroDeBanco) erroDeBanco = true
     for (const id of r.aplicadas) aplicadas.push(id)
   }
-  return { aplicadas, ignorados }
+  return { aplicadas, ignorados, ...(erroDeBanco ? { erroDeBanco: true } : {}) }
 }
 
 // =====================================================================================
@@ -349,13 +375,17 @@ const RECONCILIACAO_LIMITE_PADRAO = 50
  *
  * Conservadora de propósito:
  * - lista vazia do provedor ABORTA (não dá para distinguir "não tem chat" de "chamada falhou");
+ * - **lista parcial também aborta na hora de aplicar**: se os candidatos passarem de metade das
+ *   conversas examinadas, a leitura do provedor é tratada como truncada/incompleta. Sem isso, um
+ *   `GET /chats` paginado apagaria tudo que ficou fora da primeira página;
  * - nunca considera grupo, conversa por LID sem número, nem conversa sem telefone;
  * - nunca considera conversa `em_atendimento` (alguém está atendendo agora);
  * - exige inatividade mínima (`inatividadeHoras`, padrão 24h) — chat novo pode ainda não constar;
  * - `aplicar` é opt-in: por padrão só devolve os candidatos (simulação);
- * - respeita o `limite` por execução.
+ * - `limite` limita quantas são APAGADAS por execução (a contagem de candidatos é completa, para
+ *   a proporção acima ser confiável).
  *
- * @returns {Promise<{ok:boolean, error?:string, provider_chats:number, candidatos:Array, aplicadas:number[], simulacao:boolean}>}
+ * @returns {Promise<{ok:boolean, error?:string, provider_chats:number, conversas_examinadas:number, candidatos:Array, total_candidatos:number, aplicadas:number[], simulacao:boolean}>}
  */
 async function reconciliarExclusoesDeChats({
   company_id,
@@ -403,20 +433,25 @@ async function reconciliarExclusoesDeChats({
     : RECONCILIACAO_INATIVIDADE_HORAS_PADRAO
   const corte = new Date(Date.now() - horas * 3600_000).toISOString()
 
+  // Ordem determinística e pela ponta certa: conversa parada há mais tempo é a mais provável de
+  // ter sido apagada no celular, e o teto de 5000 não pode cortar um pedaço arbitrário da base.
   const { data: conversas, error: errSel } = await supabase
     .from('conversas')
-    .select('id, telefone, tipo, cliente_id, status_atendimento, ultima_atividade, nome_contato_cache')
+    .select('id, telefone, tipo, cliente_id, status_atendimento, ultima_atividade')
     .eq('company_id', cid)
     .eq('whatsapp_instance_id', instanceId)
+    .order('ultima_atividade', { ascending: true, nullsFirst: true })
     .limit(5000)
   if (errSel) {
-    return { ok: false, error: errSel.message, provider_chats: identidadesProvedor.size, candidatos: [], aplicadas: [], simulacao: !aplicar }
+    return { ok: false, error: errSel.message, provider_chats: identidadesProvedor.size, conversas_examinadas: 0, candidatos: [], total_candidatos: 0, aplicadas: [], simulacao: !aplicar }
   }
 
   const tetoAplicar = Number.isFinite(Number(limite)) && Number(limite) > 0
     ? Math.floor(Number(limite))
     : RECONCILIACAO_LIMITE_PADRAO
 
+  // Conta TODOS os candidatos (sem parar no teto): a proporção abaixo só faz sentido completa.
+  let elegiveis = 0
   const candidatos = []
   for (const conv of conversas || []) {
     const telefone = String(conv.telefone || '').trim()
@@ -426,6 +461,7 @@ async function reconciliarExclusoesDeChats({
     if (identidade.endsWith('@g.us') || identidade.startsWith('lid:')) continue
     const tipo = String(conv.tipo || '').toLowerCase()
     if (tipo === 'grupo' || tipo === 'group') continue
+    elegiveis++
     if (String(conv.status_atendimento || '').toLowerCase() === 'em_atendimento') continue
     if (conv.ultima_atividade && String(conv.ultima_atividade) > corte) continue
     if (variantesDeIdentidade(identidade).some((v) => identidadesProvedor.has(v))) continue
@@ -436,15 +472,39 @@ async function reconciliarExclusoesDeChats({
       ultima_atividade: conv.ultima_atividade ?? null,
       status_atendimento: conv.status_atendimento ?? null,
     })
-    if (candidatos.length >= tetoAplicar) break
+  }
+
+  const base = {
+    provider_chats: identidadesProvedor.size,
+    conversas_examinadas: elegiveis,
+    total_candidatos: candidatos.length,
   }
 
   if (!aplicar) {
-    return { ok: true, provider_chats: identidadesProvedor.size, candidatos, aplicadas: [], simulacao: true }
+    return { ok: true, ...base, candidatos: candidatos.slice(0, tetoAplicar), aplicadas: [], simulacao: true }
+  }
+
+  // Guarda de lista truncada: provedor que pagina `GET /chats` devolve só a 1ª página e TODO o
+  // resto viraria "apagado no WhatsApp". Com amostra suficiente, candidato acima de metade das
+  // conversas examinadas é sintoma de leitura incompleta, não de exclusão em massa real.
+  const PROPORCAO_SUSPEITA = 0.5
+  const AMOSTRA_MINIMA = 10
+  if (elegiveis >= AMOSTRA_MINIMA && candidatos.length > elegiveis * PROPORCAO_SUSPEITA) {
+    console.warn('[chatDeletionSync] reconciliação ABORTADA: lista do provedor parece incompleta', {
+      company_id: cid, whatsapp_instance_id: instanceId, ...base,
+    })
+    return {
+      ok: false,
+      error: `A lista do provedor parece incompleta/paginada (${candidatos.length} de ${elegiveis} conversas não constam nela). Abortado para não apagar conversa viva — confira a simulação antes.`,
+      ...base,
+      candidatos: candidatos.slice(0, tetoAplicar),
+      aplicadas: [],
+      simulacao: false,
+    }
   }
 
   const aplicadas = []
-  for (const cand of candidatos) {
+  for (const cand of candidatos.slice(0, tetoAplicar)) {
     const r = await apagarDependenciasEConversa({ company_id: cid, conversa_id: cand.conversa_id })
     if (!r.ok) {
       console.warn('[chatDeletionSync] reconciliação: falha ao apagar', { company_id: cid, conversa_id: cand.conversa_id, error: r.error })
@@ -463,11 +523,10 @@ async function reconciliarExclusoesDeChats({
   console.log('[chatDeletionSync] reconciliação aplicada', {
     company_id: cid,
     whatsapp_instance_id: instanceId,
-    provider_chats: identidadesProvedor.size,
-    candidatos: candidatos.length,
+    ...base,
     aplicadas: aplicadas.length,
   })
-  return { ok: true, provider_chats: identidadesProvedor.size, candidatos, aplicadas, simulacao: false }
+  return { ok: true, ...base, candidatos: candidatos.slice(0, tetoAplicar), aplicadas, simulacao: false }
 }
 
 module.exports = {

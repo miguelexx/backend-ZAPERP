@@ -21,6 +21,7 @@ jest.mock('../services/chat/realtime/chatRealtimeGateway', () => ({
 
 const supabase = require('../config/supabase')
 const { emitirEventoEmpresaConversa } = require('../services/chat/realtime/chatRealtimeGateway')
+const { listWhatsappInstances } = require('../services/whatsappInstanceService')
 const sync = require('../services/chat/sync/chatDeletionSyncService')
 
 const COMPANY = 1
@@ -30,6 +31,8 @@ const INSTANCIA = 7
 let conversas
 /** Registro de DELETEs aplicados: { table, filtros } */
 let deletes
+/** Quando setado, todo SELECT em `conversas` devolve erro (simula falha de infra). */
+let erroSelectConversas
 
 function fakeSupabase() {
   supabase.from.mockImplementation((table) => {
@@ -53,6 +56,7 @@ function fakeSupabase() {
         return Promise.resolve({ data: null, error: null })
       }
       if (table === 'conversas' && state.op === 'select') {
+        if (erroSelectConversas) return Promise.resolve({ data: null, error: { message: erroSelectConversas } })
         const cid = Number(state.filtros.company_id)
         const telefones = state.filtros.telefone__in || null
         const chatLid = state.filtros.chat_lid
@@ -82,6 +86,8 @@ beforeEach(() => {
   sync._test.resetEco()
   delete process.env.WHATSAPP_CHAT_DELETE_SYNC_INBOUND
   delete process.env.WHATSAPP_CHAT_DELETE_SYNC_MAX_BATCH
+  listWhatsappInstances.mockResolvedValue({ instances: [{ id: INSTANCIA, ativo: true, is_default: true }] })
+  erroSelectConversas = null
   deletes = []
   conversas = [
     { id: 10, company_id: COMPANY, whatsapp_instance_id: INSTANCIA, telefone: '5534999887766', tipo: 'cliente', cliente_id: 99, status_atendimento: 'aberta', chat_lid: null, ultima_atividade: '2026-01-01T00:00:00Z' },
@@ -103,6 +109,12 @@ describe('identidade do chat', () => {
     expect(sync.chaveIdentidadeDeChat('120363000000000000@g.us')).toBe('120363000000000000@g.us')
     expect(sync.chaveIdentidadeDeChat('')).toBeNull()
     expect(sync.chaveIdentidadeDeChat('status@broadcast')).toBeNull()
+  })
+
+  test('parte do LID fica CRUA, igual ao que o inbound grava em telefone/chat_lid', () => {
+    // webhookInbound/payload.js grava `lid:${raw.replace(/@lid$/i,'')}` — sem tirar não-dígitos.
+    // Normalizar aqui faria a chave divergir da do banco num LID com sufixo de device.
+    expect(sync.chaveIdentidadeDeChat('123456789012345:12@lid')).toBe('lid:123456789012345:12')
   })
 
   test('variantes cobrem o 9º dígito (o provedor pode ecoar a outra forma)', () => {
@@ -187,6 +199,58 @@ describe('exclusão vinda do WhatsApp', () => {
     })
     expect(r.ignorado).toBe('grupo')
     expect(deletes).toHaveLength(0)
+  })
+
+  test('erro de banco NÃO é "não achei": sinaliza para o webhook pedir reentrega', async () => {
+    erroSelectConversas = 'connection reset'
+    const r = await sync.aplicarExclusaoRemotaDeChat({
+      company_id: COMPANY,
+      whatsapp_instance_id: INSTANCIA,
+      telefone: '5534999887766',
+      io: io(),
+    })
+    expect(r.ignorado).toBe('erro_de_banco')
+    expect(r.erroDeBanco).toBe('connection reset')
+    expect(deletes).toHaveLength(0)
+  })
+
+  test('conversa legada sem instância: apaga só quando a empresa tem UM número', async () => {
+    conversas = [{ id: 50, company_id: COMPANY, whatsapp_instance_id: null, telefone: '5534999887766', tipo: 'cliente', cliente_id: null, status_atendimento: 'aberta', chat_lid: null }]
+    const r = await sync.aplicarExclusaoRemotaDeChat({
+      company_id: COMPANY, whatsapp_instance_id: INSTANCIA, telefone: '5534999887766', io: io(),
+    })
+    expect(r.aplicadas).toEqual([50])
+  })
+
+  test('conversa legada sem instância NÃO é apagada se a empresa tem vários números', async () => {
+    listWhatsappInstances.mockResolvedValue({
+      instances: [{ id: INSTANCIA, ativo: true }, { id: 8, ativo: true }],
+    })
+    conversas = [{ id: 51, company_id: COMPANY, whatsapp_instance_id: null, telefone: '5534999887766', tipo: 'cliente', cliente_id: null, status_atendimento: 'aberta', chat_lid: null }]
+    const r = await sync.aplicarExclusaoRemotaDeChat({
+      company_id: COMPANY, whatsapp_instance_id: INSTANCIA, telefone: '5534999887766', io: io(),
+    })
+    expect(r.aplicadas).toEqual([])
+    expect(conversas.some((c) => c.id === 51)).toBe(true)
+  })
+
+  test('canal sem instância resolvida não apaga em empresa multi-número', async () => {
+    listWhatsappInstances.mockResolvedValue({
+      instances: [{ id: INSTANCIA, ativo: true }, { id: 8, ativo: true }],
+    })
+    const r = await sync.aplicarExclusaoRemotaDeChat({
+      company_id: COMPANY, whatsapp_instance_id: null, telefone: '5534999887766', io: io(),
+    })
+    expect(r.aplicadas).toEqual([])
+    expect(conversas.some((c) => c.id === 10)).toBe(true)
+  })
+
+  test('casa a conversa espelhada por LID pelo chat_lid (parte crua)', async () => {
+    conversas = [{ id: 60, company_id: COMPANY, whatsapp_instance_id: INSTANCIA, telefone: '5534999887766', tipo: 'cliente', cliente_id: null, status_atendimento: 'aberta', chat_lid: '280396956696801' }]
+    const r = await sync.aplicarExclusaoRemotaDeChat({
+      company_id: COMPANY, whatsapp_instance_id: INSTANCIA, telefone: '280396956696801@lid', io: io(),
+    })
+    expect(r.aplicadas).toEqual([60])
   })
 
   test('chave mestra desligada não apaga nada', async () => {
@@ -329,5 +393,48 @@ describe('reconciliação contra GET /chats', () => {
       expect.anything(), COMPANY, 41, 'conversa_apagada',
       expect.objectContaining({ origem: 'reconciliacao' }),
     )
+  })
+
+  test('lista PARCIAL do provedor aborta ao aplicar (GET /chats paginado não apaga a base)', async () => {
+    // 12 conversas antigas, provedor só devolve 2 (1ª página) → 10 "candidatos" = 83% da amostra.
+    conversas = Array.from({ length: 12 }, (_, i) => ({
+      id: 100 + i,
+      company_id: COMPANY,
+      whatsapp_instance_id: INSTANCIA,
+      telefone: `55349900000${String(i).padStart(2, '0')}`,
+      tipo: 'cliente',
+      cliente_id: null,
+      status_atendimento: 'aberta',
+      ultima_atividade: '2020-01-01T00:00:00Z',
+    }))
+    const provider = providerCom(['5534990000000@c.us', '5534990000001@c.us'])
+    const r = await sync.reconciliarExclusoesDeChats({
+      company_id: COMPANY, whatsapp_instance_id: INSTANCIA, provider, aplicar: true, io: io(),
+    })
+    expect(r.ok).toBe(false)
+    expect(r.error).toMatch(/incompleta|paginada/i)
+    expect(r.aplicadas).toEqual([])
+    expect(deletes).toHaveLength(0)
+    expect(conversas).toHaveLength(12)
+  })
+
+  test('simulação informa o total de candidatos mesmo acima do limite', async () => {
+    conversas = Array.from({ length: 6 }, (_, i) => ({
+      id: 200 + i,
+      company_id: COMPANY,
+      whatsapp_instance_id: INSTANCIA,
+      telefone: `55349911000${String(i).padStart(2, '0')}`,
+      tipo: 'cliente',
+      cliente_id: null,
+      status_atendimento: 'aberta',
+      ultima_atividade: '2020-01-01T00:00:00Z',
+    }))
+    const r = await sync.reconciliarExclusoesDeChats({
+      company_id: COMPANY, whatsapp_instance_id: INSTANCIA, provider: providerCom(['5511999999999@c.us']), limite: 2, io: io(),
+    })
+    expect(r.ok).toBe(true)
+    expect(r.total_candidatos).toBe(6)
+    expect(r.candidatos).toHaveLength(2)
+    expect(r.conversas_examinadas).toBe(6)
   })
 })
