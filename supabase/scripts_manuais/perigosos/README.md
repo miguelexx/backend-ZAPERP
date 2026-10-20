@@ -20,6 +20,32 @@ multi-tenant aplicado em `backend/supabase/migrations/20260630120000_rls_company
 `20260630130000_drop_remaining_company_id_defaults.sql`. Se for reaproveitar partes deste script,
 **não reative essas linhas**.
 
+## `COMPANY_31_*.sql` — limpar uma empresa preservando os atendentes
+
+Zera **todos os dados operacionais** de uma empresa (conversas, mensagens, clientes, atendimentos,
+logs, disparos, helpdesk, chat interno, auditoria) **preservando os atendentes** (`usuarios`),
+o acesso deles (`departamentos`, `usuario_*`) e a conexão (`whatsapp_instances`).
+
+| Arquivo | O que faz |
+|---|---|
+| `COMPANY_31_1_SIMULAR.sql` | **Só leitura.** Relatório `MANTER`/`APAGAR` por tabela. Rode antes e depois. |
+| `COMPANY_31_2_APAGAR.sql` | Apaga. Bloco único = transação única; sobrou linha, faz rollback de tudo. |
+| `COMPANY_31_0_MENSAGENS_EM_LOTES.sql` | Opcional, só se `mensagens` for grande demais para uma transação. |
+
+Diferente do `APAGAR_DADOS_COMPANY_4.sql` (que apaga `usuarios` e `departamentos`), estes **não**
+usam lista fixa de tabelas: varrem o `information_schema` em tempo de execução e apagam de toda
+tabela com `company_id` fora da lista `v_manter`, mais as filhas sem `company_id` presas por FK
+`NO ACTION`/`RESTRICT`. Rodam em várias passadas, resolvendo a ordem de FK sozinhos.
+
+Para outra empresa: troque o `31` em `cfg` (simular) e em `v_company` (apagar) — e mantenha as duas
+listas `v_manter`/`manter` iguais, senão o relatório deixa de bater com a exclusão.
+
+**Não apaga a mídia no R2/Storage** — só as linhas de `mensagens`.
+
+⚠️ **Formato:** os blocos usam `$$` e nunca `$1` ou dollar-quote nomeado (`$nome$`) por dentro.
+O SQL Editor do Supabase não reconhece esses dois e quebra o statement no `;` errado, gerando
+`42601: unterminated dollar-quoted string`. Se for editar, mantenha essa restrição.
+
 ## Os demais arquivos
 
 `APAGAR_DADOS_COMPANY_4.sql`, `EXCLUIR_CLIENTE_ESPECIFICO.sql`, `EXCLUIR_CONVERSAS_LISTA_ESPECIFICA.sql`,
