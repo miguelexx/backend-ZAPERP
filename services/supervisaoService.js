@@ -11,7 +11,7 @@
  * `aggregateResponseStats`/`outboundEhRespostaHumana` são exportados para teste. `company_id` do JWT.
  */
 const supabase = require('../config/supabase')
-const { getDisplayName } = require('../helpers/contactEnrichment')
+const { pickConversationDisplayName } = require('../helpers/contactEnrichment')
 const { isGroupConversation } = require('../helpers/conversaHelper')
 const { empresaModoSimplesAtivo } = require('../helpers/empresaModoSimplesFlag')
 const {
@@ -409,7 +409,7 @@ function buildPendingItem(conversa, lastMessage, depMap) {
     : 'Sem departamento'
   const clienteObj = conversa.clientes || null
   const clienteNome = safeDisplayString(
-    getDisplayName(clienteObj) || conversa.nome_contato_cache || conversa.telefone || 'Cliente',
+    pickConversationDisplayName(clienteObj, conversa.nome_contato_cache) || conversa.telefone || 'Cliente',
     200
   )
   const resumoConversa = buildResumoConversa(conversa, lastMessage)
@@ -891,7 +891,7 @@ async function getMovimentacaoFuncionario(companyId, usuarioId) {
       tipo,
       conversa_id: mov.conversa_id,
       cliente_nome: safeDisplayString(
-        getDisplayName(conv?.clientes) || conv?.nome_contato_cache || conv?.telefone || '',
+        pickConversationDisplayName(conv?.clientes, conv?.nome_contato_cache) || conv?.telefone || '',
         200
       ) || null,
       criado_em: mov.criado_em,

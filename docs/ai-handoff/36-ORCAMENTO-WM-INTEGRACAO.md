@@ -20,7 +20,7 @@ critério de pronto. As sessões são **sequenciais** — nenhuma começa antes 
 | Planejamento e estimativa | **aprovado** |
 | Fundação desligada + leitura com mock | **aprovado com testes** |
 | Preparação sem escrita em homologação | **aprovado** — a prévia usa o shape documentado (§8 da 2ª remessa); falta conferência humana contra o Icthus |
-| Criação real no ERP | **bloqueado só na Sessão 6** (o despacho não existe). As pendências 1 e 2 foram **respondidas** em 20/10 e já estão traduzidas em código |
+| Criação real no ERP | **implementada em 21/10 (Sessão 6), com testes e nenhuma chamada real à WM** — falta o primeiro teste em produção (roteiro na Sessão 6 da seção 9) e a homologação do replay idempotente com a WM |
 | Produção multiempresa | **bloqueado** na pendência **13** — a WM declara que *não* fornece prova de vínculo de tenant; o isolamento é 100% do ZapERP |
 
 ### Contrato recebido (20/10/2026)
@@ -704,11 +704,11 @@ Decisões da 4A que a 4B e a 6 herdam:
 O parágrafo que havia aqui dizia que 4A era o último passo seguro sem resposta da WM, porque a
 prévia e o resultado da criação não estavam no contrato. A 2ª remessa respondeu os dois, então:
 
-- **5B** monta `OrcamentoPreview` e `OrcamentoResultado` (hoje placeholders honestos) consumindo a
-  `previa_sanitizada` e o `wm_resultado_sanitizado` **já normalizados** — por governança (seção 13),
-  o normalizador vem antes da tela, e é o que a 4B entregou;
-- **6** liga o despacho: `wmApiClient.criarOrcamento` **sem `retryOpts`** (uma tentativa) em
-  `confirmar` e em `verificar`, gravando o resultado por `normalizarResultadoCriacao`.
+- **5B** (feita) montou `OrcamentoPreview` e `OrcamentoResultado` consumindo a `previa_sanitizada` e
+  o `wm_resultado_sanitizado` **já normalizados** — por governança (seção 13), o normalizador vem
+  antes da tela, e é o que a 4B entregou;
+- **6** (feita em 21/10) ligou o despacho: `wmApiClient.criarOrcamento` **sem `retryOpts`** (uma
+  tentativa) em `confirmar` e em `verificar`, gravando o resultado por `normalizarResultadoCriacao`.
 
 Uma regra nova que a 5B e a 6 não podem contrariar (§11.1): **"criado agora" × "resultado
 idempotente já concluído" não existe na resposta da WM** e é proibido inferir por `meta.criado_em`.
@@ -763,13 +763,11 @@ sem mexer no `useAutoScroll` da conversa, ordem de Escape, lista virtualizada e 
 **Pronto quando:** um usuário conclui o caminho comum pesquisando só por nomes, sem conhecer código
 ERP, e o rascunho sobrevive a erro e a fechamento acidental.
 
-### Sessão 6 — Criação (só com a Sessão 0 resolvida)
+### Sessão 6 — Criação — **IMPLEMENTADA (21/10), NÃO DEPLOYADA**
 
 Confirmação, criação idempotente, tela de resultado e resumo por template fixo com os dados oficiais
 da WM. **"Enviar ao cliente"** é ação separada e explícita, usando o envio normal da conversa, com o
-texto revisável antes de sair. Falha no envio do WhatsApp **não** cria outro orçamento. Replay
-idempotente homologado com a WM. Runbook de suporte para `INCERTO`. Rollout: `orcamentos.criar`
-liberado para poucos usuários de uma empresa piloto.
+texto revisável antes de sair. Falha no envio do WhatsApp **não** cria outro orçamento.
 
 Template do resumo (formata, não calcula):
 
@@ -782,6 +780,128 @@ Olá, João! Segue seu orçamento:
 Total: R$ 3.740,00
 Orçamento: 12345
 ```
+
+#### O que ficou pronto
+
+**Backend — `services/wm/wmOrcamentoService.js`.** Um único ponto escreve no ERP:
+`despacharCriacao`, chamado por `confirmar` e por `verificar`. Ele chama
+`wmApiClient.criarOrcamento(payload)` **sem `retryOpts`** — uma tentativa — e nada antes dele mudou:
+a leitura, a expiração, a exigência do snapshot e a transição atômica `PREPARADO → ENVIANDO` que
+persiste o `comando_id` **antes** de qualquer chamada continuam idênticas. O POST só sai para quem
+venceu o UPDATE condicional.
+
+Desfechos, pela tabela de retry da seção 7 (quem decide FALHA_SEGURA × INCERTO continua sendo o
+`wmErrorMapper`, não um segundo mapeamento):
+
+| resposta | estado | observação |
+|---|---|---|
+| `200` com `codigo_pedido_erp` | `CRIADO` | `wm_resultado_sanitizado` + `concluido_em` |
+| `200` sem número utilizável | `INCERTO` | gravou e não sabemos o número |
+| `502`, `503`, `400/422`, `409 COMANDO_ID_REUTILIZADO`, erro de **conexão** | `FALHA_SEGURA` | nada foi gravado |
+| `ORCAMENTO_DADOS_ALTERADOS` | `FALHA_SEGURA` | mensagem manda **repreparar**, nunca "tentar de novo" |
+| `504`, timeout, falha não classificada, `409 COMANDO_NAO_REEXECUTADO`/`RESULTADO_INCERTO` | `INCERTO` | pode ter gravado |
+
+Toda gravação de desfecho registra `http_status_ultimo`, `erro_codigo_ultimo` (o código **da WM**
+quando existe) e incrementa `tentativas` — coluna que existia desde a migration e nunca tinha sido
+escrita. O estado final é gravado **antes** da resposta: se a WM respondeu e o nosso UPDATE falhar,
+isso é tratado como INCERTO (nunca como sucesso), o `codigo_pedido_erp` vai para o log de erro
+porque não vive em mais lugar nenhum, e há um degrau de recuperação — um UPDATE mínimo só de
+estado, no qual um `CRIADO` que não coube vira `INCERTO`, porque `INCERTO` é o único estado que o
+suporte consegue reconciliar depois.
+
+`verificar` é **reconciliação, não criação** (D10): reenvia o payload idêntico com o MESMO
+`comando_id`, só aceita `INCERTO`, e o estado só pode andar para `CRIADO` — nenhum desfecho dela
+transforma um incerto em falha segura, porque um 409 não prova que o orçamento não existe.
+
+**Máquina de estados.** Uma aresta nova e só uma: `INCERTO → CRIADO`. A tabela de D10 sempre disse
+"200 ⇒ CRIADO"; a aresta faltava porque a Sessão 4A não tinha despacho. `INCERTO → ENVIANDO` e
+`INCERTO → PREPARADO` continuam inexistentes — é isso que impede `comando_id` novo sobre um incerto.
+
+**`COLUNAS_OPERACAO`** ganhou `wm_resultado_sanitizado`; sem ela, uma operação já `CRIADA` voltava do
+`GET` com `resultado: null` depois de um F5.
+
+**Frontend.** O drawer liga `onConfirmar`/`confirmando` à prévia e mostra `OrcamentoResultado` com o
+número do ERP. Resposta `INCERTO` leva a uma **tela terminal** com um único botão (Fechar) e a
+orientação de procurar o suporte — nenhuma tela do atendente chama `verificarOrcamento`, que fica
+como operação de suporte. Falha segura mantém a prévia à vista, trava o confirmar (a preparação
+morreu no servidor) e manda calcular de novo. O rascunho é limpo após a criação, para o drawer não
+reabrir com o orçamento inteiro preenchido e um "Calcular" à mão. "Enviar ao cliente" entrega o
+texto ao composer (`queueComposerAppend`, o mesmo caminho do painel de produtos): o atendente revisa
+e envia como qualquer mensagem, e o envio não conhece a criação.
+
+**Melhoria do vendedor (medida contra o ERP real).** O pré-preenchimento pelo `user.nome` do ZapERP
+foi **removido**: os vendedores do Icthus da empresa piloto são `FINANCEIRO`, `MARKONY`,
+`RAFAEL LUIZ SILVA`, `ROBSON DO NASCIMENTO LOURES` e `SAMUEL` (`total: 5`, sem outras páginas), e
+nome de atendente não está entre eles — o palpite garantia um `VENDEDOR_NAO_ENCONTRADO` na primeira
+tentativa de todo atendente novo. A memória do último vendedor **confirmado pela WM**
+(`vendedorLembrado.js`) ficou intacta: é a parte que funciona.
+
+**Testes.** Backend 249 suítes / 3193 testes (eram 3160); frontend 49/49 scripts, com o de orçamento
+em 300 asserções (eram 266). Nenhum teste chama a WM de verdade: `wmApiClient` é mockado e o `fetch`
+global é um espião que lança se for tocado.
+
+#### O que NÃO ficou pronto
+
+- **Replay idempotente homologado com a WM** — nada foi criado no Icthus nesta sessão, por desenho.
+  A homologação é o primeiro teste real (roteiro abaixo).
+- **Tela de suporte para reconciliar `INCERTO`** — o backend está pronto
+  (`POST /api/orcamentos/:id/verificar`), mas nenhuma interface a chama. Hoje a reconciliação é
+  `curl` com credencial de um usuário da empresa que tenha `orcamentos.criar`.
+- **Rollout** — `orcamentos.criar` ainda não foi restringido a poucos usuários da empresa piloto.
+
+#### Roteiro do primeiro teste real em produção
+
+**Antes de clicar:**
+
+1. `WM_ORCAMENTOS_ENABLED` e a flag da empresa ligadas só para a empresa 1; `orcamentos.criar`
+   concedido a **um** usuário (o seu). Confira no `getMe` (`orcamento_wm_habilitado`).
+2. `SELECT estado, count(*) FROM wm_orcamento_operacoes WHERE company_id = 1 GROUP BY 1` — anote.
+   Qualquer linha em `ENVIANDO` ou `INCERTO` **antes** do teste é passivo anterior, não resultado seu.
+3. Escolha um cliente real de baixo risco e **um** produto barato, quantidade 1.
+4. Deixe o log da API aberto (`pm2 logs`) e o Icthus aberto na tela de orçamentos.
+
+**O que observar, na ordem:** a prévia mostra cliente, vendedor, item, preço e total, com
+"Valores consultados agora" (fonte `tempo_real`) · ao clicar **Confirmar e criar no ERP** o botão
+desabilita sem mudar de lugar · a tela de resultado aparece com **Número do orçamento** · esse
+número existe no Icthus, com o mesmo cliente, o mesmo item e o mesmo total.
+
+**Provar a idempotência (o ponto do teste):** monte um segundo orçamento e, na prévia, **clique duas
+vezes seguidas, rápido**, em "Confirmar e criar no ERP". Depois:
+
+```sql
+SELECT id, estado, comando_id, tentativas, http_status_ultimo,
+       wm_resultado_sanitizado->>'codigo_pedido_erp' AS numero
+  FROM wm_orcamento_operacoes
+ WHERE company_id = 1
+ ORDER BY criado_em DESC LIMIT 5;
+```
+
+O esperado é **uma** linha nova, `estado = 'CRIADO'`, `tentativas = 1`, **um** `comando_id` e **um**
+número — e, no Icthus, **um** orçamento. Dois orçamentos para um clique duplo é falha grave: pare o
+rollout e desligue o módulo.
+
+**Se der `INCERTO`:** a tela trava e manda procurar o suporte — e está certa. **Não** crie outro.
+Ache o número no Icthus pelo cliente/valor/horário; se existir, o orçamento foi criado. Para
+reconciliar pelo sistema (reenvio do MESMO `comando_id`, sem criar de novo):
+
+```bash
+curl -X POST https://<api>/api/orcamentos/<operacao_id>/verificar \
+     -H "Authorization: Bearer <jwt de usuário com orcamentos.criar>" \
+     -H "Content-Type: application/json" -d '{}'
+```
+
+`200` ⇒ a linha vira `CRIADO` com o número. `409` ⇒ segue incerto: repita mais tarde, **sempre à
+mão**, nunca em laço.
+
+**Como desligar, do mais rápido ao mais cirúrgico:**
+
+1. `WM_ORCAMENTOS_ENABLED=false` + restart da API → as rotas respondem `403 ORCAMENTO_WM_OFF` e o
+   botão some do cabeçalho. É o botão de pânico.
+2. Revogar a permissão `orcamentos.criar` do usuário → ele continua vendo, não cria.
+3. Desligar a flag só da empresa (`wm_orcamento_integracoes.ativo = false`) — o gate tem cache de
+   20 s em memória, então o efeito aparece em até 20 segundos.
+
+Nenhum dos três desfaz orçamento já criado no Icthus — isso é no ERP, à mão.
 
 ### Sessão 7 — Separada e opcional
 

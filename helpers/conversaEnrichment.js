@@ -33,7 +33,11 @@ function needsEnrichment(conv) {
   if (isLid(conv.telefone)) return false
   const tel = String(conv.telefone || '').trim()
   if (!tel || tel.length < 10) return false
-  const hasName = conv.contato_nome && String(conv.contato_nome).trim() && !/^\d+$/.test(String(conv.contato_nome).replace(/\D/g, ''))
+  // Nome "ruim" conta como SEM nome — é exatamente o caso em que o atendente não acha o
+  // cliente na lista. Antes o teste só pegava telefone cru: um pushname de emoji ("❤")
+  // passava como nome e a conversa nunca era enriquecida com o nome salvo na agenda.
+  const nomeAtual = conv.contato_nome ? String(conv.contato_nome).trim() : ''
+  const hasName = !!nomeAtual && nomeAtual !== 'Sem nome' && !isBadName(nomeAtual)
   const hasPhoto = conv.foto_perfil && String(conv.foto_perfil).trim().startsWith('http')
   return !hasName || !hasPhoto
 }

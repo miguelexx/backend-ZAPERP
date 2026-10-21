@@ -16,12 +16,12 @@ const {
 } = require('../../validators/wmOrcamentosValidators')
 
 /**
- * Miolo do orçamento manual × API WM — Sessões 4A e 4B do doc 36.
+ * Miolo do orçamento manual × API WM — Sessões 4A, 4B e 6 do doc 36.
  *
- * Três responsabilidades, e nenhuma delas é "escrever no ERP": o despacho da criação é a
- * Sessão 6. A 4B trocou a costura provisória da prévia pelo shape REAL que a WM documentou na
- * 2ª remessa do contrato (pendências 1 e 2, respondidas) e acrescentou o normalizador do 200
- * da criação — que também não despacha nada.
+ * A Sessão 6 ligou o despacho: a partir dela este módulo **escreve em sistema de terceiro**.
+ * Há exatamente UM ponto onde isso acontece (`despacharCriacao`, chamado por `confirmar` e por
+ * `verificar`), ele chama `wmApiClient.criarOrcamento` SEM `retryOpts` — uma tentativa — e tudo
+ * o que vem antes dele existe para que ele saia no máximo uma vez por confirmação de negócio.
  *
  *   1. LAÇO DE AMBIGUIDADE — recebe o rascunho inteiro (cliente por busca ou código, vendedor
  *      por busca ou código, itens com busca ou código + quantidade, páginas), chama `preparar`
@@ -75,6 +75,10 @@ const COLUNAS_OPERACAO = [
   'comando_id',
   'payload_hash',
   'previa_sanitizada',
+  // Resultado sanitizado do `200` da criação: é por ele que a tela mostra o número do
+  // orçamento (`codigo_pedido_erp`) depois de um F5. Sem ele nesta lista, `projetarOperacao`
+  // devolveria `resultado: null` para uma operação já CRIADA.
+  'wm_resultado_sanitizado',
   'http_status_ultimo',
   'erro_codigo_ultimo',
   'tentativas',
@@ -104,7 +108,6 @@ const CODIGOS = Object.freeze({
   SNAPSHOT_DIVERGENTE: 'ORCAMENTO_SNAPSHOT_DIVERGENTE',
   SNAPSHOT_AUSENTE: 'ORCAMENTO_SNAPSHOT_AUSENTE',
   PERSISTENCIA_INDISPONIVEL: 'ORCAMENTO_PERSISTENCIA_INDISPONIVEL',
-  DESPACHO_NAO_LIBERADO: 'ORCAMENTO_DESPACHO_NAO_LIBERADO',
 })
 
 const MENSAGENS = Object.freeze({
@@ -116,7 +119,6 @@ const MENSAGENS = Object.freeze({
   [CODIGOS.SNAPSHOT_DIVERGENTE]: 'Não foi possível confirmar este orçamento com segurança. Procure o suporte.',
   [CODIGOS.SNAPSHOT_AUSENTE]: 'Não foi possível confirmar este orçamento com segurança. Monte o orçamento de novo.',
   [CODIGOS.PERSISTENCIA_INDISPONIVEL]: 'Não foi possível registrar o orçamento agora. Tente de novo em instantes.',
-  [CODIGOS.DESPACHO_NAO_LIBERADO]: 'A criação no ERP ainda não está liberada nesta versão.',
 })
 
 const PADRAO_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -871,20 +873,16 @@ async function preparar({ company_id, usuario_id = null, rascunho, requestId } =
 }
 
 /* ================================================================== *
- * 2. confirmar — transição atômica (NÃO despacha nesta sessão)
+ * 2. confirmar — transição atômica + despacho
  * ================================================================== */
 
 /**
  * Confirmação de negócio: gera o `comando_id`, persiste-o pela transição atômica
- * `PREPARADO → ENVIANDO` e **para aí**.
+ * `PREPARADO → ENVIANDO` e só então despacha a criação ao ERP.
  *
- * ⚠️ **NÃO DESPACHA PARA A WM NESTA SESSÃO.** O despacho é a Sessão 6; as pendências 1 e 2
- * (schema da prévia e schema de sucesso da criação) já foram respondidas pela 2ª remessa do
- * contrato e traduzidas em `extrairPayloadCriacaoDaPrevia`/`normalizarResultadoCriacao`,
- * mas nenhuma delas chama a WM. O que esta função
- * entrega é exatamente a parte que precisa estar certa ANTES de existir despacho: um único
- * `comando_id` por confirmação de negócio, persistido antes de qualquer chamada externa.
- * `tests/wmOrcamentoIdempotencia.test.js` prova que `wmApiClient.criarOrcamento` não é chamado.
+ * A ORDEM É O DESENHO INTEIRO. O `comando_id` está no banco ANTES do POST, e o POST só sai
+ * para quem venceu o UPDATE condicional. Duplo clique, duas abas, F5 e timeout disputam o
+ * UPDATE, não a API da WM: quem perde recebe o estado atual e volta sem falar com ninguém.
  *
  * A TRAVA É O BANCO, não o rate limit e não o frontend. O SQL da seção 7 do doc 36:
  *
@@ -943,7 +941,10 @@ async function confirmar({ company_id, usuario_id = null, preparacao_id, request
     .eq('company_id', cid)
     .eq('estado', stateMachine.ESTADOS.PREPARADO)
     .gt('expira_em', agora)
-    .select(COLUNAS_OPERACAO)
+    // `payload_criacao` entra SÓ aqui, e porque a linha seguinte é o despacho: a vencedora da
+    // transição já leva o snapshot, sem um segundo SELECT entre persistir o comando e usá-lo.
+    // Ele não atravessa para `projetarOperacao` — a projeção não o lê.
+    .select(`${COLUNAS_OPERACAO}, payload_criacao`)
     .maybeSingle()
 
   if (error) {
@@ -976,17 +977,11 @@ async function confirmar({ company_id, usuario_id = null, preparacao_id, request
     },
   })
 
-  return {
-    ok: true,
-    requestId: rid,
-    resultado: {
-      ...projetarOperacao(data),
-      // Explícito para a UI (e para o teste): a confirmação ficou registrada, o despacho ao
-      // ERP é da Sessão 6. Nada foi criado no Icthus.
-      despachado: false,
-      despacho_pendente_sessao: 6,
-    },
-  }
+  // Daqui para baixo existe escrita em sistema de terceiro. Tudo acima — a leitura, a
+  // expiração, a exigência do snapshot e a transição atômica que persistiu o `comando_id` —
+  // já aconteceu, e é o que garante que o despacho abaixo sai NO MÁXIMO uma vez por
+  // confirmação de negócio: quem não venceu o UPDATE nem chega aqui.
+  return despacharCriacao({ cid, usuario_id, row: data, comando_id, rid, reconciliacao: false })
 }
 
 /** Estado que não aceita (nova) confirmação. ENVIANDO/CRIADO respondem 200 idempotente. */
@@ -1063,6 +1058,351 @@ function montarPayloadDespacho({ payload_criacao, payload_hash, telefone, comand
   return { ok: true, payload: conferido.value }
 }
 
+/* ================================================================== *
+ * 3.1 Despacho da criação — o ÚNICO ponto que escreve em sistema de terceiro
+ * ================================================================== */
+
+/**
+ * Classifica a resposta de `POST /orcamentos/criar` em estado local.
+ *
+ * Função pura: não escreve, não decide sozinha o que fazer, só traduz. A tabela de retry da
+ * seção 7 do doc 36, linha por linha:
+ *
+ *   | resposta da WM                           | estado local  | por quê                      |
+ *   |------------------------------------------|---------------|------------------------------|
+ *   | `200` com `codigo_pedido_erp` legível    | `CRIADO`      | gravou e sabemos o número    |
+ *   | `200` sem número utilizável              | `INCERTO`     | gravou e NÃO sabemos o número|
+ *   | `502` (recusa antes da escrita)          | `FALHA_SEGURA`| nada foi gravado             |
+ *   | `503 SINCRONIZADOR_OFFLINE` (pré-envio)  | `FALHA_SEGURA`| nada foi gravado             |
+ *   | `ORCAMENTO_DADOS_ALTERADOS`              | `FALHA_SEGURA`| recusa pré-escrita (§11)     |
+ *   | `504` / timeout / falha não classificada | `INCERTO`     | pode ter gravado             |
+ *   | erro de CONEXÃO                          | `FALHA_SEGURA`| provado que não chegou       |
+ *   | `409 COMANDO_NAO_REEXECUTADO`/`RESULTADO_INCERTO` | `INCERTO` | a WM não reexecuta    |
+ *   | `409 COMANDO_ID_REUTILIZADO`             | `FALHA_SEGURA`| recusa; erro crítico local   |
+ *
+ * Nada disso é decidido aqui de novo: quem decide FALHA_SEGURA × INCERTO é o `wmErrorMapper`,
+ * que é o mesmo mapeamento usado na tela. Esta função só lê `envelope.estado`. O `200` sem
+ * número utilizável é o único ramo que o mapeador não cobre (ele mapeia erro, não sucesso) —
+ * e ele é INCERTO de propósito: a WM afirma que deu certo, então chamar de falha segura
+ * convidaria a criar o mesmo orçamento outra vez.
+ *
+ * @param {object} args
+ * @param {object} args.resposta  resultado normalizado do `wmApiClient` (nunca lança)
+ * @param {string} args.requestId
+ */
+function classificarRespostaCriacao({ resposta, requestId }) {
+  const http_status = Number(resposta?.status) || null
+
+  if (resposta?.ok === true) {
+    const normalizado = normalizarResultadoCriacao({
+      dados: resposta.data?.dados,
+      meta: resposta.data?.meta,
+    })
+    if (normalizado.ok) {
+      return {
+        estado: stateMachine.ESTADOS.CRIADO,
+        resultado_sanitizado: normalizado.resultado_sanitizado,
+        http_status,
+        erro_codigo: null,
+        erro: null,
+      }
+    }
+    return {
+      estado: stateMachine.ESTADOS.INCERTO,
+      resultado_sanitizado: null,
+      http_status,
+      erro_codigo: normalizado.motivo,
+      erro: erroDeResultadoWm({
+        resultado: { ...resposta, ok: false, respostaInvalida: true },
+        operacao: OPERACAO.CRIACAO,
+        requestId,
+      }),
+    }
+  }
+
+  const erro = erroDeResultadoWm({ resultado: resposta, operacao: OPERACAO.CRIACAO, requestId })
+  return {
+    estado: erro.envelope?.estado === ESTADO.INCERTO
+      ? stateMachine.ESTADOS.INCERTO
+      : stateMachine.ESTADOS.FALHA_SEGURA,
+    resultado_sanitizado: null,
+    http_status,
+    // Código da WM quando existe (é o que o runbook procura); senão o nosso código local.
+    erro_codigo: resposta?.erroWm || erro.envelope?.codigo || null,
+    erro,
+  }
+}
+
+/**
+ * Grava o desfecho do despacho. `estadoPara` `null` = só metadados (é o caso da reconciliação
+ * que não virou `CRIADO`: o estado continua `INCERTO` e nada o move).
+ *
+ * `estadoDe` vai no filtro, então o UPDATE é condicional como o da confirmação: um desfecho
+ * nunca sobrescreve um estado que mudou debaixo dele.
+ */
+async function gravarDesfecho({ cid, operacao_id, estadoDe, patch }) {
+  const { data, error } = await supabase
+    .from(TABELA)
+    .update(patch)
+    .eq('id', operacao_id)
+    .eq('company_id', cid)
+    .eq('estado', estadoDe)
+    .select(COLUNAS_OPERACAO)
+    .maybeSingle()
+  if (error || !data) return { ok: false, row: null }
+  return { ok: true, row: data }
+}
+
+/**
+ * Persistência do desfecho, com um degrau de recuperação.
+ *
+ * A resposta da WM já chegou quando isto roda — então falhar aqui é perder o registro de uma
+ * escrita que PODE ter acontecido no ERP. Daí o degrau: se o patch completo não passar (jsonb
+ * recusado, coluna, qualquer coisa), tenta-se um UPDATE mínimo só de estado, porque uma
+ * operação criada que ficasse presa em `ENVIANDO` não seria alcançável nem por `verificar`
+ * (que só aceita `INCERTO`) — ou seja, ficaria sem caminho de reconciliação nenhum.
+ *
+ * No degrau, um `CRIADO` vira `INCERTO` de propósito: sem `wm_resultado_sanitizado` não há
+ * número de orçamento para mostrar, e `INCERTO` é o único estado que o suporte consegue
+ * reconciliar depois (reenvio idêntico, mesmo `comando_id`, D10).
+ */
+async function persistirDesfecho({ cid, operacao_id, estadoDe, estadoPara, desfecho, tentativas }) {
+  const agora = agoraIso()
+  const patch = {
+    http_status_ultimo: desfecho.http_status,
+    erro_codigo_ultimo: textoCurto(desfecho.erro_codigo, 64),
+    tentativas,
+    atualizado_em: agora,
+  }
+  if (estadoPara) patch.estado = estadoPara
+  if (desfecho.estado === stateMachine.ESTADOS.CRIADO) {
+    patch.wm_resultado_sanitizado = desfecho.resultado_sanitizado
+    patch.concluido_em = agora
+  }
+
+  const completo = await gravarDesfecho({ cid, operacao_id, estadoDe, patch })
+  if (completo.ok) return { ok: true, row: completo.row, degradado: false }
+  if (!estadoPara) return { ok: false, row: null, degradado: false }
+
+  const estadoMinimo = estadoPara === stateMachine.ESTADOS.CRIADO
+    ? stateMachine.ESTADOS.INCERTO
+    : estadoPara
+  const minimo = await gravarDesfecho({
+    cid,
+    operacao_id,
+    estadoDe,
+    patch: { estado: estadoMinimo, atualizado_em: agoraIso() },
+  })
+  return { ok: false, row: minimo.row, degradado: minimo.ok, estadoMinimo }
+}
+
+/**
+ * Despacha `POST /orcamentos/criar` **uma vez** e aplica o desfecho.
+ *
+ * ⚠️ `wmApiClient.criarOrcamento(payload)` é chamado SEM `retryOpts` — e isso não é estilo:
+ * qualquer objeto ali (mesmo `{}`) liga o `fetchWithRetry` e abre a porta para dois orçamentos
+ * no Icthus. Uma tentativa, e só. A reconciliação é explícita (D10) e vive em `verificar`.
+ *
+ * Pré-condições já garantidas pelo chamador: a operação é da empresa, o `comando_id` está
+ * PERSISTIDO (confirmar: pela transição atômica; verificar: desde o despacho original), e o
+ * estado é o esperado. Aqui ainda se barra, ANTES do POST:
+ *   · configuração de integração inválida — nada foi enviado, prova de falha segura;
+ *   · divergência de hash do snapshot — mesmo `comando_id` com payload diferente nunca sai.
+ *
+ * @param {object} args
+ * @param {boolean} args.reconciliacao `true` em `verificar`: não cria, só confere (D10).
+ */
+async function despacharCriacao({ cid, usuario_id, row, comando_id, rid, reconciliacao = false }) {
+  const estadoDe = row.estado
+  const tentativas = (Number(row.tentativas) || 0) + 1
+
+  const contato = await resolverContatoAutorizado(cid)
+  if (contato.erro) {
+    return barrarAntesDoDespacho({
+      cid,
+      usuario_id,
+      row,
+      comando_id,
+      rid,
+      reconciliacao,
+      erro: erroDeResultadoWm({
+        resultado: { configuracaoInvalida: contato.erro },
+        operacao: OPERACAO.CRIACAO,
+        requestId: rid,
+      }),
+      erro_codigo: 'integracao_invalida',
+    })
+  }
+
+  const montado = montarPayloadDespacho({
+    payload_criacao: row.payload_criacao,
+    payload_hash: row.payload_hash,
+    telefone: contato.telefone,
+    comando_id,
+  })
+  if (!montado.ok) {
+    // Mesmo comando com payload diferente: erro crítico local. Nunca despachado, nunca
+    // "tentado de novo" — a diferença é entre gravar o orçamento certo e gravar outro.
+    console.warn('[wmOrcamentoService] despacho barrado localmente', JSON.stringify({
+      requestId: rid, company_id: cid, motivo: montado.motivo, reconciliacao,
+    }))
+    return barrarAntesDoDespacho({
+      cid,
+      usuario_id,
+      row,
+      comando_id,
+      rid,
+      reconciliacao,
+      erro: erroLocal({
+        codigo: montado.motivo,
+        httpStatus: 409,
+        requestId: rid,
+        estado: reconciliacao ? ESTADO.INCERTO : ESTADO.FALHA_SEGURA,
+      }),
+      erro_codigo: montado.motivo,
+    })
+  }
+
+  // ===== A ÚNICA LINHA DESTE REPOSITÓRIO QUE CRIA ORÇAMENTO NO ERP =====
+  const resposta = await wmApiClient.criarOrcamento(montado.payload)
+  // =====================================================================
+
+  const desfecho = classificarRespostaCriacao({ resposta, requestId: rid })
+  const criou = desfecho.estado === stateMachine.ESTADOS.CRIADO
+
+  // Na reconciliação o estado só pode andar para CRIADO; qualquer outro desfecho deixa a
+  // operação em INCERTO (D10: um incerto não vira falha segura por causa de um 409).
+  const estadoPara = reconciliacao ? (criou ? stateMachine.ESTADOS.CRIADO : null) : desfecho.estado
+
+  // Conferência não-lançante de propósito: a WM JÁ respondeu. Uma exceção aqui descartaria o
+  // desfecho inteiro e deixaria a operação presa em ENVIANDO depois de uma possível escrita no
+  // ERP. Transição impossível por construção (só saem CRIADO/INCERTO/FALHA_SEGURA daqui) —
+  // mas, se alguém acrescentar um estado novo e esquecer da aresta, o caminho tem de ser o de
+  // registro falho, que termina em INCERTO, e não um 503 genérico.
+  const transicaoOk = !estadoPara || stateMachine.transicaoPermitida(estadoDe, estadoPara)
+  const persistido = transicaoOk
+    ? await persistirDesfecho({ cid, operacao_id: row.id, estadoDe, estadoPara, desfecho, tentativas })
+    : { ok: false, row: null, degradado: false }
+
+  if (!persistido.ok) {
+    // A WM já respondeu e o nosso registro não acompanhou. Isso é um INCERTO, não um sucesso:
+    // o número do orçamento (quando houve) vai para o log porque não vive em mais lugar nenhum.
+    console.error('[wmOrcamentoService] desfecho do despacho NÃO registrado', JSON.stringify({
+      requestId: rid,
+      company_id: cid,
+      operacao_id: row.id,
+      comando_id,
+      estado_pretendido: desfecho.estado,
+      estado_gravado: persistido.degradado ? persistido.estadoMinimo : null,
+      http_status: desfecho.http_status,
+      codigo_pedido_erp: desfecho.resultado_sanitizado?.codigo_pedido_erp || null,
+    }))
+    await registrarEventoOrcamento({
+      company_id: cid,
+      usuario_id,
+      acao: EVENTOS.RESULTADO_INCERTO,
+      operacao_id: row.id,
+      detalhes: {
+        estado_anterior: estadoDe,
+        estado: persistido.degradado ? persistido.estadoMinimo : estadoDe,
+        comando_id,
+        http_status: desfecho.http_status,
+        erro_codigo: 'desfecho_nao_registrado',
+        tentativas,
+      },
+    })
+    return erroLocal({
+      codigo: CODIGOS_WM.RESULTADO_INCERTO,
+      httpStatus: 503,
+      requestId: rid,
+      estado: ESTADO.INCERTO,
+      mensagem: 'Não foi possível confirmar se este orçamento foi criado no ERP. Não crie outro — procure o suporte.',
+    })
+  }
+
+  const linha = persistido.row
+  await registrarEventoOrcamento({
+    company_id: cid,
+    usuario_id,
+    acao: criou
+      ? EVENTOS.CRIADO
+      : (desfecho.estado === stateMachine.ESTADOS.INCERTO ? EVENTOS.RESULTADO_INCERTO : EVENTOS.FALHA_SEGURA),
+    operacao_id: row.id,
+    detalhes: {
+      estado_anterior: estadoDe,
+      estado: linha.estado,
+      comando_id,
+      payload_hash: row.payload_hash,
+      http_status: desfecho.http_status,
+      erro_codigo: desfecho.erro_codigo,
+      tentativas,
+      conversa_id: row.conversa_id ?? null,
+    },
+  })
+
+  if (criou) {
+    return {
+      ok: true,
+      requestId: rid,
+      resultado: {
+        ...projetarOperacao(linha),
+        despachado: true,
+        // §11.1: a WM NÃO distingue "criado agora" de "resultado idempotente". Esta afirmação
+        // sai do NOSSO estado anterior — reconciliar um INCERTO é, por definição, confirmar
+        // algo que já tinha sido despachado.
+        ja_criado: reconciliacao === true,
+        reconciliado: reconciliacao === true,
+      },
+    }
+  }
+
+  return desfecho.erro
+}
+
+/**
+ * Falha PROVADAMENTE anterior ao despacho (configuração inválida ou snapshot divergente).
+ *
+ * Em `confirmar` a operação está em `ENVIANDO` e precisa sair de lá: vira `FALHA_SEGURA`, que é
+ * terminal e honesta — nada foi gravado no ERP, e o caminho é montar o orçamento de novo. A
+ * máquina de estados também permitiria `ENVIANDO → PREPARADO` aqui, mas voltar manteria
+ * confirmável uma preparação cujo `comando_id` já existe; `FALHA_SEGURA` fecha o assunto sem
+ * nunca reusar comando.
+ *
+ * Em `verificar` nada muda de estado: o `INCERTO` continua `INCERTO` (só os metadados entram),
+ * porque não despachar não prova nada sobre o despacho original.
+ */
+async function barrarAntesDoDespacho({ cid, usuario_id, row, comando_id, rid, reconciliacao, erro, erro_codigo }) {
+  const estadoPara = reconciliacao ? null : stateMachine.ESTADOS.FALHA_SEGURA
+  if (estadoPara) stateMachine.assertTransicao(row.estado, estadoPara)
+
+  const persistido = await persistirDesfecho({
+    cid,
+    operacao_id: row.id,
+    estadoDe: row.estado,
+    estadoPara,
+    desfecho: { estado: estadoPara || row.estado, http_status: null, erro_codigo, resultado_sanitizado: null },
+    // A tentativa não chegou a sair: `tentativas` conta despacho, não intenção.
+    tentativas: Number(row.tentativas) || 0,
+  })
+
+  await registrarEventoOrcamento({
+    company_id: cid,
+    usuario_id,
+    acao: reconciliacao ? EVENTOS.RESULTADO_INCERTO : EVENTOS.FALHA_SEGURA,
+    operacao_id: row.id,
+    detalhes: {
+      estado_anterior: row.estado,
+      estado: persistido.row?.estado || row.estado,
+      comando_id,
+      erro_codigo,
+      tentativas: Number(row.tentativas) || 0,
+      conversa_id: row.conversa_id ?? null,
+    },
+  })
+
+  return erro
+}
+
 /**
  * Verificação de um resultado INCERTO (D10).
  *
@@ -1072,13 +1412,16 @@ function montarPayloadDespacho({ payload_criacao, payload_hash, telefone, comand
  * e nenhuma delas é "tentar com UUID novo": `200` ⇒ `CRIADO`; `409 COMANDO_NAO_REEXECUTADO` /
  * `RESULTADO_INCERTO` ⇒ segue `INCERTO`; `409 COMANDO_ID_REUTILIZADO` ⇒ erro crítico local.
  *
- * ⚠️ **NESTA SESSÃO ELA NÃO DESPACHA.** Faz todo o trabalho local — e é esse trabalho que
- * precisa estar à prova antes de existir despacho:
- *   · exige estado `INCERTO` (nada mais é "verificável");
+ * **ISTO NÃO É UMA CRIAÇÃO NOVA, É UMA CONFERÊNCIA.** As garantias que fazem a diferença:
+ *   · exige estado `INCERTO` (nada mais é "verificável": `ENVIANDO` ainda está em curso, e
+ *     `PREPARADO`/`EXPIRADO`/`FALHA_SEGURA` nunca foram despachados);
  *   · exige o `comando_id` já persistido e **nunca gera outro**;
- *   · remonta o payload idêntico pelo snapshot e barra divergência de hash.
- * E para, devolvendo `despachado: false`. A Sessão 6 troca o `return` final por
- * `wmApiClient.criarOrcamento(payload)` — sem `retryOpts`, uma tentativa — e nada mais.
+ *   · remonta o payload idêntico pelo snapshot e barra divergência de hash antes do POST;
+ *   · o estado só pode andar para `CRIADO`. Nenhum desfecho aqui transforma um `INCERTO` em
+ *     `FALHA_SEGURA` — um 409 não prova que o orçamento não existe.
+ *
+ * Ação **sempre explícita**: botão do usuário ou operação de suporte. Nunca automática, nunca
+ * em laço, nunca num `useEffect` (§12 proíbe repetir sozinho).
  */
 async function verificar({ company_id, usuario_id = null, operacao_id, requestId } = {}) {
   const rid = requestId || novoRequestId()
@@ -1109,42 +1452,16 @@ async function verificar({ company_id, usuario_id = null, operacao_id, requestId
     return erroLocal({ codigo: CODIGOS.SNAPSHOT_AUSENTE, httpStatus: 409, requestId: rid, estado: ESTADO.INCERTO })
   }
 
-  const contato = await resolverContatoAutorizado(cid)
-  if (contato.erro) {
-    return erroDeResultadoWm({
-      resultado: { configuracaoInvalida: contato.erro },
-      operacao: OPERACAO.CRIACAO,
-      requestId: rid,
-    })
-  }
-
-  const montado = montarPayloadDespacho({
-    payload_criacao: row.payload_criacao,
-    payload_hash: row.payload_hash,
-    telefone: contato.telefone,
-    comando_id: row.comando_id, // o MESMO de sempre. Nunca um novo.
+  // Reconciliação: o MESMO `comando_id` de sempre, nunca um novo, e o payload remontado do
+  // snapshot (divergência de hash é barrada lá dentro, antes de qualquer POST).
+  return despacharCriacao({
+    cid,
+    usuario_id,
+    row,
+    comando_id: row.comando_id,
+    rid,
+    reconciliacao: true,
   })
-  if (!montado.ok) {
-    console.warn('[wmOrcamentoService] verificação barrada localmente', JSON.stringify({
-      requestId: rid, company_id: cid, motivo: montado.motivo,
-    }))
-    return erroLocal({ codigo: montado.motivo, httpStatus: 409, requestId: rid, estado: ESTADO.INCERTO })
-  }
-
-  // === FIM DA SESSÃO 4A ===
-  // O payload está montado e provado idêntico ao despachado. A chamada
-  // `wmApiClient.criarOrcamento(montado.payload)` é da Sessão 6 e NÃO
-  // acontece aqui — nenhum POST de criação sai desta sessão.
-  return {
-    ok: true,
-    requestId: rid,
-    resultado: {
-      ...projetarOperacao(row),
-      despachado: false,
-      despacho_pendente_sessao: 6,
-      payload_pronto: true,
-    },
-  }
 }
 
 /* ================================================================== *
@@ -1179,11 +1496,13 @@ module.exports = {
   confirmar,
   verificar,
   obterOperacao,
-  // Expostos para teste e para a Sessão 6. As duas primeiras são as traduções do contrato:
-  // prévia → payload de criação (§8/§9.2) e 200 da criação → resultado sanitizado (§10/§11.1).
+  // Expostos para teste. As duas primeiras são as traduções do contrato: prévia → payload de
+  // criação (§8/§9.2) e 200 da criação → resultado sanitizado (§10/§11.1). A terceira é a
+  // barreira de hash, e a quarta é a tabela FALHA_SEGURA × INCERTO em forma de função.
   extrairPayloadCriacaoDaPrevia,
   normalizarResultadoCriacao,
   montarPayloadDespacho,
+  classificarRespostaCriacao,
   projetarAmbiguidade,
   projetarOperacao,
 }

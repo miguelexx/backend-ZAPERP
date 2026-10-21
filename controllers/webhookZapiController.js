@@ -23,7 +23,7 @@ const { normalizePhoneBR, possiblePhonesForWhatsappIdentity } = require('../help
 const { extrairNomePrefixoTexto } = require('../helpers/mensagemAtendenteNomeHelper')
 const { getCanonicalPhone, getOrCreateCliente, findOrCreateConversation, mergeConversasIntoCanonico, mergeConversationLidToPhone } = require('../helpers/conversationSync')
 // crmSync.syncLead: movido para controllers/webhookInbound/crmLeadInbound.js.
-const { chooseBestName, isBadName, getDisplayName } = require('../helpers/contactEnrichment')
+const { chooseBestName, isBadName, getDisplayName, primeiroNomeUtilizavel } = require('../helpers/contactEnrichment')
 const { clienteTemNomeProtegido } = require('../helpers/clienteNomeProtecao')
 const { selectClienteNomeFoto } = require('../helpers/clienteNomeColunas')
 const { parseVcardForContact } = require('../helpers/vcardHelper')
@@ -1016,6 +1016,16 @@ exports.receberZapi = async (req, res) => {
       }
     }
 
+    // Nome que pode ir para o CARD da lista ou para FORA (CRM). Todo nome cru deste payload é o
+    // pushname do CLIENTE, e pushname pode não ser nome nenhum ("❤", medido no canal em 21/10).
+    // O cache do banco já os recusa (chooseBestName/isBadName); os emits NÃO recusavam, e o
+    // frontend aplica nome não-vazio sem reavaliar (chatsStore.mergeConversaPartial) — então o
+    // pushname cru sobrescrevia no card o nome salvo na agenda e só o F5 trazia o certo de volta.
+    // Cada emit mantém a SUA cadeia de origem; aqui elas só passam pelo filtro.
+    const nomeCacheExibivel = primeiroNomeUtilizavel(nomeParaCache)
+    const nomeSenderExibivel = primeiroNomeUtilizavel(senderName)
+    const nomePayloadExibivel = nomeCacheExibivel || nomeSenderExibivel || primeiroNomeUtilizavel(payload?.chatName)
+
     // 2) Conversa — uma única conversa por contato; quando Z-API envia chatLid/senderLid, unificar por chat_lid
     //    para que "recebido" (phone real) e "enviado pelo celular" (phone @lid) caiam no mesmo chat.
     //    Sempre priorizar número real (phone) do payload; LID só para vincular/atualizar.
@@ -1237,7 +1247,7 @@ exports.receberZapi = async (req, res) => {
             tipo: isGroup ? 'grupo' : 'cliente',
             nome_grupo: isGroup ? (nomeGrupo || null) : null,
             foto_grupo: isGroup ? (chatPhoto || null) : null,
-            contato_nome: isGroup ? (nomeGrupo || phone || 'Grupo') : (clienteNomeProtegido && clienteNomeAtual ? clienteNomeAtual : (nomeParaCache || senderName || payload?.chatName || phone || null)),
+            contato_nome: isGroup ? (nomeGrupo || phone || 'Grupo') : (clienteNomeProtegido && clienteNomeAtual ? clienteNomeAtual : (nomePayloadExibivel || phone || null)),
             foto_perfil: isGroup ? null : (senderPhoto || null),
             unread_count: unreadInicial,
             tags: [],
@@ -1258,12 +1268,14 @@ exports.receberZapi = async (req, res) => {
         // Só quando é contato real (!isGroup), o cliente falou (!fromMe) e temos cliente_id.
         // → controllers/webhookInbound/crmLeadInbound.js (setImmediate, fire-and-forget).
         if (!isGroup && !fromMe && cliente_id) {
+          // Nome do lead vai para o CRM: filtrado pelo mesmo critério dos emits (pushname "❤"
+          // não pode virar o nome do lead lá). crmLeadInbound mantém a cadeia e cai no telefone.
           scheduleInboundLeadCapture({
             companyId: company_id,
             conversaId: conversa_id,
-            nomeParaCache,
-            senderName,
-            chatName: payload?.chatName,
+            nomeParaCache: nomeCacheExibivel,
+            senderName: nomeSenderExibivel,
+            chatName: primeiroNomeUtilizavel(payload?.chatName),
             phone,
           })
         }
@@ -2424,7 +2436,11 @@ exports.receberZapi = async (req, res) => {
       // Status canônico para os ticks no frontend (sent, delivered, read, pending, erro, played)
       const canon = canonStatusForEmit(mensagemSalva.status_mensagem ?? mensagemSalva.status ?? (fromMe ? 'sent' : 'delivered'))
       // Payload de nova_mensagem (construção pura) → controllers/webhookInbound/realtimePayload.js.
-      const emitPayload = buildNovaMensagemPayload({ mensagemSalva, canon, convIdForEmit, fromMe, nomeParaCache, senderName, senderPhoto })
+      const emitPayload = buildNovaMensagemPayload({
+        mensagemSalva, canon, convIdForEmit, fromMe, senderPhoto,
+        nomeParaCache: nomeCacheExibivel,
+        senderName: nomeSenderExibivel,
+      })
       if (mensagemFoiInseridaPeloWebhook) {
         // Emitir nova_mensagem para todas as mensagens inseridas pelo webhook:
         // - fromMe=false (recebida do cliente) → frontend DEVE notificar
@@ -2451,7 +2467,7 @@ exports.receberZapi = async (req, res) => {
           scheduleInboundCrmForward({
             companyId: company_id,
             mensagemSalva,
-            nome: nomeParaCache || senderName || payload?.chatName || null,
+            nome: nomePayloadExibivel,
             phone,
           })
         }
@@ -2514,7 +2530,7 @@ exports.receberZapi = async (req, res) => {
       }
       let contatoNome = (clienteNomeProtegido && clienteNomeAtual)
         ? String(clienteNomeAtual).trim()
-        : ((nomeParaCache && String(nomeParaCache).trim()) || (convRow?.nome_contato_cache ? String(convRow.nome_contato_cache).trim() : null))
+        : (nomeCacheExibivel || (convRow?.nome_contato_cache ? String(convRow.nome_contato_cache).trim() : null))
       let fotoPerfil = convRow?.foto_perfil_contato_cache ? String(convRow.foto_perfil_contato_cache).trim() : null
       
       // Foto: fallback cliente só se cache vazio

@@ -10,7 +10,7 @@ const { isGroupConversation, isClosedAttendanceStatus } = require('../../helpers
 const { selectComMarcos, erroDeMarcoAusente, desligarMarcos } = require('../../helpers/ackMilestoneColumns')
 const { isLidPhoneKey, pickRealPhoneCandidate } = require('../../helpers/phoneHelper')
 const { resolveReabertaPorFaltaInteracao, enrichConversasReabertaFaltaInteracao } = require('../../helpers/reabertaFaltaInteracaoHelper')
-const { getDisplayName } = require('../../helpers/contactEnrichment')
+const { pickConversationDisplayName } = require('../../helpers/contactEnrichment')
 const { aplicarModoSimplesNoPayload } = require('../../services/atendimentoModoSimplesService')
 const { empresaModoSimplesAtivo } = require('../../helpers/empresaModoSimplesFlag')
 const { usuarioPodeVerGrupo } = require('../../helpers/departamentoGruposHelper')
@@ -306,7 +306,6 @@ exports.detalharChat = async (req, res) => {
     // Nunca exibir LID (lid:xxx) como nome ou número — identificador interno do WhatsApp.
     // Se a conversa ainda é lid: mas há telefone real no cliente (ou irmã), exibir esse número.
     const isLidConv = !isGroup && isLidPhoneKey(conversa.telefone)
-    const clienteNome = getDisplayName(clientesConv)
     const nomeCache = (conversa.nome_contato_cache && String(conversa.nome_contato_cache).trim()) ? String(conversa.nome_contato_cache).trim() : null
     let telefoneExibivel = null
     if (isGroup) {
@@ -331,7 +330,7 @@ exports.detalharChat = async (req, res) => {
     }
     const nomeUnico = isGroup
       ? (conversa.nome_grupo ?? conversa.telefone ?? 'Grupo')
-      : (clienteNome || nomeCache || (isLidConv && !telefoneExibivel ? 'Contato' : null))
+      : (pickConversationDisplayName(clientesConv, nomeCache) || (isLidConv && !telefoneExibivel ? 'Contato' : null))
     const clienteTelefoneExibivel = isGroup
       ? conversa.telefone
       : (telefoneExibivel || pickRealPhoneCandidate(clientesConv?.telefone) || null)

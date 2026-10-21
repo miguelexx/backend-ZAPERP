@@ -10,7 +10,7 @@ const { isGroupConversation, isClosedAttendanceStatus } = require('../../helpers
 const { possiblePhonesForWhatsappIdentity, whatsappIdentityKey, isSameWhatsappIdentity, isLidPhoneKey, pickRealPhoneCandidate } = require('../../helpers/phoneHelper')
 const { deduplicateConversationsByContact, sortConversationsByRecent, sortConversationsPinThenRecent, sortConversationsBySearchRelevance } = require('../../helpers/conversationSync')
 const { resolveReabertaPorFaltaInteracao, enrichConversasReabertaFaltaInteracao } = require('../../helpers/reabertaFaltaInteracaoHelper')
-const { getDisplayName } = require('../../helpers/contactEnrichment')
+const { getDisplayName, pickConversationDisplayName } = require('../../helpers/contactEnrichment')
 const { empresaModoSimplesAtivo } = require('../../helpers/empresaModoSimplesFlag')
 const { resolveGrupoIdsComUnreadParaUsuario, applyAguardandoAtendenteModoSimplesQuery, rowAguardandoAtendenteModoSimples } = require('../../helpers/modoSimplesGrupoUnread')
 const { usuarioPertenceSetorFinanceiro } = require('../../helpers/financeiroSetorHelper')
@@ -810,8 +810,6 @@ exports.listarConversas = async (req, res) => {
         if (fallbackCli && isSameWhatsappIdentity(convTel, fallbackCli.telefone)) clientesObj = fallbackCli
       }
 
-      const nomeCliente = getDisplayName(clientesObj)
-
       const fotoCliente =
         (clientesObj?.foto_perfil && String(clientesObj.foto_perfil).trim()) ||
         null
@@ -831,8 +829,7 @@ exports.listarConversas = async (req, res) => {
       const contatoNome = isGroup
         ? (c.nome_grupo || telefoneExibivel || 'Grupo')
         : (
-            nomeCliente ||
-            (c.nome_contato_cache && String(c.nome_contato_cache).trim()) ||
+            pickConversationDisplayName(clientesObj, c.nome_contato_cache) ||
             telefoneExibivel ||
             (isLid ? 'Contato' : 'Sem nome')
           )

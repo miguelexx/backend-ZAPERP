@@ -7,7 +7,7 @@
 const supabase = require('../../config/supabase')
 const { getProvider } = require('../../services/providers')
 const { getOrCreateCliente } = require('../../helpers/conversationSync')
-const { getDisplayName } = require('../../helpers/contactEnrichment')
+const { primeiroNomeUtilizavel } = require('../../helpers/contactEnrichment')
 const { tryMarkWaitingAfterHumanOutbound } = require('../../services/absenceFinalizationService')
 const { empresaModoSimplesAtivo } = require('../../helpers/empresaModoSimplesFlag')
 const { schedulePendingOutboundReconciliation } = require('../../services/pendingOutboundReconciliationService')
@@ -147,7 +147,12 @@ exports.enviarMensagemChat = async (req, res) => {
               const io = req.app.get('io')
               const { data: cli } = await supabase.from('clientes').select('nome, pushname, telefone, foto_perfil').eq('id', novoClienteId).eq('company_id', company_id).maybeSingle()
               const { data: conv } = await supabase.from('conversas').select('nome_contato_cache, foto_perfil_contato_cache').eq('id', conversa_id).eq('company_id', company_id).maybeSingle()
-              const contatoNome = getDisplayName(cli) || conv?.nome_contato_cache || synced.nome || conversa.telefone
+              // Prioridade explícita: nome salvo do cliente > cache da conversa > nome da agenda
+              // recém-sincronizado > pushname > telefone. Antes `getDisplayName(cli)` abria a
+              // fila e o pushname ("❤") ganhava do cache E de `synced.nome` (o nome da agenda).
+              const contatoNome = primeiroNomeUtilizavel(
+                cli?.nome, conv?.nome_contato_cache, synced.nome, cli?.pushname
+              ) || conversa.telefone
               const fotoPerfil = conv?.foto_perfil_contato_cache || cli?.foto_perfil || synced.foto_perfil
               io.to(`empresa_${company_id}`).emit('contato_atualizado', {
                 conversa_id: Number(conversa_id),

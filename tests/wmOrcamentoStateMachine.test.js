@@ -15,6 +15,10 @@ const PERMITIDAS = [
   [ESTADOS.ENVIANDO, ESTADOS.FALHA_SEGURA],
   [ESTADOS.ENVIANDO, ESTADOS.INCERTO],
   [ESTADOS.ENVIANDO, ESTADOS.PREPARADO],
+  // Reconciliação do D10 (Sessão 6): reenvio IDÊNTICO com o MESMO `comando_id` que responde
+  // 200. Não cria nada — §13 garante que comando concluído devolve o resultado sem recriar —,
+  // então registrar CRIADO é anotar um fato. É a ÚNICA saída de INCERTO.
+  [ESTADOS.INCERTO, ESTADOS.CRIADO],
 ]
 
 function ehPermitida(de, para) {
@@ -52,10 +56,8 @@ describe('wmOrcamentoStateMachine — transições', () => {
     }
   })
 
-  it('CRIADO, FALHA_SEGURA, INCERTO e EXPIRADO são terminais', () => {
-    expect([...sm.ESTADOS_TERMINAIS].sort()).toEqual(
-      ['CRIADO', 'EXPIRADO', 'FALHA_SEGURA', 'INCERTO']
-    )
+  it('CRIADO, FALHA_SEGURA e EXPIRADO são terminais', () => {
+    expect([...sm.ESTADOS_TERMINAIS].sort()).toEqual(['CRIADO', 'EXPIRADO', 'FALHA_SEGURA'])
     for (const terminal of sm.ESTADOS_TERMINAIS) {
       expect(sm.isTerminal(terminal)).toBe(true)
       expect(sm.proximosEstados(terminal)).toEqual([])
@@ -67,10 +69,19 @@ describe('wmOrcamentoStateMachine — transições', () => {
     expect(sm.isTerminal(ESTADOS.ENVIANDO)).toBe(false)
   })
 
-  it('INCERTO não volta para ENVIANDO nem para PREPARADO (D10: nunca refazer um incerto)', () => {
+  it('INCERTO só sai para CRIADO — nunca para ENVIANDO nem PREPARADO (D10)', () => {
+    // O que a reconciliação NÃO pode fazer é despachar de novo com comando novo. Essas duas
+    // arestas são justamente as que significariam isso, e elas não existem.
     expect(sm.transicaoPermitida(ESTADOS.INCERTO, ESTADOS.ENVIANDO)).toBe(false)
     expect(sm.transicaoPermitida(ESTADOS.INCERTO, ESTADOS.PREPARADO)).toBe(false)
-    expect(sm.transicaoPermitida(ESTADOS.INCERTO, ESTADOS.CRIADO)).toBe(false)
+    // Um 409 na reconciliação não prova que o orçamento não existe: INCERTO não vira falha
+    // segura, e também não expira.
+    expect(sm.transicaoPermitida(ESTADOS.INCERTO, ESTADOS.FALHA_SEGURA)).toBe(false)
+    expect(sm.transicaoPermitida(ESTADOS.INCERTO, ESTADOS.EXPIRADO)).toBe(false)
+    // A única saída, e ela só registra o que a WM confirmou com o MESMO comando.
+    expect(sm.transicaoPermitida(ESTADOS.INCERTO, ESTADOS.CRIADO)).toBe(true)
+    expect(sm.proximosEstados(ESTADOS.INCERTO)).toEqual([ESTADOS.CRIADO])
+    expect(sm.isTerminal(ESTADOS.INCERTO)).toBe(false)
   })
 
   it('EXPIRADO não vira ENVIANDO (preparação vencida exige nova preparação)', () => {

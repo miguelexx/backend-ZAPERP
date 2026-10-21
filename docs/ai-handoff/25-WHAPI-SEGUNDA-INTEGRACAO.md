@@ -1314,3 +1314,144 @@ Encontrado na mesma revisão e corrigido (mesma família do alarme falso):
 
 Testes novos em `envioFluxoAuditoria`: instância sem configuração com id → `skip_sem_instancia`
 sem update; sem id → `erro`.
+
+## 2026-10-21 — Nome do contato: a agenda do celular está em `GET /chats`, não em `GET /contacts`
+
+**Sintoma relatado:** a lista de conversas mostra número de telefone (ou um pushname inútil) em
+vez do nome do cliente; o atendente não acha o cliente pelo nome.
+
+### Contrato medido no canal de produção (MCP Whapi, só leitura)
+
+Para o MESMO contato, os dois endpoints discordam:
+
+| Chamada | Resposta |
+|---------|----------|
+| `GET /contacts/553497829258` | `{"phonebook":false,"saved":false,"id":"553497829258"}` — **sem nome** |
+| `GET /chats/553497829258@s.whatsapp.net` | `{"name":"Claudia DB", …, last_message.from_name:"❤"}` |
+
+Mais três, mesmo padrão: `553499934924` → `name: "DISTRIBUIDORA NEVADA LTDA"` (pushname
+`"Rayssa"`), `553434215115` → `name: "Agro Fixo"` (pushname `"Agro Frutal"`), `5517997741156`
+→ `name: "CDM FRIOS E LATÍCINIOS"`.
+
+Conclusões, em ordem de importância:
+
+1. **`GET /chats/{id}.name` é o nome salvo na agenda do celular conectado** — é o nome que o
+   WhatsApp Web mostra e o que o atendente procura. É a fonte certa.
+2. **`GET /contacts/{ContactID}` NÃO serve para isso.** Responde `saved:false` e sem nome para
+   contato que claramente tem nome na agenda. Só é confiável para a entrada de agenda que o
+   canal sincronizou (`GET /contacts` em lista devolve 1546 com `name`/`saved:true`).
+   Quando traz `name`, pode ser **o próprio telefone formatado** (`"+55 34 3423-8595"`).
+3. **O webhook (`from_name` / `notify` / `pushname`) é o pushname do CLIENTE, nunca o nome
+   salvo.** `"❤"`, `"Rayssa"`, `"Agro Frutal"`. `isBadName` recusa `"❤"` → a lista caía no
+   telefone cru. É esta a causa raiz do sintoma.
+4. A LISTA `GET /chats` (sem id) **não** traz `name` nos itens — só o `GET /chats/{id}`. Então
+   não existe backfill de nomes em 1 chamada; é uma leitura por chat.
+5. `GET /chats/{id}` sofre do **9º dígito** como as ações de chat (doc 34): celular BR vive no
+   canal quase sempre com 12 dígitos. `GET /chats/553497829258@…` → 200;
+   `GET /chats/5534997829258@…` → 404.
+
+### Quanto isso muda (as 9 conversas da 1ª página de `GET /chats`, 21/10)
+
+| Chat | `/contacts/{id}` | `/chats/{id}.name` | Antes → agora |
+|------|-------------------|---------------------|----------------|
+| 553499709890 | sem nome | **Contador** | telefone → Contador |
+| 553484143745 | sem nome | **Porto De Areia Marinheiro Lucineia** | pushname "Lucineia Rosa" → nome salvo |
+| 553497829258 | sem nome | **Claudia DB** | pushname "❤" (recusado) → telefone → Claudia DB |
+| 553434215115 | sem nome | **Agro Fixo** | pushname "Agro Frutal" → Agro Fixo |
+| 553498157019 | **404** | sem nome | telefone (não há nome em lugar nenhum) |
+| 553499000699 | **404** | sem nome | telefone (idem) |
+| 5517997741156 | CDM FRIOS E LATÍCINIOS | idem | já funcionava |
+| 553499934924 | DISTRIBUIDORA NEVADA LTDA | idem | já funcionava |
+| 553496673937 | BORGES E PEREIRA COM DE TINTAS LTDA ME | — | já funcionava |
+
+**4 de 9 ganham nome**; 3 já tinham; 2 não têm nome em fonte nenhuma (nunca foram salvos na
+agenda e não têm pushname) e continuam no telefone — isso é o teto da API, não uma falha.
+Note também os dois **404** em `/contacts/{id}`: antes faziam `getContactMetadata` devolver
+`null` e abortar também a foto.
+
+### O que mudou
+
+| Arquivo | Mudança |
+|---------|---------|
+| `services/providers/whapi/chatsAdmin.js` | `getChat` passou a endereçar por `runOnChatCandidates` (antes `toWhapiChatId` sozinho → 404 silencioso no 9º dígito). `runOnChatCandidates` devolve `data` no sucesso e aceita `opts.quietNaoExistia`. Novo `getChatBookName(phone, opts)` — o nome da agenda |
+| `services/providers/whapi/contacts.js` | `getContactMetadata`: quando `/contacts/{id}` não devolve nome **utilizável** (`isBadName` cobre ausente e telefone-como-nome), busca o nome em `getChatBookName` e o devolve em `name`. Opt-out por `opts.skipChatNameFallback` |
+| `controllers/chat/groupAdminController.js` | Passa `skipChatNameFallback: true` — participante de grupo é chamada em leque e o 1:1 com ele quase nunca existe |
+| `helpers/conversaEnrichment.js` | `needsEnrichment`: nome "ruim" conta como SEM nome. Antes o teste só pegava telefone cru, então pushname de emoji (`"❤"`) passava como nome e a conversa nunca era enriquecida |
+| `helpers/contactEnrichment.js` | Novo `pickConversationDisplayName(cliente, nomeCache)`: nome bom do cliente > nome bom do cache > o que houver |
+| `conversationListController.js` · `conversationDetailController.js` · `printController.js` | Usam esse helper no lugar de `clienteNome || nomeCache` cru |
+| `controllers/webhookZapiController.js` | Os emits passaram a filtrar o nome cru do payload por `isBadName` — o pushname sobrescrevia no card o nome bom (o frontend aplica `nome_contato_cache` não-vazio sem reavaliar, `chatsStore.mergeConversaPartial`) e o nome certo só voltava no F5. **São 6 pontos, não 1** — ver "Revisão da mesma leva" abaixo |
+
+**Por que o helper de exibição era necessário:** `getDisplayName` cai em `pushname` e depois no
+telefone, e a ordem era `clienteNome || nome_contato_cache`. O enriquecimento da lista roda com
+`skipPersistence` e grava só em `nome_contato_cache` — então um pushname ruim (`"❤"`) ganhava do
+nome da agenda recém-descoberto e a conversa continuava mostrando "❤". Agora um nome **ruim** do
+cliente não ganha do cache; nome bom (manual, planilha, `nome_protegido`) continua ganhando.
+
+**Por que só esses 4 arquivos:** `getContactMetadata` é a ÚNICA porta pela qual o nome do
+WhatsApp entra em `clientes.nome` / `conversas.nome_contato_cache`. Quem passa por ela:
+`syncUltraMsgContact` (webhook de cada mensagem, enriquecimento da lista, cadastro manual de
+contato, `groupSender`) e `syncFotosProgressivaService`. Corrigir a porta corrige todos.
+
+O score já estava certo e não foi tocado: `contactEnrichment.SOURCE_SCORE` dá 110 a
+`syncUltramsg`/`name` contra 70 de `nome_existente` — então o nome da agenda **substitui** um
+nome que tinha nascido de pushname, e `manual` (120) / `import_planilha` (200) /
+`nome_protegido` continuam ganhando dele.
+
+### Revisão da mesma leva — o pushname cru vazava em 6 lugares, não em 1
+
+A primeira versão guardou só o emit de `conversa_atualizada`. A revisão achou os outros: todo
+nome cru deste payload é o **pushname do cliente**, e o cache do banco já o recusa
+(`chooseBestName`/`isBadName`) — mas quem **emite** não recusava.
+
+| Onde | Levava | Agora |
+|------|--------|-------|
+| `conversa_atualizada` | `nomeParaCache` | `nomeCacheExibivel` |
+| `nova_conversa` | `nomeParaCache || senderName || chatName || phone` | `nomePayloadExibivel || phone` |
+| `nova_mensagem` (`buildNovaMensagemPayload`) | guarda só contra telefone — "❤" passava | recebe os nomes já filtrados |
+| inbox do CRM Avançado (`scheduleInboundCrmForward`) | idem | `nomePayloadExibivel` |
+| lead no CRM (`scheduleInboundLeadCapture`) | idem — o lead nascia chamado "❤" | cada candidato filtrado |
+| `contato_atualizado` (`textMessageController`) | `getDisplayName(cli)` ganhava do cache **e** de `synced.nome` | prioridade explícita |
+| painel de supervisão (2 pontos) | `getDisplayName() || nome_contato_cache` | `pickConversationDisplayName` |
+
+A regra agora mora em um lugar: `primeiroNomeUtilizavel(...nomes)` em `helpers/contactEnrichment.js`.
+**Cada emit mantém a SUA cadeia de origem** — o filtro não foi usado para ampliar o que vai no
+payload, só para recusar o que não é nome. Critério da varredura: todo lugar onde
+`getDisplayName(cliente)` vinha **antes** de `nome_contato_cache` estava invertido, porque
+`getDisplayName` cai em `pushname`. Sobrou zero (grep no doc).
+
+Ficaram **de fora de propósito**: `remetente_nome` de mensagem de grupo (ali o pushname do
+membro é o certo, é o que o WhatsApp mostra) e os `getDisplayName()` de relatórios, SLA, IA e
+dashboard, onde não existe cache na cadeia e o pushname é só fallback de exibição.
+
+### Replay contra as respostas medidas do canal
+
+As 10 respostas reais de `/contacts` + `/chats` passadas pela lógica nova com o `isBadName` de
+verdade: **5 mudam para melhor** (inclusive o caso de `name` = "+55 34 3423-8595"), 3 já estavam
+certas **e não gastam chamada a `/chats`**, 2 não têm nome em fonte nenhuma e seguem no telefone.
+
+### Como o passivo é recuperado (nada disso é novo)
+
+1. **Próxima mensagem recebida** de cada conversa — o webhook chama `syncUltraMsgContact`.
+2. **Abrir a lista de conversas** — `enrichConversationsWithContactData`, até 15 por request.
+3. **Botão "Sincronizar fotos"** (`POST /chats/sincronizar-fotos-perfil` →
+   `syncFotosFullProgressiva`) — varre até 10.000 clientes e agora grava nome junto com a foto.
+   É o backfill mais completo da base existente.
+4. **Botão "Sincronizar contatos do celular"** — `GET /contacts` em lista, que continua sendo a
+   fonte boa para a agenda inteira (1546 nomes no canal medido).
+
+### Custo
+
+A chamada extra só acontece para contato **sem** nome utilizável — quem já tem nome bom não
+gasta nada (teste cobre). Para quem não tem: 1 leitura de chat no caso comum (o endereço cru é
+o que o canal tem), 2 no pior caso (variante do 9º dígito). Cache de 5 min por
+(telefone, empresa) do `syncUltraMsgContact` vale para o resultado inteiro.
+
+### Testes
+
+`tests/whapiNomeAgendaDoChat.test.js` — 19 casos: nome vem do chat quando `/contacts` não tem;
+telefone guardado com o 9º acha o chat sem ele (e na ordem certa); telefone formatado no `name`
+não conta como nome; nome bom não consulta `/chats`; `skipChatNameFallback` não gasta chamada;
+chat sem nome não inventa nome; `from_name` do chat NÃO é lido como nome; `getChat` lê o chat
+sem o 9º dígito; 404 em todos os endereços é explicado. Mais 4 casos de `needsEnrichment` e
+6 de `pickConversationDisplayName`. E `tests/webhookEmitNomeRuim.test.js` — 3 casos sobre o
+emit (emoji e telefone não vão; pushname de verdade vai). Suíte completa: 3225 testes (251 suítes).

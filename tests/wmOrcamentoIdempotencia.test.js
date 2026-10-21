@@ -1,25 +1,27 @@
 /**
- * Idempotência e concorrência do orçamento WM — Sessão 4A do doc 36, seção 7.
+ * Idempotência e concorrência do orçamento WM — Sessões 4A e 6 do doc 36, seção 7.
  *
  * É o arquivo que importa mais nesta frente: o erro que ele previne é irreversível. Um
  * orçamento duplicado no ERP de terceiro não se desfaz com um `UPDATE`.
+ *
+ * Desde a Sessão 6 `confirmar` DESPACHA de verdade — e por isso cada asserção aqui deixou de
+ * falar de um despacho simulado e passou a contar chamadas reais ao `wmApiClient` (mockado;
+ * nenhum teste desta suíte faz rede, e o `fetch` global é um espião que lança se for tocado).
  *
  * O QUE ESTÁ PROVADO AQUI
  *
  *   · a trava de concorrência é o BANCO — o `UPDATE … WHERE estado='PREPARADO' AND
  *     expira_em > now()` com as 4 condições, inclusive `company_id`;
- *   · duplo clique simultâneo: UMA requisição ganha a transição, e um despacho condicionado a
- *     ela sai UMA vez; as outras recebem o estado atual e não falam com a WM;
- *   · F5 durante `ENVIANDO` **não gera `comando_id` novo**;
+ *   · duplo clique simultâneo: UMA requisição ganha a transição e o POST de criação sai UMA
+ *     vez; as outras recebem o estado atual e não falam com a WM;
+ *   · F5 durante `ENVIANDO` **não gera `comando_id` novo** e não redespacha;
  *   · mesmo `comando_id` com `payload_hash` diferente é barrado localmente e **nunca**
  *     despachado;
- *   · timeout na criação vira `INCERTO`, `INCERTO` é terminal e **nunca** gera `comando_id`
- *     novo — verificar é reenviar o payload idêntico com o mesmo comando (D10);
- *   · nenhum POST tem retry automático, e nesta sessão **nenhum POST de criação sai**.
- *
- * ⚠️ Nesta sessão `confirmar` NÃO despacha para a WM (o despacho é a Sessão 6). Vários testes
- * abaixo simulam o despacho da Sessão 6 condicionando-o à
- * transição atômica — é assim que se prova hoje que ela basta.
+ *   · `200` idempotente não duplica histórico; `504`, timeout e falha não classificada viram
+ *     `INCERTO`; erro de conexão vira `FALHA_SEGURA`;
+ *   · `verificar` só aceita `INCERTO`, reusa o MESMO `comando_id` e o MESMO payload, e nunca
+ *     transforma um incerto em falha segura (D10);
+ *   · o POST de criação **não tem retry**: uma tentativa, com `retryOpts` ausente.
  */
 const fs = require('fs')
 const path = require('path')
@@ -94,16 +96,38 @@ function linha(patch = {}) {
   }
 }
 
-/**
- * Despacho da Sessão 6, simulado: só sai quando `confirmar` devolveu a transição vencedora.
- * É o mesmo acoplamento que a Sessão 6 vai ter — e é o que torna "a WM é chamada uma vez"
- * verificável hoje, com a criação ainda bloqueada.
- */
-async function confirmarEDespacharComoSessao6(args) {
-  const r = await service.confirmar(args)
-  const venceu = r.ok && r.resultado?.estado === 'ENVIANDO' && !r.resultado?.ja_em_andamento
-  if (venceu) await wmApiClient.criarOrcamento({ simulado: true })
-  return r
+/** `200` realista de `/orcamentos/criar` (§10 do guia da 2ª remessa). */
+const CRIACAO_200 = Object.freeze({
+  ok: true,
+  status: 200,
+  operacao: 'criacao',
+  data: {
+    dados: {
+      codigo_pedido_erp: '123456',
+      documento_venda: '2 - Orçamento',
+      cliente: { codigo_cliente_erp: 'C0001', nome: 'Maria Souza' },
+      vendedor: { codigo_vendedor_erp: 'V0007', nome: 'Carlos Lima' },
+      valor_total: '66.076',
+      bloqueado: true,
+    },
+    meta: { fonte: 'tempo_real', criado_em: '2026-10-21T10:00:00' },
+  },
+})
+
+/** Resposta de erro do `wmApiClient` (ele nunca lança; sempre devolve este formato). */
+function respostaErro(patch = {}) {
+  return {
+    ok: false,
+    status: 0,
+    data: null,
+    erroWm: null,
+    indiceItem: null,
+    transporte: null,
+    respostaInvalida: false,
+    configuracaoInvalida: null,
+    operacao: 'criacao',
+    ...patch,
+  }
 }
 
 beforeEach(() => {
@@ -120,7 +144,7 @@ beforeEach(() => {
     if (!telefone) return null
     return { company_id: Number(cid), ativo: true, telefone_autorizado: telefone, atualizado_em: '2026-10-20T12:00:00.000Z' }
   })
-  wmApiClient.criarOrcamento.mockResolvedValue({ ok: true, status: 200, data: {}, operacao: 'criacao' })
+  wmApiClient.criarOrcamento.mockResolvedValue({ ...CRIACAO_200 })
 })
 
 afterEach(() => {
@@ -135,7 +159,9 @@ describe('transição atômica PREPARADO → ENVIANDO', () => {
     const r = await service.confirmar({ company_id: 1, usuario_id: 9, preparacao_id: ID_PREPARACAO })
 
     expect(r.ok).toBe(true)
-    expect(r.resultado.estado).toBe('ENVIANDO')
+    // Com o despacho ligado o estado final já é CRIADO; o que este teste examina é a transição
+    // intermediária, que é onde mora a trava.
+    expect(r.resultado.estado).toBe('CRIADO')
 
     const update = db.chamadas.find((c) => c.modo === 'update' && c.patch?.estado === 'ENVIANDO')
     expect(update).toBeTruthy()
@@ -145,33 +171,81 @@ describe('transição atômica PREPARADO → ENVIANDO', () => {
     expect(update.patch.enviado_em).toBeTruthy()
   })
 
-  it('o comando_id é gerado pelo backend e persistido ANTES de qualquer despacho', async () => {
+  it('o comando_id é gerado pelo backend e persistido ANTES do despacho', async () => {
+    // A ordem é a garantia: se o POST saísse antes do UPDATE, um crash no meio deixaria um
+    // orçamento no ERP sem rastro nenhum do lado de cá.
+    let comandoNoBancoQuandoOPostSaiu = null
+    let estadoNoBancoQuandoOPostSaiu = null
+    wmApiClient.criarOrcamento.mockImplementation(async () => {
+      comandoNoBancoQuandoOPostSaiu = db.operacoes[0].comando_id
+      estadoNoBancoQuandoOPostSaiu = db.operacoes[0].estado
+      return { ...CRIACAO_200 }
+    })
+
     await service.confirmar({ company_id: 1, usuario_id: 9, preparacao_id: ID_PREPARACAO })
 
-    // Persistido na própria transição (que é o único lugar onde ele é escrito).
-    expect(db.operacoes[0].comando_id).toMatch(/^[0-9a-f-]{36}$/)
-    expect(db.operacoes[0].estado).toBe('ENVIANDO')
-    // E nada foi despachado nesta sessão.
-    expect(wmApiClient.criarOrcamento).not.toHaveBeenCalled()
+    // No instante do POST o comando já estava gravado, e a linha já estava em ENVIANDO.
+    expect(comandoNoBancoQuandoOPostSaiu).toMatch(/^[0-9a-f-]{36}$/)
+    expect(estadoNoBancoQuandoOPostSaiu).toBe('ENVIANDO')
+    // E o que foi despachado é o MESMO comando — não um segundo UUID.
+    expect(wmApiClient.criarOrcamento.mock.calls[0][0].comando_id).toBe(comandoNoBancoQuandoOPostSaiu)
   })
 
   it('o comando_id NUNCA sai na resposta ao navegador', async () => {
     const r = await service.confirmar({ company_id: 1, usuario_id: 9, preparacao_id: ID_PREPARACAO })
 
+    const comandoDespachado = wmApiClient.criarOrcamento.mock.calls[0][0].comando_id
     const corpo = JSON.stringify(r.resultado)
-    expect(corpo).not.toContain(db.operacoes[0].comando_id)
+    expect(corpo).not.toContain(comandoDespachado)
     expect(corpo).not.toMatch(/comando_id/i)
     expect(corpo).not.toMatch(/payload_hash/i)
     expect(corpo).not.toContain(TELEFONE_EMPRESA_1)
-    // A sessão é explícita sobre não ter despachado.
-    expect(r.resultado.despachado).toBe(false)
-    expect(r.resultado.despacho_pendente_sessao).toBe(6)
+    expect(r.resultado.despachado).toBe(true)
   })
 
-  it('confirmar não fala com a WM nesta sessão — nem preparar, nem criar', async () => {
+  it('o payload despachado carrega o telefone da empresa e o preço do SNAPSHOT', async () => {
     await service.confirmar({ company_id: 1, usuario_id: 9, preparacao_id: ID_PREPARACAO })
-    expect(wmApiClient.criarOrcamento).not.toHaveBeenCalled()
+
+    expect(wmApiClient.criarOrcamento).toHaveBeenCalledTimes(1)
+    const payload = wmApiClient.criarOrcamento.mock.calls[0][0]
+    expect(payload.telefone).toBe(TELEFONE_EMPRESA_1)
+    expect(payload.cliente_codigo_erp).toBe('C0001')
+    expect(payload.itens[0].preco_confirmado).toBe('33.038')
+    // `preparar` não é chamado por `confirmar` em nenhuma hipótese.
     expect(wmApiClient.prepararOrcamento).not.toHaveBeenCalled()
+  })
+
+  it('o 200 vira CRIADO com o número do ERP, concluido_em e tentativas = 1', async () => {
+    const r = await service.confirmar({ company_id: 1, usuario_id: 9, preparacao_id: ID_PREPARACAO })
+
+    expect(r.ok).toBe(true)
+    expect(r.resultado.estado).toBe('CRIADO')
+    expect(r.resultado.resultado.codigo_pedido_erp).toBe('123456')
+    expect(r.resultado.ja_criado).toBe(false)
+
+    const linha = db.operacoes[0]
+    expect(linha.estado).toBe('CRIADO')
+    expect(linha.wm_resultado_sanitizado.codigo_pedido_erp).toBe('123456')
+    expect(linha.concluido_em).toBeTruthy()
+    expect(linha.http_status_ultimo).toBe(200)
+    expect(linha.erro_codigo_ultimo).toBeNull()
+    // A coluna existia desde a migration e nunca tinha sido escrita.
+    expect(linha.tentativas).toBe(1)
+  })
+
+  it('200 sem `codigo_pedido_erp` utilizável é INCERTO — nunca CRIADO sem número', async () => {
+    wmApiClient.criarOrcamento.mockResolvedValue({
+      ...CRIACAO_200,
+      data: { dados: { documento_venda: '2 - Orçamento' }, meta: {} },
+    })
+
+    const r = await service.confirmar({ company_id: 1, usuario_id: 9, preparacao_id: ID_PREPARACAO })
+
+    expect(r.ok).toBe(false)
+    expect(r.envelope.estado).toBe('INCERTO')
+    expect(db.operacoes[0].estado).toBe('INCERTO')
+    expect(db.operacoes[0].wm_resultado_sanitizado).toBeNull()
+    expect(db.operacoes[0].concluido_em).toBeNull()
   })
 })
 
@@ -181,8 +255,8 @@ describe('transição atômica PREPARADO → ENVIANDO', () => {
 describe('concorrência: duplo clique simultâneo', () => {
   it('duas confirmações ao mesmo tempo: UMA ganha, e o despacho sai UMA vez', async () => {
     const [a, b] = await Promise.all([
-      confirmarEDespacharComoSessao6({ company_id: 1, usuario_id: 9, preparacao_id: ID_PREPARACAO }),
-      confirmarEDespacharComoSessao6({ company_id: 1, usuario_id: 9, preparacao_id: ID_PREPARACAO }),
+      service.confirmar({ company_id: 1, usuario_id: 9, preparacao_id: ID_PREPARACAO }),
+      service.confirmar({ company_id: 1, usuario_id: 9, preparacao_id: ID_PREPARACAO }),
     ])
 
     // Nenhuma das duas é erro: a perdedora recebe o estado atual, não uma falha.
@@ -203,7 +277,7 @@ describe('concorrência: duplo clique simultâneo', () => {
   it('cinco confirmações simultâneas também produzem um único comando e um único despacho', async () => {
     const todas = await Promise.all(
       Array.from({ length: 5 }, () =>
-        confirmarEDespacharComoSessao6({ company_id: 1, usuario_id: 9, preparacao_id: ID_PREPARACAO })
+        service.confirmar({ company_id: 1, usuario_id: 9, preparacao_id: ID_PREPARACAO })
       )
     )
 
@@ -241,7 +315,7 @@ describe('F5 durante ENVIANDO não gera comando novo', () => {
   })
 
   it('devolve o mesmo estado, mantém o comando_id e não chama a WM', async () => {
-    const r = await confirmarEDespacharComoSessao6({ company_id: 1, usuario_id: 9, preparacao_id: ID_PREPARACAO })
+    const r = await service.confirmar({ company_id: 1, usuario_id: 9, preparacao_id: ID_PREPARACAO })
 
     expect(r.ok).toBe(true)
     expect(r.resultado.estado).toBe('ENVIANDO')
@@ -263,7 +337,7 @@ describe('F5 durante ENVIANDO não gera comando novo', () => {
   it('CRIADO responde idempotente, sem novo comando e sem despacho', async () => {
     db = criarFakeDb({ linhas: [linha({ estado: 'CRIADO', comando_id: COMANDO_EXISTENTE, concluido_em: new Date().toISOString() })] })
 
-    const r = await confirmarEDespacharComoSessao6({ company_id: 1, usuario_id: 9, preparacao_id: ID_PREPARACAO })
+    const r = await service.confirmar({ company_id: 1, usuario_id: 9, preparacao_id: ID_PREPARACAO })
 
     expect(r.ok).toBe(true)
     expect(r.resultado.estado).toBe('CRIADO')
@@ -280,7 +354,7 @@ describe('preparação expirada não vira gravação', () => {
   it('prazo local vencido é 409 e a linha passa a EXPIRADO, sem comando_id', async () => {
     db = criarFakeDb({ linhas: [linha({ expira_em: new Date(Date.now() - 1000).toISOString() })] })
 
-    const r = await confirmarEDespacharComoSessao6({ company_id: 1, usuario_id: 9, preparacao_id: ID_PREPARACAO })
+    const r = await service.confirmar({ company_id: 1, usuario_id: 9, preparacao_id: ID_PREPARACAO })
 
     expect(r.ok).toBe(false)
     expect(r.httpStatus).toBe(409)
@@ -423,17 +497,21 @@ describe('INCERTO (D10)', () => {
     expect(preparacao.envelope.estado).toBe('FALHA_SEGURA')
   })
 
-  it('INCERTO é terminal na máquina de estados — não há saída para ENVIANDO', () => {
-    expect(stateMachine.isTerminal('INCERTO')).toBe(true)
-    expect(stateMachine.proximosEstados('INCERTO')).toEqual([])
+  it('a única saída de INCERTO é CRIADO — nunca ENVIANDO, nunca FALHA_SEGURA', () => {
+    // Sair para ENVIANDO significaria despachar de novo (com comando novo); sair para
+    // FALHA_SEGURA significaria afirmar que o orçamento não existe. Nenhuma das duas é
+    // sustentável sobre um incerto.
+    expect(stateMachine.proximosEstados('INCERTO')).toEqual(['CRIADO'])
     expect(stateMachine.transicaoPermitida('INCERTO', 'ENVIANDO')).toBe(false)
+    expect(stateMachine.transicaoPermitida('INCERTO', 'PREPARADO')).toBe(false)
+    expect(stateMachine.transicaoPermitida('INCERTO', 'FALHA_SEGURA')).toBe(false)
     expect(stateMachine.transicaoPermitida('ENVIANDO', 'INCERTO')).toBe(true)
   })
 
   it('confirmar em cima de um INCERTO é recusado e NÃO gera comando novo', async () => {
     db = criarFakeDb({ linhas: [linha({ estado: 'INCERTO', comando_id: COMANDO_EXISTENTE })] })
 
-    const r = await confirmarEDespacharComoSessao6({ company_id: 1, usuario_id: 9, preparacao_id: ID_PREPARACAO })
+    const r = await service.confirmar({ company_id: 1, usuario_id: 9, preparacao_id: ID_PREPARACAO })
 
     expect(r.ok).toBe(false)
     expect(r.envelope.codigo).toBe('WM_RESULTADO_INCERTO')
@@ -444,22 +522,77 @@ describe('INCERTO (D10)', () => {
     expect(wmApiClient.criarOrcamento).not.toHaveBeenCalled()
   })
 
-  it('verificar reusa o MESMO comando_id, remonta o payload idêntico e não despacha nesta sessão', async () => {
+  it('verificar reenvia o MESMO comando_id com o MESMO payload, e nunca gera outro', async () => {
     db = criarFakeDb({ linhas: [linha({ estado: 'INCERTO', comando_id: COMANDO_EXISTENTE })] })
 
     const r = await service.verificar({ company_id: 1, usuario_id: 9, operacao_id: ID_PREPARACAO })
 
+    expect(wmApiClient.criarOrcamento).toHaveBeenCalledTimes(1)
+    const payload = wmApiClient.criarOrcamento.mock.calls[0][0]
+    // O MESMO comando. Um UUID novo aqui seria um segundo orçamento no Icthus.
+    expect(payload.comando_id).toBe(COMANDO_EXISTENTE)
+    expect(payload).toEqual({
+      telefone: TELEFONE_EMPRESA_1,
+      comando_id: COMANDO_EXISTENTE,
+      cliente_codigo_erp: 'C0001',
+      vendedor_codigo_erp: 'V0007',
+      bloquear_apos_criar: true,
+      itens: [{ codigo_produto_erp: 'P001', quantidade: '2', preco_confirmado: '33.038' }],
+    })
+    // 200 na reconciliação: o orçamento já existia e agora sabemos o número.
     expect(r.ok).toBe(true)
-    expect(r.resultado.estado).toBe('INCERTO')
-    expect(r.resultado.payload_pronto).toBe(true)
-    expect(r.resultado.despachado).toBe(false)
-    expect(r.resultado.despacho_pendente_sessao).toBe(6)
-    // Nenhum comando novo, nem no banco nem em tentativa de UPDATE.
+    expect(r.resultado.estado).toBe('CRIADO')
+    expect(r.resultado.resultado.codigo_pedido_erp).toBe('123456')
+    expect(r.resultado.ja_criado).toBe(true)
+    expect(r.resultado.reconciliado).toBe(true)
     expect(db.operacoes[0].comando_id).toBe(COMANDO_EXISTENTE)
-    expect(db.chamadas.filter((c) => c.modo === 'update')).toHaveLength(0)
-    expect(wmApiClient.criarOrcamento).not.toHaveBeenCalled()
     // E o comando_id não vaza na resposta.
     expect(JSON.stringify(r.resultado)).not.toContain(COMANDO_EXISTENTE)
+  })
+
+  it.each([
+    ['COMANDO_NAO_REEXECUTADO', 409],
+    ['RESULTADO_INCERTO', 409],
+  ])('verificar com 409 %s continua INCERTO (a WM não reexecuta)', async (erroWm, status) => {
+    db = criarFakeDb({ linhas: [linha({ estado: 'INCERTO', comando_id: COMANDO_EXISTENTE, tentativas: 1 })] })
+    wmApiClient.criarOrcamento.mockResolvedValue(respostaErro({ status, erroWm }))
+
+    const r = await service.verificar({ company_id: 1, usuario_id: 9, operacao_id: ID_PREPARACAO })
+
+    expect(r.ok).toBe(false)
+    expect(r.envelope.estado).toBe('INCERTO')
+    expect(db.operacoes[0].estado).toBe('INCERTO')
+    expect(db.operacoes[0].comando_id).toBe(COMANDO_EXISTENTE)
+    // Os metadados entram mesmo sem mudar de estado — é o rastro do runbook.
+    expect(db.operacoes[0].tentativas).toBe(2)
+    expect(db.operacoes[0].http_status_ultimo).toBe(409)
+    expect(db.operacoes[0].erro_codigo_ultimo).toBe(erroWm)
+  })
+
+  it('verificar com 409 COMANDO_ID_REUTILIZADO NÃO rebaixa o incerto para falha segura', async () => {
+    db = criarFakeDb({ linhas: [linha({ estado: 'INCERTO', comando_id: COMANDO_EXISTENTE })] })
+    wmApiClient.criarOrcamento.mockResolvedValue(respostaErro({ status: 409, erroWm: 'COMANDO_ID_REUTILIZADO' }))
+
+    const r = await service.verificar({ company_id: 1, usuario_id: 9, operacao_id: ID_PREPARACAO })
+
+    expect(r.ok).toBe(false)
+    expect(r.envelope.codigo).toBe('WM_COMANDO_ID_REUTILIZADO')
+    // Crítico: a WM diz que este comando já foi usado com outro payload. O orçamento PODE
+    // existir — chamar isso de falha segura convidaria a criar outro.
+    expect(db.operacoes[0].estado).toBe('INCERTO')
+    expect(wmApiClient.criarOrcamento).toHaveBeenCalledTimes(1)
+  })
+
+  it('verificar com falha de rede continua INCERTO e não redespacha', async () => {
+    db = criarFakeDb({ linhas: [linha({ estado: 'INCERTO', comando_id: COMANDO_EXISTENTE })] })
+    wmApiClient.criarOrcamento.mockResolvedValue(respostaErro({ transporte: 'timeout' }))
+
+    const r = await service.verificar({ company_id: 1, usuario_id: 9, operacao_id: ID_PREPARACAO })
+
+    expect(r.ok).toBe(false)
+    expect(r.envelope.estado).toBe('INCERTO')
+    expect(db.operacoes[0].estado).toBe('INCERTO')
+    expect(wmApiClient.criarOrcamento).toHaveBeenCalledTimes(1)
   })
 
   it('o payload remontado é byte a byte o do snapshot, com o mesmo comando', () => {
@@ -513,30 +646,234 @@ describe('INCERTO (D10)', () => {
 })
 
 // =============================================================================
+// 6B. A tabela de desfechos da seção 7 — FALHA_SEGURA × INCERTO
+// =============================================================================
+describe('desfecho do despacho: o que cada resposta da WM vira no banco', () => {
+  it.each([
+    ['504 (REALTIME_TIMEOUT)', { status: 504, erroWm: 'REALTIME_TIMEOUT' }],
+    ['504 sem código', { status: 504 }],
+    ['timeout de transporte', { transporte: 'timeout' }],
+    ['falha de transporte não classificada', { transporte: 'desconhecido' }],
+    ['409 COMANDO_NAO_REEXECUTADO', { status: 409, erroWm: 'COMANDO_NAO_REEXECUTADO' }],
+    ['409 RESULTADO_INCERTO', { status: 409, erroWm: 'RESULTADO_INCERTO' }],
+    ['2xx com corpo fora do contrato', { ok: false, status: 200, respostaInvalida: true }],
+  ])('%s ⇒ INCERTO (a escrita pode ter acontecido)', async (_rotulo, patch) => {
+    wmApiClient.criarOrcamento.mockResolvedValue(respostaErro(patch))
+
+    const r = await service.confirmar({ company_id: 1, usuario_id: 9, preparacao_id: ID_PREPARACAO })
+
+    expect(r.ok).toBe(false)
+    expect(r.envelope.estado).toBe('INCERTO')
+    expect(r.envelope.mensagem).toMatch(/não crie outro|procure o suporte/i)
+    expect(db.operacoes[0].estado).toBe('INCERTO')
+    expect(db.operacoes[0].concluido_em).toBeNull()
+    expect(db.operacoes[0].tentativas).toBe(1)
+  })
+
+  it.each([
+    ['erro de CONEXÃO (prova que não chegou)', { transporte: 'conexao' }],
+    ['502 (recusa antes da escrita)', { status: 502 }],
+    ['503 SINCRONIZADOR_OFFLINE (antes do envio)', { status: 503, erroWm: 'SINCRONIZADOR_OFFLINE' }],
+    ['400 payload_invalido', { status: 400, erroWm: 'payload_invalido' }],
+    ['422 CLIENTE_INVALIDO', { status: 422, erroWm: 'CLIENTE_INVALIDO' }],
+    ['409 COMANDO_ID_REUTILIZADO', { status: 409, erroWm: 'COMANDO_ID_REUTILIZADO' }],
+  ])('%s ⇒ FALHA_SEGURA (nada foi gravado)', async (_rotulo, patch) => {
+    wmApiClient.criarOrcamento.mockResolvedValue(respostaErro(patch))
+
+    const r = await service.confirmar({ company_id: 1, usuario_id: 9, preparacao_id: ID_PREPARACAO })
+
+    expect(r.ok).toBe(false)
+    expect(r.envelope.estado).toBe('FALHA_SEGURA')
+    expect(db.operacoes[0].estado).toBe('FALHA_SEGURA')
+    expect(db.operacoes[0].concluido_em).toBeNull()
+    expect(db.operacoes[0].wm_resultado_sanitizado).toBeNull()
+    expect(db.operacoes[0].tentativas).toBe(1)
+  })
+
+  it('ORCAMENTO_DADOS_ALTERADOS é FALHA_SEGURA e manda REPREPARAR, não "tentar de novo"', async () => {
+    wmApiClient.criarOrcamento.mockResolvedValue(respostaErro({ status: 409, erroWm: 'ORCAMENTO_DADOS_ALTERADOS' }))
+
+    const r = await service.confirmar({ company_id: 1, usuario_id: 9, preparacao_id: ID_PREPARACAO })
+
+    expect(r.envelope.codigo).toBe('WM_ORCAMENTO_DADOS_ALTERADOS')
+    expect(r.envelope.estado).toBe('FALHA_SEGURA')
+    // A frase não pode convidar a repetir o MESMO comando: ele nunca vai passar.
+    expect(r.envelope.mensagem).toMatch(/calcule a prévia de novo/i)
+    expect(db.operacoes[0].estado).toBe('FALHA_SEGURA')
+    expect(wmApiClient.criarOrcamento).toHaveBeenCalledTimes(1)
+  })
+
+  it('o erro_codigo_ultimo guarda o código da WM — é o que o runbook procura', async () => {
+    wmApiClient.criarOrcamento.mockResolvedValue(respostaErro({ status: 503, erroWm: 'SINCRONIZADOR_OFFLINE' }))
+
+    await service.confirmar({ company_id: 1, usuario_id: 9, preparacao_id: ID_PREPARACAO })
+
+    expect(db.operacoes[0].erro_codigo_ultimo).toBe('SINCRONIZADOR_OFFLINE')
+    expect(db.operacoes[0].http_status_ultimo).toBe(503)
+  })
+
+  it('a resposta da WM chegou e o nosso UPDATE falhou: INCERTO, nunca sucesso', async () => {
+    // O POST só acontece depois da transição atômica, então derrubar o UPDATE de dentro do
+    // mock atinge exatamente o registro do desfecho — a situação que o teste quer.
+    wmApiClient.criarOrcamento.mockImplementation(async () => {
+      db.falhar.update = true
+      return { ...CRIACAO_200 }
+    })
+    const erroLog = jest.spyOn(console, 'error').mockImplementation(() => {})
+
+    const r = await service.confirmar({ company_id: 1, usuario_id: 9, preparacao_id: ID_PREPARACAO })
+
+    expect(r.ok).toBe(false)
+    expect(r.envelope.estado).toBe('INCERTO')
+    expect(r.envelope.mensagem).toMatch(/procure o suporte/i)
+    // O número do orçamento não vive em mais lugar nenhum: tem de estar no log de erro.
+    const logado = JSON.stringify(erroLog.mock.calls)
+    expect(logado).toMatch(/desfecho do despacho NÃO registrado/)
+    expect(logado).toContain('123456')
+    erroLog.mockRestore()
+  })
+
+  it('UPDATE completo recusado mas o mínimo passa: a linha fica INCERTO (e não CRIADO sem número)', async () => {
+    // Um CRIADO sem `wm_resultado_sanitizado` seria um beco: a tela não teria número para
+    // mostrar e `verificar` recusaria a operação (só aceita INCERTO). INCERTO é reconciliável.
+    const erroLog = jest.spyOn(console, 'error').mockImplementation(() => {})
+    // Recusa SÓ o patch que carrega o resultado (jsonb grande, coluna, o que for). O UPDATE
+    // mínimo de estado — o degrau de recuperação — continua funcionando.
+    const supabase = require('../config/supabase')
+    const builderOriginal = supabase.from.getMockImplementation()
+    const recusado = {
+      eq: () => recusado,
+      gt: () => recusado,
+      select: () => recusado,
+      async maybeSingle() { return { data: null, error: { message: 'patch recusado' } } },
+    }
+    supabase.from.mockImplementation((tabela) => {
+      const chain = builderOriginal(tabela)
+      const update = chain.update
+      chain.update = (patch) => (patch?.wm_resultado_sanitizado !== undefined ? recusado : update(patch))
+      return chain
+    })
+
+    const r = await service.confirmar({ company_id: 1, usuario_id: 9, preparacao_id: ID_PREPARACAO })
+
+    expect(r.ok).toBe(false)
+    expect(r.envelope.estado).toBe('INCERTO')
+    expect(db.operacoes[0].estado).toBe('INCERTO')
+    erroLog.mockRestore()
+  })
+
+  it('o 200 idempotente não duplica histórico: operação já CRIADO não redespacha', async () => {
+    db = criarFakeDb({
+      linhas: [linha({
+        estado: 'CRIADO',
+        comando_id: COMANDO_EXISTENTE,
+        concluido_em: new Date().toISOString(),
+        wm_resultado_sanitizado: { codigo_pedido_erp: '123456' },
+        tentativas: 1,
+      })],
+    })
+
+    const a = await service.confirmar({ company_id: 1, usuario_id: 9, preparacao_id: ID_PREPARACAO })
+    const b = await service.confirmar({ company_id: 1, usuario_id: 9, preparacao_id: ID_PREPARACAO })
+
+    for (const r of [a, b]) {
+      expect(r.ok).toBe(true)
+      expect(r.resultado.estado).toBe('CRIADO')
+      expect(r.resultado.ja_criado).toBe(true)
+      expect(r.resultado.resultado.codigo_pedido_erp).toBe('123456')
+    }
+    // Uma linha, uma criação, nenhum POST novo e `tentativas` intacto.
+    expect(db.operacoes).toHaveLength(1)
+    expect(db.operacoes[0].tentativas).toBe(1)
+    expect(wmApiClient.criarOrcamento).not.toHaveBeenCalled()
+  })
+
+  it('configuração de integração ausente vira FALHA_SEGURA sem nenhum POST', async () => {
+    configService.obterConfigInterna.mockResolvedValue({ company_id: 1, ativo: false, telefone_autorizado: TELEFONE_EMPRESA_1 })
+
+    const r = await service.confirmar({ company_id: 1, usuario_id: 9, preparacao_id: ID_PREPARACAO })
+
+    expect(r.ok).toBe(false)
+    expect(r.envelope.estado).toBe('FALHA_SEGURA')
+    expect(db.operacoes[0].estado).toBe('FALHA_SEGURA')
+    // Nada saiu: a prova de falha segura é não ter havido chamada.
+    expect(wmApiClient.criarOrcamento).not.toHaveBeenCalled()
+    // E a tentativa não contou, porque despacho nenhum foi feito.
+    expect(db.operacoes[0].tentativas).toBe(0)
+  })
+
+  it('snapshot adulterado barra o despacho e a operação vira FALHA_SEGURA', async () => {
+    db = criarFakeDb({
+      linhas: [linha({
+        payload_criacao: { ...PAYLOAD_CRIACAO, cliente_codigo_erp: 'C_OUTRO' },
+        payload_hash: stateMachine.calcularPayloadHash(PAYLOAD_CRIACAO),
+      })],
+    })
+    const aviso = jest.spyOn(console, 'warn').mockImplementation(() => {})
+
+    const r = await service.confirmar({ company_id: 1, usuario_id: 9, preparacao_id: ID_PREPARACAO })
+
+    expect(r.ok).toBe(false)
+    expect(r.envelope.codigo).toBe('ORCAMENTO_SNAPSHOT_DIVERGENTE')
+    expect(wmApiClient.criarOrcamento).not.toHaveBeenCalled()
+    expect(db.operacoes[0].estado).toBe('FALHA_SEGURA')
+    aviso.mockRestore()
+  })
+})
+
+// =============================================================================
 // 7. Nenhum retry automático
 // =============================================================================
 describe('nenhum POST tem retry automático', () => {
-  it('nenhuma chamada desta sessão repete, e a criação não é chamada em lugar nenhum do serviço', async () => {
+  it('cada confirmação e cada verificação fazem EXATAMENTE um POST de criação', async () => {
     await service.confirmar({ company_id: 1, usuario_id: 9, preparacao_id: ID_PREPARACAO })
+    expect(wmApiClient.criarOrcamento).toHaveBeenCalledTimes(1)
+
     db = criarFakeDb({ linhas: [linha({ estado: 'INCERTO', comando_id: COMANDO_EXISTENTE })] })
     await service.verificar({ company_id: 1, usuario_id: 9, operacao_id: ID_PREPARACAO })
+    expect(wmApiClient.criarOrcamento).toHaveBeenCalledTimes(2)
 
-    expect(wmApiClient.criarOrcamento).not.toHaveBeenCalled()
     expect(wmApiClient.prepararOrcamento).not.toHaveBeenCalled()
   })
 
-  it('o serviço não contém laço de retentativa sobre as chamadas da WM', () => {
+  it.each([
+    ['timeout', { transporte: 'timeout' }],
+    ['504', { status: 504 }],
+    ['503', { status: 503, erroWm: 'SINCRONIZADOR_OFFLINE' }],
+    ['502', { status: 502 }],
+    ['conexão', { transporte: 'conexao' }],
+  ])('falha de %s na criação NÃO produz uma segunda tentativa', async (_rotulo, patch) => {
+    wmApiClient.criarOrcamento.mockResolvedValue(respostaErro(patch))
+
+    await service.confirmar({ company_id: 1, usuario_id: 9, preparacao_id: ID_PREPARACAO })
+
+    // Uma tentativa. Repetir qualquer uma destas duplicaria orçamento no Icthus.
+    expect(wmApiClient.criarOrcamento).toHaveBeenCalledTimes(1)
+  })
+
+  it('o despacho chama `criarOrcamento` com UM argumento — nunca com retryOpts', async () => {
+    await service.confirmar({ company_id: 1, usuario_id: 9, preparacao_id: ID_PREPARACAO })
+
+    // `criarOrcamento(payload)` e ponto. Não existe assinatura com opções, e o cliente HTTP
+    // depende disso: `retryOpts` ausente ⇒ `maxAttempts = 1` no `fetchWithRetry`.
+    expect(wmApiClient.criarOrcamento.mock.calls[0]).toHaveLength(1)
+  })
+
+  it('o serviço não contém laço de retentativa, e chama a criação num ponto só', () => {
     const src = fs.readFileSync(path.join(RAIZ, 'services/wm/wmOrcamentoService.js'), 'utf8')
     // Nenhum `for`/`while` envolvendo chamada ao cliente WM, nenhum setTimeout de backoff.
     expect(src).not.toMatch(/setTimeout/)
     expect(src).not.toMatch(/while\s*\(/)
-    // E `criarOrcamento` não é chamado nesta sessão (o despacho é a Sessão 6). A menção em
-    // comentário é esperada — é onde a Sessão 6 entra; o que não pode existir é código.
+
     const chamadasEmCodigo = src
       .split('\n')
       .filter((l) => /wmApiClient\.criarOrcamento\s*\(/.test(l))
       .filter((l) => !/^\s*(\*|\/\/|\/\*)/.test(l))
-    expect(chamadasEmCodigo).toEqual([])
+    // UMA chamada no arquivo inteiro: `confirmar` e `verificar` passam os dois pelo mesmo
+    // ponto. Duas chamadas seriam duas políticas de retry para manter sincronizadas.
+    expect(chamadasEmCodigo).toHaveLength(1)
+    // E ela passa só o payload: qualquer segundo argumento religa o retry.
+    expect(chamadasEmCodigo[0]).toMatch(/criarOrcamento\(\s*montado\.payload\s*\)/)
   })
 })
 
@@ -545,7 +882,7 @@ describe('nenhum POST tem retry automático', () => {
 // =============================================================================
 describe('isolamento: a preparação da empresa A não existe para a empresa B', () => {
   it('empresa B confirmando o UUID da empresa A recebe 404 e não toca na linha', async () => {
-    const r = await confirmarEDespacharComoSessao6({ company_id: 2, usuario_id: 77, preparacao_id: ID_PREPARACAO })
+    const r = await service.confirmar({ company_id: 2, usuario_id: 77, preparacao_id: ID_PREPARACAO })
 
     expect(r.ok).toBe(false)
     // 404, não 403: um 403 confirmaria que o UUID existe em algum lugar.
@@ -707,17 +1044,33 @@ describe('rotas de confirmar/verificar/obter (HTTP)', () => {
     expect(db.operacoes[0].comando_id).toBeNull()
   })
 
-  it('caminho comum do confirmar: 200 ENVIANDO, sem comando_id na resposta e sem despacho', async () => {
+  it('caminho comum do confirmar: 200 CRIADO, com o número do ERP e sem comando_id', async () => {
     ligarModulo()
 
     const res = await request(app).post(`/api/orcamentos/${ID_PREPARACAO}/confirmar`).set('Authorization', `Bearer ${token()}`).send({})
 
     expect(res.status).toBe(200)
-    expect(res.body.estado).toBe('ENVIANDO')
-    expect(res.body.despachado).toBe(false)
+    expect(res.body.estado).toBe('CRIADO')
+    expect(res.body.despachado).toBe(true)
+    expect(res.body.resultado.codigo_pedido_erp).toBe('123456')
     expect(JSON.stringify(res.body)).not.toMatch(/comando_id/i)
+    expect(JSON.stringify(res.body)).not.toContain(TELEFONE_EMPRESA_1)
     expect(db.operacoes[0].comando_id).toMatch(/^[0-9a-f-]{36}$/)
-    expect(wmApiClient.criarOrcamento).not.toHaveBeenCalled()
+    expect(wmApiClient.criarOrcamento).toHaveBeenCalledTimes(1)
+  })
+
+  it('INCERTO chega ao navegador como 504 com "não crie outro" — sem código técnico', async () => {
+    ligarModulo()
+    wmApiClient.criarOrcamento.mockResolvedValue(respostaErro({ transporte: 'timeout' }))
+
+    const res = await request(app).post(`/api/orcamentos/${ID_PREPARACAO}/confirmar`).set('Authorization', `Bearer ${token()}`).send({})
+
+    expect(res.status).toBe(504)
+    expect(res.body.estado).toBe('INCERTO')
+    expect(res.body.mensagem).toMatch(/não crie outro/i)
+    // Nada técnico atravessa para a tela.
+    expect(JSON.stringify(res.body)).not.toMatch(/comando_id|payload_hash|504|timeout/i)
+    expect(db.operacoes[0].estado).toBe('INCERTO')
   })
 
   it('UUID malformado na rota é 404 e não encosta no banco', async () => {

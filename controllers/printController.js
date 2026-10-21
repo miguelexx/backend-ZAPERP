@@ -1,6 +1,6 @@
 const supabase = require('../config/supabase')
 const { isGroupConversation } = require('../helpers/conversaHelper')
-const { getDisplayName } = require('../helpers/contactEnrichment')
+const { pickConversationDisplayName } = require('../helpers/contactEnrichment')
 const { isLidPhoneKey, pickRealPhoneCandidate } = require('../helpers/phoneHelper')
 
 function escapeHtml(s) {
@@ -348,12 +348,11 @@ exports.imprimirConversa = async (req, res) => {
     }
 
     const isLidConv = !isGroup && isLidPhoneKey(conversa.telefone)
-    const clienteNome = getDisplayName(clientesConv)
     const nomeCache = conversa.nome_contato_cache ? String(conversa.nome_contato_cache).trim() : null
     const telefoneRealLid = isLidConv ? pickRealPhoneCandidate(clientesConv?.telefone) : null
     const nomeCliente = isGroup
       ? conversa.nome_grupo || conversa.telefone || 'Grupo'
-      : clienteNome || nomeCache || telefoneRealLid || (isLidConv ? 'Contato' : conversa.telefone) || '—'
+      : pickConversationDisplayName(clientesConv, nomeCache) || telefoneRealLid || (isLidConv ? 'Contato' : conversa.telefone) || '—'
 
     const telefoneExibir = isGroup
       ? escapeHtml(conversa.telefone || '—')

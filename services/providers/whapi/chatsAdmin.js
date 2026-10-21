@@ -11,13 +11,13 @@
  */
 
 const { resolveConfig } = require('./config')
-const { toWhapiChatId, toWhapiGroupId, chatIdCandidates } = require('./phones')
+const { toWhapiGroupId, chatIdCandidates } = require('./phones')
 const { post, patch, del, get } = require('./http')
 const { extractArray, isWhapiSuccessBody, notImplemented } = require('./parse')
 
 /**
  * Resultado de uma ação de chat.
- * @typedef {{ok: boolean, chatId?: string, httpStatus?: number, naoExistia?: boolean, error?: string}} ResultadoAcaoChat
+ * @typedef {{ok: boolean, chatId?: string, httpStatus?: number, naoExistia?: boolean, error?: string, data?: any}} ResultadoAcaoChat
  */
 
 /**
@@ -54,7 +54,7 @@ async function runOnChatCandidates(label, phone, opts, call) {
     try {
       const { ok, status, data } = await call(cfg, chatId)
       ultimoStatus = status
-      if (isWhapiSuccessBody(ok, data)) return { ok: true, chatId, httpStatus: status }
+      if (isWhapiSuccessBody(ok, data)) return { ok: true, chatId, httpStatus: status, data }
       if (Number(status) === 404) continue
       const error = String(data?.error?.message || data?.error || `HTTP ${status}`)
       console.warn(`❌ Whapi ${label} recusado:`, chatId, `HTTP ${status}`, error.slice(0, 160))
@@ -64,7 +64,12 @@ async function runOnChatCandidates(label, phone, opts, call) {
       return { ok: false, chatId, error: e?.message || String(e) }
     }
   }
-  console.warn(`⚠️ Whapi ${label}: nenhum dos endereços existe no canal`, candidatos.join(' · '))
+  // `quietNaoExistia`: para quem CONSULTA (ler o nome do chat de um contato que talvez nem
+  // tenha conversa no celular), "não existe" é resposta normal, não incidente — sem isto a
+  // varredura de nomes enche o log com um aviso por contato.
+  if (opts?.quietNaoExistia !== true) {
+    console.warn(`⚠️ Whapi ${label}: nenhum dos endereços existe no canal`, candidatos.join(' · '))
+  }
   return { ok: false, naoExistia: true, httpStatus: ultimoStatus ?? 404 }
 }
 
@@ -143,21 +148,47 @@ async function getChats(opts = {}) {
 /**
  * Metadados de UM chat específico. GET /chats/{ChatID}.
  * `chat` aceita telefone ou chat id (…@s.whatsapp.net / …@g.us). Retorna { ok, chat } ou { ok:false }.
+ *
+ * Endereçado por `runOnChatCandidates`: com `toWhapiChatId` sozinho esta leitura caía no MESMO
+ * 404 silencioso das ações de chat (o 9º dígito), medido no canal em 21/10:
+ *   GET /chats/553497829258@s.whatsapp.net  → 200 (o chat real, com `name`)
+ *   GET /chats/5534997829258@s.whatsapp.net → 404 "specified chat not found"
  */
 async function getChat(chat, opts = {}) {
-  const cfg = await resolveConfig(opts)
-  if (!cfg) return { ok: false, error: 'Instância Whapi não configurada' }
-  const chatId = toWhapiChatId(chat)
-  if (!chatId) return { ok: false, error: 'Chat inválido.' }
-  try {
-    const { ok, status, data } = await get({ token: cfg.token, endpoint: `/chats/${encodeURIComponent(chatId)}` })
-    if (!ok || data?.error) {
-      return { ok: false, httpStatus: status, error: String(data?.error?.message || data?.error || `HTTP ${status}`) }
+  const r = await runOnChatCandidates('getChat', chat, opts, (cfg, chatId) => get({
+    token: cfg.token,
+    endpoint: `/chats/${encodeURIComponent(chatId)}`,
+  }))
+  if (!r.ok) {
+    if (r.naoExistia) {
+      return { ok: false, httpStatus: r.httpStatus ?? 404, error: 'Chat não encontrado no canal.' }
     }
-    return { ok: true, chat: data || null, httpStatus: status }
-  } catch (e) {
-    return { ok: false, error: `Falha de conexão ao ler chat (Whapi): ${e?.message || e}` }
+    return r
   }
+  const body = r.data && typeof r.data === 'object' ? r.data : null
+  const inner = body?.chat && typeof body.chat === 'object' ? body.chat : body
+  return { ok: true, chat: inner || null, chatId: r.chatId, httpStatus: r.httpStatus }
+}
+
+/**
+ * Nome que o WhatsApp do celular conectado mostra para este chat — o nome SALVO NA AGENDA,
+ * que é o nome pelo qual o atendente procura o cliente na lista.
+ *
+ * Medido no canal de produção em 21/10 (MCP, só leitura). Para um contato que o atendente tem
+ * salvo, `/contacts/{id}` responde SEM nome e só `/chats/{id}` traz o nome da agenda:
+ *   GET /contacts/553497829258             → {"phonebook":false,"saved":false,"id":"553497829258"}
+ *   GET /chats/553497829258@s.whatsapp.net → {"name":"Claudia DB", …, last_message.from_name:"❤"}
+ * O webhook, por sua vez, só traz `from_name` = pushname do CLIENTE ("❤", "Rayssa", "Agro
+ * Frutal"), que não é o nome salvo ("Claudia DB", "DISTRIBUIDORA NEVADA LTDA", "Agro Fixo").
+ * Por isso o nome da agenda sai daqui, e não de `/contacts`.
+ *
+ * @returns {Promise<string|null>} nome do chat, ou null quando o chat não existe / não tem nome
+ */
+async function getChatBookName(phone, opts = {}) {
+  const r = await getChat(phone, { ...opts, quietNaoExistia: true })
+  if (!r?.ok || !r.chat || typeof r.chat !== 'object') return null
+  const name = r.chat.name
+  return typeof name === 'string' && name.trim() ? name.trim() : null
 }
 
 async function getGroups(opts = {}) {
@@ -246,6 +277,7 @@ module.exports = {
   deleteChat,
   getChats,
   getChat,
+  getChatBookName,
   getGroups,
   getGroup,
   patchChat,

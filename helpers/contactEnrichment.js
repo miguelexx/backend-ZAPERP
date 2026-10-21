@@ -207,10 +207,56 @@ function getDisplayName(cliente) {
   return nome || pushname || telefone || null
 }
 
+/** Placeholders que a UI escreve quando não sabe o nome — não são nome de ninguém. */
+const PLACEHOLDERS_UI = new Set(['sem nome', 'contato'])
+
+/**
+ * Nome a exibir numa conversa: o melhor entre o nome do cliente e o cache da conversa.
+ *
+ * `getDisplayName` cai em `pushname` e depois no telefone, e pushname pode ser lixo ("❤").
+ * O cache da conversa (`nome_contato_cache`) é onde o enriquecimento grava o nome SALVO na
+ * agenda do celular (provider Whapi, `getChatBookName`) — com `clienteNome || nomeCache` cru,
+ * um pushname ruim ganhava do nome certo e a conversa continuava mostrando "❤" depois de o
+ * nome já ter sido descoberto. Ordem: nome bom do cliente > nome bom do cache > o que houver.
+ *
+ * @param {object|null} cliente linha de `clientes` (nome, pushname, telefone)
+ * @param {string|null} nomeCache `conversas.nome_contato_cache`
+ * @returns {string|null}
+ */
+function pickConversationDisplayName(cliente, nomeCache) {
+  const doCliente = getDisplayName(cliente)
+  const cacheRaw = nomeCache != null && String(nomeCache).trim() ? String(nomeCache).trim() : null
+  const bom = (n) => !!n && !isBadName(n) && !PLACEHOLDERS_UI.has(n.toLowerCase())
+  if (bom(doCliente)) return doCliente
+  if (bom(cacheRaw)) return cacheRaw
+  return doCliente || cacheRaw || null
+}
+
+/**
+ * Primeiro nome UTILIZÁVEL da lista, na ordem dada; null se nenhum presta.
+ *
+ * Serve para os payloads de realtime e para o que sai para fora (CRM): todo nome cru de webhook
+ * é o pushname do CLIENTE, e pushname pode não ser nome nenhum ("❤", medido no canal em 21/10).
+ * O cache do banco já recusa esses nomes (chooseBestName/isBadName) — quem emite tambem precisa,
+ * senão o card recebe "❤" e esconde o nome salvo na agenda.
+ *
+ * @param {...(string|null|undefined)} nomes candidatos na ordem de preferência
+ * @returns {string|null}
+ */
+function primeiroNomeUtilizavel(...nomes) {
+  for (const bruto of nomes) {
+    const n = normalizeName(bruto)
+    if (n && !isBadName(n)) return n
+  }
+  return null
+}
+
 module.exports = {
   normalizeName,
   isBadName,
   scoreName,
   chooseBestName,
-  getDisplayName
+  getDisplayName,
+  pickConversationDisplayName,
+  primeiroNomeUtilizavel
 }

@@ -6,6 +6,8 @@
  */
 
 const { agendaContactFields } = require('../../../helpers/agendaContact')
+const { isBadName } = require('../../../helpers/contactEnrichment')
+const { getChatBookName } = require('./chatsAdmin')
 const { resolveConfig } = require('./config')
 const { toWhapiContactId, isGroupJid } = require('./phones')
 const { get, post, put, patch, del, head } = require('./http')
@@ -90,22 +92,60 @@ function buildContactMetadataResult(data) {
   }
 }
 
+const EMPTY_CONTACT_METADATA = {
+  name: null, pushname: null, short: null, notify: null, vname: null, imgUrl: null,
+}
+
+/**
+ * Nome/pushname/foto de UM contato. Esta é a ÚNICA porta pela qual o nome do WhatsApp entra em
+ * `clientes.nome` e `conversas.nome_contato_cache` (via `syncUltraMsgContact`) — webhook de
+ * mensagem, enriquecimento da lista de conversas, cadastro manual e varredura de fotos todos
+ * passam por aqui.
+ *
+ * `GET /contacts/{id}` NÃO basta. Medido no canal de produção em 21/10 (MCP, só leitura): para
+ * um contato que o atendente tem salvo na agenda o endpoint responde sem nome —
+ * `{"phonebook":false,"saved":false,"id":"553497829258"}` — enquanto `GET /chats/{id}` traz
+ * `"name":"Claudia DB"`. Sem esse segundo passo o atendimento ficava com o pushname do cliente
+ * ("❤") e, como `isBadName` recusa pushname desse tipo, a lista caía no telefone cru: o
+ * atendente não achava o cliente pelo nome. Por isso, quando `/contacts` não devolve nome
+ * utilizável, o nome vem do chat (`getChatBookName`).
+ *
+ * @param {object} [opts]
+ * @param {boolean} [opts.skipChatNameFallback] não consultar `/chats` (chamadas em leque, como
+ *   enriquecer participantes de grupo, onde o 1:1 quase nunca existe e o custo multiplica)
+ */
 async function getContactMetadata(phone, opts = {}) {
   const cfg = await resolveConfig(opts)
   if (!cfg) return null
   const contactId = toWhapiContactId(phone)
   if (!contactId || isGroupJid(contactId)) return null
+  let result = null
   try {
     const { ok, data } = await get({
       token: cfg.token,
       endpoint: `/contacts/${encodeURIComponent(contactId)}`,
     })
-    if (!ok || !data) return null
-    const contact = data.contact && typeof data.contact === 'object' ? data.contact : data
-    return buildContactMetadataResult(contact)
+    if (ok && data) {
+      const contact = data.contact && typeof data.contact === 'object' ? data.contact : data
+      result = buildContactMetadataResult(contact)
+    }
   } catch {
-    return null
+    result = null
   }
+  // Nome da agenda do celular conectado. `isBadName` cobre os dois jeitos de `/contacts` não
+  // responder nome: ausente, ou o próprio telefone formatado ("+55 34 3423-8595", visto no canal).
+  if (opts.skipChatNameFallback !== true && isBadName(result?.name)) {
+    let chatName = null
+    try {
+      chatName = await getChatBookName(phone, opts)
+    } catch {
+      chatName = null
+    }
+    if (chatName && !isBadName(chatName)) {
+      return { ...(result || EMPTY_CONTACT_METADATA), name: chatName }
+    }
+  }
+  return result
 }
 
 async function getProfilePicture(phone, opts = {}) {

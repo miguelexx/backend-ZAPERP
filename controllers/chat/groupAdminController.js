@@ -159,7 +159,9 @@ async function hydrateParticipantNamesFromProvider(provider, opts, participants)
     .slice(0, 40)
   if (!need.length) return participants
   await mapWithConcurrency(need, 6, async ({ p, idx }) => {
-    const meta = await provider.getContactMetadata(p.phone, opts).catch(() => null)
+    // Participante de grupo: o 1:1 com ele quase nunca existe no canal, então buscar o nome da
+    // agenda via GET /chats custaria 2 chamadas por participante para devolver nada.
+    const meta = await provider.getContactMetadata(p.phone, { ...opts, skipChatNameFallback: true }).catch(() => null)
     if (!meta) return
     const name = meta.name || meta.pushname || meta.notify
     const next = { ...participants[idx] }

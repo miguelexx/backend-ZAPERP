@@ -17,9 +17,20 @@ const crypto = require('crypto')
  *                                                             └─ falha ANTES de despacho
  *                                                                comprovado ──────────▶ PREPARADO
  *
- * INCERTO é TERMINAL (D10): enquanto a WM não definir por escrito a semântica de
- * reconciliação, nenhum fluxo gera `comando_id` novo para "corrigir" um incerto.
- * FALHA_SEGURA também é terminal — repreparar cria uma operação nova, não reusa esta.
+ *   INCERTO ──reconciliação explícita (MESMO comando_id, MESMO payload) ── 200 ──▶ CRIADO
+ *
+ * INCERTO tem **uma única saída, e ela não cria nada** (D10). A 2ª remessa do contrato fechou a
+ * semântica que faltava: o guia autoriza repetir a requisição com o MESMO `comando_id` depois
+ * de problema de transporte (§11) e garante que comando já concluído devolve o resultado
+ * idempotente SEM recriar (§13). Reenviar o payload byte a byte idêntico é, portanto, uma
+ * CONSULTA — e quando ela responde `200`, o orçamento já existia: registrar `CRIADO` é anotar
+ * um fato, não produzir um. A tabela de D10 no doc 36 sempre disse isso ("200 ⇒ CRIADO"); a
+ * aresta faltava aqui porque a Sessão 4A ainda não tinha despacho nenhum.
+ *
+ * O que continua PROIBIDO, e é a parte que importa: `INCERTO → ENVIANDO` e `INCERTO → PREPARADO`
+ * não existem. Nenhum fluxo gera `comando_id` novo para "corrigir" um incerto, nenhum entra em
+ * laço e nenhum reconcilia sozinho — a ação é sempre explícita do usuário ou do suporte (§12).
+ * FALHA_SEGURA segue terminal: repreparar cria uma operação nova, não reusa esta.
  */
 
 const ESTADOS = Object.freeze({
@@ -45,7 +56,9 @@ const TRANSICOES = Object.freeze({
   ]),
   [ESTADOS.CRIADO]: Object.freeze([]),
   [ESTADOS.FALHA_SEGURA]: Object.freeze([]),
-  [ESTADOS.INCERTO]: Object.freeze([]),
+  // Única saída de INCERTO, e só pela reconciliação do D10: reenvio idêntico com o MESMO
+  // `comando_id` que respondeu 200. NÃO existe INCERTO → ENVIANDO nem INCERTO → PREPARADO.
+  [ESTADOS.INCERTO]: Object.freeze([ESTADOS.CRIADO]),
   [ESTADOS.EXPIRADO]: Object.freeze([]),
 })
 
