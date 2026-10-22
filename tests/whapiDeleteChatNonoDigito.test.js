@@ -15,9 +15,15 @@ describe('Whapi deleteChat — tentativa por forma do número', () => {
   beforeEach(() => {
     jest.resetModules()
     process.env.WHAPI_BASE_URL = 'https://gate.whapi.test'
+    // Este arquivo cobre o ENDEREÇAMENTO (qual chat id é tentado, em que ordem). A conferência
+    // pós-exclusão e o arquivamento de último recurso têm arquivo próprio
+    // (whapiDeleteChatResiduo.test.js); ligados aqui, o GET de conferência entraria na contagem
+    // de chamadas e embaralharia o que estes testes afirmam.
+    process.env.WHAPI_CHAT_DELETE_VERIFY = 'false'
   })
   afterEach(() => {
     delete process.env.WHAPI_BASE_URL
+    delete process.env.WHAPI_CHAT_DELETE_VERIFY
     jest.resetModules()
   })
 

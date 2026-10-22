@@ -113,14 +113,84 @@ async function readChat(phone, opts = {}) {
  * Tenta os endereços em ordem — ver `runOnChatCandidates`.
  * @returns {Promise<ResultadoAcaoChat>}
  */
+function envLigado(nome, padrao = true) {
+  const raw = String(process.env[nome] ?? '').trim().toLowerCase()
+  if (!raw) return padrao
+  if (['1', 'true', 'yes', 'sim', 'on'].includes(raw)) return true
+  if (['0', 'false', 'no', 'nao', 'não', 'off'].includes(raw)) return false
+  return padrao
+}
+
+function envMs(nome, padrao) {
+  const n = Number(String(process.env[nome] ?? '').trim())
+  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : padrao
+}
+
+const esperar = (ms) => new Promise((r) => setTimeout(r, ms))
+
+/** O chat ainda está no canal? Consulta o endereço EXATO que o DELETE aceitou. */
+async function chatAindaExiste(cfg, chatId) {
+  try {
+    const { ok, status, data } = await get({ token: cfg.token, endpoint: `/chats/${encodeURIComponent(chatId)}` })
+    if (Number(status) === 404) return false
+    if (!ok) return null // indeterminado: não afirmar nada
+    return isWhapiSuccessBody(ok, data)
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Apaga o chat na conta conectada — e CONFERE se ele saiu mesmo.
+ *
+ * Por que conferir (medido em produção, 21/10): o `DELETE /chats/{id}` devolve 200 e limpa o
+ * histórico, mas o **card da conversa e a última mensagem continuam na lista do aparelho**.
+ * O 200 do provedor, sozinho, não prova que a conversa saiu — era por isso que o sistema dizia
+ * "apagado" com a conversa viva no WhatsApp.
+ *
+ * Sequência: apaga → confere → se sobrou, apaga de novo (agora a última mensagem já está na
+ * visão do canal) → confere. Persistindo o resíduo, ARQUIVA como último recurso: não é apagar,
+ * mas tira o card da lista principal, é reversível e não toca em nada do lado do cliente.
+ *
+ * O que NÃO fazemos: revogar a mensagem residual. A Whapi só tem `DELETE /messages/{id}`, que
+ * apaga **para todos** — apagaria a mensagem no aparelho do CLIENTE para limpar a nossa lista.
+ *
+ * Env: `WHAPI_CHAT_DELETE_VERIFY` (padrão on) · `WHAPI_CHAT_DELETE_ARCHIVE_FALLBACK` (padrão on)
+ * · `WHAPI_CHAT_DELETE_RETRY_DELAY_MS` (padrão 1200).
+ *
+ * @returns {Promise<ResultadoAcaoChat & {residuo?: boolean, arquivado?: boolean, verificado?: boolean}>}
+ */
 async function deleteChat(phone, opts = {}) {
-  return runOnChatCandidates('deleteChat', phone, opts, (cfg, chatId) => del({
+  const apagar = () => runOnChatCandidates('deleteChat', phone, opts, (cfg, chatId) => del({
     token: cfg.token,
     endpoint: `/chats/${encodeURIComponent(chatId)}`,
     companyId: cfg.companyId,
     whatsappInstanceId: cfg.whatsappInstanceId,
     skipSendGuard: true,
   }))
+
+  const r = await apagar()
+  if (!r.ok || !envLigado('WHAPI_CHAT_DELETE_VERIFY')) return r
+
+  const cfg = await resolveConfig(opts)
+  if (!cfg) return r
+
+  let existe = await chatAindaExiste(cfg, r.chatId)
+  if (existe !== true) return { ...r, verificado: existe === false }
+
+  // Sobrou: 2ª tentativa com a visão do canal já atualizada.
+  await esperar(envMs('WHAPI_CHAT_DELETE_RETRY_DELAY_MS', 1200))
+  const r2 = await apagar()
+  existe = await chatAindaExiste(cfg, r2.ok ? r2.chatId : r.chatId)
+  if (existe === false) return { ...(r2.ok ? r2 : r), verificado: true }
+
+  console.warn('⚠️ Whapi deleteChat: o chat continua na lista depois de 2 tentativas', r.chatId)
+  if (!envLigado('WHAPI_CHAT_DELETE_ARCHIVE_FALLBACK')) {
+    return { ...r, verificado: true, residuo: true, arquivado: false }
+  }
+  const arq = await archiveChat(phone, opts)
+  console.warn('⚠️ Whapi deleteChat: arquivado como último recurso (sai da lista principal, não é exclusão)', r.chatId, 'ok:', arq?.ok === true)
+  return { ...r, verificado: true, residuo: true, arquivado: arq?.ok === true }
 }
 
 /**

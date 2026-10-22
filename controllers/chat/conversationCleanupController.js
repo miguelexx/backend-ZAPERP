@@ -74,6 +74,19 @@ async function apagarChatNoWhatsapp(company_id, conv) {
       companyId: company_id,
       ...(instanceId ? { whatsappInstanceId: instanceId } : {}),
     })
+    // Apagou no provedor mas o chat CONTINUA na lista do aparelho (resíduo medido em produção:
+    // histórico limpo, card + última mensagem de pé). Não é sucesso: dizer "apagado" aqui foi
+    // o que fez o atendente achar que tinha saído do WhatsApp quando não tinha.
+    if (result?.residuo === true) {
+      console.warn('[apagarConversa] chat continuou na lista do WhatsApp depois de apagar', {
+        company_id,
+        conversa_id: conv?.id ?? null,
+        provider: providerName,
+        arquivado: result?.arquivado === true,
+      })
+      return { ok: false, motivo: result?.arquivado === true ? 'residuo_arquivado_no_whatsapp' : 'residuo_no_whatsapp' }
+    }
+
     const ok = result === true || result?.ok === true
     if (!ok) {
       // `naoExistia`: o adapter tentou todas as formas do número e nenhuma existe no canal —

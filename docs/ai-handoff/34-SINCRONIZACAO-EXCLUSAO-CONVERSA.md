@@ -343,6 +343,42 @@ cobre as seis entradas — ordem das tentativas, 404 em cadeia, erro não-404 pa
 200 com body de erro, grupo e LID com endereço único, instância ausente sem chamada, e o 501 do
 `clearChatMessages`.
 
+## 8.3 O 200 do provedor não prova que a conversa saiu (21/10)
+
+Depois do fix do 9º dígito, o relato mudou: **o histórico some do aparelho, mas o card da
+conversa e a última mensagem continuam na lista.** Ou seja, o `DELETE /chats/{id}` chega no chat
+certo (por isso o histórico foi limpo) e ainda assim a conversa não sai da lista.
+
+A doc oficial do endpoint descreve só "deleting chats" e os códigos 200/400/401/404 — **não diz**
+se o efeito alcança o aparelho, e o changelog da Whapi tem um "fix" genérico de inconsistência
+nesse método. Não dá para afirmar a causa pela documentação; dá para parar de mentir no resultado.
+
+**O que passou a acontecer:** `deleteChat` apaga → **confere** com `GET /chats/{id}` no endereço
+exato que o DELETE aceitou → se o chat ainda está lá, apaga **de novo** (agora a última mensagem
+já está na visão do canal) → confere outra vez. Persistindo, **arquiva** como último recurso: não
+é exclusão, mas tira o card da lista principal, é reversível e não toca em nada do lado do cliente.
+O resultado passa a carregar `verificado`, `residuo` e `arquivado`, e o controller devolve
+`whatsapp_motivo: residuo_no_whatsapp` / `residuo_arquivado_no_whatsapp` em vez de dizer "apagado".
+
+**O que NÃO fazemos, de propósito:** revogar a mensagem residual. A Whapi só tem
+`DELETE /messages/{MessageID}`, que apaga **para todos** (não existe flag de "só para mim" — a
+referência da API não lista nenhuma). Isso apagaria a mensagem no aparelho do CLIENTE para
+limpar a nossa lista. Não é o que "apagar a conversa aqui" autoriza.
+
+| Env | Padrão | Papel |
+|---|---|---|
+| `WHAPI_CHAT_DELETE_VERIFY` | on | Conferir depois de apagar. `false` volta ao comportamento antigo (1 DELETE, sem GET). |
+| `WHAPI_CHAT_DELETE_ARCHIVE_FALLBACK` | on | Arquivar quando o chat resiste às duas tentativas. |
+| `WHAPI_CHAT_DELETE_RETRY_DELAY_MS` | 1200 | Espera entre a 1ª e a 2ª tentativa. |
+
+**Custo:** a exclusão passou a fazer 2 chamadas a mais no caminho feliz (1 DELETE + 1 GET) e, no
+pior caso, 5 (DELETE, GET, DELETE, GET, POST archive) com ~1,2 s de espera no meio.
+
+**Ainda em aberto:** se o resíduo persistir mesmo com a 2ª tentativa, a causa é do provedor/do
+protocolo, não do nosso endereçamento — e o caminho é reproduzir com a Whapi (chat id + horário)
+ou aceitar o arquivamento como o melhor alcançável. O teste ao vivo precisa rodar no canal onde o
+problema aparece; o MCP desta sessão só alcança o canal da WM.
+
 ## 9. Risco residual
 
 - **Exclusão remota é irreversível e leva o histórico do atendimento** (mensagens, `atendimentos`,
