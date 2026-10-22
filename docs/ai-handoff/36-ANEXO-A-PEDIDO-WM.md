@@ -22,6 +22,56 @@ Para vocês saberem o que não precisa mais ser enviado:
 
 ---
 
+## Dois comportamentos da busca que travam o atendente
+
+> Medidos em uso real, contra uma instalação em produção, com o módulo já no ar. Não são dúvidas
+> de contrato: são coisas que o atendente encontra na primeira hora de uso. Contornamos as duas do
+> nosso lado, mas o conserto de verdade é de vocês.
+
+### A. A correspondência exata esconde todos os outros produtos
+
+Quando o termo pesquisado é exatamente a descrição de algum produto, a resposta vem como produto
+único e os demais que contêm a palavra **não aparecem**. Medido:
+
+| termo | resultado |
+|---|---|
+| `filtro` | 1 produto (o item chamado literalmente "FILTRO") |
+| `filtr` | **468 produtos** |
+| `parafuso` | 1 |
+| `parafus` | **285** |
+| `piso` | 1 |
+| `pis` | **42** |
+
+Na prática, o atendente de uma loja de peças pesquisa "filtro" e vê um item, concluindo que o
+sistema não carregou o catálogo.
+
+**Pedido:** quando houver correspondência exata **e** outros produtos contendo o termo, devolver a
+lista com o exato em primeiro lugar, em vez de suprimir o restante. Hoje contornamos repetindo a
+consulta com o termo encurtado — funciona, mas é um remendo e gasta uma chamada a mais.
+
+### B. A busca de cliente é por prefixo, e a de produto é por trecho
+
+Medido com `cliente_busca` em `/orcamentos/preparar`:
+
+| termo | resultado |
+|---|---|
+| `DINIZ` | nenhum cliente |
+| `SILVA` | nenhum cliente |
+| `MARIA APARECIDA AMADEI` | 3 candidatos |
+
+O `04-contratos-api.md` confirma: nome de cliente é consultado **por prefixo**. Como produto é por
+trecho, as duas caixas da mesma tela se comportam de formas diferentes, e ninguém adivinha isso —
+pesquisar o sobrenome do cliente simplesmente não acha.
+
+**Pedido:** aceitar trecho do nome na busca de cliente, como já acontece em produto. Por ora
+orientamos o atendente a começar pelo primeiro nome ou colar o CPF/CNPJ (que casa por igualdade).
+
+**Observação menor, do mesmo tema:** a busca de produto depende da ordem das palavras —
+`filtro oleo` encontra, `oleo filtro` não. Se a correspondência passar a considerar os termos
+independentemente da ordem, ajuda bastante.
+
+---
+
 ## 1. `preco_negociado` está ativo? (pergunta nova, e é a mais urgente)
 
 Encontramos uma divergência entre os dois documentos da 2ª remessa:

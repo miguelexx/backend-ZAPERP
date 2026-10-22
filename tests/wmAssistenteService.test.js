@@ -230,31 +230,92 @@ describe('projeção dos candidatos', () => {
     expect(JSON.stringify(r.dados)).not.toMatch(/atual/i)
   })
 
-  it('produto resolvido sai com os mesmos 4 campos e sem preço', async () => {
+  /**
+   * O ramo RESOLVIDO tem lista branca MAIOR que a da lista, e isso é contrato, não descuido:
+   * medido no ERP real em 22/10, a WM devolve aqui preço, estoque, `ativo` e identificadores,
+   * com `meta.fonte: 'tempo_real'`. Descartá-los fazia a atendente escolher às cegas.
+   */
+  it('produto resolvido traz preço, estoque e identificadores — como STRING, byte a byte', async () => {
     wmApiClient.consultarProdutos.mockResolvedValue({
       ok: true,
       status: 200,
       operacao: 'leitura',
       data: {
         dados: {
-          produto: {
-            codigo_produto_erp: '0000474',
-            descricao: 'CHAPA DESLIZANTE',
-            marca: 'ACME',
-            unidade: 'UN',
-            preco_unitario: '33.038',
-          },
+          codigo_produto_erp: '0005205',
+          descricao: 'FILTRO OLEO',
+          codigo_barras: '2500051470008',
+          codigo_fabricante: '04E115561L',
+          marca: 'VOLKSWAGEN',
+          unidade: 'M2',
+          grupo: 'PECAS',
+          subgrupo: 'FILTROS',
+          preco_unitario: '0.010',
+          estoque_previsto: '0.000',
+          ativo: true,
         },
-        meta: {},
+        meta: { fonte: 'tempo_real', consultado_em: '2026-10-22T20:14:47.481Z' },
       },
     })
 
-    const r = await service.consultarProdutos({ company_id: 1, consulta: { codigo_produto_erp: '0000474' } })
+    const r = await service.consultarProdutos({ company_id: 1, consulta: { codigo_produto_erp: '0005205' } })
 
     expect(r.ok).toBe(true)
     expect(r.dados.status).toBe('produto')
-    expect(r.dados.produto).toEqual({ codigo_produto_erp: '0000474', descricao: 'CHAPA DESLIZANTE', marca: 'ACME', unidade: 'UN' })
-    expect(JSON.stringify(r.dados)).not.toContain('33.038')
+    expect(r.dados.produto).toEqual({
+      codigo_produto_erp: '0005205',
+      descricao: 'FILTRO OLEO',
+      codigo_barras: '2500051470008',
+      codigo_fabricante: '04E115561L',
+      marca: 'VOLKSWAGEN',
+      unidade: 'M2',
+      grupo: 'PECAS',
+      subgrupo: 'FILTROS',
+      preco_unitario: '0.010',
+      estoque_previsto: '0.000',
+      ativo: true,
+    })
+    // As casas decimais da WM chegam intactas: nada de 0.01 nem de Number.
+    expect(typeof r.dados.produto.preco_unitario).toBe('string')
+    expect(r.dados.meta.fonte).toBe('tempo_real')
+  })
+
+  it('preço fora do formato decimal textual vira null — nunca zero, nunca número', async () => {
+    for (const bruto of [33.038, '33,038', '1e3', '', '  ', null, {}, true]) {
+      wmApiClient.consultarProdutos.mockResolvedValue({
+        ok: true,
+        status: 200,
+        operacao: 'leitura',
+        data: {
+          dados: { produto: { codigo_produto_erp: 'P1', descricao: 'X', preco_unitario: bruto, estoque_previsto: bruto } },
+          meta: {},
+        },
+      })
+      cache.invalidar()
+      const r = await service.consultarProdutos({ company_id: 1, consulta: { codigo_produto_erp: `P${String(bruto)}` } })
+      expect(r.ok).toBe(true)
+      expect(r.dados.produto.preco_unitario).toBeNull()
+      expect(r.dados.produto.estoque_previsto).toBeNull()
+    }
+  })
+
+  it('`ativo` só atravessa como booleano de verdade — omissão não vira "ativo"', async () => {
+    wmApiClient.consultarProdutos.mockResolvedValue({
+      ok: true,
+      status: 200,
+      operacao: 'leitura',
+      data: { dados: { produto: { codigo_produto_erp: 'P1', descricao: 'X', ativo: 'sim' } }, meta: {} },
+    })
+    const r = await service.consultarProdutos({ company_id: 1, consulta: { codigo_produto_erp: 'P1' } })
+    expect(r.dados.produto.ativo).toBeNull()
+  })
+
+  it('a LISTA continua sem preço: o do resolvido não é reaproveitado para os candidatos', async () => {
+    wmApiClient.consultarProdutos.mockResolvedValue(respostaMultiplos({
+      produtos: [{ codigo_produto_erp: 'A', descricao: 'A', marca: null, unidade: 'UN' }],
+    }))
+    const r = await service.consultarProdutos({ company_id: 1, consulta: { busca: 'aaa' } })
+    expect(Object.keys(r.dados.produtos[0]).sort()).toEqual(['codigo_produto_erp', 'descricao', 'marca', 'unidade'])
   })
 
   it('aceita o produto resolvido na raiz de dados (forma legada não modelada no OpenAPI)', async () => {
@@ -593,6 +654,209 @@ describe('coalescência de requisições em voo', () => {
     wmApiClient.consultarProdutos.mockResolvedValue(respostaMultiplos({ produtos: [] }))
     const depois = await service.consultarProdutos({ company_id: 1, consulta: { busca: 'chapa' } })
     expect(depois.ok).toBe(true)
+  })
+})
+
+// =============================================================================
+// Correspondência exata que esconde os irmãos
+// =============================================================================
+/**
+ * Medido ao vivo contra o ERP da empresa 20 em 22/10:
+ *   `filtro` → 1 · `filtr` → 468   |   `parafuso` → 1 · `parafus` → 285   |   `piso` → 1 · `pis` → 42
+ *
+ * Nos dois primeiros existe um produto chamado literalmente assim e a WM resolve nele,
+ * escondendo os outros. No terceiro o resultado é único de verdade — e aí NÃO se gasta chamada.
+ */
+describe('irmãos escondidos pela correspondência exata', () => {
+  /** Resposta resolvida com a descrição que o teste pedir. */
+  function respostaResolvida(descricao, extra = {}) {
+    return {
+      ok: true,
+      status: 200,
+      operacao: 'leitura',
+      data: {
+        dados: { produto: { codigo_produto_erp: 'EXATO', descricao, marca: 'ACME', unidade: 'UN', ...extra } },
+        meta: { fonte: 'tempo_real' },
+      },
+    }
+  }
+
+  const IRMAOS = [
+    { codigo_produto_erp: 'EXATO', descricao: 'FILTRO', marca: 'ACME', unidade: 'UN' },
+    { codigo_produto_erp: 'A1', descricao: 'FILTRO DE OLEO', marca: 'ACME', unidade: 'UN' },
+    { codigo_produto_erp: 'A2', descricao: 'FILTRO DE AR', marca: 'ACME', unidade: 'UN' },
+  ]
+
+  it('termo IGUAL à descrição dispara a segunda consulta, com o termo encurtado em 1 caractere', async () => {
+    wmApiClient.consultarProdutos
+      .mockResolvedValueOnce(respostaResolvida('FILTRO'))
+      .mockResolvedValueOnce(respostaMultiplos({ produtos: IRMAOS, total: 468, temMais: true }))
+
+    const r = await service.consultarProdutos({ company_id: 1, consulta: { busca: 'filtro' } })
+
+    expect(wmApiClient.consultarProdutos).toHaveBeenCalledTimes(2)
+    expect(wmApiClient.consultarProdutos.mock.calls[0][0]).toEqual({ telefone: TELEFONE_A, busca: 'filtro' })
+    expect(wmApiClient.consultarProdutos.mock.calls[1][0]).toEqual({ telefone: TELEFONE_A, busca: 'filtr' })
+
+    expect(r.ok).toBe(true)
+    expect(r.dados.status).toBe('multiplos_produtos')
+    // O exato em PRIMEIRO, e marcado — a tela não precisa adivinhar qual é.
+    expect(r.dados.produtos[0].codigo_produto_erp).toBe('EXATO')
+    expect(r.dados.correspondencia_exata.codigo_produto_erp).toBe('EXATO')
+    expect(r.dados.outros_com_a_palavra.map((p) => p.codigo_produto_erp)).toEqual(['A1', 'A2'])
+    expect(r.dados.termo_dos_outros).toBe('filtr')
+    // O total global dos escondidos chega à tela: é dele que sai "mostrar mais resultados".
+    expect(r.dados.paginacao.total).toBe(468)
+  })
+
+  it('caixa e acento não impedem a detecção (a WM casa sem diferenciar os dois)', async () => {
+    wmApiClient.consultarProdutos
+      .mockResolvedValueOnce(respostaResolvida('PARAFUSO SEXTAVADO'))
+      .mockResolvedValueOnce(respostaMultiplos({ produtos: [
+        { codigo_produto_erp: 'EXATO', descricao: 'PARAFUSO SEXTAVADO', marca: null, unidade: 'UN' },
+        { codigo_produto_erp: 'B1', descricao: 'PARAFUSO SEXTAVADO INOX', marca: null, unidade: 'UN' },
+      ] }))
+
+    const r = await service.consultarProdutos({ company_id: 1, consulta: { busca: ' Parafuso  Sextavado ' } })
+
+    expect(wmApiClient.consultarProdutos).toHaveBeenCalledTimes(2)
+    expect(wmApiClient.consultarProdutos.mock.calls[1][0].busca).toBe('Parafuso  Sextavad')
+    expect(r.dados.correspondencia_exata.codigo_produto_erp).toBe('EXATO')
+  })
+
+  it('termo apenas CONTIDO na descrição não gasta chamada nenhuma (caso `piso`)', async () => {
+    wmApiClient.consultarProdutos.mockResolvedValue(
+      respostaResolvida('PISO EXTENCAO PENEIRA 9650 9750')
+    )
+
+    const r = await service.consultarProdutos({ company_id: 1, consulta: { busca: 'piso' } })
+
+    expect(wmApiClient.consultarProdutos).toHaveBeenCalledTimes(1)
+    expect(r.dados.status).toBe('produto')
+    expect(r.dados.produto.codigo_produto_erp).toBe('EXATO')
+  })
+
+  it('termo de 3 caracteres não encurta: `pis` viraria `pi` e varreria o catálogo', async () => {
+    wmApiClient.consultarProdutos.mockResolvedValue(respostaResolvida('PIS'))
+
+    const r = await service.consultarProdutos({ company_id: 1, consulta: { busca: 'pis' } })
+
+    expect(wmApiClient.consultarProdutos).toHaveBeenCalledTimes(1)
+    expect(r.dados.status).toBe('produto')
+  })
+
+  it('consulta por CÓDIGO nunca dispara a segunda busca', async () => {
+    wmApiClient.consultarProdutos.mockResolvedValue(respostaResolvida('FILTRO'))
+    const r = await service.consultarProdutos({ company_id: 1, consulta: { codigo_produto_erp: 'FILTRO' } })
+    expect(wmApiClient.consultarProdutos).toHaveBeenCalledTimes(1)
+    expect(r.dados.status).toBe('produto')
+  })
+
+  it('a melhoria nunca piora o que já funcionava: falha, vazio, resolver de novo ou exceção devolvem o original', async () => {
+    const segundasRuins = [
+      falhaWm({ status: 503, erroWm: 'SINCRONIZADOR_OFFLINE' }),
+      falhaWm({ status: 400, erroWm: 'PAGINA_FORA_DO_INTERVALO' }),
+      respostaMultiplos({ produtos: [] }),
+      // só o próprio exato: não há irmão a revelar
+      respostaMultiplos({ produtos: [{ codigo_produto_erp: 'EXATO', descricao: 'FILTRO', marca: null, unidade: 'UN' }] }),
+      // resolveu de novo em vez de listar
+      respostaResolvida('FILTR'),
+      // forma fora do contrato
+      { ok: true, status: 200, operacao: 'leitura', data: { dados: { qualquer: true }, meta: {} } },
+    ]
+
+    for (const segunda of segundasRuins) {
+      jest.clearAllMocks()
+      cache.invalidar()
+      wmApiClient.consultarProdutos
+        .mockResolvedValueOnce(respostaResolvida('FILTRO'))
+        .mockResolvedValueOnce(segunda)
+
+      const r = await service.consultarProdutos({ company_id: 1, consulta: { busca: 'filtro' } })
+
+      expect(r.ok).toBe(true)
+      expect(r.dados.status).toBe('produto')
+      expect(r.dados.produto.codigo_produto_erp).toBe('EXATO')
+    }
+
+    // E se a segunda chamada LANÇAR, a resposta original continua de pé.
+    jest.clearAllMocks()
+    cache.invalidar()
+    wmApiClient.consultarProdutos
+      .mockResolvedValueOnce(respostaResolvida('FILTRO'))
+      .mockRejectedValueOnce(new Error('explodiu'))
+
+    const r = await service.consultarProdutos({ company_id: 1, consulta: { busca: 'filtro' } })
+    expect(r.ok).toBe(true)
+    expect(r.dados.status).toBe('produto')
+  })
+
+  it('a segunda consulta passa pelo MESMO cache: repetir a busca não gasta chamada nova', async () => {
+    wmApiClient.consultarProdutos
+      .mockResolvedValueOnce(respostaResolvida('FILTRO'))
+      .mockResolvedValueOnce(respostaMultiplos({ produtos: IRMAOS }))
+
+    const a = await service.consultarProdutos({ company_id: 1, consulta: { busca: 'filtro' } })
+    const b = await service.consultarProdutos({ company_id: 1, consulta: { busca: 'filtro' } })
+
+    expect(wmApiClient.consultarProdutos).toHaveBeenCalledTimes(2)
+    expect(b.dados).toEqual(a.dados)
+
+    // E quem digitar o termo encurtado à mão reusa a MESMA entrada de cache.
+    const c = await service.consultarProdutos({ company_id: 1, consulta: { busca: 'filtr' } })
+    expect(wmApiClient.consultarProdutos).toHaveBeenCalledTimes(2)
+    expect(c.origem_resposta).toBe('cache')
+  })
+
+  it('a empresa B não enxerga os irmãos da empresa A', async () => {
+    wmApiClient.consultarProdutos.mockImplementation(async (payload) => {
+      if (payload.busca === 'filtro') return respostaResolvida('FILTRO')
+      return payload.telefone === TELEFONE_A
+        ? respostaMultiplos({ produtos: [...IRMAOS] })
+        : respostaMultiplos({ produtos: [{ codigo_produto_erp: 'B9', descricao: 'FILTRO DA EMPRESA B', marca: null, unidade: 'UN' }] })
+    })
+
+    const a = await service.consultarProdutos({ company_id: 1, consulta: { busca: 'filtro' } })
+    const b = await service.consultarProdutos({ company_id: 2, consulta: { busca: 'filtro' } })
+
+    expect(JSON.stringify(a.dados)).not.toContain('EMPRESA B')
+    expect(b.dados.outros_com_a_palavra.map((p) => p.codigo_produto_erp)).toEqual(['B9'])
+  })
+
+  it('página > 1 revela a continuação da lista sem repetir o exato no topo', async () => {
+    wmApiClient.consultarProdutos
+      .mockResolvedValueOnce(respostaResolvida('FILTRO'))
+      .mockResolvedValueOnce(respostaMultiplos({
+        produtos: [{ codigo_produto_erp: 'C1', descricao: 'FILTRO 31', marca: null, unidade: 'UN' }],
+        pagina: 2,
+        total: 468,
+        temMais: true,
+        temAnterior: true,
+      }))
+
+    const r = await service.consultarProdutos({ company_id: 1, consulta: { busca: 'filtro', pagina: 2 } })
+
+    expect(wmApiClient.consultarProdutos.mock.calls[1][0]).toEqual({ telefone: TELEFONE_A, busca: 'filtr', pagina: 2 })
+    expect(r.dados.status).toBe('multiplos_produtos')
+    expect(r.dados.correspondencia_exata).toBeUndefined()
+    expect(r.dados.produtos.map((p) => p.codigo_produto_erp)).toEqual(['C1'])
+    expect(r.dados.paginacao.pagina).toBe(2)
+  })
+
+  it('o preço do exato atravessa, e os irmãos continuam sem preço', async () => {
+    wmApiClient.consultarProdutos
+      .mockResolvedValueOnce(respostaResolvida('FILTRO', { preco_unitario: '0.010', estoque_previsto: '0.000', ativo: true }))
+      .mockResolvedValueOnce(respostaMultiplos({ produtos: IRMAOS, meta: { fonte: 'cache_cloud' } }))
+
+    const r = await service.consultarProdutos({ company_id: 1, consulta: { busca: 'filtro' } })
+
+    expect(r.dados.correspondencia_exata.preco_unitario).toBe('0.010')
+    // A procedência do preço é a da PRIMEIRA resposta, não a da lista.
+    expect(r.dados.correspondencia_exata_meta.fonte).toBe('tempo_real')
+    expect(r.dados.meta.fonte).toBe('cache_cloud')
+    for (const outro of r.dados.outros_com_a_palavra) {
+      expect(outro.preco_unitario).toBeUndefined()
+    }
   })
 })
 

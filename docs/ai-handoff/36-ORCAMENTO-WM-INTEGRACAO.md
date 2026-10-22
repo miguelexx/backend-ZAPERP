@@ -912,7 +912,12 @@ Aposentadoria da sync direta SQL Server → Postgres de produtos. **Nunca** junt
 ## 10. Pendências com a WM — status após ler o contrato (20/10)
 
 Depois da 2ª remessa, **nenhum item bloqueia a Sessão 6**: os itens 1 e 2 foram respondidos. Os
-itens 5, 6, 7 e 8 bloqueiam a produção, e o 13 bloqueia a produção multiempresa. O item 14 é novo.
+itens 5, 6, 7 e 8 bloqueiam a produção, e o 13 bloqueia a produção multiempresa.
+
+Os itens **15, 16 e 17 são novos (22/10)** e vêm de medição ao vivo contra o ERP real da Tijolar
+(empresa 20), com o módulo já em produção. Nenhum é bug nosso: os três são comportamento
+documentado da WM que, na tela da atendente, parece sistema quebrado. Os três têm mitigação local
+aplicada e os três pedem conserto de verdade do lado da WM.
 
 | # | Pendência | Status |
 |---|---|---|
@@ -930,6 +935,49 @@ itens 5, 6, 7 e 8 bloqueiam a produção, e o 13 bloqueia a produção multiempr
 | **12** | Um telefone por empresa, ou vários? | 🟢 **RESPONDIDA.** `assistente_contatos` tem `UNIQUE(telefone)` global e aceita vários contatos por sincronizador, mas a autorização exige **exatamente um** contato ativo correspondente: dois equivalentes dão `403`. O ZapERP usa **um** por empresa, inequívoco. |
 | **13** | Prova de vínculo de tenant | 🔴 **ABERTA — e a WM declara que não a fornece.** `09-seguranca.md` é explícito: *"o Bearer não prova a origem WhatsApp de uma mensagem nem restringe uma credencial a uma única empresa"* e *"esses consumidores são confiáveis para informar o telefone"*. Não há identidade verificável para o consumidor: `/sincronizadores/identidade` exige o token do **Worker**, não o nosso, e `acesso/validar` devolve só `{autorizado:true}`. |
 | **14** | `preco_negociado` — OpenAPI × guia | 🔴 **ABERTA (nova, 2ª remessa).** O `openapi.yaml` acrescentou `preco_negociado` (`PrecoNegociadoOrcamento`: decimal textual, > 0, ≤ 1000000, até 4 casas) aos itens de `preparar` **e** de `criar`; o guia afirma em §7.1 e §9.1 que **nenhuma das duas** o aceita. A precedência declarada pela WM é o OpenAPI, então isto é divergência real. **Decisão local: NÃO implementar.** O campo é opcional, logo não enviá-lo é seguro e concorda com o guia; e o próprio schema avisa que só um "Worker compatível" aplica a negociação — num Worker antigo o desconto seria **ignorado em silêncio** e o ERP gravaria o preço cheio, inaceitável sem forma de detectar o suporte. Como é chave desconhecida, o `additionalProperties: false` da nossa camada já a rejeita se vier do navegador (comentário registrado em `validators/wmOrcamentosValidators.js`). **Pedir à WM:** qual dos dois documentos vale, e como detectar Worker compatível. |
+| **15** | Correspondência exata esconde os demais produtos | 🔴 **ABERTA (nova, 22/10) — medida no ERP real.** `04-contratos-api.md`: *"uma única correspondência exata global de descrição normalizada ou identificador também pode resolver"*. Na prática, quando o termo digitado É a descrição de algum produto, a WM resolve nele e **não lista** os outros que contêm a palavra. Medido na empresa 20: `filtro` → **1** (existe um produto chamado literalmente "FILTRO") × `filtr` → **468**; `parafuso` → **1** × `parafus` → **285**. Para comparação, `piso` → **1** × `pis` → **42** é caso legítimo: o único resultado de `piso` é único de verdade (o produto é "PISO EXTENCAO PENEIRA 9650 9750", o termo só aparece nele). O catálogo não está incompleto — busca por `a` devolve **7364**. **Mitigação local aplicada:** ao detectar que a descrição resolvida é IGUAL ao termo normalizado, `wmAssistenteService` faz UMA segunda consulta com o termo encurtado em 1 caractere e devolve a lista com o exato em primeiro e marcado (`correspondencia_exata` / `outros_com_a_palavra`); passa pelo mesmo cache e pela mesma coalescência, e qualquer falha devolve o resultado original. **Pedir à WM:** que a resolução por correspondência exata devolva a LISTA com o produto exato em primeiro, em vez de suprimir os demais. A WM é o único lado que sabe o total global sem gastar uma chamada extra nossa. |
+| **16** | Busca de produto depende da ORDEM das palavras | 🔴 **ABERTA (nova, 22/10) — medida no ERP real.** `04-contratos-api.md`: *"descrição/marca por ocorrência"* — ou seja, o trecho literal. Medido: `filtro oleo` acha e `oleo filtro` devolve `PRODUTO_NAO_ENCONTRADO`; `piso peneira` não acha o produto "PISO EXTENCAO PENEIRA 9650 9750". Quem digita duas palavras na ordem "errada" conclui que o produto não existe. **Mitigação local aplicada:** só texto — com duas ou mais palavras e zero resultados, o estado vazio do picker explica a ordem e sugere tentar uma palavra só, citando a primeira que a pessoa digitou. Nenhuma busca alternativa é disparada por conta própria (custo — seção 11). **Pedir à WM:** casar as palavras do termo em qualquer ordem (AND de ocorrências), não só o trecho literal. |
+| **17** | Busca de cliente é por PREFIXO | 🔴 **ABERTA (nova, 22/10) — medida no ERP real.** `04-contratos-api.md`: *"O Worker consulta dbo.Clientes, nome por prefixo com `Latin1_General_CI_AI`, CPF/CNPJ/código por igualdade"*. Produto casa por trecho, cliente casa pelo **começo** do nome — regras diferentes no mesmo formulário. Medido com `cliente_busca` dentro de `preparar`: `DINIZ` → `WM_NAO_ENCONTRADO`, `SILVA` → `WM_NAO_ENCONTRADO`, `MARIA APARECIDA AMADEI` → 3 candidatos. O atendente que digita o sobrenome vê um sistema quebrado. **Mitigação local aplicada:** só texto — dica fixa no campo ("Pelo começo do nome, ou pelo CPF/CNPJ") e, no erro de não encontrado, a explicação citando o que foi digitado e oferecendo o documento, que casa por igualdade. **Pedir à WM:** aceitar trecho do nome na busca de cliente, como já faz em produto. Este é o conserto de verdade. |
+
+### Dois achados de 22/10 que NÃO são pendência — são contrato que estávamos desperdiçando
+
+**1. O produto resolvido já vem com preço, estoque e identificadores.** Resposta real de
+`/produtos/consultar` com busca `FILTRO OLEO` na empresa 20:
+
+```json
+{"dados":{"codigo_produto_erp":"0005205","descricao":"FILTRO OLEO","codigo_barras":"2500051470008",
+"codigo_fabricante":"04E115561L","marca":"VOLKSWAGEN","unidade":"M2","grupo":"PECAS",
+"subgrupo":"FILTROS","preco_unitario":"0.010","estoque_previsto":"0.000","ativo":true,
+"estoque_sincronizado_em":"2026-10-22T11:37:49.484Z","sincronizado_em":"2026-09-28T12:38:12.102Z"},
+"meta":{"fonte":"tempo_real","consultado_em":"2026-10-22T20:14:47.481Z"}}
+```
+
+A nossa lista branca entregava só `codigo_produto_erp`, `descricao`, `marca` e `unidade` — nos
+dois ramos — então a atendente escolhia o produto sem ver preço nem estoque, com o dado já na
+mão. Corrigido: a projeção do ramo **resolvido** passou a repassar `preco_unitario`,
+`estoque_previsto`, `ativo`, `codigo_barras`, `codigo_fabricante`, `grupo` e `subgrupo`, e o card
+os mostra. As regras de sempre continuam: valor é **string decimal da WM, impressa como veio**
+(nada de recalcular ou reformatar — §8.1), ausência vira "—" e nunca "R$ 0,00", e a procedência é
+dita em voz alta — `tempo_real` pode ser falado como agora, `cache_cloud` **nunca** como "atual".
+
+O ramo **lista** (`multiplos_produtos`) segue com os 4 campos, porque é o que o contrato dá:
+card sem preço é card sem preço, e reaproveitar o preço do resolvido para os outros candidatos
+seria inventar dado. Isso vale também para o grupo "outros com essa palavra" do item 15.
+
+**2. A mesma caixa de busca já resolve identificadores.** `04-contratos-api.md`:
+*"Identificadores ERP/barras/fabricante usam igualdade exata, sem normalização textual"*. Medido
+na empresa 20, os três resolvem direto para FILTRO OLEO pelo campo `busca`, sem precisar de
+`codigo_produto_erp` em campo separado:
+
+| termo digitado | o que é | resultado |
+|---|---|---|
+| `0005205` | código ERP | resolvido |
+| `2500051470008` | código de barras | resolvido |
+| `04E115561L` | código do fabricante | resolvido |
+
+Nenhuma mudança de código foi necessária — o caminho já funcionava. O que mudou foi a dica
+embaixo do campo, que antes dizia só "Pesquise pelo nome. Não é preciso saber o código do ERP" e
+escondia o atalho: numa loja de peças, **bipar o código de barras acha o produto na hora**.
 
 ### O que o item 13 significa na prática
 

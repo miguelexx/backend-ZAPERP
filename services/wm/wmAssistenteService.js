@@ -29,16 +29,27 @@ const { LIMITES } = require('../../validators/wmOrcamentosValidators')
  *   3. A chave do cache carrega `company_id` + a versão da config. Cache sem `company_id`
  *      vazaria catálogo entre empresas tão bem quanto uma query sem filtro.
  *
- * O QUE SAI DAQUI PARA A UI é uma projeção com lista branca de campos, nunca a resposta crua:
+ * O QUE SAI DAQUI PARA A UI é uma projeção com lista branca de campos, nunca a resposta crua —
+ * e a lista branca é DIFERENTE nos dois ramos, porque o contrato também é:
  *
- *   · `/produtos/consultar` devolve, pelo contrato, APENAS `codigo_produto_erp`, `descricao`,
- *     `marca` e `unidade` — **sem preço e sem estoque** — e a descoberta de candidatos vem do
- *     **cache cloud** da WM (`docs/wm/04-contratos-api.md`). Então nada aqui inventa preço ou
- *     estoque, e nada é rotulado como "atual": `candidatos_origem: 'cache_cloud'` sai junto
- *     justamente para a Sessão 5 não poder escrever "estoque atual" na tela.
- *   · Se um dia a WM passar a mandar `preco_unitario`/`estoque_previsto` neste endpoint, a
- *     lista branca DESCARTA os dois. Preço e estoque só aparecem adiante, nos candidatos de
- *     `produto_ambiguo` da preparação e na prévia, onde são realtime.
+ *   · **lista** (`multiplos_produtos`): pelo contrato, APENAS `codigo_produto_erp`,
+ *     `descricao`, `marca` e `unidade` — **sem preço e sem estoque** — e a descoberta de
+ *     candidatos vem do **cache cloud** da WM (`docs/wm/04-contratos-api.md`). Nada aqui
+ *     inventa preço ou estoque, e nada é rotulado como "atual": `candidatos_origem:
+ *     'cache_cloud'` sai junto justamente para a tela não poder escrever "estoque atual".
+ *     Se um dia a WM mandar preço nesta lista, a lista branca o DESCARTA.
+ *   · **resolvido** (`produto`): medido no ERP real em 22/10, a WM devolve aqui
+ *     `preco_unitario`, `estoque_previsto`, `ativo`, `codigo_barras`, `codigo_fabricante`,
+ *     `grupo` e `subgrupo`, com `meta.fonte: 'tempo_real'`. Esse dado já chegava e era
+ *     descartado, e a atendente escolhia o produto sem ver preço nem estoque. Agora atravessa
+ *     — como STRING, byte a byte, sem recálculo e sem reformatação (§8.1 do guia) — e a
+ *     procedência vai no `meta`: `cache_cloud` jamais pode ser falado como "atual".
+ *
+ * Reaproveitar o preço do resolvido para os itens da lista seria inventar dado, e é proibido:
+ * card sem preço é card sem preço.
+ *
+ * CORRESPONDÊNCIA EXATA QUE ESCONDE OS IRMÃOS — ver
+ * `revelarIrmaosDaCorrespondenciaExata`. Resumo: `filtro` devolvia 1 produto e `filtr`, 468.
  *
  * Página além da última é `400 PAGINA_FORA_DO_INTERVALO` e atravessa como 400: sem clamp, sem
  * "corrigir" para a última página, nem aqui nem na resposta ao frontend. O contrato é explícito
@@ -57,6 +68,12 @@ const ENDPOINT_PRODUTOS = 'produtos/consultar'
  * NÃO possa apresentar isso como dado atual.
  */
 const CANDIDATOS_ORIGEM = 'cache_cloud'
+
+/**
+ * Mínimo de caracteres do termo encurtado que revela os irmãos escondidos. Mesmo piso do
+ * picker: abaixo disso a busca deixa de ter intenção e passa a varrer o catálogo.
+ */
+const BUSCA_IRMAOS_MIN = 3
 
 /** Teto defensivo do `meta` repassado (o contrato não o modela: é só `type: object`). */
 const META_MAX_CHAVES = 20
@@ -104,6 +121,26 @@ async function resolverContatoAutorizado(companyId) {
   return { telefone, configVersao: String(row.atualizado_em ?? '') }
 }
 
+/**
+ * Normalização usada APENAS para comparar o termo pesquisado com a descrição devolvida — ela
+ * nunca toca no que é enviado à WM nem na chave do cache (lá o termo vai exatamente como
+ * digitado, de propósito; ver `wmConsultaCache`).
+ *
+ * Espelha o que a WM faz na correspondência: `docs/wm/04-contratos-api.md` diz que descrição e
+ * marca casam "sem diferenciar caixa e os acentos portugueses mapeados por
+ * `translate(lower(...))`", e que a correspondência exata de produto mantém
+ * Trim/OrdinalIgnoreCase. Daí: minúsculas, acentos removidos, espaços colapsados e aparados.
+ */
+function normalizarParaComparacao(texto) {
+  if (typeof texto !== 'string') return ''
+  return texto
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
 /** Texto curto e sem byte nulo, ou null. `descricao`/`marca`/`unidade` são nullable no contrato. */
 function textoOpcional(valor) {
   if (valor === null || valor === undefined) return null
@@ -126,6 +163,53 @@ function projetarProduto(p) {
     descricao: textoOpcional(p.descricao),
     marca: textoOpcional(p.marca),
     unidade: textoOpcional(p.unidade),
+  }
+}
+
+/**
+ * Decimal textual da WM, repassado BYTE A BYTE. Preço é `0.00##` invariant e estoque é
+ * `0.000` invariant com negativo permitido — e a regra de ouro do módulo é não recalcular nem
+ * reformatar (§8.1 do guia). Número, notação científica, vírgula decimal ou texto livre viram
+ * `null`, e `null` a tela imprime como "—", nunca como zero.
+ */
+function decimalTextual(valor) {
+  if (typeof valor !== 'string') return null
+  const limpo = valor.trim()
+  if (!/^-?\d+(?:\.\d+)?$/.test(limpo)) return null
+  return limpo
+}
+
+/**
+ * Lista branca do produto RESOLVIDO (`dados.status === 'produto'`).
+ *
+ * Medido ao vivo em 22/10 contra o ERP da empresa 20: quando a WM resolve, ela devolve muito
+ * mais do que a lista de candidatos — `preco_unitario`, `estoque_previsto`, `ativo`,
+ * `codigo_barras`, `codigo_fabricante`, `grupo`, `subgrupo` — com `meta.fonte: 'tempo_real'`.
+ * Esse dado já chegou e era descartado aqui, então a atendente escolhia o produto sem ver
+ * preço nem estoque. Agora passa, e continua sendo lista branca: o que não está escrito aqui
+ * não sai daqui.
+ *
+ * Isto **não** vale para a lista (`multiplos_produtos`): ali o contrato dá só os 4 campos, e
+ * inventar preço para o resto da lista — ou reaproveitar o do resolvido — seria mentira. Card
+ * sem preço é card sem preço.
+ *
+ * A procedência viaja junto, no `meta` da resposta: `tempo_real` pode ser falado como agora,
+ * `cache_cloud` **nunca** pode ser rotulado como atual.
+ */
+function projetarProdutoResolvido(p) {
+  const base = projetarProduto(p)
+  if (!base) return null
+  return {
+    ...base,
+    codigo_barras: textoOpcional(p.codigo_barras),
+    codigo_fabricante: textoOpcional(p.codigo_fabricante),
+    grupo: textoOpcional(p.grupo),
+    subgrupo: textoOpcional(p.subgrupo),
+    preco_unitario: decimalTextual(p.preco_unitario),
+    estoque_previsto: decimalTextual(p.estoque_previsto),
+    // `ativo` só atravessa como booleano de verdade: consulta por código explícito pode trazer
+    // produto inativo (contrato), e "indefinido" não pode virar "ativo" por omissão.
+    ativo: typeof p.ativo === 'boolean' ? p.ativo : null,
   }
 }
 
@@ -220,7 +304,7 @@ function projetarRespostaProdutos(data, telefoneProibido) {
     }
   }
 
-  const resolvido = projetarProduto(dados.produto) || projetarProduto(dados)
+  const resolvido = projetarProdutoResolvido(dados.produto) || projetarProdutoResolvido(dados)
   if (resolvido) {
     return {
       ok: true,
@@ -238,44 +322,27 @@ function projetarRespostaProdutos(data, telefoneProibido) {
 }
 
 /**
- * Consulta candidatos de produto na WM.
+ * Uma página de candidatos, com cache e coalescência. É o único lugar que fala com a WM neste
+ * arquivo — tanto a consulta que o atendente pediu quanto a que revela os irmãos escondidos
+ * passam por aqui, e portanto pelo MESMO cache e pela MESMA coalescência.
  *
- * @param {object} args
- * @param {number} args.company_id  **sempre** de `req.user.company_id`
- * @param {object} args.consulta    saída de `validarConsultarProdutosBody` (busca XOR código, pagina)
- * @param {string} [args.requestId] correlação de log
  * @returns {Promise<{ ok: true, dados: object, origem_resposta: string }|{ ok: false, httpStatus: number, envelope: object, interno: object }>}
  */
-async function consultarProdutos({ company_id, consulta, requestId } = {}) {
-  const cid = Number(company_id)
-  if (!Number.isFinite(cid) || cid <= 0) {
-    // Não deveria acontecer: `auth` já exige company_id no token. Se acontecer, é bug local —
-    // e um bug local não pode virar chamada externa com tenant indefinido.
-    return erroLocal({ motivo: 'company_id_invalido', requestId })
-  }
-  if (!ehObjetoSimples(consulta)) return erroLocal({ motivo: 'consulta_invalida', requestId })
-
-  const temBusca = typeof consulta.busca === 'string' && consulta.busca.length > 0
-  const temCodigo = typeof consulta.codigo_produto_erp === 'string' && consulta.codigo_produto_erp.length > 0
-  if (temBusca === temCodigo) return erroLocal({ motivo: 'consulta_invalida', requestId })
-
-  const contato = await resolverContatoAutorizado(cid)
-  if (contato.erro) return erroLocal({ motivo: contato.erro, requestId })
-
+async function buscarPaginaDeProdutos({ cid, contato, modo, termo, pagina, requestId }) {
   // Payload da WM: o telefone PRIMEIRO, resolvido no servidor, e só os campos validados.
   // Nenhuma chave extra — nem `limite` (obsoleto/ignorado), nem `tamanho_pagina` (não aceito).
   const payload = { telefone: contato.telefone }
-  if (temBusca) payload.busca = consulta.busca
-  else payload.codigo_produto_erp = consulta.codigo_produto_erp
-  if (consulta.pagina !== undefined) payload.pagina = consulta.pagina
+  if (modo === 'busca') payload.busca = termo
+  else payload.codigo_produto_erp = termo
+  if (pagina !== undefined) payload.pagina = pagina
 
   const chave = wmConsultaCache.montarChave({
     companyId: cid,
     configVersao: contato.configVersao,
     endpoint: ENDPOINT_PRODUTOS,
-    modo: temBusca ? 'busca' : 'codigo',
-    termo: temBusca ? consulta.busca : consulta.codigo_produto_erp,
-    pagina: consulta.pagina,
+    modo,
+    termo,
+    pagina,
   })
 
   const { valor, origem } = await wmConsultaCache.resolverComCoalescencia(
@@ -307,6 +374,146 @@ async function consultarProdutos({ company_id, consulta, requestId } = {}) {
   return { ok: true, dados: valor.dados, origem_resposta: origem }
 }
 
+/**
+ * Revela os produtos que a correspondência exata escondeu.
+ *
+ * ────────────────────────────────────────────────────────────────────────────
+ * O PROBLEMA, MEDIDO NO ERP REAL DA EMPRESA 20 (22/10)
+ * ────────────────────────────────────────────────────────────────────────────
+ *   busca `filtro`   → 1 produto (status `produto`)   ·  busca `filtr`   → 468
+ *   busca `parafuso` → 1 produto (status `produto`)   ·  busca `parafus` → 285
+ *
+ * O contrato explica: *"uma única correspondência exata global de descrição normalizada ou
+ * identificador também pode resolver"* (`docs/wm/04-contratos-api.md`). Existe um produto
+ * chamado literalmente "FILTRO", então a WM resolve nele e **não lista** os outros 467 que
+ * contêm a palavra. Para a atendente, o sistema parecia não puxar todos os produtos.
+ *
+ * A correção: ao detectar exatamente esse caso, consultar de novo com o termo encurtado em um
+ * caractere e devolver a lista inteira, com o produto exato em primeiro e marcado.
+ *
+ * ────────────────────────────────────────────────────────────────────────────
+ * QUANDO **NÃO** DISPARA — e por quê
+ * ────────────────────────────────────────────────────────────────────────────
+ *   · o termo apenas APARECE na descrição (`cimento` → "CIMENTO CAMPEAO AZUL CP 2 E 32 50KG"):
+ *     aí a WM resolveu porque o resultado é único de verdade, não há irmão escondido, e gastar
+ *     chamada seria desperdício. Medido: `piso` devolve 1 e é esse caso;
+ *   · consulta por código (`codigo_produto_erp`): casa por igualdade, não por trecho;
+ *   · termo encurtado com menos de `BUSCA_IRMAOS_MIN` caracteres;
+ *   · a segunda consulta falha, volta vazia, resolve de novo ou não acrescenta ninguém.
+ *
+ * Em todos esses casos devolve `null` e o chamador responde o resultado ORIGINAL. A melhoria
+ * nunca pode piorar o caso que já funciona — inclusive se a segunda chamada lançar.
+ *
+ * @returns {Promise<object|null>} resposta expandida, ou `null` para manter a original
+ */
+async function revelarIrmaosDaCorrespondenciaExata({ cid, contato, busca, pagina, resultado, requestId }) {
+  const dados = resultado?.dados
+  if (!dados || dados.status !== 'produto' || !dados.produto) return null
+
+  const termo = String(busca).trim()
+  const alvo = normalizarParaComparacao(termo)
+  if (!alvo) return null
+  // O caso patológico é EXATAMENTE este: o termo digitado É a descrição do produto.
+  if (normalizarParaComparacao(dados.produto.descricao) !== alvo) return null
+
+  const encurtado = termo.slice(0, -1).trim()
+  if (encurtado.length < BUSCA_IRMAOS_MIN) return null
+
+  let segunda = null
+  try {
+    segunda = await buscarPaginaDeProdutos({ cid, contato, modo: 'busca', termo: encurtado, pagina, requestId })
+  } catch {
+    // Exceção de transporte na consulta EXTRA não derruba a resposta que já temos.
+    return null
+  }
+  if (!segunda || segunda.ok !== true) return null
+
+  const lista = segunda.dados
+  if (!lista || lista.status !== 'multiplos_produtos' || !Array.isArray(lista.produtos)) return null
+  if (lista.produtos.length === 0) return null
+
+  const exato = dados.produto
+  const outros = lista.produtos.filter((p) => p.codigo_produto_erp !== exato.codigo_produto_erp)
+  if (outros.length === 0) return null
+
+  // Página > 1: a lista é a continuação do termo encurtado e o exato já apareceu na primeira.
+  // Repeti-lo no topo da página 2 faria parecer que ele existe duas vezes no catálogo.
+  const primeiraPagina = pagina === undefined || pagina === 1
+  if (!primeiraPagina) {
+    return {
+      ok: true,
+      dados: { ...lista, termo_dos_outros: encurtado },
+      origem_resposta: resultado.origem_resposta,
+    }
+  }
+
+  return {
+    ok: true,
+    dados: {
+      status: 'multiplos_produtos',
+      // Lista única para quem só sabe ler `produtos` — o exato sempre em primeiro.
+      produtos: [exato, ...outros],
+      // E os dois grupos nomeados, para a tela não precisar adivinhar qual é qual.
+      correspondencia_exata: exato,
+      // A procedência do EXATO é a da primeira resposta (de onde vêm o preço e o estoque dele);
+      // a do `meta` abaixo é a da lista. Misturar as duas rotularia o preço com a fonte errada.
+      correspondencia_exata_meta: dados.meta,
+      outros_com_a_palavra: outros,
+      termo_dos_outros: encurtado,
+      paginacao: lista.paginacao,
+      candidatos_origem: CANDIDATOS_ORIGEM,
+      meta: lista.meta,
+    },
+    origem_resposta: resultado.origem_resposta,
+  }
+}
+
+/**
+ * Consulta candidatos de produto na WM.
+ *
+ * @param {object} args
+ * @param {number} args.company_id  **sempre** de `req.user.company_id`
+ * @param {object} args.consulta    saída de `validarConsultarProdutosBody` (busca XOR código, pagina)
+ * @param {string} [args.requestId] correlação de log
+ * @returns {Promise<{ ok: true, dados: object, origem_resposta: string }|{ ok: false, httpStatus: number, envelope: object, interno: object }>}
+ */
+async function consultarProdutos({ company_id, consulta, requestId } = {}) {
+  const cid = Number(company_id)
+  if (!Number.isFinite(cid) || cid <= 0) {
+    // Não deveria acontecer: `auth` já exige company_id no token. Se acontecer, é bug local —
+    // e um bug local não pode virar chamada externa com tenant indefinido.
+    return erroLocal({ motivo: 'company_id_invalido', requestId })
+  }
+  if (!ehObjetoSimples(consulta)) return erroLocal({ motivo: 'consulta_invalida', requestId })
+
+  const temBusca = typeof consulta.busca === 'string' && consulta.busca.length > 0
+  const temCodigo = typeof consulta.codigo_produto_erp === 'string' && consulta.codigo_produto_erp.length > 0
+  if (temBusca === temCodigo) return erroLocal({ motivo: 'consulta_invalida', requestId })
+
+  const contato = await resolverContatoAutorizado(cid)
+  if (contato.erro) return erroLocal({ motivo: contato.erro, requestId })
+
+  const resultado = await buscarPaginaDeProdutos({
+    cid,
+    contato,
+    modo: temBusca ? 'busca' : 'codigo',
+    termo: temBusca ? consulta.busca : consulta.codigo_produto_erp,
+    pagina: consulta.pagina,
+    requestId,
+  })
+  if (!resultado.ok || !temBusca) return resultado
+
+  const expandido = await revelarIrmaosDaCorrespondenciaExata({
+    cid,
+    contato,
+    busca: consulta.busca,
+    pagina: consulta.pagina,
+    resultado,
+    requestId,
+  })
+  return expandido || resultado
+}
+
 module.exports = {
   ENDPOINT_PRODUTOS,
   CANDIDATOS_ORIGEM,
@@ -314,6 +521,8 @@ module.exports = {
   consultarProdutos,
   // expostos para teste — projeções puras, sem efeito
   projetarProduto,
+  projetarProdutoResolvido,
+  normalizarParaComparacao,
   projetarPaginacao,
   projetarMeta,
   projetarRespostaProdutos,
