@@ -141,16 +141,25 @@ async function chatAindaExiste(cfg, chatId) {
 }
 
 /**
- * Apaga o chat na conta conectada — e CONFERE se ele saiu mesmo.
+ * Apaga a conversa do contato na conta conectada — TODOS os endereços dele — e confere.
  *
- * Por que conferir (medido em produção, 21/10): o `DELETE /chats/{id}` devolve 200 e limpa o
- * histórico, mas o **card da conversa e a última mensagem continuam na lista do aparelho**.
- * O 200 do provedor, sozinho, não prova que a conversa saiu — era por isso que o sistema dizia
- * "apagado" com a conversa viva no WhatsApp.
+ * **O contato pode ter DOIS chats.** Medido no canal de produção em 21/10, no mesmo número:
  *
- * Sequência: apaga → confere → se sobrou, apaga de novo (agora a última mensagem já está na
- * visão do canal) → confere. Persistindo o resíduo, ARQUIVA como último recurso: não é apagar,
- * mas tira o card da lista principal, é reversível e não toca em nada do lado do cliente.
+ *   5534999911246@s.whatsapp.net  (com o 9º)  → chat criado agora
+ *   553499911246@s.whatsapp.net   (sem o 9º)  → "Miguel WM", com o histórico
+ *
+ * São chats SEPARADOS para o WhatsApp. Enquanto esta função parava no primeiro endereço que
+ * respondia, apagávamos um e o gêmeo continuava na lista — era exatamente o relato "apagou,
+ * mas ficou o card e a última mensagem". Por isso o laço agora percorre **todos** os candidatos
+ * em vez de parar no primeiro: 404 = aquele endereço não existe (segue), erro real PARA.
+ *
+ * Isso é coerente com o resto do sistema, que já trata as formas ±9º dígito como a MESMA
+ * identidade (`possiblePhonesForWhatsappIdentity`, candidatos de envio): se o envio alcança as
+ * duas, apagar a conversa tem de alcançar as duas.
+ *
+ * Depois de apagar, CONFERE: o 200 do provedor não prova que o chat saiu. Sobrando algum
+ * endereço, tenta de novo e, por fim, ARQUIVA os sobreviventes — não é exclusão, mas tira da
+ * lista principal, é reversível e não toca em nada do lado do cliente.
  *
  * O que NÃO fazemos: revogar a mensagem residual. A Whapi só tem `DELETE /messages/{id}`, que
  * apaga **para todos** — apagaria a mensagem no aparelho do CLIENTE para limpar a nossa lista.
@@ -158,39 +167,85 @@ async function chatAindaExiste(cfg, chatId) {
  * Env: `WHAPI_CHAT_DELETE_VERIFY` (padrão on) · `WHAPI_CHAT_DELETE_ARCHIVE_FALLBACK` (padrão on)
  * · `WHAPI_CHAT_DELETE_RETRY_DELAY_MS` (padrão 1200).
  *
- * @returns {Promise<ResultadoAcaoChat & {residuo?: boolean, arquivado?: boolean, verificado?: boolean}>}
+ * @returns {Promise<ResultadoAcaoChat & {apagados?: string[], residuo?: boolean, arquivado?: boolean, verificado?: boolean}>}
  */
 async function deleteChat(phone, opts = {}) {
-  const apagar = () => runOnChatCandidates('deleteChat', phone, opts, (cfg, chatId) => del({
-    token: cfg.token,
-    endpoint: `/chats/${encodeURIComponent(chatId)}`,
-    companyId: cfg.companyId,
-    whatsappInstanceId: cfg.whatsappInstanceId,
-    skipSendGuard: true,
-  }))
-
-  const r = await apagar()
-  if (!r.ok || !envLigado('WHAPI_CHAT_DELETE_VERIFY')) return r
-
   const cfg = await resolveConfig(opts)
-  if (!cfg) return r
+  if (!cfg) return { ok: false, error: 'Instância Whapi não configurada' }
+  const candidatos = chatIdCandidates(phone)
+  if (!candidatos.length) return { ok: false, error: 'Chat inválido.' }
 
-  let existe = await chatAindaExiste(cfg, r.chatId)
-  if (existe !== true) return { ...r, verificado: existe === false }
+  /** Apaga UM endereço. @returns {'apagado'|'nao_existe'|{erro}} */
+  const apagarEndereco = async (chatId) => {
+    try {
+      const { ok, status, data } = await del({
+        token: cfg.token,
+        endpoint: `/chats/${encodeURIComponent(chatId)}`,
+        companyId: cfg.companyId,
+        whatsappInstanceId: cfg.whatsappInstanceId,
+        skipSendGuard: true,
+      })
+      if (isWhapiSuccessBody(ok, data)) return 'apagado'
+      if (Number(status) === 404) return 'nao_existe'
+      const error = String(data?.error?.message || data?.error || `HTTP ${status}`)
+      console.warn('❌ Whapi deleteChat recusado:', chatId, `HTTP ${status}`, error.slice(0, 160))
+      return { erro: { chatId, httpStatus: status, error } }
+    } catch (e) {
+      console.warn('❌ Whapi deleteChat falhou:', chatId, e?.message || e)
+      return { erro: { chatId, error: e?.message || String(e) } }
+    }
+  }
+
+  /** Varre todos os endereços. Para no primeiro erro REAL (404 não é erro). */
+  const apagarTodos = async (lista) => {
+    const apagados = []
+    for (const chatId of lista) {
+      const r = await apagarEndereco(chatId)
+      if (r === 'apagado') apagados.push(chatId)
+      else if (r && r.erro) return { apagados, erro: r.erro }
+    }
+    return { apagados, erro: null }
+  }
+
+  const { apagados, erro } = await apagarTodos(candidatos)
+  if (!apagados.length) {
+    if (erro) return { ok: false, ...erro }
+    console.warn('⚠️ Whapi deleteChat: nenhum dos endereços existe no canal', candidatos.join(' · '))
+    return { ok: false, naoExistia: true, httpStatus: 404 }
+  }
+
+  const base = { ok: true, chatId: apagados[0], apagados }
+  if (!envLigado('WHAPI_CHAT_DELETE_VERIFY')) return base
+
+  // `indeterminado`: a consulta de conferência falhou (nem 200 nem 404). Não dá para afirmar
+  // que sumiu nem que sobrou — então não inventa resíduo E não carimba "verificado".
+  const sobreviventes = async () => {
+    const restantes = []
+    let indeterminado = false
+    for (const chatId of apagados) {
+      const estado = await chatAindaExiste(cfg, chatId)
+      if (estado === true) restantes.push(chatId)
+      else if (estado === null) indeterminado = true
+    }
+    return { restantes, indeterminado }
+  }
+
+  let { restantes, indeterminado } = await sobreviventes()
+  if (!restantes.length) return { ...base, verificado: !indeterminado }
 
   // Sobrou: 2ª tentativa com a visão do canal já atualizada.
   await esperar(envMs('WHAPI_CHAT_DELETE_RETRY_DELAY_MS', 1200))
-  const r2 = await apagar()
-  existe = await chatAindaExiste(cfg, r2.ok ? r2.chatId : r.chatId)
-  if (existe === false) return { ...(r2.ok ? r2 : r), verificado: true }
+  await apagarTodos(restantes)
+  ;({ restantes, indeterminado } = await sobreviventes())
+  if (!restantes.length) return { ...base, verificado: !indeterminado }
 
-  console.warn('⚠️ Whapi deleteChat: o chat continua na lista depois de 2 tentativas', r.chatId)
+  console.warn('⚠️ Whapi deleteChat: continua na lista depois de 2 tentativas', restantes.join(' · '))
   if (!envLigado('WHAPI_CHAT_DELETE_ARCHIVE_FALLBACK')) {
-    return { ...r, verificado: true, residuo: true, arquivado: false }
+    return { ...base, verificado: true, residuo: true, arquivado: false }
   }
   const arq = await archiveChat(phone, opts)
-  console.warn('⚠️ Whapi deleteChat: arquivado como último recurso (sai da lista principal, não é exclusão)', r.chatId, 'ok:', arq?.ok === true)
-  return { ...r, verificado: true, residuo: true, arquivado: arq?.ok === true }
+  console.warn('⚠️ Whapi deleteChat: arquivado como último recurso (sai da lista principal, não é exclusão)', restantes.join(' · '), 'ok:', arq?.ok === true)
+  return { ...base, verificado: true, residuo: true, arquivado: arq?.ok === true }
 }
 
 /**

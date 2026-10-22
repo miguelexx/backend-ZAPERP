@@ -76,15 +76,19 @@ describe('Whapi deleteChat — tentativa por forma do número', () => {
     expect(urls[1].url).toContain('553493120506%40s.whatsapp.net')
   })
 
-  test('conversa gravada SEM o 9º apaga de primeira (1 chamada só)', async () => {
+  test('conversa gravada SEM o 9º: apaga a dela e ainda tenta o endereço gêmeo', async () => {
+    // Desde 21/10 o deleteChat percorre TODOS os endereços do contato, não para no primeiro:
+    // no canal de produção o mesmo contato tinha os dois chats (com e sem o 9º) e o gêmeo
+    // sobrevivia. O 404 do endereço que não existe é esperado e não atrapalha.
     const { urls } = mockDeps((url) => (url.includes('553493120506%40s.whatsapp.net') ? { status: 200, body: {} } : naoEncontrado))
     const whapi = require('../services/providers/whapi')
 
     const r = await whapi.deleteChat('553493120506', OPTS)
 
     expect(r.ok).toBe(true)
-    expect(urls).toHaveLength(1)
+    expect(r.apagados).toEqual(['553493120506@s.whatsapp.net'])
     expect(urls[0].url).toContain('553493120506%40s.whatsapp.net')
+    expect(urls.map((u) => u.url).some((u) => u.includes('5534993120506%40s.whatsapp.net'))).toBe(true)
   })
 
   test('nenhuma forma existe → nao_existia (não é "o provedor recusou")', async () => {
@@ -161,6 +165,22 @@ describe('chatIdCandidates', () => {
     const { chatIdCandidates } = require('../services/providers/whapi/phones')
     expect(chatIdCandidates('120363000000000000@g.us')).toEqual(['120363000000000000@g.us'])
     expect(chatIdCandidates('lid:280396956696801')).toEqual(['280396956696801@lid'])
+  })
+
+  test('FIXO não ganha variante de celular (o delete age em todos os endereços)', () => {
+    // 553434238595 é o fixo da WM. possiblePhonesBR inventaria 5534934238595; como o deleteChat
+    // percorre TODOS os candidatos, um palpite que por acaso exista seria a conversa de OUTRA
+    // pessoa. Por isso aqui usamos o gerador COM guarda de celular.
+    const { chatIdCandidates } = require('../services/providers/whapi/phones')
+    expect(chatIdCandidates('553434238595')).toEqual(['553434238595@s.whatsapp.net'])
+  })
+
+  test('celular BR gera as duas formas (mesmo assinante)', () => {
+    const { chatIdCandidates } = require('../services/providers/whapi/phones')
+    expect(chatIdCandidates('5534999911246')).toEqual([
+      '5534999911246@s.whatsapp.net',
+      '553499911246@s.whatsapp.net',
+    ])
   })
 
   test('respeita o teto de tentativas', () => {

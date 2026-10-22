@@ -379,6 +379,39 @@ protocolo, não do nosso endereçamento — e o caminho é reproduzir com a Whap
 ou aceitar o arquivamento como o melhor alcançável. O teste ao vivo precisa rodar no canal onde o
 problema aparece; o MCP desta sessão só alcança o canal da WM.
 
+## 8.4 A causa real do "ficou o card": o contato tem DOIS chats (21/10)
+
+Teste ao vivo na linha da WM, chamando a API direto (sem o ZapERP no meio): mandei uma mensagem
+para um número, apaguei o chat e consultei. Dois resultados:
+
+1. **O `DELETE /chats/{id}` funciona** — 200 e o `GET` seguinte devolve 404. Não é o endpoint.
+2. **O mesmo contato tinha DOIS chats**, e só um foi apagado:
+
+```
+5534999911246@s.whatsapp.net  (com o 9º)  -> criado no teste, apagado, 404 depois
+553499911246@s.whatsapp.net   (sem o 9º)  -> "Miguel WM", com histórico, CONTINUOU LÁ
+```
+
+Para o WhatsApp são chats **separados**. Como o `deleteChat` parava no primeiro endereço que
+respondia, apagávamos um e o gêmeo seguia na lista com a última mensagem dele — exatamente o
+relato "apagou no ZapERP, mas no WhatsApp ficou o card e a última mensagem". O resíduo nunca foi
+"o provedor ignora o DELETE": era endereço faltando.
+
+**Correção:** o laço percorre **todos** os candidatos (404 = aquele endereço não existe, segue;
+erro real PARA). Coerente com o resto do sistema, que já trata ±9º dígito como a MESMA identidade
+(`possiblePhonesForWhatsappIdentity`, candidatos de envio): se o envio alcança as duas formas,
+apagar a conversa tem de alcançar as duas. O resultado traz `apagados: string[]`.
+
+A conferência de §8.3 continua valendo para o que sobreviver, agora por endereço, e a espera +
+2ª tentativa + arquivamento só entram quando algum endereço resiste de verdade. Conferência
+indeterminada (GET que não é 200 nem 404) não inventa resíduo **nem** carimba `verificado`.
+
+> **Consequência para as outras ações:** `archiveChat`, `readChat` e `patchChat` continuam
+> parando no primeiro endereço (`runOnChatCandidates`). Para contato com chat duplicado, fixar,
+> silenciar e marcar lido pegam só um dos dois. Não foi alterado aqui porque "apagar" é o único
+> em que o gêmeo deixa o usuário sem o resultado inteiro — nas outras, agir num endereço é o
+> comportamento que já existia e mexer nisso pede teste ao vivo próprio.
+
 ## 9. Risco residual
 
 - **Exclusão remota é irreversível e leva o histórico do atendimento** (mensagens, `atendimentos`,

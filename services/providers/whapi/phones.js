@@ -11,7 +11,13 @@
  * a MESMA base da identidade WhatsApp — sem a mangueira de JID UltraMSG.
  */
 
-const { normalizePhoneBR, preferredBrSendDigits, possiblePhonesBR, isLidPhoneKey } = require('../../../helpers/phoneHelper')
+const {
+  normalizePhoneBR,
+  preferredBrSendDigits,
+  possiblePhonesBR,
+  possiblePhonesForWhatsappIdentity,
+  isLidPhoneKey,
+} = require('../../../helpers/phoneHelper')
 
 /** true se o valor já é um JID de grupo (@g.us). */
 function isGroupJid(v) {
@@ -224,7 +230,12 @@ function chatIdCandidates(phone, max = 3) {
   const bare = raw.replace(/@[^@]+$/, '').replace(/\D/g, '')
   if (bare && !bare.startsWith('120')) addId(`${bare}@s.whatsapp.net`)
   // Depois as variantes ±9º dígito e, por último, a forma preferida de envio.
-  for (const variant of possiblePhonesBR(raw)) {
+  // `possiblePhonesForWhatsappIdentity` e NÃO `possiblePhonesBR`: só o primeiro tem a guarda de
+  // celular (`isLikelyBrMobileDigits`). Sem ela, um FIXO como 553434238595 geraria o "celular"
+  // 5534934238595 — e, como o `deleteChat` passou a agir em TODOS os endereços, um palpite que
+  // por acaso exista seria a conversa de OUTRA pessoa sendo apagada. Em celular BR as duas
+  // formas são o mesmo assinante; em fixo, não são.
+  for (const variant of possiblePhonesForWhatsappIdentity(raw)) {
     const digits = String(variant || '').replace(/\D/g, '')
     if (digits) addId(`${digits}@s.whatsapp.net`)
   }
