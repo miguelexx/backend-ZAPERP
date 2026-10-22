@@ -917,7 +917,8 @@ itens 5, 6, 7 e 8 bloqueiam a produção, e o 13 bloqueia a produção multiempr
 Os itens **15, 16 e 17 são novos (22/10)** e vêm de medição ao vivo contra o ERP real da Tijolar
 (empresa 20), com o módulo já em produção. Nenhum é bug nosso: os três são comportamento
 documentado da WM que, na tela da atendente, parece sistema quebrado. Os três têm mitigação local
-aplicada e os três pedem conserto de verdade do lado da WM.
+aplicada e os três pedem conserto de verdade do lado da WM — os pedidos correspondentes estão
+redigidos em [`36-ANEXO-A-PEDIDO-WM.md`](36-ANEXO-A-PEDIDO-WM.md).
 
 | # | Pendência | Status |
 |---|---|---|
