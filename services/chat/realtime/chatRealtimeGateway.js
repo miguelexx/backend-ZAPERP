@@ -116,15 +116,51 @@ function emitirConversaAtualizada(io, company_id, conversa_id, payload = null, o
   }
 }
 
+/**
+ * PURA: as salas que recebem um evento escopado a uma conversa.
+ *
+ * A sala da CONVERSA entra junto com as dos usuários. A lista de quem pode ver vem de um cache de
+ * 15s (CONVERSA_VISIBILITY_CACHE_TTL_MS); enquanto o emit ia SÓ para `usuario_*`, o atendente que
+ * estava com a conversa ABERTA podia não receber a mensagem dela — bastava a lista estar vencida
+ * ou ter sido montada antes de uma mudança de atribuição/setor. O card se curava sozinho (qualquer
+ * refetch da lista traz o preview da API); a thread não tem nada equivalente e ficava mentindo:
+ * card anunciando uma mensagem que a conversa não mostrava (caso real de 21/10/2026).
+ *
+ * Não amplia visibilidade: só entra em `conversa_${id}` quem passou por
+ * `canUserJoinConversationRoom` no `join_conversa` (socket/conversationRooms.js) — o mesmo
+ * raciocínio que `emitirEventoConversaVisivel` já aplicava.
+ */
+function buildRoomsConversaEUsuarios(conversa_id, usuarioIds) {
+  const cid = Number(conversa_id)
+  const rooms = Number.isFinite(cid) && cid > 0 ? [`conversa_${cid}`] : []
+  for (const uid of usuarioIds || []) {
+    const n = Number(uid)
+    if (Number.isFinite(n) && n > 0) rooms.push(`usuario_${n}`)
+  }
+  return rooms
+}
+
 async function emitirParaUsuariosQuePodemVerConversa(io, company_id, conversa_id, eventName, payload) {
   if (!io || !conversa_id) return false
   const usuarioIds = await obterUsuarioIdsQuePodemVerConversa(company_id, conversa_id)
   if (!Array.isArray(usuarioIds) || usuarioIds.length === 0) return false
   const idsUnicos = [...new Set(usuarioIds.map(Number).filter((id) => Number.isFinite(id) && id > 0))]
   if (idsUnicos.length === 0) return false
+  // A sala da CONVERSA entra junto com as dos usuários.
+  //
+  // A lista de quem pode ver vem de um cache de 15s (CONVERSA_VISIBILITY_CACHE_TTL_MS). Enquanto
+  // este emit ia SÓ para `usuario_*`, o atendente que estava com a conversa ABERTA podia não
+  // receber a mensagem da conversa que estava olhando — bastava a lista estar vencida ou ter sido
+  // montada antes de uma mudança de atribuição/setor. O card se curava sozinho (qualquer refetch
+  // da lista traz o preview da API), a thread não: ficava com a última bolha antiga, com o card
+  // anunciando uma mensagem que a conversa não mostrava.
+  //
+  // Não amplia visibilidade: só entra em `conversa_${id}` quem passou por
+  // `canUserJoinConversationRoom` no `join_conversa` (socket/conversationRooms.js). É o mesmo
+  // raciocínio que `emitirEventoConversaVisivel`, logo abaixo, já aplicava.
   // Emit único com todas as rooms: 1 serialização do payload em vez de N (caminho de TODO
-  // nova_mensagem inbound). Mesmos destinatários; Socket.IO deduplica sockets.
-  io.to(idsUnicos.map((uid) => `usuario_${uid}`)).emit(eventName, payload)
+  // nova_mensagem inbound). Socket.IO deduplica sockets que estejam em mais de uma sala.
+  io.to(buildRoomsConversaEUsuarios(conversa_id, idsUnicos)).emit(eventName, payload)
   return true
 }
 
@@ -284,4 +320,5 @@ module.exports = {
   emitirDepartamento,
   emitirMudancaSetorRealtime,
   setorRealtimeMudou,
+  _test: { buildRoomsConversaEUsuarios },
 }
