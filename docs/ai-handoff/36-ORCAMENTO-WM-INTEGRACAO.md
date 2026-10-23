@@ -980,6 +980,37 @@ Nenhuma mudança de código foi necessária — o caminho já funcionava. O que 
 embaixo do campo, que antes dizia só "Pesquise pelo nome. Não é preciso saber o código do ERP" e
 escondia o atalho: numa loja de peças, **bipar o código de barras acha o produto na hora**.
 
+### Achado de 23/10 — "1,000" não é mil: a quantidade exibida sai sem as casas vazias e com a unidade
+
+A WM serializa quantidade e estoque com **três casas fixas** (pendência 8: estoque `0.000`
+invariant). `"1.000"` é **uma** peça e `"13.000"` são **treze** — e era exatamente assim que a
+tela imprimia, trocando só o ponto pela vírgula: `Estoque 1,000`, `1,000 × CIMENTO`. Em
+português a vírgula é separador decimal, mas o olho lê três zeros à direita como milhar: a
+atendente lia "mil" onde havia uma peça. Num orçamento isso não é estética, é a quantidade
+errada passada ao cliente.
+
+Medido na empresa 20 em 23/10, o catálogo tem saldo de verdade — `TINTA AEROSSOL AMARELO NH`
+com `estoque_previsto: "13.000"`, `PARAFUSO ALLEN 10X25MM` com `"100.000"` —, então o número
+com três casas aparece o tempo todo, não em caso de borda.
+
+**Regra, num lugar só:** `formatQuantidadeExibicao(valor, unidade)` em
+`frontend/src/conversa/orcamento/orcamentoFormat.js`. Ela tira as casas decimais que **não
+significam nada** e cola a unidade do produto: `"13.000"` + `UN` → `13 UN`; `"100.000"` + `PC`
+→ `100 PC`; `"1.500"` + `M2` → `1,5 M2`, porque meia unidade é informação e não se apaga.
+Sem unidade informada sai só o número. Todo lugar que mostra quantidade ou estoque passa por
+ela: card de produto, linha do carrinho, cartão de ambiguidade, prévia e o resumo enviado ao
+cliente.
+
+⚠️ **Isto é exibição, e só exibição.** O valor que viaja para a WM continua sendo a string
+decimal exata — `normalizarQuantidadeParaEnvio` (que o corpo de `preparar` usa) não conhece
+este formatador, e `formatQuantidadeOrcamento` continua existindo para quem precisa do número
+com as casas da WM. §8.1 proíbe reformatar valor de origem, e a criação é conferida por
+`payload_hash`: um formatador que vazasse para o corpo quebraria a conferência. Há teste
+explícito para as duas metades — o que é exibido muda, o que é enviado não.
+
+O campo de quantidade do carrinho é **texto digitado pela atendente** e continua intocado: ele
+não é exibição de dado da WM, e reformatá-lo enquanto se digita tiraria o cursor do lugar.
+
 ### O que o item 13 significa na prática
 
 O `ZAPERP_API_TOKEN` pode operar sobre **qualquer** empresa cadastrada na WM, e o telefone enviado é

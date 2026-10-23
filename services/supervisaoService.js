@@ -437,7 +437,84 @@ function buildPendingItem(conversa, lastMessage, depMap) {
   })
 }
 
+// =====================================================================
+// CACHE + COALESCING de `buildConversationInsights`
+//
+// Doc 29 §backlog item 7: `getResumo` + `getClientesPendentes` correm a cada
+// 30 s POR ABA DE ADMIN aberta, e cada um varre todas as conversas abertas
+// mais as mensagens do dia, sem teto. O doc chama a isto "o maior consumidor
+// recorrente de CPU/banco".
+//
+// `buildConversationInsights` e' a raiz do custo — 6 queries, incluindo
+// `listLastMessagesByConversation` sobre TODAS as conversas abertas — e e'
+// chamado de SETE sitios neste arquivo. Cachea-lo resolve todos de uma vez.
+//
+// Por que e' seguro cachear o OBJETO: conferido em 23/10, nenhum dos sete
+// chamadores muta `insights.*` — os `.sort()` que existem vem sempre depois
+// de `.filter()`/`.map()`, que criam array novo. Se alguem um dia ordenar
+// `insights.pending` no lugar, reordena para todos: nesse caso, copiar antes.
+//
+// TTL mais curto que o poll de 30 s do painel, logo a defasagem maxima e' de
+// um ciclo. O `promise` guardado em voo faz COALESCING: varias abas de admin
+// a pedir ao mesmo tempo partilham uma unica execucao.
+//
+// Chave e' SEMPRE o company_id — isolamento entre empresas e' app-layer aqui
+// (SERVICE_ROLE bypassa RLS), entao cache sem tenant na chave seria vazamento.
+// =====================================================================
+const SUPERVISAO_INSIGHTS_TTL_MS = Number(process.env.SUPERVISAO_INSIGHTS_TTL_MS) || 15_000
+const SUPERVISAO_INSIGHTS_CACHE_MAX = 200
+const supervisaoInsightsCache = new Map()
+
+function pruneSupervisaoInsightsCache() {
+  const now = Date.now()
+  for (const [k, v] of supervisaoInsightsCache.entries()) {
+    if (!v?.promise && v?.expiresAt != null && v.expiresAt <= now) supervisaoInsightsCache.delete(k)
+  }
+  if (supervisaoInsightsCache.size > SUPERVISAO_INSIGHTS_CACHE_MAX) {
+    const excesso = supervisaoInsightsCache.size - SUPERVISAO_INSIGHTS_CACHE_MAX
+    let removidos = 0
+    for (const k of supervisaoInsightsCache.keys()) {
+      supervisaoInsightsCache.delete(k)
+      if (++removidos >= excesso) break
+    }
+  }
+}
+
+/** Invalida o cache (uma empresa, ou tudo se `companyId` vier nulo). Usado nos testes. */
+function invalidarSupervisaoInsights(companyId = null) {
+  if (companyId == null) supervisaoInsightsCache.clear()
+  else supervisaoInsightsCache.delete(String(companyId))
+}
+
 async function buildConversationInsights(companyId) {
+  const chave = String(companyId)
+  const agora = Date.now()
+  const atual = supervisaoInsightsCache.get(chave)
+
+  // Em voo: partilha a execucao em vez de abrir outra igual.
+  if (atual?.promise) return atual.promise
+  // Fresco: devolve sem tocar no banco.
+  if (atual && atual.expiresAt > agora) return atual.valor
+
+  const promise = buildConversationInsightsSemCache(companyId)
+  supervisaoInsightsCache.set(chave, { promise })
+
+  try {
+    const valor = await promise
+    supervisaoInsightsCache.set(chave, {
+      valor,
+      expiresAt: Date.now() + SUPERVISAO_INSIGHTS_TTL_MS,
+    })
+    pruneSupervisaoInsightsCache()
+    return valor
+  } catch (erro) {
+    // Falha NAO e' cacheada: a proxima chamada tenta de novo.
+    supervisaoInsightsCache.delete(chave)
+    throw erro
+  }
+}
+
+async function buildConversationInsightsSemCache(companyId) {
   const [slaConfig, conversations, modoSimplesAtivo, triage] = await Promise.all([
     getSlaConfig(companyId),
     listOpenConversations(companyId),
@@ -1130,4 +1207,8 @@ module.exports = {
   // Exportados para teste/certificação do cálculo de tempo de resposta:
   aggregateResponseStats,
   outboundEhRespostaHumana,
+  // Cache de insights (doc 29 §7): expostos para teste e para quem precise
+  // forçar releitura imediata depois de uma escrita.
+  invalidarSupervisaoInsights,
+  SUPERVISAO_INSIGHTS_TTL_MS,
 }
