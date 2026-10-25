@@ -672,9 +672,141 @@ async function consultarClientes({ company_id, consulta, requestId } = {}) {
   return { ok: true, dados: valor.dados, origem_resposta: origem }
 }
 
+/* ================================================================== *
+ * Disponibilidade do ERP — a porta realtime está de pé?
+ *
+ * POR QUE ISTO EXISTE. As portas da WM falham SEPARADAMENTE, e a assimetria engana o
+ * atendente. Medido em produção em 25/10/2026, com o sincronizador de uma loja fora do ar:
+ *
+ *   produtos/consultar  (acervo dentro da WM)   -> 200 em 166 ms
+ *   clientes/consultar  (realtime, fala com a loja) -> 503 em 2478 ms
+ *   orcamentos/preparar (realtime)              -> 503
+ *
+ * Ou seja: a busca de produto continua perfeita, o atendente monta a cesta inteira, digita o
+ * cliente — e só descobre no Calcular que nada pode ser calculado. Esta sonda existe para a
+ * tela poder avisar ANTES do trabalho perdido.
+ *
+ * A SONDA É A CONSULTA DE CLIENTE POR CÓDIGO, e a escolha foi medida: por código ela percorre o
+ * mesmo caminho realtime da busca por nome (503 nas duas), mas é uma igualdade indexada em vez
+ * de um LIKE com COUNT sobre `dbo.Clientes` — é a pergunta mais barata que prova que a loja
+ * responde. O código é um sentinela que quase certamente não existe; se por acaso existir, a
+ * resposta 200 é lida SÓ como "está viva" e nenhum dado de cliente sai daqui.
+ *
+ * 404 CONTA COMO VIVO. "Não encontrei esse código" só pode ter vindo de quem de fato consultou
+ * a base da loja. Tratar 404 como falha diria "offline" numa loja saudável.
+ *
+ * CACHE PRÓPRIO, DE 30 s, E NÃO O `wmConsultaCache`. O cache de catálogo tem TTL de 2–5 min e
+ * guarda só sucesso. Aqui os dois lados são diferentes: o veredito NEGATIVO é o que mais
+ * precisa de cache (senão cada abertura de tela custa 2,5 s esperando o timeout da WM), e 3
+ * minutos seria tempo demais — a loja volta e o atendente continuaria vendo o aviso.
+ * ================================================================== */
+
+/** Código sentinela da sonda. Formato plausível, existência improvável. */
+const CODIGO_SONDA_ERP = '0000000'
+
+/** TTL curto: longo o bastante para não martelar, curto o bastante para a volta ser percebida. */
+const DISPONIBILIDADE_TTL_MS = 30_000
+
+/** `company_id|configVersao` → `{ expiraEm, valor }` e as sondas em voo, para coalescer. */
+const disponibilidadeCache = new Map()
+const disponibilidadeEmVoo = new Map()
+
+/** Só para teste: zera o cache da sonda sem mexer no cache de catálogo. */
+function invalidarDisponibilidadeErp() {
+  disponibilidadeCache.clear()
+  disponibilidadeEmVoo.clear()
+}
+
+/**
+ * Lê o resultado normalizado do cliente como veredito de disponibilidade.
+ * `motivo` é vocabulário fechado — a tela decide a frase, o serviço não manda texto pronto.
+ */
+function lerDisponibilidade(resultado) {
+  if (!resultado || typeof resultado !== 'object') {
+    return { erp_alcancavel: false, motivo: 'indisponivel' }
+  }
+  if (resultado.configuracaoInvalida) return { erp_alcancavel: false, motivo: 'nao_configurado' }
+  if (resultado.transporte) return { erp_alcancavel: false, motivo: 'indisponivel' }
+  if (resultado.ok) return { erp_alcancavel: true, motivo: null }
+  if (resultado.status === 404) return { erp_alcancavel: true, motivo: null }
+  if (resultado.status === 503) return { erp_alcancavel: false, motivo: 'sincronizador_offline' }
+  if (resultado.status === 504) return { erp_alcancavel: false, motivo: 'lento' }
+  // 400 com o sentinela seria defeito nosso de formato, não da loja; 401/403 são configuração.
+  if (resultado.status === 401 || resultado.status === 403) {
+    return { erp_alcancavel: false, motivo: 'nao_configurado' }
+  }
+  return { erp_alcancavel: false, motivo: 'indisponivel' }
+}
+
+/**
+ * A porta realtime do ERP está de pé para esta empresa?
+ *
+ * Nunca lança e nunca devolve erro HTTP: indisponibilidade é a RESPOSTA, não uma falha. A tela
+ * que pergunta "dá para orçar agora?" não pode ter de tratar exceção para saber que não dá.
+ *
+ * @param {object} args
+ * @param {number} args.company_id  **sempre** de `req.user.company_id`
+ * @returns {Promise<{ erp_alcancavel: boolean, motivo: string|null, verificado_em: string, origem_resposta: string }>}
+ */
+async function verificarDisponibilidadeErp({ company_id } = {}) {
+  const agora = () => new Date().toISOString()
+  const cid = Number(company_id)
+  if (!Number.isFinite(cid) || cid <= 0) {
+    return { erp_alcancavel: false, motivo: 'nao_configurado', verificado_em: agora(), origem_resposta: 'local' }
+  }
+
+  const contato = await resolverContatoAutorizado(cid)
+  if (contato.erro) {
+    // Empresa sem vínculo/ativo: não é a loja que caiu, é o módulo que não está provisionado.
+    return { erp_alcancavel: false, motivo: 'nao_configurado', verificado_em: agora(), origem_resposta: 'local' }
+  }
+
+  const chave = `${cid}|${contato.configVersao}`
+
+  const emCache = disponibilidadeCache.get(chave)
+  if (emCache && emCache.expiraEm > Date.now()) {
+    return { ...emCache.valor, origem_resposta: 'cache' }
+  }
+
+  // Coalescência: várias abas abrindo o drawer ao mesmo tempo fazem UMA sonda só.
+  const emVoo = disponibilidadeEmVoo.get(chave)
+  if (emVoo) return { ...(await emVoo), origem_resposta: 'coalescido' }
+
+  const promessa = (async () => {
+    let veredito
+    try {
+      const resultado = await wmApiClient.consultarClientes({
+        telefone: contato.telefone,
+        codigo_cliente_erp: CODIGO_SONDA_ERP,
+      })
+      veredito = lerDisponibilidade(resultado)
+    } catch {
+      // Exceção de transporte não prevista: para esta pergunta é indisponibilidade, e ponto.
+      veredito = { erp_alcancavel: false, motivo: 'indisponivel' }
+    }
+    const valor = { ...veredito, verificado_em: agora() }
+    // Os DOIS vereditos entram no cache — o negativo é justamente o caro de reapurar.
+    disponibilidadeCache.set(chave, { valor, expiraEm: Date.now() + DISPONIBILIDADE_TTL_MS })
+    return valor
+  })()
+
+  disponibilidadeEmVoo.set(chave, promessa)
+  try {
+    const valor = await promessa
+    return { ...valor, origem_resposta: 'wm' }
+  } finally {
+    disponibilidadeEmVoo.delete(chave)
+  }
+}
+
 module.exports = {
   ENDPOINT_PRODUTOS,
   ENDPOINT_CLIENTES,
+  CODIGO_SONDA_ERP,
+  DISPONIBILIDADE_TTL_MS,
+  verificarDisponibilidadeErp,
+  invalidarDisponibilidadeErp,
+  lerDisponibilidade,
   CANDIDATOS_ORIGEM,
   CODIGOS,
   consultarProdutos,

@@ -49,6 +49,22 @@ router.post(
 )
 
 /**
+ * `GET /erp/status` — "dá para orçar agora?".
+ *
+ * Responde 200 inclusive quando a resposta é NÃO: indisponibilidade do ERP é o conteúdo, não um
+ * erro. Corpo: `{ erp_alcancavel, motivo, verificado_em, origem_resposta }`, com `motivo` num
+ * vocabulário fechado (`sincronizador_offline`, `lento`, `indisponivel`, `nao_configurado`) —
+ * a frase exibida é escolha da tela, não do servidor.
+ *
+ * Sonda de 30 s em cache e coalescida: várias abas abrindo o drawer custam UMA pergunta à WM.
+ */
+router.get(
+  '/erp/status',
+  requirePermissao('orcamentos.ver'),
+  wmOrcamentosController.statusErp
+)
+
+/**
  * `POST /clientes/consultar` — auxílio para achar o cliente no ERP.
  *
  * Body: `busca` XOR `codigo_cliente_erp`, mais `pagina` opcional. Mesma permissão e mesmo

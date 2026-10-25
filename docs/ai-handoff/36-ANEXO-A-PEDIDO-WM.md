@@ -108,8 +108,19 @@ Para cliente vocês declararam: `dbo.Clientes`, nome por prefixo com `Latin1_Gen
 produto, trecho. Para vendedor, nada. São três caixas na mesma tela e o atendente não tem como
 saber que cada uma se comporta de um jeito.
 
-**Pedido:** declarar a regra de correspondência de `vendedor_busca` — e, se for prefixo como a de
-cliente, dizer isso explicitamente no contrato, para podermos escrever a dica certa no campo.
+**Pedido 1:** declarar a regra de correspondência de `vendedor_busca` — e, se for prefixo como a
+de cliente, dizer isso explicitamente no contrato, para podermos escrever a dica certa no campo.
+
+**Pedido 2, e este é o que resolve de verdade: um `/vendedores/consultar`.** Hoje o vendedor é o
+único dos três que não tem porta própria. Cliente tem `/clientes/consultar`, produto tem
+`/produtos/consultar`, e vendedor só existe dentro de `preparar` — que exige cliente **e** pelo
+menos um item (`itens` tem `minItems: 1`). Ou seja: não há como mostrar a lista de vendedores da
+loja antes de o orçamento estar quase pronto, e o atendente novo tem de adivinhar como o nome dele
+está cadastrado no ERP.
+
+Um endpoint espelhando o de clientes — `{busca XOR codigo_vendedor_erp, pagina}` devolvendo
+`codigo_vendedor_erp` e `nome` — fecharia essa lacuna com o desenho que vocês já têm pronto, e
+sem nada de novo do nosso lado além de consumir.
 
 ---
 

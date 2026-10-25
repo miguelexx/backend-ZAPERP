@@ -112,6 +112,38 @@ async function garantirAcessoConversa({ company_id, conversa_id, user_id, role, 
 }
 
 /**
+ * `GET /api/orcamentos/erp/status`
+ *
+ * "Dá para orçar agora?" — responde 200 inclusive quando a resposta é NÃO. Indisponibilidade do
+ * ERP é o conteúdo, não um erro: a tela que pergunta isso não pode ter de tratar 503 para saber
+ * que a loja está fora do ar.
+ *
+ * Existe porque a busca de produto vem do acervo da WM e continua funcionando com o
+ * sincronizador da loja desligado, enquanto cliente e `preparar` não. Sem este aviso o atendente
+ * monta a cesta inteira e só descobre no Calcular.
+ */
+async function statusErp(req, res) {
+  const requestId = novoRequestId()
+  const company_id = req.user?.company_id
+
+  try {
+    const r = await wmAssistenteService.verificarDisponibilidadeErp({ company_id })
+    return res.json({ ok: true, requestId, ...r })
+  } catch (err) {
+    // O serviço promete não lançar; se lançar, o honesto é dizer que não sabemos.
+    console.error('[wmOrcamentos] erp/status falha inesperada', requestId, err?.message || err)
+    return res.json({
+      ok: true,
+      requestId,
+      erp_alcancavel: false,
+      motivo: 'indisponivel',
+      verificado_em: new Date().toISOString(),
+      origem_resposta: 'local',
+    })
+  }
+}
+
+/**
  * `POST /api/orcamentos/clientes/consultar`
  *
  * Candidatos de cliente por nome (`busca`) ou por código exato (`codigo_cliente_erp`), um dos
@@ -447,6 +479,7 @@ module.exports = {
   CODIGO_CONVERSA_NAO_INDIVIDUAL,
   consultarProdutos,
   consultarClientes,
+  statusErp,
   preparar,
   confirmar,
   verificar,
