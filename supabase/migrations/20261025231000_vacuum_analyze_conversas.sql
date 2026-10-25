@@ -41,3 +41,25 @@ VACUUM (ANALYZE) public.conversas;
 VACUUM (ANALYZE) public.atendimentos;
 VACUUM (ANALYZE) public.conversa_unreads;
 VACUUM (ANALYZE) public.mensagens;
+
+-- =====================================================================================
+-- SE DER ERRO 53100 "could not resize shared memory ... to 67151776 bytes"
+--
+-- Aconteceu em 25/10 no `webhook_logs`. 67151776 bytes = 64 MiB, que e exatamente o
+-- `/dev/shm` padrao de um container Docker. O VACUUM tenta paralelizar a limpeza dos
+-- indices e pede memoria compartilhada que o container nao tem.
+--
+-- Nao e problema do VACUUM nem da tabela: e o tamanho do `/dev/shm` do container do
+-- Postgres. Contorno imediato, desligando a paralelizacao:
+--
+--   VACUUM (PARALLEL 0, ANALYZE) public.webhook_logs;
+--
+-- Fica mais lento, mas nao precisa de memoria compartilhada extra. Use a mesma forma em
+-- qualquer tabela grande que dê o mesmo erro.
+--
+-- ATENCAO, achado de infra: esse teto de 64 MiB nao afeta so o VACUUM. Plano de consulta
+-- paralelo tambem usa memoria compartilhada; com 1 GB de indices em `mensagens`, varredura
+-- paralela e exatamente o que o planejador quer usar nas consultas pesadas. Vale aumentar
+-- o `shm_size` do container do Postgres no Coolify (256 MB ja resolve folgado) — e aí o
+-- `PARALLEL 0` deixa de ser necessario.
+-- =====================================================================================
