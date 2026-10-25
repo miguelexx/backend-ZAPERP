@@ -47,6 +47,7 @@ const PREFIXO_OPENAPI = '/api/v1/assistente'
 /** Caminhos exatos do `openapi.yaml` da WM (docs/wm/openapi.yaml). Não deduzir, não descobrir. */
 const WM_PATHS = Object.freeze({
   ACESSO_VALIDAR: '/api/v1/assistente/acesso/validar',
+  CLIENTES_CONSULTAR: '/api/v1/assistente/clientes/consultar',
   PRODUTOS_CONSULTAR: '/api/v1/assistente/produtos/consultar',
   ORCAMENTOS_PREPARAR: '/api/v1/assistente/orcamentos/preparar',
   ORCAMENTOS_CRIAR: '/api/v1/assistente/orcamentos/criar',
@@ -403,6 +404,25 @@ async function validarAcesso(payload) {
 }
 
 /**
+ * `POST /clientes/consultar` — leitura. Mesma política de retry de `consultarProdutos`: nada é
+ * escrito, então repetir 5xx/429/408 e falha de rede é seguro.
+ *
+ * DIFERENÇA QUE IMPORTA em relação a `consultarProdutos`: esta porta é REALTIME. A WM precisa
+ * falar com o sincronizador instalado na máquina da loja, e devolve `503 SINCRONIZADOR_OFFLINE`
+ * quando ele está fora do ar — enquanto `produtos/consultar`, servido do acervo já sincronizado
+ * dentro da WM, continua respondendo 200. Medido em produção em 25/10/2026. Esse 503 NÃO está
+ * declarado nas respostas desta rota no `openapi.yaml` (pendência registrada no Anexo A).
+ */
+async function consultarClientes(payload) {
+  return requisitar({
+    operacao: OPERACAO.LEITURA,
+    path: WM_PATHS.CLIENTES_CONSULTAR,
+    body: payload,
+    retryOpts: { idempotent: true },
+  })
+}
+
+/**
  * `POST /produtos/consultar` — leitura. Retry de 5xx/429/408 e rede é seguro: nada é escrito.
  * O payload já vem validado (`validators/wmOrcamentosValidators`) e com o `telefone` injetado
  * pelo chamador server-side.
@@ -456,6 +476,7 @@ module.exports = {
   resolveTimeoutMs,
   sanitizarCodigoErro,
   validarAcesso,
+  consultarClientes,
   consultarProdutos,
   prepararOrcamento,
   criarOrcamento,

@@ -65,6 +65,19 @@ Todos exigem variáveis R2 no `.env` (`R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_S
 
 ---
 
+## Scripts do Orçamento WM (ERP Icthus)
+
+Exigem `WM_API_BASE_URL` e `ZAPERP_API_TOKEN` no `.env`. Contexto: [`docs/ai-handoff/36-ORCAMENTO-WM-INTEGRACAO.md`](../ai-handoff/36-ORCAMENTO-WM-INTEGRACAO.md).
+
+| Script | Uso | Efeito |
+|--------|-----|--------|
+| `wm-diagnostico-empresa.js` | `node scripts/wm-diagnostico-empresa.js --company-id=N [--cliente-busca=T --vendedor-busca=T] [--produto=CODIGO] [--json]` | **Só leitura.** Diz se a empresa está pronta para orçar e, se não está, qual é o impedimento: env, as **duas** tabelas da migration, vínculo/ativo/validação, e as três portas da WM. Separa o que ninguém separava: `produtos/consultar` é servido do acervo dentro da WM e responde mesmo com a loja offline, enquanto `clientes/consultar` e `orcamentos/preparar` são realtime e devolvem `503 SINCRONIZADOR_OFFLINE`. Sem `--cliente-busca` não chama `preparar`. **Nunca** chama `criar`. Exit 0 = pronta. |
+| `wm-provisionar-empresa.js` | `node scripts/wm-provisionar-empresa.js --company-id=N --telefone=T --por=QUEM --confirmar`<br>`… --ativar --confirmar` · `… --desativar --sem-validar --confirmar` | Provisiona o vínculo `company_id` → telefone autorizado da WM e valida em `acesso/validar`. **Nada é gravado sem `--confirmar`**; `--dry-run` valida sem gravar. Vínculo nasce DESATIVADO — ativar é segundo passo consciente. O telefone nunca é impresso (só os 4 últimos dígitos). Caminho por SQL: [`36-ANEXO-B-PROVISIONAMENTO.md`](../ai-handoff/36-ANEXO-B-PROVISIONAMENTO.md). |
+
+> O `acesso/validar` prova que existe contato ativo com aquele telefone do lado da WM — **não** prova que ele pertence à mesma empresa do `company_id`. Essa conferência é humana (pendência 13 do doc 36).
+
+---
+
 ## Pasta `certificacao/`
 
 Scripts e SQLs em `scripts/certificacao/` para verificação do sistema antes de produção:

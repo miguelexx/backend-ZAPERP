@@ -22,10 +22,10 @@ Para vocês saberem o que não precisa mais ser enviado:
 
 ---
 
-## Dois comportamentos da busca que travam o atendente
+## Quatro comportamentos da busca que travam o atendente
 
 > Medidos em uso real, contra uma instalação em produção, com o módulo já no ar. Não são dúvidas
-> de contrato: são coisas que o atendente encontra na primeira hora de uso. Contornamos as duas do
+> de contrato: são coisas que o atendente encontra na primeira hora de uso. Contornamos o que dava do
 > nosso lado, mas o conserto de verdade é de vocês.
 
 ### A. A correspondência exata esconde todos os outros produtos
@@ -70,6 +70,47 @@ orientamos o atendente a começar pelo primeiro nome ou colar o CPF/CNPJ (que ca
 `filtro oleo` encontra, `oleo filtro` não. Se a correspondência passar a considerar os termos
 independentemente da ordem, ajuda bastante.
 
+### C. O trecho casa no MEIO de outra palavra, e o resultado vira ruído
+
+Medido em 25/10/2026 na mesma instalação. Como a correspondência é por trecho em qualquer posição,
+um termo curto e central do vocabulário da loja traz majoritariamente itens sem relação:
+
+| termo | total | termo inicia alguma palavra | ruído |
+|---|---|---|---|
+| `cimento` | 6 | **1** | **5 (83%)** |
+| `cimen` | 7 | 2 | 5 |
+| `tinta` | 17 | 17 | 0 |
+| `oleo` | 181 | 30 na página | 0 |
+| `cabo` | 144 | 30 na página | 0 |
+
+As cinco linhas de ruído de `cimento` são `ARREFE**CIMENTO**` e `ARREFI**CIMENTO**`: quem pesquisa
+cimento recebe radiador e líquido de arrefecimento. O atendente não conclui "a busca casou um
+trecho" — conclui que o sistema trouxe lixo, ou que o catálogo está errado.
+
+**Pedido:** considerar **início de palavra** na busca por descrição, em vez de trecho em qualquer
+posição (mantendo o trecho como segundo critério, se quiserem preservar o alcance atual). Os
+separadores que importam, pela amostra real, são espaço, hífen e barra — descrições como
+`R-1892`, `EXT/INT` e `AL221117 - RADIADOR` precisam continuar casando por qualquer uma de suas
+palavras.
+
+Contornamos do nosso lado ordenando a página que recebemos — relevantes primeiro, o restante
+abaixo de um separador que diz "também contêm o termo" — mas é só apresentação: não alcança um
+produto relevante que a paginação de vocês tenha deixado em outra página. Só a origem resolve.
+
+### D. A busca de VENDEDOR não tem semântica declarada
+
+O contrato diz o que acontece com o resultado (`VENDEDOR_NAO_ENCONTRADO` para zero,
+`multiplos_vendedores` para mais de um, vendedor canônico para um) e diz a origem
+("Funcionários ativos e vendedores, sem filtro de empresa"), mas **não diz como o texto casa** —
+prefixo, trecho, ou igualdade.
+
+Para cliente vocês declararam: `dbo.Clientes`, nome por prefixo com `Latin1_General_CI_AI`. Para
+produto, trecho. Para vendedor, nada. São três caixas na mesma tela e o atendente não tem como
+saber que cada uma se comporta de um jeito.
+
+**Pedido:** declarar a regra de correspondência de `vendedor_busca` — e, se for prefixo como a de
+cliente, dizer isso explicitamente no contrato, para podermos escrever a dica certa no campo.
+
 ---
 
 ## 1. `preco_negociado` está ativo? (pergunta nova, e é a mais urgente)
@@ -98,24 +139,53 @@ detectar o suporte, ou de uma garantia de que a API recusa o campo quando o Work
 `preco_confirmado`), ou os dois convivem? Em caso de desconto, qual valor a prévia devolve em
 `valor_total` e `valor_produtos`?
 
-## 2. Retenção da idempotência
+## 2. O `503 SINCRONIZADOR_OFFLINE` não está declarado nas rotas que o devolvem
+
+Medido em 25/10/2026, em produção, com o sincronizador de uma loja fora do ar:
+
+| rota | o que o `openapi.yaml` declara | o que respondeu |
+|---|---|---|
+| `/clientes/consultar` | `200`, `400`, `404` | **`503 SINCRONIZADOR_OFFLINE`** |
+| `/orcamentos/preparar` | `200`, `400`, `404`, `502` | **`503 SINCRONIZADOR_OFFLINE`** |
+| `/produtos/consultar` | `200`, `400`, `403`, `404` | `200` normalmente |
+| `/acesso/validar` | `200`, `400`, `401`, `403` | `200` normalmente |
+
+Nosso cliente já trata o `503` como falha segura e não grava nada, então não houve incidente. O
+pedido aqui é de contrato e de documentação, por três motivos:
+
+**a)** Declarar o `503` nas respostas de `/clientes/consultar` e `/orcamentos/preparar`. Hoje quem
+gera cliente a partir do OpenAPI não produz esse caminho, e ele é o mais comum em operação real.
+
+**b)** Confirmar, por rota, **quais dependem do sincronizador e quais são servidas do acervo já
+sincronizado dentro da WM**. A medição acima sugere que `produtos` e `acesso` sobrevivem à loja
+offline e que `clientes` e `preparar` não — queremos confirmação de vocês, não inferência nossa.
+Essa assimetria tem consequência direta na tela: com a loja offline a busca de produto continua
+funcionando, então o atendente monta o orçamento inteiro e só descobre o problema no botão de
+calcular. Saber a lista exata nos deixa avisar antes.
+
+**c)** Confirmar se `SINCRONIZADOR_OFFLINE` significa sempre *o sincronizador daquele cliente* e
+nunca *indisponibilidade da WM*. Dissemos ao atendente que o caminho é conferir o computador do
+ERP da própria loja; se o código também cobrir falha interna de vocês, a orientação está errada e
+mandamos gente mexer na máquina errada.
+
+## 3. Retenção da idempotência
 
 Por quanto tempo a API guarda um `comando_id` e o resultado associado? Isso define por quanto tempo
 mantemos o payload de criação armazenado e por quanto tempo o reenvio do mesmo comando ainda serve
 como verificação de um resultado incerto.
 
-## 3. Timeout e SLA
+## 4. Timeout e SLA
 
 Tempos esperados e limites internos de `produtos/consultar`, `orcamentos/preparar` e
 `orcamentos/criar`, incluindo o limite da execução realtime que gera o `504 REALTIME_TIMEOUT`.
 Nossos timeouts hoje são estimativa.
 
-## 4. Rate limits
+## 5. Rate limits
 
 Existe limite de requisições nos endpoints `/api/v1/assistente`? Se sim, por token, por telefone ou
 por endpoint, e com que janela? Encontramos limite documentado apenas no login administrativo.
 
-## 5. Decimais na entrada
+## 6. Decimais na entrada
 
 A saída está clara (preço `0.00##` invariant, estoque `0.000`, e a prévia devolve quantidade com três
 casas). Na entrada, confirmar:
@@ -125,7 +195,7 @@ casas). Na entrada, confirmar:
 - `quantidade` igual a `0` é recusada? O padrão `^\d+(?:\.\d+)?$` a aceita, e hoje nós a barramos
   localmente.
 
-## 6. `bloquear_apos_criar`
+## 7. `bloquear_apos_criar`
 
 O campo é obrigatório em `preparar` e tem `default: true` em `criar`, e a prévia o devolve, mas não
 encontramos a descrição do seu **efeito funcional** no ERP. O que exatamente ele bloqueia, e qual

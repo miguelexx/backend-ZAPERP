@@ -20,6 +20,7 @@ const { getOrCreateCliente, shouldUpdateFotoPerfil } = require('../helpers/conve
 const { chooseBestName, isBadName, getDisplayName } = require('../helpers/contactEnrichment')
 const { decidirPatchNomeCliente, clienteTemNomeProtegido } = require('../helpers/clienteNomeProtecao')
 const { marcarSchemaNomeProtecaoIndisponivel, updateClienteResiliente } = require('../helpers/clienteNomeColunas')
+const { pruneMapaPorIdade, agendarVarredura } = require('../helpers/pruneMapaPorIdade')
 
 const CACHE_TTL_MS = 5 * 60 * 1000
 const cache = new Map()
@@ -289,6 +290,28 @@ const SYNC_DEBOUNCE_MS = 60_000
 /** Reconsulta foto no UltraMSG no máximo a cada 6h por conversa (B03/B09). */
 const FOTO_REFRESH_TTL_MS = 6 * 60 * 60 * 1000
 
+/**
+ * Retenção dos dois mapas acima (doc 29 §3 item 14): a chave é `company_id:conversa_id` e
+ * nada as apagava, então cresciam para sempre desde o boot.
+ *
+ * As retenções são **diferentes de propósito**, cada uma folgada em relação à janela que o
+ * seu mapa protege. Usar uma só — a menor — apagaria a marca da foto antes das 6 h e o
+ * serviço voltaria a reconsultar foto no provedor em rajada, que é precisamente o que o
+ * `FOTO_REFRESH_TTL_MS` existe para evitar.
+ */
+const SYNC_RETENCAO_MS = 10 * 60 * 1000 // 10× SYNC_DEBOUNCE_MS (60 s)
+const FOTO_RETENCAO_MS = FOTO_REFRESH_TTL_MS + 60 * 60 * 1000 // 6 h + 1 h de folga
+
+/** Remove entradas vencidas dos dois mapas. Devolve quantas saíram (usado em teste). */
+function pruneMapasDeSync(agora = Date.now()) {
+  return (
+    pruneMapaPorIdade(_lastSyncByConv, SYNC_RETENCAO_MS, agora) +
+    pruneMapaPorIdade(_lastFotoRefreshByConv, FOTO_RETENCAO_MS, agora)
+  )
+}
+
+agendarVarredura(pruneMapasDeSync, 10 * 60 * 1000)
+
 async function syncConversationContactOnJoin(supabase, conversaId, companyId, io, opts = {}) {
   if (!conversaId || !companyId || !io) return
   const key = `${companyId}:${conversaId}`
@@ -413,4 +436,13 @@ async function syncConversationContactOnJoin(supabase, conversaId, companyId, io
   }
 }
 
-module.exports = { syncUltraMsgContact, syncContactFromUltramsg, syncConversationContactOnJoin }
+module.exports = {
+  syncUltraMsgContact,
+  syncContactFromUltramsg,
+  syncConversationContactOnJoin,
+  // expostos para o teste da varredura (doc 29 item 14)
+  pruneMapasDeSync,
+  SYNC_RETENCAO_MS,
+  FOTO_RETENCAO_MS,
+  __mapasDeSync: () => [_lastSyncByConv, _lastFotoRefreshByConv],
+}

@@ -28,6 +28,7 @@ const { clienteTemNomeProtegido } = require('../helpers/clienteNomeProtecao')
 const { selectClienteNomeFoto } = require('../helpers/clienteNomeColunas')
 const { parseVcardForContact } = require('../helpers/vcardHelper')
 const { resolvePeerPhone } = require('../helpers/conversationKeyHelper')
+const { telefoneParaLog, textoParaLog, nomeParaLog } = require('../helpers/redactLogPII')
 const { incrementarUnreadParaConversa, emitirParaUsuariosQuePodemVerConversa } = require('./chatController')
 const { emitirMudancaSetorRealtime, setorRealtimeMudou } = require('../services/chat/realtime/chatRealtimeGateway')
 const { normalizarTimestampSemFusoAmbiguoParaApi } = require('../helpers/timestampApiCompat')
@@ -852,7 +853,7 @@ exports.receberZapi = async (req, res) => {
 
       // Newsletters (canais) e Status/broadcast não são conversas de atendimento — ignorar silenciosamente
       if (isNewsletter) {
-        console.log('[Z-API] ⏭️ isNewsletter=true — newsletter ignorada:', phone || '(sem phone)')
+        console.log('[Z-API] ⏭️ isNewsletter=true — newsletter ignorada:', phone ? telefoneParaLog(phone) : '(sem phone)')
         continue
       }
       const inboundOrigin = inspectInboundOrigin(payload)
@@ -920,10 +921,24 @@ exports.receberZapi = async (req, res) => {
         continue
       }
 
+    // LGPD (doc 29 §3 item 15): este log corre em TODA mensagem. Telefone completo e
+    // conteúdo da mensagem não vão para o log — o texto já está em `mensagens`, logá-lo
+    // outra vez não acrescenta diagnóstico, só exposição. Ver helpers/redactLogPII.js.
     if (isGroup) {
-      console.log('📩 Z-API [GRUPO]', phone, nomeGrupo || '', fromMe ? '(de mim)' : `(${senderName || participantPhone || 'participante'})`, texto?.slice(0, 50))
+      console.log(
+        '📩 Z-API [GRUPO]',
+        telefoneParaLog(phone),
+        nomeParaLog(nomeGrupo),
+        fromMe ? '(de mim)' : `(${senderName ? nomeParaLog(senderName) : telefoneParaLog(participantPhone)})`,
+        textoParaLog(texto)
+      )
     } else {
-      console.log('📩 ULTRAMSG mensagem recebida:', phone, fromMe ? '(enviada por nós)' : '(recebida)', texto?.slice(0, 50))
+      console.log(
+        '📩 ULTRAMSG mensagem recebida:',
+        telefoneParaLog(phone),
+        fromMe ? '(enviada por nós)' : '(recebida)',
+        textoParaLog(texto)
+      )
     }
 
     let cliente_id = null

@@ -20,7 +20,9 @@ function canonicalBrWhatsappForStorage(canonical) {
   }
   return c
 }
-const { chooseBestName, isBadName } = require('./contactEnrichment')
+const { chooseBestName, isBadName } = require('./contactEnrichment')
+const { telefoneParaLog } = require('./redactLogPII')
+const WHATSAPP_DEBUG = String(process.env.WHATSAPP_DEBUG || '').toLowerCase() === 'true'
 const {
   decidirPatchNomeCliente,
   patchNomeInsert,
@@ -70,7 +72,7 @@ function getCanonicalPhone(phone) {
   if (norm) return norm
 
   // Qualquer coisa que não normalize para BR é considerada inválida
-  console.warn('[getCanonicalPhone] Telefone inválido para BR, descartado:', phoneStr)
+  console.warn('[getCanonicalPhone] Telefone inválido para BR, descartado:', telefoneParaLog(phoneStr), 'digitos:', String(phoneStr || '').replace(/\D/g, '').length)
   return ''
 }
 
@@ -967,7 +969,7 @@ async function getOrCreateCliente(supabaseClient, company_id, phone, fields = {}
   }
 
   const errMsg = String(errFinal?.message || errFinal?.code || 'unknown')
-  console.warn('[getOrCreateCliente] Insert falhou, continuando sem cliente:', errMsg, 'company_id:', company_id, 'telefone:', telefoneCanonico)
+  console.warn('[getOrCreateCliente] Insert falhou, continuando sem cliente:', errMsg, 'company_id:', company_id, 'telefone:', telefoneParaLog(telefoneCanonico))
   return {
     cliente_id: null,
     created: false,
@@ -1053,7 +1055,7 @@ async function findOrCreateConversation(supabaseClient, {
     canonical = getCanonicalPhoneAnyIntl(phone)
   }
   if (!canonical) {
-    console.warn(`[findOrCreateConversation] ${logPrefix} não foi possível normalizar o phone: "${phone}"`)
+    console.warn(`[findOrCreateConversation] ${logPrefix} não foi possível normalizar o phone: ${telefoneParaLog(phone)} (digitos: ${String(phone || '').replace(/\D/g, '').length})`)
     return null
   }
 
@@ -1074,7 +1076,10 @@ async function findOrCreateConversation(supabaseClient, {
     if (variants.length === 0) variants = [canonical]
   }
 
-  console.log(`[findOrCreateConversation] ${logPrefix} canonical="${canonical}" variants=[${variants.join(',')}] isGroup=${isGroup}`)
+  // Corria em TODA mensagem com o telefone canonico E todas as variantes em claro
+  // (doc 29 item 15). Atras de WHATSAPP_DEBUG: e detalhe de diagnostico da familia de
+  // bugs do 9o digito, nao informacao de operacao.
+  if (WHATSAPP_DEBUG) console.log(`[findOrCreateConversation] ${logPrefix} canonical=${telefoneParaLog(canonical)} variants=${variants.length} isGroup=${isGroup}`)
 
   // 3) Buscar conversa(s) por qualquer variante do telefone (inclui fechadas para reutilizar — webhook reabre quando cliente manda msg)
   let found
@@ -1112,7 +1117,7 @@ async function findOrCreateConversation(supabaseClient, {
     }
 
     let conv = foundScoped[0]
-    console.log(`[findOrCreateConversation] ${logPrefix} ✅ encontrada conv=${conv.id} phone_db="${conv.telefone}"`)
+    if (WHATSAPP_DEBUG) console.log(`[findOrCreateConversation] ${logPrefix} ✅ encontrada conv=${conv.id} phone_db=${telefoneParaLog(conv.telefone)}`)
 
     // 5) Garantir telefone canônico na conversa encontrada (normalizar legado)
     const storedCanonical = conv.telefone
@@ -1200,7 +1205,7 @@ async function findOrCreateConversation(supabaseClient, {
     throw errCreate
   }
 
-  console.log(`[findOrCreateConversation] ${logPrefix} 🆕 criada conv=${created.id} canonical="${canonical}"`)
+  console.log(`[findOrCreateConversation] ${logPrefix} 🆕 criada conv=${created.id} canonical=${telefoneParaLog(canonical)}`)
   return { conversa: created, created: true }
 }
 

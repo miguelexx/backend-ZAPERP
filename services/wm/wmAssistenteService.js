@@ -514,16 +514,178 @@ async function consultarProdutos({ company_id, consulta, requestId } = {}) {
   return expandido || resultado
 }
 
+/* ================================================================== *
+ * Clientes — AUXÍLIO DE BUSCA, não autoridade de resolução
+ *
+ * A decisão D11 do doc 36 continua valendo: quem resolve o cliente do orçamento é `preparar`.
+ * Esta consulta existe porque a busca de cliente do ERP é **por prefixo**
+ * (`dbo.Clientes`, `Latin1_General_CI_AI`, conforme `docs/wm/04-contratos-api.md`), e isso é
+ * invisível para quem digita: "SILVA" não encontra "JOSE DA SILVA", e o atendente conclui que o
+ * cliente não está cadastrado. Medido: `DINIZ` → nenhum, `SILVA` → nenhum,
+ * `MARIA APARECIDA AMADEI` → 3 candidatos.
+ *
+ * O que ela NÃO pode virar: a palavra final sobre o cliente. `/clientes/consultar` não aplica
+ * Inativo/Bloqueado e `preparar` aplica — então um cliente listado aqui ainda pode ser recusado
+ * no Calcular com `CLIENTE_INVALIDO`. Quem chama precisa deixar isso claro na tela.
+ * ================================================================== */
+
+/** Identificador curto do endpoint na chave do cache. Separado do de produtos de propósito. */
+const ENDPOINT_CLIENTES = 'clientes/consultar'
+
+/**
+ * Lista branca de um candidato de cliente. Os campos são os do contrato
+ * (`CandidatoCliente`): código, nome e os documentos que distinguem homônimos — sem eles, duas
+ * "MARIA SILVA" são indistinguíveis na tela e o atendente escolhe no escuro.
+ *
+ * @returns {object|null} null quando falta código ou nome (sem os dois não há como escolher)
+ */
+function projetarCliente(c) {
+  if (!ehObjetoSimples(c)) return null
+  const codigo = typeof c.codigo_cliente_erp === 'string' ? c.codigo_cliente_erp.trim() : ''
+  const nome = typeof c.nome === 'string' ? c.nome.trim() : ''
+  if (!codigo || !nome) return null
+  return {
+    codigo_cliente_erp: codigo,
+    nome,
+    cpf: textoOpcional(c.cpf),
+    cnpj: textoOpcional(c.cnpj),
+    inscricao_estadual: textoOpcional(c.inscricao_estadual),
+  }
+}
+
+/**
+ * Traduz `/clientes/consultar` na forma que a UI consome. Dois ramos, ambos no `openapi.yaml`
+ * (`ConsultarClientesResposta`), ao contrário do irmão de produtos:
+ *
+ *   · `multiplos_clientes` — `candidatos[]` + `paginacao`;
+ *   · `cliente`            — `cliente` único já resolvido.
+ *
+ * @returns {{ ok: true, dados: object }|{ ok: false, respostaInvalida: true }}
+ */
+function projetarRespostaClientes(data, telefoneProibido) {
+  if (!ehObjetoSimples(data)) return { ok: false, respostaInvalida: true }
+  const dados = data.dados
+  if (!ehObjetoSimples(dados)) return { ok: false, respostaInvalida: true }
+
+  const meta = projetarMeta(data.meta, telefoneProibido)
+
+  if (dados.status === 'multiplos_clientes') {
+    if (!Array.isArray(dados.candidatos)) return { ok: false, respostaInvalida: true }
+    const candidatos = []
+    for (const bruto of dados.candidatos) {
+      const c = projetarCliente(bruto)
+      // Mesma regra do picker de produtos: candidato inselecionável não é descartado em
+      // silêncio — recusamos a resposta inteira, para que mudança de contrato apareça.
+      if (!c) return { ok: false, respostaInvalida: true }
+      candidatos.push(c)
+    }
+    return {
+      ok: true,
+      dados: {
+        status: 'multiplos_clientes',
+        candidatos,
+        paginacao: projetarPaginacao(dados.paginacao),
+        // O ERP não filtra Inativo/Bloqueado nesta rota: a tela precisa saber que a palavra
+        // final é do `preparar`, e não pode apresentar isto como escolha fechada.
+        resolucao_definitiva: false,
+        meta,
+      },
+    }
+  }
+
+  if (dados.status === 'cliente') {
+    const cliente = projetarCliente(dados.cliente)
+    if (!cliente) return { ok: false, respostaInvalida: true }
+    return {
+      ok: true,
+      dados: {
+        status: 'cliente',
+        cliente,
+        paginacao: null,
+        resolucao_definitiva: false,
+        meta,
+      },
+    }
+  }
+
+  return { ok: false, respostaInvalida: true }
+}
+
+/**
+ * Consulta candidatos de cliente na WM. Mesmo cache e mesma coalescência dos produtos — chave
+ * distinta pelo `ENDPOINT_CLIENTES`, então as duas consultas nunca se contaminam.
+ *
+ * @param {object} args
+ * @param {number} args.company_id  **sempre** de `req.user.company_id`
+ * @param {object} args.consulta    saída de `validarConsultarClientesBody` (busca XOR código, pagina)
+ * @param {string} [args.requestId] correlação de log
+ * @returns {Promise<{ ok: true, dados: object, origem_resposta: string }|{ ok: false, httpStatus: number, envelope: object, interno: object }>}
+ */
+async function consultarClientes({ company_id, consulta, requestId } = {}) {
+  const cid = Number(company_id)
+  if (!Number.isFinite(cid) || cid <= 0) return erroLocal({ motivo: 'company_id_invalido', requestId })
+  if (!ehObjetoSimples(consulta)) return erroLocal({ motivo: 'consulta_invalida', requestId })
+
+  const temBusca = typeof consulta.busca === 'string' && consulta.busca.length > 0
+  const temCodigo = typeof consulta.codigo_cliente_erp === 'string' && consulta.codigo_cliente_erp.length > 0
+  if (temBusca === temCodigo) return erroLocal({ motivo: 'consulta_invalida', requestId })
+
+  const contato = await resolverContatoAutorizado(cid)
+  if (contato.erro) return erroLocal({ motivo: contato.erro, requestId })
+
+  const payload = { telefone: contato.telefone }
+  if (temBusca) payload.busca = consulta.busca
+  else payload.codigo_cliente_erp = consulta.codigo_cliente_erp
+  if (consulta.pagina !== undefined) payload.pagina = consulta.pagina
+
+  const chave = wmConsultaCache.montarChave({
+    companyId: cid,
+    configVersao: contato.configVersao,
+    endpoint: ENDPOINT_CLIENTES,
+    modo: temBusca ? 'busca' : 'codigo',
+    termo: temBusca ? consulta.busca : consulta.codigo_cliente_erp,
+    pagina: consulta.pagina,
+  })
+
+  const { valor, origem } = await wmConsultaCache.resolverComCoalescencia(
+    chave,
+    async () => {
+      const resultado = await wmApiClient.consultarClientes(payload)
+      if (!resultado.ok) return erroDeResultado({ resultado, requestId })
+
+      const projetado = projetarRespostaClientes(resultado.data, contato.telefone)
+      if (!projetado.ok) {
+        return erroDeResultado({
+          resultado: { ...resultado, ok: false, respostaInvalida: true },
+          requestId,
+        })
+      }
+      return { ok: true, dados: projetado.dados }
+    },
+    (v) => Boolean(v && v.ok === true),
+  )
+
+  if (!valor || valor.ok !== true) {
+    return valor || erroLocal({ motivo: 'resposta_ausente', requestId })
+  }
+
+  return { ok: true, dados: valor.dados, origem_resposta: origem }
+}
+
 module.exports = {
   ENDPOINT_PRODUTOS,
+  ENDPOINT_CLIENTES,
   CANDIDATOS_ORIGEM,
   CODIGOS,
   consultarProdutos,
+  consultarClientes,
   // expostos para teste — projeções puras, sem efeito
   projetarProduto,
   projetarProdutoResolvido,
+  projetarCliente,
   normalizarParaComparacao,
   projetarPaginacao,
   projetarMeta,
   projetarRespostaProdutos,
+  projetarRespostaClientes,
 }

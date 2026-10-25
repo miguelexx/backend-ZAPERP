@@ -91,6 +91,45 @@ const lastMenuEnviadoServerAt = new Map()
 /** Após este ms desde o envio do menu, volta a valer "opção inválida" para texto não numérico. */
 const POS_MENU_OPCAO_INVALIDA_GRACE_MS = 8_000
 
+/**
+ * Retenção dos mapas de debounce por conversa (doc 29 §3 item 14).
+ *
+ * Estes mapas só eram limpos no fim do fluxo (`limparEstadoTriagem`): conversa que nunca
+ * chega lá deixava a entrada para SEMPRE — leak lento, estimado em 0,3–1 MB/dia.
+ *
+ * 10 min é 10× a MAIOR janela de leitura (`OPCAO_INVALIDA_DEBOUNCE_MS`, 60 s), e os quatro
+ * sítios de leitura usam `|| 0` ("nunca enviado") — exatamente a conclusão a que a janela
+ * expirada já chegaria. Logo, podar aqui não muda decisão nenhuma.
+ *
+ * `lastChatbotSendPerCompany` fica DE FORA de propósito: a chave é o `company_id`, então é
+ * limitado pelo número de empresas e não cresce com o tempo.
+ */
+const DEBOUNCE_MAPS_RETENCAO_MS = 10 * 60 * 1000
+
+/** Mapas chaveados por conversa, todos com `Date.now()` como valor. */
+function mapasDebouncePorConversa() {
+  return [lastWelcomeSentAt, lastOpcaoInvalidaSentAt, lastForaHorarioSentAt, lastMenuEnviadoServerAt]
+}
+
+/** Remove entradas vencidas. Devolve quantas saíram (usado em teste). */
+function pruneDebounceMapsPorConversa(agora = Date.now()) {
+  let removidas = 0
+  for (const mapa of mapasDebouncePorConversa()) {
+    for (const [chave, ts] of [...mapa.entries()]) {
+      if (!Number.isFinite(ts) || agora - ts > DEBOUNCE_MAPS_RETENCAO_MS) {
+        mapa.delete(chave)
+        removidas++
+      }
+    }
+  }
+  return removidas
+}
+
+// Mesmo padrão do `conversationVisibilityService` (doc 29 item 9): varredura periódica com
+// `unref()`, para não manter o processo vivo nem atrapalhar os testes.
+const _debouncePruneTimer = setInterval(pruneDebounceMapsPorConversa, 60_000)
+if (typeof _debouncePruneTimer.unref === 'function') _debouncePruneTimer.unref()
+
 /** Normaliza conversa_id para chave de Map/Set (evita "123" vs 123 furarem debounce/lock). */
 function conversaLockKey(conversa_id) {
   const n = Number(conversa_id)
@@ -2082,6 +2121,10 @@ async function processIncomingMessageLocked(ctx, conversaEstadoInicial) {
 }
 
 module.exports = {
+  // expostos para teste da varredura (doc 29 item 14)
+  pruneDebounceMapsPorConversa,
+  DEBOUNCE_MAPS_RETENCAO_MS,
+  __mapasDebouncePorConversa: mapasDebouncePorConversa,
   DEFAULT_CHATBOT_CONFIG,
   validateChatbotConfig,
   normalizeChatbotTriageStrings,

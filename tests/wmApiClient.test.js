@@ -261,6 +261,7 @@ describe('wmApiClient — base URL validada (anti-SSRF, TLS, sem descoberta)', (
 
     it.each([
       ['produtos/consultar', () => client.consultarProdutos({ telefone: TELEFONE_AUTORIZADO, busca: 'x' })],
+      ['clientes/consultar', () => client.consultarClientes({ telefone: TELEFONE_AUTORIZADO, busca: 'x' })],
       ['orcamentos/preparar', () => client.prepararOrcamento({ telefone: TELEFONE_AUTORIZADO })],
       ['orcamentos/criar', () => client.criarOrcamento({ telefone: TELEFONE_AUTORIZADO })],
     ])('%s sai com o prefixo UMA vez', async (caminho, chamar) => {
@@ -413,6 +414,30 @@ describe('wmApiClient — política de retry (o núcleo de segurança, D5)', () 
     const s = await client.prepararOrcamento({ telefone: TELEFONE_AUTORIZADO })
     expect(global.fetch).toHaveBeenCalledTimes(1)
     expect(s.status).toBe(503)
+  })
+
+  it('consultarClientes repete 5xx como leitura idempotente (nada é escrito)', async () => {
+    global.fetch
+      .mockResolvedValueOnce(respostaMock({ status: 503, corpo: { erro: 'SINCRONIZADOR_OFFLINE' } }))
+      .mockResolvedValueOnce(respostaMock({ corpo: { dados: {}, meta: {} } }))
+
+    const r = await client.consultarClientes({ telefone: TELEFONE_AUTORIZADO, busca: 'maria' })
+
+    expect(global.fetch).toHaveBeenCalledTimes(2)
+    expect(r.ok).toBe(true)
+  })
+
+  it('consultarClientes devolve o 503 SINCRONIZADOR_OFFLINE que a rota não declara no OpenAPI', async () => {
+    // Medido em produção em 25/10/2026: esta porta é realtime e cai com o sincronizador da loja,
+    // enquanto `produtos/consultar` (acervo sincronizado dentro da WM) segue respondendo 200.
+    global.fetch.mockResolvedValue(respostaMock({ status: 503, corpo: { erro: 'SINCRONIZADOR_OFFLINE' } }))
+
+    const r = await client.consultarClientes({ telefone: TELEFONE_AUTORIZADO, busca: 'maria' })
+
+    expect(r.ok).toBe(false)
+    expect(r.status).toBe(503)
+    expect(r.erroWm).toBe('SINCRONIZADOR_OFFLINE')
+    expect(r.transporte).toBeNull()
   })
 })
 

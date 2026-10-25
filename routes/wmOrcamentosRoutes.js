@@ -49,6 +49,25 @@ router.post(
 )
 
 /**
+ * `POST /clientes/consultar` — auxílio para achar o cliente no ERP.
+ *
+ * Body: `busca` XOR `codigo_cliente_erp`, mais `pagina` opcional. Mesma permissão e mesmo
+ * formato do irmão de produtos.
+ *
+ * Existe por causa de um detalhe do ERP que o atendente não tem como adivinhar: a busca de
+ * cliente é **por prefixo**, então "SILVA" não encontra "JOSE DA SILVA". Sem esta rota, a
+ * única forma de descobrir o nome canônico era tentar no Calcular e ver dar errado.
+ *
+ * NÃO decide o cliente do orçamento: a resposta vem com `resolucao_definitiva: false`, porque
+ * `/clientes/consultar` não aplica Inativo/Bloqueado e `preparar` aplica (D11).
+ */
+router.post(
+  '/clientes/consultar',
+  requirePermissao('orcamentos.ver'),
+  wmOrcamentosController.consultarClientes
+)
+
+/**
  * `POST /preparar` — Sessão 4A.
  *
  * Resolve cliente, vendedor e itens dentro da própria preparação (D11) e devolve OU a

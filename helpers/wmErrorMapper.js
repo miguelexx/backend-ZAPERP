@@ -96,7 +96,11 @@ const MENSAGENS = Object.freeze({
   [CODIGOS.PRODUTO_NAO_ENCONTRADO]: 'Um dos produtos do orçamento não foi encontrado no ERP.',
   [CODIGOS.PRODUTO_INATIVO]: 'Um dos produtos do orçamento está inativo no ERP.',
   [CODIGOS.ERRO_ORIGEM]: 'O ERP recusou a operação. Tente de novo em instantes.',
-  [CODIGOS.SINCRONIZADOR_OFFLINE]: 'O ERP está indisponível no momento.',
+  // Não é a WM que caiu: é o sincronizador instalado na máquina da PRÓPRIA loja que não está
+  // alcançável — e isso se resolve lá (máquina ligada, internet, serviço rodando), não com o
+  // suporte do ZapERP. A frase diz o que fazer porque quem lê é o atendente, não o técnico.
+  // O estado é FALHA_SEGURA: nada foi gravado no ERP, então o orçamento pode ser refeito.
+  [CODIGOS.SINCRONIZADOR_OFFLINE]: 'O sistema da sua loja está fora do ar, então o orçamento não pôde ser calculado. Nada foi gravado. Confira se o computador do ERP está ligado e com internet, e tente de novo.',
   [CODIGOS.TIMEOUT]: 'O ERP demorou para responder. Tente de novo.',
   [CODIGOS.INDISPONIVEL]: 'Não foi possível falar com o ERP agora. Tente de novo em instantes.',
   [CODIGOS.RESPOSTA_INVALIDA]: 'O ERP respondeu de um jeito inesperado. Avise o suporte.',

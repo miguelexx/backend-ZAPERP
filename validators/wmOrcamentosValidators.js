@@ -202,6 +202,58 @@ function validarConsultarProdutosBody(body) {
   return { ok: true, value }
 }
 
+const CHAVES_CONSULTAR_CLIENTES = ['busca', 'codigo_cliente_erp', 'pagina']
+
+/**
+ * `POST /api/orcamentos/clientes/consultar`.
+ *
+ * ESTA ROTA É AUXÍLIO DE BUSCA, NÃO AUTORIDADE DE RESOLUÇÃO. A decisão D11 do doc 36 continua
+ * valendo: quem resolve cliente para o orçamento é `preparar`. O motivo está no contrato
+ * (`docs/wm/04-contratos-api.md`): `/clientes/consultar` **não aplica** os filtros Inativo e
+ * Bloqueado, e `preparar` aplica — então um cliente encontrado aqui ainda pode ser recusado no
+ * Calcular com `CLIENTE_INVALIDO`. Serve para o atendente DESCOBRIR o nome canônico (a busca do
+ * ERP é por PREFIXO: "SILVA" não acha "JOSE DA SILVA"), não para fechar a escolha.
+ *
+ * Mesmo recorte do irmão de produtos: sem `telefone` (o serviço injeta a partir da empresa),
+ * sem `limite` (obsoleto e ignorado pela WM), sem `tamanho_pagina` (não aceito).
+ */
+function validarConsultarClientesBody(body) {
+  if (!ehObjetoSimples(body)) return erro('Corpo da requisição inválido')
+  const chaves = conferirChaves(body, CHAVES_CONSULTAR_CLIENTES)
+  if (chaves) return chaves
+
+  const um = exigirExatamenteUm(body, 'busca', 'codigo_cliente_erp')
+  if (um) return um
+
+  const value = {}
+  if (body.busca !== undefined) {
+    const r = validarTexto(body.busca, { min: LIMITES.BUSCA_MIN, max: LIMITES.BUSCA_MAX, campo: 'busca' })
+    if (!r.ok) return r
+    // ÚNICO lugar do módulo que apara as bordas, e é de propósito. O `validarTexto` preserva o
+    // valor byte a byte porque a busca de PRODUTO casa trecho e a correspondência exata depende
+    // do que foi enviado. Cliente é outra semântica: o ERP casa por PREFIXO
+    // (`dbo.Clientes`, `Latin1_General_CI_AI` — `docs/wm/04-contratos-api.md`), então um espaço
+    // à esquerda torna o prefixo impossível e devolve zero resultado SEM dizer por quê. Nome
+    // colado da conversa quase sempre vem com borda. Aparar aqui é a diferença entre achar e
+    // não achar; o miolo e a caixa continuam intocados.
+    value.busca = r.value.trim()
+  } else {
+    // Código de cliente usa o teto de 20 do `cliente_codigo_erp` de `criar`, não o de 7 dos
+    // produtos: são numerações diferentes no ERP. Também aparado — o ERP casa por igualdade.
+    const r = validarTexto(body.codigo_cliente_erp, { min: LIMITES.CODIGO_ERP_MIN, max: LIMITES.CODIGO_ERP_MAX, campo: 'codigo_cliente_erp' })
+    if (!r.ok) return r
+    value.codigo_cliente_erp = r.value.trim()
+  }
+
+  if (body.pagina !== undefined) {
+    const r = validarPagina(body.pagina, 'pagina')
+    if (!r.ok) return r
+    value.pagina = r.value
+  }
+
+  return { ok: true, value }
+}
+
 const CHAVES_PREPARAR = [
   'conversa_id',
   'cliente_codigo_erp',
@@ -498,6 +550,7 @@ module.exports = {
   CAMPOS_PROIBIDOS,
   PADRAO_DECIMAL,
   validarConsultarProdutosBody,
+  validarConsultarClientesBody,
   validarPrepararBody,
   validarCorpoVazio,
   validarPayloadPreparar,

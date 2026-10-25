@@ -6,6 +6,7 @@ const wmAssistenteService = require('../services/wm/wmAssistenteService')
 const wmOrcamentoService = require('../services/wm/wmOrcamentoService')
 const {
   validarConsultarProdutosBody,
+  validarConsultarClientesBody,
   validarPrepararBody,
   validarCorpoVazio,
 } = require('../validators/wmOrcamentosValidators')
@@ -108,6 +109,64 @@ async function garantirAcessoConversa({ company_id, conversa_id, user_id, role, 
     }
   }
   return { ok: true, conv: perm.conv }
+}
+
+/**
+ * `POST /api/orcamentos/clientes/consultar`
+ *
+ * Candidatos de cliente por nome (`busca`) ou por código exato (`codigo_cliente_erp`), um dos
+ * dois. Existe porque a busca de cliente do ERP é **por prefixo**: quem digita o sobrenome não
+ * encontra nada, e sem esta consulta não há como descobrir o nome canônico antes do Calcular.
+ *
+ * A resposta carrega `resolucao_definitiva: false` de propósito: esta rota NÃO decide o cliente
+ * do orçamento. `/clientes/consultar` não aplica Inativo/Bloqueado e `preparar` aplica, então a
+ * palavra final continua sendo do Calcular (D11). A tela tem de refletir isso.
+ */
+async function consultarClientes(req, res) {
+  const requestId = novoRequestId()
+  const company_id = req.user?.company_id
+
+  const validado = validarConsultarClientesBody(req.body)
+  if (!validado.ok) {
+    return responderErroLocal(res, {
+      status: 400,
+      codigo: CODIGO_DADOS_INVALIDOS,
+      mensagem: validado.error,
+      campo: validado.campo,
+      requestId,
+    })
+  }
+
+  try {
+    const r = await wmAssistenteService.consultarClientes({
+      company_id,
+      consulta: validado.value,
+      requestId,
+    })
+
+    if (!r.ok) {
+      if (r.interno?.alertaOperacional) {
+        console.warn('[wmOrcamentos] clientes/consultar', JSON.stringify({
+          requestId,
+          company_id,
+          httpLocal: r.interno.httpStatusLocal,
+          httpWm: r.interno.httpStatusWm,
+          codigo: r.envelope?.codigo || null,
+        }))
+      }
+      return res.status(r.httpStatus).json(r.envelope)
+    }
+
+    return res.json({ ok: true, requestId, ...r.dados })
+  } catch (err) {
+    console.error('[wmOrcamentos] clientes/consultar falha inesperada', requestId, err?.message || err)
+    return responderErroLocal(res, {
+      status: 503,
+      codigo: CODIGO_ERRO_INTERNO,
+      mensagem: 'Não foi possível consultar os clientes agora. Tente de novo.',
+      requestId,
+    })
+  }
 }
 
 /**
@@ -387,6 +446,7 @@ module.exports = {
   CODIGO_CONVERSA_NEGADA,
   CODIGO_CONVERSA_NAO_INDIVIDUAL,
   consultarProdutos,
+  consultarClientes,
   preparar,
   confirmar,
   verificar,
