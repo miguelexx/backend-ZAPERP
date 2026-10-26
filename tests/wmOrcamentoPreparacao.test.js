@@ -312,8 +312,12 @@ describe('pronto_para_confirmacao: snapshot server-side', () => {
     expect(previa.valor_total).toBe('1266.576')
     expect(previa.bloquear_apos_criar).toBe(true)
     // Itens: só os campos de §8, nada adivinhado (não existe `unidade` na prévia documentada).
+    // `valor_total_bruto` e `valor_desconto_unit` entram por serem do contrato e por um motivo
+    // concreto: sem eles um desconto aplicado pelo ERP apareceria só como um total menor, sem
+    // dizer de onde veio, e o atendente não teria como explicar o preço ao cliente.
     expect(Object.keys(previa.itens[0]).sort()).toEqual(
-      ['codigo_produto_erp', 'descricao', 'estoque_previsto', 'preco_unitario', 'quantidade', 'valor_total']
+      ['codigo_produto_erp', 'descricao', 'estoque_previsto', 'preco_unitario', 'quantidade',
+        'valor_desconto_unit', 'valor_total', 'valor_total_bruto']
     )
     expect(previa.itens[0]).toEqual({
       codigo_produto_erp: 'P001',
@@ -322,6 +326,10 @@ describe('pronto_para_confirmacao: snapshot server-side', () => {
       preco_unitario: '33.038',
       estoque_previsto: '10.000',
       valor_total: '66.076',
+      // A fixture não traz os dois: ausente vira null, nunca zero — "sem desconto" e "não
+      // informado" são coisas diferentes na hora de exibir.
+      valor_total_bruto: null,
+      valor_desconto_unit: null,
     })
     // Estoque previsto pode ser NEGATIVO e atravessa como texto, sem virar conta.
     expect(previa.itens[1].estoque_previsto).toBe('-2.125')

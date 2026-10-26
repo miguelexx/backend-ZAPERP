@@ -196,6 +196,17 @@ function decimalTextual(valor) {
  * A procedência viaja junto, no `meta` da resposta: `tempo_real` pode ser falado como agora,
  * `cache_cloud` **nunca** pode ser rotulado como atual.
  */
+/**
+ * Instante ISO-8601, ou null. Validado de verdade (`Date.parse`) e **reemitido** pelo próprio
+ * `Date`, para que nenhuma string arbitrária da origem atravesse como se fosse data.
+ */
+function instanteIso(valor) {
+  if (typeof valor !== 'string') return null
+  const t = Date.parse(valor.trim())
+  if (!Number.isFinite(t)) return null
+  return new Date(t).toISOString()
+}
+
 function projetarProdutoResolvido(p) {
   const base = projetarProduto(p)
   if (!base) return null
@@ -210,6 +221,18 @@ function projetarProdutoResolvido(p) {
     // `ativo` só atravessa como booleano de verdade: consulta por código explícito pode trazer
     // produto inativo (contrato), e "indefinido" não pode virar "ativo" por omissão.
     ativo: typeof p.ativo === 'boolean' ? p.ativo : null,
+    // QUÃO VELHO É O NÚMERO QUE ESTAMOS MOSTRANDO.
+    //
+    // `meta.fonte: "tempo_real"` diz que a CONSULTA foi ao vivo — não que o valor seja de agora.
+    // Medido em 26/10/2026 na base da MARGRE: a mediana de `estoque_sincronizado_em` era de
+    // **86,4 h** (3,6 dias), com alguns produtos em 0,1 h. Ou seja, o atendente vê "352,5 em
+    // estoque" sem saber se isso é de seis minutos ou de três dias atrás, e promete prazo em
+    // cima disso. A API sempre soube a idade; nós é que a descartávamos.
+    //
+    // São dois carimbos distintos e não intercambiáveis: um é do SALDO, outro do CADASTRO
+    // (descrição, preço, grupo). Quem exibe decide o que fazer com cada um.
+    estoque_sincronizado_em: instanteIso(p.estoque_sincronizado_em),
+    sincronizado_em: instanteIso(p.sincronizado_em),
   }
 }
 
@@ -814,6 +837,7 @@ module.exports = {
   // expostos para teste — projeções puras, sem efeito
   projetarProduto,
   projetarProdutoResolvido,
+  instanteIso,
   projetarCliente,
   normalizarParaComparacao,
   projetarPaginacao,

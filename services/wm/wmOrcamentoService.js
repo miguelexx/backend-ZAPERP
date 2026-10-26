@@ -359,6 +359,13 @@ function extrairPayloadCriacaoDaPrevia({ dados, meta, rascunho, bloquear_apos_cr
       // pelo padrão decimal (que não aceita sinal) — é texto de exibição, nunca entra em conta.
       estoque_previsto: textoCurto(bruto.estoque_previsto, LIMITES.DECIMAL_MAX_LEN),
       valor_total: decimalExato(bruto.valor_total),
+      // DESCONTO APLICADO PELO ERP. Hoje vem zerado na MARGRE (`valor_desconto_unit: "0.00"`,
+      // `valor_total_bruto` igual ao `valor_total`), mas é o ERP que decide — tabela
+      // promocional, política por cliente. Sem estes dois campos, um desconto real apareceria
+      // só como um total menor, sem dizer de onde veio, e o atendente não teria como explicar
+      // o preço ao cliente. São exibição: não entram em conta nenhuma e não vão para `criar`.
+      valor_total_bruto: decimalExato(bruto.valor_total_bruto),
+      valor_desconto_unit: decimalExato(bruto.valor_desconto_unit),
     })
   }
 

@@ -97,19 +97,24 @@ Contornamos do nosso lado ordenando a página que recebemos — relevantes prime
 abaixo de um separador que diz "também contêm o termo" — mas é só apresentação: não alcança um
 produto relevante que a paginação de vocês tenha deixado em outra página. Só a origem resolve.
 
-### D. A busca de VENDEDOR não tem semântica declarada
+### D. As três caixas da mesma tela casam de três jeitos diferentes
 
-O contrato diz o que acontece com o resultado (`VENDEDOR_NAO_ENCONTRADO` para zero,
-`multiplos_vendedores` para mais de um, vendedor canônico para um) e diz a origem
-("Funcionários ativos e vendedores, sem filtro de empresa"), mas **não diz como o texto casa** —
-prefixo, trecho, ou igualdade.
+Medimos a de vendedor em 26/10/2026, porque o contrato não a declara. O resultado:
 
-Para cliente vocês declararam: `dbo.Clientes`, nome por prefixo com `Latin1_General_CI_AI`. Para
-produto, trecho. Para vendedor, nada. São três caixas na mesma tela e o atendente não tem como
-saber que cada uma se comporta de um jeito.
+| campo | como o texto casa | evidência |
+|---|---|---|
+| produto | **trecho**, em qualquer posição | `cimento` traz `ARREFECIMENTO` |
+| cliente | **prefixo** | `lacerda` não acha `JORGE LACERDA`; `jorge lacerda` acha |
+| vendedor | **trecho**, em qualquer posição | `aula` resolve `PAULA FERNANDA (002)` |
 
-**Pedido 1:** declarar a regra de correspondência de `vendedor_busca` — e, se for prefixo como a
-de cliente, dizer isso explicitamente no contrato, para podermos escrever a dica certa no campo.
+São três regras diferentes em três campos lado a lado, e o atendente não tem como deduzir isso.
+O efeito prático é o do meio: quem aprende que "basta digitar um pedaço" no produto e no vendedor
+aplica a mesma intuição no cliente e não acha ninguém.
+
+**Pedido 1:** declarar no contrato a regra de `vendedor_busca` (hoje ela só diz o que acontece com
+o resultado, não como o texto casa) e, principalmente, considerar **uniformizar cliente com as
+outras duas**. O pedido B acima já trata disso: aceitar trecho na busca de cliente resolveria a
+inconsistência e o problema de usabilidade de uma vez.
 
 **Pedido 2, e este é o que resolve de verdade: um `/vendedores/consultar`.** Hoje o vendedor é o
 único dos três que não tem porta própria. Cliente tem `/clientes/consultar`, produto tem

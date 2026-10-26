@@ -253,6 +253,8 @@ describe('projeção dos candidatos', () => {
           preco_unitario: '0.010',
           estoque_previsto: '0.000',
           ativo: true,
+          estoque_sincronizado_em: '2026-10-23T00:09:24.272Z',
+          sincronizado_em: '2026-10-22T18:26:16.860Z',
         },
         meta: { fonte: 'tempo_real', consultado_em: '2026-10-22T20:14:47.481Z' },
       },
@@ -274,10 +276,48 @@ describe('projeção dos candidatos', () => {
       preco_unitario: '0.010',
       estoque_previsto: '0.000',
       ativo: true,
+      estoque_sincronizado_em: '2026-10-23T00:09:24.272Z',
+      sincronizado_em: '2026-10-22T18:26:16.860Z',
     })
     // As casas decimais da WM chegam intactas: nada de 0.01 nem de Number.
     expect(typeof r.dados.produto.preco_unitario).toBe('string')
     expect(r.dados.meta.fonte).toBe('tempo_real')
+  })
+
+  it('a idade do estoque atravessa — `tempo_real` é a consulta, não o valor', async () => {
+    // Medido na base real em 26/10/2026: mediana de 86,4 h entre o saldo e agora, com casos de
+    // 0,1 h. Sem este campo a tela mostra "352,5 em estoque" sem dizer de quando é.
+    wmApiClient.consultarProdutos.mockResolvedValue({
+      ok: true,
+      status: 200,
+      operacao: 'leitura',
+      data: {
+        dados: {
+          codigo_produto_erp: '0000209',
+          descricao: 'PISO (((PROMOÇÃO)))',
+          estoque_previsto: '352.500',
+          estoque_sincronizado_em: '2026-10-23T00:09:24.272Z',
+          sincronizado_em: '2026-10-22T18:26:16.860Z',
+        },
+        meta: { fonte: 'tempo_real' },
+      },
+    })
+
+    const r = await service.consultarProdutos({ company_id: 1, consulta: { codigo_produto_erp: '0000209' } })
+
+    expect(r.dados.produto.estoque_sincronizado_em).toBe('2026-10-23T00:09:24.272Z')
+    expect(r.dados.produto.sincronizado_em).toBe('2026-10-22T18:26:16.860Z')
+    // São dois carimbos distintos: um do SALDO, outro do CADASTRO. Não se misturam.
+    expect(r.dados.produto.estoque_sincronizado_em).not.toBe(r.dados.produto.sincronizado_em)
+  })
+
+  it('data inválida vira null — string arbitrária não atravessa como se fosse data', () => {
+    for (const ruim of ['ontem', '', '  ', 'NaN', 42, null, {}, true, '2026-13-45T99:99:99Z']) {
+      expect(service.instanteIso(ruim)).toBeNull()
+    }
+    // Válida é reemitida pelo próprio Date, em ISO canônico.
+    expect(service.instanteIso('2026-10-23T00:09:24.272Z')).toBe('2026-10-23T00:09:24.272Z')
+    expect(service.instanteIso(' 2026-10-23T00:09:24.272Z ')).toBe('2026-10-23T00:09:24.272Z')
   })
 
   it('preço fora do formato decimal textual vira null — nunca zero, nunca número', async () => {
