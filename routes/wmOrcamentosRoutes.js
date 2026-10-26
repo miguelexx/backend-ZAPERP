@@ -150,9 +150,21 @@ router.get(
 )
 
 /*
- * NÃO existe rota de clientes (D11): cliente e vendedor resolvem dentro de `preparar`, porque
- * `/clientes/consultar` da WM não filtra Inativo/Bloqueado e `preparar` filtra — escolher ali
- * criaria um beco sem saída com `CLIENTE_INVALIDO` que o atendente não tem como prever.
+ * A rota de clientes é AUXÍLIO DE BUSCA, e D11 continua de pé: quem RESOLVE o cliente do
+ * orçamento é `preparar`. A distinção não é formalidade — `/clientes/consultar` da WM não filtra
+ * Inativo/Bloqueado e `preparar` filtra, então escolher na busca não garante que o Calcular
+ * aceita. É por isso que a resposta carrega `resolucao_definitiva: false` e a tela precisa
+ * dizê-lo; tratar a escolha como confirmação recria o beco sem saída com `CLIENTE_INVALIDO`
+ * que D11 queria evitar.
+ *
+ * O que mudou desde D11: o ERP casa nome de cliente por PREFIXO (`dbo.Clientes`,
+ * `Latin1_General_CI_AI`), e isso era invisível — "SILVA" não encontra "JOSE DA SILVA", e sem
+ * uma busca o atendente só descobria errando no Calcular. Medido: `DINIZ` → nenhum,
+ * `SILVA` → nenhum, `MARIA APARECIDA AMADEI` → 3 candidatos.
+ *
+ * NÃO existe rota de VENDEDOR, e não por escolha nossa: a WM não publica endpoint de vendedor.
+ * Ele só se resolve dentro de `preparar`, que exige cliente e ao menos um item — pedido
+ * registrado no Anexo A.
  *
  * Também não existe rota de configuração: o vínculo com o telefone autorizado da WM é
  * provisionado por operação confiável, não por admin de tenant (seção 4 e pendência 13 — a WM
