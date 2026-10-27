@@ -216,6 +216,9 @@ async function concluirEncerramentoAusenciaInterrompido({ company_id, conv, last
       ausencia_mensagem_enviada_em: lastMsg.criado_em || nowIso,
       atendente_id: null,
       atendente_atribuido_em: null,
+      // Remove o setor ao finalizar (visível a todos sem setor). O snapshot acima preserva
+      // departamento_id para a eventual reabertura automática, então o vínculo não se perde.
+      departamento_id: null,
     })
     .eq('company_id', company_id)
     .eq('id', conv.id)
@@ -738,6 +741,9 @@ async function finalizeConversationsByAbsence(opts = {}) {
           ausencia_mensagem_enviada_em: null,
           atendente_id: null,
           atendente_atribuido_em: null,
+          // Remove o setor ao finalizar (visível a todos sem setor). `snap` preserva o
+          // departamento_id para a reabertura automática e para o revert abaixo.
+          departamento_id: null,
         })
         .eq('company_id', company_id)
         .eq('id', conv.id)
@@ -789,6 +795,8 @@ async function finalizeConversationsByAbsence(opts = {}) {
             status_atendimento: 'em_atendimento',
             atendente_id: prevAtendenteId,
             atendente_atribuido_em: prevAtendenteId ? prevAtendenteAtribuidoEm : null,
+            // Restaura o setor junto do restante do estado anterior (o fechamento o havia zerado).
+            departamento_id: snap.departamento_id,
             finalizacao_motivo: null,
             finalizada_automaticamente: false,
             finalizada_automaticamente_em: null,
@@ -970,6 +978,9 @@ async function finalizeAbsenceForConversaIds(p) {
         ausencia_mensagem_enviada_em: null,
         atendente_id: null,
         atendente_atribuido_em: null,
+        // Remove o setor ao finalizar (visível a todos sem setor). `snap` preserva o
+        // departamento_id para a reabertura automática e para o revert abaixo.
+        departamento_id: null,
       })
       .eq('company_id', company_id)
       .eq('id', conv.id)
@@ -1023,6 +1034,8 @@ async function finalizeAbsenceForConversaIds(p) {
           status_atendimento: 'em_atendimento',
           atendente_id: prevAtendenteId,
           atendente_atribuido_em: prevAtendenteId ? prevAtendenteAtribuidoEm : null,
+          // Restaura o setor junto do restante do estado anterior (o fechamento o havia zerado).
+          departamento_id: snap.departamento_id,
           finalizacao_motivo: null,
           finalizada_automaticamente: false,
           finalizada_automaticamente_em: null,

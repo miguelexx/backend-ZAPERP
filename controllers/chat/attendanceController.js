@@ -83,6 +83,9 @@ exports.encerrarChat = async (req, res) => {
     // o encerramento INTEIRO — o atendente clicava em Encerrar e a conversa não fechava.
     const baseEncerrarPatch = {
       status_atendimento: 'fechada',
+      // Ao finalizar, remove o vínculo de setor para que a conversa fique visível a todos os
+      // usuários que enxergam conversas sem setor (a reabertura já volta sem setor — ver reabrirChat).
+      departamento_id: null,
       finalizacao_motivo: null,
       finalizada_automaticamente: false,
       finalizada_automaticamente_em: null,

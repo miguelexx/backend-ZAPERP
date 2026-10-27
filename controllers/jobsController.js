@@ -156,7 +156,8 @@ exports.timeoutInatividadeChatbot = async (req, res) => {
           // reenviava a mesma mensagem indefinidamente.
           const { data: fechadaRow, error: updErr } = await supabase
             .from('conversas')
-            .update({ status_atendimento: 'fechada' })
+            // Ao finalizar, remove o setor para a conversa ficar visível a todos sem setor.
+            .update({ status_atendimento: 'fechada', departamento_id: null })
             .eq('id', conv.id)
             .eq('company_id', company_id)
             .eq('status_atendimento', stAtual)
