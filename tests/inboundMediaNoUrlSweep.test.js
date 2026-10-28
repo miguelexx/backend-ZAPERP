@@ -9,7 +9,7 @@
  */
 
 const { _test, precisaBackfillMidia } = require('../services/inboundMediaBackfillService')
-const { selecionarConversasParaVarredura } = _test
+const { selecionarConversasParaVarredura, deveReagendarBackfill } = _test
 
 const AGORA = Date.parse('2026-10-16T12:00:00.000Z')
 const linha = (over = {}) => ({
@@ -187,5 +187,23 @@ describe('recorte no SQL — a varredura não pode depender do filtro em JS', ()
       criado_em: new Date().toISOString(),
     }
     expect(selecionarConversasParaVarredura([textoComum], { agora: Date.now() })).toEqual([])
+  })
+})
+
+describe('re-tentativa curta do backfill ao vivo — decisão pura', () => {
+  test('reagenda enquanto a conversa segue quebrada e há tentativa restante', () => {
+    expect(deveReagendarBackfill({ attempt: 1, maxRetries: 1, aindaQuebrada: true })).toBe(true)
+  })
+
+  test('para quando a conversa já foi reparada (não gasta chamada do provedor à toa)', () => {
+    expect(deveReagendarBackfill({ attempt: 1, maxRetries: 1, aindaQuebrada: false })).toBe(false)
+  })
+
+  test('respeita o teto de tentativas', () => {
+    expect(deveReagendarBackfill({ attempt: 2, maxRetries: 1, aindaQuebrada: true })).toBe(false)
+  })
+
+  test('RETRY_MAX=0 desliga a re-tentativa', () => {
+    expect(deveReagendarBackfill({ attempt: 1, maxRetries: 0, aindaQuebrada: true })).toBe(false)
   })
 })

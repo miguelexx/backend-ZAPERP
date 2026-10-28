@@ -86,7 +86,9 @@ let _running = 0
 setInterval(() => {
   const cutoff = Date.now() - debounceMs() * 2
   for (const [key, entry] of _debounceMap.entries()) {
-    if (entry.lastTs < cutoff && !entry.trailingTimer) _debounceMap.delete(key)
+    // Só remove quando NÃO há timer vivo (trailing do debounce OU re-tentativa agendada) —
+    // apagar com um retryTimer pendente perderia a 2ª tentativa de recuperação.
+    if (entry.lastTs < cutoff && !entry.trailingTimer && !entry.retryTimer) _debounceMap.delete(key)
   }
 }, 5 * 60 * 1000).unref()
 
@@ -114,6 +116,84 @@ async function executarBackfill({ supabase, io, company_id, conversa_id }) {
   return true
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Re-tentativa curta do backfill AO VIVO.
+//
+// Por que existe: a passada ao vivo roda UMA vez (~8s após a rajada). Quando o provedor ainda não
+// liberou o arquivo nesse instante (o auto-download dele ainda em curso), a busca volta vazia e a
+// PRÓXIMA tentativa automática só vinha na varredura periódica — até 15 min depois. No intervalo, o
+// áudio recuperável fica como chip "não carregado" para o atendente. Esta re-tentativa, limitada e
+// só enquanto a conversa SEGUE com mídia sem URL, fecha a maioria desses casos em ~1 min.
+//
+// Aditivo e barato: não altera o contrato de executarBackfill nem a varredura; herda o mesmo teto de
+// concorrência global; faz 1 leitura curta (head/count) por tentativa; desligável por env (RETRY_MAX=0).
+// ─────────────────────────────────────────────────────────────────────────────
+
+function backfillRetryMax() {
+  return parsePositiveIntEnv('INBOUND_MEDIA_BACKFILL_RETRY_MAX', 1, { min: 0, max: 5 })
+}
+
+function backfillRetryDelayMs() {
+  return parsePositiveIntEnv('INBOUND_MEDIA_BACKFILL_RETRY_DELAY_MS', 60_000, { min: 5_000, max: 600_000 })
+}
+
+/** Decisão PURA: ainda vale reagendar? Só quando a conversa continua quebrada E há tentativa restante. */
+function deveReagendarBackfill({ attempt, maxRetries, aindaQuebrada }) {
+  return Boolean(aindaQuebrada) && Number(attempt) <= Number(maxRetries)
+}
+
+/**
+ * A conversa ainda tem mídia RECENTE sem URL renderável? Mesmo recorte da varredura periódica
+ * (tipo de mídia OU texto placeholder, com whatsapp_id, dentro da janela do provedor), porém
+ * escopado a UMA conversa e sem trazer linhas (head/count). Erro → false (não insiste à toa).
+ */
+async function conversaAindaTemMidiaSemUrl(supabase, company_id, conversa_id) {
+  try {
+    const sinceIso = new Date(Date.now() - sweepJanelaDias() * 24 * 3600_000).toISOString()
+    const base = () => supabase
+      .from('mensagens')
+      .select('id', { count: 'exact', head: true })
+      .eq('company_id', company_id)
+      .eq('conversa_id', conversa_id)
+      .is('url', null)
+      .not('whatsapp_id', 'is', null)
+      .gte('criado_em', sinceIso)
+    const [porTipo, porPlaceholder] = await Promise.all([
+      base().in('tipo', [...MEDIA_FAMILY_TIPOS]),
+      base().in('texto', [...MEDIA_PLACEHOLDER_TEXTS]),
+    ])
+    if (porTipo.error || porPlaceholder.error) return false
+    return ((porTipo.count || 0) + (porPlaceholder.count || 0)) > 0
+  } catch (_) {
+    return false
+  }
+}
+
+/**
+ * Agenda a re-tentativa nº `attempt` do backfill para a conversa. Guardada no mesmo _debounceMap
+ * (campo retryTimer): uma nova rajada cancela a re-tentativa pendente (o novo trailing fará uma
+ * passada fresca e reagenda a sua própria). Teto de concorrência barrou (executarBackfill=false):
+ * deixa para a varredura de 15 min — não reagenda, para não formar laço.
+ */
+function agendarReattemptBackfill(ctx, attempt) {
+  const { supabase, io, company_id, conversa_id } = ctx
+  if (attempt > backfillRetryMax()) return
+  const key = `${company_id}:${conversa_id}`
+  const entry = _debounceMap.get(key) || { lastTs: Date.now(), trailingTimer: null, retryTimer: null }
+  if (entry.retryTimer) clearTimeout(entry.retryTimer)
+  entry.retryTimer = setTimeout(() => {
+    entry.retryTimer = null
+    setImmediate(async () => {
+      const aindaQuebrada = await conversaAindaTemMidiaSemUrl(supabase, company_id, conversa_id)
+      if (!deveReagendarBackfill({ attempt, maxRetries: backfillRetryMax(), aindaQuebrada })) return
+      const rodou = await executarBackfill({ supabase, io, company_id, conversa_id })
+      if (rodou) agendarReattemptBackfill(ctx, attempt + 1)
+    })
+  }, backfillRetryDelayMs())
+  if (typeof entry.retryTimer.unref === 'function') entry.retryTimer.unref()
+  _debounceMap.set(key, entry)
+}
+
 /**
  * Agenda (não bloqueia o webhook) um backfill de mídia para a conversa, se necessário.
  *
@@ -135,10 +215,12 @@ function scheduleInboundMediaBackfill(ctx) {
 
   const key = `${company_id}:${conversa_id}`
   const now = Date.now()
-  const entry = _debounceMap.get(key) || { lastTs: 0, trailingTimer: null }
+  const entry = _debounceMap.get(key) || { lastTs: 0, trailingTimer: null, retryTimer: null }
 
-  // Reinicia o timer a cada nova mensagem (trailing).
+  // Reinicia o timer a cada nova mensagem (trailing). Uma re-tentativa pendente também é cancelada:
+  // a passada fresca abaixo a substitui e reagenda a sua própria se ainda for preciso.
   if (entry.trailingTimer) clearTimeout(entry.trailingTimer)
+  if (entry.retryTimer) { clearTimeout(entry.retryTimer); entry.retryTimer = null }
   entry.lastTs = now
   _debounceMap.set(key, entry)
 
@@ -147,7 +229,12 @@ function scheduleInboundMediaBackfill(ctx) {
   const trailing = trailingMs()
   entry.trailingTimer = setTimeout(() => {
     entry.trailingTimer = null
-    setImmediate(() => executarBackfill({ supabase, io, company_id, conversa_id }))
+    setImmediate(async () => {
+      await executarBackfill({ supabase, io, company_id, conversa_id })
+      // Provedor podia ainda não ter liberado o arquivo nesta 1ª passada: reagenda uma tentativa
+      // curta (só enquanto a conversa seguir com mídia sem URL) em vez de esperar a varredura.
+      agendarReattemptBackfill({ supabase, io, company_id, conversa_id }, 1)
+    })
   }, trailing)
   if (typeof entry.trailingTimer.unref === 'function') entry.trailingTimer.unref()
 }
@@ -353,6 +440,7 @@ module.exports = {
   startInboundMediaNoUrlSweepScheduler,
   _test: {
     selecionarConversasParaVarredura,
+    deveReagendarBackfill,
     _sweepCooldown,
   },
 }
