@@ -32,6 +32,81 @@ function publicWebhookUrl(appUrl, providerName) {
   return `${base}/webhooks/ultramsg?token=***`
 }
 
+/**
+ * Auto-sync de grupos/chats ao conectar um canal Whapi — espelha o UltraMSG
+ * (`ultramsgIntegrationService.getStatus`, que dispara `syncGroups`/`syncFromChats`
+ * na transição desconectado→conectado). Sem este gatilho, um canal Whapi NUNCA
+ * importava a lista de grupos: grupos só apareciam por mensagem ao vivo ou ao abrir.
+ *
+ * `persistWhapiHealth` é o único ponto por onde passa todo update de status do Whapi
+ * (status da instância, hidratação da lista, logout), então o gatilho fica aqui.
+ *
+ * - Transição desconectado→conectado detectada POR INSTÂNCIA (cada canal conecta sozinho).
+ * - O sync em si é A NÍVEL DE EMPRESA (`syncGroups`/`syncFromChats` só recebem company_id,
+ *   igual ao endpoint manual), então o throttle é POR EMPRESA para não rodar duas vezes
+ *   quando dois canais da mesma empresa conectam juntos, nem a cada poll.
+ * - Mapa em memória: após restart ele nasce vazio e o 1º poll re-sincroniza (desejável;
+ *   idempotente e throttled), mesmo comportamento do UltraMSG.
+ */
+const whapiLastConnectedState = new Map() // `${companyId}:${instanceId}` -> boolean
+const whapiLastAutoSyncAt = new Map()     // `${companyId}` -> epoch ms
+const WHAPI_AUTOSYNC_THROTTLE_MS = 10 * 60 * 1000
+const WHAPI_AUTOSYNC_MAP_MAX = 500
+
+function pruneMapEntries(map, max) {
+  if (map.size <= max) return
+  const excess = map.size - max
+  let i = 0
+  for (const k of map.keys()) {
+    map.delete(k)
+    if (++i >= excess) break
+  }
+}
+
+function maybeAutoSyncWhapiOnConnect(companyId, instanceId, conn) {
+  try {
+    if (!companyId || !instanceId || !conn) return
+    const key = `${companyId}:${instanceId}`
+    if (!conn.connected) {
+      whapiLastConnectedState.set(key, false)
+      pruneMapEntries(whapiLastConnectedState, WHAPI_AUTOSYNC_MAP_MAX)
+      return
+    }
+    const estavaConectado = whapiLastConnectedState.get(key) === true
+    whapiLastConnectedState.set(key, true)
+    pruneMapEntries(whapiLastConnectedState, WHAPI_AUTOSYNC_MAP_MAX)
+    if (estavaConectado) return // já estava conectado: não re-sincroniza a cada poll
+
+    const now = Date.now()
+    const last = whapiLastAutoSyncAt.get(String(companyId)) || 0
+    if (now - last < WHAPI_AUTOSYNC_THROTTLE_MS) return
+    whapiLastAutoSyncAt.set(String(companyId), now)
+    pruneMapEntries(whapiLastAutoSyncAt, WHAPI_AUTOSYNC_MAP_MAX)
+
+    setImmediate(async () => {
+      try {
+        const { syncGroups, syncFromChats } = require('../services/ultramsgGroupsSyncService')
+        const g = await syncGroups(companyId).catch((e) => ({ ok: false, errors: [e?.message || 'Erro'] }))
+        if (g.ok && g.totalFetched > 0) {
+          console.log(`[WHAPI] Auto-sync grupos empresa ${companyId} (inst ${instanceId}): ${g.inserted} inseridos, ${g.updated} atualizados`)
+        } else if (g.errors?.length) {
+          console.warn(`[WHAPI] Auto-sync grupos empresa ${companyId} (inst ${instanceId}):`, g.errors[0])
+        }
+        const c = await syncFromChats(companyId).catch((e) => ({ ok: false, errors: [e?.message || 'Erro'] }))
+        if (c.ok && c.totalFetched > 0) {
+          console.log(`[WHAPI] Auto-sync chats empresa ${companyId} (inst ${instanceId}): ${c.inserted} inseridos, ${c.updated} atualizados`)
+        } else if (c.errors?.length) {
+          console.warn(`[WHAPI] Auto-sync chats empresa ${companyId} (inst ${instanceId}):`, c.errors[0])
+        }
+      } catch (e) {
+        console.warn('[WHAPI] Erro no auto-sync ao conectar:', e?.message || e)
+      }
+    })
+  } catch (e) {
+    console.warn('[WHAPI] maybeAutoSyncWhapiOnConnect:', e?.message || e)
+  }
+}
+
 async function persistWhapiHealth(companyId, instanceId, conn) {
   if (!conn || !instanceId) return
   const patch = {
@@ -44,6 +119,17 @@ async function persistWhapiHealth(companyId, instanceId, conn) {
     patch.display_phone = conn.phone
   }
   await whatsappInstanceService.updateWhatsappInstance(companyId, instanceId, patch)
+  // Após persistir a saúde: se acabou de conectar, importa grupos/chats em background.
+  maybeAutoSyncWhapiOnConnect(companyId, instanceId, conn)
+}
+
+// Hook de teste do auto-sync Whapi (transição/throttle). Reset limpa o estado em memória.
+exports._test = {
+  maybeAutoSyncWhapiOnConnect,
+  resetWhapiAutoSyncState() {
+    whapiLastConnectedState.clear()
+    whapiLastAutoSyncAt.clear()
+  },
 }
 
 function isWhapiProvider(value) {
