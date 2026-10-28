@@ -307,17 +307,23 @@ async function preparar(req, res) {
   }
 
   try {
-    const acesso = await garantirAcessoConversa({
-      company_id,
-      conversa_id: validado.value.conversa_id,
-      user_id: req.user?.id,
-      role: req.user?.perfil,
-      // Mesmo nome que os 10 controllers vizinhos leem de `req.user` — a política canônica
-      // usa isso para o acesso por departamento.
-      user_dep_ids: req.user?.departamento_ids || [],
-    })
-    if (!acesso.ok) {
-      return responderErroLocal(res, { ...acesso, requestId })
+    // Orçamento avulso (balcão) não parte de uma conversa: sem `conversa_id` não há acesso de
+    // conversa a revalidar, e a D9 (`assertPermissaoConversa`) só se aplica QUANDO há conversa. O
+    // gate de módulo (`requireOrcamentoWm`) e a permissão `orcamentos.ver` do router já barram, e
+    // `company_id` continua vindo SÓ de `req.user`. Com `conversa_id`, revalida como sempre.
+    if (validado.value.conversa_id !== undefined) {
+      const acesso = await garantirAcessoConversa({
+        company_id,
+        conversa_id: validado.value.conversa_id,
+        user_id: req.user?.id,
+        role: req.user?.perfil,
+        // Mesmo nome que os 10 controllers vizinhos leem de `req.user` — a política canônica
+        // usa isso para o acesso por departamento.
+        user_dep_ids: req.user?.departamento_ids || [],
+      })
+      if (!acesso.ok) {
+        return responderErroLocal(res, { ...acesso, requestId })
+      }
     }
 
     const r = await wmOrcamentoService.preparar({

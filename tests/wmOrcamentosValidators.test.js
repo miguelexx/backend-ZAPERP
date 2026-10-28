@@ -133,16 +133,22 @@ describe('campos proibidos vindos do navegador', () => {
     expect(v.validarPrepararBody(prepararBodyValido({ itens: [{ busca: 'x', quantidade: '1', xyz: 1 }] })).ok).toBe(false)
   })
 
-  it('recusa preco_negociado nos itens — pendência 14, e é intencional', () => {
-    // O openapi.yaml da 2ª remessa aceita `preco_negociado` nos itens de preparar E de criar; o
-    // guia diz em §7.1 e §9.1 que nenhuma das duas aceita. Enquanto a divergência existir não
-    // implementamos: o campo é opcional (não enviar é seguro) e só um "Worker compatível" aplica
-    // a negociação — num Worker antigo o desconto seria ignorado em silêncio e o ERP gravaria o
-    // preço cheio. Como é chave desconhecida, a recusa é automática. Este teste trava isso para
-    // que ninguém "conserte" a ausência sem resolver a pendência.
-    const r = v.validarPrepararBody(prepararBodyValido({ itens: [{ busca: 'x', quantidade: '1', preco_negociado: '400.00' }] }))
-    expect(r.ok).toBe(false)
-    expect(r.error).toMatch(/desconhecido/i)
+  it('aceita preco_negociado opcional nos itens e o copia byte a byte', () => {
+    // Medido ATIVO na MARGRE em 27/10 (Anexo A, item 1): a WM aplica o preço negociado por linha.
+    // Agora enviamos. É opcional, decimal > 0, e a string sai idêntica à que entrou.
+    const r = v.validarPrepararBody(prepararBodyValido({ itens: [{ busca: 'x', quantidade: '1', preco_negociado: '10.00' }] }))
+    expect(r.ok).toBe(true)
+    expect(r.value.itens[0].preco_negociado).toBe('10.00')
+    // Sem o campo, nada de preco_negociado no item normalizado.
+    const semPreco = v.validarPrepararBody(prepararBodyValido())
+    expect(semPreco.value.itens[0].preco_negociado).toBeUndefined()
+  })
+
+  it('recusa preco_negociado 0, 0.00 ou negativo nos itens (guarda local antes da WM)', () => {
+    for (const ruim of ['0', '0.00', '-1', '-0.01', 'abc', '']) {
+      const r = v.validarPrepararBody(prepararBodyValido({ itens: [{ busca: 'x', quantidade: '1', preco_negociado: ruim }] }))
+      expect(r.ok).toBe(false)
+    }
   })
 })
 
@@ -161,12 +167,18 @@ describe('validarPrepararBody', () => {
     expect(r.value).not.toHaveProperty('company_id')
   })
 
-  it('exige conversa_id (a rota revalida acesso por assertPermissaoConversa — D9)', () => {
+  it('aceita SEM conversa_id (orçamento avulso de balcão) e não o inclui no valor', () => {
+    // conversa_id passou a ser OPCIONAL: o avulso não parte de conversa. Ausente, o valor
+    // normalizado não o carrega e a rota pula a checagem de acesso à conversa (D9 só vale com
+    // conversa). A XOR de cliente/vendedor e os itens continuam intactos sem ela.
     const semConversa = prepararBodyValido()
     delete semConversa.conversa_id
     const r = v.validarPrepararBody(semConversa)
-    expect(r.ok).toBe(false)
-    expect(r.campo).toBe('conversa_id')
+    expect(r.ok).toBe(true)
+    expect(r.value).not.toHaveProperty('conversa_id')
+    expect(r.value.cliente_busca).toBe('João da Silva')
+    expect(r.value.vendedor_busca).toBe('Carlos')
+    expect(r.value.itens).toEqual([{ busca: 'notebook', quantidade: '1' }])
   })
 
   it('recusa conversa_id inválido', () => {
@@ -433,6 +445,28 @@ describe('validarPayloadCriar — o único payload que escreve no ERP', () => {
     expect(r.error).toMatch(/maior que zero/i)
   })
 
+  it('aceita preco_negociado opcional no item e o preserva ao lado do oficial', () => {
+    // Os dois convivem: `preco_confirmado` é o oficial (intacto); `preco_negociado` é o do
+    // atendente. É assim que o desconto persiste no orçamento gravado (Anexo A, item 1).
+    const r = v.validarPayloadCriar(criarPayloadValido({
+      itens: [{ codigo_produto_erp: '1234567', quantidade: '2', preco_confirmado: '18.42', preco_negociado: '10.00' }],
+    }))
+    expect(r.ok).toBe(true)
+    expect(r.value.itens[0].preco_confirmado).toBe('18.42')
+    expect(r.value.itens[0].preco_negociado).toBe('10.00')
+    // Sem negociação, o item não leva preco_negociado.
+    expect(v.validarPayloadCriar(criarPayloadValido()).value.itens[0].preco_negociado).toBeUndefined()
+  })
+
+  it('recusa preco_negociado 0/negativo na criação (a WM recusaria; o erro aqui é nosso)', () => {
+    for (const ruim of ['0', '0.00', '-5.00']) {
+      const r = v.validarPayloadCriar(criarPayloadValido({
+        itens: [{ codigo_produto_erp: '1234567', quantidade: '2', preco_confirmado: '18.42', preco_negociado: ruim }],
+      }))
+      expect(r.ok).toBe(false)
+    }
+  })
+
   it('recusa quantidade e preço como number', () => {
     expect(v.validarPayloadCriar(criarPayloadValido({
       itens: [{ codigo_produto_erp: '1234567', quantidade: 2, preco_confirmado: '1.00' }],
@@ -452,8 +486,8 @@ describe('validarPayloadCriar — o único payload que escreve no ERP', () => {
   it('recusa chave desconhecida no payload de criação', () => {
     expect(v.validarPayloadCriar(criarPayloadValido({ cliente_pagina: 1 })).ok).toBe(false)
     expect(v.validarPayloadCriar(criarPayloadValido({ company_id: 1 })).ok).toBe(false)
-    // `preco_negociado` também não entra na criação — pendência 14, mesmo motivo de preparar.
-    const item = { codigo_produto_erp: '1234567', quantidade: '1', preco_confirmado: '1.00', preco_negociado: '400.00' }
+    // `preco_negociado` É aceito (medido ativo, Anexo A item 1); uma OUTRA chave no item, não.
+    const item = { codigo_produto_erp: '1234567', quantidade: '1', preco_confirmado: '1.00', xyz: 1 }
     expect(v.validarPayloadCriar(criarPayloadValido({ itens: [item] })).ok).toBe(false)
   })
 

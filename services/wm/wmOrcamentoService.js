@@ -269,11 +269,14 @@ function decimalExato(valor) {
  *   · não inventa cliente/vendedor canônico: sem código canônico na prévia, falha;
  *   · não inclui `telefone` nem `comando_id` no snapshot (ver `montarPayloadDespacho`);
  *   · não inclui CPF/CNPJ/IE na prévia sanitizada — nem do candidato escolhido (seção 6);
- *   · não envia `preco_negociado`. O `openapi.yaml` da 2ª remessa passou a aceitá-lo nos itens
- *     de `preparar` e de `criar`, mas o guia afirma em §7.1 e §9.1 que nenhuma das duas o
- *     aceita, e o próprio schema avisa que só um "Worker compatível" aplica a negociação — num
- *     Worker antigo o desconto seria ignorado em silêncio e o ERP gravaria o preço cheio. É
- *     campo opcional: não enviar é seguro e concorda com o guia. Pendência nova na seção 10.
+ *   · não deriva o `preco_negociado` do nada: ele é do ATENDENTE. Quando a linha foi negociada
+ *     (o rascunho trouxe `preco_negociado`), o snapshot leva o `preco_negociado` que a PRÓPRIA
+ *     PRÉVIA ecoou (`bruto.preco_negociado`) — nunca o do rascunho de volta. É a mesma regra do
+ *     `preco_confirmado`: o que a prévia mostrou é o que a criação despacha, e assim o total
+ *     confirmado bate com o que o atendente leu. Se a linha foi negociada mas a prévia NÃO ecoou
+ *     o campo (Worker que ignorou a negociação — Anexo A, item 1b), o snapshot segue SEM ele: a
+ *     prévia já mostrou o preço cheio e a criação grava o preço cheio, sem surpresa. Enviar foi
+ *     medido ATIVO na MARGRE em 27/10 (Anexo A, item 1). `preco_unitario` oficial nunca muda.
  *
  * **Premissa explícita de ordem:** os itens da prévia correspondem 1:1, **por índice**, aos
  * itens enviados. É o que o contrato implica ao definir `indice_item` como "índice zero-based
@@ -349,7 +352,20 @@ function extrairPayloadCriacaoDaPrevia({ dados, meta, rascunho, bloquear_apos_cr
       return { ok: false, motivo: 'previa_quantidade_invalida' }
     }
 
-    itensPayload.push({ codigo_produto_erp: codigoBruto, quantidade, preco_confirmado: preco })
+    const itemPayload = { codigo_produto_erp: codigoBruto, quantidade, preco_confirmado: preco }
+
+    // Preço negociado: só quando o atendente negociou ESTA linha (o rascunho trouxe o campo) E a
+    // prévia o ecoou (prova de que o Worker aplicou a negociação). O valor é o da prévia, não o
+    // do rascunho — autoridade igual à do `preco_confirmado`, para o despacho bater com o que a
+    // tela mostrou. Negociou mas a prévia não ecoou ⇒ Worker ignorou (Anexo A, 1b): segue sem o
+    // campo, e o total cheio da prévia é o que será gravado — sem divergência silenciosa.
+    const negociouLinha = decimalExato(rascunho.itens[i]?.preco_negociado) !== null
+    if (negociouLinha) {
+      const precoNegociadoPrevia = decimalExato(bruto.preco_negociado)
+      if (precoNegociadoPrevia !== null) itemPayload.preco_negociado = precoNegociadoPrevia
+    }
+
+    itensPayload.push(itemPayload)
     itensExibicao.push({
       codigo_produto_erp: codigoBruto,
       descricao: textoCurto(bruto.descricao),

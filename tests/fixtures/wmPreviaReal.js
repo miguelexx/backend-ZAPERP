@@ -47,14 +47,22 @@ function previaPronta({ itens, bloquear_apos_criar = true, fonte = 'tempo_real' 
       status: 'pronto_para_confirmacao',
       cliente: { codigo_cliente_erp: 'C0001', nome: 'JOAO DA SILVA', cpf: '123.456.789-00', cnpj: null, inscricao_estadual: 'ISENTO' },
       vendedor: { codigo_vendedor_erp: 'V0007', nome: 'CARLOS SOUZA' },
-      itens: lista.map((i) => ({
-        codigo_produto_erp: i.codigo,
-        descricao: i.descricao ?? null,
-        quantidade: i.quantidade,
-        preco_unitario: i.preco,
-        estoque_previsto: i.estoque_previsto ?? null,
-        valor_total: i.valor_total ?? null,
-      })),
+      itens: lista.map((i) => {
+        const item = {
+          codigo_produto_erp: i.codigo,
+          descricao: i.descricao ?? null,
+          quantidade: i.quantidade,
+          preco_unitario: i.preco,
+          estoque_previsto: i.estoque_previsto ?? null,
+          valor_total: i.valor_total ?? null,
+        }
+        // A prévia ecoa o preço negociado e o desconto quando a linha foi negociada (medido na
+        // MARGRE em 27/10). Só aparecem no fixture quando o item os traz.
+        if (i.preco_negociado !== undefined) item.preco_negociado = i.preco_negociado
+        if (i.valor_total_bruto !== undefined) item.valor_total_bruto = i.valor_total_bruto
+        if (i.valor_desconto_unit !== undefined) item.valor_desconto_unit = i.valor_desconto_unit
+        return item
+      }),
       valor_produtos: '1266.576',
       valor_total: '1266.576',
       bloquear_apos_criar,

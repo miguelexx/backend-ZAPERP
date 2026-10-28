@@ -300,6 +300,55 @@ describe('pronto_para_confirmacao: snapshot server-side', () => {
     })
   })
 
+  it('leva preco_negociado ao snapshot quando a linha foi negociada E a prévia ecoou', async () => {
+    // O atendente negociou a 1ª linha (P001) para 10.00; a WM aplicou e ecoou na prévia (medido
+    // na MARGRE, 27/10). O snapshot leva o preco_negociado DA PRÉVIA ao lado do oficial intacto;
+    // a 2ª linha, não negociada, não leva o campo.
+    const previa = fx.previaPronta({
+      itens: [
+        { codigo: 'P001', quantidade: '2.000', preco: '33.038', descricao: 'NOTEBOOK', estoque_previsto: '10.000', valor_total: '20.000', valor_total_bruto: '66.076', valor_desconto_unit: '23.038', preco_negociado: '10.00' },
+        { codigo: 'P002', quantidade: '1.000', preco: '1200.500', descricao: 'MONITOR', estoque_previsto: '5.000', valor_total: '1200.500' },
+      ],
+    })
+    wmApiClient.prepararOrcamento.mockResolvedValue(fx.resultadoOk(previa))
+
+    const rascunho = rascunhoBase({
+      itens: [
+        { codigo_produto_erp: 'P001', quantidade: '2', preco_negociado: '10.00' },
+        { busca: 'notebook', quantidade: '1' },
+      ],
+    })
+    const r = await service.preparar({ company_id: 1, usuario_id: 9, rascunho })
+
+    expect(r.ok).toBe(true)
+    const itens = db.operacoes[0].payload_criacao.itens
+    // Oficial intacto + negociado da prévia, lado a lado.
+    expect(itens[0]).toEqual({ codigo_produto_erp: 'P001', quantidade: '2.000', preco_confirmado: '33.038', preco_negociado: '10.00' })
+    // Linha não negociada: sem preco_negociado.
+    expect(itens[1].preco_negociado).toBeUndefined()
+    // O despacho reconfere o snapshot (preco_negociado precisa passar pelo validarPayloadCriar).
+    expect(db.operacoes[0].payload_hash).toBe(stateMachine.calcularPayloadHash(db.operacoes[0].payload_criacao))
+  })
+
+  it('NÃO leva preco_negociado quando a linha foi negociada mas a prévia não ecoou (Worker ignorou, Anexo A 1b)', async () => {
+    // O rascunho negociou, mas a prévia voltou com o preço cheio e SEM preco_negociado: o Worker
+    // não aplicou. O snapshot segue o preço cheio da prévia — sem desconto, sem divergência calada.
+    wmApiClient.prepararOrcamento.mockResolvedValue(fx.resultadoOk(fx.previaPronta()))
+
+    const rascunho = rascunhoBase({
+      itens: [
+        { codigo_produto_erp: 'P001', quantidade: '2', preco_negociado: '10.00' },
+        { busca: 'notebook', quantidade: '1' },
+      ],
+    })
+    const r = await service.preparar({ company_id: 1, rascunho })
+
+    expect(r.ok).toBe(true)
+    const itens = db.operacoes[0].payload_criacao.itens
+    expect(itens[0]).toEqual({ codigo_produto_erp: 'P001', quantidade: '2.000', preco_confirmado: '33.038' })
+    expect(itens[0].preco_negociado).toBeUndefined()
+  })
+
   it('a prévia sanitizada leva os campos reais do contrato para a UI', async () => {
     wmApiClient.prepararOrcamento.mockResolvedValue(fx.resultadoOk(fx.previaPronta()))
 
@@ -855,16 +904,34 @@ describe('POST /api/orcamentos/preparar (HTTP)', () => {
     expect(wmApiClient.prepararOrcamento).not.toHaveBeenCalled()
   })
 
-  it('conversa_id é obrigatório', async () => {
+  it('orçamento AVULSO (sem conversa_id) passa pelo gate de módulo + permissão e NÃO revalida conversa', async () => {
+    // Balcão: sem conversa não há acesso de conversa a checar (D9 só vale com conversa). O gate de
+    // módulo e orcamentos.ver já protegem, e company_id continua vindo do JWT.
     ligarModulo()
+    wmApiClient.prepararOrcamento.mockResolvedValue(fx.resultadoOk(fx.previaPronta()))
     const corpo = corpoValido()
     delete corpo.conversa_id
 
     const res = await request(app).post('/api/orcamentos/preparar').set('Authorization', `Bearer ${token()}`).send(corpo)
 
-    expect(res.status).toBe(400)
-    expect(res.body.codigo).toBe('ORCAMENTO_DADOS_INVALIDOS')
+    expect(res.status).toBe(200)
+    expect(res.body.ok).toBe(true)
+    expect(res.body.preparacao_id).toBeTruthy()
+    // O choke point de acesso à conversa NÃO é tocado no avulso.
     expect(assertPermissaoConversa).not.toHaveBeenCalled()
+    // Isolamento preservado: a operação persistida é da empresa do JWT.
+    expect(db.operacoes[0].company_id).toBe(1)
+    expect(db.operacoes[0].conversa_id ?? null).toBeNull()
+  })
+
+  it('COM conversa_id continua revalidando o acesso por assertPermissaoConversa', async () => {
+    ligarModulo()
+    wmApiClient.prepararOrcamento.mockResolvedValue(fx.resultadoOk(fx.previaPronta()))
+
+    const res = await request(app).post('/api/orcamentos/preparar').set('Authorization', `Bearer ${token()}`).send(corpoValido())
+
+    expect(res.status).toBe(200)
+    expect(assertPermissaoConversa).toHaveBeenCalledWith(expect.objectContaining({ company_id: 1, conversa_id: 501, user_id: 9 }))
   })
 
   it.each(['telefone', 'company_id', 'comando_id', 'preco_confirmado', 'token', 'base_url', 'bloquear_apos_criar'])(

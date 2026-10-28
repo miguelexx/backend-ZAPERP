@@ -265,43 +265,68 @@ const CHAVES_PREPARAR = [
   'itens',
 ]
 /**
- * `preco_negociado` NÃO ENTRA NESTAS LISTAS, e a ausência é deliberada — não esquecimento.
+ * `preco_negociado` — o preço que o ATENDENTE digitou para esta linha NESTE orçamento (um
+ * desconto por item, ou a distribuição de um desconto global). É OPCIONAL e, quando vem, viaja
+ * até a WM; o `preco_unitario` oficial do cadastro continua intacto.
  *
+ * ────────────────────────────────────────────────────────────────────────────
+ * POR QUE AGORA ELE É ENVIADO (antes era deliberadamente barrado)
+ * ────────────────────────────────────────────────────────────────────────────
  * O `openapi.yaml` da 2ª remessa (20/10/2026) acrescentou o campo aos itens de `preparar` E de
- * `criar` (schema `PrecoNegociadoOrcamento`), mas o guia da MESMA remessa afirma em §7.1 ("a
- * preparação não aceita preco_confirmado nem preco_negociado") e em §9.1 ("não recebe busca,
- * paginação ou preço negociado") que nenhuma das duas o aceita. A precedência declarada pela WM
- * é o OpenAPI, então isto é divergência real do contrato — registrada como pendência aberta na
- * seção 10 do doc 36.
+ * `criar` (schema `PrecoNegociadoOrcamento`), mas o guia da MESMA remessa afirmava em §7.1 e
+ * §9.1 que nenhuma das duas o aceitava — divergência que nos fez não enviá-lo por precaução.
  *
- * Por que não implementar enquanto a divergência existir: o campo é OPCIONAL, logo não enviá-lo
- * é seguro e concorda com o guia; e o próprio schema avisa que só um "Worker compatível revalida
- * a referência e aplica a negociação". Num Worker antigo o desconto seria **ignorado em
- * silêncio** e o ERP gravaria o preço cheio — inaceitável sem forma de detectar o suporte.
+ * Isso foi REFUTADO POR MEDIÇÃO ATIVA em 27/10/2026, contra o ERP real da MARGRE: enviando
+ * `{ codigo_produto_erp:'0000209', quantidade:'2', preco_negociado:'10.00' }` num produto de
+ * `preco_unitario` oficial `"18.42"`, o `preparar` devolveu a prévia com `preco_unitario` intacto
+ * (`"18.42"`), `preco_negociado "10.00"`, `valor_total_bruto "36.84"`, `valor_total "20.00"` e
+ * `valor_desconto_unit "16.84"`. Também medido: a WM aceita preço ACIMA do oficial e RECUSA com
+ * `400 payload_invalido` um valor `"0.00"` ou negativo. Detalhes no doc 36, Anexo A, item 1.
  *
- * Consequência prática: `preco_negociado` é chave desconhecida, e `conferirChaves` recusa chave
- * desconhecida (o `additionalProperties: false` desta camada). Se vier do navegador, é erro de
- * validação — exatamente o comportamento desejado enquanto a negociação não existir de fato.
+ * ────────────────────────────────────────────────────────────────────────────
+ * GUARDAS LOCAIS (o erro tem de ser nosso e legível, antes de gastar a chamada)
+ * ────────────────────────────────────────────────────────────────────────────
+ * Validado pelo MESMO `validarDecimalString` da quantidade, com `exigirPositivo: true`: "0",
+ * "0.00" e negativo são recusados AQUI, com mensagem clara, antes de a WM devolver o 400 dela.
+ * A string é copiada byte a byte, como todo decimal deste módulo — o que o atendente digitou é
+ * o que vai à WM, sem reformatar.
+ *
+ * ⚠️ RISCO RESIDUAL (Anexo A, item 1b): a WM só aplica a negociação em "Worker compatível".
+ * Provamos que o Worker da MARGRE aplica; para empresa de Worker desconhecido o desconto poderia
+ * ser ignorado em silêncio e o ERP gravar o preço cheio. Como o módulo só está ligado para a
+ * MARGRE hoje, é aceitável; a detecção de compatibilidade continua pendente com a WM.
  */
-const CHAVES_ITEM_PREPARAR = ['codigo_produto_erp', 'busca', 'quantidade', 'produto_pagina']
+const CHAVES_ITEM_PREPARAR = ['codigo_produto_erp', 'busca', 'quantidade', 'produto_pagina', 'preco_negociado']
 
-/** `POST /api/orcamentos/preparar`. `conversa_id` é obrigatório: a rota revalida o acesso à
- * conversa por `assertPermissaoConversa` (D9) antes de qualquer chamada externa. */
+/**
+ * `POST /api/orcamentos/preparar`. `conversa_id` é OPCIONAL.
+ *
+ * Quando vem, é validado como sempre e a rota revalida o acesso à conversa por
+ * `assertPermissaoConversa` (D9) antes de qualquer chamada externa. Quando ausente — o orçamento
+ * avulso (balcão), que não parte de nenhuma conversa — segue sem ele: a rota pula a checagem de
+ * acesso à conversa, e a proteção fica a cargo do gate de módulo (`requireOrcamentoWm`), da
+ * permissão `orcamentos.ver` do router e do `company_id` do JWT. A rejeição de chave desconhecida
+ * e a regra XOR de cliente/vendedor continuam valendo nos dois casos.
+ */
 function validarPrepararBody(body) {
   if (!ehObjetoSimples(body)) return erro('Corpo da requisição inválido')
   const chaves = conferirChaves(body, CHAVES_PREPARAR)
   if (chaves) return chaves
 
-  if (body.conversa_id === undefined) return erro('conversa_id é obrigatório', 'conversa_id')
-  const conv = validarConversaId(body.conversa_id)
-  if (!conv.ok) return conv
+  // conversa_id opcional: validado só quando presente (um valor inválido continua barrado).
+  let conv = null
+  if (body.conversa_id !== undefined) {
+    conv = validarConversaId(body.conversa_id)
+    if (!conv.ok) return conv
+  }
 
   const umCliente = exigirExatamenteUm(body, 'cliente_codigo_erp', 'cliente_busca')
   if (umCliente) return umCliente
   const umVendedor = exigirExatamenteUm(body, 'vendedor_codigo_erp', 'vendedor_busca')
   if (umVendedor) return umVendedor
 
-  const value = { conversa_id: conv.value }
+  const value = {}
+  if (conv) value.conversa_id = conv.value
 
   if (body.cliente_codigo_erp !== undefined) {
     const r = validarTexto(body.cliente_codigo_erp, { min: LIMITES.CODIGO_ERP_MIN, max: LIMITES.CODIGO_ERP_MAX, campo: 'cliente_codigo_erp' })
@@ -376,6 +401,14 @@ function validarItensPreparar(itens) {
       const r = validarPagina(item.produto_pagina, `${ctx}.produto_pagina`)
       if (!r.ok) return r
       normalizado.produto_pagina = r.value
+    }
+
+    // Preço negociado pelo atendente nesta linha (opcional). Decimal > 0, byte a byte — o
+    // oficial `preco_unitario` não aparece aqui e não é tocado.
+    if (item.preco_negociado !== undefined) {
+      const r = validarDecimalString(item.preco_negociado, { campo: `${ctx}.preco_negociado`, exigirPositivo: true })
+      if (!r.ok) return r
+      normalizado.preco_negociado = r.value
     }
 
     saida.push(normalizado)
@@ -473,8 +506,10 @@ const CHAVES_PAYLOAD_CRIAR = [
   'bloquear_apos_criar',
   'itens',
 ]
-const CHAVES_ITEM_CRIAR = ['codigo_produto_erp', 'quantidade', 'preco_confirmado']
-// `preco_negociado` fica fora aqui pelo mesmo motivo registrado junto de CHAVES_ITEM_PREPARAR.
+// `preco_confirmado` é o oficial da prévia (sempre presente); `preco_negociado` é o preço que o
+// atendente negociou nesta linha (opcional) — ver o bloco junto de CHAVES_ITEM_PREPARAR. Os dois
+// convivem no item: o openapi aceita ambos, e é assim que o desconto persiste no orçamento gravado.
+const CHAVES_ITEM_CRIAR = ['codigo_produto_erp', 'quantidade', 'preco_confirmado', 'preco_negociado']
 const PADRAO_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
 /**
@@ -531,7 +566,18 @@ function validarPayloadCriar(payload) {
     const p = validarDecimalString(item.preco_confirmado, { campo: `${ctx}.preco_confirmado`, exigirPositivo: false })
     if (!p.ok) return p
 
-    itens.push({ codigo_produto_erp: cod.value, quantidade: q.value, preco_confirmado: p.value })
+    const itemSaida = { codigo_produto_erp: cod.value, quantidade: q.value, preco_confirmado: p.value }
+
+    // Preço negociado pelo atendente (opcional). Quando presente, tem de ser decimal > 0 — a
+    // WM recusaria 0/negativo, mas o erro aqui é nosso e legível. O oficial `preco_confirmado`
+    // segue intacto ao lado dele.
+    if (item.preco_negociado !== undefined) {
+      const pn = validarDecimalString(item.preco_negociado, { campo: `${ctx}.preco_negociado`, exigirPositivo: true })
+      if (!pn.ok) return pn
+      itemSaida.preco_negociado = pn.value
+    }
+
+    itens.push(itemSaida)
   }
 
   const value = {

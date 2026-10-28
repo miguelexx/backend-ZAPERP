@@ -129,7 +129,40 @@ sem nada de novo do nosso lado além de consumir.
 
 ---
 
-## 1. `preco_negociado` está ativo? (pergunta nova, e é a mais urgente)
+## 1. `preco_negociado` — MEDIDO ATIVO em 27/10/2026; falta só detectar compatibilidade
+
+**Atualização:** testamos na prática contra a instalação da MARGRE e o `preco_negociado` **é
+aplicado**. Enviando `preco_negociado: "10.00"` num item de `preparar` com `preco_unitario` oficial
+`18.42`, a prévia voltou:
+
+```
+preco_unitario:      "18.42"   (oficial, intacto)
+preco_negociado:     "10.00"
+valor_total_bruto:   "36.84"   (oficial × qtd)
+valor_total:         "20.00"   (negociado × qtd)
+valor_desconto_unit: "16.84"   (desconto por unidade)
+```
+
+e no nível do orçamento `valor_desconto_unit_pmb: "16.84"`. Ou seja: o item **c)** abaixo está
+respondido — o oficial e o negociado **convivem**, o negociado manda no `valor_total`, e o desconto
+vem decomposto. Também medimos: a API **aceita preço acima** do oficial (aumento, não só desconto),
+e **recusa com `400 payload_invalido`** valor zero ou negativo. Isso contraria o guia (§7.1/§9.1) e
+confirma o `openapi.yaml` — como a regra de precedência já mandava.
+
+**O que ainda trava usar isso com segurança é só o item (b):** a compatibilidade do Worker. Provamos
+que o Worker da MARGRE aplica; não temos como saber, antes de enviar, se o Worker de **outra**
+empresa aplica ou ignora em silêncio. Essa é a pergunta que resta, e ela importa no momento em que o
+módulo atender mais de uma empresa.
+
+**b)** A descrição do schema diz *"Worker compatível revalida a referência e aplica a negociação por
+linha"*. **Como o ZapERP sabe, por empresa, se o Worker é compatível** — um campo na resposta, uma
+versão mínima, ou a garantia de que a API **recusa** o `preco_negociado` quando o Worker não o aplica
+(em vez de aceitar e ignorar)? Sem isso, para empresas de Worker desconhecido, um desconto digitado
+pode virar preço cheio gravado sem ninguém perceber.
+
+---
+
+<details><summary>Registro original da pendência (antes da medição de 27/10)</summary>
 
 Encontramos uma divergência entre os dois documentos da 2ª remessa:
 
@@ -154,6 +187,8 @@ detectar o suporte, ou de uma garantia de que a API recusa o campo quando o Work
 **c)** Se estiver ativo: o valor negociado substitui o `preco_unitario` na prévia (e portanto no
 `preco_confirmado`), ou os dois convivem? Em caso de desconto, qual valor a prévia devolve em
 `valor_total` e `valor_produtos`?
+
+</details>
 
 ## 2. O `503 SINCRONIZADOR_OFFLINE` não está declarado nas rotas que o devolvem
 
