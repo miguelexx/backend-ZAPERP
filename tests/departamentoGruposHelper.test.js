@@ -68,4 +68,43 @@ describe('departamentoGruposHelper', () => {
 
     await expect(helper.getGrupoIdsSemDepartamento(1)).resolves.toEqual([11, 12])
   })
+
+  describe('getGrupoIdsFixadosPeloUsuario', () => {
+    test('retorna só os ids fixados que são GRUPO (ignora pin de individuais)', async () => {
+      const { helper } = loadHelperWithResponses({
+        // o usuário fixou as conversas 1, 2 e 3...
+        conversa_usuario_prefs: [{ data: [{ conversa_id: 1 }, { conversa_id: 2 }, { conversa_id: 3 }], error: null }],
+        // ...mas só 2 e 3 são grupos
+        conversas: [{ data: [{ id: 2 }, { id: 3 }], error: null }],
+      })
+      await expect(helper.getGrupoIdsFixadosPeloUsuario(1, 10)).resolves.toEqual([2, 3])
+    })
+
+    test('sem nenhum pin → [] sem consultar conversas', async () => {
+      const { helper, supabase } = loadHelperWithResponses({
+        conversa_usuario_prefs: [{ data: [], error: null }],
+      })
+      await expect(helper.getGrupoIdsFixadosPeloUsuario(1, 10)).resolves.toEqual([])
+      // só a tabela de prefs foi consultada
+      expect(supabase.from).toHaveBeenCalledTimes(1)
+      expect(supabase.from).toHaveBeenCalledWith('conversa_usuario_prefs')
+    })
+
+    test('tabela de prefs ausente (migration não aplicada) → [] sem lançar', async () => {
+      const { helper } = loadHelperWithResponses({
+        conversa_usuario_prefs: [{
+          data: null,
+          error: { code: '42P01', message: 'relation "public.conversa_usuario_prefs" does not exist' },
+        }],
+      })
+      await expect(helper.getGrupoIdsFixadosPeloUsuario(1, 10)).resolves.toEqual([])
+    })
+
+    test('company_id / usuario_id inválidos → [] sem consultar', async () => {
+      const { helper, supabase } = loadHelperWithResponses({})
+      await expect(helper.getGrupoIdsFixadosPeloUsuario(0, 10)).resolves.toEqual([])
+      await expect(helper.getGrupoIdsFixadosPeloUsuario(1, null)).resolves.toEqual([])
+      expect(supabase.from).not.toHaveBeenCalled()
+    })
+  })
 })

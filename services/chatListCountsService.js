@@ -30,6 +30,7 @@ const {
 const {
   getGrupoIdsPorDepartamentos,
   getGrupoIdsSemDepartamento,
+  getGrupoIdsFixadosPeloUsuario,
   pushNonGroupVisibilityParts,
   pushAtendenteFilaLivreVisibilityParts,
   pushAllowedGroupIdsPart,
@@ -229,6 +230,10 @@ async function resolveChatListCountsContext(req) {
   const grupoIdsSemDepartamento =
     !isAdmin && !filter_dep_id ? await getGrupoIdsSemDepartamento(company_id) : []
 
+  // Grupos que o próprio usuário fixou — entram na contagem da "Minha fila" para o badge bater
+  // com a lista (que também passa a incluí-los). [] se a tabela de prefs não existir.
+  const grupoIdsFixadosNaMinhaFila = await getGrupoIdsFixadosPeloUsuario(company_id, user_id).catch(() => [])
+
   let grupoUnreadIdsAguardando = []
   let unreadMap = {}
   if (atendimentoModoSimplesEmpresa) {
@@ -327,6 +332,7 @@ async function resolveChatListCountsContext(req) {
     conversaIdsParticipanteAtivo: Array.isArray(conversaIdsParticipanteAtivo) ? conversaIdsParticipanteAtivo : [],
     grupoIdsPermitidosPorDepartamento,
     grupoIdsSemDepartamento,
+    grupoIdsFixadosNaMinhaFila,
     conversaIdsFilter,
     forceEmptyConversas,
     data_inicio,
@@ -358,6 +364,7 @@ function applyChatListSqlFilters(query, ctx, overrides = {}) {
     conversaIdsParticipanteAtivo,
     grupoIdsPermitidosPorDepartamento,
     grupoIdsSemDepartamento,
+    grupoIdsFixadosNaMinhaFila,
     conversaIdsFilter,
     forceEmptyConversas,
     data_inicio,
@@ -465,7 +472,12 @@ function applyChatListSqlFilters(query, ctx, overrides = {}) {
     q = q.or('tipo.is.null,tipo.neq.grupo')
     q = q.eq('aguardando_resposta_campanha', true)
   } else if (minhaFilaAtiva) {
-    q = q.or('tipo.is.null,tipo.neq.grupo')
+    // Abre exceção na exclusão de grupos para os grupos que o usuário fixou (casam o OR de
+    // status via 'aberta'); o pós-filtro confirma. Espelha a lista (conversationListController).
+    const fixadosNaFila = Array.isArray(grupoIdsFixadosNaMinhaFila) ? grupoIdsFixadosNaMinhaFila : []
+    q = fixadosNaFila.length > 0
+      ? q.or(`tipo.is.null,tipo.neq.grupo,id.in.(${fixadosNaFila.join(',')})`)
+      : q.or('tipo.is.null,tipo.neq.grupo')
     q = q.or(
       `status_atendimento.eq.aberta,and(status_atendimento.eq.em_atendimento,atendente_id.eq.${user_id}),and(status_atendimento.eq.aguardando_cliente,atendente_id.eq.${user_id}),and(status_atendimento.eq.pagamento_pendente,atendente_id.eq.${user_id}),and(status_atendimento.eq.em_atraso,atendente_id.eq.${user_id})${conversaIdsParticipanteAtivo.length > 0 ? `,and(status_atendimento.in.(em_atendimento,aguardando_cliente,pagamento_pendente,em_atraso),id.in.(${conversaIdsParticipanteAtivo.join(',')}))` : ''}`
     )
@@ -582,7 +594,11 @@ function rowVisibleInPostFilteredList(row, ctx, overrides = {}) {
     ctx?.filtroAtendenteInformado != null ? Number(ctx.filtroAtendenteInformado) : null
 
   if (overrides.minha_fila === true) {
-    if (isGroup) return false
+    // Grupo entra na Minha fila só quando o próprio usuário o fixou (espelha a lista).
+    if (isGroup) {
+      const fixadosNaFila = new Set((ctx?.grupoIdsFixadosNaMinhaFila || []).map(Number))
+      return fixadosNaFila.has(Number(row.id))
+    }
     if (row.aguardando_resposta_campanha === true) return false
     if (['em_atendimento', 'aguardando_cliente', 'pagamento_pendente', 'em_atraso'].includes(status)) {
       return vinculadaAoUsuario

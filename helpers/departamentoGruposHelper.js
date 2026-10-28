@@ -115,6 +115,64 @@ async function getGrupoIdsSemDepartamento(company_id) {
   return uniqueGrupoIds.filter((id) => !vinculados.has(Number(id)))
 }
 
+function isConversaUsuarioPrefsUnavailable(error) {
+  const msg = String(error?.message || error || '').toLowerCase()
+  const code = String(error?.code || '')
+  return (
+    code === '42P01' ||
+    code === '42501' ||
+    code === 'PGRST205' ||
+    (msg.includes('conversa_usuario_prefs') &&
+      (msg.includes('does not exist') ||
+        msg.includes('could not find') ||
+        msg.includes('schema cache') ||
+        msg.includes('permission denied')))
+  )
+}
+
+/**
+ * Ids de GRUPO que o PRÓPRIO atendente fixou (`conversa_usuario_prefs.fixada = true`).
+ * Usado para incluir esses grupos na "Minha fila" do usuário — grupo fixado pelo atendente
+ * entra na fila e fica fixado no topo (o sort já prioriza `fixada`). Só grupos: fixar uma
+ * conversa individual não muda a composição da Minha fila (ela segue o status/atendente).
+ * Devolve [] se a tabela de prefs ainda não existe (migration não aplicada) — nunca lança por isso.
+ */
+async function getGrupoIdsFixadosPeloUsuario(company_id, usuario_id) {
+  const cid = Number(company_id)
+  const uid = Number(usuario_id)
+  if (!Number.isFinite(cid) || cid <= 0 || !Number.isFinite(uid) || uid <= 0) return []
+
+  const { data: prefs, error: prefErr } = await supabase
+    .from('conversa_usuario_prefs')
+    .select('conversa_id')
+    .eq('company_id', cid)
+    .eq('usuario_id', uid)
+    .eq('fixada', true)
+
+  if (prefErr) {
+    if (isConversaUsuarioPrefsUnavailable(prefErr)) return []
+    throw prefErr
+  }
+  const fixadasIds = normalizePositiveIds((prefs || []).map((r) => r.conversa_id))
+  if (fixadasIds.length === 0) return []
+
+  // Restringe aos que são de fato GRUPO (pins de individuais não entram por aqui).
+  const grupoIds = []
+  const pageSize = 1000
+  for (let i = 0; i < fixadasIds.length; i += pageSize) {
+    const chunk = fixadasIds.slice(i, i + pageSize)
+    const { data, error } = await supabase
+      .from('conversas')
+      .select('id')
+      .eq('company_id', cid)
+      .eq('tipo', 'grupo')
+      .in('id', chunk)
+    if (error) throw error
+    for (const row of data || []) grupoIds.push(Number(row.id))
+  }
+  return normalizePositiveIds(grupoIds)
+}
+
 async function usuarioPodeVerGrupo({ company_id, conversa_id, role, departamento_ids }) {
   if (isAdminRole(role)) return true
 
@@ -168,6 +226,7 @@ module.exports = {
   getGrupoDepartamentoIds,
   getGrupoIdsPorDepartamentos,
   getGrupoIdsSemDepartamento,
+  getGrupoIdsFixadosPeloUsuario,
   usuarioPodeVerGrupo,
   pushNonGroupVisibilityParts,
   pushAtendenteFilaLivreVisibilityParts,

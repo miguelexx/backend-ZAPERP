@@ -1490,7 +1490,14 @@ exports.receberZapi = async (req, res) => {
             company_id,
             conversa_id,
             status_atendimento: st,
-            type
+            type,
+            hasRealMedia: !!(imageUrl || documentUrl || audioUrl || videoUrl || stickerUrl || locationUrl),
+            imageUrl,
+            documentUrl,
+            audioUrl,
+            videoUrl,
+            stickerUrl,
+            locationUrl,
           })
           if (reopenDecision.shouldReopen) {
             const depAntesReabrir =
@@ -1516,6 +1523,20 @@ exports.receberZapi = async (req, res) => {
               reaberta.reaberta_por_falta_interacao = false
               const { resetChatbotStateForConversa } = require('../services/chatbotTriageService')
               await resetChatbotStateForConversa(supabase, company_id, conversa_id)
+              try {
+                const { error: errHist } = await supabase.from('historico_atendimentos').insert({
+                  conversa_id,
+                  usuario_id: null,
+                  acao: 'reabertura_automatica_inbound',
+                  observacao:
+                    'Reaberto automaticamente pela mensagem do cliente após encerramento',
+                })
+                if (errHist) {
+                  console.warn('[Z-API] historico reabertura_automatica_inbound:', errHist.message || errHist)
+                }
+              } catch (errHist) {
+                console.warn('[Z-API] historico reabertura_automatica_inbound:', errHist?.message || errHist)
+              }
               const io = req.app.get('io')
               if (io) {
                 emitReaberturaSemSetorRealtime({

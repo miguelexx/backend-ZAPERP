@@ -74,6 +74,40 @@ describe('reopenPolicy - conversa finalizada permanece finalizada em fechos casu
       expect(r.shouldReopen).toBe(true)
     })
   })
+
+  describe('placeholder de mídia sem arquivo não reabre', () => {
+    const placeholders = ['(mídia)', '(áudio)', '(imagem)', '(vídeo)', '(figurinha)', '(arquivo)']
+
+    it.each(placeholders)('mantém fechada para "%s" sem arquivo', (texto) => {
+      const r = shouldReopenFinishedConversation(texto, { status_atendimento: 'fechada' })
+      expect(r.shouldReopen).toBe(false)
+      expect(r.reason).toBe('media_placeholder_no_file')
+    })
+
+    test('áudio/foto reais (com arquivo) continuam reabrindo — demanda sem legenda', () => {
+      const r = shouldReopenFinishedConversation('(áudio)', {
+        status_atendimento: 'fechada',
+        hasRealMedia: true,
+      })
+      expect(r.shouldReopen).toBe(true)
+    })
+
+    test('imagem real com URL continua reabrindo', () => {
+      const r = shouldReopenFinishedConversation('(imagem)', {
+        status_atendimento: 'fechada',
+        imageUrl: 'https://cdn.example/foto.jpg',
+      })
+      expect(r.shouldReopen).toBe(true)
+    })
+
+    test('Whapi/UltraMSG com type=audio e sem link ainda reabre (mídia tipada é mensagem real)', () => {
+      const r = shouldReopenFinishedConversation('(áudio)', {
+        status_atendimento: 'fechada',
+        type: 'audio',
+      })
+      expect(r.shouldReopen).toBe(true)
+    })
+  })
 })
 
 const {

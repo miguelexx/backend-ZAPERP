@@ -18,6 +18,8 @@ Reabrir uma conversa encerrada só acontece por: cliente mandar mensagem (`reope
 assumir com `reabrirAoEncaminhar`, e — por desenho do módulo Disparo — um novo envio de campanha
 (`marcarAguardandoRespostaCampanha` leva `fechada` → `aberta`, ver §5).
 
+**2026-10-28:** (1) placeholder **sem tipo e sem arquivo** (`(mídia)` solto) **não** reabre — o webhook já descartava esse evento, mas a reabertura rodava antes e deixava a conversa “Aberta” sem bolha nova. Foto/áudio **tipados** (`type=image/audio/…`) ou com URL continuam reabrindo. (2) reabertura automática por inbound agora grava `historico_atendimentos.acao = reabertura_automatica_inbound` (best-effort; falha do histórico não desfaz o UPDATE). O painel Histórico, se a thread estiver aberta, recarrega no evento `conversa_reaberta`.
+
 ## 2. A causa do print: a reversão por falha de envio prendia a conversa para sempre
 
 `finalizeConversationsByAbsence` fechava a conversa, chamava `sendAbsenceClosingMessage` e, se o

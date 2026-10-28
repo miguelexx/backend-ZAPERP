@@ -1,6 +1,7 @@
 /**
  * Política PURA de reabertura de conversa encerrada ao chegar novo inbound.
- * Extraído de controllers/webhookZapiController.js (Fase 1 — doc 24) sem alteração de comportamento.
+ * Extraído de controllers/webhookZapiController.js (Fase 1 — doc 24).
+ * 2026-10-28: placeholder sem tipo/arquivo (`(mídia)` solto) não reabre; mídia tipada continua.
  */
 
 const { parseNota } = require('../../services/avaliacaoService')
@@ -16,9 +17,59 @@ function normalizeReopenText(texto) {
 }
 
 /**
+ * Placeholders que o extrator grava quando não há legenda (`(áudio)`, `(mídia)`, …).
+ * Sem tipo de mídia e sem arquivo isso NÃO é demanda — o webhook descarta `(mídia)` sem URL.
+ * Tipo reconhecido (image/audio/…) conta como mensagem real mesmo se o link ainda não veio
+ * (Whapi sem auto_download / UltraMSG com media vazio). Com URL a reabertura padrão continua.
+ */
+const MEDIA_PLACEHOLDER_COMPACT = new Set([
+  'midia',
+  'mensagem',
+  'imagem',
+  'audio',
+  'video',
+  'video visualizacao unica',
+  'figurinha',
+  'arquivo',
+  'localizacao',
+  'contato',
+])
+
+const TYPED_MEDIA_TYPES = new Set([
+  'image',
+  'audio',
+  'video',
+  'document',
+  'file',
+  'sticker',
+  'ptt',
+  'voice',
+  'ptv',
+  'contact',
+  'location',
+  'poll',
+])
+
+function inboundHasRealMedia(context = {}) {
+  if (context.hasRealMedia === true) return true
+  if (
+    context.imageUrl ||
+    context.documentUrl ||
+    context.audioUrl ||
+    context.videoUrl ||
+    context.stickerUrl ||
+    context.locationUrl
+  ) {
+    return true
+  }
+  return TYPED_MEDIA_TYPES.has(String(context.type || '').toLowerCase())
+}
+
+/**
  * Decide se conversa encerrada deve reabrir ao receber nova mensagem do cliente.
  * Regra: reabrir por defeito; manter fechada só para nota de avaliação (0-10),
- * agradecimentos / ACKs de encerramento ou frases que indicam ausência de nova demanda.
+ * agradecimentos / ACKs de encerramento, placeholders de mídia sem arquivo,
+ * ou frases que indicam ausência de nova demanda.
  */
 function shouldReopenFinishedConversation(message, context = {}) {
   const raw = String(message || '').trim()
@@ -33,6 +84,10 @@ function shouldReopenFinishedConversation(message, context = {}) {
 
   if (!compact) {
     return { shouldReopen: false, reason: 'empty_or_symbols_only', normalized }
+  }
+
+  if (MEDIA_PLACEHOLDER_COMPACT.has(compact) && !inboundHasRealMedia(context)) {
+    return { shouldReopen: false, reason: 'media_placeholder_no_file', normalized }
   }
 
   // Mesma regra do avaliacaoService: só dígitos 0-10 — não reabre (avaliação ou tentativa)
@@ -163,6 +218,7 @@ function shouldSkipReopenAsOwnOutboundEcho({ inboundText, recentOutboundTexts = 
 module.exports = {
   normalizeReopenText,
   shouldReopenFinishedConversation,
+  inboundHasRealMedia,
   normalizeEchoText,
   inboundLooksLikeRecentOutbound,
   looksLikeAtendimentoFinalizacao,

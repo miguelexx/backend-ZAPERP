@@ -16,7 +16,7 @@ const { resolveGrupoIdsComUnreadParaUsuario, applyAguardandoAtendenteModoSimples
 const { usuarioPertenceSetorFinanceiro } = require('../../helpers/financeiroSetorHelper')
 const { buildClienteSearchOr, buildTelefoneSearchOr, buildPhoneSearchTerms, chatIdentityMatchesSearch } = require('../../helpers/chatSearchHelper')
 const { buscarConversaIdsPorNomesVinculados, buscarClienteIdsPorNomeVinculado, anexarVinculosEmBusca } = require('../../helpers/clienteNomesVinculados')
-const { getGrupoIdsPorDepartamentos, getGrupoIdsSemDepartamento, pushNonGroupVisibilityParts, pushAtendenteFilaLivreVisibilityParts, pushAllowedGroupIdsPart } = require('../../helpers/departamentoGruposHelper')
+const { getGrupoIdsPorDepartamentos, getGrupoIdsSemDepartamento, getGrupoIdsFixadosPeloUsuario, pushNonGroupVisibilityParts, pushAtendenteFilaLivreVisibilityParts, pushAllowedGroupIdsPart } = require('../../helpers/departamentoGruposHelper')
 const { countConversasWithFilter, overridesFromListQuery, parseConversaIdsQuery, getStartOfTodayIso, getEndOfTodayIso } = require('../../services/chatListCountsService')
 const { parsePositiveInt, parseChatListPagination, applyChatListCursor, splitChatListPage, shouldIncludeClientesSemConversa, setChatListPaginationHeaders } = require('../../services/chat/read/pagination')
 const { getChatSearchIdLimit, getChatFilterIdLimit } = require('../../services/chat/read/searchLimits')
@@ -198,6 +198,11 @@ exports.listarConversas = async (req, res) => {
     }
     const conversaIdsParticipanteAtivoSet = new Set(conversaIdsParticipanteAtivo.map(Number))
     const conversaIdsTransferidasSet = new Set(conversaIdsTransferidas.map(Number))
+    // Grupos que o próprio atendente fixou — entram na Minha fila (fixados no topo). Resolvido
+    // aqui (parte async) porque buildQuery é síncrona; computado só na aba Minha fila.
+    const grupoIdsFixadosNaMinhaFila = minhaFilaAtiva
+      ? await getGrupoIdsFixadosPeloUsuario(company_id, user_id).catch(() => [])
+      : []
 
     let grupoUnreadIdsAguardando = []
     if (aguardandoAtendenteAtivo && atendimentoModoSimplesEmpresa) {
@@ -515,8 +520,14 @@ exports.listarConversas = async (req, res) => {
         // O bloco de visibilidade acima já restringe quais grupos o atendente pode ver.
         // Admin ou usuário sem grupos vinculados: comportamento original (excluir grupos).
         const incluirGruposSetor = !isAdmin && grupoIdsPermitidosPorDepartamento.length > 0
+        // Grupos que o PRÓPRIO atendente fixou também entram na Minha fila (fixados no topo),
+        // mesmo sem vínculo de setor. Eles têm status_atendimento='aberta', então casam o OR de
+        // status abaixo; aqui basta abrir exceção na exclusão de grupos para os ids fixados.
+        // (`grupoIdsFixadosNaMinhaFila` é resolvido antes, na parte async — buildQuery é síncrona.)
         if (!incluirGruposSetor) {
-          q = q.or('tipo.is.null,tipo.neq.grupo')
+          q = grupoIdsFixadosNaMinhaFila.length > 0
+            ? q.or(`tipo.is.null,tipo.neq.grupo,id.in.(${grupoIdsFixadosNaMinhaFila.join(',')})`)
+            : q.or('tipo.is.null,tipo.neq.grupo')
         }
         q = q.or(
           `${incluirGruposSetor ? `id.in.(${grupoIdsPermitidosPorDepartamento.join(',')}),` : ''}status_atendimento.eq.aberta,and(status_atendimento.eq.em_atendimento,atendente_id.eq.${user_id}),and(status_atendimento.eq.aguardando_cliente,atendente_id.eq.${user_id}),and(status_atendimento.eq.pagamento_pendente,atendente_id.eq.${user_id}),and(status_atendimento.eq.em_atraso,atendente_id.eq.${user_id})${conversaIdsParticipanteAtivo.length > 0 ? `,and(status_atendimento.in.(em_atendimento,aguardando_cliente,pagamento_pendente,em_atraso),id.in.(${conversaIdsParticipanteAtivo.join(',')}))` : ''}`
