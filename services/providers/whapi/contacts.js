@@ -7,6 +7,7 @@
 
 const { agendaContactFields } = require('../../../helpers/agendaContact')
 const { isBadName } = require('../../../helpers/contactEnrichment')
+const { phoneKeyBR } = require('../../../helpers/phoneHelper')
 const { getChatBookName } = require('./chatsAdmin')
 const { resolveConfig } = require('./config')
 const { toWhapiContactId, isGroupJid } = require('./phones')
@@ -14,10 +15,28 @@ const { get, post, put, patch, del, head } = require('./http')
 const { extractArray, firstHttpUrl } = require('./parse')
 
 const CONTACTS_PAGE_MAX = 500
+const CHATS_PAGE_MAX = 500
+const CHATS_INDEX_MAX_PAGES = 40
+const CHAT_NAME_CONCURRENCY = 3
 
+/**
+ * Nome SALVO NA AGENDA que a lista `/contacts` traz. `pushname`/`notify` são o perfil do
+ * CLIENTE (ele escolhe; "❤", "Rayssa"), nunca o nome salvo no celular — não entram aqui.
+ * Quem ficar sem nome segue para `getAgendaNamesFromChats` (o nome pode viver em `/chats/{id}`).
+ */
 function firstWhapiContactName(raw) {
-  return [raw.name, raw.pushname, raw.pushName, raw.formattedName, raw.notify, raw.short]
-    .find((v) => typeof v === 'string' && v.trim())
+  return [raw.name, raw.formattedName].find((v) => typeof v === 'string' && v.trim())
+}
+
+/** Telefone individual (só dígitos) de um item de `/contacts`; null para grupo, LID, broadcast ou id inválido. */
+function whapiContactPhoneId(raw) {
+  if (!raw || typeof raw !== 'object') return null
+  const id = raw.id != null ? String(raw.id).trim() : ''
+  if (!id || isGroupJid(id) || raw.type === 'group') return null
+  if (/lid|broadcast|newsletter|@g\.us/i.test(id)) return null
+  if (id.includes('@') && !/^\d{10,15}@(c\.us|s\.whatsapp\.net)$/.test(id)) return null
+  const digits = id.replace(/@.*$/, '').replace(/\D/g, '')
+  return /^\d{10,15}$/.test(digits) ? digits : null
 }
 
 function mapWhapiContactForAgenda(raw) {
@@ -68,11 +87,130 @@ async function getContacts(page = 1, pageSize = 100, opts = {}) {
   }
   const raw = extractArray(data, ['contacts', 'data', 'list'])
   const contacts = raw.map(mapWhapiContactForAgenda).filter(Boolean).map(agendaContactFields).filter(Boolean)
+  // Medido no canal em 29/10 (1547 itens): 670 vêm SEM nome e 10 com o telefone formatado no
+  // lugar do nome ("+55 34 3423-8595"), e uma parte deles está salva na agenda — a lista diz
+  // `saved:false` e só `GET /chats/{id}` traz o nome. Devolvemos esses ids em `semNome` para a
+  // sincronização completar pelo chat, em vez de descartá-los em silêncio.
+  const semNome = []
+  for (const item of raw) {
+    const name = item && typeof item === 'object' ? firstWhapiContactName(item) : null
+    if (name && !isBadName(name)) continue
+    const digits = whapiContactPhoneId(item)
+    if (digits) semNome.push(digits)
+  }
   const iteratorTotal = Number(data?.total)
   const hasMore = Number.isFinite(iteratorTotal)
     ? (offset + raw.length) < iteratorTotal
     : raw.length >= size
-  return { data: contacts, hasMore, rawCount: raw.length, total: Number.isFinite(iteratorTotal) ? iteratorTotal : null }
+  return { data: contacts, hasMore, rawCount: raw.length, total: Number.isFinite(iteratorTotal) ? iteratorTotal : null, semNome }
+}
+
+/**
+ * Índice dos chats individuais do canal (chave = identidade do celular, ±9º dígito).
+ * Lê `GET /chats` paginado (a lista NÃO traz `name`; serve só para saber quem tem conversa).
+ * Devolve null quando a lista não pôde ser lida — quem chama consulta todos os ids, sem filtro.
+ */
+async function loadIndividualChatIndex(cfg) {
+  const keys = new Set()
+  let offset = 0
+  for (let page = 0; page < CHATS_INDEX_MAX_PAGES; page++) {
+    let response
+    try {
+      response = await get({
+        token: cfg.token,
+        endpoint: '/chats',
+        extraParams: { count: String(CHATS_PAGE_MAX), offset: String(offset) },
+      })
+    } catch {
+      return null
+    }
+    const { ok, data } = response
+    if (!ok || data?.error) return null
+    const rows = extractArray(data, ['chats', 'data', 'list'])
+    for (const chat of rows) {
+      const id = chat && chat.id != null ? String(chat.id) : ''
+      if (!/@(s\.whatsapp\.net|c\.us)$/.test(id)) continue
+      const key = phoneKeyBR(id.replace(/@.*$/, ''))
+      if (key) keys.add(key)
+    }
+    offset += rows.length
+    const total = Number(data?.total)
+    const more = Number.isFinite(total) ? offset < total : rows.length >= CHATS_PAGE_MAX
+    if (!rows.length || !more) break
+  }
+  return keys
+}
+
+/**
+ * Nome da agenda para contatos que `GET /contacts` devolveu sem nome utilizável.
+ *
+ * Por que existe: o nome salvo no celular vive em `GET /chats/{id}.name` (ver
+ * `getContactMetadata`), e a lista `/contacts` omite esse nome para parte dos contatos salvos.
+ * Custo controlado: lê a lista de chats uma vez (1–2 chamadas) e só consulta `GET /chats/{id}`
+ * de quem tem conversa no canal — sem chat não há de onde tirar nome. O endereço do chat tolera
+ * o 9º dígito (`getChatBookName` → `runOnChatCandidates`).
+ *
+ * @param {string[]} ids telefones (dígitos) vindos de `getContacts().semNome`
+ * @param {object} opts { companyId, whatsappInstanceId }
+ * @param {object} [hooks] { shouldStop: async () => boolean, onProgress: async ({ verificados, total, encontrados }) => void }
+ * @returns {Promise<{ names: Map<string,string>, total: number, verificados: number, encontrados: number, semChat: number, chatSemNome: number, cancelado: boolean }>}
+ */
+async function getAgendaNamesFromChats(ids, opts = {}, hooks = {}) {
+  const cfg = await resolveConfig(opts)
+  if (!cfg) throw new Error('Instância Whapi não configurada para esta empresa.')
+  const unique = [...new Set(
+    (Array.isArray(ids) ? ids : [])
+      .map((v) => String(v || '').replace(/@.*$/, '').replace(/\D/g, ''))
+      .filter((d) => /^\d{10,15}$/.test(d))
+  )]
+  const result = { names: new Map(), total: unique.length, verificados: 0, encontrados: 0, semChat: 0, chatSemNome: 0, cancelado: false }
+  if (!unique.length) return result
+
+  const index = await loadIndividualChatIndex(cfg)
+  const fila = unique.filter((id) => {
+    if (index && !index.has(phoneKeyBR(id))) {
+      result.semChat++
+      return false
+    }
+    return true
+  })
+  result.verificados = result.semChat
+
+  const stop = typeof hooks.shouldStop === 'function' ? hooks.shouldStop : null
+  const onProgress = typeof hooks.onProgress === 'function' ? hooks.onProgress : null
+  let desdeUltimoStop = 0
+  for (let i = 0; i < fila.length; i += CHAT_NAME_CONCURRENCY) {
+    if (stop && (desdeUltimoStop === 0 || desdeUltimoStop >= 10)) {
+      desdeUltimoStop = 0
+      if (await stop()) {
+        result.cancelado = true
+        break
+      }
+    }
+    const chunk = fila.slice(i, i + CHAT_NAME_CONCURRENCY)
+    const nomes = await Promise.all(chunk.map(async (id) => {
+      try {
+        return await getChatBookName(id, opts)
+      } catch {
+        return null
+      }
+    }))
+    chunk.forEach((id, k) => {
+      const nome = nomes[k]
+      if (nome && !isBadName(nome)) {
+        result.names.set(id, String(nome).trim())
+        result.encontrados++
+      } else {
+        result.chatSemNome++
+      }
+    })
+    result.verificados += chunk.length
+    desdeUltimoStop += chunk.length
+    if (onProgress) {
+      await onProgress({ verificados: result.verificados, total: result.total, encontrados: result.encontrados })
+    }
+  }
+  return result
 }
 
 function buildContactMetadataResult(data) {
@@ -457,6 +595,7 @@ async function getLidByIds(phones, opts = {}) {
 
 module.exports = {
   getContacts,
+  getAgendaNamesFromChats,
   getContactMetadata,
   getProfilePicture,
   getContactProfile,

@@ -33,8 +33,12 @@ const MIN_INTL_PHONE_LENGTH = 10
 const MAX_INTL_PHONE_LENGTH = 15
 const ERROR_MESSAGE_MAX_LENGTH = 80
 const MAX_PAGES_DEFAULT = parseInt(process.env.SYNC_MAX_PAGES_PER_RUN, 10) || 20
-// Teto de contatos importados por sincronização (nome + foto). Padrão 2500; override via env ou opts.
-const MAX_CONTATOS_DEFAULT = Math.max(1, parseInt(process.env.SYNC_MAX_CONTATOS, 10) || 2500)
+// Teto de contatos importados por sincronização (nome + foto). Padrão 10000; override via env ou opts.
+// Cada execução relê a agenda do início, então o que ficar acima do teto NUNCA entra em outra
+// rodada — o teto é proteção contra agenda absurda, não paginação. Era 2500 (cortava agendas grandes).
+const MAX_CONTATOS_DEFAULT = Math.max(1, parseInt(process.env.SYNC_MAX_CONTATOS, 10) || 10000)
+// Progresso da fase "completando nomes" gravado a cada N contatos verificados.
+const NOMES_PROGRESSO_A_CADA = 10
 
 function contactSyncProviderOpts(companyId, syncTarget) {
   const opts = { companyId }
@@ -572,7 +576,10 @@ async function runContactSyncFull(company_id, opts = {}) {
   const stats = { totalProcessados: 0, totalCriados: 0, totalAtualizados: 0,
     totalIgnorados: 0, totalInvalidos: 0, totalDuplicadosNoLote: 0, totalConflitados: 0,
     totalFotosAtualizadas: 0, totalFotosIndisponiveis: 0, totalErros: 0,
-    totalAgendaRaw: 0, totalAgendaValidos: 0, totalVerificados: 0 }
+    totalAgendaRaw: 0, totalAgendaValidos: 0, totalVerificados: 0,
+    // Fase "completando nomes" (Whapi): ids que a lista trouxe sem nome utilizável e quantos
+    // ganharam o nome da agenda via GET /chats/{id}.
+    totalSemNomeNaLista: 0, totalNomesDoChat: 0, nomesVerificados: 0, nomesTotal: 0 }
   if (!company_id) return { ...stats, ok: false, error: 'company_id ausente' }
   let acquired = false
   let heartbeat
@@ -613,6 +620,11 @@ async function runContactSyncFull(company_id, opts = {}) {
     let truncadoPorLimite = false
     const fetchPageSize = instanceProvider === 'whapi' ? WHAPI_CONTACTS_PAGE_SIZE : 10000
     const providerOpts = contactSyncProviderOpts(company_id, syncTarget)
+    // Whapi: a lista /contacts omite o nome de parte dos contatos salvos (e às vezes traz o
+    // telefone formatado no lugar). O provider devolve esses ids em `semNome`; depois da leitura
+    // da agenda, o nome é completado por GET /chats/{id} (só para quem tem conversa no canal).
+    const podeCompletarNomes = typeof provider.getAgendaNamesFromChats === 'function'
+    const semNomeNaLista = new Set()
     for (let page = 1; ; page++) {
       if (shouldCancel && (await shouldCancel())) {
         await progress('cancelado', stats.totalVerificados)
@@ -630,6 +642,12 @@ async function runContactSyncFull(company_id, opts = {}) {
       if (data.length && fingerprints.has(fingerprint)) throw new Error('O WhatsApp repetiu a página da agenda; sincronização incompleta.')
       fingerprints.add(fingerprint)
       stats.totalAgendaRaw += Number(response?.rawCount ?? data.length)
+      if (podeCompletarNomes && Array.isArray(response?.semNome)) {
+        for (const id of response.semNome) {
+          const digits = String(id || '').replace(/\D/g, '')
+          if (digits) semNomeNaLista.add(digits)
+        }
+      }
       for (const contact of data) {
         const parsed = parseAgendaContact(contact)
         if (!parsed) { stats.totalInvalidos++; continue }
@@ -640,6 +658,45 @@ async function runContactSyncFull(company_id, opts = {}) {
         unique.set(parsed.phone, parsed)
       }
       if (truncadoPorLimite || !response?.hasMore) break
+    }
+    stats.totalSemNomeNaLista = semNomeNaLista.size
+    if (podeCompletarNomes && semNomeNaLista.size && !truncadoPorLimite) {
+      stats.nomesTotal = semNomeNaLista.size
+      await progress('completando_nomes')
+      let ultimoProgresso = 0
+      const nomes = await provider.getAgendaNamesFromChats([...semNomeNaLista], providerOpts, {
+        shouldStop: shouldCancel || undefined,
+        onProgress: async (p) => {
+          stats.nomesVerificados = p.verificados
+          stats.nomesTotal = p.total
+          if (p.verificados - ultimoProgresso >= NOMES_PROGRESSO_A_CADA || p.verificados >= p.total) {
+            ultimoProgresso = p.verificados
+            await progress('completando_nomes', p.verificados)
+          }
+        },
+      })
+      if (nomes?.cancelado) {
+        await progress('cancelado', stats.totalVerificados)
+        return cancelResult()
+      }
+      stats.nomesVerificados = nomes?.verificados ?? stats.nomesVerificados
+      const encontrados = nomes?.names instanceof Map ? nomes.names : new Map()
+      for (const [id, nome] of encontrados) {
+        const parsed = parseAgendaContact({ id, phone: id, name: nome })
+        if (!parsed) continue
+        const atual = unique.get(parsed.phone)
+        if (atual) {
+          // Já estava na lista com o telefone no lugar do nome: ganha o nome da agenda.
+          if (isBadName(atual.nome)) {
+            atual.nome = parsed.nome
+            stats.totalNomesDoChat++
+          }
+          continue
+        }
+        if (unique.size >= maxContatos) { truncadoPorLimite = true; break }
+        unique.set(parsed.phone, parsed)
+        stats.totalNomesDoChat++
+      }
     }
     stats.totalAgendaValidos = unique.size
     stats.truncadoPorLimite = truncadoPorLimite
@@ -686,7 +743,11 @@ async function runContactSyncFull(company_id, opts = {}) {
     await registrarEvento(company_id, TIPOS.SYNC_FIM, 'Agenda sincronizada por solicitação manual', stats)
     const avisos = []
     if (truncadoPorLimite) {
-      avisos.push(`Limite de ${maxContatos} contatos por sincronização atingido. Os ${maxContatos} primeiros foram importados com nome e foto; rode novamente para trazer o restante.`)
+      // Não prometa "rode novamente": cada execução relê a agenda do início e para no mesmo ponto.
+      avisos.push(`Limite de ${maxContatos} contatos por sincronização atingido. Os ${maxContatos} primeiros foram importados com nome e foto; para trazer o restante, aumente SYNC_MAX_CONTATOS no servidor.`)
+    }
+    if (stats.totalNomesDoChat) {
+      avisos.push(`${stats.totalNomesDoChat} contato(s) vieram sem nome na lista do WhatsApp e receberam o nome salvo na agenda a partir da conversa.`)
     }
     if (stats.totalFotosIndisponiveis) {
       avisos.push(`${stats.totalFotosIndisponiveis} contato(s) sem foto disponível no WhatsApp. Fotos existentes foram preservadas.`)

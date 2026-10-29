@@ -292,7 +292,10 @@ describe('Whapi provider — sendText', () => {
     })
     const whapi = require('../services/providers/whapi')
     const page1 = await whapi.getContacts(1, 500, { companyId: 1, whatsappInstanceId: 10 })
-    expect(page1.data.map((c) => c.name).sort()).toEqual(['Jefferson Fernandes', 'Loja Centro'])
+    // pushname é o perfil do CLIENTE, não o nome salvo: não vira nome da agenda. O id vai para
+    // `semNome` e a sincronização tenta o nome salvo em GET /chats/{id}. Grupo fica fora.
+    expect(page1.data.map((c) => c.name)).toEqual(['Jefferson Fernandes'])
+    expect(page1.semNome).toEqual(['553497071470'])
     expect(page1.hasMore).toBe(true)
     expect(page1.rawCount).toBe(3)
     expect(page1.total).toBe(1746)

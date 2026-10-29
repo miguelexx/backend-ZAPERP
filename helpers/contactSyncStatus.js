@@ -13,6 +13,8 @@ function contactSyncStatus(job, progress = null) {
     verificados: r.totalVerificados || 0, criados: r.totalCriados || 0,
     atualizados: r.totalAtualizados || 0, fotos_atualizadas: r.totalFotosAtualizadas || 0,
     fotos_indisponiveis: r.totalFotosIndisponiveis || 0, erros: r.totalErros || 0,
+    // Fase "completando nomes" (Whapi): contatos sem nome na lista verificados via conversa.
+    nomes_verificados: r.nomesVerificados || 0, nomes_total: r.nomesTotal || 0, nomes_do_chat: r.totalNomesDoChat || 0,
     error: failed ? (job.erro || r.error || 'Erro ao sincronizar contatos.') : null,
     message: cancelando
       ? 'Interrompendo a importação… aguarde o encerramento do lote atual.'

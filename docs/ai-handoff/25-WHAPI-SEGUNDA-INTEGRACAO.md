@@ -1456,3 +1456,72 @@ chat sem nome não inventa nome; `from_name` do chat NÃO é lido como nome; `ge
 sem o 9º dígito; 404 em todos os endereços é explicado. Mais 4 casos de `needsEnrichment` e
 6 de `pickConversationDisplayName`. E `tests/webhookEmitNomeRuim.test.js` — 3 casos sobre o
 emit (emoji e telefone não vão; pushname de verdade vai). Suíte completa: 3225 testes (251 suítes).
+
+## 2026-10-29 — "Sincronizar contatos do celular" não puxava todos nem com o nome certo
+
+**Sintoma (Miguel):** o botão em Configurações → Clientes não trazia todos os contatos do celular,
+e parte dos que vinham ficava sem nome ou com nome errado.
+
+### Medido no canal de produção (script só leitura, 29/10)
+
+`GET /contacts` com `count=500` paginado, 1547 itens:
+
+| situação na lista `/contacts` | quantos |
+| --- | --- |
+| `name` utilizável (`saved:true`) | 866 |
+| `name` = telefone formatado ("+55 34 3423-8595", `saved:true`) | 10 |
+| **sem `name`** (`saved:false`) | 670 |
+| id inválido (`"0"`) | 1 |
+
+Amostra de 25 dos 680 sem nome utilizável, consultando `GET /chats/{id}`: **7 tinham o nome da
+agenda no chat** (contatos salvos que a lista reporta como `saved:false` — o mesmo furo da seção
+de 21/10, agora na LISTA), 16 não têm chat, 2 têm chat sem nome. Projeção: ~190 contatos salvos
+ficavam de fora a cada sincronização. Os 649 chats individuais de `GET /chats` que não estão em
+`/contacts` (379) não têm nome em nenhum lugar (amostra 25/25) — não são contatos da agenda.
+
+Antes, o provider descartava os 670 em silêncio (`mapWhapiContactForAgenda` exigia nome), os 10
+nasciam sem nome (`isBadName` barra o telefone) e `pushname` — quando a lista o trouxesse — virava
+nome com a prioridade máxima (`syncUltramsg`, 110), capaz de sobrescrever um nome bom.
+
+### O que mudou
+
+- `providers/whapi/contacts.js`
+  - `getContacts` devolve também **`semNome: [ids]`**: todo item individual cujo `name` falta ou é
+    ruim (`isBadName`). `pushname`/`notify` deixaram de contar como nome da agenda.
+  - **`getAgendaNamesFromChats(ids, opts, { shouldStop, onProgress })`**: lê `GET /chats` paginado
+    UMA vez (a lista não traz `name`; serve só como índice de quem tem conversa, chave
+    `phoneKeyBR` ±9º dígito) e só então `GET /chats/{id}` por contato, 3 em paralelo, via
+    `getChatBookName` (tolera o 9º dígito). Sem chat → não gasta chamada. Se a lista de chats
+    falhar, consulta todos os ids. Devolve `{ names: Map, total, verificados, encontrados, semChat,
+    chatSemNome, cancelado }`.
+- `contactSyncService.runContactSyncFull`: nova fase **`completando_nomes`** entre "buscando" e
+  "importando" (só quando o provider expõe `getAgendaNamesFromChats`; UltraMSG segue igual).
+  Contato sem nome na lista + nome no chat → entra na importação com o nome da agenda; contato
+  com telefone-como-nome → ganha o nome do chat; sem chat/sem nome → não nasce (não é agenda).
+  Progresso e cancelamento funcionam na fase. Stats novos: `totalSemNomeNaLista`,
+  `totalNomesDoChat`, `nomesVerificados`, `nomesTotal`; aviso ao final com o total completado.
+- Teto `SYNC_MAX_CONTATOS` **2500 → 10000**. Cada execução relê a agenda do início, então o
+  excedente NUNCA entrava em outra rodada — o aviso prometia "rode novamente para trazer o
+  restante", o que era falso; agora diz para aumentar a env.
+- `helpers/contactSyncStatus.js` expõe `nomes_verificados`/`nomes_total`/`nomes_do_chat`;
+  frontend `ClientesSection.jsx` mostra "Completando nomes pela conversa: X de Y…".
+
+### Custo
+
+Para este canal: 1547 contatos → 4 chamadas `/contacts` + 2 `/chats` (índice) + ~250 `GET
+/chats/{id}` (só quem tem conversa, ~9/25 da amostra), antes das fotos. Nome que entra vem com
+fonte `syncUltramsg` (110): troca pushname/nome ruim, nunca nome protegido (manual/planilha).
+
+### Fora do escopo / residual
+
+- `ultramsgContactsSyncService.syncViaContactsApi` (usado por "sync-all" de grupos) não ganhou a
+  fase de chats — só o job do botão (`runContactSyncFull`).
+- `/chats/{id}` continua sem resposta para contato salvo que nunca conversou pelo canal: esse só
+  entra quando a lista `/contacts` trouxer o nome.
+
+### Testes
+
+`tests/whapiAgendaNomesPelosChats.test.js` (6): provider (semNome, índice de chats lido 1 vez,
+9º dígito, lista de chats indisponível, shouldStop) e serviço (importa pelo chat, telefone-como-
+nome ganha nome, sem chat não inventa, cancelamento, UltraMSG intacto).
+`tests/whapiProvider.test.js` ajustado: pushname não é nome.

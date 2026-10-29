@@ -110,6 +110,7 @@ module.exports = {
   muteChat: chatsAdmin.muteChat,
 
   getContacts: contacts.getContacts,
+  getAgendaNamesFromChats: contacts.getAgendaNamesFromChats,
   getContactMetadata: contacts.getContactMetadata,
   getProfilePicture: contacts.getProfilePicture,
   getContactProfile: contacts.getContactProfile,
