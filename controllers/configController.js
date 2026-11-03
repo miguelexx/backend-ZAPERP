@@ -10,6 +10,12 @@ const {
   invalidateModuloCampanhasCache,
   primeModuloCampanhasCache,
 } = require('../helpers/moduloCampanhas')
+const {
+  getEmpresaTimezone,
+  setEmpresaTimezone,
+  descreverFuso,
+  fusoMudou,
+} = require('../helpers/empresaTimezone')
 
 /** GET /config/empresa — dados da empresa */
 exports.getEmpresa = async (req, res) => {
@@ -22,7 +28,10 @@ exports.getEmpresa = async (req, res) => {
       .single()
     if (error) { console.error('[configController]', error?.message); return res.status(500).json({ error: 'Erro interno' }) }
     if (!data) return res.status(404).json({ error: 'Empresa não encontrada' })
-    return res.json(data)
+    // Fuso da empresa vive em ia_config (não há coluna em `empresas`). Vai junto porque
+    // atendente também lê este endpoint e a UI formata todo horário no fuso da empresa.
+    const fuso = await getEmpresaTimezone(company_id)
+    return res.json({ ...data, ...fuso })
   } catch (err) {
     console.error(err)
     return res.status(500).json({ error: 'Erro ao obter empresa' })
@@ -51,7 +60,19 @@ exports.putEmpresa = async (req, res) => {
       modulo_campanhas_ativo,
       senha_modulo_campanhas,
       crm_habilitado,
+      estado,
+      timezone,
     } = req.body
+
+    // Fuso da empresa: não é coluna de `empresas`, vive em ia_config.chatbot_triage.
+    // Validado/gravado depois do update para não deixar o banco pela metade se o update falhar.
+    const querMudarFuso = estado !== undefined || timezone !== undefined
+    if (querMudarFuso && estado !== undefined && estado !== null && String(estado).trim() !== '') {
+      const alvo = descreverFuso(estado, timezone)
+      if (!alvo.estado) {
+        return res.status(400).json({ error: 'Estado (UF) inválido. Use a sigla do estado, ex.: MT.' })
+      }
+    }
 
     const FONTES_VALIDAS = new Set(['inter','plus-jakarta-sans','poppins','montserrat','orbitron','nunito','raleway','playfair-display'])
 
@@ -105,7 +126,12 @@ exports.putEmpresa = async (req, res) => {
       }
     }
 
-    const { data, error } = await supabase.from('empresas').update(update).eq('id', company_id).select().single()
+    // Salvar só o fuso não altera nenhuma coluna de `empresas` — nesse caso apenas lê a linha
+    // (um update com objeto vazio é rejeitado pelo PostgREST).
+    const query = Object.keys(update).length > 0
+      ? supabase.from('empresas').update(update).eq('id', company_id).select().single()
+      : supabase.from('empresas').select('*').eq('id', company_id).single()
+    const { data, error } = await query
     if (error) {
       const msg = String(error.message || '')
       if (msg.includes('zapi_auto_sync_contatos') || msg.includes('does not exist')) {
@@ -150,7 +176,25 @@ exports.putEmpresa = async (req, res) => {
       } catch (_) {}
     }
 
-    return res.json(data)
+    let fuso = await getEmpresaTimezone(company_id)
+    if (querMudarFuso) {
+      const alvo = descreverFuso(
+        estado !== undefined ? estado : fuso.estado,
+        timezone !== undefined ? timezone : fuso.timezone
+      )
+      // Só escreve quando muda de verdade: "Salvar configurações gerais" reenvia o
+      // estado atual junto com o resto e não deve invalidar o cache do chatbot à toa.
+      if (fusoMudou(fuso, alvo)) {
+        try {
+          fuso = await setEmpresaTimezone(company_id, alvo)
+        } catch (errFuso) {
+          console.error('[configController] setEmpresaTimezone', errFuso?.message || errFuso)
+          return res.status(500).json({ error: 'Dados salvos, mas o fuso horário não pôde ser gravado. Tente novamente.' })
+        }
+      }
+    }
+
+    return res.json({ ...data, ...fuso })
   } catch (err) {
     console.error(err)
     return res.status(500).json({ error: 'Erro ao atualizar empresa' })
