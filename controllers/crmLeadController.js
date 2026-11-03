@@ -316,6 +316,134 @@ async function enviarLeadDaConversa(req, res) {
 }
 
 /**
+ * POST /api/crm/movimentacao/from-conversa/:conversaId
+ *
+ * "Registrar movimentação": grava uma OBSERVAÇÃO na oportunidade do cliente no
+ * CRM Avançado SEM mudar a etapa do funil (rota IRMÃ de /leads/from-conversa, que
+ * cria/move o lead). Reaproveita os MESMOS ids externos do ZapERP que o /lead usa
+ * (leadId=conversaId, contatoId=cliente.id, telefone) para o CRM achar a
+ * oportunidade.
+ *
+ * SEGURANÇA: company_id e usuarioId vêm SEMPRE de req.user (JWT), nunca do body.
+ *
+ * SEM RETRY: diferente do /lead, uma movimentação é um registro append-only
+ * (observação guardada para sempre). Retentar em 5xx arriscaria gravar a mesma
+ * observação duas vezes se a 1ª já tivesse persistido — então não retentamos.
+ *
+ * Contrato de resposta (o front mostra a `message` real do CRM, em especial o 409):
+ *   - 200 { ok:true, oportunidade?, etapa?, movimentacao? }   → registrado
+ *   - 400 texto/conversa inválidos · 403 CRM_DISABLED · 404 conversa
+ *   - 422 CRM recusou por contrato (inclui o 409 "cliente não está em nenhuma
+ *     etapa do funil") · 502 CRM indisponível · 500 erro interno
+ */
+async function registrarMovimentacaoDaConversa(req, res) {
+  const companyId = Number(req.user?.company_id)
+  const conversaId = Number(req.params?.conversaId)
+
+  if (!companyId) return res.status(401).json({ error: 'Sessão inválida.' })
+  if (!Number.isInteger(conversaId) || conversaId <= 0) {
+    return res.status(400).json({ error: 'Conversa inválida.' })
+  }
+
+  const texto = typeof req.body?.texto === 'string' ? req.body.texto.trim() : ''
+  if (!texto) {
+    return res.status(400).json({ error: 'A movimentação não pode ficar vazia.' })
+  }
+
+  try {
+    // Interruptor mestre (ambiente) + módulo CRM ligado para esta empresa.
+    if (!(await crmDisponivelParaEmpresa(companyId))) {
+      return res.status(403).json({
+        error: 'O CRM não está disponível para esta empresa.',
+        code: 'CRM_DISABLED',
+      })
+    }
+
+    // 1. Conversa — escopada por empresa (mesma leitura do /lead).
+    const { data: conversa, error: convErr } = await supabase
+      .from('conversas')
+      .select('id, telefone, cliente_id, tipo, nome_contato_cache')
+      .eq('id', conversaId)
+      .eq('company_id', companyId)
+      .maybeSingle()
+
+    if (convErr) throw convErr
+    if (!conversa) return res.status(404).json({ error: 'Conversa não encontrada.' })
+    if (isGroupConversation(conversa)) {
+      return res.status(400).json({ error: 'Grupos não têm oportunidade no CRM.' })
+    }
+
+    // 2. Cliente vinculado — escopado por empresa (só precisamos do id e telefone).
+    let cliente = null
+    if (conversa.cliente_id) {
+      const { data: cli, error: cliErr } = await supabase
+        .from('clientes')
+        .select('id, telefone')
+        .eq('id', conversa.cliente_id)
+        .eq('company_id', companyId)
+        .maybeSingle()
+      if (cliErr) throw cliErr
+      cliente = cli || null
+    }
+
+    const telefone =
+      (cliente?.telefone && String(cliente.telefone).trim()) ||
+      (conversa.telefone && String(conversa.telefone).trim()) ||
+      null
+
+    const usuarioId = req.user?.id != null ? String(req.user.id) : null
+
+    // 3. Repassa ao CRM Avançado com os mesmos ids que o /lead já usa.
+    const mov = await crmSync.registrarMovimentacao({
+      companyId,
+      usuarioId,
+      texto,
+      leadId: conversaId,
+      contatoId: cliente?.id ?? null,
+      telefone,
+    })
+
+    if (crmSync.isCrmError(mov)) {
+      const m = mapCrmError(mov)
+      console.error(
+        `[crmMov] CRM recusou a movimentação (respondendo HTTP ${m.httpStatus}): ` +
+        `crm_status=${m.crm_status} message=${m.message || '-'} detalhe=${m.detalhe || '-'}`
+      )
+      return res.status(m.httpStatus).json({
+        error: m.error,
+        message: m.message,
+        code: m.code,
+        crm_status: m.crm_status,
+        detalhe: m.detalhe,
+      })
+    }
+
+    if (mov === null) {
+      // registrarMovimentacao devolve null quando o CRM não está configurado
+      // (URL/segredo ausentes) ou faltam campos mínimos. Trata como indisponível.
+      console.error('[crmMov] registrarMovimentacao devolveu null (CRM não configurado ou payload mínimo ausente)')
+      return res.status(502).json({
+        error: 'O CRM Avançado não respondeu. Tente novamente.',
+        code: 'CRM_UNREACHABLE',
+        crm_status: 0,
+        detalhe: null,
+      })
+    }
+
+    return res.status(200).json({
+      ok: true,
+      oportunidade: mov?.oportunidade ?? null,
+      etapa: mov?.etapa ?? null,
+      movimentacao: mov?.movimentacao ?? null,
+    })
+  } catch (err) {
+    console.error('[crmMov] Falha ao registrar movimentação:', err?.message || err)
+    if (err?.stack) console.error(err.stack)
+    return res.status(500).json({ error: 'Erro ao registrar movimentação no CRM.', code: 'INTERNAL' })
+  }
+}
+
+/**
  * GET /api/crm/etapas
  *
  * Lista as etapas (colunas do funil) do CRM Avançado da empresa, para o usuário
@@ -389,4 +517,4 @@ async function listarEtapasCrm(req, res) {
   }
 }
 
-module.exports = { enviarLeadDaConversa, listarEtapasCrm }
+module.exports = { enviarLeadDaConversa, registrarMovimentacaoDaConversa, listarEtapasCrm }

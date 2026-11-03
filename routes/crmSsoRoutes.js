@@ -35,4 +35,8 @@ router.get('/etapas', auth, crmLead.listarEtapasCrm)
 // "Enviar ao CRM" a partir de uma conversa → cria/atualiza o lead no CRM Avançado.
 router.post('/leads/from-conversa/:conversaId', auth, crmLead.enviarLeadDaConversa)
 
+// "Registrar movimentação" a partir de uma conversa → grava uma observação na
+// oportunidade do cliente no CRM Avançado SEM mudar a etapa (rota irmã do /lead).
+router.post('/movimentacao/from-conversa/:conversaId', auth, crmLead.registrarMovimentacaoDaConversa)
+
 module.exports = router

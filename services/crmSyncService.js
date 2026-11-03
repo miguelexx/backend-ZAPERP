@@ -243,6 +243,40 @@ function syncLead(p = {}) {
 }
 
 /**
+ * Registrar movimentação → POST /movimentacao
+ *
+ * Grava uma OBSERVAÇÃO na oportunidade do cliente no CRM Avançado SEM mudar a
+ * etapa do funil (diferente de syncLead, que cria/move o lead). Reaproveita os
+ * MESMOS ids externos do ZapERP que o /lead usa (leadId=conversaId,
+ * contatoId=cliente.id), com `telefone` como fallback — o CRM localiza a
+ * oportunidade por eles.
+ *
+ * O CRM exige companyId + usuarioId (idExternoZap do atendente) + texto. Devolve
+ * 409 quando o cliente ainda não está em nenhuma etapa do funil (precisa do
+ * "Enviar ao CRM" antes); a mensagem real é preservada (crmErrorFromResponse).
+ *
+ * NOTA: a chave da empresa no corpo é `companyId` (contrato do endpoint de
+ * movimentação), não `empresaId` como no /lead.
+ *
+ * @param {{ companyId:number|string, usuarioId:number|string, texto:string,
+ *           leadId?:number|string, contatoId?:number|string, telefone?:string }} p
+ */
+function registrarMovimentacao(p = {}) {
+  const companyId = idToString(p.companyId)
+  const usuarioId = idToString(p.usuarioId)
+  const texto = typeof p.texto === 'string' ? p.texto.trim() : ''
+  if (!companyId || !usuarioId || !texto) return Promise.resolve(null)
+  return post('/movimentacao', pruneEmpty({
+    companyId,
+    usuarioId,
+    texto,
+    leadId: idToString(p.leadId),
+    contatoId: idToString(p.contatoId),
+    telefone: p.telefone,
+  }))
+}
+
+/**
  * Lista as etapas (colunas do funil) do CRM Avançado da empresa.
  *   → GET /api/webhooks/zaperp/empresa/:empresaId/etapas
  *
@@ -347,6 +381,7 @@ module.exports = {
   syncEmpresa,
   syncContato,
   syncLead,
+  registrarMovimentacao,
   resumoEmpresa,
   listEtapas,
   forwardInboundMessage,
