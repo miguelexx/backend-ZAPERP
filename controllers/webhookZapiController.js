@@ -1411,15 +1411,21 @@ exports.receberZapi = async (req, res) => {
           if (cfg.reabrirAutomaticamente) {
             const depAntesReabrir =
               convStatus?.departamento_id != null ? Number(convStatus.departamento_id) : null
-            const snap = await fetchLastAbsenceEncerramentoSnap(conversa_id)
-            const assign = await resolveReopenAssignmentAfterAbsence(company_id, snap)
-            const deptoRestaurar =
-              snap?.departamento_id != null && Number(snap.departamento_id) > 0
-                ? Number(snap.departamento_id)
-                : depAntesReabrir
-            const { data: reabertaAusencia } = await supabase
-              .from('conversas')
-              .update({
+            // "Ir direto ao atendente" (reabrirSemChatbot): retoma o atendente/setor do
+            // encerramento e pula o menu. DESLIGADO: reabre para TODOS os atendentes (sem dono
+            // e sem setor) e passa de novo pelo menu do chatbot — como um contato novo.
+            const irDiretoAtendente = cfg.reabrirSemChatbot !== false
+            let updatePatch
+            let assignAtendenteId = null
+            if (irDiretoAtendente) {
+              const snap = await fetchLastAbsenceEncerramentoSnap(conversa_id)
+              const assign = await resolveReopenAssignmentAfterAbsence(company_id, snap)
+              const deptoRestaurar =
+                snap?.departamento_id != null && Number(snap.departamento_id) > 0
+                  ? Number(snap.departamento_id)
+                  : depAntesReabrir
+              assignAtendenteId = assign.atendente_id
+              updatePatch = {
                 status_atendimento: assign.status_atendimento,
                 departamento_id: deptoRestaurar,
                 atendente_id: assign.atendente_id,
@@ -1428,7 +1434,22 @@ exports.receberZapi = async (req, res) => {
                 finalizada_automaticamente: false,
                 finalizada_automaticamente_em: null,
                 aguardando_cliente_desde: null,
-              })
+              }
+            } else {
+              updatePatch = {
+                status_atendimento: 'aberta',
+                departamento_id: null,
+                atendente_id: null,
+                atendente_atribuido_em: null,
+                finalizacao_motivo: null,
+                finalizada_automaticamente: false,
+                finalizada_automaticamente_em: null,
+                aguardando_cliente_desde: null,
+              }
+            }
+            const { data: reabertaAusencia } = await supabase
+              .from('conversas')
+              .update(updatePatch)
               .eq('id', conversa_id)
               .eq('company_id', company_id)
               .eq('status_atendimento', st)
@@ -1441,17 +1462,24 @@ exports.receberZapi = async (req, res) => {
               await clearReabertaFaltaInteracao(company_id, conversa_id)
               reabertaAusencia.reaberta_falta_interacao_em = null
               reabertaAusencia.reaberta_por_falta_interacao = false
+              if (!irDiretoAtendente) {
+                // Volta ao menu de triagem: zera o estado do bot para o cliente escolher o setor
+                // de novo (o gate do chatbot abaixo exige departamento_id e atendente_id nulos).
+                const { resetChatbotStateForConversa } = require('../services/chatbotTriageService')
+                await resetChatbotStateForConversa(supabase, company_id, conversa_id)
+              }
               await supabase.from('historico_atendimentos').insert({
                 conversa_id,
                 usuario_id: null,
                 acao: 'reabertura_automatica_ausencia',
-                observacao:
-                  'Reaberto pelo cliente após encerramento automático por ausência — retomada sem novo menu de triagem',
+                observacao: irDiretoAtendente
+                  ? 'Reaberto pelo cliente após encerramento automático por ausência — retomada sem novo menu de triagem'
+                  : 'Reaberto pelo cliente após encerramento automático por ausência — liberado para todos os atendentes via menu de triagem',
               })
               await logBotAction(company_id, conversa_id, 'reabertura_automatica_ausencia', {
-                bypass_chatbot: cfg.reabrirSemChatbot,
-                status_atendimento: assign.status_atendimento,
-                atendente_restaurado: assign.atendente_id,
+                bypass_chatbot: irDiretoAtendente,
+                status_atendimento: updatePatch.status_atendimento,
+                atendente_restaurado: assignAtendenteId,
               })
               const io = req.app.get('io')
               if (io) {
