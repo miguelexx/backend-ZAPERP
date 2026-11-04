@@ -791,6 +791,74 @@ async function applyWhapiPollMessageUpdate(ctxSrc, update, io) {
   return { pollRow: updated, lastVoteOptions, trigger }
 }
 
+/** Formata um valor monetário cheio (não centavos) para o resumo de pedido/produto inbound. */
+function formatWhapiMoney(value, currency) {
+  const n = Number(value)
+  if (!Number.isFinite(n)) return ''
+  const code = String(currency || '').trim().toUpperCase()
+  try {
+    return new Intl.NumberFormat('pt-BR', { style: 'currency', currency: code || 'BRL' }).format(n)
+  } catch {
+    return `${n.toFixed(2)}${code ? ` ${code}` : ''}`
+  }
+}
+
+/**
+ * Resumo legível de um pedido recebido (type 'order'). A API Whapi entrega só o agregado
+ * (item_count, total_price, currency) — sem os itens individuais —, então mostramos uma linha
+ * em vez de um cartão por produto.
+ */
+function buildWhapiOrderSummary(order) {
+  if (!order || typeof order !== 'object') return ''
+  const partes = ['🛒 Pedido recebido']
+  const itemCount = Number(order.item_count)
+  if (Number.isFinite(itemCount) && itemCount > 0) {
+    partes.push(`${itemCount} ${itemCount > 1 ? 'itens' : 'item'}`)
+  }
+  const preco = formatWhapiMoney(order.total_price, order.currency)
+  if (preco) partes.push(preco)
+  return partes.join(' • ')
+}
+
+/**
+ * Produto recebido do cliente (type 'product'): a mensagem só traz product_id + catalog_id.
+ * Resolve nome/preço/moeda/imagem no catálogo Whapi (best-effort, espelha enrichNormalizedPollVote)
+ * para a bolha mostrar o cartão. Falha de rede nunca derruba o inbound — fica o cartão mínimo.
+ */
+async function enrichNormalizedProduct(normalized, ctxSrc) {
+  const ref = normalized?.productRef
+  if (!ref || ctxSrc?.company_id == null) return normalized
+  const productId = String(ref.product_id || '').trim()
+  const meta = { id: productId || null, catalog_id: ref.catalog_id || null, name: null, price: null, currency: null, image: null }
+  if (productId) {
+    try {
+      const whapiCatalog = require('../services/providers/whapi/catalog')
+      const res = await whapiCatalog.getProduct(productId, {
+        companyId: ctxSrc.company_id,
+        whatsappInstanceId: ctxSrc.whatsapp_instance_id || undefined,
+      })
+      const p = res && res.ok ? res.product : null
+      if (p) {
+        meta.name = p.name || null
+        meta.price = p.price != null ? p.price : (p.sale_price != null ? p.sale_price : null)
+        meta.currency = p.currency || null
+        meta.image = p.image || (Array.isArray(p.images) ? p.images[0] : null) || null
+      }
+    } catch (e) {
+      console.warn('[WHAPI] getProduct inbound falhou:', e?.message || e)
+    }
+  }
+  normalized.productMeta = meta
+  const nome = meta.name ? String(meta.name).trim() : ''
+  const preco = meta.price != null ? formatWhapiMoney(meta.price, meta.currency) : ''
+  const body = nome ? ['🛍️ ' + nome, preco].filter(Boolean).join('\n') : '🛍️ Produto'
+  normalized.body = body
+  normalized.message = body
+  normalized.text = { message: body }
+  normalized.texto = body
+  return normalized
+}
+
 function normalizeWhapiMessageToInternal(m, ctx = {}) {
   if (!m || typeof m !== 'object') return null
   const channelId = ctx.channelId
@@ -809,6 +877,16 @@ function normalizeWhapiMessageToInternal(m, ctx = {}) {
     || type === 'edit'
     || actionType === 'edit'
   )
+  // Produto compartilhado pelo cliente (type 'product'): só vem product_id + catalog_id;
+  // nome/preço/imagem são resolvidos depois por enrichNormalizedProduct (catálogo Whapi).
+  const productRef = (type === 'product' && m.product && typeof m.product === 'object')
+    ? {
+        product_id: String(m.product.product_id ?? m.product.id ?? '').trim() || null,
+        catalog_id: String(m.product.catalog_id ?? '').trim() || null,
+      }
+    : null
+  // Pedido (carrinho) do cliente (type 'order'): resumo agregado — a API Whapi não envia os itens.
+  const orderSummary = type === 'order' ? buildWhapiOrderSummary(m.order) : ''
   // Outros `action` (ex. media_notify) não são mensagem de atendimento — edit/vote/reaction passam.
   if (type === 'action' && !isReaction && !isPollVote && !isEdit) return null
   if (type === 'deleted' || type === 'revoke' || type === 'revoked' || m.deleted === true) return null
@@ -862,6 +940,8 @@ function normalizeWhapiMessageToInternal(m, ctx = {}) {
     || (interactiveReply && (interactiveReply.title || interactiveReply.id))
     || pollVotePreview
     || (pollMsg && pollPreviewText(pollMsg))
+    || orderSummary
+    || (productRef ? '🛍️ Produto' : '')
     || m.body
     || m.caption
     || m[type]?.caption
@@ -945,6 +1025,9 @@ function normalizeWhapiMessageToInternal(m, ctx = {}) {
     : (type === 'live_location') ? 'location'
     : (type === 'gif' || type === 'short') ? 'video'
     : (type === 'contacts' || type === 'contact_list' || (contactsArray && contactsArray.length > 1)) ? 'contact'
+    // Produto → cartão (bolha product). Pedido → texto (resumo agregado; sem cartão por item).
+    : (type === 'product') ? 'product'
+    : (type === 'order') ? 'chat'
     : type
 
   return {
@@ -1003,6 +1086,7 @@ function normalizeWhapiMessageToInternal(m, ctx = {}) {
     ...(reactionPayload ? { reaction: reactionPayload } : {}),
     ...(contactPayload ? { contact: contactPayload } : {}),
     ...(contactsArray && contactsArray.length ? { contacts: contactsArray } : {}),
+    ...(productRef ? { productRef } : {}),
     isEdit,
   }
 }
@@ -1311,6 +1395,13 @@ async function handleWebhookWhapi(req, res) {
           console.warn('[WHAPI] enrich poll vote falhou:', e?.message || e)
         }
       }
+      if (normalized.productRef) {
+        try {
+          normalized = await enrichNormalizedProduct(normalized, ctxSrc)
+        } catch (e) {
+          console.warn('[WHAPI] enrich produto falhou:', e?.message || e)
+        }
+      }
       // Evento Z-API = ReceivedCallback; o tipo de conteúdo (chat/image/poll/…) fica em msgType
       // para extractMessage não achatar enquete/mídia em texto.
       normalized.msgType = normalized.type
@@ -1431,6 +1522,8 @@ exports._test = {
   normalizeWhapiPresence,
   resolvePollVoteLabels,
   enrichNormalizedPollVote,
+  enrichNormalizedProduct,
+  buildWhapiOrderSummary,
   whapiMessageEpochMs,
   whapiInboundIsHistorical,
   getWhapiInboundMaxAgeMs,

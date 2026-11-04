@@ -204,6 +204,12 @@ const storage = multer.diskStorage({
 
 const upload = multer({
   storage,
+  // Nome do arquivo em UTF-8: o busboy decodifica o `filename` do multipart como latin1 por
+  // padrão, então "Orçamento.pdf" (bytes UTF-8 do browser) virava "OrÃ§amento.pdf" em
+  // `file.originalname` — e esse nome ia para `nome_arquivo` (card/thread) e para o próprio
+  // documento enviado ao WhatsApp. Navegadores mandam o filename em UTF-8, então decodificar
+  // como UTF-8 recupera acento, cedilha e travessão sem heurística de "desmojibakar".
+  defParamCharset: 'utf8',
   // Limite físico do parser. Tipos não-vídeo continuam limitados a 32 MB logo abaixo.
   limits: { fileSize: VIDEO_SOURCE_UPLOAD_MAX_BYTES },
   fileFilter: (req, file, cb) => {

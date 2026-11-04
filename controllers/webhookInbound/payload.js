@@ -606,6 +606,13 @@ function extractMessage(payload) {
     }
   }
 
+  // Produto compartilhado pelo cliente (Whapi type 'product'): o normalizador já resolveu
+  // nome/preço/imagem no catálogo e anexou payload.productMeta. Aqui só repassamos adiante.
+  const productMeta = (payload.productMeta && typeof payload.productMeta === 'object') ? payload.productMeta : null
+  if (type === 'product' && !texto) {
+    texto = productMeta?.name ? `🛍️ ${String(productMeta.name).trim()}` : '(produto)'
+  }
+
   let pollMeta = null
   if (type === 'poll') {
     const p = payload.pollMeta || payload.poll || {}
@@ -673,7 +680,8 @@ function extractMessage(payload) {
     chatPhoto: chatPhoto && String(chatPhoto).trim() ? String(chatPhoto).trim() : null,
     contactMeta,
     locationMeta,
-    pollMeta
+    pollMeta,
+    productMeta
   }
 }
 

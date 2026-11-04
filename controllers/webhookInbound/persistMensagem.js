@@ -257,7 +257,7 @@ function nomeArquivoDoTexto(texto) {
 function applyInboundMediaFields(insertMsg, media) {
   const {
     type, imageUrl, documentUrl, audioUrl, videoUrl, stickerUrl,
-    locationUrl, locationMeta, contactMeta, pollMeta, fileName, diag = {},
+    locationUrl, locationMeta, contactMeta, pollMeta, productMeta, fileName, diag = {},
   } = media || {}
 
   if (type === 'image' && imageUrl) {
@@ -312,6 +312,12 @@ function applyInboundMediaFields(insertMsg, media) {
     insertMsg.tipo = 'poll'
     if (pollMeta && (pollMeta.title || (Array.isArray(pollMeta.options) && pollMeta.options.length))) {
       insertMsg.reply_meta = { ...(insertMsg.reply_meta && typeof insertMsg.reply_meta === 'object' ? insertMsg.reply_meta : {}), poll: pollMeta }
+    }
+  } else if (type === 'product') {
+    // Produto recebido do cliente: a bolha (ProductMessage) lê reply_meta.product { id, name, price, currency, image }.
+    insertMsg.tipo = 'product'
+    if (productMeta && typeof productMeta === 'object') {
+      insertMsg.reply_meta = { ...(insertMsg.reply_meta && typeof insertMsg.reply_meta === 'object' ? insertMsg.reply_meta : {}), product: productMeta }
     }
   } else if (type === 'reaction') {
     insertMsg.tipo = 'reaction'

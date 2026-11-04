@@ -848,7 +848,8 @@ exports.receberZapi = async (req, res) => {
         chatPhoto,
         contactMeta,
         locationMeta,
-        pollMeta
+        pollMeta,
+        productMeta
       } = extracted
 
       // Newsletters (canais) e Status/broadcast não são conversas de atendimento — ignorar silenciosamente
@@ -2235,7 +2236,7 @@ exports.receberZapi = async (req, res) => {
       }
       // Mapeamento tipo/mídia → campos do row (puro) → controllers/webhookInbound/persistMensagem.js.
       applyInboundMediaFields(insertMsg, {
-        type, imageUrl, documentUrl, audioUrl, videoUrl, stickerUrl, locationUrl, locationMeta, contactMeta, pollMeta, fileName,
+        type, imageUrl, documentUrl, audioUrl, videoUrl, stickerUrl, locationUrl, locationMeta, contactMeta, pollMeta, productMeta, fileName,
         diag: { company_id, conversa_id, whatsapp_id: whatsappIdStr || null, whatsapp_instance_id: whatsapp_instance_id || null, fromMe },
       })
       // Demais tipos: já têm texto preenchido; tipo padrão é texto

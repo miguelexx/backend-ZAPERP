@@ -20,7 +20,7 @@ function canonicalBrWhatsappForStorage(canonical) {
   }
   return c
 }
-const { chooseBestName, isBadName } = require('./contactEnrichment')
+const { chooseBestName, isBadName } = require('./contactEnrichment')
 const { telefoneParaLog } = require('./redactLogPII')
 const WHATSAPP_DEBUG = String(process.env.WHATSAPP_DEBUG || '').toLowerCase() === 'true'
 const {
@@ -544,6 +544,41 @@ function selectConversationsByPhoneVariants(supabaseClient, company_id, variants
     whatsappInstanceId,
     allowLegacyNullInstance
   )
+}
+
+/**
+ * Conversas legadas (whatsapp_instance_id IS NULL) do mesmo número — usadas só para ADOÇÃO
+ * quando a empresa tem UMA ÚNICA instância ativa (sem ambiguidade de número). Não entram na
+ * busca escopada normal quando a instância do inbound não é default.
+ */
+function selectLegacyNullConversationsByPhoneVariants(supabaseClient, company_id, variants, limit = 20) {
+  return supabaseClient
+    .from('conversas')
+    .select(CONVERSA_INSTANCE_SELECT)
+    .eq('company_id', company_id)
+    .in('telefone', variants)
+    .is('whatsapp_instance_id', null)
+    .order('ultima_atividade', { ascending: false })
+    .order('id', { ascending: false })
+    .limit(limit)
+}
+
+/**
+ * Empresa tem exatamente UMA instância ativa, e é a do inbound? Então não há ambiguidade de
+ * número e uma conversa legada (instância NULL) pode ser adotada com segurança — espelha a regra
+ * já usada em ações manuais (resolveWhatsappInstanceForManualAction / getDefaultWhatsappInstance).
+ * require tardio: evita ciclo de carga e mantém o helper testável (jest.mock do serviço).
+ */
+async function companyHasSingleActiveWhatsappInstanceMatching(company_id, whatsappInstanceId) {
+  try {
+    const { listWhatsappInstances } = require('../services/whatsappInstanceService')
+    const { instances } = await listWhatsappInstances(company_id)
+    const active = (Array.isArray(instances) ? instances : []).filter((i) => i && i.ativo !== false)
+    return active.length === 1 && Number(active[0].id) === Number(whatsappInstanceId)
+  } catch (e) {
+    console.warn('[conversationSync] companyHasSingleActiveWhatsappInstanceMatching:', e?.message || e)
+    return false
+  }
 }
 
 async function findClienteRowForPhone(supabaseClient, company_id, phone, telefoneCanonico, searchPhones, opts = {}) {
@@ -1135,6 +1170,38 @@ async function findOrCreateConversation(supabaseClient, {
 
     conv = await attachWhatsappInstanceToLegacyConversation(supabaseClient, company_id, conv, whatsappInstanceId)
     return { conversa: conv, created: false }
+  }
+
+  // 5.5) ADOÇÃO de conversa legada (instância NULL) em empresa de INSTÂNCIA ÚNICA ativa.
+  // Sem is_default marcado, o inbound de um número único NÃO adotava a conversa legada e criava
+  // uma conversa nova vazia — "rachando" o histórico (que ficava na conversa NULL). Aqui, só no
+  // ramo de criação e só quando há exatamente UMA instância ativa (= a do inbound), reaproveita e
+  // carimba a conversa legada. Empresa multi-número (2+ ativas) NÃO dispara: isolamento intacto.
+  if (whatsappInstanceId && !allowLegacyNullInstance) {
+    const { data: legacyNullRows } = await selectLegacyNullConversationsByPhoneVariants(
+      supabaseClient,
+      company_id,
+      variants
+    )
+    if (
+      Array.isArray(legacyNullRows) &&
+      legacyNullRows.length > 0 &&
+      (await companyHasSingleActiveWhatsappInstanceMatching(company_id, whatsappInstanceId))
+    ) {
+      const canonicalLegacy = legacyNullRows[0]
+      if (legacyNullRows.length > 1 && !isGroup) {
+        const dupIds = legacyNullRows.slice(1).map((c) => c.id).filter(Boolean)
+        await mergeConversasIntoCanonico(supabaseClient, company_id, canonicalLegacy.id, dupIds, { io })
+      }
+      const adopted = await attachWhatsappInstanceToLegacyConversation(
+        supabaseClient,
+        company_id,
+        canonicalLegacy,
+        whatsappInstanceId
+      )
+      console.log(`[findOrCreateConversation] ${logPrefix} ♻️ adotou conversa legada (instância única ativa) conv=${adopted.id}`)
+      return { conversa: adopted, created: false }
+    }
   }
 
   // 6) Não encontrou — criar com telefone CANÔNICO (grupos: sempre dígitos para consistência)
