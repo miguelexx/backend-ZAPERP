@@ -69,7 +69,17 @@ async function ensureConversaForCliente({
   }
 
   if (!result?.conversa?.id) {
-    return { ok: false, error: 'Não foi possível localizar ou criar conversa', conversa: null, criada: false }
+    // `findOrCreateConversation` só chega aqui sem conversa quando o telefone do contato não
+    // normaliza para um número de WhatsApp (qualquer outra falha é exceção, tratada acima).
+    // Isso é erro de DADO do cadastro, não falha do servidor: o chamador responde 400 e diz
+    // o que fazer, em vez de 500 ("Erro no servidor") sem ação possível. Doc 39.
+    return {
+      ok: false,
+      error: 'O número deste contato não é válido para WhatsApp. Edite o contato e corrija o telefone (DDD + número).',
+      codigo: 'TELEFONE_CONTATO_INVALIDO',
+      conversa: null,
+      criada: false,
+    }
   }
 
   const convId = Number(result.conversa.id)

@@ -11,7 +11,7 @@ const { getProvider } = require('./providers')
 const { resolveContactSyncInstance } = require('./chat/identity/conversationAddressService')
 const { getEmpresaWhatsappConfig } = require('./whatsappConfigService')
 const { getOrCreateCliente } = require('../helpers/conversationSync')
-const { normalizePhoneBR, possiblePhonesBR, possiblePhonesForWhatsappIdentity, phoneKeyBR } = require('../helpers/phoneHelper')
+const { normalizePhoneBR, normalizePhoneBRParaCadastro, possiblePhonesBR, possiblePhonesForWhatsappIdentity, phoneKeyBR } = require('../helpers/phoneHelper')
 const { isBadName, chooseBestName } = require('../helpers/contactEnrichment')
 const { clienteTemNomeProtegido } = require('../helpers/clienteNomeProtecao')
 const { marcarSchemaNomeProtecaoIndisponivel } = require('../helpers/clienteNomeColunas')
@@ -99,7 +99,11 @@ function parseAgendaContact(raw) {
   if (!digits || digits.length < MIN_PHONE_DIGITS) return null
 
   const explicitIntl = phoneStr.startsWith('+') || phoneStr.includes('@')
-  const normBR = explicitIntl && !digits.startsWith('55') ? '' : normalizePhoneBR(digits)
+  // `normalizePhoneBRParaCadastro` (e não `normalizePhoneBR`) porque a agenda do celular é a
+  // origem do tronco "0" antes do DDD ("034 99826-5514", "+55 (034) 9826-5514"). Sem isto o
+  // contato era importado como "internacional" e nunca abria conversa — doc 39. Para número
+  // que já vem certo as duas funções devolvem exatamente o mesmo valor.
+  const normBR = explicitIntl && !digits.startsWith('55') ? '' : normalizePhoneBRParaCadastro(digits)
   let phoneNorm = normBR
   let isBR = true
   if (!phoneNorm) {

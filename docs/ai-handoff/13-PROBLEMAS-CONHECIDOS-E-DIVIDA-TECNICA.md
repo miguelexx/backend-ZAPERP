@@ -41,6 +41,30 @@
 | **CONFIRMADO · alto (Disparo)** | `POST .../execucao/iniciar` (campanha 23 em produção) devolvia **500**. Causa: `upsert` da fila com `ON CONFLICT (chave_idempotencia)` (constraint ausente/cache PostgREST) e FK de instância/variação sumida. Wizard ainda dava `POST /limites` com campanha `pronta` → **422** no console. | **Corrigido (2026-09-04):** insert das chaves novas; unique de execução ativa reaproveitada; FK/unique viram **422**; instância ausente bloqueia; wizard congelado não grava limites. |
 | **CONFIRMADO · alto (Disparo)** | Campanha 23 iniciou (eventos: iniciada → pausada → retomada) com **0 itens na fila**. Causa: execução criada e o fill da fila falhou; retry/idempotência devolvia a execução vazia; `iniciar` em `em_execucao` nem chamava `gerarFilaParaCampanha`. | **Corrigido (2026-09-04):** execução existente incompleta é preenchida; `iniciar`/`continuar` completam a fila; UI gera fila automaticamente se `em_execucao` e `total_itens=0`. |
 
+## Endereço de destino corrompido pelo `55` — envio que nunca sai (2026-11-05)
+
+**CÓDIGO CORRIGIDO (05/11, não deployado) · PASSIVO ABERTO.** `normalizePhoneBR` prefixava `55`
+em qualquer número de 10 ou 11 dígitos. Um celular francês `+33 780259005` virou `5533780259005`;
+a Whapi aceita o POST, devolve id e a mensagem fica `pending` **para sempre** — nunca transmitida.
+Como existe `whatsapp_id`, `messageTicks.js:157` desenha ✓ ("enviada"), e
+`pendingOutboundReconciliationService.js:276` devolve `keep_provider_pending` sem alertar ninguém.
+
+Medido em produção em 05/11/2026: **61 mensagens em 30 conversas de 7 empresas** presas em
+`pending` com id do provedor (todas exibidas como enviadas); **74 conversas** com a assinatura do
+`55` indevido. Número estrangeiro de 12+ dígitos não é corrompido — é **descartado**
+(`getCanonicalPhone` devolve `''`).
+
+**Corrigido no código:** 11 dígitos só ganham `55` quando podem ser celular BR (DDD da Anatel +
+nono dígito); a busca passa a tentar também a forma legada, então o registro antigo continua
+sendo encontrado e nenhuma conversa duplica. Suíte: 3473 testes verdes.
+
+**Continua aberto:** as **75 conversas** já gravadas (13 empresas) ainda têm o `55` indevido em
+`conversas.telefone` e o envio continua indo para lá — é reparo de DADO, bloco 5 do SQL, e só
+depois do **deploy** do backend (antes dele, trocar o telefone duplica a conversa). Também
+continua aberto o tique único que mistura `pending` com `sent`. Laudo, evidência do provedor e
+SQL em [38](38-AUDITORIA-ENDERECO-DESTINO-CORROMPIDO.md) e
+`scripts/diagnostico_endereco_destino_corrompido.sql`.
+
 ## "Buscar histórico no WhatsApp" — causa e limitação (2026-08-25)
 
 Fluxo rastreado: botão em `frontend/src/conversa/ConversaThread.jsx` → `carregarMensagensAntigasContato` (chatService) → `POST /chats/:id/mensagens/sync-old` → fachada `chatController.carregarMensagensAntigasContato` (**reexport** de `controllers/chat/messageReadController.js`) → `oldMessagesSyncService.syncOldMessagesForConversation` → `providers/ultramsg.getChatMessages` → `GET /instance{id}/chats/messages?chatId=…&limit=1000` (com paginação por `lastMessageId`, até `OLD_MESSAGES_SYNC_MAX_PAGES`). A importação já é idempotente (dedup por `whatsapp_id`, upgrade de placeholder, tratamento de `23505`), cria a conversa como `fechada`/`lida` e **não** dispara chatbot, notificação nem reabertura.

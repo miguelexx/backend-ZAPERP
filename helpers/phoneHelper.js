@@ -4,6 +4,59 @@
  * Grupos: preservar JID com @g.us.
  */
 
+/** DDDs em uso no Brasil (Anatel). Usado só para decidir se 11 dígitos podem ser BR. */
+const DDDS_BR = new Set([
+  '11', '12', '13', '14', '15', '16', '17', '18', '19',
+  '21', '22', '24', '27', '28',
+  '31', '32', '33', '34', '35', '37', '38',
+  '41', '42', '43', '44', '45', '46', '47', '48', '49',
+  '51', '53', '54', '55',
+  '61', '62', '63', '64', '65', '66', '67', '68', '69',
+  '71', '73', '74', '75', '77', '79',
+  '81', '82', '83', '84', '85', '86', '87', '88', '89',
+  '91', '92', '93', '94', '95', '96', '97', '98', '99',
+])
+
+/**
+ * 11 dígitos que PODEM ser um celular brasileiro sem DDI: DDD válido + `9` + 8 dígitos.
+ *
+ * Desde a universalização do nono dígito, todo número brasileiro de 11 dígitos é
+ * `DDD + 9 + 8`. Logo, 11 dígitos cujo terceiro dígito não é `9` (ou cujo DDD não existe)
+ * NÃO é brasileiro — é número estrangeiro com DDI: `+33 780259005` (França),
+ * `+1 415 2223333` (EUA), `+34 612345678` (Espanha), `+56 912345678` (Chile).
+ *
+ * @param {string} digits - somente dígitos
+ * @returns {boolean}
+ */
+function podeSerCelularBrSemDdi(digits) {
+  const d = String(digits || '')
+  if (d.length !== 11) return false
+  if (d.charAt(2) !== '9') return false
+  return DDDS_BR.has(d.slice(0, 2))
+}
+
+/**
+ * Forma LEGADA de um endereço internacional de 11 dígitos: o mesmo número com o `55`
+ * que `normalizePhoneBR` colava na frente antes da correção do doc 38.
+ *
+ * Serve só para BUSCA: registros gravados antes da correção (ex.: conversa do contato
+ * francês guardada como `5533780259005`) precisam continuar casando com a chave nova
+ * (`33780259005`), senão o próximo inbound abriria uma segunda conversa e o histórico
+ * pareceria ter sumido. Devolve `''` quando não se aplica.
+ *
+ * Não há risco de casar com outra pessoa: `'55' + X` só existe como número brasileiro
+ * de verdade quando `X` é celular BR — e esse caso nem chega aqui.
+ *
+ * @param {string} digits - somente dígitos
+ * @returns {string}
+ */
+function formaLegadaCom55(digits) {
+  const d = String(digits || '')
+  if (d.length !== 11 || d.startsWith('0')) return ''
+  if (podeSerCelularBrSemDdi(d)) return ''
+  return '55' + d
+}
+
 /**
  * Normaliza telefone para padrão Brasil (armazenamento/consulta).
  * - Grupos: retorna o JID intacto (ex: 120363...@g.us).
@@ -29,10 +82,114 @@ function normalizePhoneBR(phone) {
   // - já vem com DDI 55: 55 + DDD(2) + número (8/9) => 12/13
   if (digits.startsWith('55') && (digits.length === 12 || digits.length === 13)) return digits
   // - às vezes vem só DDD+numero (10/11)
-  if (digits.length === 10 || digits.length === 11) return '55' + digits
+  //
+  // 11 dígitos: colar `55` em QUALQUER coisa transformava número estrangeiro em endereço
+  // inexistente — `+33 780259005` (França) virava `5533780259005`, a Whapi aceitava o envio
+  // e nunca entregava (doc 38). Hoje só ganha o DDI o que pode ser celular BR
+  // (DDD válido + nono dígito); o resto já é endereço internacional completo e volta intacto.
+  // Nada deixa de ser aceito: os dois ramos devolvem número, como antes.
+  // Tronco "0" (`034…`) segue o caminho antigo de propósito — a correção dele mora na
+  // escrita (`normalizePhoneBRParaCadastro`, doc 39 §8).
+  if (digits.length === 10) return '55' + digits
+  if (digits.length === 11) {
+    if (digits.startsWith('0') || podeSerCelularBrSemDdi(digits)) return '55' + digits
+    return digits
+  }
+
+  // ✅ Tronco "0" antes do DDD — hábito de agenda de celular ("034 99826-5514",
+  // "+55 (034) 99826-5514"). Sem isto o contato era importado/cadastrado com um número
+  // que NENHUM caminho de leitura aceita: aparecia na busca mas estourava 500 ao abrir
+  // ("Não foi possível localizar ou criar conversa"). Doc 39.
+  //
+  // SEGURANÇA: este bloco roda DEPOIS de todas as regras acima, ou seja, só vê entradas
+  // que hoje já retornam ''. Nenhum número hoje aceito muda de resultado — inclusive o
+  // "550…" de 13 dígitos, que a regra BR strict acima já devolve intacto (ver doc 39 §8).
+  // Só converte quando o resultado cai EXATAMENTE num formato BR válido; caso ambíguo
+  // (ex.: código de operadora "041…") continua recusado.
+  let semTronco = digits.replace(/^0+/, '')
+  // "55" + "0" + DDD (13/14 díg.): o tronco está DEPOIS do DDI. Só aqui, no ramo já
+  // recusado — o "550…" de 13 dígitos que a regra BR strict aceita acima não passa por aqui.
+  if (semTronco.startsWith('550') && (semTronco.length === 13 || semTronco.length === 14)) {
+    semTronco = '55' + semTronco.slice(2).replace(/^0+/, '')
+  }
+  if (semTronco && semTronco !== digits) {
+    if (semTronco.length === 10 || semTronco.length === 11) return comDdiSeForBrValido('55' + semTronco)
+    if (semTronco.startsWith('55') && (semTronco.length === 12 || semTronco.length === 13)) {
+      return comDdiSeForBrValido(semTronco)
+    }
+  }
 
   // Qualquer outra coisa (ex.: timestamps/IDs) NÃO é telefone BR
   return ''
+}
+
+/**
+ * Guarda de formato para o ramo de RECUPERAÇÃO de tronco (e só para ele): devolve o número
+ * apenas se ele for `55` + DDD começando em 1–9 + 8/9 dígitos. DDD brasileiro nunca começa
+ * com 0, então isto impede que uma recuperação transforme lixo em "telefone válido".
+ * Não é aplicado ao que a regra BR strict já aceitava — esse caminho fica intacto.
+ */
+function comDdiSeForBrValido(digits) {
+  return /^55[1-9]\d{9,10}$/.test(digits) ? digits : ''
+}
+
+/**
+ * Telefone vindo da AGENDA do celular / cadastro manual (caminho de ESCRITA).
+ *
+ * Igual a `normalizePhoneBR`, com um caso a mais: `55` + `0` + DDD, de 13 ou 14 dígitos
+ * ("+55 (034) 9826-5514"). Esse formato de 13 dígitos é aceito intacto pela regra BR strict
+ * (`55` + 11 dígitos) e vira um endereço inexistente no WhatsApp — o envio sai com ✓ e nunca
+ * chega (família do doc 38). Aqui, no momento de GRAVAR, ele é corrigido.
+ *
+ * Por que uma função separada: `normalizePhoneBR` é usada em dezenas de pontos de LEITURA
+ * (busca, dedup, roteamento de inbound). Mudar lá o que hoje é aceito faria registros antigos
+ * gravados como `550…` deixarem de casar com a própria conversa. Esta variante só é usada
+ * onde o número está entrando no sistema.
+ *
+ * @param {string} phone
+ * @returns {string}
+ */
+function normalizePhoneBRParaCadastro(phone) {
+  const s = String(phone || '').trim()
+  if (!s || s.endsWith('@g.us')) return normalizePhoneBR(phone)
+
+  const digits = s.replace(/\D/g, '')
+
+  // "55" + "0" + DDD → o tronco está depois do DDI ("+55 (034) 9826-5514").
+  if (digits.startsWith('550') && (digits.length === 13 || digits.length === 14)) {
+    const recuperado = comDdiSeForBrValido('55' + digits.slice(2).replace(/^0+/, ''))
+    if (recuperado) return recuperado
+  }
+
+  // "0" + DDD sem DDI ("(034) 9826-5514" → 11 dígitos). A regra BR strict de 10/11 dígitos
+  // aceita isso intacto e produz "5503498265514" (DDD "03", inexistente); por isso a correção
+  // mora aqui, no caminho de escrita, e não na leitura.
+  if (digits.startsWith('0')) {
+    const recuperado = comDdiSeForBrValido('55' + digits.replace(/^0+/, ''))
+    if (recuperado) return recuperado
+  }
+
+  return normalizePhoneBR(phone)
+}
+
+/**
+ * Correção de tronco "0" para quem já tem seu próprio fluxo de normalização.
+ *
+ * Devolve número SOMENTE quando `normalizePhoneBR` (o que o fluxo normal usa) **não** chega
+ * sozinho ao resultado certo — isto é, nas formas que a regra BR strict aceita intactas e
+ * transforma em DDD inexistente: `0` + DDD (11 díg.) e `55` + `0` + DDD (13 díg.).
+ * Em todo o resto devolve `''`.
+ *
+ * Uso: `const telefone = corrigirTroncoZeroBR(entrada) || entrada`. Como só devolve algo no
+ * caso que hoje grava número errado, fica provado que nada muda para quem já entra certo.
+ *
+ * @param {string} phone
+ * @returns {string} número BR canônico corrigido, ou '' se o fluxo normal já resolve
+ */
+function corrigirTroncoZeroBR(phone) {
+  const paraCadastro = normalizePhoneBRParaCadastro(phone)
+  if (!paraCadastro) return ''
+  return paraCadastro !== normalizePhoneBR(phone) ? paraCadastro : ''
 }
 
 /**
@@ -69,6 +226,10 @@ function possiblePhonesBR(phone) {
       list.push(digits.slice(0, 4) + '9' + digits.slice(4))
     }
   }
+  // Endereço internacional: inclui a forma legada com `55` para continuar achando o que
+  // foi gravado antes da correção do doc 38 (sem isto o histórico pareceria ter sumido).
+  const legada = formaLegadaCom55(digits)
+  if (legada) list.push(legada)
   return Array.from(new Set(list.filter(Boolean)))
 }
 
@@ -134,7 +295,13 @@ function toZapiSendFormat(phone) {
   if (!digits) return ''
   // grupo numérico (120...): enviar como está
   if (digits.startsWith('120') && digits.length >= 15 && digits.length <= 22) return digits
-  if (digits.length === 10 || digits.length === 11) return '55' + digits
+  if (digits.length === 10) return '55' + digits
+  // Mesma regra do normalizePhoneBR (doc 38): só vira BR o que pode ser celular BR.
+  // Endereço internacional de 11 dígitos sai como está — é o destino correto para o envio.
+  if (digits.length === 11) {
+    if (digits.startsWith('0') || podeSerCelularBrSemDdi(digits)) return '55' + digits
+    return digits
+  }
   if (!digits.startsWith('55') || digits.length < 12) return ''
 
   if (digits.length === 13) return digits
@@ -215,7 +382,12 @@ function possiblePhonesForWhatsappIdentity(phone) {
   if (!digits || digits.startsWith('120')) return digits && !digits.startsWith('120') ? [digits] : []
 
   const list = [digits]
-  if (!digits.startsWith('55')) return Array.from(new Set(list.filter(Boolean)))
+  if (!digits.startsWith('55')) {
+    // Mesma razão de possiblePhonesBR: achar o registro gravado com o `55` indevido (doc 38).
+    const legada = formaLegadaCom55(digits)
+    if (legada) list.push(legada)
+    return Array.from(new Set(list.filter(Boolean)))
+  }
 
   if (digits.length === 13 && digits.charAt(4) === '9') {
     const without9 = digits.slice(0, 4) + digits.slice(5)
@@ -334,6 +506,10 @@ function pickRealPhoneCandidate(...values) {
 
 module.exports = {
   normalizePhoneBR,
+  normalizePhoneBRParaCadastro,
+  corrigirTroncoZeroBR,
+  podeSerCelularBrSemDdi,
+  formaLegadaCom55,
   toZapiSendFormat,
   preferredBrSendDigits,
   possiblePhonesBR,

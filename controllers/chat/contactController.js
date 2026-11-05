@@ -14,6 +14,7 @@ const { resolveWhatsappInstanceForManualAction } = require('../../services/whats
 const { resolveConversationWhatsappInstance, resolveConversationProvider } = require('../../services/chat/identity/conversationAddressService')
 const { getProvider } = require('../../services/providers')
 const { getCanonicalPhone, getCanonicalPhoneAnyIntl, getOrCreateCliente, findOrCreateConversation } = require('../../helpers/conversationSync')
+const { corrigirTroncoZeroBR } = require('../../helpers/phoneHelper')
 const { emitirEventoEmpresaConversa, emitirConversaAtualizada } = require('../../services/chat/realtime/chatRealtimeGateway')
 const { assertPermissaoConversa, assertPodeEnviarMensagem } = require('../../services/chat/access/conversationPolicy')
 const { loadWhatsappInstanceMetaMap } = require('../../services/chat/read/conversationLookups')
@@ -417,6 +418,11 @@ exports.abrirConversaCliente = async (req, res) => {
           whatsapp_instances: r.whatsapp_instances || [],
         })
       }
+      // Telefone do contato inválido é erro de dado (400 + motivo acionável), não 500:
+      // o 500 virava o toast genérico "Erro no servidor" e o atendente ficava sem saída. Doc 39.
+      if (r.codigo === 'TELEFONE_CONTATO_INVALIDO') {
+        return res.status(400).json({ error: r.error, codigo: r.codigo })
+      }
       const st = r.error === 'Cliente sem telefone cadastrado' ? 400 : 500
       return res.status(st).json({ error: r.error })
     }
@@ -465,10 +471,15 @@ exports.criarContato = async (req, res) => {
     const { company_id, id: usuario_id } = req.user
     const { nome, telefone, whatsapp_instance_id } = req.body
 
-    const telefoneRaw = telefone != null ? String(telefone).trim() : ''
-    if (!telefoneRaw) {
+    const telefoneDigitado = telefone != null ? String(telefone).trim() : ''
+    if (!telefoneDigitado) {
       return res.status(400).json(erroTelefoneNovoContato('TELEFONE_OBRIGATORIO'))
     }
+    // Tronco "0" antes do DDD ("(034) 9826-5514") era gravado como "5503498265514" — DDD
+    // inexistente, envio que sai com ✓ e nunca chega (doc 38/39). `corrigirTroncoZeroBR`
+    // devolve '' quando não há tronco, então para todo número que já entra certo hoje
+    // `telefoneRaw === telefoneDigitado` e nada neste fluxo muda.
+    const telefoneRaw = corrigirTroncoZeroBR(telefoneDigitado) || telefoneDigitado
 
     const instanceRes = await resolveWhatsappInstanceForManualAction(company_id, whatsapp_instance_id)
     if (instanceRes.code === 'SELECIONE_WHATSAPP_INSTANCE') {

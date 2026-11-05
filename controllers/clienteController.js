@@ -12,6 +12,7 @@
 const supabase = require('../config/supabase');
 const { getDisplayName } = require('../helpers/contactEnrichment');
 const { getCanonicalPhone, getCanonicalPhoneAnyIntl, getOrCreateCliente } = require('../helpers/conversationSync');
+const { corrigirTroncoZeroBR } = require('../helpers/phoneHelper');
 const { ensureConversaForCliente } = require('../services/conversaAbrirClienteService');
 const { executarAssumirConversa } = require('../services/conversaAssumirInternoService');
 const { buildClienteListagemSearchOr, buildPhoneSearchTerms } = require('../helpers/chatSearchHelper');
@@ -327,7 +328,12 @@ exports.criarCliente = async (req, res) => {
   const { telefone, wa_id, nome, observacoes, email, empresa, abrir_conversa, assumir, whatsapp_instance_id } = req.body;
   const cid = Number(company_id)
 
-  const telefoneRaw = telefone != null ? String(telefone).trim() : ''
+  const telefoneDigitado = telefone != null ? String(telefone).trim() : ''
+  // Tronco "0" antes do DDD ("(034) 9826-5514", "+55 (034) 99826-5514"): sem corrigir aqui o
+  // contato nasce com um número que o WhatsApp não tem — ou nem abre conversa (doc 39).
+  // `corrigirTroncoZeroBR` devolve '' quando não há tronco, então para todo número que já
+  // entra certo hoje `telefoneRaw === telefoneDigitado` e este fluxo não muda em nada.
+  const telefoneRaw = corrigirTroncoZeroBR(telefoneDigitado) || telefoneDigitado
   const waIdRaw = wa_id != null ? String(wa_id).trim() : ''
 
   if (!telefoneRaw && !waIdRaw) {

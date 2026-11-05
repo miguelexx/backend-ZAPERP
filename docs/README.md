@@ -89,6 +89,8 @@ docs/
 | **Apagar conversa nos dois sentidos (ZapERP ↔ WhatsApp), anti-loop, varredura UltraMSG** | `ai-handoff/34-SINCRONIZACAO-EXCLUSAO-CONVERSA.md` |
 | **Salvar/baixar mídia ("Salvar como…"), Content-Type por bytes, Content-Disposition** | `ai-handoff/35-AUDITORIA-MIDIA-SALVAR-COMO.md` |
 | **Orçamento manual no ERP via API WM (plano de registro, decisões fechadas, o que não tocar)** | `ai-handoff/36-ORCAMENTO-WM-INTEGRACAO.md` |
+| **"Mostra enviada mas não foi" — `55` colado em número estrangeiro, `pending` eterno, tique que mente** | `ai-handoff/38-AUDITORIA-ENDERECO-DESTINO-CORROMPIDO.md` |
+| **Contato aparece na busca ("Sem conversa") e dá erro ao abrir — tronco "0" antes do DDD** | `ai-handoff/39-AUDITORIA-CONTATO-NAO-ABRE-CONVERSA.md` |
 | **Contrato da API WM como recebido (openapi.yaml + 5 documentos, não editar)** | `wm/README.md` |
 | Nomes "zapi" no código | `reference/ADR-LEGACY-NAMING.md` |
 | Regras obrigatórias do projeto | `reference/PROJECT_RULES.md` |
