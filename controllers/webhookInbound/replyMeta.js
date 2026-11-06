@@ -10,9 +10,37 @@
 const supabaseDefault = require('../../config/supabase')
 const { applyWhatsappInstanceFilterOrLegacy } = require('./whatsappIdLookup')
 
+/** Preço formatado em pt-BR (igual ao formatWhapiMoney do provider, sem acoplar o módulo). */
+function formatReplyMoney(value, currency) {
+  const num = Number(value)
+  if (!Number.isFinite(num)) return ''
+  try {
+    return new Intl.NumberFormat('pt-BR', { style: 'currency', currency: currency || 'BRL' }).format(num)
+  } catch {
+    return `R$ ${num.toFixed(2).replace('.', ',')}`
+  }
+}
+
 async function buildWebhookReplyMeta(supabaseClient, { payload, company_id, conversa_id, whatsapp_instance_id }) {
   const supabase = supabaseClient || supabaseDefault
   let webhookReplyMeta = null
+
+  // Pergunta do cliente SOBRE um produto do catálogo (Whapi product_inquiry): a "mensagem citada" é o
+  // próprio produto (resolvido em enrichQuotedProduct → payload.quotedProduct). A citação mostra o
+  // cartão (foto + nome + preço) em vez do rótulo solto "Mensagem". O produto não é uma mensagem na
+  // thread, então sem replyToId (evita o toque "Mensagem não encontrada").
+  const qp = payload?.quotedProduct
+  if (qp && typeof qp === 'object' && (qp.name || qp.image || qp.id)) {
+    const nome = String(qp.name || '').trim() || 'Produto'
+    const preco = qp.price != null ? formatReplyMoney(qp.price, qp.currency) : ''
+    return {
+      name: '🛍️ ' + nome,
+      snippet: preco || 'Produto do catálogo',
+      ts: Date.now(),
+      reply_kind: 'product',
+      ...(qp.image ? { thumb: String(qp.image) } : {}),
+    }
+  }
   const refMsg = payload?.referencedMessage ?? payload?.quotedMsg ?? payload?.quoted ?? null
   const quotedIdRaw =
     payload?.referenceMessageId ??          // campo oficial Z-API ReceivedCallback

@@ -859,6 +859,51 @@ async function enrichNormalizedProduct(normalized, ctxSrc) {
   return normalized
 }
 
+/**
+ * Produto CITADO numa pergunta do cliente (product_inquiry): a mensagem é um texto que referencia
+ * um produto do catálogo. Resolve nome/preço/moeda/imagem (best-effort, espelha enrichNormalizedProduct)
+ * e anexa `normalized.quotedProduct` para buildWebhookReplyMeta montar a citação com o cartão do produto
+ * (foto + nome + preço) em vez do rótulo solto "Mensagem". Falha de rede nunca derruba o inbound.
+ */
+async function enrichQuotedProduct(normalized, ctxSrc) {
+  const ref = normalized?.quotedProductRef
+  if (!ref) return normalized
+  const productId = String(ref.product_id || '').trim()
+  const meta = { id: productId || null, catalog_id: ref.catalog_id || null, name: null, price: null, currency: null, image: null }
+  if (productId && ctxSrc?.company_id != null) {
+    try {
+      const whapiCatalog = require('../services/providers/whapi/catalog')
+      const res = await whapiCatalog.getProduct(productId, {
+        companyId: ctxSrc.company_id,
+        whatsappInstanceId: ctxSrc.whatsapp_instance_id || undefined,
+      })
+      const p = res && res.ok ? res.product : null
+      if (p) {
+        meta.name = p.name || null
+        meta.price = p.price != null ? p.price : (p.sale_price != null ? p.sale_price : null)
+        meta.currency = p.currency || null
+        meta.image = p.image || (Array.isArray(p.images) ? p.images[0] : null) || null
+      }
+    } catch (e) {
+      console.warn('[WHAPI] getProduct (produto citado) inbound falhou:', e?.message || e)
+    }
+  }
+  normalized.quotedProduct = meta
+  // Pergunta sem texto (cliente só tocou no produto, sem digitar): evita bolha vazia / drop pelo
+  // guard de placeholder — usa o resumo do produto como corpo. Se já houver texto, preserva.
+  const hadText = String(normalized.body ?? normalized.texto ?? '').trim()
+  if (!hadText) {
+    const nome = meta.name ? String(meta.name).trim() : ''
+    const preco = meta.price != null ? formatWhapiMoney(meta.price, meta.currency) : ''
+    const body = nome ? ['🛍️ ' + nome, preco].filter(Boolean).join('\n') : '🛍️ Produto do catálogo'
+    normalized.body = body
+    normalized.message = body
+    normalized.text = { message: body }
+    normalized.texto = body
+  }
+  return normalized
+}
+
 function normalizeWhapiMessageToInternal(m, ctx = {}) {
   if (!m || typeof m !== 'object') return null
   const channelId = ctx.channelId
@@ -883,6 +928,19 @@ function normalizeWhapiMessageToInternal(m, ctx = {}) {
     ? {
         product_id: String(m.product.product_id ?? m.product.id ?? '').trim() || null,
         catalog_id: String(m.product.catalog_id ?? '').trim() || null,
+      }
+    : null
+  // Pergunta do cliente SOBRE um produto do catálogo ("product_inquiry"): o cliente toca num produto
+  // e manda uma mensagem — chega como type:'text' com context.quoted_type:'product' +
+  // context.quoted_content:{catalog_id,product_id}. NÃO é um type:'product' (esse só vem from_me).
+  // Guarda só a referência; nome/preço/imagem são resolvidos depois por enrichQuotedProduct.
+  const quotedCtx = (m.context && typeof m.context === 'object') ? m.context : null
+  const quotedContent = (quotedCtx && typeof quotedCtx.quoted_content === 'object') ? quotedCtx.quoted_content : null
+  const quotedProductRef = (quotedContent
+    && (String(quotedCtx.quoted_type || '').toLowerCase() === 'product' || quotedContent.product_id))
+    ? {
+        product_id: String(quotedContent.product_id ?? '').trim() || null,
+        catalog_id: String(quotedContent.catalog_id ?? '').trim() || null,
       }
     : null
   // Pedido (carrinho) do cliente (type 'order'): resumo agregado — a API Whapi não envia os itens.
@@ -1087,6 +1145,7 @@ function normalizeWhapiMessageToInternal(m, ctx = {}) {
     ...(contactPayload ? { contact: contactPayload } : {}),
     ...(contactsArray && contactsArray.length ? { contacts: contactsArray } : {}),
     ...(productRef ? { productRef } : {}),
+    ...(quotedProductRef ? { quotedProductRef } : {}),
     isEdit,
   }
 }
@@ -1402,6 +1461,13 @@ async function handleWebhookWhapi(req, res) {
           console.warn('[WHAPI] enrich produto falhou:', e?.message || e)
         }
       }
+      if (normalized.quotedProductRef) {
+        try {
+          normalized = await enrichQuotedProduct(normalized, ctxSrc)
+        } catch (e) {
+          console.warn('[WHAPI] enrich produto citado falhou:', e?.message || e)
+        }
+      }
       // Evento Z-API = ReceivedCallback; o tipo de conteúdo (chat/image/poll/…) fica em msgType
       // para extractMessage não achatar enquete/mídia em texto.
       normalized.msgType = normalized.type
@@ -1523,6 +1589,7 @@ exports._test = {
   resolvePollVoteLabels,
   enrichNormalizedPollVote,
   enrichNormalizedProduct,
+  enrichQuotedProduct,
   buildWhapiOrderSummary,
   whapiMessageEpochMs,
   whapiInboundIsHistorical,

@@ -112,3 +112,106 @@ describe('Whapi inbound — produto e pedido do catálogo', () => {
     expect(insertMsg.reply_meta).toEqual({ product: productMeta })
   })
 })
+
+/**
+ * Pergunta do cliente SOBRE um produto do catálogo ("product_inquiry"): o CASO REAL de produção.
+ * O cliente toca num produto e manda uma mensagem → chega como type:'text' com context.quoted_type
+ * 'product' + quoted_content {catalog_id, product_id}. Antes a citação virava o rótulo solto
+ * "Mensagem" (e o toque dava "não encontrada"). Agora a citação mostra o cartão do produto.
+ * Shape confirmado no webhook_logs de produção (ids 2230886 "Samara", 2199003).
+ */
+describe('Whapi inbound — pergunta sobre produto (product_inquiry / citação)', () => {
+  const CTX = { channelId: 'HULKBR-NZCYL', connectedPhone: '553498630553' }
+  const CTX_SRC = { company_id: 7, whatsapp_instance_id: 42 }
+
+  afterEach(() => jest.resetModules())
+
+  // Mensagem real (Samara): texto citando o produto do catálogo.
+  const inquiryMsg = (overrides = {}) => ({
+    id: 'KqTSdhCL_D4Kvg-hdUEHgkAIPs',
+    from: '556184262566',
+    from_me: false,
+    from_name: 'Samara',
+    type: 'text',
+    text: { body: 'Alugaria?' },
+    chat_id: '556184262566@s.whatsapp.net',
+    timestamp: 1793968998,
+    context: {
+      quoted_id: 'product_inquiry',
+      quoted_type: 'product',
+      quoted_author: '553498630553@s.whatsapp.net',
+      quoted_content: { catalog_id: '553498630553@s.whatsapp.net', product_id: '27084234967920949' },
+    },
+    ...overrides,
+  })
+
+  function normalize(m) {
+    const controller = require('../controllers/webhookWhapiController')
+    return controller._test.normalizeWhapiMessageToInternal(m, CTX)
+  }
+
+  test('texto citando produto → quotedProductRef (NÃO productRef) e o texto do cliente é preservado', () => {
+    const m = normalize(inquiryMsg())
+    expect(m.type).toBe('chat')                 // segue sendo texto do cliente
+    expect(m.body).toBe('Alugaria?')            // a pergunta não é descartada nem sobrescrita
+    expect(m.productRef).toBeUndefined()        // não é um type:'product'
+    expect(m.quotedProductRef).toEqual({ catalog_id: '553498630553@s.whatsapp.net', product_id: '27084234967920949' })
+  })
+
+  test('enrichQuotedProduct: resolve o produto citado no catálogo e preserva o texto da pergunta', async () => {
+    const getProduct = jest.fn(async () => ({
+      ok: true,
+      product: { id: '27084234967920949', name: 'Apartamento Centro', price: 1200, currency: 'BRL', image: 'https://cdn/apt.jpg' },
+    }))
+    jest.doMock('../services/providers/whapi/catalog', () => ({ getProduct }))
+    const controller = require('../controllers/webhookWhapiController')
+    const normalized = controller._test.normalizeWhapiMessageToInternal(inquiryMsg(), CTX)
+    const out = await controller._test.enrichQuotedProduct(normalized, CTX_SRC)
+    expect(getProduct).toHaveBeenCalledWith('27084234967920949', { companyId: 7, whatsappInstanceId: 42 })
+    expect(out.quotedProduct).toEqual({ id: '27084234967920949', catalog_id: '553498630553@s.whatsapp.net', name: 'Apartamento Centro', price: 1200, currency: 'BRL', image: 'https://cdn/apt.jpg' })
+    expect(out.body).toBe('Alugaria?') // texto do cliente intacto
+  })
+
+  test('enrichQuotedProduct: pergunta SEM texto → corpo recebe o resumo do produto (não é descartada)', async () => {
+    const getProduct = jest.fn(async () => ({
+      ok: true, product: { id: '27084234967920949', name: 'Apartamento Centro', price: 1200, currency: 'BRL', image: 'https://cdn/apt.jpg' },
+    }))
+    jest.doMock('../services/providers/whapi/catalog', () => ({ getProduct }))
+    const controller = require('../controllers/webhookWhapiController')
+    const normalized = controller._test.normalizeWhapiMessageToInternal(inquiryMsg({ text: { body: '' } }), CTX)
+    const out = await controller._test.enrichQuotedProduct(normalized, CTX_SRC)
+    expect(out.body).toContain('🛍️ Apartamento Centro')
+    expect(out.body).toMatch(/R\$\s?1\.200,00/)
+  })
+
+  test('enrichQuotedProduct: catálogo falha → cartão mínimo, pergunta preservada, sem derrubar o inbound', async () => {
+    const getProduct = jest.fn(async () => { throw new Error('rede') })
+    jest.doMock('../services/providers/whapi/catalog', () => ({ getProduct }))
+    const controller = require('../controllers/webhookWhapiController')
+    const normalized = controller._test.normalizeWhapiMessageToInternal(inquiryMsg(), CTX)
+    const out = await controller._test.enrichQuotedProduct(normalized, CTX_SRC)
+    expect(out.quotedProduct).toEqual({ id: '27084234967920949', catalog_id: '553498630553@s.whatsapp.net', name: null, price: null, currency: null, image: null })
+    expect(out.body).toBe('Alugaria?')
+  })
+
+  test('buildWebhookReplyMeta: payload.quotedProduct → citação vira cartão (thumb+nome+preço), sem replyToId', async () => {
+    const { buildWebhookReplyMeta } = require('../controllers/webhookInbound/replyMeta')
+    const payload = {
+      quotedProduct: { id: '27084234967920949', catalog_id: 'c', name: 'Apartamento Centro', price: 1200, currency: 'BRL', image: 'https://cdn/apt.jpg' },
+    }
+    // supabase nunca é tocado: o ramo de produto retorna antes de qualquer query.
+    const supabaseStub = { from: () => { throw new Error('não deveria consultar o banco') } }
+    const meta = await buildWebhookReplyMeta(supabaseStub, { payload, company_id: 7, conversa_id: 1, whatsapp_instance_id: 42 })
+    expect(meta.name).toBe('🛍️ Apartamento Centro')
+    expect(meta.snippet).toMatch(/R\$\s?1\.200,00/)
+    expect(meta.thumb).toBe('https://cdn/apt.jpg')
+    expect(meta.reply_kind).toBe('product')
+    expect(meta.replyToId).toBeUndefined() // produto não é mensagem na thread → sem toque "não encontrada"
+  })
+
+  test('buildWebhookReplyMeta: sem quotedProduct segue o fluxo normal (não quebra o reply comum)', async () => {
+    const { buildWebhookReplyMeta } = require('../controllers/webhookInbound/replyMeta')
+    const meta = await buildWebhookReplyMeta(null, { payload: {}, company_id: 7, conversa_id: 1, whatsapp_instance_id: 42 })
+    expect(meta).toBeNull() // sem citação nenhuma → null, como antes
+  })
+})
