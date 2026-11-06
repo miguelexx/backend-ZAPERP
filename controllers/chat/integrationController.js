@@ -13,7 +13,24 @@ const { listWhatsappInstances, sanitizeWhatsappInstance } = require('../../servi
 
 const WHAPI_STATUS_MAX_INSTANCES = 8
 const WHAPI_LIVE_UP = new Set(['AUTH', 'CONNECTED', 'READY'])
-const WHAPI_AMBIGUOUS_HEALTH = new Set(['', 'NOT_CONFIGURED', 'ERROR', 'UNKNOWN'])
+
+/**
+ * Escala do GET /health da Whapi (documentação oficial):
+ *   1 INIT  — subindo no servidor dela
+ *   2 LAUNCH— conectando na conta do WhatsApp
+ *   3 QR    — sessão vazia, esperando leitura do QR / pareamento
+ *   4 AUTH  — conectado
+ *   5 ERROR — erro
+ * Fora da escala: STOP (canal desativado: trial/cobrança) e SYNC_ERROR (falha de
+ * sincronização; o envio continua funcionando).
+ *
+ * INIT → LAUNCH → AUTH é a RECONEXÃO NORMAL (2–3s) — é o que acontece quando a
+ * rede oscila e o canal volta sozinho. Só QR prova que o aparelho foi desvinculado
+ * e que ler um QR Code resolve. Por isso aqui é LISTA DE PERMISSÃO: estado
+ * desconhecido, transitório ou de erro NUNCA acusa desconexão.
+ */
+const WHAPI_UNLINKED_CODE = 3
+const WHAPI_UNLINKED_TEXT = new Set(['QR', 'UNAUTHORIZED', 'LOGGED_OUT', 'LOGOUT', 'EXPIRED'])
 
 function isActiveWhapiInstance(inst) {
   return Boolean(
@@ -33,11 +50,29 @@ function isLiveWhapiUp(result) {
   return WHAPI_LIVE_UP.has(healthStatus(result))
 }
 
-/** Só AUTH perdido de verdade — não “sem default” / timeout / health vazio. */
-function isProvenWhapiSessionDown(result) {
+function healthCode(result) {
+  const code = Number(result?.code ?? result?.raw?.status?.code)
+  return Number.isFinite(code) ? code : null
+}
+
+/**
+ * Aparelho DESVINCULADO de verdade (o QR Code é o que resolve).
+ *
+ * Não confundir com queda de internet: canal reiniciando (INIT/LAUNCH), canal
+ * desativado (STOP), falha de sync (SYNC_ERROR), erro/timeout da consulta,
+ * `not_configured` e health vazio continuam devolvendo "conectado" para o
+ * frontend — nenhum deles é resolvido por QR, e acender a tela neles tirava o
+ * atendimento do ar por uma oscilação de rede.
+ *
+ * O código numérico manda quando vem (é o campo estável do /health); sem ele,
+ * cai no texto. Qualquer estado fora da lista = não acusa.
+ */
+function isWhapiDeviceUnlinked(result) {
   if (!result || isLiveWhapiUp(result)) return false
-  if (WHAPI_AMBIGUOUS_HEALTH.has(healthStatus(result))) return false
-  return result.connected === false
+  if (result.connected !== false) return false
+  const code = healthCode(result)
+  if (code != null) return code === WHAPI_UNLINKED_CODE
+  return WHAPI_UNLINKED_TEXT.has(healthStatus(result))
 }
 
 exports.listWhatsappInstancesAtendimento = async (req, res) => {
@@ -131,9 +166,12 @@ exports.zapiStatus = exports.whatsappStatus
 // HIDE_WHATSAPP_DISCONNECT_BANNER: ele existe justamente para alimentar o
 // overlay vermelho de "canal desconectado" do frontend.
 //
-// Regra à prova de falso-positivo (pintar o sistema inteiro de vermelho é
-// disruptivo): só devolve `connected:false` quando o provider da empresa é
-// Whapi E TODOS os canais Whapi ativos estão comprovadamente fora do AUTH.
+// Regra à prova de falso-positivo (pintar o sistema inteiro é disruptivo e,
+// desde 11/2026, essa tela oferece o QR Code): só devolve `connected:false`
+// quando o provider da empresa é Whapi E TODOS os canais Whapi ativos estão
+// com o APARELHO DESVINCULADO (health QR/code 3 — ver isWhapiDeviceUnlinked).
+// Queda de rede não entra: o canal reconecta sozinho por INIT → LAUNCH → AUTH
+// e esses estados devolvem `connected:true`.
 // Com 2+ números, consulta cada instância (não a default da empresa): em
 // produção, 2 canais sem is_default faziam getConnectionStatus({companyId})
 // falhar e o overlay acendia mesmo com os dois AUTH. Em QUALQUER outra
@@ -190,20 +228,32 @@ exports.whapiChannelStatus = async (req, res) => {
       })
     }
 
-    const allProvenDown = results.length === whapiActive.length
-      && results.every((r) => isProvenWhapiSessionDown(r))
-    if (allProvenDown) {
+    const allUnlinked = results.length === whapiActive.length
+      && results.every((r) => isWhapiDeviceUnlinked(r))
+    if (allUnlinked) {
       return res.json({
         ok: true,
         isWhapi: true,
         connected: false,
         status: results[0]?.status || null,
+        statusCode: healthCode(results[0]),
+        // O frontend repete a regra antes de acender a tela; `unlinked` é o
+        // veredito desta camada: aparelho desvinculado, QR Code resolve.
+        unlinked: true,
         provider: 'whapi',
       })
     }
 
-    // not_configured / error / timeout / health vazio → fail-safe, overlay não acende.
-    return res.json({ ok: true, isWhapi: true, connected: true, status: null, provider: 'whapi' })
+    // INIT/LAUNCH (reconexão normal), STOP, SYNC_ERROR, not_configured, erro,
+    // timeout, health vazio → fail-safe: nada disso é desvínculo, overlay não acende.
+    return res.json({
+      ok: true,
+      isWhapi: true,
+      connected: true,
+      status: results.find((r) => r?.status)?.status || null,
+      unlinked: false,
+      provider: 'whapi',
+    })
   } catch (err) {
     console.error('whapiChannelStatus:', err?.message || err)
     // Erro ⇒ nunca acusa desconexão (evita overlay vermelho por falha transitória).

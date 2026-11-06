@@ -497,6 +497,10 @@ exports.getInstanceStatus = async (req, res) => {
       needsRestore: false,
       provider: 'whapi',
       status: conn.status || null,
+      // 1 INIT / 2 LAUNCH = canal subindo ou reconectando; 3 QR = desvinculado.
+      // A tela de reconexão usa isso para não chamar de "erro" uma reconexão normal.
+      // `Number(null)` é 0: código ausente precisa chegar como null, não como 0.
+      statusCode: conn.code == null ? null : Number(conn.code),
       phone: conn.phone || null,
       is_business: typeof conn.isBusiness === 'boolean' ? conn.isBusiness : null,
     })

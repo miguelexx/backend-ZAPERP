@@ -206,6 +206,8 @@ Whapi envia **arrays** por evento: `messages` (inbound e `from_me`) e `statuses`
 
 **GET /health CONFIRMADO (MCP):** `{ status: { code: 4, text: "AUTH" }, user: { id: "55…" }, channel_id, uptime, start_at, device_id }`. `AUTH` = sessão conectada.
 
+**Escala do `status.code` (documentação Whapi, 2026-11-06)** — `1 INIT` (subindo no servidor dela), `2 LAUNCH` (conectando na conta), `3 QR` (sessão vazia, esperando leitura do QR), `4 AUTH` (conectado), `5 ERROR`; fora da escala, `STOP` (canal desativado: trial/cobrança) e `SYNC_ERROR` (falha de sync — o envio continua). **`INIT → LAUNCH → AUTH` é a reconexão NORMAL (2–3s) de oscilação de rede**, e chamadas nessa janela podem devolver 401. Por isso `GET /chats/whapi-status` só acusa desconexão com `code 3`/QR (`isWhapiDeviceUnlinked` em `controllers/chat/integrationController.js`): é o único estado que um QR Code resolve, e a tela do frontend agora mostra o QR — mandar escanear por queda de rede seria pior que não avisar. `getConnectionStatus` devolve `code` junto de `status` justamente para essa decisão; `GET /instances/:id/status` repassa como `statusCode`.
+
 **POST /messages/* CONFIRMADO (OpenAPI `SentMessage`):** `{ sent: true, message?: { id, … } }`. `sent` obrigatório; `message.id` é o id síncrono quando presente.
 
 **Higiene operacional (MCP GET 2026-09-04, sem PATCH):** canal `NEBULA-AER3B` em `AUTH` (`user.id` = 553499911246). O webhook do canal **ainda** aponta para `https://zapapi.wmsistemas.inf.br/webhooks/ultramsg?token=…` (token na query — vuln de log já conhecida). Eventos atuais incluem messages/statuses **e** chats/contacts/groups/calls/channel/users. **Não alteramos settings nesta sessão.** Homologação de receber **não funciona** enquanto o canal postar no parser UltraMSG.

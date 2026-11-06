@@ -184,3 +184,108 @@ test('health error (sem throw) NÃO acende overlay', async () => {
   await whapiChannelStatus({ user: { company_id: 7 } }, res)
   expect(res.body).toMatchObject({ isWhapi: true, connected: true })
 })
+
+// =====================================================================
+// Queda de INTERNET × aparelho DESVINCULADO (06/11/2026)
+//
+// A tela deixou de ser só um aviso vermelho: ela agora oferece o QR Code.
+// Mandar o supervisor escanear um QR porque a rede oscilou é pior do que não
+// avisar nada — e a Whapi reconecta sozinha por INIT → LAUNCH → AUTH em 2-3s.
+// Por isso a regra virou LISTA DE PERMISSÃO: só QR (code 3) acusa desvínculo.
+// Escala oficial do /health: 1 INIT, 2 LAUNCH, 3 QR, 4 AUTH, 5 ERROR
+// (+ STOP = canal desativado e SYNC_ERROR = falha de sync, fora da escala).
+// =====================================================================
+
+async function statusComHealth(health) {
+  resolveCompanyWhatsappProvider.mockResolvedValue('whapi')
+  listWhatsappInstances.mockResolvedValue({ instances: [whapiRow(10)], error: null })
+  mockHealthByInstance({ 10: health })
+  const res = mockRes()
+  await whapiChannelStatus({ user: { company_id: 7 } }, res)
+  return res.body
+}
+
+test('canal RECONECTANDO (code 2 / LAUNCH) → connected:true (rede oscilando não vira QR)', async () => {
+  const body = await statusComHealth({ connected: false, status: 'LAUNCH', code: 2 })
+  expect(body).toMatchObject({ isWhapi: true, connected: true, unlinked: false })
+})
+
+test('canal SUBINDO (code 1 / INIT) → connected:true', async () => {
+  const body = await statusComHealth({ connected: false, status: 'INIT', code: 1 })
+  expect(body.connected).toBe(true)
+})
+
+test('canal DESATIVADO (STOP) → connected:true (QR não resolve cobrança/desativação)', async () => {
+  const body = await statusComHealth({ connected: false, status: 'STOP' })
+  expect(body.connected).toBe(true)
+})
+
+test('SYNC_ERROR → connected:true (envio continua; não é desvínculo)', async () => {
+  const body = await statusComHealth({ connected: false, status: 'SYNC_ERROR' })
+  expect(body.connected).toBe(true)
+})
+
+test('code 5 (ERROR) → connected:true', async () => {
+  const body = await statusComHealth({ connected: false, status: 'ERROR', code: 5 })
+  expect(body.connected).toBe(true)
+})
+
+test('QR (code 3) → connected:false + unlinked:true (único caso que acende)', async () => {
+  const body = await statusComHealth({ connected: false, status: 'QR', code: 3 })
+  expect(body).toMatchObject({
+    isWhapi: true,
+    connected: false,
+    unlinked: true,
+    status: 'QR',
+    statusCode: 3,
+  })
+})
+
+test('QR só no raw.status.code (sem campo code) → acende do mesmo jeito', async () => {
+  const body = await statusComHealth({
+    connected: false,
+    status: 'QR',
+    raw: { status: { code: 3, text: 'QR' } },
+  })
+  expect(body).toMatchObject({ connected: false, unlinked: true })
+})
+
+test('texto desvinculado mas code transitório → o CÓDIGO manda (não acende)', async () => {
+  const body = await statusComHealth({ connected: false, status: 'UNAUTHORIZED', code: 2 })
+  expect(body.connected).toBe(true)
+})
+
+test('estado novo/desconhecido da Whapi → não acende (lista de permissão)', async () => {
+  const body = await statusComHealth({ connected: false, status: 'FOI_PARA_A_LUA' })
+  expect(body.connected).toBe(true)
+})
+
+test('um canal QR e outro LAUNCH → connected:true (nem todos desvinculados)', async () => {
+  resolveCompanyWhatsappProvider.mockResolvedValue('whapi')
+  listWhatsappInstances.mockResolvedValue({
+    instances: [whapiRow(10), whapiRow(11)],
+    error: null,
+  })
+  mockHealthByInstance({
+    10: { connected: false, status: 'QR', code: 3 },
+    11: { connected: false, status: 'LAUNCH', code: 2 },
+  })
+  const res = mockRes()
+  await whapiChannelStatus({ user: { company_id: 7 } }, res)
+  expect(res.body.connected).toBe(true)
+})
+
+test('dois canais QR → connected:false (os dois desvinculados)', async () => {
+  resolveCompanyWhatsappProvider.mockResolvedValue('whapi')
+  listWhatsappInstances.mockResolvedValue({
+    instances: [whapiRow(10), whapiRow(11)],
+    error: null,
+  })
+  mockHealthByInstance({
+    10: { connected: false, status: 'QR', code: 3 },
+    11: { connected: false, status: 'QR', code: 3 },
+  })
+  const res = mockRes()
+  await whapiChannelStatus({ user: { company_id: 7 } }, res)
+  expect(res.body).toMatchObject({ connected: false, unlinked: true })
+})

@@ -178,6 +178,9 @@ async function getConnectionStatus(opts = {}) {
       ok,
       connected: parsed.connected,
       status: parsed.stateText,
+      // Código da escala do /health (1 INIT, 2 LAUNCH, 3 QR, 4 AUTH, 5 ERROR).
+      // É o campo estável: quem decide "aparelho desvinculado" usa ele antes do texto.
+      code: parsed.code,
       httpStatus: status,
       channelId: data?.channel_id || cfg.channelId || null,
       phone: parsed.phone || null,
