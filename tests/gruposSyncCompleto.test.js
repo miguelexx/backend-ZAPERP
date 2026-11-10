@@ -100,6 +100,67 @@ describe('Whapi — listagens completas (paginação por count/offset)', () => {
     expect(fetchWithRetry).toHaveBeenCalledTimes(2) // 1ª página + 1 repetida detectada
   })
 
+  test('página curta no meio não encerra a lista quando o total ainda não foi coberto', async () => {
+    // Medido em 10/11/2026: `/chats` reordena entre páginas e devolve página curta antes do fim
+    // (708 de 723). Com `total` conhecido, insiste no offset seguinte.
+    process.env.WHAPI_LIST_PAGE_SIZE = '4'
+    const chat = (n) => ({ id: `55349900000${n}@s.whatsapp.net` })
+    const { fetchWithRetry } = mockDeps(async (url) => {
+      const { offset } = paramsOf(url)
+      if (offset === '0') return jsonRes({ chats: [chat(1), chat(2), chat(3), chat(4)], total: 6 })
+      if (offset === '4') return jsonRes({ chats: [chat(5)], total: 6 }) // curta, mas falta 1
+      if (offset === '5') return jsonRes({ chats: [chat(6)], total: 6 })
+      return jsonRes({ chats: [], total: 6 })
+    })
+    const whapi = require('../services/providers/whapi')
+    const chats = await whapi.getChats(CTX)
+    delete process.env.WHAPI_LIST_PAGE_SIZE
+
+    expect(chats).toHaveLength(6)
+    expect(fetchWithRetry).toHaveBeenCalledTimes(3)
+    // Offset é o total de itens DISTINTOS já coletados, não página × tamanho.
+    expect(paramsOf(fetchWithRetry.mock.calls[2][0])).toEqual({ count: '4', offset: '5' })
+  })
+
+  test('lista que reordena (item repetido) recupera a cauda em vez de perdê-la', async () => {
+    // O caso real: chat que recebe mensagem salta para o topo, a página seguinte repete um item
+    // e a cauda cai para além das posições lidas. Retomando pelo nº de distintos, ela volta.
+    process.env.WHAPI_LIST_PAGE_SIZE = '4'
+    const chat = (n) => ({ id: `55349900000${n}@s.whatsapp.net` })
+    const { fetchWithRetry } = mockDeps(async (url) => {
+      const { offset } = paramsOf(url)
+      if (offset === '0') return jsonRes({ chats: [chat(1), chat(2), chat(3), chat(4)], total: 6 })
+      // offset 4: devolve um repetido (o 4) + um novo → distintos = 5, posições lidas = 6
+      if (offset === '4') return jsonRes({ chats: [chat(4), chat(5)], total: 6 })
+      if (offset === '5') return jsonRes({ chats: [chat(6)], total: 6 })
+      return jsonRes({ chats: [], total: 6 })
+    })
+    const whapi = require('../services/providers/whapi')
+    const chats = await whapi.getChats(CTX)
+    delete process.env.WHAPI_LIST_PAGE_SIZE
+
+    expect(chats.map((c) => c.id)).toHaveLength(6)
+    expect(new Set(chats.map((c) => c.id)).size).toBe(6) // sem repetidos na saída
+    // Por posições lidas o próximo offset seria 6 e o chat 6 ficaria de fora: aqui é 5.
+    expect(paramsOf(fetchWithRetry.mock.calls[2][0])).toEqual({ count: '4', offset: '5' })
+  })
+
+  test('lista que acabou antes do total informado encerra na página vazia (sem laço)', async () => {
+    process.env.WHAPI_LIST_PAGE_SIZE = '4'
+    const chat = (n) => ({ id: `55349900000${n}@s.whatsapp.net` })
+    const { fetchWithRetry } = mockDeps(async (url) => {
+      const { offset } = paramsOf(url)
+      if (offset === '0') return jsonRes({ chats: [chat(1), chat(2)], total: 99 })
+      return jsonRes({ chats: [], total: 99 })
+    })
+    const whapi = require('../services/providers/whapi')
+    const chats = await whapi.getChats(CTX)
+    delete process.env.WHAPI_LIST_PAGE_SIZE
+
+    expect(chats).toHaveLength(2)
+    expect(fetchWithRetry).toHaveBeenCalledTimes(2)
+  })
+
   test('count/offset explícitos continuam sendo UMA página (quem chama pagina sozinho)', async () => {
     const grupo = (n) => ({ id: `12036300000000000${n}@g.us`, name: `G${n}` })
     const { fetchWithRetry } = mockDeps(async () => jsonRes({ groups: [grupo(1)], total: 50 }))

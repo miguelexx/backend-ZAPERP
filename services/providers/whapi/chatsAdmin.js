@@ -297,10 +297,16 @@ async function fetchWholeList({ token, endpoint, keys, count, offset }) {
   let total = null
 
   for (let page = 0; page < LIST_MAX_PAGES; page += 1) {
+    // Offset = quantos itens DISTINTOS já temos, não `página × tamanho` nem posições lidas.
+    // `/chats` é ordenado por atividade: chat que recebe mensagem durante a varredura salta para
+    // o topo, empurra os de baixo e a cauda da lista cai para além do último offset lido. Medido
+    // em 10/11/2026 na empresa 1: 723 posições lidas, 15 repetidas, 15 da cauda nunca alcançadas
+    // (708 distintos). Retomar pelo total de distintos recupera exatamente essa cauda — a
+    // sobreposição é absorvida pelo `vistos`.
     const { ok, data } = await get({
       token,
       endpoint,
-      extraParams: { count: String(LIST_PAGE_SIZE), offset: String(page * LIST_PAGE_SIZE) },
+      extraParams: { count: String(LIST_PAGE_SIZE), offset: String(out.length) },
     })
     if (!ok) break
 
@@ -322,9 +328,14 @@ async function fetchWholeList({ token, endpoint, keys, count, offset }) {
 
     // Canal ignorou `offset` (página repetida) → para, senão o laço nunca acaba.
     if (novos === 0) break
-    // Última página: veio menos do que o pedido, ou já cobrimos o total informado.
-    if (lote.length < LIST_PAGE_SIZE) break
+    // Já cobrimos o que a API diz existir.
     if (total != null && out.length >= total) break
+    // Página curta só encerra quando NÃO há total para conferir. Com total conhecido e itens
+    // faltando, insiste no próximo offset: `/chats` é ordenado por atividade e reordena entre as
+    // páginas, então uma página do meio pode vir curta sem que a lista tenha acabado (medido em
+    // 10/11/2026: parava em 708 de 723 e em 1941 de 1943). A página vazia ou repetida acima
+    // encerra o laço quando a lista realmente terminou.
+    if (lote.length < LIST_PAGE_SIZE && total == null) break
 
     if (page === LIST_MAX_PAGES - 1) {
       console.warn(

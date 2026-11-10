@@ -245,7 +245,7 @@ async function syncGroups(company_id) {
     return { ok: false, totalFetched: 0, inserted: 0, updated: 0, skipped: 0, errors: ['company_id ausente'] }
   }
 
-  const stats = { totalFetched: 0, inserted: 0, updated: 0, skipped: 0, errors: [] }
+  const stats = { totalFetched: 0, inserted: 0, updated: 0, skipped: 0, numeros: 0, errors: [] }
   const targets = await listSyncTargets(company_id)
   let algumaListagemOk = false
 
@@ -270,6 +270,7 @@ async function syncGroups(company_id) {
       continue
     }
     algumaListagemOk = true
+    stats.numeros += 1
     if (!Array.isArray(groups) || groups.length === 0) continue
 
     stats.totalFetched += groups.length

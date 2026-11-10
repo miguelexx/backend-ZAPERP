@@ -1607,3 +1607,50 @@ WHERE i.n = 1
   AND c.tipo = 'grupo'
   AND c.whatsapp_instance_id IS NULL;
 ```
+
+### Certificação contra os 25 números ativos (10/11, só leitura, nada gravado)
+
+Varredura de todo canal ativo: `/groups` + `/chats` paginados vs. `conversas tipo='grupo'`.
+
+```
+numeros ativos auditados: 25 (erros: 0)
+grupos no canal (uniao /groups + /chats): 195
+   ja no banco: 118
+   entrariam no sync: 77
+   DESCARTADOS pela validacao: 0      ← era aqui que o id legado sumia
+```
+
+- **`/groups` fechou exato em 25/25 números** (coletado == `total` da API). É a fonte completa.
+- **`soEmChats = 0` em 25/25**: nenhum grupo existe só em `/chats`. Logo o botão pode chamar
+  `/groups/sync` (barato) em vez de `sync-all`.
+- Os 77 que entram incluem **Caracol Uniformes: 30 grupos, nenhum no banco** (todos de id
+  legado), "Classificados Gaúcha do Norte" (396 participantes), "Zurich / Seguralta" (374) e
+  "WM Sistemas de Gestão" (397).
+
+**`/chats` e o `total` que não bate.** 10 números fecham abaixo do `total` (ex. empresa 1:
+708 de 723). Investigado: `GET /chats?count=50&offset=700` devolve 23 itens e **todos os 23 já
+estavam coletados** — zero novos. O `total` da Whapi conta posições, não chats distintos; 708 é
+a lista inteira. Mesmo assim a paginação foi endurecida: o offset passou a ser o nº de itens
+**distintos** já coletados (não posições lidas nem página × tamanho), porque `/chats` é ordenado
+por atividade e reordena entre as páginas — com offset por posição a cauda cairia fora. Encerra
+em página vazia, página só com repetidos, ou ao cobrir o `total`.
+
+### Botão "Sincronizar todos os grupos" (Configurações → Clientes)
+
+- `frontend/src/configuracoes/sections/ClientesSection.jsx`: botão abaixo de "Sincronizar fotos
+  de perfil", chama `syncGroups()` (`POST /integrations/whatsapp/groups/sync`, que já existia em
+  `api/whatsappIntegration.js`) e, no fim, `requestChatListResync({ force: true })` para a lista
+  de conversas reler — os grupos nascem durante o clique.
+- `controllers/whatsappIntegrationController.js`: a resposta de `/groups/sync` passou a devolver
+  `numeros` (quantos números foram varridos) e `errors` (até 5). Com multi-número o sync pode dar
+  certo num canal e falhar noutro; sem isso a tela diria "OK" escondendo a falha.
+- Mensagem na tela: "N grupo(s) encontrado(s) em M número(s): X novo(s), Y atualizado(s), Z sem
+  alteração", mais uma linha âmbar com os avisos. Rate limit do endpoint: 3 cliques por minuto
+  (429 com o motivo na tela).
+- Testes: `frontend/e2e/sincronizar-grupos.spec.js` (3, Playwright com API mockada): botão não
+  dispara sozinho ao abrir a tela, resultado com contagem, falha de um número vira aviso, 429
+  mostra o motivo e reabilita o botão.
+
+> **Armadilha:** `npm run build` no frontend reescreve `dist/`, que é versionado — e a memória de
+> 24/10 avisa que um rebuild arrasta Orçamento/IA para produção. Para só conferir se compila use
+> `npx vite build --outDir <pasta fora do repo> --emptyOutDir`.

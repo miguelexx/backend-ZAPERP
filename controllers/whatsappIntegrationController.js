@@ -1096,7 +1096,11 @@ exports.syncGroups = async (req, res) => {
     totalFetched: result.totalFetched,
     inserted: result.inserted,
     updated: result.updated,
-    skipped: result.skipped
+    skipped: result.skipped,
+    // Quantos NÚMEROS da empresa foram varridos e o que falhou em cada um: com multi-número a
+    // sincronização pode dar certo num canal e falhar noutro, e quem clicou precisa saber.
+    numeros: result.numeros ?? 0,
+    errors: Array.isArray(result.errors) ? result.errors.slice(0, 5) : []
   })
 }
 
