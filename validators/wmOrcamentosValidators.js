@@ -254,6 +254,70 @@ function validarConsultarClientesBody(body) {
   return { ok: true, value }
 }
 
+const CHAVES_CONSULTAR_VENDEDORES = ['busca', 'codigo_vendedor_erp', 'pagina']
+
+/**
+ * `POST /api/orcamentos/vendedores/consultar`.
+ *
+ * ────────────────────────────────────────────────────────────────────────────
+ * ESTE VALIDADOR NÃO É O DE CLIENTES COM OUTRO NOME
+ * ────────────────────────────────────────────────────────────────────────────
+ * A diferença que importa, medida ao vivo em 09/11/2026: **`busca` é OPCIONAL nesta porta**.
+ * Sem termo nenhum a WM devolve TODOS os vendedores (8 na empresa de teste) — e é por isso que
+ * aqui NÃO há `exigirExatamenteUm`. Corpo vazio `{}` é requisição válida, e é justamente a que
+ * a tela faz ao abrir o campo: a lista é curta, ninguém precisa adivinhar o nome.
+ *
+ * O que continua proibido é mandar os DOIS: `busca` e `codigo_vendedor_erp` juntos não têm
+ * semântica no contrato, e deixar passar significaria escolher um deles em silêncio.
+ *
+ * ⚠️ `busca: ''` é `400 payload_invalido` na WM (mínimo 1 caractere). Quem não tem termo
+ * **omite** o campo; `validarTexto` já recusa string vazia ou só de espaços, então nenhuma
+ * string vazia atravessa daqui para o serviço — e o serviço só põe `busca` no payload quando
+ * ela tem conteúdo.
+ *
+ * Aparo das bordas, como em clientes e ao contrário de produtos: a busca de vendedor casa
+ * **trecho em qualquer posição** (`arkony` acha `MARKONY`), então um espaço colado numa ponta
+ * só faz o trecho deixar de casar. Não há aqui a lógica de correspondência exata que obriga o
+ * picker de produtos a preservar o valor byte a byte.
+ *
+ * Mesmo recorte dos irmãos: sem `telefone` (o serviço injeta a partir da empresa), sem
+ * `tamanho_pagina` (fixo em 30 na WM), sem `limite`.
+ */
+function validarConsultarVendedoresBody(body) {
+  // Corpo ausente é modo "todos": a tela abre o campo e pede a lista inteira. `undefined` e
+  // `null` chegam quando o cliente HTTP não manda corpo; os dois valem como `{}`.
+  const corpo = body === undefined || body === null ? {} : body
+  if (!ehObjetoSimples(corpo)) return erro('Corpo da requisição inválido')
+  const chaves = conferirChaves(corpo, CHAVES_CONSULTAR_VENDEDORES)
+  if (chaves) return chaves
+
+  if (corpo.busca !== undefined && corpo.codigo_vendedor_erp !== undefined) {
+    return erro('informe busca OU codigo_vendedor_erp, não os dois', 'busca')
+  }
+
+  const value = {}
+  if (corpo.busca !== undefined) {
+    const r = validarTexto(corpo.busca, { min: LIMITES.BUSCA_MIN, max: LIMITES.BUSCA_MAX, campo: 'busca' })
+    if (!r.ok) return r
+    value.busca = r.value.trim()
+  } else if (corpo.codigo_vendedor_erp !== undefined) {
+    // Mesmo teto de 20 do `vendedor_codigo_erp` de `criar` — numeração de vendedor, não de
+    // produto. Aparado: o ERP casa código por igualdade.
+    const r = validarTexto(corpo.codigo_vendedor_erp, { min: LIMITES.CODIGO_ERP_MIN, max: LIMITES.CODIGO_ERP_MAX, campo: 'codigo_vendedor_erp' })
+    if (!r.ok) return r
+    value.codigo_vendedor_erp = r.value.trim()
+  }
+  // Nenhum dos dois: modo "todos", e `value` segue sem chave de termo. É VÁLIDO.
+
+  if (corpo.pagina !== undefined) {
+    const r = validarPagina(corpo.pagina, 'pagina')
+    if (!r.ok) return r
+    value.pagina = r.value
+  }
+
+  return { ok: true, value }
+}
+
 const CHAVES_PREPARAR = [
   'conversa_id',
   'cliente_codigo_erp',
@@ -597,6 +661,7 @@ module.exports = {
   PADRAO_DECIMAL,
   validarConsultarProdutosBody,
   validarConsultarClientesBody,
+  validarConsultarVendedoresBody,
   validarPrepararBody,
   validarCorpoVazio,
   validarPayloadPreparar,

@@ -696,6 +696,184 @@ async function consultarClientes({ company_id, consulta, requestId } = {}) {
 }
 
 /* ================================================================== *
+ * Vendedores — a porta que faltava, e que NÃO é a de clientes com outro nome
+ *
+ * Até 09/11/2026 o vendedor era o único dos três campos sem porta própria: cliente tinha
+ * `/clientes/consultar`, produto tinha `/produtos/consultar`, e vendedor só existia dentro de
+ * `preparar` — que exige cliente E ao menos um item. Não havia como mostrar os vendedores da
+ * loja antes de o orçamento estar quase pronto, e o atendente novo tinha de adivinhar como o
+ * nome dele está cadastrado no ERP. O pedido está no Anexo A (item D, pedido 2) e foi atendido.
+ *
+ * TRÊS DIFERENÇAS DE CONTRATO EM RELAÇÃO A CLIENTES, medidas ao vivo em 09/11/2026. Elas são a
+ * armadilha desta porta, porque quem copiar a projeção de clientes erra nas três:
+ *
+ *   1. **a chave é `dados.vendedores[]` e NÃO existe campo `status`.** Clientes têm
+ *      `status: 'multiplos_clientes' | 'cliente'`; vendedores vêm sempre como array simples.
+ *      Por isso `projetarRespostaVendedores` não procura `status` nenhum — procurá-lo faria
+ *      toda resposta legítima virar `respostaInvalida`;
+ *   2. **lista vazia é RESPOSTA LEGÍTIMA**: `200` com `vendedores: []` e `total: 0`, nunca 404.
+ *      Em clientes, nada encontrado é 404 e o mapeador o traduz em "vazio". Aqui tratar o vazio
+ *      como erro diria "não foi possível buscar" para uma busca que funcionou perfeitamente —
+ *      e é exatamente a confusão que esta porta existe para acabar. O que continua sendo
+ *      `respostaInvalida` é só a FORMA fora do contrato (sem `dados`, `vendedores` que não é
+ *      array, candidato sem código ou sem nome);
+ *   3. **`busca` é OPCIONAL.** Sem ela a WM devolve TODOS os vendedores (medido: 8 na empresa de
+ *      teste). Isso é um presente de UX — a lista é curta, dá para mostrar todo mundo sem
+ *      digitar nada — e é o modo `todos` abaixo.
+ *
+ * Mais o que foi medido: `busca` casa trecho em QUALQUER posição (`arkony` acha `MARKONY`), ao
+ * contrário de cliente, que casa por PREFIXO; `busca: ''` é `400 payload_invalido`, então o
+ * campo é OMITIDO quando não há termo — jamais enviado vazio; `pagina` além do fim é
+ * `400 PAGINA_FORA_DO_INTERVALO`, repassado sem clamp como nas outras portas.
+ *
+ * O QUE ESTA PORTA NÃO É: a palavra final sobre o vendedor. D11 continua valendo — quem resolve
+ * o vendedor do orçamento é `preparar`, que revalida o código e pode recusá-lo (vendedor
+ * inativado, carteira trocada). A diferença em relação a clientes é que escolher aqui devolve
+ * `codigo_vendedor_erp`, e é ele que elimina a ambiguidade no `preparar`. Daí
+ * `resolucao_definitiva: false` viajar junto, igual ao irmão de clientes.
+ * ================================================================== */
+
+/** Identificador curto do endpoint na chave do cache. Separado dos outros dois de propósito. */
+const ENDPOINT_VENDEDORES = 'vendedores/consultar'
+
+/**
+ * Termo sentinela do modo "todos". `wmConsultaCache.montarChave` recusa termo vazio (devolve
+ * `null`, e aí não haveria cache nem coalescência justamente no caso mais comum — abrir o
+ * campo). O `modo` já separa as chaves, então uma busca literal por `*` nunca colide com isto.
+ */
+const TERMO_TODOS = '*'
+
+/**
+ * Lista branca de um vendedor. Só os dois campos do contrato: `codigo_vendedor_erp` e `nome`.
+ * O que não está escrito aqui não sai daqui, por mais que a WM mande.
+ *
+ * @returns {object|null} null sem código ou sem nome — sem os dois não há como escolher nem
+ *   como exibir, e um buraco na lista esconderia mudança de contrato
+ */
+function projetarVendedor(v) {
+  if (!ehObjetoSimples(v)) return null
+  const codigo = typeof v.codigo_vendedor_erp === 'string' ? v.codigo_vendedor_erp.trim() : ''
+  const nome = typeof v.nome === 'string' ? v.nome.trim() : ''
+  if (!codigo || !nome) return null
+  return { codigo_vendedor_erp: codigo, nome }
+}
+
+/**
+ * Traduz `/vendedores/consultar` na forma que a UI consome.
+ *
+ * UM ramo só, porque o contrato tem um só: `dados.vendedores[]` + `dados.paginacao`. Não há
+ * `status` na resposta da WM — o `status: 'vendedores'` que sai daqui é NOSSO rótulo local, para
+ * a tela agrupar as três buscas do mesmo jeito; não o leia como campo da WM.
+ *
+ * `vendedores: []` atravessa como sucesso com lista vazia. É a diferença 2 do cabeçalho desta
+ * seção, e é a que mais importa: "a WM respondeu e não há vendedor com esse nome" não pode sair
+ * daqui com a mesma cara de "a resposta veio fora do contrato".
+ *
+ * @returns {{ ok: true, dados: object }|{ ok: false, respostaInvalida: true }}
+ */
+function projetarRespostaVendedores(data, telefoneProibido) {
+  if (!ehObjetoSimples(data)) return { ok: false, respostaInvalida: true }
+  const dados = data.dados
+  if (!ehObjetoSimples(dados)) return { ok: false, respostaInvalida: true }
+  if (!Array.isArray(dados.vendedores)) return { ok: false, respostaInvalida: true }
+
+  const vendedores = []
+  for (const bruto of dados.vendedores) {
+    const v = projetarVendedor(bruto)
+    // Mesma regra dos outros dois pickers: candidato inselecionável não é descartado em
+    // silêncio — recusamos a resposta inteira, para que mudança de contrato apareça.
+    if (!v) return { ok: false, respostaInvalida: true }
+    vendedores.push(v)
+  }
+
+  return {
+    ok: true,
+    dados: {
+      status: 'vendedores',
+      vendedores,
+      paginacao: projetarPaginacao(dados.paginacao),
+      // Igual a clientes: escolher aqui encurta o caminho, mas `preparar` revalida (D11).
+      resolucao_definitiva: false,
+      meta: projetarMeta(data.meta, telefoneProibido),
+    },
+  }
+}
+
+/**
+ * Consulta vendedores na WM. Mesmo cache e mesma coalescência das outras duas consultas — chave
+ * distinta pelo `ENDPOINT_VENDEDORES`, então nenhuma das três se contamina.
+ *
+ * Três modos, e o terceiro é o que esta porta trouxe de novo:
+ *   · `busca`  — trecho em qualquer posição;
+ *   · `codigo` — `codigo_vendedor_erp` exato;
+ *   · `todos`  — nenhum dos dois: a WM devolve a lista inteira. **O campo `busca` é OMITIDO**,
+ *     jamais enviado como string vazia (a WM responde `400 payload_invalido`).
+ *
+ * @param {object} args
+ * @param {number} args.company_id  **sempre** de `req.user.company_id`
+ * @param {object} args.consulta    saída de `validarConsultarVendedoresBody` (busca OU código OU
+ *   nenhum dos dois, mais `pagina` opcional)
+ * @param {string} [args.requestId] correlação de log
+ * @returns {Promise<{ ok: true, dados: object, origem_resposta: string }|{ ok: false, httpStatus: number, envelope: object, interno: object }>}
+ */
+async function consultarVendedores({ company_id, consulta, requestId } = {}) {
+  const cid = Number(company_id)
+  if (!Number.isFinite(cid) || cid <= 0) return erroLocal({ motivo: 'company_id_invalido', requestId })
+  if (!ehObjetoSimples(consulta)) return erroLocal({ motivo: 'consulta_invalida', requestId })
+
+  const temBusca = typeof consulta.busca === 'string' && consulta.busca.length > 0
+  const temCodigo = typeof consulta.codigo_vendedor_erp === 'string' && consulta.codigo_vendedor_erp.length > 0
+  // Os dois juntos o validador já recusa; aqui é a rede de segurança. Nenhum dos dois é VÁLIDO
+  // nesta porta (ao contrário de clientes e produtos), então só o "ambos" é erro.
+  if (temBusca && temCodigo) return erroLocal({ motivo: 'consulta_invalida', requestId })
+
+  const contato = await resolverContatoAutorizado(cid)
+  if (contato.erro) return erroLocal({ motivo: contato.erro, requestId })
+
+  const modo = temBusca ? 'busca' : temCodigo ? 'codigo' : 'todos'
+
+  const payload = { telefone: contato.telefone }
+  if (temBusca) payload.busca = consulta.busca
+  else if (temCodigo) payload.codigo_vendedor_erp = consulta.codigo_vendedor_erp
+  // modo `todos`: nenhuma chave de termo. String vazia aqui seria 400 na WM.
+  if (consulta.pagina !== undefined) payload.pagina = consulta.pagina
+
+  const chave = wmConsultaCache.montarChave({
+    companyId: cid,
+    configVersao: contato.configVersao,
+    endpoint: ENDPOINT_VENDEDORES,
+    modo,
+    termo: temBusca ? consulta.busca : temCodigo ? consulta.codigo_vendedor_erp : TERMO_TODOS,
+    pagina: consulta.pagina,
+  })
+
+  const { valor, origem } = await wmConsultaCache.resolverComCoalescencia(
+    chave,
+    async () => {
+      const resultado = await wmApiClient.consultarVendedores(payload)
+      if (!resultado.ok) return erroDeResultado({ resultado, requestId })
+
+      const projetado = projetarRespostaVendedores(resultado.data, contato.telefone)
+      if (!projetado.ok) {
+        // 2xx com FORMA fora do contrato. Lista vazia não cai aqui: ela é sucesso.
+        return erroDeResultado({
+          resultado: { ...resultado, ok: false, respostaInvalida: true },
+          requestId,
+        })
+      }
+      return { ok: true, dados: projetado.dados }
+    },
+    (v) => Boolean(v && v.ok === true),
+  )
+
+  if (!valor || valor.ok !== true) {
+    return valor || erroLocal({ motivo: 'resposta_ausente', requestId })
+  }
+
+  return { ok: true, dados: valor.dados, origem_resposta: origem }
+}
+
+/* ================================================================== *
  * Disponibilidade do ERP — a porta realtime está de pé?
  *
  * POR QUE ISTO EXISTE. As portas da WM falham SEPARADAMENTE, e a assimetria engana o
@@ -825,6 +1003,7 @@ async function verificarDisponibilidadeErp({ company_id } = {}) {
 module.exports = {
   ENDPOINT_PRODUTOS,
   ENDPOINT_CLIENTES,
+  ENDPOINT_VENDEDORES,
   CODIGO_SONDA_ERP,
   DISPONIBILIDADE_TTL_MS,
   verificarDisponibilidadeErp,
@@ -834,14 +1013,17 @@ module.exports = {
   CODIGOS,
   consultarProdutos,
   consultarClientes,
+  consultarVendedores,
   // expostos para teste — projeções puras, sem efeito
   projetarProduto,
   projetarProdutoResolvido,
   instanteIso,
   projetarCliente,
+  projetarVendedor,
   normalizarParaComparacao,
   projetarPaginacao,
   projetarMeta,
   projetarRespostaProdutos,
   projetarRespostaClientes,
+  projetarRespostaVendedores,
 }

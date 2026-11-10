@@ -314,12 +314,17 @@ centralizada na WM.
 | Rota ZapERP | Body aceito do navegador |
 |---|---|
 | `POST /api/orcamentos/produtos/consultar` | `busca` XOR `codigo_produto_erp`, `pagina` |
+| `POST /api/orcamentos/clientes/consultar` | `busca` XOR `codigo_cliente_erp`, `pagina` |
+| `POST /api/orcamentos/vendedores/consultar` | **nada**, OU `busca`, OU `codigo_vendedor_erp`; `pagina` — corpo vazio é válido e devolve todos |
 | `POST /api/orcamentos/preparar` | `conversa_id`, cliente, vendedor, itens, páginas |
 | `POST /api/orcamentos/:preparacaoId/confirmar` | corpo vazio |
 | `POST /api/orcamentos/:operacaoId/verificar` | corpo vazio (D10) |
 | `GET /api/orcamentos/:operacaoId` | — |
 
-Não há rota de clientes: cliente e vendedor resolvem dentro de `preparar` (D11). Montagem em
+As rotas de cliente (25/10) e de vendedor (09/11) existem como **auxílio de busca**, não como
+autoridade: D11 continua valendo e quem RESOLVE cliente e vendedor é o `preparar` — as duas
+respostas carregam `resolucao_definitiva: false`. A de vendedor só passou a ser possível quando a
+WM publicou `/vendedores/consultar` (ver os achados de 09/11 na seção 10). Montagem em
 `app.js` seguindo o padrão vizinho: `app.use('/orcamentos', apiLimiter, …)` e
 `api.use('/orcamentos', …)`; o frontend usa **sempre** `/api/orcamentos/*`.
 
@@ -941,6 +946,113 @@ pedidos correspondentes estão redigidos em
 | **16** | Busca de produto depende da ORDEM das palavras | 🔴 **ABERTA (nova, 22/10) — medida no ERP real.** `04-contratos-api.md`: *"descrição/marca por ocorrência"* — ou seja, o trecho literal. Medido: `filtro oleo` acha e `oleo filtro` devolve `PRODUTO_NAO_ENCONTRADO`; `piso peneira` não acha o produto "PISO EXTENCAO PENEIRA 9650 9750". Quem digita duas palavras na ordem "errada" conclui que o produto não existe. **Mitigação local — revista em 25/10:** antes era só texto; agora, quando o termo tem **duas ou mais palavras E o resultado veio vazio**, o picker refaz a busca **uma única vez** com a palavra mais longa do termo e mostra o resultado com o aviso `Nada com "oleo filtro". Mostrando resultados para "filtro".` e um botão de voltar ao termo digitado. Os limites são parte da mitigação, não detalhe: uma tentativa só (nunca em cascata), nunca para "melhorar" um resultado que já veio, palavra de no mínimo 3 caracteres, e nunca depois de a pessoa pedir para ver só o que digitou. **Custo: +1 chamada no pior caso, e só no vazio.** Se a segunda tentativa também vier vazia, fica o estado vazio que já explicava a ordem das palavras. **Pedir à WM:** casar as palavras do termo em qualquer ordem (AND de ocorrências), não só o trecho literal — é a única correção que resolve na origem; a nossa é de apresentação e não alcança resultado que esteja em outra página. |
 | **18** | Busca de descrição casa TRECHO em qualquer posição — 83% de ruído num termo central | 🔴 **ABERTA (nova, 25/10) — medida no ERP real.** `04-contratos-api.md`: *"descrição/marca por ocorrência"*. A ocorrência vale **em qualquer posição**, inclusive no meio de outra palavra. Medido na empresa 20: <br><br>`cimento` → **6** resultados, **1** com o termo iniciando palavra, **5** de ruído (`ARREFECIMENTO`, `ARREFICIMENTO` — radiador e aditivo); `cimen` → **7**, 2 × 5. Para contraste, `tinta` → **17** com **zero** ruído, `oleo` → **181** (30 na página) com zero, `cabo` → **144** com zero. <br><br>Ou seja: num termo central do vocabulário de quem atende, **83% do resultado é lixo** — e a atendente pesquisa "cimento" e recebe radiador. Não é catálogo incompleto nem loja errada: a Tijolar é revenda de peças agrícolas e automotivas (John Deere, MAHLE, VOLKSWAGEN, AGROLEITE), e "só um cimento" é o dado correto (argamassa 0, areia 0, brita 1, concreto 5). O problema é o que vem em volta. <br><br>**Mitigação local aplicada (apresentação, não filtro):** o picker **reordena a página que já recebeu** — relevante é o candidato em que o termo **inicia uma palavra** da descrição ou da marca (sem acento, sem caixa, com hífen/barra/pontuação separando palavras: `R-1892`, `EXT/INT`, `AL221117 - RADIADOR`); o resto desce para um bloco rotulado `Também contêm "cimento"`. **Nada é escondido nem filtrado**, a contagem e a paginação continuam sendo as da WM, e cada card mostra o trecho casado destacado — é o que faz `ARREFE**CIMENTO**` se explicar sozinho. <br><br>**Limite conhecido da mitigação:** ela só ordena **a página atual**. Um produto relevante que a WM tenha colocado na página 4 continua na página 4. **Pedir à WM:** que a busca de descrição considere **início de palavra**, e não trecho em qualquer posição — ou, no mínimo, que ordene o resultado com os de início de palavra primeiro. Só a WM resolve na origem, porque só ela ordena o conjunto global antes de paginar. |
 | **17** | Busca de cliente é por PREFIXO | 🔴 **ABERTA (nova, 22/10) — medida no ERP real.** `04-contratos-api.md`: *"O Worker consulta dbo.Clientes, nome por prefixo com `Latin1_General_CI_AI`, CPF/CNPJ/código por igualdade"*. Produto casa por trecho, cliente casa pelo **começo** do nome — regras diferentes no mesmo formulário. Medido com `cliente_busca` dentro de `preparar`: `DINIZ` → `WM_NAO_ENCONTRADO`, `SILVA` → `WM_NAO_ENCONTRADO`, `MARIA APARECIDA AMADEI` → 3 candidatos. O atendente que digita o sobrenome vê um sistema quebrado. **Mitigação local aplicada:** só texto — dica fixa no campo ("Pelo começo do nome, ou pelo CPF/CNPJ") e, no erro de não encontrado, a explicação citando o que foi digitado e oferecendo o documento, que casa por igualdade. **Pedir à WM:** aceitar trecho do nome na busca de cliente, como já faz em produto. Este é o conserto de verdade. |
+
+### Achado de 09/11 — `/vendedores/consultar` existe, e NÃO é o de clientes com outro nome
+
+O pedido 2 do item D do [Anexo A](36-ANEXO-A-PEDIDO-WM.md) foi **atendido**. Até 09/11/2026 o
+vendedor era o único dos três campos sem porta própria: cliente tinha `/clientes/consultar`,
+produto tinha `/produtos/consultar`, e vendedor só se resolvia dentro de `preparar` — que exige
+cliente **e** ao menos um item. Não havia como mostrar os vendedores da loja antes de o orçamento
+estar quase pronto, e o atendente novo tinha de adivinhar como o próprio nome está cadastrado no
+ERP.
+
+**Contrato MEDIDO ao vivo em 09/11/2026** contra a instalação da WM Sistemas (`company_id` 1,
+telefone terminado em 1417, 8 vendedores reais). Não é leitura do `openapi.yaml` — ele ainda não
+descreve esta rota.
+
+```
+POST /api/v1/assistente/vendedores/consultar
+Corpo: { telefone, busca?, codigo_vendedor_erp?, pagina? }
+
+200:
+{ "dados": { "vendedores": [ {"codigo_vendedor_erp":"003","nome":"MARKONY"} ],
+             "paginacao": {"pagina":1,"tamanho_pagina":30,"total":8,
+                           "tem_mais":false,"tem_anterior":false} },
+  "meta": { "fonte":"tempo_real", "consultado_em":"..." } }
+```
+
+**TRÊS DIFERENÇAS EM RELAÇÃO A `/clientes/consultar`.** Elas são a armadilha desta porta: quem
+copiar o padrão de clientes erra nas três, e os três erros são silenciosos.
+
+| # | Clientes | Vendedores | O que quebra se confundir |
+|---|---|---|---|
+| 1 | `dados.candidatos[]` **com** `status` (`multiplos_clientes` \| `cliente`) | `dados.vendedores[]` e **não existe `status`** | Procurar `status` faz **toda** resposta legítima virar `respostaInvalida` |
+| 2 | nada encontrado é **404** | nada encontrado é **`200` com `vendedores: []` e `total: 0`** | Tratar vazio como erro diz "não foi possível buscar" para uma busca que funcionou |
+| 3 | `busca` XOR `codigo` é **obrigatório** | **`busca` é OPCIONAL** — sem ela, devolve TODOS | Exigir termo joga fora o que esta porta tem de melhor |
+
+A diferença 3 é um presente de UX, não um detalhe: a lista é curta (8 medidos), então o campo
+pode abrir já mostrando todo mundo e **ninguém precisa adivinhar nome nenhum**. É o único
+consultar do módulo em que o corpo vazio é requisição válida.
+
+Outros comportamentos medidos:
+
+- `busca` casa **trecho em qualquer posição** (`arkony` acha `MARKONY`) — diferente de cliente,
+  que casa por **prefixo** (item 17 da seção 10). Isto fecha a tabela do item D do Anexo A: os
+  três campos casam de três jeitos, e vendedor é o terceiro;
+- `codigo_vendedor_erp` resolve por igualdade exata (`003` → MARKONY);
+- **`busca: ""` é `400 payload_invalido`** (mínimo 1 caractere). Quem não tem termo **omite** o
+  campo. O validador local recusa string vazia antes de gastar a chamada;
+- `pagina` além do fim é `400 PAGINA_FORA_DO_INTERVALO`, **sem clamp**, como nas outras portas;
+- é **realtime** (`fonte: tempo_real`): cai com o sincronizador da loja, devolvendo
+  `503 SINCRONIZADOR_OFFLINE`, igual a clientes e diferente de produtos.
+
+**Implementado em 09/11 (não deployado):** `wmApiClient.consultarVendedores` →
+`wmAssistenteService.consultarVendedores` (projeção em lista branca de `codigo_vendedor_erp` +
+`nome`, cache com `ENDPOINT_VENDEDORES` próprio, modo `todos` com termo sentinela) →
+`validarConsultarVendedoresBody` → `POST /api/orcamentos/vendedores/consultar` com
+`orcamentos.ver` atrás do gate de módulo. No frontend, `VendedorPicker.jsx`. Testes:
+`backend/tests/wmVendedoresConsulta.test.js`.
+
+**D11 continua valendo**: quem resolve o vendedor do orçamento é `preparar`, que revalida o
+código e pode recusá-lo (vendedor inativado, carteira trocada) — por isso a resposta carrega
+`resolucao_definitiva: false`. O que escolher na lista muda é a **ambiguidade**: com
+`vendedor_codigo_erp` no corpo, `preparar` não precisa desempatar homônimos e o laço do
+`AmbiguidadePicker` não aparece. Quem digita e calcula continua caindo no laço, como antes.
+
+### Achado de 09/11 — a tela dizia de quando era o SALDO e calava de quando era o PREÇO
+
+São dois carimbos, e a tela usava só um. Medido na base real em 09/11/2026, no mesmo produto:
+
+| carimbo | o que ele data | idade medida |
+|---|---|---|
+| `estoque_sincronizado_em` | o **saldo** | **9,2 h** — e a tela dizia |
+| `sincronizado_em` | o **cadastro**, que carrega o **preço** | **920 h ≈ 38 dias** — e a tela calava |
+
+Orçamento é documento comercial: o cliente recebe, guarda, volta com ele na mão e cobra o valor.
+Um preço de mais de um mês impresso como valor conferido, sem uma palavra sobre a data, é um
+compromisso que a loja não tinha como honrar sem saber.
+
+**Corrigido:** `idadeDoPreco` em `orcamentoFormat.js`, irmã de `idadeDoSaldo`, com limite de
+aviso **próprio** — `IDADE_PRECO_AVISO_HORAS = 7 × 24` contra as 24 h do saldo. O limite é maior
+de propósito: o saldo muda a cada venda (um dia de loja já o torna uma promessa que ninguém
+conferiu), o preço muda por decisão (repasse, tabela promocional, reajuste), e uma semana é o
+ciclo comercial mais curto em que isso costuma acontecer. Com 24 h, os 920 h medidos fariam toda
+linha de todo orçamento nascer em âmbar — e um aviso que aparece sempre deixa de ser lido.
+
+A linha do carrinho passa a dizer `Preço atualizado há 38 dias` ao lado do valor, em âmbar acima
+do limite e calada abaixo dele. Linha com **preço negociado** não recebe a idade: o valor que
+vale ali é o que o atendente acabou de definir.
+
+### Achado de 09/11 — negociação ignorada pelo Worker era invisível
+
+O atendente digita R$ 10,00 num item de R$ 18,42, manda calcular, e o total volta cheio. O
+backend está **certo** em fazer isso (guarda do `preco_negociado` em `wmOrcamentoService.js`):
+sem o eco de `preco_negociado` na prévia, o Worker não aplicou a negociação (Anexo A, item 1b), e
+gravar o valor negociado criaria um orçamento diferente do que a WM calculou. O que faltava era a
+**tela dizer**. Sem isso, a pessoa conclui que o sistema engoliu o desconto — ou envia o
+orçamento cheio ao cliente achando que o desconto está lá dentro.
+
+**Corrigido:** a prévia sanitizada passou a levar dois campos por item, e eles são dois fatos
+distintos:
+
+- `preco_negociado` — o eco da prévia (o valor que a WM confirmou ter usado), nunca o do rascunho
+  de volta. Mesma autoridade do `preco_confirmado`;
+- `negociacao_ignorada` — `true` só quando o atendente negociou a linha **e** a prévia não ecoou;
+  `false` quando negociou e a WM aplicou; `null` quando não houve negociação. Os três são
+  estados diferentes e a tela os lê como tal — só o `true` vira texto.
+
+O despacho **não muda**: continua sem o campo, com o preço cheio. O que muda é que a prévia agora
+explica a linha, em âmbar, no próprio item (`avisoNegociacaoIgnorada`).
 
 ### Dois achados de 22/10 que NÃO são pendência — são contrato que estávamos desperdiçando
 

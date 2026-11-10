@@ -9,6 +9,7 @@ const { getProvider } = require('../../services/providers')
 const { isRealWhatsAppId, buildCrmReferenceId } = require('../../helpers/whatsappMessageIdHelper')
 const { mapProviderSendResult } = require('../../services/chat/outbound/providerResultMapper')
 const { isTransientOutboundFailure } = require('../../services/chat/outbound/outboundFailureClassifier')
+const { gravarResultadoDoEnvio } = require('../../services/chat/outbound/outboundResultPersistence')
 const { schedulePendingOutboundReconciliation } = require('../../services/pendingOutboundReconciliationService')
 const { isInternalNoteRow } = require('../../helpers/internalNote')
 const { normalizeForwardTipo } = require('../../services/chat/outbound/messageNormalizers')
@@ -421,16 +422,18 @@ async function encaminharUmaMensagemParaConversa(ctx) {
     needsReconciliation = true
   }
 
-  await supabase
-    .from('mensagens')
-    .update({
-      status: nextStatus,
-      status_mensagem: nextStatusMensagem,
-      ...(hasTraceableForwardId ? { whatsapp_id: waMessageId } : {}),
-      ...(hasQueueForwardId ? { provider_queue_id: waMessageId } : {}),
-    })
-    .eq('company_id', company_id)
-    .eq('id', novaMensagem.id)
+  // Gravação CONDICIONAL (doc 29 §3 item 2): o ACK/eco do provedor pode chegar antes desta
+  // gravação e já ter levado a mensagem a sent/delivered/read. Escrever o status do envio por
+  // cima devolvia a bolha ao relógio. O helper só grava o status se a linha ainda estiver aberta
+  // (pending/sending/erro/failed); quando já avançou, grava apenas os ids.
+  await gravarResultadoDoEnvio({
+    company_id,
+    mensagem_id: novaMensagem.id,
+    status: nextStatus,
+    status_mensagem: nextStatusMensagem,
+    whatsapp_id: hasTraceableForwardId ? waMessageId : null,
+    provider_queue_id: hasQueueForwardId ? waMessageId : null,
+  })
 
   await supabase
     .from('conversas')

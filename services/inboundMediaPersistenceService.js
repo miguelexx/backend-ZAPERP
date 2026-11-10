@@ -56,6 +56,14 @@ function isEstadoColunaAusente(error) {
 }
 
 /** Uma cópia por mídia dentro deste processo; entre instâncias quem protege é midia_persist_lock_ate. */
+/**
+ * Teto de downloads de mídia inbound simultâneos (doc 29 §3 item 11). Ajustável por env;
+ * 3 é conservador para o processo único (PM2 `instances: 1`).
+ */
+const _limiteDownloadInbound = require('../helpers/limiteConcorrencia').criarLimiteConcorrencia(
+  Number(process.env.INBOUND_MEDIA_DOWNLOAD_CONCURRENCY) || 3
+)
+
 const emExecucao = new Set()
 const retentativasAgendadas = new Map()
 
@@ -415,7 +423,10 @@ function schedulePersistInboundMediaIfNeeded(ctx) {
   const { supabase, io, company_id, mensagem_id, fromMe } = ctx || {}
   if (!supabase || company_id == null || mensagem_id == null) return
   setImmediate(() => {
-    persistInboundMediaToUploads({ supabase, io, company_id, mensagem_id, fromMe: !!fromMe }).catch((e) => {
+    // Teto de concorrência (doc 29 §3 item 11): antes era um download por mensagem SEM limite,
+    // então uma rajada de N mídias abria N downloads de até ~80 MB ao mesmo tempo no único
+    // processo que também serve API e sockets. A fila é FIFO e nada é descartado.
+    _limiteDownloadInbound.run(() => persistInboundMediaToUploads({ supabase, io, company_id, mensagem_id, fromMe: !!fromMe })).catch((e) => {
       console.warn('[inboundMediaPersist] falha assíncrona:', { mensagem_id, err: e?.message || String(e) })
     })
   })

@@ -349,6 +349,51 @@ describe('pronto_para_confirmacao: snapshot server-side', () => {
     expect(itens[0].preco_negociado).toBeUndefined()
   })
 
+  it('a prévia DIZ que a negociação não foi aplicada — o silêncio é que fazia o atendente achar defeito', async () => {
+    // Mesma situação do teste acima (Worker ignorou). O snapshot continua certo: preço cheio,
+    // sem `preco_negociado`. O que muda é a prévia que vai à TELA — ela passa a carregar o fato.
+    //
+    // Sem isso: a pessoa digita R$ 10,00, o total volta cheio, nada explica, e ela conclui que o
+    // sistema engoliu o desconto — ou envia o orçamento cheio achando que ele está lá dentro.
+    wmApiClient.prepararOrcamento.mockResolvedValue(fx.resultadoOk(fx.previaPronta()))
+
+    const rascunho = rascunhoBase({
+      itens: [
+        { codigo_produto_erp: 'P001', quantidade: '2', preco_negociado: '10.00' },
+        { busca: 'notebook', quantidade: '1' },
+      ],
+    })
+    const r = await service.preparar({ company_id: 1, rascunho })
+
+    const itens = r.resultado.previa.itens
+    // Negociou e a WM NÃO ecoou: é o único estado que a tela transforma em aviso.
+    expect(itens[0].negociacao_ignorada).toBe(true)
+    expect(itens[0].preco_negociado).toBeNull()
+    // Não negociou: `null`, que é diferente de `false`. A tela não diz nada nos dois casos, mas
+    // eles são fatos distintos e colapsá-los esconderia a mudança no dia em que ela importar.
+    expect(itens[1].negociacao_ignorada).toBeNull()
+    // O preço OFICIAL continua intacto, como sempre.
+    expect(itens[0].preco_unitario).toBe('33.038')
+  })
+
+  it('negociação aplicada: a prévia ecoa o valor e NÃO acende o aviso', async () => {
+    const previa = fx.previaPronta({
+      itens: [
+        { codigo: 'P001', quantidade: '2.000', preco: '33.038', descricao: 'NOTEBOOK', estoque_previsto: '10.000', valor_total: '20.000', preco_negociado: '10.00' },
+      ],
+    })
+    wmApiClient.prepararOrcamento.mockResolvedValue(fx.resultadoOk(previa))
+
+    const rascunho = rascunhoBase({ itens: [{ codigo_produto_erp: 'P001', quantidade: '2', preco_negociado: '10.00' }] })
+    const r = await service.preparar({ company_id: 1, rascunho })
+
+    const item = r.resultado.previa.itens[0]
+    expect(item.negociacao_ignorada).toBe(false)
+    expect(item.preco_negociado).toBe('10.00')
+    // O eco é da PRÉVIA, nunca o do rascunho de volta — mesma autoridade do `preco_confirmado`.
+    expect(item.preco_unitario).toBe('33.038')
+  })
+
   it('a prévia sanitizada leva os campos reais do contrato para a UI', async () => {
     wmApiClient.prepararOrcamento.mockResolvedValue(fx.resultadoOk(fx.previaPronta()))
 
@@ -364,8 +409,12 @@ describe('pronto_para_confirmacao: snapshot server-side', () => {
     // `valor_total_bruto` e `valor_desconto_unit` entram por serem do contrato e por um motivo
     // concreto: sem eles um desconto aplicado pelo ERP apareceria só como um total menor, sem
     // dizer de onde veio, e o atendente não teria como explicar o preço ao cliente.
+    // `preco_negociado` e `negociacao_ignorada` entram pelo mesmo tipo de motivo: sem eles, uma
+    // negociação que o Worker não aplicou sumia do total sem uma palavra, e o atendente concluía
+    // que o sistema tinha engolido o desconto.
     expect(Object.keys(previa.itens[0]).sort()).toEqual(
-      ['codigo_produto_erp', 'descricao', 'estoque_previsto', 'preco_unitario', 'quantidade',
+      ['codigo_produto_erp', 'descricao', 'estoque_previsto', 'negociacao_ignorada',
+        'preco_negociado', 'preco_unitario', 'quantidade',
         'valor_desconto_unit', 'valor_total', 'valor_total_bruto']
     )
     expect(previa.itens[0]).toEqual({
@@ -379,6 +428,10 @@ describe('pronto_para_confirmacao: snapshot server-side', () => {
       // informado" são coisas diferentes na hora de exibir.
       valor_total_bruto: null,
       valor_desconto_unit: null,
+      // Esta linha não foi negociada: `null` nos dois, que é diferente de `false`. Não houve
+      // pedido de negociação, então não há aplicação a afirmar nem a negar.
+      preco_negociado: null,
+      negociacao_ignorada: null,
     })
     // Estoque previsto pode ser NEGATIVO e atravessa como texto, sem virar conta.
     expect(previa.itens[1].estoque_previsto).toBe('-2.125')

@@ -904,6 +904,51 @@ async function enrichQuotedProduct(normalized, ctxSrc) {
   return normalized
 }
 
+/**
+ * Pedido recebido do cliente (type 'order'): busca os ITENS do pedido (GET /business/orders) e monta
+ * `normalized.orderMeta` { order_id, item_count, total_price, currency, title, preview, items[] } para a
+ * bolha OrderMessage mostrar foto + nome + qtd + preço de cada item e o total. Best-effort: se a busca
+ * falhar (sem token, conta comum, rede), fica o resumo + o preview (miniatura do webhook) e nunca
+ * derruba o inbound. Espelha enrichNormalizedProduct.
+ */
+async function enrichNormalizedOrder(normalized, ctxSrc) {
+  const ref = normalized?.orderRef
+  if (!ref) return normalized
+  const meta = {
+    order_id: ref.order_id || null,
+    item_count: ref.item_count != null ? ref.item_count : null,
+    total_price: ref.total_price != null ? ref.total_price : null,
+    currency: ref.currency || null,
+    title: ref.title || null,
+    preview: ref.preview || null,
+    items: [],
+  }
+  if (ref.order_id && ctxSrc?.company_id != null) {
+    try {
+      const whapiOrders = require('../services/providers/whapi/orders')
+      const res = await whapiOrders.getOrder(ref.order_id, {
+        orderToken: ref.token || undefined,
+        companyId: ctxSrc.company_id,
+        whatsappInstanceId: ctxSrc.whatsapp_instance_id || undefined,
+      })
+      if (res && res.ok && Array.isArray(res.items)) meta.items = res.items
+    } catch (e) {
+      console.warn('[WHAPI] getOrder inbound falhou:', e?.message || e)
+    }
+  }
+  normalized.orderMeta = meta
+  // Corpo: resumo (🛒 • N itens • total) + nomes dos itens quando houver. Nunca vazio → não é
+  // descartado pelo guard de placeholder e vira o preview do card na lista de conversas.
+  const base = buildWhapiOrderSummary({ item_count: meta.item_count, total_price: meta.total_price, currency: meta.currency }) || '🛒 Pedido recebido'
+  const nomes = meta.items.map((i) => (i && i.name ? String(i.name).trim() : '')).filter(Boolean)
+  const body = nomes.length ? `${base}\n${nomes.map((n) => `• ${n}`).join('\n')}` : base
+  normalized.body = body
+  normalized.message = body
+  normalized.text = { message: body }
+  normalized.texto = body
+  return normalized
+}
+
 function normalizeWhapiMessageToInternal(m, ctx = {}) {
   if (!m || typeof m !== 'object') return null
   const channelId = ctx.channelId
@@ -943,8 +988,20 @@ function normalizeWhapiMessageToInternal(m, ctx = {}) {
         catalog_id: String(quotedContent.catalog_id ?? '').trim() || null,
       }
     : null
-  // Pedido (carrinho) do cliente (type 'order'): resumo agregado — a API Whapi não envia os itens.
+  // Pedido (carrinho) do cliente (type 'order'): o webhook traz só o agregado + token; os ITENS
+  // (nome/preço/imagem) são buscados depois por enrichNormalizedOrder via GET /business/orders.
   const orderSummary = type === 'order' ? buildWhapiOrderSummary(m.order) : ''
+  const orderRef = (type === 'order' && m.order && typeof m.order === 'object')
+    ? {
+        order_id: String(m.order.order_id ?? m.order.id ?? '').trim() || null,
+        token: m.order.token != null ? String(m.order.token) : null,
+        item_count: Number.isFinite(Number(m.order.item_count)) ? Number(m.order.item_count) : null,
+        total_price: m.order.total_price != null ? Number(m.order.total_price) : null,
+        currency: m.order.currency != null ? String(m.order.currency) : null,
+        title: m.order.title != null ? String(m.order.title) : null,
+        preview: typeof m.order.preview === 'string' ? m.order.preview : null,
+      }
+    : null
   // Outros `action` (ex. media_notify) não são mensagem de atendimento — edit/vote/reaction passam.
   if (type === 'action' && !isReaction && !isPollVote && !isEdit) return null
   if (type === 'deleted' || type === 'revoke' || type === 'revoked' || m.deleted === true) return null
@@ -1083,9 +1140,9 @@ function normalizeWhapiMessageToInternal(m, ctx = {}) {
     : (type === 'live_location') ? 'location'
     : (type === 'gif' || type === 'short') ? 'video'
     : (type === 'contacts' || type === 'contact_list' || (contactsArray && contactsArray.length > 1)) ? 'contact'
-    // Produto → cartão (bolha product). Pedido → texto (resumo agregado; sem cartão por item).
+    // Produto → cartão (bolha product). Pedido → cartão de pedido (bolha order, itens + total).
     : (type === 'product') ? 'product'
-    : (type === 'order') ? 'chat'
+    : (type === 'order') ? 'order'
     : type
 
   return {
@@ -1146,6 +1203,7 @@ function normalizeWhapiMessageToInternal(m, ctx = {}) {
     ...(contactsArray && contactsArray.length ? { contacts: contactsArray } : {}),
     ...(productRef ? { productRef } : {}),
     ...(quotedProductRef ? { quotedProductRef } : {}),
+    ...(orderRef ? { orderRef } : {}),
     isEdit,
   }
 }
@@ -1468,6 +1526,13 @@ async function handleWebhookWhapi(req, res) {
           console.warn('[WHAPI] enrich produto citado falhou:', e?.message || e)
         }
       }
+      if (normalized.orderRef) {
+        try {
+          normalized = await enrichNormalizedOrder(normalized, ctxSrc)
+        } catch (e) {
+          console.warn('[WHAPI] enrich pedido falhou:', e?.message || e)
+        }
+      }
       // Evento Z-API = ReceivedCallback; o tipo de conteúdo (chat/image/poll/…) fica em msgType
       // para extractMessage não achatar enquete/mídia em texto.
       normalized.msgType = normalized.type
@@ -1590,6 +1655,7 @@ exports._test = {
   enrichNormalizedPollVote,
   enrichNormalizedProduct,
   enrichQuotedProduct,
+  enrichNormalizedOrder,
   buildWhapiOrderSummary,
   whapiMessageEpochMs,
   whapiInboundIsHistorical,

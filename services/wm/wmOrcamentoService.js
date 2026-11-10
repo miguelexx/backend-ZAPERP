@@ -360,9 +360,9 @@ function extrairPayloadCriacaoDaPrevia({ dados, meta, rascunho, bloquear_apos_cr
     // tela mostrou. Negociou mas a prévia não ecoou ⇒ Worker ignorou (Anexo A, 1b): segue sem o
     // campo, e o total cheio da prévia é o que será gravado — sem divergência silenciosa.
     const negociouLinha = decimalExato(rascunho.itens[i]?.preco_negociado) !== null
-    if (negociouLinha) {
-      const precoNegociadoPrevia = decimalExato(bruto.preco_negociado)
-      if (precoNegociadoPrevia !== null) itemPayload.preco_negociado = precoNegociadoPrevia
+    const precoNegociadoPrevia = negociouLinha ? decimalExato(bruto.preco_negociado) : null
+    if (negociouLinha && precoNegociadoPrevia !== null) {
+      itemPayload.preco_negociado = precoNegociadoPrevia
     }
 
     itensPayload.push(itemPayload)
@@ -382,6 +382,21 @@ function extrairPayloadCriacaoDaPrevia({ dados, meta, rascunho, bloquear_apos_cr
       // o preço ao cliente. São exibição: não entram em conta nenhuma e não vão para `criar`.
       valor_total_bruto: decimalExato(bruto.valor_total_bruto),
       valor_desconto_unit: decimalExato(bruto.valor_desconto_unit),
+      // O PREÇO NEGOCIADO, e se ele foi APLICADO. Dois campos, porque são dois fatos:
+      //
+      //   · `preco_negociado` é o eco da prévia — o valor que a WM confirmou ter usado. Nunca o
+      //     do rascunho de volta (mesma regra do `preco_confirmado`);
+      //   · `negociacao_ignorada` é `true` SÓ quando o atendente negociou esta linha e a prévia
+      //     NÃO ecoou o campo, isto é, quando o Worker do ERP não aplicou a negociação (Anexo A,
+      //     item 1b). O despacho segue sem o campo e o preço cheio é o que será gravado — isso
+      //     está certo e não muda. O que faltava era DIZER: a pessoa digitava R$ 10,00, o total
+      //     não mudava, e nada na tela explicava por quê. Ela concluía que o sistema tinha
+      //     engolido o desconto — e, pior, que o total exibido estava errado.
+      //
+      // `false` quando negociou e a prévia ecoou; `null` quando não houve negociação nenhuma
+      // nesta linha. Os três são estados diferentes e a tela os lê como tal.
+      preco_negociado: precoNegociadoPrevia,
+      negociacao_ignorada: negociouLinha ? precoNegociadoPrevia === null : null,
     })
   }
 

@@ -7,6 +7,7 @@ const wmOrcamentoService = require('../services/wm/wmOrcamentoService')
 const {
   validarConsultarProdutosBody,
   validarConsultarClientesBody,
+  validarConsultarVendedoresBody,
   validarPrepararBody,
   validarCorpoVazio,
 } = require('../validators/wmOrcamentosValidators')
@@ -196,6 +197,70 @@ async function consultarClientes(req, res) {
       status: 503,
       codigo: CODIGO_ERRO_INTERNO,
       mensagem: 'Não foi possível consultar os clientes agora. Tente de novo.',
+      requestId,
+    })
+  }
+}
+
+/**
+ * `POST /api/orcamentos/vendedores/consultar`
+ *
+ * Vendedores do ERP: por trecho do nome (`busca`), por código exato (`codigo_vendedor_erp`), ou
+ * **sem nenhum dos dois** — e aí a WM devolve a lista inteira. É o único dos três consultares em
+ * que o corpo vazio é requisição válida, e é dele que a tela se serve ao abrir o campo: a lista
+ * é curta (8 na empresa de teste) e ninguém precisa adivinhar como o nome está cadastrado.
+ *
+ * LISTA VAZIA É `200`, NÃO ERRO. A WM responde `{ vendedores: [], paginacao: { total: 0 } }`
+ * quando não há vendedor com aquele nome — ao contrário de clientes, onde nada encontrado é 404.
+ * Nada aqui converte vazio em falha: "não existe vendedor com esse nome" e "não foi possível
+ * buscar agora" são conclusões opostas para quem está com o cliente esperando.
+ *
+ * Como o irmão de clientes, a resposta carrega `resolucao_definitiva: false`: escolher aqui
+ * devolve o `codigo_vendedor_erp` (que elimina a ambiguidade no `preparar`), mas quem resolve o
+ * vendedor do orçamento continua sendo o `preparar`, que revalida e pode recusar (D11).
+ */
+async function consultarVendedores(req, res) {
+  const requestId = novoRequestId()
+  const company_id = req.user?.company_id
+
+  const validado = validarConsultarVendedoresBody(req.body)
+  if (!validado.ok) {
+    return responderErroLocal(res, {
+      status: 400,
+      codigo: CODIGO_DADOS_INVALIDOS,
+      mensagem: validado.error,
+      campo: validado.campo,
+      requestId,
+    })
+  }
+
+  try {
+    const r = await wmAssistenteService.consultarVendedores({
+      company_id,
+      consulta: validado.value,
+      requestId,
+    })
+
+    if (!r.ok) {
+      if (r.interno?.alertaOperacional) {
+        console.warn('[wmOrcamentos] vendedores/consultar', JSON.stringify({
+          requestId,
+          company_id,
+          httpLocal: r.interno.httpStatusLocal,
+          httpWm: r.interno.httpStatusWm,
+          codigo: r.envelope?.codigo || null,
+        }))
+      }
+      return res.status(r.httpStatus).json(r.envelope)
+    }
+
+    return res.json({ ok: true, requestId, ...r.dados })
+  } catch (err) {
+    console.error('[wmOrcamentos] vendedores/consultar falha inesperada', requestId, err?.message || err)
+    return responderErroLocal(res, {
+      status: 503,
+      codigo: CODIGO_ERRO_INTERNO,
+      mensagem: 'Não foi possível consultar os vendedores agora. Tente de novo.',
       requestId,
     })
   }
@@ -485,6 +550,7 @@ module.exports = {
   CODIGO_CONVERSA_NAO_INDIVIDUAL,
   consultarProdutos,
   consultarClientes,
+  consultarVendedores,
   statusErp,
   preparar,
   confirmar,

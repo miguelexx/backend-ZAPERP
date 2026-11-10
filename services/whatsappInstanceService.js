@@ -246,7 +246,7 @@ async function getLegacyEmpresaZapiDefault(companyId, opts = {}) {
   return { instance: buildLegacyInstance(data, opts), error: null }
 }
 
-async function getDefaultWhatsappInstance(companyId, opts = {}) {
+async function getDefaultWhatsappInstanceUncached(companyId, opts = {}) {
   const cid = normalizeCompanyId(companyId)
   if (!cid) return { instance: null, error: 'company_id invalido' }
   const provider = normalizeProvider(opts.provider)
@@ -308,7 +308,7 @@ async function getDefaultWhatsappInstance(companyId, opts = {}) {
   return getLegacyEmpresaZapiDefault(cid, opts)
 }
 
-async function getWhatsappInstanceById(companyId, whatsappInstanceId, opts = {}) {
+async function getWhatsappInstanceByIdUncached(companyId, whatsappInstanceId, opts = {}) {
   const cid = normalizeCompanyId(companyId)
   const id = Number(whatsappInstanceId)
   if (!cid) return { instance: null, error: 'company_id invalido' }
@@ -330,6 +330,69 @@ async function getWhatsappInstanceById(companyId, whatsappInstanceId, opts = {})
   }
   if (!data) return { instance: null, error: 'Instancia WhatsApp nao encontrada' }
   return { instance: responseInstance(data, opts), error: null }
+}
+
+/**
+ * Cache de leitura das instâncias (doc 29 §3 item 6).
+ *
+ * `resolveConfig` dos adapters (ultramsg/whapi) chama estas duas funções em TODO envio, e
+ * `conversationAddressService` em todo caminho que resolve telefone/instância: a mesma linha de
+ * `whatsapp_instances` era lida várias vezes por mensagem. TTL curto + invalidação explícita
+ * nos mutadores deste módulo.
+ *
+ * A chave inclui o `company_id` (isolamento aqui é app-layer) E todas as opções que mudam o
+ * RESULTADO — principalmente `includeCredentials`, que troca o select entre PUBLIC e PRIVATE:
+ * sem isso um chamador sem credenciais poderia receber a linha com token (ou o adapter receber
+ * uma linha sem token e falhar o envio).
+ *
+ * Resultado com `error` NÃO é cacheado: "instância não encontrada" tem de voltar fresco assim
+ * que o admin criar/ativar a instância, mesmo sem passar pelos mutadores daqui.
+ */
+const _instanceCache = require('../helpers/shortTtlCache').create({
+  name: 'whatsappInstance',
+  ttlMs: Number(process.env.WHATSAPP_INSTANCE_CACHE_TTL_MS || 15_000),
+  max: 500,
+})
+
+/** Invalida tudo que foi cacheado para a empresa (qualquer instância, qualquer combinação de opts). */
+function invalidateWhatsappInstanceCache(companyId) {
+  if (companyId == null) { _instanceCache.clear(); return }
+  _instanceCache.invalidate(companyId)
+}
+
+/** Assinatura das opções que alteram o resultado — vai na chave. */
+function _optsFingerprint(opts = {}) {
+  return [
+    opts.includeCredentials === true ? 'cred' : 'pub',
+    opts.requireActive === false ? 'any' : 'ativo',
+    normalizeProvider(opts.provider),
+    opts.requireExplicitDefault === true ? 'explicit' : '',
+    opts.allowImplicitDefaultFallback === true ? 'implicit' : '',
+  ].join('|')
+}
+
+/** Cópia rasa: o objeto cacheado é partilhado entre chamadores; ninguém muta o do cache. */
+function _copiaResultado(r) {
+  if (!r || typeof r !== 'object') return r
+  return { ...r, ...(r.instance && typeof r.instance === 'object' ? { instance: { ...r.instance } } : {}) }
+}
+
+async function getDefaultWhatsappInstance(companyId, opts = {}) {
+  const r = await _instanceCache.wrap(companyId, `default:${_optsFingerprint(opts)}`, async () => {
+    const res = await getDefaultWhatsappInstanceUncached(companyId, opts)
+    if (res?.error) throw Object.assign(new Error('nao-cachear'), { _naoCachear: true, _resultado: res })
+    return res
+  }).catch((e) => (e?._naoCachear ? e._resultado : Promise.reject(e)))
+  return _copiaResultado(r)
+}
+
+async function getWhatsappInstanceById(companyId, whatsappInstanceId, opts = {}) {
+  const r = await _instanceCache.wrap(companyId, `id:${Number(whatsappInstanceId)}:${_optsFingerprint(opts)}`, async () => {
+    const res = await getWhatsappInstanceByIdUncached(companyId, whatsappInstanceId, opts)
+    if (res?.error) throw Object.assign(new Error('nao-cachear'), { _naoCachear: true, _resultado: res })
+    return res
+  }).catch((e) => (e?._naoCachear ? e._resultado : Promise.reject(e)))
+  return _copiaResultado(r)
 }
 
 async function getWhatsappInstanceByProviderInstanceId(provider, instanceId, opts = {}) {
@@ -649,6 +712,9 @@ async function setDefaultWhatsappInstance(companyId, whatsappInstanceId) {
 
   const row = Array.isArray(data) ? data[0] : data
   if (error || !row) return { instance: null, error: error?.message || 'Erro ao definir instancia default' }
+  // Qualquer escrita em `whatsapp_instances` derruba o cache de leitura desta empresa
+  // (sem isso o adapter seguiria usando token/instância antigos por até um TTL).
+  invalidateWhatsappInstanceCache(cid)
   return { instance: sanitizeWhatsappInstance(row), error: null }
 }
 
@@ -716,6 +782,10 @@ async function createWhatsappInstance(companyId, input = {}) {
     .maybeSingle()
 
   if (error || !data) return { instance: null, error: error?.message || 'Erro ao criar instancia WhatsApp' }
+  // Qualquer escrita em `whatsapp_instances` derruba o cache de leitura desta empresa
+  // (sem isso o adapter seguiria usando token/instância antigos por até um TTL).
+  invalidateWhatsappInstanceCache(cid)
+
   if (shouldBeDefault && data.ativo !== false) {
     return setDefaultWhatsappInstance(cid, data.id)
   }
@@ -814,11 +884,15 @@ async function updateWhatsappInstance(companyId, whatsappInstanceId, input = {})
     .maybeSingle()
 
   if (error || !data) return { instance: null, error: error?.message || 'Erro ao atualizar instancia WhatsApp' }
+  // Qualquer escrita em `whatsapp_instances` derruba o cache de leitura desta empresa
+  // (sem isso o adapter seguiria usando token/instância antigos por até um TTL).
+  invalidateWhatsappInstanceCache(cid)
   return { instance: sanitizeWhatsappInstance(data), error: null }
 }
 
 module.exports = {
   DEFAULT_PROVIDER,
+  invalidateWhatsappInstanceCache,
   sanitizeWhatsappInstance,
   toEmpresaWhatsappConfig,
   getDefaultWhatsappInstance,

@@ -23,6 +23,7 @@ const { enrichMensagemComAutorUsuario } = require('../../services/chat/presentat
 const { aplicarAguardandoClienteNoPayload, anexarAssumirNoPayloadLista } = require('../../services/chat/outbound/modoSimplesOutbound')
 const { mapProviderSendResultComTransitoria, enviarSemEstourar } = require('../../services/chat/outbound/providerResultMapper')
 const { isTransientOutboundFailure } = require('../../services/chat/outbound/outboundFailureClassifier')
+const { gravarResultadoDoEnvio } = require('../../services/chat/outbound/outboundResultPersistence')
 const { schedulePendingOutboundReconciliation } = require('../../services/pendingOutboundReconciliationService')
 
 exports.getPixConfig = async (req, res) => {
@@ -274,16 +275,18 @@ async function enviarPixCartaoWhapi(req, res, { cfg, pixTexto, whatsappInstanceI
     nextStatus, nextStatusMensagem,
   } = mappedResult
 
-  await supabase
-    .from('mensagens')
-    .update({
-      status: nextStatus,
-      status_mensagem: nextStatusMensagem,
-      ...(hasTraceableId ? { whatsapp_id: waMessageId } : {}),
-      ...(hasQueueId ? { provider_queue_id: waMessageId } : {}),
-    })
-    .eq('company_id', company_id)
-    .eq('id', msg.id)
+  // Gravação CONDICIONAL (doc 29 §3 item 2): o ACK/eco do provedor pode chegar antes desta
+  // gravação e já ter levado a mensagem a sent/delivered/read. Escrever o status do envio por
+  // cima devolvia a bolha ao relógio. O helper só grava o status se a linha ainda estiver aberta
+  // (pending/sending/erro/failed); quando já avançou, grava apenas os ids.
+  await gravarResultadoDoEnvio({
+    company_id,
+    mensagem_id: msg.id,
+    status: nextStatus,
+    status_mensagem: nextStatusMensagem,
+    whatsapp_id: hasTraceableId ? waMessageId : null,
+    provider_queue_id: hasQueueId ? waMessageId : null,
+  })
 
   if (io) {
     const payload = await enrichMensagemComAutorUsuario(supabase, company_id, {

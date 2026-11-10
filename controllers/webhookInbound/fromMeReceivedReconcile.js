@@ -24,6 +24,64 @@ const { extrairNomePrefixoTexto } = require('../../helpers/mensagemAtendenteNome
 const WEBHOOK_MSG_SELECT = 'id, conversa_id, company_id, whatsapp_instance_id, whatsapp_id, texto, url, tipo, direcao, criado_em, status, autor_usuario_id, reply_meta, nome_arquivo, contact_meta, location_meta, remetente_nome, remetente_telefone'
 const WHATSAPP_DEBUG = String(process.env.WHATSAPP_DEBUG || '').toLowerCase() === 'true'
 
+/**
+ * Conversas da MESMA empresa que são o mesmo contato da `conversa_id` — ela própria, as do mesmo
+ * `cliente_id` e as do mesmo telefone (incluindo as variantes de identidade BR, ± 9º dígito).
+ *
+ * É o que a "Busca 2" da reconciliação de eco precisa: a divergência de `conversa_id` que ela
+ * cobre é sempre o mesmo contato resolvido para outra linha de `conversas` (lid vs telefone,
+ * nono dígito, split por instância) — nunca outro cliente. Devolve `[]` quando não há irmãs,
+ * e nesse caso o chamador não faz a Busca 2.
+ */
+async function conversaIdsDoMesmoContato(supabase, { company_id, conversa_id }) {
+  if (!company_id || !conversa_id) return []
+  try {
+    const { data: base } = await supabase
+      .from('conversas')
+      .select('id, cliente_id, telefone')
+      .eq('company_id', company_id)
+      .eq('id', conversa_id)
+      .maybeSingle()
+    if (!base?.id) return []
+
+    const ids = new Set([Number(base.id)])
+
+    if (base.cliente_id != null) {
+      const { data: porCliente } = await supabase
+        .from('conversas')
+        .select('id')
+        .eq('company_id', company_id)
+        .eq('cliente_id', base.cliente_id)
+        .limit(16)
+      for (const c of porCliente || []) if (c?.id != null) ids.add(Number(c.id))
+    }
+
+    const digitos = String(base.telefone || '').replace(/\D/g, '')
+    if (digitos.length >= 10) {
+      const { possiblePhonesForWhatsappIdentity } = require('../../helpers/phoneHelper')
+      const telefones = Array.from(new Set(
+        [digitos, ...(possiblePhonesForWhatsappIdentity(digitos) || [])]
+          .map((t) => String(t || '').replace(/\D/g, ''))
+          .filter((t) => t.length >= 10),
+      ))
+      if (telefones.length) {
+        const { data: porTelefone } = await supabase
+          .from('conversas')
+          .select('id')
+          .eq('company_id', company_id)
+          .in('telefone', telefones)
+          .limit(16)
+        for (const c of porTelefone || []) if (c?.id != null) ids.add(Number(c.id))
+      }
+    }
+
+    return [...ids]
+  } catch (e) {
+    console.warn('[Z-API] fromMe reconcile: conversas do mesmo contato:', e?.message || e)
+    return []
+  }
+}
+
 async function reconcileFromMeInReceived(supabaseClient, ctx) {
   const supabase = supabaseClient || supabaseDefault
   const {
@@ -63,7 +121,7 @@ async function reconcileFromMeInReceived(supabaseClient, ctx) {
     const fromIso = Number.isFinite(tsMs) ? new Date(tsMs - windowMs).toISOString() : null
     const toIso = Number.isFinite(tsMs) ? new Date(tsMs + windowMs).toISOString() : null
 
-    const buildQuery = (filterConversa) => {
+    const buildQuery = (filterConversa, conversaIdsIrmas = null) => {
       let q = supabase
         .from('mensagens')
         .select('id, criado_em, texto, url, nome_arquivo, tipo, whatsapp_id, reply_meta, conversa_id, autor_usuario_id')
@@ -73,6 +131,7 @@ async function reconcileFromMeInReceived(supabaseClient, ctx) {
         .order('id', { ascending: false })
         .limit(15)
       if (filterConversa) q = q.eq('conversa_id', conversa_id)
+      else if (Array.isArray(conversaIdsIrmas) && conversaIdsIrmas.length) q = q.in('conversa_id', conversaIdsIrmas)
       q = applyWhatsappInstanceFilterOrLegacy(q, whatsapp_instance_id)
       if (fromIso && toIso) q = q.gte('criado_em', fromIso).lte('criado_em', toIso)
       // URL do webhook (CDN) ≠ /uploads/ do CRM — não filtrar por url remota
@@ -94,15 +153,25 @@ async function reconcileFromMeInReceived(supabaseClient, ctx) {
     const { data: candidates } = await buildQuery(true)
     let cand = findCand(candidates)
 
-    // Busca 2 (fallback): na empresa inteira — cobre divergência de conversa_id entre
-    // chatController (URL param) e webhook (findOrCreateConversation pode resolver diferente)
+    // Busca 2 (fallback): fora da conversa resolvida pelo webhook — cobre divergência de
+    // conversa_id entre chatController (URL param) e webhook (findOrCreateConversation pode
+    // resolver diferente). Essa divergência é SEMPRE o MESMO contato (± 9º dígito, lid vs
+    // telefone, split por instância), então a busca agora é restrita às conversas desse
+    // contato em vez da empresa inteira: na empresa toda, um eco podia casar com o outbound de
+    // OUTRO cliente só por ter texto/mídia parecidos e gravar whatsapp_id/status na linha
+    // errada (doc 29 §3 item 12). Sem conversas irmãs, Busca 2 não tem o que cobrir.
     if (!cand) {
-      const { data: fallbackCandidates } = await buildQuery(false)
-      cand = findCand(fallbackCandidates)
-      if (cand && WHATSAPP_DEBUG) {
-        console.log('[Z-API] fromMe reconcile fallback: encontrado fora da conversa', {
-          cand_conversa: cand.conversa_id, webhook_conversa: conversa_id
-        })
+      const irmas = await conversaIdsDoMesmoContato(supabase, { company_id, conversa_id })
+      if (irmas.length) {
+        const { data: fallbackCandidates } = await buildQuery(false, irmas)
+        cand = findCand(fallbackCandidates)
+        if (cand && WHATSAPP_DEBUG) {
+          console.log('[Z-API] fromMe reconcile fallback: encontrado fora da conversa', {
+            cand_conversa: cand.conversa_id, webhook_conversa: conversa_id
+          })
+        }
+      } else if (WHATSAPP_DEBUG) {
+        console.log('[Z-API] fromMe reconcile: Busca 2 ignorada (nenhuma conversa irmã do mesmo contato)')
       }
     }
 

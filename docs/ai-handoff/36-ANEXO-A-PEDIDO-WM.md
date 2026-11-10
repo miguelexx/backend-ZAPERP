@@ -105,7 +105,7 @@ Medimos a de vendedor em 26/10/2026, porque o contrato não a declara. O resulta
 |---|---|---|
 | produto | **trecho**, em qualquer posição | `cimento` traz `ARREFECIMENTO` |
 | cliente | **prefixo** | `lacerda` não acha `JORGE LACERDA`; `jorge lacerda` acha |
-| vendedor | **trecho**, em qualquer posição | `aula` resolve `PAULA FERNANDA (002)` |
+| vendedor | **trecho**, em qualquer posição | `aula` resolve `PAULA FERNANDA (002)`; reconfirmado em 09/11 na porta nova: `arkony` acha `MARKONY (003)` |
 
 São três regras diferentes em três campos lado a lado, e o atendente não tem como deduzir isso.
 O efeito prático é o do meio: quem aprende que "basta digitar um pedaço" no produto e no vendedor
@@ -116,16 +116,32 @@ o resultado, não como o texto casa) e, principalmente, considerar **uniformizar
 outras duas**. O pedido B acima já trata disso: aceitar trecho na busca de cliente resolveria a
 inconsistência e o problema de usabilidade de uma vez.
 
-**Pedido 2, e este é o que resolve de verdade: um `/vendedores/consultar`.** Hoje o vendedor é o
-único dos três que não tem porta própria. Cliente tem `/clientes/consultar`, produto tem
-`/produtos/consultar`, e vendedor só existe dentro de `preparar` — que exige cliente **e** pelo
-menos um item (`itens` tem `minItems: 1`). Ou seja: não há como mostrar a lista de vendedores da
-loja antes de o orçamento estar quase pronto, e o atendente novo tem de adivinhar como o nome dele
+**Pedido 2 — ✅ ATENDIDO em 09/11/2026. Obrigado.** Era: *um `/vendedores/consultar`*, porque o
+vendedor era o único dos três sem porta própria — cliente tem `/clientes/consultar`, produto tem
+`/produtos/consultar`, e vendedor só existia dentro de `preparar`, que exige cliente **e** pelo
+menos um item (`itens` tem `minItems: 1`). Não havia como mostrar a lista de vendedores da loja
+antes de o orçamento estar quase pronto, e o atendente novo tinha de adivinhar como o nome dele
 está cadastrado no ERP.
 
-Um endpoint espelhando o de clientes — `{busca XOR codigo_vendedor_erp, pagina}` devolvendo
-`codigo_vendedor_erp` e `nome` — fecharia essa lacuna com o desenho que vocês já têm pronto, e
-sem nada de novo do nosso lado além de consumir.
+`POST /api/v1/assistente/vendedores/consultar` está no ar e **já consumimos**. Medimos o
+comportamento ao vivo em 09/11 (8 vendedores reais) e registramos o contrato do nosso lado em
+[36-ORCAMENTO-WM-INTEGRACAO.md](36-ORCAMENTO-WM-INTEGRACAO.md), seção 10, "Achado de 09/11". Duas
+observações, nenhuma delas um problema:
+
+1. **Vocês fizeram melhor do que pedimos.** Pedimos `busca XOR codigo_vendedor_erp`, espelhando
+   clientes; veio com **`busca` opcional**, e sem termo a rota devolve a lista inteira. É isso que
+   permite o campo abrir já mostrando os vendedores — ninguém precisa adivinhar nome nenhum. Foi
+   o que implementamos.
+2. **A resposta tem forma própria, e isso vale documentar**, porque quem assumir este código vindo
+   de `/clientes/consultar` vai errar: a lista vem em `dados.vendedores[]` e **não há campo
+   `status`**; e nada encontrado é **`200` com `vendedores: []` e `total: 0`**, enquanto em
+   clientes é `404`. Seria útil que o `openapi.yaml` passasse a descrever esta rota — hoje ela não
+   está lá, então o contrato que temos é o que medimos.
+
+O resto bate com as outras portas e não precisa de nada: `pagina` fora do intervalo é
+`400 PAGINA_FORA_DO_INTERVALO` sem clamp, `busca: ""` é `400 payload_invalido` (omitimos o campo
+em vez de mandar vazio), e a rota é realtime — cai com o sincronizador, devolvendo
+`503 SINCRONIZADOR_OFFLINE`, que tratamos como indisponibilidade e nunca como lista vazia.
 
 ---
 

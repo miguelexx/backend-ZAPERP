@@ -12,6 +12,7 @@ const { isGroupConversation } = require('../../../helpers/conversaHelper')
 const {
   buildMensagemInternaMovimentacao,
   perfilPodeVerMovimentacaoInterna,
+  MOVIMENTACAO_INTERNA_PERFIS,
 } = require('../../atendimentosRegistroService')
 const { statusAtendimentoParaLista } = require('../presentation/chatDto')
 const {
@@ -266,7 +267,11 @@ async function emitirMovimentacaoInternaAtendimento(io, {
       .select('id, perfil')
       .eq('company_id', Number(company_id))
       .eq('ativo', true)
-      .in('perfil', ['admin', 'administrador'])
+      // A lista canônica é MOVIMENTACAO_INTERNA_PERFIS (admin/administrador/supervisor). O
+      // pré-filtro estava cravado só em admin, então o supervisor nunca recebia a bolha
+      // "X transferiu para Y" em tempo real — só ao reabrir a conversa (detalharChat já a
+      // devolve para supervisor). O filtro por perfilPodeVerMovimentacaoInterna abaixo continua.
+      .in('perfil', MOVIMENTACAO_INTERNA_PERFIS)
 
     if (error) {
       console.warn('[movimentacaoInterna] usuarios:', error?.message || error)

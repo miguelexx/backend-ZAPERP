@@ -265,13 +265,21 @@ function emitirMidiaAtualizada({ io, company_id, row, updated }) {
   } catch (_) { /* emissão é best-effort */ }
 }
 
+/** Teto de uploads simultâneos ao R2 (doc 29 §3 item 11). Ajustável por env. */
+const _limiteEspelhamentoR2 = require('../helpers/limiteConcorrencia').criarLimiteConcorrencia(
+  Number(process.env.R2_MIRROR_CONCURRENCY) || 2
+)
+
 /** Agenda espelhamento assíncrono (não bloqueia o fluxo). No-op se a empresa não usa R2. */
 function scheduleR2MirrorIfNeeded({ supabase, io = null, company_id, mensagem_id }) {
   if (_colunasStorageIndisponiveis) return
   if (!supabase || company_id == null || mensagem_id == null) return
   if (!empresaUsaR2(company_id)) return
   setImmediate(() => {
-    mirrorMensagemParaR2({ supabase, io, company_id, mensagem_id }).catch((e) => {
+    // Teto de concorrência (doc 29 §3 item 11): o espelhamento lê o arquivo local e faz upload;
+    // sem limite, uma rajada de mídias subia N arquivos ao mesmo tempo. A varredura periódica
+    // (`runMediaR2MirrorSweep`) já era sequencial — este era o caminho sem teto.
+    _limiteEspelhamentoR2.run(() => mirrorMensagemParaR2({ supabase, io, company_id, mensagem_id })).catch((e) => {
       console.warn('[mediaR2] agendamento falhou:', { mensagem_id, erro: e?.message || String(e) })
     })
   })

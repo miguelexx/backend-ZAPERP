@@ -16,7 +16,7 @@ const {
   applyWhatsappInstanceFilterOrLegacy,
   logAmbiguousWhatsappId,
 } = require('./whatsappIdLookup')
-const { filterRowsForFromMeReconcile, findPendingOutboundByAckPhone } = require('./fromMeReconcile')
+const { filterRowsForFromMeReconcile, findPendingOutboundByAckPhone, resolveConversaIdsDoAckPorTelefone } = require('./fromMeReconcile')
 
 /** Log seguro (sem tokens/conteudo sensivel) — duplicado do controller. */
 function _logWebhookSafe(entry) {
@@ -397,6 +397,24 @@ exports.statusZapi = async (req, res) => {
       const isWhatsAppFormatId = !ehCanalWhapi && (idStr.includes('@') || idStr.includes('_'))
       if (!msg && isWhatsAppFormatId && company_id) {
         const fromIso = new Date(Date.now() - 5 * 60 * 1000).toISOString()
+        // Cerca por TELEFONE (doc 29 §3 item 12). Esta heurística casa "o único outbound
+        // pendente da EMPRESA" com o ACK; sem filtro de conversa, um ACK do contato A podia
+        // gravar status/whatsapp_id na linha pendente do contato B — a bolha errada ganhava o
+        // tique e o id, e a certa ficava no relógio para sempre.
+        //   null → id sem telefone extraível (JID de grupo): segue a heurística de antes.
+        //   []   → telefone conhecido mas sem conversa dele aqui: o candidato só poderia ser de
+        //          outra conversa, então NÃO adivinha (o ACK tardio/varredura resolve).
+        let convIdsDoAck = null
+        try {
+          convIdsDoAck = await resolveConversaIdsDoAckPorTelefone({ company_id, whatsapp_instance_id, ackId: idStr })
+        } catch (eConvAck) {
+          console.warn('[ULTRAMSG] ACK fallback 3: conversas do telefone:', eConvAck?.message || eConvAck)
+          convIdsDoAck = null
+        }
+        const telefoneDoAckConhecido = Array.isArray(convIdsDoAck)
+        if (telefoneDoAckConhecido && convIdsDoAck.length === 0) {
+          if (logDebug) console.log('[DEBUG] status fallback 3 ignorado: telefone do ACK sem conversa nesta empresa/instância')
+        } else {
         let recentOutQuery = supabase
           .from('mensagens')
           .select('id, conversa_id, company_id, autor_usuario_id, whatsapp_instance_id, whatsapp_id, status')
@@ -406,6 +424,7 @@ exports.statusZapi = async (req, res) => {
           .order('criado_em', { ascending: false })
           .order('id', { ascending: false })
           .limit(5)
+        if (telefoneDoAckConhecido) recentOutQuery = recentOutQuery.in('conversa_id', convIdsDoAck)
         recentOutQuery = applyWhatsappInstanceFilterOrLegacy(recentOutQuery, whatsapp_instance_id)
         const { data: recentOutRows, error: errRecentOut } = await recentOutQuery
         registrarFalhaInfra('status.recent_out', errRecentOut)
@@ -424,6 +443,7 @@ exports.statusZapi = async (req, res) => {
           marcosGravados = patched.marcos || marcosGravados
           registrarFalhaInfra('status.patch', patched.error)
           if (msg && logDebug) console.log('[DEBUG] status reconciliação: message_ack antes do ReceivedCallback', { mensagem_id: msg.id })
+        }
         }
       }
 

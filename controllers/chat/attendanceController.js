@@ -19,6 +19,7 @@ const { marcarAguardandoClienteManual, retomarEmAtendimentoManual } = require('.
 const { marcarAguardandoPagamento, retomarDeCobrancaFinanceira } = require('../../services/conversaPagamentoFinanceiroService')
 const { normalizarTimestampSemFusoAmbiguoParaApi } = require('../../helpers/timestampApiCompat')
 const { mapProviderSendResult } = require('../../services/chat/outbound/providerResultMapper')
+const { gravarResultadoDoEnvio } = require('../../services/chat/outbound/outboundResultPersistence')
 const { INTERNAL_NOTE_PERMISSAO, INTERNAL_NOTE_STATUS, sanitizeInternalNoteTexto, buildInternalNoteInsert } = require('../../helpers/internalNote')
 const { usuarioTemPermissao } = require('../../helpers/permissoesService')
 const { resolveConversationWhatsappInstance, resolveConversationProvider } = require('../../services/chat/identity/conversationAddressService')
@@ -195,17 +196,12 @@ exports.encerrarChat = async (req, res) => {
               const instanceProvider = await resolveConversationProvider(company_id, whatsappInstanceId)
               const provider = getProvider({ provider: instanceProvider })
               if (provider?.sendText) {
-                const resultSend = await provider.sendText(telefoneParaEnvio, msg, {
-                  companyId: company_id,
-                  conversaId: conversa_id,
-                  whatsappInstanceId: whatsappInstanceId || undefined,
-                  sendOrigin: 'mensagem_finalizacao_atendimento',
-                })
-                const mappedResult = mapProviderSendResult(resultSend, { failedStatusMensagem: 'failed' })
-                const finalizacaoMessageId = mappedResult.waMessageId
-                const finalizacaoTraceable = mappedResult.hasValidId
-                const statusMsg = mappedResult.nextStatus
-                const statusMensagem = mappedResult.nextStatusMensagem
+                // A linha nasce ANTES do POST para que o envio leve `referenceId: crm-{id}`
+                // (doc 29 §3 item 4). Sem ele a varredura de reconciliação consultava o provedor
+                // por um referenceId que nunca foi enviado, concluía "nunca aceito" e REENVIAVA a
+                // mensagem de finalização ao cliente; e o eco `message_create` não tinha
+                // identidade forte para casar com esta linha (bolha duplicada). Mesma ordem do
+                // envio normal: insert → provider → gravação condicional do resultado.
                 const { data: msgInsert, error: errInsert } = await supabase
                   .from('mensagens')
                   .insert({
@@ -213,20 +209,50 @@ exports.encerrarChat = async (req, res) => {
                     texto: msg,
                     direcao: 'out',
                     company_id,
-                    status: statusMsg,
-                    status_mensagem: statusMensagem,
-                    ...(finalizacaoTraceable ? { whatsapp_id: finalizacaoMessageId } : {}),
+                    status: 'pending',
+                    status_mensagem: 'sending',
                     ...(whatsappInstanceId ? { whatsapp_instance_id: whatsappInstanceId } : {}),
                     autor_usuario_id: user_id
                   })
                   .select()
                   .single()
-                if (!errInsert && msgInsert && req.app?.get('io')) {
-                  const io2 = req.app.get('io')
-                  const payload = await enrichMensagemComAutorUsuario(supabase, company_id, msgInsert)
-                  emitirEventoEmpresaConversa(io2, company_id, conversa_id, io2.EVENTS?.NOVA_MENSAGEM || 'nova_mensagem', payload)
-                  emitirConversaAtualizada(io2, company_id, conversa_id, { ...data }, { skipAtualizarConversa: true })
-                  emitirSincronizacaoListaConversas(io2, company_id, conversa_id)
+                if (errInsert || !msgInsert?.id) {
+                  console.warn('[encerrarChat] mensagem finalização não persistida; envio cancelado para não sair sem rastro:', errInsert?.message || 'sem linha')
+                } else {
+                  const resultSend = await provider.sendText(telefoneParaEnvio, msg, {
+                    companyId: company_id,
+                    conversaId: conversa_id,
+                    whatsappInstanceId: whatsappInstanceId || undefined,
+                    sendOrigin: 'mensagem_finalizacao_atendimento',
+                    referenceId: `crm-${msgInsert.id}`,
+                  })
+                  const mappedResult = mapProviderSendResult(resultSend, { failedStatusMensagem: 'failed' })
+                  const finalizacaoMessageId = mappedResult.waMessageId
+                  const finalizacaoTraceable = mappedResult.hasValidId
+                  const statusMsg = mappedResult.nextStatus
+                  const statusMensagem = mappedResult.nextStatusMensagem
+                  // Condicional + guarda o id de fila (antes descartado quando não era id real):
+                  // sem `provider_queue_id` o ACK da UltraMSG não tinha como casar esta linha.
+                  await gravarResultadoDoEnvio({
+                    company_id,
+                    mensagem_id: msgInsert.id,
+                    status: statusMsg,
+                    status_mensagem: statusMensagem,
+                    whatsapp_id: finalizacaoTraceable ? finalizacaoMessageId : null,
+                    provider_queue_id: mappedResult.hasQueueId ? finalizacaoMessageId : null,
+                  })
+                  if (req.app?.get('io')) {
+                    const io2 = req.app.get('io')
+                    const payload = await enrichMensagemComAutorUsuario(supabase, company_id, {
+                      ...msgInsert,
+                      status: statusMsg,
+                      status_mensagem: statusMensagem,
+                      ...(finalizacaoTraceable ? { whatsapp_id: finalizacaoMessageId } : {}),
+                    })
+                    emitirEventoEmpresaConversa(io2, company_id, conversa_id, io2.EVENTS?.NOVA_MENSAGEM || 'nova_mensagem', payload)
+                    emitirConversaAtualizada(io2, company_id, conversa_id, { ...data }, { skipAtualizarConversa: true })
+                    emitirSincronizacaoListaConversas(io2, company_id, conversa_id)
+                  }
                 }
               }
             }

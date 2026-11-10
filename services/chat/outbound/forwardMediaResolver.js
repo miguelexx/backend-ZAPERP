@@ -108,7 +108,14 @@ async function resolveForwardMediaForProvider({ provider, mensagemOriginal, comp
     if (tempR2Path) localPath = tempR2Path
   }
 
+  // Arquivos criados pela NORMALIZAÇÃO neste encaminhamento (`<nome>-wa.mp4` / `<nome>-wa.jpg`).
+  // `removeSource: false` preserva a mídia salva (certo), mas o CONVERTIDO ficava órfão em
+  // /uploads a cada encaminhamento de vídeo/imagem (doc 29 §3 item 11). Removidos no finally,
+  // exceto quando é justamente ele que o provedor vai buscar pela URL pública devolvida.
+  const convertidosTemporarios = []
+  let resultado = null
   try {
+  resultado = await (async () => {
   if (tipo === 'video' && localPath) {
     const path = require('path')
     const normalizedVideo = await normalizeVideoForUltraMsg({
@@ -118,6 +125,7 @@ async function resolveForwardMediaForProvider({ provider, mensagemOriginal, comp
       mimetype: '',
     }, 'video', { removeSource: false })
     if (normalizedVideo?.converted && normalizedVideo?.file) {
+      convertidosTemporarios.push(normalizedVideo.file.path)
       localPath = normalizedVideo.file.path
       uploadName = normalizedVideo.file.originalname
       if (baseUrl && !isLocalBase) {
@@ -143,6 +151,7 @@ async function resolveForwardMediaForProvider({ provider, mensagemOriginal, comp
           mimetype: '',
         }, 'imagem')
         if (normalizedImage?.converted && normalizedImage?.file) {
+          convertidosTemporarios.push(normalizedImage.file.path)
           uploadPath = normalizedImage.file.path
           uploadName = normalizedImage.file.originalname
           console.log('[ULTRAMSG][FORWARD_IMAGE] Imagem encaminhada normalizada para JPEG:', {
@@ -180,10 +189,23 @@ async function resolveForwardMediaForProvider({ provider, mensagemOriginal, comp
       ? 'URL local da mídia indisponível para encaminhamento.'
       : 'Provider não suporta uploadMedia e a URL pública da mídia não está configurada.',
   }
+  })()
+  return resultado
   } finally {
     // Remove o temporário baixado do R2 (se houver). Só chega aqui após uploadMedia ter lido o arquivo.
     if (tempR2Path) {
       try { require('fs').unlinkSync(tempR2Path) } catch (_) { /* já removido */ }
+    }
+    // Convertidos da normalização: já foram lidos pelo uploadMedia neste ponto. O ÚNICO que
+    // precisa sobreviver é o que o provedor ainda vai buscar pela URL devolvida (fallback por
+    // URL pública) — apagá-lo mandaria o provedor a um 404.
+    const urlDevolvida = String(resultado?.url || '')
+    for (const caminho of convertidosTemporarios) {
+      try {
+        const nome = require('path').basename(caminho)
+        if (nome && (urlDevolvida.includes(nome) || urlDevolvida.includes(encodeURIComponent(nome)))) continue
+        require('fs').unlinkSync(caminho)
+      } catch (_) { /* já removido ou nunca criado */ }
     }
   }
 }

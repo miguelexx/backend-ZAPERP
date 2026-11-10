@@ -84,6 +84,29 @@ router.post(
 )
 
 /**
+ * `POST /vendedores/consultar` — os vendedores do ERP, antes de o orçamento existir.
+ *
+ * Body: nada, OU `busca`, OU `codigo_vendedor_erp`; mais `pagina` opcional. **Corpo vazio é
+ * válido** e devolve a lista inteira — é o único consultar do módulo em que isso acontece, e é
+ * a razão de esta rota valer a pena: o atendente abre o campo e VÊ os vendedores, em vez de
+ * adivinhar como o nome está cadastrado.
+ *
+ * Até 09/11/2026 esta porta não existia do lado da WM: vendedor só se resolvia dentro de
+ * `preparar`, que exige cliente e ao menos um item. O pedido está no Anexo A (item D, pedido 2)
+ * e foi atendido; o contrato medido está no cabeçalho de `wmAssistenteService` e no doc 36.
+ *
+ * NÃO decide o vendedor do orçamento: a resposta vem com `resolucao_definitiva: false`, porque
+ * `preparar` revalida o código e pode recusá-lo (vendedor inativado, carteira trocada) — D11.
+ * O que escolher aqui muda é a AMBIGUIDADE: com `vendedor_codigo_erp` no corpo, `preparar` não
+ * precisa adivinhar entre homônimos.
+ */
+router.post(
+  '/vendedores/consultar',
+  requirePermissao('orcamentos.ver'),
+  wmOrcamentosController.consultarVendedores
+)
+
+/**
  * `POST /preparar` — Sessão 4A.
  *
  * Resolve cliente, vendedor e itens dentro da própria preparação (D11) e devolve OU a
@@ -162,9 +185,15 @@ router.get(
  * uma busca o atendente só descobria errando no Calcular. Medido: `DINIZ` → nenhum,
  * `SILVA` → nenhum, `MARIA APARECIDA AMADEI` → 3 candidatos.
  *
- * NÃO existe rota de VENDEDOR, e não por escolha nossa: a WM não publica endpoint de vendedor.
- * Ele só se resolve dentro de `preparar`, que exige cliente e ao menos um item — pedido
- * registrado no Anexo A.
+ * A rota de VENDEDOR passou a existir em 09/11/2026, quando a WM publicou
+ * `/vendedores/consultar` — o pedido 2 do item D do Anexo A, atendido. Antes dela o vendedor só
+ * se resolvia dentro de `preparar`, que exige cliente e ao menos um item, então não havia como
+ * mostrar a lista antes de o orçamento estar quase pronto.
+ *
+ * Ela NÃO é a de clientes com outro nome, e três diferenças de contrato provam isso: a lista vem
+ * em `vendedores[]` sem campo `status`; nada encontrado é `200` com lista vazia, não 404; e
+ * `busca` é OPCIONAL — sem ela, a WM devolve todos. A terceira é a que muda a tela: a lista é
+ * curta e cabe inteira, então abrir o campo já mostra os vendedores.
  *
  * Também não existe rota de configuração: o vínculo com o telefone autorizado da WM é
  * provisionado por operação confiável, não por admin de tenant (seção 4 e pendência 13 — a WM

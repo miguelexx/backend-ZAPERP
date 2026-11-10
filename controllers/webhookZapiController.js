@@ -91,6 +91,17 @@ const WHATSAPP_DEBUG = String(process.env.WHATSAPP_DEBUG || '').toLowerCase() ==
 // IMPORTANTE: não depender de colunas opcionais para manter compatibilidade com bancos legados.
 const WEBHOOK_MSG_SELECT = 'id, conversa_id, company_id, whatsapp_instance_id, whatsapp_id, texto, url, tipo, direcao, criado_em, status, autor_usuario_id, reply_meta, nome_arquivo, contact_meta, location_meta, remetente_nome, remetente_telefone'
 
+/**
+ * Caches de leitura do caminho quente do inbound (doc 29 §3 item 6). Chave SEMPRE com
+ * `company_id` — o isolamento entre empresas aqui é só app-layer. TTL curto, teto de entradas
+ * e varredura periódica ficam no helper.
+ */
+const _empresaFlagCache = require('../helpers/shortTtlCache').create({
+  name: 'empresaFlagInbound',
+  ttlMs: Number(process.env.INBOUND_EMPRESA_FLAG_CACHE_TTL_MS || 30_000),
+  max: 200,
+})
+
 // Ordem de progresso dos ticks de status. Usado em statusZapi para evitar que um ack atrasado
 // (ex.: "delivered" chegando depois de "read") regrida visualmente o status já persistido.
 // STATUS_RANK importado de messageStatusHelper (inclui sending=0).
@@ -253,14 +264,20 @@ exports.receberZapi = async (req, res) => {
     let persistFailures = 0
     let persistFailureLastError = ''
 
+    // Flag de empresa lida em TODO webhook inbound (doc 29 §3 item 6). TTL curto por
+    // `company_id`: a flag muda em "Salvar configurações", não por mensagem. Falha continua
+    // caindo no default `false` e NÃO é cacheada.
     let separarMensagensDisparadasEmpresa = false
     try {
-      const { data: empCfgRow, error: empCfgErr } = await supabase
-        .from('empresas')
-        .select('separar_mensagens_disparadas')
-        .eq('id', company_id)
-        .maybeSingle()
-      if (!empCfgErr && empCfgRow) separarMensagensDisparadasEmpresa = !!empCfgRow.separar_mensagens_disparadas
+      separarMensagensDisparadasEmpresa = await _empresaFlagCache.wrap(company_id, 'separar_mensagens_disparadas', async () => {
+        const { data: empCfgRow, error: empCfgErr } = await supabase
+          .from('empresas')
+          .select('separar_mensagens_disparadas')
+          .eq('id', company_id)
+          .maybeSingle()
+        if (empCfgErr) throw empCfgErr
+        return !!empCfgRow?.separar_mensagens_disparadas
+      })
     } catch (_) {
       separarMensagensDisparadasEmpresa = false
     }
@@ -849,7 +866,8 @@ exports.receberZapi = async (req, res) => {
         contactMeta,
         locationMeta,
         pollMeta,
-        productMeta
+        productMeta,
+        orderMeta
       } = extracted
 
       // Newsletters (canais) e Status/broadcast não são conversas de atendimento — ignorar silenciosamente
@@ -1314,17 +1332,25 @@ exports.receberZapi = async (req, res) => {
     // re-sync) dispara boas-vindas/menu "sem o cliente ter mandado mensagem" — o bug relatado.
     // Mensagem genuinamente nova tem whatsapp_id inédito e nunca é bloqueada aqui.
     let inboundReentregue = false
+    /** Linha já existente achada pela guarda de reentrega — evita repetir a consulta no insert. */
+    let linhaJaProcessadaReentrega = null
     if (!fromMe && !isGroup && conversa_id && messageId) {
       const waIdReentrega = String(messageId).trim()
       if (waIdReentrega) {
+        // Select COMPLETO (era `id, direcao`): a MESMA consulta por whatsapp_id rodava de novo
+        // mais abaixo na idempotência do insert (doc 29 §3 item 6, "mesma query 2×"). O HIT é
+        // guardado em `linhaJaProcessadaReentrega` e reaproveitado lá.
+        // Só o HIT é reaproveitado: um MISS é reconsultado, porque entre os dois pontos rodam a
+        // reabertura e o chatbot e uma reentrega CONCORRENTE pode ter inserido a linha nesse meio.
         const { data: jaProcessado } = await selectSingleMensagemByWhatsappId(supabase, {
           company_id,
           whatsapp_id: waIdReentrega,
           whatsapp_instance_id,
-          select: 'id, direcao',
+          select: WEBHOOK_MSG_SELECT,
           context: 'received.preprocess.idempotency',
         })
         if (jaProcessado?.id) {
+          linhaJaProcessadaReentrega = jaProcessado
           inboundReentregue = true
           console.log('[Z-API] ⏭️ inbound reentregue/replay — pulando reabertura e chatbot (sem novo menu de boas-vindas)', {
             conversa_id,
@@ -2011,13 +2037,23 @@ exports.receberZapi = async (req, res) => {
 
     // Idempotencia: chave por instancia quando disponivel; legado fica restrito a whatsapp_instance_id null.
     if (whatsappIdStr) {
-      let { data: existente } = await selectSingleMensagemByWhatsappId(supabase, {
-        company_id,
-        whatsapp_id: whatsappIdStr,
-        whatsapp_instance_id,
-        select: WEBHOOK_MSG_SELECT,
-        context: 'received.idempotency',
-      })
+      // `linhaJaProcessadaReentrega` vem da guarda de reentrega acima: MESMA chave
+      // (company_id + whatsapp_id + instância) e select completo. Reaproveitar o HIT remove a
+      // segunda ida ao banco; o MISS continua sendo consultado aqui (ver nota lá em cima).
+      const reaproveitavel =
+        linhaJaProcessadaReentrega?.id &&
+        String(linhaJaProcessadaReentrega.whatsapp_id || '') === whatsappIdStr
+          ? linhaJaProcessadaReentrega
+          : null
+      let { data: existente } = reaproveitavel
+        ? { data: reaproveitavel }
+        : await selectSingleMensagemByWhatsappId(supabase, {
+          company_id,
+          whatsapp_id: whatsappIdStr,
+          whatsapp_instance_id,
+          select: WEBHOOK_MSG_SELECT,
+          context: 'received.idempotency',
+        })
       
       // Se não encontrou por whatsapp_id e é mensagem enviada por nós, reconciliar com outbound do CRM
       if (!existente && fromMe) {
@@ -2236,7 +2272,7 @@ exports.receberZapi = async (req, res) => {
       }
       // Mapeamento tipo/mídia → campos do row (puro) → controllers/webhookInbound/persistMensagem.js.
       applyInboundMediaFields(insertMsg, {
-        type, imageUrl, documentUrl, audioUrl, videoUrl, stickerUrl, locationUrl, locationMeta, contactMeta, pollMeta, productMeta, fileName,
+        type, imageUrl, documentUrl, audioUrl, videoUrl, stickerUrl, locationUrl, locationMeta, contactMeta, pollMeta, productMeta, orderMeta, fileName,
         diag: { company_id, conversa_id, whatsapp_id: whatsappIdStr || null, whatsapp_instance_id: whatsapp_instance_id || null, fromMe },
       })
       // Demais tipos: já têm texto preenchido; tipo padrão é texto

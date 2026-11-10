@@ -32,7 +32,7 @@ describe('Whapi inbound — produto e pedido do catálogo', () => {
     expect(m.body).toBe('🛍️ Produto')
   })
 
-  test('type "order" vira resumo de texto (agregado) — nunca vazio', () => {
+  test('type "order" → internalType order + resumo no body (itens buscados no enrich)', () => {
     const m = normalize({
       id: 'wamid.order1',
       from_me: false,
@@ -42,8 +42,9 @@ describe('Whapi inbound — produto e pedido do catálogo', () => {
       timestamp: 1700000000,
       order: { order_id: '964278151888836', item_count: 3, currency: 'BRL', total_price: 359, status: 'new' },
     })
-    expect(m.type).toBe('chat') // sem cartão por item (a API Whapi não envia os itens)
+    expect(m.type).toBe('order') // cartão de pedido (OrderMessage); itens resolvidos em enrichNormalizedOrder
     expect(m.productRef).toBeUndefined()
+    expect(m.orderRef).toMatchObject({ order_id: '964278151888836', item_count: 3, currency: 'BRL', total_price: 359 })
     expect(m.body).toContain('Pedido')
     expect(m.body).toContain('3 itens')
     expect(m.body).toMatch(/R\$\s?359/)
@@ -213,5 +214,111 @@ describe('Whapi inbound — pergunta sobre produto (product_inquiry / citação)
     const { buildWebhookReplyMeta } = require('../controllers/webhookInbound/replyMeta')
     const meta = await buildWebhookReplyMeta(null, { payload: {}, company_id: 7, conversa_id: 1, whatsapp_instance_id: 42 })
     expect(meta).toBeNull() // sem citação nenhuma → null, como antes
+  })
+})
+
+/**
+ * Pedido (carrinho) recebido do cliente pelo catálogo (Whapi type 'order'). O webhook traz só o
+ * agregado + token; os ITENS vêm por GET /business/orders/{id}?order_token=…. Agora o pedido vira um
+ * cartão (OrderMessage) com foto + nome + qtd + preço por item e o total. Shape confirmado 2026-11-10.
+ */
+describe('Whapi inbound — pedido (order) do catálogo', () => {
+  const CTX = { channelId: 'HULKBR-NZCYL', connectedPhone: '553498630553' }
+  const CTX_SRC = { company_id: 7, whatsapp_instance_id: 42 }
+
+  afterEach(() => jest.resetModules())
+
+  const orderMsg = (overrides = {}) => ({
+    id: 'ORDER1', from: '556184262566', from_me: false, from_name: 'Daniele',
+    type: 'order', chat_id: '556184262566@s.whatsapp.net', timestamp: 1700000000,
+    order: {
+      order_id: '964278151888836', seller: '553498630553', title: 'Daniele',
+      token: 'AR4ToE6jF7HwiKY8cUChFb+h6Blgb0sbRMOY3vwRHhsaeg==',
+      item_count: 1, currency: 'BRL', total_price: 1000, status: 'new',
+      preview: 'data:image/jpeg;base64,/9j/XYZ',
+    },
+    ...overrides,
+  })
+
+  function normalize(m) {
+    const controller = require('../controllers/webhookWhapiController')
+    return controller._test.normalizeWhapiMessageToInternal(m, CTX)
+  }
+
+  test('type "order" → internalType order + orderRef (id, token, preview) + resumo no body', () => {
+    const m = normalize(orderMsg())
+    expect(m.type).toBe('order')
+    expect(m.productRef).toBeUndefined()
+    expect(m.orderRef).toMatchObject({
+      order_id: '964278151888836',
+      token: 'AR4ToE6jF7HwiKY8cUChFb+h6Blgb0sbRMOY3vwRHhsaeg==',
+      item_count: 1, currency: 'BRL', total_price: 1000, preview: 'data:image/jpeg;base64,/9j/XYZ',
+    })
+    expect(m.body).toContain('Pedido recebido')
+    expect(m.body).toMatch(/R\$\s?1\.000,00/)
+  })
+
+  test('enrichNormalizedOrder: busca itens e monta orderMeta com nomes no body', async () => {
+    const getOrder = jest.fn(async () => ({
+      ok: true,
+      items: [
+        { product_retailer_id: '27343291311970176', name: 'Apartamento Centro', image: 'https://cdn/apt.jpg', quantity: 1, price: 1000, currency: 'BRL' },
+      ],
+    }))
+    jest.doMock('../services/providers/whapi/orders', () => ({ getOrder, normalizeOrderItem: (x) => x }))
+    const controller = require('../controllers/webhookWhapiController')
+    const normalized = controller._test.normalizeWhapiMessageToInternal(orderMsg(), CTX)
+    const out = await controller._test.enrichNormalizedOrder(normalized, CTX_SRC)
+    expect(getOrder).toHaveBeenCalledWith('964278151888836', expect.objectContaining({
+      orderToken: 'AR4ToE6jF7HwiKY8cUChFb+h6Blgb0sbRMOY3vwRHhsaeg==', companyId: 7, whatsappInstanceId: 42,
+    }))
+    expect(out.orderMeta.items).toHaveLength(1)
+    expect(out.orderMeta.items[0]).toMatchObject({ name: 'Apartamento Centro', image: 'https://cdn/apt.jpg', quantity: 1, price: 1000 })
+    expect(out.orderMeta.preview).toBe('data:image/jpeg;base64,/9j/XYZ')
+    expect(out.body).toContain('• Apartamento Centro')
+  })
+
+  test('enrichNormalizedOrder: busca falha → orderMeta sem itens mas com resumo+preview (não derruba)', async () => {
+    const getOrder = jest.fn(async () => ({ ok: false, error: 'need order token', items: [] }))
+    jest.doMock('../services/providers/whapi/orders', () => ({ getOrder, normalizeOrderItem: (x) => x }))
+    const controller = require('../controllers/webhookWhapiController')
+    const normalized = controller._test.normalizeWhapiMessageToInternal(orderMsg(), CTX)
+    const out = await controller._test.enrichNormalizedOrder(normalized, CTX_SRC)
+    expect(out.orderMeta.items).toEqual([])
+    expect(out.orderMeta.item_count).toBe(1)
+    expect(out.orderMeta.preview).toBe('data:image/jpeg;base64,/9j/XYZ')
+    expect(out.body).toContain('Pedido recebido')
+  })
+
+  test('extractMessage repassa orderMeta e mantém type order (não vira "(mídia)")', () => {
+    const { extractMessage } = require('../controllers/webhookInbound/payload')
+    const orderMeta = { order_id: '1', item_count: 1, total_price: 1000, currency: 'BRL', title: 'Daniele', preview: 'data:image/jpeg;base64,X', items: [{ name: 'Apto', price: 1000, currency: 'BRL', quantity: 1, image: 'https://i' }] }
+    const extracted = extractMessage({
+      type: 'ReceivedCallback', msgType: 'order', id: 'ORDER1', phone: '556184262566',
+      message: '🛒 Pedido recebido • 1 item • R$ 1.000,00', text: { message: '🛒 Pedido recebido • 1 item • R$ 1.000,00' },
+      timestamp: 1700000000, orderMeta,
+    })
+    expect(extracted.type).toBe('order')
+    expect(extracted.orderMeta).toEqual(orderMeta)
+    expect(extracted.texto).toContain('Pedido recebido')
+    expect(extracted.texto).not.toBe('(mídia)')
+  })
+
+  test('applyInboundMediaFields: type order → tipo=order + reply_meta.order', () => {
+    const { applyInboundMediaFields } = require('../controllers/webhookInbound/persistMensagem')
+    const orderMeta = { order_id: '1', item_count: 1, total_price: 1000, currency: 'BRL', preview: 'data:image/jpeg;base64,X', items: [{ name: 'Apto', price: 1000, quantity: 1, image: 'https://i' }] }
+    const insertMsg = { texto: '🛒 Pedido recebido' }
+    applyInboundMediaFields(insertMsg, { type: 'order', orderMeta })
+    expect(insertMsg.tipo).toBe('order')
+    expect(insertMsg.reply_meta).toEqual({ order: orderMeta })
+  })
+
+  test('orders.normalizeOrderItem: normaliza campos e defaults (quantity≥1, image só http/data)', () => {
+    // requireActual: testes anteriores deste bloco dão doMock em orders (identidade) — aqui queremos o real.
+    const { normalizeOrderItem } = jest.requireActual('../services/providers/whapi/orders')
+    expect(normalizeOrderItem({ product_retailer_id: '9', name: 'X', image: 'https://i/x.jpg', quantity: 2, price: 50, currency: 'BRL' }))
+      .toEqual({ product_retailer_id: '9', name: 'X', image: 'https://i/x.jpg', quantity: 2, price: 50, currency: 'BRL' })
+    // sem quantity → 1; sem image → null
+    expect(normalizeOrderItem({ name: 'Y' })).toMatchObject({ name: 'Y', quantity: 1, image: null, price: null })
   })
 })

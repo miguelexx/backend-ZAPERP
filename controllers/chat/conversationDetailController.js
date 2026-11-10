@@ -356,7 +356,13 @@ exports.detalharChat = async (req, res) => {
     // ao apenas abrir o chat sem mensagens. O status real do BD segue em `status_atendimento_real`.
     const statusDetalheReal = isGroup ? null : conversa.status_atendimento
     const statusDetalheLista = statusAtendimentoParaLista(isGroup, conversa.status_atendimento, exibirBadgeAberta)
-    let mensagensFormatadas = (mensagens || []).reverse()
+    // `reverse()` MUTA o array: com `mensagens.reverse()` direto, `mensagens` virava ascendente e
+    // o bloco de movimentação interna abaixo lia as pontas trocadas (pageRows[0] passava a ser a
+    // mensagem MAIS ANTIGA). O resultado era janela invertida — `from_criado_em` >= mais nova e,
+    // com cursor, `to_criado_em` <= mais antiga (intervalo impossível): as bolhas "X assumiu" /
+    // "X transferiu para Y" (com a observação da transferência) quase nunca apareciam no histórico
+    // de admin/supervisor. Cópia antes de inverter mantém `mensagens` em ordem decrescente.
+    let mensagensFormatadas = [...(mensagens || [])].reverse()
     if (perfilPodeVerMovimentacaoInterna(perfil)) {
       const movimentosQuery = {
         company_id,

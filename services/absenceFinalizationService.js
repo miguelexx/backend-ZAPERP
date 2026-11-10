@@ -467,7 +467,7 @@ async function sendAbsenceClosingMessage({ provider, company_id, conversa_id, te
   // Falha TRANSITÓRIA (timeout/rede/429/5xx) não prova que nada saiu: a linha fica
   // pending/sending para a varredura de reconciliação confirmar ou reenviar sem duplicar.
   const mappedResult = mapProviderSendResultComTransitoria(result, { failedStatusMensagem: 'failed' })
-  const { ok, waMessageId: messageId, hasValidId: hasTraceableId, falhaTransitoria } = mappedResult
+  const { ok, waMessageId: messageId, hasValidId: hasTraceableId, hasQueueId, falhaTransitoria } = mappedResult
   if (!ok) {
     console.warn('[absenceFinalization] envio de mensagem de ausencia falhou', {
       company_id,
@@ -501,6 +501,10 @@ async function sendAbsenceClosingMessage({ provider, company_id, conversa_id, te
       status: mappedResult.nextStatus,
       status_mensagem: mappedResult.nextStatusMensagem,
       ...(hasTraceableId ? { whatsapp_id: messageId } : {}),
+      // Id de FILA da UltraMSG (numérico) era simplesmente descartado: a linha ficava sem
+      // nenhum id e o ACK não tinha como casá-la (fallback 4b do statusZapi usa esta coluna),
+      // então o tique ficava no relógio para sempre. Ver doc 29 §3 item 4.
+      ...(hasQueueId ? { provider_queue_id: messageId } : {}),
       ...(row?.whatsapp_instance_id ? { whatsapp_instance_id: row.whatsapp_instance_id } : {}),
     })
     .select()

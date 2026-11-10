@@ -15,6 +15,7 @@ const { getUsuarioParaEnvioCliente, enrichMensagemComAutorUsuario } = require('.
 const { aplicarAguardandoClienteNoPayload, anexarAssumirNoPayloadLista } = require('../../services/chat/outbound/modoSimplesOutbound')
 const { mapProviderSendResult, mapProviderSendResultComTransitoria, enviarSemEstourar } = require('../../services/chat/outbound/providerResultMapper')
 const { isTransientOutboundFailure } = require('../../services/chat/outbound/outboundFailureClassifier')
+const { gravarResultadoDoEnvio } = require('../../services/chat/outbound/outboundResultPersistence')
 const { schedulePendingOutboundReconciliation } = require('../../services/pendingOutboundReconciliationService')
 
 exports.enviarReacaoMensagem = async (req, res) => {
@@ -291,11 +292,18 @@ exports.enviarContatoWhatsapp = async (req, res) => {
       nextStatusMensagem = 'sending'
       needsReconciliation = true
     }
-    await supabase
-      .from('mensagens')
-      .update({ status: nextStatus, status_mensagem: nextStatusMensagem, ...(hasTraceableContactId ? { whatsapp_id: waMessageId } : {}), ...(hasQueueContactId ? { provider_queue_id: waMessageId } : {}) })
-      .eq('company_id', company_id)
-      .eq('id', msg.id)
+    // Gravação CONDICIONAL (doc 29 §3 item 2): o ACK/eco do provedor pode chegar antes desta
+    // linha e já ter levado a mensagem a sent/delivered/read. Gravar o status do envio por cima
+    // devolvia a bolha ao relógio. O helper só escreve o status se a linha ainda estiver aberta
+    // (pending/sending/erro/failed) e, quando já avançou, grava apenas os ids.
+    await gravarResultadoDoEnvio({
+      company_id,
+      mensagem_id: msg.id,
+      status: nextStatus,
+      status_mensagem: nextStatusMensagem,
+      whatsapp_id: hasTraceableContactId ? waMessageId : null,
+      provider_queue_id: hasQueueContactId ? waMessageId : null,
+    })
 
     if (io) {
       const payload = await enrichMensagemComAutorUsuario(supabase, company_id, { ...msg, status: nextStatus, status_mensagem: nextStatusMensagem, whatsapp_id: hasTraceableContactId ? waMessageId : null })
@@ -507,11 +515,18 @@ exports.enviarLocalizacao = async (req, res) => {
       needsReconciliation = true
     }
 
-    await supabase
-      .from('mensagens')
-      .update({ status: nextStatus, status_mensagem: nextStatusMensagem, ...(hasTraceableLocationId ? { whatsapp_id: waMessageId } : {}), ...(hasQueueLocationId ? { provider_queue_id: waMessageId } : {}) })
-      .eq('company_id', company_id)
-      .eq('id', msg.id)
+    // Gravação CONDICIONAL (doc 29 §3 item 2): o ACK/eco do provedor pode chegar antes desta
+    // linha e já ter levado a mensagem a sent/delivered/read. Gravar o status do envio por cima
+    // devolvia a bolha ao relógio. O helper só escreve o status se a linha ainda estiver aberta
+    // (pending/sending/erro/failed) e, quando já avançou, grava apenas os ids.
+    await gravarResultadoDoEnvio({
+      company_id,
+      mensagem_id: msg.id,
+      status: nextStatus,
+      status_mensagem: nextStatusMensagem,
+      whatsapp_id: hasTraceableLocationId ? waMessageId : null,
+      provider_queue_id: hasQueueLocationId ? waMessageId : null,
+    })
 
     if (io) {
       const payload = await enrichMensagemComAutorUsuario(supabase, company_id, { ...msg, status: nextStatus, status_mensagem: nextStatusMensagem, whatsapp_id: hasTraceableLocationId ? waMessageId : null, location_meta: msg.location_meta || location_meta })
@@ -651,11 +666,18 @@ exports.enviarLigacaoWhatsapp = async (req, res) => {
       ok, waMessageId, hasValidId: hasTraceableCallId,
       hasQueueId: hasQueueCallId, nextStatus, nextStatusMensagem,
     } = mappedResult
-    await supabase
-      .from('mensagens')
-      .update({ status: nextStatus, status_mensagem: nextStatusMensagem, ...(hasTraceableCallId ? { whatsapp_id: waMessageId } : {}), ...(hasQueueCallId ? { provider_queue_id: waMessageId } : {}) })
-      .eq('company_id', company_id)
-      .eq('id', msg.id)
+    // Gravação CONDICIONAL (doc 29 §3 item 2): o ACK/eco do provedor pode chegar antes desta
+    // linha e já ter levado a mensagem a sent/delivered/read. Gravar o status do envio por cima
+    // devolvia a bolha ao relógio. O helper só escreve o status se a linha ainda estiver aberta
+    // (pending/sending/erro/failed) e, quando já avançou, grava apenas os ids.
+    await gravarResultadoDoEnvio({
+      company_id,
+      mensagem_id: msg.id,
+      status: nextStatus,
+      status_mensagem: nextStatusMensagem,
+      whatsapp_id: hasTraceableCallId ? waMessageId : null,
+      provider_queue_id: hasQueueCallId ? waMessageId : null,
+    })
 
     if (io) {
       const payload = await enrichMensagemComAutorUsuario(supabase, company_id, { ...msg, status: nextStatus, status_mensagem: nextStatusMensagem, whatsapp_id: hasTraceableCallId ? waMessageId : null })
@@ -807,16 +829,18 @@ exports.enviarEnquete = async (req, res) => {
       nextStatus, nextStatusMensagem,
     } = mappedResult
 
-    await supabase
-      .from('mensagens')
-      .update({
-        status: nextStatus,
-        status_mensagem: nextStatusMensagem,
-        ...(hasTraceableId ? { whatsapp_id: waMessageId } : {}),
-        ...(hasQueueId ? { provider_queue_id: waMessageId } : {}),
-      })
-      .eq('company_id', company_id)
-      .eq('id', msg.id)
+    // Gravação CONDICIONAL (doc 29 §3 item 2): o ACK/eco do provedor pode chegar antes desta
+    // linha e já ter levado a mensagem a sent/delivered/read. Gravar o status do envio por cima
+    // devolvia a bolha ao relógio. O helper só escreve o status se a linha ainda estiver aberta
+    // (pending/sending/erro/failed) e, quando já avançou, grava apenas os ids.
+    await gravarResultadoDoEnvio({
+      company_id,
+      mensagem_id: msg.id,
+      status: nextStatus,
+      status_mensagem: nextStatusMensagem,
+      whatsapp_id: hasTraceableId ? waMessageId : null,
+      provider_queue_id: hasQueueId ? waMessageId : null,
+    })
 
     if (io) {
       const payload = await enrichMensagemComAutorUsuario(supabase, company_id, {
@@ -1084,16 +1108,18 @@ exports.enviarProdutoCatalogo = async (req, res) => {
       nextStatus, nextStatusMensagem,
     } = mappedResult
 
-    await supabase
-      .from('mensagens')
-      .update({
-        status: nextStatus,
-        status_mensagem: nextStatusMensagem,
-        ...(hasTraceableId ? { whatsapp_id: waMessageId } : {}),
-        ...(hasQueueId ? { provider_queue_id: waMessageId } : {}),
-      })
-      .eq('company_id', company_id)
-      .eq('id', msg.id)
+    // Gravação CONDICIONAL (doc 29 §3 item 2): o ACK/eco do provedor pode chegar antes desta
+    // linha e já ter levado a mensagem a sent/delivered/read. Gravar o status do envio por cima
+    // devolvia a bolha ao relógio. O helper só escreve o status se a linha ainda estiver aberta
+    // (pending/sending/erro/failed) e, quando já avançou, grava apenas os ids.
+    await gravarResultadoDoEnvio({
+      company_id,
+      mensagem_id: msg.id,
+      status: nextStatus,
+      status_mensagem: nextStatusMensagem,
+      whatsapp_id: hasTraceableId ? waMessageId : null,
+      provider_queue_id: hasQueueId ? waMessageId : null,
+    })
 
     if (io) {
       const payload = await enrichMensagemComAutorUsuario(supabase, company_id, {

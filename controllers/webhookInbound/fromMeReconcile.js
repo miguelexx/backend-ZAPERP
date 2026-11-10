@@ -63,18 +63,19 @@ function filterRowsForFromMeReconcile(rows) {
 }
 
 /**
- * ACK wamid (`true_5534…@c.us_…`) quando há vários outbound pendentes na empresa
- * (campanha). Casa só a conversa daquele telefone — um pendente por contato é seguro.
+ * Conversas da empresa cujo telefone é o do ACK (`true_5534…@c.us_SID`), incluindo as variantes
+ * de identidade BR (± 9º dígito). Devolve:
+ *   - `null`  → o id do ACK não tem telefone extraível (ex.: JID de grupo). Quem chama decide.
+ *   - `[]`    → tem telefone, mas NENHUMA conversa daquele número nesta empresa/instância.
+ *   - `[ids]` → as conversas candidatas.
+ *
+ * Extraído de `findPendingOutboundByAckPhone` para que o fallback 3 do `statusZapi` — que hoje
+ * procura "o único pendente da EMPRESA" — possa cercar o candidato pela conversa do telefone
+ * certo (doc 29 §3 item 12: o ACK gravava status/whatsapp_id na linha de OUTRA conversa).
  */
-async function findPendingOutboundByAckPhone({
-  company_id,
-  whatsapp_instance_id,
-  ackId,
-  fromIso,
-  select,
-}) {
+async function resolveConversaIdsDoAckPorTelefone({ company_id, whatsapp_instance_id, ackId }) {
   const digits = extractPhoneDigitsFromWhatsappMessageId(ackId)
-  if (!digits || !company_id || !fromIso) return null
+  if (!digits || !company_id) return null
   const phones = Array.from(new Set(
     [digits, ...(possiblePhonesForWhatsappIdentity(digits) || [])]
       .map((p) => String(p || '').replace(/\D/g, ''))
@@ -91,8 +92,23 @@ async function findPendingOutboundByAckPhone({
   convQuery = applyWhatsappInstanceFilterOrLegacy(convQuery, whatsapp_instance_id)
   const { data: convs, error: convErr } = await convQuery
   if (convErr) throw convErr
-  const convIds = [...new Set((convs || []).map((c) => c.id).filter(Boolean))]
-  if (!convIds.length) return null
+  return [...new Set((convs || []).map((c) => c.id).filter(Boolean))]
+}
+
+/**
+ * ACK wamid (`true_5534…@c.us_…`) quando há vários outbound pendentes na empresa
+ * (campanha). Casa só a conversa daquele telefone — um pendente por contato é seguro.
+ */
+async function findPendingOutboundByAckPhone({
+  company_id,
+  whatsapp_instance_id,
+  ackId,
+  fromIso,
+  select,
+}) {
+  if (!company_id || !fromIso) return null
+  const convIds = await resolveConversaIdsDoAckPorTelefone({ company_id, whatsapp_instance_id, ackId })
+  if (!convIds || !convIds.length) return null
 
   let msgQuery = supabase
     .from('mensagens')
@@ -292,6 +308,7 @@ function findFromMeOutboundCandidateWithPollFallback(rows, opts = {}) {
 }
 
 module.exports = {
+  resolveConversaIdsDoAckPorTelefone,
   normalizeMediaFileNameForMatch,
   normalizeMediaBaseNameForMatch,
   mediaFamilyForStorageTipo,

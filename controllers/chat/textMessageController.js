@@ -568,11 +568,15 @@ exports.enviarMensagemChat = async (req, res) => {
           erro: e?.message || String(e),
         })
         sendResult = { ok: false, error: e?.message || 'Erro ao enviar mensagem', transient: true }
-        await supabase
-          .from('mensagens')
-          .update({ status: 'pending', status_mensagem: 'sending' })
-          .eq('company_id', company_id)
-          .eq('id', msg.id)
+        // CONDICIONAL: o provedor pode ter recebido a mensagem e o ACK já ter chegado antes
+        // desta exceção de transporte. Gravar 'pending' por cima de um 'delivered' real
+        // rebaixava o tique de forma permanente (doc 29 §3 item 2).
+        await gravarResultadoDoEnvio({
+          company_id,
+          mensagem_id: msg.id,
+          status: 'pending',
+          status_mensagem: 'sending',
+        })
         const io2 = req.app.get('io')
         if (io2) {
           io2.to(`empresa_${company_id}`).to(`conversa_${conversa_id}`).to(`usuario_${user_id}`)

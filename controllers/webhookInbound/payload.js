@@ -613,6 +613,11 @@ function extractMessage(payload) {
     texto = productMeta?.name ? `🛍️ ${String(productMeta.name).trim()}` : '(produto)'
   }
 
+  // Pedido (Whapi type 'order'): o normalizador já buscou os itens e anexou payload.orderMeta.
+  // Aqui só repassamos; texto cai no resumo se vier vazio (nunca descartado).
+  const orderMeta = (payload.orderMeta && typeof payload.orderMeta === 'object') ? payload.orderMeta : null
+  if (type === 'order' && !texto) texto = '🛒 Pedido recebido'
+
   let pollMeta = null
   if (type === 'poll') {
     const p = payload.pollMeta || payload.poll || {}
@@ -681,7 +686,8 @@ function extractMessage(payload) {
     contactMeta,
     locationMeta,
     pollMeta,
-    productMeta
+    productMeta,
+    orderMeta
   }
 }
 

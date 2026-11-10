@@ -7,6 +7,7 @@
 const supabase = require('../../config/supabase')
 const { schedulePendingOutboundReconciliation } = require('../../services/pendingOutboundReconciliationService')
 const { mapProviderSendResult } = require('../../services/chat/outbound/providerResultMapper')
+const { gravarResultadoDoEnvio } = require('../../services/chat/outbound/outboundResultPersistence')
 const { isTransientOutboundFailure } = require('../../services/chat/outbound/outboundFailureClassifier')
 const { getProvider } = require('../../services/providers')
 const {
@@ -56,11 +57,18 @@ async function aplicarResultadoReenvio({ req, company_id, conversa_id, mensagem,
     ...(hasQueueId ? { provider_queue_id: waMessageId } : {}),
   }
 
-  await supabase
-    .from('mensagens')
-    .update(patch)
-    .eq('company_id', company_id)
-    .eq('id', mensagem.id)
+  // Gravação CONDICIONAL (doc 29 §3 item 2): entre o POST ao provedor e esta gravação o ACK/eco
+  // pode já ter levado a linha a sent/delivered/read. Gravar o resultado do reenvio por cima
+  // rebaixava o tique. O helper só escreve o status enquanto a linha está aberta
+  // (pending/sending/erro/failed) e, quando já avançou, grava apenas os ids.
+  await gravarResultadoDoEnvio({
+    company_id,
+    mensagem_id: mensagem.id,
+    status: patch.status,
+    status_mensagem: patch.status_mensagem,
+    whatsapp_id: hasValidId ? waMessageId : null,
+    provider_queue_id: hasQueueId ? waMessageId : null,
+  })
 
   const io = req.app?.get('io')
   if (io) {

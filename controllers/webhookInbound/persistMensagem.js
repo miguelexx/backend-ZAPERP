@@ -257,7 +257,7 @@ function nomeArquivoDoTexto(texto) {
 function applyInboundMediaFields(insertMsg, media) {
   const {
     type, imageUrl, documentUrl, audioUrl, videoUrl, stickerUrl,
-    locationUrl, locationMeta, contactMeta, pollMeta, productMeta, fileName, diag = {},
+    locationUrl, locationMeta, contactMeta, pollMeta, productMeta, orderMeta, fileName, diag = {},
   } = media || {}
 
   if (type === 'image' && imageUrl) {
@@ -318,6 +318,13 @@ function applyInboundMediaFields(insertMsg, media) {
     insertMsg.tipo = 'product'
     if (productMeta && typeof productMeta === 'object') {
       insertMsg.reply_meta = { ...(insertMsg.reply_meta && typeof insertMsg.reply_meta === 'object' ? insertMsg.reply_meta : {}), product: productMeta }
+    }
+  } else if (type === 'order') {
+    // Pedido recebido do cliente: a bolha (OrderMessage) lê reply_meta.order { item_count, total_price,
+    // currency, title, preview, items:[{ name, price, currency, quantity, image }] }.
+    insertMsg.tipo = 'order'
+    if (orderMeta && typeof orderMeta === 'object') {
+      insertMsg.reply_meta = { ...(insertMsg.reply_meta && typeof insertMsg.reply_meta === 'object' ? insertMsg.reply_meta : {}), order: orderMeta }
     }
   } else if (type === 'reaction') {
     insertMsg.tipo = 'reaction'

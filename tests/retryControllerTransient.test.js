@@ -22,8 +22,16 @@ jest.mock('../config/supabase', () => ({
       return q
     },
     update: (patch) => {
-      mockUpdates.push({ table, patch })
-      const q = { eq: () => q, then: (resolve) => resolve({ error: null }) }
+      const registro = { table, patch, filtroStatus: null }
+      mockUpdates.push(registro)
+      // `gravarResultadoDoEnvio` condiciona o UPDATE a `status IN (...)` para não rebaixar um
+      // tique que o ACK já avançou (doc 29 §3 item 2) — o mock precisa aceitar `.in`/`.select`.
+      const q = {
+        eq: () => q,
+        in: (col, valores) => { if (col === 'status') registro.filtroStatus = valores; return q },
+        select: () => q,
+        then: (resolve) => resolve({ data: [{ id: 55 }], error: null }),
+      }
       return q
     },
   }),
@@ -119,6 +127,8 @@ describe('reenviarMidiaMensagem — classificação de falha', () => {
     expect(res.body.mensagem.status_mensagem).toBe('sending')
     const up = mockUpdates.find((u) => u.table === 'mensagens')
     expect(up.patch).toMatchObject({ status: 'pending', status_mensagem: 'sending' })
+    // Não rebaixa um ACK que chegou primeiro: o UPDATE sai condicionado ao status ainda aberto.
+    expect(up.filtroStatus).toEqual(expect.arrayContaining(['pending', 'sending', 'erro', 'failed']))
     expect(mockSchedule).toHaveBeenCalledWith(expect.objectContaining({ companyId: 1, mensagemId: 55 }))
   })
 

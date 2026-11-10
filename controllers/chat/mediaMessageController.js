@@ -172,6 +172,12 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
         original: fileWork?.originalname,
         mime: fileWork?.mimetype,
       })
+      // O upload abortado aqui ficava em /uploads para sempre (doc 29 §3 item 11): nada mais
+      // referencia o arquivo depois do 422. Mesma limpeza que os outros dois ramos de 422
+      // (guard de duração do voice e conversão obrigatória de vídeo) já fazem.
+      try {
+        if (fileWork?.path && require('fs').existsSync(fileWork.path)) require('fs').unlinkSync(fileWork.path)
+      } catch (_) {}
       return {
         ok: false,
         status: 422,
@@ -585,7 +591,14 @@ async function enviarArquivoProcessarUm(req, file, { company_id, user_id, conver
           // 'erro' a tiraria do sweep e exigiria clique manual, além de arriscar duplicação num
           // reenvio cego. Mantém pending + reconciliação (consulta crm-{id} antes de reenviar).
           console.error('WhatsApp enviar mídia — exceção no envio, mantendo pending para retry automático:', e?.message || e)
-          await supabase.from('mensagens').update({ status: 'pending', status_mensagem: 'sending' }).eq('company_id', company_id).eq('id', msg.id)
+          // CONDICIONAL: o provedor pode ter recebido a mídia e o ACK já ter chegado antes desta
+          // exceção de transporte — gravar 'pending' por cima rebaixava o tique (doc 29 §3 item 2).
+          await gravarResultadoDoEnvio({
+            company_id,
+            mensagem_id: msg.id,
+            status: 'pending',
+            status_mensagem: 'sending',
+          })
           const io2 = req.app?.get('io')
           if (io2) {
             const payload = { mensagem_id: msg.id, conversa_id: Number(conversa_id), status: 'pending', status_mensagem: 'sending' }

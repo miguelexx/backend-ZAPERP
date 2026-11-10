@@ -48,6 +48,7 @@ const PREFIXO_OPENAPI = '/api/v1/assistente'
 const WM_PATHS = Object.freeze({
   ACESSO_VALIDAR: '/api/v1/assistente/acesso/validar',
   CLIENTES_CONSULTAR: '/api/v1/assistente/clientes/consultar',
+  VENDEDORES_CONSULTAR: '/api/v1/assistente/vendedores/consultar',
   PRODUTOS_CONSULTAR: '/api/v1/assistente/produtos/consultar',
   ORCAMENTOS_PREPARAR: '/api/v1/assistente/orcamentos/preparar',
   ORCAMENTOS_CRIAR: '/api/v1/assistente/orcamentos/criar',
@@ -423,6 +424,40 @@ async function consultarClientes(payload) {
 }
 
 /**
+ * `POST /vendedores/consultar` — leitura. Mesma política de retry de `consultarClientes`: nada
+ * é escrito, então repetir 5xx/429/408 e falha de rede é seguro. Também é REALTIME (fala com o
+ * sincronizador da loja e cai com ele, `503 SINCRONIZADOR_OFFLINE`).
+ *
+ * ⚠️ TRÊS DIFERENÇAS DE CONTRATO EM RELAÇÃO A `/clientes/consultar`, medidas ao vivo em
+ * 09/11/2026 contra a instalação da WM Sistemas. Quem copiar o padrão de clientes erra nas três:
+ *
+ *   1. a lista vem em `dados.vendedores[]` e **não existe campo `status`** — clientes trazem
+ *      `status: 'multiplos_clientes' | 'cliente'`, vendedores vêm sempre como array simples;
+ *   2. **nada encontrado é `200` com `vendedores: []` e `total: 0`**, não 404. Em clientes,
+ *      nada encontrado é 404;
+ *   3. **`busca` é OPCIONAL.** Sem ela, a WM devolve TODOS os vendedores (medido: 8). Em
+ *      clientes, `busca` XOR `codigo` é obrigatório.
+ *
+ * Mais o que foi medido junto: `busca` casa trecho em QUALQUER posição (`arkony` acha
+ * `MARKONY`), ao contrário de cliente, que casa por prefixo; `busca: ''` é `400
+ * payload_invalido` (mínimo 1 caractere), então quem não tem termo OMITE o campo — nunca manda
+ * string vazia; `pagina` além do fim é `400 PAGINA_FORA_DO_INTERVALO`, sem clamp, como nas
+ * outras portas.
+ *
+ * Este módulo não conhece nada disso: ele só posta o payload que recebe. O contrato está aqui
+ * porque é aqui que o endpoint é nomeado, e a projeção que depende dele vive no
+ * `wmAssistenteService`.
+ */
+async function consultarVendedores(payload) {
+  return requisitar({
+    operacao: OPERACAO.LEITURA,
+    path: WM_PATHS.VENDEDORES_CONSULTAR,
+    body: payload,
+    retryOpts: { idempotent: true },
+  })
+}
+
+/**
  * `POST /produtos/consultar` — leitura. Retry de 5xx/429/408 e rede é seguro: nada é escrito.
  * O payload já vem validado (`validators/wmOrcamentosValidators`) e com o `telefone` injetado
  * pelo chamador server-side.
@@ -477,6 +512,7 @@ module.exports = {
   sanitizarCodigoErro,
   validarAcesso,
   consultarClientes,
+  consultarVendedores,
   consultarProdutos,
   prepararOrcamento,
   criarOrcamento,

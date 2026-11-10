@@ -5,6 +5,7 @@ const { phoneCandidatesForSend } = require('./phones')
 const { awaitSendDelay } = require('./delay')
 const { resolveConfig } = require('./config')
 const { postJson, aplicarReferenceId, maskToken } = require('./http')
+const { isTransientOutboundFailure } = require('../../chat/outbound/outboundFailureClassifier')
 
 /** 
  * Converte URL de áudio para formato compatível com UltraMsg.
@@ -366,6 +367,21 @@ async function sendVoice(phone, audioUrl, opts = {}) {
 
     if (opts?.disableAudioFallback) {
       return returnDetails ? { ...normalized, ok: false, error: errMsg } : false
+    }
+
+    // O fallback existe para RECUSA DEFINITIVA do /messages/voice (formato/extensão que o
+    // endpoint voice não aceita). Numa falha TRANSITÓRIA (5xx/408/425/429) a UltraMSG pode já
+    // ter aceitado o áudio: repostar o MESMO body em /messages/audio — com o mesmo referenceId —
+    // entregava DOIS áudios ao cliente (doc 29 §3 item 5). Transitória devolve a falha com o
+    // httpStatus preservado, e o chamador mantém a linha pending + reconciliação (que consulta
+    // o provedor por crm-{id} antes de qualquer reenvio).
+    if (isTransientOutboundFailure({ httpStatus: normalized.httpStatus ?? status })) {
+      console.warn('[ULTRAMSG][VOICE] falha transitória — fallback /messages/audio NÃO executado (evita áudio duplicado)', {
+        to: nums[0]?.slice(-12),
+        status,
+        error: errMsg.slice(0, 200),
+      })
+      return returnDetails ? { ...normalized, ok: false, error: errMsg, transient: true } : false
     }
 
     // Fallback: tenta como áudio comum
