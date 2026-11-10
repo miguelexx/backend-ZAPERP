@@ -258,13 +258,96 @@ async function clearChatMessages() {
   return notImplemented('clearChatMessages')
 }
 
+/**
+ * Tamanho da página nas listagens (`/chats`, `/groups`). A Whapi aceita `count`/`offset` e
+ * devolve `total`; sem `count` ela entrega **100** itens e nada avisa que há mais.
+ */
+const LIST_PAGE_SIZE = Math.max(1, Math.min(500, parseInt(process.env.WHAPI_LIST_PAGE_SIZE, 10) || 200))
+/** Trava anti-laço se o canal ignorar `offset` e repetir a mesma página. */
+const LIST_MAX_PAGES = Math.max(1, parseInt(process.env.WHAPI_LIST_MAX_PAGES, 10) || 60)
+
+/**
+ * Lê uma listagem INTEIRA da Whapi, paginando por `count`/`offset`.
+ *
+ * Medido no canal de produção em 10/11/2026 (MCP, só leitura):
+ *   GET /groups            → {"count":100,"total":2}     ← `count` é o default, não o devolvido
+ *   GET /chats?count=1     → {"count":1,"total":723}
+ * Isto é, o default é 100. Como `getChats`/`getGroups` não mandavam `count`, uma empresa com
+ * 723 chats entregava só os 100 mais recentes ao sync — e todo grupo fora dessa janela (ou
+ * depois do 100º grupo) nunca era importado para o sistema.
+ *
+ * `opts.count`/`opts.offset` explícitos continuam valendo como pedido de UMA página (quem
+ * chama assim quer paginar por conta própria).
+ *
+ * @param {{token: string, endpoint: string, keys: string[], count?: any, offset?: any}} args
+ * @returns {Promise<object[]>} todos os itens da listagem
+ */
+async function fetchWholeList({ token, endpoint, keys, count, offset }) {
+  if (count != null || offset != null) {
+    const extraParams = {}
+    if (count != null) extraParams.count = String(count)
+    if (offset != null) extraParams.offset = String(offset)
+    const { ok, data } = await get({ token, endpoint, extraParams })
+    if (!ok) return []
+    return extractArray(data, keys)
+  }
+
+  const out = []
+  const vistos = new Set()
+  let total = null
+
+  for (let page = 0; page < LIST_MAX_PAGES; page += 1) {
+    const { ok, data } = await get({
+      token,
+      endpoint,
+      extraParams: { count: String(LIST_PAGE_SIZE), offset: String(page * LIST_PAGE_SIZE) },
+    })
+    if (!ok) break
+
+    const lote = extractArray(data, keys)
+    if (!Array.isArray(lote) || lote.length === 0) break
+
+    const totalBody = Number(data?.total)
+    if (Number.isFinite(totalBody) && totalBody >= 0) total = totalBody
+
+    let novos = 0
+    for (const item of lote) {
+      const id = String(item?.id || item?.jid || item?.chatId || '').trim()
+      const chave = id || `#${out.length}:${JSON.stringify(item).slice(0, 120)}`
+      if (vistos.has(chave)) continue
+      vistos.add(chave)
+      out.push(item)
+      novos += 1
+    }
+
+    // Canal ignorou `offset` (página repetida) → para, senão o laço nunca acaba.
+    if (novos === 0) break
+    // Última página: veio menos do que o pedido, ou já cobrimos o total informado.
+    if (lote.length < LIST_PAGE_SIZE) break
+    if (total != null && out.length >= total) break
+
+    if (page === LIST_MAX_PAGES - 1) {
+      console.warn(
+        `[WHAPI] ${endpoint}: teto de ${LIST_MAX_PAGES} páginas atingido (${out.length} itens` +
+        `${total != null ? ` de ${total}` : ''}). Ajuste WHAPI_LIST_MAX_PAGES.`
+      )
+    }
+  }
+
+  return out
+}
+
 async function getChats(opts = {}) {
   const cfg = await resolveConfig(opts)
   if (!cfg) return []
   try {
-    const { ok, data } = await get({ token: cfg.token, endpoint: '/chats' })
-    if (!ok) return []
-    return extractArray(data, ['chats', 'data', 'list'])
+    return await fetchWholeList({
+      token: cfg.token,
+      endpoint: '/chats',
+      keys: ['chats', 'data', 'list'],
+      count: opts.count,
+      offset: opts.offset,
+    })
   } catch {
     return []
   }
@@ -320,12 +403,13 @@ async function getGroups(opts = {}) {
   const cfg = await resolveConfig(opts)
   if (!cfg) return []
   try {
-    const extraParams = {}
-    if (opts.count != null) extraParams.count = String(opts.count)
-    if (opts.offset != null) extraParams.offset = String(opts.offset)
-    const { ok, data } = await get({ token: cfg.token, endpoint: '/groups', extraParams })
-    if (!ok) return []
-    return extractArray(data, ['groups', 'data', 'chats', 'list'])
+    return await fetchWholeList({
+      token: cfg.token,
+      endpoint: '/groups',
+      keys: ['groups', 'data', 'chats', 'list'],
+      count: opts.count,
+      offset: opts.offset,
+    })
   } catch {
     return []
   }

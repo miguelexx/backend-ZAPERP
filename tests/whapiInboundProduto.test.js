@@ -322,3 +322,65 @@ describe('Whapi inbound — pedido (order) do catálogo', () => {
     expect(normalizeOrderItem({ name: 'Y' })).toMatchObject({ name: 'Y', quantity: 1, image: null, price: null })
   })
 })
+
+/**
+ * Pré-visualização de link (Whapi type 'link_preview'): o cliente manda uma URL (ex. post do Instagram)
+ * e o WhatsApp monta o cartão (foto + título + descrição + domínio). Antes aparecia só o texto; agora o
+ * cartão é renderizado (LinkPreviewMessage). Shape: m.link_preview { body, url, title, description, preview }.
+ */
+describe('Whapi inbound — pré-visualização de link (link_preview)', () => {
+  const CTX = { channelId: 'HULKBR-NZCYL', connectedPhone: '553498630553' }
+  afterEach(() => jest.resetModules())
+  function normalize(m) {
+    return require('../controllers/webhookWhapiController')._test.normalizeWhapiMessageToInternal(m, CTX)
+  }
+
+  const lpMsg = (ov = {}) => ({
+    id: 'LP1', from: '553499000000', from_me: false, from_name: 'Silvia',
+    type: 'link_preview', chat_id: '553499000000@s.whatsapp.net', timestamp: 1700000000,
+    link_preview: {
+      body: 'Olá! Posso ter mais informações sobre isso?',
+      url: 'https://instagram.com/p/abc',
+      title: 'Eliabedamasceno.imoveis',
+      description: 'VENDA…',
+      preview: 'data:image/jpeg;base64,/9j/HOUSE',
+    },
+    ...ov,
+  })
+
+  test('type link_preview → linkPreviewMeta (url/título/descrição/preview) + body = texto do cliente', () => {
+    const m = normalize(lpMsg())
+    expect(m.type).toBe('chat') // é uma mensagem de texto com cartão (não um tipo próprio)
+    expect(m.body).toBe('Olá! Posso ter mais informações sobre isso?')
+    expect(m.linkPreviewMeta).toEqual({
+      url: 'https://instagram.com/p/abc',
+      title: 'Eliabedamasceno.imoveis',
+      description: 'VENDA…',
+      preview: 'data:image/jpeg;base64,/9j/HOUSE',
+    })
+  })
+
+  test('link_preview sem imagem/descrição ainda carrega url+título', () => {
+    const m = normalize(lpMsg({ link_preview: { body: 'veja', url: 'https://x.com', title: 'X' } }))
+    expect(m.linkPreviewMeta).toEqual({ url: 'https://x.com', title: 'X', description: null, preview: null })
+  })
+
+  test('extractMessage repassa linkPreviewMeta e mantém o texto', () => {
+    const { extractMessage } = require('../controllers/webhookInbound/payload')
+    const linkPreviewMeta = { url: 'https://instagram.com/p/abc', title: 'X', description: 'Y', preview: 'data:image/jpeg;base64,Z' }
+    const ex = extractMessage({
+      type: 'ReceivedCallback', msgType: 'chat', id: 'LP1', phone: '553499000000',
+      message: 'Olá!', text: { message: 'Olá!' }, timestamp: 1700000000, linkPreviewMeta,
+    })
+    expect(ex.linkPreviewMeta).toEqual(linkPreviewMeta)
+    expect(ex.texto).toBe('Olá!')
+  })
+
+  test('applyInboundMediaFields: linkPreviewMeta → reply_meta.link_preview (merge, não apaga citação)', () => {
+    const { applyInboundMediaFields } = require('../controllers/webhookInbound/persistMensagem')
+    const linkPreviewMeta = { url: 'https://instagram.com/p/abc', title: 'X', description: 'Y', preview: 'data:image/jpeg;base64,Z' }
+    const insertMsg = { texto: 'Olá!', reply_meta: { name: 'Você', snippet: 'anterior' } } // citação já resolvida antes
+    applyInboundMediaFields(insertMsg, { type: 'link', linkPreviewMeta })
+    expect(insertMsg.reply_meta).toEqual({ name: 'Você', snippet: 'anterior', link_preview: linkPreviewMeta })
+  })
+})

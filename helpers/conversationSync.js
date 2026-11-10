@@ -452,9 +452,10 @@ async function refetchConversationInInstanceScope(
   variants,
   whatsappInstanceId,
   allowLegacyNullInstance,
-  limit = 20
+  limit = 20,
+  isGroup = null
 ) {
-  const found = await selectConversationsByPhoneVariants(
+  const rows = await selectConversationsByPhoneVariants(
     supabaseClient,
     company_id,
     variants,
@@ -462,6 +463,8 @@ async function refetchConversationInInstanceScope(
     allowLegacyNullInstance,
     limit
   )
+  // Mesma regra do caminho principal: grupo não casa com individual.
+  const found = isGroup == null ? rows : filterRowsByConversationKind(rows, isGroup)
   const scoped = pickConversationForWhatsappInstance(found, whatsappInstanceId, allowLegacyNullInstance)
   if (!Array.isArray(scoped) || scoped.length === 0) return null
   let conv = scoped[0]
@@ -497,7 +500,35 @@ async function attachWhatsappInstanceToLegacyConversation(supabaseClient, compan
  * Busca cliente existente por variantes 12/13 dígitos e phoneKeyBR (55… vs 9º dígito).
  * Cobre telefone salvo sem DDI ou formato diferente do canônico do INSERT.
  */
-const CONVERSA_INSTANCE_SELECT = 'id, departamento_id, telefone, cliente_id, whatsapp_instance_id'
+const CONVERSA_INSTANCE_SELECT = 'id, departamento_id, telefone, cliente_id, whatsapp_instance_id, tipo'
+
+/**
+ * A linha encontrada é de GRUPO? (`tipo` pode ser null em conversas antigas, então o sufixo
+ * @g.us e o formato Group-Owner também contam.)
+ */
+function rowIsGroupConversation(row) {
+  if (!row) return false
+  const tipo = String(row.tipo || '').trim().toLowerCase()
+  if (tipo === 'grupo' || tipo === 'group') return true
+  const telefone = String(row.telefone || '').trim().toLowerCase()
+  if (telefone.endsWith('@g.us')) return true
+  return /^\d{5,15}-\d{10,15}$/.test(telefone)
+}
+
+/**
+ * Grupo nunca casa com conversa individual e vice-versa.
+ *
+ * Um grupo de ID LEGADO (`<dono>-<criação>@g.us`, grupos criados antes de 2021) gera a variante
+ * de busca `<dono>` — o telefone do criador do grupo. Na empresa 1 isso casava com a conversa
+ * INDIVIDUAL 452 (`553484079741`, `tipo='cliente'`): o grupo "WM Sistemas de Gestão" (397
+ * participantes) nunca era criado, as mensagens dele iriam para a conversa do indivíduo e o
+ * `needsGroupUpdate` logo abaixo ainda reescrevia o telefone dessa conversa com o id do grupo.
+ * Medido em 10/11/2026 contra o canal e o banco de produção.
+ */
+function filterRowsByConversationKind(rows, isGroup) {
+  if (!Array.isArray(rows) || rows.length === 0) return []
+  return rows.filter((row) => rowIsGroupConversation(row) === !!isGroup)
+}
 
 async function queryScopedConversationRows(buildBaseQuery, whatsappInstanceId, allowLegacyNullInstance) {
   async function run(scope) {
@@ -1137,6 +1168,9 @@ async function findOrCreateConversation(supabaseClient, {
     throw errFind
   }
 
+  // Grupo só casa com grupo; individual só casa com individual (ver filterRowsByConversationKind).
+  found = filterRowsByConversationKind(found, isGroup)
+
   const foundScoped = pickConversationForWhatsappInstance(found, whatsappInstanceId, allowLegacyNullInstance)
 
   if (Array.isArray(foundScoped) && foundScoped.length > 0) {
@@ -1178,11 +1212,12 @@ async function findOrCreateConversation(supabaseClient, {
   // ramo de criação e só quando há exatamente UMA instância ativa (= a do inbound), reaproveita e
   // carimba a conversa legada. Empresa multi-número (2+ ativas) NÃO dispara: isolamento intacto.
   if (whatsappInstanceId && !allowLegacyNullInstance) {
-    const { data: legacyNullRows } = await selectLegacyNullConversationsByPhoneVariants(
+    const { data: legacyNullRowsRaw } = await selectLegacyNullConversationsByPhoneVariants(
       supabaseClient,
       company_id,
       variants
     )
+    const legacyNullRows = filterRowsByConversationKind(legacyNullRowsRaw, isGroup)
     if (
       Array.isArray(legacyNullRows) &&
       legacyNullRows.length > 0 &&
@@ -1260,7 +1295,8 @@ async function findOrCreateConversation(supabaseClient, {
         variants,
         whatsappInstanceId,
         legacyAllowed,
-        20
+        20,
+        isGroup
       )
       if (raceConv?.id) {
         console.log(`[findOrCreateConversation] ${logPrefix} ⚡ unique violation → conv=${raceConv.id} instance=${raceConv.whatsapp_instance_id ?? 'legacy'}`)
@@ -1436,4 +1472,6 @@ module.exports = {
   hasValidFotoPerfil,
   shouldUpdateFotoPerfil,
   mergeAndReturnCliente,
+  rowIsGroupConversation,
+  filterRowsByConversationKind,
 }

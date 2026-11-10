@@ -1527,3 +1527,83 @@ fonte `syncUltramsg` (110): troca pushname/nome ruim, nunca nome protegido (manu
 9º dígito, lista de chats indisponível, shouldStop) e serviço (importa pelo chat, telefone-como-
 nome ganha nome, sem chat não inventa, cancelamento, UltraMSG intacto).
 `tests/whapiProvider.test.js` ajustado: pushname não é nome.
+
+---
+
+## 2026-11-10 — "Faltam grupos no sistema": quatro perdas, nenhuma com erro na tela
+
+Pedido do Miguel: certificar que os grupos são puxados corretamente e fazer todos aparecerem.
+Medido no canal e no banco de PRODUÇÃO (MCP Whapi + script só leitura).
+
+### O que estava acontecendo
+
+Banco: 432 conversas `tipo='grupo'`, **zero** com id legado. O canal da empresa 1 tem 2 grupos e
+um deles — "WM Sistemas de Gestão", **397 participantes** — não existia em nenhuma linha.
+
+| # | Perda | Evidência |
+|---|---|---|
+| 1 | **Whapi pagina em 100 e ninguém mandava `count`** | `GET /groups` → `{"count":100,"total":2}` (o `count` ecoado é o *default*); `GET /chats?count=1` → `{"count":1,"total":723}`. `getChats`/`getGroups` não mandavam `count`/`offset`: da empresa com 723 chats chegavam 100, e do 101º grupo em diante nada |
+| 2 | **Id LEGADO de grupo descartado** | `extractGroupFields` exigia `digits.startsWith('120')`. Grupo criado antes de 2021 tem id `<dono>-<criação>@g.us` (`553484079741-1553807524@g.us`) → `null`, pulado em silêncio |
+| 3 | **Grupo legado casava com a conversa INDIVIDUAL do dono** | `findOrCreateConversation` gera a variante `<dono>` = `553484079741`, que é a conversa 452 (`tipo='cliente'`) da empresa 1. O grupo não era criado, as mensagens dele iriam para o individual e o `needsGroupUpdate` ainda reescrevia o telefone dessa conversa com o id do grupo |
+| 4 | **Sync só varria a instância DEFAULT** | `syncGroups`/`syncFromChats` só recebem `company_id`; `resolveConfig` cai em `getDefaultWhatsappInstance`. Empresa 25 tem 2 números ativos (25 e 26) — os grupos do 26 só entravam por mensagem ao vivo |
+
+### O que mudou
+
+| Arquivo | Mudança |
+|---|---|
+| `services/providers/whapi/chatsAdmin.js` | `fetchWholeList` novo: pagina `/chats` e `/groups` por `count`/`offset` até cobrir `total` (página `WHAPI_LIST_PAGE_SIZE`, default 200; teto `WHAPI_LIST_MAX_PAGES`, default 60). Dedup por id + parada quando a página não traz nada novo (canal que ignora `offset`). `opts.count`/`opts.offset` explícitos seguem valendo como UMA página |
+| `services/ultramsgGroupsSyncService.js` | `extractGroupFields` aceita id legado e devolve `telefone` **sem** `@g.us` mas **com** o hífen — o mesmo formato que `findOrCreateConversation` grava (dígitos colados criariam linha dupla). `listSyncTargets` varre todas as instâncias ATIVAS; `syncGroups`/`syncFromChats` iteram por número e falha de um não derruba o outro. `persistirGrupo` centraliza find/create: procura **sem** filtro de instância (grupo é um só por empresa, mesmo com 2 números dentro dele), carimba `whatsapp_instance_id` quando a linha estava nula e cria pelo caminho do webhook |
+| `helpers/conversationSync.js` | `tipo` entrou no `CONVERSA_INSTANCE_SELECT`; `filterRowsByConversationKind` aplica-se ao caminho principal, à adoção de legada e ao refetch de corrida: **grupo nunca casa com individual e vice-versa** |
+
+Bônus do `persistirGrupo`: `getGroupMetadata` (1–2 chamadas HTTP por grupo) só roda quando falta
+nome ou falta foto. Num re-sync de empresa com ~150 grupos isso sai de ~300 chamadas para zero —
+importa porque a Whapi pausa o canal em 429.
+
+### Dry-run contra produção (10/11, nada gravado)
+
+- empresa 1: **criaria "WM Sistemas de Gestão" (397 participantes)**; o outro grupo já existia.
+- empresa 25: criaria 7 grupos entre os 2 números (inclui o legado "Somos FrutalCred") e daria
+  nome a `VCTEX & FRUTALCRED` e `CREDFRANCO COMUNICADOS`, hoje com `nome_grupo = NULL`.
+- empresa 31: canal devolve 0 grupos (os 34 do banco vieram de webhook) — sync nunca apaga.
+
+### Fora do escopo / residual
+
+- **Aba "Abertas" exige mensagem no grupo**: `conversationListController.js:1048`
+  (`if (c.is_group) return c.ultima_mensagem != null`) + frontend `exibir_badge_aberta` sempre
+  `false` para grupo. Grupo recém-importado sem mensagem na nossa base aparece em "Todas", não em
+  "Abertas"; e na "Minha fila" o admin só vê grupo que ele fixou. É desenho ("grupo não tem estado
+  de atendimento"), mexer nisso é backend+frontend acoplados — **não alterado**.
+- Conversa INDIVIDUAL em `syncFromChats` segue sem carimbo de instância (carimbar ali duplicaria
+  conversa de número que já tem linha com instância nula — fora do escopo de grupos).
+- 23 grupos antigos com `whatsapp_instance_id IS NULL` (cid1: 3, cid26: 11, cid29: 9): o sync
+  carimba na próxima passada; quem quiser antecipar, SQL no fim desta seção.
+- UltraMSG: `getGroups`/`getChats` não ganharam paginação (não há sinal de teto; empresa 19 tem
+  149 grupos). As 3 instâncias UltraMSG (5, 18, 19) estão **paradas por não-pagamento** — o canal
+  devolve 404 com essa mensagem, então não houve como medir.
+- **Achado lateral (não corrigido)**: `services/providers/ultramsg/http.js` loga a URL crua em
+  qualquer resposta ≥400, e a URL do UltraMSG leva `?token=` — token em claro no log de produção
+  toda vez que uma chamada falha. A redação de `helpers/redactUrlSecrets.js` não alcança esse log.
+
+### Testes
+
+`tests/gruposSyncCompleto.test.js` (14): paginação (`/groups` e `/chats` em várias páginas,
+`count`/`offset` em toda página, anti-laço de página repetida, pedido explícito de uma página),
+id legado aceito/recusado, grupo legado × conversa individual do dono nos dois sentidos + grupo
+existente não duplicado, e multi-número (2 instâncias consultadas, inativa de fora, fallback de
+default, falha de um número não derruba o outro). Suíte completa: **3628 testes, 279 suítes, ok**.
+
+### SQL opcional (carimbar a instância dos grupos antigos) — o Miguel roda no editor
+
+```sql
+-- Só empresas de UM número ativo: sem ambiguidade de qual instância carimbar.
+UPDATE conversas c
+SET whatsapp_instance_id = i.id
+FROM (
+  SELECT company_id, MIN(id) AS id, COUNT(*) AS n
+  FROM whatsapp_instances WHERE ativo = true GROUP BY company_id
+) i
+WHERE i.n = 1
+  AND c.company_id = i.company_id
+  AND c.tipo = 'grupo'
+  AND c.whatsapp_instance_id IS NULL;
+```

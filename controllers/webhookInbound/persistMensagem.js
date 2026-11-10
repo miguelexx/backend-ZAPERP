@@ -257,7 +257,7 @@ function nomeArquivoDoTexto(texto) {
 function applyInboundMediaFields(insertMsg, media) {
   const {
     type, imageUrl, documentUrl, audioUrl, videoUrl, stickerUrl,
-    locationUrl, locationMeta, contactMeta, pollMeta, productMeta, orderMeta, fileName, diag = {},
+    locationUrl, locationMeta, contactMeta, pollMeta, productMeta, orderMeta, linkPreviewMeta, fileName, diag = {},
   } = media || {}
 
   if (type === 'image' && imageUrl) {
@@ -328,6 +328,12 @@ function applyInboundMediaFields(insertMsg, media) {
     }
   } else if (type === 'reaction') {
     insertMsg.tipo = 'reaction'
+  }
+  // Pré-visualização de link: é uma mensagem de texto/link (sem tipo próprio) — a bolha
+  // (LinkPreviewMessage) lê reply_meta.link_preview { url, title, description, preview }. Fora do
+  // if/else porque o tipo continua texto; faz MERGE p/ não apagar uma citação já resolvida.
+  if (linkPreviewMeta && typeof linkPreviewMeta === 'object' && (linkPreviewMeta.url || linkPreviewMeta.title || linkPreviewMeta.preview)) {
+    insertMsg.reply_meta = { ...(insertMsg.reply_meta && typeof insertMsg.reply_meta === 'object' ? insertMsg.reply_meta : {}), link_preview: linkPreviewMeta }
   }
   // Demais tipos: já têm texto preenchido; tipo padrão é texto (não seta insertMsg.tipo).
   return insertMsg

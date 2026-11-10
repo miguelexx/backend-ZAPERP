@@ -1002,6 +1002,18 @@ function normalizeWhapiMessageToInternal(m, ctx = {}) {
         preview: typeof m.order.preview === 'string' ? m.order.preview : null,
       }
     : null
+  // Pré-visualização de link (type 'link_preview'): o cliente manda uma URL e o WhatsApp monta o
+  // cartão (foto + título + descrição + domínio). Tudo já vem no webhook (sem API extra). O texto
+  // fica no body; aqui guardamos o meta do cartão para a bolha LinkPreviewMessage renderizar.
+  const linkPreviewMeta = (type === 'link_preview' && m.link_preview && typeof m.link_preview === 'object')
+    ? {
+        url: m.link_preview.url != null ? String(m.link_preview.url)
+          : (m.link_preview.canonical_url != null ? String(m.link_preview.canonical_url) : null),
+        title: m.link_preview.title != null ? String(m.link_preview.title) : null,
+        description: m.link_preview.description != null ? String(m.link_preview.description) : null,
+        preview: typeof m.link_preview.preview === 'string' ? m.link_preview.preview : null,
+      }
+    : null
   // Outros `action` (ex. media_notify) não são mensagem de atendimento — edit/vote/reaction passam.
   if (type === 'action' && !isReaction && !isPollVote && !isEdit) return null
   if (type === 'deleted' || type === 'revoke' || type === 'revoked' || m.deleted === true) return null
@@ -1204,6 +1216,7 @@ function normalizeWhapiMessageToInternal(m, ctx = {}) {
     ...(productRef ? { productRef } : {}),
     ...(quotedProductRef ? { quotedProductRef } : {}),
     ...(orderRef ? { orderRef } : {}),
+    ...(linkPreviewMeta ? { linkPreviewMeta } : {}),
     isEdit,
   }
 }

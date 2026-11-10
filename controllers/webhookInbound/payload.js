@@ -618,6 +618,10 @@ function extractMessage(payload) {
   const orderMeta = (payload.orderMeta && typeof payload.orderMeta === 'object') ? payload.orderMeta : null
   if (type === 'order' && !texto) texto = '🛒 Pedido recebido'
 
+  // Pré-visualização de link (Whapi type 'link_preview'): o normalizador anexou payload.linkPreviewMeta
+  // { url, title, description, preview }. Só repassamos; o texto (body) já foi resolvido acima.
+  const linkPreviewMeta = (payload.linkPreviewMeta && typeof payload.linkPreviewMeta === 'object') ? payload.linkPreviewMeta : null
+
   let pollMeta = null
   if (type === 'poll') {
     const p = payload.pollMeta || payload.poll || {}
@@ -687,7 +691,8 @@ function extractMessage(payload) {
     locationMeta,
     pollMeta,
     productMeta,
-    orderMeta
+    orderMeta,
+    linkPreviewMeta
   }
 }
 
