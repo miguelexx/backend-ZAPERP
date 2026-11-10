@@ -396,6 +396,74 @@ exports.enviarConviteGrupo = async (req, res) => {
   }
 }
 
+/**
+ * Convida em lote quem o WhatsApp NÃO deixou adicionar direto.
+ *
+ * Medido no canal em 10/11/2026: adicionar o contato devolve
+ * `{"success":true,"processed":[],"failed":["55…@s.whatsapp.net"]}` mesmo com o endereço certo e
+ * com o nosso número sendo o CRIADOR do grupo. Não é permissão nossa nem endereço errado: é a
+ * privacidade do contato ("quem pode me adicionar a grupos"). Nesse caso o WhatsApp não tem como
+ * ser forçado — o caminho que funciona é mandar o link de convite, e quem entra é a pessoa.
+ *
+ * O código do convite é resolvido UMA vez e reaproveitado para todos os destinos.
+ */
+const CONVITE_LOTE_MAX = 50
+const CONVITE_INTERVALO_MS = Math.max(0, parseInt(process.env.GRUPO_CONVITE_INTERVALO_MS, 10) || 1200)
+
+exports.convidarParticipantesGrupo = async (req, res) => {
+  try {
+    const ctx = await loadGroupContext(req)
+    if (ctx.error) return res.status(ctx.error.status).json({ error: ctx.error.error })
+    const missing = needMethod(ctx.provider, 'sendGroupInvite')
+    if (missing) return res.status(missing.status).json({ error: missing.error })
+    if (!ctx.jid) return res.status(400).json({ error: 'Este grupo ainda não existe no WhatsApp.' })
+
+    const brutos = req.body?.participantes || req.body?.participants || req.body?.telefones || []
+    const lista = (Array.isArray(brutos) ? brutos : [brutos])
+      .map((p) => String(p ?? '').replace(/@[^@]+$/, '').replace(/\D/g, ''))
+      .filter(Boolean)
+    const destinos = [...new Set(lista)]
+    if (destinos.length === 0) return res.status(400).json({ error: 'Informe ao menos um número.' })
+    if (destinos.length > CONVITE_LOTE_MAX) {
+      return res.status(400).json({ error: `No máximo ${CONVITE_LOTE_MAX} convites por vez.` })
+    }
+
+    let code = String(req.body?.invite_code || req.body?.inviteCode || '').trim()
+    if (!code && ctx.provider.getGroupInvite) {
+      const inv = await ctx.provider.getGroupInvite(ctx.jid, ctx.opts)
+      code = String(inv?.inviteCode || inv?.data?.invite_code || '').trim()
+    }
+    if (!code) {
+      return res.status(422).json({
+        ok: false,
+        error: 'Não foi possível obter o link de convite deste grupo. Confira se o número conectado é admin.',
+      })
+    }
+
+    const titulo = ctx.conversa?.nome_grupo || 'Convite de grupo'
+    const resultados = []
+    for (let i = 0; i < destinos.length; i += 1) {
+      const to = destinos[i]
+      try {
+        const r = await ctx.provider.sendGroupInvite(code, to, { title: titulo }, ctx.opts)
+        resultados.push({ telefone: to, ok: r?.ok === true, erro: r?.ok ? null : (r?.error || 'Falha ao enviar.') })
+      } catch (e) {
+        resultados.push({ telefone: to, ok: false, erro: String(e?.message || e).slice(0, 120) })
+      }
+      // Espaçamento entre envios: convite é mensagem, e rajada queima o número.
+      if (i < destinos.length - 1 && CONVITE_INTERVALO_MS > 0) {
+        await new Promise((r) => setTimeout(r, CONVITE_INTERVALO_MS))
+      }
+    }
+
+    const enviados = resultados.filter((r) => r.ok).length
+    return res.json({ ok: enviados > 0, enviados, total: destinos.length, resultados })
+  } catch (err) {
+    console.error('[convidarParticipantesGrupo]', err)
+    return res.status(500).json({ error: 'Erro ao enviar convites' })
+  }
+}
+
 exports.listarParticipantesGrupo = async (req, res) => {
   try {
     const ctx = await loadGroupContext(req)

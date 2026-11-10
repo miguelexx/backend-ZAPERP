@@ -31,6 +31,7 @@ const {
 } = require('../services/comunidade/comunidadeFilaService')
 const { emitComunidade, EVENTS } = require('../services/comunidade/comunidadeSocketService')
 const { resolverEnderecoWhatsapp } = require('../services/chat/identity/enderecoWhatsappService')
+const { isSameWhatsappIdentity } = require('../helpers/phoneHelper')
 
 const cfg = getComunidadeWorkerConfig()
 let io = null
@@ -169,17 +170,30 @@ function metodoDoProvider(p, tipo, operacao) {
   }
 }
 
-/** Interpreta a resposta de add: o jid entrou (processed) ou foi recusado (failed)? */
+/**
+ * Interpreta a resposta de add: o jid entrou (processed) ou foi recusado (failed)?
+ *
+ * Comparação por IDENTIDADE de WhatsApp, não por igualdade de dígitos. Medido no canal em
+ * 10/11/2026: mandamos `553499911246` (o wa_id, 12 dígitos) e a Whapi respondeu
+ * `{"success":true,"processed":[],"failed":["5534999911246@s.whatsapp.net"]}` — ela ecoa o
+ * número com o 9º dígito. Comparando dígito a dígito, o `failed` não casava, caía no
+ * `success === true` e a recusa virava "1 ok" na tela com ninguém dentro do grupo.
+ *
+ * E `success: true` NÃO quer dizer que alguém entrou: ele é o status da requisição. Quem manda
+ * são os arrays; só na ausência dos dois é que se olha para ele.
+ */
 function avaliarResultadoAdd(jid, data) {
-  const toDigits = (x) => String(x ?? '').replace(/@[^@]+$/, '').replace(/\D/g, '')
-  const processed = Array.isArray(data?.processed) ? data.processed.map(toDigits) : []
-  const failed = Array.isArray(data?.failed) ? data.failed.map(toDigits) : []
-  if (failed.includes(jid)) return 'failed'
-  if (processed.includes(jid)) return 'processed'
-  // Sem arrays conclusivos: success=true → assume processed; senão failed.
-  if (data?.success === true) return 'processed'
-  if (processed.length === 0 && failed.length === 0 && data?.success !== false) return 'processed'
-  return 'failed'
+  const processed = Array.isArray(data?.processed) ? data.processed : []
+  const failed = Array.isArray(data?.failed) ? data.failed : []
+  const casa = (lista) => lista.some((item) => isSameWhatsappIdentity(item, jid))
+
+  if (casa(failed)) return 'failed'
+  if (casa(processed)) return 'processed'
+  // Arrays presentes mas sem o nosso número: se alguém foi recusado e ninguém entrou, é recusa.
+  if (failed.length > 0 && processed.length === 0) return 'failed'
+  if (processed.length > 0) return 'processed'
+  // Sem nada conclusivo: só então `success` decide.
+  return data?.success === false ? 'failed' : 'processed'
 }
 
 async function processarItem(item) {

@@ -161,3 +161,61 @@ describe('worker da fila — adiciona no endereço certo', () => {
     expect(finalizacao()).toMatchObject({ resultado: 'processed' })
   })
 })
+
+describe('avaliarResultadoAdd — a Whapi ecoa o número com o 9º dígito', () => {
+  let worker
+
+  beforeEach(() => {
+    jest.resetModules()
+    const chain = {}
+    const ret = () => chain
+    chain.from = ret; chain.select = ret; chain.eq = ret; chain.update = ret
+    chain.gte = () => Promise.resolve({ count: 0 })
+    chain.in = () => Promise.resolve({ data: [], error: null })
+    chain.maybeSingle = () => Promise.resolve({ data: { id: 'op1', status: 'em_execucao' }, error: null })
+    chain.single = () => Promise.resolve({ data: {}, error: null })
+    chain.rpc = jest.fn(async () => ({ data: true, error: null }))
+    jest.doMock('../config/supabase', () => chain)
+    jest.doMock('../services/providers', () => ({ getProvider: () => ({}) }))
+    jest.doMock('../services/whatsappInstanceService', () => ({
+      getWhatsappInstanceById: jest.fn(async () => ({ instance: { metadata: {} }, error: null })),
+    }))
+    jest.doMock('../services/comunidade/comunidadeFilaService', () => ({
+      recalcularContadores: jest.fn(async () => ({})), pausarOperacaoAutomatica: jest.fn(async () => ({})),
+    }))
+    jest.doMock('../services/comunidade/comunidadeSocketService', () => ({ emitComunidade: jest.fn(), EVENTS: {} }))
+    worker = require('../workers/comunidadeWorker')
+  })
+
+  afterEach(() => jest.resetModules())
+
+  test('resposta REAL do canal: enviamos 12 dígitos, o failed volta com 13 → recusa', () => {
+    // Capturado em 10/11/2026 no canal da empresa 4. Antes isto virava "1 ok" na tela,
+    // com ninguém dentro do grupo: o failed não casava e caía no success:true.
+    const data = { success: true, processed: [], failed: ['5534999911246@s.whatsapp.net'] }
+    expect(worker.avaliarResultadoAdd('553499911246', data)).toBe('failed')
+  })
+
+  test('o inverso também casa: enviado com 13, ecoado com 12', () => {
+    const data = { success: true, processed: [], failed: ['553499911246'] }
+    expect(worker.avaliarResultadoAdd('5534999911246', data)).toBe('failed')
+  })
+
+  test('processed com a outra forma do número conta como entrou', () => {
+    const data = { success: true, processed: ['5534999911246@s.whatsapp.net'], failed: [] }
+    expect(worker.avaliarResultadoAdd('553499911246', data)).toBe('processed')
+  })
+
+  test('success:true com alguém em failed e ninguém em processed NÃO é sucesso', () => {
+    const data = { success: true, processed: [], failed: ['5511999998888'] }
+    expect(worker.avaliarResultadoAdd('553499911246', data)).toBe('failed')
+  })
+
+  test('sem arrays, success:true segue valendo (compatibilidade)', () => {
+    expect(worker.avaliarResultadoAdd('553499911246', { success: true })).toBe('processed')
+  })
+
+  test('sem arrays e success:false é recusa', () => {
+    expect(worker.avaliarResultadoAdd('553499911246', { success: false })).toBe('failed')
+  })
+})

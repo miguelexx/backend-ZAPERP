@@ -93,6 +93,8 @@ router.post('/:id/grupo/solicitacoes', auth, chatController.aprovarSolicitacaoGr
 router.delete('/:id/grupo/solicitacoes', auth, chatController.rejeitarSolicitacaoGrupo)
 router.get('/:id/participantes', auth, chatController.listarParticipantesGrupo)
 router.post('/:id/participantes', auth, chatController.adicionarParticipantesGrupo)
+// Convida quem o WhatsApp recusou adicionar direto (privacidade do contato): manda o link.
+router.post('/:id/participantes/convidar', auth, chatController.convidarParticipantesGrupo)
 router.delete('/:id/participantes', auth, chatController.removerParticipantesGrupo)
 // Adição em massa (fila protegida / ritmo ultra-conservador) — p/ muitos participantes sem bloquear o número
 router.post('/:id/participantes/fila', auth, chatController.enfileirarParticipantesGrupo)

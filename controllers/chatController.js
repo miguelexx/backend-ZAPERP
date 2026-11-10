@@ -292,6 +292,7 @@ exports.revogarConviteGrupo = _groupAdminController.revogarConviteGrupo
 exports.enviarConviteGrupo = _groupAdminController.enviarConviteGrupo
 exports.listarParticipantesGrupo = _groupAdminController.listarParticipantesGrupo
 exports.adicionarParticipantesGrupo = _groupAdminController.adicionarParticipantesGrupo
+exports.convidarParticipantesGrupo = _groupAdminController.convidarParticipantesGrupo
 exports.removerParticipantesGrupo = _groupAdminController.removerParticipantesGrupo
 exports.promoverAdminGrupo = _groupAdminController.promoverAdminGrupo
 exports.rebaixarAdminGrupo = _groupAdminController.rebaixarAdminGrupo
