@@ -1654,3 +1654,42 @@ em página vazia, página só com repetidos, ou ao cobrir o `total`.
 > **Armadilha:** `npm run build` no frontend reescreve `dist/`, que é versionado — e a memória de
 > 24/10 avisa que um rebuild arrasta Orçamento/IA para produção. Para só conferir se compila use
 > `npx vite build --outDir <pasta fora do repo> --emptyOutDir`.
+
+### 2026-11-10 (parte 2) — o que faltava para o grupo APARECER, e o token no log
+
+Depois do sync, três pendências que eu tinha deixado anotadas foram fechadas a pedido do Miguel.
+
+**1. Grupo sem mensagem agora entra em "Abertas".** A regra `if (c.is_group) return c.ultima_mensagem != null`
+(`conversationListController.js`) vinha de quando grupo só nascia por mensagem recebida. Com o
+sync importando a lista do WhatsApp, o grupo recém-criado tem **0 mensagens na nossa base** e
+sumia justamente da aba onde o atendente ia procurar — exatamente o sintoma do pedido original.
+Grupo não tem estado de atendimento, então não há o que "aguardar": ou a empresa participa, ou não.
+Mexeu em três pontos, que têm de andar juntos ou o badge discorda da lista:
+
+| Ponto | Antes | Agora |
+|---|---|---|
+| `conversationListController.js` (pós-filtro "aberta") | exigia `ultima_mensagem` | grupo passa sempre |
+| `chatListCountsService.js` (`rowVisibleInPostFilteredList`) | `isGroup → rowHasMessage(row)` | `isGroup → true` |
+| `frontend/src/chats/chatListQueryHelpers.js` | `exibir_badge_aberta !== false` derrubava TODO grupo (o backend força `false` para grupo), nos dois portões: `chatRowIsStaleForTab` e `rowStillBelongsToActiveTab` | grupo sai antes da checagem de badge nos dois |
+
+Sem a parte do frontend, o GET trazia o grupo e o realtime o removia em seguida.
+
+**2. Token do UltraMSG parou de vazar no log.** `services/providers/ultramsg/http.js` logava a URL
+crua e a URL do UltraMSG leva `?token=` (a API não aceita header). O log dispara em **toda**
+resposta ≥ 400 — e as 3 instâncias paradas por não-pagamento respondem 404 a cada chamada, então
+o token da instância ia em claro para o log de produção continuamente. Agora passa por
+`helpers/redactUrlSecrets.js` (`params` já era sanitizado; a URL não era). O endpoint continua
+legível no log: redige-se o VALOR, não o rastro.
+
+**3. SQL dos dois reparos de dados:** `docs/2026-11-10-grupos-e-fila.sql` — carimbar a instância
+nos grupos com `whatsapp_instance_id IS NULL` (só empresas de um número ativo) e reenfileirar as
+adições que falharam pelo 9º dígito. Cada bloco tem um SELECT de conferência antes do UPDATE; o
+bloco 2 só depois do deploy, senão falha igual.
+
+Testes: `tests/grupoAbertasEUltramsgLog.test.js` (7). Suíte: **3655 testes, 283 suítes, ok**.
+Frontend: 60/60 scripts Node e `e2e/configuracoes-local-mock.spec.js` 12/12.
+
+> **Armadilha de e2e (confirmada de novo):** `configuracoes-local-mock.spec.js` falha de forma
+> intermitente no arranque a frio do Vite — aqui falhou uma vez e passou nas duas conferências
+> seguintes, com e sem as mudanças. Antes de atribuir a falha ao seu código, rode o arquivo de
+> novo com o dev server já quente.

@@ -1045,7 +1045,12 @@ exports.listarConversas = async (req, res) => {
       conversasFormatadas = conversasFormatadas.filter((c) => {
         if (c.sem_conversa) return false
         if (c.aguardando_resposta_campanha === true) return false
-        if (c.is_group) return c.ultima_mensagem != null // grupo precisa ter ao menos 1 mensagem
+        // Grupo entra mesmo sem mensagem NA NOSSA BASE. A exigência de `ultima_mensagem` vinha de
+        // quando grupo só nascia por mensagem recebida; desde que o sync importa a lista do
+        // WhatsApp, o grupo recém-importado tem 0 mensagens aqui e sumia de "Abertas" — o
+        // atendente via o grupo no celular e não no sistema. Grupo não tem estado de atendimento,
+        // então não há o que "aguardar": ou a empresa participa dele, ou não.
+        if (c.is_group) return true
         return c.exibir_badge_aberta // individual: tem mensagem ou atendente assumiu
       })
     }

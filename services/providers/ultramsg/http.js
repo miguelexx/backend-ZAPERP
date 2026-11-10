@@ -9,6 +9,7 @@ const {
 } = require('../../whatsappSendGuardService')
 const { ULTRAMSG_BASE_URL, ULTRAMSG_TIMEOUT_MS, WHATSAPP_DEBUG } = require('./constants')
 const { maybeInvalidateCacheOnBadToken } = require('./result')
+const { redactUrlSecrets } = require('../../../helpers/redactUrlSecrets')
 
 /** Constrói base URL: https://api.ultramsg.com/instance{id} — UltraMsg exige prefixo "instance" */
 function buildBaseUrl(instanceId) {
@@ -95,7 +96,11 @@ function logUltramsgRequest({ method, url, headers = {}, params = null, body = n
   const logPayload = {
     '[ULTRAMSG REQUEST]': {
       method,
-      url,
+      // A URL do UltraMSG leva `?token=` (a API não aceita header), e este log dispara em TODA
+      // resposta >= 400 — ou seja, o token da instância ia em claro para o log de produção a
+      // cada falha. Visto em 10/11/2026 nas 3 instâncias paradas por não-pagamento, que
+      // respondem 404 a cada chamada. `params` já era sanitizado; a URL não era.
+      url: redactUrlSecrets(url),
       headers: sanitizedHeaders,
       ...(params != null && typeof params === 'object' && Object.keys(params).length > 0 && { params: sanitizeForLog(params, params?.token) }),
       ...(bodyForLog != null && { body: bodyForLog })

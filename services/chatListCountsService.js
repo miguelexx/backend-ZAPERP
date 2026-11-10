@@ -621,7 +621,10 @@ function rowVisibleInPostFilteredList(row, ctx, overrides = {}) {
   }
 
   if (overrides.status_atendimento === 'aberta') {
-    if (isGroup) return rowHasMessage(row)
+    // Espelha a lista: grupo entra em "Abertas" mesmo sem mensagem na nossa base (grupo
+    // recém-importado pelo sync tem 0 mensagens aqui). Se o contador exigisse mensagem, o
+    // badge mostraria menos do que a lista entrega.
+    if (isGroup) return true
     if (row.aguardando_resposta_campanha === true) return false
     return status === 'aberta' && (rowHasMessage(row) || atendenteId != null)
   }

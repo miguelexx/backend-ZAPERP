@@ -30,6 +30,7 @@ const {
   pausarOperacaoAutomatica,
 } = require('../services/comunidade/comunidadeFilaService')
 const { emitComunidade, EVENTS } = require('../services/comunidade/comunidadeSocketService')
+const { resolverEnderecoWhatsapp } = require('../services/chat/identity/enderecoWhatsappService')
 
 const cfg = getComunidadeWorkerConfig()
 let io = null
@@ -225,22 +226,41 @@ async function processarItem(item) {
       status: 'enviando', tentativas: tentativa, updated_at: new Date().toISOString(),
     }).eq('id', item.id)
 
+    const providerOpts = { companyId, whatsappInstanceId: instId }
+
+    // Endereço real antes de agir: o número discado e o JID do WhatsApp divergem no 9º dígito.
+    const endereco = await resolverEnderecoWhatsapp(p, item.participante_jid, providerOpts)
+    if (endereco.jid && endereco.jid !== endereco.original) {
+      console.log(`[comunidadeWorker] endereço corrigido: ${endereco.original} → ${endereco.jid}`)
+    }
+    if (endereco.existe === false) {
+      await finalizarItem(item, {
+        status: 'falhou', resultado: 'failed',
+        erro_codigo: 'SEM_WHATSAPP',
+        erro_mensagem: 'Este número não tem WhatsApp.',
+        concluido_em: new Date().toISOString(),
+      })
+      if (io) emitComunidade(io, companyId, EVENTS.ITEM_ATUALIZADO, { operacao_id: item.operacao_id, item_id: item.id, status: 'falhou', jid: item.participante_jid })
+      await recalcularContadores(item.operacao_id, io, companyId)
+      return
+    }
+    const jidAlvo = endereco.jid
+
     // reserva o próximo horário permitido (espaçamento conservador) já antes da chamada
     proximoPermitidoPorInstancia.set(instId, Date.now() + intervaloComJitterMs(limites))
 
-    const result = await metodo.call(p, item.comunidade_id, [item.participante_jid], {
-      companyId, whatsappInstanceId: instId,
-    })
+    const result = await metodo.call(p, item.comunidade_id, [jidAlvo], providerOpts)
 
     if (result?.ok) {
       let resultado = 'processed'
-      if (operacao === 'add') resultado = avaliarResultadoAdd(item.participante_jid, result.data)
+      // Avalia contra o endereço REALMENTE enviado — a resposta ecoa esse, não o número discado.
+      if (operacao === 'add') resultado = avaliarResultadoAdd(jidAlvo, result.data)
       if (resultado === 'failed') {
-        // WhatsApp recusou a adição (anti-spam) — terminal, sem retry.
+        // Endereço certo e mesmo assim recusado: aí sim é privacidade/anti-spam. Terminal.
         await finalizarItem(item, {
           status: 'falhou', resultado: 'failed',
           erro_codigo: 'WHATSAPP_RECUSOU',
-          erro_mensagem: 'O WhatsApp não adicionou este contato (política anti-spam/privacidade).',
+          erro_mensagem: 'O WhatsApp não adicionou este contato. Normalmente é a configuração de privacidade dele ("quem pode me adicionar a grupos") — nesse caso, envie o link de convite do grupo.',
           concluido_em: new Date().toISOString(),
         })
       } else {

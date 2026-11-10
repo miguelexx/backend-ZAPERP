@@ -313,6 +313,36 @@ async function listarOperacoes(companyId, { limit = 50 } = {}) {
 }
 
 /** Operações de um ALVO específico (ex.: um grupo @g.us) — para progresso na UI do grupo. */
+/**
+ * Por que falhou — agrupado por motivo, com os números afetados.
+ *
+ * A tela mostrava só "0 ok · 1 falha" e o motivo ficava enterrado em `comunidade_fila_itens`:
+ * quem clicou não tinha como saber se foi privacidade do contato, número sem WhatsApp ou falha
+ * do canal, nem o que fazer a respeito. Máximo de 5 motivos e 5 números por motivo.
+ */
+async function resumirErrosDaOperacao(operacaoId) {
+  const { data } = await supabase
+    .from('comunidade_fila_itens')
+    .select('participante_jid, erro_codigo, erro_mensagem')
+    .eq('operacao_id', operacaoId)
+    .eq('status', 'falhou')
+    .limit(500)
+  if (!Array.isArray(data) || data.length === 0) return []
+
+  const porMotivo = new Map()
+  for (const item of data) {
+    const codigo = item.erro_codigo || 'FALHA'
+    const chave = `${codigo}|${item.erro_mensagem || ''}`
+    if (!porMotivo.has(chave)) {
+      porMotivo.set(chave, { codigo, mensagem: item.erro_mensagem || 'Falha ao processar.', total: 0, numeros: [] })
+    }
+    const alvo = porMotivo.get(chave)
+    alvo.total += 1
+    if (alvo.numeros.length < 5 && item.participante_jid) alvo.numeros.push(item.participante_jid)
+  }
+  return [...porMotivo.values()].sort((a, b) => b.total - a.total).slice(0, 5)
+}
+
 async function listarOperacoesDoAlvo(companyId, comunidadeId, { limit = 10 } = {}) {
   const { data } = await supabase
     .from('comunidade_operacoes')
@@ -321,7 +351,15 @@ async function listarOperacoesDoAlvo(companyId, comunidadeId, { limit = 10 } = {
     .eq('comunidade_id', String(comunidadeId || '').trim())
     .order('created_at', { ascending: false })
     .limit(Math.min(Math.max(1, Number(limit) || 10), 50))
-  return data || []
+
+  const ops = data || []
+  // Só consulta os itens das operações que de fato têm falha.
+  await Promise.all(
+    ops.map(async (op) => {
+      if (Number(op?.falhados) > 0) op.erros = await resumirErrosDaOperacao(op.id)
+    })
+  )
+  return ops
 }
 
 async function obterOperacao(companyId, operacaoId) {
@@ -349,5 +387,6 @@ module.exports = {
   pausarOperacaoAutomatica,
   listarOperacoes,
   listarOperacoesDoAlvo,
+  resumirErrosDaOperacao,
   obterOperacao,
 }

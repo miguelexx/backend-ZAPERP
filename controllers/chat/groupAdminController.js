@@ -9,6 +9,7 @@ const { isGroupConversation } = require('../../helpers/conversaHelper')
 const { normalizePhoneBR, possiblePhonesBR } = require('../../helpers/phoneHelper')
 const { getDisplayName, isBadName } = require('../../helpers/contactEnrichment')
 const { resolveConversationWhatsappInstance, resolveConversationProvider } = require('../../services/chat/identity/conversationAddressService')
+const { resolverEnderecosWhatsapp } = require('../../services/chat/identity/enderecoWhatsappService')
 const { assertPermissaoConversa } = require('../../services/chat/access/conversationPolicy')
 const { emitirConversaAtualizada } = require('../../services/chat/realtime/chatRealtimeGateway')
 const { findOrCreateConversation } = require('../../helpers/conversationSync')
@@ -414,19 +415,38 @@ exports.adicionarParticipantesGrupo = async (req, res) => {
     const missing = needMethod(ctx.provider, 'addGroupParticipant')
     if (missing) return res.status(missing.status).json({ error: missing.error })
     const parts = req.body?.participantes || req.body?.participants || req.body?.telefone
-    const result = await ctx.provider.addGroupParticipant(ctx.jid, parts, ctx.opts)
+
+    // Endereço REAL de cada contato antes de adicionar: o número discado tem o 9º dígito, o JID
+    // do WhatsApp pode não ter, e aí a adição falha em silêncio. Ver enderecoWhatsappService.
+    const enderecos = await resolverEnderecosWhatsapp(ctx.provider, parts, ctx.opts)
+    const semWhatsapp = enderecos.filter((e) => e.existe === false).map((e) => e.original)
+    const alvos = enderecos.filter((e) => e.existe !== false).map((e) => e.jid)
+    if (alvos.length === 0) {
+      return res.status(422).json({
+        ok: false,
+        codigo: 'SEM_WHATSAPP',
+        error: semWhatsapp.length === 1
+          ? 'Este número não tem WhatsApp.'
+          : 'Nenhum dos números informados tem WhatsApp.',
+        failed: semWhatsapp,
+      })
+    }
+
+    const result = await ctx.provider.addGroupParticipant(ctx.jid, alvos, ctx.opts)
     // A Whapi devolve { success, processed[], failed[] }: a adição pode FALHAR por
     // privacidade/anti-spam do WhatsApp mesmo com HTTP 200. Não reportar "adicionado"
     // quando ninguém entrou — senão o usuário acha que deu certo e o contato não está no grupo.
     if (result?.ok) {
       const data = result.data || {}
       const processed = Array.isArray(data.processed) ? data.processed : []
-      const failed = Array.isArray(data.failed) ? data.failed : []
+      const failed = [...(Array.isArray(data.failed) ? data.failed : []), ...semWhatsapp]
       if (processed.length === 0 && failed.length > 0) {
         return res.status(422).json({
           ok: false,
-          codigo: 'NAO_ADICIONADO',
-          error: 'O WhatsApp não adicionou o contato (privacidade/anti-spam). Envie o link de convite do grupo.',
+          codigo: semWhatsapp.length === failed.length ? 'SEM_WHATSAPP' : 'NAO_ADICIONADO',
+          error: semWhatsapp.length === failed.length
+            ? 'Este número não tem WhatsApp.'
+            : 'O WhatsApp não adicionou o contato. Normalmente é a configuração de privacidade dele ("quem pode me adicionar a grupos") — nesse caso, envie o link de convite do grupo.',
           failed,
         })
       }
