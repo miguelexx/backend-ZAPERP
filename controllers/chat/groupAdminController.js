@@ -75,12 +75,19 @@ function mapSettings(raw) {
     if (v === false || v === 'anyone') return 'anyone'
     return adminMeansAdmins ? 'anyone' : 'anyone'
   }
+  // Nomes REAIS dos campos no GET /groups/{id} da Whapi, conferidos no canal em 10/11/2026:
+  //   {"announcements":true,"restricted":true,"adminAddMemberMode":true,"joinApprovalMode":true}
+  // O código lia `announce`, `restrict` e `approve_participants`, que não existem na resposta —
+  // então três das quatro travas apareciam como "anyone" na tela mesmo estando LIGADAS no grupo.
+  // Era por isso que "Aprovar quem pede para entrar" parecia desligado enquanto bloqueava a
+  // adição direta de participantes. Os nomes antigos ficam como alternativa.
   return {
-    send_messages: flag(raw.announce ?? raw.only_admins_can_send_messages),
-    edit_group_info: flag(raw.restrict ?? raw.only_admins_can_edit_info),
+    send_messages: flag(raw.announcements ?? raw.announce ?? raw.only_admins_can_send_messages),
+    edit_group_info: flag(raw.restricted ?? raw.restrict ?? raw.only_admins_can_edit_info),
     add_participants: flag(raw.adminAddMemberMode ?? raw.only_admins_can_add_members),
     approve_participants: flag(
-      raw.member_add_mode === 'admin_approval'
+      raw.joinApprovalMode === true
+      || raw.member_add_mode === 'admin_approval'
       || raw.approve_participants === true
       || raw.approve_participants === 'admins'
       || raw.approve_new_members === true
@@ -774,3 +781,6 @@ exports.consultarConvite = async (req, res) => {
     return res.status(500).json({ error: 'Erro ao consultar convite' })
   }
 }
+
+// Hooks de teste — lógica pura, sem rede nem banco.
+exports._test = { mapSettings }
