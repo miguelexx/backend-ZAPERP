@@ -25,7 +25,7 @@ describe('enderecoWhatsappService — JID real antes de agir', () => {
       ]),
     }
     const r = await resolverEnderecoWhatsapp(provider, '5534999911246', { companyId: 4, whatsappInstanceId: 4 })
-    expect(r).toEqual({ original: '5534999911246', jid: '553499911246', existe: true, verificado: true })
+    expect(r).toEqual({ original: '5534999911246', jid: '553499911246', chatId: '553499911246@s.whatsapp.net', existe: true, verificado: true })
     expect(provider.checkPhones).toHaveBeenCalledWith(['5534999911246'], { companyId: 4, whatsappInstanceId: 4 })
   })
 
@@ -39,12 +39,12 @@ describe('enderecoWhatsappService — JID real antes de agir', () => {
   test('consulta indisponível NÃO vira "não existe" — segue com o número original', async () => {
     const provider = { checkPhones: jest.fn(async () => { throw new Error('canal fora do ar') }) }
     const r = await resolverEnderecoWhatsapp(provider, '5534999911246', {})
-    expect(r).toEqual({ original: '5534999911246', jid: '5534999911246', existe: true, verificado: false })
+    expect(r).toEqual({ original: '5534999911246', jid: '5534999911246', chatId: '', existe: true, verificado: false })
   })
 
   test('provider sem checkPhones: comportamento antigo, uma chamada a menos', async () => {
     const r = await resolverEnderecoWhatsapp({}, '5534999911246', {})
-    expect(r).toEqual({ original: '5534999911246', jid: '5534999911246', existe: true, verificado: false })
+    expect(r).toEqual({ original: '5534999911246', jid: '5534999911246', chatId: '', existe: true, verificado: false })
   })
 
   test('vários números numa consulta só, deduplicados e na ordem', async () => {
@@ -116,14 +116,15 @@ describe('worker da fila — adiciona no endereço certo', () => {
 
   afterEach(() => jest.resetModules())
 
-  test('manda o wa_id (12 dígitos), não o número discado (13) — e conclui', async () => {
+  test('manda o JID completo do wa_id — o adapter reescreveria o número cru', async () => {
     montar({ waId: '553499911246@s.whatsapp.net', respostaAdd: { processed: ['553499911246'], failed: [] } });
     await worker.processarItem(item)
 
     expect(checkPhones).toHaveBeenCalled()
     expect(addGroupParticipant).toHaveBeenCalledTimes(1)
     // O endereço enviado é o do WhatsApp, não o do cadastro.
-    expect(addGroupParticipant.mock.calls[0][1]).toEqual(['553499911246'])
+    // Com sufixo: `contactIds` repassa intacto. Sem sufixo, toWhapiRecipient voltaria a 13.
+    expect(addGroupParticipant.mock.calls[0][1]).toEqual(['553499911246@s.whatsapp.net'])
     expect(finalizacao()).toMatchObject({ status: 'concluida', resultado: 'processed', erro_codigo: null })
   })
 
@@ -217,5 +218,40 @@ describe('avaliarResultadoAdd — a Whapi ecoa o número com o 9º dígito', () 
 
   test('sem arrays e success:false é recusa', () => {
     expect(worker.avaliarResultadoAdd('553499911246', { success: false })).toBe('failed')
+  })
+})
+
+describe('endereço enviado — o adapter reinsere o 9º dígito em número cru', () => {
+  const { resolverEnderecoWhatsapp } = require('../services/chat/identity/enderecoWhatsappService')
+  const { toWhapiRecipient } = require('../services/providers/whapi/phones')
+
+  test('o adapter REALMENTE reinsere o 9º dígito (a razão de tudo)', () => {
+    // Era isto que desfazia a resolução do wa_id: resolvíamos 12 dígitos e o adapter
+    // devolvia 13, mandando a adição para um endereço que não existe no WhatsApp.
+    expect(toWhapiRecipient('553499911246')).toBe('5534999911246')
+  })
+
+  test('verificado devolve chatId com sufixo — forma que o adapter repassa intacta', async () => {
+    const provider = {
+      checkPhones: async () => [{ input: '5534999911246', exists: true, waId: '553499911246@s.whatsapp.net' }],
+    }
+    const r = await resolverEnderecoWhatsapp(provider, '5534999911246', {})
+    expect(r.chatId).toBe('553499911246@s.whatsapp.net')
+    // E o sufixo é justamente o que faz `contactIds` NÃO passar por toWhapiRecipient.
+    expect(r.chatId.toLowerCase()).toContain('@s.whatsapp.net')
+  })
+
+  test('NÃO verificado não inventa chatId (adapter ainda pode tentar as duas formas)', async () => {
+    const provider = { checkPhones: async () => { throw new Error('fora do ar') } }
+    const r = await resolverEnderecoWhatsapp(provider, '5534999911246', {})
+    expect(r.chatId).toBe('')
+    expect(r.jid).toBe('5534999911246')
+  })
+
+  test('número sem WhatsApp não ganha chatId', async () => {
+    const provider = { checkPhones: async () => [{ input: '5534999999999', exists: false, waId: null }] }
+    const r = await resolverEnderecoWhatsapp(provider, '5534999999999', {})
+    expect(r.existe).toBe(false)
+    expect(r.chatId).toBe('')
   })
 })

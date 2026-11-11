@@ -495,7 +495,9 @@ exports.adicionarParticipantesGrupo = async (req, res) => {
     // do WhatsApp pode não ter, e aí a adição falha em silêncio. Ver enderecoWhatsappService.
     const enderecos = await resolverEnderecosWhatsapp(ctx.provider, parts, ctx.opts)
     const semWhatsapp = enderecos.filter((e) => e.existe === false).map((e) => e.original)
-    const alvos = enderecos.filter((e) => e.existe !== false).map((e) => e.jid)
+    // JID completo quando verificado: número cru passa por `toWhapiRecipient`, que REINSERE o
+    // 9º dígito e manda a adição para um endereço que não existe.
+    const alvos = enderecos.filter((e) => e.existe !== false).map((e) => e.chatId || e.jid)
     if (alvos.length === 0) {
       return res.status(422).json({
         ok: false,
@@ -521,7 +523,7 @@ exports.adicionarParticipantesGrupo = async (req, res) => {
           codigo: semWhatsapp.length === failed.length ? 'SEM_WHATSAPP' : 'NAO_ADICIONADO',
           error: semWhatsapp.length === failed.length
             ? 'Este número não tem WhatsApp.'
-            : 'O WhatsApp não adicionou o contato. Normalmente é a configuração de privacidade dele ("quem pode me adicionar a grupos") — nesse caso, envie o link de convite do grupo.',
+            : 'O WhatsApp recusou adicionar este contato. Costuma ser a privacidade dele ("quem pode me adicionar a grupos") — nesse caso, use o botão de enviar o convite do grupo.',
           failed,
         })
       }

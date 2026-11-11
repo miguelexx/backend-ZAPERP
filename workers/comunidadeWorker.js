@@ -258,7 +258,9 @@ async function processarItem(item) {
       await recalcularContadores(item.operacao_id, io, companyId)
       return
     }
-    const jidAlvo = endereco.jid
+    // JID completo quando verificado: número cru passa por `toWhapiRecipient`, que REINSERE o
+    // 9º dígito e desfaz a resolução (ver comoChatId em enderecoWhatsappService).
+    const jidAlvo = endereco.chatId || endereco.jid
 
     // reserva o próximo horário permitido (espaçamento conservador) já antes da chamada
     proximoPermitidoPorInstancia.set(instId, Date.now() + intervaloComJitterMs(limites))
@@ -274,7 +276,7 @@ async function processarItem(item) {
         await finalizarItem(item, {
           status: 'falhou', resultado: 'failed',
           erro_codigo: 'WHATSAPP_RECUSOU',
-          erro_mensagem: 'O WhatsApp não adicionou este contato. Normalmente é a configuração de privacidade dele ("quem pode me adicionar a grupos") — nesse caso, envie o link de convite do grupo.',
+          erro_mensagem: 'O WhatsApp recusou adicionar este contato. Costuma ser a privacidade dele ("quem pode me adicionar a grupos") — nesse caso, use o botão de enviar o convite do grupo.',
           concluido_em: new Date().toISOString(),
         })
       } else {

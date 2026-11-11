@@ -23,9 +23,25 @@ function somenteDigitos(valor) {
  * @typedef {object} EnderecoWhatsapp
  * @property {string} original  número como veio (só dígitos)
  * @property {string} jid       endereço a usar na chamada (wa_id quando o WhatsApp informou)
+ * @property {string} chatId    `jid@s.whatsapp.net` quando verificado; '' quando não
  * @property {boolean} existe   false só quando o WhatsApp afirmou que o número não tem conta
  * @property {boolean} verificado false quando não deu para consultar (seguimos com o original)
  */
+
+/**
+ * Forma que o adapter Whapi NÃO reescreve.
+ *
+ * `contactIds` (services/providers/whapi/groups.js) repassa intacto o que já tem sufixo de JID,
+ * mas passa número cru por `toWhapiRecipient`, que **reinsere o 9º dígito**:
+ *   toWhapiRecipient('553499911246') → '5534999911246'
+ * Ou seja: resolver o wa_id certo e mandar só os dígitos não adiantava nada — o adapter
+ * desfazia a resolução e a Whapi tentava um endereço inexistente. Medido em 11/11/2026, com o
+ * eco da própria API denunciando o estrago: mandamos 12 dígitos e o `failed` voltou com 13.
+ */
+function comoChatId(jid) {
+  const d = somenteDigitos(jid)
+  return d ? `${d}@s.whatsapp.net` : ''
+}
 
 /**
  * Resolve o endereço de vários telefones de uma vez (uma chamada só).
@@ -45,7 +61,7 @@ async function resolverEnderecosWhatsapp(provider, telefones, opts = {}) {
   const unicos = [...new Set(lista)]
   if (unicos.length === 0) return []
 
-  const semVerificar = unicos.map((original) => ({ original, jid: original, existe: true, verificado: false }))
+  const semVerificar = unicos.map((original) => ({ original, jid: original, chatId: '', existe: true, verificado: false }))
   if (typeof provider?.checkPhones !== 'function') return semVerificar
 
   let linhas
@@ -66,21 +82,25 @@ async function resolverEnderecosWhatsapp(provider, telefones, opts = {}) {
 
   return unicos.map((original) => {
     const linha = porInput.get(original)
-    if (!linha) return { original, jid: original, existe: true, verificado: false }
-    if (linha.exists === false) return { original, jid: original, existe: false, verificado: true }
+    if (!linha) return { original, jid: original, chatId: '', existe: true, verificado: false }
+    if (linha.exists === false) return { original, jid: original, chatId: '', existe: false, verificado: true }
     const waId = somenteDigitos(linha.waId)
-    return { original, jid: waId || original, existe: true, verificado: true }
+    const jid = waId || original
+    // Só vira chatId quando o WhatsApp confirmou o endereço: mandar `@s.whatsapp.net` de um
+    // número não verificado tiraria do adapter a chance de tentar a outra forma do 9º dígito.
+    return { original, jid, chatId: waId ? comoChatId(waId) : '', existe: true, verificado: true }
   })
 }
 
 /** Atalho para um telefone só. */
 async function resolverEnderecoWhatsapp(provider, telefone, opts = {}) {
   const [endereco] = await resolverEnderecosWhatsapp(provider, [telefone], opts)
-  return endereco || { original: somenteDigitos(telefone), jid: somenteDigitos(telefone), existe: true, verificado: false }
+  return endereco || { original: somenteDigitos(telefone), jid: somenteDigitos(telefone), chatId: '', existe: true, verificado: false }
 }
 
 module.exports = {
   somenteDigitos,
+  comoChatId,
   resolverEnderecosWhatsapp,
   resolverEnderecoWhatsapp,
 }
